@@ -1173,10 +1173,11 @@ Important behavior:
 - Code after `await ctx.reload()` still runs from the pre-reload version
 - Code after `await ctx.reload()` must not assume old in-memory extension state is still valid
 - After the handler returns, future commands/events/tool calls use the new extension version
+- If reload happens during an active agent/tool loop, the next provider request in that same run uses the refreshed tool definitions and system prompt
 
-For predictable behavior, treat reload as terminal for that handler (`await ctx.reload(); return;`).
+For predictable behavior, treat reload as terminal for that handler (`await ctx.reload(); return;`). Do not keep using the old `ctx` after reload except to return a short result.
 
-Tools run with `ExtensionContext`, so they cannot call `ctx.reload()` directly. Use a command as the reload entrypoint, then expose a tool that queues that command as a follow-up user message.
+Tools can call `ctx.reload()` directly. A reload tool should usually use `executionMode: "sequential"` so sibling tool calls from the pre-reload assistant message do not race the runtime swap.
 
 Example tool the LLM can call to trigger reload:
 
@@ -1198,10 +1199,11 @@ export default function (pi: ExtensionAPI) {
     label: "Reload Runtime",
     description: "Reload extensions, skills, prompts, and themes",
     parameters: Type.Object({}),
-    async execute() {
-      pi.sendUserMessage("/reload-runtime", { deliverAs: "followUp" });
+    executionMode: "sequential",
+    async execute(_toolCallId, _params, _signal, _onUpdate, ctx) {
+      await ctx.reload();
       return {
-        content: [{ type: "text", text: "Queued /reload-runtime as a follow-up command." }],
+        content: [{ type: "text", text: "Reloaded runtime. Refreshed tools are available on the next turn." }],
       };
     },
   });

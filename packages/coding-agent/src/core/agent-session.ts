@@ -17,6 +17,7 @@ import { existsSync, mkdirSync, readFileSync, writeFileSync } from "node:fs";
 import { basename, dirname } from "node:path";
 import type {
 	Agent,
+	AgentContext,
 	AgentEvent,
 	AgentMessage,
 	AgentState,
@@ -341,6 +342,7 @@ export class AgentSession {
 		this._unsubscribeAgent = this.agent.subscribe(this._handleAgentEvent);
 		this._installAgentToolHooks();
 		this._installAgentContextTransform();
+		this._installAgentTurnRefresh();
 
 		this._buildRuntime({
 			activeToolNames: this._initialActiveToolNames,
@@ -423,6 +425,32 @@ export class AgentSession {
 			} catch {
 				return authoritativeMessages;
 			}
+		};
+	}
+
+	private _installAgentTurnRefresh(): void {
+		const previousPrepareNextTurn = this.agent.prepareNextTurn?.bind(this.agent);
+		this.agent.prepareNextTurn = async (signal) => {
+			const previous = previousPrepareNextTurn ? await previousPrepareNextTurn(signal) : undefined;
+			const snapshot = this._createAgentContextSnapshot();
+			return {
+				...previous,
+				context: {
+					...(previous?.context ?? snapshot),
+					systemPrompt: snapshot.systemPrompt,
+					tools: snapshot.tools,
+				},
+				model: previous?.model ?? this.agent.state.model,
+				thinkingLevel: previous?.thinkingLevel ?? this.agent.state.thinkingLevel,
+			};
+		};
+	}
+
+	private _createAgentContextSnapshot(): AgentContext {
+		return {
+			systemPrompt: this.agent.state.systemPrompt,
+			messages: this.agent.state.messages.slice(),
+			tools: this.agent.state.tools.slice(),
 		};
 	}
 
@@ -2342,12 +2370,9 @@ export class AgentSession {
 					})();
 				},
 				reload: () => {
-					if (this.isStreaming) {
-						throw new Error("Cannot reload while the agent is streaming.");
-					}
 					const actions = this._extensionCommandContextActions;
-					if (!actions) {
-						throw new Error("Reload is unavailable before extension command context is bound.");
+					if (this.isStreaming || !actions) {
+						return this.reload();
 					}
 					return actions.reload();
 				},

@@ -448,13 +448,8 @@ describe("ExtensionRunner", () => {
 			const runner = new ExtensionRunner(result.extensions, result.runtime, tempDir, sessionManager, modelRegistry);
 			let reloadCalls = 0;
 
-			runner.bindCore(extensionActions, extensionContextActions);
-			runner.bindCommandContext({
-				waitForIdle: async () => {},
-				newSession: async () => ({ cancelled: false }),
-				fork: async () => ({ cancelled: false }),
-				navigateTree: async () => ({ cancelled: false }),
-				switchSession: async () => ({ cancelled: false }),
+			runner.bindCore(extensionActions, {
+				...extensionContextActions,
 				reload: async () => {
 					reloadCalls++;
 				},
