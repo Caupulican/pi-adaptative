@@ -1,7 +1,7 @@
 {
-	"name": "@earendil-works/pi-coding-agent",
+	"name": "@caupulican/pi-adaptative",
 	"version": "0.76.0",
-	"description": "Coding agent CLI with read, bash, edit, write tools and session management",
+	"description": "Adaptive fork of Pi coding agent for self-evolving agent harness experiments",
 	"type": "module",
 	"piConfig": {
 		"name": "pi-adaptative",
@@ -91,7 +91,7 @@
 	"license": "MIT",
 	"repository": {
 		"type": "git",
-		"url": "git+https://github.com/earendil-works/pi-mono.git",
+		"url": "git+https://github.com/Caupulican/pi-adaptative.git",
 		"directory": "packages/coding-agent"
 	},
 	"engines": {
