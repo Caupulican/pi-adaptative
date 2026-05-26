@@ -340,6 +340,7 @@ export class AgentSession {
 		// (session persistence, extensions, auto-compaction, retry logic)
 		this._unsubscribeAgent = this.agent.subscribe(this._handleAgentEvent);
 		this._installAgentToolHooks();
+		this._installAgentContextTransform();
 
 		this._buildRuntime({
 			activeToolNames: this._initialActiveToolNames,
@@ -398,6 +399,51 @@ export class AgentSession {
 	 * registered tool execution to the extension context. Tool call and tool result interception now
 	 * happens here instead of in wrappers.
 	 */
+	private _installAgentContextTransform(): void {
+		const previousTransformContext = this.agent.transformContext?.bind(this.agent);
+		this.agent.transformContext = async (messages, signal) => {
+			const transformed = previousTransformContext ? await previousTransformContext(messages, signal) : messages;
+			const authoritativeMessages = this.agent.state.messages.length > 0 ? this.agent.state.messages : transformed;
+			try {
+				const settings = this.settingsManager.getCompactionSettings();
+				const contextWindow = this.model?.contextWindow ?? 0;
+				if (!settings.enabled || contextWindow <= 0 || this.isCompacting) {
+					return authoritativeMessages;
+				}
+				const contextTokens = this._estimateCurrentContextTokens(authoritativeMessages);
+				if (!shouldCompact(contextTokens, contextWindow, settings)) {
+					return authoritativeMessages;
+				}
+				const latestBefore = getLatestCompactionEntry(this.sessionManager.getBranch())?.id;
+				await this._runAutoCompaction("threshold", false);
+				const latestAfter = getLatestCompactionEntry(this.sessionManager.getBranch())?.id;
+				return latestAfter && latestAfter !== latestBefore
+					? this.agent.state.messages.slice()
+					: authoritativeMessages;
+			} catch {
+				return authoritativeMessages;
+			}
+		};
+	}
+
+	private _estimateCurrentContextTokens(messages: AgentMessage[]): number {
+		const estimate = estimateContextTokens(messages);
+		const compactionEntry = getLatestCompactionEntry(this.sessionManager.getBranch());
+		if (estimate.lastUsageIndex === null || !compactionEntry) {
+			return estimate.tokens;
+		}
+		const usageMessage = messages[estimate.lastUsageIndex];
+		if (usageMessage?.role !== "assistant") {
+			return estimate.tokens;
+		}
+		const usageTimestamp = (usageMessage as AssistantMessage).timestamp;
+		const compactionTimestamp = new Date(compactionEntry.timestamp).getTime();
+		if (usageTimestamp <= compactionTimestamp) {
+			return estimate.trailingTokens;
+		}
+		return estimate.tokens;
+	}
+
 	private _installAgentToolHooks(): void {
 		this.agent.beforeToolCall = async ({ toolCall, args }) => {
 			const runner = this._extensionRunner;
@@ -1886,6 +1932,18 @@ export class AgentSession {
 			contextTokens = estimate.tokens;
 		} else {
 			contextTokens = calculateContextTokens(assistantMessage.usage);
+			const estimate = estimateContextTokens(this.agent.state.messages);
+			if (estimate.lastUsageIndex !== null) {
+				const usageMsg = this.agent.state.messages[estimate.lastUsageIndex];
+				const usageIsPostCompaction = !(
+					compactionEntry &&
+					usageMsg.role === "assistant" &&
+					(usageMsg as AssistantMessage).timestamp <= new Date(compactionEntry.timestamp).getTime()
+				);
+				if (usageIsPostCompaction) {
+					contextTokens = Math.max(contextTokens, estimate.tokens);
+				}
+			}
 		}
 		if (shouldCompact(contextTokens, contextWindow, settings)) {
 			return await this._runAutoCompaction("threshold", false);

@@ -29,20 +29,25 @@ vi.mock("../src/core/compaction/index.js", () => ({
 	estimateContextTokens: (
 		messages: Array<{
 			role: string;
+			content?: Array<{ type: string; text?: string }>;
 			usage?: { input: number; output: number; cacheRead: number; cacheWrite: number; totalTokens?: number };
 			stopReason?: string;
 		}>,
 	) => {
+		const estimate = (message: { content?: Array<{ type: string; text?: string }> }) =>
+			(message.content || []).reduce((sum, part) => sum + Math.ceil((part.text || "").length / 4), 0);
 		// Walk backwards to find last non-error, non-aborted assistant with usage
 		for (let i = messages.length - 1; i >= 0; i--) {
 			const msg = messages[i];
 			if (msg.role === "assistant" && msg.stopReason !== "error" && msg.stopReason !== "aborted" && msg.usage) {
-				const tokens =
+				const usageTokens =
 					msg.usage.totalTokens ?? msg.usage.input + msg.usage.output + msg.usage.cacheRead + msg.usage.cacheWrite;
-				return { tokens, usageTokens: tokens, trailingTokens: 0, lastUsageIndex: i };
+				const trailingTokens = messages.slice(i + 1).reduce((sum, message) => sum + estimate(message), 0);
+				return { tokens: usageTokens + trailingTokens, usageTokens, trailingTokens, lastUsageIndex: i };
 			}
 		}
-		return { tokens: 0, usageTokens: 0, trailingTokens: 0, lastUsageIndex: null };
+		const tokens = messages.reduce((sum, message) => sum + estimate(message), 0);
+		return { tokens, usageTokens: 0, trailingTokens: tokens, lastUsageIndex: null };
 	},
 	generateBranchSummary: async () => ({ summary: "", aborted: false, readFiles: [], modifiedFiles: [] }),
 	prepareCompaction: () => ({ dummy: true }),
@@ -120,6 +125,51 @@ describe("AgentSession auto-compaction queue resume", () => {
 		await expect(runAutoCompaction("threshold", false)).resolves.toBe(true);
 
 		expect(continueSpy).not.toHaveBeenCalled();
+	});
+
+	it("should compact between tool-loop turns before the next provider request", async () => {
+		const model = session.model!;
+		const at = Date.now();
+		const user = {
+			role: "user" as const,
+			content: [{ type: "text" as const, text: "inspect repo" }],
+			timestamp: at,
+		};
+		const assistant: AssistantMessage = {
+			role: "assistant",
+			content: [{ type: "toolCall", id: "call-1", name: "bash", arguments: { command: "large output" } } as any],
+			api: model.api,
+			provider: model.provider,
+			model: model.id,
+			usage: {
+				input: 100,
+				output: 20,
+				cacheRead: 0,
+				cacheWrite: 0,
+				totalTokens: 120,
+				cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, total: 0 },
+			},
+			stopReason: "toolUse",
+			timestamp: at + 1,
+		};
+		const toolResult = {
+			role: "toolResult" as const,
+			toolCallId: "call-1",
+			toolName: "bash",
+			content: [{ type: "text" as const, text: "x".repeat(model.contextWindow * 4) }],
+			isError: false,
+			timestamp: at + 2,
+		};
+
+		sessionManager.appendMessage(user);
+		sessionManager.appendMessage(assistant);
+		sessionManager.appendMessage(toolResult);
+		session.agent.state.messages = [user, assistant, toolResult];
+
+		const transformed = await session.agent.transformContext?.([user, assistant, toolResult], undefined);
+
+		expect(transformed).toEqual(session.agent.state.messages);
+		expect(sessionManager.getEntries().some((entry) => entry.type === "compaction")).toBe(true);
 	});
 
 	it("should not compact repeatedly after overflow recovery already attempted", async () => {
@@ -302,6 +352,59 @@ describe("AgentSession auto-compaction queue resume", () => {
 		await checkCompaction(errorAssistant);
 
 		expect(runAutoCompactionSpy).toHaveBeenCalledWith("threshold", false);
+	});
+
+	it("should ignore stale pre-compaction assistant usage in provider preflight transform", async () => {
+		const model = session.model!;
+		const preCompactionTimestamp = Date.now() - 10_000;
+		const keptAssistant: AssistantMessage = {
+			role: "assistant",
+			content: [{ type: "text", text: "kept response from before compaction" }],
+			api: model.api,
+			provider: model.provider,
+			model: model.id,
+			usage: {
+				input: 180_000,
+				output: 10_000,
+				cacheRead: 0,
+				cacheWrite: 0,
+				totalTokens: 190_000,
+				cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, total: 0 },
+			},
+			stopReason: "stop",
+			timestamp: preCompactionTimestamp,
+		};
+		const beforeUser = {
+			role: "user" as const,
+			content: [{ type: "text" as const, text: "before compaction" }],
+			timestamp: preCompactionTimestamp - 1000,
+		};
+		const afterUser = {
+			role: "user" as const,
+			content: [{ type: "text" as const, text: "new small prompt" }],
+			timestamp: Date.now(),
+		};
+
+		sessionManager.appendMessage(beforeUser);
+		sessionManager.appendMessage(keptAssistant);
+		const firstKeptEntryId = sessionManager.getEntries()[0]!.id;
+		sessionManager.appendCompaction("summary", firstKeptEntryId, keptAssistant.usage.totalTokens, undefined, false);
+		sessionManager.appendMessage(afterUser);
+		session.agent.state.messages = [beforeUser, keptAssistant, afterUser];
+
+		const runAutoCompactionSpy = vi
+			.spyOn(
+				session as unknown as {
+					_runAutoCompaction: (reason: "overflow" | "threshold", willRetry: boolean) => Promise<void>;
+				},
+				"_runAutoCompaction",
+			)
+			.mockResolvedValue();
+
+		const transformed = await session.agent.transformContext?.([beforeUser, keptAssistant, afterUser], undefined);
+
+		expect(transformed).toEqual([beforeUser, keptAssistant, afterUser]);
+		expect(runAutoCompactionSpy).not.toHaveBeenCalled();
 	});
 
 	it("should not trigger threshold compaction for error messages when no prior usage exists", async () => {
