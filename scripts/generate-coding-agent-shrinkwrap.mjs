@@ -129,6 +129,11 @@ function registryTarballUrl(packageName, version) {
 	return `https://registry.npmjs.org/${packageName}/-/${tarballName}-${version}.tgz`;
 }
 
+function toPublishedLockPath(lockPath) {
+	const packagePrefix = "packages/coding-agent/";
+	return lockPath.startsWith(packagePrefix) ? lockPath.slice(packagePrefix.length) : lockPath;
+}
+
 function getInternalWorkspaces(lockPackages) {
 	const workspaces = new Map();
 
@@ -201,23 +206,24 @@ function addInternalWorkspace(shrinkwrapPackages, addedPaths, queue, name, works
 	shrinkwrapPackages[outputPath] = sortedPackageEntry(entry);
 	addedPaths.add(outputPath);
 
-	for (const dependencyName of Object.keys(packageDependencies(packageJson))) {
-		queue.push({ name: dependencyName, from: outputPath });
+	for (const [dependencyName, spec] of Object.entries(packageDependencies(packageJson))) {
+		queue.push({ name: dependencyName, spec: String(spec), from: outputPath });
 	}
 }
 
 function addExternalPackage(lockPackages, shrinkwrapPackages, addedPaths, queue, name, from) {
 	const lockPath = resolveExternalDependency(lockPackages, name, from);
-	if (addedPaths.has(lockPath)) {
+	const outputPath = toPublishedLockPath(lockPath);
+	if (addedPaths.has(outputPath)) {
 		return;
 	}
 
 	const entry = lockPackages[lockPath];
-	shrinkwrapPackages[lockPath] = copyLockEntry(entry);
-	addedPaths.add(lockPath);
+	shrinkwrapPackages[outputPath] = copyLockEntry(entry);
+	addedPaths.add(outputPath);
 
-	for (const dependencyName of Object.keys(packageDependencies(entry))) {
-		queue.push({ name: dependencyName, from: lockPath });
+	for (const [dependencyName, spec] of Object.entries(packageDependencies(entry))) {
+		queue.push({ name: dependencyName, spec: String(spec), from: lockPath });
 	}
 }
 
@@ -301,7 +307,11 @@ function generateShrinkwrap() {
 	};
 	const addedPaths = new Set([""]);
 	const internalNames = new Set();
-	const queue = Object.keys(packageDependencies(codingAgentPackage)).map((name) => ({ name, from: "" }));
+	const queue = Object.entries(packageDependencies(codingAgentPackage)).map(([name, spec]) => ({
+		name,
+		spec: String(spec),
+		from: "packages/coding-agent",
+	}));
 
 	while (queue.length > 0) {
 		const item = queue.shift();
@@ -309,7 +319,7 @@ function generateShrinkwrap() {
 			break;
 		}
 
-		const workspace = internalWorkspaces.get(item.name);
+		const workspace = item.spec?.startsWith("npm:") ? undefined : internalWorkspaces.get(item.name);
 		if (workspace) {
 			const outputPath = `node_modules/${item.name}`;
 			internalNames.add(item.name);
