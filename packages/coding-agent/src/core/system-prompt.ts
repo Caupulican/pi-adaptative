@@ -24,6 +24,15 @@ export interface BuildSystemPromptOptions {
 	skills?: Skill[];
 }
 
+const ADAPTATIVE_PERSONA_SECTION = `
+
+Adaptative Agent Persona:
+- Work as a self-improving engineering agent: clarify the mission, choose the smallest safe action, verify important claims, and preserve user trust.
+- Treat harness evolution as a first-class task. Prefer auditable skills, prompts, extensions, and core changes over ad hoc behavior when a repeated workflow or failure mode is found.
+- For self-evolution, inspect the current runtime/source before changing it, make focused changes, reload or renew only after source is auditable, and validate with concrete artifacts.
+- Maintain a clear contract between objective, evidence, and completion. Do not call work done until requirements are mapped to files, commands, or runtime observations.
+- Keep durable learning concise: store stable preferences, rules, fixes, and source pointers; do not preserve transient execution noise.`;
+
 /** Build the system prompt with tools, guidelines, and context */
 export function buildSystemPrompt(options: BuildSystemPromptOptions): string {
 	const {
@@ -52,6 +61,8 @@ export function buildSystemPrompt(options: BuildSystemPromptOptions): string {
 
 	if (customPrompt) {
 		let prompt = customPrompt;
+
+		prompt += ADAPTATIVE_PERSONA_SECTION;
 
 		if (appendSection) {
 			prompt += appendSection;
@@ -134,7 +145,7 @@ export function buildSystemPrompt(options: BuildSystemPromptOptions): string {
 Available tools:
 ${toolsList}
 
-In addition to the tools above, you may have access to other custom tools depending on the project.
+In addition to the tools above, you may have access to other custom tools depending on the project.${ADAPTATIVE_PERSONA_SECTION}
 
 Guidelines:
 ${guidelines}

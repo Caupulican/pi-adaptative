@@ -77,6 +77,7 @@ describe("ExtensionRunner", () => {
 		shutdown: () => {},
 		getContextUsage: () => undefined,
 		compact: () => {},
+		reload: async () => {},
 		getSystemPrompt: () => "",
 	};
 
@@ -440,6 +441,29 @@ describe("ExtensionRunner", () => {
 
 			controller.abort();
 			expect(ctx.signal?.aborted).toBe(true);
+		});
+
+		it("exposes reload on ExtensionContext for idle self-maintenance hooks", async () => {
+			const result = await discoverAndLoadExtensions([], tempDir, tempDir);
+			const runner = new ExtensionRunner(result.extensions, result.runtime, tempDir, sessionManager, modelRegistry);
+			let reloadCalls = 0;
+
+			runner.bindCore(extensionActions, extensionContextActions);
+			runner.bindCommandContext({
+				waitForIdle: async () => {},
+				newSession: async () => ({ cancelled: false }),
+				fork: async () => ({ cancelled: false }),
+				navigateTree: async () => ({ cancelled: false }),
+				switchSession: async () => ({ cancelled: false }),
+				reload: async () => {
+					reloadCalls++;
+				},
+			});
+
+			const ctx = runner.createContext();
+			await ctx.reload();
+
+			expect(reloadCalls).toBe(1);
 		});
 	});
 

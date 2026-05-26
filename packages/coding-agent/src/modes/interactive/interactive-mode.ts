@@ -1656,6 +1656,9 @@ export class InteractiveMode {
 					}
 				})();
 			},
+			reload: async () => {
+				await this.handleReloadCommand();
+			},
 			getSystemPrompt: () => this.session.systemPrompt,
 		});
 
@@ -3646,6 +3649,7 @@ export class InteractiveMode {
 			],
 			followUp: [
 				...this.session.getFollowUpMessages(),
+				...this.session.getQueuedExtensionCommands(),
 				...this.compactionQueuedMessages.filter((msg) => msg.mode === "followUp").map((msg) => msg.text),
 			],
 		};
@@ -3656,7 +3660,7 @@ export class InteractiveMode {
 	 * Clears both session queue and compaction queue.
 	 */
 	private clearAllQueues(): { steering: string[]; followUp: string[] } {
-		const { steering, followUp } = this.session.clearQueue();
+		const { steering, followUp, commands } = this.session.clearQueue();
 		const compactionSteering = this.compactionQueuedMessages
 			.filter((msg) => msg.mode === "steer")
 			.map((msg) => msg.text);
@@ -3666,7 +3670,7 @@ export class InteractiveMode {
 		this.compactionQueuedMessages = [];
 		return {
 			steering: [...steering, ...compactionSteering],
-			followUp: [...followUp, ...compactionFollowUp],
+			followUp: [...followUp, ...commands, ...compactionFollowUp],
 		};
 	}
 

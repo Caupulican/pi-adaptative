@@ -131,6 +131,7 @@ export type AgentSessionEvent =
 			type: "queue_update";
 			steering: readonly string[];
 			followUp: readonly string[];
+			commands: readonly string[];
 	  }
 	| { type: "compaction_start"; reason: "manual" | "threshold" | "overflow" }
 	| { type: "session_info_changed"; name: string | undefined }
@@ -193,8 +194,10 @@ export interface ExtensionBindings {
 
 /** Options for AgentSession.prompt() */
 export interface PromptOptions {
-	/** Whether to expand file-based prompt templates (default: true) */
+	/** Whether to expand file-based prompt templates and skills (default: true). */
 	expandPromptTemplates?: boolean;
+	/** Whether slash commands should be handled before sending to the model. Defaults to expandPromptTemplates. */
+	processSlashCommands?: boolean;
 	/** Image attachments */
 	images?: ImageContent[];
 	/** When streaming, how to queue the message: "steer" (interrupt) or "followUp" (wait). Required if streaming. */
@@ -264,6 +267,8 @@ export class AgentSession {
 	private _steeringMessages: string[] = [];
 	/** Tracks pending follow-up messages for UI display. Removed when delivered. */
 	private _followUpMessages: string[] = [];
+	/** Tracks extension slash commands queued while the agent is streaming. */
+	private _queuedExtensionCommands: string[] = [];
 	/** Messages queued to be included with the next user prompt as context ("asides"). */
 	private _pendingNextTurnMessages: CustomMessage[] = [];
 
@@ -459,6 +464,7 @@ export class AgentSession {
 			type: "queue_update",
 			steering: [...this._steeringMessages],
 			followUp: [...this._followUpMessages],
+			commands: [...this._queuedExtensionCommands],
 		});
 	}
 
@@ -923,6 +929,7 @@ export class AgentSession {
 			}
 		} finally {
 			this._flushPendingBashMessages();
+			await this._drainQueuedExtensionCommands();
 		}
 	}
 
@@ -961,13 +968,23 @@ export class AgentSession {
 	 */
 	async prompt(text: string, options?: PromptOptions): Promise<void> {
 		const expandPromptTemplates = options?.expandPromptTemplates ?? true;
+		const processSlashCommands = options?.processSlashCommands ?? expandPromptTemplates;
 		const preflightResult = options?.preflightResult;
 		let messages: AgentMessage[] | undefined;
 
 		try {
-			// Handle extension commands first (execute immediately, even during streaming)
-			// Extension commands manage their own LLM interaction via pi.sendMessage()
-			if (expandPromptTemplates && text.startsWith("/")) {
+			// Handle extension commands first. Programmatic extension messages may opt
+			// into command handling; if the agent is currently streaming, queue the
+			// command for the end of the run instead of sending it to the model.
+			if (processSlashCommands && text.startsWith("/")) {
+				if (this.isStreaming && options?.source === "extension" && options?.streamingBehavior) {
+					const commandName = this._parseCommandName(text);
+					if (this._extensionRunner.getCommand(commandName)) {
+						this._queueExtensionCommand(text);
+						preflightResult?.(true);
+						return;
+					}
+				}
 				const handled = await this._tryExecuteExtensionCommand(text);
 				if (handled) {
 					// Extension command executed, no prompt to send
@@ -1114,10 +1131,15 @@ export class AgentSession {
 	/**
 	 * Try to execute an extension command. Returns true if command was found and executed.
 	 */
+	private _parseCommandName(text: string): string {
+		const spaceIndex = text.indexOf(" ");
+		return spaceIndex === -1 ? text.slice(1) : text.slice(1, spaceIndex);
+	}
+
 	private async _tryExecuteExtensionCommand(text: string): Promise<boolean> {
 		// Parse command name and args
 		const spaceIndex = text.indexOf(" ");
-		const commandName = spaceIndex === -1 ? text.slice(1) : text.slice(1, spaceIndex);
+		const commandName = this._parseCommandName(text);
 		const args = spaceIndex === -1 ? "" : text.slice(spaceIndex + 1);
 
 		const command = this._extensionRunner.getCommand(commandName);
@@ -1247,6 +1269,22 @@ export class AgentSession {
 	}
 
 	/**
+	 * Internal: Queue an extension command to execute after the current agent run.
+	 */
+	private _queueExtensionCommand(text: string): void {
+		this._queuedExtensionCommands.push(text);
+		this._emitQueueUpdate();
+	}
+
+	private async _drainQueuedExtensionCommands(): Promise<void> {
+		while (this._queuedExtensionCommands.length > 0 && !this.isStreaming) {
+			const commandText = this._queuedExtensionCommands.shift()!;
+			this._emitQueueUpdate();
+			await this._tryExecuteExtensionCommand(commandText);
+		}
+	}
+
+	/**
 	 * Throw an error if the text is an extension command.
 	 */
 	private _throwIfExtensionCommand(text: string): void {
@@ -1317,7 +1355,7 @@ export class AgentSession {
 	 */
 	async sendUserMessage(
 		content: string | (TextContent | ImageContent)[],
-		options?: { deliverAs?: "steer" | "followUp" },
+		options?: { deliverAs?: "steer" | "followUp"; processSlashCommands?: boolean },
 	): Promise<void> {
 		// Normalize content to text string + optional images
 		let text: string;
@@ -1339,9 +1377,12 @@ export class AgentSession {
 			if (images.length === 0) images = undefined;
 		}
 
-		// Use prompt() with expandPromptTemplates: false to skip command handling and template expansion
+		// Skip skill/template expansion by default. Extensions that intentionally
+		// want slash commands to execute (for example self-maintenance reloads)
+		// can opt in with processSlashCommands.
 		await this.prompt(text, {
 			expandPromptTemplates: false,
+			processSlashCommands: options?.processSlashCommands ?? false,
 			streamingBehavior: options?.deliverAs,
 			images,
 			source: "extension",
@@ -1351,21 +1392,23 @@ export class AgentSession {
 	/**
 	 * Clear all queued messages and return them.
 	 * Useful for restoring to editor when user aborts.
-	 * @returns Object with steering and followUp arrays
+	 * @returns Object with steering, followUp, and queued extension command arrays
 	 */
-	clearQueue(): { steering: string[]; followUp: string[] } {
+	clearQueue(): { steering: string[]; followUp: string[]; commands: string[] } {
 		const steering = [...this._steeringMessages];
 		const followUp = [...this._followUpMessages];
+		const commands = [...this._queuedExtensionCommands];
 		this._steeringMessages = [];
 		this._followUpMessages = [];
+		this._queuedExtensionCommands = [];
 		this.agent.clearAllQueues();
 		this._emitQueueUpdate();
-		return { steering, followUp };
+		return { steering, followUp, commands };
 	}
 
-	/** Number of pending messages (includes both steering and follow-up) */
+	/** Number of pending messages (includes steering, follow-up, and queued extension commands) */
 	get pendingMessageCount(): number {
-		return this._steeringMessages.length + this._followUpMessages.length;
+		return this._steeringMessages.length + this._followUpMessages.length + this._queuedExtensionCommands.length;
 	}
 
 	/** Get pending steering messages (read-only) */
@@ -1376,6 +1419,11 @@ export class AgentSession {
 	/** Get pending follow-up messages (read-only) */
 	getFollowUpMessages(): readonly string[] {
 		return this._followUpMessages;
+	}
+
+	/** Get pending extension commands (read-only). */
+	getQueuedExtensionCommands(): readonly string[] {
+		return this._queuedExtensionCommands;
 	}
 
 	get resourceLoader(): ResourceLoader {
@@ -2234,6 +2282,16 @@ export class AgentSession {
 							options?.onError?.(err);
 						}
 					})();
+				},
+				reload: () => {
+					if (this.isStreaming) {
+						throw new Error("Cannot reload while the agent is streaming.");
+					}
+					const actions = this._extensionCommandContextActions;
+					if (!actions) {
+						throw new Error("Reload is unavailable before extension command context is bound.");
+					}
+					return actions.reload();
 				},
 				getSystemPrompt: () => this.systemPrompt,
 			},

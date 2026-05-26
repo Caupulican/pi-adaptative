@@ -322,6 +322,8 @@ export interface ExtensionContext {
 	getContextUsage(): ContextUsage | undefined;
 	/** Trigger compaction without awaiting completion. */
 	compact(options?: CompactOptions): void;
+	/** Reload extensions, skills, prompts, and themes when the runtime is idle. */
+	reload(): Promise<void>;
 	/** Get the current effective system prompt. */
 	getSystemPrompt(): string;
 }
@@ -376,7 +378,7 @@ export interface ReplacedSessionContext extends ExtensionCommandContext {
 
 	sendUserMessage(
 		content: string | (TextContent | ImageContent)[],
-		options?: { deliverAs?: "steer" | "followUp" },
+		options?: { deliverAs?: "steer" | "followUp"; processSlashCommands?: boolean },
 	): Promise<void>;
 }
 
@@ -1186,7 +1188,7 @@ export interface ExtensionAPI {
 	 */
 	sendUserMessage(
 		content: string | (TextContent | ImageContent)[],
-		options?: { deliverAs?: "steer" | "followUp" },
+		options?: { deliverAs?: "steer" | "followUp"; processSlashCommands?: boolean },
 	): void;
 
 	/** Append a custom entry to the session for state persistence (not sent to LLM). */
@@ -1411,7 +1413,7 @@ export type SendMessageHandler = <T = unknown>(
 
 export type SendUserMessageHandler = (
 	content: string | (TextContent | ImageContent)[],
-	options?: { deliverAs?: "steer" | "followUp" },
+	options?: { deliverAs?: "steer" | "followUp"; processSlashCommands?: boolean },
 ) => void;
 
 export type AppendEntryHandler = <T = unknown>(customType: string, data?: T) => void;
@@ -1499,6 +1501,7 @@ export interface ExtensionContextActions {
 	shutdown: () => void;
 	getContextUsage: () => ContextUsage | undefined;
 	compact: (options?: CompactOptions) => void;
+	reload: () => Promise<void>;
 	getSystemPrompt: () => string;
 }
 

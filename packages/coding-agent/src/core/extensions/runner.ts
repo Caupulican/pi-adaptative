@@ -626,6 +626,10 @@ export class ExtensionRunner {
 				runner.assertActive();
 				runner.compactFn(options);
 			},
+			reload: () => {
+				runner.assertActive();
+				return runner.reloadHandler();
+			},
 			getSystemPrompt: () => {
 				runner.assertActive();
 				return runner.getSystemPromptFn();
