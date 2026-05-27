@@ -1,6 +1,6 @@
 {
 	"name": "@caupulican/pi-adaptative",
-	"version": "0.76.0",
+	"version": "0.76.1",
 	"description": "Adaptive fork of Pi coding agent for self-evolving agent harness experiments",
 	"type": "module",
 	"piConfig": {

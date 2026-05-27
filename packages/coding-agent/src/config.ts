@@ -11,6 +11,7 @@ import { normalizePath } from "./utils/paths.ts";
 
 const __filename = fileURLToPath(import.meta.url);
 const __dirname = dirname(__filename);
+const PI_ADAPTATIVE_RELEASES_URL = "https://github.com/Caupulican/pi-adaptative/releases/latest";
 
 /**
  * Detect if we're running as a Bun compiled binary.
@@ -309,7 +310,7 @@ export function getSelfUpdateUnavailableInstruction(
 ): string {
 	const method = detectInstallMethod();
 	if (method === "bun-binary") {
-		return `Download from: https://github.com/earendil-works/pi-mono/releases/latest`;
+		return `Download from: ${PI_ADAPTATIVE_RELEASES_URL}`;
 	}
 	const command = getSelfUpdateCommandForMethod(method, packageName, updatePackageName, npmCommand);
 	if (command) {

@@ -2,6 +2,12 @@
 
 ## [Unreleased]
 
+## [0.76.1] - 2026-05-27
+
+### Fixed
+
+- Fixed Pi Adaptative update checks and Bun binary fallback instructions to use the `Caupulican/pi-adaptative` package/release locations instead of upstream Pi endpoints.
+
 ## [0.76.0] - 2026-05-27
 
 ### New Features
