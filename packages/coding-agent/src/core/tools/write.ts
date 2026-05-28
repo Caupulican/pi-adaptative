@@ -1,11 +1,12 @@
 import type { AgentTool } from "@earendil-works/pi-agent-core";
 import { Container, Text } from "@earendil-works/pi-tui";
-import { mkdir as fsMkdir, writeFile as fsWriteFile } from "fs/promises";
+import { mkdir as fsMkdir, readFile as fsReadFile, writeFile as fsWriteFile } from "fs/promises";
 import { dirname } from "path";
 import { type Static, Type } from "typebox";
 import { keyHint } from "../../modes/interactive/components/keybinding-hints.ts";
 import { getLanguageFromPath, highlightCode } from "../../modes/interactive/theme/theme.ts";
 import type { ToolDefinition, ToolRenderResultOptions } from "../extensions/types.ts";
+import { applyEncodingPreservation, isValidUTF8, utf8ByteLength } from "./file-encoding-policy.ts";
 import { withFileMutationQueue } from "./file-mutation-queue.ts";
 import { resolveToCwd } from "./path-utils.ts";
 import { invalidArgText, normalizeDisplayText, replaceTabs, shortenPath, str } from "./render-utils.ts";
@@ -25,12 +26,15 @@ export type WriteToolInput = Static<typeof writeSchema>;
 export interface WriteOperations {
 	/** Write content to a file */
 	writeFile: (absolutePath: string, content: string) => Promise<void>;
+	/** Read existing file contents when available for encoding preservation */
+	readFile?: (absolutePath: string) => Promise<Buffer>;
 	/** Create directory recursively */
 	mkdir: (dir: string) => Promise<void>;
 }
 
 const defaultWriteOperations: WriteOperations = {
 	writeFile: (path, content) => fsWriteFile(path, content, "utf-8"),
+	readFile: (path) => fsReadFile(path),
 	mkdir: (dir) => fsMkdir(dir, { recursive: true }).then(() => {}),
 };
 
@@ -214,12 +218,31 @@ export function createWriteToolDefinition(
 				await ops.mkdir(dir);
 				throwIfAborted();
 
+				// Read existing file if available to preserve UTF-8 BOM and CRLF style.
+				let existingContent: string | undefined;
+				if (ops.readFile) {
+					try {
+						const existingBuffer = await ops.readFile(absolutePath);
+						if (isValidUTF8(existingBuffer)) {
+							existingContent = existingBuffer.toString("utf-8");
+						}
+					} catch {
+						// Ignore: file does not exist, is unreadable, or remote operations do not expose reads.
+					}
+				}
+
+				let finalContent = content;
+				if (existingContent !== undefined) {
+					finalContent = applyEncodingPreservation(existingContent, content);
+				}
+
 				// Write the file contents.
-				await ops.writeFile(absolutePath, content);
+				await ops.writeFile(absolutePath, finalContent);
 				throwIfAborted();
 
+				const byteCount = utf8ByteLength(finalContent);
 				return {
-					content: [{ type: "text", text: `Successfully wrote ${content.length} bytes to ${path}` }],
+					content: [{ type: "text", text: `Successfully wrote ${byteCount} bytes to ${path}` }],
 					details: undefined,
 				};
 			});

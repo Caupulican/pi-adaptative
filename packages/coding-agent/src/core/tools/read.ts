@@ -21,6 +21,13 @@ const readSchema = Type.Object({
 	path: Type.String({ description: "Path to the file to read (relative or absolute)" }),
 	offset: Type.Optional(Type.Number({ description: "Line number to start reading from (1-indexed)" })),
 	limit: Type.Optional(Type.Number({ description: "Maximum number of lines to read" })),
+	lineNumbers: Type.Optional(Type.Boolean({ description: "Include line numbers in the output" })),
+	tail: Type.Optional(Type.Number({ description: "Number of lines to read from the end of the file" })),
+	filter: Type.Optional(
+		Type.Union([Type.Literal("none"), Type.Literal("minimal"), Type.Literal("aggressive")], {
+			description: "Safe text filtering level (none, minimal, aggressive)",
+		}),
+	),
 });
 
 export type ReadToolInput = Static<typeof readSchema>;
@@ -218,7 +225,21 @@ export function createReadToolDefinition(
 		parameters: readSchema,
 		async execute(
 			_toolCallId,
-			{ path, offset, limit }: { path: string; offset?: number; limit?: number },
+			{
+				path,
+				offset,
+				limit,
+				lineNumbers,
+				tail,
+				filter,
+			}: {
+				path: string;
+				offset?: number;
+				limit?: number;
+				lineNumbers?: boolean;
+				tail?: number;
+				filter?: "none" | "minimal" | "aggressive";
+			},
 			signal?: AbortSignal,
 			_onUpdate?,
 			ctx?,
@@ -281,23 +302,109 @@ export function createReadToolDefinition(
 								const textContent = buffer.toString("utf-8");
 								const allLines = textContent.split("\n");
 								const totalFileLines = allLines.length;
-								// Apply offset if specified. Convert from 1-indexed input to 0-indexed array access.
-								const startLine = offset ? Math.max(0, offset - 1) : 0;
+								// Apply offset/tail if specified. Convert from 1-indexed input to 0-indexed array access.
+								let startLine = 0;
+								let userLimitedLines = limit;
+								if (offset !== undefined) {
+									startLine = Math.max(0, offset - 1);
+								} else if (tail !== undefined) {
+									startLine = Math.max(0, totalFileLines - tail);
+									if (limit === undefined) {
+										userLimitedLines = tail;
+									}
+								}
 								const startLineDisplay = startLine + 1;
 								// Check if offset is out of bounds.
-								if (startLine >= allLines.length) {
-									throw new Error(`Offset ${offset} is beyond end of file (${allLines.length} lines total)`);
+								if (startLine >= allLines.length && allLines.length > 0) {
+									throw new Error(
+										`Offset ${startLine + 1} is beyond end of file (${allLines.length} lines total)`,
+									);
 								}
-								let selectedContent: string;
-								let userLimitedLines: number | undefined;
-								// If limit is specified by the user, honor it first. Otherwise truncateHead decides.
-								if (limit !== undefined) {
-									const endLine = Math.min(startLine + limit, allLines.length);
-									selectedContent = allLines.slice(startLine, endLine).join("\n");
-									userLimitedLines = endLine - startLine;
+								let slicedLines =
+									userLimitedLines !== undefined
+										? allLines
+												.map((line, idx) => ({ text: line, originalIndex: idx + 1 }))
+												.slice(startLine, startLine + userLimitedLines)
+										: allLines.map((line, idx) => ({ text: line, originalIndex: idx + 1 })).slice(startLine);
+
+								// Safe text filtering
+								let canFilter = true;
+								if (mimeType) {
+									canFilter = false;
 								} else {
-									selectedContent = allLines.slice(startLine).join("\n");
+									const fileNameLower = path.toLowerCase();
+									const unsafeExtensions = [
+										".json",
+										".jsonl",
+										".yml",
+										".yaml",
+										".toml",
+										".xml",
+										".csv",
+										".tsv",
+									];
+									if (unsafeExtensions.some((ext) => fileNameLower.endsWith(ext))) {
+										canFilter = false;
+									} else {
+										try {
+											JSON.parse(textContent);
+											canFilter = false;
+										} catch {}
+									}
 								}
+
+								if (canFilter && filter && filter !== "none") {
+									const filtered: typeof slicedLines = [];
+									if (filter === "minimal") {
+										let consecutiveBlank = 0;
+										for (const item of slicedLines) {
+											const trimmed = item.text.trimEnd();
+											if (trimmed === "") {
+												consecutiveBlank++;
+												if (consecutiveBlank <= 1) {
+													filtered.push({ text: "", originalIndex: item.originalIndex });
+												}
+											} else {
+												consecutiveBlank = 0;
+												filtered.push({ text: trimmed, originalIndex: item.originalIndex });
+											}
+										}
+										while (filtered.length > 0 && filtered[filtered.length - 1].text === "") {
+											filtered.pop();
+										}
+									} else if (filter === "aggressive") {
+										for (const item of slicedLines) {
+											const trimmed = item.text.trimEnd();
+											const trimmedStart = trimmed.trimStart();
+											if (trimmedStart === "") {
+												continue;
+											}
+											if (
+												trimmedStart.startsWith("//") ||
+												trimmedStart.startsWith("#") ||
+												(trimmedStart.startsWith("/*") && trimmedStart.endsWith("*/"))
+											) {
+												continue;
+											}
+											filtered.push({ text: trimmed, originalIndex: item.originalIndex });
+										}
+									}
+
+									// If filtering would empty a non-empty list, keep original
+									const isOriginalNotEmpty = slicedLines.some((item) => item.text.trim().length > 0);
+									const isFilteredEmpty = filtered.every((item) => item.text.trim().length === 0);
+									if (isOriginalNotEmpty && isFilteredEmpty) {
+										// Fallback to slicedLines
+									} else {
+										slicedLines = filtered;
+									}
+								}
+
+								const finalLines = slicedLines.map((item) =>
+									lineNumbers ? `${item.originalIndex}: ${item.text}` : item.text,
+								);
+								const selectedContent = finalLines.join("\n");
+
 								// Apply truncation, respecting both line and byte limits.
 								const truncation = truncateHead(selectedContent);
 								let outputText: string;

@@ -25,11 +25,19 @@ describe("issue #3303 nested .gitignore rules leak into sibling directories", ()
 		};
 		const text = result.content[0]?.text ?? "";
 		if (text === "No files found matching pattern") return [];
-		return text
-			.split("\n")
-			.map((l) => l.trim())
-			.filter((l) => l.length > 0 && !l.startsWith("["))
-			.sort();
+		const paths: string[] = [];
+		let currentDir = "";
+		for (const line of text.split("\n")) {
+			if (!line || line.startsWith("[")) continue;
+			if (line.startsWith("  ")) {
+				const file = line.trim();
+				const fullPath = currentDir === "./" ? file : currentDir + file;
+				paths.push(fullPath);
+			} else {
+				currentDir = line.trim();
+			}
+		}
+		return paths.sort();
 	}
 
 	afterEach(() => {

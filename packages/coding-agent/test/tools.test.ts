@@ -200,6 +200,63 @@ describe("Coding Agent Tools", () => {
 			expect(output).toContain("definitely not a png");
 			expect(result.content.some((c: any) => c.type === "image")).toBe(false);
 		});
+
+		it("should include line numbers when lineNumbers parameter is true", async () => {
+			const testFile = join(testDir, "lineno.txt");
+			writeFileSync(testFile, "line one\nline two\nline three");
+
+			const result = await readTool.execute("test-lineno", { path: testFile, lineNumbers: true });
+			expect(getTextOutput(result)).toBe("1: line one\n2: line two\n3: line three");
+		});
+
+		it("should support tail parameter for reading from end of file", async () => {
+			const testFile = join(testDir, "tail.txt");
+			writeFileSync(testFile, "1\n2\n3\n4\n5\n6\n7\n8\n9\n10");
+
+			const result = await readTool.execute("test-tail", { path: testFile, tail: 3 });
+			expect(getTextOutput(result)).toBe("8\n9\n10");
+		});
+
+		it("should support tail parameter combined with lineNumbers", async () => {
+			const testFile = join(testDir, "tail-lineno.txt");
+			writeFileSync(testFile, "1\n2\n3\n4\n5\n6\n7\n8\n9\n10");
+
+			const result = await readTool.execute("test-tail-lineno", { path: testFile, tail: 3, lineNumbers: true });
+			expect(getTextOutput(result)).toBe("8: 8\n9: 9\n10: 10");
+		});
+
+		it("should support minimal filtering level", async () => {
+			const testFile = join(testDir, "minimal-filter.txt");
+			writeFileSync(testFile, "line one   \n\n\nline two  \nline three\n");
+
+			const result = await readTool.execute("test-minimal-filter", { path: testFile, filter: "minimal" });
+			expect(getTextOutput(result)).toBe("line one\n\nline two\nline three");
+		});
+
+		it("should support aggressive filtering level", async () => {
+			const testFile = join(testDir, "aggressive-filter.txt");
+			writeFileSync(testFile, "line one   \n// comment\n\n\nline two  \n# another comment\nline three\n");
+
+			const result = await readTool.execute("test-aggressive-filter", { path: testFile, filter: "aggressive" });
+			expect(getTextOutput(result)).toBe("line one\nline two\nline three");
+		});
+
+		it("should never filter JSON files even if filter parameter is set", async () => {
+			const testFile = join(testDir, "data.json");
+			const jsonContent = '{\n  "a": 1,\n  "b": 2\n}';
+			writeFileSync(testFile, jsonContent);
+
+			const result = await readTool.execute("test-json-filter", { path: testFile, filter: "aggressive" });
+			expect(getTextOutput(result)).toBe(jsonContent);
+		});
+
+		it("should fall back to raw content if filtering would empty non-empty file", async () => {
+			const testFile = join(testDir, "comments-only.txt");
+			writeFileSync(testFile, "// only comments\n# here");
+
+			const result = await readTool.execute("test-fallback-filter", { path: testFile, filter: "aggressive" });
+			expect(getTextOutput(result)).toBe("// only comments\n# here");
+		});
 	});
 
 	describe("write tool", () => {
@@ -553,6 +610,28 @@ describe("Coding Agent Tools", () => {
 			expect(getTextOutput(result).trim()).toBe("prefix-output\ncommand-output");
 		});
 
+		it("should apply command prefix to optimizer-eligible commands", async () => {
+			const testFile = join(testDir, "prefix-cat.txt");
+			writeFileSync(testFile, "body");
+			const bashWithPrefix = createBashTool(testDir, {
+				commandPrefix: "echo prefix-output",
+			});
+
+			const result = await bashWithPrefix.execute("test-prefix-cat", { command: `cat ${testFile}` });
+			expect(getTextOutput(result).trim()).toBe("prefix-output\nbody");
+		});
+
+		it("should apply spawn hook to optimizer-eligible commands", async () => {
+			const testFile = join(testDir, "hook-cat.txt");
+			writeFileSync(testFile, "body");
+			const bashWithHook = createBashTool(testDir, {
+				spawnHook: (context) => ({ ...context, command: `echo hook-output\n${context.command}` }),
+			});
+
+			const result = await bashWithHook.execute("test-hook-cat", { command: `cat ${testFile}` });
+			expect(getTextOutput(result).trim()).toBe("hook-output\nbody");
+		});
+
 		it("should work without command prefix", async () => {
 			const bashWithoutPrefix = createBashTool(testDir, {});
 
@@ -682,6 +761,90 @@ describe("Coding Agent Tools", () => {
 			expect(fullOutput).toContain("1\n2\n3");
 			expect(fullOutput).toContain("2998\n2999\n3000");
 		});
+
+		it("should optimize eligible simple commands natively", async () => {
+			const searchDir = join(testDir, "optimized-find");
+			mkdirSync(searchDir);
+			writeFileSync(join(searchDir, "child.txt"), "child");
+			const bash = createBashTool(testDir);
+
+			const result = await bash.execute("test-opt", { command: `find ${searchDir}` });
+			expect(getTextOutput(result).trim()).toBe("child.txt");
+		});
+
+		it("should truncate optimized command output like normal bash output", async () => {
+			const testFile = join(testDir, "optimized-large.txt");
+			const lines = Array.from({ length: 3000 }, (_, index) => `line-${String(index + 1).padStart(4, "0")}`);
+			writeFileSync(testFile, `${lines.join("\n")}\n`);
+			const bash = createBashTool(testDir);
+
+			const result = await bash.execute("test-opt-trunc", { command: `cat ${testFile}` });
+			const output = getTextOutput(result);
+
+			expect(result.details?.truncation?.truncated).toBe(true);
+			expect(result.details?.fullOutputPath).toBeDefined();
+			expect(output).toContain("line-3000");
+			expect(output).toMatch(/\[Showing lines \d+-\d+ of 3000\. Full output: /);
+		});
+
+		it("should not bypass custom operations for eligible simple commands", async () => {
+			const testFile = join(testDir, "custom-ops.txt");
+			writeFileSync(testFile, "file content");
+			let execCalled = false;
+			const customBash = createBashTool(testDir, {
+				operations: {
+					exec: async (_cmd, _cwd, { onData }) => {
+						execCalled = true;
+						onData(Buffer.from("custom operations\n", "utf-8"));
+						return { exitCode: 0 };
+					},
+				},
+			});
+
+			const result = await customBash.execute("test-custom-ops", { command: `cat ${testFile}` });
+			expect(getTextOutput(result).trim()).toBe("custom operations");
+			expect(execCalled).toBe(true);
+		});
+
+		it("should fall back to native execution on unsupported commands or unsafe operators", async () => {
+			const testFile = join(testDir, "unsafe.txt");
+			writeFileSync(testFile, "unsafe");
+
+			let execCalled = false;
+			let execCommand = "";
+			const customBash = createBashTool(testDir, {
+				operations: {
+					exec: async (cmd) => {
+						execCalled = true;
+						execCommand = cmd;
+						return { exitCode: 0 };
+					},
+				},
+			});
+
+			await customBash.execute("test-unsafe-redirect", { command: `cat ${testFile} > out.txt` });
+			expect(execCalled).toBe(true);
+			expect(execCommand).toContain(">");
+
+			execCalled = false;
+			await customBash.execute("test-unsafe-pipe", { command: `cat ${testFile} | grep unsafe` });
+			expect(execCalled).toBe(true);
+		});
+
+		it("should fall back to native execution when PI_TOOL_OPTIMIZER_DISABLED=1", async () => {
+			const searchDir = join(testDir, "disabled-find");
+			mkdirSync(searchDir);
+			writeFileSync(join(searchDir, "child.txt"), "child");
+			process.env.PI_TOOL_OPTIMIZER_DISABLED = "1";
+
+			try {
+				const bash = createBashTool(testDir);
+				const result = await bash.execute("test-disabled", { command: `find ${searchDir}` });
+				expect(getTextOutput(result)).toContain(searchDir);
+			} finally {
+				delete process.env.PI_TOOL_OPTIMIZER_DISABLED;
+			}
+		});
 	});
 
 	describe("grep tool", () => {
@@ -695,7 +858,7 @@ describe("Coding Agent Tools", () => {
 			});
 
 			const output = getTextOutput(result);
-			expect(output).toContain("example.txt:2: match line");
+			expect(output).toBe("example.txt:\n  2: match line");
 		});
 
 		it("should respect global limit and include context lines", async () => {
@@ -711,12 +874,29 @@ describe("Coding Agent Tools", () => {
 			});
 
 			const output = getTextOutput(result);
-			expect(output).toContain("context.txt-1- before");
-			expect(output).toContain("context.txt:2: match one");
-			expect(output).toContain("context.txt-3- after");
+			expect(output).toContain("context.txt:");
+			expect(output).toContain("  1- before");
+			expect(output).toContain("  2: match one");
+			expect(output).toContain("  3- after");
 			expect(output).toContain("[1 matches limit reached. Use limit=2 for more, or refine pattern]");
 			// Ensure second match is not present
 			expect(output).not.toContain("match two");
+		});
+
+		it("should group multiple matches by file name", async () => {
+			const fileA = join(testDir, "fileA.txt");
+			const fileB = join(testDir, "fileB.txt");
+			writeFileSync(fileA, "line one\nmatch A1\nline three\nmatch A2\n");
+			writeFileSync(fileB, "line one\nmatch B1\n");
+
+			const result = await grepTool.execute("test-multi-file-grep", {
+				pattern: "match",
+				path: testDir,
+			});
+
+			const output = getTextOutput(result);
+			expect(output).toContain("fileA.txt:\n  2: match A1\n  4: match A2");
+			expect(output).toContain("fileB.txt:\n  2: match B1");
 		});
 
 		it("should treat flag-like patterns as search text", async () => {
@@ -749,13 +929,11 @@ describe("Coding Agent Tools", () => {
 				path: testDir,
 			});
 
-			const outputLines = getTextOutput(result)
-				.split("\n")
-				.map((line) => line.trim())
-				.filter(Boolean);
-
-			expect(outputLines).toContain("visible.txt");
-			expect(outputLines).toContain(".secret/hidden.txt");
+			const output = getTextOutput(result);
+			expect(output).toContain("./");
+			expect(output).toContain("  visible.txt");
+			expect(output).toContain(".secret/");
+			expect(output).toContain("  hidden.txt");
 		});
 
 		it("should respect .gitignore", async () => {
@@ -790,6 +968,33 @@ describe("Coding Agent Tools", () => {
 
 			expect(getTextOutput(result)).toContain("No files found matching pattern");
 		});
+
+		it("should treat '.' as match-all pattern", async () => {
+			writeFileSync(join(testDir, "file1.txt"), "1");
+			writeFileSync(join(testDir, "file2.log"), "2");
+
+			const result = await findTool.execute("test-find-all", {
+				pattern: ".",
+				path: testDir,
+			});
+
+			const output = getTextOutput(result);
+			expect(output).toContain("file1.txt");
+			expect(output).toContain("file2.log");
+		});
+
+		it("should support ignoreCase option", async () => {
+			writeFileSync(join(testDir, "UPPER.TXT"), "upper");
+
+			const resultCase = await findTool.execute("test-find-case", {
+				pattern: "*.txt",
+				path: testDir,
+				ignoreCase: true,
+			});
+
+			const output = getTextOutput(resultCase);
+			expect(output).toContain("UPPER.TXT");
+		});
 	});
 
 	describe("ls tool", () => {
@@ -802,6 +1007,44 @@ describe("Coding Agent Tools", () => {
 
 			expect(output).toContain(".hidden-file");
 			expect(output).toContain(".hidden-dir/");
+		});
+
+		it("should list files with metadata (sizes and permissions)", async () => {
+			const testFile = join(testDir, "test.txt");
+			writeFileSync(testFile, "hello");
+
+			const result = await lsTool.execute("test-ls-meta", { path: testDir, metadata: true });
+			const output = getTextOutput(result);
+
+			expect(output).toContain("test.txt");
+			expect(output).toMatch(/-rwxr-xr-x|-rw-r--r--|d---------|d|rwx/);
+			expect(output).toContain("5B");
+		});
+
+		it("should handle partial stat failures gracefully and keep entry in list", async () => {
+			const failStatTool = createLsTool(testDir, {
+				operations: {
+					exists: () => true,
+					readdir: () => ["ok-file.txt", "broken-file.txt"],
+					stat: async (p) => {
+						if (p.endsWith("broken-file.txt")) {
+							throw new Error("Disk read error");
+						}
+						// If checking target root dir, return directory
+						if (p === testDir) {
+							return { isDirectory: () => true, size: 0, mode: 0o755 };
+						}
+						return { isDirectory: () => false, size: 10, mode: 0o644 };
+					},
+				},
+			});
+
+			const result = await failStatTool.execute("test-ls-fail-stat", { metadata: true });
+			const output = getTextOutput(result);
+
+			expect(output).toContain("ok-file.txt");
+			expect(output).toContain("broken-file.txt");
+			expect(output).toContain("??????????  ???????  broken-file.txt");
 		});
 	});
 });

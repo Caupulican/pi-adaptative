@@ -1,5 +1,6 @@
 import { constants } from "node:fs";
-import { access as fsAccess } from "node:fs/promises";
+import { access as fsAccess, readdir as fsReaddir, readFile as fsReadFile, stat as fsStat } from "node:fs/promises";
+import { relative as relativePath, resolve as resolvePath } from "node:path";
 import type { AgentTool } from "@earendil-works/pi-agent-core";
 import { Container, Text, truncateToWidth } from "@earendil-works/pi-tui";
 import { spawn } from "child_process";
@@ -16,6 +17,7 @@ import {
 	untrackDetachedChildPid,
 } from "../../utils/shell.ts";
 import type { ToolDefinition, ToolRenderResultOptions } from "../extensions/types.ts";
+import { classifyGitCommand, executeFilteredGit } from "./git-filter.ts";
 import { OutputAccumulator } from "./output-accumulator.ts";
 import { getTextOutput, invalidArgText, str } from "./render-utils.ts";
 import { wrapToolDefinition } from "./tool-definition-wrapper.ts";
@@ -266,6 +268,143 @@ function rebuildBashResultRenderComponent(
 	}
 }
 
+async function tryOptimizeCommand(
+	command: string,
+	cwd: string,
+): Promise<{ optimized: boolean; output?: string; exitCode?: number }> {
+	if (process.env.PI_TOOL_OPTIMIZER_DISABLED === "1") {
+		return { optimized: false };
+	}
+
+	const trimmed = command.trim();
+	if (!trimmed) {
+		return { optimized: false };
+	}
+
+	// Reject if there are shell operators or pipes/redirects
+	const shellOperators = ["|", ">", "<", "&", ";", "\n", "\r", "$", "`", "(", ")", "*", "?", "[", "]"];
+	if (shellOperators.some((op) => trimmed.includes(op))) {
+		return { optimized: false };
+	}
+
+	// Simple tokenizer split by whitespace
+	const args = trimmed.split(/\s+/);
+	if (args.length === 0) {
+		return { optimized: false };
+	}
+
+	const cmd = args[0];
+	const unquote = (s: string) => {
+		if ((s.startsWith('"') && s.endsWith('"')) || (s.startsWith("'") && s.endsWith("'"))) {
+			return s.slice(1, -1);
+		}
+		return s;
+	};
+
+	const resolveToCwd = (p: string, base: string) => {
+		const clean = unquote(p);
+		if (clean.startsWith("/")) return clean;
+		return resolvePath(base, clean);
+	};
+
+	try {
+		if (cmd === "cat") {
+			if (args.length === 2 && !args[1].startsWith("-")) {
+				const filePath = resolveToCwd(args[1], cwd);
+				const content = await fsReadFile(filePath, "utf-8");
+				return { optimized: true, output: content, exitCode: 0 };
+			}
+		} else if (cmd === "head") {
+			if (args.length === 2 && !args[1].startsWith("-")) {
+				const filePath = resolveToCwd(args[1], cwd);
+				const content = await fsReadFile(filePath, "utf-8");
+				const lines = content.split("\n").slice(0, 10).join("\n");
+				return { optimized: true, output: lines, exitCode: 0 };
+			} else if (args.length === 4 && args[1] === "-n" && !args[3].startsWith("-")) {
+				const count = parseInt(args[2], 10);
+				if (!Number.isNaN(count) && count >= 0) {
+					const filePath = resolveToCwd(args[3], cwd);
+					const content = await fsReadFile(filePath, "utf-8");
+					const lines = content.split("\n").slice(0, count).join("\n");
+					return { optimized: true, output: lines, exitCode: 0 };
+				}
+			}
+		} else if (cmd === "tail") {
+			if (args.length === 2 && !args[1].startsWith("-")) {
+				const filePath = resolveToCwd(args[1], cwd);
+				const content = await fsReadFile(filePath, "utf-8");
+				const allLines = content.split("\n");
+				const lines = allLines.slice(Math.max(0, allLines.length - 10)).join("\n");
+				return { optimized: true, output: lines, exitCode: 0 };
+			} else if (args.length === 4 && args[1] === "-n" && !args[3].startsWith("-")) {
+				const count = parseInt(args[2], 10);
+				if (!Number.isNaN(count) && count >= 0) {
+					const filePath = resolveToCwd(args[3], cwd);
+					const content = await fsReadFile(filePath, "utf-8");
+					const allLines = content.split("\n");
+					const lines = allLines.slice(Math.max(0, allLines.length - count)).join("\n");
+					return { optimized: true, output: lines, exitCode: 0 };
+				}
+			}
+		} else if (cmd === "ls") {
+			if (args.length === 1 || (args.length === 2 && !args[1].startsWith("-"))) {
+				const targetDir = args.length === 2 ? resolveToCwd(args[1], cwd) : cwd;
+				const entries = await fsReaddir(targetDir);
+				entries.sort((a, b) => a.toLowerCase().localeCompare(b.toLowerCase()));
+				const results: string[] = [];
+				for (const entry of entries) {
+					let suffix = "";
+					try {
+						const entryStat = await fsStat(resolvePath(targetDir, entry));
+						if (entryStat.isDirectory()) suffix = "/";
+					} catch {}
+					results.push(entry + suffix);
+				}
+				return { optimized: true, output: results.join("\n"), exitCode: 0 };
+			}
+		} else if (cmd === "grep" || cmd === "rg") {
+			if (args.length === 3 && !args[1].startsWith("-") && !args[2].startsWith("-")) {
+				const patternStr = unquote(args[1]);
+				const filePath = resolveToCwd(args[2], cwd);
+				const content = await fsReadFile(filePath, "utf-8");
+				const lines = content.split("\n");
+				const matches: string[] = [];
+				for (let i = 0; i < lines.length; i++) {
+					if (lines[i].includes(patternStr)) {
+						matches.push(lines[i]);
+					}
+				}
+				return { optimized: true, output: matches.join("\n"), exitCode: matches.length > 0 ? 0 : 1 };
+			}
+		} else if (cmd === "find") {
+			if (args.length === 1 || (args.length === 2 && !args[1].startsWith("-"))) {
+				const searchPath = args.length === 2 ? resolveToCwd(args[1], cwd) : cwd;
+				const walk = async (dir: string): Promise<string[]> => {
+					let results: string[] = [];
+					const entries = await fsReaddir(dir);
+					for (const entry of entries) {
+						const full = resolvePath(dir, entry);
+						const entryStat = await fsStat(full);
+						if (entryStat.isDirectory()) {
+							results.push(full);
+							results = results.concat(await walk(full));
+						} else {
+							results.push(full);
+						}
+					}
+					return results;
+				};
+				const all = (await walk(searchPath)).map((p) => relativePath(searchPath, p).replace(/\\/g, "/"));
+				return { optimized: true, output: all.join("\n"), exitCode: 0 };
+			}
+		}
+	} catch {
+		return { optimized: false };
+	}
+
+	return { optimized: false };
+}
+
 export function createBashToolDefinition(
 	cwd: string,
 	options?: BashToolOptions,
@@ -273,6 +412,8 @@ export function createBashToolDefinition(
 	const ops = options?.operations ?? createLocalBashOperations({ shellPath: options?.shellPath });
 	const commandPrefix = options?.commandPrefix;
 	const spawnHook = options?.spawnHook;
+	const canOptimizeCommand = !options?.operations && !options?.shellPath && !commandPrefix && !spawnHook;
+	const canFilterCommand = canOptimizeCommand;
 	return {
 		name: "bash",
 		label: "bash",
@@ -370,6 +511,46 @@ export function createBashToolDefinition(
 			const appendStatus = (text: string, status: string) => `${text ? `${text}\n\n` : ""}${status}`;
 
 			try {
+				if (canFilterCommand) {
+					const classification = classifyGitCommand(command, spawnContext.env);
+					if (classification.eligible && classification.subcommand) {
+						const res = await executeFilteredGit(
+							cwd,
+							classification.subcommand,
+							classification.globalOptions || [],
+							classification.subcommandArgs || [],
+							{ signal, timeout },
+						);
+						if (res.exitCode !== -100) {
+							output.append(res.rawBytes ?? Buffer.from(res.rawOut, "utf-8"));
+							const snapshot = await finishOutput();
+							if (res.exitCode !== 0) {
+								const { text: rawOutputText } = formatOutput(snapshot);
+								throw new Error(appendStatus(rawOutputText, `Command exited with code ${res.exitCode}`));
+							}
+							const details = snapshot.truncation.truncated
+								? { truncation: snapshot.truncation, fullOutputPath: snapshot.fullOutputPath }
+								: snapshot.fullOutputPath
+									? { fullOutputPath: snapshot.fullOutputPath }
+									: undefined;
+							return { content: [{ type: "text", text: res.output }], details };
+						}
+					}
+				}
+
+				if (canOptimizeCommand) {
+					const optResult = await tryOptimizeCommand(command, cwd);
+					if (optResult.optimized) {
+						output.append(Buffer.from(optResult.output ?? "", "utf-8"));
+						const snapshot = await finishOutput();
+						const { text: outputText, details } = formatOutput(snapshot);
+						if (optResult.exitCode !== 0 && optResult.exitCode !== undefined) {
+							throw new Error(appendStatus(outputText, `Command exited with code ${optResult.exitCode}`));
+						}
+						return { content: [{ type: "text", text: outputText }], details };
+					}
+				}
+
 				let exitCode: number | null;
 				try {
 					const result = await ops.exec(spawnContext.command, spawnContext.cwd, {

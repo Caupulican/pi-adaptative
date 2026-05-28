@@ -18,10 +18,12 @@ function toPosixPath(value: string): string {
 
 const findSchema = Type.Object({
 	pattern: Type.String({
-		description: "Glob pattern to match files, e.g. '*.ts', '**/*.json', or 'src/**/*.spec.ts'",
+		description:
+			"Glob pattern to match files, e.g. '*.ts', '**/*.json', or 'src/**/*.spec.ts'. Use '.' to match all files.",
 	}),
 	path: Type.Optional(Type.String({ description: "Directory to search in (default: current directory)" })),
 	limit: Type.Optional(Type.Number({ description: "Maximum number of results (default: 1000)" })),
+	ignoreCase: Type.Optional(Type.Boolean({ description: "Case-insensitive matching (default: false)" })),
 });
 
 export type FindToolInput = Static<typeof findSchema>;
@@ -108,6 +110,66 @@ function formatFindResult(
 	return text;
 }
 
+function formatFindResults(relativized: string[], effectiveLimit: number): { text: string; details: FindToolDetails } {
+	if (relativized.length === 0) {
+		return { text: "No files found matching pattern", details: {} };
+	}
+
+	const dirGroups = new Map<string, string[]>();
+	const extCounts = new Map<string, number>();
+
+	for (const p of relativized) {
+		const dir = path.dirname(p);
+		const base = path.basename(p);
+		const dirKey = dir === "." ? "./" : `${dir}/`;
+		if (!dirGroups.has(dirKey)) {
+			dirGroups.set(dirKey, []);
+		}
+		dirGroups.get(dirKey)!.push(base);
+
+		const ext = path.extname(p).toLowerCase() || "(no extension)";
+		extCounts.set(ext, (extCounts.get(ext) || 0) + 1);
+	}
+
+	const sortedDirs = Array.from(dirGroups.keys()).sort((a, b) => a.localeCompare(b));
+	const formattedLines: string[] = [];
+	for (const dir of sortedDirs) {
+		formattedLines.push(dir);
+		const files = dirGroups.get(dir)!;
+		files.sort((a, b) => a.localeCompare(b));
+		for (const file of files) {
+			formattedLines.push(`  ${file}`);
+		}
+	}
+
+	const extSummaryParts = Array.from(extCounts.entries())
+		.sort((a, b) => b[1] - a[1] || a[0].localeCompare(b[0]))
+		.map(([ext, count]) => `${ext}: ${count}`);
+	const extSummary = `Extensions: ${extSummaryParts.join(", ")}`;
+
+	const resultLimitReached = relativized.length >= effectiveLimit;
+	const rawOutput = formattedLines.join("\n");
+	const truncation = truncateHead(rawOutput, { maxLines: Number.MAX_SAFE_INTEGER });
+	let resultOutput = truncation.content;
+	const details: FindToolDetails = {};
+	const notices: string[] = [];
+	if (resultLimitReached) {
+		notices.push(`${effectiveLimit} results limit reached`);
+		details.resultLimitReached = effectiveLimit;
+	}
+	if (truncation.truncated) {
+		notices.push(`${formatSize(DEFAULT_MAX_BYTES)} limit reached`);
+		details.truncation = truncation;
+	}
+	if (relativized.length > 0) {
+		resultOutput += `\n\n[Summary - ${extSummary}]`;
+	}
+	if (notices.length > 0) {
+		resultOutput += `\n\n[${notices.join(". ")}]`;
+	}
+	return { text: resultOutput, details };
+}
+
 export function createFindToolDefinition(
 	cwd: string,
 	options?: FindToolOptions,
@@ -121,7 +183,12 @@ export function createFindToolDefinition(
 		parameters: findSchema,
 		async execute(
 			_toolCallId,
-			{ pattern, path: searchDir, limit }: { pattern: string; path?: string; limit?: number },
+			{
+				pattern,
+				path: searchDir,
+				limit,
+				ignoreCase,
+			}: { pattern: string; path?: string; limit?: number; ignoreCase?: boolean },
 			signal?: AbortSignal,
 			_onUpdate?,
 			_ctx?,
@@ -153,6 +220,11 @@ export function createFindToolDefinition(
 						const effectiveLimit = limit ?? DEFAULT_LIMIT;
 						const ops = customOps ?? defaultFindOperations;
 
+						let effectivePattern = pattern;
+						if (pattern === ".") {
+							effectivePattern = "**/*";
+						}
+
 						// If custom operations provide glob(), use that instead of fd.
 						if (customOps?.glob) {
 							if (!(await ops.exists(searchPath))) {
@@ -163,21 +235,12 @@ export function createFindToolDefinition(
 								settle(() => reject(new Error("Operation aborted")));
 								return;
 							}
-							const results = await ops.glob(pattern, searchPath, {
+							const results = await ops.glob(effectivePattern, searchPath, {
 								ignore: ["**/node_modules/**", "**/.git/**"],
 								limit: effectiveLimit,
 							});
 							if (signal?.aborted) {
 								settle(() => reject(new Error("Operation aborted")));
-								return;
-							}
-							if (results.length === 0) {
-								settle(() =>
-									resolve({
-										content: [{ type: "text", text: "No files found matching pattern" }],
-										details: undefined,
-									}),
-								);
 								return;
 							}
 
@@ -186,27 +249,12 @@ export function createFindToolDefinition(
 								if (p.startsWith(searchPath)) return toPosixPath(p.slice(searchPath.length + 1));
 								return toPosixPath(path.relative(searchPath, p));
 							});
-							const resultLimitReached = relativized.length >= effectiveLimit;
-							const rawOutput = relativized.join("\n");
-							const truncation = truncateHead(rawOutput, { maxLines: Number.MAX_SAFE_INTEGER });
-							let resultOutput = truncation.content;
-							const details: FindToolDetails = {};
-							const notices: string[] = [];
-							if (resultLimitReached) {
-								notices.push(`${effectiveLimit} results limit reached`);
-								details.resultLimitReached = effectiveLimit;
-							}
-							if (truncation.truncated) {
-								notices.push(`${formatSize(DEFAULT_MAX_BYTES)} limit reached`);
-								details.truncation = truncation;
-							}
-							if (notices.length > 0) {
-								resultOutput += `\n\n[${notices.join(". ")}]`;
-							}
+
+							const formatted = formatFindResults(relativized, effectiveLimit);
 							settle(() =>
 								resolve({
-									content: [{ type: "text", text: resultOutput }],
-									details: Object.keys(details).length > 0 ? details : undefined,
+									content: [{ type: "text", text: formatted.text }],
+									details: Object.keys(formatted.details).length > 0 ? formatted.details : undefined,
 								}),
 							);
 							return;
@@ -234,18 +282,25 @@ export function createFindToolDefinition(
 							"--max-results",
 							String(effectiveLimit),
 						];
+						if (ignoreCase) {
+							args.push("--ignore-case");
+						}
 
 						// fd --glob matches against the basename unless --full-path is set; in --full-path
 						// mode it matches against the absolute candidate path, so a path-containing
 						// pattern like 'src/**/*.spec.ts' needs a leading '**/' to match anything.
-						let effectivePattern = pattern;
-						if (pattern.includes("/")) {
+						let finalPattern = effectivePattern;
+						if (effectivePattern.includes("/")) {
 							args.push("--full-path");
-							if (!pattern.startsWith("/") && !pattern.startsWith("**/") && pattern !== "**") {
-								effectivePattern = `**/${pattern}`;
+							if (
+								!effectivePattern.startsWith("/") &&
+								!effectivePattern.startsWith("**/") &&
+								effectivePattern !== "**"
+							) {
+								finalPattern = `**/${effectivePattern}`;
 							}
 						}
-						args.push("--", effectivePattern, searchPath);
+						args.push("--", finalPattern, searchPath);
 
 						const child = spawn(fdPath, args, { stdio: ["ignore", "pipe", "pipe"] });
 						const rl = createInterface({ input: child.stdout });
@@ -289,15 +344,6 @@ export function createFindToolDefinition(
 									return;
 								}
 							}
-							if (!output) {
-								settle(() =>
-									resolve({
-										content: [{ type: "text", text: "No files found matching pattern" }],
-										details: undefined,
-									}),
-								);
-								return;
-							}
 
 							const relativized: string[] = [];
 							for (const rawLine of lines) {
@@ -314,29 +360,11 @@ export function createFindToolDefinition(
 								relativized.push(toPosixPath(relativePath));
 							}
 
-							const resultLimitReached = relativized.length >= effectiveLimit;
-							const rawOutput = relativized.join("\n");
-							const truncation = truncateHead(rawOutput, { maxLines: Number.MAX_SAFE_INTEGER });
-							let resultOutput = truncation.content;
-							const details: FindToolDetails = {};
-							const notices: string[] = [];
-							if (resultLimitReached) {
-								notices.push(
-									`${effectiveLimit} results limit reached. Use limit=${effectiveLimit * 2} for more, or refine pattern`,
-								);
-								details.resultLimitReached = effectiveLimit;
-							}
-							if (truncation.truncated) {
-								notices.push(`${formatSize(DEFAULT_MAX_BYTES)} limit reached`);
-								details.truncation = truncation;
-							}
-							if (notices.length > 0) {
-								resultOutput += `\n\n[${notices.join(". ")}]`;
-							}
+							const formatted = formatFindResults(relativized, effectiveLimit);
 							settle(() =>
 								resolve({
-									content: [{ type: "text", text: resultOutput }],
-									details: Object.keys(details).length > 0 ? details : undefined,
+									content: [{ type: "text", text: formatted.text }],
+									details: Object.keys(formatted.details).length > 0 ? formatted.details : undefined,
 								}),
 							);
 						});

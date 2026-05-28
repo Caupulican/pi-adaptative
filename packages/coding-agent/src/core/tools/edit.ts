@@ -18,6 +18,7 @@ import {
 	restoreLineEndings,
 	stripBom,
 } from "./edit-diff.ts";
+import { isValidUTF8 } from "./file-encoding-policy.ts";
 import { withFileMutationQueue } from "./file-mutation-queue.ts";
 import { resolveToCwd } from "./path-utils.ts";
 import { invalidArgText, shortenPath, str } from "./render-utils.ts";
@@ -337,6 +338,11 @@ export function createEditToolDefinition(
 
 				// Read the file.
 				const buffer = await ops.readFile(absolutePath);
+				if (!isValidUTF8(buffer)) {
+					throw new Error(
+						`Could not edit file: ${path}. Binary or non-UTF-8 text cannot be safely edited by the text edit tool.`,
+					);
+				}
 				const rawContent = buffer.toString("utf-8");
 				throwIfAborted();
 

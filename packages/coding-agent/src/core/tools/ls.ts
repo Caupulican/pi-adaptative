@@ -13,6 +13,7 @@ import { DEFAULT_MAX_BYTES, formatSize, type TruncationResult, truncateHead } fr
 const lsSchema = Type.Object({
 	path: Type.Optional(Type.String({ description: "Directory to list (default: current directory)" })),
 	limit: Type.Optional(Type.Number({ description: "Maximum number of entries to return (default: 500)" })),
+	metadata: Type.Optional(Type.Boolean({ description: "Include file size and permission metadata (default: false)" })),
 });
 
 export type LsToolInput = Static<typeof lsSchema>;
@@ -28,11 +29,17 @@ export interface LsToolDetails {
  * Pluggable operations for the ls tool.
  * Override these to delegate directory listing to remote systems (for example SSH).
  */
+export interface LsEntryStats {
+	isDirectory: () => boolean;
+	size?: number;
+	mode?: number;
+}
+
 export interface LsOperations {
 	/** Check if path exists */
 	exists: (absolutePath: string) => Promise<boolean> | boolean;
 	/** Get file or directory stats. Throws if not found. */
-	stat: (absolutePath: string) => Promise<{ isDirectory: () => boolean }> | { isDirectory: () => boolean };
+	stat: (absolutePath: string) => Promise<LsEntryStats> | LsEntryStats;
 	/** Read directory entries */
 	readdir: (absolutePath: string) => Promise<string[]> | string[];
 }
@@ -96,6 +103,15 @@ function formatLsResult(
 	return text;
 }
 
+function getPermissionString(mode: number, isDirectory: boolean): string {
+	const typeChar = isDirectory ? "d" : "-";
+	const rwx = (m: number) => [m & 4 ? "r" : "-", m & 2 ? "w" : "-", m & 1 ? "x" : "-"].join("");
+	const owner = rwx((mode >> 6) & 7);
+	const group = rwx((mode >> 3) & 7);
+	const others = rwx(mode & 7);
+	return `${typeChar}${owner}${group}${others}`;
+}
+
 export function createLsToolDefinition(
 	cwd: string,
 	options?: LsToolOptions,
@@ -109,7 +125,7 @@ export function createLsToolDefinition(
 		parameters: lsSchema,
 		async execute(
 			_toolCallId,
-			{ path, limit }: { path?: string; limit?: number },
+			{ path, limit, metadata }: { path?: string; limit?: number; metadata?: boolean },
 			signal?: AbortSignal,
 			_onUpdate?,
 			_ctx?,
@@ -164,14 +180,37 @@ export function createLsToolDefinition(
 
 							const fullPath = nodePath.join(dirPath, entry);
 							let suffix = "";
+							let sizeStr = "";
+							let modeStr = "";
 							try {
 								const entryStat = await ops.stat(fullPath);
-								if (entryStat.isDirectory()) suffix = "/";
+								const isDir = entryStat.isDirectory();
+								if (isDir) suffix = "/";
+
+								if (metadata) {
+									if (isDir) {
+										sizeStr = "    -";
+									} else {
+										const sizeVal = entryStat.size ?? 0;
+										sizeStr = formatSize(sizeVal).padStart(7);
+									}
+									if (typeof entryStat.mode === "number") {
+										modeStr = getPermissionString(entryStat.mode, isDir);
+									} else {
+										modeStr = isDir ? "d---------" : "----------";
+									}
+								}
 							} catch {
-								// Skip entries we cannot stat.
-								continue;
+								if (metadata) {
+									sizeStr = "???????";
+									modeStr = "??????????";
+								}
 							}
-							results.push(entry + suffix);
+							if (metadata) {
+								results.push(`${modeStr}  ${sizeStr}  ${entry}${suffix}`);
+							} else {
+								results.push(entry + suffix);
+							}
 						}
 
 						signal?.removeEventListener("abort", onAbort);

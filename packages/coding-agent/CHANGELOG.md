@@ -1,6 +1,15 @@
 # Changelog
 
-## [Unreleased]
+## [0.76.2] - 2026-05-28
+
+### Added
+
+- Added richer built-in file-tool controls for `read`, `grep`, `find`, and `ls`, including line-numbered and tail reads, safe filtered reads, grouped search/list summaries, optional metadata, and clearer limit/truncation notices.
+- Added conservative git output filtering for bash/RPC command paths, with explicit opt-outs for unfiltered git output.
+
+### Fixed
+
+- Fixed text file edits to refuse invalid UTF-8 inputs before mutating files and updated writes to preserve existing UTF-8 BOM and CRLF line endings where applicable.
 
 ## [0.76.1] - 2026-05-27
 

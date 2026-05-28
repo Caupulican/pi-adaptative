@@ -13,6 +13,7 @@ import { join } from "node:path";
 import { stripAnsi } from "../utils/ansi.ts";
 import { sanitizeBinaryOutput } from "../utils/shell.ts";
 import type { BashOperations } from "./tools/bash.ts";
+import { classifyGitCommand, executeFilteredGit } from "./tools/git-filter.ts";
 import { DEFAULT_MAX_BYTES, truncateTail } from "./tools/truncate.ts";
 
 // ============================================================================
@@ -24,6 +25,8 @@ export interface BashExecutorOptions {
 	onChunk?: (chunk: string) => void;
 	/** AbortSignal for cancellation */
 	signal?: AbortSignal;
+	/** Enable conservative pi-native git output filtering for local default execution paths */
+	enableGitFilter?: boolean;
 }
 
 export interface BashResult {
@@ -53,6 +56,38 @@ export async function executeBashWithOperations(
 	operations: BashOperations,
 	options?: BashExecutorOptions,
 ): Promise<BashResult> {
+	if (options?.enableGitFilter) {
+		const classification = classifyGitCommand(command, process.env);
+		if (classification.eligible && classification.subcommand) {
+			const res = await executeFilteredGit(
+				cwd,
+				classification.subcommand,
+				classification.globalOptions || [],
+				classification.subcommandArgs || [],
+				{ signal: options.signal },
+			);
+			if (res.exitCode !== -100) {
+				const rawBytes = res.rawBytes ?? Buffer.from(res.rawOut, "utf-8");
+				let fullOutputPath: string | undefined;
+				if (rawBytes.length > DEFAULT_MAX_BYTES) {
+					const id = randomBytes(8).toString("hex");
+					fullOutputPath = join(tmpdir(), `pi-bash-${id}.log`);
+					const tempFileStream = createWriteStream(fullOutputPath);
+					tempFileStream.write(rawBytes);
+					tempFileStream.end();
+				}
+				options.onChunk?.(res.output);
+				return {
+					output: res.output,
+					exitCode: res.exitCode,
+					cancelled: options.signal?.aborted ?? false,
+					truncated: rawBytes.length > DEFAULT_MAX_BYTES,
+					fullOutputPath,
+				};
+			}
+		}
+	}
+
 	const outputChunks: string[] = [];
 	let outputBytes = 0;
 	const maxOutputBytes = DEFAULT_MAX_BYTES * 2;

@@ -2691,6 +2691,7 @@ export class AgentSession {
 		const prefix = this.settingsManager.getShellCommandPrefix();
 		const shellPath = this.settingsManager.getShellPath();
 		const resolvedCommand = prefix ? `${prefix}\n${command}` : command;
+		const enableGitFilter = !options?.operations && !prefix && !shellPath;
 
 		try {
 			const result = await executeBashWithOperations(
@@ -2700,6 +2701,7 @@ export class AgentSession {
 				{
 					onChunk,
 					signal: this._bashAbortController.signal,
+					enableGitFilter,
 				},
 			);
 

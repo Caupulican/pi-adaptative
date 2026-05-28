@@ -313,19 +313,43 @@ export function createGrepToolDefinition(
 							}
 
 							// Format matches after streaming finishes so custom readFile() backends can be async.
+							const fileGroups = new Map<string, string[]>();
 							for (const match of matches) {
+								const relativePath = formatPath(match.filePath);
+								if (!fileGroups.has(relativePath)) {
+									fileGroups.set(relativePath, []);
+								}
+								const group = fileGroups.get(relativePath)!;
+
 								if (contextValue === 0 && match.lineText !== undefined) {
-									const relativePath = formatPath(match.filePath);
 									const sanitized = match.lineText
 										.replace(/\r\n/g, "\n")
 										.replace(/\r/g, "")
 										.replace(/\n$/, "");
 									const { text: truncatedText, wasTruncated } = truncateLine(sanitized);
 									if (wasTruncated) linesTruncated = true;
-									outputLines.push(`${relativePath}:${match.lineNumber}: ${truncatedText}`);
+									group.push(`  ${match.lineNumber}: ${truncatedText}`);
 								} else {
 									const block = await formatBlock(match.filePath, match.lineNumber);
-									outputLines.push(...block);
+									for (const line of block) {
+										if (line.startsWith(`${relativePath}:`)) {
+											group.push(`  ${line.slice(relativePath.length + 1)}`);
+										} else if (line.startsWith(`${relativePath}-`)) {
+											group.push(`  ${line.slice(relativePath.length + 1)}`);
+										} else {
+											group.push(`  ${line}`);
+										}
+									}
+								}
+							}
+
+							for (const [relativePath, lines] of fileGroups) {
+								outputLines.push(`${relativePath}:`);
+								let lastLine = "";
+								for (const line of lines) {
+									if (line === lastLine) continue;
+									outputLines.push(line);
+									lastLine = line;
 								}
 							}
 
