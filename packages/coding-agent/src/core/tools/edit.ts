@@ -4,6 +4,7 @@ import { constants } from "fs";
 import { access as fsAccess, readFile as fsReadFile, writeFile as fsWriteFile } from "fs/promises";
 import { type Static, Type } from "typebox";
 import { renderDiff } from "../../modes/interactive/components/diff.ts";
+import type { Theme } from "../../modes/interactive/theme/theme.ts";
 import type { ToolDefinition } from "../extensions/types.ts";
 import {
 	applyEditsToNormalizedContent,
@@ -21,7 +22,7 @@ import {
 import { isValidUTF8 } from "./file-encoding-policy.ts";
 import { withFileMutationQueue } from "./file-mutation-queue.ts";
 import { resolveToCwd } from "./path-utils.ts";
-import { invalidArgText, shortenPath, str } from "./render-utils.ts";
+import { renderToolPath, str } from "./render-utils.ts";
 import { wrapToolDefinition } from "./tool-definition-wrapper.ts";
 
 type EditPreview = EditDiffResult | EditDiffError;
@@ -192,14 +193,8 @@ function getRenderablePreviewInput(args: RenderableEditArgs | undefined): { path
 	return null;
 }
 
-function formatEditCall(
-	args: RenderableEditArgs | undefined,
-	theme: typeof import("../../modes/interactive/theme/theme.ts").theme,
-): string {
-	const invalidArg = invalidArgText(theme);
-	const rawPath = str(args?.file_path ?? args?.path);
-	const path = rawPath !== null ? shortenPath(rawPath) : null;
-	const pathDisplay = path === null ? invalidArg : path ? theme.fg("accent", path) : theme.fg("toolOutput", "...");
+function formatEditCall(args: RenderableEditArgs | undefined, theme: Theme, cwd: string): string {
+	const pathDisplay = renderToolPath(str(args?.file_path ?? args?.path), theme, cwd);
 	return `${theme.fg("toolTitle", theme.bold("edit"))} ${pathDisplay}`;
 }
 
@@ -207,7 +202,7 @@ function formatEditResult(
 	args: RenderableEditArgs | undefined,
 	preview: EditPreview | undefined,
 	result: EditToolResultLike,
-	theme: typeof import("../../modes/interactive/theme/theme.ts").theme,
+	theme: Theme,
 	isError: boolean,
 ): string | undefined {
 	const rawPath = str(args?.file_path ?? args?.path);
@@ -235,7 +230,7 @@ function formatEditResult(
 function getEditHeaderBg(
 	preview: EditPreview | undefined,
 	settledError: boolean | undefined,
-	theme: typeof import("../../modes/interactive/theme/theme.ts").theme,
+	theme: Theme,
 ): (text: string) => string {
 	if (preview) {
 		if ("error" in preview) {
@@ -252,11 +247,12 @@ function getEditHeaderBg(
 function buildEditCallComponent(
 	component: EditCallRenderComponent,
 	args: RenderableEditArgs | undefined,
-	theme: typeof import("../../modes/interactive/theme/theme.ts").theme,
+	theme: Theme,
+	cwd: string,
 ): EditCallRenderComponent {
 	component.setBgFn(getEditHeaderBg(component.preview, component.settledError, theme));
 	component.clear();
-	component.addChild(new Text(formatEditCall(args, theme), 0, 0));
+	component.addChild(new Text(formatEditCall(args, theme, cwd), 0, 0));
 
 	if (!component.preview) {
 		return component;
@@ -395,7 +391,7 @@ export function createEditToolDefinition(
 				});
 			}
 
-			return buildEditCallComponent(component, args, theme);
+			return buildEditCallComponent(component, args, theme, context.cwd);
 		},
 		renderResult(result, _options, theme, context) {
 			const callComponent = context.state.callComponent;
@@ -420,7 +416,12 @@ export function createEditToolDefinition(
 					changed = true;
 				}
 				if (changed) {
-					buildEditCallComponent(callComponent, context.args as RenderableEditArgs | undefined, theme);
+					buildEditCallComponent(
+						callComponent,
+						context.args as RenderableEditArgs | undefined,
+						theme,
+						context.cwd,
+					);
 				}
 			}
 
