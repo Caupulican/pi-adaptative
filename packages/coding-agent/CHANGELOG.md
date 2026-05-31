@@ -2,6 +2,10 @@
 
 ## [Unreleased]
 
+### Changed
+
+- Changed OpenAI Codex Responses SSE response-header timeout default inherited from `@earendil-works/pi-ai` from 10s to 20s.
+
 ## [0.78.0] - 2026-05-29
 
 ### New Features
