@@ -88,6 +88,36 @@ When disabled, the system prompt tells the agent not to edit Pi core, the instal
 
 The agent is instructed to edit only that source checkout, preserve unrelated changes, validate before reporting success, and ask for explicit approval before settings changes, publishing, tagging, or releasing.
 
+### Auto Learn
+
+| Setting | Type | Default | Description |
+|---------|------|---------|-------------|
+| `autoLearn.enabled` | boolean | `false` | Autonomously trigger background history scavenging for long sessions |
+| `autoLearn.model` | string | `"active"` | Model used by the background learner; `"active"` uses the current session model, otherwise use a `pi --model` pattern |
+| `autoLearn.longSessionMessages` | number | `32` | Trigger after this many message entries in the active branch |
+| `autoLearn.longSessionContextPercent` | number | `70` | Trigger when current context usage reaches this percent |
+| `autoLearn.cooldownMinutes` | number | `120` | Per-session-tenant cooldown between learner launches |
+| `autoLearn.leaseMinutes` | number | `90` | Shared-state lease duration for a running background learner |
+| `autoLearn.maxConcurrentLearners` | number | `2` | Maximum running Auto Learn background learners across all session tenants |
+| `autoLearn.applyHighConfidence` | boolean | `false` | Allow the learner to apply high-confidence memory candidates; tooling/core changes remain proposal/approval-gated |
+
+When enabled, Auto Learn uses a shared state file under the learning extension data directory to coordinate non-colliding background learners across sessions. Each long session gets its own tenant lease, and all learners read/renew the same state before scavenging stored histories for tooling capability and agent-behavior improvements. Learners also query available user/project memory first, using existing rules, preferences, corrections, and project facts to polish candidates, avoid duplicates, and improve accuracy.
+
+```json
+{
+  "autoLearn": {
+    "enabled": true,
+    "model": "active",
+    "longSessionMessages": 32,
+    "longSessionContextPercent": 70,
+    "cooldownMinutes": 120,
+    "leaseMinutes": 90,
+    "maxConcurrentLearners": 2,
+    "applyHighConfidence": false
+  }
+}
+```
+
 ### Compaction
 
 | Setting | Type | Default | Description |

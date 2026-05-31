@@ -9,6 +9,7 @@
 - Added raw prompt-template argument placeholders (`$ARGUMENTS_RAW` and `$RAW_ARGUMENTS`).
 - Added optional session names for `/new <name>`, `/clone <name>`, and `/fork <name>`.
 - Added `selfModification.enabled` and `selfModification.sourcePath` settings with system-prompt guardrails for Pi harness self-modification.
+- Added `autoLearn` settings for autonomous, model-selected background learning on long sessions.
 
 ### Fixed
 

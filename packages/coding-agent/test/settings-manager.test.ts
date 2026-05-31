@@ -258,6 +258,43 @@ describe("SettingsManager", () => {
 		});
 	});
 
+	describe("autoLearn", () => {
+		it("should merge global and project autoLearn settings", () => {
+			writeFileSync(
+				join(agentDir, "settings.json"),
+				JSON.stringify({ autoLearn: { enabled: true, model: "active", longSessionMessages: 40 } }),
+			);
+			writeFileSync(
+				join(projectDir, ".pi", "settings.json"),
+				JSON.stringify({ autoLearn: { model: "openai/gpt-5.4", cooldownMinutes: 30 } }),
+			);
+
+			const manager = SettingsManager.create(projectDir, agentDir);
+
+			expect(manager.getAutoLearnSettings()).toEqual({
+				enabled: true,
+				model: "openai/gpt-5.4",
+				longSessionMessages: 40,
+				cooldownMinutes: 30,
+			});
+		});
+
+		it("should save global autoLearn settings", async () => {
+			const settingsPath = join(agentDir, "settings.json");
+			const manager = SettingsManager.create(projectDir, agentDir);
+
+			manager.setAutoLearnSettings({ enabled: true, model: "active", maxConcurrentLearners: 3 });
+			await manager.flush();
+
+			const savedSettings = JSON.parse(readFileSync(settingsPath, "utf-8"));
+			expect(savedSettings.autoLearn).toEqual({
+				enabled: true,
+				model: "active",
+				maxConcurrentLearners: 3,
+			});
+		});
+	});
+
 	describe("httpIdleTimeoutMs", () => {
 		it("should default to 5 minutes", () => {
 			const manager = SettingsManager.create(projectDir, agentDir);

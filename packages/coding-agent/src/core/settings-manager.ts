@@ -62,6 +62,17 @@ export interface SelfModificationSettings {
 	sourcePath?: string; // Path to the pi-adaptative source tree when self-modification is enabled
 }
 
+export interface AutoLearnSettings {
+	enabled?: boolean; // default: false - autonomously trigger background history scavenging for long sessions
+	model?: string; // "active" or omitted uses the current session model; otherwise a pi --model pattern
+	longSessionMessages?: number; // default: 32
+	longSessionContextPercent?: number; // default: 70
+	cooldownMinutes?: number; // default: 120 per session tenant
+	leaseMinutes?: number; // default: 90 for background learner state leases
+	maxConcurrentLearners?: number; // default: 2 across all session tenants
+	applyHighConfidence?: boolean; // default: false unless the learning extension config opts in
+}
+
 export type TransportSetting = Transport;
 
 /**
@@ -116,6 +127,7 @@ export interface Settings {
 	markdown?: MarkdownSettings;
 	warnings?: WarningSettings;
 	selfModification?: SelfModificationSettings; // Local guardrails for modifying the pi-adaptative source/harness
+	autoLearn?: AutoLearnSettings; // Setting-gated autonomous background learning for long sessions
 	sessionDir?: string; // Custom session storage directory (same format as --session-dir CLI flag)
 	httpIdleTimeoutMs?: number; // HTTP header/body idle timeout in milliseconds; 0 disables it
 	websocketConnectTimeoutMs?: number; // WebSocket connect/open handshake timeout in milliseconds; 0 disables it
@@ -1105,6 +1117,16 @@ export class SettingsManager {
 	setSelfModificationSettings(settings: SelfModificationSettings): void {
 		this.globalSettings.selfModification = { ...settings };
 		this.markModified("selfModification");
+		this.save();
+	}
+
+	getAutoLearnSettings(): AutoLearnSettings {
+		return { ...(this.settings.autoLearn ?? {}) };
+	}
+
+	setAutoLearnSettings(settings: AutoLearnSettings): void {
+		this.globalSettings.autoLearn = { ...settings };
+		this.markModified("autoLearn");
 		this.save();
 	}
 }
