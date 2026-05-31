@@ -188,8 +188,8 @@ export interface OverlayHandle {
 	isHidden(): boolean;
 	/** Focus this overlay and bring it to the visual front */
 	focus(): void;
-	/** Release focus to the previous target */
-	unfocus(): void;
+	/** Release focus to the previous target, or to an explicit target */
+	unfocus(options?: { target?: Component | null }): void;
 	/** Check if this overlay currently has focus */
 	isFocused(): boolean;
 }
@@ -322,6 +322,11 @@ export class TUI extends Container {
 		}
 	}
 
+	restoreFocus(component: Component | null): void {
+		const topVisible = this.getTopmostVisibleOverlay();
+		this.setFocus(topVisible?.component ?? component);
+	}
+
 	/**
 	 * Show an overlay component with configurable positioning and sizing.
 	 * Returns a handle to control the overlay's visibility.
@@ -385,10 +390,16 @@ export class TUI extends Container {
 				entry.focusOrder = ++this.focusOrderCounter;
 				this.requestRender();
 			},
-			unfocus: () => {
+			unfocus: (options?: { target?: Component | null }) => {
 				if (this.focusedComponent !== component) return;
 				const topVisible = this.getTopmostVisibleOverlay();
-				this.setFocus(topVisible && topVisible !== entry ? topVisible.component : entry.preFocus);
+				const target =
+					options && "target" in options
+						? options.target
+						: topVisible && topVisible !== entry
+							? topVisible.component
+							: entry.preFocus;
+				this.setFocus(target ?? null);
 				this.requestRender();
 			},
 			isFocused: () => this.focusedComponent === component,

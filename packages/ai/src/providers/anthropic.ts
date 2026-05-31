@@ -176,6 +176,7 @@ function getAnthropicCompat(
 		sendSessionAffinityHeaders:
 			model.compat?.sendSessionAffinityHeaders ?? !!(isFireworks || isCloudflareAiGatewayAnthropic),
 		supportsCacheControlOnTools: model.compat?.supportsCacheControlOnTools ?? !isFireworks,
+		supportsTemperature: model.compat?.supportsTemperature ?? true,
 		allowEmptySignature: model.compat?.allowEmptySignature ?? false,
 	};
 }
@@ -936,8 +937,13 @@ function buildParams(
 		];
 	}
 
-	// Temperature is incompatible with extended thinking (adaptive or budget-based).
-	if (options?.temperature !== undefined && !options?.thinkingEnabled) {
+	// Temperature is incompatible with extended thinking (adaptive or budget-based),
+	// and some newer Anthropic models reject it entirely.
+	if (
+		options?.temperature !== undefined &&
+		!options?.thinkingEnabled &&
+		getAnthropicCompat(model).supportsTemperature
+	) {
 		params.temperature = options.temperature;
 	}
 
@@ -1016,6 +1022,12 @@ function convertMessages(
 
 	// Transform messages for cross-provider compatibility
 	const transformedMessages = transformMessages(messages, model, normalizeToolCallId);
+	let latestAssistantIndex = -1;
+	for (let i = 0; i < transformedMessages.length; i++) {
+		if (transformedMessages[i].role === "assistant") {
+			latestAssistantIndex = i;
+		}
+	}
 
 	for (let i = 0; i < transformedMessages.length; i++) {
 		const msg = transformedMessages[i];
@@ -1060,6 +1072,7 @@ function convertMessages(
 			}
 		} else if (msg.role === "assistant") {
 			const blocks: ContentBlockParam[] = [];
+			const isLatestAssistantMessage = i === latestAssistantIndex;
 
 			for (const block of msg.content) {
 				if (block.type === "text") {
@@ -1069,6 +1082,23 @@ function convertMessages(
 						text: sanitizeSurrogates(block.text),
 					});
 				} else if (block.type === "thinking") {
+					// The latest assistant message may contain signed thinking blocks that
+					// Anthropic requires to be replayed byte-for-byte with the signature.
+					if (isLatestAssistantMessage && (block.redacted || block.thinkingSignature?.trim())) {
+						if (block.redacted) {
+							blocks.push({
+								type: "redacted_thinking",
+								data: block.thinkingSignature!,
+							});
+						} else {
+							blocks.push({
+								type: "thinking",
+								thinking: block.thinking,
+								signature: block.thinkingSignature!,
+							});
+						}
+						continue;
+					}
 					// Redacted thinking: pass the opaque payload back as redacted_thinking
 					if (block.redacted) {
 						blocks.push({

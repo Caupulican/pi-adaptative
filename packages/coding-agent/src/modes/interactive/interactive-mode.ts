@@ -2317,7 +2317,7 @@ export class InteractiveMode {
 			this.editorContainer.clear();
 			this.editorContainer.addChild(this.editor);
 			this.editor.setText(savedText);
-			this.ui.setFocus(this.editor);
+			this.ui.restoreFocus(this.editor);
 			this.ui.requestRender();
 		};
 
@@ -2441,7 +2441,7 @@ export class InteractiveMode {
 
 		// Global debug handler on TUI (works regardless of focus)
 		this.ui.onDebug = () => this.handleDebugCommand();
-		this.defaultEditor.onAction("app.model.select", () => this.showModelSelector());
+		this.defaultEditor.onAction("app.model.select", () => void this.showModelSelector());
 		this.defaultEditor.onAction("app.tools.expand", () => this.toggleToolOutputExpansion());
 		this.defaultEditor.onAction("app.thinking.toggle", () => this.toggleThinkingBlockVisibility());
 		this.defaultEditor.onAction("app.editor.external", () => this.openExternalEditor());
@@ -2550,14 +2550,14 @@ export class InteractiveMode {
 				this.editor.setText("");
 				return;
 			}
-			if (text === "/fork") {
-				this.showUserMessageSelector();
+			if (text === "/fork" || text.startsWith("/fork ")) {
+				this.showUserMessageSelector(text.slice("/fork".length).trim() || undefined);
 				this.editor.setText("");
 				return;
 			}
-			if (text === "/clone") {
+			if (text === "/clone" || text.startsWith("/clone ")) {
 				this.editor.setText("");
-				await this.handleCloneCommand();
+				await this.handleCloneCommand(text.slice("/clone".length).trim() || undefined);
 				return;
 			}
 			if (text === "/tree") {
@@ -2575,9 +2575,9 @@ export class InteractiveMode {
 				this.editor.setText("");
 				return;
 			}
-			if (text === "/new") {
+			if (text === "/new" || text.startsWith("/new ")) {
 				this.editor.setText("");
-				await this.handleClearCommand();
+				await this.handleClearCommand(text.slice("/new".length).trim() || undefined);
 				return;
 			}
 			if (text === "/compact" || text.startsWith("/compact ")) {
@@ -3885,7 +3885,7 @@ export class InteractiveMode {
 		const done = () => {
 			this.editorContainer.clear();
 			this.editorContainer.addChild(this.editor);
-			this.ui.setFocus(this.editor);
+			this.ui.restoreFocus(this.editor);
 		};
 		const { component, focus } = create(done);
 		this.editorContainer.clear();
@@ -4057,7 +4057,7 @@ export class InteractiveMode {
 
 	private async handleModelCommand(searchTerm?: string): Promise<void> {
 		if (!searchTerm) {
-			this.showModelSelector();
+			await this.showModelSelector();
 			return;
 		}
 
@@ -4076,7 +4076,7 @@ export class InteractiveMode {
 			return;
 		}
 
-		this.showModelSelector(searchTerm);
+		await this.showModelSelector(searchTerm);
 	}
 
 	private async findExactModelMatch(searchTerm: string): Promise<Model<any> | undefined> {
@@ -4136,7 +4136,19 @@ export class InteractiveMode {
 		}
 	}
 
-	private showModelSelector(initialSearchInput?: string): void {
+	private async showModelSelector(initialSearchInput?: string): Promise<void> {
+		try {
+			await this.session.extensionRunner.emit({
+				type: "model_selector_open",
+				currentModel: this.session.model,
+				scopedModels: this.session.scopedModels,
+				initialSearchInput,
+			});
+		} catch (error) {
+			this.showError(error instanceof Error ? error.message : String(error));
+			return;
+		}
+
 		this.showSelector((done) => {
 			const selector = new ModelSelectorComponent(
 				this.ui,
@@ -4245,7 +4257,7 @@ export class InteractiveMode {
 		});
 	}
 
-	private showUserMessageSelector(): void {
+	private showUserMessageSelector(newSessionName?: string): void {
 		const userMessages = this.session.getUserMessagesForForking();
 
 		if (userMessages.length === 0) {
@@ -4268,9 +4280,14 @@ export class InteractiveMode {
 						}
 
 						this.renderCurrentSessionState();
+						if (newSessionName) {
+							this.session.setSessionName(newSessionName);
+						}
 						this.editor.setText(result.selectedText ?? "");
 						done();
-						this.showStatus("Forked to new session");
+						this.showStatus(
+							newSessionName ? `Forked to new session: ${newSessionName}` : "Forked to new session",
+						);
 					} catch (error: unknown) {
 						done();
 						this.showError(error instanceof Error ? error.message : String(error));
@@ -4286,7 +4303,7 @@ export class InteractiveMode {
 		});
 	}
 
-	private async handleCloneCommand(): Promise<void> {
+	private async handleCloneCommand(newSessionName?: string): Promise<void> {
 		const leafId = this.sessionManager.getLeafId();
 		if (!leafId) {
 			this.showStatus("Nothing to clone yet");
@@ -4301,8 +4318,11 @@ export class InteractiveMode {
 			}
 
 			this.renderCurrentSessionState();
+			if (newSessionName) {
+				this.session.setSessionName(newSessionName);
+			}
 			this.editor.setText("");
-			this.showStatus("Cloned to new session");
+			this.showStatus(newSessionName ? `Cloned to new session: ${newSessionName}` : "Cloned to new session");
 		} catch (error: unknown) {
 			this.showError(error instanceof Error ? error.message : String(error));
 		}
@@ -5417,7 +5437,7 @@ export class InteractiveMode {
 		this.ui.requestRender();
 	}
 
-	private async handleClearCommand(): Promise<void> {
+	private async handleClearCommand(newSessionName?: string): Promise<void> {
 		if (this.loadingAnimation) {
 			this.loadingAnimation.stop();
 			this.loadingAnimation = undefined;
@@ -5429,8 +5449,12 @@ export class InteractiveMode {
 				return;
 			}
 			this.renderCurrentSessionState();
+			if (newSessionName) {
+				this.session.setSessionName(newSessionName);
+			}
 			this.chatContainer.addChild(new Spacer(1));
-			this.chatContainer.addChild(new Text(`${theme.fg("accent", "✓ New session started")}`, 1, 1));
+			const label = newSessionName ? `✓ New session started: ${newSessionName}` : "✓ New session started";
+			this.chatContainer.addChild(new Text(`${theme.fg("accent", label)}`, 1, 1));
 			this.ui.requestRender();
 		} catch (error: unknown) {
 			await this.handleFatalRuntimeError("Failed to create session", error);

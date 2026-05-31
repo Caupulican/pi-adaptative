@@ -712,6 +712,14 @@ export interface ToolExecutionEndEvent {
 
 export type ModelSelectSource = "set" | "cycle" | "restore";
 
+/** Fired before the interactive model selector opens. Extensions can register or refresh providers/models. */
+export interface ModelSelectorOpenEvent {
+	type: "model_selector_open";
+	currentModel: Model<any> | undefined;
+	scopedModels: ReadonlyArray<{ model: Model<any>; thinkingLevel?: string }>;
+	initialSearchInput?: string;
+}
+
 /** Fired when a new model is selected */
 export interface ModelSelectEvent {
 	type: "model_select";
@@ -968,6 +976,7 @@ export type ExtensionEvent =
 	| ToolExecutionStartEvent
 	| ToolExecutionUpdateEvent
 	| ToolExecutionEndEvent
+	| ModelSelectorOpenEvent
 	| ModelSelectEvent
 	| ThinkingLevelSelectEvent
 	| UserBashEvent
@@ -1122,6 +1131,7 @@ export interface ExtensionAPI {
 	on(event: "tool_execution_start", handler: ExtensionHandler<ToolExecutionStartEvent>): void;
 	on(event: "tool_execution_update", handler: ExtensionHandler<ToolExecutionUpdateEvent>): void;
 	on(event: "tool_execution_end", handler: ExtensionHandler<ToolExecutionEndEvent>): void;
+	on(event: "model_selector_open", handler: ExtensionHandler<ModelSelectorOpenEvent>): void;
 	on(event: "model_select", handler: ExtensionHandler<ModelSelectEvent>): void;
 	on(event: "thinking_level_select", handler: ExtensionHandler<ThinkingLevelSelectEvent>): void;
 	on(event: "tool_call", handler: ExtensionHandler<ToolCallEvent, ToolCallEventResult>): void;

@@ -244,6 +244,15 @@ function applyThinkingLevelMetadata(model: Model<any>): void {
 	if (model.api === "anthropic-messages" && isAnthropicAdaptiveThinkingModel(model.id)) {
 		mergeAnthropicMessagesCompat(model, { forceAdaptiveThinking: true });
 	}
+	if (
+		model.api === "anthropic-messages" &&
+		(model.id.includes("opus-4-7") ||
+			model.id.includes("opus-4.7") ||
+			model.id.includes("opus-4-8") ||
+			model.id.includes("opus-4.8"))
+	) {
+		mergeAnthropicMessagesCompat(model, { supportsTemperature: false });
+	}
 	if (model.api === "openai-completions" && model.id.includes("deepseek-v4")) {
 		mergeThinkingLevelMap(
 			model,
@@ -1246,6 +1255,34 @@ async function generateModels() {
 
 	}
 
+
+	// Add built-in local llama.cpp OpenAI-compatible server profile
+	if (!allModels.some((m) => m.provider === "llama-cpp" && m.id === "local")) {
+		allModels.push({
+			id: "local",
+			name: "llama.cpp local server",
+			api: "openai-completions",
+			provider: "llama-cpp",
+			baseUrl: "http://127.0.0.1:8080/v1",
+			reasoning: false,
+			input: ["text"],
+			cost: {
+				input: 0,
+				output: 0,
+				cacheRead: 0,
+				cacheWrite: 0,
+			},
+			contextWindow: 32768,
+			maxTokens: 4096,
+			compat: {
+				supportsDeveloperRole: false,
+				supportsStore: false,
+				supportsReasoningEffort: false,
+				maxTokensField: "max_tokens",
+				supportsStrictMode: false,
+			},
+		});
+	}
 
 	// Add missing EU Opus 4.6 profile
 	if (!allModels.some((m) => m.provider === "amazon-bedrock" && m.id === "eu.anthropic.claude-opus-4-6-v1")) {

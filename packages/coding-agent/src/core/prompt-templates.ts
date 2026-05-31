@@ -58,14 +58,15 @@ export function parseCommandArgs(argsString: string): string[] {
  * Substitute argument placeholders in template content
  * Supports:
  * - $1, $2, ... for positional args
- * - $@ and $ARGUMENTS for all args
+ * - $@ and $ARGUMENTS for all parsed args joined with spaces
+ * - $ARGUMENTS_RAW and $RAW_ARGUMENTS for the raw tail after the template name
  * - ${@:N} for args from Nth onwards (bash-style slicing)
  * - ${@:N:L} for L args starting from Nth
  *
  * Note: Replacement happens on the template string only. Argument values
  * containing patterns like $1, $@, or $ARGUMENTS are NOT recursively substituted.
  */
-export function substituteArgs(content: string, args: string[]): string {
+export function substituteArgs(content: string, args: string[], rawArgs?: string): string {
 	let result = content;
 
 	// Replace $1, $2, etc. with positional args FIRST (before wildcards)
@@ -91,6 +92,12 @@ export function substituteArgs(content: string, args: string[]): string {
 
 	// Pre-compute all args joined (optimization)
 	const allArgs = args.join(" ");
+
+	const rawArgumentText = rawArgs ?? allArgs;
+
+	// Replace raw-argument aliases before $ARGUMENTS so the shared prefix does not partially match.
+	result = result.replace(/\$ARGUMENTS_RAW/g, rawArgumentText);
+	result = result.replace(/\$RAW_ARGUMENTS/g, rawArgumentText);
 
 	// Replace $ARGUMENTS with all args joined (new syntax, aligns with Claude, Codex, OpenCode)
 	result = result.replace(/\$ARGUMENTS/g, allArgs);
@@ -278,7 +285,7 @@ export function expandPromptTemplate(text: string, templates: PromptTemplate[]):
 	const template = templates.find((t) => t.name === templateName);
 	if (template) {
 		const args = parseCommandArgs(argsString);
-		return substituteArgs(template.content, args);
+		return substituteArgs(template.content, args, argsString);
 	}
 
 	return text;

@@ -35,13 +35,27 @@ describe("JsonlSessionRepo", () => {
 		const otherSession = await repo.create({ cwd: otherCwd, id: "other-session" });
 		const metadata = await session.getMetadata();
 		const otherMetadata = await otherSession.getMetadata();
-		expect(metadata.path).toContain("--tmp-my-project--");
-		expect(otherMetadata.path).toContain("--tmp-other-project--");
+		expect(metadata.path).toContain(`--${encodeURIComponent(cwd)}--`);
+		expect(otherMetadata.path).toContain(`--${encodeURIComponent(otherCwd)}--`);
 		expect(existsSync(metadata.path)).toBe(true);
 		expect((await repo.list({ cwd })).map((sessionMetadata) => sessionMetadata.id)).toEqual([metadata.id]);
 		expect((await repo.list()).map((sessionMetadata) => sessionMetadata.id).sort()).toEqual(
 			[metadata.id, otherMetadata.id].sort(),
 		);
+	});
+
+	it("does not collide cwd paths that only differ by separators", async () => {
+		const root = createTempDir();
+		const env = new NodeExecutionEnv({ cwd: root });
+		const repo = new JsonlSessionRepo({ fs: env, sessionsRoot: root });
+		const dashed = await repo.create({ cwd: "/tmp/a-b", id: "dashed" });
+		const nested = await repo.create({ cwd: "/tmp/a/b", id: "nested" });
+		const dashedMetadata = await dashed.getMetadata();
+		const nestedMetadata = await nested.getMetadata();
+
+		expect(dashedMetadata.path).not.toBe(nestedMetadata.path);
+		expect(dashedMetadata.path).toContain(`--${encodeURIComponent("/tmp/a-b")}--`);
+		expect(nestedMetadata.path).toContain(`--${encodeURIComponent("/tmp/a/b")}--`);
 	});
 
 	it("opens, deletes, and forks by metadata", async () => {

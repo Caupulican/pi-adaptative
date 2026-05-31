@@ -38,6 +38,13 @@ describe("substituteArgs", () => {
 		expect(substituteArgs("Test: $@", args)).toBe(substituteArgs("Test: $ARGUMENTS", args));
 	});
 
+	test("should replace raw argument placeholders with the unparsed tail", () => {
+		expect(substituteArgs("Raw: $ARGUMENTS_RAW", ["one", "two three"], 'one "two three"')).toBe(
+			'Raw: one "two three"',
+		);
+		expect(substituteArgs("Raw: $RAW_ARGUMENTS", ["a", "b"], "a   b")).toBe("Raw: a   b");
+	});
+
 	// CRITICAL: argument values containing patterns should remain literal
 	test("should NOT recursively substitute patterns in argument values", () => {
 		expect(substituteArgs("$ARGUMENTS", ["$1", "$ARGUMENTS"])).toBe("$1 $ARGUMENTS");

@@ -112,6 +112,57 @@ describe("openai-completions responseModel", () => {
 		expect(message.responseModel).toBeUndefined();
 	});
 
+	it("buffers reasoning_details that arrive before matching streamed tool calls", async () => {
+		const detail = { type: "reasoning.encrypted", id: "call_1", data: "encrypted" };
+		mockState.chunks = [
+			{
+				id: "chatcmpl-r",
+				model: "openrouter/auto",
+				choices: [{ index: 0, delta: { reasoning_details: [detail] } }],
+			},
+			{
+				id: "chatcmpl-r",
+				model: "openrouter/auto",
+				choices: [
+					{
+						index: 0,
+						delta: {
+							tool_calls: [
+								{ index: 0, id: "call_1", type: "function", function: { name: "lookup", arguments: '{"q"' } },
+							],
+						},
+					},
+				],
+			},
+			{
+				id: "chatcmpl-r",
+				model: "openrouter/auto",
+				choices: [
+					{
+						index: 0,
+						delta: { tool_calls: [{ index: 0, function: { arguments: ':"x"}' } }] },
+						finish_reason: "tool_calls",
+					},
+				],
+				usage: {
+					prompt_tokens: 1,
+					completion_tokens: 1,
+					prompt_tokens_details: { cached_tokens: 0 },
+					completion_tokens_details: { reasoning_tokens: 0 },
+				},
+			},
+		];
+
+		const message = await complete(
+			openRouterAuto(),
+			{ messages: [{ role: "user", content: "hi", timestamp: Date.now() }] },
+			{ apiKey: "test" },
+		);
+
+		const toolCall = message.content.find((block) => block.type === "toolCall");
+		expect(toolCall?.thoughtSignature).toBe(JSON.stringify(detail));
+	});
+
 	it("ignores empty or missing chunk.model", async () => {
 		mockState.chunks = [
 			{ id: "chatcmpl-3", choices: [{ index: 0, delta: { content: "hi" } }] },

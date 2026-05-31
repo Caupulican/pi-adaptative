@@ -2,6 +2,14 @@
 
 ## [Unreleased]
 
+### Added
+
+- Added raw prompt-template argument placeholders (`$ARGUMENTS_RAW` and `$RAW_ARGUMENTS`) to harness prompt formatting.
+
+### Fixed
+
+- Fixed JSONL session directory encoding to avoid cwd collisions while preserving legacy directory reads.
+
 ## [0.78.1] - 2026-05-31
 
 ## [0.78.0] - 2026-05-29

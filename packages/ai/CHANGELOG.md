@@ -2,6 +2,17 @@
 
 ## [Unreleased]
 
+### Added
+
+- Added a built-in `llama-cpp/local` OpenAI-compatible profile for local llama.cpp servers.
+
+### Fixed
+
+- Fixed OpenAI-compatible streaming to preserve encrypted `reasoning_details` that arrive before their matching tool calls.
+- Fixed OpenAI-compatible role selection so non-OpenAI providers use `system` messages unless developer-role support is explicitly enabled.
+- Fixed Anthropic Opus 4.7+ requests to omit unsupported `temperature` and replay signed latest thinking blocks without text normalization.
+- Fixed Amazon Bedrock message conversion to filter empty user text blocks and skip user messages left empty after filtering.
+
 ## [0.78.1] - 2026-05-31
 
 ### Changed

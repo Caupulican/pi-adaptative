@@ -6,6 +6,7 @@ import type { Context, Model, SimpleStreamOptions } from "../src/types.ts";
 interface AnthropicThinkingPayload {
 	thinking?: { type: string; budget_tokens?: number; display?: string };
 	output_config?: { effort?: string };
+	temperature?: number;
 }
 
 class PayloadCaptured extends Error {
@@ -130,6 +131,12 @@ describe("Anthropic thinking disable payload", () => {
 
 		expect(payload.thinking).toEqual({ type: "disabled" });
 		expect(payload.output_config).toBeUndefined();
+	});
+
+	it("omits temperature for Claude Opus 4.8 even when thinking is off", async () => {
+		const payload = await capturePayload(getModel("anthropic", "claude-opus-4-8"), { temperature: 0.2 });
+
+		expect(payload.temperature).toBeUndefined();
 	});
 
 	it("uses adaptive thinking for Claude Opus 4.8 when reasoning is enabled", async () => {

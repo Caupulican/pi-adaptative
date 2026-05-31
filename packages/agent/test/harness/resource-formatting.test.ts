@@ -21,4 +21,14 @@ describe("resource formatting helpers", () => {
 			formatPromptTemplateInvocation({ name: "review", content: "Review $1 with $ARGUMENTS" }, ["a.ts", "care"]),
 		).toBe("Review a.ts with a.ts care");
 	});
+
+	it("formats prompt template invocations with raw arguments", () => {
+		expect(
+			formatPromptTemplateInvocation(
+				{ name: "review", content: "Review $ARGUMENTS_RAW" },
+				["a.ts", "care deeply"],
+				'a.ts "care deeply"',
+			),
+		).toBe('Review a.ts "care deeply"');
+	});
 });

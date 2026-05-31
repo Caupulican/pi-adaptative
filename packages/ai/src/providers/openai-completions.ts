@@ -58,6 +58,16 @@ function hasToolHistory(messages: Message[]): boolean {
 	return false;
 }
 
+function getOpenAICompletionsApiKey(model: Model<"openai-completions">, apiKey: string | undefined): string {
+	if (apiKey) {
+		return apiKey;
+	}
+	if (model.provider === "llama-cpp") {
+		return "sk-no-key";
+	}
+	throw new Error(`No API key for provider: ${model.provider}`);
+}
+
 function isTextContentBlock(block: { type: string }): block is TextContent {
 	return block.type === "text";
 }
@@ -135,10 +145,7 @@ export const streamOpenAICompletions: StreamFunction<"openai-completions", OpenA
 		};
 
 		try {
-			const apiKey = options?.apiKey;
-			if (!apiKey) {
-				throw new Error(`No API key for provider: ${model.provider}`);
-			}
+			const apiKey = getOpenAICompletionsApiKey(model, options?.apiKey);
 			const compat = getCompat(model);
 			const cacheRetention = resolveCacheRetention(options?.cacheRetention);
 			const cacheSessionId = cacheRetention === "none" ? undefined : options?.sessionId;
@@ -171,6 +178,7 @@ export const streamOpenAICompletions: StreamFunction<"openai-completions", OpenA
 			let hasFinishReason = false;
 			const toolCallBlocksByIndex = new Map<number, StreamingToolCallBlock>();
 			const toolCallBlocksById = new Map<string, StreamingToolCallBlock>();
+			const pendingReasoningDetailsById = new Map<string, string>();
 			const blocks = output.content as StreamingBlock[];
 			const getContentIndex = (block: StreamingBlock) => blocks.indexOf(block);
 			const finishBlock = (block: StreamingBlock) => {
@@ -226,6 +234,13 @@ export const streamOpenAICompletions: StreamFunction<"openai-completions", OpenA
 				}
 				return thinkingBlock;
 			};
+			const attachPendingReasoningDetail = (block: StreamingToolCallBlock, id: string) => {
+				const pending = pendingReasoningDetailsById.get(id);
+				if (pending !== undefined && !block.thoughtSignature) {
+					block.thoughtSignature = pending;
+					pendingReasoningDetailsById.delete(id);
+				}
+			};
 			const ensureToolCallBlock = (toolCall: StreamingToolCallDelta) => {
 				const streamIndex = typeof toolCall.index === "number" ? toolCall.index : undefined;
 				let block = streamIndex !== undefined ? toolCallBlocksByIndex.get(streamIndex) : undefined;
@@ -259,7 +274,11 @@ export const streamOpenAICompletions: StreamFunction<"openai-completions", OpenA
 					toolCallBlocksByIndex.set(streamIndex, block);
 				}
 				if (toolCall.id) {
+					if (!block.id) {
+						block.id = toolCall.id;
+					}
 					toolCallBlocksById.set(toolCall.id, block);
+					attachPendingReasoningDetail(block, toolCall.id);
 				}
 				return block;
 			};
@@ -374,11 +393,12 @@ export const streamOpenAICompletions: StreamFunction<"openai-completions", OpenA
 					if (reasoningDetails && Array.isArray(reasoningDetails)) {
 						for (const detail of reasoningDetails) {
 							if (detail.type === "reasoning.encrypted" && detail.id && detail.data) {
-								const matchingToolCall = output.content.find(
-									(b) => b.type === "toolCall" && b.id === detail.id,
-								) as ToolCall | undefined;
+								const serialized = JSON.stringify(detail);
+								const matchingToolCall = toolCallBlocksById.get(detail.id);
 								if (matchingToolCall) {
-									matchingToolCall.thoughtSignature = JSON.stringify(detail);
+									matchingToolCall.thoughtSignature = serialized;
+								} else {
+									pendingReasoningDetailsById.set(detail.id, serialized);
 								}
 							}
 						}
@@ -430,10 +450,7 @@ export const streamSimpleOpenAICompletions: StreamFunction<"openai-completions",
 	context: Context,
 	options?: SimpleStreamOptions,
 ): AssistantMessageEventStream => {
-	const apiKey = options?.apiKey;
-	if (!apiKey) {
-		throw new Error(`No API key for provider: ${model.provider}`);
-	}
+	const apiKey = getOpenAICompletionsApiKey(model, options?.apiKey);
 
 	const base = buildBaseOptions(model, options, apiKey);
 	const clampedReasoning = options?.reasoning ? clampThinkingLevel(model, options.reasoning) : undefined;
@@ -1077,6 +1094,7 @@ function detectCompat(model: Model<"openai-completions">): ResolvedOpenAIComplet
 	const isMoonshot = provider === "moonshotai" || provider === "moonshotai-cn" || baseUrl.includes("api.moonshot.");
 	const isCloudflareWorkersAI = provider === "cloudflare-workers-ai" || baseUrl.includes("api.cloudflare.com");
 	const isCloudflareAiGateway = provider === "cloudflare-ai-gateway" || baseUrl.includes("gateway.ai.cloudflare.com");
+	const isOpenAI = provider === "openai" && baseUrl.includes("api.openai.com");
 
 	const isNonStandard =
 		provider === "cerebras" ||
@@ -1101,7 +1119,7 @@ function detectCompat(model: Model<"openai-completions">): ResolvedOpenAIComplet
 
 	return {
 		supportsStore: !isNonStandard,
-		supportsDeveloperRole: !isNonStandard,
+		supportsDeveloperRole: isOpenAI,
 		supportsReasoningEffort: !isGrok && !isZai && !isMoonshot && !isTogether && !isCloudflareAiGateway,
 		supportsUsageInStreaming: true,
 		maxTokensField: useMaxTokens ? "max_tokens" : "max_completion_tokens",

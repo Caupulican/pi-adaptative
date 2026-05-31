@@ -136,6 +136,7 @@ const AnthropicMessagesCompatSchema = Type.Object({
 	supportsLongCacheRetention: Type.Optional(Type.Boolean()),
 	sendSessionAffinityHeaders: Type.Optional(Type.Boolean()),
 	supportsCacheControlOnTools: Type.Optional(Type.Boolean()),
+	supportsTemperature: Type.Optional(Type.Boolean()),
 	forceAdaptiveThinking: Type.Optional(Type.Boolean()),
 });
 
@@ -711,6 +712,9 @@ export class ModelRegistry {
 	 * Get API key for a model.
 	 */
 	hasConfiguredAuth(model: Model<Api>): boolean {
+		if (model.provider === "llama-cpp") {
+			return true;
+		}
 		const providerApiKey = this.providerRequestConfigs.get(model.provider)?.apiKey;
 		return (
 			this.authStorage.hasAuth(model.provider) ||
@@ -804,6 +808,10 @@ export class ModelRegistry {
 			return authStatus;
 		}
 
+		if (provider === "llama-cpp") {
+			return { configured: true, source: "runtime", label: "no API key required" };
+		}
+
 		const providerApiKey = this.providerRequestConfigs.get(provider)?.apiKey;
 		if (!providerApiKey) {
 			return authStatus;
@@ -843,6 +851,9 @@ export class ModelRegistry {
 	 * Get API key for a provider.
 	 */
 	async getApiKeyForProvider(provider: string): Promise<string | undefined> {
+		if (provider === "llama-cpp") {
+			return undefined;
+		}
 		const apiKey = await this.authStorage.getApiKey(provider, { includeFallback: false });
 		if (apiKey !== undefined) {
 			return apiKey;

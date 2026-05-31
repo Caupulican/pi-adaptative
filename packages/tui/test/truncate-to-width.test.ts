@@ -1,6 +1,6 @@
 import assert from "node:assert";
 import { describe, it } from "node:test";
-import { normalizeTerminalOutput, truncateToWidth, visibleWidth } from "../src/utils.ts";
+import { extractSegments, normalizeTerminalOutput, truncateToWidth, visibleWidth } from "../src/utils.ts";
 
 describe("truncateToWidth", () => {
 	it("keeps output within width for very large unicode input", () => {
@@ -58,6 +58,14 @@ describe("truncateToWidth", () => {
 describe("visibleWidth", () => {
 	it("counts tabs inline and skips ANSI inline", () => {
 		assert.strictEqual(visibleWidth("\t\x1b[31m界\x1b[0m"), 5);
+	});
+
+	it("accounts for tabs when extracting styled segments", () => {
+		const segments = extractSegments("a\tb", 4, 4, 1);
+		assert.strictEqual(segments.before, "a\t");
+		assert.strictEqual(segments.beforeWidth, 4);
+		assert.strictEqual(segments.after, "b");
+		assert.strictEqual(segments.afterWidth, 1);
 	});
 
 	it("keeps Thai and Lao AM clusters at their normal cell width", () => {

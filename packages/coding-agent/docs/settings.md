@@ -68,6 +68,26 @@ Set `PI_SKIP_VERSION_CHECK=1` to disable the Pi version update check. Use `--off
 }
 ```
 
+### Self Modification
+
+| Setting | Type | Default | Description |
+|---------|------|---------|-------------|
+| `selfModification.enabled` | boolean | `false` | Allow the agent to modify Pi's own source/harness when explicitly tasked |
+| `selfModification.sourcePath` | string | - | Path to the `pi-adaptative` source checkout the agent must use for self-modification |
+
+When disabled, the system prompt tells the agent not to edit Pi core, the installed runtime, or harness source for self-evolution. To permit self-modification, enable the setting and provide the source checkout path:
+
+```json
+{
+  "selfModification": {
+    "enabled": true,
+    "sourcePath": "/path/to/pi-adaptative"
+  }
+}
+```
+
+The agent is instructed to edit only that source checkout, preserve unrelated changes, validate before reporting success, and ask for explicit approval before settings changes, publishing, tagging, or releasing.
+
 ### Compaction
 
 | Setting | Type | Default | Description |

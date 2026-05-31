@@ -117,6 +117,38 @@ describe("bedrock convertMessages skips unknown content types", () => {
 		expect(p.messages[0].content[0]).toEqual({ text: "hello" });
 	});
 
+	it("skips empty user text blocks", async () => {
+		const messages: Message[] = [
+			{
+				role: "user",
+				content: [
+					{ type: "text", text: "   " },
+					{ type: "text", text: "hello" },
+				],
+				timestamp: Date.now(),
+			},
+		];
+		const payload = await capturePayload({ messages });
+		expect(payload).toBeDefined();
+		const p = payload as { messages: Array<{ role: string; content: unknown[] }> };
+		expect(p.messages).toHaveLength(1);
+		expect(p.messages[0].content).toEqual([{ text: "hello" }]);
+	});
+
+	it("skips user messages with only empty text blocks", async () => {
+		const messages: Message[] = [
+			{
+				role: "user",
+				content: [{ type: "text", text: "   " }],
+				timestamp: Date.now(),
+			},
+		];
+		const payload = await capturePayload({ messages });
+		expect(payload).toBeDefined();
+		const p = payload as { messages: Array<{ role: string; content: unknown[] }> };
+		expect(p.messages).toHaveLength(0);
+	});
+
 	it("skips user messages with only unknown content blocks", async () => {
 		const messages: Message[] = [
 			{

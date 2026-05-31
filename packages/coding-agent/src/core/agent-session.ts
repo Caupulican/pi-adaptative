@@ -970,6 +970,36 @@ export class AgentSession {
 		return Array.from(unique);
 	}
 
+	private _buildSelfModificationPrompt(): string {
+		const settings = this.settingsManager.getSelfModificationSettings();
+		if (!settings.enabled) {
+			return `Pi self-modification guardrails (local setting inactive):
+- Do not modify Pi core, the installed Pi runtime, or pi-adaptative harness source for self-evolution.
+- If self-modification is needed, ask the user to enable \`selfModification.enabled\` and set \`selfModification.sourcePath\` to the pi-adaptative source checkout.`;
+		}
+
+		const rawSourcePath = settings.sourcePath?.trim();
+		if (!rawSourcePath) {
+			return `Pi self-modification guardrails (local setting active, source missing):
+- Self-modification is enabled, but \`selfModification.sourcePath\` is not set.
+- Do not modify Pi core or runtime output. Ask the user to set \`selfModification.sourcePath\` to the pi-adaptative source checkout before proceeding.`;
+		}
+
+		const sourcePath = resolvePath(rawSourcePath, this._cwd, { trim: true });
+		const sourceLooksValid = existsSync(sourcePath) && existsSync(resolvePath("package.json", sourcePath));
+		const sourceStatus = sourceLooksValid
+			? sourcePath
+			: `${sourcePath} (missing or not a source checkout; ask the user to correct \`selfModification.sourcePath\` before editing)`;
+		return `Pi self-modification guardrails (local setting active):
+- Authorized pi-adaptative source path: ${sourceStatus}
+- Only modify Pi core/harness source under the authorized source path; never patch installed node_modules or generated runtime output as the source of truth.
+- Before changing Pi itself, restate the objective and scope, inspect relevant source/docs/examples, and make the smallest auditable change.
+- Preserve user changes: check git status before and after, avoid unrelated edits, and do not overwrite concurrent work.
+- Validate with focused tests and broader checks proportional to risk before claiming success.
+- Reload/restart/renew only after source changes are saved and auditable.
+- Ask for explicit approval before changing global settings, publishing, tagging, or releasing.`;
+	}
+
 	private _rebuildSystemPrompt(toolNames: string[]): string {
 		const validToolNames = toolNames.filter((name) => this._toolRegistry.has(name));
 		const toolSnippets: Record<string, string> = {};
@@ -988,8 +1018,8 @@ export class AgentSession {
 
 		const loaderSystemPrompt = this._resourceLoader.getSystemPrompt();
 		const loaderAppendSystemPrompt = this._resourceLoader.getAppendSystemPrompt();
-		const appendSystemPrompt =
-			loaderAppendSystemPrompt.length > 0 ? loaderAppendSystemPrompt.join("\n\n") : undefined;
+		const appendSystemPromptParts = [this._buildSelfModificationPrompt(), ...loaderAppendSystemPrompt];
+		const appendSystemPrompt = appendSystemPromptParts.length > 0 ? appendSystemPromptParts.join("\n\n") : undefined;
 		const loadedSkills = this._resourceLoader.getSkills().skills;
 		const loadedContextFiles = this._resourceLoader.getAgentsFiles().agentsFiles;
 
@@ -1151,17 +1181,12 @@ export class AgentSession {
 				throw new Error(formatNoApiKeyFoundMessage(this.model.provider));
 			}
 
-			// Check if we need to compact before sending (catches aborted responses)
+			// Check if we need to compact before sending (catches aborted responses).
+			// Do not call agent.continue() here: the next model turn must include the
+			// user's pending prompt, not an empty continuation after compaction.
 			const lastAssistant = this._findLastAssistantMessage();
-			if (lastAssistant && (await this._checkCompaction(lastAssistant, false))) {
-				try {
-					await this.agent.continue();
-					while (await this._handlePostAgentRun()) {
-						await this.agent.continue();
-					}
-				} finally {
-					this._flushPendingBashMessages();
-				}
+			if (lastAssistant) {
+				await this._checkCompaction(lastAssistant, false);
 			}
 
 			// Build messages array (custom message if any, then user message)

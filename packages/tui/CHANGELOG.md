@@ -2,6 +2,12 @@
 
 ## [Unreleased]
 
+### Fixed
+
+- Fixed tab width accounting in styled segment extraction so overlay composition and slicing stay aligned.
+- Fixed Kitty inline image component redraws by reserving image rows before emitting the placement sequence.
+- Fixed process-global keybindings to use a shared singleton across duplicate `pi-tui` module instances.
+
 ## [0.78.1] - 2026-05-31
 
 ## [0.78.0] - 2026-05-29

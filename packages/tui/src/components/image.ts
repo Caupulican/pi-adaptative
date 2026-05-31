@@ -88,14 +88,17 @@ export class Image implements Component {
 				}
 
 				if (caps.images === "kitty") {
-					// For Kitty: C=1 prevents cursor movement.
-					// Don't need the cursor movement.
-					lines = [result.sequence];
-
-					// Return `rows` lines so TUI accounts for image height.
+					// Reserve the image rows before drawing. This prevents later clear/redraw
+					// operations from erasing an inline Kitty image that was emitted on the
+					// first reserved line.
+					lines = [];
 					for (let i = 0; i < result.rows - 1; i++) {
 						lines.push("");
 					}
+					const rowOffset = result.rows - 1;
+					const moveUp = rowOffset > 0 ? `\x1b[${rowOffset}A` : "";
+					const moveDown = rowOffset > 0 ? `\x1b[${rowOffset}B` : "";
+					lines.push(moveUp + result.sequence + moveDown);
 				} else {
 					// Return `rows` lines so TUI accounts for image height.
 					// First (rows-1) lines are empty and cleared before the image is drawn.

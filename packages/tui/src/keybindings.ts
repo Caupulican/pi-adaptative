@@ -230,15 +230,20 @@ export class KeybindingsManager {
 	}
 }
 
-let globalKeybindings: KeybindingsManager | null = null;
+const GLOBAL_KEYBINDINGS_SYMBOL = Symbol.for("@earendil-works/pi-tui.keybindings");
+
+type GlobalKeybindingsStore = typeof globalThis & Record<symbol, KeybindingsManager | undefined>;
+
+function getGlobalKeybindingsStore(): GlobalKeybindingsStore {
+	return globalThis as GlobalKeybindingsStore;
+}
 
 export function setKeybindings(keybindings: KeybindingsManager): void {
-	globalKeybindings = keybindings;
+	getGlobalKeybindingsStore()[GLOBAL_KEYBINDINGS_SYMBOL] = keybindings;
 }
 
 export function getKeybindings(): KeybindingsManager {
-	if (!globalKeybindings) {
-		globalKeybindings = new KeybindingsManager(TUI_KEYBINDINGS);
-	}
-	return globalKeybindings;
+	const store = getGlobalKeybindingsStore();
+	store[GLOBAL_KEYBINDINGS_SYMBOL] ??= new KeybindingsManager(TUI_KEYBINDINGS);
+	return store[GLOBAL_KEYBINDINGS_SYMBOL];
 }

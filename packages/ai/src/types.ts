@@ -47,6 +47,7 @@ export type KnownProvider =
 	| "opencode"
 	| "opencode-go"
 	| "kimi-coding"
+	| "llama-cpp"
 	| "cloudflare-workers-ai"
 	| "cloudflare-ai-gateway"
 	| "xiaomi"
@@ -461,6 +462,8 @@ export interface AnthropicMessagesCompat {
 	 * Default: false.
 	 */
 	forceAdaptiveThinking?: boolean;
+	/** Whether the provider accepts a `temperature` parameter for this model. Default: true. */
+	supportsTemperature?: boolean;
 	/** Whether to replay empty thinking signatures as `signature: ""` instead of converting thinking to text. Default: false. */
 	allowEmptySignature?: boolean;
 }

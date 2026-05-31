@@ -2,7 +2,12 @@ import { mkdirSync, readFileSync, rmSync, writeFileSync } from "fs";
 import { tmpdir } from "os";
 import { join } from "path";
 import { afterEach, beforeEach, describe, expect, it } from "vitest";
-import { findMostRecentSession, loadEntriesFromFile, SessionManager } from "../../src/core/session-manager.ts";
+import {
+	findMostRecentSession,
+	getDefaultSessionDir,
+	loadEntriesFromFile,
+	SessionManager,
+} from "../../src/core/session-manager.ts";
 
 describe("loadEntriesFromFile", () => {
 	let tempDir: string;
@@ -143,6 +148,28 @@ describe("findMostRecentSession", () => {
 
 		expect(findMostRecentSession(tempDir, projectA)).toBe(fileA);
 		expect(findMostRecentSession(tempDir, projectB)).toBe(fileB);
+	});
+});
+
+describe("default session directory encoding", () => {
+	let tempDir: string;
+
+	beforeEach(() => {
+		tempDir = join(tmpdir(), `session-test-${Date.now()}`);
+		mkdirSync(tempDir, { recursive: true });
+	});
+
+	afterEach(() => {
+		rmSync(tempDir, { recursive: true, force: true });
+	});
+
+	it("uses collision-resistant cwd encoding", () => {
+		const dashed = getDefaultSessionDir("/tmp/a-b", tempDir);
+		const nested = getDefaultSessionDir("/tmp/a/b", tempDir);
+
+		expect(dashed).not.toBe(nested);
+		expect(dashed).toContain(encodeURIComponent("/tmp/a-b"));
+		expect(nested).toContain(encodeURIComponent("/tmp/a/b"));
 	});
 });
 

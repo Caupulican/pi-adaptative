@@ -153,8 +153,8 @@ export class FooterComponent implements Component {
 
 		let statsLeft = statsParts.join(" ");
 
-		// Add model name on the right side, plus thinking level if model supports it
-		const modelName = state.model?.id || "no-model";
+		// Add model display name on the right side, plus thinking level if model supports it
+		const modelName = state.model?.name || state.model?.id || "no-model";
 
 		let statsLeftWidth = visibleWidth(statsLeft);
 

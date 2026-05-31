@@ -32,6 +32,10 @@ type JsonlSessionRepoFileSystem = Pick<
 >;
 
 function encodeCwd(cwd: string): string {
+	return `--${encodeURIComponent(cwd)}--`;
+}
+
+function encodeLegacyCwd(cwd: string): string {
 	return `--${cwd.replace(/^[/\\]/, "").replace(/[/\\:]/g, "-")}--`;
 }
 
@@ -60,6 +64,19 @@ export class JsonlSessionRepo implements JsonlSessionRepoApi {
 			await this.fs.joinPath([await this.getSessionsRoot(), encodeCwd(cwd)]),
 			`Failed to resolve session directory for ${cwd}`,
 		);
+	}
+
+	private async getLegacySessionDir(cwd: string): Promise<string> {
+		return getFileSystemResultOrThrow(
+			await this.fs.joinPath([await this.getSessionsRoot(), encodeLegacyCwd(cwd)]),
+			`Failed to resolve legacy session directory for ${cwd}`,
+		);
+	}
+
+	private async getSessionDirsForCwd(cwd: string): Promise<string[]> {
+		const current = await this.getSessionDir(cwd);
+		const legacy = await this.getLegacySessionDir(cwd);
+		return current === legacy ? [current] : [current, legacy];
 	}
 
 	private async createSessionFilePath(cwd: string, sessionId: string, timestamp: string): Promise<string> {
@@ -100,7 +117,7 @@ export class JsonlSessionRepo implements JsonlSessionRepoApi {
 	}
 
 	async list(options: JsonlSessionListOptions = {}): Promise<JsonlSessionMetadata[]> {
-		const dirs = options.cwd ? [await this.getSessionDir(options.cwd)] : await this.listSessionDirs();
+		const dirs = options.cwd ? await this.getSessionDirsForCwd(options.cwd) : await this.listSessionDirs();
 		const sessions: JsonlSessionMetadata[] = [];
 		for (const dir of dirs) {
 			if (!getFileSystemResultOrThrow(await this.fs.exists(dir), `Failed to check session directory ${dir}`)) {

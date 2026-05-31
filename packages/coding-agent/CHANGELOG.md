@@ -2,6 +2,23 @@
 
 ## [Unreleased]
 
+### Added
+
+- Added a built-in `llama-cpp/local` model profile for local llama.cpp servers, available without API-key setup.
+- Added a `model_selector_open` extension event so extensions can refresh or register models before the interactive selector loads.
+- Added raw prompt-template argument placeholders (`$ARGUMENTS_RAW` and `$RAW_ARGUMENTS`).
+- Added optional session names for `/new <name>`, `/clone <name>`, and `/fork <name>`.
+- Added `selfModification.enabled` and `selfModification.sourcePath` settings with system-prompt guardrails for Pi harness self-modification.
+
+### Fixed
+
+- Fixed session listing/resume metadata loading to stream large JSONL files instead of reading each file fully into memory.
+- Fixed pre-prompt auto-compaction so it does not run an empty continuation before sending the user's pending prompt.
+- Fixed default session directory encoding to avoid cwd collisions while still reading legacy session directories.
+- Fixed extension overlay focus restoration so closing editor replacement UI does not steal focus from an active overlay.
+- Fixed the footer to display model override names instead of always showing raw model IDs.
+- Fixed OpenAI-compatible, Anthropic, and Amazon Bedrock provider fixes inherited from `@earendil-works/pi-ai`.
+
 ## [0.78.1] - 2026-05-31
 
 ### Changed

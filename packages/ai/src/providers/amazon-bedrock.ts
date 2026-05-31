@@ -665,13 +665,20 @@ function convertMessages(
 			case "user": {
 				const content: ContentBlock[] = [];
 				if (typeof m.content === "string") {
-					content.push({ text: sanitizeSurrogates(m.content) });
+					const text = sanitizeSurrogates(m.content);
+					if (text.trim().length > 0) {
+						content.push({ text });
+					}
 				} else {
 					for (const c of m.content) {
 						switch (c.type) {
-							case "text":
-								content.push({ text: sanitizeSurrogates(c.text) });
+							case "text": {
+								const text = sanitizeSurrogates(c.text);
+								if (text.trim().length > 0) {
+									content.push({ text });
+								}
 								break;
+							}
 							case "image":
 								content.push({ image: createImageBlock(c.mimeType, c.data) });
 								break;

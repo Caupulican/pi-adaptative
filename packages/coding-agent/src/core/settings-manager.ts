@@ -57,6 +57,11 @@ export interface WarningSettings {
 	anthropicExtraUsage?: boolean; // default: true
 }
 
+export interface SelfModificationSettings {
+	enabled?: boolean; // default: false
+	sourcePath?: string; // Path to the pi-adaptative source tree when self-modification is enabled
+}
+
 export type TransportSetting = Transport;
 
 /**
@@ -110,6 +115,7 @@ export interface Settings {
 	showHardwareCursor?: boolean; // Show terminal cursor while still positioning it for IME
 	markdown?: MarkdownSettings;
 	warnings?: WarningSettings;
+	selfModification?: SelfModificationSettings; // Local guardrails for modifying the pi-adaptative source/harness
 	sessionDir?: string; // Custom session storage directory (same format as --session-dir CLI flag)
 	httpIdleTimeoutMs?: number; // HTTP header/body idle timeout in milliseconds; 0 disables it
 	websocketConnectTimeoutMs?: number; // WebSocket connect/open handshake timeout in milliseconds; 0 disables it
@@ -1086,6 +1092,19 @@ export class SettingsManager {
 	setWarnings(warnings: WarningSettings): void {
 		this.globalSettings.warnings = { ...warnings };
 		this.markModified("warnings");
+		this.save();
+	}
+
+	getSelfModificationSettings(): { enabled: boolean; sourcePath?: string } {
+		return {
+			enabled: this.settings.selfModification?.enabled ?? false,
+			sourcePath: this.settings.selfModification?.sourcePath,
+		};
+	}
+
+	setSelfModificationSettings(settings: SelfModificationSettings): void {
+		this.globalSettings.selfModification = { ...settings };
+		this.markModified("selfModification");
 		this.save();
 	}
 }

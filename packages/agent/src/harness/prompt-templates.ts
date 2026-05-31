@@ -245,8 +245,8 @@ export function parseCommandArgs(argsString: string): string[] {
 	return args;
 }
 
-/** Substitute prompt template placeholders (`$1`, `$@`, `$ARGUMENTS`, `${@:N}`, `${@:N:L}`) with command arguments. */
-export function substituteArgs(content: string, args: string[]): string {
+/** Substitute prompt template placeholders (`$1`, `$@`, `$ARGUMENTS`, `$ARGUMENTS_RAW`, `$RAW_ARGUMENTS`, `${@:N}`, `${@:N:L}`) with command arguments. */
+export function substituteArgs(content: string, args: string[], rawArgs?: string): string {
 	let result = content;
 	result = result.replace(/\$(\d+)/g, (_, num: string) => args[parseInt(num, 10) - 1] ?? "");
 	result = result.replace(/\$\{@:(\d+)(?::(\d+))?\}/g, (_, startStr: string, lengthStr?: string) => {
@@ -256,12 +256,19 @@ export function substituteArgs(content: string, args: string[]): string {
 		return args.slice(start).join(" ");
 	});
 	const allArgs = args.join(" ");
+	const rawArgumentText = rawArgs ?? allArgs;
+	result = result.replace(/\$ARGUMENTS_RAW/g, rawArgumentText);
+	result = result.replace(/\$RAW_ARGUMENTS/g, rawArgumentText);
 	result = result.replace(/\$ARGUMENTS/g, allArgs);
 	result = result.replace(/\$@/g, allArgs);
 	return result;
 }
 
 /** Format a prompt template invocation with positional arguments. */
-export function formatPromptTemplateInvocation(template: PromptTemplate, args: string[] = []): string {
-	return substituteArgs(template.content, args);
+export function formatPromptTemplateInvocation(
+	template: PromptTemplate,
+	args: string[] = [],
+	rawArgs?: string,
+): string {
+	return substituteArgs(template.content, args, rawArgs);
 }
