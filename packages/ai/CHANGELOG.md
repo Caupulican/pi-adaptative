@@ -2,6 +2,10 @@
 
 ## [Unreleased]
 
+### Changed
+
+- Changed OpenAI Codex Responses SSE response-header timeout default from 10s to 20s.
+
 ## [0.78.0] - 2026-05-29
 
 ### Breaking Changes

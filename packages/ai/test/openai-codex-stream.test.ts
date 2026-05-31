@@ -364,10 +364,10 @@ describe("openai-codex streaming", () => {
 		await vi.advanceTimersByTimeAsync(0);
 		expect(fetchMock).toHaveBeenCalledTimes(1);
 
-		await vi.advanceTimersByTimeAsync(10_000);
+		await vi.advanceTimersByTimeAsync(20_000);
 		const result = await resultPromise;
 		expect(result.stopReason).toBe("error");
-		expect(result.errorMessage).toBe("Codex SSE response headers timed out after 10000ms");
+		expect(result.errorMessage).toBe("Codex SSE response headers timed out after 20000ms");
 	});
 
 	it("aborts SSE body reads after response headers arrive", async () => {
