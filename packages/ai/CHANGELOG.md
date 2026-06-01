@@ -14,6 +14,7 @@
 - Fixed OpenAI-compatible role selection so non-OpenAI providers use `system` messages unless developer-role support is explicitly enabled.
 - Fixed Anthropic Opus 4.7+ requests to omit unsupported `temperature` and replay signed latest thinking blocks without text normalization.
 - Fixed Amazon Bedrock message conversion to filter empty user text blocks and skip user messages left empty after filtering.
+- Fixed OpenAI GPT-5.5 generated metadata to omit unsupported minimal thinking ([#5243](https://github.com/earendil-works/pi/issues/5243)).
 
 ## [0.78.1] - 2026-05-31
 

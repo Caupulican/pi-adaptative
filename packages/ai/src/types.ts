@@ -453,6 +453,12 @@ export interface AnthropicMessagesCompat {
 	 */
 	supportsCacheControlOnTools?: boolean;
 	/**
+	 * Whether the model accepts the Anthropic `temperature` request field.
+	 * Claude Opus 4.7+ rejects non-default temperature values.
+	 * Default: true.
+	 */
+	supportsTemperature?: boolean;
+	/**
 	 * Whether to force adaptive thinking (`thinking.type: "adaptive"` plus
 	 * `output_config.effort`) regardless of the model id. Built-in models that
 	 * require adaptive thinking set this in generated metadata. Custom
@@ -462,8 +468,6 @@ export interface AnthropicMessagesCompat {
 	 * Default: false.
 	 */
 	forceAdaptiveThinking?: boolean;
-	/** Whether the provider accepts a `temperature` parameter for this model. Default: true. */
-	supportsTemperature?: boolean;
 	/** Whether to replay empty thinking signatures as `signature: ""` instead of converting thinking to text. Default: false. */
 	allowEmptySignature?: boolean;
 }
