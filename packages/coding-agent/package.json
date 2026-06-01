@@ -1,6 +1,6 @@
 {
 	"name": "@caupulican/pi-adaptative",
-	"version": "0.78.4",
+	"version": "0.79.0",
 	"description": "Adaptive fork of Pi coding agent for self-evolving agent harness experiments",
 	"type": "module",
 	"piConfig": {
@@ -41,9 +41,9 @@
 		"prepublishOnly": "npm run clean && npm run build && npm run shrinkwrap"
 	},
 	"dependencies": {
-		"@earendil-works/pi-agent-core": "^0.78.4",
-		"@earendil-works/pi-ai": "^0.78.4",
-		"@earendil-works/pi-tui": "^0.78.4",
+		"@earendil-works/pi-agent-core": "^0.79.0",
+		"@earendil-works/pi-ai": "^0.79.0",
+		"@earendil-works/pi-tui": "^0.79.0",
 		"@silvia-odwyer/photon-node": "0.3.4",
 		"chalk": "5.6.2",
 		"cross-spawn": "7.0.6",
