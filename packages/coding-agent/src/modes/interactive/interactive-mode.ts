@@ -26,6 +26,7 @@ import type {
 	MarkdownTheme,
 	OverlayHandle,
 	OverlayOptions,
+	SelectItem,
 	SlashCommand,
 } from "@earendil-works/pi-tui";
 import {
@@ -81,6 +82,7 @@ import { BUILT_IN_PROVIDER_DISPLAY_NAMES } from "../../core/provider-display-nam
 import type { ResourceDiagnostic } from "../../core/resource-loader.ts";
 import { formatMissingSessionCwdPrompt, MissingSessionCwdError } from "../../core/session-cwd.ts";
 import { type SessionContext, SessionManager } from "../../core/session-manager.ts";
+import type { AutoLearnSettings, SelfModificationSettings } from "../../core/settings-manager.ts";
 import { BUILTIN_SLASH_COMMANDS } from "../../core/slash-commands.ts";
 import type { SourceInfo } from "../../core/source-info.ts";
 import { isInstallTelemetryEnabled } from "../../core/telemetry.ts";
@@ -89,7 +91,7 @@ import { getChangelogPath, getNewEntries, parseChangelog } from "../../utils/cha
 import { copyToClipboard } from "../../utils/clipboard.ts";
 import { extensionForImageMimeType, readClipboardImage } from "../../utils/clipboard-image.ts";
 import { parseGitUrl } from "../../utils/git.ts";
-import { getCwdRelativePath } from "../../utils/paths.ts";
+import { getCwdRelativePath, resolvePath } from "../../utils/paths.ts";
 import { getPiUserAgent } from "../../utils/pi-user-agent.ts";
 import { killTrackedDetachedChildren } from "../../utils/shell.ts";
 import { ensureTool } from "../../utils/tools-manager.ts";
@@ -188,6 +190,47 @@ function isDeadTerminalError(error: unknown): boolean {
 
 const ANTHROPIC_SUBSCRIPTION_AUTH_WARNING =
 	"Anthropic subscription auth is active. Third-party harness usage draws from extra usage and is billed per token, not your Claude plan limits. Manage extra usage at https://claude.ai/settings/usage.";
+
+const AUTO_LEARN_DEFAULTS = {
+	model: "active",
+	longSessionMessages: 32,
+	longSessionContextPercent: 70,
+	cooldownMinutes: 120,
+	leaseMinutes: 90,
+	maxConcurrentLearners: 2,
+	applyHighConfidence: false,
+} as const;
+
+interface AutoLearnState {
+	lastLaunchByTenant?: Record<string, number>;
+	runs?: Record<
+		string,
+		{
+			tenant: string;
+			pid?: number;
+			model: string;
+			reason: string;
+			startedAt: number;
+			expiresAt: number;
+			cwd: string;
+			logPath: string;
+		}
+	>;
+}
+
+interface AutoLearnDecision {
+	shouldRun: boolean;
+	reason: string;
+	messageCount: number;
+	contextPercent: number | null;
+	cooldownRemainingMs: number;
+	runningCount: number;
+}
+
+interface AutoLearnSpawnTarget {
+	command: string;
+	argsPrefix: string[];
+}
 
 function isAnthropicSubscriptionAuthKey(apiKey: string | undefined): boolean {
 	return typeof apiKey === "string" && apiKey.startsWith("sk-ant-oat");
@@ -330,6 +373,9 @@ export class InteractiveMode {
 	// Auto-compaction state
 	private autoCompactionLoader: Loader | undefined = undefined;
 	private autoCompactionEscapeHandler?: () => void;
+
+	// Auto Learn background runner state
+	private autoLearnLastStatus = "idle";
 
 	// Auto-retry state
 	private retryLoader: Loader | undefined = undefined;
@@ -718,8 +764,9 @@ export class InteractiveMode {
 			this.ui.requestRender();
 		});
 
-		// Initialize available provider count for footer display
+		// Initialize available provider count and Auto Learn status for footer display
 		await this.updateAvailableProviderCount();
+		this.updateAutoLearnFooter();
 	}
 
 	/**
@@ -2569,6 +2616,11 @@ export class InteractiveMode {
 				this.editor.setText("");
 				return;
 			}
+			if (text === "/auto-learn" || text.startsWith("/auto-learn ")) {
+				this.handleAutoLearnCommand(text);
+				this.editor.setText("");
+				return;
+			}
 			if (text === "/scoped-models") {
 				this.editor.setText("");
 				await this.showModelsSelector();
@@ -2908,6 +2960,7 @@ export class InteractiveMode {
 			}
 
 			case "agent_end":
+				this.maybeStartAutoLearn();
 				if (this.settingsManager.getShowTerminalProgress()) {
 					this.ui.terminal.setProgress(false);
 				}
@@ -3920,8 +3973,404 @@ export class InteractiveMode {
 		this.ui.requestRender();
 	}
 
+	private getAutoLearnModelAuthPriority(model: Model<any>): number {
+		if (this.session.model && model.provider === this.session.model.provider && model.id === this.session.model.id) {
+			return 0;
+		}
+
+		const credential = this.session.modelRegistry.authStorage.get(model.provider);
+		if (credential?.type === "oauth") return 1;
+		if (credential?.type === "api_key") return 2;
+
+		const authStatus = this.session.modelRegistry.getProviderAuthStatus(model.provider);
+		switch (authStatus.source) {
+			case "runtime":
+				return 3;
+			case "environment":
+				return 4;
+			case "models_json_key":
+			case "models_json_command":
+			case "fallback":
+				return 5;
+			default:
+				return 6;
+		}
+	}
+
+	private getAutoLearnModelAuthLabel(model: Model<any>): string {
+		const credential = this.session.modelRegistry.authStorage.get(model.provider);
+		if (credential?.type === "oauth") return "subscription";
+		if (credential?.type === "api_key") return "API key";
+
+		const authStatus = this.session.modelRegistry.getProviderAuthStatus(model.provider);
+		switch (authStatus.source) {
+			case "runtime":
+				return authStatus.label ? `runtime ${authStatus.label}` : "runtime API key";
+			case "environment":
+				return authStatus.label ? `env ${authStatus.label}` : "environment API key";
+			case "models_json_key":
+				return "models.json API key";
+			case "models_json_command":
+				return "models.json command";
+			case "fallback":
+				return authStatus.label ?? "custom provider config";
+			default:
+				return "configured";
+		}
+	}
+
+	private getAutoLearnModelOptions(): SelectItem[] {
+		this.session.modelRegistry.refresh();
+		const availableModels = this.session.modelRegistry.getAvailable();
+		const sortedModels = [...availableModels].sort((a, b) => {
+			const priorityDelta = this.getAutoLearnModelAuthPriority(a) - this.getAutoLearnModelAuthPriority(b);
+			if (priorityDelta !== 0) return priorityDelta;
+			const providerDelta = this.session.modelRegistry
+				.getProviderDisplayName(a.provider)
+				.localeCompare(this.session.modelRegistry.getProviderDisplayName(b.provider));
+			if (providerDelta !== 0) return providerDelta;
+			return a.id.localeCompare(b.id);
+		});
+
+		return sortedModels.map((model) => {
+			const providerName = this.session.modelRegistry.getProviderDisplayName(model.provider);
+			const authLabel = this.getAutoLearnModelAuthLabel(model);
+			const modelPattern = `${model.provider}/${model.id}`;
+			const currentLabel =
+				this.session.model && model.provider === this.session.model.provider && model.id === this.session.model.id
+					? " · current"
+					: "";
+			const displayName = model.name && model.name !== model.id ? ` · ${model.name}` : "";
+			return {
+				value: modelPattern,
+				label: modelPattern,
+				description: `${providerName} · ${authLabel}${currentLabel}${displayName}`,
+			};
+		});
+	}
+
+	private getAutoLearnDataDir(): string {
+		return path.join(getAgentDir(), "auto-learn");
+	}
+
+	private getAutoLearnStatePath(): string {
+		return path.join(this.getAutoLearnDataDir(), "state.json");
+	}
+
+	private readAutoLearnState(): AutoLearnState {
+		try {
+			const statePath = this.getAutoLearnStatePath();
+			if (!fs.existsSync(statePath)) return {};
+			return JSON.parse(fs.readFileSync(statePath, "utf-8")) as AutoLearnState;
+		} catch {
+			return {};
+		}
+	}
+
+	private writeAutoLearnState(state: AutoLearnState): void {
+		const dir = this.getAutoLearnDataDir();
+		fs.mkdirSync(dir, { recursive: true });
+		fs.writeFileSync(this.getAutoLearnStatePath(), `${JSON.stringify(state, null, 2)}\n`, "utf-8");
+	}
+
+	private isAutoLearnPidAlive(pid: number | undefined): boolean {
+		if (typeof pid !== "number" || pid <= 0) return false;
+		try {
+			process.kill(pid, 0);
+			return true;
+		} catch (error) {
+			const code =
+				error && typeof error === "object" && "code" in error ? String((error as { code?: unknown }).code) : "";
+			return code === "EPERM";
+		}
+	}
+
+	private pruneAutoLearnState(state: AutoLearnState, now = Date.now()): AutoLearnState {
+		const runs = { ...(state.runs ?? {}) };
+		for (const [id, run] of Object.entries(runs)) {
+			if (run.expiresAt <= now || !this.isAutoLearnPidAlive(run.pid)) {
+				delete runs[id];
+			}
+		}
+		return { ...state, runs };
+	}
+
+	private getEffectiveAutoLearnSettings(): Required<AutoLearnSettings> {
+		const settings = this.settingsManager.getAutoLearnSettings();
+		return {
+			enabled: settings.enabled ?? false,
+			model: settings.model?.trim() || AUTO_LEARN_DEFAULTS.model,
+			longSessionMessages: settings.longSessionMessages ?? AUTO_LEARN_DEFAULTS.longSessionMessages,
+			longSessionContextPercent: settings.longSessionContextPercent ?? AUTO_LEARN_DEFAULTS.longSessionContextPercent,
+			cooldownMinutes: settings.cooldownMinutes ?? AUTO_LEARN_DEFAULTS.cooldownMinutes,
+			leaseMinutes: settings.leaseMinutes ?? AUTO_LEARN_DEFAULTS.leaseMinutes,
+			maxConcurrentLearners: settings.maxConcurrentLearners ?? AUTO_LEARN_DEFAULTS.maxConcurrentLearners,
+			applyHighConfidence: settings.applyHighConfidence ?? AUTO_LEARN_DEFAULTS.applyHighConfidence,
+		};
+	}
+
+	private getAutoLearnTenantKey(): string {
+		return `${this.sessionManager.getCwd()}::${this.session.sessionId}`;
+	}
+
+	private getAutoLearnMessageCount(): number {
+		return this.sessionManager.getBranch().filter((entry) => entry.type === "message").length;
+	}
+
+	private resolveAutoLearnModelPattern(settings: Required<AutoLearnSettings>): string | undefined {
+		if (settings.model === "active") {
+			return this.session.model ? `${this.session.model.provider}/${this.session.model.id}` : undefined;
+		}
+		return settings.model;
+	}
+
+	private getAutoLearnSpawnTarget(): AutoLearnSpawnTarget | undefined {
+		const overridePath = process.env.PI_AUTO_LEARN_CLI_PATH?.trim();
+		if (overridePath) {
+			return { command: overridePath, argsPrefix: [] };
+		}
+
+		const execBase = path.basename(process.execPath).toLowerCase();
+		const isScriptRuntime =
+			execBase === "node" || execBase === "node.exe" || execBase === "bun" || execBase === "bun.exe";
+		if (!isScriptRuntime) {
+			return { command: process.execPath, argsPrefix: [] };
+		}
+
+		const cliPath = process.argv[1];
+		if (!cliPath || cliPath.startsWith("-")) {
+			return undefined;
+		}
+		return { command: process.execPath, argsPrefix: [cliPath] };
+	}
+
+	private validateAutoLearnModelValue(value: string | undefined): string | undefined {
+		const modelValue = value?.trim();
+		if (!modelValue || modelValue === "active") return undefined;
+		const available = this.session.modelRegistry.getAvailable();
+		if (modelValue.includes("/")) {
+			const [provider, modelId] = modelValue.split("/", 2);
+			if (available.some((model) => model.provider === provider && model.id === modelId)) return undefined;
+			return `Auto Learn model "${modelValue}" is not in configured subscription/API models; saved as manual/unverified.`;
+		}
+		if (available.some((model) => model.id === modelValue)) return undefined;
+		return `Auto Learn model "${modelValue}" is not in configured subscription/API models; saved as manual/unverified.`;
+	}
+
+	private validateSelfModificationSource(settings: SelfModificationSettings): string | undefined {
+		if (!settings.enabled) return undefined;
+		const rawPath = settings.sourcePath?.trim();
+		if (!rawPath) return "Self modification is enabled, but no pi-adaptative source path is set.";
+		const sourcePath = resolvePath(rawPath, this.sessionManager.getCwd(), { trim: true });
+		if (!fs.existsSync(sourcePath)) return `Self modification source path does not exist: ${sourcePath}`;
+		if (!fs.existsSync(path.join(sourcePath, "package.json"))) {
+			return `Self modification source path has no package.json: ${sourcePath}`;
+		}
+		if (!fs.existsSync(path.join(sourcePath, "packages", "coding-agent"))) {
+			return `Self modification source path does not look like pi-adaptative (missing packages/coding-agent): ${sourcePath}`;
+		}
+		return undefined;
+	}
+
+	private evaluateAutoLearn(force = false): AutoLearnDecision {
+		const settings = this.getEffectiveAutoLearnSettings();
+		const state = this.pruneAutoLearnState(this.readAutoLearnState());
+		this.writeAutoLearnState(state);
+		const now = Date.now();
+		const tenant = this.getAutoLearnTenantKey();
+		const runningCount = Object.keys(state.runs ?? {}).length;
+		const lastLaunch = state.lastLaunchByTenant?.[tenant] ?? 0;
+		const cooldownMs = settings.cooldownMinutes * 60 * 1000;
+		const cooldownRemainingMs = Math.max(0, lastLaunch + cooldownMs - now);
+		const messageCount = this.getAutoLearnMessageCount();
+		const contextPercent = this.session.getContextUsage()?.percent ?? null;
+
+		if (!settings.enabled && !force) {
+			return {
+				shouldRun: false,
+				reason: "disabled",
+				messageCount,
+				contextPercent,
+				cooldownRemainingMs,
+				runningCount,
+			};
+		}
+		if (runningCount >= settings.maxConcurrentLearners) {
+			return {
+				shouldRun: false,
+				reason: `max learners running (${runningCount}/${settings.maxConcurrentLearners})`,
+				messageCount,
+				contextPercent,
+				cooldownRemainingMs,
+				runningCount,
+			};
+		}
+		if (!force && cooldownRemainingMs > 0) {
+			return {
+				shouldRun: false,
+				reason: "cooldown",
+				messageCount,
+				contextPercent,
+				cooldownRemainingMs,
+				runningCount,
+			};
+		}
+		if (force) {
+			return { shouldRun: true, reason: "manual", messageCount, contextPercent, cooldownRemainingMs, runningCount };
+		}
+		if (messageCount >= settings.longSessionMessages) {
+			return {
+				shouldRun: true,
+				reason: `message trigger (${messageCount}/${settings.longSessionMessages})`,
+				messageCount,
+				contextPercent,
+				cooldownRemainingMs,
+				runningCount,
+			};
+		}
+		if (contextPercent !== null && contextPercent >= settings.longSessionContextPercent) {
+			return {
+				shouldRun: true,
+				reason: `context trigger (${contextPercent.toFixed(1)}%/${settings.longSessionContextPercent}%)`,
+				messageCount,
+				contextPercent,
+				cooldownRemainingMs,
+				runningCount,
+			};
+		}
+		return {
+			shouldRun: false,
+			reason: "thresholds not met",
+			messageCount,
+			contextPercent,
+			cooldownRemainingMs,
+			runningCount,
+		};
+	}
+
+	private buildAutoLearnPrompt(reason: string, settings: Required<AutoLearnSettings>): string {
+		return `You are Pi Auto Learn running as a background learner.\n\nObjective: run one bounded continuous-learning pass for this Pi tenant.\nTrigger: ${reason}.\n\nRequired workflow:\n1. Query existing durable memory/rules first when tools allow it.\n2. Run the available Auto Learn tooling, preferably learning_run_auto, with applyHighConfidence=${settings.applyHighConfidence}.\n3. Keep tooling/core/source changes proposal/approval-gated; do not publish, tag, release, or modify Pi source from this background run.\n4. If the learning tools are unavailable, report BLOCKED with the missing tool names and do not improvise.\n5. Finish with PASS, BLOCKED, or FAIL and concise evidence.`;
+	}
+
+	private launchAutoLearn(reason: string, force = false): string {
+		const settings = this.getEffectiveAutoLearnSettings();
+		const decision = this.evaluateAutoLearn(force);
+		if (!decision.shouldRun) {
+			return `Auto Learn not started: ${decision.reason}`;
+		}
+		const modelPattern = this.resolveAutoLearnModelPattern(settings);
+		if (!modelPattern) {
+			return "Auto Learn not started: no active model is available for model=active.";
+		}
+		const spawnTarget = this.getAutoLearnSpawnTarget();
+		if (!spawnTarget) {
+			return "Auto Learn not started: could not resolve current pi CLI path.";
+		}
+
+		const dir = this.getAutoLearnDataDir();
+		fs.mkdirSync(dir, { recursive: true });
+		const runId = `${Date.now()}-${crypto.randomUUID().slice(0, 8)}`;
+		const logPath = path.join(dir, `${runId}.log`);
+		const outFd = fs.openSync(logPath, "a");
+		const prompt = this.buildAutoLearnPrompt(reason, settings);
+		const args = [
+			...spawnTarget.argsPrefix,
+			"--print",
+			"--name",
+			`Auto Learn ${runId}`,
+			"--model",
+			modelPattern,
+			prompt,
+		];
+		const child = spawn(spawnTarget.command, args, {
+			cwd: this.sessionManager.getCwd(),
+			detached: true,
+			stdio: ["ignore", outFd, outFd],
+			env: { ...process.env, PI_AUTO_LEARN_CHILD: "1" },
+		});
+		child.unref();
+		fs.closeSync(outFd);
+
+		const now = Date.now();
+		const state = this.pruneAutoLearnState(this.readAutoLearnState(), now);
+		state.lastLaunchByTenant = { ...(state.lastLaunchByTenant ?? {}), [this.getAutoLearnTenantKey()]: now };
+		state.runs = {
+			...(state.runs ?? {}),
+			[runId]: {
+				tenant: this.getAutoLearnTenantKey(),
+				pid: child.pid,
+				model: modelPattern,
+				reason,
+				startedAt: now,
+				expiresAt: now + settings.leaseMinutes * 60 * 1000,
+				cwd: this.sessionManager.getCwd(),
+				logPath,
+			},
+		};
+		this.writeAutoLearnState(state);
+		this.autoLearnLastStatus = `running ${modelPattern}`;
+		this.updateAutoLearnFooter();
+		return `Auto Learn started (${reason}) with ${modelPattern}. Log: ${logPath}`;
+	}
+
+	private maybeStartAutoLearn(): void {
+		if (process.env.PI_AUTO_LEARN_CHILD === "1") return;
+		const decision = this.evaluateAutoLearn(false);
+		if (!decision.shouldRun) {
+			this.autoLearnLastStatus = decision.reason;
+			this.updateAutoLearnFooter();
+			return;
+		}
+		const message = this.launchAutoLearn(decision.reason, false);
+		this.showStatus(message);
+	}
+
+	private updateAutoLearnFooter(): void {
+		const settings = this.getEffectiveAutoLearnSettings();
+		if (!settings.enabled) {
+			this.footerDataProvider.setExtensionStatus("auto-learn", undefined);
+			return;
+		}
+		this.footerDataProvider.setExtensionStatus(
+			"auto-learn",
+			theme.fg("accent", `learn: ${this.autoLearnLastStatus}`),
+		);
+		this.footer.invalidate();
+		this.ui.requestRender();
+	}
+
+	private formatAutoLearnStatus(): string {
+		const settings = this.getEffectiveAutoLearnSettings();
+		const decision = this.evaluateAutoLearn(false);
+		const state = this.pruneAutoLearnState(this.readAutoLearnState());
+		const runs = Object.entries(state.runs ?? {});
+		const contextText = decision.contextPercent === null ? "unknown" : `${decision.contextPercent.toFixed(1)}%`;
+		const cooldownText =
+			decision.cooldownRemainingMs > 0 ? `${Math.ceil(decision.cooldownRemainingMs / 60000)}m remaining` : "ready";
+		const runLines = runs.length
+			? runs.map(([id, run]) => `- ${id}: ${run.model}, pid=${run.pid ?? "?"}, log=${run.logPath}`).join("\n")
+			: "- none";
+		return `Auto Learn status\nEnabled: ${settings.enabled}\nModel: ${settings.model}\nNext decision: ${decision.shouldRun ? "ready" : decision.reason}\nMessages: ${decision.messageCount}/${settings.longSessionMessages}\nContext: ${contextText}/${settings.longSessionContextPercent}%\nCooldown: ${cooldownText}\nRunning leases: ${runs.length}/${settings.maxConcurrentLearners}\nRuns:\n${runLines}`;
+	}
+
+	private handleAutoLearnCommand(text: string): void {
+		const action = text.slice("/auto-learn".length).trim() || "status";
+		if (action === "run" || action === "now" || action === "run-now") {
+			this.showStatus(this.launchAutoLearn("manual", true));
+			return;
+		}
+		if (action === "status") {
+			this.chatContainer.addChild(new Spacer(1));
+			this.chatContainer.addChild(new Text(this.formatAutoLearnStatus(), 1, 0));
+			this.ui.requestRender();
+			return;
+		}
+		this.showStatus("Usage: /auto-learn [status|run]");
+	}
+
 	private showSettingsSelector(): void {
 		this.showSelector((done) => {
+			const projectSettings = this.settingsManager.getProjectSettings();
 			const selector = new SettingsSelectorComponent(
 				{
 					autoCompact: this.session.autoCompactionEnabled,
@@ -3950,6 +4399,14 @@ export class InteractiveMode {
 					clearOnShrink: this.settingsManager.getClearOnShrink(),
 					showTerminalProgress: this.settingsManager.getShowTerminalProgress(),
 					warnings: this.settingsManager.getWarnings(),
+					selfModification: this.settingsManager.getSelfModificationSettings(),
+					selfModificationScope: projectSettings.selfModification ? "project" : "global",
+					autoLearn: this.settingsManager.getAutoLearnSettings(),
+					autoLearnScope: projectSettings.autoLearn ? "project" : "global",
+					autoLearnModelOptions: this.getAutoLearnModelOptions(),
+					currentModelPattern: this.session.model
+						? `${this.session.model.provider}/${this.session.model.id}`
+						: undefined,
 				},
 				{
 					onAutoCompactChange: (enabled) => {
@@ -4070,6 +4527,25 @@ export class InteractiveMode {
 					},
 					onWarningsChange: (warnings) => {
 						this.settingsManager.setWarnings(warnings);
+					},
+					onSelfModificationChange: (settings, scope) => {
+						this.settingsManager.setSelfModificationSettings(settings, scope);
+						const validationMessage = this.validateSelfModificationSource(settings);
+						if (validationMessage) {
+							this.showWarning(validationMessage);
+						}
+						this.showStatus(
+							`Self modification settings saved to ${scope}. Start a new session or /reload for system-prompt guardrails to fully refresh.`,
+						);
+					},
+					onAutoLearnChange: (settings, scope) => {
+						this.settingsManager.setAutoLearnSettings(settings, scope);
+						const validationMessage = this.validateAutoLearnModelValue(settings.model);
+						if (validationMessage) {
+							this.showWarning(validationMessage);
+						}
+						this.updateAutoLearnFooter();
+						this.showStatus(`Auto Learn settings saved to ${scope}. Use /auto-learn status or /auto-learn run.`);
 					},
 					onCancel: () => {
 						done();

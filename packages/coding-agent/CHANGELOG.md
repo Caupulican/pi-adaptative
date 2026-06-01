@@ -2,6 +2,10 @@
 
 ## [Unreleased]
 
+### Added
+
+- Added interactive `/settings` controls for Pi self-modification and Auto Learn, including global/project save scopes, source-path validation, configured-account model selection, `/auto-learn status`, `/auto-learn run`, and an idle background Auto Learn scheduler.
+
 ## [0.78.4] - 2026-06-01
 
 ### Changed

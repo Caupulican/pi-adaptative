@@ -293,6 +293,36 @@ describe("SettingsManager", () => {
 				maxConcurrentLearners: 3,
 			});
 		});
+
+		it("should save project scoped autoLearn settings", async () => {
+			const settingsPath = join(projectDir, ".pi", "settings.json");
+			const manager = SettingsManager.create(projectDir, agentDir);
+
+			manager.setAutoLearnSettings({ enabled: true, model: "openai/gpt-5.4" }, "project");
+			await manager.flush();
+
+			const savedSettings = JSON.parse(readFileSync(settingsPath, "utf-8"));
+			expect(savedSettings.autoLearn).toEqual({
+				enabled: true,
+				model: "openai/gpt-5.4",
+			});
+		});
+	});
+
+	describe("selfModification", () => {
+		it("should save project scoped selfModification settings", async () => {
+			const settingsPath = join(projectDir, ".pi", "settings.json");
+			const manager = SettingsManager.create(projectDir, agentDir);
+
+			manager.setSelfModificationSettings({ enabled: true, sourcePath: "/src/pi-adaptative" }, "project");
+			await manager.flush();
+
+			const savedSettings = JSON.parse(readFileSync(settingsPath, "utf-8"));
+			expect(savedSettings.selfModification).toEqual({
+				enabled: true,
+				sourcePath: "/src/pi-adaptative",
+			});
+		});
 	});
 
 	describe("httpIdleTimeoutMs", () => {

@@ -1114,7 +1114,15 @@ export class SettingsManager {
 		};
 	}
 
-	setSelfModificationSettings(settings: SelfModificationSettings): void {
+	setSelfModificationSettings(settings: SelfModificationSettings, scope: SettingsScope = "global"): void {
+		if (scope === "project") {
+			const projectSettings = structuredClone(this.projectSettings);
+			projectSettings.selfModification = { ...settings };
+			this.markProjectModified("selfModification");
+			this.saveProjectSettings(projectSettings);
+			return;
+		}
+
 		this.globalSettings.selfModification = { ...settings };
 		this.markModified("selfModification");
 		this.save();
@@ -1124,7 +1132,15 @@ export class SettingsManager {
 		return { ...(this.settings.autoLearn ?? {}) };
 	}
 
-	setAutoLearnSettings(settings: AutoLearnSettings): void {
+	setAutoLearnSettings(settings: AutoLearnSettings, scope: SettingsScope = "global"): void {
+		if (scope === "project") {
+			const projectSettings = structuredClone(this.projectSettings);
+			projectSettings.autoLearn = { ...settings };
+			this.markProjectModified("autoLearn");
+			this.saveProjectSettings(projectSettings);
+			return;
+		}
+
 		this.globalSettings.autoLearn = { ...settings };
 		this.markModified("autoLearn");
 		this.save();

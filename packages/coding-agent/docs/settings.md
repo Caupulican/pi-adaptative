@@ -75,6 +75,8 @@ Set `PI_SKIP_VERSION_CHECK=1` to disable the Pi version update check. Use `--off
 | `selfModification.enabled` | boolean | `false` | Allow the agent to modify Pi's own source/harness when explicitly tasked |
 | `selfModification.sourcePath` | string | - | Path to the `pi-adaptative` source checkout the agent must use for self-modification |
 
+Use `/settings` → **Self modification** to configure this interactively. The submenu lets you choose whether to save globally or to the current project's `.pi/settings.json`. Pi warns when the path does not look like a `pi-adaptative` checkout, and a new session or `/reload` is recommended after changing guardrail settings.
+
 When disabled, the system prompt tells the agent not to edit Pi core, the installed runtime, or harness source for self-evolution. To permit self-modification, enable the setting and provide the source checkout path:
 
 ```json
@@ -100,6 +102,8 @@ The agent is instructed to edit only that source checkout, preserve unrelated ch
 | `autoLearn.leaseMinutes` | number | `90` | Shared-state lease duration for a running background learner |
 | `autoLearn.maxConcurrentLearners` | number | `2` | Maximum running Auto Learn background learners across all session tenants |
 | `autoLearn.applyHighConfidence` | boolean | `false` | Allow the learner to apply high-confidence memory candidates; tooling/core changes remain proposal/approval-gated |
+
+Use `/settings` → **Auto Learn** to configure this interactively, including the scavenger model. The submenu lets you choose whether to save globally or to the current project's `.pi/settings.json`. The model picker prioritizes models from currently configured subscription/API accounts and still offers a manual custom-pattern entry. Use `/auto-learn status` to inspect trigger state, cooldown, and running leases; use `/auto-learn run` to start one learner immediately.
 
 When enabled, Auto Learn uses a shared state file under the learning extension data directory to coordinate non-colliding background learners across sessions. Each long session gets its own tenant lease, and all learners read/renew the same state before scavenging stored histories for tooling capability and agent-behavior improvements. Learners also query available user/project memory first, using existing rules, preferences, corrections, and project facts to polish candidates, avoid duplicates, and improve accuracy.
 

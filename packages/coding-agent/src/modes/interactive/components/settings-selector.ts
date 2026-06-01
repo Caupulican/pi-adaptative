@@ -3,6 +3,8 @@ import type { Transport } from "@earendil-works/pi-ai";
 import {
 	Container,
 	getCapabilities,
+	getKeybindings,
+	Input,
 	type SelectItem,
 	SelectList,
 	type SelectListLayoutOptions,
@@ -12,7 +14,12 @@ import {
 	Text,
 } from "@earendil-works/pi-tui";
 import { formatHttpIdleTimeoutMs, HTTP_IDLE_TIMEOUT_CHOICES } from "../../../core/http-dispatcher.ts";
-import type { WarningSettings } from "../../../core/settings-manager.ts";
+import type {
+	AutoLearnSettings,
+	SelfModificationSettings,
+	SettingsScope,
+	WarningSettings,
+} from "../../../core/settings-manager.ts";
 import { getSelectListTheme, getSettingsListTheme, theme } from "../theme/theme.ts";
 import { DynamicBorder } from "./dynamic-border.ts";
 import { keyDisplayText } from "./keybinding-hints.ts";
@@ -22,6 +29,8 @@ const SETTINGS_SUBMENU_SELECT_LIST_LAYOUT: SelectListLayoutOptions = {
 	maxPrimaryColumnWidth: 32,
 };
 
+const AUTO_LEARN_CUSTOM_MODEL_VALUE = "__custom_auto_learn_model__";
+
 const THINKING_DESCRIPTIONS: Record<ThinkingLevel, string> = {
 	off: "No reasoning",
 	minimal: "Very brief reasoning (~1k tokens)",
@@ -30,6 +39,88 @@ const THINKING_DESCRIPTIONS: Record<ThinkingLevel, string> = {
 	high: "Deep reasoning (~16k tokens)",
 	xhigh: "Maximum reasoning (~32k tokens)",
 };
+
+const AUTO_LEARN_DEFAULTS = {
+	model: "active",
+	longSessionMessages: 32,
+	longSessionContextPercent: 70,
+	cooldownMinutes: 120,
+	leaseMinutes: 90,
+	maxConcurrentLearners: 2,
+	applyHighConfidence: false,
+} as const;
+
+function booleanSettingValue(value: boolean | undefined, defaultValue = false): string {
+	return (value ?? defaultValue) ? "true" : "false";
+}
+
+function optionalStringValue(value: string | undefined, fallback = "(not set)"): string {
+	const trimmed = value?.trim();
+	return trimmed && trimmed.length > 0 ? trimmed : fallback;
+}
+
+function normalizeOptionalString(value: string): string | undefined {
+	const trimmed = value.trim();
+	return trimmed.length > 0 ? trimmed : undefined;
+}
+
+function numberSettingValue(value: number | undefined, defaultValue: number): string {
+	return String(value ?? defaultValue);
+}
+
+function autoLearnModelValue(settings: AutoLearnSettings): string {
+	return optionalStringValue(settings.model, AUTO_LEARN_DEFAULTS.model);
+}
+
+function selfModificationSummary(settings: SelfModificationSettings): string {
+	if (!(settings.enabled ?? false)) return "disabled";
+	return optionalStringValue(settings.sourcePath) === "(not set)" ? "enabled (missing path)" : "enabled";
+}
+
+function autoLearnSummary(settings: AutoLearnSettings): string {
+	return settings.enabled ? `enabled (${autoLearnModelValue(settings)})` : "disabled";
+}
+
+function buildAutoLearnModelOptions(
+	settings: AutoLearnSettings,
+	configuredModelOptions: SelectItem[] | undefined,
+	currentModelPattern: string | undefined,
+): SelectItem[] {
+	const currentValue = autoLearnModelValue(settings);
+	const options: SelectItem[] = [
+		{
+			value: AUTO_LEARN_DEFAULTS.model,
+			label: "active",
+			description: currentModelPattern
+				? `Use the current session model (${currentModelPattern})`
+				: "Use the current session model",
+		},
+	];
+	const seen = new Set(options.map((option) => option.value));
+
+	for (const option of configuredModelOptions ?? []) {
+		if (seen.has(option.value)) continue;
+		options.push(option);
+		seen.add(option.value);
+	}
+
+	if (currentValue !== AUTO_LEARN_DEFAULTS.model && !seen.has(currentValue)) {
+		options.push({
+			value: currentValue,
+			label: currentValue,
+			description: "Current custom setting",
+		});
+		seen.add(currentValue);
+	}
+
+	options.push({
+		value: AUTO_LEARN_CUSTOM_MODEL_VALUE,
+		label: "Manual / custom…",
+		description: "Type a model pattern not listed above",
+	});
+
+	return options;
+}
 
 export interface SettingsConfig {
 	autoCompact: boolean;
@@ -58,6 +149,12 @@ export interface SettingsConfig {
 	clearOnShrink: boolean;
 	showTerminalProgress: boolean;
 	warnings: WarningSettings;
+	selfModification: { enabled: boolean; sourcePath?: string };
+	selfModificationScope?: SettingsScope;
+	autoLearn: AutoLearnSettings;
+	autoLearnScope?: SettingsScope;
+	currentModelPattern?: string;
+	autoLearnModelOptions?: SelectItem[];
 }
 
 export interface SettingsCallbacks {
@@ -86,7 +183,370 @@ export interface SettingsCallbacks {
 	onClearOnShrinkChange: (enabled: boolean) => void;
 	onShowTerminalProgressChange: (enabled: boolean) => void;
 	onWarningsChange: (warnings: WarningSettings) => void;
+	onSelfModificationChange: (settings: SelfModificationSettings, scope: SettingsScope) => void;
+	onAutoLearnChange: (settings: AutoLearnSettings, scope: SettingsScope) => void;
 	onCancel: () => void;
+}
+
+class TextInputSubmenu extends Container {
+	private input: Input;
+
+	constructor(
+		title: string,
+		description: string,
+		currentValue: string,
+		onSubmit: (value: string) => void,
+		onCancel: () => void,
+		emptyHint = "empty clears the setting",
+	) {
+		super();
+
+		this.addChild(new Text(theme.bold(theme.fg("accent", title)), 0, 0));
+		if (description) {
+			this.addChild(new Spacer(1));
+			this.addChild(new Text(theme.fg("muted", description), 0, 0));
+		}
+		this.addChild(new Spacer(1));
+
+		this.input = new Input();
+		this.input.setValue(currentValue);
+		this.input.focused = true;
+		this.input.onSubmit = onSubmit;
+		this.input.onEscape = onCancel;
+		this.addChild(this.input);
+
+		this.addChild(new Spacer(1));
+		this.addChild(new Text(theme.fg("dim", `  Enter to save · Esc to go back · ${emptyHint}`), 0, 0));
+	}
+
+	handleInput(data: string): void {
+		this.input.handleInput(data);
+	}
+}
+
+class AutoLearnModelSelectionSubmenu extends Container {
+	private searchInput: Input;
+	private selectList: SelectList;
+	private customInput: TextInputSubmenu | null = null;
+
+	constructor(options: SelectItem[], currentValue: string, onSelect: (value: string) => void, onCancel: () => void) {
+		super();
+
+		this.addChild(new Text(theme.bold(theme.fg("accent", "Auto Learn Scavenger Model")), 0, 0));
+		this.addChild(new Spacer(1));
+		this.addChild(
+			new Text(
+				theme.fg(
+					"muted",
+					"Choose active or a model from currently configured subscription/API accounts. Type to filter; choose manual for a custom pattern.",
+				),
+				0,
+				0,
+			),
+		);
+		this.addChild(new Spacer(1));
+
+		this.searchInput = new Input();
+		this.searchInput.focused = true;
+		this.addChild(this.searchInput);
+		this.addChild(new Spacer(1));
+
+		this.selectList = new SelectList(
+			options,
+			Math.min(options.length, 10),
+			getSelectListTheme(),
+			SETTINGS_SUBMENU_SELECT_LIST_LAYOUT,
+		);
+
+		const currentIndex = options.findIndex((option) => option.value === currentValue);
+		if (currentIndex !== -1) {
+			this.selectList.setSelectedIndex(currentIndex);
+		}
+
+		this.selectList.onSelect = (item) => {
+			if (item.value === AUTO_LEARN_CUSTOM_MODEL_VALUE) {
+				this.customInput = new TextInputSubmenu(
+					"Custom Auto Learn Model",
+					'Enter "active" or a provider/model pattern like "openai/gpt-5.4".',
+					currentValue === AUTO_LEARN_DEFAULTS.model ? "" : currentValue,
+					(value) => {
+						onSelect(normalizeOptionalString(value) ?? AUTO_LEARN_DEFAULTS.model);
+					},
+					() => {
+						this.customInput = null;
+					},
+					'empty uses "active"',
+				);
+				return;
+			}
+			onSelect(item.value);
+		};
+		this.selectList.onCancel = onCancel;
+		this.addChild(this.selectList);
+
+		this.addChild(new Spacer(1));
+		this.addChild(new Text(theme.fg("dim", "  Type to filter · Enter to select · Esc to go back"), 0, 0));
+	}
+
+	handleInput(data: string): void {
+		if (this.customInput) {
+			this.customInput.handleInput(data);
+			return;
+		}
+
+		const kb = getKeybindings();
+		if (kb.matches(data, "tui.select.up") || kb.matches(data, "tui.select.down")) {
+			this.selectList.handleInput(data);
+			return;
+		}
+		if (kb.matches(data, "tui.select.confirm") || kb.matches(data, "tui.select.cancel")) {
+			this.selectList.handleInput(data);
+			return;
+		}
+
+		this.searchInput.handleInput(data);
+		this.selectList.setFilter(this.searchInput.getValue());
+	}
+
+	render(width: number): string[] {
+		return this.customInput ? this.customInput.render(width) : super.render(width);
+	}
+
+	invalidate(): void {
+		super.invalidate();
+		this.customInput?.invalidate?.();
+	}
+}
+
+class SelfModificationSettingsSubmenu extends Container {
+	private settingsList: SettingsList;
+	private state: SelfModificationSettings;
+	private scope: SettingsScope;
+
+	constructor(
+		settings: SelfModificationSettings,
+		onChange: (settings: SelfModificationSettings, scope: SettingsScope) => void,
+		onCancel: () => void,
+		scope: SettingsScope = "global",
+	) {
+		super();
+
+		this.state = { ...settings, enabled: settings.enabled ?? false };
+		this.scope = scope;
+
+		const items: SettingItem[] = [
+			{
+				id: "self-modification-scope",
+				label: "Save scope",
+				description:
+					"Save this self-modification configuration globally or in the current project's .pi/settings.json",
+				currentValue: this.scope,
+				values: ["global", "project"],
+			},
+			{
+				id: "self-modification-enabled",
+				label: "Enabled",
+				description: "Allow agents to modify Pi's own source/harness only when explicitly tasked",
+				currentValue: booleanSettingValue(this.state.enabled),
+				values: ["true", "false"],
+			},
+			{
+				id: "self-modification-source-path",
+				label: "Source path",
+				description: "Path to the pi-adaptative source checkout agents may edit for self-evolution",
+				currentValue: optionalStringValue(this.state.sourcePath),
+				submenu: (_currentValue, done) =>
+					new TextInputSubmenu(
+						"Pi-adaptative Source Path",
+						"Set the source checkout path used by self-evolution guardrails. Empty clears it.",
+						this.state.sourcePath ?? "",
+						(value) => {
+							const sourcePath = normalizeOptionalString(value);
+							this.state = { ...this.state, sourcePath };
+							onChange({ ...this.state }, this.scope);
+							done(optionalStringValue(sourcePath));
+						},
+						() => done(),
+					),
+			},
+		];
+
+		this.settingsList = new SettingsList(
+			items,
+			Math.min(items.length, 10),
+			getSettingsListTheme(),
+			(id, newValue) => {
+				switch (id) {
+					case "self-modification-scope":
+						this.scope = newValue as SettingsScope;
+						onChange({ ...this.state }, this.scope);
+						break;
+					case "self-modification-enabled":
+						this.state = { ...this.state, enabled: newValue === "true" };
+						onChange({ ...this.state }, this.scope);
+						break;
+				}
+			},
+			onCancel,
+		);
+
+		this.addChild(this.settingsList);
+	}
+
+	handleInput(data: string): void {
+		this.settingsList.handleInput(data);
+	}
+}
+
+class AutoLearnSettingsSubmenu extends Container {
+	private settingsList: SettingsList;
+	private state: AutoLearnSettings;
+	private scope: SettingsScope;
+
+	constructor(
+		settings: AutoLearnSettings,
+		currentModelPattern: string | undefined,
+		modelOptions: SelectItem[] | undefined,
+		onChange: (settings: AutoLearnSettings, scope: SettingsScope) => void,
+		onCancel: () => void,
+		scope: SettingsScope = "global",
+	) {
+		super();
+
+		this.state = { ...settings };
+		this.scope = scope;
+		const modelDescription = currentModelPattern
+			? `Model for background learning. "active" uses ${currentModelPattern}; configured subscription/API models are listed first.`
+			: 'Model for background learning. Use "active" for the current session model, or choose a configured subscription/API model.';
+		const selectableModelOptions = buildAutoLearnModelOptions(this.state, modelOptions, currentModelPattern);
+
+		const items: SettingItem[] = [
+			{
+				id: "auto-learn-scope",
+				label: "Save scope",
+				description: "Save this Auto Learn configuration globally or in the current project's .pi/settings.json",
+				currentValue: this.scope,
+				values: ["global", "project"],
+			},
+			{
+				id: "auto-learn-enabled",
+				label: "Enabled",
+				description: "Autonomously trigger background history scavenging for long sessions",
+				currentValue: booleanSettingValue(this.state.enabled),
+				values: ["true", "false"],
+			},
+			{
+				id: "auto-learn-model",
+				label: "Scavenger model",
+				description: modelDescription,
+				currentValue: autoLearnModelValue(this.state),
+				submenu: (_currentValue, done) =>
+					new AutoLearnModelSelectionSubmenu(
+						selectableModelOptions,
+						autoLearnModelValue(this.state),
+						(value) => {
+							this.state = { ...this.state, model: value };
+							onChange({ ...this.state }, this.scope);
+							done(autoLearnModelValue(this.state));
+						},
+						() => done(),
+					),
+			},
+			{
+				id: "auto-learn-long-session-messages",
+				label: "Message trigger",
+				description: "Trigger after this many message entries in the active branch",
+				currentValue: numberSettingValue(this.state.longSessionMessages, AUTO_LEARN_DEFAULTS.longSessionMessages),
+				values: ["16", "32", "64", "128", "256"],
+			},
+			{
+				id: "auto-learn-context-percent",
+				label: "Context trigger %",
+				description: "Trigger when current context usage reaches this percentage",
+				currentValue: numberSettingValue(
+					this.state.longSessionContextPercent,
+					AUTO_LEARN_DEFAULTS.longSessionContextPercent,
+				),
+				values: ["50", "60", "70", "80", "90"],
+			},
+			{
+				id: "auto-learn-cooldown-minutes",
+				label: "Cooldown minutes",
+				description: "Per-session-tenant cooldown between learner launches",
+				currentValue: numberSettingValue(this.state.cooldownMinutes, AUTO_LEARN_DEFAULTS.cooldownMinutes),
+				values: ["15", "30", "60", "120", "240"],
+			},
+			{
+				id: "auto-learn-lease-minutes",
+				label: "Lease minutes",
+				description: "Shared-state lease duration for a running background learner",
+				currentValue: numberSettingValue(this.state.leaseMinutes, AUTO_LEARN_DEFAULTS.leaseMinutes),
+				values: ["30", "60", "90", "180"],
+			},
+			{
+				id: "auto-learn-max-concurrent",
+				label: "Max learners",
+				description: "Maximum running Auto Learn background learners across all session tenants",
+				currentValue: numberSettingValue(
+					this.state.maxConcurrentLearners,
+					AUTO_LEARN_DEFAULTS.maxConcurrentLearners,
+				),
+				values: ["1", "2", "3", "4"],
+			},
+			{
+				id: "auto-learn-apply-high-confidence",
+				label: "Apply high confidence",
+				description:
+					"Allow high-confidence memory candidates to be applied automatically; tooling/core changes stay approval-gated",
+				currentValue: booleanSettingValue(this.state.applyHighConfidence, AUTO_LEARN_DEFAULTS.applyHighConfidence),
+				values: ["false", "true"],
+			},
+		];
+
+		this.settingsList = new SettingsList(
+			items,
+			Math.min(items.length, 10),
+			getSettingsListTheme(),
+			(id, newValue) => {
+				switch (id) {
+					case "auto-learn-scope":
+						this.scope = newValue as SettingsScope;
+						break;
+					case "auto-learn-enabled":
+						this.state = { ...this.state, enabled: newValue === "true" };
+						break;
+					case "auto-learn-long-session-messages":
+						this.state = { ...this.state, longSessionMessages: parseInt(newValue, 10) };
+						break;
+					case "auto-learn-context-percent":
+						this.state = { ...this.state, longSessionContextPercent: parseInt(newValue, 10) };
+						break;
+					case "auto-learn-cooldown-minutes":
+						this.state = { ...this.state, cooldownMinutes: parseInt(newValue, 10) };
+						break;
+					case "auto-learn-lease-minutes":
+						this.state = { ...this.state, leaseMinutes: parseInt(newValue, 10) };
+						break;
+					case "auto-learn-max-concurrent":
+						this.state = { ...this.state, maxConcurrentLearners: parseInt(newValue, 10) };
+						break;
+					case "auto-learn-apply-high-confidence":
+						this.state = { ...this.state, applyHighConfidence: newValue === "true" };
+						break;
+					default:
+						return;
+				}
+				onChange({ ...this.state }, this.scope);
+			},
+			onCancel,
+		);
+
+		this.addChild(this.settingsList);
+	}
+
+	handleInput(data: string): void {
+		this.settingsList.handleInput(data);
+	}
 }
 
 /**
@@ -210,6 +670,8 @@ export class SettingsSelectorComponent extends Container {
 		const supportsImages = getCapabilities().images;
 		const followUpKey = keyDisplayText("app.message.followUp");
 		let currentWarnings = { ...config.warnings };
+		let currentSelfModification: SelfModificationSettings = { ...config.selfModification };
+		let currentAutoLearn: AutoLearnSettings = { ...config.autoLearn };
 
 		const items: SettingItem[] = [
 			{
@@ -290,6 +752,40 @@ export class SettingsSelectorComponent extends Container {
 				description: "Default filter when opening /tree",
 				currentValue: config.treeFilterMode,
 				values: ["default", "no-tools", "user-only", "labeled-only", "all"],
+			},
+			{
+				id: "self-modification",
+				label: "Self modification",
+				description: "Enable Pi self-evolution guardrails and configure the editable pi-adaptative source checkout",
+				currentValue: selfModificationSummary(currentSelfModification),
+				submenu: (_currentValue, done) =>
+					new SelfModificationSettingsSubmenu(
+						currentSelfModification,
+						(settings, scope) => {
+							currentSelfModification = { ...settings };
+							callbacks.onSelfModificationChange(settings, scope);
+						},
+						() => done(selfModificationSummary(currentSelfModification)),
+						config.selfModificationScope ?? "global",
+					),
+			},
+			{
+				id: "auto-learn",
+				label: "Auto Learn",
+				description: "Configure autonomous background learning/scavenging for long sessions",
+				currentValue: autoLearnSummary(currentAutoLearn),
+				submenu: (_currentValue, done) =>
+					new AutoLearnSettingsSubmenu(
+						currentAutoLearn,
+						config.currentModelPattern,
+						config.autoLearnModelOptions,
+						(settings, scope) => {
+							currentAutoLearn = { ...settings };
+							callbacks.onAutoLearnChange(settings, scope);
+						},
+						() => done(autoLearnSummary(currentAutoLearn)),
+						config.autoLearnScope ?? "global",
+					),
 			},
 			{
 				id: "warnings",
