@@ -2,7 +2,7 @@ import { mkdirSync, readFileSync, realpathSync, rmSync, writeFileSync } from "no
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
-import { ENV_AGENT_DIR, PACKAGE_NAME, VERSION } from "../src/config.ts";
+import { APP_NAME, ENV_AGENT_DIR, PACKAGE_NAME, VERSION } from "../src/config.ts";
 import { main } from "../src/main.ts";
 
 describe("package commands", () => {
@@ -94,7 +94,7 @@ describe("package commands", () => {
 
 			const stdout = logSpy.mock.calls.map(([message]) => String(message)).join("\n");
 			expect(stdout).toContain("Usage:");
-			expect(stdout).toContain("pi install <source> [-l]");
+			expect(stdout).toContain(`${APP_NAME} install <source> [-l]`);
 			expect(errorSpy).not.toHaveBeenCalled();
 			expect(process.exitCode).toBeUndefined();
 		} finally {
@@ -111,7 +111,7 @@ describe("package commands", () => {
 
 			const stderr = errorSpy.mock.calls.map(([message]) => String(message)).join("\n");
 			expect(stderr).toContain('Unknown option --unknown for "install".');
-			expect(stderr).toContain('Use "pi --help" or "pi install <source> [-l]".');
+			expect(stderr).toContain(`Use "${APP_NAME} --help" or "${APP_NAME} install <source> [-l]".`);
 			expect(process.exitCode).toBe(1);
 		} finally {
 			errorSpy.mockRestore();
@@ -126,7 +126,7 @@ describe("package commands", () => {
 
 			const stderr = errorSpy.mock.calls.map(([message]) => String(message)).join("\n");
 			expect(stderr).toContain("Missing install source.");
-			expect(stderr).toContain("Usage: pi install <source> [-l]");
+			expect(stderr).toContain(`Usage: ${APP_NAME} install <source> [-l]`);
 			expect(stderr).not.toContain("at ");
 			expect(process.exitCode).toBe(1);
 		} finally {

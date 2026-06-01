@@ -2,6 +2,17 @@
 
 ## [Unreleased]
 
+## [0.78.4] - 2026-06-01
+
+### Changed
+
+- Restored eager startup injection for `AGENTS.md`, `CLAUDE.md`, and `GEMINI.md` context files; lazy startup loading now applies to skills and agent resources only.
+
+### Fixed
+
+- Restored extension `context` handlers in the agent context transform pipeline after auto-compaction support.
+- Updated package-command and pending-tool panel regression coverage for the Pi Adaptative command name and reusable tool-panel registry.
+
 ## [0.78.3] - 2026-06-01
 
 ### New Features

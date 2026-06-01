@@ -1,7 +1,7 @@
 /**
  * Context Files (AGENTS.md)
  *
- * Context files provide project-specific instructions that can be lazy-loaded by path.
+ * Context files provide project-specific instructions injected into the startup prompt.
  */
 
 import {
@@ -16,7 +16,7 @@ const loader = new DefaultResourceLoader({
 	cwd: process.cwd(),
 	agentDir: getAgentDir(),
 	agentsFilesOverride: (current) => ({
-		agentsFiles: [...current.agentsFiles, { path: "/virtual/AGENTS.md" }],
+		agentsFiles: [...current.agentsFiles, { path: "/virtual/AGENTS.md", content: "Virtual project instructions" }],
 	}),
 });
 await loader.reload();

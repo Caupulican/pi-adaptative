@@ -18,7 +18,7 @@ export interface BuildSystemPromptOptions {
 	appendSystemPrompt?: string;
 	/** Working directory. */
 	cwd: string;
-	/** Lazy-loadable project/agent instruction file locations. */
+	/** Eagerly loaded project/agent instruction files. */
 	contextFiles?: Array<{ path: string; content?: string }>;
 	/** Discovered skills; startup prompt lists only lazy-loadable locations. */
 	skills?: Skill[];
@@ -33,23 +33,19 @@ Adaptative Agent Persona:
 - Maintain a clear contract between objective, evidence, and completion. Do not call work done until requirements are mapped to files, commands, or runtime observations.
 - Keep durable learning concise: store stable preferences, rules, fixes, and source pointers; do not preserve transient execution noise.`;
 
-function formatContextFileLocationsForPrompt(contextFiles: Array<{ path: string; content?: string }>): string {
+function formatContextFilesForPrompt(contextFiles: Array<{ path: string; content?: string }>): string {
 	if (contextFiles.length === 0) {
 		return "";
 	}
 
-	const lines = [
-		"\n\n<project_context>",
-		"Project-specific instruction files are available for lazy loading. Their contents are not injected into the startup prompt; use the read tool only when their scope is relevant.",
-		"",
-		"<available_context_files>",
-	];
+	const lines = ["\n\n<project_context>", "", "Project-specific instructions and guidelines:", ""];
 
-	for (const { path } of contextFiles) {
-		lines.push(`  <context_file path="${escapeXml(path)}" />`);
+	for (const { path, content } of contextFiles) {
+		lines.push(`<project_instructions path="${escapeXml(path)}">`);
+		lines.push(content ?? "");
+		lines.push("</project_instructions>", "");
 	}
 
-	lines.push("</available_context_files>");
 	lines.push("</project_context>");
 	return lines.join("\n");
 }
@@ -98,7 +94,7 @@ export function buildSystemPrompt(options: BuildSystemPromptOptions): string {
 			prompt += appendSection;
 		}
 
-		prompt += formatContextFileLocationsForPrompt(contextFiles);
+		prompt += formatContextFilesForPrompt(contextFiles);
 
 		// Append skills section (only if read tool is available)
 		const customPromptHasRead = !selectedTools || selectedTools.includes("read");
@@ -183,7 +179,7 @@ Pi documentation (read only when the user asks about pi itself, its SDK, extensi
 		prompt += appendSection;
 	}
 
-	prompt += formatContextFileLocationsForPrompt(contextFiles);
+	prompt += formatContextFilesForPrompt(contextFiles);
 
 	// Append skills section (only if read tool is available)
 	if (hasRead && skills.length > 0) {

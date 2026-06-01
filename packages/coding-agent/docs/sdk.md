@@ -348,7 +348,7 @@ const { session } = await createAgentSession({
   - `.pi/skills/`
   - `.agents/skills/` in `cwd` and ancestor directories (up to git repo root, or filesystem root when not in a repo)
 - Project prompts (`.pi/prompts/`)
-- Context files (`AGENTS.md` walking up from cwd)
+- Context files (`AGENTS.md`, `CLAUDE.md`, or `GEMINI.md` walking up from cwd)
 - Session directory naming
 
 `agentDir` is used by `DefaultResourceLoader` for:
@@ -357,7 +357,7 @@ const { session } = await createAgentSession({
   - `skills/` under `agentDir` (for example `~/.pi/agent/skills/`)
   - `~/.agents/skills/`
 - Global prompts (`prompts/`)
-- Global context file (`AGENTS.md`)
+- Global context file (`AGENTS.md`, `CLAUDE.md`, or `GEMINI.md`)
 - Settings (`settings.json`)
 - Custom models (`models.json`)
 - Credentials (`auth.json`)
@@ -633,7 +633,7 @@ const loader = new DefaultResourceLoader({
   agentsFilesOverride: (current) => ({
     agentsFiles: [
       ...current.agentsFiles,
-      { path: "/virtual/AGENTS.md" },
+      { path: "/virtual/AGENTS.md", content: "Virtual project instructions" },
     ],
   }),
 });

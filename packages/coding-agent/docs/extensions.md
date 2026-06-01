@@ -480,7 +480,7 @@ pi.on("before_agent_start", async (event, ctx) => {
   //   .promptGuidelines - custom guideline bullets
   //   .appendSystemPrompt - text from --append-system-prompt flags
   //   .cwd - working directory
-  //   .contextFiles - lazy-loadable AGENTS.md/CLAUDE.md file locations
+  //   .contextFiles - eagerly loaded AGENTS.md/CLAUDE.md/GEMINI.md context files
   //   .skills - discovered skills; startup prompt includes locations only, not frontmatter
 
   return {
@@ -496,7 +496,7 @@ pi.on("before_agent_start", async (event, ctx) => {
 });
 ```
 
-The `systemPromptOptions` field gives extensions access to the same structured data Pi uses to build the system prompt. This lets you inspect what Pi has discovered — custom prompts, guidelines, tool snippets, context file locations, skills — without re-discovering resources or re-parsing flags. Use it when your extension needs to make deep, informed changes to the system prompt while respecting user-provided configuration.
+The `systemPromptOptions` field gives extensions access to the same structured data Pi uses to build the system prompt. This lets you inspect what Pi has discovered — custom prompts, guidelines, tool snippets, context file contents, skills — without re-discovering resources or re-parsing flags. Use it when your extension needs to make deep, informed changes to the system prompt while respecting user-provided configuration.
 
 Inside `before_agent_start`, `event.systemPrompt` and `ctx.getSystemPrompt()` both reflect the chained system prompt as of the current handler. Later `before_agent_start` handlers can still modify it again.
 

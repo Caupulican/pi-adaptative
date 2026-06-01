@@ -60,18 +60,18 @@ describe("buildSystemPrompt", () => {
 		});
 	});
 
-	describe("lazy startup resources", () => {
-		test("lists context file locations without injecting AGENTS content", () => {
+	describe("startup resources", () => {
+		test("injects context file contents at startup", () => {
 			const prompt = buildSystemPrompt({
 				contextFiles: [{ path: "/repo/AGENTS.md", content: "SECRET PROJECT INSTRUCTIONS" }],
 				skills: [],
 				cwd: process.cwd(),
 			});
 
-			expect(prompt).toContain('<context_file path="/repo/AGENTS.md" />');
-			expect(prompt).toContain("Project-specific instruction files are available for lazy loading");
-			expect(prompt).not.toContain("SECRET PROJECT INSTRUCTIONS");
-			expect(prompt).not.toContain("<project_instructions");
+			expect(prompt).toContain('<project_instructions path="/repo/AGENTS.md">');
+			expect(prompt).toContain("Project-specific instructions and guidelines");
+			expect(prompt).toContain("SECRET PROJECT INSTRUCTIONS");
+			expect(prompt).not.toContain("available_context_files");
 		});
 
 		test("lists skill locations without injecting skill frontmatter", () => {

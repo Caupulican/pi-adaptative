@@ -300,12 +300,12 @@ Use `--offline` or `PI_OFFLINE=1` to disable all startup network operations desc
 
 ## Context Files
 
-Pi Adaptative discovers `AGENTS.md` (or `CLAUDE.md`) locations at startup from:
-- `~/.pi/agent/AGENTS.md` (global)
+Pi Adaptative discovers `AGENTS.md`, `CLAUDE.md`, and `GEMINI.md` context files at startup from:
+- `AGENTS.md`, `CLAUDE.md`, or `GEMINI.md` in `~/.pi/agent/` (global)
 - Parent directories (walking up from cwd)
 - Current directory
 
-Use these files for project instructions, conventions, common commands, and safety rules. Their contents are lazy-loaded by path with the `read` tool instead of being concatenated into every startup prompt.
+Use these files for project instructions, conventions, common commands, and safety rules. Their contents are injected into the startup system prompt so every session starts with the active project context.
 
 Disable context file discovery with `--no-context-files` (or `-nc`).
 
@@ -573,7 +573,7 @@ Available built-in tools: `read`, `bash`, `edit`, `write`, `grep`, `find`, `ls`
 | `--no-prompt-templates` | Disable prompt template discovery |
 | `--theme <path>` | Load theme (repeatable) |
 | `--no-themes` | Disable theme discovery |
-| `--no-context-files`, `-nc` | Disable AGENTS.md and CLAUDE.md context file discovery |
+| `--no-context-files`, `-nc` | Disable AGENTS.md, CLAUDE.md, and GEMINI.md context file discovery |
 
 Combine `--no-*` with explicit flags to load exactly what you need, ignoring settings.json (e.g., `--no-extensions -e ./my-ext.ts`).
 

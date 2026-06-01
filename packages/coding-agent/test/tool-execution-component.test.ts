@@ -545,6 +545,14 @@ describe("ToolExecutionComponent parity", () => {
 			absent: undefined,
 		},
 		{
+			title: "GEMINI.md",
+			path: join(process.cwd(), "GEMINI.md"),
+			content: "Hidden Gemini instructions",
+			compact: "read resource GEMINI.md",
+			hidden: "Hidden Gemini instructions",
+			absent: undefined,
+		},
+		{
 			title: "Pi documentation",
 			path: getReadmePath(),
 			content: "Hidden docs content",

@@ -410,25 +410,29 @@ export class AgentSession {
 		this.agent.transformContext = async (messages, signal) => {
 			const transformed = previousTransformContext ? await previousTransformContext(messages, signal) : messages;
 			const authoritativeMessages = this.agent.state.messages.length > 0 ? this.agent.state.messages : transformed;
+			let currentMessages = authoritativeMessages;
 			try {
 				const settings = this.settingsManager.getCompactionSettings();
 				const contextWindow = this.model?.contextWindow ?? 0;
-				if (!settings.enabled || contextWindow <= 0 || this.isCompacting) {
-					return authoritativeMessages;
+				if (settings.enabled && contextWindow > 0 && !this.isCompacting) {
+					const contextTokens = this._estimateCurrentContextTokens(authoritativeMessages);
+					if (shouldCompact(contextTokens, contextWindow, settings)) {
+						const latestBefore = getLatestCompactionEntry(this.sessionManager.getBranch())?.id;
+						await this._runAutoCompaction("threshold", false);
+						const latestAfter = getLatestCompactionEntry(this.sessionManager.getBranch())?.id;
+						if (latestAfter && latestAfter !== latestBefore) {
+							currentMessages = this.agent.state.messages.slice();
+						}
+					}
 				}
-				const contextTokens = this._estimateCurrentContextTokens(authoritativeMessages);
-				if (!shouldCompact(contextTokens, contextWindow, settings)) {
-					return authoritativeMessages;
-				}
-				const latestBefore = getLatestCompactionEntry(this.sessionManager.getBranch())?.id;
-				await this._runAutoCompaction("threshold", false);
-				const latestAfter = getLatestCompactionEntry(this.sessionManager.getBranch())?.id;
-				return latestAfter && latestAfter !== latestBefore
-					? this.agent.state.messages.slice()
-					: authoritativeMessages;
 			} catch {
-				return authoritativeMessages;
+				currentMessages = authoritativeMessages;
 			}
+
+			if (this._extensionRunner.hasHandlers("context")) {
+				return await this._extensionRunner.emitContext(currentMessages);
+			}
+			return currentMessages;
 		};
 	}
 

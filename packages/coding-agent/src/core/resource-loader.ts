@@ -54,15 +54,23 @@ function resolvePromptInput(input: string | undefined, description: string): str
 	return input;
 }
 
-function loadContextFileFromDir(dir: string): { path: string } | null {
-	const candidates = ["AGENTS.md", "AGENTS.MD", "CLAUDE.md", "CLAUDE.MD"];
+function loadContextFilesFromDir(dir: string): Array<{ path: string; content: string }> {
+	const candidates = ["AGENTS.md", "AGENTS.MD", "CLAUDE.md", "CLAUDE.MD", "GEMINI.md", "GEMINI.MD"];
+	const files: Array<{ path: string; content: string }> = [];
 	for (const filename of candidates) {
 		const filePath = join(dir, filename);
 		if (existsSync(filePath)) {
-			return { path: filePath };
+			try {
+				files.push({
+					path: filePath,
+					content: readFileSync(filePath, "utf-8"),
+				});
+			} catch (error) {
+				console.error(chalk.yellow(`Warning: Could not read ${filePath}: ${error}`));
+			}
 		}
 	}
-	return null;
+	return files;
 }
 
 export function loadProjectContextFiles(options: {
@@ -75,8 +83,7 @@ export function loadProjectContextFiles(options: {
 	const contextFiles: Array<{ path: string; content?: string }> = [];
 	const seenPaths = new Set<string>();
 
-	const globalContext = loadContextFileFromDir(resolvedAgentDir);
-	if (globalContext) {
+	for (const globalContext of loadContextFilesFromDir(resolvedAgentDir)) {
 		contextFiles.push(globalContext);
 		seenPaths.add(globalContext.path);
 	}
@@ -87,10 +94,14 @@ export function loadProjectContextFiles(options: {
 	const root = resolve("/");
 
 	while (true) {
-		const contextFile = loadContextFileFromDir(currentDir);
-		if (contextFile && !seenPaths.has(contextFile.path)) {
-			ancestorContextFiles.unshift(contextFile);
-			seenPaths.add(contextFile.path);
+		const contextFilesInDir = loadContextFilesFromDir(currentDir).filter(
+			(contextFile) => !seenPaths.has(contextFile.path),
+		);
+		if (contextFilesInDir.length > 0) {
+			ancestorContextFiles.unshift(...contextFilesInDir);
+			for (const contextFile of contextFilesInDir) {
+				seenPaths.add(contextFile.path);
+			}
 		}
 
 		if (currentDir === root) break;

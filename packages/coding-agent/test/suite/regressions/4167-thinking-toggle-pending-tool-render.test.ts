@@ -5,6 +5,7 @@ import { beforeAll, describe, expect, test, vi } from "vitest";
 import type { AgentSessionEvent } from "../../../src/core/agent-session.ts";
 import type { SessionContext } from "../../../src/core/session-manager.ts";
 import type { ToolExecutionComponent } from "../../../src/modes/interactive/components/tool-execution.ts";
+import { ToolPanelRegistry } from "../../../src/modes/interactive/components/tool-panel-registry.ts";
 import { InteractiveMode } from "../../../src/modes/interactive/interactive-mode.ts";
 import { initTheme } from "../../../src/modes/interactive/theme/theme.ts";
 import { stripAnsi } from "../../../src/utils/ansi.ts";
@@ -28,7 +29,7 @@ const EMPTY_USAGE: Usage = {
 };
 
 type RenderSessionContextThis = {
-	pendingTools: Map<string, ToolExecutionComponent>;
+	toolPanels: ToolPanelRegistry;
 	chatContainer: Container;
 	footer: { invalidate(): void };
 	ui: TUI;
@@ -43,6 +44,10 @@ type RenderSessionContextThis = {
 	updateEditorBorderColor(): void;
 	getRegisteredToolDefinition(toolName: string): undefined;
 	addMessageToChat(message: AgentMessage, options?: { populateHistory?: boolean }): void;
+	appendToolExecutionComponent(component: ToolExecutionComponent, allowGrouping: boolean): void;
+	attachToolExecutionComponent(toolName: string, toolCallId: string, args: unknown): ToolExecutionComponent;
+	getToolPanelScope(): { sessionId?: string; sessionFile?: string; cwd: string };
+	clearRenderedToolPanelState(): void;
 };
 
 type RenderSessionContext = (
@@ -55,8 +60,9 @@ type HandleEvent = (this: RenderSessionContextThis, event: AgentSessionEvent) =>
 
 function createFakeInteractiveModeThis(): RenderSessionContextThis {
 	const chatContainer = new Container();
+	const toolPanels = new ToolPanelRegistry();
 	return {
-		pendingTools: new Map<string, ToolExecutionComponent>(),
+		toolPanels,
 		chatContainer,
 		footer: { invalidate: vi.fn() },
 		ui: { requestRender: vi.fn() } as unknown as TUI,
@@ -72,6 +78,18 @@ function createFakeInteractiveModeThis(): RenderSessionContextThis {
 		getRegisteredToolDefinition: (_toolName: string) => undefined,
 		addMessageToChat(message: AgentMessage) {
 			chatContainer.addChild(new Text(message.role, 0, 0));
+		},
+		appendToolExecutionComponent(component: ToolExecutionComponent) {
+			chatContainer.addChild(component);
+		},
+		attachToolExecutionComponent: (
+			InteractiveMode.prototype as unknown as {
+				attachToolExecutionComponent(toolName: string, toolCallId: string, args: unknown): ToolExecutionComponent;
+			}
+		).attachToolExecutionComponent,
+		getToolPanelScope: () => ({ cwd: process.cwd() }),
+		clearRenderedToolPanelState() {
+			toolPanels.clearAll();
 		},
 	};
 }
@@ -133,7 +151,7 @@ describe("InteractiveMode.renderSessionContext", () => {
 
 		renderSessionContext.call(fakeThis, createSessionContext([createAssistantToolCallMessage()]));
 
-		expect(fakeThis.pendingTools.has(TOOL_CALL_ID)).toBe(true);
+		expect(fakeThis.toolPanels.hasActive(TOOL_CALL_ID)).toBe(true);
 
 		await handleEvent.call(fakeThis, {
 			type: "tool_execution_end",
@@ -143,7 +161,7 @@ describe("InteractiveMode.renderSessionContext", () => {
 			isError: false,
 		});
 
-		expect(fakeThis.pendingTools.has(TOOL_CALL_ID)).toBe(false);
+		expect(fakeThis.toolPanels.hasActive(TOOL_CALL_ID)).toBe(false);
 		expect(renderChat(fakeThis.chatContainer)).toContain("FINAL_RESULT");
 	});
 
@@ -158,7 +176,7 @@ describe("InteractiveMode.renderSessionContext", () => {
 			createSessionContext([createAssistantToolCallMessage(), createToolResultMessage("HISTORICAL_RESULT")]),
 		);
 
-		expect(fakeThis.pendingTools.size).toBe(0);
+		expect(fakeThis.toolPanels.hasActive(TOOL_CALL_ID)).toBe(false);
 		expect(renderChat(fakeThis.chatContainer)).toContain("HISTORICAL_RESULT");
 	});
 });

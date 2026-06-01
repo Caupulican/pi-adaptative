@@ -2,6 +2,12 @@
 
 ## [Unreleased]
 
+## [0.78.4] - 2026-06-01
+
+### Changed
+
+- Refreshed generated model metadata from upstream model registries.
+
 ## [0.78.3] - 2026-06-01
 
 ### Added

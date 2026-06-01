@@ -93,13 +93,13 @@ See [Sessions](sessions.md) and [Compaction](compaction.md) for details.
 
 ## Context Files
 
-Pi discovers `AGENTS.md` or `CLAUDE.md` locations at startup from:
+Pi discovers `AGENTS.md`, `CLAUDE.md`, or `GEMINI.md` context files at startup from:
 
-- `~/.pi/agent/AGENTS.md` for global instructions
+- `AGENTS.md`, `CLAUDE.md`, or `GEMINI.md` in `~/.pi/agent/` for global instructions
 - parent directories, walking up from the current working directory
 - the current directory
 
-Use context files for project conventions, commands, safety rules, and preferences. Their contents are lazy-loaded by path with the `read` tool instead of being injected into every startup prompt. Disable discovery with `--no-context-files` or `-nc`.
+Use context files for project conventions, commands, safety rules, and preferences. Their contents are injected into the startup system prompt so every session begins with the active project context. Disable discovery with `--no-context-files` or `-nc`.
 
 ### System Prompt Files
 
@@ -204,7 +204,7 @@ Built-in tools: `read`, `bash`, `edit`, `write`, `grep`, `find`, `ls`.
 | `--no-prompt-templates` | Disable prompt template discovery |
 | `--theme <path>` | Load a theme; repeatable |
 | `--no-themes` | Disable theme discovery |
-| `--no-context-files`, `-nc` | Disable `AGENTS.md` and `CLAUDE.md` discovery |
+| `--no-context-files`, `-nc` | Disable `AGENTS.md`, `CLAUDE.md`, and `GEMINI.md` discovery |
 
 Combine `--no-*` with explicit flags to load exactly what you need, ignoring settings. Example:
 
@@ -216,7 +216,7 @@ pi --no-extensions -e ./my-extension.ts
 
 | Option | Description |
 |--------|-------------|
-| `--system-prompt <text>` | Replace default prompt; context file and skill locations are still appended for lazy loading |
+| `--system-prompt <text>` | Replace default prompt; context file contents and lazy-loadable skill locations are still appended |
 | `--append-system-prompt <text>` | Append to system prompt |
 | `--verbose` | Force verbose startup |
 | `-h`, `--help` | Show help |

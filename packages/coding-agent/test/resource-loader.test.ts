@@ -297,19 +297,46 @@ Content`,
 			expect(themes.some((t) => t.sourcePath?.endsWith("skip.json"))).toBe(false);
 		});
 
-		it("should discover AGENTS.md context files", async () => {
+		it("should discover AGENTS.md context files with eager content", async () => {
 			writeFileSync(join(cwd, "AGENTS.md"), "# Project Guidelines\n\nBe helpful.");
 
 			const loader = new DefaultResourceLoader({ cwd, agentDir });
 			await loader.reload();
 
 			const { agentsFiles } = loader.getAgentsFiles();
-			expect(agentsFiles.some((f) => f.path.includes("AGENTS.md"))).toBe(true);
+			const agentsFile = agentsFiles.find((f) => f.path.includes("AGENTS.md"));
+			expect(agentsFile).toBeDefined();
+			expect(agentsFile?.content).toContain("Be helpful.");
 		});
 
-		it("should skip AGENTS.md and CLAUDE.md discovery when noContextFiles is true", async () => {
+		it("should discover GEMINI.md context files with eager content", async () => {
+			writeFileSync(join(cwd, "GEMINI.md"), "# Gemini Guidelines\n\nUse project context.");
+
+			const loader = new DefaultResourceLoader({ cwd, agentDir });
+			await loader.reload();
+
+			const { agentsFiles } = loader.getAgentsFiles();
+			const geminiFile = agentsFiles.find((f) => f.path.includes("GEMINI.md"));
+			expect(geminiFile).toBeDefined();
+			expect(geminiFile?.content).toContain("Use project context.");
+		});
+
+		it("should eagerly load AGENTS.md, CLAUDE.md, and GEMINI.md when they coexist", async () => {
+			writeFileSync(join(cwd, "AGENTS.md"), "Agents context");
+			writeFileSync(join(cwd, "CLAUDE.md"), "Claude context");
+			writeFileSync(join(cwd, "GEMINI.md"), "Gemini context");
+
+			const loader = new DefaultResourceLoader({ cwd, agentDir });
+			await loader.reload();
+
+			const names = loader.getAgentsFiles().agentsFiles.map((f) => f.path.split(/[\\/]/).at(-1));
+			expect(names).toEqual(expect.arrayContaining(["AGENTS.md", "CLAUDE.md", "GEMINI.md"]));
+		});
+
+		it("should skip AGENTS.md, CLAUDE.md, and GEMINI.md discovery when noContextFiles is true", async () => {
 			writeFileSync(join(cwd, "AGENTS.md"), "# Project Guidelines\n\nBe helpful.");
 			writeFileSync(join(cwd, "CLAUDE.md"), "# Claude Guidelines\n\nBe helpful.");
+			writeFileSync(join(cwd, "GEMINI.md"), "# Gemini Guidelines\n\nBe helpful.");
 
 			const loader = new DefaultResourceLoader({ cwd, agentDir, noContextFiles: true });
 			await loader.reload();
