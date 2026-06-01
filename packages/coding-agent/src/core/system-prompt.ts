@@ -18,9 +18,9 @@ export interface BuildSystemPromptOptions {
 	appendSystemPrompt?: string;
 	/** Working directory. */
 	cwd: string;
-	/** Pre-loaded context files. */
-	contextFiles?: Array<{ path: string; content: string }>;
-	/** Pre-loaded skills. */
+	/** Lazy-loadable project/agent instruction file locations. */
+	contextFiles?: Array<{ path: string; content?: string }>;
+	/** Discovered skills; startup prompt lists only lazy-loadable locations. */
 	skills?: Skill[];
 }
 
@@ -32,6 +32,36 @@ Adaptative Agent Persona:
 - For self-evolution, inspect the current runtime/source before changing it, make focused changes, reload or renew only after source is auditable, and validate with concrete artifacts.
 - Maintain a clear contract between objective, evidence, and completion. Do not call work done until requirements are mapped to files, commands, or runtime observations.
 - Keep durable learning concise: store stable preferences, rules, fixes, and source pointers; do not preserve transient execution noise.`;
+
+function formatContextFileLocationsForPrompt(contextFiles: Array<{ path: string; content?: string }>): string {
+	if (contextFiles.length === 0) {
+		return "";
+	}
+
+	const lines = [
+		"\n\n<project_context>",
+		"Project-specific instruction files are available for lazy loading. Their contents are not injected into the startup prompt; use the read tool only when their scope is relevant.",
+		"",
+		"<available_context_files>",
+	];
+
+	for (const { path } of contextFiles) {
+		lines.push(`  <context_file path="${escapeXml(path)}" />`);
+	}
+
+	lines.push("</available_context_files>");
+	lines.push("</project_context>");
+	return lines.join("\n");
+}
+
+function escapeXml(str: string): string {
+	return str
+		.replace(/&/g, "&amp;")
+		.replace(/</g, "&lt;")
+		.replace(/>/g, "&gt;")
+		.replace(/"/g, "&quot;")
+		.replace(/'/g, "&apos;");
+}
 
 /** Build the system prompt with tools, guidelines, and context */
 export function buildSystemPrompt(options: BuildSystemPromptOptions): string {
@@ -68,15 +98,7 @@ export function buildSystemPrompt(options: BuildSystemPromptOptions): string {
 			prompt += appendSection;
 		}
 
-		// Append project context files
-		if (contextFiles.length > 0) {
-			prompt += "\n\n<project_context>\n\n";
-			prompt += "Project-specific instructions and guidelines:\n\n";
-			for (const { path: filePath, content } of contextFiles) {
-				prompt += `<project_instructions path="${filePath}">\n${content}\n</project_instructions>\n\n`;
-			}
-			prompt += "</project_context>\n";
-		}
+		prompt += formatContextFileLocationsForPrompt(contextFiles);
 
 		// Append skills section (only if read tool is available)
 		const customPromptHasRead = !selectedTools || selectedTools.includes("read");
@@ -161,15 +183,7 @@ Pi documentation (read only when the user asks about pi itself, its SDK, extensi
 		prompt += appendSection;
 	}
 
-	// Append project context files
-	if (contextFiles.length > 0) {
-		prompt += "\n\n<project_context>\n\n";
-		prompt += "Project-specific instructions and guidelines:\n\n";
-		for (const { path: filePath, content } of contextFiles) {
-			prompt += `<project_instructions path="${filePath}">\n${content}\n</project_instructions>\n\n`;
-		}
-		prompt += "</project_context>\n";
-	}
+	prompt += formatContextFileLocationsForPrompt(contextFiles);
 
 	// Append skills section (only if read tool is available)
 	if (hasRead && skills.length > 0) {

@@ -63,12 +63,12 @@ For project-level Claude Code skills, add to `.pi/settings.json`:
 
 ## How Skills Work
 
-1. At startup, pi scans skill locations and extracts names and descriptions
-2. The system prompt includes available skills in XML format per the [specification](https://agentskills.io/integrate-skills)
+1. At startup, pi scans skill locations enough to validate and register them
+2. The system prompt includes only lazy-loadable skill file locations; skill frontmatter and instructions are not injected upfront
 3. When a task matches, the agent uses `read` to load the full SKILL.md (models don't always do this; use prompting or `/skill:name` to force it)
 4. The agent follows the instructions, using relative paths to reference scripts and assets
 
-This is progressive disclosure: only descriptions are always in context, full instructions load on-demand.
+This is progressive disclosure: locations are always available, while frontmatter and full instructions load on-demand.
 
 ## Skill Commands
 

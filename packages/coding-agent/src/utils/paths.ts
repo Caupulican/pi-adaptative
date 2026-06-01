@@ -97,7 +97,10 @@ export function getCwdRelativePath(filePath: string, cwd: string): string | unde
 
 export function formatPathRelativeToCwdOrAbsolute(filePath: string, cwd: string): string {
 	const absolutePath = resolvePath(filePath, cwd);
-	return (getCwdRelativePath(absolutePath, cwd) ?? absolutePath).split(sep).join("/");
+	const resolvedCwd = resolvePath(cwd);
+	const absoluteDisplay = absolutePath.split(sep).join("/");
+	const relativeDisplay = (relative(resolvedCwd, absolutePath) || ".").split(sep).join("/");
+	return relativeDisplay.length < absoluteDisplay.length ? relativeDisplay : absoluteDisplay;
 }
 
 export function markPathIgnoredByCloudSync(path: string): void {

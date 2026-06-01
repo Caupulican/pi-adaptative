@@ -1,7 +1,7 @@
 /**
  * Context Files (AGENTS.md)
  *
- * Context files provide project-specific instructions loaded into the system prompt.
+ * Context files provide project-specific instructions that can be lazy-loaded by path.
  */
 
 import {
@@ -16,18 +16,7 @@ const loader = new DefaultResourceLoader({
 	cwd: process.cwd(),
 	agentDir: getAgentDir(),
 	agentsFilesOverride: (current) => ({
-		agentsFiles: [
-			...current.agentsFiles,
-			{
-				path: "/virtual/AGENTS.md",
-				content: `# Project Guidelines
-
-## Code Style
-- Use TypeScript strict mode
-- No any types
-- Prefer const over let`,
-			},
-		],
+		agentsFiles: [...current.agentsFiles, { path: "/virtual/AGENTS.md" }],
 	}),
 });
 await loader.reload();
@@ -36,7 +25,7 @@ await loader.reload();
 const discovered = loader.getAgentsFiles().agentsFiles;
 console.log("Discovered context files:");
 for (const file of discovered) {
-	console.log(`  - ${file.path} (${file.content.length} chars)`);
+	console.log(`  - ${file.path}`);
 }
 
 const { session } = await createAgentSession({

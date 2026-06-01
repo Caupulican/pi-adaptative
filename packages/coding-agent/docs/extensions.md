@@ -480,8 +480,8 @@ pi.on("before_agent_start", async (event, ctx) => {
   //   .promptGuidelines - custom guideline bullets
   //   .appendSystemPrompt - text from --append-system-prompt flags
   //   .cwd - working directory
-  //   .contextFiles - AGENTS.md files and other loaded context files
-  //   .skills - loaded skills
+  //   .contextFiles - lazy-loadable AGENTS.md/CLAUDE.md file locations
+  //   .skills - discovered skills; startup prompt includes locations only, not frontmatter
 
   return {
     // Inject a persistent message (stored in session, sent to LLM)
@@ -496,7 +496,7 @@ pi.on("before_agent_start", async (event, ctx) => {
 });
 ```
 
-The `systemPromptOptions` field gives extensions access to the same structured data Pi uses to build the system prompt. This lets you inspect what Pi has loaded — custom prompts, guidelines, tool snippets, context files, skills — without re-discovering resources or re-parsing flags. Use it when your extension needs to make deep, informed changes to the system prompt while respecting user-provided configuration.
+The `systemPromptOptions` field gives extensions access to the same structured data Pi uses to build the system prompt. This lets you inspect what Pi has discovered — custom prompts, guidelines, tool snippets, context file locations, skills — without re-discovering resources or re-parsing flags. Use it when your extension needs to make deep, informed changes to the system prompt while respecting user-provided configuration.
 
 Inside `before_agent_start`, `event.systemPrompt` and `ctx.getSystemPrompt()` both reflect the chained system prompt as of the current handler. Later `before_agent_start` handlers can still modify it again.
 
@@ -1986,6 +1986,8 @@ By default, tool output is wrapped in a `Box` that handles padding and backgroun
 
 Set `renderShell: "self"` when the tool should render its own shell instead of using the default `Box`. This is useful for tools that need complete control over framing or background behavior, for example large previews that must stay visually stable after the tool settles.
 
+Set `toolGroup` to a stable freeform group id when adjacent tool calls should collapse into one grouped panel in the TUI. Grouping is display-only: renderer state remains per tool call, and reusable panels are still scoped to the active session/cwd so different sessions cannot share display state.
+
 ```typescript
 pi.registerTool({
   name: "my_tool",
@@ -2008,6 +2010,7 @@ pi.registerTool({
 - `lastComponent` - the previously returned component for that slot, if any
 - `invalidate()` - request a rerender of this tool row
 - `toolCallId`, `cwd`, `executionStarted`, `argsComplete`, `isPartial`, `expanded`, `showImages`, `isError`
+- `toolGroupSummary` - true when `renderCall` is rendering a collapsed grouped-panel summary; avoid adding per-row expand hints in this mode
 
 Use `context.state` for cross-slot shared state. Keep slot-local caches on the returned component instance when you want to reuse and mutate the same component across renders.
 

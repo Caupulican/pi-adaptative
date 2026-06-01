@@ -58,10 +58,14 @@ export interface FindToolOptions {
 	operations?: FindOperations;
 }
 
-function formatFindCall(args: { pattern: string; path?: string; limit?: number } | undefined, theme: Theme): string {
+function formatFindCall(
+	args: { pattern: string; path?: string; limit?: number } | undefined,
+	theme: Theme,
+	cwd: string,
+): string {
 	const pattern = str(args?.pattern);
 	const rawPath = str(args?.path);
-	const path = rawPath !== null ? shortenPath(rawPath || ".") : null;
+	const path = rawPath !== null ? shortenPath(rawPath || ".", cwd) : null;
 	const limit = args?.limit;
 	const invalidArg = invalidArgText(theme);
 	let text =
@@ -179,6 +183,7 @@ export function createFindToolDefinition(
 		description: `Search for files by glob pattern. Returns matching file paths relative to the search directory. Respects .gitignore. Output is truncated to ${DEFAULT_LIMIT} results or ${DEFAULT_MAX_BYTES / 1024}KB (whichever is hit first).`,
 		promptSnippet: "Find files by glob pattern (respects .gitignore)",
 		parameters: findSchema,
+		toolGroup: "explore",
 		async execute(
 			_toolCallId,
 			{
@@ -379,7 +384,7 @@ export function createFindToolDefinition(
 		},
 		renderCall(args, theme, context) {
 			const text = (context.lastComponent as Text | undefined) ?? new Text("", 0, 0);
-			text.setText(formatFindCall(args, theme));
+			text.setText(formatFindCall(args, theme, context.cwd));
 			return text;
 		},
 		renderResult(result, options, theme, context) {

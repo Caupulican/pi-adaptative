@@ -68,10 +68,11 @@ export interface GrepToolOptions {
 function formatGrepCall(
 	args: { pattern: string; path?: string; glob?: string; limit?: number } | undefined,
 	theme: Theme,
+	cwd: string,
 ): string {
 	const pattern = str(args?.pattern);
 	const rawPath = str(args?.path);
-	const path = rawPath !== null ? shortenPath(rawPath || ".") : null;
+	const path = rawPath !== null ? shortenPath(rawPath || ".", cwd) : null;
 	const glob = str(args?.glob);
 	const limit = args?.limit;
 	const invalidArg = invalidArgText(theme);
@@ -131,6 +132,7 @@ export function createGrepToolDefinition(
 		description: `Search file contents for a pattern. Returns matching lines with file paths and line numbers. Respects .gitignore. Output is truncated to ${DEFAULT_LIMIT} matches or ${DEFAULT_MAX_BYTES / 1024}KB (whichever is hit first). Long lines are truncated to ${GREP_MAX_LINE_LENGTH} chars.`,
 		promptSnippet: "Search file contents for patterns (respects .gitignore)",
 		parameters: grepSchema,
+		toolGroup: "explore",
 		async execute(
 			_toolCallId,
 			{
@@ -393,7 +395,7 @@ export function createGrepToolDefinition(
 		},
 		renderCall(args, theme, context) {
 			const text = (context.lastComponent as Text | undefined) ?? new Text("", 0, 0);
-			text.setText(formatGrepCall(args, theme));
+			text.setText(formatGrepCall(args, theme, context.cwd));
 			return text;
 		},
 		renderResult(result, options, theme, context) {

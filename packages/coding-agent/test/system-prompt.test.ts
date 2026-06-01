@@ -1,4 +1,5 @@
 import { describe, expect, test } from "vitest";
+import { createSyntheticSourceInfo } from "../src/core/source-info.ts";
 import { buildSystemPrompt } from "../src/core/system-prompt.ts";
 
 describe("buildSystemPrompt", () => {
@@ -56,6 +57,44 @@ describe("buildSystemPrompt", () => {
 			expect(prompt).toContain(
 				"- When reading pi docs or examples, resolve docs/... under Additional docs and examples/... under Examples, not the current working directory",
 			);
+		});
+	});
+
+	describe("lazy startup resources", () => {
+		test("lists context file locations without injecting AGENTS content", () => {
+			const prompt = buildSystemPrompt({
+				contextFiles: [{ path: "/repo/AGENTS.md", content: "SECRET PROJECT INSTRUCTIONS" }],
+				skills: [],
+				cwd: process.cwd(),
+			});
+
+			expect(prompt).toContain('<context_file path="/repo/AGENTS.md" />');
+			expect(prompt).toContain("Project-specific instruction files are available for lazy loading");
+			expect(prompt).not.toContain("SECRET PROJECT INSTRUCTIONS");
+			expect(prompt).not.toContain("<project_instructions");
+		});
+
+		test("lists skill locations without injecting skill frontmatter", () => {
+			const prompt = buildSystemPrompt({
+				contextFiles: [],
+				skills: [
+					{
+						name: "secret-skill-name",
+						description: "SECRET SKILL DESCRIPTION",
+						filePath: "/skills/secret/SKILL.md",
+						baseDir: "/skills/secret",
+						sourceInfo: createSyntheticSourceInfo("/skills/secret/SKILL.md", { source: "test" }),
+						disableModelInvocation: false,
+					},
+				],
+				cwd: process.cwd(),
+			});
+
+			expect(prompt).toContain('<skill location="/skills/secret/SKILL.md" />');
+			expect(prompt).toContain("Skill frontmatter and instructions are not injected");
+			expect(prompt).not.toContain("secret-skill-name");
+			expect(prompt).not.toContain("SECRET SKILL DESCRIPTION");
+			expect(prompt).not.toContain("<description>");
 		});
 	});
 

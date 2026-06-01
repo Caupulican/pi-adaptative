@@ -1,4 +1,5 @@
 import * as os from "node:os";
+import { relative, sep } from "node:path";
 import { pathToFileURL } from "node:url";
 import type { ImageContent, TextContent } from "@earendil-works/pi-ai";
 import { getCapabilities, getImageDimensions, hyperlink, imageFallback } from "@earendil-works/pi-tui";
@@ -7,13 +8,41 @@ import { stripAnsi } from "../../utils/ansi.ts";
 import { resolvePath } from "../../utils/paths.ts";
 import { sanitizeBinaryOutput } from "../../utils/shell.ts";
 
-export function shortenPath(path: unknown): string {
+function toDisplaySeparators(path: string): string {
+	return path.split(sep).join("/");
+}
+
+function looksLikeWindowsAbsolutePath(path: string): boolean {
+	return /^[a-zA-Z]:[\\/]/.test(path);
+}
+
+function addCandidate(candidates: string[], value: string | undefined): void {
+	if (!value || candidates.includes(value)) return;
+	candidates.push(value);
+}
+
+export function shortenPath(path: unknown, cwd?: string): string {
 	if (typeof path !== "string") return "";
+	const candidates: string[] = [];
+	addCandidate(candidates, toDisplaySeparators(path));
+
 	const home = os.homedir();
 	if (path.startsWith(home)) {
-		return `~${path.slice(home.length)}`;
+		addCandidate(candidates, `~${toDisplaySeparators(path.slice(home.length))}`);
 	}
-	return path;
+
+	if (cwd && !looksLikeWindowsAbsolutePath(path)) {
+		try {
+			const absolutePath = resolvePath(path, cwd);
+			const resolvedCwd = resolvePath(cwd);
+			const relativePath = relative(resolvedCwd, absolutePath) || ".";
+			addCandidate(candidates, toDisplaySeparators(relativePath));
+		} catch {
+			// Keep the raw/home-shortened candidates when a path cannot be resolved for display.
+		}
+	}
+
+	return candidates.reduce((shortest, candidate) => (candidate.length < shortest.length ? candidate : shortest));
 }
 
 export function linkPath(styledText: string, rawPath: string, cwd: string): string {
@@ -81,5 +110,5 @@ export function renderToolPath(
 	if (rawPath === null) return invalidArgText(theme);
 	const value = rawPath || options?.emptyFallback;
 	if (!value) return theme.fg("toolOutput", "...");
-	return linkPath(theme.fg("accent", shortenPath(value)), value, cwd);
+	return linkPath(theme.fg("accent", shortenPath(value, cwd)), value, cwd);
 }

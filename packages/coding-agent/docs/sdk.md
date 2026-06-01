@@ -633,7 +633,7 @@ const loader = new DefaultResourceLoader({
   agentsFilesOverride: (current) => ({
     agentsFiles: [
       ...current.agentsFiles,
-      { path: "/virtual/AGENTS.md", content: "# Guidelines\n\n- Be concise" },
+      { path: "/virtual/AGENTS.md" },
     ],
   }),
 });

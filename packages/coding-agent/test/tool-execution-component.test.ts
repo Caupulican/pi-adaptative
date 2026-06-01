@@ -8,6 +8,7 @@ import { type BashOperations, createBashToolDefinition } from "../src/core/tools
 import { createReadTool, createReadToolDefinition } from "../src/core/tools/read.ts";
 import { createWriteToolDefinition } from "../src/core/tools/write.ts";
 import { ToolExecutionComponent } from "../src/modes/interactive/components/tool-execution.ts";
+import { getToolPanelActionKey } from "../src/modes/interactive/components/tool-panel-registry.ts";
 import { initTheme } from "../src/modes/interactive/theme/theme.ts";
 import { stripAnsi } from "../src/utils/ansi.ts";
 
@@ -33,6 +34,25 @@ function createFakeTui(): TUI {
 describe("ToolExecutionComponent parity", () => {
 	beforeAll(() => {
 		initTheme("dark");
+	});
+
+	test("session-scoped tool panel keys isolate tenants", () => {
+		const first = getToolPanelActionKey({ sessionId: "a", sessionFile: "/tmp/a.jsonl", cwd: "/repo" }, "read", {
+			path: "README.md",
+		});
+		const second = getToolPanelActionKey({ sessionId: "b", sessionFile: "/tmp/b.jsonl", cwd: "/repo" }, "read", {
+			path: "README.md",
+		});
+		const sameSessionOtherFile = getToolPanelActionKey(
+			{ sessionId: "a", sessionFile: "/tmp/a.jsonl", cwd: "/repo" },
+			"read",
+			{ path: "CHANGELOG.md" },
+		);
+		expect(first).toBeDefined();
+		expect(second).toBeDefined();
+		expect(sameSessionOtherFile).toBeDefined();
+		expect(first).not.toEqual(second);
+		expect(first).not.toEqual(sameSessionOtherFile);
 	});
 
 	test("stacks custom call and result renderers like the old implementation", () => {
@@ -101,6 +121,37 @@ describe("ToolExecutionComponent parity", () => {
 		const rendered = stripAnsi(component.render(120).join("\n"));
 		expect(rendered).toContain("read");
 		expect(rendered).toContain("README.md");
+	});
+
+	test("shortens absolute tool paths relative to cwd, including parent traversals", () => {
+		const cwd = resolve("/tmp/pi-path-display/repo/src");
+		const insidePath = join(cwd, "index.ts");
+		const siblingPath = resolve(cwd, "../../shared/lib.ts");
+		const inside = new ToolExecutionComponent(
+			"read",
+			"tool-path-1",
+			{ path: insidePath },
+			{},
+			undefined,
+			createFakeTui(),
+			cwd,
+		);
+		const sibling = new ToolExecutionComponent(
+			"edit",
+			"tool-path-2",
+			{ path: siblingPath },
+			{},
+			undefined,
+			createFakeTui(),
+			cwd,
+		);
+
+		const insideRendered = stripAnsi(inside.render(120).join("\n"));
+		const siblingRendered = stripAnsi(sibling.render(120).join("\n"));
+		expect(insideRendered).toContain("index.ts");
+		expect(insideRendered).not.toContain(insidePath);
+		expect(siblingRendered).toContain("../../shared/lib.ts");
+		expect(siblingRendered).not.toContain(siblingPath);
 	});
 
 	test("bash execute emits an initial empty partial update before output arrives", async () => {
@@ -313,7 +364,7 @@ describe("ToolExecutionComponent parity", () => {
 		expect(rendered).toContain("arg:bar");
 	});
 
-	test("falls back when custom renderers are absent", () => {
+	test("falls back to human custom labels when custom renderers are absent", () => {
 		const toolDefinition: ToolDefinition = {
 			...createBaseToolDefinition(),
 		};
@@ -329,8 +380,81 @@ describe("ToolExecutionComponent parity", () => {
 		);
 		component.updateResult({ content: [{ type: "text", text: "done" }], details: {}, isError: false }, false);
 		const rendered = stripAnsi(component.render(120).join("\n"));
-		expect(rendered).toContain("custom_tool");
+		expect(rendered).toContain("Custom Tool");
+		expect(rendered).not.toContain("custom_tool");
 		expect(rendered).toContain("done");
+	});
+
+	test("uses extension-provided labels for fallback tool titles", () => {
+		const toolDefinition: ToolDefinition = {
+			...createBaseToolDefinition("learning_auto_learn_state"),
+			label: "Auto Learn State",
+		};
+
+		const component = new ToolExecutionComponent(
+			"learning_auto_learn_state",
+			"tool-6b",
+			{ action: "read" },
+			{},
+			toolDefinition,
+			createFakeTui(),
+			process.cwd(),
+		);
+		component.updateResult({ content: [{ type: "text", text: "done" }], details: {}, isError: false }, false);
+		const rendered = stripAnsi(component.render(120).join("\n"));
+		expect(rendered).toContain("Auto Learn State");
+		expect(rendered).not.toContain("learning_auto_learn_state");
+	});
+
+	test("can reset a reusable tool panel to the latest invocation", () => {
+		const firstDefinition: ToolDefinition = { ...createBaseToolDefinition("first_tool"), label: "First Tool" };
+		const secondDefinition: ToolDefinition = { ...createBaseToolDefinition("second_tool"), label: "Second Tool" };
+		const component = new ToolExecutionComponent(
+			"first_tool",
+			"tool-reset-1",
+			{ path: "first.txt" },
+			{},
+			firstDefinition,
+			createFakeTui(),
+			process.cwd(),
+		);
+		component.updateResult({ content: [{ type: "text", text: "first result" }], details: {}, isError: false }, false);
+
+		component.resetInvocation("second_tool", "tool-reset-2", { path: "second.txt" }, secondDefinition);
+		component.updateResult(
+			{ content: [{ type: "text", text: "second result" }], details: {}, isError: false },
+			false,
+		);
+
+		const rendered = stripAnsi(component.render(120).join("\n"));
+		expect(rendered).toContain("Second Tool");
+		expect(rendered).toContain("second result");
+		expect(rendered).not.toContain("First Tool");
+		expect(rendered).not.toContain("first result");
+	});
+
+	test("renders grouped call summaries without result output", () => {
+		const toolDefinition: ToolDefinition = {
+			...createBaseToolDefinition("summary_tool"),
+			label: "Summary Tool",
+			toolGroup: "summary",
+		};
+		const component = new ToolExecutionComponent(
+			"summary_tool",
+			"tool-summary",
+			{ foo: "bar" },
+			{},
+			toolDefinition,
+			createFakeTui(),
+			process.cwd(),
+		);
+		component.updateResult(
+			{ content: [{ type: "text", text: "hidden grouped result" }], details: {}, isError: false },
+			false,
+		);
+		const summary = stripAnsi(component.renderCallSummary(120).join("\n"));
+		expect(summary).toContain("Summary Tool");
+		expect(summary).not.toContain("hidden grouped result");
 	});
 
 	test("trims trailing blank display lines from write previews", () => {
@@ -416,7 +540,7 @@ describe("ToolExecutionComponent parity", () => {
 			title: "outside AGENTS.md",
 			path: resolve(process.cwd(), "..", "AGENTS.md"),
 			content: "Hidden outside resource instructions",
-			compact: `read resource ${resolve(process.cwd(), "..", "AGENTS.md").replace(/\\/g, "/")}`,
+			compact: "read resource ../AGENTS.md",
 			hidden: "Hidden outside resource instructions",
 			absent: undefined,
 		},

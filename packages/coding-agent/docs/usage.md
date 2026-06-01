@@ -93,13 +93,13 @@ See [Sessions](sessions.md) and [Compaction](compaction.md) for details.
 
 ## Context Files
 
-Pi loads `AGENTS.md` or `CLAUDE.md` at startup from:
+Pi discovers `AGENTS.md` or `CLAUDE.md` locations at startup from:
 
 - `~/.pi/agent/AGENTS.md` for global instructions
 - parent directories, walking up from the current working directory
 - the current directory
 
-Use context files for project conventions, commands, safety rules, and preferences. Disable loading with `--no-context-files` or `-nc`.
+Use context files for project conventions, commands, safety rules, and preferences. Their contents are lazy-loaded by path with the `read` tool instead of being injected into every startup prompt. Disable discovery with `--no-context-files` or `-nc`.
 
 ### System Prompt Files
 
@@ -216,7 +216,7 @@ pi --no-extensions -e ./my-extension.ts
 
 | Option | Description |
 |--------|-------------|
-| `--system-prompt <text>` | Replace default prompt; context files and skills are still appended |
+| `--system-prompt <text>` | Replace default prompt; context file and skill locations are still appended for lazy loading |
 | `--append-system-prompt <text>` | Append to system prompt |
 | `--verbose` | Force verbose startup |
 | `-h`, `--help` | Show help |

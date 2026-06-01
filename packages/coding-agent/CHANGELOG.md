@@ -2,6 +2,11 @@
 
 ## [Unreleased]
 
+### New Features
+
+- **Lazy startup resources** - Skills and context files are listed by location only and loaded on demand, avoiding startup prompt pollution. See [Skills](docs/skills.md#how-skills-work) and [Context Files](docs/usage.md#context-files).
+- **Cleaner interactive tool panels** - Repeated tool actions reuse session-scoped panels, related exploration calls can collapse into grouped summaries, and file tool titles prefer shortened relative paths.
+
 ### Added
 
 - Added a built-in `llama-cpp/local` model profile for local llama.cpp servers, available without API-key setup.
@@ -10,6 +15,8 @@
 - Added optional session names for `/new <name>`, `/clone <name>`, and `/fork <name>`.
 - Added `selfModification.enabled` and `selfModification.sourcePath` settings with system-prompt guardrails for Pi harness self-modification.
 - Added `autoLearn` settings for autonomous, model-selected background learning on long sessions.
+- Added session-scoped grouped tool panel helpers so compatible tools can collapse related actions into reusable TUI panels.
+- Added lazy startup prompt listings for skill and context-file locations without injecting skill frontmatter or AGENTS/CLAUDE contents.
 
 ### Fixed
 
@@ -18,6 +25,9 @@
 - Fixed default session directory encoding to avoid cwd collisions while still reading legacy session directories.
 - Fixed extension overlay focus restoration so closing editor replacement UI does not steal focus from an active overlay.
 - Fixed the footer to display model override names instead of always showing raw model IDs.
+- Fixed extension tool fallback titles to prefer human-readable labels instead of raw internal tool names.
+- Fixed repeated file/status tool rendering to reuse session-scoped panels for the latest distinct action instead of adding a new raw line each time.
+- Fixed built-in file tool panels to prefer shortened cwd-relative path display, including `../../` parent traversals when shorter.
 - Fixed OpenAI-compatible, Anthropic, and Amazon Bedrock provider fixes inherited from `@earendil-works/pi-ai`.
 
 ## [0.78.1] - 2026-05-31

@@ -3,7 +3,7 @@ import type { ToolDefinition, ToolRenderContext } from "../../../core/extensions
 import { createAllToolDefinitions, type ToolName } from "../../../core/tools/index.ts";
 import { getTextOutput as getRenderedTextOutput } from "../../../core/tools/render-utils.ts";
 import { convertToPng } from "../../../utils/image-convert.ts";
-import { theme } from "../theme/theme.ts";
+import { type ThemeBg, theme } from "../theme/theme.ts";
 
 export interface ToolExecutionOptions {
 	showImages?: boolean;
@@ -28,6 +28,7 @@ export class ToolExecutionComponent extends Container {
 	private isPartial = true;
 	private toolDefinition?: ToolDefinition<any, any>;
 	private builtInToolDefinition?: ToolDefinition<any, any>;
+	toolGroup: string | undefined;
 	private ui: TUI;
 	private cwd: string;
 	private executionStarted = false;
@@ -55,6 +56,7 @@ export class ToolExecutionComponent extends Container {
 		this.args = args;
 		this.toolDefinition = toolDefinition;
 		this.builtInToolDefinition = createAllToolDefinitions(cwd)[toolName as ToolName];
+		this.toolGroup = this.toolDefinition?.toolGroup ?? this.builtInToolDefinition?.toolGroup;
 		this.showImages = options.showImages ?? true;
 		this.imageWidthCells = options.imageWidthCells ?? 60;
 		this.ui = ui;
@@ -112,7 +114,7 @@ export class ToolExecutionComponent extends Container {
 		return this.toolDefinition.renderShell ?? this.builtInToolDefinition.renderShell ?? "default";
 	}
 
-	private getRenderContext(lastComponent: Component | undefined): ToolRenderContext {
+	private getRenderContext(lastComponent: Component | undefined, toolGroupSummary = false): ToolRenderContext {
 		return {
 			args: this.args,
 			toolCallId: this.toolCallId,
@@ -129,11 +131,53 @@ export class ToolExecutionComponent extends Container {
 			expanded: this.expanded,
 			showImages: this.showImages,
 			isError: this.result?.isError ?? false,
+			toolGroupSummary,
 		};
 	}
 
+	private humanizeToolName(name: string): string {
+		const words = name
+			.replace(/[_-]+/g, " ")
+			.replace(/([a-z0-9])([A-Z])/g, "$1 $2")
+			.trim()
+			.split(/\s+/)
+			.filter(Boolean);
+		if (words.length === 0) return name;
+		return words.map((word) => word.charAt(0).toUpperCase() + word.slice(1)).join(" ");
+	}
+
+	private getDisplayLabel(): string {
+		const label = (this.toolDefinition?.label ?? this.builtInToolDefinition?.label)?.trim();
+		if (this.builtInToolDefinition) return label || this.toolName;
+		if (!label || label === this.toolName) return this.humanizeToolName(this.toolName);
+		return label;
+	}
+
+	resetInvocation(
+		toolName: string,
+		toolCallId: string,
+		args: any,
+		toolDefinition: ToolDefinition<any, any> | undefined,
+	): void {
+		this.toolName = toolName;
+		this.toolCallId = toolCallId;
+		this.args = args;
+		this.toolDefinition = toolDefinition;
+		this.builtInToolDefinition = createAllToolDefinitions(this.cwd)[toolName as ToolName];
+		this.toolGroup = this.toolDefinition?.toolGroup ?? this.builtInToolDefinition?.toolGroup;
+		this.executionStarted = false;
+		this.argsComplete = false;
+		this.isPartial = true;
+		this.result = undefined;
+		this.callRendererComponent = undefined;
+		this.resultRendererComponent = undefined;
+		this.rendererState = {};
+		this.convertedImages.clear();
+		this.updateDisplay();
+	}
+
 	private createCallFallback(): Component {
-		return new Text(theme.fg("toolTitle", theme.bold(this.toolName)), 0, 0);
+		return new Text(theme.fg("toolTitle", theme.bold(this.getDisplayLabel())), 0, 0);
 	}
 
 	private createResultFallback(): Component | undefined {
@@ -213,9 +257,30 @@ export class ToolExecutionComponent extends Container {
 		this.updateDisplay();
 	}
 
+	getBackgroundColor(): ThemeBg {
+		if (this.isPartial) return "toolPendingBg";
+		if (this.result?.isError) return "toolErrorBg";
+		return "toolSuccessBg";
+	}
+
 	override invalidate(): void {
 		super.invalidate();
 		this.updateDisplay();
+	}
+
+	renderCallSummary(width: number): string[] {
+		const callRenderer = this.getCallRenderer();
+		let component: Component;
+		if (!callRenderer) {
+			component = this.createCallFallback();
+		} else {
+			try {
+				component = callRenderer(this.args, theme, this.getRenderContext(undefined, true));
+			} catch {
+				component = this.createCallFallback();
+			}
+		}
+		return component.render(width);
 	}
 
 	override render(width: number): string[] {
@@ -226,11 +291,7 @@ export class ToolExecutionComponent extends Container {
 	}
 
 	private updateDisplay(): void {
-		const bgFn = this.isPartial
-			? (text: string) => theme.bg("toolPendingBg", text)
-			: this.result?.isError
-				? (text: string) => theme.bg("toolErrorBg", text)
-				: (text: string) => theme.bg("toolSuccessBg", text);
+		const bgFn = (text: string) => theme.bg(this.getBackgroundColor(), text);
 
 		let hasContent = false;
 		this.hideComponent = false;
@@ -338,7 +399,7 @@ export class ToolExecutionComponent extends Container {
 	}
 
 	private formatToolExecution(): string {
-		let text = theme.fg("toolTitle", theme.bold(this.toolName));
+		let text = theme.fg("toolTitle", theme.bold(this.getDisplayLabel()));
 		const content = JSON.stringify(this.args, null, 2);
 		if (content) {
 			text += `\n\n${content}`;

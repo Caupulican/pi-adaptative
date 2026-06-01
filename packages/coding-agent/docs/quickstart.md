@@ -85,7 +85,7 @@ Additional built-in read-only tools (`grep`, `find`, `ls`) are available through
 
 ## Give pi project instructions
 
-Pi loads context files at startup. Add an `AGENTS.md` file to tell it how to work in a project:
+Pi discovers context file locations at startup and lazy-loads their contents only when needed. Add an `AGENTS.md` file to tell it how to work in a project:
 
 ```markdown
 # Project Instructions
@@ -95,12 +95,12 @@ Pi loads context files at startup. Add an `AGENTS.md` file to tell it how to wor
 - Keep responses concise.
 ```
 
-Pi loads:
+Pi discovers:
 
 - `~/.pi/agent/AGENTS.md` for global instructions
 - `AGENTS.md` or `CLAUDE.md` from parent directories and the current directory
 
-Restart pi, or run `/reload`, after changing context files.
+Restart pi, or run `/reload`, after changing context file locations. If only contents changed, the agent can read the file again on demand.
 
 ## Common things to try
 

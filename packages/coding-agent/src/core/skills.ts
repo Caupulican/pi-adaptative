@@ -340,19 +340,15 @@ export function formatSkillsForPrompt(skills: Skill[]): string {
 	}
 
 	const lines = [
-		"\n\nThe following skills provide specialized instructions for specific tasks.",
-		"Use the read tool to load a skill's file when the task matches its description.",
+		"\n\nSkill files are available for lazy loading.",
+		"Skill frontmatter and instructions are not injected into the startup prompt. Use the read tool to inspect a skill file when its location appears relevant.",
 		"When a skill file references a relative path, resolve it against the skill directory (parent of SKILL.md / dirname of the path) and use that absolute path in tool commands.",
 		"",
 		"<available_skills>",
 	];
 
 	for (const skill of visibleSkills) {
-		lines.push("  <skill>");
-		lines.push(`    <name>${escapeXml(skill.name)}</name>`);
-		lines.push(`    <description>${escapeXml(skill.description)}</description>`);
-		lines.push(`    <location>${escapeXml(skill.filePath)}</location>`);
-		lines.push("  </skill>");
+		lines.push(`  <skill location="${escapeXml(skill.filePath)}" />`);
 	}
 
 	lines.push("</available_skills>");

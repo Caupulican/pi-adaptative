@@ -227,7 +227,7 @@ describe("skills", () => {
 			expect(result).toBe("");
 		});
 
-		it("should format skills as XML", () => {
+		it("should format skill locations as XML without frontmatter", () => {
 			const skills: Skill[] = [
 				createTestSkill({
 					name: "test-skill",
@@ -241,10 +241,9 @@ describe("skills", () => {
 
 			expect(result).toContain("<available_skills>");
 			expect(result).toContain("</available_skills>");
-			expect(result).toContain("<skill>");
-			expect(result).toContain("<name>test-skill</name>");
-			expect(result).toContain("<description>A test skill.</description>");
-			expect(result).toContain("<location>/path/to/skill/SKILL.md</location>");
+			expect(result).toContain('<skill location="/path/to/skill/SKILL.md" />');
+			expect(result).not.toContain("<name>test-skill</name>");
+			expect(result).not.toContain("A test skill.");
 		});
 
 		it("should include intro text before XML", () => {
@@ -261,25 +260,24 @@ describe("skills", () => {
 			const xmlStart = result.indexOf("<available_skills>");
 			const introText = result.substring(0, xmlStart);
 
-			expect(introText).toContain("The following skills provide specialized instructions");
-			expect(introText).toContain("Use the read tool to load a skill's file");
+			expect(introText).toContain("Skill files are available for lazy loading");
+			expect(introText).toContain("Skill frontmatter and instructions are not injected");
 		});
 
-		it("should escape XML special characters", () => {
+		it("should escape XML special characters in locations", () => {
 			const skills: Skill[] = [
 				createTestSkill({
 					name: "test-skill",
 					description: 'A skill with <special> & "characters".',
-					filePath: "/path/to/skill/SKILL.md",
+					filePath: '/path/to/<skill>&"quote"/SKILL.md',
 					baseDir: "/path/to/skill",
 				}),
 			];
 
 			const result = formatSkillsForPrompt(skills);
 
-			expect(result).toContain("&lt;special&gt;");
-			expect(result).toContain("&amp;");
-			expect(result).toContain("&quot;characters&quot;");
+			expect(result).toContain("&lt;skill&gt;&amp;&quot;quote&quot;");
+			expect(result).not.toContain("&lt;special&gt;");
 		});
 
 		it("should format multiple skills", () => {
@@ -300,9 +298,11 @@ describe("skills", () => {
 
 			const result = formatSkillsForPrompt(skills);
 
-			expect(result).toContain("<name>skill-one</name>");
-			expect(result).toContain("<name>skill-two</name>");
-			expect((result.match(/<skill>/g) || []).length).toBe(2);
+			expect(result).toContain('location="/path/one/SKILL.md"');
+			expect(result).toContain('location="/path/two/SKILL.md"');
+			expect(result).not.toContain("skill-one");
+			expect(result).not.toContain("skill-two");
+			expect((result.match(/<skill /g) || []).length).toBe(2);
 		});
 
 		it("should exclude skills with disableModelInvocation from prompt", () => {
@@ -324,9 +324,11 @@ describe("skills", () => {
 
 			const result = formatSkillsForPrompt(skills);
 
-			expect(result).toContain("<name>visible-skill</name>");
-			expect(result).not.toContain("<name>hidden-skill</name>");
-			expect((result.match(/<skill>/g) || []).length).toBe(1);
+			expect(result).toContain('location="/path/visible/SKILL.md"');
+			expect(result).not.toContain("visible-skill");
+			expect(result).not.toContain("hidden-skill");
+			expect(result).not.toContain("/path/hidden/SKILL.md");
+			expect((result.match(/<skill /g) || []).length).toBe(1);
 		});
 
 		it("should return empty string when all skills have disableModelInvocation", () => {

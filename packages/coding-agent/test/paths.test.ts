@@ -3,7 +3,14 @@ import { homedir, tmpdir } from "node:os";
 import { join, resolve } from "node:path";
 import { pathToFileURL } from "node:url";
 import { afterEach, describe, expect, it } from "vitest";
-import { canonicalizePath, getCwdRelativePath, isLocalPath, normalizePath, resolvePath } from "../src/utils/paths.ts";
+import {
+	canonicalizePath,
+	formatPathRelativeToCwdOrAbsolute,
+	getCwdRelativePath,
+	isLocalPath,
+	normalizePath,
+	resolvePath,
+} from "../src/utils/paths.ts";
 
 let tempDir: string;
 
@@ -71,6 +78,14 @@ describe("getCwdRelativePath", () => {
 	it("rejects parent-directory traversals", () => {
 		const cwd = join(tmpdir(), "pi-paths-cwd");
 		expect(getCwdRelativePath(join(cwd, "..", "AGENTS.md"), cwd)).toBeUndefined();
+	});
+});
+
+describe("formatPathRelativeToCwdOrAbsolute", () => {
+	it("prefers parent-relative paths when shorter than absolute paths", () => {
+		const cwd = resolve("/tmp/pi-paths-cwd/project/src");
+		const target = resolve(cwd, "../../shared/AGENTS.md");
+		expect(formatPathRelativeToCwdOrAbsolute(target, cwd)).toBe("../../shared/AGENTS.md");
 	});
 });
 
