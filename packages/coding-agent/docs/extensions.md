@@ -1986,7 +1986,7 @@ By default, tool output is wrapped in a `Box` that handles padding and backgroun
 
 Set `renderShell: "self"` when the tool should render its own shell instead of using the default `Box`. This is useful for tools that need complete control over framing or background behavior, for example large previews that must stay visually stable after the tool settles.
 
-Set `toolGroup` to a stable freeform group id when adjacent tool calls should collapse into one grouped panel in the TUI. Grouping is display-only: renderer state remains per tool call, and reusable panels are still scoped to the active session/cwd so different sessions cannot share display state.
+Adjacent tool calls collapse into grouped panels by default using the tool name as the group id. Set `toolGroup` to a stable freeform group id when related tools should share one grouped panel in the TUI, or set it to an empty string to opt out for a specific tool. Grouping is display-only: renderer state remains per tool call, and reusable panels are still scoped to the active session/cwd so different sessions cannot share display state.
 
 ```typescript
 pi.registerTool({

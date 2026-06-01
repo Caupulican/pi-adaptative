@@ -2,6 +2,10 @@
 
 ## [Unreleased]
 
+### Changed
+
+- Enabled grouped interactive tool panels by default for all tools, while preserving explicit cross-tool grouping and blank-string opt-out.
+
 ## [0.80.0] - 2026-06-01
 
 ### Added

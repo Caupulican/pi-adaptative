@@ -18,6 +18,21 @@ export class ToolGroupComponent implements Component {
 		this.tools.push(tool);
 	}
 
+	removeTool(tool: ToolExecutionComponent): boolean {
+		const index = this.tools.indexOf(tool);
+		if (index === -1) return false;
+		this.tools.splice(index, 1);
+		return true;
+	}
+
+	getToolCount(): number {
+		return this.tools.length;
+	}
+
+	getOnlyTool(): ToolExecutionComponent | undefined {
+		return this.tools.length === 1 ? this.tools[0] : undefined;
+	}
+
 	setExpanded(expanded: boolean): void {
 		this.expanded = expanded;
 		for (const tool of this.tools) tool.setExpanded(expanded);

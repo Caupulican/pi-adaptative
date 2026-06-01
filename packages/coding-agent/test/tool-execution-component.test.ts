@@ -8,6 +8,7 @@ import { type BashOperations, createBashToolDefinition } from "../src/core/tools
 import { createReadTool, createReadToolDefinition } from "../src/core/tools/read.ts";
 import { createWriteToolDefinition } from "../src/core/tools/write.ts";
 import { ToolExecutionComponent } from "../src/modes/interactive/components/tool-execution.ts";
+import { ToolGroupComponent } from "../src/modes/interactive/components/tool-group.ts";
 import { getToolPanelActionKey } from "../src/modes/interactive/components/tool-panel-registry.ts";
 import { initTheme } from "../src/modes/interactive/theme/theme.ts";
 import { stripAnsi } from "../src/utils/ansi.ts";
@@ -431,6 +432,65 @@ describe("ToolExecutionComponent parity", () => {
 		expect(rendered).toContain("second result");
 		expect(rendered).not.toContain("First Tool");
 		expect(rendered).not.toContain("first result");
+	});
+
+	test("assigns default tool groups from tool names", () => {
+		const component = new ToolExecutionComponent(
+			"custom_tool",
+			"tool-default-group",
+			{},
+			{},
+			createBaseToolDefinition("custom_tool"),
+			createFakeTui(),
+			process.cwd(),
+		);
+		expect(component.toolGroup).toBe("custom_tool");
+
+		component.resetInvocation("second_tool", "tool-default-group-reset", {}, createBaseToolDefinition("second_tool"));
+		expect(component.toolGroup).toBe("second_tool");
+	});
+
+	test("allows explicit blank tool group opt-out", () => {
+		const component = new ToolExecutionComponent(
+			"custom_tool",
+			"tool-blank-group",
+			{},
+			{},
+			{ ...createBaseToolDefinition("custom_tool"), toolGroup: "" },
+			createFakeTui(),
+			process.cwd(),
+		);
+		expect(component.toolGroup).toBeUndefined();
+	});
+
+	test("removes tools from grouped components for reusable panel relocation", () => {
+		const first = new ToolExecutionComponent(
+			"custom_tool",
+			"tool-group-first",
+			{},
+			{},
+			createBaseToolDefinition("custom_tool"),
+			createFakeTui(),
+			process.cwd(),
+		);
+		const second = new ToolExecutionComponent(
+			"custom_tool",
+			"tool-group-second",
+			{},
+			{},
+			createBaseToolDefinition("custom_tool"),
+			createFakeTui(),
+			process.cwd(),
+		);
+		const group = new ToolGroupComponent("custom_tool", [first, second]);
+
+		expect(group.getToolCount()).toBe(2);
+		expect(group.removeTool(first)).toBe(true);
+		expect(group.getToolCount()).toBe(1);
+		expect(group.getOnlyTool()).toBe(second);
+		expect(group.removeTool(first)).toBe(false);
+		expect(group.removeTool(second)).toBe(true);
+		expect(group.getToolCount()).toBe(0);
 	});
 
 	test("renders grouped call summaries without result output", () => {

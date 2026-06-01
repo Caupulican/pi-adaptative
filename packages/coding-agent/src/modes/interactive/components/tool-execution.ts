@@ -56,7 +56,7 @@ export class ToolExecutionComponent extends Container {
 		this.args = args;
 		this.toolDefinition = toolDefinition;
 		this.builtInToolDefinition = createAllToolDefinitions(cwd)[toolName as ToolName];
-		this.toolGroup = this.toolDefinition?.toolGroup ?? this.builtInToolDefinition?.toolGroup;
+		this.toolGroup = this.resolveToolGroup();
 		this.showImages = options.showImages ?? true;
 		this.imageWidthCells = options.imageWidthCells ?? 60;
 		this.ui = ui;
@@ -114,6 +114,16 @@ export class ToolExecutionComponent extends Container {
 		return this.toolDefinition.renderShell ?? this.builtInToolDefinition.renderShell ?? "default";
 	}
 
+	private resolveToolGroup(): string | undefined {
+		const configuredGroup = this.toolDefinition?.toolGroup ?? this.builtInToolDefinition?.toolGroup;
+		if (configuredGroup !== undefined) {
+			const trimmed = configuredGroup.trim();
+			return trimmed || undefined;
+		}
+		const defaultGroup = this.toolName.trim();
+		return defaultGroup || undefined;
+	}
+
 	private getRenderContext(lastComponent: Component | undefined, toolGroupSummary = false): ToolRenderContext {
 		return {
 			args: this.args,
@@ -164,7 +174,7 @@ export class ToolExecutionComponent extends Container {
 		this.args = args;
 		this.toolDefinition = toolDefinition;
 		this.builtInToolDefinition = createAllToolDefinitions(this.cwd)[toolName as ToolName];
-		this.toolGroup = this.toolDefinition?.toolGroup ?? this.builtInToolDefinition?.toolGroup;
+		this.toolGroup = this.resolveToolGroup();
 		this.executionStarted = false;
 		this.argsComplete = false;
 		this.isPartial = true;

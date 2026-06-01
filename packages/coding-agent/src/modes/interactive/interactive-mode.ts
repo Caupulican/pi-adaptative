@@ -1782,15 +1782,36 @@ export class InteractiveMode {
 		this.chatContainer.addChild(component);
 	}
 
+	private detachToolExecutionComponent(component: ToolExecutionComponent): void {
+		const children = this.chatContainer.children;
+		const directIndex = children.indexOf(component);
+		if (directIndex !== -1) {
+			children.splice(directIndex, 1);
+			return;
+		}
+		for (let i = 0; i < children.length; i++) {
+			const child = children[i];
+			if (!(child instanceof ToolGroupComponent) || !child.removeTool(component)) continue;
+			const remaining = child.getToolCount();
+			if (remaining === 0) {
+				children.splice(i, 1);
+			} else if (remaining === 1) {
+				const onlyTool = child.getOnlyTool();
+				if (onlyTool) children[i] = onlyTool;
+			}
+			return;
+		}
+	}
+
 	private attachToolExecutionComponent(toolName: string, toolCallId: string, args: any): ToolExecutionComponent {
 		const actionKey = getToolPanelActionKey(this.getToolPanelScope(), toolName, args);
 		const toolDefinition = this.getRegisteredToolDefinition(toolName);
 		const existing = this.toolPanels.getReusable(actionKey);
 		if (existing) {
-			this.chatContainer.removeChild(existing);
+			this.detachToolExecutionComponent(existing);
 			existing.resetInvocation(toolName, toolCallId, args, toolDefinition);
 			existing.setExpanded(this.toolOutputExpanded);
-			this.chatContainer.addChild(existing);
+			this.appendToolExecutionComponent(existing, true);
 			this.toolPanels.register(toolCallId, existing, actionKey);
 			return existing;
 		}
@@ -1807,7 +1828,7 @@ export class InteractiveMode {
 			this.sessionManager.getCwd(),
 		);
 		component.setExpanded(this.toolOutputExpanded);
-		this.appendToolExecutionComponent(component, !actionKey);
+		this.appendToolExecutionComponent(component, true);
 		this.toolPanels.register(toolCallId, component, actionKey);
 		return component;
 	}
