@@ -54,6 +54,34 @@ function resolvePromptInput(input: string | undefined, description: string): str
 	return input;
 }
 
+const CONTEXT_THREAT_PATTERNS: Array<{ label: string; pattern: RegExp }> = [
+	{
+		label: "instruction override",
+		pattern:
+			/\b(?:ignore|disregard|override|bypass)\b.{0,80}\b(?:previous|prior|above|system|developer|agent)\b.{0,80}\binstructions?\b/i,
+	},
+	{
+		label: "secret exfiltration",
+		pattern:
+			/\b(?:reveal|print|dump|exfiltrate|send|upload)\b.{0,80}\b(?:secrets?|tokens?|api[_ -]?keys?|credentials?|environment variables?|\.env)\b/i,
+	},
+	{
+		label: "hidden instruction",
+		pattern: /\b(?:do not tell|don't tell|hide this from)\b.{0,80}\b(?:user|operator|developer)\b/i,
+	},
+];
+
+export function scanContextFileThreats(content: string): string[] {
+	return CONTEXT_THREAT_PATTERNS.filter(({ pattern }) => pattern.test(content)).map(({ label }) => label);
+}
+
+function sanitizeContextFileContent(filePath: string, content: string): string {
+	const findings = scanContextFileThreats(content);
+	if (findings.length === 0) return content;
+	console.error(chalk.yellow(`Warning: Blocked context file ${filePath}: ${findings.join(", ")}`));
+	return `[BLOCKED: ${filePath} contained potential prompt injection (${findings.join(", ")}). Content not loaded.]`;
+}
+
 function loadContextFilesFromDir(dir: string): Array<{ path: string; content: string }> {
 	const candidates = ["AGENTS.md", "AGENTS.MD", "CLAUDE.md", "CLAUDE.MD", "GEMINI.md", "GEMINI.MD"];
 	const files: Array<{ path: string; content: string }> = [];
@@ -61,9 +89,10 @@ function loadContextFilesFromDir(dir: string): Array<{ path: string; content: st
 		const filePath = join(dir, filename);
 		if (existsSync(filePath)) {
 			try {
+				const content = readFileSync(filePath, "utf-8");
 				files.push({
 					path: filePath,
-					content: readFileSync(filePath, "utf-8"),
+					content: sanitizeContextFileContent(filePath, content),
 				});
 			} catch (error) {
 				console.error(chalk.yellow(`Warning: Could not read ${filePath}: ${error}`));

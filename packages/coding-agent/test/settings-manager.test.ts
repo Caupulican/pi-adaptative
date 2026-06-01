@@ -214,6 +214,44 @@ describe("SettingsManager", () => {
 		});
 	});
 
+	describe("autonomy settings", () => {
+		it("should default to off and persist full mode", async () => {
+			const manager = SettingsManager.create(projectDir, agentDir);
+
+			expect(manager.getAutonomySettings()).toEqual({ mode: "off" });
+
+			manager.setAutonomySettings({ mode: "full" });
+			await manager.flush();
+
+			const savedSettings = JSON.parse(readFileSync(join(agentDir, "settings.json"), "utf-8"));
+			expect(savedSettings.autonomy).toEqual({ mode: "full" });
+		});
+	});
+
+	describe("auto learn settings", () => {
+		it("should persist reflection review settings", async () => {
+			const manager = SettingsManager.create(projectDir, agentDir);
+
+			manager.setAutoLearnSettings({
+				enabled: true,
+				model: "openai/gpt-5.5",
+				reflectionReview: true,
+				reflectionMinToolCalls: 8,
+				reflectionCooldownMinutes: 30,
+			});
+			await manager.flush();
+
+			const savedSettings = JSON.parse(readFileSync(join(agentDir, "settings.json"), "utf-8"));
+			expect(savedSettings.autoLearn).toMatchObject({
+				enabled: true,
+				model: "openai/gpt-5.5",
+				reflectionReview: true,
+				reflectionMinToolCalls: 8,
+				reflectionCooldownMinutes: 30,
+			});
+		});
+	});
+
 	describe("project settings directory creation", () => {
 		it("should not create .pi folder when only reading project settings", () => {
 			// Create agent dir with global settings, but NO .pi folder in project

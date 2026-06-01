@@ -82,7 +82,7 @@ import { BUILT_IN_PROVIDER_DISPLAY_NAMES } from "../../core/provider-display-nam
 import type { ResourceDiagnostic } from "../../core/resource-loader.ts";
 import { formatMissingSessionCwdPrompt, MissingSessionCwdError } from "../../core/session-cwd.ts";
 import { type SessionContext, SessionManager } from "../../core/session-manager.ts";
-import type { AutoLearnSettings, SelfModificationSettings } from "../../core/settings-manager.ts";
+import type { AutoLearnSettings, AutonomyMode, SelfModificationSettings } from "../../core/settings-manager.ts";
 import { BUILTIN_SLASH_COMMANDS } from "../../core/slash-commands.ts";
 import type { SourceInfo } from "../../core/source-info.ts";
 import { isInstallTelemetryEnabled } from "../../core/telemetry.ts";
@@ -192,6 +192,7 @@ const ANTHROPIC_SUBSCRIPTION_AUTH_WARNING =
 	"Anthropic subscription auth is active. Third-party harness usage draws from extra usage and is billed per token, not your Claude plan limits. Manage extra usage at https://claude.ai/settings/usage.";
 
 const AUTO_LEARN_DEFAULTS = {
+	enabled: false,
 	model: "active",
 	longSessionMessages: 32,
 	longSessionContextPercent: 70,
@@ -199,10 +200,59 @@ const AUTO_LEARN_DEFAULTS = {
 	leaseMinutes: 90,
 	maxConcurrentLearners: 2,
 	applyHighConfidence: false,
-} as const;
+	reflectionReview: true,
+	reflectionMinToolCalls: 5,
+	reflectionCooldownMinutes: 60,
+} as const satisfies Required<AutoLearnSettings>;
+
+const AUTONOMY_AUTO_LEARN_PRESETS = {
+	off: { ...AUTO_LEARN_DEFAULTS, enabled: false, reflectionReview: false },
+	safe: {
+		...AUTO_LEARN_DEFAULTS,
+		enabled: true,
+		longSessionMessages: 48,
+		longSessionContextPercent: 80,
+		cooldownMinutes: 180,
+		leaseMinutes: 60,
+		maxConcurrentLearners: 1,
+		applyHighConfidence: false,
+		reflectionReview: true,
+		reflectionMinToolCalls: 8,
+		reflectionCooldownMinutes: 120,
+	},
+	balanced: {
+		...AUTO_LEARN_DEFAULTS,
+		enabled: true,
+		longSessionMessages: 32,
+		longSessionContextPercent: 70,
+		cooldownMinutes: 120,
+		leaseMinutes: 90,
+		maxConcurrentLearners: 2,
+		applyHighConfidence: false,
+		reflectionReview: true,
+		reflectionMinToolCalls: 5,
+		reflectionCooldownMinutes: 60,
+	},
+	full: {
+		...AUTO_LEARN_DEFAULTS,
+		enabled: true,
+		longSessionMessages: 8,
+		longSessionContextPercent: 50,
+		cooldownMinutes: 15,
+		leaseMinutes: 90,
+		maxConcurrentLearners: 3,
+		applyHighConfidence: true,
+		reflectionReview: true,
+		reflectionMinToolCalls: 1,
+		reflectionCooldownMinutes: 0,
+	},
+} as const satisfies Record<AutonomyMode, Required<AutoLearnSettings>>;
+
+const AUTONOMY_MODES: AutonomyMode[] = ["off", "safe", "balanced", "full"];
 
 interface AutoLearnState {
 	lastLaunchByTenant?: Record<string, number>;
+	lastReflectionByTenant?: Record<string, number>;
 	runs?: Record<
 		string,
 		{
@@ -214,6 +264,10 @@ interface AutoLearnState {
 			expiresAt: number;
 			cwd: string;
 			logPath: string;
+			promptPath?: string;
+			kind?: "auto" | "reflection";
+			autonomyMode?: AutonomyMode;
+			authority?: string;
 		}
 	>;
 }
@@ -225,6 +279,11 @@ interface AutoLearnDecision {
 	contextPercent: number | null;
 	cooldownRemainingMs: number;
 	runningCount: number;
+}
+
+interface AutonomyReviewDecision extends AutoLearnDecision {
+	toolCalls: number;
+	digest?: string;
 }
 
 interface AutoLearnSpawnTarget {
@@ -2621,6 +2680,11 @@ export class InteractiveMode {
 				this.editor.setText("");
 				return;
 			}
+			if (text === "/autonomy" || text.startsWith("/autonomy ")) {
+				this.handleAutonomyCommand(text);
+				this.editor.setText("");
+				return;
+			}
 			if (text === "/scoped-models") {
 				this.editor.setText("");
 				await this.showModelsSelector();
@@ -2960,7 +3024,9 @@ export class InteractiveMode {
 			}
 
 			case "agent_end":
-				this.maybeStartAutoLearn();
+				if (!this.maybeStartAutoLearn()) {
+					this.maybeStartAutonomyReview(event.messages);
+				}
 				if (this.settingsManager.getShowTerminalProgress()) {
 					this.ui.terminal.setProgress(false);
 				}
@@ -4095,17 +4161,29 @@ export class InteractiveMode {
 		return { ...state, runs };
 	}
 
+	private getAutoLearnPresetForAutonomyMode(
+		mode: AutonomyMode,
+		current: AutoLearnSettings = {},
+	): Required<AutoLearnSettings> {
+		const preset = AUTONOMY_AUTO_LEARN_PRESETS[mode] ?? AUTONOMY_AUTO_LEARN_PRESETS.off;
+		return { ...preset, model: current.model?.trim() || preset.model };
+	}
+
 	private getEffectiveAutoLearnSettings(): Required<AutoLearnSettings> {
 		const settings = this.settingsManager.getAutoLearnSettings();
+		const preset = this.getAutoLearnPresetForAutonomyMode(this.settingsManager.getAutonomySettings().mode, settings);
 		return {
-			enabled: settings.enabled ?? false,
-			model: settings.model?.trim() || AUTO_LEARN_DEFAULTS.model,
-			longSessionMessages: settings.longSessionMessages ?? AUTO_LEARN_DEFAULTS.longSessionMessages,
-			longSessionContextPercent: settings.longSessionContextPercent ?? AUTO_LEARN_DEFAULTS.longSessionContextPercent,
-			cooldownMinutes: settings.cooldownMinutes ?? AUTO_LEARN_DEFAULTS.cooldownMinutes,
-			leaseMinutes: settings.leaseMinutes ?? AUTO_LEARN_DEFAULTS.leaseMinutes,
-			maxConcurrentLearners: settings.maxConcurrentLearners ?? AUTO_LEARN_DEFAULTS.maxConcurrentLearners,
-			applyHighConfidence: settings.applyHighConfidence ?? AUTO_LEARN_DEFAULTS.applyHighConfidence,
+			enabled: settings.enabled ?? preset.enabled,
+			model: settings.model?.trim() || preset.model,
+			longSessionMessages: settings.longSessionMessages ?? preset.longSessionMessages,
+			longSessionContextPercent: settings.longSessionContextPercent ?? preset.longSessionContextPercent,
+			cooldownMinutes: settings.cooldownMinutes ?? preset.cooldownMinutes,
+			leaseMinutes: settings.leaseMinutes ?? preset.leaseMinutes,
+			maxConcurrentLearners: settings.maxConcurrentLearners ?? preset.maxConcurrentLearners,
+			applyHighConfidence: settings.applyHighConfidence ?? preset.applyHighConfidence,
+			reflectionReview: settings.reflectionReview ?? preset.reflectionReview,
+			reflectionMinToolCalls: settings.reflectionMinToolCalls ?? preset.reflectionMinToolCalls,
+			reflectionCooldownMinutes: settings.reflectionCooldownMinutes ?? preset.reflectionCooldownMinutes,
 		};
 	}
 
@@ -4248,11 +4326,55 @@ export class InteractiveMode {
 		};
 	}
 
-	private buildAutoLearnPrompt(reason: string, settings: Required<AutoLearnSettings>): string {
-		return `You are Pi Auto Learn running as a background learner.\n\nObjective: run one bounded continuous-learning pass for this Pi tenant.\nTrigger: ${reason}.\n\nRequired workflow:\n1. Query existing durable memory/rules first when tools allow it.\n2. Run the available Auto Learn tooling, preferably learning_run_auto, with applyHighConfidence=${settings.applyHighConfidence}.\n3. Keep tooling/core/source changes proposal/approval-gated; do not publish, tag, release, or modify Pi source from this background run.\n4. If the learning tools are unavailable, report BLOCKED with the missing tool names and do not improvise.\n5. Finish with PASS, BLOCKED, or FAIL and concise evidence.`;
+	private buildAutonomyAuthorityPrompt(): string {
+		const autonomy = this.settingsManager.getAutonomySettings();
+		const selfModification = this.settingsManager.getSelfModificationSettings();
+		if (autonomy.mode !== "full") {
+			return [
+				"Authority mode: proposal-gated.",
+				"- You may autonomously query memory and run bounded learning tools.",
+				"- Durable memory writes require the configured high-confidence policy; skills, extensions, source, settings, publishing, tagging, and releases remain proposals unless the foreground user explicitly asks.",
+			].join("\n");
+		}
+
+		const sourceAuthority =
+			selfModification.enabled && selfModification.sourcePath?.trim()
+				? `- Pi source: standing authority to edit the authorized selfModification.sourcePath (${selfModification.sourcePath.trim()}) for self-evolution improvements; inspect git status first, preserve unrelated user changes, run focused validation, and leave a clear rollback/test summary.`
+				: "- Pi source: no standing source-edit authority until selfModification.enabled and selfModification.sourcePath are set.";
+		return [
+			"Authority mode: FULL AUTONOMOUS standing grant.",
+			"- Memory: may apply high-confidence durable Automata memory/corrections after duplicate and corroboration checks.",
+			"- Skills: may create or patch user/project-owned procedural skills and support files; prefer updating existing umbrella skills; do not delete skills without making a recoverable archive/backup.",
+			"- User/project extensions and tools: may create or patch small scoped extensions/tools under Pi user/project roots when they address repeated workflow/tooling gaps; validate and keep changes auditable.",
+			"- Settings: may auto-tune autonomy/autoLearn settings to reduce bottlenecks; do not modify credentials, provider auth, package sources, or unrelated user preferences.",
+			sourceAuthority,
+			"- Hard stops without explicit foreground approval: publish, npm release, git push, tag creation, credential changes, destructive user-data deletion, network-exposed services, or authority expansion beyond this policy.",
+			"- Audit: final output must list changed paths/settings, commands/tests run, evidence, residual risks, and rollback guidance. If no safe validation is possible, leave the change as a proposal instead of applying it.",
+		].join("\n");
 	}
 
-	private launchAutoLearn(reason: string, force = false): string {
+	private buildAutoLearnPrompt(
+		reason: string,
+		settings: Required<AutoLearnSettings>,
+		options: { kind?: "auto" | "reflection"; turnDigest?: string } = {},
+	): string {
+		const authorityBlock = this.buildAutonomyAuthorityPrompt();
+		const reflectionBlock =
+			options.kind === "reflection" && options.turnDigest
+				? `\n\nLatest completed turn digest (bounded; use only as current-session evidence, not as longitudinal proof):\n<turn_digest>\n${options.turnDigest}\n</turn_digest>`
+				: "";
+		const objective =
+			options.kind === "reflection"
+				? "review the latest completed turn for durable memory, skill, validation, and tooling-improvement cues, then run one bounded continuous-learning pass if the learning tools are available"
+				: "run one bounded continuous-learning pass for this Pi tenant";
+		return `You are Pi Auto Learn running as a background learner.\n\nObjective: ${objective}.\nTrigger: ${reason}.\n\n${authorityBlock}\n\nRequired workflow:\n1. Query existing durable memory/rules first when tools allow it.\n2. Run the available Auto Learn tooling, preferably learning_run_auto, with applyHighConfidence=${settings.applyHighConfidence}.\n3. Treat the latest-turn digest as current-session evidence only; do not auto-commit one-off cues unless deterministic tooling corroborates them.\n4. In mode=full, apply safe memory/skill/user-extension/authorized-source improvements under the standing grant above; otherwise keep them proposal-gated.\n5. Never cross hard-stop boundaries from the authority policy.\n6. If the learning tools are unavailable, report BLOCKED with the missing tool names and do not improvise.\n7. Finish with PASS, BLOCKED, or FAIL and concise evidence.${reflectionBlock}`;
+	}
+
+	private launchAutoLearn(
+		reason: string,
+		force = false,
+		options: { cooldownKind?: "auto" | "reflection"; promptKind?: "auto" | "reflection"; turnDigest?: string } = {},
+	): string {
 		const settings = this.getEffectiveAutoLearnSettings();
 		const decision = this.evaluateAutoLearn(force);
 		if (!decision.shouldRun) {
@@ -4271,8 +4393,14 @@ export class InteractiveMode {
 		fs.mkdirSync(dir, { recursive: true });
 		const runId = `${Date.now()}-${crypto.randomUUID().slice(0, 8)}`;
 		const logPath = path.join(dir, `${runId}.log`);
+		const promptPath = path.join(dir, `${runId}.prompt.md`);
 		const outFd = fs.openSync(logPath, "a");
-		const prompt = this.buildAutoLearnPrompt(reason, settings);
+		const kind = options.promptKind ?? "auto";
+		const prompt = this.buildAutoLearnPrompt(reason, settings, {
+			kind,
+			turnDigest: options.turnDigest,
+		});
+		fs.writeFileSync(promptPath, prompt, "utf-8");
 		const args = [
 			...spawnTarget.argsPrefix,
 			"--print",
@@ -4293,7 +4421,14 @@ export class InteractiveMode {
 
 		const now = Date.now();
 		const state = this.pruneAutoLearnState(this.readAutoLearnState(), now);
-		state.lastLaunchByTenant = { ...(state.lastLaunchByTenant ?? {}), [this.getAutoLearnTenantKey()]: now };
+		if (options.cooldownKind === "reflection") {
+			state.lastReflectionByTenant = {
+				...(state.lastReflectionByTenant ?? {}),
+				[this.getAutoLearnTenantKey()]: now,
+			};
+		} else {
+			state.lastLaunchByTenant = { ...(state.lastLaunchByTenant ?? {}), [this.getAutoLearnTenantKey()]: now };
+		}
 		state.runs = {
 			...(state.runs ?? {}),
 			[runId]: {
@@ -4305,6 +4440,13 @@ export class InteractiveMode {
 				expiresAt: now + settings.leaseMinutes * 60 * 1000,
 				cwd: this.sessionManager.getCwd(),
 				logPath,
+				promptPath,
+				kind,
+				autonomyMode: this.settingsManager.getAutonomySettings().mode,
+				authority:
+					this.settingsManager.getAutonomySettings().mode === "full"
+						? "standing-full-autonomous"
+						: "proposal-gated",
 			},
 		};
 		this.writeAutoLearnState(state);
@@ -4313,16 +4455,160 @@ export class InteractiveMode {
 		return `Auto Learn started (${reason}) with ${modelPattern}. Log: ${logPath}`;
 	}
 
-	private maybeStartAutoLearn(): void {
-		if (process.env.PI_AUTO_LEARN_CHILD === "1") return;
+	private sanitizeAutoLearnDigestText(text: string): string {
+		return text
+			.replace(
+				/-----BEGIN [A-Z ]*(?:PRIVATE|OPENSSH|RSA|DSA|EC) KEY-----[\s\S]*?-----END [A-Z ]*(?:PRIVATE|OPENSSH|RSA|DSA|EC) KEY-----/g,
+				"[redacted-private-key]",
+			)
+			.replace(/\b(?:sk|pk)-(?:proj-)?[A-Za-z0-9_-]{12,}/g, "[redacted-api-key]")
+			.replace(/\bsk-ant-[A-Za-z0-9_-]{12,}/g, "[redacted-api-key]")
+			.replace(/\b(?:ghp|gho|ghu|ghs|github_pat)_[A-Za-z0-9_]{20,}/g, "[redacted-github-token]")
+			.replace(/\b(?:AKIA|ASIA)[0-9A-Z]{16}\b/g, "[redacted-aws-access-key]")
+			.replace(/(?:Bearer\s+)[A-Za-z0-9._-]{16,}/gi, "Bearer [redacted]")
+			.replace(/([?&](?:key|token|api_key|access_token|secret|password)=)[^&\s]+/gi, "$1[redacted]")
+			.replace(
+				/((?:access|refresh|token|apiKey|api_key|password|secret|authorization|auth)\s*[:=]\s*)[^\s,'"}]{8,}/gi,
+				"$1[redacted]",
+			);
+	}
+
+	private capAutoLearnDigestText(text: string, maxChars: number): string {
+		const compact = this.sanitizeAutoLearnDigestText(text).replace(/\s+/g, " ").trim();
+		if (compact.length <= maxChars) return compact;
+		return `${compact.slice(0, Math.max(0, maxChars - 20)).trimEnd()} …[truncated]`;
+	}
+
+	private getAgentMessagePlainText(message: AgentMessage): string {
+		const raw = message as unknown as Record<string, unknown>;
+		const content = raw.content;
+		if (typeof content === "string") return content;
+		if (!Array.isArray(content)) return "";
+		const parts: string[] = [];
+		for (const block of content) {
+			if (!block || typeof block !== "object") continue;
+			const item = block as Record<string, unknown>;
+			if (item.type === "text" && typeof item.text === "string") parts.push(item.text);
+			if (item.type === "toolCall" && typeof item.name === "string") parts.push(`[tool call: ${item.name}]`);
+		}
+		return parts.join("\n");
+	}
+
+	private countAgentToolCalls(messages: AgentMessage[]): number {
+		let toolCalls = 0;
+		let toolResults = 0;
+		for (const message of messages) {
+			const raw = message as unknown as Record<string, unknown>;
+			const role = String(raw.role ?? "");
+			if (role === "toolResult" || role === "bashExecution") toolResults++;
+			const content = raw.content;
+			if (!Array.isArray(content)) continue;
+			for (const block of content) {
+				if (block && typeof block === "object" && (block as Record<string, unknown>).type === "toolCall") {
+					toolCalls++;
+				}
+			}
+		}
+		return Math.max(toolCalls, toolResults);
+	}
+
+	private buildAutonomyReviewDigest(messages: AgentMessage[]): string {
+		const lines: string[] = [];
+		for (const message of messages.slice(-18)) {
+			const raw = message as unknown as Record<string, unknown>;
+			const role = String(raw.role ?? "message");
+			const label = role === "toolResult" && typeof raw.toolName === "string" ? `toolResult:${raw.toolName}` : role;
+			const text = this.capAutoLearnDigestText(this.getAgentMessagePlainText(message), 700);
+			if (text) lines.push(`${label}: ${text}`);
+		}
+		const digest = lines.join("\n---\n");
+		return this.capAutoLearnDigestText(digest || "[No textual turn digest available.]", 6000);
+	}
+
+	private evaluateAutonomyReview(messages: AgentMessage[]): AutonomyReviewDecision {
+		const settings = this.getEffectiveAutoLearnSettings();
+		const autonomy = this.settingsManager.getAutonomySettings();
+		const state = this.pruneAutoLearnState(this.readAutoLearnState());
+		this.writeAutoLearnState(state);
+		const now = Date.now();
+		const tenant = this.getAutoLearnTenantKey();
+		const runningCount = Object.keys(state.runs ?? {}).length;
+		const lastReflection = state.lastReflectionByTenant?.[tenant] ?? 0;
+		const cooldownMs = settings.reflectionCooldownMinutes * 60 * 1000;
+		const cooldownRemainingMs = Math.max(0, lastReflection + cooldownMs - now);
+		const messageCount = this.getAutoLearnMessageCount();
+		const contextPercent = this.session.getContextUsage()?.percent ?? null;
+		const toolCalls = this.countAgentToolCalls(messages);
+		const userText = messages
+			.filter((message) => String((message as unknown as Record<string, unknown>).role ?? "") === "user")
+			.map((message) => this.getAgentMessagePlainText(message))
+			.join("\n");
+		const correctionSignal =
+			/\b(next time|for future|from now on|remember this|don't|do not|avoid|instead|you should|should have|you forgot|you missed|not what i asked|wrong again)\b/i.test(
+				userText,
+			);
+		const base = { messageCount, contextPercent, cooldownRemainingMs, runningCount, toolCalls };
+		if (!settings.enabled) return { ...base, shouldRun: false, reason: "disabled" };
+		if (!settings.reflectionReview) return { ...base, shouldRun: false, reason: "reflection disabled" };
+		if (runningCount >= settings.maxConcurrentLearners) {
+			return {
+				...base,
+				shouldRun: false,
+				reason: `max learners running (${runningCount}/${settings.maxConcurrentLearners})`,
+			};
+		}
+		if (cooldownRemainingMs > 0) return { ...base, shouldRun: false, reason: "reflection cooldown" };
+		if (correctionSignal) {
+			return {
+				...base,
+				shouldRun: true,
+				reason: "reflection correction signal",
+				digest: this.buildAutonomyReviewDigest(messages),
+			};
+		}
+		if (autonomy.mode === "full") {
+			return {
+				...base,
+				shouldRun: true,
+				reason: "full autonomy post-turn review",
+				digest: this.buildAutonomyReviewDigest(messages),
+			};
+		}
+		if (toolCalls >= settings.reflectionMinToolCalls) {
+			return {
+				...base,
+				shouldRun: true,
+				reason: `reflection tool trigger (${toolCalls}/${settings.reflectionMinToolCalls})`,
+				digest: this.buildAutonomyReviewDigest(messages),
+			};
+		}
+		return { ...base, shouldRun: false, reason: "reflection thresholds not met" };
+	}
+
+	private maybeStartAutoLearn(): boolean {
+		if (process.env.PI_AUTO_LEARN_CHILD === "1") return false;
 		const decision = this.evaluateAutoLearn(false);
 		if (!decision.shouldRun) {
 			this.autoLearnLastStatus = decision.reason;
 			this.updateAutoLearnFooter();
-			return;
+			return false;
 		}
 		const message = this.launchAutoLearn(decision.reason, false);
 		this.showStatus(message);
+		return message.startsWith("Auto Learn started");
+	}
+
+	private maybeStartAutonomyReview(messages: AgentMessage[]): boolean {
+		if (process.env.PI_AUTO_LEARN_CHILD === "1") return false;
+		const decision = this.evaluateAutonomyReview(messages);
+		if (!decision.shouldRun) return false;
+		const message = this.launchAutoLearn(decision.reason, true, {
+			cooldownKind: "reflection",
+			promptKind: "reflection",
+			turnDigest: decision.digest,
+		});
+		this.showStatus(message);
+		return message.startsWith("Auto Learn started");
 	}
 
 	private updateAutoLearnFooter(): void {
@@ -4348,9 +4634,72 @@ export class InteractiveMode {
 		const cooldownText =
 			decision.cooldownRemainingMs > 0 ? `${Math.ceil(decision.cooldownRemainingMs / 60000)}m remaining` : "ready";
 		const runLines = runs.length
-			? runs.map(([id, run]) => `- ${id}: ${run.model}, pid=${run.pid ?? "?"}, log=${run.logPath}`).join("\n")
+			? runs
+					.map(
+						([id, run]) =>
+							`- ${id}: ${run.model}, kind=${run.kind ?? "auto"}, authority=${run.authority ?? "unknown"}, pid=${run.pid ?? "?"}, log=${run.logPath}`,
+					)
+					.join("\n")
 			: "- none";
-		return `Auto Learn status\nEnabled: ${settings.enabled}\nModel: ${settings.model}\nNext decision: ${decision.shouldRun ? "ready" : decision.reason}\nMessages: ${decision.messageCount}/${settings.longSessionMessages}\nContext: ${contextText}/${settings.longSessionContextPercent}%\nCooldown: ${cooldownText}\nRunning leases: ${runs.length}/${settings.maxConcurrentLearners}\nRuns:\n${runLines}`;
+		const reflectionLast = state.lastReflectionByTenant?.[this.getAutoLearnTenantKey()] ?? 0;
+		const reflectionCooldownRemainingMs = Math.max(
+			0,
+			reflectionLast + settings.reflectionCooldownMinutes * 60 * 1000 - Date.now(),
+		);
+		const reflectionCooldownText =
+			reflectionCooldownRemainingMs > 0 ? `${Math.ceil(reflectionCooldownRemainingMs / 60000)}m remaining` : "ready";
+		return `Auto Learn status\nEnabled: ${settings.enabled}\nModel: ${settings.model}\nNext decision: ${decision.shouldRun ? "ready" : decision.reason}\nMessages: ${decision.messageCount}/${settings.longSessionMessages}\nContext: ${contextText}/${settings.longSessionContextPercent}%\nCooldown: ${cooldownText}\nReflection review: ${settings.reflectionReview ? "enabled" : "disabled"} (tool trigger ${settings.reflectionMinToolCalls}, cooldown ${reflectionCooldownText})\nRunning leases: ${runs.length}/${settings.maxConcurrentLearners}\nRuns:\n${runLines}`;
+	}
+
+	private formatAutonomyStatus(): string {
+		const autonomy = this.settingsManager.getAutonomySettings();
+		const settings = this.getEffectiveAutoLearnSettings();
+		const autoLearnState = this.pruneAutoLearnState(this.readAutoLearnState());
+		const running = Object.entries(autoLearnState.runs ?? {});
+		const safety =
+			autonomy.mode === "full"
+				? "standing grant for memory, skills, user/project extensions, autonomy/autoLearn tuning, and authorized selfModification.sourcePath edits; hard stops still require explicit foreground approval"
+				: "proposal-gated outside configured high-confidence memory policy";
+		const reflectionLine =
+			autonomy.mode === "full"
+				? `Reflection review: ${settings.reflectionReview ? "enabled" : "disabled"}; post-turn when concurrency allows; cooldown=${settings.reflectionCooldownMinutes}m`
+				: `Reflection review: ${settings.reflectionReview ? "enabled" : "disabled"}; tool trigger=${settings.reflectionMinToolCalls}; cooldown=${settings.reflectionCooldownMinutes}m`;
+		return [
+			"Autonomy status",
+			`Mode: ${autonomy.mode}${autonomy.mode === "full" ? " (standing autonomy)" : ""}`,
+			`Auto Learn: ${settings.enabled ? "enabled" : "disabled"}; model=${settings.model}; applyHighConfidence=${settings.applyHighConfidence}`,
+			`Long-session trigger: ${settings.longSessionMessages} messages or ${settings.longSessionContextPercent}% context; cooldown=${settings.cooldownMinutes}m`,
+			reflectionLine,
+			`Running learners: ${running.length}/${settings.maxConcurrentLearners}`,
+			`Standing authority: ${safety}`,
+			`Audit/log dir: ${this.getAutoLearnDataDir()}`,
+			"Use /autonomy off|safe|balanced|full to switch presets. Advanced overrides remain in /settings → Auto Learn Advanced.",
+		].join("\n");
+	}
+
+	private applyAutonomyMode(mode: AutonomyMode, scope: "global" | "project" = "global"): void {
+		const currentAutoLearn = this.settingsManager.getAutoLearnSettings();
+		const preset = this.getAutoLearnPresetForAutonomyMode(mode, currentAutoLearn);
+		this.settingsManager.setAutonomySettings({ mode }, scope);
+		this.settingsManager.setAutoLearnSettings(preset, scope);
+		this.updateAutoLearnFooter();
+	}
+
+	private handleAutonomyCommand(text: string): void {
+		const action = text.slice("/autonomy".length).trim() || "status";
+		if (AUTONOMY_MODES.includes(action as AutonomyMode)) {
+			const mode = action as AutonomyMode;
+			this.applyAutonomyMode(mode);
+			this.showStatus(`Autonomy mode set to ${mode}${mode === "full" ? " (standing autonomy)" : ""}.`);
+			return;
+		}
+		if (action === "status") {
+			this.chatContainer.addChild(new Spacer(1));
+			this.chatContainer.addChild(new Text(this.formatAutonomyStatus(), 1, 0));
+			this.ui.requestRender();
+			return;
+		}
+		this.showStatus("Usage: /autonomy [status|off|safe|balanced|full]");
 	}
 
 	private handleAutoLearnCommand(text: string): void {
@@ -4401,6 +4750,8 @@ export class InteractiveMode {
 					warnings: this.settingsManager.getWarnings(),
 					selfModification: this.settingsManager.getSelfModificationSettings(),
 					selfModificationScope: projectSettings.selfModification ? "project" : "global",
+					autonomy: this.settingsManager.getAutonomySettings(),
+					autonomyScope: projectSettings.autonomy ? "project" : "global",
 					autoLearn: this.settingsManager.getAutoLearnSettings(),
 					autoLearnScope: projectSettings.autoLearn ? "project" : "global",
 					autoLearnModelOptions: this.getAutoLearnModelOptions(),
@@ -4537,6 +4888,10 @@ export class InteractiveMode {
 						this.showStatus(
 							`Self modification settings saved to ${scope}. Start a new session or /reload for system-prompt guardrails to fully refresh.`,
 						);
+					},
+					onAutonomyChange: (settings, scope) => {
+						this.applyAutonomyMode(settings.mode ?? "off", scope);
+						this.showStatus(`Autonomy mode ${settings.mode ?? "off"} saved to ${scope}. Use /autonomy status.`);
 					},
 					onAutoLearnChange: (settings, scope) => {
 						this.settingsManager.setAutoLearnSettings(settings, scope);

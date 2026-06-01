@@ -37,6 +37,7 @@ function makeConfig(overrides: Partial<SettingsConfig> = {}): SettingsConfig {
 		showTerminalProgress: false,
 		warnings: {},
 		selfModification: { enabled: false },
+		autonomy: { mode: "off" },
 		autoLearn: {},
 		currentModelPattern: "openai/gpt-5.4",
 		autoLearnModelOptions: [
@@ -82,6 +83,7 @@ function makeCallbacks(overrides: Partial<SettingsCallbacks> = {}): SettingsCall
 		onShowTerminalProgressChange: vi.fn(),
 		onWarningsChange: vi.fn(),
 		onSelfModificationChange: vi.fn(),
+		onAutonomyChange: vi.fn(),
 		onAutoLearnChange: vi.fn(),
 		onCancel: vi.fn(),
 		...overrides,
@@ -108,6 +110,16 @@ describe("settings selector", () => {
 
 		expect(output).toContain("Self modification");
 		expect(output).toContain("enabled");
+	});
+
+	it("exposes autonomy mode settings in the searchable settings TUI", () => {
+		const selector = new SettingsSelectorComponent(makeConfig({ autonomy: { mode: "full" } }), makeCallbacks());
+
+		selector.getSettingsList().handleInput("autonomy");
+		const output = selector.render(140).join("\n");
+
+		expect(output).toContain("Autonomy");
+		expect(output).toContain("standing autonomy");
 	});
 
 	it("exposes Auto Learn model settings in the searchable settings TUI", () => {
@@ -141,5 +153,18 @@ describe("settings selector", () => {
 		expect(output).toContain("subscription");
 		expect(output).toContain("openai/gpt-5.4");
 		expect(output).toContain("API key");
+	});
+
+	it("exposes Auto Learn reflection review settings", () => {
+		const selector = new SettingsSelectorComponent(
+			makeConfig({ autoLearn: { enabled: true, reflectionReview: true, reflectionMinToolCalls: 5 } }),
+			makeCallbacks(),
+		);
+
+		selector.getSettingsList().handleInput("learn");
+		selector.getSettingsList().handleInput("\r");
+		const output = selector.render(180).join("\n");
+
+		expect(output).toContain("Reflection review");
 	});
 });

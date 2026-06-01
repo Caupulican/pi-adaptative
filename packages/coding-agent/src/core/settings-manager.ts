@@ -71,6 +71,15 @@ export interface AutoLearnSettings {
 	leaseMinutes?: number; // default: 90 for background learner state leases
 	maxConcurrentLearners?: number; // default: 2 across all session tenants
 	applyHighConfidence?: boolean; // default: false unless the learning extension config opts in
+	reflectionReview?: boolean; // default: true when Auto Learn is enabled - post-turn review after corrective/complex turns
+	reflectionMinToolCalls?: number; // default: 5 tool calls in a turn before reflection review triggers
+	reflectionCooldownMinutes?: number; // default: 60 per session tenant for reflection reviews
+}
+
+export type AutonomyMode = "off" | "safe" | "balanced" | "full";
+
+export interface AutonomySettings {
+	mode?: AutonomyMode; // default: off; presets drive Auto Learn/reflection without many knobs
 }
 
 export type TransportSetting = Transport;
@@ -127,6 +136,7 @@ export interface Settings {
 	markdown?: MarkdownSettings;
 	warnings?: WarningSettings;
 	selfModification?: SelfModificationSettings; // Local guardrails for modifying the pi-adaptative source/harness
+	autonomy?: AutonomySettings; // Low-config autonomy preset controlling background learning/reflection defaults
 	autoLearn?: AutoLearnSettings; // Setting-gated autonomous background learning for long sessions
 	sessionDir?: string; // Custom session storage directory (same format as --session-dir CLI flag)
 	httpIdleTimeoutMs?: number; // HTTP header/body idle timeout in milliseconds; 0 disables it
@@ -1125,6 +1135,25 @@ export class SettingsManager {
 
 		this.globalSettings.selfModification = { ...settings };
 		this.markModified("selfModification");
+		this.save();
+	}
+
+	getAutonomySettings(): { mode: AutonomyMode } {
+		const mode = this.settings.autonomy?.mode;
+		return { mode: mode === "safe" || mode === "balanced" || mode === "full" ? mode : "off" };
+	}
+
+	setAutonomySettings(settings: AutonomySettings, scope: SettingsScope = "global"): void {
+		if (scope === "project") {
+			const projectSettings = structuredClone(this.projectSettings);
+			projectSettings.autonomy = { ...settings };
+			this.markProjectModified("autonomy");
+			this.saveProjectSettings(projectSettings);
+			return;
+		}
+
+		this.globalSettings.autonomy = { ...settings };
+		this.markModified("autonomy");
 		this.save();
 	}
 

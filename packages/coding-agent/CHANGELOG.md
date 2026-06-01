@@ -2,6 +2,15 @@
 
 ## [Unreleased]
 
+### Added
+
+- Added low-config autonomy presets via `autonomy.mode` and `/autonomy status|off|safe|balanced|full`; `full` now means standing autonomy with post-turn reflection whenever concurrency allows, plus grants for memory, skills, user/project extensions/tools, autonomy tuning, and authorized self-modification source edits while keeping publish/push/tag/release/credential/destructive actions foreground-approval gated.
+- Added Auto Learn reflection review: when Auto Learn/autonomy is enabled, Pi can launch a bounded background learner after corrective or complex tool-heavy turns, with separate cooldown/status reporting and authority instructions derived from `autonomy.mode`.
+
+### Security
+
+- Added prompt-injection/exfiltration scanning for eagerly injected `AGENTS.md`, `CLAUDE.md`, and `GEMINI.md` context files; suspicious files are replaced with a blocked notice instead of entering the system prompt.
+
 ## [0.79.0] - 2026-06-01
 
 ### Added

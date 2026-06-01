@@ -88,22 +88,43 @@ When disabled, the system prompt tells the agent not to edit Pi core, the instal
 }
 ```
 
-The agent is instructed to edit only that source checkout, preserve unrelated changes, validate before reporting success, and ask for explicit approval before settings changes, publishing, tagging, or releasing.
+The agent is instructed to edit only that source checkout, preserve unrelated changes, and validate before reporting success. Settings changes remain explicit-approval gated unless `autonomy.mode` is `full` and the change is limited to autonomy/Auto Learn tuning; publishing, pushing, tagging, and releasing always require explicit foreground approval.
 
-### Auto Learn
+### Autonomy
 
 | Setting | Type | Default | Description |
 |---------|------|---------|-------------|
-| `autoLearn.enabled` | boolean | `false` | Autonomously trigger background history scavenging for long sessions |
+| `autonomy.mode` | string | `"off"` | Low-config autonomy preset: `"off"`, `"safe"`, `"balanced"`, or `"full"` |
+
+Use `/settings` → **Autonomy** or `/autonomy off|safe|balanced|full` to choose one preset instead of tuning all Auto Learn knobs. `full` is the standing-autonomy mode: it schedules post-turn reflection whenever concurrency allows and grants autonomous authority for high-confidence memory writes, user/project skill creation or patching, small user/project extension/tool improvements, autonomy/Auto Learn setting tuning, and edits under the authorized `selfModification.sourcePath` when validation and rollback evidence are recorded.
+
+Hard stops still require explicit foreground approval even in `full`: publishing, npm release, git push, tag creation, credential changes, destructive user-data deletion, network-exposed services, or authority expansion beyond this policy. `/autonomy status` shows the active grant and the Auto Learn audit/log directory.
+
+```json
+{
+  "autonomy": {
+    "mode": "balanced"
+  }
+}
+```
+
+### Auto Learn Advanced
+
+| Setting | Type | Default | Description |
+|---------|------|---------|-------------|
+| `autoLearn.enabled` | boolean | derived from `autonomy.mode` (`false` when off) | Autonomously trigger background history scavenging for long sessions |
 | `autoLearn.model` | string | `"active"` | Model used by the background learner; `"active"` uses the current session model, otherwise use a `pi --model` pattern |
 | `autoLearn.longSessionMessages` | number | `32` | Trigger after this many message entries in the active branch |
 | `autoLearn.longSessionContextPercent` | number | `70` | Trigger when current context usage reaches this percent |
 | `autoLearn.cooldownMinutes` | number | `120` | Per-session-tenant cooldown between learner launches |
 | `autoLearn.leaseMinutes` | number | `90` | Shared-state lease duration for a running background learner |
 | `autoLearn.maxConcurrentLearners` | number | `2` | Maximum running Auto Learn background learners across all session tenants |
-| `autoLearn.applyHighConfidence` | boolean | `false` | Allow the learner to apply high-confidence memory candidates; tooling/core changes remain proposal/approval-gated |
+| `autoLearn.applyHighConfidence` | boolean | `false` | Allow the learner to apply high-confidence memory candidates; broader write authority is controlled by `autonomy.mode` |
+| `autoLearn.reflectionReview` | boolean | `true` | When Auto Learn is enabled, also run bounded post-turn reflection after corrective or complex turns |
+| `autoLearn.reflectionMinToolCalls` | number | `5` | Trigger reflection review after this many tool calls in one completed turn |
+| `autoLearn.reflectionCooldownMinutes` | number | `60` | Per-session-tenant cooldown between reflection-review learners |
 
-Use `/settings` → **Auto Learn** to configure this interactively, including the scavenger model. The submenu lets you choose whether to save globally or to the current project's `.pi/settings.json`. The model picker prioritizes models from currently configured subscription/API accounts and still offers a manual custom-pattern entry. Use `/auto-learn status` to inspect trigger state, cooldown, and running leases; use `/auto-learn run` to start one learner immediately.
+Use `/settings` → **Auto Learn Advanced** to override the active autonomy preset, including the scavenger model and reflection review. The submenu lets you choose whether to save globally or to the current project's `.pi/settings.json`. The model picker prioritizes models from currently configured subscription/API accounts and still offers a manual custom-pattern entry. Use `/autonomy status` for the compact preset dashboard, `/auto-learn status` to inspect trigger state, reflection cooldown, and running leases, or `/auto-learn run` to start one learner immediately.
 
 When enabled, Auto Learn uses a shared state file under the learning extension data directory to coordinate non-colliding background learners across sessions. Each long session gets its own tenant lease, and all learners read/renew the same state before scavenging stored histories for tooling capability and agent-behavior improvements. Learners also query available user/project memory first, using existing rules, preferences, corrections, and project facts to polish candidates, avoid duplicates, and improve accuracy.
 
@@ -117,7 +138,10 @@ When enabled, Auto Learn uses a shared state file under the learning extension d
     "cooldownMinutes": 120,
     "leaseMinutes": 90,
     "maxConcurrentLearners": 2,
-    "applyHighConfidence": false
+    "applyHighConfidence": false,
+    "reflectionReview": true,
+    "reflectionMinToolCalls": 5,
+    "reflectionCooldownMinutes": 60
   }
 }
 ```

@@ -16,6 +16,8 @@ import {
 import { formatHttpIdleTimeoutMs, HTTP_IDLE_TIMEOUT_CHOICES } from "../../../core/http-dispatcher.ts";
 import type {
 	AutoLearnSettings,
+	AutonomyMode,
+	AutonomySettings,
 	SelfModificationSettings,
 	SettingsScope,
 	WarningSettings,
@@ -40,6 +42,8 @@ const THINKING_DESCRIPTIONS: Record<ThinkingLevel, string> = {
 	xhigh: "Maximum reasoning (~32k tokens)",
 };
 
+const AUTONOMY_MODES: AutonomyMode[] = ["off", "safe", "balanced", "full"];
+
 const AUTO_LEARN_DEFAULTS = {
 	model: "active",
 	longSessionMessages: 32,
@@ -48,6 +52,9 @@ const AUTO_LEARN_DEFAULTS = {
 	leaseMinutes: 90,
 	maxConcurrentLearners: 2,
 	applyHighConfidence: false,
+	reflectionReview: true,
+	reflectionMinToolCalls: 5,
+	reflectionCooldownMinutes: 60,
 } as const;
 
 function booleanSettingValue(value: boolean | undefined, defaultValue = false): string {
@@ -75,6 +82,15 @@ function autoLearnModelValue(settings: AutoLearnSettings): string {
 function selfModificationSummary(settings: SelfModificationSettings): string {
 	if (!(settings.enabled ?? false)) return "disabled";
 	return optionalStringValue(settings.sourcePath) === "(not set)" ? "enabled (missing path)" : "enabled";
+}
+
+function autonomyModeValue(settings: AutonomySettings): AutonomyMode {
+	return settings.mode && AUTONOMY_MODES.includes(settings.mode) ? settings.mode : "off";
+}
+
+function autonomySummary(settings: AutonomySettings): string {
+	const mode = autonomyModeValue(settings);
+	return mode === "full" ? "standing autonomy" : mode;
 }
 
 function autoLearnSummary(settings: AutoLearnSettings): string {
@@ -151,6 +167,8 @@ export interface SettingsConfig {
 	warnings: WarningSettings;
 	selfModification: { enabled: boolean; sourcePath?: string };
 	selfModificationScope?: SettingsScope;
+	autonomy: AutonomySettings;
+	autonomyScope?: SettingsScope;
 	autoLearn: AutoLearnSettings;
 	autoLearnScope?: SettingsScope;
 	currentModelPattern?: string;
@@ -184,6 +202,7 @@ export interface SettingsCallbacks {
 	onShowTerminalProgressChange: (enabled: boolean) => void;
 	onWarningsChange: (warnings: WarningSettings) => void;
 	onSelfModificationChange: (settings: SelfModificationSettings, scope: SettingsScope) => void;
+	onAutonomyChange: (settings: AutonomySettings, scope: SettingsScope) => void;
 	onAutoLearnChange: (settings: AutoLearnSettings, scope: SettingsScope) => void;
 	onCancel: () => void;
 }
@@ -398,6 +417,66 @@ class SelfModificationSettingsSubmenu extends Container {
 	}
 }
 
+class AutonomySettingsSubmenu extends Container {
+	private settingsList: SettingsList;
+	private state: AutonomySettings;
+	private scope: SettingsScope;
+
+	constructor(
+		settings: AutonomySettings,
+		onChange: (settings: AutonomySettings, scope: SettingsScope) => void,
+		onCancel: () => void,
+		scope: SettingsScope = "global",
+	) {
+		super();
+		this.state = { mode: autonomyModeValue(settings) };
+		this.scope = scope;
+
+		const items: SettingItem[] = [
+			{
+				id: "autonomy-scope",
+				label: "Save scope",
+				description: "Save this autonomy preset globally or in the current project's .pi/settings.json",
+				currentValue: this.scope,
+				values: ["global", "project"],
+			},
+			{
+				id: "autonomy-mode",
+				label: "Mode",
+				description: "One preset for background learning: off, safe, balanced, or standing autonomy",
+				currentValue: autonomyModeValue(this.state),
+				values: AUTONOMY_MODES,
+			},
+		];
+
+		this.settingsList = new SettingsList(
+			items,
+			Math.min(items.length, 10),
+			getSettingsListTheme(),
+			(id, newValue) => {
+				switch (id) {
+					case "autonomy-scope":
+						this.scope = newValue as SettingsScope;
+						break;
+					case "autonomy-mode":
+						this.state = { ...this.state, mode: newValue as AutonomyMode };
+						break;
+					default:
+						return;
+				}
+				onChange({ ...this.state }, this.scope);
+			},
+			onCancel,
+		);
+
+		this.addChild(this.settingsList);
+	}
+
+	handleInput(data: string): void {
+		this.settingsList.handleInput(data);
+	}
+}
+
 class AutoLearnSettingsSubmenu extends Container {
 	private settingsList: SettingsList;
 	private state: AutoLearnSettings;
@@ -497,9 +576,36 @@ class AutoLearnSettingsSubmenu extends Container {
 				id: "auto-learn-apply-high-confidence",
 				label: "Apply high confidence",
 				description:
-					"Allow high-confidence memory candidates to be applied automatically; tooling/core changes stay approval-gated",
+					"Allow high-confidence memory candidates to be applied automatically; broader write authority follows autonomy.mode",
 				currentValue: booleanSettingValue(this.state.applyHighConfidence, AUTO_LEARN_DEFAULTS.applyHighConfidence),
 				values: ["false", "true"],
+			},
+			{
+				id: "auto-learn-reflection-review",
+				label: "Reflection review",
+				description: "After corrective or complex turns, launch a bounded background learning review",
+				currentValue: booleanSettingValue(this.state.reflectionReview, AUTO_LEARN_DEFAULTS.reflectionReview),
+				values: ["true", "false"],
+			},
+			{
+				id: "auto-learn-reflection-tool-calls",
+				label: "Reflection tool trigger",
+				description: "Trigger reflection review after this many tool calls in one completed turn",
+				currentValue: numberSettingValue(
+					this.state.reflectionMinToolCalls,
+					AUTO_LEARN_DEFAULTS.reflectionMinToolCalls,
+				),
+				values: ["3", "5", "8", "12"],
+			},
+			{
+				id: "auto-learn-reflection-cooldown",
+				label: "Reflection cooldown",
+				description: "Per-session-tenant cooldown between reflection-review launches",
+				currentValue: numberSettingValue(
+					this.state.reflectionCooldownMinutes,
+					AUTO_LEARN_DEFAULTS.reflectionCooldownMinutes,
+				),
+				values: ["15", "30", "60", "120"],
 			},
 		];
 
@@ -532,6 +638,15 @@ class AutoLearnSettingsSubmenu extends Container {
 						break;
 					case "auto-learn-apply-high-confidence":
 						this.state = { ...this.state, applyHighConfidence: newValue === "true" };
+						break;
+					case "auto-learn-reflection-review":
+						this.state = { ...this.state, reflectionReview: newValue === "true" };
+						break;
+					case "auto-learn-reflection-tool-calls":
+						this.state = { ...this.state, reflectionMinToolCalls: parseInt(newValue, 10) };
+						break;
+					case "auto-learn-reflection-cooldown":
+						this.state = { ...this.state, reflectionCooldownMinutes: parseInt(newValue, 10) };
 						break;
 					default:
 						return;
@@ -671,6 +786,7 @@ export class SettingsSelectorComponent extends Container {
 		const followUpKey = keyDisplayText("app.message.followUp");
 		let currentWarnings = { ...config.warnings };
 		let currentSelfModification: SelfModificationSettings = { ...config.selfModification };
+		let currentAutonomy: AutonomySettings = { ...config.autonomy };
 		let currentAutoLearn: AutoLearnSettings = { ...config.autoLearn };
 
 		const items: SettingItem[] = [
@@ -770,9 +886,25 @@ export class SettingsSelectorComponent extends Container {
 					),
 			},
 			{
+				id: "autonomy",
+				label: "Autonomy",
+				description: "Choose one autonomy preset instead of tuning many background-learning knobs",
+				currentValue: autonomySummary(currentAutonomy),
+				submenu: (_currentValue, done) =>
+					new AutonomySettingsSubmenu(
+						currentAutonomy,
+						(settings, scope) => {
+							currentAutonomy = { ...settings };
+							callbacks.onAutonomyChange(settings, scope);
+						},
+						() => done(autonomySummary(currentAutonomy)),
+						config.autonomyScope ?? "global",
+					),
+			},
+			{
 				id: "auto-learn",
-				label: "Auto Learn",
-				description: "Configure autonomous background learning/scavenging for long sessions",
+				label: "Auto Learn Advanced",
+				description: "Advanced overrides for autonomous background learning/scavenging",
 				currentValue: autoLearnSummary(currentAutoLearn),
 				submenu: (_currentValue, done) =>
 					new AutoLearnSettingsSubmenu(

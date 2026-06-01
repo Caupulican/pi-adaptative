@@ -17,7 +17,8 @@ export interface BuiltinSlashCommand {
 
 export const BUILTIN_SLASH_COMMANDS: ReadonlyArray<BuiltinSlashCommand> = [
 	{ name: "settings", description: "Open settings menu" },
-	{ name: "auto-learn", description: "Show Auto Learn status or run now (/auto-learn run)" },
+	{ name: "autonomy", description: "Show or set autonomy mode (/autonomy full)" },
+	{ name: "auto-learn", description: "Show Auto Learn/reflection status or run now (/auto-learn run)" },
 	{ name: "model", description: "Select model (opens selector UI)" },
 	{ name: "scoped-models", description: "Enable/disable models for Ctrl+P cycling" },
 	{ name: "export", description: "Export session (HTML default, or specify path: .html/.jsonl)" },

@@ -994,6 +994,11 @@ export class AgentSession {
 		const sourceStatus = sourceLooksValid
 			? sourcePath
 			: `${sourcePath} (missing or not a source checkout; ask the user to correct \`selfModification.sourcePath\` before editing)`;
+		const autonomy = this.settingsManager.getAutonomySettings();
+		const settingsGate =
+			autonomy.mode === "full"
+				? "In autonomy.mode=full, autonomy/autoLearn setting tuning is covered by the standing autonomy grant; ask before changing credentials, provider auth, package sources, or unrelated preferences."
+				: "Ask for explicit approval before changing global settings.";
 		return `Pi self-modification guardrails (local setting active):
 - Authorized pi-adaptative source path: ${sourceStatus}
 - Only modify Pi core/harness source under the authorized source path; never patch installed node_modules or generated runtime output as the source of truth.
@@ -1001,7 +1006,33 @@ export class AgentSession {
 - Preserve user changes: check git status before and after, avoid unrelated edits, and do not overwrite concurrent work.
 - Validate with focused tests and broader checks proportional to risk before claiming success.
 - Reload/restart/renew only after source changes are saved and auditable.
-- Ask for explicit approval before changing global settings, publishing, tagging, or releasing.`;
+- ${settingsGate}
+- Always ask for explicit approval before publishing, pushing, tagging, or releasing.`;
+	}
+
+	private _buildAutonomyPrompt(): string | undefined {
+		const autoLearn = this.settingsManager.getAutoLearnSettings();
+		const autonomy = this.settingsManager.getAutonomySettings();
+		if (!autoLearn.enabled && autonomy.mode === "off") {
+			return undefined;
+		}
+
+		const reflection = autoLearn.reflectionReview ?? autonomy.mode !== "off";
+		const model = autoLearn.model?.trim() || "active";
+		if (autonomy.mode === "full") {
+			return `Pi autonomy policy (mode full, standing autonomy):
+- Setting-authorized background learners may run after long sessions or corrective/complex turns using model ${model}; they may act without asking first inside this standing grant.
+- Standing grant: write high-confidence durable memory, create/patch user/project skills, create/patch small user/project extensions/tools, tune autonomy/autoLearn settings, edit the authorized selfModification.sourcePath, run validation, and leave audit/rollback evidence.
+- Hard stops still require explicit foreground approval: publish/npm release, git push, tag creation, credential/provider-auth changes, destructive user-data deletion, network-exposed services, or expanding authority beyond this policy.
+- Treat current-turn evidence as a cue, not proof; prefer deterministic or longitudinal corroboration for durable behavior changes.
+- Active-task work remains primary: autonomy runs must not interrupt user-visible execution or claim task completion without evidence.`;
+		}
+		return `Pi autonomy policy (mode ${autonomy.mode}):
+- Setting-authorized background learners may run after long sessions${reflection ? " or corrective/complex turns" : ""} using model ${model}.
+- Background learning may query durable memory and run bounded learning tools.
+- Auto-apply is limited to high-confidence durable memory when explicitly configured; tooling, skill, prompt, extension, settings, and core-source changes stay proposal/approval-gated.
+- Treat current-turn evidence as a cue, not proof; prefer longitudinal corroboration before changing durable behavior.
+- Active-task work remains primary: learning runs must not interrupt user-visible execution or claim task completion.`;
 	}
 
 	private _rebuildSystemPrompt(toolNames: string[]): string {
@@ -1022,7 +1053,11 @@ export class AgentSession {
 
 		const loaderSystemPrompt = this._resourceLoader.getSystemPrompt();
 		const loaderAppendSystemPrompt = this._resourceLoader.getAppendSystemPrompt();
-		const appendSystemPromptParts = [this._buildSelfModificationPrompt(), ...loaderAppendSystemPrompt];
+		const appendSystemPromptParts = [
+			this._buildSelfModificationPrompt(),
+			this._buildAutonomyPrompt(),
+			...loaderAppendSystemPrompt,
+		].filter((part): part is string => Boolean(part));
 		const appendSystemPrompt = appendSystemPromptParts.length > 0 ? appendSystemPromptParts.join("\n\n") : undefined;
 		const loadedSkills = this._resourceLoader.getSkills().skills;
 		const loadedContextFiles = this._resourceLoader.getAgentsFiles().agentsFiles;
