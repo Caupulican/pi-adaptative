@@ -5,7 +5,7 @@
 </p>
 <p align="center">
   <a href="https://discord.com/invite/3cU7Bz4UPx"><img alt="Discord" src="https://img.shields.io/badge/discord-community-5865F2?style=flat-square&logo=discord&logoColor=white" /></a>
-  <a href="https://www.npmjs.com/package/@earendil-works/pi-coding-agent"><img alt="npm" src="https://img.shields.io/npm/v/@earendil-works/pi-coding-agent?style=flat-square" /></a>
+  <a href="https://www.npmjs.com/package/@caupulican/pi-adaptative"><img alt="npm" src="https://img.shields.io/npm/v/@caupulican/pi-adaptative?style=flat-square" /></a>
 </p>
 <p align="center">
   <a href="https://pi.dev">pi.dev</a> domain graciously donated by
@@ -17,11 +17,13 @@
 
 ---
 
-Pi is a minimal terminal coding harness. Adapt pi to your workflows, not the other way around, without having to fork and modify pi internals. Extend it with TypeScript [Extensions](#extensions), [Skills](#skills), [Prompt Templates](#prompt-templates), and [Themes](#themes). Put your extensions, skills, prompt templates, and themes in [Pi Packages](#pi-packages) and share them with others via npm or git.
+# Pi Adaptative
 
-Pi ships with powerful defaults but skips features like sub agents and plan mode. Instead, you can ask pi to build what you want or install a third party pi package that matches your workflow.
+Pi Adaptative is our implementation and testbed for self-evolving coding agents. It keeps Pi's minimal terminal harness foundation, then layers on practical adaptive-agent work: lazy startup context, persistent tool panels, continuous learning, bounded self-modification guardrails, and release-tested agent-harness evolution.
 
-Pi runs in four modes: interactive, print or JSON, RPC for process integration, and an SDK for embedding in your own apps. See [openclaw/openclaw](https://github.com/openclaw/openclaw) for a real-world SDK integration.
+This fork is meant to be installed and used as `@caupulican/pi-adaptative`. It preserves Pi-compatible CLI and SDK surfaces where useful, while making the product identity and published package `pi-adaptative`.
+
+Pi Adaptative runs in four modes: interactive, print or JSON, RPC for process integration, and an SDK for embedding in your own apps. It remains extensible with TypeScript [Extensions](#extensions), [Skills](#skills), [Prompt Templates](#prompt-templates), [Themes](#themes), and [Pi Packages](#pi-packages).
 
 ## Share your OSS coding agent sessions
 
@@ -68,7 +70,7 @@ I regularly publish my own `pi-mono` work sessions here:
 ## Quick Start
 
 ```bash
-npm install -g --ignore-scripts @earendil-works/pi-coding-agent
+npm install -g --ignore-scripts @caupulican/pi-adaptative
 ```
 
 `--ignore-scripts` disables dependency lifecycle scripts during install. Pi does not require install scripts for normal npm installs.
@@ -298,14 +300,14 @@ Use `--offline` or `PI_OFFLINE=1` to disable all startup network operations desc
 
 ## Context Files
 
-Pi loads `AGENTS.md` (or `CLAUDE.md`) at startup from:
+Pi Adaptative discovers `AGENTS.md` (or `CLAUDE.md`) locations at startup from:
 - `~/.pi/agent/AGENTS.md` (global)
 - Parent directories (walking up from cwd)
 - Current directory
 
-Use for project instructions, conventions, common commands. All matching files are concatenated.
+Use these files for project instructions, conventions, common commands, and safety rules. Their contents are lazy-loaded by path with the `read` tool instead of being concatenated into every startup prompt.
 
-Disable context file loading with `--no-context-files` (or `-nc`).
+Disable context file discovery with `--no-context-files` (or `-nc`).
 
 ### System Prompt
 
@@ -329,7 +331,7 @@ Place in `~/.pi/agent/prompts/`, `.pi/prompts/`, or a [pi package](#pi-packages)
 
 ### Skills
 
-On-demand capability packages following the [Agent Skills standard](https://agentskills.io). Invoke via `/skill:name` or let the agent load them automatically.
+On-demand capability packages following the [Agent Skills standard](https://agentskills.io). Startup prompts list only lazy-loadable skill locations; frontmatter and instructions stay out of context until the agent reads the relevant skill or you invoke `/skill:name`.
 
 ```markdown
 <!-- ~/.pi/agent/skills/my-skill/SKILL.md -->
@@ -659,6 +661,6 @@ MIT
 
 ## See Also
 
-- [@earendil-works/pi-ai](https://www.npmjs.com/package/@earendil-works/pi-ai): Core LLM toolkit
-- [@earendil-works/pi-agent-core](https://www.npmjs.com/package/@earendil-works/pi-agent-core): Agent framework
-- [@earendil-works/pi-tui](https://www.npmjs.com/package/@earendil-works/pi-tui): Terminal UI components
+- [@caupulican/pi-ai](https://www.npmjs.com/package/@caupulican/pi-ai): Core LLM toolkit for this fork
+- [@caupulican/pi-agent-core](https://www.npmjs.com/package/@caupulican/pi-agent-core): Agent framework for this fork
+- [@caupulican/pi-tui](https://www.npmjs.com/package/@caupulican/pi-tui): Terminal UI components for this fork

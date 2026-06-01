@@ -16,18 +16,16 @@
 
 ---
 
-# Pi Agent Harness Mono Repo
+# Pi Adaptative
 
-This is the home of the pi agent harness project including our self extensible coding agent.
+Pi Adaptative is our implementation and testbed for self-evolving coding agents. It is an adaptive fork of the Pi agent harness focused on practical agent self-improvement: lazy context loading, tool/panel ergonomics, continuous learning, autonomous but bounded harness evolution, and release-tested workflows that can be installed from npm.
 
-* **[@earendil-works/pi-coding-agent](packages/coding-agent)**: Interactive coding agent CLI
-* **[@earendil-works/pi-agent-core](packages/agent)**: Agent runtime with tool calling and state management
-* **[@earendil-works/pi-ai](packages/ai)**: Unified multi-provider LLM API (OpenAI, Anthropic, Google, …)
+* **[@caupulican/pi-adaptative](packages/coding-agent)**: Interactive CLI and self-evolution harness
+* **[@caupulican/pi-agent-core](packages/agent)**: Agent runtime package published for this fork
+* **[@caupulican/pi-ai](packages/ai)**: Multi-provider LLM API package published for this fork
+* **[@caupulican/pi-tui](packages/tui)**: Terminal UI package published for this fork
 
-To learn more about pi:
-
-* [Visit pi.dev](https://pi.dev), the project website with demos
-* [Read the documentation](https://pi.dev/docs/latest), but you can also ask the agent to explain itself
+This repository keeps upstream Pi compatibility where useful, but the product and npm install target for our work is `pi-adaptative`.
 
 ## Share your OSS coding agent sessions
 
@@ -49,10 +47,10 @@ I regularly publish my own `pi-mono` work sessions here:
 
 | Package | Description |
 |---------|-------------|
-| **[@earendil-works/pi-ai](packages/ai)** | Unified multi-provider LLM API (OpenAI, Anthropic, Google, etc.) |
-| **[@earendil-works/pi-agent-core](packages/agent)** | Agent runtime with tool calling and state management |
-| **[@earendil-works/pi-coding-agent](packages/coding-agent)** | Interactive coding agent CLI |
-| **[@earendil-works/pi-tui](packages/tui)** | Terminal UI library with differential rendering |
+| **[@caupulican/pi-ai](packages/ai)** | Unified multi-provider LLM API (OpenAI, Anthropic, Google, etc.) |
+| **[@caupulican/pi-agent-core](packages/agent)** | Agent runtime with tool calling and state management |
+| **[@caupulican/pi-adaptative](packages/coding-agent)** | Interactive coding agent CLI and adaptive harness |
+| **[@caupulican/pi-tui](packages/tui)** | Terminal UI library with differential rendering |
 
 For Slack/chat automation and workflows see [earendil-works/pi-chat](https://github.com/earendil-works/pi-chat).
 
