@@ -2,6 +2,12 @@
 
 ## [Unreleased]
 
+## [0.80.4] - 2026-06-02
+
+### Fixed
+
+- Reduced visible text-row flicker by painting updated text before clearing stale tail content.
+
 ## [0.80.3] - 2026-06-02
 
 ## [0.80.2] - 2026-06-02

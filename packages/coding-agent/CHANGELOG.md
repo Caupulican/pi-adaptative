@@ -2,6 +2,12 @@
 
 ## [Unreleased]
 
+## [0.80.4] - 2026-06-02
+
+### Added
+
+- Added terminal clipboard image paste attachment handling so pasted images are sent as model image inputs instead of temp-file path text.
+
 ## [0.80.3] - 2026-06-02
 
 ### Fixed
