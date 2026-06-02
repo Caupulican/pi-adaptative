@@ -64,6 +64,31 @@ function getCellItalic(terminal: VirtualTerminal, row: number, col: number): num
 	return cell.isItalic();
 }
 
+describe("TUI differential rendering", () => {
+	it("paints changed text before clearing the line tail to avoid visible blank flicker", async () => {
+		const terminal = new LoggingVirtualTerminal(40, 10);
+		const tui = new TUI(terminal);
+		const component = new TestComponent();
+		tui.addChild(component);
+
+		component.lines = ["abcdef"];
+		tui.start();
+		await terminal.waitForRender();
+		terminal.clearWrites();
+
+		component.lines = ["abc"];
+		tui.requestRender();
+		await terminal.waitForRender();
+
+		const writes = terminal.getWrites();
+		assert.ok(!writes.includes("\x1b[2K"), "text row updates should not blank the whole line before repainting");
+		assert.ok(writes.includes("abc"), "replacement text should be painted");
+		assert.ok(writes.includes("\x1b[K"), "shorter replacement should clear the trailing old text after painting");
+
+		tui.stop();
+	});
+});
+
 describe("TUI Kitty image cleanup", () => {
 	it("deletes changed image ids before drawing moved placements", async () => {
 		const terminal = new LoggingVirtualTerminal(40, 10);

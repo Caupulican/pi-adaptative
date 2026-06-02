@@ -1180,14 +1180,16 @@ export class TUI extends Container {
 
 		buffer += appendStart ? "\r\n" : "\r"; // Move to column 0
 
-		// Only render changed lines (firstChanged to lastChanged), not all lines to end
-		// This reduces flicker when only a single line changes (e.g., spinner animation)
+		// Only render changed lines (firstChanged to lastChanged), not all lines to end.
+		// Prefer paint-over-then-clear-tail for text lines instead of clear-then-paint.
+		// Some terminals visibly flash when EL2 blanks the row before the replacement
+		// text arrives, especially while typing or during high-frequency agent updates.
 		const renderEnd = Math.min(lastChanged, newLines.length - 1);
 		for (let i = firstChanged; i <= renderEnd; i++) {
 			if (i > firstChanged) buffer += "\r\n";
-			buffer += "\x1b[2K"; // Clear current line
 			const line = newLines[i];
 			const isImage = isImageLine(line);
+			if (isImage) buffer += "\x1b[2K"; // Clear reserved/image rows before redrawing placements.
 			if (!isImage && visibleWidth(line) > width) {
 				// Log all lines to crash file for debugging
 				const crashLogPath = path.join(os.homedir(), ".pi", "agent", "pi-crash.log");
@@ -1217,6 +1219,7 @@ export class TUI extends Container {
 				throw new Error(errorMsg);
 			}
 			buffer += line;
+			if (!isImage && visibleWidth(line) < visibleWidth(this.previousLines[i] ?? "")) buffer += "\x1b[K";
 		}
 
 		// Track where cursor ended up after rendering
