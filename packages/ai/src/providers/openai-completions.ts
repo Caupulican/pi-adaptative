@@ -1095,7 +1095,6 @@ function detectCompat(model: Model<"openai-completions">): ResolvedOpenAIComplet
 	const isOpenRouter = provider === "openrouter" || baseUrl.includes("openrouter.ai");
 	const isCloudflareWorkersAI = provider === "cloudflare-workers-ai" || baseUrl.includes("api.cloudflare.com");
 	const isCloudflareAiGateway = provider === "cloudflare-ai-gateway" || baseUrl.includes("gateway.ai.cloudflare.com");
-	const isOpenAI = provider === "openai" && baseUrl.includes("api.openai.com");
 
 	const isNonStandard =
 		provider === "cerebras" ||
@@ -1120,7 +1119,7 @@ function detectCompat(model: Model<"openai-completions">): ResolvedOpenAIComplet
 
 	return {
 		supportsStore: !isNonStandard,
-		supportsDeveloperRole: isOpenAI,
+		supportsDeveloperRole: !isNonStandard && !isOpenRouter,
 		supportsReasoningEffort: !isGrok && !isZai && !isMoonshot && !isTogether && !isCloudflareAiGateway,
 		supportsUsageInStreaming: true,
 		maxTokensField: useMaxTokens ? "max_tokens" : "max_completion_tokens",

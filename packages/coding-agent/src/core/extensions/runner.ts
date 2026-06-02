@@ -225,6 +225,7 @@ export class ExtensionRunner {
 	private extensions: Extension[];
 	private runtime: ExtensionRuntime;
 	private uiContext: ExtensionUIContext;
+	private mode: ExtensionContext["mode"] = "print";
 	private cwd: string;
 	private sessionManager: SessionManager;
 	private modelRegistry: ModelRegistry;
@@ -355,6 +356,10 @@ export class ExtensionRunner {
 
 	setUIContext(uiContext?: ExtensionUIContext): void {
 		this.uiContext = uiContext ?? noOpUIContext;
+	}
+
+	setMode(mode: ExtensionContext["mode"]): void {
+		this.mode = mode;
 	}
 
 	getUIContext(): ExtensionUIContext {
@@ -580,6 +585,10 @@ export class ExtensionRunner {
 			get hasUI() {
 				runner.assertActive();
 				return runner.hasUI();
+			},
+			get mode() {
+				runner.assertActive();
+				return runner.mode;
 			},
 			get cwd() {
 				runner.assertActive();

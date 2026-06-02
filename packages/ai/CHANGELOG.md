@@ -2,6 +2,11 @@
 
 ## [Unreleased]
 
+### Fixed
+
+- Fixed OpenRouter reasoning-model requests to use `system` instructions instead of unsupported `developer` messages.
+- Fixed Amazon Bedrock message conversion to replace blank required user/tool-result content with a placeholder while still filtering empty assistant content.
+
 ## [0.80.1] - 2026-06-01
 
 ## [0.80.0] - 2026-06-01

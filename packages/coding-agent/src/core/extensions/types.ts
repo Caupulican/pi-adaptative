@@ -300,6 +300,8 @@ export interface ExtensionContext {
 	ui: ExtensionUIContext;
 	/** Whether UI is available (false in print/RPC mode) */
 	hasUI: boolean;
+	/** Runtime mode hosting this extension invocation. */
+	mode: "tui" | "print" | "rpc";
 	/** Current working directory */
 	cwd: string;
 	/** Session manager (read-only) */

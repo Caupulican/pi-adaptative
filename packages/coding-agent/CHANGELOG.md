@@ -2,6 +2,16 @@
 
 ## [Unreleased]
 
+### Added
+
+- Added the built-in `matrix-machine` green/blue machine theme.
+- Added `ctx.mode` to extension contexts so extensions can distinguish `tui`, `print`, and `rpc` runtimes.
+
+### Fixed
+
+- Fixed footer branch refresh on WSL `/mnt/<drive>` repositories by polling `.git/HEAD` in addition to file watching.
+- Fixed provider compatibility via inherited `@earendil-works/pi-ai` OpenRouter and Amazon Bedrock request handling updates.
+
 ## [0.80.1] - 2026-06-01
 
 ### Changed
