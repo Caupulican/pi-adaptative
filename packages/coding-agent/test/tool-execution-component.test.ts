@@ -1,5 +1,5 @@
 import { join, resolve } from "node:path";
-import { Text, type TUI } from "@earendil-works/pi-tui";
+import { Text, type TUI, visibleWidth } from "@earendil-works/pi-tui";
 import { Type } from "typebox";
 import { beforeAll, describe, expect, test } from "vitest";
 import { getReadmePath } from "../src/config.ts";
@@ -515,6 +515,28 @@ describe("ToolExecutionComponent parity", () => {
 		const summary = stripAnsi(component.renderCallSummary(120).join("\n"));
 		expect(summary).toContain("Summary Tool");
 		expect(summary).not.toContain("hidden grouped result");
+	});
+
+	test("keeps collapsed grouped bash summaries within render width when adding expand hint", () => {
+		const command = `printf 'WSL_ADDRS\n'; ip -4 -o addr show scope global | sed 's/\\// /g' || true
+printf '\nWINDOWS_IPV4\n'; powershell.exe -NoProfile -Command "Get-NetIPAddress -AddressFamily IPv4 | Where-Object { $_.IPAddress -notlike '169.254*' -and $_.IPAddress -ne '127.0.0.1' } | Select-Object InterfaceAlias,IPAddress,PrefixLength | Format-Table -AutoSize" 2>/dev/null | tr -d '\r' || true`;
+		const component = new ToolExecutionComponent(
+			"bash",
+			"tool-group-long-bash",
+			{ command, timeout: 15 },
+			{},
+			createBashToolDefinition(process.cwd()),
+			createFakeTui(),
+			process.cwd(),
+		);
+		const group = new ToolGroupComponent("bash", [component]);
+
+		const lines = group.render(112);
+
+		expect(stripAnsi(lines.join("\n"))).toContain("to expand");
+		for (const line of lines) {
+			expect(visibleWidth(line)).toBeLessThanOrEqual(112);
+		}
 	});
 
 	test("trims trailing blank display lines from write previews", () => {

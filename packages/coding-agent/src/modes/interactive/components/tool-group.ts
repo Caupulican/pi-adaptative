@@ -1,4 +1,4 @@
-import { Box, type Component } from "@earendil-works/pi-tui";
+import { Box, type Component, truncateToWidth, visibleWidth } from "@earendil-works/pi-tui";
 import { type ThemeBg, theme } from "../theme/theme.ts";
 import { keyText } from "./keybinding-hints.ts";
 import type { ToolExecutionComponent } from "./tool-execution.ts";
@@ -61,16 +61,24 @@ export class ToolGroupComponent implements Component {
 	}
 
 	private renderCollapsed(width: number): string[] {
+		const safeWidth = Math.max(1, width);
 		const lines = this.tools.flatMap((tool) =>
-			tool.renderCallSummary(width).map((line) => line.replace(/[ \t]+$/g, "")),
+			tool.renderCallSummary(safeWidth).map((line) => line.replace(/[ \t]+$/g, "")),
 		);
 		for (let i = lines.length - 1; i >= 0; i--) {
 			if (lines[i]?.trim()) {
-				lines[i] += theme.fg("dim", ` (${keyText("app.tools.expand")} to expand)`);
+				lines[i] = this.appendExpandHint(lines[i], safeWidth);
 				break;
 			}
 		}
-		return lines;
+		return lines.map((line) => truncateToWidth(line, safeWidth, "..."));
+	}
+
+	private appendExpandHint(line: string, width: number): string {
+		const hint = theme.fg("dim", ` (${keyText("app.tools.expand")} to expand)`);
+		const hintWidth = visibleWidth(hint);
+		if (hintWidth >= width) return truncateToWidth(hint, width, "...");
+		return truncateToWidth(line, width - hintWidth, "") + hint;
 	}
 
 	private getBackgroundColor(): ThemeBg {
