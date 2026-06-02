@@ -539,6 +539,31 @@ printf '\nWINDOWS_IPV4\n'; powershell.exe -NoProfile -Command "Get-NetIPAddress 
 		}
 	});
 
+	test("keeps collapsed grouped npm version checks within render width when adding expand hint", () => {
+		const firstCommand = `npm view @earendil-works/pi-ai versions --json | tail -c 1000 && printf '\n---\n' && npm view @earendil-works/pi-agent-core versions --json | tail -c 1000 && printf '\n---\n' && npm view @earendil-works/pi-tui versions --json | tail -c 1000`;
+		const secondCommand = `cd /mnt/d/GitHub/mine/pi-adaptative && npm view @caupulican/pi-adaptative@0.80.2 dependencies --json && printf '\n---dist-tags---\n' && npm view @caupulican/pi-adaptative dist-tags --json`;
+		const components = [firstCommand, secondCommand].map(
+			(command, index) =>
+				new ToolExecutionComponent(
+					"bash",
+					`tool-group-npm-version-${index}`,
+					{ command, timeout: 60 },
+					{},
+					createBashToolDefinition(process.cwd()),
+					createFakeTui(),
+					process.cwd(),
+				),
+		);
+		const group = new ToolGroupComponent("bash", components);
+
+		const lines = group.render(112);
+
+		expect(stripAnsi(lines.join("\n"))).toContain("to expand");
+		for (const line of lines) {
+			expect(visibleWidth(line)).toBeLessThanOrEqual(112);
+		}
+	});
+
 	test("trims trailing blank display lines from write previews", () => {
 		const component = new ToolExecutionComponent(
 			"write",

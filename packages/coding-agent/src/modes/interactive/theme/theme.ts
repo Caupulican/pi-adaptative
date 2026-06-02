@@ -101,6 +101,86 @@ const ThemeJsonSchema = Type.Object({
 
 type ThemeJson = Static<typeof ThemeJsonSchema>;
 
+const FALLBACK_DARK_THEME_JSON: ThemeJson = {
+	name: "dark",
+	vars: {
+		cyan: "#00d7ff",
+		blue: "#5f87ff",
+		green: "#b5bd68",
+		red: "#cc6666",
+		yellow: "#ffff00",
+		text: "#d4d4d4",
+		gray: "#808080",
+		dimGray: "#666666",
+		darkGray: "#505050",
+		accent: "#8abeb7",
+		selectedBg: "#3a3a4a",
+		userMsgBg: "#343541",
+		toolPendingBg: "#282832",
+		toolSuccessBg: "#283228",
+		toolErrorBg: "#3c2828",
+		customMsgBg: "#2d2838",
+	},
+	colors: {
+		accent: "accent",
+		border: "blue",
+		borderAccent: "cyan",
+		borderMuted: "darkGray",
+		success: "green",
+		error: "red",
+		warning: "yellow",
+		muted: "gray",
+		dim: "dimGray",
+		text: "text",
+		thinkingText: "gray",
+		selectedBg: "selectedBg",
+		userMessageBg: "userMsgBg",
+		userMessageText: "text",
+		customMessageBg: "customMsgBg",
+		customMessageText: "text",
+		customMessageLabel: "#9575cd",
+		toolPendingBg: "toolPendingBg",
+		toolSuccessBg: "toolSuccessBg",
+		toolErrorBg: "toolErrorBg",
+		toolTitle: "text",
+		toolOutput: "gray",
+		mdHeading: "#f0c674",
+		mdLink: "#81a2be",
+		mdLinkUrl: "dimGray",
+		mdCode: "accent",
+		mdCodeBlock: "green",
+		mdCodeBlockBorder: "gray",
+		mdQuote: "gray",
+		mdQuoteBorder: "gray",
+		mdHr: "gray",
+		mdListBullet: "accent",
+		toolDiffAdded: "green",
+		toolDiffRemoved: "red",
+		toolDiffContext: "gray",
+		syntaxComment: "#6A9955",
+		syntaxKeyword: "#569CD6",
+		syntaxFunction: "#DCDCAA",
+		syntaxVariable: "#9CDCFE",
+		syntaxString: "#CE9178",
+		syntaxNumber: "#B5CEA8",
+		syntaxType: "#4EC9B0",
+		syntaxOperator: "#D4D4D4",
+		syntaxPunctuation: "#D4D4D4",
+		thinkingOff: "darkGray",
+		thinkingMinimal: "#6e6e6e",
+		thinkingLow: "#5f87af",
+		thinkingMedium: "#81a2be",
+		thinkingHigh: "#b294bb",
+		thinkingXhigh: "#d183e8",
+		bashMode: "green",
+	},
+	export: {
+		pageBg: "#18181e",
+		cardBg: "#1e1e24",
+		infoBg: "#3c3728",
+	},
+};
+
 const validateThemeJson = Compile(ThemeJsonSchema);
 
 export type ThemeColor =
@@ -432,11 +512,27 @@ function getBuiltinThemes(): Record<string, ThemeJson> {
 		const darkPath = path.join(themesDir, "dark.json");
 		const lightPath = path.join(themesDir, "light.json");
 		const matrixMachinePath = path.join(themesDir, "matrix-machine.json");
-		BUILTIN_THEMES = {
-			dark: JSON.parse(fs.readFileSync(darkPath, "utf-8")) as ThemeJson,
-			light: JSON.parse(fs.readFileSync(lightPath, "utf-8")) as ThemeJson,
-			"matrix-machine": JSON.parse(fs.readFileSync(matrixMachinePath, "utf-8")) as ThemeJson,
+
+		const themes: Record<string, ThemeJson> = {};
+		const tryLoad = (name: string, filePath: string) => {
+			try {
+				if (fs.existsSync(filePath)) {
+					themes[name] = parseThemeJsonContent(filePath, fs.readFileSync(filePath, "utf-8"));
+				}
+			} catch (e) {
+				console.error(`Warning: Failed to load builtin theme ${name}:`, e);
+			}
 		};
+
+		tryLoad("dark", darkPath);
+		tryLoad("light", lightPath);
+		tryLoad("matrix-machine", matrixMachinePath);
+
+		if (!themes.dark) {
+			themes.dark = FALLBACK_DARK_THEME_JSON;
+		}
+
+		BUILTIN_THEMES = themes;
 	}
 	return BUILTIN_THEMES;
 }
