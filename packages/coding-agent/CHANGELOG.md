@@ -2,6 +2,8 @@
 
 ## [Unreleased]
 
+## [0.80.3] - 2026-06-02
+
 ### Fixed
 
 - Fixed startup fallback when optional built-in theme assets are unavailable or invalid.
