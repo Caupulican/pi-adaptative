@@ -160,6 +160,16 @@ export type {
 	ResolvedResource,
 } from "./core/package-manager.ts";
 export { DefaultPackageManager } from "./core/package-manager.ts";
+export {
+	ACTIVE_TURN_TTL_MS,
+	AUTO_RELOAD_COORDINATOR_TTL_MS,
+	describeReloadSession,
+	getPendingReloadBlockers,
+	isReloadSessionProcessAlive,
+	type PendingReloadBlockers,
+	type ReloadBlockerOptions,
+	type ReloadSessionRecord,
+} from "./core/reload-blockers.ts";
 export type { ResourceCollision, ResourceDiagnostic, ResourceLoader } from "./core/resource-loader.ts";
 export { DefaultResourceLoader, loadProjectContextFiles } from "./core/resource-loader.ts";
 // SDK for programmatic usage

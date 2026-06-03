@@ -2,6 +2,14 @@
 
 ## [Unreleased]
 
+### Added
+
+- Added reload-blocker helpers for extensions to describe active Pi auto-reload blockers with pid, cwd, and session-file details.
+
+### Fixed
+
+- Made Auto Learn background sessions use dedicated session ids/directories and surfaced active Pi auto-reload blockers in `/auto-learn status`.
+
 ## [0.80.4] - 2026-06-02
 
 ### Added

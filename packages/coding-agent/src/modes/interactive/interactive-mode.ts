@@ -79,6 +79,7 @@ import { createCompactionSummaryMessage } from "../../core/messages.ts";
 import { defaultModelPerProvider, findExactModelReferenceMatch, resolveModelScope } from "../../core/model-resolver.ts";
 import { DefaultPackageManager } from "../../core/package-manager.ts";
 import { BUILT_IN_PROVIDER_DISPLAY_NAMES } from "../../core/provider-display-names.ts";
+import { getPendingReloadBlockers } from "../../core/reload-blockers.ts";
 import type { ResourceDiagnostic } from "../../core/resource-loader.ts";
 import { formatMissingSessionCwdPrompt, MissingSessionCwdError } from "../../core/session-cwd.ts";
 import { type SessionContext, SessionManager } from "../../core/session-manager.ts";
@@ -275,6 +276,8 @@ interface AutoLearnState {
 			expiresAt: number;
 			cwd: string;
 			logPath: string;
+			sessionDir?: string;
+			sessionId?: string;
 			promptPath?: string;
 			kind?: "auto" | "reflection";
 			autonomyMode?: AutonomyMode;
@@ -4469,6 +4472,9 @@ export class InteractiveMode {
 		const promptPath = path.join(dir, `${runId}.prompt.md`);
 		const outFd = fs.openSync(logPath, "a");
 		const kind = options.promptKind ?? "auto";
+		const sessionDir = path.join(dir, "sessions");
+		const sessionId = `auto-learn-${kind}-${runId}`;
+		fs.mkdirSync(sessionDir, { recursive: true });
 		const prompt = this.buildAutoLearnPrompt(reason, settings, {
 			kind,
 			turnDigest: options.turnDigest,
@@ -4481,6 +4487,10 @@ export class InteractiveMode {
 			`Auto Learn ${runId}`,
 			"--model",
 			modelPattern,
+			"--session-dir",
+			sessionDir,
+			"--session-id",
+			sessionId,
 			prompt,
 		];
 		const child = spawn(spawnTarget.command, args, {
@@ -4513,6 +4523,8 @@ export class InteractiveMode {
 				expiresAt: now + settings.leaseMinutes * 60 * 1000,
 				cwd: this.sessionManager.getCwd(),
 				logPath,
+				sessionDir,
+				sessionId,
 				promptPath,
 				kind,
 				autonomyMode: this.settingsManager.getAutonomySettings().mode,
@@ -4708,11 +4720,25 @@ export class InteractiveMode {
 			decision.cooldownRemainingMs > 0 ? `${Math.ceil(decision.cooldownRemainingMs / 60000)}m remaining` : "ready";
 		const runLines = runs.length
 			? runs
-					.map(
-						([id, run]) =>
-							`- ${id}: ${run.model}, kind=${run.kind ?? "auto"}, authority=${run.authority ?? "unknown"}, pid=${run.pid ?? "?"}, log=${run.logPath}`,
-					)
+					.map(([id, run]) => {
+						const session = [
+							run.sessionId ? `session=${run.sessionId}` : "",
+							run.sessionDir ? `sessionDir=${run.sessionDir}` : "",
+						]
+							.filter(Boolean)
+							.join(", ");
+						const sessionText = session ? `, ${session}` : "";
+						return `- ${id}: ${run.model}, kind=${run.kind ?? "auto"}, authority=${run.authority ?? "unknown"}, pid=${run.pid ?? "?"}${sessionText}, log=${run.logPath}`;
+					})
 					.join("\n")
+			: "- none";
+		const reloadBlockers = getPendingReloadBlockers({
+			ownPid: process.pid,
+			ownSessionId: this.sessionManager.getSessionId(),
+			ownSessionFile: this.sessionManager.getSessionFile(),
+		});
+		const reloadBlockerLines = reloadBlockers.pending
+			? reloadBlockers.descriptions.map((description) => `- ${description}`).join("\n")
 			: "- none";
 		const reflectionLast = state.lastReflectionByTenant?.[this.getAutoLearnTenantKey()] ?? 0;
 		const reflectionCooldownRemainingMs = Math.max(
@@ -4721,7 +4747,7 @@ export class InteractiveMode {
 		);
 		const reflectionCooldownText =
 			reflectionCooldownRemainingMs > 0 ? `${Math.ceil(reflectionCooldownRemainingMs / 60000)}m remaining` : "ready";
-		return `Auto Learn status\nEnabled: ${settings.enabled}\nModel: ${settings.model}\nNext decision: ${decision.shouldRun ? "ready" : decision.reason}\nMessages: ${decision.messageCount}/${settings.longSessionMessages}\nContext: ${contextText}/${settings.longSessionContextPercent}%\nCooldown: ${cooldownText}\nReflection review: ${settings.reflectionReview ? "enabled" : "disabled"} (tool trigger ${settings.reflectionMinToolCalls}, cooldown ${reflectionCooldownText})\nRunning leases: ${runs.length}/${settings.maxConcurrentLearners}\nRuns:\n${runLines}`;
+		return `Auto Learn status\nEnabled: ${settings.enabled}\nModel: ${settings.model}\nNext decision: ${decision.shouldRun ? "ready" : decision.reason}\nMessages: ${decision.messageCount}/${settings.longSessionMessages}\nContext: ${contextText}/${settings.longSessionContextPercent}%\nCooldown: ${cooldownText}\nReflection review: ${settings.reflectionReview ? "enabled" : "disabled"} (tool trigger ${settings.reflectionMinToolCalls}, cooldown ${reflectionCooldownText})\nRunning leases: ${runs.length}/${settings.maxConcurrentLearners}\nPi auto-reload blockers: ${reloadBlockers.pending ? reloadBlockers.reason : "none"}\n${reloadBlockerLines}\nRuns:\n${runLines}`;
 	}
 
 	private formatAutonomyStatus(): string {
