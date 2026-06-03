@@ -212,6 +212,10 @@ export function assertValidSessionId(id: string): void {
 	}
 }
 
+export function isAutoLearnSessionId(id: string): boolean {
+	return id.startsWith("auto-learn-");
+}
+
 /** Generate a unique short ID (8 hex chars, collision-checked) */
 function generateId(byId: { has(id: string): boolean }): string {
 	for (let i = 0; i < 100; i++) {
@@ -561,6 +565,7 @@ export function findMostRecentSession(sessionDir: string, cwd?: string): string 
 			.filter(
 				(file): file is { path: string; header: SessionHeader } =>
 					file.header !== null &&
+					!isAutoLearnSessionId(file.header.id) &&
 					(!resolvedCwd || sessionCwdMatches(getSessionHeaderCwd(file.header), resolvedCwd)),
 			)
 			.map(({ path }) => ({ path, mtime: statSync(path).mtime }))
@@ -680,7 +685,7 @@ async function buildSessionInfo(filePath: string): Promise<SessionInfo | null> {
 			}
 		}
 
-		if (!header) return null;
+		if (!header || isAutoLearnSessionId(header.id)) return null;
 		const cwd = typeof header.cwd === "string" ? header.cwd : "";
 		const parentSessionPath = header.parentSession;
 		const headerTime = typeof header.timestamp === "string" ? new Date(header.timestamp).getTime() : NaN;

@@ -220,8 +220,8 @@ describe("SessionManager custom flat session directory", () => {
 		rmSync(tempDir, { recursive: true, force: true });
 	});
 
-	function createPersistedSession(cwd: string, label: string): string {
-		const session = SessionManager.create(cwd, tempDir);
+	function createPersistedSession(cwd: string, label: string, id?: string): string {
+		const session = SessionManager.create(cwd, tempDir, id ? { id } : undefined);
 		session.appendMessage({ role: "user", content: label, timestamp: Date.now() });
 		session.appendMessage({
 			role: "assistant",
@@ -260,6 +260,27 @@ describe("SessionManager custom flat session directory", () => {
 
 		const continuedA = SessionManager.continueRecent(projectA, tempDir);
 		expect(continuedA.getSessionFile()).toBe(sessionA);
+	});
+
+	it("hides Auto Learn sessions from current-folder and all session lists", async () => {
+		const userSession = createPersistedSession(projectA, "visible user session");
+		await new Promise((r) => setTimeout(r, 10));
+		createPersistedSession(projectA, "hidden auto learn session", "auto-learn-reflection-test-run");
+
+		const current = await SessionManager.list(projectA, tempDir);
+		expect(current.map((session) => session.path)).toEqual([userSession]);
+
+		const all = await SessionManager.listAll(tempDir);
+		expect(all.map((session) => session.path)).toEqual([userSession]);
+	});
+
+	it("does not continue Auto Learn sessions when choosing the most recent session", async () => {
+		const userSession = createPersistedSession(projectA, "visible user session");
+		await new Promise((r) => setTimeout(r, 10));
+		createPersistedSession(projectA, "newer hidden auto learn session", "auto-learn-auto-test-run");
+
+		const continued = SessionManager.continueRecent(projectA, tempDir);
+		expect(continued.getSessionFile()).toBe(userSession);
 	});
 });
 

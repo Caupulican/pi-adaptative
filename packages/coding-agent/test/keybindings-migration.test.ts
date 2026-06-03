@@ -69,6 +69,14 @@ describe("keybindings migration", () => {
 		});
 	});
 
+	it("defaults image paste to alt+v so ctrl+v remains available for terminal text paste", () => {
+		const keybindings = new KeybindingsManager();
+
+		expect(keybindings.getKeys("app.clipboard.pasteImage")).toEqual(["alt+v"]);
+		expect(keybindings.matches("\x16", "app.clipboard.pasteImage")).toBe(false);
+		expect(keybindings.matches("\x1bv", "app.clipboard.pasteImage")).toBe(true);
+	});
+
 	it("loads old key names in memory before the file is rewritten", () => {
 		const agentDir = createAgentDir({
 			selectConfirm: "enter",

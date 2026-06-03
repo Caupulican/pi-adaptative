@@ -2,6 +2,11 @@
 
 ## [Unreleased]
 
+### Fixed
+
+- Fixed Auto Learn background learner startup so prompt content is passed by file instead of argv, preventing null-byte turn digests from crashing interactive Pi, serialized shared learner state updates across sessions/tenants, hid internal Auto Learn sessions from resume/all session lists, and enforced 7-day retention for internal Auto Learn prompts/logs/session history plus processed provider/user history after indexed extraction and learning-outcome evidence.
+- Changed image paste to use `alt+v` by default and made missing clipboard images a silent no-op so normal terminal text paste no longer raises a noisy “No image found” status.
+
 ## [0.80.5] - 2026-06-03
 
 ### Added
