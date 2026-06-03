@@ -13,13 +13,38 @@ Pi supports subscription-based providers via OAuth and API key providers via env
 
 ## Subscriptions
 
-Use `/login` in interactive mode, then select a provider:
+Use `/login` in interactive mode, then select a provider, or pass one directly (for example `/login chatgpt` or `/login claude`):
 
 - ChatGPT Plus/Pro (Codex)
 - Claude Pro/Max
 - GitHub Copilot
 
-Use `/logout` to clear credentials. Tokens are stored in `~/.pi/agent/auth.json` and auto-refresh when expired.
+Use `/logout` to clear credentials. Tokens are stored per provider in `~/.pi/agent/auth.json` and auto-refresh when expired.
+
+## Running Multiple Providers at Once
+
+Pi does not keep a single global active provider for running agents. Each Pi process/session has its own selected model, and `auth.json` can hold credentials for many providers at the same time. After logging in to both subscription providers, start separate terminals with explicit provider or model selection:
+
+```bash
+# ChatGPT Plus/Pro subscription via Codex
+pi --provider openai-codex --name chatgpt-worker
+# equivalent friendly alias:
+pi --provider chatgpt --name chatgpt-worker
+
+# Claude Pro/Max subscription
+pi --provider anthropic --name claude-worker
+# equivalent friendly alias:
+pi --provider claude --name claude-worker
+```
+
+Or pin exact models:
+
+```bash
+pi --model openai-codex/gpt-5.5 --name chatgpt-worker
+pi --model anthropic/claude-opus-4-8 --name claude-worker
+```
+
+Those instances can run concurrently. Switching `/model` in one instance only changes that session's in-memory model and its session history; it does not retarget already-running Pi processes.
 
 ### OpenAI Codex
 

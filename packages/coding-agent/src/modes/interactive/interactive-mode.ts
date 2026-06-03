@@ -77,7 +77,12 @@ import { FooterDataProvider, type ReadonlyFooterDataProvider } from "../../core/
 import { configureHttpDispatcher, formatHttpIdleTimeoutMs } from "../../core/http-dispatcher.ts";
 import { type AppKeybinding, KeybindingsManager } from "../../core/keybindings.ts";
 import { createCompactionSummaryMessage } from "../../core/messages.ts";
-import { defaultModelPerProvider, findExactModelReferenceMatch, resolveModelScope } from "../../core/model-resolver.ts";
+import {
+	cliProviderAliases,
+	defaultModelPerProvider,
+	findExactModelReferenceMatch,
+	resolveModelScope,
+} from "../../core/model-resolver.ts";
 import { DefaultPackageManager } from "../../core/package-manager.ts";
 import { BUILT_IN_PROVIDER_DISPLAY_NAMES } from "../../core/provider-display-names.ts";
 import { getPendingReloadBlockers } from "../../core/reload-blockers.ts";
@@ -3014,13 +3019,13 @@ export class InteractiveMode {
 				this.editor.setText("");
 				return;
 			}
-			if (text === "/login") {
-				this.showOAuthSelector("login");
+			if (text === "/login" || text.startsWith("/login ")) {
+				await this.showOAuthSelector("login", text.slice("/login".length).trim() || undefined);
 				this.editor.setText("");
 				return;
 			}
-			if (text === "/logout") {
-				this.showOAuthSelector("logout");
+			if (text === "/logout" || text.startsWith("/logout ")) {
+				await this.showOAuthSelector("logout", text.slice("/logout".length).trim() || undefined);
 				this.editor.setText("");
 				return;
 			}
@@ -5962,6 +5967,36 @@ export class InteractiveMode {
 		return options.sort((a, b) => a.name.localeCompare(b.name));
 	}
 
+	private resolveAuthProviderOption(
+		providerReference: string,
+		providerOptions: AuthSelectorProvider[],
+	): AuthSelectorProvider | undefined {
+		const normalized = providerReference.trim().toLowerCase();
+		if (!normalized) return undefined;
+		const exactMatch = providerOptions.find((provider) => {
+			const id = provider.id.toLowerCase();
+			const name = provider.name.toLowerCase();
+			return id === normalized || name === normalized;
+		});
+		if (exactMatch) return exactMatch;
+		const aliasTarget = cliProviderAliases[normalized] ?? normalized;
+		return providerOptions.find((provider) => {
+			const id = provider.id.toLowerCase();
+			const name = provider.name.toLowerCase();
+			return id === aliasTarget || name === aliasTarget;
+		});
+	}
+
+	private async startProviderLogin(providerOption: AuthSelectorProvider): Promise<void> {
+		if (providerOption.authType === "oauth") {
+			await this.showLoginDialog(providerOption.id, providerOption.name);
+		} else if (providerOption.id === BEDROCK_PROVIDER_ID) {
+			this.showBedrockSetupDialog(providerOption.id, providerOption.name);
+		} else {
+			await this.showApiKeyLoginDialog(providerOption.id, providerOption.name);
+		}
+	}
+
 	private showLoginAuthTypeSelector(): void {
 		const subscriptionLabel = "Use a subscription";
 		const apiKeyLabel = "Use an API key";
@@ -6005,13 +6040,7 @@ export class InteractiveMode {
 						return;
 					}
 
-					if (providerOption.authType === "oauth") {
-						await this.showLoginDialog(providerOption.id, providerOption.name);
-					} else if (providerOption.id === BEDROCK_PROVIDER_ID) {
-						this.showBedrockSetupDialog(providerOption.id, providerOption.name);
-					} else {
-						await this.showApiKeyLoginDialog(providerOption.id, providerOption.name);
-					}
+					await this.startProviderLogin(providerOption);
 				},
 				() => {
 					done();
@@ -6023,8 +6052,20 @@ export class InteractiveMode {
 		});
 	}
 
-	private async showOAuthSelector(mode: "login" | "logout"): Promise<void> {
+	private async showOAuthSelector(mode: "login" | "logout", providerReference?: string): Promise<void> {
 		if (mode === "login") {
+			if (providerReference) {
+				const providerOptions = this.getLoginProviderOptions();
+				const providerOption = this.resolveAuthProviderOption(providerReference, providerOptions);
+				if (!providerOption) {
+					this.showError(
+						`Unknown login provider "${providerReference}". Use /login to select from available providers.`,
+					);
+					return;
+				}
+				await this.startProviderLogin(providerOption);
+				return;
+			}
 			this.showLoginAuthTypeSelector();
 			return;
 		}
@@ -6034,6 +6075,29 @@ export class InteractiveMode {
 			this.showStatus(
 				"No stored credentials to remove. /logout only removes credentials saved by /login; environment variables and models.json config are unchanged.",
 			);
+			return;
+		}
+
+		if (providerReference) {
+			const providerOption = this.resolveAuthProviderOption(providerReference, providerOptions);
+			if (!providerOption) {
+				this.showError(
+					`No stored credentials found for "${providerReference}". Use /logout to select a saved provider.`,
+				);
+				return;
+			}
+			try {
+				this.session.modelRegistry.authStorage.logout(providerOption.id);
+				this.session.modelRegistry.refresh();
+				await this.updateAvailableProviderCount();
+				const message =
+					providerOption.authType === "oauth"
+						? `Logged out of ${providerOption.name}`
+						: `Removed stored API key for ${providerOption.name}. Environment variables and models.json config are unchanged.`;
+				this.showStatus(message);
+			} catch (error: unknown) {
+				this.showError(`Logout failed: ${error instanceof Error ? error.message : String(error)}`);
+			}
 			return;
 		}
 

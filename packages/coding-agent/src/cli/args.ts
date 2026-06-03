@@ -230,7 +230,7 @@ ${chalk.bold("Commands:")}
   ${APP_NAME} <command> --help          Show help for install/remove/uninstall/update/list
 
 ${chalk.bold("Options:")}
-  --provider <name>              Provider name (default: google)
+  --provider <name>              Provider name (with --model, or alone to select provider default)
   --model <pattern>              Model pattern or ID (supports "provider/id" and optional ":<thinking>")
   --api-key <key>                API key (defaults to env vars)
   --system-prompt <text>         System prompt (default: coding assistant prompt)
@@ -296,6 +296,9 @@ ${chalk.bold("Examples:")}
 
   # Use different model
   ${APP_NAME} --provider openai --model gpt-4o-mini "Help me refactor this code"
+
+  # Use a provider's default model
+  ${APP_NAME} --provider openai-codex "Use my ChatGPT subscription"
 
   # Use model with provider prefix (no --provider needed)
   ${APP_NAME} --model openai/gpt-4o "Help me refactor this code"

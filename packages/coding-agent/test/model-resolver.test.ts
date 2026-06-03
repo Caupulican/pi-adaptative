@@ -5,6 +5,7 @@ import {
 	findInitialModel,
 	parseModelPattern,
 	resolveCliModel,
+	resolveCliProviderDefault,
 } from "../src/core/model-resolver.ts";
 
 // Mock models for testing
@@ -63,7 +64,20 @@ const mockOpenRouterModels: Model<"anthropic-messages">[] = [
 	},
 ];
 
-const allModels = [...mockModels, ...mockOpenRouterModels];
+const mockOpenAICodexModel: Model<"anthropic-messages"> = {
+	id: "gpt-5.5",
+	name: "GPT-5.5 (Codex)",
+	api: "anthropic-messages",
+	provider: "openai-codex",
+	baseUrl: "https://chatgpt.com/backend-api/codex",
+	reasoning: true,
+	input: ["text", "image"],
+	cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 },
+	contextWindow: 272000,
+	maxTokens: 64000,
+};
+
+const allModels = [...mockModels, ...mockOpenRouterModels, mockOpenAICodexModel];
 
 describe("parseModelPattern", () => {
 	describe("simple patterns without colons", () => {
@@ -222,6 +236,30 @@ describe("resolveCliModel", () => {
 		expect(result.model?.id).toBe("gpt-4o");
 	});
 
+	test("resolves friendly CLI provider aliases", () => {
+		const registry = {
+			getAll: () => allModels,
+		} as unknown as Parameters<typeof resolveCliModel>[0]["modelRegistry"];
+
+		const chatgptResult = resolveCliModel({
+			cliProvider: "chatgpt",
+			cliModel: "gpt-5.5",
+			modelRegistry: registry,
+		});
+		expect(chatgptResult.error).toBeUndefined();
+		expect(chatgptResult.model?.provider).toBe("openai-codex");
+		expect(chatgptResult.model?.id).toBe("gpt-5.5");
+
+		const claudeResult = resolveCliModel({
+			cliProvider: "claude",
+			cliModel: "sonnet",
+			modelRegistry: registry,
+		});
+		expect(claudeResult.error).toBeUndefined();
+		expect(claudeResult.model?.provider).toBe("anthropic");
+		expect(claudeResult.model?.id).toBe("claude-sonnet-4-5");
+	});
+
 	test("resolves fuzzy patterns within an explicit provider", () => {
 		const registry = {
 			getAll: () => allModels,
@@ -372,6 +410,52 @@ describe("resolveCliModel", () => {
 	});
 });
 
+describe("resolveCliProviderDefault", () => {
+	test("selects a provider default when --provider is supplied without --model", () => {
+		const registry = {
+			getAll: () => allModels,
+		} as unknown as Parameters<typeof resolveCliProviderDefault>[0]["modelRegistry"];
+
+		const result = resolveCliProviderDefault({
+			cliProvider: "openai-codex",
+			modelRegistry: registry,
+		});
+
+		expect(result.error).toBeUndefined();
+		expect(result.model?.provider).toBe("openai-codex");
+		expect(result.model?.id).toBe("gpt-5.5");
+	});
+
+	test("selects provider defaults through friendly aliases", () => {
+		const registry = {
+			getAll: () => allModels,
+		} as unknown as Parameters<typeof resolveCliProviderDefault>[0]["modelRegistry"];
+
+		const result = resolveCliProviderDefault({
+			cliProvider: "chatgpt",
+			modelRegistry: registry,
+		});
+
+		expect(result.error).toBeUndefined();
+		expect(result.model?.provider).toBe("openai-codex");
+		expect(result.model?.id).toBe("gpt-5.5");
+	});
+
+	test("returns a clear error for unknown provider-only selection", () => {
+		const registry = {
+			getAll: () => allModels,
+		} as unknown as Parameters<typeof resolveCliProviderDefault>[0]["modelRegistry"];
+
+		const result = resolveCliProviderDefault({
+			cliProvider: "missing-provider",
+			modelRegistry: registry,
+		});
+
+		expect(result.model).toBeUndefined();
+		expect(result.error).toContain('Unknown provider "missing-provider"');
+	});
+});
+
 describe("default model selection", () => {
 	test("openai defaults track current models", () => {
 		expect(defaultModelPerProvider.openai).toBe("gpt-5.4");
@@ -387,6 +471,22 @@ describe("default model selection", () => {
 
 	test("ai-gateway default tracks current model", () => {
 		expect(defaultModelPerProvider["vercel-ai-gateway"]).toBe("zai/glm-5.1");
+	});
+
+	test("findInitialModel accepts provider-only defaults", async () => {
+		const registry = {
+			getAll: () => allModels,
+		} as unknown as Parameters<typeof findInitialModel>[0]["modelRegistry"];
+
+		const result = await findInitialModel({
+			cliProvider: "chatgpt",
+			scopedModels: [],
+			isContinuing: false,
+			modelRegistry: registry,
+		});
+
+		expect(result.model?.provider).toBe("openai-codex");
+		expect(result.model?.id).toBe("gpt-5.5");
 	});
 
 	test("findInitialModel accepts explicit provider custom model ids", async () => {

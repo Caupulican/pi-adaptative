@@ -92,6 +92,28 @@ describe("ModelRegistry", () => {
 		messages: [],
 	};
 
+	describe("multi-provider auth", () => {
+		test("resolves distinct stored credentials per provider", async () => {
+			authStorage.set("anthropic", { type: "api_key", key: "anthropic-key" });
+			authStorage.set("openai-codex", { type: "api_key", key: "codex-key" });
+
+			const registry = ModelRegistry.create(authStorage, modelsJsonPath);
+			const anthropicModel = getModelsForProvider(registry, "anthropic")[0];
+			const codexModel = getModelsForProvider(registry, "openai-codex")[0];
+			expect(anthropicModel).toBeDefined();
+			expect(codexModel).toBeDefined();
+
+			const anthropicAuth = await registry.getApiKeyAndHeaders(anthropicModel!);
+			const codexAuth = await registry.getApiKeyAndHeaders(codexModel!);
+
+			expect(anthropicAuth).toMatchObject({ ok: true, apiKey: "anthropic-key" });
+			expect(codexAuth).toMatchObject({ ok: true, apiKey: "codex-key" });
+			expect(registry.getAvailable().map((model) => model.provider)).toEqual(
+				expect.arrayContaining(["anthropic", "openai-codex"]),
+			);
+		});
+	});
+
 	describe("baseUrl override (no custom models)", () => {
 		test("overriding baseUrl keeps all built-in models", () => {
 			writeRawModelsJson({

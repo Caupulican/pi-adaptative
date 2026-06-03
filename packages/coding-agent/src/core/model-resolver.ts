@@ -53,6 +53,33 @@ export interface ScopedModel {
 	thinkingLevel?: ThinkingLevel;
 }
 
+/** User-friendly aliases for CLI provider names. Keep canonical provider IDs authoritative. */
+export const cliProviderAliases: Record<string, string> = {
+	chatgpt: "openai-codex",
+	codex: "openai-codex",
+	"openai-codex-subscription": "openai-codex",
+	"openai-subscription": "openai-codex",
+	claude: "anthropic",
+	"claude-pro": "anthropic",
+	"claude-max": "anthropic",
+};
+
+function buildProviderLookup(availableModels: Model<Api>[]): Map<string, string> {
+	const providerMap = new Map<string, string>();
+	for (const model of availableModels) {
+		providerMap.set(model.provider.toLowerCase(), model.provider);
+	}
+	for (const [alias, canonical] of Object.entries(cliProviderAliases)) {
+		const normalizedAlias = alias.toLowerCase();
+		if (providerMap.has(normalizedAlias)) continue;
+		const resolvedCanonical = providerMap.get(canonical.toLowerCase());
+		if (resolvedCanonical) {
+			providerMap.set(normalizedAlias, resolvedCanonical);
+		}
+	}
+	return providerMap;
+}
+
 /**
  * Helper to check if a model ID looks like an alias (no date suffix)
  * Dates are typically in format: -20241022 or -20250929
@@ -357,11 +384,8 @@ export function resolveCliModel(options: {
 		};
 	}
 
-	// Build canonical provider lookup (case-insensitive)
-	const providerMap = new Map<string, string>();
-	for (const m of availableModels) {
-		providerMap.set(m.provider.toLowerCase(), m.provider);
-	}
+	// Build canonical provider lookup (case-insensitive), including friendly aliases.
+	const providerMap = buildProviderLookup(availableModels);
 
 	let provider = cliProvider ? providerMap.get(cliProvider.toLowerCase()) : undefined;
 	if (cliProvider && !provider) {
@@ -406,10 +430,15 @@ export function resolveCliModel(options: {
 	}
 
 	if (cliProvider && provider) {
-		// If both were provided, tolerate --model <provider>/<pattern> by stripping the provider prefix
-		const prefix = `${provider}/`;
-		if (cliModel.toLowerCase().startsWith(prefix.toLowerCase())) {
-			pattern = cliModel.substring(prefix.length);
+		// If both were provided, tolerate --model <provider>/<pattern> by stripping
+		// either the canonical provider prefix or the user-entered alias prefix.
+		const prefixes = Array.from(new Set([provider, cliProvider].filter((value) => value.length > 0)));
+		for (const candidatePrefix of prefixes) {
+			const prefix = `${candidatePrefix}/`;
+			if (cliModel.toLowerCase().startsWith(prefix.toLowerCase())) {
+				pattern = cliModel.substring(prefix.length);
+				break;
+			}
 		}
 	}
 
@@ -467,6 +496,54 @@ export function resolveCliModel(options: {
 	};
 }
 
+export function resolveCliProviderDefault(options: {
+	cliProvider?: string;
+	modelRegistry: ModelRegistry;
+}): ResolveCliModelResult {
+	const { cliProvider, modelRegistry } = options;
+	if (!cliProvider) {
+		return { model: undefined, warning: undefined, thinkingLevel: undefined, error: undefined };
+	}
+
+	// Important: use *all* models here, not just models with pre-configured auth.
+	// This allows "--provider <name> --api-key <key>" to work for first-time setup.
+	const availableModels = modelRegistry.getAll();
+	if (availableModels.length === 0) {
+		return {
+			model: undefined,
+			warning: undefined,
+			thinkingLevel: undefined,
+			error: "No models available. Check your installation or add models to models.json.",
+		};
+	}
+
+	const providerMap = buildProviderLookup(availableModels);
+	const provider = providerMap.get(cliProvider.toLowerCase());
+	if (!provider) {
+		return {
+			model: undefined,
+			warning: undefined,
+			thinkingLevel: undefined,
+			error: `Unknown provider "${cliProvider}". Use --list-models to see available providers/models.`,
+		};
+	}
+
+	const providerModels = availableModels.filter((model) => model.provider === provider);
+	if (providerModels.length === 0) {
+		return {
+			model: undefined,
+			warning: undefined,
+			thinkingLevel: undefined,
+			error: `No models found for provider "${provider}". Use --list-models to see available providers/models.`,
+		};
+	}
+
+	const defaultId = defaultModelPerProvider[provider as KnownProvider];
+	const model =
+		(defaultId ? providerModels.find((candidate) => candidate.id === defaultId) : undefined) ?? providerModels[0];
+	return { model, warning: undefined, thinkingLevel: undefined, error: undefined };
+}
+
 export interface InitialModelResult {
 	model: Model<Api> | undefined;
 	thinkingLevel: ThinkingLevel;
@@ -475,7 +552,7 @@ export interface InitialModelResult {
 
 /**
  * Find the initial model to use based on priority:
- * 1. CLI args (provider + model)
+ * 1. CLI args (provider + optional model)
  * 2. First model from scoped models (if not continuing/resuming)
  * 3. Restored from session (if continuing/resuming)
  * 4. Saved default from settings
@@ -506,12 +583,14 @@ export async function findInitialModel(options: {
 	let thinkingLevel: ThinkingLevel = DEFAULT_THINKING_LEVEL;
 
 	// 1. CLI args take priority
-	if (cliProvider && cliModel) {
-		const resolved = resolveCliModel({
-			cliProvider,
-			cliModel,
-			modelRegistry,
-		});
+	if (cliProvider || cliModel) {
+		const resolved = cliModel
+			? resolveCliModel({
+					cliProvider,
+					cliModel,
+					modelRegistry,
+				})
+			: resolveCliProviderDefault({ cliProvider, modelRegistry });
 		if (resolved.error) {
 			console.error(chalk.red(resolved.error));
 			process.exit(1);

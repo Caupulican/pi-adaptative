@@ -105,6 +105,18 @@ Then just talk to pi. By default, pi gives the model four tools: `read`, `write`
 
 For each built-in provider, pi maintains a list of tool-capable models, updated with every release. Authenticate via subscription (`/login`) or API key, then select any model from that provider via `/model` (or Ctrl+L).
 
+Pi does not have a single global "active provider" for running agents. Credentials are stored per provider, and each Pi process/session keeps its own selected model. That means you can log in to both subscriptions and run multiple instances side by side:
+
+```bash
+# Terminal 1: ChatGPT Plus/Pro subscription via Codex
+pi --provider openai-codex --name chatgpt-worker
+
+# Terminal 2: Claude Pro/Max subscription
+pi --provider anthropic --name claude-worker
+```
+
+You can also spell the model explicitly, e.g. `pi --model openai-codex/gpt-5.5` and `pi --model anthropic/claude-opus-4-8`. The friendly CLI provider alias `chatgpt` maps to `openai-codex`; `claude` maps to `anthropic`.
+
 **Subscriptions:**
 - Anthropic Claude Pro/Max
 - OpenAI ChatGPT Plus/Pro (Codex)
@@ -176,7 +188,7 @@ Type `/` in the editor to trigger commands. [Extensions](#extensions) can regist
 
 | Command | Description |
 |---------|-------------|
-| `/login`, `/logout` | OAuth authentication |
+| `/login [provider]`, `/logout [provider]` | Configure or remove provider authentication |
 | `/model` | Switch models |
 | `/scoped-models` | Enable/disable models for Ctrl+P cycling |
 | `/settings` | Thinking level, theme, message delivery, transport |
@@ -531,7 +543,7 @@ cat README.md | pi -p "Summarize this text"
 
 | Option | Description |
 |--------|-------------|
-| `--provider <name>` | Provider (anthropic, openai, google, etc.) |
+| `--provider <name>` | Provider (anthropic, openai, openai-codex, google, etc.); without `--model`, selects that provider's default model |
 | `--model <pattern>` | Model pattern or ID (supports `provider/id` and optional `:<thinking>`) |
 | `--api-key <key>` | API key (overrides env vars) |
 | `--thinking <level>` | `off`, `minimal`, `low`, `medium`, `high`, `xhigh` |

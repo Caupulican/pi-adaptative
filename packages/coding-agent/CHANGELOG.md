@@ -1,5 +1,11 @@
 ## [Unreleased]
 
+## [0.80.7] - 2026-06-03
+
+### Added
+
+- Added provider-only CLI startup, friendly ChatGPT/Claude provider aliases, direct `/login [provider]` and `/logout [provider]` commands, and docs/tests for running concurrent Pi instances with different subscription providers.
+
 ## [0.80.6] - 2026-06-03
 
 ### Fixed

@@ -28,7 +28,12 @@ import type { ExtensionFactory } from "./core/extensions/types.ts";
 import { configureHttpDispatcher } from "./core/http-dispatcher.ts";
 import { KeybindingsManager } from "./core/keybindings.ts";
 import type { ModelRegistry } from "./core/model-registry.ts";
-import { resolveCliModel, resolveModelScope, type ScopedModel } from "./core/model-resolver.ts";
+import {
+	resolveCliModel,
+	resolveCliProviderDefault,
+	resolveModelScope,
+	type ScopedModel,
+} from "./core/model-resolver.ts";
 import { restoreStdout, takeOverStdout } from "./core/output-guard.ts";
 import type { CreateAgentSessionOptions } from "./core/sdk.ts";
 import {
@@ -352,13 +357,19 @@ function buildSessionOptions(
 
 	// Model from CLI
 	// - supports --provider <name> --model <pattern>
+	// - supports --provider <name> to select that provider's default model
 	// - supports --model <provider>/<pattern>
-	if (parsed.model) {
-		const resolved = resolveCliModel({
-			cliProvider: parsed.provider,
-			cliModel: parsed.model,
-			modelRegistry,
-		});
+	if (parsed.model || parsed.provider) {
+		const resolved = parsed.model
+			? resolveCliModel({
+					cliProvider: parsed.provider,
+					cliModel: parsed.model,
+					modelRegistry,
+				})
+			: resolveCliProviderDefault({
+					cliProvider: parsed.provider,
+					modelRegistry,
+				});
 		if (resolved.warning) {
 			diagnostics.push({ type: "warning", message: resolved.warning });
 		}
@@ -369,7 +380,7 @@ function buildSessionOptions(
 			options.model = resolved.model;
 			// Allow "--model <pattern>:<thinking>" as a shorthand.
 			// Explicit --thinking still takes precedence (applied later).
-			if (!parsed.thinking && resolved.thinkingLevel) {
+			if (parsed.model && !parsed.thinking && resolved.thinkingLevel) {
 				options.thinkingLevel = resolved.thinkingLevel;
 				cliThinkingFromModel = true;
 			}
