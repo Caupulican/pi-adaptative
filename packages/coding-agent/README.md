@@ -343,7 +343,7 @@ Place in `~/.pi/agent/prompts/`, `.pi/prompts/`, or a [pi package](#pi-packages)
 
 ### Skills
 
-On-demand capability packages following the [Agent Skills standard](https://agentskills.io). Startup prompts list only lazy-loadable skill locations; frontmatter and instructions stay out of context until the agent reads the relevant skill or you invoke `/skill:name`.
+On-demand capability packages following the [Agent Skills standard](https://agentskills.io). Startup prompts list each skill name, description, and lazy-loadable file location so the agent can choose relevant skills without injecting full instructions until it reads the skill or you invoke `/skill:name`.
 
 ```markdown
 <!-- ~/.pi/agent/skills/my-skill/SKILL.md -->

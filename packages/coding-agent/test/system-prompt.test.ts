@@ -28,6 +28,18 @@ describe("buildSystemPrompt", () => {
 	});
 
 	describe("default tools", () => {
+		test("includes adaptive MAPE and tenant-safety guardrails", () => {
+			const prompt = buildSystemPrompt({
+				contextFiles: [],
+				skills: [],
+				cwd: process.cwd(),
+			});
+
+			expect(prompt).toContain("Use a lightweight MAPE loop for adaptive work");
+			expect(prompt).toContain("default to current-session or current-tenant state");
+			expect(prompt).toContain("confront Automata/user memory");
+		});
+
 		test("includes all default tools when snippets are provided", () => {
 			const prompt = buildSystemPrompt({
 				toolSnippets: {
@@ -74,7 +86,7 @@ describe("buildSystemPrompt", () => {
 			expect(prompt).not.toContain("available_context_files");
 		});
 
-		test("lists skill locations without injecting skill frontmatter", () => {
+		test("lists skill names, descriptions, and locations without injecting full instructions", () => {
 			const prompt = buildSystemPrompt({
 				contextFiles: [],
 				skills: [
@@ -90,11 +102,10 @@ describe("buildSystemPrompt", () => {
 				cwd: process.cwd(),
 			});
 
-			expect(prompt).toContain('<skill location="/skills/secret/SKILL.md" />');
-			expect(prompt).toContain("Skill frontmatter and instructions are not injected");
-			expect(prompt).not.toContain("secret-skill-name");
-			expect(prompt).not.toContain("SECRET SKILL DESCRIPTION");
-			expect(prompt).not.toContain("<description>");
+			expect(prompt).toContain("<name>secret-skill-name</name>");
+			expect(prompt).toContain("<description>SECRET SKILL DESCRIPTION</description>");
+			expect(prompt).toContain("<location>/skills/secret/SKILL.md</location>");
+			expect(prompt).toContain("Use the read tool to load a skill's file");
 		});
 	});
 

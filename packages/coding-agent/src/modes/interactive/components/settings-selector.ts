@@ -565,7 +565,7 @@ class AutoLearnSettingsSubmenu extends Container {
 			{
 				id: "auto-learn-max-concurrent",
 				label: "Max learners",
-				description: "Maximum running Auto Learn background learners across all session tenants",
+				description: "Maximum running Auto Learn background learners per session tenant",
 				currentValue: numberSettingValue(
 					this.state.maxConcurrentLearners,
 					AUTO_LEARN_DEFAULTS.maxConcurrentLearners,

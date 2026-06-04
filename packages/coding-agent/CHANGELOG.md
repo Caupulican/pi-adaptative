@@ -1,5 +1,11 @@
 ## [Unreleased]
 
+### Changed
+
+- Restored skill prompt metadata so available skills include names and descriptions as well as lazy-load locations, making automatic skill selection effective again.
+- Scoped Auto Learn learner concurrency and artifacts per session tenant, cleaned successful worker artifacts after exit, while keeping shared state for visibility, and made reload blockers ignore Auto Learn workers by default.
+- Tightened Auto Learn instructions around memory-first, chunked/vectorized candidate validation using the benefit/uniqueness/agent-improvement tree.
+
 ## [0.80.7] - 2026-06-03
 
 ### Added

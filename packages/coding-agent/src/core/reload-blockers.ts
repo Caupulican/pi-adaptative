@@ -35,6 +35,8 @@ export interface ReloadBlockerOptions {
 	ownSessionFile?: string;
 	activeTurnTtlMs?: number;
 	coordinatorTtlMs?: number;
+	/** Auto Learn workers are memory-first, short-lived, and should not block foreground reload/adaptive work by default. */
+	includeAutoLearnSessions?: boolean;
 	isProcessAlive?: (pid: number | undefined) => boolean;
 }
 
@@ -109,6 +111,14 @@ function isOwnSession(key: string, session: ParsedSession, options: ReloadBlocke
 	return false;
 }
 
+function isAutoLearnSession(session: ParsedSession): boolean {
+	return !!session.sessionId?.startsWith("auto-learn-");
+}
+
+function shouldIgnoreSession(session: ParsedSession, options: ReloadBlockerOptions): boolean {
+	return options.includeAutoLearnSessions !== true && isAutoLearnSession(session);
+}
+
 function addBlocker(blockers: Map<string, ReloadSessionRecord>, record: ReloadSessionRecord): void {
 	const identity = [
 		record.key,
@@ -135,7 +145,7 @@ function activeTurnBlockers(options: ReloadBlockerOptions): ReloadSessionRecord[
 	for (const [key, rawSession] of Object.entries(registry.sessions)) {
 		const session = parseSession(rawSession);
 		if (!session?.active) continue;
-		if (isOwnSession(key, session, options)) continue;
+		if (isOwnSession(key, session, options) || shouldIgnoreSession(session, options)) continue;
 		if (session.updatedAt === undefined || now - session.updatedAt > ttl) continue;
 		if (!isAlive(session.pid)) continue;
 		blockers.push({ key, source: "active-turn", ...session });
@@ -163,7 +173,7 @@ function coordinatorBlockers(options: ReloadBlockerOptions): { blockers: ReloadS
 			const session = parseSession(rawSession);
 			if (!session) continue;
 			if (session.reloadedAt !== undefined) continue;
-			if (isOwnSession(key, session, options)) continue;
+			if (isOwnSession(key, session, options) || shouldIgnoreSession(session, options)) continue;
 			if (!isAlive(session.pid)) continue;
 			blockers.push({ key, source: "coordinator", reason: stringValue(rawChange.reason), ...session });
 		}

@@ -69,7 +69,7 @@ export interface AutoLearnSettings {
 	longSessionContextPercent?: number; // default: 70
 	cooldownMinutes?: number; // default: 120 per session tenant
 	leaseMinutes?: number; // default: 90 for background learner state leases
-	maxConcurrentLearners?: number; // default: 2 across all session tenants
+	maxConcurrentLearners?: number; // default: 2 per session tenant
 	applyHighConfidence?: boolean; // default: false unless the learning extension config opts in
 	reflectionReview?: boolean; // default: true when Auto Learn is enabled - post-turn review after corrective/complex turns
 	reflectionMinToolCalls?: number; // default: 5 tool calls in a turn before reflection review triggers

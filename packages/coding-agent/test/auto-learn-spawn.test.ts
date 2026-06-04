@@ -257,6 +257,7 @@ if (!prompt.includes("\\0")) {
 	process.exit(4);
 }
 console.log("received-null-byte-prompt-file");
+await new Promise((resolve) => setTimeout(resolve, 1000));
 `,
 			"utf-8",
 		);
@@ -277,6 +278,7 @@ console.log("received-null-byte-prompt-file");
 		};
 		const promptPath = Object.values(state.runs)[0]?.promptPath;
 		expect(promptPath).toBeDefined();
+		expect(promptPath).toContain(join(dataDir, "tenants"));
 		expect(readFileSync(promptPath!, "utf-8")).toContain("before-null\0after-null");
 	});
 
@@ -339,7 +341,7 @@ console.log("received-null-byte-prompt-file");
 		expect(readAutoLearnRunCount(dataDir)).toBe(1);
 	});
 
-	it("enforces max concurrent learners across tenants through shared state", () => {
+	it("isolates concurrent learner limits by tenant while sharing state for visibility", () => {
 		const dataDir = createTempDir();
 		const fakeCliPath = writeFakeCli(dataDir, `console.log("reserved"); setTimeout(() => undefined, 1000);\n`);
 		const spawnTarget = { command: process.execPath, argsPrefix: [fakeCliPath] };
@@ -347,8 +349,8 @@ console.log("received-null-byte-prompt-file");
 		const tenantB = createAutoLearnHarness(dataDir, spawnTarget, { sessionId: "tenant-b" });
 
 		expect(tenantA.launchAutoLearn("tenant A", true)).toContain("Auto Learn started");
-		expect(tenantB.launchAutoLearn("tenant B", true)).toContain("Auto Learn not started: max learners running (1/1)");
-		expect(readAutoLearnRunCount(dataDir)).toBe(1);
+		expect(tenantB.launchAutoLearn("tenant B", true)).toContain("Auto Learn started");
+		expect(readAutoLearnRunCount(dataDir)).toBe(2);
 	});
 
 	it("keeps --print @prompt-file in the CLI file-input path", () => {

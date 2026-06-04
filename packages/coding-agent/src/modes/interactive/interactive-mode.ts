@@ -296,6 +296,15 @@ function definedStringSet(values: Iterable<string | undefined> | undefined): Set
 	return set;
 }
 
+function sanitizeAutoLearnPathPart(input: string | undefined, fallback: string): string {
+	const cleaned = (input || fallback)
+		.replace(/[^a-zA-Z0-9._-]+/g, "-")
+		.replace(/-+/g, "-")
+		.replace(/^-+|-+$/g, "")
+		.slice(0, 80);
+	return cleaned || fallback;
+}
+
 function isOldAutoLearnArtifact(filePath: string, now: number, retentionMs: number): boolean {
 	const stats = fs.lstatSync(filePath);
 	return stats.isFile() && now - stats.mtimeMs > retentionMs;
@@ -311,6 +320,22 @@ function removeOldAutoLearnArtifact(
 		result[counter]++;
 	} catch {
 		result.errors++;
+	}
+}
+
+function isPathInside(target: string, root: string): boolean {
+	const resolvedTarget = path.resolve(target);
+	const resolvedRoot = path.resolve(root);
+	return resolvedTarget === resolvedRoot || resolvedTarget.startsWith(`${resolvedRoot}${path.sep}`);
+}
+
+function removeAutoLearnArtifactPath(filePath: string, root: string): boolean {
+	if (!isPathInside(filePath, root)) return false;
+	try {
+		fs.rmSync(filePath, { recursive: true, force: true });
+		return true;
+	} catch {
+		return false;
 	}
 }
 
@@ -376,30 +401,31 @@ function pruneAutoLearnSessionFiles(
 	}
 }
 
-export function pruneAutoLearnConversationHistory(options: AutoLearnHistoryPruneOptions): AutoLearnHistoryPruneResult {
-	const result: AutoLearnHistoryPruneResult = { promptFiles: 0, logFiles: 0, sessionFiles: 0, errors: 0 };
-	const dataDir = path.resolve(options.dataDir);
-	const now = options.now ?? Date.now();
-	const retentionMs = options.retentionMs ?? AUTO_LEARN_HISTORY_RETENTION_MS;
-	const activeRunIds = definedStringSet(options.activeRunIds);
-	const activeSessionIds = definedStringSet(options.activeSessionIds);
-	if (retentionMs <= 0 || !fs.existsSync(dataDir)) return result;
-
+function pruneAutoLearnRunArtifacts(
+	dir: string,
+	activeRunIds: ReadonlySet<string>,
+	now: number,
+	retentionMs: number,
+	result: AutoLearnHistoryPruneResult,
+): void {
 	let entries: fs.Dirent[];
 	try {
-		entries = fs.readdirSync(dataDir, { withFileTypes: true });
+		entries = fs.readdirSync(dir, { withFileTypes: true });
 	} catch {
-		result.errors++;
-		return result;
+		return;
 	}
 
 	for (const entry of entries) {
+		const filePath = path.join(dir, entry.name);
+		if (entry.isDirectory()) {
+			pruneAutoLearnRunArtifacts(filePath, activeRunIds, now, retentionMs, result);
+			continue;
+		}
 		if (!entry.isFile()) continue;
 		const promptRunId = entry.name.endsWith(".prompt.md") ? entry.name.slice(0, -".prompt.md".length) : undefined;
 		const logRunId = entry.name.endsWith(".log") ? entry.name.slice(0, -".log".length) : undefined;
 		const runId = promptRunId ?? logRunId;
 		if (!runId || activeRunIds.has(runId)) continue;
-		const filePath = path.join(dataDir, entry.name);
 		let shouldPrune = false;
 		try {
 			shouldPrune = isOldAutoLearnArtifact(filePath, now, retentionMs);
@@ -410,8 +436,19 @@ export function pruneAutoLearnConversationHistory(options: AutoLearnHistoryPrune
 		if (!shouldPrune) continue;
 		removeOldAutoLearnArtifact(filePath, result, promptRunId ? "promptFiles" : "logFiles");
 	}
+}
 
-	pruneAutoLearnSessionFiles(path.join(dataDir, "sessions"), activeSessionIds, now, retentionMs, result);
+export function pruneAutoLearnConversationHistory(options: AutoLearnHistoryPruneOptions): AutoLearnHistoryPruneResult {
+	const result: AutoLearnHistoryPruneResult = { promptFiles: 0, logFiles: 0, sessionFiles: 0, errors: 0 };
+	const dataDir = path.resolve(options.dataDir);
+	const now = options.now ?? Date.now();
+	const retentionMs = options.retentionMs ?? AUTO_LEARN_HISTORY_RETENTION_MS;
+	const activeRunIds = definedStringSet(options.activeRunIds);
+	const activeSessionIds = definedStringSet(options.activeSessionIds);
+	if (retentionMs <= 0 || !fs.existsSync(dataDir)) return result;
+
+	pruneAutoLearnRunArtifacts(dataDir, activeRunIds, now, retentionMs, result);
+	pruneAutoLearnSessionFiles(dataDir, activeSessionIds, now, retentionMs, result);
 	return result;
 }
 
@@ -4545,6 +4582,16 @@ export class InteractiveMode {
 		return `${this.sessionManager.getCwd()}::${this.session.sessionId}`;
 	}
 
+	private getAutoLearnTenantId(): string {
+		const cwdHash = crypto.createHash("sha256").update(this.sessionManager.getCwd()).digest("hex").slice(0, 8);
+		const sessionPart = sanitizeAutoLearnPathPart(this.session.sessionId, "session");
+		return `${sessionPart}-${cwdHash}`;
+	}
+
+	private getAutoLearnTenantDataDir(): string {
+		return path.join(this.getAutoLearnDataDir(), "tenants", this.getAutoLearnTenantId());
+	}
+
 	private getAutoLearnMessageCount(): number {
 		return this.sessionManager.getBranch().filter((entry) => entry.type === "message").length;
 	}
@@ -4556,7 +4603,7 @@ export class InteractiveMode {
 	): AutoLearnDecision {
 		const now = Date.now();
 		const tenant = this.getAutoLearnTenantKey();
-		const runningCount = Object.keys(state.runs ?? {}).length;
+		const runningCount = Object.values(state.runs ?? {}).filter((run) => run.tenant === tenant).length;
 		const lastLaunch = state.lastLaunchByTenant?.[tenant] ?? 0;
 		const cooldownMs = settings.cooldownMinutes * 60 * 1000;
 		const cooldownRemainingMs = Math.max(0, lastLaunch + cooldownMs - now);
@@ -4576,7 +4623,7 @@ export class InteractiveMode {
 		if (runningCount >= settings.maxConcurrentLearners) {
 			return {
 				shouldRun: false,
-				reason: `max learners running (${runningCount}/${settings.maxConcurrentLearners})`,
+				reason: `max tenant learners running (${runningCount}/${settings.maxConcurrentLearners})`,
 				messageCount,
 				contextPercent,
 				cooldownRemainingMs,
@@ -4730,7 +4777,7 @@ export class InteractiveMode {
 			options.kind === "reflection"
 				? "review the latest completed turn for durable memory, skill, validation, and tooling-improvement cues, then run one bounded continuous-learning pass if the learning tools are available"
 				: "run one bounded continuous-learning pass for this Pi tenant";
-		return `You are Pi Auto Learn running as a background learner.\n\nObjective: ${objective}.\nTrigger: ${reason}.\n\n${authorityBlock}\n\nRequired workflow:\n1. Query existing durable memory/rules first when tools allow it.\n2. Run the available Auto Learn tooling, preferably learning_run_auto, with applyHighConfidence=${settings.applyHighConfidence}.\n3. Treat the latest-turn digest as current-session evidence only; do not auto-commit one-off cues unless deterministic tooling corroborates them.\n4. In mode=full, apply safe memory/skill/user-extension/authorized-source improvements under the standing grant above; otherwise keep them proposal-gated.\n5. Never cross hard-stop boundaries from the authority policy.\n6. If the learning tools are unavailable, report BLOCKED with the missing tool names and do not improvise.\n7. Finish with PASS, BLOCKED, or FAIL and concise evidence.${reflectionBlock}`;
+		return `You are Pi Auto Learn running as a background learner.\n\nObjective: ${objective}.\nTrigger: ${reason}.\n\n${authorityBlock}\n\nRequired workflow:\n1. Query existing durable memory/rules first when tools allow it. Memory confrontation is mandatory before accepting, merging, upgrading, or rejecting learning candidates.\n2. Run the available Auto Learn tooling, preferably learning_run_auto, with applyHighConfidence=${settings.applyHighConfidence}. Process candidate validation in vectorized chunks/batches; avoid scalar per-candidate memory queries except for final selected writes.\n3. Apply the learning validation tree to each candidate chunk: (a) Why is this good for the user? (b) Is it unique, or similar to existing memory/skills/agents so it should merge or upgrade existing knowledge? (c) Will this make Pi a better agent? Candidates that cannot answer all three are noise.\n4. Treat the latest-turn digest as current-session evidence only; do not auto-commit one-off cues unless deterministic tooling and memory confrontation corroborate them.\n5. In mode=full, apply safe memory/skill/user-extension/authorized-source improvements under the standing grant above; otherwise keep them proposal-gated.\n6. Never cross hard-stop boundaries from the authority policy.\n7. If the learning tools are unavailable, report BLOCKED with the missing tool names and do not improvise.\n8. Finish with PASS, BLOCKED, or FAIL and concise evidence, including chunk counts, merge/upgrade decisions, and cleanup/purge status.${reflectionBlock}`;
 	}
 
 	private reserveAutoLearnRun(params: {
@@ -4814,6 +4861,21 @@ export class InteractiveMode {
 		});
 	}
 
+	private cleanupCompletedAutoLearnRun(runId: string, artifactPaths: string[]): void {
+		const dataDir = this.getAutoLearnDataDir();
+		const removed = artifactPaths.filter((filePath) => removeAutoLearnArtifactPath(filePath, dataDir)).length;
+		this.withAutoLearnStateLock((current) => {
+			const state = this.pruneAutoLearnState(current);
+			const runs = { ...(state.runs ?? {}) };
+			delete runs[runId];
+			return { result: undefined, next: { ...state, runs } };
+		});
+		if (removed > 0) {
+			this.autoLearnLastStatus = `cleaned ${removed} artifact(s)`;
+			this.updateAutoLearnFooter();
+		}
+	}
+
 	private markAutoLearnReservationRunning(
 		reservation: AutoLearnReservation,
 		pid: number,
@@ -4859,14 +4921,14 @@ export class InteractiveMode {
 			return "Auto Learn not started: could not resolve current pi CLI path.";
 		}
 
-		const dir = this.getAutoLearnDataDir();
+		const dir = this.getAutoLearnTenantDataDir();
 		fs.mkdirSync(dir, { recursive: true });
 		const runId = `${Date.now()}-${crypto.randomUUID().slice(0, 8)}`;
 		const logPath = path.join(dir, `${runId}.log`);
 		const promptPath = path.join(dir, `${runId}.prompt.md`);
 		const kind = options.promptKind ?? "auto";
-		const sessionDir = path.join(dir, "sessions");
-		const sessionId = `auto-learn-${kind}-${runId}`;
+		const sessionDir = path.join(dir, "sessions", runId);
+		const sessionId = `auto-learn-${kind}-${this.getAutoLearnTenantId()}-${runId}`;
 		fs.mkdirSync(sessionDir, { recursive: true });
 		const prompt = this.buildAutoLearnPrompt(reason, settings, {
 			kind,
@@ -4959,6 +5021,9 @@ export class InteractiveMode {
 			return `Auto Learn not started: failed to spawn background learner. Log: ${logPath}`;
 		}
 		const childPid = child.pid;
+		child.once("exit", (code) => {
+			if (code === 0) this.cleanupCompletedAutoLearnRun(reservation.runId, [promptPath, logPath, sessionDir]);
+		});
 		child.unref();
 		this.markAutoLearnReservationRunning(reservation, childPid, settings);
 
@@ -5046,7 +5111,7 @@ export class InteractiveMode {
 		});
 		const now = Date.now();
 		const tenant = this.getAutoLearnTenantKey();
-		const runningCount = Object.keys(state.runs ?? {}).length;
+		const runningCount = Object.values(state.runs ?? {}).filter((run) => run.tenant === tenant).length;
 		const lastReflection = state.lastReflectionByTenant?.[tenant] ?? 0;
 		const cooldownMs = settings.reflectionCooldownMinutes * 60 * 1000;
 		const cooldownRemainingMs = Math.max(0, lastReflection + cooldownMs - now);
@@ -5068,7 +5133,7 @@ export class InteractiveMode {
 			return {
 				...base,
 				shouldRun: false,
-				reason: `max learners running (${runningCount}/${settings.maxConcurrentLearners})`,
+				reason: `max tenant learners running (${runningCount}/${settings.maxConcurrentLearners})`,
 			};
 		}
 		if (cooldownRemainingMs > 0) return { ...base, shouldRun: false, reason: "reflection cooldown" };
@@ -5143,7 +5208,9 @@ export class InteractiveMode {
 		const settings = this.getEffectiveAutoLearnSettings();
 		const decision = this.evaluateAutoLearn(false);
 		const state = this.getPrunedAutoLearnState();
-		const runs = Object.entries(state.runs ?? {});
+		const tenant = this.getAutoLearnTenantKey();
+		const runs = Object.entries(state.runs ?? {}).filter(([, run]) => run.tenant === tenant);
+		const otherTenantRuns = Object.values(state.runs ?? {}).filter((run) => run.tenant !== tenant).length;
 		const contextText = decision.contextPercent === null ? "unknown" : `${decision.contextPercent.toFixed(1)}%`;
 		const cooldownText =
 			decision.cooldownRemainingMs > 0 ? `${Math.ceil(decision.cooldownRemainingMs / 60000)}m remaining` : "ready";
@@ -5176,14 +5243,16 @@ export class InteractiveMode {
 		);
 		const reflectionCooldownText =
 			reflectionCooldownRemainingMs > 0 ? `${Math.ceil(reflectionCooldownRemainingMs / 60000)}m remaining` : "ready";
-		return `Auto Learn status\nEnabled: ${settings.enabled}\nModel: ${settings.model}\nNext decision: ${decision.shouldRun ? "ready" : decision.reason}\nMessages: ${decision.messageCount}/${settings.longSessionMessages}\nContext: ${contextText}/${settings.longSessionContextPercent}%\nCooldown: ${cooldownText}\nReflection review: ${settings.reflectionReview ? "enabled" : "disabled"} (tool trigger ${settings.reflectionMinToolCalls}, cooldown ${reflectionCooldownText})\nHistory retention: 7 days for internal Auto Learn prompts/logs/sessions\nRunning leases: ${runs.length}/${settings.maxConcurrentLearners}\nPi auto-reload blockers: ${reloadBlockers.pending ? reloadBlockers.reason : "none"}\n${reloadBlockerLines}\nRuns:\n${runLines}`;
+		return `Auto Learn status\nEnabled: ${settings.enabled}\nModel: ${settings.model}\nNext decision: ${decision.shouldRun ? "ready" : decision.reason}\nMessages: ${decision.messageCount}/${settings.longSessionMessages}\nContext: ${contextText}/${settings.longSessionContextPercent}%\nCooldown: ${cooldownText}\nReflection review: ${settings.reflectionReview ? "enabled" : "disabled"} (tool trigger ${settings.reflectionMinToolCalls}, cooldown ${reflectionCooldownText})\nHistory retention: 7 days for internal Auto Learn prompts/logs/sessions\nRunning tenant leases: ${runs.length}/${settings.maxConcurrentLearners}\nOther tenant leases: ${otherTenantRuns}\nTenant artifact dir: ${this.getAutoLearnTenantDataDir()}\nPi auto-reload blockers: ${reloadBlockers.pending ? reloadBlockers.reason : "none"}\n${reloadBlockerLines}\nRuns:\n${runLines}`;
 	}
 
 	private formatAutonomyStatus(): string {
 		const autonomy = this.settingsManager.getAutonomySettings();
 		const settings = this.getEffectiveAutoLearnSettings();
 		const autoLearnState = this.getPrunedAutoLearnState();
-		const running = Object.entries(autoLearnState.runs ?? {});
+		const tenant = this.getAutoLearnTenantKey();
+		const running = Object.entries(autoLearnState.runs ?? {}).filter(([, run]) => run.tenant === tenant);
+		const otherTenantRunning = Object.values(autoLearnState.runs ?? {}).filter((run) => run.tenant !== tenant).length;
 		const safety =
 			autonomy.mode === "full"
 				? "standing grant for memory, skills, user/project extensions, autonomy/autoLearn tuning, and authorized selfModification.sourcePath edits; hard stops still require explicit foreground approval"
@@ -5198,10 +5267,12 @@ export class InteractiveMode {
 			`Auto Learn: ${settings.enabled ? "enabled" : "disabled"}; model=${settings.model}; applyHighConfidence=${settings.applyHighConfidence}`,
 			`Long-session trigger: ${settings.longSessionMessages} messages or ${settings.longSessionContextPercent}% context; cooldown=${settings.cooldownMinutes}m`,
 			reflectionLine,
-			`Running learners: ${running.length}/${settings.maxConcurrentLearners}`,
+			`Running tenant learners: ${running.length}/${settings.maxConcurrentLearners}`,
+			`Other tenant learners: ${otherTenantRunning}`,
 			"History retention: 7 days for internal Auto Learn prompts/logs/sessions",
 			`Standing authority: ${safety}`,
 			`Audit/log dir: ${this.getAutoLearnDataDir()}`,
+			`Tenant artifact dir: ${this.getAutoLearnTenantDataDir()}`,
 			"Use /autonomy off|safe|balanced|full to switch presets. Advanced overrides remain in /settings → Auto Learn Advanced.",
 		].join("\n");
 	}

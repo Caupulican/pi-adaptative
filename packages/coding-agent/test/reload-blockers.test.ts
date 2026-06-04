@@ -59,6 +59,14 @@ describe("getPendingReloadBlockers", () => {
 					},
 					peer: {
 						pid: 101,
+						sessionId: "peer-session",
+						sessionFile: "/sessions/peer.jsonl",
+						cwd: "/repo",
+						active: true,
+						updatedAt: now,
+					},
+					autoLearnPeer: {
+						pid: 107,
 						sessionId: "auto-learn-peer",
 						sessionFile: "/sessions/auto-learn-peer.jsonl",
 						cwd: "/repo",
@@ -95,6 +103,13 @@ describe("getPendingReloadBlockers", () => {
 						sessions: {
 							coordinator: {
 								pid: 104,
+								sessionId: "coordinator-session",
+								sessionFile: "/sessions/coordinator.jsonl",
+								cwd: "/repo",
+								seenAt: now,
+							},
+							autoLearnCoordinator: {
+								pid: 108,
 								sessionId: "auto-learn-coordinator",
 								sessionFile: "/sessions/auto-learn-coordinator.jsonl",
 								cwd: "/repo",
@@ -133,8 +148,24 @@ describe("getPendingReloadBlockers", () => {
 		expect(status.pending).toBe(true);
 		expect(status.reason).toBe("Pi resources changed");
 		expect(status.descriptions).toEqual([
-			"coordinator:auto-learn-coordinator pid=104 cwd=/repo file=/sessions/auto-learn-coordinator.jsonl",
-			"peer:auto-learn-peer pid=101 cwd=/repo file=/sessions/auto-learn-peer.jsonl",
+			"coordinator:coordinator-session pid=104 cwd=/repo file=/sessions/coordinator.jsonl",
+			"peer:peer-session pid=101 cwd=/repo file=/sessions/peer.jsonl",
 		]);
+
+		const includingAutoLearn = getPendingReloadBlockers({
+			agentDir,
+			now,
+			ownPid: 100,
+			ownSessionId: "foreground",
+			ownSessionFile: "/sessions/foreground.jsonl",
+			includeAutoLearnSessions: true,
+			isProcessAlive: (pid) => pid !== 103,
+		});
+		expect(includingAutoLearn.descriptions).toContain(
+			"autoLearnCoordinator:auto-learn-coordinator pid=108 cwd=/repo file=/sessions/auto-learn-coordinator.jsonl",
+		);
+		expect(includingAutoLearn.descriptions).toContain(
+			"autoLearnPeer:auto-learn-peer pid=107 cwd=/repo file=/sessions/auto-learn-peer.jsonl",
+		);
 	});
 });
