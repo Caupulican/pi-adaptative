@@ -35,6 +35,7 @@ export const BUILTIN_SLASH_COMMANDS: ReadonlyArray<BuiltinSlashCommand> = [
 		description: "Duplicate the current session at the current position (optional name: /clone <name>)",
 	},
 	{ name: "tree", description: "Navigate session tree (switch branches)" },
+	{ name: "trust", description: "Trust or untrust this project folder" },
 	{ name: "login", description: "Configure provider authentication" },
 	{ name: "logout", description: "Remove provider authentication" },
 	{ name: "new", description: "Start a new session (optional name: /new <name>)" },

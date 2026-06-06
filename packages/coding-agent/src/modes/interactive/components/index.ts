@@ -29,6 +29,7 @@ export { ToolExecutionComponent, type ToolExecutionOptions } from "./tool-execut
 export { ToolGroupComponent } from "./tool-group.ts";
 export { createToolPanelTenantKey, getToolPanelActionKey, ToolPanelRegistry } from "./tool-panel-registry.ts";
 export { TreeSelectorComponent } from "./tree-selector.ts";
+export { TrustSelectorComponent } from "./trust-selector.ts";
 export { UserMessageComponent } from "./user-message.ts";
 export { UserMessageSelectorComponent } from "./user-message-selector.ts";
 export { truncateToVisualLines, type VisualTruncateResult } from "./visual-truncate.ts";

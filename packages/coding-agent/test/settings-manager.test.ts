@@ -419,6 +419,36 @@ describe("SettingsManager", () => {
 		});
 	});
 
+	describe("project trust", () => {
+		it("ignores project settings and refuses project writes when untrusted", async () => {
+			const projectSettingsPath = join(projectDir, ".pi", "settings.json");
+			writeFileSync(projectSettingsPath, JSON.stringify({ packages: ["npm:project-package"], theme: "light" }));
+
+			const manager = SettingsManager.create(projectDir, agentDir, { projectTrusted: false });
+
+			expect(manager.isProjectTrusted()).toBe(false);
+			expect(manager.getProjectSettings()).toEqual({});
+			expect(manager.getPackages()).toEqual([]);
+			expect(() => manager.setProjectPackages(["npm:another-package"])).toThrow(/Project is not trusted/);
+			await expect(manager.flush()).resolves.toBeUndefined();
+			expect(JSON.parse(readFileSync(projectSettingsPath, "utf-8"))).toEqual({
+				packages: ["npm:project-package"],
+				theme: "light",
+			});
+		});
+
+		it("loads project settings after trust is enabled", () => {
+			const projectSettingsPath = join(projectDir, ".pi", "settings.json");
+			writeFileSync(projectSettingsPath, JSON.stringify({ packages: ["npm:project-package"] }));
+			const manager = SettingsManager.create(projectDir, agentDir, { projectTrusted: false });
+
+			manager.setProjectTrusted(true);
+
+			expect(manager.isProjectTrusted()).toBe(true);
+			expect(manager.getPackages()).toEqual(["npm:project-package"]);
+		});
+	});
+
 	describe("getSessionDir", () => {
 		it("should return undefined when not set", () => {
 			writeFileSync(join(agentDir, "settings.json"), JSON.stringify({ theme: "dark" }));

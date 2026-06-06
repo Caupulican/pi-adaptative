@@ -119,10 +119,16 @@ describe("createAgentSession stream options", () => {
 		expect(options?.timeoutMs).toBe(1234);
 	});
 
-	it("does not default timeoutMs from httpIdleTimeoutMs for other providers", async () => {
+	it("forwards httpIdleTimeoutMs as timeoutMs for other providers", async () => {
 		const options = await captureStreamOptions("openai-completions", { httpIdleTimeoutMs: 1234 });
 
-		expect(options?.timeoutMs).toBeUndefined();
+		expect(options?.timeoutMs).toBe(1234);
+	});
+
+	it("maps httpIdleTimeoutMs=0 to an effectively disabled SDK timeout", async () => {
+		const options = await captureStreamOptions("openai-completions", { httpIdleTimeoutMs: 0 });
+
+		expect(options?.timeoutMs).toBe(2147483647);
 	});
 
 	it("lets request timeoutMs override httpIdleTimeoutMs for OpenAI Codex", async () => {
