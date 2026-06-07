@@ -1,5 +1,12 @@
 ## [Unreleased]
 
+## [0.80.11] - 2026-06-07
+
+### Changed
+
+- Made centralized TUI title badges use theme-balanced state colors for running, success, warning, persistent, failure, blocked, and muted states.
+- Updated tool execution fallback labels to show status colors instead of forcing the neutral tool-title color.
+
 ## [0.80.8] - 2026-06-04
 
 ### Changed

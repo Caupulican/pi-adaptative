@@ -587,7 +587,9 @@ These patterns cover the most common UI needs in extensions. **Copy these patter
 
 ### Pattern 0: Title Badge
 
-For compact status labels in custom messages, skill renderers, and `renderCall`/`renderResult`, use `TitleBadgeComponent` or `titleBadge()` from `@earendil-works/pi-coding-agent`. It keeps titles visually consistent, compact, and width-bounded. `ToolTitleComponent`/`toolTitle()` remain aliases for tool-specific code.
+For compact status labels in custom messages, skill renderers, and `renderCall`/`renderResult`, use `TitleBadgeComponent` or `titleBadge()` from `@earendil-works/pi-coding-agent`. It keeps titles visually consistent, compact, theme-balanced, and width-bounded. `ToolTitleComponent`/`toolTitle()` remain aliases for tool-specific code.
+
+Status colors intentionally map to theme tokens instead of hard-coded ANSI values: `error`/`failed`/`failure`/`blocked` use `error` red, `persistent`/`pending`/`warning`/`cancelled` use `warning` yellow, `success` uses `success` green, `running` uses `accent`, and `idle`/`disabled`/`muted` stay subdued. Keep generated ids out of badge text and `details`; store ids in result metadata for control/debug flows instead.
 
 ```typescript
 import { titleBadge } from "@earendil-works/pi-coding-agent";
@@ -597,7 +599,7 @@ renderCall(args, theme) {
     label: "background script",
     icon: "◆",
     action: args.action || "list",
-    details: [args.id || args.name],
+    details: [args.name],
     status: args.action === "stop" ? "warning" : "running",
   });
 }

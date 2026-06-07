@@ -36,6 +36,19 @@ describe("TitleBadgeComponent", () => {
 		expect(stripAnsi(component.render(80).join(""))).toBe("[tool]");
 	});
 
+	test("uses theme-balanced status colors for failure, persistent, and success states", () => {
+		const failed = renderTitleBadge(theme, { label: "tool", action: "failed", status: "failed" });
+		const persistent = renderTitleBadge(theme, { label: "assistant", action: "persistent", status: "persistent" });
+		const success = renderTitleBadge(theme, { label: "tool", action: "done", status: "success" });
+
+		expect(failed).toContain(theme.fg("error", theme.bold("[tool]")));
+		expect(failed).toContain(theme.fg("error", "failed"));
+		expect(persistent).toContain(theme.fg("warning", theme.bold("[assistant]")));
+		expect(persistent).toContain(theme.fg("warning", "persistent"));
+		expect(success).toContain(theme.fg("success", theme.bold("[tool]")));
+		expect(success).toContain(theme.fg("success", "done"));
+	});
+
 	test("bounds rendered width to avoid TUI overflow", () => {
 		const component = new TitleBadgeComponent(theme, {
 			label: "background script",

@@ -2,7 +2,21 @@ import type { Component } from "@earendil-works/pi-tui";
 import { truncateToWidth } from "@earendil-works/pi-tui";
 import type { Theme, ThemeColor } from "../theme/theme.ts";
 
-export type TitleBadgeStatus = "pending" | "running" | "success" | "warning" | "error" | "muted" | "info";
+export type TitleBadgeStatus =
+	| "pending"
+	| "running"
+	| "success"
+	| "warning"
+	| "error"
+	| "failed"
+	| "failure"
+	| "blocked"
+	| "cancelled"
+	| "persistent"
+	| "idle"
+	| "disabled"
+	| "muted"
+	| "info";
 
 export interface TitleBadgeSegment {
 	text: string | number | undefined | null;
@@ -32,14 +46,38 @@ export type ToolTitleStatus = TitleBadgeStatus;
 export type ToolTitleSegment = TitleBadgeSegment;
 export type ToolTitleOptions = TitleBadgeOptions;
 
-const STATUS_COLORS: Record<TitleBadgeStatus, ThemeColor> = {
+const STATUS_BADGE_COLORS: Record<TitleBadgeStatus, ThemeColor> = {
 	pending: "warning",
 	running: "accent",
 	success: "success",
 	warning: "warning",
 	error: "error",
+	failed: "error",
+	failure: "error",
+	blocked: "error",
+	cancelled: "warning",
+	persistent: "warning",
+	idle: "muted",
+	disabled: "muted",
 	muted: "muted",
 	info: "customMessageLabel",
+};
+
+const STATUS_ACTION_COLORS: Record<TitleBadgeStatus, ThemeColor> = {
+	pending: "warning",
+	running: "accent",
+	success: "success",
+	warning: "warning",
+	error: "error",
+	failed: "error",
+	failure: "error",
+	blocked: "error",
+	cancelled: "warning",
+	persistent: "warning",
+	idle: "dim",
+	disabled: "muted",
+	muted: "muted",
+	info: "accent",
 };
 
 function styleSegment(theme: Theme, segment: TitleBadgeSegment): string {
@@ -59,13 +97,15 @@ function normalizeDetail(
 }
 
 export function renderTitleBadge(theme: Theme, options: TitleBadgeOptions): string {
-	const badgeColor = options.badgeColor ?? STATUS_COLORS[options.status ?? "info"];
+	const status = options.status ?? "info";
+	const badgeColor = options.badgeColor ?? STATUS_BADGE_COLORS[status];
+	const actionColor = options.actionColor ?? STATUS_ACTION_COLORS[status];
 	const icon = options.icon ? `${theme.fg(badgeColor, options.icon)} ` : "";
 	const badge = theme.fg(badgeColor, theme.bold(`[${options.label}]`));
 	const parts = [icon + badge];
 
 	if (options.action !== undefined && options.action !== null && options.action !== "") {
-		parts.push(theme.fg(options.actionColor ?? "accent", String(options.action)));
+		parts.push(theme.fg(actionColor, String(options.action)));
 	}
 
 	for (const detail of options.details ?? []) {

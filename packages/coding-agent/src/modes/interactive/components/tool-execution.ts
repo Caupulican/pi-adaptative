@@ -196,7 +196,6 @@ export class ToolExecutionComponent extends Container {
 	private createCallFallback(): Component {
 		return titleBadge(theme, {
 			label: this.getDisplayLabel(),
-			badgeColor: "toolTitle",
 			status: this.titleBadgeStatus(),
 		});
 	}
@@ -422,7 +421,6 @@ export class ToolExecutionComponent extends Container {
 	private formatToolExecution(): string {
 		let text = renderTitleBadge(theme, {
 			label: this.getDisplayLabel(),
-			badgeColor: "toolTitle",
 			status: this.titleBadgeStatus(),
 		});
 		const content = JSON.stringify(this.args, null, 2);
