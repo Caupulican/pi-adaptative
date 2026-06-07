@@ -276,6 +276,8 @@ export class AgentSession {
 	private _queuedExtensionCommands: string[] = [];
 	/** Messages queued to be included with the next user prompt as context ("asides"). */
 	private _pendingNextTurnMessages: CustomMessage[] = [];
+	/** Serializes prompt() submissions made while streaming so queued steering/follow-ups keep user-typed FIFO order. */
+	private _streamingPromptSubmissionTail: Promise<void> = Promise.resolve();
 
 	// Compaction state
 	private _compactionAbortController: AbortController | undefined = undefined;
@@ -1134,6 +1136,18 @@ export class AgentSession {
 	 * @throws Error if no model selected or no API key available (when not streaming)
 	 */
 	async prompt(text: string, options?: PromptOptions): Promise<void> {
+		if (this.isStreaming && options?.streamingBehavior) {
+			const run = this._streamingPromptSubmissionTail.then(
+				() => this._promptUnserialized(text, options),
+				() => this._promptUnserialized(text, options),
+			);
+			this._streamingPromptSubmissionTail = run.catch(() => {});
+			return run;
+		}
+		return this._promptUnserialized(text, options);
+	}
+
+	private async _promptUnserialized(text: string, options?: PromptOptions): Promise<void> {
 		const expandPromptTemplates = options?.expandPromptTemplates ?? true;
 		const processSlashCommands = options?.processSlashCommands ?? expandPromptTemplates;
 		const preflightResult = options?.preflightResult;

@@ -59,7 +59,7 @@ Type `/` in the editor to open command completion. Extensions can register custo
 
 You can submit messages while the agent is still working:
 
-- **Enter** queues a steering message, delivered after the current assistant turn finishes executing its tool calls.
+- **Enter** queues a steering message; if the assistant is currently streaming text, Pi interrupts that stream and delivers the steering next. Otherwise, it delivers after the current assistant turn finishes executing its tool calls.
 - **Alt+Enter** queues a follow-up message, delivered after the agent finishes all work.
 - **Escape** aborts and restores queued messages to the editor.
 - **Alt+Up** retrieves queued messages back to the editor.

@@ -38,7 +38,7 @@ class MockAssistantStream extends EventStream<AssistantMessageEvent, AssistantMe
 	}
 }
 
-function createAssistantMessage(text: string): AssistantMessage {
+function createAssistantMessage(text: string, stopReason: AssistantMessage["stopReason"] = "stop"): AssistantMessage {
 	return {
 		role: "assistant",
 		content: [{ type: "text", text }],
@@ -53,7 +53,7 @@ function createAssistantMessage(text: string): AssistantMessage {
 			totalTokens: 0,
 			cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, total: 0 },
 		},
-		stopReason: "stop",
+		stopReason,
 		timestamp: Date.now(),
 	};
 }
@@ -181,6 +181,194 @@ describe("AgentSession concurrent prompt guard", () => {
 		await firstPrompt.catch(() => {});
 	});
 
+	it("should interrupt active assistant output and deliver queued steering", async () => {
+		const model = getModel("anthropic", "claude-sonnet-4-5")!;
+		let firstStreamAborted = false;
+		let sawSteeringMessage = false;
+
+		const agent = new Agent({
+			getApiKey: () => "test-key",
+			initialState: {
+				model,
+				systemPrompt: "Test",
+				tools: [],
+			},
+			streamFn: (_model, context, options) => {
+				const userTexts = context.messages
+					.filter((message) => message.role === "user")
+					.map((message) => {
+						if (typeof message.content === "string") {
+							return message.content;
+						}
+						return message.content
+							.filter((part): part is TextContent => part.type === "text")
+							.map((part) => part.text)
+							.join("\n");
+					});
+				const stream = new MockAssistantStream();
+				queueMicrotask(() => {
+					if (userTexts.includes("Steer now")) {
+						sawSteeringMessage = true;
+						stream.push({ type: "start", partial: createAssistantMessage("") });
+						stream.push({ type: "done", reason: "stop", message: createAssistantMessage("Steering handled") });
+						return;
+					}
+
+					stream.push({ type: "start", partial: createAssistantMessage("printing") });
+					const checkAbort = () => {
+						if (options?.signal?.aborted) {
+							firstStreamAborted = true;
+							stream.push({
+								type: "error",
+								reason: "aborted",
+								error: createAssistantMessage("", "aborted"),
+							});
+							return;
+						}
+						setTimeout(checkAbort, 5);
+					};
+					checkAbort();
+				});
+				return stream;
+			},
+		});
+
+		const sessionManager = SessionManager.inMemory();
+		const settingsManager = SettingsManager.create(tempDir, tempDir);
+		const authStorage = AuthStorage.create(join(tempDir, "auth.json"));
+		const modelRegistry = ModelRegistry.create(authStorage, tempDir);
+		authStorage.setRuntimeApiKey("anthropic", "test-key");
+
+		session = new AgentSession({
+			agent,
+			sessionManager,
+			settingsManager,
+			cwd: tempDir,
+			modelRegistry,
+			resourceLoader: createTestResourceLoader(),
+		});
+
+		const firstPrompt = session.prompt("First message");
+		await new Promise((resolve) => setTimeout(resolve, 10));
+		expect(session.isStreaming).toBe(true);
+
+		await session.prompt("Steer now", { streamingBehavior: "steer" });
+		await firstPrompt;
+
+		expect(firstStreamAborted).toBe(true);
+		expect(sawSteeringMessage).toBe(true);
+		expect(session.pendingMessageCount).toBe(0);
+		expect(session.isStreaming).toBe(false);
+	});
+
+	it("should preserve FIFO order for streaming prompt steering even when input handlers finish out of order", async () => {
+		const model = getModel("anthropic", "claude-sonnet-4-5")!;
+		const assistantResponses: string[] = [];
+
+		const agent = new Agent({
+			getApiKey: () => "test-key",
+			initialState: {
+				model,
+				systemPrompt: "Test",
+				tools: [],
+			},
+			streamFn: (_model, context, options) => {
+				const userTexts = context.messages
+					.filter((message) => message.role === "user")
+					.map((message) => {
+						if (typeof message.content === "string") {
+							return message.content;
+						}
+						return message.content
+							.filter((part): part is TextContent => part.type === "text")
+							.map((part) => part.text)
+							.join("\n");
+					});
+				const stream = new MockAssistantStream();
+				queueMicrotask(() => {
+					if (userTexts.includes("second steer")) {
+						assistantResponses.push("second");
+						stream.push({ type: "start", partial: createAssistantMessage("") });
+						stream.push({ type: "done", reason: "stop", message: createAssistantMessage("handled second") });
+						return;
+					}
+					if (userTexts.includes("first steer")) {
+						assistantResponses.push("first");
+						stream.push({ type: "start", partial: createAssistantMessage("") });
+						stream.push({ type: "done", reason: "stop", message: createAssistantMessage("handled first") });
+						return;
+					}
+
+					stream.push({ type: "start", partial: createAssistantMessage("printing") });
+					const checkAbort = () => {
+						if (options?.signal?.aborted) {
+							stream.push({
+								type: "error",
+								reason: "aborted",
+								error: createAssistantMessage("", "aborted"),
+							});
+							return;
+						}
+						setTimeout(checkAbort, 5);
+					};
+					checkAbort();
+				});
+				return stream;
+			},
+		});
+
+		const sessionManager = SessionManager.inMemory();
+		const settingsManager = SettingsManager.create(tempDir, tempDir);
+		const authStorage = AuthStorage.create(join(tempDir, "auth.json"));
+		const modelRegistry = ModelRegistry.create(authStorage, tempDir);
+		authStorage.setRuntimeApiKey("anthropic", "test-key");
+		const extensionsResult = await createTestExtensionsResult([
+			(pi) => {
+				pi.on("input", async (event) => {
+					if (event.text === "first steer") {
+						await new Promise((resolve) => setTimeout(resolve, 30));
+					}
+					return { action: "continue" };
+				});
+			},
+		]);
+
+		session = new AgentSession({
+			agent,
+			sessionManager,
+			settingsManager,
+			cwd: tempDir,
+			modelRegistry,
+			resourceLoader: createTestResourceLoader({ extensionsResult }),
+		});
+
+		const firstPrompt = session.prompt("start");
+		await new Promise((resolve) => setTimeout(resolve, 10));
+		expect(session.isStreaming).toBe(true);
+
+		const firstSteer = session.prompt("first steer", { streamingBehavior: "steer" });
+		const secondSteer = session.prompt("second steer", { streamingBehavior: "steer" });
+		await Promise.all([firstSteer, secondSteer]);
+		await firstPrompt;
+
+		expect(
+			sessionManager
+				.getEntries()
+				.filter((entry) => entry.type === "message")
+				.map((entry) => entry.message)
+				.filter((message) => message.role === "user")
+				.map((message) => {
+					if (typeof message.content === "string") return message.content;
+					return message.content
+						.filter((part): part is TextContent => part.type === "text")
+						.map((part) => part.text)
+						.join("\n");
+				}),
+		).toEqual(["start", "first steer", "second steer"]);
+		expect(assistantResponses).toEqual(["first", "second"]);
+		expect(session.pendingMessageCount).toBe(0);
+	});
+
 	it("should queue extension-origin steering messages while streaming", async () => {
 		const model = getModel("anthropic", "claude-sonnet-4-5")!;
 		let abortSignal: AbortSignal | undefined;
@@ -278,17 +466,13 @@ describe("AgentSession concurrent prompt guard", () => {
 		expect(pi).toBeDefined();
 
 		pi!.sendUserMessage("Steer from extension", { deliverAs: "steer" });
-		await new Promise((resolve) => setTimeout(resolve, 25));
+		await firstPrompt;
 
-		expect(session.pendingMessageCount).toBe(1);
-		expect(session.getSteeringMessages()).toContain("Steer from extension");
 		expect(lastInputSource).toBe("extension");
 		expect(queueEvents.some((event) => event.steering.includes("Steer from extension"))).toBe(true);
-
-		await session.abort();
-		await firstPrompt.catch(() => {});
-
 		expect(sawSteeringMessage).toBe(true);
+		expect(session.pendingMessageCount).toBe(0);
+		expect(session.isStreaming).toBe(false);
 	});
 
 	it("should allow prompt() after previous completes", async () => {

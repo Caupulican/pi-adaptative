@@ -313,13 +313,13 @@ unsubscribe();
 
 ## Steering and Follow-up
 
-Steering messages let you interrupt the agent while tools are running. Follow-up messages let you queue work after the agent would otherwise stop.
+Steering messages let you interrupt active assistant text streaming and inject course corrections before the next turn; if tools are already running, steering waits until the tool batch finishes. Follow-up messages let you queue work after the agent would otherwise stop.
 
 ```typescript
 agent.steeringMode = "one-at-a-time";
 agent.followUpMode = "one-at-a-time";
 
-// While agent is running tools
+// While the assistant is streaming text, or while tools are running
 agent.steer({
   role: "user",
   content: "Stop! Do this instead.",
@@ -343,7 +343,7 @@ agent.clearAllQueues();
 
 Use clearSteeringQueue, clearFollowUpQueue, or clearAllQueues to drop queued messages.
 
-When steering messages are detected after a turn completes:
+When steering messages are submitted during assistant text streaming, the active stream is aborted and steering is injected on the next turn. When steering messages are detected after a turn completes:
 1. All tool calls from the current assistant message have already finished
 2. Steering messages are injected
 3. The LLM responds on the next turn
