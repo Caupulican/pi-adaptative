@@ -4,6 +4,7 @@ import { Box, Container, Markdown, type MarkdownTheme, Spacer, Text } from "@ear
 import type { MessageRenderer } from "../../../core/extensions/types.ts";
 import type { CustomMessage } from "../../../core/messages.ts";
 import { getMarkdownTheme, theme } from "../theme/theme.ts";
+import { renderTitleBadge } from "./tool-title.ts";
 
 /**
  * Component that renders a custom message entry from extensions.
@@ -75,8 +76,7 @@ export class CustomMessageComponent extends Container {
 		this.box.clear();
 
 		// Default rendering: label + content
-		const label = theme.fg("customMessageLabel", `\x1b[1m[${this.message.customType}]\x1b[22m`);
-		this.box.addChild(new Text(label, 0, 0));
+		this.box.addChild(new Text(renderTitleBadge(theme, { label: this.message.customType }), 0, 0));
 		this.box.addChild(new Spacer(1));
 
 		// Extract text content

@@ -4,6 +4,7 @@ import { createAllToolDefinitions, type ToolName } from "../../../core/tools/ind
 import { getTextOutput as getRenderedTextOutput } from "../../../core/tools/render-utils.ts";
 import { convertToPng } from "../../../utils/image-convert.ts";
 import { type ThemeBg, theme } from "../theme/theme.ts";
+import { renderTitleBadge, titleBadge } from "./tool-title.ts";
 
 export interface ToolExecutionOptions {
 	showImages?: boolean;
@@ -186,8 +187,18 @@ export class ToolExecutionComponent extends Container {
 		this.updateDisplay();
 	}
 
+	private titleBadgeStatus(): "pending" | "running" | "success" | "error" {
+		if (this.result?.isError) return "error";
+		if (this.isPartial) return this.executionStarted ? "running" : "pending";
+		return "success";
+	}
+
 	private createCallFallback(): Component {
-		return new Text(theme.fg("toolTitle", theme.bold(this.getDisplayLabel())), 0, 0);
+		return titleBadge(theme, {
+			label: this.getDisplayLabel(),
+			badgeColor: "toolTitle",
+			status: this.titleBadgeStatus(),
+		});
 	}
 
 	private createResultFallback(): Component | undefined {
@@ -409,7 +420,11 @@ export class ToolExecutionComponent extends Container {
 	}
 
 	private formatToolExecution(): string {
-		let text = theme.fg("toolTitle", theme.bold(this.getDisplayLabel()));
+		let text = renderTitleBadge(theme, {
+			label: this.getDisplayLabel(),
+			badgeColor: "toolTitle",
+			status: this.titleBadgeStatus(),
+		});
 		const content = JSON.stringify(this.args, null, 2);
 		if (content) {
 			text += `\n\n${content}`;

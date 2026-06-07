@@ -13,6 +13,7 @@ import type { SessionTreeNode } from "../../../core/session-manager.ts";
 import { theme } from "../theme/theme.ts";
 import { DynamicBorder } from "./dynamic-border.ts";
 import { keyHint, keyText } from "./keybinding-hints.ts";
+import { renderTitleBadge } from "./tool-title.ts";
 
 /** Gutter info: position (displayIndent where connector was) and whether to show │ */
 interface GutterInfo {
@@ -731,13 +732,13 @@ class TreeList implements Component {
 					if (toolCall) {
 						result = theme.fg("muted", this.formatToolCall(toolCall.name, toolCall.arguments));
 					} else {
-						result = theme.fg("muted", `[${toolMsg.toolName ?? "tool"}]`);
+						result = renderTitleBadge(theme, { label: toolMsg.toolName ?? "tool", badgeColor: "muted" });
 					}
 				} else if (role === "bashExecution") {
 					const bashMsg = msg as { command?: string };
-					result = theme.fg("dim", `[bash]: ${normalize(bashMsg.command ?? "")}`);
+					result = `${renderTitleBadge(theme, { label: "bash", badgeColor: "dim" })}: ${normalize(bashMsg.command ?? "")}`;
 				} else {
-					result = theme.fg("dim", `[${role}]`);
+					result = renderTitleBadge(theme, { label: role, badgeColor: "dim" });
 				}
 				break;
 			}
@@ -749,33 +750,55 @@ class TreeList implements Component {
 								.filter((c): c is { type: "text"; text: string } => c.type === "text")
 								.map((c) => c.text)
 								.join("");
-				result = theme.fg("customMessageLabel", `[${entry.customType}]: `) + normalize(content);
+				result = `${renderTitleBadge(theme, { label: entry.customType })}: ${normalize(content)}`;
 				break;
 			}
 			case "compaction": {
 				const tokens = Math.round(entry.tokensBefore / 1000);
-				result = theme.fg("borderAccent", `[compaction: ${tokens}k tokens]`);
+				result = renderTitleBadge(theme, {
+					label: "compaction",
+					details: [{ text: `${tokens}k tokens`, color: "borderAccent" }],
+					badgeColor: "borderAccent",
+				});
 				break;
 			}
 			case "branch_summary":
-				result = theme.fg("warning", `[branch summary]: `) + normalize(entry.summary);
+				result = `${renderTitleBadge(theme, { label: "branch summary", badgeColor: "warning" })}: ${normalize(entry.summary)}`;
 				break;
 			case "model_change":
-				result = theme.fg("dim", `[model: ${entry.modelId}]`);
+				result = renderTitleBadge(theme, {
+					label: "model",
+					details: [{ text: entry.modelId, color: "dim" }],
+					badgeColor: "dim",
+				});
 				break;
 			case "thinking_level_change":
-				result = theme.fg("dim", `[thinking: ${entry.thinkingLevel}]`);
+				result = renderTitleBadge(theme, {
+					label: "thinking",
+					details: [{ text: entry.thinkingLevel, color: "dim" }],
+					badgeColor: "dim",
+				});
 				break;
 			case "custom":
-				result = theme.fg("dim", `[custom: ${entry.customType}]`);
+				result = renderTitleBadge(theme, {
+					label: "custom",
+					details: [{ text: entry.customType, color: "dim" }],
+					badgeColor: "dim",
+				});
 				break;
 			case "label":
-				result = theme.fg("dim", `[label: ${entry.label ?? "(cleared)"}]`);
+				result = renderTitleBadge(theme, {
+					label: "label",
+					details: [{ text: entry.label ?? "(cleared)", color: "dim" }],
+					badgeColor: "dim",
+				});
 				break;
 			case "session_info":
-				result = entry.name
-					? [theme.fg("dim", "[title: "), theme.fg("dim", entry.name), theme.fg("dim", "]")].join("")
-					: [theme.fg("dim", "[title: "), theme.italic(theme.fg("dim", "empty")), theme.fg("dim", "]")].join("");
+				result = renderTitleBadge(theme, {
+					label: "title",
+					details: [{ text: entry.name ?? "empty", color: "dim", italic: !entry.name }],
+					badgeColor: "dim",
+				});
 				break;
 			default:
 				result = "";

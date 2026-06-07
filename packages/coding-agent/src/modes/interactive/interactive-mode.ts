@@ -6541,7 +6541,10 @@ export class InteractiveMode {
 		this.editorContainer.addChild(reloadBox);
 		this.ui.setFocus(reloadBox);
 		this.ui.requestRender(true);
-		await new Promise((resolve) => process.nextTick(resolve));
+		// Let the terminal paint the reload notice before CPU-heavy extension/theme
+		// work begins. process.nextTick runs before I/O and can still make reloads
+		// appear frozen.
+		await new Promise((resolve) => setImmediate(resolve));
 
 		const dismissReloadBox = (editor: Component) => {
 			this.editorContainer.clear();

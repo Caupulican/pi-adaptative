@@ -117,6 +117,10 @@ function getAliases(): Record<string, string> {
 
 type HandlerFn = (...args: unknown[]) => Promise<unknown>;
 
+function yieldToEventLoop(): Promise<void> {
+	return new Promise((resolve) => setImmediate(resolve));
+}
+
 /**
  * Create a runtime with throwing stubs for action methods.
  * Runner.bindCore() replaces these with real implementations.
@@ -418,7 +422,12 @@ export async function loadExtensions(paths: string[], cwd: string, eventBus?: Ev
 	const runtime = createExtensionRuntime();
 
 	for (const extPath of paths) {
+		// Extension imports can be CPU-heavy under jiti. Yield around each load so
+		// interactive reloads can repaint/status-update instead of freezing the TUI
+		// for the whole extension set.
+		await yieldToEventLoop();
 		const { extension, error } = await loadExtension(extPath, resolvedCwd, resolvedEventBus, runtime);
+		await yieldToEventLoop();
 
 		if (error) {
 			errors.push({ path: extPath, error });

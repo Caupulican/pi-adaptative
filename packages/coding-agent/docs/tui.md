@@ -585,6 +585,24 @@ This pattern is NOT needed when:
 
 These patterns cover the most common UI needs in extensions. **Copy these patterns instead of building from scratch.**
 
+### Pattern 0: Title Badge
+
+For compact status labels in custom messages, skill renderers, and `renderCall`/`renderResult`, use `TitleBadgeComponent` or `titleBadge()` from `@earendil-works/pi-coding-agent`. It keeps titles visually consistent, compact, and width-bounded. `ToolTitleComponent`/`toolTitle()` remain aliases for tool-specific code.
+
+```typescript
+import { titleBadge } from "@earendil-works/pi-coding-agent";
+
+renderCall(args, theme) {
+  return titleBadge(theme, {
+    label: "background script",
+    icon: "◆",
+    action: args.action || "list",
+    details: [args.id || args.name],
+    status: args.action === "stop" ? "warning" : "running",
+  });
+}
+```
+
 ### Pattern 1: Selection Dialog (SelectList)
 
 For letting users pick from a list of options. Use `SelectList` from `@earendil-works/pi-tui` with `DynamicBorder` for framing.

@@ -2,6 +2,7 @@ import { Box, Markdown, type MarkdownTheme, Spacer, Text } from "@earendil-works
 import type { BranchSummaryMessage } from "../../../core/messages.ts";
 import { getMarkdownTheme, theme } from "../theme/theme.ts";
 import { keyText } from "./keybinding-hints.ts";
+import { renderTitleBadge } from "./tool-title.ts";
 
 /**
  * Component that renders a branch summary message with collapsed/expanded state.
@@ -32,8 +33,7 @@ export class BranchSummaryMessageComponent extends Box {
 	private updateDisplay(): void {
 		this.clear();
 
-		const label = theme.fg("customMessageLabel", `\x1b[1m[branch]\x1b[22m`);
-		this.addChild(new Text(label, 0, 0));
+		this.addChild(new Text(renderTitleBadge(theme, { label: "branch" }), 0, 0));
 		this.addChild(new Spacer(1));
 
 		if (this.expanded) {

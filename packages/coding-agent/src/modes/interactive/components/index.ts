@@ -28,6 +28,20 @@ export { ThinkingSelectorComponent } from "./thinking-selector.ts";
 export { ToolExecutionComponent, type ToolExecutionOptions } from "./tool-execution.ts";
 export { ToolGroupComponent } from "./tool-group.ts";
 export { createToolPanelTenantKey, getToolPanelActionKey, ToolPanelRegistry } from "./tool-panel-registry.ts";
+export {
+	renderTitleBadge,
+	renderToolTitle,
+	TitleBadgeComponent,
+	type TitleBadgeOptions,
+	type TitleBadgeSegment,
+	type TitleBadgeStatus,
+	ToolTitleComponent,
+	type ToolTitleOptions,
+	type ToolTitleSegment,
+	type ToolTitleStatus,
+	titleBadge,
+	toolTitle,
+} from "./tool-title.ts";
 export { TreeSelectorComponent } from "./tree-selector.ts";
 export { TrustSelectorComponent } from "./trust-selector.ts";
 export { UserMessageComponent } from "./user-message.ts";
