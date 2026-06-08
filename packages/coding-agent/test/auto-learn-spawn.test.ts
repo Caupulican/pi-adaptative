@@ -2,7 +2,7 @@ import { spawnSync } from "node:child_process";
 import { existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, utimesSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { afterEach, describe, expect, it } from "vitest";
+import { afterEach, beforeAll, describe, expect, it } from "vitest";
 import { parseArgs } from "../src/cli/args.ts";
 import {
 	AUTO_LEARN_HISTORY_RETENTION_MS,
@@ -12,12 +12,16 @@ import {
 	InteractiveMode,
 	pruneAutoLearnConversationHistory,
 } from "../src/modes/interactive/interactive-mode.ts";
+import { initTheme } from "../src/modes/interactive/theme/theme.ts";
 
 const tempDirs: string[] = [];
 
+beforeAll(() => {
+	initTheme("dark");
+});
+
 interface AutoLearnLaunchHarness {
 	runtimeHost: unknown;
-	autoLearnLastStatus: string;
 	getAutoLearnDataDir: () => string;
 	getAutoLearnSpawnTarget: () => AutoLearnSpawnTarget | undefined;
 	updateAutoLearnFooter: () => void;
@@ -133,7 +137,6 @@ function createAutoLearnHarness(
 	};
 	const harness = Object.create(InteractiveMode.prototype) as AutoLearnLaunchHarness;
 	harness.runtimeHost = { session };
-	harness.autoLearnLastStatus = "idle";
 	harness.getAutoLearnDataDir = () => dataDir;
 	harness.getAutoLearnSpawnTarget = () => spawnTarget;
 	harness.updateAutoLearnFooter = () => undefined;
@@ -148,6 +151,7 @@ describe("Auto Learn spawn args", () => {
 		const args = buildAutoLearnSpawnArgs(spawnTarget, {
 			name: "Auto Learn test-run",
 			modelPattern: "openai/gpt-5.5",
+			thinkingLevel: "xhigh",
 			sessionDir: "/tmp/pi auto learn/sessions",
 			sessionId: "auto-learn-reflection-test-run",
 			promptPath: "/tmp/pi auto learn/test-run.prompt.md",
@@ -161,6 +165,8 @@ describe("Auto Learn spawn args", () => {
 			"Auto Learn test-run",
 			"--model",
 			"openai/gpt-5.5",
+			"--thinking",
+			"xhigh",
 			"--session-dir",
 			"/tmp/pi auto learn/sessions",
 			"--session-id",
@@ -270,6 +276,7 @@ await new Promise((resolve) => setTimeout(resolve, 1000));
 		});
 
 		expect(result).toContain("Auto Learn started");
+		expect(result).not.toContain("with test/model");
 		const logPath = result.match(/Log: (.*)$/)?.[1];
 		expect(logPath).toBeDefined();
 		await waitForFileToContain(logPath!, "received-null-byte-prompt-file");
@@ -351,6 +358,43 @@ await new Promise((resolve) => setTimeout(resolve, 1000));
 		expect(tenantA.launchAutoLearn("tenant A", true)).toContain("Auto Learn started");
 		expect(tenantB.launchAutoLearn("tenant B", true)).toContain("Auto Learn started");
 		expect(readAutoLearnRunCount(dataDir)).toBe(2);
+	});
+
+	it("keeps Auto Learn footer compact and free of model/log paths", () => {
+		let footerStatus: string | undefined;
+		const mode = Object.create(InteractiveMode.prototype) as any;
+		mode.getEffectiveAutoLearnSettings = () => ({ enabled: true });
+		mode.getAutoLearnTenantKey = () => "tenant-a";
+		mode.getPrunedAutoLearnState = () => ({
+			runs: {
+				active: {
+					tenant: "tenant-a",
+					pid: 123,
+					modelPattern: "openai-codex/gpt-5.5",
+					logPath: "/home/user/.pi/agent/auto-learn/active.log",
+				},
+			},
+		});
+		mode.isAutoLearnPidAlive = () => true;
+		mode.footerDataProvider = {
+			setExtensionStatus: (_name: string, value: string | undefined) => {
+				footerStatus = value;
+			},
+		};
+		mode.footer = { invalidate: () => undefined };
+		mode.ui = { requestRender: () => undefined };
+
+		mode.updateAutoLearnFooter();
+
+		expect(footerStatus).toContain("(learning)");
+		expect(footerStatus).not.toContain("openai-codex");
+		expect(footerStatus).not.toContain("gpt-5.5");
+		expect(footerStatus).not.toContain("/home/user");
+		expect(footerStatus).not.toContain("learn:");
+
+		mode.isAutoLearnPidAlive = () => false;
+		mode.updateAutoLearnFooter();
+		expect(footerStatus).toBeUndefined();
 	});
 
 	it("keeps --print @prompt-file in the CLI file-input path", () => {

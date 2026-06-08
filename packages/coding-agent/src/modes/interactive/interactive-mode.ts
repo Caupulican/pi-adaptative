@@ -270,6 +270,7 @@ const AUTONOMY_AUTO_LEARN_PRESETS = {
 
 const AUTONOMY_MODES: AutonomyMode[] = ["off", "safe", "balanced", "full"];
 const AUTO_LEARN_RESERVATION_MS = 2 * 60 * 1000;
+const AUTO_LEARN_THINKING_LEVEL = "xhigh";
 export const AUTO_LEARN_HISTORY_RETENTION_MS = 7 * 24 * 60 * 60 * 1000;
 
 export interface AutoLearnHistoryPruneResult {
@@ -512,6 +513,7 @@ export interface AutoLearnSpawnTarget {
 export interface AutoLearnSpawnArgsOptions {
 	name: string;
 	modelPattern: string;
+	thinkingLevel?: string;
 	sessionDir: string;
 	sessionId: string;
 	promptPath: string;
@@ -528,6 +530,7 @@ export function buildAutoLearnSpawnArgs(
 		options.name,
 		"--model",
 		options.modelPattern,
+		...(options.thinkingLevel ? ["--thinking", options.thinkingLevel] : []),
 		"--session-dir",
 		options.sessionDir,
 		"--session-id",
@@ -685,9 +688,6 @@ export class InteractiveMode {
 	// Auto-compaction state
 	private autoCompactionLoader: Loader | undefined = undefined;
 	private autoCompactionEscapeHandler?: () => void;
-
-	// Auto Learn background runner state
-	private autoLearnLastStatus = "idle";
 
 	// Auto-retry state
 	private retryLoader: Loader | undefined = undefined;
@@ -4891,17 +4891,14 @@ export class InteractiveMode {
 
 	private cleanupCompletedAutoLearnRun(runId: string, artifactPaths: string[]): void {
 		const dataDir = this.getAutoLearnDataDir();
-		const removed = artifactPaths.filter((filePath) => removeAutoLearnArtifactPath(filePath, dataDir)).length;
+		for (const filePath of artifactPaths) removeAutoLearnArtifactPath(filePath, dataDir);
 		this.withAutoLearnStateLock((current) => {
 			const state = this.pruneAutoLearnState(current);
 			const runs = { ...(state.runs ?? {}) };
 			delete runs[runId];
 			return { result: undefined, next: { ...state, runs } };
 		});
-		if (removed > 0) {
-			this.autoLearnLastStatus = `cleaned ${removed} artifact(s)`;
-			this.updateAutoLearnFooter();
-		}
+		this.updateAutoLearnFooter();
 	}
 
 	private markAutoLearnReservationRunning(
@@ -4965,6 +4962,7 @@ export class InteractiveMode {
 		const args = buildAutoLearnSpawnArgs(spawnTarget, {
 			name: `Auto Learn ${runId}`,
 			modelPattern,
+			thinkingLevel: AUTO_LEARN_THINKING_LEVEL,
 			sessionDir,
 			sessionId,
 			promptPath,
@@ -4973,7 +4971,6 @@ export class InteractiveMode {
 		if (invalidSpawnInput) {
 			const message = `Auto Learn not started: ${invalidSpawnInput} contains a null byte.`;
 			this.appendAutoLearnLog(logPath, message);
-			this.autoLearnLastStatus = "start failed";
 			this.updateAutoLearnFooter();
 			return `${message} Log: ${logPath}`;
 		}
@@ -5002,7 +4999,6 @@ export class InteractiveMode {
 			const message = error instanceof Error ? error.message : String(error);
 			this.releaseAutoLearnReservation(reservation, options.cooldownKind);
 			this.appendAutoLearnLog(logPath, `Auto Learn failed to write prompt file: ${message}`);
-			this.autoLearnLastStatus = "start failed";
 			this.updateAutoLearnFooter();
 			return `Auto Learn not started: failed to write prompt file (${message}). Log: ${logPath}`;
 		}
@@ -5030,7 +5026,6 @@ export class InteractiveMode {
 			const message = error instanceof Error ? error.message : String(error);
 			this.releaseAutoLearnReservation(reservation, options.cooldownKind);
 			this.appendAutoLearnLog(logPath, `Auto Learn failed to start: ${message}`);
-			this.autoLearnLastStatus = "start failed";
 			this.updateAutoLearnFooter();
 			return `Auto Learn not started: failed to spawn background learner (${message}). Log: ${logPath}`;
 		} finally {
@@ -5044,7 +5039,6 @@ export class InteractiveMode {
 		}
 		if (!child || typeof child.pid !== "number" || child.pid <= 0) {
 			this.releaseAutoLearnReservation(reservation, options.cooldownKind);
-			this.autoLearnLastStatus = "start failed";
 			this.updateAutoLearnFooter();
 			return `Auto Learn not started: failed to spawn background learner. Log: ${logPath}`;
 		}
@@ -5055,9 +5049,8 @@ export class InteractiveMode {
 		child.unref();
 		this.markAutoLearnReservationRunning(reservation, childPid, settings);
 
-		this.autoLearnLastStatus = `running ${modelPattern}`;
 		this.updateAutoLearnFooter();
-		return `Auto Learn started (${reason}) with ${modelPattern}. Log: ${logPath}`;
+		return `Auto Learn started. Log: ${logPath}`;
 	}
 
 	private sanitizeAutoLearnDigestText(text: string): string {
@@ -5196,12 +5189,11 @@ export class InteractiveMode {
 		if (process.env.PI_AUTO_LEARN_CHILD === "1") return false;
 		const decision = this.evaluateAutoLearn(false);
 		if (!decision.shouldRun) {
-			this.autoLearnLastStatus = decision.reason;
 			this.updateAutoLearnFooter();
 			return false;
 		}
 		const message = this.launchAutoLearn(decision.reason, false);
-		this.showStatus(message);
+		if (!message.startsWith("Auto Learn started")) this.showStatus(message);
 		return message.startsWith("Auto Learn started");
 	}
 
@@ -5214,7 +5206,7 @@ export class InteractiveMode {
 			promptKind: "reflection",
 			turnDigest: decision.digest,
 		});
-		this.showStatus(message);
+		if (!message.startsWith("Auto Learn started")) this.showStatus(message);
 		return message.startsWith("Auto Learn started");
 	}
 
@@ -5224,9 +5216,14 @@ export class InteractiveMode {
 			this.footerDataProvider.setExtensionStatus("auto-learn", undefined);
 			return;
 		}
+		const tenant = this.getAutoLearnTenantKey();
+		const state = this.getPrunedAutoLearnState();
+		const hasActiveRun = Object.values(state.runs ?? {}).some(
+			(run) => run.tenant === tenant && this.isAutoLearnPidAlive(run.pid),
+		);
 		this.footerDataProvider.setExtensionStatus(
 			"auto-learn",
-			theme.fg("accent", `learn: ${this.autoLearnLastStatus}`),
+			hasActiveRun ? theme.fg("warning", "(learning)") : undefined,
 		);
 		this.footer.invalidate();
 		this.ui.requestRender();

@@ -1,5 +1,9 @@
 ## [Unreleased]
 
+### Fixed
+
+- Reduced automatic Auto Learn TUI noise by hiding model/log-path startup status from routine learner launches, showing only a compact `(learning)` footer marker while active, clearing it when done, and spawning learners with `xhigh` thinking.
+
 ## [0.80.12] - 2026-06-07
 
 ## [0.80.11] - 2026-06-07
