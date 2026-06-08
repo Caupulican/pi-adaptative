@@ -60,7 +60,17 @@ const VIRTUAL_MODULES: Record<string, unknown> = {
 	"@mariozechner/pi-coding-agent": _bundledPiCodingAgent,
 };
 
-const require = createRequire(import.meta.url);
+function uniquePaths(paths: string[]): string[] {
+	return [...new Set(paths)];
+}
+
+function safeRealpath(filePath: string): string {
+	try {
+		return fs.realpathSync(filePath);
+	} catch {
+		return filePath;
+	}
+}
 
 /**
  * Get aliases for jiti (used in Node.js/development mode).
@@ -71,20 +81,42 @@ let _aliases: Record<string, string> | null = null;
 function getAliases(): Record<string, string> {
 	if (_aliases) return _aliases;
 
-	const __dirname = path.dirname(fileURLToPath(import.meta.url));
+	const loaderFile = fileURLToPath(import.meta.url);
+	const realLoaderFile = safeRealpath(loaderFile);
+	const __dirname = path.dirname(loaderFile);
+	const realDirname = path.dirname(realLoaderFile);
 	const packageIndex = path.resolve(__dirname, "../..", "index.js");
 
-	const typeboxEntry = require.resolve("typebox");
-	const typeboxCompileEntry = require.resolve("typebox/compile");
-	const typeboxValueEntry = require.resolve("typebox/value");
-
-	const packagesRoot = path.resolve(__dirname, "../../../../");
-	const resolveWorkspaceOrImport = (workspaceRelativePath: string, specifier: string): string => {
-		const workspacePath = path.join(packagesRoot, workspaceRelativePath);
-		if (fs.existsSync(workspacePath)) {
-			return workspacePath;
+	const moduleRequires = uniquePaths([loaderFile, realLoaderFile]).map((file) => createRequire(file));
+	const resolveModule = (specifier: string): string => {
+		for (const moduleRequire of moduleRequires) {
+			try {
+				return moduleRequire.resolve(specifier);
+			} catch {
+				// Try the next resolution base. Linked global installs may resolve the
+				// loader through the global symlink path while workspace dependencies are
+				// hoisted beside the real source path.
+			}
 		}
 		return fileURLToPath(import.meta.resolve(specifier));
+	};
+
+	const typeboxEntry = resolveModule("typebox");
+	const typeboxCompileEntry = resolveModule("typebox/compile");
+	const typeboxValueEntry = resolveModule("typebox/value");
+
+	const packagesRoots = uniquePaths([
+		path.resolve(__dirname, "../../../../"),
+		path.resolve(realDirname, "../../../../"),
+	]);
+	const resolveWorkspaceOrImport = (workspaceRelativePath: string, specifier: string): string => {
+		for (const packagesRoot of packagesRoots) {
+			const workspacePath = path.join(packagesRoot, workspaceRelativePath);
+			if (fs.existsSync(workspacePath)) {
+				return workspacePath;
+			}
+		}
+		return resolveModule(specifier);
 	};
 
 	const piCodingAgentEntry = packageIndex;
