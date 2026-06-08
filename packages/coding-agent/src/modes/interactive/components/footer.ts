@@ -16,6 +16,65 @@ function sanitizeStatusText(text: string): string {
 		.trim();
 }
 
+function stripAnsi(text: string): string {
+	return text.replace(/\u001b\[[0-?]*[ -/]*[@-~]/g, "");
+}
+
+function normalizeLearningPhase(phase: string): string {
+	const normalized = phase
+		.toLowerCase()
+		.replace(/[^a-z0-9_-]+/g, "")
+		.trim();
+	if (!normalized) return "active";
+	if (normalized === "starting") return "start";
+	if (normalized === "mapping") return "map";
+	if (normalized === "scanning") return "scan";
+	if (normalized === "auditing") return "audit";
+	if (normalized === "learning") return "run";
+	if (normalized === "pruning") return "prune";
+	return normalized.slice(0, 16);
+}
+
+function formatExtensionStatuses(statuses: ReadonlyMap<string, string>): string[] {
+	const regularStatuses: string[] = [];
+	const learningPhases = new Set<string>();
+	let sawLearningStatus = false;
+
+	for (const [key, rawText] of Array.from(statuses.entries()).sort(([a], [b]) => a.localeCompare(b))) {
+		const text = sanitizeStatusText(rawText);
+		const plain = stripAnsi(text).trim();
+		const plainLower = plain.toLowerCase();
+		let phase: string | undefined;
+
+		if (plainLower.startsWith("(learning)")) {
+			phase = plain.slice("(learning)".length).trim();
+		} else if (plainLower === "learning") {
+			phase = "active";
+		} else if (/^learn(?:ing)?\s*[: ]/.test(plainLower)) {
+			phase = plain.replace(/^learn(?:ing)?\s*[: ]/i, "").trim();
+		}
+
+		if (phase !== undefined) {
+			sawLearningStatus = true;
+			learningPhases.add(normalizeLearningPhase(phase));
+			continue;
+		}
+
+		if (key === "auto-learn" || key === "continuous-learning") {
+			sawLearningStatus = true;
+			learningPhases.add("active");
+			continue;
+		}
+
+		regularStatuses.push(text);
+	}
+
+	if (!sawLearningStatus) return regularStatuses;
+	const phases = Array.from(learningPhases).filter((phase) => phase !== "active");
+	const phaseText = phases.length > 0 ? phases.join("/") : "active";
+	return [theme.fg("warning", "learn") + theme.fg("dim", `:${phaseText}`), ...regularStatuses];
+}
+
 /**
  * Format token counts for compact footer display.
  */
@@ -217,15 +276,16 @@ export class FooterComponent implements Component {
 		const pwdLine = truncateToWidth(theme.fg("dim", pwd), width, theme.fg("dim", "..."));
 		const lines = [pwdLine, dimStatsLeft + dimRemainder];
 
-		// Add extension statuses on a single line, sorted by key alphabetically
+		// Add extension statuses on a single line. Learning-related statuses are
+		// folded into one compact chip so independent learning systems do not render
+		// brittle duplicates like "(learning) (learning) auto".
 		const extensionStatuses = this.footerData.getExtensionStatuses();
 		if (extensionStatuses.size > 0) {
-			const sortedStatuses = Array.from(extensionStatuses.entries())
-				.sort(([a], [b]) => a.localeCompare(b))
-				.map(([, text]) => sanitizeStatusText(text));
-			const statusLine = sortedStatuses.join(" ");
-			// Truncate to terminal width with dim ellipsis for consistency with footer style
-			lines.push(truncateToWidth(statusLine, width, theme.fg("dim", "...")));
+			const statusLine = formatExtensionStatuses(extensionStatuses).join(" ");
+			if (statusLine) {
+				// Truncate to terminal width with dim ellipsis for consistency with footer style
+				lines.push(truncateToWidth(statusLine, width, theme.fg("dim", "...")));
+			}
 		}
 
 		return lines;

@@ -59,10 +59,13 @@ function createSession(options: {
 	return session as unknown as AgentSession;
 }
 
-function createFooterData(providerCount: number): ReadonlyFooterDataProvider {
+function createFooterData(
+	providerCount: number,
+	extensionStatuses = new Map<string, string>(),
+): ReadonlyFooterDataProvider {
 	const provider = {
 		getGitBranch: () => "main",
-		getExtensionStatuses: () => new Map<string, string>(),
+		getExtensionStatuses: () => extensionStatuses,
 		getAvailableProviderCount: () => providerCount,
 		onBranchChange: (callback: () => void) => {
 			void callback;
@@ -71,6 +74,10 @@ function createFooterData(providerCount: number): ReadonlyFooterDataProvider {
 	};
 
 	return provider;
+}
+
+function stripAnsi(text: string): string {
+	return text.replace(/\u001b\[[0-?]*[ -/]*[@-~]/g, "");
 }
 
 describe("formatCwdForFooter", () => {
@@ -122,5 +129,21 @@ describe("FooterComponent width handling", () => {
 		for (const line of lines) {
 			expect(visibleWidth(line)).toBeLessThanOrEqual(width);
 		}
+	});
+
+	it("folds duplicate learning footer statuses into one phase chip", () => {
+		const session = createSession({ sessionName: "" });
+		const statuses = new Map<string, string>([
+			["auto-learn", "(learning)"],
+			["continuous-learning", "\u001b[33m(learning)\u001b[0m\u001b[2m auto\u001b[0m"],
+			["pi-chat", "pi-chat"],
+		]);
+		const footer = new FooterComponent(session, createFooterData(1, statuses));
+
+		const statusLine = stripAnsi(footer.render(120).at(-1) ?? "");
+
+		expect(statusLine).toContain("learn:auto");
+		expect(statusLine).toContain("pi-chat");
+		expect(statusLine).not.toContain("(learning) (learning)");
 	});
 });

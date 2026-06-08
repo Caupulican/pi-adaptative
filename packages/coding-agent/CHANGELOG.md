@@ -1,5 +1,9 @@
 ## [Unreleased]
 
+### Fixed
+
+- Folded overlapping Auto Learn and continuous-learning footer statuses into one compact `learn:<phase>` chip, preventing duplicate `(learning) (learning)` indicators while keeping phase context.
+
 ## [0.80.13] - 2026-06-08
 
 ### Fixed
