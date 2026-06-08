@@ -56,6 +56,27 @@ describe("ToolExecutionComponent parity", () => {
 		expect(first).not.toEqual(sameSessionOtherFile);
 	});
 
+	test("background_script status reuses the start panel by job name", () => {
+		const scope = { sessionId: "a", sessionFile: "/tmp/a.jsonl", cwd: "/repo" };
+		const start = getToolPanelActionKey(scope, "background_script", {
+			action: "start",
+			name: "build-watch",
+		});
+		const status = getToolPanelActionKey(scope, "background_script", {
+			action: "status",
+			id: "build-watch",
+		});
+		const logs = getToolPanelActionKey(scope, "background_script", {
+			action: "logs",
+			id: "build-watch",
+		});
+
+		expect(start).toBeDefined();
+		expect(status).toEqual(start);
+		expect(logs).toEqual(start);
+		expect(getToolPanelActionKey(scope, "background_script", { action: "list" })).toBeUndefined();
+	});
+
 	test("stacks custom call and result renderers like the old implementation", () => {
 		const toolDefinition: ToolDefinition = {
 			...createBaseToolDefinition(),

@@ -1,5 +1,9 @@
 ## [Unreleased]
 
+### Fixed
+
+- Reused background script job panels in place for repeated start/status/logs calls with the same job name/id, so long-running script status refreshes one persistent TUI line instead of appending repeated rows.
+
 ## [0.80.14] - 2026-06-08
 
 ### Fixed

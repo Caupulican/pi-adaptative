@@ -130,7 +130,11 @@ import { SettingsSelectorComponent } from "./components/settings-selector.ts";
 import { SkillInvocationMessageComponent } from "./components/skill-invocation-message.ts";
 import { ToolExecutionComponent } from "./components/tool-execution.ts";
 import { ToolGroupComponent } from "./components/tool-group.ts";
-import { getToolPanelActionKey, ToolPanelRegistry } from "./components/tool-panel-registry.ts";
+import {
+	getToolPanelActionKey,
+	shouldReuseToolPanelInPlace,
+	ToolPanelRegistry,
+} from "./components/tool-panel-registry.ts";
 import { TreeSelectorComponent } from "./components/tree-selector.ts";
 import { TrustSelectorComponent } from "./components/trust-selector.ts";
 import { UserMessageComponent } from "./components/user-message.ts";
@@ -2083,6 +2087,13 @@ export class InteractiveMode {
 		const toolDefinition = this.getRegisteredToolDefinition(toolName);
 		const existing = this.toolPanels.getReusable(actionKey);
 		if (existing) {
+			if (shouldReuseToolPanelInPlace(toolName, args)) {
+				existing.resetInvocation(toolName, toolCallId, args, toolDefinition);
+				existing.setExpanded(this.toolOutputExpanded);
+				this.toolPanels.register(toolCallId, existing, actionKey);
+				this.ui.requestRender();
+				return existing;
+			}
 			this.detachToolExecutionComponent(existing);
 			existing.resetInvocation(toolName, toolCallId, args, toolDefinition);
 			existing.setExpanded(this.toolOutputExpanded);

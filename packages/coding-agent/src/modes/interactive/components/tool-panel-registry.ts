@@ -10,6 +10,15 @@ export function createToolPanelTenantKey(scope: ToolPanelTenantScope): string {
 	return [scope.sessionId || "no-session-id", scope.sessionFile || "no-session-file", scope.cwd].join("\0");
 }
 
+function backgroundScriptSelector(record: Record<string, unknown>): string | undefined {
+	const action = String(record.action || "list");
+	if (action === "start" && typeof record.name === "string" && record.name.trim()) return record.name.trim();
+	if (["status", "logs", "stop"].includes(action) && typeof record.id === "string" && record.id.trim()) {
+		return record.id.trim();
+	}
+	return undefined;
+}
+
 export function getToolPanelActionKey(
 	scope: ToolPanelTenantScope,
 	toolName: string,
@@ -22,10 +31,23 @@ export function getToolPanelActionKey(
 	if (["read", "edit", "write"].includes(toolName) && typeof pathValue === "string" && pathValue.trim()) {
 		return `${tenantKey}\0${toolName}:${pathValue.trim()}`;
 	}
+	if (toolName === "background_script") {
+		const selector = backgroundScriptSelector(record);
+		return selector ? `${tenantKey}\0${toolName}:${selector}` : undefined;
+	}
 	if (toolName.endsWith("_status")) return `${tenantKey}\0${toolName}`;
 	if (toolName === "learning_auto_learn_state") return `${tenantKey}\0${toolName}:${String(record.action || "read")}`;
 	if (toolName === "task_steps") return `${tenantKey}\0${toolName}:${String(record.action || "list")}`;
 	return undefined;
+}
+
+export function shouldReuseToolPanelInPlace(toolName: string, args: unknown): boolean {
+	return (
+		toolName === "background_script" &&
+		!!args &&
+		typeof args === "object" &&
+		!!backgroundScriptSelector(args as Record<string, unknown>)
+	);
 }
 
 export class ToolPanelRegistry {
