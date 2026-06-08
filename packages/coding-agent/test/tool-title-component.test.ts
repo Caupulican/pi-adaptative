@@ -1,4 +1,4 @@
-import { visibleWidth } from "@earendil-works/pi-tui";
+import { visibleWidth } from "@caupulican/pi-tui";
 import { beforeAll, describe, expect, test } from "vitest";
 import {
 	renderTitleBadge,

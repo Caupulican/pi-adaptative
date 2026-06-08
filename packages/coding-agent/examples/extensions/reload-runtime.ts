@@ -6,7 +6,7 @@
  * active run sees the refreshed tool definitions.
  */
 
-import type { ExtensionAPI } from "@earendil-works/pi-coding-agent";
+import type { ExtensionAPI } from "@caupulican/pi-adaptative";
 import { Type } from "typebox";
 
 export default function (pi: ExtensionAPI) {

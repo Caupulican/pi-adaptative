@@ -1,4 +1,4 @@
-import { Box, type Component, truncateToWidth, visibleWidth } from "@earendil-works/pi-tui";
+import { Box, type Component, truncateToWidth, visibleWidth } from "@caupulican/pi-tui";
 import { type ThemeBg, theme } from "../theme/theme.ts";
 import { keyText } from "./keybinding-hints.ts";
 import type { ToolExecutionComponent } from "./tool-execution.ts";

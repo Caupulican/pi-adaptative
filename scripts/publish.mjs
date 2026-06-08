@@ -1,22 +1,22 @@
 #!/usr/bin/env node
 
 import { spawnSync } from "node:child_process";
-import { cpSync, existsSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
+import { cpSync, existsSync, mkdtempSync, readFileSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 
 const packages = [
-	{ directory: "packages/ai", sourceName: "@earendil-works/pi-ai", publishName: "@caupulican/pi-ai" },
-	{ directory: "packages/agent", sourceName: "@earendil-works/pi-agent-core", publishName: "@caupulican/pi-agent-core" },
-	{ directory: "packages/tui", sourceName: "@earendil-works/pi-tui", publishName: "@caupulican/pi-tui" },
-	{ directory: "packages/coding-agent", sourceName: "@caupulican/pi-adaptative", publishName: "@caupulican/pi-adaptative" },
+	{ directory: "packages/ai", name: "@caupulican/pi-ai" },
+	{ directory: "packages/agent", name: "@caupulican/pi-agent-core" },
+	{ directory: "packages/tui", name: "@caupulican/pi-tui" },
+	{ directory: "packages/coding-agent", name: "@caupulican/pi-adaptative" },
 ];
 
 const dryRun = process.argv.includes("--dry-run");
 const unknownArgs = process.argv.slice(2).filter((arg) => arg !== "--dry-run");
 
 if (unknownArgs.length > 0) {
-	console.error(`Usage: node scripts/publish.mjs [--dry-run]`);
+	console.error("Usage: node scripts/publish.mjs [--dry-run]");
 	process.exit(1);
 }
 
@@ -44,54 +44,16 @@ function readPackageJson(directory) {
 	return JSON.parse(readFileSync(join(directory, "package.json"), "utf8"));
 }
 
-function writePackageJson(directory, packageJson) {
-	writeFileSync(join(directory, "package.json"), `${JSON.stringify(packageJson, null, "\t")}\n`);
-}
-
 function assertBuildOutputExists(directory) {
 	if (!existsSync(join(directory, "dist"))) {
 		throw new Error(`${directory}/dist does not exist. Run npm run build before publishing.`);
 	}
 }
 
-function aliasInternalDependencies(dependencies, publishVersions) {
-	if (!dependencies) return;
-	for (const pkg of packages) {
-		if (!dependencies[pkg.sourceName] || pkg.sourceName === pkg.publishName) continue;
-		dependencies[pkg.sourceName] = `npm:${pkg.publishName}@${publishVersions.get(pkg.sourceName)}`;
-	}
-}
-
-function rewriteShrinkwrapForPublish(directory, publishVersions) {
-	const shrinkwrapPath = join(directory, "npm-shrinkwrap.json");
-	if (!existsSync(shrinkwrapPath)) return;
-
-	const shrinkwrap = JSON.parse(readFileSync(shrinkwrapPath, "utf8"));
-	aliasInternalDependencies(shrinkwrap.packages?.[""]?.dependencies, publishVersions);
-
-	for (const pkg of packages) {
-		if (pkg.sourceName === pkg.publishName) continue;
-		const entry = shrinkwrap.packages?.[`node_modules/${pkg.sourceName}`];
-		if (!entry) continue;
-		entry.resolved = `https://registry.npmjs.org/${pkg.publishName}/-/${pkg.publishName.split("/")[1]}-${publishVersions.get(pkg.sourceName)}.tgz`;
-		aliasInternalDependencies(entry.dependencies, publishVersions);
-	}
-
-	writeFileSync(shrinkwrapPath, `${JSON.stringify(shrinkwrap, null, "\t")}\n`);
-}
-
-function preparePublishDirectory(pkg, publishVersions) {
+function preparePublishDirectory(pkg) {
 	const tempRoot = mkdtempSync(join(tmpdir(), "pi-publish-"));
-	const publishDirectory = join(tempRoot, pkg.publishName.split("/")[1]);
+	const publishDirectory = join(tempRoot, pkg.name.split("/")[1]);
 	cpSync(pkg.directory, publishDirectory, { recursive: true });
-
-	const packageJson = readPackageJson(publishDirectory);
-	packageJson.name = pkg.publishName;
-	aliasInternalDependencies(packageJson.dependencies, publishVersions);
-	aliasInternalDependencies(packageJson.devDependencies, publishVersions);
-	writePackageJson(publishDirectory, packageJson);
-	rewriteShrinkwrapForPublish(publishDirectory, publishVersions);
-
 	return { publishDirectory, tempRoot };
 }
 
@@ -122,10 +84,10 @@ function isPublished(name, version) {
 const packageVersions = new Map();
 for (const pkg of packages) {
 	const packageJson = readPackageJson(pkg.directory);
-	if (packageJson.name !== pkg.sourceName) {
-		throw new Error(`${pkg.directory}/package.json has name ${packageJson.name}, expected ${pkg.sourceName}`);
+	if (packageJson.name !== pkg.name) {
+		throw new Error(`${pkg.directory}/package.json has name ${packageJson.name}, expected ${pkg.name}`);
 	}
-	packageVersions.set(pkg.sourceName, packageJson.version);
+	packageVersions.set(pkg.name, packageJson.version);
 }
 
 const versions = [...new Set(packageVersions.values())];
@@ -136,17 +98,17 @@ if (versions.length !== 1) {
 console.log(`Publishing pi packages at ${versions[0]}${dryRun ? " (dry run)" : ""}\n`);
 
 for (const pkg of packages) {
-	const version = packageVersions.get(pkg.sourceName);
+	const version = packageVersions.get(pkg.name);
 	assertBuildOutputExists(pkg.directory);
-	const published = isPublished(pkg.publishName, version);
-	const { publishDirectory, tempRoot } = preparePublishDirectory(pkg, packageVersions);
+	const published = isPublished(pkg.name, version);
+	const { publishDirectory, tempRoot } = preparePublishDirectory(pkg);
 
 	try {
 		if (dryRun) {
 			if (published) {
-				console.log(`${pkg.publishName}@${version} is already published; validating package contents only.`);
+				console.log(`${pkg.name}@${version} is already published; validating package contents only.`);
 			} else {
-				console.log(`${pkg.publishName}@${version} is not published; validating package contents before publish.`);
+				console.log(`${pkg.name}@${version} is not published; validating package contents before publish.`);
 			}
 			validatePack(publishDirectory);
 			console.log();
@@ -154,7 +116,7 @@ for (const pkg of packages) {
 		}
 
 		if (published) {
-			console.log(`Skipping ${pkg.publishName}@${version}: already published\n`);
+			console.log(`Skipping ${pkg.name}@${version}: already published\n`);
 			continue;
 		}
 

@@ -3,7 +3,7 @@ import {
 	fauxAssistantMessage,
 	fauxToolCall,
 	registerFauxProvider,
-} from "@earendil-works/pi-ai";
+} from "@caupulican/pi-ai";
 import { Type } from "typebox";
 import { afterEach, describe, expect, it } from "vitest";
 import type { ResourceLoader } from "../../../src/core/resource-loader.ts";

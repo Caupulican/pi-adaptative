@@ -34,12 +34,6 @@
 		"release:major": "node scripts/release.mjs major",
 		"prepare": "husky"
 	},
-	"dependencies": {
-		"@caupulican/pi-agent-core": "file:packages/agent",
-		"@caupulican/pi-ai": "file:packages/ai",
-		"@caupulican/pi-tui": "file:packages/tui",
-		"@earendil-works/pi-coding-agent": "file:packages/coding-agent"
-	},
 	"devDependencies": {
 		"@anthropic-ai/sandbox-runtime": "0.0.26",
 		"@biomejs/biome": "2.3.5",

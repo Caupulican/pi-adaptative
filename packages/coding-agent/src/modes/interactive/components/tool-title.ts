@@ -1,5 +1,5 @@
-import type { Component } from "@earendil-works/pi-tui";
-import { truncateToWidth } from "@earendil-works/pi-tui";
+import type { Component } from "@caupulican/pi-tui";
+import { truncateToWidth } from "@caupulican/pi-tui";
 import type { Theme, ThemeColor } from "../theme/theme.ts";
 
 export type TitleBadgeStatus =

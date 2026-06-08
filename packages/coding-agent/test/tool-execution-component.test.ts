@@ -1,5 +1,5 @@
 import { join, resolve } from "node:path";
-import { Text, type TUI, visibleWidth } from "@earendil-works/pi-tui";
+import { Text, type TUI, visibleWidth } from "@caupulican/pi-tui";
 import { Type } from "typebox";
 import { beforeAll, describe, expect, test } from "vitest";
 import { getReadmePath } from "../src/config.ts";
@@ -616,7 +616,7 @@ printf '\nWINDOWS_IPV4\n'; powershell.exe -NoProfile -Command "Get-NetIPAddress 
 	});
 
 	test("keeps collapsed grouped npm version checks within render width when adding expand hint", () => {
-		const firstCommand = `npm view @earendil-works/pi-ai versions --json | tail -c 1000 && printf '\n---\n' && npm view @earendil-works/pi-agent-core versions --json | tail -c 1000 && printf '\n---\n' && npm view @earendil-works/pi-tui versions --json | tail -c 1000`;
+		const firstCommand = `npm view @caupulican/pi-ai versions --json | tail -c 1000 && printf '\n---\n' && npm view @caupulican/pi-agent-core versions --json | tail -c 1000 && printf '\n---\n' && npm view @caupulican/pi-tui versions --json | tail -c 1000`;
 		const secondCommand = `cd /mnt/d/GitHub/mine/pi-adaptative && npm view @caupulican/pi-adaptative@0.80.2 dependencies --json && printf '\n---dist-tags---\n' && npm view @caupulican/pi-adaptative dist-tags --json`;
 		const components = [firstCommand, secondCommand].map(
 			(command, index) =>

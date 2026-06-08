@@ -12,10 +12,10 @@
  * - Progress tracking widget during execution
  */
 
-import type { AgentMessage } from "@earendil-works/pi-agent-core";
-import type { AssistantMessage, TextContent } from "@earendil-works/pi-ai";
-import type { ExtensionAPI, ExtensionContext } from "@earendil-works/pi-coding-agent";
-import { Key } from "@earendil-works/pi-tui";
+import type { ExtensionAPI, ExtensionContext } from "@caupulican/pi-adaptative";
+import type { AgentMessage } from "@caupulican/pi-agent-core";
+import type { AssistantMessage, TextContent } from "@caupulican/pi-ai";
+import { Key } from "@caupulican/pi-tui";
 import { extractTodoItems, isSafeCommand, markCompletedSteps, type TodoItem } from "./utils.ts";
 
 // Tools

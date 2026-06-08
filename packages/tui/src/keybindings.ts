@@ -230,7 +230,7 @@ export class KeybindingsManager {
 	}
 }
 
-const GLOBAL_KEYBINDINGS_SYMBOL = Symbol.for("@earendil-works/pi-tui.keybindings");
+const GLOBAL_KEYBINDINGS_SYMBOL = Symbol.for("@caupulican/pi-tui.keybindings");
 
 type GlobalKeybindingsStore = typeof globalThis & Record<symbol, KeybindingsManager | undefined>;
 
