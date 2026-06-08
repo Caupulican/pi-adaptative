@@ -181,7 +181,7 @@ describe("AgentSession concurrent prompt guard", () => {
 		await firstPrompt.catch(() => {});
 	});
 
-	it("should interrupt active assistant output and deliver queued steering", async () => {
+	it("should queue steering without aborting active assistant output", async () => {
 		const model = getModel("anthropic", "claude-sonnet-4-5")!;
 		let firstStreamAborted = false;
 		let sawSteeringMessage = false;
@@ -215,7 +215,7 @@ describe("AgentSession concurrent prompt guard", () => {
 					}
 
 					stream.push({ type: "start", partial: createAssistantMessage("printing") });
-					const checkAbort = () => {
+					setTimeout(() => {
 						if (options?.signal?.aborted) {
 							firstStreamAborted = true;
 							stream.push({
@@ -225,9 +225,8 @@ describe("AgentSession concurrent prompt guard", () => {
 							});
 							return;
 						}
-						setTimeout(checkAbort, 5);
-					};
-					checkAbort();
+						stream.push({ type: "done", reason: "stop", message: createAssistantMessage("First completed") });
+					}, 20);
 				});
 				return stream;
 			},
@@ -255,8 +254,22 @@ describe("AgentSession concurrent prompt guard", () => {
 		await session.prompt("Steer now", { streamingBehavior: "steer" });
 		await firstPrompt;
 
-		expect(firstStreamAborted).toBe(true);
+		const assistantTexts = sessionManager
+			.getEntries()
+			.filter((entry) => entry.type === "message")
+			.map((entry) => entry.message)
+			.filter((message) => message.role === "assistant")
+			.map((message) => {
+				if (typeof message.content === "string") return message.content;
+				return message.content
+					.filter((part): part is TextContent => part.type === "text")
+					.map((part) => part.text)
+					.join("\n");
+			});
+
+		expect(firstStreamAborted).toBe(false);
 		expect(sawSteeringMessage).toBe(true);
+		expect(assistantTexts).toEqual(["First completed", "Steering handled"]);
 		expect(session.pendingMessageCount).toBe(0);
 		expect(session.isStreaming).toBe(false);
 	});
@@ -300,7 +313,7 @@ describe("AgentSession concurrent prompt guard", () => {
 					}
 
 					stream.push({ type: "start", partial: createAssistantMessage("printing") });
-					const checkAbort = () => {
+					setTimeout(() => {
 						if (options?.signal?.aborted) {
 							stream.push({
 								type: "error",
@@ -309,9 +322,8 @@ describe("AgentSession concurrent prompt guard", () => {
 							});
 							return;
 						}
-						setTimeout(checkAbort, 5);
-					};
-					checkAbort();
+						stream.push({ type: "done", reason: "stop", message: createAssistantMessage("initial done") });
+					}, 20);
 				});
 				return stream;
 			},
@@ -408,14 +420,13 @@ describe("AgentSession concurrent prompt guard", () => {
 					}
 
 					stream.push({ type: "start", partial: createAssistantMessage("") });
-					const checkAbort = () => {
+					setTimeout(() => {
 						if (abortSignal?.aborted) {
 							stream.push({ type: "error", reason: "aborted", error: createAssistantMessage("Aborted") });
-						} else {
-							setTimeout(checkAbort, 5);
+							return;
 						}
-					};
-					checkAbort();
+						stream.push({ type: "done", reason: "stop", message: createAssistantMessage("Initial done") });
+					}, 20);
 				});
 				return stream;
 			},

@@ -1,5 +1,13 @@
 ## [Unreleased]
 
+## [0.80.18] - 2026-06-08
+
+### Fixed
+
+- Queued steering without aborting active assistant output, so user steering and busy-session wake messages do not interrupt the current stream.
+- Loaded extensions from linked global installs by resolving package aliases from both the symlinked loader path and the real source path.
+- Added workspace and local-release compatibility links so both fork package names and upstream Pi import names resolve through `node_modules` during installation smoke tests.
+
 ## [0.80.17] - 2026-06-07
 
 ### Fixed

@@ -2,7 +2,7 @@
 
 import { cpSync, existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, symlinkSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
-import { isAbsolute, join, relative, resolve } from "node:path";
+import { dirname, isAbsolute, join, relative, resolve } from "node:path";
 import { spawnSync } from "node:child_process";
 
 const packages = [
@@ -168,6 +168,32 @@ function createPiShim(installDirectory) {
 	symlinkSync(join("node_modules", ".bin", "pi"), join(installDirectory, "pi"));
 }
 
+const compatibilityPackageLinks = [
+	{ link: join("@earendil-works", "pi-coding-agent"), target: join("@caupulican", "pi-adaptative") },
+	{ link: join("@caupulican", "pi-agent-core"), target: join("@earendil-works", "pi-agent-core") },
+	{ link: join("@caupulican", "pi-ai"), target: join("@earendil-works", "pi-ai") },
+	{ link: join("@caupulican", "pi-tui"), target: join("@earendil-works", "pi-tui") },
+];
+
+function createPackageCompatibilityLinks(installDirectory) {
+	const nodeModulesDirectory = join(installDirectory, "node_modules");
+	for (const { link, target } of compatibilityPackageLinks) {
+		const targetPath = join(nodeModulesDirectory, target);
+		if (!existsSync(targetPath)) {
+			throw new Error(`Cannot create compatibility link ${link}; missing target ${targetPath}`);
+		}
+
+		const linkPath = join(nodeModulesDirectory, link);
+		if (existsSync(linkPath)) {
+			continue;
+		}
+
+		mkdirSync(dirname(linkPath), { recursive: true });
+		const linkTarget = process.platform === "win32" ? targetPath : relative(dirname(linkPath), targetPath);
+		symlinkSync(linkTarget, linkPath, process.platform === "win32" ? "junction" : "dir");
+	}
+}
+
 function packPackage(pkg, tarballDirectory) {
 	const packageJson = readPackageJson(pkg.directory);
 	if (packageJson.name !== pkg.name) {
@@ -224,6 +250,7 @@ if (!options.skipInstall) {
 	writeFileSync(join(nodeInstallDirectory, "package.json"), installPackageJson);
 
 	run("npm", ["install", "--omit=dev", "--ignore-scripts"], { cwd: nodeInstallDirectory });
+	createPackageCompatibilityLinks(nodeInstallDirectory);
 	createPiShim(nodeInstallDirectory);
 
 	if (!options.skipBunInstall) {
@@ -236,6 +263,7 @@ if (!options.skipInstall) {
 		);
 		writeFileSync(join(bunInstallDirectory, "package.json"), `${JSON.stringify({ private: true, dependencies: bunDependencies, overrides: bunDependencies }, undefined, "\t")}\n`);
 		run("bun", ["install", "--production", "--ignore-scripts"], { cwd: bunInstallDirectory });
+		createPackageCompatibilityLinks(bunInstallDirectory);
 		createPiShim(bunInstallDirectory);
 	}
 }

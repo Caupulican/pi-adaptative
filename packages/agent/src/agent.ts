@@ -263,17 +263,6 @@ export class Agent {
 	/** Queue a message to be injected after the current assistant turn finishes. */
 	steer(message: AgentMessage): void {
 		this.steeringQueue.enqueue(message);
-		if (this.shouldInterruptAssistantStreamForSteering()) {
-			this.abort();
-		}
-	}
-
-	private shouldInterruptAssistantStreamForSteering(): boolean {
-		return Boolean(
-			this.activeRun &&
-				this._state.streamingMessage?.role === "assistant" &&
-				this._state.pendingToolCalls.size === 0,
-		);
 	}
 
 	/** Queue a message to run only after the agent would otherwise stop. */
