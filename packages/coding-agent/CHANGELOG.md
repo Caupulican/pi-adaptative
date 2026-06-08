@@ -1,5 +1,10 @@
 ## [Unreleased]
 
+### Fixed
+
+- Reused active background script panels for same-turn repeated start/status/logs calls, so a model-issued status burst for one job still refreshes one TUI row instead of appending duplicates.
+- Queued compaction messages with steering/follow-up behavior when auto-compaction finishes while the agent is still processing, avoiding the internal `streamingBehavior` error and duplicate restored queue display.
+
 ## [0.80.15] - 2026-06-08
 
 ### Fixed

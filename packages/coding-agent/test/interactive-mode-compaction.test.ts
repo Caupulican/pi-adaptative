@@ -2,6 +2,33 @@ import { describe, expect, test, vi } from "vitest";
 import { InteractiveMode } from "../src/modes/interactive/interactive-mode.ts";
 
 describe("InteractiveMode compaction events", () => {
+	test("flushes queued compaction prompts as steering when the agent is still streaming", async () => {
+		const prompt = vi.fn().mockResolvedValue(undefined);
+		const fakeThis = {
+			compactionQueuedMessages: [{ text: "verify the image", mode: "steer" as const, images: undefined }],
+			session: {
+				isStreaming: true,
+				prompt,
+				followUp: vi.fn().mockResolvedValue(undefined),
+				steer: vi.fn().mockResolvedValue(undefined),
+				clearQueue: vi.fn(),
+			},
+			isExtensionCommand: vi.fn(() => false),
+			updatePendingMessagesDisplay: vi.fn(),
+			showError: vi.fn(),
+		};
+		const flushCompactionQueue = Reflect.get(InteractiveMode.prototype, "flushCompactionQueue") as (
+			this: typeof fakeThis,
+			options?: { willRetry?: boolean },
+		) => Promise<void>;
+
+		await flushCompactionQueue.call(fakeThis, { willRetry: false });
+
+		expect(prompt).toHaveBeenCalledWith("verify the image", { images: undefined, streamingBehavior: "steer" });
+		expect(fakeThis.showError).not.toHaveBeenCalled();
+		expect(fakeThis.compactionQueuedMessages).toEqual([]);
+	});
+
 	test("rebuilds chat and appends a synthetic compaction summary at the bottom", async () => {
 		const fakeThis = {
 			isInitialized: true,

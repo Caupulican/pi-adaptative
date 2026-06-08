@@ -2085,12 +2085,13 @@ export class InteractiveMode {
 	private attachToolExecutionComponent(toolName: string, toolCallId: string, args: any): ToolExecutionComponent {
 		const actionKey = getToolPanelActionKey(this.getToolPanelScope(), toolName, args);
 		const toolDefinition = this.getRegisteredToolDefinition(toolName);
-		const existing = this.toolPanels.getReusable(actionKey);
+		const reuseInPlace = shouldReuseToolPanelInPlace(toolName, args);
+		const existing = this.toolPanels.getReusable(actionKey, { allowActive: reuseInPlace });
 		if (existing) {
-			if (shouldReuseToolPanelInPlace(toolName, args)) {
+			if (reuseInPlace && actionKey) {
 				existing.resetInvocation(toolName, toolCallId, args, toolDefinition);
 				existing.setExpanded(this.toolOutputExpanded);
-				this.toolPanels.register(toolCallId, existing, actionKey);
+				this.toolPanels.replaceActiveForAction(toolCallId, existing, actionKey);
 				this.ui.requestRender();
 				return existing;
 			}
@@ -4336,8 +4337,13 @@ export class InteractiveMode {
 				await this.session.prompt(message.text);
 			}
 
-			// Send first prompt (starts streaming)
-			const promptPromise = this.session.prompt(firstPrompt.text, { images: firstPrompt.images }).catch((error) => {
+			// Send first prompt (starts streaming). Auto-compaction can finish while the
+			// agent is still processing; in that case, queue the message with the same
+			// steering/follow-up mode instead of surfacing an internal streamingBehavior error.
+			const promptOptions = this.session.isStreaming
+				? { images: firstPrompt.images, streamingBehavior: firstPrompt.mode }
+				: { images: firstPrompt.images };
+			const promptPromise = this.session.prompt(firstPrompt.text, promptOptions).catch((error) => {
 				restoreQueue(error);
 			});
 

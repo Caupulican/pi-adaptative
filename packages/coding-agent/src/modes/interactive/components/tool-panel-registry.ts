@@ -55,11 +55,20 @@ export class ToolPanelRegistry {
 	private readonly activeByCallId = new Map<string, ToolExecutionComponent>();
 	private readonly actionKeyByCallId = new Map<string, string>();
 
-	getReusable(actionKey: string | undefined): ToolExecutionComponent | undefined {
+	getReusable(actionKey: string | undefined, options?: { allowActive?: boolean }): ToolExecutionComponent | undefined {
 		if (!actionKey) return undefined;
 		const panel = this.panelsByAction.get(actionKey);
-		if (!panel || this.isActive(panel)) return undefined;
+		if (!panel || (!options?.allowActive && this.isActive(panel))) return undefined;
 		return panel;
+	}
+
+	replaceActiveForAction(toolCallId: string, panel: ToolExecutionComponent, actionKey: string): void {
+		for (const [activeCallId, activeActionKey] of this.actionKeyByCallId.entries()) {
+			if (activeActionKey !== actionKey) continue;
+			this.activeByCallId.delete(activeCallId);
+			this.actionKeyByCallId.delete(activeCallId);
+		}
+		this.register(toolCallId, panel, actionKey);
 	}
 
 	register(toolCallId: string, panel: ToolExecutionComponent, actionKey?: string): void {

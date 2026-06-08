@@ -9,7 +9,7 @@ import { createReadTool, createReadToolDefinition } from "../src/core/tools/read
 import { createWriteToolDefinition } from "../src/core/tools/write.ts";
 import { ToolExecutionComponent } from "../src/modes/interactive/components/tool-execution.ts";
 import { ToolGroupComponent } from "../src/modes/interactive/components/tool-group.ts";
-import { getToolPanelActionKey } from "../src/modes/interactive/components/tool-panel-registry.ts";
+import { getToolPanelActionKey, ToolPanelRegistry } from "../src/modes/interactive/components/tool-panel-registry.ts";
 import { initTheme } from "../src/modes/interactive/theme/theme.ts";
 import { stripAnsi } from "../src/utils/ansi.ts";
 
@@ -75,6 +75,31 @@ describe("ToolExecutionComponent parity", () => {
 		expect(status).toEqual(start);
 		expect(logs).toEqual(start);
 		expect(getToolPanelActionKey(scope, "background_script", { action: "list" })).toBeUndefined();
+	});
+
+	test("background_script in-place reuse supersedes earlier active calls for the same job", () => {
+		const scope = { sessionId: "a", sessionFile: "/tmp/a.jsonl", cwd: "/repo" };
+		const key = getToolPanelActionKey(scope, "background_script", { action: "start", name: "build-watch" });
+		expect(key).toBeDefined();
+		const registry = new ToolPanelRegistry();
+		const panel = new ToolExecutionComponent(
+			"background_script",
+			"tool-script-1",
+			{ action: "start", name: "build-watch" },
+			{},
+			createBaseToolDefinition("background_script"),
+			createFakeTui(),
+			process.cwd(),
+		);
+
+		registry.register("tool-script-1", panel, key);
+		expect(registry.getReusable(key)).toBeUndefined();
+		expect(registry.getReusable(key, { allowActive: true })).toBe(panel);
+
+		registry.replaceActiveForAction("tool-script-2", panel, key as string);
+
+		expect(registry.getActive("tool-script-1")).toBeUndefined();
+		expect(registry.getActive("tool-script-2")).toBe(panel);
 	});
 
 	test("stacks custom call and result renderers like the old implementation", () => {
