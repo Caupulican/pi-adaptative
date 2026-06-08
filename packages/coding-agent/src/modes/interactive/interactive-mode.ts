@@ -3010,6 +3010,24 @@ export class InteractiveMode {
 			text = text.trim();
 			if (!text) return;
 
+			// User input submitted while work is active is always steering. Treat
+			// slash/bang text as user steering text instead of executing commands that
+			// would interrupt the current stream or compaction.
+			if (this.session.isCompacting) {
+				const images = this.takeClipboardImagesForText(text);
+				this.queueCompactionMessage(text, "steer", images);
+				return;
+			}
+			if (this.session.isStreaming) {
+				const images = this.takeClipboardImagesForText(text);
+				this.editor.addToHistory?.(text);
+				this.editor.setText("");
+				await this.session.prompt(text, { streamingBehavior: "steer", images, processSlashCommands: false });
+				this.updatePendingMessagesDisplay();
+				this.ui.requestRender();
+				return;
+			}
+
 			// Handle commands
 			if (text === "/settings") {
 				this.showSettingsSelector();
@@ -3165,31 +3183,6 @@ export class InteractiveMode {
 					this.updateEditorBorderColor();
 					return;
 				}
-			}
-
-			// Queue input during compaction (extension commands execute immediately)
-			if (this.session.isCompacting) {
-				if (this.isExtensionCommand(text)) {
-					this.editor.addToHistory?.(text);
-					this.editor.setText("");
-					await this.session.prompt(text);
-				} else {
-					const images = this.takeClipboardImagesForText(text);
-					this.queueCompactionMessage(text, "steer", images);
-				}
-				return;
-			}
-
-			// If streaming, use prompt() with steer behavior
-			// This handles extension commands (execute immediately), prompt template expansion, and queueing
-			if (this.session.isStreaming) {
-				const images = this.takeClipboardImagesForText(text);
-				this.editor.addToHistory?.(text);
-				this.editor.setText("");
-				await this.session.prompt(text, { streamingBehavior: "steer", images });
-				this.updatePendingMessagesDisplay();
-				this.ui.requestRender();
-				return;
 			}
 
 			// Normal message submission

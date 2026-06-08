@@ -20,6 +20,10 @@ type SubmitContext = {
 	};
 	flushPendingBashComponents: () => void;
 	buildUserInputSubmission: (text: string) => UserInputSubmission;
+	takeClipboardImagesForText: (text: string) => unknown[] | undefined;
+	queueCompactionMessage: (text: string, mode: "steer" | "followUp", images?: unknown[]) => void;
+	updatePendingMessagesDisplay: () => void;
+	ui: { requestRender: () => void };
 	onInputCallback?: (submission: UserInputSubmission) => void;
 	pendingUserInputs: UserInputSubmission[];
 };
@@ -59,6 +63,10 @@ function createSubmitContext(): SubmitContext {
 		},
 		flushPendingBashComponents: vi.fn(),
 		buildUserInputSubmission: (text: string) => ({ text }),
+		takeClipboardImagesForText: vi.fn(() => undefined),
+		queueCompactionMessage: vi.fn(),
+		updatePendingMessagesDisplay: vi.fn(),
+		ui: { requestRender: vi.fn() },
 		pendingUserInputs: [],
 	};
 }
@@ -73,6 +81,35 @@ describe("InteractiveMode startup input", () => {
 		expect(context.pendingUserInputs).toEqual([{ text: "early prompt" }]);
 		expect(context.flushPendingBashComponents).toHaveBeenCalledTimes(1);
 		expect(context.editor.addToHistory).toHaveBeenCalledWith("early prompt");
+	});
+
+	it("queues every submitted message as steering while streaming", async () => {
+		const context = createSubmitContext();
+		context.session.isStreaming = true;
+		interactiveModePrototype.setupEditorSubmitHandler.call(context);
+
+		await context.defaultEditor.onSubmit?.("/reload");
+
+		expect(context.session.prompt).toHaveBeenCalledWith("/reload", {
+			streamingBehavior: "steer",
+			images: undefined,
+			processSlashCommands: false,
+		});
+		expect(context.queueCompactionMessage).not.toHaveBeenCalled();
+		expect(context.editor.setText).toHaveBeenCalledWith("");
+		expect(context.updatePendingMessagesDisplay).toHaveBeenCalledTimes(1);
+		expect(context.ui.requestRender).toHaveBeenCalledTimes(1);
+	});
+
+	it("queues every submitted message as steering while compacting", async () => {
+		const context = createSubmitContext();
+		context.session.isCompacting = true;
+		interactiveModePrototype.setupEditorSubmitHandler.call(context);
+
+		await context.defaultEditor.onSubmit?.("/reload");
+
+		expect(context.queueCompactionMessage).toHaveBeenCalledWith("/reload", "steer", undefined);
+		expect(context.session.prompt).not.toHaveBeenCalled();
 	});
 
 	it("returns queued startup input before installing a new input callback", async () => {
