@@ -1,5 +1,9 @@
 ## [Unreleased]
 
+### Fixed
+
+- Added background script result aliases from job id and name, so follow-up status/log calls reuse the original start panel even when the job's generated id differs from the friendly start name.
+
 ## [0.80.16] - 2026-06-07
 
 ### Fixed

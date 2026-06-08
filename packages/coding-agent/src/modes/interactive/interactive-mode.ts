@@ -132,6 +132,7 @@ import { ToolExecutionComponent } from "./components/tool-execution.ts";
 import { ToolGroupComponent } from "./components/tool-group.ts";
 import {
 	getToolPanelActionKey,
+	getToolPanelResultActionKeys,
 	shouldReuseToolPanelInPlace,
 	ToolPanelRegistry,
 } from "./components/tool-panel-registry.ts";
@@ -3365,6 +3366,10 @@ export class InteractiveMode {
 				const component = this.toolPanels.getActive(event.toolCallId);
 				if (component) {
 					component.updateResult({ ...event.result, isError: event.isError });
+					this.toolPanels.registerAliases(
+						component,
+						getToolPanelResultActionKeys(this.getToolPanelScope(), event.toolName, event.result),
+					);
 					this.toolPanels.finish(event.toolCallId);
 					this.ui.requestRender();
 				}

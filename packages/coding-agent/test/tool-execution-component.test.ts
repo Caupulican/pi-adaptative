@@ -9,7 +9,11 @@ import { createReadTool, createReadToolDefinition } from "../src/core/tools/read
 import { createWriteToolDefinition } from "../src/core/tools/write.ts";
 import { ToolExecutionComponent } from "../src/modes/interactive/components/tool-execution.ts";
 import { ToolGroupComponent } from "../src/modes/interactive/components/tool-group.ts";
-import { getToolPanelActionKey, ToolPanelRegistry } from "../src/modes/interactive/components/tool-panel-registry.ts";
+import {
+	getToolPanelActionKey,
+	getToolPanelResultActionKeys,
+	ToolPanelRegistry,
+} from "../src/modes/interactive/components/tool-panel-registry.ts";
 import { initTheme } from "../src/modes/interactive/theme/theme.ts";
 import { stripAnsi } from "../src/utils/ansi.ts";
 
@@ -100,6 +104,32 @@ describe("ToolExecutionComponent parity", () => {
 
 		expect(registry.getActive("tool-script-1")).toBeUndefined();
 		expect(registry.getActive("tool-script-2")).toBe(panel);
+	});
+
+	test("background_script result aliases allow status by generated job id to reuse the start panel", () => {
+		const scope = { sessionId: "a", sessionFile: "/tmp/a.jsonl", cwd: "/repo" };
+		const startKey = getToolPanelActionKey(scope, "background_script", { action: "start", name: "build-watch" });
+		const statusKey = getToolPanelActionKey(scope, "background_script", { action: "status", id: "job-123" });
+		const aliases = getToolPanelResultActionKeys(scope, "background_script", {
+			details: { job: { id: "job-123", name: "build-watch" } },
+		});
+		const registry = new ToolPanelRegistry();
+		const panel = new ToolExecutionComponent(
+			"background_script",
+			"tool-script-1",
+			{ action: "start", name: "build-watch" },
+			{},
+			createBaseToolDefinition("background_script"),
+			createFakeTui(),
+			process.cwd(),
+		);
+
+		registry.register("tool-script-1", panel, startKey);
+		registry.finish("tool-script-1");
+		registry.registerAliases(panel, aliases);
+
+		expect(statusKey).toBeDefined();
+		expect(registry.getReusable(statusKey)).toBe(panel);
 	});
 
 	test("stacks custom call and result renderers like the old implementation", () => {

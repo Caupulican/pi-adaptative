@@ -10,6 +10,10 @@ export function createToolPanelTenantKey(scope: ToolPanelTenantScope): string {
 	return [scope.sessionId || "no-session-id", scope.sessionFile || "no-session-file", scope.cwd].join("\0");
 }
 
+function backgroundScriptActionKey(tenantKey: string, selector: string): string {
+	return `${tenantKey}\0background_script:${selector}`;
+}
+
 function backgroundScriptSelector(record: Record<string, unknown>): string | undefined {
 	const action = String(record.action || "list");
 	if (action === "start" && typeof record.name === "string" && record.name.trim()) return record.name.trim();
@@ -17,6 +21,19 @@ function backgroundScriptSelector(record: Record<string, unknown>): string | und
 		return record.id.trim();
 	}
 	return undefined;
+}
+
+function backgroundScriptResultSelectors(result: unknown): string[] {
+	if (!result || typeof result !== "object") return [];
+	const details = (result as Record<string, unknown>).details;
+	if (!details || typeof details !== "object") return [];
+	const job = (details as Record<string, unknown>).job;
+	if (!job || typeof job !== "object") return [];
+	const record = job as Record<string, unknown>;
+	const selectors = [record.id, record.name]
+		.filter((value): value is string => typeof value === "string" && value.trim().length > 0)
+		.map((value) => value.trim());
+	return [...new Set(selectors)];
 }
 
 export function getToolPanelActionKey(
@@ -33,12 +50,18 @@ export function getToolPanelActionKey(
 	}
 	if (toolName === "background_script") {
 		const selector = backgroundScriptSelector(record);
-		return selector ? `${tenantKey}\0${toolName}:${selector}` : undefined;
+		return selector ? backgroundScriptActionKey(tenantKey, selector) : undefined;
 	}
 	if (toolName.endsWith("_status")) return `${tenantKey}\0${toolName}`;
 	if (toolName === "learning_auto_learn_state") return `${tenantKey}\0${toolName}:${String(record.action || "read")}`;
 	if (toolName === "task_steps") return `${tenantKey}\0${toolName}:${String(record.action || "list")}`;
 	return undefined;
+}
+
+export function getToolPanelResultActionKeys(scope: ToolPanelTenantScope, toolName: string, result: unknown): string[] {
+	if (toolName !== "background_script") return [];
+	const tenantKey = createToolPanelTenantKey(scope);
+	return backgroundScriptResultSelectors(result).map((selector) => backgroundScriptActionKey(tenantKey, selector));
 }
 
 export function shouldReuseToolPanelInPlace(toolName: string, args: unknown): boolean {
@@ -76,6 +99,12 @@ export class ToolPanelRegistry {
 		if (actionKey) {
 			this.panelsByAction.set(actionKey, panel);
 			this.actionKeyByCallId.set(toolCallId, actionKey);
+		}
+	}
+
+	registerAliases(panel: ToolExecutionComponent, actionKeys: string[]): void {
+		for (const actionKey of actionKeys) {
+			this.panelsByAction.set(actionKey, panel);
 		}
 	}
 
