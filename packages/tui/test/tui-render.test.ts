@@ -248,6 +248,31 @@ describe("TUI resize handling", () => {
 
 		tui.stop();
 	});
+
+	it("truncates lines gracefully when terminal is extremely narrow without crashing", async () => {
+		const terminal = new VirtualTerminal(10, 10);
+		const tui = new TUI(terminal);
+		const component = new TestComponent();
+		tui.addChild(component);
+
+		// Start with a normal width and a long line
+		component.lines = ["This is a very long line that will definitely exceed the new width limit"];
+		tui.start();
+		await terminal.waitForRender();
+
+		// Resize to a very narrow width (e.g., 2 columns) which simulates pane dragging
+		terminal.resize(2, 10);
+		// If it crashes, waitForRender would reject or the process would crash.
+		// It should gracefully truncate.
+		await terminal.waitForRender();
+
+		const viewport = terminal.getViewport();
+		// The viewport's first visible line should be truncated to length 2 ("Th")
+		assert.ok(viewport[0]?.startsWith("Th"), "Line should be truncated to fit the new width");
+		assert.strictEqual(viewport[0]?.length, 2, "Line should not exceed the terminal width");
+
+		tui.stop();
+	});
 });
 
 describe("TUI content shrinkage", () => {
