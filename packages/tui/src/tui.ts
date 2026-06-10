@@ -237,13 +237,6 @@ export class Container implements Component {
 		}
 	}
 
-	replaceChild(oldChild: Component, newChild: Component): void {
-		const index = this.children.indexOf(oldChild);
-		if (index !== -1) {
-			this.children[index] = newChild;
-		}
-	}
-
 	clear(): void {
 		this.children = [];
 	}
@@ -262,60 +255,6 @@ export class Container implements Component {
 				lines.push(line);
 			}
 		}
-		return lines;
-	}
-}
-
-/**
- * Container variant for large mostly-static component trees.
- *
- * Use this when parent-owned structure changes are explicit (add/remove/clear)
- * and call markDirty() after mutating a child in place. This avoids re-walking
- * long scrollback/chat trees on unrelated renders such as editor keystrokes.
- */
-export class CachedContainer extends Container {
-	private dirty = true;
-	private cachedWidth?: number;
-	private cachedLines?: string[];
-
-	markDirty(): void {
-		this.dirty = true;
-	}
-
-	override addChild(component: Component): void {
-		super.addChild(component);
-		this.markDirty();
-	}
-
-	override removeChild(component: Component): void {
-		const before = this.children.length;
-		super.removeChild(component);
-		if (this.children.length !== before) this.markDirty();
-	}
-
-	override replaceChild(oldChild: Component, newChild: Component): void {
-		if (this.children.includes(oldChild)) this.markDirty();
-		super.replaceChild(oldChild, newChild);
-	}
-
-	override clear(): void {
-		if (this.children.length > 0) this.markDirty();
-		super.clear();
-	}
-
-	override invalidate(): void {
-		this.markDirty();
-		super.invalidate();
-	}
-
-	override render(width: number): string[] {
-		if (!this.dirty && this.cachedLines && this.cachedWidth === width) {
-			return this.cachedLines;
-		}
-		const lines = super.render(width);
-		this.cachedWidth = width;
-		this.cachedLines = lines;
-		this.dirty = false;
 		return lines;
 	}
 }
@@ -1190,6 +1129,19 @@ export class TUI extends Container {
 		return null;
 	}
 
+	/**
+	 * Truncate a line that exceeds the terminal width to prevent crashes or
+	 * rendering artifacts, especially during extreme terminal resizes.
+	 * Applied only to lines being physically written: measuring every buffered
+	 * line each frame costs O(total scrollback) and makes rendering sluggish.
+	 */
+	private fitLineToWidth(line: string, width: number): string {
+		if (!isImageLine(line) && visibleWidth(line) > width) {
+			return sliceByColumn(line, 0, width, true);
+		}
+		return line;
+	}
+
 	private doRender(): void {
 		if (this.stopped) return;
 		const width = this.terminal.columns;
@@ -1219,15 +1171,6 @@ export class TUI extends Container {
 
 		newLines = this.applyLineResets(newLines);
 
-		// Gracefully truncate any lines that exceed the terminal width to prevent crashes
-		// or rendering artifacts, especially during extreme terminal resizes.
-		newLines = newLines.map((line) => {
-			if (!isImageLine(line) && visibleWidth(line) > width) {
-				return sliceByColumn(line, 0, width, true);
-			}
-			return line;
-		});
-
 		// Helper to clear scrollback and viewport and render all new lines
 		const fullRender = (clear: boolean): void => {
 			this.fullRedrawCount += 1;
@@ -1238,7 +1181,7 @@ export class TUI extends Container {
 			}
 			for (let i = 0; i < newLines.length; i++) {
 				if (i > 0) buffer += "\r\n";
-				buffer += newLines[i];
+				buffer += this.fitLineToWidth(newLines[i], width);
 			}
 			buffer += "\x1b[?2026l"; // End synchronized output
 			this.terminal.write(buffer);
@@ -1428,8 +1371,11 @@ export class TUI extends Container {
 			const line = newLines[i];
 			const isImage = isImageLine(line);
 			if (isImage) buffer += "\x1b[2K"; // Clear reserved/image rows before redrawing placements.
-			buffer += line;
-			if (!isImage && visibleWidth(line) < visibleWidth(this.previousLines[i] ?? "")) buffer += "\x1b[K";
+			buffer += isImage ? line : this.fitLineToWidth(line, width);
+			// Screen rows hold lines truncated to the terminal width, so compare effective widths.
+			const lineWidth = isImage ? 0 : Math.min(visibleWidth(line), width);
+			const prevWidth = isImage ? 0 : Math.min(visibleWidth(this.previousLines[i] ?? ""), width);
+			if (!isImage && lineWidth < prevWidth) buffer += "\x1b[K";
 		}
 
 		// Track where cursor ended up after rendering

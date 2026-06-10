@@ -273,6 +273,29 @@ describe("TUI resize handling", () => {
 
 		tui.stop();
 	});
+
+	it("truncates overwide lines written through the differential path without a resize", async () => {
+		const terminal = new VirtualTerminal(10, 10);
+		const tui = new TUI(terminal);
+		const component = new TestComponent();
+		tui.addChild(component);
+
+		component.lines = ["short", "stable"];
+		tui.start();
+		await terminal.waitForRender();
+
+		// Change one line to exceed the width without resizing, so only the
+		// differential write path runs (no full redraw).
+		component.lines = ["this line is far wider than ten columns", "stable"];
+		tui.requestRender();
+		await terminal.waitForRender();
+
+		const viewport = terminal.getViewport();
+		assert.strictEqual(viewport[0], "this line ", "Overwide line should be truncated to the terminal width");
+		assert.strictEqual(viewport[1], "stable", "Following line should be untouched by the overwide neighbor");
+
+		tui.stop();
+	});
 });
 
 describe("TUI content shrinkage", () => {

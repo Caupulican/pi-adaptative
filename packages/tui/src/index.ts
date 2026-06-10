@@ -90,7 +90,6 @@ export {
 	type TerminalCapabilities,
 } from "./terminal-image.ts";
 export {
-	CachedContainer,
 	type Component,
 	Container,
 	CURSOR_MARKER,

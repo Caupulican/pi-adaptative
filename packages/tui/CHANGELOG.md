@@ -1,5 +1,10 @@
 ## [Unreleased]
 
+### Fixed
+
+- Fixed sluggish rendering in long sessions: overwide-line truncation now only measures lines actually written to the terminal instead of scanning the entire buffer on every frame.
+- Removed the `CachedContainer` workaround; component-internal updates (async image conversion, tool renderer invalidation) could render stale cached chat lines.
+
 ## [0.80.17] - 2026-06-07
 
 ## [0.80.16] - 2026-06-07

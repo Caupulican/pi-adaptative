@@ -1,5 +1,9 @@
 ## [Unreleased]
 
+### Fixed
+
+- Fixed sluggish terminal rendering in long sessions caused by per-frame width measurement of the entire scrollback buffer.
+
 ## [0.80.19] - 2026-06-08
 
 ### Fixed
