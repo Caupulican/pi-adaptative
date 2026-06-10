@@ -237,6 +237,13 @@ export class Container implements Component {
 		}
 	}
 
+	replaceChild(oldChild: Component, newChild: Component): void {
+		const index = this.children.indexOf(oldChild);
+		if (index !== -1) {
+			this.children[index] = newChild;
+		}
+	}
+
 	clear(): void {
 		this.children = [];
 	}
@@ -255,6 +262,60 @@ export class Container implements Component {
 				lines.push(line);
 			}
 		}
+		return lines;
+	}
+}
+
+/**
+ * Container variant for large mostly-static component trees.
+ *
+ * Use this when parent-owned structure changes are explicit (add/remove/clear)
+ * and call markDirty() after mutating a child in place. This avoids re-walking
+ * long scrollback/chat trees on unrelated renders such as editor keystrokes.
+ */
+export class CachedContainer extends Container {
+	private dirty = true;
+	private cachedWidth?: number;
+	private cachedLines?: string[];
+
+	markDirty(): void {
+		this.dirty = true;
+	}
+
+	override addChild(component: Component): void {
+		super.addChild(component);
+		this.markDirty();
+	}
+
+	override removeChild(component: Component): void {
+		const before = this.children.length;
+		super.removeChild(component);
+		if (this.children.length !== before) this.markDirty();
+	}
+
+	override replaceChild(oldChild: Component, newChild: Component): void {
+		if (this.children.includes(oldChild)) this.markDirty();
+		super.replaceChild(oldChild, newChild);
+	}
+
+	override clear(): void {
+		if (this.children.length > 0) this.markDirty();
+		super.clear();
+	}
+
+	override invalidate(): void {
+		this.markDirty();
+		super.invalidate();
+	}
+
+	override render(width: number): string[] {
+		if (!this.dirty && this.cachedLines && this.cachedWidth === width) {
+			return this.cachedLines;
+		}
+		const lines = super.render(width);
+		this.cachedWidth = width;
+		this.cachedLines = lines;
+		this.dirty = false;
 		return lines;
 	}
 }

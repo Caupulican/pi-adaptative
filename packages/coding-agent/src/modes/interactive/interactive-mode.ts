@@ -30,6 +30,7 @@ import type {
 	SlashCommand,
 } from "@caupulican/pi-tui";
 import {
+	CachedContainer,
 	CombinedAutocompleteProvider,
 	type Component,
 	Container,
@@ -623,7 +624,7 @@ export interface InteractiveModeOptions {
 export class InteractiveMode {
 	private runtimeHost: AgentSessionRuntime;
 	private ui: TUI;
-	private chatContainer: Container;
+	private chatContainer: CachedContainer;
 	private pendingMessagesContainer: Container;
 	private statusContainer: Container;
 	private defaultEditor: CustomEditor;
@@ -758,7 +759,7 @@ export class InteractiveMode {
 		this.ui = new TUI(new ProcessTerminal(), this.settingsManager.getShowHardwareCursor());
 		this.ui.setClearOnShrink(this.settingsManager.getClearOnShrink());
 		this.headerContainer = new Container();
-		this.chatContainer = new Container();
+		this.chatContainer = new CachedContainer();
 		this.pendingMessagesContainer = new Container();
 		this.statusContainer = new Container();
 		this.widgetContainerAbove = new Container();
@@ -2040,6 +2041,10 @@ export class InteractiveMode {
 		};
 	}
 
+	private markChatDirty(): void {
+		this.chatContainer.markDirty();
+	}
+
 	private appendToolExecutionComponent(component: ToolExecutionComponent, allowGrouping: boolean): void {
 		const toolGroup = allowGrouping ? component.toolGroup?.trim() : undefined;
 		if (!toolGroup) {
@@ -2051,12 +2056,13 @@ export class InteractiveMode {
 		const lastChild = children[children.length - 1];
 		if (lastChild instanceof ToolGroupComponent && lastChild.toolGroup === toolGroup) {
 			lastChild.addTool(component);
+			this.markChatDirty();
 			return;
 		}
 		if (lastChild instanceof ToolExecutionComponent && lastChild.toolGroup?.trim() === toolGroup) {
 			const group = new ToolGroupComponent(toolGroup, [lastChild, component]);
 			group.setExpanded(this.toolOutputExpanded);
-			children[children.length - 1] = group;
+			this.chatContainer.replaceChild(lastChild, group);
 			return;
 		}
 		this.chatContainer.addChild(component);
@@ -2066,7 +2072,7 @@ export class InteractiveMode {
 		const children = this.chatContainer.children;
 		const directIndex = children.indexOf(component);
 		if (directIndex !== -1) {
-			children.splice(directIndex, 1);
+			this.chatContainer.removeChild(component);
 			return;
 		}
 		for (let i = 0; i < children.length; i++) {
@@ -2074,10 +2080,12 @@ export class InteractiveMode {
 			if (!(child instanceof ToolGroupComponent) || !child.removeTool(component)) continue;
 			const remaining = child.getToolCount();
 			if (remaining === 0) {
-				children.splice(i, 1);
+				this.chatContainer.removeChild(child);
 			} else if (remaining === 1) {
 				const onlyTool = child.getOnlyTool();
-				if (onlyTool) children[i] = onlyTool;
+				if (onlyTool) this.chatContainer.replaceChild(child, onlyTool);
+			} else {
+				this.markChatDirty();
 			}
 			return;
 		}
@@ -2093,6 +2101,7 @@ export class InteractiveMode {
 				existing.resetInvocation(toolName, toolCallId, args, toolDefinition);
 				existing.setExpanded(this.toolOutputExpanded);
 				this.toolPanels.replaceActiveForAction(toolCallId, existing, actionKey);
+				this.markChatDirty();
 				this.ui.requestRender();
 				return existing;
 			}
@@ -2246,6 +2255,7 @@ export class InteractiveMode {
 				child.setHiddenThinkingLabel(this.hiddenThinkingLabel);
 			}
 		}
+		this.markChatDirty();
 		if (this.streamingComponent) {
 			this.streamingComponent.setHiddenThinkingLabel(this.hiddenThinkingLabel);
 		}
@@ -3274,6 +3284,7 @@ export class InteractiveMode {
 					this.streamingMessage = event.message;
 					this.chatContainer.addChild(this.streamingComponent);
 					this.streamingComponent.updateContent(this.streamingMessage);
+					this.markChatDirty();
 					this.ui.requestRender();
 				}
 				break;
@@ -3282,6 +3293,7 @@ export class InteractiveMode {
 				if (this.streamingComponent && event.message.role === "assistant") {
 					this.streamingMessage = event.message;
 					this.streamingComponent.updateContent(this.streamingMessage);
+					this.markChatDirty();
 
 					for (const content of this.streamingMessage.content) {
 						if (content.type === "toolCall") {
@@ -3291,6 +3303,7 @@ export class InteractiveMode {
 								const component = this.toolPanels.getActive(content.id);
 								if (component) {
 									component.updateArgs(content.arguments);
+									this.markChatDirty();
 								}
 							}
 						}
@@ -3313,6 +3326,7 @@ export class InteractiveMode {
 						this.streamingMessage.errorMessage = errorMessage;
 					}
 					this.streamingComponent.updateContent(this.streamingMessage);
+					this.markChatDirty();
 
 					if (this.streamingMessage.stopReason === "aborted" || this.streamingMessage.stopReason === "error") {
 						if (!errorMessage) {
@@ -3324,12 +3338,14 @@ export class InteractiveMode {
 								isError: true,
 							});
 						}
+						this.markChatDirty();
 						this.clearActiveToolCalls();
 					} else {
 						// Args are now complete - trigger diff computation for edit tools
 						for (const [, component] of this.toolPanels.activeEntries()) {
 							component.setArgsComplete();
 						}
+						this.markChatDirty();
 					}
 					this.streamingComponent = undefined;
 					this.streamingMessage = undefined;
@@ -3342,6 +3358,7 @@ export class InteractiveMode {
 				let component = this.toolPanels.getActive(event.toolCallId);
 				if (!component) component = this.attachToolExecutionComponent(event.toolName, event.toolCallId, event.args);
 				component.markExecutionStarted();
+				this.markChatDirty();
 				this.ui.requestRender();
 				break;
 			}
@@ -3350,6 +3367,7 @@ export class InteractiveMode {
 				const component = this.toolPanels.getActive(event.toolCallId);
 				if (component) {
 					component.updateResult({ ...event.partialResult, isError: false }, true);
+					this.markChatDirty();
 					this.ui.requestRender();
 				}
 				break;
@@ -3359,6 +3377,7 @@ export class InteractiveMode {
 				const component = this.toolPanels.getActive(event.toolCallId);
 				if (component) {
 					component.updateResult({ ...event.result, isError: event.isError });
+					this.markChatDirty();
 					this.toolPanels.registerAliases(
 						component,
 						getToolPanelResultActionKeys(this.getToolPanelScope(), event.toolName, event.result),
@@ -3543,6 +3562,7 @@ export class InteractiveMode {
 
 		if (last && secondLast && last === this.lastStatusText && secondLast === this.lastStatusSpacer) {
 			this.lastStatusText.setText(theme.fg("dim", message));
+			this.markChatDirty();
 			this.ui.requestRender();
 			return;
 		}
@@ -4039,6 +4059,7 @@ export class InteractiveMode {
 				child.setExpanded(expanded);
 			}
 		}
+		this.markChatDirty();
 		this.ui.requestRender();
 	}
 
@@ -5411,6 +5432,7 @@ export class InteractiveMode {
 								child.setShowImages(enabled);
 							}
 						}
+						this.markChatDirty();
 					},
 					onImageWidthCellsChange: (width) => {
 						this.settingsManager.setImageWidthCells(width);
@@ -5419,6 +5441,7 @@ export class InteractiveMode {
 								child.setImageWidthCells(width);
 							}
 						}
+						this.markChatDirty();
 					},
 					onAutoResizeImagesChange: (enabled) => {
 						this.settingsManager.setImageAutoResize(enabled);
