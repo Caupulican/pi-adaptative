@@ -2,6 +2,7 @@ import { mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "nod
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
+import { ENV_AGENT_DIR } from "../src/config.ts";
 import {
 	getAvailableThemes,
 	getAvailableThemesWithPaths,
@@ -16,11 +17,12 @@ type ThemeFile = {
 
 describe("theme picker", () => {
 	let tempRoot: string;
+	let agentDir: string;
 
 	beforeEach(() => {
 		tempRoot = mkdtempSync(join(tmpdir(), "pi-theme-picker-"));
-		const agentDir = join(tempRoot, "agent");
-		vi.stubEnv("PI_CODING_AGENT_DIR", agentDir);
+		agentDir = join(tempRoot, "agent");
+		vi.stubEnv(ENV_AGENT_DIR, agentDir);
 		mkdirSync(join(agentDir, "themes"), { recursive: true });
 		setRegisteredThemes([]);
 	});
@@ -40,7 +42,7 @@ describe("theme picker", () => {
 			name: "bar",
 		};
 
-		const themePath = join(process.env.PI_CODING_AGENT_DIR!, "themes", "foo.json");
+		const themePath = join(agentDir, "themes", "foo.json");
 		writeFileSync(themePath, JSON.stringify(customTheme, null, 2));
 
 		expect(getAvailableThemes()).toContain("bar");

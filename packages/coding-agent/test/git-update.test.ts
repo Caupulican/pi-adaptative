@@ -9,17 +9,24 @@
 import { spawnSync } from "node:child_process";
 import { createHash } from "node:crypto";
 import { existsSync, mkdirSync, readFileSync, rmSync, writeFileSync } from "node:fs";
-import { tmpdir } from "node:os";
+import { devNull, tmpdir } from "node:os";
 import { join } from "node:path";
 import { afterEach, beforeEach, describe, expect, it } from "vitest";
 import { DefaultPackageManager } from "../src/core/package-manager.ts";
 import { SettingsManager } from "../src/core/settings-manager.ts";
 
-// Helper to run git commands in a directory
+// Helper to run git commands in a directory.
+// Global/system config is isolated so host settings (e.g. forced tag signing)
+// cannot change command behavior.
 function git(args: string[], cwd: string): string {
 	const result = spawnSync("git", args, {
 		cwd,
 		encoding: "utf-8",
+		env: {
+			...process.env,
+			GIT_CONFIG_GLOBAL: devNull,
+			GIT_CONFIG_SYSTEM: devNull,
+		},
 	});
 	if (result.status !== 0) {
 		throw new Error(`Command failed: git ${args.join(" ")}\n${result.stderr}`);
@@ -379,7 +386,7 @@ describe("DefaultPackageManager git update", () => {
 			const gitHost = "github.com";
 			const gitPath = "test/extension";
 			const hash = createHash("sha256").update(`git-${gitHost}-${gitPath}`).digest("hex").slice(0, 8);
-			const cachedDir = join(tmpdir(), "pi-extensions", `git-${gitHost}`, hash, gitPath);
+			const cachedDir = join(agentDir, "tmp", "extensions", `git-${gitHost}`, hash, gitPath);
 			const extensionFile = join(cachedDir, "pi-extensions", "session-breakdown.ts");
 
 			rmSync(cachedDir, { recursive: true, force: true });
@@ -426,7 +433,7 @@ describe("DefaultPackageManager git update", () => {
 			const gitHost = "github.com";
 			const gitPath = "test/extension";
 			const hash = createHash("sha256").update(`git-${gitHost}-${gitPath}`).digest("hex").slice(0, 8);
-			const cachedDir = join(tmpdir(), "pi-extensions", `git-${gitHost}`, hash, gitPath);
+			const cachedDir = join(agentDir, "tmp", "extensions", `git-${gitHost}`, hash, gitPath);
 			const extensionFile = join(cachedDir, "pi-extensions", "session-breakdown.ts");
 
 			rmSync(cachedDir, { recursive: true, force: true });

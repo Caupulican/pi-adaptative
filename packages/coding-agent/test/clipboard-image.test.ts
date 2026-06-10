@@ -18,6 +18,23 @@ vi.mock("child_process", () => {
 	};
 });
 
+// isWSL() falls back to /proc/version when env vars carry no WSL markers, so a
+// host running WSL would leak into the "non-WSL Linux" baseline these tests assume.
+vi.mock("fs", async (importOriginal) => {
+	const actual = await importOriginal<typeof import("fs")>();
+	return {
+		...actual,
+		readFileSync: ((path: unknown, ...args: unknown[]) => {
+			if (path === "/proc/version") {
+				const error = new Error("ENOENT: no such file or directory, open '/proc/version'") as NodeJS.ErrnoException;
+				error.code = "ENOENT";
+				throw error;
+			}
+			return (actual.readFileSync as (...a: unknown[]) => unknown)(path, ...args);
+		}) as typeof actual.readFileSync,
+	};
+});
+
 vi.mock("../src/utils/clipboard-native.js", () => {
 	return {
 		clipboard: mocks.clipboard,

@@ -35,7 +35,9 @@ describe("createAgentSession session manager defaults", () => {
 			model: model!,
 		});
 
-		const safePath = `--${cwd.replace(/^[/\\]/, "").replace(/[/\\:]/g, "-")}--`;
+		// Default session dirs use percent-encoded cwd names; the dash-encoded
+		// form is only consulted as a legacy fallback when it already exists.
+		const safePath = `--${encodeURIComponent(cwd)}--`;
 		const expectedSessionDir = join(agentDir, "sessions", safePath);
 		const sessionDir = session.sessionManager.getSessionDir();
 		const sessionFile = session.sessionManager.getSessionFile();
