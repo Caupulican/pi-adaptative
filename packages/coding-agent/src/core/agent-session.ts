@@ -94,6 +94,64 @@ import { type BashOperations, createLocalBashOperations } from "./tools/bash.ts"
 import { createAllToolDefinitions } from "./tools/index.ts";
 import { createToolDefinitionFromAgentTool } from "./tools/tool-definition-wrapper.ts";
 
+const MAX_RETAINED_TOOL_RESULT_DETAILS_BYTES = 32 * 1024;
+
+function estimateJsonLikeBytes(value: unknown, maxBytes: number): { bytes: number; exceeded: boolean } {
+	const seen = new WeakSet<object>();
+	let bytes = 0;
+	const add = (amount: number): boolean => {
+		bytes += amount;
+		return bytes <= maxBytes;
+	};
+	const visit = (current: unknown): boolean => {
+		if (bytes > maxBytes) return false;
+		if (current === null) return add(4);
+		if (current === undefined) return add(9);
+		if (typeof current === "string") return add(current.length * 4 + 2);
+		if (typeof current === "number") return add(24);
+		if (typeof current === "boolean") return add(current ? 4 : 5);
+		if (typeof current === "bigint") return add(current.toString().length + 2);
+		if (typeof current === "symbol" || typeof current === "function") return add(12);
+		if (typeof current !== "object") return add(8);
+
+		const objectValue = current as Record<string, unknown>;
+		if (seen.has(objectValue)) return add(20);
+		seen.add(objectValue);
+		if (Array.isArray(objectValue)) {
+			if (!add(2)) return false;
+			for (let index = 0; index < objectValue.length; index++) {
+				if (!add(index === 0 ? 0 : 1)) return false;
+				if (!visit(objectValue[index])) return false;
+			}
+			return bytes <= maxBytes;
+		}
+
+		if (!add(2)) return false;
+		let first = true;
+		for (const key in objectValue) {
+			if (!Object.hasOwn(objectValue, key)) continue;
+			if (!add((first ? 0 : 1) + key.length * 4 + 3)) return false;
+			first = false;
+			if (!visit(objectValue[key])) return false;
+		}
+		return bytes <= maxBytes;
+	};
+	visit(value);
+	return { bytes, exceeded: bytes > maxBytes };
+}
+
+function compactToolResultDetailsForRetention(message: AgentMessage): void {
+	if (message.role !== "toolResult" || message.details === undefined) return;
+	const estimate = estimateJsonLikeBytes(message.details, MAX_RETAINED_TOOL_RESULT_DETAILS_BYTES);
+	if (!estimate.exceeded) return;
+	message.details = {
+		piToolResultDetailsTruncated: true,
+		reason: "Tool result details exceeded retention budget; model-visible content was retained.",
+		minimumBytes: estimate.bytes,
+		maxRetainedBytes: MAX_RETAINED_TOOL_RESULT_DETAILS_BYTES,
+	};
+}
+
 // ============================================================================
 // Skill Block Parsing
 // ============================================================================
@@ -588,8 +646,11 @@ export class AgentSession {
 		// Notify all listeners
 		this._emit(event.type === "agent_end" ? { ...event, willRetry: this._willRetryAfterAgentEnd(event) } : event);
 
-		// Handle session persistence
+		// Handle session/context retention. Tool result details are UI/log metadata,
+		// not provider-visible content, and large graph/search payloads can otherwise
+		// accumulate until the interactive Node process hits the V8 heap limit.
 		if (event.type === "message_end") {
+			compactToolResultDetailsForRetention(event.message);
 			// Check if this is a custom message from extensions
 			if (event.message.role === "custom") {
 				// Persist as CustomMessageEntry

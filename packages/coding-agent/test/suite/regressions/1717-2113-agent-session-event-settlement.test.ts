@@ -17,6 +17,19 @@ function createEchoTool(): AgentTool {
 	};
 }
 
+function createLargeDetailsTool(): AgentTool {
+	return {
+		name: "large_details",
+		label: "Large Details",
+		description: "Return small content with oversized structured details",
+		parameters: Type.Object({}),
+		execute: async () => ({
+			content: [{ type: "text", text: "small model-visible result" }],
+			details: { payload: "x".repeat(80_000), nested: { keep: "metadata" } },
+		}),
+	};
+}
+
 describe("regressions #1717/#2113: agent session event settlement", () => {
 	const harnesses: Harness[] = [];
 
@@ -62,6 +75,33 @@ describe("regressions #1717/#2113: agent session event settlement", () => {
 		const firstToolResultIndex = branchMessages.findIndex((message) => message.role === "toolResult");
 		expect(firstToolResultIndex).toBeGreaterThan(0);
 		expect(branchMessages[firstToolResultIndex - 1]?.role).toBe("assistant");
+	});
+
+	it("caps oversized tool result details before retaining session history", async () => {
+		const harness = await createHarness({
+			tools: [createLargeDetailsTool()],
+		});
+		harnesses.push(harness);
+		harness.setResponses([
+			fauxAssistantMessage([fauxToolCall("large_details", {})], { stopReason: "toolUse" }),
+			fauxAssistantMessage("done"),
+		]);
+
+		await harness.session.prompt("run large details tool");
+
+		const toolResult = harness.sessionManager
+			.getBranch()
+			.filter((entry) => entry.type === "message")
+			.map((entry) => entry.message)
+			.find((message) => message.role === "toolResult" && message.toolName === "large_details");
+		expect(toolResult?.role).toBe("toolResult");
+		if (!toolResult || toolResult.role !== "toolResult") throw new Error("Expected retained tool result");
+		expect(toolResult.content).toEqual([{ type: "text", text: "small model-visible result" }]);
+		expect(toolResult.details).toMatchObject({
+			piToolResultDetailsTruncated: true,
+			maxRetainedBytes: 32 * 1024,
+		});
+		expect(JSON.stringify(toolResult.details).length).toBeLessThan(500);
 	});
 
 	it("runs tool_call handlers after the assistant tool-use message is settled in the session", async () => {
