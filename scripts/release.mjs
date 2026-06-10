@@ -132,11 +132,16 @@ function addUnreleasedSection() {
 	for (const changelog of changelogs) {
 		const content = readFileSync(changelog, "utf-8");
 
-		// Insert after "# Changelog\n\n"
-		const updated = content.replace(
-			/^(# Changelog\n\n)/,
-			`$1${unreleasedSection}`
-		);
+		if (content.includes("## [Unreleased]")) {
+			console.log(`  Skipping ${changelog}: [Unreleased] already present`);
+			continue;
+		}
+
+		// Insert after "# Changelog\n\n" when the header exists; otherwise the
+		// changelog starts directly with version sections, so prepend.
+		const updated = /^# Changelog\n\n/.test(content)
+			? content.replace(/^(# Changelog\n\n)/, `$1${unreleasedSection}`)
+			: unreleasedSection + content;
 		writeFileSync(changelog, updated);
 		console.log(`  Added [Unreleased] to ${changelog}`);
 	}
@@ -180,7 +185,10 @@ console.log();
 console.log("Committing and tagging...");
 stageChangedFiles();
 run(`git commit -m "Release v${version}"`);
-run(`git tag v${version}`);
+// Release tags are plain lightweight refs. Disable host-level forced tag
+// signing/annotation (tag.gpgSign) so tagging never depends on local
+// signing setup.
+run(`git -c tag.gpgSign=false tag v${version}`);
 console.log();
 
 // 7. Add new [Unreleased] sections
