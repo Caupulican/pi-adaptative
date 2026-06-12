@@ -1,5 +1,12 @@
 ## [Unreleased]
 
+## [0.80.22] - 2026-06-12
+
+### Added
+
+- Added explicit `disabledResources` settings for reversible user/project resource unload filters across extensions, skills, prompts, and themes.
+- Documented resource include/exclude patterns for extension and skill loading.
+
 ## [0.80.20] - 2026-06-10
 
 ### Fixed

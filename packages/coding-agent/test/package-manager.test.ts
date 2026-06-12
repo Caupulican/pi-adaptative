@@ -168,6 +168,37 @@ Content`,
 			expect(result.prompts.some((r) => r.path === promptPath && !r.enabled)).toBe(true);
 		});
 
+		it("should disable auto-discovered resources from disabledResources settings", async () => {
+			const extDir = join(agentDir, "extensions", "noisy-ext");
+			mkdirSync(extDir, { recursive: true });
+			const extPath = join(extDir, "index.ts");
+			writeFileSync(extPath, "export default function() {}");
+
+			const skillDir = join(agentDir, "skills", "project-only-skill");
+			mkdirSync(skillDir, { recursive: true });
+			const skillFile = join(skillDir, "SKILL.md");
+			writeFileSync(
+				skillFile,
+				`---
+name: project-only-skill
+description: Project-only skill
+---
+Content`,
+			);
+
+			settingsManager = SettingsManager.inMemory({
+				disabledResources: {
+					extensions: ["noisy-ext"],
+					skills: ["project-only-skill"],
+				},
+			});
+			packageManager = new DefaultPackageManager({ cwd: tempDir, agentDir, settingsManager });
+
+			const result = await packageManager.resolve();
+			expect(result.extensions.some((r) => r.path === extPath && !r.enabled)).toBe(true);
+			expect(result.skills.some((r) => r.path === skillFile && !r.enabled)).toBe(true);
+		});
+
 		it("should resolve symlinked user and project resources once", async () => {
 			const previousHome = process.env.HOME;
 			process.env.HOME = tempDir;

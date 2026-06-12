@@ -38,7 +38,19 @@ Discovery rules:
 - In all skill locations, directories containing `SKILL.md` are discovered recursively
 - In `~/.agents/skills/` and project `.agents/skills/`, root `.md` files are ignored
 
-Disable discovery with `--no-skills` (explicit `--skill` paths still load).
+Disable all default discovery with `--no-skills` (explicit `--skill` paths still load).
+
+Unload specific skills with settings filters. Put user-wide filters in `~/.pi/agent/settings.json` or project-specific filters in `.pi/settings.json`:
+
+```json
+{
+  "disabledResources": {
+    "skills": ["zuvi-trello-fix-release", "project-only-skill"]
+  }
+}
+```
+
+The existing `skills` array also accepts resource patterns: plain entries include local files/directories, `!pattern` excludes matching auto-discovered resources, `+path` force-includes an exact path, and `-path` force-excludes an exact path. `disabledResources.skills` is the explicit reversible unload form. It removes matching skills from the system prompt and skill commands after reload.
 
 ### Using Skills from Other Harnesses
 
@@ -146,7 +158,7 @@ Per the [Agent Skills specification](https://agentskills.io/specification#frontm
 | `compatibility` | No | Max 500 chars. Environment requirements. |
 | `metadata` | No | Arbitrary key-value mapping. |
 | `allowed-tools` | No | Space-delimited list of pre-approved tools (experimental). |
-| `disable-model-invocation` | No | When `true`, skill is hidden from system prompt. Users must use `/skill:name`. |
+| `disable-model-invocation` | No | When `true`, skill is hidden from system prompt. Users must use `/skill:name`. For full project/user unload, prefer `disabledResources.skills` in settings. |
 
 ### Name Rules
 

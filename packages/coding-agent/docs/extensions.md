@@ -118,7 +118,7 @@ Extensions are auto-discovered from:
 | `.pi/extensions/*.ts` | Project-local |
 | `.pi/extensions/*/index.ts` | Project-local (subdirectory) |
 
-Additional paths via `settings.json`:
+Additional paths and filters via `settings.json`:
 
 ```json
 {
@@ -128,10 +128,16 @@ Additional paths via `settings.json`:
   ],
   "extensions": [
     "/path/to/local/extension.ts",
-    "/path/to/local/extension/dir"
-  ]
+    "/path/to/local/extension/dir",
+    "!experimental-extension"
+  ],
+  "disabledResources": {
+    "extensions": ["old-extension", "project-only-extension"]
+  }
 }
 ```
+
+Resource arrays support include/exclude patterns: plain entries include local paths, `!pattern` excludes matching auto-discovered resources, `+path` force-includes an exact path, and `-path` force-excludes an exact path. `disabledResources.extensions` is the explicit reversible unload form and is equivalent to exclude patterns. Put it in user settings for global unloads or project `.pi/settings.json` for project-specific unloads.
 
 To share extensions via npm or git as pi packages, see [packages.md](packages.md).
 

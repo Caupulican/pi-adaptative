@@ -32,7 +32,7 @@ import { spawnProcess, spawnProcessSync } from "../utils/child-process.ts";
 import { type GitSource, parseGitUrl } from "../utils/git.ts";
 import { canonicalizePath, isLocalPath, markPathIgnoredByCloudSync, resolvePath } from "../utils/paths.ts";
 import { isStdoutTakenOver } from "./output-guard.ts";
-import type { PackageSource, SettingsManager } from "./settings-manager.ts";
+import type { PackageSource, Settings, SettingsManager } from "./settings-manager.ts";
 
 const NETWORK_TIMEOUT_MS = 10000;
 const UPDATE_CHECK_CONCURRENCY = 4;
@@ -633,11 +633,10 @@ function matchesAnyPattern(filePath: string, patterns: string[], baseDir: string
 	const rel = toPosixPath(relative(baseDir, filePath));
 	const name = basename(filePath);
 	const filePathPosix = toPosixPath(filePath);
-	const isSkillFile = name === "SKILL.md";
-	const parentDir = isSkillFile ? dirname(filePath) : undefined;
-	const parentRel = isSkillFile ? toPosixPath(relative(baseDir, parentDir!)) : undefined;
-	const parentName = isSkillFile ? basename(parentDir!) : undefined;
-	const parentDirPosix = isSkillFile ? toPosixPath(parentDir!) : undefined;
+	const parentDir = dirname(filePath);
+	const parentRel = toPosixPath(relative(baseDir, parentDir));
+	const parentName = basename(parentDir);
+	const parentDirPosix = toPosixPath(parentDir);
 
 	return patterns.some((pattern) => {
 		const normalizedPattern = toPosixPath(pattern);
@@ -648,11 +647,10 @@ function matchesAnyPattern(filePath: string, patterns: string[], baseDir: string
 		) {
 			return true;
 		}
-		if (!isSkillFile) return false;
 		return (
-			minimatch(parentRel!, normalizedPattern) ||
-			minimatch(parentName!, normalizedPattern) ||
-			minimatch(parentDirPosix!, normalizedPattern)
+			minimatch(parentRel, normalizedPattern) ||
+			minimatch(parentName, normalizedPattern) ||
+			minimatch(parentDirPosix, normalizedPattern)
 		);
 	});
 }
@@ -667,23 +665,39 @@ function matchesAnyExactPattern(filePath: string, patterns: string[], baseDir: s
 	const rel = toPosixPath(relative(baseDir, filePath));
 	const name = basename(filePath);
 	const filePathPosix = toPosixPath(filePath);
-	const isSkillFile = name === "SKILL.md";
-	const parentDir = isSkillFile ? dirname(filePath) : undefined;
-	const parentRel = isSkillFile ? toPosixPath(relative(baseDir, parentDir!)) : undefined;
-	const parentDirPosix = isSkillFile ? toPosixPath(parentDir!) : undefined;
+	const parentDir = dirname(filePath);
+	const parentRel = toPosixPath(relative(baseDir, parentDir));
+	const parentName = basename(parentDir);
+	const parentDirPosix = toPosixPath(parentDir);
 
 	return patterns.some((pattern) => {
 		const normalized = normalizeExactPattern(pattern);
-		if (normalized === rel || normalized === filePathPosix) {
+		if (normalized === rel || normalized === name || normalized === filePathPosix) {
 			return true;
 		}
-		if (!isSkillFile) return false;
-		return normalized === parentRel || normalized === parentDirPosix;
+		return normalized === parentRel || normalized === parentName || normalized === parentDirPosix;
 	});
 }
 
 function getOverridePatterns(entries: string[]): string[] {
 	return entries.filter((pattern) => pattern.startsWith("!") || pattern.startsWith("+") || pattern.startsWith("-"));
+}
+
+function toDisabledOverride(pattern: string): string | null {
+	const trimmed = pattern.trim();
+	if (!trimmed) return null;
+	if (trimmed.startsWith("!") || trimmed.startsWith("-")) return trimmed;
+	if (trimmed.startsWith("+")) return `-${trimmed.slice(1)}`;
+	return `!${trimmed}`;
+}
+
+function mergeResourceOverrides(settings: Settings, resourceType: ResourceType): string[] {
+	const base = Array.isArray(settings[resourceType]) ? (settings[resourceType] as string[]) : [];
+	const disabledResources = settings.disabledResources;
+	const disabled = Array.isArray(disabledResources?.[resourceType])
+		? disabledResources[resourceType]!.map(toDisabledOverride).filter((value): value is string => Boolean(value))
+		: [];
+	return [...base, ...disabled];
 }
 
 function isEnabledByOverrides(filePath: string, patterns: string[], baseDir: string): boolean {
@@ -2244,16 +2258,16 @@ export class DefaultPackageManager implements PackageManager {
 		};
 
 		const userOverrides = {
-			extensions: (globalSettings.extensions ?? []) as string[],
-			skills: (globalSettings.skills ?? []) as string[],
-			prompts: (globalSettings.prompts ?? []) as string[],
-			themes: (globalSettings.themes ?? []) as string[],
+			extensions: mergeResourceOverrides(globalSettings, "extensions"),
+			skills: mergeResourceOverrides(globalSettings, "skills"),
+			prompts: mergeResourceOverrides(globalSettings, "prompts"),
+			themes: mergeResourceOverrides(globalSettings, "themes"),
 		};
 		const projectOverrides = {
-			extensions: (projectSettings.extensions ?? []) as string[],
-			skills: (projectSettings.skills ?? []) as string[],
-			prompts: (projectSettings.prompts ?? []) as string[],
-			themes: (projectSettings.themes ?? []) as string[],
+			extensions: mergeResourceOverrides(projectSettings, "extensions"),
+			skills: mergeResourceOverrides(projectSettings, "skills"),
+			prompts: mergeResourceOverrides(projectSettings, "prompts"),
+			themes: mergeResourceOverrides(projectSettings, "themes"),
 		};
 
 		const userDirs = {

@@ -99,6 +99,14 @@ export type PackageSource =
 			themes?: string[];
 	  };
 
+export interface DisabledResourcesSettings {
+	extensions?: string[];
+	skills?: string[];
+	prompts?: string[];
+	themes?: string[];
+	agents?: string[];
+}
+
 export interface Settings {
 	lastChangelogVersion?: string;
 	defaultProvider?: string;
@@ -119,10 +127,11 @@ export interface Settings {
 	collapseChangelog?: boolean; // Show condensed changelog after update (use /changelog for full)
 	enableInstallTelemetry?: boolean; // default: true - anonymous version/update ping after changelog-detected updates
 	packages?: PackageSource[]; // Array of npm/git package sources (string or object with filtering)
-	extensions?: string[]; // Array of local extension file paths or directories
-	skills?: string[]; // Array of local skill file paths or directories
-	prompts?: string[]; // Array of local prompt template paths or directories
-	themes?: string[]; // Array of local theme file paths or directories
+	extensions?: string[]; // Array of local extension file paths/directories or include/exclude patterns
+	skills?: string[]; // Array of local skill file paths/directories or include/exclude patterns
+	prompts?: string[]; // Array of local prompt template paths/directories or include/exclude patterns
+	themes?: string[]; // Array of local theme file paths/directories or include/exclude patterns
+	disabledResources?: DisabledResourcesSettings; // Explicit reversible resource unload filters for extensions/skills/prompts/themes/agents
 	enableSkillCommands?: boolean; // default: true - register skills as /skill:name commands
 	terminal?: TerminalSettings;
 	images?: ImageSettings;
