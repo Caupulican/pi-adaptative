@@ -68,10 +68,16 @@ describe("AgentSession retry", () => {
 		}
 	});
 
-	function createSession(options?: { failCount?: number; maxRetries?: number; delayAssistantMessageEndMs?: number }) {
+	function createSession(options?: {
+		failCount?: number;
+		maxRetries?: number;
+		delayAssistantMessageEndMs?: number;
+		baseDelayMs?: number;
+	}) {
 		const failCount = options?.failCount ?? 1;
 		const maxRetries = options?.maxRetries ?? 3;
 		const delayAssistantMessageEndMs = options?.delayAssistantMessageEndMs ?? 0;
+		const baseDelayMs = options?.baseDelayMs ?? 1;
 		let callCount = 0;
 
 		const model = getModel("anthropic", "claude-sonnet-4-5")!;
@@ -104,7 +110,7 @@ describe("AgentSession retry", () => {
 		const authStorage = AuthStorage.create(join(tempDir, "auth.json"));
 		const modelRegistry = ModelRegistry.create(authStorage, tempDir);
 		authStorage.setRuntimeApiKey("anthropic", "test-key");
-		settingsManager.applyOverrides({ retry: { enabled: true, maxRetries, baseDelayMs: 1 } });
+		settingsManager.applyOverrides({ retry: { enabled: true, maxRetries, baseDelayMs } });
 
 		session = new AgentSession({
 			agent,
@@ -142,6 +148,43 @@ describe("AgentSession retry", () => {
 		expect(created.getCallCount()).toBe(2);
 		expect(events).toEqual(["start:1", "end:success=true"]);
 		expect(created.session.isRetrying).toBe(false);
+	});
+
+	it("queues steering during retry backoff instead of starting a concurrent run", async () => {
+		const created = createSession({ failCount: 1, baseDelayMs: 200 });
+		const retryEnds: boolean[] = [];
+		let steerPromise: Promise<void> | undefined;
+		created.session.subscribe((event) => {
+			if (event.type === "auto_retry_start" && !steerPromise) {
+				expect(created.session.isRetrying).toBe(true);
+				steerPromise = created.session.prompt("steer me mid-retry", { streamingBehavior: "steer" });
+			}
+			if (event.type === "auto_retry_end") retryEnds.push(event.success);
+		});
+
+		await created.session.prompt("Hello");
+		expect(steerPromise).toBeDefined();
+		await steerPromise;
+
+		// The retry itself completed; steering did not cancel or race it.
+		expect(retryEnds).toEqual([true]);
+		// One failed call plus exactly one retried turn that incorporates the queued
+		// steering — no concurrent third run.
+		expect(created.getCallCount()).toBe(2);
+
+		const branchMessages = created.session.sessionManager
+			.getBranch()
+			.filter((entry) => entry.type === "message")
+			.map((entry) => entry.message);
+		const steerIndex = branchMessages.findIndex(
+			(message) => message.role === "user" && JSON.stringify(message.content).includes("steer me mid-retry"),
+		);
+		const successIndex = branchMessages.findIndex(
+			(message) => message.role === "assistant" && JSON.stringify(message.content).includes("Success"),
+		);
+		// The steering message was consumed by the retried turn, not dropped.
+		expect(steerIndex).toBeGreaterThan(-1);
+		expect(successIndex).toBeGreaterThan(steerIndex);
 	});
 
 	it("exhausts max retries and emits failure", async () => {

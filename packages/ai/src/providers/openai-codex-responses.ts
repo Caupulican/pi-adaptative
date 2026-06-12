@@ -32,7 +32,7 @@ import type {
 	StreamOptions,
 	Usage,
 } from "../types.ts";
-import { combineAbortSignals } from "../utils/abort-signals.ts";
+import { abortableSleep, combineAbortSignals } from "../utils/abort-signals.ts";
 import {
 	appendAssistantMessageDiagnostic,
 	createAssistantMessageDiagnostic,
@@ -149,20 +149,6 @@ function getRetryAfterDelayMs(headers: Headers): number | undefined {
 function capRetryDelayMs(delayMs: number, options?: StreamOptions): number {
 	const maxRetryDelayMs = options?.maxRetryDelayMs ?? DEFAULT_MAX_RETRY_DELAY_MS;
 	return maxRetryDelayMs > 0 ? Math.min(delayMs, maxRetryDelayMs) : delayMs;
-}
-
-function sleep(ms: number, signal?: AbortSignal): Promise<void> {
-	return new Promise((resolve, reject) => {
-		if (signal?.aborted) {
-			reject(new Error("Request was aborted"));
-			return;
-		}
-		const timeout = setTimeout(resolve, ms);
-		signal?.addEventListener("abort", () => {
-			clearTimeout(timeout);
-			reject(new Error("Request was aborted"));
-		});
-	});
 }
 
 function normalizeTimeoutMs(value: number | undefined): number | undefined {
@@ -344,7 +330,7 @@ export const streamOpenAICodexResponses: StreamFunction<"openai-codex-responses"
 									? capRetryDelayMs(retryAfterDelayMs, options)
 									: retryAfterDelayMs;
 
-						await sleep(delayMs, options?.signal);
+						await abortableSleep(delayMs, options?.signal);
 						continue;
 					}
 
@@ -365,7 +351,7 @@ export const streamOpenAICodexResponses: StreamFunction<"openai-codex-responses"
 					// Network errors are retryable
 					if (attempt < maxRetries && !lastError.message.includes("usage limit")) {
 						const delayMs = BASE_DELAY_MS * 2 ** attempt;
-						await sleep(delayMs, options?.signal);
+						await abortableSleep(delayMs, options?.signal);
 						continue;
 					}
 					throw lastError;
@@ -621,6 +607,8 @@ function normalizeCodexStatus(status: unknown): CodexResponseStatus | undefined 
 // SSE Parsing
 // ============================================================================
 
+const MAX_SSE_LINE_CHARS = 64 * 1024 * 1024;
+
 async function* parseSSE(response: Response, signal?: AbortSignal): AsyncGenerator<Record<string, unknown>> {
 	if (!response.body) return;
 
@@ -667,6 +655,10 @@ async function* parseSSE(response: Response, signal?: AbortSignal): AsyncGenerat
 					}
 				}
 				idx = buffer.indexOf("\n\n");
+			}
+			if (buffer.length > MAX_SSE_LINE_CHARS) {
+				// A delimiter-less stream would otherwise grow this buffer without bound.
+				throw new Error(`Codex SSE stream exceeded the ${MAX_SSE_LINE_CHARS} character buffer limit`);
 			}
 		}
 	} finally {
@@ -784,6 +776,9 @@ export function closeOpenAICodexWebSocketSessions(sessionId?: string): void {
 }
 
 registerSessionResourceCleanup(closeOpenAICodexWebSocketSessions);
+// Debug stats and SSE-fallback flags are keyed per sessionId too; without this they
+// outlive the session in long-running processes that switch sessions.
+registerSessionResourceCleanup(resetOpenAICodexWebSocketDebugStats);
 
 function isWebSocketSseFallbackActive(sessionId: string | undefined): boolean {
 	return sessionId ? websocketSseFallbackSessions.has(sessionId) : false;

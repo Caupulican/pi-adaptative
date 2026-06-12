@@ -59,6 +59,29 @@ describe("Editor component", () => {
 			assert.strictEqual(editor.getText(), "second prompt");
 		});
 
+		it("recalls queued messages on Up arrow before falling back to history", () => {
+			const editor = new Editor(createTestTUI(), defaultEditorTheme);
+			editor.addToHistory("older history entry");
+			editor.onRecallQueued = () => {
+				editor.setText("queued steering message");
+				return true;
+			};
+
+			editor.handleInput("\x1b[A"); // Up arrow
+
+			assert.strictEqual(editor.getText(), "queued steering message");
+		});
+
+		it("falls back to history on Up arrow when there is nothing queued", () => {
+			const editor = new Editor(createTestTUI(), defaultEditorTheme);
+			editor.addToHistory("history entry");
+			editor.onRecallQueued = () => false;
+
+			editor.handleInput("\x1b[A"); // Up arrow
+
+			assert.strictEqual(editor.getText(), "history entry");
+		});
+
 		it("cycles through history entries on repeated Up arrow", () => {
 			const editor = new Editor(createTestTUI(), defaultEditorTheme);
 

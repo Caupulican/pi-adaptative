@@ -7,10 +7,11 @@
  */
 
 import { randomBytes } from "node:crypto";
-import { createWriteStream, type WriteStream } from "node:fs";
+import type { WriteStream } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { stripAnsi } from "../utils/ansi.ts";
+import { createSafeWriteStream } from "../utils/safe-write-stream.ts";
 import { sanitizeBinaryOutput } from "../utils/shell.ts";
 import type { BashOperations } from "./tools/bash.ts";
 import { classifyGitCommand, executeFilteredGit } from "./tools/git-filter.ts";
@@ -68,11 +69,13 @@ export async function executeBashWithOperations(
 			);
 			if (res.exitCode !== -100) {
 				const rawBytes = res.rawBytes ?? Buffer.from(res.rawOut, "utf-8");
-				let fullOutputPath: string | undefined;
-				if (rawBytes.length > DEFAULT_MAX_BYTES) {
+				// The filter already spills oversized output to a temp file; reuse it
+				// instead of materializing another full copy here.
+				let fullOutputPath = res.fullOutputPath;
+				if (fullOutputPath === undefined && rawBytes.length > DEFAULT_MAX_BYTES) {
 					const id = randomBytes(8).toString("hex");
 					fullOutputPath = join(tmpdir(), `pi-bash-${id}.log`);
-					const tempFileStream = createWriteStream(fullOutputPath);
+					const tempFileStream = createSafeWriteStream(fullOutputPath);
 					tempFileStream.write(rawBytes);
 					tempFileStream.end();
 				}
@@ -81,7 +84,7 @@ export async function executeBashWithOperations(
 					output: res.output,
 					exitCode: res.exitCode,
 					cancelled: options.signal?.aborted ?? false,
-					truncated: rawBytes.length > DEFAULT_MAX_BYTES,
+					truncated: res.fullOutputPath !== undefined || rawBytes.length > DEFAULT_MAX_BYTES,
 					fullOutputPath,
 				};
 			}
@@ -102,7 +105,12 @@ export async function executeBashWithOperations(
 		}
 		const id = randomBytes(8).toString("hex");
 		tempFilePath = join(tmpdir(), `pi-bash-${id}.log`);
-		tempFileStream = createWriteStream(tempFilePath);
+		// On stream failure (e.g. disk full), drop the artifact instead of
+		// crashing the process; the rolling in-memory output is still returned.
+		tempFileStream = createSafeWriteStream(tempFilePath, () => {
+			tempFileStream = undefined;
+			tempFilePath = undefined;
+		});
 		for (const chunk of outputChunks) {
 			tempFileStream.write(chunk);
 		}
@@ -121,7 +129,9 @@ export async function executeBashWithOperations(
 			ensureTempFile();
 		}
 
-		if (tempFileStream) {
+		// Guard writableEnded: custom BashOperations may deliver late onData
+		// callbacks after an abort path has already ended the stream.
+		if (tempFileStream && !tempFileStream.writableEnded) {
 			tempFileStream.write(text);
 		}
 

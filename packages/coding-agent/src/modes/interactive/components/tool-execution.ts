@@ -1,7 +1,9 @@
 import { Box, type Component, Container, getCapabilities, Image, Spacer, Text, type TUI } from "@caupulican/pi-tui";
 import type { ToolDefinition, ToolRenderContext } from "../../../core/extensions/types.ts";
+import { compactRetainedDetails, MAX_TUI_RETAINED_DETAILS_BYTES } from "../../../core/message-retention.ts";
 import { createAllToolDefinitions, type ToolName } from "../../../core/tools/index.ts";
 import { getTextOutput as getRenderedTextOutput } from "../../../core/tools/render-utils.ts";
+import { truncateHead } from "../../../core/tools/truncate.ts";
 import { convertToPng } from "../../../utils/image-convert.ts";
 import { type ThemeBg, theme } from "../theme/theme.ts";
 import { renderTitleBadge, titleBadge } from "./tool-title.ts";
@@ -9,6 +11,19 @@ import { renderTitleBadge, titleBadge } from "./tool-title.ts";
 export interface ToolExecutionOptions {
 	showImages?: boolean;
 	imageWidthCells?: number;
+}
+
+// Components only use built-in definitions for display (renderers, grouping), so one
+// toolset per cwd is shared instead of allocating a full toolset per scrollback component.
+const builtInDefinitionsByCwd = new Map<string, ReturnType<typeof createAllToolDefinitions>>();
+
+function getBuiltInToolDefinitions(cwd: string): ReturnType<typeof createAllToolDefinitions> {
+	let definitions = builtInDefinitionsByCwd.get(cwd);
+	if (!definitions) {
+		definitions = createAllToolDefinitions(cwd);
+		builtInDefinitionsByCwd.set(cwd, definitions);
+	}
+	return definitions;
 }
 
 export class ToolExecutionComponent extends Container {
@@ -56,7 +71,7 @@ export class ToolExecutionComponent extends Container {
 		this.toolCallId = toolCallId;
 		this.args = args;
 		this.toolDefinition = toolDefinition;
-		this.builtInToolDefinition = createAllToolDefinitions(cwd)[toolName as ToolName];
+		this.builtInToolDefinition = getBuiltInToolDefinitions(cwd)[toolName as ToolName];
 		this.toolGroup = this.resolveToolGroup();
 		this.showImages = options.showImages ?? true;
 		this.imageWidthCells = options.imageWidthCells ?? 60;
@@ -174,7 +189,7 @@ export class ToolExecutionComponent extends Container {
 		this.toolCallId = toolCallId;
 		this.args = args;
 		this.toolDefinition = toolDefinition;
-		this.builtInToolDefinition = createAllToolDefinitions(this.cwd)[toolName as ToolName];
+		this.builtInToolDefinition = getBuiltInToolDefinitions(this.cwd)[toolName as ToolName];
 		this.toolGroup = this.resolveToolGroup();
 		this.executionStarted = false;
 		this.argsComplete = false;
@@ -205,7 +220,17 @@ export class ToolExecutionComponent extends Container {
 		if (!output) {
 			return undefined;
 		}
-		return new Text(theme.fg("toolOutput", output), 0, 0);
+		// The fallback also serves results whose custom renderer threw; without a
+		// display bound, a renderer bug degrades into dumping the full payload.
+		const truncation = truncateHead(output);
+		if (!truncation.truncated) {
+			return new Text(theme.fg("toolOutput", output), 0, 0);
+		}
+		const note = theme.fg(
+			"dim",
+			`[output truncated for display: showing ${truncation.outputLines} lines; the full result is retained in the conversation]`,
+		);
+		return new Text(`${theme.fg("toolOutput", truncation.content)}\n${note}`, 0, 0);
 	}
 
 	updateArgs(args: any): void {
@@ -233,6 +258,10 @@ export class ToolExecutionComponent extends Container {
 		},
 		isPartial = false,
 	): void {
+		// Final results live in the chat scrollback for the rest of the process.
+		// Oversized details would pin large payloads per tool call, so retain the
+		// same compacted form a resumed session would see.
+		if (!isPartial) compactRetainedDetails(result, MAX_TUI_RETAINED_DETAILS_BYTES);
 		this.result = result;
 		this.isPartial = isPartial;
 		this.updateDisplay();
@@ -429,7 +458,14 @@ export class ToolExecutionComponent extends Container {
 		}
 		const output = this.getTextOutput();
 		if (output) {
-			text += `\n${output}`;
+			// Same display bound as createResultFallback: unknown tools must not
+			// dump arbitrarily large payloads into the scrollback.
+			const truncation = truncateHead(output);
+			if (truncation.truncated) {
+				text += `\n${truncation.content}\n${theme.fg("dim", `[output truncated for display: showing ${truncation.outputLines} lines; the full result is retained in the conversation]`)}`;
+			} else {
+				text += `\n${output}`;
+			}
 		}
 		return text;
 	}

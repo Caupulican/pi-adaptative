@@ -1,8 +1,28 @@
 import { spawn } from "node:child_process";
-import { existsSync } from "node:fs";
+import { randomBytes } from "node:crypto";
+import { existsSync, type WriteStream } from "node:fs";
+import { tmpdir } from "node:os";
 import { join, resolve } from "node:path";
 import { waitForChildProcess } from "../../utils/child-process.ts";
+import { createSafeWriteStream } from "../../utils/safe-write-stream.ts";
 import { killProcessTree, trackDetachedChildPid, untrackDetachedChildPid } from "../../utils/shell.ts";
+
+/**
+ * Retention budget for git output held in memory while filtering. Output beyond
+ * the budget is spilled to a temp file so a giant `git log -p`/`git diff` cannot
+ * exhaust the V8 heap. Override with PI_GIT_FILTER_MAX_RETAINED_BYTES.
+ */
+const DEFAULT_MAX_RETAINED_GIT_OUTPUT_BYTES = 48 * 1024 * 1024;
+const MAX_RETAINED_GIT_STDERR_BYTES = 8 * 1024 * 1024;
+
+function maxRetainedGitOutputBytes(): number {
+	const raw = process.env.PI_GIT_FILTER_MAX_RETAINED_BYTES;
+	if (raw !== undefined) {
+		const parsed = Number.parseInt(raw, 10);
+		if (Number.isFinite(parsed) && parsed > 0) return parsed;
+	}
+	return DEFAULT_MAX_RETAINED_GIT_OUTPUT_BYTES;
+}
 
 const SUPPORTED_SUBCOMMANDS = new Set([
 	"status",
@@ -24,13 +44,18 @@ export interface FilterResult {
 	exitCode: number;
 	rawOut: string;
 	rawBytes?: Buffer;
+	/** Set when git output exceeded the in-memory retention budget; the file holds the full output. */
+	fullOutputPath?: string;
 }
 
 interface GitQueryResult {
 	stdout: string;
 	stderr: string;
 	status: number | null;
-	rawBytes: Buffer;
+	/** Full raw output (stderr then stdout). Absent when output overflowed to disk. */
+	rawBytes?: Buffer;
+	/** Set when stdout exceeded the retention budget and was spilled to a temp file. */
+	overflow?: { fullOutputPath: string; totalBytes: number };
 }
 
 interface GitFilterOptions {
@@ -126,8 +151,18 @@ function rawText(res: GitQueryResult, combine = false): string {
 	return res.stderr || res.stdout;
 }
 
+function applyOverflowDisclosure(res: GitQueryResult, result: FilterResult): FilterResult {
+	if (!res.overflow) return result;
+	const totalMb = (res.overflow.totalBytes / (1024 * 1024)).toFixed(1);
+	return {
+		...result,
+		output: `${result.output}\n\n[git output was ${totalMb}MB; filtered view computed from the retained head. Full output: ${res.overflow.fullOutputPath}]`,
+		fullOutputPath: res.overflow.fullOutputPath,
+	};
+}
+
 function resultFromQuery(res: GitQueryResult, output: string, exitCode = res.status ?? 0): FilterResult {
-	return { output, exitCode, rawOut: rawText(res), rawBytes: res.rawBytes };
+	return applyOverflowDisclosure(res, { output, exitCode, rawOut: rawText(res), rawBytes: res.rawBytes });
 }
 
 export async function runGitQuery(
@@ -149,6 +184,14 @@ export async function runGitQuery(
 
 	const stdoutChunks: Buffer[] = [];
 	const stderrChunks: Buffer[] = [];
+	const maxRetainedBytes = maxRetainedGitOutputBytes();
+	let retainedStdoutBytes = 0;
+	let totalStdoutBytes = 0;
+	let retainedStderrBytes = 0;
+	let overflowPath: string | undefined;
+	let overflowStream: WriteStream | undefined;
+	let overflowStreamEnded = false;
+	let overflowWriteError: Error | undefined;
 	let timedOut = false;
 	const timeoutSeconds = options?.timeout;
 	let timeoutHandle: NodeJS.Timeout | undefined;
@@ -168,24 +211,71 @@ export async function runGitQuery(
 			else options.signal.addEventListener("abort", killChild, { once: true });
 		}
 
-		child.stdout?.on("data", (chunk: Buffer) => stdoutChunks.push(chunk));
-		child.stderr?.on("data", (chunk: Buffer) => stderrChunks.push(chunk));
+		child.stdout?.on("data", (chunk: Buffer) => {
+			totalStdoutBytes += chunk.length;
+			if (overflowStream) {
+				overflowStream.write(chunk);
+				return;
+			}
+			stdoutChunks.push(chunk);
+			retainedStdoutBytes += chunk.length;
+			if (retainedStdoutBytes > maxRetainedBytes) {
+				overflowPath = join(tmpdir(), `pi-git-${randomBytes(8).toString("hex")}.log`);
+				overflowStream = createSafeWriteStream(overflowPath, (error) => {
+					overflowWriteError = error;
+				});
+				for (const retained of stdoutChunks) overflowStream.write(retained);
+			}
+		});
+		child.stderr?.on("data", (chunk: Buffer) => {
+			stderrChunks.push(chunk);
+			retainedStderrBytes += chunk.length;
+			while (retainedStderrBytes > MAX_RETAINED_GIT_STDERR_BYTES && stderrChunks.length > 1) {
+				retainedStderrBytes -= stderrChunks.shift()?.length ?? 0;
+			}
+		});
 		const status = await waitForChildProcess(child);
 		if (options?.signal?.aborted) throw new Error("aborted");
 		if (timedOut) throw new Error(`timeout:${timeoutSeconds}`);
 		const stdoutBuffer = Buffer.concat(stdoutChunks);
 		const stderrBuffer = Buffer.concat(stderrChunks);
-		const rawBytes = Buffer.concat([stderrBuffer, stdoutBuffer]);
+		if (overflowStream !== undefined && overflowPath !== undefined) {
+			if (stderrBuffer.length > 0 && !overflowStream.writableEnded) {
+				overflowStream.write("\n--- stderr ---\n");
+				overflowStream.write(stderrBuffer);
+			}
+			const stream = overflowStream;
+			await new Promise<void>((resolveEnd) => {
+				stream.end(() => resolveEnd());
+			});
+			overflowStreamEnded = true;
+			if (overflowWriteError !== undefined) {
+				// Spill failed (e.g. disk full): disclose the loss instead of pointing
+				// consumers at a broken artifact, and keep the retained head usable.
+				return {
+					stdout: stdoutBuffer.toString("utf-8"),
+					stderr: `${stderrBuffer.toString("utf-8")}\n[git output overflow spill failed: ${overflowWriteError.message}; output beyond the retained head was lost]`,
+					status,
+				};
+			}
+			return {
+				stdout: stdoutBuffer.toString("utf-8"),
+				stderr: stderrBuffer.toString("utf-8"),
+				status,
+				overflow: { fullOutputPath: overflowPath, totalBytes: totalStdoutBytes },
+			};
+		}
 		return {
 			stdout: stdoutBuffer.toString("utf-8"),
 			stderr: stderrBuffer.toString("utf-8"),
 			status,
-			rawBytes,
+			rawBytes: Buffer.concat([stderrBuffer, stdoutBuffer]),
 		};
 	} finally {
 		if (child.pid) untrackDetachedChildPid(child.pid);
 		if (timeoutHandle) clearTimeout(timeoutHandle);
 		if (options?.signal) options.signal.removeEventListener("abort", killChild);
+		if (overflowStream !== undefined && !overflowStreamEnded) overflowStream.end();
 	}
 }
 
@@ -489,7 +579,7 @@ async function handleDiff(
 	const { compacted, truncated } = compactDiff(diffRes.stdout);
 	let output = `${statRes.stdout.trimEnd()}\n\n${compacted}`.trim();
 	if (truncated) output += "\n\n[Diff truncated. Re-run with: git diff --no-compact]";
-	return { output, exitCode: 0, rawOut: diffRes.stdout, rawBytes: diffRes.rawBytes };
+	return applyOverflowDisclosure(diffRes, { output, exitCode: 0, rawOut: diffRes.stdout, rawBytes: diffRes.rawBytes });
 }
 
 async function handleShow(
@@ -699,12 +789,12 @@ async function handleStash(
 		return { output: res.stdout.trim() || "No stashes found.", exitCode: 0, rawOut, rawBytes: res.rawBytes };
 	if (sub === "show") {
 		const { compacted, truncated } = compactDiff(res.stdout);
-		return {
+		return applyOverflowDisclosure(res, {
 			output: `${compacted.trim()}${truncated ? "\n\n[Diff truncated.]" : ""}`,
 			exitCode: 0,
 			rawOut,
 			rawBytes: res.rawBytes,
-		};
+		});
 	}
 	if (res.stdout.includes("No local changes to save"))
 		return { output: "No local changes to save.", exitCode: 0, rawOut, rawBytes: res.rawBytes };

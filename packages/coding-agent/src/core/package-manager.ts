@@ -31,6 +31,7 @@ import { CONFIG_DIR_NAME } from "../config.ts";
 import { spawnProcess, spawnProcessSync } from "../utils/child-process.ts";
 import { type GitSource, parseGitUrl } from "../utils/git.ts";
 import { canonicalizePath, isLocalPath, markPathIgnoredByCloudSync, resolvePath } from "../utils/paths.ts";
+import { createRollingOutputBuffer } from "./exec.ts";
 import { isStdoutTakenOver } from "./output-guard.ts";
 import type { PackageSource, Settings, SettingsManager } from "./settings-manager.ts";
 
@@ -2519,8 +2520,11 @@ export class DefaultPackageManager implements PackageManager {
 	): Promise<string> {
 		return new Promise((resolvePromise, reject) => {
 			const child = this.spawnCaptureCommand(command, args, options);
-			let stdout = "";
-			let stderr = "";
+			// Callers parse stdout, so a silently truncated tail would corrupt results.
+			// Bound retention and fail loudly in the (pathological) overflow case.
+			const maxCapturedOutput = 16 * 1024 * 1024;
+			const stdout = createRollingOutputBuffer(maxCapturedOutput);
+			const stderr = createRollingOutputBuffer(maxCapturedOutput);
 			let timedOut = false;
 			const timeout =
 				typeof options?.timeoutMs === "number"
@@ -2531,10 +2535,10 @@ export class DefaultPackageManager implements PackageManager {
 					: undefined;
 
 			child.stdout?.on("data", (data) => {
-				stdout += data.toString();
+				stdout.push(data.toString());
 			});
 			child.stderr?.on("data", (data) => {
-				stderr += data.toString();
+				stderr.push(data.toString());
 			});
 			child.once("error", (error) => {
 				if (timeout) clearTimeout(timeout);
@@ -2547,11 +2551,19 @@ export class DefaultPackageManager implements PackageManager {
 					return;
 				}
 				if (code === 0) {
-					resolvePromise(stdout.trim());
+					if (stdout.truncated()) {
+						reject(
+							new Error(`${command} ${args.join(" ")} produced more than ${maxCapturedOutput} bytes of output`),
+						);
+						return;
+					}
+					resolvePromise(stdout.text().trim());
 					return;
 				}
 				const exitStatus = code === null ? `signal ${signal ?? "unknown"}` : `code ${code}`;
-				reject(new Error(`${command} ${args.join(" ")} failed with ${exitStatus}: ${stderr || stdout}`));
+				reject(
+					new Error(`${command} ${args.join(" ")} failed with ${exitStatus}: ${stderr.text() || stdout.text()}`),
+				);
 			});
 		});
 	}

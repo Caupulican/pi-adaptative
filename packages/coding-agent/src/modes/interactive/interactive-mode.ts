@@ -1009,7 +1009,9 @@ export class InteractiveMode {
 				rawKeyHint("!", "to run bash"),
 				rawKeyHint("!!", "to run bash (no context)"),
 				hint("app.message.followUp", "to queue follow-up"),
+				rawKeyHint(">>", "prefix to queue follow-up"),
 				hint("app.message.dequeue", "to edit all queued messages"),
+				rawKeyHint("↑", "(empty editor) to recall queued messages"),
 				hint("app.clipboard.pasteImage", "to paste image"),
 				rawKeyHint("drop files", "to attach"),
 			].join("\n");
@@ -1067,7 +1069,7 @@ export class InteractiveMode {
 		await this.rebindCurrentSession();
 
 		// Render initial messages AFTER showing loaded resources
-		this.renderInitialMessages();
+		await this.renderInitialMessages();
 		this.renderProjectTrustWarningIfNeeded();
 
 		// Set up theme file watcher
@@ -1943,7 +1945,7 @@ export class InteractiveMode {
 					}
 
 					this.chatContainer.clear();
-					this.renderInitialMessages();
+					await this.renderInitialMessages();
 					if (result.editorText && !this.editor.getText().trim()) {
 						this.editor.setText(result.editorText);
 					}
@@ -2022,7 +2024,7 @@ export class InteractiveMode {
 		this.streamingComponent = undefined;
 		this.streamingMessage = undefined;
 		this.clearRenderedToolPanelState();
-		this.renderInitialMessages();
+		void this.renderInitialMessages();
 	}
 
 	/**
@@ -2929,10 +2931,14 @@ export class InteractiveMode {
 		this.ui.onDebug = () => this.handleDebugCommand();
 		this.defaultEditor.onAction("app.model.select", () => void this.showModelSelector());
 		this.defaultEditor.onAction("app.tools.expand", () => this.toggleToolOutputExpansion());
-		this.defaultEditor.onAction("app.thinking.toggle", () => this.toggleThinkingBlockVisibility());
+		this.defaultEditor.onAction("app.thinking.toggle", () => void this.toggleThinkingBlockVisibility());
 		this.defaultEditor.onAction("app.editor.external", () => this.openExternalEditor());
 		this.defaultEditor.onAction("app.message.followUp", () => this.handleFollowUp());
 		this.defaultEditor.onAction("app.message.dequeue", () => this.handleDequeue());
+		// Plain Up arrow on an empty editor recalls queued messages for editing
+		// before history navigation. Many terminals (e.g. Windows Terminal) swallow
+		// the alt-chord bindings, so the queue must be reachable without them.
+		this.defaultEditor.onRecallQueued = () => this.restoreQueuedMessagesToEditor() > 0;
 		this.defaultEditor.onAction("app.session.new", () => this.handleClearCommand());
 		this.defaultEditor.onAction("app.session.tree", () => this.showTreeSelector());
 		this.defaultEditor.onAction("app.session.fork", () => this.showUserMessageSelector());
@@ -3010,19 +3016,33 @@ export class InteractiveMode {
 			text = text.trim();
 			if (!text) return;
 
+			// A ">>" prefix queues the message as a follow-up (delivered after the
+			// current work finishes, starting the next round) instead of steering.
+			// This is the chord-free alternative to app.message.followUp, which many
+			// terminals swallow (e.g. Windows Terminal claims alt+enter).
+			const queueAsFollowUp = text.startsWith(">>");
+			if (queueAsFollowUp) {
+				text = text.slice(2).trim();
+				if (!text) return;
+			}
+
 			// User input submitted while work is active is always steering. Treat
 			// slash/bang text as user steering text instead of executing commands that
 			// would interrupt the current stream or compaction.
 			if (this.session.isCompacting) {
 				const images = this.takeClipboardImagesForText(text);
-				this.queueCompactionMessage(text, "steer", images);
+				this.queueCompactionMessage(text, queueAsFollowUp ? "followUp" : "steer", images);
 				return;
 			}
-			if (this.session.isStreaming) {
+			if (this.session.isStreaming || this.session.isRetrying) {
 				const images = this.takeClipboardImagesForText(text);
 				this.editor.addToHistory?.(text);
 				this.editor.setText("");
-				await this.session.prompt(text, { streamingBehavior: "steer", images, processSlashCommands: false });
+				await this.session.prompt(text, {
+					streamingBehavior: queueAsFollowUp ? "followUp" : "steer",
+					images,
+					processSlashCommands: false,
+				});
 				this.updatePendingMessagesDisplay();
 				this.ui.requestRender();
 				return;
@@ -3440,7 +3460,7 @@ export class InteractiveMode {
 					}
 				} else if (event.result) {
 					this.chatContainer.clear();
-					this.rebuildChatFromMessages();
+					await this.rebuildChatFromMessages();
 					this.addMessageToChat(
 						createCompactionSummaryMessage(
 							event.result.summary,
@@ -3654,10 +3674,19 @@ export class InteractiveMode {
 	 * @param options.updateFooter Update footer state
 	 * @param options.populateHistory Add user messages to editor history
 	 */
-	private renderSessionContext(
+	private renderGeneration = 0;
+
+	private async renderSessionContext(
 		sessionContext: SessionContext,
 		options: { updateFooter?: boolean; populateHistory?: boolean } = {},
-	): void {
+	): Promise<void> {
+		// Rebuilding a long session's scrollback synchronously blocks the event loop
+		// for seconds (reload/resume feel frozen). Yield between chunks so input and
+		// repaints keep flowing; a newer rebuild supersedes this one via generation.
+		const generation = ++this.renderGeneration;
+		const CHUNK_SIZE = 20;
+		let processed = 0;
+
 		this.clearRenderedToolPanelState();
 		const renderedPendingTools = new Map<string, ToolExecutionComponent>();
 
@@ -3667,6 +3696,12 @@ export class InteractiveMode {
 		}
 
 		for (const message of sessionContext.messages) {
+			if (processed > 0 && processed % CHUNK_SIZE === 0) {
+				this.ui.requestRender();
+				await new Promise((resolve) => setImmediate(resolve));
+				if (generation !== this.renderGeneration) return;
+			}
+			processed++;
 			// Assistant messages need special handling for tool calls
 			if (message.role === "assistant") {
 				this.addMessageToChat(message);
@@ -3710,10 +3745,10 @@ export class InteractiveMode {
 		this.ui.requestRender();
 	}
 
-	renderInitialMessages(): void {
+	async renderInitialMessages(): Promise<void> {
 		// Get aligned messages and entries from session context
 		const context = this.sessionManager.buildSessionContext();
-		this.renderSessionContext(context, {
+		await this.renderSessionContext(context, {
 			updateFooter: true,
 			populateHistory: true,
 		});
@@ -3741,10 +3776,10 @@ export class InteractiveMode {
 		});
 	}
 
-	private rebuildChatFromMessages(): void {
+	private async rebuildChatFromMessages(): Promise<void> {
 		this.chatContainer.clear();
 		const context = this.sessionManager.buildSessionContext();
-		this.renderSessionContext(context);
+		await this.renderSessionContext(context);
 	}
 
 	// =========================================================================
@@ -4042,13 +4077,13 @@ export class InteractiveMode {
 		this.ui.requestRender();
 	}
 
-	private toggleThinkingBlockVisibility(): void {
+	private async toggleThinkingBlockVisibility(): Promise<void> {
 		this.hideThinkingBlock = !this.hideThinkingBlock;
 		this.settingsManager.setHideThinkingBlock(this.hideThinkingBlock);
 
 		// Rebuild chat from session messages
 		this.chatContainer.clear();
-		this.rebuildChatFromMessages();
+		await this.rebuildChatFromMessages();
 
 		// If streaming, re-add the streaming component with updated visibility and re-render
 		if (this.streamingComponent && this.streamingMessage) {
@@ -5411,6 +5446,7 @@ export class InteractiveMode {
 								child.setShowImages(enabled);
 							}
 						}
+						this.ui.requestRender();
 					},
 					onImageWidthCellsChange: (width) => {
 						this.settingsManager.setImageWidthCells(width);
@@ -5419,6 +5455,7 @@ export class InteractiveMode {
 								child.setImageWidthCells(width);
 							}
 						}
+						this.ui.requestRender();
 					},
 					onAutoResizeImagesChange: (enabled) => {
 						this.settingsManager.setImageAutoResize(enabled);
@@ -5474,7 +5511,7 @@ export class InteractiveMode {
 							}
 						}
 						this.chatContainer.clear();
-						this.rebuildChatFromMessages();
+						void this.rebuildChatFromMessages();
 					},
 					onCollapseChangelogChange: (collapsed) => {
 						this.settingsManager.setCollapseChangelog(collapsed);
@@ -5923,7 +5960,7 @@ export class InteractiveMode {
 
 						// Update UI
 						this.chatContainer.clear();
-						this.renderInitialMessages();
+						await this.renderInitialMessages();
 						if (result.editorText && !this.editor.getText().trim()) {
 							this.editor.setText(result.editorText);
 						}
@@ -6593,7 +6630,7 @@ export class InteractiveMode {
 			this.setupAutocompleteProvider();
 			const runner = this.session.extensionRunner;
 			this.setupExtensionShortcuts(runner);
-			this.rebuildChatFromMessages();
+			await this.rebuildChatFromMessages();
 			dismissReloadBox(this.editor as Component);
 			this.showLoadedResources({
 				force: false,

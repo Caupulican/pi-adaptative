@@ -1566,6 +1566,8 @@ export interface Extension {
 	commands: Map<string, RegisteredCommand>;
 	flags: Map<string, ExtensionFlag>;
 	shortcuts: Map<KeyId, ExtensionShortcut>;
+	/** Unsubscribe callbacks for pi.events subscriptions, disposed when this generation is replaced (reload). */
+	eventUnsubscribes: Array<() => void>;
 }
 
 /** Result of loading extensions. */

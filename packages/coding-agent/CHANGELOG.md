@@ -1,5 +1,25 @@
 ## [Unreleased]
 
+### Fixed
+
+- Fixed JavaScript heap exhaustion in long-running sessions by bounding in-memory retention across the stack:
+  - Session load now compacts oversized tool result details, so resuming or branching on top of large session files no longer pins their full payloads in memory.
+  - Interactive scrollback components retain tool result details under a dedicated budget (512KB estimate per result), matching resumed-session semantics for pathological payloads while keeping designed display payloads (bash output window, diffs) intact.
+  - Scrollback components share one built-in toolset per working directory instead of allocating a full toolset per tool call.
+- Bounded subprocess output retention:
+  - `pi.exec`/`execCommand` keeps a rolling tail per stream (default 16 MiB, configurable via `maxBuffer`) and reports `stdoutTruncated`/`stderrTruncated` on the result.
+  - The git output filter spills oversized git output (default over 48 MiB, `PI_GIT_FILTER_MAX_RETAINED_BYTES` to tune) to a temp file, discloses the cap in the filtered output, and reuses the spill file as the full-output artifact instead of materializing extra in-memory copies.
+  - Package manager command capture is bounded and fails loudly instead of accumulating unbounded output.
+- Hot reload now unsubscribes the replaced extension generation's `pi.events` handlers from the shared event bus, so repeated reloads no longer pin old extension module graphs or double-process bus events.
+- Fixed abort-listener accumulation in retry backoff sleeps (`utils/sleep.ts` and the openai-codex provider): each completed sleep now detaches its listener instead of leaving it on the signal for the signal's lifetime.
+- Best-effort temp-file writes (bash full-output capture, git filter overflow spill) now handle stream errors instead of crashing the process with an uncaught `error` event on disk failures; the git overflow path discloses a failed spill in stderr instead of referencing a broken artifact.
+- Session file rewrites (migration, branch operations) are now atomic (write-then-rename), removing the torn-file window when a crash or a second pi process appending to the same session interleaves with a truncate-in-place rewrite.
+- Codex websocket debug stats and SSE-fallback flags are now cleared with the rest of the session resources on session replacement and dispose, instead of accumulating per session id for the process lifetime.
+- User input during an auto-retry backoff now queues as steering and is incorporated into the retried turn, instead of starting a concurrent run that raced and cancelled the pending retry. `isRetrying` is true from the moment `auto_retry_start` is observable, and the interactive editor routes submissions during the retry window through the steering path.
+- Oversized reads no longer spike the heap: the read tool streams line slices for files beyond 16 MiB (any region stays reachable in batches via offset continuation, with true line numbers), images beyond a 128 MiB pathology guard return guidance instead of loading, CLI `@file` attachments are bounded with a leading window plus a read-tool pointer, oversized SKILL.md files are skipped with a diagnostic, and the session loader skips lines too large to hold in a string instead of failing the whole resume.
+- Delimiter-less streams can no longer grow line-assembly buffers without bound: RPC JSONL input, the Anthropic SSE parser, and the Codex SSE parser each cap their buffers (64 MiB) and discard or fail cleanly.
+- Hot reload no longer freezes the UI: the chat scrollback rebuild is chunked with yields (also applies to resume, tree navigation, and display toggles). Plain Up arrow on an empty editor recalls queued messages for editing, and a `>>` prefix queues a follow-up message — both work in terminals that swallow the alt-chord bindings.
+
 ## [0.80.22] - 2026-06-12
 
 ### Added

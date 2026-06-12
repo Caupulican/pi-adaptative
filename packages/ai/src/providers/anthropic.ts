@@ -345,6 +345,8 @@ function consumeLine(text: string): { line: string; rest: string } | null {
 	};
 }
 
+const MAX_SSE_LINE_CHARS = 64 * 1024 * 1024;
+
 async function* iterateSseMessages(
 	body: ReadableStream<Uint8Array>,
 	signal?: AbortSignal,
@@ -374,6 +376,11 @@ async function* iterateSseMessages(
 					yield event;
 				}
 				consumed = consumeLine(buffer);
+			}
+			if (buffer.length > MAX_SSE_LINE_CHARS) {
+				// A delimiter-less stream (broken proxy/server) would otherwise grow
+				// this buffer without bound; fail the request cleanly instead.
+				throw new Error(`SSE stream exceeded the ${MAX_SSE_LINE_CHARS} character line limit`);
 			}
 		}
 

@@ -368,7 +368,20 @@ function createExtensionAPI(
 			runtime.unregisterProvider(name, extension.path);
 		},
 
-		events: eventBus,
+		// Track bus subscriptions per extension generation so hot reloads can
+		// unsubscribe replaced generations (see disposeExtensionEventSubscriptions).
+		events: {
+			emit: (channel: string, data: unknown) => {
+				runtime.assertActive();
+				eventBus.emit(channel, data);
+			},
+			on: (channel: string, handler: (data: unknown) => void) => {
+				runtime.assertActive();
+				const unsubscribe = eventBus.on(channel, handler);
+				extension.eventUnsubscribes.push(unsubscribe);
+				return unsubscribe;
+			},
+		},
 	} as ExtensionAPI;
 
 	return api;
@@ -408,7 +421,26 @@ function createExtension(extensionPath: string, resolvedPath: string): Extension
 		commands: new Map(),
 		flags: new Map(),
 		shortcuts: new Map(),
+		eventUnsubscribes: [],
 	};
+}
+
+/**
+ * Unsubscribe a replaced extension generation's pi.events handlers from the shared
+ * event bus. Without this, every hot reload leaves the previous generation's handlers
+ * subscribed, pinning the old module graph in memory and double-processing events.
+ */
+export function disposeExtensionEventSubscriptions(extensions: Extension[]): void {
+	for (const extension of extensions) {
+		for (const unsubscribe of extension.eventUnsubscribes) {
+			try {
+				unsubscribe();
+			} catch {
+				// Disposal must never break a reload.
+			}
+		}
+		extension.eventUnsubscribes.length = 0;
+	}
 }
 
 async function loadExtension(

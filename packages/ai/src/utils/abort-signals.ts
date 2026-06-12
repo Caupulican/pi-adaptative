@@ -3,6 +3,29 @@ export interface CombinedAbortSignal {
 	cleanup: () => void;
 }
 
+/**
+ * Sleep that rejects on abort. Always detaches its abort listener when settling,
+ * so repeated sleeps (e.g. retry backoff) on a long-lived signal do not accumulate
+ * listeners for the signal's lifetime.
+ */
+export function abortableSleep(ms: number, signal?: AbortSignal): Promise<void> {
+	return new Promise((resolve, reject) => {
+		if (signal?.aborted) {
+			reject(new Error("Request was aborted"));
+			return;
+		}
+		const onAbort = () => {
+			clearTimeout(timeout);
+			reject(new Error("Request was aborted"));
+		};
+		const timeout = setTimeout(() => {
+			signal?.removeEventListener("abort", onAbort);
+			resolve();
+		}, ms);
+		signal?.addEventListener("abort", onAbort, { once: true });
+	});
+}
+
 export function combineAbortSignals(signals: readonly (AbortSignal | undefined)[]): CombinedAbortSignal {
 	const activeSignals = signals.filter((signal): signal is AbortSignal => signal !== undefined);
 	if (activeSignals.length === 0) {

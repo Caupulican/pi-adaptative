@@ -267,6 +267,13 @@ export class Editor implements Component, Focusable {
 	private history: string[] = [];
 	private historyIndex: number = -1; // -1 = not browsing, 0 = most recent, 1 = older, etc.
 
+	/**
+	 * Consulted on Up arrow in an empty editor, before history navigation.
+	 * Return true after restoring queued message(s) into the editor to consume
+	 * the key; return false to fall through to history.
+	 */
+	onRecallQueued?: () => boolean;
+
 	// Kill ring for Emacs-style kill/yank operations
 	private killRing = new KillRing();
 	private lastAction: "kill" | "yank" | "type-word" | null = null;
@@ -757,6 +764,9 @@ export class Editor implements Component, Focusable {
 		// Arrow key navigation (with history support)
 		if (kb.matches(data, "tui.editor.cursorUp")) {
 			if (this.isEditorEmpty()) {
+				if (this.onRecallQueued?.()) {
+					return;
+				}
 				this.navigateHistory(-1);
 			} else if (this.historyIndex > -1 && this.isOnFirstVisualLine()) {
 				this.navigateHistory(-1);

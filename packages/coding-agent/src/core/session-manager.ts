@@ -10,6 +10,7 @@ import {
 	openSync,
 	readdirSync,
 	readSync,
+	renameSync,
 	statSync,
 	writeFileSync,
 } from "fs";
@@ -19,6 +20,7 @@ import { createInterface } from "readline";
 import { StringDecoder } from "string_decoder";
 import { getAgentDir as getDefaultAgentDir, getSessionsDir } from "../config.ts";
 import { normalizePath, resolvePath } from "../utils/paths.ts";
+import { compactToolResultDetailsForRetention } from "./message-retention.ts";
 import {
 	type BashExecutionMessage,
 	type CustomMessage,
@@ -470,6 +472,8 @@ export function getDefaultSessionDir(cwd: string, agentDir: string = getDefaultA
 }
 
 const SESSION_READ_BUFFER_SIZE = 1024 * 1024;
+// One line must fit comfortably under V8's max string length (~512MiB chars).
+const MAX_SESSION_LINE_CHARS = 256 * 1024 * 1024;
 
 function parseSessionEntryLine(line: string): FileEntry | null {
 	if (!line.trim()) return null;
@@ -482,9 +486,14 @@ function parseSessionEntryLine(line: string): FileEntry | null {
 }
 
 /** Exported for testing */
-export function loadEntriesFromFile(filePath: string): FileEntry[] {
+export function loadEntriesFromFile(filePath: string, options?: { maxLineChars?: number }): FileEntry[] {
 	const resolvedFilePath = normalizePath(filePath);
 	if (!existsSync(resolvedFilePath)) return [];
+
+	// A single line beyond this budget can never become a usable entry, and
+	// accumulating it would crash the whole load (RangeError near V8's max string
+	// length) — bricking session resume. Drop it like any other unparseable line.
+	const maxLineChars = options?.maxLineChars ?? MAX_SESSION_LINE_CHARS;
 
 	const entries: FileEntry[] = [];
 	const fd = openSync(resolvedFilePath, "r");
@@ -492,26 +501,44 @@ export function loadEntriesFromFile(filePath: string): FileEntry[] {
 		const decoder = new StringDecoder("utf8");
 		const buffer = Buffer.allocUnsafe(SESSION_READ_BUFFER_SIZE);
 		let pending = "";
+		let skippingOversizedLine = false;
 
 		while (true) {
 			const bytesRead = readSync(fd, buffer, 0, buffer.length, null);
 			if (bytesRead === 0) break;
 
 			pending += decoder.write(buffer.subarray(0, bytesRead));
+			if (skippingOversizedLine) {
+				const resumeIndex = pending.indexOf("\n");
+				if (resumeIndex === -1) {
+					pending = "";
+					continue;
+				}
+				pending = pending.slice(resumeIndex + 1);
+				skippingOversizedLine = false;
+			}
 			let lineStart = 0;
 			let newlineIndex = pending.indexOf("\n", lineStart);
 			while (newlineIndex !== -1) {
-				const entry = parseSessionEntryLine(pending.slice(lineStart, newlineIndex));
-				if (entry) entries.push(entry);
+				if (newlineIndex - lineStart <= maxLineChars) {
+					const entry = parseSessionEntryLine(pending.slice(lineStart, newlineIndex));
+					if (entry) entries.push(entry);
+				}
 				lineStart = newlineIndex + 1;
 				newlineIndex = pending.indexOf("\n", lineStart);
 			}
 			pending = pending.slice(lineStart);
+			if (pending.length > maxLineChars) {
+				skippingOversizedLine = true;
+				pending = "";
+			}
 		}
 
 		pending += decoder.end();
-		const finalEntry = parseSessionEntryLine(pending);
-		if (finalEntry) entries.push(finalEntry);
+		if (!skippingOversizedLine && pending.length <= maxLineChars) {
+			const finalEntry = parseSessionEntryLine(pending);
+			if (finalEntry) entries.push(finalEntry);
+		}
 	} finally {
 		closeSync(fd);
 	}
@@ -869,6 +896,12 @@ export class SessionManager {
 				this._rewriteFile();
 			}
 
+			// Bound in-memory retention: oversized tool result details from disk would
+			// otherwise be pinned in fileEntries for the whole process lifetime.
+			for (const entry of this.fileEntries) {
+				if (entry.type === "message") compactToolResultDetailsForRetention(entry.message);
+			}
+
 			this._buildIndex();
 			this.flushed = true;
 		} else {
@@ -928,7 +961,11 @@ export class SessionManager {
 
 	private _rewriteFile(): void {
 		if (!this.persist || !this.sessionFile) return;
-		const fd = openSync(this.sessionFile, "w");
+		// Write-then-rename keeps the session file valid at every instant: truncating
+		// in place leaves a torn-file window for crashes or a concurrent process
+		// appending to the same session.
+		const tempFile = `${this.sessionFile}.${process.pid}.${randomUUID().slice(0, 8)}.tmp`;
+		const fd = openSync(tempFile, "wx");
 		try {
 			for (const entry of this.fileEntries) {
 				writeFileSync(fd, `${JSON.stringify(entry)}\n`);
@@ -936,6 +973,7 @@ export class SessionManager {
 		} finally {
 			closeSync(fd);
 		}
+		renameSync(tempFile, this.sessionFile);
 	}
 
 	isPersisted(): boolean {

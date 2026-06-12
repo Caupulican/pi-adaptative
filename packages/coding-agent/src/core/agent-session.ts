@@ -80,6 +80,7 @@ import {
 	wrapRegisteredTools,
 } from "./extensions/index.ts";
 import { emitSessionShutdownEvent } from "./extensions/runner.ts";
+import { compactToolResultDetailsForRetention } from "./message-retention.ts";
 import type { BashExecutionMessage, CustomMessage } from "./messages.ts";
 import type { ModelRegistry } from "./model-registry.ts";
 import { expandPromptTemplate, type PromptTemplate } from "./prompt-templates.ts";
@@ -93,64 +94,6 @@ import { type BuildSystemPromptOptions, buildSystemPrompt } from "./system-promp
 import { type BashOperations, createLocalBashOperations } from "./tools/bash.ts";
 import { createAllToolDefinitions } from "./tools/index.ts";
 import { createToolDefinitionFromAgentTool } from "./tools/tool-definition-wrapper.ts";
-
-const MAX_RETAINED_TOOL_RESULT_DETAILS_BYTES = 32 * 1024;
-
-function estimateJsonLikeBytes(value: unknown, maxBytes: number): { bytes: number; exceeded: boolean } {
-	const seen = new WeakSet<object>();
-	let bytes = 0;
-	const add = (amount: number): boolean => {
-		bytes += amount;
-		return bytes <= maxBytes;
-	};
-	const visit = (current: unknown): boolean => {
-		if (bytes > maxBytes) return false;
-		if (current === null) return add(4);
-		if (current === undefined) return add(9);
-		if (typeof current === "string") return add(current.length * 4 + 2);
-		if (typeof current === "number") return add(24);
-		if (typeof current === "boolean") return add(current ? 4 : 5);
-		if (typeof current === "bigint") return add(current.toString().length + 2);
-		if (typeof current === "symbol" || typeof current === "function") return add(12);
-		if (typeof current !== "object") return add(8);
-
-		const objectValue = current as Record<string, unknown>;
-		if (seen.has(objectValue)) return add(20);
-		seen.add(objectValue);
-		if (Array.isArray(objectValue)) {
-			if (!add(2)) return false;
-			for (let index = 0; index < objectValue.length; index++) {
-				if (!add(index === 0 ? 0 : 1)) return false;
-				if (!visit(objectValue[index])) return false;
-			}
-			return bytes <= maxBytes;
-		}
-
-		if (!add(2)) return false;
-		let first = true;
-		for (const key in objectValue) {
-			if (!Object.hasOwn(objectValue, key)) continue;
-			if (!add((first ? 0 : 1) + key.length * 4 + 3)) return false;
-			first = false;
-			if (!visit(objectValue[key])) return false;
-		}
-		return bytes <= maxBytes;
-	};
-	visit(value);
-	return { bytes, exceeded: bytes > maxBytes };
-}
-
-function compactToolResultDetailsForRetention(message: AgentMessage): void {
-	if (message.role !== "toolResult" || message.details === undefined) return;
-	const estimate = estimateJsonLikeBytes(message.details, MAX_RETAINED_TOOL_RESULT_DETAILS_BYTES);
-	if (!estimate.exceeded) return;
-	message.details = {
-		piToolResultDetailsTruncated: true,
-		reason: "Tool result details exceeded retention budget; model-visible content was retained.",
-		minimumBytes: estimate.bytes,
-		maxRetainedBytes: MAX_RETAINED_TOOL_RESULT_DETAILS_BYTES,
-	};
-}
 
 // ============================================================================
 // Skill Block Parsing
@@ -1197,7 +1140,7 @@ export class AgentSession {
 	 * @throws Error if no model selected or no API key available (when not streaming)
 	 */
 	async prompt(text: string, options?: PromptOptions): Promise<void> {
-		if (this.isStreaming && options?.streamingBehavior) {
+		if ((this.isStreaming || this.isRetrying) && options?.streamingBehavior) {
 			const run = this._streamingPromptSubmissionTail.then(
 				() => this._promptUnserialized(text, options),
 				() => this._promptUnserialized(text, options),
@@ -1262,8 +1205,10 @@ export class AgentSession {
 				expandedText = expandPromptTemplate(expandedText, [...this.promptTemplates]);
 			}
 
-			// If streaming, queue via steer() or followUp() based on option
-			if (this.isStreaming) {
+			// If streaming — or waiting out a retry backoff, which is still an active
+			// operation — queue via steer() or followUp() instead of starting a
+			// concurrent run that would race the pending retry continuation.
+			if (this.isStreaming || this.isRetrying) {
 				if (!options?.streamingBehavior) {
 					throw new Error(
 						"Agent is already processing. Specify streamingBehavior ('steer' or 'followUp') to queue the message.",
@@ -2778,6 +2723,11 @@ export class AgentSession {
 
 		const delayMs = settings.baseDelayMs * 2 ** (this._retryAttempt - 1);
 
+		// The retry window counts as active work from the instant listeners hear
+		// about it: isRetrying must already be true inside auto_retry_start handlers
+		// so prompts arriving there queue as steering instead of racing the retry.
+		this._retryAbortController = new AbortController();
+
 		this._emit({
 			type: "auto_retry_start",
 			attempt: this._retryAttempt,
@@ -2793,7 +2743,6 @@ export class AgentSession {
 		}
 
 		// Wait with exponential backoff (abortable)
-		this._retryAbortController = new AbortController();
 		try {
 			await sleep(delayMs, this._retryAbortController.signal);
 		} catch {

@@ -8,6 +8,8 @@ import type { ResourceDiagnostic } from "./diagnostics.ts";
 import { createSyntheticSourceInfo, type SourceInfo } from "./source-info.ts";
 
 /** Max name length per spec */
+const MAX_SKILL_FILE_BYTES = 8 * 1024 * 1024;
+
 const MAX_NAME_LENGTH = 64;
 
 /** Max description length per spec */
@@ -281,6 +283,17 @@ function loadSkillFromFile(
 	const diagnostics: ResourceDiagnostic[] = [];
 
 	try {
+		// A skill file is prompt material; anything beyond this is a mistake (or
+		// hostile) and would otherwise be loaded whole into the heap at startup.
+		const { size } = statSync(filePath);
+		if (size > MAX_SKILL_FILE_BYTES) {
+			diagnostics.push({
+				type: "warning",
+				path: filePath,
+				message: `Skill file is ${Math.round(size / (1024 * 1024))}MB (limit ${Math.round(MAX_SKILL_FILE_BYTES / (1024 * 1024))}MB); skipped.`,
+			});
+			return { skill: null, diagnostics };
+		}
 		const rawContent = readFileSync(filePath, "utf-8");
 		const { frontmatter } = parseFrontmatter<SkillFrontmatter>(rawContent);
 		const skillDir = dirname(filePath);

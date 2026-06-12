@@ -792,4 +792,135 @@ printf '\nWINDOWS_IPV4\n'; powershell.exe -NoProfile -Command "Get-NetIPAddress 
 			expect(collapsed.indexOf(":120-329")).toBeLessThan(collapsed.indexOf("to expand"));
 		});
 	}
+
+	test("bounds the fallback result view when a tool has no renderer", () => {
+		const lines: string[] = [];
+		for (let index = 0; index < 4000; index++) lines.push(`fallback-line-${String(index).padStart(4, "0")}`);
+		const component = new ToolExecutionComponent(
+			"mystery_tool",
+			"tool-fallback-1",
+			{},
+			{},
+			undefined,
+			createFakeTui(),
+			process.cwd(),
+		);
+		component.updateResult({ content: [{ type: "text", text: lines.join("\n") }], isError: false });
+
+		const rendered = stripAnsi(component.render(200).join("\n"));
+		expect(rendered).toContain("fallback-line-0000");
+		expect(rendered).not.toContain("fallback-line-3999");
+		expect(rendered).toMatch(/truncated for display/i);
+	});
+
+	test("bounds the fallback result view when a custom renderer throws", () => {
+		const lines: string[] = [];
+		for (let index = 0; index < 4000; index++) lines.push(`payload-line-${String(index).padStart(4, "0")}`);
+		const throwingDefinition: ToolDefinition = {
+			...createBaseToolDefinition(),
+			renderResult: () => {
+				throw new Error("renderer bug");
+			},
+		};
+		const component = new ToolExecutionComponent(
+			"custom_tool",
+			"tool-fallback-2",
+			{},
+			{},
+			throwingDefinition,
+			createFakeTui(),
+			process.cwd(),
+		);
+		component.updateResult({ content: [{ type: "text", text: lines.join("\n") }], isError: false });
+
+		const rendered = stripAnsi(component.render(200).join("\n"));
+		expect(rendered).toContain("payload-line-0000");
+		expect(rendered).not.toContain("payload-line-3999");
+		expect(rendered).toMatch(/truncated for display/i);
+	});
+
+	test("caps oversized result details retained after execution completes", () => {
+		const seenDetails: unknown[] = [];
+		const toolDefinition: ToolDefinition = {
+			...createBaseToolDefinition(),
+			renderResult: (result) => {
+				seenDetails.push(result.details);
+				return new Text("custom result", 0, 0);
+			},
+		};
+		const component = new ToolExecutionComponent(
+			"custom_tool",
+			"tool-retention-1",
+			{},
+			{},
+			toolDefinition,
+			createFakeTui(),
+			process.cwd(),
+		);
+
+		component.updateResult({
+			content: [{ type: "text", text: "ok" }],
+			isError: false,
+			details: { payload: "x".repeat(200_000) },
+		});
+
+		const retained = seenDetails[seenDetails.length - 1] as Record<string, unknown>;
+		expect(retained.piToolResultDetailsTruncated).toBe(true);
+	});
+
+	test("keeps small result details intact after execution completes", () => {
+		const seenDetails: unknown[] = [];
+		const toolDefinition: ToolDefinition = {
+			...createBaseToolDefinition(),
+			renderResult: (result) => {
+				seenDetails.push(result.details);
+				return new Text("custom result", 0, 0);
+			},
+		};
+		const component = new ToolExecutionComponent(
+			"custom_tool",
+			"tool-retention-2",
+			{},
+			{},
+			toolDefinition,
+			createFakeTui(),
+			process.cwd(),
+		);
+
+		component.updateResult({
+			content: [{ type: "text", text: "ok" }],
+			isError: false,
+			details: { summary: "kept", lines: 3 },
+		});
+
+		expect(seenDetails[seenDetails.length - 1]).toEqual({ summary: "kept", lines: 3 });
+	});
+
+	test("does not cap details on partial result updates", () => {
+		const seenDetails: unknown[] = [];
+		const toolDefinition: ToolDefinition = {
+			...createBaseToolDefinition(),
+			renderResult: (result) => {
+				seenDetails.push(result.details);
+				return new Text("custom result", 0, 0);
+			},
+		};
+		const component = new ToolExecutionComponent(
+			"custom_tool",
+			"tool-retention-3",
+			{},
+			{},
+			toolDefinition,
+			createFakeTui(),
+			process.cwd(),
+		);
+
+		const partialPayload = { payload: "x".repeat(200_000) };
+		component.updateResult(
+			{ content: [{ type: "text", text: "running" }], isError: false, details: partialPayload },
+			true,
+		);
+
+		expect(seenDetails[seenDetails.length - 1]).toBe(partialPayload);
+	});
 });

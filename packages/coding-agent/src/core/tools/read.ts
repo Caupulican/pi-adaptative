@@ -1,9 +1,10 @@
 import { basename, dirname, isAbsolute, relative, resolve as resolvePath, sep } from "node:path";
+import { StringDecoder } from "node:string_decoder";
 import type { AgentTool } from "@caupulican/pi-agent-core";
 import type { Api, ImageContent, Model, TextContent } from "@caupulican/pi-ai";
 import { Text } from "@caupulican/pi-tui";
 import { constants } from "fs";
-import { access as fsAccess, readFile as fsReadFile } from "fs/promises";
+import { access as fsAccess, open as fsOpen, readFile as fsReadFile, stat as fsStat } from "fs/promises";
 import { type Static, Type } from "typebox";
 import { getReadmePath } from "../../config.ts";
 import { keyHint, keyText } from "../../modes/interactive/components/keybinding-hints.ts";
@@ -61,19 +62,117 @@ export interface ReadOperations {
 	access: (absolutePath: string) => Promise<void>;
 	/** Detect image MIME type, return null or undefined for non-images */
 	detectImageMimeType?: (absolutePath: string) => Promise<string | null | undefined>;
+	/** File size in bytes, used to decide between whole-file and sliced reads. */
+	stat?: (absolutePath: string) => Promise<{ size: number }>;
+	/**
+	 * Stream a slice of lines out of the file with bounded memory. Any region of an
+	 * arbitrarily large file stays reachable in batches via offset continuation.
+	 */
+	readLineSlice?: (absolutePath: string, options: LineSliceOptions) => Promise<LineSlice>;
+	/** Count lines by streaming (bounded memory); used to resolve tail reads on oversized files. */
+	countLines?: (absolutePath: string) => Promise<number>;
+}
+
+export interface LineSliceOptions {
+	/** 0-based line to start collecting at. */
+	startLine: number;
+	/** Maximum number of lines to collect. */
+	maxLines: number;
+	/** Maximum total characters to collect across lines. */
+	maxChars: number;
+}
+
+export interface LineSlice {
+	lines: { text: string; originalIndex: number }[];
+	/** True when the end of the file was reached while collecting. */
+	reachedEnd: boolean;
+}
+
+const SLICE_SCAN_CHUNK_BYTES = 1024 * 1024;
+
+async function scanLines(
+	absolutePath: string,
+	onLine: (text: string | undefined, index: number) => boolean,
+): Promise<void> {
+	const handle = await fsOpen(absolutePath, "r");
+	try {
+		const decoder = new StringDecoder("utf8");
+		const buffer = Buffer.allocUnsafe(SLICE_SCAN_CHUNK_BYTES);
+		let pending = "";
+		let index = 0;
+		while (true) {
+			const { bytesRead } = await handle.read(buffer, 0, buffer.length, null);
+			if (bytesRead === 0) break;
+			pending += decoder.write(buffer.subarray(0, bytesRead));
+			let lineStart = 0;
+			let newlineIndex = pending.indexOf("\n", lineStart);
+			while (newlineIndex !== -1) {
+				if (!onLine(pending.slice(lineStart, newlineIndex), index++)) return;
+				lineStart = newlineIndex + 1;
+				newlineIndex = pending.indexOf("\n", lineStart);
+			}
+			pending = pending.slice(lineStart);
+		}
+		pending += decoder.end();
+		onLine(pending, index);
+	} finally {
+		await handle.close();
+	}
+}
+
+async function readLocalLineSlice(absolutePath: string, options: LineSliceOptions): Promise<LineSlice> {
+	const lines: { text: string; originalIndex: number }[] = [];
+	let collectedChars = 0;
+	let sawMore = false;
+	await scanLines(absolutePath, (text, index) => {
+		if (text === undefined) return false;
+		if (index < options.startLine) return true;
+		if (lines.length >= options.maxLines || collectedChars > options.maxChars) {
+			sawMore = true;
+			return false;
+		}
+		lines.push({ text, originalIndex: index + 1 });
+		collectedChars += text.length;
+		return true;
+	});
+	return { lines, reachedEnd: !sawMore };
+}
+
+async function countLocalLines(absolutePath: string): Promise<number> {
+	let count = 0;
+	await scanLines(absolutePath, () => {
+		count++;
+		return true;
+	});
+	return count;
 }
 
 const defaultReadOperations: ReadOperations = {
 	readFile: (path) => fsReadFile(path),
 	access: (path) => fsAccess(path, constants.R_OK),
 	detectImageMimeType: detectSupportedImageMimeTypeFromFile,
+	stat: async (path) => ({ size: (await fsStat(path)).size }),
+	readLineSlice: readLocalLineSlice,
+	countLines: countLocalLines,
 };
+
+// Loading a whole file before truncation lets a single giant file spike the heap
+// to its full size. Beyond these budgets, text reads stream line slices (every
+// region stays reachable in batches — lossless). The image budget is deliberately
+// far above any real screenshot/photo so quality-degrading workarounds are never
+// needed in practice; it only guards against pathological files.
+const DEFAULT_MAX_TEXT_READ_BYTES = 16 * 1024 * 1024;
+const DEFAULT_MAX_IMAGE_READ_BYTES = 128 * 1024 * 1024;
 
 export interface ReadToolOptions {
 	/** Whether to auto-resize images to 2000x2000 max. Default: true */
 	autoResizeImages?: boolean;
 	/** Custom operations for file reading. Default: local filesystem */
 	operations?: ReadOperations;
+	/** Whole-file load budget for text reads; larger files stream line slices instead. Default 16 MiB. */
+	maxTextReadBytes?: number;
+	/** Pathology guard for image reads; larger images return downscale guidance. Default 128 MiB. */
+	maxImageReadBytes?: number;
 }
 
 type ReadRenderArgs = { path?: string; file_path?: string; offset?: number; limit?: number };
@@ -220,6 +319,8 @@ export function createReadToolDefinition(
 ): ToolDefinition<typeof readSchema, ReadToolDetails | undefined> {
 	const autoResizeImages = options?.autoResizeImages ?? true;
 	const ops = options?.operations ?? defaultReadOperations;
+	const maxTextReadBytes = options?.maxTextReadBytes ?? DEFAULT_MAX_TEXT_READ_BYTES;
+	const maxImageReadBytes = options?.maxImageReadBytes ?? DEFAULT_MAX_IMAGE_READ_BYTES;
 	return {
 		name: "read",
 		label: "read",
@@ -272,7 +373,22 @@ export function createReadToolDefinition(
 							let content: (TextContent | ImageContent)[];
 							let details: ReadToolDetails | undefined;
 							const nonVisionImageNote = getNonVisionImageNote(ctx?.model);
+							const fileSize = ops.stat ? (await ops.stat(absolutePath)).size : undefined;
+							if (aborted) return;
 							if (mimeType) {
+								if (fileSize !== undefined && fileSize > maxImageReadBytes) {
+									signal?.removeEventListener("abort", onAbort);
+									resolve({
+										content: [
+											{
+												type: "text",
+												text: `Image file is ${formatSize(fileSize)} (${formatSize(maxImageReadBytes)} inline decode limit). Downscale it first, e.g. with bash (ImageMagick: magick "${path}" -resize 2000x2000 /tmp/preview.png) and read the result.`,
+											},
+										],
+										details: undefined,
+									});
+									return;
+								}
 								// Read image as binary.
 								const buffer = await ops.readFile(absolutePath);
 								if (autoResizeImages) {
@@ -301,35 +417,73 @@ export function createReadToolDefinition(
 									];
 								}
 							} else {
-								// Read text content.
-								const buffer = await ops.readFile(absolutePath);
-								const textContent = buffer.toString("utf-8");
-								const allLines = textContent.split("\n");
-								const totalFileLines = allLines.length;
-								// Apply offset/tail if specified. Convert from 1-indexed input to 0-indexed array access.
+								// Read text content. Oversized files are streamed as line slices so
+								// any region stays reachable in batches without loading the whole file.
+								const useSlicedRead =
+									fileSize !== undefined && fileSize > maxTextReadBytes && ops.readLineSlice !== undefined;
 								let startLine = 0;
 								let userLimitedLines = limit;
-								if (offset !== undefined) {
-									startLine = Math.max(0, offset - 1);
-								} else if (tail !== undefined) {
-									startLine = Math.max(0, totalFileLines - tail);
-									if (limit === undefined) {
-										userLimitedLines = tail;
+								let totalFileLines: number | undefined;
+								let moreContentRemains = false;
+								let textContentForJsonCheck: string | undefined;
+								let slicedLines: { text: string; originalIndex: number }[];
+								if (useSlicedRead && ops.readLineSlice) {
+									if (offset !== undefined) {
+										startLine = Math.max(0, offset - 1);
+									} else if (tail !== undefined) {
+										const counted = ops.countLines ? await ops.countLines(absolutePath) : undefined;
+										if (counted !== undefined) {
+											totalFileLines = counted;
+											startLine = Math.max(0, counted - tail);
+										}
+										if (limit === undefined) {
+											userLimitedLines = tail;
+										}
 									}
+									const slice = await ops.readLineSlice(absolutePath, {
+										startLine,
+										maxLines: userLimitedLines ?? DEFAULT_MAX_LINES,
+										maxChars: DEFAULT_MAX_BYTES * 4,
+									});
+									if (slice.lines.length === 0 && startLine > 0) {
+										throw new Error(`Offset ${startLine + 1} is beyond end of file`);
+									}
+									slicedLines = slice.lines;
+									moreContentRemains = !slice.reachedEnd;
+								} else {
+									const buffer = await ops.readFile(absolutePath);
+									const textContent = buffer.toString("utf-8");
+									textContentForJsonCheck = textContent;
+									const allLines = textContent.split("\n");
+									totalFileLines = allLines.length;
+									// Apply offset/tail if specified. Convert from 1-indexed input to 0-indexed array access.
+									if (offset !== undefined) {
+										startLine = Math.max(0, offset - 1);
+									} else if (tail !== undefined) {
+										startLine = Math.max(0, totalFileLines - tail);
+										if (limit === undefined) {
+											userLimitedLines = tail;
+										}
+									}
+									// Check if offset is out of bounds.
+									if (startLine >= allLines.length && allLines.length > 0) {
+										throw new Error(
+											`Offset ${startLine + 1} is beyond end of file (${allLines.length} lines total)`,
+										);
+									}
+									slicedLines =
+										userLimitedLines !== undefined
+											? allLines
+													.map((line, idx) => ({ text: line, originalIndex: idx + 1 }))
+													.slice(startLine, startLine + userLimitedLines)
+											: allLines
+													.map((line, idx) => ({ text: line, originalIndex: idx + 1 }))
+													.slice(startLine);
+									moreContentRemains =
+										userLimitedLines !== undefined && startLine + userLimitedLines < allLines.length;
 								}
 								const startLineDisplay = startLine + 1;
-								// Check if offset is out of bounds.
-								if (startLine >= allLines.length && allLines.length > 0) {
-									throw new Error(
-										`Offset ${startLine + 1} is beyond end of file (${allLines.length} lines total)`,
-									);
-								}
-								let slicedLines =
-									userLimitedLines !== undefined
-										? allLines
-												.map((line, idx) => ({ text: line, originalIndex: idx + 1 }))
-												.slice(startLine, startLine + userLimitedLines)
-										: allLines.map((line, idx) => ({ text: line, originalIndex: idx + 1 })).slice(startLine);
+								const firstSelectedLineText = slicedLines[0]?.text ?? "";
 
 								// Safe text filtering
 								let canFilter = true;
@@ -349,9 +503,9 @@ export function createReadToolDefinition(
 									];
 									if (unsafeExtensions.some((ext) => fileNameLower.endsWith(ext))) {
 										canFilter = false;
-									} else {
+									} else if (textContentForJsonCheck !== undefined) {
 										try {
-											JSON.parse(textContent);
+											JSON.parse(textContentForJsonCheck);
 											canFilter = false;
 										} catch {}
 									}
@@ -412,9 +566,13 @@ export function createReadToolDefinition(
 								// Apply truncation, respecting both line and byte limits.
 								const truncation = truncateHead(selectedContent);
 								let outputText: string;
+								const totalDisplay =
+									totalFileLines !== undefined
+										? String(totalFileLines)
+										: `a ${fileSize !== undefined ? formatSize(fileSize) : "large"} file`;
 								if (truncation.firstLineExceedsLimit) {
 									// First line alone exceeds the byte limit. Point the model at a bash fallback.
-									const firstLineSize = formatSize(Buffer.byteLength(allLines[startLine], "utf-8"));
+									const firstLineSize = formatSize(Buffer.byteLength(firstSelectedLineText, "utf-8"));
 									outputText = `[Line ${startLineDisplay} is ${firstLineSize}, exceeds ${formatSize(DEFAULT_MAX_BYTES)} limit. Use bash: sed -n '${startLineDisplay}p' ${path} | head -c ${DEFAULT_MAX_BYTES}]`;
 									details = { truncation };
 								} else if (truncation.truncated) {
@@ -423,18 +581,21 @@ export function createReadToolDefinition(
 									const nextOffset = endLineDisplay + 1;
 									outputText = truncation.content;
 									if (truncation.truncatedBy === "lines") {
-										outputText += `\n\n[Showing lines ${startLineDisplay}-${endLineDisplay} of ${totalFileLines}. Use offset=${nextOffset} to continue.]`;
+										outputText += `\n\n[Showing lines ${startLineDisplay}-${endLineDisplay} of ${totalDisplay}. Use offset=${nextOffset} to continue.]`;
 									} else {
-										outputText += `\n\n[Showing lines ${startLineDisplay}-${endLineDisplay} of ${totalFileLines} (${formatSize(DEFAULT_MAX_BYTES)} limit). Use offset=${nextOffset} to continue.]`;
+										outputText += `\n\n[Showing lines ${startLineDisplay}-${endLineDisplay} of ${totalDisplay} (${formatSize(DEFAULT_MAX_BYTES)} limit). Use offset=${nextOffset} to continue.]`;
 									}
 									details = { truncation };
-								} else if (userLimitedLines !== undefined && startLine + userLimitedLines < allLines.length) {
-									// User-specified limit stopped early, but the file still has more content.
-									const remaining = allLines.length - (startLine + userLimitedLines);
-									const nextOffset = startLine + userLimitedLines + 1;
-									outputText = `${truncation.content}\n\n[${remaining} more lines in file. Use offset=${nextOffset} to continue.]`;
+								} else if (moreContentRemains) {
+									// More content exists beyond this slice; hand the model a continuation pointer.
+									const nextOffset = startLine + slicedLines.length + 1;
+									const remaining =
+										totalFileLines !== undefined && userLimitedLines !== undefined
+											? `${totalFileLines - (startLine + userLimitedLines)} more lines in file`
+											: "More content remains";
+									outputText = `${truncation.content}\n\n[${remaining}. Use offset=${nextOffset} to continue.]`;
 								} else {
-									// No truncation and no remaining user-limited content.
+									// No truncation and no remaining content.
 									outputText = truncation.content;
 								}
 								content = [{ type: "text", text: outputText }];

@@ -218,7 +218,10 @@ export const streamBedrock: StreamFunction<"bedrock-converse-stream", BedrockOpt
 				await options?.onResponse?.({ status: response.$metadata.httpStatusCode, headers: responseHeaders }, model);
 			}
 
-			for await (const item of response.stream!) {
+			if (!response.stream) {
+				throw new Error("Bedrock returned a response without a stream");
+			}
+			for await (const item of response.stream) {
 				if (item.messageStart) {
 					if (item.messageStart.role !== ConversationRole.ASSISTANT) {
 						throw new Error("Unexpected assistant message start but got user message start instead");
