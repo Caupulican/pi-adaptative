@@ -83,10 +83,10 @@ jobs:
 
   publish-npm:
     runs-on: ubuntu-latest
-    # Intentionally NOT `needs: build`. The npm packages are independent of the
-    # cross-compiled binaries, so a flaky binary build must never block the npm
-    # publish — the whole point is that a release lands on npm automatically.
-    # This job has its own build/check/test gates below.
+    # The binary build is a mandatory release gate: packages publish to npm only
+    # after the cross-platform binaries build successfully, so a broken build
+    # never ships a release. This job also runs its own build/check/test below.
+    needs: build
     # Override the top-level contents:write — this job only needs to read the
     # repo and mint an OIDC token for npm provenance attestations.
     permissions:
