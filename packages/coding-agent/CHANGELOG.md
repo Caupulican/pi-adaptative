@@ -1,5 +1,9 @@
 ## [Unreleased]
 
+### Fixed
+
+- Fixed package repository metadata so npm provenance publishing matches the fork repository.
+
 ## [0.80.24] - 2026-06-14
 
 ### Added
