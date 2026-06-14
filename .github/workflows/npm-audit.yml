@@ -1,8 +1,6 @@
 name: npm audit
 
 on:
-  schedule:
-    - cron: '37 7 * * *'
   workflow_dispatch:
 
 permissions:
@@ -10,6 +8,7 @@ permissions:
 
 jobs:
   audit:
+    if: github.actor == 'Caupulican'
     runs-on: ubuntu-latest
     steps:
       - name: Checkout
