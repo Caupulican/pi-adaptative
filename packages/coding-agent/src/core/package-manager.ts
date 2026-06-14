@@ -33,11 +33,13 @@ import { type GitSource, parseGitUrl } from "../utils/git.ts";
 import { canonicalizePath, isLocalPath, markPathIgnoredByCloudSync, resolvePath } from "../utils/paths.ts";
 import { createRollingOutputBuffer } from "./exec.ts";
 import { isStdoutTakenOver } from "./output-guard.ts";
-import type { PackageSource, Settings, SettingsManager } from "./settings-manager.ts";
+import { mergeResourceProfileMap, parseResourceProfileBlocks } from "./resource-profile-blocks.ts";
+import type { PackageSource, ResourceProfileSettings, Settings, SettingsManager } from "./settings-manager.ts";
 
 const NETWORK_TIMEOUT_MS = 10000;
 const UPDATE_CHECK_CONCURRENCY = 4;
 const GIT_UPDATE_CONCURRENCY = 4;
+const MAX_RESOURCE_PROFILE_SCAN_BYTES = 2 * 1024 * 1024;
 
 function isOfflineModeEnabled(): boolean {
 	const value = process.env.PI_OFFLINE;
@@ -932,6 +934,8 @@ export class DefaultPackageManager implements PackageManager {
 		}
 
 		this.addAutoDiscoveredResources(accumulator, globalSettings, projectSettings, globalBaseDir, projectBaseDir);
+		this.collectEmbeddedResourceProfiles(accumulator);
+		this.applyResourceProfileFilters(accumulator);
 
 		return this.toResolvedPaths(accumulator);
 	}
@@ -2460,6 +2464,57 @@ export class DefaultPackageManager implements PackageManager {
 			prompts: new Map(),
 			themes: new Map(),
 		};
+	}
+
+	private getResourceProfileScanPath(resourceType: ResourceType, path: string): string | undefined {
+		try {
+			const stats = statSync(path);
+			if (stats.isFile()) return path;
+			if (resourceType === "skills" && stats.isDirectory()) {
+				const skillFile = join(path, "SKILL.md");
+				return existsSync(skillFile) ? skillFile : undefined;
+			}
+		} catch {}
+		return undefined;
+	}
+
+	private collectEmbeddedResourceProfiles(accumulator: ResourceAccumulator): void {
+		const activeProfileNames = this.settingsManager.getActiveResourceProfileNames();
+		const discoveredProfiles: Record<string, ResourceProfileSettings> = {};
+		for (const resourceType of RESOURCE_TYPES) {
+			if (resourceType === "themes") continue;
+			const target = this.getTargetMap(accumulator, resourceType);
+			for (const path of target.keys()) {
+				const scanPath = this.getResourceProfileScanPath(resourceType, path);
+				if (!scanPath) continue;
+				try {
+					const { size } = statSync(scanPath);
+					if (size > MAX_RESOURCE_PROFILE_SCAN_BYTES) continue;
+					const content = readFileSync(scanPath, "utf-8");
+					const { profiles } = parseResourceProfileBlocks(content, { profileNames: activeProfileNames });
+					Object.assign(discoveredProfiles, mergeResourceProfileMap(discoveredProfiles, profiles));
+				} catch {}
+			}
+		}
+		this.settingsManager.replaceDiscoveredResourceProfileDefinitions(discoveredProfiles);
+	}
+
+	private applyResourceProfileFilters(accumulator: ResourceAccumulator): void {
+		for (const resourceType of RESOURCE_TYPES) {
+			const filter = this.settingsManager.getResourceProfileFilter(resourceType);
+			if (filter.allow.length === 0 && filter.block.length === 0) continue;
+			const target = this.getTargetMap(accumulator, resourceType);
+			for (const [path, entry] of target.entries()) {
+				const baseDir =
+					entry.metadata.baseDir ??
+					(entry.metadata.scope === "project" ? join(this.cwd, CONFIG_DIR_NAME) : this.agentDir);
+				const allowed = filter.allow.length === 0 || matchesAnyPattern(path, filter.allow, baseDir);
+				const blocked = matchesAnyPattern(path, filter.block, baseDir);
+				if (!allowed || blocked) {
+					entry.enabled = false;
+				}
+			}
+		}
 	}
 
 	private toResolvedPaths(accumulator: ResourceAccumulator): ResolvedPaths {

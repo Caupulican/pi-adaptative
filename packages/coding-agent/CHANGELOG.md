@@ -1,5 +1,14 @@
 ## [Unreleased]
 
+### Added
+
+- Added resource profiles for scoped loading of extensions, skills, prompt templates, themes, context agent files, and tools, including zero-footprint user-level directory overlays and one-shot profile definitions.
+- Added embedded `<resource-profile>` blocks for extensions, prompt templates, skills, and context agent files; profile blocks are parsed as config and stripped from prompt-facing content.
+
+### Changed
+
+- Updated Pi Adaptative README copy to state the fork credit, purpose, and compatibility mode plainly.
+
 ## [0.80.23] - 2026-06-12
 
 ### Fixed

@@ -133,11 +133,28 @@ Additional paths and filters via `settings.json`:
   ],
   "disabledResources": {
     "extensions": ["old-extension", "project-only-extension"]
+  },
+  "activeResourceProfile": "lean",
+  "resourceProfiles": {
+    "lean": {
+      "extensions": { "block": ["old-extension"], "allow": [] },
+      "tools": { "allow": ["read", "rg", "python"] }
+    }
   }
 }
 ```
 
-Resource arrays support include/exclude patterns: plain entries include local paths, `!pattern` excludes matching auto-discovered resources, `+path` force-includes an exact path, and `-path` force-excludes an exact path. `disabledResources.extensions` is the explicit reversible unload form and is equivalent to exclude patterns. Put it in user settings for global unloads or project `.pi/settings.json` for project-specific unloads.
+Resource arrays support include/exclude patterns: plain entries include local paths, `!pattern` excludes matching auto-discovered resources, `+path` force-includes an exact path, and `-path` force-excludes an exact path. `disabledResources.extensions` remains as the legacy explicit reversible unload form and is merged as a `resourceProfiles` block filter. Prefer `resourceProfiles` when you need focused per-session, per-repo, or subagent-specific loading.
+
+Extensions may carry profile blocks inside comments. Pi reads only matching `<resource-profile>` blocks as JSON config before filtering, and ignores the rest of the extension file for profile parsing:
+
+```ts
+/*
+<resource-profile name="reviewer">
+{ "tools": { "allow": ["read", "rg"] }, "extensions": { "block": ["heavy-devtools"] } }
+</resource-profile>
+*/
+```
 
 To share extensions via npm or git as pi packages, see [packages.md](packages.md).
 

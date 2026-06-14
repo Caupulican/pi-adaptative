@@ -172,6 +172,14 @@ export {
 } from "./core/reload-blockers.ts";
 export type { ResourceCollision, ResourceDiagnostic, ResourceLoader } from "./core/resource-loader.ts";
 export { DefaultResourceLoader, loadProjectContextFiles } from "./core/resource-loader.ts";
+export {
+	mergeResourceProfileMap,
+	mergeResourceProfileSettings,
+	parseResourceProfileBlocks,
+	parseResourceProfileInput,
+	parseResourceProfileJson,
+	stripResourceProfileBlocks,
+} from "./core/resource-profile-blocks.ts";
 // SDK for programmatic usage
 export {
 	AgentSessionRuntime,
@@ -225,8 +233,14 @@ export {
 } from "./core/session-manager.ts";
 export {
 	type CompactionSettings,
+	type DirectoryResourceProfileInfo,
+	getDirectoryResourceProfileInfo,
 	type ImageSettings,
+	matchesResourceProfilePattern,
 	type PackageSource,
+	type ResourceProfileFilterSettings,
+	type ResourceProfileKind,
+	type ResourceProfileSettings,
 	type RetrySettings,
 	SettingsManager,
 	type SettingsManagerCreateOptions,

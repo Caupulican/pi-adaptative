@@ -35,6 +35,7 @@ import {
 	type ScopedModel,
 } from "./core/model-resolver.ts";
 import { restoreStdout, takeOverStdout } from "./core/output-guard.ts";
+import { parseResourceProfileInput } from "./core/resource-profile-blocks.ts";
 import type { CreateAgentSessionOptions } from "./core/sdk.ts";
 import {
 	formatMissingSessionCwdPrompt,
@@ -688,6 +689,23 @@ export async function main(args: string[], options?: MainOptions) {
 				? projectTrustedForSession
 				: (parsed.projectTrustOverride ?? (!hasProjectTrustInputs(cwd) || trustStore.get(cwd) === true));
 		const runtimeSettingsManager = SettingsManager.create(cwd, agentDir, { projectTrusted });
+		if (parsed.resourceProfileJson) {
+			for (const profileInput of parsed.resourceProfileJson) {
+				const { profiles, errors } = parseResourceProfileInput(profileInput);
+				if (errors.length > 0) {
+					reportDiagnostics(
+						errors.map((message) => ({
+							type: "warning" as const,
+							message: `--resource-profile-json ignored entry: ${message}`,
+						})),
+					);
+				}
+				runtimeSettingsManager.addInlineResourceProfileDefinitions(profiles);
+			}
+		}
+		if (parsed.resourceProfiles && parsed.resourceProfiles.length > 0) {
+			runtimeSettingsManager.setRuntimeResourceProfiles(parsed.resourceProfiles);
+		}
 		const services = await createAgentSessionServices({
 			cwd,
 			agentDir,
@@ -756,6 +774,7 @@ export async function main(args: string[], options?: MainOptions) {
 			tools: sessionOptions.tools,
 			excludeTools: sessionOptions.excludeTools,
 			noTools: sessionOptions.noTools,
+			toolProfileFilter: settingsManager.getResourceProfileFilter("tools"),
 			customTools: sessionOptions.customTools,
 		});
 		const cliThinkingOverride = parsed.thinking !== undefined || cliThinkingFromModel;

@@ -3,6 +3,7 @@ import { basename, dirname, join, resolve, sep } from "path";
 import { CONFIG_DIR_NAME } from "../config.ts";
 import { parseFrontmatter } from "../utils/frontmatter.ts";
 import { resolvePath } from "../utils/paths.ts";
+import { stripResourceProfileBlocks } from "./resource-profile-blocks.ts";
 import { createSyntheticSourceInfo, type SourceInfo } from "./source-info.ts";
 
 /**
@@ -111,7 +112,8 @@ export function substituteArgs(content: string, args: string[], rawArgs?: string
 function loadTemplateFromFile(filePath: string, sourceInfo: SourceInfo): PromptTemplate | null {
 	try {
 		const rawContent = readFileSync(filePath, "utf-8");
-		const { frontmatter, body } = parseFrontmatter<Record<string, string>>(rawContent);
+		const { frontmatter, body: rawBody } = parseFrontmatter<Record<string, string>>(rawContent);
+		const body = stripResourceProfileBlocks(rawBody);
 
 		const name = basename(filePath).replace(/\.md$/, "");
 

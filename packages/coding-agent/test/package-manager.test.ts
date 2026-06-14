@@ -199,6 +199,64 @@ Content`,
 			expect(result.skills.some((r) => r.path === skillFile && !r.enabled)).toBe(true);
 		});
 
+		it("should filter resources through an active allow/block resource profile", async () => {
+			const keepExtDir = join(agentDir, "extensions", "keep-ext");
+			const noisyExtDir = join(agentDir, "extensions", "noisy-ext");
+			mkdirSync(keepExtDir, { recursive: true });
+			mkdirSync(noisyExtDir, { recursive: true });
+			const keepExtPath = join(keepExtDir, "index.ts");
+			const noisyExtPath = join(noisyExtDir, "index.ts");
+			writeFileSync(keepExtPath, "export default function() {}");
+			writeFileSync(noisyExtPath, "export default function() {}");
+
+			const keepSkillDir = join(agentDir, "skills", "keep-skill");
+			const otherSkillDir = join(agentDir, "skills", "other-skill");
+			mkdirSync(keepSkillDir, { recursive: true });
+			mkdirSync(otherSkillDir, { recursive: true });
+			const keepSkillFile = join(keepSkillDir, "SKILL.md");
+			const otherSkillFile = join(otherSkillDir, "SKILL.md");
+			writeFileSync(keepSkillFile, "---\nname: keep-skill\ndescription: Keep\n---\nContent");
+			writeFileSync(otherSkillFile, "---\nname: other-skill\ndescription: Other\n---\nContent");
+
+			settingsManager = SettingsManager.inMemory({
+				activeResourceProfile: "lean",
+				resourceProfiles: {
+					lean: {
+						extensions: { block: ["noisy-ext"] },
+						skills: { allow: ["keep-skill"] },
+					},
+				},
+			});
+			packageManager = new DefaultPackageManager({ cwd: tempDir, agentDir, settingsManager });
+
+			const result = await packageManager.resolve();
+			expect(result.extensions.some((r) => r.path === keepExtPath && r.enabled)).toBe(true);
+			expect(result.extensions.some((r) => r.path === noisyExtPath && !r.enabled)).toBe(true);
+			expect(result.skills.some((r) => r.path === keepSkillFile && r.enabled)).toBe(true);
+			expect(result.skills.some((r) => r.path === otherSkillFile && !r.enabled)).toBe(true);
+		});
+
+		it("should apply embedded resource-profile blocks from extension files before filtering", async () => {
+			const extDir = join(agentDir, "extensions", "profiled-ext");
+			mkdirSync(extDir, { recursive: true });
+			const extPath = join(extDir, "index.ts");
+			writeFileSync(
+				extPath,
+				`/*
+<resource-profile name="lean">
+{ "extensions": { "block": ["profiled-ext"] } }
+</resource-profile>
+*/
+export default function() {}`,
+			);
+
+			settingsManager = SettingsManager.inMemory({ activeResourceProfile: "lean" });
+			packageManager = new DefaultPackageManager({ cwd: tempDir, agentDir, settingsManager });
+
+			const result = await packageManager.resolve();
+			expect(result.extensions.some((r) => r.path === extPath && !r.enabled)).toBe(true);
+		});
+
 		it("should resolve symlinked user and project resources once", async () => {
 			const previousHome = process.env.HOME;
 			process.env.HOME = tempDir;

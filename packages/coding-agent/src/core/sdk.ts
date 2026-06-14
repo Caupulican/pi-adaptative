@@ -13,7 +13,9 @@ import { ModelRegistry } from "./model-registry.ts";
 import { findInitialModel } from "./model-resolver.ts";
 import type { ResourceLoader } from "./resource-loader.ts";
 import { DefaultResourceLoader } from "./resource-loader.ts";
+import { parseResourceProfileInput } from "./resource-profile-blocks.ts";
 import { getDefaultSessionDir, SessionManager } from "./session-manager.ts";
+import type { ResourceProfileFilterSettings, ResourceProfileSettings } from "./settings-manager.ts";
 import { SettingsManager } from "./settings-manager.ts";
 import { isInstallTelemetryEnabled } from "./telemetry.ts";
 import { time } from "./timings.ts";
@@ -67,6 +69,14 @@ export interface CreateAgentSessionOptions {
 	tools?: string[];
 	/** Optional denylist of tool names to disable. Applies after `tools` when both are provided. */
 	excludeTools?: string[];
+	/** Optional resource-profile allow/block filters for tool names. */
+	toolProfileFilter?: ResourceProfileFilterSettings;
+	/** Optional one-shot profile definitions. Never persisted to disk. */
+	resourceProfileDefinitions?: Record<string, ResourceProfileSettings>;
+	/** Optional one-shot profile definitions as JSON or <resource-profile> tag text. Never persisted to disk. */
+	resourceProfileJson?: string | string[];
+	/** Optional runtime profile selection. Never persisted to disk. */
+	resourceProfiles?: string[];
 	/** Custom tools to register (in addition to built-in tools). */
 	customTools?: ToolDefinition[];
 
@@ -213,6 +223,20 @@ export async function createAgentSession(options: CreateAgentSessionOptions = {}
 	const modelRegistry = options.modelRegistry ?? ModelRegistry.create(authStorage, modelsPath);
 
 	const settingsManager = options.settingsManager ?? SettingsManager.create(cwd, agentDir);
+	if (options.resourceProfileDefinitions) {
+		settingsManager.addInlineResourceProfileDefinitions(options.resourceProfileDefinitions);
+	}
+	if (options.resourceProfileJson) {
+		const inputs = Array.isArray(options.resourceProfileJson)
+			? options.resourceProfileJson
+			: [options.resourceProfileJson];
+		for (const input of inputs) {
+			settingsManager.addInlineResourceProfileDefinitions(parseResourceProfileInput(input).profiles);
+		}
+	}
+	if (options.resourceProfiles && options.resourceProfiles.length > 0) {
+		settingsManager.setRuntimeResourceProfiles(options.resourceProfiles);
+	}
 	const sessionManager = options.sessionManager ?? SessionManager.create(cwd, getDefaultSessionDir(cwd, agentDir));
 
 	if (!resourceLoader) {
@@ -280,6 +304,7 @@ export async function createAgentSession(options: CreateAgentSessionOptions = {}
 	}
 
 	const defaultActiveToolNames: ToolName[] = ["read", "bash", "edit", "write"];
+	const toolProfileFilter = options.toolProfileFilter ?? settingsManager.getResourceProfileFilter("tools");
 	const allowedToolNames = options.tools ?? (options.noTools === "all" ? [] : undefined);
 	const excludedToolNames = options.excludeTools;
 	const excludedToolNameSet = excludedToolNames ? new Set(excludedToolNames) : undefined;
@@ -421,6 +446,7 @@ export async function createAgentSession(options: CreateAgentSessionOptions = {}
 		allowedToolNames,
 		excludedToolNames,
 		extensionRunnerRef,
+		toolProfileFilter,
 		sessionStartEvent: options.sessionStartEvent,
 	});
 	const extensionsResult = resourceLoader.getExtensions();

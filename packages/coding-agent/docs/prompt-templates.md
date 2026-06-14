@@ -31,6 +31,7 @@ Review the staged changes (`git diff --cached`). Focus on:
 - The filename becomes the command name. `review.md` becomes `/review`.
 - `description` is optional. If missing, the first non-empty line is used.
 - `argument-hint` is optional. When set, the hint is displayed before the description in the autocomplete dropdown.
+- Optional `<resource-profile name="...">{...}</resource-profile>` blocks define profile filters as JSON. Pi reads only matching profile blocks as config and strips them from expanded prompt content.
 
 ### Argument Hints
 

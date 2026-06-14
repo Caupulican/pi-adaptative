@@ -18,14 +18,28 @@
 
 # Pi Adaptative
 
-Pi Adaptative is our implementation and testbed for self-evolving coding agents. It is an adaptive fork of the Pi agent harness focused on practical agent self-improvement: lazy context loading, tool/panel ergonomics, continuous learning, autonomous but bounded harness evolution, and release-tested workflows that can be installed from npm.
+Pi Adaptative is a fork of Pi focused on adaptive agent runtime: reloading changes, making bounded self-modifications, and staying compatible with normal Pi workflows.
+
+**Fork credit:** Built on Pi by Mario Zechner / badlogic.
+
+## Purpose
+
+This repo keeps the scope simple:
+
+- reload supported runtime changes while working;
+- make source-backed self-modifications with validation;
+- scope loaded resources through profiles when needed;
+- keep per-repo configuration out of the repo by using user-level state;
+- keep the package installable and usable as a normal coding-agent CLI.
+
+## Compatibility mode
+
+`pi-adaptative` keeps Pi-compatible CLI, SDK, settings, skills, prompt templates, themes, extensions, and package loading where practical. Adaptive features are additive. Legacy settings such as `disabledResources` still work as aliases for profile blocks.
 
 * **[@caupulican/pi-adaptative](packages/coding-agent)**: Interactive CLI and self-evolution harness
 * **[@caupulican/pi-agent-core](packages/agent)**: Agent runtime package published for this fork
 * **[@caupulican/pi-ai](packages/ai)**: Multi-provider LLM API package published for this fork
 * **[@caupulican/pi-tui](packages/tui)**: Terminal UI package published for this fork
-
-This repository keeps upstream Pi compatibility where useful, but the product and npm install target for our work is `pi-adaptative`.
 
 ## Share your OSS coding agent sessions
 

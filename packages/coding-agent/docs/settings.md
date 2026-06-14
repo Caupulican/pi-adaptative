@@ -1,11 +1,12 @@
 # Settings
 
-Pi uses JSON settings files with project settings overriding global settings.
+Pi uses JSON settings files with project settings overriding global settings. Pi also supports zero-footprint directory resource profiles stored under the user-level agent directory.
 
 | Location | Scope |
 |----------|-------|
 | `~/.pi/agent/settings.json` | Global (all projects) |
 | `.pi/settings.json` | Project (current directory) |
+| `~/.pi/agent/resource-profiles/<hash>/settings.json` | User-level per repo/directory overlay; no repo files written |
 
 Edit directly or use `/settings` for common options.
 
@@ -281,6 +282,10 @@ Paths in `~/.pi/agent/settings.json` resolve relative to `~/.pi/agent`. Paths in
 | `prompts` | string[] | `[]` | Local prompt template paths or directories |
 | `themes` | string[] | `[]` | Local theme file paths or directories |
 | `enableSkillCommands` | boolean | `true` | Register skills as `/skill:name` commands |
+| `resourceProfiles` | object | `{}` | Named resource allow/block filters for `extensions`, `skills`, `prompts`, `themes`, `agents`, and `tools` |
+| `activeResourceProfile` | string/string[] | - | Active profile name(s) |
+| `activeResourceProfiles` | string[] | - | Active profile names; equivalent to array form of `activeResourceProfile` |
+| `disabledResources` | object | `{}` | Legacy block filters; still supported and merged into resource profiles |
 
 Arrays support glob patterns and exclusions. Use `!pattern` to exclude. Use `+path` to force-include an exact path and `-path` to force-exclude an exact path.
 
@@ -309,6 +314,43 @@ Object form filters which resources to load:
 ```
 
 See [packages.md](packages.md) for package management details.
+
+#### resourceProfiles
+
+Resource profiles dynamically filter resources after discovery. Each resource kind supports `allow` and `block` arrays. If `allow` is non-empty, only matching resources load; `block` is applied after allow. Patterns match relative paths, absolute paths, file names, and containing directory names.
+
+```json
+{
+  "activeResourceProfile": "lean",
+  "resourceProfiles": {
+    "lean": {
+      "extensions": { "block": ["cmux-agent-manager", "heavy-devtools"] },
+      "skills": { "allow": ["engineering-principles", "graph-first-code-navigation"] },
+      "agents": { "block": ["GEMINI.md"] },
+      "tools": { "allow": ["read", "rg", "python"] }
+    }
+  }
+}
+```
+
+Use `--resource-profile lean` to select a profile for one session or subagent launch. Use `--resource-profile-json` for one-shot definitions that never touch disk:
+
+```bash
+pi --resource-profile oneoff \
+  --resource-profile-json '{"oneoff":{"tools":{"allow":["read","rg"]}}}'
+```
+
+Resource files may also carry profile blocks. Pi parses only the matching `<resource-profile>` block as JSON config and strips the block from prompt/agent/skill expansion content:
+
+```markdown
+<resource-profile name="lean">
+{ "tools": { "allow": ["read", "rg"] }, "agents": { "block": ["GEMINI.md"] } }
+</resource-profile>
+```
+
+Supported carriers: extension files (`.ts`/`.js`, usually inside comments), prompt templates, skill files, and context agent files (`AGENTS.md`, `CLAUDE.md`, `GEMINI.md`). Resource-profile block contents are data, not instructions.
+
+Zero-footprint repo/directory overlays live under `~/.pi/agent/resource-profiles/<hash>/settings.json`, where `<hash>` is derived from the nearest VCS root (or current directory when no VCS root exists). These files are user-level settings; Pi does not write `.pi/settings.json` just to remember directory profiles.
 
 ## Example
 

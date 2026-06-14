@@ -7,6 +7,7 @@ import { AuthStorage } from "./auth-storage.ts";
 import type { SessionStartEvent, ToolDefinition } from "./extensions/index.ts";
 import { ModelRegistry } from "./model-registry.ts";
 import { DefaultResourceLoader, type DefaultResourceLoaderOptions, type ResourceLoader } from "./resource-loader.ts";
+import { parseResourceProfileInput } from "./resource-profile-blocks.ts";
 import { type CreateAgentSessionOptions, type CreateAgentSessionResult, createAgentSession } from "./sdk.ts";
 import type { SessionManager } from "./session-manager.ts";
 import { SettingsManager } from "./settings-manager.ts";
@@ -56,6 +57,10 @@ export interface CreateAgentSessionFromServicesOptions {
 	tools?: string[];
 	excludeTools?: CreateAgentSessionOptions["excludeTools"];
 	noTools?: CreateAgentSessionOptions["noTools"];
+	toolProfileFilter?: CreateAgentSessionOptions["toolProfileFilter"];
+	resourceProfileDefinitions?: CreateAgentSessionOptions["resourceProfileDefinitions"];
+	resourceProfileJson?: CreateAgentSessionOptions["resourceProfileJson"];
+	resourceProfiles?: CreateAgentSessionOptions["resourceProfiles"];
 	customTools?: ToolDefinition[];
 }
 
@@ -181,6 +186,30 @@ export async function createAgentSessionServices(
 export async function createAgentSessionFromServices(
 	options: CreateAgentSessionFromServicesOptions,
 ): Promise<CreateAgentSessionResult> {
+	const needsProfileReload =
+		options.resourceProfileDefinitions !== undefined ||
+		options.resourceProfileJson !== undefined ||
+		(options.resourceProfiles !== undefined && options.resourceProfiles.length > 0);
+	if (options.resourceProfileDefinitions) {
+		options.services.settingsManager.addInlineResourceProfileDefinitions(options.resourceProfileDefinitions);
+	}
+	if (options.resourceProfileJson) {
+		const inputs = Array.isArray(options.resourceProfileJson)
+			? options.resourceProfileJson
+			: [options.resourceProfileJson];
+		for (const input of inputs) {
+			options.services.settingsManager.addInlineResourceProfileDefinitions(
+				parseResourceProfileInput(input).profiles,
+			);
+		}
+	}
+	if (options.resourceProfiles && options.resourceProfiles.length > 0) {
+		options.services.settingsManager.setRuntimeResourceProfiles(options.resourceProfiles);
+	}
+	if (needsProfileReload) {
+		await options.services.resourceLoader.reload();
+	}
+
 	return createAgentSession({
 		cwd: options.services.cwd,
 		agentDir: options.services.agentDir,
@@ -195,6 +224,8 @@ export async function createAgentSessionFromServices(
 		tools: options.tools,
 		excludeTools: options.excludeTools,
 		noTools: options.noTools,
+		toolProfileFilter:
+			options.toolProfileFilter ?? options.services.settingsManager.getResourceProfileFilter("tools"),
 		customTools: options.customTools,
 		sessionStartEvent: options.sessionStartEvent,
 	});

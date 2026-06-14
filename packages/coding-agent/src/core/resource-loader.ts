@@ -19,7 +19,12 @@ import type { Extension, ExtensionFactory, ExtensionRuntime, LoadExtensionsResul
 import { DefaultPackageManager, type PathMetadata } from "./package-manager.ts";
 import type { PromptTemplate } from "./prompt-templates.ts";
 import { loadPromptTemplates } from "./prompt-templates.ts";
-import { SettingsManager } from "./settings-manager.ts";
+import {
+	mergeResourceProfileMap,
+	parseResourceProfileBlocks,
+	stripResourceProfileBlocks,
+} from "./resource-profile-blocks.ts";
+import { matchesResourceProfilePattern, type ResourceProfileSettings, SettingsManager } from "./settings-manager.ts";
 import type { Skill } from "./skills.ts";
 import { loadSkills } from "./skills.ts";
 import { createSourceInfo, type SourceInfo } from "./source-info.ts";
@@ -81,8 +86,9 @@ export function scanContextFileThreats(content: string): string[] {
 }
 
 function sanitizeContextFileContent(filePath: string, content: string): string {
-	const findings = scanContextFileThreats(content);
-	if (findings.length === 0) return content;
+	const profileFreeContent = stripResourceProfileBlocks(content);
+	const findings = scanContextFileThreats(profileFreeContent);
+	if (findings.length === 0) return profileFreeContent;
 	console.error(chalk.yellow(`Warning: Blocked context file ${filePath}: ${findings.join(", ")}`));
 	return `[BLOCKED: ${filePath} contained potential prompt injection (${findings.join(", ")}). Content not loaded.]`;
 }
@@ -509,14 +515,37 @@ export class DefaultResourceLoader implements ResourceLoader {
 			}
 		}
 
+		const rawAgentsFiles = this.noContextFiles
+			? []
+			: loadProjectContextFiles({
+					cwd: this.cwd,
+					agentDir: this.agentDir,
+					projectTrusted: this.settingsManager.isProjectTrusted(),
+				});
+		const agentEmbeddedProfiles: Record<string, ResourceProfileSettings> = {};
+		const activeProfileNames = this.settingsManager.getActiveResourceProfileNames();
+		for (const file of rawAgentsFiles) {
+			try {
+				const rawContent = readFileSync(file.path, "utf-8");
+				const { profiles } = parseResourceProfileBlocks(rawContent, { profileNames: activeProfileNames });
+				Object.assign(agentEmbeddedProfiles, mergeResourceProfileMap(agentEmbeddedProfiles, profiles));
+			} catch {}
+		}
+		this.settingsManager.addDiscoveredResourceProfileDefinitions(agentEmbeddedProfiles);
+		const agentProfileFilter = this.settingsManager.getResourceProfileFilter("agents");
 		const agentsFiles = {
-			agentsFiles: this.noContextFiles
-				? []
-				: loadProjectContextFiles({
-						cwd: this.cwd,
-						agentDir: this.agentDir,
-						projectTrusted: this.settingsManager.isProjectTrusted(),
-					}),
+			agentsFiles: rawAgentsFiles
+				.filter((file) => {
+					const allowed =
+						agentProfileFilter.allow.length === 0 ||
+						matchesResourceProfilePattern(file.path, agentProfileFilter.allow, this.cwd);
+					const blocked = matchesResourceProfilePattern(file.path, agentProfileFilter.block, this.cwd);
+					return allowed && !blocked;
+				})
+				.map((file) => ({
+					...file,
+					content: file.content ? stripResourceProfileBlocks(file.content) : file.content,
+				})),
 		};
 		const resolvedAgentsFiles = this.agentsFilesOverride ? this.agentsFilesOverride(agentsFiles) : agentsFiles;
 		this.agentsFiles = resolvedAgentsFiles.agentsFiles;

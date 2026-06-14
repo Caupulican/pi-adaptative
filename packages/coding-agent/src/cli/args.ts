@@ -32,6 +32,8 @@ export interface Args {
 	excludeTools?: string[];
 	noTools?: boolean;
 	noBuiltinTools?: boolean;
+	resourceProfiles?: string[];
+	resourceProfileJson?: string[];
 	extensions?: string[];
 	noExtensions?: boolean;
 	print?: boolean;
@@ -127,6 +129,16 @@ export function parseArgs(args: string[]): Args {
 				.split(",")
 				.map((s) => s.trim())
 				.filter((name) => name.length > 0);
+		} else if (arg === "--resource-profile" && i + 1 < args.length) {
+			result.resourceProfiles = [
+				...(result.resourceProfiles ?? []),
+				...args[++i]
+					.split(",")
+					.map((s) => s.trim())
+					.filter((name) => name.length > 0),
+			];
+		} else if (arg === "--resource-profile-json" && i + 1 < args.length) {
+			result.resourceProfileJson = [...(result.resourceProfileJson ?? []), args[++i]];
 		} else if (arg === "--thinking" && i + 1 < args.length) {
 			const level = args[++i];
 			if (isValidThinkingLevel(level)) {
@@ -262,6 +274,8 @@ ${chalk.bold("Options:")}
                                  Applies to built-in, extension, and custom tools
   --exclude-tools, -xt <tools>   Comma-separated denylist of tool names to disable
                                  Applies to built-in, extension, and custom tools
+  --resource-profile <names>     Comma-separated resource profile names for this session
+  --resource-profile-json <json>  One-shot profile definitions as JSON or <resource-profile> tag text
   --thinking <level>             Set thinking level: off, minimal, low, medium, high, xhigh
   --extension, -e <path>         Load an extension file (can be used multiple times)
   --no-extensions, -ne           Disable extension discovery (explicit -e paths still work)

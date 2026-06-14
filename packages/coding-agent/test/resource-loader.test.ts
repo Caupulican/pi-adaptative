@@ -97,6 +97,28 @@ Prompt content.`,
 			expect(prompts.some((p) => p.name === "test-prompt")).toBe(true);
 		});
 
+		it("should strip resource-profile blocks from prompt template content", async () => {
+			const promptsDir = join(agentDir, "prompts");
+			mkdirSync(promptsDir, { recursive: true });
+			writeFileSync(
+				join(promptsDir, "profiled-prompt.md"),
+				`---
+description: A profiled prompt
+---
+Prompt content.
+<resource-profile name="lean">
+{ "tools": { "allow": ["read"] } }
+</resource-profile>`,
+			);
+
+			const loader = new DefaultResourceLoader({ cwd, agentDir });
+			await loader.reload();
+
+			const prompt = loader.getPrompts().prompts.find((p) => p.name === "profiled-prompt");
+			expect(prompt?.content).toContain("Prompt content.");
+			expect(prompt?.content).not.toContain("resource-profile");
+		});
+
 		it("should prefer project resources over user on name collisions", async () => {
 			const userPromptsDir = join(agentDir, "prompts");
 			const projectPromptsDir = join(cwd, ".pi", "prompts");
@@ -346,6 +368,45 @@ Content`,
 
 			const names = loader.getAgentsFiles().agentsFiles.map((f) => f.path.split(/[\\/]/).at(-1));
 			expect(names).toEqual(expect.arrayContaining(["AGENTS.md", "CLAUDE.md", "GEMINI.md"]));
+		});
+
+		it("should filter context agent files through an active resource profile", async () => {
+			writeFileSync(join(cwd, "AGENTS.md"), "Agents context");
+			writeFileSync(join(cwd, "GEMINI.md"), "Gemini context");
+			const settingsManager = SettingsManager.inMemory({
+				activeResourceProfile: "agent-min",
+				resourceProfiles: {
+					"agent-min": { agents: { block: ["GEMINI.md"] } },
+				},
+			});
+
+			const loader = new DefaultResourceLoader({ cwd, agentDir, settingsManager });
+			await loader.reload();
+
+			const names = loader.getAgentsFiles().agentsFiles.map((f) => f.path.split(/[\\/]/).at(-1));
+			expect(names).toContain("AGENTS.md");
+			expect(names).not.toContain("GEMINI.md");
+		});
+
+		it("should apply embedded resource-profile blocks from context agent files and strip them from content", async () => {
+			writeFileSync(
+				join(cwd, "AGENTS.md"),
+				`Agents context
+<resource-profile name="agent-min">
+{ "agents": { "block": ["GEMINI.md"] } }
+</resource-profile>`,
+			);
+			writeFileSync(join(cwd, "GEMINI.md"), "Gemini context");
+			const settingsManager = SettingsManager.inMemory({ activeResourceProfile: "agent-min" });
+
+			const loader = new DefaultResourceLoader({ cwd, agentDir, settingsManager });
+			await loader.reload();
+
+			const files = loader.getAgentsFiles().agentsFiles;
+			const names = files.map((f) => f.path.split(/[\\/]/).at(-1));
+			expect(names).toContain("AGENTS.md");
+			expect(names).not.toContain("GEMINI.md");
+			expect(files.find((f) => f.path.endsWith("AGENTS.md"))?.content).not.toContain("resource-profile");
 		});
 
 		it("should skip AGENTS.md, CLAUDE.md, and GEMINI.md discovery when noContextFiles is true", async () => {

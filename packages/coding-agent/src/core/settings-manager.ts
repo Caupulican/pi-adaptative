@@ -1,10 +1,13 @@
 import type { Transport } from "@caupulican/pi-ai";
-import { existsSync, mkdirSync, readFileSync, writeFileSync } from "fs";
-import { dirname, join } from "path";
+import { createHash } from "crypto";
+import { existsSync, mkdirSync, readFileSync, statSync, writeFileSync } from "fs";
+import { minimatch } from "minimatch";
+import { basename, dirname, join, relative, resolve, sep } from "path";
 import lockfile from "proper-lockfile";
 import { CONFIG_DIR_NAME, getAgentDir } from "../config.ts";
 import { normalizePath, resolvePath } from "../utils/paths.ts";
 import { DEFAULT_HTTP_IDLE_TIMEOUT_MS, parseHttpIdleTimeoutMs } from "./http-dispatcher.ts";
+import { mergeResourceProfileMap } from "./resource-profile-blocks.ts";
 
 export interface CompactionSettings {
 	enabled?: boolean; // default: true
@@ -99,12 +102,24 @@ export type PackageSource =
 			themes?: string[];
 	  };
 
+export type ResourceProfileKind = "extensions" | "skills" | "prompts" | "themes" | "agents" | "tools";
+
+export interface ResourceProfileFilterSettings {
+	/** Allowlist patterns. When non-empty, only matching resources stay available. */
+	allow?: string[];
+	/** Blocklist patterns. Applied after allow. */
+	block?: string[];
+}
+
+export type ResourceProfileSettings = Partial<Record<ResourceProfileKind, ResourceProfileFilterSettings>>;
+
 export interface DisabledResourcesSettings {
 	extensions?: string[];
 	skills?: string[];
 	prompts?: string[];
 	themes?: string[];
 	agents?: string[];
+	tools?: string[];
 }
 
 export interface Settings {
@@ -131,7 +146,10 @@ export interface Settings {
 	skills?: string[]; // Array of local skill file paths/directories or include/exclude patterns
 	prompts?: string[]; // Array of local prompt template paths/directories or include/exclude patterns
 	themes?: string[]; // Array of local theme file paths/directories or include/exclude patterns
-	disabledResources?: DisabledResourcesSettings; // Explicit reversible resource unload filters for extensions/skills/prompts/themes/agents
+	disabledResources?: DisabledResourcesSettings; // Legacy reversible block filters for extensions/skills/prompts/themes/agents/tools
+	resourceProfiles?: Record<string, ResourceProfileSettings>; // Named resource allow/block filters
+	activeResourceProfile?: string | string[]; // Active profile name(s), applied after global/project/directory settings merge
+	activeResourceProfiles?: string[]; // Active profile names, equivalent to activeResourceProfile array
 	enableSkillCommands?: boolean; // default: true - register skills as /skill:name commands
 	terminal?: TerminalSettings;
 	images?: ImageSettings;
@@ -183,6 +201,128 @@ function deepMergeSettings(base: Settings, overrides: Settings): Settings {
 	return result;
 }
 
+function toPosixPath(p: string): string {
+	return p.split(sep).join("/");
+}
+
+function findDirectoryProfileRoot(cwd: string): string {
+	let current = resolvePath(cwd);
+	while (true) {
+		for (const marker of [".git", ".hg", ".svn"]) {
+			try {
+				statSync(join(current, marker));
+				return current;
+			} catch {}
+		}
+		const parent = resolve(current, "..");
+		if (parent === current) return resolvePath(cwd);
+		current = parent;
+	}
+}
+
+export interface DirectoryResourceProfileInfo {
+	root: string;
+	hash: string;
+	path: string;
+}
+
+export function getDirectoryResourceProfileInfo(
+	cwd: string,
+	agentDir: string = getAgentDir(),
+): DirectoryResourceProfileInfo {
+	const root = findDirectoryProfileRoot(cwd);
+	const hash = createHash("sha256").update(root).digest("hex").slice(0, 16);
+	return {
+		root,
+		hash,
+		path: join(resolvePath(agentDir), "resource-profiles", hash, "settings.json"),
+	};
+}
+
+export function matchesResourceProfilePattern(resourcePath: string, patterns: string[], baseDir = ""): boolean {
+	if (patterns.length === 0) return false;
+	const resolvedBase = baseDir ? resolvePath(baseDir) : "";
+	const rel = resolvedBase ? toPosixPath(relative(resolvedBase, resourcePath)) : toPosixPath(resourcePath);
+	const name = basename(resourcePath);
+	const filePathPosix = toPosixPath(resourcePath);
+	const parentDir = dirname(resourcePath);
+	const parentRel = resolvedBase ? toPosixPath(relative(resolvedBase, parentDir)) : toPosixPath(parentDir);
+	const parentName = basename(parentDir);
+	const parentDirPosix = toPosixPath(parentDir);
+
+	return patterns.some((pattern) => {
+		const normalizedPattern = toPosixPath(pattern);
+		return (
+			minimatch(rel, normalizedPattern) ||
+			minimatch(name, normalizedPattern) ||
+			minimatch(filePathPosix, normalizedPattern) ||
+			minimatch(parentRel, normalizedPattern) ||
+			minimatch(parentName, normalizedPattern) ||
+			minimatch(parentDirPosix, normalizedPattern)
+		);
+	});
+}
+
+function normalizeResourceProfileNames(value: unknown): string[] {
+	const values: string[] = [];
+	const add = (candidate: unknown) => {
+		if (Array.isArray(candidate)) {
+			for (const item of candidate) add(item);
+			return;
+		}
+		if (typeof candidate === "string") {
+			for (const part of candidate.split(",")) {
+				const trimmed = part.trim();
+				if (trimmed) values.push(trimmed);
+			}
+		}
+	};
+	add(value);
+	return [...new Set(values)];
+}
+
+function normalizeActiveResourceProfiles(settings: Settings): string[] {
+	const explicitProfiles = normalizeResourceProfileNames(settings.activeResourceProfiles);
+	const values =
+		explicitProfiles.length > 0 ? explicitProfiles : normalizeResourceProfileNames(settings.activeResourceProfile);
+	if (values.length === 0 && settings.resourceProfiles?.default) {
+		values.push("default");
+	}
+	return [...new Set(values)];
+}
+
+function appendFilter(target: ResourceProfileFilterSettings, source?: ResourceProfileFilterSettings): void {
+	if (!source) return;
+	if (Array.isArray(source.allow)) target.allow = [...(target.allow ?? []), ...source.allow];
+	if (Array.isArray(source.block)) target.block = [...(target.block ?? []), ...source.block];
+}
+
+function collectLegacyDisabledFilterFromSettings(
+	settings: Settings,
+	kind: ResourceProfileKind,
+): ResourceProfileFilterSettings {
+	const legacyDisabled = settings.disabledResources?.[kind];
+	return Array.isArray(legacyDisabled) ? { block: legacyDisabled } : {};
+}
+
+function collectNamedResourceProfileFilters(
+	settings: Settings,
+	kind: ResourceProfileKind,
+	profileNames: string[],
+): ResourceProfileFilterSettings {
+	const result: ResourceProfileFilterSettings = {};
+	for (const profileName of profileNames) {
+		appendFilter(result, settings.resourceProfiles?.[profileName]?.[kind]);
+	}
+	return result;
+}
+
+function mergeResourceProfileFilters(...filters: ResourceProfileFilterSettings[]): ResourceProfileFilterSettings {
+	const result: ResourceProfileFilterSettings = {};
+	for (const filter of filters) appendFilter(result, filter);
+	return result;
+}
+
 function parseTimeoutSetting(value: unknown, settingName: string): number | undefined {
 	const timeoutMs = parseHttpIdleTimeoutMs(value);
 	if (timeoutMs !== undefined) {
@@ -195,6 +335,7 @@ function parseTimeoutSetting(value: unknown, settingName: string): number | unde
 }
 
 export type SettingsScope = "global" | "project";
+export type SettingsErrorScope = SettingsScope | "directoryProfile";
 
 export interface SettingsManagerCreateOptions {
 	projectTrusted?: boolean;
@@ -205,19 +346,30 @@ export interface SettingsStorage {
 }
 
 export interface SettingsError {
-	scope: SettingsScope;
+	scope: SettingsErrorScope;
 	error: Error;
 }
 
 export class FileSettingsStorage implements SettingsStorage {
 	private globalSettingsPath: string;
 	private projectSettingsPath: string;
+	private directoryProfileInfo: DirectoryResourceProfileInfo;
 
 	constructor(cwd: string, agentDir: string) {
 		const resolvedCwd = resolvePath(cwd);
 		const resolvedAgentDir = resolvePath(agentDir);
 		this.globalSettingsPath = join(resolvedAgentDir, "settings.json");
 		this.projectSettingsPath = join(resolvedCwd, CONFIG_DIR_NAME, "settings.json");
+		this.directoryProfileInfo = getDirectoryResourceProfileInfo(resolvedCwd, resolvedAgentDir);
+	}
+
+	getDirectoryResourceProfileInfo(): DirectoryResourceProfileInfo {
+		return { ...this.directoryProfileInfo };
+	}
+
+	readDirectoryResourceProfile(): string | undefined {
+		const path = this.directoryProfileInfo.path;
+		return existsSync(path) ? readFileSync(path, "utf-8") : undefined;
 	}
 
 	private acquireLockSyncWithRetry(path: string): () => void {
@@ -299,6 +451,10 @@ export class SettingsManager {
 	private storage: SettingsStorage;
 	private globalSettings: Settings;
 	private projectSettings: Settings;
+	private directoryProfileSettings: Settings;
+	private runtimeResourceProfiles: string[] | undefined;
+	private inlineResourceProfileDefinitions: Record<string, ResourceProfileSettings> = {};
+	private discoveredResourceProfileDefinitions: Record<string, ResourceProfileSettings> = {};
 	private settings: Settings;
 	private projectTrusted: boolean;
 	private modifiedFields = new Set<keyof Settings>(); // Track global fields modified during session
@@ -307,6 +463,7 @@ export class SettingsManager {
 	private modifiedProjectNestedFields = new Map<keyof Settings, Set<string>>(); // Track project nested field modifications
 	private globalSettingsLoadError: Error | null = null; // Track if global settings file had parse errors
 	private projectSettingsLoadError: Error | null = null; // Track if project settings file had parse errors
+	private directoryProfileInfo: DirectoryResourceProfileInfo | null = null;
 	private writeQueue: Promise<void> = Promise.resolve();
 	private errors: SettingsError[];
 
@@ -314,19 +471,36 @@ export class SettingsManager {
 		storage: SettingsStorage,
 		initialGlobal: Settings,
 		initialProject: Settings,
+		initialDirectoryProfile: Settings = {},
 		globalLoadError: Error | null = null,
 		projectLoadError: Error | null = null,
 		initialErrors: SettingsError[] = [],
 		projectTrusted = true,
+		directoryProfileInfo: DirectoryResourceProfileInfo | null = null,
 	) {
 		this.storage = storage;
 		this.globalSettings = initialGlobal;
 		this.projectSettings = initialProject;
+		this.directoryProfileSettings = initialDirectoryProfile;
 		this.projectTrusted = projectTrusted;
 		this.globalSettingsLoadError = globalLoadError;
 		this.projectSettingsLoadError = projectLoadError;
+		this.directoryProfileInfo = directoryProfileInfo;
 		this.errors = [...initialErrors];
-		this.settings = deepMergeSettings(this.globalSettings, this.projectSettings);
+		this.settings = this.mergeEffectiveSettings();
+	}
+
+	private mergeEffectiveSettings(): Settings {
+		let merged = deepMergeSettings(this.globalSettings, this.projectSettings);
+		merged = deepMergeSettings(merged, this.directoryProfileSettings);
+		if (this.runtimeResourceProfiles) {
+			merged = deepMergeSettings(merged, { activeResourceProfiles: this.runtimeResourceProfiles });
+		}
+		return merged;
+	}
+
+	private recomputeSettings(): void {
+		this.settings = this.mergeEffectiveSettings();
 	}
 
 	/** Create a SettingsManager that loads from files */
@@ -344,6 +518,7 @@ export class SettingsManager {
 		const projectTrusted = options.projectTrusted ?? true;
 		const globalLoad = SettingsManager.tryLoadFromStorage(storage, "global");
 		const projectLoad = SettingsManager.tryLoadFromStorage(storage, "project", projectTrusted);
+		const directoryProfileLoad = SettingsManager.tryLoadDirectoryProfileFromStorage(storage);
 		const initialErrors: SettingsError[] = [];
 		if (globalLoad.error) {
 			initialErrors.push({ scope: "global", error: globalLoad.error });
@@ -351,15 +526,20 @@ export class SettingsManager {
 		if (projectLoad.error) {
 			initialErrors.push({ scope: "project", error: projectLoad.error });
 		}
+		if (directoryProfileLoad.error) {
+			initialErrors.push({ scope: "directoryProfile", error: directoryProfileLoad.error });
+		}
 
 		return new SettingsManager(
 			storage,
 			globalLoad.settings,
 			projectLoad.settings,
+			directoryProfileLoad.settings,
 			globalLoad.error,
 			projectLoad.error,
 			initialErrors,
 			projectTrusted,
+			directoryProfileLoad.info,
 		);
 	}
 
@@ -398,6 +578,25 @@ export class SettingsManager {
 			return { settings: SettingsManager.loadFromStorage(storage, scope, projectTrusted), error: null };
 		} catch (error) {
 			return { settings: {}, error: error as Error };
+		}
+	}
+
+	private static tryLoadDirectoryProfileFromStorage(storage: SettingsStorage): {
+		settings: Settings;
+		error: Error | null;
+		info: DirectoryResourceProfileInfo | null;
+	} {
+		if (!(storage instanceof FileSettingsStorage)) {
+			return { settings: {}, error: null, info: null };
+		}
+		const info = storage.getDirectoryResourceProfileInfo();
+		try {
+			const content = storage.readDirectoryResourceProfile();
+			if (!content) return { settings: {}, error: null, info };
+			const settings = JSON.parse(content);
+			return { settings: SettingsManager.migrateSettings(settings), error: null, info };
+		} catch (error) {
+			return { settings: {}, error: error as Error, info };
 		}
 	}
 
@@ -471,6 +670,61 @@ export class SettingsManager {
 		return structuredClone(this.projectSettings);
 	}
 
+	getDirectoryResourceProfileSettings(): Settings {
+		return structuredClone(this.directoryProfileSettings);
+	}
+
+	getDirectoryResourceProfileInfo(): DirectoryResourceProfileInfo | null {
+		return this.directoryProfileInfo ? { ...this.directoryProfileInfo } : null;
+	}
+
+	getActiveResourceProfileNames(): string[] {
+		if (this.runtimeResourceProfiles && this.runtimeResourceProfiles.length > 0) {
+			return [...this.runtimeResourceProfiles];
+		}
+		return normalizeActiveResourceProfiles(this.settings);
+	}
+
+	getResourceProfileFilter(kind: ResourceProfileKind): Required<ResourceProfileFilterSettings> {
+		const legacyFilter = mergeResourceProfileFilters(
+			collectLegacyDisabledFilterFromSettings(this.globalSettings, kind),
+			collectLegacyDisabledFilterFromSettings(this.projectSettings, kind),
+			collectLegacyDisabledFilterFromSettings(this.directoryProfileSettings, kind),
+		);
+		const activeProfiles = this.getActiveResourceProfileNames();
+		const profileFilter = mergeResourceProfileFilters(
+			collectNamedResourceProfileFilters(this.globalSettings, kind, activeProfiles),
+			collectNamedResourceProfileFilters(this.projectSettings, kind, activeProfiles),
+			collectNamedResourceProfileFilters(this.directoryProfileSettings, kind, activeProfiles),
+			collectNamedResourceProfileFilters(
+				{ resourceProfiles: this.inlineResourceProfileDefinitions },
+				kind,
+				activeProfiles,
+			),
+			collectNamedResourceProfileFilters(
+				{ resourceProfiles: this.discoveredResourceProfileDefinitions },
+				kind,
+				activeProfiles,
+			),
+		);
+		const filter = mergeResourceProfileFilters(legacyFilter, profileFilter);
+		return {
+			allow: [...new Set(filter.allow ?? [])],
+			block: [...new Set(filter.block ?? [])],
+		};
+	}
+
+	isResourceAllowedByProfile(kind: ResourceProfileKind, resourcePath: string, baseDir = ""): boolean {
+		const filter = this.getResourceProfileFilter(kind);
+		if (filter.allow.length > 0 && !matchesResourceProfilePattern(resourcePath, filter.allow, baseDir)) {
+			return false;
+		}
+		if (matchesResourceProfilePattern(resourcePath, filter.block, baseDir)) {
+			return false;
+		}
+		return true;
+	}
+
 	isProjectTrusted(): boolean {
 		return this.projectTrusted;
 	}
@@ -487,7 +741,7 @@ export class SettingsManager {
 		if (!trusted) {
 			this.projectSettings = {};
 			this.projectSettingsLoadError = null;
-			this.settings = deepMergeSettings(this.globalSettings, this.projectSettings);
+			this.recomputeSettings();
 			return;
 		}
 
@@ -497,7 +751,7 @@ export class SettingsManager {
 		if (projectLoad.error) {
 			this.recordError("project", projectLoad.error);
 		}
-		this.settings = deepMergeSettings(this.globalSettings, this.projectSettings);
+		this.recomputeSettings();
 	}
 
 	async reload(): Promise<void> {
@@ -525,12 +779,44 @@ export class SettingsManager {
 			this.recordError("project", projectLoad.error);
 		}
 
-		this.settings = deepMergeSettings(this.globalSettings, this.projectSettings);
+		const directoryProfileLoad = SettingsManager.tryLoadDirectoryProfileFromStorage(this.storage);
+		this.directoryProfileInfo = directoryProfileLoad.info;
+		if (!directoryProfileLoad.error) {
+			this.directoryProfileSettings = directoryProfileLoad.settings;
+		} else {
+			this.recordError("directoryProfile", directoryProfileLoad.error);
+		}
+
+		this.recomputeSettings();
 	}
 
 	/** Apply additional overrides on top of current settings */
 	applyOverrides(overrides: Partial<Settings>): void {
 		this.settings = deepMergeSettings(this.settings, overrides);
+	}
+
+	/** Select runtime-only resource profiles, e.g. from CLI/subagent launch options. */
+	setRuntimeResourceProfiles(profileNames: string[]): void {
+		this.runtimeResourceProfiles = profileNames.length > 0 ? [...profileNames] : undefined;
+		this.recomputeSettings();
+	}
+
+	/** Add one-shot profile definitions from CLI/SDK/ephemeral agent launch input. Never writes to disk. */
+	addInlineResourceProfileDefinitions(profiles: Record<string, ResourceProfileSettings>): void {
+		this.inlineResourceProfileDefinitions = mergeResourceProfileMap(this.inlineResourceProfileDefinitions, profiles);
+	}
+
+	/** Replace profile definitions discovered inside loaded resource files. Never writes to disk. */
+	replaceDiscoveredResourceProfileDefinitions(profiles: Record<string, ResourceProfileSettings>): void {
+		this.discoveredResourceProfileDefinitions = { ...profiles };
+	}
+
+	/** Add profile definitions discovered after resource resolution, e.g. context agent files. Never writes to disk. */
+	addDiscoveredResourceProfileDefinitions(profiles: Record<string, ResourceProfileSettings>): void {
+		this.discoveredResourceProfileDefinitions = mergeResourceProfileMap(
+			this.discoveredResourceProfileDefinitions,
+			profiles,
+		);
 	}
 
 	/** Mark a global field as modified during this session */
@@ -561,7 +847,7 @@ export class SettingsManager {
 		}
 	}
 
-	private recordError(scope: SettingsScope, error: unknown): void {
+	private recordError(scope: SettingsErrorScope, error: unknown): void {
 		const normalizedError = error instanceof Error ? error : new Error(String(error));
 		this.errors.push({ scope, error: normalizedError });
 	}
@@ -631,7 +917,7 @@ export class SettingsManager {
 	}
 
 	private save(): void {
-		this.settings = deepMergeSettings(this.globalSettings, this.projectSettings);
+		this.recomputeSettings();
 
 		if (this.globalSettingsLoadError) {
 			return;
@@ -649,7 +935,7 @@ export class SettingsManager {
 	private saveProjectSettings(settings: Settings): void {
 		this.assertProjectTrustedForWrite();
 		this.projectSettings = structuredClone(settings);
-		this.settings = deepMergeSettings(this.globalSettings, this.projectSettings);
+		this.recomputeSettings();
 
 		if (this.projectSettingsLoadError) {
 			return;

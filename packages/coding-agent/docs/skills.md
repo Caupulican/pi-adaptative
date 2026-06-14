@@ -82,6 +82,18 @@ For project-level Claude Code skills, add to `.pi/settings.json`:
 
 This is progressive disclosure: names and descriptions are always in context, while full instructions load on-demand.
 
+When multiple skills are loaded, descriptions are the routing contract. Write narrow descriptions and prefer the most task-specific skill. Combine skills only when they cover distinct parts of the request. Do not rely on the agent to apply every loaded skill.
+
+Skills may carry optional resource profile blocks:
+
+```markdown
+<resource-profile name="reviewer">
+{ "tools": { "allow": ["read", "rg"] } }
+</resource-profile>
+```
+
+These blocks are JSON config, not instructions. Pi parses only matching profile blocks and strips them from `/skill:name` expansion.
+
 ## Skill Commands
 
 Skills register as `/skill:name` commands:

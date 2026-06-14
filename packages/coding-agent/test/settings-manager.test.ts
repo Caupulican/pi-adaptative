@@ -3,7 +3,7 @@ import { homedir } from "os";
 import { join } from "path";
 import { afterEach, beforeEach, describe, expect, it } from "vitest";
 import { DEFAULT_HTTP_IDLE_TIMEOUT_MS } from "../src/core/http-dispatcher.ts";
-import { SettingsManager } from "../src/core/settings-manager.ts";
+import { getDirectoryResourceProfileInfo, SettingsManager } from "../src/core/settings-manager.ts";
 
 describe("SettingsManager", () => {
 	const testDir = join(process.cwd(), "test-settings-tmp");
@@ -473,6 +473,76 @@ describe("SettingsManager", () => {
 			writeFileSync(join(agentDir, "settings.json"), JSON.stringify({ sessionDir: "~/sessions" }));
 			const manager = SettingsManager.create(projectDir, agentDir);
 			expect(manager.getSessionDir()).toBe(join(homedir(), "sessions"));
+		});
+	});
+
+	describe("resource profiles", () => {
+		it("loads zero-footprint directory resource profile settings from the user agent dir", () => {
+			const info = getDirectoryResourceProfileInfo(projectDir, agentDir);
+			mkdirSync(join(agentDir, "resource-profiles", info.hash), { recursive: true });
+			writeFileSync(
+				info.path,
+				JSON.stringify({
+					activeResourceProfile: "lean",
+					resourceProfiles: {
+						lean: {
+							extensions: { block: ["noisy-ext"] },
+							tools: { allow: ["read", "rg"] },
+						},
+					},
+				}),
+			);
+
+			const manager = SettingsManager.create(projectDir, agentDir);
+
+			expect(manager.getDirectoryResourceProfileInfo()?.path).toBe(info.path);
+			expect(manager.getResourceProfileFilter("extensions").block).toEqual(["noisy-ext"]);
+			expect(manager.getResourceProfileFilter("tools").allow).toEqual(["read", "rg"]);
+		});
+
+		it("combines legacy disabledResources with active resource profile filters", () => {
+			const manager = SettingsManager.inMemory({
+				disabledResources: { skills: ["legacy-skill"] },
+				activeResourceProfile: "project",
+				resourceProfiles: {
+					project: { skills: { allow: ["active-skill"], block: ["blocked-skill"] } },
+				},
+			});
+
+			expect(manager.getResourceProfileFilter("skills")).toEqual({
+				allow: ["active-skill"],
+				block: ["legacy-skill", "blocked-skill"],
+			});
+		});
+
+		it("lets runtime resource profiles override active profile selection", () => {
+			const manager = SettingsManager.inMemory({
+				activeResourceProfile: "default",
+				resourceProfiles: {
+					default: { tools: { block: ["bash"] } },
+					worker: { tools: { allow: ["read", "rg"] } },
+				},
+			});
+
+			manager.setRuntimeResourceProfiles(["worker"]);
+
+			expect(manager.getResourceProfileFilter("tools")).toEqual({
+				allow: ["read", "rg"],
+				block: [],
+			});
+		});
+
+		it("merges one-shot inline resource profile definitions without writing settings", () => {
+			const manager = SettingsManager.inMemory({ activeResourceProfile: "one-shot" });
+
+			manager.addInlineResourceProfileDefinitions({
+				"one-shot": { tools: { allow: ["read"], block: ["bash"] } },
+			});
+
+			expect(manager.getResourceProfileFilter("tools")).toEqual({
+				allow: ["read"],
+				block: ["bash"],
+			});
 		});
 	});
 });

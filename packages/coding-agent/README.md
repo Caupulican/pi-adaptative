@@ -19,9 +19,23 @@
 
 # Pi Adaptative
 
-Pi Adaptative is our implementation and testbed for self-evolving coding agents. It keeps Pi's minimal terminal harness foundation, then layers on practical adaptive-agent work: lazy startup context, persistent tool panels, continuous learning, bounded self-modification guardrails, and release-tested agent-harness evolution.
+Pi Adaptative is a fork of Pi focused on adaptive agent runtime: reloading changes, making bounded self-modifications, and staying compatible with normal Pi workflows.
 
-This fork is meant to be installed and used as `@caupulican/pi-adaptative`. It preserves Pi-compatible CLI and SDK surfaces where useful, while making the product identity and published package `pi-adaptative`.
+**Fork credit:** Built on Pi by Mario Zechner / badlogic.
+
+## Purpose
+
+This package is meant to be installed and used as `@caupulican/pi-adaptative`. It keeps the scope simple:
+
+- reload supported runtime changes while working;
+- make source-backed self-modifications with validation;
+- scope loaded resources through profiles when needed;
+- keep per-repo configuration out of the repo by using user-level state;
+- keep the package installable and usable as a normal coding-agent CLI.
+
+## Compatibility mode
+
+`pi-adaptative` keeps Pi-compatible CLI, SDK, settings, skills, prompt templates, themes, extensions, and package loading where practical. Adaptive features are additive. Legacy settings such as `disabledResources` still work as aliases for profile blocks.
 
 Pi Adaptative runs in four modes: interactive, print or JSON, RPC for process integration, and an SDK for embedding in your own apps. It remains extensible with TypeScript [Extensions](#extensions), [Skills](#skills), [Prompt Templates](#prompt-templates), [Themes](#themes), and [Pi Packages](#pi-packages).
 
