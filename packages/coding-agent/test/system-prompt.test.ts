@@ -36,7 +36,15 @@ describe("buildSystemPrompt", () => {
 			});
 
 			expect(prompt).toContain("Use a lightweight MAPE loop for adaptive work");
+			expect(prompt).toContain("Trigger self-evolution when evidence shows");
+			expect(prompt).toContain("do not evolve durable behavior for one-off project facts");
+			expect(prompt).toContain("Choose the lowest durable layer");
+			expect(prompt).toContain("core only for generic platform behavior");
+			expect(prompt).toContain("generated operational state out of target repositories");
 			expect(prompt).toContain("default to current-session or current-tenant state");
+			expect(prompt).toContain("Do not bake user-specific provider names");
+			expect(prompt).toContain("fresh bounded judge pass with the same active provider/model route");
+			expect(prompt).toContain("reviewer/judge output as evidence, not authority");
 			expect(prompt).toContain("confront Automata/user memory");
 		});
 
