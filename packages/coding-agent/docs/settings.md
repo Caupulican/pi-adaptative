@@ -165,6 +165,36 @@ When enabled, Auto Learn keeps a small shared state file for visibility/cooldown
 }
 ```
 
+### Context GC
+
+Context GC only rewrites the provider-bound context view. It does not delete or mutate the canonical session log.
+
+| Setting | Type | Default | Description |
+|---------|------|---------|-------------|
+| `contextGc.enabled` | boolean | `true` | Enable provider-context packing for stale bulky context |
+| `contextGc.preserveRecentMessages` | number | `12` | Recent messages kept verbatim |
+| `contextGc.minToolResultChars` | number | `2500` | Minimum stale tool-result size before packing |
+| `contextGc.tools` | string[] | `read`, `bash`, `rg`, `grep`, `context_headroom_retrieve`, `headroom_retrieve` | Tool results eligible for stale-output packing |
+| `contextGc.semanticMemory.enabled` | boolean | `true` | Pack stale Automata/Mind semantic context pages from provider context |
+| `contextGc.semanticMemory.preserveRecentPages` | number | `2` | Newest semantic memory pages kept verbatim |
+| `contextGc.semanticMemory.minChars` | number | `1200` | Minimum semantic page size before packing |
+| `contextGc.semanticMemory.markers` | string[] | Automata/Mind XML-ish tags | Markers used to identify deterministic memory pages |
+
+Semantic memory packing only targets tool results and Automata/Mind custom context messages; normal user prompts are preserved even if they contain matching marker text.
+
+```json
+{
+  "contextGc": {
+    "enabled": true,
+    "preserveRecentMessages": 12,
+    "semanticMemory": {
+      "enabled": true,
+      "preserveRecentPages": 2
+    }
+  }
+}
+```
+
 ### Branch Summary
 
 | Setting | Type | Default | Description |

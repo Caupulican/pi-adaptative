@@ -14,7 +14,7 @@
  */
 
 import { existsSync, mkdirSync, readFileSync, writeFileSync } from "node:fs";
-import { basename, dirname } from "node:path";
+import { basename, dirname, join } from "node:path";
 import type {
 	Agent,
 	AgentContext,
@@ -50,6 +50,7 @@ import {
 	prepareCompaction,
 	shouldCompact,
 } from "./compaction/index.ts";
+import { applyContextGc, type ContextGcReport } from "./context-gc.ts";
 import { DEFAULT_THINKING_LEVEL } from "./defaults.ts";
 import { exportSessionToHtml, type ToolHtmlRenderer } from "./export-html/index.ts";
 import { createToolHtmlRenderer } from "./export-html/tool-renderer.ts";
@@ -300,10 +301,11 @@ export class AgentSession {
 	/** Serializes prompt() submissions made while streaming so queued steering/follow-ups keep user-typed FIFO order. */
 	private _streamingPromptSubmissionTail: Promise<void> = Promise.resolve();
 
-	// Compaction state
+	// Compaction/context hygiene state
 	private _compactionAbortController: AbortController | undefined = undefined;
 	private _autoCompactionAbortController: AbortController | undefined = undefined;
 	private _overflowRecoveryAttempted = false;
+	private _latestContextGcReport: ContextGcReport | undefined = undefined;
 
 	// Branch summarization state
 	private _branchSummaryAbortController: AbortController | undefined = undefined;
@@ -459,10 +461,11 @@ export class AgentSession {
 				currentMessages = authoritativeMessages;
 			}
 
+			let finalMessages = currentMessages;
 			if (this._extensionRunner.hasHandlers("context")) {
-				return await this._extensionRunner.emitContext(currentMessages);
+				finalMessages = await this._extensionRunner.emitContext(currentMessages);
 			}
-			return currentMessages;
+			return this._applyContextGc(finalMessages, true).messages;
 		};
 	}
 
@@ -490,6 +493,51 @@ export class AgentSession {
 			messages: this.agent.state.messages.slice(),
 			tools: this.agent.state.tools.slice(),
 		};
+	}
+
+	private _contextGcStorageDir(): string {
+		return join(this.sessionManager.getSessionDir(), "context-gc", this.sessionManager.getSessionId());
+	}
+
+	private _applyContextGc(
+		messages: AgentMessage[],
+		writePayloads: boolean,
+	): { messages: AgentMessage[]; report: ContextGcReport } {
+		try {
+			const result = applyContextGc(messages, {
+				...this.settingsManager.getContextGcSettings(),
+				cwd: this._cwd,
+				storageDir: this._contextGcStorageDir(),
+				writePayloads,
+			});
+			this._latestContextGcReport = result.report;
+			return result;
+		} catch {
+			const report: ContextGcReport = {
+				enabled: false,
+				packedCount: 0,
+				originalTokens: 0,
+				packedTokens: 0,
+				savedTokens: 0,
+				records: [],
+			};
+			this._latestContextGcReport = report;
+			return { messages, report };
+		}
+	}
+
+	getContextGcReport(messages?: AgentMessage[]): ContextGcReport {
+		if (messages) return this._applyContextGc(messages, false).report;
+		return (
+			this._latestContextGcReport ?? {
+				enabled: this.settingsManager.getContextGcSettings().enabled,
+				packedCount: 0,
+				originalTokens: 0,
+				packedTokens: 0,
+				savedTokens: 0,
+				records: [],
+			}
+		);
 	}
 
 	private _estimateCurrentContextTokens(messages: AgentMessage[]): number {
@@ -2714,6 +2762,7 @@ export class AgentSession {
 			for (const definition of createCoreDiagnosticsToolDefinitions(
 				() => this.getActiveToolNames(),
 				() => this.getAllTools(),
+				(messages) => this.getContextGcReport(messages),
 			)) {
 				this._baseToolDefinitions.set(definition.name, definition);
 			}

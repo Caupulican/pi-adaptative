@@ -1,6 +1,7 @@
 import type { AgentMessage } from "@caupulican/pi-agent-core";
 import { Type } from "typebox";
 import { estimateTokens } from "../compaction/compaction.ts";
+import type { ContextGcReport } from "../context-gc.ts";
 import { createBranchSummaryMessage, createCompactionSummaryMessage, createCustomMessage } from "../messages.ts";
 import type { CompactionEntry, SessionEntry } from "../session-manager.ts";
 import type { ToolDefinition, ToolInfo } from "./types.ts";
@@ -118,6 +119,35 @@ function latestCompaction(entries: SessionEntry[]): CompactionEntry | undefined 
 	return undefined;
 }
 
+function activeContextMessages(entries: SessionEntry[]): AgentMessage[] {
+	const messages: AgentMessage[] = [];
+	const compaction = latestCompaction(entries);
+	if (!compaction) {
+		for (const entry of entries) {
+			const message = messageFromEntry(entry);
+			if (message) messages.push(message);
+		}
+		return messages;
+	}
+
+	messages.push(createCompactionSummaryMessage(compaction.summary, compaction.tokensBefore, compaction.timestamp));
+	const compactionIndex = entries.findIndex((entry) => entry.id === compaction.id);
+	let foundFirstKept = false;
+	for (let index = 0; index < compactionIndex; index++) {
+		const entry = entries[index];
+		if (entry.id === compaction.firstKeptEntryId) foundFirstKept = true;
+		if (!foundFirstKept) continue;
+		const message = messageFromEntry(entry);
+		if (message) messages.push(message);
+	}
+	for (let index = compactionIndex + 1; index < entries.length; index++) {
+		const entry = entries[index];
+		const message = messageFromEntry(entry);
+		if (message) messages.push(message);
+	}
+	return messages;
+}
+
 function activeContextRows(entries: SessionEntry[]): AuditRow[] {
 	const rows: AuditRow[] = [];
 	const compaction = latestCompaction(entries);
@@ -169,6 +199,7 @@ function groupRows(rows: AuditRow[]): Array<[string, { count: number; tokens: nu
 export function createCoreDiagnosticsToolDefinitions(
 	getActiveTools: () => string[],
 	getAllTools: () => ToolInfo[],
+	getContextGcReport?: (messages: AgentMessage[]) => ContextGcReport,
 ): ToolDefinition[] {
 	return [
 		{
@@ -209,6 +240,8 @@ export function createCoreDiagnosticsToolDefinitions(
 
 				const branch = ctx.sessionManager.getBranch();
 				const rows = activeContextRows(branch);
+				const activeMessages = activeContextMessages(branch);
+				const contextGcReport = getContextGcReport?.(activeMessages);
 				const contextUsage = ctx.getContextUsage();
 				const systemPrompt = ctx.getSystemPrompt?.() || "";
 				const activeTools = new Set(getActiveTools());
@@ -225,6 +258,7 @@ export function createCoreDiagnosticsToolDefinitions(
 				).length;
 				const toolSchemaTokens = Math.ceil(toolSchemaChars / 4);
 				const rowTokenSum = rows.reduce((sum, row) => sum + row.tokens, 0);
+				const effectiveRowTokenSum = Math.max(0, rowTokenSum - (contextGcReport?.savedTokens ?? 0));
 				const usageText = contextUsage
 					? contextUsage.tokens === null || contextUsage.percent === null
 						? `provider usage: unknown/${contextUsage.contextWindow} tokens (usually right after compaction)`
@@ -255,6 +289,9 @@ export function createCoreDiagnosticsToolDefinitions(
 					"Context audit",
 					usageText,
 					`active branch rows: ${rows.length}; session row estimate: ${rowTokenSum} tokens`,
+					contextGcReport
+						? `Context GC estimate: ${contextGcReport.savedTokens} tokens saved by packing ${contextGcReport.packedCount} stale row(s); effective session row estimate: ${effectiveRowTokenSum} tokens`
+						: undefined,
 					`system prompt estimate: ${systemTokens} tokens (${systemPrompt.length} chars)`,
 					`active tool schema estimate: ${toolSchemaTokens} tokens across ${activeToolInfos.length} active tool(s)`,
 					unattributed === null
@@ -280,6 +317,8 @@ export function createCoreDiagnosticsToolDefinitions(
 						activeTools: activeToolInfos.map((tool) => tool.name),
 						toolSchemaEstimate: { chars: toolSchemaChars, estimatedTokens: toolSchemaTokens },
 						rowTokenSum,
+						effectiveRowTokenSum,
+						contextGc: contextGcReport,
 						rows,
 					},
 				};

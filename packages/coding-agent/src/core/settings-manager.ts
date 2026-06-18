@@ -15,6 +15,21 @@ export interface CompactionSettings {
 	keepRecentTokens?: number; // default: 20000
 }
 
+export interface SemanticMemoryGcSettings {
+	enabled?: boolean; // default: true
+	preserveRecentPages?: number; // default: 2
+	minChars?: number; // default: 1200
+	markers?: string[]; // default: Automata/Mind XML-ish response tags
+}
+
+export interface ContextGcSettings {
+	enabled?: boolean; // default: true
+	preserveRecentMessages?: number; // default: 12
+	minToolResultChars?: number; // default: 2500
+	tools?: string[]; // default: read,bash,rg,grep,context_headroom_retrieve,headroom_retrieve
+	semanticMemory?: SemanticMemoryGcSettings;
+}
+
 export interface BranchSummarySettings {
 	reserveTokens?: number; // default: 16384 (tokens reserved for prompt + LLM response)
 	skipPrompt?: boolean; // default: false - when true, skips "Summarize branch?" prompt and defaults to no summary
@@ -132,6 +147,7 @@ export interface Settings {
 	followUpMode?: "all" | "one-at-a-time";
 	theme?: string;
 	compaction?: CompactionSettings;
+	contextGc?: ContextGcSettings;
 	branchSummary?: BranchSummarySettings;
 	retry?: RetrySettings;
 	hideThinkingBlock?: boolean;
@@ -1086,6 +1102,49 @@ export class SettingsManager {
 			enabled: this.getCompactionEnabled(),
 			reserveTokens: this.getCompactionReserveTokens(),
 			keepRecentTokens: this.getCompactionKeepRecentTokens(),
+		};
+	}
+
+	getContextGcSettings(): {
+		enabled: boolean;
+		preserveRecentMessages: number;
+		minToolResultChars: number;
+		tools: string[];
+		semanticMemory: {
+			enabled: boolean;
+			preserveRecentPages: number;
+			minChars: number;
+			markers: string[];
+		};
+	} {
+		return {
+			enabled: this.settings.contextGc?.enabled ?? true,
+			preserveRecentMessages: this.settings.contextGc?.preserveRecentMessages ?? 12,
+			minToolResultChars: this.settings.contextGc?.minToolResultChars ?? 2500,
+			tools: this.settings.contextGc?.tools ?? [
+				"read",
+				"bash",
+				"rg",
+				"grep",
+				"context_headroom_retrieve",
+				"headroom_retrieve",
+			],
+			semanticMemory: {
+				enabled: this.settings.contextGc?.semanticMemory?.enabled ?? true,
+				preserveRecentPages: this.settings.contextGc?.semanticMemory?.preserveRecentPages ?? 2,
+				minChars: this.settings.contextGc?.semanticMemory?.minChars ?? 1200,
+				markers: this.settings.contextGc?.semanticMemory?.markers ?? [
+					"<automata_context",
+					"<automata_response",
+					"<automata_query",
+					"<automata_fetch",
+					"<memory_lifecycle_audit",
+					"<memory_lifecycle_purge",
+					"<automata_doctor",
+					"<automata_optimizer",
+					"<automata_mesh",
+				],
+			},
 		};
 	}
 
