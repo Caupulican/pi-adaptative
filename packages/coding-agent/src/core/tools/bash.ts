@@ -33,6 +33,11 @@ export type BashToolInput = Static<typeof bashSchema>;
 export interface BashToolDetails {
 	truncation?: TruncationResult;
 	fullOutputPath?: string;
+	fullOutputError?: string;
+	preview?: {
+		content: string;
+		skippedLines: number;
+	};
 }
 
 /**
@@ -152,6 +157,7 @@ export interface BashToolOptions {
 }
 
 const BASH_PREVIEW_LINES = 5;
+const BASH_PREVIEW_BYTES = 8 * 1024;
 const BASH_UPDATE_THROTTLE_MS = 100;
 
 type BashRenderState = {
@@ -200,9 +206,11 @@ function rebuildBashResultRenderComponent(
 	const state = component.state;
 	component.clear();
 
-	let output = getTextOutput(result as any, showImages).trim();
+	const renderPreview = !options.expanded ? result.details?.preview : undefined;
+	let output = (renderPreview ? renderPreview.content : getTextOutput(result as any, showImages)).trim();
 	const truncation = result.details?.truncation;
 	const fullOutputPath = result.details?.fullOutputPath;
+	const fullOutputError = result.details?.fullOutputError;
 	if (!options.isPartial && truncation?.truncated && fullOutputPath && output.endsWith("]")) {
 		const footerStart = output.lastIndexOf("\n\n[");
 		if (footerStart !== -1 && output.slice(footerStart).includes(fullOutputPath)) {
@@ -211,20 +219,19 @@ function rebuildBashResultRenderComponent(
 	}
 
 	if (output) {
-		const styledOutput = output
-			.split("\n")
-			.map((line) => theme.fg("toolOutput", line))
-			.join("\n");
-
 		if (options.expanded) {
+			const styledOutput = output
+				.split("\n")
+				.map((line) => theme.fg("toolOutput", line))
+				.join("\n");
 			component.addChild(new Text(`\n${styledOutput}`, 0, 0));
 		} else {
 			component.addChild({
 				render: (width: number) => {
 					if (state.cachedLines === undefined || state.cachedWidth !== width) {
-						const preview = truncateToVisualLines(styledOutput, BASH_PREVIEW_LINES, width);
-						state.cachedLines = preview.visualLines;
-						state.cachedSkipped = preview.skippedCount;
+						const preview = truncateToVisualLines(output, BASH_PREVIEW_LINES, width);
+						state.cachedLines = preview.visualLines.map((line) => theme.fg("toolOutput", line));
+						state.cachedSkipped = (result.details?.preview?.skippedLines ?? 0) + preview.skippedCount;
 						state.cachedWidth = width;
 					}
 					if (state.cachedSkipped && state.cachedSkipped > 0) {
@@ -244,10 +251,12 @@ function rebuildBashResultRenderComponent(
 		}
 	}
 
-	if (truncation?.truncated || fullOutputPath) {
+	if (truncation?.truncated || fullOutputPath || fullOutputError) {
 		const warnings: string[] = [];
 		if (fullOutputPath) {
 			warnings.push(`Full output: ${fullOutputPath}`);
+		} else if (fullOutputError) {
+			warnings.push(`Full output unavailable: ${fullOutputError}`);
 		}
 		if (truncation?.truncated) {
 			if (truncation.truncatedBy === "lines") {
@@ -438,12 +447,20 @@ export function createBashToolDefinition(
 				if (!onUpdate || !updateDirty) return;
 				updateDirty = false;
 				lastUpdateAt = Date.now();
-				const snapshot = output.snapshot({ persistIfTruncated: true });
+				const snapshot = output.previewSnapshot(BASH_PREVIEW_LINES, BASH_PREVIEW_BYTES, {
+					persistIfFullTruncated: true,
+				});
+				const preview = {
+					content: snapshot.content,
+					skippedLines: Math.max(0, snapshot.truncation.totalLines - snapshot.truncation.outputLines),
+				};
 				onUpdate({
-					content: [{ type: "text", text: snapshot.content || "" }],
+					content: [{ type: "text", text: preview.content || "" }],
 					details: {
 						truncation: snapshot.truncation.truncated ? snapshot.truncation : undefined,
 						fullOutputPath: snapshot.fullOutputPath,
+						fullOutputError: snapshot.fullOutputError,
+						preview,
 					},
 				});
 			};
@@ -483,26 +500,45 @@ export function createBashToolDefinition(
 				output.finish();
 				clearUpdateTimer();
 				emitOutputUpdate();
-				const snapshot = output.snapshot({ persistIfTruncated: true });
-				await output.closeTempFile();
-				return snapshot;
+				return output.snapshot({ persistIfTruncated: true });
 			};
 
 			const formatOutput = (snapshot: Awaited<ReturnType<typeof finishOutput>>, emptyText = "(no output)") => {
 				const truncation = snapshot.truncation;
 				let text = snapshot.content || emptyText;
 				let details: BashToolDetails | undefined;
+				const preview = output.preview(BASH_PREVIEW_LINES, BASH_PREVIEW_BYTES);
+				const fullOutputNotice = snapshot.fullOutputPath
+					? `Full output: ${snapshot.fullOutputPath}`
+					: snapshot.fullOutputError
+						? `Full output unavailable: ${snapshot.fullOutputError}`
+						: "Full output unavailable";
+				if (truncation.truncated || preview.skippedLines > 0) {
+					details = { preview };
+				}
+				if (snapshot.fullOutputPath || snapshot.fullOutputError) {
+					details = {
+						...(details ?? {}),
+						fullOutputPath: snapshot.fullOutputPath,
+						fullOutputError: snapshot.fullOutputError,
+					};
+				}
 				if (truncation.truncated) {
-					details = { truncation, fullOutputPath: snapshot.fullOutputPath };
+					details = {
+						...(details ?? {}),
+						truncation,
+						fullOutputPath: snapshot.fullOutputPath,
+						fullOutputError: snapshot.fullOutputError,
+					};
 					const startLine = truncation.totalLines - truncation.outputLines + 1;
 					const endLine = truncation.totalLines;
 					if (truncation.lastLinePartial) {
 						const lastLineSize = formatSize(output.getLastLineBytes());
-						text += `\n\n[Showing last ${formatSize(truncation.outputBytes)} of line ${endLine} (line is ${lastLineSize}). Full output: ${snapshot.fullOutputPath}]`;
+						text += `\n\n[Showing last ${formatSize(truncation.outputBytes)} of line ${endLine} (line is ${lastLineSize}). ${fullOutputNotice}]`;
 					} else if (truncation.truncatedBy === "lines") {
-						text += `\n\n[Showing lines ${startLine}-${endLine} of ${truncation.totalLines}. Full output: ${snapshot.fullOutputPath}]`;
+						text += `\n\n[Showing lines ${startLine}-${endLine} of ${truncation.totalLines}. ${fullOutputNotice}]`;
 					} else {
-						text += `\n\n[Showing lines ${startLine}-${endLine} of ${truncation.totalLines} (${formatSize(DEFAULT_MAX_BYTES)} limit). Full output: ${snapshot.fullOutputPath}]`;
+						text += `\n\n[Showing lines ${startLine}-${endLine} of ${truncation.totalLines} (${formatSize(DEFAULT_MAX_BYTES)} limit). ${fullOutputNotice}]`;
 					}
 				}
 				return { text, details };
@@ -529,9 +565,13 @@ export function createBashToolDefinition(
 								throw new Error(appendStatus(rawOutputText, `Command exited with code ${res.exitCode}`));
 							}
 							const details = snapshot.truncation.truncated
-								? { truncation: snapshot.truncation, fullOutputPath: snapshot.fullOutputPath }
-								: snapshot.fullOutputPath
-									? { fullOutputPath: snapshot.fullOutputPath }
+								? {
+										truncation: snapshot.truncation,
+										fullOutputPath: snapshot.fullOutputPath,
+										fullOutputError: snapshot.fullOutputError,
+									}
+								: snapshot.fullOutputPath || snapshot.fullOutputError
+									? { fullOutputPath: snapshot.fullOutputPath, fullOutputError: snapshot.fullOutputError }
 									: undefined;
 							return { content: [{ type: "text", text: res.output }], details };
 						}
@@ -581,6 +621,7 @@ export function createBashToolDefinition(
 				return { content: [{ type: "text", text: outputText }], details };
 			} finally {
 				clearUpdateTimer();
+				await output.closeTempFile();
 			}
 		},
 		renderCall(args, _theme, context) {

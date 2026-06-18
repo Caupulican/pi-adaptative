@@ -1,5 +1,14 @@
 ## [Unreleased]
 
+### Added
+
+- Added OpenRouter Fusion as a selectable OpenRouter model alias.
+
+### Fixed
+
+- Fixed OpenAI/Azure/Codex Responses providers to send system context through top-level `instructions` and require terminal response events before accepting streamed output.
+- Fixed provider HTTP error reporting to include structured response bodies where available.
+
 ## [0.80.28] - 2026-06-18
 
 ## [0.80.25] - 2026-06-14

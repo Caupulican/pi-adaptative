@@ -75,10 +75,6 @@ export interface OpenAIResponsesStreamOptions {
 	) => void;
 }
 
-export interface ConvertResponsesMessagesOptions {
-	includeSystemPrompt?: boolean;
-}
-
 export interface ConvertResponsesToolsOptions {
 	strict?: boolean | null;
 }
@@ -87,11 +83,14 @@ export interface ConvertResponsesToolsOptions {
 // Message conversion
 // =============================================================================
 
+export function buildResponsesInstructions(context: Context): string | undefined {
+	return context.systemPrompt ? sanitizeSurrogates(context.systemPrompt) : undefined;
+}
+
 export function convertResponsesMessages<TApi extends Api>(
 	model: Model<TApi>,
 	context: Context,
 	allowedToolCallProviders: ReadonlySet<string>,
-	options?: ConvertResponsesMessagesOptions,
 ): ResponseInput {
 	const messages: ResponseInput = [];
 
@@ -121,15 +120,6 @@ export function convertResponsesMessages<TApi extends Api>(
 	};
 
 	const transformedMessages = transformMessages(context.messages, model, normalizeToolCallId);
-
-	const includeSystemPrompt = options?.includeSystemPrompt ?? true;
-	if (includeSystemPrompt && context.systemPrompt) {
-		const role = model.reasoning ? "developer" : "system";
-		messages.push({
-			role,
-			content: sanitizeSurrogates(context.systemPrompt),
-		});
-	}
 
 	let msgIndex = 0;
 	for (const msg of transformedMessages) {
@@ -293,8 +283,41 @@ export async function processResponsesStream<TApi extends Api>(
 ): Promise<void> {
 	let currentItem: ResponseReasoningItem | ResponseOutputMessage | ResponseFunctionToolCall | null = null;
 	let currentBlock: ThinkingContent | TextContent | (ToolCall & { partialJson: string }) | null = null;
+	let sawTerminalResponseEvent = false;
 	const blocks = output.content;
 	const blockIndex = () => blocks.length - 1;
+	const finalizeResponse = (
+		response: Extract<ResponseStreamEvent, { type: "response.completed" | "response.incomplete" }>["response"],
+	): void => {
+		sawTerminalResponseEvent = true;
+		if (response?.id) {
+			output.responseId = response.id;
+		}
+		if (response?.usage) {
+			const cachedTokens = response.usage.input_tokens_details?.cached_tokens || 0;
+			output.usage = {
+				// OpenAI includes cached tokens in input_tokens, so subtract to get non-cached input
+				input: (response.usage.input_tokens || 0) - cachedTokens,
+				output: response.usage.output_tokens || 0,
+				cacheRead: cachedTokens,
+				cacheWrite: 0,
+				totalTokens: response.usage.total_tokens || 0,
+				cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, total: 0 },
+			};
+		}
+		calculateCost(model, output.usage);
+		if (options?.applyServiceTierPricing) {
+			const serviceTier = options.resolveServiceTier
+				? options.resolveServiceTier(response?.service_tier, options.serviceTier)
+				: (response?.service_tier ?? options.serviceTier);
+			options.applyServiceTierPricing(output.usage, serviceTier);
+		}
+		// Map status to stop reason
+		output.stopReason = mapStopReason(response?.status);
+		if (output.content.some((b) => b.type === "toolCall") && output.stopReason === "stop") {
+			output.stopReason = "toolUse";
+		}
+	};
 
 	for await (const event of openaiStream) {
 		if (event.type === "response.created") {
@@ -489,38 +512,12 @@ export async function processResponsesStream<TApi extends Api>(
 				currentBlock = null;
 				stream.push({ type: "toolcall_end", contentIndex: blockIndex(), toolCall, partial: output });
 			}
-		} else if (event.type === "response.completed") {
-			const response = event.response;
-			if (response?.id) {
-				output.responseId = response.id;
-			}
-			if (response?.usage) {
-				const cachedTokens = response.usage.input_tokens_details?.cached_tokens || 0;
-				output.usage = {
-					// OpenAI includes cached tokens in input_tokens, so subtract to get non-cached input
-					input: (response.usage.input_tokens || 0) - cachedTokens,
-					output: response.usage.output_tokens || 0,
-					cacheRead: cachedTokens,
-					cacheWrite: 0,
-					totalTokens: response.usage.total_tokens || 0,
-					cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, total: 0 },
-				};
-			}
-			calculateCost(model, output.usage);
-			if (options?.applyServiceTierPricing) {
-				const serviceTier = options.resolveServiceTier
-					? options.resolveServiceTier(response?.service_tier, options.serviceTier)
-					: (response?.service_tier ?? options.serviceTier);
-				options.applyServiceTierPricing(output.usage, serviceTier);
-			}
-			// Map status to stop reason
-			output.stopReason = mapStopReason(response?.status);
-			if (output.content.some((b) => b.type === "toolCall") && output.stopReason === "stop") {
-				output.stopReason = "toolUse";
-			}
+		} else if (event.type === "response.completed" || event.type === "response.incomplete") {
+			finalizeResponse(event.response);
 		} else if (event.type === "error") {
 			throw new Error(`Error Code ${event.code}: ${event.message}` || "Unknown error");
 		} else if (event.type === "response.failed") {
+			sawTerminalResponseEvent = true;
 			const error = event.response?.error;
 			const details = event.response?.incomplete_details;
 			const msg = error
@@ -530,6 +527,9 @@ export async function processResponsesStream<TApi extends Api>(
 					: "Unknown error (no error details in response)";
 			throw new Error(msg);
 		}
+	}
+	if (!sawTerminalResponseEvent) {
+		throw new Error("OpenAI Responses stream ended before a terminal response event");
 	}
 }
 

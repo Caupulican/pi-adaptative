@@ -43,6 +43,7 @@ import type {
 	ToolCall,
 	ToolResultMessage,
 } from "../types.ts";
+import { normalizeProviderError } from "../utils/error-body.ts";
 import { AssistantMessageEventStream } from "../utils/event-stream.ts";
 import { parseStreamingJson } from "../utils/json-parse.ts";
 import { createHttpProxyAgentsForTarget } from "../utils/node-http-proxy.ts";
@@ -298,12 +299,16 @@ const BEDROCK_ERROR_PREFIXES: Record<string, string> = {
  * detection) can distinguish error categories via simple string matching.
  */
 function formatBedrockError(error: unknown): string {
-	const message = error instanceof Error ? error.message : JSON.stringify(error);
+	const norm = normalizeProviderError(error);
+	const core =
+		!norm.messageCarriesBody && norm.status !== undefined && norm.body !== undefined
+			? `${norm.status}: ${norm.body}`
+			: norm.message;
 	if (error instanceof BedrockRuntimeServiceException) {
 		const prefix = BEDROCK_ERROR_PREFIXES[error.name] ?? error.name;
-		return `${prefix}: ${message}`;
+		return `${prefix}: ${core}`;
 	}
-	return message;
+	return core;
 }
 
 /**

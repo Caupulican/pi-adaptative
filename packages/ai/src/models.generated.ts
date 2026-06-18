@@ -8870,6 +8870,23 @@ export const MODELS = {
 			contextWindow: 2000000,
 			maxTokens: 30000,
 		} satisfies Model<"openai-completions">,
+		"openrouter/fusion": {
+			id: "openrouter/fusion",
+			name: "OpenRouter: Fusion",
+			api: "openai-completions",
+			provider: "openrouter",
+			baseUrl: "https://openrouter.ai/api/v1",
+			reasoning: true,
+			input: ["text"],
+			cost: {
+				input: 0,
+				output: 0,
+				cacheRead: 0,
+				cacheWrite: 0,
+			},
+			contextWindow: 1000000,
+			maxTokens: 30000,
+		} satisfies Model<"openai-completions">,
 		"bytedance-seed/seed-1.6": {
 			id: "bytedance-seed/seed-1.6",
 			name: "ByteDance Seed: Seed 1.6",

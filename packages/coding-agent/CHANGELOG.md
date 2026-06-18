@@ -1,5 +1,17 @@
 ## [Unreleased]
 
+### Added
+
+- Added OpenRouter Fusion as a selectable OpenRouter model alias.
+
+### Fixed
+
+- Fixed large `bash` and filtered-git output handling to keep live previews, truncation snapshots, and terminal rendering bounded by the visible output budget instead of accumulated command history.
+- Fixed bash full-output temp-file cleanup so disk/close failures do not leak file descriptors or mask the original command failure.
+- Fixed OpenAI/Azure/Codex Responses providers to send system context through top-level `instructions` and require terminal response events before accepting streamed output.
+- Fixed provider HTTP error reporting to include structured response bodies where available.
+- Fixed streaming markdown code fences so partial closing fences do not temporarily render as shrinking code content.
+
 ## [0.80.28] - 2026-06-18
 
 ## [0.80.25] - 2026-06-14

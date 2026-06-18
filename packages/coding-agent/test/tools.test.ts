@@ -639,7 +639,7 @@ describe("Coding Agent Tools", () => {
 			expect(getTextOutput(result).trim()).toBe("no-prefix");
 		});
 
-		it("should coalesce streaming updates for chatty output", async () => {
+		it("should coalesce streaming updates and emit only bounded previews for chatty output", async () => {
 			const operations: BashOperations = {
 				exec: async (_command, _cwd, { onData }) => {
 					for (let i = 0; i < 5000; i++) {
@@ -648,7 +648,10 @@ describe("Coding Agent Tools", () => {
 					return { exitCode: 0 };
 				},
 			};
-			const updates: Array<{ content: Array<{ type: string; text?: string }>; details?: unknown }> = [];
+			const updates: Array<{
+				content: Array<{ type: string; text?: string }>;
+				details?: { preview?: { content: string; skippedLines: number } };
+			}> = [];
 			const bash = createBashTool(testDir, { operations });
 
 			const result = await bash.execute("test-call-chatty-updates", { command: "chatty" }, undefined, (update) =>
@@ -656,6 +659,9 @@ describe("Coding Agent Tools", () => {
 			);
 
 			expect(updates.length).toBeLessThan(25);
+			const finalPreview = updates.at(-1)?.details?.preview;
+			expect(finalPreview?.content).toBe("line 4995\nline 4996\nline 4997\nline 4998\nline 4999");
+			expect(finalPreview?.skippedLines).toBe(4995);
 			expect(getTextOutput(result)).toContain("line 4999");
 		});
 
@@ -760,6 +766,17 @@ describe("Coding Agent Tools", () => {
 			const fullOutput = readFileSync(fullOutputPath!, "utf-8");
 			expect(fullOutput).toContain("1\n2\n3");
 			expect(fullOutput).toContain("2998\n2999\n3000");
+		});
+
+		it("should keep a bounded preview for piped command output", async () => {
+			const bash = createBashTool(testDir);
+
+			const result = await bash.execute("test-call-piped-output-preview", { command: "seq 3000 | cat" });
+
+			expect(result.details?.truncation?.truncated).toBe(true);
+			expect(result.details?.preview?.content).toBe("2996\n2997\n2998\n2999\n3000");
+			expect(result.details?.preview?.skippedLines).toBe(2995);
+			expect(result.details?.fullOutputPath).toBeDefined();
 		});
 
 		it("should optimize eligible simple commands natively", async () => {

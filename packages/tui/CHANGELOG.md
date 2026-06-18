@@ -1,5 +1,9 @@
 ## [Unreleased]
 
+### Fixed
+
+- Fixed streaming markdown code fences so partial closing fences do not temporarily render as shrinking code content.
+
 ## [0.80.28] - 2026-06-18
 
 ## [0.80.25] - 2026-06-14

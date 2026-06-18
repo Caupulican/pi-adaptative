@@ -1,7 +1,7 @@
 import type { ResponseOutputMessage } from "openai/resources/responses/responses.js";
 import { describe, expect, it } from "vitest";
 import { getModel } from "../src/models.ts";
-import { convertResponsesMessages } from "../src/providers/openai-responses-shared.ts";
+import { buildResponsesInstructions, convertResponsesMessages } from "../src/providers/openai-responses-shared.ts";
 import type { AssistantMessage, Context, Usage } from "../src/types.ts";
 
 const usage: Usage = {
@@ -44,5 +44,18 @@ describe("OpenAI Responses message ID conversion", () => {
 
 		expect(messageIds).toEqual(["msg_pi_1", "msg_pi_1_1"]);
 		expect(new Set(messageIds).size).toBe(messageIds.length);
+	});
+
+	it("keeps system prompt out of replay input and exposes it as instructions", () => {
+		const model = getModel("openai", "gpt-5.5");
+		const context: Context = {
+			systemPrompt: "Follow core instructions.",
+			messages: [{ role: "user", content: "hello", timestamp: Date.now() }],
+		};
+
+		const input = convertResponsesMessages(model, context, new Set(["openai", "openai-codex", "opencode"]));
+
+		expect(buildResponsesInstructions(context)).toBe("Follow core instructions.");
+		expect(input).toEqual([{ role: "user", content: [{ type: "input_text", text: "hello" }] }]);
 	});
 });
