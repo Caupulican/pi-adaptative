@@ -301,7 +301,7 @@ describe("AgentSession model and extension characterization", () => {
 		).toBe(true);
 	});
 
-	it("bindExtensions emits session_start and reload emits session_shutdown then session_start", async () => {
+	it("bindExtensions emits session_start and reload keeps the old generation alive until the new generation starts", async () => {
 		const lifecycleEvents: string[] = [];
 		const harness = await createHarness({
 			extensionFactories: [
@@ -320,6 +320,6 @@ describe("AgentSession model and extension characterization", () => {
 		await harness.session.bindExtensions({ shutdownHandler: () => {} });
 		await harness.session.reload();
 
-		expect(lifecycleEvents).toEqual(["start:startup", "shutdown:reload", "start:reload"]);
+		expect(lifecycleEvents).toEqual(["start:startup", "start:reload", "shutdown:reload"]);
 	});
 });

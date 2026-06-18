@@ -53,6 +53,7 @@ import {
 import { DEFAULT_THINKING_LEVEL } from "./defaults.ts";
 import { exportSessionToHtml, type ToolHtmlRenderer } from "./export-html/index.ts";
 import { createToolHtmlRenderer } from "./export-html/tool-renderer.ts";
+import { createCoreDiagnosticsToolDefinitions } from "./extensions/builtin.ts";
 import {
 	type ContextUsage,
 	type ExtensionCommandContextActions,
@@ -252,6 +253,18 @@ export interface SessionStats {
 interface ToolDefinitionEntry {
 	definition: ToolDefinition;
 	sourceInfo: SourceInfo;
+}
+
+interface ReloadRuntimeSnapshot {
+	extensionRunner: ExtensionRunner;
+	baseToolDefinitions: Map<string, ToolDefinition>;
+	toolRegistry: Map<string, AgentTool>;
+	toolDefinitions: Map<string, ToolDefinitionEntry>;
+	toolPromptSnippets: Map<string, string>;
+	toolPromptGuidelines: Map<string, string[]>;
+	agentTools: AgentTool[];
+	agentSystemPrompt: string;
+	baseSystemPrompt: string;
 }
 
 // ============================================================================
@@ -2617,6 +2630,63 @@ export class AgentSession {
 		this.setActiveToolsByName([...new Set(nextActiveToolNames)]);
 	}
 
+	private _createReloadRuntimeSnapshot(): ReloadRuntimeSnapshot {
+		return {
+			extensionRunner: this._extensionRunner,
+			baseToolDefinitions: this._baseToolDefinitions,
+			toolRegistry: this._toolRegistry,
+			toolDefinitions: this._toolDefinitions,
+			toolPromptSnippets: this._toolPromptSnippets,
+			toolPromptGuidelines: this._toolPromptGuidelines,
+			agentTools: this.agent.state.tools,
+			agentSystemPrompt: this.agent.state.systemPrompt,
+			baseSystemPrompt: this._baseSystemPrompt,
+		};
+	}
+
+	private _restoreReloadRuntimeSnapshot(snapshot: ReloadRuntimeSnapshot): void {
+		this._extensionRunner = snapshot.extensionRunner;
+		this._baseToolDefinitions = snapshot.baseToolDefinitions;
+		this._toolRegistry = snapshot.toolRegistry;
+		this._toolDefinitions = snapshot.toolDefinitions;
+		this._toolPromptSnippets = snapshot.toolPromptSnippets;
+		this._toolPromptGuidelines = snapshot.toolPromptGuidelines;
+		this.agent.state.tools = snapshot.agentTools;
+		this.agent.state.systemPrompt = snapshot.agentSystemPrompt;
+		this._baseSystemPrompt = snapshot.baseSystemPrompt;
+		if (this._extensionRunnerRef) {
+			this._extensionRunnerRef.current = snapshot.extensionRunner;
+		}
+		this._applyExtensionBindings(snapshot.extensionRunner);
+	}
+
+	private _doctorReloadRuntime(): void {
+		const extensionErrors = this._resourceLoader.getExtensions().errors;
+		if (extensionErrors.length > 0) {
+			const summary = extensionErrors
+				.slice(0, 6)
+				.map((error) => `${error.path}: ${error.error}`)
+				.join("; ");
+			throw new Error(`Extension reload failed doctor: ${summary}`);
+		}
+
+		const missingActiveTools = this.getActiveToolNames().filter((name) => !this._toolRegistry.has(name));
+		if (missingActiveTools.length > 0) {
+			throw new Error(
+				`Extension reload failed doctor: active tool(s) missing after reload: ${missingActiveTools.join(", ")}`,
+			);
+		}
+
+		for (const tool of this.agent.state.tools) {
+			if (!this._toolDefinitions.has(tool.name)) {
+				throw new Error(`Extension reload failed doctor: tool ${tool.name} missing from definition registry`);
+			}
+		}
+
+		this._createAgentContextSnapshot();
+		this.getContextUsage();
+	}
+
 	private _buildRuntime(options: {
 		activeToolNames?: string[];
 		flagValues?: Map<string, boolean | string>;
@@ -2640,6 +2710,14 @@ export class AgentSession {
 		this._baseToolDefinitions = new Map(
 			Object.entries(baseToolDefinitions).map(([name, tool]) => [name, tool as ToolDefinition]),
 		);
+		if (!this._baseToolsOverride) {
+			for (const definition of createCoreDiagnosticsToolDefinitions(
+				() => this.getActiveToolNames(),
+				() => this.getAllTools(),
+			)) {
+				this._baseToolDefinitions.set(definition.name, definition);
+			}
+		}
 
 		const extensionsResult = this._resourceLoader.getExtensions();
 		if (options.flagValues) {
@@ -2663,7 +2741,7 @@ export class AgentSession {
 
 		const defaultActiveToolNames = this._baseToolsOverride
 			? Object.keys(this._baseToolsOverride)
-			: ["read", "bash", "edit", "write"];
+			: ["read", "bash", "edit", "write", "context_audit"];
 		const baseActiveToolNames = options.activeToolNames ?? defaultActiveToolNames;
 		this._refreshToolRegistry({
 			activeToolNames: baseActiveToolNames,
@@ -2672,25 +2750,55 @@ export class AgentSession {
 	}
 
 	async reload(): Promise<void> {
-		const previousFlagValues = this._extensionRunner.getFlagValues();
-		await emitSessionShutdownEvent(this._extensionRunner, { type: "session_shutdown", reason: "reload" });
-		await this.settingsManager.reload();
-		resetApiProviders();
-		await this._resourceLoader.reload();
-		this._buildRuntime({
-			activeToolNames: this.getActiveToolNames(),
-			flagValues: previousFlagValues,
-			includeAllExtensionTools: true,
-		});
-
-		const hasBindings =
-			this._extensionUIContext ||
-			this._extensionCommandContextActions ||
-			this._extensionShutdownHandler ||
-			this._extensionErrorListener;
-		if (hasBindings) {
-			await this._extensionRunner.emit({ type: "session_start", reason: "reload" });
-			await this.extendResourcesFromExtensions("reload");
+		const previousRunner = this._extensionRunner;
+		const snapshot = this._createReloadRuntimeSnapshot();
+		const activeToolNames = this.getActiveToolNames();
+		const previousFlagValues = previousRunner.getFlagValues();
+		const reloadErrors: string[] = [];
+		let newRunner: ExtensionRunner | undefined;
+		try {
+			await this.settingsManager.reload();
+			await this._resourceLoader.reload({ failOnExtensionErrors: true, deferExtensionDispose: true });
+			resetApiProviders();
+			this._buildRuntime({
+				activeToolNames,
+				flagValues: previousFlagValues,
+				includeAllExtensionTools: true,
+			});
+			newRunner = this._extensionRunner;
+			const offDoctorErrors = newRunner.onError((error) => {
+				reloadErrors.push(`${error.extensionPath} ${error.event}: ${error.error}`);
+			});
+			try {
+				this._doctorReloadRuntime();
+				const hasBindings =
+					this._extensionUIContext ||
+					this._extensionCommandContextActions ||
+					this._extensionShutdownHandler ||
+					this._extensionErrorListener;
+				if (hasBindings) {
+					await newRunner.emit({ type: "session_start", reason: "reload" });
+					await this.extendResourcesFromExtensions("reload");
+					this._doctorReloadRuntime();
+				}
+			} finally {
+				offDoctorErrors();
+			}
+			if (reloadErrors.length > 0) {
+				throw new Error(`Extension reload failed doctor: ${reloadErrors.slice(0, 6).join("; ")}`);
+			}
+			await emitSessionShutdownEvent(previousRunner, { type: "session_shutdown", reason: "reload" });
+			previousRunner.invalidate();
+			this._resourceLoader.commitReload?.();
+		} catch (error) {
+			if (newRunner && newRunner !== previousRunner) {
+				newRunner.invalidate(
+					"This extension ctx was discarded because reload failed and Pi restored the previous valid runtime.",
+				);
+			}
+			this._resourceLoader.rollbackReload?.();
+			this._restoreReloadRuntimeSnapshot(snapshot);
+			throw error;
 		}
 	}
 

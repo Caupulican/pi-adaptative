@@ -68,15 +68,15 @@ export interface SelfModificationSettings {
 export interface AutoLearnSettings {
 	enabled?: boolean; // default: false - autonomously trigger background history scavenging for long sessions
 	model?: string; // "active" or omitted uses the current session model; otherwise a pi --model pattern
-	longSessionMessages?: number; // default: 32
-	longSessionContextPercent?: number; // default: 70
-	cooldownMinutes?: number; // default: 120 per session tenant
+	longSessionMessages?: number; // default: 64
+	longSessionContextPercent?: number; // default: 85
+	cooldownMinutes?: number; // default: 1440 per session tenant (manual /auto-learn run bypasses)
 	leaseMinutes?: number; // default: 90 for background learner state leases
 	maxConcurrentLearners?: number; // default: 2 per session tenant
 	applyHighConfidence?: boolean; // default: false unless the learning extension config opts in
 	reflectionReview?: boolean; // default: true when Auto Learn is enabled - post-turn review after corrective/complex turns
-	reflectionMinToolCalls?: number; // default: 5 tool calls in a turn before reflection review triggers
-	reflectionCooldownMinutes?: number; // default: 60 per session tenant for reflection reviews
+	reflectionMinToolCalls?: number; // default: 8 tool calls in a turn before reflection review triggers
+	reflectionCooldownMinutes?: number; // default: 1440 per session tenant for reflection reviews
 }
 
 export type AutonomyMode = "off" | "safe" | "balanced" | "full";
