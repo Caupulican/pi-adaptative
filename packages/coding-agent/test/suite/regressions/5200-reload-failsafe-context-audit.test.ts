@@ -99,6 +99,7 @@ describe("reload failsafe and context audit", () => {
 		});
 		try {
 			await session.bindExtensions({});
+			expect(session.getActiveToolNames()).toContain("context_audit");
 			const definition = session.getToolDefinition("context_audit");
 			expect(definition).toBeDefined();
 			const result = await definition!.execute(
