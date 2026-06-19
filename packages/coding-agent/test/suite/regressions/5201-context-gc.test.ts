@@ -48,10 +48,14 @@ function user(text: string): UserMessage {
 }
 
 function customMemory(text: string): AgentMessage {
+	return customMemoryParts(text);
+}
+
+function customMemoryParts(...texts: string[]): AgentMessage {
 	return {
 		role: "custom",
 		customType: "automata-session-context",
-		content: [{ type: "text", text }],
+		content: texts.map((text) => ({ type: "text", text })),
 		display: false,
 		timestamp: Date.now(),
 	} as AgentMessage;
@@ -196,6 +200,46 @@ describe("Context GC", () => {
 		expect(textOf(result.messages[1])).toContain("keep my real prompt intact");
 		expect(textOf(result.messages[6])).toContain("<automata_response");
 		expect(textOf(result.messages[6])).not.toContain("Semantic GC packed");
+	});
+
+	it("detects semantic memory markers across text content boundaries", () => {
+		const messages: AgentMessage[] = [customMemoryParts("alpha", "beta", "memory ".repeat(40))];
+
+		const result = applyContextGc(messages, {
+			cwd: "/repo",
+			preserveRecentMessages: 0,
+			semanticMemory: { markers: ["alpha\nbeta"], preserveRecentPages: 0, minChars: 20 },
+			writePayloads: false,
+		});
+
+		expect(result.report.records.map((record) => record.reason)).toEqual(["stale-semantic-memory"]);
+		expect(textOf(result.messages[0])).toContain("Semantic GC packed stale Automata/Mind context page");
+	});
+
+	it("does not join large non-semantic messages during semantic scan", () => {
+		const messages: AgentMessage[] = [
+			customMemoryParts("large ".repeat(200), "ordinary text"),
+			toolResult("other-1", "other-tool", "large ".repeat(200)),
+		];
+		const originalJoin = Array.prototype.join;
+		let newlineJoinCount = 0;
+		Array.prototype.join = function patchedJoin(this: unknown[], separator?: string): string {
+			if (separator === "\n") newlineJoinCount++;
+			return originalJoin.call(this, separator);
+		};
+		try {
+			const result = applyContextGc(messages, {
+				cwd: "/repo",
+				preserveRecentMessages: 0,
+				semanticMemory: { preserveRecentPages: 0, minChars: 20 },
+				writePayloads: false,
+			});
+			expect(result.report.packedCount).toBe(0);
+		} finally {
+			Array.prototype.join = originalJoin;
+		}
+
+		expect(newlineJoinCount).toBe(0);
 	});
 
 	it("reports Context GC savings from context_audit", async () => {

@@ -138,8 +138,8 @@ export function getContextGcSettings(settings?: ContextGcSettings): NormalizedCo
 	return normalizeContextGcSettings(settings);
 }
 
-function contentText(content: unknown): string | undefined {
-	if (typeof content === "string") return content;
+function textContentParts(content: unknown): string[] | undefined {
+	if (typeof content === "string") return [content];
 	if (!Array.isArray(content)) return undefined;
 	const parts: string[] = [];
 	for (const part of content) {
@@ -149,18 +149,50 @@ function contentText(content: unknown): string | undefined {
 		else if (typed.type === "image") return undefined;
 		else return undefined;
 	}
-	return parts.join("\n");
+	return parts;
+}
+
+function contentText(content: unknown): string | undefined {
+	if (typeof content === "string") return content;
+	return textContentParts(content)?.join("\n");
+}
+
+function toolResultParts(message: ToolResultMessage): string[] {
+	const parts: string[] = [];
+	for (const part of message.content) {
+		if (part.type === "text" && part.text) parts.push(part.text);
+		else if (part.type === "image") parts.push(`[image ${part.mimeType}]`);
+	}
+	return parts;
 }
 
 function toolResultText(message: ToolResultMessage): string {
-	return message.content
-		.map((part) => {
-			if (part.type === "text") return part.text;
-			if (part.type === "image") return `[image ${part.mimeType}]`;
-			return "";
-		})
-		.filter(Boolean)
-		.join("\n");
+	return toolResultParts(message).join("\n");
+}
+
+function smallStringSlice(value: string, start?: number, end?: number): string {
+	const sliced = value.slice(start, end);
+	return sliced ? ` ${sliced}`.slice(1) : "";
+}
+
+function joinedPartsContainMarker(parts: string[], marker: string): boolean {
+	if (marker.length === 0) return true;
+	const tailLength = marker.length - 1;
+	let tail = "";
+	let first = true;
+	for (const part of parts) {
+		if (part.includes(marker)) return true;
+		if (!first && `${tail}\n${smallStringSlice(part, 0, tailLength)}`.includes(marker)) return true;
+		if (tailLength === 0) tail = "";
+		else if (part.length >= tailLength) tail = smallStringSlice(part, -tailLength);
+		else tail = `${tail}${first ? "" : "\n"}${part}`.slice(-tailLength);
+		first = false;
+	}
+	return false;
+}
+
+function joinedPartsContainAnyMarker(parts: string[], markers: readonly string[]): boolean {
+	return markers.some((marker) => joinedPartsContainMarker(parts, marker));
 }
 
 function isSemanticMemoryCustomMessage(message: AgentMessage): boolean {
@@ -175,8 +207,13 @@ function agentMessageText(message: AgentMessage): string | undefined {
 	return undefined;
 }
 
-function isSemanticMemoryPage(text: string, settings: Required<SemanticMemoryGcSettings>): boolean {
-	return settings.markers.some((marker) => text.includes(marker));
+function semanticMessageHasMarker(message: AgentMessage, settings: Required<SemanticMemoryGcSettings>): boolean {
+	if (message.role === "toolResult") return joinedPartsContainAnyMarker(toolResultParts(message), settings.markers);
+	if (isSemanticMemoryCustomMessage(message)) {
+		const parts = textContentParts((message as { content?: unknown }).content);
+		return parts ? joinedPartsContainAnyMarker(parts, settings.markers) : false;
+	}
+	return false;
 }
 
 interface ContextGcPlan {
@@ -216,9 +253,8 @@ function collectContextGcPlan(
 			readResultCallIds.push(message.toolCallId);
 		}
 
-		if (semanticSettings.enabled) {
-			const text = agentMessageText(message);
-			if (text && isSemanticMemoryPage(text, semanticSettings)) semanticIndexes.push(messageIndex);
+		if (semanticSettings.enabled && semanticMessageHasMarker(message, semanticSettings)) {
+			semanticIndexes.push(messageIndex);
 		}
 	}
 
@@ -335,7 +371,11 @@ export function applyContextGc(
 	const plan = collectContextGcPlan(messages, options.cwd, options.semanticMemory);
 	const recentStart = Math.max(0, messages.length - options.preserveRecentMessages);
 	const semanticIndexSet = new Set(plan.semanticIndexes);
-	const preservedSemanticIndexes = new Set(plan.semanticIndexes.slice(-options.semanticMemory.preserveRecentPages));
+	const preservedSemanticIndexes = new Set(
+		options.semanticMemory.preserveRecentPages > 0
+			? plan.semanticIndexes.slice(-options.semanticMemory.preserveRecentPages)
+			: [],
+	);
 	const nextMessages = messages.slice();
 	let changed = false;
 
