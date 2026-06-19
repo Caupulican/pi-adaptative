@@ -397,6 +397,7 @@ function createHarnessWithResourceLoader(
 		sessionManager,
 		settingsManager,
 		cwd: tempDir,
+		agentDir: tempDir,
 		modelRegistry,
 		resourceLoader,
 		baseToolsOverride: options.baseToolsOverride,

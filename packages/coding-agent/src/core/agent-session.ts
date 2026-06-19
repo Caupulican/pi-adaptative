@@ -34,6 +34,7 @@ import {
 	resetApiProviders,
 	streamSimple,
 } from "@caupulican/pi-ai";
+import { getAgentDir } from "../config.ts";
 import { theme } from "../modes/interactive/theme/theme.ts";
 import { stripFrontmatter } from "../utils/frontmatter.ts";
 import { resolvePath } from "../utils/paths.ts";
@@ -169,6 +170,8 @@ export interface AgentSessionConfig {
 	sessionManager: SessionManager;
 	settingsManager: SettingsManager;
 	cwd: string;
+	/** User-level agent state directory for generated runtime artifacts. */
+	agentDir?: string;
 	/** Models to cycle through with Ctrl+P (from --models flag) */
 	scopedModels?: Array<{ model: Model<any>; thinkingLevel?: ThinkingLevel }>;
 	/** Resource loader for skills, prompts, themes, context files, system prompt */
@@ -326,6 +329,7 @@ export class AgentSession {
 	private _customTools: ToolDefinition[];
 	private _baseToolDefinitions: Map<string, ToolDefinition> = new Map();
 	private _cwd: string;
+	private _agentDir: string;
 	private _extensionRunnerRef?: { current?: ExtensionRunner };
 	private _initialActiveToolNames?: string[];
 	private _allowedToolNames?: Set<string>;
@@ -362,6 +366,7 @@ export class AgentSession {
 		this._resourceLoader = config.resourceLoader;
 		this._customTools = config.customTools ?? [];
 		this._cwd = config.cwd;
+		this._agentDir = config.agentDir ?? getAgentDir();
 		this._modelRegistry = config.modelRegistry;
 		this._extensionRunnerRef = config.extensionRunnerRef;
 		this._initialActiveToolNames = config.initialActiveToolNames;
@@ -496,7 +501,7 @@ export class AgentSession {
 	}
 
 	private _contextGcStorageDir(): string {
-		return join(this.sessionManager.getSessionDir(), "context-gc", this.sessionManager.getSessionId());
+		return join(this._agentDir, "context-gc", this.sessionManager.getSessionId());
 	}
 
 	private _applyContextGc(

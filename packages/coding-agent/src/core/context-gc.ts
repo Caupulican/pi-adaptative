@@ -269,7 +269,7 @@ function collectContextGcPlan(
 }
 
 function storagePathFor(storageDir: string | undefined, key: string): string | undefined {
-	if (!storageDir) return undefined;
+	if (!storageDir || !isAbsolute(storageDir)) return undefined;
 	return resolve(storageDir, `${key}.txt`);
 }
 

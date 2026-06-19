@@ -9,6 +9,7 @@ import { applyContextGc } from "../../../src/core/context-gc.ts";
 import { createCoreDiagnosticsToolDefinitions } from "../../../src/core/extensions/builtin.ts";
 import type { SessionEntry } from "../../../src/core/session-manager.ts";
 import { createSyntheticSourceInfo } from "../../../src/core/source-info.ts";
+import { createHarness } from "../../test-harness.ts";
 
 const usage: Usage = {
 	input: 0,
@@ -175,6 +176,52 @@ describe("Context GC", () => {
 		expect(textOf(result.messages[1])).toContain(storagePath!);
 		expect(result.report.originalTokens).toBe(beforeTokens);
 		expect(result.report.savedTokens).toBeGreaterThan(0);
+	});
+
+	it("does not write payload files for relative storage dirs", () => {
+		const repo = mkdtempSync(join(tmpdir(), "pi-context-gc-repo-"));
+		tempDirs.push(repo);
+		const oldCwd = process.cwd();
+		const original = large("RELATIVE STORAGE PAYLOAD");
+		const messages: AgentMessage[] = [
+			assistantToolCall("bash-relative", "bash", { command: "npm test" }),
+			toolResult("bash-relative", "bash", original),
+			user("later"),
+		];
+
+		try {
+			process.chdir(repo);
+			const result = applyContextGc(messages, {
+				cwd: repo,
+				storageDir: "context-gc",
+				preserveRecentMessages: 0,
+				minToolResultChars: 20,
+				writePayloads: true,
+			});
+
+			expect(result.report.records[0]?.storagePath).toBeUndefined();
+			expect(existsSync(join(repo, "context-gc"))).toBe(false);
+			expect(textOf(result.messages[1])).toContain("retained in the session log");
+		} finally {
+			process.chdir(oldCwd);
+		}
+	});
+
+	it("uses agentDir rather than sessionDir for AgentSession context-gc storage", () => {
+		const harness = createHarness();
+		try {
+			const agentDir = join(harness.tempDir, "agent-state");
+			const session = harness.session as unknown as { _agentDir: string; _contextGcStorageDir(): string };
+			session._agentDir = agentDir;
+
+			const storageDir = session._contextGcStorageDir();
+			expect(storageDir).toBe(join(agentDir, "context-gc", harness.sessionManager.getSessionId()));
+			expect(storageDir).not.toBe(
+				join(harness.sessionManager.getSessionDir(), "context-gc", harness.sessionManager.getSessionId()),
+			);
+		} finally {
+			harness.cleanup();
+		}
 	});
 
 	it("packs stale Automata semantic memory pages while preserving recent pages", () => {
