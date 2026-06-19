@@ -334,14 +334,15 @@ export function applyContextGc(
 	const calls = collectToolCalls(messages);
 	const latestReadByPath = collectLatestReadCallByPath(messages, calls, options.cwd);
 	const recentStart = Math.max(0, messages.length - options.preserveRecentMessages);
-	const semanticIndexes = Array.from(collectSemanticMemoryIndexes(messages, options.semanticMemory));
+	const semanticIndexSet = collectSemanticMemoryIndexes(messages, options.semanticMemory);
+	const semanticIndexes = Array.from(semanticIndexSet);
 	const preservedSemanticIndexes = new Set(semanticIndexes.slice(-options.semanticMemory.preserveRecentPages));
 	const nextMessages = messages.slice();
 	let changed = false;
 
 	for (let index = 0; index < messages.length; index++) {
 		const message = messages[index];
-		if (semanticIndexes.includes(index) && !preservedSemanticIndexes.has(index) && index < recentStart) {
+		if (semanticIndexSet.has(index) && !preservedSemanticIndexes.has(index) && index < recentStart) {
 			const originalText = agentMessageText(message);
 			if (originalText && originalText.length >= options.semanticMemory.minChars) {
 				const originalTokens = estimateTokens(message);
