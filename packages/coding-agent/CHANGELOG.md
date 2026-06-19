@@ -1,5 +1,14 @@
 ## [Unreleased]
 
+### Added
+
+- Added deterministic improvement-loop helpers for metric-based keep/discard decisions, sandbox worktree creation, sandbox measurement, patch export, and cleanup.
+- Tightened adaptive self-evolution prompt guidance around sandbox-first mutation, validation, and durable evidence capture.
+
+### Changed
+
+- Optimized semantic context GC membership and planning, including marker-first semantic scans that avoid unnecessary string joins.
+
 ## [0.80.29] - 2026-06-18
 
 ### Added
