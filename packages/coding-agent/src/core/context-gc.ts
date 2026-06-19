@@ -179,35 +179,10 @@ function isSemanticMemoryPage(text: string, settings: Required<SemanticMemoryGcS
 	return settings.markers.some((marker) => text.includes(marker));
 }
 
-function collectSemanticMemoryIndexes(
-	messages: AgentMessage[],
-	settings: Required<SemanticMemoryGcSettings>,
-): Set<number> {
-	const indexes = new Set<number>();
-	if (!settings.enabled) return indexes;
-	for (let index = 0; index < messages.length; index++) {
-		const text = agentMessageText(messages[index]);
-		if (text && isSemanticMemoryPage(text, settings)) indexes.add(index);
-	}
-	return indexes;
-}
-
-function collectToolCalls(messages: AgentMessage[]): Map<string, ToolCallMeta> {
-	const calls = new Map<string, ToolCallMeta>();
-	for (let messageIndex = 0; messageIndex < messages.length; messageIndex++) {
-		const message = messages[messageIndex];
-		if (message.role !== "assistant") continue;
-		for (const part of message.content) {
-			if (part.type !== "toolCall") continue;
-			calls.set(part.id, {
-				id: part.id,
-				name: part.name,
-				args: part.arguments ?? {},
-				messageIndex,
-			});
-		}
-	}
-	return calls;
+interface ContextGcPlan {
+	calls: Map<string, ToolCallMeta>;
+	latestReadByPath: Map<string, string>;
+	semanticIndexes: number[];
 }
 
 function normalizeToolPath(cwd: string, value: unknown): string | undefined {
@@ -216,19 +191,45 @@ function normalizeToolPath(cwd: string, value: unknown): string | undefined {
 	return normalizePath(isAbsolute(path) ? path : resolve(cwd, path));
 }
 
-function collectLatestReadCallByPath(
+function collectContextGcPlan(
 	messages: AgentMessage[],
-	calls: Map<string, ToolCallMeta>,
 	cwd: string,
-): Map<string, string> {
-	const latest = new Map<string, string>();
-	for (const message of messages) {
-		if (message.role !== "toolResult" || message.toolName !== "read") continue;
-		const call = calls.get(message.toolCallId);
-		const path = normalizeToolPath(cwd, call?.args.path);
-		if (path) latest.set(path, message.toolCallId);
+	semanticSettings: Required<SemanticMemoryGcSettings>,
+): ContextGcPlan {
+	const calls = new Map<string, ToolCallMeta>();
+	const readResultCallIds: string[] = [];
+	const semanticIndexes: number[] = [];
+
+	for (let messageIndex = 0; messageIndex < messages.length; messageIndex++) {
+		const message = messages[messageIndex];
+		if (message.role === "assistant") {
+			for (const part of message.content) {
+				if (part.type !== "toolCall") continue;
+				calls.set(part.id, {
+					id: part.id,
+					name: part.name,
+					args: part.arguments ?? {},
+					messageIndex,
+				});
+			}
+		} else if (message.role === "toolResult" && message.toolName === "read") {
+			readResultCallIds.push(message.toolCallId);
+		}
+
+		if (semanticSettings.enabled) {
+			const text = agentMessageText(message);
+			if (text && isSemanticMemoryPage(text, semanticSettings)) semanticIndexes.push(messageIndex);
+		}
 	}
-	return latest;
+
+	const latestReadByPath = new Map<string, string>();
+	for (const toolCallId of readResultCallIds) {
+		const call = calls.get(toolCallId);
+		const path = normalizeToolPath(cwd, call?.args.path);
+		if (path) latestReadByPath.set(path, toolCallId);
+	}
+
+	return { calls, latestReadByPath, semanticIndexes };
 }
 
 function storagePathFor(storageDir: string | undefined, key: string): string | undefined {
@@ -331,12 +332,10 @@ export function applyContextGc(
 		writePayloads: rawSettings.writePayloads ?? true,
 	};
 	const eligibleTools = new Set(options.tools);
-	const calls = collectToolCalls(messages);
-	const latestReadByPath = collectLatestReadCallByPath(messages, calls, options.cwd);
+	const plan = collectContextGcPlan(messages, options.cwd, options.semanticMemory);
 	const recentStart = Math.max(0, messages.length - options.preserveRecentMessages);
-	const semanticIndexSet = collectSemanticMemoryIndexes(messages, options.semanticMemory);
-	const semanticIndexes = Array.from(semanticIndexSet);
-	const preservedSemanticIndexes = new Set(semanticIndexes.slice(-options.semanticMemory.preserveRecentPages));
+	const semanticIndexSet = new Set(plan.semanticIndexes);
+	const preservedSemanticIndexes = new Set(plan.semanticIndexes.slice(-options.semanticMemory.preserveRecentPages));
 	const nextMessages = messages.slice();
 	let changed = false;
 
@@ -380,11 +379,11 @@ export function applyContextGc(
 		const originalText = toolResultText(message);
 		if (originalText.length < options.minToolResultChars) continue;
 
-		const call = calls.get(message.toolCallId);
+		const call = plan.calls.get(message.toolCallId);
 		const path = normalizeToolPath(options.cwd, call?.args.path);
 		let reason: ContextGcPackedRecord["reason"] = "stale-tool-result";
 		if (message.toolName === "read" && path) {
-			if (latestReadByPath.get(path) === message.toolCallId) continue;
+			if (plan.latestReadByPath.get(path) === message.toolCallId) continue;
 			reason = "superseded-read";
 		}
 
