@@ -249,11 +249,12 @@ describe("AgentSessionRuntime session lifecycle events", () => {
 		});
 
 		const ctx = runtimeHost.session.extensionRunner.createContext();
-		runtimeHost.session.agent.state.isStreaming = true;
+		const mutableAgentState = runtimeHost.session.agent.state as unknown as { isStreaming: boolean };
+		mutableAgentState.isStreaming = true;
 		await expect(ctx.reload()).rejects.toThrow(/streaming/);
 		expect(reloadCalls).toBe(0);
 
-		runtimeHost.session.agent.state.isStreaming = false;
+		mutableAgentState.isStreaming = false;
 		(runtimeHost.session as any)._compactionAbortController = new AbortController();
 		await expect(ctx.reload()).rejects.toThrow(/compaction/);
 		expect(reloadCalls).toBe(0);

@@ -1,5 +1,11 @@
 ## [Unreleased]
 
+## [0.80.33] - 2026-06-21
+
+### Fixed
+
+- Fixed the hot-reload safety regression test to mutate agent streaming state through a typed test-only shim, allowing release CI type checks to pass while keeping runtime state readonly.
+
 ## [0.80.32] - 2026-06-21
 
 ### Added
