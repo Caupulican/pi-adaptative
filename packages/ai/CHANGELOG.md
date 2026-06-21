@@ -1,5 +1,11 @@
 ## [Unreleased]
 
+## [0.80.34] - 2026-06-21
+
+### Fixed
+
+- Generated image model metadata now uses the formatted object shape expected by CI artifact verification.
+
 ## [0.80.33] - 2026-06-21
 
 ## [0.80.32] - 2026-06-21

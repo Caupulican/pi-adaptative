@@ -1,5 +1,11 @@
 ## [Unreleased]
 
+## [0.80.34] - 2026-06-21
+
+### Fixed
+
+- Fixed release cleanliness by generating image model metadata in the same formatted shape enforced by CI, so binary publish jobs do not dirty `image-models.generated.ts`.
+
 ## [0.80.33] - 2026-06-21
 
 ### Fixed

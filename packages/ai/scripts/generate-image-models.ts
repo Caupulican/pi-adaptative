@@ -76,6 +76,19 @@ async function fetchOpenRouterImageModels(): Promise<ImagesModel<"openrouter-ima
 	}
 }
 
+function serializeStringArray(values: string[]): string {
+	return `[${values.map((value) => JSON.stringify(value)).join(", ")}]`;
+}
+
+function serializeCost(cost: ImagesModel<"openrouter-images">["cost"]): string {
+	return `{
+				input: ${cost.input},
+				output: ${cost.output},
+				cacheRead: ${cost.cacheRead},
+				cacheWrite: ${cost.cacheWrite},
+			}`;
+}
+
 function generateImageModelsFile(models: ImagesModel<"openrouter-images">[]): string {
 	const imageModelsByProvider = {
 		openrouter: Object.fromEntries(
@@ -89,9 +102,9 @@ function generateImageModelsFile(models: ImagesModel<"openrouter-images">[]): st
 			api: ${JSON.stringify(model.api)},
 			provider: ${JSON.stringify(model.provider)},
 			baseUrl: ${JSON.stringify(model.baseUrl)},
-			input: ${JSON.stringify(model.input)},
-			output: ${JSON.stringify(model.output)},
-			cost: ${JSON.stringify(model.cost, null, 2).replace(/^/gm, "\t")}
+			input: ${serializeStringArray(model.input)},
+			output: ${serializeStringArray(model.output)},
+			cost: ${serializeCost(model.cost)},
 		} satisfies ImagesModel<${JSON.stringify(model.api)}>`,
 				]),
 		),
@@ -102,7 +115,7 @@ function generateImageModelsFile(models: ImagesModel<"openrouter-images">[]): st
 			const modelEntries = Object.entries(providerModels)
 				.map(([id, serialized]) => `\t\t${JSON.stringify(id)}: ${serialized},`)
 				.join("\n");
-			return `\t${JSON.stringify(provider)}: {\n${modelEntries}\n\t},`;
+			return `\t${provider}: {\n${modelEntries}\n\t},`;
 		})
 		.join("\n");
 
