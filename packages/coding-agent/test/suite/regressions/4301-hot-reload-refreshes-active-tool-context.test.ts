@@ -71,7 +71,9 @@ describe("hot reload active tool context", () => {
 		await harness.session.prompt("reload then use new schema");
 
 		const hotReloadResult = harness.eventsOfType("tool_execution_end").find((event) => event.toolName === "hot_reload");
-		const schemaResult = harness.eventsOfType("tool_execution_end").find((event) => event.toolName === "schema_tool");
+		const schemaResult = harness.eventsOfType("tool_execution_end").find((event) =>
+			event.toolName === "schema_tool",
+		);
 		expect(reloadCount).toBe(0);
 		expect(hotReloadResult?.isError).toBe(true);
 		expect(schemaResult).toBeUndefined();

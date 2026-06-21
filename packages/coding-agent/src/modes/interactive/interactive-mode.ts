@@ -5225,7 +5225,9 @@ export class InteractiveMode {
 				reason: `max tenant learners running (${runningCount}/${settings.maxConcurrentLearners})`,
 			};
 		}
-		if (cooldownRemainingMs > 0 && !bypassCooldown) return { ...base, shouldRun: false, reason: "reflection cooldown" };
+		if (cooldownRemainingMs > 0 && !bypassCooldown) {
+			return { ...base, shouldRun: false, reason: "reflection cooldown" };
+		}
 		if (behavioralSelfImprovementSignal) {
 			return {
 				...base,
