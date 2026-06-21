@@ -1034,7 +1034,7 @@ describe("Coding Agent Tools", () => {
 			const output = getTextOutput(result);
 
 			expect(output).toContain("test.txt");
-			expect(output).toMatch(/-rwxr-xr-x|-rw-r--r--|d---------|d|rwx/);
+			expect(output).toMatch(/[-dl][rwx-]{9}/);
 			expect(output).toContain("5B");
 		});
 

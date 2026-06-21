@@ -231,4 +231,32 @@ describe("AgentSessionRuntime session lifecycle events", () => {
 		expect(cancelAtResult).toEqual({ cancelled: true });
 		expect(events).toEqual([{ type: "session_before_fork", entryId: "missing-entry", position: "at" }]);
 	});
+
+	it("refuses extension-triggered reload while streaming or compacting", async () => {
+		const { runtimeHost } = await createRuntimeHost(() => {});
+		let reloadCalls = 0;
+		await runtimeHost.session.bindExtensions({
+			commandContextActions: {
+				waitForIdle: async () => {},
+				newSession: async () => ({ cancelled: false }),
+				fork: async () => ({ cancelled: false }),
+				navigateTree: async () => ({ cancelled: false }),
+				switchSession: async () => ({ cancelled: false }),
+				reload: async () => {
+					reloadCalls++;
+				},
+			},
+		});
+
+		const ctx = runtimeHost.session.extensionRunner.createContext();
+		runtimeHost.session.agent.state.isStreaming = true;
+		await expect(ctx.reload()).rejects.toThrow(/streaming/);
+		expect(reloadCalls).toBe(0);
+
+		runtimeHost.session.agent.state.isStreaming = false;
+		(runtimeHost.session as any)._compactionAbortController = new AbortController();
+		await expect(ctx.reload()).rejects.toThrow(/compaction/);
+		expect(reloadCalls).toBe(0);
+		(runtimeHost.session as any)._compactionAbortController = undefined;
+	});
 });

@@ -28,7 +28,12 @@ interface AutoLearnLaunchHarness {
 	launchAutoLearn: (
 		reason: string,
 		force?: boolean,
-		options?: { cooldownKind?: "auto" | "reflection"; promptKind?: "auto" | "reflection"; turnDigest?: string },
+		options?: {
+			cooldownKind?: "auto" | "reflection";
+			promptKind?: "auto" | "reflection";
+			turnDigest?: string;
+			bypassReflectionCooldown?: boolean;
+		},
 	) => string;
 }
 
@@ -346,6 +351,134 @@ await new Promise((resolve) => setTimeout(resolve, 1000));
 			second.launchAutoLearn("same tenant second", true, { cooldownKind: "reflection", promptKind: "reflection" }),
 		).toContain("Auto Learn not started: reflection cooldown");
 		expect(readAutoLearnRunCount(dataDir)).toBe(1);
+	});
+
+	it("lets explicit self-improvement reflection signals bypass reflection cooldown", () => {
+		const dataDir = createTempDir();
+		const fakeCliPath = writeFakeCli(dataDir, `console.log("reserved"); setTimeout(() => undefined, 1000);\n`);
+		const spawnTarget = { command: process.execPath, argsPrefix: [fakeCliPath] };
+		const first = createAutoLearnHarness(dataDir, spawnTarget, {
+			maxConcurrentLearners: 2,
+			reflectionCooldownMinutes: 10,
+		});
+		const second = createAutoLearnHarness(dataDir, spawnTarget, {
+			maxConcurrentLearners: 2,
+			reflectionCooldownMinutes: 10,
+		});
+
+		expect(
+			first.launchAutoLearn("same tenant first", true, { cooldownKind: "reflection", promptKind: "reflection" }),
+		).toContain("Auto Learn started");
+		expect(
+			second.launchAutoLearn("reflection behavioral self-improvement signal", true, {
+				cooldownKind: "reflection",
+				promptKind: "reflection",
+				bypassReflectionCooldown: true,
+			}),
+		).toContain("Auto Learn started");
+		expect(readAutoLearnRunCount(dataDir)).toBe(2);
+	});
+
+	it("detects code-baked behavioral self-improvement cues as automatic reflection triggers", () => {
+		const now = Date.now();
+		const mode = Object.create(InteractiveMode.prototype) as any;
+		mode.getEffectiveAutoLearnSettings = () => ({
+			enabled: true,
+			reflectionReview: true,
+			reflectionCooldownMinutes: 60,
+			reflectionMinToolCalls: 99,
+			maxConcurrentLearners: 1,
+		});
+		mode.runtimeHost = {
+			session: {
+				settingsManager: { getAutonomySettings: () => ({ mode: "balanced" }) },
+				getContextUsage: () => ({ percent: 10 }),
+			},
+		};
+		mode.withAutoLearnStateLock = (callback: (state: unknown) => { result: unknown }) =>
+			callback({ lastReflectionByTenant: { tenant: now }, runs: {} }).result;
+		mode.pruneAutoLearnHistoryFromState = (state: unknown) => state;
+		mode.getAutoLearnTenantKey = () => "tenant";
+		mode.getAutoLearnMessageCount = () => 3;
+		mode.countAgentToolCalls = () => 0;
+		mode.getAgentMessagePlainText = (message: { content: string }) => message.content;
+		mode.buildAutonomyReviewDigest = () => "digest";
+
+		const decision = mode.evaluateAutonomyReview([
+			{
+				role: "user",
+				content:
+					"Pi needs code-baked harness self-improvement triggers that fire automatically, not Automata-only memory.",
+			},
+		]);
+
+		expect(decision.shouldRun).toBe(true);
+		expect(decision.reason).toBe("reflection behavioral self-improvement signal");
+		expect(decision.bypassCooldown).toBe(true);
+	});
+
+	it("detects Hermes-style complex tasks as automatic reflection triggers", () => {
+		const now = Date.now();
+		const mode = Object.create(InteractiveMode.prototype) as any;
+		mode.getEffectiveAutoLearnSettings = () => ({
+			enabled: true,
+			reflectionReview: true,
+			reflectionCooldownMinutes: 60,
+			reflectionMinToolCalls: 99,
+			maxConcurrentLearners: 1,
+		});
+		mode.runtimeHost = {
+			session: {
+				settingsManager: { getAutonomySettings: () => ({ mode: "balanced" }) },
+				getContextUsage: () => ({ percent: 10 }),
+			},
+		};
+		mode.withAutoLearnStateLock = (callback: (state: unknown) => { result: unknown }) =>
+			callback({ lastReflectionByTenant: { tenant: now }, runs: {} }).result;
+		mode.pruneAutoLearnHistoryFromState = (state: unknown) => state;
+		mode.getAutoLearnTenantKey = () => "tenant";
+		mode.getAutoLearnMessageCount = () => 3;
+		mode.countAgentToolCalls = () => 5;
+		mode.getAgentMessagePlainText = (message: { content: string }) => message.content;
+		mode.buildAutonomyReviewDigest = () => "digest";
+
+		const decision = mode.evaluateAutonomyReview([{ role: "user", content: "Please solve this." }]);
+
+		expect(decision.shouldRun).toBe(true);
+		expect(decision.reason).toBe("reflection complex task learning signal (5/5 tool calls)");
+		expect(decision.bypassCooldown).toBe(true);
+	});
+
+	it("instructs Auto Learn to code-bake behavioral self-improvements instead of stopping at memory", () => {
+		const mode = Object.create(InteractiveMode.prototype) as any;
+		mode.runtimeHost = {
+			session: {
+				settingsManager: {
+					getAutonomySettings: () => ({ mode: "full" }),
+					getSelfModificationSettings: () => ({ enabled: true, sourcePath: "/repo/pi-adaptative" }),
+				},
+			},
+		};
+
+		const prompt = mode.buildAutoLearnPrompt(
+			"reflection behavioral self-improvement signal",
+			{
+				applyHighConfidence: true,
+			} as any,
+			{ kind: "reflection", turnDigest: "latest user correction" },
+		);
+
+		expect(prompt).toContain("Hermes-style learning cycle");
+		expect(prompt).toContain("after a complex task (5+ tool calls)");
+		expect(prompt).toContain("Memory stores compact facts/preferences/state");
+		expect(prompt).toContain("Skill update preference order");
+		expect(prompt).toContain("patch the currently loaded or consulted skill");
+		expect(prompt).toContain("create a new class-level umbrella skill only when no existing artifact fits");
+		expect(prompt).toContain("Behavioral self-improvement is code-baked by default");
+		expect(prompt).toContain("memory alone is not completion");
+		expect(prompt).toContain("patch an existing skill/prompt/agent/extension/tool");
+		expect(prompt).toContain("authorized Pi source");
+		expect(prompt).toContain("Do not harden transient or environment-dependent failures");
 	});
 
 	it("isolates concurrent learner limits by tenant while sharing state for visibility", () => {

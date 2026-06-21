@@ -1,9 +1,4 @@
-import {
-	type FauxProviderRegistration,
-	fauxAssistantMessage,
-	fauxToolCall,
-	registerFauxProvider,
-} from "@caupulican/pi-ai";
+import { fauxAssistantMessage, fauxToolCall } from "@caupulican/pi-ai";
 import { Type } from "typebox";
 import { afterEach, describe, expect, it } from "vitest";
 import { createHarness, getAssistantTexts, type Harness } from "./harness.ts";
@@ -17,9 +12,8 @@ describe("extension reload while the agent is streaming", () => {
 		}
 	});
 
-	it("settles the in-flight turn, keeps the session tree intact, and serves the next turn", async () => {
+	it("refuses active-turn reload, keeps the session tree intact, and serves the next turn", async () => {
 		let reloadCount = 0;
-		let postReloadFaux: FauxProviderRegistration | undefined;
 
 		const harness = await createHarness({
 			extensionFactories: [
@@ -32,11 +26,6 @@ describe("extension reload while the agent is streaming", () => {
 						async execute(_toolCallId, _params, _signal, _onUpdate, ctx) {
 							await ctx.reload();
 							reloadCount++;
-							// reload() resets the api provider registry; a real custom-provider
-							// extension re-registers on activation. Mirror that for the faux api
-							// and queue the post-reload assistant turn on the new registration.
-							postReloadFaux = registerFauxProvider({ api: harness.faux.api });
-							postReloadFaux.setResponses([fauxAssistantMessage("done after reload")]);
 							return { content: [{ type: "text", text: "reload finished" }], details: {} };
 						},
 					});
@@ -45,19 +34,22 @@ describe("extension reload while the agent is streaming", () => {
 		});
 		harnesses.push(harness);
 
-		harness.setResponses([fauxAssistantMessage([fauxToolCall("reload_now", {})], { stopReason: "toolUse" })]);
+		harness.setResponses([
+			fauxAssistantMessage([fauxToolCall("reload_now", {})], { stopReason: "toolUse" }),
+			fauxAssistantMessage("done after refused reload"),
+		]);
 
 		await harness.session.prompt("reload while working");
 
-		expect(reloadCount).toBe(1);
-		expect(getAssistantTexts(harness).at(-1)).toBe("done after reload");
+		expect(reloadCount).toBe(0);
+		expect(getAssistantTexts(harness).at(-1)).toBe("done after refused reload");
 
 		const branch = harness.sessionManager.getBranch();
 		const branchMessages = branch.filter((entry) => entry.type === "message").map((entry) => entry.message);
 		expect(branchMessages.map((message) => message.role)).toEqual(["user", "assistant", "toolResult", "assistant"]);
 		const toolResult = branchMessages.find((message) => message.role === "toolResult");
 		if (!toolResult || toolResult.role !== "toolResult") throw new Error("missing tool result");
-		expect(toolResult.isError).toBe(false);
+		expect(toolResult.isError).toBe(true);
 
 		// Every entry's parent must resolve inside the session tree.
 		const entries = harness.sessionManager.getEntries();
@@ -68,9 +60,8 @@ describe("extension reload while the agent is streaming", () => {
 			}
 		}
 
-		// The swapped-in runtime must serve the next turn end to end.
-		if (!postReloadFaux) throw new Error("post-reload faux registration missing");
-		postReloadFaux.setResponses([fauxAssistantMessage("second turn ok")]);
+		// The original runtime must remain intact and serve the next turn end to end.
+		harness.setResponses([fauxAssistantMessage("second turn ok")]);
 		await harness.session.prompt("are you still alive?");
 		expect(getAssistantTexts(harness).at(-1)).toBe("second turn ok");
 	}, 30_000);

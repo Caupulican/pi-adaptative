@@ -1,5 +1,15 @@
 ## [Unreleased]
 
+## [0.80.32] - 2026-06-21
+
+### Added
+
+- Added code-baked Auto Learn review triggers for corrective, self-improvement, and complex tool-use turns so reusable behavior is steered toward auditable skills/prompts/agents/extensions/source changes instead of memory-only drift.
+
+### Fixed
+
+- Made extension-triggered hot reload UI-safe: `ctx.reload()` now refuses to run while the agent is streaming, a tool call is active, or context compaction/branch summarization is in progress, preserving the current TUI/session instead of racing reload through an active turn.
+
 ## [0.80.31] - 2026-06-19
 
 ## [0.80.30] - 2026-06-19

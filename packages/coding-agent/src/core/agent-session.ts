@@ -2560,8 +2560,22 @@ export class AgentSession {
 					})();
 				},
 				reload: () => {
+					if (this.isStreaming) {
+						return Promise.reject(
+							new Error(
+								"ctx.reload() cannot run while the agent is streaming or a tool call is active. Wait for ctx.isIdle(), queue a follow-up /reload, or use an idle command/event handler so hot reload cannot destabilize the UI.",
+							),
+						);
+					}
+					if (this.isCompacting) {
+						return Promise.reject(
+							new Error(
+								"ctx.reload() cannot run during context compaction or branch summarization. Let compaction finish before reloading so the session tree and UI remain stable.",
+							),
+						);
+					}
 					const actions = this._extensionCommandContextActions;
-					if (this.isStreaming || !actions) {
+					if (!actions) {
 						return this.reload();
 					}
 					return actions.reload();
@@ -2804,6 +2818,12 @@ export class AgentSession {
 	}
 
 	async reload(): Promise<void> {
+		if (this.isStreaming) {
+			throw new Error("Cannot reload while the agent is streaming or a tool call is active");
+		}
+		if (this.isCompacting) {
+			throw new Error("Cannot reload while context compaction or branch summarization is active");
+		}
 		const previousRunner = this._extensionRunner;
 		const snapshot = this._createReloadRuntimeSnapshot();
 		const activeToolNames = this.getActiveToolNames();
