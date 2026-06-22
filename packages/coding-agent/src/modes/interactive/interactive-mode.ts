@@ -157,6 +157,9 @@ import {
 	theme,
 } from "./theme/theme.ts";
 
+const TUI_HISTORY_RELOAD_MAX_LINES = 1000;
+const TUI_HISTORY_RELOAD_WRAP_WIDTH = 100;
+
 /** Interface for components that can be expanded/collapsed */
 interface Expandable {
 	setExpanded(expanded: boolean): void;
@@ -3670,6 +3673,118 @@ export class InteractiveMode {
 		}
 	}
 
+	private getContentText(content: unknown): string {
+		if (typeof content === "string") return content;
+		if (Array.isArray(content)) {
+			return content
+				.map((part) => {
+					const maybeText = (part as { text?: unknown }).text;
+					return typeof maybeText === "string" ? maybeText : "";
+				})
+				.join("");
+		}
+		return "";
+	}
+
+	private getTuiHistoryMessageText(message: AgentMessage): string {
+		switch (message.role) {
+			case "bashExecution":
+				return [message.command, message.output ?? ""].filter(Boolean).join("\n");
+			case "user":
+				return this.getUserMessageText(message);
+			case "assistant":
+				return this.getContentText(message.content);
+			case "toolResult":
+				return this.getContentText(message.content);
+			case "custom":
+				return this.getContentText(message.content);
+			case "compactionSummary":
+			case "branchSummary":
+				return message.summary;
+			default: {
+				const _exhaustive: never = message;
+				return JSON.stringify(_exhaustive);
+			}
+		}
+	}
+
+	private estimateTuiHistoryLines(message: AgentMessage): number {
+		const text = this.getTuiHistoryMessageText(message);
+		const hardLines = text.length > 0 ? text.split(/\r\n|\r|\n/).length : 1;
+		const wrappedLines = Math.ceil(text.length / TUI_HISTORY_RELOAD_WRAP_WIDTH);
+		// Add one line for role/tool chrome or spacing. Tool-call-only assistant messages
+		// have little text but still render a component.
+		return Math.max(1, hardLines, wrappedLines) + 1;
+	}
+
+	private trimTextToTuiHistoryTail(text: string, maxEstimatedLines: number): string {
+		const maxLines = Math.max(1, maxEstimatedLines);
+		const lines = text.split(/\r\n|\r|\n/);
+		if (lines.length > maxLines) {
+			const omitted = lines.length - maxLines;
+			return `[Earlier ${omitted} line${omitted === 1 ? "" : "s"} omitted from TUI reload history; full session remains available to the model.]\n${lines.slice(-maxLines).join("\n")}`;
+		}
+		const maxChars = Math.max(TUI_HISTORY_RELOAD_WRAP_WIDTH, maxLines * TUI_HISTORY_RELOAD_WRAP_WIDTH);
+		if (text.length > maxChars) {
+			const omitted = text.length - maxChars;
+			return `[Earlier ${omitted} character${omitted === 1 ? "" : "s"} omitted from TUI reload history; full session remains available to the model.]\n${text.slice(-maxChars)}`;
+		}
+		return text;
+	}
+
+	private trimMessageToTuiHistoryTail(message: AgentMessage, maxEstimatedLines: number): AgentMessage {
+		const text = this.getTuiHistoryMessageText(message);
+		const trimmedText = this.trimTextToTuiHistoryTail(text, maxEstimatedLines);
+		if (trimmedText === text) return message;
+		const clone = JSON.parse(JSON.stringify(message)) as AgentMessage;
+		const mutable = clone as unknown as { role?: string; content?: unknown; output?: unknown };
+		if (mutable.role === "bashExecution" && typeof mutable.output === "string") {
+			mutable.output = trimmedText;
+		} else if (mutable.role === "compactionSummary" || mutable.role === "branchSummary") {
+			(mutable as { summary?: string }).summary = trimmedText;
+		} else if (typeof mutable.content === "string") {
+			mutable.content = trimmedText;
+		} else {
+			mutable.content = [{ type: "text", text: trimmedText }];
+		}
+		return clone;
+	}
+
+	private messagesForTuiHistoryReload(messages: AgentMessage[]): {
+		messages: AgentMessage[];
+		omittedMessages: number;
+		estimatedLines: number;
+	} {
+		let estimatedLines = 0;
+		let start = messages.length;
+		for (let i = messages.length - 1; i >= 0; i--) {
+			const nextLines = this.estimateTuiHistoryLines(messages[i]);
+			if (start < messages.length && estimatedLines + nextLines > TUI_HISTORY_RELOAD_MAX_LINES) break;
+			estimatedLines += nextLines;
+			start = i;
+			if (estimatedLines >= TUI_HISTORY_RELOAD_MAX_LINES) break;
+		}
+		const selected = messages.slice(start);
+		if (selected.length > 0 && estimatedLines > TUI_HISTORY_RELOAD_MAX_LINES) {
+			const tailLines = selected.slice(1).reduce((sum, message) => sum + this.estimateTuiHistoryLines(message), 0);
+			const firstAllowance = TUI_HISTORY_RELOAD_MAX_LINES - tailLines;
+			if (firstAllowance <= 4) {
+				selected.shift();
+				start += 1;
+				estimatedLines = tailLines;
+			} else {
+				// Reserve room for truncation marker, role chrome, and wrap variance.
+				selected[0] = this.trimMessageToTuiHistoryTail(selected[0], firstAllowance - 4);
+				estimatedLines = tailLines + this.estimateTuiHistoryLines(selected[0]);
+			}
+		}
+		return {
+			messages: selected,
+			omittedMessages: start,
+			estimatedLines,
+		};
+	}
+
 	/**
 	 * Render session context to chat. Used for initial load and rebuild after compaction.
 	 * @param sessionContext Session context to render
@@ -3697,7 +3812,14 @@ export class InteractiveMode {
 			this.updateEditorBorderColor();
 		}
 
-		for (const message of sessionContext.messages) {
+		const tuiHistory = this.messagesForTuiHistoryReload(sessionContext.messages);
+		if (tuiHistory.omittedMessages > 0) {
+			this.showStatus(
+				`Showing last ~${TUI_HISTORY_RELOAD_MAX_LINES} TUI history lines; omitted ${tuiHistory.omittedMessages} older message${tuiHistory.omittedMessages === 1 ? "" : "s"}. Full session remains available to the model.`,
+			);
+		}
+
+		for (const message of tuiHistory.messages) {
 			if (processed > 0 && processed % CHUNK_SIZE === 0) {
 				this.ui.requestRender();
 				await new Promise((resolve) => setImmediate(resolve));
