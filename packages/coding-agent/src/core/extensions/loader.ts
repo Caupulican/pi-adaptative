@@ -488,7 +488,9 @@ function createLazyToolDefinition(
 			: undefined,
 		toolGroup: typeof manifest.toolGroup === "string" ? manifest.toolGroup : undefined,
 		executionMode:
-			manifest.executionMode === "parallel" || manifest.executionMode === "sequential" ? manifest.executionMode : undefined,
+			manifest.executionMode === "parallel" || manifest.executionMode === "sequential"
+				? manifest.executionMode
+				: undefined,
 		execute: async (toolCallId, params, signal, onUpdate, ctx) => {
 			await load();
 			const loadedDefinition = extension.tools.get(name)?.definition;

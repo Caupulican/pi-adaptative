@@ -3650,10 +3650,13 @@ export class InteractiveMode {
 		}
 
 		if (this.streamingUiUpdateTimer) return;
-		this.streamingUiUpdateTimer = setTimeout(() => {
-			this.streamingUiUpdateTimer = undefined;
-			update();
-		}, Math.max(0, STREAMING_UI_UPDATE_INTERVAL_MS - elapsed));
+		this.streamingUiUpdateTimer = setTimeout(
+			() => {
+				this.streamingUiUpdateTimer = undefined;
+				update();
+			},
+			Math.max(0, STREAMING_UI_UPDATE_INTERVAL_MS - elapsed),
+		);
 	}
 
 	private trimLiveTuiHistory(): void {
@@ -4076,7 +4079,6 @@ export class InteractiveMode {
 			this.showStatus(`Session compacted ${times}`);
 		}
 	}
-
 
 	async getUserInput(): Promise<UserInputSubmission> {
 		const queuedInput = this.pendingUserInputs.shift();

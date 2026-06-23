@@ -74,7 +74,9 @@ export default function(pi) {
 
 async function executeLazyTool(root: string, toolName: string) {
 	const result = await discoverAndLoadExtensions([], root, root);
-	const tool = result.extensions.flatMap((extension) => [...extension.tools.values()]).find((entry) => entry.definition.name === toolName);
+	const tool = result.extensions
+		.flatMap((extension) => [...extension.tools.values()])
+		.find((entry) => entry.definition.name === toolName);
 	expect(tool).toBeDefined();
 	return tool!.definition.execute("tool-call", {}, undefined, undefined, undefined as never);
 }
@@ -104,13 +106,9 @@ describe("lazy extension loading", () => {
 		expect(counters().imports).toEqual([]);
 		expect(counters().factories).toEqual([]);
 
-		const output = await result.extensions[0].tools.get("lazy_a")!.definition.execute(
-			"tool-call",
-			{},
-			undefined,
-			undefined,
-			undefined as never,
-		);
+		const output = await result.extensions[0].tools
+			.get("lazy_a")!
+			.definition.execute("tool-call", {}, undefined, undefined, undefined as never);
 
 		expect(output.content[0]).toEqual({ type: "text", text: "A" });
 		expect(result.extensions[0].lazy?.loaded).toBe(true);
@@ -138,13 +136,9 @@ describe("lazy extension loading", () => {
 		await new Promise((resolve) => setImmediate(resolve));
 		expect(counters().events).toEqual([]);
 
-		await result.extensions[0].tools.get("lazy_a")!.definition.execute(
-			"tool-call",
-			{},
-			undefined,
-			undefined,
-			undefined as never,
-		);
+		await result.extensions[0].tools
+			.get("lazy_a")!
+			.definition.execute("tool-call", {}, undefined, undefined, undefined as never);
 		bus.emit("lazy-event", {});
 		await new Promise((resolve) => setImmediate(resolve));
 		expect(counters().events).toEqual(["a"]);
