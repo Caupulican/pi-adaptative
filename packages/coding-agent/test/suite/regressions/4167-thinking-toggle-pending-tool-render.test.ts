@@ -61,6 +61,7 @@ type HandleEvent = (this: RenderSessionContextThis, event: AgentSessionEvent) =>
 function createFakeInteractiveModeThis(): RenderSessionContextThis {
 	const chatContainer = new Container();
 	const toolPanels = new ToolPanelRegistry();
+	const proto = InteractiveMode.prototype as unknown as Record<string, (...args: unknown[]) => unknown>;
 	return {
 		toolPanels,
 		chatContainer,
@@ -88,10 +89,18 @@ function createFakeInteractiveModeThis(): RenderSessionContextThis {
 			}
 		).attachToolExecutionComponent,
 		getToolPanelScope: () => ({ cwd: process.cwd() }),
+		messagesForTuiHistoryReload: proto.messagesForTuiHistoryReload,
+		estimateTuiHistoryLines: proto.estimateTuiHistoryLines,
+		trimMessageToTuiHistoryTail: proto.trimMessageToTuiHistoryTail,
+		cloneMessageWithText: proto.cloneMessageWithText,
+		getTuiHistoryMessageText: proto.getTuiHistoryMessageText,
+		getMessageTuiText: proto.getMessageTuiText,
+		getContentText: proto.getContentText,
+		getUserMessageText: proto.getUserMessageText,
 		clearRenderedToolPanelState() {
 			toolPanels.clearAll();
 		},
-	};
+	} as unknown as RenderSessionContextThis;
 }
 
 function createAssistantToolCallMessage(): AssistantMessage {

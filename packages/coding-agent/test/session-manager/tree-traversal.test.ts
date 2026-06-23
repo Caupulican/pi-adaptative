@@ -148,6 +148,7 @@ describe("SessionManager append and tree traversal", () => {
 			const path = session.getBranch();
 			expect(path).toHaveLength(4);
 			expect(path.map((e) => e.id)).toEqual([id1, id2, id3, id4]);
+			expect(session.getEntryCount()).toBe(4);
 		});
 
 		it("returns path from specified entry to root", () => {

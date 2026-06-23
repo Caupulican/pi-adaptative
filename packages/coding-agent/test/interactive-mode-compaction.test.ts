@@ -38,6 +38,7 @@ describe("InteractiveMode compaction events", () => {
 			defaultEditor: {},
 			statusContainer: { clear: vi.fn() },
 			chatContainer: { clear: vi.fn() },
+			resetLiveTuiHistoryTrim: vi.fn(),
 			rebuildChatFromMessages: vi.fn(),
 			addMessageToChat: vi.fn(),
 			showError: vi.fn(),

@@ -104,10 +104,22 @@ export function formatCwdForFooter(cwd: string, home: string | undefined): strin
  * Footer component that shows pwd, token stats, and context usage.
  * Computes token/context stats from session, gets git branch and extension statuses from provider.
  */
+type FooterUsageSnapshot = {
+	entryCount: number;
+	messageCount: number;
+	totalInput: number;
+	totalOutput: number;
+	totalCacheRead: number;
+	totalCacheWrite: number;
+	totalCost: number;
+	contextUsage: ReturnType<AgentSession["getContextUsage"]>;
+};
+
 export class FooterComponent implements Component {
 	private autoCompactEnabled = true;
 	private session: AgentSession;
 	private footerData: ReadonlyFooterDataProvider;
+	private usageSnapshot?: FooterUsageSnapshot;
 
 	constructor(session: AgentSession, footerData: ReadonlyFooterDataProvider) {
 		this.session = session;
@@ -116,6 +128,7 @@ export class FooterComponent implements Component {
 
 	setSession(session: AgentSession): void {
 		this.session = session;
+		this.usageSnapshot = undefined;
 	}
 
 	setAutoCompactEnabled(enabled: boolean): void {
@@ -123,11 +136,10 @@ export class FooterComponent implements Component {
 	}
 
 	/**
-	 * No-op: git branch caching now handled by provider.
-	 * Kept for compatibility with existing call sites in interactive-mode.
+	 * Invalidate cached footer stats when session state changes.
 	 */
 	invalidate(): void {
-		// No-op: git branch is cached/invalidated by provider
+		this.usageSnapshot = undefined;
 	}
 
 	/**
@@ -138,29 +150,57 @@ export class FooterComponent implements Component {
 		// Git watcher cleanup handled by provider
 	}
 
-	render(width: number): string[] {
-		const state = this.session.state;
+	private getUsageSnapshot(messageCount: number): FooterUsageSnapshot {
+		const sessionManager = this.session.sessionManager as AgentSession["sessionManager"] & {
+			getEntryCount?: () => number;
+		};
+		const entryCount = sessionManager.getEntryCount?.() ?? sessionManager.getEntries().length;
+		const cached = this.usageSnapshot;
+		if (cached && cached.entryCount === entryCount && cached.messageCount === messageCount) {
+			return cached;
+		}
 
-		// Calculate cumulative usage from ALL session entries (not just post-compaction messages)
+		// Calculate cumulative usage from ALL session entries in one batched pass.
+		// This avoids per-frame defensive array allocation when only the TUI redraws.
 		let totalInput = 0;
 		let totalOutput = 0;
 		let totalCacheRead = 0;
 		let totalCacheWrite = 0;
 		let totalCost = 0;
 
-		for (const entry of this.session.sessionManager.getEntries()) {
-			if (entry.type === "message" && entry.message.role === "assistant") {
-				totalInput += entry.message.usage.input;
-				totalOutput += entry.message.usage.output;
-				totalCacheRead += entry.message.usage.cacheRead;
-				totalCacheWrite += entry.message.usage.cacheWrite;
-				totalCost += entry.message.usage.cost.total;
-			}
+		const entries = this.session.sessionManager.getEntries();
+		for (let i = 0; i < entries.length; i++) {
+			const entry = entries[i];
+			if (entry.type !== "message" || entry.message.role !== "assistant") continue;
+			const usage = entry.message.usage;
+			if (!usage) continue;
+			totalInput += usage.input;
+			totalOutput += usage.output;
+			totalCacheRead += usage.cacheRead;
+			totalCacheWrite += usage.cacheWrite;
+			totalCost += usage.cost.total;
 		}
 
-		// Calculate context usage from session (handles compaction correctly).
-		// After compaction, tokens are unknown until the next LLM response.
-		const contextUsage = this.session.getContextUsage();
+		const snapshot: FooterUsageSnapshot = {
+			entryCount,
+			messageCount,
+			totalInput,
+			totalOutput,
+			totalCacheRead,
+			totalCacheWrite,
+			totalCost,
+			// Calculate context usage from session (handles compaction correctly).
+			// After compaction, tokens are unknown until the next LLM response.
+			contextUsage: this.session.getContextUsage(),
+		};
+		this.usageSnapshot = snapshot;
+		return snapshot;
+	}
+
+	render(width: number): string[] {
+		const state = this.session.state;
+		const usageSnapshot = this.getUsageSnapshot(state.messages?.length ?? 0);
+		const { totalInput, totalOutput, totalCacheRead, totalCacheWrite, totalCost, contextUsage } = usageSnapshot;
 		const contextWindow = contextUsage?.contextWindow ?? state.model?.contextWindow ?? 0;
 		const contextPercentValue = contextUsage?.percent ?? 0;
 		const contextPercent = contextUsage?.percent !== null ? contextPercentValue.toFixed(1) : "?";

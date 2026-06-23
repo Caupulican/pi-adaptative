@@ -1247,9 +1247,10 @@ export class SessionManager {
 		const startId = fromId ?? this.leafId;
 		let current = startId ? this.byId.get(startId) : undefined;
 		while (current) {
-			path.unshift(current);
+			path.push(current);
 			current = current.parentId ? this.byId.get(current.parentId) : undefined;
 		}
+		path.reverse();
 		return path;
 	}
 
@@ -1276,6 +1277,11 @@ export class SessionManager {
 	 */
 	getEntries(): SessionEntry[] {
 		return this.fileEntries.filter((e): e is SessionEntry => e.type !== "session");
+	}
+
+	/** Return current session entry count without allocating a defensive entries array. */
+	getEntryCount(): number {
+		return this.byId.size;
 	}
 
 	/**

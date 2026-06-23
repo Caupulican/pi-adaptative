@@ -159,6 +159,8 @@ import {
 
 const TUI_HISTORY_RELOAD_MAX_LINES = 1000;
 const TUI_HISTORY_RELOAD_WRAP_WIDTH = 100;
+const TUI_LIVE_HISTORY_MAX_COMPONENTS = 260;
+const TUI_LIVE_HISTORY_TRIM_TO_COMPONENTS = 220;
 
 /** Interface for components that can be expanded/collapsed */
 interface Expandable {
@@ -665,6 +667,10 @@ export class InteractiveMode {
 	// Status line tracking (for mutating immediately-sequential status updates)
 	private lastStatusSpacer: Spacer | undefined = undefined;
 	private lastStatusText: Text | undefined = undefined;
+
+	// Live TUI history cap. Full session history remains in SessionManager/model state.
+	private liveHistoryHiddenNotice: Text | undefined = undefined;
+	private liveHistoryHiddenComponents = 0;
 
 	// Streaming message tracking
 	private streamingComponent: AssistantMessageComponent | undefined = undefined;
@@ -1950,6 +1956,7 @@ export class InteractiveMode {
 					}
 
 					this.chatContainer.clear();
+					this.resetLiveTuiHistoryTrim();
 					await this.renderInitialMessages();
 					if (result.editorText && !this.editor.getText().trim()) {
 						this.editor.setText(result.editorText);
@@ -2024,6 +2031,7 @@ export class InteractiveMode {
 
 	private renderCurrentSessionState(): void {
 		this.chatContainer.clear();
+		this.resetLiveTuiHistoryTrim();
 		this.pendingMessagesContainer.clear();
 		this.compactionQueuedMessages = [];
 		this.streamingComponent = undefined;
@@ -2051,6 +2059,7 @@ export class InteractiveMode {
 		const toolGroup = allowGrouping ? component.toolGroup?.trim() : undefined;
 		if (!toolGroup) {
 			this.chatContainer.addChild(component);
+			this.trimLiveTuiHistory();
 			return;
 		}
 
@@ -2058,15 +2067,18 @@ export class InteractiveMode {
 		const lastChild = children[children.length - 1];
 		if (lastChild instanceof ToolGroupComponent && lastChild.toolGroup === toolGroup) {
 			lastChild.addTool(component);
+			this.trimLiveTuiHistory();
 			return;
 		}
 		if (lastChild instanceof ToolExecutionComponent && lastChild.toolGroup?.trim() === toolGroup) {
 			const group = new ToolGroupComponent(toolGroup, [lastChild, component]);
 			group.setExpanded(this.toolOutputExpanded);
 			children[children.length - 1] = group;
+			this.trimLiveTuiHistory();
 			return;
 		}
 		this.chatContainer.addChild(component);
+		this.trimLiveTuiHistory();
 	}
 
 	private detachToolExecutionComponent(component: ToolExecutionComponent): void {
@@ -3299,6 +3311,7 @@ export class InteractiveMode {
 					this.streamingMessage = event.message;
 					this.chatContainer.addChild(this.streamingComponent);
 					this.streamingComponent.updateContent(this.streamingMessage);
+					this.trimLiveTuiHistory();
 					this.ui.requestRender();
 				}
 				break;
@@ -3465,6 +3478,7 @@ export class InteractiveMode {
 					}
 				} else if (event.result) {
 					this.chatContainer.clear();
+					this.resetLiveTuiHistoryTrim();
 					await this.rebuildChatFromMessages();
 					this.addMessageToChat(
 						createCompactionSummaryMessage(
@@ -3555,6 +3569,52 @@ export class InteractiveMode {
 		return textBlocks.map((c) => (c as { text: string }).text).join("");
 	}
 
+	private resetLiveTuiHistoryTrim(): void {
+		this.liveHistoryHiddenNotice = undefined;
+		this.liveHistoryHiddenComponents = 0;
+	}
+
+	private trimLiveTuiHistory(): void {
+		const children = this.chatContainer.children;
+		if (children.length <= TUI_LIVE_HISTORY_MAX_COMPONENTS) return;
+
+		let protectedStart = children.length;
+		const protect = (component: Component | undefined) => {
+			if (!component) return;
+			const index = children.indexOf(component);
+			if (index !== -1 && index < protectedStart) protectedStart = index;
+		};
+
+		protect(this.streamingComponent);
+		protect(this.lastStatusSpacer);
+		protect(this.lastStatusText);
+		for (const [, component] of this.toolPanels.activeEntries()) {
+			protect(component);
+		}
+
+		const trimStart = children[0] === this.liveHistoryHiddenNotice ? 1 : 0;
+		const targetTrimEnd = children.length - TUI_LIVE_HISTORY_TRIM_TO_COMPONENTS;
+		const trimEnd = Math.min(targetTrimEnd, protectedStart);
+		if (trimEnd <= trimStart) return;
+
+		const removed = children.splice(trimStart, trimEnd - trimStart);
+		this.liveHistoryHiddenComponents += removed.length;
+		if (removed.includes(this.lastStatusSpacer as Component)) this.lastStatusSpacer = undefined;
+		if (removed.includes(this.lastStatusText as Component)) this.lastStatusText = undefined;
+
+		const noticeText = theme.fg(
+			"dim",
+			`Older TUI history hidden to preserve FPS (${this.liveHistoryHiddenComponents} components). Full session remains available to the model.`,
+		);
+		if (children[0] === this.liveHistoryHiddenNotice) {
+			this.liveHistoryHiddenNotice?.setText(noticeText);
+			return;
+		}
+
+		this.liveHistoryHiddenNotice = new Text(noticeText, 1, 0);
+		children.unshift(this.liveHistoryHiddenNotice);
+	}
+
 	/**
 	 * Show a status message in the chat.
 	 *
@@ -3578,6 +3638,7 @@ export class InteractiveMode {
 		this.chatContainer.addChild(text);
 		this.lastStatusSpacer = spacer;
 		this.lastStatusText = text;
+		this.trimLiveTuiHistory();
 		this.ui.requestRender();
 	}
 
@@ -3671,6 +3732,7 @@ export class InteractiveMode {
 				const _exhaustive: never = message;
 			}
 		}
+		this.trimLiveTuiHistory();
 	}
 
 	private getContentText(content: unknown): string {
@@ -3902,6 +3964,7 @@ export class InteractiveMode {
 
 	private async rebuildChatFromMessages(): Promise<void> {
 		this.chatContainer.clear();
+		this.resetLiveTuiHistoryTrim();
 		const context = this.sessionManager.buildSessionContext();
 		await this.renderSessionContext(context);
 	}
@@ -4207,6 +4270,7 @@ export class InteractiveMode {
 
 		// Rebuild chat from session messages
 		this.chatContainer.clear();
+		this.resetLiveTuiHistoryTrim();
 		await this.rebuildChatFromMessages();
 
 		// If streaming, re-add the streaming component with updated visibility and re-render
@@ -5673,6 +5737,7 @@ export class InteractiveMode {
 							}
 						}
 						this.chatContainer.clear();
+						this.resetLiveTuiHistoryTrim();
 						void this.rebuildChatFromMessages();
 					},
 					onCollapseChangelogChange: (collapsed) => {
@@ -6122,6 +6187,7 @@ export class InteractiveMode {
 
 						// Update UI
 						this.chatContainer.clear();
+						this.resetLiveTuiHistoryTrim();
 						await this.renderInitialMessages();
 						if (result.editorText && !this.editor.getText().trim()) {
 							this.editor.setText(result.editorText);

@@ -44,6 +44,7 @@ describe("InteractiveMode.showStatus", () => {
 			ui: { requestRender: vi.fn() },
 			lastStatusSpacer: undefined,
 			lastStatusText: undefined,
+			trimLiveTuiHistory: vi.fn(),
 		};
 
 		(InteractiveMode as any).prototype.showStatus.call(fakeThis, "STATUS_ONE");
@@ -63,6 +64,7 @@ describe("InteractiveMode.showStatus", () => {
 			ui: { requestRender: vi.fn() },
 			lastStatusSpacer: undefined,
 			lastStatusText: undefined,
+			trimLiveTuiHistory: vi.fn(),
 		};
 
 		(InteractiveMode as any).prototype.showStatus.call(fakeThis, "STATUS_ONE");

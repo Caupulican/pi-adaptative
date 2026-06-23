@@ -1,6 +1,8 @@
 import type { AgentMessage } from "@caupulican/pi-agent-core";
-import { describe, expect, test } from "vitest";
+import { Container, Text } from "@caupulican/pi-tui";
+import { beforeAll, describe, expect, test } from "vitest";
 import { InteractiveMode } from "../src/modes/interactive/interactive-mode.ts";
+import { initTheme } from "../src/modes/interactive/theme/theme.ts";
 
 function makeUserMessage(text: string): AgentMessage {
 	return {
@@ -25,6 +27,9 @@ function callHistorySelector(messages: AgentMessage[]): {
 }
 
 describe("InteractiveMode TUI reload history cap", () => {
+	beforeAll(() => {
+		initTheme("dark");
+	});
 	test("keeps only the tail of long reload history", () => {
 		const messages = Array.from({ length: 140 }, (_, index) =>
 			makeUserMessage(Array.from({ length: 10 }, (__, line) => `message-${index}-line-${line}`).join("\n")),
@@ -48,5 +53,26 @@ describe("InteractiveMode TUI reload history cap", () => {
 		expect(renderedText).toContain("omitted from TUI reload history");
 		expect(renderedText).not.toContain("huge-line-0");
 		expect(renderedText).toContain("huge-line-1499");
+	});
+
+	test("caps live chat component tree to protect redraw FPS", () => {
+		const ctx = Object.create((InteractiveMode as any).prototype);
+		ctx.chatContainer = new Container();
+		ctx.toolPanels = { activeEntries: () => [] };
+		ctx.liveHistoryHiddenNotice = undefined;
+		ctx.liveHistoryHiddenComponents = 0;
+		ctx.lastStatusSpacer = undefined;
+		ctx.lastStatusText = undefined;
+		ctx.streamingComponent = undefined;
+
+		for (let i = 0; i < 300; i++) {
+			ctx.chatContainer.addChild(new Text(`component-${i}`, 0, 0));
+		}
+
+		(InteractiveMode as any).prototype.trimLiveTuiHistory.call(ctx);
+
+		expect(ctx.chatContainer.children.length).toBeLessThanOrEqual(221);
+		expect(ctx.liveHistoryHiddenComponents).toBe(80);
+		expect(ctx.chatContainer.children[0]).toBe(ctx.liveHistoryHiddenNotice);
 	});
 });
