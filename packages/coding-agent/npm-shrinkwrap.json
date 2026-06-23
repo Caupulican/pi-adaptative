@@ -1,12 +1,12 @@
 {
 	"name": "@caupulican/pi-adaptative",
-	"version": "0.80.34",
+	"version": "0.80.35",
 	"lockfileVersion": 3,
 	"requires": true,
 	"packages": {
 		"": {
 			"name": "@caupulican/pi-adaptative",
-			"version": "0.80.34",
+			"version": "0.80.35",
 			"license": "MIT",
 			"dependencies": {
 				"@caupulican/pi-agent-core": "^0.80.34",
