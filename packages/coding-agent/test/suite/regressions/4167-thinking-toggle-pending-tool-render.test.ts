@@ -54,7 +54,7 @@ type RenderSessionContext = (
 	this: RenderSessionContextThis,
 	sessionContext: SessionContext,
 	options?: { updateFooter?: boolean; populateHistory?: boolean },
-) => void;
+) => Promise<void>;
 
 type HandleEvent = (this: RenderSessionContextThis, event: AgentSessionEvent) => Promise<void>;
 
@@ -75,13 +75,18 @@ function createFakeInteractiveModeThis(): RenderSessionContextThis {
 		session: { retryAttempt: 0 },
 		toolOutputExpanded: false,
 		isInitialized: true,
+		renderGeneration: 0,
+		liveHistoryHiddenNotice: undefined,
+		liveHistoryHiddenComponents: 0,
+		lastStatusSpacer: undefined,
+		lastStatusText: undefined,
 		updateEditorBorderColor: vi.fn(),
 		getRegisteredToolDefinition: (_toolName: string) => undefined,
 		addMessageToChat(message: AgentMessage) {
-			chatContainer.addChild(new Text(message.role, 0, 0));
+			this.chatContainer.addChild(new Text(message.role, 0, 0));
 		},
 		appendToolExecutionComponent(component: ToolExecutionComponent) {
-			chatContainer.addChild(component);
+			this.chatContainer.addChild(component);
 		},
 		attachToolExecutionComponent: (
 			InteractiveMode.prototype as unknown as {
@@ -89,6 +94,8 @@ function createFakeInteractiveModeThis(): RenderSessionContextThis {
 			}
 		).attachToolExecutionComponent,
 		getToolPanelScope: () => ({ cwd: process.cwd() }),
+		resetLiveTuiHistoryTrim: proto.resetLiveTuiHistoryTrim,
+		trimLiveTuiHistory: proto.trimLiveTuiHistory,
 		messagesForTuiHistoryReload: proto.messagesForTuiHistoryReload,
 		estimateTuiHistoryLines: proto.estimateTuiHistoryLines,
 		trimMessageToTuiHistoryTail: proto.trimMessageToTuiHistoryTail,
@@ -158,7 +165,7 @@ describe("InteractiveMode.renderSessionContext", () => {
 		).renderSessionContext;
 		const handleEvent = (InteractiveMode.prototype as unknown as { handleEvent: HandleEvent }).handleEvent;
 
-		renderSessionContext.call(fakeThis, createSessionContext([createAssistantToolCallMessage()]));
+		await renderSessionContext.call(fakeThis, createSessionContext([createAssistantToolCallMessage()]));
 
 		expect(fakeThis.toolPanels.hasActive(TOOL_CALL_ID)).toBe(true);
 
@@ -174,13 +181,13 @@ describe("InteractiveMode.renderSessionContext", () => {
 		expect(renderChat(fakeThis.chatContainer)).toContain("FINAL_RESULT");
 	});
 
-	test("does not keep completed historical tool calls registered as pending", () => {
+	test("does not keep completed historical tool calls registered as pending", async () => {
 		const fakeThis = createFakeInteractiveModeThis();
 		const renderSessionContext = (
 			InteractiveMode.prototype as unknown as { renderSessionContext: RenderSessionContext }
 		).renderSessionContext;
 
-		renderSessionContext.call(
+		await renderSessionContext.call(
 			fakeThis,
 			createSessionContext([createAssistantToolCallMessage(), createToolResultMessage("HISTORICAL_RESULT")]),
 		);

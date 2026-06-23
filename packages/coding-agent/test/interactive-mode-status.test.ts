@@ -45,6 +45,7 @@ describe("InteractiveMode.showStatus", () => {
 			lastStatusSpacer: undefined,
 			lastStatusText: undefined,
 			trimLiveTuiHistory: vi.fn(),
+			appendStatusToChat: (InteractiveMode as any).prototype.appendStatusToChat,
 		};
 
 		(InteractiveMode as any).prototype.showStatus.call(fakeThis, "STATUS_ONE");
@@ -65,6 +66,7 @@ describe("InteractiveMode.showStatus", () => {
 			lastStatusSpacer: undefined,
 			lastStatusText: undefined,
 			trimLiveTuiHistory: vi.fn(),
+			appendStatusToChat: (InteractiveMode as any).prototype.appendStatusToChat,
 		};
 
 		(InteractiveMode as any).prototype.showStatus.call(fakeThis, "STATUS_ONE");

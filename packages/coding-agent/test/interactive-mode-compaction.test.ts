@@ -32,6 +32,7 @@ describe("InteractiveMode compaction events", () => {
 	test("rebuilds chat and appends a synthetic compaction summary at the bottom", async () => {
 		const fakeThis = {
 			isInitialized: true,
+			tuiHistoryLoaded: true,
 			footer: { invalidate: vi.fn() },
 			autoCompactionEscapeHandler: undefined as (() => void) | undefined,
 			autoCompactionLoader: undefined,
@@ -71,7 +72,7 @@ describe("InteractiveMode compaction events", () => {
 			willRetry: false,
 		});
 
-		expect(fakeThis.chatContainer.clear).toHaveBeenCalledTimes(1);
+		expect(fakeThis.chatContainer.clear).not.toHaveBeenCalled();
 		expect(fakeThis.rebuildChatFromMessages).toHaveBeenCalledTimes(1);
 		expect(fakeThis.addMessageToChat).toHaveBeenCalledTimes(1);
 		expect(fakeThis.addMessageToChat).toHaveBeenCalledWith(
