@@ -286,6 +286,30 @@ This pattern makes the fetched models available during normal startup and to `pi
 
 Run `npm install` in the extension directory, then imports from `node_modules/` work automatically.
 
+### Lazy tool packages
+
+Large tool-only extensions can opt into lazy loading so pi discovers tool metadata at boot without importing the extension module or retaining its state. Add `pi.lazyTools` to the package manifest. The extension factory is imported and run only when one of those tools is executed.
+
+```json
+{
+  "name": "heavy-tool-extension",
+  "pi": {
+    "extensions": ["./src/index.ts"],
+    "lazyTools": [
+      {
+        "name": "heavy_query",
+        "label": "Heavy Query",
+        "description": "Run the heavy query engine on demand",
+        "promptSnippet": "Run the heavy query engine",
+        "parameters": { "type": "object", "properties": {}, "additionalProperties": false }
+      }
+    ]
+  }
+}
+```
+
+Use lazy loading only for tool-only startup behavior. Event handlers, commands, flags, providers, shortcuts, and dynamic resource discovery require the factory to run at startup, so those extensions should stay eager or split heavy tools into a separate lazy package.
+
 ## Events
 
 ### Lifecycle Overview

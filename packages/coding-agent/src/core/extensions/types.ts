@@ -1566,6 +1566,12 @@ export interface Extension {
 	commands: Map<string, RegisteredCommand>;
 	flags: Map<string, ExtensionFlag>;
 	shortcuts: Map<KeyId, ExtensionShortcut>;
+	/** Optional lazy loader for tool-only extensions loaded on first tool use. */
+	lazy?: {
+		loaded: boolean;
+		loading?: Promise<void>;
+		load(): Promise<void>;
+	};
 	/** Unsubscribe callbacks for pi.events subscriptions, disposed when this generation is replaced (reload). */
 	eventUnsubscribes: Array<() => void>;
 }

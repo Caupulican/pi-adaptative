@@ -468,6 +468,85 @@ async function loadExtension(
 	}
 }
 
+function createLazyToolDefinition(
+	extension: Extension,
+	manifest: LazyToolManifest,
+	load: () => Promise<void>,
+): ToolDefinition {
+	const name = String(manifest.name).trim();
+	const definition: ToolDefinition = {
+		name,
+		label: typeof manifest.label === "string" && manifest.label.trim() ? manifest.label : name,
+		description:
+			typeof manifest.description === "string" && manifest.description.trim()
+				? manifest.description
+				: `Lazy extension tool ${name}`,
+		parameters: (manifest.parameters ?? defaultLazyToolParameters()) as ToolDefinition["parameters"],
+		promptSnippet: typeof manifest.promptSnippet === "string" ? manifest.promptSnippet : undefined,
+		promptGuidelines: Array.isArray(manifest.promptGuidelines)
+			? manifest.promptGuidelines.filter((item): item is string => typeof item === "string")
+			: undefined,
+		toolGroup: typeof manifest.toolGroup === "string" ? manifest.toolGroup : undefined,
+		executionMode:
+			manifest.executionMode === "parallel" || manifest.executionMode === "sequential" ? manifest.executionMode : undefined,
+		execute: async (toolCallId, params, signal, onUpdate, ctx) => {
+			await load();
+			const loadedDefinition = extension.tools.get(name)?.definition;
+			if (!loadedDefinition || loadedDefinition === definition) {
+				throw new Error(`Lazy extension ${extension.path} did not register tool ${name}`);
+			}
+			return loadedDefinition.execute(toolCallId, params, signal, onUpdate, ctx);
+		},
+	};
+	return definition;
+}
+
+function createLazyExtension(
+	extensionPath: string,
+	resolvedPath: string,
+	cwd: string,
+	eventBus: EventBus,
+	runtime: ExtensionRuntime,
+	lazyTools: LazyToolManifest[],
+): Extension {
+	const extension = createExtension(extensionPath, resolvedPath);
+	const load = async (): Promise<void> => {
+		if (extension.lazy?.loaded) return;
+		if (extension.lazy?.loading) return extension.lazy.loading;
+
+		const loading = (async () => {
+			const factory = await loadExtensionModule(resolvedPath);
+			if (!factory) {
+				throw new Error(`Extension does not export a valid factory function: ${extensionPath}`);
+			}
+			const api = createExtensionAPI(extension, runtime, cwd, eventBus);
+			await factory(api);
+			if (extension.lazy) {
+				extension.lazy.loaded = true;
+				extension.lazy.loading = undefined;
+			}
+		})();
+
+		if (extension.lazy) extension.lazy.loading = loading;
+		try {
+			await loading;
+		} catch (err) {
+			if (extension.lazy) extension.lazy.loading = undefined;
+			throw err;
+		}
+	};
+
+	extension.lazy = { loaded: false, load };
+	for (const tool of lazyTools) {
+		const name = String(tool.name).trim();
+		extension.tools.set(name, {
+			definition: createLazyToolDefinition(extension, tool, load),
+			sourceInfo: extension.sourceInfo,
+		});
+	}
+	return extension;
+}
+
 /**
  * Create an Extension from an inline factory function.
  */
@@ -488,18 +567,34 @@ export async function loadExtensionFromFactory(
 /**
  * Load extensions from paths.
  */
-export async function loadExtensions(paths: string[], cwd: string, eventBus?: EventBus): Promise<LoadExtensionsResult> {
+export async function loadExtensions(
+	paths: Array<string | ExtensionLoadSpec>,
+	cwd: string,
+	eventBus?: EventBus,
+): Promise<LoadExtensionsResult> {
 	const extensions: Extension[] = [];
 	const errors: Array<{ path: string; error: string }> = [];
 	const resolvedCwd = resolvePath(cwd);
 	const resolvedEventBus = eventBus ?? createEventBus();
 	const runtime = createExtensionRuntime();
 
-	for (const extPath of paths) {
+	for (const spec of paths) {
+		const normalized = typeof spec === "string" ? { path: spec } : spec;
+		const extPath = normalized.path;
+		const resolvedPath = resolvePath(extPath, resolvedCwd, { normalizeUnicodeSpaces: true });
+		const lazyTools = (normalized.lazyTools ?? inferLazyToolsForExtensionPath(resolvedPath))?.filter(
+			(tool) => typeof tool.name === "string" && tool.name.trim(),
+		);
 		// Extension imports can be CPU-heavy under jiti. Yield around each load so
 		// interactive reloads can repaint/status-update instead of freezing the TUI
-		// for the whole extension set.
+		// for the whole extension set. Lazy tool manifests skip import entirely here.
 		await yieldToEventLoop();
+		if (lazyTools?.length) {
+			extensions.push(createLazyExtension(extPath, resolvedPath, resolvedCwd, resolvedEventBus, runtime, lazyTools));
+			await yieldToEventLoop();
+			continue;
+		}
+
 		const { extension, error } = await loadExtension(extPath, resolvedCwd, resolvedEventBus, runtime);
 		await yieldToEventLoop();
 
@@ -520,11 +615,68 @@ export async function loadExtensions(paths: string[], cwd: string, eventBus?: Ev
 	};
 }
 
+interface LazyToolManifest {
+	name?: unknown;
+	label?: unknown;
+	description?: unknown;
+	parameters?: unknown;
+	promptSnippet?: unknown;
+	promptGuidelines?: unknown;
+	toolGroup?: unknown;
+	executionMode?: unknown;
+	/** Optional extension entry this tool belongs to when a package declares multiple entries. */
+	extension?: unknown;
+}
+
 interface PiManifest {
 	extensions?: string[];
 	themes?: string[];
 	skills?: string[];
 	prompts?: string[];
+	/** Tool metadata for opt-in lazy extension loading. Factories stay unloaded until one of these tools runs. */
+	lazyTools?: LazyToolManifest[];
+	/** Alternate nested spelling: { tools: [...] }. */
+	lazy?: { tools?: LazyToolManifest[] } | boolean;
+}
+
+interface ExtensionLoadSpec {
+	path: string;
+	lazyTools?: LazyToolManifest[];
+}
+
+function getManifestLazyTools(manifest: PiManifest | null): LazyToolManifest[] | undefined {
+	if (!manifest) return undefined;
+	const tools = Array.isArray(manifest.lazyTools)
+		? manifest.lazyTools
+		: typeof manifest.lazy === "object" && Array.isArray(manifest.lazy.tools)
+			? manifest.lazy.tools
+			: undefined;
+	return tools?.filter((tool) => tool && typeof tool.name === "string" && tool.name.trim());
+}
+
+function defaultLazyToolParameters(): ToolDefinition["parameters"] {
+	return { type: "object", properties: {}, additionalProperties: false } as ToolDefinition["parameters"];
+}
+
+function lazyToolsForEntry(tools: LazyToolManifest[] | undefined, dir: string, entryPath: string, entryCount: number) {
+	if (!tools?.length) return undefined;
+	const selected = tools.filter((tool) => {
+		if (typeof tool.extension !== "string" || !tool.extension.trim()) {
+			return entryCount === 1;
+		}
+		return path.resolve(dir, tool.extension) === entryPath;
+	});
+	return selected.length > 0 ? selected : undefined;
+}
+
+function inferLazyToolsForExtensionPath(resolvedPath: string): LazyToolManifest[] | undefined {
+	const dir = path.dirname(resolvedPath);
+	const manifest = readPiManifest(path.join(dir, "package.json"));
+	const lazyTools = getManifestLazyTools(manifest);
+	if (!manifest?.extensions?.length || !lazyTools?.length) return undefined;
+	const resolvedEntries = manifest.extensions.map((extPath) => path.resolve(dir, extPath));
+	if (!resolvedEntries.includes(resolvedPath)) return undefined;
+	return lazyToolsForEntry(lazyTools, dir, resolvedPath, resolvedEntries.length);
 }
 
 function readPiManifest(packageJsonPath: string): PiManifest | null {
@@ -553,21 +705,21 @@ function isExtensionFile(name: string): boolean {
  *
  * Returns resolved paths or null if no entry points found.
  */
-function resolveExtensionEntries(dir: string): string[] | null {
+function resolveExtensionEntries(dir: string): ExtensionLoadSpec[] | null {
 	// Check for package.json with "pi" field first
 	const packageJsonPath = path.join(dir, "package.json");
 	if (fs.existsSync(packageJsonPath)) {
 		const manifest = readPiManifest(packageJsonPath);
 		if (manifest?.extensions?.length) {
-			const entries: string[] = [];
-			for (const extPath of manifest.extensions) {
-				const resolvedExtPath = path.resolve(dir, extPath);
-				if (fs.existsSync(resolvedExtPath)) {
-					entries.push(resolvedExtPath);
-				}
-			}
-			if (entries.length > 0) {
-				return entries;
+			const resolvedEntries = manifest.extensions
+				.map((extPath) => path.resolve(dir, extPath))
+				.filter((resolvedExtPath) => fs.existsSync(resolvedExtPath));
+			if (resolvedEntries.length > 0) {
+				const lazyTools = getManifestLazyTools(manifest);
+				return resolvedEntries.map((entryPath) => ({
+					path: entryPath,
+					lazyTools: lazyToolsForEntry(lazyTools, dir, entryPath, resolvedEntries.length),
+				}));
 			}
 		}
 	}
@@ -576,10 +728,10 @@ function resolveExtensionEntries(dir: string): string[] | null {
 	const indexTs = path.join(dir, "index.ts");
 	const indexJs = path.join(dir, "index.js");
 	if (fs.existsSync(indexTs)) {
-		return [indexTs];
+		return [{ path: indexTs }];
 	}
 	if (fs.existsSync(indexJs)) {
-		return [indexJs];
+		return [{ path: indexJs }];
 	}
 
 	return null;
@@ -595,12 +747,12 @@ function resolveExtensionEntries(dir: string): string[] | null {
  *
  * No recursion beyond one level. Complex packages must use package.json manifest.
  */
-function discoverExtensionsInDir(dir: string): string[] {
+function discoverExtensionsInDir(dir: string): ExtensionLoadSpec[] {
 	if (!fs.existsSync(dir)) {
 		return [];
 	}
 
-	const discovered: string[] = [];
+	const discovered: ExtensionLoadSpec[] = [];
 
 	try {
 		const entries = fs.readdirSync(dir, { withFileTypes: true });
@@ -610,7 +762,7 @@ function discoverExtensionsInDir(dir: string): string[] {
 
 			// 1. Direct files: *.ts or *.js
 			if ((entry.isFile() || entry.isSymbolicLink()) && isExtensionFile(entry.name)) {
-				discovered.push(entryPath);
+				discovered.push({ path: entryPath });
 				continue;
 			}
 
@@ -640,15 +792,16 @@ export async function discoverAndLoadExtensions(
 ): Promise<LoadExtensionsResult> {
 	const resolvedCwd = resolvePath(cwd);
 	const resolvedAgentDir = resolvePath(agentDir);
-	const allPaths: string[] = [];
+	const allPaths: ExtensionLoadSpec[] = [];
 	const seen = new Set<string>();
 
-	const addPaths = (paths: string[]) => {
-		for (const p of paths) {
-			const resolved = path.resolve(p);
+	const addPaths = (paths: Array<string | ExtensionLoadSpec>) => {
+		for (const spec of paths) {
+			const normalized = typeof spec === "string" ? { path: spec } : spec;
+			const resolved = path.resolve(normalized.path);
 			if (!seen.has(resolved)) {
 				seen.add(resolved);
-				allPaths.push(p);
+				allPaths.push(normalized);
 			}
 		}
 	};
