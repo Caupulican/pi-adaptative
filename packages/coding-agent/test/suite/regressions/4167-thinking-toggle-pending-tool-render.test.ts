@@ -82,10 +82,10 @@ function createFakeInteractiveModeThis(): RenderSessionContextThis {
 		lastStatusText: undefined,
 		updateEditorBorderColor: vi.fn(),
 		getRegisteredToolDefinition: (_toolName: string) => undefined,
-		addMessageToChat(message: AgentMessage) {
+		addMessageToChat(this: RenderSessionContextThis, message: AgentMessage) {
 			this.chatContainer.addChild(new Text(message.role, 0, 0));
 		},
-		appendToolExecutionComponent(component: ToolExecutionComponent) {
+		appendToolExecutionComponent(this: RenderSessionContextThis, component: ToolExecutionComponent) {
 			this.chatContainer.addChild(component);
 		},
 		attachToolExecutionComponent: (
