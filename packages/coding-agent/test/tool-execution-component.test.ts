@@ -617,7 +617,7 @@ printf '\nWINDOWS_IPV4\n'; powershell.exe -NoProfile -Command "Get-NetIPAddress 
 
 	test("keeps collapsed grouped npm version checks within render width when adding expand hint", () => {
 		const firstCommand = `npm view @caupulican/pi-ai versions --json | tail -c 1000 && printf '\n---\n' && npm view @caupulican/pi-agent-core versions --json | tail -c 1000 && printf '\n---\n' && npm view @caupulican/pi-tui versions --json | tail -c 1000`;
-		const secondCommand = `cd /mnt/d/GitHub/mine/pi-adaptative && npm view @caupulican/pi-adaptative@0.80.2 dependencies --json && printf '\n---dist-tags---\n' && npm view @caupulican/pi-adaptative dist-tags --json`;
+		const secondCommand = `cd /workspace/pi-adaptative && npm view @caupulican/pi-adaptative@0.80.2 dependencies --json && printf '\n---dist-tags---\n' && npm view @caupulican/pi-adaptative dist-tags --json`;
 		const components = [firstCommand, secondCommand].map(
 			(command, index) =>
 				new ToolExecutionComponent(
