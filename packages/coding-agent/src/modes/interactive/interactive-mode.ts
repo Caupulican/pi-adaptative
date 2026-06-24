@@ -5120,12 +5120,17 @@ export class InteractiveMode {
 			.filter((candidate): candidate is string => Boolean(candidate));
 	}
 
+	private getCurrentCwdForSettings(): string {
+		return this.runtimeHost?.session?.sessionManager?.getCwd?.() || process.cwd();
+	}
+
 	private resolveSelfModificationSource(settings: {
 		sourcePath?: string;
 		sourcePaths?: string[];
 	}): string | undefined {
+		const cwd = this.getCurrentCwdForSettings();
 		const resolved = this.collectSelfModificationCandidates(settings).map((candidate) =>
-			resolvePath(candidate, this.sessionManager.getCwd(), { trim: true }),
+			resolvePath(candidate, cwd, { trim: true }),
 		);
 		if (resolved.length === 0) return undefined;
 		return (
@@ -5137,8 +5142,9 @@ export class InteractiveMode {
 
 	private validateSelfModificationSource(settings: SelfModificationSettings): string | undefined {
 		if (!settings.enabled) return undefined;
+		const cwd = this.getCurrentCwdForSettings();
 		const resolved = this.collectSelfModificationCandidates(settings).map((candidate) =>
-			resolvePath(candidate, this.sessionManager.getCwd(), { trim: true }),
+			resolvePath(candidate, cwd, { trim: true }),
 		);
 		if (resolved.length === 0) return "Self modification is enabled, but no pi-adaptative source path is set.";
 		const valid = resolved.find(

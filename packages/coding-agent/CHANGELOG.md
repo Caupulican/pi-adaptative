@@ -1,5 +1,9 @@
 ## [Unreleased]
 
+### Fixed
+
+- Fixed Auto Learn prompt construction in lightweight harnesses so self-modification source resolution falls back safely when no full session manager is present.
+
 ## [0.80.39] - 2026-06-24
 
 ### Changed
