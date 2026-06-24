@@ -581,6 +581,11 @@ export interface Model<TApi extends Api> {
 		cacheWrite: number; // $/million tokens
 	};
 	contextWindow: number;
+	/**
+	 * Optional usage threshold where auto-compaction should trigger for this model.
+	 * Use this when a provider has a cost or quality boundary before the hard context window.
+	 */
+	autoCompactionTriggerTokens?: number;
 	maxTokens: number;
 	headers?: Record<string, string>;
 	/** Compatibility overrides for OpenAI-compatible APIs. If not set, auto-detected from baseUrl. */

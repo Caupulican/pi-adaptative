@@ -1,5 +1,9 @@
 ## [Unreleased]
 
+### Changed
+
+- Changed auto-compaction to honor a model-specific `autoCompactionTriggerTokens` threshold when set, compacting at the lower of that value and `contextWindow - reserveTokens`. Fugu and Fugu Ultra now auto-compact around 272000 tokens instead of effectively waiting for the 1,000,000 context window.
+
 ## [0.80.40] - 2026-06-24
 
 ### Fixed

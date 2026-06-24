@@ -1,5 +1,9 @@
 ## [Unreleased]
 
+### Added
+
+- Added optional `Model.autoCompactionTriggerTokens` and set it to 272000 for Sakana Fugu and Fugu Ultra, so auto-compaction can trigger at a provider cost/quality boundary before the 1,000,000 hard context window.
+
 ## [0.80.40] - 2026-06-24
 
 ## [0.80.39] - 2026-06-24

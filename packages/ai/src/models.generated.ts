@@ -4098,6 +4098,7 @@ export const MODELS = {
 				cacheWrite: 0,
 			},
 			contextWindow: 1000000,
+			autoCompactionTriggerTokens: 272000,
 			maxTokens: 10000,
 		} satisfies Model<"openai-responses">,
 		"fugu-ultra": {
@@ -4117,6 +4118,7 @@ export const MODELS = {
 				cacheWrite: 0,
 			},
 			contextWindow: 1000000,
+			autoCompactionTriggerTokens: 272000,
 			maxTokens: 10000,
 		} satisfies Model<"openai-responses">,
 	},

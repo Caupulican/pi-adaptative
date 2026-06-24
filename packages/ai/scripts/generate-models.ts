@@ -158,6 +158,7 @@ const FUGU_MODELS: Model<"openai-responses">[] = [
 			cacheWrite: 0,
 		},
 		contextWindow: 1_000_000,
+		autoCompactionTriggerTokens: 272_000,
 		maxTokens: 10_000,
 	},
 	{
@@ -177,6 +178,7 @@ const FUGU_MODELS: Model<"openai-responses">[] = [
 			cacheWrite: 0,
 		},
 		contextWindow: 1_000_000,
+		autoCompactionTriggerTokens: 272_000,
 		maxTokens: 10_000,
 	},
 ];
@@ -2106,6 +2108,9 @@ export const MODELS = {
 			output += `\t\t\t\tcacheWrite: ${model.cost.cacheWrite},\n`;
 			output += `\t\t\t},\n`;
 			output += `\t\t\tcontextWindow: ${model.contextWindow},\n`;
+			if (model.autoCompactionTriggerTokens !== undefined) {
+				output += `\t\t\tautoCompactionTriggerTokens: ${model.autoCompactionTriggerTokens},\n`;
+			}
 			output += `\t\t\tmaxTokens: ${model.maxTokens},\n`;
 			output += `\t\t} satisfies Model<"${model.api}">,\n`;
 		}

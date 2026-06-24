@@ -245,6 +245,18 @@ describe("shouldCompact", () => {
 
 		expect(shouldCompact(95000, 100000, settings)).toBe(false);
 	});
+
+	it("should use a lower model-specific trigger when provided", () => {
+		const settings: CompactionSettings = {
+			enabled: true,
+			reserveTokens: 10000,
+			keepRecentTokens: 20000,
+		};
+
+		expect(shouldCompact(272001, 1000000, settings, 272000)).toBe(true);
+		expect(shouldCompact(272000, 1000000, settings, 272000)).toBe(false);
+		expect(shouldCompact(271999, 1000000, settings, 272000)).toBe(false);
+	});
 });
 
 describe("findCutPoint", () => {

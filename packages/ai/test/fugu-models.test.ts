@@ -37,6 +37,7 @@ describe("Fugu models", () => {
 			expect(model.reasoning).toBe(true);
 			expect(model.input).toEqual(["text", "image"]);
 			expect(model.contextWindow).toBe(1_000_000);
+			expect(model.autoCompactionTriggerTokens).toBe(272_000);
 			expect(model.maxTokens).toBe(10_000);
 			expect(getSupportedThinkingLevels(model)).toEqual(["high", "xhigh"]);
 		}

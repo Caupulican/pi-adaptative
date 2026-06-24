@@ -453,7 +453,7 @@ export class AgentSession {
 				const contextWindow = this.model?.contextWindow ?? 0;
 				if (settings.enabled && contextWindow > 0 && !this.isCompacting) {
 					const contextTokens = this._estimateCurrentContextTokens(authoritativeMessages);
-					if (shouldCompact(contextTokens, contextWindow, settings)) {
+					if (shouldCompact(contextTokens, contextWindow, settings, this.model?.autoCompactionTriggerTokens)) {
 						const latestBefore = getLatestCompactionEntry(this.sessionManager.getBranch())?.id;
 						await this._runAutoCompaction("threshold", false);
 						const latestAfter = getLatestCompactionEntry(this.sessionManager.getBranch())?.id;
@@ -2171,7 +2171,7 @@ export class AgentSession {
 				}
 			}
 		}
-		if (shouldCompact(contextTokens, contextWindow, settings)) {
+		if (shouldCompact(contextTokens, contextWindow, settings, this.model?.autoCompactionTriggerTokens)) {
 			return await this._runAutoCompaction("threshold", false);
 		}
 		return false;
