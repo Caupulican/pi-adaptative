@@ -77,7 +77,8 @@ export interface WarningSettings {
 
 export interface SelfModificationSettings {
 	enabled?: boolean; // default: false
-	sourcePath?: string; // Path to the pi-adaptative source tree when self-modification is enabled
+	sourcePath?: string; // Single pi-adaptative source tree path (legacy; still honored)
+	sourcePaths?: string[]; // Ordered candidate source trees; first existing wins. Enables portable WSL/Termux switching from settings alone.
 }
 
 export interface AutoLearnSettings {
@@ -1531,10 +1532,11 @@ export class SettingsManager {
 		this.save();
 	}
 
-	getSelfModificationSettings(): { enabled: boolean; sourcePath?: string } {
+	getSelfModificationSettings(): { enabled: boolean; sourcePath?: string; sourcePaths?: string[] } {
 		return {
 			enabled: this.settings.selfModification?.enabled ?? false,
 			sourcePath: this.settings.selfModification?.sourcePath,
+			sourcePaths: this.settings.selfModification?.sourcePaths,
 		};
 	}
 

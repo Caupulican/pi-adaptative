@@ -5111,19 +5111,49 @@ export class InteractiveMode {
 		return `Auto Learn model "${modelValue}" is not in configured subscription/API models; saved as manual/unverified.`;
 	}
 
+	private collectSelfModificationCandidates(settings: { sourcePath?: string; sourcePaths?: string[] }): string[] {
+		return [
+			...(Array.isArray(settings.sourcePaths) ? settings.sourcePaths : []),
+			...(settings.sourcePath ? [settings.sourcePath] : []),
+		]
+			.map((candidate) => candidate?.trim())
+			.filter((candidate): candidate is string => Boolean(candidate));
+	}
+
+	private resolveSelfModificationSource(settings: {
+		sourcePath?: string;
+		sourcePaths?: string[];
+	}): string | undefined {
+		const resolved = this.collectSelfModificationCandidates(settings).map((candidate) =>
+			resolvePath(candidate, this.sessionManager.getCwd(), { trim: true }),
+		);
+		if (resolved.length === 0) return undefined;
+		return (
+			resolved.find(
+				(candidate) => fs.existsSync(candidate) && fs.existsSync(path.join(candidate, "package.json")),
+			) ?? resolved[0]
+		);
+	}
+
 	private validateSelfModificationSource(settings: SelfModificationSettings): string | undefined {
 		if (!settings.enabled) return undefined;
-		const rawPath = settings.sourcePath?.trim();
-		if (!rawPath) return "Self modification is enabled, but no pi-adaptative source path is set.";
-		const sourcePath = resolvePath(rawPath, this.sessionManager.getCwd(), { trim: true });
-		if (!fs.existsSync(sourcePath)) return `Self modification source path does not exist: ${sourcePath}`;
-		if (!fs.existsSync(path.join(sourcePath, "package.json"))) {
-			return `Self modification source path has no package.json: ${sourcePath}`;
+		const resolved = this.collectSelfModificationCandidates(settings).map((candidate) =>
+			resolvePath(candidate, this.sessionManager.getCwd(), { trim: true }),
+		);
+		if (resolved.length === 0) return "Self modification is enabled, but no pi-adaptative source path is set.";
+		const valid = resolved.find(
+			(candidate) =>
+				fs.existsSync(candidate) &&
+				fs.existsSync(path.join(candidate, "package.json")) &&
+				fs.existsSync(path.join(candidate, "packages", "coding-agent")),
+		);
+		if (valid) return undefined;
+		const first = resolved[0];
+		if (!fs.existsSync(first)) return `Self modification source path does not exist: ${first}`;
+		if (!fs.existsSync(path.join(first, "package.json"))) {
+			return `Self modification source path has no package.json: ${first}`;
 		}
-		if (!fs.existsSync(path.join(sourcePath, "packages", "coding-agent"))) {
-			return `Self modification source path does not look like pi-adaptative (missing packages/coding-agent): ${sourcePath}`;
-		}
-		return undefined;
+		return `Self modification source path does not look like pi-adaptative (missing packages/coding-agent): ${first}`;
 	}
 
 	private evaluateAutoLearn(force = false): AutoLearnDecision {
@@ -5145,10 +5175,13 @@ export class InteractiveMode {
 			].join("\n");
 		}
 
+		const selfModificationSource = selfModification.enabled
+			? this.resolveSelfModificationSource(selfModification)
+			: undefined;
 		const sourceAuthority =
-			selfModification.enabled && selfModification.sourcePath?.trim()
-				? `- Pi source: standing authority to edit the authorized selfModification.sourcePath (${selfModification.sourcePath.trim()}) for self-evolution improvements; inspect git status first, preserve unrelated user changes, run focused validation, and leave a clear rollback/test summary.`
-				: "- Pi source: no standing source-edit authority until selfModification.enabled and selfModification.sourcePath are set.";
+			selfModification.enabled && selfModificationSource
+				? `- Pi source: standing authority to edit the authorized selfModification source (${selfModificationSource}) for self-evolution improvements; inspect git status first, preserve unrelated user changes, run focused validation, and leave a clear rollback/test summary.`
+				: "- Pi source: no standing source-edit authority until selfModification.enabled and selfModification.sourcePaths are set.";
 		return [
 			"Authority mode: FULL AUTONOMOUS standing grant.",
 			"- Memory: may apply high-confidence durable Automata memory/corrections after duplicate and corroboration checks.",

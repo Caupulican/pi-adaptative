@@ -1065,21 +1065,33 @@ export class AgentSession {
 		if (!settings.enabled) {
 			return `Pi self-modification guardrails (local setting inactive):
 - Do not modify Pi core, the installed Pi runtime, or pi-adaptative harness source for self-evolution.
-- If self-modification is needed, ask the user to enable \`selfModification.enabled\` and set \`selfModification.sourcePath\` to the pi-adaptative source checkout.`;
+- If self-modification is needed, ask the user to enable \`selfModification.enabled\` and set \`selfModification.sourcePaths\` (or legacy \`selfModification.sourcePath\`) to the pi-adaptative source checkout.`;
 		}
 
-		const rawSourcePath = settings.sourcePath?.trim();
-		if (!rawSourcePath) {
+		// Resolve from an ordered candidate list first (portable WSL/Termux switching
+		// from settings alone), then fall back to the legacy single sourcePath.
+		const rawCandidates = [
+			...(Array.isArray(settings.sourcePaths) ? settings.sourcePaths : []),
+			...(settings.sourcePath ? [settings.sourcePath] : []),
+		]
+			.map((candidate) => candidate?.trim())
+			.filter((candidate): candidate is string => Boolean(candidate));
+
+		if (rawCandidates.length === 0) {
 			return `Pi self-modification guardrails (local setting active, source missing):
-- Self-modification is enabled, but \`selfModification.sourcePath\` is not set.
-- Do not modify Pi core or runtime output. Ask the user to set \`selfModification.sourcePath\` to the pi-adaptative source checkout before proceeding.`;
+- Self-modification is enabled, but no \`selfModification.sourcePaths\`/\`selfModification.sourcePath\` value is set.
+- Do not modify Pi core or runtime output. Ask the user to set \`selfModification.sourcePaths\` to the pi-adaptative source checkout before proceeding.`;
 		}
 
-		const sourcePath = resolvePath(rawSourcePath, this._cwd, { trim: true });
+		const resolvedCandidates = rawCandidates.map((candidate) => resolvePath(candidate, this._cwd, { trim: true }));
+		const sourcePath =
+			resolvedCandidates.find(
+				(candidate) => existsSync(candidate) && existsSync(resolvePath("package.json", candidate)),
+			) ?? resolvedCandidates[0];
 		const sourceLooksValid = existsSync(sourcePath) && existsSync(resolvePath("package.json", sourcePath));
 		const sourceStatus = sourceLooksValid
 			? sourcePath
-			: `${sourcePath} (missing or not a source checkout; ask the user to correct \`selfModification.sourcePath\` before editing)`;
+			: `${sourcePath} (missing or not a source checkout; ask the user to correct \`selfModification.sourcePaths\` before editing)`;
 		const autonomy = this.settingsManager.getAutonomySettings();
 		const settingsGate =
 			autonomy.mode === "full"

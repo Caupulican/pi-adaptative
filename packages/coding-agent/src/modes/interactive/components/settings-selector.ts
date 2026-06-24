@@ -81,7 +81,10 @@ function autoLearnModelValue(settings: AutoLearnSettings): string {
 
 function selfModificationSummary(settings: SelfModificationSettings): string {
 	if (!(settings.enabled ?? false)) return "disabled";
-	return optionalStringValue(settings.sourcePath) === "(not set)" ? "enabled (missing path)" : "enabled";
+	const hasPath =
+		Boolean(settings.sourcePath?.trim()) ||
+		(Array.isArray(settings.sourcePaths) && settings.sourcePaths.some((candidate) => Boolean(candidate?.trim())));
+	return hasPath ? "enabled" : "enabled (missing path)";
 }
 
 function autonomyModeValue(settings: AutonomySettings): AutonomyMode {
