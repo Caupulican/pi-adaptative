@@ -501,6 +501,28 @@ describe("Generate E2E Tests", () => {
 		});
 	});
 
+	describe.skipIf(!process.env.SAKANA_API_KEY && !process.env.FUGU_API_KEY)("Fugu Provider (Responses API)", () => {
+		const baseOptions = { reasoningEffort: "high", timeoutMs: 120_000, maxRetries: 4 };
+		const fugu = getModel("fugu", "fugu");
+		const fuguUltra = getModel("fugu", "fugu-ultra");
+
+		it("should complete basic text generation with fugu", { retry: 3 }, async () => {
+			await basicTextGeneration(fugu, baseOptions);
+		});
+
+		it("should complete basic text generation with fugu-ultra", { retry: 3 }, async () => {
+			await basicTextGeneration(fuguUltra, baseOptions);
+		});
+
+		it("should handle tool calling", { retry: 3 }, async () => {
+			await handleToolCall(fugu, baseOptions);
+		});
+
+		it("should handle streaming", { retry: 3 }, async () => {
+			await handleStreaming(fugu, baseOptions);
+		});
+	});
+
 	describe.skipIf(!process.env.ANTHROPIC_API_KEY)("Anthropic Provider (claude-haiku-4-5)", () => {
 		const model = getModel("anthropic", "claude-haiku-4-5");
 

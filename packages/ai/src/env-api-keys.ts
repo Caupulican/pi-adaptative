@@ -98,6 +98,13 @@ function getApiKeyEnvVars(provider: string): readonly string[] | undefined {
 		return ["ANTHROPIC_OAUTH_TOKEN", "ANTHROPIC_API_KEY"];
 	}
 
+	// Sakana's Codex/Fugu integration documents SAKANA_API_KEY. The models page
+	// examples also accept FUGU_API_KEY/FUGU_BASE_URL, so keep FUGU_API_KEY as
+	// a compatibility fallback while preferring the provider-level key.
+	if (provider === "fugu") {
+		return ["SAKANA_API_KEY", "FUGU_API_KEY"];
+	}
+
 	const envMap: Record<string, string> = {
 		openai: "OPENAI_API_KEY",
 		"azure-openai-responses": "AZURE_OPENAI_API_KEY",

@@ -9,7 +9,14 @@ import {
 	CLOUDFLARE_AI_GATEWAY_OPENAI_BASE_URL,
 	CLOUDFLARE_WORKERS_AI_BASE_URL,
 } from "../src/providers/cloudflare.ts";
-import type { AnthropicMessagesCompat, Api, KnownProvider, Model, OpenAICompletionsCompat } from "../src/types.ts";
+import type {
+	AnthropicMessagesCompat,
+	Api,
+	KnownProvider,
+	Model,
+	OpenAICompletionsCompat,
+	OpenAIResponsesCompat,
+} from "../src/types.ts";
 
 const __filename = fileURLToPath(import.meta.url);
 const __dirname = dirname(__filename);
@@ -117,6 +124,62 @@ const TOGETHER_TOGGLE_REASONING_LEVEL_MAP = {
 
 const AI_GATEWAY_MODELS_URL = "https://ai-gateway.vercel.sh/v1";
 const AI_GATEWAY_BASE_URL = "https://ai-gateway.vercel.sh";
+// Sakana Fugu reference facts:
+// - Codex/Fugu config uses base_url=https://api.sakana.ai/v1, env_key=SAKANA_API_KEY, wire_api=responses.
+// - configs/files/fugu.json lists fugu and fugu-ultra with 1M context, image input, 10K truncation, and high/xhigh reasoning only.
+// - Fugu Ultra standard pricing comes from https://console.sakana.ai/pricing; high-context tiering is applied at usage time.
+const FUGU_BASE_URL = "https://api.sakana.ai/v1";
+const FUGU_RESPONSES_COMPAT: OpenAIResponsesCompat = {
+	supportsLongCacheRetention: false,
+};
+const FUGU_THINKING_LEVEL_MAP = {
+	off: null,
+	minimal: null,
+	low: null,
+	medium: null,
+	high: "high",
+	xhigh: "xhigh",
+} as const;
+const FUGU_MODELS: Model<"openai-responses">[] = [
+	{
+		id: "fugu",
+		name: "Fugu",
+		api: "openai-responses",
+		provider: "fugu",
+		baseUrl: FUGU_BASE_URL,
+		compat: FUGU_RESPONSES_COMPAT,
+		reasoning: true,
+		thinkingLevelMap: FUGU_THINKING_LEVEL_MAP,
+		input: ["text", "image"],
+		cost: {
+			input: 0,
+			output: 0,
+			cacheRead: 0,
+			cacheWrite: 0,
+		},
+		contextWindow: 1_000_000,
+		maxTokens: 10_000,
+	},
+	{
+		id: "fugu-ultra",
+		name: "Fugu Ultra",
+		api: "openai-responses",
+		provider: "fugu",
+		baseUrl: FUGU_BASE_URL,
+		compat: FUGU_RESPONSES_COMPAT,
+		reasoning: true,
+		thinkingLevelMap: FUGU_THINKING_LEVEL_MAP,
+		input: ["text", "image"],
+		cost: {
+			input: 5,
+			output: 30,
+			cacheRead: 0.5,
+			cacheWrite: 0,
+		},
+		contextWindow: 1_000_000,
+		maxTokens: 10_000,
+	},
+];
 const ZAI_TOOL_STREAM_UNSUPPORTED_MODELS = new Set(["glm-4.5", "glm-4.5-air", "glm-4.5-flash", "glm-4.5v"]);
 const EAGER_TOOL_INPUT_STREAMING_UNSUPPORTED_ANTHROPIC_MODELS = new Set([
 	"github-copilot:claude-haiku-4.5",
@@ -1192,7 +1255,7 @@ async function generateModels() {
 	const aiGatewayModels = await fetchAiGatewayModels();
 
 	// Combine models (models.dev has priority)
-	const allModels = [...modelsDevModels, ...openRouterModels, ...aiGatewayModels].filter(
+	const allModels = [...modelsDevModels, ...openRouterModels, ...aiGatewayModels, ...FUGU_MODELS].filter(
 		(model) =>
 			!((model.provider === "opencode" || model.provider === "opencode-go") && model.id === "gpt-5.3-codex-spark"),
 	);

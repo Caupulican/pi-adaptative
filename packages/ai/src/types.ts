@@ -26,6 +26,7 @@ export type KnownProvider =
 	| "google"
 	| "google-vertex"
 	| "openai"
+	| "fugu"
 	| "azure-openai-responses"
 	| "openai-codex"
 	| "deepseek"

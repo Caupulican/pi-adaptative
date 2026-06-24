@@ -27,7 +27,9 @@ import {
 } from "./openai-responses-shared.ts";
 import { buildBaseOptions } from "./simple-options.ts";
 
-const OPENAI_TOOL_CALL_PROVIDERS = new Set(["openai", "openai-codex", "opencode"]);
+const OPENAI_TOOL_CALL_PROVIDERS = new Set(["openai", "openai-codex", "opencode", "fugu"]);
+const FUGU_DEFAULT_TIMEOUT_MS = 7_200_000;
+const FUGU_DEFAULT_MAX_RETRIES = 4;
 
 /**
  * Resolve cache retention preference.
@@ -114,8 +116,12 @@ export const streamOpenAIResponses: StreamFunction<"openai-responses", OpenAIRes
 			}
 			const requestOptions = {
 				...(options?.signal ? { signal: options.signal } : {}),
-				...(options?.timeoutMs !== undefined ? { timeout: options.timeoutMs } : {}),
-				maxRetries: options?.maxRetries ?? 0,
+				...(options?.timeoutMs !== undefined
+					? { timeout: options.timeoutMs }
+					: model.provider === "fugu"
+						? { timeout: FUGU_DEFAULT_TIMEOUT_MS }
+						: {}),
+				maxRetries: options?.maxRetries ?? (model.provider === "fugu" ? FUGU_DEFAULT_MAX_RETRIES : 0),
 			};
 			const { data: openaiStream, response } = await client.responses.create(params, requestOptions).withResponse();
 			await options?.onResponse?.({ status: response.status, headers: headersToRecord(response.headers) }, model);
@@ -123,7 +129,10 @@ export const streamOpenAIResponses: StreamFunction<"openai-responses", OpenAIRes
 
 			await processResponsesStream(openaiStream, output, stream, model, {
 				serviceTier: options?.serviceTier,
-				applyServiceTierPricing: (usage, serviceTier) => applyServiceTierPricing(usage, serviceTier, model),
+				applyServiceTierPricing:
+					model.provider === "fugu"
+						? undefined
+						: (usage, serviceTier) => applyServiceTierPricing(usage, serviceTier, model),
 			});
 
 			if (options?.signal?.aborted) {
@@ -172,6 +181,20 @@ export const streamSimpleOpenAIResponses: StreamFunction<"openai-responses", Sim
 	} satisfies OpenAIResponsesOptions);
 };
 
+function resolveFuguBaseUrl(): string | undefined {
+	if (typeof process === "undefined") return undefined;
+	const value = process.env.FUGU_BASE_URL?.trim();
+	if (!value) return undefined;
+	const baseUrl = value.replace(/\/+$/, "");
+	return baseUrl.endsWith("/v1") ? baseUrl : `${baseUrl}/v1`;
+}
+
+function resolveBaseUrl(model: Model<"openai-responses">): string {
+	if (isCloudflareProvider(model.provider)) return resolveCloudflareBaseUrl(model);
+	if (model.provider === "fugu") return resolveFuguBaseUrl() ?? model.baseUrl;
+	return model.baseUrl;
+}
+
 function createClient(
 	model: Model<"openai-responses">,
 	context: Context,
@@ -213,7 +236,7 @@ function createClient(
 
 	return new OpenAI({
 		apiKey,
-		baseURL: isCloudflareProvider(model.provider) ? resolveCloudflareBaseUrl(model) : model.baseUrl,
+		baseURL: resolveBaseUrl(model),
 		dangerouslyAllowBrowser: true,
 		defaultHeaders,
 	});
@@ -242,7 +265,7 @@ function buildParams(model: Model<"openai-responses">, context: Context, options
 		params.temperature = options?.temperature;
 	}
 
-	if (options?.serviceTier !== undefined) {
+	if (options?.serviceTier !== undefined && model.provider !== "fugu") {
 		params.service_tier = options.serviceTier;
 	}
 
@@ -255,11 +278,14 @@ function buildParams(model: Model<"openai-responses">, context: Context, options
 			const effort = options?.reasoningEffort
 				? (model.thinkingLevelMap?.[options.reasoningEffort] ?? options.reasoningEffort)
 				: "medium";
+			const supportsReasoningSummary = model.provider !== "fugu" || model.id === "fugu-ultra";
 			params.reasoning = {
 				effort: effort as NonNullable<typeof params.reasoning>["effort"],
-				summary: options?.reasoningSummary || "auto",
+				...(supportsReasoningSummary ? { summary: options?.reasoningSummary || "auto" } : {}),
 			};
-			params.include = ["reasoning.encrypted_content"];
+			if (supportsReasoningSummary) {
+				params.include = ["reasoning.encrypted_content"];
+			}
 		} else if (model.provider !== "github-copilot" && model.thinkingLevelMap?.off !== null) {
 			params.reasoning = {
 				effort: (model.thinkingLevelMap?.off ?? "none") as NonNullable<typeof params.reasoning>["effort"],

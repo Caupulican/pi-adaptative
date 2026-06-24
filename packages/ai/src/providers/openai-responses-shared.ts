@@ -79,6 +79,32 @@ export interface ConvertResponsesToolsOptions {
 	strict?: boolean | null;
 }
 
+interface InputTokenDetailsWithOrchestration {
+	cached_tokens?: number;
+	orchestration_input_tokens?: number;
+	orchestration_input_cached_tokens?: number;
+}
+
+interface OutputTokenDetailsWithOrchestration {
+	orchestration_output_tokens?: number;
+}
+
+function applyFuguUltraPricing<TApi extends Api>(model: Model<TApi>, usage: Usage): void {
+	if (model.provider !== "fugu" || model.id !== "fugu-ultra") return;
+
+	// Sakana pricing has a higher Fugu Ultra tier once context exceeds 272K tokens.
+	// Source: https://console.sakana.ai/pricing
+	const highContext = usage.input + usage.cacheRead > 272_000;
+	const inputRate = highContext ? 10 : 5;
+	const outputRate = highContext ? 45 : 30;
+	const cacheReadRate = highContext ? 1 : 0.5;
+	usage.cost.input = (inputRate / 1_000_000) * usage.input;
+	usage.cost.output = (outputRate / 1_000_000) * usage.output;
+	usage.cost.cacheRead = (cacheReadRate / 1_000_000) * usage.cacheRead;
+	usage.cost.cacheWrite = 0;
+	usage.cost.total = usage.cost.input + usage.cost.output + usage.cost.cacheRead;
+}
+
 // =============================================================================
 // Message conversion
 // =============================================================================
@@ -294,18 +320,33 @@ export async function processResponsesStream<TApi extends Api>(
 			output.responseId = response.id;
 		}
 		if (response?.usage) {
-			const cachedTokens = response.usage.input_tokens_details?.cached_tokens || 0;
+			const inputDetails = response.usage.input_tokens_details as InputTokenDetailsWithOrchestration | undefined;
+			const cachedTokens = inputDetails?.cached_tokens || 0;
+			let inputTokens = (response.usage.input_tokens || 0) - cachedTokens;
+			let outputTokens = response.usage.output_tokens || 0;
+			let cacheReadTokens = cachedTokens;
+			if (model.provider === "fugu") {
+				const outputDetails = response.usage.output_tokens_details as
+					| OutputTokenDetailsWithOrchestration
+					| undefined;
+				inputTokens += inputDetails?.orchestration_input_tokens || 0;
+				cacheReadTokens += inputDetails?.orchestration_input_cached_tokens || 0;
+				outputTokens += outputDetails?.orchestration_output_tokens || 0;
+			}
 			output.usage = {
-				// OpenAI includes cached tokens in input_tokens, so subtract to get non-cached input
-				input: (response.usage.input_tokens || 0) - cachedTokens,
-				output: response.usage.output_tokens || 0,
-				cacheRead: cachedTokens,
+				// OpenAI includes cached tokens in input_tokens, so subtract to get non-cached input.
+				// Sakana Fugu Ultra also reports billable orchestration tokens in token details fields.
+				// Source: https://console.sakana.ai/pricing#usage-field-details
+				input: inputTokens,
+				output: outputTokens,
+				cacheRead: cacheReadTokens,
 				cacheWrite: 0,
 				totalTokens: response.usage.total_tokens || 0,
 				cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, total: 0 },
 			};
 		}
 		calculateCost(model, output.usage);
+		applyFuguUltraPricing(model, output.usage);
 		if (options?.applyServiceTierPricing) {
 			const serviceTier = options.resolveServiceTier
 				? options.resolveServiceTier(response?.service_tier, options.serviceTier)

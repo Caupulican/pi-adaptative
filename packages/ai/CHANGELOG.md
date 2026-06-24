@@ -1,5 +1,9 @@
 ## [Unreleased]
 
+### Added
+
+- Added Sakana Fugu as a first-class provider with `fugu` and `fugu-ultra` models through the OpenAI Responses-compatible Sakana API.
+
 ## [0.80.34] - 2026-06-21
 
 ### Fixed

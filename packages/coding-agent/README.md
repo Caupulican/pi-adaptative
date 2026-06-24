@@ -139,6 +139,7 @@ You can also spell the model explicitly, e.g. `pi --model openai-codex/gpt-5.5` 
 **API keys:**
 - Anthropic
 - OpenAI
+- Fugu
 - Azure OpenAI
 - DeepSeek
 - Google Gemini

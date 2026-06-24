@@ -19,6 +19,19 @@ function createModel(): Model<"openai-responses"> {
 	};
 }
 
+function createFuguUltraModel(): Model<"openai-responses"> {
+	return {
+		...createModel(),
+		id: "fugu-ultra",
+		name: "Fugu Ultra",
+		provider: "fugu",
+		baseUrl: "https://api.sakana.ai/v1",
+		cost: { input: 5, output: 30, cacheRead: 0.5, cacheWrite: 0 },
+		contextWindow: 1_000_000,
+		maxTokens: 10_000,
+	};
+}
+
 function createOutput(model: Model<"openai-responses">): AssistantMessage {
 	return {
 		role: "assistant",
@@ -62,6 +75,45 @@ async function* createCompletedEvents(): AsyncIterable<ResponseStreamEvent> {
 	} as ResponseStreamEvent;
 }
 
+async function* createCompletedEventsWithOrchestrationUsage(): AsyncIterable<ResponseStreamEvent> {
+	yield {
+		type: "response.completed",
+		response: {
+			id: "resp_completed_with_orchestration",
+			status: "completed",
+			usage: {
+				input_tokens: 20,
+				output_tokens: 7,
+				total_tokens: 66,
+				input_tokens_details: {
+					cached_tokens: 2,
+					orchestration_input_tokens: 30,
+					orchestration_input_cached_tokens: 3,
+				},
+				output_tokens_details: {
+					orchestration_output_tokens: 6,
+				},
+			},
+		},
+	} as unknown as ResponseStreamEvent;
+}
+
+async function* createHighContextFuguUltraEvents(): AsyncIterable<ResponseStreamEvent> {
+	yield {
+		type: "response.completed",
+		response: {
+			id: "resp_high_context_fugu_ultra",
+			status: "completed",
+			usage: {
+				input_tokens: 300_000,
+				output_tokens: 1_000,
+				total_tokens: 301_000,
+				input_tokens_details: { cached_tokens: 100_000 },
+			},
+		},
+	} as unknown as ResponseStreamEvent;
+}
+
 async function* createIncompleteEvents(): AsyncIterable<ResponseStreamEvent> {
 	yield {
 		type: "response.incomplete",
@@ -98,6 +150,47 @@ describe("OpenAI Responses terminal events", () => {
 		expect(output.usage.input).toBe(18);
 		expect(output.usage.cacheRead).toBe(2);
 		expect(output.usage.output).toBe(7);
+	});
+
+	it("includes Sakana Fugu Ultra orchestration tokens in usage and cost", async () => {
+		const model = createFuguUltraModel();
+		const output = createOutput(model);
+
+		await processResponsesStream(
+			createCompletedEventsWithOrchestrationUsage(),
+			output,
+			new AssistantMessageEventStream(),
+			model,
+		);
+
+		expect(output.responseId).toBe("resp_completed_with_orchestration");
+		expect(output.usage.input).toBe(48);
+		expect(output.usage.cacheRead).toBe(5);
+		expect(output.usage.output).toBe(13);
+		expect(output.usage.totalTokens).toBe(66);
+		expect(output.usage.cost.input).toBeCloseTo(0.00024);
+		expect(output.usage.cost.cacheRead).toBeCloseTo(0.0000025);
+		expect(output.usage.cost.output).toBeCloseTo(0.00039);
+	});
+
+	it("applies the high-context Sakana Fugu Ultra pricing tier", async () => {
+		const model = createFuguUltraModel();
+		const output = createOutput(model);
+
+		await processResponsesStream(
+			createHighContextFuguUltraEvents(),
+			output,
+			new AssistantMessageEventStream(),
+			model,
+		);
+
+		expect(output.responseId).toBe("resp_high_context_fugu_ultra");
+		expect(output.usage.input).toBe(200_000);
+		expect(output.usage.cacheRead).toBe(100_000);
+		expect(output.usage.output).toBe(1_000);
+		expect(output.usage.cost.input).toBeCloseTo(2);
+		expect(output.usage.cost.cacheRead).toBeCloseTo(0.1);
+		expect(output.usage.cost.output).toBeCloseTo(0.045);
 	});
 
 	it("accepts incomplete terminal events as length stops", async () => {

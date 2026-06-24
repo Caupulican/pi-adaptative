@@ -4,6 +4,8 @@ import { findEnvKeys, getEnvApiKey } from "../src/env-api-keys.ts";
 const originalCopilotGitHubToken = process.env.COPILOT_GITHUB_TOKEN;
 const originalGhToken = process.env.GH_TOKEN;
 const originalGitHubToken = process.env.GITHUB_TOKEN;
+const originalSakanaApiKey = process.env.SAKANA_API_KEY;
+const originalFuguApiKey = process.env.FUGU_API_KEY;
 
 afterEach(() => {
 	if (originalCopilotGitHubToken === undefined) {
@@ -22,6 +24,18 @@ afterEach(() => {
 		delete process.env.GITHUB_TOKEN;
 	} else {
 		process.env.GITHUB_TOKEN = originalGitHubToken;
+	}
+
+	if (originalSakanaApiKey === undefined) {
+		delete process.env.SAKANA_API_KEY;
+	} else {
+		process.env.SAKANA_API_KEY = originalSakanaApiKey;
+	}
+
+	if (originalFuguApiKey === undefined) {
+		delete process.env.FUGU_API_KEY;
+	} else {
+		process.env.FUGU_API_KEY = originalFuguApiKey;
 	}
 });
 
@@ -42,5 +56,21 @@ describe("environment API keys", () => {
 
 		expect(findEnvKeys("github-copilot")).toEqual(["COPILOT_GITHUB_TOKEN"]);
 		expect(getEnvApiKey("github-copilot")).toBe("copilot-token");
+	});
+
+	it("prefers SAKANA_API_KEY over FUGU_API_KEY for Fugu", () => {
+		process.env.SAKANA_API_KEY = "sakana-token";
+		process.env.FUGU_API_KEY = "fugu-token";
+
+		expect(findEnvKeys("fugu")).toEqual(["SAKANA_API_KEY", "FUGU_API_KEY"]);
+		expect(getEnvApiKey("fugu")).toBe("sakana-token");
+	});
+
+	it("falls back to FUGU_API_KEY for Fugu", () => {
+		delete process.env.SAKANA_API_KEY;
+		process.env.FUGU_API_KEY = "fugu-token";
+
+		expect(findEnvKeys("fugu")).toEqual(["FUGU_API_KEY"]);
+		expect(getEnvApiKey("fugu")).toBe("fugu-token");
 	});
 });

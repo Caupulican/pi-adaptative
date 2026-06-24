@@ -1,5 +1,9 @@
 ## [Unreleased]
 
+### Added
+
+- Added Fugu provider selection, API-key setup docs, and default model routing.
+
 ## [0.80.34] - 2026-06-21
 
 ### Fixed

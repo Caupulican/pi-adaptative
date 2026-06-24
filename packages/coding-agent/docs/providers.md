@@ -76,6 +76,7 @@ pi
 | Anthropic | `ANTHROPIC_API_KEY` | `anthropic` |
 | Azure OpenAI Responses | `AZURE_OPENAI_API_KEY` | `azure-openai-responses` |
 | OpenAI | `OPENAI_API_KEY` | `openai` |
+| Fugu | `SAKANA_API_KEY` or `FUGU_API_KEY` (`FUGU_BASE_URL` optional) | `fugu` |
 | DeepSeek | `DEEPSEEK_API_KEY` | `deepseek` |
 | Google Gemini | `GEMINI_API_KEY` | `google` |
 | Mistral | `MISTRAL_API_KEY` | `mistral` |
@@ -110,6 +111,7 @@ Store credentials in `~/.pi/agent/auth.json`:
 {
   "anthropic": { "type": "api_key", "key": "sk-ant-..." },
   "openai": { "type": "api_key", "key": "sk-..." },
+  "fugu": { "type": "api_key", "key": "$SAKANA_API_KEY" },
   "deepseek": { "type": "api_key", "key": "sk-..." },
   "google": { "type": "api_key", "key": "..." },
   "opencode": { "type": "api_key", "key": "..." },
@@ -123,6 +125,20 @@ Store credentials in `~/.pi/agent/auth.json`:
 ```
 
 The file is created with `0600` permissions (user read/write only). Auth file credentials take priority over environment variables.
+
+#### Fugu
+
+Sakana Fugu uses the OpenAI Responses-compatible Sakana API at `https://api.sakana.ai/v1`.
+
+```bash
+export SAKANA_API_KEY=...           # preferred; matches Sakana's Codex/Fugu setup
+# or export FUGU_API_KEY=...
+# optional: export FUGU_BASE_URL=https://api.sakana.ai
+pi --provider fugu --model fugu
+pi --provider fugu --model fugu-ultra --thinking xhigh
+```
+
+Both `fugu` and `fugu-ultra` support image input and only the `high` and `xhigh` reasoning levels. `FUGU_BASE_URL` is normalized to include `/v1`. Complex `fugu-ultra` tasks may need higher request timeouts.
 
 ### Key Resolution
 
