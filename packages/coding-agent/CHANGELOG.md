@@ -1,5 +1,9 @@
 ## [Unreleased]
 
+### Changed
+
+- Strengthened the adaptive core prompt with tool-first deterministic-work routing, evidence-backed correction handling, and current-information honesty.
+
 ## [0.80.38] - 2026-06-24
 
 ### Added
