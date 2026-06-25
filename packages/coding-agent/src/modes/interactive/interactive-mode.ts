@@ -5541,7 +5541,6 @@ export class InteractiveMode {
 
 	private evaluateAutonomyReview(messages: AgentMessage[]): AutonomyReviewDecision {
 		const settings = this.getEffectiveAutoLearnSettings();
-		const autonomy = this.settingsManager.getAutonomySettings();
 		const state = this.withAutoLearnStateLock((current) => {
 			const pruned = this.pruneAutoLearnHistoryFromState(current);
 			return { result: pruned, next: pruned };
@@ -5612,14 +5611,7 @@ export class InteractiveMode {
 				bypassCooldown: true,
 			};
 		}
-		if (autonomy.mode === "full") {
-			return {
-				...base,
-				shouldRun: true,
-				reason: "full autonomy post-turn review",
-				digest: this.buildAutonomyReviewDigest(messages),
-			};
-		}
+		// Full autonomy expands allowed action scope for triggered reviews; it does not make every turn a review trigger.
 		if (toolCalls >= settings.reflectionMinToolCalls) {
 			return {
 				...base,
