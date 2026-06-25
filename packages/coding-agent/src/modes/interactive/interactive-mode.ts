@@ -226,6 +226,7 @@ const ANTHROPIC_SUBSCRIPTION_AUTH_WARNING =
 const AUTO_LEARN_DEFAULTS = {
 	enabled: false,
 	model: "active",
+	thinkingLevel: "low",
 	longSessionMessages: 32,
 	longSessionContextPercent: 70,
 	cooldownMinutes: 24 * 60,
@@ -282,7 +283,6 @@ const AUTONOMY_AUTO_LEARN_PRESETS = {
 
 const AUTONOMY_MODES: AutonomyMode[] = ["off", "safe", "balanced", "full"];
 const AUTO_LEARN_RESERVATION_MS = 2 * 60 * 1000;
-const AUTO_LEARN_THINKING_LEVEL = "xhigh";
 const AUTO_LEARN_COMPLEX_TASK_TOOL_CALLS = 5;
 export const AUTO_LEARN_HISTORY_RETENTION_MS = 7 * 24 * 60 * 60 * 1000;
 
@@ -4973,6 +4973,7 @@ export class InteractiveMode {
 			reflectionReview: settings.reflectionReview ?? preset.reflectionReview,
 			reflectionMinToolCalls: settings.reflectionMinToolCalls ?? preset.reflectionMinToolCalls,
 			reflectionCooldownMinutes: settings.reflectionCooldownMinutes ?? preset.reflectionCooldownMinutes,
+			thinkingLevel: settings.thinkingLevel ?? preset.thinkingLevel,
 		};
 	}
 
@@ -5377,7 +5378,7 @@ export class InteractiveMode {
 		const args = buildAutoLearnSpawnArgs(spawnTarget, {
 			name: `Auto Learn ${runId}`,
 			modelPattern,
-			thinkingLevel: AUTO_LEARN_THINKING_LEVEL,
+			thinkingLevel: settings.thinkingLevel ?? "low",
 			sessionDir,
 			sessionId,
 			promptPath,

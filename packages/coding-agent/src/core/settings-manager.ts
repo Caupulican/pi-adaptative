@@ -81,9 +81,12 @@ export interface SelfModificationSettings {
 	sourcePaths?: string[]; // Ordered candidate source trees; first existing wins. Enables portable WSL/Termux switching from settings alone.
 }
 
+export type AutoLearnThinkingLevel = "off" | "minimal" | "low" | "medium" | "high" | "xhigh";
+
 export interface AutoLearnSettings {
 	enabled?: boolean; // default: false - autonomously trigger background history scavenging for long sessions
 	model?: string; // "active" or omitted uses the current session model; otherwise a pi --model pattern
+	thinkingLevel?: AutoLearnThinkingLevel; // default: low for background learner subprocesses
 	longSessionMessages?: number; // default: 64
 	longSessionContextPercent?: number; // default: 85
 	cooldownMinutes?: number; // default: 1440 per session tenant (manual /auto-learn run bypasses)
@@ -1584,7 +1587,8 @@ export class SettingsManager {
 	}
 
 	getAutoLearnSettings(): AutoLearnSettings {
-		return { ...(this.settings.autoLearn ?? {}) };
+		const settings = this.settings.autoLearn ?? {};
+		return { ...settings, thinkingLevel: settings.thinkingLevel ?? "low" };
 	}
 
 	setAutoLearnSettings(settings: AutoLearnSettings, scope: SettingsScope = "global"): void {

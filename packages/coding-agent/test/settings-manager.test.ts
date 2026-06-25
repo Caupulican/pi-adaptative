@@ -235,6 +235,7 @@ describe("SettingsManager", () => {
 			manager.setAutoLearnSettings({
 				enabled: true,
 				model: "openai/gpt-5.5",
+				thinkingLevel: "high",
 				reflectionReview: true,
 				reflectionMinToolCalls: 8,
 				reflectionCooldownMinutes: 30,
@@ -245,6 +246,7 @@ describe("SettingsManager", () => {
 			expect(savedSettings.autoLearn).toMatchObject({
 				enabled: true,
 				model: "openai/gpt-5.5",
+				thinkingLevel: "high",
 				reflectionReview: true,
 				reflectionMinToolCalls: 8,
 				reflectionCooldownMinutes: 30,
@@ -312,6 +314,7 @@ describe("SettingsManager", () => {
 			expect(manager.getAutoLearnSettings()).toEqual({
 				enabled: true,
 				model: "openai/gpt-5.4",
+				thinkingLevel: "low",
 				longSessionMessages: 40,
 				cooldownMinutes: 30,
 			});
