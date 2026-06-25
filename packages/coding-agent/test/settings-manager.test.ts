@@ -580,7 +580,17 @@ describe("SettingsManager", () => {
 				resourceProfiles: {
 					"router-managed": {
 						skills: { block: ["*"] },
-						tools: { allow: ["read", "bash", "skill_search", "skill_open"] },
+						tools: {
+							allow: [
+								"read",
+								"bash",
+								"skill_search",
+								"skill_open",
+								"automata_graph_pointer_pack",
+								"skill_router_profile_status",
+								"skill_router_profile_switch",
+							],
+						},
 					},
 				},
 			});
@@ -588,6 +598,9 @@ describe("SettingsManager", () => {
 			expect(manager.isResourceAllowedByProfile("skills", "/tmp/some/SKILL.md")).toBe(false);
 			expect(manager.isResourceAllowedByProfile("tools", "read")).toBe(true);
 			expect(manager.isResourceAllowedByProfile("tools", "skill_search")).toBe(true);
+			expect(manager.isResourceAllowedByProfile("tools", "automata_graph_pointer_pack")).toBe(true);
+			expect(manager.isResourceAllowedByProfile("tools", "skill_router_profile_status")).toBe(true);
+			expect(manager.isResourceAllowedByProfile("tools", "skill_router_profile_switch")).toBe(true);
 			expect(manager.isResourceAllowedByProfile("tools", "write")).toBe(false);
 		});
 
@@ -597,22 +610,50 @@ describe("SettingsManager", () => {
 				resourceProfiles: {
 					"router-managed": {
 						skills: { block: ["*"] },
-						tools: { allow: ["read", "bash", "skill_search", "skill_open"] },
+						tools: { allow: ["read", "bash", "skill_search", "skill_open", "automata_graph_pointer_pack"] },
 					},
 					"router-managed-harness": {
 						skills: { block: ["*"] },
-						tools: { allow: ["read", "bash", "adaptative_agent_status", "learning_status"] },
+						tools: {
+							allow: [
+								"read",
+								"bash",
+								"adaptative_agent_status",
+								"learning_run_auto",
+								"learning_query_memory",
+								"task_steps",
+								"task_background",
+								"task_goal",
+								"run_ledger",
+							],
+						},
 					},
 				},
 			});
 
 			expect(manager.getResourceProfileFilter("skills")).toEqual({ allow: [], block: ["*"] });
 			expect(manager.getResourceProfileFilter("tools")).toEqual({
-				allow: ["read", "bash", "skill_search", "skill_open", "adaptative_agent_status", "learning_status"],
+				allow: [
+					"read",
+					"bash",
+					"skill_search",
+					"skill_open",
+					"automata_graph_pointer_pack",
+					"adaptative_agent_status",
+					"learning_run_auto",
+					"learning_query_memory",
+					"task_steps",
+					"task_background",
+					"task_goal",
+					"run_ledger",
+				],
 				block: [],
 			});
 			expect(manager.isResourceAllowedByProfile("tools", "adaptative_agent_status")).toBe(true);
+			expect(manager.isResourceAllowedByProfile("tools", "task_steps")).toBe(true);
+			expect(manager.isResourceAllowedByProfile("tools", "run_ledger")).toBe(true);
 			expect(manager.isResourceAllowedByProfile("tools", "write")).toBe(false);
+			expect(manager.isResourceAllowedByProfile("tools", "learning_status")).toBe(false);
 		});
 	});
 });
