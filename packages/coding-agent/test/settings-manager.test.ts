@@ -573,5 +573,46 @@ describe("SettingsManager", () => {
 				block: ["bash"],
 			});
 		});
+
+		it("blocks broad skills and restricts tools for router-managed profile", () => {
+			const manager = SettingsManager.inMemory({
+				activeResourceProfiles: ["router-managed"],
+				resourceProfiles: {
+					"router-managed": {
+						skills: { block: ["*"] },
+						tools: { allow: ["read", "bash", "skill_search", "skill_open"] },
+					},
+				},
+			});
+
+			expect(manager.isResourceAllowedByProfile("skills", "/tmp/some/SKILL.md")).toBe(false);
+			expect(manager.isResourceAllowedByProfile("tools", "read")).toBe(true);
+			expect(manager.isResourceAllowedByProfile("tools", "skill_search")).toBe(true);
+			expect(manager.isResourceAllowedByProfile("tools", "write")).toBe(false);
+		});
+
+		it("merges router-managed task profiles deterministically", () => {
+			const manager = SettingsManager.inMemory({
+				activeResourceProfiles: ["router-managed", "router-managed-harness"],
+				resourceProfiles: {
+					"router-managed": {
+						skills: { block: ["*"] },
+						tools: { allow: ["read", "bash", "skill_search", "skill_open"] },
+					},
+					"router-managed-harness": {
+						skills: { block: ["*"] },
+						tools: { allow: ["read", "bash", "adaptative_agent_status", "learning_status"] },
+					},
+				},
+			});
+
+			expect(manager.getResourceProfileFilter("skills")).toEqual({ allow: [], block: ["*"] });
+			expect(manager.getResourceProfileFilter("tools")).toEqual({
+				allow: ["read", "bash", "skill_search", "skill_open", "adaptative_agent_status", "learning_status"],
+				block: [],
+			});
+			expect(manager.isResourceAllowedByProfile("tools", "adaptative_agent_status")).toBe(true);
+			expect(manager.isResourceAllowedByProfile("tools", "write")).toBe(false);
+		});
 	});
 });
