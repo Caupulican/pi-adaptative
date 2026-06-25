@@ -350,15 +350,44 @@ describe("SettingsManager", () => {
 	describe("selfModification", () => {
 		it("should save project scoped selfModification settings", async () => {
 			const settingsPath = join(projectDir, ".pi", "settings.json");
+			const sourcePath = join(testDir, "src", "pi-adaptative");
 			const manager = SettingsManager.create(projectDir, agentDir);
 
-			manager.setSelfModificationSettings({ enabled: true, sourcePath: "/src/pi-adaptative" }, "project");
+			manager.setSelfModificationSettings({ enabled: true, sourcePath }, "project");
 			await manager.flush();
 
 			const savedSettings = JSON.parse(readFileSync(settingsPath, "utf-8"));
 			expect(savedSettings.selfModification).toEqual({
 				enabled: true,
-				sourcePath: "/src/pi-adaptative",
+				sourcePath,
+			});
+		});
+
+		it("should preserve sourcePaths when saving single sourcePath settings", async () => {
+			const settingsPath = join(agentDir, "settings.json");
+			const oldSourcePath = join(testDir, "src", "old");
+			const nextSourcePath = join(testDir, "src", "pi-adaptative");
+			const sourcePaths = [join(testDir, "src", "one"), join(testDir, "src", "two")];
+			writeFileSync(
+				settingsPath,
+				JSON.stringify({
+					selfModification: {
+						enabled: true,
+						sourcePath: oldSourcePath,
+						sourcePaths,
+					},
+				}),
+			);
+			const manager = SettingsManager.create(projectDir, agentDir);
+
+			manager.setSelfModificationSettings({ enabled: false, sourcePath: nextSourcePath });
+			await manager.flush();
+
+			const savedSettings = JSON.parse(readFileSync(settingsPath, "utf-8"));
+			expect(savedSettings.selfModification).toEqual({
+				enabled: false,
+				sourcePath: nextSourcePath,
+				sourcePaths,
 			});
 		});
 	});

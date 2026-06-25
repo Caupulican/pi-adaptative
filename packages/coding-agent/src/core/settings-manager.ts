@@ -1543,13 +1543,23 @@ export class SettingsManager {
 	setSelfModificationSettings(settings: SelfModificationSettings, scope: SettingsScope = "global"): void {
 		if (scope === "project") {
 			const projectSettings = structuredClone(this.projectSettings);
-			projectSettings.selfModification = { ...settings };
+			const existing = projectSettings.selfModification;
+			projectSettings.selfModification = {
+				...existing,
+				...settings,
+				sourcePaths: settings.sourcePaths ?? existing?.sourcePaths,
+			};
 			this.markProjectModified("selfModification");
 			this.saveProjectSettings(projectSettings);
 			return;
 		}
 
-		this.globalSettings.selfModification = { ...settings };
+		const existing = this.globalSettings.selfModification;
+		this.globalSettings.selfModification = {
+			...existing,
+			...settings,
+			sourcePaths: settings.sourcePaths ?? existing?.sourcePaths,
+		};
 		this.markModified("selfModification");
 		this.save();
 	}

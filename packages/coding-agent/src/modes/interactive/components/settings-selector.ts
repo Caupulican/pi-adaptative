@@ -168,7 +168,11 @@ export interface SettingsConfig {
 	clearOnShrink: boolean;
 	showTerminalProgress: boolean;
 	warnings: WarningSettings;
-	selfModification: { enabled: boolean; sourcePath?: string };
+	selfModification: {
+		enabled: boolean;
+		sourcePath?: string;
+		sourcePaths?: string[];
+	};
 	selfModificationScope?: SettingsScope;
 	autonomy: AutonomySettings;
 	autonomyScope?: SettingsScope;
