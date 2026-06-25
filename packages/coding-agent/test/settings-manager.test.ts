@@ -317,6 +317,7 @@ describe("SettingsManager", () => {
 				thinkingLevel: "low",
 				longSessionMessages: 40,
 				cooldownMinutes: 30,
+				complexTaskToolCalls: 12,
 			});
 		});
 
@@ -583,13 +584,14 @@ describe("SettingsManager", () => {
 				resourceProfiles: {
 					"router-managed": {
 						skills: { block: ["*"] },
+						agents: { block: ["*"] },
+						prompts: { block: ["*"] },
 						tools: {
 							allow: [
 								"read",
 								"bash",
 								"skill_search",
 								"skill_open",
-								"automata_graph_pointer_pack",
 								"skill_router_profile_status",
 								"skill_router_profile_switch",
 							],
@@ -599,9 +601,11 @@ describe("SettingsManager", () => {
 			});
 
 			expect(manager.isResourceAllowedByProfile("skills", "/tmp/some/SKILL.md")).toBe(false);
+			expect(manager.isResourceAllowedByProfile("agents", "some-agent")).toBe(false);
+			expect(manager.isResourceAllowedByProfile("prompts", "some-prompt")).toBe(false);
 			expect(manager.isResourceAllowedByProfile("tools", "read")).toBe(true);
 			expect(manager.isResourceAllowedByProfile("tools", "skill_search")).toBe(true);
-			expect(manager.isResourceAllowedByProfile("tools", "automata_graph_pointer_pack")).toBe(true);
+			expect(manager.isResourceAllowedByProfile("tools", "automata_graph_pointer_pack")).toBe(false);
 			expect(manager.isResourceAllowedByProfile("tools", "skill_router_profile_status")).toBe(true);
 			expect(manager.isResourceAllowedByProfile("tools", "skill_router_profile_switch")).toBe(true);
 			expect(manager.isResourceAllowedByProfile("tools", "write")).toBe(false);
@@ -613,7 +617,7 @@ describe("SettingsManager", () => {
 				resourceProfiles: {
 					"router-managed": {
 						skills: { block: ["*"] },
-						tools: { allow: ["read", "bash", "skill_search", "skill_open", "automata_graph_pointer_pack"] },
+						tools: { allow: ["read", "bash", "skill_search", "skill_open"] },
 					},
 					"router-managed-harness": {
 						skills: { block: ["*"] },
@@ -622,6 +626,7 @@ describe("SettingsManager", () => {
 								"read",
 								"bash",
 								"adaptative_agent_status",
+								"automata_graph_pointer_pack",
 								"learning_run_auto",
 								"learning_query_memory",
 								"task_steps",
@@ -641,8 +646,8 @@ describe("SettingsManager", () => {
 					"bash",
 					"skill_search",
 					"skill_open",
-					"automata_graph_pointer_pack",
 					"adaptative_agent_status",
+					"automata_graph_pointer_pack",
 					"learning_run_auto",
 					"learning_query_memory",
 					"task_steps",

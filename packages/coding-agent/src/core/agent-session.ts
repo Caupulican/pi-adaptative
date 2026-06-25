@@ -1060,12 +1060,10 @@ export class AgentSession {
 		return Array.from(unique);
 	}
 
-	private _buildSelfModificationPrompt(): string {
+	private _buildSelfModificationPrompt(): string | undefined {
 		const settings = this.settingsManager.getSelfModificationSettings();
 		if (!settings.enabled) {
-			return `Pi self-modification guardrails (local setting inactive):
-- Do not modify Pi core, the installed Pi runtime, or pi-adaptative harness source for self-evolution.
-- If self-modification is needed, ask the user to enable \`selfModification.enabled\` and set \`selfModification.sourcePaths\` (or legacy \`selfModification.sourcePath\`) to the pi-adaptative source checkout.`;
+			return undefined;
 		}
 
 		// Resolve from an ordered candidate list first (portable WSL/Termux switching
@@ -1111,7 +1109,7 @@ export class AgentSession {
 	private _buildAutonomyPrompt(): string | undefined {
 		const autoLearn = this.settingsManager.getAutoLearnSettings();
 		const autonomy = this.settingsManager.getAutonomySettings();
-		if (!autoLearn.enabled && autonomy.mode === "off") {
+		if (!autoLearn.enabled && autonomy.mode !== "full") {
 			return undefined;
 		}
 

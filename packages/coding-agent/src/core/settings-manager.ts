@@ -94,8 +94,9 @@ export interface AutoLearnSettings {
 	maxConcurrentLearners?: number; // default: 2 per session tenant
 	applyHighConfidence?: boolean; // default: false unless the learning extension config opts in
 	reflectionReview?: boolean; // default: true when Auto Learn is enabled - post-turn review after corrective/complex turns
-	reflectionMinToolCalls?: number; // default: 8 tool calls in a turn before reflection review triggers
+	reflectionMinToolCalls?: number; // default: 12 tool calls in a turn before reflection review triggers
 	reflectionCooldownMinutes?: number; // default: 1440 per session tenant for reflection reviews
+	complexTaskToolCalls?: number; // default: 12 tool calls before bypassing reflection cooldown as a complex task
 }
 
 export type AutonomyMode = "off" | "safe" | "balanced" | "full";
@@ -1123,20 +1124,35 @@ export class SettingsManager {
 	} {
 		return {
 			enabled: this.settings.contextGc?.enabled ?? true,
-			preserveRecentMessages: this.settings.contextGc?.preserveRecentMessages ?? 12,
-			minToolResultChars: this.settings.contextGc?.minToolResultChars ?? 2500,
+			preserveRecentMessages: this.settings.contextGc?.preserveRecentMessages ?? 8,
+			minToolResultChars: this.settings.contextGc?.minToolResultChars ?? 1200,
 			tools: this.settings.contextGc?.tools ?? [
 				"read",
 				"bash",
 				"rg",
 				"grep",
+				"find",
+				"ls",
+				"skill_open",
+				"automata_graph_status",
+				"automata_graph_search",
+				"automata_graph_query",
+				"automata_graph_neighbors",
+				"automata_graph_path",
+				"automata_graph_pointer_pack",
+				"learning_query_memory",
+				"subagent",
+				"task_steps",
+				"task_background",
+				"task_goal",
+				"run_ledger",
 				"context_headroom_retrieve",
 				"headroom_retrieve",
 			],
 			semanticMemory: {
 				enabled: this.settings.contextGc?.semanticMemory?.enabled ?? true,
-				preserveRecentPages: this.settings.contextGc?.semanticMemory?.preserveRecentPages ?? 2,
-				minChars: this.settings.contextGc?.semanticMemory?.minChars ?? 1200,
+				preserveRecentPages: this.settings.contextGc?.semanticMemory?.preserveRecentPages ?? 1,
+				minChars: this.settings.contextGc?.semanticMemory?.minChars ?? 900,
 				markers: this.settings.contextGc?.semanticMemory?.markers ?? [
 					"<automata_context",
 					"<automata_response",
@@ -1588,7 +1604,11 @@ export class SettingsManager {
 
 	getAutoLearnSettings(): AutoLearnSettings {
 		const settings = this.settings.autoLearn ?? {};
-		return { ...settings, thinkingLevel: settings.thinkingLevel ?? "low" };
+		return {
+			...settings,
+			thinkingLevel: settings.thinkingLevel ?? "low",
+			complexTaskToolCalls: settings.complexTaskToolCalls ?? 12,
+		};
 	}
 
 	setAutoLearnSettings(settings: AutoLearnSettings, scope: SettingsScope = "global"): void {

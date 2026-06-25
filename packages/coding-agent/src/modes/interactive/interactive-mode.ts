@@ -234,37 +234,40 @@ const AUTO_LEARN_DEFAULTS = {
 	maxConcurrentLearners: 1,
 	applyHighConfidence: false,
 	reflectionReview: true,
-	reflectionMinToolCalls: 5,
+	reflectionMinToolCalls: 12,
 	reflectionCooldownMinutes: 24 * 60,
+	complexTaskToolCalls: 12,
 } as const satisfies Required<AutoLearnSettings>;
 
 const AUTONOMY_AUTO_LEARN_PRESETS = {
 	off: { ...AUTO_LEARN_DEFAULTS, enabled: false, reflectionReview: false },
 	safe: {
 		...AUTO_LEARN_DEFAULTS,
-		enabled: true,
+		enabled: false,
 		longSessionMessages: 64,
 		longSessionContextPercent: 85,
 		cooldownMinutes: 24 * 60,
 		leaseMinutes: 60,
 		maxConcurrentLearners: 1,
 		applyHighConfidence: false,
-		reflectionReview: true,
-		reflectionMinToolCalls: 5,
+		reflectionReview: false,
+		reflectionMinToolCalls: 12,
 		reflectionCooldownMinutes: 24 * 60,
+		complexTaskToolCalls: 12,
 	},
 	balanced: {
 		...AUTO_LEARN_DEFAULTS,
-		enabled: true,
+		enabled: false,
 		longSessionMessages: 64,
 		longSessionContextPercent: 85,
 		cooldownMinutes: 24 * 60,
 		leaseMinutes: 90,
 		maxConcurrentLearners: 1,
 		applyHighConfidence: false,
-		reflectionReview: true,
-		reflectionMinToolCalls: 5,
+		reflectionReview: false,
+		reflectionMinToolCalls: 12,
 		reflectionCooldownMinutes: 24 * 60,
+		complexTaskToolCalls: 12,
 	},
 	full: {
 		...AUTO_LEARN_DEFAULTS,
@@ -276,14 +279,14 @@ const AUTONOMY_AUTO_LEARN_PRESETS = {
 		maxConcurrentLearners: 1,
 		applyHighConfidence: true,
 		reflectionReview: true,
-		reflectionMinToolCalls: 5,
+		reflectionMinToolCalls: 12,
 		reflectionCooldownMinutes: 24 * 60,
+		complexTaskToolCalls: 12,
 	},
 } as const satisfies Record<AutonomyMode, Required<AutoLearnSettings>>;
 
 const AUTONOMY_MODES: AutonomyMode[] = ["off", "safe", "balanced", "full"];
 const AUTO_LEARN_RESERVATION_MS = 2 * 60 * 1000;
-const AUTO_LEARN_COMPLEX_TASK_TOOL_CALLS = 5;
 export const AUTO_LEARN_HISTORY_RETENTION_MS = 7 * 24 * 60 * 60 * 1000;
 
 export interface AutoLearnHistoryPruneResult {
@@ -4973,6 +4976,7 @@ export class InteractiveMode {
 			reflectionReview: settings.reflectionReview ?? preset.reflectionReview,
 			reflectionMinToolCalls: settings.reflectionMinToolCalls ?? preset.reflectionMinToolCalls,
 			reflectionCooldownMinutes: settings.reflectionCooldownMinutes ?? preset.reflectionCooldownMinutes,
+			complexTaskToolCalls: settings.complexTaskToolCalls ?? preset.complexTaskToolCalls,
 			thinkingLevel: settings.thinkingLevel ?? preset.thinkingLevel,
 		};
 	}
@@ -5215,7 +5219,7 @@ export class InteractiveMode {
 			options.kind === "reflection"
 				? "review the latest completed turn for durable memory, skill, validation, tooling, and code-baked self-improvement cues, then run one bounded continuous-learning pass if the learning tools are available"
 				: "run one bounded continuous-learning pass for this Pi tenant";
-		return `You are Pi Auto Learn running as a background learner.\n\nObjective: ${objective}.\nTrigger: ${reason}.\n\n${authorityBlock}\n\nRequired workflow:\n1. Query existing durable memory/rules first when tools allow it. Memory confrontation is mandatory before accepting, merging, upgrading, or rejecting learning candidates.\n2. Run the available Auto Learn tooling, preferably learning_run_auto, with applyHighConfidence=${settings.applyHighConfidence}. Process candidate validation in vectorized chunks/batches; avoid scalar per-candidate memory queries except for final selected writes.\n3. Apply the learning validation tree to each candidate chunk: (a) Why is this good for the user? (b) Is it unique, or similar to existing memory/skills/agents so it should merge or upgrade existing knowledge? (c) Will this make Pi a better agent? Candidates that cannot answer all three are noise.\n4. Hermes-style learning cycle: after a complex task (${AUTO_LEARN_COMPLEX_TASK_TOOL_CALLS}+ tool calls), user correction, repeated steering pattern, non-trivial fix/workaround/debugging path, loaded-skill defect, trigger gap, tool gap, or harness workflow defect, actively create or update durable learning artifacts. Memory stores compact facts/preferences/state; skills/prompts/agents/extensions/source store procedural behavior. When a lesson changes how Pi should act on a future class of task, memory alone is not completion.\n5. Skill update preference order: (1) patch the currently loaded or consulted skill that governed the task; (2) patch an existing class-level umbrella skill/agent/prompt; (3) add a support file under references/, templates/, or scripts/ and add a SKILL.md pointer; (4) create a new class-level umbrella skill only when no existing artifact fits. Never create one-off PR/error/codename/session skills.\n6. Behavioral self-improvement is code-baked by default: prefer the lowest durable executable layer that fixes the behavior — patch an existing skill/prompt/agent/extension/tool, tune an approved setting, or edit the authorized Pi source when source authority is available. Use Automata only for concise facts/evidence pointers that support the baked change.\n7. Do not harden transient or environment-dependent failures into durable behavior: missing binaries, fresh-install package gaps, credentials not configured, path mismatches, one-off task narratives, or negative tool-broken claims should become setup/troubleshooting fixes only when the fix itself is reusable.\n8. Treat the latest-turn digest as current-session evidence only; do not auto-commit one-off cues unless deterministic tooling and memory confrontation corroborate them.\n9. In mode=full, apply safe memory/skill/user-extension/authorized-source improvements under the standing grant above; otherwise keep them proposal-gated.\n10. Never cross hard-stop boundaries from the authority policy.\n11. If the learning tools are unavailable, report BLOCKED with the missing tool names and do not improvise.\n12. Finish with PASS, BLOCKED, or FAIL and concise evidence, including chunk counts, merge/upgrade/code-bake decisions, changed paths/settings, validation, and cleanup/purge status.${reflectionBlock}`;
+		return `You are Pi Auto Learn running as a background learner.\n\nObjective: ${objective}.\nTrigger: ${reason}.\n\n${authorityBlock}\n\nRequired workflow:\n1. Query existing durable memory/rules first when tools allow it. Memory confrontation is mandatory before accepting, merging, upgrading, or rejecting learning candidates.\n2. Run the available Auto Learn tooling, preferably learning_run_auto, with applyHighConfidence=${settings.applyHighConfidence}. Process candidate validation in vectorized chunks/batches; avoid scalar per-candidate memory queries except for final selected writes.\n3. Apply the learning validation tree to each candidate chunk: (a) Why is this good for the user? (b) Is it unique, or similar to existing memory/skills/agents so it should merge or upgrade existing knowledge? (c) Will this make Pi a better agent? Candidates that cannot answer all three are noise.\n4. Hermes-style learning cycle: after a complex task (${settings.complexTaskToolCalls}+ tool calls), user correction, repeated steering pattern, non-trivial fix/workaround/debugging path, loaded-skill defect, trigger gap, tool gap, or harness workflow defect, actively create or update durable learning artifacts. Memory stores compact facts/preferences/state; skills/prompts/agents/extensions/source store procedural behavior. When a lesson changes how Pi should act on a future class of task, memory alone is not completion.\n5. Skill update preference order: (1) patch the currently loaded or consulted skill that governed the task; (2) patch an existing class-level umbrella skill/agent/prompt; (3) add a support file under references/, templates/, or scripts/ and add a SKILL.md pointer; (4) create a new class-level umbrella skill only when no existing artifact fits. Never create one-off PR/error/codename/session skills.\n6. Behavioral self-improvement is code-baked by default: prefer the lowest durable executable layer that fixes the behavior — patch an existing skill/prompt/agent/extension/tool, tune an approved setting, or edit the authorized Pi source when source authority is available. Use Automata only for concise facts/evidence pointers that support the baked change.\n7. Do not harden transient or environment-dependent failures into durable behavior: missing binaries, fresh-install package gaps, credentials not configured, path mismatches, one-off task narratives, or negative tool-broken claims should become setup/troubleshooting fixes only when the fix itself is reusable.\n8. Treat the latest-turn digest as current-session evidence only; do not auto-commit one-off cues unless deterministic tooling and memory confrontation corroborate them.\n9. In mode=full, apply safe memory/skill/user-extension/authorized-source improvements under the standing grant above; otherwise keep them proposal-gated.\n10. Never cross hard-stop boundaries from the authority policy.\n11. If the learning tools are unavailable, report BLOCKED with the missing tool names and do not improvise.\n12. Finish with PASS, BLOCKED, or FAIL and concise evidence, including chunk counts, merge/upgrade/code-bake decisions, changed paths/settings, validation, and cleanup/purge status.${reflectionBlock}`;
 	}
 
 	private reserveAutoLearnRun(params: {
@@ -5570,7 +5574,8 @@ export class InteractiveMode {
 			/\b(improve|automatic(?:ally)?|autonomous|trigger|fire|skill|steer|self[- ]?improv(?:e|ement|ing)?|code[- ]?bak(?:e|ed)|bake(?:d)?|too much|less)\b/i.test(
 				userText,
 			);
-		const complexTaskSignal = toolCalls >= AUTO_LEARN_COMPLEX_TASK_TOOL_CALLS;
+		const complexTaskThreshold = Math.max(1, settings.complexTaskToolCalls ?? 12);
+		const complexTaskSignal = toolCalls >= complexTaskThreshold;
 		const bypassCooldown = correctionSignal || behavioralSelfImprovementSignal || complexTaskSignal;
 		const base = { messageCount, contextPercent, cooldownRemainingMs, runningCount, toolCalls };
 		if (!settings.enabled) return { ...base, shouldRun: false, reason: "disabled" };
@@ -5607,7 +5612,7 @@ export class InteractiveMode {
 			return {
 				...base,
 				shouldRun: true,
-				reason: `reflection complex task learning signal (${toolCalls}/${AUTO_LEARN_COMPLEX_TASK_TOOL_CALLS} tool calls)`,
+				reason: `reflection complex task learning signal (${toolCalls}/${complexTaskThreshold} tool calls)`,
 				digest: this.buildAutonomyReviewDigest(messages),
 				bypassCooldown: true,
 			};

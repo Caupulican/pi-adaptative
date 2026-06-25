@@ -68,8 +68,8 @@ export interface ContextGcResult {
 
 const DEFAULT_SEMANTIC_MEMORY_GC_SETTINGS: Required<SemanticMemoryGcSettings> = {
 	enabled: true,
-	preserveRecentPages: 2,
-	minChars: 1200,
+	preserveRecentPages: 1,
+	minChars: 900,
 	markers: [
 		"<automata_context",
 		"<automata_response",
@@ -85,9 +85,31 @@ const DEFAULT_SEMANTIC_MEMORY_GC_SETTINGS: Required<SemanticMemoryGcSettings> = 
 
 export const DEFAULT_CONTEXT_GC_SETTINGS: NormalizedContextGcSettings = {
 	enabled: true,
-	preserveRecentMessages: 12,
-	minToolResultChars: 2500,
-	tools: ["read", "bash", "rg", "grep", "context_headroom_retrieve", "headroom_retrieve"],
+	preserveRecentMessages: 8,
+	minToolResultChars: 1200,
+	tools: [
+		"read",
+		"bash",
+		"rg",
+		"grep",
+		"find",
+		"ls",
+		"skill_open",
+		"automata_graph_status",
+		"automata_graph_search",
+		"automata_graph_query",
+		"automata_graph_neighbors",
+		"automata_graph_path",
+		"automata_graph_pointer_pack",
+		"learning_query_memory",
+		"subagent",
+		"task_steps",
+		"task_background",
+		"task_goal",
+		"run_ledger",
+		"context_headroom_retrieve",
+		"headroom_retrieve",
+	],
 	semanticMemory: DEFAULT_SEMANTIC_MEMORY_GC_SETTINGS,
 };
 
