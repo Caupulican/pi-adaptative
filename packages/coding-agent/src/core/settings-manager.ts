@@ -1,13 +1,15 @@
 import type { Transport } from "@caupulican/pi-ai";
 import { createHash } from "crypto";
-import { existsSync, mkdirSync, readFileSync, statSync, writeFileSync } from "fs";
+import { existsSync, mkdirSync, readFileSync, rmSync, statSync, writeFileSync } from "fs";
 import { minimatch } from "minimatch";
 import { basename, dirname, join, relative, resolve, sep } from "path";
 import lockfile from "proper-lockfile";
-import { CONFIG_DIR_NAME, getAgentDir } from "../config.ts";
+import { CONFIG_DIR_NAME, getAgentDir, getProfilesDir } from "../config.ts";
 import { normalizePath, resolvePath } from "../utils/paths.ts";
 import { DEFAULT_HTTP_IDLE_TIMEOUT_MS, parseHttpIdleTimeoutMs } from "./http-dispatcher.ts";
+import { ProfileRegistry } from "./profile-registry.ts";
 import { mergeResourceProfileMap } from "./resource-profile-blocks.ts";
+import { validateSkillName } from "./skills.ts";
 
 export interface CompactionSettings {
 	enabled?: boolean; // default: true
@@ -326,18 +328,6 @@ function collectLegacyDisabledFilterFromSettings(
 	return Array.isArray(legacyDisabled) ? { block: legacyDisabled } : {};
 }
 
-function collectNamedResourceProfileFilters(
-	settings: Settings,
-	kind: ResourceProfileKind,
-	profileNames: string[],
-): ResourceProfileFilterSettings {
-	const result: ResourceProfileFilterSettings = {};
-	for (const profileName of profileNames) {
-		appendFilter(result, settings.resourceProfiles?.[profileName]?.[kind]);
-	}
-	return result;
-}
-
 function mergeResourceProfileFilters(...filters: ResourceProfileFilterSettings[]): ResourceProfileFilterSettings {
 	const result: ResourceProfileFilterSettings = {};
 	for (const filter of filters) appendFilter(result, filter);
@@ -355,8 +345,74 @@ function parseTimeoutSetting(value: unknown, settingName: string): number | unde
 	return undefined;
 }
 
-export type SettingsScope = "global" | "project";
-export type SettingsErrorScope = SettingsScope | "directoryProfile";
+export type ThinkingLevel = "off" | "minimal" | "low" | "medium" | "high" | "xhigh";
+
+export interface ProfileDefinitionInput {
+	name?: string;
+	description?: string;
+	model?: string;
+	thinking?: ThinkingLevel;
+	resources: ResourceProfileSettings;
+}
+
+export type ProfilePersistenceScope = "session" | "directory" | "project" | "global" | "reusable-file";
+
+const VALID_THINKING_LEVELS = ["off", "minimal", "low", "medium", "high", "xhigh"] as const;
+function isThinkingLevel(value: unknown): value is ThinkingLevel {
+	return typeof value === "string" && VALID_THINKING_LEVELS.includes(value as ThinkingLevel);
+}
+
+function asStringArrayWithPattern(value: unknown): string[] | undefined {
+	if (!Array.isArray(value)) return undefined;
+	const values = value.filter((item): item is string => typeof item === "string" && item.trim().length > 0);
+	return values.length > 0 ? values : undefined;
+}
+
+function normalizeProfileFilterResource(value: unknown): ResourceProfileFilterSettings {
+	if (!value || typeof value !== "object" || Array.isArray(value)) {
+		throw new Error("resource profile filter must be an object");
+	}
+	const filter = value as Record<string, unknown>;
+	return {
+		allow: asStringArrayWithPattern(filter.allow),
+		block: asStringArrayWithPattern(filter.block),
+	};
+}
+
+function normalizeProfileResources(value: unknown): ResourceProfileSettings {
+	if (!value || typeof value !== "object" || Array.isArray(value)) {
+		throw new Error("resources must be an object");
+	}
+	const input = value as Record<string, unknown>;
+	const result: ResourceProfileSettings = {};
+	for (const kind of ["extensions", "skills", "prompts", "themes", "agents", "tools"] as const) {
+		if (input[kind] === undefined) continue;
+		result[kind] = normalizeProfileFilterResource(input[kind]);
+	}
+	return result;
+}
+
+function parseProfileFileDefinition(content: string): ProfileDefinitionInput {
+	const parsed = JSON.parse(content) as Record<string, unknown>;
+	if (!parsed || typeof parsed !== "object" || Array.isArray(parsed)) {
+		throw new Error("profile file must contain a JSON object");
+	}
+	const name = typeof parsed.name === "string" ? parsed.name.trim() : undefined;
+	if (!name) {
+		throw new Error("profile name is required");
+	}
+	const resourceSection = parsed.resources ?? {};
+	return {
+		name,
+		description: typeof parsed.description === "string" ? parsed.description.trim() || undefined : undefined,
+		model: typeof parsed.model === "string" ? parsed.model.trim() || undefined : undefined,
+		thinking: isThinkingLevel(parsed.thinking) ? parsed.thinking : undefined,
+		resources: normalizeProfileResources(resourceSection),
+	};
+}
+
+export type SettingsScope = "global" | "project" | "directoryProfile";
+export type SettingsErrorScope = SettingsScope;
 
 export interface SettingsManagerCreateOptions {
 	projectTrusted?: boolean;
@@ -364,6 +420,7 @@ export interface SettingsManagerCreateOptions {
 
 export interface SettingsStorage {
 	withLock(scope: SettingsScope, fn: (current: string | undefined) => string | undefined): void;
+	getProfilesDir?(): string;
 }
 
 export interface SettingsError {
@@ -375,6 +432,7 @@ export class FileSettingsStorage implements SettingsStorage {
 	private globalSettingsPath: string;
 	private projectSettingsPath: string;
 	private directoryProfileInfo: DirectoryResourceProfileInfo;
+	private profilesDir: string;
 
 	constructor(cwd: string, agentDir: string) {
 		const resolvedCwd = resolvePath(cwd);
@@ -382,10 +440,15 @@ export class FileSettingsStorage implements SettingsStorage {
 		this.globalSettingsPath = join(resolvedAgentDir, "settings.json");
 		this.projectSettingsPath = join(resolvedCwd, CONFIG_DIR_NAME, "settings.json");
 		this.directoryProfileInfo = getDirectoryResourceProfileInfo(resolvedCwd, resolvedAgentDir);
+		this.profilesDir = getProfilesDir(resolvedAgentDir);
 	}
 
 	getDirectoryResourceProfileInfo(): DirectoryResourceProfileInfo {
 		return { ...this.directoryProfileInfo };
+	}
+
+	getProfilesDir(): string {
+		return this.profilesDir;
 	}
 
 	readDirectoryResourceProfile(): string | undefined {
@@ -421,7 +484,12 @@ export class FileSettingsStorage implements SettingsStorage {
 	}
 
 	withLock(scope: SettingsScope, fn: (current: string | undefined) => string | undefined): void {
-		const path = scope === "global" ? this.globalSettingsPath : this.projectSettingsPath;
+		const path =
+			scope === "global"
+				? this.globalSettingsPath
+				: scope === "project"
+					? this.projectSettingsPath
+					: this.directoryProfileInfo.path;
 		const dir = dirname(path);
 
 		let release: (() => void) | undefined;
@@ -454,17 +522,23 @@ export class FileSettingsStorage implements SettingsStorage {
 export class InMemorySettingsStorage implements SettingsStorage {
 	private global: string | undefined;
 	private project: string | undefined;
+	private directoryProfile: string | undefined;
 
 	withLock(scope: SettingsScope, fn: (current: string | undefined) => string | undefined): void {
-		const current = scope === "global" ? this.global : this.project;
+		const current = scope === "global" ? this.global : scope === "project" ? this.project : this.directoryProfile;
 		const next = fn(current);
-		if (next !== undefined) {
-			if (scope === "global") {
-				this.global = next;
-			} else {
-				this.project = next;
-			}
+		if (next === undefined) {
+			return;
 		}
+		if (scope === "global") {
+			this.global = next;
+			return;
+		}
+		if (scope === "project") {
+			this.project = next;
+			return;
+		}
+		this.directoryProfile = next;
 	}
 }
 
@@ -485,6 +559,7 @@ export class SettingsManager {
 	private globalSettingsLoadError: Error | null = null; // Track if global settings file had parse errors
 	private projectSettingsLoadError: Error | null = null; // Track if project settings file had parse errors
 	private directoryProfileInfo: DirectoryResourceProfileInfo | null = null;
+	private profileRegistry!: ProfileRegistry;
 	private writeQueue: Promise<void> = Promise.resolve();
 	private errors: SettingsError[];
 
@@ -509,6 +584,53 @@ export class SettingsManager {
 		this.directoryProfileInfo = directoryProfileInfo;
 		this.errors = [...initialErrors];
 		this.settings = this.mergeEffectiveSettings();
+		this.refreshProfileRegistry();
+	}
+
+	private createProfileRegistry(): ProfileRegistry {
+		return new ProfileRegistry({
+			globalSettings: this.globalSettings,
+			projectSettings: this.projectSettings,
+			directoryProfileSettings: this.directoryProfileSettings,
+			inlineResourceProfileDefinitions: this.inlineResourceProfileDefinitions,
+			discoveredResourceProfileDefinitions: this.discoveredResourceProfileDefinitions,
+			profilesDir: this.storage.getProfilesDir?.(),
+		});
+	}
+
+	private profileDiagnosticKeys = new Set<string>();
+	private reportProfileDiagnostic(scope: SettingsErrorScope, message: string): void {
+		const key = `${scope}:${message}`;
+		if (this.profileDiagnosticKeys.has(key)) {
+			return;
+		}
+		this.profileDiagnosticKeys.add(key);
+		this.errors.push({ scope, error: new Error(message) });
+	}
+
+	private getActiveProfileNamesForDiagnostics(): string[] {
+		const explicitProfiles =
+			this.settings.activeResourceProfiles && this.settings.activeResourceProfiles.length > 0
+				? this.settings.activeResourceProfiles
+				: this.settings.activeResourceProfile
+					? [this.settings.activeResourceProfile]
+					: [];
+		return normalizeResourceProfileNames(explicitProfiles);
+	}
+
+	private refreshProfileRegistry(): void {
+		this.profileDiagnosticKeys.clear();
+		this.profileRegistry = this.createProfileRegistry();
+		const registryDiagnostics = this.profileRegistry.listDiagnostics();
+		for (const diagnostic of registryDiagnostics) {
+			const path = diagnostic.path ? ` (${diagnostic.path})` : "";
+			this.reportProfileDiagnostic("global", `Profile diagnostic${path}: ${diagnostic.message}`);
+		}
+		for (const profileName of this.getActiveProfileNamesForDiagnostics()) {
+			if (!this.profileRegistry.getProfile(profileName)) {
+				this.reportProfileDiagnostic("global", `Active profile not found: ${profileName}`);
+			}
+		}
 	}
 
 	private mergeEffectiveSettings(): Settings {
@@ -522,6 +644,7 @@ export class SettingsManager {
 
 	private recomputeSettings(): void {
 		this.settings = this.mergeEffectiveSettings();
+		this.refreshProfileRegistry();
 	}
 
 	/** Create a SettingsManager that loads from files */
@@ -699,6 +822,11 @@ export class SettingsManager {
 		return this.directoryProfileInfo ? { ...this.directoryProfileInfo } : null;
 	}
 
+	getProfileRegistry(): ProfileRegistry {
+		this.refreshProfileRegistry();
+		return this.profileRegistry;
+	}
+
 	getActiveResourceProfileNames(): string[] {
 		if (this.runtimeResourceProfiles && this.runtimeResourceProfiles.length > 0) {
 			return [...this.runtimeResourceProfiles];
@@ -712,22 +840,14 @@ export class SettingsManager {
 			collectLegacyDisabledFilterFromSettings(this.projectSettings, kind),
 			collectLegacyDisabledFilterFromSettings(this.directoryProfileSettings, kind),
 		);
-		const activeProfiles = this.getActiveResourceProfileNames();
-		const profileFilter = mergeResourceProfileFilters(
-			collectNamedResourceProfileFilters(this.globalSettings, kind, activeProfiles),
-			collectNamedResourceProfileFilters(this.projectSettings, kind, activeProfiles),
-			collectNamedResourceProfileFilters(this.directoryProfileSettings, kind, activeProfiles),
-			collectNamedResourceProfileFilters(
-				{ resourceProfiles: this.inlineResourceProfileDefinitions },
-				kind,
-				activeProfiles,
-			),
-			collectNamedResourceProfileFilters(
-				{ resourceProfiles: this.discoveredResourceProfileDefinitions },
-				kind,
-				activeProfiles,
-			),
-		);
+		const profileFilter: ResourceProfileFilterSettings = {};
+		const seenProfiles = new Set<string>();
+		const registry = this.getProfileRegistry();
+		for (const profileName of this.getActiveResourceProfileNames()) {
+			if (seenProfiles.has(profileName)) continue;
+			seenProfiles.add(profileName);
+			appendFilter(profileFilter, registry.getProfile(profileName)?.resources[kind]);
+		}
 		const filter = mergeResourceProfileFilters(legacyFilter, profileFilter);
 		return {
 			allow: [...new Set(filter.allow ?? [])],
@@ -825,11 +945,13 @@ export class SettingsManager {
 	/** Add one-shot profile definitions from CLI/SDK/ephemeral agent launch input. Never writes to disk. */
 	addInlineResourceProfileDefinitions(profiles: Record<string, ResourceProfileSettings>): void {
 		this.inlineResourceProfileDefinitions = mergeResourceProfileMap(this.inlineResourceProfileDefinitions, profiles);
+		this.refreshProfileRegistry();
 	}
 
 	/** Replace profile definitions discovered inside loaded resource files. Never writes to disk. */
 	replaceDiscoveredResourceProfileDefinitions(profiles: Record<string, ResourceProfileSettings>): void {
 		this.discoveredResourceProfileDefinitions = { ...profiles };
+		this.refreshProfileRegistry();
 	}
 
 	/** Add profile definitions discovered after resource resolution, e.g. context agent files. Never writes to disk. */
@@ -838,6 +960,417 @@ export class SettingsManager {
 			this.discoveredResourceProfileDefinitions,
 			profiles,
 		);
+		this.refreshProfileRegistry();
+	}
+
+	private normalizeProfileName(profileName: string): string {
+		const trimmed = profileName.trim();
+		if (!trimmed) {
+			throw new Error("Profile name is required");
+		}
+		const errors = validateSkillName(trimmed);
+		if (errors.length > 0) {
+			throw new Error(`Invalid profile name "${trimmed}": ${errors.join(", ")}`);
+		}
+		return trimmed;
+	}
+
+	private sanitizeProfileResources(resources: ResourceProfileSettings): ResourceProfileSettings {
+		const result: ResourceProfileSettings = {};
+		for (const kind of ["extensions", "skills", "prompts", "themes", "agents", "tools"] as const) {
+			const filter = resources[kind];
+			if (!filter) {
+				continue;
+			}
+			result[kind] = {
+				allow: filter.allow ? [...filter.allow] : undefined,
+				block: filter.block ? [...filter.block] : undefined,
+			};
+		}
+		return result;
+	}
+
+	private setActiveProfileInSettings(settings: Settings, profileName: string | undefined): void {
+		if (profileName) {
+			settings.activeResourceProfile = profileName;
+			settings.activeResourceProfiles = [profileName];
+			return;
+		}
+		delete settings.activeResourceProfiles;
+		delete settings.activeResourceProfile;
+	}
+
+	private persistDirectoryProfiles(update: (settings: Settings) => void): void {
+		const next = structuredClone(this.directoryProfileSettings);
+		update(next);
+		this.directoryProfileSettings = next;
+		this.recomputeSettings();
+
+		if (!this.directoryProfileInfo) {
+			return;
+		}
+
+		this.enqueueWrite("directoryProfile", () => {
+			this.storage.withLock("directoryProfile", (current) => {
+				const currentSettings = current
+					? SettingsManager.migrateSettings(JSON.parse(current) as Record<string, unknown>)
+					: {};
+				const merged: Settings = {
+					...currentSettings,
+					...next,
+					resourceProfiles: next.resourceProfiles,
+					activeResourceProfiles: next.activeResourceProfiles,
+					activeResourceProfile: next.activeResourceProfile,
+				};
+				if (!next.resourceProfiles) {
+					delete merged.resourceProfiles;
+				}
+				if (!next.activeResourceProfiles && next.activeResourceProfile === undefined) {
+					delete merged.activeResourceProfiles;
+					delete merged.activeResourceProfile;
+				}
+				return JSON.stringify(merged, null, 2);
+			});
+		});
+	}
+
+	private getProfileFilePath(profileName: string): string {
+		const normalized = this.normalizeProfileName(profileName);
+		const profilesDir = this.storage.getProfilesDir?.();
+		if (!profilesDir) {
+			throw new Error("Profiles directory is not configured");
+		}
+		return join(resolve(profilesDir), `${normalized}.json`);
+	}
+
+	/**
+	 * Create or update a profile definition in the selected persistence scope.
+	 */
+	setProfileDefinition(profileName: string, definition: ProfileDefinitionInput, scope: ProfilePersistenceScope): void {
+		const name = this.normalizeProfileName(profileName);
+		const resources = this.sanitizeProfileResources(definition.resources);
+
+		if (scope === "session") {
+			const next = { ...this.inlineResourceProfileDefinitions };
+			if (Object.keys(resources).length > 0) {
+				next[name] = resources;
+			} else {
+				delete next[name];
+			}
+			this.inlineResourceProfileDefinitions = next;
+			this.refreshProfileRegistry();
+			return;
+		}
+
+		if (scope === "global") {
+			const next = structuredClone(this.globalSettings);
+			next.resourceProfiles = { ...(next.resourceProfiles ?? {}) };
+			if (Object.keys(resources).length > 0) {
+				next.resourceProfiles[name] = resources;
+			} else {
+				delete next.resourceProfiles[name];
+			}
+			if (Object.keys(next.resourceProfiles).length === 0) {
+				delete next.resourceProfiles;
+			}
+			this.globalSettings = next;
+			this.markModified("resourceProfiles");
+			this.save();
+			return;
+		}
+
+		if (scope === "project") {
+			this.updateProjectSettings("resourceProfiles", (settings) => {
+				const next = structuredClone(settings.resourceProfiles ?? {});
+				if (Object.keys(resources).length > 0) {
+					next[name] = resources;
+				} else {
+					delete next[name];
+				}
+				if (Object.keys(next).length > 0) {
+					settings.resourceProfiles = next;
+				} else {
+					delete settings.resourceProfiles;
+				}
+			});
+			return;
+		}
+
+		if (scope === "directory") {
+			this.persistDirectoryProfiles((current) => {
+				const next = { ...(current.resourceProfiles ?? {}) };
+				if (Object.keys(resources).length > 0) {
+					next[name] = resources;
+				} else {
+					delete next[name];
+				}
+				if (Object.keys(next).length > 0) {
+					current.resourceProfiles = next;
+				} else {
+					delete current.resourceProfiles;
+				}
+			});
+			return;
+		}
+
+		const path = this.getProfileFilePath(name);
+		const existing = existsSync(path)
+			? parseProfileFileDefinition(readFileSync(path, "utf-8"))
+			: { name, resources: {} };
+		const payload: ProfileDefinitionInput = {
+			...existing,
+			name,
+			resources,
+			description: definition.description ?? existing.description,
+			model: definition.model ?? existing.model,
+			thinking: definition.thinking ?? existing.thinking,
+		};
+		mkdirSync(dirname(path), { recursive: true });
+		writeFileSync(path, JSON.stringify(payload, null, 2), "utf-8");
+	}
+
+	/**
+	 * Delete a profile from the selected scope.
+	 */
+	deleteProfile(profileName: string, scope: ProfilePersistenceScope): void {
+		const name = this.normalizeProfileName(profileName);
+
+		if (scope === "session") {
+			const next = { ...this.inlineResourceProfileDefinitions };
+			delete next[name];
+			this.inlineResourceProfileDefinitions = next;
+			this.refreshProfileRegistry();
+			if (this.runtimeResourceProfiles) {
+				this.setRuntimeResourceProfiles(this.runtimeResourceProfiles.filter((profile) => profile !== name));
+			}
+			return;
+		}
+
+		if (scope === "global") {
+			const next = { ...(this.globalSettings.resourceProfiles ?? {}) };
+			delete next[name];
+			if (Object.keys(next).length > 0) {
+				this.globalSettings.resourceProfiles = next;
+			} else {
+				delete this.globalSettings.resourceProfiles;
+			}
+			if (this.globalSettings.activeResourceProfile === name) {
+				delete this.globalSettings.activeResourceProfile;
+			}
+			if (this.globalSettings.activeResourceProfiles) {
+				this.globalSettings.activeResourceProfiles = this.globalSettings.activeResourceProfiles.filter(
+					(profile) => profile !== name,
+				);
+				if (this.globalSettings.activeResourceProfiles.length === 0) {
+					delete this.globalSettings.activeResourceProfiles;
+				}
+			}
+			this.markModified("resourceProfiles");
+			this.save();
+			return;
+		}
+
+		if (scope === "project") {
+			this.updateProjectSettings("resourceProfiles", (settings) => {
+				const next = { ...(settings.resourceProfiles ?? {}) };
+				delete next[name];
+				if (Object.keys(next).length > 0) {
+					settings.resourceProfiles = next;
+				} else {
+					delete settings.resourceProfiles;
+				}
+				if (settings.activeResourceProfile === name) {
+					delete settings.activeResourceProfile;
+				}
+				if (settings.activeResourceProfiles) {
+					settings.activeResourceProfiles = settings.activeResourceProfiles.filter((profile) => profile !== name);
+					if (settings.activeResourceProfiles.length === 0) {
+						delete settings.activeResourceProfiles;
+					}
+				}
+			});
+			return;
+		}
+
+		if (scope === "directory") {
+			this.persistDirectoryProfiles((current) => {
+				const next = { ...(current.resourceProfiles ?? {}) };
+				delete next[name];
+				if (Object.keys(next).length > 0) {
+					current.resourceProfiles = next;
+				} else {
+					delete current.resourceProfiles;
+				}
+				if (current.activeResourceProfile === name) {
+					delete current.activeResourceProfile;
+				}
+				if (current.activeResourceProfiles) {
+					current.activeResourceProfiles = current.activeResourceProfiles.filter((profile) => profile !== name);
+					if (current.activeResourceProfiles.length === 0) {
+						delete current.activeResourceProfiles;
+					}
+				}
+			});
+			return;
+		}
+
+		const profilePath = this.getProfileFilePath(name);
+		if (!existsSync(profilePath)) {
+			throw new Error(`Profile not found: ${name}`);
+		}
+		rmSync(profilePath, { force: true });
+	}
+
+	renameProfile(profileName: string, newProfileName: string, scope: ProfilePersistenceScope): void {
+		const oldName = this.normalizeProfileName(profileName);
+		const newName = this.normalizeProfileName(newProfileName);
+		if (oldName === newName) {
+			return;
+		}
+
+		if (scope === "session") {
+			const profile = this.inlineResourceProfileDefinitions[oldName];
+			if (!profile) {
+				throw new Error(`Profile not found: ${oldName}`);
+			}
+			delete this.inlineResourceProfileDefinitions[oldName];
+			this.inlineResourceProfileDefinitions[newName] = profile;
+			if (this.runtimeResourceProfiles) {
+				this.runtimeResourceProfiles = this.runtimeResourceProfiles.map((name) =>
+					name === oldName ? newName : name,
+				);
+				this.setRuntimeResourceProfiles(this.runtimeResourceProfiles);
+			}
+			this.refreshProfileRegistry();
+			return;
+		}
+
+		if (scope === "global") {
+			const next = structuredClone(this.globalSettings);
+			if (!next.resourceProfiles?.[oldName]) {
+				throw new Error(`Profile not found: ${oldName}`);
+			}
+			if (next.resourceProfiles[newName]) {
+				throw new Error(`Profile already exists: ${newName}`);
+			}
+			next.resourceProfiles[newName] = next.resourceProfiles[oldName]!;
+			delete next.resourceProfiles[oldName];
+			if (next.activeResourceProfile === oldName) {
+				next.activeResourceProfile = newName;
+			}
+			if (next.activeResourceProfiles) {
+				next.activeResourceProfiles = next.activeResourceProfiles.map((name) =>
+					name === oldName ? newName : name,
+				);
+			}
+			this.globalSettings = next;
+			this.markModified("resourceProfiles");
+			this.markModified("activeResourceProfile");
+			this.markModified("activeResourceProfiles");
+			this.save();
+			return;
+		}
+
+		if (scope === "project") {
+			this.updateProjectSettings("resourceProfiles", (settings) => {
+				const next = structuredClone(settings.resourceProfiles ?? {});
+				if (!next[oldName]) {
+					throw new Error(`Profile not found: ${oldName}`);
+				}
+				if (next[newName]) {
+					throw new Error(`Profile already exists: ${newName}`);
+				}
+				next[newName] = next[oldName]!;
+				delete next[oldName];
+				settings.resourceProfiles = next;
+				if (settings.activeResourceProfile === oldName) {
+					settings.activeResourceProfile = newName;
+				}
+				if (settings.activeResourceProfiles) {
+					settings.activeResourceProfiles = settings.activeResourceProfiles.map((name) =>
+						name === oldName ? newName : name,
+					);
+				}
+			});
+			return;
+		}
+
+		if (scope === "directory") {
+			const next = structuredClone(this.directoryProfileSettings.resourceProfiles ?? {});
+			if (!next[oldName]) {
+				throw new Error(`Profile not found: ${oldName}`);
+			}
+			if (next[newName]) {
+				throw new Error(`Profile already exists: ${newName}`);
+			}
+			next[newName] = next[oldName]!;
+			delete next[oldName];
+			this.persistDirectoryProfiles((current) => {
+				current.resourceProfiles = next;
+				if (current.activeResourceProfile === oldName) {
+					current.activeResourceProfile = newName;
+				}
+				if (current.activeResourceProfiles) {
+					current.activeResourceProfiles = current.activeResourceProfiles.map((name) =>
+						name === oldName ? newName : name,
+					);
+				}
+			});
+			return;
+		}
+
+		const oldPath = this.getProfileFilePath(oldName);
+		const newPath = this.getProfileFilePath(newName);
+		if (!existsSync(oldPath)) {
+			throw new Error(`Profile not found: ${oldName}`);
+		}
+		if (existsSync(newPath)) {
+			throw new Error(`Profile already exists: ${newName}`);
+		}
+		const parsed = parseProfileFileDefinition(readFileSync(oldPath, "utf-8"));
+		parsed.name = newName;
+		writeFileSync(newPath, JSON.stringify(parsed, null, 2), "utf-8");
+		rmSync(oldPath, { force: true });
+	}
+
+	/**
+	 * Set active profile selection in the selected scope.
+	 */
+	setActiveProfile(profileName: string | undefined, scope: Exclude<ProfilePersistenceScope, "reusable-file">): void {
+		const name = profileName ? this.normalizeProfileName(profileName) : undefined;
+		if (scope === "session") {
+			if (name) {
+				this.setRuntimeResourceProfiles([name]);
+			} else {
+				this.setRuntimeResourceProfiles([]);
+			}
+			return;
+		}
+
+		if (scope === "global") {
+			if (name) {
+				this.globalSettings.activeResourceProfile = name;
+				this.globalSettings.activeResourceProfiles = [name];
+			} else {
+				delete this.globalSettings.activeResourceProfile;
+				delete this.globalSettings.activeResourceProfiles;
+			}
+			this.markModified("activeResourceProfile");
+			this.markModified("activeResourceProfiles");
+			this.save();
+			return;
+		}
+
+		if (scope === "project") {
+			this.updateProjectSettings("activeResourceProfile", (settings) => {
+				this.setActiveProfileInSettings(settings, name);
+			});
+			return;
+		}
+
+		this.persistDirectoryProfiles((current) => {
+			this.setActiveProfileInSettings(current, name);
+		});
 	}
 
 	/** Mark a global field as modified during this session */

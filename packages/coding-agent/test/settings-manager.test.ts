@@ -663,5 +663,198 @@ describe("SettingsManager", () => {
 			expect(manager.isResourceAllowedByProfile("tools", "write")).toBe(false);
 			expect(manager.isResourceAllowedByProfile("tools", "learning_status")).toBe(false);
 		});
+
+		it("loads reusable profile files from the user profiles directory", () => {
+			mkdirSync(join(agentDir, "profiles"), { recursive: true });
+			writeFileSync(
+				join(agentDir, "profiles", "reviewer.json"),
+				JSON.stringify({
+					name: "reviewer",
+					description: "Review safely",
+					model: "anthropic/claude-sonnet-4",
+					thinking: "low",
+					resources: {
+						tools: { allow: ["read", "grep"] },
+					},
+				}),
+			);
+			writeFileSync(join(agentDir, "settings.json"), JSON.stringify({ activeResourceProfile: "reviewer" }));
+
+			const manager = SettingsManager.create(projectDir, agentDir);
+			const profile = manager.getProfileRegistry().getProfile("reviewer");
+
+			expect(profile?.source).toBe("profile-file");
+			expect(profile?.description).toBe("Review safely");
+			expect(profile?.model).toBe("anthropic/claude-sonnet-4");
+			expect(profile?.thinking).toBe("low");
+			expect(manager.getResourceProfileFilter("tools")).toEqual({ allow: ["read", "grep"], block: [] });
+		});
+
+		it("shadows same-name profiles by precedence instead of unioning filters", () => {
+			writeFileSync(
+				join(agentDir, "settings.json"),
+				JSON.stringify({
+					activeResourceProfile: "reviewer",
+					resourceProfiles: {
+						reviewer: { tools: { allow: ["read"], block: ["bash"] } },
+					},
+				}),
+			);
+			writeFileSync(
+				join(projectDir, ".pi", "settings.json"),
+				JSON.stringify({
+					resourceProfiles: {
+						reviewer: { tools: { allow: ["grep"] } },
+					},
+				}),
+			);
+
+			const manager = SettingsManager.create(projectDir, agentDir);
+
+			expect(manager.getProfileRegistry().getProfile("reviewer")?.source).toBe("project-settings");
+			expect(manager.getResourceProfileFilter("tools")).toEqual({ allow: ["grep"], block: [] });
+		});
+
+		it("merges filters across distinct active profile names", () => {
+			const manager = SettingsManager.inMemory({
+				activeResourceProfiles: ["reviewer", "core-setup"],
+				resourceProfiles: {
+					reviewer: { tools: { allow: ["read"], block: ["bash"] } },
+					"core-setup": { tools: { allow: ["grep"], block: ["write"] } },
+				},
+			});
+
+			expect(manager.getResourceProfileFilter("tools")).toEqual({
+				allow: ["read", "grep"],
+				block: ["bash", "write"],
+			});
+		});
+
+		it("resolves relative resource patterns in reusable profile files against the profile directory", () => {
+			const profilesDir = join(agentDir, "profiles");
+			mkdirSync(join(profilesDir, "skills"), { recursive: true });
+			writeFileSync(
+				join(profilesDir, "relative.json"),
+				JSON.stringify({
+					name: "relative",
+					resources: {
+						skills: { allow: ["./skills/review"] },
+					},
+				}),
+			);
+			writeFileSync(join(agentDir, "settings.json"), JSON.stringify({ activeResourceProfile: "relative" }));
+
+			const manager = SettingsManager.create(projectDir, agentDir);
+
+			expect(manager.getResourceProfileFilter("skills")).toEqual({
+				allow: [join(profilesDir, "skills", "review")],
+				block: [],
+			});
+		});
+
+		it("resolves profile refs for relative file paths", () => {
+			const profilesDir = join(agentDir, "profiles");
+			mkdirSync(join(profilesDir, "nested"), { recursive: true });
+			writeFileSync(
+				join(profilesDir, "nested", "reviewer.json"),
+				JSON.stringify({
+					name: "nested-reviewer",
+					resources: {
+						skills: { allow: ["read"] },
+					},
+				}),
+			);
+			const manager = SettingsManager.create(projectDir, agentDir);
+			const registry = manager.getProfileRegistry();
+
+			expect(registry.resolveProfileRef("./nested/reviewer.json", profilesDir)?.name).toBe("nested-reviewer");
+			expect(registry.resolveProfileRef("../profiles/nested/reviewer.json", join(agentDir, "subdir"))?.name).toBe(
+				"nested-reviewer",
+			);
+		});
+
+		it("reports malformed profile files as settings errors", () => {
+			const profilesDir = join(agentDir, "profiles");
+			mkdirSync(profilesDir, { recursive: true });
+			writeFileSync(join(profilesDir, "bad.json"), '{"name": "bad--name", "resources": "oops"}');
+
+			const manager = SettingsManager.create(projectDir, agentDir);
+			const errors = manager.drainErrors();
+			expect(errors.some((entry) => /Profile diagnostic/.test(entry.error.message))).toBe(true);
+		});
+
+		it("refreshes profile diagnostics after profile files are fixed", async () => {
+			const profilesDir = join(agentDir, "profiles");
+			mkdirSync(profilesDir, { recursive: true });
+			const profilePath = join(profilesDir, "bad.json");
+			writeFileSync(profilePath, '{"name": "bad--name", "resources": "oops"}');
+
+			const manager = SettingsManager.create(projectDir, agentDir);
+			expect(manager.drainErrors().some((entry) => /Profile diagnostic/.test(entry.error.message))).toBe(true);
+
+			writeFileSync(profilePath, JSON.stringify({ name: "bad", resources: { tools: { allow: ["read"] } } }));
+			await manager.reload();
+
+			expect(manager.drainErrors().some((entry) => /Profile diagnostic/.test(entry.error.message))).toBe(false);
+		});
+
+		it("reports active profile names that do not resolve", () => {
+			writeFileSync(join(agentDir, "settings.json"), JSON.stringify({ activeResourceProfile: "ghost" }));
+
+			const manager = SettingsManager.create(projectDir, agentDir);
+			const errors = manager.drainErrors();
+			expect(errors.some((entry) => /Active profile not found: ghost/.test(entry.error.message))).toBe(true);
+		});
+
+		it("persists and renames reusable profile definitions", async () => {
+			const manager = SettingsManager.create(projectDir, agentDir);
+			manager.setProfileDefinition(
+				"reviewer",
+				{
+					description: "Review safely",
+					resources: {
+						tools: {
+							allow: ["read"],
+						},
+					},
+				},
+				"reusable-file",
+			);
+			await manager.flush();
+			const profilesPath = join(agentDir, "profiles");
+			const original = JSON.parse(readFileSync(join(profilesPath, "reviewer.json"), "utf-8"));
+			expect(original.name).toBe("reviewer");
+			expect(original.description).toBe("Review safely");
+			expect(original.resources).toEqual({ tools: { allow: ["read"] } });
+
+			manager.renameProfile("reviewer", "reviewer-2", "reusable-file");
+			await manager.flush();
+			expect(existsSync(join(profilesPath, "reviewer.json"))).toBe(false);
+			const renamed = JSON.parse(readFileSync(join(profilesPath, "reviewer-2.json"), "utf-8"));
+			expect(renamed.name).toBe("reviewer-2");
+			expect(renamed.resources).toEqual({ tools: { allow: ["read"] } });
+		});
+
+		it("deletes profile definitions from directory overlay", async () => {
+			const manager = SettingsManager.create(projectDir, agentDir);
+			manager.setProfileDefinition(
+				"reviewer",
+				{
+					resources: {
+						skills: { allow: ["read"] },
+						tools: { allow: ["write"] },
+					},
+				},
+				"directory",
+			);
+			await manager.flush();
+			expect(manager.getProfileRegistry().getProfile("reviewer")?.source).toBe("directory-overlay");
+
+			manager.deleteProfile("reviewer", "directory");
+			await manager.flush();
+
+			expect(manager.getProfileRegistry().getProfile("reviewer")?.source).toBeUndefined();
+			expect(manager.getActiveResourceProfileNames().includes("reviewer")).toBe(false);
+		});
 	});
 });

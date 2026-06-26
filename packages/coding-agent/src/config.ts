@@ -532,6 +532,11 @@ export function getPromptsDir(): string {
 	return join(getAgentDir(), "prompts");
 }
 
+/** Get path to reusable profile definitions directory */
+export function getProfilesDir(agentDir: string = getAgentDir()): string {
+	return join(agentDir, "profiles");
+}
+
 /** Get path to sessions directory */
 export function getSessionsDir(): string {
 	return join(getAgentDir(), "sessions");

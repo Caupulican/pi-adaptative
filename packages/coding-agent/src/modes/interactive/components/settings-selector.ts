@@ -180,6 +180,8 @@ export interface SettingsConfig {
 	autoLearnScope?: SettingsScope;
 	currentModelPattern?: string;
 	autoLearnModelOptions?: SelectItem[];
+	activeProfileName?: string;
+	profileOptions?: SelectItem[];
 }
 
 export interface SettingsCallbacks {
@@ -211,6 +213,7 @@ export interface SettingsCallbacks {
 	onSelfModificationChange: (settings: SelfModificationSettings, scope: SettingsScope) => void;
 	onAutonomyChange: (settings: AutonomySettings, scope: SettingsScope) => void;
 	onAutoLearnChange: (settings: AutoLearnSettings, scope: SettingsScope) => void;
+	onProfileChange?: (profileName: string) => void;
 	onCancel: () => void;
 }
 
@@ -795,6 +798,8 @@ export class SettingsSelectorComponent extends Container {
 		let currentSelfModification: SelfModificationSettings = { ...config.selfModification };
 		let currentAutonomy: AutonomySettings = { ...config.autonomy };
 		let currentAutoLearn: AutoLearnSettings = { ...config.autoLearn };
+		const profileOptions = config.profileOptions ?? [];
+		const activeProfileName = config.activeProfileName ?? "(none)";
 
 		const items: SettingItem[] = [
 			{
@@ -993,6 +998,28 @@ export class SettingsSelectorComponent extends Container {
 					),
 			},
 		];
+
+		if (profileOptions.length > 0 && callbacks.onProfileChange) {
+			const autonomyIndex = items.findIndex((item) => item.id === "autonomy");
+			items.splice(Math.max(0, autonomyIndex), 0, {
+				id: "profiles",
+				label: "Profiles",
+				description: "Select the active runtime profile for this session. Use /profiles for the fast switcher.",
+				currentValue: activeProfileName,
+				submenu: (currentValue, done) =>
+					new SelectSubmenu(
+						"Profiles",
+						"Select the active runtime profile for this session. This is session-only unless saved elsewhere.",
+						profileOptions,
+						currentValue,
+						(value) => {
+							callbacks.onProfileChange?.(value);
+							done(value);
+						},
+						() => done(),
+					),
+			});
+		}
 
 		// Only show image toggle if terminal supports it
 		if (supportsImages) {

@@ -7,6 +7,7 @@ Pi uses JSON settings files with project settings overriding global settings. Pi
 | `~/.pi/agent/settings.json` | Global (all projects) |
 | `.pi/settings.json` | Project (current directory) |
 | `~/.pi/agent/resource-profiles/<hash>/settings.json` | User-level per repo/directory overlay; no repo files written |
+| `~/.pi/agent/profiles/*.json` | Reusable named profile definitions |
 
 Edit directly or use `/settings` for common options.
 
@@ -313,6 +314,7 @@ Paths in `~/.pi/agent/settings.json` resolve relative to `~/.pi/agent`. Paths in
 | `themes` | string[] | `[]` | Local theme file paths or directories |
 | `enableSkillCommands` | boolean | `true` | Register skills as `/skill:name` commands |
 | `resourceProfiles` | object | `{}` | Named resource allow/block filters for `extensions`, `skills`, `prompts`, `themes`, `agents`, and `tools` |
+| `~/.pi/agent/profiles/*.json` | files | - | Reusable named profile definitions with optional model/thinking metadata |
 | `activeResourceProfile` | string/string[] | - | Active profile name(s) |
 | `activeResourceProfiles` | string[] | - | Active profile names; equivalent to array form of `activeResourceProfile` |
 | `disabledResources` | object | `{}` | Legacy block filters; still supported and merged into resource profiles |
@@ -363,7 +365,7 @@ Resource profiles dynamically filter resources after discovery. Each resource ki
 }
 ```
 
-Use `--resource-profile lean` to select a profile for one session or subagent launch. Use `--resource-profile-json` for one-shot definitions that never touch disk:
+Use `/profiles` in interactive mode to switch the current session profile without writing settings. Use `/profiles <name>` for a direct session-only switch, or `/settings` → **Profiles** to select from the settings menu. Use `--resource-profile lean` to select a profile for one session or subagent launch. Use `--resource-profile-json` for one-shot definitions that never touch disk:
 
 ```bash
 pi --resource-profile oneoff \
@@ -379,6 +381,23 @@ Resource files may also carry profile blocks. Pi parses only the matching `<reso
 ```
 
 Supported carriers: extension files (`.ts`/`.js`, usually inside comments), prompt templates, skill files, and context agent files (`AGENTS.md`, `CLAUDE.md`, `GEMINI.md`). Resource-profile block contents are data, not instructions.
+
+Reusable profile files live under `~/.pi/agent/profiles/<name>.json`. They use a wrapper shape so metadata can live next to resource filters:
+
+```json
+{
+  "name": "reviewer",
+  "description": "Safe review profile",
+  "model": "anthropic/claude-sonnet-4",
+  "thinking": "low",
+  "resources": {
+    "tools": { "allow": ["read", "grep", "context_audit"] },
+    "skills": { "allow": ["code-review"] }
+  }
+}
+```
+
+`resources` uses the same allow/block filter shape as `resourceProfiles`. Relative paths that start with `./` or `../` resolve from the profile file directory.
 
 Zero-footprint repo/directory overlays live under `~/.pi/agent/resource-profiles/<hash>/settings.json`, where `<hash>` is derived from the nearest VCS root (or current directory when no VCS root exists). These files are user-level settings; Pi does not write `.pi/settings.json` just to remember directory profiles.
 

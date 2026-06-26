@@ -1,5 +1,9 @@
 ## [Unreleased]
 
+### Added
+
+- Added reusable runtime profile files under `~/.pi/agent/profiles/` and an interactive `/profiles` session switcher backed by the existing resource-profile filters.
+
 ## [0.80.42] - 2026-06-24
 
 ## [0.80.41] - 2026-06-24

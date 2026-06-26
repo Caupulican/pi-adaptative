@@ -81,6 +81,7 @@ import {
 	cliProviderAliases,
 	defaultModelPerProvider,
 	findExactModelReferenceMatch,
+	resolveCliModel,
 	resolveModelScope,
 } from "../../core/model-resolver.ts";
 import { DefaultPackageManager } from "../../core/package-manager.ts";
@@ -89,7 +90,12 @@ import { getPendingReloadBlockers } from "../../core/reload-blockers.ts";
 import type { ResourceDiagnostic } from "../../core/resource-loader.ts";
 import { formatMissingSessionCwdPrompt, MissingSessionCwdError } from "../../core/session-cwd.ts";
 import { isAutoLearnSessionId, type SessionContext, SessionManager } from "../../core/session-manager.ts";
-import type { AutoLearnSettings, AutonomyMode, SelfModificationSettings } from "../../core/settings-manager.ts";
+import type {
+	AutoLearnSettings,
+	AutonomyMode,
+	SelfModificationSettings,
+	SettingsScope,
+} from "../../core/settings-manager.ts";
 import { BUILTIN_SLASH_COMMANDS } from "../../core/slash-commands.ts";
 import type { SourceInfo } from "../../core/source-info.ts";
 import { isInstallTelemetryEnabled } from "../../core/telemetry.ts";
@@ -124,6 +130,7 @@ import { formatKeyText, keyDisplayText, keyHint, keyText, rawKeyHint } from "./c
 import { LoginDialogComponent } from "./components/login-dialog.ts";
 import { ModelSelectorComponent } from "./components/model-selector.ts";
 import { type AuthSelectorProvider, OAuthSelectorComponent } from "./components/oauth-selector.ts";
+import { ProfileSelectorComponent } from "./components/profile-selector.ts";
 import { ScopedModelsSelectorComponent } from "./components/scoped-models-selector.ts";
 import { SessionSelectorComponent } from "./components/session-selector.ts";
 import { SettingsSelectorComponent } from "./components/settings-selector.ts";
@@ -3097,6 +3104,12 @@ export class InteractiveMode {
 				await this.handleModelCommand(searchTerm);
 				return;
 			}
+			if (text === "/profiles" || text.startsWith("/profiles ")) {
+				const rawProfileName = text.startsWith("/profiles ") ? text.slice(10).trim() : undefined;
+				this.editor.setText("");
+				await this.handleProfilesCommand(rawProfileName?.length ? rawProfileName : undefined);
+				return;
+			}
 			if (text === "/export" || text.startsWith("/export ")) {
 				await this.handleExportCommand(text);
 				this.editor.setText("");
@@ -5747,7 +5760,7 @@ export class InteractiveMode {
 		].join("\n");
 	}
 
-	private applyAutonomyMode(mode: AutonomyMode, scope: "global" | "project" = "global"): void {
+	private applyAutonomyMode(mode: AutonomyMode, scope: SettingsScope = "global"): void {
 		const currentAutoLearn = this.settingsManager.getAutoLearnSettings();
 		const preset = this.getAutoLearnPresetForAutonomyMode(mode, currentAutoLearn);
 		this.settingsManager.setAutonomySettings({ mode }, scope);
@@ -5790,6 +5803,21 @@ export class InteractiveMode {
 	private showSettingsSelector(): void {
 		this.showSelector((done) => {
 			const projectSettings = this.settingsManager.getProjectSettings();
+			const profileOptions = [
+				{
+					value: "(none)",
+					label: "(none)",
+					description: "Use configured profile selection (session default)",
+				},
+				...this.settingsManager
+					.getProfileRegistry()
+					.listProfiles()
+					.map((profile) => ({
+						value: profile.name,
+						label: profile.name,
+						description: profile.description ?? profile.source,
+					})),
+			];
 			const selector = new SettingsSelectorComponent(
 				{
 					autoCompact: this.session.autoCompactionEnabled,
@@ -5828,6 +5856,8 @@ export class InteractiveMode {
 					currentModelPattern: this.session.model
 						? `${this.session.model.provider}/${this.session.model.id}`
 						: undefined,
+					activeProfileName: this.settingsManager.getActiveResourceProfileNames()[0],
+					profileOptions,
 				},
 				{
 					onAutoCompactChange: (enabled) => {
@@ -5973,6 +6003,10 @@ export class InteractiveMode {
 						this.updateAutoLearnFooter();
 						this.showStatus(`Auto Learn settings saved to ${scope}. Use /auto-learn status or /auto-learn run.`);
 					},
+					onProfileChange: (profile) => {
+						done();
+						void this.applyProfile(profile);
+					},
 					onCancel: () => {
 						done();
 						this.ui.requestRender();
@@ -5981,6 +6015,110 @@ export class InteractiveMode {
 			);
 			return { component: selector, focus: selector.getSettingsList() };
 		});
+	}
+
+	private async handleProfilesCommand(profileName?: string): Promise<void> {
+		if (profileName) {
+			await this.applyProfile(profileName);
+			return;
+		}
+
+		const registry = this.settingsManager.getProfileRegistry();
+		const profiles = registry.listProfiles();
+		if (profiles.length === 0) {
+			this.showWarning(
+				"No profiles found. Add resourceProfiles to settings or JSON files under ~/.pi/agent/profiles/.",
+			);
+			return;
+		}
+
+		this.showSelector((done) => {
+			const selector = new ProfileSelectorComponent(
+				profiles,
+				this.settingsManager.getActiveResourceProfileNames(),
+				(profile) => {
+					done();
+					void this.applyProfile(profile);
+				},
+				() => {
+					done();
+					this.ui.requestRender();
+				},
+			);
+			return { component: selector, focus: selector.getSelectList() };
+		});
+	}
+
+	private async applyProfile(profileName: string): Promise<void> {
+		const normalizedName = profileName.trim();
+		const normalizedLower = normalizedName.toLowerCase();
+		if (normalizedName.length === 0 || normalizedLower === "none" || normalizedLower === "(none)") {
+			try {
+				this.settingsManager.setRuntimeResourceProfiles([]);
+				this.session.sessionManager.appendCustomEntry("pi.activeResourceProfiles", {
+					profiles: [],
+				});
+				await this.handleReloadCommand();
+				const activeProfileName = this.settingsManager.getActiveResourceProfileNames()[0] ?? "(none)";
+				this.footerDataProvider.setExtensionStatus("profile", activeProfileName);
+				this.footer.invalidate();
+				this.updateEditorBorderColor();
+				this.showStatus(`Profile: ${activeProfileName}`);
+			} catch (error) {
+				this.showError(error instanceof Error ? error.message : String(error));
+			}
+			return;
+		}
+
+		const registry = this.settingsManager.getProfileRegistry();
+		const profile =
+			normalizedName.startsWith("./") || normalizedName.startsWith("../")
+				? registry.resolveProfileRef(normalizedName, this.sessionManager.getCwd())
+				: registry.getProfile(normalizedName);
+		if (!profile) {
+			this.showError(`Profile not found: ${profileName}`);
+			return;
+		}
+
+		try {
+			let appliedModel: Model<any> | undefined;
+			if (profile.model) {
+				this.session.modelRegistry.refresh();
+				const resolved = resolveCliModel({ cliModel: profile.model, modelRegistry: this.session.modelRegistry });
+				if (resolved.error) {
+					this.showError(resolved.error);
+					return;
+				}
+				if (resolved.warning) {
+					this.showWarning(resolved.warning);
+				}
+				if (resolved.model) {
+					await this.session.setModel(resolved.model, { persistSettings: false });
+					appliedModel = resolved.model;
+				}
+				if (resolved.thinkingLevel && !profile.thinking) {
+					this.session.setThinkingLevel(resolved.thinkingLevel, { persistSettings: false });
+				}
+			}
+			if (profile.thinking) {
+				this.session.setThinkingLevel(profile.thinking, { persistSettings: false });
+			}
+			this.settingsManager.setRuntimeResourceProfiles([profile.name]);
+			this.session.sessionManager.appendCustomEntry("pi.activeResourceProfiles", {
+				profiles: [profile.name],
+			});
+			await this.handleReloadCommand();
+			this.footerDataProvider.setExtensionStatus("profile", profile.name);
+			this.footer.invalidate();
+			this.updateEditorBorderColor();
+			this.showStatus(`Profile: ${profile.name}`);
+			if (appliedModel) {
+				void this.maybeWarnAboutAnthropicSubscriptionAuth(appliedModel);
+				this.checkDaxnutsEasterEgg(appliedModel);
+			}
+		} catch (error) {
+			this.showError(error instanceof Error ? error.message : String(error));
+		}
 	}
 
 	private async handleModelCommand(searchTerm?: string): Promise<void> {
