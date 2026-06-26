@@ -2576,6 +2576,7 @@ export class AgentSession {
 				},
 				getThinkingLevel: () => this.thinkingLevel,
 				setThinkingLevel: (level) => this.setThinkingLevel(level),
+				getExternalResourceRoots: () => this.settingsManager.getEffectiveExternalResourceRoots(),
 			},
 			{
 				getModel: () => this.model,

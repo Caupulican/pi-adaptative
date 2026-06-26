@@ -196,6 +196,7 @@ export function createExtensionRuntime(): ExtensionRuntime {
 		setModel: () => Promise.reject(new Error("Extension runtime not initialized")),
 		getThinkingLevel: notInitialized,
 		setThinkingLevel: notInitialized,
+		getExternalResourceRoots: notInitialized,
 		flagValues: new Map(),
 		pendingProviderRegistrations: [],
 		assertActive,
@@ -347,6 +348,11 @@ function createExtensionAPI(
 		getCommands() {
 			runtime.assertActive();
 			return runtime.getCommands();
+		},
+
+		getExternalResourceRoots() {
+			runtime.assertActive();
+			return runtime.getExternalResourceRoots();
 		},
 
 		setModel(model) {

@@ -553,7 +553,7 @@ export class SettingsManager {
 	private runtimeResourceProfiles: string[] | undefined;
 	private inlineResourceProfileDefinitions: Record<string, ResourceProfileSettings> = {};
 	private discoveredResourceProfileDefinitions: Record<string, ResourceProfileSettings> = {};
-	private settings: Settings;
+	settings: Settings;
 	private projectTrusted: boolean;
 	private modifiedFields = new Set<keyof Settings>(); // Track global fields modified during session
 	private modifiedNestedFields = new Map<keyof Settings, Set<string>>(); // Track global nested field modifications

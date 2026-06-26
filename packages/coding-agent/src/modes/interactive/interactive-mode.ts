@@ -3208,6 +3208,24 @@ export class InteractiveMode {
 				await this.handleReloadCommand();
 				return;
 			}
+			if (text === "/install-resources" || text.startsWith("/install-resources ")) {
+				const args = text.slice("/install-resources".length).trim();
+				this.editor.setText("");
+				await this.handleInstallResourcesCommand(args);
+				return;
+			}
+			if (text === "/config-backup" || text.startsWith("/config-backup ")) {
+				const file = text.slice("/config-backup".length).trim() || undefined;
+				this.editor.setText("");
+				await this.handleConfigBackupCommand(file);
+				return;
+			}
+			if (text === "/config-restore" || text.startsWith("/config-restore ")) {
+				const file = text.slice("/config-restore".length).trim();
+				this.editor.setText("");
+				await this.handleConfigRestoreCommand(file);
+				return;
+			}
 			if (text === "/debug") {
 				this.handleDebugCommand();
 				this.editor.setText("");
@@ -8035,6 +8053,269 @@ export class InteractiveMode {
 			this.ui.requestRender();
 		} catch (error: unknown) {
 			await this.handleFatalRuntimeError("Failed to create session", error);
+		}
+	}
+
+	private copyResourcesRecursively(
+		src: string,
+		dest: string,
+		force: boolean,
+		stats: { installed: string[]; skipped: string[] },
+	): void {
+		if (!fs.existsSync(src)) return;
+
+		const entries = fs.readdirSync(src, { withFileTypes: true });
+		fs.mkdirSync(dest, { recursive: true });
+
+		for (const entry of entries) {
+			const srcPath = path.join(src, entry.name);
+			const destPath = path.join(dest, entry.name);
+
+			if (entry.isDirectory()) {
+				this.copyResourcesRecursively(srcPath, destPath, force, stats);
+			} else if (entry.isFile()) {
+				if (fs.existsSync(destPath) && !force) {
+					stats.skipped.push(destPath);
+				} else {
+					fs.copyFileSync(srcPath, destPath);
+					stats.installed.push(destPath);
+				}
+			}
+		}
+	}
+
+	private async handleInstallResourcesCommand(argsString: string): Promise<void> {
+		try {
+			const tokens = argsString.split(/\s+/).filter(Boolean);
+			let force = false;
+			let dir = "";
+			for (const t of tokens) {
+				if (t === "--force") {
+					force = true;
+				} else {
+					dir = t;
+				}
+			}
+
+			if (!dir) {
+				this.showError("Usage: /install-resources <dir> [--force]");
+				return;
+			}
+
+			const canonical = this.settingsManager.canonicalizePath(dir);
+			if (!canonical || !fs.existsSync(canonical)) {
+				this.showError(`Source directory does not exist: ${dir}`);
+				return;
+			}
+
+			const trustedRoots = this.settingsManager.getTrustedResourceRoots();
+			const trusted = trustedRoots.includes(canonical);
+
+			if (!trusted) {
+				const trust = await new Promise<boolean>((resolve) => {
+					this.showSelector((done) => {
+						const submenu = new SelectSubmenu(
+							"Trust external source for installation?",
+							`The directory "${canonical}" contains extensions/resources to install. Extensions can execute arbitrary code on your machine. Do you trust it?`,
+							[
+								{
+									value: "yes",
+									label: "Yes",
+									description: "Trust this directory and proceed with installation.",
+								},
+								{ value: "no", label: "No", description: "Do not trust this directory. Abort." },
+							],
+							"no",
+							(value) => {
+								done();
+								resolve(value === "yes");
+							},
+							() => {
+								done();
+								resolve(false);
+							},
+						);
+						return { component: submenu, focus: submenu.getSelectList() };
+					});
+				});
+
+				if (!trust) {
+					this.showStatus("Installation aborted. Source directory was not trusted.");
+					return;
+				}
+
+				this.settingsManager.addTrustedResourceRoot(canonical, "global");
+			}
+
+			const subdirs = ["skills", "extensions", "prompts", "themes", "profiles"];
+			const stats = { installed: [] as string[], skipped: [] as string[] };
+			const userAgentDir = getAgentDir();
+
+			for (const sub of subdirs) {
+				const srcSub = path.join(canonical, sub);
+				const destSub = path.join(userAgentDir, sub);
+				if (fs.existsSync(srcSub)) {
+					this.copyResourcesRecursively(srcSub, destSub, force, stats);
+				}
+			}
+
+			const installedCount = stats.installed.length;
+			const skippedCount = stats.skipped.length;
+			this.showStatus(`Installation complete: ${installedCount} resources installed, ${skippedCount} skipped.`);
+
+			await this.handleReloadCommand();
+		} catch (error) {
+			this.showError(error instanceof Error ? error.message : String(error));
+		}
+	}
+
+	private async handleConfigBackupCommand(fileArg?: string): Promise<void> {
+		try {
+			const profilesDir = path.join(getAgentDir(), "profiles");
+			const profiles: Record<string, any> = {};
+			if (fs.existsSync(profilesDir)) {
+				const entries = fs.readdirSync(profilesDir);
+				for (const entry of entries) {
+					if (entry.endsWith(".json")) {
+						const pPath = path.join(profilesDir, entry);
+						try {
+							const content = fs.readFileSync(pPath, "utf-8");
+							profiles[entry] = JSON.parse(content);
+						} catch {
+							// skip
+						}
+					}
+				}
+			}
+
+			const backupData = {
+				profiles,
+				settings: {
+					resourceProfiles: this.settingsManager.settings.resourceProfiles,
+					activeResourceProfile: this.settingsManager.settings.activeResourceProfile,
+					externalResourceRoots: this.settingsManager.settings.externalResourceRoots,
+					trustedResourceRoots: this.settingsManager.settings.trustedResourceRoots,
+				},
+			};
+
+			let targetFile = fileArg;
+			if (!targetFile) {
+				const backupsDir = path.join(getAgentDir(), "backups");
+				fs.mkdirSync(backupsDir, { recursive: true });
+				const timestamp = new Date().toISOString().replace(/[:.]/g, "-");
+				targetFile = path.join(backupsDir, `config-${timestamp}.json`);
+			} else {
+				const resolved = this.settingsManager.canonicalizePath(targetFile);
+				if (resolved) {
+					targetFile = resolved;
+				}
+			}
+
+			fs.mkdirSync(path.dirname(targetFile), { recursive: true });
+			fs.writeFileSync(targetFile, JSON.stringify(backupData, null, 2), "utf-8");
+			this.showStatus(`Configuration backup saved to ${targetFile}`);
+		} catch (error) {
+			this.showError(error instanceof Error ? error.message : String(error));
+		}
+	}
+
+	private async handleConfigRestoreCommand(fileArg: string): Promise<void> {
+		try {
+			const trimmed = fileArg.trim();
+			if (!trimmed) {
+				this.showError("Usage: /config-restore <file>");
+				return;
+			}
+
+			const resolved = this.settingsManager.canonicalizePath(trimmed);
+			if (!resolved || !fs.existsSync(resolved)) {
+				this.showError(`Backup file does not exist: ${trimmed}`);
+				return;
+			}
+
+			let bundle: any;
+			try {
+				const content = fs.readFileSync(resolved, "utf-8");
+				bundle = JSON.parse(content);
+			} catch (error) {
+				this.showError(`Failed to parse backup file: ${error instanceof Error ? error.message : String(error)}`);
+				return;
+			}
+
+			if (!bundle || typeof bundle !== "object") {
+				this.showError("Invalid backup file: must be a JSON object");
+				return;
+			}
+
+			// Confirm before clobbering
+			const confirm = await new Promise<boolean>((resolve) => {
+				this.showSelector((done) => {
+					const submenu = new SelectSubmenu(
+						"Restore configuration?",
+						"This will overwrite existing local profiles and settings with the backup values. Do you want to continue?",
+						[
+							{ value: "yes", label: "Yes", description: "Proceed with restoration." },
+							{ value: "no", label: "No", description: "Cancel and abort." },
+						],
+						"no",
+						(value) => {
+							done();
+							resolve(value === "yes");
+						},
+						() => {
+							done();
+							resolve(false);
+						},
+					);
+					return { component: submenu, focus: submenu.getSelectList() };
+				});
+			});
+
+			if (!confirm) {
+				this.showStatus("Restore aborted.");
+				return;
+			}
+
+			// 1. Restore profile files (reusable-file scope)
+			if (bundle.profiles && typeof bundle.profiles === "object") {
+				const profilesDir = path.join(getAgentDir(), "profiles");
+				fs.mkdirSync(profilesDir, { recursive: true });
+				for (const [filename, content] of Object.entries(bundle.profiles)) {
+					const targetPath = path.join(profilesDir, filename);
+					fs.writeFileSync(targetPath, JSON.stringify(content, null, 2), "utf-8");
+				}
+			}
+
+			// 2. Restore settings
+			if (bundle.settings && typeof bundle.settings === "object") {
+				const bs = bundle.settings;
+
+				// Global profiles definitions
+				if (bs.resourceProfiles && typeof bs.resourceProfiles === "object") {
+					for (const [name, definition] of Object.entries(bs.resourceProfiles)) {
+						this.settingsManager.setProfileDefinition(name, definition as any, "global");
+					}
+				}
+
+				// Active profile selection
+				if (bs.activeResourceProfile) {
+					this.settingsManager.setActiveProfile(bs.activeResourceProfile, "global");
+				}
+
+				// External roots (trustedRoots are NOT restored, as per SECURITY requirement)
+				if (Array.isArray(bs.externalResourceRoots)) {
+					this.settingsManager.setExternalResourceRoots(bs.externalResourceRoots, "global");
+
+					const currentTrusted = this.settingsManager.getTrustedResourceRoots();
+					const newTrusted = currentTrusted.filter((r) => !bs.externalResourceRoots.includes(r));
+					this.settingsManager.setTrustedResourceRoots(newTrusted, "global");
+				}
+			}
+
+			this.showStatus("Configuration restored successfully.");
+			await this.handleReloadCommand();
+		} catch (error) {
+			this.showError(error instanceof Error ? error.message : String(error));
 		}
 	}
 

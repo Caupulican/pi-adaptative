@@ -1240,6 +1240,9 @@ export interface ExtensionAPI {
 	/** Get available slash commands in the current session. */
 	getCommands(): SlashCommandInfo[];
 
+	/** Get the canonicalized paths of effective trusted external resource roots configured in settings. */
+	getExternalResourceRoots(): string[];
+
 	// =========================================================================
 	// Model and Thinking Level
 	// =========================================================================
@@ -1517,6 +1520,7 @@ export interface ExtensionActions {
 	setModel: SetModelHandler;
 	getThinkingLevel: GetThinkingLevelHandler;
 	setThinkingLevel: SetThinkingLevelHandler;
+	getExternalResourceRoots: () => string[];
 }
 
 /**

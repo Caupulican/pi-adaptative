@@ -43,5 +43,18 @@ export const BUILTIN_SLASH_COMMANDS: ReadonlyArray<BuiltinSlashCommand> = [
 	{ name: "compact", description: "Manually compact the session context" },
 	{ name: "resume", description: "Resume a different session" },
 	{ name: "reload", description: "Reload keybindings, extensions, skills, prompts, and themes" },
+	{
+		name: "install-resources",
+		description:
+			"Copy resources from a trusted directory to user local settings (/install-resources <dir> [--force])",
+	},
+	{
+		name: "config-backup",
+		description: "Backup profiles and resource settings to a JSON file (/config-backup [file])",
+	},
+	{
+		name: "config-restore",
+		description: "Restore profiles and resource settings from a JSON file (/config-restore <file>)",
+	},
 	{ name: "quit", description: `Quit ${APP_NAME}` },
 ];

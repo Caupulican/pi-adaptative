@@ -1,5 +1,11 @@
 ## [Unreleased]
 
+### Added
+
+- Exposed effective external resource roots to extensions via `getExternalResourceRoots()` on `ExtensionAPI`.
+- Added `/install-resources <dir> [--force]` slash command to copy resources from trusted directories to user local settings.
+- Added `/config-backup [file]` and `/config-restore <file>` slash commands to package/restore profiles and resource settings.
+
 ## [0.80.46] - 2026-06-26
 
 ### Added
