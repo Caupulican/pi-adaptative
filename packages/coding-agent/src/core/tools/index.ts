@@ -17,6 +17,14 @@ export {
 	type EditToolInput,
 	type EditToolOptions,
 } from "./edit.ts";
+export {
+	createExtensionifyTool,
+	createExtensionifyToolDefinition,
+	type ExtensionifyInput,
+	type ExtensionifyReport,
+	type ExtensionifyToolDetails,
+	type ExtensionifyToolOptions,
+} from "./extensionify.ts";
 export { withFileMutationQueue } from "./file-mutation-queue.ts";
 export {
 	createFindTool,
@@ -61,6 +69,14 @@ export {
 	tokenize,
 } from "./skill-audit.ts";
 export {
+	createSkillifyTool,
+	createSkillifyToolDefinition,
+	type SkillifyInput,
+	type SkillifyReport,
+	type SkillifyToolDetails,
+	type SkillifyToolOptions,
+} from "./skillify.ts";
+export {
 	DEFAULT_MAX_BYTES,
 	DEFAULT_MAX_LINES,
 	formatSize,
@@ -82,16 +98,32 @@ import type { AgentTool } from "@caupulican/pi-agent-core";
 import type { ToolDefinition } from "../extensions/types.ts";
 import { type BashToolOptions, createBashTool, createBashToolDefinition } from "./bash.ts";
 import { createEditTool, createEditToolDefinition, type EditToolOptions } from "./edit.ts";
+import {
+	createExtensionifyTool,
+	createExtensionifyToolDefinition,
+	type ExtensionifyToolOptions,
+} from "./extensionify.ts";
 import { createFindTool, createFindToolDefinition, type FindToolOptions } from "./find.ts";
 import { createGrepTool, createGrepToolDefinition, type GrepToolOptions } from "./grep.ts";
 import { createLsTool, createLsToolDefinition, type LsToolOptions } from "./ls.ts";
 import { createReadTool, createReadToolDefinition, type ReadToolOptions } from "./read.ts";
 import { createSkillAuditTool, createSkillAuditToolDefinition, type SkillAuditToolOptions } from "./skill-audit.ts";
+import { createSkillifyTool, createSkillifyToolDefinition, type SkillifyToolOptions } from "./skillify.ts";
 import { createWriteTool, createWriteToolDefinition, type WriteToolOptions } from "./write.ts";
 
 export type Tool = AgentTool<any>;
 export type ToolDef = ToolDefinition<any, any>;
-export type ToolName = "read" | "bash" | "edit" | "write" | "grep" | "find" | "ls" | "skill_audit";
+export type ToolName =
+	| "read"
+	| "bash"
+	| "edit"
+	| "write"
+	| "grep"
+	| "find"
+	| "ls"
+	| "skill_audit"
+	| "skillify"
+	| "extensionify";
 export const allToolNames: Set<ToolName> = new Set([
 	"read",
 	"bash",
@@ -101,6 +133,8 @@ export const allToolNames: Set<ToolName> = new Set([
 	"find",
 	"ls",
 	"skill_audit",
+	"skillify",
+	"extensionify",
 ]);
 
 export interface ToolsOptions {
@@ -112,6 +146,8 @@ export interface ToolsOptions {
 	find?: FindToolOptions;
 	ls?: LsToolOptions;
 	skill_audit?: SkillAuditToolOptions;
+	skillify?: SkillifyToolOptions;
+	extensionify?: ExtensionifyToolOptions;
 }
 
 export function createToolDefinition(toolName: ToolName, cwd: string, options?: ToolsOptions): ToolDef {
@@ -132,6 +168,10 @@ export function createToolDefinition(toolName: ToolName, cwd: string, options?: 
 			return createLsToolDefinition(cwd, options?.ls);
 		case "skill_audit":
 			return createSkillAuditToolDefinition(cwd, options?.skill_audit);
+		case "skillify":
+			return createSkillifyToolDefinition(cwd, options?.skillify);
+		case "extensionify":
+			return createExtensionifyToolDefinition(cwd, options?.extensionify);
 		default:
 			throw new Error(`Unknown tool name: ${toolName}`);
 	}
@@ -155,6 +195,10 @@ export function createTool(toolName: ToolName, cwd: string, options?: ToolsOptio
 			return createLsTool(cwd, options?.ls);
 		case "skill_audit":
 			return createSkillAuditTool(cwd, options?.skill_audit);
+		case "skillify":
+			return createSkillifyTool(cwd, options?.skillify);
+		case "extensionify":
+			return createExtensionifyTool(cwd, options?.extensionify);
 		default:
 			throw new Error(`Unknown tool name: ${toolName}`);
 	}
@@ -188,6 +232,8 @@ export function createAllToolDefinitions(cwd: string, options?: ToolsOptions): R
 		find: createFindToolDefinition(cwd, options?.find),
 		ls: createLsToolDefinition(cwd, options?.ls),
 		skill_audit: createSkillAuditToolDefinition(cwd, options?.skill_audit),
+		skillify: createSkillifyToolDefinition(cwd, options?.skillify),
+		extensionify: createExtensionifyToolDefinition(cwd, options?.extensionify),
 	};
 }
 
@@ -219,5 +265,7 @@ export function createAllTools(cwd: string, options?: ToolsOptions): Record<Tool
 		find: createFindTool(cwd, options?.find),
 		ls: createLsTool(cwd, options?.ls),
 		skill_audit: createSkillAuditTool(cwd, options?.skill_audit),
+		skillify: createSkillifyTool(cwd, options?.skillify),
+		extensionify: createExtensionifyTool(cwd, options?.extensionify),
 	};
 }
