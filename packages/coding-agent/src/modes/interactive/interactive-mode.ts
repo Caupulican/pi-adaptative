@@ -136,6 +136,7 @@ import { type AuthSelectorProvider, OAuthSelectorComponent } from "./components/
 import {
 	ProfileResourceEditorComponent,
 	type ProfileResourceEditorKind,
+	resolveResourceEditPath,
 } from "./components/profile-resource-editor.ts";
 import { ProfileSelectorComponent } from "./components/profile-selector.ts";
 import { ScopedModelsSelectorComponent } from "./components/scoped-models-selector.ts";
@@ -4518,6 +4519,57 @@ export class InteractiveMode {
 		}
 	}
 
+	private async openEditorForPath(filePath: string): Promise<boolean> {
+		let editorCmd = process.env.EDITOR || process.env.VISUAL;
+		let isFallback = false;
+		if (!editorCmd) {
+			editorCmd = "vi";
+			isFallback = true;
+		}
+
+		try {
+			// Stop TUI to release terminal
+			this.ui.stop();
+
+			// Split by space to support editor arguments (e.g., "code --wait")
+			const [editor, ...editorArgs] = editorCmd.split(" ");
+
+			process.stdout.write(
+				`Launching external editor: ${editorCmd} ${filePath}\nPi will resume when the editor exits.\n`,
+			);
+
+			const status = await new Promise<number | null>((resolve) => {
+				const child = spawn(editor, [...editorArgs, filePath], {
+					stdio: "inherit",
+					shell: process.platform === "win32",
+				});
+				child.on("error", () => resolve(null));
+				child.on("close", (code) => resolve(code));
+			});
+
+			if (status === null) {
+				if (isFallback) {
+					process.stdout.write(`\nError: Failed to launch fallback editor "vi".\n`);
+				} else {
+					process.stdout.write(`\nError: Failed to launch editor "${editorCmd}".\n`);
+				}
+				process.stdout.write(`Please set the $EDITOR or $VISUAL environment variable to edit inline.\n`);
+				process.stdout.write(`Absolute file path: ${filePath}\n\nPress Enter to return to Pi...`);
+				// Wait for enter key
+				await new Promise<void>((resolve) => {
+					process.stdin.once("data", () => resolve());
+				});
+			}
+
+			return status === 0;
+		} finally {
+			// Restart TUI
+			this.ui.start();
+			// Force full re-render since external editor uses alternate screen
+			this.ui.requestRender(true);
+		}
+	}
+
 	// =========================================================================
 	// UI helpers
 	// =========================================================================
@@ -6078,7 +6130,7 @@ export class InteractiveMode {
 		const activeNames = this.settingsManager.getActiveResourceProfileNames();
 
 		const options = [
-			{ value: "(none)", label: "(none)", description: "No active profile (all resources enabled)" },
+			{ value: "(none)", label: "(none)", description: "No active profile/situation (all resources enabled)" },
 			...profiles.map((p) => ({
 				value: p.name,
 				label: p.name,
@@ -6089,7 +6141,7 @@ export class InteractiveMode {
 		this.showSelector((done) => {
 			const selector = new SelectSubmenu(
 				"Profile / Situation",
-				"Select the active runtime profile for this session. This is session-only unless saved elsewhere.",
+				"Select the active runtime profile/situation for this session. This is session-only unless saved elsewhere.",
 				options,
 				activeNames[0] || "(none)",
 				(value) => {
@@ -6117,29 +6169,33 @@ export class InteractiveMode {
 		}));
 
 		const options = [
-			{ value: "create", label: "+ Create profile...", description: "Create a new resource profile definition." },
+			{
+				value: "create",
+				label: "+ Create profile / situation...",
+				description: "Create a new resource profile/situation definition.",
+			},
 		];
 
 		if (this.settingsManager.getActiveResourceProfileNames().length > 0) {
 			options.push({
 				value: "persist",
-				label: "Persist active profile to...",
-				description: "Save the current active-profile selection so it survives restart.",
+				label: "Persist active profile / situation to...",
+				description: "Save the current active profile/situation selection so it survives restart.",
 			});
 		}
 
 		if (editableProfiles.length > 0) {
 			options.push({
 				value: "delete",
-				label: "Delete profile...",
-				description: "Remove a profile definition from where it is stored.",
+				label: "Delete profile / situation...",
+				description: "Remove a profile/situation definition from where it is stored.",
 			});
 		}
 
 		this.showSelector((done) => {
 			const selector = new SelectSubmenu(
-				"Manage Profiles",
-				"Create, delete, or persist profile definitions.",
+				"Manage Profiles / Situations",
+				"Create, delete, or persist profile/situation definitions.",
 				options,
 				"",
 				(value) => {
@@ -6177,8 +6233,8 @@ export class InteractiveMode {
 
 		this.showSelector((done) => {
 			const selector = new SelectSubmenu(
-				"Persist Active Profile",
-				"Choose where to write the active-profile selection.",
+				"Persist Active Profile / Situation",
+				"Choose where to write the active profile/situation selection.",
 				scopeOptions,
 				"directory",
 				(value) => {
@@ -6205,8 +6261,8 @@ export class InteractiveMode {
 
 		this.showSelector((done) => {
 			const selector = new SelectSubmenu(
-				"Delete Profile",
-				"Pick a profile to delete.",
+				"Delete Profile / Situation",
+				"Pick a profile/situation to delete.",
 				editableProfiles,
 				"",
 				(value) => {
@@ -6279,15 +6335,19 @@ export class InteractiveMode {
 		if (!activeName || activeName === "(none)") {
 			this.showSelector((done) => {
 				const selector = new SelectSubmenu(
-					"No Active Profile",
-					"Select or create a profile to manage the library.",
+					"No Active Profile / Situation",
+					"Select or create a profile/situation to manage the library.",
 					[
 						{
 							value: "select",
-							label: "Select existing profile...",
-							description: "Choose an existing profile to activate.",
+							label: "Select existing profile / situation...",
+							description: "Choose an existing profile/situation to activate.",
 						},
-						{ value: "create", label: "Create new profile...", description: "Create a new profile definition." },
+						{
+							value: "create",
+							label: "Create new profile / situation...",
+							description: "Create a new profile/situation definition.",
+						},
 					],
 					"select",
 					(value) => {
@@ -6311,7 +6371,7 @@ export class InteractiveMode {
 		const registry = this.settingsManager.getProfileRegistry();
 		const profile = registry.getProfile(activeName);
 		if (!profile) {
-			this.showError(`Active profile "${activeName}" not found in registry.`);
+			this.showError(`Active profile/situation "${activeName}" not found in registry.`);
 			return;
 		}
 		const scope = this.scopeForProfileSource(profile.source);
@@ -6322,8 +6382,8 @@ export class InteractiveMode {
 		const name = await new Promise<string | undefined>((resolve) => {
 			this.showSelector((done) => {
 				const input = new ExtensionInputComponent(
-					"Create Profile",
-					"Enter profile name",
+					"Create Profile / Situation",
+					"Enter profile/situation name",
 					(value) => {
 						done();
 						resolve(value);
@@ -6345,7 +6405,7 @@ export class InteractiveMode {
 
 		const trimmed = name.trim();
 		if (!trimmed) {
-			this.showWarning("Profile name cannot be empty.");
+			this.showWarning("Profile/situation name cannot be empty.");
 			void this.openLibraryManagerFlow();
 			return;
 		}
@@ -6377,15 +6437,15 @@ export class InteractiveMode {
 		}));
 
 		if (editableProfiles.length === 0) {
-			this.showWarning("No existing profiles to select. Please create one.");
+			this.showWarning("No existing profiles/situations to select. Please create one.");
 			void this.createProfileAndOpenLibraryFlow();
 			return;
 		}
 
 		this.showSelector((done) => {
 			const selector = new SelectSubmenu(
-				"Select Profile",
-				"Pick a profile to activate and edit.",
+				"Select Profile / Situation",
+				"Pick a profile/situation to activate and edit.",
 				editableProfiles,
 				"",
 				(value) => {
@@ -6561,6 +6621,23 @@ export class InteractiveMode {
 					done();
 					void this.promptScopeChangeForProfile(profileName, currentScope);
 				},
+				onEdit: async (id, pathValue, kind) => {
+					done();
+					const resolvedEditPath = resolveResourceEditPath(id, pathValue, kind);
+					if (!resolvedEditPath) {
+						this.showWarning(`Resource "${id}" of kind "${kind}" has no editable file path.`);
+						void this.openLibraryEditorForProfile(profileName, currentScope);
+						return;
+					}
+					if (!fs.existsSync(resolvedEditPath)) {
+						this.showError(`Resolved path for "${id}" does not exist: ${resolvedEditPath}`);
+						void this.openLibraryEditorForProfile(profileName, currentScope);
+						return;
+					}
+					await this.openEditorForPath(resolvedEditPath);
+					await this.handleReloadCommand();
+					void this.openLibraryEditorForProfile(profileName, currentScope);
+				},
 			});
 
 			return { component: editor, focus: editor };
@@ -6584,8 +6661,8 @@ export class InteractiveMode {
 
 		this.showSelector((done) => {
 			const selector = new SelectSubmenu(
-				"Change Profile Scope",
-				`Select new scope for profile "${profileName}".`,
+				"Change Profile / Situation Scope",
+				`Select new scope for profile/situation "${profileName}".`,
 				scopeOptions,
 				currentScope,
 				(value) => {
@@ -6734,8 +6811,8 @@ export class InteractiveMode {
 		const name = await new Promise<string | undefined>((resolve) => {
 			this.showSelector((done) => {
 				const input = new ExtensionInputComponent(
-					"Create Profile",
-					"Enter profile name",
+					"Create Profile / Situation",
+					"Enter profile/situation name",
 					(value) => {
 						done();
 						resolve(value);
@@ -6757,21 +6834,21 @@ export class InteractiveMode {
 
 		const trimmed = name.trim();
 		if (!trimmed) {
-			this.showError("Profile name cannot be empty");
+			this.showError("Profile/situation name cannot be empty");
 			return this.createProfileFlow();
 		}
 
 		// Validate name rules using validateSkillName
 		const errors = validateSkillName(trimmed);
 		if (errors.length > 0) {
-			this.showError(`Invalid profile name: ${errors.join(", ")}`);
+			this.showError(`Invalid profile/situation name: ${errors.join(", ")}`);
 			return this.createProfileFlow();
 		}
 
 		// Collision check
 		const existing = this.settingsManager.getProfileRegistry().getProfile(trimmed);
 		if (existing) {
-			this.showError(`Profile "${trimmed}" already exists`);
+			this.showError(`Profile/situation "${trimmed}" already exists`);
 			return this.createProfileFlow();
 		}
 
@@ -6811,6 +6888,23 @@ export class InteractiveMode {
 				onCancel: () => {
 					done();
 					this.ui.requestRender();
+				},
+				onEdit: async (id, pathValue, kind) => {
+					done();
+					const resolvedEditPath = resolveResourceEditPath(id, pathValue, kind);
+					if (!resolvedEditPath) {
+						this.showWarning(`Resource "${id}" of kind "${kind}" has no editable file path.`);
+						void this.openNewProfileEditor(profileName);
+						return;
+					}
+					if (!fs.existsSync(resolvedEditPath)) {
+						this.showError(`Resolved path for "${id}" does not exist: ${resolvedEditPath}`);
+						void this.openNewProfileEditor(profileName);
+						return;
+					}
+					await this.openEditorForPath(resolvedEditPath);
+					await this.handleReloadCommand();
+					void this.openNewProfileEditor(profileName);
 				},
 			});
 			return { component: editor, focus: editor };

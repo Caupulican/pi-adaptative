@@ -1,5 +1,11 @@
 ## [Unreleased]
 
+### Added
+
+- Added Edit-in-$EDITOR action (key `e`) in the Manage Library browser to directly edit the highlighted resource's source file and reload upon return.
+- Added consistent "Profile / Situation" labeling across all settings selectors.
+- Added friendly empty-state messaging in kind tabs with no available resources.
+
 ## [0.80.48] - 2026-06-26
 
 ### Added

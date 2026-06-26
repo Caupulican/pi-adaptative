@@ -1,3 +1,5 @@
+import * as fs from "node:fs";
+import * as path from "node:path";
 import { isAbsolute, resolve } from "node:path";
 import {
 	Container,
@@ -41,6 +43,7 @@ export interface ProfileResourceEditorOptions {
 	onSave: (resources: ResourceProfileSettings) => void; // called on ctrl+s with the encoded result
 	onCancel: () => void; // called on esc
 	onScopeChange?: () => void;
+	onEdit?: (id: string, path: string, kind: ResourceProfileKind) => void;
 	cwd?: string;
 	agentDir?: string;
 	externalResourceRoots?: string[];
@@ -67,6 +70,65 @@ const TOOL_DESCRIPTIONS: Record<string, string> = {
 	skillify: "Convert a set of files/instructions into a skill.",
 	extensionify: "Package a tool or script as an extension.",
 };
+
+export function resolveResourceEditPath(
+	_id: string,
+	filePath: string | undefined,
+	kind: ResourceProfileKind,
+): string | undefined {
+	if (kind === "tools") {
+		return undefined;
+	}
+
+	if (!filePath) {
+		return undefined;
+	}
+
+	if (kind === "extensions") {
+		try {
+			const stats = fs.statSync(filePath);
+			if (stats.isDirectory()) {
+				const indexTs = path.join(filePath, "index.ts");
+				if (fs.existsSync(indexTs)) {
+					return indexTs;
+				}
+				const indexJs = path.join(filePath, "index.js");
+				if (fs.existsSync(indexJs)) {
+					return indexJs;
+				}
+				const pkgJsonPath = path.join(filePath, "package.json");
+				if (fs.existsSync(pkgJsonPath)) {
+					try {
+						const pkg = JSON.parse(fs.readFileSync(pkgJsonPath, "utf-8"));
+						if (typeof pkg.main === "string") {
+							const resolvedMain = path.resolve(filePath, pkg.main);
+							if (fs.existsSync(resolvedMain)) {
+								return resolvedMain;
+							}
+						}
+					} catch {}
+				}
+				return indexTs;
+			}
+		} catch {}
+		return filePath;
+	}
+
+	if (kind === "skills") {
+		try {
+			const stats = fs.statSync(filePath);
+			if (stats.isDirectory()) {
+				const skillMd = path.join(filePath, "SKILL.md");
+				if (fs.existsSync(skillMd)) {
+					return skillMd;
+				}
+			}
+		} catch {}
+		return filePath;
+	}
+
+	return filePath;
+}
 
 export function classifyResourceSource(
 	filePath: string | undefined,
@@ -141,6 +203,7 @@ export class ProfileResourceEditorComponent extends Container implements Focusab
 	private onSave: (resources: ResourceProfileSettings) => void;
 	private onCancel: () => void;
 	private onScopeChange?: () => void;
+	private onEdit?: (id: string, path: string, kind: ResourceProfileKind) => void;
 
 	constructor(options: ProfileResourceEditorOptions) {
 		super();
@@ -150,6 +213,7 @@ export class ProfileResourceEditorComponent extends Container implements Focusab
 		this.onSave = options.onSave;
 		this.onCancel = options.onCancel;
 		this.onScopeChange = options.onScopeChange;
+		this.onEdit = options.onEdit;
 		this.cwd = options.cwd || process.cwd();
 		this.agentDir = options.agentDir || "";
 		this.externalResourceRoots = options.externalResourceRoots || [];
@@ -201,7 +265,7 @@ export class ProfileResourceEditorComponent extends Container implements Focusab
 			new Text(
 				theme.fg(
 					"muted",
-					`Navigate kinds: ${keyText("tui.input.tab")}. Toggle: ${keyText("tui.select.confirm")}. Mode: ${theme.fg("accent", "a")} allow / ${theme.fg("accent", "b")} block. Scope: ${theme.fg("accent", "s")} change.`,
+					`Navigate kinds: ${keyText("tui.input.tab")}. Toggle: ${keyText("tui.select.confirm")}. Mode: ${theme.fg("accent", "a")} allow / ${theme.fg("accent", "b")} block. Scope: ${theme.fg("accent", "s")} change. Edit: ${theme.fg("accent", "e")}.`,
 				),
 				0,
 				0,
@@ -323,6 +387,7 @@ export class ProfileResourceEditorComponent extends Container implements Focusab
 			`${keyText("tui.select.confirm")} toggle`,
 			`${keyText("tui.input.tab")} kind`,
 			`${keyText("app.models.save")} save`,
+			`${theme.fg("accent", "e")} edit`,
 			countText,
 		];
 		return this.isDirty
@@ -341,6 +406,18 @@ export class ProfileResourceEditorComponent extends Container implements Focusab
 
 	private updateList(): void {
 		this.listContainer.clear();
+
+		const kind = this.getCurrentKind();
+		const missingSet = this.missingIdsByKind.get(kind.kind) || new Set<string>();
+		const totalAvailableCount = kind.items.length + missingSet.size;
+
+		if (totalAvailableCount === 0) {
+			this.listContainer.addChild(
+				new Text(theme.fg("muted", "  (none available — add a Source or install resources)"), 0, 0),
+			);
+			this.descriptionText.setText(theme.fg("muted", "  No description available"));
+			return;
+		}
 
 		if (this.filteredItems.length === 0) {
 			this.listContainer.addChild(new Text(theme.fg("muted", "  No matching resources"), 0, 0));
@@ -437,6 +514,18 @@ export class ProfileResourceEditorComponent extends Container implements Focusab
 			this.isDirty = true;
 			this.kindHeaderText.setText(this.getKindHeaderText());
 			this.refresh();
+			return;
+		}
+
+		// Edit highlighted resource
+		if (data === "e" && this.searchInput.getValue() === "") {
+			const item = this.filteredItems[this.selectedIndex];
+			if (item && !item.isMissing && item.path) {
+				const kind = this.getCurrentKind().kind;
+				if (this.onEdit) {
+					this.onEdit(item.id, item.path, kind);
+				}
+			}
 			return;
 		}
 

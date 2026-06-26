@@ -7,6 +7,7 @@ import {
 import {
 	classifyResourceSource,
 	ProfileResourceEditorComponent,
+	resolveResourceEditPath,
 } from "../src/modes/interactive/components/profile-resource-editor.ts";
 import { SettingsSelectorComponent } from "../src/modes/interactive/components/settings-selector.ts";
 import { initTheme } from "../src/modes/interactive/theme/theme.ts";
@@ -174,10 +175,74 @@ describe("Library Manage UX - Increment 2", () => {
 			selector.getSettingsList().handleInput("resources");
 			const output = selector.render(140).join("\n");
 			expect(output).toContain("Resources");
-			expect(output).toContain("Manage profiles, situation library");
+			expect(output).toContain("Manage profiles/situations, library");
 
 			// The individual sources/profiles options should not exist in the top-level list
 			expect(output).not.toContain("Sources");
+		});
+	});
+
+	describe("Edit action path resolution", () => {
+		it("should resolve edit path correctly for non-extensions", () => {
+			expect(resolveResourceEditPath("read", undefined, "tools")).toBeUndefined();
+			expect(resolveResourceEditPath("skill1", "/path/to/skill1/SKILL.md", "skills")).toBe(
+				"/path/to/skill1/SKILL.md",
+			);
+			expect(resolveResourceEditPath("agent1", "/path/to/agent1.md", "agents")).toBe("/path/to/agent1.md");
+		});
+
+		it("should resolve extension dir index.ts/js or package.json entry", () => {
+			const fs = require("node:fs");
+			const path = require("node:path");
+			const os = require("node:os");
+
+			const tempDir = fs.mkdtempSync(path.join(os.tmpdir(), "pi-test-ext-"));
+			try {
+				// Case 1: index.ts exists
+				const extTsDir = path.join(tempDir, "ext-ts");
+				fs.mkdirSync(extTsDir);
+				fs.writeFileSync(path.join(extTsDir, "index.ts"), "ts");
+				expect(resolveResourceEditPath("ext-ts", extTsDir, "extensions")).toBe(path.join(extTsDir, "index.ts"));
+
+				// Case 2: index.js exists (no index.ts)
+				const extJsDir = path.join(tempDir, "ext-js");
+				fs.mkdirSync(extJsDir);
+				fs.writeFileSync(path.join(extJsDir, "index.js"), "js");
+				expect(resolveResourceEditPath("ext-js", extJsDir, "extensions")).toBe(path.join(extJsDir, "index.js"));
+
+				// Case 3: package.json with main exists
+				const extPkgDir = path.join(tempDir, "ext-pkg");
+				fs.mkdirSync(extPkgDir);
+				fs.writeFileSync(path.join(extPkgDir, "package.json"), JSON.stringify({ main: "src/entry.js" }));
+				const entryPath = path.join(extPkgDir, "src/entry.js");
+				fs.mkdirSync(path.join(extPkgDir, "src"));
+				fs.writeFileSync(entryPath, "entry");
+				expect(resolveResourceEditPath("ext-pkg", extPkgDir, "extensions")).toBe(entryPath);
+			} finally {
+				fs.rmSync(tempDir, { recursive: true, force: true });
+			}
+		});
+	});
+
+	describe("Empty/edge states", () => {
+		it("should render friendly empty state message when no items exist", () => {
+			const editor = new ProfileResourceEditorComponent({
+				profileName: "test-profile",
+				profileScope: "session",
+				initialResources: {},
+				kinds: [
+					{
+						kind: "skills",
+						label: "Skills",
+						items: [],
+					},
+				],
+				onSave: () => {},
+				onCancel: () => {},
+			});
+
+			const renderOutput = (editor as any).render(80).join("\n");
+			expect(renderOutput).toContain("(none available — add a Source or install resources)");
 		});
 	});
 });

@@ -1009,7 +1009,7 @@ export class SettingsSelectorComponent extends Container {
 		items.push({
 			id: "resources",
 			label: "Resources",
-			description: "Manage profiles, situation library, and external resource sources.",
+			description: "Manage profiles/situations, library, and external resource sources.",
 			currentValue: config.activeProfileName ?? "(none)",
 			submenu: (_currentValue, done) => {
 				const options: SelectItem[] = [];
@@ -1036,8 +1036,8 @@ export class SettingsSelectorComponent extends Container {
 
 				options.push({
 					value: "manage-profiles",
-					label: "Manage Profiles",
-					description: "Create, delete, or persist profile definitions.",
+					label: "Manage Profiles / Situations",
+					description: "Create, delete, or persist profile/situation definitions.",
 				});
 
 				options.push({
@@ -1048,7 +1048,7 @@ export class SettingsSelectorComponent extends Container {
 
 				return new SelectSubmenu(
 					"Resources Hub",
-					"Configure profiles and external resource catalogs.",
+					"Configure profiles/situations and external resource catalogs.",
 					options,
 					"",
 					(value) => {
