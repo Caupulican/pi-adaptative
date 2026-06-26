@@ -2641,6 +2641,16 @@ export class AgentSession {
 		);
 	}
 
+	/**
+	 * Resolve the active resource-profile tool allow/block filter from current settings.
+	 * Mirrors the construction-time derivation (settingsManager.getResourceProfileFilter("tools"))
+	 * so reload() can re-apply it after a live settings/profile edit.
+	 */
+	private _deriveToolProfileFilter(): Required<ResourceProfileFilterSettings> {
+		const filter = this.settingsManager.getResourceProfileFilter("tools");
+		return { allow: filter.allow ?? [], block: filter.block ?? [] };
+	}
+
 	private _refreshToolRegistry(options?: { activeToolNames?: string[]; includeAllExtensionTools?: boolean }): void {
 		const previousRegistryNames = new Set(this._toolRegistry.keys());
 		const previousActiveToolNames = this.getActiveToolNames();
@@ -2878,6 +2888,12 @@ export class AgentSession {
 		let newRunner: ExtensionRunner | undefined;
 		try {
 			await this.settingsManager.reload();
+			// Re-derive the resource-profile tool filter from the freshly reloaded settings.
+			// Unlike skills/prompts/themes (which re-filter through the resource loader on every
+			// reload), the tool filter is held on the session, so without this a live edit to the
+			// active profile's tools allow/block — or switching the active profile — would not
+			// apply on /reload and allowed tools would stay missing.
+			this._toolProfileFilter = this._deriveToolProfileFilter();
 			await this._resourceLoader.reload({ failOnExtensionErrors: true, deferExtensionDispose: true });
 			resetApiProviders();
 			this._buildRuntime({
