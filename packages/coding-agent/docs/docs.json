@@ -49,6 +49,14 @@
           "path": "skills.md"
         },
         {
+          "title": "Resource Profiles & Library",
+          "path": "resources.md"
+        },
+        {
+          "title": "Self-Adaptation",
+          "path": "self-adaptation.md"
+        },
+        {
           "title": "Prompt Templates",
           "path": "prompt-templates.md"
         },
