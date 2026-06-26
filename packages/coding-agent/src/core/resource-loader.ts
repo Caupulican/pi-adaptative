@@ -1,7 +1,7 @@
 import { existsSync, readdirSync, readFileSync, statSync } from "node:fs";
 import { join, resolve, sep } from "node:path";
 import chalk from "chalk";
-import { CONFIG_DIR_NAME, getBundledSkillsDir } from "../config.ts";
+import { CONFIG_DIR_NAME, getBundledPromptsDir, getBundledSkillsDir } from "../config.ts";
 import { loadThemeFromPath, type Theme } from "../modes/interactive/theme/theme.ts";
 import type { ResourceDiagnostic } from "./diagnostics.ts";
 
@@ -646,9 +646,13 @@ export class DefaultResourceLoader implements ResourceLoader {
 				}
 			}
 
+			const bundledPromptsDir = getBundledPromptsDir();
 			const promptPaths = this.noPromptTemplates
 				? this.mergePaths(cliEnabledPrompts, this.additionalPromptTemplatePaths)
-				: this.mergePaths([...cliEnabledPrompts, ...enabledPrompts], this.additionalPromptTemplatePaths);
+				: this.mergePaths(
+						[...cliEnabledPrompts, ...enabledPrompts, bundledPromptsDir],
+						this.additionalPromptTemplatePaths,
+					);
 
 			this.lastPromptPaths = promptPaths;
 			this.updatePromptsFromPaths(promptPaths, metadataByPath);

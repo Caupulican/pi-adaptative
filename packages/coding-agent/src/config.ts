@@ -462,6 +462,13 @@ export function getBundledSkillsDir(): string {
 	return join(getBundledResourcesDir(), "skills");
 }
 
+/**
+ * Get path to bundled prompts directory.
+ */
+export function getBundledPromptsDir(): string {
+	return join(getBundledResourcesDir(), "prompts");
+}
+
 // =============================================================================
 // App Config (from package.json piConfig)
 // =============================================================================
