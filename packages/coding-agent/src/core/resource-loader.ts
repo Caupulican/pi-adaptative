@@ -434,15 +434,15 @@ export class DefaultResourceLoader implements ResourceLoader {
 		this.lastThemePaths = snapshot.lastThemePaths;
 	}
 
-	commitReload(): void {
+	async commitReload(): Promise<void> {
 		if (!this.pendingReloadSnapshot) return;
-		disposeExtensionEventSubscriptions(this.pendingReloadSnapshot.extensionsResult.extensions);
+		await disposeExtensionEventSubscriptions(this.pendingReloadSnapshot.extensionsResult.extensions);
 		this.pendingReloadSnapshot = undefined;
 	}
 
-	rollbackReload(): void {
+	async rollbackReload(): Promise<void> {
 		if (!this.pendingReloadSnapshot) return;
-		disposeExtensionEventSubscriptions(this.extensionsResult.extensions);
+		await disposeExtensionEventSubscriptions(this.extensionsResult.extensions);
 		this.restoreSnapshot(this.pendingReloadSnapshot);
 		this.pendingReloadSnapshot = undefined;
 	}
@@ -660,11 +660,11 @@ export class DefaultResourceLoader implements ResourceLoader {
 			if (options.deferExtensionDispose) {
 				this.pendingReloadSnapshot = snapshot;
 			} else {
-				disposeExtensionEventSubscriptions(snapshot.extensionsResult.extensions);
+				await disposeExtensionEventSubscriptions(snapshot.extensionsResult.extensions);
 			}
 		} catch (error) {
 			if (this.extensionsResult !== snapshot.extensionsResult) {
-				disposeExtensionEventSubscriptions(this.extensionsResult.extensions);
+				await disposeExtensionEventSubscriptions(this.extensionsResult.extensions);
 			}
 			this.restoreSnapshot(snapshot);
 			throw error;

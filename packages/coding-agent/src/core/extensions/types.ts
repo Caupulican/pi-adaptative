@@ -1326,6 +1326,15 @@ export interface ExtensionAPI {
 	 */
 	unregisterProvider(name: string): void;
 
+	/**
+	 * Register a cleanup callback run when this extension is unloaded/reloaded.
+	 * Useful for disposing timers, event listeners, or other resources.
+	 *
+	 * Multiple callbacks can be registered; they run in registration order.
+	 * Exceptions in one callback do not prevent others from running.
+	 */
+	onDispose(fn: () => void | Promise<void>): void;
+
 	/** Shared event bus for extension communication. */
 	events: EventBus;
 }
@@ -1483,6 +1492,10 @@ export interface ExtensionRuntimeState {
 	 */
 	registerProvider: (name: string, config: ProviderConfig, extensionPath?: string) => void;
 	unregisterProvider: (name: string, extensionPath?: string) => void;
+	/** Map tracking which providers are owned by each extension (for clean unregister on unload). */
+	providersByExtension: Map<string, Set<string>>;
+	/** Get the list of provider names owned by an extension. */
+	getProvidersForExtension: (extensionPath: string) => string[];
 }
 
 /**
@@ -1574,6 +1587,8 @@ export interface Extension {
 	};
 	/** Unsubscribe callbacks for pi.events subscriptions, disposed when this generation is replaced (reload). */
 	eventUnsubscribes: Array<() => void>;
+	/** Cleanup callbacks registered via onDispose, run when extension is unloaded/reloaded. */
+	disposers: Array<() => void | Promise<void>>;
 }
 
 /** Result of loading extensions. */

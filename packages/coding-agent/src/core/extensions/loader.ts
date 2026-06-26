@@ -178,6 +178,8 @@ export function createExtensionRuntime(): ExtensionRuntime {
 		}
 	};
 
+	const providersByExtension = new Map<string, Set<string>>();
+
 	const runtime: ExtensionRuntime = {
 		sendMessage: notInitialized,
 		sendUserMessage: notInitialized,
@@ -209,6 +211,10 @@ export function createExtensionRuntime(): ExtensionRuntime {
 		},
 		unregisterProvider: (name) => {
 			runtime.pendingProviderRegistrations = runtime.pendingProviderRegistrations.filter((r) => r.name !== name);
+		},
+		providersByExtension,
+		getProvidersForExtension: (extensionPath: string) => {
+			return [...(providersByExtension.get(extensionPath) ?? [])];
 		},
 	};
 
@@ -368,6 +374,11 @@ function createExtensionAPI(
 			runtime.unregisterProvider(name, extension.path);
 		},
 
+		onDispose(fn: () => void | Promise<void>): void {
+			runtime.assertActive();
+			extension.disposers.push(fn);
+		},
+
 		// Track bus subscriptions per extension generation so hot reloads can
 		// unsubscribe replaced generations (see disposeExtensionEventSubscriptions).
 		events: {
@@ -387,7 +398,7 @@ function createExtensionAPI(
 	return api;
 }
 
-async function loadExtensionModule(extensionPath: string) {
+async function loadExtensionModule(extensionPath: string, opts?: { fresh?: boolean }) {
 	const jiti = createJiti(import.meta.url, {
 		moduleCache: false,
 		// In Bun binary: use virtualModules for bundled packages (no filesystem resolution)
@@ -396,7 +407,14 @@ async function loadExtensionModule(extensionPath: string) {
 		...(isBunBinary ? { virtualModules: VIRTUAL_MODULES, tryNative: false } : { alias: getAliases() }),
 	});
 
-	const module = await jiti.import(extensionPath, { default: true });
+	// When fresh mode is enabled, append a cache-busting query string to force re-import
+	let resolvedPath = extensionPath;
+	if (opts?.fresh) {
+		const separator = extensionPath.includes("?") ? "&" : "?";
+		resolvedPath = `${extensionPath}${separator}fresh=${Date.now()}`;
+	}
+
+	const module = await jiti.import(resolvedPath, { default: true });
 	const factory = module as ExtensionFactory;
 	return typeof factory !== "function" ? undefined : factory;
 }
@@ -422,16 +440,19 @@ function createExtension(extensionPath: string, resolvedPath: string): Extension
 		flags: new Map(),
 		shortcuts: new Map(),
 		eventUnsubscribes: [],
+		disposers: [],
 	};
 }
 
 /**
  * Unsubscribe a replaced extension generation's pi.events handlers from the shared
- * event bus. Without this, every hot reload leaves the previous generation's handlers
- * subscribed, pinning the old module graph in memory and double-processing events.
+ * event bus and invoke cleanup callbacks. Without this, every hot reload leaves the
+ * previous generation's handlers subscribed, pinning the old module graph in memory
+ * and double-processing events.
  */
-export function disposeExtensionEventSubscriptions(extensions: Extension[]): void {
+export async function disposeExtensionEventSubscriptions(extensions: Extension[]): Promise<void> {
 	for (const extension of extensions) {
+		// Unsubscribe event listeners
 		for (const unsubscribe of extension.eventUnsubscribes) {
 			try {
 				unsubscribe();
@@ -440,6 +461,19 @@ export function disposeExtensionEventSubscriptions(extensions: Extension[]): voi
 			}
 		}
 		extension.eventUnsubscribes.length = 0;
+
+		// Invoke cleanup callbacks
+		for (const disposer of extension.disposers) {
+			try {
+				const result = disposer();
+				if (result instanceof Promise) {
+					await result;
+				}
+			} catch {
+				// Disposal must never break a reload.
+			}
+		}
+		extension.disposers.length = 0;
 	}
 }
 

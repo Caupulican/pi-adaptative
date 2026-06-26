@@ -83,6 +83,7 @@ describe.skipIf(!API_KEY)("Compaction extensions", () => {
 			flags: new Map(),
 			shortcuts: new Map(),
 			eventUnsubscribes: [],
+			disposers: [],
 		};
 	}
 
@@ -258,6 +259,7 @@ describe.skipIf(!API_KEY)("Compaction extensions", () => {
 			flags: new Map(),
 			shortcuts: new Map(),
 			eventUnsubscribes: [],
+			disposers: [],
 		};
 
 		createSession([throwingExtension]);
@@ -308,6 +310,7 @@ describe.skipIf(!API_KEY)("Compaction extensions", () => {
 			flags: new Map(),
 			shortcuts: new Map(),
 			eventUnsubscribes: [],
+			disposers: [],
 		};
 
 		const extension2: Extension = {
@@ -340,6 +343,7 @@ describe.skipIf(!API_KEY)("Compaction extensions", () => {
 			flags: new Map(),
 			shortcuts: new Map(),
 			eventUnsubscribes: [],
+			disposers: [],
 		};
 
 		createSession([extension1, extension2]);
