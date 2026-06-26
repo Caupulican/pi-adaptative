@@ -1,5 +1,10 @@
 ## [Unreleased]
 
+### Fixed
+
+- Resolved the active profile's model and thinking level at startup (both headless and interactive) when no explicit CLI `--model` or `--thinking` flags are passed.
+- Handled profile model resolution failures gracefully by falling back to default/available models and issuing a warning rather than crashing.
+
 ## [0.80.49] - 2026-06-26
 
 ### Added

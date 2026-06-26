@@ -10,7 +10,7 @@ import { DEFAULT_THINKING_LEVEL } from "./defaults.ts";
 import type { ExtensionRunner, LoadExtensionsResult, SessionStartEvent, ToolDefinition } from "./extensions/index.ts";
 import { convertToLlm } from "./messages.ts";
 import { ModelRegistry } from "./model-registry.ts";
-import { findInitialModel } from "./model-resolver.ts";
+import { findInitialModel, resolveProfileModelSettings } from "./model-resolver.ts";
 import type { ResourceLoader } from "./resource-loader.ts";
 import { DefaultResourceLoader } from "./resource-loader.ts";
 import { parseResourceProfileInput } from "./resource-profile-blocks.ts";
@@ -252,6 +252,27 @@ export async function createAgentSession(options: CreateAgentSessionOptions = {}
 	let model = options.model;
 	let modelFallbackMessage: string | undefined;
 
+	let thinkingLevel = options.thinkingLevel;
+
+	const activeProfileNames = settingsManager.getActiveResourceProfileNames();
+	if (activeProfileNames.length > 0) {
+		const profileSettings = resolveProfileModelSettings({
+			activeProfileNames,
+			registry: settingsManager.getProfileRegistry(),
+			modelRegistry,
+			cwd,
+		});
+		if (profileSettings.error) {
+			modelFallbackMessage = `Profile model resolution error: ${profileSettings.error}`;
+		}
+		if (!model && profileSettings.model) {
+			model = profileSettings.model;
+		}
+		if (thinkingLevel === undefined && profileSettings.thinkingLevel) {
+			thinkingLevel = profileSettings.thinkingLevel;
+		}
+	}
+
 	// If session has data, try to restore model from it
 	if (!model && hasExistingSession && existingSession.model) {
 		const restoredModel = modelRegistry.find(existingSession.model.provider, existingSession.model.modelId);
@@ -280,8 +301,6 @@ export async function createAgentSession(options: CreateAgentSessionOptions = {}
 			modelFallbackMessage += `. Using ${model.provider}/${model.id}`;
 		}
 	}
-
-	let thinkingLevel = options.thinkingLevel;
 
 	// If session has data, restore thinking level from it
 	if (thinkingLevel === undefined && hasExistingSession) {

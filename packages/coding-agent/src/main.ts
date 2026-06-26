@@ -32,6 +32,7 @@ import {
 	resolveCliModel,
 	resolveCliProviderDefault,
 	resolveModelScope,
+	resolveProfileModelSettings,
 	type ScopedModel,
 } from "./core/model-resolver.ts";
 import { restoreStdout, takeOverStdout } from "./core/output-guard.ts";
@@ -347,6 +348,7 @@ function buildSessionOptions(
 	hasExistingSession: boolean,
 	modelRegistry: ModelRegistry,
 	settingsManager: SettingsManager,
+	cwd: string,
 ): {
 	options: CreateAgentSessionOptions;
 	cliThinkingFromModel: boolean;
@@ -385,6 +387,32 @@ function buildSessionOptions(
 				options.thinkingLevel = resolved.thinkingLevel;
 				cliThinkingFromModel = true;
 			}
+		}
+	}
+
+	// Model/Thinking from active profiles if not explicitly set via CLI flags
+	const activeProfileNames = settingsManager.getActiveResourceProfileNames();
+	if (activeProfileNames.length > 0) {
+		const profileSettings = resolveProfileModelSettings({
+			activeProfileNames,
+			registry: settingsManager.getProfileRegistry(),
+			modelRegistry,
+			cwd,
+		});
+		if (profileSettings.warning) {
+			diagnostics.push({ type: "warning", message: profileSettings.warning });
+		}
+		if (profileSettings.error) {
+			diagnostics.push({
+				type: "warning",
+				message: `Active profile model resolution error: ${profileSettings.error}`,
+			});
+		}
+		if (!options.model && profileSettings.model) {
+			options.model = profileSettings.model;
+		}
+		if (!parsed.thinking && profileSettings.thinkingLevel) {
+			options.thinkingLevel = profileSettings.thinkingLevel;
 		}
 	}
 
@@ -750,6 +778,7 @@ export async function main(args: string[], options?: MainOptions) {
 			sessionManager.buildSessionContext().messages.length > 0,
 			modelRegistry,
 			settingsManager,
+			cwd,
 		);
 		diagnostics.push(...sessionOptionDiagnostics);
 

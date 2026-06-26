@@ -9,6 +9,7 @@ import { minimatch } from "minimatch";
 import { isValidThinkingLevel } from "../cli/args.ts";
 import { DEFAULT_THINKING_LEVEL } from "./defaults.ts";
 import type { ModelRegistry } from "./model-registry.ts";
+import type { ProfileRegistry } from "./profile-registry.ts";
 
 /** Default model IDs for each known provider */
 export const defaultModelPerProvider: Record<KnownProvider, string> = {
@@ -715,4 +716,67 @@ export async function restoreModelFromSession(
 
 	// No models available
 	return { model: undefined, fallbackMessage: undefined };
+}
+
+export interface ResolvedProfileModelSettings {
+	model?: Model<any>;
+	thinkingLevel?: ThinkingLevel;
+	warning?: string;
+	error?: string;
+}
+
+export function resolveProfileModelSettings(options: {
+	activeProfileNames: string[];
+	registry: ProfileRegistry;
+	modelRegistry: ModelRegistry;
+	cwd: string;
+}): ResolvedProfileModelSettings {
+	const { activeProfileNames, registry, modelRegistry, cwd } = options;
+	let modelString: string | undefined;
+	let thinking: ThinkingLevel | undefined;
+
+	for (const profileName of activeProfileNames) {
+		const profile =
+			profileName.startsWith("./") || profileName.startsWith("../")
+				? registry.resolveProfileRef(profileName, cwd)
+				: registry.getProfile(profileName);
+		if (profile) {
+			if (!modelString && profile.model) {
+				modelString = profile.model;
+			}
+			if (!thinking && profile.thinking) {
+				thinking = profile.thinking;
+			}
+			if (modelString && thinking) {
+				break;
+			}
+		}
+	}
+
+	if (!modelString && !thinking) {
+		return {};
+	}
+
+	const result: ResolvedProfileModelSettings = {};
+	if (modelString) {
+		const resolved = resolveCliModel({ cliModel: modelString, modelRegistry });
+		if (resolved.error) {
+			result.error = resolved.error;
+		}
+		if (resolved.warning) {
+			result.warning = resolved.warning;
+		}
+		if (resolved.model) {
+			result.model = resolved.model;
+		}
+		if (resolved.thinkingLevel && !thinking) {
+			thinking = resolved.thinkingLevel;
+		}
+	}
+
+	if (thinking) {
+		result.thinkingLevel = thinking;
+	}
+
+	return result;
 }
