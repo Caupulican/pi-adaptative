@@ -316,13 +316,13 @@ export default (pi) => {
 			);
 
 			// Mock streaming state
-			(session as any).isStreaming = true;
+			Object.defineProperty(session, "isStreaming", { get: () => true, configurable: true });
 
 			await expect(session.loadExtensionLive(extFile)).rejects.toThrow(
 				"Cannot load extension while the agent is streaming",
 			);
 
-			(session as any).isStreaming = false;
+			Object.defineProperty(session, "isStreaming", { get: () => false, configurable: true });
 		});
 
 		it.skipIf(!API_KEY)("prevents load while context compaction is active", async () => {
@@ -339,13 +339,13 @@ export default (pi) => {
 			);
 
 			// Mock compaction state
-			(session as any).isCompacting = true;
+			Object.defineProperty(session, "isCompacting", { get: () => true, configurable: true });
 
 			await expect(session.loadExtensionLive(extFile)).rejects.toThrow(
 				"Cannot load extension while context compaction",
 			);
 
-			(session as any).isCompacting = false;
+			Object.defineProperty(session, "isCompacting", { get: () => false, configurable: true });
 		});
 	});
 
@@ -442,6 +442,7 @@ export default (pi) => {
 	pi.registerProvider("live-unload-test-provider", {
 		name: "Live Unload Test Provider",
 		baseUrl: "https://test.example.com",
+		apiKey: "dummy-key",
 		api: "custom-api",
 		models: [{
 			id: "test-model",
@@ -503,13 +504,13 @@ export default (pi) => {
 			await session.loadExtensionLive(extFile);
 
 			// Mock streaming state
-			(session as any).isStreaming = true;
+			Object.defineProperty(session, "isStreaming", { get: () => true, configurable: true });
 
 			await expect(session.unloadExtensionLive(extFile)).rejects.toThrow(
 				"Cannot unload extension while the agent is streaming",
 			);
 
-			(session as any).isStreaming = false;
+			Object.defineProperty(session, "isStreaming", { get: () => false, configurable: true });
 		});
 
 		it.skipIf(!API_KEY)("prevents unload while context compaction is active", async () => {
@@ -529,13 +530,13 @@ export default (pi) => {
 			await session.loadExtensionLive(extFile);
 
 			// Mock compaction state
-			(session as any).isCompacting = true;
+			Object.defineProperty(session, "isCompacting", { get: () => true, configurable: true });
 
 			await expect(session.unloadExtensionLive(extFile)).rejects.toThrow(
 				"Cannot unload extension while context compaction",
 			);
 
-			(session as any).isCompacting = false;
+			Object.defineProperty(session, "isCompacting", { get: () => false, configurable: true });
 		});
 	});
 
