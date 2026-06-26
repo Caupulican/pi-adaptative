@@ -28,24 +28,20 @@ describe("buildSystemPrompt", () => {
 	});
 
 	describe("default tools", () => {
-		test("includes adaptive MAPE and tenant-safety guardrails", () => {
+		test("includes the adaptive operating posture guardrails", () => {
 			const prompt = buildSystemPrompt({
 				contextFiles: [],
 				skills: [],
 				cwd: process.cwd(),
 			});
 
-			expect(prompt).toContain("Use a lightweight MAPE loop for adaptive work");
-			expect(prompt).toContain("Trigger self-evolution when evidence shows");
-			expect(prompt).toContain("do not evolve durable behavior for one-off project facts");
-			expect(prompt).toContain("Choose the lowest durable layer");
-			expect(prompt).toContain("core only for generic platform behavior");
-			expect(prompt).toContain("generated operational state out of target repositories");
-			expect(prompt).toContain("default to current-session or current-tenant state");
-			expect(prompt).toContain("Do not bake user-specific provider names");
-			expect(prompt).toContain("fresh bounded judge pass with the same active provider/model route");
-			expect(prompt).toContain("reviewer/judge output as evidence, not authority");
-			expect(prompt).toContain("confront Automata/user memory");
+			// The verbose MAPE/self-evolution block was condensed into the "Adaptive operating
+			// posture" guardrails (token-burst reduction); assert the current concise content.
+			expect(prompt).toContain("Adaptive operating posture:");
+			expect(prompt).toContain("Prefer the smallest safe action");
+			expect(prompt).toContain("ask before credentials, destructive actions, publish/push/tag/release");
+			expect(prompt).toContain("Keep durable learning concise and auditable");
+			expect(prompt).toContain("use explicit tools/profiles and validate changes before claiming success");
 		});
 
 		test("includes all default tools when snippets are provided", () => {

@@ -1,5 +1,9 @@
 ## [Unreleased]
 
+### Fixed
+
+- Updated stale `auto-learn-spawn` and `system-prompt` tests that asserted pre-token-reduction prompt content and a hardcoded complex-task threshold, so they match the current condensed system prompt and the configurable `complexTaskToolCalls` setting. Unblocks the CI publish gate.
+
 ## [0.80.43] - 2026-06-26
 
 ### Added

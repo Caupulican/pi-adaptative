@@ -426,6 +426,7 @@ await new Promise((resolve) => setTimeout(resolve, 1000));
 			reflectionCooldownMinutes: 60,
 			reflectionMinToolCalls: 99,
 			maxConcurrentLearners: 1,
+			complexTaskToolCalls: 5,
 		});
 		mode.runtimeHost = {
 			session: {
@@ -464,6 +465,7 @@ await new Promise((resolve) => setTimeout(resolve, 1000));
 			"reflection behavioral self-improvement signal",
 			{
 				applyHighConfidence: true,
+				complexTaskToolCalls: 5,
 			} as any,
 			{ kind: "reflection", turnDigest: "latest user correction" },
 		);
