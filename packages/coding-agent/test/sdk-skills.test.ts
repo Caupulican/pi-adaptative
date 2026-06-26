@@ -59,6 +59,9 @@ This is a test skill.
 			getAgentsFiles: () => ({ agentsFiles: [] }),
 			getSystemPrompt: () => undefined,
 			getAppendSystemPrompt: () => [],
+			getLoadedExtension: () => undefined,
+			removeLoadedExtension: () => undefined,
+			loadSingleExtension: async () => ({ extension: null, error: "Not implemented" }),
 			extendResources: () => {},
 			reload: async () => {},
 		};
@@ -92,6 +95,9 @@ This is a test skill.
 			getAgentsFiles: () => ({ agentsFiles: [] }),
 			getSystemPrompt: () => undefined,
 			getAppendSystemPrompt: () => [],
+			getLoadedExtension: () => undefined,
+			removeLoadedExtension: () => undefined,
+			loadSingleExtension: async () => ({ extension: null, error: "Not implemented" }),
 			extendResources: () => {},
 			reload: async () => {},
 		};

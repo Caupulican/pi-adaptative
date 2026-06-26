@@ -477,16 +477,17 @@ export async function disposeExtensionEventSubscriptions(extensions: Extension[]
 	}
 }
 
-async function loadExtension(
+export async function loadExtension(
 	extensionPath: string,
 	cwd: string,
 	eventBus: EventBus,
 	runtime: ExtensionRuntime,
+	opts?: { fresh?: boolean },
 ): Promise<{ extension: Extension | null; error: string | null }> {
 	const resolvedPath = resolvePath(extensionPath, cwd, { normalizeUnicodeSpaces: true });
 
 	try {
-		const factory = await loadExtensionModule(resolvedPath);
+		const factory = await loadExtensionModule(resolvedPath, opts);
 		if (!factory) {
 			return { extension: null, error: `Extension does not export a valid factory function: ${extensionPath}` };
 		}

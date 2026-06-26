@@ -82,6 +82,7 @@ import {
 	type TurnStartEvent,
 	wrapRegisteredTools,
 } from "./extensions/index.ts";
+import { disposeExtensionEventSubscriptions } from "./extensions/loader.ts";
 import { emitSessionShutdownEvent } from "./extensions/runner.ts";
 import { compactToolResultDetailsForRetention } from "./message-retention.ts";
 import type { BashExecutionMessage, CustomMessage } from "./messages.ts";
@@ -2889,6 +2890,119 @@ export class AgentSession {
 			throw error;
 		}
 	}
+
+	/**
+	 * Unload a single extension without full reload.
+	 * Runs the extension's session_shutdown lifecycle, unregisters its providers,
+	 * disposes its event subscriptions, and rebuilds the runtime.
+	 * Falls back to full reload on error.
+	 */
+	async unloadExtensionLive(extensionPath: string): Promise<void> {
+		if (this.isStreaming) {
+			throw new Error("Cannot unload extension while the agent is streaming or a tool call is active");
+		}
+		if (this.isCompacting) {
+			throw new Error("Cannot unload extension while context compaction or branch summarization is active");
+		}
+
+		const ext = this._resourceLoader.getLoadedExtension(extensionPath);
+		if (!ext) {
+			return; // Nothing to unload
+		}
+
+		const previousRunner = this._extensionRunner;
+		try {
+			// Run session_shutdown lifecycle for this extension only
+			await this._extensionRunner.emitToExtension(ext, { type: "session_shutdown", reason: "unload" });
+
+			// Unregister its providers (keyed by the extension's own path, as registered)
+			const runtime = this._resourceLoader.getExtensions().runtime;
+			for (const name of runtime.getProvidersForExtension(ext.path)) {
+				runtime.unregisterProvider(name, ext.path);
+			}
+
+			// Dispose its event subscriptions and run disposers
+			await disposeExtensionEventSubscriptions([ext]);
+
+			// Remove from loaded extensions
+			this._resourceLoader.removeLoadedExtension(extensionPath);
+
+			// Rebuild runtime with new extension set
+			const activeToolNames = this.getActiveToolNames();
+			const previousFlagValues = previousRunner.getFlagValues();
+			this._buildRuntime({
+				activeToolNames,
+				flagValues: previousFlagValues,
+				includeAllExtensionTools: true,
+			});
+			previousRunner.invalidate();
+
+			// Invoke refresh hook if available
+			this._onExtensionsChanged?.();
+		} catch (error) {
+			// Fall back to full reload on error
+			try {
+				await this.reload();
+			} catch {
+				// Suppress nested error; original error will be thrown below
+			}
+			throw error;
+		}
+	}
+
+	/**
+	 * Load a single extension without full reload.
+	 * Loads the extension with fresh import, rebuilds the runtime,
+	 * and runs the extension's session_start lifecycle.
+	 * Falls back to full reload on error.
+	 */
+	async loadExtensionLive(extensionPath: string): Promise<void> {
+		if (this.isStreaming) {
+			throw new Error("Cannot load extension while the agent is streaming or a tool call is active");
+		}
+		if (this.isCompacting) {
+			throw new Error("Cannot load extension while context compaction or branch summarization is active");
+		}
+
+		const previousRunner = this._extensionRunner;
+		try {
+			// Load the extension with fresh import
+			const { extension, error } = await this._resourceLoader.loadSingleExtension(extensionPath);
+			if (error || !extension) {
+				throw new Error(error || `Failed to load extension: ${extensionPath}`);
+			}
+
+			// Rebuild runtime to aggregate tools/commands/handlers/providers
+			const activeToolNames = this.getActiveToolNames();
+			const previousFlagValues = previousRunner.getFlagValues();
+			this._buildRuntime({
+				activeToolNames,
+				flagValues: previousFlagValues,
+				includeAllExtensionTools: true,
+			});
+
+			// Run session_start lifecycle for the new extension only
+			await this._extensionRunner.emitToExtension(extension, { type: "session_start", reason: "load" });
+
+			// Invoke refresh hook if available
+			this._onExtensionsChanged?.();
+		} catch (error) {
+			// Fall back to full reload on error
+			try {
+				await this.reload();
+			} catch {
+				// Suppress nested error; original error will be thrown below
+			}
+			throw error;
+		}
+	}
+
+	/**
+	 * Optional hook for extensions changed (load/unload).
+	 * Can be overridden by UI layer to trigger refresh.
+	 * @protected
+	 */
+	protected _onExtensionsChanged?(): void;
 
 	// =========================================================================
 	// Auto-Retry

@@ -12,6 +12,7 @@ import { createEventBus, type EventBus } from "./event-bus.ts";
 import {
 	createExtensionRuntime,
 	disposeExtensionEventSubscriptions,
+	loadExtension,
 	loadExtensionFromFactory,
 	loadExtensions,
 } from "./extensions/loader.ts";
@@ -50,6 +51,9 @@ export interface ResourceLoader {
 	getAgentsFiles(): { agentsFiles: Array<{ path: string; content?: string }> };
 	getSystemPrompt(): string | undefined;
 	getAppendSystemPrompt(): string[];
+	getLoadedExtension(path: string): Extension | undefined;
+	removeLoadedExtension(path: string): Extension | undefined;
+	loadSingleExtension(path: string): Promise<{ extension: Extension | null; error: string | null }>;
 	extendResources(paths: ResourceExtensionPaths): void;
 	reload(options?: ResourceReloadOptions): Promise<void>;
 	commitReload?(): void;
@@ -352,6 +356,48 @@ export class DefaultResourceLoader implements ResourceLoader {
 
 	getAppendSystemPrompt(): string[] {
 		return this.appendSystemPrompt;
+	}
+
+	/**
+	 * Get a loaded extension by path.
+	 * Matches by path or resolvedPath.
+	 */
+	getLoadedExtension(extensionPath: string): Extension | undefined {
+		return this.extensionsResult.extensions.find(
+			(ext) => ext.path === extensionPath || ext.resolvedPath === extensionPath,
+		);
+	}
+
+	/**
+	 * Remove and return a loaded extension from the extensions array.
+	 */
+	removeLoadedExtension(extensionPath: string): Extension | undefined {
+		const index = this.extensionsResult.extensions.findIndex(
+			(ext) => ext.path === extensionPath || ext.resolvedPath === extensionPath,
+		);
+		if (index === -1) return undefined;
+		const [ext] = this.extensionsResult.extensions.splice(index, 1);
+		return ext;
+	}
+
+	/**
+	 * Load a single extension with fresh import, reusing the shared runtime.
+	 * Returns the loaded extension or null with error details.
+	 */
+	async loadSingleExtension(extensionPath: string): Promise<{ extension: Extension | null; error: string | null }> {
+		const result = await loadExtension(extensionPath, this.cwd, this.eventBus, this.extensionsResult.runtime, {
+			fresh: true,
+		});
+		if (result.extension && !result.error) {
+			const loaded = result.extension;
+			// Drop any stale generation at the same path, then register the freshly loaded one so
+			// _buildRuntime() aggregates it.
+			this.extensionsResult.extensions = this.extensionsResult.extensions.filter(
+				(e) => e.path !== loaded.path && e.resolvedPath !== loaded.resolvedPath,
+			);
+			this.extensionsResult.extensions.push(loaded);
+		}
+		return result;
 	}
 
 	extendResources(paths: ResourceExtensionPaths): void {

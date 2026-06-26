@@ -742,6 +742,32 @@ export class ExtensionRunner {
 		return result as RunnerEmitResult<TEvent>;
 	}
 
+	/**
+	 * Emit an event to a single extension only.
+	 * Used for granular load/unload lifecycle events (session_start/session_shutdown)
+	 * without triggering all other extensions' handlers.
+	 */
+	async emitToExtension(extension: Extension, event: RunnerEmitEvent): Promise<void> {
+		const ctx = this.createContext();
+		const handlers = extension.handlers.get(event.type);
+		if (!handlers || handlers.length === 0) return;
+
+		for (const handler of handlers) {
+			try {
+				await handler(event, ctx);
+			} catch (err) {
+				const message = err instanceof Error ? err.message : String(err);
+				const stack = err instanceof Error ? err.stack : undefined;
+				this.emitError({
+					extensionPath: extension.path,
+					event: event.type,
+					error: message,
+					stack,
+				});
+			}
+		}
+	}
+
 	async emitMessageEnd(event: MessageEndEvent): Promise<AgentMessage | undefined> {
 		const ctx = this.createContext();
 		let currentMessage = event.message;

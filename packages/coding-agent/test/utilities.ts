@@ -222,6 +222,9 @@ export function createTestResourceLoader(options: CreateTestResourceLoaderOption
 		getAgentsFiles: () => ({ agentsFiles: [] }),
 		getSystemPrompt: () => undefined,
 		getAppendSystemPrompt: () => [],
+		getLoadedExtension: () => undefined,
+		removeLoadedExtension: () => undefined,
+		loadSingleExtension: async () => ({ extension: null, error: "Not implemented in mock" }),
 		extendResources: () => {},
 		reload: async () => {},
 	};
