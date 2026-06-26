@@ -440,6 +440,28 @@ export function getBundledInteractiveAssetPath(name: string): string {
 	return join(getInteractiveAssetsDir(), name);
 }
 
+/**
+ * Get path to bundled resources directory (shipped with package).
+ * - For Bun binary: bundled-resources/ next to executable
+ * - For Node.js (dist/): dist/bundled-resources/
+ * - For tsx (src/): src/bundled-resources/
+ */
+export function getBundledResourcesDir(): string {
+	if (isBunBinary) {
+		return join(getPackageDir(), "bundled-resources");
+	}
+	const packageDir = getPackageDir();
+	const srcOrDist = existsSync(join(packageDir, "src")) ? "src" : "dist";
+	return join(packageDir, srcOrDist, "bundled-resources");
+}
+
+/**
+ * Get path to bundled skills directory.
+ */
+export function getBundledSkillsDir(): string {
+	return join(getBundledResourcesDir(), "skills");
+}
+
 // =============================================================================
 // App Config (from package.json piConfig)
 // =============================================================================

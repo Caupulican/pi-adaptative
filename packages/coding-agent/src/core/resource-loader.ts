@@ -1,7 +1,7 @@
 import { existsSync, readdirSync, readFileSync, statSync } from "node:fs";
 import { join, resolve, sep } from "node:path";
 import chalk from "chalk";
-import { CONFIG_DIR_NAME } from "../config.ts";
+import { CONFIG_DIR_NAME, getBundledSkillsDir } from "../config.ts";
 import { loadThemeFromPath, type Theme } from "../modes/interactive/theme/theme.ts";
 import type { ResourceDiagnostic } from "./diagnostics.ts";
 
@@ -629,9 +629,11 @@ export class DefaultResourceLoader implements ResourceLoader {
 			this.extensionsResult = resolvedExtensionsResult;
 			this.applyExtensionSourceInfo(this.extensionsResult.extensions, metadataByPath);
 
+			// Build skill paths with precedence: CLI > user/project > bundled > additional
+			const bundledSkillsDir = getBundledSkillsDir();
 			const skillPaths = this.noSkills
-				? this.mergePaths(cliEnabledSkills, this.additionalSkillPaths)
-				: this.mergePaths([...cliEnabledSkills, ...enabledSkills], this.additionalSkillPaths);
+				? this.mergePaths([...cliEnabledSkills, bundledSkillsDir], this.additionalSkillPaths)
+				: this.mergePaths([...cliEnabledSkills, ...enabledSkills, bundledSkillsDir], this.additionalSkillPaths);
 
 			this.lastSkillPaths = skillPaths;
 			this.updateSkillsFromPaths(skillPaths, metadataByPath);
