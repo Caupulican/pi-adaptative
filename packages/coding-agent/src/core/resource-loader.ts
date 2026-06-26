@@ -632,7 +632,7 @@ export class DefaultResourceLoader implements ResourceLoader {
 			// Build skill paths with precedence: CLI > user/project > bundled > additional
 			const bundledSkillsDir = getBundledSkillsDir();
 			const skillPaths = this.noSkills
-				? this.mergePaths([...cliEnabledSkills, bundledSkillsDir], this.additionalSkillPaths)
+				? this.mergePaths([...cliEnabledSkills], this.additionalSkillPaths)
 				: this.mergePaths([...cliEnabledSkills, ...enabledSkills, bundledSkillsDir], this.additionalSkillPaths);
 
 			this.lastSkillPaths = skillPaths;
