@@ -856,5 +856,65 @@ describe("SettingsManager", () => {
 			expect(manager.getProfileRegistry().getProfile("reviewer")?.source).toBeUndefined();
 			expect(manager.getActiveResourceProfileNames().includes("reviewer")).toBe(false);
 		});
+
+		it("persists the active profile selection to directory scope", async () => {
+			const manager = SettingsManager.create(projectDir, agentDir);
+			manager.setActiveProfile("reviewer", "directory");
+			await manager.flush();
+
+			const freshManager = SettingsManager.create(projectDir, agentDir);
+			expect(freshManager.getActiveResourceProfileNames()).toContain("reviewer");
+		});
+
+		it("persists the active profile selection to project scope", async () => {
+			const manager = SettingsManager.create(projectDir, agentDir);
+			manager.setActiveProfile("reviewer", "project");
+			await manager.flush();
+
+			const freshManager = SettingsManager.create(projectDir, agentDir);
+			expect(freshManager.getActiveResourceProfileNames()).toContain("reviewer");
+		});
+
+		it("persists the active profile selection to global scope", async () => {
+			const manager = SettingsManager.create(projectDir, agentDir);
+			manager.setActiveProfile("reviewer", "global");
+			await manager.flush();
+
+			const freshManager = SettingsManager.create(projectDir, agentDir);
+			expect(freshManager.getActiveResourceProfileNames()).toContain("reviewer");
+		});
+
+		it("clears the active profile selection when set to undefined", async () => {
+			const manager = SettingsManager.create(projectDir, agentDir);
+			manager.setActiveProfile("reviewer", "directory");
+			await manager.flush();
+
+			manager.setActiveProfile(undefined, "directory");
+			await manager.flush();
+
+			const freshManager = SettingsManager.create(projectDir, agentDir);
+			expect(freshManager.getActiveResourceProfileNames()).not.toContain("reviewer");
+		});
+
+		it("writes profile resources to a reusable profile file", async () => {
+			const manager = SettingsManager.create(projectDir, agentDir);
+			manager.setProfileDefinition(
+				"reviewer",
+				{
+					resources: {
+						tools: { allow: ["read", "grep"] },
+					},
+				},
+				"reusable-file",
+			);
+			manager.setActiveProfile("reviewer", "global");
+			await manager.flush();
+
+			const freshManager = SettingsManager.create(projectDir, agentDir);
+			const profile = freshManager.getProfileRegistry().getProfile("reviewer");
+			expect(profile?.resources.tools?.allow).toEqual(["read", "grep"]);
+			expect(freshManager.getResourceProfileFilter("tools").allow).toContain("read");
+			expect(freshManager.getResourceProfileFilter("tools").allow).toContain("grep");
+		});
 	});
 });

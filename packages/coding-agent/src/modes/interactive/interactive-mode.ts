@@ -99,6 +99,7 @@ import type {
 import { BUILTIN_SLASH_COMMANDS } from "../../core/slash-commands.ts";
 import type { SourceInfo } from "../../core/source-info.ts";
 import { isInstallTelemetryEnabled } from "../../core/telemetry.ts";
+import { allToolNames } from "../../core/tools/index.ts";
 import type { TruncationResult } from "../../core/tools/truncate.ts";
 import { hasProjectTrustInputs, ProjectTrustStore } from "../../core/trust-manager.ts";
 import { getChangelogPath, getNewEntries, parseChangelog } from "../../utils/changelog.ts";
@@ -130,6 +131,10 @@ import { formatKeyText, keyDisplayText, keyHint, keyText, rawKeyHint } from "./c
 import { LoginDialogComponent } from "./components/login-dialog.ts";
 import { ModelSelectorComponent } from "./components/model-selector.ts";
 import { type AuthSelectorProvider, OAuthSelectorComponent } from "./components/oauth-selector.ts";
+import {
+	ProfileResourceEditorComponent,
+	type ProfileResourceEditorKind,
+} from "./components/profile-resource-editor.ts";
 import { ProfileSelectorComponent } from "./components/profile-selector.ts";
 import { ScopedModelsSelectorComponent } from "./components/scoped-models-selector.ts";
 import { SessionSelectorComponent } from "./components/session-selector.ts";
@@ -6007,6 +6012,18 @@ export class InteractiveMode {
 						done();
 						void this.applyProfile(profile);
 					},
+					onProfileEdit: (profileName) => {
+						done();
+						void this.openProfileResourceEditor(profileName);
+					},
+					onProfilePersistActive: (scope) => {
+						done();
+						this.persistActiveProfile(scope);
+					},
+					onProfileDelete: (profileName) => {
+						done();
+						this.deleteProfileFromSource(profileName);
+					},
 					onCancel: () => {
 						done();
 						this.ui.requestRender();
@@ -6116,6 +6133,124 @@ export class InteractiveMode {
 				void this.maybeWarnAboutAnthropicSubscriptionAuth(appliedModel);
 				this.checkDaxnutsEasterEgg(appliedModel);
 			}
+		} catch (error) {
+			this.showError(error instanceof Error ? error.message : String(error));
+		}
+	}
+
+	private getProfileResourceKinds(): ProfileResourceEditorKind[] {
+		const loader = this.session.resourceLoader;
+		const base = (p: string) => p.split(/[\\/]/).pop() ?? p;
+		return [
+			{ kind: "tools", label: "Tools", allIds: [...allToolNames] },
+			{ kind: "skills", label: "Skills", allIds: loader.getSkills().skills.map((s) => s.name) },
+			{
+				kind: "extensions",
+				label: "Extensions",
+				allIds: loader.getExtensions().extensions.map((e) => base(e.path)),
+			},
+			{ kind: "agents", label: "Agents", allIds: loader.getAgentsFiles().agentsFiles.map((f) => base(f.path)) },
+			{ kind: "prompts", label: "Prompts", allIds: loader.getPrompts().prompts.map((p) => p.name) },
+			{ kind: "themes", label: "Themes", allIds: getAvailableThemes() },
+		];
+	}
+
+	/** Map where a profile currently lives to the scope we should write it back to. */
+	private scopeForProfileSource(source: string): "session" | "directory" | "project" | "global" | "reusable-file" {
+		switch (source) {
+			case "profile-file":
+				return "reusable-file";
+			case "directory-overlay":
+			case "embedded":
+				return "directory";
+			case "inline":
+				return "session";
+			default:
+				return "global"; // "settings"
+		}
+	}
+
+	private async refreshAfterProfileMutation(profileName: string): Promise<void> {
+		if (this.settingsManager.getActiveResourceProfileNames().includes(profileName)) {
+			await this.handleReloadCommand();
+			const active = this.settingsManager.getActiveResourceProfileNames()[0] ?? "(none)";
+			this.footerDataProvider.setExtensionStatus("profile", active);
+			this.footer.invalidate();
+			this.updateEditorBorderColor();
+		}
+	}
+
+	private async openProfileResourceEditor(profileName: string): Promise<void> {
+		const profile = this.settingsManager.getProfileRegistry().getProfile(profileName);
+		if (!profile) {
+			this.showError(`Profile not found: ${profileName}`);
+			return;
+		}
+		const scope = this.scopeForProfileSource(profile.source);
+		const kinds = this.getProfileResourceKinds();
+		this.showSelector((done) => {
+			const editor = new ProfileResourceEditorComponent({
+				profileName: profile.name,
+				initialResources: profile.resources,
+				kinds,
+				onSave: (resources) => {
+					done();
+					try {
+						this.settingsManager.setProfileDefinition(
+							profile.name,
+							{
+								name: profile.name,
+								description: profile.description,
+								model: profile.model,
+								thinking: profile.thinking,
+								resources,
+							},
+							scope,
+						);
+						this.showStatus(`Saved profile "${profile.name}" to ${scope}.`);
+						void this.refreshAfterProfileMutation(profile.name);
+					} catch (error) {
+						this.showError(error instanceof Error ? error.message : String(error));
+					}
+				},
+				onCancel: () => {
+					done();
+					this.ui.requestRender();
+				},
+			});
+			return { component: editor, focus: editor };
+		});
+	}
+
+	private persistActiveProfile(scope: "session" | "directory" | "project" | "global"): void {
+		const active = this.settingsManager.getActiveResourceProfileNames()[0];
+		if (!active) {
+			this.showError("No active profile to persist. Select one with /profiles first.");
+			return;
+		}
+		try {
+			if (scope === "session") {
+				this.settingsManager.setRuntimeResourceProfiles([active]);
+			} else {
+				this.settingsManager.setActiveProfile(active, scope);
+			}
+			this.showStatus(`Active profile "${active}" persisted to ${scope}.`);
+		} catch (error) {
+			this.showError(error instanceof Error ? error.message : String(error));
+		}
+	}
+
+	private deleteProfileFromSource(profileName: string): void {
+		const profile = this.settingsManager.getProfileRegistry().getProfile(profileName);
+		if (!profile) {
+			this.showError(`Profile not found: ${profileName}`);
+			return;
+		}
+		const scope = this.scopeForProfileSource(profile.source);
+		try {
+			this.settingsManager.deleteProfile(profileName, scope);
+			this.showStatus(`Deleted profile "${profileName}" from ${scope}.`);
+			void this.refreshAfterProfileMutation(profileName);
 		} catch (error) {
 			this.showError(error instanceof Error ? error.message : String(error));
 		}

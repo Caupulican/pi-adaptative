@@ -214,6 +214,9 @@ export interface SettingsCallbacks {
 	onAutonomyChange: (settings: AutonomySettings, scope: SettingsScope) => void;
 	onAutoLearnChange: (settings: AutoLearnSettings, scope: SettingsScope) => void;
 	onProfileChange?: (profileName: string) => void;
+	onProfileEdit?: (profileName: string) => void;
+	onProfilePersistActive?: (scope: "session" | "directory" | "project" | "global") => void;
+	onProfileDelete?: (profileName: string) => void;
 	onCancel: () => void;
 }
 
@@ -1014,6 +1017,78 @@ export class SettingsSelectorComponent extends Container {
 						currentValue,
 						(value) => {
 							callbacks.onProfileChange?.(value);
+							done(value);
+						},
+						() => done(),
+					),
+			});
+		}
+
+		const editableProfiles = profileOptions.filter((o) => o.value !== "(none)");
+		if (editableProfiles.length > 0 && callbacks.onProfileEdit) {
+			items.push({
+				id: "profile-edit",
+				label: "Edit profile resources",
+				description: "Toggle which tools/skills/etc. a profile allows (saved to where it lives).",
+				currentValue: "",
+				submenu: (_currentValue, done) =>
+					new SelectSubmenu(
+						"Edit profile resources",
+						"Pick a profile to edit its resource allow/block lists.",
+						editableProfiles,
+						activeProfileName,
+						(value) => {
+							callbacks.onProfileEdit?.(value);
+							done(value);
+						},
+						() => done(),
+					),
+			});
+		}
+		if (callbacks.onProfilePersistActive) {
+			const scopeOptions = [
+				{ value: "session", label: "session", description: "Runtime only (not written to disk)" },
+				{
+					value: "directory",
+					label: "directory",
+					description: "~/.pi/agent/resource-profiles/<hash>/settings.json",
+				},
+				{ value: "project", label: "project", description: ".pi/settings.json" },
+				{ value: "global", label: "global", description: "~/.pi/agent/settings.json" },
+			];
+			items.push({
+				id: "profile-persist-active",
+				label: "Persist active profile to",
+				description: "Save the current active-profile selection so it survives restart.",
+				currentValue: "",
+				submenu: (_currentValue, done) =>
+					new SelectSubmenu(
+						"Persist active profile",
+						"Choose where to write the active-profile selection.",
+						scopeOptions,
+						"directory",
+						(value) => {
+							callbacks.onProfilePersistActive?.(value as "session" | "directory" | "project" | "global");
+							done(value);
+						},
+						() => done(),
+					),
+			});
+		}
+		if (editableProfiles.length > 0 && callbacks.onProfileDelete) {
+			items.push({
+				id: "profile-delete",
+				label: "Delete profile",
+				description: "Remove a profile definition from where it is stored.",
+				currentValue: "",
+				submenu: (_currentValue, done) =>
+					new SelectSubmenu(
+						"Delete profile",
+						"Pick a profile to delete.",
+						editableProfiles,
+						activeProfileName,
+						(value) => {
+							callbacks.onProfileDelete?.(value);
 							done(value);
 						},
 						() => done(),
