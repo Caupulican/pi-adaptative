@@ -182,6 +182,8 @@ export interface SettingsConfig {
 	autoLearnModelOptions?: SelectItem[];
 	activeProfileName?: string;
 	profileOptions?: SelectItem[];
+	externalResourceRoots?: string[];
+	trustedResourceRoots?: string[];
 }
 
 export interface SettingsCallbacks {
@@ -218,6 +220,8 @@ export interface SettingsCallbacks {
 	onProfileEdit?: (profileName: string) => void;
 	onProfilePersistActive?: (scope: "session" | "directory" | "project" | "global") => void;
 	onProfileDelete?: (profileName: string) => void;
+	onAddExternalResourceRoot?: () => void;
+	onRemoveExternalResourceRoot?: (root: string) => void;
 	onCancel: () => void;
 }
 
@@ -723,8 +727,12 @@ class WarningSettingsSubmenu extends Container {
 	}
 }
 
-class SelectSubmenu extends Container {
+export class SelectSubmenu extends Container {
 	private selectList: SelectList;
+
+	getSelectList(): SelectList {
+		return this.selectList;
+	}
 
 	constructor(
 		title: string,
@@ -1002,6 +1010,48 @@ export class SettingsSelectorComponent extends Container {
 					),
 			},
 		];
+
+		const externalRoots = config.externalResourceRoots ?? [];
+		const trustedRoots = config.trustedResourceRoots ?? [];
+		if (callbacks.onAddExternalResourceRoot && callbacks.onRemoveExternalResourceRoot) {
+			items.push({
+				id: "sources",
+				label: "Sources",
+				description: "Manage external resource roots (skills, extensions, prompts, themes, profiles).",
+				currentValue: `${externalRoots.length} roots`,
+				submenu: (_currentValue, done) => {
+					const options = [
+						{
+							value: "__add__",
+							label: "+ Add external root...",
+							description: "Register a new external directory root",
+						},
+						...externalRoots.map((r) => ({
+							value: r,
+							label: r,
+							description: trustedRoots.includes(r)
+								? "Trusted (select to remove)"
+								: "Untrusted (select to remove)",
+						})),
+					];
+					return new SelectSubmenu(
+						"Sources",
+						"Manage external resource roots. Adding a root requires trust confirmation.",
+						options,
+						"__add__",
+						(value) => {
+							done();
+							if (value === "__add__") {
+								callbacks.onAddExternalResourceRoot?.();
+							} else {
+								callbacks.onRemoveExternalResourceRoot?.(value);
+							}
+						},
+						() => done(),
+					);
+				},
+			});
+		}
 
 		if (profileOptions.length > 0 && callbacks.onProfileChange) {
 			const autonomyIndex = items.findIndex((item) => item.id === "autonomy");

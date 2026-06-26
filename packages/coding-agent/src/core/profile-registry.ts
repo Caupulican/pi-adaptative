@@ -40,6 +40,7 @@ export interface ProfileRegistryOptions {
 	inlineResourceProfileDefinitions: Record<string, ResourceProfileSettings>;
 	discoveredResourceProfileDefinitions: Record<string, ResourceProfileSettings>;
 	profilesDir?: string;
+	externalResourceRoots?: string[];
 }
 
 const RESOURCE_PROFILE_KINDS: ResourceProfileKind[] = ["extensions", "skills", "prompts", "themes", "agents", "tools"];
@@ -236,7 +237,7 @@ export class ProfileRegistry {
 			add({ ...profile, source: "project-settings" }, 3);
 		}
 		for (const profile of this.loadProfileFiles()) {
-			add(profile.profile, 4);
+			add(profile.profile, profile.precedence);
 		}
 		for (const profile of normalizeSettingsProfiles(this.options.globalSettings, "global-settings")) {
 			add({ ...profile, source: "global-settings" }, 5);
@@ -249,25 +250,49 @@ export class ProfileRegistry {
 	}
 
 	private loadProfileFiles(): ProfileCandidate[] {
-		const profilesDir = this.options.profilesDir;
-		if (!profilesDir || !existsSync(profilesDir)) return [];
-		let entries: string[];
-		try {
-			entries = readdirSync(profilesDir)
-				.filter((entry) => entry.endsWith(".json"))
-				.sort();
-		} catch (error) {
-			this.diagnostics.push({ source: "profile-file", path: profilesDir, message: String(error) });
-			return [];
-		}
-		const profiles: ProfileCandidate[] = [];
+		const candidates: ProfileCandidate[] = [];
 		let order = 0;
-		for (const entry of entries) {
-			const sourcePath = join(profilesDir, entry);
-			const loaded = this.loadProfileFile(sourcePath, "profile-file", order++);
-			if (loaded) profiles.push(loaded);
+
+		const profilesDir = this.options.profilesDir;
+		if (profilesDir && existsSync(profilesDir)) {
+			try {
+				const entries = readdirSync(profilesDir)
+					.filter((entry) => entry.endsWith(".json"))
+					.sort();
+				for (const entry of entries) {
+					const sourcePath = join(profilesDir, entry);
+					const loaded = this.loadProfileFile(sourcePath, "profile-file", order++);
+					if (loaded) {
+						candidates.push({ ...loaded, precedence: 4 });
+					}
+				}
+			} catch (error) {
+				this.diagnostics.push({ source: "profile-file", path: profilesDir, message: String(error) });
+			}
 		}
-		return profiles;
+
+		const externalRoots = this.options.externalResourceRoots ?? [];
+		for (const root of externalRoots) {
+			const extProfilesDir = join(root, "profiles");
+			if (existsSync(extProfilesDir)) {
+				try {
+					const entries = readdirSync(extProfilesDir)
+						.filter((entry) => entry.endsWith(".json"))
+						.sort();
+					for (const entry of entries) {
+						const sourcePath = join(extProfilesDir, entry);
+						const loaded = this.loadProfileFile(sourcePath, "profile-file", order++);
+						if (loaded) {
+							candidates.push({ ...loaded, precedence: 4.1 });
+						}
+					}
+				} catch (error) {
+					this.diagnostics.push({ source: "profile-file", path: extProfilesDir, message: String(error) });
+				}
+			}
+		}
+
+		return candidates;
 	}
 
 	private loadProfileFile(sourcePath: string, source: ProfileSource, order: number): ProfileCandidate | undefined {

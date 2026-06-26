@@ -1,5 +1,10 @@
 ## [Unreleased]
 
+### Added
+
+- Added support for configuring `externalResourceRoots` and `trustedResourceRoots` to scan and load external directories for skills, extensions, prompts, themes, and profiles.
+- Added `/settings → Sources` UI to manage (add, trust, and remove) external resource roots.
+
 ## [0.80.45] - 2026-06-26
 
 ### Added

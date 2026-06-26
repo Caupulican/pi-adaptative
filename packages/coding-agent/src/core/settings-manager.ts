@@ -1,7 +1,8 @@
 import type { Transport } from "@caupulican/pi-ai";
 import { createHash } from "crypto";
-import { existsSync, mkdirSync, readFileSync, rmSync, statSync, writeFileSync } from "fs";
+import { existsSync, mkdirSync, readFileSync, realpathSync, rmSync, statSync, writeFileSync } from "fs";
 import { minimatch } from "minimatch";
+import { homedir } from "os";
 import { basename, dirname, join, relative, resolve, sep } from "path";
 import lockfile from "proper-lockfile";
 import { CONFIG_DIR_NAME, getAgentDir, getProfilesDir } from "../config.ts";
@@ -169,6 +170,8 @@ export interface Settings {
 	skills?: string[]; // Array of local skill file paths/directories or include/exclude patterns
 	prompts?: string[]; // Array of local prompt template paths/directories or include/exclude patterns
 	themes?: string[]; // Array of local theme file paths/directories or include/exclude patterns
+	externalResourceRoots?: string[]; // External directory roots to scan for resources
+	trustedResourceRoots?: string[]; // Explicitly trusted external directory roots (canonical absolute paths)
 	disabledResources?: DisabledResourcesSettings; // Legacy reversible block filters for extensions/skills/prompts/themes/agents/tools
 	resourceProfiles?: Record<string, ResourceProfileSettings>; // Named resource allow/block filters
 	activeResourceProfile?: string | string[]; // Active profile name(s), applied after global/project/directory settings merge
@@ -595,6 +598,7 @@ export class SettingsManager {
 			inlineResourceProfileDefinitions: this.inlineResourceProfileDefinitions,
 			discoveredResourceProfileDefinitions: this.discoveredResourceProfileDefinitions,
 			profilesDir: this.storage.getProfilesDir?.(),
+			externalResourceRoots: this.getEffectiveExternalResourceRoots(),
 		});
 	}
 
@@ -2156,5 +2160,81 @@ export class SettingsManager {
 		this.globalSettings.autoLearn = { ...settings };
 		this.markModified("autoLearn");
 		this.save();
+	}
+
+	getExternalResourceRoots(): string[] {
+		return this.settings.externalResourceRoots ?? [];
+	}
+
+	setExternalResourceRoots(roots: string[], scope: SettingsScope = "global"): void {
+		if (scope === "project") {
+			const projectSettings = structuredClone(this.projectSettings);
+			projectSettings.externalResourceRoots = [...roots];
+			this.markProjectModified("externalResourceRoots");
+			this.saveProjectSettings(projectSettings);
+			return;
+		}
+
+		this.globalSettings.externalResourceRoots = [...roots];
+		this.markModified("externalResourceRoots");
+		this.save();
+	}
+
+	getTrustedResourceRoots(): string[] {
+		return this.settings.trustedResourceRoots ?? [];
+	}
+
+	setTrustedResourceRoots(roots: string[], scope: SettingsScope = "global"): void {
+		if (scope === "project") {
+			const projectSettings = structuredClone(this.projectSettings);
+			projectSettings.trustedResourceRoots = [...roots];
+			this.markProjectModified("trustedResourceRoots");
+			this.saveProjectSettings(projectSettings);
+			return;
+		}
+
+		this.globalSettings.trustedResourceRoots = [...roots];
+		this.markModified("trustedResourceRoots");
+		this.save();
+	}
+
+	addTrustedResourceRoot(path: string, scope: SettingsScope = "global"): void {
+		const canonicalPath = this.canonicalizePath(path);
+		if (!canonicalPath) return;
+
+		const current = this.getTrustedResourceRoots();
+		if (!current.includes(canonicalPath)) {
+			this.setTrustedResourceRoots([...current, canonicalPath], scope);
+		}
+	}
+
+	canonicalizePath(p: string): string | null {
+		try {
+			const resolved = resolve(p.replace(/^~/, homedir()));
+			if (existsSync(resolved)) {
+				return realpathSync(resolved);
+			}
+			return resolved;
+		} catch {
+			return null;
+		}
+	}
+
+	getEffectiveExternalResourceRoots(): string[] {
+		const roots = this.getExternalResourceRoots();
+		const trusted = this.getTrustedResourceRoots();
+
+		const canonicalTrusted = new Set(
+			trusted.map((t) => this.canonicalizePath(t)).filter((t): t is string => t !== null),
+		);
+
+		const effective: string[] = [];
+		for (const r of roots) {
+			const canonicalR = this.canonicalizePath(r);
+			if (canonicalR && canonicalR.trim() !== "" && canonicalTrusted.has(canonicalR) && existsSync(canonicalR)) {
+				effective.push(canonicalR);
+			}
+		}
+		return effective;
 	}
 }

@@ -139,7 +139,7 @@ import {
 import { ProfileSelectorComponent } from "./components/profile-selector.ts";
 import { ScopedModelsSelectorComponent } from "./components/scoped-models-selector.ts";
 import { SessionSelectorComponent } from "./components/session-selector.ts";
-import { SettingsSelectorComponent } from "./components/settings-selector.ts";
+import { SelectSubmenu, SettingsSelectorComponent } from "./components/settings-selector.ts";
 import { SkillInvocationMessageComponent } from "./components/skill-invocation-message.ts";
 import { ToolExecutionComponent } from "./components/tool-execution.ts";
 import { ToolGroupComponent } from "./components/tool-group.ts";
@@ -5870,6 +5870,8 @@ export class InteractiveMode {
 						: undefined,
 					activeProfileName: this.settingsManager.getActiveResourceProfileNames()[0],
 					profileOptions,
+					externalResourceRoots: this.settingsManager.getExternalResourceRoots(),
+					trustedResourceRoots: this.settingsManager.getTrustedResourceRoots(),
 				},
 				{
 					onAutoCompactChange: (enabled) => {
@@ -6034,6 +6036,14 @@ export class InteractiveMode {
 					onProfileDelete: (profileName) => {
 						done();
 						this.deleteProfileFromSource(profileName);
+					},
+					onAddExternalResourceRoot: () => {
+						done();
+						void this.addExternalResourceRootFlow();
+					},
+					onRemoveExternalResourceRoot: (root) => {
+						done();
+						void this.removeExternalResourceRootFlow(root);
 					},
 					onCancel: () => {
 						done();
@@ -6366,6 +6376,103 @@ export class InteractiveMode {
 			this.settingsManager.deleteProfile(profileName, scope);
 			this.showStatus(`Deleted profile "${profileName}" from ${scope}.`);
 			void this.refreshAfterProfileMutation(profileName);
+		} catch (error) {
+			this.showError(error instanceof Error ? error.message : String(error));
+		}
+	}
+
+	private async addExternalResourceRootFlow(): Promise<void> {
+		const rootPath = await new Promise<string | undefined>((resolve) => {
+			this.showSelector((done) => {
+				const input = new ExtensionInputComponent(
+					"Add External Root",
+					"Enter external root directory path",
+					(value) => {
+						done();
+						resolve(value);
+					},
+					() => {
+						done();
+						resolve(undefined);
+					},
+					{ tui: this.ui },
+				);
+				return { component: input, focus: input };
+			});
+		});
+
+		if (rootPath === undefined) {
+			this.ui.requestRender();
+			return;
+		}
+
+		const trimmed = rootPath.trim();
+		if (!trimmed) {
+			this.showError("Directory path cannot be empty");
+			return;
+		}
+
+		const canonical = this.settingsManager.canonicalizePath(trimmed);
+		if (!canonical) {
+			this.showError(`Invalid path: ${trimmed}`);
+			return;
+		}
+
+		// Prompt for trust confirmation (Yes/No)
+		const trust = await new Promise<boolean>((resolve) => {
+			this.showSelector((done) => {
+				const submenu = new SelectSubmenu(
+					"Trust external source?",
+					"This directory can load custom extensions that execute arbitrary code on your machine.",
+					[
+						{ value: "yes", label: "Yes", description: "Trust this directory and enable loading resources." },
+						{ value: "no", label: "No", description: "Do not trust this directory. Skip loading resources." },
+					],
+					"no",
+					(value) => {
+						done();
+						resolve(value === "yes");
+					},
+					() => {
+						done();
+						resolve(false);
+					},
+				);
+				return { component: submenu, focus: submenu.getSelectList() };
+			});
+		});
+
+		if (!trust) {
+			this.showStatus("Aborted. External root was not trusted.");
+			return;
+		}
+
+		try {
+			const currentRoots = this.settingsManager.getExternalResourceRoots();
+			if (!currentRoots.includes(canonical)) {
+				this.settingsManager.setExternalResourceRoots([...currentRoots, canonical], "global");
+			}
+			this.settingsManager.addTrustedResourceRoot(canonical, "global");
+			this.showStatus(`Added trusted external root: ${canonical}`);
+			await this.handleReloadCommand();
+		} catch (error) {
+			this.showError(error instanceof Error ? error.message : String(error));
+		}
+	}
+
+	private async removeExternalResourceRootFlow(root: string): Promise<void> {
+		try {
+			const currentRoots = this.settingsManager.getExternalResourceRoots();
+			const currentTrusted = this.settingsManager.getTrustedResourceRoots();
+
+			const newRoots = currentRoots.filter((r) => r !== root);
+			const newTrusted = currentTrusted.filter((r) => r !== root);
+
+			this.settingsManager.setExternalResourceRoots(newRoots, "global");
+			this.settingsManager.setTrustedResourceRoots(newTrusted, "global");
+
+			this.showStatus(`Removed external root: ${root}`);
+			await this.handleReloadCommand();
 		} catch (error) {
 			this.showError(error instanceof Error ? error.message : String(error));
 		}

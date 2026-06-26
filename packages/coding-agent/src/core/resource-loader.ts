@@ -592,9 +592,47 @@ export class DefaultResourceLoader implements ResourceLoader {
 			const cliEnabledPrompts = getEnabledPaths(cliExtensionPaths.prompts);
 			const cliEnabledThemes = getEnabledPaths(cliExtensionPaths.themes);
 
+			// Gather effective external resource roots
+			const effectiveRoots = this.settingsManager.getEffectiveExternalResourceRoots();
+
+			// Discover external extensions
+			const externalExtensions: string[] = [];
+			for (const root of effectiveRoots) {
+				const extDir = join(root, "extensions");
+				if (existsSync(extDir)) {
+					try {
+						const entries = readdirSync(extDir, { withFileTypes: true });
+						for (const entry of entries) {
+							let isDir = entry.isDirectory();
+							if (entry.isSymbolicLink()) {
+								try {
+									const stats = statSync(join(extDir, entry.name));
+									isDir = stats.isDirectory();
+								} catch {
+									continue;
+								}
+							}
+							if (isDir) {
+								const entryPath = join(extDir, entry.name);
+								if (
+									existsSync(join(entryPath, "index.ts")) ||
+									existsSync(join(entryPath, "index.js")) ||
+									existsSync(join(entryPath, "package.json"))
+								) {
+									externalExtensions.push(entryPath);
+									metadataByPath.set(entryPath, { source: "external", scope: "user", origin: "top-level" });
+								}
+							}
+						}
+					} catch {
+						// silent
+					}
+				}
+			}
+
 			const extensionPaths = this.noExtensions
 				? cliEnabledExtensions
-				: this.mergePaths(cliEnabledExtensions, enabledExtensions);
+				: this.mergePaths(cliEnabledExtensions, [...enabledExtensions, ...externalExtensions]);
 
 			const extensionsResult = await loadExtensions(extensionPaths, this.cwd, this.eventBus);
 			const inlineExtensions = await this.loadExtensionFactories(extensionsResult.runtime);
@@ -629,11 +667,45 @@ export class DefaultResourceLoader implements ResourceLoader {
 			this.extensionsResult = resolvedExtensionsResult;
 			this.applyExtensionSourceInfo(this.extensionsResult.extensions, metadataByPath);
 
+			// Discover external skills
+			const externalSkills: string[] = [];
+			for (const root of effectiveRoots) {
+				const skillsDir = join(root, "skills");
+				if (existsSync(skillsDir)) {
+					try {
+						const entries = readdirSync(skillsDir, { withFileTypes: true });
+						for (const entry of entries) {
+							let isDir = entry.isDirectory();
+							if (entry.isSymbolicLink()) {
+								try {
+									const stats = statSync(join(skillsDir, entry.name));
+									isDir = stats.isDirectory();
+								} catch {
+									continue;
+								}
+							}
+							if (isDir) {
+								const entryPath = join(skillsDir, entry.name);
+								const skillFile = join(entryPath, "SKILL.md");
+								const targetPath = existsSync(skillFile) ? skillFile : entryPath;
+								externalSkills.push(targetPath);
+								metadataByPath.set(targetPath, { source: "external", scope: "user", origin: "top-level" });
+							}
+						}
+					} catch {
+						// silent
+					}
+				}
+			}
+
 			// Build skill paths with precedence: CLI > user/project > bundled > additional
 			const bundledSkillsDir = getBundledSkillsDir();
 			const skillPaths = this.noSkills
 				? this.mergePaths([...cliEnabledSkills], this.additionalSkillPaths)
-				: this.mergePaths([...cliEnabledSkills, ...enabledSkills, bundledSkillsDir], this.additionalSkillPaths);
+				: this.mergePaths(
+						[...cliEnabledSkills, ...enabledSkills, ...externalSkills, bundledSkillsDir],
+						this.additionalSkillPaths,
+					);
 
 			this.lastSkillPaths = skillPaths;
 			this.updateSkillsFromPaths(skillPaths, metadataByPath);
@@ -646,11 +718,24 @@ export class DefaultResourceLoader implements ResourceLoader {
 				}
 			}
 
+			// Discover external prompts
+			const externalPrompts: string[] = [];
+			for (const root of effectiveRoots) {
+				const promptsDir = join(root, "prompts");
+				if (existsSync(promptsDir)) {
+					const files = collectFilesRecursively(promptsDir, /\.md$/);
+					for (const f of files) {
+						externalPrompts.push(f);
+						metadataByPath.set(f, { source: "external", scope: "user", origin: "top-level" });
+					}
+				}
+			}
+
 			const bundledPromptsDir = getBundledPromptsDir();
 			const promptPaths = this.noPromptTemplates
 				? this.mergePaths(cliEnabledPrompts, this.additionalPromptTemplatePaths)
 				: this.mergePaths(
-						[...cliEnabledPrompts, ...enabledPrompts, bundledPromptsDir],
+						[...cliEnabledPrompts, ...enabledPrompts, ...externalPrompts, bundledPromptsDir],
 						this.additionalPromptTemplatePaths,
 					);
 
@@ -669,9 +754,22 @@ export class DefaultResourceLoader implements ResourceLoader {
 				}
 			}
 
+			// Discover external themes
+			const externalThemes: string[] = [];
+			for (const root of effectiveRoots) {
+				const themesDir = join(root, "themes");
+				if (existsSync(themesDir)) {
+					const files = collectFilesRecursively(themesDir, /\.json$/);
+					for (const f of files) {
+						externalThemes.push(f);
+						metadataByPath.set(f, { source: "external", scope: "user", origin: "top-level" });
+					}
+				}
+			}
+
 			const themePaths = this.noThemes
 				? this.mergePaths(cliEnabledThemes, this.additionalThemePaths)
-				: this.mergePaths([...cliEnabledThemes, ...enabledThemes], this.additionalThemePaths);
+				: this.mergePaths([...cliEnabledThemes, ...enabledThemes, ...externalThemes], this.additionalThemePaths);
 
 			this.lastThemePaths = themePaths;
 			this.updateThemesFromPaths(themePaths, metadataByPath);
@@ -1182,4 +1280,40 @@ export class DefaultResourceLoader implements ResourceLoader {
 
 		return conflicts;
 	}
+}
+
+function collectFilesRecursively(dir: string, pattern: RegExp): string[] {
+	const files: string[] = [];
+	if (!existsSync(dir)) return files;
+
+	try {
+		const entries = readdirSync(dir, { withFileTypes: true });
+		for (const entry of entries) {
+			if (entry.name.startsWith(".")) continue;
+			if (entry.name === "node_modules") continue;
+
+			const fullPath = join(dir, entry.name);
+			let isDir = entry.isDirectory();
+			let isFile = entry.isFile();
+
+			if (entry.isSymbolicLink()) {
+				try {
+					const stats = statSync(fullPath);
+					isDir = stats.isDirectory();
+					isFile = stats.isFile();
+				} catch {
+					continue;
+				}
+			}
+
+			if (isDir) {
+				files.push(...collectFilesRecursively(fullPath, pattern));
+			} else if (isFile && pattern.test(entry.name)) {
+				files.push(fullPath);
+			}
+		}
+	} catch {
+		// silent
+	}
+	return files;
 }

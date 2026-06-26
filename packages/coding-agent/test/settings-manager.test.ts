@@ -1,4 +1,4 @@
-import { existsSync, mkdirSync, readFileSync, rmSync, writeFileSync } from "fs";
+import { existsSync, mkdirSync, readFileSync, realpathSync, rmSync, writeFileSync } from "fs";
 import { homedir } from "os";
 import { join } from "path";
 import { afterEach, beforeEach, describe, expect, it } from "vitest";
@@ -946,6 +946,37 @@ describe("SettingsManager", () => {
 			expect(profile?.resources.tools?.allow).toEqual(["read", "grep"]);
 			expect(freshManager.getResourceProfileFilter("tools").allow).toContain("read");
 			expect(freshManager.getResourceProfileFilter("tools").allow).toContain("grep");
+		});
+
+		describe("external resource roots settings", () => {
+			it("round-trip: gets effective external roots matching trusted and existing", async () => {
+				const manager = SettingsManager.create(projectDir, agentDir);
+				const tempRoot1 = join(agentDir, "temp-root-1");
+				const tempRoot2 = join(agentDir, "temp-root-2");
+				mkdirSync(tempRoot1, { recursive: true });
+
+				manager.setExternalResourceRoots([tempRoot1, tempRoot2], "global");
+				manager.setTrustedResourceRoots([tempRoot1, tempRoot2], "global");
+				await manager.flush();
+
+				const freshManager = SettingsManager.create(projectDir, agentDir);
+				const effective = freshManager.getEffectiveExternalResourceRoots();
+				expect(effective).toContain(realpathSync(tempRoot1));
+				expect(effective).not.toContain(tempRoot2);
+			});
+
+			it("skips untrusted roots", async () => {
+				const manager = SettingsManager.create(projectDir, agentDir);
+				const tempRoot1 = join(agentDir, "temp-root-1");
+				mkdirSync(tempRoot1, { recursive: true });
+
+				manager.setExternalResourceRoots([tempRoot1], "global");
+				manager.setTrustedResourceRoots([], "global");
+				await manager.flush();
+
+				const freshManager = SettingsManager.create(projectDir, agentDir);
+				expect(freshManager.getEffectiveExternalResourceRoots()).not.toContain(realpathSync(tempRoot1));
+			});
 		});
 	});
 });

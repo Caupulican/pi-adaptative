@@ -745,4 +745,120 @@ export default function(pi: ExtensionAPI) {
 			expect(runner.getToolDefinition("duplicate-tool")?.description).toBe("explicit tool");
 		});
 	});
+
+	describe("external resource roots in loader", () => {
+		it("should discover skills when external root is trusted and existing", async () => {
+			const settingsManager = SettingsManager.create(cwd, agentDir);
+			const extRoot = join(tempDir, "ext-root");
+			const extSkillDir = join(extRoot, "skills", "ext-skill");
+			mkdirSync(extSkillDir, { recursive: true });
+			writeFileSync(
+				join(extSkillDir, "SKILL.md"),
+				`---
+name: ext-skill
+description: External skill
+---
+Content`,
+			);
+
+			// Not trusted initially
+			settingsManager.setExternalResourceRoots([extRoot], "global");
+			await settingsManager.flush();
+
+			let loader = new DefaultResourceLoader({ cwd, agentDir, settingsManager });
+			await loader.reload();
+			let { skills } = loader.getSkills();
+			expect(skills.some((s) => s.name === "ext-skill")).toBe(false);
+
+			// Trust the root
+			settingsManager.addTrustedResourceRoot(extRoot, "global");
+			await settingsManager.flush();
+
+			loader = new DefaultResourceLoader({ cwd, agentDir, settingsManager });
+			await loader.reload();
+			({ skills } = loader.getSkills());
+			expect(skills.some((s) => s.name === "ext-skill")).toBe(true);
+		});
+
+		it("should silently ignore missing paths", async () => {
+			const settingsManager = SettingsManager.create(cwd, agentDir);
+			const extRoot = join(tempDir, "non-existent-ext-root");
+			settingsManager.setExternalResourceRoots([extRoot], "global");
+			settingsManager.addTrustedResourceRoot(extRoot, "global");
+			await settingsManager.flush();
+
+			const loader = new DefaultResourceLoader({ cwd, agentDir, settingsManager });
+			await expect(loader.reload()).resolves.toBeUndefined();
+		});
+
+		it("profile registry: discovers profiles from external root", async () => {
+			const settingsManager = SettingsManager.create(cwd, agentDir);
+			const extRoot = join(tempDir, "ext-root-profile");
+			const extProfilesDir = join(extRoot, "profiles");
+			mkdirSync(extProfilesDir, { recursive: true });
+			writeFileSync(
+				join(extProfilesDir, "ext-profile.json"),
+				JSON.stringify({
+					name: "ext-profile",
+					description: "External Profile description",
+					resources: {
+						tools: { allow: ["read"] },
+					},
+				}),
+			);
+
+			settingsManager.setExternalResourceRoots([extRoot], "global");
+			settingsManager.addTrustedResourceRoot(extRoot, "global");
+			await settingsManager.flush();
+
+			// Reload the settings manager so it gets the profiles
+			await settingsManager.reload();
+
+			const registry = settingsManager.getProfileRegistry();
+			const profiles = registry.listProfiles();
+			const found = profiles.find((p) => p.name === "ext-profile");
+			expect(found).toBeDefined();
+			expect(found?.description).toBe("External Profile description");
+		});
+
+		it("precedence: same-name skill in user local directory shadows the external root's copy", async () => {
+			const settingsManager = SettingsManager.create(cwd, agentDir);
+			const extRoot = join(tempDir, "ext-root-precedence");
+			const extSkillDir = join(extRoot, "skills", "shadowed-skill");
+			mkdirSync(extSkillDir, { recursive: true });
+			writeFileSync(
+				join(extSkillDir, "SKILL.md"),
+				`---
+name: shadowed-skill
+description: External description
+---
+Content`,
+			);
+
+			// User skill
+			const userSkillDir = join(agentDir, "skills", "shadowed-skill");
+			mkdirSync(userSkillDir, { recursive: true });
+			writeFileSync(
+				join(userSkillDir, "SKILL.md"),
+				`---
+name: shadowed-skill
+description: User description
+---
+Content`,
+			);
+
+			settingsManager.setExternalResourceRoots([extRoot], "global");
+			settingsManager.addTrustedResourceRoot(extRoot, "global");
+			await settingsManager.flush();
+
+			const loader = new DefaultResourceLoader({ cwd, agentDir, settingsManager });
+			await loader.reload();
+
+			const { skills } = loader.getSkills();
+			const skill = skills.find((s) => s.name === "shadowed-skill");
+			expect(skill).toBeDefined();
+			// User skill should win over external root's copy
+			expect(skill?.description).toBe("User description");
+		});
+	});
 });
