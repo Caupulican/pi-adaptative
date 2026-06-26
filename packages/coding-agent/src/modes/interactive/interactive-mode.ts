@@ -96,6 +96,7 @@ import type {
 	SelfModificationSettings,
 	SettingsScope,
 } from "../../core/settings-manager.ts";
+import { validateSkillName } from "../../core/skills.ts";
 import { BUILTIN_SLASH_COMMANDS } from "../../core/slash-commands.ts";
 import type { SourceInfo } from "../../core/source-info.ts";
 import { isInstallTelemetryEnabled } from "../../core/telemetry.ts";
@@ -6018,6 +6019,10 @@ export class InteractiveMode {
 						done();
 						void this.applyProfile(profile);
 					},
+					onProfileCreate: () => {
+						done();
+						void this.createProfileFlow();
+					},
 					onProfileEdit: (profileName) => {
 						done();
 						void this.openProfileResourceEditor(profileName);
@@ -6186,6 +6191,89 @@ export class InteractiveMode {
 			this.footer.invalidate();
 			this.updateEditorBorderColor();
 		}
+	}
+
+	private async createProfileFlow(): Promise<void> {
+		const name = await new Promise<string | undefined>((resolve) => {
+			this.showSelector((done) => {
+				const input = new ExtensionInputComponent(
+					"Create Profile",
+					"Enter profile name",
+					(value) => {
+						done();
+						resolve(value);
+					},
+					() => {
+						done();
+						resolve(undefined);
+					},
+					{ tui: this.ui },
+				);
+				return { component: input, focus: input };
+			});
+		});
+
+		if (name === undefined) {
+			this.ui.requestRender();
+			return;
+		}
+
+		const trimmed = name.trim();
+		if (!trimmed) {
+			this.showError("Profile name cannot be empty");
+			return this.createProfileFlow();
+		}
+
+		// Validate name rules using validateSkillName
+		const errors = validateSkillName(trimmed);
+		if (errors.length > 0) {
+			this.showError(`Invalid profile name: ${errors.join(", ")}`);
+			return this.createProfileFlow();
+		}
+
+		// Collision check
+		const existing = this.settingsManager.getProfileRegistry().getProfile(trimmed);
+		if (existing) {
+			this.showError(`Profile "${trimmed}" already exists`);
+			return this.createProfileFlow();
+		}
+
+		// Open the resource editor on the NEW profile
+		void this.openNewProfileEditor(trimmed);
+	}
+
+	private async openNewProfileEditor(profileName: string): Promise<void> {
+		const scope = "reusable-file";
+		const kinds = await this.getProfileResourceKinds();
+		this.showSelector((done) => {
+			const editor = new ProfileResourceEditorComponent({
+				profileName,
+				initialResources: {},
+				kinds,
+				onSave: (resources) => {
+					done();
+					try {
+						this.settingsManager.setProfileDefinition(
+							profileName,
+							{
+								name: profileName,
+								resources,
+							},
+							scope,
+						);
+						this.showStatus(`Saved profile "${profileName}" to ${scope}.`);
+						this.ui.requestRender();
+					} catch (error) {
+						this.showError(error instanceof Error ? error.message : String(error));
+					}
+				},
+				onCancel: () => {
+					done();
+					this.ui.requestRender();
+				},
+			});
+			return { component: editor, focus: editor };
+		});
 	}
 
 	private async openProfileResourceEditor(profileName: string): Promise<void> {

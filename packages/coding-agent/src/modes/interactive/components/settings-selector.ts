@@ -214,6 +214,7 @@ export interface SettingsCallbacks {
 	onAutonomyChange: (settings: AutonomySettings, scope: SettingsScope) => void;
 	onAutoLearnChange: (settings: AutoLearnSettings, scope: SettingsScope) => void;
 	onProfileChange?: (profileName: string) => void;
+	onProfileCreate?: () => void;
 	onProfileEdit?: (profileName: string) => void;
 	onProfilePersistActive?: (scope: "session" | "directory" | "project" | "global") => void;
 	onProfileDelete?: (profileName: string) => void;
@@ -1025,6 +1026,19 @@ export class SettingsSelectorComponent extends Container {
 		}
 
 		const editableProfiles = profileOptions.filter((o) => o.value !== "(none)");
+		if (callbacks.onProfileCreate) {
+			items.push({
+				id: "profile-create",
+				label: "Create profile",
+				description: "Create a new resource profile definition.",
+				currentValue: "",
+				submenu: (_currentValue, done) => {
+					callbacks.onProfileCreate?.();
+					done();
+					return new Container();
+				},
+			});
+		}
 		if (editableProfiles.length > 0 && callbacks.onProfileEdit) {
 			items.push({
 				id: "profile-edit",

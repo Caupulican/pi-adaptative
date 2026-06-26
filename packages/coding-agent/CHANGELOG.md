@@ -1,5 +1,10 @@
 ## [Unreleased]
 
+### Added
+
+- Added an always-available "Create profile" flow in `/settings` that prompts for a new profile name, validates it, opens the resource editor, and persists the new profile to `~/.pi/agent/profiles/`.
+
+
 ## [0.80.44] - 2026-06-26
 
 ### Fixed

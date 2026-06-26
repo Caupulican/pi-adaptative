@@ -4,6 +4,7 @@ import { join } from "path";
 import { afterEach, beforeEach, describe, expect, it } from "vitest";
 import { DEFAULT_HTTP_IDLE_TIMEOUT_MS } from "../src/core/http-dispatcher.ts";
 import { getDirectoryResourceProfileInfo, SettingsManager } from "../src/core/settings-manager.ts";
+import { validateSkillName } from "../src/core/skills.ts";
 
 describe("SettingsManager", () => {
 	const testDir = join(process.cwd(), "test-settings-tmp");
@@ -833,6 +834,36 @@ describe("SettingsManager", () => {
 			const renamed = JSON.parse(readFileSync(join(profilesPath, "reviewer-2.json"), "utf-8"));
 			expect(renamed.name).toBe("reviewer-2");
 			expect(renamed.resources).toEqual({ tools: { allow: ["read"] } });
+		});
+
+		it("allows a fresh settings manager to load newly created reusable-file profiles", async () => {
+			const manager = SettingsManager.create(projectDir, agentDir);
+			manager.setProfileDefinition(
+				"created-profile",
+				{
+					resources: {
+						tools: {
+							allow: ["read"],
+						},
+					},
+				},
+				"reusable-file",
+			);
+			await manager.flush();
+
+			// Load fresh SettingsManager
+			const freshManager = SettingsManager.create(projectDir, agentDir);
+			const profile = freshManager.getProfileRegistry().getProfile("created-profile");
+			expect(profile).toBeDefined();
+			expect(profile?.name).toBe("created-profile");
+			expect(profile?.resources.tools?.allow).toEqual(["read"]);
+			expect(profile?.source).toBe("profile-file");
+		});
+
+		it("validates profile names correctly using validateSkillName rules", () => {
+			expect(validateSkillName("valid-profile-name").length).toBe(0);
+			expect(validateSkillName("Bad Name!").length).toBeGreaterThan(0);
+			expect(validateSkillName("profile_name").length).toBeGreaterThan(0);
 		});
 
 		it("deletes profile definitions from directory overlay", async () => {
