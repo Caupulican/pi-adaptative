@@ -3,6 +3,11 @@
 ### Added
 
 - Added reusable runtime profile files under `~/.pi/agent/profiles/` and an interactive `/profiles` session switcher backed by the existing resource-profile filters.
+- Added a profile resource editor and management UI under `/settings → Profiles`: per-kind allow/block tick-lists (tools, skills, extensions, agents, prompts, themes), persist the active profile to a chosen scope, and delete profiles.
+- Added live per-extension load/unload: toggling an extension in the active profile loads/unloads it in-session without a full reload (with an `onDispose` hook, per-extension provider cleanup, module cache-bypass, and a full-reload fallback).
+- Added bundled default skills (`skill-architect`, `pi-harness-learning`) shipped with the package at lowest precedence, discoverable and profile-filterable like user skills.
+- Added a `skill_audit` tool that flags near-duplicate skills via a dependency-free Jaccard heuristic, and exported the `runSkillAudit`/`tokenize`/`jaccard` primitives from the package entry for extension reuse.
+- Added `/skillify`, `/extensionify`, and `/learn` self-adaptation commands plus pure model-callable `skillify`/`extensionify` proposal tools (validate/audit or isolated smoke-test; persistent writes happen only at the main-session prompt layer behind explicit user confirmation).
 
 ## [0.80.42] - 2026-06-24
 
