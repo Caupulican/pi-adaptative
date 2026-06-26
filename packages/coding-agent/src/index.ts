@@ -359,6 +359,16 @@ export {
 	type WriteToolOptions,
 	withFileMutationQueue,
 } from "./core/tools/index.ts";
+// Skill-audit primitives — exported so extensions (e.g. continuous-learning) can reuse the native
+// Jaccard overlap audit via `import { runSkillAudit } from "@caupulican/pi-adaptative"` instead of
+// carrying a duplicate copy.
+export {
+	jaccard,
+	runSkillAudit,
+	type SkillAuditReport,
+	type SkillSummary,
+	tokenize,
+} from "./core/tools/skill-audit.ts";
 export { hasProjectTrustInputs, type ProjectTrustDecision, ProjectTrustStore } from "./core/trust-manager.ts";
 // Main entry point
 export { type MainOptions, main } from "./main.ts";
