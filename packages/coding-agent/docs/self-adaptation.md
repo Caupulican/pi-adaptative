@@ -28,7 +28,7 @@ The same analysis is also available to the model as the `skillify`, `extensionif
 
 Authoring has a hard boundary between *drafting* and *committing*:
 
-- **Proposal** is pure. The `skillify` and `extensionify` tools analyze the session, generate a draft, validate it, and return it. They never write to disk and never reload anything, so they are safe for the model — or a subagent — to call.
+- **Proposal** is non-destructive. The `skillify` and `extensionify` tools analyze the session, generate a draft, validate it, and return it. They never write to disk and never reload anything, so they are safe for the model — or a subagent — to call.
 - **Activation** is human-gated. The persistent write and the live reload happen only at the `/skillify` and `/extensionify` commands in your main session, and only after you confirm the draft.
 
 Because activation lives only at the interactive layer, a subagent can at most produce a proposal — it can never persist or activate a capability on its own.

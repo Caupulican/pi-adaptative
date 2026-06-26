@@ -1,6 +1,6 @@
 # Resource Profiles & Library
 
-Pi can load a lot: extensions, skills, prompt templates, themes, agents. Across different projects and situations you rarely want all of them at once. **Resource profiles** are named on/off contracts that decide what is active, and the **Resources hub** is where you register a shared catalog of resources and curate which ones each project or situation uses.
+Pi can load a wide range of resources: extensions, skills, prompt templates, themes, agents. Across different projects and situations you rarely want all of them at once. **Resource profiles** are named on/off contracts that decide what is active, and the **Resources hub** is where you register a shared catalog of resources and curate which ones each project or situation uses.
 
 The system separates three ideas that are easy to conflate:
 
