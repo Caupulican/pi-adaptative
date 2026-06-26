@@ -227,6 +227,7 @@ export function createTestResourceLoader(options: CreateTestResourceLoaderOption
 		loadSingleExtension: async () => ({ extension: null, error: "Not implemented in mock" }),
 		extendResources: () => {},
 		reload: async () => {},
+		getDiscoverableExtensionPaths: async () => extensionsResult.extensions.map((e) => e.path),
 	};
 }
 

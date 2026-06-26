@@ -293,6 +293,7 @@ export class AgentSession {
 	// Event subscription state
 	private _unsubscribeAgent?: () => void;
 	private _eventListeners: AgentSessionEventListener[] = [];
+	private _extensionsChangedListeners: Array<() => void> = [];
 
 	/** Tracks pending steering messages for UI display. Removed when delivered. */
 	private _steeringMessages: string[] = [];
@@ -855,6 +856,35 @@ export class AgentSession {
 				this._eventListeners.splice(index, 1);
 			}
 		};
+	}
+
+	/**
+	 * Subscribe to extensions changed events (load/unload live).
+	 * Returns unsubscribe function for this listener.
+	 */
+	onExtensionsChanged(cb: () => void): () => void {
+		this._extensionsChangedListeners.push(cb);
+
+		return () => {
+			const index = this._extensionsChangedListeners.indexOf(cb);
+			if (index !== -1) {
+				this._extensionsChangedListeners.splice(index, 1);
+			}
+		};
+	}
+
+	/**
+	 * Notify all extensions-changed listeners.
+	 * Called after successful load/unload operations.
+	 */
+	private _notifyExtensionsChanged(): void {
+		for (const listener of this._extensionsChangedListeners) {
+			try {
+				listener();
+			} catch {
+				// Suppress errors from listeners to avoid cascading failures
+			}
+		}
 	}
 
 	/**
@@ -2937,8 +2967,8 @@ export class AgentSession {
 			});
 			previousRunner.invalidate();
 
-			// Invoke refresh hook if available
-			this._onExtensionsChanged?.();
+			// Notify extensions-changed listeners
+			this._notifyExtensionsChanged();
 		} catch (error) {
 			// Fall back to full reload on error
 			try {
@@ -2984,8 +3014,8 @@ export class AgentSession {
 			// Run session_start lifecycle for the new extension only
 			await this._extensionRunner.emitToExtension(extension, { type: "session_start", reason: "load" });
 
-			// Invoke refresh hook if available
-			this._onExtensionsChanged?.();
+			// Notify extensions-changed listeners
+			this._notifyExtensionsChanged();
 		} catch (error) {
 			// Fall back to full reload on error
 			try {
@@ -2998,11 +3028,90 @@ export class AgentSession {
 	}
 
 	/**
-	 * Optional hook for extensions changed (load/unload).
-	 * Can be overridden by UI layer to trigger refresh.
-	 * @protected
+	 * Reconcile loaded extensions with the active profile.
+	 * Loads extensions that should be enabled but aren't, and unloads extensions that shouldn't be.
+	 * Falls back to full reload if any individual load/unload fails.
 	 */
-	protected _onExtensionsChanged?(): void;
+	async reconcileLoadedExtensions(): Promise<void> {
+		if (this.isStreaming) {
+			throw new Error("Cannot reconcile extensions while the agent is streaming or a tool call is active");
+		}
+		if (this.isCompacting) {
+			throw new Error("Cannot reconcile extensions while context compaction or branch summarization is active");
+		}
+
+		try {
+			// Get all discoverable extension paths
+			const allDiscoverablePaths = await this._resourceLoader.getDiscoverableExtensionPaths();
+
+			// Get the target enabled set based on profile filters
+			const targetEnabledSet = new Set<string>();
+			for (const path of allDiscoverablePaths) {
+				if (this.settingsManager.isResourceAllowedByProfile("extensions", path)) {
+					targetEnabledSet.add(path);
+				}
+			}
+
+			// Get currently loaded set
+			const loadedExtensions = this._resourceLoader.getExtensions().extensions;
+			const loadedSet = new Set<string>();
+			for (const ext of loadedExtensions) {
+				loadedSet.add(ext.path);
+			}
+
+			// Collect unloads and loads
+			const toUnload: string[] = [];
+			const toLoad: string[] = [];
+
+			for (const path of loadedSet) {
+				if (!targetEnabledSet.has(path)) {
+					toUnload.push(path);
+				}
+			}
+
+			for (const path of targetEnabledSet) {
+				if (!loadedSet.has(path)) {
+					toLoad.push(path);
+				}
+			}
+
+			// Apply unloads first, then loads, to minimize churn
+			// Collect errors but continue through all operations
+			const errors: Error[] = [];
+
+			for (const path of toUnload) {
+				try {
+					await this.unloadExtensionLive(path);
+				} catch (error) {
+					errors.push(error instanceof Error ? error : new Error(String(error)));
+				}
+			}
+
+			for (const path of toLoad) {
+				try {
+					await this.loadExtensionLive(path);
+				} catch (error) {
+					errors.push(error instanceof Error ? error : new Error(String(error)));
+				}
+			}
+
+			// If any errors occurred, throw the first one (already fell back to full reload in load/unload)
+			if (errors.length > 0) {
+				throw errors[0];
+			}
+
+			// Single notification at the end
+			this._notifyExtensionsChanged();
+		} catch (error) {
+			// Fall back to full reload on error
+			try {
+				await this.reload();
+			} catch {
+				// Suppress nested error; original error will be thrown below
+			}
+			throw error;
+		}
+	}
 
 	// =========================================================================
 	// Auto-Retry

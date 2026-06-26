@@ -68,6 +68,7 @@ describe("reload failsafe and context audit", () => {
 					runtime: createExtensionRuntime(),
 				};
 			},
+			getDiscoverableExtensionPaths: async () => extensionsResult.extensions.map((e) => e.path),
 		};
 
 		const harness = await createHarness({ resourceLoader });

@@ -184,6 +184,7 @@ function createMinimalResourceLoader(systemPrompt: string): ResourceLoader {
 		loadSingleExtension: async () => ({ extension: null, error: "Not implemented" }),
 		extendResources: () => {},
 		reload: async () => {},
+		getDiscoverableExtensionPaths: async () => [],
 	};
 }
 

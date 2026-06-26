@@ -51,6 +51,7 @@ Available: read, bash. Be concise.`,
 	loadSingleExtension: async () => ({ extension: null, error: "Not implemented" }),
 	extendResources: () => {},
 	reload: async () => {},
+	getDiscoverableExtensionPaths: async () => [],
 };
 
 const { session } = await createAgentSession({

@@ -711,6 +711,7 @@ export class InteractiveMode {
 
 	// Agent subscription unsubscribe function
 	private unsubscribe?: () => void;
+	private unsubscribeExtensionsChanged?: () => void;
 	private signalCleanupHandlers: Array<() => void> = [];
 
 	// Track if editor is in bash mode (text starts with !)
@@ -1099,6 +1100,11 @@ export class InteractiveMode {
 
 		// Initialize extensions first so resources are shown before messages
 		await this.rebindCurrentSession();
+
+		// Register extensions-changed listener for live reload UI refresh
+		this.unsubscribeExtensionsChanged = this.session.onExtensionsChanged(() => {
+			this.refreshUIAfterExtensionsChanged();
+		});
 
 		// Render initial messages AFTER showing loaded resources
 		await this.renderInitialMessages();
@@ -6138,16 +6144,18 @@ export class InteractiveMode {
 		}
 	}
 
-	private getProfileResourceKinds(): ProfileResourceEditorKind[] {
+	private async getProfileResourceKinds(): Promise<ProfileResourceEditorKind[]> {
 		const loader = this.session.resourceLoader;
 		const base = (p: string) => p.split(/[\\/]/).pop() ?? p;
+		// Get all discoverable extension paths (enabled and disabled) for profile filtering
+		const allDiscoverableExtensions = await loader.getDiscoverableExtensionPaths();
 		return [
 			{ kind: "tools", label: "Tools", allIds: [...allToolNames] },
 			{ kind: "skills", label: "Skills", allIds: loader.getSkills().skills.map((s) => s.name) },
 			{
 				kind: "extensions",
 				label: "Extensions",
-				allIds: loader.getExtensions().extensions.map((e) => base(e.path)),
+				allIds: allDiscoverableExtensions.map((e) => base(e)),
 			},
 			{ kind: "agents", label: "Agents", allIds: loader.getAgentsFiles().agentsFiles.map((f) => base(f.path)) },
 			{ kind: "prompts", label: "Prompts", allIds: loader.getPrompts().prompts.map((p) => p.name) },
@@ -6187,7 +6195,9 @@ export class InteractiveMode {
 			return;
 		}
 		const scope = this.scopeForProfileSource(profile.source);
-		const kinds = this.getProfileResourceKinds();
+		const kinds = await this.getProfileResourceKinds();
+		const isActiveProfile = this.settingsManager.getActiveResourceProfileNames().includes(profile.name);
+		const originalResources = profile.resources;
 		this.showSelector((done) => {
 			const editor = new ProfileResourceEditorComponent({
 				profileName: profile.name,
@@ -6208,7 +6218,24 @@ export class InteractiveMode {
 							scope,
 						);
 						this.showStatus(`Saved profile "${profile.name}" to ${scope}.`);
-						void this.refreshAfterProfileMutation(profile.name);
+						// For active profiles, detect if only extensions changed to avoid full reload
+						if (isActiveProfile) {
+							const extensionsChanged = originalResources.extensions !== resources.extensions;
+							const otherResourcesChanged =
+								originalResources.tools !== resources.tools ||
+								originalResources.skills !== resources.skills ||
+								originalResources.agents !== resources.agents ||
+								originalResources.prompts !== resources.prompts ||
+								originalResources.themes !== resources.themes;
+							if (extensionsChanged && !otherResourcesChanged) {
+								// Only extensions changed: use live reconciliation
+								void this.reconcileExtensionsAndRefreshUI(profile.name);
+							} else {
+								// Other resources changed or mixed: use full reload
+								void this.refreshAfterProfileMutation(profile.name);
+							}
+						}
+						// Non-active profiles don't need refresh
 					} catch (error) {
 						this.showError(error instanceof Error ? error.message : String(error));
 					}
@@ -7313,6 +7340,74 @@ export class InteractiveMode {
 		}
 	}
 
+	/**
+	 * Refresh UI after extensions are loaded/unloaded live.
+	 * Performs the same refresh calls as handleReloadCommand but without the full reload.
+	 */
+	private async refreshUIAfterExtensionsChanged(): Promise<void> {
+		try {
+			// Refresh keybindings and autocomplete
+			this.keybindings.reload();
+			this.setupAutocompleteProvider();
+
+			// Refresh themes
+			const activeHeader = this.customHeader ?? this.builtInHeader;
+			if (isExpandable(activeHeader)) {
+				activeHeader.setExpanded(this.toolOutputExpanded);
+			}
+			setRegisteredThemes(this.session.resourceLoader.getThemes().themes);
+			this.hideThinkingBlock = this.settingsManager.getHideThinkingBlock();
+			const themeName = this.settingsManager.getTheme();
+			const themeResult = themeName ? setTheme(themeName, true) : { success: true };
+			if (!themeResult.success) {
+				this.showError(`Failed to load theme "${themeName}": ${themeResult.error}\nFell back to dark theme.`);
+			}
+
+			// Refresh editor settings
+			const editorPaddingX = this.settingsManager.getEditorPaddingX();
+			const autocompleteMaxVisible = this.settingsManager.getAutocompleteMaxVisible();
+			this.defaultEditor.setPaddingX(editorPaddingX);
+			this.defaultEditor.setAutocompleteMaxVisible(autocompleteMaxVisible);
+			if (this.editor !== this.defaultEditor) {
+				this.editor.setPaddingX?.(editorPaddingX);
+				this.editor.setAutocompleteMaxVisible?.(autocompleteMaxVisible);
+			}
+
+			// Refresh extension shortcuts
+			const runner = this.session.extensionRunner;
+			this.setupExtensionShortcuts(runner);
+
+			// Refresh chat and UI
+			await this.rebuildChatFromMessages();
+			this.footer.invalidate();
+			this.ui.requestRender();
+		} catch (error) {
+			this.showError(`Extension refresh failed: ${error instanceof Error ? error.message : String(error)}`);
+		}
+	}
+
+	/**
+	 * Reconcile extensions for the active profile and refresh UI.
+	 * Used when only extensions change in the active profile to avoid full reload.
+	 */
+	private async reconcileExtensionsAndRefreshUI(profileName: string): Promise<void> {
+		try {
+			await this.session.reconcileLoadedExtensions();
+			const active = this.settingsManager.getActiveResourceProfileNames()[0] ?? "(none)";
+			this.footerDataProvider.setExtensionStatus("profile", active);
+			this.footer.invalidate();
+			this.updateEditorBorderColor();
+		} catch (error) {
+			// On error, fall back to full reload
+			try {
+				await this.refreshAfterProfileMutation(profileName);
+			} catch {
+				// If full reload also fails, show error
+				this.showError(`Failed to reconcile extensions: ${error instanceof Error ? error.message : String(error)}`);
+			}
+		}
+	}
+
 	private async handleExportCommand(text: string): Promise<void> {
 		const outputPath = this.getPathCommandArgument(text, "/export");
 
@@ -7928,6 +8023,9 @@ export class InteractiveMode {
 		this.footerDataProvider.dispose();
 		if (this.unsubscribe) {
 			this.unsubscribe();
+		}
+		if (this.unsubscribeExtensionsChanged) {
+			this.unsubscribeExtensionsChanged();
 		}
 		if (this.isInitialized) {
 			this.ui.stop();

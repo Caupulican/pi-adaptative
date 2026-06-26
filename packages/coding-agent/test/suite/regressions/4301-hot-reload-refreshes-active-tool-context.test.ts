@@ -62,6 +62,7 @@ describe("hot reload active tool context", () => {
 				reloadCount += 1;
 				extensionsResult = await createTestExtensionsResult([makeExtension("new")]);
 			},
+			getDiscoverableExtensionPaths: async () => extensionsResult.extensions.map((e) => e.path),
 		};
 
 		const harness = await createHarness({ resourceLoader });

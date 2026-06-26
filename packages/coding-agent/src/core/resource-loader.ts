@@ -58,6 +58,8 @@ export interface ResourceLoader {
 	reload(options?: ResourceReloadOptions): Promise<void>;
 	commitReload?(): void;
 	rollbackReload?(): void;
+	/** Get all discoverable extension paths (enabled and disabled) */
+	getDiscoverableExtensionPaths(): Promise<string[]>;
 }
 
 interface ResourceLoaderSnapshot {
@@ -356,6 +358,27 @@ export class DefaultResourceLoader implements ResourceLoader {
 
 	getAppendSystemPrompt(): string[] {
 		return this.appendSystemPrompt;
+	}
+
+	/**
+	 * Get all discoverable extension paths (enabled and disabled).
+	 * Used for profile resource filtering to show the full universe of available extensions.
+	 */
+	async getDiscoverableExtensionPaths(): Promise<string[]> {
+		await this.settingsManager.reload();
+		const resolvedPaths = await this.packageManager.resolve();
+		const cliExtensionPaths = await this.packageManager.resolveExtensionSources(this.additionalExtensionPaths, {
+			temporary: true,
+		});
+		// Return all paths (enabled and disabled) from both resolved and CLI sources
+		const allPaths = new Set<string>();
+		for (const resource of resolvedPaths.extensions) {
+			allPaths.add(resource.path);
+		}
+		for (const resource of cliExtensionPaths.extensions) {
+			allPaths.add(resource.path);
+		}
+		return Array.from(allPaths);
 	}
 
 	/**

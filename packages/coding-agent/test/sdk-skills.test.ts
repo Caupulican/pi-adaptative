@@ -64,6 +64,7 @@ This is a test skill.
 			loadSingleExtension: async () => ({ extension: null, error: "Not implemented" }),
 			extendResources: () => {},
 			reload: async () => {},
+			getDiscoverableExtensionPaths: async () => [],
 		};
 
 		const { session } = await createAgentSession({
@@ -100,6 +101,7 @@ This is a test skill.
 			loadSingleExtension: async () => ({ extension: null, error: "Not implemented" }),
 			extendResources: () => {},
 			reload: async () => {},
+			getDiscoverableExtensionPaths: async () => [],
 		};
 
 		const { session } = await createAgentSession({
