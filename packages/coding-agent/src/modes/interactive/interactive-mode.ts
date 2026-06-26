@@ -8693,7 +8693,7 @@ export class InteractiveMode {
 				this.settingsManager.addTrustedResourceRoot(canonical, "global");
 			}
 
-			const subdirs = ["skills", "extensions", "prompts", "themes", "profiles"];
+			const subdirs = ["skills", "extensions", "prompts", "themes", "profiles", "agents"];
 			const stats = { installed: [] as string[], skipped: [] as string[] };
 			const userAgentDir = getAgentDir();
 

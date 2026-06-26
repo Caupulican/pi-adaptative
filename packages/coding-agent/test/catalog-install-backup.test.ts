@@ -141,6 +141,32 @@ describe("Catalog, Install Resources, Config Backup & Restore", () => {
 			expect(readFileSync(join(agentDir, "skills", "test.md"), "utf-8")).toBe("test skill content");
 		});
 
+		it("installs user-level agents to the agent dir where subagent discovery reads them", async () => {
+			const manager = SettingsManager.create(projectDir, agentDir);
+			manager.addTrustedResourceRoot(trustedSourceDir, "global");
+
+			// Catalog ships flat agent .md files under <root>/agents
+			const agentsSrc = join(trustedSourceDir, "agents");
+			mkdirSync(agentsSrc, { recursive: true });
+			writeFileSync(join(agentsSrc, "scout.md"), "---\nname: scout\nprofile: recon\n---\nbody", "utf-8");
+
+			const context = {
+				settingsManager: manager,
+				showError: vi.fn((msg) => console.error("TEST SHOW_ERROR:", msg)),
+				showStatus: vi.fn((msg) => console.log("TEST SHOW_STATUS:", msg)),
+				showSelector: vi.fn(),
+				handleReloadCommand: vi.fn(async () => {}),
+				copyResourcesRecursively,
+			};
+
+			await handleInstallResourcesCommand.call(context, trustedSourceDir);
+
+			// getAgentDir()/agents is the user-scope dir discoverAgents() scans
+			const installed = join(agentDir, "agents", "scout.md");
+			expect(existsSync(installed)).toBe(true);
+			expect(readFileSync(installed, "utf-8")).toContain("name: scout");
+		});
+
 		it("skips existing files unless --force is specified", async () => {
 			const manager = SettingsManager.create(projectDir, agentDir);
 			manager.addTrustedResourceRoot(trustedSourceDir, "global");
