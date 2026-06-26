@@ -8838,7 +8838,7 @@ export const MODELS = {
 				cacheRead: 0.02,
 				cacheWrite: 0,
 			},
-			contextWindow: 512000,
+			contextWindow: 1000000,
 			maxTokens: 131072,
 		} satisfies Model<"anthropic-messages">,
 		"qwen3.6-plus": {
@@ -9558,7 +9558,7 @@ export const MODELS = {
 			cost: {
 				input: 0.2288,
 				output: 0.3432,
-				cacheRead: 0,
+				cacheRead: 0.02288,
 				cacheWrite: 0,
 			},
 			contextWindow: 131072,
@@ -10224,9 +10224,9 @@ export const MODELS = {
 			reasoning: true,
 			input: ["text"],
 			cost: {
-				input: 0.15,
-				output: 0.8999999999999999,
-				cacheRead: 0.049999999999999996,
+				input: 0.12,
+				output: 0.48,
+				cacheRead: 0,
 				cacheWrite: 0,
 			},
 			contextWindow: 204800,
@@ -10241,8 +10241,8 @@ export const MODELS = {
 			reasoning: true,
 			input: ["text"],
 			cost: {
-				input: 0.24,
-				output: 0.96,
+				input: 0.18,
+				output: 0.72,
 				cacheRead: 0,
 				cacheWrite: 0,
 			},
@@ -10600,7 +10600,7 @@ export const MODELS = {
 			cost: {
 				input: 0.6,
 				output: 2.5,
-				cacheRead: 0,
+				cacheRead: 0.6,
 				cacheWrite: 0,
 			},
 			contextWindow: 262144,
@@ -10735,13 +10735,13 @@ export const MODELS = {
 			reasoning: true,
 			input: ["text"],
 			cost: {
-				input: 0.09,
-				output: 0.44999999999999996,
+				input: 0.08499999999999999,
+				output: 0.39999999999999997,
 				cacheRead: 0,
 				cacheWrite: 0,
 			},
 			contextWindow: 1000000,
-			maxTokens: 4096,
+			maxTokens: 16384,
 		} satisfies Model<"openai-completions">,
 		"nvidia/nemotron-3-super-120b-a12b:free": {
 			id: "nvidia/nemotron-3-super-120b-a12b:free",
@@ -11529,13 +11529,13 @@ export const MODELS = {
 			reasoning: true,
 			input: ["text"],
 			cost: {
-				input: 0.039,
-				output: 0.18,
+				input: 0.03,
+				output: 0.15,
 				cacheRead: 0,
 				cacheWrite: 0,
 			},
 			contextWindow: 131072,
-			maxTokens: 4096,
+			maxTokens: 131072,
 		} satisfies Model<"openai-completions">,
 		"openai/gpt-oss-120b:free": {
 			id: "openai/gpt-oss-120b:free",
@@ -12483,11 +12483,11 @@ export const MODELS = {
 			cost: {
 				input: 0.14,
 				output: 1,
-				cacheRead: 0,
+				cacheRead: 0.049999999999999996,
 				cacheWrite: 0,
 			},
 			contextWindow: 262144,
-			maxTokens: 262144,
+			maxTokens: 81920,
 		} satisfies Model<"openai-completions">,
 		"qwen/qwen3.5-397b-a17b": {
 			id: "qwen/qwen3.5-397b-a17b",
@@ -13095,11 +13095,11 @@ export const MODELS = {
 			cost: {
 				input: 0.98,
 				output: 3.08,
-				cacheRead: 0.49,
+				cacheRead: 0.182,
 				cacheWrite: 0,
 			},
 			contextWindow: 202752,
-			maxTokens: 65535,
+			maxTokens: 4096,
 		} satisfies Model<"openai-completions">,
 		"z-ai/glm-5.2": {
 			id: "z-ai/glm-5.2",
