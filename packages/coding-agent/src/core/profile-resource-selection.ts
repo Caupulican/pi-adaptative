@@ -97,3 +97,64 @@ export function encodeResourceSelection(
 	}
 	return { allow };
 }
+
+export type ResourceFraming = "allow" | "block";
+
+/**
+ * Detect the framing of a given resource profile filter settings.
+ */
+export function detectResourceFraming(filter: ResourceProfileFilterSettings | undefined): ResourceFraming {
+	if (!filter) {
+		return "block";
+	}
+	if (filter.allow && filter.allow.length > 0) {
+		return "allow";
+	}
+	if (filter.block && filter.block.length > 0) {
+		if (filter.block.includes("*")) {
+			return "allow";
+		}
+		return "block";
+	}
+	return "block";
+}
+
+/**
+ * Encode an enabled set back into a filter, respecting the specified framing.
+ */
+export function encodeResourceSelectionWithFraming(
+	enabled: Set<string>,
+	allIds: string[],
+	framing: ResourceFraming,
+): ResourceProfileFilterSettings | undefined {
+	if (framing === "allow") {
+		return encodeResourceSelection(enabled, allIds);
+	}
+
+	const allIdsSet = new Set(allIds);
+	let validEnabledCount = 0;
+	for (const id of enabled) {
+		if (allIdsSet.has(id)) {
+			validEnabledCount++;
+		}
+	}
+
+	// All enabled: return undefined
+	if (validEnabledCount === allIds.length) {
+		return undefined;
+	}
+
+	// None enabled: return { block: ["*"] }
+	if (validEnabledCount === 0) {
+		return { block: ["*"] };
+	}
+
+	// Block framing with subset disabled: list disabled ids in block
+	const block: string[] = [];
+	for (const id of allIds) {
+		if (!enabled.has(id)) {
+			block.push(id);
+		}
+	}
+	return { block };
+}

@@ -1,5 +1,11 @@
 ## [Unreleased]
 
+### Added
+
+- Consolidated `/settings` profile and source configuration under a single `Resources` hub with a first-run catalog nudge.
+- Implemented the unified `Manage Library` browser and editor featuring allow/block list toggling, fuzzy description search, missing items detection, and live reload on save.
+
+
 ## [0.80.47] - 2026-06-26
 
 ### Added

@@ -215,13 +215,7 @@ export interface SettingsCallbacks {
 	onSelfModificationChange: (settings: SelfModificationSettings, scope: SettingsScope) => void;
 	onAutonomyChange: (settings: AutonomySettings, scope: SettingsScope) => void;
 	onAutoLearnChange: (settings: AutoLearnSettings, scope: SettingsScope) => void;
-	onProfileChange?: (profileName: string) => void;
-	onProfileCreate?: () => void;
-	onProfileEdit?: (profileName: string) => void;
-	onProfilePersistActive?: (scope: "session" | "directory" | "project" | "global") => void;
-	onProfileDelete?: (profileName: string) => void;
-	onAddExternalResourceRoot?: () => void;
-	onRemoveExternalResourceRoot?: (root: string) => void;
+	onResourcesHubAction?: (action: string) => void;
 	onCancel: () => void;
 }
 
@@ -810,9 +804,6 @@ export class SettingsSelectorComponent extends Container {
 		let currentSelfModification: SelfModificationSettings = { ...config.selfModification };
 		let currentAutonomy: AutonomySettings = { ...config.autonomy };
 		let currentAutoLearn: AutoLearnSettings = { ...config.autoLearn };
-		const profileOptions = config.profileOptions ?? [];
-		const activeProfileName = config.activeProfileName ?? "(none)";
-
 		const items: SettingItem[] = [
 			{
 				id: "autocompact",
@@ -1012,153 +1003,62 @@ export class SettingsSelectorComponent extends Container {
 		];
 
 		const externalRoots = config.externalResourceRoots ?? [];
-		const trustedRoots = config.trustedResourceRoots ?? [];
-		if (callbacks.onAddExternalResourceRoot && callbacks.onRemoveExternalResourceRoot) {
-			items.push({
-				id: "sources",
-				label: "Sources",
-				description: "Manage external resource roots (skills, extensions, prompts, themes, profiles).",
-				currentValue: `${externalRoots.length} roots`,
-				submenu: (_currentValue, done) => {
-					const options = [
-						{
-							value: "__add__",
-							label: "+ Add external root...",
-							description: "Register a new external directory root",
-						},
-						...externalRoots.map((r) => ({
-							value: r,
-							label: r,
-							description: trustedRoots.includes(r)
-								? "Trusted (select to remove)"
-								: "Untrusted (select to remove)",
-						})),
-					];
-					return new SelectSubmenu(
-						"Sources",
-						"Manage external resource roots. Adding a root requires trust confirmation.",
-						options,
-						"__add__",
-						(value) => {
-							done();
-							if (value === "__add__") {
-								callbacks.onAddExternalResourceRoot?.();
-							} else {
-								callbacks.onRemoveExternalResourceRoot?.(value);
-							}
-						},
-						() => done(),
-					);
-				},
-			});
-		}
+		const hasSources = externalRoots.length > 0;
+		const hasProfiles = (config.profileOptions ?? []).filter((o) => o.value !== "(none)").length > 0;
 
-		if (profileOptions.length > 0 && callbacks.onProfileChange) {
-			const autonomyIndex = items.findIndex((item) => item.id === "autonomy");
-			items.splice(Math.max(0, autonomyIndex), 0, {
-				id: "profiles",
-				label: "Profiles",
-				description: "Select the active runtime profile for this session. Use /profiles for the fast switcher.",
-				currentValue: activeProfileName,
-				submenu: (currentValue, done) =>
-					new SelectSubmenu(
-						"Profiles",
-						"Select the active runtime profile for this session. This is session-only unless saved elsewhere.",
-						profileOptions,
-						currentValue,
-						(value) => {
-							callbacks.onProfileChange?.(value);
-							done(value);
-						},
-						() => done(),
-					),
-			});
-		}
+		items.push({
+			id: "resources",
+			label: "Resources",
+			description: "Manage profiles, situation library, and external resource sources.",
+			currentValue: config.activeProfileName ?? "(none)",
+			submenu: (_currentValue, done) => {
+				const options: SelectItem[] = [];
 
-		const editableProfiles = profileOptions.filter((o) => o.value !== "(none)");
-		if (callbacks.onProfileCreate) {
-			items.push({
-				id: "profile-create",
-				label: "Create profile",
-				description: "Create a new resource profile definition.",
-				currentValue: "",
-				submenu: (_currentValue, done) => {
-					callbacks.onProfileCreate?.();
-					done();
-					return new Container();
-				},
-			});
-		}
-		if (editableProfiles.length > 0 && callbacks.onProfileEdit) {
-			items.push({
-				id: "profile-edit",
-				label: "Edit profile resources",
-				description: "Toggle which tools/skills/etc. a profile allows (saved to where it lives).",
-				currentValue: "",
-				submenu: (_currentValue, done) =>
-					new SelectSubmenu(
-						"Edit profile resources",
-						"Pick a profile to edit its resource allow/block lists.",
-						editableProfiles,
-						activeProfileName,
-						(value) => {
-							callbacks.onProfileEdit?.(value);
-							done(value);
-						},
-						() => done(),
-					),
-			});
-		}
-		if (callbacks.onProfilePersistActive) {
-			const scopeOptions = [
-				{ value: "session", label: "session", description: "Runtime only (not written to disk)" },
-				{
-					value: "directory",
-					label: "directory",
-					description: "~/.pi/agent/resource-profiles/<hash>/settings.json",
-				},
-				{ value: "project", label: "project", description: ".pi/settings.json" },
-				{ value: "global", label: "global", description: "~/.pi/agent/settings.json" },
-			];
-			items.push({
-				id: "profile-persist-active",
-				label: "Persist active profile to",
-				description: "Save the current active-profile selection so it survives restart.",
-				currentValue: "",
-				submenu: (_currentValue, done) =>
-					new SelectSubmenu(
-						"Persist active profile",
-						"Choose where to write the active-profile selection.",
-						scopeOptions,
-						"directory",
-						(value) => {
-							callbacks.onProfilePersistActive?.(value as "session" | "directory" | "project" | "global");
-							done(value);
-						},
-						() => done(),
-					),
-			});
-		}
-		if (editableProfiles.length > 0 && callbacks.onProfileDelete) {
-			items.push({
-				id: "profile-delete",
-				label: "Delete profile",
-				description: "Remove a profile definition from where it is stored.",
-				currentValue: "",
-				submenu: (_currentValue, done) =>
-					new SelectSubmenu(
-						"Delete profile",
-						"Pick a profile to delete.",
-						editableProfiles,
-						activeProfileName,
-						(value) => {
-							callbacks.onProfileDelete?.(value);
-							done(value);
-						},
-						() => done(),
-					),
-			});
-		}
+				if (!hasSources && !hasProfiles) {
+					options.push({
+						value: "nudge-add-source",
+						label: "Add your catalog directory →",
+						description: "First-run nudge: Add a directory of shared skills, extensions, profiles, and agents.",
+					});
+				}
+
+				options.push({
+					value: "active-profile",
+					label: "Profile / Situation",
+					description: `Select the active profile/situation. Current: ${config.activeProfileName ?? "(none)"}`,
+				});
+
+				options.push({
+					value: "manage-library",
+					label: "Manage Library",
+					description: "Toggle allowed tools/skills/extensions in the active profile/scope.",
+				});
+
+				options.push({
+					value: "manage-profiles",
+					label: "Manage Profiles",
+					description: "Create, delete, or persist profile definitions.",
+				});
+
+				options.push({
+					value: "sources",
+					label: "Sources",
+					description: `Manage external resource roots (${externalRoots.length} registered).`,
+				});
+
+				return new SelectSubmenu(
+					"Resources Hub",
+					"Configure profiles and external resource catalogs.",
+					options,
+					"",
+					(value) => {
+						done();
+						callbacks.onResourcesHubAction?.(value);
+					},
+					() => done(),
+				);
+			},
+		});
 
 		// Only show image toggle if terminal supports it
 		if (supportsImages) {

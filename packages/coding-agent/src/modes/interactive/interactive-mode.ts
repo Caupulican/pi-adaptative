@@ -106,6 +106,7 @@ import { hasProjectTrustInputs, ProjectTrustStore } from "../../core/trust-manag
 import { getChangelogPath, getNewEntries, parseChangelog } from "../../utils/changelog.ts";
 import { copyToClipboard } from "../../utils/clipboard.ts";
 import { readClipboardImage } from "../../utils/clipboard-image.ts";
+import { parseFrontmatter } from "../../utils/frontmatter.ts";
 import { parseGitUrl } from "../../utils/git.ts";
 import { getCwdRelativePath, resolvePath } from "../../utils/paths.ts";
 import { getPiUserAgent } from "../../utils/pi-user-agent.ts";
@@ -6035,33 +6036,9 @@ export class InteractiveMode {
 						this.updateAutoLearnFooter();
 						this.showStatus(`Auto Learn settings saved to ${scope}. Use /auto-learn status or /auto-learn run.`);
 					},
-					onProfileChange: (profile) => {
+					onResourcesHubAction: (action) => {
 						done();
-						void this.applyProfile(profile);
-					},
-					onProfileCreate: () => {
-						done();
-						void this.createProfileFlow();
-					},
-					onProfileEdit: (profileName) => {
-						done();
-						void this.openProfileResourceEditor(profileName);
-					},
-					onProfilePersistActive: (scope) => {
-						done();
-						this.persistActiveProfile(scope);
-					},
-					onProfileDelete: (profileName) => {
-						done();
-						this.deleteProfileFromSource(profileName);
-					},
-					onAddExternalResourceRoot: () => {
-						done();
-						void this.addExternalResourceRootFlow();
-					},
-					onRemoveExternalResourceRoot: (root) => {
-						done();
-						void this.removeExternalResourceRootFlow(root);
+						void this.handleResourcesHubAction(action);
 					},
 					onCancel: () => {
 						done();
@@ -6070,6 +6047,557 @@ export class InteractiveMode {
 				},
 			);
 			return { component: selector, focus: selector.getSettingsList() };
+		});
+	}
+
+	private async handleResourcesHubAction(action: string): Promise<void> {
+		switch (action) {
+			case "nudge-add-source":
+				void this.addExternalResourceRootFlow().then(() => {
+					void this.showSettingsSelector();
+				});
+				break;
+			case "active-profile":
+				void this.openActiveProfileSelector();
+				break;
+			case "manage-library":
+				void this.openLibraryManagerFlow();
+				break;
+			case "manage-profiles":
+				void this.openManageProfilesFlow();
+				break;
+			case "sources":
+				void this.openSourcesManagerFlow();
+				break;
+		}
+	}
+
+	private async openActiveProfileSelector(): Promise<void> {
+		const registry = this.settingsManager.getProfileRegistry();
+		const profiles = registry.listProfiles();
+		const activeNames = this.settingsManager.getActiveResourceProfileNames();
+
+		const options = [
+			{ value: "(none)", label: "(none)", description: "No active profile (all resources enabled)" },
+			...profiles.map((p) => ({
+				value: p.name,
+				label: p.name,
+				description: p.description || p.source,
+			})),
+		];
+
+		this.showSelector((done) => {
+			const selector = new SelectSubmenu(
+				"Profile / Situation",
+				"Select the active runtime profile for this session. This is session-only unless saved elsewhere.",
+				options,
+				activeNames[0] || "(none)",
+				(value) => {
+					done();
+					void this.applyProfile(value === "(none)" ? "" : value).then(() => {
+						void this.showSettingsSelector();
+					});
+				},
+				() => {
+					done();
+					void this.showSettingsSelector();
+				},
+			);
+			return { component: selector, focus: selector.getSelectList() };
+		});
+	}
+
+	private async openManageProfilesFlow(): Promise<void> {
+		const registry = this.settingsManager.getProfileRegistry();
+		const profiles = registry.listProfiles();
+		const editableProfiles = profiles.map((p) => ({
+			value: p.name,
+			label: p.name,
+			description: p.description || p.source,
+		}));
+
+		const options = [
+			{ value: "create", label: "+ Create profile...", description: "Create a new resource profile definition." },
+		];
+
+		if (this.settingsManager.getActiveResourceProfileNames().length > 0) {
+			options.push({
+				value: "persist",
+				label: "Persist active profile to...",
+				description: "Save the current active-profile selection so it survives restart.",
+			});
+		}
+
+		if (editableProfiles.length > 0) {
+			options.push({
+				value: "delete",
+				label: "Delete profile...",
+				description: "Remove a profile definition from where it is stored.",
+			});
+		}
+
+		this.showSelector((done) => {
+			const selector = new SelectSubmenu(
+				"Manage Profiles",
+				"Create, delete, or persist profile definitions.",
+				options,
+				"",
+				(value) => {
+					done();
+					if (value === "create") {
+						void this.createProfileFlow().then(() => {
+							void this.showSettingsSelector();
+						});
+					} else if (value === "persist") {
+						void this.openPersistProfileSelector();
+					} else if (value === "delete") {
+						void this.openDeleteProfileSelector();
+					}
+				},
+				() => {
+					done();
+					void this.showSettingsSelector();
+				},
+			);
+			return { component: selector, focus: selector.getSelectList() };
+		});
+	}
+
+	private async openPersistProfileSelector(): Promise<void> {
+		const scopeOptions = [
+			{ value: "session", label: "session", description: "Runtime only (not written to disk)" },
+			{
+				value: "directory",
+				label: "directory",
+				description: "~/.pi/agent/resource-profiles/<hash>/settings.json",
+			},
+			{ value: "project", label: "project", description: ".pi/settings.json" },
+			{ value: "global", label: "global", description: "~/.pi/agent/settings.json" },
+		];
+
+		this.showSelector((done) => {
+			const selector = new SelectSubmenu(
+				"Persist Active Profile",
+				"Choose where to write the active-profile selection.",
+				scopeOptions,
+				"directory",
+				(value) => {
+					done();
+					this.persistActiveProfile(value as "session" | "directory" | "project" | "global");
+					void this.showSettingsSelector();
+				},
+				() => {
+					done();
+					void this.openManageProfilesFlow();
+				},
+			);
+			return { component: selector, focus: selector.getSelectList() };
+		});
+	}
+
+	private async openDeleteProfileSelector(): Promise<void> {
+		const registry = this.settingsManager.getProfileRegistry();
+		const editableProfiles = registry.listProfiles().map((p) => ({
+			value: p.name,
+			label: p.name,
+			description: p.description || p.source,
+		}));
+
+		this.showSelector((done) => {
+			const selector = new SelectSubmenu(
+				"Delete Profile",
+				"Pick a profile to delete.",
+				editableProfiles,
+				"",
+				(value) => {
+					done();
+					this.deleteProfileFromSource(value);
+					void this.showSettingsSelector();
+				},
+				() => {
+					done();
+					void this.openManageProfilesFlow();
+				},
+			);
+			return { component: selector, focus: selector.getSelectList() };
+		});
+	}
+
+	private async openSourcesManagerFlow(): Promise<void> {
+		const externalRoots = this.settingsManager.getExternalResourceRoots();
+		const trustedRoots = this.settingsManager.getTrustedResourceRoots();
+
+		const options = [
+			{
+				value: "add",
+				label: "+ Add external root...",
+				description: "Register a new external directory root (requires trust)",
+			},
+		];
+
+		for (const r of externalRoots) {
+			const isTrusted = trustedRoots.includes(r);
+			options.push({
+				value: `remove:${r}`,
+				label: `Remove: ${r}`,
+				description: isTrusted ? "Trusted external root" : "Untrusted external root",
+			});
+		}
+
+		this.showSelector((done) => {
+			const selector = new SelectSubmenu(
+				"Sources",
+				"Manage external resource roots. Adding a root requires trust confirmation.",
+				options,
+				"",
+				(value) => {
+					done();
+					if (value === "add") {
+						void this.addExternalResourceRootFlow().then(() => {
+							void this.showSettingsSelector();
+						});
+					} else if (value.startsWith("remove:")) {
+						const root = value.slice("remove:".length);
+						void this.removeExternalResourceRootFlow(root).then(() => {
+							void this.showSettingsSelector();
+						});
+					}
+				},
+				() => {
+					done();
+					void this.showSettingsSelector();
+				},
+			);
+			return { component: selector, focus: selector.getSelectList() };
+		});
+	}
+
+	private async openLibraryManagerFlow(): Promise<void> {
+		const activeNames = this.settingsManager.getActiveResourceProfileNames();
+		const activeName = activeNames[0];
+
+		if (!activeName || activeName === "(none)") {
+			this.showSelector((done) => {
+				const selector = new SelectSubmenu(
+					"No Active Profile",
+					"Select or create a profile to manage the library.",
+					[
+						{
+							value: "select",
+							label: "Select existing profile...",
+							description: "Choose an existing profile to activate.",
+						},
+						{ value: "create", label: "Create new profile...", description: "Create a new profile definition." },
+					],
+					"select",
+					(value) => {
+						done();
+						if (value === "create") {
+							void this.createProfileAndOpenLibraryFlow();
+						} else {
+							void this.selectProfileAndOpenLibraryFlow();
+						}
+					},
+					() => {
+						done();
+						void this.showSettingsSelector();
+					},
+				);
+				return { component: selector, focus: selector.getSelectList() };
+			});
+			return;
+		}
+
+		const registry = this.settingsManager.getProfileRegistry();
+		const profile = registry.getProfile(activeName);
+		if (!profile) {
+			this.showError(`Active profile "${activeName}" not found in registry.`);
+			return;
+		}
+		const scope = this.scopeForProfileSource(profile.source);
+		void this.openLibraryEditorForProfile(profile.name, scope);
+	}
+
+	private async createProfileAndOpenLibraryFlow(): Promise<void> {
+		const name = await new Promise<string | undefined>((resolve) => {
+			this.showSelector((done) => {
+				const input = new ExtensionInputComponent(
+					"Create Profile",
+					"Enter profile name",
+					(value) => {
+						done();
+						resolve(value);
+					},
+					() => {
+						done();
+						resolve(undefined);
+					},
+					{ tui: this.ui },
+				);
+				return { component: input, focus: input };
+			});
+		});
+
+		if (name === undefined) {
+			void this.openLibraryManagerFlow();
+			return;
+		}
+
+		const trimmed = name.trim();
+		if (!trimmed) {
+			this.showWarning("Profile name cannot be empty.");
+			void this.openLibraryManagerFlow();
+			return;
+		}
+
+		try {
+			this.settingsManager.setProfileDefinition(
+				trimmed,
+				{
+					name: trimmed,
+					resources: {},
+				},
+				"directory",
+			);
+			await this.applyProfile(trimmed);
+			void this.openLibraryEditorForProfile(trimmed, "directory");
+		} catch (error) {
+			this.showError(error instanceof Error ? error.message : String(error));
+			void this.openLibraryManagerFlow();
+		}
+	}
+
+	private async selectProfileAndOpenLibraryFlow(): Promise<void> {
+		const registry = this.settingsManager.getProfileRegistry();
+		const profiles = registry.listProfiles();
+		const editableProfiles = profiles.map((p) => ({
+			value: p.name,
+			label: p.name,
+			description: p.description || p.source,
+		}));
+
+		if (editableProfiles.length === 0) {
+			this.showWarning("No existing profiles to select. Please create one.");
+			void this.createProfileAndOpenLibraryFlow();
+			return;
+		}
+
+		this.showSelector((done) => {
+			const selector = new SelectSubmenu(
+				"Select Profile",
+				"Pick a profile to activate and edit.",
+				editableProfiles,
+				"",
+				(value) => {
+					done();
+					void this.applyProfile(value).then(() => {
+						const profile = registry.getProfile(value)!;
+						const scope = this.scopeForProfileSource(profile.source);
+						void this.openLibraryEditorForProfile(value, scope);
+					});
+				},
+				() => {
+					done();
+					void this.openLibraryManagerFlow();
+				},
+			);
+			return { component: selector, focus: selector.getSelectList() };
+		});
+	}
+
+	private async getProfileResourceKinds(): Promise<ProfileResourceEditorKind[]> {
+		const loader = this.session.resourceLoader;
+		const base = (p: string) => p.split(/[\\/]/).pop() ?? p;
+		const allDiscoverableExtensions = await loader.getDiscoverableExtensionPaths();
+		const skills = loader.getSkills().skills;
+		const prompts = loader.getPrompts().prompts;
+		const themes = getAvailableThemesWithPaths();
+		const agents = loader.getAgentsFiles().agentsFiles;
+
+		const getAgentDescription = (filePath: string): string | undefined => {
+			try {
+				const content = fs.readFileSync(filePath, "utf-8");
+				const { frontmatter } = parseFrontmatter<Record<string, unknown>>(content);
+				if (typeof frontmatter.description === "string") {
+					return frontmatter.description;
+				}
+			} catch {}
+			return undefined;
+		};
+
+		const getExtensionDescription = (filePath: string): string | undefined => {
+			try {
+				let dir = filePath;
+				if (fs.existsSync(filePath) && !fs.statSync(filePath).isDirectory()) {
+					dir = path.dirname(filePath);
+				}
+				const pkgPath = path.join(dir, "package.json");
+				if (fs.existsSync(pkgPath)) {
+					const pkg = JSON.parse(fs.readFileSync(pkgPath, "utf-8"));
+					if (typeof pkg.description === "string") {
+						return pkg.description;
+					}
+				}
+			} catch {}
+			return undefined;
+		};
+
+		return [
+			{
+				kind: "tools",
+				label: "Tools",
+				items: Array.from(allToolNames).map((name: string) => ({ id: name })),
+			},
+			{
+				kind: "skills",
+				label: "Skills",
+				items: skills.map((s) => ({
+					id: s.name,
+					path: s.filePath,
+					description: s.description,
+				})),
+			},
+			{
+				kind: "extensions",
+				label: "Extensions",
+				items: allDiscoverableExtensions.map((e) => ({
+					id: base(e),
+					path: e,
+					description: getExtensionDescription(e),
+				})),
+			},
+			{
+				kind: "agents",
+				label: "Agents",
+				items: agents.map((f) => ({
+					id: base(f.path),
+					path: f.path,
+					description: getAgentDescription(f.path),
+				})),
+			},
+			{
+				kind: "prompts",
+				label: "Prompts",
+				items: prompts.map((p) => ({
+					id: p.name,
+					path: p.filePath,
+					description: p.description,
+				})),
+			},
+			{
+				kind: "themes",
+				label: "Themes",
+				items: themes.map((t) => ({
+					id: t.name,
+					path: t.path,
+				})),
+			},
+		];
+	}
+
+	private async openLibraryEditorForProfile(
+		profileName: string,
+		initialScope: "session" | "directory" | "project" | "global" | "reusable-file",
+	): Promise<void> {
+		const currentScope = initialScope;
+		const registry = this.settingsManager.getProfileRegistry();
+		const profile = registry.getProfile(profileName);
+		if (!profile) {
+			this.showError(`Profile not found: ${profileName}`);
+			return;
+		}
+
+		const kinds = await this.getProfileResourceKinds();
+		const originalResources = profile.resources;
+		const isActiveProfile = this.settingsManager.getActiveResourceProfileNames().includes(profile.name);
+
+		this.showSelector((done) => {
+			const editor = new ProfileResourceEditorComponent({
+				profileName: profile!.name,
+				profileScope: currentScope,
+				initialResources: profile!.resources,
+				kinds,
+				cwd: this.sessionManager.getCwd(),
+				agentDir: getAgentDir(),
+				externalResourceRoots: this.settingsManager.getExternalResourceRoots(),
+				onSave: (resources) => {
+					done();
+					try {
+						this.settingsManager.setProfileDefinition(
+							profileName,
+							{
+								name: profileName,
+								description: profile!.description,
+								model: profile!.model,
+								thinking: profile!.thinking,
+								resources,
+							},
+							currentScope,
+						);
+						this.showStatus(`Saved profile "${profileName}" to ${currentScope}.`);
+						if (isActiveProfile) {
+							const extensionsChanged = originalResources.extensions !== resources.extensions;
+							const otherResourcesChanged =
+								originalResources.tools !== resources.tools ||
+								originalResources.skills !== resources.skills ||
+								originalResources.agents !== resources.agents ||
+								originalResources.prompts !== resources.prompts ||
+								originalResources.themes !== resources.themes;
+							if (extensionsChanged && !otherResourcesChanged) {
+								void this.reconcileExtensionsAndRefreshUI(profileName);
+							} else {
+								void this.refreshAfterProfileMutation(profileName);
+							}
+						}
+					} catch (error) {
+						this.showError(error instanceof Error ? error.message : String(error));
+					}
+				},
+				onCancel: () => {
+					done();
+					void this.openLibraryManagerFlow();
+				},
+				onScopeChange: () => {
+					done();
+					void this.promptScopeChangeForProfile(profileName, currentScope);
+				},
+			});
+
+			return { component: editor, focus: editor };
+		});
+	}
+
+	private async promptScopeChangeForProfile(
+		profileName: string,
+		currentScope: "session" | "directory" | "project" | "global" | "reusable-file",
+	): Promise<void> {
+		const scopeOptions = [
+			{ value: "session", label: "session", description: "Runtime only (not written to disk)" },
+			{
+				value: "directory",
+				label: "directory",
+				description: "~/.pi/agent/resource-profiles/<hash>/settings.json",
+			},
+			{ value: "project", label: "project", description: ".pi/settings.json" },
+			{ value: "global", label: "global", description: "~/.pi/agent/settings.json" },
+		];
+
+		this.showSelector((done) => {
+			const selector = new SelectSubmenu(
+				"Change Profile Scope",
+				`Select new scope for profile "${profileName}".`,
+				scopeOptions,
+				currentScope,
+				(value) => {
+					done();
+					void this.openLibraryEditorForProfile(profileName, value as any);
+				},
+				() => {
+					done();
+					void this.openLibraryEditorForProfile(profileName, currentScope);
+				},
+			);
+			return { component: selector, focus: selector.getSelectList() };
 		});
 	}
 
@@ -6177,25 +6705,6 @@ export class InteractiveMode {
 		}
 	}
 
-	private async getProfileResourceKinds(): Promise<ProfileResourceEditorKind[]> {
-		const loader = this.session.resourceLoader;
-		const base = (p: string) => p.split(/[\\/]/).pop() ?? p;
-		// Get all discoverable extension paths (enabled and disabled) for profile filtering
-		const allDiscoverableExtensions = await loader.getDiscoverableExtensionPaths();
-		return [
-			{ kind: "tools", label: "Tools", allIds: [...allToolNames] },
-			{ kind: "skills", label: "Skills", allIds: loader.getSkills().skills.map((s) => s.name) },
-			{
-				kind: "extensions",
-				label: "Extensions",
-				allIds: allDiscoverableExtensions.map((e) => base(e)),
-			},
-			{ kind: "agents", label: "Agents", allIds: loader.getAgentsFiles().agentsFiles.map((f) => base(f.path)) },
-			{ kind: "prompts", label: "Prompts", allIds: loader.getPrompts().prompts.map((p) => p.name) },
-			{ kind: "themes", label: "Themes", allIds: getAvailableThemes() },
-		];
-	}
-
 	/** Map where a profile currently lives to the scope we should write it back to. */
 	private scopeForProfileSource(source: string): "session" | "directory" | "project" | "global" | "reusable-file" {
 		switch (source) {
@@ -6276,8 +6785,12 @@ export class InteractiveMode {
 		this.showSelector((done) => {
 			const editor = new ProfileResourceEditorComponent({
 				profileName,
+				profileScope: scope,
 				initialResources: {},
 				kinds,
+				cwd: this.sessionManager.getCwd(),
+				agentDir: getAgentDir(),
+				externalResourceRoots: this.settingsManager.getExternalResourceRoots(),
 				onSave: (resources) => {
 					done();
 					try {
@@ -6291,67 +6804,6 @@ export class InteractiveMode {
 						);
 						this.showStatus(`Saved profile "${profileName}" to ${scope}.`);
 						this.ui.requestRender();
-					} catch (error) {
-						this.showError(error instanceof Error ? error.message : String(error));
-					}
-				},
-				onCancel: () => {
-					done();
-					this.ui.requestRender();
-				},
-			});
-			return { component: editor, focus: editor };
-		});
-	}
-
-	private async openProfileResourceEditor(profileName: string): Promise<void> {
-		const profile = this.settingsManager.getProfileRegistry().getProfile(profileName);
-		if (!profile) {
-			this.showError(`Profile not found: ${profileName}`);
-			return;
-		}
-		const scope = this.scopeForProfileSource(profile.source);
-		const kinds = await this.getProfileResourceKinds();
-		const isActiveProfile = this.settingsManager.getActiveResourceProfileNames().includes(profile.name);
-		const originalResources = profile.resources;
-		this.showSelector((done) => {
-			const editor = new ProfileResourceEditorComponent({
-				profileName: profile.name,
-				initialResources: profile.resources,
-				kinds,
-				onSave: (resources) => {
-					done();
-					try {
-						this.settingsManager.setProfileDefinition(
-							profile.name,
-							{
-								name: profile.name,
-								description: profile.description,
-								model: profile.model,
-								thinking: profile.thinking,
-								resources,
-							},
-							scope,
-						);
-						this.showStatus(`Saved profile "${profile.name}" to ${scope}.`);
-						// For active profiles, detect if only extensions changed to avoid full reload
-						if (isActiveProfile) {
-							const extensionsChanged = originalResources.extensions !== resources.extensions;
-							const otherResourcesChanged =
-								originalResources.tools !== resources.tools ||
-								originalResources.skills !== resources.skills ||
-								originalResources.agents !== resources.agents ||
-								originalResources.prompts !== resources.prompts ||
-								originalResources.themes !== resources.themes;
-							if (extensionsChanged && !otherResourcesChanged) {
-								// Only extensions changed: use live reconciliation
-								void this.reconcileExtensionsAndRefreshUI(profile.name);
-							} else {
-								// Other resources changed or mixed: use full reload
-								void this.refreshAfterProfileMutation(profile.name);
-							}
-						}
-						// Non-active profiles don't need refresh
 					} catch (error) {
 						this.showError(error instanceof Error ? error.message : String(error));
 					}
