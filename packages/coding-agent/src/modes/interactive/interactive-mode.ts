@@ -3444,7 +3444,11 @@ export class InteractiveMode {
 			}
 
 			case "agent_end":
-				if (!this.maybeStartAutoLearn()) {
+				// Native in-process reflection fully replaces the subprocess learning paths
+				// (continuous-learning AND autonomy-review) when enabled; otherwise fall back to legacy.
+				if (this.isNativeReflectionEnabled()) {
+					this.maybeRunNativeReflection(event.messages);
+				} else if (!this.maybeStartAutoLearn()) {
 					this.maybeStartAutonomyReview(event.messages);
 				}
 				if (this.settingsManager.getShowTerminalProgress()) {
@@ -5723,6 +5727,72 @@ export class InteractiveMode {
 			};
 		}
 		return { ...base, shouldRun: false, reason: "reflection thresholds not met" };
+	}
+
+	/**
+	 * Native reflection (R2) is the in-process replacement for the buggy `continuous-learning`
+	 * subprocess. It runs when auto-learn is enabled and is not killed via `PI_NATIVE_REFLECTION=0`.
+	 */
+	private isNativeReflectionEnabled(): boolean {
+		if (process.env.PI_NATIVE_REFLECTION === "0") return false;
+		if (process.env.PI_AUTO_LEARN_CHILD === "1") return false;
+		return this.getEffectiveAutoLearnSettings().enabled;
+	}
+
+	/** Heuristic: does the user's turn text read like a correction/steer worth learning from? */
+	private hasCorrectionSignal(userText: string): boolean {
+		return /\b(next time|for future|from now on|remember this|don't|do not|avoid|instead|you should|should have|you forgot|you missed|not what i asked|wrong again)\b/i.test(
+			userText,
+		);
+	}
+
+	/**
+	 * End-of-loop native reflection: demand-gate the just-finished turn (zero-I/O) and, when
+	 * warranted, run the in-process {@link AgentSession.runReflectionPass} as a fire-and-forget
+	 * background microtask. No subprocess, no blocking of the UI.
+	 */
+	private maybeRunNativeReflection(messages: AgentMessage[]): void {
+		if (!this.isNativeReflectionEnabled()) return;
+
+		const settings = this.getEffectiveAutoLearnSettings();
+		const toolCallCount = this.countAgentToolCalls(messages);
+		const contextPercent = this.session.getContextUsage()?.percent ?? 0;
+		const contextHeadroomPct = Math.max(0, 100 - contextPercent);
+
+		const userText = messages
+			.filter((m) => String((m as unknown as Record<string, unknown>).role ?? "") === "user")
+			.map((m) => this.getAgentMessagePlainText(m))
+			.join("\n");
+		const hadCorrection = this.hasCorrectionSignal(userText);
+
+		// A correction is worth learning from even on a short turn; otherwise require a complex turn.
+		const trigger: "complex" | "corrective" | "none" = hadCorrection
+			? "corrective"
+			: toolCallCount >= Math.max(1, settings.complexTaskToolCalls ?? 12)
+				? "complex"
+				: "none";
+		if (trigger === "none") return;
+
+		const recentTurnText = messages
+			.map((m) =>
+				`${String((m as unknown as Record<string, unknown>).role ?? "")}: ${this.getAgentMessagePlainText(m)}`.trim(),
+			)
+			.filter(Boolean)
+			.join("\n");
+
+		// Stable per-turn id so a duplicate scheduling/retry can't double-count the reflection cost.
+		const lastId = (messages[messages.length - 1] as unknown as { id?: string })?.id;
+		const reportId = lastId ? `reflection:${lastId}` : undefined;
+
+		void this.session
+			.runReflectionPass({
+				signals: { trigger, toolCallCount, hadCorrection, contextHeadroomPct, usefulLately: 0 },
+				recentTurnText,
+				reportId,
+			})
+			.catch(() => {
+				// best-effort background learning; never disrupt the session
+			});
 	}
 
 	private maybeStartAutoLearn(): boolean {

@@ -24,7 +24,17 @@ import type {
 	AgentTool,
 	ThinkingLevel,
 } from "@caupulican/pi-agent-core";
-import type { AssistantMessage, ImageContent, Message, Model, TextContent, Usage } from "@caupulican/pi-ai";
+import type {
+	AssistantMessage,
+	Context,
+	ImageContent,
+	Message,
+	Model,
+	SimpleStreamOptions,
+	StopReason,
+	TextContent,
+	Usage,
+} from "@caupulican/pi-ai";
 import {
 	clampThinkingLevel,
 	cleanupSessionResources,
@@ -84,6 +94,13 @@ import {
 } from "./extensions/index.ts";
 import { disposeExtensionEventSubscriptions } from "./extensions/loader.ts";
 import { emitSessionShutdownEvent } from "./extensions/runner.ts";
+import {
+	type DemandSignals,
+	decideDemand,
+	ReflectionEngine,
+	type ReflectionResult,
+	type ReflectionWrite,
+} from "./learning/reflection-engine.ts";
 import { MemoryManager } from "./memory/memory-manager.ts";
 import type { MemoryProvider } from "./memory/memory-provider.ts";
 import { FileStoreProvider } from "./memory/providers/file-store.ts";
@@ -297,6 +314,32 @@ export interface SpawnedUsageTotals {
 	cost: number;
 	/** Number of distinct reports recorded. */
 	reports: number;
+}
+
+/**
+ * Options for {@link AgentSession.runIsolatedCompletion} — a one-shot LLM call fully isolated from
+ * the main session (used by the native reflection engine, R2). See the adaptive-agent design §6c/§7.
+ */
+export interface IsolatedCompletionOptions {
+	/** System prompt for the isolated call. */
+	systemPrompt: string;
+	/** The isolated conversation (e.g. the reflection prompt). NOT the main session history. */
+	messages: Message[];
+	/** Model to use. Defaults to the session model; callers should pass a cheap model. */
+	model?: Model<any>;
+	/** Thinking level. Defaults to "off" to keep the call cheap. */
+	thinkingLevel?: ThinkingLevel;
+	/** Output token cap. */
+	maxTokens?: number;
+	/** Abort signal. */
+	signal?: AbortSignal;
+}
+
+/** Result of an isolated completion: the text, the usage spent, and the stop reason. */
+export interface IsolatedCompletionResult {
+	text: string;
+	usage: Usage;
+	stopReason: StopReason;
 }
 
 interface ToolDefinitionEntry {
@@ -3907,6 +3950,175 @@ export class AgentSession {
 			reports += 1;
 		}
 		return { cost, reports };
+	}
+
+	/**
+	 * Run a one-shot LLM completion fully ISOLATED from the main session — the load-bearing
+	 * primitive for the native reflection engine (adaptive-agent design §6c/§7).
+	 *
+	 * Isolation invariants (audited by codex): builds a fresh {@link Context} (no main history), runs
+	 * with `tools: []`, sets `cacheRetention: "none"`, and passes **no `sessionId`** — so it cannot
+	 * mutate `agent.state.messages`, cannot append session entries, cannot touch the tool registry,
+	 * and cannot churn the main session's prompt cache. Mirrors `generateSummary()`'s mechanics.
+	 *
+	 * Returns the result even on an error/aborted stop reason (callers — e.g. a background reflection
+	 * microtask — decide whether to act); it does not throw on a model-level error.
+	 */
+	async runIsolatedCompletion(opts: IsolatedCompletionOptions): Promise<IsolatedCompletionResult> {
+		const model = opts.model ?? this.model;
+		if (!model) {
+			throw new Error("runIsolatedCompletion: no model available");
+		}
+		const thinkingLevel = opts.thinkingLevel ?? "off";
+
+		// Fresh, isolated context: explicit messages, no tools, nothing from the main session.
+		const context: Context = {
+			systemPrompt: opts.systemPrompt,
+			messages: opts.messages,
+			tools: [],
+		};
+
+		// Isolate the prompt cache and DELIBERATELY omit sessionId so no session-aware caching/routing
+		// can entangle this call with the main session.
+		const options: SimpleStreamOptions = {
+			maxTokens: opts.maxTokens,
+			signal: opts.signal,
+			cacheRetention: "none",
+		};
+		// pi-ai's `reasoning` option does not include "off" (that's the provider default already).
+		if (thinkingLevel !== "off") {
+			options.reasoning = thinkingLevel;
+		}
+
+		// When streamFn is the raw streamSimple (e.g. in tests), auth must be injected explicitly.
+		// Throw only when auth genuinely fails — providers that authenticate without an API key
+		// (OAuth, local no-key) legitimately return ok with an undefined apiKey.
+		if (this.agent.streamFn === streamSimple) {
+			const auth = await this._modelRegistry.getApiKeyAndHeaders(model);
+			if (!auth.ok) {
+				throw new Error(auth.error);
+			}
+			options.apiKey = auth.apiKey;
+			options.headers = auth.headers;
+		}
+
+		const stream = await this.agent.streamFn(model, context, options);
+		const result = await stream.result();
+		const text = result.content
+			.filter((c): c is TextContent => c.type === "text")
+			.map((c) => c.text)
+			.join("");
+		const usage: Usage = result.usage ?? {
+			input: 0,
+			output: 0,
+			cacheRead: 0,
+			cacheWrite: 0,
+			totalTokens: 0,
+			cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, total: 0 },
+		};
+		return { text, usage, stopReason: result.stopReason };
+	}
+
+	/**
+	 * Native end-of-loop reflection pass (R2). Demand-gates (zero-I/O), and when warranted runs the
+	 * {@link ReflectionEngine} via an isolated completion ({@link runIsolatedCompletion}), applies the
+	 * resulting memory writes through the bundled `memory` tool, and accounts the reflection's token
+	 * cost via the cost-aggregation surface so it stays visible and net-negative-auditable.
+	 *
+	 * Returns `null` when the gate skips (or in a child session, which must not learn). The whole pass
+	 * is best-effort: a model/parse error yields no writes, never throws into the caller.
+	 */
+	async runReflectionPass(input: {
+		signals: DemandSignals;
+		recentTurnText: string;
+		model?: Model<any>;
+		thinkingLevel?: ThinkingLevel;
+		signal?: AbortSignal;
+		/** Stable id so a duplicate scheduling/retry of the same pass can't double-count its cost. */
+		reportId?: string;
+	}): Promise<ReflectionResult | null> {
+		if (this._isChildSession) return null;
+		const plan = decideDemand(input.signals);
+		if (plan.act === "skip") return null;
+
+		const complete = (systemPrompt: string, userPrompt: string) =>
+			this.runIsolatedCompletion({
+				systemPrompt,
+				messages: [{ role: "user", content: [{ type: "text", text: userPrompt }], timestamp: Date.now() }],
+				model: input.model,
+				thinkingLevel: input.thinkingLevel ?? "low",
+				maxTokens: plan.tokenBudget,
+				signal: input.signal,
+			});
+
+		const result = await new ReflectionEngine().reflect({
+			recentTurnText: input.recentTurnText,
+			// Read memory FRESH (not the prefix-cache-frozen system-prompt block) so confront-before-write
+			// sees writes made earlier this session.
+			existingMemory: this._memoryManager.buildSystemPromptBlockFresh() || "",
+			plan,
+			complete,
+		});
+
+		for (const write of result.writes) {
+			await this._applyReflectionWrite(write, input.signal);
+		}
+
+		// Account the reflection's spend so it surfaces in the footer roll-up (net-token visibility).
+		// Idempotent on reportId so a retried/duplicated pass cannot double-count.
+		if (result.usage.cost.total > 0 || result.usage.totalTokens > 0) {
+			this.addSpawnedUsage(result.usage, { label: "reflection", reportId: input.reportId });
+		}
+		return result;
+	}
+
+	/**
+	 * Apply one reflection write through the bundled `memory` tool. `memory_replace`/`memory_remove`
+	 * don't carry a target file, so we try MEMORY.md first and fall back to USER.md when the substring
+	 * isn't found there. Best-effort: failures are swallowed (reflection must never break a turn).
+	 */
+	private async _applyReflectionWrite(write: ReflectionWrite, signal?: AbortSignal): Promise<void> {
+		type MemResult = { details?: { success?: boolean; error?: string } };
+		type MemExec = (
+			toolCallId: string,
+			params: { action: string; target: string; content?: string; oldContent?: string },
+			signal: AbortSignal | undefined,
+			onUpdate: undefined,
+			ctx: undefined,
+		) => Promise<MemResult>;
+		const memTool = this._memoryManager.getToolDefinitions().find((t) => t.name === "memory");
+		const exec = memTool?.execute as unknown as MemExec | undefined;
+		if (!exec) return;
+
+		const run = (params: Parameters<MemExec>[1]) => exec("reflection", params, signal, undefined, undefined);
+
+		if (write.kind === "memory_add") {
+			try {
+				await run({ action: "add", target: write.section === "USER" ? "user" : "memory", content: write.text });
+			} catch {
+				// best-effort; reflection writes must never throw into the turn loop
+			}
+			return;
+		}
+
+		// replace / remove carry no target file — try MEMORY.md, then USER.md. The memory tool reports
+		// outcomes via `details.success` (it catches its own errors rather than throwing). Only a
+		// genuine "not found in the file" justifies trying the other file; a real failure for a file
+		// (budget exceeded / drift) must NOT fall through and mutate the wrong target.
+		for (const target of ["memory", "user"] as const) {
+			try {
+				const params =
+					write.kind === "memory_replace"
+						? { action: "replace", target, oldContent: write.target, content: write.text }
+						: { action: "remove", target, oldContent: write.target };
+				const res = await run(params);
+				if (res?.details?.success === true) return; // applied
+				if (!/not found/i.test(String(res?.details?.error ?? ""))) return; // real failure — don't misapply
+				// substring simply absent from this file — try the next target
+			} catch {
+				// defensive: if the tool ever does throw, try the next target
+			}
+		}
 	}
 
 	getContextUsage(): ContextUsage | undefined {

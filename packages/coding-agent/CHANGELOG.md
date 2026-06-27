@@ -1,5 +1,10 @@
 ## [Unreleased]
 
+### Added
+
+- Native reflection engine: when auto-learn is enabled, pi now learns in-process at the end of a turn (demand-gated, cheap model) and writes durable lessons via the `memory` tool, replacing the external continuous-learning subprocess. Set `PI_NATIVE_REFLECTION=0` to fall back to the legacy path.
+- `AgentSession.runIsolatedCompletion(...)`: a one-shot LLM call fully isolated from the session (no history/log/tool mutation, no prompt-cache churn) — the primitive the reflection engine runs on.
+
 ## [0.80.58] - 2026-06-27
 
 ### Added

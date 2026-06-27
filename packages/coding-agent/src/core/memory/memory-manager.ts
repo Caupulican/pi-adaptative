@@ -80,6 +80,21 @@ export class MemoryManager {
 			return this.systemPromptBlockCache;
 		}
 
+		this.systemPromptBlockCache = this._composeSystemPromptBlock();
+		return this.systemPromptBlockCache;
+	}
+
+	/**
+	 * Compose the memory block freshly from the providers, BYPASSING the frozen cache used by the
+	 * system prompt. Used by end-of-loop reflection so its confront-before-write sees the live memory
+	 * (including writes made earlier in the same session) without churning the prefix-cache-stable
+	 * system prompt block.
+	 */
+	public buildSystemPromptBlockFresh(): string {
+		return this._composeSystemPromptBlock();
+	}
+
+	private _composeSystemPromptBlock(): string {
 		const blocks: string[] = [];
 		for (const p of this.providers) {
 			if (!this.activeProviders.has(p.name) || !p.systemPromptBlock) {
@@ -94,9 +109,7 @@ export class MemoryManager {
 				console.error(`Memory provider ${p.name} failed to generate system prompt block:`, err);
 			}
 		}
-
-		this.systemPromptBlockCache = blocks.join("\n\n");
-		return this.systemPromptBlockCache;
+		return blocks.join("\n\n");
 	}
 
 	public async prefetch(query: string): Promise<string> {
