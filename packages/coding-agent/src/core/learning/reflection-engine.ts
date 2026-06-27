@@ -66,7 +66,9 @@ export interface ReflectionInput {
 export type ReflectionWrite =
 	| { kind: "memory_add"; section: "MEMORY" | "USER"; text: string }
 	| { kind: "memory_replace"; target: string; text: string }
-	| { kind: "memory_remove"; target: string };
+	| { kind: "memory_remove"; target: string }
+	// R7 memory-to-behavior: promote a recurring procedural workflow into an executable skill.
+	| { kind: "promote_skill"; name: string; description: string; body: string };
 
 export interface ReflectionResult {
 	writes: ReflectionWrite[];
@@ -92,6 +94,7 @@ Memory guidelines:
 - Avoid duplicate facts. If the fact is already represented, do not add it.
 - CONFRONT existing memory: if the new turn contradicts or updates an existing fact, use "memory_replace" or "memory_remove" to supersede the old fact rather than blindly appending.
 - Keep memories short, factual, and direct. No fluff.
+- PROMOTE to behavior: if the turn established a REPEATABLE, multi-step PROCEDURE/workflow (not a one-off fact) that should govern a future class of tasks, emit a "promote_skill" instead of (or in addition to) a memory fact. Only promote a genuinely reusable procedure — never a single fact, a one-off narrative, or environment-specific noise. Prefer a memory fact when unsure.
 
 You must output your analysis and writes in the following JSON format inside a \`\`\`json\`\`\` code fence:
 {
@@ -99,7 +102,8 @@ You must output your analysis and writes in the following JSON format inside a \
   "writes": [
     { "kind": "memory_add", "section": "MEMORY" | "USER", "text": "New direct fact to append" },
     { "kind": "memory_replace", "target": "Exact text substring to replace", "text": "New replacement text" },
-    { "kind": "memory_remove", "target": "Exact text substring to remove" }
+    { "kind": "memory_remove", "target": "Exact text substring to remove" },
+    { "kind": "promote_skill", "name": "kebab-case-skill-name", "description": "one line of when to use it", "body": "Markdown: the step-by-step procedure" }
   ]
 }
 `;
@@ -143,6 +147,13 @@ Analyze this turn and output your memory updates.`;
 							writes.push({ kind: "memory_replace", target: w.target, text: w.text });
 						} else if (w.kind === "memory_remove" && typeof w.target === "string") {
 							writes.push({ kind: "memory_remove", target: w.target });
+						} else if (
+							w.kind === "promote_skill" &&
+							typeof w.name === "string" &&
+							typeof w.description === "string" &&
+							typeof w.body === "string"
+						) {
+							writes.push({ kind: "promote_skill", name: w.name, description: w.description, body: w.body });
 						}
 					}
 				}

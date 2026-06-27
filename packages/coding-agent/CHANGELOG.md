@@ -1,5 +1,9 @@
 ## [Unreleased]
 
+### Added
+
+- Memory-to-behavior: the reflection engine can now promote a recurring, multi-step procedure it learned into an executable skill (a generated SKILL.md under your skills directory), so lessons become reusable behavior instead of just remembered facts.
+
 ## [0.80.64] - 2026-06-27
 
 ### Added
