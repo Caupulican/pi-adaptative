@@ -47,6 +47,7 @@ import type { EventBus } from "../event-bus.ts";
 import type { ExecOptions, ExecResult } from "../exec.ts";
 import type { ReadonlyFooterDataProvider } from "../footer-data-provider.ts";
 import type { KeybindingsManager } from "../keybindings.ts";
+import type { MemoryProvider } from "../memory/memory-provider.ts";
 import type { CustomMessage } from "../messages.ts";
 import type { ModelRegistry } from "../model-registry.ts";
 import type {
@@ -1243,6 +1244,9 @@ export interface ExtensionAPI {
 	/** Get the canonicalized paths of effective trusted external resource roots configured in settings. */
 	getExternalResourceRoots(): string[];
 
+	/** Register a memory provider with the session's MemoryManager (applied on next memory (re)init). */
+	registerMemoryProvider(provider: MemoryProvider): void;
+
 	// =========================================================================
 	// Model and Thinking Level
 	// =========================================================================
@@ -1521,6 +1525,7 @@ export interface ExtensionActions {
 	getThinkingLevel: GetThinkingLevelHandler;
 	setThinkingLevel: SetThinkingLevelHandler;
 	getExternalResourceRoots: () => string[];
+	registerMemoryProvider: (provider: MemoryProvider) => void;
 }
 
 /**

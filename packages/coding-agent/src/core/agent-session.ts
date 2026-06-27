@@ -84,6 +84,9 @@ import {
 } from "./extensions/index.ts";
 import { disposeExtensionEventSubscriptions } from "./extensions/loader.ts";
 import { emitSessionShutdownEvent } from "./extensions/runner.ts";
+import { MemoryManager } from "./memory/memory-manager.ts";
+import type { MemoryProvider } from "./memory/memory-provider.ts";
+import { FileStoreProvider } from "./memory/providers/file-store.ts";
 import { compactToolResultDetailsForRetention } from "./message-retention.ts";
 import type { BashExecutionMessage, CustomMessage } from "./messages.ts";
 import type { ModelRegistry } from "./model-registry.ts";
@@ -197,6 +200,8 @@ export interface AgentSessionConfig {
 	 */
 	isExplicitModel?: boolean;
 	isExplicitThinking?: boolean;
+	/** True when this session is a spawned subagent/child — gates durable memory writes. */
+	isChildSession?: boolean;
 	/**
 	 * Override base tools (useful for custom runtimes).
 	 *
@@ -347,6 +352,11 @@ export class AgentSession {
 	private _toolProfileFilter?: Required<ResourceProfileFilterSettings>;
 	private readonly _isExplicitModel: boolean;
 	private readonly _isExplicitThinking: boolean;
+	/** Plug-and-play memory subsystem. Recreated on each (re)initialize so reload is safe. */
+	private _memoryManager: MemoryManager = new MemoryManager();
+	private readonly _isChildSession: boolean;
+	/** Memory providers registered by extensions via pi.registerMemoryProvider, applied on (re)init. */
+	private _pendingMemoryProviders: MemoryProvider[] = [];
 	private _baseToolsOverride?: Record<string, AgentTool>;
 	private _sessionStartEvent: SessionStartEvent;
 	private _extensionUIContext?: ExtensionUIContext;
@@ -389,6 +399,7 @@ export class AgentSession {
 			: undefined;
 		this._isExplicitModel = config.isExplicitModel ?? false;
 		this._isExplicitThinking = config.isExplicitThinking ?? false;
+		this._isChildSession = config.isChildSession ?? process.env.PI_CHILD_SESSION === "1";
 		this._baseToolsOverride = config.baseToolsOverride;
 		this._sessionStartEvent = config.sessionStartEvent ?? { type: "session_start", reason: "startup" };
 
@@ -940,6 +951,9 @@ export class AgentSession {
 		);
 		this._disconnectFromAgent();
 		this._eventListeners = [];
+		// Best-effort memory cleanup (release locks/handles). Write-side onSessionEnd is wired on a
+		// true session-end hook (P3); file-store shutdown is a no-op.
+		void this._memoryManager.shutdownAll().catch(() => {});
 		cleanupSessionResources(this.sessionId);
 	}
 
@@ -1195,6 +1209,8 @@ export class AgentSession {
 		const appendSystemPromptParts = [
 			this._buildSelfModificationPrompt(),
 			this._buildAutonomyPrompt(),
+			// Memory subsystem: static, frozen-per-session block (e.g. file-store MEMORY.md/USER.md).
+			this._memoryManager.buildSystemPromptBlock() || undefined,
 			...loaderAppendSystemPrompt,
 		].filter((part): part is string => Boolean(part));
 		const appendSystemPrompt = appendSystemPromptParts.length > 0 ? appendSystemPromptParts.join("\n\n") : undefined;
@@ -2438,6 +2454,8 @@ export class AgentSession {
 		this._applyExtensionBindings(this._extensionRunner);
 		await this._extensionRunner.emit(this._sessionStartEvent);
 		await this.extendResourcesFromExtensions(this._sessionStartEvent.reason === "reload" ? "reload" : "startup");
+		// Initialize the memory subsystem after extensions have had a chance to register providers.
+		await this._initializeMemory();
 	}
 
 	private async extendResourcesFromExtensions(reason: "startup" | "reload"): Promise<void> {
@@ -2589,6 +2607,7 @@ export class AgentSession {
 				getThinkingLevel: () => this.thinkingLevel,
 				setThinkingLevel: (level) => this.setThinkingLevel(level),
 				getExternalResourceRoots: () => this.settingsManager.getEffectiveExternalResourceRoots(),
+				registerMemoryProvider: (provider) => this.registerMemoryProvider(provider),
 			},
 			{
 				getModel: () => this.model,
@@ -2697,6 +2716,47 @@ export class AgentSession {
 		}
 	}
 
+	/**
+	 * (Re)build the memory subsystem: a fresh MemoryManager (reload-safe), register the bundled
+	 * file-store + any extension-contributed providers, initialize, then surface the memory tools and
+	 * the frozen system-prompt block. Best-effort: never throws into the session lifecycle.
+	 */
+	private async _initializeMemory(): Promise<void> {
+		try {
+			// Release the previous generation's providers (locks/handles) before recreating, so a
+			// reload does not orphan the old MemoryManager. No-op on first init / for file-store.
+			await this._memoryManager.shutdownAll().catch(() => {});
+			const manager = new MemoryManager();
+			manager.registerProvider(new FileStoreProvider());
+			for (const provider of this._pendingMemoryProviders) {
+				try {
+					manager.registerProvider(provider);
+				} catch {
+					// Duplicate name or reserved-tool collision — skip this provider, keep the rest.
+				}
+			}
+			this._memoryManager = manager;
+			await manager.initializeAll(this.sessionManager.getSessionId(), {
+				agentDir: this._agentDir,
+				cwd: this._cwd,
+				isChildSession: this._isChildSession,
+			});
+			// Surface memory tools + the frozen memory block now that providers are initialized.
+			// _refreshToolRegistry() ends in setActiveToolsByName(), which rebuilds AND assigns the
+			// system prompt (including the memory block), so no explicit _rebuildSystemPrompt is needed.
+			this._refreshToolRegistry();
+		} catch (error) {
+			console.error("Memory subsystem init failed:", error instanceof Error ? error.message : String(error));
+		}
+	}
+
+	/** Register a memory provider contributed by an extension; applied on the next memory (re)init. */
+	registerMemoryProvider(provider: MemoryProvider): void {
+		if (!this._pendingMemoryProviders.some((p) => p.name === provider.name)) {
+			this._pendingMemoryProviders.push(provider);
+		}
+	}
+
 	private _refreshToolRegistry(options?: { activeToolNames?: string[]; includeAllExtensionTools?: boolean }): void {
 		const previousRegistryNames = new Set(this._toolRegistry.keys());
 		const previousActiveToolNames = this.getActiveToolNames();
@@ -2720,6 +2780,11 @@ export class AgentSession {
 			...this._customTools.map((definition) => ({
 				definition,
 				sourceInfo: createSyntheticSourceInfo(`<sdk:${definition.name}>`, { source: "sdk" }),
+			})),
+			// Memory subsystem provider tools (e.g. file-store's `memory` tool).
+			...this._memoryManager.getToolDefinitions().map((definition) => ({
+				definition,
+				sourceInfo: createSyntheticSourceInfo(`<memory:${definition.name}>`, { source: "sdk" }),
 			})),
 		].filter((tool) => isAllowedTool(tool.definition.name));
 		const definitionRegistry = new Map<string, ToolDefinitionEntry>(
@@ -2957,6 +3022,8 @@ export class AgentSession {
 			});
 			try {
 				this._doctorReloadRuntime();
+				// Reload starts memory providers fresh; loaded extensions re-register below.
+				this._pendingMemoryProviders = [];
 				const hasBindings =
 					this._extensionUIContext ||
 					this._extensionCommandContextActions ||
@@ -2976,6 +3043,8 @@ export class AgentSession {
 			await emitSessionShutdownEvent(previousRunner, { type: "session_shutdown", reason: "reload" });
 			previousRunner.invalidate();
 			this._resourceLoader.commitReload?.();
+			// Re-derive the memory subsystem from the reloaded settings/providers.
+			await this._initializeMemory();
 		} catch (error) {
 			if (newRunner && newRunner !== previousRunner) {
 				newRunner.invalidate(

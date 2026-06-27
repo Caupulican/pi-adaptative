@@ -55,6 +55,8 @@ export interface CreateAgentSessionOptions {
 	isExplicitModel?: boolean;
 	/** Whether `thinkingLevel` came from an explicit flag (see isExplicitModel). */
 	isExplicitThinking?: boolean;
+	/** True when this session is a spawned subagent/child — gates durable memory writes. */
+	isChildSession?: boolean;
 	/** Models available for cycling (Ctrl+P in interactive mode) */
 	scopedModels?: Array<{ model: Model<any>; thinkingLevel?: ThinkingLevel }>;
 
@@ -476,6 +478,7 @@ export async function createAgentSession(options: CreateAgentSessionOptions = {}
 		toolProfileFilter,
 		isExplicitModel: options.isExplicitModel ?? options.model != null,
 		isExplicitThinking: options.isExplicitThinking ?? options.thinkingLevel !== undefined,
+		isChildSession: options.isChildSession ?? process.env.PI_CHILD_SESSION === "1",
 		sessionStartEvent: options.sessionStartEvent,
 	});
 	const extensionsResult = resourceLoader.getExtensions();

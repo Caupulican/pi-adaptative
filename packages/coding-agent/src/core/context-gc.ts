@@ -71,6 +71,10 @@ const DEFAULT_SEMANTIC_MEMORY_GC_SETTINGS: Required<SemanticMemoryGcSettings> = 
 	preserveRecentPages: 1,
 	minChars: 900,
 	markers: [
+		// Generic memory-subsystem recall page marker (brand-free). Provider-specific markers are
+		// merged in dynamically at runtime via MemoryManager.getContextMarkers().
+		"<memory_context",
+		// Pre-existing provider-specific markers (to be generalized to provider-declared markers).
 		"<automata_context",
 		"<automata_response",
 		"<automata_query",
