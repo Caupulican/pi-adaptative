@@ -55,6 +55,7 @@ describe("regression #5109: exclude tools", () => {
 				"context_audit",
 				"dynamic_tool",
 				"edit",
+				"memory",
 				"write",
 			]);
 			expect(harness.session.systemPrompt).not.toContain("- read:");

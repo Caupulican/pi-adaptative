@@ -87,12 +87,15 @@ describe("regression #3592: no-builtin-tools keeps extension tools enabled", () 
 			"find",
 			"grep",
 			"ls",
+			"memory",
 			"read",
 			"skill_audit",
 			"skillify",
 			"write",
 		]);
-		expect(session.getActiveToolNames()).toEqual(["dynamic_tool"]);
+		// The bundled memory provider's `memory` tool is provider-contributed (like extension/SDK
+		// tools) and likewise survives --no-builtin-tools.
+		expect(session.getActiveToolNames().sort()).toEqual(["dynamic_tool", "memory"]);
 		expect(session.systemPrompt).toContain("- dynamic_tool: Run dynamic test behavior");
 		expect(session.systemPrompt).not.toContain("- read:");
 		expect(session.systemPrompt).not.toContain("- bash:");
