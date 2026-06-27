@@ -1,5 +1,11 @@
 ## [Unreleased]
 
+### Added
+
+- Cost aggregation: the footer now rolls up the cost of spawned/subagent sessions into the displayed cost (e.g. `$0.842 (+$0.310 sub)`). Spawned usage is persisted per session and survives reload.
+- Extension API `pi.reportSpawnedUsage(usage, opts?)` so extensions that spawn pi (subagents, learners) can report a child's cost up to the parent footer.
+- Print mode emits a child's cumulative usage so a spawner can roll it up: a terminal `{type:"result", usage}` event in `--mode json`, and an opt-in `--print-usage` line (`__PI_USAGE__` prefix on stderr) in text mode.
+
 ## [0.80.57] - 2026-06-27
 
 ## [0.80.56] - 2026-06-27

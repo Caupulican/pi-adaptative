@@ -51,6 +51,7 @@ function createSession(options: {
 			getCwd: () => "/tmp/project",
 		},
 		getContextUsage: () => ({ contextWindow: 200_000, percent: 12.3 }),
+		getSpawnedUsage: () => ({ cost: 0, reports: 0 }),
 		modelRegistry: {
 			isUsingOAuth: () => false,
 		},

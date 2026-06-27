@@ -24,7 +24,7 @@ import type {
 	AgentTool,
 	ThinkingLevel,
 } from "@caupulican/pi-agent-core";
-import type { AssistantMessage, ImageContent, Message, Model, TextContent } from "@caupulican/pi-ai";
+import type { AssistantMessage, ImageContent, Message, Model, TextContent, Usage } from "@caupulican/pi-ai";
 import {
 	clampThinkingLevel,
 	cleanupSessionResources,
@@ -266,6 +266,37 @@ export interface SessionStats {
 	};
 	cost: number;
 	contextUsage?: ContextUsage;
+}
+
+/** customType for spawned-usage roll-up entries (Cost Aggregation, Model A). */
+export const SPAWNED_USAGE_CUSTOM_TYPE = "spawned_usage";
+
+/**
+ * A single spawned/subagent usage report, persisted as a `CustomEntry`
+ * (`customType: "spawned_usage"`). Persistence-only — does NOT enter LLM context.
+ *
+ * Single-hop invariant: each report MUST already include the reporter's own usage AND its
+ * accumulated sub-usage. A child rolls up its grandchildren, then reports once to its direct
+ * parent. Only the direct parent records the report — never a grandparent — so cost cannot be
+ * double-counted across levels.
+ */
+export interface SpawnedUsageReport {
+	/** Cumulative usage attributed to the spawned session (own + its own sub-usage). */
+	usage: Usage;
+	/** Human-readable source label for diagnostics (e.g. subagent name). */
+	label?: string;
+	/** Session id of the reporting child, if known. */
+	sourceSessionId?: string;
+	/** Stable id used to de-duplicate re-reports (retries, double agent_end). */
+	reportId?: string;
+}
+
+/** Aggregated spawned-usage totals derived from `spawned_usage` custom entries. */
+export interface SpawnedUsageTotals {
+	/** Summed `usage.cost.total` across all recorded reports. */
+	cost: number;
+	/** Number of distinct reports recorded. */
+	reports: number;
 }
 
 interface ToolDefinitionEntry {
@@ -2608,6 +2639,9 @@ export class AgentSession {
 				setThinkingLevel: (level) => this.setThinkingLevel(level),
 				getExternalResourceRoots: () => this.settingsManager.getEffectiveExternalResourceRoots(),
 				registerMemoryProvider: (provider) => this.registerMemoryProvider(provider),
+				reportSpawnedUsage: (usage, opts) => {
+					this.addSpawnedUsage(usage, opts);
+				},
 			},
 			{
 				getModel: () => this.model,
@@ -3761,6 +3795,118 @@ export class AgentSession {
 			cost: totalCost,
 			contextUsage: this.getContextUsage(),
 		};
+	}
+
+	/**
+	 * Cumulative usage (full breakdown) for this session's entire spawn subtree: its own
+	 * assistant messages PLUS every `spawned_usage` report it has rolled up. Single source of
+	 * truth for "how much did this session and everything it spawned spend" — used by print-mode
+	 * to emit a child's total so a spawner can roll it up via {@link addSpawnedUsage}.
+	 *
+	 * Including the `spawned_usage` reports is what keeps the single-hop invariant intact: a child
+	 * that itself spawned grandchildren must report own + sub-usage in one number, or the parent
+	 * silently under-counts the grandchildren.
+	 */
+	getCumulativeUsage(): Usage {
+		let input = 0;
+		let output = 0;
+		let cacheRead = 0;
+		let cacheWrite = 0;
+		let totalTokens = 0;
+		let costInput = 0;
+		let costOutput = 0;
+		let costCacheRead = 0;
+		let costCacheWrite = 0;
+		let costTotal = 0;
+		const add = (usage: Usage) => {
+			input += usage.input;
+			output += usage.output;
+			cacheRead += usage.cacheRead;
+			cacheWrite += usage.cacheWrite;
+			totalTokens += usage.totalTokens;
+			costInput += usage.cost.input;
+			costOutput += usage.cost.output;
+			costCacheRead += usage.cost.cacheRead;
+			costCacheWrite += usage.cost.cacheWrite;
+			costTotal += usage.cost.total;
+		};
+		for (const message of this.state.messages) {
+			if (message.role !== "assistant") continue;
+			const usage = (message as AssistantMessage).usage;
+			if (!usage) continue;
+			add(usage);
+		}
+		// Roll up usage this session attributed to its own spawned children (single-hop).
+		for (const entry of this.sessionManager.getEntries()) {
+			if (entry.type !== "custom" || entry.customType !== SPAWNED_USAGE_CUSTOM_TYPE) continue;
+			const data = entry.data as SpawnedUsageReport | undefined;
+			if (data?.usage) add(data.usage);
+		}
+		return {
+			input,
+			output,
+			cacheRead,
+			cacheWrite,
+			totalTokens,
+			cost: {
+				input: costInput,
+				output: costOutput,
+				cacheRead: costCacheRead,
+				cacheWrite: costCacheWrite,
+				total: costTotal,
+			},
+		};
+	}
+
+	/**
+	 * Record usage spent by a spawned/subagent session so the footer can roll it into the
+	 * displayed cost. Persisted as a `CustomEntry` (`customType: "spawned_usage"`, Model A) so
+	 * it survives reload and is reconstructed exactly like main usage; a new/forked session
+	 * starts fresh because it owns a new log file.
+	 *
+	 * Idempotent on `opts.reportId`: a re-report (retry, duplicate `agent_end`) with a
+	 * previously-seen id is ignored, so cost cannot be double-counted. Honors the single-hop
+	 * invariant documented on {@link SpawnedUsageReport}.
+	 *
+	 * @returns the id of the appended entry, or `undefined` if the report was a duplicate.
+	 */
+	addSpawnedUsage(
+		usage: Usage,
+		opts?: { label?: string; sourceSessionId?: string; reportId?: string },
+	): string | undefined {
+		const reportId = opts?.reportId;
+		if (reportId) {
+			for (const entry of this.sessionManager.getEntries()) {
+				if (
+					entry.type === "custom" &&
+					entry.customType === SPAWNED_USAGE_CUSTOM_TYPE &&
+					(entry.data as SpawnedUsageReport | undefined)?.reportId === reportId
+				) {
+					return undefined;
+				}
+			}
+		}
+		const report: SpawnedUsageReport = {
+			usage,
+			label: opts?.label,
+			sourceSessionId: opts?.sourceSessionId,
+			reportId,
+		};
+		return this.sessionManager.appendCustomEntry(SPAWNED_USAGE_CUSTOM_TYPE, report);
+	}
+
+	/** Aggregate all recorded spawned-usage reports (see {@link addSpawnedUsage}). */
+	getSpawnedUsage(): SpawnedUsageTotals {
+		let cost = 0;
+		let reports = 0;
+		for (const entry of this.sessionManager.getEntries()) {
+			if (entry.type !== "custom" || entry.customType !== SPAWNED_USAGE_CUSTOM_TYPE) continue;
+			const data = entry.data as SpawnedUsageReport | undefined;
+			if (!data?.usage) continue;
+			cost += data.usage.cost.total;
+			reports += 1;
+		}
+		return { cost, reports };
 	}
 
 	getContextUsage(): ContextUsage | undefined {

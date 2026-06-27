@@ -12,6 +12,14 @@ import { flushRawStdout, writeRawStdout } from "../core/output-guard.ts";
 import { killTrackedDetachedChildren } from "../utils/shell.ts";
 
 /**
+ * Sentinel prefix for the cumulative-usage line emitted to stderr in text print mode under
+ * `--print-usage`. A spawner (subagent extension, auto-learn runner) greps stderr for this prefix
+ * and `JSON.parse`s the remainder ({@link Usage}) to roll the child's cost up via
+ * `pi.reportSpawnedUsage`. See the Cost Aggregation design.
+ */
+export const PRINT_USAGE_LINE_PREFIX = "__PI_USAGE__";
+
+/**
  * Options for print mode.
  */
 export interface PrintModeOptions {
@@ -23,6 +31,12 @@ export interface PrintModeOptions {
 	initialMessage?: string;
 	/** Images to attach to the initial message */
 	initialImages?: ImageContent[];
+	/**
+	 * Emit the session's cumulative usage at exit so a spawner can roll this child's cost up.
+	 * - text mode: one `__PI_USAGE__<json>` line to stderr (keeps stdout = the answer).
+	 * - json mode: a terminal `{type:"result", usage}` event is always emitted regardless of this flag.
+	 */
+	printUsage?: boolean;
 }
 
 /**
@@ -30,7 +44,7 @@ export interface PrintModeOptions {
  * Sends prompts to the agent and outputs the result.
  */
 export async function runPrintMode(runtimeHost: AgentSessionRuntime, options: PrintModeOptions): Promise<number> {
-	const { mode, messages = [], initialMessage, initialImages } = options;
+	const { mode, messages = [], initialMessage, initialImages, printUsage } = options;
 	let exitCode = 0;
 	let session = runtimeHost.session;
 	let unsubscribe: (() => void) | undefined;
@@ -143,6 +157,16 @@ export async function runPrintMode(runtimeHost: AgentSessionRuntime, options: Pr
 					}
 				}
 			}
+		}
+
+		// Emit cumulative session usage so a spawner can roll this child's cost into its own
+		// footer (Cost Aggregation). json: a terminal authoritative `result` event; text: an
+		// opt-in (`--print-usage`) sentinel line on stderr, leaving stdout = the answer.
+		const cumulativeUsage = session.getCumulativeUsage();
+		if (mode === "json") {
+			writeRawStdout(`${JSON.stringify({ type: "result", usage: cumulativeUsage })}\n`);
+		} else if (printUsage) {
+			process.stderr.write(`${PRINT_USAGE_LINE_PREFIX}${JSON.stringify(cumulativeUsage)}\n`);
 		}
 
 		return exitCode;

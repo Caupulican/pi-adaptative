@@ -19,6 +19,7 @@ type FakeSession = {
 	subscribe: ReturnType<typeof vi.fn>;
 	prompt: ReturnType<typeof vi.fn>;
 	reload: ReturnType<typeof vi.fn>;
+	getCumulativeUsage: () => AssistantMessage["usage"];
 };
 
 type FakeRuntimeHost = {
@@ -72,6 +73,14 @@ function createRuntimeHost(assistantMessage: AssistantMessage): FakeRuntimeHost 
 		subscribe: vi.fn(() => () => {}),
 		prompt: vi.fn(async () => {}),
 		reload: vi.fn(async () => {}),
+		getCumulativeUsage: () => ({
+			input: 0,
+			output: 0,
+			cacheRead: 0,
+			cacheWrite: 0,
+			totalTokens: 0,
+			cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, total: 0 },
+		}),
 	};
 
 	return {

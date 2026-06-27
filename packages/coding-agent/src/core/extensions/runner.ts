@@ -289,6 +289,7 @@ export class ExtensionRunner {
 		this.runtime.setThinkingLevel = actions.setThinkingLevel;
 		this.runtime.getExternalResourceRoots = actions.getExternalResourceRoots;
 		this.runtime.registerMemoryProvider = actions.registerMemoryProvider;
+		this.runtime.reportSpawnedUsage = actions.reportSpawnedUsage;
 
 		// Context actions (required)
 		this.getModel = contextActions.getModel;

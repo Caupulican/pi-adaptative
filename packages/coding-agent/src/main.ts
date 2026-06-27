@@ -930,6 +930,7 @@ export async function main(args: string[], options?: MainOptions) {
 			messages: parsed.messages,
 			initialMessage,
 			initialImages,
+			printUsage: parsed.printUsage,
 		});
 		stopThemeWatcher();
 		restoreStdout();

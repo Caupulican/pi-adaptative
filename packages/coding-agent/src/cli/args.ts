@@ -37,6 +37,8 @@ export interface Args {
 	extensions?: string[];
 	noExtensions?: boolean;
 	print?: boolean;
+	/** Emit cumulative session usage (one JSON line, `__PI_USAGE__` prefix) to stderr at exit (text print mode). */
+	printUsage?: boolean;
 	export?: string;
 	noSkills?: boolean;
 	skills?: string[];
@@ -149,6 +151,8 @@ export function parseArgs(args: string[]): Args {
 					message: `Invalid thinking level "${level}". Valid values: ${VALID_THINKING_LEVELS.join(", ")}`,
 				});
 			}
+		} else if (arg === "--print-usage") {
+			result.printUsage = true;
 		} else if (arg === "--print" || arg === "-p") {
 			result.print = true;
 			const next = args[i + 1];
@@ -258,6 +262,8 @@ ${chalk.bold("Options:")}
   --append-system-prompt <text>  Append text or file contents to the system prompt (can be used multiple times)
   --mode <mode>                  Output mode: text (default), json, or rpc
   --print, -p                    Non-interactive mode: process prompt and exit
+  --print-usage                  With -p: emit cumulative session usage (one JSON line,
+                                 "__PI_USAGE__" prefix) to stderr at exit, for cost roll-up
   --continue, -c                 Continue previous session
   --resume, -r                   Select a session to resume
   --session <path|id>            Use specific session file or partial UUID

@@ -112,6 +112,8 @@ type FooterUsageSnapshot = {
 	totalCacheRead: number;
 	totalCacheWrite: number;
 	totalCost: number;
+	/** Rolled-up cost of spawned/subagent sessions (Cost Aggregation). 0 when none. */
+	totalSpawnedCost: number;
 	contextUsage: ReturnType<AgentSession["getContextUsage"]>;
 };
 
@@ -181,6 +183,10 @@ export class FooterComponent implements Component {
 			totalCost += usage.cost.total;
 		}
 
+		// Roll up spawned/subagent cost (Cost Aggregation, Model A). Derived from the same
+		// session entries, so the {entryCount} cache key above busts when new reports land.
+		const totalSpawnedCost = this.session.getSpawnedUsage().cost;
+
 		const snapshot: FooterUsageSnapshot = {
 			entryCount,
 			messageCount,
@@ -189,6 +195,7 @@ export class FooterComponent implements Component {
 			totalCacheRead,
 			totalCacheWrite,
 			totalCost,
+			totalSpawnedCost,
 			// Calculate context usage from session (handles compaction correctly).
 			// After compaction, tokens are unknown until the next LLM response.
 			contextUsage: this.session.getContextUsage(),
@@ -200,7 +207,8 @@ export class FooterComponent implements Component {
 	render(width: number): string[] {
 		const state = this.session.state;
 		const usageSnapshot = this.getUsageSnapshot(state.messages?.length ?? 0);
-		const { totalInput, totalOutput, totalCacheRead, totalCacheWrite, totalCost, contextUsage } = usageSnapshot;
+		const { totalInput, totalOutput, totalCacheRead, totalCacheWrite, totalCost, totalSpawnedCost, contextUsage } =
+			usageSnapshot;
 		const contextWindow = contextUsage?.contextWindow ?? state.model?.contextWindow ?? 0;
 		const contextPercentValue = contextUsage?.percent ?? 0;
 		const contextPercent = contextUsage?.percent !== null ? contextPercentValue.toFixed(1) : "?";
@@ -229,8 +237,12 @@ export class FooterComponent implements Component {
 
 		// Show cost with "(sub)" indicator if using OAuth subscription
 		const usingSubscription = state.model ? this.session.modelRegistry.isUsingOAuth(state.model) : false;
-		if (totalCost || usingSubscription) {
-			const costStr = `$${totalCost.toFixed(3)}${usingSubscription ? " (sub)" : ""}`;
+		if (totalCost || totalSpawnedCost || usingSubscription) {
+			// Main cost, then the spawned/subagent roll-up: `$0.842 (sub) (+$0.310 sub)`.
+			let costStr = `$${totalCost.toFixed(3)}${usingSubscription ? " (sub)" : ""}`;
+			if (totalSpawnedCost) {
+				costStr += ` (+$${totalSpawnedCost.toFixed(3)} sub)`;
+			}
 			statsParts.push(costStr);
 		}
 
