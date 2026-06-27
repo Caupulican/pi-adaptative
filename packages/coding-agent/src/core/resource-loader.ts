@@ -428,10 +428,31 @@ export class DefaultResourceLoader implements ResourceLoader {
 		return result;
 	}
 
+	/**
+	 * Apply the active resource-profile allow/block to a list of discovered resource paths.
+	 * Used for every source that does NOT pass through the package manager's
+	 * resolve/applyResourceProfileFilters pipeline (external roots, bundled defaults, and
+	 * extension-contributed resources) so no source bypasses the active profile.
+	 */
+	private filterPathsByProfile(paths: string[], kind: ResourceProfileKind): string[] {
+		const filter = this.settingsManager.getResourceProfileFilter(kind);
+		if (filter.allow.length === 0 && filter.block.length === 0) return paths;
+		return paths.filter((p) => {
+			const allowed = filter.allow.length === 0 || matchesResourceProfilePattern(p, filter.allow, this.cwd);
+			const blocked = matchesResourceProfilePattern(p, filter.block, this.cwd);
+			return allowed && !blocked;
+		});
+	}
+
 	extendResources(paths: ResourceExtensionPaths): void {
-		const skillPaths = this.normalizeExtensionPaths(paths.skillPaths ?? []);
-		const promptPaths = this.normalizeExtensionPaths(paths.promptPaths ?? []);
-		const themePaths = this.normalizeExtensionPaths(paths.themePaths ?? []);
+		// Extension-contributed resources (via the resources_discover event) must respect the
+		// active resource profile too — otherwise an allowed extension can re-introduce skills/
+		// prompts/themes the profile blocks.
+		const allowPath = (entry: { path: string }, kind: ResourceProfileKind): boolean =>
+			this.filterPathsByProfile([entry.path], kind).length > 0;
+		const skillPaths = this.normalizeExtensionPaths(paths.skillPaths ?? []).filter((e) => allowPath(e, "skills"));
+		const promptPaths = this.normalizeExtensionPaths(paths.promptPaths ?? []).filter((e) => allowPath(e, "prompts"));
+		const themePaths = this.normalizeExtensionPaths(paths.themePaths ?? []).filter((e) => allowPath(e, "themes"));
 
 		for (const entry of skillPaths) {
 			this.extensionSkillSourceInfos.set(entry.path, createSourceInfo(entry.path, entry.metadata));
@@ -600,19 +621,8 @@ export class DefaultResourceLoader implements ResourceLoader {
 			// Gather effective external resource roots
 			const effectiveRoots = this.settingsManager.getEffectiveExternalResourceRoots();
 
-			// Resources discovered from external roots are merged directly here (they do not pass
-			// through the package manager's resolve/applyResourceProfileFilters pipeline), so the active
-			// resource-profile allow/block must be applied to them explicitly — otherwise a registered
-			// catalog loads its entire contents regardless of the active profile. Mirrors the agents filter.
-			const filterPathsByProfile = (paths: string[], kind: ResourceProfileKind): string[] => {
-				const filter = this.settingsManager.getResourceProfileFilter(kind);
-				if (filter.allow.length === 0 && filter.block.length === 0) return paths;
-				return paths.filter((p) => {
-					const allowed = filter.allow.length === 0 || matchesResourceProfilePattern(p, filter.allow, this.cwd);
-					const blocked = matchesResourceProfilePattern(p, filter.block, this.cwd);
-					return allowed && !blocked;
-				});
-			};
+			const filterPathsByProfile = (paths: string[], kind: ResourceProfileKind): string[] =>
+				this.filterPathsByProfile(paths, kind);
 
 			// Discover external extensions
 			const externalExtensions: string[] = [];

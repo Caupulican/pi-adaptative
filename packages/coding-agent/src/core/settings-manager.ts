@@ -613,6 +613,12 @@ export class SettingsManager {
 	}
 
 	private getActiveProfileNamesForDiagnostics(): string[] {
+		// Mirror getActiveResourceProfileNames()'s source precedence (runtime profiles from
+		// --resource-profile take priority) so a bad runtime profile name still surfaces a
+		// "profile not found" diagnostic instead of silently applying zero filtering.
+		if (this.runtimeResourceProfiles && this.runtimeResourceProfiles.length > 0) {
+			return normalizeResourceProfileNames(this.runtimeResourceProfiles);
+		}
 		const explicitProfiles =
 			this.settings.activeResourceProfiles && this.settings.activeResourceProfiles.length > 0
 				? this.settings.activeResourceProfiles

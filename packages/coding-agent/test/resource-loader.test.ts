@@ -561,6 +561,41 @@ Extra prompt content`,
 			expect(loadedPrompt?.sourceInfo?.path).toBe(promptPath);
 		});
 
+		it("should apply the active resource profile to extension-contributed (resources_discover) resources", async () => {
+			// Regression: an allowed extension could re-introduce skills/prompts the profile blocks,
+			// because extendResources merged contributed paths without the profile filter.
+			const blockedDir = join(tempDir, "ext-skills", "blocked-ext-skill");
+			mkdirSync(blockedDir, { recursive: true });
+			writeFileSync(join(blockedDir, "SKILL.md"), "---\nname: blocked-ext-skill\ndescription: no\n---\nx");
+			const allowedDir = join(tempDir, "ext-skills", "allowed-ext-skill");
+			mkdirSync(allowedDir, { recursive: true });
+			writeFileSync(join(allowedDir, "SKILL.md"), "---\nname: allowed-ext-skill\ndescription: yes\n---\nx");
+
+			const settingsManager = SettingsManager.inMemory({
+				activeResourceProfile: "lean",
+				resourceProfiles: { lean: { skills: { block: ["blocked-ext-skill"] } } },
+			});
+			const loader = new DefaultResourceLoader({ cwd, agentDir, settingsManager });
+			await loader.reload();
+
+			const meta = (dir: string) => ({
+				source: "extension:x",
+				scope: "temporary" as const,
+				origin: "top-level" as const,
+				baseDir: dir,
+			});
+			loader.extendResources({
+				skillPaths: [
+					{ path: blockedDir, metadata: meta(blockedDir) },
+					{ path: allowedDir, metadata: meta(allowedDir) },
+				],
+			});
+
+			const names = loader.getSkills().skills.map((s) => s.name);
+			expect(names).not.toContain("blocked-ext-skill");
+			expect(names).toContain("allowed-ext-skill");
+		});
+
 		it("should load extension resources returned as file URLs", async () => {
 			const extraSkillDir = join(tempDir, "extra skills", "file-url-skill");
 			mkdirSync(extraSkillDir, { recursive: true });
