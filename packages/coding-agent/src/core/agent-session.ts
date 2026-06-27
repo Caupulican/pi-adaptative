@@ -94,6 +94,7 @@ import {
 } from "./extensions/index.ts";
 import { disposeExtensionEventSubscriptions } from "./extensions/loader.ts";
 import { emitSessionShutdownEvent } from "./extensions/runner.ts";
+import { type ChannelProvider, GatewayRegistry, type JobSchedulerProvider } from "./gateways/channel-provider.ts";
 import {
 	type DemandSignals,
 	decideDemand,
@@ -432,6 +433,8 @@ export class AgentSession {
 	private _memoryManager: MemoryManager = new MemoryManager();
 	/** R4: tracks whether injected recall is actually used, to adapt the recall gate. */
 	private readonly _effectivenessTracker = new EffectivenessTracker();
+	/** R8: registry for deployment-supplied gateway channels + schedulers (lifecycle driven by the host runner). */
+	private readonly _gatewayRegistry = new GatewayRegistry();
 	private readonly _isChildSession: boolean;
 	/** Memory providers registered by extensions via pi.registerMemoryProvider, applied on (re)init. */
 	private _pendingMemoryProviders: MemoryProvider[] = [];
@@ -1020,6 +1023,8 @@ export class AgentSession {
 			this.abortBranchSummary();
 			this.abortBash();
 			this.agent.abort();
+			// R8: stop any deployment-registered gateway channels / schedulers.
+			void this._gatewayRegistry.stop().catch(() => {});
 		} catch {
 			// Dispose must succeed even if an abort hook throws.
 		}
@@ -2909,6 +2914,21 @@ export class AgentSession {
 		if (!this._pendingMemoryProviders.some((p) => p.name === provider.name)) {
 			this._pendingMemoryProviders.push(provider);
 		}
+	}
+
+	/** R8: the gateway/scheduler registry. A deployment runner registers providers and drives start/stop. */
+	get gateways(): GatewayRegistry {
+		return this._gatewayRegistry;
+	}
+
+	/** R8: register a deployment-supplied transport channel (gateway). */
+	registerChannelProvider(provider: ChannelProvider): void {
+		this._gatewayRegistry.registerChannel(provider);
+	}
+
+	/** R8: register a deployment-supplied job scheduler (cron). */
+	registerJobScheduler(provider: JobSchedulerProvider): void {
+		this._gatewayRegistry.registerScheduler(provider);
 	}
 
 	private _refreshToolRegistry(options?: { activeToolNames?: string[]; includeAllExtensionTools?: boolean }): void {

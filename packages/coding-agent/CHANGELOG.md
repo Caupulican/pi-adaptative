@@ -1,5 +1,9 @@
 ## [Unreleased]
 
+### Added
+
+- Gateway & scheduler provider interfaces: pi now exposes `ChannelProvider` (transports) and `JobSchedulerProvider` (cron) contracts plus a registry, so a deployment/server wrapper can plug in channels and scheduled jobs without baking any transport into the core agent.
+
 ## [0.80.65] - 2026-06-27
 
 ### Added
