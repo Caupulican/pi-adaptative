@@ -1,5 +1,9 @@
 ## [Unreleased]
 
+### Changed
+
+- Persistent memory no longer accumulates duplicate facts: when a remembered fact restates an existing one, it supersedes that line in place instead of piling up (anti append-rot).
+
 ## [0.80.62] - 2026-06-27
 
 ### Added

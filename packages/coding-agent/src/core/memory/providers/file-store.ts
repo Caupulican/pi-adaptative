@@ -4,7 +4,34 @@ import lockfile from "proper-lockfile";
 import { type Static, Type } from "typebox";
 import type { ToolDefinition } from "../../extensions/types.ts";
 import { scanContextFileThreats } from "../../resource-loader.ts";
+import { jaccard, tokenize } from "../../tools/skill-audit.ts";
 import type { MemoryLifecycleContext, MemoryProvider } from "../memory-provider.ts";
+
+/**
+ * R5 confront-before-write (anti append-rot): if `content` is a near-duplicate of an existing
+ * non-empty line (token Jaccard ≥ threshold — i.e. the same fact reworded), supersede that line in
+ * place and return the rewritten file; otherwise return null (the caller appends normally).
+ */
+export function supersedeNearDuplicateLine(existing: string, content: string): string | null {
+	const NEAR_DUP_THRESHOLD = 0.6;
+	const contentTokens = tokenize(content);
+	if (contentTokens.length === 0) return null;
+	const lines = existing.split("\n");
+	let bestIdx = -1;
+	let bestScore = NEAR_DUP_THRESHOLD;
+	for (let i = 0; i < lines.length; i++) {
+		const line = lines[i].trim();
+		if (!line) continue;
+		const score = jaccard(contentTokens, tokenize(line));
+		if (score >= bestScore) {
+			bestScore = score;
+			bestIdx = i;
+		}
+	}
+	if (bestIdx === -1) return null;
+	lines[bestIdx] = content;
+	return lines.join("\n");
+}
 
 const memorySchema = Type.Object({
 	action: Type.Union([Type.Literal("add"), Type.Literal("replace"), Type.Literal("remove")], {
@@ -162,10 +189,17 @@ export class FileStoreProvider implements MemoryProvider {
 							if (content === undefined) {
 								throw new Error("Parameter 'content' is required for action 'add'.");
 							}
-							newContent =
-								newContent.endsWith("\n") || newContent === ""
-									? `${newContent}${content}\n`
-									: `${newContent}\n${content}\n`;
+							// R5: confront before write. If this fact is a near-duplicate of an existing line,
+							// supersede it in place instead of appending a redundant copy (prevents append-rot).
+							const superseded = supersedeNearDuplicateLine(currentOnDisk, content);
+							if (superseded !== null) {
+								newContent = superseded;
+							} else {
+								newContent =
+									newContent.endsWith("\n") || newContent === ""
+										? `${newContent}${content}\n`
+										: `${newContent}\n${content}\n`;
+							}
 						} else if (action === "replace") {
 							if (content === undefined || oldContent === undefined) {
 								throw new Error("Parameters 'content' and 'oldContent' are required for action 'replace'.");
