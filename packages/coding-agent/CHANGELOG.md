@@ -1,5 +1,9 @@
 ## [Unreleased]
 
+### Added
+
+- Adaptive recall feedback: pi now tracks whether the cross-session context it recalled was actually used in its answer, and tunes how eagerly it recalls — leaning in when recall helps, backing off when it doesn't.
+
 ## [0.80.61] - 2026-06-27
 
 ### Added

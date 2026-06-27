@@ -101,6 +101,7 @@ import {
 	type ReflectionResult,
 	type ReflectionWrite,
 } from "./learning/reflection-engine.ts";
+import { EffectivenessTracker } from "./memory/effectiveness-tracker.ts";
 import { MemoryManager } from "./memory/memory-manager.ts";
 import type { MemoryProvider } from "./memory/memory-provider.ts";
 import { FileStoreProvider } from "./memory/providers/file-store.ts";
@@ -429,6 +430,8 @@ export class AgentSession {
 	private readonly _isExplicitThinking: boolean;
 	/** Plug-and-play memory subsystem. Recreated on each (re)initialize so reload is safe. */
 	private _memoryManager: MemoryManager = new MemoryManager();
+	/** R4: tracks whether injected recall is actually used, to adapt the recall gate. */
+	private readonly _effectivenessTracker = new EffectivenessTracker();
 	private readonly _isChildSession: boolean;
 	/** Memory providers registered by extensions via pi.registerMemoryProvider, applied on (re)init. */
 	private _pendingMemoryProviders: MemoryProvider[] = [];
@@ -1384,7 +1387,12 @@ export class AgentSession {
 		const t = text.trim();
 		if (t.length < 12 || t.startsWith("/")) return false;
 		const words = t.split(/\s+/).filter((w) => w.length >= 3);
-		return words.length >= 3;
+		// R4 adaptive gate: if recall has rarely been used lately (enough samples to trust the signal),
+		// raise the bar so we only recall on clearly substantial turns — and relax it again once recall
+		// starts paying off. Never fully disabled, so the loop can recover.
+		const recallRarelyUseful =
+			this._effectivenessTracker.sampleCount >= 5 && this._effectivenessTracker.usefulLately() < 0.15;
+		return words.length >= (recallRarelyUseful ? 6 : 3);
 	}
 
 	private async _promptUnserialized(text: string, options?: PromptOptions): Promise<void> {
@@ -1392,6 +1400,10 @@ export class AgentSession {
 		const processSlashCommands = options?.processSlashCommands ?? expandPromptTemplates;
 		const preflightResult = options?.preflightResult;
 		let messages: AgentMessage[] | undefined;
+		// R4 effectiveness feedback: remember the recall page + the query so we can score, after the
+		// response, whether the agent actually used the recalled context.
+		let injectedRecall = "";
+		let recallQuery = "";
 
 		try {
 			// Handle extension commands first. Programmatic extension messages may opt
@@ -1498,6 +1510,8 @@ export class AgentSession {
 				try {
 					const recall = await this._memoryManager.prefetch(expandedText);
 					if (recall) {
+						injectedRecall = recall;
+						recallQuery = expandedText;
 						messages.push({ role: "user", content: [{ type: "text", text: recall }], timestamp: Date.now() });
 					}
 				} catch {
@@ -1560,6 +1574,20 @@ export class AgentSession {
 
 		preflightResult?.(true);
 		await this._runAgentPrompt(messages);
+
+		// R4: score whether the agent actually used the recalled context, so the recall gate can adapt.
+		if (injectedRecall) {
+			const response = this._findLastAssistantMessage();
+			const responseText = response
+				? response.content
+						.filter((c): c is TextContent => c.type === "text")
+						.map((c) => c.text)
+						.join(" ")
+				: "";
+			if (responseText) {
+				this._effectivenessTracker.recordRecallOutcome(injectedRecall, recallQuery, responseText);
+			}
+		}
 	}
 
 	/**
