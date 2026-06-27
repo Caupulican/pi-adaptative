@@ -25,7 +25,12 @@ import {
 	parseResourceProfileBlocks,
 	stripResourceProfileBlocks,
 } from "./resource-profile-blocks.ts";
-import { matchesResourceProfilePattern, type ResourceProfileSettings, SettingsManager } from "./settings-manager.ts";
+import {
+	matchesResourceProfilePattern,
+	type ResourceProfileKind,
+	type ResourceProfileSettings,
+	SettingsManager,
+} from "./settings-manager.ts";
 import type { Skill } from "./skills.ts";
 import { loadSkills } from "./skills.ts";
 import { createSourceInfo, type SourceInfo } from "./source-info.ts";
@@ -595,6 +600,20 @@ export class DefaultResourceLoader implements ResourceLoader {
 			// Gather effective external resource roots
 			const effectiveRoots = this.settingsManager.getEffectiveExternalResourceRoots();
 
+			// Resources discovered from external roots are merged directly here (they do not pass
+			// through the package manager's resolve/applyResourceProfileFilters pipeline), so the active
+			// resource-profile allow/block must be applied to them explicitly — otherwise a registered
+			// catalog loads its entire contents regardless of the active profile. Mirrors the agents filter.
+			const filterPathsByProfile = (paths: string[], kind: ResourceProfileKind): string[] => {
+				const filter = this.settingsManager.getResourceProfileFilter(kind);
+				if (filter.allow.length === 0 && filter.block.length === 0) return paths;
+				return paths.filter((p) => {
+					const allowed = filter.allow.length === 0 || matchesResourceProfilePattern(p, filter.allow, this.cwd);
+					const blocked = matchesResourceProfilePattern(p, filter.block, this.cwd);
+					return allowed && !blocked;
+				});
+			};
+
 			// Discover external extensions
 			const externalExtensions: string[] = [];
 			for (const root of effectiveRoots) {
@@ -632,7 +651,10 @@ export class DefaultResourceLoader implements ResourceLoader {
 
 			const extensionPaths = this.noExtensions
 				? cliEnabledExtensions
-				: this.mergePaths(cliEnabledExtensions, [...enabledExtensions, ...externalExtensions]);
+				: this.mergePaths(cliEnabledExtensions, [
+						...enabledExtensions,
+						...filterPathsByProfile(externalExtensions, "extensions"),
+					]);
 
 			const extensionsResult = await loadExtensions(extensionPaths, this.cwd, this.eventBus);
 			const inlineExtensions = await this.loadExtensionFactories(extensionsResult.runtime);
@@ -698,12 +720,32 @@ export class DefaultResourceLoader implements ResourceLoader {
 				}
 			}
 
-			// Build skill paths with precedence: CLI > user/project > bundled > additional
+			// Build skill paths with precedence: CLI > user/project > bundled > additional.
+			// Bundled skills are expanded into individual SKILL.md paths so they pass through the
+			// resource-profile filter exactly like user/external skills (no source bypasses the profile).
 			const bundledSkillsDir = getBundledSkillsDir();
+			const bundledSkillPaths: string[] = [];
+			if (existsSync(bundledSkillsDir)) {
+				try {
+					for (const entry of readdirSync(bundledSkillsDir, { withFileTypes: true })) {
+						if (!entry.isDirectory()) continue;
+						const entryPath = join(bundledSkillsDir, entry.name);
+						const skillFile = join(entryPath, "SKILL.md");
+						bundledSkillPaths.push(existsSync(skillFile) ? skillFile : entryPath);
+					}
+				} catch {
+					// silent
+				}
+			}
 			const skillPaths = this.noSkills
 				? this.mergePaths([...cliEnabledSkills], this.additionalSkillPaths)
 				: this.mergePaths(
-						[...cliEnabledSkills, ...enabledSkills, ...externalSkills, bundledSkillsDir],
+						[
+							...cliEnabledSkills,
+							...enabledSkills,
+							...filterPathsByProfile(externalSkills, "skills"),
+							...filterPathsByProfile(bundledSkillPaths, "skills"),
+						],
 						this.additionalSkillPaths,
 					);
 
@@ -731,11 +773,20 @@ export class DefaultResourceLoader implements ResourceLoader {
 				}
 			}
 
+			// Bundled prompts expanded into individual files so they pass through the profile filter too.
 			const bundledPromptsDir = getBundledPromptsDir();
+			const bundledPromptPaths = existsSync(bundledPromptsDir)
+				? collectFilesRecursively(bundledPromptsDir, /\.md$/)
+				: [];
 			const promptPaths = this.noPromptTemplates
 				? this.mergePaths(cliEnabledPrompts, this.additionalPromptTemplatePaths)
 				: this.mergePaths(
-						[...cliEnabledPrompts, ...enabledPrompts, ...externalPrompts, bundledPromptsDir],
+						[
+							...cliEnabledPrompts,
+							...enabledPrompts,
+							...filterPathsByProfile(externalPrompts, "prompts"),
+							...filterPathsByProfile(bundledPromptPaths, "prompts"),
+						],
 						this.additionalPromptTemplatePaths,
 					);
 
@@ -769,7 +820,10 @@ export class DefaultResourceLoader implements ResourceLoader {
 
 			const themePaths = this.noThemes
 				? this.mergePaths(cliEnabledThemes, this.additionalThemePaths)
-				: this.mergePaths([...cliEnabledThemes, ...enabledThemes, ...externalThemes], this.additionalThemePaths);
+				: this.mergePaths(
+						[...cliEnabledThemes, ...enabledThemes, ...filterPathsByProfile(externalThemes, "themes")],
+						this.additionalThemePaths,
+					);
 
 			this.lastThemePaths = themePaths;
 			this.updateThemesFromPaths(themePaths, metadataByPath);

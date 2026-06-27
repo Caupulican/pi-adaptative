@@ -388,6 +388,57 @@ Content`,
 			expect(names).not.toContain("GEMINI.md");
 		});
 
+		it("should filter EXTERNAL-ROOT extensions/skills/prompts through the active resource profile", async () => {
+			// Regression: a registered external resource root (catalog) was loading its entire contents
+			// regardless of the active profile — e.g. a blocked extension like idle-watcher kept running.
+			const root = join(tempDir, "catalog");
+			mkdirSync(join(root, "extensions", "idle-watcher"), { recursive: true });
+			writeFileSync(join(root, "extensions", "idle-watcher", "index.ts"), "export default (pi) => {};");
+			mkdirSync(join(root, "extensions", "smart-edit"), { recursive: true });
+			writeFileSync(join(root, "extensions", "smart-edit", "index.ts"), "export default (pi) => {};");
+			mkdirSync(join(root, "skills", "blocked-skill"), { recursive: true });
+			writeFileSync(
+				join(root, "skills", "blocked-skill", "SKILL.md"),
+				"---\nname: blocked-skill\ndescription: no\n---\nx",
+			);
+			mkdirSync(join(root, "skills", "allowed-skill"), { recursive: true });
+			writeFileSync(
+				join(root, "skills", "allowed-skill", "SKILL.md"),
+				"---\nname: allowed-skill\ndescription: yes\n---\nx",
+			);
+			mkdirSync(join(root, "prompts"), { recursive: true });
+			writeFileSync(join(root, "prompts", "blocked.md"), "blocked prompt");
+			writeFileSync(join(root, "prompts", "allowed.md"), "allowed prompt");
+
+			const settingsManager = SettingsManager.inMemory({
+				externalResourceRoots: [root],
+				trustedResourceRoots: [root],
+				activeResourceProfile: "lean",
+				resourceProfiles: {
+					lean: {
+						extensions: { block: ["idle-watcher"] },
+						skills: { block: ["blocked-skill"] },
+						prompts: { block: ["blocked.md"] },
+					},
+				},
+			});
+
+			const loader = new DefaultResourceLoader({ cwd, agentDir, settingsManager });
+			await loader.reload();
+
+			const extPaths = loader.getExtensions().extensions.map((e) => e.path);
+			expect(extPaths.some((p) => p.includes(join("extensions", "idle-watcher")))).toBe(false);
+			expect(extPaths.some((p) => p.includes(join("extensions", "smart-edit")))).toBe(true);
+
+			const skillNames = loader.getSkills().skills.map((s) => s.name);
+			expect(skillNames).not.toContain("blocked-skill");
+			expect(skillNames).toContain("allowed-skill");
+
+			const promptNames = loader.getPrompts().prompts.map((p) => p.name);
+			expect(promptNames).not.toContain("blocked");
+			expect(promptNames).toContain("allowed");
+		});
+
 		it("should apply embedded resource-profile blocks from context agent files and strip them from content", async () => {
 			writeFileSync(
 				join(cwd, "AGENTS.md"),
