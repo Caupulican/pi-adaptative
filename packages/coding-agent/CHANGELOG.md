@@ -1,5 +1,9 @@
 ## [Unreleased]
 
+### Added
+
+- Resource catalog (round resource management): point pi at a catalog directory of skills/extensions/agents/prompts/themes and install them into your pi user level. `update` hash-compares what you've installed against the catalog and re-syncs only the changed ones (and only what you chose on this machine); `backup` copies a user-level resource back into the catalog. Content-hash based, so it's portable across machines.
+
 ## [0.80.67] - 2026-06-27
 
 ### Added

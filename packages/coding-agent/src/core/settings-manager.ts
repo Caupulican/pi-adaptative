@@ -154,6 +154,8 @@ export interface Settings {
 	steeringMode?: "all" | "one-at-a-time";
 	followUpMode?: "all" | "one-at-a-time";
 	theme?: string;
+	/** Resource catalog directory (round resource management): the folder pi installs/updates/backs up from. */
+	catalogDir?: string;
 	compaction?: CompactionSettings;
 	contextGc?: ContextGcSettings;
 	branchSummary?: BranchSummarySettings;
@@ -1624,6 +1626,21 @@ export class SettingsManager {
 	setTheme(theme: string): void {
 		this.globalSettings.theme = theme;
 		this.markModified("theme");
+		this.save();
+	}
+
+	/** The configured resource catalog directory, if any (round resource management). */
+	getCatalogDir(): string | undefined {
+		return this.settings.catalogDir;
+	}
+
+	setCatalogDir(dir: string | undefined): void {
+		if (dir) {
+			this.globalSettings.catalogDir = dir;
+		} else {
+			delete this.globalSettings.catalogDir;
+		}
+		this.markModified("catalogDir");
 		this.save();
 	}
 
