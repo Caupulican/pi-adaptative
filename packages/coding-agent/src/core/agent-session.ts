@@ -104,6 +104,7 @@ import {
 import { MemoryManager } from "./memory/memory-manager.ts";
 import type { MemoryProvider } from "./memory/memory-provider.ts";
 import { FileStoreProvider } from "./memory/providers/file-store.ts";
+import { TranscriptRecallProvider } from "./memory/providers/transcript-recall.ts";
 import { compactToolResultDetailsForRetention } from "./message-retention.ts";
 import type { BashExecutionMessage, CustomMessage } from "./messages.ts";
 import type { ModelRegistry } from "./model-registry.ts";
@@ -1374,6 +1375,18 @@ export class AgentSession {
 		return this._promptUnserialized(text, options);
 	}
 
+	/**
+	 * Zero-I/O gate for cross-session recall (R3): skip trivial turns (short acks, slash commands) so
+	 * recall only runs when it could plausibly help. The provider's similarity cutoff is the real
+	 * filter — this just avoids the index query on turns that obviously don't warrant it.
+	 */
+	private _shouldAttemptRecall(text: string): boolean {
+		const t = text.trim();
+		if (t.length < 12 || t.startsWith("/")) return false;
+		const words = t.split(/\s+/).filter((w) => w.length >= 3);
+		return words.length >= 3;
+	}
+
 	private async _promptUnserialized(text: string, options?: PromptOptions): Promise<void> {
 		const expandPromptTemplates = options?.expandPromptTemplates ?? true;
 		const processSlashCommands = options?.processSlashCommands ?? expandPromptTemplates;
@@ -1474,8 +1487,23 @@ export class AgentSession {
 				await this._checkCompaction(lastAssistant, false);
 			}
 
-			// Build messages array (custom message if any, then user message)
+			// Build messages array (recall page, then custom message if any, then user message)
 			messages = [];
+
+			// R3: cross-session similarity recall. For a substantive turn, ask the memory providers to
+			// prefetch a relevant <memory_context> page from past sessions and prepend it as data ahead of
+			// the user message. Best-effort and gated: trivial turns are skipped, and providers return ""
+			// (no page) when nothing is relevant — so it stays net-negative and the GC packs stale pages.
+			if (this._shouldAttemptRecall(expandedText)) {
+				try {
+					const recall = await this._memoryManager.prefetch(expandedText);
+					if (recall) {
+						messages.push({ role: "user", content: [{ type: "text", text: recall }], timestamp: Date.now() });
+					}
+				} catch {
+					// recall must never break a turn
+				}
+			}
 
 			// Add user message
 			const userContent: (TextContent | ImageContent)[] = [{ type: "text", text: expandedText }];
@@ -2810,6 +2838,9 @@ export class AgentSession {
 			await this._memoryManager.shutdownAll().catch(() => {});
 			const manager = new MemoryManager();
 			manager.registerProvider(new FileStoreProvider());
+			// Bundled read-only cross-session recall (R3): indexes past-session transcripts and answers
+			// prefetch() with a <memory_context> page. Never writes.
+			manager.registerProvider(new TranscriptRecallProvider());
 			for (const provider of this._pendingMemoryProviders) {
 				try {
 					manager.registerProvider(provider);

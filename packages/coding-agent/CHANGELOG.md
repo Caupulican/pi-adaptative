@@ -1,5 +1,9 @@
 ## [Unreleased]
 
+### Added
+
+- Cross-session memory recall: pi now indexes your recent past sessions (same project) and, when a turn is relevant, injects a small read-only recall page from that history — so it can draw on what you did before without you re-explaining. Local, dependency-free, and scoped to the current working directory; the current session and background-learning sessions are excluded.
+
 ## [0.80.60] - 2026-06-27
 
 ### Fixed
