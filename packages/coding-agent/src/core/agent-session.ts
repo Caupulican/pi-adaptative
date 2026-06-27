@@ -114,6 +114,7 @@ import { resolveProfileModelSettings } from "./model-resolver.ts";
 import { expandPromptTemplate, type PromptTemplate } from "./prompt-templates.ts";
 import type { ResourceExtensionPaths, ResourceLoader } from "./resource-loader.ts";
 import { stripResourceProfileBlocks } from "./resource-profile-blocks.ts";
+import { classifyToolTrust, UNTRUSTED_BOUNDARY_SYSTEM_RULE, wrapUntrustedText } from "./security/untrusted-boundary.ts";
 import type { BranchSummaryEntry, CompactionEntry, SessionManager } from "./session-manager.ts";
 import { CURRENT_SESSION_VERSION, getLatestCompactionEntry, type SessionHeader } from "./session-manager.ts";
 import {
@@ -693,29 +694,42 @@ export class AgentSession {
 
 		this.agent.afterToolCall = async ({ toolCall, args, result, isError }) => {
 			const runner = this._extensionRunner;
-			if (!runner.hasHandlers("tool_result")) {
-				return undefined;
+			let content = result.content;
+			let details = result.details;
+			let resolvedIsError = isError;
+
+			if (runner.hasHandlers("tool_result")) {
+				const hookResult = await runner.emitToolResult({
+					type: "tool_result",
+					toolName: toolCall.name,
+					toolCallId: toolCall.id,
+					input: args as Record<string, unknown>,
+					content,
+					details,
+					isError,
+				});
+				if (hookResult) {
+					content = hookResult.content ?? content;
+					details = hookResult.details;
+					resolvedIsError = hookResult.isError ?? isError;
+				}
 			}
 
-			const hookResult = await runner.emitToolResult({
-				type: "tool_result",
-				toolName: toolCall.name,
-				toolCallId: toolCall.id,
-				input: args as Record<string, unknown>,
-				content: result.content,
-				details: result.details,
-				isError,
-			});
-
-			if (!hookResult) {
-				return undefined;
+			// Untrusted-content boundary: structurally fence output from attacker-controllable sources
+			// (web/search, subagents, recall, third-party tools) so injection payloads are framed as data.
+			// First-party tools (read/grep/find/ls/edit/write/bash) are trusted and pass through unchanged.
+			if (classifyToolTrust(toolCall.name) === "untrusted") {
+				const source = `tool:${toolCall.name}`;
+				const wrapped = content.map((block) =>
+					block.type === "text" ? { ...block, text: wrapUntrustedText(block.text, source) } : block,
+				);
+				content = wrapped;
 			}
 
-			return {
-				content: hookResult.content,
-				details: hookResult.details,
-				isError: hookResult.isError ?? isError,
-			};
+			if (content === result.content && details === result.details && resolvedIsError === isError) {
+				return undefined;
+			}
+			return { content, details, isError: resolvedIsError };
 		};
 	}
 
@@ -1303,6 +1317,8 @@ export class AgentSession {
 			// R6: situational soul — the active profile's identity prefix, switched atomically with the
 			// profile's capabilities/model. Most prominent, so it comes first.
 			this._buildSituationSoulPrompt(),
+			// Always-on untrusted-content boundary contract (gives the <untrusted_content> fences meaning).
+			UNTRUSTED_BOUNDARY_SYSTEM_RULE,
 			this._buildSelfModificationPrompt(),
 			this._buildAutonomyPrompt(),
 			// Memory subsystem: static, frozen-per-session block (e.g. file-store MEMORY.md/USER.md).

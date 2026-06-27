@@ -1,5 +1,9 @@
 ## [Unreleased]
 
+### Added
+
+- Untrusted-content boundary (security): output from attacker-controllable sources (web/search, subagents, recall, third-party tools) is now structurally fenced in `<untrusted_content>` tags with a random nonce and break-out neutralization, plus an always-on system-prompt rule that the agent must treat such content as data, never instructions — and that boundary actions always need human approval. First-party tools (read/grep/find/ls/edit/write/bash) are trusted and unwrapped.
+
 ## [0.80.66] - 2026-06-27
 
 ### Added
