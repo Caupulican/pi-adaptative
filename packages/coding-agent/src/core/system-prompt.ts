@@ -3,6 +3,8 @@
  */
 
 import { getDocsPath, getExamplesPath, getReadmePath } from "../config.ts";
+import { getExtensionDescription, getExtensionDisplayName } from "./extension-metadata.ts";
+import type { Extension } from "./extensions/types.ts";
 import { formatSkillsForPrompt, type Skill } from "./skills.ts";
 
 export interface BuildSystemPromptOptions {
@@ -22,6 +24,8 @@ export interface BuildSystemPromptOptions {
 	contextFiles?: Array<{ path: string; content?: string }>;
 	/** Discovered skills; startup prompt lists only lazy-loadable locations. */
 	skills?: Skill[];
+	/** Discovered extensions currently active. */
+	extensions?: Extension[];
 }
 
 const ADAPTATIVE_PERSONA_SECTION = `
@@ -84,6 +88,9 @@ export function buildSystemPrompt(options: BuildSystemPromptOptions): string {
 	const contextFiles = providedContextFiles ?? [];
 	const skills = providedSkills ?? [];
 
+	const activeTools = selectedTools || ["read", "bash", "edit", "write"];
+	const visibleTools = activeTools.filter((name) => !!toolSnippets?.[name]);
+
 	if (customPrompt) {
 		let prompt = customPrompt;
 
@@ -101,6 +108,12 @@ export function buildSystemPrompt(options: BuildSystemPromptOptions): string {
 			prompt += formatSkillsForPrompt(skills);
 		}
 
+		// Append extensions section
+		const extensions = options.extensions ?? [];
+		if (extensions.length > 0) {
+			prompt += formatExtensionsForPrompt(extensions, visibleTools);
+		}
+
 		// Add date and working directory last
 		prompt += `\nCurrent date: ${date}`;
 		prompt += `\nCurrent working directory: ${promptCwd}`;
@@ -115,8 +128,6 @@ export function buildSystemPrompt(options: BuildSystemPromptOptions): string {
 
 	// Build tools list based on selected tools.
 	// A tool appears in Available tools only when the caller provides a one-line snippet.
-	const tools = selectedTools || ["read", "bash", "edit", "write"];
-	const visibleTools = tools.filter((name) => !!toolSnippets?.[name]);
 	const toolsList =
 		visibleTools.length > 0 ? visibleTools.map((name) => `- ${name}: ${toolSnippets![name]}`).join("\n") : "(none)";
 
@@ -131,11 +142,11 @@ export function buildSystemPrompt(options: BuildSystemPromptOptions): string {
 		guidelinesList.push(guideline);
 	};
 
-	const hasBash = tools.includes("bash");
-	const hasGrep = tools.includes("grep");
-	const hasFind = tools.includes("find");
-	const hasLs = tools.includes("ls");
-	const hasRead = tools.includes("read");
+	const hasBash = activeTools.includes("bash");
+	const hasGrep = activeTools.includes("grep");
+	const hasFind = activeTools.includes("find");
+	const hasLs = activeTools.includes("ls");
+	const hasRead = activeTools.includes("read");
 
 	// File exploration guidelines
 	if (hasBash && !hasGrep && !hasFind && !hasLs) {
@@ -185,9 +196,60 @@ Pi documentation (read only when the user asks about pi itself, its SDK, extensi
 		prompt += formatSkillsForPrompt(skills);
 	}
 
+	// Append extensions section
+	const activeExtensions = options.extensions ?? [];
+	if (activeExtensions.length > 0) {
+		prompt += formatExtensionsForPrompt(activeExtensions, visibleTools);
+	}
+
 	// Add date and working directory last
 	prompt += `\nCurrent date: ${date}`;
 	prompt += `\nCurrent working directory: ${promptCwd}`;
 
 	return prompt;
+}
+
+function formatExtensionsForPrompt(extensions: Extension[], visibleTools: string[]): string {
+	if (extensions.length === 0) {
+		return "";
+	}
+
+	const lines = ["\n\nThe following extensions are currently loaded and active:", "", "<active_extensions>"];
+	let added = 0;
+
+	for (const ext of extensions) {
+		const name = getExtensionDisplayName(ext.path);
+		const description = getExtensionDescription(ext.path);
+
+		const tools = Array.from(ext.tools.keys()).filter((t) => visibleTools.includes(t));
+		const commands = Array.from(ext.commands.keys());
+
+		// Skip extension listing if it has no visible tools, commands, or description
+		if (tools.length === 0 && commands.length === 0 && !description) {
+			continue;
+		}
+
+		lines.push("  <extension>");
+		lines.push(`    <name>${escapeXml(name)}</name>`);
+		if (description) {
+			lines.push(`    <description>${escapeXml(description)}</description>`);
+		}
+		lines.push(`    <path>${escapeXml(ext.path)}</path>`);
+
+		if (tools.length > 0) {
+			lines.push(`    <registered_tools>${tools.map(escapeXml).join(", ")}</registered_tools>`);
+		}
+		if (commands.length > 0) {
+			lines.push(`    <registered_commands>${commands.map(escapeXml).join(", ")}</registered_commands>`);
+		}
+		lines.push("  </extension>");
+		added++;
+	}
+
+	if (added === 0) {
+		return "";
+	}
+
+	lines.push("</active_extensions>");
+	return lines.join("\n");
 }

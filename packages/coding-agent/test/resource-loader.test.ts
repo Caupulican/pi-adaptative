@@ -430,13 +430,21 @@ Content`,
 			expect(extPaths.some((p) => p.includes(join("extensions", "idle-watcher")))).toBe(false);
 			expect(extPaths.some((p) => p.includes(join("extensions", "smart-edit")))).toBe(true);
 
-			const skillNames = loader.getSkills().skills.map((s) => s.name);
-			expect(skillNames).not.toContain("blocked-skill");
-			expect(skillNames).toContain("allowed-skill");
+			const allSkills = loader.getSkills().skills.map((s) => s.name);
+			expect(allSkills).toContain("blocked-skill");
+			expect(allSkills).toContain("allowed-skill");
 
-			const promptNames = loader.getPrompts().prompts.map((p) => p.name);
-			expect(promptNames).not.toContain("blocked");
-			expect(promptNames).toContain("allowed");
+			const activeSkillNames = loader.getActiveSkills().map((s) => s.name);
+			expect(activeSkillNames).not.toContain("blocked-skill");
+			expect(activeSkillNames).toContain("allowed-skill");
+
+			const allPrompts = loader.getPrompts().prompts.map((p) => p.name);
+			expect(allPrompts).toContain("blocked");
+			expect(allPrompts).toContain("allowed");
+
+			const activePromptNames = loader.getActivePrompts().map((p) => p.name);
+			expect(activePromptNames).not.toContain("blocked");
+			expect(activePromptNames).toContain("allowed");
 		});
 
 		it("should apply embedded resource-profile blocks from context agent files and strip them from content", async () => {

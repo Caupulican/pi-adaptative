@@ -388,6 +388,7 @@ export class ProfileResourceEditorComponent extends Container implements Focusab
 			`${keyText("tui.input.tab")} kind`,
 			`${keyText("app.models.save")} save`,
 			`${theme.fg("accent", "e")} edit`,
+			`${theme.fg("accent", "Ctrl+Q")}/${keyText("app.interrupt")} cancel`,
 			countText,
 		];
 		return this.isDirty
@@ -570,8 +571,13 @@ export class ProfileResourceEditorComponent extends Container implements Focusab
 			return;
 		}
 
-		// Escape - cancel
-		if (matchesKey(data, Key.escape)) {
+		// Escape / Ctrl+Q - cancel (unconditional)
+		if (
+			kb.matches(data, "app.interrupt") ||
+			matchesKey(data, Key.escape) ||
+			matchesKey(data, Key.esc) ||
+			matchesKey(data, "ctrl+q")
+		) {
 			this.onCancel();
 			return;
 		}

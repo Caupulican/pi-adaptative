@@ -214,11 +214,20 @@ export function createTestResourceLoader(options: CreateTestResourceLoaderOption
 		runtime: createExtensionRuntime(),
 	};
 
-	return {
+	const loader: ResourceLoader = {
 		getExtensions: () => extensionsResult,
 		getSkills: () => ({ skills: [], diagnostics: [] }),
+		getActiveSkills() {
+			return this.getSkills().skills;
+		},
 		getPrompts: () => ({ prompts: [], diagnostics: [] }),
+		getActivePrompts() {
+			return this.getPrompts().prompts;
+		},
 		getThemes: () => ({ themes: [], diagnostics: [] }),
+		getActiveThemes() {
+			return this.getThemes().themes;
+		},
 		getAgentsFiles: () => ({ agentsFiles: [] }),
 		getSystemPrompt: () => undefined,
 		getAppendSystemPrompt: () => [],
@@ -229,6 +238,8 @@ export function createTestResourceLoader(options: CreateTestResourceLoaderOption
 		reload: async () => {},
 		getDiscoverableExtensionPaths: async () => extensionsResult.extensions.map((e) => e.path),
 	};
+
+	return loader;
 }
 
 /**

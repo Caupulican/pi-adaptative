@@ -223,6 +223,9 @@ const noOpUIContext: ExtensionUIContext = {
 
 export class ExtensionRunner {
 	private extensions: Extension[];
+	get activeExtensions(): ReadonlyArray<Extension> {
+		return this.extensions;
+	}
 	private runtime: ExtensionRuntime;
 	private uiContext: ExtensionUIContext;
 	private mode: ExtensionContext["mode"] = "print";

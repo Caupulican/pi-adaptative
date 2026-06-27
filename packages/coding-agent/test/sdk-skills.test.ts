@@ -54,8 +54,11 @@ This is a test skill.
 		const resourceLoader: ResourceLoader = {
 			getExtensions: () => ({ extensions: [], errors: [], runtime: createExtensionRuntime() }),
 			getSkills: () => ({ skills: [], diagnostics: [] }),
+			getActiveSkills: () => [],
 			getPrompts: () => ({ prompts: [], diagnostics: [] }),
+			getActivePrompts: () => [],
 			getThemes: () => ({ themes: [], diagnostics: [] }),
+			getActiveThemes: () => [],
 			getAgentsFiles: () => ({ agentsFiles: [] }),
 			getSystemPrompt: () => undefined,
 			getAppendSystemPrompt: () => [],
@@ -91,8 +94,11 @@ This is a test skill.
 		const resourceLoader: ResourceLoader = {
 			getExtensions: () => ({ extensions: [], errors: [], runtime: createExtensionRuntime() }),
 			getSkills: () => ({ skills: [customSkill], diagnostics: [] }),
+			getActiveSkills: () => [customSkill],
 			getPrompts: () => ({ prompts: [], diagnostics: [] }),
+			getActivePrompts: () => [],
 			getThemes: () => ({ themes: [], diagnostics: [] }),
+			getActiveThemes: () => [],
 			getAgentsFiles: () => ({ agentsFiles: [] }),
 			getSystemPrompt: () => undefined,
 			getAppendSystemPrompt: () => [],

@@ -1,5 +1,14 @@
 ## [Unreleased]
 
+### Fixed
+
+- Resource profiles are now the final authority everywhere: a profile-blocked skill, prompt, theme, or extension can no longer be selected or invoked by the user or the agent — including after a runtime profile switch. Skills/prompts/themes load fully (so the profile editor can show them) but are filtered at every use surface; extensions stay load-gated (a blocked extension is never loaded or allowed to run).
+- The profile resource editor can now be cancelled/aborted (Ctrl+Q / Esc / interrupt) without saving; the footer advertises it.
+
+### Added
+
+- The system prompt now lists the agent's loaded capabilities — active skills, tools, and extensions (with names and descriptions) — so the agent can answer "list your capabilities" accurately. Extensions show a real name/description instead of `index.ts`.
+
 ## [0.80.59] - 2026-06-27
 
 ### Added

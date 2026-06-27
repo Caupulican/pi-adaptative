@@ -1164,7 +1164,7 @@ export class AgentSession {
 
 	/** File-based prompt templates */
 	get promptTemplates(): ReadonlyArray<PromptTemplate> {
-		return this._resourceLoader.getPrompts().prompts;
+		return this._resourceLoader.getActivePrompts();
 	}
 
 	private _normalizePromptSnippet(text: string | undefined): string | undefined {
@@ -1288,7 +1288,9 @@ export class AgentSession {
 			...loaderAppendSystemPrompt,
 		].filter((part): part is string => Boolean(part));
 		const appendSystemPrompt = appendSystemPromptParts.length > 0 ? appendSystemPromptParts.join("\n\n") : undefined;
-		const loadedSkills = this._resourceLoader.getSkills().skills;
+		// Only surface skills the active profile permits — the agent must not be told about (or able
+		// to invoke) a skill its profile blocks.
+		const loadedSkills = this._resourceLoader.getActiveSkills();
 		const loadedContextFiles = this._resourceLoader.getAgentsFiles().agentsFiles;
 
 		this._baseSystemPromptOptions = {
@@ -1300,6 +1302,7 @@ export class AgentSession {
 			selectedTools: validToolNames,
 			toolSnippets,
 			promptGuidelines,
+			extensions: [...this._extensionRunner.activeExtensions],
 		};
 		return buildSystemPrompt(this._baseSystemPromptOptions);
 	}
@@ -1577,8 +1580,10 @@ export class AgentSession {
 		const skillName = spaceIndex === -1 ? text.slice(7) : text.slice(7, spaceIndex);
 		const args = spaceIndex === -1 ? "" : text.slice(spaceIndex + 1).trim();
 
-		const skill = this.resourceLoader.getSkills().skills.find((s) => s.name === skillName);
-		if (!skill) return text; // Unknown skill, pass through
+		// Resolve only against profile-active skills so a `/skill:` the active profile blocks cannot be
+		// expanded/invoked — by the user OR the agent — even if it loaded before a runtime profile switch.
+		const skill = this.resourceLoader.getActiveSkills().find((s) => s.name === skillName);
+		if (!skill) return text; // Unknown or profile-blocked skill, pass through unchanged
 
 		try {
 			const content = readFileSync(skill.filePath, "utf-8");
@@ -2626,7 +2631,7 @@ export class AgentSession {
 				sourceInfo: template.sourceInfo,
 			}));
 
-			const skills: SlashCommandInfo[] = this._resourceLoader.getSkills().skills.map((skill) => ({
+			const skills: SlashCommandInfo[] = this._resourceLoader.getActiveSkills().map((skill) => ({
 				name: `skill:${skill.name}`,
 				description: skill.description,
 				source: "skill",

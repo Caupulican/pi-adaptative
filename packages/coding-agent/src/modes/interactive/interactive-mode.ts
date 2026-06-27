@@ -930,7 +930,7 @@ export class InteractiveMode {
 		this.skillCommands.clear();
 		const skillCommandList: SlashCommand[] = [];
 		if (this.settingsManager.getEnableSkillCommands()) {
-			for (const skill of this.session.resourceLoader.getSkills().skills) {
+			for (const skill of this.session.resourceLoader.getActiveSkills()) {
 				const commandName = `skill:${skill.name}`;
 				this.skillCommands.set(commandName, skill.filePath);
 				skillCommandList.push({
@@ -1814,7 +1814,7 @@ export class InteractiveMode {
 				addLoadedSection("Context", contextCompactList, contextList);
 			}
 
-			const skills = skillsResult.skills;
+			const skills = this.session.resourceLoader.getActiveSkills();
 			if (skills.length > 0) {
 				const groups = this.buildScopeGroups(
 					skills.map((skill) => ({ path: skill.filePath, sourceInfo: skill.sourceInfo })),
@@ -5986,7 +5986,12 @@ export class InteractiveMode {
 					thinkingLevel: this.session.thinkingLevel,
 					availableThinkingLevels: this.session.getAvailableThinkingLevels(),
 					currentTheme: this.settingsManager.getTheme() || "dark",
-					availableThemes: getAvailableThemes(),
+					// The picker offers only themes the active profile permits (no-bypass). The theme
+					// registry/renderer keeps the full set, so an already-applied theme still renders
+					// even if the profile would block re-selecting it.
+					availableThemes: getAvailableThemes().filter((name) =>
+						this.settingsManager.isResourceAllowedByProfile("themes", name),
+					),
 					hideThinkingBlock: this.hideThinkingBlock,
 					collapseChangelog: this.settingsManager.getCollapseChangelog(),
 					enableInstallTelemetry: this.settingsManager.getEnableInstallTelemetry(),

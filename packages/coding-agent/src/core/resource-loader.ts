@@ -51,8 +51,14 @@ export interface ResourceReloadOptions {
 export interface ResourceLoader {
 	getExtensions(): LoadExtensionsResult;
 	getSkills(): { skills: Skill[]; diagnostics: ResourceDiagnostic[] };
+	/** Skills allowed by the currently active resource profile — use for selection/invocation/agent-visibility. */
+	getActiveSkills(): Skill[];
 	getPrompts(): { prompts: PromptTemplate[]; diagnostics: ResourceDiagnostic[] };
+	/** Prompt templates allowed by the currently active resource profile — use for selection/invocation/agent-visibility. */
+	getActivePrompts(): PromptTemplate[];
 	getThemes(): { themes: Theme[]; diagnostics: ResourceDiagnostic[] };
+	/** Themes allowed by the currently active resource profile. */
+	getActiveThemes(): Theme[];
 	getAgentsFiles(): { agentsFiles: Array<{ path: string; content?: string }> };
 	getSystemPrompt(): string | undefined;
 	getAppendSystemPrompt(): string[];
@@ -345,12 +351,61 @@ export class DefaultResourceLoader implements ResourceLoader {
 		return { skills: this.skills, diagnostics: this.skillDiagnostics };
 	}
 
+	/**
+	 * Skills permitted by the CURRENTLY active resource profile (the loaded set intersected with the
+	 * live profile filter). Use this everywhere a skill can be SELECTED, INVOKED, or shown to the
+	 * agent — so neither the user (autocomplete / typed `/skill:`) nor the agent (system prompt /
+	 * expansion / command API / RPC) can use a skill the active profile blocks, including after a
+	 * runtime profile switch (router-managed / `/profile`). The full loaded set (`getSkills`) is
+	 * reserved for the profile editor and resource listings, which must show blockable skills.
+	 */
+	getActiveSkills(): Skill[] {
+		const filter = this.settingsManager.getResourceProfileFilter("skills");
+		if (filter.allow.length === 0 && filter.block.length === 0) return this.skills;
+		return this.skills.filter((s) => {
+			const allowed = filter.allow.length === 0 || matchesResourceProfilePattern(s.filePath, filter.allow, this.cwd);
+			const blocked = matchesResourceProfilePattern(s.filePath, filter.block, this.cwd);
+			return allowed && !blocked;
+		});
+	}
+
 	getPrompts(): { prompts: PromptTemplate[]; diagnostics: ResourceDiagnostic[] } {
 		return { prompts: this.prompts, diagnostics: this.promptDiagnostics };
 	}
 
+	/**
+	 * Prompt templates permitted by the CURRENTLY active resource profile (the loaded set intersected with the
+	 * live profile filter). Use this everywhere a prompt template can be SELECTED, INVOKED, or shown to the
+	 * agent — so neither the user (autocomplete / typed slash command) nor the agent can use a prompt template
+	 * the active profile blocks. The full loaded set (`getPrompts`) is reserved for the profile editor.
+	 */
+	getActivePrompts(): PromptTemplate[] {
+		const filter = this.settingsManager.getResourceProfileFilter("prompts");
+		if (filter.allow.length === 0 && filter.block.length === 0) return this.prompts;
+		return this.prompts.filter((p) => {
+			const allowed = filter.allow.length === 0 || matchesResourceProfilePattern(p.filePath, filter.allow, this.cwd);
+			const blocked = matchesResourceProfilePattern(p.filePath, filter.block, this.cwd);
+			return allowed && !blocked;
+		});
+	}
+
 	getThemes(): { themes: Theme[]; diagnostics: ResourceDiagnostic[] } {
 		return { themes: this.themes, diagnostics: this.themeDiagnostics };
+	}
+
+	/**
+	 * Themes permitted by the CURRENTLY active resource profile.
+	 */
+	getActiveThemes(): Theme[] {
+		const filter = this.settingsManager.getResourceProfileFilter("themes");
+		if (filter.allow.length === 0 && filter.block.length === 0) return this.themes;
+		return this.themes.filter((t) => {
+			if (!t.sourcePath) return true;
+			const allowed =
+				filter.allow.length === 0 || matchesResourceProfilePattern(t.sourcePath, filter.allow, this.cwd);
+			const blocked = matchesResourceProfilePattern(t.sourcePath, filter.block, this.cwd);
+			return allowed && !blocked;
+		});
 	}
 
 	getAgentsFiles(): { agentsFiles: Array<{ path: string; content?: string }> } {
@@ -572,6 +627,7 @@ export class DefaultResourceLoader implements ResourceLoader {
 			const getEnabledPaths = (
 				resources: Array<{ path: string; enabled: boolean; metadata: PathMetadata }>,
 			): string[] => getEnabledResources(resources).map((r) => r.path);
+
 			const enabledExtensions = getEnabledPaths(resolvedPaths.extensions);
 			const enabledSkillResources = getEnabledResources(resolvedPaths.skills);
 			const enabledPrompts = getEnabledPaths(resolvedPaths.prompts);
@@ -662,7 +718,7 @@ export class DefaultResourceLoader implements ResourceLoader {
 			const extensionPaths = this.noExtensions
 				? cliEnabledExtensions
 				: this.mergePaths(cliEnabledExtensions, [
-						...enabledExtensions,
+						...filterPathsByProfile(enabledExtensions, "extensions"),
 						...filterPathsByProfile(externalExtensions, "extensions"),
 					]);
 
@@ -750,12 +806,7 @@ export class DefaultResourceLoader implements ResourceLoader {
 			const skillPaths = this.noSkills
 				? this.mergePaths([...cliEnabledSkills], this.additionalSkillPaths)
 				: this.mergePaths(
-						[
-							...cliEnabledSkills,
-							...enabledSkills,
-							...filterPathsByProfile(externalSkills, "skills"),
-							...filterPathsByProfile(bundledSkillPaths, "skills"),
-						],
+						[...cliEnabledSkills, ...enabledSkills, ...externalSkills, ...bundledSkillPaths],
 						this.additionalSkillPaths,
 					);
 
@@ -791,12 +842,7 @@ export class DefaultResourceLoader implements ResourceLoader {
 			const promptPaths = this.noPromptTemplates
 				? this.mergePaths(cliEnabledPrompts, this.additionalPromptTemplatePaths)
 				: this.mergePaths(
-						[
-							...cliEnabledPrompts,
-							...enabledPrompts,
-							...filterPathsByProfile(externalPrompts, "prompts"),
-							...filterPathsByProfile(bundledPromptPaths, "prompts"),
-						],
+						[...cliEnabledPrompts, ...enabledPrompts, ...externalPrompts, ...bundledPromptPaths],
 						this.additionalPromptTemplatePaths,
 					);
 
@@ -830,10 +876,7 @@ export class DefaultResourceLoader implements ResourceLoader {
 
 			const themePaths = this.noThemes
 				? this.mergePaths(cliEnabledThemes, this.additionalThemePaths)
-				: this.mergePaths(
-						[...cliEnabledThemes, ...enabledThemes, ...filterPathsByProfile(externalThemes, "themes")],
-						this.additionalThemePaths,
-					);
+				: this.mergePaths([...cliEnabledThemes, ...enabledThemes, ...externalThemes], this.additionalThemePaths);
 
 			this.lastThemePaths = themePaths;
 			this.updateThemesFromPaths(themePaths, metadataByPath);
