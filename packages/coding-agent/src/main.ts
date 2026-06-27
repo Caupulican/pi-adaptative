@@ -390,6 +390,12 @@ function buildSessionOptions(
 		}
 	}
 
+	// Record whether model/thinking came from an explicit CLI flag (before the profile fills them
+	// in below), so AgentSession can re-apply profile model/thinking on reload without clobbering
+	// an explicit --model/--thinking.
+	options.isExplicitModel = !!parsed.model;
+	options.isExplicitThinking = !!parsed.thinking || cliThinkingFromModel;
+
 	// Model/Thinking from active profiles if not explicitly set via CLI flags
 	const activeProfileNames = settingsManager.getActiveResourceProfileNames();
 	if (activeProfileNames.length > 0) {

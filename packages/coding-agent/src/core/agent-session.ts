@@ -87,6 +87,7 @@ import { emitSessionShutdownEvent } from "./extensions/runner.ts";
 import { compactToolResultDetailsForRetention } from "./message-retention.ts";
 import type { BashExecutionMessage, CustomMessage } from "./messages.ts";
 import type { ModelRegistry } from "./model-registry.ts";
+import { resolveProfileModelSettings } from "./model-resolver.ts";
 import { expandPromptTemplate, type PromptTemplate } from "./prompt-templates.ts";
 import type { ResourceExtensionPaths, ResourceLoader } from "./resource-loader.ts";
 import { stripResourceProfileBlocks } from "./resource-profile-blocks.ts";
@@ -189,6 +190,13 @@ export interface AgentSessionConfig {
 	excludedToolNames?: string[];
 	/** Optional resource-profile allow/block filters for tool names. */
 	toolProfileFilter?: ResourceProfileFilterSettings;
+	/**
+	 * Whether the model/thinking level came from an explicit launch flag. When false, the active
+	 * profile's model/thinking is re-applied on reload() so live profile edits take effect; when
+	 * true, the explicit launch-time choice is preserved.
+	 */
+	isExplicitModel?: boolean;
+	isExplicitThinking?: boolean;
 	/**
 	 * Override base tools (useful for custom runtimes).
 	 *
@@ -337,6 +345,8 @@ export class AgentSession {
 	private _allowedToolNames?: Set<string>;
 	private _excludedToolNames?: Set<string>;
 	private _toolProfileFilter?: Required<ResourceProfileFilterSettings>;
+	private readonly _isExplicitModel: boolean;
+	private readonly _isExplicitThinking: boolean;
 	private _baseToolsOverride?: Record<string, AgentTool>;
 	private _sessionStartEvent: SessionStartEvent;
 	private _extensionUIContext?: ExtensionUIContext;
@@ -377,6 +387,8 @@ export class AgentSession {
 		this._toolProfileFilter = config.toolProfileFilter
 			? { allow: config.toolProfileFilter.allow ?? [], block: config.toolProfileFilter.block ?? [] }
 			: undefined;
+		this._isExplicitModel = config.isExplicitModel ?? false;
+		this._isExplicitThinking = config.isExplicitThinking ?? false;
 		this._baseToolsOverride = config.baseToolsOverride;
 		this._sessionStartEvent = config.sessionStartEvent ?? { type: "session_start", reason: "startup" };
 
@@ -2651,6 +2663,40 @@ export class AgentSession {
 		return { allow: filter.allow ?? [], block: filter.block ?? [] };
 	}
 
+	/**
+	 * Re-resolve the active resource profile's model/thinking from current settings and apply it.
+	 * Only acts when the profile actually binds model/thinking AND that field was not set by an
+	 * explicit launch flag — so live profile edits apply on reload without clobbering an explicit
+	 * --model/--thinking. A no-op for profiles that don't bind a model.
+	 */
+	private async _reapplyActiveProfileModelSettings(): Promise<void> {
+		if (this._isExplicitModel && this._isExplicitThinking) return;
+		const activeProfileNames = this.settingsManager.getActiveResourceProfileNames();
+		if (activeProfileNames.length === 0) return;
+		const profileSettings = resolveProfileModelSettings({
+			activeProfileNames,
+			registry: this.settingsManager.getProfileRegistry(),
+			modelRegistry: this._modelRegistry,
+			cwd: this._cwd,
+		});
+		if (!this._isExplicitModel && profileSettings.model) {
+			const current = this.agent.state.model;
+			const next = profileSettings.model;
+			if (!current || current.provider !== next.provider || current.id !== next.id) {
+				// Mirror the startup/cycle path: set the model directly (no auth gate, no settings
+				// persist) so re-applying the profile model behaves like initial resolution rather
+				// than a runtime model switch. No model_select emit here — reload rebuilds the
+				// extension runtime and emits session_start("reload") right after, and the UI
+				// re-renders from session.model.
+				this.agent.state.model = next;
+				this.sessionManager.appendModelChange(next.provider, next.id);
+			}
+		}
+		if (!this._isExplicitThinking && profileSettings.thinkingLevel) {
+			this.setThinkingLevel(profileSettings.thinkingLevel);
+		}
+	}
+
 	private _refreshToolRegistry(options?: { activeToolNames?: string[]; includeAllExtensionTools?: boolean }): void {
 		const previousRegistryNames = new Set(this._toolRegistry.keys());
 		const previousActiveToolNames = this.getActiveToolNames();
@@ -2894,6 +2940,10 @@ export class AgentSession {
 			// active profile's tools allow/block — or switching the active profile — would not
 			// apply on /reload and allowed tools would stay missing.
 			this._toolProfileFilter = this._deriveToolProfileFilter();
+			// Re-apply the active profile's model/thinking from the freshly reloaded settings, so a live
+			// profile edit (or switch) takes effect on /reload. Skipped when the launch used an explicit
+			// --model/--thinking flag, which must win over the profile across reloads.
+			await this._reapplyActiveProfileModelSettings();
 			await this._resourceLoader.reload({ failOnExtensionErrors: true, deferExtensionDispose: true });
 			resetApiProviders();
 			this._buildRuntime({

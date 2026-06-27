@@ -47,6 +47,14 @@ export interface CreateAgentSessionOptions {
 	model?: Model<any>;
 	/** Thinking level. Default: from settings, else 'medium' (clamped to model capabilities) */
 	thinkingLevel?: ThinkingLevel;
+	/**
+	 * Whether `model` came from an explicit CLI/SDK flag (vs. profile/settings resolution).
+	 * When false (default), the active profile's model is re-applied on reload so live profile
+	 * edits take effect; when true, the explicit launch-time model is preserved across reloads.
+	 */
+	isExplicitModel?: boolean;
+	/** Whether `thinkingLevel` came from an explicit flag (see isExplicitModel). */
+	isExplicitThinking?: boolean;
 	/** Models available for cycling (Ctrl+P in interactive mode) */
 	scopedModels?: Array<{ model: Model<any>; thinkingLevel?: ThinkingLevel }>;
 
@@ -466,6 +474,8 @@ export async function createAgentSession(options: CreateAgentSessionOptions = {}
 		excludedToolNames,
 		extensionRunnerRef,
 		toolProfileFilter,
+		isExplicitModel: options.isExplicitModel ?? options.model != null,
+		isExplicitThinking: options.isExplicitThinking ?? options.thinkingLevel !== undefined,
 		sessionStartEvent: options.sessionStartEvent,
 	});
 	const extensionsResult = resourceLoader.getExtensions();
