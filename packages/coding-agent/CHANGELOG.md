@@ -1,5 +1,9 @@
 ## [Unreleased]
 
+### Added
+
+- Situational profiles (souls): a resource profile can now define a `soul` — a situational identity injected into the system prompt while the profile is active — so switching a profile switches the agent's identity, capabilities, and model together as one "situation".
+
 ## [0.80.63] - 2026-06-27
 
 ### Changed

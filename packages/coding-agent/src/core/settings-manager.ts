@@ -355,6 +355,11 @@ export interface ProfileDefinitionInput {
 	description?: string;
 	model?: string;
 	thinking?: ThinkingLevel;
+	/**
+	 * Situational identity (R6): a system-prompt prefix injected while this profile is active, so a
+	 * profile becomes a full "situation" = soul + capabilities + model/thinking, switched atomically.
+	 */
+	soul?: string;
 	resources: ResourceProfileSettings;
 }
 
@@ -410,6 +415,7 @@ function parseProfileFileDefinition(content: string): ProfileDefinitionInput {
 		description: typeof parsed.description === "string" ? parsed.description.trim() || undefined : undefined,
 		model: typeof parsed.model === "string" ? parsed.model.trim() || undefined : undefined,
 		thinking: isThinkingLevel(parsed.thinking) ? parsed.thinking : undefined,
+		soul: typeof parsed.soul === "string" ? parsed.soul.trim() || undefined : undefined,
 		resources: normalizeProfileResources(resourceSection),
 	};
 }
@@ -874,6 +880,23 @@ export class SettingsManager {
 			return false;
 		}
 		return true;
+	}
+
+	/**
+	 * Situational soul(s) of the currently active profile(s) (R6): a system-prompt identity prefix
+	 * injected while the profile is active. Multiple active profiles' souls are concatenated.
+	 */
+	getActiveProfileSoul(): string | undefined {
+		const registry = this.getProfileRegistry();
+		const souls: string[] = [];
+		const seen = new Set<string>();
+		for (const profileName of this.getActiveResourceProfileNames()) {
+			if (seen.has(profileName)) continue;
+			seen.add(profileName);
+			const soul = registry.getProfile(profileName)?.soul?.trim();
+			if (soul) souls.push(soul);
+		}
+		return souls.length > 0 ? souls.join("\n\n") : undefined;
 	}
 
 	isProjectTrusted(): boolean {

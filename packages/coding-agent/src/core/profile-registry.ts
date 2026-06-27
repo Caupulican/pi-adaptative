@@ -21,6 +21,8 @@ export interface NormalizedProfile {
 	description?: string;
 	model?: string;
 	thinking?: ThinkingLevel;
+	/** Situational identity injected into the system prompt while this profile is active (R6). */
+	soul?: string;
 	resources: ResourceProfileSettings;
 	source: ProfileSource;
 	sourcePath?: string;
@@ -134,11 +136,13 @@ function normalizeWrapperProfile(options: {
 	const description = asNonEmptyString(options.value.description);
 	const model = asNonEmptyString(options.value.model);
 	const thinking = normalizeThinking(options.value.thinking);
+	const soul = asNonEmptyString(options.value.soul);
 	return {
 		name,
 		description,
 		model,
 		thinking,
+		soul,
 		resources,
 		source: options.source,
 		sourcePath: options.sourcePath,

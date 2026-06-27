@@ -1195,6 +1195,16 @@ export class AgentSession {
 		return Array.from(unique);
 	}
 
+	/**
+	 * R6: the active profile's situational soul, wrapped so the model reads it as its identity for this
+	 * situation. Empty when no active profile defines a soul.
+	 */
+	private _buildSituationSoulPrompt(): string | undefined {
+		const soul = this.settingsManager.getActiveProfileSoul();
+		if (!soul) return undefined;
+		return `<situation_soul>\n${soul}\n</situation_soul>`;
+	}
+
 	private _buildSelfModificationPrompt(): string | undefined {
 		const settings = this.settingsManager.getSelfModificationSettings();
 		if (!settings.enabled) {
@@ -1285,6 +1295,9 @@ export class AgentSession {
 		const loaderSystemPrompt = this._resourceLoader.getSystemPrompt();
 		const loaderAppendSystemPrompt = this._resourceLoader.getAppendSystemPrompt();
 		const appendSystemPromptParts = [
+			// R6: situational soul — the active profile's identity prefix, switched atomically with the
+			// profile's capabilities/model. Most prominent, so it comes first.
+			this._buildSituationSoulPrompt(),
 			this._buildSelfModificationPrompt(),
 			this._buildAutonomyPrompt(),
 			// Memory subsystem: static, frozen-per-session block (e.g. file-store MEMORY.md/USER.md).
