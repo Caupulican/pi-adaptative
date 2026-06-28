@@ -10,6 +10,7 @@
 
 import { existsSync, mkdirSync, readdirSync, readFileSync, renameSync, statSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
+import lockfile from "proper-lockfile";
 import { jaccard, tokenize } from "../tools/skill-audit.ts";
 
 /** Per-promoted-skill signal the proposal logic reasons over. Pure data — no I/O. */
@@ -128,6 +129,29 @@ export class SkillCurator {
 			staleDays: options.staleDays ?? DEFAULT_CURATOR_OPTIONS.staleDays,
 			overlapThreshold: options.overlapThreshold ?? DEFAULT_CURATOR_OPTIONS.overlapThreshold,
 		});
+	}
+
+	/**
+	 * Auto-archive every stale promoted skill in ONE locked batch (#32 default-on). The lock serializes
+	 * curation across sessions sharing this `agentDir` so a concurrent session can't archive a folder
+	 * mid-rename (agy's race mitigation). Returns the names archived (for the host to announce). Never
+	 * throws; on lock contention it simply does nothing this run.
+	 */
+	async autoArchiveStale(now: number, options: Partial<Omit<CuratorOptions, "now">> = {}): Promise<string[]> {
+		if (!existsSync(this.skillsDir)) return [];
+		let release: (() => Promise<void>) | undefined;
+		try {
+			release = await lockfile.lock(this.skillsDir, { realpath: false, retries: 2 });
+			const archived: string[] = [];
+			for (const a of this.proposeCuration(now, options).archive) {
+				if (this.archiveSkill(a.name)) archived.push(a.name);
+			}
+			return archived;
+		} catch {
+			return []; // another session holds the lock, or fs error — skip this run
+		} finally {
+			if (release) await release().catch(() => {});
+		}
 	}
 
 	/** Move a promoted skill into `.archive/` (restorable). Returns true if archived. */

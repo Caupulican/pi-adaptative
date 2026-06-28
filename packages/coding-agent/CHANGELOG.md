@@ -1,5 +1,17 @@
 ## [Unreleased]
 
+### Changed
+
+- The proactive cost guard is now ON by default in warn-only mode: an unusually expensive turn (projected
+  over ~$2.50) surfaces a `⚠$X/turn` indicator in the footer. It never silently changes behavior —
+  auto-downgrading reasoning remains opt-in (`costGuard.action: "downgrade"`); set `costGuard.maxTurnUsd: 0`
+  to disable.
+- The skill curator now auto-archives stale reflection-promoted skills at session start by default
+  (restorable, announced, promoted-only). Archival runs under a lock so concurrent sessions sharing an
+  agent directory can't race, and every auto-archive is announced with a `/curate restore` hint. Set
+  `curator.autoArchive: false` to return to propose-only (`/curate`). Hand-authored skills are never
+  touched, and skill consolidation remains a suggestion you approve.
+
 ## [0.80.78] - 2026-06-28
 
 ### Fixed

@@ -246,6 +246,13 @@ export class FooterComponent implements Component {
 			statsParts.push(costStr);
 		}
 
+		// Proactive cost-guard warning (#34): when the projected per-turn cost crosses the ceiling,
+		// surface a visible notice so an expensive turn never sneaks by. Warn-only — no silent action.
+		const costGuard = this.session.getLastCostGuardDecision?.();
+		if (costGuard?.over) {
+			statsParts.push(theme.fg("warning", `⚠$${costGuard.estUsd.toFixed(2)}/turn`));
+		}
+
 		// Colorize context percentage based on usage
 		let contextPercentStr: string;
 		const autoIndicator = this.autoCompactEnabled ? " (auto)" : "";

@@ -161,6 +161,8 @@ export interface Settings {
 	compaction?: CompactionSettings;
 	/** Proactive per-turn cost guard (#34). */
 	costGuard?: { maxTurnUsd?: number; action?: "warn" | "downgrade" };
+	/** Skill curator (#32): auto-archive stale reflection-promoted skills at session start. */
+	curator?: { autoArchive?: boolean; staleDays?: number };
 	contextGc?: ContextGcSettings;
 	branchSummary?: BranchSummarySettings;
 	retry?: RetrySettings;
@@ -1694,10 +1696,26 @@ export class SettingsManager {
 		return this.settings.compaction?.triggerPercent ?? 0.7;
 	}
 
-	/** Proactive per-turn cost guard (#34). `maxTurnUsd<=0` (default) disables it. */
+	/**
+	 * Skill curator (#32). Auto-archive of stale reflection-promoted skills is ON by default (restorable,
+	 * announced, promoted-only). Set `autoArchive: false` to make it propose-only (`/curate`).
+	 */
+	getCuratorSettings(): { autoArchive: boolean; staleDays: number } {
+		return {
+			autoArchive: this.settings.curator?.autoArchive ?? true,
+			staleDays: this.settings.curator?.staleDays ?? 30,
+		};
+	}
+
+	/**
+	 * Proactive per-turn cost guard (#34). Default ON in WARN-only mode with a high anomaly-catching
+	 * ceiling so an unusually expensive turn surfaces a visible footer notice without ever silently
+	 * changing behavior. Set `maxTurnUsd: 0` to disable, or `action: "downgrade"` to also auto-reduce
+	 * reasoning effort over the ceiling.
+	 */
 	getCostGuardSettings(): { maxTurnUsd: number; action: "warn" | "downgrade" } {
 		return {
-			maxTurnUsd: this.settings.costGuard?.maxTurnUsd ?? 0,
+			maxTurnUsd: this.settings.costGuard?.maxTurnUsd ?? 2.5,
 			action: this.settings.costGuard?.action ?? "warn",
 		};
 	}

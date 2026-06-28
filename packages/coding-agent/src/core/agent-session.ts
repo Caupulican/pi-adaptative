@@ -689,6 +689,18 @@ export class AgentSession {
 		return this._skillCurator.proposeCuration(Date.now(), options);
 	}
 
+	/**
+	 * Session-start auto-curation (#32, default ON): archive stale reflection-promoted skills in one
+	 * locked batch and return the names archived so the host can ANNOUNCE it (never silent). Skipped in
+	 * child sessions and when `curator.autoArchive` is disabled. Restorable via `/curate restore`.
+	 */
+	async runStartupSkillCuration(): Promise<string[]> {
+		if (this._isChildSession) return [];
+		const settings = this.settingsManager.getCuratorSettings();
+		if (!settings.autoArchive) return [];
+		return this._skillCurator.autoArchiveStale(Date.now(), { staleDays: settings.staleDays });
+	}
+
 	/** Archive a promoted skill into `skills/.archive/` (restorable, non-destructive). Returns true if moved. */
 	archivePromotedSkill(name: string): boolean {
 		return this._skillCurator.archiveSkill(name);

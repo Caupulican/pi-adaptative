@@ -1202,6 +1202,21 @@ export class InteractiveMode {
 			}
 		});
 
+		// Skill curator (#32): auto-archive stale reflection-promoted skills at startup, and ANNOUNCE it
+		// (never silent — the user can restore any of them with `/curate restore <name>`).
+		this.session
+			.runStartupSkillCuration()
+			.then((archived) => {
+				if (archived.length > 0) {
+					this.showStatus(
+						`Curator: auto-archived ${archived.length} stale skill(s) — ${archived.join(", ")}. Restore with /curate restore <name>.`,
+					);
+				}
+			})
+			.catch(() => {
+				// curation is best-effort; never disrupt startup
+			});
+
 		// Show startup warnings
 		const { migratedProviders, modelFallbackMessage, initialMessage, initialImages, initialMessages } = this.options;
 

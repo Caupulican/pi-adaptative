@@ -119,4 +119,20 @@ describe("SkillCurator (filesystem)", () => {
 		const proposals = curator.proposeCuration(created + 40 * DAY, { staleDays: 30 });
 		expect(proposals.archive.map((a) => a.name)).toContain("stale");
 	});
+
+	it("autoArchiveStale archives stale promoted skills under a lock, keeps fresh + hand-authored", async () => {
+		writeSkill("stale", true);
+		writeSkill("fresh", true);
+		writeSkill("hand", false);
+		const curator = new SkillCurator(dir);
+		const created = curator.loadPromotedSkills().find((s) => s.name === "stale")?.createdMs ?? 0;
+		// 'fresh' shares the same real file-creation time as 'stale'; give it a recent use so it isn't stale.
+		curator.recordUse("fresh", created + 39 * DAY);
+
+		const archived = await curator.autoArchiveStale(created + 40 * DAY, { staleDays: 30 });
+		expect(archived).toEqual(["stale"]);
+		expect(existsSync(join(dir, ".archive", "stale", "SKILL.md"))).toBe(true);
+		expect(existsSync(join(dir, "fresh", "SKILL.md"))).toBe(true); // fresh kept
+		expect(existsSync(join(dir, "hand", "SKILL.md"))).toBe(true); // hand-authored never touched
+	});
 });
