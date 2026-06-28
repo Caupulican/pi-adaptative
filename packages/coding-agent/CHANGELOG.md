@@ -1,5 +1,18 @@
 ## [Unreleased]
 
+### Added
+
+- Proactive per-turn cost guard (opt-in): set `costGuard.maxTurnUsd` to estimate the dollar cost of each
+  turn before it is submitted and, when it exceeds the ceiling, surface a warning or (with
+  `costGuard.action: "downgrade"`) automatically step reasoning effort down once to curb a runaway
+  billing spike. Disabled by default.
+
+### Changed
+
+- Background reflection now uses a static system prompt with the variable memory/turn content moved to the
+  user message, so repeated reflection passes reuse the provider prompt-cache prefix instead of re-billing
+  it — and added guidance to avoid persisting transient/environment-specific noise as memory.
+
 ## [0.80.75] - 2026-06-28
 
 ### Changed

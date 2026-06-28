@@ -159,6 +159,8 @@ export interface Settings {
 	/** Resource catalog directory (round resource management): the folder pi installs/updates/backs up from. */
 	catalogDir?: string;
 	compaction?: CompactionSettings;
+	/** Proactive per-turn cost guard (#34). */
+	costGuard?: { maxTurnUsd?: number; action?: "warn" | "downgrade" };
 	contextGc?: ContextGcSettings;
 	branchSummary?: BranchSummarySettings;
 	retry?: RetrySettings;
@@ -1690,6 +1692,14 @@ export class SettingsManager {
 
 	getCompactionTriggerPercent(): number {
 		return this.settings.compaction?.triggerPercent ?? 0.7;
+	}
+
+	/** Proactive per-turn cost guard (#34). `maxTurnUsd<=0` (default) disables it. */
+	getCostGuardSettings(): { maxTurnUsd: number; action: "warn" | "downgrade" } {
+		return {
+			maxTurnUsd: this.settings.costGuard?.maxTurnUsd ?? 0,
+			action: this.settings.costGuard?.action ?? "warn",
+		};
 	}
 
 	/** Configured auxiliary summarizer model id, or "auto" (default) to pick the cheapest authed model. */

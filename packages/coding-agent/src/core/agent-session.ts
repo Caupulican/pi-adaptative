@@ -26,6 +26,7 @@ import type {
 } from "@caupulican/pi-agent-core";
 import type {
 	AssistantMessage,
+	CacheRetention,
 	Context,
 	ImageContent,
 	Message,
@@ -62,6 +63,7 @@ import {
 	shouldCompact,
 } from "./compaction/index.ts";
 import { applyContextGc, type ContextGcReport } from "./context-gc.ts";
+import { type CostGuardDecision, downgradeReasoning, estimateTurnCostUsd, evaluateCostGuard } from "./cost-guard.ts";
 import { DEFAULT_THINKING_LEVEL } from "./defaults.ts";
 import { exportSessionToHtml, type ToolHtmlRenderer } from "./export-html/index.ts";
 import { createToolHtmlRenderer } from "./export-html/tool-renderer.ts";
@@ -337,6 +339,12 @@ export interface IsolatedCompletionOptions {
 	maxTokens?: number;
 	/** Abort signal. */
 	signal?: AbortSignal;
+	/**
+	 * Prompt-cache retention for this isolated call. Defaults to `"none"` (no caching — preserves full
+	 * isolation). Callers whose `systemPrompt` is STATIC across calls (e.g. reflection, #33) can pass
+	 * `"short"`/`"long"` so the provider reuses the cached prefix and bills only the variable tail.
+	 */
+	cacheRetention?: CacheRetention;
 }
 
 /** Result of an isolated completion: the text, the usage spent, and the stop reason. */
@@ -438,6 +446,10 @@ export class AgentSession {
 	private readonly _gatewayRegistry = new GatewayRegistry();
 	/** Cache for getSpawnedUsage(), keyed by session entry count (Bug #22 — avoid O(N) per render frame). */
 	private _spawnedUsageCache?: { entryCount: number; totals: SpawnedUsageTotals };
+	/** Latest proactive cost-guard decision (#34), for the host UI to surface. Undefined when disabled. */
+	private _lastCostGuardDecision?: CostGuardDecision;
+	/** One-shot latch so the cost guard downgrades reasoning once per over-threshold episode, not every call. */
+	private _costGuardDowngraded = false;
 	/** Set on dispose so in-flight background reflection bails instead of writing to a dead session (Bug #21). */
 	private _disposed = false;
 	/** Aborts in-flight background reflection completions on dispose (Bug #21). */
@@ -613,8 +625,50 @@ export class AgentSession {
 			if (this._extensionRunner.hasHandlers("context")) {
 				finalMessages = await this._extensionRunner.emitContext(currentMessages);
 			}
-			return this._applyContextGc(finalMessages, true).messages;
+			const gcMessages = this._applyContextGc(finalMessages, true).messages;
+			this._applyCostGuard(gcMessages);
+			return gcMessages;
 		};
+	}
+
+	/**
+	 * Proactive per-turn cost guard (#34): estimate the USD cost of the about-to-be-submitted turn and,
+	 * when it exceeds the user's ceiling, record a warning decision (for the host UI to surface) and —
+	 * if configured to `downgrade` — step reasoning effort down ONCE per over-threshold episode to curb a
+	 * runaway billing spike. Disabled by default (`maxTurnUsd<=0`), so it never alters behavior unless the
+	 * user opts in. Best-effort: never throws into the turn.
+	 */
+	private _applyCostGuard(messages: AgentMessage[]): void {
+		try {
+			const guard = this.settingsManager.getCostGuardSettings();
+			if (guard.maxTurnUsd <= 0 || !this.model?.cost) {
+				this._lastCostGuardDecision = undefined;
+				return;
+			}
+			const inputTokens = this._estimateCurrentContextTokens(messages);
+			const maxOutputTokens = this.model.maxTokens ?? 4096;
+			const estUsd = estimateTurnCostUsd({ inputTokens, maxOutputTokens, cost: this.model.cost });
+			const decision = evaluateCostGuard(estUsd, { maxTurnUsd: guard.maxTurnUsd, action: guard.action });
+			this._lastCostGuardDecision = decision;
+			if (!decision.over) {
+				this._costGuardDowngraded = false; // back under the ceiling — re-arm the one-shot downgrade
+				return;
+			}
+			if (guard.action === "downgrade" && !this._costGuardDowngraded && this.supportsThinking()) {
+				const next = downgradeReasoning(this.thinkingLevel);
+				if (next !== this.thinkingLevel) {
+					this.setThinkingLevel(next as ThinkingLevel);
+					this._costGuardDowngraded = true;
+				}
+			}
+		} catch {
+			// cost guard must never disrupt a turn
+		}
+	}
+
+	/** Latest cost-guard decision (for the host footer/UI to surface a warning). Undefined if disabled. */
+	getLastCostGuardDecision(): CostGuardDecision | undefined {
+		return this._lastCostGuardDecision;
 	}
 
 	private _installAgentTurnRefresh(): void {
@@ -4158,7 +4212,7 @@ export class AgentSession {
 		const options: SimpleStreamOptions = {
 			maxTokens: opts.maxTokens,
 			signal: opts.signal,
-			cacheRetention: "none",
+			cacheRetention: opts.cacheRetention ?? "none",
 		};
 		// pi-ai's `reasoning` option does not include "off" (that's the provider default already).
 		if (thinkingLevel !== "off") {
@@ -4230,6 +4284,9 @@ export class AgentSession {
 				thinkingLevel: input.thinkingLevel ?? "low",
 				maxTokens: plan.tokenBudget,
 				signal,
+				// The reflection system prompt is static (#33) — let the provider cache the prefix so
+				// repeated passes only pay for the variable tail.
+				cacheRetention: "short",
 			});
 
 		const result = await new ReflectionEngine().reflect({

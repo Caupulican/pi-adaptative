@@ -76,17 +76,13 @@ export interface ReflectionResult {
 	rationale: string;
 }
 
-export class ReflectionEngine {
-	/**
-	 * Build the reflection prompt, call the injected isolated complete(),
-	 * parse the response, confront existing memory, and return memory writes.
-	 * Zero direct I/O.
-	 */
-	async reflect(input: ReflectionInput): Promise<ReflectionResult> {
-		const systemPrompt = `You are a reflection engine. Your job is to analyze the recent conversation turn, compare it against the agent's existing memory, and decide if any memory updates are needed.
-
-Existing Memory snapshot:
-${input.existingMemory}
+/**
+ * STATIC reflection system prompt (Hermes-parity #33). It is byte-identical across every reflection
+ * pass — the variable parts (existing memory snapshot + the turn transcript) live in the USER prompt —
+ * so the provider prompt-cache reuses this prefix instead of re-billing it each pass (cost guard).
+ * Do NOT interpolate per-call data into this constant or caching breaks.
+ */
+export const REFLECTION_SYSTEM_PROMPT = `You are a reflection engine. Your job is to analyze the recent conversation turn, compare it against the agent's existing memory, and decide if any memory updates are needed.
 
 Memory guidelines:
 - "MEMORY" is for project facts, configuration, repeatable workflows, and coding findings.
@@ -94,6 +90,7 @@ Memory guidelines:
 - Avoid duplicate facts. If the fact is already represented, do not add it.
 - CONFRONT existing memory: if the new turn contradicts or updates an existing fact, use "memory_replace" or "memory_remove" to supersede the old fact rather than blindly appending.
 - Keep memories short, factual, and direct. No fluff.
+- Do NOT capture transient/environment-specific noise: tool/network failures, one-off errors, or a single narrative event. Persist only durable facts and preferences.
 - PROMOTE to behavior: if the turn established a REPEATABLE, multi-step PROCEDURE/workflow (not a one-off fact) that should govern a future class of tasks, emit a "promote_skill" instead of (or in addition to) a memory fact. Only promote a genuinely reusable procedure — never a single fact, a one-off narrative, or environment-specific noise. Prefer a memory fact when unsure.
 
 You must output your analysis and writes in the following JSON format inside a \`\`\`json\`\`\` code fence:
@@ -108,10 +105,23 @@ You must output your analysis and writes in the following JSON format inside a \
 }
 `;
 
-		const userPrompt = `Recent turn transcript:
+export class ReflectionEngine {
+	/**
+	 * Build the reflection prompt, call the injected isolated complete(),
+	 * parse the response, confront existing memory, and return memory writes.
+	 * Zero direct I/O.
+	 */
+	async reflect(input: ReflectionInput): Promise<ReflectionResult> {
+		const systemPrompt = REFLECTION_SYSTEM_PROMPT;
+
+		// Variable inputs go in the USER prompt so the system prefix above stays cache-stable (#33).
+		const userPrompt = `Existing Memory snapshot:
+${input.existingMemory}
+
+Recent turn transcript:
 ${input.recentTurnText}
 
-Analyze this turn and output your memory updates.`;
+Analyze this turn against the existing memory and output your memory updates.`;
 
 		try {
 			const compResult = await input.complete(systemPrompt, userPrompt);
