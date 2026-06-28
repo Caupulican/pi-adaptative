@@ -103,7 +103,7 @@ function autoLearnSummary(settings: AutoLearnSettings): string {
 
 function modelRouterSummary(settings: ModelRouterSettings): string {
 	const state = settings.enabled ? "enabled" : "disabled";
-	return `${state} · cheap: ${optionalStringValue(settings.cheapModel)} · expensive: ${optionalStringValue(settings.expensiveModel)}`;
+	return `${state} · cheap: ${optionalStringValue(settings.cheapModel)} · expensive: ${optionalStringValue(settings.expensiveModel)} · learn: ${optionalStringValue(settings.learningModel, "active")}`;
 }
 
 function buildAutoLearnModelOptions(
@@ -183,6 +183,7 @@ export interface SettingsConfig {
 	autonomy: AutonomySettings;
 	autonomyScope?: SettingsScope;
 	modelRouter: ModelRouterSettings;
+	modelRouterScope?: SettingsScope;
 	autoLearn: AutoLearnSettings;
 	autoLearnScope?: SettingsScope;
 	currentModelPattern?: string;
@@ -221,6 +222,7 @@ export interface SettingsCallbacks {
 	onWarningsChange: (warnings: WarningSettings) => void;
 	onSelfModificationChange: (settings: SelfModificationSettings, scope: SettingsScope) => void;
 	onAutonomyChange: (settings: AutonomySettings, scope: SettingsScope) => void;
+	onModelRouterChange: (settings: ModelRouterSettings, scope: SettingsScope) => void;
 	onAutoLearnChange: (settings: AutoLearnSettings, scope: SettingsScope) => void;
 	onResourcesHubAction?: (action: string) => void;
 	onCancel: () => void;
@@ -683,6 +685,128 @@ class AutoLearnSettingsSubmenu extends Container {
 	}
 }
 
+class ModelRouterSettingsSubmenu extends Container {
+	private settingsList: SettingsList;
+	private state: ModelRouterSettings;
+	private scope: SettingsScope;
+
+	constructor(
+		settings: ModelRouterSettings,
+		onChange: (settings: ModelRouterSettings, scope: SettingsScope) => void,
+		onCancel: () => void,
+		scope: SettingsScope = "global",
+	) {
+		super();
+		this.state = {
+			...settings,
+			enabled: settings.enabled ?? false,
+			learningModel: settings.learningModel ?? "active",
+		};
+		this.scope = scope;
+		this.addChild(new Text(theme.bold(theme.fg("accent", "Model Router")), 0, 0));
+		this.addChild(new Spacer(1));
+
+		const items: SettingItem[] = [
+			{
+				id: "model-router-scope",
+				label: "Save scope",
+				description: "Save this routing configuration globally or in the current project's .pi/settings.json",
+				currentValue: this.scope,
+				values: ["global", "project"],
+			},
+			{
+				id: "model-router-enabled",
+				label: "Enabled",
+				description: "Route read-only/research turns to cheap model and modify/tool-heavy turns to expensive model",
+				currentValue: booleanSettingValue(this.state.enabled),
+				values: ["false", "true"],
+			},
+			{
+				id: "model-router-cheap",
+				label: "Cheap model",
+				description: "Model pattern for read-only, research, explanation, and question turns",
+				currentValue: optionalStringValue(this.state.cheapModel),
+				submenu: (_currentValue, done) =>
+					new TextInputSubmenu(
+						"Cheap / Research Model",
+						"Enter a provider/model pattern from pi --list-models. Empty clears it.",
+						this.state.cheapModel ?? "",
+						(value) => {
+							this.state = { ...this.state, cheapModel: normalizeOptionalString(value) };
+							onChange({ ...this.state }, this.scope);
+							done(optionalStringValue(this.state.cheapModel));
+						},
+						() => done(),
+					),
+			},
+			{
+				id: "model-router-expensive",
+				label: "Expensive model",
+				description: "Model pattern for modify, implementation, and escalated tool-heavy turns",
+				currentValue: optionalStringValue(this.state.expensiveModel),
+				submenu: (_currentValue, done) =>
+					new TextInputSubmenu(
+						"Expensive / Modify Model",
+						"Enter a provider/model pattern from pi --list-models. Empty clears it.",
+						this.state.expensiveModel ?? "",
+						(value) => {
+							this.state = { ...this.state, expensiveModel: normalizeOptionalString(value) };
+							onChange({ ...this.state }, this.scope);
+							done(optionalStringValue(this.state.expensiveModel));
+						},
+						() => done(),
+					),
+			},
+			{
+				id: "model-router-learning",
+				label: "Learning/reflection model",
+				description:
+					"Model pattern for background reflection, learn, and skill-creator work; active uses the session model",
+				currentValue: optionalStringValue(this.state.learningModel, "active"),
+				submenu: (_currentValue, done) =>
+					new TextInputSubmenu(
+						"Learning / Reflection Model",
+						'Enter "active" or a provider/model pattern from pi --list-models. Empty uses active.',
+						this.state.learningModel === "active" ? "" : (this.state.learningModel ?? ""),
+						(value) => {
+							this.state = { ...this.state, learningModel: normalizeOptionalString(value) ?? "active" };
+							onChange({ ...this.state }, this.scope);
+							done(optionalStringValue(this.state.learningModel, "active"));
+						},
+						() => done(),
+						'empty uses "active"',
+					),
+			},
+		];
+
+		this.settingsList = new SettingsList(
+			items,
+			Math.min(items.length, 10),
+			getSettingsListTheme(),
+			(id, newValue) => {
+				switch (id) {
+					case "model-router-scope":
+						this.scope = newValue as SettingsScope;
+						break;
+					case "model-router-enabled":
+						this.state = { ...this.state, enabled: newValue === "true" };
+						break;
+					default:
+						return;
+				}
+				onChange({ ...this.state }, this.scope);
+			},
+			onCancel,
+		);
+
+		this.addChild(this.settingsList);
+	}
+
+	handleInput(data: string): void {
+		this.settingsList.handleInput(data);
+	}
+}
+
 /**
  * A submenu component for selecting from a list of options.
  */
@@ -815,6 +939,7 @@ export class SettingsSelectorComponent extends Container {
 		let currentWarnings = { ...config.warnings };
 		let currentSelfModification: SelfModificationSettings = { ...config.selfModification };
 		let currentAutonomy: AutonomySettings = { ...config.autonomy };
+		let currentModelRouter: ModelRouterSettings = { ...config.modelRouter };
 		let currentAutoLearn: AutoLearnSettings = { ...config.autoLearn };
 		const items: SettingItem[] = [
 			{
@@ -932,8 +1057,18 @@ export class SettingsSelectorComponent extends Container {
 				id: "model-router",
 				label: "Model Router",
 				description:
-					"Read-only; edit modelRouter.enabled, modelRouter.cheapModel, and modelRouter.expensiveModel in settings/profile config",
-				currentValue: modelRouterSummary(config.modelRouter),
+					"Configure models for cheap research, expensive modify/escalation, and background learning/reflection",
+				currentValue: modelRouterSummary(currentModelRouter),
+				submenu: (_currentValue, done) =>
+					new ModelRouterSettingsSubmenu(
+						currentModelRouter,
+						(settings, scope) => {
+							currentModelRouter = { ...settings };
+							callbacks.onModelRouterChange(settings, scope);
+						},
+						() => done(modelRouterSummary(currentModelRouter)),
+						config.modelRouterScope ?? "global",
+					),
 			},
 			{
 				id: "auto-learn",

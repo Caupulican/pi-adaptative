@@ -4,7 +4,12 @@ import { basename, dirname, join, resolve } from "path";
 import { isValidThinkingLevel } from "../cli/args.ts";
 import { resolvePath } from "../utils/paths.ts";
 import { mergeResourceProfileSettings } from "./resource-profile-blocks.ts";
-import type { ResourceProfileKind, ResourceProfileSettings, Settings } from "./settings-manager.ts";
+import type {
+	ModelRouterSettings,
+	ResourceProfileKind,
+	ResourceProfileSettings,
+	Settings,
+} from "./settings-manager.ts";
 import { validateSkillName } from "./skills.ts";
 
 export type ProfileSource =
@@ -21,6 +26,7 @@ export interface NormalizedProfile {
 	description?: string;
 	model?: string;
 	thinking?: ThinkingLevel;
+	modelRouter?: ModelRouterSettings;
 	/** Situational identity injected into the system prompt while this profile is active (R6). */
 	soul?: string;
 	resources: ResourceProfileSettings;
@@ -114,6 +120,17 @@ function normalizeThinking(value: unknown): ThinkingLevel | undefined {
 	return thinking;
 }
 
+function normalizeModelRouterSettings(value: unknown): ModelRouterSettings | undefined {
+	if (!isRecord(value)) return undefined;
+	const settings: ModelRouterSettings = {};
+	if (typeof value.enabled === "boolean") settings.enabled = value.enabled;
+	for (const key of ["cheapModel", "expensiveModel", "learningModel"] as const) {
+		const candidate = asNonEmptyString(value[key]);
+		if (candidate) settings[key] = candidate;
+	}
+	return Object.keys(settings).length > 0 ? settings : undefined;
+}
+
 function normalizeWrapperProfile(options: {
 	value: unknown;
 	source: ProfileSource;
@@ -136,12 +153,14 @@ function normalizeWrapperProfile(options: {
 	const description = asNonEmptyString(options.value.description);
 	const model = asNonEmptyString(options.value.model);
 	const thinking = normalizeThinking(options.value.thinking);
+	const modelRouter = normalizeModelRouterSettings(options.value.modelRouter);
 	const soul = asNonEmptyString(options.value.soul);
 	return {
 		name,
 		description,
 		model,
 		thinking,
+		modelRouter,
 		soul,
 		resources,
 		source: options.source,

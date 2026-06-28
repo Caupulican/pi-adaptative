@@ -7,6 +7,7 @@ export type ModelRouterStatusSettings = {
 	enabled: boolean;
 	cheapModel?: string;
 	expensiveModel?: string;
+	learningModel?: string;
 };
 
 export type ModelRouterDecisionStatus = {
@@ -60,6 +61,7 @@ export function formatModelRouterStatus(
 		`${formatLabel("Status:")} ${settings.enabled ? "enabled" : "disabled"}`,
 		`${formatLabel("Cheap model:")} ${settings.cheapModel ?? "unset"}`,
 		`${formatLabel("Expensive model:")} ${settings.expensiveModel ?? "unset"}`,
+		`${formatLabel("Learning model:")} ${settings.learningModel ?? "active"}`,
 	];
 	if (!settings.enabled) {
 		lines.push(`${formatLabel("Routing:")} inactive (disabled)`);

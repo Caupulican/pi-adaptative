@@ -110,12 +110,34 @@ Hard stops still require explicit foreground approval even in `full`: publishing
 }
 ```
 
+### Model Router
+
+| Setting | Type | Default | Description |
+|---------|------|---------|-------------|
+| `modelRouter.enabled` | boolean | `false` | Enable deterministic cheap/expensive model routing |
+| `modelRouter.cheapModel` | string | - | Model pattern for read-only, research, explanation, and question turns |
+| `modelRouter.expensiveModel` | string | - | Model pattern for modify, implementation, and escalated tool-heavy turns |
+| `modelRouter.learningModel` | string | `"active"` | Model pattern for background reflection, learn, and skill-creator work; `"active"` uses the current session model |
+
+Use `/settings` → **Model Router** to configure these fields globally or for the current project's `.pi/settings.json`. `/session` and `/usage` show the active router state and diagnostics. Profile files can also include a `modelRouter` block so a situation can carry its own cheap, expensive, and learning/reflection models together with its model, thinking level, soul, and resource filters.
+
+```json
+{
+  "modelRouter": {
+    "enabled": true,
+    "cheapModel": "openrouter/google/gemini-flash-latest",
+    "expensiveModel": "openai-codex/gpt-5.5",
+    "learningModel": "anthropic/claude-haiku-4-5"
+  }
+}
+```
+
 ### Auto Learn Advanced
 
 | Setting | Type | Default | Description |
 |---------|------|---------|-------------|
 | `autoLearn.enabled` | boolean | derived from `autonomy.mode` (`false` when off) | Autonomously trigger background history scavenging for long sessions |
-| `autoLearn.model` | string | `"active"` | Model used by the background learner; `"active"` uses the current session model, otherwise use a `pi --model` pattern |
+| `autoLearn.model` | string | `modelRouter.learningModel`, otherwise `"active"` | Legacy/direct override for the background learner; `"active"` uses the current session model, otherwise use a `pi --model` pattern |
 | `autoLearn.longSessionMessages` | number | `32` | Trigger after this many message entries in the active branch |
 | `autoLearn.longSessionContextPercent` | number | `70` | Trigger when current context usage reaches this percent |
 | `autoLearn.cooldownMinutes` | number | `120` | Per-session-tenant cooldown between learner launches |
@@ -126,7 +148,7 @@ Hard stops still require explicit foreground approval even in `full`: publishing
 | `autoLearn.reflectionMinToolCalls` | number | `5` | Trigger reflection review after this many tool calls in one completed turn |
 | `autoLearn.reflectionCooldownMinutes` | number | `60` | Per-session-tenant cooldown between reflection-review learners |
 
-Use `/settings` → **Auto Learn Advanced** to override the active autonomy preset, including the scavenger model and reflection review. The submenu lets you choose whether to save globally or to the current project's `.pi/settings.json`. The model picker prioritizes models from currently configured subscription/API accounts and still offers a manual custom-pattern entry. Use `/autonomy status` for the compact preset dashboard, `/auto-learn status` to inspect trigger state, reflection cooldown, and running leases, or `/auto-learn run` to start one learner immediately.
+Use `/settings` → **Model Router** for the preferred place to choose the scavenger/reflection/skill-creator model. Use `/settings` → **Auto Learn Advanced** for trigger/cooldown/concurrency overrides and the legacy direct `autoLearn.model` override. Use `/autonomy status` for the compact preset dashboard, `/auto-learn status` to inspect trigger state, reflection cooldown, and running leases, or `/auto-learn run` to start one learner immediately.
 
 When enabled, Auto Learn keeps a small shared state file for visibility/cooldowns, but prompt/log/session artifacts are isolated under per-session-tenant directories so one session's learner does not consume another session's concurrency budget. Learners must confront available user/project memory first, using existing rules, preferences, corrections, and project facts to decide whether each candidate is useful, unique versus merge/upgrade-worthy, and agent-improving. Candidate validation is chunked/vectorized instead of one memory query per candidate. Successful Auto Learn workers purge their internal prompt/log/session artifacts after exit; the 7-day retention pruner is a fallback for unfinished or failed artifacts, and active leases are skipped so running learners are not raced. Provider/user history pruning is delegated to the continuous-learning tool after it records a learning outcome: only files older than 7 days whose current fingerprint still matches a successfully extracted index entry are deleted, and active/current sessions are protected.
 

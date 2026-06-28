@@ -6121,6 +6121,7 @@ export class InteractiveMode {
 					autonomy: this.settingsManager.getAutonomySettings(),
 					autonomyScope: projectSettings.autonomy ? "project" : "global",
 					modelRouter: this.settingsManager.getModelRouterSettings(),
+					modelRouterScope: projectSettings.modelRouter ? "project" : "global",
 					autoLearn: this.settingsManager.getAutoLearnSettings(),
 					autoLearnScope: projectSettings.autoLearn ? "project" : "global",
 					autoLearnModelOptions: this.getAutoLearnModelOptions(),
@@ -6266,6 +6267,19 @@ export class InteractiveMode {
 					onAutonomyChange: (settings, scope) => {
 						this.applyAutonomyMode(settings.mode ?? "off", scope);
 						this.showStatus(`Autonomy mode ${settings.mode ?? "off"} saved to ${scope}. Use /autonomy status.`);
+					},
+					onModelRouterChange: (settings, scope) => {
+						this.settingsManager.setModelRouterSettings(settings, scope);
+						for (const value of [settings.cheapModel, settings.expensiveModel, settings.learningModel]) {
+							const validationMessage = this.validateAutoLearnModelValue(value);
+							if (validationMessage) {
+								this.showWarning(validationMessage.replace("Auto Learn model", "Model router model"));
+							}
+						}
+						this.updateAutoLearnFooter();
+						this.showStatus(
+							`Model Router settings saved to ${scope}. Use /session or /usage to inspect routing.`,
+						);
 					},
 					onAutoLearnChange: (settings, scope) => {
 						this.settingsManager.setAutoLearnSettings(settings, scope);

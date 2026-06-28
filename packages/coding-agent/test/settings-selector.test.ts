@@ -85,6 +85,7 @@ function makeCallbacks(overrides: Partial<SettingsCallbacks> = {}): SettingsCall
 		onWarningsChange: vi.fn(),
 		onSelfModificationChange: vi.fn(),
 		onAutonomyChange: vi.fn(),
+		onModelRouterChange: vi.fn(),
 		onAutoLearnChange: vi.fn(),
 		onCancel: vi.fn(),
 		...overrides,
@@ -169,28 +170,62 @@ describe("settings selector", () => {
 		expect(output).toContain("Reflection review");
 	});
 
-	it("exposes model router settings together in the searchable settings TUI", () => {
+	it("exposes configurable model router settings together in the searchable settings TUI", () => {
 		const selector = new SettingsSelectorComponent(
 			makeConfig({
 				modelRouter: {
 					enabled: true,
 					cheapModel: "anthropic/claude-haiku-4-5",
 					expensiveModel: "anthropic/claude-sonnet-4-5",
+					learningModel: "openai/gpt-5.4",
 				},
 			}),
 			makeCallbacks(),
 		);
 
 		selector.getSettingsList().handleInput("model router");
+		selector.getSettingsList().handleInput("\r");
 		const output = selector.render(180).join("\n");
 
 		expect(output).toContain("Model Router");
-		expect(output).toContain("modelRouter.enabled");
-		expect(output).toContain("modelRouter.cheapModel");
-		expect(output).toContain("modelRouter.expensiveModel");
-		expect(output).toContain("enabled");
+		expect(output).toContain("Enabled");
+		expect(output).toContain("Cheap model");
+		expect(output).toContain("Expensive model");
+		expect(output).toContain("Learning/reflection model");
+		expect(output).toContain("true");
 		expect(output).toContain("anthropic/claude-haiku-4-5");
 		expect(output).toContain("anthropic/claude-sonnet-4-5");
+		expect(output).toContain("openai/gpt-5.4");
+	});
+
+	it("persists model router changes from its submenu", () => {
+		const onModelRouterChange = vi.fn();
+		const selector = new SettingsSelectorComponent(
+			makeConfig({
+				modelRouter: {
+					enabled: false,
+					cheapModel: "anthropic/claude-haiku-4-5",
+					expensiveModel: "anthropic/claude-sonnet-4-5",
+					learningModel: "active",
+				},
+			}),
+			makeCallbacks({ onModelRouterChange }),
+		);
+
+		selector.getSettingsList().handleInput("model router");
+		selector.getSettingsList().handleInput("\r");
+		selector.getSettingsList().handleInput("\x1b[B");
+		selector.getSettingsList().handleInput("\r");
+
+		expect(onModelRouterChange).toHaveBeenCalledWith(
+			{
+				enabled: true,
+				cheapModel: "anthropic/claude-haiku-4-5",
+				expensiveModel: "anthropic/claude-sonnet-4-5",
+				learningModel: "active",
+			},
+			"global",
+		);
 	});
 
 	it("cancels the Resources submenu with Escape and Ctrl+C", () => {

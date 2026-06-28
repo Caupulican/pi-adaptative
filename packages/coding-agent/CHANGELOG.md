@@ -1,5 +1,11 @@
 ## [Unreleased]
 
+### Added
+
+- Added a configurable Model Router settings submenu for cheap/research, expensive/modify, and background
+  learning/reflection model roles, including project/global save scope support and profile-file
+  `modelRouter` overrides for situation-specific routing.
+
 ## [0.80.81] - 2026-06-28
 
 ### Added

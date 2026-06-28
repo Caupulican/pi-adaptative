@@ -114,6 +114,7 @@ export interface ModelRouterSettings {
 	enabled?: boolean; // default: false — routing is opt-in until escalation safeguards are complete
 	cheapModel?: string; // model pattern for read-only/research turns
 	expensiveModel?: string; // model pattern for modify/tool-heavy turns
+	learningModel?: string; // model pattern for background reflection/learn/skill-creator work; "active" uses session model
 }
 
 export type TransportSetting = Transport;
@@ -370,6 +371,7 @@ export interface ProfileDefinitionInput {
 	description?: string;
 	model?: string;
 	thinking?: ThinkingLevel;
+	modelRouter?: ModelRouterSettings;
 	/**
 	 * Situational identity (R6): a system-prompt prefix injected while this profile is active, so a
 	 * profile becomes a full "situation" = soul + capabilities + model/thinking, switched atomically.
@@ -415,6 +417,20 @@ function normalizeProfileResources(value: unknown): ResourceProfileSettings {
 	return result;
 }
 
+function normalizeModelRouterSettings(value: unknown): ModelRouterSettings | undefined {
+	if (!value || typeof value !== "object" || Array.isArray(value)) return undefined;
+	const input = value as Record<string, unknown>;
+	const settings: ModelRouterSettings = {};
+	if (typeof input.enabled === "boolean") settings.enabled = input.enabled;
+	for (const key of ["cheapModel", "expensiveModel", "learningModel"] as const) {
+		const candidate = input[key];
+		if (typeof candidate !== "string") continue;
+		const trimmed = candidate.trim();
+		if (trimmed) settings[key] = trimmed;
+	}
+	return Object.keys(settings).length > 0 ? settings : undefined;
+}
+
 function parseProfileFileDefinition(content: string): ProfileDefinitionInput {
 	const parsed = JSON.parse(content) as Record<string, unknown>;
 	if (!parsed || typeof parsed !== "object" || Array.isArray(parsed)) {
@@ -430,6 +446,7 @@ function parseProfileFileDefinition(content: string): ProfileDefinitionInput {
 		description: typeof parsed.description === "string" ? parsed.description.trim() || undefined : undefined,
 		model: typeof parsed.model === "string" ? parsed.model.trim() || undefined : undefined,
 		thinking: isThinkingLevel(parsed.thinking) ? parsed.thinking : undefined,
+		modelRouter: normalizeModelRouterSettings(parsed.modelRouter),
 		soul: typeof parsed.soul === "string" ? parsed.soul.trim() || undefined : undefined,
 		resources: normalizeProfileResources(resourceSection),
 	};
@@ -1173,6 +1190,7 @@ export class SettingsManager {
 			description: definition.description ?? existing.description,
 			model: definition.model ?? existing.model,
 			thinking: definition.thinking ?? existing.thinking,
+			modelRouter: definition.modelRouter ?? existing.modelRouter,
 		};
 		mkdirSync(dirname(path), { recursive: true });
 		writeFileSync(path, JSON.stringify(payload, null, 2), "utf-8");
@@ -1727,12 +1745,61 @@ export class SettingsManager {
 		};
 	}
 
-	getModelRouterSettings(): { enabled: boolean; cheapModel?: string; expensiveModel?: string } {
-		return {
+	private getProfileModelRouterSettings(): ModelRouterSettings | undefined {
+		const activeProfileNames = this.getActiveResourceProfileNames();
+		if (activeProfileNames.length === 0) return undefined;
+		const merged: ModelRouterSettings = {};
+		for (let index = activeProfileNames.length - 1; index >= 0; index--) {
+			const profile = this.profileRegistry.getProfile(activeProfileNames[index]);
+			const router = profile?.modelRouter;
+			if (!router) continue;
+			if (router.enabled !== undefined) merged.enabled = router.enabled;
+			if (router.cheapModel !== undefined) merged.cheapModel = router.cheapModel;
+			if (router.expensiveModel !== undefined) merged.expensiveModel = router.expensiveModel;
+			if (router.learningModel !== undefined) merged.learningModel = router.learningModel;
+		}
+		return Object.keys(merged).length > 0 ? merged : undefined;
+	}
+
+	getModelRouterSettings(): {
+		enabled: boolean;
+		cheapModel?: string;
+		expensiveModel?: string;
+		learningModel?: string;
+	} {
+		const profileSettings = this.getProfileModelRouterSettings();
+		const settings = {
 			enabled: this.settings.modelRouter?.enabled ?? false,
 			cheapModel: this.settings.modelRouter?.cheapModel?.trim() || undefined,
 			expensiveModel: this.settings.modelRouter?.expensiveModel?.trim() || undefined,
+			learningModel: this.settings.modelRouter?.learningModel?.trim() || undefined,
 		};
+		return {
+			enabled: profileSettings?.enabled ?? settings.enabled,
+			cheapModel: profileSettings?.cheapModel?.trim() || settings.cheapModel,
+			expensiveModel: profileSettings?.expensiveModel?.trim() || settings.expensiveModel,
+			learningModel: profileSettings?.learningModel?.trim() || settings.learningModel,
+		};
+	}
+
+	setModelRouterSettings(settings: ModelRouterSettings, scope: SettingsScope = "global"): void {
+		const normalized: ModelRouterSettings = {
+			enabled: settings.enabled ?? false,
+			cheapModel: settings.cheapModel?.trim() || undefined,
+			expensiveModel: settings.expensiveModel?.trim() || undefined,
+			learningModel: settings.learningModel?.trim() || undefined,
+		};
+		if (scope === "project") {
+			const projectSettings = structuredClone(this.projectSettings);
+			projectSettings.modelRouter = normalized;
+			this.markProjectModified("modelRouter");
+			this.saveProjectSettings(projectSettings);
+			return;
+		}
+
+		this.globalSettings.modelRouter = normalized;
+		this.markModified("modelRouter");
+		this.save();
 	}
 
 	/** Configured auxiliary summarizer model id, or "auto" (default) to pick the cheapest authed model. */
@@ -2250,6 +2317,7 @@ export class SettingsManager {
 		const settings = this.settings.autoLearn ?? {};
 		return {
 			...settings,
+			model: settings.model ?? this.getModelRouterSettings().learningModel,
 			thinkingLevel: settings.thinkingLevel ?? "low",
 			complexTaskToolCalls: settings.complexTaskToolCalls ?? 12,
 		};

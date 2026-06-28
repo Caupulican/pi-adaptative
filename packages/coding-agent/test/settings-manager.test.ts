@@ -230,6 +230,38 @@ describe("SettingsManager", () => {
 	});
 
 	describe("auto learn settings", () => {
+		it("should use the model-router learning model as the Auto Learn model fallback", () => {
+			writeFileSync(
+				join(agentDir, "settings.json"),
+				JSON.stringify({
+					modelRouter: { learningModel: "anthropic/claude-haiku-4-5" },
+					autoLearn: { enabled: true },
+				}),
+			);
+
+			const manager = SettingsManager.create(projectDir, agentDir);
+
+			expect(manager.getModelRouterSettings()).toMatchObject({ learningModel: "anthropic/claude-haiku-4-5" });
+			expect(manager.getAutoLearnSettings()).toMatchObject({
+				enabled: true,
+				model: "anthropic/claude-haiku-4-5",
+			});
+		});
+
+		it("should let explicit Auto Learn model override the model-router learning model", () => {
+			writeFileSync(
+				join(agentDir, "settings.json"),
+				JSON.stringify({
+					modelRouter: { learningModel: "anthropic/claude-haiku-4-5" },
+					autoLearn: { enabled: true, model: "openai/gpt-5.4" },
+				}),
+			);
+
+			const manager = SettingsManager.create(projectDir, agentDir);
+
+			expect(manager.getAutoLearnSettings()).toMatchObject({ model: "openai/gpt-5.4" });
+		});
+
 		it("should persist reflection review settings", async () => {
 			const manager = SettingsManager.create(projectDir, agentDir);
 
@@ -251,6 +283,70 @@ describe("SettingsManager", () => {
 				reflectionReview: true,
 				reflectionMinToolCalls: 8,
 				reflectionCooldownMinutes: 30,
+			});
+		});
+	});
+
+	describe("modelRouter", () => {
+		it("should let active profile files override model router roles", () => {
+			mkdirSync(join(agentDir, "profiles"), { recursive: true });
+			writeFileSync(
+				join(agentDir, "profiles", "cheap-research.json"),
+				JSON.stringify({
+					name: "cheap-research",
+					modelRouter: {
+						enabled: true,
+						cheapModel: "anthropic/claude-haiku-4-5",
+						expensiveModel: "anthropic/claude-sonnet-4-5",
+						learningModel: "anthropic/claude-haiku-4-5",
+					},
+					resources: {},
+				}),
+			);
+			writeFileSync(
+				join(agentDir, "settings.json"),
+				JSON.stringify({
+					activeResourceProfile: "cheap-research",
+					modelRouter: {
+						enabled: false,
+						cheapModel: "openai/gpt-5.4",
+						expensiveModel: "openai/gpt-5.5",
+					},
+				}),
+			);
+
+			const manager = SettingsManager.create(projectDir, agentDir);
+
+			expect(manager.getModelRouterSettings()).toEqual({
+				enabled: true,
+				cheapModel: "anthropic/claude-haiku-4-5",
+				expensiveModel: "anthropic/claude-sonnet-4-5",
+				learningModel: "anthropic/claude-haiku-4-5",
+			});
+			expect(manager.getAutoLearnSettings()).toMatchObject({ model: "anthropic/claude-haiku-4-5" });
+		});
+
+		it("should save project scoped routing and learning model settings", async () => {
+			const settingsPath = join(projectDir, ".pi", "settings.json");
+			const manager = SettingsManager.create(projectDir, agentDir);
+
+			manager.setModelRouterSettings(
+				{
+					enabled: true,
+					cheapModel: "anthropic/claude-haiku-4-5",
+					expensiveModel: "anthropic/claude-sonnet-4-5",
+					learningModel: "openai/gpt-5.4",
+				},
+				"project",
+			);
+			await manager.flush();
+
+			const savedSettings = JSON.parse(readFileSync(settingsPath, "utf-8"));
+			expect(savedSettings.modelRouter).toEqual({
+				enabled: true,
+				cheapModel: "anthropic/claude-haiku-4-5",
+				expensiveModel: "anthropic/claude-sonnet-4-5",
+				learningModel: "openai/gpt-5.4",
 			});
 		});
 	});

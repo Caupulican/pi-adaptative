@@ -45,7 +45,7 @@ A profile is an allow/block contract over six kinds: `extensions`, `skills`, `pr
 
 Empty `allow` means "allow all of this kind." `block: ["*"]` means "none."
 
-A profile may also bind a **model** and a **thinking level** that apply when the profile is active. Thinking is one of `off`, `minimal`, `low`, `medium`, `high`, `xhigh`. Explicit CLI flags still win over a profile's model/thinking, which in turn win over the settings default.
+A profile may also bind a **model**, **thinking level**, and **modelRouter** block that apply when the profile is active. Thinking is one of `off`, `minimal`, `low`, `medium`, `high`, `xhigh`. Explicit CLI flags still win over a profile's foreground model/thinking, which in turn win over the settings default. A profile's `modelRouter` block overrides the matching global/project router fields while that situation is active, including the background learning/reflection model.
 
 Profiles are stored in settings under `resourceProfiles`, and the active one(s) in `activeResourceProfile`:
 
@@ -75,6 +75,12 @@ Besides inline settings, a profile can live as a standalone JSON file in `~/.pi/
   "description": "Fast read-only scout: cheap model, read tools only.",
   "model": "anthropic/claude-haiku-4-5",
   "thinking": "low",
+  "modelRouter": {
+    "enabled": true,
+    "cheapModel": "anthropic/claude-haiku-4-5",
+    "expensiveModel": "anthropic/claude-sonnet-4-5",
+    "learningModel": "anthropic/claude-haiku-4-5"
+  },
   "resources": {
     "tools": { "allow": ["read", "grep", "find", "ls"] },
     "extensions": { "block": ["*"] }

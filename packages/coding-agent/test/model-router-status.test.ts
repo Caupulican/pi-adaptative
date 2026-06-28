@@ -8,11 +8,17 @@ import type { SessionEntry } from "../src/core/session-manager.ts";
 
 describe("model router status formatting", () => {
 	it("shows disabled state and configured models", () => {
-		const text = formatModelRouterStatus({ enabled: false, cheapModel: "cheap", expensiveModel: "expensive" });
+		const text = formatModelRouterStatus({
+			enabled: false,
+			cheapModel: "cheap",
+			expensiveModel: "expensive",
+			learningModel: "learner",
+		});
 
 		expect(text).toContain("Status: disabled");
 		expect(text).toContain("Cheap model: cheap");
 		expect(text).toContain("Expensive model: expensive");
+		expect(text).toContain("Learning model: learner");
 		expect(text).toContain("Routing: inactive (disabled)");
 		expect(text).toContain("Latest intent: none");
 		expect(text).toContain("Last decision: none");
