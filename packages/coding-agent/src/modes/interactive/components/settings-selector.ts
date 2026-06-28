@@ -18,6 +18,7 @@ import type {
 	AutoLearnSettings,
 	AutonomyMode,
 	AutonomySettings,
+	ModelRouterSettings,
 	SelfModificationSettings,
 	SettingsScope,
 	WarningSettings,
@@ -100,6 +101,11 @@ function autoLearnSummary(settings: AutoLearnSettings): string {
 	return settings.enabled ? `enabled (${autoLearnModelValue(settings)})` : "disabled";
 }
 
+function modelRouterSummary(settings: ModelRouterSettings): string {
+	const state = settings.enabled ? "enabled" : "disabled";
+	return `${state} · cheap: ${optionalStringValue(settings.cheapModel)} · expensive: ${optionalStringValue(settings.expensiveModel)}`;
+}
+
 function buildAutoLearnModelOptions(
 	settings: AutoLearnSettings,
 	configuredModelOptions: SelectItem[] | undefined,
@@ -176,6 +182,7 @@ export interface SettingsConfig {
 	selfModificationScope?: SettingsScope;
 	autonomy: AutonomySettings;
 	autonomyScope?: SettingsScope;
+	modelRouter: ModelRouterSettings;
 	autoLearn: AutoLearnSettings;
 	autoLearnScope?: SettingsScope;
 	currentModelPattern?: string;
@@ -785,6 +792,11 @@ export class SelectSubmenu extends Container {
 	}
 
 	handleInput(data: string): void {
+		const kb = getKeybindings();
+		if (kb.matches(data, "app.interrupt") || kb.matches(data, "app.clear")) {
+			this.selectList.onCancel?.();
+			return;
+		}
 		this.selectList.handleInput(data);
 	}
 }
@@ -915,6 +927,13 @@ export class SettingsSelectorComponent extends Container {
 						() => done(autonomySummary(currentAutonomy)),
 						config.autonomyScope ?? "global",
 					),
+			},
+			{
+				id: "model-router",
+				label: "Model Router",
+				description:
+					"Read-only; edit modelRouter.enabled, modelRouter.cheapModel, and modelRouter.expensiveModel in settings/profile config",
+				currentValue: modelRouterSummary(config.modelRouter),
 			},
 			{
 				id: "auto-learn",

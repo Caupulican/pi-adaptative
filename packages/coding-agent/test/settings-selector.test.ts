@@ -38,6 +38,7 @@ function makeConfig(overrides: Partial<SettingsConfig> = {}): SettingsConfig {
 		warnings: {},
 		selfModification: { enabled: false },
 		autonomy: { mode: "off" },
+		modelRouter: {},
 		autoLearn: {},
 		currentModelPattern: "openai/gpt-5.4",
 		autoLearnModelOptions: [
@@ -166,5 +167,53 @@ describe("settings selector", () => {
 		const output = selector.render(180).join("\n");
 
 		expect(output).toContain("Reflection review");
+	});
+
+	it("exposes model router settings together in the searchable settings TUI", () => {
+		const selector = new SettingsSelectorComponent(
+			makeConfig({
+				modelRouter: {
+					enabled: true,
+					cheapModel: "anthropic/claude-haiku-4-5",
+					expensiveModel: "anthropic/claude-sonnet-4-5",
+				},
+			}),
+			makeCallbacks(),
+		);
+
+		selector.getSettingsList().handleInput("model router");
+		const output = selector.render(180).join("\n");
+
+		expect(output).toContain("Model Router");
+		expect(output).toContain("modelRouter.enabled");
+		expect(output).toContain("modelRouter.cheapModel");
+		expect(output).toContain("modelRouter.expensiveModel");
+		expect(output).toContain("enabled");
+		expect(output).toContain("anthropic/claude-haiku-4-5");
+		expect(output).toContain("anthropic/claude-sonnet-4-5");
+	});
+
+	it("cancels the Resources submenu with Escape and Ctrl+C", () => {
+		for (const key of ["\x1b", "\x03"]) {
+			const onCancel = vi.fn();
+			const onResourcesHubAction = vi.fn();
+			const selector = new SettingsSelectorComponent(
+				makeConfig({
+					activeProfileName: "reviewer",
+					profileOptions: [{ value: "reviewer", label: "reviewer", description: "Reviewer situation" }],
+					externalResourceRoots: ["/catalog/path1"],
+					trustedResourceRoots: ["/catalog/path1"],
+				}),
+				makeCallbacks({ onCancel, onResourcesHubAction }),
+			);
+
+			selector.getSettingsList().handleInput("resources");
+			selector.getSettingsList().handleInput("\r");
+			selector.getSettingsList().handleInput(key);
+
+			expect(onResourcesHubAction).not.toHaveBeenCalled();
+			expect(onCancel).not.toHaveBeenCalled();
+			expect(selector.render(140).join("\n")).toContain("Resources");
+		}
 	});
 });

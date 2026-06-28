@@ -110,6 +110,12 @@ export interface AutonomySettings {
 	mode?: AutonomyMode; // default: off; presets drive Auto Learn/reflection without many knobs
 }
 
+export interface ModelRouterSettings {
+	enabled?: boolean; // default: false — routing is opt-in until escalation safeguards are complete
+	cheapModel?: string; // model pattern for read-only/research turns
+	expensiveModel?: string; // model pattern for modify/tool-heavy turns
+}
+
 export type TransportSetting = Transport;
 
 /**
@@ -198,6 +204,7 @@ export interface Settings {
 	warnings?: WarningSettings;
 	selfModification?: SelfModificationSettings; // Local guardrails for modifying the pi-adaptative source/harness
 	autonomy?: AutonomySettings; // Low-config autonomy preset controlling background learning/reflection defaults
+	modelRouter?: ModelRouterSettings; // Opt-in deterministic cheap/expensive model routing foundation
 	autoLearn?: AutoLearnSettings; // Setting-gated autonomous background learning for long sessions
 	sessionDir?: string; // Custom session storage directory (same format as --session-dir CLI flag)
 	httpIdleTimeoutMs?: number; // HTTP header/body idle timeout in milliseconds; 0 disables it
@@ -1717,6 +1724,14 @@ export class SettingsManager {
 		return {
 			maxTurnUsd: this.settings.costGuard?.maxTurnUsd ?? 2.5,
 			action: this.settings.costGuard?.action ?? "warn",
+		};
+	}
+
+	getModelRouterSettings(): { enabled: boolean; cheapModel?: string; expensiveModel?: string } {
+		return {
+			enabled: this.settings.modelRouter?.enabled ?? false,
+			cheapModel: this.settings.modelRouter?.cheapModel?.trim() || undefined,
+			expensiveModel: this.settings.modelRouter?.expensiveModel?.trim() || undefined,
 		};
 	}
 

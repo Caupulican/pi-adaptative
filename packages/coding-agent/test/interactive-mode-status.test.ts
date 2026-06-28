@@ -104,6 +104,113 @@ describe("InteractiveMode.setToolsExpanded", () => {
 	});
 });
 
+describe("InteractiveMode.handleSessionCommand", () => {
+	test("renders the Model Router status block from the active session", () => {
+		initTheme("dark");
+		const fakeThis: any = {
+			chatContainer: new Container(),
+			ui: { requestRender: vi.fn() },
+			sessionManager: { getSessionName: () => "integration-session" },
+			session: {
+				getSessionStats: () => ({
+					sessionFile: "/tmp/pi-session.jsonl",
+					sessionId: "session-id",
+					userMessages: 1,
+					assistantMessages: 1,
+					toolCalls: 0,
+					toolResults: 0,
+					totalMessages: 2,
+					tokens: { input: 10, output: 20, cacheRead: 0, cacheWrite: 0, total: 30 },
+					cost: 0,
+				}),
+				getDailyUsageTotals: () => ({
+					totalCost: 0,
+					ownCost: 0,
+					spawnedCost: 0,
+					sessionCount: 0,
+					spawnedReportCount: 0,
+				}),
+				getDailyUsageBreakdown: vi.fn(),
+				getModelRouterStatus: (formatLabel: (label: string) => string) =>
+					`${formatLabel("Status:")} enabled\n${formatLabel("Routing:")} skipped (expensive model missing auth: anthropic/claude-sonnet-4-5)\n${formatLabel("Latest intent:")} modify\n${formatLabel("Last decision:")} none`,
+			},
+		};
+
+		(InteractiveMode as any).prototype.handleSessionCommand.call(fakeThis);
+
+		const output = normalizeRenderedOutput(fakeThis.chatContainer);
+		expect(output).toContain("Session Info");
+		expect(output).toContain("Model Router");
+		expect(output).toContain("Status: enabled");
+		expect(output).toContain("Routing: skipped (expensive model missing auth: anthropic/claude-sonnet-4-5)");
+		expect(output).toContain("Latest intent: modify");
+		expect(output).toContain("Last decision: none");
+		expect(fakeThis.ui.requestRender).toHaveBeenCalledTimes(1);
+	});
+});
+
+describe("InteractiveMode.handleUsageCommand", () => {
+	test("renders a unified token, cost, and optimization control summary", () => {
+		initTheme("dark");
+		const fakeThis: any = {
+			chatContainer: new Container(),
+			ui: { requestRender: vi.fn() },
+			session: {
+				getSessionStats: () => ({
+					tokens: { input: 1_000, output: 500, cacheRead: 250, cacheWrite: 125, total: 1_875 },
+					cost: 0.1234,
+				}),
+				getSpawnedUsage: () => ({ cost: 0.25, reports: 3 }),
+				getDailyUsageTotals: () => ({
+					ownCost: 0.5,
+					spawnedCost: 0.25,
+					totalCost: 0.75,
+					input: 10_000,
+					output: 2_000,
+					cacheRead: 4_000,
+					cacheWrite: 1_000,
+					totalTokens: 17_000,
+					sessions: 2,
+					reports: 3,
+				}),
+				getContextUsage: () => ({ percent: 66.6, tokens: 66_600, contextWindow: 100_000 }),
+				autoCompactionEnabled: true,
+				getLastCostGuardDecision: () => ({ over: true, estUsd: 1.23, thresholdUsd: 1, action: "warn" }),
+				getModelRouterStatus: (formatLabel: (label: string) => string) =>
+					`${formatLabel("Status:")} enabled\n${formatLabel("Routing:")} waiting for prompt`,
+			},
+			getCurrentAutoLearnSettings: () => ({
+				enabled: true,
+				model: "anthropic/claude-haiku-4-5",
+				reflectionReview: true,
+				reflectionMinToolCalls: 8,
+				maxConcurrentLearners: 1,
+				cooldownMinutes: 60,
+			}),
+		};
+
+		(InteractiveMode as any).prototype.handleUsageCommand.call(fakeThis);
+
+		const output = normalizeRenderedOutput(fakeThis.chatContainer);
+		expect(output).toContain("Usage & Optimization");
+		expect(output).toContain("Session tokens");
+		expect(output).toContain("Cost");
+		expect(output).toContain("Spawned/background: $0.2500 (3 reports)");
+		expect(output).toContain("Today: $0.7500");
+		expect(output).toContain("Context: 66.6% (66,600/100,000)");
+		expect(output).toContain("Auto-compaction: enabled");
+		expect(output).toContain("Cost guard: over $1.2300/$1.0000 (warn)");
+		expect(output).toContain("Auto Learn: enabled");
+		expect(output).toContain("Scavenger model: anthropic/claude-haiku-4-5");
+		expect(output).toContain("Model Router");
+		expect(output).toContain("Manual controls");
+		expect(output).toContain("/compact");
+		expect(output).toContain("/settings");
+		expect(output).toContain("context_audit");
+		expect(fakeThis.ui.requestRender).toHaveBeenCalledTimes(1);
+	});
+});
+
 describe("InteractiveMode.createExtensionUIContext setTheme", () => {
 	test("persists theme changes to settings manager", () => {
 		initTheme("dark");

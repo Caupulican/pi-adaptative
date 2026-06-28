@@ -163,6 +163,7 @@ describe("Library Manage UX - Increment 2", () => {
 					warnings: {},
 					selfModification: { enabled: false },
 					autonomy: { mode: "off" },
+					modelRouter: {},
 					autoLearn: { enabled: false },
 					activeProfileName: "reviewer",
 					profileOptions: [{ value: "reviewer", label: "reviewer", description: "Reviewer situation" }],

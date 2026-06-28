@@ -183,7 +183,7 @@ class ConfigSelectorHeader implements Component {
 	render(width: number): string[] {
 		const title = theme.bold("Resource Configuration");
 		const sep = theme.fg("muted", " · ");
-		const hint = rawKeyHint("space", "toggle") + sep + rawKeyHint("esc", "close");
+		const hint = rawKeyHint("space", "toggle") + sep + rawKeyHint("esc/ctrl+c", "close");
 		const hintWidth = visibleWidth(hint);
 		const titleWidth = visibleWidth(title);
 		const spacing = Math.max(1, width - titleWidth - hintWidth);
@@ -422,12 +422,12 @@ class ResourceList implements Component, Focusable {
 			}
 			return;
 		}
-		if (kb.matches(data, "tui.select.cancel")) {
+		if (kb.matches(data, "tui.select.cancel") || kb.matches(data, "app.interrupt") || kb.matches(data, "app.clear")) {
 			this.onCancel?.();
 			return;
 		}
 		if (matchesKey(data, "ctrl+c")) {
-			this.onExit?.();
+			this.onCancel?.();
 			return;
 		}
 		if (data === " " || kb.matches(data, "tui.select.confirm")) {

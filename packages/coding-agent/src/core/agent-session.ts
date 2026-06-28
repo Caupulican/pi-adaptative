@@ -12,7 +12,6 @@
  *
  * Modes use this class and add their own I/O layer on top.
  */
-
 import { existsSync, mkdirSync, readFileSync, writeFileSync } from "node:fs";
 import { basename, dirname, join } from "node:path";
 import type {
@@ -45,7 +44,7 @@ import {
 	resetApiProviders,
 	streamSimple,
 } from "@caupulican/pi-ai";
-import { getAgentDir } from "../config.ts";
+import { getAgentDir, getSessionsDir } from "../config.ts";
 import { theme } from "../modes/interactive/theme/theme.ts";
 import { stripFrontmatter } from "../utils/frontmatter.ts";
 import { resolvePath } from "../utils/paths.ts";
@@ -63,6 +62,13 @@ import {
 	shouldCompact,
 } from "./compaction/index.ts";
 import { applyContextGc, type ContextGcReport } from "./context-gc.ts";
+import {
+	aggregateDailyUsageFromSessionFiles,
+	aggregateDailyUsageFromSessionRoot,
+	type DailyUsageTotals,
+	formatDailyUsageBreakdown,
+	getLocalDayWindow,
+} from "./cost/daily-usage.ts";
 import { type CostGuardDecision, downgradeReasoning, estimateTurnCostUsd, evaluateCostGuard } from "./cost-guard.ts";
 import { DEFAULT_THINKING_LEVEL } from "./defaults.ts";
 import { exportSessionToHtml, type ToolHtmlRenderer } from "./export-html/index.ts";
@@ -114,6 +120,22 @@ import { compactToolResultDetailsForRetention } from "./message-retention.ts";
 import { type BashExecutionMessage, type CustomMessage, createCustomMessage } from "./messages.ts";
 import type { ModelRegistry } from "./model-registry.ts";
 import { resolveCliModel, resolveProfileModelSettings } from "./model-resolver.ts";
+import { collectModelRouterConfigDiagnostics } from "./model-router/config-diagnostics.ts";
+import { classifyModelRouterIntent, type ModelRouterIntent } from "./model-router/intent-classifier.ts";
+import {
+	bufferModelRouterSessionCustomMessage,
+	bufferModelRouterSessionMessage,
+	createModelRouterSessionBuffer,
+	flushModelRouterSessionBuffer,
+	type ModelRouterSessionBuffer,
+} from "./model-router/session-buffer.ts";
+import {
+	formatModelRouterStatus,
+	getRecentModelRouterDecisions,
+	MODEL_ROUTER_DECISION_CUSTOM_TYPE,
+	type ModelRouterDecisionStatus,
+} from "./model-router/status.ts";
+import { shouldEscalateModelRouterTool } from "./model-router/tool-escalation.ts";
 import { expandPromptTemplate, type PromptTemplate } from "./prompt-templates.ts";
 import type { ResourceExtensionPaths, ResourceLoader } from "./resource-loader.ts";
 import { stripResourceProfileBlocks } from "./resource-profile-blocks.ts";
@@ -383,6 +405,17 @@ const THINKING_LEVELS: ThinkingLevel[] = ["off", "minimal", "low", "medium", "hi
 // AgentSession Class
 // ============================================================================
 
+function formatModelRouterModel(model: Model<any>): string {
+	return `${model.provider}/${model.id}`;
+}
+
+function persistModelRouterDecision(
+	sessionManager: Pick<SessionManager, "appendCustomEntry">,
+	decision: ModelRouterDecisionStatus,
+): void {
+	sessionManager.appendCustomEntry(MODEL_ROUTER_DECISION_CUSTOM_TYPE, decision);
+}
+
 export class AgentSession {
 	readonly agent: Agent;
 	readonly sessionManager: SessionManager;
@@ -447,10 +480,18 @@ export class AgentSession {
 	private readonly _gatewayRegistry = new GatewayRegistry();
 	/** Cache for getSpawnedUsage(), keyed by session entry count (Bug #22 — avoid O(N) per render frame). */
 	private _spawnedUsageCache?: { entryCount: number; totals: SpawnedUsageTotals };
+	private _dailyUsageCache?: { sessionDir: string; expiresAt: number; totals: DailyUsageTotals };
 	/** Latest proactive cost-guard decision (#34), for the host UI to surface. Undefined when disabled. */
 	private _lastCostGuardDecision?: CostGuardDecision;
 	/** One-shot latch so the cost guard downgrades reasoning once per over-threshold episode, not every call. */
 	private _costGuardDowngraded = false;
+	/** Active model-router intent for the current transient routed turn, if any. */
+	private _activeModelRouterIntent?: ModelRouterIntent;
+	private _modelRouterSessionBuffer?: ModelRouterSessionBuffer;
+	private _modelRouterEscalationRequested = false;
+	private _lastModelRouterDecision?: ModelRouterDecisionStatus;
+	private _lastModelRouterSkipReason?: string;
+	private _lastModelRouterIntent?: ModelRouterIntent;
 	/** Lazily-built skill curator (#32) over `<agentDir>/skills`. */
 	private _skillCuratorInstance?: SkillCurator;
 	/** Set on dispose so in-flight background reflection bails instead of writing to a dead session (Bug #21). */
@@ -802,6 +843,19 @@ export class AgentSession {
 
 	private _installAgentToolHooks(): void {
 		this.agent.beforeToolCall = async ({ toolCall, args }) => {
+			if (
+				this._activeModelRouterIntent &&
+				shouldEscalateModelRouterTool({ intent: this._activeModelRouterIntent, toolName: toolCall.name, args })
+			) {
+				this._modelRouterEscalationRequested = true;
+				this.agent.abort();
+				return {
+					block: true,
+					reason:
+						"Model router escalation required: a cheap research turn attempted a mutating tool. Retry the turn on the configured expensive model.",
+				};
+			}
+
 			const runner = this._extensionRunner;
 			if (!runner.hasHandlers("tool_call")) {
 				return undefined;
@@ -921,8 +975,17 @@ export class AgentSession {
 		// accumulate until the interactive Node process hits the V8 heap limit.
 		if (event.type === "message_end") {
 			compactToolResultDetailsForRetention(event.message);
+			const modelRouterBuffer = this._modelRouterSessionBuffer;
+			if (modelRouterBuffer && event.message.role === "custom") {
+				bufferModelRouterSessionCustomMessage(modelRouterBuffer, event.message);
+			} else if (
+				modelRouterBuffer &&
+				(event.message.role === "user" || event.message.role === "assistant" || event.message.role === "toolResult")
+			) {
+				bufferModelRouterSessionMessage(modelRouterBuffer, event.message as Message);
+			}
 			// Check if this is a custom message from extensions
-			if (event.message.role === "custom") {
+			else if (event.message.role === "custom") {
 				// Persist as CustomMessageEntry
 				this.sessionManager.appendCustomMessageEntry(
 					event.message.customType,
@@ -1500,6 +1563,160 @@ export class AgentSession {
 		}
 	}
 
+	private _resolveModelRouterModelForIntent(intent: ModelRouterIntent): Model<any> | undefined {
+		const settings = this.settingsManager.getModelRouterSettings();
+		const modelLabel = intent === "research" ? "cheap model" : "expensive model";
+		if (!settings.enabled) {
+			this._lastModelRouterSkipReason = "disabled";
+			return undefined;
+		}
+		const modelPattern = intent === "research" ? settings.cheapModel : settings.expensiveModel;
+		if (!modelPattern) {
+			this._lastModelRouterSkipReason = `${modelLabel} unset`;
+			return undefined;
+		}
+		const resolved = resolveCliModel({ cliModel: modelPattern, modelRegistry: this._modelRegistry });
+		if (!resolved.model) {
+			this._lastModelRouterSkipReason = `${modelLabel} unresolved: ${modelPattern}`;
+			return undefined;
+		}
+		const resolvedName = formatModelRouterModel(resolved.model);
+		if (!this._modelRegistry.hasConfiguredAuth(resolved.model)) {
+			this._lastModelRouterSkipReason = `${modelLabel} missing auth: ${resolvedName}`;
+			return undefined;
+		}
+		this._lastModelRouterSkipReason = undefined;
+		return resolved.model;
+	}
+
+	private _resolveModelRouterTurnModel(prompt: string): Model<any> | undefined {
+		const intent = classifyModelRouterIntent(prompt);
+		this._lastModelRouterIntent = intent;
+		return this._resolveModelRouterModelForIntent(intent);
+	}
+
+	getModelRouterStatus(formatLabel?: (label: string) => string): string {
+		const recentDecisions = getRecentModelRouterDecisions(this.sessionManager.getEntries());
+		const lastDecision = this._lastModelRouterDecision ?? recentDecisions.at(-1);
+		const historicalDecisions = this._lastModelRouterDecision ? recentDecisions : recentDecisions.slice(0, -1);
+		const settings = this.settingsManager.getModelRouterSettings();
+		const lines = [
+			formatModelRouterStatus(
+				settings,
+				lastDecision,
+				formatLabel,
+				historicalDecisions,
+				this._lastModelRouterSkipReason,
+				this._lastModelRouterIntent ?? lastDecision?.intent,
+			),
+		];
+		const diagnostics = collectModelRouterConfigDiagnostics(settings, this._modelRegistry);
+		if (diagnostics.length > 0) {
+			lines.push(formatLabel ? formatLabel("Config diagnostics:") : "Config diagnostics:");
+			for (const diagnostic of diagnostics) {
+				lines.push(`- ${diagnostic}`);
+			}
+		}
+		return lines.join("\n");
+	}
+
+	private async _runAgentPromptWithModelRouter(
+		messages: AgentMessage | AgentMessage[],
+		routedModel: Model<any> | undefined,
+		routedIntent: ModelRouterIntent | undefined,
+		persistDecision = true,
+	): Promise<void> {
+		if (!routedModel) {
+			await this._runAgentPrompt(messages);
+			return;
+		}
+
+		const previousModel = this.agent.state.model;
+		const previousThinkingLevel = this.agent.state.thinkingLevel;
+		const previousActiveModelRouterIntent = this._activeModelRouterIntent;
+		const previousModelRouterSessionBuffer = this._modelRouterSessionBuffer;
+		const previousModelRouterEscalationRequested = this._modelRouterEscalationRequested;
+		const bufferRoutedTurn = routedIntent === "research";
+		const originalHistoryLength = this.agent.state.messages.length;
+		let retryModel: Model<any> | undefined;
+		let completedDecision: ModelRouterDecisionStatus | undefined = routedIntent
+			? {
+					intent: routedIntent,
+					routedModel: formatModelRouterModel(routedModel),
+					outcome: "routed",
+				}
+			: undefined;
+		let thrownError: unknown;
+		if (routedIntent) {
+			this._lastModelRouterDecision = completedDecision;
+		}
+		this._activeModelRouterIntent = routedIntent;
+		if (bufferRoutedTurn) {
+			this._modelRouterSessionBuffer = createModelRouterSessionBuffer();
+			this._modelRouterEscalationRequested = false;
+		}
+		if (!modelsAreEqual(this.model, routedModel)) {
+			this.agent.state.model = routedModel;
+			this.agent.state.thinkingLevel = clampThinkingLevel(routedModel, previousThinkingLevel) as ThinkingLevel;
+		}
+		try {
+			await this._runAgentPrompt(messages);
+			if (bufferRoutedTurn && this._modelRouterEscalationRequested) {
+				this.agent.state.messages.splice(originalHistoryLength);
+				retryModel = this._resolveModelRouterModelForIntent("modify") ?? previousModel;
+				completedDecision = {
+					intent: routedIntent,
+					routedModel: formatModelRouterModel(routedModel),
+					outcome: "escalated",
+					retryModel: formatModelRouterModel(retryModel),
+				};
+				this._lastModelRouterDecision = completedDecision;
+			} else if (bufferRoutedTurn && this._modelRouterSessionBuffer) {
+				flushModelRouterSessionBuffer(
+					this._modelRouterSessionBuffer,
+					(message) => {
+						this.sessionManager.appendMessage(message);
+					},
+					(customType, content, display, details) => {
+						this.sessionManager.appendCustomMessageEntry(customType, content, display, details);
+					},
+				);
+			}
+		} catch (error) {
+			thrownError = error;
+			if (completedDecision) {
+				completedDecision = { ...completedDecision, outcome: "failed" };
+				this._lastModelRouterDecision = completedDecision;
+			}
+		} finally {
+			this.agent.state.model = previousModel;
+			this.agent.state.thinkingLevel = previousThinkingLevel;
+			this._activeModelRouterIntent = previousActiveModelRouterIntent;
+			this._modelRouterSessionBuffer = previousModelRouterSessionBuffer;
+			this._modelRouterEscalationRequested = previousModelRouterEscalationRequested;
+		}
+
+		if (retryModel && !thrownError) {
+			try {
+				await this._runAgentPromptWithModelRouter(messages, retryModel, "modify", false);
+			} catch (error) {
+				thrownError = error;
+				if (completedDecision) {
+					completedDecision = { ...completedDecision, outcome: "failed" };
+					this._lastModelRouterDecision = completedDecision;
+				}
+			}
+		}
+
+		if (persistDecision && completedDecision) {
+			persistModelRouterDecision(this.sessionManager, completedDecision);
+		}
+
+		if (thrownError) {
+			throw thrownError;
+		}
+	}
+
 	private async _handlePostAgentRun(): Promise<boolean> {
 		const msg = this._lastAssistantMessage;
 		this._lastAssistantMessage = undefined;
@@ -1573,6 +1790,8 @@ export class AgentSession {
 		const processSlashCommands = options?.processSlashCommands ?? expandPromptTemplates;
 		const preflightResult = options?.preflightResult;
 		let messages: AgentMessage[] | undefined;
+		let routedTurnModel: Model<any> | undefined;
+		let routedTurnIntent: ModelRouterIntent | undefined;
 		// R4 effectiveness feedback: remember the recall page + the query so we can score, after the
 		// response, whether the agent actually used the recalled context.
 		let injectedRecall = "";
@@ -1647,21 +1866,25 @@ export class AgentSession {
 			// Flush any pending bash messages before the new prompt
 			this._flushPendingBashMessages();
 
+			routedTurnModel = this._resolveModelRouterTurnModel(expandedText);
+			routedTurnIntent = routedTurnModel ? classifyModelRouterIntent(expandedText) : undefined;
+			const requestModel = routedTurnModel ?? this.model;
+
 			// Validate model
-			if (!this.model) {
+			if (!requestModel) {
 				throw new Error(formatNoModelSelectedMessage());
 			}
 
-			if (!this._modelRegistry.hasConfiguredAuth(this.model)) {
-				const isOAuth = this._modelRegistry.isUsingOAuth(this.model);
+			if (!this._modelRegistry.hasConfiguredAuth(requestModel)) {
+				const isOAuth = this._modelRegistry.isUsingOAuth(requestModel);
 				if (isOAuth) {
 					throw new Error(
-						`Authentication failed for "${this.model.provider}". ` +
+						`Authentication failed for "${requestModel.provider}". ` +
 							`Credentials may have expired or network is unavailable. ` +
-							`Run '/login ${this.model.provider}' to re-authenticate.`,
+							`Run '/login ${requestModel.provider}' to re-authenticate.`,
 					);
 				}
-				throw new Error(formatNoApiKeyFoundMessage(this.model.provider));
+				throw new Error(formatNoApiKeyFoundMessage(requestModel.provider));
 			}
 
 			// Check if we need to compact before sending (catches aborted responses).
@@ -1752,7 +1975,7 @@ export class AgentSession {
 		}
 
 		preflightResult?.(true);
-		await this._runAgentPrompt(messages);
+		await this._runAgentPromptWithModelRouter(messages, routedTurnModel, routedTurnIntent);
 
 		// R4: score whether the agent actually used the recalled context, so the recall gate can adapt.
 		if (injectedRecall) {
@@ -4224,6 +4447,25 @@ export class AgentSession {
 		const totals: SpawnedUsageTotals = { cost, reports };
 		this._spawnedUsageCache = { entryCount, totals };
 		return totals;
+	}
+
+	getDailyUsageTotals(now = new Date()): DailyUsageTotals {
+		const sessionDir = this.sessionManager.getSessionDir();
+		const scope = this.sessionManager.usesDefaultSessionDir() ? getSessionsDir() : sessionDir;
+		const nowMs = now.getTime();
+		if (this._dailyUsageCache?.sessionDir === scope && this._dailyUsageCache.expiresAt > nowMs) {
+			return this._dailyUsageCache.totals;
+		}
+		const window = getLocalDayWindow(now);
+		const totals = this.sessionManager.usesDefaultSessionDir()
+			? aggregateDailyUsageFromSessionRoot(scope, window)
+			: aggregateDailyUsageFromSessionFiles(sessionDir, window);
+		this._dailyUsageCache = { sessionDir: scope, expiresAt: nowMs + 10_000, totals };
+		return totals;
+	}
+
+	getDailyUsageBreakdown(formatLabel?: (label: string) => string, now = new Date()): string {
+		return formatDailyUsageBreakdown(this.getDailyUsageTotals(now), formatLabel);
 	}
 
 	/**

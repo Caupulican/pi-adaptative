@@ -20,6 +20,7 @@ function createSession(options: {
 	reasoning?: boolean;
 	thinkingLevel?: string;
 	usage?: AssistantUsage;
+	dailyCost?: number;
 }): AgentSession {
 	const usage = options.usage;
 	const entries =
@@ -52,6 +53,7 @@ function createSession(options: {
 		},
 		getContextUsage: () => ({ contextWindow: 200_000, percent: 12.3 }),
 		getSpawnedUsage: () => ({ cost: 0, reports: 0 }),
+		getDailyUsageTotals: () => ({ totalCost: options.dailyCost ?? 0 }),
 		modelRegistry: {
 			isUsingOAuth: () => false,
 		},
@@ -146,5 +148,14 @@ describe("FooterComponent width handling", () => {
 		expect(statusLine).toContain("learn:auto");
 		expect(statusLine).toContain("pi-chat");
 		expect(statusLine).not.toContain("(learning) (learning)");
+	});
+
+	it("shows the active-day cost total in the visible stats line", () => {
+		const session = createSession({ sessionName: "", dailyCost: 2.415 });
+		const footer = new FooterComponent(session, createFooterData(1));
+
+		const statsLine = stripAnsi(footer.render(120)[1] ?? "");
+
+		expect(statsLine).toContain("day:$2.415");
 	});
 });

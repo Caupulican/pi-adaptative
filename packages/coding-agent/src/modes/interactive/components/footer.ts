@@ -114,6 +114,7 @@ type FooterUsageSnapshot = {
 	totalCost: number;
 	/** Rolled-up cost of spawned/subagent sessions (Cost Aggregation). 0 when none. */
 	totalSpawnedCost: number;
+	dailyTotalCost: number;
 	contextUsage: ReturnType<AgentSession["getContextUsage"]>;
 };
 
@@ -186,6 +187,7 @@ export class FooterComponent implements Component {
 		// Roll up spawned/subagent cost (Cost Aggregation, Model A). Derived from the same
 		// session entries, so the {entryCount} cache key above busts when new reports land.
 		const totalSpawnedCost = this.session.getSpawnedUsage().cost;
+		const dailyTotalCost = this.session.getDailyUsageTotals?.().totalCost ?? 0;
 
 		const snapshot: FooterUsageSnapshot = {
 			entryCount,
@@ -196,6 +198,7 @@ export class FooterComponent implements Component {
 			totalCacheWrite,
 			totalCost,
 			totalSpawnedCost,
+			dailyTotalCost,
 			// Calculate context usage from session (handles compaction correctly).
 			// After compaction, tokens are unknown until the next LLM response.
 			contextUsage: this.session.getContextUsage(),
@@ -207,8 +210,16 @@ export class FooterComponent implements Component {
 	render(width: number): string[] {
 		const state = this.session.state;
 		const usageSnapshot = this.getUsageSnapshot(state.messages?.length ?? 0);
-		const { totalInput, totalOutput, totalCacheRead, totalCacheWrite, totalCost, totalSpawnedCost, contextUsage } =
-			usageSnapshot;
+		const {
+			totalInput,
+			totalOutput,
+			totalCacheRead,
+			totalCacheWrite,
+			totalCost,
+			totalSpawnedCost,
+			dailyTotalCost,
+			contextUsage,
+		} = usageSnapshot;
 		const contextWindow = contextUsage?.contextWindow ?? state.model?.contextWindow ?? 0;
 		const contextPercentValue = contextUsage?.percent ?? 0;
 		const contextPercent = contextUsage?.percent !== null ? contextPercentValue.toFixed(1) : "?";
@@ -244,6 +255,9 @@ export class FooterComponent implements Component {
 				costStr += ` (+$${totalSpawnedCost.toFixed(3)} sub)`;
 			}
 			statsParts.push(costStr);
+		}
+		if (dailyTotalCost) {
+			statsParts.push(`day:$${dailyTotalCost.toFixed(3)}`);
 		}
 
 		// Proactive cost-guard warning (#34): when the projected per-turn cost crosses the ceiling,

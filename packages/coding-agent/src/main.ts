@@ -35,6 +35,7 @@ import {
 	resolveProfileModelSettings,
 	type ScopedModel,
 } from "./core/model-resolver.ts";
+import { collectModelRouterConfigDiagnostics } from "./core/model-router/config-diagnostics.ts";
 import { restoreStdout, takeOverStdout } from "./core/output-guard.ts";
 import { parseResourceProfileInput } from "./core/resource-profile-blocks.ts";
 import type { CreateAgentSessionOptions } from "./core/sdk.ts";
@@ -770,6 +771,15 @@ export async function main(args: string[], options?: MainOptions) {
 				message: `Failed to load extension "${path}": ${error}`,
 			})),
 		];
+
+		diagnostics.push(
+			...collectModelRouterConfigDiagnostics(settingsManager.getModelRouterSettings(), modelRegistry).map(
+				(message) => ({
+					type: "warning" as const,
+					message,
+				}),
+			),
+		);
 
 		const modelPatterns = parsed.models ?? settingsManager.getEnabledModels();
 		const scopedModels =

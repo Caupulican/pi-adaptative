@@ -1,5 +1,50 @@
 ## [Unreleased]
 
+### Added
+
+- Added the opt-in model-router settings shape and deterministic prompt intent classifier foundation for
+  cheap/expensive model routing. When explicitly enabled with authenticated router models, read-only turns
+  temporarily use the configured cheap model and modifying turns use the configured expensive model without
+  persisting transient model switches; routing remains disabled by default.
+- Added transcript-safe model-router escalation: cheap/research-routed turns that attempt mutating tools
+  discard the cheap attempt and retry the original turn on the configured expensive model instead of
+  letting a low-cost model perform write or execution work.
+- Added active-session daily cost visibility: the footer now includes a `day:$...` total derived from
+  same-day session logs across default project directories, including spawned/background usage reports.
+- Added a daily cost breakdown to the session info surface so users can see own/session cost,
+  spawned/background report cost, scanned sessions, and spawned/background report counts.
+- Added model-router status to the session info surface, including enabled state, configured cheap/
+  expensive models, and the latest routed or escalated decision.
+- Persisted model-router routing decisions as hidden custom session entries so `/session` can show a
+  short recent-decision history after session reloads.
+- Added model-router routing activity/skip status to `/session`, including disabled, unresolved model,
+  unset model, and missing-auth reasons.
+- Added latest model-router intent visibility to `/session` so users can audit whether the last prompt was
+  classified as research or modify.
+- Clarified model-router `/session` status so a skipped latest prompt no longer presents an older routed
+  decision as the current latest decision.
+- Added model-router discoverability in the interactive settings selector by showing enabled, cheap-model,
+  and expensive-model configuration together.
+- Added a read-only settings selector cue naming `modelRouter.enabled`, `modelRouter.cheapModel`, and
+  `modelRouter.expensiveModel` as the editable config keys.
+- Added startup diagnostics for enabled model-router configs with unset, unresolved, or unauthenticated
+  cheap/expensive model settings.
+- Added `/usage` as a unified token, cost, background-spend, context, Auto Learn, model-router, and
+  manual optimization control summary.
+
+### Fixed
+
+- `/exit` now behaves as a quit alias in interactive mode, and `/quit`/`/exit` bypass active streaming or
+  compaction queues instead of being sent to the model as normal prompts.
+- The Resources submenu now handles keyboard input correctly, so Escape/Ctrl+C can cancel nested resource
+  menus and the CLI resource selector shuts down through the normal TUI cleanup path.
+- Active-profile resource edits now compare resource filters by value, preserving the live extension
+  load/unload path for extension-only changes instead of falling back to an unnecessary full reload.
+- Model-router classification now keeps educational question prompts such as "how do I add..." or
+  "what does git commit do?" on the cheap research lane while preserving explicit change requests.
+- Model-router cheap-turn escalation now permits allowlisted read-only shell commands such as
+  `git status`, `git diff --stat`, `pwd`, and `npm view` without retrying on the expensive model.
+
 ## [0.80.80] - 2026-06-28
 
 ### Fixed

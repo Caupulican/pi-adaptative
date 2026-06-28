@@ -88,6 +88,7 @@ import { DefaultPackageManager } from "../../core/package-manager.ts";
 import { BUILT_IN_PROVIDER_DISPLAY_NAMES } from "../../core/provider-display-names.ts";
 import { getPendingReloadBlockers } from "../../core/reload-blockers.ts";
 import type { ResourceDiagnostic } from "../../core/resource-loader.ts";
+import { resourceProfileSettingsChangedKinds } from "../../core/resource-profile-equality.ts";
 import { formatMissingSessionCwdPrompt, MissingSessionCwdError } from "../../core/session-cwd.ts";
 import { isAutoLearnSessionId, type SessionContext, SessionManager } from "../../core/session-manager.ts";
 import type {
@@ -3085,6 +3086,12 @@ export class InteractiveMode {
 			text = text.trim();
 			if (!text) return;
 
+			if (text === "/quit" || text === "/exit") {
+				this.editor.setText("");
+				await this.shutdown();
+				return;
+			}
+
 			// A ">>" prefix queues the message as a follow-up (delivered after the
 			// current work finishes, starting the next round) instead of steering.
 			// This is the chord-free alternative to app.message.followUp, which many
@@ -3177,6 +3184,11 @@ export class InteractiveMode {
 			}
 			if (text === "/session") {
 				this.handleSessionCommand();
+				this.editor.setText("");
+				return;
+			}
+			if (text === "/usage" || text === "/cost") {
+				this.handleUsageCommand();
 				this.editor.setText("");
 				return;
 			}
@@ -3280,12 +3292,6 @@ export class InteractiveMode {
 				this.editor.setText("");
 				return;
 			}
-			if (text === "/quit") {
-				this.editor.setText("");
-				await this.shutdown();
-				return;
-			}
-
 			// Handle bash command (! for normal, !! for excluded from context)
 			if (text.startsWith("!")) {
 				const isExcluded = text.startsWith("!!");
@@ -5113,6 +5119,10 @@ export class InteractiveMode {
 		};
 	}
 
+	private getCurrentAutoLearnSettings(): Required<AutoLearnSettings> {
+		return this.getEffectiveAutoLearnSettings();
+	}
+
 	private getAutoLearnTenantKey(): string {
 		return `${this.sessionManager.getCwd()}::${this.session.sessionId}`;
 	}
@@ -6110,6 +6120,7 @@ export class InteractiveMode {
 					selfModificationScope: projectSettings.selfModification ? "project" : "global",
 					autonomy: this.settingsManager.getAutonomySettings(),
 					autonomyScope: projectSettings.autonomy ? "project" : "global",
+					modelRouter: this.settingsManager.getModelRouterSettings(),
 					autoLearn: this.settingsManager.getAutoLearnSettings(),
 					autoLearnScope: projectSettings.autoLearn ? "project" : "global",
 					autoLearnModelOptions: this.getAutoLearnModelOptions(),
@@ -6773,17 +6784,13 @@ export class InteractiveMode {
 						);
 						this.showStatus(`Saved profile "${profileName}" to ${currentScope}.`);
 						if (isActiveProfile) {
-							const extensionsChanged = originalResources.extensions !== resources.extensions;
-							const otherResourcesChanged =
-								originalResources.tools !== resources.tools ||
-								originalResources.skills !== resources.skills ||
-								originalResources.agents !== resources.agents ||
-								originalResources.prompts !== resources.prompts ||
-								originalResources.themes !== resources.themes;
-							if (extensionsChanged && !otherResourcesChanged) {
+							const changedKinds = resourceProfileSettingsChangedKinds(originalResources, resources);
+							if (changedKinds.size === 1 && changedKinds.has("extensions")) {
 								void this.reconcileExtensionsAndRefreshUI(profileName);
-							} else {
+							} else if (changedKinds.size > 0) {
 								void this.refreshAfterProfileMutation(profileName);
+							} else {
+								this.ui.requestRender();
 							}
 						}
 					} catch (error) {
@@ -8595,10 +8602,79 @@ export class InteractiveMode {
 		}
 		info += `${theme.fg("dim", "Total:")} ${stats.tokens.total.toLocaleString()}\n`;
 
-		if (stats.cost > 0) {
+		const dailyUsage = this.session.getDailyUsageTotals();
+		if (stats.cost > 0 || dailyUsage.totalCost > 0) {
 			info += `\n${theme.bold("Cost")}\n`;
-			info += `${theme.fg("dim", "Total:")} ${stats.cost.toFixed(4)}`;
+			info += `${theme.fg("dim", "Total:")} $${stats.cost.toFixed(4)}\n`;
+			info += `${this.session.getDailyUsageBreakdown((label) => theme.fg("dim", label))}`;
 		}
+
+		info += `\n\n${theme.bold("Model Router")}\n`;
+		info += this.session.getModelRouterStatus((label) => theme.fg("dim", label));
+
+		this.chatContainer.addChild(new Spacer(1));
+		this.chatContainer.addChild(new Text(info, 1, 0));
+		this.ui.requestRender();
+	}
+
+	private handleUsageCommand(): void {
+		const stats = this.session.getSessionStats();
+		const spawned = this.session.getSpawnedUsage();
+		const daily = this.session.getDailyUsageTotals();
+		const context = this.session.getContextUsage();
+		const autoLearn = this.getCurrentAutoLearnSettings();
+		const costGuard = this.session.getLastCostGuardDecision();
+
+		let info = `${theme.bold("Usage & Optimization")}\n\n`;
+		info += `${theme.bold("Session tokens")}\n`;
+		info += `${theme.fg("dim", "Input:")} ${stats.tokens.input.toLocaleString()}\n`;
+		info += `${theme.fg("dim", "Output:")} ${stats.tokens.output.toLocaleString()}\n`;
+		info += `${theme.fg("dim", "Cache read:")} ${stats.tokens.cacheRead.toLocaleString()}\n`;
+		info += `${theme.fg("dim", "Cache write:")} ${stats.tokens.cacheWrite.toLocaleString()}\n`;
+		info += `${theme.fg("dim", "Total:")} ${stats.tokens.total.toLocaleString()}\n\n`;
+
+		info += `${theme.bold("Cost")}\n`;
+		info += `${theme.fg("dim", "Session:")} $${stats.cost.toFixed(4)}\n`;
+		info += `${theme.fg("dim", "Spawned/background:")} $${spawned.cost.toFixed(4)} (${spawned.reports} reports)\n`;
+		info += `${theme.fg("dim", "Today:")} $${daily.totalCost.toFixed(4)}\n`;
+		info += `${theme.fg("dim", "Today own:")} $${daily.ownCost.toFixed(4)}\n`;
+		info += `${theme.fg("dim", "Today spawned/background:")} $${daily.spawnedCost.toFixed(4)}\n`;
+		info += `${theme.fg("dim", "Today tokens:")} ${daily.totalTokens.toLocaleString()}\n\n`;
+
+		info += `${theme.bold("Optimization state")}\n`;
+		const contextPercent = context?.percent;
+		const contextTokens = context?.tokens;
+		if (
+			context &&
+			contextPercent !== undefined &&
+			contextPercent !== null &&
+			contextTokens !== undefined &&
+			contextTokens !== null
+		) {
+			info += `${theme.fg("dim", "Context:")} ${contextPercent.toFixed(1)}% (${contextTokens.toLocaleString()}/${context.contextWindow.toLocaleString()})\n`;
+		} else {
+			info += `${theme.fg("dim", "Context:")} unknown until next provider usage sample\n`;
+		}
+		info += `${theme.fg("dim", "Auto-compaction:")} ${this.session.autoCompactionEnabled ? "enabled" : "disabled"}\n`;
+		if (costGuard) {
+			const status = costGuard.over ? "over" : "ok";
+			info += `${theme.fg("dim", "Cost guard:")} ${status} $${costGuard.estUsd.toFixed(4)}/$${costGuard.thresholdUsd.toFixed(4)} (${costGuard.action})\n`;
+		} else {
+			info += `${theme.fg("dim", "Cost guard:")} disabled\n`;
+		}
+		info += `${theme.fg("dim", "Auto Learn:")} ${autoLearn.enabled ? "enabled" : "disabled"}\n`;
+		info += `${theme.fg("dim", "Scavenger model:")} ${autoLearn.model || "active"}\n`;
+		info += `${theme.fg("dim", "Reflection review:")} ${autoLearn.reflectionReview ? "enabled" : "disabled"} (${autoLearn.reflectionMinToolCalls} tool-call trigger)\n`;
+		info += `${theme.fg("dim", "Auto Learn concurrency:")} ${autoLearn.maxConcurrentLearners} learner(s), ${autoLearn.cooldownMinutes}m cooldown\n\n`;
+
+		info += `${theme.bold("Model Router")}\n`;
+		info += `${this.session.getModelRouterStatus((label) => theme.fg("dim", label))}\n\n`;
+
+		info += `${theme.bold("Manual controls")}\n`;
+		info += `${theme.fg("dim", "/compact")}: compact the active context now\n`;
+		info += `${theme.fg("dim", "/settings")}: adjust Auto Learn, cost guard, compaction, and model-router config\n`;
+		info += `${theme.fg("dim", "/auto-learn status|run")}: inspect or launch background learning\n`;
+		info += `${theme.fg("dim", "context_audit")}: ask the agent to inspect provider-visible context contributors\n`;
 
 		this.chatContainer.addChild(new Spacer(1));
 		this.chatContainer.addChild(new Text(info, 1, 0));

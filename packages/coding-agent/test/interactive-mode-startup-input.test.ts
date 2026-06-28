@@ -12,6 +12,7 @@ type SubmitContext = {
 		addToHistory?: (text: string) => void;
 		setText: (text: string) => void;
 	};
+	shutdown: () => Promise<void>;
 	session: {
 		isCompacting: boolean;
 		isStreaming: boolean;
@@ -55,6 +56,7 @@ function createSubmitContext(): SubmitContext {
 			addToHistory: vi.fn(),
 			setText: vi.fn(),
 		},
+		shutdown: vi.fn(async () => {}),
 		session: {
 			isCompacting: false,
 			isStreaming: false,
@@ -110,6 +112,36 @@ describe("InteractiveMode startup input", () => {
 
 		expect(context.queueCompactionMessage).toHaveBeenCalledWith("/reload", "steer", undefined);
 		expect(context.session.prompt).not.toHaveBeenCalled();
+	});
+
+	it("treats /quit and /exit as local shutdown commands", async () => {
+		for (const command of ["/quit", "/exit"]) {
+			const context = createSubmitContext();
+			interactiveModePrototype.setupEditorSubmitHandler.call(context);
+
+			await context.defaultEditor.onSubmit?.(command);
+
+			expect(context.shutdown).toHaveBeenCalledTimes(1);
+			expect(context.session.prompt).not.toHaveBeenCalled();
+			expect(context.editor.setText).toHaveBeenCalledWith("");
+		}
+	});
+
+	it("lets /quit and /exit bypass steering and compaction queues", async () => {
+		for (const state of ["streaming", "compacting"] as const) {
+			for (const command of ["/quit", "/exit"]) {
+				const context = createSubmitContext();
+				context.session.isStreaming = state === "streaming";
+				context.session.isCompacting = state === "compacting";
+				interactiveModePrototype.setupEditorSubmitHandler.call(context);
+
+				await context.defaultEditor.onSubmit?.(command);
+
+				expect(context.shutdown).toHaveBeenCalledTimes(1);
+				expect(context.session.prompt).not.toHaveBeenCalled();
+				expect(context.queueCompactionMessage).not.toHaveBeenCalled();
+			}
+		}
 	});
 
 	it("returns queued startup input before installing a new input callback", async () => {
