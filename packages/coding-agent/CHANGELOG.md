@@ -1,3 +1,10 @@
+## [Unreleased]
+
+### Fixed
+
+- Long-session performance: the footer's spawned-cost total is now cached by entry count instead of re-scanning all session entries on every render frame, fixing typing lag and CPU spikes in long sessions.
+- Long-session stability: disposing a session now releases the hooks it installed on the shared agent (so the session and its history can be garbage-collected) and aborts any in-flight background reflection so it can't keep spending tokens or write memory/skills against a closed session.
+
 ## [0.80.71] - 2026-06-28
 
 ### Fixed

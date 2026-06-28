@@ -436,6 +436,12 @@ export class AgentSession {
 	private readonly _effectivenessTracker = new EffectivenessTracker();
 	/** R8: registry for deployment-supplied gateway channels + schedulers (lifecycle driven by the host runner). */
 	private readonly _gatewayRegistry = new GatewayRegistry();
+	/** Cache for getSpawnedUsage(), keyed by session entry count (Bug #22 — avoid O(N) per render frame). */
+	private _spawnedUsageCache?: { entryCount: number; totals: SpawnedUsageTotals };
+	/** Set on dispose so in-flight background reflection bails instead of writing to a dead session (Bug #21). */
+	private _disposed = false;
+	/** Aborts in-flight background reflection completions on dispose (Bug #21). */
+	private readonly _reflectionAbort = new AbortController();
 	private readonly _isChildSession: boolean;
 	/** Memory providers registered by extensions via pi.registerMemoryProvider, applied on (re)init. */
 	private _pendingMemoryProviders: MemoryProvider[] = [];
@@ -1039,6 +1045,15 @@ export class AgentSession {
 			this.agent.abort();
 			// R8: stop any deployment-registered gateway channels / schedulers.
 			void this._gatewayRegistry.stop().catch(() => {});
+			// Bug #21: abort any in-flight background reflection so it cannot keep spending tokens or
+			// write memory/skills against this now-disposed session.
+			this._disposed = true;
+			this._reflectionAbort.abort();
+			// Bug #20: clear the hooks this session installed on the shared agent so their closures stop
+			// pinning this (deactivated) session — and all its history/maps — in memory if the agent
+			// instance outlives the session.
+			this.agent.afterToolCall = undefined;
+			this.agent.transformContext = undefined;
 		} catch {
 			// Dispose must succeed even if an abort hook throws.
 		}
@@ -4051,8 +4066,14 @@ export class AgentSession {
 		return this.sessionManager.appendCustomEntry(SPAWNED_USAGE_CUSTOM_TYPE, report);
 	}
 
-	/** Aggregate all recorded spawned-usage reports (see {@link addSpawnedUsage}). */
+	/**
+	 * Aggregate all recorded spawned-usage reports (see {@link addSpawnedUsage}). Cached by the session
+	 * entry count so the interactive footer (which calls this every render frame) is O(1) between turns
+	 * instead of an O(N) scan on every keystroke (Bug #22). Recomputes only when entries change.
+	 */
 	getSpawnedUsage(): SpawnedUsageTotals {
+		const entryCount = this.sessionManager.getEntryCount?.() ?? this.sessionManager.getEntries().length;
+		if (this._spawnedUsageCache?.entryCount === entryCount) return this._spawnedUsageCache.totals;
 		let cost = 0;
 		let reports = 0;
 		for (const entry of this.sessionManager.getEntries()) {
@@ -4062,7 +4083,9 @@ export class AgentSession {
 			cost += data.usage.cost.total;
 			reports += 1;
 		}
-		return { cost, reports };
+		const totals: SpawnedUsageTotals = { cost, reports };
+		this._spawnedUsageCache = { entryCount, totals };
+		return totals;
 	}
 
 	/**
@@ -4150,9 +4173,15 @@ export class AgentSession {
 		/** Stable id so a duplicate scheduling/retry of the same pass can't double-count its cost. */
 		reportId?: string;
 	}): Promise<ReflectionResult | null> {
-		if (this._isChildSession) return null;
+		if (this._isChildSession || this._disposed) return null;
 		const plan = decideDemand(input.signals);
 		if (plan.act === "skip") return null;
+
+		// Bug #21: tie this background pass to the session lifetime. Disposing the session aborts the
+		// in-flight completion (input.signal can add a more specific abort).
+		const signal = input.signal
+			? AbortSignal.any([input.signal, this._reflectionAbort.signal])
+			: this._reflectionAbort.signal;
 
 		const complete = (systemPrompt: string, userPrompt: string) =>
 			this.runIsolatedCompletion({
@@ -4161,7 +4190,7 @@ export class AgentSession {
 				model: input.model,
 				thinkingLevel: input.thinkingLevel ?? "low",
 				maxTokens: plan.tokenBudget,
-				signal: input.signal,
+				signal,
 			});
 
 		const result = await new ReflectionEngine().reflect({
@@ -4173,8 +4202,12 @@ export class AgentSession {
 			complete,
 		});
 
+		// Bug #21: if the session was disposed while the completion was in flight, do NOT write memory
+		// or skills against the dead session.
+		if (this._disposed) return result;
+
 		for (const write of result.writes) {
-			await this._applyReflectionWrite(write, input.signal);
+			await this._applyReflectionWrite(write, signal);
 		}
 
 		// Account the reflection's spend so it surfaces in the footer roll-up (net-token visibility).
