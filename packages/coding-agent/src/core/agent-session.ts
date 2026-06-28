@@ -108,7 +108,7 @@ import type { MemoryProvider } from "./memory/memory-provider.ts";
 import { FileStoreProvider } from "./memory/providers/file-store.ts";
 import { TranscriptRecallProvider } from "./memory/providers/transcript-recall.ts";
 import { compactToolResultDetailsForRetention } from "./message-retention.ts";
-import type { BashExecutionMessage, CustomMessage } from "./messages.ts";
+import { type BashExecutionMessage, type CustomMessage, createCustomMessage } from "./messages.ts";
 import type { ModelRegistry } from "./model-registry.ts";
 import { resolveProfileModelSettings } from "./model-resolver.ts";
 import { expandPromptTemplate, type PromptTemplate } from "./prompt-templates.ts";
@@ -1561,7 +1561,13 @@ export class AgentSession {
 					if (recall) {
 						injectedRecall = recall;
 						recallQuery = expandedText;
-						messages.push({ role: "user", content: [{ type: "text", text: recall }], timestamp: Date.now() });
+						// Inject as a GC-managed custom context message (role "custom", customType
+						// "memory_context"), NOT a persisted user message: the semantic-memory context-GC packs
+						// stale recall pages so they don't accumulate forever (Bug #7), and the transcript index
+						// only re-reads user/assistant text so recalled snippets can't recirculate (Bug #10).
+						messages.push(
+							createCustomMessage("memory_context", recall, false, undefined, new Date().toISOString()),
+						);
 					}
 				} catch {
 					// recall must never break a turn

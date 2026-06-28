@@ -1,3 +1,19 @@
+## [Unreleased]
+
+### Fixed
+
+- Cross-session recall hardening: recalled past-session pages are now injected as a GC-managed
+  `<memory_context>` block (instead of a plain user message), so stale recall pages pack down over long
+  sessions instead of accumulating verbatim; oversize transcript logs are skipped before parsing; and
+  recall is scoped to the current working directory so transcripts from other projects can't leak in.
+- Memory injection cost guard: the persistent-memory block (`MEMORY.md`/`USER.md`) injected into the
+  system prompt is now capped at read time as well as on write, so a memory file bloated by an external
+  edit can no longer inflate every turn's context. The file on disk is untouched and truncation is noted.
+- Background reflection debounce (cost guard): native end-of-turn reflection no longer launches
+  overlapping or back-to-back passes during a rapid multi-turn correction session; a minimum interval and
+  an in-flight guard prevent redundant background model calls. Skipped corrections are still reflected on
+  the next eligible pass over the accumulated turn text.
+
 ## [0.80.72] - 2026-06-28
 
 ### Fixed

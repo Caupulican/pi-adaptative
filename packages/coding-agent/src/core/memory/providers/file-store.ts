@@ -109,8 +109,17 @@ export class FileStoreProvider implements MemoryProvider {
 			return sanitizedLines.join("\n");
 		};
 
-		const mem = sanitize(this.lastWrittenMemory);
-		const usr = sanitize(this.lastWrittenUser);
+		// Read-time budget guard (cost): the memory tool already caps writes at BUDGET_*, but a file edited
+		// externally (or by any path that bypasses the tool) could be arbitrarily large and would then
+		// bloat the system prompt on EVERY turn. Cap the injected view to the same budget so the per-turn
+		// cost stays bounded; the file on disk is untouched and the model is told it was truncated.
+		const cap = (content: string, limit: number) => {
+			if (content.length <= limit) return content;
+			return `${content.slice(0, limit)}\n[…truncated to ${limit} chars for the prompt; full file is on disk]`;
+		};
+
+		const mem = cap(sanitize(this.lastWrittenMemory), FileStoreProvider.BUDGET_MEMORY);
+		const usr = cap(sanitize(this.lastWrittenUser), FileStoreProvider.BUDGET_USER);
 
 		const blocks: string[] = [];
 		if (mem.trim()) {

@@ -132,6 +132,13 @@ export interface AgentLoopTurnUpdate {
 
 export interface PrepareNextTurnContext extends ShouldStopAfterTurnContext {}
 
+/**
+ * Default runaway-loop backstop: a single identical tool-call signature recurring this many times
+ * within a sliding window (2×) stops the loop. Generous enough that legitimate long/varied work never
+ * trips it, but bounds the cost of a model wedged repeating one failing call forever.
+ */
+export const DEFAULT_MAX_STALL_TURNS = 12;
+
 export interface AgentLoopConfig extends SimpleStreamOptions {
 	model: Model<any>;
 
@@ -206,6 +213,23 @@ export interface AgentLoopConfig extends SimpleStreamOptions {
 	 * Contract: must not throw or reject. Throwing interrupts the low-level agent loop without producing a normal event sequence.
 	 */
 	shouldStopAfterTurn?: (context: ShouldStopAfterTurnContext) => boolean | Promise<boolean>;
+
+	/**
+	 * Runaway-loop backstop. A model stuck repeating the SAME tool call (identical name + arguments) —
+	 * because a tool keeps erroring, or it is confused/oscillating — makes no progress yet keeps
+	 * consuming tokens indefinitely (history grows every turn). This bounds that cost: if one tool-call
+	 * signature recurs at least this many times within a sliding window (2×), the loop stops gracefully
+	 * (emits `agent_end`). It counts ONLY turns that issued tool calls and keys on exact name+arguments,
+	 * so legitimate long or varied agentic work never trips it. `0` disables the backstop.
+	 * Default: {@link DEFAULT_MAX_STALL_TURNS}.
+	 */
+	maxStallTurns?: number;
+
+	/**
+	 * Observability hook fired once if the {@link maxStallTurns} runaway backstop trips, just before the
+	 * loop stops. Lets the host surface/log why the run ended. Must not throw.
+	 */
+	onRunawayStop?: (info: { signature: string; repeats: number }) => void;
 
 	/**
 	 * Called after `turn_end` and before the loop decides whether another provider request should start.

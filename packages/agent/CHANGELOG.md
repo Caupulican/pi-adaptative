@@ -1,3 +1,12 @@
+## [Unreleased]
+
+### Added
+
+- Runaway-loop backstop (cost guard): the core agent loop now stops gracefully when a model gets wedged
+  repeating the same tool call (identical name + arguments) — a no-progress state that otherwise spends
+  tokens unbounded. Configurable via `maxStallTurns` (default 12) with an `onRunawayStop` hook; keyed on
+  a sliding window of exact tool-call signatures so legitimate long or varied work never trips it.
+
 ## [0.80.72] - 2026-06-28
 
 ## [0.80.71] - 2026-06-28

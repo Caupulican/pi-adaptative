@@ -9,7 +9,7 @@
  */
 
 import { readdirSync, statSync } from "node:fs";
-import { join } from "node:path";
+import { join, resolve } from "node:path";
 import { wrapUntrustedText } from "../../security/untrusted-boundary.ts";
 import {
 	type FileEntry,
@@ -26,6 +26,9 @@ const MAX_SESSIONS = 60;
 const MAX_DOC_CHARS = 8_000;
 /** Overall corpus cap across all docs. */
 const MAX_TOTAL_CHARS = 500_000;
+/** Skip transcript files larger than this before parsing them, so a huge log can't block/bloat the
+ * first recalled turn (Bug #9). Far above a normal session; only pathological logs exceed it. */
+const MAX_FILE_BYTES = 8_000_000;
 
 export class TranscriptRecallProvider implements MemoryProvider {
 	readonly name = "transcript-recall";
@@ -104,11 +107,15 @@ export class TranscriptRecallProvider implements MemoryProvider {
 				.map((f) => {
 					const path = join(dir, f);
 					let mtime = 0;
+					let size = 0;
 					try {
-						mtime = statSync(path).mtimeMs;
+						const st = statSync(path);
+						mtime = st.mtimeMs;
+						size = st.size;
 					} catch {}
-					return { path, mtime };
+					return { path, mtime, size };
 				})
+				.filter((f) => f.size > 0 && f.size <= MAX_FILE_BYTES) // skip oversize logs before parse (Bug #9)
 				.sort((a, b) => b.mtime - a.mtime) // most-recent first
 				.slice(0, MAX_SESSIONS);
 		} catch {
@@ -126,6 +133,9 @@ export class TranscriptRecallProvider implements MemoryProvider {
 			const header = entries.find((e): e is Extract<FileEntry, { type: "session" }> => e.type === "session");
 			const sessionId = header?.id;
 			if (!sessionId || sessionId === this.currentSessionId || isAutoLearnSessionId(sessionId)) continue;
+			// Privacy: only recall from sessions that ran in THIS working directory. A misplaced/copied
+			// transcript with a different cwd must not leak across project boundaries (Bug #11).
+			if (header?.cwd && resolve(header.cwd) !== resolve(this.cwd)) continue;
 
 			const text = extractSessionText(entries, MAX_DOC_CHARS);
 			if (!text.trim()) continue;

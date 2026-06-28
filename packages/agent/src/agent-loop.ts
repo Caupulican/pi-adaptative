@@ -21,6 +21,7 @@ import type {
 	AgentToolResult,
 	StreamFn,
 } from "./types.ts";
+import { DEFAULT_MAX_STALL_TURNS } from "./types.ts";
 
 export type AgentEventSink = (event: AgentEvent) => Promise<void> | void;
 
@@ -163,6 +164,12 @@ async function runLoop(
 	let currentContext = initialContext;
 	let config = initialConfig;
 	let firstTurn = true;
+	// Runaway-loop backstop state: a sliding window of recent tool-call signatures. A model wedged
+	// repeating the SAME call (identical name+args) makes no progress but keeps spending tokens; if one
+	// signature recurs `stallLimit` times within the window we stop gracefully. Counts only turns that
+	// issued tool calls and keys on exact args, so varied/long work never trips it. `0` disables.
+	const stallLimit = config.maxStallTurns ?? DEFAULT_MAX_STALL_TURNS;
+	const stallWindow: string[] = [];
 	// Check for steering messages at start (user may have typed while waiting)
 	let pendingMessages: AgentMessage[] = (await config.getSteeringMessages?.()) || [];
 
@@ -216,6 +223,19 @@ async function runLoop(
 			}
 
 			await emit({ type: "turn_end", message, toolResults });
+
+			// Runaway-loop backstop (cost guard): detect a model stuck repeating one tool call.
+			if (stallLimit > 0 && toolCalls.length > 0) {
+				const signature = JSON.stringify(toolCalls.map((c) => [c.name, c.arguments ?? null]));
+				stallWindow.push(signature);
+				if (stallWindow.length > stallLimit * 2) stallWindow.shift();
+				const repeats = stallWindow.reduce((n, s) => (s === signature ? n + 1 : n), 0);
+				if (repeats >= stallLimit) {
+					config.onRunawayStop?.({ signature, repeats });
+					await emit({ type: "agent_end", messages: newMessages });
+					return;
+				}
+			}
 
 			const nextTurnContext = {
 				message,

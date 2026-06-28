@@ -671,6 +671,13 @@ export class InteractiveMode {
 	private pendingClipboardImages: PendingClipboardImage[] = [];
 	private clipboardImageCounter = 0;
 	private loadingAnimation: Loader | undefined = undefined;
+	// Native-reflection debounce: prevents back-to-back/overlapping background reflection passes (cost
+	// guard). `_nativeReflectionInFlight` blocks a second pass while one runs; `_lastNativeReflectionAt`
+	// enforces a minimum gap between passes. Skipped corrections aren't lost — the next eligible pass
+	// reflects over the accumulated turn text.
+	private _nativeReflectionInFlight = false;
+	private _lastNativeReflectionAt = 0;
+	private static readonly NATIVE_REFLECTION_MIN_INTERVAL_MS = 45_000;
 	private workingMessage: string | undefined = undefined;
 	private workingVisible = true;
 	private workingIndicatorOptions: LoaderIndicatorOptions | undefined = undefined;
@@ -5772,6 +5779,14 @@ export class InteractiveMode {
 	private maybeRunNativeReflection(messages: AgentMessage[]): void {
 		if (!this.isNativeReflectionEnabled()) return;
 
+		// Debounce (cost guard): never run two background reflection passes at once, and never start one
+		// within the min interval of the last — a multi-turn correction session would otherwise spawn
+		// overlapping passes that re-reason the same task. The accumulated turn text is still reflected
+		// on the next eligible pass, so no learning is dropped.
+		if (this._nativeReflectionInFlight) return;
+		const now = Date.now();
+		if (now - this._lastNativeReflectionAt < InteractiveMode.NATIVE_REFLECTION_MIN_INTERVAL_MS) return;
+
 		const settings = this.getEffectiveAutoLearnSettings();
 		const toolCallCount = this.countAgentToolCalls(messages);
 		const contextPercent = this.session.getContextUsage()?.percent ?? 0;
@@ -5810,6 +5825,8 @@ export class InteractiveMode {
 		// (authed) models — falls back to the session model when unset or unavailable.
 		const { model, thinkingLevel } = this._resolveReflectionModel(settings);
 
+		this._nativeReflectionInFlight = true;
+		this._lastNativeReflectionAt = now;
 		void this.session
 			.runReflectionPass({
 				signals: { trigger, toolCallCount, hadCorrection, contextHeadroomPct, usefulLately: 0 },
@@ -5820,6 +5837,9 @@ export class InteractiveMode {
 			})
 			.catch(() => {
 				// best-effort background learning; never disrupt the session
+			})
+			.finally(() => {
+				this._nativeReflectionInFlight = false;
 			});
 	}
 
