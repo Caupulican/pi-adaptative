@@ -874,6 +874,29 @@ Content`,
 			expect(skills.some((s) => s.name === "ext-skill")).toBe(true);
 		});
 
+		it("getDiscoverableExtensionPaths includes external-root extensions (so the profile editor can block them)", async () => {
+			// Regression: external-root extensions were LOADED but absent from the discoverable universe, so
+			// the profile editor showed "(none available)" while they ran and could not be blocked per-profile.
+			const settingsManager = SettingsManager.create(cwd, agentDir);
+			const extRoot = join(tempDir, "ext-root-disc");
+			const extDir = join(extRoot, "extensions", "my-ext");
+			mkdirSync(extDir, { recursive: true });
+			writeFileSync(join(extDir, "index.ts"), "export default (pi) => {};");
+			settingsManager.setExternalResourceRoots([extRoot], "global");
+			settingsManager.addTrustedResourceRoot(extRoot, "global");
+			await settingsManager.flush();
+
+			const loader = new DefaultResourceLoader({ cwd, agentDir, settingsManager });
+			await loader.reload();
+
+			// Loaded AND discoverable (editor universe) — the two must agree.
+			expect(loader.getExtensions().extensions.some((e) => e.path.includes(join("extensions", "my-ext")))).toBe(
+				true,
+			);
+			const discoverable = await loader.getDiscoverableExtensionPaths();
+			expect(discoverable.some((p) => p.includes(join("extensions", "my-ext")))).toBe(true);
+		});
+
 		it("should silently ignore missing paths", async () => {
 			const settingsManager = SettingsManager.create(cwd, agentDir);
 			const extRoot = join(tempDir, "non-existent-ext-root");

@@ -1,5 +1,12 @@
 ## [Unreleased]
 
+### Fixed
+
+- Resource-profile editor now lists extensions installed under external resource roots. Previously these
+  extensions were loaded and active but missing from the editor's "available" list, so it showed "(none
+  available)" while they ran and they couldn't be blocked or allowed per profile. The editor's universe
+  and the loaded set now come from a single discovery source, so they always match.
+
 ## [0.80.79] - 2026-06-28
 
 ### Changed

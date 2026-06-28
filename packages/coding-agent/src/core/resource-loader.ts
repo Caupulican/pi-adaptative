@@ -514,7 +514,10 @@ export class DefaultResourceLoader implements ResourceLoader {
 		const cliExtensionPaths = await this.packageManager.resolveExtensionSources(this.additionalExtensionPaths, {
 			temporary: true,
 		});
-		// Return all paths (enabled and disabled) from both resolved and CLI sources
+		// Return all paths (enabled and disabled) from resolved, CLI, AND external-resource-root sources.
+		// External-root extensions are loaded just like the others (see reload), so they MUST appear in the
+		// profile editor's universe too — otherwise they're active but unblockable, and the editor wrongly
+		// shows "(none available)" while they run (bug: external extensions invisible to the profile editor).
 		const allPaths = new Set<string>();
 		for (const resource of resolvedPaths.extensions) {
 			allPaths.add(resource.path);
@@ -522,7 +525,47 @@ export class DefaultResourceLoader implements ResourceLoader {
 		for (const resource of cliExtensionPaths.extensions) {
 			allPaths.add(resource.path);
 		}
+		for (const p of this.discoverExternalExtensionPaths()) {
+			allPaths.add(p);
+		}
 		return Array.from(allPaths);
+	}
+
+	/**
+	 * Discover extension directories under every external resource root (`<root>/extensions/<name>` with an
+	 * index.ts/index.js/package.json). Single source of truth shared by the load path and the profile
+	 * editor's universe so the two never diverge.
+	 */
+	private discoverExternalExtensionPaths(): string[] {
+		const out: string[] = [];
+		for (const root of this.settingsManager.getEffectiveExternalResourceRoots()) {
+			const extDir = join(root, "extensions");
+			if (!existsSync(extDir)) continue;
+			try {
+				for (const entry of readdirSync(extDir, { withFileTypes: true })) {
+					let isDir = entry.isDirectory();
+					if (entry.isSymbolicLink()) {
+						try {
+							isDir = statSync(join(extDir, entry.name)).isDirectory();
+						} catch {
+							continue;
+						}
+					}
+					if (!isDir) continue;
+					const entryPath = join(extDir, entry.name);
+					if (
+						existsSync(join(entryPath, "index.ts")) ||
+						existsSync(join(entryPath, "index.js")) ||
+						existsSync(join(entryPath, "package.json"))
+					) {
+						out.push(entryPath);
+					}
+				}
+			} catch {
+				// silent — a missing/unreadable root must not break discovery
+			}
+		}
+		return out;
 	}
 
 	/**
@@ -764,39 +807,10 @@ export class DefaultResourceLoader implements ResourceLoader {
 			const filterPathsByProfile = (paths: string[], kind: ResourceProfileKind): string[] =>
 				this.filterPathsByProfile(paths, kind);
 
-			// Discover external extensions
-			const externalExtensions: string[] = [];
-			for (const root of effectiveRoots) {
-				const extDir = join(root, "extensions");
-				if (existsSync(extDir)) {
-					try {
-						const entries = readdirSync(extDir, { withFileTypes: true });
-						for (const entry of entries) {
-							let isDir = entry.isDirectory();
-							if (entry.isSymbolicLink()) {
-								try {
-									const stats = statSync(join(extDir, entry.name));
-									isDir = stats.isDirectory();
-								} catch {
-									continue;
-								}
-							}
-							if (isDir) {
-								const entryPath = join(extDir, entry.name);
-								if (
-									existsSync(join(entryPath, "index.ts")) ||
-									existsSync(join(entryPath, "index.js")) ||
-									existsSync(join(entryPath, "package.json"))
-								) {
-									externalExtensions.push(entryPath);
-									metadataByPath.set(entryPath, { source: "external", scope: "user", origin: "top-level" });
-								}
-							}
-						}
-					} catch {
-						// silent
-					}
-				}
+			// Discover external extensions (same source the profile editor uses, so they stay in sync).
+			const externalExtensions = this.discoverExternalExtensionPaths();
+			for (const entryPath of externalExtensions) {
+				metadataByPath.set(entryPath, { source: "external", scope: "user", origin: "top-level" });
 			}
 
 			const extensionPaths = this.noExtensions
