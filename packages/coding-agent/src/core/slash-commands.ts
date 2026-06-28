@@ -41,6 +41,7 @@ export const BUILTIN_SLASH_COMMANDS: ReadonlyArray<BuiltinSlashCommand> = [
 	{ name: "logout", description: "Remove provider authentication" },
 	{ name: "new", description: "Start a new session (optional name: /new <name>)" },
 	{ name: "compact", description: "Manually compact the session context" },
+	{ name: "curate", description: "Review/archive stale or overlapping reflection-promoted skills" },
 	{ name: "resume", description: "Resume a different session" },
 	{ name: "reload", description: "Reload keybindings, extensions, skills, prompts, and themes" },
 	{

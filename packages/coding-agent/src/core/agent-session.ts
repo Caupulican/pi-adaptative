@@ -104,6 +104,7 @@ import {
 	type ReflectionResult,
 	type ReflectionWrite,
 } from "./learning/reflection-engine.ts";
+import { type CurationProposals, isPromotedFrontmatter, SkillCurator } from "./learning/skill-curator.ts";
 import { EffectivenessTracker } from "./memory/effectiveness-tracker.ts";
 import { MemoryManager } from "./memory/memory-manager.ts";
 import type { MemoryProvider } from "./memory/memory-provider.ts";
@@ -450,6 +451,8 @@ export class AgentSession {
 	private _lastCostGuardDecision?: CostGuardDecision;
 	/** One-shot latch so the cost guard downgrades reasoning once per over-threshold episode, not every call. */
 	private _costGuardDowngraded = false;
+	/** Lazily-built skill curator (#32) over `<agentDir>/skills`. */
+	private _skillCuratorInstance?: SkillCurator;
 	/** Set on dispose so in-flight background reflection bails instead of writing to a dead session (Bug #21). */
 	private _disposed = false;
 	/** Aborts in-flight background reflection completions on dispose (Bug #21). */
@@ -669,6 +672,31 @@ export class AgentSession {
 	/** Latest cost-guard decision (for the host footer/UI to surface a warning). Undefined if disabled. */
 	getLastCostGuardDecision(): CostGuardDecision | undefined {
 		return this._lastCostGuardDecision;
+	}
+
+	private get _skillCurator(): SkillCurator {
+		if (!this._skillCuratorInstance) {
+			this._skillCuratorInstance = new SkillCurator(join(this._agentDir, "skills"));
+		}
+		return this._skillCuratorInstance;
+	}
+
+	/**
+	 * Skill curator (#32): PROPOSE (never auto-apply) archival of stale reflection-promoted skills and
+	 * consolidation of overlapping ones. The host surfaces these (e.g. a `/curate` command) for approval.
+	 */
+	proposeSkillCuration(options?: { staleDays?: number; overlapThreshold?: number }): CurationProposals {
+		return this._skillCurator.proposeCuration(Date.now(), options);
+	}
+
+	/** Archive a promoted skill into `skills/.archive/` (restorable, non-destructive). Returns true if moved. */
+	archivePromotedSkill(name: string): boolean {
+		return this._skillCurator.archiveSkill(name);
+	}
+
+	/** Restore a previously-archived promoted skill. Returns true if moved back. */
+	restorePromotedSkill(name: string): boolean {
+		return this._skillCurator.restoreSkill(name);
 	}
 
 	private _installAgentTurnRefresh(): void {
@@ -1782,6 +1810,11 @@ export class AgentSession {
 
 		try {
 			const content = readFileSync(skill.filePath, "utf-8");
+			// Curator (#32): record use of a reflection-PROMOTED skill so stale ones can later be proposed
+			// for archival. Only promoted skills carry the marker, so hand-authored skills are untouched.
+			if (isPromotedFrontmatter(content)) {
+				this._skillCurator.recordUse(skill.name, Date.now());
+			}
 			const body = stripResourceProfileBlocks(stripFrontmatter(content)).trim();
 			const skillBlock = `<skill name="${skill.name}" location="${skill.filePath}">\nReferences are relative to ${skill.baseDir}.\n\n${body}\n</skill>`;
 			return args ? `${skillBlock}\n\n${args}` : skillBlock;

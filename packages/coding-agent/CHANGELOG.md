@@ -1,5 +1,13 @@
 ## [Unreleased]
 
+### Added
+
+- Skill curator (`/curate`): reflection-promoted skills are now usage-tracked and can be reviewed instead
+  of accumulating forever. `/curate` lists stale/unused promoted skills proposed for (restorable)
+  archival and overlapping pairs proposed for consolidation; `/curate archive <name>` and
+  `/curate restore <name>` apply them. Propose-only — nothing is archived or merged automatically, and
+  hand-authored skills are never touched.
+
 ## [0.80.76] - 2026-06-28
 
 ### Added

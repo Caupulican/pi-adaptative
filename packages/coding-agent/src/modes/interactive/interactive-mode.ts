@@ -3221,6 +3221,12 @@ export class InteractiveMode {
 				await this.handleReloadCommand();
 				return;
 			}
+			if (text === "/curate" || text.startsWith("/curate ")) {
+				const args = text.slice("/curate".length).trim();
+				this.editor.setText("");
+				this.handleCurateCommand(args);
+				return;
+			}
 			if (text === "/install-resources" || text.startsWith("/install-resources ")) {
 				const args = text.slice("/install-resources".length).trim();
 				this.editor.setText("");
@@ -8869,6 +8875,43 @@ export class InteractiveMode {
 		} catch (error) {
 			this.showError(error instanceof Error ? error.message : String(error));
 		}
+	}
+
+	/**
+	 * `/curate` — skill curator (#32). With no args, lists reflection-promoted skills proposed for
+	 * archival (stale/unused) and pairs proposed for consolidation (overlapping). PROPOSE-ONLY: the user
+	 * applies actions explicitly via `/curate archive <name>` / `/curate restore <name>`. Never touches
+	 * hand-authored skills; archival is restorable.
+	 */
+	private handleCurateCommand(args: string): void {
+		const [sub, name] = args.split(/\s+/, 2);
+		if (sub === "archive" && name) {
+			this.showStatus(
+				this.session.archivePromotedSkill(name)
+					? `Archived promoted skill '${name}'`
+					: `Could not archive '${name}' (not a promoted skill?)`,
+			);
+			return;
+		}
+		if (sub === "restore" && name) {
+			this.showStatus(
+				this.session.restorePromotedSkill(name) ? `Restored skill '${name}'` : `Could not restore '${name}'`,
+			);
+			return;
+		}
+		const proposals = this.session.proposeSkillCuration();
+		if (proposals.archive.length === 0 && proposals.consolidate.length === 0) {
+			this.showStatus("Curator: no stale or overlapping promoted skills. Nothing to propose.");
+			return;
+		}
+		const lines: string[] = ["Skill curator proposals (nothing applied automatically):"];
+		for (const a of proposals.archive) {
+			lines.push(`  • archive '${a.name}' — ${a.reason}  →  /curate archive ${a.name}`);
+		}
+		for (const c of proposals.consolidate) {
+			lines.push(`  • consider merging '${c.names[0]}' + '${c.names[1]}' (overlap ${(c.overlap * 100) | 0}%)`);
+		}
+		this.showStatus(lines.join("\n"));
 	}
 
 	private async handleConfigBackupCommand(fileArg?: string): Promise<void> {
