@@ -1,5 +1,9 @@
 ## [Unreleased]
 
+### Fixed
+
+- Reflection cost de-duplication now works on the real turn path: the per-turn key was derived from a message id that doesn't exist at runtime, so a retried/duplicate reflection pass could double-count its cost. It now uses the turn's timestamp + size.
+
 ## [0.80.69] - 2026-06-28
 
 ### Added

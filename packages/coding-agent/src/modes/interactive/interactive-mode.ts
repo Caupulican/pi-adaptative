@@ -5799,8 +5799,12 @@ export class InteractiveMode {
 			.join("\n");
 
 		// Stable per-turn id so a duplicate scheduling/retry can't double-count the reflection cost.
-		const lastId = (messages[messages.length - 1] as unknown as { id?: string })?.id;
-		const reportId = lastId ? `reflection:${lastId}` : undefined;
+		// Messages carry no `id` on the real path (only timestamps), so derive the key from the last
+		// message's timestamp + the turn size — present on every real turn, stable across a retry of the
+		// same agent_end, and distinct between turns. Falls back to a content signature if needed.
+		const last = messages[messages.length - 1] as unknown as { id?: string; timestamp?: number | string };
+		const turnKey = last?.id ?? (last?.timestamp != null ? `${last.timestamp}:${recentTurnText.length}` : undefined);
+		const reportId = turnKey ? `reflection:${turnKey}` : undefined;
 
 		// User-configurable reflection model + thinking (auto-learn settings), restricted to AVAILABLE
 		// (authed) models — falls back to the session model when unset or unavailable.
