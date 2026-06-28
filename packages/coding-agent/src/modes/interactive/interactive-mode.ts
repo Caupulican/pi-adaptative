@@ -5751,6 +5751,24 @@ export class InteractiveMode {
 	 * warranted, run the in-process {@link AgentSession.runReflectionPass} as a fire-and-forget
 	 * background microtask. No subprocess, no blocking of the UI.
 	 */
+	/**
+	 * Resolve the model + thinking level the native reflection pass should use, from auto-learn
+	 * settings (`model`, `thinkingLevel`). The configured model is honored only when its provider is
+	 * AVAILABLE (api key / logged in) — otherwise we fall back to the session model (undefined). This
+	 * lets the user pick a balanced/cheaper reflection model without risking an unusable one.
+	 */
+	private _resolveReflectionModel(settings: Required<AutoLearnSettings>) {
+		let model: Model<any> | undefined;
+		if (settings.model && settings.model !== "active") {
+			const resolved = resolveCliModel({ cliModel: settings.model, modelRegistry: this.session.modelRegistry });
+			if (resolved.model && this.session.modelRegistry.hasConfiguredAuth(resolved.model)) {
+				model = resolved.model;
+			}
+		}
+		const thinkingLevel = settings.thinkingLevel ?? "low";
+		return { model, thinkingLevel };
+	}
+
 	private maybeRunNativeReflection(messages: AgentMessage[]): void {
 		if (!this.isNativeReflectionEnabled()) return;
 
@@ -5784,11 +5802,17 @@ export class InteractiveMode {
 		const lastId = (messages[messages.length - 1] as unknown as { id?: string })?.id;
 		const reportId = lastId ? `reflection:${lastId}` : undefined;
 
+		// User-configurable reflection model + thinking (auto-learn settings), restricted to AVAILABLE
+		// (authed) models — falls back to the session model when unset or unavailable.
+		const { model, thinkingLevel } = this._resolveReflectionModel(settings);
+
 		void this.session
 			.runReflectionPass({
 				signals: { trigger, toolCallCount, hadCorrection, contextHeadroomPct, usefulLately: 0 },
 				recentTurnText,
 				reportId,
+				model,
+				thinkingLevel,
 			})
 			.catch(() => {
 				// best-effort background learning; never disrupt the session

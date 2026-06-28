@@ -1,5 +1,9 @@
 ## [Unreleased]
 
+### Added
+
+- Configurable reflection model: the native reflection engine now uses the `autoLearn.model` / `autoLearn.thinkingLevel` settings (a `--model` pattern, e.g. a balanced or cheaper model) instead of always using the session model. The configured model is honored only when its provider is available (api key / logged in); otherwise it falls back to the session model.
+
 ## [0.80.68] - 2026-06-27
 
 ### Added
