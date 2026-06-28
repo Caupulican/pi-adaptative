@@ -151,6 +151,29 @@ function createAgentStream(): EventStream<AgentEvent, AgentMessage[]> {
 }
 
 /**
+ * How many `stallLimit`-length periods the runaway-loop window spans. A window of `stallLimit * P`
+ * turns lets the count-based detector catch oscillating cycles of period up to `P` (each signature in a
+ * period-k cycle recurs ~window/k times), not just back-to-back repeats. Beyond this the cycle is loose
+ * enough that it's indistinguishable from legitimate varied work, so we don't chase it.
+ */
+const STALL_WINDOW_PERIODS = 4;
+
+/**
+ * Normalize a tool-call batch into a stable signature for runaway-loop detection. Volatile argument
+ * tokens — epoch/timestamps, UUIDs, long hashes/nonces — are masked so a model retrying the SAME call
+ * with a fresh timestamp/id each turn still collapses to one signature and is detected (bug #28). Only
+ * clearly-volatile patterns are masked: short numbers (`file2.ts`, `line 42`, `count: 3`) are kept so
+ * genuinely-distinct calls (reading numbered files, different line ranges) are NOT falsely merged.
+ */
+function normalizeToolSignature(pairs: Array<[string, unknown]>): string {
+	return JSON.stringify(pairs)
+		.replace(/[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}/gi, "<uuid>")
+		.replace(/\d{4}-\d{2}-\d{2}[tT][0-9:.]+(?:z|[+-]\d{2}:?\d{2})?/gi, "<ts>")
+		.replace(/\b[0-9a-f]{16,}\b/gi, "<hex>")
+		.replace(/\d{10,}/g, "<num>");
+}
+
+/**
  * Main loop logic shared by agentLoop and agentLoopContinue.
  */
 async function runLoop(
@@ -164,10 +187,15 @@ async function runLoop(
 	let currentContext = initialContext;
 	let config = initialConfig;
 	let firstTurn = true;
-	// Runaway-loop backstop state: a sliding window of recent tool-call signatures. A model wedged
-	// repeating the SAME call (identical name+args) makes no progress but keeps spending tokens; if one
-	// signature recurs `stallLimit` times within the window we stop gracefully. Counts only turns that
-	// issued tool calls and keys on exact args, so varied/long work never trips it. `0` disables.
+	// Runaway-loop backstop state: a sliding window of recent NORMALIZED tool-call signatures. A model
+	// wedged repeating the same action makes no progress but keeps spending tokens; if one signature
+	// recurs `stallLimit` times within the window we stop gracefully. Signatures are normalized so
+	// volatile args (timestamps/UUIDs/nonces that change every call) can't disguise an otherwise-
+	// identical call (bug #28). The window spans `stallLimit * STALL_WINDOW_PERIODS` turns so periodic
+	// oscillation is caught too, not just back-to-back repeats: a cycle of period P repeats each
+	// signature ~window/P times, so any P up to STALL_WINDOW_PERIODS reaches the threshold before the
+	// window slides past it. Counts only turns that issued tool calls, so varied/long work never trips
+	// it. `0` disables.
 	const stallLimit = config.maxStallTurns ?? DEFAULT_MAX_STALL_TURNS;
 	const stallWindow: string[] = [];
 	// Check for steering messages at start (user may have typed while waiting)
@@ -224,11 +252,11 @@ async function runLoop(
 
 			await emit({ type: "turn_end", message, toolResults });
 
-			// Runaway-loop backstop (cost guard): detect a model stuck repeating one tool call.
+			// Runaway-loop backstop (cost guard): detect a model stuck repeating one action.
 			if (stallLimit > 0 && toolCalls.length > 0) {
-				const signature = JSON.stringify(toolCalls.map((c) => [c.name, c.arguments ?? null]));
+				const signature = normalizeToolSignature(toolCalls.map((c) => [c.name, c.arguments ?? null]));
 				stallWindow.push(signature);
-				if (stallWindow.length > stallLimit * 2) stallWindow.shift();
+				if (stallWindow.length > stallLimit * STALL_WINDOW_PERIODS) stallWindow.shift();
 				const repeats = stallWindow.reduce((n, s) => (s === signature ? n + 1 : n), 0);
 				if (repeats >= stallLimit) {
 					config.onRunawayStop?.({ signature, repeats });

@@ -164,4 +164,84 @@ describe("runaway-loop backstop", () => {
 		expect(stalls).toHaveLength(0); // varied args never trip the backstop
 		expect(events.filter((e) => e.type === "agent_end")).toHaveLength(1);
 	});
+
+	it("trips when only a volatile arg (timestamp) changes each call (bug #28)", async () => {
+		const context: AgentContext = { systemPrompt: "", messages: [], tools: [echoTool] };
+		const stalls: Array<{ signature: string; repeats: number }> = [];
+		let n = 0;
+
+		// Same logical call, but with a fresh epoch-ms timestamp baked into the args every turn — a naive
+		// exact-match detector would never see a repeat. Normalization must collapse these to one signature.
+		const streamFn = () => {
+			const stream = new MockAssistantStream();
+			queueMicrotask(() => {
+				n++;
+				const ts = 1_700_000_000_000 + n * 1234; // changing 13-digit epoch ms
+				stream.push({
+					type: "done",
+					reason: "toolUse",
+					message: assistantMessage(
+						[{ type: "toolCall", id: `t${n}`, name: "echo", arguments: { value: `fetch?at=${ts}` } }],
+						"toolUse",
+					),
+				});
+			});
+			return stream;
+		};
+
+		const config: AgentLoopConfig = {
+			model: createModel(),
+			convertToLlm: identityConverter,
+			maxStallTurns: 4,
+			onRunawayStop: (info) => stalls.push(info),
+		};
+
+		const events = await drain(
+			agentLoop([{ role: "user", content: "go", timestamp: 1 }], context, config, undefined, streamFn),
+		);
+
+		expect(stalls).toHaveLength(1);
+		expect(stalls[0].repeats).toBe(4); // volatile timestamps masked → detected
+		expect(events.filter((e) => e.type === "agent_end")).toHaveLength(1);
+	});
+
+	it("trips on a period-3 oscillation A→B→C→A→… (bug #28)", async () => {
+		const context: AgentContext = { systemPrompt: "", messages: [], tools: [echoTool] };
+		const stalls: Array<{ signature: string; repeats: number }> = [];
+		let n = 0;
+		const cycle = ["A", "B", "C"];
+
+		// A 3-state cycle never repeats back-to-back, so a small 2×L window can't see L repeats of any one
+		// state. The L×4 window must still catch it.
+		const streamFn = () => {
+			const stream = new MockAssistantStream();
+			queueMicrotask(() => {
+				const value = cycle[n % 3];
+				n++;
+				stream.push({
+					type: "done",
+					reason: "toolUse",
+					message: assistantMessage(
+						[{ type: "toolCall", id: `t${n}`, name: "echo", arguments: { value } }],
+						"toolUse",
+					),
+				});
+			});
+			return stream;
+		};
+
+		const config: AgentLoopConfig = {
+			model: createModel(),
+			convertToLlm: identityConverter,
+			maxStallTurns: 4,
+			onRunawayStop: (info) => stalls.push(info),
+		};
+
+		const events = await drain(
+			agentLoop([{ role: "user", content: "go", timestamp: 1 }], context, config, undefined, streamFn),
+		);
+
+		expect(stalls).toHaveLength(1); // periodic oscillation is caught, not just back-to-back repeats
+		expect(events.filter((e) => e.type === "agent_end")).toHaveLength(1);
+	});
 });

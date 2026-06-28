@@ -673,11 +673,15 @@ export class InteractiveMode {
 	private loadingAnimation: Loader | undefined = undefined;
 	// Native-reflection debounce: prevents back-to-back/overlapping background reflection passes (cost
 	// guard). `_nativeReflectionInFlight` blocks a second pass while one runs; `_lastNativeReflectionAt`
-	// enforces a minimum gap between passes. Skipped corrections aren't lost — the next eligible pass
-	// reflects over the accumulated turn text.
+	// enforces a minimum gap between passes. A debounce-skipped turn's text is BUFFERED in
+	// `_pendingReflectionText` (not dropped) and folded into the next pass, so no corrective feedback is
+	// lost — reflection sees only the current turn's messages, so dropping a skipped turn would lose its
+	// learning entirely (bug #29).
 	private _nativeReflectionInFlight = false;
 	private _lastNativeReflectionAt = 0;
+	private _pendingReflectionText: string[] = [];
 	private static readonly NATIVE_REFLECTION_MIN_INTERVAL_MS = 45_000;
+	private static readonly PENDING_REFLECTION_MAX_CHARS = 12_000;
 	private workingMessage: string | undefined = undefined;
 	private workingVisible = true;
 	private workingIndicatorOptions: LoaderIndicatorOptions | undefined = undefined;
@@ -5776,16 +5780,28 @@ export class InteractiveMode {
 		return { model, thinkingLevel };
 	}
 
+	/** Buffer a debounce-skipped turn's text so its learning is folded into the next pass (bug #29). */
+	private _bufferPendingReflection(text: string): void {
+		const t = text.trim();
+		if (!t) return;
+		this._pendingReflectionText.push(t);
+		// Bound the buffer so a long skipped streak can't grow unbounded; drop oldest past the budget
+		// (the most recent corrections matter most).
+		let total = this._pendingReflectionText.reduce((n, s) => n + s.length + 1, 0);
+		while (this._pendingReflectionText.length > 1 && total > InteractiveMode.PENDING_REFLECTION_MAX_CHARS) {
+			total -= (this._pendingReflectionText.shift()?.length ?? 0) + 1;
+		}
+	}
+
+	private _drainPendingReflection(): string {
+		if (this._pendingReflectionText.length === 0) return "";
+		const joined = this._pendingReflectionText.join("\n");
+		this._pendingReflectionText = [];
+		return joined;
+	}
+
 	private maybeRunNativeReflection(messages: AgentMessage[]): void {
 		if (!this.isNativeReflectionEnabled()) return;
-
-		// Debounce (cost guard): never run two background reflection passes at once, and never start one
-		// within the min interval of the last — a multi-turn correction session would otherwise spawn
-		// overlapping passes that re-reason the same task. The accumulated turn text is still reflected
-		// on the next eligible pass, so no learning is dropped.
-		if (this._nativeReflectionInFlight) return;
-		const now = Date.now();
-		if (now - this._lastNativeReflectionAt < InteractiveMode.NATIVE_REFLECTION_MIN_INTERVAL_MS) return;
 
 		const settings = this.getEffectiveAutoLearnSettings();
 		const toolCallCount = this.countAgentToolCalls(messages);
@@ -5813,6 +5829,23 @@ export class InteractiveMode {
 			.filter(Boolean)
 			.join("\n");
 
+		// Debounce (cost guard): never run two background reflection passes at once, and never start one
+		// within the min interval of the last — a multi-turn correction session would otherwise spawn
+		// overlapping passes that re-reason the same task. A skipped turn is NOT dropped: its text is
+		// buffered and folded into the next pass, so the corrective feedback is still learned (bug #29).
+		const now = Date.now();
+		const debounced =
+			this._nativeReflectionInFlight ||
+			now - this._lastNativeReflectionAt < InteractiveMode.NATIVE_REFLECTION_MIN_INTERVAL_MS;
+		if (debounced) {
+			this._bufferPendingReflection(recentTurnText);
+			return;
+		}
+
+		// Fold any buffered (previously debounced) turns into this pass so nothing learned is lost.
+		const pending = this._drainPendingReflection();
+		const reflectionText = pending ? `${pending}\n${recentTurnText}` : recentTurnText;
+
 		// Stable per-turn id so a duplicate scheduling/retry can't double-count the reflection cost.
 		// Messages carry no `id` on the real path (only timestamps), so derive the key from the last
 		// message's timestamp + the turn size — present on every real turn, stable across a retry of the
@@ -5830,7 +5863,7 @@ export class InteractiveMode {
 		void this.session
 			.runReflectionPass({
 				signals: { trigger, toolCallCount, hadCorrection, contextHeadroomPct, usefulLately: 0 },
-				recentTurnText,
+				recentTurnText: reflectionText,
 				reportId,
 				model,
 				thinkingLevel,

@@ -1,5 +1,13 @@
 ## [Unreleased]
 
+### Fixed
+
+- Runaway-loop backstop hardening (peer review): tool-call signatures are now normalized so volatile
+  arguments (timestamps, UUIDs, long hashes/nonces) can't disguise an otherwise-identical repeating call,
+  and the detection window was widened so short oscillating cycles (A→B→C→…) are caught too — not just
+  back-to-back repeats. Short numbers in arguments are preserved so genuinely distinct calls are not
+  falsely merged.
+
 ## [0.80.73] - 2026-06-28
 
 ### Added

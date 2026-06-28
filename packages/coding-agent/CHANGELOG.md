@@ -1,5 +1,11 @@
 ## [Unreleased]
 
+### Fixed
+
+- Background-reflection debounce now defers instead of dropping (peer review): a turn skipped by the
+  debounce has its text buffered and folded into the next reflection pass, so corrective feedback from
+  rapid multi-turn corrections is still learned rather than lost. The buffer is size-bounded.
+
 ## [0.80.73] - 2026-06-28
 
 ### Fixed
