@@ -26,6 +26,9 @@ export class EffectivenessTracker {
 	 */
 	recordRecallOutcome(recallText: string, queryText: string, responseText: string): void {
 		const used = distinctiveRecallUsage(recallText, queryText, responseText);
+		// A negative score means "no signal" (recall added nothing beyond the query) — don't let a
+		// redundant recall drag the score down; just skip the sample.
+		if (used < 0) return;
 		this.ema = ALPHA * used + (1 - ALPHA) * this.ema;
 		this.samples += 1;
 	}
@@ -48,11 +51,16 @@ export class EffectivenessTracker {
 export function distinctiveRecallUsage(recallText: string, queryText: string, responseText: string): number {
 	const queryTokens = new Set(tokenize(queryText));
 	const distinctive = tokenize(recallText).filter((t) => !queryTokens.has(t));
-	if (distinctive.length === 0) return 0;
+	// No distinctive content → recall added nothing the query didn't already carry → no usable signal.
+	if (distinctive.length === 0) return -1;
 	const responseTokens = new Set(tokenize(responseText));
 	let hits = 0;
 	for (const token of distinctive) {
 		if (responseTokens.has(token)) hits++;
 	}
-	return hits / distinctive.length;
+	// Reward ANY meaningful reuse without penalizing long snippets (Bug #14): a concise answer reuses
+	// only a few key recall tokens, so saturate the denominator at a small number of key tokens rather
+	// than dividing by the full distinctive vocabulary.
+	const KEY_TOKENS = 4;
+	return Math.min(1, hits / Math.min(distinctive.length, KEY_TOKENS));
 }

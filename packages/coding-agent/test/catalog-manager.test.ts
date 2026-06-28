@@ -83,6 +83,21 @@ describe("CatalogManager (round resource management)", () => {
 		expect(readFileSync(join(catalogDir, "skills", "local-only", "SKILL.md"), "utf-8")).toContain("authored locally");
 	});
 
+	it("hashPath does not crash on a circular symlink (Bug #19)", async () => {
+		const { symlinkSync } = await import("node:fs");
+		const dir = join(catalogDir, "skills", "looped");
+		mkdirSync(dir, { recursive: true });
+		writeFileSync(join(dir, "SKILL.md"), "content", "utf-8");
+		try {
+			symlinkSync(dir, join(dir, "self")); // circular: dir/self -> dir
+		} catch {
+			return; // symlinks unavailable on this platform → skip
+		}
+		// Must terminate (cycle guard), not RangeError: Maximum call stack size exceeded.
+		expect(() => hashPath(dir)).not.toThrow();
+		expect(typeof hashPath(dir)).toBe("string");
+	});
+
 	it("hashPath is content-based and order-stable", () => {
 		writeSkill(catalogDir, "x", "same");
 		writeSkill(agentDir, "x", "same");

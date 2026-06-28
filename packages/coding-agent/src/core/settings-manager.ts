@@ -889,16 +889,17 @@ export class SettingsManager {
 	 * injected while the profile is active. Multiple active profiles' souls are concatenated.
 	 */
 	getActiveProfileSoul(): string | undefined {
+		// First-wins precedence (like profile model/thinking): the most-specific active profile's soul
+		// is the identity — concatenating multiple souls would inject contradictory identities (Bug #16).
 		const registry = this.getProfileRegistry();
-		const souls: string[] = [];
 		const seen = new Set<string>();
 		for (const profileName of this.getActiveResourceProfileNames()) {
 			if (seen.has(profileName)) continue;
 			seen.add(profileName);
 			const soul = registry.getProfile(profileName)?.soul?.trim();
-			if (soul) souls.push(soul);
+			if (soul) return soul;
 		}
-		return souls.length > 0 ? souls.join("\n\n") : undefined;
+		return undefined;
 	}
 
 	isProjectTrusted(): boolean {

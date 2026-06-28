@@ -22,6 +22,9 @@ export function supersedeNearDuplicateLine(existing: string, content: string): s
 	for (let i = 0; i < lines.length; i++) {
 		const line = lines[i].trim();
 		if (!line) continue;
+		// Never supersede structural Markdown (headings, list markers as headings) — a fact must not
+		// silently overwrite section structure (Bug #15).
+		if (line.startsWith("#")) continue;
 		const score = jaccard(contentTokens, tokenize(line));
 		if (score >= bestScore) {
 			bestScore = score;

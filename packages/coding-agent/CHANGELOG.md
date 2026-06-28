@@ -1,5 +1,12 @@
 ## [Unreleased]
 
+### Fixed
+
+- Security (untrusted boundary): closed a fence-spoofing bypass — closing tags in case/whitespace variants (e.g. `</UNTRUSTED_CONTENT >`) are now neutralized — and widened the set of tool names treated as untrusted (download/exec/scrape/etc.).
+- Security (cross-session recall): recalled past-session text is now fenced as untrusted data so an injected payload in old history can't be replayed as a current instruction; recall pages are no longer re-indexed into the recall corpus (no recirculation).
+- Memory: a remembered fact can no longer overwrite Markdown section headers; the recall-effectiveness metric no longer unfairly penalizes long snippets; situational souls follow first-wins profile precedence instead of concatenating.
+- Stability: the resource catalog no longer crashes on a circular symlink (cycle-guarded hashing) and never leaves a partially-copied resource on a failed install/backup (atomic swap); gateway re-registration stops the replaced provider (no listener leak).
+
 ## [0.80.70] - 2026-06-28
 
 ### Fixed

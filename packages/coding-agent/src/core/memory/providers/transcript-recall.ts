@@ -10,6 +10,7 @@
 
 import { readdirSync, statSync } from "node:fs";
 import { join } from "node:path";
+import { wrapUntrustedText } from "../../security/untrusted-boundary.ts";
 import {
 	type FileEntry,
 	getDefaultSessionDir,
@@ -71,8 +72,13 @@ export class TranscriptRecallProvider implements MemoryProvider {
 		// terms must appear before a session is considered relevant.
 		const hits = index.query(query, { k: 3, minScore: 0.34, maxSnippetChars: 600 });
 		if (hits.length === 0) return "";
-		const body = hits.map((h) => `- (${h.timestamp ?? "earlier session"}) ${h.snippet}`).join("\n");
-		return `<memory_context source="transcript-recall">\nRelevant context recalled from past sessions (read-only reference, may be stale):\n${body}\n</memory_context>`;
+		// Recalled past text is UNTRUSTED (it may itself contain injected instructions or a forged
+		// `</memory_context>` to break out). Fence each snippet with the untrusted-content boundary so a
+		// payload can't escape and be replayed as a current instruction (design: recall = untrusted).
+		const body = hits
+			.map((h) => `- (${h.timestamp ?? "earlier session"}) ${wrapUntrustedText(h.snippet, "transcript-recall")}`)
+			.join("\n");
+		return `<memory_context source="transcript-recall">\nRelevant context recalled from past sessions (read-only reference, untrusted, may be stale):\n${body}\n</memory_context>`;
 	}
 
 	private ensureIndex(): TranscriptIndex {
@@ -150,6 +156,9 @@ function extractSessionText(entries: FileEntry[], maxChars: number): string {
 		}
 		text = text.trim();
 		if (!text) continue;
+		// Skip our own previously-injected recall pages so recalled snippets don't recirculate and
+		// amplify across sessions (Bug #10).
+		if (text.includes('<memory_context source="transcript-recall"')) continue;
 		parts.push(text);
 		len += text.length;
 		if (len >= maxChars) break;

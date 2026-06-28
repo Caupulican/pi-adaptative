@@ -68,11 +68,16 @@ export class GatewayRegistry {
 	private inboundHandler: ChannelInboundHandler = () => {};
 
 	registerChannel(provider: ChannelProvider): void {
+		// Stop a same-named provider being replaced so its listeners/sockets don't leak (Bug #17).
+		const existing = this.channels.get(provider.name);
+		if (existing && existing !== provider) void Promise.resolve(existing.stop()).catch(() => {});
 		this.channels.set(provider.name, provider);
 		if (this.started) void Promise.resolve(provider.start(this.inboundHandler)).catch(() => {});
 	}
 
 	registerScheduler(provider: JobSchedulerProvider): void {
+		const existing = this.schedulers.get(provider.name);
+		if (existing && existing !== provider) void Promise.resolve(existing.stop()).catch(() => {});
 		this.schedulers.set(provider.name, provider);
 		if (this.started) void Promise.resolve(provider.start()).catch(() => {});
 	}

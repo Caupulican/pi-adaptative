@@ -17,12 +17,21 @@ describe("R4 effectiveness feedback", () => {
 			expect(distinctiveRecallUsage(recall, query, response)).toBe(0);
 		});
 
-		it("is zero when recall adds nothing beyond the query", () => {
+		it("returns a no-signal sentinel when recall adds nothing beyond the query (Bug #14)", () => {
 			const query = "kubernetes helm chart staging values";
 			const recall = "kubernetes helm chart staging values";
 			const response = "kubernetes helm chart staging values are all set.";
-			// No distinctive tokens → recall contributed nothing measurable.
-			expect(distinctiveRecallUsage(recall, query, response)).toBe(0);
+			// No distinctive tokens → no usable signal (negative sentinel) so the tracker skips it rather
+			// than recording a misleading zero.
+			expect(distinctiveRecallUsage(recall, query, response)).toBeLessThan(0);
+		});
+
+		it("does not penalize a long recall snippet that the response reused a few key tokens from (Bug #14)", () => {
+			const query = "how do I deploy";
+			const longRecall = `deploy using helm chart staging values infra directory ${Array.from({ length: 40 }, (_, i) => `extra${i}`).join(" ")}`;
+			const response = "Use the helm chart with staging values from infra.";
+			// Only ~4 key tokens reused out of a long snippet — must still read as clearly useful.
+			expect(distinctiveRecallUsage(longRecall, query, response)).toBeGreaterThan(0.6);
 		});
 	});
 

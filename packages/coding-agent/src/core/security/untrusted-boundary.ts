@@ -14,7 +14,8 @@ export type ToolTrustLevel = "trusted" | "untrusted";
 const BOUNDARY_TAG = "untrusted_content";
 
 /** Tools whose output is attacker-controllable by default (name heuristic over built-ins + extensions). */
-const UNTRUSTED_NAME_RE = /(fetch|search|web|browser|crawl|http|url|subagent|delegate|recall|graph|automata)/i;
+const UNTRUSTED_NAME_RE =
+	/(fetch|search|web|browser|crawl|http|url|download|scrape|curl|wget|request|api|exec|execute|run[_-]?script|shell|subagent|delegate|recall|graph|automata)/i;
 /** First-party tools that operate on the agent's own working scope — always trusted. */
 const TRUSTED_BUILTINS = new Set(["read", "grep", "find", "ls", "edit", "write", "memory"]);
 
@@ -47,9 +48,11 @@ export function wrapUntrustedText(
 	options?: { nonce?: string; freshness?: string },
 ): string {
 	const nonce = options?.nonce ?? randomBytes(16).toString("hex");
+	// Neutralize fence spoofing tolerant to CASE and WHITESPACE variations (e.g. `</UNTRUSTED_CONTENT>`
+	// or `< / untrusted_content >`), which LLMs still read as a closing tag. Match an angle bracket,
+	// optional slash/whitespace, then the tag name in any case.
 	const neutralized = text
-		.replaceAll(`</${BOUNDARY_TAG}`, `&lt;/${BOUNDARY_TAG}`)
-		.replaceAll(`<${BOUNDARY_TAG}`, `&lt;${BOUNDARY_TAG}`)
+		.replace(/<(\s*\/?\s*)untrusted_content/gi, "&lt;$1untrusted_content")
 		.replaceAll(nonce, "[NONCE_NEUTRALIZED]");
 	const freshnessAttr = options?.freshness ? ` freshness="${escapeAttr(options.freshness)}"` : "";
 	return `<${BOUNDARY_TAG} id="${nonce}" source="${escapeAttr(source)}"${freshnessAttr}>\n${neutralized}\n</${BOUNDARY_TAG}>`;
