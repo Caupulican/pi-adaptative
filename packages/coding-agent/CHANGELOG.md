@@ -1,5 +1,23 @@
 ## [Unreleased]
 
+### Changed
+
+- Compaction cost guard (long-session savings): compaction now also triggers once context passes a
+  configurable fraction of the model's window (`compaction.triggerPercent`, default 0.7) — not only when
+  it's nearly full — so per-turn input cost stays bounded on large-window models, while an anti-thrashing
+  gate skips an early compaction that would barely shrink the context. The summary is now produced by a
+  cheap auxiliary model when one is available (`compaction.model`, default `"auto"` picks the cheapest
+  authed model that can hold the context and is cheaper than the session model; falls back to the session
+  model), instead of always using the main model.
+
+### Fixed
+
+- Hardened context/memory threat scanning: added detection and neutralization of invisible/bidirectional
+  control characters (zero-width, bidi overrides/isolates — the "Trojan Source" vector), and a broader,
+  scoped pattern set. Context-file and memory reads strip hidden characters and continue; high-privilege
+  memory writes are scanned in a stricter scope (exfil/backdoor/persistence patterns) and rejected
+  outright.
+
 ## [0.80.74] - 2026-06-28
 
 ### Fixed

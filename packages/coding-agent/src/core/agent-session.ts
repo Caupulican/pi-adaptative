@@ -110,7 +110,7 @@ import { TranscriptRecallProvider } from "./memory/providers/transcript-recall.t
 import { compactToolResultDetailsForRetention } from "./message-retention.ts";
 import { type BashExecutionMessage, type CustomMessage, createCustomMessage } from "./messages.ts";
 import type { ModelRegistry } from "./model-registry.ts";
-import { resolveProfileModelSettings } from "./model-resolver.ts";
+import { resolveCliModel, resolveProfileModelSettings } from "./model-resolver.ts";
 import { expandPromptTemplate, type PromptTemplate } from "./prompt-templates.ts";
 import type { ResourceExtensionPaths, ResourceLoader } from "./resource-loader.ts";
 import { stripResourceProfileBlocks } from "./resource-profile-blocks.ts";
@@ -545,6 +545,36 @@ export class AgentSession {
 
 		const result = await this._modelRegistry.getApiKeyAndHeaders(model);
 		return result.ok ? { apiKey: result.apiKey, headers: result.headers } : {};
+	}
+
+	/**
+	 * Resolve the model used to SUMMARIZE during compaction (cost guard, #30). A compaction summary is an
+	 * extraction task — it does not need the main (expensive) model. Selection:
+	 *   - an explicit `compaction.model` setting wins, but only if its provider is authed (else fall back);
+	 *   - `"auto"` (default) picks the CHEAPEST authed model whose context window can hold a compaction
+	 *     (capability floor), and ONLY if it is strictly cheaper than the session model — so we never
+	 *     downgrade to an equally-priced but weaker summarizer (agy's floor: don't degrade the checkpoint);
+	 *   - otherwise the session model is used (safe default).
+	 */
+	private _resolveCompactionModel(sessionModel: Model<any>): Model<any> {
+		const setting = this.settingsManager.getCompactionModel();
+		if (setting && setting !== "auto") {
+			const resolved = resolveCliModel({ cliModel: setting, modelRegistry: this._modelRegistry });
+			if (resolved.model && this._modelRegistry.hasConfiguredAuth(resolved.model)) return resolved.model;
+			return sessionModel; // configured but unusable → don't break compaction
+		}
+		// "auto": cheapest authed model that can summarize a large context AND is cheaper than the session
+		// model. The context-window floor keeps a tiny local model from being picked for a big summary.
+		const FLOOR_CONTEXT = 64_000;
+		const sessionInputCost = sessionModel.cost?.input ?? Number.POSITIVE_INFINITY;
+		let best: Model<any> | undefined;
+		for (const m of this._modelRegistry.getAvailable()) {
+			if ((m.contextWindow ?? 0) < FLOOR_CONTEXT) continue;
+			const cost = m.cost?.input ?? Number.POSITIVE_INFINITY;
+			if (cost >= sessionInputCost) continue; // only ever pick something cheaper than the session model
+			if (!best || cost < (best.cost?.input ?? Number.POSITIVE_INFINITY)) best = m;
+		}
+		return best ?? sessionModel;
 	}
 
 	/**
@@ -2190,7 +2220,8 @@ export class AgentSession {
 				throw new Error(formatNoModelSelectedMessage());
 			}
 
-			const { apiKey, headers } = await this._getCompactionRequestAuth(this.model);
+			const compactionModel = this._resolveCompactionModel(this.model);
+			const { apiKey, headers } = await this._getCompactionRequestAuth(compactionModel);
 
 			const pathEntries = this.sessionManager.getBranch();
 			const settings = this.settingsManager.getCompactionSettings();
@@ -2242,7 +2273,7 @@ export class AgentSession {
 				// Generate compaction result
 				const result = await compact(
 					preparation,
-					this.model,
+					compactionModel,
 					apiKey,
 					headers,
 					customInstructions,
@@ -2449,10 +2480,12 @@ export class AgentSession {
 				return false;
 			}
 
+			// Summarize with the cheap auxiliary model when available (cost guard, #30).
+			const compactionModel = this._resolveCompactionModel(this.model);
 			let apiKey: string | undefined;
 			let headers: Record<string, string> | undefined;
 			if (this.agent.streamFn === streamSimple) {
-				const authResult = await this._modelRegistry.getApiKeyAndHeaders(this.model);
+				const authResult = await this._modelRegistry.getApiKeyAndHeaders(compactionModel);
 				if (!authResult.ok || !authResult.apiKey) {
 					this._emit({
 						type: "compaction_end",
@@ -2466,7 +2499,7 @@ export class AgentSession {
 				apiKey = authResult.apiKey;
 				headers = authResult.headers;
 			} else {
-				({ apiKey, headers } = await this._getCompactionRequestAuth(this.model));
+				({ apiKey, headers } = await this._getCompactionRequestAuth(compactionModel));
 			}
 
 			const pathEntries = this.sessionManager.getBranch();
@@ -2527,7 +2560,7 @@ export class AgentSession {
 				// Generate compaction result
 				const compactResult = await compact(
 					preparation,
-					this.model,
+					compactionModel,
 					apiKey,
 					headers,
 					undefined,

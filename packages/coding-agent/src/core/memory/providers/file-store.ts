@@ -3,7 +3,7 @@ import { join } from "path";
 import lockfile from "proper-lockfile";
 import { type Static, Type } from "typebox";
 import type { ToolDefinition } from "../../extensions/types.ts";
-import { scanContextFileThreats } from "../../resource-loader.ts";
+import { hasInvisibleUnicode, scanContextFileThreats, stripInvisibleUnicode } from "../../resource-loader.ts";
 import { jaccard, tokenize } from "../../tools/skill-audit.ts";
 import type { MemoryLifecycleContext, MemoryProvider } from "../memory-provider.ts";
 
@@ -98,7 +98,9 @@ export class FileStoreProvider implements MemoryProvider {
 
 	public systemPromptBlock(): string {
 		const sanitize = (content: string) => {
-			const lines = content.split("\n");
+			// Strip hidden/bidi-control chars before injecting memory into the prompt (defence in depth: the
+			// write path already blocks them, but a file edited out-of-band could carry them). Strip #31.
+			const lines = stripInvisibleUnicode(content).cleaned.split("\n");
 			const sanitizedLines = lines.map((line) => {
 				const threats = scanContextFileThreats(line);
 				if (threats.length > 0) {
@@ -170,6 +172,37 @@ export class FileStoreProvider implements MemoryProvider {
 					}
 
 					const { action, target, content, oldContent } = params;
+
+					// Strict-scope injection guard on the high-privilege WRITE path (agy #31): a poisoned
+					// memory entry persists across sessions and is injected into every future system prompt,
+					// so block outright rather than strip. Hidden/bidi-control chars have no legitimate place
+					// in a memory note, so reject those too.
+					if ((action === "add" || action === "replace") && content !== undefined) {
+						if (hasInvisibleUnicode(content)) {
+							return {
+								content: [
+									{
+										type: "text",
+										text: "Error: memory write rejected — contains hidden/bidirectional control characters.",
+									},
+								],
+								details: { success: false, error: "Invisible unicode in memory write" },
+							};
+						}
+						const threats = scanContextFileThreats(content, "strict");
+						if (threats.length > 0) {
+							return {
+								content: [
+									{
+										type: "text",
+										text: `Error: memory write rejected — potential injection/exfiltration detected (${threats.join(", ")}).`,
+									},
+								],
+								details: { success: false, error: "Threat in memory write" },
+							};
+						}
+					}
+
 					const filePath = target === "memory" ? this.memoryFilePath : this.userFilePath;
 					const budget = target === "memory" ? FileStoreProvider.BUDGET_MEMORY : FileStoreProvider.BUDGET_USER;
 

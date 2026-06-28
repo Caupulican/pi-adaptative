@@ -16,6 +16,8 @@ export interface CompactionSettings {
 	enabled?: boolean; // default: true
 	reserveTokens?: number; // default: 16384
 	keepRecentTokens?: number; // default: 20000
+	triggerPercent?: number; // default: 0.7 — also compact past this fraction of the window (cost guard)
+	model?: string; // default: "auto" — cheap auxiliary model for the summary; "auto" picks cheapest authed, else the session model
 }
 
 export interface SemanticMemoryGcSettings {
@@ -1686,11 +1688,26 @@ export class SettingsManager {
 		return this.settings.compaction?.keepRecentTokens ?? 20000;
 	}
 
-	getCompactionSettings(): { enabled: boolean; reserveTokens: number; keepRecentTokens: number } {
+	getCompactionTriggerPercent(): number {
+		return this.settings.compaction?.triggerPercent ?? 0.7;
+	}
+
+	/** Configured auxiliary summarizer model id, or "auto" (default) to pick the cheapest authed model. */
+	getCompactionModel(): string {
+		return this.settings.compaction?.model ?? "auto";
+	}
+
+	getCompactionSettings(): {
+		enabled: boolean;
+		reserveTokens: number;
+		keepRecentTokens: number;
+		triggerPercent: number;
+	} {
 		return {
 			enabled: this.getCompactionEnabled(),
 			reserveTokens: this.getCompactionReserveTokens(),
 			keepRecentTokens: this.getCompactionKeepRecentTokens(),
+			triggerPercent: this.getCompactionTriggerPercent(),
 		};
 	}
 

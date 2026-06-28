@@ -257,6 +257,43 @@ describe("shouldCompact", () => {
 		expect(shouldCompact(272000, 1000000, settings, 272000)).toBe(false);
 		expect(shouldCompact(271999, 1000000, settings, 272000)).toBe(false);
 	});
+
+	it("triggers early at the fractional cap on large-window models (cost guard #30)", () => {
+		// 200k window: hard trigger = 183616; fractional trigger = 0.7*200k = 140000.
+		const settings: CompactionSettings = {
+			enabled: true,
+			reserveTokens: 16384,
+			keepRecentTokens: 20000,
+			triggerPercent: 0.7,
+		};
+		expect(shouldCompact(130000, 200000, settings)).toBe(false); // below the early trigger
+		expect(shouldCompact(150000, 200000, settings)).toBe(true); // early trigger, high projected savings
+		expect(shouldCompact(190000, 200000, settings)).toBe(true); // hard trigger (near-full)
+	});
+
+	it("suppresses the early trigger when projected savings are tiny (anti-thrashing #30)", () => {
+		// window 100k, hard trigger = 90000, fractional = 0.5*100k = 50000.
+		const base = { enabled: true, reserveTokens: 10000, triggerPercent: 0.5 };
+		// keepRecent ~ all of context → early compaction would barely shrink it → skip.
+		const thrashy: CompactionSettings = { ...base, keepRecentTokens: 60000 };
+		expect(shouldCompact(55000, 100000, thrashy)).toBe(false); // early trigger gated off
+		expect(shouldCompact(95000, 100000, thrashy)).toBe(true); // but the hard trigger still fires
+		// Same position, but lots is reclaimable → early compaction is worth it.
+		const worthwhile: CompactionSettings = { ...base, keepRecentTokens: 10000 };
+		expect(shouldCompact(55000, 100000, worthwhile)).toBe(true);
+	});
+
+	it("disables the fractional cap when triggerPercent is 0 or >= 1", () => {
+		const off: CompactionSettings = {
+			enabled: true,
+			reserveTokens: 16384,
+			keepRecentTokens: 20000,
+			triggerPercent: 0,
+		};
+		// Only the hard trigger (183616) applies; 150k would have tripped a fractional cap but is ignored.
+		expect(shouldCompact(150000, 200000, off)).toBe(false);
+		expect(shouldCompact(190000, 200000, off)).toBe(true);
+	});
 });
 
 describe("findCutPoint", () => {

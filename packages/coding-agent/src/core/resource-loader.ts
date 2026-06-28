@@ -109,31 +109,109 @@ function resolvePromptInput(input: string | undefined, description: string): str
 	return input;
 }
 
-const CONTEXT_THREAT_PATTERNS: Array<{ label: string; pattern: RegExp }> = [
+/**
+ * Threat-pattern scope (Hermes-parity #31). `context` patterns apply to any attacker-influenced text
+ * injected into context (context files, recalled memory). `strict` patterns are additionally checked on
+ * HIGH-PRIVILEGE writes (memory writes, skill installs) where a false positive is cheap (user-mediated)
+ * but a miss can persist an exfiltration/backdoor. A `strict` scan is a SUPERSET of `context`.
+ */
+export type ThreatScope = "context" | "strict";
+
+const THREAT_PATTERNS: Array<{ label: string; pattern: RegExp; scope: ThreatScope }> = [
 	{
 		label: "instruction override",
 		pattern:
 			/\b(?:ignore|disregard|override|bypass)\b.{0,80}\b(?:previous|prior|above|system|developer|agent)\b.{0,80}\binstructions?\b/i,
+		scope: "context",
 	},
 	{
 		label: "secret exfiltration",
 		pattern:
 			/\b(?:reveal|print|dump|exfiltrate|send|upload)\b.{0,80}\b(?:secrets?|tokens?|api[_ -]?keys?|credentials?|environment variables?|\.env)\b/i,
+		scope: "context",
 	},
 	{
 		label: "hidden instruction",
 		pattern: /\b(?:do not tell|don't tell|hide this from)\b.{0,80}\b(?:user|operator|developer)\b/i,
+		scope: "context",
+	},
+	{
+		label: "role hijack",
+		pattern: /\byou\s+are\s+(?:\w+\s+){0,4}now\s+(?:a|an|the)\s+\w+/i,
+		scope: "context",
+	},
+	{
+		label: "system prompt leak",
+		pattern: /\b(?:output|print|reveal|repeat|show)\b.{0,40}\b(?:system|initial|developer)\b.{0,20}\bprompt\b/i,
+		scope: "context",
+	},
+	// strict-only (high-privilege write paths): credential exfil, backdoors, persistence.
+	{
+		label: "credential exfil command",
+		pattern:
+			/\b(?:curl|wget|fetch|invoke-webrequest|nc)\b.{0,100}\$\{?\w*(?:KEY|TOKEN|SECRET|PASSWORD|CREDENTIAL|API)/i,
+		scope: "strict",
+	},
+	{
+		label: "ssh backdoor",
+		pattern: /authorized_keys|(?:~|\$HOME)\/\.ssh\b/i,
+		scope: "strict",
+	},
+	{
+		label: "secret file read",
+		pattern: /\bcat\b.{0,40}(?:\.env\b|\.netrc|\.pgpass|\.npmrc|\.pypirc|credentials)/i,
+		scope: "strict",
+	},
+	{
+		label: "data exfil to url",
+		pattern: /\b(?:send|post|upload|exfiltrate|transmit|curl|wget)\b.{0,80}https?:\/\//i,
+		scope: "strict",
 	},
 ];
 
-export function scanContextFileThreats(content: string): string[] {
-	return CONTEXT_THREAT_PATTERNS.filter(({ pattern }) => pattern.test(content)).map(({ label }) => label);
+/**
+ * Invisible / bidirectional-control characters used to HIDE instructions inside otherwise-innocent text
+ * or to visually reorder it (Trojan-Source style): zero-width spaces/joiners, LRM/RLM, bidi
+ * embeddings/overrides, isolates, word-joiner, and BOM/zero-width-no-break. (Hermes-parity #31.)
+ */
+const INVISIBLE_UNICODE_RE = /[\u200B-\u200F\u202A-\u202E\u2060-\u2064\u2066-\u206F\uFEFF]/g;
+
+/** True if `content` contains any invisible/bidi-control character. */
+export function hasInvisibleUnicode(content: string): boolean {
+	INVISIBLE_UNICODE_RE.lastIndex = 0;
+	return INVISIBLE_UNICODE_RE.test(content);
+}
+
+/**
+ * Strip invisible/bidi-control characters, returning the cleaned text and how many were removed. Used on
+ * READ paths (context files, recalled memory) — strip-and-continue rather than block, so benign
+ * international text isn't rejected wholesale while hidden payloads are neutralized (agy's layered policy).
+ */
+export function stripInvisibleUnicode(content: string): { cleaned: string; removed: number } {
+	let removed = 0;
+	const cleaned = content.replace(INVISIBLE_UNICODE_RE, () => {
+		removed++;
+		return "";
+	});
+	return { cleaned, removed };
+}
+
+export function scanContextFileThreats(content: string, scope: ThreatScope = "context"): string[] {
+	return THREAT_PATTERNS.filter((p) => (scope === "strict" || p.scope === "context") && p.pattern.test(content)).map(
+		({ label }) => label,
+	);
 }
 
 function sanitizeContextFileContent(filePath: string, content: string): string {
 	const profileFreeContent = stripResourceProfileBlocks(content);
-	const findings = scanContextFileThreats(profileFreeContent);
-	if (findings.length === 0) return profileFreeContent;
+	// Strip-and-continue for hidden/bidi-control chars: don't reject a whole file for benign zero-width
+	// chars in legitimate international text, but neutralize any payload hidden with them (agy #31).
+	const { cleaned, removed } = stripInvisibleUnicode(profileFreeContent);
+	if (removed > 0) {
+		console.error(chalk.yellow(`Warning: stripped ${removed} invisible/bidi char(s) from ${filePath}`));
+	}
+	const findings = scanContextFileThreats(cleaned);
+	if (findings.length === 0) return cleaned;
 	console.error(chalk.yellow(`Warning: Blocked context file ${filePath}: ${findings.join(", ")}`));
 	return `[BLOCKED: ${filePath} contained potential prompt injection (${findings.join(", ")}). Content not loaded.]`;
 }

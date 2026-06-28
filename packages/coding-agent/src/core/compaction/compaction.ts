@@ -116,12 +116,21 @@ export interface CompactionSettings {
 	enabled: boolean;
 	reserveTokens: number;
 	keepRecentTokens: number;
+	/**
+	 * Compaction also triggers once context exceeds this fraction of the model's window — not only when
+	 * it's nearly full (`contextWindow - reserveTokens`). On large-window models, waiting until nearly
+	 * full means every turn pays a huge input cost; a fractional cap keeps per-turn input bounded
+	 * (cost guard). The effective trigger is the LOWER of the two, so small-window models keep the
+	 * reserve-based behavior while large windows compact earlier. `0`/`1`+ disables the fractional cap.
+	 */
+	triggerPercent?: number;
 }
 
 export const DEFAULT_COMPACTION_SETTINGS: CompactionSettings = {
 	enabled: true,
 	reserveTokens: 16384,
 	keepRecentTokens: 20000,
+	triggerPercent: 0.7,
 };
 
 // ============================================================================
@@ -214,7 +223,22 @@ export function estimateContextTokens(messages: AgentMessage[]): ContextUsageEst
 }
 
 /**
+ * Minimum projected space saving for the EARLY (fractional) compaction trigger to fire. Anti-thrashing
+ * (cost guard, #30): an early compaction whose summary would barely shrink the context (mostly recent,
+ * protected content) just burns a summarization call for little gain — skip it and let the context grow
+ * until either the saving is worthwhile or the hard (near-full) trigger forces it. Does NOT gate the
+ * hard trigger, so overflow is always avoided.
+ */
+export const MIN_COMPACTION_SAVINGS = 0.12;
+
+/**
  * Check if compaction should trigger based on context usage.
+ *
+ * Two triggers:
+ * - HARD: context exceeds `contextWindow - reserveTokens` (near-full) or an explicit `triggerTokens`
+ *   override — always compact (prevents overflow).
+ * - EARLY (fractional, cost guard): context exceeds `contextWindow * triggerPercent` — compact only if
+ *   the summary would actually save enough (`MIN_COMPACTION_SAVINGS`), so we don't thrash for tiny gains.
  */
 export function shouldCompact(
 	contextTokens: number,
@@ -223,10 +247,23 @@ export function shouldCompact(
 	triggerTokens?: number,
 ): boolean {
 	if (!settings.enabled) return false;
-	const defaultTriggerTokens = contextWindow - settings.reserveTokens;
-	const effectiveTriggerTokens =
-		triggerTokens === undefined ? defaultTriggerTokens : Math.min(defaultTriggerTokens, triggerTokens);
-	return contextTokens > effectiveTriggerTokens;
+
+	// Hard trigger: near-full, or a caller-supplied lower override. Always compacts (avoid overflow).
+	const reserveTrigger = contextWindow - settings.reserveTokens;
+	const hardTrigger = triggerTokens === undefined ? reserveTrigger : Math.min(reserveTrigger, triggerTokens);
+	if (contextTokens > hardTrigger) return true;
+
+	// Early fractional trigger: bounds per-turn input cost on large-window models, gated by anti-thrashing.
+	const pct = settings.triggerPercent ?? 0;
+	if (pct > 0 && pct < 1) {
+		const fractionalTrigger = Math.floor(contextWindow * pct);
+		if (contextTokens > fractionalTrigger) {
+			// Projected saving ≈ the non-protected fraction (everything but the recent tail we keep).
+			const projectedSavings = contextTokens > 0 ? 1 - settings.keepRecentTokens / contextTokens : 0;
+			return projectedSavings >= MIN_COMPACTION_SAVINGS;
+		}
+	}
+	return false;
 }
 
 // ============================================================================
