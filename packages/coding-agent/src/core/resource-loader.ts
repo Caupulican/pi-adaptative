@@ -170,11 +170,17 @@ const THREAT_PATTERNS: Array<{ label: string; pattern: RegExp; scope: ThreatScop
 ];
 
 /**
- * Invisible / bidirectional-control characters used to HIDE instructions inside otherwise-innocent text
- * or to visually reorder it (Trojan-Source style): zero-width spaces/joiners, LRM/RLM, bidi
- * embeddings/overrides, isolates, word-joiner, and BOM/zero-width-no-break. (Hermes-parity #31.)
+ * Genuinely-dangerous invisible / bidi-control characters used to HIDE instructions or visually reorder
+ * text (Trojan-Source): zero-width space (U+200B), bidi embeddings/overrides (U+202A\u2013U+202E), word-joiner
+ * + invisible math operators (U+2060\u2013U+2064), bidi isolates + deprecated format controls (U+2066\u2013U+206F),
+ * and BOM/zero-width-no-break (U+FEFF).
+ *
+ * DELIBERATELY EXCLUDES U+200C ZWNJ, U+200D ZWJ, U+200E LRM, U+200F RLM \u2014 these are LEGITIMATE and
+ * load-bearing in Persian/Arabic/Hebrew/Hindi shaping (joiner control, directionality) and in emoji ZWJ
+ * sequences; stripping them corrupts real text (bug #35). The Trojan-Source reorder attack relies on the
+ * embeddings/overrides/isolates above, which are still stripped. (Hermes-parity #31/#35.)
  */
-const INVISIBLE_UNICODE_RE = /[\u200B-\u200F\u202A-\u202E\u2060-\u2064\u2066-\u206F\uFEFF]/g;
+const INVISIBLE_UNICODE_RE = /[\u200B\u202A-\u202E\u2060-\u2064\u2066-\u206F\uFEFF]/g;
 
 /** True if `content` contains any invisible/bidi-control character. */
 export function hasInvisibleUnicode(content: string): boolean {

@@ -1,5 +1,13 @@
 ## [Unreleased]
 
+### Fixed
+
+- Threat scanner no longer strips legitimate international text: the invisible-character filter now
+  preserves the zero-width non-joiner/joiner and left/right-to-left marks (U+200C–U+200F) that are
+  load-bearing in Persian, Arabic, Hebrew, and Hindi shaping and in emoji ZWJ sequences, while still
+  removing the genuinely-dangerous zero-width and bidi-reordering controls used for hidden-instruction
+  ("Trojan Source") attacks.
+
 ## [0.80.77] - 2026-06-28
 
 ### Added

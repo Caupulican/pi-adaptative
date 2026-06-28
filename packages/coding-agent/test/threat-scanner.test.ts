@@ -60,4 +60,18 @@ describe("invisible / bidi Unicode", () => {
 		expect(cleaned).toBe("nothing hidden here");
 		expect(removed).toBe(0);
 	});
+
+	it("preserves legitimate i18n joiners/marks ZWNJ/ZWJ/LRM/RLM (bug #35)", () => {
+		// These are load-bearing in Persian/Arabic/Hebrew/Hindi shaping and emoji ZWJ sequences — stripping
+		// them corrupts real text. Only genuinely-dangerous controls (above) may be removed.
+		const ZWNJ = String.fromCharCode(0x200c);
+		const ZWJ = String.fromCharCode(0x200d);
+		const LRM = String.fromCharCode(0x200e);
+		const RLM = String.fromCharCode(0x200f);
+		const text = `می${ZWNJ}خواهم ${LRM}name${RLM} 👨${ZWJ}👩${ZWJ}👧`;
+		expect(hasInvisibleUnicode(text)).toBe(false);
+		const { cleaned, removed } = stripInvisibleUnicode(text);
+		expect(removed).toBe(0);
+		expect(cleaned).toBe(text); // unchanged — no corruption of legitimate international text/emoji
+	});
 });
