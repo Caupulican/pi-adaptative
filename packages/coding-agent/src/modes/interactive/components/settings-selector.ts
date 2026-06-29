@@ -33,6 +33,7 @@ const SETTINGS_SUBMENU_SELECT_LIST_LAYOUT: SelectListLayoutOptions = {
 };
 
 const AUTO_LEARN_CUSTOM_MODEL_VALUE = "__custom_auto_learn_model__";
+const MODEL_ROUTER_UNSET_MODEL_VALUE = "__unset_model_router_model__";
 
 const THINKING_DESCRIPTIONS: Record<ThinkingLevel, string> = {
 	off: "No reasoning",
@@ -145,6 +146,59 @@ function buildAutoLearnModelOptions(
 	});
 
 	return options;
+}
+
+function buildModelRouterRoleModelOptions(options: {
+	currentValue: string | undefined;
+	configuredModelOptions: SelectItem[] | undefined;
+	currentModelPattern: string | undefined;
+	includeActive: boolean;
+	unsetDescription?: string;
+}): SelectItem[] {
+	const modelOptions: SelectItem[] = [];
+	const seen = new Set<string>();
+
+	if (options.includeActive) {
+		modelOptions.push({
+			value: AUTO_LEARN_DEFAULTS.model,
+			label: "active",
+			description: options.currentModelPattern
+				? `Use the current session model (${options.currentModelPattern})`
+				: "Use the current session model",
+		});
+		seen.add(AUTO_LEARN_DEFAULTS.model);
+	} else {
+		modelOptions.push({
+			value: MODEL_ROUTER_UNSET_MODEL_VALUE,
+			label: "(unset)",
+			description: options.unsetDescription ?? "Clear this model setting",
+		});
+		seen.add(MODEL_ROUTER_UNSET_MODEL_VALUE);
+	}
+
+	for (const option of options.configuredModelOptions ?? []) {
+		if (seen.has(option.value)) continue;
+		modelOptions.push(option);
+		seen.add(option.value);
+	}
+
+	const currentValue = options.currentValue?.trim();
+	if (currentValue && !seen.has(currentValue)) {
+		modelOptions.push({
+			value: currentValue,
+			label: currentValue,
+			description: "Current custom setting",
+		});
+		seen.add(currentValue);
+	}
+
+	modelOptions.push({
+		value: AUTO_LEARN_CUSTOM_MODEL_VALUE,
+		label: "Manual / custom…",
+		description: "Type a model pattern not listed above",
+	});
+
+	return modelOptions;
 }
 
 export interface SettingsConfig {
@@ -264,26 +318,38 @@ class TextInputSubmenu extends Container {
 	}
 }
 
-class AutoLearnModelSelectionSubmenu extends Container {
+class ModelSelectionSubmenu extends Container {
 	private searchInput: Input;
 	private selectList: SelectList;
 	private customInput: TextInputSubmenu | null = null;
 
-	constructor(options: SelectItem[], currentValue: string, onSelect: (value: string) => void, onCancel: () => void) {
+	constructor(
+		options: SelectItem[],
+		currentValue: string,
+		onSelect: (value: string) => void,
+		onCancel: () => void,
+		labels: {
+			title: string;
+			description: string;
+			customTitle: string;
+			customDescription: string;
+			customEmptyHint: string;
+			customEmptyValue: string | undefined;
+		} = {
+			title: "Auto Learn Scavenger Model",
+			description:
+				"Choose active or a model from currently configured subscription/API accounts. Type to filter; choose manual for a custom pattern.",
+			customTitle: "Custom Auto Learn Model",
+			customDescription: 'Enter "active" or a provider/model pattern like "openai/gpt-5.4".',
+			customEmptyHint: 'empty uses "active"',
+			customEmptyValue: AUTO_LEARN_DEFAULTS.model,
+		},
+	) {
 		super();
 
-		this.addChild(new Text(theme.bold(theme.fg("accent", "Auto Learn Scavenger Model")), 0, 0));
+		this.addChild(new Text(theme.bold(theme.fg("accent", labels.title)), 0, 0));
 		this.addChild(new Spacer(1));
-		this.addChild(
-			new Text(
-				theme.fg(
-					"muted",
-					"Choose active or a model from currently configured subscription/API accounts. Type to filter; choose manual for a custom pattern.",
-				),
-				0,
-				0,
-			),
-		);
+		this.addChild(new Text(theme.fg("muted", labels.description), 0, 0));
 		this.addChild(new Spacer(1));
 
 		this.searchInput = new Input();
@@ -306,16 +372,16 @@ class AutoLearnModelSelectionSubmenu extends Container {
 		this.selectList.onSelect = (item) => {
 			if (item.value === AUTO_LEARN_CUSTOM_MODEL_VALUE) {
 				this.customInput = new TextInputSubmenu(
-					"Custom Auto Learn Model",
-					'Enter "active" or a provider/model pattern like "openai/gpt-5.4".',
-					currentValue === AUTO_LEARN_DEFAULTS.model ? "" : currentValue,
+					labels.customTitle,
+					labels.customDescription,
+					currentValue === labels.customEmptyValue ? "" : currentValue,
 					(value) => {
-						onSelect(normalizeOptionalString(value) ?? AUTO_LEARN_DEFAULTS.model);
+						onSelect(normalizeOptionalString(value) ?? labels.customEmptyValue ?? "");
 					},
 					() => {
 						this.customInput = null;
 					},
-					'empty uses "active"',
+					labels.customEmptyHint,
 				);
 				return;
 			}
@@ -541,7 +607,7 @@ class AutoLearnSettingsSubmenu extends Container {
 				description: modelDescription,
 				currentValue: autoLearnModelValue(this.state),
 				submenu: (_currentValue, done) =>
-					new AutoLearnModelSelectionSubmenu(
+					new ModelSelectionSubmenu(
 						selectableModelOptions,
 						autoLearnModelValue(this.state),
 						(value) => {
@@ -692,6 +758,8 @@ class ModelRouterSettingsSubmenu extends Container {
 
 	constructor(
 		settings: ModelRouterSettings,
+		currentModelPattern: string | undefined,
+		modelOptions: SelectItem[] | undefined,
 		onChange: (settings: ModelRouterSettings, scope: SettingsScope) => void,
 		onCancel: () => void,
 		scope: SettingsScope = "global",
@@ -703,6 +771,26 @@ class ModelRouterSettingsSubmenu extends Container {
 			learningModel: settings.learningModel ?? "active",
 		};
 		this.scope = scope;
+		const cheapModelOptions = buildModelRouterRoleModelOptions({
+			currentValue: this.state.cheapModel,
+			configuredModelOptions: modelOptions,
+			currentModelPattern,
+			includeActive: false,
+			unsetDescription: "Clear cheap routing model; research turns fall back to the active session model",
+		});
+		const expensiveModelOptions = buildModelRouterRoleModelOptions({
+			currentValue: this.state.expensiveModel,
+			configuredModelOptions: modelOptions,
+			currentModelPattern,
+			includeActive: false,
+			unsetDescription: "Clear expensive routing model; modify turns fall back to the active session model",
+		});
+		const learningModelOptions = buildModelRouterRoleModelOptions({
+			currentValue: this.state.learningModel,
+			configuredModelOptions: modelOptions,
+			currentModelPattern,
+			includeActive: true,
+		});
 		this.addChild(new Text(theme.bold(theme.fg("accent", "Model Router")), 0, 0));
 		this.addChild(new Spacer(1));
 
@@ -724,57 +812,86 @@ class ModelRouterSettingsSubmenu extends Container {
 			{
 				id: "model-router-cheap",
 				label: "Cheap model",
-				description: "Model pattern for read-only, research, explanation, and question turns",
+				description: "Pick the model for read-only, research, explanation, and question turns",
 				currentValue: optionalStringValue(this.state.cheapModel),
 				submenu: (_currentValue, done) =>
-					new TextInputSubmenu(
-						"Cheap / Research Model",
-						"Enter a provider/model pattern from pi --list-models. Empty clears it.",
-						this.state.cheapModel ?? "",
+					new ModelSelectionSubmenu(
+						cheapModelOptions,
+						this.state.cheapModel ?? MODEL_ROUTER_UNSET_MODEL_VALUE,
 						(value) => {
-							this.state = { ...this.state, cheapModel: normalizeOptionalString(value) };
+							this.state = {
+								...this.state,
+								cheapModel: value === MODEL_ROUTER_UNSET_MODEL_VALUE ? undefined : value,
+							};
 							onChange({ ...this.state }, this.scope);
 							done(optionalStringValue(this.state.cheapModel));
 						},
 						() => done(),
+						{
+							title: "Cheap / Research Model",
+							description:
+								"Choose from models available through configured subscription/API accounts. Type to filter; manual is fallback.",
+							customTitle: "Custom Cheap / Research Model",
+							customDescription: "Enter a provider/model pattern from pi --list-models.",
+							customEmptyHint: "empty clears the setting",
+							customEmptyValue: MODEL_ROUTER_UNSET_MODEL_VALUE,
+						},
 					),
 			},
 			{
 				id: "model-router-expensive",
 				label: "Expensive model",
-				description: "Model pattern for modify, implementation, and escalated tool-heavy turns",
+				description: "Pick the model for modify, implementation, and escalated tool-heavy turns",
 				currentValue: optionalStringValue(this.state.expensiveModel),
 				submenu: (_currentValue, done) =>
-					new TextInputSubmenu(
-						"Expensive / Modify Model",
-						"Enter a provider/model pattern from pi --list-models. Empty clears it.",
-						this.state.expensiveModel ?? "",
+					new ModelSelectionSubmenu(
+						expensiveModelOptions,
+						this.state.expensiveModel ?? MODEL_ROUTER_UNSET_MODEL_VALUE,
 						(value) => {
-							this.state = { ...this.state, expensiveModel: normalizeOptionalString(value) };
+							this.state = {
+								...this.state,
+								expensiveModel: value === MODEL_ROUTER_UNSET_MODEL_VALUE ? undefined : value,
+							};
 							onChange({ ...this.state }, this.scope);
 							done(optionalStringValue(this.state.expensiveModel));
 						},
 						() => done(),
+						{
+							title: "Expensive / Modify Model",
+							description:
+								"Choose from models available through configured subscription/API accounts. Type to filter; manual is fallback.",
+							customTitle: "Custom Expensive / Modify Model",
+							customDescription: "Enter a provider/model pattern from pi --list-models.",
+							customEmptyHint: "empty clears the setting",
+							customEmptyValue: MODEL_ROUTER_UNSET_MODEL_VALUE,
+						},
 					),
 			},
 			{
 				id: "model-router-learning",
 				label: "Learning/reflection model",
 				description:
-					"Model pattern for background reflection, learn, and skill-creator work; active uses the session model",
+					"Pick the model for background reflection, learn, and skill-creator work; active uses the session model",
 				currentValue: optionalStringValue(this.state.learningModel, "active"),
 				submenu: (_currentValue, done) =>
-					new TextInputSubmenu(
-						"Learning / Reflection Model",
-						'Enter "active" or a provider/model pattern from pi --list-models. Empty uses active.',
-						this.state.learningModel === "active" ? "" : (this.state.learningModel ?? ""),
+					new ModelSelectionSubmenu(
+						learningModelOptions,
+						this.state.learningModel ?? AUTO_LEARN_DEFAULTS.model,
 						(value) => {
-							this.state = { ...this.state, learningModel: normalizeOptionalString(value) ?? "active" };
+							this.state = { ...this.state, learningModel: value };
 							onChange({ ...this.state }, this.scope);
 							done(optionalStringValue(this.state.learningModel, "active"));
 						},
 						() => done(),
-						'empty uses "active"',
+						{
+							title: "Learning / Reflection Model",
+							description:
+								"Choose active or a model from configured subscription/API accounts. Type to filter; manual is fallback.",
+							customTitle: "Custom Learning / Reflection Model",
+							customDescription: 'Enter "active" or a provider/model pattern from pi --list-models.',
+							customEmptyHint: 'empty uses "active"',
+							customEmptyValue: AUTO_LEARN_DEFAULTS.model,
+						},
 					),
 			},
 		];
@@ -1062,6 +1179,8 @@ export class SettingsSelectorComponent extends Container {
 				submenu: (_currentValue, done) =>
 					new ModelRouterSettingsSubmenu(
 						currentModelRouter,
+						config.currentModelPattern,
+						config.autoLearnModelOptions,
 						(settings, scope) => {
 							currentModelRouter = { ...settings };
 							callbacks.onModelRouterChange(settings, scope);

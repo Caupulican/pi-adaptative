@@ -1044,6 +1044,27 @@ describe("SettingsManager", () => {
 			expect(freshManager.getResourceProfileFilter("tools").allow).toContain("grep");
 		});
 
+		it("writes profile model selection to a reusable profile file", async () => {
+			const manager = SettingsManager.create(projectDir, agentDir);
+			manager.setProfileDefinition(
+				"cheap-research",
+				{
+					model: "anthropic/claude-haiku-4-5",
+					resources: {},
+				},
+				"reusable-file",
+			);
+			await manager.flush();
+
+			const savedProfile = JSON.parse(readFileSync(join(agentDir, "profiles", "cheap-research.json"), "utf-8"));
+			expect(savedProfile.model).toBe("anthropic/claude-haiku-4-5");
+
+			const freshManager = SettingsManager.create(projectDir, agentDir);
+			expect(freshManager.getProfileRegistry().getProfile("cheap-research")?.model).toBe(
+				"anthropic/claude-haiku-4-5",
+			);
+		});
+
 		describe("external resource roots settings", () => {
 			it("round-trip: gets effective external roots matching trusted and existing", async () => {
 				const manager = SettingsManager.create(projectDir, agentDir);

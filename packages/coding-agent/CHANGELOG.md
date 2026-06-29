@@ -1,5 +1,11 @@
 ## [Unreleased]
 
+### Changed
+
+- Model Router model selection now defaults to searchable pickers populated from authenticated/configured
+  provider models, with manual entry only as an explicit fallback; profile creation now also prompts for
+  a profile model from the same authenticated model list.
+
 ## [0.80.82] - 2026-06-28
 
 ### Added

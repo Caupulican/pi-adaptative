@@ -6613,10 +6613,16 @@ export class InteractiveMode {
 		}
 
 		try {
+			const profileModel = await this.selectProfileModelForCreate();
+			if (profileModel === undefined) {
+				void this.openLibraryManagerFlow();
+				return;
+			}
 			this.settingsManager.setProfileDefinition(
 				trimmed,
 				{
 					name: trimmed,
+					model: profileModel ?? undefined,
 					resources: {},
 				},
 				"directory",
@@ -7050,11 +7056,48 @@ export class InteractiveMode {
 			return this.createProfileFlow();
 		}
 
+		const profileModel = await this.selectProfileModelForCreate();
+		if (profileModel === undefined) {
+			this.ui.requestRender();
+			return;
+		}
+
 		// Open the resource editor on the NEW profile
-		void this.openNewProfileEditor(trimmed);
+		void this.openNewProfileEditor(trimmed, profileModel ?? undefined);
 	}
 
-	private async openNewProfileEditor(profileName: string): Promise<void> {
+	private async selectProfileModelForCreate(): Promise<string | null | undefined> {
+		const modelOptions = [
+			{
+				value: "(none)",
+				label: "(none)",
+				description: "Do not pin a foreground profile model; use the session/default model",
+			},
+			...this.getAutoLearnModelOptions(),
+		];
+
+		return await new Promise<string | null | undefined>((resolve) => {
+			this.showSelector((done) => {
+				const selector = new SelectSubmenu(
+					"Profile Model",
+					"Pick the foreground model for this profile from authenticated/configured providers.",
+					modelOptions,
+					"(none)",
+					(value) => {
+						done();
+						resolve(value === "(none)" ? null : value);
+					},
+					() => {
+						done();
+						resolve(undefined);
+					},
+				);
+				return { component: selector, focus: selector.getSelectList() };
+			});
+		});
+	}
+
+	private async openNewProfileEditor(profileName: string, profileModel?: string): Promise<void> {
 		const scope = "reusable-file";
 		const kinds = await this.getProfileResourceKinds();
 		this.showSelector((done) => {
@@ -7073,6 +7116,7 @@ export class InteractiveMode {
 							profileName,
 							{
 								name: profileName,
+								model: profileModel,
 								resources,
 							},
 							scope,
@@ -7092,17 +7136,17 @@ export class InteractiveMode {
 					const resolvedEditPath = resolveResourceEditPath(id, pathValue, kind);
 					if (!resolvedEditPath) {
 						this.showWarning(`Resource "${id}" of kind "${kind}" has no editable file path.`);
-						void this.openNewProfileEditor(profileName);
+						void this.openNewProfileEditor(profileName, profileModel);
 						return;
 					}
 					if (!fs.existsSync(resolvedEditPath)) {
 						this.showError(`Resolved path for "${id}" does not exist: ${resolvedEditPath}`);
-						void this.openNewProfileEditor(profileName);
+						void this.openNewProfileEditor(profileName, profileModel);
 						return;
 					}
 					await this.openEditorForPath(resolvedEditPath);
 					await this.handleReloadCommand();
-					void this.openNewProfileEditor(profileName);
+					void this.openNewProfileEditor(profileName, profileModel);
 				},
 			});
 			return { component: editor, focus: editor };

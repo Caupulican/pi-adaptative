@@ -198,6 +198,171 @@ describe("settings selector", () => {
 		expect(output).toContain("openai/gpt-5.4");
 	});
 
+	it("lists configured subscription and API models in the Model Router model pickers", () => {
+		const selector = new SettingsSelectorComponent(
+			makeConfig({
+				modelRouter: {
+					enabled: true,
+					cheapModel: "anthropic/claude-opus-4-5",
+					expensiveModel: "openai/gpt-5.4",
+					learningModel: "active",
+				},
+			}),
+			makeCallbacks(),
+		);
+
+		selector.getSettingsList().handleInput("model router");
+		selector.getSettingsList().handleInput("\r");
+		selector.getSettingsList().handleInput("\x1b[B");
+		selector.getSettingsList().handleInput("\x1b[B");
+		selector.getSettingsList().handleInput("\r");
+		const output = selector.render(180).join("\n");
+
+		expect(output).toContain("Cheap / Research Model");
+		expect(output).toContain("anthropic/claude-opus-4-5");
+		expect(output).toContain("subscription");
+		expect(output).toContain("openai/gpt-5.4");
+		expect(output).toContain("API key");
+		expect(output).toContain("Manual / custom");
+	});
+
+	it("persists selected configured models from the Model Router picker", () => {
+		const onModelRouterChange = vi.fn();
+		const selector = new SettingsSelectorComponent(
+			makeConfig({
+				modelRouter: {
+					enabled: true,
+					expensiveModel: "openai/gpt-5.4",
+					learningModel: "active",
+				},
+			}),
+			makeCallbacks({ onModelRouterChange }),
+		);
+
+		selector.getSettingsList().handleInput("model router");
+		selector.getSettingsList().handleInput("\r");
+		selector.getSettingsList().handleInput("\x1b[B");
+		selector.getSettingsList().handleInput("\x1b[B");
+		selector.getSettingsList().handleInput("\r");
+		selector.getSettingsList().handleInput("\x1b[B");
+		selector.getSettingsList().handleInput("\r");
+
+		expect(onModelRouterChange).toHaveBeenCalledWith(
+			{
+				enabled: true,
+				cheapModel: "anthropic/claude-opus-4-5",
+				expensiveModel: "openai/gpt-5.4",
+				learningModel: "active",
+			},
+			"global",
+		);
+	});
+
+	it("persists custom manual models from the Model Router picker fallback", () => {
+		const onModelRouterChange = vi.fn();
+		const selector = new SettingsSelectorComponent(
+			makeConfig({
+				modelRouter: {
+					enabled: true,
+					expensiveModel: "openai/gpt-5.4",
+					learningModel: "active",
+				},
+			}),
+			makeCallbacks({ onModelRouterChange }),
+		);
+
+		selector.getSettingsList().handleInput("model router");
+		selector.getSettingsList().handleInput("\r");
+		selector.getSettingsList().handleInput("\x1b[B");
+		selector.getSettingsList().handleInput("\x1b[B");
+		selector.getSettingsList().handleInput("\r");
+		selector.getSettingsList().handleInput("\x1b[B");
+		selector.getSettingsList().handleInput("\x1b[B");
+		selector.getSettingsList().handleInput("\x1b[B");
+		selector.getSettingsList().handleInput("\r");
+		selector.getSettingsList().handleInput("custom/provider-model");
+		selector.getSettingsList().handleInput("\r");
+
+		expect(onModelRouterChange).toHaveBeenCalledWith(
+			{
+				enabled: true,
+				cheapModel: "custom/provider-model",
+				expensiveModel: "openai/gpt-5.4",
+				learningModel: "active",
+			},
+			"global",
+		);
+	});
+
+	it("clears cheap model from the Model Router picker", () => {
+		const onModelRouterChange = vi.fn();
+		const selector = new SettingsSelectorComponent(
+			makeConfig({
+				modelRouter: {
+					enabled: true,
+					cheapModel: "openai/gpt-5.4",
+					expensiveModel: "openai/gpt-5.4",
+					learningModel: "active",
+				},
+			}),
+			makeCallbacks({ onModelRouterChange }),
+		);
+
+		selector.getSettingsList().handleInput("model router");
+		selector.getSettingsList().handleInput("\r");
+		selector.getSettingsList().handleInput("\x1b[B");
+		selector.getSettingsList().handleInput("\x1b[B");
+		selector.getSettingsList().handleInput("\r");
+		selector.getSettingsList().handleInput("\x1b[A");
+		selector.getSettingsList().handleInput("\x1b[A");
+		selector.getSettingsList().handleInput("\r");
+
+		expect(onModelRouterChange).toHaveBeenCalledWith(
+			{
+				enabled: true,
+				cheapModel: undefined,
+				expensiveModel: "openai/gpt-5.4",
+				learningModel: "active",
+			},
+			"global",
+		);
+	});
+
+	it("persists active for the Model Router learning model picker", () => {
+		const onModelRouterChange = vi.fn();
+		const selector = new SettingsSelectorComponent(
+			makeConfig({
+				modelRouter: {
+					enabled: true,
+					cheapModel: "openai/gpt-5.4",
+					expensiveModel: "openai/gpt-5.4",
+					learningModel: "anthropic/claude-opus-4-5",
+				},
+			}),
+			makeCallbacks({ onModelRouterChange }),
+		);
+
+		selector.getSettingsList().handleInput("model router");
+		selector.getSettingsList().handleInput("\r");
+		selector.getSettingsList().handleInput("\x1b[B");
+		selector.getSettingsList().handleInput("\x1b[B");
+		selector.getSettingsList().handleInput("\x1b[B");
+		selector.getSettingsList().handleInput("\x1b[B");
+		selector.getSettingsList().handleInput("\r");
+		selector.getSettingsList().handleInput("\x1b[A");
+		selector.getSettingsList().handleInput("\r");
+
+		expect(onModelRouterChange).toHaveBeenCalledWith(
+			{
+				enabled: true,
+				cheapModel: "openai/gpt-5.4",
+				expensiveModel: "openai/gpt-5.4",
+				learningModel: "active",
+			},
+			"global",
+		);
+	});
+
 	it("persists model router changes from its submenu", () => {
 		const onModelRouterChange = vi.fn();
 		const selector = new SettingsSelectorComponent(
