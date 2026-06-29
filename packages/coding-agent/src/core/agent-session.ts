@@ -53,6 +53,7 @@ import { formatNoApiKeyFoundMessage, formatNoModelSelectedMessage } from "./auth
 import { type BashResult, executeBashWithOperations } from "./bash-executor.ts";
 import {
 	type CompactionResult,
+	type CompactionSettings,
 	calculateContextTokens,
 	collectEntriesForBranchSummary,
 	compact,
@@ -199,6 +200,7 @@ export type AgentSessionEvent =
 	| { type: "compaction_start"; reason: "manual" | "threshold" | "overflow" }
 	| { type: "session_info_changed"; name: string | undefined }
 	| { type: "thinking_level_changed"; level: ThinkingLevel }
+	| { type: "warning"; message: string }
 	| {
 			type: "compaction_end";
 			reason: "manual" | "threshold" | "overflow";
@@ -490,6 +492,7 @@ export class AgentSession {
 	private _activeModelRouterIntent?: ModelRouterIntent;
 	private _modelRouterSessionBuffer?: ModelRouterSessionBuffer;
 	private _modelRouterEscalationRequested = false;
+	private _isModelRouterRetry = false;
 	private _lastModelRouterDecision?: ModelRouterDecisionStatus;
 	private _lastModelRouterSkipReason?: string;
 	private _lastModelRouterIntent?: ModelRouterIntent;
@@ -649,7 +652,7 @@ export class AgentSession {
 			const authoritativeMessages = this.agent.state.messages.length > 0 ? this.agent.state.messages : transformed;
 			let currentMessages = authoritativeMessages;
 			try {
-				const settings = this.settingsManager.getCompactionSettings();
+				const settings = this._getAdaptedCompactionSettings();
 				const contextWindow = this.model?.contextWindow ?? 0;
 				if (settings.enabled && contextWindow > 0 && !this.isCompacting) {
 					const contextTokens = this._estimateCurrentContextTokens(authoritativeMessages);
@@ -968,8 +971,15 @@ export class AgentSession {
 		// Emit to extensions first
 		await this._emitExtensionEvent(event);
 
+		const suppressRetryPromptEvent =
+			this._isModelRouterRetry &&
+			(event.type === "message_start" || event.type === "message_end") &&
+			(event.message.role === "user" || event.message.role === "custom");
+
 		// Notify all listeners
-		this._emit(event.type === "agent_end" ? { ...event, willRetry: this._willRetryAfterAgentEnd(event) } : event);
+		if (!suppressRetryPromptEvent) {
+			this._emit(event.type === "agent_end" ? { ...event, willRetry: this._willRetryAfterAgentEnd(event) } : event);
+		}
 
 		// Handle session/context retention. Tool result details are UI/log metadata,
 		// not provider-visible content, and large graph/search payloads can otherwise
@@ -1337,6 +1347,8 @@ export class AgentSession {
 		// Rebuild base system prompt with new tool set
 		this._baseSystemPrompt = this._rebuildSystemPrompt(validToolNames);
 		this.agent.state.systemPrompt = this._baseSystemPrompt;
+
+		this._checkContextWindowUsageWarning();
 	}
 
 	/** Whether compaction or branch summarization is currently running */
@@ -1702,14 +1714,19 @@ export class AgentSession {
 		}
 
 		if (retryModel && !thrownError) {
+			const previousIsModelRouterRetry = this._isModelRouterRetry;
 			try {
+				this._isModelRouterRetry = true;
 				await this._runAgentPromptWithModelRouter(messages, retryModel, "modify", false);
+				this._lastModelRouterDecision = completedDecision;
 			} catch (error) {
 				thrownError = error;
 				if (completedDecision) {
 					completedDecision = { ...completedDecision, outcome: "failed" };
 					this._lastModelRouterDecision = completedDecision;
 				}
+			} finally {
+				this._isModelRouterRetry = previousIsModelRouterRetry;
 			}
 		}
 
@@ -1891,6 +1908,8 @@ export class AgentSession {
 				}
 				throw new Error(formatNoApiKeyFoundMessage(requestModel.provider));
 			}
+
+			this._checkContextWindowUsageWarning();
 
 			// Check if we need to compact before sending (catches aborted responses).
 			// Do not call agent.continue() here: the next model turn must include the
@@ -2356,6 +2375,7 @@ export class AgentSession {
 		this.setThinkingLevel(thinkingLevel, { persistSettings });
 
 		await this._emitModelSelect(model, previousModel, "set");
+		this._checkContextWindowUsageWarning();
 	}
 
 	/**
@@ -2397,6 +2417,8 @@ export class AgentSession {
 
 		await this._emitModelSelect(next.model, currentModel, "cycle");
 
+		this._checkContextWindowUsageWarning();
+
 		return { model: next.model, thinkingLevel: this.thinkingLevel, isScoped: true };
 	}
 
@@ -2421,6 +2443,8 @@ export class AgentSession {
 		this.setThinkingLevel(thinkingLevel);
 
 		await this._emitModelSelect(nextModel, currentModel, "cycle");
+
+		this._checkContextWindowUsageWarning();
 
 		return { model: nextModel, thinkingLevel: this.thinkingLevel, isScoped: false };
 	}
@@ -2551,7 +2575,7 @@ export class AgentSession {
 			const { apiKey, headers } = await this._getCompactionRequestAuth(compactionModel);
 
 			const pathEntries = this.sessionManager.getBranch();
-			const settings = this.settingsManager.getCompactionSettings();
+			const settings = this._getAdaptedCompactionSettings();
 
 			const preparation = prepareCompaction(pathEntries, settings);
 			if (!preparation) {
@@ -2694,8 +2718,61 @@ export class AgentSession {
 	 * @param assistantMessage The assistant message to check
 	 * @param skipAbortedCheck If false, include aborted messages (for pre-prompt check). Default: true
 	 */
-	private async _checkCompaction(assistantMessage: AssistantMessage, skipAbortedCheck = true): Promise<boolean> {
+	private _getAdaptedCompactionSettings(): CompactionSettings {
 		const settings = this.settingsManager.getCompactionSettings();
+		if (!this.model) return settings;
+		const contextWindow = this.model.contextWindow ?? 0;
+		if (contextWindow <= 0) return settings;
+
+		// Adapt reserveTokens: at most 25% of context window
+		const maxReserve = Math.floor(contextWindow * 0.25);
+		const reserveTokens = Math.min(settings.reserveTokens, maxReserve);
+
+		// Adapt keepRecentTokens: at most 50% of context window
+		const maxKeepRecent = Math.floor(contextWindow * 0.5);
+		const keepRecentTokens = Math.min(settings.keepRecentTokens, maxKeepRecent);
+
+		return {
+			...settings,
+			reserveTokens,
+			keepRecentTokens,
+		};
+	}
+
+	private _checkContextWindowUsageWarning(): void {
+		if (!this.model) return;
+		const contextWindow = this.model.contextWindow ?? 0;
+		if (contextWindow <= 0) return;
+
+		const systemPromptTokens = Math.ceil((this.agent.state.systemPrompt ?? "").length / 4);
+
+		let toolsChars = 0;
+		for (const tool of this.agent.state.tools || []) {
+			toolsChars += tool.name.length;
+			toolsChars += tool.description?.length ?? 0;
+			if (tool.parameters) {
+				toolsChars += JSON.stringify(tool.parameters).length;
+			}
+		}
+		const toolsTokens = Math.ceil(toolsChars / 4);
+
+		const baseTokens = systemPromptTokens + toolsTokens;
+
+		if (baseTokens >= contextWindow) {
+			this._emit({
+				type: "warning",
+				message: `Base configuration (system prompt and active tools) consumes ${baseTokens} tokens, which exceeds the model's context window of ${contextWindow} tokens. The model cannot process any prompts in this state.`,
+			});
+		} else if (baseTokens >= contextWindow * 0.7) {
+			this._emit({
+				type: "warning",
+				message: `Base configuration (system prompt and active tools) consumes ${baseTokens} tokens (${Math.round((baseTokens / contextWindow) * 100)}% of the ${contextWindow} context window). This leaves very little room for conversation history and may cause immediate compaction or context overflow.`,
+			});
+		}
+	}
+
+	private async _checkCompaction(assistantMessage: AssistantMessage, skipAbortedCheck = true): Promise<boolean> {
+		const settings = this._getAdaptedCompactionSettings();
 		if (!settings.enabled) return false;
 
 		// Skip if message was aborted (user cancelled) - unless skipAbortedCheck is false
@@ -2790,7 +2867,7 @@ export class AgentSession {
 	 * Internal: Run auto-compaction with events.
 	 */
 	private async _runAutoCompaction(reason: "overflow" | "threshold", willRetry: boolean): Promise<boolean> {
-		const settings = this.settingsManager.getCompactionSettings();
+		const settings = this._getAdaptedCompactionSettings();
 
 		this._emit({ type: "compaction_start", reason });
 		this._autoCompactionAbortController = new AbortController();

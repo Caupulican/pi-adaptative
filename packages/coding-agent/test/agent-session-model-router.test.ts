@@ -1,9 +1,11 @@
-import type { AgentMessage, ThinkingLevel } from "@caupulican/pi-agent-core";
+import type { AgentMessage, AgentTool, ThinkingLevel } from "@caupulican/pi-agent-core";
 import type { AssistantMessage, Message, Model, Usage } from "@caupulican/pi-ai";
-import { getModel } from "@caupulican/pi-ai";
+import { fauxAssistantMessage, fauxToolCall, getModel } from "@caupulican/pi-ai";
+import { Type } from "typebox";
 import { describe, expect, it } from "vitest";
 import { AgentSession } from "../src/core/agent-session.ts";
 import { MODEL_ROUTER_DECISION_CUSTOM_TYPE, type ModelRouterDecisionStatus } from "../src/core/model-router/status.ts";
+import { createHarness } from "./suite/harness.ts";
 
 type RouterSettings = { enabled: boolean; cheapModel?: string; expensiveModel?: string };
 type RouterContext = {
@@ -42,6 +44,14 @@ type AgentSessionRouterPrototype = {
 const routerPrototype = AgentSession.prototype as unknown as AgentSessionRouterPrototype;
 const cheapModel = getModel("anthropic", "claude-haiku-4-5")!;
 const expensiveModel = getModel("anthropic", "claude-sonnet-4-5")!;
+const bashParameters = Type.Object({ command: Type.String() });
+const bashTool: AgentTool<typeof bashParameters> = {
+	name: "bash",
+	label: "Bash",
+	description: "Run a shell command",
+	parameters: bashParameters,
+	execute: async () => ({ content: [{ type: "text", text: "ok" }], details: {} }),
+};
 
 function createUsage(): Usage {
 	return {
@@ -72,6 +82,36 @@ function createContext(
 }
 
 describe("AgentSession model router turn selection", () => {
+	it("does not duplicate user message_start events and preserves escalated status after cheap-to-expensive retry", async () => {
+		const harness = await createHarness({
+			models: [{ id: "cheap" }, { id: "expensive" }],
+			tools: [bashTool],
+			settings: {
+				modelRouter: {
+					enabled: true,
+					cheapModel: "faux/cheap",
+					expensiveModel: "faux/expensive",
+				},
+			},
+		});
+		try {
+			harness.setResponses([
+				fauxAssistantMessage([fauxToolCall("bash", { command: "cp source target" })], { stopReason: "toolUse" }),
+				fauxAssistantMessage("retried on expensive"),
+			]);
+
+			await harness.session.prompt("Explain whether this command is safe: cp source target");
+
+			const userStarts = harness.eventsOfType("message_start").filter((event) => event.message.role === "user");
+			expect(userStarts).toHaveLength(1);
+			expect(harness.session.getModelRouterStatus()).toContain(
+				"research -> faux/cheap (escalated -> faux/expensive)",
+			);
+		} finally {
+			harness.cleanup();
+		}
+	});
+
 	it("does nothing when model routing is disabled", () => {
 		const selected = routerPrototype._resolveModelRouterTurnModel.call(
 			createContext({ enabled: false, cheapModel: "anthropic/claude-haiku-4-5" }),

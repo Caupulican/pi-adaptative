@@ -812,12 +812,15 @@ export class DefaultResourceLoader implements ResourceLoader {
 			for (const entryPath of externalExtensions) {
 				metadataByPath.set(entryPath, { source: "external", scope: "user", origin: "top-level" });
 			}
+			const activeProfilesForExt = this.settingsManager.getActiveResourceProfileNames();
+			const profileFilteredExternalExtensions =
+				activeProfilesForExt.length === 0 ? [] : filterPathsByProfile(externalExtensions, "extensions");
 
 			const extensionPaths = this.noExtensions
 				? cliEnabledExtensions
 				: this.mergePaths(cliEnabledExtensions, [
 						...filterPathsByProfile(enabledExtensions, "extensions"),
-						...filterPathsByProfile(externalExtensions, "extensions"),
+						...profileFilteredExternalExtensions,
 					]);
 
 			const extensionsResult = await loadExtensions(extensionPaths, this.cwd, this.eventBus);

@@ -1,5 +1,15 @@
 ## [Unreleased]
 
+### Added
+
+- Added dynamic token estimation checks for model context windows, warning the user if the base configuration (system prompt and tools) uses more than 70% of the context window.
+
+### Fixed
+
+- Fixed adaptive scaling of compaction parameters (`reserveTokens` and `keepRecentTokens`) for models with small context windows to avoid immediate auto-compaction loops.
+- Fixed a scope redeclaration issue with `activeProfileNames` in the resource loader.
+
+
 ## [0.80.85] - 2026-06-29
 
 ### Fixed

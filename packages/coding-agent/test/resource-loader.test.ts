@@ -447,6 +447,24 @@ Content`,
 			expect(activePromptNames).toContain("allowed");
 		});
 
+		it("should suppress external root extensions at load time when no resource profile is active", async () => {
+			const root = join(tempDir, "catalog-no-profile");
+			mkdirSync(join(root, "extensions", "should-not-load"), { recursive: true });
+			writeFileSync(join(root, "extensions", "should-not-load", "index.ts"), "export default (pi) => {};");
+
+			const settingsManager = SettingsManager.inMemory({
+				externalResourceRoots: [root],
+				trustedResourceRoots: [root],
+				activeResourceProfiles: [],
+			});
+
+			const loader = new DefaultResourceLoader({ cwd, agentDir, settingsManager });
+			await loader.reload();
+
+			const extPaths = loader.getExtensions().extensions.map((e) => e.path);
+			expect(extPaths.some((p) => p.includes(join("extensions", "should-not-load")))).toBe(false);
+		});
+
 		it("should apply resource profiles selected by a trusted external root settings file", async () => {
 			const root = join(tempDir, "catalog-settings");
 			mkdirSync(join(root, "extensions", "allowed-tool"), { recursive: true });
@@ -940,7 +958,7 @@ Content`,
 			settingsManager.setExternalResourceRoots([extRoot], "global");
 			settingsManager.addTrustedResourceRoot(extRoot, "global");
 			await settingsManager.flush();
-
+			settingsManager.setRuntimeResourceProfiles(["default"]);
 			const loader = new DefaultResourceLoader({ cwd, agentDir, settingsManager });
 			await loader.reload();
 

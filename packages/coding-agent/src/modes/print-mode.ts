@@ -118,6 +118,8 @@ export async function runPrintMode(runtimeHost: AgentSessionRuntime, options: Pr
 		unsubscribe = session.subscribe((event) => {
 			if (mode === "json") {
 				writeRawStdout(`${JSON.stringify(event)}\n`);
+			} else if (event.type === "warning") {
+				console.warn(`Warning: ${event.message}`);
 			}
 		});
 	};

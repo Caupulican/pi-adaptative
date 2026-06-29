@@ -3381,6 +3381,10 @@ export class InteractiveMode {
 				this.updateEditorBorderColor();
 				break;
 
+			case "warning":
+				this.showWarning(event.message);
+				break;
+
 			case "message_start":
 				if (event.message.role === "custom") {
 					this.addMessageToChat(event.message);
