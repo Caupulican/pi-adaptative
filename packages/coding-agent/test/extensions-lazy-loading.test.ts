@@ -154,6 +154,10 @@ describe("lazy extension loading", () => {
 		writeLazyPackage(tempDir, "b", "lazy_b", "B");
 		const agentDir = tempDir;
 		const settingsManager = SettingsManager.create(tempDir, agentDir);
+		settingsManager.addInlineResourceProfileDefinitions({
+			"lazy-test": { extensions: { allow: ["extensions/*/index.ts"] } },
+		});
+		settingsManager.setRuntimeResourceProfiles(["lazy-test"]);
 		const resourceLoader = new DefaultResourceLoader({ cwd: tempDir, agentDir, settingsManager });
 		await resourceLoader.reload();
 		const sessionManager = SessionManager.inMemory(tempDir);

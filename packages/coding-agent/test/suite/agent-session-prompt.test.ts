@@ -257,6 +257,7 @@ describe("AgentSession prompt characterization", () => {
 	it("does not expose or dispatch extension commands when no resource profile is active", async () => {
 		const commandRuns: string[] = [];
 		const harness = await createHarness({
+			settings: { activeResourceProfiles: [] },
 			extensionFactories: [
 				(pi) => {
 					pi.registerCommand("testcmd", {

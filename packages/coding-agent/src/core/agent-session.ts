@@ -3255,7 +3255,11 @@ export class AgentSession {
 	}
 
 	private _filterExtensionsForRuntime(extensions: Extension[]): Extension[] {
-		if (this.settingsManager.getActiveResourceProfileNames().length === 0) return [];
+		if (this.settingsManager.getActiveResourceProfileNames().length === 0) {
+			return this.settingsManager.hasExplicitActiveResourceProfileSelection()
+				? []
+				: extensions.filter((extension) => extension.sourceInfo.source === "inline");
+		}
 		const hasToolOrCommandGate = this._hasToolOrCommandProfileGate();
 		return extensions
 			.filter((extension) =>

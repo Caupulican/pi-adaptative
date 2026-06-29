@@ -30,7 +30,10 @@ describe("AgentSession dynamic provider registration", () => {
 		extensionFactories: ExtensionFactory[],
 		options: { enableExtensionProfile?: boolean; restrictTools?: boolean } = {},
 	) {
-		const settingsManager = SettingsManager.create(tempDir, agentDir);
+		const settingsManager =
+			options.enableExtensionProfile === false
+				? SettingsManager.inMemory({ activeResourceProfiles: [] })
+				: SettingsManager.create(tempDir, agentDir);
 		if (options.enableExtensionProfile ?? true) {
 			settingsManager.addInlineResourceProfileDefinitions({
 				"with-extension": {

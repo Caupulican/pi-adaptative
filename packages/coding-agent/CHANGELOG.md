@@ -15,6 +15,7 @@
 - Fixed profile-gated extension runtimes to preserve allowed provider-only, handler-only, shortcut-only,
   and renderer-only extensions even when the active profile also restricts tools or slash commands.
 - Fixed explicit empty active profile selections so they suppress trusted external-root profile fallback.
+- Fixed no-profile extension gating to preserve explicitly supplied SDK inline extension factories while still suppressing configured/discovered extensions unless a profile selects them.
 
 ## [0.80.84] - 2026-06-29
 

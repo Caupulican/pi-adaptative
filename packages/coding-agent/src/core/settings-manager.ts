@@ -914,6 +914,10 @@ export class SettingsManager {
 			: this.getExternalRootActiveResourceProfileNames();
 	}
 
+	hasExplicitActiveResourceProfileSelection(): boolean {
+		return hasExplicitActiveResourceProfileSelection(this.settings);
+	}
+
 	getResourceProfileFilter(kind: ResourceProfileKind): Required<ResourceProfileFilterSettings> {
 		const legacyFilter = mergeResourceProfileFilters(
 			collectLegacyDisabledFilterFromSettings(this.globalSettings, kind),
