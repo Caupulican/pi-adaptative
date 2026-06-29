@@ -37,7 +37,7 @@ function makeConfig(overrides: Partial<SettingsConfig> = {}): SettingsConfig {
 		showTerminalProgress: false,
 		warnings: {},
 		selfModification: { enabled: false },
-		autonomy: { mode: "off" },
+		autonomy: { mode: "off", maxStallTurns: 20 },
 		modelRouter: {},
 		autoLearn: {},
 		currentModelPattern: "openai/gpt-5.4",
@@ -115,13 +115,33 @@ describe("settings selector", () => {
 	});
 
 	it("exposes autonomy mode settings in the searchable settings TUI", () => {
-		const selector = new SettingsSelectorComponent(makeConfig({ autonomy: { mode: "full" } }), makeCallbacks());
+		const selector = new SettingsSelectorComponent(
+			makeConfig({ autonomy: { mode: "full", maxStallTurns: 20 } }),
+			makeCallbacks(),
+		);
 
 		selector.getSettingsList().handleInput("autonomy");
 		const output = selector.render(140).join("\n");
 
 		expect(output).toContain("Autonomy");
 		expect(output).toContain("standing autonomy");
+		expect(output).toContain("20 rounds");
+	});
+
+	it("persists goal loop rounds from the Autonomy submenu", () => {
+		const onAutonomyChange = vi.fn();
+		const selector = new SettingsSelectorComponent(
+			makeConfig({ autonomy: { mode: "balanced", maxStallTurns: 20 } }),
+			makeCallbacks({ onAutonomyChange }),
+		);
+
+		selector.getSettingsList().handleInput("autonomy");
+		selector.getSettingsList().handleInput("\r");
+		selector.getSettingsList().handleInput("\x1b[B");
+		selector.getSettingsList().handleInput("\x1b[B");
+		selector.getSettingsList().handleInput("\r");
+
+		expect(onAutonomyChange).toHaveBeenCalledWith({ mode: "balanced", maxStallTurns: 30 }, "global");
 	});
 
 	it("exposes Auto Learn model settings in the searchable settings TUI", () => {

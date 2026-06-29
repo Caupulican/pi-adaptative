@@ -6012,6 +6012,7 @@ export class InteractiveMode {
 		return [
 			"Autonomy status",
 			`Mode: ${autonomy.mode}${autonomy.mode === "full" ? " (standing autonomy)" : ""}`,
+			`Goal loop rounds: ${autonomy.maxStallTurns}`,
 			`Auto Learn: ${settings.enabled ? "enabled" : "disabled"}; model=${settings.model}; applyHighConfidence=${settings.applyHighConfidence}`,
 			`Long-session trigger: ${settings.longSessionMessages} messages or ${settings.longSessionContextPercent}% context; cooldown=${settings.cooldownMinutes}m`,
 			reflectionLine,
@@ -6028,7 +6029,7 @@ export class InteractiveMode {
 	private applyAutonomyMode(mode: AutonomyMode, scope: SettingsScope = "global"): void {
 		const currentAutoLearn = this.settingsManager.getAutoLearnSettings();
 		const preset = this.getAutoLearnPresetForAutonomyMode(mode, currentAutoLearn);
-		this.settingsManager.setAutonomySettings({ mode }, scope);
+		this.settingsManager.setAutonomySettings({ ...this.settingsManager.getAutonomySettings(), mode }, scope);
 		this.settingsManager.setAutoLearnSettings(preset, scope);
 		this.updateAutoLearnFooter();
 	}

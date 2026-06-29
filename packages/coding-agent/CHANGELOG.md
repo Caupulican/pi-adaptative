@@ -1,5 +1,10 @@
 ## [Unreleased]
 
+### Added
+
+- Added a configurable `autonomy.maxStallTurns` setting, defaulting to 20, that caps foreground
+  goal-loop provider rounds and is editable from `/settings` → **Autonomy**.
+
 ## [0.80.83] - 2026-06-28
 
 ### Changed

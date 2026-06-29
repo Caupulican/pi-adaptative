@@ -112,6 +112,7 @@ export interface AgentOptions {
 	thinkingBudgets?: ThinkingBudgets;
 	transport?: Transport;
 	maxRetryDelayMs?: number;
+	maxStallTurns?: number;
 	toolExecution?: ToolExecutionMode;
 }
 
@@ -195,6 +196,8 @@ export class Agent {
 	public transport: Transport;
 	/** Optional cap for provider-requested retry delays. */
 	public maxRetryDelayMs?: number;
+	/** Runaway-loop backstop for repeated identical tool-call turns. */
+	public maxStallTurns?: number;
 	/** Tool execution strategy for assistant messages that contain multiple tool calls. */
 	public toolExecution: ToolExecutionMode;
 
@@ -215,6 +218,7 @@ export class Agent {
 		this.thinkingBudgets = options.thinkingBudgets;
 		this.transport = options.transport ?? "auto";
 		this.maxRetryDelayMs = options.maxRetryDelayMs;
+		this.maxStallTurns = options.maxStallTurns;
 		this.toolExecution = options.toolExecution ?? "parallel";
 	}
 
@@ -430,6 +434,7 @@ export class Agent {
 			transport: this.transport,
 			thinkingBudgets: this.thinkingBudgets,
 			maxRetryDelayMs: this.maxRetryDelayMs,
+			maxStallTurns: this.maxStallTurns,
 			toolExecution: this.toolExecution,
 			beforeToolCall: this.beforeToolCall,
 			afterToolCall: this.afterToolCall,

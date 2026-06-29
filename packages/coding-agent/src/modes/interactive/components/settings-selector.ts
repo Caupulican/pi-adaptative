@@ -23,6 +23,7 @@ import type {
 	SettingsScope,
 	WarningSettings,
 } from "../../../core/settings-manager.ts";
+import { DEFAULT_AUTONOMY_MAX_STALL_TURNS } from "../../../core/settings-manager.ts";
 import { getSelectListTheme, getSettingsListTheme, theme } from "../theme/theme.ts";
 import { DynamicBorder } from "./dynamic-border.ts";
 import { keyDisplayText } from "./keybinding-hints.ts";
@@ -45,6 +46,7 @@ const THINKING_DESCRIPTIONS: Record<ThinkingLevel, string> = {
 };
 
 const AUTONOMY_MODES: AutonomyMode[] = ["off", "safe", "balanced", "full"];
+const AUTONOMY_MAX_STALL_TURN_VALUES = ["0", "5", "10", "20", "30", "50"];
 
 const AUTO_LEARN_DEFAULTS = {
 	model: "active",
@@ -95,7 +97,14 @@ function autonomyModeValue(settings: AutonomySettings): AutonomyMode {
 
 function autonomySummary(settings: AutonomySettings): string {
 	const mode = autonomyModeValue(settings);
-	return mode === "full" ? "standing autonomy" : mode;
+	const rounds = settings.maxStallTurns ?? DEFAULT_AUTONOMY_MAX_STALL_TURNS;
+	const modeLabel = mode === "full" ? "standing autonomy" : mode;
+	return `${modeLabel}, ${rounds} rounds`;
+}
+
+function autonomyMaxStallTurnsValue(settings: AutonomySettings): string {
+	const rounds = settings.maxStallTurns ?? DEFAULT_AUTONOMY_MAX_STALL_TURNS;
+	return String(rounds);
 }
 
 function autoLearnSummary(settings: AutoLearnSettings): string {
@@ -516,7 +525,10 @@ class AutonomySettingsSubmenu extends Container {
 		scope: SettingsScope = "global",
 	) {
 		super();
-		this.state = { mode: autonomyModeValue(settings) };
+		this.state = {
+			mode: autonomyModeValue(settings),
+			maxStallTurns: settings.maxStallTurns ?? DEFAULT_AUTONOMY_MAX_STALL_TURNS,
+		};
 		this.scope = scope;
 
 		const items: SettingItem[] = [
@@ -534,6 +546,13 @@ class AutonomySettingsSubmenu extends Container {
 				currentValue: autonomyModeValue(this.state),
 				values: AUTONOMY_MODES,
 			},
+			{
+				id: "autonomy-goal-loop-rounds",
+				label: "Goal loop rounds",
+				description: "Maximum provider rounds in one foreground goal loop before Pi stops continuing",
+				currentValue: autonomyMaxStallTurnsValue(this.state),
+				values: AUTONOMY_MAX_STALL_TURN_VALUES,
+			},
 		];
 
 		this.settingsList = new SettingsList(
@@ -547,6 +566,9 @@ class AutonomySettingsSubmenu extends Container {
 						break;
 					case "autonomy-mode":
 						this.state = { ...this.state, mode: newValue as AutonomyMode };
+						break;
+					case "autonomy-goal-loop-rounds":
+						this.state = { ...this.state, maxStallTurns: Number(newValue) };
 						break;
 					default:
 						return;

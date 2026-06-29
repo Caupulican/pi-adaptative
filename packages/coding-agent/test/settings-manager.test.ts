@@ -219,13 +219,34 @@ describe("SettingsManager", () => {
 		it("should default to off and persist full mode", async () => {
 			const manager = SettingsManager.create(projectDir, agentDir);
 
-			expect(manager.getAutonomySettings()).toEqual({ mode: "off" });
+			expect(manager.getAutonomySettings()).toEqual({ mode: "off", maxStallTurns: 20 });
 
-			manager.setAutonomySettings({ mode: "full" });
+			manager.setAutonomySettings({ mode: "full", maxStallTurns: 30 });
 			await manager.flush();
 
 			const savedSettings = JSON.parse(readFileSync(join(agentDir, "settings.json"), "utf-8"));
-			expect(savedSettings.autonomy).toEqual({ mode: "full" });
+			expect(savedSettings.autonomy).toEqual({ mode: "full", maxStallTurns: 30 });
+			expect(manager.getAutonomySettings()).toEqual({ mode: "full", maxStallTurns: 30 });
+		});
+
+		it("should preserve zero and sanitize invalid max stall turn settings to the default", () => {
+			writeFileSync(
+				join(agentDir, "settings.json"),
+				JSON.stringify({ autonomy: { mode: "balanced", maxStallTurns: 0 } }),
+			);
+
+			let manager = SettingsManager.create(projectDir, agentDir);
+
+			expect(manager.getAutonomySettings()).toEqual({ mode: "balanced", maxStallTurns: 0 });
+
+			writeFileSync(
+				join(agentDir, "settings.json"),
+				JSON.stringify({ autonomy: { mode: "balanced", maxStallTurns: -1 } }),
+			);
+
+			manager = SettingsManager.create(projectDir, agentDir);
+
+			expect(manager.getAutonomySettings()).toEqual({ mode: "balanced", maxStallTurns: 20 });
 		});
 	});
 

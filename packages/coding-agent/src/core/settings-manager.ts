@@ -106,8 +106,11 @@ export interface AutoLearnSettings {
 
 export type AutonomyMode = "off" | "safe" | "balanced" | "full";
 
+export const DEFAULT_AUTONOMY_MAX_STALL_TURNS = 20;
+
 export interface AutonomySettings {
 	mode?: AutonomyMode; // default: off; presets drive Auto Learn/reflection without many knobs
+	maxStallTurns?: number; // default: 20; maximum provider rounds in one foreground goal loop
 }
 
 export interface ModelRouterSettings {
@@ -2294,9 +2297,14 @@ export class SettingsManager {
 		this.save();
 	}
 
-	getAutonomySettings(): { mode: AutonomyMode } {
+	getAutonomySettings(): { mode: AutonomyMode; maxStallTurns: number } {
 		const mode = this.settings.autonomy?.mode;
-		return { mode: mode === "safe" || mode === "balanced" || mode === "full" ? mode : "off" };
+		const configuredRounds = this.settings.autonomy?.maxStallTurns;
+		const maxStallTurns =
+			typeof configuredRounds === "number" && Number.isInteger(configuredRounds) && configuredRounds >= 0
+				? configuredRounds
+				: DEFAULT_AUTONOMY_MAX_STALL_TURNS;
+		return { mode: mode === "safe" || mode === "balanced" || mode === "full" ? mode : "off", maxStallTurns };
 	}
 
 	setAutonomySettings(settings: AutonomySettings, scope: SettingsScope = "global"): void {

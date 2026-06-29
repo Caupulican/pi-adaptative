@@ -1553,9 +1553,13 @@ export class AgentSession {
 
 	private async _runAgentPrompt(messages: AgentMessage | AgentMessage[]): Promise<void> {
 		try {
+			const maxGoalLoopRounds = this.settingsManager.getAutonomySettings().maxStallTurns;
+			this.agent.maxStallTurns = maxGoalLoopRounds;
+			let goalLoopRounds = 1;
 			await this.agent.prompt(messages);
-			while (await this._handlePostAgentRun()) {
+			while ((maxGoalLoopRounds === 0 || goalLoopRounds < maxGoalLoopRounds) && (await this._handlePostAgentRun())) {
 				await this.agent.continue();
+				goalLoopRounds++;
 			}
 		} finally {
 			this._flushPendingBashMessages();

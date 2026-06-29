@@ -97,15 +97,17 @@ The agent is instructed to edit only that source checkout, preserve unrelated ch
 | Setting | Type | Default | Description |
 |---------|------|---------|-------------|
 | `autonomy.mode` | string | `"off"` | Low-config autonomy preset: `"off"`, `"safe"`, `"balanced"`, or `"full"` |
+| `autonomy.maxStallTurns` | number | `20` | Maximum provider rounds in one foreground goal loop before Pi stops continuing |
 
-Use `/settings` → **Autonomy** or `/autonomy off|safe|balanced|full` to choose one preset instead of tuning all Auto Learn knobs. `full` is the standing-autonomy mode: it schedules post-turn reflection whenever concurrency allows and grants autonomous authority for high-confidence memory writes, user/project skill creation or patching, small user/project extension/tool improvements, autonomy/Auto Learn setting tuning, and edits under the authorized `selfModification.sourcePath` when validation and rollback evidence are recorded.
+Use `/settings` → **Autonomy** to choose one preset and the foreground goal-loop round budget, or `/autonomy off|safe|balanced|full` to switch the preset while preserving the configured round budget. `full` is the standing-autonomy mode: it schedules post-turn reflection whenever concurrency allows and grants autonomous authority for high-confidence memory writes, user/project skill creation or patching, small user/project extension/tool improvements, autonomy/Auto Learn setting tuning, and edits under the authorized `selfModification.sourcePath` when validation and rollback evidence are recorded.
 
 Hard stops still require explicit foreground approval even in `full`: publishing, npm release, git push, tag creation, credential changes, destructive user-data deletion, network-exposed services, or authority expansion beyond this policy. `/autonomy status` shows the active grant and the Auto Learn audit/log directory.
 
 ```json
 {
   "autonomy": {
-    "mode": "balanced"
+    "mode": "balanced",
+    "maxStallTurns": 20
   }
 }
 ```

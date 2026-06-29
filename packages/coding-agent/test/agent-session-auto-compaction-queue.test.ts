@@ -1,6 +1,7 @@
 import { existsSync, mkdirSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
+import type { AgentMessage } from "@caupulican/pi-agent-core";
 import { Agent } from "@caupulican/pi-agent-core";
 import { type AssistantMessage, getModel } from "@caupulican/pi-ai";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
@@ -61,6 +62,7 @@ vi.mock("../src/core/compaction/index.js", () => ({
 describe("AgentSession auto-compaction queue resume", () => {
 	let session: AgentSession;
 	let sessionManager: SessionManager;
+	let settingsManager: SettingsManager;
 	let tempDir: string;
 
 	beforeEach(() => {
@@ -78,7 +80,7 @@ describe("AgentSession auto-compaction queue resume", () => {
 		});
 
 		sessionManager = SessionManager.inMemory();
-		const settingsManager = SettingsManager.create(tempDir, tempDir);
+		settingsManager = SettingsManager.create(tempDir, tempDir);
 		const authStorage = AuthStorage.create(join(tempDir, "auth.json"));
 		authStorage.setRuntimeApiKey("anthropic", "test-key");
 		const modelRegistry = ModelRegistry.create(authStorage, tempDir);
@@ -125,6 +127,56 @@ describe("AgentSession auto-compaction queue resume", () => {
 		await expect(runAutoCompaction("threshold", false)).resolves.toBe(true);
 
 		expect(continueSpy).not.toHaveBeenCalled();
+	});
+
+	it("should cap the agent continuation loop using autonomy goal loop rounds", async () => {
+		settingsManager.setAutonomySettings({ mode: "full", maxStallTurns: 3 });
+		const promptSpy = vi.spyOn(session.agent, "prompt").mockResolvedValue();
+		const continueSpy = vi.spyOn(session.agent, "continue").mockResolvedValue();
+		const internals = session as unknown as {
+			_runAgentPrompt: (messages: AgentMessage | AgentMessage[]) => Promise<void>;
+			_handlePostAgentRun: () => Promise<boolean>;
+		};
+		vi.spyOn(internals, "_handlePostAgentRun")
+			.mockResolvedValueOnce(true)
+			.mockResolvedValueOnce(true)
+			.mockResolvedValueOnce(true)
+			.mockResolvedValueOnce(true)
+			.mockResolvedValueOnce(false);
+
+		await internals._runAgentPrompt({
+			role: "user",
+			content: [{ type: "text", text: "keep working" }],
+			timestamp: Date.now(),
+		});
+
+		expect(promptSpy).toHaveBeenCalledTimes(1);
+		expect(session.agent.maxStallTurns).toBe(3);
+		expect(continueSpy).toHaveBeenCalledTimes(2);
+	});
+
+	it("should treat zero autonomy max stall turns as unlimited foreground continuations", async () => {
+		settingsManager.setAutonomySettings({ mode: "full", maxStallTurns: 0 });
+		vi.spyOn(session.agent, "prompt").mockResolvedValue();
+		const continueSpy = vi.spyOn(session.agent, "continue").mockResolvedValue();
+		const internals = session as unknown as {
+			_runAgentPrompt: (messages: AgentMessage | AgentMessage[]) => Promise<void>;
+			_handlePostAgentRun: () => Promise<boolean>;
+		};
+		vi.spyOn(internals, "_handlePostAgentRun")
+			.mockResolvedValueOnce(true)
+			.mockResolvedValueOnce(true)
+			.mockResolvedValueOnce(true)
+			.mockResolvedValueOnce(false);
+
+		await internals._runAgentPrompt({
+			role: "user",
+			content: [{ type: "text", text: "keep working" }],
+			timestamp: Date.now(),
+		});
+
+		expect(session.agent.maxStallTurns).toBe(0);
+		expect(continueSpy).toHaveBeenCalledTimes(3);
 	});
 
 	it("should compact between tool-loop turns before the next provider request", async () => {
