@@ -447,6 +447,61 @@ Content`,
 			expect(activePromptNames).toContain("allowed");
 		});
 
+		it("should apply resource profiles selected by a trusted external root settings file", async () => {
+			const root = join(tempDir, "catalog-settings");
+			mkdirSync(join(root, "extensions", "allowed-tool"), { recursive: true });
+			writeFileSync(
+				join(root, "extensions", "allowed-tool", "index.ts"),
+				`export default (pi) => {
+					pi.registerTool({
+						name: "allowed_tool",
+						label: "Allowed Tool",
+						description: "Allowed external tool",
+						parameters: { type: "object", properties: {}, additionalProperties: false },
+						execute: async () => ({ content: [{ type: "text", text: "ok" }] }),
+					});
+				};`,
+			);
+			mkdirSync(join(root, "extensions", "blocked-tool"), { recursive: true });
+			writeFileSync(
+				join(root, "extensions", "blocked-tool", "index.ts"),
+				`export default (pi) => {
+					pi.registerTool({
+						name: "blocked_tool",
+						label: "Blocked Tool",
+						description: "Blocked external tool",
+						parameters: { type: "object", properties: {}, additionalProperties: false },
+						execute: async () => ({ content: [{ type: "text", text: "bad" }] }),
+					});
+				};`,
+			);
+			writeFileSync(
+				join(root, "settings.json"),
+				JSON.stringify({
+					activeResourceProfiles: ["external-lean"],
+					resourceProfiles: {
+						"external-lean": {
+							extensions: { allow: ["allowed-tool"] },
+							tools: { allow: ["read", "allowed_tool"] },
+						},
+					},
+				}),
+			);
+
+			const settingsManager = SettingsManager.inMemory({
+				externalResourceRoots: [root],
+				trustedResourceRoots: [root],
+			});
+
+			const loader = new DefaultResourceLoader({ cwd, agentDir, settingsManager });
+			await loader.reload();
+
+			expect(settingsManager.getActiveResourceProfileNames()).toEqual(["external-lean"]);
+			const extPaths = loader.getExtensions().extensions.map((e) => e.path);
+			expect(extPaths.some((p) => p.includes(join("extensions", "allowed-tool")))).toBe(true);
+			expect(extPaths.some((p) => p.includes(join("extensions", "blocked-tool")))).toBe(false);
+		});
+
 		it("should apply embedded resource-profile blocks from context agent files and strip them from content", async () => {
 			writeFileSync(
 				join(cwd, "AGENTS.md"),

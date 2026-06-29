@@ -386,6 +386,15 @@ function createHarnessWithResourceLoader(
 
 	if (options.settings) {
 		settingsManager.applyOverrides(options.settings);
+		if (options.settings.resourceProfiles) {
+			settingsManager.addInlineResourceProfileDefinitions(options.settings.resourceProfiles);
+		}
+		const activeProfiles = options.settings.activeResourceProfiles ?? options.settings.activeResourceProfile;
+		if (typeof activeProfiles === "string") {
+			settingsManager.setRuntimeResourceProfiles([activeProfiles]);
+		} else if (Array.isArray(activeProfiles)) {
+			settingsManager.setRuntimeResourceProfiles(activeProfiles);
+		}
 	}
 
 	const authStorage = AuthStorage.create(join(tempDir, "auth.json"));

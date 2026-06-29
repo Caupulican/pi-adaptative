@@ -326,11 +326,19 @@ function normalizeResourceProfileNames(value: unknown): string[] {
 	return [...new Set(values)];
 }
 
+function hasExplicitActiveResourceProfileSelection(settings: Settings): boolean {
+	return Object.hasOwn(settings, "activeResourceProfiles") || Object.hasOwn(settings, "activeResourceProfile");
+}
+
 function normalizeActiveResourceProfiles(settings: Settings): string[] {
 	const explicitProfiles = normalizeResourceProfileNames(settings.activeResourceProfiles);
 	const values =
 		explicitProfiles.length > 0 ? explicitProfiles : normalizeResourceProfileNames(settings.activeResourceProfile);
-	if (values.length === 0 && settings.resourceProfiles?.default) {
+	if (
+		values.length === 0 &&
+		!hasExplicitActiveResourceProfileSelection(settings) &&
+		settings.resourceProfiles?.default
+	) {
 		values.push("default");
 	}
 	return [...new Set(values)];
@@ -666,7 +674,25 @@ export class SettingsManager {
 				: this.settings.activeResourceProfile
 					? [this.settings.activeResourceProfile]
 					: [];
-		return normalizeResourceProfileNames(explicitProfiles);
+		const names = normalizeResourceProfileNames(explicitProfiles);
+		return names.length > 0 || hasExplicitActiveResourceProfileSelection(this.settings)
+			? names
+			: this.getExternalRootActiveResourceProfileNames();
+	}
+
+	private getExternalRootActiveResourceProfileNames(): string[] {
+		const names: string[] = [];
+		for (const root of this.getEffectiveExternalResourceRoots()) {
+			try {
+				const settingsPath = join(root, "settings.json");
+				if (!existsSync(settingsPath)) continue;
+				const parsed = JSON.parse(readFileSync(settingsPath, "utf-8")) as Settings;
+				names.push(...normalizeActiveResourceProfiles(parsed));
+			} catch {
+				// External-root settings are optional; ignore malformed files for active-profile fallback.
+			}
+		}
+		return [...new Set(names)];
 	}
 
 	private refreshProfileRegistry(): void {
@@ -882,7 +908,10 @@ export class SettingsManager {
 		if (this.runtimeResourceProfiles && this.runtimeResourceProfiles.length > 0) {
 			return [...this.runtimeResourceProfiles];
 		}
-		return normalizeActiveResourceProfiles(this.settings);
+		const names = normalizeActiveResourceProfiles(this.settings);
+		return names.length > 0 || hasExplicitActiveResourceProfileSelection(this.settings)
+			? names
+			: this.getExternalRootActiveResourceProfileNames();
 	}
 
 	getResourceProfileFilter(kind: ResourceProfileKind): Required<ResourceProfileFilterSettings> {

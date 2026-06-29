@@ -6,12 +6,22 @@ import { downgradeReasoning, estimateTurnCostUsd, evaluateCostGuard } from "../s
  * submitting, and trip a warn/downgrade decision over a user ceiling. Disabled by default.
  */
 describe("estimateTurnCostUsd", () => {
-	// Per-token prices (e.g. $3/M input, $15/M output, $0.30/M cache-read).
-	const cost = { input: 3e-6, output: 15e-6, cacheRead: 0.3e-6, cacheWrite: 3.75e-6 };
+	// Model costs are dollars per million tokens (e.g. $3/M input, $15/M output, $0.30/M cache-read).
+	const cost = { input: 3, output: 15, cacheRead: 0.3, cacheWrite: 3.75 };
 
 	it("bills full input + max output", () => {
 		const usd = estimateTurnCostUsd({ inputTokens: 100_000, maxOutputTokens: 4_000, cost });
 		expect(usd).toBeCloseTo(100_000 * 3e-6 + 4_000 * 15e-6, 9); // 0.30 + 0.06 = 0.36
+	});
+
+	it("does not inflate per-million model costs into per-token costs", () => {
+		const usd = estimateTurnCostUsd({
+			inputTokens: 272_000,
+			maxOutputTokens: 128_000,
+			cost: { input: 15, output: 120 },
+		});
+
+		expect(usd).toBeCloseTo(19.44, 9);
 	});
 
 	it("bills cached input at the cache-read rate", () => {

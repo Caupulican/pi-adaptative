@@ -261,6 +261,12 @@ describe("test harness", () => {
 		const calls: string[] = [];
 
 		harness = await createHarnessWithExtensions({
+			settings: {
+				activeResourceProfile: "with-extensions",
+				resourceProfiles: {
+					"with-extensions": { extensions: { allow: ["<alpha>", "<beta>"] } },
+				},
+			},
 			extensionFactories: [
 				{
 					path: "<alpha>",

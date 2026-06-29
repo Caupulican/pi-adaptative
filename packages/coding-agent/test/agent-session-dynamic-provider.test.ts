@@ -26,8 +26,20 @@ describe("AgentSession dynamic provider registration", () => {
 		}
 	});
 
-	async function createSession(extensionFactories: ExtensionFactory[]) {
+	async function createSession(
+		extensionFactories: ExtensionFactory[],
+		options: { enableExtensionProfile?: boolean; restrictTools?: boolean } = {},
+	) {
 		const settingsManager = SettingsManager.create(tempDir, agentDir);
+		if (options.enableExtensionProfile ?? true) {
+			settingsManager.addInlineResourceProfileDefinitions({
+				"with-extension": {
+					extensions: { allow: ["<inline:1>"] },
+					...(options.restrictTools ? { tools: { allow: ["read"] } } : {}),
+				},
+			});
+			settingsManager.setRuntimeResourceProfiles(["with-extension"]);
+		}
 		const sessionManager = SessionManager.inMemory();
 		const authStorage = AuthStorage.create(join(agentDir, "auth.json"));
 		authStorage.setRuntimeApiKey("anthropic", "test-key");
@@ -73,6 +85,38 @@ describe("AgentSession dynamic provider registration", () => {
 
 		expect(session.model?.baseUrl).toBe("http://localhost:8080/top-level");
 		expect(await capturePromptBaseUrl(session)).toBe("http://localhost:8080/top-level");
+
+		session.dispose();
+	});
+
+	it("keeps provider-only extensions active when an explicit profile also restricts tools", async () => {
+		const session = await createSession(
+			[
+				(pi) => {
+					pi.registerProvider("anthropic", { baseUrl: "http://localhost:8080/provider-only" });
+				},
+			],
+			{ restrictTools: true },
+		);
+
+		expect(session.model?.baseUrl).toBe("http://localhost:8080/provider-only");
+		expect(await capturePromptBaseUrl(session)).toBe("http://localhost:8080/provider-only");
+
+		session.dispose();
+	});
+
+	it("does not apply top-level registerProvider overrides from extensions when no profile is active", async () => {
+		const session = await createSession(
+			[
+				(pi) => {
+					pi.registerProvider("anthropic", { baseUrl: "http://localhost:8080/default-leak" });
+				},
+			],
+			{ enableExtensionProfile: false },
+		);
+
+		expect(session.model?.baseUrl).toBe("https://api.anthropic.com");
+		expect(await capturePromptBaseUrl(session)).toBe("https://api.anthropic.com");
 
 		session.dispose();
 	});

@@ -31,6 +31,12 @@ describe("Cost aggregation (spawned-usage roll-up)", () => {
 
 	const newSession = async (opts: { extensionFactories?: unknown[] } = {}) => {
 		const settingsManager = SettingsManager.create(tempDir, agentDir);
+		if (opts.extensionFactories?.length) {
+			settingsManager.addInlineResourceProfileDefinitions({
+				"with-extension": { extensions: { allow: ["<inline:1>"] } },
+			});
+			settingsManager.setRuntimeResourceProfiles(["with-extension"]);
+		}
 		const resourceLoader = new DefaultResourceLoader({
 			cwd: tempDir,
 			agentDir,

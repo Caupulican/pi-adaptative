@@ -76,6 +76,7 @@ import { createToolHtmlRenderer } from "./export-html/tool-renderer.ts";
 import { createCoreDiagnosticsToolDefinitions } from "./extensions/builtin.ts";
 import {
 	type ContextUsage,
+	type Extension,
 	type ExtensionCommandContextActions,
 	type ExtensionContext,
 	type ExtensionErrorListener,
@@ -3234,6 +3235,44 @@ export class AgentSession {
 		return { allow: filter.allow ?? [], block: filter.block ?? [] };
 	}
 
+	private _isToolOrCommandAllowedByProfile(name: string): boolean {
+		if (this._allowedToolNames && !this._allowedToolNames.has(name)) return false;
+		if (this._excludedToolNames?.has(name)) return false;
+		const filter = this._toolProfileFilter;
+		if (!filter) return true;
+		if (filter.allow.length > 0 && !matchesResourceProfilePattern(name, filter.allow)) return false;
+		if (matchesResourceProfilePattern(name, filter.block)) return false;
+		return true;
+	}
+
+	private _hasToolOrCommandProfileGate(): boolean {
+		return Boolean(
+			this._allowedToolNames ||
+				this._excludedToolNames ||
+				(this._toolProfileFilter &&
+					(this._toolProfileFilter.allow.length > 0 || this._toolProfileFilter.block.length > 0)),
+		);
+	}
+
+	private _filterExtensionsForRuntime(extensions: Extension[]): Extension[] {
+		if (this.settingsManager.getActiveResourceProfileNames().length === 0) return [];
+		const hasToolOrCommandGate = this._hasToolOrCommandProfileGate();
+		return extensions
+			.filter((extension) =>
+				this.settingsManager.isResourceAllowedByProfile("extensions", extension.path, extension.sourceInfo.baseDir),
+			)
+			.map((extension) => {
+				if (!hasToolOrCommandGate) return extension;
+				const tools = new Map(
+					Array.from(extension.tools.entries()).filter(([name]) => this._isToolOrCommandAllowedByProfile(name)),
+				);
+				const commands = new Map(
+					Array.from(extension.commands.entries()).filter(([name]) => this._isToolOrCommandAllowedByProfile(name)),
+				);
+				return { ...extension, tools, commands };
+			});
+	}
+
 	/**
 	 * Re-resolve the active resource profile's model/thinking from current settings and apply it.
 	 * Only acts when the profile actually binds model/thinking AND that field was not set by an
@@ -3530,9 +3569,15 @@ export class AgentSession {
 				extensionsResult.runtime.flagValues.set(name, value);
 			}
 		}
+		const extensions = this._filterExtensionsForRuntime(extensionsResult.extensions);
+		const runtimeExtensionPaths = new Set(extensions.map((extension) => extension.path));
+		extensionsResult.runtime.pendingProviderRegistrations =
+			extensionsResult.runtime.pendingProviderRegistrations.filter((registration) =>
+				runtimeExtensionPaths.has(registration.extensionPath),
+			);
 
 		this._extensionRunner = new ExtensionRunner(
-			extensionsResult.extensions,
+			extensions,
 			extensionsResult.runtime,
 			this._cwd,
 			this.sessionManager,

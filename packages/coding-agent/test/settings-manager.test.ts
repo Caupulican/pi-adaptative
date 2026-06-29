@@ -1115,6 +1115,29 @@ describe("SettingsManager", () => {
 				const freshManager = SettingsManager.create(projectDir, agentDir);
 				expect(freshManager.getEffectiveExternalResourceRoots()).not.toContain(realpathSync(tempRoot1));
 			});
+
+			it("respects an explicit empty active profile list instead of falling back to external root settings", async () => {
+				const manager = SettingsManager.create(projectDir, agentDir);
+				const tempRoot = join(agentDir, "temp-root-profiles");
+				mkdirSync(tempRoot, { recursive: true });
+				writeFileSync(
+					join(tempRoot, "settings.json"),
+					JSON.stringify({
+						activeResourceProfiles: ["external-lean"],
+						resourceProfiles: { "external-lean": { tools: { allow: ["external-tool"] } } },
+					}),
+				);
+
+				manager.setExternalResourceRoots([tempRoot], "global");
+				manager.setTrustedResourceRoots([tempRoot], "global");
+				await manager.flush();
+				writeFileSync(join(projectDir, ".pi", "settings.json"), JSON.stringify({ activeResourceProfiles: [] }));
+
+				const freshManager = SettingsManager.create(projectDir, agentDir);
+
+				expect(freshManager.getActiveResourceProfileNames()).toEqual([]);
+				expect(freshManager.getResourceProfileFilter("tools")).toEqual({ allow: [], block: [] });
+			});
 		});
 	});
 });

@@ -227,6 +227,12 @@ describe("AgentSession prompt characterization", () => {
 	it("dispatches extension commands without consuming a provider response", async () => {
 		const commandRuns: string[] = [];
 		const harness = await createHarness({
+			settings: {
+				activeResourceProfile: "with-extension",
+				resourceProfiles: {
+					"with-extension": { extensions: { allow: ["<inline:1>"] } },
+				},
+			},
 			extensionFactories: [
 				(pi) => {
 					pi.registerCommand("testcmd", {
@@ -248,6 +254,81 @@ describe("AgentSession prompt characterization", () => {
 		expect(harness.getPendingResponseCount()).toBe(1);
 	});
 
+	it("does not expose or dispatch extension commands when no resource profile is active", async () => {
+		const commandRuns: string[] = [];
+		const harness = await createHarness({
+			extensionFactories: [
+				(pi) => {
+					pi.registerCommand("testcmd", {
+						description: "Test command",
+						handler: async () => {
+							commandRuns.push("ran");
+						},
+					});
+				},
+			],
+		});
+		harnesses.push(harness);
+		harness.setResponses([fauxAssistantMessage("model saw default command text")]);
+
+		expect(harness.session.extensionRunner.getRegisteredCommands()).toEqual([]);
+		expect(harness.session.getActiveToolNames()).toEqual(["read", "bash", "edit", "write", "context_audit"]);
+
+		await harness.session.prompt("/testcmd should-not-run");
+
+		expect(commandRuns).toEqual([]);
+		expect(harness.session.messages.map((message) => message.role)).toEqual(["user", "assistant"]);
+		expect(getMessageText(harness.session.messages[0]!)).toBe("/testcmd should-not-run");
+	});
+
+	it("does not expose or dispatch extension commands blocked by the active resource profile", async () => {
+		const commandRuns: string[] = [];
+		const harness = await createHarness({
+			settings: {
+				activeResourceProfile: "focused",
+				resourceProfiles: {
+					focused: { extensions: { block: ["<blocked-ext>"] } },
+				},
+			},
+			extensionFactories: [
+				{
+					path: "<allowed-ext>",
+					factory: (pi) => {
+						pi.registerCommand("allowedcmd", {
+							description: "Allowed command",
+							handler: async () => {
+								commandRuns.push("allowed");
+							},
+						});
+					},
+				},
+				{
+					path: "<blocked-ext>",
+					factory: (pi) => {
+						pi.registerCommand("blockedcmd", {
+							description: "Blocked command",
+							handler: async () => {
+								commandRuns.push("blocked");
+							},
+						});
+					},
+				},
+			],
+		});
+		harnesses.push(harness);
+		harness.setResponses([fauxAssistantMessage("model saw blocked command")]);
+
+		const commandNames = harness.session.extensionRunner.getRegisteredCommands().map((command) => command.name);
+		expect(commandNames).toContain("allowedcmd");
+		expect(commandNames).not.toContain("blockedcmd");
+
+		await harness.session.prompt("/blockedcmd should-not-run");
+
+		expect(commandRuns).toEqual([]);
+		expect(harness.session.messages.map((message) => message.role)).toEqual(["user", "assistant"]);
+		expect(getMessageText(harness.session.messages[0]!)).toBe("/blockedcmd should-not-run");
+	});
+
 	it("sendUserMessage while idle triggers a turn", async () => {
 		const harness = await createHarness();
 		harnesses.push(harness);
@@ -263,6 +344,12 @@ describe("AgentSession prompt characterization", () => {
 	it("does not report streamingBehavior to input handlers while idle", async () => {
 		const inputEvents: InputEvent[] = [];
 		const harness = await createHarness({
+			settings: {
+				activeResourceProfile: "with-input-extension",
+				resourceProfiles: {
+					"with-input-extension": { extensions: { allow: ["<inline:1>"] } },
+				},
+			},
 			extensionFactories: [
 				(pi) => {
 					pi.on("input", (event) => {
@@ -300,6 +387,12 @@ describe("AgentSession prompt characterization", () => {
 			},
 		};
 		const harness = await createHarness({
+			settings: {
+				activeResourceProfile: "with-input-extension",
+				resourceProfiles: {
+					"with-input-extension": { extensions: { allow: ["<inline:1>"] } },
+				},
+			},
 			tools: [waitTool],
 			extensionFactories: [
 				(pi) => {

@@ -7,7 +7,7 @@
  * reactive cleanup. Pure functions: no I/O, fully testable.
  */
 
-/** Per-token USD prices (as carried on `Model.cost`, which is per-token, not per-million). */
+/** Per-million-token USD prices, as carried on `Model.cost`. */
 export interface ModelTokenCost {
 	input: number;
 	output: number;
@@ -31,8 +31,8 @@ export function estimateTurnCostUsd(args: {
 	const cached = Math.max(0, Math.min(args.cachedInputTokens ?? 0, inputTokens));
 	const freshInput = inputTokens - cached;
 	const cacheReadRate = cost.cacheRead ?? cost.input;
-	const inputUsd = freshInput * cost.input + cached * cacheReadRate;
-	const outputUsd = Math.max(0, maxOutputTokens) * cost.output;
+	const inputUsd = (freshInput * cost.input + cached * cacheReadRate) / 1_000_000;
+	const outputUsd = (Math.max(0, maxOutputTokens) * cost.output) / 1_000_000;
 	return inputUsd + outputUsd;
 }
 

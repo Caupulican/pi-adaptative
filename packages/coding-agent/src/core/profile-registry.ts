@@ -15,6 +15,7 @@ import { validateSkillName } from "./skills.ts";
 export type ProfileSource =
 	| "global-settings"
 	| "project-settings"
+	| "external-settings"
 	| "profile-file"
 	| "directory-overlay"
 	| "inline"
@@ -172,14 +173,37 @@ function normalizeWrapperProfile(options: {
 function normalizeSettingsProfiles(
 	settings: Settings,
 	source: ProfileSource,
+	baseDir?: string,
+	sourcePath?: string,
 ): Array<Omit<NormalizedProfile, "source"> & { source?: ProfileSource }> {
 	const profiles: Array<Omit<NormalizedProfile, "source"> & { source?: ProfileSource }> = [];
 	for (const [name, resources] of Object.entries(settings.resourceProfiles ?? {})) {
 		const nameErrors = validateProfileName(name);
 		if (nameErrors.length > 0) continue;
-		profiles.push({ name, resources: mergeResourceProfileSettings(undefined, resources) });
+		profiles.push({
+			name,
+			resources: mergeResourceProfileSettings(undefined, resources),
+			sourcePath,
+			baseDir,
+		});
 	}
 	return profiles.map((profile) => ({ ...profile, source }));
+}
+
+function loadSettingsFileProfiles(sourcePath: string, source: ProfileSource): NormalizedProfile[] {
+	try {
+		const stats = statSync(sourcePath);
+		if (!stats.isFile()) return [];
+		const parsed = JSON.parse(readFileSync(sourcePath, "utf-8")) as Settings;
+		return normalizeSettingsProfiles(parsed, source, dirname(resolve(sourcePath)), resolve(sourcePath)).map(
+			(profile) => ({
+				...profile,
+				source,
+			}),
+		);
+	} catch {
+		return [];
+	}
 }
 
 function normalizeDefinitions(
@@ -262,6 +286,9 @@ export class ProfileRegistry {
 		for (const profile of this.loadProfileFiles()) {
 			add(profile.profile, profile.precedence);
 		}
+		for (const profile of this.loadExternalSettingsProfiles()) {
+			add(profile, 4.2);
+		}
 		for (const profile of normalizeSettingsProfiles(this.options.globalSettings, "global-settings")) {
 			add({ ...profile, source: "global-settings" }, 5);
 		}
@@ -316,6 +343,14 @@ export class ProfileRegistry {
 		}
 
 		return candidates;
+	}
+
+	private loadExternalSettingsProfiles(): NormalizedProfile[] {
+		const profiles: NormalizedProfile[] = [];
+		for (const root of this.options.externalResourceRoots ?? []) {
+			profiles.push(...loadSettingsFileProfiles(join(root, "settings.json"), "external-settings"));
+		}
+		return profiles;
 	}
 
 	private loadProfileFile(sourcePath: string, source: ProfileSource, order: number): ProfileCandidate | undefined {

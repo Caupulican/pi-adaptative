@@ -1,4 +1,18 @@
-## [Unreleased]
+## [0.80.85] - 2026-06-29
+
+### Fixed
+
+- Fixed proactive cost-guard estimates treating model prices as per-token instead of per-million,
+  which could show impossible per-turn warnings in the footer.
+- Fixed trusted external resource-root settings profiles not constraining startup tools, preventing
+  simple prompts from activating every external extension tool schema.
+- Fixed active resource profiles so blocked extensions are excluded from the extension runtime itself,
+  preventing their commands, tools, handlers, shortcuts, and renderers from being visible or callable.
+- Fixed the no-profile default runtime to expose only Pi's built-in default tools, with extension
+  commands, handlers, tools, and provider registrations disabled until an explicit profile enables them.
+- Fixed profile-gated extension runtimes to preserve allowed provider-only, handler-only, shortcut-only,
+  and renderer-only extensions even when the active profile also restricts tools or slash commands.
+- Fixed explicit empty active profile selections so they suppress trusted external-root profile fallback.
 
 ## [0.80.84] - 2026-06-29
 

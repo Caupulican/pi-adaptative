@@ -14,6 +14,8 @@ function profileSourceLabel(profile: NormalizedProfile): string {
 			return "global settings";
 		case "project-settings":
 			return "project settings";
+		case "external-settings":
+			return "external settings";
 		case "directory-overlay":
 			return "directory overlay";
 		case "profile-file":
