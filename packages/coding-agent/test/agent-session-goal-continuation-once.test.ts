@@ -108,7 +108,11 @@ describe("Phase 10D: AgentSession Goal Continuation Once", () => {
 		expect(call.text).toContain("g1");
 		expect(call.text).toContain("Req 1 text");
 
-		expect(call.options).toEqual({ expandPromptTemplates: false, processSlashCommands: false });
+		expect(call.options).toEqual({
+			expandPromptTemplates: false,
+			processSlashCommands: false,
+			autoContinueGoal: false,
+		});
 	});
 
 	it("promptLimits are honored", async () => {

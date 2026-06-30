@@ -117,6 +117,7 @@ import {
 import { disposeExtensionEventSubscriptions } from "./extensions/loader.ts";
 import { emitSessionShutdownEvent } from "./extensions/runner.ts";
 import { type ChannelProvider, GatewayRegistry, type JobSchedulerProvider } from "./gateways/channel-provider.ts";
+import { DEFAULT_GOAL_CONTINUE_MAX_TURNS } from "./goals/goal-continuation-defaults.ts";
 import {
 	buildGoalContinuationPrompt,
 	type GoalContinuationPrompt,
@@ -314,6 +315,8 @@ export interface PromptOptions {
 	source?: InputSource;
 	/** Internal hook used by RPC mode to observe prompt preflight acceptance or rejection. */
 	preflightResult?: (success: boolean) => void;
+	/** Whether an idle active goal should auto-inject bounded continuation prompts after this prompt settles. Default: true. */
+	autoContinueGoal?: boolean;
 }
 
 /** Result from cycleModel() */
@@ -495,6 +498,8 @@ export class AgentSession {
 	private _pendingNextTurnMessages: CustomMessage[] = [];
 	/** Serializes prompt() submissions made while streaming so queued steering/follow-ups keep user-typed FIFO order. */
 	private _streamingPromptSubmissionTail: Promise<void> = Promise.resolve();
+	/** Guards bounded idle autosteer so continuation prompts do not recursively trigger themselves. */
+	private _isGoalAutoContinuing = false;
 
 	// Compaction/context hygiene state
 	private _compactionAbortController: AbortController | undefined = undefined;
@@ -2164,6 +2169,8 @@ export class AgentSession {
 				this._effectivenessTracker.recordRecallOutcome(injectedRecall, recallQuery, responseText);
 			}
 		}
+
+		await this._autoContinueGoalFromIdle(options);
 	}
 
 	/**
@@ -4810,6 +4817,21 @@ export class AgentSession {
 		});
 	}
 
+	private async _autoContinueGoalFromIdle(options?: PromptOptions): Promise<void> {
+		if (options?.autoContinueGoal === false || this._isGoalAutoContinuing) return;
+
+		const { maxStallTurns } = this.settingsManager.getAutonomySettings();
+		const snapshot = this.getGoalRuntimeSnapshot({ maxStallTurns });
+		if (snapshot.continuation.action !== "continue") return;
+
+		this._isGoalAutoContinuing = true;
+		try {
+			await this.continueGoalLoop({ maxTurns: DEFAULT_GOAL_CONTINUE_MAX_TURNS, maxStallTurns });
+		} finally {
+			this._isGoalAutoContinuing = false;
+		}
+	}
+
 	async continueGoalOnce(options: GoalContinuationOnceOptions): Promise<GoalContinuationOnceResult> {
 		const snapshot = this.getGoalRuntimeSnapshot({ maxStallTurns: options.maxStallTurns });
 
@@ -4818,7 +4840,11 @@ export class AgentSession {
 		}
 
 		const prompt = buildGoalContinuationPrompt({ snapshot, limits: options.promptLimits });
-		await this.prompt(prompt.text, { expandPromptTemplates: false, processSlashCommands: false });
+		await this.prompt(prompt.text, {
+			expandPromptTemplates: false,
+			processSlashCommands: false,
+			autoContinueGoal: false,
+		});
 
 		return { submitted: true, snapshot, prompt };
 	}

@@ -76,7 +76,7 @@ describe("InteractiveMode /goal-continue command", () => {
 	it("parses default and explicit bounded arguments", () => {
 		expect(interactiveModePrototype.parseGoalContinueCommand("/goal-continue")).toEqual({
 			ok: true,
-			maxTurns: 3,
+			maxTurns: 20,
 			maxStallTurns: 20,
 		});
 		expect(interactiveModePrototype.parseGoalContinueCommand("/goal-continue 7 0")).toEqual({

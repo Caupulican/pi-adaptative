@@ -7,6 +7,12 @@
   goal continuation loop and `/goal-continue`; without it the continuation runtime always read empty
   state and could not continue. The tool is active by default and maps to the `memory_write` capability.
 
+### Changed
+
+- Changed bounded goal continuation to default to 20 turns and auto-inject continuation prompts after a
+  prompt settles idle while an active goal remains open, with internal recursion suppression for
+  continuation prompts.
+
 ## [0.80.86] - 2026-06-29
 
 ### Added

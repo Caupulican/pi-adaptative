@@ -75,6 +75,12 @@ import type {
 	ExtensionWidgetOptions,
 } from "../../core/extensions/index.ts";
 import { FooterDataProvider, type ReadonlyFooterDataProvider } from "../../core/footer-data-provider.ts";
+import {
+	DEFAULT_GOAL_CONTINUE_MAX_STALL_TURNS,
+	DEFAULT_GOAL_CONTINUE_MAX_TURNS,
+	MAX_GOAL_CONTINUE_MAX_STALL_TURNS,
+	MAX_GOAL_CONTINUE_MAX_TURNS,
+} from "../../core/goals/goal-continuation-defaults.ts";
 import { configureHttpDispatcher, formatHttpIdleTimeoutMs } from "../../core/http-dispatcher.ts";
 import { type AppKeybinding, KeybindingsManager } from "../../core/keybindings.ts";
 import { createCompactionSummaryMessage } from "../../core/messages.ts";
@@ -180,10 +186,6 @@ const TUI_HISTORY_RELOAD_CHUNK_SIZE = 20;
 const TUI_LIVE_HISTORY_MAX_COMPONENTS = 260;
 const TUI_LIVE_HISTORY_TRIM_TO_COMPONENTS = 220;
 const STREAMING_UI_UPDATE_INTERVAL_MS = 80;
-const DEFAULT_GOAL_CONTINUE_MAX_TURNS = 3;
-const DEFAULT_GOAL_CONTINUE_MAX_STALL_TURNS = 20;
-const MAX_GOAL_CONTINUE_MAX_TURNS = 20;
-const MAX_GOAL_CONTINUE_MAX_STALL_TURNS = 100;
 
 /** Interface for components that can be expanded/collapsed */
 interface Expandable {
