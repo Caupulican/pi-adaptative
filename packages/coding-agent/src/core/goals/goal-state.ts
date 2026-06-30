@@ -128,7 +128,7 @@ function isGoalEvent(value: unknown): value is GoalEvent {
 	}
 }
 
-function isGoalState(value: unknown): value is GoalState {
+export function isGoalState(value: unknown): value is GoalState {
 	if (!isRecord(value)) return false;
 	return (
 		typeof value.goalId === "string" &&
@@ -173,6 +173,10 @@ function cloneGoalState(state: GoalState): GoalState {
 		evidence: state.evidence.map(cloneGoalEvidenceRef),
 		events: state.events.map(cloneGoalEvent),
 	};
+}
+
+export function cloneGoalStateForStorage(state: GoalState): GoalState {
+	return cloneGoalState(state);
 }
 
 export function createGoalState(args: { goalId: string; userGoal: string; now: string }): GoalState {

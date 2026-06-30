@@ -109,6 +109,8 @@ import {
 import { disposeExtensionEventSubscriptions } from "./extensions/loader.ts";
 import { emitSessionShutdownEvent } from "./extensions/runner.ts";
 import { type ChannelProvider, GatewayRegistry, type JobSchedulerProvider } from "./gateways/channel-provider.ts";
+import type { GoalState } from "./goals/goal-state.ts";
+import { appendGoalStateSnapshot, getLatestGoalStateSnapshot } from "./goals/session-goal-state.ts";
 import {
 	type DemandSignals,
 	decideDemand,
@@ -4697,6 +4699,22 @@ export class AgentSession {
 
 	getDailyUsageBreakdown(formatLabel?: (label: string) => string, now = new Date()): string {
 		return formatDailyUsageBreakdown(this.getDailyUsageTotals(now), formatLabel);
+	}
+
+	/**
+	 * Save a snapshot of the goal state to the session log.
+	 *
+	 * @returns the id of the appended custom entry
+	 */
+	saveGoalStateSnapshot(state: GoalState): string {
+		return appendGoalStateSnapshot(this.sessionManager, state);
+	}
+
+	/**
+	 * Retrieve the latest valid goal state snapshot from the session log.
+	 */
+	getGoalStateSnapshot(): GoalState | undefined {
+		return getLatestGoalStateSnapshot(this.sessionManager.getEntries());
 	}
 
 	/**
