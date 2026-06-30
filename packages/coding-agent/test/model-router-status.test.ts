@@ -11,17 +11,28 @@ describe("model router status formatting", () => {
 		const text = formatModelRouterStatus({
 			enabled: false,
 			cheapModel: "cheap",
+			mediumModel: "medium",
 			expensiveModel: "expensive",
 			learningModel: "learner",
 		});
 
 		expect(text).toContain("Status: disabled");
 		expect(text).toContain("Cheap model: cheap");
+		expect(text).toContain("Medium model: medium");
 		expect(text).toContain("Expensive model: expensive");
 		expect(text).toContain("Learning model: learner");
 		expect(text).toContain("Routing: inactive (disabled)");
 		expect(text).toContain("Latest intent: none");
 		expect(text).toContain("Last decision: none");
+	});
+
+	it("shows medium model as unset when absent", () => {
+		const text = formatModelRouterStatus({
+			enabled: false,
+			cheapModel: "cheap",
+			expensiveModel: "expensive",
+		});
+		expect(text).toContain("Medium model: unset");
 	});
 
 	it("shows routed activity and latest prompt intent when the latest prompt used the router", () => {

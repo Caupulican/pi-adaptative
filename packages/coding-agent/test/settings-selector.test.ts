@@ -196,6 +196,7 @@ describe("settings selector", () => {
 				modelRouter: {
 					enabled: true,
 					cheapModel: "anthropic/claude-haiku-4-5",
+					mediumModel: "anthropic/claude-medium-4-5",
 					expensiveModel: "anthropic/claude-sonnet-4-5",
 					learningModel: "openai/gpt-5.4",
 				},
@@ -210,10 +211,12 @@ describe("settings selector", () => {
 		expect(output).toContain("Model Router");
 		expect(output).toContain("Enabled");
 		expect(output).toContain("Cheap model");
+		expect(output).toContain("Medium model");
 		expect(output).toContain("Expensive model");
 		expect(output).toContain("Learning/reflection model");
 		expect(output).toContain("true");
 		expect(output).toContain("anthropic/claude-haiku-4-5");
+		expect(output).toContain("anthropic/claude-medium-4-5");
 		expect(output).toContain("anthropic/claude-sonnet-4-5");
 		expect(output).toContain("openai/gpt-5.4");
 	});
@@ -368,6 +371,7 @@ describe("settings selector", () => {
 		selector.getSettingsList().handleInput("\x1b[B");
 		selector.getSettingsList().handleInput("\x1b[B");
 		selector.getSettingsList().handleInput("\x1b[B");
+		selector.getSettingsList().handleInput("\x1b[B"); // One more Down arrow because of Medium model
 		selector.getSettingsList().handleInput("\r");
 		selector.getSettingsList().handleInput("\x1b[A");
 		selector.getSettingsList().handleInput("\r");
@@ -376,6 +380,79 @@ describe("settings selector", () => {
 			{
 				enabled: true,
 				cheapModel: "openai/gpt-5.4",
+				expensiveModel: "openai/gpt-5.4",
+				learningModel: "active",
+			},
+			"global",
+		);
+	});
+
+	it("persists selected configured model for the Medium model picker", () => {
+		const onModelRouterChange = vi.fn();
+		const selector = new SettingsSelectorComponent(
+			makeConfig({
+				modelRouter: {
+					enabled: true,
+					cheapModel: "anthropic/claude-opus-4-5",
+					expensiveModel: "openai/gpt-5.4",
+					learningModel: "active",
+				},
+			}),
+			makeCallbacks({ onModelRouterChange }),
+		);
+
+		selector.getSettingsList().handleInput("model router");
+		selector.getSettingsList().handleInput("\r");
+		selector.getSettingsList().handleInput("\x1b[B");
+		selector.getSettingsList().handleInput("\x1b[B");
+		selector.getSettingsList().handleInput("\x1b[B"); // Select Medium model (index 3)
+		selector.getSettingsList().handleInput("\r");
+		selector.getSettingsList().handleInput("\x1b[B"); // Moves to "anthropic/claude-opus-4-5"
+		selector.getSettingsList().handleInput("\x1b[B"); // Select the second available model ("openai/gpt-5.4")
+		selector.getSettingsList().handleInput("\r");
+
+		expect(onModelRouterChange).toHaveBeenCalledWith(
+			{
+				enabled: true,
+				cheapModel: "anthropic/claude-opus-4-5",
+				mediumModel: "openai/gpt-5.4",
+				expensiveModel: "openai/gpt-5.4",
+				learningModel: "active",
+			},
+			"global",
+		);
+	});
+
+	it("clears medium model from the Model Router picker", () => {
+		const onModelRouterChange = vi.fn();
+		const selector = new SettingsSelectorComponent(
+			makeConfig({
+				modelRouter: {
+					enabled: true,
+					cheapModel: "openai/gpt-5.4",
+					mediumModel: "openai/gpt-5.4",
+					expensiveModel: "openai/gpt-5.4",
+					learningModel: "active",
+				},
+			}),
+			makeCallbacks({ onModelRouterChange }),
+		);
+
+		selector.getSettingsList().handleInput("model router");
+		selector.getSettingsList().handleInput("\r");
+		selector.getSettingsList().handleInput("\x1b[B");
+		selector.getSettingsList().handleInput("\x1b[B");
+		selector.getSettingsList().handleInput("\x1b[B"); // Select Medium model
+		selector.getSettingsList().handleInput("\r");
+		selector.getSettingsList().handleInput("\x1b[A"); // Clear option
+		selector.getSettingsList().handleInput("\x1b[A");
+		selector.getSettingsList().handleInput("\r");
+
+		expect(onModelRouterChange).toHaveBeenCalledWith(
+			{
+				enabled: true,
+				cheapModel: "openai/gpt-5.4",
+				mediumModel: undefined,
 				expensiveModel: "openai/gpt-5.4",
 				learningModel: "active",
 			},

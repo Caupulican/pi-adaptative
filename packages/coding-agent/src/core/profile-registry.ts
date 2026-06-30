@@ -125,7 +125,7 @@ function normalizeModelRouterSettings(value: unknown): ModelRouterSettings | und
 	if (!isRecord(value)) return undefined;
 	const settings: ModelRouterSettings = {};
 	if (typeof value.enabled === "boolean") settings.enabled = value.enabled;
-	for (const key of ["cheapModel", "expensiveModel", "learningModel"] as const) {
+	for (const key of ["cheapModel", "mediumModel", "expensiveModel", "learningModel"] as const) {
 		const candidate = asNonEmptyString(value[key]);
 		if (candidate) settings[key] = candidate;
 	}

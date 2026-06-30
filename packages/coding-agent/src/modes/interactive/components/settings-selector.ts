@@ -113,7 +113,7 @@ function autoLearnSummary(settings: AutoLearnSettings): string {
 
 function modelRouterSummary(settings: ModelRouterSettings): string {
 	const state = settings.enabled ? "enabled" : "disabled";
-	return `${state} · cheap: ${optionalStringValue(settings.cheapModel)} · expensive: ${optionalStringValue(settings.expensiveModel)} · learn: ${optionalStringValue(settings.learningModel, "active")}`;
+	return `${state} · cheap: ${optionalStringValue(settings.cheapModel)} · medium: ${optionalStringValue(settings.mediumModel)} · expensive: ${optionalStringValue(settings.expensiveModel)} · learn: ${optionalStringValue(settings.learningModel, "active")}`;
 }
 
 function buildAutoLearnModelOptions(
@@ -800,6 +800,13 @@ class ModelRouterSettingsSubmenu extends Container {
 			includeActive: false,
 			unsetDescription: "Clear cheap routing model; research turns fall back to the active session model",
 		});
+		const mediumModelOptions = buildModelRouterRoleModelOptions({
+			currentValue: this.state.mediumModel,
+			configuredModelOptions: modelOptions,
+			currentModelPattern,
+			includeActive: false,
+			unsetDescription: "Clear medium routing model; implementation turns fall back according to router policy",
+		});
 		const expensiveModelOptions = buildModelRouterRoleModelOptions({
 			currentValue: this.state.expensiveModel,
 			configuredModelOptions: modelOptions,
@@ -854,6 +861,35 @@ class ModelRouterSettingsSubmenu extends Container {
 							description:
 								"Choose from models available through configured subscription/API accounts. Type to filter; manual is fallback.",
 							customTitle: "Custom Cheap / Research Model",
+							customDescription: "Enter a provider/model pattern from pi --list-models.",
+							customEmptyHint: "empty clears the setting",
+							customEmptyValue: MODEL_ROUTER_UNSET_MODEL_VALUE,
+						},
+					),
+			},
+			{
+				id: "model-router-medium",
+				label: "Medium model",
+				description: "Pick the model for normal scoped implementation, edits, tests, and mechanical refactors",
+				currentValue: optionalStringValue(this.state.mediumModel),
+				submenu: (_currentValue, done) =>
+					new ModelSelectionSubmenu(
+						mediumModelOptions,
+						this.state.mediumModel ?? MODEL_ROUTER_UNSET_MODEL_VALUE,
+						(value) => {
+							this.state = {
+								...this.state,
+								mediumModel: value === MODEL_ROUTER_UNSET_MODEL_VALUE ? undefined : value,
+							};
+							onChange({ ...this.state }, this.scope);
+							done(optionalStringValue(this.state.mediumModel));
+						},
+						() => done(),
+						{
+							title: "Medium / Implementation Model",
+							description:
+								"Choose from models available through configured subscription/API accounts. Type to filter; manual is fallback.",
+							customTitle: "Custom Medium / Implementation Model",
 							customDescription: "Enter a provider/model pattern from pi --list-models.",
 							customEmptyHint: "empty clears the setting",
 							customEmptyValue: MODEL_ROUTER_UNSET_MODEL_VALUE,

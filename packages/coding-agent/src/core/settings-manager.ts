@@ -116,6 +116,7 @@ export interface AutonomySettings {
 export interface ModelRouterSettings {
 	enabled?: boolean; // default: false — routing is opt-in until escalation safeguards are complete
 	cheapModel?: string; // model pattern for read-only/research turns
+	mediumModel?: string; // model pattern for normal scoped implementation, edits, and refactors
 	expensiveModel?: string; // model pattern for modify/tool-heavy turns
 	learningModel?: string; // model pattern for background reflection/learn/skill-creator work; "active" uses session model
 }
@@ -433,7 +434,7 @@ function normalizeModelRouterSettings(value: unknown): ModelRouterSettings | und
 	const input = value as Record<string, unknown>;
 	const settings: ModelRouterSettings = {};
 	if (typeof input.enabled === "boolean") settings.enabled = input.enabled;
-	for (const key of ["cheapModel", "expensiveModel", "learningModel"] as const) {
+	for (const key of ["cheapModel", "mediumModel", "expensiveModel", "learningModel"] as const) {
 		const candidate = input[key];
 		if (typeof candidate !== "string") continue;
 		const trimmed = candidate.trim();
@@ -1791,6 +1792,7 @@ export class SettingsManager {
 			if (!router) continue;
 			if (router.enabled !== undefined) merged.enabled = router.enabled;
 			if (router.cheapModel !== undefined) merged.cheapModel = router.cheapModel;
+			if (router.mediumModel !== undefined) merged.mediumModel = router.mediumModel;
 			if (router.expensiveModel !== undefined) merged.expensiveModel = router.expensiveModel;
 			if (router.learningModel !== undefined) merged.learningModel = router.learningModel;
 		}
@@ -1800,6 +1802,7 @@ export class SettingsManager {
 	getModelRouterSettings(): {
 		enabled: boolean;
 		cheapModel?: string;
+		mediumModel?: string;
 		expensiveModel?: string;
 		learningModel?: string;
 	} {
@@ -1807,12 +1810,14 @@ export class SettingsManager {
 		const settings = {
 			enabled: this.settings.modelRouter?.enabled ?? false,
 			cheapModel: this.settings.modelRouter?.cheapModel?.trim() || undefined,
+			mediumModel: this.settings.modelRouter?.mediumModel?.trim() || undefined,
 			expensiveModel: this.settings.modelRouter?.expensiveModel?.trim() || undefined,
 			learningModel: this.settings.modelRouter?.learningModel?.trim() || undefined,
 		};
 		return {
 			enabled: profileSettings?.enabled ?? settings.enabled,
 			cheapModel: profileSettings?.cheapModel?.trim() || settings.cheapModel,
+			mediumModel: profileSettings?.mediumModel?.trim() || settings.mediumModel,
 			expensiveModel: profileSettings?.expensiveModel?.trim() || settings.expensiveModel,
 			learningModel: profileSettings?.learningModel?.trim() || settings.learningModel,
 		};
@@ -1822,6 +1827,7 @@ export class SettingsManager {
 		const normalized: ModelRouterSettings = {
 			enabled: settings.enabled ?? false,
 			cheapModel: settings.cheapModel?.trim() || undefined,
+			mediumModel: settings.mediumModel?.trim() || undefined,
 			expensiveModel: settings.expensiveModel?.trim() || undefined,
 			learningModel: settings.learningModel?.trim() || undefined,
 		};

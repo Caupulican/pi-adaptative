@@ -8,8 +8,8 @@ function formatModel(model: Model<any>): string {
 }
 
 function collectModelRouterModelDiagnostics(
-	label: "cheap model" | "expensive model",
-	settingKey: "modelRouter.cheapModel" | "modelRouter.expensiveModel",
+	label: "cheap model" | "medium model" | "expensive model",
+	settingKey: "modelRouter.cheapModel" | "modelRouter.mediumModel" | "modelRouter.expensiveModel",
 	modelPattern: string | undefined,
 	modelRegistry: ModelRegistry,
 ): string[] {
@@ -36,6 +36,12 @@ export function collectModelRouterConfigDiagnostics(
 			"cheap model",
 			"modelRouter.cheapModel",
 			settings.cheapModel,
+			modelRegistry,
+		),
+		...collectModelRouterModelDiagnostics(
+			"medium model",
+			"modelRouter.mediumModel",
+			settings.mediumModel,
 			modelRegistry,
 		),
 		...collectModelRouterModelDiagnostics(

@@ -6,6 +6,7 @@ export const MODEL_ROUTER_DECISION_CUSTOM_TYPE = "model_router_decision";
 export type ModelRouterStatusSettings = {
 	enabled: boolean;
 	cheapModel?: string;
+	mediumModel?: string;
 	expensiveModel?: string;
 	learningModel?: string;
 };
@@ -60,6 +61,7 @@ export function formatModelRouterStatus(
 	const lines = [
 		`${formatLabel("Status:")} ${settings.enabled ? "enabled" : "disabled"}`,
 		`${formatLabel("Cheap model:")} ${settings.cheapModel ?? "unset"}`,
+		`${formatLabel("Medium model:")} ${settings.mediumModel ?? "unset"}`,
 		`${formatLabel("Expensive model:")} ${settings.expensiveModel ?? "unset"}`,
 		`${formatLabel("Learning model:")} ${settings.learningModel ?? "active"}`,
 	];
