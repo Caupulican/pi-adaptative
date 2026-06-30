@@ -63,6 +63,7 @@ import {
 } from "../../config.ts";
 import { type AgentSession, type AgentSessionEvent, parseSkillBlock } from "../../core/agent-session.ts";
 import { type AgentSessionRuntime, SessionImportFileNotFoundError } from "../../core/agent-session-runtime.ts";
+import { readAutoLearnSessionIdFromFile, reportCompletedAutoLearnUsageHelper } from "../../core/cost/session-usage.ts";
 import type {
 	AutocompleteProviderFactory,
 	EditorFactory,
@@ -371,29 +372,6 @@ function removeAutoLearnArtifactPath(filePath: string, root: string): boolean {
 		return true;
 	} catch {
 		return false;
-	}
-}
-
-function readAutoLearnSessionIdFromFile(filePath: string): string | undefined {
-	let fd: number | undefined;
-	try {
-		fd = fs.openSync(filePath, "r");
-		const buffer = Buffer.alloc(64 * 1024);
-		const bytesRead = fs.readSync(fd, buffer, 0, buffer.length, 0);
-		const firstLine = buffer.toString("utf8", 0, bytesRead).split("\n", 1)[0]?.trim();
-		if (!firstLine) return undefined;
-		const header = JSON.parse(firstLine) as Record<string, unknown>;
-		return header.type === "session" && typeof header.id === "string" ? header.id : undefined;
-	} catch {
-		return undefined;
-	} finally {
-		if (fd !== undefined) {
-			try {
-				fs.closeSync(fd);
-			} catch {
-				// Ignore close errors while pruning best-effort history artifacts.
-			}
-		}
 	}
 }
 
@@ -5450,9 +5428,34 @@ export class InteractiveMode {
 		});
 	}
 
-	private cleanupCompletedAutoLearnRun(runId: string, artifactPaths: string[]): void {
+	private reportCompletedAutoLearnUsage(runId: string, sessionDir: string, sessionId: string, logPath: string): void {
+		try {
+			reportCompletedAutoLearnUsageHelper({
+				runId,
+				sessionDir,
+				sessionId,
+				logPath,
+				parentSession: this.session,
+				appendLog: (p, msg) => this.appendAutoLearnLog(p, msg),
+			});
+		} catch (error: unknown) {
+			const message = error instanceof Error ? error.message : String(error);
+			this.appendAutoLearnLog(logPath, `Auto Learn usage report failed: ${message}`);
+		}
+	}
+
+	private cleanupCompletedAutoLearnRun(
+		runId: string,
+		options: {
+			artifactPaths: string[];
+			sessionDir: string;
+			sessionId: string;
+			logPath: string;
+		},
+	): void {
+		this.reportCompletedAutoLearnUsage(runId, options.sessionDir, options.sessionId, options.logPath);
 		const dataDir = this.getAutoLearnDataDir();
-		for (const filePath of artifactPaths) removeAutoLearnArtifactPath(filePath, dataDir);
+		for (const filePath of options.artifactPaths) removeAutoLearnArtifactPath(filePath, dataDir);
 		this.withAutoLearnStateLock((current) => {
 			const state = this.pruneAutoLearnState(current);
 			const runs = { ...(state.runs ?? {}) };
@@ -5611,7 +5614,14 @@ export class InteractiveMode {
 		}
 		const childPid = child.pid;
 		child.once("exit", (code) => {
-			if (code === 0) this.cleanupCompletedAutoLearnRun(reservation.runId, [promptPath, logPath, sessionDir]);
+			if (code === 0) {
+				this.cleanupCompletedAutoLearnRun(reservation.runId, {
+					artifactPaths: [promptPath, logPath, sessionDir],
+					sessionDir,
+					sessionId,
+					logPath,
+				});
+			}
 		});
 		child.unref();
 		this.markAutoLearnReservationRunning(reservation, childPid, settings);

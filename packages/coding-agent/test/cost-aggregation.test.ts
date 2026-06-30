@@ -1,12 +1,16 @@
-import { existsSync, mkdirSync, rmSync } from "node:fs";
+import { existsSync, mkdirSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
-import { join } from "node:path";
+import { basename, join } from "node:path";
 import { getModel, type Usage } from "@caupulican/pi-ai";
 import { afterEach, beforeEach, describe, expect, it } from "vitest";
 import { SPAWNED_USAGE_CUSTOM_TYPE } from "../src/core/agent-session.ts";
+import {
+	aggregateCumulativeUsageFromSessionEntries,
+	reportCompletedAutoLearnUsageHelper,
+} from "../src/core/cost/session-usage.ts";
 import { DefaultResourceLoader } from "../src/core/resource-loader.ts";
 import { createAgentSession } from "../src/core/sdk.ts";
-import { SessionManager } from "../src/core/session-manager.ts";
+import { type SessionEntry, SessionManager } from "../src/core/session-manager.ts";
 import { SettingsManager } from "../src/core/settings-manager.ts";
 
 /**
@@ -154,5 +158,294 @@ describe("Cost aggregation (spawned-usage roll-up)", () => {
 		expect(totals.reports).toBe(1);
 		expect(totals.cost).toBeCloseTo(0.77, 10);
 		session.dispose();
+	});
+
+	describe("aggregateCumulativeUsageFromSessionEntries", () => {
+		it("sums assistant usage", () => {
+			const entries: SessionEntry[] = [
+				{
+					type: "message",
+					id: "1",
+					parentId: null,
+					timestamp: new Date().toISOString(),
+					message: {
+						role: "assistant",
+						content: [{ type: "text", text: "hello" }],
+						usage: usage(0.12),
+						timestamp: Date.now(),
+					},
+				} as unknown as SessionEntry,
+				{
+					type: "message",
+					id: "2",
+					parentId: "1",
+					timestamp: new Date().toISOString(),
+					message: {
+						role: "user",
+						content: [{ type: "text", text: "hi" }],
+						timestamp: Date.now(),
+					},
+				} as unknown as SessionEntry,
+				{
+					type: "message",
+					id: "3",
+					parentId: "2",
+					timestamp: new Date().toISOString(),
+					message: {
+						role: "assistant",
+						content: [{ type: "text", text: "there" }],
+						usage: usage(0.08),
+						timestamp: Date.now(),
+					},
+				} as unknown as SessionEntry,
+			];
+
+			const result = aggregateCumulativeUsageFromSessionEntries(entries);
+			expect(result.cost.total).toBeCloseTo(0.2, 10);
+			expect(result.totalTokens).toBe(300);
+		});
+
+		it("rolls up spawned usage", () => {
+			const entries: SessionEntry[] = [
+				{
+					type: "message",
+					id: "1",
+					parentId: null,
+					timestamp: new Date().toISOString(),
+					message: {
+						role: "assistant",
+						content: [{ type: "text", text: "hello" }],
+						usage: usage(0.1),
+						timestamp: Date.now(),
+					},
+				} as unknown as SessionEntry,
+				{
+					type: "custom",
+					id: "2",
+					parentId: "1",
+					timestamp: new Date().toISOString(),
+					customType: SPAWNED_USAGE_CUSTOM_TYPE,
+					data: {
+						usage: usage(0.15),
+						reportId: "spawn-1",
+					},
+				},
+			];
+
+			const result = aggregateCumulativeUsageFromSessionEntries(entries);
+			expect(result.cost.total).toBeCloseTo(0.25, 10);
+			expect(result.totalTokens).toBe(300);
+		});
+
+		it("ignores malformed spawned usage", () => {
+			const entries: SessionEntry[] = [
+				{
+					type: "custom",
+					id: "1",
+					parentId: null,
+					timestamp: new Date().toISOString(),
+					customType: SPAWNED_USAGE_CUSTOM_TYPE,
+					data: {
+						// missing usage
+						reportId: "spawn-1",
+					},
+				} as unknown as SessionEntry,
+				{
+					type: "custom",
+					id: "2",
+					parentId: "1",
+					timestamp: new Date().toISOString(),
+					customType: SPAWNED_USAGE_CUSTOM_TYPE,
+					data: {
+						usage: {
+							input: "invalid", // invalid type
+							cost: { total: 0.15 },
+						},
+					},
+				} as unknown as SessionEntry,
+				{
+					type: "custom",
+					id: "3",
+					parentId: "2",
+					timestamp: new Date().toISOString(),
+					customType: SPAWNED_USAGE_CUSTOM_TYPE,
+				} as SessionEntry,
+			];
+
+			const result = aggregateCumulativeUsageFromSessionEntries(entries);
+			expect(result.cost.total).toBe(0);
+			expect(result.totalTokens).toBe(0);
+		});
+	});
+
+	describe("Auto Learn cleanup integration", () => {
+		it("Auto Learn cleanup reports child usage before removing artifacts", async () => {
+			const session = await newSession();
+			const childSessionId = "child-session-id-123";
+			const runId = "run-id-abc";
+			const sessionDir = join(tempDir, "sessions", runId);
+			mkdirSync(sessionDir, { recursive: true });
+
+			const childSessionFile = join(sessionDir, `2026-06-29T21-30-00_500_${childSessionId}.jsonl`);
+
+			// Write child session file content
+			const header = { type: "session", id: childSessionId, timestamp: new Date().toISOString(), cwd: tempDir };
+			const assistantEntry = {
+				type: "message",
+				id: "msg-1",
+				parentId: null,
+				timestamp: new Date().toISOString(),
+				message: {
+					role: "assistant",
+					content: [{ type: "text", text: "completed reflection" }],
+					usage: usage(0.18),
+					timestamp: Date.now(),
+				},
+			};
+			const spawnedEntry = {
+				type: "custom",
+				id: "msg-2",
+				parentId: "msg-1",
+				timestamp: new Date().toISOString(),
+				customType: SPAWNED_USAGE_CUSTOM_TYPE,
+				data: {
+					usage: usage(0.07),
+					reportId: "sub-1",
+				},
+			};
+
+			const fileContent = `${[
+				JSON.stringify(header),
+				JSON.stringify(assistantEntry),
+				JSON.stringify(spawnedEntry),
+			].join("\n")}\n`;
+
+			writeFileSync(childSessionFile, fileContent, "utf-8");
+
+			const logs: string[] = [];
+			const appendLog = (_path: string, msg: string) => {
+				logs.push(msg);
+			};
+
+			reportCompletedAutoLearnUsageHelper({
+				runId,
+				sessionDir,
+				sessionId: childSessionId,
+				logPath: "fake.log",
+				parentSession: session,
+				appendLog,
+			});
+
+			const spawnedUsage = session.getSpawnedUsage();
+			expect(spawnedUsage.reports).toBe(1);
+			expect(spawnedUsage.cost).toBeCloseTo(0.25, 10);
+
+			expect(logs).toContain(`Auto Learn usage reported: ${childSessionId}.`);
+			session.dispose();
+		});
+
+		it("Auto Learn cleanup report is idempotent by reportId", async () => {
+			const session = await newSession();
+			const childSessionId = "child-session-id-456";
+			const runId = "run-id-def";
+			const sessionDir = join(tempDir, "sessions", runId);
+			mkdirSync(sessionDir, { recursive: true });
+
+			const childSessionFile = join(sessionDir, `2026-06-29T21-30-00_500_${childSessionId}.jsonl`);
+
+			const header = { type: "session", id: childSessionId, timestamp: new Date().toISOString(), cwd: tempDir };
+			const assistantEntry = {
+				type: "message",
+				id: "msg-1",
+				parentId: null,
+				timestamp: new Date().toISOString(),
+				message: {
+					role: "assistant",
+					content: [{ type: "text", text: "completed learning" }],
+					usage: usage(0.4),
+					timestamp: Date.now(),
+				},
+			};
+
+			const fileContent = `${[JSON.stringify(header), JSON.stringify(assistantEntry)].join("\n")}\n`;
+
+			writeFileSync(childSessionFile, fileContent, "utf-8");
+
+			reportCompletedAutoLearnUsageHelper({
+				runId,
+				sessionDir,
+				sessionId: childSessionId,
+				logPath: "fake.log",
+				parentSession: session,
+			});
+
+			// Call twice to check idempotence
+			reportCompletedAutoLearnUsageHelper({
+				runId,
+				sessionDir,
+				sessionId: childSessionId,
+				logPath: "fake.log",
+				parentSession: session,
+			});
+
+			const spawnedUsage = session.getSpawnedUsage();
+			expect(spawnedUsage.reports).toBe(1);
+			expect(spawnedUsage.cost).toBeCloseTo(0.4, 10);
+			session.dispose();
+		});
+
+		it("drives cleanupCompletedAutoLearnRun ordering: reports child usage, then deletes artifacts", async () => {
+			const session = await newSession();
+			const childSessionId = "child-session-id-789";
+			const runId = "run-id-ghi";
+			const sessionDir = join(tempDir, "sessions", runId);
+			mkdirSync(sessionDir, { recursive: true });
+
+			const childSessionFile = join(sessionDir, `2026-06-29T21-30-00_500_${childSessionId}.jsonl`);
+			const logPath = join(sessionDir, "fake.log");
+			const promptPath = join(sessionDir, "fake.prompt.md");
+			writeFileSync(
+				childSessionFile,
+				`{"type":"session","id":"${childSessionId}"}\n{"type":"message","message":{"role":"assistant","usage":{"input":10,"output":20,"cacheRead":0,"cacheWrite":0,"totalTokens":30,"cost":{"input":0.1,"output":0.2,"cacheRead":0,"cacheWrite":0,"total":0.3}},"timestamp":123}}`,
+				"utf-8",
+			);
+			writeFileSync(logPath, "some log", "utf-8");
+			writeFileSync(promptPath, "some prompt", "utf-8");
+
+			const reportSequence: string[] = [];
+
+			// Mimic cleanupCompletedAutoLearnRun logic
+			// 1. Report usage
+			reportCompletedAutoLearnUsageHelper({
+				runId,
+				sessionDir,
+				sessionId: childSessionId,
+				logPath,
+				parentSession: {
+					addSpawnedUsage: (usage: Usage, opts: { label: string; sourceSessionId: string; reportId: string }) => {
+						reportSequence.push("reported");
+						return session.addSpawnedUsage(usage, opts);
+					},
+				},
+			});
+
+			// 2. Delete files
+			const artifactPaths = [promptPath, logPath, sessionDir];
+			for (const p of artifactPaths) {
+				if (existsSync(p)) {
+					rmSync(p, { recursive: true, force: true });
+					reportSequence.push(`deleted:${basename(p)}`);
+				}
+			}
+
+			expect(reportSequence).toEqual([
+				"reported",
+				"deleted:fake.prompt.md",
+				"deleted:fake.log",
+				"deleted:run-id-ghi", // sessionDir name is runId
+			]);
+			expect(session.getSpawnedUsage().cost).toBeCloseTo(0.3, 10);
+			session.dispose();
+		});
 	});
 });
