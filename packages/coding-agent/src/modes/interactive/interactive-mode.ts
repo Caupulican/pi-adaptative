@@ -78,8 +78,10 @@ import { FooterDataProvider, type ReadonlyFooterDataProvider } from "../../core/
 import {
 	DEFAULT_GOAL_CONTINUE_MAX_STALL_TURNS,
 	DEFAULT_GOAL_CONTINUE_MAX_TURNS,
+	DEFAULT_GOAL_CONTINUE_MAX_WALL_CLOCK_MINUTES,
 	MAX_GOAL_CONTINUE_MAX_STALL_TURNS,
 	MAX_GOAL_CONTINUE_MAX_TURNS,
+	MAX_GOAL_CONTINUE_MAX_WALL_CLOCK_MINUTES,
 } from "../../core/goals/goal-continuation-defaults.ts";
 import { configureHttpDispatcher, formatHttpIdleTimeoutMs } from "../../core/http-dispatcher.ts";
 import { type AppKeybinding, KeybindingsManager } from "../../core/keybindings.ts";
@@ -8689,10 +8691,12 @@ export class InteractiveMode {
 
 	private parseGoalContinueCommand(
 		text: string,
-	): { ok: true; maxTurns: number; maxStallTurns: number } | { ok: false; error: string } {
-		const usage = "Usage: /goal-continue [maxTurns 1-20] [maxStallTurns 0-100]";
+	):
+		| { ok: true; maxTurns: number; maxStallTurns: number; maxWallClockMinutes: number }
+		| { ok: false; error: string } {
+		const usage = "Usage: /goal-continue [maxTurns 1-20] [maxStallTurns 0-100] [maxMinutes 0-1440]";
 		const parts = text.trim().split(/\s+/).slice(1);
-		if (parts.length > 2) {
+		if (parts.length > 3) {
 			return { ok: false, error: usage };
 		}
 
@@ -8716,10 +8720,16 @@ export class InteractiveMode {
 			0,
 			MAX_GOAL_CONTINUE_MAX_STALL_TURNS,
 		);
-		if (maxTurns === undefined || maxStallTurns === undefined) {
+		const maxWallClockMinutes = parseBoundedInteger(
+			parts[2],
+			DEFAULT_GOAL_CONTINUE_MAX_WALL_CLOCK_MINUTES,
+			0,
+			MAX_GOAL_CONTINUE_MAX_WALL_CLOCK_MINUTES,
+		);
+		if (maxTurns === undefined || maxStallTurns === undefined || maxWallClockMinutes === undefined) {
 			return { ok: false, error: usage };
 		}
-		return { ok: true, maxTurns, maxStallTurns };
+		return { ok: true, maxTurns, maxStallTurns, maxWallClockMinutes };
 	}
 
 	private async handleGoalContinueCommand(text: string): Promise<void> {
@@ -8730,12 +8740,13 @@ export class InteractiveMode {
 		}
 
 		this.showStatus(
-			`Goal continuation started: up to ${parsed.maxTurns} turn(s), stall limit ${parsed.maxStallTurns}.`,
+			`Goal continuation started: up to ${parsed.maxTurns} turn(s), stall limit ${parsed.maxStallTurns}, wall-clock limit ${parsed.maxWallClockMinutes || "disabled"} minute(s).`,
 		);
 		try {
 			const result = await this.session.continueGoalLoop({
 				maxTurns: parsed.maxTurns,
 				maxStallTurns: parsed.maxStallTurns,
+				maxWallClockMinutes: parsed.maxWallClockMinutes,
 			});
 			const continuation = result.finalSnapshot.continuation;
 			this.showStatus(

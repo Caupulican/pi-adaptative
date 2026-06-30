@@ -23,7 +23,13 @@ import type {
 	SettingsScope,
 	WarningSettings,
 } from "../../../core/settings-manager.ts";
-import { DEFAULT_AUTONOMY_MAX_STALL_TURNS } from "../../../core/settings-manager.ts";
+import {
+	DEFAULT_AUTONOMY_GOAL_AUTO_CONTINUE,
+	DEFAULT_AUTONOMY_GOAL_AUTO_CONTINUE_DELAY_MS,
+	DEFAULT_AUTONOMY_GOAL_CONTINUE_MAX_WALL_CLOCK_MINUTES,
+	DEFAULT_AUTONOMY_GOAL_CONTINUE_TURNS,
+	DEFAULT_AUTONOMY_MAX_STALL_TURNS,
+} from "../../../core/settings-manager.ts";
 import { getSelectListTheme, getSettingsListTheme, theme } from "../theme/theme.ts";
 import { DynamicBorder } from "./dynamic-border.ts";
 import { keyDisplayText } from "./keybinding-hints.ts";
@@ -46,7 +52,10 @@ const THINKING_DESCRIPTIONS: Record<ThinkingLevel, string> = {
 };
 
 const AUTONOMY_MODES: AutonomyMode[] = ["off", "safe", "balanced", "full"];
-const AUTONOMY_MAX_STALL_TURN_VALUES = ["0", "5", "10", "20", "30", "50"];
+const AUTONOMY_GOAL_CONTINUE_TURN_VALUES = ["1", "3", "5", "10", "20"];
+const AUTONOMY_MAX_STALL_TURN_VALUES = ["0", "5", "10", "20", "30", "50", "100"];
+const AUTONOMY_GOAL_CONTINUE_MAX_WALL_CLOCK_MINUTE_VALUES = ["0", "15", "30", "60", "120", "240", "480", "1440"];
+const AUTONOMY_GOAL_AUTO_CONTINUE_DELAY_MS_VALUES = ["0", "250", "1000", "5000", "30000", "60000"];
 
 const AUTO_LEARN_DEFAULTS = {
 	model: "active",
@@ -97,14 +106,31 @@ function autonomyModeValue(settings: AutonomySettings): AutonomyMode {
 
 function autonomySummary(settings: AutonomySettings): string {
 	const mode = autonomyModeValue(settings);
-	const rounds = settings.maxStallTurns ?? DEFAULT_AUTONOMY_MAX_STALL_TURNS;
+	const turns = settings.goalContinueTurns ?? DEFAULT_AUTONOMY_GOAL_CONTINUE_TURNS;
+	const stall = settings.maxStallTurns ?? DEFAULT_AUTONOMY_MAX_STALL_TURNS;
+	const autoContinue = settings.goalAutoContinue ?? DEFAULT_AUTONOMY_GOAL_AUTO_CONTINUE;
 	const modeLabel = mode === "full" ? "standing autonomy" : mode;
-	return `${modeLabel}, ${rounds} rounds`;
+	return `${modeLabel}, ${turns} turns, stall ${stall}, auto ${autoContinue ? "on" : "off"}`;
+}
+
+function autonomyGoalContinueTurnsValue(settings: AutonomySettings): string {
+	return String(settings.goalContinueTurns ?? DEFAULT_AUTONOMY_GOAL_CONTINUE_TURNS);
 }
 
 function autonomyMaxStallTurnsValue(settings: AutonomySettings): string {
-	const rounds = settings.maxStallTurns ?? DEFAULT_AUTONOMY_MAX_STALL_TURNS;
-	return String(rounds);
+	return String(settings.maxStallTurns ?? DEFAULT_AUTONOMY_MAX_STALL_TURNS);
+}
+
+function autonomyGoalContinueMaxWallClockMinutesValue(settings: AutonomySettings): string {
+	return String(settings.goalContinueMaxWallClockMinutes ?? DEFAULT_AUTONOMY_GOAL_CONTINUE_MAX_WALL_CLOCK_MINUTES);
+}
+
+function autonomyGoalAutoContinueValue(settings: AutonomySettings): string {
+	return String(settings.goalAutoContinue ?? DEFAULT_AUTONOMY_GOAL_AUTO_CONTINUE);
+}
+
+function autonomyGoalAutoContinueDelayMsValue(settings: AutonomySettings): string {
+	return String(settings.goalAutoContinueDelayMs ?? DEFAULT_AUTONOMY_GOAL_AUTO_CONTINUE_DELAY_MS);
 }
 
 function autoLearnSummary(settings: AutoLearnSettings): string {
@@ -528,6 +554,11 @@ class AutonomySettingsSubmenu extends Container {
 		this.state = {
 			mode: autonomyModeValue(settings),
 			maxStallTurns: settings.maxStallTurns ?? DEFAULT_AUTONOMY_MAX_STALL_TURNS,
+			goalContinueTurns: settings.goalContinueTurns ?? DEFAULT_AUTONOMY_GOAL_CONTINUE_TURNS,
+			goalContinueMaxWallClockMinutes:
+				settings.goalContinueMaxWallClockMinutes ?? DEFAULT_AUTONOMY_GOAL_CONTINUE_MAX_WALL_CLOCK_MINUTES,
+			goalAutoContinue: settings.goalAutoContinue ?? DEFAULT_AUTONOMY_GOAL_AUTO_CONTINUE,
+			goalAutoContinueDelayMs: settings.goalAutoContinueDelayMs ?? DEFAULT_AUTONOMY_GOAL_AUTO_CONTINUE_DELAY_MS,
 		};
 		this.scope = scope;
 
@@ -547,11 +578,39 @@ class AutonomySettingsSubmenu extends Container {
 				values: AUTONOMY_MODES,
 			},
 			{
-				id: "autonomy-goal-loop-rounds",
-				label: "Goal loop rounds",
-				description: "Maximum provider rounds in one foreground goal loop before Pi stops continuing",
+				id: "autonomy-goal-auto-continue",
+				label: "Goal auto-continue",
+				description: "Inject bounded continuation prompts when Pi becomes idle with an active open goal",
+				currentValue: autonomyGoalAutoContinueValue(this.state),
+				values: ["true", "false"],
+			},
+			{
+				id: "autonomy-goal-continue-turns",
+				label: "Goal turns",
+				description: "Maximum continuation prompts in one idle or explicit goal loop",
+				currentValue: autonomyGoalContinueTurnsValue(this.state),
+				values: AUTONOMY_GOAL_CONTINUE_TURN_VALUES,
+			},
+			{
+				id: "autonomy-max-stall-turns",
+				label: "Goal stall limit",
+				description: "Maximum no-progress rounds before Pi stops continuing and asks the user",
 				currentValue: autonomyMaxStallTurnsValue(this.state),
 				values: AUTONOMY_MAX_STALL_TURN_VALUES,
+			},
+			{
+				id: "autonomy-goal-wall-clock-minutes",
+				label: "Goal max minutes",
+				description: "Wall-clock budget per goal continuation loop; 0 disables the time budget",
+				currentValue: autonomyGoalContinueMaxWallClockMinutesValue(this.state),
+				values: AUTONOMY_GOAL_CONTINUE_MAX_WALL_CLOCK_MINUTE_VALUES,
+			},
+			{
+				id: "autonomy-goal-auto-continue-delay-ms",
+				label: "Goal delay ms",
+				description: "Delay before idle auto-continuation starts; 0 starts immediately after idle",
+				currentValue: autonomyGoalAutoContinueDelayMsValue(this.state),
+				values: AUTONOMY_GOAL_AUTO_CONTINUE_DELAY_MS_VALUES,
 			},
 		];
 
@@ -567,8 +626,20 @@ class AutonomySettingsSubmenu extends Container {
 					case "autonomy-mode":
 						this.state = { ...this.state, mode: newValue as AutonomyMode };
 						break;
-					case "autonomy-goal-loop-rounds":
+					case "autonomy-goal-auto-continue":
+						this.state = { ...this.state, goalAutoContinue: newValue === "true" };
+						break;
+					case "autonomy-goal-continue-turns":
+						this.state = { ...this.state, goalContinueTurns: Number(newValue) };
+						break;
+					case "autonomy-max-stall-turns":
 						this.state = { ...this.state, maxStallTurns: Number(newValue) };
+						break;
+					case "autonomy-goal-wall-clock-minutes":
+						this.state = { ...this.state, goalContinueMaxWallClockMinutes: Number(newValue) };
+						break;
+					case "autonomy-goal-auto-continue-delay-ms":
+						this.state = { ...this.state, goalAutoContinueDelayMs: Number(newValue) };
 						break;
 					default:
 						return;

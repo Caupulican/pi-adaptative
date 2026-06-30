@@ -11,7 +11,9 @@
 
 - Changed bounded goal continuation to default to 20 turns and auto-inject continuation prompts after a
   prompt settles idle while an active goal remains open, with internal recursion suppression for
-  continuation prompts.
+  continuation prompts. It now also respects new settings for wall-clock budget, idle delay, and turn limits,
+  which can be configured via the Autonomy submenu in the settings TUI.
+- Added a third positional argument `[maxMinutes]` to the `/goal-continue` command to support bounded wall-clock loop termination.
 
 ## [0.80.86] - 2026-06-29
 

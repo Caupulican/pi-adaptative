@@ -117,7 +117,6 @@ import {
 import { disposeExtensionEventSubscriptions } from "./extensions/loader.ts";
 import { emitSessionShutdownEvent } from "./extensions/runner.ts";
 import { type ChannelProvider, GatewayRegistry, type JobSchedulerProvider } from "./gateways/channel-provider.ts";
-import { DEFAULT_GOAL_CONTINUE_MAX_TURNS } from "./goals/goal-continuation-defaults.ts";
 import {
 	buildGoalContinuationPrompt,
 	type GoalContinuationPrompt,
@@ -424,10 +423,15 @@ export interface GoalContinuationOnceResult {
 export type GoalContinuationLoopStopReason =
 	| "continuation_not_allowed"
 	| "max_turns_reached"
+	| "wall_clock_budget_reached"
 	| "goal_state_not_advanced";
 
 export interface GoalContinuationLoopOptions extends GoalContinuationOnceOptions {
 	maxTurns: number;
+	/** 0 or undefined disables wall-clock budget. */
+	maxWallClockMinutes?: number;
+	/** Test seam for wall-clock budget enforcement. Defaults to Date.now. */
+	now?: () => number;
 }
 
 export interface GoalContinuationLoopResult {
@@ -498,6 +502,8 @@ export class AgentSession {
 	private _pendingNextTurnMessages: CustomMessage[] = [];
 	/** Serializes prompt() submissions made while streaming so queued steering/follow-ups keep user-typed FIFO order. */
 	private _streamingPromptSubmissionTail: Promise<void> = Promise.resolve();
+	/** Pending idle timer that starts bounded goal continuation after the session becomes idle. */
+	private _goalAutoContinueTimer: ReturnType<typeof setTimeout> | undefined;
 	/** Guards bounded idle autosteer so continuation prompts do not recursively trigger themselves. */
 	private _isGoalAutoContinuing = false;
 
@@ -1316,6 +1322,7 @@ export class AgentSession {
 	 */
 	dispose(): void {
 		try {
+			this._clearGoalAutoContinueTimer();
 			this.abortRetry();
 			this.abortCompaction();
 			this.abortBranchSummary();
@@ -1933,6 +1940,10 @@ export class AgentSession {
 	 * @throws Error if no model selected or no API key available (when not streaming)
 	 */
 	async prompt(text: string, options?: PromptOptions): Promise<void> {
+		if (options?.autoContinueGoal !== false) {
+			this._clearGoalAutoContinueTimer();
+		}
+
 		if ((this.isStreaming || this.isRetrying) && options?.streamingBehavior) {
 			const run = this._streamingPromptSubmissionTail.then(
 				() => this._promptUnserialized(text, options),
@@ -2170,7 +2181,7 @@ export class AgentSession {
 			}
 		}
 
-		await this._autoContinueGoalFromIdle(options);
+		this._scheduleGoalAutoContinueFromIdle(options);
 	}
 
 	/**
@@ -4817,16 +4828,55 @@ export class AgentSession {
 		});
 	}
 
-	private async _autoContinueGoalFromIdle(options?: PromptOptions): Promise<void> {
-		if (options?.autoContinueGoal === false || this._isGoalAutoContinuing) return;
+	private _clearGoalAutoContinueTimer(): void {
+		if (this._goalAutoContinueTimer !== undefined) {
+			clearTimeout(this._goalAutoContinueTimer);
+			this._goalAutoContinueTimer = undefined;
+		}
+	}
 
-		const { maxStallTurns } = this.settingsManager.getAutonomySettings();
+	private _scheduleGoalAutoContinueFromIdle(options?: PromptOptions): void {
+		if (options?.autoContinueGoal === false || this._isGoalAutoContinuing || this._disposed) return;
+
+		const { maxStallTurns, goalAutoContinue, goalAutoContinueDelayMs } = this.settingsManager.getAutonomySettings();
+		if (!goalAutoContinue) return;
+
+		const snapshot = this.getGoalRuntimeSnapshot({ maxStallTurns });
+		if (snapshot.continuation.action !== "continue") return;
+
+		this._clearGoalAutoContinueTimer();
+		this._goalAutoContinueTimer = setTimeout(() => {
+			this._goalAutoContinueTimer = undefined;
+			void this._runScheduledGoalAutoContinue();
+		}, goalAutoContinueDelayMs);
+
+		const timer = this._goalAutoContinueTimer;
+		if (typeof timer === "object" && timer && "unref" in timer) {
+			const { unref } = timer as { unref?: () => void };
+			unref?.call(timer);
+		}
+	}
+
+	private async _runScheduledGoalAutoContinue(): Promise<void> {
+		if (this._isGoalAutoContinuing || this._disposed) return;
+
+		const { maxStallTurns, goalContinueTurns, goalContinueMaxWallClockMinutes, goalAutoContinue } =
+			this.settingsManager.getAutonomySettings();
+		if (!goalAutoContinue) return;
+
 		const snapshot = this.getGoalRuntimeSnapshot({ maxStallTurns });
 		if (snapshot.continuation.action !== "continue") return;
 
 		this._isGoalAutoContinuing = true;
 		try {
-			await this.continueGoalLoop({ maxTurns: DEFAULT_GOAL_CONTINUE_MAX_TURNS, maxStallTurns });
+			await this.continueGoalLoop({
+				maxTurns: goalContinueTurns,
+				maxStallTurns,
+				maxWallClockMinutes: goalContinueMaxWallClockMinutes,
+			});
+		} catch (error) {
+			const message = error instanceof Error ? error.message : String(error);
+			this._emit({ type: "warning", message: `Goal auto-continuation failed: ${message}` });
 		} finally {
 			this._isGoalAutoContinuing = false;
 		}
@@ -4851,16 +4901,29 @@ export class AgentSession {
 
 	async continueGoalLoop(options: GoalContinuationLoopOptions): Promise<GoalContinuationLoopResult> {
 		let turnsSubmitted = 0;
+		const now = options.now ?? Date.now;
+		const maxWallClockMs =
+			typeof options.maxWallClockMinutes === "number" && options.maxWallClockMinutes > 0
+				? options.maxWallClockMinutes * 60_000
+				: undefined;
+		const startedAt = now();
+		const hasReachedWallClockBudget = () => maxWallClockMs !== undefined && now() - startedAt >= maxWallClockMs;
+		const snapshot = () => this.getGoalRuntimeSnapshot({ maxStallTurns: options.maxStallTurns });
+
 		if (options.maxTurns <= 0) {
 			return {
 				turnsSubmitted: 0,
 				stopReason: "max_turns_reached",
-				finalSnapshot: this.getGoalRuntimeSnapshot({ maxStallTurns: options.maxStallTurns }),
+				finalSnapshot: snapshot(),
 			};
 		}
 
+		if (hasReachedWallClockBudget()) {
+			return { turnsSubmitted, stopReason: "wall_clock_budget_reached", finalSnapshot: snapshot() };
+		}
+
 		while (turnsSubmitted < options.maxTurns) {
-			const beforeSnapshot = this.getGoalRuntimeSnapshot({ maxStallTurns: options.maxStallTurns });
+			const beforeSnapshot = snapshot();
 			if (beforeSnapshot.continuation.action !== "continue") {
 				return { turnsSubmitted, stopReason: "continuation_not_allowed", finalSnapshot: beforeSnapshot };
 			}
@@ -4875,7 +4938,11 @@ export class AgentSession {
 				turnsSubmitted++;
 			}
 
-			const afterSnapshot = this.getGoalRuntimeSnapshot({ maxStallTurns: options.maxStallTurns });
+			if (hasReachedWallClockBudget()) {
+				return { turnsSubmitted, stopReason: "wall_clock_budget_reached", finalSnapshot: snapshot() };
+			}
+
+			const afterSnapshot = snapshot();
 			if (afterSnapshot.continuation.action !== "continue") {
 				return { turnsSubmitted, stopReason: "continuation_not_allowed", finalSnapshot: afterSnapshot };
 			}
@@ -4893,7 +4960,7 @@ export class AgentSession {
 		return {
 			turnsSubmitted,
 			stopReason: "max_turns_reached",
-			finalSnapshot: this.getGoalRuntimeSnapshot({ maxStallTurns: options.maxStallTurns }),
+			finalSnapshot: snapshot(),
 		};
 	}
 

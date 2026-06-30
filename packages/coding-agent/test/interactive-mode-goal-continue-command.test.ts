@@ -78,11 +78,13 @@ describe("InteractiveMode /goal-continue command", () => {
 			ok: true,
 			maxTurns: 20,
 			maxStallTurns: 20,
+			maxWallClockMinutes: 0,
 		});
 		expect(interactiveModePrototype.parseGoalContinueCommand("/goal-continue 7 0")).toEqual({
 			ok: true,
 			maxTurns: 7,
 			maxStallTurns: 0,
+			maxWallClockMinutes: 0,
 		});
 	});
 
@@ -93,7 +95,7 @@ describe("InteractiveMode /goal-continue command", () => {
 			"/goal-continue 1 101",
 			"/goal-continue 1.5",
 			"/goal-continue one",
-			"/goal-continue 1 2 3",
+			"/goal-continue 1 2 3 4",
 		];
 		for (const text of invalid) {
 			const result = interactiveModePrototype.parseGoalContinueCommand(text);
@@ -108,7 +110,7 @@ describe("InteractiveMode /goal-continue command", () => {
 
 		await interactiveModePrototype.handleGoalContinueCommand.call(context, "/goal-continue 2 10");
 
-		expect(calls).toEqual([{ maxTurns: 2, maxStallTurns: 10 }]);
+		expect(calls).toEqual([{ maxTurns: 2, maxStallTurns: 10, maxWallClockMinutes: 0 }]);
 		expect(statuses[0]).toContain("Goal continuation started");
 		expect(statuses[1]).toContain("goal_state_not_advanced");
 		expect(statuses[1]).toContain("submitted 2 turn(s)");
@@ -122,7 +124,7 @@ describe("InteractiveMode /goal-continue command", () => {
 		await interactiveModePrototype.handleGoalContinueCommand.call(context, "/goal-continue 1000");
 
 		expect(calls).toEqual([]);
-		expect(errors).toEqual(["Usage: /goal-continue [maxTurns 1-20] [maxStallTurns 0-100]"]);
+		expect(errors).toEqual(["Usage: /goal-continue [maxTurns 1-20] [maxStallTurns 0-100] [maxMinutes 0-1440]"]);
 		expect(getRefreshCount()).toBe(0);
 	});
 
@@ -149,7 +151,7 @@ describe("InteractiveMode /goal-continue command", () => {
 
 		await interactiveModePrototype.handleGoalContinueCommand.call(context, "/goal-continue 1 20");
 
-		expect(calls).toEqual([{ maxTurns: 1, maxStallTurns: 20 }]);
+		expect(calls).toEqual([{ maxTurns: 1, maxStallTurns: 20, maxWallClockMinutes: 0 }]);
 		expect(errors).toEqual(["Goal continuation failed: loop failed"]);
 		expect(refreshCount).toBe(1);
 	});

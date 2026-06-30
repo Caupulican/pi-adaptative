@@ -7,6 +7,17 @@ import { basename, dirname, join, relative, resolve, sep } from "path";
 import lockfile from "proper-lockfile";
 import { CONFIG_DIR_NAME, getAgentDir, getProfilesDir } from "../config.ts";
 import { normalizePath, resolvePath } from "../utils/paths.ts";
+import {
+	DEFAULT_GOAL_AUTO_CONTINUE,
+	DEFAULT_GOAL_AUTO_CONTINUE_DELAY_MS,
+	DEFAULT_GOAL_CONTINUE_MAX_STALL_TURNS,
+	DEFAULT_GOAL_CONTINUE_MAX_TURNS,
+	DEFAULT_GOAL_CONTINUE_MAX_WALL_CLOCK_MINUTES,
+	MAX_GOAL_AUTO_CONTINUE_DELAY_MS,
+	MAX_GOAL_CONTINUE_MAX_STALL_TURNS,
+	MAX_GOAL_CONTINUE_MAX_TURNS,
+	MAX_GOAL_CONTINUE_MAX_WALL_CLOCK_MINUTES,
+} from "./goals/goal-continuation-defaults.ts";
 import { DEFAULT_HTTP_IDLE_TIMEOUT_MS, parseHttpIdleTimeoutMs } from "./http-dispatcher.ts";
 import { ProfileRegistry } from "./profile-registry.ts";
 import { mergeResourceProfileMap } from "./resource-profile-blocks.ts";
@@ -106,11 +117,19 @@ export interface AutoLearnSettings {
 
 export type AutonomyMode = "off" | "safe" | "balanced" | "full";
 
-export const DEFAULT_AUTONOMY_MAX_STALL_TURNS = 20;
+export const DEFAULT_AUTONOMY_MAX_STALL_TURNS = DEFAULT_GOAL_CONTINUE_MAX_STALL_TURNS;
+export const DEFAULT_AUTONOMY_GOAL_CONTINUE_TURNS = DEFAULT_GOAL_CONTINUE_MAX_TURNS;
+export const DEFAULT_AUTONOMY_GOAL_CONTINUE_MAX_WALL_CLOCK_MINUTES = DEFAULT_GOAL_CONTINUE_MAX_WALL_CLOCK_MINUTES;
+export const DEFAULT_AUTONOMY_GOAL_AUTO_CONTINUE = DEFAULT_GOAL_AUTO_CONTINUE;
+export const DEFAULT_AUTONOMY_GOAL_AUTO_CONTINUE_DELAY_MS = DEFAULT_GOAL_AUTO_CONTINUE_DELAY_MS;
 
 export interface AutonomySettings {
 	mode?: AutonomyMode; // default: off; presets drive Auto Learn/reflection without many knobs
-	maxStallTurns?: number; // default: 20; maximum provider rounds in one foreground goal loop
+	maxStallTurns?: number; // default: 20; maximum no-progress rounds before goal continuation asks the user
+	goalContinueTurns?: number; // default: 20; maximum continuation prompts per idle/explicit goal loop
+	goalContinueMaxWallClockMinutes?: number; // default: 0; 0 disables wall-clock budget
+	goalAutoContinue?: boolean; // default: true; auto-inject continuation prompts when an active goal is idle
+	goalAutoContinueDelayMs?: number; // default: 0; delay before idle auto-continuation starts
 }
 
 export interface ModelRouterSettings {
@@ -374,6 +393,12 @@ function parseTimeoutSetting(value: unknown, settingName: string): number | unde
 		throw new Error(`Invalid ${settingName} setting: ${String(value)}`);
 	}
 	return undefined;
+}
+
+function sanitizeIntegerSetting(value: unknown, fallback: number, min: number, max: number): number {
+	if (typeof value !== "number" || !Number.isInteger(value)) return fallback;
+	if (value < min || value > max) return fallback;
+	return value;
 }
 
 export type ThinkingLevel = "off" | "minimal" | "low" | "medium" | "high" | "xhigh";
@@ -2336,14 +2361,50 @@ export class SettingsManager {
 		this.save();
 	}
 
-	getAutonomySettings(): { mode: AutonomyMode; maxStallTurns: number } {
+	getAutonomySettings(): Required<AutonomySettings> {
 		const mode = this.settings.autonomy?.mode;
-		const configuredRounds = this.settings.autonomy?.maxStallTurns;
-		const maxStallTurns =
-			typeof configuredRounds === "number" && Number.isInteger(configuredRounds) && configuredRounds >= 0
-				? configuredRounds
-				: DEFAULT_AUTONOMY_MAX_STALL_TURNS;
-		return { mode: mode === "safe" || mode === "balanced" || mode === "full" ? mode : "off", maxStallTurns };
+		const configuredMaxStallTurns = this.settings.autonomy?.maxStallTurns;
+		const configuredGoalContinueTurns = this.settings.autonomy?.goalContinueTurns;
+		const configuredGoalContinueMaxWallClockMinutes = this.settings.autonomy?.goalContinueMaxWallClockMinutes;
+		const configuredGoalAutoContinue = this.settings.autonomy?.goalAutoContinue;
+		const configuredGoalAutoContinueDelayMs = this.settings.autonomy?.goalAutoContinueDelayMs;
+
+		const maxStallTurns = sanitizeIntegerSetting(
+			configuredMaxStallTurns,
+			DEFAULT_AUTONOMY_MAX_STALL_TURNS,
+			0,
+			MAX_GOAL_CONTINUE_MAX_STALL_TURNS,
+		);
+		const goalContinueTurns = sanitizeIntegerSetting(
+			configuredGoalContinueTurns,
+			DEFAULT_AUTONOMY_GOAL_CONTINUE_TURNS,
+			1,
+			MAX_GOAL_CONTINUE_MAX_TURNS,
+		);
+		const goalContinueMaxWallClockMinutes = sanitizeIntegerSetting(
+			configuredGoalContinueMaxWallClockMinutes,
+			DEFAULT_AUTONOMY_GOAL_CONTINUE_MAX_WALL_CLOCK_MINUTES,
+			0,
+			MAX_GOAL_CONTINUE_MAX_WALL_CLOCK_MINUTES,
+		);
+		const goalAutoContinueDelayMs = sanitizeIntegerSetting(
+			configuredGoalAutoContinueDelayMs,
+			DEFAULT_AUTONOMY_GOAL_AUTO_CONTINUE_DELAY_MS,
+			0,
+			MAX_GOAL_AUTO_CONTINUE_DELAY_MS,
+		);
+
+		return {
+			mode: mode === "safe" || mode === "balanced" || mode === "full" ? mode : "off",
+			maxStallTurns,
+			goalContinueTurns,
+			goalContinueMaxWallClockMinutes,
+			goalAutoContinue:
+				typeof configuredGoalAutoContinue === "boolean"
+					? configuredGoalAutoContinue
+					: DEFAULT_AUTONOMY_GOAL_AUTO_CONTINUE,
+			goalAutoContinueDelayMs,
+		};
 	}
 
 	setAutonomySettings(settings: AutonomySettings, scope: SettingsScope = "global"): void {

@@ -219,14 +219,28 @@ describe("SettingsManager", () => {
 		it("should default to off and persist full mode", async () => {
 			const manager = SettingsManager.create(projectDir, agentDir);
 
-			expect(manager.getAutonomySettings()).toEqual({ mode: "off", maxStallTurns: 20 });
+			expect(manager.getAutonomySettings()).toEqual({
+				mode: "off",
+				maxStallTurns: 20,
+				goalContinueTurns: 20,
+				goalContinueMaxWallClockMinutes: 0,
+				goalAutoContinue: true,
+				goalAutoContinueDelayMs: 0,
+			});
 
 			manager.setAutonomySettings({ mode: "full", maxStallTurns: 30 });
 			await manager.flush();
 
 			const savedSettings = JSON.parse(readFileSync(join(agentDir, "settings.json"), "utf-8"));
 			expect(savedSettings.autonomy).toEqual({ mode: "full", maxStallTurns: 30 });
-			expect(manager.getAutonomySettings()).toEqual({ mode: "full", maxStallTurns: 30 });
+			expect(manager.getAutonomySettings()).toEqual({
+				mode: "full",
+				maxStallTurns: 30,
+				goalContinueTurns: 20,
+				goalContinueMaxWallClockMinutes: 0,
+				goalAutoContinue: true,
+				goalAutoContinueDelayMs: 0,
+			});
 		});
 
 		it("should preserve zero and sanitize invalid max stall turn settings to the default", () => {
@@ -237,7 +251,14 @@ describe("SettingsManager", () => {
 
 			let manager = SettingsManager.create(projectDir, agentDir);
 
-			expect(manager.getAutonomySettings()).toEqual({ mode: "balanced", maxStallTurns: 0 });
+			expect(manager.getAutonomySettings()).toEqual({
+				mode: "balanced",
+				maxStallTurns: 0,
+				goalContinueTurns: 20,
+				goalContinueMaxWallClockMinutes: 0,
+				goalAutoContinue: true,
+				goalAutoContinueDelayMs: 0,
+			});
 
 			writeFileSync(
 				join(agentDir, "settings.json"),
@@ -246,7 +267,14 @@ describe("SettingsManager", () => {
 
 			manager = SettingsManager.create(projectDir, agentDir);
 
-			expect(manager.getAutonomySettings()).toEqual({ mode: "balanced", maxStallTurns: 20 });
+			expect(manager.getAutonomySettings()).toEqual({
+				mode: "balanced",
+				maxStallTurns: 20,
+				goalContinueTurns: 20,
+				goalContinueMaxWallClockMinutes: 0,
+				goalAutoContinue: true,
+				goalAutoContinueDelayMs: 0,
+			});
 		});
 	});
 

@@ -1,5 +1,5 @@
 import { fauxAssistantMessage, fauxToolCall } from "@caupulican/pi-ai";
-import { describe, expect, it } from "vitest";
+import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { applyGoalEvent, createGoalState } from "../src/core/goals/goal-state.ts";
 import { appendGoalStateSnapshot } from "../src/core/goals/session-goal-state.ts";
 import { createHarness, getUserTexts } from "./suite/harness.ts";
@@ -15,6 +15,14 @@ function countContinuationPrompts(harness: Awaited<ReturnType<typeof createHarne
 }
 
 describe("AgentSession goal idle autosteer", () => {
+	beforeEach(() => {
+		vi.useFakeTimers();
+	});
+
+	afterEach(() => {
+		vi.useRealTimers();
+	});
+
 	it("injects the default 20 continuation prompts after an idle turn while the goal advances", async () => {
 		const harness = await createHarness();
 		try {
@@ -32,6 +40,7 @@ describe("AgentSession goal idle autosteer", () => {
 			harness.setResponses(responses);
 
 			await harness.session.prompt("start the task");
+			await vi.runAllTimersAsync();
 
 			expect(countContinuationPrompts(harness)).toBe(20);
 			expect(harness.getPendingResponseCount()).toBe(0);
@@ -47,6 +56,7 @@ describe("AgentSession goal idle autosteer", () => {
 			harness.setResponses([fauxAssistantMessage("manual continuation settled")]);
 
 			await harness.session.prompt("manual continuation prompt", { autoContinueGoal: false });
+			await vi.runAllTimersAsync();
 
 			expect(countContinuationPrompts(harness)).toBe(0);
 			expect(getUserTexts(harness)).toEqual(["manual continuation prompt"]);

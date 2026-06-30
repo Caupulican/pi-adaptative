@@ -125,10 +125,10 @@ describe("settings selector", () => {
 
 		expect(output).toContain("Autonomy");
 		expect(output).toContain("standing autonomy");
-		expect(output).toContain("20 rounds");
+		expect(output).toContain("20 turns, stall 20, auto on");
 	});
 
-	it("persists goal loop rounds from the Autonomy submenu", () => {
+	it("persists goal continue turns from the Autonomy submenu", () => {
 		const onAutonomyChange = vi.fn();
 		const selector = new SettingsSelectorComponent(
 			makeConfig({ autonomy: { mode: "balanced", maxStallTurns: 20 } }),
@@ -139,9 +139,20 @@ describe("settings selector", () => {
 		selector.getSettingsList().handleInput("\r");
 		selector.getSettingsList().handleInput("\x1b[B");
 		selector.getSettingsList().handleInput("\x1b[B");
+		selector.getSettingsList().handleInput("\x1b[B"); // down arrow to reach goalContinueTurns
 		selector.getSettingsList().handleInput("\r");
 
-		expect(onAutonomyChange).toHaveBeenCalledWith({ mode: "balanced", maxStallTurns: 30 }, "global");
+		expect(onAutonomyChange).toHaveBeenCalledWith(
+			{
+				mode: "balanced",
+				maxStallTurns: 20,
+				goalContinueTurns: 1, // 20 -> 1
+				goalContinueMaxWallClockMinutes: 0,
+				goalAutoContinue: true,
+				goalAutoContinueDelayMs: 0,
+			},
+			"global",
+		);
 	});
 
 	it("exposes Auto Learn model settings in the searchable settings TUI", () => {

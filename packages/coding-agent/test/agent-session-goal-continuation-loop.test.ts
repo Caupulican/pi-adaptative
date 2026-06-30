@@ -143,4 +143,75 @@ describe("Phase 10E: AgentSession Goal Continuation Loop", () => {
 		// Text should be truncated to length 100
 		expect(promptCalls[0].text.length).toBe(100);
 	});
+
+	it("stops with wall_clock_budget_reached if time is exceeded during loop", async () => {
+		const { session, sessionManager, promptCalls } = createTestSession();
+
+		let state = createGoalState({ goalId: "g1", userGoal: "User Goal Here", now: "T0" });
+		state = applyGoalEvent(state, { type: "add_requirement", id: "req-1", text: "Req 1 text", now: "T0" });
+		appendGoalStateSnapshot(sessionManager, state);
+
+		let callCount = 0;
+		let mockNow = 100000000;
+		session.prompt = async (text: string, options?: unknown) => {
+			promptCalls.push({ text, options });
+			callCount++;
+			// Advance time by 60 minutes
+			mockNow += 60 * 60_000;
+			state = applyGoalEvent(state, {
+				type: "add_requirement",
+				id: `req-new-${callCount}`,
+				text: `Req new ${callCount}`,
+				now: `T${callCount}`,
+			});
+			appendGoalStateSnapshot(sessionManager, state);
+		};
+
+		const result = await session.continueGoalLoop({
+			maxStallTurns: 3,
+			maxTurns: 5,
+			maxWallClockMinutes: 30, // 30 minutes
+			now: () => mockNow,
+		});
+
+		// It should submit the first turn, but after returning, mockNow is +60 minutes which exceeds 30.
+		// So it should return wall_clock_budget_reached and not submit a second turn.
+		expect(result.turnsSubmitted).toBe(1);
+		expect(result.stopReason).toBe("wall_clock_budget_reached");
+		expect(promptCalls.length).toBe(1);
+	});
+
+	it("treats 0 as disabled for maxWallClockMinutes budget", async () => {
+		const { session, sessionManager, promptCalls } = createTestSession();
+
+		let state = createGoalState({ goalId: "g1", userGoal: "User Goal Here", now: "T0" });
+		state = applyGoalEvent(state, { type: "add_requirement", id: "req-1", text: "Req 1 text", now: "T0" });
+		appendGoalStateSnapshot(sessionManager, state);
+
+		let callCount = 0;
+		let mockNow = 100000000;
+		session.prompt = async (text: string, options?: unknown) => {
+			promptCalls.push({ text, options });
+			callCount++;
+			mockNow += 100 * 60_000; // +100 minutes
+			state = applyGoalEvent(state, {
+				type: "add_requirement",
+				id: `req-new-${callCount}`,
+				text: `Req new ${callCount}`,
+				now: `T${callCount}`,
+			});
+			appendGoalStateSnapshot(sessionManager, state);
+		};
+
+		const result = await session.continueGoalLoop({
+			maxStallTurns: 3,
+			maxTurns: 3,
+			maxWallClockMinutes: 0,
+			now: () => mockNow,
+		});
+
+		expect(result.turnsSubmitted).toBe(3);
+		expect(result.stopReason).toBe("max_turns_reached");
+		expect(promptCalls.length).toBe(3);
+	});
 });
