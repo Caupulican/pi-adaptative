@@ -118,6 +118,11 @@ import { disposeExtensionEventSubscriptions } from "./extensions/loader.ts";
 import { emitSessionShutdownEvent } from "./extensions/runner.ts";
 import { type ChannelProvider, GatewayRegistry, type JobSchedulerProvider } from "./gateways/channel-provider.ts";
 import {
+	buildGoalContinuationPrompt,
+	type GoalContinuationPrompt,
+	type GoalContinuationPromptLimits,
+} from "./goals/goal-continuation-prompt.ts";
+import {
 	buildGoalRuntimeSnapshot,
 	type GoalRuntimeSnapshot,
 	type GoalRuntimeSnapshotSettings,
@@ -399,6 +404,17 @@ export interface IsolatedCompletionResult {
 	text: string;
 	usage: Usage;
 	stopReason: StopReason;
+}
+
+export interface GoalContinuationOnceOptions {
+	maxStallTurns: number;
+	promptLimits?: GoalContinuationPromptLimits;
+}
+
+export interface GoalContinuationOnceResult {
+	submitted: boolean;
+	snapshot: GoalRuntimeSnapshot;
+	prompt?: GoalContinuationPrompt;
 }
 
 interface ToolDefinitionEntry {
@@ -4769,6 +4785,19 @@ export class AgentSession {
 			entries: this.sessionManager.getEntries(),
 			settings,
 		});
+	}
+
+	async continueGoalOnce(options: GoalContinuationOnceOptions): Promise<GoalContinuationOnceResult> {
+		const snapshot = this.getGoalRuntimeSnapshot({ maxStallTurns: options.maxStallTurns });
+
+		if (snapshot.continuation.action !== "continue") {
+			return { submitted: false, snapshot };
+		}
+
+		const prompt = buildGoalContinuationPrompt({ snapshot, limits: options.promptLimits });
+		await this.prompt(prompt.text, { expandPromptTemplates: false, processSlashCommands: false });
+
+		return { submitted: true, snapshot, prompt };
 	}
 
 	/**
