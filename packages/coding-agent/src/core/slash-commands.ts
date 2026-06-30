@@ -19,6 +19,10 @@ export const BUILTIN_SLASH_COMMANDS: ReadonlyArray<BuiltinSlashCommand> = [
 	{ name: "settings", description: "Open settings menu" },
 	{ name: "autonomy", description: "Show or set autonomy mode (/autonomy full)" },
 	{ name: "auto-learn", description: "Show Auto Learn/reflection status or run now (/auto-learn run)" },
+	{
+		name: "goal-continue",
+		description: "Continue the current goal loop explicitly (/goal-continue [turns] [stalls])",
+	},
 	{ name: "model", description: "Select model (opens selector UI)" },
 	{ name: "profiles", description: "Select a runtime profile for this session" },
 	{ name: "scoped-models", description: "Enable/disable models for Ctrl+P cycling" },

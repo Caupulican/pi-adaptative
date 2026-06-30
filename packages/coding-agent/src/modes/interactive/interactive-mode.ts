@@ -180,6 +180,10 @@ const TUI_HISTORY_RELOAD_CHUNK_SIZE = 20;
 const TUI_LIVE_HISTORY_MAX_COMPONENTS = 260;
 const TUI_LIVE_HISTORY_TRIM_TO_COMPONENTS = 220;
 const STREAMING_UI_UPDATE_INTERVAL_MS = 80;
+const DEFAULT_GOAL_CONTINUE_MAX_TURNS = 3;
+const DEFAULT_GOAL_CONTINUE_MAX_STALL_TURNS = 20;
+const MAX_GOAL_CONTINUE_MAX_TURNS = 20;
+const MAX_GOAL_CONTINUE_MAX_STALL_TURNS = 100;
 
 /** Interface for components that can be expanded/collapsed */
 interface Expandable {
@@ -3182,6 +3186,11 @@ export class InteractiveMode {
 			}
 			if (text === "/usage" || text === "/cost") {
 				this.handleUsageCommand();
+				this.editor.setText("");
+				return;
+			}
+			if (text === "/goal-continue" || text.startsWith("/goal-continue ")) {
+				await this.handleGoalContinueCommand(text);
 				this.editor.setText("");
 				return;
 			}
@@ -8674,6 +8683,67 @@ export class InteractiveMode {
 		this.chatContainer.addChild(new Spacer(1));
 		this.chatContainer.addChild(new Text(theme.fg("dim", `Session name set: ${name}`), 1, 0));
 		this.ui.requestRender();
+	}
+
+	private parseGoalContinueCommand(
+		text: string,
+	): { ok: true; maxTurns: number; maxStallTurns: number } | { ok: false; error: string } {
+		const usage = "Usage: /goal-continue [maxTurns 1-20] [maxStallTurns 0-100]";
+		const parts = text.trim().split(/\s+/).slice(1);
+		if (parts.length > 2) {
+			return { ok: false, error: usage };
+		}
+
+		const parseBoundedInteger = (
+			value: string | undefined,
+			fallback: number,
+			min: number,
+			max: number,
+		): number | undefined => {
+			if (value === undefined || value.length === 0) return fallback;
+			if (!/^\d+$/.test(value)) return undefined;
+			const parsed = Number.parseInt(value, 10);
+			if (!Number.isSafeInteger(parsed) || parsed < min || parsed > max) return undefined;
+			return parsed;
+		};
+
+		const maxTurns = parseBoundedInteger(parts[0], DEFAULT_GOAL_CONTINUE_MAX_TURNS, 1, MAX_GOAL_CONTINUE_MAX_TURNS);
+		const maxStallTurns = parseBoundedInteger(
+			parts[1],
+			DEFAULT_GOAL_CONTINUE_MAX_STALL_TURNS,
+			0,
+			MAX_GOAL_CONTINUE_MAX_STALL_TURNS,
+		);
+		if (maxTurns === undefined || maxStallTurns === undefined) {
+			return { ok: false, error: usage };
+		}
+		return { ok: true, maxTurns, maxStallTurns };
+	}
+
+	private async handleGoalContinueCommand(text: string): Promise<void> {
+		const parsed = this.parseGoalContinueCommand(text);
+		if (!parsed.ok) {
+			this.showError(parsed.error);
+			return;
+		}
+
+		this.showStatus(
+			`Goal continuation started: up to ${parsed.maxTurns} turn(s), stall limit ${parsed.maxStallTurns}.`,
+		);
+		try {
+			const result = await this.session.continueGoalLoop({
+				maxTurns: parsed.maxTurns,
+				maxStallTurns: parsed.maxStallTurns,
+			});
+			const continuation = result.finalSnapshot.continuation;
+			this.showStatus(
+				`Goal continuation stopped: ${result.stopReason}; submitted ${result.turnsSubmitted} turn(s); latest decision ${continuation.action}/${continuation.reasonCode}.`,
+			);
+		} catch (error) {
+			this.showError(`Goal continuation failed: ${error instanceof Error ? error.message : String(error)}`);
+		} finally {
+			this.refreshAutonomyFooterStatus();
+		}
 	}
 
 	private handleSessionCommand(): void {
