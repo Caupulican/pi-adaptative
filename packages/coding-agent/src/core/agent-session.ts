@@ -417,6 +417,21 @@ export interface GoalContinuationOnceResult {
 	prompt?: GoalContinuationPrompt;
 }
 
+export type GoalContinuationLoopStopReason =
+	| "continuation_not_allowed"
+	| "max_turns_reached"
+	| "goal_state_not_advanced";
+
+export interface GoalContinuationLoopOptions extends GoalContinuationOnceOptions {
+	maxTurns: number;
+}
+
+export interface GoalContinuationLoopResult {
+	turnsSubmitted: number;
+	stopReason: GoalContinuationLoopStopReason;
+	finalSnapshot: GoalRuntimeSnapshot;
+}
+
 interface ToolDefinitionEntry {
 	definition: ToolDefinition;
 	sourceInfo: SourceInfo;
@@ -4798,6 +4813,54 @@ export class AgentSession {
 		await this.prompt(prompt.text, { expandPromptTemplates: false, processSlashCommands: false });
 
 		return { submitted: true, snapshot, prompt };
+	}
+
+	async continueGoalLoop(options: GoalContinuationLoopOptions): Promise<GoalContinuationLoopResult> {
+		let turnsSubmitted = 0;
+		if (options.maxTurns <= 0) {
+			return {
+				turnsSubmitted: 0,
+				stopReason: "max_turns_reached",
+				finalSnapshot: this.getGoalRuntimeSnapshot({ maxStallTurns: options.maxStallTurns }),
+			};
+		}
+
+		while (turnsSubmitted < options.maxTurns) {
+			const beforeSnapshot = this.getGoalRuntimeSnapshot({ maxStallTurns: options.maxStallTurns });
+			if (beforeSnapshot.continuation.action !== "continue") {
+				return { turnsSubmitted, stopReason: "continuation_not_allowed", finalSnapshot: beforeSnapshot };
+			}
+
+			const state = beforeSnapshot.goalState;
+			const beforeKey = state
+				? `${state.goalId}:${state.updatedAt}:${state.events.length}:${state.stallTurns}:${state.status}`
+				: undefined;
+
+			const result = await this.continueGoalOnce(options);
+			if (result.submitted) {
+				turnsSubmitted++;
+			}
+
+			const afterSnapshot = this.getGoalRuntimeSnapshot({ maxStallTurns: options.maxStallTurns });
+			if (afterSnapshot.continuation.action !== "continue") {
+				return { turnsSubmitted, stopReason: "continuation_not_allowed", finalSnapshot: afterSnapshot };
+			}
+
+			const afterState = afterSnapshot.goalState;
+			const afterKey = afterState
+				? `${afterState.goalId}:${afterState.updatedAt}:${afterState.events.length}:${afterState.stallTurns}:${afterState.status}`
+				: undefined;
+
+			if (beforeKey === afterKey) {
+				return { turnsSubmitted, stopReason: "goal_state_not_advanced", finalSnapshot: afterSnapshot };
+			}
+		}
+
+		return {
+			turnsSubmitted,
+			stopReason: "max_turns_reached",
+			finalSnapshot: this.getGoalRuntimeSnapshot({ maxStallTurns: options.maxStallTurns }),
+		};
 	}
 
 	/**
