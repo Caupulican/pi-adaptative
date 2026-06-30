@@ -51,7 +51,7 @@ import { stripFrontmatter } from "../utils/frontmatter.ts";
 import { resolvePath } from "../utils/paths.ts";
 import { sleep } from "../utils/sleep.ts";
 import { formatNoApiKeyFoundMessage, formatNoModelSelectedMessage } from "./auth-guidance.ts";
-import type { CapabilityEnvelope, GateOutcome, RouteDecision } from "./autonomy/contracts.ts";
+import type { CapabilityEnvelope, EvidenceBundle, GateOutcome, RouteDecision } from "./autonomy/contracts.ts";
 import { evaluateToolGate } from "./autonomy/gates.ts";
 import type { AutonomyStatusSnapshot } from "./autonomy/status.ts";
 import { type BashResult, executeBashWithOperations } from "./bash-executor.ts";
@@ -145,6 +145,7 @@ import {
 } from "./model-router/status.ts";
 import { shouldEscalateModelRouterTool } from "./model-router/tool-escalation.ts";
 import { expandPromptTemplate, type PromptTemplate } from "./prompt-templates.ts";
+import { appendEvidenceBundleSnapshot, getLatestEvidenceBundleSnapshot } from "./research/session-evidence-bundle.ts";
 import type { ResourceExtensionPaths, ResourceLoader } from "./resource-loader.ts";
 import { stripResourceProfileBlocks } from "./resource-profile-blocks.ts";
 import { classifyToolTrust, UNTRUSTED_BOUNDARY_SYSTEM_RULE, wrapUntrustedText } from "./security/untrusted-boundary.ts";
@@ -4715,6 +4716,22 @@ export class AgentSession {
 	 */
 	getGoalStateSnapshot(): GoalState | undefined {
 		return getLatestGoalStateSnapshot(this.sessionManager.getEntries());
+	}
+
+	/**
+	 * Save a snapshot of the evidence bundle to the session log.
+	 *
+	 * @returns the id of the appended custom entry
+	 */
+	saveEvidenceBundleSnapshot(bundle: EvidenceBundle): string {
+		return appendEvidenceBundleSnapshot(this.sessionManager, bundle);
+	}
+
+	/**
+	 * Retrieve the latest valid evidence bundle snapshot from the session log.
+	 */
+	getEvidenceBundleSnapshot(): EvidenceBundle | undefined {
+		return getLatestEvidenceBundleSnapshot(this.sessionManager.getEntries());
 	}
 
 	/**
