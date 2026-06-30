@@ -55,6 +55,7 @@ import type {
 	CapabilityEnvelope,
 	EvidenceBundle,
 	GateOutcome,
+	LearningDecision,
 	RouteDecision,
 	WorkerResult,
 } from "./autonomy/contracts.ts";
@@ -125,6 +126,7 @@ import {
 	type ReflectionResult,
 	type ReflectionWrite,
 } from "./learning/reflection-engine.ts";
+import { appendLearningDecisionSnapshot, getLearningDecisionSnapshots } from "./learning/session-learning-decision.ts";
 import { type CurationProposals, isPromotedFrontmatter, SkillCurator } from "./learning/skill-curator.ts";
 import { EffectivenessTracker } from "./memory/effectiveness-tracker.ts";
 import { MemoryManager } from "./memory/memory-manager.ts";
@@ -4747,6 +4749,14 @@ export class AgentSession {
 
 	getWorkerResultSnapshots(): WorkerResult[] {
 		return getWorkerResultSnapshots(this.sessionManager.getEntries());
+	}
+
+	saveLearningDecisionSnapshot(decision: LearningDecision): string {
+		return appendLearningDecisionSnapshot(this.sessionManager, decision);
+	}
+
+	getLearningDecisionSnapshots(): LearningDecision[] {
+		return getLearningDecisionSnapshots(this.sessionManager.getEntries());
 	}
 
 	/**

@@ -168,3 +168,36 @@ export function evaluateLearningDecision(args: {
 		createdAt: now,
 	});
 }
+
+function isPlainRecord(value: unknown): value is Record<string, unknown> {
+	if (!value || typeof value !== "object" || Array.isArray(value)) return false;
+	const prototype = Object.getPrototypeOf(value);
+	return prototype === Object.prototype || prototype === null;
+}
+
+export function isLearningDecision(value: unknown): value is LearningDecision {
+	if (!isPlainRecord(value)) return false;
+
+	if (typeof value.kind !== "string" || !["no-op", "proposal", "apply"].includes(value.kind)) {
+		return false;
+	}
+
+	if (typeof value.reasonCode !== "string") return false;
+	if (typeof value.confidence !== "number" || !Number.isFinite(value.confidence)) return false;
+	if (typeof value.summary !== "string") return false;
+	if (typeof value.requiresApproval !== "boolean") return false;
+	if (value.createdAt !== undefined && typeof value.createdAt !== "string") return false;
+
+	return true;
+}
+
+export function cloneLearningDecisionForStorage(decision: LearningDecision): LearningDecision {
+	return {
+		kind: decision.kind,
+		reasonCode: decision.reasonCode,
+		confidence: decision.confidence,
+		summary: decision.summary,
+		requiresApproval: decision.requiresApproval,
+		createdAt: decision.createdAt,
+	};
+}
