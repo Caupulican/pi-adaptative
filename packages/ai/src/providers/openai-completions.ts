@@ -1026,6 +1026,7 @@ function parseChunkUsage(
 		completion_tokens?: number;
 		prompt_cache_hit_tokens?: number;
 		prompt_tokens_details?: { cached_tokens?: number; cache_write_tokens?: number };
+		cost?: number;
 	},
 	model: Model<"openai-completions">,
 ): AssistantMessage["usage"] {
@@ -1050,7 +1051,7 @@ function parseChunkUsage(
 		cacheRead: cacheReadTokens,
 		cacheWrite: cacheWriteTokens,
 		totalTokens: input + outputTokens + cacheReadTokens + cacheWriteTokens,
-		cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, total: 0 },
+		cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, total: rawUsage.cost || 0 },
 	};
 	calculateCost(model, usage);
 	return usage;

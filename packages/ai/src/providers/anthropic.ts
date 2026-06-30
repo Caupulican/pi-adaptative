@@ -544,6 +544,9 @@ export const streamAnthropic: StreamFunction<"anthropic-messages", AnthropicOpti
 					// Anthropic doesn't provide total_tokens, compute from components
 					output.usage.totalTokens =
 						output.usage.input + output.usage.output + output.usage.cacheRead + output.usage.cacheWrite;
+					if ((event.message.usage as any).cost !== undefined) {
+						output.usage.cost.total = (event.message.usage as any).cost || 0;
+					}
 					calculateCost(model, output.usage);
 				} else if (event.type === "content_block_start") {
 					if (event.content_block.type === "text") {
@@ -686,6 +689,9 @@ export const streamAnthropic: StreamFunction<"anthropic-messages", AnthropicOpti
 					// Anthropic doesn't provide total_tokens, compute from components
 					output.usage.totalTokens =
 						output.usage.input + output.usage.output + output.usage.cacheRead + output.usage.cacheWrite;
+					if ((event.usage as any).cost !== undefined) {
+						output.usage.cost.total = (event.usage as any).cost || 0;
+					}
 					calculateCost(model, output.usage);
 				}
 			}
