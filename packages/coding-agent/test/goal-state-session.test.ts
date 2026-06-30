@@ -143,4 +143,54 @@ describe("Phase 9A: Goal State Session Persistence", () => {
 		expect(retrieved).toBeDefined();
 		expect(retrieved?.goalId).toBe("g1");
 	});
+
+	it("registers the goal tool as active and drives continuation end to end", async () => {
+		const sessionManager = SessionManager.inMemory();
+		const settingsManager = SettingsManager.inMemory();
+		const model = getModel("anthropic", "claude-sonnet-4-5");
+		if (!model) throw new Error("Missing test model");
+
+		const agent = new Agent({
+			getApiKey: () => "test",
+			initialState: { model, systemPrompt: "test", tools: [], thinkingLevel: "off" },
+		});
+		const session = new AgentSession({
+			agent,
+			sessionManager,
+			settingsManager,
+			resourceLoader: createTestResourceLoader(),
+			cwd: process.cwd(),
+			modelRegistry: ModelRegistry.inMemory(AuthStorage.inMemory()),
+		});
+
+		// The goal producer tool must be active by default, otherwise the model can
+		// never record goal state and /goal-continue stays inert.
+		expect(session.getActiveToolNames()).toContain("goal");
+		const goalTool = session.getToolDefinition("goal");
+		expect(goalTool).toBeDefined();
+		if (!goalTool) throw new Error("goal tool not registered");
+
+		const before = session.getGoalRuntimeSnapshot({ maxStallTurns: 20 });
+		expect(before.continuation.reasonCode).toBe("missing_goal_state");
+
+		await goalTool.execute(
+			"call-1",
+			{ action: "start", goalId: "g1", userGoal: "Ship feature" },
+			undefined,
+			undefined,
+			undefined as never,
+		);
+		await goalTool.execute(
+			"call-2",
+			{ action: "add_requirement", requirementId: "r1", text: "Implement X" },
+			undefined,
+			undefined,
+			undefined as never,
+		);
+
+		const after = session.getGoalRuntimeSnapshot({ maxStallTurns: 20 });
+		expect(after.goalState?.goalId).toBe("g1");
+		expect(after.continuation.action).toBe("continue");
+		expect(after.continuation.openRequirementIds).toEqual(["r1"]);
+	});
 });

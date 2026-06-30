@@ -179,6 +179,7 @@ import type { SlashCommandInfo } from "./slash-commands.ts";
 import { createSyntheticSourceInfo, type SourceInfo } from "./source-info.ts";
 import { type BuildSystemPromptOptions, buildSystemPrompt } from "./system-prompt.ts";
 import { type BashOperations, createLocalBashOperations } from "./tools/bash.ts";
+import { createGoalToolDefinition } from "./tools/goal.ts";
 import { createAllToolDefinitions } from "./tools/index.ts";
 import { createToolDefinitionFromAgentTool } from "./tools/tool-definition-wrapper.ts";
 
@@ -260,7 +261,7 @@ export interface AgentSessionConfig {
 	customTools?: ToolDefinition[];
 	/** Model registry for API key resolution and model discovery */
 	modelRegistry: ModelRegistry;
-	/** Initial active built-in tool names. Default: [read, bash, edit, write, context_audit] */
+	/** Initial active built-in tool names. Default: [read, bash, edit, write, context_audit, goal] */
 	initialActiveToolNames?: string[];
 	/** Optional allowlist of tool names. When provided, only these tool names are exposed. */
 	allowedToolNames?: string[];
@@ -3791,6 +3792,13 @@ export class AgentSession {
 			)) {
 				this._baseToolDefinitions.set(definition.name, definition);
 			}
+			const goalToolDefinition = createGoalToolDefinition({
+				getGoalState: () => this.getGoalStateSnapshot(),
+				saveGoalState: (state) => {
+					this.saveGoalStateSnapshot(state);
+				},
+			});
+			this._baseToolDefinitions.set(goalToolDefinition.name, goalToolDefinition);
 		}
 
 		const extensionsResult = this._resourceLoader.getExtensions();
@@ -3821,7 +3829,7 @@ export class AgentSession {
 
 		const defaultActiveToolNames = this._baseToolsOverride
 			? Object.keys(this._baseToolsOverride)
-			: ["read", "bash", "edit", "write", "context_audit"];
+			: ["read", "bash", "edit", "write", "context_audit", "goal"];
 		const baseActiveToolNames = options.activeToolNames ?? defaultActiveToolNames;
 		this._refreshToolRegistry({
 			activeToolNames: baseActiveToolNames,

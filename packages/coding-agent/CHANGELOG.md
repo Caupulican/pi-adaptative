@@ -1,5 +1,12 @@
 ## [Unreleased]
 
+### Added
+
+- Added a `goal` tool that records the durable goal ledger (goal, requirements, evidence, and
+  progress/stall events) as session-persisted snapshots. This is the producer that drives the bounded
+  goal continuation loop and `/goal-continue`; without it the continuation runtime always read empty
+  state and could not continue. The tool is active by default and maps to the `memory_write` capability.
+
 ## [0.80.86] - 2026-06-29
 
 ### Added

@@ -15,6 +15,7 @@ const TOOL_CAPABILITY_REQUIREMENTS = new Map<string, readonly CapabilityName[]>(
 	["skill_audit", ["skill_read"]],
 	["skillify", ["skill_write"]],
 	["extensionify", ["source_write"]],
+	["goal", ["memory_write"]],
 ]);
 
 export function hasCapabilityPolicyForTool(toolName: string): boolean {
