@@ -117,6 +117,11 @@ import {
 import { disposeExtensionEventSubscriptions } from "./extensions/loader.ts";
 import { emitSessionShutdownEvent } from "./extensions/runner.ts";
 import { type ChannelProvider, GatewayRegistry, type JobSchedulerProvider } from "./gateways/channel-provider.ts";
+import {
+	buildGoalRuntimeSnapshot,
+	type GoalRuntimeSnapshot,
+	type GoalRuntimeSnapshotSettings,
+} from "./goals/goal-runtime-snapshot.ts";
 import type { GoalState } from "./goals/goal-state.ts";
 import { appendGoalStateSnapshot, getLatestGoalStateSnapshot } from "./goals/session-goal-state.ts";
 import {
@@ -4757,6 +4762,13 @@ export class AgentSession {
 
 	getLearningDecisionSnapshots(): LearningDecision[] {
 		return getLearningDecisionSnapshots(this.sessionManager.getEntries());
+	}
+
+	getGoalRuntimeSnapshot(settings: GoalRuntimeSnapshotSettings): GoalRuntimeSnapshot {
+		return buildGoalRuntimeSnapshot({
+			entries: this.sessionManager.getEntries(),
+			settings,
+		});
 	}
 
 	/**
