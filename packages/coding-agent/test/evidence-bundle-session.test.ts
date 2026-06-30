@@ -66,6 +66,50 @@ describe("Phase 9B: Evidence Bundle Session Persistence", () => {
 		expect(latest?.query).toBe("Valid search");
 	});
 
+	it("invalid/non-plain evidence bundle payload is ignored while an older valid snapshot remains", () => {
+		const sessionManager = SessionManager.inMemory();
+
+		const validBundle = createEvidenceBundle({ query: "Valid", sources: [], findings: [], now: "T0" });
+		appendEvidenceBundleSnapshot(sessionManager, validBundle);
+
+		const newerValidBundle = createEvidenceBundle({ query: "Ignore me", sources: [], findings: [], now: "T1" });
+		const payload = Object.assign(new Date(0), { version: 1, bundle: newerValidBundle });
+		sessionManager.appendCustomEntry(EVIDENCE_BUNDLE_CUSTOM_TYPE, payload);
+
+		const latest = getLatestEvidenceBundleSnapshot(sessionManager.getEntries());
+		expect(latest?.query).toBe("Valid");
+	});
+
+	it("non-plain source or infinite confidence finding is ignored while older valid snapshot remains", () => {
+		const sessionManager = SessionManager.inMemory();
+
+		const validBundle = createEvidenceBundle({ query: "Valid", sources: [], findings: [], now: "T0" });
+		appendEvidenceBundleSnapshot(sessionManager, validBundle);
+
+		sessionManager.appendCustomEntry(EVIDENCE_BUNDLE_CUSTOM_TYPE, {
+			version: 1,
+			bundle: {
+				query: "Bad source",
+				sources: [Object.assign(new Date(0), { id: "src", kind: "workspace", trusted: true })],
+				findings: [],
+				createdAt: "T1",
+			},
+		});
+
+		sessionManager.appendCustomEntry(EVIDENCE_BUNDLE_CUSTOM_TYPE, {
+			version: 1,
+			bundle: {
+				query: "Bad finding",
+				sources: [],
+				findings: [{ id: "f1", summary: "finding", confidence: Infinity, evidenceIds: [] }],
+				createdAt: "T2",
+			},
+		});
+
+		const latest = getLatestEvidenceBundleSnapshot(sessionManager.getEntries());
+		expect(latest?.query).toBe("Valid");
+	});
+
 	it("snapshots do not retain caller-owned nested references", () => {
 		const sessionManager = SessionManager.inMemory();
 

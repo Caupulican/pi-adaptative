@@ -62,6 +62,38 @@ describe("Phase 9A: Goal State Session Persistence", () => {
 		expect(latest?.goalId).toBe("g1");
 	});
 
+	it("invalid/non-plain goal payload is ignored while an older valid state remains", () => {
+		const sessionManager = SessionManager.inMemory();
+
+		const validState = createGoalState({ goalId: "g1", userGoal: "Fix bugs", now: "T0" });
+		appendGoalStateSnapshot(sessionManager, validState);
+
+		const newerValidState = createGoalState({ goalId: "g2", userGoal: "Ignore me", now: "T1" });
+		const payload = Object.assign(new Date(0), { version: 1, state: newerValidState });
+		sessionManager.appendCustomEntry(GOAL_STATE_CUSTOM_TYPE, payload);
+
+		const latest = getLatestGoalStateSnapshot(sessionManager.getEntries());
+		expect(latest?.goalId).toBe("g1");
+	});
+
+	it("non-finite stallTurns is ignored while an older valid state remains", () => {
+		const sessionManager = SessionManager.inMemory();
+
+		const validState = createGoalState({ goalId: "g1", userGoal: "Fix bugs", now: "T0" });
+		appendGoalStateSnapshot(sessionManager, validState);
+
+		const newerValidState1 = createGoalState({ goalId: "g2", userGoal: "Ignore me", now: "T1" });
+		newerValidState1.stallTurns = Number.NaN;
+		sessionManager.appendCustomEntry(GOAL_STATE_CUSTOM_TYPE, { version: 1, state: newerValidState1 });
+
+		const newerValidState2 = createGoalState({ goalId: "g3", userGoal: "Ignore me", now: "T2" });
+		newerValidState2.stallTurns = Infinity;
+		sessionManager.appendCustomEntry(GOAL_STATE_CUSTOM_TYPE, { version: 1, state: newerValidState2 });
+
+		const latest = getLatestGoalStateSnapshot(sessionManager.getEntries());
+		expect(latest?.goalId).toBe("g1");
+	});
+
 	it("snapshots do not retain caller-owned nested array references", () => {
 		const sessionManager = SessionManager.inMemory();
 		let state = createGoalState({ goalId: "g1", userGoal: "Fix bugs", now: "T0" });

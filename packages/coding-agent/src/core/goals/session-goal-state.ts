@@ -19,22 +19,23 @@ export function appendGoalStateSnapshot(
 	return sessionManager.appendCustomEntry(GOAL_STATE_CUSTOM_TYPE, payload);
 }
 
+function isPlainRecord(value: unknown): value is Record<string, unknown> {
+	if (!value || typeof value !== "object" || Array.isArray(value)) return false;
+	const prototype = Object.getPrototypeOf(value);
+	return prototype === Object.prototype || prototype === null;
+}
+
 export function getLatestGoalStateSnapshot(entries: readonly SessionEntry[]): GoalState | undefined {
 	for (let i = entries.length - 1; i >= 0; i--) {
 		const entry = entries[i];
 		if (entry.type === "custom" && entry.customType === GOAL_STATE_CUSTOM_TYPE) {
 			const payload = entry.data;
-			if (
-				payload &&
-				typeof payload === "object" &&
-				"version" in payload &&
-				(payload as Record<string, unknown>).version === 1 &&
-				"state" in payload
-			) {
-				const state = (payload as Record<string, unknown>).state;
-				if (isGoalState(state)) {
-					return cloneGoalStateForStorage(state);
-				}
+			if (!isPlainRecord(payload)) continue;
+			if (payload.version !== 1) continue;
+			if (!("state" in payload)) continue;
+			const state = payload.state;
+			if (isGoalState(state)) {
+				return cloneGoalStateForStorage(state);
 			}
 		}
 	}

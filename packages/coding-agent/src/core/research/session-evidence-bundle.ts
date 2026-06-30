@@ -20,22 +20,23 @@ export function appendEvidenceBundleSnapshot(
 	return sessionManager.appendCustomEntry(EVIDENCE_BUNDLE_CUSTOM_TYPE, payload);
 }
 
+function isPlainRecord(value: unknown): value is Record<string, unknown> {
+	if (!value || typeof value !== "object" || Array.isArray(value)) return false;
+	const prototype = Object.getPrototypeOf(value);
+	return prototype === Object.prototype || prototype === null;
+}
+
 export function getLatestEvidenceBundleSnapshot(entries: readonly SessionEntry[]): EvidenceBundle | undefined {
 	for (let i = entries.length - 1; i >= 0; i--) {
 		const entry = entries[i];
 		if (entry.type === "custom" && entry.customType === EVIDENCE_BUNDLE_CUSTOM_TYPE) {
 			const payload = entry.data;
-			if (
-				payload &&
-				typeof payload === "object" &&
-				"version" in payload &&
-				(payload as Record<string, unknown>).version === 1 &&
-				"bundle" in payload
-			) {
-				const bundle = (payload as Record<string, unknown>).bundle;
-				if (isEvidenceBundle(bundle)) {
-					return cloneEvidenceBundleForStorage(bundle);
-				}
+			if (!isPlainRecord(payload)) continue;
+			if (payload.version !== 1) continue;
+			if (!("bundle" in payload)) continue;
+			const bundle = payload.bundle;
+			if (isEvidenceBundle(bundle)) {
+				return cloneEvidenceBundleForStorage(bundle);
 			}
 		}
 	}

@@ -71,6 +71,15 @@ describe("Phase 9C: Worker Result Session Persistence", () => {
 		});
 		sessionManager.appendCustomEntry(WORKER_RESULT_CUSTOM_TYPE, { version: 1, result: nonPlainResult });
 
+		const validResult2 = {
+			requestId: "req-valid-2",
+			status: "completed" as const,
+			summary: "Valid 2",
+			changedFiles: [],
+		};
+		const payload = Object.assign(new Date(0), { version: 1, result: validResult2 });
+		sessionManager.appendCustomEntry(WORKER_RESULT_CUSTOM_TYPE, payload);
+
 		const snapshots = getWorkerResultSnapshots(sessionManager.getEntries());
 		expect(snapshots.length).toBe(1);
 		expect(snapshots[0].requestId).toBe("req-valid");

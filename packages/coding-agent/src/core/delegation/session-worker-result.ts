@@ -20,6 +20,12 @@ export function appendWorkerResultSnapshot(
 	return sessionManager.appendCustomEntry(WORKER_RESULT_CUSTOM_TYPE, payload);
 }
 
+function isPlainRecord(value: unknown): value is Record<string, unknown> {
+	if (!value || typeof value !== "object" || Array.isArray(value)) return false;
+	const prototype = Object.getPrototypeOf(value);
+	return prototype === Object.prototype || prototype === null;
+}
+
 export function getWorkerResultSnapshots(entries: readonly SessionEntry[]): WorkerResult[] {
 	const results: WorkerResult[] = [];
 
@@ -29,11 +35,10 @@ export function getWorkerResultSnapshots(entries: readonly SessionEntry[]): Work
 		}
 
 		const payload = entry.data;
-		if (!payload || typeof payload !== "object" || !("version" in payload)) continue;
-		const record = payload as Record<string, unknown>;
-		if (record.version !== 1) continue;
-		if (!("result" in record)) continue;
-		const result = record.result;
+		if (!isPlainRecord(payload)) continue;
+		if (payload.version !== 1) continue;
+		if (!("result" in payload)) continue;
+		const result = payload.result;
 		if (isWorkerResult(result)) {
 			results.push(cloneWorkerResultForStorage(result));
 		}

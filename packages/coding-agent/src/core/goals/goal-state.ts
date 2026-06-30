@@ -53,7 +53,9 @@ export type GoalEvent =
 	| { type: "cancel_goal"; now: string };
 
 function isRecord(value: unknown): value is Record<string, unknown> {
-	return Boolean(value) && typeof value === "object";
+	if (!value || typeof value !== "object" || Array.isArray(value)) return false;
+	const prototype = Object.getPrototypeOf(value);
+	return prototype === Object.prototype || prototype === null;
 }
 
 function isStringArray(value: unknown): value is readonly string[] {
@@ -144,6 +146,7 @@ export function isGoalState(value: unknown): value is GoalState {
 		typeof value.updatedAt === "string" &&
 		typeof value.lastProgressAt === "string" &&
 		typeof value.stallTurns === "number" &&
+		Number.isFinite(value.stallTurns) &&
 		hasOptionalString(value, "blockedReason")
 	);
 }

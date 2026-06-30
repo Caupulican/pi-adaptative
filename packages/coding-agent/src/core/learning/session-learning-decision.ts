@@ -20,6 +20,12 @@ export function appendLearningDecisionSnapshot(
 	return sessionManager.appendCustomEntry(LEARNING_DECISION_CUSTOM_TYPE, payload);
 }
 
+function isPlainRecord(value: unknown): value is Record<string, unknown> {
+	if (!value || typeof value !== "object" || Array.isArray(value)) return false;
+	const prototype = Object.getPrototypeOf(value);
+	return prototype === Object.prototype || prototype === null;
+}
+
 export function getLearningDecisionSnapshots(entries: readonly SessionEntry[]): LearningDecision[] {
 	const results: LearningDecision[] = [];
 
@@ -29,11 +35,10 @@ export function getLearningDecisionSnapshots(entries: readonly SessionEntry[]): 
 		}
 
 		const payload = entry.data;
-		if (!payload || typeof payload !== "object" || !("version" in payload)) continue;
-		const record = payload as Record<string, unknown>;
-		if (record.version !== 1) continue;
-		if (!("decision" in record)) continue;
-		const decision = record.decision;
+		if (!isPlainRecord(payload)) continue;
+		if (payload.version !== 1) continue;
+		if (!("decision" in payload)) continue;
+		const decision = payload.decision;
 		if (isLearningDecision(decision)) {
 			results.push(cloneLearningDecisionForStorage(decision));
 		}

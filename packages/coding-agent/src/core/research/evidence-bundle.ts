@@ -81,7 +81,7 @@ export function cloneEvidenceBundleForStorage(bundle: EvidenceBundle): EvidenceB
 }
 
 export function isEvidenceBundle(value: unknown): value is EvidenceBundle {
-	if (!value || typeof value !== "object") return false;
+	if (!isPlainRecord(value)) return false;
 	const bundle = value as Record<string, unknown>;
 
 	if (typeof bundle.query !== "string") return false;
@@ -89,7 +89,7 @@ export function isEvidenceBundle(value: unknown): value is EvidenceBundle {
 
 	if (!Array.isArray(bundle.sources)) return false;
 	for (const source of bundle.sources) {
-		if (!source || typeof source !== "object") return false;
+		if (!isPlainRecord(source)) return false;
 		const ref = source as Record<string, unknown>;
 		if (typeof ref.id !== "string") return false;
 		if (
@@ -107,11 +107,12 @@ export function isEvidenceBundle(value: unknown): value is EvidenceBundle {
 
 	if (!Array.isArray(bundle.findings)) return false;
 	for (const finding of bundle.findings) {
-		if (!finding || typeof finding !== "object") return false;
+		if (!isPlainRecord(finding)) return false;
 		const f = finding as Record<string, unknown>;
 		if (typeof f.id !== "string") return false;
 		if (typeof f.summary !== "string") return false;
-		if (f.confidence !== undefined && typeof f.confidence !== "number") return false;
+		if (f.confidence !== undefined && (typeof f.confidence !== "number" || !Number.isFinite(f.confidence)))
+			return false;
 		if (!Array.isArray(f.evidenceIds) || !f.evidenceIds.every((id) => typeof id === "string")) return false;
 	}
 

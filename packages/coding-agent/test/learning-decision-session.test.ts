@@ -108,6 +108,16 @@ describe("Phase 9D: Learning Decision Session Persistence", () => {
 		});
 		sessionManager.appendCustomEntry(LEARNING_DECISION_CUSTOM_TYPE, { version: 1, decision: nonPlainDecision });
 
+		const validDecision2 = {
+			kind: "apply" as const,
+			reasonCode: "valid-2",
+			confidence: 90,
+			summary: "Valid 2",
+			requiresApproval: false,
+		};
+		const payload = Object.assign(new Date(0), { version: 1, decision: validDecision2 });
+		sessionManager.appendCustomEntry(LEARNING_DECISION_CUSTOM_TYPE, payload);
+
 		const snapshots = getLearningDecisionSnapshots(sessionManager.getEntries());
 		expect(snapshots.length).toBe(1);
 		expect(snapshots[0].reasonCode).toBe("valid");
