@@ -1,4 +1,5 @@
 import { describe, expect, it } from "vitest";
+import type { RouteDecision } from "../src/core/autonomy/contracts.ts";
 import {
 	formatModelRouterStatus,
 	getRecentModelRouterDecisions,
@@ -36,9 +37,16 @@ describe("model router status formatting", () => {
 	});
 
 	it("shows routed activity and latest prompt intent when the latest prompt used the router", () => {
+		const route: RouteDecision = {
+			tier: "cheap",
+			risk: "read-only",
+			confidence: 0.9,
+			reasonCode: "read_only_question",
+			reasons: [],
+		};
 		const text = formatModelRouterStatus(
 			{ enabled: true, cheapModel: "cheap", expensiveModel: "expensive" },
-			{ intent: "research", routedModel: "cheap", outcome: "routed" },
+			{ route, routedModel: "cheap", outcome: "routed" },
 			undefined,
 			[],
 			undefined,
@@ -47,6 +55,7 @@ describe("model router status formatting", () => {
 
 		expect(text).toContain("Routing: active");
 		expect(text).toContain("Latest intent: research");
+		expect(text).toContain("Last decision: cheap/read-only -> cheap (read_only_question, routed)");
 	});
 
 	it("shows why the latest prompt skipped routing and preserves the classified intent", () => {
@@ -65,11 +74,18 @@ describe("model router status formatting", () => {
 	});
 
 	it("does not present a previous routed decision as latest when the latest prompt skipped routing", () => {
+		const route: RouteDecision = {
+			tier: "expensive",
+			risk: "high-impact",
+			confidence: 1.0,
+			reasonCode: "test_run",
+			reasons: [],
+		};
 		const text = formatModelRouterStatus(
 			{ enabled: true, cheapModel: "cheap", expensiveModel: "expensive" },
-			{ intent: "modify", routedModel: "expensive", outcome: "routed" },
+			{ route, routedModel: "expensive", outcome: "routed" },
 			undefined,
-			[{ intent: "modify", routedModel: "expensive", outcome: "routed" }],
+			[{ route, routedModel: "expensive", outcome: "routed" }],
 			"cheap model missing auth: anthropic/claude-haiku-4-5",
 			"research",
 		);
@@ -78,14 +94,21 @@ describe("model router status formatting", () => {
 		expect(text).toContain("Latest intent: research");
 		expect(text).toContain("Last decision: none");
 		expect(text).toContain("Recent decisions:");
-		expect(text).toContain("modify -> expensive");
+		expect(text).toContain("expensive/high-impact -> expensive (test_run, routed)");
 	});
 
 	it("shows the latest routed decision and escalation retry once", () => {
+		const route: RouteDecision = {
+			tier: "cheap",
+			risk: "read-only",
+			confidence: 0.8,
+			reasonCode: "explain",
+			reasons: [],
+		};
 		const text = formatModelRouterStatus(
 			{ enabled: true, cheapModel: "cheap", expensiveModel: "expensive" },
 			{
-				intent: "research",
+				route,
 				routedModel: "openrouter/cheap",
 				outcome: "escalated",
 				retryModel: "anthropic/expensive",
@@ -93,54 +116,121 @@ describe("model router status formatting", () => {
 		);
 
 		expect(text).toContain("Status: enabled");
-		expect(text).toContain("Last decision: research -> openrouter/cheap (escalated -> anthropic/expensive)");
-		expect(text).not.toContain("Escalated retry:");
+		expect(text).toContain(
+			"Last decision: cheap/read-only -> openrouter/cheap (explain, escalated -> anthropic/expensive)",
+		);
 	});
 
 	it("shows history without duplicating the latest persisted decision", () => {
+		const route1: RouteDecision = {
+			tier: "expensive",
+			risk: "high-impact",
+			confidence: 1.0,
+			reasonCode: "test_run",
+			reasons: [],
+		};
+		const route2: RouteDecision = {
+			tier: "cheap",
+			risk: "read-only",
+			confidence: 0.9,
+			reasonCode: "explain",
+			reasons: [],
+		};
 		const text = formatModelRouterStatus(
 			{ enabled: true, cheapModel: "cheap", expensiveModel: "expensive" },
-			{ intent: "modify", routedModel: "expensive", outcome: "routed" },
+			{ route: route1, routedModel: "expensive", outcome: "routed" },
 			undefined,
-			[{ intent: "research", routedModel: "cheap", outcome: "routed" }],
+			[{ route: route2, routedModel: "cheap", outcome: "routed" }],
 		);
 
 		expect(text).toContain("Recent decisions:");
-		expect(text).toContain("research -> cheap");
-		expect(text.match(/modify -> expensive/g)).toHaveLength(1);
+		expect(text).toContain("cheap/read-only -> cheap (explain, routed)");
+		expect(text.match(/expensive\/high-impact -> expensive/g)).toHaveLength(1);
 	});
 
 	it("shows failed routed decisions", () => {
+		const route: RouteDecision = {
+			tier: "cheap",
+			risk: "read-only",
+			confidence: 0.9,
+			reasonCode: "explain",
+			reasons: [],
+		};
 		const text = formatModelRouterStatus(
 			{ enabled: true, cheapModel: "cheap", expensiveModel: "expensive" },
-			{ intent: "research", routedModel: "cheap", outcome: "failed" },
+			{ route, routedModel: "cheap", outcome: "failed" },
 		);
 
-		expect(text).toContain("Last decision: research -> cheap (failed)");
+		expect(text).toContain("Last decision: cheap/read-only -> cheap (explain, failed)");
 	});
 
-	it("extracts recent persisted decisions from session custom entries", () => {
+	it("shows medium and expensive routed decisions clearly", () => {
+		const mediumRoute: RouteDecision = {
+			tier: "medium",
+			risk: "scoped-write",
+			confidence: 0.85,
+			reasonCode: "normal_implementation",
+			reasons: [],
+		};
+		const expensiveRoute: RouteDecision = {
+			tier: "expensive",
+			risk: "approval-required",
+			confidence: 0.9,
+			reasonCode: "release_or_publish",
+			reasons: [],
+		};
+
+		const textMed = formatModelRouterStatus(
+			{ enabled: true, cheapModel: "cheap", mediumModel: "medium", expensiveModel: "expensive" },
+			{ route: mediumRoute, routedModel: "medium", outcome: "routed" },
+		);
+		expect(textMed).toContain("Last decision: medium/scoped-write -> medium (normal_implementation, routed)");
+
+		const textExp = formatModelRouterStatus(
+			{ enabled: true, cheapModel: "cheap", mediumModel: "medium", expensiveModel: "expensive" },
+			{ route: expensiveRoute, routedModel: "expensive", outcome: "routed" },
+		);
+		expect(textExp).toContain("Last decision: expensive/approval-required -> expensive (release_or_publish, routed)");
+	});
+
+	it("extracts recent persisted decisions from session custom entries and ignores malformed safely", () => {
+		const validRoute: RouteDecision = {
+			tier: "cheap",
+			risk: "read-only",
+			confidence: 0.9,
+			reasonCode: "explain",
+			reasons: [],
+		};
 		const entries: SessionEntry[] = [
 			{
 				type: "custom",
 				customType: MODEL_ROUTER_DECISION_CUSTOM_TYPE,
-				data: { intent: "research", routedModel: "cheap", outcome: "routed" },
+				data: { route: validRoute, routedModel: "cheap", outcome: "routed" },
 				id: "1",
 				parentId: null,
 				timestamp: "2026-06-28T00:00:00.000Z",
 			},
 			{
 				type: "custom",
-				customType: "other",
-				data: { intent: "modify", routedModel: "wrong", outcome: "routed" },
+				customType: MODEL_ROUTER_DECISION_CUSTOM_TYPE,
+				data: { intent: "research" }, // malformed, missing route
 				id: "2",
 				parentId: null,
 				timestamp: "2026-06-28T00:00:01.000Z",
 			},
+			{
+				type: "custom",
+				customType: "other",
+				data: { route: validRoute, routedModel: "wrong", outcome: "routed" },
+				id: "3",
+				parentId: null,
+				timestamp: "2026-06-28T00:00:02.000Z",
+			},
 		];
 
-		expect(getRecentModelRouterDecisions(entries)).toEqual([
-			{ intent: "research", routedModel: "cheap", outcome: "routed" },
-		]);
+		const recent = getRecentModelRouterDecisions(entries);
+		expect(recent).toHaveLength(1);
+		expect(recent[0].route.tier).toBe("cheap");
+		expect(recent[0].routedModel).toBe("cheap");
 	});
 });

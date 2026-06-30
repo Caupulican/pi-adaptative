@@ -1,49 +1,66 @@
 import type { AgentMessage, AgentTool, ThinkingLevel } from "@caupulican/pi-agent-core";
-import type { AssistantMessage, Message, Model, Usage } from "@caupulican/pi-ai";
+import type { Api, AssistantMessage, Message, Model, Usage } from "@caupulican/pi-ai";
 import { fauxAssistantMessage, fauxToolCall, getModel } from "@caupulican/pi-ai";
 import { Type } from "typebox";
 import { describe, expect, it } from "vitest";
 import { AgentSession } from "../src/core/agent-session.ts";
+import type { RouteDecision } from "../src/core/autonomy/contracts.ts";
 import { MODEL_ROUTER_DECISION_CUSTOM_TYPE, type ModelRouterDecisionStatus } from "../src/core/model-router/status.ts";
 import { createHarness } from "./suite/harness.ts";
 
-type RouterSettings = { enabled: boolean; cheapModel?: string; expensiveModel?: string };
+type TestModel = Model<Api>;
+
+type RouterSettings = {
+	enabled: boolean;
+	cheapModel?: string;
+	mediumModel?: string;
+	expensiveModel?: string;
+};
+
 type RouterContext = {
 	settingsManager: {
 		getModelRouterSettings: () => RouterSettings;
 	};
 	sessionManager: { getEntries: () => [] };
 	_modelRegistry: {
-		getAll: () => Model<any>[];
-		hasConfiguredAuth: (model: Model<any>) => boolean;
+		getAll: () => TestModel[];
+		hasConfiguredAuth: (model: TestModel) => boolean;
 	};
 };
 
 type RoutedRunContext = {
-	model: Model<any> | undefined;
-	agent: { state: { model: Model<any> | undefined; thinkingLevel: ThinkingLevel; messages: AgentMessage[] } };
+	model: TestModel | undefined;
+	agent: { state: { model: TestModel | undefined; thinkingLevel: ThinkingLevel; messages: AgentMessage[] } };
 	sessionManager: {
 		appendMessage: (message: Message) => string;
 		appendCustomEntry: (customType: string, data?: unknown) => string;
+		appendCustomMessageEntry: (customType: string, content: unknown, display: string, details?: unknown) => string;
 	};
 	_runAgentPrompt: (messages: AgentMessage | AgentMessage[]) => Promise<void>;
-	_resolveModelRouterModelForIntent: (intent: "research" | "modify") => Model<any> | undefined;
+	_isModelRouterRetry?: boolean;
+	_resolveModelRouterModelForIntent: (intent: "research" | "modify") => TestModel | undefined;
 	_runAgentPromptWithModelRouter?: AgentSessionRouterPrototype["_runAgentPromptWithModelRouter"];
 };
 
 type AgentSessionRouterPrototype = {
-	_resolveModelRouterTurnModel(this: RouterContext, prompt: string): Model<any> | undefined;
+	_resolveModelRouterTurnModel(this: RouterContext, prompt: string): TestModel | undefined;
+	_resolveModelRouterTurnRoute(
+		this: RouterContext,
+		prompt: string,
+	): { decision: RouteDecision; model: TestModel } | undefined;
 	_runAgentPromptWithModelRouter(
 		this: RoutedRunContext,
 		messages: AgentMessage | AgentMessage[],
-		routedModel: Model<any> | undefined,
-		routedIntent: "research" | "modify" | undefined,
+		routedModel: TestModel | undefined,
+		routeDecision: RouteDecision | undefined,
 	): Promise<void>;
 };
 
 const routerPrototype = AgentSession.prototype as unknown as AgentSessionRouterPrototype;
-const cheapModel = getModel("anthropic", "claude-haiku-4-5")!;
-const expensiveModel = getModel("anthropic", "claude-sonnet-4-5")!;
+const cheapModel = getModel("anthropic", "claude-haiku-4-5")! as TestModel;
+const mediumModel = getModel("anthropic", "claude-3-5-sonnet-20241022")! as TestModel;
+const expensiveModel = getModel("anthropic", "claude-sonnet-4-5")! as TestModel;
+
 const bashParameters = Type.Object({ command: Type.String() });
 const bashTool: AgentTool<typeof bashParameters> = {
 	name: "bash",
@@ -66,7 +83,7 @@ function createUsage(): Usage {
 
 function createContext(
 	settings: RouterSettings,
-	authenticatedModels: Model<any>[] = [cheapModel, expensiveModel],
+	authenticatedModels: TestModel[] = [cheapModel, mediumModel, expensiveModel],
 ): RouterContext {
 	return Object.assign(Object.create(AgentSession.prototype), {
 		settingsManager: {
@@ -74,8 +91,8 @@ function createContext(
 		},
 		sessionManager: { getEntries: () => [] },
 		_modelRegistry: {
-			getAll: () => [cheapModel, expensiveModel],
-			hasConfiguredAuth: (model: Model<any>) =>
+			getAll: () => [cheapModel, mediumModel, expensiveModel],
+			hasConfiguredAuth: (model: TestModel) =>
 				authenticatedModels.some((candidate) => candidate.provider === model.provider && candidate.id === model.id),
 		},
 	});
@@ -105,7 +122,7 @@ describe("AgentSession model router turn selection", () => {
 			const userStarts = harness.eventsOfType("message_start").filter((event) => event.message.role === "user");
 			expect(userStarts).toHaveLength(1);
 			expect(harness.session.getModelRouterStatus()).toContain(
-				"research -> faux/cheap (escalated -> faux/expensive)",
+				"cheap/read-only -> faux/cheap (read_only_question, escalated -> faux/expensive)",
 			);
 		} finally {
 			harness.cleanup();
@@ -134,6 +151,23 @@ describe("AgentSession model router turn selection", () => {
 		expect(selected?.id).toBe("claude-haiku-4-5");
 	});
 
+	it("selects the medium model for normal implementation prompts", () => {
+		const context = createContext({
+			enabled: true,
+			cheapModel: "anthropic/claude-haiku-4-5",
+			mediumModel: "anthropic/claude-3-5-sonnet-20241022",
+			expensiveModel: "anthropic/claude-sonnet-4-5",
+		});
+		const resolved = routerPrototype._resolveModelRouterTurnRoute.call(
+			context,
+			"Implement a small fix and update the relevant unit test.",
+		);
+
+		expect(resolved?.model.id).toBe("claude-3-5-sonnet-20241022");
+		expect(resolved?.decision.tier).toBe("medium");
+		expect(resolved?.decision.risk).toBe("scoped-write");
+	});
+
 	it("selects the expensive model for authenticated modify turns", () => {
 		const selected = routerPrototype._resolveModelRouterTurnModel.call(
 			createContext({
@@ -141,10 +175,31 @@ describe("AgentSession model router turn selection", () => {
 				cheapModel: "anthropic/claude-haiku-4-5",
 				expensiveModel: "anthropic/claude-sonnet-4-5",
 			}),
-			"Fix the failing tests",
+			"Publish a release and push the tag.",
 		);
 
 		expect(selected?.id).toBe("claude-sonnet-4-5");
+	});
+
+	it("falls back to expensive when medium model is missing or lacks auth", () => {
+		const context = createContext(
+			{
+				enabled: true,
+				cheapModel: "anthropic/claude-haiku-4-5",
+				mediumModel: "anthropic/claude-3-5-sonnet-20241022",
+				expensiveModel: "anthropic/claude-sonnet-4-5",
+			},
+			[cheapModel, expensiveModel], // medium model is not authenticated!
+		);
+		const resolved = routerPrototype._resolveModelRouterTurnRoute.call(
+			context,
+			"Implement a small fix and update the relevant unit test.",
+		);
+
+		expect(resolved?.model.id).toBe("claude-sonnet-4-5");
+		expect(resolved?.decision.tier).toBe("expensive");
+		expect(resolved?.decision.fallbackFrom).toBe("medium");
+		expect(resolved?.decision.reasonCode).toBe("medium_unavailable_fallback_expensive");
 	});
 
 	it("refuses to route to a configured model without auth", () => {
@@ -159,10 +214,12 @@ describe("AgentSession model router turn selection", () => {
 		const selected = routerPrototype._resolveModelRouterTurnModel.call(context, "Explain this code block");
 
 		expect(selected).toBeUndefined();
-		expect(AgentSession.prototype.getModelRouterStatus.call(context)).toContain(
+		expect(AgentSession.prototype.getModelRouterStatus.call(context as unknown as AgentSession)).toContain(
 			"Routing: skipped (cheap model missing auth: anthropic/claude-haiku-4-5)",
 		);
-		expect(AgentSession.prototype.getModelRouterStatus.call(context)).toContain("Latest intent: research");
+		expect(AgentSession.prototype.getModelRouterStatus.call(context as unknown as AgentSession)).toContain(
+			"Latest intent: research",
+		);
 	});
 
 	it("reports unresolved configured model when routing is skipped", () => {
@@ -174,10 +231,12 @@ describe("AgentSession model router turn selection", () => {
 		const selected = routerPrototype._resolveModelRouterTurnModel.call(context, "Explain this code block");
 
 		expect(selected).toBeUndefined();
-		expect(AgentSession.prototype.getModelRouterStatus.call(context)).toContain(
+		expect(AgentSession.prototype.getModelRouterStatus.call(context as unknown as AgentSession)).toContain(
 			"Routing: skipped (cheap model unresolved: definitely-not-a-model)",
 		);
-		expect(AgentSession.prototype.getModelRouterStatus.call(context)).toContain("Latest intent: research");
+		expect(AgentSession.prototype.getModelRouterStatus.call(context as unknown as AgentSession)).toContain(
+			"Latest intent: research",
+		);
 	});
 
 	it("includes current config diagnostics in model-router session status", () => {
@@ -187,7 +246,7 @@ describe("AgentSession model router turn selection", () => {
 			expensiveModel: "anthropic/claude-sonnet-4-5",
 		});
 
-		const status = AgentSession.prototype.getModelRouterStatus.call(context);
+		const status = AgentSession.prototype.getModelRouterStatus.call(context as unknown as AgentSession);
 
 		expect(status).toContain("Config diagnostics:");
 		expect(status).toContain("- Model router cheap model is unresolved: definitely-not-a-model.");
@@ -202,13 +261,18 @@ describe("AgentSession model router turn selection", () => {
 			},
 			[cheapModel],
 		);
-		const selected = routerPrototype._resolveModelRouterTurnModel.call(context, "Fix the failing tests");
+		const selected = routerPrototype._resolveModelRouterTurnModel.call(
+			context,
+			"Publish a release and push the tag.",
+		);
 
 		expect(selected).toBeUndefined();
-		expect(AgentSession.prototype.getModelRouterStatus.call(context)).toContain(
+		expect(AgentSession.prototype.getModelRouterStatus.call(context as unknown as AgentSession)).toContain(
 			"Routing: skipped (expensive model missing auth: anthropic/claude-sonnet-4-5)",
 		);
-		expect(AgentSession.prototype.getModelRouterStatus.call(context)).toContain("Latest intent: modify");
+		expect(AgentSession.prototype.getModelRouterStatus.call(context as unknown as AgentSession)).toContain(
+			"Latest intent: modify",
+		);
 	});
 
 	it("reports unresolved expensive model configuration for modify prompts", () => {
@@ -217,17 +281,22 @@ describe("AgentSession model router turn selection", () => {
 			cheapModel: "anthropic/claude-haiku-4-5",
 			expensiveModel: "definitely-not-a-model",
 		});
-		const selected = routerPrototype._resolveModelRouterTurnModel.call(context, "Fix the failing tests");
+		const selected = routerPrototype._resolveModelRouterTurnModel.call(
+			context,
+			"Publish a release and push the tag.",
+		);
 
 		expect(selected).toBeUndefined();
-		expect(AgentSession.prototype.getModelRouterStatus.call(context)).toContain(
+		expect(AgentSession.prototype.getModelRouterStatus.call(context as unknown as AgentSession)).toContain(
 			"Routing: skipped (expensive model unresolved: definitely-not-a-model)",
 		);
-		expect(AgentSession.prototype.getModelRouterStatus.call(context)).toContain("Latest intent: modify");
+		expect(AgentSession.prototype.getModelRouterStatus.call(context as unknown as AgentSession)).toContain(
+			"Latest intent: modify",
+		);
 	});
 
 	it("uses routed models only for the current turn and restores session state", async () => {
-		let modelDuringRun: Model<any> | undefined;
+		let modelDuringRun: TestModel | undefined;
 		const persistedDecisions: ModelRouterDecisionStatus[] = [];
 		const context: RoutedRunContext = {
 			model: expensiveModel,
@@ -238,6 +307,7 @@ describe("AgentSession model router turn selection", () => {
 					persistedDecisions.push(data as ModelRouterDecisionStatus);
 					return "custom";
 				},
+				appendCustomMessageEntry: () => "custom",
 			},
 			_resolveModelRouterModelForIntent: () => expensiveModel,
 			_runAgentPromptWithModelRouter: routerPrototype._runAgentPromptWithModelRouter,
@@ -246,19 +316,22 @@ describe("AgentSession model router turn selection", () => {
 			},
 		};
 
-		await routerPrototype._runAgentPromptWithModelRouter.call(
-			context,
-			{ role: "user", content: [{ type: "text", text: "Explain this code block" }], timestamp: 0 },
-			cheapModel,
-			"research",
-		);
+		const route: RouteDecision = {
+			tier: "cheap",
+			risk: "read-only",
+			confidence: 0.9,
+			reasonCode: "explain",
+			reasons: [],
+		};
+
+		await routerPrototype._runAgentPromptWithModelRouter.call(context, [], cheapModel, route);
 
 		expect(modelDuringRun?.id).toBe("claude-haiku-4-5");
 		expect(context.agent.state.model?.id).toBe("claude-sonnet-4-5");
 		expect(context.agent.state.thinkingLevel).toBe("high");
-		expect(persistedDecisions).toEqual([
-			{ intent: "research", routedModel: "anthropic/claude-haiku-4-5", outcome: "routed" },
-		]);
+		expect(persistedDecisions[0].route.tier).toBe("cheap");
+		expect(persistedDecisions[0].route.reasonCode).toBe("explain");
+		expect(persistedDecisions[0].outcome).toBe("routed");
 	});
 
 	it("discards buffered cheap-turn messages and retries on expensive model after escalation", async () => {
@@ -277,6 +350,7 @@ describe("AgentSession model router turn selection", () => {
 					persistedDecisions.push({ customType, data });
 					return "custom";
 				},
+				appendCustomMessageEntry: () => "custom",
 			},
 			_resolveModelRouterModelForIntent: () => expensiveModel,
 			_runAgentPromptWithModelRouter: routerPrototype._runAgentPromptWithModelRouter,
@@ -301,28 +375,27 @@ describe("AgentSession model router turn selection", () => {
 			},
 		};
 
-		await routerPrototype._runAgentPromptWithModelRouter.call(
-			context,
-			{ role: "user", content: [{ type: "text", text: "Explain this code block" }], timestamp: 0 },
-			cheapModel,
-			"research",
-		);
+		const route: RouteDecision = {
+			tier: "cheap",
+			risk: "read-only",
+			confidence: 0.9,
+			reasonCode: "explain",
+			reasons: [],
+		};
+
+		await routerPrototype._runAgentPromptWithModelRouter.call(context, [], cheapModel, route);
 
 		expect(modelsDuringRuns).toEqual(["claude-haiku-4-5", "claude-sonnet-4-5"]);
 		expect(context.agent.state.messages.map((message) => message.role)).toEqual(["assistant"]);
 		expect(persisted).toHaveLength(1);
 		const persistedMessage = persisted[0] as AssistantMessage;
 		expect((persistedMessage.content[0] as { text: string }).text).toBe("response-2");
-		expect(persistedDecisions).toEqual([
-			{
-				customType: MODEL_ROUTER_DECISION_CUSTOM_TYPE,
-				data: {
-					intent: "research",
-					routedModel: "anthropic/claude-haiku-4-5",
-					outcome: "escalated",
-					retryModel: "anthropic/claude-sonnet-4-5",
-				},
-			},
-		]);
+
+		expect(persistedDecisions).toHaveLength(1);
+		expect(persistedDecisions[0].customType).toBe(MODEL_ROUTER_DECISION_CUSTOM_TYPE);
+		const decisionData = persistedDecisions[0].data as ModelRouterDecisionStatus;
+		expect(decisionData.route.tier).toBe("cheap");
+		expect(decisionData.outcome).toBe("escalated");
+		expect(decisionData.retryModel).toBe("anthropic/claude-sonnet-4-5");
 	});
 });

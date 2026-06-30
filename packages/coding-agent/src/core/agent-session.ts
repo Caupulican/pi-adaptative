@@ -24,6 +24,7 @@ import type {
 	ThinkingLevel,
 } from "@caupulican/pi-agent-core";
 import type {
+	Api,
 	AssistantMessage,
 	CacheRetention,
 	Context,
@@ -50,6 +51,7 @@ import { stripFrontmatter } from "../utils/frontmatter.ts";
 import { resolvePath } from "../utils/paths.ts";
 import { sleep } from "../utils/sleep.ts";
 import { formatNoApiKeyFoundMessage, formatNoModelSelectedMessage } from "./auth-guidance.ts";
+import type { RouteDecision } from "./autonomy/contracts.ts";
 import { type BashResult, executeBashWithOperations } from "./bash-executor.ts";
 import {
 	type CompactionResult,
@@ -123,7 +125,7 @@ import { type BashExecutionMessage, type CustomMessage, createCustomMessage } fr
 import type { ModelRegistry } from "./model-registry.ts";
 import { resolveCliModel, resolveProfileModelSettings } from "./model-resolver.ts";
 import { collectModelRouterConfigDiagnostics } from "./model-router/config-diagnostics.ts";
-import { classifyModelRouterIntent, type ModelRouterIntent } from "./model-router/intent-classifier.ts";
+import { classifyModelRouterRoute, type ModelRouterIntent } from "./model-router/intent-classifier.ts";
 import {
 	bufferModelRouterSessionCustomMessage,
 	bufferModelRouterSessionMessage,
@@ -490,6 +492,7 @@ export class AgentSession {
 	private _costGuardDowngraded = false;
 	/** Active model-router intent for the current transient routed turn, if any. */
 	private _activeModelRouterIntent?: ModelRouterIntent;
+	private _activeModelRouterRoute?: RouteDecision;
 	private _modelRouterSessionBuffer?: ModelRouterSessionBuffer;
 	private _modelRouterEscalationRequested = false;
 	private _isModelRouterRetry = false;
@@ -848,8 +851,8 @@ export class AgentSession {
 	private _installAgentToolHooks(): void {
 		this.agent.beforeToolCall = async ({ toolCall, args }) => {
 			if (
-				this._activeModelRouterIntent &&
-				shouldEscalateModelRouterTool({ intent: this._activeModelRouterIntent, toolName: toolCall.name, args })
+				this._activeModelRouterRoute &&
+				shouldEscalateModelRouterTool({ tier: this._activeModelRouterRoute.tier, toolName: toolCall.name, args })
 			) {
 				this._modelRouterEscalationRequested = true;
 				this.agent.abort();
@@ -1580,36 +1583,92 @@ export class AgentSession {
 		}
 	}
 
-	private _resolveModelRouterModelForIntent(intent: ModelRouterIntent): Model<any> | undefined {
+	private _isModelAvailableAndAuthed(pattern: string): boolean {
+		const resolved = resolveCliModel({ cliModel: pattern, modelRegistry: this._modelRegistry });
+		if (!resolved.model) return false;
+		return this._modelRegistry.hasConfiguredAuth(resolved.model);
+	}
+
+	private _resolveModelRouterTurnRoute(prompt: string): { decision: RouteDecision; model: Model<Api> } | undefined {
 		const settings = this.settingsManager.getModelRouterSettings();
-		const modelLabel = intent === "research" ? "cheap model" : "expensive model";
 		if (!settings.enabled) {
 			this._lastModelRouterSkipReason = "disabled";
 			return undefined;
 		}
-		const modelPattern = intent === "research" ? settings.cheapModel : settings.expensiveModel;
-		if (!modelPattern) {
-			this._lastModelRouterSkipReason = `${modelLabel} unset`;
+
+		const decision = classifyModelRouterRoute(prompt);
+		this._lastModelRouterIntent = decision.tier === "cheap" ? "research" : "modify";
+
+		// Learning tier must not be selected for normal user prompts
+		if (decision.tier === "learning") {
+			this._lastModelRouterSkipReason = "learning tier not supported for user prompts";
 			return undefined;
 		}
+
+		const modelPattern =
+			settings[
+				decision.tier === "cheap" ? "cheapModel" : decision.tier === "medium" ? "mediumModel" : "expensiveModel"
+			];
+		const label =
+			decision.tier === "cheap" ? "cheap model" : decision.tier === "medium" ? "medium model" : "expensive model";
+
+		if (decision.tier === "medium" && (!modelPattern || !this._isModelAvailableAndAuthed(modelPattern))) {
+			const expensivePattern = settings.expensiveModel;
+			if (expensivePattern && this._isModelAvailableAndAuthed(expensivePattern)) {
+				const resolvedExpensive = resolveCliModel({
+					cliModel: expensivePattern,
+					modelRegistry: this._modelRegistry,
+				});
+				if (resolvedExpensive.model) {
+					decision.fallbackFrom = "medium";
+					decision.tier = "expensive";
+					decision.reasonCode = "medium_unavailable_fallback_expensive";
+					decision.reasons = [...decision.reasons, "Medium model is unavailable, falling back to expensive model"];
+					decision.model = formatModelRouterModel(resolvedExpensive.model);
+					this._lastModelRouterSkipReason = undefined;
+					return { decision, model: resolvedExpensive.model };
+				}
+			}
+			this._lastModelRouterSkipReason = "medium model and expensive fallback are unavailable";
+			return undefined;
+		}
+
+		if (!modelPattern) {
+			this._lastModelRouterSkipReason = `${label} unset`;
+			return undefined;
+		}
+
 		const resolved = resolveCliModel({ cliModel: modelPattern, modelRegistry: this._modelRegistry });
 		if (!resolved.model) {
-			this._lastModelRouterSkipReason = `${modelLabel} unresolved: ${modelPattern}`;
+			this._lastModelRouterSkipReason = `${label} unresolved: ${modelPattern}`;
 			return undefined;
 		}
+
 		const resolvedName = formatModelRouterModel(resolved.model);
 		if (!this._modelRegistry.hasConfiguredAuth(resolved.model)) {
-			this._lastModelRouterSkipReason = `${modelLabel} missing auth: ${resolvedName}`;
+			this._lastModelRouterSkipReason = `${label} missing auth: ${resolvedName}`;
 			return undefined;
 		}
+
 		this._lastModelRouterSkipReason = undefined;
+		decision.model = resolvedName;
+		return { decision, model: resolved.model };
+	}
+
+	private _resolveModelRouterModelForIntent(intent: ModelRouterIntent): Model<Api> | undefined {
+		const settings = this.settingsManager.getModelRouterSettings();
+		const modelPattern = intent === "research" ? settings.cheapModel : settings.expensiveModel;
+		if (!modelPattern) return undefined;
+		const resolved = resolveCliModel({ cliModel: modelPattern, modelRegistry: this._modelRegistry });
+		if (!resolved.model) return undefined;
+		if (!this._modelRegistry.hasConfiguredAuth(resolved.model)) return undefined;
 		return resolved.model;
 	}
 
-	private _resolveModelRouterTurnModel(prompt: string): Model<any> | undefined {
-		const intent = classifyModelRouterIntent(prompt);
-		this._lastModelRouterIntent = intent;
-		return this._resolveModelRouterModelForIntent(intent);
+	// biome-ignore lint/correctness/noUnusedPrivateClassMembers: test seam
+	private _resolveModelRouterTurnModel(prompt: string): Model<Api> | undefined {
+		const resolved = this._resolveModelRouterTurnRoute(prompt);
+		return resolved?.model;
 	}
 
 	getModelRouterStatus(formatLabel?: (label: string) => string): string {
@@ -1639,8 +1698,8 @@ export class AgentSession {
 
 	private async _runAgentPromptWithModelRouter(
 		messages: AgentMessage | AgentMessage[],
-		routedModel: Model<any> | undefined,
-		routedIntent: ModelRouterIntent | undefined,
+		routedModel: Model<Api> | undefined,
+		routeDecision: RouteDecision | undefined,
 		persistDecision = true,
 	): Promise<void> {
 		if (!routedModel) {
@@ -1651,23 +1710,30 @@ export class AgentSession {
 		const previousModel = this.agent.state.model;
 		const previousThinkingLevel = this.agent.state.thinkingLevel;
 		const previousActiveModelRouterIntent = this._activeModelRouterIntent;
+		const previousActiveModelRouterRoute = this._activeModelRouterRoute;
 		const previousModelRouterSessionBuffer = this._modelRouterSessionBuffer;
 		const previousModelRouterEscalationRequested = this._modelRouterEscalationRequested;
-		const bufferRoutedTurn = routedIntent === "research";
+		const bufferRoutedTurn = routeDecision?.tier === "cheap";
 		const originalHistoryLength = this.agent.state.messages.length;
-		let retryModel: Model<any> | undefined;
-		let completedDecision: ModelRouterDecisionStatus | undefined = routedIntent
+		let retryModel: Model<Api> | undefined;
+		let completedDecision: ModelRouterDecisionStatus | undefined = routeDecision
 			? {
-					intent: routedIntent,
+					route: routeDecision,
 					routedModel: formatModelRouterModel(routedModel),
 					outcome: "routed",
+					intent: routeDecision.tier === "cheap" ? "research" : "modify",
 				}
 			: undefined;
 		let thrownError: unknown;
-		if (routedIntent) {
+		if (routeDecision) {
 			this._lastModelRouterDecision = completedDecision;
 		}
-		this._activeModelRouterIntent = routedIntent;
+		this._activeModelRouterIntent = routeDecision
+			? routeDecision.tier === "cheap"
+				? "research"
+				: "modify"
+			: undefined;
+		this._activeModelRouterRoute = routeDecision;
 		if (bufferRoutedTurn) {
 			this._modelRouterSessionBuffer = createModelRouterSessionBuffer();
 			this._modelRouterEscalationRequested = false;
@@ -1682,10 +1748,11 @@ export class AgentSession {
 				this.agent.state.messages.splice(originalHistoryLength);
 				retryModel = this._resolveModelRouterModelForIntent("modify") ?? previousModel;
 				completedDecision = {
-					intent: routedIntent,
+					route: routeDecision!,
 					routedModel: formatModelRouterModel(routedModel),
 					outcome: "escalated",
 					retryModel: formatModelRouterModel(retryModel),
+					intent: routeDecision!.tier === "cheap" ? "research" : "modify",
 				};
 				this._lastModelRouterDecision = completedDecision;
 			} else if (bufferRoutedTurn && this._modelRouterSessionBuffer) {
@@ -1709,6 +1776,7 @@ export class AgentSession {
 			this.agent.state.model = previousModel;
 			this.agent.state.thinkingLevel = previousThinkingLevel;
 			this._activeModelRouterIntent = previousActiveModelRouterIntent;
+			this._activeModelRouterRoute = previousActiveModelRouterRoute;
 			this._modelRouterSessionBuffer = previousModelRouterSessionBuffer;
 			this._modelRouterEscalationRequested = previousModelRouterEscalationRequested;
 		}
@@ -1717,7 +1785,16 @@ export class AgentSession {
 			const previousIsModelRouterRetry = this._isModelRouterRetry;
 			try {
 				this._isModelRouterRetry = true;
-				await this._runAgentPromptWithModelRouter(messages, retryModel, "modify", false);
+				const retryDecision: RouteDecision = {
+					tier: "expensive",
+					risk: "high-impact",
+					confidence: 1.0,
+					reasonCode: "cheap_mutating_tool_escalation",
+					reasons: ["Cheap research turn attempted a mutating tool and escalated"],
+					fallbackFrom: "cheap",
+					model: formatModelRouterModel(retryModel),
+				};
+				await this._runAgentPromptWithModelRouter(messages, retryModel, retryDecision, false);
 				this._lastModelRouterDecision = completedDecision;
 			} catch (error) {
 				thrownError = error;
@@ -1812,8 +1889,8 @@ export class AgentSession {
 		const processSlashCommands = options?.processSlashCommands ?? expandPromptTemplates;
 		const preflightResult = options?.preflightResult;
 		let messages: AgentMessage[] | undefined;
-		let routedTurnModel: Model<any> | undefined;
-		let routedTurnIntent: ModelRouterIntent | undefined;
+		let routedTurnModel: Model<Api> | undefined;
+		let routedTurnRouteDecision: RouteDecision | undefined;
 		// R4 effectiveness feedback: remember the recall page + the query so we can score, after the
 		// response, whether the agent actually used the recalled context.
 		let injectedRecall = "";
@@ -1888,8 +1965,9 @@ export class AgentSession {
 			// Flush any pending bash messages before the new prompt
 			this._flushPendingBashMessages();
 
-			routedTurnModel = this._resolveModelRouterTurnModel(expandedText);
-			routedTurnIntent = routedTurnModel ? classifyModelRouterIntent(expandedText) : undefined;
+			const resolvedRouteInfo = this._resolveModelRouterTurnRoute(expandedText);
+			routedTurnModel = resolvedRouteInfo?.model;
+			routedTurnRouteDecision = resolvedRouteInfo?.decision;
 			const requestModel = routedTurnModel ?? this.model;
 
 			// Validate model
@@ -1999,7 +2077,7 @@ export class AgentSession {
 		}
 
 		preflightResult?.(true);
-		await this._runAgentPromptWithModelRouter(messages, routedTurnModel, routedTurnIntent);
+		await this._runAgentPromptWithModelRouter(messages, routedTurnModel, routedTurnRouteDecision);
 
 		// R4: score whether the agent actually used the recalled context, so the recall gate can adapt.
 		if (injectedRecall) {

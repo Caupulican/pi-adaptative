@@ -1,4 +1,4 @@
-import type { ModelRouterIntent } from "./intent-classifier.ts";
+import type { ModelTier } from "../autonomy/contracts.ts";
 
 const READ_ONLY_TOOL_NAMES = new Set([
 	"read",
@@ -51,8 +51,6 @@ const MUTATING_SHELL_TOKEN_RE =
 const MUTATING_TOOL_NAME_RE =
 	/(bash|exec|execute|run|shell|write|edit|patch|replace|delete|remove|move|rename|create|mkdir|touch|install|commit|push|publish|deploy|apply)/i;
 
-type ToolEscalationOptions = { intent: ModelRouterIntent; toolName: string; args?: unknown };
-
 function getShellCommand(args: unknown): string | undefined {
 	if (!args || typeof args !== "object") return undefined;
 	const record = args as Record<string, unknown>;
@@ -91,8 +89,8 @@ function isReadOnlyShellCommand(command: string): boolean {
 	return segments.length > 0 && segments.every(isReadOnlyShellSegment);
 }
 
-export function shouldEscalateModelRouterTool(options: ToolEscalationOptions): boolean {
-	if (options.intent !== "research") return false;
+export function shouldEscalateModelRouterTool(options: { tier: ModelTier; toolName: string; args?: unknown }): boolean {
+	if (options.tier !== "cheap") return false;
 	const toolName = options.toolName.trim().toLowerCase();
 	if (!toolName) return true;
 	if (READ_ONLY_TOOL_NAMES.has(toolName)) return false;
