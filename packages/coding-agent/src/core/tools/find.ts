@@ -8,6 +8,13 @@ import { keyHint } from "../../modes/interactive/components/keybinding-hints.ts"
 import type { Theme } from "../../modes/interactive/theme/theme.ts";
 import { ensureTool } from "../../utils/tools-manager.ts";
 import type { ToolDefinition, ToolRenderResultOptions } from "../extensions/types.ts";
+import {
+	defaultFffSearchBackend,
+	type FffSearchBackend,
+	type FffSearchResult,
+	hasGitignoreInTree,
+	relativePathInside,
+} from "./fff-search-backend.ts";
 import { pathExists, resolveToCwd } from "./path-utils.ts";
 import { getTextOutput, invalidArgText, shortenPath, str } from "./render-utils.ts";
 import { wrapToolDefinition } from "./tool-definition-wrapper.ts";
@@ -54,8 +61,10 @@ const defaultFindOperations: FindOperations = {
 };
 
 export interface FindToolOptions {
-	/** Custom operations for find. Default: local filesystem plus fd */
+	/** Custom operations for find. Default: local filesystem plus FFF when available, then fd */
 	operations?: FindOperations;
+	/** FFF backend for resident indexed search. Set false to force fd fallback. */
+	fff?: FffSearchBackend | false;
 }
 
 function formatFindCall(
@@ -110,6 +119,72 @@ function formatFindResult(
 		text += `\n${theme.fg("warning", `[Truncated: ${warnings.join(", ")}]`)}`;
 	}
 	return text;
+}
+
+function hasGlobSyntax(pattern: string): boolean {
+	return pattern === "." || /[*?[{]/.test(pattern);
+}
+
+function fffQueryParts(parts: string[]): string {
+	return parts.filter(Boolean).join(" ");
+}
+
+function toSearchRelative(repoRelativePath: string, searchPathRelativeToCwd: string): string | undefined {
+	if (!searchPathRelativeToCwd) return repoRelativePath;
+	const prefix = `${searchPathRelativeToCwd}/`;
+	if (!repoRelativePath.startsWith(prefix)) return undefined;
+	return repoRelativePath.slice(prefix.length);
+}
+
+function fffGlobPattern(pattern: string, searchPathRelativeToCwd: string): string {
+	const effectivePattern = pattern === "." ? "**/*" : pattern;
+	if (!searchPathRelativeToCwd) {
+		if (effectivePattern.includes("/") || effectivePattern.startsWith("**/")) return effectivePattern;
+		return `**/${effectivePattern}`;
+	}
+	if (effectivePattern === "**" || effectivePattern === "**/*") return `${searchPathRelativeToCwd}/**/*`;
+	if (effectivePattern.includes("/")) return `${searchPathRelativeToCwd}/${effectivePattern}`;
+	return `${searchPathRelativeToCwd}/**/${effectivePattern}`;
+}
+
+function fffSearchOutput(result: FffSearchResult, searchPathRelativeToCwd: string, effectiveLimit: number) {
+	const relativized = result.items
+		.map((item) => toSearchRelative(item.relativePath, searchPathRelativeToCwd))
+		.filter((item): item is string => Boolean(item));
+	return formatFindResults(relativized, effectiveLimit);
+}
+
+async function tryFffFind(options: {
+	backend: FffSearchBackend;
+	cwd: string;
+	searchPath: string;
+	pattern: string;
+	ignoreCase?: boolean;
+	effectiveLimit: number;
+}): Promise<{ text: string; details: FindToolDetails } | undefined> {
+	// FFF's glob/file-search API does not expose fd-compatible forced ignore-case semantics.
+	if (options.ignoreCase) return undefined;
+	if (!(await pathExists(options.searchPath))) return undefined;
+	if (await hasGitignoreInTree(options.searchPath)) return undefined;
+
+	const searchPathRelativeToCwd = relativePathInside(options.cwd, options.searchPath);
+	if (searchPathRelativeToCwd === undefined) return undefined;
+
+	const finder = await options.backend.getFinder(options.cwd);
+	if (!finder) return undefined;
+
+	if (hasGlobSyntax(options.pattern)) {
+		const result = finder.glob(fffGlobPattern(options.pattern, searchPathRelativeToCwd), {
+			pageSize: options.effectiveLimit,
+		});
+		return result.ok ? fffSearchOutput(result.value, searchPathRelativeToCwd, options.effectiveLimit) : undefined;
+	}
+
+	const pathConstraint = searchPathRelativeToCwd ? `${searchPathRelativeToCwd}/` : "";
+	const result = finder.fileSearch(fffQueryParts([pathConstraint, options.pattern]), {
+		pageSize: options.effectiveLimit,
+	});
+	return result.ok ? fffSearchOutput(result.value, searchPathRelativeToCwd, options.effectiveLimit) : undefined;
 }
 
 function formatFindResults(relativized: string[], effectiveLimit: number): { text: string; details: FindToolDetails } {
@@ -177,6 +252,7 @@ export function createFindToolDefinition(
 	options?: FindToolOptions,
 ): ToolDefinition<typeof findSchema, FindToolDetails | undefined> {
 	const customOps = options?.operations;
+	const fffBackend = options?.fff === false ? undefined : (options?.fff ?? defaultFffSearchBackend);
 	return {
 		name: "find",
 		label: "find",
@@ -226,6 +302,30 @@ export function createFindToolDefinition(
 						let effectivePattern = pattern;
 						if (pattern === ".") {
 							effectivePattern = "**/*";
+						}
+
+						if (!customOps && fffBackend) {
+							const fffResult = await tryFffFind({
+								backend: fffBackend,
+								cwd,
+								searchPath,
+								pattern: effectivePattern,
+								ignoreCase,
+								effectiveLimit,
+							});
+							if (signal?.aborted) {
+								settle(() => reject(new Error("Operation aborted")));
+								return;
+							}
+							if (fffResult) {
+								settle(() =>
+									resolve({
+										content: [{ type: "text", text: fffResult.text }],
+										details: Object.keys(fffResult.details).length > 0 ? fffResult.details : undefined,
+									}),
+								);
+								return;
+							}
 						}
 
 						// If custom operations provide glob(), use that instead of fd.

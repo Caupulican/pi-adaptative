@@ -1,15 +1,35 @@
 import chalk from "chalk";
 import { type SpawnSyncReturns, spawnSync } from "child_process";
-import { chmodSync, createWriteStream, existsSync, mkdirSync, readdirSync, renameSync, rmSync } from "fs";
+import {
+	chmodSync,
+	createWriteStream,
+	existsSync,
+	mkdirSync,
+	readdirSync,
+	renameSync,
+	rmSync,
+	writeFileSync,
+} from "fs";
+import { createRequire } from "module";
 import { arch, platform } from "os";
-import { join } from "path";
+import { dirname, join } from "path";
 import { Readable } from "stream";
 import { pipeline } from "stream/promises";
+import { pathToFileURL } from "url";
 import { APP_NAME, getBinDir } from "../config.ts";
+import { spawnProcess, waitForChildProcess } from "./child-process.ts";
 
 const TOOLS_DIR = getBinDir();
 const NETWORK_TIMEOUT_MS = 10_000;
 const DOWNLOAD_TIMEOUT_MS = 120_000;
+const FFF_NODE_VERSION = "0.9.6";
+const FFF_MANAGED_DIR = join(TOOLS_DIR, "fff-node");
+const FFF_MANAGED_PACKAGE_JSON = join(FFF_MANAGED_DIR, "package.json");
+
+type ModuleRequire = ((id: string) => unknown) & { resolve?: (id: string) => string };
+
+const moduleRequire = createRequire(import.meta.url);
+const executableDirRequire = createRequire(pathToFileURL(join(dirname(process.execPath), "package.json")).href);
 
 function isOfflineModeEnabled(): boolean {
 	const value = process.env.PI_OFFLINE;
@@ -320,6 +340,165 @@ const TERMUX_PACKAGES: Record<string, string> = {
 	fd: "fd",
 	rg: "ripgrep",
 };
+
+const FFF_PLATFORM_PACKAGES: Record<string, string> = {
+	"darwin/arm64": "@ff-labs/fff-bin-darwin-arm64",
+	"darwin/x64": "@ff-labs/fff-bin-darwin-x64",
+	"linux/arm64/glibc": "@ff-labs/fff-bin-linux-arm64-gnu",
+	"linux/arm64/musl": "@ff-labs/fff-bin-linux-arm64-musl",
+	"linux/x64/glibc": "@ff-labs/fff-bin-linux-x64-gnu",
+	"linux/x64/musl": "@ff-labs/fff-bin-linux-x64-musl",
+	"win32/arm64": "@ff-labs/fff-bin-win32-arm64",
+	"win32/x64": "@ff-labs/fff-bin-win32-x64",
+};
+
+let fffNodeInstallPromise: Promise<unknown | undefined> | undefined;
+
+function detectLinuxLibc(): "glibc" | "musl" {
+	let output = "";
+	try {
+		const result = spawnSync("ldd", ["--version"], { encoding: "utf-8", stdio: "pipe", timeout: 5000 });
+		output = `${result.stdout ?? ""}${result.stderr ?? ""}`;
+	} catch (e: unknown) {
+		const err = e as { stdout?: string | Buffer; stderr?: string | Buffer };
+		output = `${String(err.stdout ?? "")}${String(err.stderr ?? "")}`;
+	}
+	return output.toLowerCase().includes("musl") ? "musl" : "glibc";
+}
+
+function getFffPlatformPackageName(): string | undefined {
+	const plat = platform();
+	const architecture = arch();
+	if (plat === "linux") {
+		return FFF_PLATFORM_PACKAGES[`${plat}/${architecture}/${detectLinuxLibc()}`];
+	}
+	return FFF_PLATFORM_PACKAGES[`${plat}/${architecture}`];
+}
+
+function createManagedFffRequire(): ModuleRequire | undefined {
+	if (!existsSync(FFF_MANAGED_PACKAGE_JSON)) return undefined;
+	return createRequire(pathToFileURL(FFF_MANAGED_PACKAGE_JSON).href);
+}
+
+function findFffNodeDistEntry(startPath: string): string | undefined {
+	let currentDir = dirname(startPath);
+	while (currentDir !== dirname(currentDir)) {
+		const candidate = join(currentDir, "node_modules", "@ff-labs", "fff-node", "dist", "src", "index.js");
+		if (existsSync(candidate)) return candidate;
+		currentDir = dirname(currentDir);
+	}
+	return undefined;
+}
+
+function loadFffNodeDistEntry(requireFff: ModuleRequire): unknown | undefined {
+	if (!requireFff.resolve) return undefined;
+	try {
+		const ffiPath = requireFff.resolve("ffi-rs");
+		const fffEntry = findFffNodeDistEntry(ffiPath);
+		return fffEntry ? requireFff(fffEntry) : undefined;
+	} catch {
+		return undefined;
+	}
+}
+
+function loadFffNodeWith(requireFff: ModuleRequire): unknown | undefined {
+	try {
+		return requireFff("@ff-labs/fff-node");
+	} catch {
+		return loadFffNodeDistEntry(requireFff);
+	}
+}
+
+export function loadAvailableFffNodePackage(): unknown | undefined {
+	for (const requireFff of [moduleRequire, executableDirRequire, createManagedFffRequire()].filter(
+		(candidate): candidate is ModuleRequire => Boolean(candidate),
+	)) {
+		const loaded = loadFffNodeWith(requireFff);
+		if (loaded) return loaded;
+	}
+	return undefined;
+}
+
+async function runNpmInstall(args: string[]): Promise<{ code: number | null; stderr: string }> {
+	try {
+		const child = spawnProcess("npm", args, { stdio: ["ignore", "pipe", "pipe"] });
+		let stderr = "";
+		child.stderr?.on("data", (chunk) => {
+			stderr += chunk.toString();
+		});
+		const code = await waitForChildProcess(child);
+		return { code, stderr };
+	} catch (error) {
+		return { code: 1, stderr: error instanceof Error ? error.message : String(error) };
+	}
+}
+
+async function installManagedFffNodePackage(platformPackage: string, silent: boolean): Promise<unknown | undefined> {
+	mkdirSync(FFF_MANAGED_DIR, { recursive: true });
+	if (!existsSync(FFF_MANAGED_PACKAGE_JSON)) {
+		writeFileSync(FFF_MANAGED_PACKAGE_JSON, '{"name":"pi-managed-fff-node","private":true,"version":"0.0.0"}\n');
+	}
+
+	if (!silent) {
+		console.log(chalk.dim("FFF native search not found. Installing managed FFF package..."));
+	}
+
+	const args = [
+		"install",
+		"--ignore-scripts",
+		"--omit=dev",
+		"--include=optional",
+		"--no-audit",
+		"--no-fund",
+		"--package-lock=false",
+		"--prefix",
+		FFF_MANAGED_DIR,
+		`@ff-labs/fff-node@${FFF_NODE_VERSION}`,
+		`${platformPackage}@${FFF_NODE_VERSION}`,
+	];
+	const result = await runNpmInstall(args);
+	if (result.code !== 0) {
+		if (!silent) {
+			console.log(
+				chalk.yellow(`Failed to install FFF native search: ${result.stderr.trim() || `exit code ${result.code}`}`),
+			);
+		}
+		return undefined;
+	}
+	const loaded = loadFffNodeWith(createRequire(pathToFileURL(FFF_MANAGED_PACKAGE_JSON).href));
+	if (!loaded && !silent) {
+		console.log(chalk.yellow("Managed FFF install completed but @ff-labs/fff-node could not be loaded."));
+	}
+	return loaded;
+}
+
+export async function ensureFffNodePackage(
+	silent: boolean = false,
+	forceManagedInstall: boolean = false,
+): Promise<unknown | undefined> {
+	const existing = forceManagedInstall ? undefined : loadAvailableFffNodePackage();
+	if (existing) return existing;
+
+	if (isOfflineModeEnabled()) {
+		if (!silent) {
+			console.log(chalk.yellow("FFF native search not found. Offline mode enabled, skipping install."));
+		}
+		return undefined;
+	}
+
+	const platformPackage = getFffPlatformPackageName();
+	if (!platformPackage) {
+		if (!silent) {
+			console.log(chalk.yellow(`FFF native search is not available for ${platform()}/${arch()}.`));
+		}
+		return undefined;
+	}
+
+	fffNodeInstallPromise ??= installManagedFffNodePackage(platformPackage, silent).finally(() => {
+		fffNodeInstallPromise = undefined;
+	});
+	return fffNodeInstallPromise;
+}
 
 // Ensure a tool is available, downloading if necessary
 // Returns the path to the tool, or null if unavailable

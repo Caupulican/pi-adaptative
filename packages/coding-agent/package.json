@@ -44,6 +44,7 @@
 		"@caupulican/pi-agent-core": "^0.80.86",
 		"@caupulican/pi-ai": "^0.80.86",
 		"@caupulican/pi-tui": "^0.80.86",
+		"@ff-labs/fff-node": "0.9.6",
 		"@silvia-odwyer/photon-node": "0.3.4",
 		"chalk": "5.6.2",
 		"cross-spawn": "7.0.6",

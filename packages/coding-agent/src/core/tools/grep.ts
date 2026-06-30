@@ -9,6 +9,14 @@ import { keyHint } from "../../modes/interactive/components/keybinding-hints.ts"
 import type { Theme } from "../../modes/interactive/theme/theme.ts";
 import { ensureTool } from "../../utils/tools-manager.ts";
 import type { ToolDefinition, ToolRenderResultOptions } from "../extensions/types.ts";
+import {
+	defaultFffSearchBackend,
+	type FffGrepMatch,
+	type FffGrepResult,
+	type FffSearchBackend,
+	hasGitignoreInTree,
+	relativePathInside,
+} from "./fff-search-backend.ts";
 import { resolveToCwd } from "./path-utils.ts";
 import { getTextOutput, invalidArgText, shortenPath, str } from "./render-utils.ts";
 import { wrapToolDefinition } from "./tool-definition-wrapper.ts";
@@ -61,8 +69,10 @@ const defaultGrepOperations: GrepOperations = {
 };
 
 export interface GrepToolOptions {
-	/** Custom operations for grep. Default: local filesystem plus ripgrep */
+	/** Custom operations for grep. Default: local filesystem plus FFF when available, then ripgrep */
 	operations?: GrepOperations;
+	/** FFF backend for resident indexed search. Set false to force ripgrep fallback. */
+	fff?: FffSearchBackend | false;
 }
 
 function formatGrepCall(
@@ -121,11 +131,173 @@ function formatGrepResult(
 	return text;
 }
 
+function globConstraintForFff(glob: string | undefined): string {
+	if (!glob) return "";
+	if (glob.includes("/") || glob.startsWith("**/")) return glob;
+	return `**/${glob}`;
+}
+
+function fffGrepQuery(options: {
+	pattern: string;
+	glob?: string;
+	isDirectory: boolean;
+	searchPathRelativeToCwd: string;
+}): string | undefined {
+	const parts: string[] = [];
+	if (options.searchPathRelativeToCwd) {
+		parts.push(options.isDirectory ? `${options.searchPathRelativeToCwd}/` : options.searchPathRelativeToCwd);
+	}
+	parts.push(globConstraintForFff(options.glob));
+	parts.push(options.pattern);
+	return parts.filter(Boolean).join(" ");
+}
+
+function fffDisplayPath(
+	match: FffGrepMatch,
+	options: { isDirectory: boolean; searchPathRelativeToCwd: string },
+): string | undefined {
+	if (!options.searchPathRelativeToCwd) return match.relativePath;
+	if (!options.isDirectory) {
+		return match.relativePath === options.searchPathRelativeToCwd ? path.basename(match.relativePath) : undefined;
+	}
+	const prefix = `${options.searchPathRelativeToCwd}/`;
+	if (!match.relativePath.startsWith(prefix)) return undefined;
+	return match.relativePath.slice(prefix.length);
+}
+
+function appendFffMatchLines(options: {
+	match: FffGrepMatch;
+	outputLines: string[];
+	linesTruncated: { value: boolean };
+	contextValue: number;
+}): void {
+	const before = options.match.contextBefore ?? [];
+	for (let i = 0; i < before.length; i++) {
+		const lineNumber = options.match.lineNumber - before.length + i;
+		const { text, wasTruncated } = truncateLine(before[i] ?? "");
+		if (wasTruncated) options.linesTruncated.value = true;
+		options.outputLines.push(`  ${lineNumber}- ${text}`);
+	}
+
+	const { text, wasTruncated } = truncateLine(options.match.lineContent.replace(/\r/g, ""));
+	if (wasTruncated) options.linesTruncated.value = true;
+	options.outputLines.push(`  ${options.match.lineNumber}: ${text}`);
+
+	if (options.contextValue === 0) return;
+	const after = options.match.contextAfter ?? [];
+	for (let i = 0; i < after.length; i++) {
+		const lineNumber = options.match.lineNumber + 1 + i;
+		const { text: contextText, wasTruncated: contextWasTruncated } = truncateLine(after[i] ?? "");
+		if (contextWasTruncated) options.linesTruncated.value = true;
+		options.outputLines.push(`  ${lineNumber}- ${contextText}`);
+	}
+}
+
+function formatFffGrepResult(options: {
+	result: FffGrepResult;
+	isDirectory: boolean;
+	searchPathRelativeToCwd: string;
+	effectiveLimit: number;
+	contextValue: number;
+}): { text: string; details: GrepToolDetails } {
+	if (options.result.items.length === 0) return { text: "No matches found", details: {} };
+
+	const outputLines: string[] = [];
+	const linesTruncated = { value: false };
+	let currentPath = "";
+	for (const match of options.result.items) {
+		const displayPath = fffDisplayPath(match, options);
+		if (!displayPath) continue;
+		if (displayPath !== currentPath) {
+			currentPath = displayPath;
+			outputLines.push(`${displayPath}:`);
+		}
+		appendFffMatchLines({
+			match,
+			outputLines,
+			linesTruncated,
+			contextValue: options.contextValue,
+		});
+	}
+
+	if (outputLines.length === 0) return { text: "No matches found", details: {} };
+	const rawOutput = outputLines.join("\n");
+	const truncation = truncateHead(rawOutput, { maxLines: Number.MAX_SAFE_INTEGER });
+	let output = truncation.content;
+	const details: GrepToolDetails = {};
+	const notices: string[] = [];
+	if (options.result.nextCursor) {
+		notices.push(
+			`${options.effectiveLimit} matches limit reached. Use limit=${options.effectiveLimit * 2} for more, or refine pattern`,
+		);
+		details.matchLimitReached = options.effectiveLimit;
+	}
+	if (truncation.truncated) {
+		notices.push(`${formatSize(DEFAULT_MAX_BYTES)} limit reached`);
+		details.truncation = truncation;
+	}
+	if (linesTruncated.value) {
+		notices.push(`Some lines truncated to ${GREP_MAX_LINE_LENGTH} chars. Use read tool to see full lines`);
+		details.linesTruncated = true;
+	}
+	if (notices.length > 0) output += `\n\n[${notices.join(". ")}]`;
+	return { text: output, details };
+}
+
+async function tryFffGrep(options: {
+	backend: FffSearchBackend;
+	cwd: string;
+	searchPath: string;
+	pattern: string;
+	glob?: string;
+	ignoreCase?: boolean;
+	literal?: boolean;
+	contextValue: number;
+	effectiveLimit: number;
+	isDirectory: boolean;
+}): Promise<{ text: string; details: GrepToolDetails } | undefined> {
+	// FFF has smart-case/case-sensitive modes but no forced ignore-case equivalent.
+	if (options.ignoreCase) return undefined;
+	if (options.isDirectory && (await hasGitignoreInTree(options.searchPath))) return undefined;
+
+	const searchPathRelativeToCwd = relativePathInside(options.cwd, options.searchPath);
+	if (searchPathRelativeToCwd === undefined) return undefined;
+
+	const finder = await options.backend.getFinder(options.cwd);
+	if (!finder) return undefined;
+
+	const query = fffGrepQuery({
+		pattern: options.pattern,
+		glob: options.glob,
+		isDirectory: options.isDirectory,
+		searchPathRelativeToCwd,
+	});
+	if (!query) return undefined;
+
+	const result = finder.grep(query, {
+		mode: options.literal ? "plain" : "regex",
+		smartCase: false,
+		maxMatchesPerFile: options.effectiveLimit,
+		beforeContext: options.contextValue,
+		afterContext: options.contextValue,
+		pageSize: options.effectiveLimit,
+	});
+	if (!result.ok || result.value.regexFallbackError) return undefined;
+	return formatFffGrepResult({
+		result: result.value,
+		isDirectory: options.isDirectory,
+		searchPathRelativeToCwd,
+		effectiveLimit: options.effectiveLimit,
+		contextValue: options.contextValue,
+	});
+}
+
 export function createGrepToolDefinition(
 	cwd: string,
 	options?: GrepToolOptions,
 ): ToolDefinition<typeof grepSchema, GrepToolDetails | undefined> {
 	const customOps = options?.operations;
+	const fffBackend = options?.fff === false ? undefined : (options?.fff ?? defaultFffSearchBackend);
 	return {
 		name: "grep",
 		label: "grep",
@@ -171,12 +343,6 @@ export function createGrepToolDefinition(
 
 				(async () => {
 					try {
-						const rgPath = await ensureTool("rg", true);
-						if (!rgPath) {
-							settle(() => reject(new Error("ripgrep (rg) is not available and could not be downloaded")));
-							return;
-						}
-
 						const searchPath = resolveToCwd(searchDir || ".", cwd);
 						const ops = customOps ?? defaultGrepOperations;
 						let isDirectory: boolean;
@@ -198,6 +364,36 @@ export function createGrepToolDefinition(
 							}
 							return path.basename(filePath);
 						};
+
+						if (!customOps && fffBackend) {
+							const fffResult = await tryFffGrep({
+								backend: fffBackend,
+								cwd,
+								searchPath,
+								pattern,
+								glob,
+								ignoreCase,
+								literal,
+								contextValue,
+								effectiveLimit,
+								isDirectory,
+							});
+							if (fffResult) {
+								settle(() =>
+									resolve({
+										content: [{ type: "text", text: fffResult.text }],
+										details: Object.keys(fffResult.details).length > 0 ? fffResult.details : undefined,
+									}),
+								);
+								return;
+							}
+						}
+
+						const rgPath = await ensureTool("rg", true);
+						if (!rgPath) {
+							settle(() => reject(new Error("ripgrep (rg) is not available and could not be downloaded")));
+							return;
+						}
 
 						const fileCache = new Map<string, string[]>();
 						const getFileLines = async (filePath: string): Promise<string[]> => {
