@@ -2,6 +2,7 @@ import { type ExecFileException, execFile, spawnSync } from "child_process";
 import { existsSync, type FSWatcher, readFileSync, type Stats, statSync, unwatchFile, watchFile } from "fs";
 import { dirname, join, resolve } from "path";
 import { closeWatcher, FS_WATCH_RETRY_DELAY_MS, watchWithErrorHandler } from "../utils/fs-watch.ts";
+import { type AutonomyStatusSnapshot, formatAutonomyStatus } from "./autonomy/status.ts";
 
 type GitPaths = {
 	repoDir: string;
@@ -102,6 +103,7 @@ export class FooterDataProvider {
 
 	private extensionStatuses = new Map<string, string>();
 	private cachedBranch: string | null | undefined = undefined;
+	private autonomyStatus: string | undefined;
 	private gitPaths: GitPaths | null | undefined = undefined;
 	private headWatcher: FSWatcher | null = null;
 	private headWatchFilePath: string | null = null;
@@ -121,6 +123,18 @@ export class FooterDataProvider {
 		this.cwd = cwd;
 		this.gitPaths = findGitPaths(cwd);
 		this.setupGitWatcher();
+	}
+
+	getAutonomyStatus(): string | undefined {
+		return this.autonomyStatus;
+	}
+
+	setAutonomyStatusSnapshot(snapshot: AutonomyStatusSnapshot | undefined): void {
+		if (snapshot === undefined) {
+			this.autonomyStatus = undefined;
+		} else {
+			this.autonomyStatus = formatAutonomyStatus(snapshot);
+		}
 	}
 
 	/** Current git branch, null if not in repo, "detached" if detached HEAD */
@@ -384,5 +398,5 @@ export class FooterDataProvider {
 /** Read-only view for extensions - excludes setExtensionStatus, setAvailableProviderCount and dispose */
 export type ReadonlyFooterDataProvider = Pick<
 	FooterDataProvider,
-	"getGitBranch" | "getExtensionStatuses" | "getAvailableProviderCount" | "onBranchChange"
+	"getGitBranch" | "getExtensionStatuses" | "getAvailableProviderCount" | "onBranchChange" | "getAutonomyStatus"
 >;

@@ -343,12 +343,25 @@ export class FooterComponent implements Component {
 		// folded into one compact chip so independent learning systems do not render
 		// brittle duplicates like "(learning) (learning) auto".
 		const extensionStatuses = this.footerData.getExtensionStatuses();
-		if (extensionStatuses.size > 0) {
-			const statusLine = formatExtensionStatuses(extensionStatuses).join(" ");
-			if (statusLine) {
-				// Truncate to terminal width with dim ellipsis for consistency with footer style
-				lines.push(truncateToWidth(statusLine, width, theme.fg("dim", "...")));
+		const autonomyStatus = this.footerData.getAutonomyStatus();
+
+		const statusParts: string[] = [];
+		if (autonomyStatus) {
+			const sanitizedAutonomyStatus = sanitizeStatusText(autonomyStatus);
+			if (sanitizedAutonomyStatus) {
+				statusParts.push(sanitizedAutonomyStatus);
 			}
+		}
+		if (extensionStatuses.size > 0) {
+			const extLine = formatExtensionStatuses(extensionStatuses).join(" ");
+			if (extLine) {
+				statusParts.push(extLine);
+			}
+		}
+
+		if (statusParts.length > 0) {
+			const statusLine = statusParts.join(" ");
+			lines.push(truncateToWidth(statusLine, width, theme.fg("dim", "...")));
 		}
 
 		return lines;

@@ -51,7 +51,9 @@ import { stripFrontmatter } from "../utils/frontmatter.ts";
 import { resolvePath } from "../utils/paths.ts";
 import { sleep } from "../utils/sleep.ts";
 import { formatNoApiKeyFoundMessage, formatNoModelSelectedMessage } from "./auth-guidance.ts";
-import type { RouteDecision } from "./autonomy/contracts.ts";
+import type { CapabilityEnvelope, GateOutcome, RouteDecision } from "./autonomy/contracts.ts";
+import { evaluateToolGate } from "./autonomy/gates.ts";
+import type { AutonomyStatusSnapshot } from "./autonomy/status.ts";
 import { type BashResult, executeBashWithOperations } from "./bash-executor.ts";
 import {
 	type CompactionResult,
@@ -425,6 +427,7 @@ export class AgentSession {
 	readonly agent: Agent;
 	readonly sessionManager: SessionManager;
 	readonly settingsManager: SettingsManager;
+	public capabilityEnvelope?: CapabilityEnvelope;
 
 	private _scopedModels: Array<{ model: Model<any>; thinkingLevel?: ThinkingLevel }>;
 
@@ -497,6 +500,7 @@ export class AgentSession {
 	private _modelRouterEscalationRequested = false;
 	private _isModelRouterRetry = false;
 	private _lastModelRouterDecision?: ModelRouterDecisionStatus;
+	private _lastAutonomyGateOutcome?: GateOutcome;
 	private _lastModelRouterSkipReason?: string;
 	private _lastModelRouterIntent?: ModelRouterIntent;
 	/** Lazily-built skill curator (#32) over `<agentDir>/skills`. */
@@ -860,6 +864,25 @@ export class AgentSession {
 					block: true,
 					reason:
 						"Model router escalation required: a cheap research turn attempted a mutating tool. Retry the turn on the configured expensive model.",
+				};
+			}
+
+			// Autonomy tool gating
+			const gateResult = evaluateToolGate({
+				toolName: toolCall.name,
+				args,
+				cwd: this._cwd,
+				envelope: this.capabilityEnvelope,
+			});
+
+			if (this.capabilityEnvelope) {
+				this._lastAutonomyGateOutcome = gateResult;
+			}
+
+			if (gateResult.outcome === "block" || gateResult.outcome === "ask-user") {
+				return {
+					block: true,
+					reason: `Tool execution blocked by autonomy gate [${gateResult.gate}]: ${gateResult.message} (${gateResult.reasonCode})`,
 				};
 			}
 
@@ -5035,6 +5058,38 @@ export class AgentSession {
 	// =========================================================================
 	// Extension System
 	// =========================================================================
+
+	public getAutonomyStatusSnapshot(): AutonomyStatusSnapshot {
+		const snapshot: AutonomyStatusSnapshot = {};
+
+		if (this._lastModelRouterDecision?.route) {
+			snapshot.latestRoute = {
+				tier: this._lastModelRouterDecision.route.tier,
+				reasonCode: this._lastModelRouterDecision.route.reasonCode,
+				risk: this._lastModelRouterDecision.route.risk,
+			};
+		}
+
+		if (this._lastAutonomyGateOutcome) {
+			snapshot.latestGate = {
+				outcome: this._lastAutonomyGateOutcome.outcome,
+				gate: this._lastAutonomyGateOutcome.gate,
+				reasonCode: this._lastAutonomyGateOutcome.reasonCode,
+			};
+		}
+
+		const spawnedCost = this.getSpawnedUsage().cost;
+		if (spawnedCost > 0) {
+			snapshot.spawnedCostUsd = spawnedCost;
+		}
+
+		const dailyCost = this.getDailyUsageTotals?.()?.totalCost;
+		if (dailyCost !== undefined && dailyCost > 0) {
+			snapshot.dailyCostUsd = dailyCost;
+		}
+
+		return snapshot;
+	}
 
 	createReplacedSessionContext(): ReplacedSessionContext {
 		const context = Object.defineProperties(

@@ -65,11 +65,13 @@ function createSession(options: {
 function createFooterData(
 	providerCount: number,
 	extensionStatuses = new Map<string, string>(),
+	autonomyStatus?: string,
 ): ReadonlyFooterDataProvider {
 	const provider = {
 		getGitBranch: () => "main",
 		getExtensionStatuses: () => extensionStatuses,
 		getAvailableProviderCount: () => providerCount,
+		getAutonomyStatus: () => autonomyStatus,
 		onBranchChange: (callback: () => void) => {
 			void callback;
 			return () => {};
@@ -157,5 +159,59 @@ describe("FooterComponent width handling", () => {
 		const statsLine = stripAnsi(footer.render(120)[1] ?? "");
 
 		expect(statsLine).toContain("day:$2.415");
+	});
+
+	it("renders autonomy status on the status line when present", () => {
+		const session = createSession({ sessionName: "" });
+		const footer = new FooterComponent(session, createFooterData(1, new Map(), "Autonomy: idle"));
+
+		const lines = footer.render(120);
+		const statusLine = stripAnsi(lines.at(-1) ?? "");
+
+		expect(lines.length).toBe(3); // pwd, stats, status
+		expect(statusLine).toBe("Autonomy: idle");
+	});
+
+	it("renders autonomy status before extension statuses when both are present", () => {
+		const session = createSession({ sessionName: "" });
+		const statuses = new Map<string, string>([["my-ext", "ext-status"]]);
+		const footer = new FooterComponent(session, createFooterData(1, statuses, "Autonomy: running"));
+
+		const lines = footer.render(120);
+		const statusLine = stripAnsi(lines.at(-1) ?? "");
+
+		expect(statusLine).toBe("Autonomy: running ext-status");
+	});
+
+	it("sanitizes autonomy status before rendering it on the footer line", () => {
+		const session = createSession({ sessionName: "" });
+		const footer = new FooterComponent(session, createFooterData(1, new Map(), "Autonomy:\nrunning\tfast"));
+
+		const lines = footer.render(120);
+		const statusLine = stripAnsi(lines.at(-1) ?? "");
+
+		expect(lines).toHaveLength(3);
+		expect(statusLine).toBe("Autonomy: running fast");
+	});
+
+	it("truncates long autonomy status to width with the existing footer truncation path", () => {
+		const session = createSession({ sessionName: "" });
+		const longStatus = `Autonomy: ${"running ".repeat(50)}`;
+		const footer = new FooterComponent(session, createFooterData(1, new Map(), longStatus));
+
+		const width = 80;
+		const lines = footer.render(width);
+		const statusLine = lines.at(-1) ?? "";
+
+		expect(visibleWidth(statusLine)).toBeLessThanOrEqual(width);
+		expect(stripAnsi(statusLine)).toContain("...");
+	});
+
+	it("leaves footer line count unchanged when autonomy status and extension statuses are absent", () => {
+		const session = createSession({ sessionName: "" });
+		const footer = new FooterComponent(session, createFooterData(1));
+
+		const lines = footer.render(120);
+		expect(lines.length).toBe(2); // Only pwd and stats
 	});
 });

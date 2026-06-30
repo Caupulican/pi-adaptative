@@ -8,6 +8,40 @@ export type ModelTier = "cheap" | "medium" | "expensive" | "learning";
 
 export type RouteRisk = "read-only" | "scoped-write" | "high-impact" | "approval-required";
 
+export type OperationRisk = "read-only" | "scoped-write" | "high-impact" | "approval-required";
+
+export interface RiskAssessmentInput {
+	operation: string;
+	toolName?: string;
+	command?: string;
+	paths?: readonly string[];
+	capabilities?: readonly CapabilityName[];
+}
+
+export interface RiskAssessment {
+	risk: OperationRisk;
+	reasonCode: string;
+	reasons: readonly string[];
+	requiresApproval: boolean;
+}
+
+export type PathScopeDecisionKind = "inside" | "outside" | "denied" | "missing";
+
+export interface PathScope {
+	root: string;
+	allowedPaths?: readonly string[];
+	deniedPaths?: readonly string[];
+	followSymlinks?: boolean;
+}
+
+export interface PathScopeDecision {
+	kind: PathScopeDecisionKind;
+	path: string;
+	resolvedPath?: string;
+	matchedRule?: string;
+	reasonCode: string;
+}
+
 export interface RouteDecision {
 	tier: ModelTier;
 	model?: string;

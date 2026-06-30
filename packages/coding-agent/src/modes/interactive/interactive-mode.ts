@@ -1221,6 +1221,8 @@ export class InteractiveMode {
 			} catch (error: unknown) {
 				const errorMessage = error instanceof Error ? error.message : "Unknown error occurred";
 				this.showError(errorMessage);
+			} finally {
+				this.refreshAutonomyFooterStatus();
 			}
 		}
 
@@ -1231,6 +1233,8 @@ export class InteractiveMode {
 				} catch (error: unknown) {
 					const errorMessage = error instanceof Error ? error.message : "Unknown error occurred";
 					this.showError(errorMessage);
+				} finally {
+					this.refreshAutonomyFooterStatus();
 				}
 			}
 		}
@@ -1243,8 +1247,15 @@ export class InteractiveMode {
 			} catch (error: unknown) {
 				const errorMessage = error instanceof Error ? error.message : "Unknown error occurred";
 				this.showError(errorMessage);
+			} finally {
+				this.refreshAutonomyFooterStatus();
 			}
 		}
+	}
+
+	private refreshAutonomyFooterStatus(): void {
+		this.footerDataProvider.setAutonomyStatusSnapshot(this.session.getAutonomyStatusSnapshot());
+		this.footer.invalidate();
 	}
 
 	private async checkForPackageUpdates(): Promise<string[]> {
@@ -3092,11 +3103,15 @@ export class InteractiveMode {
 				const images = this.takeClipboardImagesForText(text);
 				this.editor.addToHistory?.(text);
 				this.editor.setText("");
-				await this.session.prompt(text, {
-					streamingBehavior: queueAsFollowUp ? "followUp" : "steer",
-					images,
-					processSlashCommands: false,
-				});
+				try {
+					await this.session.prompt(text, {
+						streamingBehavior: queueAsFollowUp ? "followUp" : "steer",
+						images,
+						processSlashCommands: false,
+					});
+				} finally {
+					this.refreshAutonomyFooterStatus();
+				}
 				this.updatePendingMessagesDisplay();
 				this.ui.requestRender();
 				return;
@@ -4378,7 +4393,11 @@ export class InteractiveMode {
 			if (this.isExtensionCommand(text)) {
 				this.editor.addToHistory?.(text);
 				this.editor.setText("");
-				await this.session.prompt(text);
+				try {
+					await this.session.prompt(text);
+				} finally {
+					this.refreshAutonomyFooterStatus();
+				}
 			} else {
 				const images = this.takeClipboardImagesForText(text);
 				this.queueCompactionMessage(text, "followUp", images);
@@ -4392,7 +4411,11 @@ export class InteractiveMode {
 			const images = this.takeClipboardImagesForText(text);
 			this.editor.addToHistory?.(text);
 			this.editor.setText("");
-			await this.session.prompt(text, { streamingBehavior: "followUp", images });
+			try {
+				await this.session.prompt(text, { streamingBehavior: "followUp", images });
+			} finally {
+				this.refreshAutonomyFooterStatus();
+			}
 			this.updatePendingMessagesDisplay();
 			this.ui.requestRender();
 		}
@@ -4819,9 +4842,14 @@ export class InteractiveMode {
 			const promptOptions = this.session.isStreaming
 				? { images: firstPrompt.images, streamingBehavior: firstPrompt.mode }
 				: { images: firstPrompt.images };
-			const promptPromise = this.session.prompt(firstPrompt.text, promptOptions).catch((error) => {
-				restoreQueue(error);
-			});
+			const promptPromise = this.session
+				.prompt(firstPrompt.text, promptOptions)
+				.catch((error) => {
+					restoreQueue(error);
+				})
+				.finally(() => {
+					this.refreshAutonomyFooterStatus();
+				});
 
 			// Queue remaining messages
 			for (const message of rest) {

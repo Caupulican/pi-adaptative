@@ -263,3 +263,73 @@ describe("FooterDataProvider reftable branch detection", () => {
 		}
 	});
 });
+
+describe("FooterDataProvider autonomy status", () => {
+	let originalCwd: string;
+	let tempDir: string;
+
+	beforeEach(() => {
+		originalCwd = process.cwd();
+		tempDir = mkdtempSync(join(tmpdir(), "footer-data-provider-status-"));
+	});
+
+	afterEach(() => {
+		process.chdir(originalCwd);
+		if (tempDir && existsSync(tempDir)) {
+			rmSync(tempDir, { recursive: true, force: true });
+		}
+	});
+
+	it("newly constructed provider has undefined autonomy status", () => {
+		const repoDir = createPlainRepo(tempDir);
+		const provider = new FooterDataProvider(repoDir);
+		expect(provider.getAutonomyStatus()).toBeUndefined();
+		provider.dispose();
+	});
+
+	it("setting an autonomy snapshot stores formatted status containing route/gate/cost data", () => {
+		const repoDir = createPlainRepo(tempDir);
+		const provider = new FooterDataProvider(repoDir);
+
+		provider.setAutonomyStatusSnapshot({
+			latestRoute: { tier: "cheap", reasonCode: "allowed" },
+			latestGate: { gate: "learning", outcome: "allow", reasonCode: "ok" },
+			currentCostUsd: 1.23,
+		});
+
+		const status = provider.getAutonomyStatus();
+		expect(status).toContain("Route: cheap");
+		expect(status).toContain("Gate: learning = allow (ok)");
+		expect(status).toContain("Costs: current: $1.2300");
+
+		provider.dispose();
+	});
+
+	it("setting undefined clears the status", () => {
+		const repoDir = createPlainRepo(tempDir);
+		const provider = new FooterDataProvider(repoDir);
+
+		provider.setAutonomyStatusSnapshot({
+			currentCostUsd: 1.23,
+		});
+		expect(provider.getAutonomyStatus()).toBeDefined();
+
+		provider.setAutonomyStatusSnapshot(undefined);
+		expect(provider.getAutonomyStatus()).toBeUndefined();
+
+		provider.dispose();
+	});
+
+	it("status formatting redacts secrets through the existing formatter when snapshot values contain suspicious strings", () => {
+		const repoDir = createPlainRepo(tempDir);
+		const provider = new FooterDataProvider(repoDir);
+
+		provider.setAutonomyStatusSnapshot({
+			latestRoute: { tier: "cheap", reasonCode: "bearer sk-1234abcd5678" },
+		});
+		expect(provider.getAutonomyStatus()).toContain("[REDACTED]");
+		expect(provider.getAutonomyStatus()).not.toContain("sk-1234");
+
+		provider.dispose();
+	});
+});
