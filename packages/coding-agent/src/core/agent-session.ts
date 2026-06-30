@@ -51,7 +51,13 @@ import { stripFrontmatter } from "../utils/frontmatter.ts";
 import { resolvePath } from "../utils/paths.ts";
 import { sleep } from "../utils/sleep.ts";
 import { formatNoApiKeyFoundMessage, formatNoModelSelectedMessage } from "./auth-guidance.ts";
-import type { CapabilityEnvelope, EvidenceBundle, GateOutcome, RouteDecision } from "./autonomy/contracts.ts";
+import type {
+	CapabilityEnvelope,
+	EvidenceBundle,
+	GateOutcome,
+	RouteDecision,
+	WorkerResult,
+} from "./autonomy/contracts.ts";
 import { evaluateToolGate } from "./autonomy/gates.ts";
 import type { AutonomyStatusSnapshot } from "./autonomy/status.ts";
 import { type BashResult, executeBashWithOperations } from "./bash-executor.ts";
@@ -76,6 +82,7 @@ import {
 } from "./cost/daily-usage.ts";
 import { type CostGuardDecision, downgradeReasoning, estimateTurnCostUsd, evaluateCostGuard } from "./cost-guard.ts";
 import { DEFAULT_THINKING_LEVEL } from "./defaults.ts";
+import { appendWorkerResultSnapshot, getWorkerResultSnapshots } from "./delegation/session-worker-result.ts";
 import { exportSessionToHtml, type ToolHtmlRenderer } from "./export-html/index.ts";
 import { createToolHtmlRenderer } from "./export-html/tool-renderer.ts";
 import { createCoreDiagnosticsToolDefinitions } from "./extensions/builtin.ts";
@@ -4732,6 +4739,14 @@ export class AgentSession {
 	 */
 	getEvidenceBundleSnapshot(): EvidenceBundle | undefined {
 		return getLatestEvidenceBundleSnapshot(this.sessionManager.getEntries());
+	}
+
+	saveWorkerResultSnapshot(result: WorkerResult): string {
+		return appendWorkerResultSnapshot(this.sessionManager, result);
+	}
+
+	getWorkerResultSnapshots(): WorkerResult[] {
+		return getWorkerResultSnapshots(this.sessionManager.getEntries());
 	}
 
 	/**

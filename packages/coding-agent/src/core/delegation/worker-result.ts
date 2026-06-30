@@ -1,6 +1,50 @@
 import path from "node:path";
 import type { GateOutcome, WorkerRequest, WorkerResult } from "../autonomy/contracts.ts";
 import { checkPathScope } from "../autonomy/path-scope.ts";
+import { cloneEvidenceBundleForStorage, isEvidenceBundle } from "../research/evidence-bundle.ts";
+
+export function cloneWorkerResultForStorage(result: WorkerResult): WorkerResult {
+	return {
+		...result,
+		changedFiles: [...result.changedFiles],
+		blockers: result.blockers ? [...result.blockers] : undefined,
+		evidence: result.evidence ? cloneEvidenceBundleForStorage(result.evidence) : undefined,
+	};
+}
+
+function isPlainRecord(value: unknown): value is Record<string, unknown> {
+	if (!value || typeof value !== "object" || Array.isArray(value)) return false;
+	const prototype = Object.getPrototypeOf(value);
+	return prototype === Object.prototype || prototype === null;
+}
+
+export function isWorkerResult(value: unknown): value is WorkerResult {
+	if (!isPlainRecord(value)) return false;
+	const obj = value as Record<string, unknown>;
+
+	if (typeof obj.requestId !== "string") return false;
+	if (typeof obj.status !== "string" || !["completed", "blocked", "failed", "cancelled"].includes(obj.status)) {
+		return false;
+	}
+	if (typeof obj.summary !== "string") return false;
+
+	if (!Array.isArray(obj.changedFiles) || !obj.changedFiles.every((f) => typeof f === "string")) {
+		return false;
+	}
+
+	if (obj.blockers !== undefined) {
+		if (!Array.isArray(obj.blockers) || !obj.blockers.every((b) => typeof b === "string")) {
+			return false;
+		}
+	}
+
+	if (obj.usageReportId !== undefined && typeof obj.usageReportId !== "string") return false;
+	if (obj.createdAt !== undefined && typeof obj.createdAt !== "string") return false;
+
+	if (obj.evidence !== undefined && !isEvidenceBundle(obj.evidence)) return false;
+
+	return true;
+}
 
 export function requiresParentReview(result: WorkerResult): boolean {
 	if (result.status !== "completed") {
