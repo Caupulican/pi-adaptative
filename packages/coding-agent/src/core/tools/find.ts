@@ -17,6 +17,7 @@ import {
 } from "./fff-search-backend.ts";
 import { pathExists, resolveToCwd } from "./path-utils.ts";
 import { getTextOutput, invalidArgText, shortenPath, str } from "./render-utils.ts";
+import { defaultSearchRouter, type SearchRouter } from "./search-router.ts";
 import { wrapToolDefinition } from "./tool-definition-wrapper.ts";
 import { DEFAULT_MAX_BYTES, formatSize, type TruncationResult, truncateHead } from "./truncate.ts";
 
@@ -61,10 +62,12 @@ const defaultFindOperations: FindOperations = {
 };
 
 export interface FindToolOptions {
-	/** Custom operations for find. Default: local filesystem plus FFF when available, then fd */
+	/** Custom operations for find. Default: local filesystem plus routed FFF/fd search */
 	operations?: FindOperations;
 	/** FFF backend for resident indexed search. Set false to force fd fallback. */
 	fff?: FffSearchBackend | false;
+	/** Pure router that selects FFF or fd from request filters and environment facts. */
+	searchRouter?: SearchRouter;
 }
 
 function formatFindCall(
@@ -156,24 +159,54 @@ function fffSearchOutput(result: FffSearchResult, searchPathRelativeToCwd: strin
 
 async function tryFffFind(options: {
 	backend: FffSearchBackend;
+	router: SearchRouter;
 	cwd: string;
 	searchPath: string;
 	pattern: string;
 	ignoreCase?: boolean;
 	effectiveLimit: number;
 }): Promise<{ text: string; details: FindToolDetails } | undefined> {
-	// FFF's glob/file-search API does not expose fd-compatible forced ignore-case semantics.
-	if (options.ignoreCase) return undefined;
 	if (!(await pathExists(options.searchPath))) return undefined;
-	if (await hasGitignoreInTree(options.searchPath)) return undefined;
 
 	const searchPathRelativeToCwd = relativePathInside(options.cwd, options.searchPath);
+	const glob = hasGlobSyntax(options.pattern);
+	const baseRoute = options.router.route({
+		tool: "find",
+		glob,
+		ignoreCase: Boolean(options.ignoreCase),
+		limit: options.effectiveLimit,
+		finderAvailable: true,
+		pathResolvable: searchPathRelativeToCwd !== undefined,
+		gitignoreInTree: false,
+	});
+	if (baseRoute.backend !== "fff") return undefined;
 	if (searchPathRelativeToCwd === undefined) return undefined;
 
-	const finder = await options.backend.getFinder(options.cwd);
-	if (!finder) return undefined;
+	const gitignoreInTree = await hasGitignoreInTree(options.searchPath);
+	const semanticRoute = options.router.route({
+		tool: "find",
+		glob,
+		ignoreCase: Boolean(options.ignoreCase),
+		limit: options.effectiveLimit,
+		finderAvailable: true,
+		pathResolvable: true,
+		gitignoreInTree,
+	});
+	if (semanticRoute.backend !== "fff") return undefined;
 
-	if (hasGlobSyntax(options.pattern)) {
+	const finder = await options.backend.getFinder(options.cwd);
+	const finderRoute = options.router.route({
+		tool: "find",
+		glob,
+		ignoreCase: Boolean(options.ignoreCase),
+		limit: options.effectiveLimit,
+		finderAvailable: Boolean(finder),
+		pathResolvable: true,
+		gitignoreInTree: false,
+	});
+	if (!finder || finderRoute.backend !== "fff") return undefined;
+
+	if (glob) {
 		const result = finder.glob(fffGlobPattern(options.pattern, searchPathRelativeToCwd), {
 			pageSize: options.effectiveLimit,
 		});
@@ -253,6 +286,7 @@ export function createFindToolDefinition(
 ): ToolDefinition<typeof findSchema, FindToolDetails | undefined> {
 	const customOps = options?.operations;
 	const fffBackend = options?.fff === false ? undefined : (options?.fff ?? defaultFffSearchBackend);
+	const searchRouter = options?.searchRouter ?? defaultSearchRouter;
 	return {
 		name: "find",
 		label: "find",
@@ -307,6 +341,7 @@ export function createFindToolDefinition(
 						if (!customOps && fffBackend) {
 							const fffResult = await tryFffFind({
 								backend: fffBackend,
+								router: searchRouter,
 								cwd,
 								searchPath,
 								pattern: effectivePattern,

@@ -19,6 +19,7 @@ import {
 } from "./fff-search-backend.ts";
 import { resolveToCwd } from "./path-utils.ts";
 import { getTextOutput, invalidArgText, shortenPath, str } from "./render-utils.ts";
+import { defaultSearchRouter, type SearchRouter } from "./search-router.ts";
 import { wrapToolDefinition } from "./tool-definition-wrapper.ts";
 import {
 	DEFAULT_MAX_BYTES,
@@ -69,10 +70,12 @@ const defaultGrepOperations: GrepOperations = {
 };
 
 export interface GrepToolOptions {
-	/** Custom operations for grep. Default: local filesystem plus FFF when available, then ripgrep */
+	/** Custom operations for grep. Default: local filesystem plus routed FFF/rg search */
 	operations?: GrepOperations;
 	/** FFF backend for resident indexed search. Set false to force ripgrep fallback. */
 	fff?: FffSearchBackend | false;
+	/** Pure router that selects FFF or rg from request filters and environment facts. */
+	searchRouter?: SearchRouter;
 }
 
 function formatGrepCall(
@@ -246,6 +249,7 @@ function formatFffGrepResult(options: {
 
 async function tryFffGrep(options: {
 	backend: FffSearchBackend;
+	router: SearchRouter;
 	cwd: string;
 	searchPath: string;
 	pattern: string;
@@ -256,15 +260,42 @@ async function tryFffGrep(options: {
 	effectiveLimit: number;
 	isDirectory: boolean;
 }): Promise<{ text: string; details: GrepToolDetails } | undefined> {
-	// FFF has smart-case/case-sensitive modes but no forced ignore-case equivalent.
-	if (options.ignoreCase) return undefined;
-	if (options.isDirectory && (await hasGitignoreInTree(options.searchPath))) return undefined;
-
 	const searchPathRelativeToCwd = relativePathInside(options.cwd, options.searchPath);
+	const baseRoute = options.router.route({
+		tool: "grep",
+		glob: Boolean(options.glob),
+		ignoreCase: Boolean(options.ignoreCase),
+		limit: options.effectiveLimit,
+		finderAvailable: true,
+		pathResolvable: searchPathRelativeToCwd !== undefined,
+		gitignoreInTree: false,
+	});
+	if (baseRoute.backend !== "fff") return undefined;
 	if (searchPathRelativeToCwd === undefined) return undefined;
 
+	const gitignoreInTree = options.isDirectory ? await hasGitignoreInTree(options.searchPath) : false;
+	const semanticRoute = options.router.route({
+		tool: "grep",
+		glob: Boolean(options.glob),
+		ignoreCase: Boolean(options.ignoreCase),
+		limit: options.effectiveLimit,
+		finderAvailable: true,
+		pathResolvable: true,
+		gitignoreInTree,
+	});
+	if (semanticRoute.backend !== "fff") return undefined;
+
 	const finder = await options.backend.getFinder(options.cwd);
-	if (!finder) return undefined;
+	const finderRoute = options.router.route({
+		tool: "grep",
+		glob: Boolean(options.glob),
+		ignoreCase: Boolean(options.ignoreCase),
+		limit: options.effectiveLimit,
+		finderAvailable: Boolean(finder),
+		pathResolvable: true,
+		gitignoreInTree: false,
+	});
+	if (!finder || finderRoute.backend !== "fff") return undefined;
 
 	const query = fffGrepQuery({
 		pattern: options.pattern,
@@ -298,6 +329,7 @@ export function createGrepToolDefinition(
 ): ToolDefinition<typeof grepSchema, GrepToolDetails | undefined> {
 	const customOps = options?.operations;
 	const fffBackend = options?.fff === false ? undefined : (options?.fff ?? defaultFffSearchBackend);
+	const searchRouter = options?.searchRouter ?? defaultSearchRouter;
 	return {
 		name: "grep",
 		label: "grep",
@@ -368,6 +400,7 @@ export function createGrepToolDefinition(
 						if (!customOps && fffBackend) {
 							const fffResult = await tryFffGrep({
 								backend: fffBackend,
+								router: searchRouter,
 								cwd,
 								searchPath,
 								pattern,
