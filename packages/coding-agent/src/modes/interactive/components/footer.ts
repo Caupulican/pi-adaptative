@@ -248,23 +248,13 @@ export class FooterComponent implements Component {
 
 		// Show cost with "(sub)" indicator if using OAuth subscription
 		const usingSubscription = state.model ? this.session.modelRegistry.isUsingOAuth(state.model) : false;
-		if (totalCost || totalSpawnedCost || usingSubscription) {
-			// Main cost, then the spawned/subagent roll-up: `$0.842 (sub) (+$0.310 sub)`.
-			let costStr = `$${totalCost.toFixed(3)}${usingSubscription ? " (sub)" : ""}`;
-			if (totalSpawnedCost) {
-				costStr += ` (+$${totalSpawnedCost.toFixed(3)} sub)`;
-			}
+		const grandTotalCost = totalCost + totalSpawnedCost;
+		if (grandTotalCost || usingSubscription) {
+			const costStr = `$${grandTotalCost.toFixed(3)}${usingSubscription ? " (sub)" : ""}`;
 			statsParts.push(costStr);
 		}
 		if (dailyTotalCost) {
 			statsParts.push(`day:$${dailyTotalCost.toFixed(3)}`);
-		}
-
-		// Proactive cost-guard warning (#34): when the projected per-turn cost crosses the ceiling,
-		// surface a visible notice so an expensive turn never sneaks by. Warn-only — no silent action.
-		const costGuard = this.session.getLastCostGuardDecision?.();
-		if (costGuard?.over) {
-			statsParts.push(theme.fg("warning", `⚠$${costGuard.estUsd.toFixed(2)}/turn`));
 		}
 
 		// Colorize context percentage based on usage
