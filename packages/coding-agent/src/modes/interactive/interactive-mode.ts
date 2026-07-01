@@ -6181,6 +6181,8 @@ export class InteractiveMode {
 					autoLearn: this.settingsManager.getAutoLearnSettings(),
 					autoLearnScope: projectSettings.autoLearn ? "project" : "global",
 					autoLearnModelOptions: this.getAutoLearnModelOptions(),
+					contextPolicyEnforcement: this.settingsManager.getContextPromptEnforcementSettings(),
+					contextPolicyEnforcementScope: projectSettings.contextPolicy?.enforcement ? "project" : "global",
 					currentModelPattern: this.session.model
 						? `${this.session.model.provider}/${this.session.model.id}`
 						: undefined,
@@ -6345,6 +6347,10 @@ export class InteractiveMode {
 						}
 						this.updateAutoLearnFooter();
 						this.showStatus(`Auto Learn settings saved to ${scope}. Use /auto-learn status or /auto-learn run.`);
+					},
+					onContextPolicyEnforcementChange: (settings, scope) => {
+						this.settingsManager.setContextPromptEnforcementSettings(settings, scope);
+						this.showStatus(`Context/prompt-policy settings saved to ${scope}.`);
 					},
 					onResourcesHubAction: (action) => {
 						done();

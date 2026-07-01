@@ -516,6 +516,108 @@ describe("SettingsManager", () => {
 		});
 	});
 
+	describe("contextPolicy enforcement settings", () => {
+		it("defaults to disabled with the documented default window/threshold", () => {
+			const manager = SettingsManager.create(projectDir, agentDir);
+
+			expect(manager.getContextPromptEnforcementSettings()).toEqual({
+				enabled: false,
+				preserveRecentMessages: 8,
+				minChars: 1200,
+			});
+		});
+
+		it("should save global contextPolicy enforcement settings and read them back", async () => {
+			const settingsPath = join(agentDir, "settings.json");
+			const manager = SettingsManager.create(projectDir, agentDir);
+
+			manager.setContextPromptEnforcementSettings({ enabled: true, preserveRecentMessages: 4, minChars: 600 });
+			await manager.flush();
+
+			const savedSettings = JSON.parse(readFileSync(settingsPath, "utf-8"));
+			expect(savedSettings.contextPolicy).toEqual({
+				enforcement: { enabled: true, preserveRecentMessages: 4, minChars: 600 },
+			});
+			expect(manager.getContextPromptEnforcementSettings()).toEqual({
+				enabled: true,
+				preserveRecentMessages: 4,
+				minChars: 600,
+			});
+		});
+
+		it("should save project scoped contextPolicy enforcement settings", async () => {
+			const settingsPath = join(projectDir, ".pi", "settings.json");
+			const manager = SettingsManager.create(projectDir, agentDir);
+
+			manager.setContextPromptEnforcementSettings(
+				{ enabled: true, preserveRecentMessages: 16, minChars: 2400 },
+				"project",
+			);
+			await manager.flush();
+
+			const savedSettings = JSON.parse(readFileSync(settingsPath, "utf-8"));
+			expect(savedSettings.contextPolicy).toEqual({
+				enforcement: { enabled: true, preserveRecentMessages: 16, minChars: 2400 },
+			});
+			expect(manager.getContextPromptEnforcementSettings()).toEqual({
+				enabled: true,
+				preserveRecentMessages: 16,
+				minChars: 2400,
+			});
+		});
+
+		it("never persists retrievalToolAvailable -- it is a runtime fact, never a user setting", async () => {
+			const settingsPath = join(agentDir, "settings.json");
+			const manager = SettingsManager.create(projectDir, agentDir);
+
+			manager.setContextPromptEnforcementSettings({ enabled: true, preserveRecentMessages: 4, minChars: 600 });
+			await manager.flush();
+
+			const savedSettings = JSON.parse(readFileSync(settingsPath, "utf-8"));
+			expect(Object.keys(savedSettings.contextPolicy.enforcement)).not.toContain("retrievalToolAvailable");
+			expect(Object.keys(manager.getContextPromptEnforcementSettings())).not.toContain("retrievalToolAvailable");
+		});
+
+		it("preserves an existing sibling key under global contextPolicy when saving enforcement settings", async () => {
+			const settingsPath = join(agentDir, "settings.json");
+			// Simulate a future sibling under contextPolicy (not yet a real field on
+			// ContextPolicySettings) already present on disk.
+			writeFileSync(settingsPath, JSON.stringify({ contextPolicy: { someFutureSetting: { flag: true } } }));
+			const manager = SettingsManager.create(projectDir, agentDir);
+
+			manager.setContextPromptEnforcementSettings({ enabled: true, preserveRecentMessages: 4, minChars: 600 });
+			await manager.flush();
+
+			const savedSettings = JSON.parse(readFileSync(settingsPath, "utf-8"));
+			expect(savedSettings.contextPolicy.someFutureSetting).toEqual({ flag: true });
+			expect(savedSettings.contextPolicy.enforcement).toEqual({
+				enabled: true,
+				preserveRecentMessages: 4,
+				minChars: 600,
+			});
+		});
+
+		it("preserves an existing sibling key under project-scoped contextPolicy when saving enforcement settings", async () => {
+			const settingsPath = join(projectDir, ".pi", "settings.json");
+			writeFileSync(settingsPath, JSON.stringify({ contextPolicy: { someFutureSetting: { flag: true } } }));
+			const manager = SettingsManager.create(projectDir, agentDir);
+
+			manager.setContextPromptEnforcementSettings(
+				{ enabled: true, preserveRecentMessages: 16, minChars: 2400 },
+				"project",
+			);
+			await manager.flush();
+
+			const savedSettings = JSON.parse(readFileSync(settingsPath, "utf-8"));
+			expect(savedSettings.contextPolicy.someFutureSetting).toEqual({ flag: true });
+			expect(savedSettings.contextPolicy.enforcement).toEqual({
+				enabled: true,
+				preserveRecentMessages: 16,
+				minChars: 2400,
+			});
+		});
+	});
+
 	describe("selfModification", () => {
 		it("should save project scoped selfModification settings", async () => {
 			const settingsPath = join(projectDir, ".pi", "settings.json");

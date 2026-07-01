@@ -40,6 +40,7 @@ function makeConfig(overrides: Partial<SettingsConfig> = {}): SettingsConfig {
 		autonomy: { mode: "off", maxStallTurns: 20 },
 		modelRouter: {},
 		autoLearn: {},
+		contextPolicyEnforcement: {},
 		currentModelPattern: "openai/gpt-5.4",
 		autoLearnModelOptions: [
 			{
@@ -87,6 +88,7 @@ function makeCallbacks(overrides: Partial<SettingsCallbacks> = {}): SettingsCall
 		onAutonomyChange: vi.fn(),
 		onModelRouterChange: vi.fn(),
 		onAutoLearnChange: vi.fn(),
+		onContextPolicyEnforcementChange: vi.fn(),
 		onCancel: vi.fn(),
 		...overrides,
 	};
@@ -199,6 +201,107 @@ describe("settings selector", () => {
 		const output = selector.render(180).join("\n");
 
 		expect(output).toContain("Reflection review");
+	});
+
+	it("exposes context/prompt-policy enforcement settings in the searchable settings TUI", () => {
+		const selector = new SettingsSelectorComponent(
+			makeConfig({ contextPolicyEnforcement: { enabled: true, preserveRecentMessages: 8, minChars: 1200 } }),
+			makeCallbacks(),
+		);
+
+		selector.getSettingsList().handleInput("prompt policy");
+		const topLevelOutput = selector.render(180).join("\n");
+		expect(topLevelOutput).toContain("Context / Prompt Policy");
+		expect(topLevelOutput).toContain("enabled (preserve 8, min 1200 chars)");
+
+		selector.getSettingsList().handleInput("\r");
+		const output = selector.render(180).join("\n");
+
+		expect(output).toContain("Prompt policy enforcement");
+		expect(output).toContain("Preserve recent messages");
+		expect(output).toContain("Minimum chars before stubbing");
+
+		// The "artifact_retrieve must be active" note lives in the enabled item's
+		// description, shown when that item is selected.
+		selector.getSettingsList().handleInput("\x1b[B");
+		const enabledItemOutput = selector.render(180).join("\n");
+		expect(enabledItemOutput).toContain("artifact_retrieve");
+	});
+
+	it("shows disabled as the default summary when context/prompt-policy enforcement is not configured", () => {
+		const selector = new SettingsSelectorComponent(makeConfig({ contextPolicyEnforcement: {} }), makeCallbacks());
+
+		selector.getSettingsList().handleInput("prompt policy");
+		const output = selector.render(180).join("\n");
+
+		expect(output).toContain("disabled");
+	});
+
+	it("persists toggling context/prompt-policy enforcement on from its submenu", () => {
+		const onContextPolicyEnforcementChange = vi.fn();
+		const selector = new SettingsSelectorComponent(
+			makeConfig({ contextPolicyEnforcement: { enabled: false, preserveRecentMessages: 8, minChars: 1200 } }),
+			makeCallbacks({ onContextPolicyEnforcementChange }),
+		);
+
+		selector.getSettingsList().handleInput("prompt policy");
+		selector.getSettingsList().handleInput("\r"); // open submenu
+		selector.getSettingsList().handleInput("\x1b[B"); // down to "Prompt policy enforcement"
+		selector.getSettingsList().handleInput("\r"); // cycle false -> true
+
+		expect(onContextPolicyEnforcementChange).toHaveBeenCalledWith(
+			{ enabled: true, preserveRecentMessages: 8, minChars: 1200 },
+			"global",
+		);
+	});
+
+	it("persists context/prompt-policy numeric settings only as one of the discrete safe values (no free-text entry)", () => {
+		const onContextPolicyEnforcementChange = vi.fn();
+		const selector = new SettingsSelectorComponent(
+			makeConfig({ contextPolicyEnforcement: { enabled: true, preserveRecentMessages: 8, minChars: 1200 } }),
+			makeCallbacks({ onContextPolicyEnforcementChange }),
+		);
+
+		selector.getSettingsList().handleInput("prompt policy");
+		selector.getSettingsList().handleInput("\r"); // open submenu
+		selector.getSettingsList().handleInput("\x1b[B"); // down to "Prompt policy enforcement"
+		selector.getSettingsList().handleInput("\x1b[B"); // down to "Preserve recent messages"
+		selector.getSettingsList().handleInput("\r"); // cycle 8 -> 16 (next in ["2","4","8","16","32"])
+
+		expect(onContextPolicyEnforcementChange).toHaveBeenLastCalledWith(
+			{ enabled: true, preserveRecentMessages: 16, minChars: 1200 },
+			"global",
+		);
+
+		selector.getSettingsList().handleInput("\x1b[B"); // down to "Minimum chars before stubbing"
+		selector.getSettingsList().handleInput("\r"); // cycle 1200 -> 2400 (next in ["300","600","1200","2400","4800"])
+
+		expect(onContextPolicyEnforcementChange).toHaveBeenLastCalledWith(
+			{ enabled: true, preserveRecentMessages: 16, minChars: 2400 },
+			"global",
+		);
+
+		// Cycling can never land outside the documented discrete set -- there is no
+		// free-text path for these numbers, so an invalid/out-of-range value can't be typed.
+		for (const call of onContextPolicyEnforcementChange.mock.calls) {
+			const [settings] = call;
+			expect(["2", "4", "8", "16", "32"]).toContain(String(settings.preserveRecentMessages));
+			expect(["300", "600", "1200", "2400", "4800"]).toContain(String(settings.minChars));
+		}
+	});
+
+	it("does not expose retrievalToolAvailable as a configurable setting anywhere in the submenu", () => {
+		const selector = new SettingsSelectorComponent(
+			makeConfig({ contextPolicyEnforcement: { enabled: true, preserveRecentMessages: 8, minChars: 1200 } }),
+			makeCallbacks(),
+		);
+
+		selector.getSettingsList().handleInput("prompt policy");
+		selector.getSettingsList().handleInput("\r");
+		const output = selector.render(180).join("\n");
+
+		expect(output).not.toContain("retrievalToolAvailable");
+		expect(output).not.toContain("retrieval tool available");
 	});
 
 	it("exposes configurable model router settings together in the searchable settings TUI", () => {

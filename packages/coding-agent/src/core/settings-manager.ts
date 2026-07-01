@@ -1971,6 +1971,23 @@ export class SettingsManager {
 		};
 	}
 
+	setContextPromptEnforcementSettings(
+		settings: ContextPromptEnforcementSettings,
+		scope: SettingsScope = "global",
+	): void {
+		if (scope === "project") {
+			const projectSettings = structuredClone(this.projectSettings);
+			projectSettings.contextPolicy = { ...projectSettings.contextPolicy, enforcement: { ...settings } };
+			this.markProjectModified("contextPolicy");
+			this.saveProjectSettings(projectSettings);
+			return;
+		}
+
+		this.globalSettings.contextPolicy = { ...this.globalSettings.contextPolicy, enforcement: { ...settings } };
+		this.markModified("contextPolicy");
+		this.save();
+	}
+
 	getBranchSummarySettings(): { reserveTokens: number; skipPrompt: boolean } {
 		return {
 			reserveTokens: this.settings.branchSummary?.reserveTokens ?? 16384,

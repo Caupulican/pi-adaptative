@@ -165,6 +165,7 @@ describe("Library Manage UX - Increment 2", () => {
 					autonomy: { mode: "off" },
 					modelRouter: {},
 					autoLearn: { enabled: false },
+					contextPolicyEnforcement: { enabled: false },
 					activeProfileName: "reviewer",
 					profileOptions: [{ value: "reviewer", label: "reviewer", description: "Reviewer situation" }],
 					externalResourceRoots: ["/catalog/path1"],

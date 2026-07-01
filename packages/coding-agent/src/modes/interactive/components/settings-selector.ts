@@ -18,6 +18,7 @@ import type {
 	AutoLearnSettings,
 	AutonomyMode,
 	AutonomySettings,
+	ContextPromptEnforcementSettings,
 	ModelRouterSettings,
 	SelfModificationSettings,
 	SettingsScope,
@@ -56,6 +57,15 @@ const AUTONOMY_GOAL_CONTINUE_TURN_VALUES = ["1", "3", "5", "10", "20"];
 const AUTONOMY_MAX_STALL_TURN_VALUES = ["0", "5", "10", "20", "30", "50", "100"];
 const AUTONOMY_GOAL_CONTINUE_MAX_WALL_CLOCK_MINUTE_VALUES = ["0", "15", "30", "60", "120", "240", "480", "1440"];
 const AUTONOMY_GOAL_AUTO_CONTINUE_DELAY_MS_VALUES = ["0", "250", "1000", "5000", "30000", "60000"];
+
+const CONTEXT_POLICY_PRESERVE_RECENT_MESSAGES_VALUES = ["2", "4", "8", "16", "32"];
+const CONTEXT_POLICY_MIN_CHARS_VALUES = ["300", "600", "1200", "2400", "4800"];
+
+const CONTEXT_POLICY_ENFORCEMENT_DEFAULTS = {
+	enabled: false,
+	preserveRecentMessages: 8,
+	minChars: 1200,
+} as const;
 
 const AUTO_LEARN_DEFAULTS = {
 	model: "active",
@@ -135,6 +145,13 @@ function autonomyGoalAutoContinueDelayMsValue(settings: AutonomySettings): strin
 
 function autoLearnSummary(settings: AutoLearnSettings): string {
 	return settings.enabled ? `enabled (${autoLearnModelValue(settings)})` : "disabled";
+}
+
+function contextPolicyEnforcementSummary(settings: ContextPromptEnforcementSettings): string {
+	if (!(settings.enabled ?? CONTEXT_POLICY_ENFORCEMENT_DEFAULTS.enabled)) return "disabled";
+	const preserve = settings.preserveRecentMessages ?? CONTEXT_POLICY_ENFORCEMENT_DEFAULTS.preserveRecentMessages;
+	const minChars = settings.minChars ?? CONTEXT_POLICY_ENFORCEMENT_DEFAULTS.minChars;
+	return `enabled (preserve ${preserve}, min ${minChars} chars)`;
 }
 
 function modelRouterSummary(settings: ModelRouterSettings): string {
@@ -275,6 +292,8 @@ export interface SettingsConfig {
 	modelRouterScope?: SettingsScope;
 	autoLearn: AutoLearnSettings;
 	autoLearnScope?: SettingsScope;
+	contextPolicyEnforcement: ContextPromptEnforcementSettings;
+	contextPolicyEnforcementScope?: SettingsScope;
 	currentModelPattern?: string;
 	autoLearnModelOptions?: SelectItem[];
 	activeProfileName?: string;
@@ -313,6 +332,7 @@ export interface SettingsCallbacks {
 	onAutonomyChange: (settings: AutonomySettings, scope: SettingsScope) => void;
 	onModelRouterChange: (settings: ModelRouterSettings, scope: SettingsScope) => void;
 	onAutoLearnChange: (settings: AutoLearnSettings, scope: SettingsScope) => void;
+	onContextPolicyEnforcementChange: (settings: ContextPromptEnforcementSettings, scope: SettingsScope) => void;
 	onResourcesHubAction?: (action: string) => void;
 	onCancel: () => void;
 }
@@ -844,6 +864,93 @@ class AutoLearnSettingsSubmenu extends Container {
 	}
 }
 
+class ContextPolicyEnforcementSettingsSubmenu extends Container {
+	private settingsList: SettingsList;
+	private state: ContextPromptEnforcementSettings;
+	private scope: SettingsScope;
+
+	constructor(
+		settings: ContextPromptEnforcementSettings,
+		onChange: (settings: ContextPromptEnforcementSettings, scope: SettingsScope) => void,
+		onCancel: () => void,
+		scope: SettingsScope = "global",
+	) {
+		super();
+
+		this.state = { ...settings };
+		this.scope = scope;
+
+		const items: SettingItem[] = [
+			{
+				id: "context-policy-scope",
+				label: "Save scope",
+				description:
+					"Save this context/prompt-policy configuration globally or in the current project's .pi/settings.json",
+				currentValue: this.scope,
+				values: ["global", "project"],
+			},
+			{
+				id: "context-policy-enabled",
+				label: "Prompt policy enforcement",
+				description:
+					"Opt-in: stub stale artifact-backed grep/find output in the model-visible prompt only. Never touches transcript/session history. Requires the artifact_retrieve tool to be active this turn (not configurable here -- it's a runtime fact, not a setting).",
+				currentValue: booleanSettingValue(this.state.enabled, CONTEXT_POLICY_ENFORCEMENT_DEFAULTS.enabled),
+				values: ["false", "true"],
+			},
+			{
+				id: "context-policy-preserve-recent-messages",
+				label: "Preserve recent messages",
+				description: "Never stub a tool result within this many of the most recent messages",
+				currentValue: numberSettingValue(
+					this.state.preserveRecentMessages,
+					CONTEXT_POLICY_ENFORCEMENT_DEFAULTS.preserveRecentMessages,
+				),
+				values: CONTEXT_POLICY_PRESERVE_RECENT_MESSAGES_VALUES,
+			},
+			{
+				id: "context-policy-min-chars",
+				label: "Minimum chars before stubbing",
+				description:
+					"Only stub a tool result whose original provider-visible text is at least this many characters",
+				currentValue: numberSettingValue(this.state.minChars, CONTEXT_POLICY_ENFORCEMENT_DEFAULTS.minChars),
+				values: CONTEXT_POLICY_MIN_CHARS_VALUES,
+			},
+		];
+
+		this.settingsList = new SettingsList(
+			items,
+			Math.min(items.length, 10),
+			getSettingsListTheme(),
+			(id, newValue) => {
+				switch (id) {
+					case "context-policy-scope":
+						this.scope = newValue as SettingsScope;
+						break;
+					case "context-policy-enabled":
+						this.state = { ...this.state, enabled: newValue === "true" };
+						break;
+					case "context-policy-preserve-recent-messages":
+						this.state = { ...this.state, preserveRecentMessages: parseInt(newValue, 10) };
+						break;
+					case "context-policy-min-chars":
+						this.state = { ...this.state, minChars: parseInt(newValue, 10) };
+						break;
+					default:
+						return;
+				}
+				onChange({ ...this.state }, this.scope);
+			},
+			onCancel,
+		);
+
+		this.addChild(this.settingsList);
+	}
+
+	handleInput(data: string): void {
+		this.settingsList.handleInput(data);
+	}
+}
+
 class ModelRouterSettingsSubmenu extends Container {
 	private settingsList: SettingsList;
 	private state: ModelRouterSettings;
@@ -1187,6 +1294,7 @@ export class SettingsSelectorComponent extends Container {
 		let currentAutonomy: AutonomySettings = { ...config.autonomy };
 		let currentModelRouter: ModelRouterSettings = { ...config.modelRouter };
 		let currentAutoLearn: AutoLearnSettings = { ...config.autoLearn };
+		let currentContextPolicyEnforcement: ContextPromptEnforcementSettings = { ...config.contextPolicyEnforcement };
 		const items: SettingItem[] = [
 			{
 				id: "autocompact",
@@ -1334,6 +1442,23 @@ export class SettingsSelectorComponent extends Container {
 						},
 						() => done(autoLearnSummary(currentAutoLearn)),
 						config.autoLearnScope ?? "global",
+					),
+			},
+			{
+				id: "context-policy-enforcement",
+				label: "Context / Prompt Policy",
+				description:
+					"Opt-in artifact-stub prompt-policy enforcement: stubs stale artifact-backed tool output in the model-visible prompt only, never the transcript. Requires the artifact_retrieve tool to be active.",
+				currentValue: contextPolicyEnforcementSummary(currentContextPolicyEnforcement),
+				submenu: (_currentValue, done) =>
+					new ContextPolicyEnforcementSettingsSubmenu(
+						currentContextPolicyEnforcement,
+						(settings, scope) => {
+							currentContextPolicyEnforcement = { ...settings };
+							callbacks.onContextPolicyEnforcementChange(settings, scope);
+						},
+						() => done(contextPolicyEnforcementSummary(currentContextPolicyEnforcement)),
+						config.contextPolicyEnforcementScope ?? "global",
 					),
 			},
 			{
