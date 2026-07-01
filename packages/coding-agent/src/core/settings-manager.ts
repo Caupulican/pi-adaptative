@@ -59,16 +59,20 @@ export interface ContextPromptEnforcementSettings {
 }
 
 /**
- * Observe-only local memory retrieval (see context/memory-retrieval.ts): when enabled,
- * each turn queries the local, read-only Pi OKF memory provider under
+ * Local memory retrieval (see context/memory-retrieval.ts, context/memory-prompt-block.ts):
+ * when `enabled`, each turn queries the local, read-only Pi OKF memory provider under
  * `<agentDir>/okf-memory` (fixed path, not user-configurable in this slice) and stores a
- * report of source-labeled evidence. Nothing here is ever injected into the provider-
- * visible prompt or transcript -- report-only. External/non-local providers are never
+ * report of source-labeled evidence. By default (`includeInPrompt` false) this is
+ * report-only -- nothing is injected into the provider-visible prompt or transcript. When
+ * `includeInPrompt` is also true, a single bounded, source-labeled, untrusted-content-
+ * wrapped evidence block is appended to the provider-visible prompt each turn (never
+ * written to the transcript/session history). External/non-local providers are never
  * constructed or queried by this setting.
  */
 export interface MemoryRetrievalSettings {
 	enabled?: boolean; // default: false -- no behavior change unless explicitly opted in
 	maxResults?: number; // default: 5, clamped to [1, 20]
+	includeInPrompt?: boolean; // default: false -- requires `enabled` too; report-only otherwise
 }
 
 export interface ContextPolicySettings {
@@ -2010,12 +2014,13 @@ export class SettingsManager {
 		this.save();
 	}
 
-	getMemoryRetrievalSettings(): { enabled: boolean; maxResults: number } {
+	getMemoryRetrievalSettings(): { enabled: boolean; maxResults: number; includeInPrompt: boolean } {
 		return {
 			enabled: this.settings.contextPolicy?.memory?.enabled ?? false,
 			maxResults: clampMemoryRetrievalMaxResults(
 				this.settings.contextPolicy?.memory?.maxResults ?? MEMORY_RETRIEVAL_MAX_RESULTS_DEFAULT,
 			),
+			includeInPrompt: this.settings.contextPolicy?.memory?.includeInPrompt ?? false,
 		};
 	}
 
@@ -2024,6 +2029,7 @@ export class SettingsManager {
 			enabled: settings.enabled,
 			maxResults:
 				settings.maxResults === undefined ? undefined : clampMemoryRetrievalMaxResults(settings.maxResults),
+			includeInPrompt: settings.includeInPrompt,
 		};
 		if (scope === "project") {
 			const projectSettings = structuredClone(this.projectSettings);

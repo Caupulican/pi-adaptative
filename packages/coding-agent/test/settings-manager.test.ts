@@ -622,7 +622,11 @@ describe("SettingsManager", () => {
 		it("defaults to disabled with the documented default maxResults", () => {
 			const manager = SettingsManager.create(projectDir, agentDir);
 
-			expect(manager.getMemoryRetrievalSettings()).toEqual({ enabled: false, maxResults: 5 });
+			expect(manager.getMemoryRetrievalSettings()).toEqual({
+				enabled: false,
+				maxResults: 5,
+				includeInPrompt: false,
+			});
 		});
 
 		it("should save global memory retrieval settings and read them back", async () => {
@@ -634,7 +638,11 @@ describe("SettingsManager", () => {
 
 			const savedSettings = JSON.parse(readFileSync(settingsPath, "utf-8"));
 			expect(savedSettings.contextPolicy).toEqual({ memory: { enabled: true, maxResults: 8 } });
-			expect(manager.getMemoryRetrievalSettings()).toEqual({ enabled: true, maxResults: 8 });
+			expect(manager.getMemoryRetrievalSettings()).toEqual({
+				enabled: true,
+				maxResults: 8,
+				includeInPrompt: false,
+			});
 		});
 
 		it("should save project scoped memory retrieval settings", async () => {
@@ -646,7 +654,11 @@ describe("SettingsManager", () => {
 
 			const savedSettings = JSON.parse(readFileSync(settingsPath, "utf-8"));
 			expect(savedSettings.contextPolicy).toEqual({ memory: { enabled: true, maxResults: 3 } });
-			expect(manager.getMemoryRetrievalSettings()).toEqual({ enabled: true, maxResults: 3 });
+			expect(manager.getMemoryRetrievalSettings()).toEqual({
+				enabled: true,
+				maxResults: 3,
+				includeInPrompt: false,
+			});
 		});
 
 		it("clamps maxResults to the documented [1, 20] range at both ends", async () => {
@@ -673,7 +685,11 @@ describe("SettingsManager", () => {
 			writeFileSync(settingsPath, JSON.stringify({ contextPolicy: { memory: { enabled: true, maxResults: 999 } } }));
 			const manager = SettingsManager.create(projectDir, agentDir);
 
-			expect(manager.getMemoryRetrievalSettings()).toEqual({ enabled: true, maxResults: 20 });
+			expect(manager.getMemoryRetrievalSettings()).toEqual({
+				enabled: true,
+				maxResults: 20,
+				includeInPrompt: false,
+			});
 		});
 
 		it("preserves an existing sibling key under global contextPolicy when saving memory retrieval settings", async () => {
@@ -726,6 +742,68 @@ describe("SettingsManager", () => {
 				minChars: 600,
 			});
 			expect(savedAfterMemoryChange.contextPolicy.memory).toEqual({ enabled: false, maxResults: 3 });
+		});
+
+		it("defaults includeInPrompt to false", () => {
+			const manager = SettingsManager.create(projectDir, agentDir);
+			expect(manager.getMemoryRetrievalSettings().includeInPrompt).toBe(false);
+		});
+
+		it("should save and read back includeInPrompt globally", async () => {
+			const settingsPath = join(agentDir, "settings.json");
+			const manager = SettingsManager.create(projectDir, agentDir);
+
+			manager.setMemoryRetrievalSettings({ enabled: true, maxResults: 5, includeInPrompt: true });
+			await manager.flush();
+
+			const savedSettings = JSON.parse(readFileSync(settingsPath, "utf-8"));
+			expect(savedSettings.contextPolicy.memory).toEqual({ enabled: true, maxResults: 5, includeInPrompt: true });
+			expect(manager.getMemoryRetrievalSettings()).toEqual({
+				enabled: true,
+				maxResults: 5,
+				includeInPrompt: true,
+			});
+		});
+
+		it("should save and read back includeInPrompt project-scoped", async () => {
+			const settingsPath = join(projectDir, ".pi", "settings.json");
+			const manager = SettingsManager.create(projectDir, agentDir);
+
+			manager.setMemoryRetrievalSettings({ enabled: true, maxResults: 5, includeInPrompt: true }, "project");
+			await manager.flush();
+
+			const savedSettings = JSON.parse(readFileSync(settingsPath, "utf-8"));
+			expect(savedSettings.contextPolicy.memory).toEqual({ enabled: true, maxResults: 5, includeInPrompt: true });
+			expect(manager.getMemoryRetrievalSettings()).toEqual({
+				enabled: true,
+				maxResults: 5,
+				includeInPrompt: true,
+			});
+		});
+
+		it("preserves enabled/maxResults when only includeInPrompt changes, and preserves enforcement settings too", async () => {
+			const settingsPath = join(agentDir, "settings.json");
+			const manager = SettingsManager.create(projectDir, agentDir);
+
+			manager.setContextPromptEnforcementSettings({ enabled: true, preserveRecentMessages: 4, minChars: 600 });
+			manager.setMemoryRetrievalSettings({ enabled: true, maxResults: 8, includeInPrompt: false });
+			await manager.flush();
+
+			manager.setMemoryRetrievalSettings({ enabled: true, maxResults: 8, includeInPrompt: true });
+			await manager.flush();
+
+			const savedSettings = JSON.parse(readFileSync(settingsPath, "utf-8"));
+			expect(savedSettings.contextPolicy.memory).toEqual({ enabled: true, maxResults: 8, includeInPrompt: true });
+			expect(savedSettings.contextPolicy.enforcement).toEqual({
+				enabled: true,
+				preserveRecentMessages: 4,
+				minChars: 600,
+			});
+			expect(manager.getMemoryRetrievalSettings()).toEqual({
+				enabled: true,
+				maxResults: 8,
+				includeInPrompt: true,
+			});
 		});
 	});
 

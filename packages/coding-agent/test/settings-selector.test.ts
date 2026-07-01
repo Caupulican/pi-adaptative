@@ -392,6 +392,52 @@ describe("settings selector", () => {
 		expect(output).not.toContain("rootDir");
 	});
 
+	it("exposes the Include in prompt toggle in the memory-retrieval submenu", () => {
+		const selector = new SettingsSelectorComponent(
+			makeConfig({ contextMemoryRetrieval: { enabled: true, maxResults: 5, includeInPrompt: true } }),
+			makeCallbacks(),
+		);
+
+		selector.getSettingsList().handleInput("memory retrieval");
+		const topLevelOutput = selector.render(180).join("\n");
+		expect(topLevelOutput).toContain("enabled (max 5 results, in prompt)");
+
+		selector.getSettingsList().handleInput("\r");
+		const output = selector.render(180).join("\n");
+		expect(output).toContain("Include in prompt");
+
+		// The "requires retrieval enabled, never the transcript" note lives in this item's
+		// description, shown when it's selected.
+		selector.getSettingsList().handleInput("\x1b[B");
+		selector.getSettingsList().handleInput("\x1b[B");
+		selector.getSettingsList().handleInput("\x1b[B");
+		const includeItemOutput = selector.render(180).join("\n");
+		// The description may line-wrap in the rendered output, so check substrings that
+		// survive wrapping rather than the exact phrase.
+		expect(includeItemOutput).toContain("transcript");
+		expect(includeItemOutput).toContain("untrusted-evidence");
+	});
+
+	it("persists toggling Include in prompt on from its submenu", () => {
+		const onContextMemoryRetrievalChange = vi.fn();
+		const selector = new SettingsSelectorComponent(
+			makeConfig({ contextMemoryRetrieval: { enabled: true, maxResults: 5, includeInPrompt: false } }),
+			makeCallbacks({ onContextMemoryRetrievalChange }),
+		);
+
+		selector.getSettingsList().handleInput("memory retrieval");
+		selector.getSettingsList().handleInput("\r"); // open submenu
+		selector.getSettingsList().handleInput("\x1b[B"); // down to "Local memory retrieval"
+		selector.getSettingsList().handleInput("\x1b[B"); // down to "Max results"
+		selector.getSettingsList().handleInput("\x1b[B"); // down to "Include in prompt"
+		selector.getSettingsList().handleInput("\r"); // cycle false -> true
+
+		expect(onContextMemoryRetrievalChange).toHaveBeenCalledWith(
+			{ enabled: true, maxResults: 5, includeInPrompt: true },
+			"global",
+		);
+	});
+
 	it("exposes configurable model router settings together in the searchable settings TUI", () => {
 		const selector = new SettingsSelectorComponent(
 			makeConfig({

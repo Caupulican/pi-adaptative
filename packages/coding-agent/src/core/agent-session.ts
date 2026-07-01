@@ -82,6 +82,7 @@ import {
 	type PromptPolicyShadowReport,
 	planPromptPolicy,
 } from "./context/context-prompt-policy.ts";
+import { buildMemoryPromptBlock } from "./context/memory-prompt-block.ts";
 import {
 	type MemoryProvider as ContextMemoryProvider,
 	DEFAULT_LOCAL_MEMORY_EGRESS_POLICY,
@@ -797,11 +798,16 @@ export class AgentSession {
 			}
 			const auditReport = this._runContextAudit(finalMessages);
 			const shadowReport = this._runPromptPolicyPlanning(auditReport);
-			await this._runMemoryRetrieval(finalMessages);
+			const memoryReport = await this._runMemoryRetrieval(finalMessages);
 			const gcResult = this._applyContextGc(finalMessages, true);
 			this._correlatePromptPolicyWithContextGc(gcResult.report);
 			const enforcementResult = this._runPromptEnforcement(gcResult.messages, shadowReport);
-			const gcMessages = enforcementResult.messages;
+			// Appended LAST, after gc and enforcement, so the bounded evidence block is
+			// never packed/stubbed/reshaped by either pass and always reflects this turn's
+			// fresh retrieval. Because nothing downstream trims it, memory-prompt-block.ts's
+			// character caps are the only budget protection for this block -- load-bearing,
+			// not merely defensive.
+			const gcMessages = this._maybeAppendMemoryEvidenceBlock(enforcementResult.messages, memoryReport);
 			this._applyCostGuard(gcMessages);
 			return gcMessages;
 		};
@@ -1138,6 +1144,44 @@ export class AgentSession {
 	/** Read-only inspection of the latest memory-retrieval report, for tests/debugging. */
 	getMemoryRetrievalReport(): MemoryRetrievalReport {
 		return this._latestMemoryRetrievalReport ?? emptyMemoryRetrievalReport(0);
+	}
+
+	/**
+	 * Bounded prompt-surfacing pilot for local memory evidence (see
+	 * context/memory-prompt-block.ts): opt-in, default disabled, and gated on TWO settings
+	 * (`enabled` AND `includeInPrompt`) plus a non-empty `report.contextItems` -- the first
+	 * two are belt-and-suspenders on top of the fact that `_runMemoryRetrieval` already
+	 * leaves `contextItems` empty whenever `enabled` is false, regardless of
+	 * `includeInPrompt`. Reuses the `report` this pass's `_runMemoryRetrieval` call already
+	 * computed -- never re-queries the provider here.
+	 *
+	 * Appends exactly one ephemeral `custom`/"memory_evidence" message wrapped by
+	 * `wrapUntrustedText` (the same nonce-fenced boundary + always-on system-prompt rule
+	 * used for other untrusted content) to the END of `messages`. This is purely additive
+	 * (never mutates an existing message) and purely transient: `messages` here is the
+	 * array about to be sent to the provider, not `this.agent.state.messages` or anything
+	 * persisted via `sessionManager` -- so the injected message can never reach the
+	 * transcript, regardless of how many times this pass runs.
+	 */
+	private _maybeAppendMemoryEvidenceBlock(messages: AgentMessage[], report: MemoryRetrievalReport): AgentMessage[] {
+		try {
+			const settings = this.settingsManager.getMemoryRetrievalSettings();
+			if (!settings.enabled || !settings.includeInPrompt || report.contextItems.length === 0) return messages;
+
+			const block = buildMemoryPromptBlock(report.contextItems);
+			if (!block.text) return messages;
+
+			const evidenceMessage: CustomMessage = {
+				role: "custom",
+				customType: "memory_evidence",
+				content: [{ type: "text", text: wrapUntrustedText(block.text, "memory:pi-okf") }],
+				display: false,
+				timestamp: Date.now(),
+			};
+			return [...messages, evidenceMessage];
+		} catch {
+			return messages;
+		}
 	}
 
 	private _applyContextGc(

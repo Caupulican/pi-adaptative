@@ -73,6 +73,7 @@ const CONTEXT_MEMORY_RETRIEVAL_MAX_RESULTS_VALUES = ["1", "3", "5", "10", "20"];
 const CONTEXT_MEMORY_RETRIEVAL_DEFAULTS = {
 	enabled: false,
 	maxResults: 5,
+	includeInPrompt: false,
 } as const;
 
 const AUTO_LEARN_DEFAULTS = {
@@ -165,7 +166,8 @@ function contextPolicyEnforcementSummary(settings: ContextPromptEnforcementSetti
 function contextMemoryRetrievalSummary(settings: MemoryRetrievalSettings): string {
 	if (!(settings.enabled ?? CONTEXT_MEMORY_RETRIEVAL_DEFAULTS.enabled)) return "disabled";
 	const maxResults = settings.maxResults ?? CONTEXT_MEMORY_RETRIEVAL_DEFAULTS.maxResults;
-	return `enabled (max ${maxResults} results)`;
+	const includeInPrompt = settings.includeInPrompt ?? CONTEXT_MEMORY_RETRIEVAL_DEFAULTS.includeInPrompt;
+	return `enabled (max ${maxResults} results${includeInPrompt ? ", in prompt" : ""})`;
 }
 
 function modelRouterSummary(settings: ModelRouterSettings): string {
@@ -997,7 +999,7 @@ class ContextMemoryRetrievalSettingsSubmenu extends Container {
 				id: "context-memory-enabled",
 				label: "Local memory retrieval",
 				description:
-					"Opt-in, observe-only: each turn, search local Pi OKF memory documents (under <agent dir>/okf-memory) for evidence related to the latest message. Results are recorded for inspection only -- nothing is added to the model-visible prompt or transcript yet. Local-only; never queries an external provider.",
+					"Opt-in: each turn, search local Pi OKF memory documents (under <agent dir>/okf-memory) for evidence related to the latest message. By default this is observe-only (recorded for inspection only). Enable 'Include in prompt' below to also surface a bounded, source-labeled evidence block to the model. Local-only; never queries an external provider.",
 				currentValue: booleanSettingValue(this.state.enabled, CONTEXT_MEMORY_RETRIEVAL_DEFAULTS.enabled),
 				values: ["false", "true"],
 			},
@@ -1007,6 +1009,17 @@ class ContextMemoryRetrievalSettingsSubmenu extends Container {
 				description: "Maximum number of memory items to retrieve per query (1-20)",
 				currentValue: numberSettingValue(this.state.maxResults, CONTEXT_MEMORY_RETRIEVAL_DEFAULTS.maxResults),
 				values: CONTEXT_MEMORY_RETRIEVAL_MAX_RESULTS_VALUES,
+			},
+			{
+				id: "context-memory-include-in-prompt",
+				label: "Include in prompt",
+				description:
+					"Opt-in, requires 'Local memory retrieval' enabled above: surfaces retrieved memory as a bounded, source-labeled, untrusted-evidence block in the model prompt only -- never the transcript, never treated as an instruction or rule. Default off.",
+				currentValue: booleanSettingValue(
+					this.state.includeInPrompt,
+					CONTEXT_MEMORY_RETRIEVAL_DEFAULTS.includeInPrompt,
+				),
+				values: ["false", "true"],
 			},
 		];
 
@@ -1024,6 +1037,9 @@ class ContextMemoryRetrievalSettingsSubmenu extends Container {
 						break;
 					case "context-memory-max-results":
 						this.state = { ...this.state, maxResults: parseInt(newValue, 10) };
+						break;
+					case "context-memory-include-in-prompt":
+						this.state = { ...this.state, includeInPrompt: newValue === "true" };
 						break;
 					default:
 						return;
@@ -1556,7 +1572,7 @@ export class SettingsSelectorComponent extends Container {
 				id: "context-memory-retrieval",
 				label: "Context / Memory Retrieval",
 				description:
-					"Opt-in, observe-only local memory retrieval: searches local Pi OKF memory documents each turn and records source-labeled evidence for inspection. Never injects results into the model-visible prompt yet, and never queries an external provider.",
+					"Opt-in local memory retrieval: searches local Pi OKF memory documents each turn and records source-labeled evidence for inspection. Prompt inclusion is off by default and only occurs when 'Include in prompt' is enabled. Never queries an external provider.",
 				currentValue: contextMemoryRetrievalSummary(currentContextMemoryRetrieval),
 				submenu: (_currentValue, done) =>
 					new ContextMemoryRetrievalSettingsSubmenu(
