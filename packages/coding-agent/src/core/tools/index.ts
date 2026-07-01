@@ -1,4 +1,11 @@
 export {
+	type ArtifactRetrieveToolDetails,
+	type ArtifactRetrieveToolInput,
+	type ArtifactRetrieveToolOptions,
+	createArtifactRetrieveTool,
+	createArtifactRetrieveToolDefinition,
+} from "./artifact-retrieve.ts";
+export {
 	type BashOperations,
 	type BashSpawnContext,
 	type BashSpawnHook,
@@ -96,6 +103,11 @@ export {
 
 import type { AgentTool } from "@caupulican/pi-agent-core";
 import type { ToolDefinition } from "../extensions/types.ts";
+import {
+	type ArtifactRetrieveToolOptions,
+	createArtifactRetrieveTool,
+	createArtifactRetrieveToolDefinition,
+} from "./artifact-retrieve.ts";
 import { type BashToolOptions, createBashTool, createBashToolDefinition } from "./bash.ts";
 import { createEditTool, createEditToolDefinition, type EditToolOptions } from "./edit.ts";
 import {
@@ -123,7 +135,8 @@ export type ToolName =
 	| "ls"
 	| "skill_audit"
 	| "skillify"
-	| "extensionify";
+	| "extensionify"
+	| "artifact_retrieve";
 export const allToolNames: Set<ToolName> = new Set([
 	"read",
 	"bash",
@@ -135,6 +148,7 @@ export const allToolNames: Set<ToolName> = new Set([
 	"skill_audit",
 	"skillify",
 	"extensionify",
+	"artifact_retrieve",
 ]);
 
 export interface ToolsOptions {
@@ -148,6 +162,7 @@ export interface ToolsOptions {
 	skill_audit?: SkillAuditToolOptions;
 	skillify?: SkillifyToolOptions;
 	extensionify?: ExtensionifyToolOptions;
+	artifact_retrieve?: ArtifactRetrieveToolOptions;
 }
 
 export function createToolDefinition(toolName: ToolName, cwd: string, options?: ToolsOptions): ToolDef {
@@ -172,6 +187,8 @@ export function createToolDefinition(toolName: ToolName, cwd: string, options?: 
 			return createSkillifyToolDefinition(cwd, options?.skillify);
 		case "extensionify":
 			return createExtensionifyToolDefinition(cwd, options?.extensionify);
+		case "artifact_retrieve":
+			return createArtifactRetrieveToolDefinition(cwd, options?.artifact_retrieve);
 		default:
 			throw new Error(`Unknown tool name: ${toolName}`);
 	}
@@ -199,6 +216,8 @@ export function createTool(toolName: ToolName, cwd: string, options?: ToolsOptio
 			return createSkillifyTool(cwd, options?.skillify);
 		case "extensionify":
 			return createExtensionifyTool(cwd, options?.extensionify);
+		case "artifact_retrieve":
+			return createArtifactRetrieveTool(cwd, options?.artifact_retrieve);
 		default:
 			throw new Error(`Unknown tool name: ${toolName}`);
 	}
@@ -234,6 +253,7 @@ export function createAllToolDefinitions(cwd: string, options?: ToolsOptions): R
 		skill_audit: createSkillAuditToolDefinition(cwd, options?.skill_audit),
 		skillify: createSkillifyToolDefinition(cwd, options?.skillify),
 		extensionify: createExtensionifyToolDefinition(cwd, options?.extensionify),
+		artifact_retrieve: createArtifactRetrieveToolDefinition(cwd, options?.artifact_retrieve),
 	};
 }
 
@@ -267,5 +287,6 @@ export function createAllTools(cwd: string, options?: ToolsOptions): Record<Tool
 		skill_audit: createSkillAuditTool(cwd, options?.skill_audit),
 		skillify: createSkillifyTool(cwd, options?.skillify),
 		extensionify: createExtensionifyTool(cwd, options?.extensionify),
+		artifact_retrieve: createArtifactRetrieveTool(cwd, options?.artifact_retrieve),
 	};
 }

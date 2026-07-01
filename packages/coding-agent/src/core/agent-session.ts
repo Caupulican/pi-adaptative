@@ -73,6 +73,8 @@ import {
 	prepareCompaction,
 	shouldCompact,
 } from "./compaction/index.ts";
+import { type ArtifactStore, createFileArtifactStore } from "./context/context-artifacts.ts";
+import { type ContextAuditReport, runContextAudit } from "./context/context-audit.ts";
 import { applyContextGc, type ContextGcReport } from "./context-gc.ts";
 import {
 	aggregateDailyUsageFromSessionFiles,
@@ -479,6 +481,15 @@ function persistModelRouterDecision(
 	sessionManager.appendCustomEntry(MODEL_ROUTER_DECISION_CUSTOM_TYPE, decision);
 }
 
+/** Read a packed grep/find tool result's `details.artifactId`, if present, without `any`. */
+function extractArtifactId(message: AgentMessage | undefined): string | undefined {
+	if (!message || message.role !== "toolResult") return undefined;
+	const details = (message as { details?: unknown }).details;
+	if (typeof details !== "object" || details === null) return undefined;
+	const artifactId = (details as { artifactId?: unknown }).artifactId;
+	return typeof artifactId === "string" ? artifactId : undefined;
+}
+
 export class AgentSession {
 	readonly agent: Agent;
 	readonly sessionManager: SessionManager;
@@ -512,6 +523,8 @@ export class AgentSession {
 	private _autoCompactionAbortController: AbortController | undefined = undefined;
 	private _overflowRecoveryAttempted = false;
 	private _latestContextGcReport: ContextGcReport | undefined = undefined;
+	private _toolArtifactStore: ArtifactStore | undefined = undefined;
+	private _latestContextAuditReport: ContextAuditReport | undefined = undefined;
 
 	// Branch summarization state
 	private _branchSummaryAbortController: AbortController | undefined = undefined;
@@ -740,6 +753,7 @@ export class AgentSession {
 			if (this._extensionRunner.hasHandlers("context")) {
 				finalMessages = await this._extensionRunner.emitContext(currentMessages);
 			}
+			this._runContextAudit(finalMessages);
 			const gcMessages = this._applyContextGc(finalMessages, true).messages;
 			this._applyCostGuard(gcMessages);
 			return gcMessages;
@@ -853,6 +867,83 @@ export class AgentSession {
 		return join(this._agentDir, "context-gc", this.sessionManager.getSessionId());
 	}
 
+	private _toolArtifactsDir(): string {
+		return join(this._agentDir, "context-artifacts", this.sessionManager.getSessionId());
+	}
+
+	/**
+	 * Session-scoped, filesystem-backed artifact store for first-capture-then-bound tool
+	 * output (grep/find only, for now -- see tool-output-artifacts.md). Lazily created and
+	 * cached so every tool construction in this session shares one store instance.
+	 *
+	 * `packToolOutput()` registers a reference (the packing tool call's id) at pack time
+	 * and fails closed, so packed artifacts are never prematurely collected.
+	 * `_releaseGcPackedArtifactReferences()` (called from `_applyContextGc()`) releases
+	 * that reference once context-gc packs the result out of live context, and
+	 * opportunistically reclaims now-unreferenced artifacts via `cleanup()`.
+	 * Remaining carry-forward gap: cleanup() now also runs at dispose(), but only reclaims
+	 * already-released (zero-reference) artifacts. A session that ends before context-gc
+	 * ever evicts a result never releases that reference, so its artifact stays on disk by
+	 * design (resolvable on resume). Reclaiming those requires an explicit cross-session
+	 * expiry/liveness policy, not just a sweep.
+	 */
+	private _getToolArtifactStore(): ArtifactStore {
+		this._toolArtifactStore ??= createFileArtifactStore({ baseDir: this._toolArtifactsDir() });
+		return this._toolArtifactStore;
+	}
+
+	/**
+	 * One pass over the current branch, mapping each toolResult's toolCallId to its
+	 * persisted session-entry id. Rebuilt every audit pass (O(branch) per turn), so this is
+	 * O(n^2) over a long session. Fine at current scale; after the artifact-read fix this is
+	 * the next per-turn audit cost to optimize if it ever matters (e.g. cache/incrementally
+	 * update instead of a full rebuild).
+	 */
+	private _buildSessionEntryIdLookup(): (toolCallId: string) => string | undefined {
+		const map = new Map<string, string>();
+		for (const entry of this.sessionManager.getBranch()) {
+			if (entry.type === "message" && entry.message.role === "toolResult") {
+				map.set(entry.message.toolCallId, entry.id);
+			}
+		}
+		return (toolCallId: string) => map.get(toolCallId);
+	}
+
+	/**
+	 * Phase 1 observe-only audit pass (see context/context-audit.ts): converts live
+	 * toolResult messages into ContextItems and runs the existing retention/hard-constraint
+	 * evaluators over them, storing the latest deterministic report for tests/debugging.
+	 * Read-only with respect to messages, the transcript, and artifact references -- uses
+	 * `_toolArtifactStore` (the field), not `_getToolArtifactStore()` (the getter), so a
+	 * session that never packed anything doesn't force-create a store/dir just to audit.
+	 * Never throws into a live turn: any failure degrades to an empty report.
+	 */
+	private _runContextAudit(messages: AgentMessage[]): ContextAuditReport {
+		try {
+			const report = runContextAudit(messages, {
+				turnIndex: this._turnIndex,
+				artifactStore: this._toolArtifactStore,
+				sessionEntryIdForToolCallId: this._buildSessionEntryIdLookup(),
+			});
+			this._latestContextAuditReport = report;
+			return report;
+		} catch {
+			const report: ContextAuditReport = { turnIndex: this._turnIndex, items: [] };
+			this._latestContextAuditReport = report;
+			return report;
+		}
+	}
+
+	/**
+	 * Read-only inspection of the context audit. With `messages`, recomputes fresh against
+	 * the given array (still no mutation of messages/transcript/artifact refs); without,
+	 * returns the last report computed during a real transform pass.
+	 */
+	getContextAuditReport(messages?: AgentMessage[]): ContextAuditReport {
+		if (messages) return this._runContextAudit(messages);
+		return this._latestContextAuditReport ?? { turnIndex: this._turnIndex, items: [] };
+	}
+
 	private _applyContextGc(
 		messages: AgentMessage[],
 		writePayloads: boolean,
@@ -865,6 +956,12 @@ export class AgentSession {
 				writePayloads,
 			});
 			this._latestContextGcReport = result.report;
+			// Only release/reclaim on the real per-turn pass (writePayloads=true), never on
+			// the read-only status-report path (getContextGcReport with writePayloads=false),
+			// so merely inspecting the report can't have side effects.
+			if (writePayloads && result.report.packedCount > 0) {
+				this._releaseGcPackedArtifactReferences(messages, result.report);
+			}
 			return result;
 		} catch {
 			const report: ContextGcReport = {
@@ -878,6 +975,36 @@ export class AgentSession {
 			this._latestContextGcReport = report;
 			return { messages, report };
 		}
+	}
+
+	/**
+	 * Reference-release + cleanup lifecycle: once context-gc has packed a grep/find tool
+	 * result out of the live prompt (the message is no longer current/active working
+	 * context -- see contracts-and-retention.md's "ephemeral"/"expired" retention
+	 * classes), release the pack-time reference `packToolOutput()` registered for it, and
+	 * opportunistically reclaim now-unreferenced artifacts. This is the other half of the
+	 * D2b-1 gate: artifacts were being registered but never released, so they accumulated
+	 * for the life of the session.
+	 *
+	 * `record.toolCallId` (from context-gc's packed record) is exactly the holder id
+	 * `packToolOutput()` used when it called `addReference()` -- both trace back to the
+	 * same tool call's id -- so no separate bookkeeping is needed to find it.
+	 */
+	private _releaseGcPackedArtifactReferences(messages: AgentMessage[], report: ContextGcReport): void {
+		const store = this._toolArtifactStore;
+		if (!store) return; // no store was ever constructed, so nothing could have been packed to one
+
+		let releasedAny = false;
+		for (const record of report.records) {
+			if (record.toolName !== "grep" && record.toolName !== "find") continue;
+			const artifactId = extractArtifactId(messages[record.messageIndex]);
+			if (!artifactId) continue;
+			if (store.removeReference(artifactId, record.toolCallId)) releasedAny = true;
+		}
+		// Cleanup only runs immediately after a release actually happened in this pass, so
+		// a long session doesn't re-scan the artifact directory on every turn once nothing
+		// new became eligible for release.
+		if (releasedAny) store.cleanup();
 	}
 
 	getContextGcReport(messages?: AgentMessage[]): ContextGcReport {
@@ -1352,6 +1479,18 @@ export class AgentSession {
 		// true session-end hook (P3); file-store shutdown is a no-op.
 		void this._memoryManager.shutdownAll().catch(() => {});
 		cleanupSessionResources(this.sessionId);
+		// Best-effort final sweep for any grep/find artifact already released (reference
+		// count zero) but not yet reclaimed -- e.g. a release whose cleanup() call failed
+		// transiently. This is conservative: it never releases a still-referenced
+		// artifact, so a session that ends before context-gc ever evicts a result (too
+		// short to cross preserveRecentMessages) correctly leaves that artifact in place,
+		// resolvable if the same session is resumed later. It does not sweep OTHER
+		// sessions' artifact directories.
+		try {
+			this._toolArtifactStore?.cleanup();
+		} catch {
+			// Best-effort; dispose must succeed regardless.
+		}
 	}
 
 	// =========================================================================
@@ -1418,17 +1557,37 @@ export class AgentSession {
 	 * Only tools in the registry can be enabled. Unknown tool names are ignored.
 	 * Also rebuilds the system prompt to reflect the new tool set.
 	 * Changes take effect on the next agent turn.
+	 *
+	 * artifact_retrieve is auto-activated as a companion whenever grep or find ends up
+	 * in the resulting active set and artifact_retrieve is registered (i.e. not excluded/
+	 * blocked/outside an allowlist -- the registry itself is built with that same filter,
+	 * so registry presence already tracks "allowed"). This is enforced here, not just in
+	 * the settings/profile refresh flow, because this method is a public, extension-
+	 * exposed activation path (`setActiveTools`) on its own: without this, grep/find could
+	 * end up active while still being handed an artifact store (gated on "allowed" in
+	 * `_buildRuntime`) with no active tool able to resolve the resulting
+	 * "Full output: artifact tool-output:<id>" handle.
 	 */
 	setActiveToolsByName(toolNames: string[]): void {
 		const tools: AgentTool[] = [];
 		const validToolNames: string[] = [];
-		for (const name of toolNames) {
+		const seen = new Set<string>();
+		const addIfRegistered = (name: string): void => {
+			if (seen.has(name)) return;
 			const tool = this._toolRegistry.get(name);
-			if (tool) {
-				tools.push(tool);
-				validToolNames.push(name);
-			}
+			if (!tool) return;
+			seen.add(name);
+			tools.push(tool);
+			validToolNames.push(name);
+		};
+
+		for (const name of toolNames) {
+			addIfRegistered(name);
 		}
+		if (validToolNames.includes("grep") || validToolNames.includes("find")) {
+			addIfRegistered("artifact_retrieve");
+		}
+
 		this.agent.state.tools = tools;
 
 		// Rebuild base system prompt with new tool set
@@ -3719,6 +3878,10 @@ export class AgentSession {
 			}
 		}
 
+		// artifact_retrieve companion auto-activation is enforced inside
+		// setActiveToolsByName() itself (not duplicated here), so every activation path --
+		// including the public, extension-exposed setActiveTools() -- gets the same
+		// guarantee, not just this settings/profile refresh flow.
 		this.setActiveToolsByName([...new Set(nextActiveToolNames)]);
 	}
 
@@ -3787,6 +3950,14 @@ export class AgentSession {
 		const autoResizeImages = this.settingsManager.getImageAutoResize();
 		const shellCommandPrefix = this.settingsManager.getShellCommandPrefix();
 		const shellPath = this.settingsManager.getShellPath();
+		// grep/find must not emit a "Full output: artifact tool-output:<id>" handle that
+		// nothing can resolve. If artifact_retrieve is explicitly excluded/blocked/outside
+		// an active allowlist, don't hand grep/find an artifact store at all: they fall
+		// back to their pre-existing bounded preview/truncation behavior, with no
+		// payload/meta files ever written and no retrieval promise made.
+		const toolArtifactStore = this._isToolOrCommandAllowedByProfile("artifact_retrieve")
+			? this._getToolArtifactStore()
+			: undefined;
 		const baseToolDefinitions = this._baseToolsOverride
 			? Object.fromEntries(
 					Object.entries(this._baseToolsOverride).map(([name, tool]) => [
@@ -3797,6 +3968,9 @@ export class AgentSession {
 			: createAllToolDefinitions(this._cwd, {
 					read: { autoResizeImages },
 					bash: { commandPrefix: shellCommandPrefix, shellPath },
+					grep: { artifactStore: toolArtifactStore },
+					find: { artifactStore: toolArtifactStore },
+					artifact_retrieve: { artifactStore: toolArtifactStore },
 				});
 
 		this._baseToolDefinitions = new Map(

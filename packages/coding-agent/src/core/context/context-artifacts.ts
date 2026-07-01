@@ -6,11 +6,12 @@
  * storage-authority/location/concurrency decisions are accepted (see
  * docs/context-management-rework/memory-architecture.md).
  *
- * `createFileArtifactStore` and `createInMemoryArtifactStore` are the two ArtifactStore
- * implementations this module defines. Live wiring (grep/find capture, reference
- * lifecycle release/cleanup, and retrieval via the artifact_retrieve tool) is layered on
- * top by AgentSession and tool construction in later commits -- this file only defines the
- * storage abstraction itself.
+ * `createFileArtifactStore` is wired into live grep/find tool construction in
+ * agent-session.ts (session-scoped under `<agentDir>/context-artifacts/<sessionId>/`).
+ * References are registered at pack time and released when context-gc evicts the
+ * corresponding grep/find tool result (opportunistic, conservative cleanup), with a
+ * best-effort dispose-time sweep for zero-reference artifacts. Payloads are retrievable
+ * out of band via the artifact_retrieve tool (context/artifact-retrieval.ts).
  */
 
 import { createHash } from "node:crypto";
