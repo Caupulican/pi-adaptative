@@ -1,9 +1,9 @@
 /**
- * Storage authority/rebuildability metadata for future SQLite table design (Phase M0/M3).
+ * Storage authority/rebuildability metadata for SQLite runtime-index table design (Phase M0/M3).
  *
- * No SQLite implementation exists yet. This module only records, per prospective table,
- * whether its rows are the only copy of something (canonical_local_state), rebuildable
- * from another canonical source (derived_rebuildable), disposable performance data
+ * This module records, per runtime-index table, whether its rows are the only copy of
+ * something (canonical_local_state), rebuildable from another canonical source
+ * (derived_rebuildable), disposable performance data
  * (runtime_cache_disposable), or audit/calibration telemetry whose loss does not affect
  * current task truth (append_only_telemetry). Per memory-architecture.md: cleanup and
  * prompt safety must never depend only on disposable/derived rows.

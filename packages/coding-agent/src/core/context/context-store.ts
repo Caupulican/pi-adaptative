@@ -2,10 +2,10 @@
  * Context store abstraction (Phase 2): the operational index for context item metadata,
  * retention/policy decisions, and retrieval records. Per memory-architecture.md, this is
  * an index/state/cache layer, not the sole audit source — transcript and artifacts remain
- * canonical. An in-memory implementation is provided for tests; SQLite waits on the Phase
- * M0 storage-authority/location/concurrency decisions.
+ * canonical. An in-memory implementation is provided for tests; sqlite-runtime-index.ts
+ * provides an explicit SQLite implementation for callers that opt into it.
  *
- * Nothing here is wired into session persistence or prompt construction yet.
+ * Nothing here is wired into session persistence or prompt construction by default yet.
  */
 
 import type { ContextItem } from "./context-item.ts";
