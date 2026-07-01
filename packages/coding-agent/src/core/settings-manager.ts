@@ -210,6 +210,22 @@ export interface ResearchLaneSettings {
 export type ResolvedResearchLaneSettings = Required<Omit<ResearchLaneSettings, "model">> &
 	Pick<ResearchLaneSettings, "model">;
 
+export const DEFAULT_WORKER_DELEGATION_ENABLED = false;
+export const DEFAULT_WORKER_DELEGATION_MAX_USD = 0.5;
+export const DEFAULT_WORKER_DELEGATION_MAX_WALL_CLOCK_MS = 120_000;
+export const MAX_WORKER_DELEGATION_MAX_USD = 5;
+export const MAX_WORKER_DELEGATION_MAX_WALL_CLOCK_MS = 3_600_000;
+
+export interface WorkerDelegationSettings {
+	enabled?: boolean; // default: false — the delegate tool refuses (with a reason) until enabled
+	model?: string; // model pattern; unset falls back to modelRouter.cheapModel, then the session model
+	maxUsd?: number; // default: 0.50 per delegated worker; post-hoc breaches mark the lane budget_exhausted
+	maxWallClockMs?: number; // default: 120000; 0 disables the wall-clock budget
+}
+
+export type ResolvedWorkerDelegationSettings = Required<Omit<WorkerDelegationSettings, "model">> &
+	Pick<WorkerDelegationSettings, "model">;
+
 export type TransportSetting = Transport;
 
 /**
@@ -300,6 +316,7 @@ export interface Settings {
 	selfModification?: SelfModificationSettings; // Local guardrails for modifying the pi-adaptative source/harness
 	autonomy?: AutonomySettings; // Low-config autonomy preset controlling background learning/reflection defaults
 	researchLane?: ResearchLaneSettings; // Opt-in autonomous read-only research lane producing evidence bundles
+	workerDelegation?: WorkerDelegationSettings; // Opt-in bounded scout-worker delegation via the delegate tool
 	modelRouter?: ModelRouterSettings; // Opt-in deterministic cheap/expensive model routing foundation
 	autoLearn?: AutoLearnSettings; // Setting-gated autonomous background learning for long sessions
 	sessionDir?: string; // Custom session storage directory (same format as --session-dir CLI flag)
@@ -2608,6 +2625,44 @@ export class SettingsManager {
 
 		this.globalSettings.researchLane = { ...settings };
 		this.markModified("researchLane");
+		this.save();
+	}
+
+	getWorkerDelegationSettings(): ResolvedWorkerDelegationSettings {
+		const configured = this.settings.workerDelegation ?? {};
+
+		const resolved: ResolvedWorkerDelegationSettings = {
+			enabled: typeof configured.enabled === "boolean" ? configured.enabled : DEFAULT_WORKER_DELEGATION_ENABLED,
+			maxUsd: sanitizeNumberSetting(
+				configured.maxUsd,
+				DEFAULT_WORKER_DELEGATION_MAX_USD,
+				0,
+				MAX_WORKER_DELEGATION_MAX_USD,
+			),
+			maxWallClockMs: sanitizeIntegerSetting(
+				configured.maxWallClockMs,
+				DEFAULT_WORKER_DELEGATION_MAX_WALL_CLOCK_MS,
+				0,
+				MAX_WORKER_DELEGATION_MAX_WALL_CLOCK_MS,
+			),
+		};
+		if (typeof configured.model === "string" && configured.model.trim().length > 0) {
+			resolved.model = configured.model;
+		}
+		return resolved;
+	}
+
+	setWorkerDelegationSettings(settings: WorkerDelegationSettings, scope: SettingsScope = "global"): void {
+		if (scope === "project") {
+			const projectSettings = structuredClone(this.projectSettings);
+			projectSettings.workerDelegation = { ...settings };
+			this.markProjectModified("workerDelegation");
+			this.saveProjectSettings(projectSettings);
+			return;
+		}
+
+		this.globalSettings.workerDelegation = { ...settings };
+		this.markModified("workerDelegation");
 		this.save();
 	}
 

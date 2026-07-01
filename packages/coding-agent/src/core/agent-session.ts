@@ -57,6 +57,7 @@ import type {
 	GateOutcome,
 	LearningDecision,
 	RouteDecision,
+	WorkerRequest,
 	WorkerResult,
 } from "./autonomy/contracts.ts";
 import { evaluateToolGate } from "./autonomy/gates.ts";
@@ -108,6 +109,7 @@ import {
 import { type CostGuardDecision, downgradeReasoning, estimateTurnCostUsd, evaluateCostGuard } from "./cost-guard.ts";
 import { DEFAULT_THINKING_LEVEL } from "./defaults.ts";
 import { appendWorkerResultSnapshot, getWorkerResultSnapshots } from "./delegation/session-worker-result.ts";
+import { runWorker, type WorkerRunOutcome } from "./delegation/worker-runner.ts";
 import { exportSessionToHtml, type ToolHtmlRenderer } from "./export-html/index.ts";
 import { createToolHtmlRenderer } from "./export-html/tool-renderer.ts";
 import { createCoreDiagnosticsToolDefinitions } from "./extensions/builtin.ts";
@@ -208,6 +210,7 @@ import type { SlashCommandInfo } from "./slash-commands.ts";
 import { createSyntheticSourceInfo, type SourceInfo } from "./source-info.ts";
 import { type BuildSystemPromptOptions, buildSystemPrompt } from "./system-prompt.ts";
 import { type BashOperations, createLocalBashOperations } from "./tools/bash.ts";
+import { createDelegateToolDefinition } from "./tools/delegate.ts";
 import { createGoalToolDefinition } from "./tools/goal.ts";
 import { createAllToolDefinitions } from "./tools/index.ts";
 import { createToolDefinitionFromAgentTool } from "./tools/tool-definition-wrapper.ts";
@@ -447,6 +450,15 @@ export interface ResearchLaneRunOutcome {
 	result?: ResearchRunResult;
 }
 
+export interface WorkerDelegationRunOutcome {
+	/** False when the delegation was skipped before starting (see skipReason). */
+	started: boolean;
+	skipReason?: string;
+	/** Terminal lane record when the delegation ran. */
+	record?: LaneRecord;
+	outcome?: WorkerRunOutcome;
+}
+
 export interface GoalContinuationOnceOptions {
 	maxStallTurns: number;
 	promptLimits?: GoalContinuationPromptLimits;
@@ -587,6 +599,10 @@ export class AgentSession {
 	private readonly _laneTracker = new LaneTracker();
 	/** Session-lifetime abort for in-flight research passes (same pattern as _reflectionAbort). */
 	private readonly _researchLaneAbort = new AbortController();
+	/** Single-flight guard: at most one delegated worker runs at a time per session. */
+	private _isWorkerDelegationRunning = false;
+	/** Session-lifetime abort for in-flight delegated workers. */
+	private readonly _workerDelegationAbort = new AbortController();
 
 	// Compaction/context hygiene state
 	private _compactionAbortController: AbortController | undefined = undefined;
@@ -1827,9 +1843,10 @@ export class AgentSession {
 			// write memory/skills against this now-disposed session.
 			this._disposed = true;
 			this._reflectionAbort.abort();
-			// Abort any in-flight research pass for the same reason: a disposed session must not keep
-			// spending tokens or persist evidence against dead state.
+			// Abort any in-flight research pass or delegated worker for the same reason: a disposed
+			// session must not keep spending tokens or persist evidence against dead state.
 			this._researchLaneAbort.abort();
+			this._workerDelegationAbort.abort();
 			// Bug #20: clear the hooks this session installed on the shared agent so their closures stop
 			// pinning this (deactivated) session — and all its history/maps — in memory if the agent
 			// instance outlives the session.
@@ -4362,6 +4379,10 @@ export class AgentSession {
 				},
 			});
 			this._baseToolDefinitions.set(goalToolDefinition.name, goalToolDefinition);
+			const delegateToolDefinition = createDelegateToolDefinition({
+				runWorkerDelegation: (args) => this.runWorkerDelegationOnce(args),
+			});
+			this._baseToolDefinitions.set(delegateToolDefinition.name, delegateToolDefinition);
 		}
 
 		const extensionsResult = this._resourceLoader.getExtensions();
@@ -4392,7 +4413,7 @@ export class AgentSession {
 
 		const defaultActiveToolNames = this._baseToolsOverride
 			? Object.keys(this._baseToolsOverride)
-			: ["read", "bash", "edit", "write", "context_audit", "goal"];
+			: ["read", "bash", "edit", "write", "context_audit", "goal", "delegate"];
 		const baseActiveToolNames = options.activeToolNames ?? defaultActiveToolNames;
 		this._refreshToolRegistry({
 			activeToolNames: baseActiveToolNames,
@@ -5530,20 +5551,26 @@ export class AgentSession {
 		}
 	}
 
-	private _resolveResearchLaneModel(): Model<Api> | undefined {
-		const research = this.settingsManager.getResearchLaneSettings();
+	/**
+	 * Resolve the model for a background lane: configured pattern, else the router's cheap model,
+	 * else the session model. An explicitly configured pattern that cannot resolve/authenticate is a
+	 * visible skip, not a silent fallback onto a potentially expensive session model.
+	 */
+	private _resolveLaneModel(configuredPattern: string | undefined): Model<Api> | undefined {
 		const routerSettings = this.settingsManager.getModelRouterSettings();
-		const pattern = research.model ?? routerSettings.cheapModel;
+		const pattern = configuredPattern ?? routerSettings.cheapModel;
 		if (pattern) {
 			const resolved = resolveCliModel({ cliModel: pattern, modelRegistry: this._modelRegistry });
 			if (resolved.model && this._modelRegistry.hasConfiguredAuth(resolved.model)) {
 				return resolved.model;
 			}
-			// An explicitly configured research model that cannot run is a visible skip, not a silent
-			// fallback onto a potentially expensive session model.
 			return undefined;
 		}
 		return this.model ?? undefined;
+	}
+
+	private _resolveResearchLaneModel(): Model<Api> | undefined {
+		return this._resolveLaneModel(this.settingsManager.getResearchLaneSettings().model);
 	}
 
 	/** Stripped research envelope — never the foreground/architect envelope. */
@@ -5665,6 +5692,125 @@ export class AgentSession {
 			return { started: true, record };
 		} finally {
 			this._isResearchLaneRunning = false;
+		}
+	}
+
+	/**
+	 * Run one bounded scout-worker delegation: build a WorkerRequest with a stripped read-only
+	 * envelope, execute it as an isolated completion on a cheap lane, validate the result via
+	 * {@link validateWorkerResult} before acceptance, and persist result + lane record + spawned
+	 * usage (idempotent per-lane reportId). Consumed by the `delegate` tool.
+	 */
+	async runWorkerDelegationOnce(request: { instructions: string }): Promise<WorkerDelegationRunOutcome> {
+		if (this._isWorkerDelegationRunning) {
+			return { started: false, skipReason: "worker_delegation_already_running" };
+		}
+		if (this._disposed) {
+			return { started: false, skipReason: "session_disposed" };
+		}
+		const instructions = request.instructions.trim();
+		if (instructions.length === 0) {
+			return { started: false, skipReason: "missing_instructions" };
+		}
+
+		const settings = this.settingsManager.getWorkerDelegationSettings();
+		if (!settings.enabled) {
+			return { started: false, skipReason: "worker_delegation_disabled" };
+		}
+
+		const model = this._resolveLaneModel(settings.model);
+		if (!model) {
+			return { started: false, skipReason: "no_worker_model" };
+		}
+
+		this._isWorkerDelegationRunning = true;
+		const startedRecord = this._laneTracker.start({ type: "worker" });
+		const maxUsd = Math.min(settings.maxUsd, this.capabilityEnvelope?.maxEstimatedUsd ?? Number.POSITIVE_INFINITY);
+		const workerRequest: WorkerRequest = {
+			id: startedRecord.laneId,
+			instructions,
+			route: {
+				tier: "cheap",
+				risk: "read-only",
+				confidence: 1,
+				reasonCode: "scout_worker",
+				reasons: ["Read-only scout delegation"],
+			},
+			envelope: {
+				id: `worker-${this.sessionId}-${startedRecord.laneId}`,
+				capabilities: ["read_files"],
+				maxEstimatedUsd: maxUsd,
+				createdAt: new Date().toISOString(),
+			},
+			maxEstimatedUsd: maxUsd,
+			createdAt: new Date().toISOString(),
+		};
+		const usageReportId = `worker:${this.sessionId}:${startedRecord.laneId}`;
+
+		try {
+			let spentUsage: Usage | undefined;
+			const outcome = await runWorker({
+				request: workerRequest,
+				maxUsd,
+				maxWallClockMs: settings.maxWallClockMs,
+				usageReportId,
+				signal: this._workerDelegationAbort.signal,
+				complete: async ({ systemPrompt, userPrompt, signal }) => {
+					const completion = await this.runIsolatedCompletion({
+						systemPrompt,
+						messages: [{ role: "user", content: [{ type: "text", text: userPrompt }], timestamp: Date.now() }],
+						model,
+						thinkingLevel: "off",
+						maxTokens: 2048,
+						signal,
+						// The worker system prompt is static — let the provider cache the prefix.
+						cacheRetention: "short",
+					});
+					spentUsage = completion.usage;
+					return {
+						text: completion.text,
+						costUsd: completion.usage.cost.total,
+						stopReason: String(completion.stopReason),
+					};
+				},
+			});
+
+			// Bug #21 pattern: never persist against a disposed session.
+			if (this._disposed) {
+				const record = this._laneTracker.complete(startedRecord.laneId, {
+					status: "canceled",
+					reasonCode: "session_disposed",
+				});
+				return { started: true, record, outcome };
+			}
+
+			this.saveWorkerResultSnapshot(outcome.result);
+			if (spentUsage && (spentUsage.cost.total > 0 || spentUsage.totalTokens > 0)) {
+				this.addSpawnedUsage(spentUsage, { label: "worker-delegation", reportId: usageReportId });
+			}
+
+			const record = this._laneTracker.complete(startedRecord.laneId, {
+				status: outcome.laneStatus,
+				reasonCode: outcome.reasonCode,
+				costUsd: outcome.costUsd,
+			});
+			if (record) {
+				appendLaneRecordSnapshot(this.sessionManager, record);
+			}
+			return { started: true, record, outcome };
+		} catch (error) {
+			const record = this._laneTracker.complete(startedRecord.laneId, {
+				status: "failed",
+				reasonCode: "worker_delegation_error",
+			});
+			if (record && !this._disposed) {
+				appendLaneRecordSnapshot(this.sessionManager, record);
+			}
+			const message = error instanceof Error ? error.message : String(error);
+			this._emit({ type: "warning", message: `Worker delegation failed: ${message}` });
+			return { started: true, record };
+		} finally {
+			this._isWorkerDelegationRunning = false;
 		}
 	}
 
@@ -6241,19 +6387,31 @@ export class AgentSession {
 			snapshot.research = researchEntries;
 		}
 
+		const delegationEntries: DiagnosticEntry[] = [];
+		const workerLaneRecords = getLaneRecordSnapshots(this.sessionManager.getEntries()).filter(
+			(record) => record.type === "worker",
+		);
+		for (const record of workerLaneRecords.slice(-maxEntriesPerFamily)) {
+			delegationEntries.push({
+				title: `Lane ${record.laneId} (${record.status})`,
+				reasonCode: record.reasonCode,
+				metadata: { costUsd: record.costUsd, startedAt: record.startedAt, completedAt: record.completedAt },
+			});
+		}
 		const workerResults = this.getWorkerResultSnapshots();
-		if (workerResults.length > 0) {
-			snapshot.delegation = workerResults.slice(-maxEntriesPerFamily).map(
-				(result): DiagnosticEntry => ({
-					title: `Worker ${result.requestId} (${result.status})`,
-					summary: result.summary,
-					metadata: {
-						changedFileCount: result.changedFiles.length,
-						blockerCount: result.blockers?.length ?? 0,
-						usageReportId: result.usageReportId,
-					},
-				}),
-			);
+		for (const result of workerResults.slice(-maxEntriesPerFamily)) {
+			delegationEntries.push({
+				title: `Worker ${result.requestId} (${result.status})`,
+				summary: result.summary,
+				metadata: {
+					changedFileCount: result.changedFiles.length,
+					blockerCount: result.blockers?.length ?? 0,
+					usageReportId: result.usageReportId,
+				},
+			});
+		}
+		if (delegationEntries.length > 0) {
+			snapshot.delegation = delegationEntries;
 		}
 
 		const learningDecisions = this.getLearningDecisionSnapshots();

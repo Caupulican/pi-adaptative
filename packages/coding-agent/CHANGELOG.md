@@ -30,6 +30,15 @@
   explicit pass. Live lanes now feed the previously-unset `activeLaneCount` in `/autonomy status`
   snapshots, and `/autonomy diagnostics` shows research lane records, all evidence bundles, and the
   last skip reason.
+- Added the bounded worker-delegation runtime piloting read-only scout workers: a new `delegate`
+  tool (active by default, mapped to the `delegate` capability, refusing with a reason until the
+  Worker Delegation setting is enabled) lets the foreground model hand one self-contained analysis
+  task to a worker running as a bounded isolated completion on a cheap model lane under a stripped
+  read-only envelope. Every result is validated through the existing `validateWorkerResult` parent
+  gate before acceptance, persisted as a worker-result snapshot plus a terminal lane record, marked
+  untrusted in the tool output, and cost-reported through spawned-usage accounting with an
+  idempotent per-lane report id. Budgets cover cost per worker and wall-clock time; delegation
+  lanes appear in `/autonomy diagnostics` and count toward the live `activeLaneCount`.
 
 ### Changed
 

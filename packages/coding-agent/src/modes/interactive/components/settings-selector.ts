@@ -25,6 +25,7 @@ import type {
 	SelfModificationSettings,
 	SettingsScope,
 	WarningSettings,
+	WorkerDelegationSettings,
 } from "../../../core/settings-manager.ts";
 import {
 	DEFAULT_AUTONOMY_GOAL_AUTO_CONTINUE,
@@ -37,6 +38,9 @@ import {
 	DEFAULT_RESEARCH_LANE_MAX_RUNS_PER_SESSION,
 	DEFAULT_RESEARCH_LANE_MAX_USD,
 	DEFAULT_RESEARCH_LANE_MAX_WALL_CLOCK_MS,
+	DEFAULT_WORKER_DELEGATION_ENABLED,
+	DEFAULT_WORKER_DELEGATION_MAX_USD,
+	DEFAULT_WORKER_DELEGATION_MAX_WALL_CLOCK_MS,
 } from "../../../core/settings-manager.ts";
 import { getSelectListTheme, getSettingsListTheme, theme } from "../theme/theme.ts";
 import { DynamicBorder } from "./dynamic-border.ts";
@@ -168,6 +172,12 @@ function researchLaneSummary(settings: ResearchLaneSettings): string {
 	const maxUsd = settings.maxUsd ?? DEFAULT_RESEARCH_LANE_MAX_USD;
 	const maxRuns = settings.maxRunsPerSession ?? DEFAULT_RESEARCH_LANE_MAX_RUNS_PER_SESSION;
 	return `enabled ($${maxUsd}/pass, ${maxRuns} runs/session)`;
+}
+
+function workerDelegationSummary(settings: WorkerDelegationSettings): string {
+	if (!(settings.enabled ?? DEFAULT_WORKER_DELEGATION_ENABLED)) return "disabled";
+	const maxUsd = settings.maxUsd ?? DEFAULT_WORKER_DELEGATION_MAX_USD;
+	return `enabled ($${maxUsd}/worker)`;
 }
 
 function autoLearnSummary(settings: AutoLearnSettings): string {
@@ -324,6 +334,8 @@ export interface SettingsConfig {
 	autonomyScope?: SettingsScope;
 	researchLane: ResearchLaneSettings;
 	researchLaneScope?: SettingsScope;
+	workerDelegation: WorkerDelegationSettings;
+	workerDelegationScope?: SettingsScope;
 	modelRouter: ModelRouterSettings;
 	modelRouterScope?: SettingsScope;
 	autoLearn: AutoLearnSettings;
@@ -369,6 +381,7 @@ export interface SettingsCallbacks {
 	onSelfModificationChange: (settings: SelfModificationSettings, scope: SettingsScope) => void;
 	onAutonomyChange: (settings: AutonomySettings, scope: SettingsScope) => void;
 	onResearchLaneChange: (settings: ResearchLaneSettings, scope: SettingsScope) => void;
+	onWorkerDelegationChange: (settings: WorkerDelegationSettings, scope: SettingsScope) => void;
 	onModelRouterChange: (settings: ModelRouterSettings, scope: SettingsScope) => void;
 	onAutoLearnChange: (settings: AutoLearnSettings, scope: SettingsScope) => void;
 	onContextPolicyEnforcementChange: (settings: ContextPromptEnforcementSettings, scope: SettingsScope) => void;
@@ -808,6 +821,91 @@ class ResearchLaneSettingsSubmenu extends Container {
 						break;
 					case "research-lane-max-runs-per-session":
 						this.state = { ...this.state, maxRunsPerSession: Number(newValue) };
+						break;
+					default:
+						return;
+				}
+				onChange({ ...this.state }, this.scope);
+			},
+			onCancel,
+		);
+
+		this.addChild(this.settingsList);
+	}
+
+	handleInput(data: string): void {
+		this.settingsList.handleInput(data);
+	}
+}
+
+class WorkerDelegationSettingsSubmenu extends Container {
+	private settingsList: SettingsList;
+	private state: WorkerDelegationSettings;
+	private scope: SettingsScope;
+
+	constructor(
+		settings: WorkerDelegationSettings,
+		onChange: (settings: WorkerDelegationSettings, scope: SettingsScope) => void,
+		onCancel: () => void,
+		scope: SettingsScope = "global",
+	) {
+		super();
+		this.state = {
+			...settings,
+			enabled: settings.enabled ?? DEFAULT_WORKER_DELEGATION_ENABLED,
+			maxUsd: settings.maxUsd ?? DEFAULT_WORKER_DELEGATION_MAX_USD,
+			maxWallClockMs: settings.maxWallClockMs ?? DEFAULT_WORKER_DELEGATION_MAX_WALL_CLOCK_MS,
+		};
+		this.scope = scope;
+
+		const items: SettingItem[] = [
+			{
+				id: "worker-delegation-scope",
+				label: "Save scope",
+				description: "Save these delegation settings globally or in the current project's .pi/settings.json",
+				currentValue: this.scope,
+				values: ["global", "project"],
+			},
+			{
+				id: "worker-delegation-enabled",
+				label: "Enabled",
+				description: "Allow the delegate tool to run bounded, read-only scout workers on a cheap model lane",
+				currentValue: String(this.state.enabled),
+				values: ["true", "false"],
+			},
+			{
+				id: "worker-delegation-max-usd",
+				label: "Budget per worker",
+				description: "USD budget per delegated worker; breaches mark the lane budget_exhausted in diagnostics",
+				currentValue: String(this.state.maxUsd),
+				values: RESEARCH_LANE_MAX_USD_VALUES,
+			},
+			{
+				id: "worker-delegation-max-wall-clock-ms",
+				label: "Max milliseconds",
+				description: "Wall-clock budget per delegated worker; 0 disables the time budget",
+				currentValue: String(this.state.maxWallClockMs),
+				values: RESEARCH_LANE_MAX_WALL_CLOCK_MS_VALUES,
+			},
+		];
+
+		this.settingsList = new SettingsList(
+			items,
+			Math.min(items.length, 10),
+			getSettingsListTheme(),
+			(id, newValue) => {
+				switch (id) {
+					case "worker-delegation-scope":
+						this.scope = newValue as SettingsScope;
+						break;
+					case "worker-delegation-enabled":
+						this.state = { ...this.state, enabled: newValue === "true" };
+						break;
+					case "worker-delegation-max-usd":
+						this.state = { ...this.state, maxUsd: Number(newValue) };
+						break;
+					case "worker-delegation-max-wall-clock-ms":
+						this.state = { ...this.state, maxWallClockMs: Number(newValue) };
 						break;
 					default:
 						return;
@@ -1528,6 +1626,7 @@ export class SettingsSelectorComponent extends Container {
 		let currentSelfModification: SelfModificationSettings = { ...config.selfModification };
 		let currentAutonomy: AutonomySettings = { ...config.autonomy };
 		let currentResearchLane: ResearchLaneSettings = { ...config.researchLane };
+		let currentWorkerDelegation: WorkerDelegationSettings = { ...config.workerDelegation };
 		let currentModelRouter: ModelRouterSettings = { ...config.modelRouter };
 		let currentAutoLearn: AutoLearnSettings = { ...config.autoLearn };
 		let currentContextPolicyEnforcement: ContextPromptEnforcementSettings = { ...config.contextPolicyEnforcement };
@@ -1659,6 +1758,23 @@ export class SettingsSelectorComponent extends Container {
 						},
 						() => done(researchLaneSummary(currentResearchLane)),
 						config.researchLaneScope ?? "global",
+					),
+			},
+			{
+				id: "worker-delegation",
+				label: "Worker Delegation",
+				description:
+					"Opt-in bounded scout-worker delegation: the delegate tool runs read-only workers on a cheap model lane",
+				currentValue: workerDelegationSummary(currentWorkerDelegation),
+				submenu: (_currentValue, done) =>
+					new WorkerDelegationSettingsSubmenu(
+						currentWorkerDelegation,
+						(settings, scope) => {
+							currentWorkerDelegation = { ...settings };
+							callbacks.onWorkerDelegationChange(settings, scope);
+						},
+						() => done(workerDelegationSummary(currentWorkerDelegation)),
+						config.workerDelegationScope ?? "global",
 					),
 			},
 			{

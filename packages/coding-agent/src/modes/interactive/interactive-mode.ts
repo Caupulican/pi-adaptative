@@ -6206,6 +6206,8 @@ export class InteractiveMode {
 					autonomyScope: projectSettings.autonomy ? "project" : "global",
 					researchLane: this.settingsManager.getResearchLaneSettings(),
 					researchLaneScope: projectSettings.researchLane ? "project" : "global",
+					workerDelegation: this.settingsManager.getWorkerDelegationSettings(),
+					workerDelegationScope: projectSettings.workerDelegation ? "project" : "global",
 					modelRouter: this.settingsManager.getModelRouterSettings(),
 					modelRouterScope: projectSettings.modelRouter ? "project" : "global",
 					autoLearn: this.settingsManager.getAutoLearnSettings(),
@@ -6363,6 +6365,10 @@ export class InteractiveMode {
 						this.showStatus(
 							`Research lane settings saved to ${scope}. Use /autonomy research or /autonomy diagnostics.`,
 						);
+					},
+					onWorkerDelegationChange: (settings, scope) => {
+						this.settingsManager.setWorkerDelegationSettings(settings, scope);
+						this.showStatus(`Worker delegation settings saved to ${scope}. The delegate tool uses them.`);
 					},
 					onModelRouterChange: (settings, scope) => {
 						this.settingsManager.setModelRouterSettings(settings, scope);

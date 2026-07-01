@@ -1,3 +1,4 @@
+import { runBoundedCompletion } from "../autonomy/bounded-completion.ts";
 import type { CapabilityEnvelope, EvidenceBundle, EvidenceRef, Finding, GateOutcome } from "../autonomy/contracts.ts";
 import { createEvidenceBundle } from "./evidence-bundle.ts";
 import { evaluateResearchRequest } from "./research-gate.ts";
@@ -150,42 +151,27 @@ export async function runResearch(options: ResearchRunnerOptions): Promise<Resea
 		return { status, reasonCode: gateOutcome.reasonCode, gateOutcome, costUsd: 0 };
 	}
 
-	const timeoutController = new AbortController();
-	const timeoutTimer =
-		options.maxWallClockMs > 0 ? setTimeout(() => timeoutController.abort(), options.maxWallClockMs) : undefined;
-	if (timeoutTimer && typeof timeoutTimer === "object" && "unref" in timeoutTimer) {
-		const { unref } = timeoutTimer as { unref?: () => void };
-		unref?.call(timeoutTimer);
+	const bounded = await runBoundedCompletion({
+		maxWallClockMs: options.maxWallClockMs,
+		signal: options.signal,
+		execute: (signal) =>
+			options.complete({
+				systemPrompt: RESEARCH_LANE_SYSTEM_PROMPT,
+				userPrompt: buildResearchUserPrompt(options),
+				signal,
+			}),
+	});
+	if (bounded.failure) {
+		return {
+			status: bounded.failure.status,
+			reasonCode: bounded.failure.reasonCode,
+			gateOutcome,
+			costUsd: bounded.completion?.costUsd ?? 0,
+		};
 	}
-	const signals: AbortSignal[] = [timeoutController.signal];
-	if (options.signal) signals.push(options.signal);
-	const signal = AbortSignal.any(signals);
-
-	let completion: ResearchCompletion;
-	try {
-		completion = await options.complete({
-			systemPrompt: RESEARCH_LANE_SYSTEM_PROMPT,
-			userPrompt: buildResearchUserPrompt(options),
-			signal,
-		});
-	} catch {
-		if (options.signal?.aborted) {
-			return { status: "canceled", reasonCode: "external_abort", gateOutcome, costUsd: 0 };
-		}
-		if (timeoutController.signal.aborted) {
-			return { status: "timeout", reasonCode: "wall_clock_exceeded", gateOutcome, costUsd: 0 };
-		}
+	const completion = bounded.completion;
+	if (!completion) {
 		return { status: "failed", reasonCode: "completion_error", gateOutcome, costUsd: 0 };
-	} finally {
-		if (timeoutTimer !== undefined) clearTimeout(timeoutTimer);
-	}
-
-	// An abort can race a completion that settled without throwing; abort still wins.
-	if (options.signal?.aborted) {
-		return { status: "canceled", reasonCode: "external_abort", gateOutcome, costUsd: completion.costUsd };
-	}
-	if (timeoutController.signal.aborted) {
-		return { status: "timeout", reasonCode: "wall_clock_exceeded", gateOutcome, costUsd: completion.costUsd };
 	}
 	if (completion.stopReason === "error" || completion.stopReason === "aborted") {
 		return { status: "failed", reasonCode: "model_error", gateOutcome, costUsd: completion.costUsd };
