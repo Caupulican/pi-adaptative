@@ -6183,6 +6183,8 @@ export class InteractiveMode {
 					autoLearnModelOptions: this.getAutoLearnModelOptions(),
 					contextPolicyEnforcement: this.settingsManager.getContextPromptEnforcementSettings(),
 					contextPolicyEnforcementScope: projectSettings.contextPolicy?.enforcement ? "project" : "global",
+					contextMemoryRetrieval: this.settingsManager.getMemoryRetrievalSettings(),
+					contextMemoryRetrievalScope: projectSettings.contextPolicy?.memory ? "project" : "global",
 					currentModelPattern: this.session.model
 						? `${this.session.model.provider}/${this.session.model.id}`
 						: undefined,
@@ -6351,6 +6353,10 @@ export class InteractiveMode {
 					onContextPolicyEnforcementChange: (settings, scope) => {
 						this.settingsManager.setContextPromptEnforcementSettings(settings, scope);
 						this.showStatus(`Context/prompt-policy settings saved to ${scope}.`);
+					},
+					onContextMemoryRetrievalChange: (settings, scope) => {
+						this.settingsManager.setMemoryRetrievalSettings(settings, scope);
+						this.showStatus(`Context/memory-retrieval settings saved to ${scope}.`);
 					},
 					onResourcesHubAction: (action) => {
 						done();

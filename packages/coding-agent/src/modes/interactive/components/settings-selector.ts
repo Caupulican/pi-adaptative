@@ -19,6 +19,7 @@ import type {
 	AutonomyMode,
 	AutonomySettings,
 	ContextPromptEnforcementSettings,
+	MemoryRetrievalSettings,
 	ModelRouterSettings,
 	SelfModificationSettings,
 	SettingsScope,
@@ -65,6 +66,13 @@ const CONTEXT_POLICY_ENFORCEMENT_DEFAULTS = {
 	enabled: false,
 	preserveRecentMessages: 8,
 	minChars: 1200,
+} as const;
+
+const CONTEXT_MEMORY_RETRIEVAL_MAX_RESULTS_VALUES = ["1", "3", "5", "10", "20"];
+
+const CONTEXT_MEMORY_RETRIEVAL_DEFAULTS = {
+	enabled: false,
+	maxResults: 5,
 } as const;
 
 const AUTO_LEARN_DEFAULTS = {
@@ -152,6 +160,12 @@ function contextPolicyEnforcementSummary(settings: ContextPromptEnforcementSetti
 	const preserve = settings.preserveRecentMessages ?? CONTEXT_POLICY_ENFORCEMENT_DEFAULTS.preserveRecentMessages;
 	const minChars = settings.minChars ?? CONTEXT_POLICY_ENFORCEMENT_DEFAULTS.minChars;
 	return `enabled (preserve ${preserve}, min ${minChars} chars)`;
+}
+
+function contextMemoryRetrievalSummary(settings: MemoryRetrievalSettings): string {
+	if (!(settings.enabled ?? CONTEXT_MEMORY_RETRIEVAL_DEFAULTS.enabled)) return "disabled";
+	const maxResults = settings.maxResults ?? CONTEXT_MEMORY_RETRIEVAL_DEFAULTS.maxResults;
+	return `enabled (max ${maxResults} results)`;
 }
 
 function modelRouterSummary(settings: ModelRouterSettings): string {
@@ -294,6 +308,8 @@ export interface SettingsConfig {
 	autoLearnScope?: SettingsScope;
 	contextPolicyEnforcement: ContextPromptEnforcementSettings;
 	contextPolicyEnforcementScope?: SettingsScope;
+	contextMemoryRetrieval: MemoryRetrievalSettings;
+	contextMemoryRetrievalScope?: SettingsScope;
 	currentModelPattern?: string;
 	autoLearnModelOptions?: SelectItem[];
 	activeProfileName?: string;
@@ -333,6 +349,7 @@ export interface SettingsCallbacks {
 	onModelRouterChange: (settings: ModelRouterSettings, scope: SettingsScope) => void;
 	onAutoLearnChange: (settings: AutoLearnSettings, scope: SettingsScope) => void;
 	onContextPolicyEnforcementChange: (settings: ContextPromptEnforcementSettings, scope: SettingsScope) => void;
+	onContextMemoryRetrievalChange: (settings: MemoryRetrievalSettings, scope: SettingsScope) => void;
 	onResourcesHubAction?: (action: string) => void;
 	onCancel: () => void;
 }
@@ -951,6 +968,79 @@ class ContextPolicyEnforcementSettingsSubmenu extends Container {
 	}
 }
 
+class ContextMemoryRetrievalSettingsSubmenu extends Container {
+	private settingsList: SettingsList;
+	private state: MemoryRetrievalSettings;
+	private scope: SettingsScope;
+
+	constructor(
+		settings: MemoryRetrievalSettings,
+		onChange: (settings: MemoryRetrievalSettings, scope: SettingsScope) => void,
+		onCancel: () => void,
+		scope: SettingsScope = "global",
+	) {
+		super();
+
+		this.state = { ...settings };
+		this.scope = scope;
+
+		const items: SettingItem[] = [
+			{
+				id: "context-memory-scope",
+				label: "Save scope",
+				description:
+					"Save this local memory-retrieval configuration globally or in the current project's .pi/settings.json",
+				currentValue: this.scope,
+				values: ["global", "project"],
+			},
+			{
+				id: "context-memory-enabled",
+				label: "Local memory retrieval",
+				description:
+					"Opt-in, observe-only: each turn, search local Pi OKF memory documents (under <agent dir>/okf-memory) for evidence related to the latest message. Results are recorded for inspection only -- nothing is added to the model-visible prompt or transcript yet. Local-only; never queries an external provider.",
+				currentValue: booleanSettingValue(this.state.enabled, CONTEXT_MEMORY_RETRIEVAL_DEFAULTS.enabled),
+				values: ["false", "true"],
+			},
+			{
+				id: "context-memory-max-results",
+				label: "Max results",
+				description: "Maximum number of memory items to retrieve per query (1-20)",
+				currentValue: numberSettingValue(this.state.maxResults, CONTEXT_MEMORY_RETRIEVAL_DEFAULTS.maxResults),
+				values: CONTEXT_MEMORY_RETRIEVAL_MAX_RESULTS_VALUES,
+			},
+		];
+
+		this.settingsList = new SettingsList(
+			items,
+			Math.min(items.length, 10),
+			getSettingsListTheme(),
+			(id, newValue) => {
+				switch (id) {
+					case "context-memory-scope":
+						this.scope = newValue as SettingsScope;
+						break;
+					case "context-memory-enabled":
+						this.state = { ...this.state, enabled: newValue === "true" };
+						break;
+					case "context-memory-max-results":
+						this.state = { ...this.state, maxResults: parseInt(newValue, 10) };
+						break;
+					default:
+						return;
+				}
+				onChange({ ...this.state }, this.scope);
+			},
+			onCancel,
+		);
+
+		this.addChild(this.settingsList);
+	}
+
+	handleInput(data: string): void {
+		this.settingsList.handleInput(data);
+	}
+}
+
 class ModelRouterSettingsSubmenu extends Container {
 	private settingsList: SettingsList;
 	private state: ModelRouterSettings;
@@ -1295,6 +1385,7 @@ export class SettingsSelectorComponent extends Container {
 		let currentModelRouter: ModelRouterSettings = { ...config.modelRouter };
 		let currentAutoLearn: AutoLearnSettings = { ...config.autoLearn };
 		let currentContextPolicyEnforcement: ContextPromptEnforcementSettings = { ...config.contextPolicyEnforcement };
+		let currentContextMemoryRetrieval: MemoryRetrievalSettings = { ...config.contextMemoryRetrieval };
 		const items: SettingItem[] = [
 			{
 				id: "autocompact",
@@ -1459,6 +1550,23 @@ export class SettingsSelectorComponent extends Container {
 						},
 						() => done(contextPolicyEnforcementSummary(currentContextPolicyEnforcement)),
 						config.contextPolicyEnforcementScope ?? "global",
+					),
+			},
+			{
+				id: "context-memory-retrieval",
+				label: "Context / Memory Retrieval",
+				description:
+					"Opt-in, observe-only local memory retrieval: searches local Pi OKF memory documents each turn and records source-labeled evidence for inspection. Never injects results into the model-visible prompt yet, and never queries an external provider.",
+				currentValue: contextMemoryRetrievalSummary(currentContextMemoryRetrieval),
+				submenu: (_currentValue, done) =>
+					new ContextMemoryRetrievalSettingsSubmenu(
+						currentContextMemoryRetrieval,
+						(settings, scope) => {
+							currentContextMemoryRetrieval = { ...settings };
+							callbacks.onContextMemoryRetrievalChange(settings, scope);
+						},
+						() => done(contextMemoryRetrievalSummary(currentContextMemoryRetrieval)),
+						config.contextMemoryRetrievalScope ?? "global",
 					),
 			},
 			{

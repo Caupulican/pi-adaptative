@@ -82,6 +82,12 @@ import {
 	type PromptPolicyShadowReport,
 	planPromptPolicy,
 } from "./context/context-prompt-policy.ts";
+import {
+	type MemoryProvider as ContextMemoryProvider,
+	DEFAULT_LOCAL_MEMORY_EGRESS_POLICY,
+} from "./context/memory-provider-contract.ts";
+import { type MemoryRetrievalReport, retrieveMemoryForContext } from "./context/memory-retrieval.ts";
+import { createOkfMemoryProvider } from "./context/okf-memory-provider.ts";
 import { applyContextGc, type ContextGcReport } from "./context-gc.ts";
 import {
 	aggregateDailyUsageFromSessionFiles,
@@ -497,6 +503,30 @@ function extractArtifactId(message: AgentMessage | undefined): string | undefine
 	return typeof artifactId === "string" ? artifactId : undefined;
 }
 
+/**
+ * Text of the most recent user message, or "" if there is none (e.g. goal-continuation
+ * turns with no new user input). An empty query degrades to zero memory-retrieval results
+ * by construction (see memory-provider-contract.ts's score-on-empty-query-tokens rule) --
+ * no special-casing needed here beyond returning "".
+ */
+function latestUserMessageText(messages: AgentMessage[]): string {
+	for (let index = messages.length - 1; index >= 0; index--) {
+		const message = messages[index];
+		if (message.role !== "user") continue;
+		if (typeof message.content === "string") return message.content;
+		const parts: string[] = [];
+		for (const part of message.content) {
+			if (part.type === "text") parts.push(part.text);
+		}
+		return parts.join("\n");
+	}
+	return "";
+}
+
+function emptyMemoryRetrievalReport(maxResults: number): MemoryRetrievalReport {
+	return { request: { query: "", maxResults }, providerReports: [], results: [], contextItems: [] };
+}
+
 export class AgentSession {
 	readonly agent: Agent;
 	readonly sessionManager: SessionManager;
@@ -535,6 +565,8 @@ export class AgentSession {
 	private _latestPromptPolicyReport: PromptPolicyShadowReport | undefined = undefined;
 	private _latestPromptPolicyGcCorrelation: PromptPolicyGcCorrelationReport | undefined = undefined;
 	private _latestPromptEnforcementReport: PromptEnforcementReport | undefined = undefined;
+	private _memoryOkfProvider: ContextMemoryProvider | undefined = undefined;
+	private _latestMemoryRetrievalReport: MemoryRetrievalReport | undefined = undefined;
 
 	// Branch summarization state
 	private _branchSummaryAbortController: AbortController | undefined = undefined;
@@ -765,6 +797,7 @@ export class AgentSession {
 			}
 			const auditReport = this._runContextAudit(finalMessages);
 			const shadowReport = this._runPromptPolicyPlanning(auditReport);
+			await this._runMemoryRetrieval(finalMessages);
 			const gcResult = this._applyContextGc(finalMessages, true);
 			this._correlatePromptPolicyWithContextGc(gcResult.report);
 			const enforcementResult = this._runPromptEnforcement(gcResult.messages, shadowReport);
@@ -907,6 +940,27 @@ export class AgentSession {
 	}
 
 	/**
+	 * Fixed path for this slice's local Pi OKF memory documents, shared across sessions
+	 * under this agentDir (not session-scoped, unlike tool-artifacts/context-gc, since OKF
+	 * memory represents durable cross-session knowledge, not a per-session capture). Not
+	 * yet user-configurable -- see the memory-retrieval settings doc comment.
+	 */
+	private _memoryOkfDir(): string {
+		return join(this._agentDir, "okf-memory");
+	}
+
+	/**
+	 * Session-scoped, read-only local OKF memory provider. Lazily created ONLY when memory
+	 * retrieval is enabled (see `_runMemoryRetrieval`) -- never force-created, so a session
+	 * with the setting off never touches `_memoryOkfDir()` at all (no directory access, no
+	 * creation; `createOkfMemoryProvider` itself never writes/mkdirs either way).
+	 */
+	private _getMemoryOkfProvider(): ContextMemoryProvider {
+		this._memoryOkfProvider ??= createOkfMemoryProvider({ rootDir: this._memoryOkfDir() });
+		return this._memoryOkfProvider;
+	}
+
+	/**
 	 * One pass over the current branch, mapping each toolResult's toolCallId to its
 	 * persisted session-entry id. Rebuilt every audit pass (O(branch) per turn), so this is
 	 * O(n^2) over a long session. Fine at current scale; after the artifact-read fix this is
@@ -1041,6 +1095,49 @@ export class AgentSession {
 	/** Read-only inspection of the latest prompt-enforcement report, for tests/debugging. */
 	getPromptEnforcementReport(): PromptEnforcementReport {
 		return this._latestPromptEnforcementReport ?? { turnIndex: this._turnIndex, items: [] };
+	}
+
+	/**
+	 * Observe-only local memory retrieval (see context/memory-retrieval.ts and
+	 * context/okf-memory-provider.ts): default disabled, opt-in setting. When disabled,
+	 * never constructs the OKF provider (no directory access under `_memoryOkfDir()` at
+	 * all) and returns an empty report -- fully fail-closed. When enabled, queries the
+	 * local, read-only OKF provider with the latest user message text (empty if there is
+	 * none, e.g. a goal-continuation turn -- degrades to zero results by construction, see
+	 * `latestUserMessageText`'s doc comment) under `DEFAULT_LOCAL_MEMORY_EGRESS_POLICY`.
+	 * Retrieved items are only ever stored in the report; nothing here touches `messages`,
+	 * the transcript, or the provider-visible prompt. Never throws into a live turn: any
+	 * failure (including a provider search error) degrades to an empty report.
+	 */
+	private async _runMemoryRetrieval(messages: AgentMessage[]): Promise<MemoryRetrievalReport> {
+		try {
+			const settings = this.settingsManager.getMemoryRetrievalSettings();
+			if (!settings.enabled) {
+				const report = emptyMemoryRetrievalReport(settings.maxResults);
+				this._latestMemoryRetrievalReport = report;
+				return report;
+			}
+			const report = await retrieveMemoryForContext(
+				[this._getMemoryOkfProvider()],
+				{ query: latestUserMessageText(messages), maxResults: settings.maxResults },
+				{
+					createdAtTurn: this._turnIndex,
+					maxResults: settings.maxResults,
+					defaultLocalPolicy: DEFAULT_LOCAL_MEMORY_EGRESS_POLICY,
+				},
+			);
+			this._latestMemoryRetrievalReport = report;
+			return report;
+		} catch {
+			const report = emptyMemoryRetrievalReport(0);
+			this._latestMemoryRetrievalReport = report;
+			return report;
+		}
+	}
+
+	/** Read-only inspection of the latest memory-retrieval report, for tests/debugging. */
+	getMemoryRetrievalReport(): MemoryRetrievalReport {
+		return this._latestMemoryRetrievalReport ?? emptyMemoryRetrievalReport(0);
 	}
 
 	private _applyContextGc(

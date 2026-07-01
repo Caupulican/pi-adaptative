@@ -41,6 +41,7 @@ function makeConfig(overrides: Partial<SettingsConfig> = {}): SettingsConfig {
 		modelRouter: {},
 		autoLearn: {},
 		contextPolicyEnforcement: {},
+		contextMemoryRetrieval: {},
 		currentModelPattern: "openai/gpt-5.4",
 		autoLearnModelOptions: [
 			{
@@ -89,6 +90,7 @@ function makeCallbacks(overrides: Partial<SettingsCallbacks> = {}): SettingsCall
 		onModelRouterChange: vi.fn(),
 		onAutoLearnChange: vi.fn(),
 		onContextPolicyEnforcementChange: vi.fn(),
+		onContextMemoryRetrievalChange: vi.fn(),
 		onCancel: vi.fn(),
 		...overrides,
 	};
@@ -302,6 +304,92 @@ describe("settings selector", () => {
 
 		expect(output).not.toContain("retrievalToolAvailable");
 		expect(output).not.toContain("retrieval tool available");
+	});
+
+	it("exposes context/memory-retrieval settings in the searchable settings TUI", () => {
+		const selector = new SettingsSelectorComponent(
+			makeConfig({ contextMemoryRetrieval: { enabled: true, maxResults: 5 } }),
+			makeCallbacks(),
+		);
+
+		selector.getSettingsList().handleInput("memory retrieval");
+		const topLevelOutput = selector.render(180).join("\n");
+		expect(topLevelOutput).toContain("Context / Memory Retrieval");
+		expect(topLevelOutput).toContain("enabled (max 5 results)");
+
+		selector.getSettingsList().handleInput("\r");
+		const output = selector.render(180).join("\n");
+
+		expect(output).toContain("Local memory retrieval");
+		expect(output).toContain("Max results");
+
+		// The local-only / observe-only note lives in the enabled item's description.
+		selector.getSettingsList().handleInput("\x1b[B");
+		const enabledItemOutput = selector.render(180).join("\n");
+		expect(enabledItemOutput).toContain("okf-memory");
+		expect(enabledItemOutput).toContain("Local-only");
+	});
+
+	it("shows disabled as the default summary when context/memory-retrieval is not configured", () => {
+		const selector = new SettingsSelectorComponent(makeConfig({ contextMemoryRetrieval: {} }), makeCallbacks());
+
+		selector.getSettingsList().handleInput("memory retrieval");
+		const output = selector.render(180).join("\n");
+
+		expect(output).toContain("disabled");
+	});
+
+	it("persists toggling context/memory-retrieval on from its submenu", () => {
+		const onContextMemoryRetrievalChange = vi.fn();
+		const selector = new SettingsSelectorComponent(
+			makeConfig({ contextMemoryRetrieval: { enabled: false, maxResults: 5 } }),
+			makeCallbacks({ onContextMemoryRetrievalChange }),
+		);
+
+		selector.getSettingsList().handleInput("memory retrieval");
+		selector.getSettingsList().handleInput("\r"); // open submenu
+		selector.getSettingsList().handleInput("\x1b[B"); // down to "Local memory retrieval"
+		selector.getSettingsList().handleInput("\r"); // cycle false -> true
+
+		expect(onContextMemoryRetrievalChange).toHaveBeenCalledWith({ enabled: true, maxResults: 5 }, "global");
+	});
+
+	it("persists context/memory-retrieval maxResults only as one of the discrete safe values (no free-text entry)", () => {
+		const onContextMemoryRetrievalChange = vi.fn();
+		const selector = new SettingsSelectorComponent(
+			makeConfig({ contextMemoryRetrieval: { enabled: true, maxResults: 5 } }),
+			makeCallbacks({ onContextMemoryRetrievalChange }),
+		);
+
+		selector.getSettingsList().handleInput("memory retrieval");
+		selector.getSettingsList().handleInput("\r"); // open submenu
+		selector.getSettingsList().handleInput("\x1b[B"); // down to "Local memory retrieval"
+		selector.getSettingsList().handleInput("\x1b[B"); // down to "Max results"
+		selector.getSettingsList().handleInput("\r"); // cycle 5 -> 10 (next in ["1","3","5","10","20"])
+
+		expect(onContextMemoryRetrievalChange).toHaveBeenLastCalledWith({ enabled: true, maxResults: 10 }, "global");
+
+		// Every value ever offered by the cycling list is inside the settings-manager's
+		// hard [1, 20] clamp range -- there is no way to reach an out-of-range value
+		// through this menu.
+		for (const call of onContextMemoryRetrievalChange.mock.calls) {
+			const [settings] = call;
+			expect(["1", "3", "5", "10", "20"]).toContain(String(settings.maxResults));
+		}
+	});
+
+	it("does not expose any runtime-only field in the memory-retrieval submenu", () => {
+		const selector = new SettingsSelectorComponent(
+			makeConfig({ contextMemoryRetrieval: { enabled: true, maxResults: 5 } }),
+			makeCallbacks(),
+		);
+
+		selector.getSettingsList().handleInput("memory retrieval");
+		selector.getSettingsList().handleInput("\r");
+		const output = selector.render(180).join("\n");
+
+		expect(output).not.toContain("providerId");
+		expect(output).not.toContain("rootDir");
 	});
 
 	it("exposes configurable model router settings together in the searchable settings TUI", () => {

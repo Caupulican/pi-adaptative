@@ -58,8 +58,30 @@ export interface ContextPromptEnforcementSettings {
 	minChars?: number; // default: 1200 (mirrors context-gc's own minToolResultChars default)
 }
 
+/**
+ * Observe-only local memory retrieval (see context/memory-retrieval.ts): when enabled,
+ * each turn queries the local, read-only Pi OKF memory provider under
+ * `<agentDir>/okf-memory` (fixed path, not user-configurable in this slice) and stores a
+ * report of source-labeled evidence. Nothing here is ever injected into the provider-
+ * visible prompt or transcript -- report-only. External/non-local providers are never
+ * constructed or queried by this setting.
+ */
+export interface MemoryRetrievalSettings {
+	enabled?: boolean; // default: false -- no behavior change unless explicitly opted in
+	maxResults?: number; // default: 5, clamped to [1, 20]
+}
+
 export interface ContextPolicySettings {
 	enforcement?: ContextPromptEnforcementSettings;
+	memory?: MemoryRetrievalSettings;
+}
+
+export const MEMORY_RETRIEVAL_MAX_RESULTS_MIN = 1;
+export const MEMORY_RETRIEVAL_MAX_RESULTS_MAX = 20;
+const MEMORY_RETRIEVAL_MAX_RESULTS_DEFAULT = 5;
+
+function clampMemoryRetrievalMaxResults(value: number): number {
+	return Math.min(MEMORY_RETRIEVAL_MAX_RESULTS_MAX, Math.max(MEMORY_RETRIEVAL_MAX_RESULTS_MIN, Math.trunc(value)));
 }
 
 export interface BranchSummarySettings {
@@ -1984,6 +2006,34 @@ export class SettingsManager {
 		}
 
 		this.globalSettings.contextPolicy = { ...this.globalSettings.contextPolicy, enforcement: { ...settings } };
+		this.markModified("contextPolicy");
+		this.save();
+	}
+
+	getMemoryRetrievalSettings(): { enabled: boolean; maxResults: number } {
+		return {
+			enabled: this.settings.contextPolicy?.memory?.enabled ?? false,
+			maxResults: clampMemoryRetrievalMaxResults(
+				this.settings.contextPolicy?.memory?.maxResults ?? MEMORY_RETRIEVAL_MAX_RESULTS_DEFAULT,
+			),
+		};
+	}
+
+	setMemoryRetrievalSettings(settings: MemoryRetrievalSettings, scope: SettingsScope = "global"): void {
+		const normalized: MemoryRetrievalSettings = {
+			enabled: settings.enabled,
+			maxResults:
+				settings.maxResults === undefined ? undefined : clampMemoryRetrievalMaxResults(settings.maxResults),
+		};
+		if (scope === "project") {
+			const projectSettings = structuredClone(this.projectSettings);
+			projectSettings.contextPolicy = { ...projectSettings.contextPolicy, memory: normalized };
+			this.markProjectModified("contextPolicy");
+			this.saveProjectSettings(projectSettings);
+			return;
+		}
+
+		this.globalSettings.contextPolicy = { ...this.globalSettings.contextPolicy, memory: normalized };
 		this.markModified("contextPolicy");
 		this.save();
 	}
