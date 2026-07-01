@@ -49,6 +49,22 @@
   `AgentSession.rollbackLearningWrite`) executes the inverse memory operation or archives a
   promoted skill, exactly once per change, and records a linked rollback audit. Audit records
   appear in the `/autonomy diagnostics` learning family.
+- Added model-capability auto-detection so small open models (including sub-1B local models) stay
+  usable for chat: the harness derives a capability class from the model's own `contextWindow`
+  metadata — full (≥32k, unchanged), lean (≥16k, background-autonomy tools like `delegate` and
+  `context_audit` blocked), minimal (≥8k, tools reduced to read/bash/edit/write, background lanes
+  disabled), and chat (<8k, no tools at all). Filtering happens in `setActiveToolsByName`, so the
+  system prompt sheds the blocked tools' schemas and guidelines too; the unfiltered request is
+  remembered and restored when switching back to a larger model, with a visible notice on
+  downgrade. Idle goal auto-continuation and the research lane are gated off below 16k
+  (`model_context_too_small` in diagnostics), and lane output-token budgets scale to the lane
+  model's window. Metadata-first with defaults only when info is missing (unknown window keeps
+  full behavior); configurable via `modelCapability.mode` (`auto` default, `off`, or a forced
+  class).
+- Changed background-lane model resolution to inherit the session model the lane was shipped
+  from unless a lane-specific model is explicitly configured (the router's `cheapModel` no longer
+  implicitly redirects lanes) — single-model setups, e.g. one local open model, now run research
+  and scout workers on that same model.
 
 ### Changed
 

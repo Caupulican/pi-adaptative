@@ -1,0 +1,93 @@
+import { describe, expect, it } from "vitest";
+import {
+	deriveModelCapabilityProfile,
+	filterToolNamesForCapability,
+	MODEL_CAPABILITY_CHAT_ALLOWED_TOOLS,
+	MODEL_CAPABILITY_LEAN_BLOCKED_TOOLS,
+	MODEL_CAPABILITY_MINIMAL_ALLOWED_TOOLS,
+} from "../src/core/model-capability.ts";
+
+const DEFAULT_ACTIVE = ["read", "bash", "edit", "write", "context_audit", "goal", "delegate"];
+
+describe("deriveModelCapabilityProfile", () => {
+	it("classifies by context window with metadata-first derivation", () => {
+		expect(deriveModelCapabilityProfile({ contextWindow: 200_000 }).class).toBe("full");
+		expect(deriveModelCapabilityProfile({ contextWindow: 32_768 }).class).toBe("full");
+		expect(deriveModelCapabilityProfile({ contextWindow: 24_000 }).class).toBe("lean");
+		expect(deriveModelCapabilityProfile({ contextWindow: 16_384 }).class).toBe("lean");
+		expect(deriveModelCapabilityProfile({ contextWindow: 12_000 }).class).toBe("minimal");
+		expect(deriveModelCapabilityProfile({ contextWindow: 8_192 }).class).toBe("minimal");
+		expect(deriveModelCapabilityProfile({ contextWindow: 4_096 }).class).toBe("chat");
+		expect(deriveModelCapabilityProfile({ contextWindow: 2_048 }).class).toBe("chat");
+	});
+
+	it("falls back to full defaults when the window is unknown (defaults are for missing info)", () => {
+		const missing = deriveModelCapabilityProfile({});
+		expect(missing.class).toBe("full");
+		expect(missing.reasonCode).toBe("unknown_context_window_defaults");
+		expect(missing.allowedToolNames).toBeUndefined();
+		expect(missing.blockedToolNames).toBeUndefined();
+		expect(missing.backgroundLanesEnabled).toBe(true);
+
+		expect(deriveModelCapabilityProfile({ contextWindow: 0 }).reasonCode).toBe("unknown_context_window_defaults");
+		expect(deriveModelCapabilityProfile({ contextWindow: -5 }).reasonCode).toBe("unknown_context_window_defaults");
+	});
+
+	it("disables background lanes below the lean threshold and scales lane output tokens", () => {
+		expect(deriveModelCapabilityProfile({ contextWindow: 200_000 }).backgroundLanesEnabled).toBe(true);
+		expect(deriveModelCapabilityProfile({ contextWindow: 16_384 }).backgroundLanesEnabled).toBe(true);
+		expect(deriveModelCapabilityProfile({ contextWindow: 8_192 }).backgroundLanesEnabled).toBe(false);
+		expect(deriveModelCapabilityProfile({ contextWindow: 4_096 }).backgroundLanesEnabled).toBe(false);
+
+		expect(deriveModelCapabilityProfile({ contextWindow: 200_000 }).laneMaxOutputTokens).toBe(2048);
+		expect(deriveModelCapabilityProfile({ contextWindow: 8_192 }).laneMaxOutputTokens).toBe(1024);
+		expect(deriveModelCapabilityProfile({ contextWindow: 2_048 }).laneMaxOutputTokens).toBe(256);
+	});
+
+	it("honors mode off and forced classes regardless of the window", () => {
+		const off = deriveModelCapabilityProfile({ contextWindow: 2_048, mode: "off" });
+		expect(off.class).toBe("full");
+		expect(off.reasonCode).toBe("detection_disabled");
+
+		const forcedChat = deriveModelCapabilityProfile({ contextWindow: 200_000, mode: "chat" });
+		expect(forcedChat.class).toBe("chat");
+		expect(forcedChat.reasonCode).toBe("forced_by_setting");
+
+		const forcedFull = deriveModelCapabilityProfile({ contextWindow: 2_048, mode: "full" });
+		expect(forcedFull.class).toBe("full");
+	});
+});
+
+describe("filterToolNamesForCapability", () => {
+	it("keeps everything for full", () => {
+		const profile = deriveModelCapabilityProfile({ contextWindow: 200_000 });
+		expect(filterToolNamesForCapability(DEFAULT_ACTIVE, profile)).toEqual(DEFAULT_ACTIVE);
+	});
+
+	it("blocks background-autonomy tools for lean", () => {
+		const profile = deriveModelCapabilityProfile({ contextWindow: 16_384 });
+		const filtered = filterToolNamesForCapability(DEFAULT_ACTIVE, profile);
+		for (const blocked of MODEL_CAPABILITY_LEAN_BLOCKED_TOOLS) {
+			expect(filtered).not.toContain(blocked);
+		}
+		expect(filtered).toContain("read");
+		expect(filtered).toContain("edit");
+	});
+
+	it("reduces minimal to the core coding set and chat to nothing", () => {
+		const minimal = deriveModelCapabilityProfile({ contextWindow: 8_192 });
+		expect(filterToolNamesForCapability(DEFAULT_ACTIVE, minimal)).toEqual([
+			...MODEL_CAPABILITY_MINIMAL_ALLOWED_TOOLS,
+		]);
+
+		const chat = deriveModelCapabilityProfile({ contextWindow: 4_096 });
+		expect(filterToolNamesForCapability(DEFAULT_ACTIVE, chat)).toEqual([...MODEL_CAPABILITY_CHAT_ALLOWED_TOOLS]);
+		expect(filterToolNamesForCapability(DEFAULT_ACTIVE, chat)).toEqual([]);
+	});
+
+	it("preserves requested order and never invents tools", () => {
+		const minimal = deriveModelCapabilityProfile({ contextWindow: 8_192 });
+		expect(filterToolNamesForCapability(["write", "goal", "read"], minimal)).toEqual(["write", "read"]);
+		expect(filterToolNamesForCapability([], minimal)).toEqual([]);
+	});
+});

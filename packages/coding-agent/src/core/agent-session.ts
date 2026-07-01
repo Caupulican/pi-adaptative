@@ -179,6 +179,11 @@ import { FileStoreProvider } from "./memory/providers/file-store.ts";
 import { TranscriptRecallProvider } from "./memory/providers/transcript-recall.ts";
 import { compactToolResultDetailsForRetention } from "./message-retention.ts";
 import { type BashExecutionMessage, type CustomMessage, createCustomMessage } from "./messages.ts";
+import {
+	deriveModelCapabilityProfile,
+	filterToolNamesForCapability,
+	type ModelCapabilityProfile,
+} from "./model-capability.ts";
 import type { ModelRegistry } from "./model-registry.ts";
 import { resolveCliModel, resolveProfileModelSettings } from "./model-resolver.ts";
 import { collectModelRouterConfigDiagnostics } from "./model-router/config-diagnostics.ts";
@@ -611,6 +616,11 @@ export class AgentSession {
 	private _isWorkerDelegationRunning = false;
 	/** Session-lifetime abort for in-flight delegated workers. */
 	private readonly _workerDelegationAbort = new AbortController();
+	/**
+	 * The last tool set requested via setActiveToolsByName BEFORE model-capability filtering, so
+	 * switching from a small-window model back to a large one restores the full requested set.
+	 */
+	private _requestedActiveToolNames: string[] | undefined;
 
 	// Compaction/context hygiene state
 	private _compactionAbortController: AbortController | undefined = undefined;
@@ -1963,6 +1973,12 @@ export class AgentSession {
 	 * "Full output: artifact tool-output:<id>" handle.
 	 */
 	setActiveToolsByName(toolNames: string[]): void {
+		// Model capability: small-window models get a reduced tool surface derived from the model's
+		// own metadata. The unfiltered request is remembered so a later switch to a larger model
+		// restores it (the filter is re-applied on every model change).
+		this._requestedActiveToolNames = [...toolNames];
+		const capabilityFiltered = filterToolNamesForCapability(toolNames, this.getModelCapabilityProfile());
+
 		const tools: AgentTool[] = [];
 		const validToolNames: string[] = [];
 		const seen = new Set<string>();
@@ -1975,7 +1991,7 @@ export class AgentSession {
 			validToolNames.push(name);
 		};
 
-		for (const name of toolNames) {
+		for (const name of capabilityFiltered) {
 			addIfRegistered(name);
 		}
 		if (validToolNames.includes("grep") || validToolNames.includes("find")) {
@@ -3098,6 +3114,20 @@ export class AgentSession {
 
 		await this._emitModelSelect(model, previousModel, "set");
 		this._checkContextWindowUsageWarning();
+
+		// Re-derive the model-capability tool surface for the new model (restores the full requested
+		// set when moving small -> large, reduces it when moving large -> small).
+		if (this._requestedActiveToolNames) {
+			const before = this.getActiveToolNames().join(",");
+			this.setActiveToolsByName(this._requestedActiveToolNames);
+			const capability = this.getModelCapabilityProfile();
+			if (capability.class !== "full" && this.getActiveToolNames().join(",") !== before) {
+				this._emit({
+					type: "warning",
+					message: `Small-context model detected (${capability.contextWindow ?? "unknown"} tokens, class '${capability.class}'): active tools reduced to [${this.getActiveToolNames().join(", ")}]; background lanes ${capability.backgroundLanesEnabled ? "enabled" : "disabled"}.`,
+				});
+			}
+		}
 	}
 
 	/**
@@ -5421,6 +5451,9 @@ export class AgentSession {
 	private _scheduleGoalAutoContinueFromIdle(options?: PromptOptions): void {
 		if (options?.autoContinueGoal === false || this._isGoalAutoContinuing || this._disposed) return;
 
+		// Small-window models cannot afford multi-thousand-token continuation prompts per idle turn.
+		if (!this.getModelCapabilityProfile().backgroundLanesEnabled) return;
+
 		const { maxStallTurns, goalAutoContinue, goalAutoContinueDelayMs } = this.settingsManager.getAutonomySettings();
 		if (!goalAutoContinue) return;
 
@@ -5512,6 +5545,11 @@ export class AgentSession {
 	private _scheduleResearchLaneFromIdle(): void {
 		if (this._isResearchLaneRunning || this._disposed || this._isChildSession) return;
 
+		if (!this.getModelCapabilityProfile().backgroundLanesEnabled) {
+			this._lastResearchLaneSkipReason = "model_context_too_small";
+			return;
+		}
+
 		const research = this.settingsManager.getResearchLaneSettings();
 		if (!research.enabled) {
 			this._lastResearchLaneSkipReason = "research_lane_disabled";
@@ -5560,15 +5598,33 @@ export class AgentSession {
 	}
 
 	/**
-	 * Resolve the model for a background lane: configured pattern, else the router's cheap model,
-	 * else the session model. An explicitly configured pattern that cannot resolve/authenticate is a
-	 * visible skip, not a silent fallback onto a potentially expensive session model.
+	 * Capability profile derived from the CURRENT session model's own metadata (context window),
+	 * honoring the modelCapability.mode setting ("off" disables, a class name forces).
+	 */
+	getModelCapabilityProfile(): ModelCapabilityProfile {
+		return deriveModelCapabilityProfile({
+			contextWindow: this.model?.contextWindow,
+			mode: this.settingsManager.getModelCapabilitySettings().mode,
+		});
+	}
+
+	/** Capability profile for a specific lane model (lane budgets scale to the lane model's window). */
+	private _laneCapabilityProfile(model: Model<Api>): ModelCapabilityProfile {
+		return deriveModelCapabilityProfile({
+			contextWindow: model.contextWindow,
+			mode: this.settingsManager.getModelCapabilitySettings().mode,
+		});
+	}
+
+	/**
+	 * Resolve the model for a background lane. Lanes are shipped BY this session, so they inherit
+	 * the session's own model unless a lane-specific model is explicitly configured — a single-model
+	 * setup (e.g. one local open model) runs its lanes on that same model. An explicitly configured
+	 * pattern that cannot resolve/authenticate is a visible skip, not a silent fallback.
 	 */
 	private _resolveLaneModel(configuredPattern: string | undefined): Model<Api> | undefined {
-		const routerSettings = this.settingsManager.getModelRouterSettings();
-		const pattern = configuredPattern ?? routerSettings.cheapModel;
-		if (pattern) {
-			const resolved = resolveCliModel({ cliModel: pattern, modelRegistry: this._modelRegistry });
+		if (configuredPattern) {
+			const resolved = resolveCliModel({ cliModel: configuredPattern, modelRegistry: this._modelRegistry });
 			if (resolved.model && this._modelRegistry.hasConfiguredAuth(resolved.model)) {
 				return resolved.model;
 			}
@@ -5642,7 +5698,7 @@ export class AgentSession {
 						messages: [{ role: "user", content: [{ type: "text", text: userPrompt }], timestamp: Date.now() }],
 						model,
 						thinkingLevel: "off",
-						maxTokens: 2048,
+						maxTokens: this._laneCapabilityProfile(model).laneMaxOutputTokens,
 						signal,
 						// The research system prompt is static — let the provider cache the prefix.
 						cacheRetention: "short",
@@ -5769,7 +5825,7 @@ export class AgentSession {
 						messages: [{ role: "user", content: [{ type: "text", text: userPrompt }], timestamp: Date.now() }],
 						model,
 						thinkingLevel: "off",
-						maxTokens: 2048,
+						maxTokens: this._laneCapabilityProfile(model).laneMaxOutputTokens,
 						signal,
 						// The worker system prompt is static — let the provider cache the prefix.
 						cacheRetention: "short",

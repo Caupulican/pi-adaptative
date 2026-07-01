@@ -198,7 +198,7 @@ export const MAX_RESEARCH_LANE_MAX_RUNS_PER_SESSION = 100;
 
 export interface ResearchLaneSettings {
 	enabled?: boolean; // default: false — autonomous background research is opt-in
-	model?: string; // model pattern; unset falls back to modelRouter.cheapModel, then the session model
+	model?: string; // model pattern; unset inherits the session model the lane was shipped from
 	maxUsd?: number; // default: 0.25 per research pass; post-hoc breaches mark the lane budget_exhausted
 	maxSources?: number; // default: 8 evidence sources per bundle
 	maxFindings?: number; // default: 10 findings per bundle
@@ -218,7 +218,7 @@ export const MAX_WORKER_DELEGATION_MAX_WALL_CLOCK_MS = 3_600_000;
 
 export interface WorkerDelegationSettings {
 	enabled?: boolean; // default: false — the delegate tool refuses (with a reason) until enabled
-	model?: string; // model pattern; unset falls back to modelRouter.cheapModel, then the session model
+	model?: string; // model pattern; unset inherits the session model the lane was shipped from
 	maxUsd?: number; // default: 0.50 per delegated worker; post-hoc breaches mark the lane budget_exhausted
 	maxWallClockMs?: number; // default: 120000; 0 disables the wall-clock budget
 }
@@ -254,6 +254,18 @@ export interface LearningPolicySettings {
 }
 
 export type ResolvedLearningPolicySettings = Required<LearningPolicySettings>;
+
+export type ModelCapabilityMode = "auto" | "off" | "full" | "lean" | "minimal" | "chat";
+
+export const DEFAULT_MODEL_CAPABILITY_MODE: ModelCapabilityMode = "auto";
+
+export interface ModelCapabilitySettings {
+	/**
+	 * default: "auto" — derive the tool/lane surface from the model's context window so small open
+	 * models stay usable for chat. "off" disables detection; a class name forces that class.
+	 */
+	mode?: ModelCapabilityMode;
+}
 
 export type TransportSetting = Transport;
 
@@ -347,6 +359,7 @@ export interface Settings {
 	researchLane?: ResearchLaneSettings; // Opt-in autonomous read-only research lane producing evidence bundles
 	workerDelegation?: WorkerDelegationSettings; // Opt-in bounded scout-worker delegation via the delegate tool
 	learningPolicy?: LearningPolicySettings; // Opt-in learning apply policy: proposal-first durable writes with audit/rollback
+	modelCapability?: ModelCapabilitySettings; // Auto-detected small-model tool/lane surface (default: auto)
 	modelRouter?: ModelRouterSettings; // Opt-in deterministic cheap/expensive model routing foundation
 	autoLearn?: AutoLearnSettings; // Setting-gated autonomous background learning for long sessions
 	sessionDir?: string; // Custom session storage directory (same format as --session-dir CLI flag)
@@ -2735,6 +2748,34 @@ export class SettingsManager {
 				100,
 			),
 		};
+	}
+
+	getModelCapabilitySettings(): Required<ModelCapabilitySettings> {
+		const configured = this.settings.modelCapability?.mode;
+		const mode: ModelCapabilityMode =
+			configured === "auto" ||
+			configured === "off" ||
+			configured === "full" ||
+			configured === "lean" ||
+			configured === "minimal" ||
+			configured === "chat"
+				? configured
+				: DEFAULT_MODEL_CAPABILITY_MODE;
+		return { mode };
+	}
+
+	setModelCapabilitySettings(settings: ModelCapabilitySettings, scope: SettingsScope = "global"): void {
+		if (scope === "project") {
+			const projectSettings = structuredClone(this.projectSettings);
+			projectSettings.modelCapability = { ...settings };
+			this.markProjectModified("modelCapability");
+			this.saveProjectSettings(projectSettings);
+			return;
+		}
+
+		this.globalSettings.modelCapability = { ...settings };
+		this.markModified("modelCapability");
+		this.save();
 	}
 
 	setLearningPolicySettings(settings: LearningPolicySettings, scope: SettingsScope = "global"): void {
