@@ -2,6 +2,16 @@
 
 ### Added
 
+- Added an opt-in Context / Prompt Policy setting that stubs stale, artifact-backed grep/find tool output
+  in the model-visible prompt only (never the transcript) once configured retention-window and character
+  thresholds are exceeded. Configurable via the Context / Prompt Policy settings submenu; default disabled.
+- Added an opt-in Context / Memory Retrieval setting that searches local Pi OKF memory documents each turn
+  and can optionally surface a bounded, source-labeled evidence block in the model prompt (never the
+  transcript). Configurable via the Context / Memory Retrieval settings submenu, including a separate
+  "Include in prompt" toggle; both default disabled, and retrieval only ever queries the local provider.
+- Extended `context_audit` with a compact Memory retrieval / Prompt inclusion diagnostic section reporting
+  status and counts for the two settings above, without exposing any memory content, query text, or file
+  paths.
 - Added a `goal` tool that records the durable goal ledger (goal, requirements, evidence, and
   progress/stall events) as session-persisted snapshots. This is the producer that drives the bounded
   goal continuation loop and `/goal-continue`; without it the continuation runtime always read empty
