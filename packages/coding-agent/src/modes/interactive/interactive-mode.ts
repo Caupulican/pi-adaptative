@@ -63,6 +63,7 @@ import {
 } from "../../config.ts";
 import { type AgentSession, type AgentSessionEvent, parseSkillBlock } from "../../core/agent-session.ts";
 import { type AgentSessionRuntime, SessionImportFileNotFoundError } from "../../core/agent-session-runtime.ts";
+import { formatAutonomyDiagnostics } from "../../core/autonomy/status.ts";
 import { readAutoLearnSessionIdFromFile, reportCompletedAutoLearnUsageHelper } from "../../core/cost/session-usage.ts";
 import type {
 	AutocompleteProviderFactory,
@@ -6103,7 +6104,15 @@ export class InteractiveMode {
 			this.ui.requestRender();
 			return;
 		}
-		this.showStatus("Usage: /autonomy [status|off|safe|balanced|full]");
+		if (action === "diagnostics") {
+			this.chatContainer.addChild(new Spacer(1));
+			this.chatContainer.addChild(
+				new Text(formatAutonomyDiagnostics(this.session.getAutonomyDiagnosticSnapshot()), 1, 0),
+			);
+			this.ui.requestRender();
+			return;
+		}
+		this.showStatus("Usage: /autonomy [status|diagnostics|off|safe|balanced|full]");
 	}
 
 	private handleAutoLearnCommand(text: string): void {

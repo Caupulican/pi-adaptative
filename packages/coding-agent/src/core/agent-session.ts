@@ -60,7 +60,7 @@ import type {
 	WorkerResult,
 } from "./autonomy/contracts.ts";
 import { evaluateToolGate } from "./autonomy/gates.ts";
-import type { AutonomyStatusSnapshot } from "./autonomy/status.ts";
+import type { AutonomyDiagnosticSnapshot, AutonomyStatusSnapshot, DiagnosticEntry } from "./autonomy/status.ts";
 import { type BashResult, executeBashWithOperations } from "./bash-executor.ts";
 import {
 	type CompactionResult,
@@ -5857,6 +5857,11 @@ export class AgentSession {
 			};
 		}
 
+		const currentCost = this.getSessionStats().cost;
+		if (currentCost > 0) {
+			snapshot.currentCostUsd = currentCost;
+		}
+
 		const spawnedCost = this.getSpawnedUsage().cost;
 		if (spawnedCost > 0) {
 			snapshot.spawnedCostUsd = spawnedCost;
@@ -5865,6 +5870,122 @@ export class AgentSession {
 		const dailyCost = this.getDailyUsageTotals?.()?.totalCost;
 		if (dailyCost !== undefined && dailyCost > 0) {
 			snapshot.dailyCostUsd = dailyCost;
+		}
+
+		const goal = this.getGoalStateSnapshot();
+		if (goal) {
+			snapshot.activeGoal = {
+				goalId: goal.goalId,
+				status: goal.status,
+				openRequirements: goal.requirements.filter((requirement) => requirement.status === "open").length,
+				stallTurns: goal.stallTurns,
+			};
+		}
+
+		// activeLaneCount is intentionally left undefined: there is no live concurrency tracker
+		// for research/worker/learning lanes yet, only historical snapshots. Populate once one exists.
+
+		return snapshot;
+	}
+
+	/**
+	 * Aggregate an effectiveness/autonomy dashboard: what Pi has actually been doing (recent
+	 * route choices, latest gate outcome, cost, and any research/delegation/learning/goal
+	 * activity). Read-only — combines existing session-log getters, never mutates state or
+	 * recomputes a route/gate decision.
+	 */
+	public getAutonomyDiagnosticSnapshot(options?: { maxEntriesPerFamily?: number }): AutonomyDiagnosticSnapshot {
+		const maxEntriesPerFamily = options?.maxEntriesPerFamily ?? 10;
+		const snapshot: AutonomyDiagnosticSnapshot = {};
+		const goal = this.getGoalStateSnapshot();
+
+		const recentDecisions = getRecentModelRouterDecisions(this.sessionManager.getEntries(), maxEntriesPerFamily);
+		if (recentDecisions.length > 0) {
+			snapshot.routes = recentDecisions.map(
+				(decision): DiagnosticEntry => ({
+					title: decision.route.tier,
+					summary: decision.routedModel,
+					reasonCode: decision.route.reasonCode,
+					metadata: { risk: decision.route.risk, outcome: decision.outcome, intent: decision.intent },
+				}),
+			);
+		}
+
+		if (this._lastAutonomyGateOutcome) {
+			const gate = this._lastAutonomyGateOutcome;
+			snapshot.gates = [
+				{
+					title: gate.gate,
+					summary: gate.message,
+					reasonCode: gate.reasonCode,
+					metadata: { outcome: gate.outcome, reversible: gate.reversible },
+				},
+			];
+		}
+
+		const costs: DiagnosticEntry[] = [];
+		const currentCostForDiagnostics = this.getSessionStats().cost;
+		if (currentCostForDiagnostics > 0) {
+			costs.push({ title: "current", summary: `$${currentCostForDiagnostics.toFixed(4)}` });
+		}
+		const spawnedCost = this.getSpawnedUsage().cost;
+		if (spawnedCost > 0) costs.push({ title: "spawned", summary: `$${spawnedCost.toFixed(4)}` });
+		const dailyCostForDiagnostics = this.getDailyUsageTotals?.()?.totalCost;
+		if (dailyCostForDiagnostics !== undefined && dailyCostForDiagnostics > 0) {
+			costs.push({ title: "daily", summary: `$${dailyCostForDiagnostics.toFixed(4)}` });
+		}
+		if (costs.length > 0) snapshot.costs = costs;
+
+		const evidenceBundle = this.getEvidenceBundleSnapshot();
+		if (evidenceBundle) {
+			snapshot.research = [
+				{
+					title: `Research: ${evidenceBundle.query}`,
+					metadata: { sourceCount: evidenceBundle.sources.length, findingCount: evidenceBundle.findings.length },
+				},
+			];
+		}
+
+		const workerResults = this.getWorkerResultSnapshots();
+		if (workerResults.length > 0) {
+			snapshot.delegation = workerResults.slice(-maxEntriesPerFamily).map(
+				(result): DiagnosticEntry => ({
+					title: `Worker ${result.requestId} (${result.status})`,
+					summary: result.summary,
+					metadata: {
+						changedFileCount: result.changedFiles.length,
+						blockerCount: result.blockers?.length ?? 0,
+						usageReportId: result.usageReportId,
+					},
+				}),
+			);
+		}
+
+		const learningDecisions = this.getLearningDecisionSnapshots();
+		if (learningDecisions.length > 0) {
+			snapshot.learning = learningDecisions.slice(-maxEntriesPerFamily).map(
+				(decision): DiagnosticEntry => ({
+					title: `Learning (${decision.kind})`,
+					summary: decision.summary,
+					reasonCode: decision.reasonCode,
+					metadata: { confidence: decision.confidence, requiresApproval: decision.requiresApproval },
+				}),
+			);
+		}
+
+		if (goal) {
+			snapshot.goals = [
+				{
+					title: `Goal ${goal.goalId}`,
+					summary: goal.userGoal,
+					reasonCode: goal.status,
+					metadata: {
+						openRequirementCount: goal.requirements.filter((requirement) => requirement.status === "open").length,
+						stallTurns: goal.stallTurns,
+						blockedReason: goal.blockedReason,
+					},
+				},
+			];
 		}
 
 		return snapshot;

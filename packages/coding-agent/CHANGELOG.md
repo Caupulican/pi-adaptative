@@ -16,6 +16,9 @@
   progress/stall events) as session-persisted snapshots. This is the producer that drives the bounded
   goal continuation loop and `/goal-continue`; without it the continuation runtime always read empty
   state and could not continue. The tool is active by default and maps to the `memory_write` capability.
+- Added `/autonomy diagnostics`, an effectiveness dashboard summarizing recent model-router decisions,
+  current/spawned/daily cost totals, and, when present, the latest research, worker-delegation,
+  learning, and goal activity. It is additive to `/autonomy [status|off|safe|balanced|full]`.
 
 ### Changed
 
