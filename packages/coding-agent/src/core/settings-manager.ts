@@ -46,6 +46,22 @@ export interface ContextGcSettings {
 	semanticMemory?: SemanticMemoryGcSettings;
 }
 
+/**
+ * Conservative, opt-in first enforcement pilot for the context-policy layer (observe-only
+ * by default -- see context/context-prompt-enforcement.ts). When enabled, stale
+ * artifact-backed tool_output results outside the recent window are stubbed in place in
+ * the provider-visible prompt only; the transcript/session history is never touched.
+ */
+export interface ContextPromptEnforcementSettings {
+	enabled?: boolean; // default: false -- no behavior change unless explicitly opted in
+	preserveRecentMessages?: number; // default: 8 (mirrors context-gc's own default recency window)
+	minChars?: number; // default: 1200 (mirrors context-gc's own minToolResultChars default)
+}
+
+export interface ContextPolicySettings {
+	enforcement?: ContextPromptEnforcementSettings;
+}
+
 export interface BranchSummarySettings {
 	reserveTokens?: number; // default: 16384 (tokens reserved for prompt + LLM response)
 	skipPrompt?: boolean; // default: false - when true, skips "Summarize branch?" prompt and defaults to no summary
@@ -194,6 +210,7 @@ export interface Settings {
 	/** Skill curator (#32): auto-archive stale reflection-promoted skills at session start. */
 	curator?: { autoArchive?: boolean; staleDays?: number };
 	contextGc?: ContextGcSettings;
+	contextPolicy?: ContextPolicySettings;
 	branchSummary?: BranchSummarySettings;
 	retry?: RetrySettings;
 	hideThinkingBlock?: boolean;
@@ -1943,6 +1960,14 @@ export class SettingsManager {
 					"<automata_mesh",
 				],
 			},
+		};
+	}
+
+	getContextPromptEnforcementSettings(): { enabled: boolean; preserveRecentMessages: number; minChars: number } {
+		return {
+			enabled: this.settings.contextPolicy?.enforcement?.enabled ?? false,
+			preserveRecentMessages: this.settings.contextPolicy?.enforcement?.preserveRecentMessages ?? 8,
+			minChars: this.settings.contextPolicy?.enforcement?.minChars ?? 1200,
 		};
 	}
 

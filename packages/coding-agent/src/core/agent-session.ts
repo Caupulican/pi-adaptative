@@ -75,6 +75,7 @@ import {
 } from "./compaction/index.ts";
 import { type ArtifactStore, createFileArtifactStore } from "./context/context-artifacts.ts";
 import { type ContextAuditReport, runContextAudit } from "./context/context-audit.ts";
+import { enforcePromptPolicy, type PromptEnforcementReport } from "./context/context-prompt-enforcement.ts";
 import {
 	correlateWithContextGc,
 	type PromptPolicyGcCorrelationReport,
@@ -533,6 +534,7 @@ export class AgentSession {
 	private _latestContextAuditReport: ContextAuditReport | undefined = undefined;
 	private _latestPromptPolicyReport: PromptPolicyShadowReport | undefined = undefined;
 	private _latestPromptPolicyGcCorrelation: PromptPolicyGcCorrelationReport | undefined = undefined;
+	private _latestPromptEnforcementReport: PromptEnforcementReport | undefined = undefined;
 
 	// Branch summarization state
 	private _branchSummaryAbortController: AbortController | undefined = undefined;
@@ -762,10 +764,11 @@ export class AgentSession {
 				finalMessages = await this._extensionRunner.emitContext(currentMessages);
 			}
 			const auditReport = this._runContextAudit(finalMessages);
-			this._runPromptPolicyPlanning(auditReport);
+			const shadowReport = this._runPromptPolicyPlanning(auditReport);
 			const gcResult = this._applyContextGc(finalMessages, true);
 			this._correlatePromptPolicyWithContextGc(gcResult.report);
-			const gcMessages = gcResult.messages;
+			const enforcementResult = this._runPromptEnforcement(gcResult.messages, shadowReport);
+			const gcMessages = enforcementResult.messages;
 			this._applyCostGuard(gcMessages);
 			return gcMessages;
 		};
@@ -1001,6 +1004,43 @@ export class AgentSession {
 	/** Read-only inspection of the latest shadow-plan/legacy-gc correlation, for tests/debugging. */
 	getPromptPolicyGcCorrelation(): PromptPolicyGcCorrelationReport {
 		return this._latestPromptPolicyGcCorrelation ?? { turnIndex: this._turnIndex, entries: [] };
+	}
+
+	/**
+	 * First enforcement pilot (see context/context-prompt-enforcement.ts): opt-in,
+	 * default-disabled stub-in-place of stale artifact-backed tool_output results in the
+	 * provider-visible message array only. Runs on `messages` AFTER context-gc has already
+	 * produced its own result, so legacy context-gc's own packing/reporting is completely
+	 * unaffected by this pass -- it only ever acts on messages gc left untouched this turn.
+	 * Never throws into a live turn: any failure degrades to returning `messages` unchanged.
+	 */
+	private _runPromptEnforcement(
+		messages: AgentMessage[],
+		shadowReport: PromptPolicyShadowReport,
+	): { messages: AgentMessage[]; report: PromptEnforcementReport } {
+		try {
+			const persistedSettings = this.settingsManager.getContextPromptEnforcementSettings();
+			const settings = {
+				...persistedSettings,
+				// Runtime fact, never assumed: artifact_retrieve is a companion affordance
+				// (auto-activated alongside grep/find), not a default/global tool, so active
+				// tools can differ turn to turn -- see context-prompt-enforcement.ts's doc
+				// comment on why this is checked separately from hasAvailableRetrievalPath.
+				retrievalToolAvailable: this.getActiveToolNames().includes("artifact_retrieve"),
+			};
+			const result = enforcePromptPolicy(messages, shadowReport, settings);
+			this._latestPromptEnforcementReport = result.report;
+			return result;
+		} catch {
+			const report: PromptEnforcementReport = { turnIndex: this._turnIndex, items: [] };
+			this._latestPromptEnforcementReport = report;
+			return { messages, report };
+		}
+	}
+
+	/** Read-only inspection of the latest prompt-enforcement report, for tests/debugging. */
+	getPromptEnforcementReport(): PromptEnforcementReport {
+		return this._latestPromptEnforcementReport ?? { turnIndex: this._turnIndex, items: [] };
 	}
 
 	private _applyContextGc(
