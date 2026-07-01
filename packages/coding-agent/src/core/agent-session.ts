@@ -75,6 +75,12 @@ import {
 } from "./compaction/index.ts";
 import { type ArtifactStore, createFileArtifactStore } from "./context/context-artifacts.ts";
 import { type ContextAuditReport, runContextAudit } from "./context/context-audit.ts";
+import {
+	correlateWithContextGc,
+	type PromptPolicyGcCorrelationReport,
+	type PromptPolicyShadowReport,
+	planPromptPolicy,
+} from "./context/context-prompt-policy.ts";
 import { applyContextGc, type ContextGcReport } from "./context-gc.ts";
 import {
 	aggregateDailyUsageFromSessionFiles,
@@ -525,6 +531,8 @@ export class AgentSession {
 	private _latestContextGcReport: ContextGcReport | undefined = undefined;
 	private _toolArtifactStore: ArtifactStore | undefined = undefined;
 	private _latestContextAuditReport: ContextAuditReport | undefined = undefined;
+	private _latestPromptPolicyReport: PromptPolicyShadowReport | undefined = undefined;
+	private _latestPromptPolicyGcCorrelation: PromptPolicyGcCorrelationReport | undefined = undefined;
 
 	// Branch summarization state
 	private _branchSummaryAbortController: AbortController | undefined = undefined;
@@ -753,8 +761,11 @@ export class AgentSession {
 			if (this._extensionRunner.hasHandlers("context")) {
 				finalMessages = await this._extensionRunner.emitContext(currentMessages);
 			}
-			this._runContextAudit(finalMessages);
-			const gcMessages = this._applyContextGc(finalMessages, true).messages;
+			const auditReport = this._runContextAudit(finalMessages);
+			this._runPromptPolicyPlanning(auditReport);
+			const gcResult = this._applyContextGc(finalMessages, true);
+			this._correlatePromptPolicyWithContextGc(gcResult.report);
+			const gcMessages = gcResult.messages;
 			this._applyCostGuard(gcMessages);
 			return gcMessages;
 		};
@@ -942,6 +953,54 @@ export class AgentSession {
 	getContextAuditReport(messages?: AgentMessage[]): ContextAuditReport {
 		if (messages) return this._runContextAudit(messages);
 		return this._latestContextAuditReport ?? { turnIndex: this._turnIndex, items: [] };
+	}
+
+	/**
+	 * Observe-first shadow/planning pass (see context/context-prompt-policy.ts): re-shapes
+	 * the audit report into a per-item policy plan whose `appliedAction` is always
+	 * "keep_raw" -- this never enforces anything, it only records what the policy engine
+	 * would say. Never throws into a live turn: any failure degrades to an empty report.
+	 */
+	private _runPromptPolicyPlanning(auditReport: ContextAuditReport): PromptPolicyShadowReport {
+		try {
+			const report = planPromptPolicy(auditReport);
+			this._latestPromptPolicyReport = report;
+			return report;
+		} catch {
+			const report: PromptPolicyShadowReport = { turnIndex: this._turnIndex, items: [] };
+			this._latestPromptPolicyReport = report;
+			return report;
+		}
+	}
+
+	/**
+	 * Read-only inspection of the shadow policy plan. With `messages`, recomputes fresh
+	 * (audit + plan) against the given array; without, returns the last plan computed
+	 * during a real transform pass. Never mutates messages/transcript/artifact refs.
+	 */
+	getPromptPolicyReport(messages?: AgentMessage[]): PromptPolicyShadowReport {
+		if (messages) return this._runPromptPolicyPlanning(this._runContextAudit(messages));
+		return this._latestPromptPolicyReport ?? { turnIndex: this._turnIndex, items: [] };
+	}
+
+	/**
+	 * Report-only correlation between the shadow plan just computed this turn and what the
+	 * legacy context-gc pass actually packed. Runs after `_applyContextGc()` has already
+	 * produced its report; never influences context-gc itself. Never throws into a live
+	 * turn: any failure degrades to an empty correlation.
+	 */
+	private _correlatePromptPolicyWithContextGc(gcReport: ContextGcReport): void {
+		const shadowReport = this._latestPromptPolicyReport ?? { turnIndex: this._turnIndex, items: [] };
+		try {
+			this._latestPromptPolicyGcCorrelation = correlateWithContextGc(shadowReport, gcReport);
+		} catch {
+			this._latestPromptPolicyGcCorrelation = { turnIndex: this._turnIndex, entries: [] };
+		}
+	}
+
+	/** Read-only inspection of the latest shadow-plan/legacy-gc correlation, for tests/debugging. */
+	getPromptPolicyGcCorrelation(): PromptPolicyGcCorrelationReport {
+		return this._latestPromptPolicyGcCorrelation ?? { turnIndex: this._turnIndex, entries: [] };
 	}
 
 	private _applyContextGc(

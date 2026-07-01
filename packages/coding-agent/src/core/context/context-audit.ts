@@ -44,12 +44,19 @@ export interface ContextAuditOptions {
 
 export interface ContextAuditItemReport {
 	item: ContextItem;
+	/** The source toolResult message's own id and position, always available (unlike refs). */
+	toolCallId: string;
+	messageIndex: number;
 	/** Coarse, store-free eligibility from context-retention.ts (treats any ref as retrievable). */
 	retention: RetentionEligibility;
+	/** Store-aware hard-constraint codes for keep_raw; always empty (no evaluated action restricts it), included for reportability. */
+	keepRawHardConstraints: PolicyHardConstraintCode[];
 	/** Store-aware hard-constraint codes for pack_to_artifact; empty means no hard rejection. */
 	packToArtifactHardConstraints: PolicyHardConstraintCode[];
 	/** Store-aware hard-constraint codes for drop_from_prompt; empty means no hard rejection. */
 	dropFromPromptHardConstraints: PolicyHardConstraintCode[];
+	/** Store-aware hard-constraint codes for summarize; empty means no hard rejection. */
+	summarizeHardConstraints: PolicyHardConstraintCode[];
 }
 
 export interface ContextAuditReport {
@@ -213,9 +220,13 @@ export function runContextAudit(messages: AgentMessage[], options: ContextAuditO
 		const flags = buildHardConstraintFlags(built, options.artifactStore !== undefined);
 		items.push({
 			item: built.item,
+			toolCallId: message.toolCallId,
+			messageIndex,
 			retention: evaluateRetentionEligibility(built.item),
+			keepRawHardConstraints: evaluateHardConstraints("keep_raw", features, flags),
 			packToArtifactHardConstraints: evaluateHardConstraints("pack_to_artifact", features, flags),
 			dropFromPromptHardConstraints: evaluateHardConstraints("drop_from_prompt", features, flags),
+			summarizeHardConstraints: evaluateHardConstraints("summarize", features, flags),
 		});
 	});
 	return { turnIndex: options.turnIndex, items };
