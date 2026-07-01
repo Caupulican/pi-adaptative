@@ -60,6 +60,8 @@ import type {
 	WorkerResult,
 } from "./autonomy/contracts.ts";
 import { evaluateToolGate } from "./autonomy/gates.ts";
+import { type LaneRecord, LaneTracker } from "./autonomy/lane-tracker.ts";
+import { appendLaneRecordSnapshot, getLaneRecordSnapshots } from "./autonomy/session-lane-record.ts";
 import type { AutonomyDiagnosticSnapshot, AutonomyStatusSnapshot, DiagnosticEntry } from "./autonomy/status.ts";
 import { type BashResult, executeBashWithOperations } from "./bash-executor.ts";
 import {
@@ -186,7 +188,12 @@ import {
 } from "./model-router/status.ts";
 import { shouldEscalateModelRouterTool } from "./model-router/tool-escalation.ts";
 import { expandPromptTemplate, type PromptTemplate } from "./prompt-templates.ts";
-import { appendEvidenceBundleSnapshot, getLatestEvidenceBundleSnapshot } from "./research/session-evidence-bundle.ts";
+import { type ResearchRunResult, runResearch } from "./research/research-runner.ts";
+import {
+	appendEvidenceBundleSnapshot,
+	getEvidenceBundleSnapshots,
+	getLatestEvidenceBundleSnapshot,
+} from "./research/session-evidence-bundle.ts";
 import type { ResourceExtensionPaths, ResourceLoader } from "./resource-loader.ts";
 import { stripResourceProfileBlocks } from "./resource-profile-blocks.ts";
 import { classifyToolTrust, UNTRUSTED_BOUNDARY_SYSTEM_RULE, wrapUntrustedText } from "./security/untrusted-boundary.ts";
@@ -431,6 +438,15 @@ export interface IsolatedCompletionResult {
 	stopReason: StopReason;
 }
 
+export interface ResearchLaneRunOutcome {
+	/** False when the pass was skipped before starting (see skipReason). */
+	started: boolean;
+	skipReason?: string;
+	/** Terminal lane record when the pass ran. */
+	record?: LaneRecord;
+	result?: ResearchRunResult;
+}
+
 export interface GoalContinuationOnceOptions {
 	maxStallTurns: number;
 	promptLimits?: GoalContinuationPromptLimits;
@@ -561,6 +577,16 @@ export class AgentSession {
 	private _goalAutoContinueTimer: ReturnType<typeof setTimeout> | undefined;
 	/** Guards bounded idle autosteer so continuation prompts do not recursively trigger themselves. */
 	private _isGoalAutoContinuing = false;
+	/** Pending idle timer that starts an autonomous research pass after the session becomes idle. */
+	private _researchLaneTimer: ReturnType<typeof setTimeout> | undefined;
+	/** Single-flight guard: at most one research pass runs at a time per session. */
+	private _isResearchLaneRunning = false;
+	/** Why the last idle research-lane evaluation skipped, for /autonomy diagnostics. */
+	private _lastResearchLaneSkipReason: string | undefined;
+	/** Live lane registry — the real source for AutonomyStatusSnapshot.activeLaneCount. */
+	private readonly _laneTracker = new LaneTracker();
+	/** Session-lifetime abort for in-flight research passes (same pattern as _reflectionAbort). */
+	private readonly _researchLaneAbort = new AbortController();
 
 	// Compaction/context hygiene state
 	private _compactionAbortController: AbortController | undefined = undefined;
@@ -1789,6 +1815,7 @@ export class AgentSession {
 	dispose(): void {
 		try {
 			this._clearGoalAutoContinueTimer();
+			this._clearResearchLaneTimer();
 			this.abortRetry();
 			this.abortCompaction();
 			this.abortBranchSummary();
@@ -1800,6 +1827,9 @@ export class AgentSession {
 			// write memory/skills against this now-disposed session.
 			this._disposed = true;
 			this._reflectionAbort.abort();
+			// Abort any in-flight research pass for the same reason: a disposed session must not keep
+			// spending tokens or persist evidence against dead state.
+			this._researchLaneAbort.abort();
 			// Bug #20: clear the hooks this session installed on the shared agent so their closures stop
 			// pinning this (deactivated) session — and all its history/maps — in memory if the agent
 			// instance outlives the session.
@@ -2680,6 +2710,7 @@ export class AgentSession {
 		}
 
 		this._scheduleGoalAutoContinueFromIdle(options);
+		this._scheduleResearchLaneFromIdle();
 	}
 
 	/**
@@ -5319,6 +5350,15 @@ export class AgentSession {
 		return getLatestEvidenceBundleSnapshot(this.sessionManager.getEntries());
 	}
 
+	getEvidenceBundleSnapshots(): EvidenceBundle[] {
+		return getEvidenceBundleSnapshots(this.sessionManager.getEntries());
+	}
+
+	/** Live lane records tracked by this process (running and terminal). */
+	getLaneRecords(): LaneRecord[] {
+		return this._laneTracker.getRecords();
+	}
+
 	saveWorkerResultSnapshot(result: WorkerResult): string {
 		return appendWorkerResultSnapshot(this.sessionManager, result);
 	}
@@ -5393,6 +5433,238 @@ export class AgentSession {
 			this._emit({ type: "warning", message: `Goal auto-continuation failed: ${message}` });
 		} finally {
 			this._isGoalAutoContinuing = false;
+		}
+	}
+
+	private _clearResearchLaneTimer(): void {
+		if (this._researchLaneTimer !== undefined) {
+			clearTimeout(this._researchLaneTimer);
+			this._researchLaneTimer = undefined;
+		}
+	}
+
+	/**
+	 * Derive the research demand from durable goal state: an active goal with open requirements,
+	 * deduplicated against the latest persisted bundle so the same requirement set is never
+	 * researched twice (the query is deterministic, so dedupe survives session reload).
+	 */
+	private _buildResearchLaneDemand(): { query: string; context: string; goalId: string } | undefined {
+		const goal = this.getGoalStateSnapshot();
+		if (!goal || goal.status !== "active") {
+			this._lastResearchLaneSkipReason = "no_active_goal";
+			return undefined;
+		}
+		const open = goal.requirements.filter((requirement) => requirement.status === "open");
+		if (open.length === 0) {
+			this._lastResearchLaneSkipReason = "no_open_requirements";
+			return undefined;
+		}
+		const query = `goal:${goal.goalId} requirements:${open
+			.map((requirement) => requirement.id)
+			.sort()
+			.join(",")}`;
+		if (this.getEvidenceBundleSnapshot()?.query === query) {
+			this._lastResearchLaneSkipReason = "recent_evidence_sufficient";
+			return undefined;
+		}
+		const context = [
+			`Goal: ${goal.userGoal}`,
+			"Open requirements:",
+			...open.slice(0, 20).map((requirement) => `- ${requirement.text}`),
+		].join("\n");
+		return { query, context, goalId: goal.goalId };
+	}
+
+	/**
+	 * Idle trigger for the autonomous research lane (mirrors {@link _scheduleGoalAutoContinueFromIdle}).
+	 * All skips are recorded in `_lastResearchLaneSkipReason` and surfaced via diagnostics — the lane
+	 * informs, it never prompts or blocks the foreground.
+	 */
+	private _scheduleResearchLaneFromIdle(): void {
+		if (this._isResearchLaneRunning || this._disposed || this._isChildSession) return;
+
+		const research = this.settingsManager.getResearchLaneSettings();
+		if (!research.enabled) {
+			this._lastResearchLaneSkipReason = "research_lane_disabled";
+			return;
+		}
+		const { mode } = this.settingsManager.getAutonomySettings();
+		if (mode === "off") {
+			this._lastResearchLaneSkipReason = "autonomy_mode_off";
+			return;
+		}
+		const priorRuns = getLaneRecordSnapshots(this.sessionManager.getEntries()).filter(
+			(record) => record.type === "research",
+		).length;
+		if (priorRuns >= research.maxRunsPerSession) {
+			this._lastResearchLaneSkipReason = "max_runs_reached";
+			return;
+		}
+		if (!this._buildResearchLaneDemand()) return;
+
+		this._clearResearchLaneTimer();
+		this._researchLaneTimer = setTimeout(() => {
+			this._researchLaneTimer = undefined;
+			void this._runScheduledResearchLane();
+		}, research.idleDelayMs);
+
+		const timer = this._researchLaneTimer;
+		if (typeof timer === "object" && timer && "unref" in timer) {
+			const { unref } = timer as { unref?: () => void };
+			unref?.call(timer);
+		}
+	}
+
+	private async _runScheduledResearchLane(): Promise<void> {
+		if (this._isResearchLaneRunning || this._disposed) return;
+
+		const research = this.settingsManager.getResearchLaneSettings();
+		const { mode } = this.settingsManager.getAutonomySettings();
+		if (!research.enabled || mode === "off") return;
+
+		try {
+			await this.runResearchLaneOnce();
+		} catch (error) {
+			const message = error instanceof Error ? error.message : String(error);
+			this._emit({ type: "warning", message: `Research lane failed: ${message}` });
+		}
+	}
+
+	private _resolveResearchLaneModel(): Model<Api> | undefined {
+		const research = this.settingsManager.getResearchLaneSettings();
+		const routerSettings = this.settingsManager.getModelRouterSettings();
+		const pattern = research.model ?? routerSettings.cheapModel;
+		if (pattern) {
+			const resolved = resolveCliModel({ cliModel: pattern, modelRegistry: this._modelRegistry });
+			if (resolved.model && this._modelRegistry.hasConfiguredAuth(resolved.model)) {
+				return resolved.model;
+			}
+			// An explicitly configured research model that cannot run is a visible skip, not a silent
+			// fallback onto a potentially expensive session model.
+			return undefined;
+		}
+		return this.model ?? undefined;
+	}
+
+	/** Stripped research envelope — never the foreground/architect envelope. */
+	private _buildResearchLaneEnvelope(maxUsd: number): CapabilityEnvelope {
+		return {
+			id: `research-${this.sessionId}-${Date.now()}`,
+			capabilities: ["research", "read_files", "memory_read"],
+			maxEstimatedUsd: Math.min(maxUsd, this.capabilityEnvelope?.maxEstimatedUsd ?? Number.POSITIVE_INFINITY),
+			createdAt: new Date().toISOString(),
+		};
+	}
+
+	/**
+	 * Run one bounded, read-only research pass and persist its results: evidence bundle snapshot,
+	 * terminal lane record, and spawned-usage cost report (single-hop invariant, idempotent on the
+	 * lane's reportId). Explicit calls (e.g. `/autonomy research`) express user intent and bypass the
+	 * enabled/mode/dedupe gates the idle scheduler enforces; budget and capability gates always apply.
+	 */
+	async runResearchLaneOnce(request?: {
+		query?: string;
+		context?: string;
+		goalId?: string;
+	}): Promise<ResearchLaneRunOutcome> {
+		if (this._isResearchLaneRunning) {
+			return { started: false, skipReason: "research_lane_already_running" };
+		}
+		if (this._disposed) {
+			return { started: false, skipReason: "session_disposed" };
+		}
+
+		const settings = this.settingsManager.getResearchLaneSettings();
+		const demand = request?.query
+			? { query: request.query, context: request.context ?? "", goalId: request.goalId }
+			: this._buildResearchLaneDemand();
+		if (!demand) {
+			return { started: false, skipReason: this._lastResearchLaneSkipReason ?? "no_research_demand" };
+		}
+
+		const model = this._resolveResearchLaneModel();
+		if (!model) {
+			this._lastResearchLaneSkipReason = "no_research_model";
+			return { started: false, skipReason: "no_research_model" };
+		}
+
+		this._isResearchLaneRunning = true;
+		const startedRecord = this._laneTracker.start({ type: "research", goalId: demand.goalId });
+		try {
+			let spentUsage: Usage | undefined;
+			const result = await runResearch({
+				query: demand.query,
+				context: demand.context,
+				envelope: this._buildResearchLaneEnvelope(settings.maxUsd),
+				maxUsd: settings.maxUsd,
+				maxSources: settings.maxSources,
+				maxFindings: settings.maxFindings,
+				maxWallClockMs: settings.maxWallClockMs,
+				signal: this._researchLaneAbort.signal,
+				complete: async ({ systemPrompt, userPrompt, signal }) => {
+					const completion = await this.runIsolatedCompletion({
+						systemPrompt,
+						messages: [{ role: "user", content: [{ type: "text", text: userPrompt }], timestamp: Date.now() }],
+						model,
+						thinkingLevel: "off",
+						maxTokens: 2048,
+						signal,
+						// The research system prompt is static — let the provider cache the prefix.
+						cacheRetention: "short",
+					});
+					spentUsage = completion.usage;
+					return {
+						text: completion.text,
+						costUsd: completion.usage.cost.total,
+						stopReason: String(completion.stopReason),
+					};
+				},
+			});
+
+			// Bug #21 pattern: if the session was disposed while the completion was in flight, do NOT
+			// persist evidence/records/usage against the dead session.
+			if (this._disposed) {
+				const record = this._laneTracker.complete(startedRecord.laneId, {
+					status: "canceled",
+					reasonCode: "session_disposed",
+				});
+				return { started: true, record, result };
+			}
+
+			let evidenceEntryId: string | undefined;
+			if (result.bundle) {
+				evidenceEntryId = this.saveEvidenceBundleSnapshot(result.bundle);
+			}
+			if (spentUsage && (spentUsage.cost.total > 0 || spentUsage.totalTokens > 0)) {
+				this.addSpawnedUsage(spentUsage, {
+					label: "research-lane",
+					reportId: `research:${this.sessionId}:${startedRecord.laneId}`,
+				});
+			}
+
+			const record = this._laneTracker.complete(startedRecord.laneId, {
+				status: result.status,
+				reasonCode: result.reasonCode,
+				costUsd: result.costUsd,
+				evidenceEntryId,
+			});
+			if (record) {
+				appendLaneRecordSnapshot(this.sessionManager, record);
+			}
+			return { started: true, record, result };
+		} catch (error) {
+			const record = this._laneTracker.complete(startedRecord.laneId, {
+				status: "failed",
+				reasonCode: "research_lane_error",
+			});
+			if (record && !this._disposed) {
+				appendLaneRecordSnapshot(this.sessionManager, record);
+			}
+			const message = error instanceof Error ? error.message : String(error);
+			this._emit({ type: "warning", message: `Research lane failed: ${message}` });
+			return { started: true, record };
+		} finally {
+			this._isResearchLaneRunning = false;
 		}
 	}
 
@@ -5882,8 +6154,12 @@ export class AgentSession {
 			};
 		}
 
-		// activeLaneCount is intentionally left undefined: there is no live concurrency tracker
-		// for research/worker/learning lanes yet, only historical snapshots. Populate once one exists.
+		// Real live count from the lane tracker — never inferred from historical snapshots. Absent
+		// while zero, matching the presence-means-signal convention of the sibling fields.
+		const activeLaneCount = this._laneTracker.getActiveCount();
+		if (activeLaneCount > 0) {
+			snapshot.activeLaneCount = activeLaneCount;
+		}
 
 		return snapshot;
 	}
@@ -5936,14 +6212,33 @@ export class AgentSession {
 		}
 		if (costs.length > 0) snapshot.costs = costs;
 
-		const evidenceBundle = this.getEvidenceBundleSnapshot();
-		if (evidenceBundle) {
-			snapshot.research = [
-				{
-					title: `Research: ${evidenceBundle.query}`,
-					metadata: { sourceCount: evidenceBundle.sources.length, findingCount: evidenceBundle.findings.length },
+		const researchEntries: DiagnosticEntry[] = [];
+		const researchLaneRecords = getLaneRecordSnapshots(this.sessionManager.getEntries()).filter(
+			(record) => record.type === "research",
+		);
+		for (const record of researchLaneRecords.slice(-maxEntriesPerFamily)) {
+			researchEntries.push({
+				title: `Lane ${record.laneId} (${record.status})`,
+				reasonCode: record.reasonCode,
+				metadata: {
+					costUsd: record.costUsd,
+					startedAt: record.startedAt,
+					completedAt: record.completedAt,
+					goalId: record.goalId,
 				},
-			];
+			});
+		}
+		for (const bundle of this.getEvidenceBundleSnapshots().slice(-maxEntriesPerFamily)) {
+			researchEntries.push({
+				title: `Research: ${bundle.query}`,
+				metadata: { sourceCount: bundle.sources.length, findingCount: bundle.findings.length },
+			});
+		}
+		if (this._lastResearchLaneSkipReason) {
+			researchEntries.push({ title: "Last skip", reasonCode: this._lastResearchLaneSkipReason });
+		}
+		if (researchEntries.length > 0) {
+			snapshot.research = researchEntries;
 		}
 
 		const workerResults = this.getWorkerResultSnapshots();

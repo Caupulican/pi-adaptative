@@ -21,6 +21,7 @@ import type {
 	ContextPromptEnforcementSettings,
 	MemoryRetrievalSettings,
 	ModelRouterSettings,
+	ResearchLaneSettings,
 	SelfModificationSettings,
 	SettingsScope,
 	WarningSettings,
@@ -31,6 +32,11 @@ import {
 	DEFAULT_AUTONOMY_GOAL_CONTINUE_MAX_WALL_CLOCK_MINUTES,
 	DEFAULT_AUTONOMY_GOAL_CONTINUE_TURNS,
 	DEFAULT_AUTONOMY_MAX_STALL_TURNS,
+	DEFAULT_RESEARCH_LANE_ENABLED,
+	DEFAULT_RESEARCH_LANE_IDLE_DELAY_MS,
+	DEFAULT_RESEARCH_LANE_MAX_RUNS_PER_SESSION,
+	DEFAULT_RESEARCH_LANE_MAX_USD,
+	DEFAULT_RESEARCH_LANE_MAX_WALL_CLOCK_MS,
 } from "../../../core/settings-manager.ts";
 import { getSelectListTheme, getSettingsListTheme, theme } from "../theme/theme.ts";
 import { DynamicBorder } from "./dynamic-border.ts";
@@ -58,6 +64,11 @@ const AUTONOMY_GOAL_CONTINUE_TURN_VALUES = ["1", "3", "5", "10", "20"];
 const AUTONOMY_MAX_STALL_TURN_VALUES = ["0", "5", "10", "20", "30", "50", "100"];
 const AUTONOMY_GOAL_CONTINUE_MAX_WALL_CLOCK_MINUTE_VALUES = ["0", "15", "30", "60", "120", "240", "480", "1440"];
 const AUTONOMY_GOAL_AUTO_CONTINUE_DELAY_MS_VALUES = ["0", "250", "1000", "5000", "30000", "60000"];
+
+const RESEARCH_LANE_MAX_USD_VALUES = ["0.05", "0.1", "0.25", "0.5", "1", "2"];
+const RESEARCH_LANE_MAX_WALL_CLOCK_MS_VALUES = ["0", "30000", "60000", "120000", "300000", "600000"];
+const RESEARCH_LANE_IDLE_DELAY_MS_VALUES = ["0", "250", "1000", "5000", "30000", "60000"];
+const RESEARCH_LANE_MAX_RUNS_PER_SESSION_VALUES = ["0", "1", "3", "5", "10", "25", "50"];
 
 const CONTEXT_POLICY_PRESERVE_RECENT_MESSAGES_VALUES = ["2", "4", "8", "16", "32"];
 const CONTEXT_POLICY_MIN_CHARS_VALUES = ["300", "600", "1200", "2400", "4800"];
@@ -150,6 +161,13 @@ function autonomyGoalAutoContinueValue(settings: AutonomySettings): string {
 
 function autonomyGoalAutoContinueDelayMsValue(settings: AutonomySettings): string {
 	return String(settings.goalAutoContinueDelayMs ?? DEFAULT_AUTONOMY_GOAL_AUTO_CONTINUE_DELAY_MS);
+}
+
+function researchLaneSummary(settings: ResearchLaneSettings): string {
+	if (!(settings.enabled ?? DEFAULT_RESEARCH_LANE_ENABLED)) return "disabled";
+	const maxUsd = settings.maxUsd ?? DEFAULT_RESEARCH_LANE_MAX_USD;
+	const maxRuns = settings.maxRunsPerSession ?? DEFAULT_RESEARCH_LANE_MAX_RUNS_PER_SESSION;
+	return `enabled ($${maxUsd}/pass, ${maxRuns} runs/session)`;
 }
 
 function autoLearnSummary(settings: AutoLearnSettings): string {
@@ -304,6 +322,8 @@ export interface SettingsConfig {
 	selfModificationScope?: SettingsScope;
 	autonomy: AutonomySettings;
 	autonomyScope?: SettingsScope;
+	researchLane: ResearchLaneSettings;
+	researchLaneScope?: SettingsScope;
 	modelRouter: ModelRouterSettings;
 	modelRouterScope?: SettingsScope;
 	autoLearn: AutoLearnSettings;
@@ -348,6 +368,7 @@ export interface SettingsCallbacks {
 	onWarningsChange: (warnings: WarningSettings) => void;
 	onSelfModificationChange: (settings: SelfModificationSettings, scope: SettingsScope) => void;
 	onAutonomyChange: (settings: AutonomySettings, scope: SettingsScope) => void;
+	onResearchLaneChange: (settings: ResearchLaneSettings, scope: SettingsScope) => void;
 	onModelRouterChange: (settings: ModelRouterSettings, scope: SettingsScope) => void;
 	onAutoLearnChange: (settings: AutoLearnSettings, scope: SettingsScope) => void;
 	onContextPolicyEnforcementChange: (settings: ContextPromptEnforcementSettings, scope: SettingsScope) => void;
@@ -679,6 +700,114 @@ class AutonomySettingsSubmenu extends Container {
 						break;
 					case "autonomy-goal-auto-continue-delay-ms":
 						this.state = { ...this.state, goalAutoContinueDelayMs: Number(newValue) };
+						break;
+					default:
+						return;
+				}
+				onChange({ ...this.state }, this.scope);
+			},
+			onCancel,
+		);
+
+		this.addChild(this.settingsList);
+	}
+
+	handleInput(data: string): void {
+		this.settingsList.handleInput(data);
+	}
+}
+
+class ResearchLaneSettingsSubmenu extends Container {
+	private settingsList: SettingsList;
+	private state: ResearchLaneSettings;
+	private scope: SettingsScope;
+
+	constructor(
+		settings: ResearchLaneSettings,
+		onChange: (settings: ResearchLaneSettings, scope: SettingsScope) => void,
+		onCancel: () => void,
+		scope: SettingsScope = "global",
+	) {
+		super();
+		this.state = {
+			...settings,
+			enabled: settings.enabled ?? DEFAULT_RESEARCH_LANE_ENABLED,
+			maxUsd: settings.maxUsd ?? DEFAULT_RESEARCH_LANE_MAX_USD,
+			maxWallClockMs: settings.maxWallClockMs ?? DEFAULT_RESEARCH_LANE_MAX_WALL_CLOCK_MS,
+			idleDelayMs: settings.idleDelayMs ?? DEFAULT_RESEARCH_LANE_IDLE_DELAY_MS,
+			maxRunsPerSession: settings.maxRunsPerSession ?? DEFAULT_RESEARCH_LANE_MAX_RUNS_PER_SESSION,
+		};
+		this.scope = scope;
+
+		const items: SettingItem[] = [
+			{
+				id: "research-lane-scope",
+				label: "Save scope",
+				description: "Save these research-lane settings globally or in the current project's .pi/settings.json",
+				currentValue: this.scope,
+				values: ["global", "project"],
+			},
+			{
+				id: "research-lane-enabled",
+				label: "Enabled",
+				description:
+					"Run bounded, read-only background research when idle with an active goal (requires autonomy mode on)",
+				currentValue: String(this.state.enabled),
+				values: ["true", "false"],
+			},
+			{
+				id: "research-lane-max-usd",
+				label: "Budget per pass",
+				description: "USD budget per research pass; breaches mark the lane budget_exhausted in diagnostics",
+				currentValue: String(this.state.maxUsd),
+				values: RESEARCH_LANE_MAX_USD_VALUES,
+			},
+			{
+				id: "research-lane-max-wall-clock-ms",
+				label: "Max milliseconds",
+				description: "Wall-clock budget per research pass; 0 disables the time budget",
+				currentValue: String(this.state.maxWallClockMs),
+				values: RESEARCH_LANE_MAX_WALL_CLOCK_MS_VALUES,
+			},
+			{
+				id: "research-lane-idle-delay-ms",
+				label: "Idle delay ms",
+				description: "Delay before idle-triggered research starts; 0 starts immediately after idle",
+				currentValue: String(this.state.idleDelayMs),
+				values: RESEARCH_LANE_IDLE_DELAY_MS_VALUES,
+			},
+			{
+				id: "research-lane-max-runs-per-session",
+				label: "Runs per session",
+				description: "Maximum idle-triggered research passes per session; explicit /autonomy research is uncapped",
+				currentValue: String(this.state.maxRunsPerSession),
+				values: RESEARCH_LANE_MAX_RUNS_PER_SESSION_VALUES,
+			},
+		];
+
+		this.settingsList = new SettingsList(
+			items,
+			Math.min(items.length, 10),
+			getSettingsListTheme(),
+			(id, newValue) => {
+				switch (id) {
+					case "research-lane-scope":
+						this.scope = newValue as SettingsScope;
+						break;
+					case "research-lane-enabled":
+						this.state = { ...this.state, enabled: newValue === "true" };
+						break;
+					case "research-lane-max-usd":
+						this.state = { ...this.state, maxUsd: Number(newValue) };
+						break;
+					case "research-lane-max-wall-clock-ms":
+						this.state = { ...this.state, maxWallClockMs: Number(newValue) };
+						break;
+					case "research-lane-idle-delay-ms":
+						this.state = { ...this.state, idleDelayMs: Number(newValue) };
+						break;
+					case "research-lane-max-runs-per-session":
+						this.state = { ...this.state, maxRunsPerSession: Number(newValue) };
 						break;
 					default:
 						return;
@@ -1398,6 +1527,7 @@ export class SettingsSelectorComponent extends Container {
 		let currentWarnings = { ...config.warnings };
 		let currentSelfModification: SelfModificationSettings = { ...config.selfModification };
 		let currentAutonomy: AutonomySettings = { ...config.autonomy };
+		let currentResearchLane: ResearchLaneSettings = { ...config.researchLane };
 		let currentModelRouter: ModelRouterSettings = { ...config.modelRouter };
 		let currentAutoLearn: AutoLearnSettings = { ...config.autoLearn };
 		let currentContextPolicyEnforcement: ContextPromptEnforcementSettings = { ...config.contextPolicyEnforcement };
@@ -1512,6 +1642,23 @@ export class SettingsSelectorComponent extends Container {
 						},
 						() => done(autonomySummary(currentAutonomy)),
 						config.autonomyScope ?? "global",
+					),
+			},
+			{
+				id: "research-lane",
+				label: "Research Lane",
+				description:
+					"Opt-in autonomous read-only research: bounded background passes that produce evidence bundles for active goals",
+				currentValue: researchLaneSummary(currentResearchLane),
+				submenu: (_currentValue, done) =>
+					new ResearchLaneSettingsSubmenu(
+						currentResearchLane,
+						(settings, scope) => {
+							currentResearchLane = { ...settings };
+							callbacks.onResearchLaneChange(settings, scope);
+						},
+						() => done(researchLaneSummary(currentResearchLane)),
+						config.researchLaneScope ?? "global",
 					),
 			},
 			{

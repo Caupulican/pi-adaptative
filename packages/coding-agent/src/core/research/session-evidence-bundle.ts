@@ -26,6 +26,27 @@ function isPlainRecord(value: unknown): value is Record<string, unknown> {
 	return prototype === Object.prototype || prototype === null;
 }
 
+export function getEvidenceBundleSnapshots(entries: readonly SessionEntry[]): EvidenceBundle[] {
+	const bundles: EvidenceBundle[] = [];
+
+	for (const entry of entries) {
+		if (entry.type !== "custom" || entry.customType !== EVIDENCE_BUNDLE_CUSTOM_TYPE) {
+			continue;
+		}
+
+		const payload = entry.data;
+		if (!isPlainRecord(payload)) continue;
+		if (payload.version !== 1) continue;
+		if (!("bundle" in payload)) continue;
+		const bundle = payload.bundle;
+		if (isEvidenceBundle(bundle)) {
+			bundles.push(cloneEvidenceBundleForStorage(bundle));
+		}
+	}
+
+	return bundles;
+}
+
 export function getLatestEvidenceBundleSnapshot(entries: readonly SessionEntry[]): EvidenceBundle | undefined {
 	for (let i = entries.length - 1; i >= 0; i--) {
 		const entry = entries[i];

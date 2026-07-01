@@ -8,6 +8,7 @@ import { createEvidenceBundle } from "../src/core/research/evidence-bundle.ts";
 import {
 	appendEvidenceBundleSnapshot,
 	EVIDENCE_BUNDLE_CUSTOM_TYPE,
+	getEvidenceBundleSnapshots,
 	getLatestEvidenceBundleSnapshot,
 } from "../src/core/research/session-evidence-bundle.ts";
 import { SessionManager } from "../src/core/session-manager.ts";
@@ -189,6 +190,28 @@ describe("Phase 9B: Evidence Bundle Session Persistence", () => {
 		const latest = getLatestEvidenceBundleSnapshot(sessionManager.getEntries());
 		expect(latest).toBeDefined();
 		expect(latest?.query).toBe("Valid");
+	});
+
+	it("getEvidenceBundleSnapshots returns every valid bundle in append order and skips malformed entries", () => {
+		const sessionManager = SessionManager.inMemory();
+
+		expect(getEvidenceBundleSnapshots(sessionManager.getEntries())).toEqual([]);
+
+		appendEvidenceBundleSnapshot(
+			sessionManager,
+			createEvidenceBundle({ query: "First", sources: [], findings: [], now: "T0" }),
+		);
+		sessionManager.appendCustomEntry(EVIDENCE_BUNDLE_CUSTOM_TYPE, { version: 2, bundle: {} });
+		sessionManager.appendCustomEntry(EVIDENCE_BUNDLE_CUSTOM_TYPE, "malformed");
+		appendEvidenceBundleSnapshot(
+			sessionManager,
+			createEvidenceBundle({ query: "Second", sources: [], findings: [], now: "T1" }),
+		);
+
+		const bundles = getEvidenceBundleSnapshots(sessionManager.getEntries());
+		expect(bundles).toHaveLength(2);
+		expect(bundles[0]?.query).toBe("First");
+		expect(bundles[1]?.query).toBe("Second");
 	});
 
 	it("AgentSession accessors save and restore the latest snapshot using an in-memory SessionManager", () => {

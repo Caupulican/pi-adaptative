@@ -182,6 +182,34 @@ export interface ModelRouterSettings {
 	learningModel?: string; // model pattern for background reflection/learn/skill-creator work; "active" uses session model
 }
 
+export const DEFAULT_RESEARCH_LANE_ENABLED = false;
+export const DEFAULT_RESEARCH_LANE_MAX_USD = 0.25;
+export const DEFAULT_RESEARCH_LANE_MAX_SOURCES = 8;
+export const DEFAULT_RESEARCH_LANE_MAX_FINDINGS = 10;
+export const DEFAULT_RESEARCH_LANE_MAX_WALL_CLOCK_MS = 120_000;
+export const DEFAULT_RESEARCH_LANE_IDLE_DELAY_MS = 0;
+export const DEFAULT_RESEARCH_LANE_MAX_RUNS_PER_SESSION = 10;
+export const MAX_RESEARCH_LANE_MAX_USD = 5;
+export const MAX_RESEARCH_LANE_MAX_SOURCES = 32;
+export const MAX_RESEARCH_LANE_MAX_FINDINGS = 50;
+export const MAX_RESEARCH_LANE_MAX_WALL_CLOCK_MS = 3_600_000;
+export const MAX_RESEARCH_LANE_IDLE_DELAY_MS = 300_000;
+export const MAX_RESEARCH_LANE_MAX_RUNS_PER_SESSION = 100;
+
+export interface ResearchLaneSettings {
+	enabled?: boolean; // default: false — autonomous background research is opt-in
+	model?: string; // model pattern; unset falls back to modelRouter.cheapModel, then the session model
+	maxUsd?: number; // default: 0.25 per research pass; post-hoc breaches mark the lane budget_exhausted
+	maxSources?: number; // default: 8 evidence sources per bundle
+	maxFindings?: number; // default: 10 findings per bundle
+	maxWallClockMs?: number; // default: 120000; 0 disables the wall-clock budget
+	idleDelayMs?: number; // default: 0 — delay before idle-triggered research starts
+	maxRunsPerSession?: number; // default: 10 idle-triggered research passes per session
+}
+
+export type ResolvedResearchLaneSettings = Required<Omit<ResearchLaneSettings, "model">> &
+	Pick<ResearchLaneSettings, "model">;
+
 export type TransportSetting = Transport;
 
 /**
@@ -271,6 +299,7 @@ export interface Settings {
 	warnings?: WarningSettings;
 	selfModification?: SelfModificationSettings; // Local guardrails for modifying the pi-adaptative source/harness
 	autonomy?: AutonomySettings; // Low-config autonomy preset controlling background learning/reflection defaults
+	researchLane?: ResearchLaneSettings; // Opt-in autonomous read-only research lane producing evidence bundles
 	modelRouter?: ModelRouterSettings; // Opt-in deterministic cheap/expensive model routing foundation
 	autoLearn?: AutoLearnSettings; // Setting-gated autonomous background learning for long sessions
 	sessionDir?: string; // Custom session storage directory (same format as --session-dir CLI flag)
@@ -440,6 +469,12 @@ function parseTimeoutSetting(value: unknown, settingName: string): number | unde
 
 function sanitizeIntegerSetting(value: unknown, fallback: number, min: number, max: number): number {
 	if (typeof value !== "number" || !Number.isInteger(value)) return fallback;
+	if (value < min || value > max) return fallback;
+	return value;
+}
+
+function sanitizeNumberSetting(value: unknown, fallback: number, min: number, max: number): number {
+	if (typeof value !== "number" || !Number.isFinite(value)) return fallback;
 	if (value < min || value > max) return fallback;
 	return value;
 }
@@ -2516,6 +2551,63 @@ export class SettingsManager {
 
 		this.globalSettings.autonomy = { ...settings };
 		this.markModified("autonomy");
+		this.save();
+	}
+
+	getResearchLaneSettings(): ResolvedResearchLaneSettings {
+		const configured = this.settings.researchLane ?? {};
+
+		const resolved: ResolvedResearchLaneSettings = {
+			enabled: typeof configured.enabled === "boolean" ? configured.enabled : DEFAULT_RESEARCH_LANE_ENABLED,
+			maxUsd: sanitizeNumberSetting(configured.maxUsd, DEFAULT_RESEARCH_LANE_MAX_USD, 0, MAX_RESEARCH_LANE_MAX_USD),
+			maxSources: sanitizeIntegerSetting(
+				configured.maxSources,
+				DEFAULT_RESEARCH_LANE_MAX_SOURCES,
+				1,
+				MAX_RESEARCH_LANE_MAX_SOURCES,
+			),
+			maxFindings: sanitizeIntegerSetting(
+				configured.maxFindings,
+				DEFAULT_RESEARCH_LANE_MAX_FINDINGS,
+				1,
+				MAX_RESEARCH_LANE_MAX_FINDINGS,
+			),
+			maxWallClockMs: sanitizeIntegerSetting(
+				configured.maxWallClockMs,
+				DEFAULT_RESEARCH_LANE_MAX_WALL_CLOCK_MS,
+				0,
+				MAX_RESEARCH_LANE_MAX_WALL_CLOCK_MS,
+			),
+			idleDelayMs: sanitizeIntegerSetting(
+				configured.idleDelayMs,
+				DEFAULT_RESEARCH_LANE_IDLE_DELAY_MS,
+				0,
+				MAX_RESEARCH_LANE_IDLE_DELAY_MS,
+			),
+			maxRunsPerSession: sanitizeIntegerSetting(
+				configured.maxRunsPerSession,
+				DEFAULT_RESEARCH_LANE_MAX_RUNS_PER_SESSION,
+				0,
+				MAX_RESEARCH_LANE_MAX_RUNS_PER_SESSION,
+			),
+		};
+		if (typeof configured.model === "string" && configured.model.trim().length > 0) {
+			resolved.model = configured.model;
+		}
+		return resolved;
+	}
+
+	setResearchLaneSettings(settings: ResearchLaneSettings, scope: SettingsScope = "global"): void {
+		if (scope === "project") {
+			const projectSettings = structuredClone(this.projectSettings);
+			projectSettings.researchLane = { ...settings };
+			this.markProjectModified("researchLane");
+			this.saveProjectSettings(projectSettings);
+			return;
+		}
+
+		this.globalSettings.researchLane = { ...settings };
+		this.markModified("researchLane");
 		this.save();
 	}
 

@@ -6112,7 +6112,26 @@ export class InteractiveMode {
 			this.ui.requestRender();
 			return;
 		}
-		this.showStatus("Usage: /autonomy [status|diagnostics|off|safe|balanced|full]");
+		if (action === "research") {
+			this.showStatus("Research lane: running…");
+			void this.session
+				.runResearchLaneOnce()
+				.then((outcome) => {
+					if (!outcome.started) {
+						this.showStatus(`Research lane skipped: ${outcome.skipReason ?? "unknown"}`);
+						return;
+					}
+					const status = outcome.record?.status ?? "unknown";
+					const reason = outcome.record?.reasonCode ? ` (${outcome.record.reasonCode})` : "";
+					this.showStatus(`Research lane ${status}${reason}`);
+				})
+				.catch((error: unknown) => {
+					const message = error instanceof Error ? error.message : String(error);
+					this.showStatus(`Research lane failed: ${message}`);
+				});
+			return;
+		}
+		this.showStatus("Usage: /autonomy [status|diagnostics|research|off|safe|balanced|full]");
 	}
 
 	private handleAutoLearnCommand(text: string): void {
@@ -6185,6 +6204,8 @@ export class InteractiveMode {
 					selfModificationScope: projectSettings.selfModification ? "project" : "global",
 					autonomy: this.settingsManager.getAutonomySettings(),
 					autonomyScope: projectSettings.autonomy ? "project" : "global",
+					researchLane: this.settingsManager.getResearchLaneSettings(),
+					researchLaneScope: projectSettings.researchLane ? "project" : "global",
 					modelRouter: this.settingsManager.getModelRouterSettings(),
 					modelRouterScope: projectSettings.modelRouter ? "project" : "global",
 					autoLearn: this.settingsManager.getAutoLearnSettings(),
@@ -6336,6 +6357,12 @@ export class InteractiveMode {
 					onAutonomyChange: (settings, scope) => {
 						this.applyAutonomyMode(settings.mode ?? "off", scope);
 						this.showStatus(`Autonomy mode ${settings.mode ?? "off"} saved to ${scope}. Use /autonomy status.`);
+					},
+					onResearchLaneChange: (settings, scope) => {
+						this.settingsManager.setResearchLaneSettings(settings, scope);
+						this.showStatus(
+							`Research lane settings saved to ${scope}. Use /autonomy research or /autonomy diagnostics.`,
+						);
 					},
 					onModelRouterChange: (settings, scope) => {
 						this.settingsManager.setModelRouterSettings(settings, scope);

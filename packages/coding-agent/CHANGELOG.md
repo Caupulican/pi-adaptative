@@ -19,6 +19,17 @@
 - Added `/autonomy diagnostics`, an effectiveness dashboard summarizing recent model-router decisions,
   current/spawned/daily cost totals, and, when present, the latest research, worker-delegation,
   learning, and goal activity. It is additive to `/autonomy [status|off|safe|balanced|full]`.
+- Added the autonomous research lane runtime: an opt-in, read-only background research pass that runs
+  when the session goes idle with an active goal that has open requirements, executes one bounded
+  isolated completion through the (unwired-until-now) research capability/budget gate, and persists a
+  provenance-tagged evidence bundle plus a terminal lane record. Budgets cover cost per pass,
+  wall-clock time, findings/sources caps, and idle runs per session; failures/skips are recorded with
+  reason codes and never block or prompt the foreground. Research spend reports through spawned-usage
+  accounting with an idempotent per-lane report id. Configurable via the new Research Lane settings
+  submenu (default disabled; also requires autonomy mode on); `/autonomy research` triggers an
+  explicit pass. Live lanes now feed the previously-unset `activeLaneCount` in `/autonomy status`
+  snapshots, and `/autonomy diagnostics` shows research lane records, all evidence bundles, and the
+  last skip reason.
 
 ### Changed
 
