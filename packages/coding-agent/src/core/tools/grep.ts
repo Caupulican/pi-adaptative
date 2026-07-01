@@ -8,6 +8,14 @@ import { type Static, Type } from "typebox";
 import { keyHint } from "../../modes/interactive/components/keybinding-hints.ts";
 import type { Theme } from "../../modes/interactive/theme/theme.ts";
 import { ensureTool } from "../../utils/tools-manager.ts";
+import type { ArtifactStore } from "../context/context-artifacts.ts";
+import {
+	type BroadQueryTracker,
+	broadQueryInvalidationNote,
+	formatArtifactNotice,
+	normalizeBroadQueryKey,
+	packToolOutput,
+} from "../context/tool-output-packer.ts";
 import type { ToolDefinition, ToolRenderResultOptions } from "../extensions/types.ts";
 import {
 	defaultFffSearchBackend,
@@ -26,7 +34,6 @@ import {
 	formatSize,
 	GREP_MAX_LINE_LENGTH,
 	type TruncationResult,
-	truncateHead,
 	truncateLine,
 } from "./truncate.ts";
 
@@ -51,6 +58,10 @@ export interface GrepToolDetails {
 	truncation?: TruncationResult;
 	matchLimitReached?: number;
 	linesTruncated?: boolean;
+	/** Set only when output was packed to an artifact; see tool-output-packer.ts. */
+	artifactId?: string;
+	/** Set when this exact query has repeatedly produced broad/truncated results. */
+	invalidationCandidate?: boolean;
 }
 
 /**
@@ -76,6 +87,14 @@ export interface GrepToolOptions {
 	fff?: FffSearchBackend | false;
 	/** Pure router that selects FFF or rg from request filters and environment facts. */
 	searchRouter?: SearchRouter;
+	/**
+	 * Opt-in artifact store for first-capture-then-bound output packing (Phase 3). When
+	 * omitted (the default), behavior is byte-for-byte unchanged from before this option
+	 * existed: output is truncated the same way, just never artifact-backed.
+	 */
+	artifactStore?: ArtifactStore;
+	/** Opt-in tracker for repeated-broad-query "do not repeat" signals. Also default-off. */
+	broadQueryTracker?: BroadQueryTracker;
 }
 
 function formatGrepCall(
@@ -196,12 +215,100 @@ function appendFffMatchLines(options: {
 	}
 }
 
+/**
+ * Shared "measure -> pack -> notices" tail for both the FFF and ripgrep result paths:
+ * first-capture the raw output to an artifact if it's oversized and a store was provided
+ * (Phase 3 tool-output-artifacts.md boundary rule), then append the same match-limit/
+ * byte-limit/line-truncation/broad-query notices either path already produced.
+ */
+function packGrepOutput(options: {
+	rawOutput: string;
+	toolCallId: string;
+	artifactStore?: ArtifactStore;
+	broadQueryTracker?: BroadQueryTracker;
+	pattern: string;
+	rawPath?: string;
+	glob?: string;
+	matchLimitReached: number | false;
+	linesTruncated: boolean;
+}): { text: string; details: GrepToolDetails } {
+	const packed = packToolOutput(
+		{
+			toolName: "grep",
+			path: options.rawPath,
+			rawContent: options.rawOutput,
+			// No line limit here because the match limit already caps rows; only the byte
+			// cap should apply, matching the pre-Slice-B truncateHead call exactly.
+			truncation: { maxLines: Number.MAX_SAFE_INTEGER },
+		},
+		options.artifactStore,
+		options.toolCallId,
+	);
+	let output = packed.content;
+	const details: GrepToolDetails = {};
+
+	const notices: string[] = [];
+	if (packed.artifactId) {
+		notices.push(formatArtifactNotice(packed.artifactId));
+		details.artifactId = packed.artifactId;
+	}
+	if (options.matchLimitReached) {
+		notices.push(
+			`${options.matchLimitReached} matches limit reached. Use limit=${options.matchLimitReached * 2} for more, or refine pattern`,
+		);
+		details.matchLimitReached = options.matchLimitReached;
+	}
+	if (packed.truncation.truncated) {
+		notices.push(`${formatSize(DEFAULT_MAX_BYTES)} limit reached`);
+		// Drop the duplicated bounded-preview text: it's already in the message's own
+		// content, and re-including it here can push `details` past
+		// MAX_RETAINED_TOOL_RESULT_DETAILS_BYTES (message-retention.ts), which replaces
+		// the *entire* details object with a stub -- silently losing artifactId and every
+		// other field alongside it. This is load-bearing beyond just the retention budget:
+		// agent-session.ts's _releaseGcPackedArtifactReferences() reads artifactId back off
+		// this same canonical message at eviction time (potentially many turns later), so
+		// keeping `details` small here is what keeps that release path working at all. If
+		// this field ever grows a large addition again, add a regression proving artifactId
+		// survives compactToolResultDetailsForRetention (see
+		// test/suite/agent-session-artifact-lifecycle.test.ts), not just a details-size check.
+		details.truncation = { ...packed.truncation, content: "" };
+	}
+	if (options.linesTruncated) {
+		notices.push(`Some lines truncated to ${GREP_MAX_LINE_LENGTH} chars. Use read tool to see full lines`);
+		details.linesTruncated = true;
+	}
+	if (options.matchLimitReached || packed.truncation.truncated) {
+		const note = broadQueryInvalidationNote(
+			options.broadQueryTracker,
+			normalizeBroadQueryKey({
+				toolName: "grep",
+				pattern: options.pattern,
+				path: options.rawPath,
+				glob: options.glob,
+			}),
+			`grep "${options.pattern}" in ${options.rawPath ?? "."}`,
+		);
+		if (note) {
+			notices.push(note);
+			details.invalidationCandidate = true;
+		}
+	}
+	if (notices.length > 0) output += `\n\n[${notices.join(". ")}]`;
+	return { text: output, details };
+}
+
 function formatFffGrepResult(options: {
 	result: FffGrepResult;
 	isDirectory: boolean;
 	searchPathRelativeToCwd: string;
 	effectiveLimit: number;
 	contextValue: number;
+	toolCallId: string;
+	artifactStore?: ArtifactStore;
+	broadQueryTracker?: BroadQueryTracker;
+	pattern: string;
+	rawPath?: string;
+	glob?: string;
 }): { text: string; details: GrepToolDetails } {
 	if (options.result.items.length === 0) return { text: "No matches found", details: {} };
 
@@ -225,26 +332,17 @@ function formatFffGrepResult(options: {
 
 	if (outputLines.length === 0) return { text: "No matches found", details: {} };
 	const rawOutput = outputLines.join("\n");
-	const truncation = truncateHead(rawOutput, { maxLines: Number.MAX_SAFE_INTEGER });
-	let output = truncation.content;
-	const details: GrepToolDetails = {};
-	const notices: string[] = [];
-	if (options.result.nextCursor) {
-		notices.push(
-			`${options.effectiveLimit} matches limit reached. Use limit=${options.effectiveLimit * 2} for more, or refine pattern`,
-		);
-		details.matchLimitReached = options.effectiveLimit;
-	}
-	if (truncation.truncated) {
-		notices.push(`${formatSize(DEFAULT_MAX_BYTES)} limit reached`);
-		details.truncation = truncation;
-	}
-	if (linesTruncated.value) {
-		notices.push(`Some lines truncated to ${GREP_MAX_LINE_LENGTH} chars. Use read tool to see full lines`);
-		details.linesTruncated = true;
-	}
-	if (notices.length > 0) output += `\n\n[${notices.join(". ")}]`;
-	return { text: output, details };
+	return packGrepOutput({
+		rawOutput,
+		toolCallId: options.toolCallId,
+		artifactStore: options.artifactStore,
+		broadQueryTracker: options.broadQueryTracker,
+		pattern: options.pattern,
+		rawPath: options.rawPath,
+		glob: options.glob,
+		matchLimitReached: options.result.nextCursor ? options.effectiveLimit : false,
+		linesTruncated: linesTruncated.value,
+	});
 }
 
 async function tryFffGrep(options: {
@@ -259,6 +357,10 @@ async function tryFffGrep(options: {
 	contextValue: number;
 	effectiveLimit: number;
 	isDirectory: boolean;
+	toolCallId: string;
+	artifactStore?: ArtifactStore;
+	broadQueryTracker?: BroadQueryTracker;
+	rawPath?: string;
 }): Promise<{ text: string; details: GrepToolDetails } | undefined> {
 	const searchPathRelativeToCwd = relativePathInside(options.cwd, options.searchPath);
 	const baseRoute = options.router.route({
@@ -320,6 +422,12 @@ async function tryFffGrep(options: {
 		searchPathRelativeToCwd,
 		effectiveLimit: options.effectiveLimit,
 		contextValue: options.contextValue,
+		toolCallId: options.toolCallId,
+		artifactStore: options.artifactStore,
+		broadQueryTracker: options.broadQueryTracker,
+		pattern: options.pattern,
+		rawPath: options.rawPath,
+		glob: options.glob,
 	});
 }
 
@@ -330,6 +438,8 @@ export function createGrepToolDefinition(
 	const customOps = options?.operations;
 	const fffBackend = options?.fff === false ? undefined : (options?.fff ?? defaultFffSearchBackend);
 	const searchRouter = options?.searchRouter ?? defaultSearchRouter;
+	const artifactStore = options?.artifactStore;
+	const broadQueryTracker = options?.broadQueryTracker;
 	return {
 		name: "grep",
 		label: "grep",
@@ -338,7 +448,7 @@ export function createGrepToolDefinition(
 		parameters: grepSchema,
 		toolGroup: "explore",
 		async execute(
-			_toolCallId,
+			toolCallId,
 			{
 				pattern,
 				path: searchDir,
@@ -410,6 +520,10 @@ export function createGrepToolDefinition(
 								contextValue,
 								effectiveLimit,
 								isDirectory,
+								toolCallId,
+								artifactStore,
+								broadQueryTracker,
+								rawPath: searchDir,
 							});
 							if (fffResult) {
 								settle(() =>
@@ -586,29 +700,19 @@ export function createGrepToolDefinition(
 							}
 
 							const rawOutput = outputLines.join("\n");
-							// Apply byte truncation. There is no line limit here because the match limit already capped rows.
-							const truncation = truncateHead(rawOutput, { maxLines: Number.MAX_SAFE_INTEGER });
-							let output = truncation.content;
-							const details: GrepToolDetails = {};
-							// Build actionable notices for truncation and match limits.
-							const notices: string[] = [];
-							if (matchLimitReached) {
-								notices.push(
-									`${effectiveLimit} matches limit reached. Use limit=${effectiveLimit * 2} for more, or refine pattern`,
-								);
-								details.matchLimitReached = effectiveLimit;
-							}
-							if (truncation.truncated) {
-								notices.push(`${formatSize(DEFAULT_MAX_BYTES)} limit reached`);
-								details.truncation = truncation;
-							}
-							if (linesTruncated) {
-								notices.push(
-									`Some lines truncated to ${GREP_MAX_LINE_LENGTH} chars. Use read tool to see full lines`,
-								);
-								details.linesTruncated = true;
-							}
-							if (notices.length > 0) output += `\n\n[${notices.join(". ")}]`;
+							// Measure -> pack (artifact-backed if oversized and a store was provided) -> notices.
+							// There is no line limit here because the match limit already capped rows.
+							const { text: output, details } = packGrepOutput({
+								rawOutput,
+								toolCallId,
+								artifactStore,
+								broadQueryTracker,
+								pattern,
+								rawPath: searchDir,
+								glob,
+								matchLimitReached: matchLimitReached ? effectiveLimit : false,
+								linesTruncated,
+							});
 							settle(() =>
 								resolve({
 									content: [{ type: "text", text: output }],

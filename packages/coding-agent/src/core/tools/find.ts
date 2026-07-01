@@ -7,6 +7,14 @@ import { type Static, Type } from "typebox";
 import { keyHint } from "../../modes/interactive/components/keybinding-hints.ts";
 import type { Theme } from "../../modes/interactive/theme/theme.ts";
 import { ensureTool } from "../../utils/tools-manager.ts";
+import type { ArtifactStore } from "../context/context-artifacts.ts";
+import {
+	type BroadQueryTracker,
+	broadQueryInvalidationNote,
+	formatArtifactNotice,
+	normalizeBroadQueryKey,
+	packToolOutput,
+} from "../context/tool-output-packer.ts";
 import type { ToolDefinition, ToolRenderResultOptions } from "../extensions/types.ts";
 import {
 	defaultFffSearchBackend,
@@ -19,7 +27,7 @@ import { pathExists, resolveToCwd } from "./path-utils.ts";
 import { getTextOutput, invalidArgText, shortenPath, str } from "./render-utils.ts";
 import { defaultSearchRouter, type SearchRouter } from "./search-router.ts";
 import { wrapToolDefinition } from "./tool-definition-wrapper.ts";
-import { DEFAULT_MAX_BYTES, formatSize, type TruncationResult, truncateHead } from "./truncate.ts";
+import { DEFAULT_MAX_BYTES, formatSize, type TruncationResult } from "./truncate.ts";
 
 function toPosixPath(value: string): string {
 	return value.split(path.sep).join("/");
@@ -42,6 +50,10 @@ const DEFAULT_LIMIT = 1000;
 export interface FindToolDetails {
 	truncation?: TruncationResult;
 	resultLimitReached?: number;
+	/** Set only when output was packed to an artifact; see tool-output-packer.ts. */
+	artifactId?: string;
+	/** Set when this exact query has repeatedly produced broad/truncated results. */
+	invalidationCandidate?: boolean;
 }
 
 /**
@@ -68,6 +80,14 @@ export interface FindToolOptions {
 	fff?: FffSearchBackend | false;
 	/** Pure router that selects FFF or fd from request filters and environment facts. */
 	searchRouter?: SearchRouter;
+	/**
+	 * Opt-in artifact store for first-capture-then-bound output packing (Phase 3). When
+	 * omitted (the default), behavior is byte-for-byte unchanged from before this option
+	 * existed: output is truncated the same way, just never artifact-backed.
+	 */
+	artifactStore?: ArtifactStore;
+	/** Opt-in tracker for repeated-broad-query "do not repeat" signals. Also default-off. */
+	broadQueryTracker?: BroadQueryTracker;
 }
 
 function formatFindCall(
@@ -150,11 +170,24 @@ function fffGlobPattern(pattern: string, searchPathRelativeToCwd: string): strin
 	return `${searchPathRelativeToCwd}/**/${effectivePattern}`;
 }
 
-function fffSearchOutput(result: FffSearchResult, searchPathRelativeToCwd: string, effectiveLimit: number) {
+interface FindPackingOptions {
+	toolCallId: string;
+	artifactStore?: ArtifactStore;
+	broadQueryTracker?: BroadQueryTracker;
+	pattern: string;
+	rawPath?: string;
+}
+
+function fffSearchOutput(
+	result: FffSearchResult,
+	searchPathRelativeToCwd: string,
+	effectiveLimit: number,
+	packing: FindPackingOptions,
+) {
 	const relativized = result.items
 		.map((item) => toSearchRelative(item.relativePath, searchPathRelativeToCwd))
 		.filter((item): item is string => Boolean(item));
-	return formatFindResults(relativized, effectiveLimit);
+	return formatFindResults(relativized, effectiveLimit, packing);
 }
 
 async function tryFffFind(options: {
@@ -165,6 +198,10 @@ async function tryFffFind(options: {
 	pattern: string;
 	ignoreCase?: boolean;
 	effectiveLimit: number;
+	toolCallId: string;
+	artifactStore?: ArtifactStore;
+	broadQueryTracker?: BroadQueryTracker;
+	rawPath?: string;
 }): Promise<{ text: string; details: FindToolDetails } | undefined> {
 	if (!(await pathExists(options.searchPath))) return undefined;
 
@@ -206,21 +243,37 @@ async function tryFffFind(options: {
 	});
 	if (!finder || finderRoute.backend !== "fff") return undefined;
 
+	const packing: FindPackingOptions = {
+		toolCallId: options.toolCallId,
+		artifactStore: options.artifactStore,
+		broadQueryTracker: options.broadQueryTracker,
+		pattern: options.pattern,
+		rawPath: options.rawPath,
+	};
+
 	if (glob) {
 		const result = finder.glob(fffGlobPattern(options.pattern, searchPathRelativeToCwd), {
 			pageSize: options.effectiveLimit,
 		});
-		return result.ok ? fffSearchOutput(result.value, searchPathRelativeToCwd, options.effectiveLimit) : undefined;
+		return result.ok
+			? fffSearchOutput(result.value, searchPathRelativeToCwd, options.effectiveLimit, packing)
+			: undefined;
 	}
 
 	const pathConstraint = searchPathRelativeToCwd ? `${searchPathRelativeToCwd}/` : "";
 	const result = finder.fileSearch(fffQueryParts([pathConstraint, options.pattern]), {
 		pageSize: options.effectiveLimit,
 	});
-	return result.ok ? fffSearchOutput(result.value, searchPathRelativeToCwd, options.effectiveLimit) : undefined;
+	return result.ok
+		? fffSearchOutput(result.value, searchPathRelativeToCwd, options.effectiveLimit, packing)
+		: undefined;
 }
 
-function formatFindResults(relativized: string[], effectiveLimit: number): { text: string; details: FindToolDetails } {
+function formatFindResults(
+	relativized: string[],
+	effectiveLimit: number,
+	packing: FindPackingOptions,
+): { text: string; details: FindToolDetails } {
 	if (relativized.length === 0) {
 		return { text: "No files found matching pattern", details: {} };
 	}
@@ -259,17 +312,57 @@ function formatFindResults(relativized: string[], effectiveLimit: number): { tex
 
 	const resultLimitReached = relativized.length >= effectiveLimit;
 	const rawOutput = formattedLines.join("\n");
-	const truncation = truncateHead(rawOutput, { maxLines: Number.MAX_SAFE_INTEGER });
-	let resultOutput = truncation.content;
+	// Measure -> pack (artifact-backed if oversized and a store was provided) -> notices.
+	const packed = packToolOutput(
+		{
+			toolName: "find",
+			path: packing.rawPath,
+			rawContent: rawOutput,
+			// No line limit here because the result limit already caps rows; only the byte
+			// cap should apply, matching the pre-Slice-B truncateHead call exactly.
+			truncation: { maxLines: Number.MAX_SAFE_INTEGER },
+		},
+		packing.artifactStore,
+		packing.toolCallId,
+	);
+	let resultOutput = packed.content;
 	const details: FindToolDetails = {};
 	const notices: string[] = [];
+	if (packed.artifactId) {
+		notices.push(formatArtifactNotice(packed.artifactId));
+		details.artifactId = packed.artifactId;
+	}
 	if (resultLimitReached) {
-		notices.push(`${effectiveLimit} results limit reached`);
+		notices.push(
+			`${effectiveLimit} results limit reached. Use limit=${effectiveLimit * 2} for more, or narrow path/pattern`,
+		);
 		details.resultLimitReached = effectiveLimit;
 	}
-	if (truncation.truncated) {
+	if (packed.truncation.truncated) {
 		notices.push(`${formatSize(DEFAULT_MAX_BYTES)} limit reached`);
-		details.truncation = truncation;
+		// Drop the duplicated bounded-preview text: it's already in the message's own
+		// content, and re-including it here can push `details` past
+		// MAX_RETAINED_TOOL_RESULT_DETAILS_BYTES (message-retention.ts), which replaces
+		// the *entire* details object with a stub -- silently losing artifactId and every
+		// other field alongside it. This is load-bearing beyond just the retention budget:
+		// agent-session.ts's _releaseGcPackedArtifactReferences() reads artifactId back off
+		// this same canonical message at eviction time (potentially many turns later), so
+		// keeping `details` small here is what keeps that release path working at all. If
+		// this field ever grows a large addition again, add a regression proving artifactId
+		// survives compactToolResultDetailsForRetention (see
+		// test/suite/agent-session-artifact-lifecycle.test.ts), not just a details-size check.
+		details.truncation = { ...packed.truncation, content: "" };
+	}
+	if (resultLimitReached || packed.truncation.truncated) {
+		const note = broadQueryInvalidationNote(
+			packing.broadQueryTracker,
+			normalizeBroadQueryKey({ toolName: "find", pattern: packing.pattern, path: packing.rawPath }),
+			`find "${packing.pattern}" in ${packing.rawPath ?? "."}`,
+		);
+		if (note) {
+			notices.push(note);
+			details.invalidationCandidate = true;
+		}
 	}
 	if (relativized.length > 0) {
 		resultOutput += `\n\n[Summary - ${extSummary}]`;
@@ -287,6 +380,8 @@ export function createFindToolDefinition(
 	const customOps = options?.operations;
 	const fffBackend = options?.fff === false ? undefined : (options?.fff ?? defaultFffSearchBackend);
 	const searchRouter = options?.searchRouter ?? defaultSearchRouter;
+	const artifactStore = options?.artifactStore;
+	const broadQueryTracker = options?.broadQueryTracker;
 	return {
 		name: "find",
 		label: "find",
@@ -295,7 +390,7 @@ export function createFindToolDefinition(
 		parameters: findSchema,
 		toolGroup: "explore",
 		async execute(
-			_toolCallId,
+			toolCallId,
 			{
 				pattern,
 				path: searchDir,
@@ -347,6 +442,10 @@ export function createFindToolDefinition(
 								pattern: effectivePattern,
 								ignoreCase,
 								effectiveLimit,
+								toolCallId,
+								artifactStore,
+								broadQueryTracker,
+								rawPath: searchDir,
 							});
 							if (signal?.aborted) {
 								settle(() => reject(new Error("Operation aborted")));
@@ -388,7 +487,13 @@ export function createFindToolDefinition(
 								return toPosixPath(path.relative(searchPath, p));
 							});
 
-							const formatted = formatFindResults(relativized, effectiveLimit);
+							const formatted = formatFindResults(relativized, effectiveLimit, {
+								toolCallId,
+								artifactStore,
+								broadQueryTracker,
+								pattern: effectivePattern,
+								rawPath: searchDir,
+							});
 							settle(() =>
 								resolve({
 									content: [{ type: "text", text: formatted.text }],
@@ -498,7 +603,13 @@ export function createFindToolDefinition(
 								relativized.push(toPosixPath(relativePath));
 							}
 
-							const formatted = formatFindResults(relativized, effectiveLimit);
+							const formatted = formatFindResults(relativized, effectiveLimit, {
+								toolCallId,
+								artifactStore,
+								broadQueryTracker,
+								pattern: effectivePattern,
+								rawPath: searchDir,
+							});
 							settle(() =>
 								resolve({
 									content: [{ type: "text", text: formatted.text }],
