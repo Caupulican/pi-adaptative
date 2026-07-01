@@ -1,6 +1,7 @@
 import type { AgentMessage } from "@caupulican/pi-agent-core";
 import { Type } from "typebox";
 import { estimateTokens } from "../compaction/compaction.ts";
+import type { MemoryPromptInclusionReport, MemoryRetrievalDiagnostics } from "../context/memory-diagnostics.ts";
 import type { ContextGcReport } from "../context-gc.ts";
 import { createBranchSummaryMessage, createCompactionSummaryMessage, createCustomMessage } from "../messages.ts";
 import type { CompactionEntry, SessionEntry } from "../session-manager.ts";
@@ -196,10 +197,31 @@ function groupRows(rows: AuditRow[]): Array<[string, { count: number; tokens: nu
 	return [...groups.entries()].sort((a, b) => b[1].tokens - a[1].tokens);
 }
 
+/** Bounded, deterministic summary lines for the memory-retrieval/prompt-inclusion diagnostic (safe metadata only, no content). */
+function formatMemoryRetrievalLine(retrieval: MemoryRetrievalDiagnostics): string {
+	return `Memory retrieval: ${retrieval.enabled ? `enabled (max ${retrieval.maxResults} results)` : "disabled"}`;
+}
+
+function formatMemoryProviderLines(retrieval: MemoryRetrievalDiagnostics): string[] {
+	return retrieval.providerReports.map((providerReport) => {
+		const rejection =
+			providerReport.rejectionReasons.length > 0 ? `; rejected: ${providerReport.rejectionReasons.join(", ")}` : "";
+		return `  provider ${providerReport.providerId}: ${providerReport.status} (${providerReport.resultCount} result(s)${rejection})`;
+	});
+}
+
+function formatMemoryPromptInclusionLine(promptInclusion: MemoryPromptInclusionReport): string {
+	return `Prompt inclusion: ${promptInclusion.status} (${promptInclusion.includedCount} included, ${promptInclusion.omittedCount} omitted, ${promptInclusion.blockChars} chars)`;
+}
+
 export function createCoreDiagnosticsToolDefinitions(
 	getActiveTools: () => string[],
 	getAllTools: () => ToolInfo[],
 	getContextGcReport?: (messages: AgentMessage[]) => ContextGcReport,
+	getMemoryDiagnostics?: () => {
+		retrieval: MemoryRetrievalDiagnostics;
+		promptInclusion: MemoryPromptInclusionReport;
+	},
 ): ToolDefinition[] {
 	return [
 		{
@@ -242,6 +264,7 @@ export function createCoreDiagnosticsToolDefinitions(
 				const rows = activeContextRows(branch);
 				const activeMessages = activeContextMessages(branch);
 				const contextGcReport = getContextGcReport?.(activeMessages);
+				const memoryDiagnostics = getMemoryDiagnostics?.();
 				const contextUsage = ctx.getContextUsage();
 				const systemPrompt = ctx.getSystemPrompt?.() || "";
 				const activeTools = new Set(getActiveTools());
@@ -297,6 +320,13 @@ export function createCoreDiagnosticsToolDefinitions(
 					unattributed === null
 						? undefined
 						: `provider-reported remainder not mapped by chars/4 rows: ${unattributed} tokens`,
+					...(memoryDiagnostics
+						? [
+								formatMemoryRetrievalLine(memoryDiagnostics.retrieval),
+								...formatMemoryProviderLines(memoryDiagnostics.retrieval),
+								formatMemoryPromptInclusionLine(memoryDiagnostics.promptInclusion),
+							]
+						: []),
 					"",
 					"Largest groups:",
 					...(groupLines.length ? groupLines : ["- none"]),
@@ -320,6 +350,7 @@ export function createCoreDiagnosticsToolDefinitions(
 						effectiveRowTokenSum,
 						contextGc: contextGcReport,
 						rows,
+						memory: memoryDiagnostics,
 					},
 				};
 			},

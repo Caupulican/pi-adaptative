@@ -82,6 +82,12 @@ import {
 	type PromptPolicyShadowReport,
 	planPromptPolicy,
 } from "./context/context-prompt-policy.ts";
+import {
+	defaultMemoryPromptInclusionReport,
+	type MemoryPromptInclusionReport,
+	type MemoryRetrievalDiagnostics,
+	sanitizeMemoryRetrievalReportForDiagnostics,
+} from "./context/memory-diagnostics.ts";
 import { buildMemoryPromptBlock } from "./context/memory-prompt-block.ts";
 import {
 	type MemoryProvider as ContextMemoryProvider,
@@ -568,6 +574,7 @@ export class AgentSession {
 	private _latestPromptEnforcementReport: PromptEnforcementReport | undefined = undefined;
 	private _memoryOkfProvider: ContextMemoryProvider | undefined = undefined;
 	private _latestMemoryRetrievalReport: MemoryRetrievalReport | undefined = undefined;
+	private _latestMemoryPromptInclusionReport: MemoryPromptInclusionReport | undefined = undefined;
 
 	// Branch summarization state
 	private _branchSummaryAbortController: AbortController | undefined = undefined;
@@ -1162,26 +1169,118 @@ export class AgentSession {
 	 * array about to be sent to the provider, not `this.agent.state.messages` or anything
 	 * persisted via `sessionManager` -- so the injected message can never reach the
 	 * transcript, regardless of how many times this pass runs.
+	 *
+	 * Also records a `MemoryPromptInclusionReport` (context/memory-diagnostics.ts) at each
+	 * branch below, for context_audit's diagnostic surface only -- this is pure bookkeeping
+	 * alongside the existing branches, not a new branch/condition: the messages returned
+	 * are unchanged by this recording.
 	 */
 	private _maybeAppendMemoryEvidenceBlock(messages: AgentMessage[], report: MemoryRetrievalReport): AgentMessage[] {
 		try {
 			const settings = this.settingsManager.getMemoryRetrievalSettings();
-			if (!settings.enabled || !settings.includeInPrompt || report.contextItems.length === 0) return messages;
+			const base = {
+				enabled: settings.enabled,
+				includeInPrompt: settings.includeInPrompt,
+				selectedItemCount: report.contextItems.length,
+			};
+			if (!settings.enabled) {
+				this._latestMemoryPromptInclusionReport = {
+					...base,
+					status: "disabled",
+					includedCount: 0,
+					omittedCount: 0,
+					blockChars: 0,
+				};
+				return messages;
+			}
+			if (!settings.includeInPrompt) {
+				this._latestMemoryPromptInclusionReport = {
+					...base,
+					status: "include_disabled",
+					includedCount: 0,
+					omittedCount: 0,
+					blockChars: 0,
+				};
+				return messages;
+			}
+			if (report.contextItems.length === 0) {
+				this._latestMemoryPromptInclusionReport = {
+					...base,
+					status: "no_results",
+					includedCount: 0,
+					omittedCount: 0,
+					blockChars: 0,
+				};
+				return messages;
+			}
 
 			const block = buildMemoryPromptBlock(report.contextItems);
-			if (!block.text) return messages;
+			if (!block.text) {
+				this._latestMemoryPromptInclusionReport = {
+					...base,
+					status: "empty_block",
+					includedCount: block.includedCount,
+					omittedCount: block.omittedCount,
+					blockChars: 0,
+				};
+				return messages;
+			}
 
+			const wrapped = wrapUntrustedText(block.text, "memory:pi-okf");
 			const evidenceMessage: CustomMessage = {
 				role: "custom",
 				customType: "memory_evidence",
-				content: [{ type: "text", text: wrapUntrustedText(block.text, "memory:pi-okf") }],
+				content: [{ type: "text", text: wrapped }],
 				display: false,
 				timestamp: Date.now(),
 			};
+			this._latestMemoryPromptInclusionReport = {
+				...base,
+				status: "included",
+				includedCount: block.includedCount,
+				omittedCount: block.omittedCount,
+				blockChars: wrapped.length,
+				sourceLabel: "memory:pi-okf",
+			};
 			return [...messages, evidenceMessage];
 		} catch {
+			// `base` may not exist yet if the throw happened before it was computed (e.g.
+			// settings access or `report.contextItems` itself threw), so this branch cannot
+			// rely on it -- fall back to safe, fixed defaults rather than risk referencing
+			// a partially-evaluated value.
+			this._latestMemoryPromptInclusionReport = {
+				enabled: false,
+				includeInPrompt: false,
+				selectedItemCount: 0,
+				status: "failed",
+				includedCount: 0,
+				omittedCount: 0,
+				blockChars: 0,
+			};
 			return messages;
 		}
+	}
+
+	/** Read-only inspection of the latest memory-prompt-inclusion decision, for tests/debugging and context_audit. */
+	getMemoryPromptInclusionReport(): MemoryPromptInclusionReport {
+		return this._latestMemoryPromptInclusionReport ?? defaultMemoryPromptInclusionReport();
+	}
+
+	/**
+	 * Combines the already-stored, no-arg latest reports (never re-queries the provider or
+	 * touches the OKF directory) into the safe, allow-list-projected shape context_audit
+	 * exposes. See context/memory-diagnostics.ts for why this projection is allow-list
+	 * based rather than a spread-then-delete of the raw report.
+	 */
+	private _getMemoryAuditDiagnostics(): {
+		retrieval: MemoryRetrievalDiagnostics;
+		promptInclusion: MemoryPromptInclusionReport;
+	} {
+		const settings = this.settingsManager.getMemoryRetrievalSettings();
+		return {
+			retrieval: sanitizeMemoryRetrievalReportForDiagnostics(this.getMemoryRetrievalReport(), settings),
+			promptInclusion: this.getMemoryPromptInclusionReport(),
+		};
 	}
 
 	private _applyContextGc(
@@ -4221,6 +4320,7 @@ export class AgentSession {
 				() => this.getActiveToolNames(),
 				() => this.getAllTools(),
 				(messages) => this.getContextGcReport(messages),
+				() => this._getMemoryAuditDiagnostics(),
 			)) {
 				this._baseToolDefinitions.set(definition.name, definition);
 			}
