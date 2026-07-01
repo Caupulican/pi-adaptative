@@ -6112,6 +6112,25 @@ export class InteractiveMode {
 			this.ui.requestRender();
 			return;
 		}
+		if (action.startsWith("rollback")) {
+			const auditId = action.slice("rollback".length).trim();
+			if (!auditId) {
+				this.showStatus("Usage: /autonomy rollback <auditId> (see /autonomy diagnostics for audit ids)");
+				return;
+			}
+			void this.session
+				.rollbackLearningWrite(auditId)
+				.then((result) => {
+					this.showStatus(
+						result.ok ? `Rolled back learning change ${auditId}.` : `Rollback skipped: ${result.reason}`,
+					);
+				})
+				.catch((error: unknown) => {
+					const message = error instanceof Error ? error.message : String(error);
+					this.showStatus(`Rollback failed: ${message}`);
+				});
+			return;
+		}
 		if (action === "research") {
 			this.showStatus("Research lane: running…");
 			void this.session
@@ -6131,7 +6150,7 @@ export class InteractiveMode {
 				});
 			return;
 		}
-		this.showStatus("Usage: /autonomy [status|diagnostics|research|off|safe|balanced|full]");
+		this.showStatus("Usage: /autonomy [status|diagnostics|research|rollback <auditId>|off|safe|balanced|full]");
 	}
 
 	private handleAutoLearnCommand(text: string): void {

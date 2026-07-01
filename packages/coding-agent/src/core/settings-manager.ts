@@ -226,6 +226,35 @@ export interface WorkerDelegationSettings {
 export type ResolvedWorkerDelegationSettings = Required<Omit<WorkerDelegationSettings, "model">> &
 	Pick<WorkerDelegationSettings, "model">;
 
+export type LearningPolicyLayer =
+	| "memory"
+	| "skill"
+	| "prompt"
+	| "extension"
+	| "tool"
+	| "script"
+	| "settings"
+	| "source";
+
+export const DEFAULT_LEARNING_POLICY_ENABLED = false;
+export const DEFAULT_LEARNING_POLICY_AUTO_APPLY_ENABLED = false;
+export const DEFAULT_LEARNING_POLICY_CONFIDENCE_THRESHOLD = 90;
+export const DEFAULT_LEARNING_POLICY_MIN_OBSERVATIONS = 2;
+export const DEFAULT_LEARNING_POLICY_ALLOWED_AUTO_APPLY_LAYERS: readonly LearningPolicyLayer[] = ["memory"];
+export const DEFAULT_LEARNING_POLICY_REFLECTION_SOURCE_CONFIDENCE = 50;
+
+export interface LearningPolicySettings {
+	enabled?: boolean; // default: false — until enabled, reflection writes keep the legacy direct-apply path (now audited)
+	autoApplyEnabled?: boolean; // default: false — with the policy on, writes become proposals unless auto-apply is enabled
+	confidenceThreshold?: number; // default: 90 (0-100)
+	minObservations?: number; // default: 2 — single-session cues do not auto-apply
+	allowedAutoApplyLayers?: LearningPolicyLayer[]; // default: ["memory"] — every other layer stays proposal-first
+	requireRollbackPlan?: boolean; // default: true — durable writes need a rollback plan to auto-apply
+	reflectionSourceConfidence?: number; // default: 50 — trust assigned to single-session reflection cues (0-100)
+}
+
+export type ResolvedLearningPolicySettings = Required<LearningPolicySettings>;
+
 export type TransportSetting = Transport;
 
 /**
@@ -317,6 +346,7 @@ export interface Settings {
 	autonomy?: AutonomySettings; // Low-config autonomy preset controlling background learning/reflection defaults
 	researchLane?: ResearchLaneSettings; // Opt-in autonomous read-only research lane producing evidence bundles
 	workerDelegation?: WorkerDelegationSettings; // Opt-in bounded scout-worker delegation via the delegate tool
+	learningPolicy?: LearningPolicySettings; // Opt-in learning apply policy: proposal-first durable writes with audit/rollback
 	modelRouter?: ModelRouterSettings; // Opt-in deterministic cheap/expensive model routing foundation
 	autoLearn?: AutoLearnSettings; // Setting-gated autonomous background learning for long sessions
 	sessionDir?: string; // Custom session storage directory (same format as --session-dir CLI flag)
@@ -2663,6 +2693,61 @@ export class SettingsManager {
 
 		this.globalSettings.workerDelegation = { ...settings };
 		this.markModified("workerDelegation");
+		this.save();
+	}
+
+	getLearningPolicySettings(): ResolvedLearningPolicySettings {
+		const configured = this.settings.learningPolicy ?? {};
+
+		const allowedLayers = Array.isArray(configured.allowedAutoApplyLayers)
+			? configured.allowedAutoApplyLayers.filter(
+					(layer): layer is LearningPolicyLayer =>
+						typeof layer === "string" &&
+						["memory", "skill", "prompt", "extension", "tool", "script", "settings", "source"].includes(layer),
+				)
+			: [...DEFAULT_LEARNING_POLICY_ALLOWED_AUTO_APPLY_LAYERS];
+
+		return {
+			enabled: typeof configured.enabled === "boolean" ? configured.enabled : DEFAULT_LEARNING_POLICY_ENABLED,
+			autoApplyEnabled:
+				typeof configured.autoApplyEnabled === "boolean"
+					? configured.autoApplyEnabled
+					: DEFAULT_LEARNING_POLICY_AUTO_APPLY_ENABLED,
+			confidenceThreshold: sanitizeIntegerSetting(
+				configured.confidenceThreshold,
+				DEFAULT_LEARNING_POLICY_CONFIDENCE_THRESHOLD,
+				0,
+				100,
+			),
+			minObservations: sanitizeIntegerSetting(
+				configured.minObservations,
+				DEFAULT_LEARNING_POLICY_MIN_OBSERVATIONS,
+				0,
+				100,
+			),
+			allowedAutoApplyLayers: allowedLayers,
+			requireRollbackPlan:
+				typeof configured.requireRollbackPlan === "boolean" ? configured.requireRollbackPlan : true,
+			reflectionSourceConfidence: sanitizeIntegerSetting(
+				configured.reflectionSourceConfidence,
+				DEFAULT_LEARNING_POLICY_REFLECTION_SOURCE_CONFIDENCE,
+				0,
+				100,
+			),
+		};
+	}
+
+	setLearningPolicySettings(settings: LearningPolicySettings, scope: SettingsScope = "global"): void {
+		if (scope === "project") {
+			const projectSettings = structuredClone(this.projectSettings);
+			projectSettings.learningPolicy = { ...settings };
+			this.markProjectModified("learningPolicy");
+			this.saveProjectSettings(projectSettings);
+			return;
+		}
+
+		this.globalSettings.learningPolicy = { ...settings };
+		this.markModified("learningPolicy");
 		this.save();
 	}
 

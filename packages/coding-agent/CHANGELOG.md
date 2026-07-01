@@ -39,6 +39,16 @@
   untrusted in the tool output, and cost-reported through spawned-usage accounting with an
   idempotent per-lane report id. Budgets cover cost per worker and wall-clock time; delegation
   lanes appear in `/autonomy diagnostics` and count toward the live `activeLaneCount`.
+- Added the learning apply/audit/rollback policy runtime: reflection-sourced durable writes now
+  route through the (previously unwired) learning gate, persist a `LearningDecision` snapshot per
+  write, and leave an audit record with a concrete rollback plan for every applied or proposed
+  change. With the new Learning Policy settings disabled (default) the legacy direct-apply
+  behavior is preserved — now fully audited; when enabled, single-session reflection cues become
+  proposals unless the configured confidence/observation thresholds and allowed layers
+  (memory-only by default) permit auto-apply. `/autonomy rollback <auditId>` (and
+  `AgentSession.rollbackLearningWrite`) executes the inverse memory operation or archives a
+  promoted skill, exactly once per change, and records a linked rollback audit. Audit records
+  appear in the `/autonomy diagnostics` learning family.
 
 ### Changed
 

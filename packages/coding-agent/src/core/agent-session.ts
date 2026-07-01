@@ -156,6 +156,14 @@ import {
 import type { GoalState } from "./goals/goal-state.ts";
 import { appendGoalStateSnapshot, getLatestGoalStateSnapshot } from "./goals/session-goal-state.ts";
 import {
+	appendLearningAuditSnapshot,
+	getLearningAuditSnapshots,
+	type LearningAuditRecord,
+	proposalFromReflectionWrite,
+	rollbackPlanForReflectionWrite,
+} from "./learning/learning-audit.ts";
+import { evaluateLearningDecision } from "./learning/learning-gate.ts";
+import {
 	type DemandSignals,
 	decideDemand,
 	ReflectionEngine,
@@ -6017,8 +6025,56 @@ export class AgentSession {
 		// or skills against the dead session.
 		if (this._disposed) return result;
 
+		// Learning apply policy: every durable write is converted to a proposal, decided by the
+		// learning gate, and audited with a rollback plan. With the policy disabled (default) the
+		// legacy direct-apply behavior is preserved — but now leaves audit records with rollback info.
+		const policy = this.settingsManager.getLearningPolicySettings();
+		let auditSequence = getLearningAuditSnapshots(this.sessionManager.getEntries()).length;
 		for (const write of result.writes) {
-			await this._applyReflectionWrite(write, signal);
+			auditSequence += 1;
+			const proposalId = `${input.reportId ?? "reflection"}-w${auditSequence}`;
+			const proposal = proposalFromReflectionWrite(write, proposalId);
+			const rollback = rollbackPlanForReflectionWrite(write);
+			const decision: LearningDecision = policy.enabled
+				? evaluateLearningDecision({
+						proposal,
+						confidence: policy.reflectionSourceConfidence,
+						observations: 1,
+						contradictions: 0,
+						settings: {
+							enabled: true,
+							autoApplyEnabled: policy.autoApplyEnabled,
+							confidenceThreshold: policy.confidenceThreshold,
+							minObservations: policy.minObservations,
+							allowedAutoApplyLayers: policy.allowedAutoApplyLayers,
+							requireRollbackPlan: policy.requireRollbackPlan,
+						},
+					})
+				: {
+						kind: "apply",
+						reasonCode: "learning_policy_disabled_legacy_apply",
+						confidence: 0,
+						summary: proposal.summary,
+						requiresApproval: false,
+					};
+
+			this.saveLearningDecisionSnapshot(decision);
+			if (decision.kind === "apply") {
+				await this._applyReflectionWrite(write, signal);
+			}
+			if (decision.kind !== "no-op") {
+				appendLearningAuditSnapshot(this.sessionManager, {
+					id: `audit-${auditSequence}`,
+					proposalId,
+					layer: proposal.layer,
+					action: decision.kind === "apply" ? "apply" : "propose",
+					summary: proposal.summary,
+					reasonCode: decision.reasonCode,
+					decision,
+					rollback,
+					createdAt: new Date().toISOString(),
+				});
+			}
 		}
 
 		// Account the reflection's spend so it surfaces in the footer roll-up (net-token visibility).
@@ -6027,6 +6083,74 @@ export class AgentSession {
 			this.addSpawnedUsage(result.usage, { label: "reflection", reportId: input.reportId });
 		}
 		return result;
+	}
+
+	getLearningAuditRecords(): LearningAuditRecord[] {
+		return getLearningAuditSnapshots(this.sessionManager.getEntries());
+	}
+
+	/**
+	 * Roll back one applied durable learning change by executing the inverse operation recorded in
+	 * its audit record (memory ops run through the same bundled memory-tool path as the original
+	 * apply; promoted skills are archived). Appends a linked "rollback" audit record on success so
+	 * the change history stays complete and a change cannot be rolled back twice.
+	 */
+	async rollbackLearningWrite(auditId: string): Promise<{ ok: boolean; reason: string }> {
+		if (this._disposed) return { ok: false, reason: "session_disposed" };
+
+		const audits = this.getLearningAuditRecords();
+		const audit = audits.find((record) => record.id === auditId);
+		if (!audit) return { ok: false, reason: "audit_not_found" };
+		if (audit.action !== "apply") return { ok: false, reason: "not_an_applied_change" };
+		if (audits.some((record) => record.action === "rollback" && record.rollbackOf === auditId)) {
+			return { ok: false, reason: "already_rolled_back" };
+		}
+		const rollback = audit.rollback;
+		if (!rollback) return { ok: false, reason: "no_rollback_plan" };
+
+		switch (rollback.kind) {
+			case "memory_remove": {
+				if (!rollback.target) return { ok: false, reason: "missing_rollback_target" };
+				await this._applyReflectionWrite({ kind: "memory_remove", target: rollback.target });
+				break;
+			}
+			case "memory_restore": {
+				if (!rollback.target || rollback.previous === undefined) {
+					return { ok: false, reason: "missing_rollback_target" };
+				}
+				await this._applyReflectionWrite({
+					kind: "memory_replace",
+					target: rollback.target,
+					text: rollback.previous,
+				});
+				break;
+			}
+			case "memory_add": {
+				if (rollback.previous === undefined) return { ok: false, reason: "missing_rollback_target" };
+				await this._applyReflectionWrite({ kind: "memory_add", section: "MEMORY", text: rollback.previous });
+				break;
+			}
+			case "archive_skill": {
+				if (!rollback.target) return { ok: false, reason: "missing_rollback_target" };
+				if (!this.archivePromotedSkill(rollback.target)) {
+					return { ok: false, reason: "skill_archive_failed" };
+				}
+				break;
+			}
+		}
+
+		appendLearningAuditSnapshot(this.sessionManager, {
+			id: `${audit.id}-rollback`,
+			proposalId: audit.proposalId,
+			layer: audit.layer,
+			action: "rollback",
+			summary: `Rolled back: ${audit.summary}`,
+			reasonCode: "user_requested_rollback",
+			decision: audit.decision,
+			rollbackOf: audit.id,
+			createdAt: new Date().toISOString(),
+		});
+		return { ok: true, reason: "rollback_applied" };
 	}
 
 	/**
@@ -6414,16 +6538,26 @@ export class AgentSession {
 			snapshot.delegation = delegationEntries;
 		}
 
+		const learningEntries: DiagnosticEntry[] = [];
 		const learningDecisions = this.getLearningDecisionSnapshots();
-		if (learningDecisions.length > 0) {
-			snapshot.learning = learningDecisions.slice(-maxEntriesPerFamily).map(
-				(decision): DiagnosticEntry => ({
-					title: `Learning (${decision.kind})`,
-					summary: decision.summary,
-					reasonCode: decision.reasonCode,
-					metadata: { confidence: decision.confidence, requiresApproval: decision.requiresApproval },
-				}),
-			);
+		for (const decision of learningDecisions.slice(-maxEntriesPerFamily)) {
+			learningEntries.push({
+				title: `Learning (${decision.kind})`,
+				summary: decision.summary,
+				reasonCode: decision.reasonCode,
+				metadata: { confidence: decision.confidence, requiresApproval: decision.requiresApproval },
+			});
+		}
+		for (const audit of this.getLearningAuditRecords().slice(-maxEntriesPerFamily)) {
+			learningEntries.push({
+				title: `Audit ${audit.id} (${audit.action})`,
+				summary: audit.summary,
+				reasonCode: audit.reasonCode,
+				metadata: { layer: audit.layer, proposalId: audit.proposalId, rollbackOf: audit.rollbackOf },
+			});
+		}
+		if (learningEntries.length > 0) {
+			snapshot.learning = learningEntries;
 		}
 
 		if (goal) {
