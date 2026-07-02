@@ -8,10 +8,10 @@ describe("profile-resource-selection", () => {
 
 	describe("encodeResourceSelection", () => {
 		describe("with toolIds universe", () => {
-			it("all enabled -> undefined", () => {
+			it("all enabled -> explicit grant-all (strict UAC: omitting the kind means DENIED)", () => {
 				const enabled = new Set(toolIds);
 				const result = encodeResourceSelection(enabled, toolIds);
-				expect(result).toBeUndefined();
+				expect(result).toEqual({ allow: ["*"] });
 			});
 
 			it("subset enabled -> { allow: [...] } in allIds order", () => {
@@ -41,10 +41,10 @@ describe("profile-resource-selection", () => {
 		});
 
 		describe("with skillIds universe", () => {
-			it("all enabled -> undefined", () => {
+			it("all enabled -> explicit grant-all (strict UAC)", () => {
 				const enabled = new Set(skillIds);
 				const result = encodeResourceSelection(enabled, skillIds);
-				expect(result).toBeUndefined();
+				expect(result).toEqual({ allow: ["*"] });
 			});
 
 			it("subset enabled -> { allow: [...] } in allIds order", () => {
@@ -63,9 +63,9 @@ describe("profile-resource-selection", () => {
 
 	describe("decodeResourceSelection", () => {
 		describe("with toolIds universe", () => {
-			it("undefined filter -> all enabled", () => {
+			it("undefined filter -> NOTHING enabled (strict UAC: unmentioned kind is denied)", () => {
 				const result = decodeResourceSelection(undefined, toolIds);
-				expect(result).toEqual(new Set(toolIds));
+				expect(result).toEqual(new Set());
 			});
 
 			it("empty filter -> all enabled", () => {
@@ -120,9 +120,9 @@ describe("profile-resource-selection", () => {
 		});
 
 		describe("with skillIds universe", () => {
-			it("undefined filter -> all enabled", () => {
+			it("undefined filter -> NOTHING enabled (strict UAC)", () => {
 				const result = decodeResourceSelection(undefined, skillIds);
-				expect(result).toEqual(new Set(skillIds));
+				expect(result).toEqual(new Set());
 			});
 
 			it("{ allow: ['a', 'c'] } -> a and c", () => {

@@ -188,6 +188,10 @@ function createMinimalResourceLoader(systemPrompt: string): ResourceLoader {
 		extendResources: () => {},
 		reload: async () => {},
 		getDiscoverableExtensionPaths: async () => [],
+		getAgentsDiagnostics: () => [],
+		getDiscoverableSkillPaths: () => [],
+		getDiscoverablePromptPaths: () => [],
+		getDiscoverableAgentsFilePaths: () => [],
 	};
 }
 

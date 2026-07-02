@@ -85,6 +85,8 @@ export interface BuildContextCompositionInput {
 	curation?: { enabled: boolean; telemetry: CurationTelemetrySnapshot; lastSkipReason?: string };
 	spawned?: { cost: number; reports: number };
 	adjustments?: { memoryEvidenceTokens: number; enforcementSavedTokens: number };
+	/** Pre-formed warnings from other subsystems (e.g. profile-withheld context files). */
+	extraObservations?: string[];
 }
 
 function estimateTextTokens(text: string): number {
@@ -169,7 +171,7 @@ export function buildContextCompositionReport(input: BuildContextCompositionInpu
 			adjustments.enforcementSavedTokens,
 	);
 
-	const observations: string[] = [];
+	const observations: string[] = [...(input.extraObservations ?? [])];
 	const heaviestTool = tools[0];
 	if (heaviestTool && toolSchemaTokens > 0 && heaviestTool.schemaTokens > Math.max(500, toolSchemaTokens * 0.3)) {
 		observations.push(

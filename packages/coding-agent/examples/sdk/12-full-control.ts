@@ -55,6 +55,10 @@ Available: read, bash. Be concise.`,
 	extendResources: () => {},
 	reload: async () => {},
 	getDiscoverableExtensionPaths: async () => [],
+	getAgentsDiagnostics: () => [],
+	getDiscoverableSkillPaths: () => [],
+	getDiscoverablePromptPaths: () => [],
+	getDiscoverableAgentsFilePaths: () => [],
 };
 
 const { session } = await createAgentSession({

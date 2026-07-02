@@ -79,10 +79,10 @@ describe("Library Manage UX - Increment 2", () => {
 			expect(decoded).toEqual(enabled);
 		});
 
-		it("should encode all enabled set as undefined for block framing", () => {
+		it("should encode all enabled set as explicit grant-all (strict UAC) for block framing", () => {
 			const enabled = new Set(allIds);
 			const encoded = encodeResourceSelectionWithFraming(enabled, allIds, "block");
-			expect(encoded).toBeUndefined();
+			expect(encoded).toEqual({ allow: ["*"] });
 
 			const decoded = decodeResourceSelection(encoded, allIds);
 			expect(decoded).toEqual(enabled);

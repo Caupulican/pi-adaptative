@@ -68,6 +68,10 @@ This is a test skill.
 			extendResources: () => {},
 			reload: async () => {},
 			getDiscoverableExtensionPaths: async () => [],
+			getAgentsDiagnostics: () => [],
+			getDiscoverableSkillPaths: () => [],
+			getDiscoverablePromptPaths: () => [],
+			getDiscoverableAgentsFilePaths: () => [],
 		};
 
 		const { session } = await createAgentSession({
@@ -108,6 +112,10 @@ This is a test skill.
 			extendResources: () => {},
 			reload: async () => {},
 			getDiscoverableExtensionPaths: async () => [],
+			getAgentsDiagnostics: () => [],
+			getDiscoverableSkillPaths: () => [],
+			getDiscoverablePromptPaths: () => [],
+			getDiscoverableAgentsFilePaths: () => [],
 		};
 
 		const { session } = await createAgentSession({

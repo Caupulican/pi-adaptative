@@ -6940,10 +6940,65 @@ export class InteractiveMode {
 		const loader = this.session.resourceLoader;
 		const base = (p: string) => p.split(/[\\/]/).pop() ?? p;
 		const allDiscoverableExtensions = await loader.getDiscoverableExtensionPaths();
-		const skills = loader.getSkills().skills;
-		const prompts = loader.getPrompts().prompts;
+		// The editor's universe must be profile-INDEPENDENT (discovery, not loading): the loaded
+		// getters are narrowed by the active profile, so building the lists from them makes
+		// currently-blocked skills/prompts/context files ungrantable — including expanding the
+		// very profile you are running under. Union the loaded (rich metadata) sets with the
+		// full pre-filter discovery paths.
+		const loadedSkills = loader.getSkills().skills;
+		const loadedSkillPaths = new Set(loadedSkills.map((skill) => skill.filePath));
+		const skillIdFromPath = (skillPath: string): string => {
+			const parts = skillPath.split(/[\\/]/);
+			const last = parts.pop() ?? skillPath;
+			if (/^skill\.md$/i.test(last)) return parts.pop() ?? last;
+			return last.replace(/\.md$/i, "");
+		};
+		const skills = [
+			...loadedSkills.map((skill) => ({ id: skill.name, path: skill.filePath, description: skill.description })),
+			...loader
+				.getDiscoverableSkillPaths()
+				.filter((skillPath) => !loadedSkillPaths.has(skillPath))
+				.map((skillPath) => ({
+					id: skillIdFromPath(skillPath),
+					path: skillPath,
+					description: getFrontmatterDescription(skillPath),
+				})),
+		];
+		const loadedPrompts = loader.getPrompts().prompts;
+		const loadedPromptPaths = new Set(loadedPrompts.map((prompt) => prompt.filePath));
+		const prompts = [
+			...loadedPrompts.map((prompt) => ({
+				id: prompt.name,
+				path: prompt.filePath,
+				description: prompt.description,
+			})),
+			...loader
+				.getDiscoverablePromptPaths()
+				.filter((promptPath) => !loadedPromptPaths.has(promptPath))
+				.map((promptPath) => ({
+					id: (promptPath.split(/[\\/]/).pop() ?? promptPath).replace(/\.md$/i, ""),
+					path: promptPath,
+					description: getFrontmatterDescription(promptPath),
+				})),
+		];
 		const themes = getAvailableThemesWithPaths();
-		const agents = loader.getAgentsFiles().agentsFiles;
+		const loadedAgentPaths = new Set(loader.getAgentsFiles().agentsFiles.map((file) => file.path));
+		const agents = [
+			...loader.getAgentsFiles().agentsFiles.map((file) => ({ path: file.path })),
+			...loader
+				.getDiscoverableAgentsFilePaths()
+				.filter((agentPath) => !loadedAgentPaths.has(agentPath))
+				.map((agentPath) => ({ path: agentPath })),
+		];
+
+		const getFrontmatterDescription = (filePath: string): string | undefined => {
+			try {
+				const content = fs.readFileSync(filePath, "utf-8");
+				const { frontmatter } = parseFrontmatter<Record<string, unknown>>(content);
+				if (typeof frontmatter.description === "string") return frontmatter.description;
+			} catch {}
+			return undefined;
+		};
 
 		const getAgentDescription = (filePath: string): string | undefined => {
 			try {
@@ -6977,16 +7032,16 @@ export class InteractiveMode {
 			{
 				kind: "tools",
 				label: "Tools",
-				items: Array.from(allToolNames).map((name: string) => ({ id: name })),
+				// Built-ins plus every currently registered tool (extension tools included), so
+				// an extension tool can be granted by name without hand-editing settings JSON.
+				items: [...new Set([...allToolNames, ...this.session.getAllTools().map((tool) => tool.name)])].map(
+					(name: string) => ({ id: name }),
+				),
 			},
 			{
 				kind: "skills",
 				label: "Skills",
-				items: skills.map((s) => ({
-					id: s.name,
-					path: s.filePath,
-					description: s.description,
-				})),
+				items: skills,
 			},
 			{
 				kind: "extensions",
@@ -7009,11 +7064,7 @@ export class InteractiveMode {
 			{
 				kind: "prompts",
 				label: "Prompts",
-				items: prompts.map((p) => ({
-					id: p.name,
-					path: p.filePath,
-					description: p.description,
-				})),
+				items: prompts,
 			},
 			{
 				kind: "themes",

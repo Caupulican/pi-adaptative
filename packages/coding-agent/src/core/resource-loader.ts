@@ -60,6 +60,12 @@ export interface ResourceLoader {
 	/** Themes allowed by the currently active resource profile. */
 	getActiveThemes(): Theme[];
 	getAgentsFiles(): { agentsFiles: Array<{ path: string; content?: string }> };
+	/** Warnings about context files withheld by the active profile (empty when none). */
+	getAgentsDiagnostics(): ResourceDiagnostic[];
+	/** Profile-INDEPENDENT discovery (editor universe; metadata only, never loads content). */
+	getDiscoverableSkillPaths(): string[];
+	getDiscoverablePromptPaths(): string[];
+	getDiscoverableAgentsFilePaths(): string[];
 	getSystemPrompt(): string | undefined;
 	getAppendSystemPrompt(): string[];
 	getLoadedExtension(path: string): Extension | undefined;
@@ -373,6 +379,10 @@ export class DefaultResourceLoader implements ResourceLoader {
 	private systemPrompt?: string;
 	private appendSystemPrompt: string[];
 	private lastSkillPaths: string[];
+	private lastAgentsFilePaths: string[] = [];
+	private discoverableSkillPaths: string[] = [];
+	private discoverablePromptPaths: string[] = [];
+	private agentsDiagnostics: ResourceDiagnostic[] = [];
 	private extensionSkillSourceInfos: Map<string, SourceInfo>;
 	private extensionPromptSourceInfos: Map<string, SourceInfo>;
 	private extensionThemeSourceInfos: Map<string, SourceInfo>;
@@ -494,6 +504,30 @@ export class DefaultResourceLoader implements ResourceLoader {
 
 	getAgentsFiles(): { agentsFiles: Array<{ path: string; content?: string }> } {
 		return { agentsFiles: this.agentsFiles };
+	}
+
+	/** Warnings about context files withheld by the active profile (empty when none). */
+	getAgentsDiagnostics(): ResourceDiagnostic[] {
+		return this.agentsDiagnostics;
+	}
+
+	/**
+	 * Profile-INDEPENDENT discovery for the profile editor's universe (same rule as
+	 * getDiscoverableExtensionPaths): the full pre-filter path sets retained from the last
+	 * reload. Discovery is metadata, not loading — granting a currently-blocked skill/prompt/
+	 * context file requires being able to SEE it; strict UAC only forbids reading denied
+	 * CONTENT into the session.
+	 */
+	getDiscoverableSkillPaths(): string[] {
+		return [...this.discoverableSkillPaths];
+	}
+
+	getDiscoverablePromptPaths(): string[] {
+		return [...this.discoverablePromptPaths];
+	}
+
+	getDiscoverableAgentsFilePaths(): string[] {
+		return [...this.lastAgentsFilePaths];
 	}
 
 	getSystemPrompt(): string | undefined {
@@ -912,6 +946,18 @@ export class DefaultResourceLoader implements ResourceLoader {
 					);
 
 			this.lastSkillPaths = skillPaths;
+			// Discovery universe: ALL package-resolved skills (profile-denied entries survive
+			// resolve() with enabled=false) plus every other source, pre-filter.
+			this.discoverableSkillPaths = this.mergePaths(
+				[
+					...cliEnabledSkills,
+					...enabledSkillResources.map(mapSkillPath),
+					...resolvedPaths.skills.map(mapSkillPath),
+					...externalSkills,
+					...bundledSkillPaths,
+				],
+				this.additionalSkillPaths,
+			);
 			this.updateSkillsFromPaths(skillPaths, metadataByPath);
 			for (const p of this.additionalSkillPaths) {
 				if (isLocalPath(p)) {
@@ -948,6 +994,16 @@ export class DefaultResourceLoader implements ResourceLoader {
 					);
 
 			this.lastPromptPaths = promptPaths;
+			this.discoverablePromptPaths = this.mergePaths(
+				[
+					...cliEnabledPrompts,
+					...enabledPrompts,
+					...resolvedPaths.prompts.map((resource) => resource.path),
+					...externalPrompts,
+					...bundledPromptPaths,
+				],
+				this.additionalPromptTemplatePaths,
+			);
 			this.updatePromptsFromPaths(promptPaths, metadataByPath);
 			for (const p of this.additionalPromptTemplatePaths) {
 				if (isLocalPath(p)) {
@@ -1006,6 +1062,8 @@ export class DefaultResourceLoader implements ResourceLoader {
 			}
 			this.settingsManager.addDiscoveredResourceProfileDefinitions(agentEmbeddedProfiles);
 			const agentProfileFilter = this.settingsManager.getResourceProfileFilter("agents");
+			// Editor universe: the FULL pre-filter path set (discovery is metadata, not loading).
+			this.lastAgentsFilePaths = rawAgentsFiles.map((file) => file.path);
 			const agentsFiles = {
 				agentsFiles: rawAgentsFiles
 					.filter((file) => {
@@ -1020,6 +1078,18 @@ export class DefaultResourceLoader implements ResourceLoader {
 						content: file.content ? stripResourceProfileBlocks(file.content) : file.content,
 					})),
 			};
+			// Strict UAC silently denying AGENTS.md/CLAUDE.md context is a sharp footgun for lean
+			// profiles — surface it loudly instead of letting instructions vanish without a trace.
+			const withheldAgentsCount = rawAgentsFiles.length - agentsFiles.agentsFiles.length;
+			this.agentsDiagnostics =
+				withheldAgentsCount > 0
+					? [
+							{
+								type: "warning",
+								message: `${withheldAgentsCount} context file(s) (AGENTS.md/CLAUDE.md) withheld by the active resource profile — grant the "agents" kind to restore them`,
+							},
+						]
+					: [];
 			const resolvedAgentsFiles = this.agentsFilesOverride ? this.agentsFilesOverride(agentsFiles) : agentsFiles;
 			this.agentsFiles = resolvedAgentsFiles.agentsFiles;
 

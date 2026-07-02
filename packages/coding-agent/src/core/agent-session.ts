@@ -1398,6 +1398,7 @@ export class AgentSession {
 			},
 			spawned: { cost: spawned.cost, reports: spawned.reports },
 			adjustments: { memoryEvidenceTokens, enforcementSavedTokens },
+			extraObservations: this._resourceLoader.getAgentsDiagnostics().map((diagnostic) => diagnostic.message),
 		});
 	}
 

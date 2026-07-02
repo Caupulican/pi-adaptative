@@ -13,14 +13,21 @@ export function decodeResourceSelection(
 	filter: ResourceProfileFilterSettings | undefined,
 	allIds: string[],
 ): Set<string> {
-	// No filter means all enabled
+	// Strict UAC: an unmentioned kind is DENIED — decoding it as "all enabled" would both
+	// lie in the editor UI and, on save, convert silent denial into an explicit grant-all.
 	if (!filter) {
-		return new Set(allIds);
+		return new Set();
 	}
 
 	// If block contains "*", nothing is enabled
 	if (filter.block?.includes("*")) {
 		return new Set();
+	}
+
+	// Explicit grant-all: every id enabled except explicitly blocked ones.
+	if (filter.allow?.includes("*")) {
+		const blocked = new Set(filter.block ?? []);
+		return new Set(allIds.filter((id) => !blocked.has(id)));
 	}
 
 	// If allow is specified, start with the allow list filtered to valid IDs
@@ -78,8 +85,12 @@ export function encodeResourceSelection(
 		}
 	}
 
-	// All enabled: return undefined (caller omits the kind)
-	if (validEnabledCount === allIds.length) {
+	// All enabled: grant-all must be said OUT LOUD under strict UAC — omitting the kind
+	// (returning undefined) would mean deny-all, silently corrupting a fully-granted kind.
+	if (allIds.length > 0 && validEnabledCount === allIds.length) {
+		return { allow: ["*"] };
+	}
+	if (allIds.length === 0) {
 		return undefined;
 	}
 
@@ -139,8 +150,11 @@ export function encodeResourceSelectionWithFraming(
 		}
 	}
 
-	// All enabled: return undefined
-	if (validEnabledCount === allIds.length) {
+	// All enabled: explicit grant-all (see encodeResourceSelection — undefined means DENIED).
+	if (allIds.length > 0 && validEnabledCount === allIds.length) {
+		return { allow: ["*"] };
+	}
+	if (allIds.length === 0) {
 		return undefined;
 	}
 

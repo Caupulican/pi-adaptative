@@ -70,7 +70,9 @@ describe("loadEntriesFromFile", () => {
 		expect(entries).toHaveLength(2);
 	});
 
-	it("opens session files larger than Node's max string length", () => {
+	// Legitimately heavy I/O (writes past Node's max string length); on a loaded machine the
+	// default 30s regularly flakes in full-suite runs.
+	it("opens session files larger than Node's max string length", { timeout: 120_000 }, () => {
 		const file = join(tempDir, "large.jsonl");
 		writeFileSync(
 			file,

@@ -229,6 +229,10 @@ export function createTestResourceLoader(options: CreateTestResourceLoaderOption
 			return this.getThemes().themes;
 		},
 		getAgentsFiles: () => ({ agentsFiles: [] }),
+		getAgentsDiagnostics: () => [],
+		getDiscoverableSkillPaths: () => [],
+		getDiscoverablePromptPaths: () => [],
+		getDiscoverableAgentsFilePaths: () => [],
 		getSystemPrompt: () => undefined,
 		getAppendSystemPrompt: () => [],
 		getLoadedExtension: () => undefined,

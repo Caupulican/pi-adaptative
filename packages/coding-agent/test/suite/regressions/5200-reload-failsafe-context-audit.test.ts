@@ -72,6 +72,10 @@ describe("reload failsafe and context audit", () => {
 				};
 			},
 			getDiscoverableExtensionPaths: async () => extensionsResult.extensions.map((e) => e.path),
+			getAgentsDiagnostics: () => [],
+			getDiscoverableSkillPaths: () => [],
+			getDiscoverablePromptPaths: () => [],
+			getDiscoverableAgentsFilePaths: () => [],
 		};
 
 		const harness = await createHarness({ resourceLoader });

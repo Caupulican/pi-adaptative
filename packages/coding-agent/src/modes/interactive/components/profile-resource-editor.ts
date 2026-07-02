@@ -222,9 +222,6 @@ export class ProfileResourceEditorComponent extends Container implements Focusab
 		for (const kind of this.kinds) {
 			const filter = options.initialResources[kind.kind];
 			const allIds = kind.items.map((item) => item.id);
-			const enabledSet = decodeResourceSelection(filter, allIds);
-			this.enabledByKind.set(kind.kind, enabledSet);
-			this.framingByKind.set(kind.kind, detectResourceFraming(filter));
 
 			// Compute missing items
 			const mentionedIds = new Set<string>();
@@ -250,6 +247,14 @@ export class ProfileResourceEditorComponent extends Container implements Focusab
 				}
 			}
 			this.missingIdsByKind.set(kind.kind, missingSet);
+
+			// Decode against the DISCOVERABLE universe plus every id the profile itself mentions:
+			// decoding only against the discoverable set silently drops grants for anything the
+			// current environment cannot see (offline external root, or a collapsed universe),
+			// and the next save would then corrupt the profile.
+			const enabledSet = decodeResourceSelection(filter, [...allIds, ...missingSet]);
+			this.enabledByKind.set(kind.kind, enabledSet);
+			this.framingByKind.set(kind.kind, detectResourceFraming(filter));
 		}
 
 		// Header
@@ -592,7 +597,10 @@ export class ProfileResourceEditorComponent extends Container implements Focusab
 		for (const kind of this.kinds) {
 			const enabledSet = this.enabledByKind.get(kind.kind)!;
 			const framing = this.framingByKind.get(kind.kind)!;
-			const allIds = kind.items.map((item) => item.id);
+			// Persist against the same widened universe used at decode time: profile-referenced
+			// ids that are not currently discoverable must survive a save untouched.
+			const missingSet = this.missingIdsByKind.get(kind.kind) ?? new Set<string>();
+			const allIds = [...new Set([...kind.items.map((item) => item.id), ...missingSet])];
 			const encoded = encodeResourceSelectionWithFraming(enabledSet, allIds, framing);
 			if (encoded !== undefined) {
 				resources[kind.kind] = encoded;

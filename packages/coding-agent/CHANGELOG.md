@@ -4,6 +4,20 @@
 
 ### Fixed
 
+- Fixed the profile editor's universe collapsing under strict UAC: the Skills/Prompts/Agents lists
+  were built from the profile-NARROWED loaded getters, so while any restrictive profile was active
+  you could not see — let alone grant — currently-blocked resources, including expanding the very
+  profile you were running under. Discovery is now profile-independent (full pre-filter path sets,
+  mirroring the existing extensions fix), and the editor's Tools list now includes registered
+  extension tools.
+- Fixed profile-editor saves silently corrupting profiles: grants referenced outside the currently
+  visible universe were dropped on save, and a fully-granted kind re-encoded to an omitted kind —
+  which under strict UAC means DENY-ALL. Selection encode/decode is now strict-UAC-coherent
+  (unmentioned decodes as denied; grant-all encodes as an explicit allow:["*"]; profile-referenced
+  ids outside the visible universe survive decode/encode round-trips).
+- Surfaced the silent strict-UAC denial of AGENTS.md/CLAUDE.md context files: when the active
+  profile does not mention the "agents" kind, the withheld files now produce a loader warning and
+  a /context dashboard observation instead of instructions vanishing without a trace.
 - Fixed profile tool grants never ACTIVATING: activation was only ever the requested defaults
   intersected with the profile allow-list, so a profile granting non-default tools (e.g. a
   search-only profile allowing grep/find) produced an empty or truncated "Available tools" set on
