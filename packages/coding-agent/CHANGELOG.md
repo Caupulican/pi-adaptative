@@ -83,6 +83,18 @@
   ANY prompt customization: lane settings (`systemPrompt`) and the delegate tool's new
   `systemPrompt` input can erase and replace everything above it — so a big session model can
   hand a small open model a minimal purpose-built prompt without shedding the safety floor.
+- Added the `model_fitness` probe (tool + `/autonomy fitness <model> [trials]`): runs the real
+  research-lane, scout-worker, and routing-judge runners plus two heavy-lifter surfaces
+  (search-plan formulation, tool-call emission) against any registered model — local Ollama
+  models included — reporting parse/success rates, judge discrimination, mean latency,
+  tokens-per-second, and probe cost. Probe spend is cost-accounted; the tool is registered but
+  not default-active. An opt-in size-class bench (`PI_LOCAL_MODEL_BENCH=1`) asserts per-class
+  minimum bars for locally installed models.
+- Added a host-keyed fitness store (`<agentDir>/state/model-fitness.json`): every probe persists
+  its report under a hardware fingerprint (CPU/cores/RAM), because fitness is a property of a
+  model ON a host — role assignments stay per-machine and synced settings cannot carry one
+  machine's speed numbers onto another. `AgentSession.getStoredFitnessReports()` exposes the
+  current host's measured evidence for profile/role decisions.
 - Added the routing judge: with the model router enabled, a bounded routing-only completion on the
   judge lane (`modelRouter.judgeModel`, else `mediumModel`; ≤128 output tokens, 10s wall clock,
   static cached prompt) decides the final cheap/medium/expensive tier over the regex baseline —

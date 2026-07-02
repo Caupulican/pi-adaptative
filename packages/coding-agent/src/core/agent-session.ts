@@ -204,6 +204,7 @@ import {
 	type ModelRouterDecisionStatus,
 } from "./model-router/status.ts";
 import { shouldEscalateModelRouterTool } from "./model-router/tool-escalation.ts";
+import { FitnessStore, type StoredFitnessReport } from "./models/fitness-store.ts";
 import type { NormalizedProfile } from "./profile-registry.ts";
 import { expandPromptTemplate, type PromptTemplate } from "./prompt-templates.ts";
 import { type ModelFitnessReport, runModelFitnessProbe } from "./research/model-fitness.ts";
@@ -6084,7 +6085,27 @@ export class AgentSession {
 		if (!this._disposed && (spent.cost.total > 0 || spent.totalTokens > 0)) {
 			this.addSpawnedUsage(spent, { label: "model-fitness" });
 		}
-		return { started: true, model: `${resolved.provider}/${resolved.id}`, report };
+		const modelRef = `${resolved.provider}/${resolved.id}`;
+		// Fitness is a property of a model ON a host — persist the report host-keyed so role
+		// assignments stay per-machine (a model can await better hardware without being forgotten).
+		// Best-effort: a disk problem must not fail the probe itself.
+		try {
+			if (!this._disposed) {
+				FitnessStore.forAgentDir(this._agentDir).save(modelRef, report);
+			}
+		} catch {
+			// best-effort persistence
+		}
+		return { started: true, model: modelRef, report };
+	}
+
+	/** Fitness reports persisted for THIS host (measured evidence for architect/profile decisions). */
+	getStoredFitnessReports(): StoredFitnessReport[] {
+		try {
+			return FitnessStore.forAgentDir(this._agentDir).getForHost();
+		} catch {
+			return [];
+		}
 	}
 
 	async continueGoalOnce(options: GoalContinuationOnceOptions): Promise<GoalContinuationOnceResult> {
