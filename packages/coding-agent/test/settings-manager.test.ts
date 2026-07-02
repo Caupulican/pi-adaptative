@@ -374,6 +374,7 @@ describe("SettingsManager", () => {
 				mediumModel: "anthropic/claude-medium-4-5",
 				expensiveModel: "anthropic/claude-sonnet-4-5",
 				learningModel: "anthropic/claude-haiku-4-5",
+				judgeEnabled: true,
 			});
 			expect(manager.getAutoLearnSettings()).toMatchObject({ model: "anthropic/claude-haiku-4-5" });
 		});
@@ -401,6 +402,7 @@ describe("SettingsManager", () => {
 				mediumModel: "anthropic/claude-medium-4-5",
 				expensiveModel: "anthropic/claude-sonnet-4-5",
 				learningModel: "openai/gpt-5.4",
+				judgeEnabled: true,
 			});
 		});
 

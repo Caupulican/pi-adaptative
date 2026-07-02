@@ -53,10 +53,12 @@ describe("regression #5109: exclude tools", () => {
 			expect(harness.session.getActiveToolNames().sort()).toEqual([
 				"bash",
 				"context_audit",
+				"delegate",
 				"dynamic_tool",
 				"edit",
 				"goal",
 				"memory",
+				"run_toolkit_script",
 				"write",
 			]);
 			expect(harness.session.systemPrompt).not.toContain("- read:");

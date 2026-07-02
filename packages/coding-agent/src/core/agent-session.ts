@@ -2532,8 +2532,16 @@ export class AgentSession {
 				this._lastModelRouterDecision = completedDecision;
 			}
 		} finally {
-			this.agent.state.model = previousModel;
-			this.agent.state.thinkingLevel = previousThinkingLevel;
+			// Restore the pre-route model ONLY if the routed model is still in place: a command
+			// handler may have legitimately changed the session model mid-turn (setModel or a
+			// provider re-registration), and clobbering that would silently undo the change.
+			if (modelsAreEqual(this.agent.state.model, routedModel)) {
+				this.agent.state.model = previousModel;
+				this.agent.state.thinkingLevel = previousThinkingLevel;
+				// The registry may have changed mid-turn (command-time registerProvider): re-resolve
+				// the restored model so a provider override is not dropped with the routed model.
+				this._refreshCurrentModelFromRegistry();
+			}
 			this._activeModelRouterIntent = previousActiveModelRouterIntent;
 			this._activeModelRouterRoute = previousActiveModelRouterRoute;
 			this._modelRouterSessionBuffer = previousModelRouterSessionBuffer;

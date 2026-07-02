@@ -430,8 +430,10 @@ Content`,
 			expect(extPaths.some((p) => p.includes(join("extensions", "idle-watcher")))).toBe(false);
 			expect(extPaths.some((p) => p.includes(join("extensions", "smart-edit")))).toBe(true);
 
+			// Strict UAC: profile-denied skills/prompts are never even READ from disk, so they are
+			// absent from the full lists too, not merely from the active selections.
 			const allSkills = loader.getSkills().skills.map((s) => s.name);
-			expect(allSkills).toContain("blocked-skill");
+			expect(allSkills).not.toContain("blocked-skill");
 			expect(allSkills).toContain("allowed-skill");
 
 			const activeSkillNames = loader.getActiveSkills().map((s) => s.name);
@@ -439,7 +441,7 @@ Content`,
 			expect(activeSkillNames).toContain("allowed-skill");
 
 			const allPrompts = loader.getPrompts().prompts.map((p) => p.name);
-			expect(allPrompts).toContain("blocked");
+			expect(allPrompts).not.toContain("blocked");
 			expect(allPrompts).toContain("allowed");
 
 			const activePromptNames = loader.getActivePrompts().map((p) => p.name);
@@ -958,6 +960,12 @@ Content`,
 			settingsManager.setExternalResourceRoots([extRoot], "global");
 			settingsManager.addTrustedResourceRoot(extRoot, "global");
 			await settingsManager.flush();
+			// Strict UAC: an active profile is a COMPLETE grant (an undefined one grants nothing),
+			// so the load half of this regression needs an explicit extension grant. Discovery
+			// below must include the path regardless of any grant — that is the editor's universe.
+			settingsManager.addInlineResourceProfileDefinitions({
+				default: { extensions: { allow: ["*"] } },
+			});
 			settingsManager.setRuntimeResourceProfiles(["default"]);
 			const loader = new DefaultResourceLoader({ cwd, agentDir, settingsManager });
 			await loader.reload();

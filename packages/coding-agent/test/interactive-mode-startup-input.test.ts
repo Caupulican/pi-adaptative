@@ -23,6 +23,7 @@ type SubmitContext = {
 	buildUserInputSubmission: (text: string) => UserInputSubmission;
 	takeClipboardImagesForText: (text: string) => unknown[] | undefined;
 	queueCompactionMessage: (text: string, mode: "steer" | "followUp", images?: unknown[]) => void;
+	refreshAutonomyFooterStatus: () => void;
 	updatePendingMessagesDisplay: () => void;
 	ui: { requestRender: () => void };
 	onInputCallback?: (submission: UserInputSubmission) => void;
@@ -67,6 +68,7 @@ function createSubmitContext(): SubmitContext {
 		buildUserInputSubmission: (text: string) => ({ text }),
 		takeClipboardImagesForText: vi.fn(() => undefined),
 		queueCompactionMessage: vi.fn(),
+		refreshAutonomyFooterStatus: vi.fn(),
 		updatePendingMessagesDisplay: vi.fn(),
 		ui: { requestRender: vi.fn() },
 		pendingUserInputs: [],

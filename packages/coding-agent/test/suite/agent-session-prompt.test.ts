@@ -273,7 +273,16 @@ describe("AgentSession prompt characterization", () => {
 		harness.setResponses([fauxAssistantMessage("model saw default command text")]);
 
 		expect(harness.session.extensionRunner.getRegisteredCommands()).toEqual([]);
-		expect(harness.session.getActiveToolNames()).toEqual(["read", "bash", "edit", "write", "context_audit", "goal"]);
+		expect(harness.session.getActiveToolNames()).toEqual([
+			"read",
+			"bash",
+			"edit",
+			"write",
+			"context_audit",
+			"goal",
+			"delegate",
+			"run_toolkit_script",
+		]);
 
 		await harness.session.prompt("/testcmd should-not-run");
 

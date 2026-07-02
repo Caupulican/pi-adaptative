@@ -36,9 +36,12 @@ describe("AgentSession dynamic provider registration", () => {
 				: SettingsManager.create(tempDir, agentDir);
 		if (options.enableExtensionProfile ?? true) {
 			settingsManager.addInlineResourceProfileDefinitions({
+				// Strict UAC: an active profile is a COMPLETE grant, and extension COMMAND dispatch
+				// is gated through the tools filter — without a tools grant the /use-proxy command
+				// below would be silently denied. These tests exercise provider propagation, not UAC.
 				"with-extension": {
 					extensions: { allow: ["<inline:1>"] },
-					...(options.restrictTools ? { tools: { allow: ["read"] } } : {}),
+					tools: { allow: options.restrictTools ? ["read"] : ["*"] },
 				},
 			});
 			settingsManager.setRuntimeResourceProfiles(["with-extension"]);

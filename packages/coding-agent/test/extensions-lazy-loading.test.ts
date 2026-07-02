@@ -155,7 +155,9 @@ describe("lazy extension loading", () => {
 		const agentDir = tempDir;
 		const settingsManager = SettingsManager.create(tempDir, agentDir);
 		settingsManager.addInlineResourceProfileDefinitions({
-			"lazy-test": { extensions: { allow: ["extensions/*/index.ts"] } },
+			// Strict UAC: an active profile is a COMPLETE grant, so tools must be granted
+			// explicitly — this test exercises lazy tool metadata filtering, not UAC denial.
+			"lazy-test": { extensions: { allow: ["extensions/*/index.ts"] }, tools: { allow: ["*"] } },
 		});
 		settingsManager.setRuntimeResourceProfiles(["lazy-test"]);
 		const resourceLoader = new DefaultResourceLoader({ cwd: tempDir, agentDir, settingsManager });
