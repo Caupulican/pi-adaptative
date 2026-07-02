@@ -15,6 +15,10 @@ describe("InteractiveMode compaction events", () => {
 			},
 			isExtensionCommand: vi.fn(() => false),
 			updatePendingMessagesDisplay: vi.fn(),
+			// flushCompactionQueue refreshes the footer in a fire-and-forget .finally();
+			// without this stub the TypeError escapes as an unhandled rejection AFTER the
+			// test resolves and fails the whole suite run.
+			refreshAutonomyFooterStatus: vi.fn(),
 			showError: vi.fn(),
 		};
 		const flushCompactionQueue = Reflect.get(InteractiveMode.prototype, "flushCompactionQueue") as (
@@ -45,6 +49,7 @@ describe("InteractiveMode compaction events", () => {
 			showError: vi.fn(),
 			showStatus: vi.fn(),
 			flushCompactionQueue: vi.fn().mockResolvedValue(undefined),
+			refreshAutonomyFooterStatus: vi.fn(),
 			settingsManager: { getShowTerminalProgress: () => false },
 			ui: { requestRender: vi.fn(), terminal: { setProgress: vi.fn() } },
 		};
