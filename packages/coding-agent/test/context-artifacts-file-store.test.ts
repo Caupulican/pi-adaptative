@@ -190,16 +190,24 @@ describe("createFileArtifactStore", () => {
 		});
 
 		it("never creates any file outside baseDir for a path-traversal-shaped id", () => {
-			const parentDir = join(baseDir, "..");
-			const beforeEntries = new Set(readdirSync(parentDir));
-			const store = createFileArtifactStore({ baseDir });
+			// The parent must be PRIVATE to this test: baseDir sits directly in the shared OS
+			// tmpdir, and snapshotting that hot directory races with unrelated processes.
+			const privateParent = mkdtempSync(join(tmpdir(), "pi-file-artifact-parent-"));
+			try {
+				const isolatedBaseDir = join(privateParent, "store");
+				mkdirSync(isolatedBaseDir);
+				const beforeEntries = new Set(readdirSync(privateParent));
+				const store = createFileArtifactStore({ baseDir: isolatedBaseDir });
 
-			store.read("../escape-attempt");
-			store.has("../escape-attempt");
-			store.addReference("../escape-attempt", "holder-1");
+				store.read("../escape-attempt");
+				store.has("../escape-attempt");
+				store.addReference("../escape-attempt", "holder-1");
 
-			const afterEntries = new Set(readdirSync(parentDir));
-			expect(afterEntries).toEqual(beforeEntries);
+				const afterEntries = new Set(readdirSync(privateParent));
+				expect(afterEntries).toEqual(beforeEntries);
+			} finally {
+				rmSync(privateParent, { recursive: true, force: true });
+			}
 		});
 
 		it("rejects an id containing a path separator even if it looks otherwise plausible", () => {

@@ -263,6 +263,81 @@ describe("Context GC", () => {
 		expect(textOf(result.messages[0])).toContain("Semantic GC packed stale Automata/Mind context page");
 	});
 
+	it("session GC packs stale default-provider recall pages (<memory_context) under DEFAULT settings", () => {
+		const harness = createHarness();
+		try {
+			const recallPage = (label: string): AgentMessage =>
+				({
+					role: "custom",
+					customType: "memory_context",
+					content: [
+						{
+							type: "text",
+							text: `<memory_context source="transcript-recall">${label} ${"recall ".repeat(200)}</memory_context>`,
+						},
+					],
+					display: false,
+					timestamp: Date.now(),
+				}) as AgentMessage;
+			const messages: AgentMessage[] = [
+				recallPage("old"),
+				...Array.from({ length: 12 }, (_, index) => user(`noise ${index}`)),
+				recallPage("recent"),
+			];
+			const session = harness.session as unknown as {
+				_applyContextGc(
+					messages: AgentMessage[],
+					writePayloads: boolean,
+				): { report: { records: { reason: string }[] } };
+			};
+			const result = session._applyContextGc(messages, false);
+			expect(result.report.records.map((record) => record.reason)).toEqual(["stale-semantic-memory"]);
+		} finally {
+			harness.cleanup();
+		}
+	});
+
+	it("session GC merges ACTIVE memory-provider markers dynamically into the semantic scan", () => {
+		const harness = createHarness();
+		try {
+			const manager = (harness.session as unknown as { _memoryManager: unknown })._memoryManager as {
+				providers: unknown[];
+				activeProviders: Set<string>;
+			};
+			manager.providers.push({
+				name: "fake-recall",
+				getContextMarkers: () => ["<fake_provider_page"],
+				shutdown: async () => {},
+			});
+			manager.activeProviders.add("fake-recall");
+			const page = (label: string): AgentMessage =>
+				({
+					role: "custom",
+					customType: "memory_context",
+					content: [
+						{ type: "text", text: `<fake_provider_page>${label} ${"recall ".repeat(200)}</fake_provider_page>` },
+					],
+					display: false,
+					timestamp: Date.now(),
+				}) as AgentMessage;
+			const messages: AgentMessage[] = [
+				page("old"),
+				...Array.from({ length: 12 }, (_, index) => user(`noise ${index}`)),
+				page("recent"),
+			];
+			const session = harness.session as unknown as {
+				_applyContextGc(
+					messages: AgentMessage[],
+					writePayloads: boolean,
+				): { report: { records: { reason: string }[] } };
+			};
+			const result = session._applyContextGc(messages, false);
+			expect(result.report.records.map((record) => record.reason)).toEqual(["stale-semantic-memory"]);
+		} finally {
+			harness.cleanup();
+		}
+	});
+
 	it("does not join large non-semantic messages during semantic scan", () => {
 		const messages: AgentMessage[] = [
 			customMemoryParts("large ".repeat(200), "ordinary text"),

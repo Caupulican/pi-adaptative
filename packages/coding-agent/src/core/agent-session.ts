@@ -1356,8 +1356,19 @@ export class AgentSession {
 		writePayloads: boolean,
 	): { messages: AgentMessage[]; report: ContextGcReport } {
 		try {
+			const settings = this.settingsManager.getContextGcSettings();
+			// Merge the ACTIVE memory providers' own page markers (e.g. transcript-recall's
+			// "<memory_context") into the semantic-memory marker list. The settings default is
+			// provider-agnostic and non-empty, so without this merge the recall pages the bundled
+			// default provider actually emits are never recognized as semantic-memory pages and
+			// accumulate raw for the life of the session — the exact growth Bug #7 GC exists to stop.
+			const providerMarkers = this._memoryManager.getContextMarkers();
 			const result = applyContextGc(messages, {
-				...this.settingsManager.getContextGcSettings(),
+				...settings,
+				semanticMemory: {
+					...settings.semanticMemory,
+					markers: [...new Set([...settings.semanticMemory.markers, ...providerMarkers])],
+				},
 				cwd: this._cwd,
 				storageDir: this._contextGcStorageDir(),
 				writePayloads,

@@ -2108,6 +2108,10 @@ export class SettingsManager {
 				preserveRecentPages: this.settings.contextGc?.semanticMemory?.preserveRecentPages ?? 1,
 				minChars: this.settings.contextGc?.semanticMemory?.minChars ?? 900,
 				markers: this.settings.contextGc?.semanticMemory?.markers ?? [
+					// Generic recall-page marker the bundled default provider (transcript-recall)
+					// emits; must be present here because a non-empty settings list fully replaces
+					// the context-gc code default that already includes it.
+					"<memory_context",
 					"<automata_context",
 					"<automata_response",
 					"<automata_query",
