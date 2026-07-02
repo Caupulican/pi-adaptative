@@ -9,6 +9,7 @@ type ProfileApplyContext = {
 			resolveProfileRef: (ref: string, fromDir: string) => NormalizedProfile | undefined;
 		};
 		setRuntimeResourceProfiles: (profiles: string[]) => void;
+		setActiveProfile: (name: string | undefined, scope: string) => void;
 	};
 	sessionManager: {
 		getCwd: () => string;
@@ -62,6 +63,7 @@ describe("InteractiveMode /profiles", () => {
 				sourcePath: "/tmp/workspace/.pi/reviewer.json",
 			});
 		const setRuntimeResourceProfiles = vi.fn();
+		const setActiveProfile = vi.fn();
 		const appendCustomEntry = vi.fn();
 		const handleReloadCommand = vi.fn(async () => {});
 		const showStatus = vi.fn();
@@ -75,6 +77,7 @@ describe("InteractiveMode /profiles", () => {
 					resolveProfileRef: profileRegistryResolve,
 				}),
 				setRuntimeResourceProfiles,
+				setActiveProfile,
 			},
 			session: {
 				modelRegistry: {
@@ -120,6 +123,7 @@ describe("InteractiveMode /profiles", () => {
 		const getProfile = vi.fn<(name: string) => NormalizedProfile | undefined>(() => profileByName);
 		const resolveProfileRef = vi.fn<(ref: string, fromDir: string) => NormalizedProfile | undefined>();
 		const setRuntimeResourceProfiles = vi.fn();
+		const setActiveProfile = vi.fn();
 		const appendCustomEntry = vi.fn();
 		const handleReloadCommand = vi.fn(async () => {});
 		const showStatus = vi.fn();
@@ -133,6 +137,7 @@ describe("InteractiveMode /profiles", () => {
 					resolveProfileRef,
 				}),
 				setRuntimeResourceProfiles,
+				setActiveProfile,
 			},
 			session: {
 				modelRegistry: {
@@ -180,6 +185,7 @@ describe("InteractiveMode /profiles", () => {
 		const getProfile = vi.fn<(name: string) => NormalizedProfile | undefined>(() => profileWithModel);
 		const resolveProfileRef = vi.fn<(ref: string, fromDir: string) => NormalizedProfile | undefined>();
 		const setRuntimeResourceProfiles = vi.fn();
+		const setActiveProfile = vi.fn();
 		const setModel = vi.fn();
 		const setThinkingLevel = vi.fn();
 		const modelRegistryRefresh = vi.fn();
@@ -196,6 +202,7 @@ describe("InteractiveMode /profiles", () => {
 					resolveProfileRef,
 				}),
 				setRuntimeResourceProfiles,
+				setActiveProfile,
 			},
 			session: {
 				modelRegistry: {
