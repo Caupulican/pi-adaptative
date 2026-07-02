@@ -4300,7 +4300,10 @@ export class AgentSession {
 
 	private _refreshToolRegistry(options?: { activeToolNames?: string[]; includeAllExtensionTools?: boolean }): void {
 		const previousRegistryNames = new Set(this._toolRegistry.keys());
-		const previousActiveToolNames = this.getActiveToolNames();
+		// Re-derive from the pre-filter REQUEST, never from agent.state.tools: the active set is
+		// capability/profile-filtered, so feeding it back through setActiveToolsByName would
+		// permanently shrink what a later switch to a larger model (or permissive profile) restores.
+		const previousActiveToolNames = this._requestedActiveToolNames ?? this.getActiveToolNames();
 		const allowedToolNames = this._allowedToolNames;
 		const excludedToolNames = this._excludedToolNames;
 		const toolProfileFilter = this._toolProfileFilter;
@@ -4380,24 +4383,27 @@ export class AgentSession {
 		}
 		this._toolRegistry = toolRegistry;
 
-		const nextActiveToolNames = (
-			options?.activeToolNames ? [...options.activeToolNames] : [...previousActiveToolNames]
-		).filter((name) => isAllowedTool(name));
+		const requestedBase = options?.activeToolNames ? [...options.activeToolNames] : [...previousActiveToolNames];
+		const nextActiveToolNames = requestedBase.filter((name) => isAllowedTool(name));
 
+		const autoActivated: string[] = [];
 		if (allowedToolNames) {
 			for (const toolName of this._toolRegistry.keys()) {
 				if (allowedToolNames.has(toolName)) {
 					nextActiveToolNames.push(toolName);
+					autoActivated.push(toolName);
 				}
 			}
 		} else if (options?.includeAllExtensionTools) {
 			for (const tool of wrappedExtensionTools) {
 				nextActiveToolNames.push(tool.name);
+				autoActivated.push(tool.name);
 			}
 		} else if (!options?.activeToolNames) {
 			for (const toolName of this._toolRegistry.keys()) {
 				if (!previousRegistryNames.has(toolName)) {
 					nextActiveToolNames.push(toolName);
+					autoActivated.push(toolName);
 				}
 			}
 		}
@@ -4407,6 +4413,10 @@ export class AgentSession {
 		// including the public, extension-exposed setActiveTools() -- gets the same
 		// guarantee, not just this settings/profile refresh flow.
 		this.setActiveToolsByName([...new Set(nextActiveToolNames)]);
+		// setActiveToolsByName just stored the profile-filtered ACTIVE set as the request; restore
+		// the true pre-filter request (plus this refresh's auto-activations) so an internal refresh
+		// can never permanently narrow it.
+		this._requestedActiveToolNames = [...new Set([...requestedBase, ...autoActivated])];
 	}
 
 	private _createReloadRuntimeSnapshot(): ReloadRuntimeSnapshot {
@@ -4578,7 +4588,9 @@ export class AgentSession {
 		}
 		const previousRunner = this._extensionRunner;
 		const snapshot = this._createReloadRuntimeSnapshot();
-		const activeToolNames = this.getActiveToolNames();
+		// Preserve the pre-filter tool REQUEST across the rebuild, not the capability/profile-filtered
+		// active set — otherwise a reload under a small model permanently shrinks the restorable set.
+		const activeToolNames = this._requestedActiveToolNames ?? this.getActiveToolNames();
 		const previousFlagValues = previousRunner.getFlagValues();
 		const reloadErrors: string[] = [];
 		let newRunner: ExtensionRunner | undefined;
@@ -4679,7 +4691,7 @@ export class AgentSession {
 			this._resourceLoader.removeLoadedExtension(extensionPath);
 
 			// Rebuild runtime with new extension set
-			const activeToolNames = this.getActiveToolNames();
+			const activeToolNames = this._requestedActiveToolNames ?? this.getActiveToolNames();
 			const previousFlagValues = previousRunner.getFlagValues();
 			this._buildRuntime({
 				activeToolNames,
@@ -4724,7 +4736,7 @@ export class AgentSession {
 			}
 
 			// Rebuild runtime to aggregate tools/commands/handlers/providers
-			const activeToolNames = this.getActiveToolNames();
+			const activeToolNames = this._requestedActiveToolNames ?? this.getActiveToolNames();
 			const previousFlagValues = previousRunner.getFlagValues();
 			this._buildRuntime({
 				activeToolNames,
@@ -6342,10 +6354,14 @@ export class AgentSession {
 		// learning gate, and audited with a rollback plan. With the policy disabled (default) the
 		// legacy direct-apply behavior is preserved — but now leaves audit records with rollback info.
 		const policy = this.settingsManager.getLearningPolicySettings();
+		// The audit id sequence counts STORED snapshots only: it reseeds from the stored count on
+		// every pass, so advancing it for a no-op (which stores nothing) would make later passes
+		// reuse ids — and rollback keys on the id, so a collision blocks or misdirects rollback.
 		let auditSequence = getLearningAuditSnapshots(this.sessionManager.getEntries()).length;
+		let writeIndex = 0;
 		for (const write of result.writes) {
-			auditSequence += 1;
-			const proposalId = `${input.reportId ?? "reflection"}-w${auditSequence}`;
+			writeIndex += 1;
+			const proposalId = `${input.reportId ?? "reflection"}-w${writeIndex}`;
 			const proposal = proposalFromReflectionWrite(write, proposalId);
 			const rollback = rollbackPlanForReflectionWrite(write);
 			const decision: LearningDecision = policy.enabled
@@ -6376,6 +6392,7 @@ export class AgentSession {
 				await this._applyReflectionWrite(write, signal);
 			}
 			if (decision.kind !== "no-op") {
+				auditSequence += 1;
 				appendLearningAuditSnapshot(this.sessionManager, {
 					id: `audit-${auditSequence}`,
 					proposalId,

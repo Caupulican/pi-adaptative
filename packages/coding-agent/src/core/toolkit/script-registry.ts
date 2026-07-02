@@ -46,7 +46,9 @@ function scoreScript(requestTokens: string[], script: ToolkitScript): number {
 	const nameTokens = new Set([...tokens(script.name), ...(script.aliases ?? []).flatMap((alias) => tokens(alias))]);
 	const descriptionTokens = new Set(tokens(script.description));
 	let score = 0;
-	for (const token of requestTokens) {
+	// Deduplicate: repeating a word ("backup backup backup") must not multiply the score past
+	// MIN_SCORE/margin and turn an ambiguous request into a confident match.
+	for (const token of new Set(requestTokens)) {
 		if (STOP_WORDS.has(token)) continue;
 		if (nameTokens.has(token)) score += 3;
 		else if (descriptionTokens.has(token)) score += 1;

@@ -174,6 +174,24 @@ describe("learning apply policy — audit and rollback", () => {
 		session.dispose();
 	});
 
+	it("audit ids track STORED snapshots only: a no-op pass must not advance the sequence", async () => {
+		const session = await newSession({ enabled: true });
+		scriptReflection(session, [{ kind: "memory_add", section: "MEMORY", text: "Speculative fact" }]);
+		await runPass(session, "turn-1");
+		expect(session.getLearningAuditRecords()).toHaveLength(0);
+
+		session.settingsManager.setLearningPolicySettings({ enabled: false });
+		scriptReflection(session, [{ kind: "memory_add", section: "MEMORY", text: "Fact A" }]);
+		await runPass(session, "turn-2");
+		scriptReflection(session, [{ kind: "memory_add", section: "MEMORY", text: "Fact B" }]);
+		await runPass(session, "turn-3");
+
+		const ids = session.getLearningAuditRecords().map((record) => record.id);
+		expect(ids).toEqual(["audit-1", "audit-2"]);
+		expect(new Set(ids).size).toBe(ids.length);
+		session.dispose();
+	});
+
 	it("rolls back an applied memory_add exactly once", async () => {
 		const session = await newSession();
 		scriptReflection(session, [{ kind: "memory_add", section: "MEMORY", text: "Fact to roll back" }]);

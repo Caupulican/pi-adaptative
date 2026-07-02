@@ -103,6 +103,29 @@ describe("model capability auto-detection", () => {
 		}
 	});
 
+	it("an internal tool refresh under a small model must not shrink the restorable request", async () => {
+		const harness = await createHarness({
+			models: [
+				{ id: "big-model", contextWindow: 200_000 },
+				{ id: "small-model", contextWindow: 8_192 },
+			],
+		});
+		try {
+			const fullSet = harness.session.getActiveToolNames();
+			await harness.session.setModel(harness.getModel("small-model")!);
+			// The same internal no-options refresh that extensions (refreshTools) and memory-init
+			// trigger: it must re-derive from the pre-filter REQUEST, or the reduced active set
+			// leaks into the request and the later big-model switch restores only the reduced set.
+			(harness.session as unknown as { _refreshToolRegistry: () => void })._refreshToolRegistry();
+			expect(harness.session.getActiveToolNames()).toEqual(["read", "bash", "edit", "write", "run_toolkit_script"]);
+
+			await harness.session.setModel(harness.getModel("big-model")!);
+			expect(harness.session.getActiveToolNames()).toEqual(fullSet);
+		} finally {
+			harness.cleanup();
+		}
+	});
+
 	it("scales lane output tokens from the lane model's own window", async () => {
 		const harness = await createHarness({
 			models: [{ id: "mid-model", contextWindow: 16_384 }],

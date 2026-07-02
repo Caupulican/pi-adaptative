@@ -48,19 +48,25 @@ export const spawnScriptExecutor: ScriptExecutor = (command, argv, cwd, timeoutM
 			{ cwd, timeout: timeoutMs, maxBuffer: MAX_OUTPUT_BYTES, encoding: "utf-8" },
 			(error, stdout, stderr) => {
 				const durationMs = Date.now() - started;
-				const killed = Boolean(error && "killed" in error && (error as { killed?: boolean }).killed);
-				const code =
-					error && typeof (error as { code?: unknown }).code === "number"
-						? ((error as { code: number }).code as number)
-						: error
-							? null
-							: 0;
+				const err = error as (Error & { killed?: boolean; code?: number | string }) | null;
+				// error.code is a NUMBER for a non-zero exit but a STRING for spawn-level failures
+				// (ENOENT, EACCES) and for the maxBuffer kill — which also sets killed=true and must
+				// not be mislabeled as a timeout.
+				const maxBufferExceeded = err?.code === "ERR_CHILD_PROCESS_STDIO_MAXBUFFER";
+				const timedOut = Boolean(err?.killed) && !maxBufferExceeded;
+				const exitCode = err ? (typeof err.code === "number" ? err.code : null) : 0;
+				// Spawn-level failures never produce their own stderr; surface the error message so
+				// the cause (missing runner, permission, output overflow) is never silently dropped.
+				let capturedStderr = stderr ?? "";
+				if (err && !timedOut && typeof err.code !== "number" && capturedStderr.length === 0) {
+					capturedStderr = err.message;
+				}
 				resolve({
-					exitCode: error ? code : 0,
+					exitCode,
 					stdout: stdout ?? "",
-					stderr: stderr ?? "",
+					stderr: capturedStderr,
 					durationMs,
-					timedOut: killed,
+					timedOut,
 				});
 			},
 		);
