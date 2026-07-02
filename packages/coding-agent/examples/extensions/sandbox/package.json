@@ -1,7 +1,7 @@
 {
 	"name": "pi-extension-sandbox",
 	"private": true,
-	"version": "0.80.96",
+	"version": "0.80.97",
 	"type": "module",
 	"scripts": {
 		"clean": "echo 'nothing to clean'",
