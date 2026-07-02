@@ -20,7 +20,7 @@ export const BUILTIN_SLASH_COMMANDS: ReadonlyArray<BuiltinSlashCommand> = [
 	{ name: "autonomy", description: "Autonomy mode, diagnostics, research, fitness (/autonomy status)" },
 	{
 		name: "models",
-		description: "Local model lifecycle: /models [list|add <ref-or-link>|remove <ref> confirm|stop]",
+		description: "Local model lifecycle: /models [list|suggest|add <ref>|remove <ref> confirm|stop]",
 	},
 	{
 		name: "fitness",

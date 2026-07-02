@@ -1,5 +1,16 @@
 ## [Unreleased]
 
+### Added
+
+- Added `/models suggest`: a curated roster of local models validated during pi's own small-model
+  research, each with the role it was shaped for — qwen3:1.7b as the toolkit executor/reflex
+  muscle, qwen3:0.6b as a minimal fast executor, and the Ternary-Bonsai family (1.7B search scout,
+  4B context-curator/reflex-brain, 8B routing-judge for larger machines) marked as non-tool-calling
+  lane/brain models. Each suggestion is a ready `/models add` ref; the roster is surfaced when no
+  local models are installed. No per-model score is baked in — fitness is host-dependent, so
+  `/models add` still auto-probes on the actual machine and the roster only encodes each model's
+  validated role.
+
 ## [0.80.99] - 2026-07-02
 
 ### Added

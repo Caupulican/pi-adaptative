@@ -94,6 +94,7 @@ import {
 	resolveCliModel,
 	resolveModelScope,
 } from "../../core/model-resolver.ts";
+import { formatModelSuggestions } from "../../core/models/default-model-suggestions.ts";
 import { FitnessStore } from "../../core/models/fitness-store.ts";
 import { registerLocalModel, unregisterLocalModel } from "../../core/models/local-registration.ts";
 import { OllamaRuntime } from "../../core/models/local-runtime.ts";
@@ -6133,6 +6134,10 @@ export class InteractiveMode {
 	private async handleModelsCommand(argsText: string): Promise<void> {
 		const [action = "list", ...rest] = argsText.split(/\s+/).filter(Boolean);
 		try {
+			if (action === "suggest" || action === "suggestions") {
+				for (const line of formatModelSuggestions()) this.showStatus(line);
+				return;
+			}
 			if (action === "stop") {
 				const stopped = this.localRuntime.stop();
 				this.showStatus(
@@ -6149,6 +6154,7 @@ export class InteractiveMode {
 					this.showStatus(
 						"Usage: /models add <ollama-tag | hf.co/org/repo[:quant] | huggingface URL | pasted install command>",
 					);
+					this.showStatus("Or start from a validated suggestion: /models suggest");
 					return;
 				}
 				const source = normalizeModelSource(rawRef);
@@ -6217,7 +6223,9 @@ export class InteractiveMode {
 		const fitness = FitnessStore.forAgentDir(getAgentDir()).getForHost();
 		const lines = [
 			`Local models (${status.managedByPi ? `pi-managed server, storage: ${status.ownedModelsDir}` : "system server — storage owned by the system daemon"}):`,
-			...(models.length === 0 ? ["  (none installed — /models add <ref>)"] : []),
+			...(models.length === 0
+				? ["  (none installed — /models add <ref>, or /models suggest for a validated roster)"]
+				: []),
 			...models.map((model) => {
 				const report = fitness.find((entry) => entry.model === `ollama/${model.name}`);
 				const gb = (model.sizeBytes / 1e9).toFixed(2);
