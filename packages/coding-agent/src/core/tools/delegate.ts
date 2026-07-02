@@ -9,6 +9,12 @@ const delegateSchema = Type.Object(
 			description:
 				"The self-contained task to delegate to a bounded read-only scout worker. Include all context the worker needs; it cannot see this conversation, run tools, or change files.",
 		}),
+		systemPrompt: Type.Optional(
+			Type.String({
+				description:
+					"Optional replacement for the worker's role prompt — useful to hand a small model a minimal, purpose-built prompt. A short non-negotiable core (read-only, no invention, untrusted output, exact format) always remains.",
+			}),
+		),
 	},
 	{ additionalProperties: false },
 );
@@ -32,7 +38,7 @@ export interface DelegateToolDetails {
 }
 
 export interface DelegateToolDependencies {
-	runWorkerDelegation: (args: { instructions: string }) => Promise<DelegateRunOutcome>;
+	runWorkerDelegation: (args: { instructions: string; systemPrompt?: string }) => Promise<DelegateRunOutcome>;
 }
 
 export function createDelegateToolDefinition(deps: DelegateToolDependencies): ToolDefinition {
@@ -55,7 +61,10 @@ export function createDelegateToolDefinition(deps: DelegateToolDependencies): To
 			content: Array<{ type: "text"; text: string }>;
 			details: DelegateToolDetails;
 		}> {
-			const run = await deps.runWorkerDelegation({ instructions: input.instructions });
+			const run = await deps.runWorkerDelegation({
+				instructions: input.instructions,
+				...(input.systemPrompt ? { systemPrompt: input.systemPrompt } : {}),
+			});
 			if (!run.started) {
 				const reason = run.skipReason ?? "unknown";
 				return {

@@ -65,6 +65,20 @@
   from unless a lane-specific model is explicitly configured (the router's `cheapModel` no longer
   implicitly redirects lanes) — single-model setups, e.g. one local open model, now run research
   and scout workers on that same model.
+- Changed active resource profiles to strict least-privilege grants: when one or more profiles are
+  active, any authority-bearing resource kind (extensions, skills, prompts, tools, agents) that no
+  active profile explicitly mentions is denied outright — a defaults profile no longer loads the
+  full extension/tool surface. Grant-all must be explicit via `allow: ["*"]`; explicitly written
+  block-framed filters keep meaning "all except the listed"; themes are exempt; behavior without
+  an active profile is unchanged.
+- Added profile-shipped subagents: research and worker lanes accept a `profile` setting whose
+  model MUST be obeyed when set (unresolvable is a visible `no_lane_profile_model` skip, never a
+  fallback), whose soul and thinking level ship with the lane, and whose tool grants are recorded
+  on the lane's capability envelope. Generic lanes keep inheriting the session model.
+- Added a level-0 subagent system-prompt core (<300 tokens of non-negotiable rules) that survives
+  ANY prompt customization: lane settings (`systemPrompt`) and the delegate tool's new
+  `systemPrompt` input can erase and replace everything above it — so a big session model can
+  hand a small open model a minimal purpose-built prompt without shedding the safety floor.
 
 ### Changed
 

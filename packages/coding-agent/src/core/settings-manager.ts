@@ -199,6 +199,8 @@ export const MAX_RESEARCH_LANE_MAX_RUNS_PER_SESSION = 100;
 export interface ResearchLaneSettings {
 	enabled?: boolean; // default: false — autonomous background research is opt-in
 	model?: string; // model pattern; unset inherits the session model the lane was shipped from
+	profile?: string; // resource profile shipped with the lane: its model/soul/thinking/tool grants govern the lane
+	systemPrompt?: string; // replaces the lane role prompt (the level-0 subagent core always remains)
 	maxUsd?: number; // default: 0.25 per research pass; post-hoc breaches mark the lane budget_exhausted
 	maxSources?: number; // default: 8 evidence sources per bundle
 	maxFindings?: number; // default: 10 findings per bundle
@@ -207,8 +209,8 @@ export interface ResearchLaneSettings {
 	maxRunsPerSession?: number; // default: 10 idle-triggered research passes per session
 }
 
-export type ResolvedResearchLaneSettings = Required<Omit<ResearchLaneSettings, "model">> &
-	Pick<ResearchLaneSettings, "model">;
+export type ResolvedResearchLaneSettings = Required<Omit<ResearchLaneSettings, "model" | "profile" | "systemPrompt">> &
+	Pick<ResearchLaneSettings, "model" | "profile" | "systemPrompt">;
 
 export const DEFAULT_WORKER_DELEGATION_ENABLED = false;
 export const DEFAULT_WORKER_DELEGATION_MAX_USD = 0.5;
@@ -219,12 +221,16 @@ export const MAX_WORKER_DELEGATION_MAX_WALL_CLOCK_MS = 3_600_000;
 export interface WorkerDelegationSettings {
 	enabled?: boolean; // default: false — the delegate tool refuses (with a reason) until enabled
 	model?: string; // model pattern; unset inherits the session model the lane was shipped from
+	profile?: string; // resource profile shipped with the worker: its model/soul/thinking/tool grants govern the lane
+	systemPrompt?: string; // replaces the worker role prompt (the level-0 subagent core always remains)
 	maxUsd?: number; // default: 0.50 per delegated worker; post-hoc breaches mark the lane budget_exhausted
 	maxWallClockMs?: number; // default: 120000; 0 disables the wall-clock budget
 }
 
-export type ResolvedWorkerDelegationSettings = Required<Omit<WorkerDelegationSettings, "model">> &
-	Pick<WorkerDelegationSettings, "model">;
+export type ResolvedWorkerDelegationSettings = Required<
+	Omit<WorkerDelegationSettings, "model" | "profile" | "systemPrompt">
+> &
+	Pick<WorkerDelegationSettings, "model" | "profile" | "systemPrompt">;
 
 export type LearningPolicyLayer =
 	| "memory"
@@ -2669,6 +2675,12 @@ export class SettingsManager {
 		if (typeof configured.model === "string" && configured.model.trim().length > 0) {
 			resolved.model = configured.model;
 		}
+		if (typeof configured.profile === "string" && configured.profile.trim().length > 0) {
+			resolved.profile = configured.profile;
+		}
+		if (typeof configured.systemPrompt === "string" && configured.systemPrompt.trim().length > 0) {
+			resolved.systemPrompt = configured.systemPrompt;
+		}
 		return resolved;
 	}
 
@@ -2706,6 +2718,12 @@ export class SettingsManager {
 		};
 		if (typeof configured.model === "string" && configured.model.trim().length > 0) {
 			resolved.model = configured.model;
+		}
+		if (typeof configured.profile === "string" && configured.profile.trim().length > 0) {
+			resolved.profile = configured.profile;
+		}
+		if (typeof configured.systemPrompt === "string" && configured.systemPrompt.trim().length > 0) {
+			resolved.systemPrompt = configured.systemPrompt;
 		}
 		return resolved;
 	}

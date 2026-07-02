@@ -64,6 +64,7 @@ import { evaluateToolGate } from "./autonomy/gates.ts";
 import { type LaneRecord, LaneTracker } from "./autonomy/lane-tracker.ts";
 import { appendLaneRecordSnapshot, getLaneRecordSnapshots } from "./autonomy/session-lane-record.ts";
 import type { AutonomyDiagnosticSnapshot, AutonomyStatusSnapshot, DiagnosticEntry } from "./autonomy/status.ts";
+import { composeSubagentSystemPrompt } from "./autonomy/subagent-prompt.ts";
 import { type BashResult, executeBashWithOperations } from "./bash-executor.ts";
 import {
 	type CompactionResult,
@@ -202,6 +203,7 @@ import {
 	type ModelRouterDecisionStatus,
 } from "./model-router/status.ts";
 import { shouldEscalateModelRouterTool } from "./model-router/tool-escalation.ts";
+import type { NormalizedProfile } from "./profile-registry.ts";
 import { expandPromptTemplate, type PromptTemplate } from "./prompt-templates.ts";
 import { type ResearchRunResult, runResearch } from "./research/research-runner.ts";
 import {
@@ -5633,15 +5635,55 @@ export class AgentSession {
 		return this.model ?? undefined;
 	}
 
-	private _resolveResearchLaneModel(): Model<Api> | undefined {
-		return this._resolveLaneModel(this.settingsManager.getResearchLaneSettings().model);
+	/**
+	 * Resolve what a lane ships with. Precedence: explicit lane model setting, then the lane
+	 * profile's model (a shipped profile with a model MUST be obeyed — unresolvable is a visible
+	 * skip, never a fallback), then generic inheritance of the session model.
+	 */
+	private _resolveLaneShipment(
+		laneSettings: { model?: string; profile?: string },
+		missingModelReason: string,
+	): { ok: true; model: Model<Api>; laneProfile?: NormalizedProfile } | { ok: false; skipReason: string } {
+		let laneProfile: NormalizedProfile | undefined;
+		if (laneSettings.profile) {
+			laneProfile = this.settingsManager.getProfileRegistry().getProfile(laneSettings.profile);
+			if (!laneProfile) {
+				return { ok: false, skipReason: "lane_profile_not_found" };
+			}
+		}
+
+		let model: Model<Api> | undefined;
+		if (laneSettings.model) {
+			model = this._resolveLaneModel(laneSettings.model);
+			if (!model) return { ok: false, skipReason: missingModelReason };
+		} else if (laneProfile?.model) {
+			model = this._resolveLaneModel(laneProfile.model);
+			if (!model) return { ok: false, skipReason: "no_lane_profile_model" };
+		} else {
+			model = this.model ?? undefined;
+			if (!model) return { ok: false, skipReason: missingModelReason };
+		}
+		return { ok: true, model, laneProfile };
+	}
+
+	/** UAC tool grants from a shipped lane profile, recorded on the lane envelope. */
+	private _laneProfileToolGrants(
+		laneProfile?: NormalizedProfile,
+	): Pick<CapabilityEnvelope, "allowedTools" | "deniedTools"> {
+		const toolsFilter = laneProfile?.resources.tools;
+		return {
+			...(toolsFilter?.allow && toolsFilter.allow.length > 0 ? { allowedTools: [...toolsFilter.allow] } : {}),
+			...(toolsFilter?.block && toolsFilter.block.length > 0 ? { deniedTools: [...toolsFilter.block] } : {}),
+		};
 	}
 
 	/** Stripped research envelope — never the foreground/architect envelope. */
-	private _buildResearchLaneEnvelope(maxUsd: number): CapabilityEnvelope {
+	private _buildResearchLaneEnvelope(maxUsd: number, laneProfile?: NormalizedProfile): CapabilityEnvelope {
 		return {
 			id: `research-${this.sessionId}-${Date.now()}`,
+			profileId: laneProfile?.name,
 			capabilities: ["research", "read_files", "memory_read"],
+			...this._laneProfileToolGrants(laneProfile),
 			maxEstimatedUsd: Math.min(maxUsd, this.capabilityEnvelope?.maxEstimatedUsd ?? Number.POSITIVE_INFINITY),
 			createdAt: new Date().toISOString(),
 		};
@@ -5673,11 +5715,12 @@ export class AgentSession {
 			return { started: false, skipReason: this._lastResearchLaneSkipReason ?? "no_research_demand" };
 		}
 
-		const model = this._resolveResearchLaneModel();
-		if (!model) {
-			this._lastResearchLaneSkipReason = "no_research_model";
-			return { started: false, skipReason: "no_research_model" };
+		const shipment = this._resolveLaneShipment(settings, "no_research_model");
+		if (!shipment.ok) {
+			this._lastResearchLaneSkipReason = shipment.skipReason;
+			return { started: false, skipReason: shipment.skipReason };
 		}
+		const { model, laneProfile } = shipment;
 
 		this._isResearchLaneRunning = true;
 		const startedRecord = this._laneTracker.start({ type: "research", goalId: demand.goalId });
@@ -5686,7 +5729,7 @@ export class AgentSession {
 			const result = await runResearch({
 				query: demand.query,
 				context: demand.context,
-				envelope: this._buildResearchLaneEnvelope(settings.maxUsd),
+				envelope: this._buildResearchLaneEnvelope(settings.maxUsd, laneProfile),
 				maxUsd: settings.maxUsd,
 				maxSources: settings.maxSources,
 				maxFindings: settings.maxFindings,
@@ -5694,13 +5737,19 @@ export class AgentSession {
 				signal: this._researchLaneAbort.signal,
 				complete: async ({ systemPrompt, userPrompt, signal }) => {
 					const completion = await this.runIsolatedCompletion({
-						systemPrompt,
+						// Level-0 core always survives; profile soul and role prompt are the replaceable
+						// layers; a settings-provided prompt replaces everything above the core.
+						systemPrompt: composeSubagentSystemPrompt({
+							soul: laneProfile?.soul,
+							rolePrompt: systemPrompt,
+							override: settings.systemPrompt,
+						}),
 						messages: [{ role: "user", content: [{ type: "text", text: userPrompt }], timestamp: Date.now() }],
 						model,
-						thinkingLevel: "off",
+						thinkingLevel: laneProfile?.thinking ?? "off",
 						maxTokens: this._laneCapabilityProfile(model).laneMaxOutputTokens,
 						signal,
-						// The research system prompt is static — let the provider cache the prefix.
+						// Core/soul/role are all static per configuration — the provider can cache the prefix.
 						cacheRetention: "short",
 					});
 					spentUsage = completion.usage;
@@ -5765,7 +5814,11 @@ export class AgentSession {
 	 * {@link validateWorkerResult} before acceptance, and persist result + lane record + spawned
 	 * usage (idempotent per-lane reportId). Consumed by the `delegate` tool.
 	 */
-	async runWorkerDelegationOnce(request: { instructions: string }): Promise<WorkerDelegationRunOutcome> {
+	async runWorkerDelegationOnce(request: {
+		instructions: string;
+		/** Model-provided replacement for the worker role prompt (the level-0 core always remains). */
+		systemPrompt?: string;
+	}): Promise<WorkerDelegationRunOutcome> {
 		if (this._isWorkerDelegationRunning) {
 			return { started: false, skipReason: "worker_delegation_already_running" };
 		}
@@ -5782,10 +5835,11 @@ export class AgentSession {
 			return { started: false, skipReason: "worker_delegation_disabled" };
 		}
 
-		const model = this._resolveLaneModel(settings.model);
-		if (!model) {
-			return { started: false, skipReason: "no_worker_model" };
+		const shipment = this._resolveLaneShipment(settings, "no_worker_model");
+		if (!shipment.ok) {
+			return { started: false, skipReason: shipment.skipReason };
 		}
+		const { model, laneProfile } = shipment;
 
 		this._isWorkerDelegationRunning = true;
 		const startedRecord = this._laneTracker.start({ type: "worker" });
@@ -5802,7 +5856,9 @@ export class AgentSession {
 			},
 			envelope: {
 				id: `worker-${this.sessionId}-${startedRecord.laneId}`,
+				profileId: laneProfile?.name,
 				capabilities: ["read_files"],
+				...this._laneProfileToolGrants(laneProfile),
 				maxEstimatedUsd: maxUsd,
 				createdAt: new Date().toISOString(),
 			},
@@ -5821,13 +5877,19 @@ export class AgentSession {
 				signal: this._workerDelegationAbort.signal,
 				complete: async ({ systemPrompt, userPrompt, signal }) => {
 					const completion = await this.runIsolatedCompletion({
-						systemPrompt,
+						// Level-0 core always survives. A model-provided prompt (delegate tool) is the most
+						// specific override, then the settings-level prompt, then profile soul + role prompt.
+						systemPrompt: composeSubagentSystemPrompt({
+							soul: laneProfile?.soul,
+							rolePrompt: systemPrompt,
+							override: request.systemPrompt ?? settings.systemPrompt,
+						}),
 						messages: [{ role: "user", content: [{ type: "text", text: userPrompt }], timestamp: Date.now() }],
 						model,
-						thinkingLevel: "off",
+						thinkingLevel: laneProfile?.thinking ?? "off",
 						maxTokens: this._laneCapabilityProfile(model).laneMaxOutputTokens,
 						signal,
-						// The worker system prompt is static — let the provider cache the prefix.
+						// Core/soul/role are all static per configuration — the provider can cache the prefix.
 						cacheRetention: "short",
 					});
 					spentUsage = completion.usage;
