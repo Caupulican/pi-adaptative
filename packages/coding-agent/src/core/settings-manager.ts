@@ -1091,11 +1091,26 @@ export class SettingsManager {
 		const profileFilter: ResourceProfileFilterSettings = {};
 		const seenProfiles = new Set<string>();
 		const registry = this.getProfileRegistry();
-		for (const profileName of this.getActiveResourceProfileNames()) {
+		const activeProfileNames = this.getActiveResourceProfileNames();
+		let kindMentionedByProfile = false;
+		for (const profileName of activeProfileNames) {
 			if (seenProfiles.has(profileName)) continue;
 			seenProfiles.add(profileName);
-			appendFilter(profileFilter, registry.getProfile(profileName)?.resources[kind]);
+			const kindFilter = registry.getProfile(profileName)?.resources[kind];
+			if (kindFilter && ((kindFilter.allow?.length ?? 0) > 0 || (kindFilter.block?.length ?? 0) > 0)) {
+				kindMentionedByProfile = true;
+			}
+			appendFilter(profileFilter, kindFilter);
 		}
+
+		// Strict UAC: an active profile set is the COMPLETE grant. An authority-bearing kind that no
+		// active profile explicitly mentions is denied outright — grant-all must be said out loud
+		// via `allow: ["*"]`. Themes are exempt (cosmetic, no authority). With no active profile,
+		// behavior is unchanged: profiles are the opt-in least-privilege boundary.
+		if (activeProfileNames.length > 0 && kind !== "themes" && !kindMentionedByProfile) {
+			return { allow: [], block: ["*"] };
+		}
+
 		const filter = mergeResourceProfileFilters(legacyFilter, profileFilter);
 		return {
 			allow: [...new Set(filter.allow ?? [])],
