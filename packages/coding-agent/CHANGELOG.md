@@ -1,5 +1,15 @@
 ## [Unreleased]
 
+### Fixed
+
+- Fixed pi crashing with an uncaught ReferenceError when opening Manage Library: the profile
+  editor's universe builder referenced a helper before its initialization (TDZ). The editor path
+  is now covered by a regression test that executes it end to end.
+- Fixed the selected profile not surviving pi restarts: /profiles selection was applied
+  runtime-only, so every new session started with no profile. Selecting a profile now persists it
+  to global settings (like model/theme selections), and selecting "(none)" persists the clear so
+  the old selection cannot resurrect on restart.
+
 ## [0.80.93] - 2026-07-02
 
 ## [0.80.92] - 2026-07-02

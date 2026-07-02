@@ -6940,6 +6940,16 @@ export class InteractiveMode {
 		const loader = this.session.resourceLoader;
 		const base = (p: string) => p.split(/[\\/]/).pop() ?? p;
 		const allDiscoverableExtensions = await loader.getDiscoverableExtensionPaths();
+		// Defined BEFORE the skills/prompts arrays below that call it (const = TDZ: defining it
+		// later crashes the whole app with a ReferenceError when the library editor opens).
+		const getFrontmatterDescription = (filePath: string): string | undefined => {
+			try {
+				const content = fs.readFileSync(filePath, "utf-8");
+				const { frontmatter } = parseFrontmatter<Record<string, unknown>>(content);
+				if (typeof frontmatter.description === "string") return frontmatter.description;
+			} catch {}
+			return undefined;
+		};
 		// The editor's universe must be profile-INDEPENDENT (discovery, not loading): the loaded
 		// getters are narrowed by the active profile, so building the lists from them makes
 		// currently-blocked skills/prompts/context files ungrantable — including expanding the
@@ -6990,15 +7000,6 @@ export class InteractiveMode {
 				.filter((agentPath) => !loadedAgentPaths.has(agentPath))
 				.map((agentPath) => ({ path: agentPath })),
 		];
-
-		const getFrontmatterDescription = (filePath: string): string | undefined => {
-			try {
-				const content = fs.readFileSync(filePath, "utf-8");
-				const { frontmatter } = parseFrontmatter<Record<string, unknown>>(content);
-				if (typeof frontmatter.description === "string") return frontmatter.description;
-			} catch {}
-			return undefined;
-		};
 
 		const getAgentDescription = (filePath: string): string | undefined => {
 			try {
@@ -7234,6 +7235,8 @@ export class InteractiveMode {
 		if (normalizedName.length === 0 || normalizedLower === "none" || normalizedLower === "(none)") {
 			try {
 				this.settingsManager.setRuntimeResourceProfiles([]);
+				// Clearing must also survive restarts (otherwise the old global selection returns).
+				this.settingsManager.setActiveProfile(undefined, "global");
 				this.session.sessionManager.appendCustomEntry("pi.activeResourceProfiles", {
 					profiles: [],
 				});
@@ -7283,6 +7286,9 @@ export class InteractiveMode {
 				this.session.setThinkingLevel(profile.thinking, { persistSettings: false });
 			}
 			this.settingsManager.setRuntimeResourceProfiles([profile.name]);
+			// Selection must survive pi restarts: persist globally (like model/theme selections).
+			// Runtime + session-entry alone made every /profile choice evaporate on exit.
+			this.settingsManager.setActiveProfile(profile.name, "global");
 			this.session.sessionManager.appendCustomEntry("pi.activeResourceProfiles", {
 				profiles: [profile.name],
 			});
