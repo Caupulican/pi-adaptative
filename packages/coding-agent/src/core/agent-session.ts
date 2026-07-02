@@ -2347,9 +2347,11 @@ export class AgentSession {
 	 */
 	private async _resolveModelRouterTurnRouteJudged(
 		prompt: string,
+		options?: { skipJudge?: boolean },
 	): Promise<{ decision: RouteDecision; model: Model<Api> } | undefined> {
 		const baseline = this._resolveModelRouterTurnRoute(prompt);
 		if (!baseline) return undefined;
+		if (options?.skipJudge) return baseline;
 
 		const settings = this.settingsManager.getModelRouterSettings();
 		if (!settings.judgeEnabled) return baseline;
@@ -2715,7 +2717,11 @@ export class AgentSession {
 			// Flush any pending bash messages before the new prompt
 			this._flushPendingBashMessages();
 
-			const resolvedRouteInfo = await this._resolveModelRouterTurnRouteJudged(expandedText);
+			const resolvedRouteInfo = await this._resolveModelRouterTurnRouteJudged(expandedText, {
+				// Internally generated turns (goal continuation, lane follow-ups) never consult the judge:
+				// the regex floor already classified them, and a 20-turn loop must not buy 20 judge calls.
+				skipJudge: options?.autoContinueGoal === false,
+			});
 			routedTurnModel = resolvedRouteInfo?.model;
 			routedTurnRouteDecision = resolvedRouteInfo?.decision;
 			const requestModel = routedTurnModel ?? this.model;
@@ -6080,7 +6086,13 @@ export class AgentSession {
 				});
 				spent.input += completion.usage.input;
 				spent.output += completion.usage.output;
+				spent.cacheRead += completion.usage.cacheRead;
+				spent.cacheWrite += completion.usage.cacheWrite;
 				spent.totalTokens += completion.usage.totalTokens;
+				spent.cost.input += completion.usage.cost.input;
+				spent.cost.output += completion.usage.cost.output;
+				spent.cost.cacheRead += completion.usage.cost.cacheRead;
+				spent.cost.cacheWrite += completion.usage.cost.cacheWrite;
 				spent.cost.total += completion.usage.cost.total;
 				return {
 					text: completion.text,
