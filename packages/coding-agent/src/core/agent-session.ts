@@ -4693,6 +4693,23 @@ export class AgentSession {
 			}
 		}
 
+		// Strict UAC: the active profile is the COMPLETE grant, so a tool the profile names
+		// explicitly is itself a request for that tool — it must ACTIVATE from the registry even
+		// if the session never requested it. Without this, activation is only ever the requested
+		// defaults ∩ allow-list, and a profile granting non-default tools (a search-only profile's
+		// grep/find) yields an empty or truncated tool set on load and /reload. A blanket "*"
+		// stays grant-only: activation then still derives from the request/defaults above.
+		const explicitAllowPatterns = toolProfileFilter?.allow.filter((pattern) => pattern !== "*") ?? [];
+		if (explicitAllowPatterns.length > 0) {
+			for (const toolName of this._toolRegistry.keys()) {
+				if (!isAllowedTool(toolName)) continue;
+				if (matchesResourceProfilePattern(toolName, explicitAllowPatterns)) {
+					nextActiveToolNames.push(toolName);
+					autoActivated.push(toolName);
+				}
+			}
+		}
+
 		// artifact_retrieve companion auto-activation is enforced inside
 		// setActiveToolsByName() itself (not duplicated here), so every activation path --
 		// including the public, extension-exposed setActiveTools() -- gets the same

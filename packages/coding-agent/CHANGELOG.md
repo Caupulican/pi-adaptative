@@ -1,5 +1,13 @@
 ## [Unreleased]
 
+### Fixed
+
+- Fixed profile tool grants never ACTIVATING: activation was only ever the requested defaults
+  intersected with the profile allow-list, so a profile granting non-default tools (e.g. a
+  search-only profile allowing grep/find) produced an empty or truncated "Available tools" set on
+  load and across /reload. Explicitly named tools in an active profile's allow list now activate
+  from the registry (a blanket "*" stays grant-only, deriving activation from the defaults).
+
 ## [0.80.89] - 2026-07-02
 
 ### Added
