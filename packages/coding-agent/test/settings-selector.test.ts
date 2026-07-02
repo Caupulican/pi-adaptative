@@ -41,6 +41,8 @@ function makeConfig(overrides: Partial<SettingsConfig> = {}): SettingsConfig {
 		researchLane: {},
 		workerDelegation: {},
 		contextCuration: {},
+		learningPolicy: {},
+		modelCapability: {},
 		modelRouter: {},
 		autoLearn: {},
 		contextPolicyEnforcement: {},
@@ -93,6 +95,8 @@ function makeCallbacks(overrides: Partial<SettingsCallbacks> = {}): SettingsCall
 		onResearchLaneChange: vi.fn(),
 		onWorkerDelegationChange: vi.fn(),
 		onContextCurationChange: vi.fn(),
+		onLearningPolicyChange: vi.fn(),
+		onModelCapabilityChange: vi.fn(),
 		onModelRouterChange: vi.fn(),
 		onAutoLearnChange: vi.fn(),
 		onContextPolicyEnforcementChange: vi.fn(),
@@ -184,7 +188,7 @@ describe("settings selector", () => {
 			makeCallbacks(),
 		);
 
-		selector.getSettingsList().handleInput("learn");
+		selector.getSettingsList().handleInput("auto learn");
 		selector.getSettingsList().handleInput("\r");
 		selector.getSettingsList().handleInput("\x1b[B");
 		selector.getSettingsList().handleInput("\x1b[B");
@@ -204,11 +208,27 @@ describe("settings selector", () => {
 			makeCallbacks(),
 		);
 
-		selector.getSettingsList().handleInput("learn");
+		selector.getSettingsList().handleInput("auto learn");
 		selector.getSettingsList().handleInput("\r");
 		const output = selector.render(180).join("\n");
 
 		expect(output).toContain("Reflection review");
+	});
+
+	it("exposes Learning Policy and Model Capability submenus (G5)", () => {
+		const policySelector = new SettingsSelectorComponent(makeConfig({}), makeCallbacks());
+		policySelector.getSettingsList().handleInput("learning policy");
+		policySelector.getSettingsList().handleInput("\r");
+		const policyOutput = policySelector.render(180).join("\n");
+		expect(policyOutput).toContain("Auto-apply");
+		expect(policyOutput).toContain("Confidence threshold");
+
+		const capabilitySelector = new SettingsSelectorComponent(makeConfig({}), makeCallbacks());
+		capabilitySelector.getSettingsList().handleInput("capability");
+		capabilitySelector.getSettingsList().handleInput("\r");
+		const capabilityOutput = capabilitySelector.render(180).join("\n");
+		expect(capabilityOutput).toContain("Mode");
+		expect(capabilityOutput).toContain("auto");
 	});
 
 	it("exposes context/prompt-policy enforcement settings in the searchable settings TUI", () => {

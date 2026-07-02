@@ -20,7 +20,9 @@ import type {
 	AutonomySettings,
 	ContextCurationSettings,
 	ContextPromptEnforcementSettings,
+	LearningPolicySettings,
 	MemoryRetrievalSettings,
+	ModelCapabilitySettings,
 	ModelRouterSettings,
 	ResearchLaneSettings,
 	SelfModificationSettings,
@@ -178,6 +180,16 @@ function researchLaneSummary(settings: ResearchLaneSettings): string {
 function contextCurationSummary(settings: ContextCurationSettings): string {
 	if (!settings.enabled) return "disabled";
 	return `on · ${settings.model ?? "no model"} · ${settings.maxJobsPerTurn ?? 4} jobs/turn`;
+}
+
+function learningPolicySummary(settings: LearningPolicySettings): string {
+	if (!settings.enabled) return "disabled (legacy direct-apply)";
+	return `on · auto-apply ${settings.autoApplyEnabled ? "on" : "off"} · conf>=${settings.confidenceThreshold ?? 60}`;
+}
+
+function modelCapabilitySummary(settings: ModelCapabilitySettings): string {
+	const mode = settings.mode ?? "auto";
+	return mode === "auto" ? "auto (derived from the model's context window)" : mode;
 }
 
 function workerDelegationSummary(settings: WorkerDelegationSettings): string {
@@ -343,6 +355,10 @@ export interface SettingsConfig {
 	workerDelegation: WorkerDelegationSettings;
 	contextCuration: ContextCurationSettings;
 	contextCurationScope?: SettingsScope;
+	learningPolicy: LearningPolicySettings;
+	learningPolicyScope?: SettingsScope;
+	modelCapability: ModelCapabilitySettings;
+	modelCapabilityScope?: SettingsScope;
 	workerDelegationScope?: SettingsScope;
 	modelRouter: ModelRouterSettings;
 	modelRouterScope?: SettingsScope;
@@ -391,6 +407,8 @@ export interface SettingsCallbacks {
 	onResearchLaneChange: (settings: ResearchLaneSettings, scope: SettingsScope) => void;
 	onWorkerDelegationChange: (settings: WorkerDelegationSettings, scope: SettingsScope) => void;
 	onContextCurationChange: (settings: ContextCurationSettings, scope: SettingsScope) => void;
+	onLearningPolicyChange: (settings: LearningPolicySettings, scope: SettingsScope) => void;
+	onModelCapabilityChange: (settings: ModelCapabilitySettings, scope: SettingsScope) => void;
 	onModelRouterChange: (settings: ModelRouterSettings, scope: SettingsScope) => void;
 	onAutoLearnChange: (settings: AutoLearnSettings, scope: SettingsScope) => void;
 	onContextPolicyEnforcementChange: (settings: ContextPromptEnforcementSettings, scope: SettingsScope) => void;
@@ -839,6 +857,152 @@ class ResearchLaneSettingsSubmenu extends Container {
 			onCancel,
 		);
 
+		this.addChild(this.settingsList);
+	}
+
+	handleInput(data: string): void {
+		this.settingsList.handleInput(data);
+	}
+}
+
+class LearningPolicySettingsSubmenu extends Container {
+	private settingsList: SettingsList;
+	private state: LearningPolicySettings;
+	private scope: SettingsScope;
+
+	constructor(
+		settings: LearningPolicySettings,
+		onChange: (settings: LearningPolicySettings, scope: SettingsScope) => void,
+		onCancel: () => void,
+		scope: SettingsScope = "global",
+	) {
+		super();
+		this.state = { ...settings };
+		this.scope = scope;
+		const items: SettingItem[] = [
+			{
+				id: "learning-policy-scope",
+				label: "Save scope",
+				description: "Save these learning-policy settings globally or in the project's .pi/settings.json",
+				currentValue: this.scope,
+				values: ["global", "project"],
+			},
+			{
+				id: "learning-policy-enabled",
+				label: "Enabled",
+				description:
+					"Gate reflection writes through the learning policy (proposals, audits, rollback). Disabled keeps legacy direct-apply with audit records.",
+				currentValue: String(this.state.enabled ?? false),
+				values: ["true", "false"],
+			},
+			{
+				id: "learning-policy-auto-apply",
+				label: "Auto-apply",
+				description: "Allow eligible writes to auto-apply; otherwise everything becomes a proposal",
+				currentValue: String(this.state.autoApplyEnabled ?? false),
+				values: ["true", "false"],
+			},
+			{
+				id: "learning-policy-confidence",
+				label: "Confidence threshold",
+				description: "Minimum confidence (0-100) before a write may auto-apply; below it, proposal or no-op",
+				currentValue: String(this.state.confidenceThreshold ?? 60),
+				values: ["25", "50", "60", "75", "90"],
+			},
+			{
+				id: "learning-policy-min-observations",
+				label: "Min observations",
+				description: "Observations required before auto-apply (allowedAutoApplyLayers stays JSON-only)",
+				currentValue: String(this.state.minObservations ?? 2),
+				values: ["1", "2", "3", "5"],
+			},
+		];
+		this.settingsList = new SettingsList(
+			items,
+			Math.min(items.length, 10),
+			getSettingsListTheme(),
+			(id, newValue) => {
+				switch (id) {
+					case "learning-policy-scope":
+						this.scope = newValue as SettingsScope;
+						break;
+					case "learning-policy-enabled":
+						this.state = { ...this.state, enabled: newValue === "true" };
+						break;
+					case "learning-policy-auto-apply":
+						this.state = { ...this.state, autoApplyEnabled: newValue === "true" };
+						break;
+					case "learning-policy-confidence":
+						this.state = { ...this.state, confidenceThreshold: Number(newValue) };
+						break;
+					case "learning-policy-min-observations":
+						this.state = { ...this.state, minObservations: Number(newValue) };
+						break;
+					default:
+						return;
+				}
+				onChange({ ...this.state }, this.scope);
+			},
+			onCancel,
+		);
+		this.addChild(this.settingsList);
+	}
+
+	handleInput(data: string): void {
+		this.settingsList.handleInput(data);
+	}
+}
+
+class ModelCapabilitySettingsSubmenu extends Container {
+	private settingsList: SettingsList;
+	private state: ModelCapabilitySettings;
+	private scope: SettingsScope;
+
+	constructor(
+		settings: ModelCapabilitySettings,
+		onChange: (settings: ModelCapabilitySettings, scope: SettingsScope) => void,
+		onCancel: () => void,
+		scope: SettingsScope = "global",
+	) {
+		super();
+		this.state = { ...settings };
+		this.scope = scope;
+		const items: SettingItem[] = [
+			{
+				id: "model-capability-scope",
+				label: "Save scope",
+				description: "Save globally or in the project's .pi/settings.json",
+				currentValue: this.scope,
+				values: ["global", "project"],
+			},
+			{
+				id: "model-capability-mode",
+				label: "Mode",
+				description:
+					'"auto" derives the tool surface and lane budgets from the model\'s own context window; "off" disables adaptation; a class name forces it',
+				currentValue: this.state.mode ?? "auto",
+				values: ["auto", "off", "full", "lean", "minimal", "chat"],
+			},
+		];
+		this.settingsList = new SettingsList(
+			items,
+			Math.min(items.length, 10),
+			getSettingsListTheme(),
+			(id, newValue) => {
+				switch (id) {
+					case "model-capability-scope":
+						this.scope = newValue as SettingsScope;
+						break;
+					case "model-capability-mode":
+						this.state = { ...this.state, mode: newValue as ModelCapabilitySettings["mode"] };
+						break;
+					default:
+						return;
+				}
+				onChange({ ...this.state }, this.scope);
+			},
+			onCancel,
+		);
 		this.addChild(this.settingsList);
 	}
 
@@ -1724,6 +1888,8 @@ export class SettingsSelectorComponent extends Container {
 		let currentAutonomy: AutonomySettings = { ...config.autonomy };
 		let currentResearchLane: ResearchLaneSettings = { ...config.researchLane };
 		let currentContextCuration: ContextCurationSettings = { ...config.contextCuration };
+		let currentLearningPolicy: LearningPolicySettings = { ...config.learningPolicy };
+		let currentModelCapability: ModelCapabilitySettings = { ...config.modelCapability };
 		let currentWorkerDelegation: WorkerDelegationSettings = { ...config.workerDelegation };
 		let currentModelRouter: ModelRouterSettings = { ...config.modelRouter };
 		let currentAutoLearn: AutoLearnSettings = { ...config.autoLearn };
@@ -1873,6 +2039,40 @@ export class SettingsSelectorComponent extends Container {
 						},
 						() => done(workerDelegationSummary(currentWorkerDelegation)),
 						config.workerDelegationScope ?? "global",
+					),
+			},
+			{
+				id: "learning-policy",
+				label: "Learning Policy",
+				description:
+					"Gate reflection-sourced durable writes: proposals, confidence thresholds, audits, and rollback",
+				currentValue: learningPolicySummary(currentLearningPolicy),
+				submenu: (_currentValue, done) =>
+					new LearningPolicySettingsSubmenu(
+						currentLearningPolicy,
+						(settings, scope) => {
+							currentLearningPolicy = { ...settings };
+							callbacks.onLearningPolicyChange(settings, scope);
+						},
+						() => done(learningPolicySummary(currentLearningPolicy)),
+						config.learningPolicyScope ?? "global",
+					),
+			},
+			{
+				id: "model-capability",
+				label: "Model Capability",
+				description:
+					"How pi adapts the tool surface and lane budgets to small models (derived from the model's own metadata)",
+				currentValue: modelCapabilitySummary(currentModelCapability),
+				submenu: (_currentValue, done) =>
+					new ModelCapabilitySettingsSubmenu(
+						currentModelCapability,
+						(settings, scope) => {
+							currentModelCapability = { ...settings };
+							callbacks.onModelCapabilityChange(settings, scope);
+						},
+						() => done(modelCapabilitySummary(currentModelCapability)),
+						config.modelCapabilityScope ?? "global",
 					),
 			},
 			{

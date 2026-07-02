@@ -4,6 +4,9 @@
 
 ### Added
 
+- Added Settings submenus for Learning Policy (enabled, auto-apply, confidence threshold, min
+  observations; layer allow-list stays JSON-only) and Model Capability (auto/off/forced class),
+  closing the last two settings surfaces that were configurable only by hand-editing JSON (G5).
 - Added routed-turn capability tool filtering (G4): when the model router swaps a turn to a
   cheaper model, the tool surface now follows the ROUTED model's capability class for that turn
   (an 8k local model no longer inherits — and pays schema tokens for — background-autonomy tools

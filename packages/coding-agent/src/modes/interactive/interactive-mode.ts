@@ -6548,6 +6548,10 @@ export class InteractiveMode {
 					workerDelegationScope: projectSettings.workerDelegation ? "project" : "global",
 					contextCuration: this.settingsManager.getContextCurationSettings(),
 					contextCurationScope: projectSettings.contextPolicy?.curation ? "project" : "global",
+					learningPolicy: this.settingsManager.getLearningPolicySettings(),
+					learningPolicyScope: projectSettings.learningPolicy ? "project" : "global",
+					modelCapability: this.settingsManager.getModelCapabilitySettings(),
+					modelCapabilityScope: projectSettings.modelCapability ? "project" : "global",
 					modelRouter: this.settingsManager.getModelRouterSettings(),
 					modelRouterScope: projectSettings.modelRouter ? "project" : "global",
 					autoLearn: this.settingsManager.getAutoLearnSettings(),
@@ -6709,6 +6713,16 @@ export class InteractiveMode {
 					onWorkerDelegationChange: (settings, scope) => {
 						this.settingsManager.setWorkerDelegationSettings(settings, scope);
 						this.showStatus(`Worker delegation settings saved to ${scope}. The delegate tool uses them.`);
+					},
+					onLearningPolicyChange: (settings, scope) => {
+						this.settingsManager.setLearningPolicySettings(settings, scope);
+						this.showStatus(`Learning policy saved to ${scope}.`);
+					},
+					onModelCapabilityChange: (settings, scope) => {
+						this.settingsManager.setModelCapabilitySettings(settings, scope);
+						this.showStatus(
+							`Model capability mode saved to ${scope}. Applies on the next model switch or /reload.`,
+						);
 					},
 					onContextCurationChange: (settings, scope) => {
 						this.settingsManager.setContextCurationSettings(settings, scope);
