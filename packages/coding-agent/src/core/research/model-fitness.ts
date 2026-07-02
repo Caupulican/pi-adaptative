@@ -1,5 +1,6 @@
 import { runBoundedCompletion } from "../autonomy/bounded-completion.ts";
 import type { CapabilityEnvelope } from "../autonomy/contracts.ts";
+import { CURATION_DIGEST_SYSTEM_PROMPT } from "../context/brain-curator.ts";
 import { runWorker } from "../delegation/worker-runner.ts";
 import { runRouteJudge } from "../model-router/route-judge.ts";
 import { runResearch } from "./research-runner.ts";
@@ -89,6 +90,8 @@ export interface ModelFitnessReport {
 	search: LaneFitnessScore;
 	/** Heavy-lifter surface: can the model emit a well-formed tool call against a schema? */
 	toolCall: LaneFitnessScore;
+	/** Curator surface: can the model digest a context chunk to strict JSON WITHOUT losing key facts? */
+	digest: LaneFitnessScore;
 	totalCostUsd: number;
 }
 
@@ -112,6 +115,54 @@ const SEARCH_PROBE_TASKS: readonly string[] = [
 	"Which files define the settings for background research?",
 	"Find where session entries of type custom are appended.",
 ];
+
+// The probe measures the REAL curation contract — same prompt the BrainCurator ships.
+export { CURATION_DIGEST_SYSTEM_PROMPT as DIGEST_PROBE_SYSTEM_PROMPT } from "../context/brain-curator.ts";
+
+/**
+ * Digest probe chunks each carry a NONCE identifier that cannot be guessed from the
+ * instructions: acceptance requires the digest to RETAIN the nonce verbatim, so the score
+ * measures extraction fidelity, not narration (a model cannot pass by paraphrasing).
+ */
+const DIGEST_PROBE_TASKS: readonly { chunk: string; nonce: string }[] = [
+	{
+		nonce: "retryWithJitter_zx41",
+		chunk: [
+			"grep results for 'retry' under src/http:",
+			"src/http/client.ts:88: export function retryWithJitter_zx41(fn, attempts = 3) {",
+			"src/http/client.ts:112:   // exponential backoff capped at 30s",
+			"src/http/pool.ts:41:   client.retry = false",
+		].join("\n"),
+	},
+	{
+		nonce: "ERR_QM_7734",
+		chunk: [
+			"$ npm run migrate",
+			"migrating 14 files...",
+			"error ERR_QM_7734: column 'owner_id' missing on table sessions (migration 0009)",
+			"exit code 1",
+		].join("\n"),
+	},
+	{
+		nonce: "v3.9.2-hotfix.1",
+		chunk: [
+			"read package.json (34 lines):",
+			'  "name": "acme-billing",',
+			'  "version": "v3.9.2-hotfix.1",',
+			'  "engines": { "node": ">=22" },',
+		].join("\n"),
+	},
+];
+
+function parseDigest(text: string, nonce: string): boolean {
+	const parsed = extractJsonObject(text);
+	if (!parsed) return false;
+	const digest = (parsed as { digest?: unknown }).digest;
+	if (typeof digest !== "string") return false;
+	const trimmed = digest.trim();
+	// Bounded and faithful: short enough to be a stub annotation, still carrying the nonce fact.
+	return trimmed.length > 0 && trimmed.length <= 240 && trimmed.includes(nonce);
+}
 
 const TOOL_CALL_PROBE_TASKS: readonly string[] = [
 	"Find usages of the function resolveCliModel under src/.",
@@ -297,10 +348,10 @@ export async function runModelFitnessProbe(options: ModelFitnessOptions): Promis
 	const probeSurface = async (
 		systemPrompt: string,
 		tasks: readonly string[],
-		accepts: (text: string) => boolean,
+		accepts: (text: string, taskIndex: number) => boolean,
 	): Promise<LaneFitnessScore> => {
 		const score: LaneFitnessScore = { succeeded: 0, total: tasks.length, outcomes: [], meanMs: 0 };
-		for (const task of tasks) {
+		for (const [taskIndex, task] of tasks.entries()) {
 			const started = now();
 			// Same wall-clock envelope as the lane surfaces — a hung model must not hang the probe.
 			const bounded = await runBoundedCompletion({
@@ -312,7 +363,7 @@ export async function runModelFitnessProbe(options: ModelFitnessOptions): Promis
 			if (bounded.failure || !bounded.completion) {
 				score.outcomes.push(bounded.failure ? bounded.failure.status : "completion_error");
 			} else {
-				const ok = accepts(bounded.completion.text);
+				const ok = accepts(bounded.completion.text, taskIndex);
 				if (ok) score.succeeded++;
 				score.outcomes.push(ok ? "ok" : "unparseable_output");
 			}
@@ -326,11 +377,17 @@ export async function runModelFitnessProbe(options: ModelFitnessOptions): Promis
 	search.tokensPerSecond = takeSurfaceSpeed();
 	const toolCall = await probeSurface(TOOL_CALL_PROBE_SYSTEM_PROMPT, TOOL_CALL_PROBE_TASKS, parseToolCall);
 	toolCall.tokensPerSecond = takeSurfaceSpeed();
+	const digest = await probeSurface(
+		CURATION_DIGEST_SYSTEM_PROMPT,
+		DIGEST_PROBE_TASKS.map((task) => task.chunk),
+		(text, taskIndex) => parseDigest(text, DIGEST_PROBE_TASKS[taskIndex]!.nonce),
+	);
+	digest.tokensPerSecond = takeSurfaceSpeed();
 
 	const tokensPerSecond =
 		overallSpeed.evalMs > 0 ? Math.round((overallSpeed.tokens / overallSpeed.evalMs) * 1000) : undefined;
 
-	return { trials, tokensPerSecond, research, worker, judge, search, toolCall, totalCostUsd };
+	return { trials, tokensPerSecond, research, worker, judge, search, toolCall, digest, totalCostUsd };
 }
 
 /** Compact human-readable report for tool output / interactive display. Bounded, no raw dumps. */
@@ -343,6 +400,7 @@ export function formatModelFitnessReport(model: string, report: ModelFitnessRepo
 		`- worker lane:   ${report.worker.succeeded}/${report.worker.total} completed+accepted, mean ${report.worker.meanMs}ms${speed(report.worker.tokensPerSecond)} [${report.worker.outcomes.join(", ")}]`,
 		`- search plans:  ${report.search.succeeded}/${report.search.total} well-formed, mean ${report.search.meanMs}ms${speed(report.search.tokensPerSecond)}`,
 		`- tool calls:    ${report.toolCall.succeeded}/${report.toolCall.total} well-formed, mean ${report.toolCall.meanMs}ms${speed(report.toolCall.tokensPerSecond)}`,
+		`- digests:       ${report.digest.succeeded}/${report.digest.total} faithful, mean ${report.digest.meanMs}ms${speed(report.digest.tokensPerSecond)}`,
 		`- route judge:   parsed ${report.judge.parsed}/${report.judge.total}, planning-elevated ${report.judge.planningElevated}/${report.judge.planningTotal}, trivial-cheap ${report.judge.trivialCheap}/${report.judge.trivialTotal}, mean ${report.judge.meanMs}ms${speed(report.judge.tokensPerSecond)}`,
 		...report.judge.outcomes.map((outcome) => `    ${outcome}`),
 	];

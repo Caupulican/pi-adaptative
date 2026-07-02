@@ -18,6 +18,7 @@ import type {
 	AutoLearnSettings,
 	AutonomyMode,
 	AutonomySettings,
+	ContextCurationSettings,
 	ContextPromptEnforcementSettings,
 	MemoryRetrievalSettings,
 	ModelRouterSettings,
@@ -172,6 +173,11 @@ function researchLaneSummary(settings: ResearchLaneSettings): string {
 	const maxUsd = settings.maxUsd ?? DEFAULT_RESEARCH_LANE_MAX_USD;
 	const maxRuns = settings.maxRunsPerSession ?? DEFAULT_RESEARCH_LANE_MAX_RUNS_PER_SESSION;
 	return `enabled ($${maxUsd}/pass, ${maxRuns} runs/session)`;
+}
+
+function contextCurationSummary(settings: ContextCurationSettings): string {
+	if (!settings.enabled) return "disabled";
+	return `on · ${settings.model ?? "no model"} · ${settings.maxJobsPerTurn ?? 4} jobs/turn`;
 }
 
 function workerDelegationSummary(settings: WorkerDelegationSettings): string {
@@ -335,6 +341,8 @@ export interface SettingsConfig {
 	researchLane: ResearchLaneSettings;
 	researchLaneScope?: SettingsScope;
 	workerDelegation: WorkerDelegationSettings;
+	contextCuration: ContextCurationSettings;
+	contextCurationScope?: SettingsScope;
 	workerDelegationScope?: SettingsScope;
 	modelRouter: ModelRouterSettings;
 	modelRouterScope?: SettingsScope;
@@ -382,6 +390,7 @@ export interface SettingsCallbacks {
 	onAutonomyChange: (settings: AutonomySettings, scope: SettingsScope) => void;
 	onResearchLaneChange: (settings: ResearchLaneSettings, scope: SettingsScope) => void;
 	onWorkerDelegationChange: (settings: WorkerDelegationSettings, scope: SettingsScope) => void;
+	onContextCurationChange: (settings: ContextCurationSettings, scope: SettingsScope) => void;
 	onModelRouterChange: (settings: ModelRouterSettings, scope: SettingsScope) => void;
 	onAutoLearnChange: (settings: AutoLearnSettings, scope: SettingsScope) => void;
 	onContextPolicyEnforcementChange: (settings: ContextPromptEnforcementSettings, scope: SettingsScope) => void;
@@ -821,6 +830,94 @@ class ResearchLaneSettingsSubmenu extends Container {
 						break;
 					case "research-lane-max-runs-per-session":
 						this.state = { ...this.state, maxRunsPerSession: Number(newValue) };
+						break;
+					default:
+						return;
+				}
+				onChange({ ...this.state }, this.scope);
+			},
+			onCancel,
+		);
+
+		this.addChild(this.settingsList);
+	}
+
+	handleInput(data: string): void {
+		this.settingsList.handleInput(data);
+	}
+}
+
+class ContextCurationSettingsSubmenu extends Container {
+	private settingsList: SettingsList;
+	private state: ContextCurationSettings;
+	private scope: SettingsScope;
+
+	constructor(
+		settings: ContextCurationSettings,
+		modelOptions: SelectItem[] | undefined,
+		onChange: (settings: ContextCurationSettings, scope: SettingsScope) => void,
+		onCancel: () => void,
+		scope: SettingsScope = "global",
+	) {
+		super();
+		this.state = {
+			...settings,
+			enabled: settings.enabled ?? false,
+			maxJobsPerTurn: settings.maxJobsPerTurn ?? 4,
+		};
+		this.scope = scope;
+
+		const modelValues = ["(unset)", ...(modelOptions ?? []).map((option) => option.value).filter(Boolean)];
+		const items: SettingItem[] = [
+			{
+				id: "context-curation-scope",
+				label: "Save scope",
+				description: "Save these curation settings globally or in the current project's .pi/settings.json",
+				currentValue: this.scope,
+				values: ["global", "project"],
+			},
+			{
+				id: "context-curation-enabled",
+				label: "Enabled",
+				description:
+					"Local brain curator: digests GC-packed stubs and scores stale-chunk relevance. Requires a digest-fit local model (run /fitness <model>).",
+				currentValue: String(this.state.enabled),
+				values: ["true", "false"],
+			},
+			{
+				id: "context-curation-model",
+				label: "Curator model",
+				description:
+					"Local model that runs curation jobs; refused until it passes the digest fitness probe on this host",
+				currentValue: this.state.model ?? "(unset)",
+				values: modelValues,
+			},
+			{
+				id: "context-curation-max-jobs",
+				label: "Max jobs per turn",
+				description: "Curation jobs drained per turn (each is one small local completion)",
+				currentValue: String(this.state.maxJobsPerTurn),
+				values: ["1", "2", "4", "8", "16"],
+			},
+		];
+
+		this.settingsList = new SettingsList(
+			items,
+			Math.min(items.length, 10),
+			getSettingsListTheme(),
+			(id, newValue) => {
+				switch (id) {
+					case "context-curation-scope":
+						this.scope = newValue as SettingsScope;
+						break;
+					case "context-curation-enabled":
+						this.state = { ...this.state, enabled: newValue === "true" };
+						break;
+					case "context-curation-model":
+						this.state = { ...this.state, model: newValue === "(unset)" ? undefined : newValue };
+						break;
+					case "context-curation-max-jobs":
+						this.state = { ...this.state, maxJobsPerTurn: Number(newValue) };
 						break;
 					default:
 						return;
@@ -1626,6 +1723,7 @@ export class SettingsSelectorComponent extends Container {
 		let currentSelfModification: SelfModificationSettings = { ...config.selfModification };
 		let currentAutonomy: AutonomySettings = { ...config.autonomy };
 		let currentResearchLane: ResearchLaneSettings = { ...config.researchLane };
+		let currentContextCuration: ContextCurationSettings = { ...config.contextCuration };
 		let currentWorkerDelegation: WorkerDelegationSettings = { ...config.workerDelegation };
 		let currentModelRouter: ModelRouterSettings = { ...config.modelRouter };
 		let currentAutoLearn: AutoLearnSettings = { ...config.autoLearn };
@@ -1775,6 +1873,24 @@ export class SettingsSelectorComponent extends Container {
 						},
 						() => done(workerDelegationSummary(currentWorkerDelegation)),
 						config.workerDelegationScope ?? "global",
+					),
+			},
+			{
+				id: "context-curation",
+				label: "Context Curation",
+				description:
+					"Opt-in local brain curator: digests GC-packed context stubs and scores stale-chunk relevance in small local-model jobs",
+				currentValue: contextCurationSummary(currentContextCuration),
+				submenu: (_currentValue, done) =>
+					new ContextCurationSettingsSubmenu(
+						currentContextCuration,
+						config.autoLearnModelOptions,
+						(settings, scope) => {
+							currentContextCuration = { ...settings };
+							callbacks.onContextCurationChange(settings, scope);
+						},
+						() => done(contextCurationSummary(currentContextCuration)),
+						config.contextCurationScope ?? "global",
 					),
 			},
 			{

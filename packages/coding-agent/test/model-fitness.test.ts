@@ -91,6 +91,26 @@ describe("runModelFitnessProbe", () => {
 		expect(report.toolCall.succeeded).toBe(0);
 	});
 
+	it("digest surface: accepts only bounded strict-JSON digests that retain the chunk nonce", async () => {
+		const replies = [
+			'{"digest":"retryWithJitter_zx41 in src/http/client.ts does capped exponential backoff."}',
+			'{"digest":"A migration failed because a column is missing."}', // nonce dropped -> unfaithful
+			"The version is v3.9.2-hotfix.1 in package.json", // no JSON -> unparseable
+		];
+		let digestCall = 0;
+		const report = await runModelFitnessProbe({
+			trials: 1,
+			judgePrompts: [],
+			complete: async ({ systemPrompt }) => {
+				const text = systemPrompt.includes("context curator") ? (replies[digestCall++] ?? "{}") : "{}";
+				return { text, costUsd: 0, stopReason: "stop" };
+			},
+		});
+		expect(report.digest.total).toBe(3);
+		expect(report.digest.succeeded).toBe(1);
+		expect(report.digest.outcomes).toEqual(["ok", "unparseable_output", "unparseable_output"]);
+	});
+
 	it("handles an empty judge prompt set without NaN", async () => {
 		const report = await runModelFitnessProbe({
 			trials: 1,

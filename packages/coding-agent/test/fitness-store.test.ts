@@ -13,6 +13,7 @@ function report(overrides: Partial<ModelFitnessReport> = {}): ModelFitnessReport
 		worker: { ...lane },
 		search: { ...lane },
 		toolCall: { ...lane },
+		digest: { ...lane },
 		judge: {
 			parsed: 6,
 			planningElevated: 3,

@@ -33,6 +33,7 @@
 
 import type { AgentMessage } from "@caupulican/pi-agent-core";
 import type { ToolResultMessage } from "@caupulican/pi-ai";
+import { CURATION_RELEVANCE_MIN_CONFIDENCE } from "./brain-curator.ts";
 import type { PromptPolicyShadowReport } from "./context-prompt-policy.ts";
 
 export interface ContextPromptEnforcementSettings {
@@ -45,6 +46,14 @@ export interface ContextPromptEnforcementSettings {
 	 * `AgentSession.getActiveToolNames().includes("artifact_retrieve")`), never assume it.
 	 */
 	retrievalToolAvailable: boolean;
+	/**
+	 * Brain-curator relevance lookup (runtime fact, like `retrievalToolAvailable`; never
+	 * persisted). ASYMMETRIC by design: an explicit high-confidence irrelevance verdict may
+	 * evict an otherwise-eligible item from within the recent window (never past the absolute
+	 * floor), but an advisory can never keep an item the policy wants gone, never stub a
+	 * hard-constraint-protected item, and its absence is byte-for-byte today's behavior.
+	 */
+	brainRelevance?: (itemId: string) => { relevant: boolean; confidence: number } | undefined;
 }
 
 export type PromptEnforcementSkipReason =
@@ -67,6 +76,8 @@ export interface PromptEnforcementItemReport {
 	artifactId?: string;
 	originalChars?: number;
 	skipReason?: PromptEnforcementSkipReason;
+	/** Set when a brain-curator irrelevance verdict allowed eviction inside the recent window. */
+	advisory?: "brain_irrelevant";
 }
 
 export interface PromptEnforcementReport {
@@ -78,6 +89,8 @@ export interface EnforcePromptPolicyResult {
 	messages: AgentMessage[];
 	report: PromptEnforcementReport;
 }
+
+const ENFORCEMENT_ABSOLUTE_RECENT_FLOOR = 4;
 
 function extractDetailsArtifactId(details: unknown): string | undefined {
 	if (typeof details !== "object" || details === null) return undefined;
@@ -136,6 +149,9 @@ export function enforcePromptPolicy(
 	}
 
 	const recentCutoffIndex = Math.max(0, messages.length - settings.preserveRecentMessages);
+	// Advisory evictions may reach inside the recent window but NEVER past this absolute floor:
+	// the last few messages are what the model is actively reasoning over.
+	const absoluteFloorIndex = Math.max(0, messages.length - ENFORCEMENT_ABSOLUTE_RECENT_FLOOR);
 	const nextMessages = messages.slice();
 	let changed = false;
 	const items: PromptEnforcementItemReport[] = [];
@@ -146,9 +162,18 @@ export function enforcePromptPolicy(
 			items.push(skip(planItem, "message_mismatch"));
 			continue;
 		}
+		let advisoryEviction = false;
 		if (planItem.messageIndex >= recentCutoffIndex) {
-			items.push(skip(planItem, "within_recent_window"));
-			continue;
+			const advisory = settings.brainRelevance?.(planItem.itemId);
+			advisoryEviction =
+				advisory !== undefined &&
+				!advisory.relevant &&
+				advisory.confidence >= CURATION_RELEVANCE_MIN_CONFIDENCE &&
+				planItem.messageIndex < absoluteFloorIndex;
+			if (!advisoryEviction) {
+				items.push(skip(planItem, "within_recent_window"));
+				continue;
+			}
 		}
 		if (message.isError) {
 			items.push(skip(planItem, "errored_tool_result"));
@@ -205,6 +230,7 @@ export function enforcePromptPolicy(
 			action: "artifact_stub",
 			artifactId,
 			originalChars,
+			...(advisoryEviction ? { advisory: "brain_irrelevant" as const } : {}),
 		});
 	}
 

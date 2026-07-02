@@ -76,9 +76,17 @@ export interface MemoryRetrievalSettings {
 	includeInPrompt?: boolean; // default: false -- requires `enabled` too; report-only otherwise
 }
 
+export interface ContextCurationSettings {
+	enabled?: boolean; // default: false -- the curator never runs unless explicitly opted in
+	/** Local model ref ("provider/id" or bare id) used for curation jobs. Required to drain. */
+	model?: string;
+	maxJobsPerTurn?: number; // default: 4, clamped to [1, 16]
+}
+
 export interface ContextPolicySettings {
 	enforcement?: ContextPromptEnforcementSettings;
 	memory?: MemoryRetrievalSettings;
+	curation?: ContextCurationSettings;
 }
 
 export const MEMORY_RETRIEVAL_MAX_RESULTS_MIN = 1;
@@ -2132,6 +2140,27 @@ export class SettingsManager {
 			preserveRecentMessages: this.settings.contextPolicy?.enforcement?.preserveRecentMessages ?? 8,
 			minChars: this.settings.contextPolicy?.enforcement?.minChars ?? 1200,
 		};
+	}
+
+	getContextCurationSettings(): { enabled: boolean; model?: string; maxJobsPerTurn: number } {
+		return {
+			enabled: this.settings.contextPolicy?.curation?.enabled ?? false,
+			model: this.settings.contextPolicy?.curation?.model?.trim() || undefined,
+			maxJobsPerTurn: sanitizeIntegerSetting(this.settings.contextPolicy?.curation?.maxJobsPerTurn, 4, 1, 16),
+		};
+	}
+
+	setContextCurationSettings(settings: ContextCurationSettings, scope: SettingsScope = "global"): void {
+		if (scope === "project") {
+			const projectSettings = structuredClone(this.projectSettings);
+			projectSettings.contextPolicy = { ...projectSettings.contextPolicy, curation: { ...settings } };
+			this.markProjectModified("contextPolicy");
+			this.saveProjectSettings(projectSettings);
+			return;
+		}
+		this.globalSettings.contextPolicy = { ...this.globalSettings.contextPolicy, curation: { ...settings } };
+		this.markModified("contextPolicy");
+		this.save();
 	}
 
 	setContextPromptEnforcementSettings(

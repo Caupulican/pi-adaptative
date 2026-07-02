@@ -77,8 +77,15 @@ import {
 	prepareCompaction,
 	shouldCompact,
 } from "./compaction/index.ts";
+// (module-scope helper for curation goal extraction defined below the imports)
+import { BrainCurator, type CurationTelemetrySnapshot } from "./context/brain-curator.ts";
 import { type ArtifactStore, createFileArtifactStore } from "./context/context-artifacts.ts";
 import { type ContextAuditReport, runContextAudit } from "./context/context-audit.ts";
+import {
+	buildContextCompositionReport,
+	type ContextCompositionReport,
+	formatContextCompositionDashboard,
+} from "./context/context-composition.ts";
 import { enforcePromptPolicy, type PromptEnforcementReport } from "./context/context-prompt-enforcement.ts";
 import {
 	correlateWithContextGc,
@@ -430,6 +437,21 @@ export interface SpawnedUsageTotals {
 	reports: number;
 }
 
+/** Latest user prompt text in the provider-visible array (curation goal line; bounded by caller). */
+function latestUserPromptText(messages: AgentMessage[]): string {
+	for (let index = messages.length - 1; index >= 0; index--) {
+		const message = messages[index];
+		if (!message || message.role !== "user") continue;
+		if (typeof message.content === "string") return message.content;
+		const text = message.content
+			.filter((part): part is { type: "text"; text: string } => (part as { type?: string }).type === "text")
+			.map((part) => part.text)
+			.join("\n");
+		if (text.length > 0) return text;
+	}
+	return "";
+}
+
 /**
  * Options for {@link AgentSession.runIsolatedCompletion} — a one-shot LLM call fully isolated from
  * the main session (used by the native reflection engine, R2). See the adaptive-agent design §6c/§7.
@@ -635,6 +657,10 @@ export class AgentSession {
 	private _autoCompactionAbortController: AbortController | undefined = undefined;
 	private _overflowRecoveryAttempted = false;
 	private _latestContextGcReport: ContextGcReport | undefined = undefined;
+	/** Brain-curation sidecar (design: brain-context-curation-design.md). Inert unless the
+	 * contextPolicy.curation setting is enabled AND the model passes the digest fitness gate. */
+	private readonly _brainCurator = new BrainCurator();
+	private _lastCurationSkipReason: string | undefined = undefined;
 	private _toolArtifactStore: ArtifactStore | undefined = undefined;
 	private _latestContextAuditReport: ContextAuditReport | undefined = undefined;
 	private _latestPromptPolicyReport: PromptPolicyShadowReport | undefined = undefined;
@@ -877,6 +903,9 @@ export class AgentSession {
 			const gcResult = this._applyContextGc(finalMessages, true);
 			this._correlatePromptPolicyWithContextGc(gcResult.report);
 			const enforcementResult = this._runPromptEnforcement(gcResult.messages, shadowReport);
+			this._enqueueRelevanceCuration(gcResult.messages, shadowReport);
+			// Fire-and-forget: the local curator overlaps the frontier call; it never blocks a turn.
+			this._maybeDrainBrainCuration();
 			// Appended LAST, after gc and enforcement, so the bounded evidence block is
 			// never packed/stubbed/reshaped by either pass and always reflects this turn's
 			// fresh retrieval. Because nothing downstream trims it, memory-prompt-block.ts's
@@ -1155,6 +1184,7 @@ export class AgentSession {
 	): { messages: AgentMessage[]; report: PromptEnforcementReport } {
 		try {
 			const persistedSettings = this.settingsManager.getContextPromptEnforcementSettings();
+			const curationEnabled = this.settingsManager.getContextCurationSettings().enabled;
 			const settings = {
 				...persistedSettings,
 				// Runtime fact, never assumed: artifact_retrieve is a companion affordance
@@ -1162,6 +1192,7 @@ export class AgentSession {
 				// tools can differ turn to turn -- see context-prompt-enforcement.ts's doc
 				// comment on why this is checked separately from hasAvailableRetrievalPath.
 				retrievalToolAvailable: this.getActiveToolNames().includes("artifact_retrieve"),
+				brainRelevance: curationEnabled ? (itemId: string) => this._brainCurator.getRelevance(itemId) : undefined,
 			};
 			const result = enforcePromptPolicy(messages, shadowReport, settings);
 			this._latestPromptEnforcementReport = result.report;
@@ -1171,6 +1202,195 @@ export class AgentSession {
 			this._latestPromptEnforcementReport = report;
 			return { messages, report };
 		}
+	}
+
+	/**
+	 * Enqueue relevance-scoring jobs for stale, artifact-backed tool outputs the enforcement
+	 * pilot could act on. Pure queueing — the verdicts only ever take effect through the
+	 * asymmetric advisory lever inside enforcePromptPolicy. Never throws into a turn.
+	 */
+	private _enqueueRelevanceCuration(messages: AgentMessage[], shadowReport: PromptPolicyShadowReport): void {
+		try {
+			const settings = this.settingsManager.getContextCurationSettings();
+			if (!settings.enabled) return;
+			const goal = latestUserPromptText(messages).slice(0, 400);
+			for (const item of shadowReport.items) {
+				if (!item.hasAvailableRetrievalPath) continue;
+				const message = messages[item.messageIndex];
+				if (!message || message.role !== "toolResult" || message.toolCallId !== item.toolCallId) continue;
+				if (message.isError) continue;
+				const details = message.details as
+					| { contextGc?: { packed?: unknown }; promptPolicy?: { enforced?: unknown } }
+					| undefined;
+				if (details?.contextGc?.packed === true || details?.promptPolicy?.enforced === true) continue;
+				const text = message.content
+					.filter((part): part is { type: "text"; text: string } => part.type === "text")
+					.map((part) => part.text)
+					.join("\n");
+				if (text.length === 0) continue;
+				this._brainCurator.enqueue({ kind: "relevance", key: item.itemId, content: text.slice(0, 4000), goal });
+			}
+		} catch {
+			// curation is a sidecar; it must never disrupt a turn
+		}
+	}
+
+	/**
+	 * Drain gate: settings on, model configured+authed, and the model has PASSED the digest
+	 * fitness probe on THIS host (design: unfit or unprobed models are refused with a visible
+	 * reason, never silently degraded). Fire-and-forget; never throws into a turn.
+	 */
+	private _maybeDrainBrainCuration(): void {
+		try {
+			const settings = this.settingsManager.getContextCurationSettings();
+			if (!settings.enabled) return;
+			if (!this._brainCurator.hasWork() || this._brainCurator.isDraining) return;
+			if (!settings.model) {
+				this._lastCurationSkipReason = "curation_model_unset";
+				return;
+			}
+			const resolved = resolveCliModel({ cliModel: settings.model, modelRegistry: this._modelRegistry });
+			if (!resolved.model || !this._modelRegistry.hasConfiguredAuth(resolved.model)) {
+				this._lastCurationSkipReason = "curation_model_unresolved";
+				return;
+			}
+			// Match on the CANONICAL "provider/id" ref — runModelFitness stores reports under it,
+			// while settings.model may be a bare id or pattern; comparing raw strings would refuse
+			// forever with curation_model_unprobed even after a successful probe.
+			const canonicalRef = `${resolved.model.provider}/${resolved.model.id}`;
+			const fitness = FitnessStore.forAgentDir(this._agentDir)
+				.getForHost()
+				.find((entry) => entry.model === canonicalRef);
+			const digestScore = fitness?.report.digest;
+			if (!digestScore) {
+				this._lastCurationSkipReason = "curation_model_unprobed";
+				return;
+			}
+			if (digestScore.succeeded < Math.ceil(digestScore.total * (2 / 3))) {
+				this._lastCurationSkipReason = "curation_model_digest_unfit";
+				return;
+			}
+			this._lastCurationSkipReason = undefined;
+			void this._drainBrainCuration(resolved.model, settings.maxJobsPerTurn);
+		} catch {
+			// curation is a sidecar; it must never disrupt a turn
+		}
+	}
+
+	private async _drainBrainCuration(model: Model<Api>, maxJobs: number): Promise<void> {
+		try {
+			let spentUsage: AssistantMessage["usage"] | undefined;
+			const results = await this._brainCurator.drain({
+				maxJobs,
+				complete: async ({ systemPrompt, userPrompt, signal }) => {
+					const completion = await this.runIsolatedCompletion({
+						systemPrompt,
+						messages: [{ role: "user", content: [{ type: "text", text: userPrompt }], timestamp: Date.now() }],
+						model,
+						thinkingLevel: "off",
+						maxTokens: 256,
+						signal,
+						// Both curation system prompts are static — the provider can cache the prefix.
+						cacheRetention: "short",
+					});
+					spentUsage = completion.usage;
+					return {
+						text: completion.text,
+						costUsd: completion.usage.cost.total,
+						stopReason: String(completion.stopReason),
+					};
+				},
+			});
+			// Honest accounting even for free local models: token visibility is the contract.
+			if (spentUsage && (spentUsage.cost.total > 0 || spentUsage.totalTokens > 0)) {
+				this.addSpawnedUsage(spentUsage, { label: "context-curator" });
+			}
+			if (this._disposed || results.length === 0) return;
+			this.sessionManager.appendCustomEntry("brain-curation", {
+				version: 1,
+				results: results.map((result) => ({
+					key: result.key,
+					kind: result.kind,
+					ok: result.ok,
+					ms: result.ms,
+					...(result.digest !== undefined ? { digest: result.digest } : {}),
+					...(result.relevant !== undefined ? { relevant: result.relevant, confidence: result.confidence } : {}),
+				})),
+				telemetry: this._brainCurator.telemetry(),
+			});
+		} catch {
+			// curation is a sidecar; it must never disrupt a turn
+		}
+	}
+
+	/**
+	 * Context composition dashboard data: decomposes the per-request payload (system prompt, tool
+	 * schemas, extension contributions, message classes incl. GC/policy stubs and recall pages)
+	 * plus background spend, so users can see exactly what their integrations cost per request.
+	 * Read-only: uses the GC report path (writePayloads=false), never mutates anything.
+	 */
+	getContextCompositionReport(): ContextCompositionReport {
+		const rawMessages = this.agent.state.messages.slice();
+		const gcResult = this._applyContextGc(rawMessages, false);
+		const activeNames = new Set(this.getActiveToolNames());
+		const extensions = this._resourceLoader.getExtensions().extensions;
+		const extensionToolNames = new Set(extensions.flatMap((extension) => [...extension.tools.keys()]));
+		const usage = this.getContextUsage();
+		const enforcementItems = this.getPromptEnforcementReport().items;
+		const curationStatus = this.getContextCurationStatus();
+		const spawned = this.getSpawnedUsage();
+		return buildContextCompositionReport({
+			systemPrompt: this.systemPrompt ?? "",
+			tools: this.getAllTools()
+				.filter((tool) => activeNames.has(tool.name))
+				.map((tool) => ({
+					name: tool.name,
+					description: tool.description,
+					parameters: tool.parameters,
+					source: extensionToolNames.has(tool.name) ? ("extension" as const) : ("built-in" as const),
+				})),
+			extensions: extensions.map((extension) => ({
+				name: basename(extension.path),
+				path: extension.path,
+				toolNames: [...extension.tools.keys()],
+				commandCount: extension.commands.size,
+			})),
+			messages: gcResult.messages,
+			providerReportedTokens: usage?.tokens ?? null,
+			contextWindow: usage?.contextWindow ?? this.model?.contextWindow ?? null,
+			gc: { packedCount: gcResult.report.packedCount, savedTokens: gcResult.report.savedTokens },
+			enforcement: {
+				enforcedCount: enforcementItems.filter((item) => item.enforced).length,
+				advisoryEvictions: enforcementItems.filter((item) => item.advisory === "brain_irrelevant").length,
+			},
+			curation: {
+				enabled: curationStatus.enabled,
+				telemetry: curationStatus.telemetry,
+				lastSkipReason: curationStatus.lastSkipReason,
+			},
+			spawned: { cost: spawned.cost, reports: spawned.reports },
+		});
+	}
+
+	/** Bounded plain-text rendering of {@link getContextCompositionReport} for the /context command. */
+	formatContextCompositionDashboard(): string {
+		return formatContextCompositionDashboard(this.getContextCompositionReport());
+	}
+
+	/** Curation status for diagnostics/dashboard: settings, live telemetry, last refusal reason. */
+	getContextCurationStatus(): {
+		enabled: boolean;
+		model?: string;
+		telemetry: CurationTelemetrySnapshot;
+		lastSkipReason?: string;
+	} {
+		const settings = this.settingsManager.getContextCurationSettings();
+		return {
+			enabled: settings.enabled,
+			model: settings.model,
+			telemetry: this._brainCurator.telemetry(),
+			lastSkipReason: this._lastCurationSkipReason,
+		};
 	}
 
 	/** Read-only inspection of the latest prompt-enforcement report, for tests/debugging. */
@@ -1363,6 +1583,7 @@ export class AgentSession {
 			// default provider actually emits are never recognized as semantic-memory pages and
 			// accumulate raw for the life of the session — the exact growth Bug #7 GC exists to stop.
 			const providerMarkers = this._memoryManager.getContextMarkers();
+			const curationSettings = this.settingsManager.getContextCurationSettings();
 			const result = applyContextGc(messages, {
 				...settings,
 				semanticMemory: {
@@ -1372,6 +1593,22 @@ export class AgentSession {
 				cwd: this._cwd,
 				storageDir: this._contextGcStorageDir(),
 				writePayloads,
+				curation: curationSettings.enabled
+					? {
+							resolveDigest: (digestKey) => this._brainCurator.getDigest(digestKey),
+							// Only the real per-turn pass enqueues work; the read-only report path
+							// (writePayloads=false) stays side-effect free.
+							onPacked: writePayloads
+								? (record, originalText) => {
+										this._brainCurator.enqueue({
+											kind: "stub_digest",
+											key: record.key ?? record.toolCallId,
+											content: originalText,
+										});
+									}
+								: undefined,
+						}
+					: undefined,
 			});
 			this._latestContextGcReport = result.report;
 			// Only release/reclaim on the real per-turn pass (writePayloads=true), never on

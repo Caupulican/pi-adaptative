@@ -165,6 +165,7 @@ describe("Library Manage UX - Increment 2", () => {
 					autonomy: { mode: "off" },
 					researchLane: {},
 					workerDelegation: {},
+					contextCuration: {},
 					modelRouter: {},
 					autoLearn: { enabled: false },
 					contextPolicyEnforcement: { enabled: false },

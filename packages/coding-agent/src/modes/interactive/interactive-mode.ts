@@ -3143,6 +3143,17 @@ export class InteractiveMode {
 				this.editor.setText("");
 				return;
 			}
+			if (text === "/fitness" || text.startsWith("/fitness ")) {
+				// First-class alias: same handler as /autonomy fitness, discoverable from the / list.
+				this.handleAutonomyCommand(`/autonomy fitness ${text.slice("/fitness".length).trim()}`.trimEnd());
+				this.editor.setText("");
+				return;
+			}
+			if (text === "/context") {
+				this.showStatus(this.session.formatContextCompositionDashboard());
+				this.editor.setText("");
+				return;
+			}
 			if (text === "/scoped-models") {
 				this.editor.setText("");
 				await this.showModelsSelector();
@@ -6254,6 +6265,8 @@ export class InteractiveMode {
 					researchLaneScope: projectSettings.researchLane ? "project" : "global",
 					workerDelegation: this.settingsManager.getWorkerDelegationSettings(),
 					workerDelegationScope: projectSettings.workerDelegation ? "project" : "global",
+					contextCuration: this.settingsManager.getContextCurationSettings(),
+					contextCurationScope: projectSettings.contextPolicy?.curation ? "project" : "global",
 					modelRouter: this.settingsManager.getModelRouterSettings(),
 					modelRouterScope: projectSettings.modelRouter ? "project" : "global",
 					autoLearn: this.settingsManager.getAutoLearnSettings(),
@@ -6415,6 +6428,12 @@ export class InteractiveMode {
 					onWorkerDelegationChange: (settings, scope) => {
 						this.settingsManager.setWorkerDelegationSettings(settings, scope);
 						this.showStatus(`Worker delegation settings saved to ${scope}. The delegate tool uses them.`);
+					},
+					onContextCurationChange: (settings, scope) => {
+						this.settingsManager.setContextCurationSettings(settings, scope);
+						this.showStatus(
+							`Context curation settings saved to ${scope}. Run /fitness <model> first if the model is unprobed.`,
+						);
 					},
 					onModelRouterChange: (settings, scope) => {
 						this.settingsManager.setModelRouterSettings(settings, scope);

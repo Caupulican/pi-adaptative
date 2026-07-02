@@ -1,5 +1,29 @@
 ## [Unreleased]
 
+### Added
+
+- Added the brain-assisted context curator (opt-in `contextPolicy.curation` settings + Settings ->
+  Context Curation submenu): a local-model sidecar that (a) writes 1-2 line semantic digests into
+  Context GC's packed stubs so the main model stops re-running tools to rediscover packed content,
+  and (b) scores stale artifact-backed tool outputs against the current goal so the prompt-policy
+  enforcement pilot can evict irrelevant content earlier. Advisories are asymmetric by design: a
+  verdict can only ever shrink the prompt, never keep or stub protected content, and every consumer
+  behaves identically when a result is absent. Curation jobs are queued/bounded/idempotent, drain
+  off-turn through the isolated-completion path with spawned-usage accounting, and persist auditable
+  session records. The curator refuses models that have not PASSED the new `digest` fitness surface
+  on this host (visible skip reasons, never silent degradation).
+- Added a `digest` surface to the `model_fitness` probe: chunks carry nonce identifiers, and a
+  digest only scores as faithful when strict JSON parses AND the nonce survives verbatim — measuring
+  extraction fidelity, not narration.
+- Added `/context`, a user-facing context composition dashboard decomposing what rides on EVERY
+  request: system prompt tokens, per-tool schema costs (heaviest first), per-extension contributions,
+  message classes (raw vs GC-packed vs policy-stubbed vs memory recall pages), GC/enforcement/curation
+  activity, spawned background spend, and provider-reported vs estimated deltas — plus actionable
+  observations (e.g. an oversized tool schema riding on every request) for users building their own
+  pi integrations.
+- Added `/fitness <model> [trials]` as a first-class, discoverable command (alias of
+  `/autonomy fitness`), so local-model/heavy-lifter probing is visible in the `/` command list.
+
 ## [0.80.88] - 2026-07-02
 
 ## [0.80.87] - 2026-07-02

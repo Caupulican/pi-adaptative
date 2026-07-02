@@ -32,10 +32,21 @@ export interface NormalizedContextGcSettings extends Omit<Required<ContextGcSett
 	semanticMemory: Required<SemanticMemoryGcSettings>;
 }
 
+/**
+ * Brain-curation hooks (both optional; absent hooks are byte-for-byte today's behavior).
+ * `resolveDigest` is a pure lookup keyed by the record's content hash; `onPacked` lets the
+ * caller enqueue digest work with the exact original text at the moment it is packed.
+ */
+export interface ContextGcCurationHooks {
+	resolveDigest?: (digestKey: string) => string | undefined;
+	onPacked?: (record: ContextGcPackedRecord, originalText: string) => void;
+}
+
 export interface ContextGcOptions extends NormalizedContextGcSettings {
 	cwd: string;
 	storageDir?: string;
 	writePayloads?: boolean;
+	curation?: ContextGcCurationHooks;
 }
 
 export interface ContextGcPackedRecord {
@@ -50,6 +61,8 @@ export interface ContextGcPackedRecord {
 	path?: string;
 	command?: string;
 	key?: string;
+	/** Brain-curator semantic digest of the packed content (model-generated; advisory only). */
+	digest?: string;
 }
 
 export interface ContextGcReport {
@@ -328,6 +341,7 @@ function buildSummary(record: ContextGcPackedRecord): string {
 		record.command ? `command: ${cap(record.command)}` : undefined,
 		`reason: ${reasonText(record)}`,
 		`original: ${record.originalChars} chars (~${record.originalTokens} tokens)`,
+		record.digest ? `summary: ${record.digest}` : undefined,
 		record.storagePath
 			? `exact old provider-visible text stored at: ${record.storagePath}`
 			: "exact old provider-visible text retained in the session log, not inline in provider context",
@@ -374,7 +388,12 @@ function makePackedSemanticMemoryMessage(message: AgentMessage, record: ContextG
 
 export function applyContextGc(
 	messages: AgentMessage[],
-	rawSettings: ContextGcSettings & { cwd?: string; storageDir?: string; writePayloads?: boolean },
+	rawSettings: ContextGcSettings & {
+		cwd?: string;
+		storageDir?: string;
+		writePayloads?: boolean;
+		curation?: ContextGcCurationHooks;
+	},
 ): ContextGcResult {
 	const settings = normalizeContextGcSettings(rawSettings);
 	const baseReport: ContextGcReport = {
@@ -392,6 +411,7 @@ export function applyContextGc(
 		cwd: rawSettings.cwd ?? process.cwd(),
 		storageDir: rawSettings.storageDir,
 		writePayloads: rawSettings.writePayloads ?? true,
+		curation: rawSettings.curation,
 	};
 	const eligibleTools = new Set(options.tools);
 	const plan = collectContextGcPlan(messages, options.cwd, options.semanticMemory);
@@ -427,6 +447,8 @@ export function applyContextGc(
 					storagePath,
 					key,
 				};
+				record.digest = options.curation?.resolveDigest?.(key);
+				options.curation?.onPacked?.(record, originalText);
 				const packed = makePackedSemanticMemoryMessage(message, record);
 				record.packedTokens = estimateTokens(packed);
 				nextMessages[index] = packed;
@@ -472,6 +494,8 @@ export function applyContextGc(
 			command: typeof call?.args.command === "string" ? call.args.command : undefined,
 			key,
 		};
+		record.digest = options.curation?.resolveDigest?.(key);
+		options.curation?.onPacked?.(record, originalText);
 		const packed = makePackedToolResult(message, record);
 		record.packedTokens = estimateTokens(packed);
 		nextMessages[index] = packed as AgentMessage;
