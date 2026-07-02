@@ -12,6 +12,10 @@ import type { CurationTelemetrySnapshot } from "./brain-curator.ts";
  * Honesty contract: everything here is an ESTIMATE (chars/4) EXCEPT `providerReportedTokens`,
  * which is what the provider actually billed. The dashboard always shows both and the delta —
  * the delta is the measure of how much the estimates can be trusted, never hidden.
+ *
+ * Known exclusions (named, not hidden): extension `context` handlers may rewrite messages at
+ * send time in ways this view cannot see. The memory evidence block and enforcement stubbing
+ * are ALSO send-time-only, but those are modeled explicitly via `adjustments`.
  */
 
 export interface ToolCompositionRow {
@@ -58,6 +62,8 @@ export interface ContextCompositionReport {
 	curation: { enabled: boolean; telemetry: CurationTelemetrySnapshot; lastSkipReason?: string } | null;
 	/** Background/side-channel spend that does NOT ride in this context but bills the account. */
 	spawned: { cost: number; reports: number } | null;
+	/** Send-time-only deltas folded into estimatedRequestTokens: +evidence block, -policy stubs. */
+	adjustments: { memoryEvidenceTokens: number; enforcementSavedTokens: number };
 	/** Actionable, bounded observations derived from the numbers above. */
 	observations: string[];
 }
@@ -78,6 +84,7 @@ export interface BuildContextCompositionInput {
 	enforcement?: { enforcedCount: number; advisoryEvictions: number };
 	curation?: { enabled: boolean; telemetry: CurationTelemetrySnapshot; lastSkipReason?: string };
 	spawned?: { cost: number; reports: number };
+	adjustments?: { memoryEvidenceTokens: number; enforcementSavedTokens: number };
 }
 
 function estimateTextTokens(text: string): number {
@@ -152,7 +159,15 @@ export function buildContextCompositionReport(input: BuildContextCompositionInpu
 	}
 	const messageClasses = [...classes.values()].sort((a, b) => b.tokens - a.tokens);
 
-	const estimatedRequestTokens = systemPromptTokens + toolSchemaTokens + messageTokens;
+	const adjustments = input.adjustments ?? { memoryEvidenceTokens: 0, enforcementSavedTokens: 0 };
+	const estimatedRequestTokens = Math.max(
+		0,
+		systemPromptTokens +
+			toolSchemaTokens +
+			messageTokens +
+			adjustments.memoryEvidenceTokens -
+			adjustments.enforcementSavedTokens,
+	);
 
 	const observations: string[] = [];
 	const heaviestTool = tools[0];
@@ -200,6 +215,7 @@ export function buildContextCompositionReport(input: BuildContextCompositionInpu
 		enforcement: input.enforcement ?? null,
 		curation: input.curation ?? null,
 		spawned: input.spawned ?? null,
+		adjustments,
 		observations,
 	};
 }
@@ -233,6 +249,11 @@ export function formatContextCompositionDashboard(report: ContextCompositionRepo
 		}
 	}
 	lines.push("", `session messages: ${report.messageCount} row(s), ~${report.messageTokens} tokens`);
+	if (report.adjustments.memoryEvidenceTokens > 0 || report.adjustments.enforcementSavedTokens > 0) {
+		lines.push(
+			`send-time adjustments: +${report.adjustments.memoryEvidenceTokens} memory evidence, -${report.adjustments.enforcementSavedTokens} policy stubs (applied when the request is built)`,
+		);
+	}
 	for (const row of report.messageClasses.slice(0, 10)) {
 		lines.push(`  - ${row.label}: ${row.count} row(s), ~${row.tokens} tok`);
 	}

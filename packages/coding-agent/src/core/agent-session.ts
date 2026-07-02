@@ -1243,7 +1243,11 @@ export class AgentSession {
 	private _maybeDrainBrainCuration(): void {
 		try {
 			const settings = this.settingsManager.getContextCurationSettings();
-			if (!settings.enabled) return;
+			if (!settings.enabled) {
+				// Never surface a stale refusal reason for a feature the user has since disabled.
+				this._lastCurationSkipReason = undefined;
+				return;
+			}
 			if (!this._brainCurator.hasWork() || this._brainCurator.isDraining) return;
 			if (!settings.model) {
 				this._lastCurationSkipReason = "curation_model_unset";
@@ -1279,6 +1283,8 @@ export class AgentSession {
 
 	private async _drainBrainCuration(model: Model<Api>, maxJobs: number): Promise<void> {
 		try {
+			// ACCUMULATE across all drained jobs (the drain runs the completer once PER job) —
+			// keeping only the last job's usage would under-report every multi-job drain.
 			let spentUsage: AssistantMessage["usage"] | undefined;
 			const results = await this._brainCurator.drain({
 				maxJobs,
@@ -1293,7 +1299,21 @@ export class AgentSession {
 						// Both curation system prompts are static — the provider can cache the prefix.
 						cacheRetention: "short",
 					});
-					spentUsage = completion.usage;
+					const usage = completion.usage;
+					if (!spentUsage) {
+						spentUsage = structuredClone(usage);
+					} else {
+						spentUsage.input += usage.input;
+						spentUsage.output += usage.output;
+						spentUsage.cacheRead += usage.cacheRead;
+						spentUsage.cacheWrite += usage.cacheWrite;
+						spentUsage.totalTokens += usage.totalTokens;
+						spentUsage.cost.input += usage.cost.input;
+						spentUsage.cost.output += usage.cost.output;
+						spentUsage.cost.cacheRead += usage.cost.cacheRead;
+						spentUsage.cost.cacheWrite += usage.cost.cacheWrite;
+						spentUsage.cost.total += usage.cost.total;
+					}
 					return {
 						text: completion.text,
 						costUsd: completion.usage.cost.total,
@@ -1339,6 +1359,14 @@ export class AgentSession {
 		const enforcementItems = this.getPromptEnforcementReport().items;
 		const curationStatus = this.getContextCurationStatus();
 		const spawned = this.getSpawnedUsage();
+		const promptInclusion = this.getMemoryPromptInclusionReport();
+		const memoryEvidenceTokens =
+			promptInclusion.status === "included" ? Math.ceil(promptInclusion.blockChars / 4) : 0;
+		// Enforcement stubs are applied at SEND time (not persisted), so the message view here
+		// still holds raw text for them; subtract what stubbing reclaims per request.
+		const enforcementSavedTokens = enforcementItems
+			.filter((item) => item.enforced && typeof item.originalChars === "number")
+			.reduce((sum, item) => sum + Math.max(0, Math.ceil((item.originalChars ?? 0) / 4) - 50), 0);
 		return buildContextCompositionReport({
 			systemPrompt: this.systemPrompt ?? "",
 			tools: this.getAllTools()
@@ -1369,6 +1397,7 @@ export class AgentSession {
 				lastSkipReason: curationStatus.lastSkipReason,
 			},
 			spawned: { cost: spawned.cost, reports: spawned.reports },
+			adjustments: { memoryEvidenceTokens, enforcementSavedTokens },
 		});
 	}
 

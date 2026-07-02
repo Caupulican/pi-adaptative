@@ -21,8 +21,11 @@
   activity, spawned background spend, and provider-reported vs estimated deltas — plus actionable
   observations (e.g. an oversized tool schema riding on every request) for users building their own
   pi integrations.
-- Added `/fitness <model> [trials]` as a first-class, discoverable command (alias of
-  `/autonomy fitness`), so local-model/heavy-lifter probing is visible in the `/` command list.
+- Added `/fitness [model] [trials]` as a first-class, discoverable command: with no arguments it
+  opens the model picker, runs the probe on the selection, shows the six-surface report, and then
+  offers ONE-STEP role assignment — context curator, router cheap/medium/expensive tier, routing
+  judge, or learning model — writing the matching settings for you (with a hint when the model
+  router itself is still disabled). With an explicit model it behaves like `/autonomy fitness`.
 
 ## [0.80.88] - 2026-07-02
 

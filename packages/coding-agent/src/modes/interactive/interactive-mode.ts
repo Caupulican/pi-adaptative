@@ -140,6 +140,7 @@ import { EarendilAnnouncementComponent } from "./components/earendil-announcemen
 import { ExtensionEditorComponent } from "./components/extension-editor.ts";
 import { ExtensionInputComponent } from "./components/extension-input.ts";
 import { ExtensionSelectorComponent } from "./components/extension-selector.ts";
+import { type FitnessRole, FitnessRoleSelectorComponent } from "./components/fitness-role-selector.ts";
 import { FooterComponent } from "./components/footer.ts";
 import { formatKeyText, keyDisplayText, keyHint, keyText, rawKeyHint } from "./components/keybinding-hints.ts";
 import { LoginDialogComponent } from "./components/login-dialog.ts";
@@ -3144,9 +3145,15 @@ export class InteractiveMode {
 				return;
 			}
 			if (text === "/fitness" || text.startsWith("/fitness ")) {
-				// First-class alias: same handler as /autonomy fitness, discoverable from the / list.
-				this.handleAutonomyCommand(`/autonomy fitness ${text.slice("/fitness".length).trim()}`.trimEnd());
+				const fitnessArgs = text.slice("/fitness".length).trim();
 				this.editor.setText("");
+				if (fitnessArgs.length === 0) {
+					// No args: open the model picker, probe the selection, then offer role assignment.
+					this.showFitnessModelSelector();
+				} else {
+					// Explicit ref: same handler as /autonomy fitness.
+					this.handleAutonomyCommand(`/autonomy fitness ${fitnessArgs}`);
+				}
 				return;
 			}
 			if (text === "/context") {
@@ -6100,6 +6107,87 @@ export class InteractiveMode {
 		this.settingsManager.setAutonomySettings({ ...this.settingsManager.getAutonomySettings(), mode }, scope);
 		this.settingsManager.setAutoLearnSettings(preset, scope);
 		this.updateAutoLearnFooter();
+	}
+
+	/** /fitness with no args: pick a model from the configured registry, probe it, assign a role. */
+	private showFitnessModelSelector(): void {
+		this.showSelector((done) => {
+			const selector = new ModelSelectorComponent(
+				this.ui,
+				this.session.model,
+				this.settingsManager,
+				this.session.modelRegistry,
+				this.session.scopedModels,
+				async (model) => {
+					done();
+					await this.runFitnessAndAssign(`${model.provider}/${model.id}`);
+				},
+				() => {
+					done();
+					this.ui.requestRender();
+				},
+			);
+			return { component: selector, focus: selector };
+		});
+	}
+
+	/** Probe a model's fitness, show the report, then offer one-step role assignment. */
+	private async runFitnessAndAssign(modelRef: string): Promise<void> {
+		this.showStatus(`Model fitness probe running on ${modelRef}… (6 surfaces; local models may take a few minutes)`);
+		try {
+			const outcome = await this.session.runModelFitness({ model: modelRef });
+			if (!outcome.started) {
+				this.showStatus(`Model fitness skipped: ${outcome.skipReason}`);
+				return;
+			}
+			this.chatContainer.addChild(new Spacer(1));
+			this.chatContainer.addChild(new Text(formatModelFitnessReport(outcome.model, outcome.report), 1, 0));
+			this.ui.requestRender();
+			this.showSelector((done) => {
+				const selector = new FitnessRoleSelectorComponent(
+					outcome.model,
+					(role) => {
+						done();
+						this.assignFitnessRole(outcome.model, role);
+					},
+					() => {
+						done();
+						this.ui.requestRender();
+					},
+				);
+				return { component: selector, focus: selector };
+			});
+		} catch (error) {
+			this.showError(error instanceof Error ? error.message : String(error));
+		}
+	}
+
+	/** Persist a role assignment from the post-probe selector into the matching settings. */
+	private assignFitnessRole(modelRef: string, role: FitnessRole): void {
+		if (role === "none") {
+			this.showStatus(`Fitness result for ${modelRef} saved. Assign a role later from /settings.`);
+			return;
+		}
+		if (role === "curator") {
+			const current = this.settingsManager.getContextCurationSettings();
+			this.settingsManager.setContextCurationSettings({ ...current, enabled: true, model: modelRef });
+			this.showStatus(`Context curation enabled with ${modelRef} as the curator.`);
+			return;
+		}
+		const router = this.settingsManager.getModelRouterSettings();
+		const field =
+			role === "router-cheap"
+				? "cheapModel"
+				: role === "router-medium"
+					? "mediumModel"
+					: role === "router-expensive"
+						? "expensiveModel"
+						: role === "judge"
+							? "judgeModel"
+							: "learningModel";
+		this.settingsManager.setModelRouterSettings({ ...router, [field]: modelRef });
+		const hint = router.enabled ? "" : " Model router is currently disabled — enable it in /settings → Model Router.";
+		this.showStatus(`${modelRef} set as ${role.replace("router-", "router ")} model.${hint}`);
 	}
 
 	private handleAutonomyCommand(text: string): void {

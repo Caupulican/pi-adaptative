@@ -18,7 +18,10 @@ export interface BuiltinSlashCommand {
 export const BUILTIN_SLASH_COMMANDS: ReadonlyArray<BuiltinSlashCommand> = [
 	{ name: "settings", description: "Open settings menu" },
 	{ name: "autonomy", description: "Autonomy mode, diagnostics, research, fitness (/autonomy status)" },
-	{ name: "fitness", description: "Probe a model for local/heavy-lifter roles (/fitness <model> [trials])" },
+	{
+		name: "fitness",
+		description: "Pick and probe a model for local/heavy-lifter roles, then assign it (/fitness [model] [trials])",
+	},
 	{ name: "context", description: "Context composition dashboard: what rides on every request" },
 	{ name: "auto-learn", description: "Show Auto Learn/reflection status or run now (/auto-learn run)" },
 	{

@@ -122,7 +122,7 @@ describe("context-gc curation hooks (surface 2: stub digests)", () => {
 			curation: { resolveDigest: (digestKey) => (digestKey === key ? "grep hit for nonce-fact-tc-1" : undefined) },
 		});
 		const secondText = JSON.stringify(second.messages[0]);
-		expect(secondText).toContain("summary: grep hit for nonce-fact-tc-1");
+		expect(secondText).toContain("not authoritative): grep hit for nonce-fact-tc-1");
 		expect(second.report.records[0]!.digest).toBe("grep hit for nonce-fact-tc-1");
 	});
 });

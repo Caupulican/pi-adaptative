@@ -341,7 +341,7 @@ function buildSummary(record: ContextGcPackedRecord): string {
 		record.command ? `command: ${cap(record.command)}` : undefined,
 		`reason: ${reasonText(record)}`,
 		`original: ${record.originalChars} chars (~${record.originalTokens} tokens)`,
-		record.digest ? `summary: ${record.digest}` : undefined,
+		record.digest ? `summary (auto-digest, machine paraphrase, not authoritative): ${record.digest}` : undefined,
 		record.storagePath
 			? `exact old provider-visible text stored at: ${record.storagePath}`
 			: "exact old provider-visible text retained in the session log, not inline in provider context",

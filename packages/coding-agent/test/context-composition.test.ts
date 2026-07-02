@@ -53,6 +53,7 @@ describe("buildContextCompositionReport", () => {
 		expect(report.estimatedRequestTokens).toBe(
 			report.systemPromptTokens + report.toolSchemaTokens + report.messageTokens,
 		);
+		expect(report.adjustments).toEqual({ memoryEvidenceTokens: 0, enforcementSavedTokens: 0 });
 		// the mega tool dominates -> actionable observation; provider delta is large -> flagged
 		expect(report.observations.some((line) => line.includes("mega_tool"))).toBe(true);
 		expect(report.observations.some((line) => line.includes("provider-reported"))).toBe(true);
@@ -103,5 +104,22 @@ describe("AgentSession.getContextCompositionReport", () => {
 		} finally {
 			harness.cleanup();
 		}
+	});
+});
+
+describe("send-time adjustments", () => {
+	it("folds the memory evidence block in and the enforcement stub savings out", () => {
+		const report = buildContextCompositionReport({
+			systemPrompt: "p".repeat(400),
+			tools: [],
+			extensions: [],
+			messages: [user("hello")],
+			providerReportedTokens: null,
+			contextWindow: null,
+			adjustments: { memoryEvidenceTokens: 300, enforcementSavedTokens: 120 },
+		});
+		expect(report.estimatedRequestTokens).toBe(report.systemPromptTokens + report.messageTokens + 300 - 120);
+		const text = formatContextCompositionDashboard(report);
+		expect(text).toContain("send-time adjustments: +300 memory evidence, -120 policy stubs");
 	});
 });
