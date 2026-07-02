@@ -180,6 +180,8 @@ export interface ModelRouterSettings {
 	mediumModel?: string; // model pattern for normal scoped implementation, edits, and refactors
 	expensiveModel?: string; // model pattern for modify/tool-heavy turns
 	learningModel?: string; // model pattern for background reflection/learn/skill-creator work; "active" uses session model
+	judgeEnabled?: boolean; // default: true — the routing judge runs automatically whenever the router is enabled and a judge model resolves
+	judgeModel?: string; // model pattern for the routing-only judge; unset falls back to mediumModel
 }
 
 export const DEFAULT_RESEARCH_LANE_ENABLED = false;
@@ -1989,6 +1991,8 @@ export class SettingsManager {
 		mediumModel?: string;
 		expensiveModel?: string;
 		learningModel?: string;
+		judgeEnabled: boolean;
+		judgeModel?: string;
 	} {
 		const profileSettings = this.getProfileModelRouterSettings();
 		const settings = {
@@ -1997,6 +2001,8 @@ export class SettingsManager {
 			mediumModel: this.settings.modelRouter?.mediumModel?.trim() || undefined,
 			expensiveModel: this.settings.modelRouter?.expensiveModel?.trim() || undefined,
 			learningModel: this.settings.modelRouter?.learningModel?.trim() || undefined,
+			judgeEnabled: this.settings.modelRouter?.judgeEnabled ?? true,
+			judgeModel: this.settings.modelRouter?.judgeModel?.trim() || undefined,
 		};
 		return {
 			enabled: profileSettings?.enabled ?? settings.enabled,
@@ -2004,6 +2010,8 @@ export class SettingsManager {
 			mediumModel: profileSettings?.mediumModel?.trim() || settings.mediumModel,
 			expensiveModel: profileSettings?.expensiveModel?.trim() || settings.expensiveModel,
 			learningModel: profileSettings?.learningModel?.trim() || settings.learningModel,
+			judgeEnabled: profileSettings?.judgeEnabled ?? settings.judgeEnabled,
+			judgeModel: profileSettings?.judgeModel?.trim() || settings.judgeModel,
 		};
 	}
 
@@ -2014,6 +2022,8 @@ export class SettingsManager {
 			mediumModel: settings.mediumModel?.trim() || undefined,
 			expensiveModel: settings.expensiveModel?.trim() || undefined,
 			learningModel: settings.learningModel?.trim() || undefined,
+			judgeEnabled: settings.judgeEnabled ?? true,
+			judgeModel: settings.judgeModel?.trim() || undefined,
 		};
 		if (scope === "project") {
 			const projectSettings = structuredClone(this.projectSettings);

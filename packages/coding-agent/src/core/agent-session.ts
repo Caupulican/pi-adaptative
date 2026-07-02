@@ -189,6 +189,7 @@ import type { ModelRegistry } from "./model-registry.ts";
 import { resolveCliModel, resolveProfileModelSettings } from "./model-resolver.ts";
 import { collectModelRouterConfigDiagnostics } from "./model-router/config-diagnostics.ts";
 import { classifyModelRouterRoute, type ModelRouterIntent } from "./model-router/intent-classifier.ts";
+import { ROUTE_JUDGE_MAX_OUTPUT_TOKENS, runRouteJudge } from "./model-router/route-judge.ts";
 import {
 	bufferModelRouterSessionCustomMessage,
 	bufferModelRouterSessionMessage,
@@ -2320,6 +2321,91 @@ export class AgentSession {
 		return resolved.model;
 	}
 
+	private _resolveConfiguredTierModel(tier: "cheap" | "medium" | "expensive"): Model<Api> | undefined {
+		const settings = this.settingsManager.getModelRouterSettings();
+		const pattern =
+			tier === "cheap" ? settings.cheapModel : tier === "medium" ? settings.mediumModel : settings.expensiveModel;
+		if (!pattern) return undefined;
+		const resolved = resolveCliModel({ cliModel: pattern, modelRegistry: this._modelRegistry });
+		if (!resolved.model) return undefined;
+		if (!this._modelRegistry.hasConfiguredAuth(resolved.model)) return undefined;
+		return resolved.model;
+	}
+
+	/**
+	 * Router resolution with the routing judge (auto-on with the router): the regex classifier's
+	 * decision is the baseline; when a judge model resolves (judgeModel, else mediumModel), one
+	 * bounded, tool-less completion may move the tier between cheap/medium/expensive — never to
+	 * learning. Core rule encoded in the judge prompt: planning is never cheap unless genuinely
+	 * trivial. Every fallback stays visible in the decision reasons, and judge spend reports
+	 * through spawned-usage accounting.
+	 */
+	private async _resolveModelRouterTurnRouteJudged(
+		prompt: string,
+	): Promise<{ decision: RouteDecision; model: Model<Api> } | undefined> {
+		const baseline = this._resolveModelRouterTurnRoute(prompt);
+		if (!baseline) return undefined;
+
+		const settings = this.settingsManager.getModelRouterSettings();
+		if (!settings.judgeEnabled) return baseline;
+		const judgePattern = settings.judgeModel ?? settings.mediumModel;
+		if (!judgePattern) return baseline;
+		const judgeModel = this._resolveLaneModel(judgePattern);
+		if (!judgeModel) return baseline;
+
+		let spentUsage: Usage | undefined;
+		const judged = await runRouteJudge({
+			prompt,
+			baseline: baseline.decision,
+			signal: this._reflectionAbort.signal,
+			complete: async ({ systemPrompt, userPrompt, signal }) => {
+				const completion = await this.runIsolatedCompletion({
+					systemPrompt,
+					messages: [{ role: "user", content: [{ type: "text", text: userPrompt }], timestamp: Date.now() }],
+					model: judgeModel,
+					thinkingLevel: "off",
+					maxTokens: ROUTE_JUDGE_MAX_OUTPUT_TOKENS,
+					signal,
+					// The judge system prompt is static — the provider can cache the prefix.
+					cacheRetention: "short",
+				});
+				spentUsage = completion.usage;
+				return {
+					text: completion.text,
+					costUsd: completion.usage.cost.total,
+					stopReason: String(completion.stopReason),
+				};
+			},
+		});
+		if (spentUsage && (spentUsage.cost.total > 0 || spentUsage.totalTokens > 0)) {
+			this.addSpawnedUsage(spentUsage, { label: "router-judge" });
+		}
+
+		if (!judged.verdict || judged.decision.tier === baseline.decision.tier) {
+			// Same tier (or judge fell back): keep the baseline model, carry the annotated decision.
+			return { decision: judged.decision, model: baseline.model };
+		}
+
+		const judgedTier = judged.decision.tier;
+		if (judgedTier !== "cheap" && judgedTier !== "medium" && judgedTier !== "expensive") {
+			return { decision: baseline.decision, model: baseline.model };
+		}
+		const judgedModel = this._resolveConfiguredTierModel(judgedTier);
+		if (!judgedModel) {
+			return {
+				decision: {
+					...baseline.decision,
+					reasons: [
+						...baseline.decision.reasons,
+						`Route judge chose ${judgedTier} but no model resolves for that tier; baseline kept`,
+					],
+				},
+				model: baseline.model,
+			};
+		}
+		return { decision: { ...judged.decision, model: formatModelRouterModel(judgedModel) }, model: judgedModel };
+	}
+
 	// biome-ignore lint/correctness/noUnusedPrivateClassMembers: test seam
 	private _resolveModelRouterTurnModel(prompt: string): Model<Api> | undefined {
 		const resolved = this._resolveModelRouterTurnRoute(prompt);
@@ -2624,7 +2710,7 @@ export class AgentSession {
 			// Flush any pending bash messages before the new prompt
 			this._flushPendingBashMessages();
 
-			const resolvedRouteInfo = this._resolveModelRouterTurnRoute(expandedText);
+			const resolvedRouteInfo = await this._resolveModelRouterTurnRouteJudged(expandedText);
 			routedTurnModel = resolvedRouteInfo?.model;
 			routedTurnRouteDecision = resolvedRouteInfo?.decision;
 			const requestModel = routedTurnModel ?? this.model;

@@ -79,6 +79,15 @@
   ANY prompt customization: lane settings (`systemPrompt`) and the delegate tool's new
   `systemPrompt` input can erase and replace everything above it — so a big session model can
   hand a small open model a minimal purpose-built prompt without shedding the safety floor.
+- Added the routing judge: with the model router enabled, a bounded routing-only completion on the
+  judge lane (`modelRouter.judgeModel`, else `mediumModel`; ≤128 output tokens, 10s wall clock,
+  static cached prompt) decides the final cheap/medium/expensive tier over the regex baseline —
+  never the learning tier. Core rule: planning/design prompts are never cheap unless the judge
+  explicitly deems them trivial; the regex classifier now also floors prospective planning prompts
+  at medium (`planning_min_medium`) while plain lookups like "show me the architecture" stay
+  cheap. Judge failures fall back to the baseline with visible reasons, judge spend reports
+  through spawned-usage accounting, and `modelRouter.judgeEnabled: false` restores byte-identical
+  router behavior.
 
 ### Changed
 

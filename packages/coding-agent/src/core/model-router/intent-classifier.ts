@@ -16,6 +16,19 @@ const SELF_MOD_MUTATE_RE =
 	/\b(modify|change|write|update|edit|delete|add|remove)\s+.*\b(skills|prompts|settings|tools|behavior)\b|self[-_]modification/i;
 const ARCHITECTURE_MUTATE_RE = /\b(rewrite|redesign|change|modify|rearchitect)\s+.*\b(architecture|architect)\b/i;
 
+// Planning floor: plans steer all downstream work, so planning never routes cheap by default.
+// Only the route judge may downgrade a planning prompt back to cheap (explicit trivial verdict).
+// Core terms are always planning; design/architecture words count only with prospective phrasing,
+// so lookups like "show me the architecture" stay cheap.
+const PLANNING_CORE_RE = /\b(plan|planning|roadmap|strategy)\b/i;
+const PLANNING_DESIGN_WORD_RE = /\b(design|architect\w*|structure|approach)\b/i;
+const PLANNING_PROSPECTIVE_RE =
+	/\b(how (?:should|would|do we|can we)|what(?:'s| is) the best|propose|draft|come up with|figure out|decide (?:on|how))\b/i;
+
+function isPlanningPrompt(text: string): boolean {
+	return PLANNING_CORE_RE.test(text) || (PLANNING_DESIGN_WORD_RE.test(text) && PLANNING_PROSPECTIVE_RE.test(text));
+}
+
 const REFACTOR_RE = /\b(refactor|refactoring)\b/i;
 const TEST_VALIDATION_RE = /\b(test|testing|validation|lint|vitest|jest|run)\b/i;
 const IMPLEMENT_RE = /\b(implement|fix|apply|change|update|create|write|generate|modify|edit|patch|add)\b/i;
@@ -33,8 +46,19 @@ export function classifyModelRouterRoute(prompt: string): RouteDecision {
 		};
 	}
 
-	// 1. Explicit read-only questions/lookups dominate (unless prefixed by explicit mutation verb)
+	// 1. Explicit read-only questions/lookups dominate (unless prefixed by explicit mutation verb).
+	// Planning-shaped questions are the exception: a plan steers expensive downstream work, so the
+	// floor is medium even when phrased as a question.
 	if (READ_ONLY_QUESTION_RE.test(text) && !EXPLICIT_MODIFY_REQUEST_RE.test(text)) {
+		if (isPlanningPrompt(text)) {
+			return {
+				tier: "medium",
+				risk: "read-only",
+				confidence: 0.75,
+				reasonCode: "planning_min_medium",
+				reasons: ["Planning/design prompts never route cheap by default; a judge may deem them trivial"],
+			};
+		}
 		return {
 			tier: "cheap",
 			risk: "read-only",
@@ -94,6 +118,15 @@ export function classifyModelRouterRoute(prompt: string): RouteDecision {
 		}
 
 		// B. Explicit implementation/scoped-write signals route medium
+		if (isPlanningPrompt(input)) {
+			return {
+				tier: "medium",
+				risk: "read-only",
+				confidence: 0.75,
+				reasonCode: "planning_min_medium",
+				reasons: ["Planning/design prompts never route cheap by default; a judge may deem them trivial"],
+			};
+		}
 		if (REFACTOR_RE.test(input)) {
 			return {
 				tier: "medium",
