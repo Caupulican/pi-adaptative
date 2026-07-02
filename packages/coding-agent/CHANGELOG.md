@@ -1,5 +1,33 @@
 ## [Unreleased]
 
+### Added
+
+- Added the executor lane (G16): configure `modelRouter.executorModel` (or assign it in one step
+  from /fitness -> "Toolkit executor") and command-shaped prompts that score a deterministic
+  Level-0 EXACT hit on the toolkit registry route the whole turn to the local executor — with the
+  judge skipped (nothing to judge), the tool surface capability-filtered to the executor's own
+  class, and `run_toolkit_script` exempted from the cheap-tier mutation escalation ONLY on these
+  routes (its own danger gate still applies; any other mutating tool still escalates). Ambiguous
+  requests never route here — they stay with the main model and the reflex brain.
+- Added workspace research sources (G1): the autonomous research lane now grounds itself in the
+  repo — a bounded ripgrep collector derives terms from the goal text and feeds pointer-first
+  sources (repo-relative path, line, <=200-char excerpt; never file bodies) into the research
+  prompt and the evidence bundle, with the synthesis anchors always preserved. Best-effort: no
+  ripgrep or no matches reproduces the previous behavior exactly.
+- Added real evidence strength to the learning gate (G6): a bounded persistent observation store
+  counts how often the same lesson (layer + normalized summary) is re-observed across passes and
+  sessions, so `minObservations` now gates on truth — the first observation proposals, repeated
+  ones can auto-apply.
+- Added autonomy telemetry emission (G3): route decisions, research/worker lane outcomes, and
+  learning decisions now emit redacted, bounded events (ids/codes/numbers only — never prompt or
+  memory text) as `autonomy-telemetry` session entries.
+- Added execution-time capability-envelope path enforcement and worker request persistence (G2
+  prerequisites): a tool wrapped in an envelope scope structurally refuses out-of-scope paths at
+  the moment it runs (deny-wins, escape-proof), and every worker result persists its originating
+  request (instructions, route, envelope) for audit.
+- Added digest-served telemetry: the /context curation line now reports how many brain digests
+  were actually rendered into GC stubs on real turns — the pays-for-itself number.
+
 ## [0.80.97] - 2026-07-02
 
 ## [0.80.96] - 2026-07-02

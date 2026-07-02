@@ -69,7 +69,15 @@ describe("buildContextCompositionReport", () => {
 			contextWindow: 32_000,
 			curation: {
 				enabled: true,
-				telemetry: { jobsRun: 3, parseFailures: 1, droppedJobs: 0, localChars: 4000, queued: 2, resultsHeld: 3 },
+				telemetry: {
+					jobsRun: 3,
+					parseFailures: 1,
+					droppedJobs: 0,
+					digestsServed: 2,
+					localChars: 4000,
+					queued: 2,
+					resultsHeld: 3,
+				},
 				lastSkipReason: "curation_model_unprobed",
 			},
 			spawned: { cost: 0.12, reports: 4 },
@@ -80,6 +88,7 @@ describe("buildContextCompositionReport", () => {
 		expect(text).toContain("tool schemas:");
 		expect(text).toContain("(+5 more:"); // 15 tools, 10 shown
 		expect(text).toContain("brain curation: enabled");
+		expect(text).toContain("2 digest(s) served into stubs");
 		expect(text).toContain("curation_model_unprobed");
 		expect(text).toContain("spawned/background spend");
 		expect(text).toContain("$0.1200");

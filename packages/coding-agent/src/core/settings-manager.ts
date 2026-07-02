@@ -191,6 +191,7 @@ export interface ModelRouterSettings {
 	learningModel?: string; // model pattern for background reflection/learn/skill-creator work; "active" uses session model
 	judgeEnabled?: boolean; // default: true — the routing judge runs automatically whenever the router is enabled and a judge model resolves
 	judgeModel?: string; // model pattern for the routing-only judge; unset falls back to mediumModel
+	executorModel?: string; // model pattern for the local executor lane (direct toolkit commands); unset disables it
 }
 
 export const DEFAULT_RESEARCH_LANE_ENABLED = false;
@@ -2032,6 +2033,7 @@ export class SettingsManager {
 		learningModel?: string;
 		judgeEnabled: boolean;
 		judgeModel?: string;
+		executorModel?: string;
 	} {
 		const profileSettings = this.getProfileModelRouterSettings();
 		const settings = {
@@ -2042,6 +2044,7 @@ export class SettingsManager {
 			learningModel: this.settings.modelRouter?.learningModel?.trim() || undefined,
 			judgeEnabled: this.settings.modelRouter?.judgeEnabled ?? true,
 			judgeModel: this.settings.modelRouter?.judgeModel?.trim() || undefined,
+			executorModel: this.settings.modelRouter?.executorModel?.trim() || undefined,
 		};
 		return {
 			enabled: profileSettings?.enabled ?? settings.enabled,
@@ -2051,6 +2054,7 @@ export class SettingsManager {
 			learningModel: profileSettings?.learningModel?.trim() || settings.learningModel,
 			judgeEnabled: profileSettings?.judgeEnabled ?? settings.judgeEnabled,
 			judgeModel: profileSettings?.judgeModel?.trim() || settings.judgeModel,
+			executorModel: profileSettings?.executorModel?.trim() || settings.executorModel,
 		};
 	}
 
@@ -2063,6 +2067,7 @@ export class SettingsManager {
 			learningModel: settings.learningModel?.trim() || undefined,
 			judgeEnabled: settings.judgeEnabled ?? true,
 			judgeModel: settings.judgeModel?.trim() || undefined,
+			executorModel: settings.executorModel?.trim() || undefined,
 		};
 		if (scope === "project") {
 			const projectSettings = structuredClone(this.projectSettings);

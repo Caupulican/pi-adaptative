@@ -65,6 +65,11 @@ import { type LaneRecord, LaneTracker } from "./autonomy/lane-tracker.ts";
 import { appendLaneRecordSnapshot, getLaneRecordSnapshots } from "./autonomy/session-lane-record.ts";
 import type { AutonomyDiagnosticSnapshot, AutonomyStatusSnapshot, DiagnosticEntry } from "./autonomy/status.ts";
 import { composeSubagentSystemPrompt } from "./autonomy/subagent-prompt.ts";
+import {
+	AUTONOMY_TELEMETRY_EVENT_TYPES,
+	type AutonomyTelemetryEvent,
+	redactTelemetryValue,
+} from "./autonomy/telemetry-events.ts";
 import { type BashResult, executeBashWithOperations } from "./bash-executor.ts";
 import {
 	type CompactionResult,
@@ -171,6 +176,7 @@ import {
 	rollbackPlanForReflectionWrite,
 } from "./learning/learning-audit.ts";
 import { evaluateLearningDecision } from "./learning/learning-gate.ts";
+import { ObservationStore, observationKey } from "./learning/observation-store.ts";
 import {
 	type DemandSignals,
 	decideDemand,
@@ -195,6 +201,7 @@ import {
 import type { ModelRegistry } from "./model-registry.ts";
 import { resolveCliModel, resolveProfileModelSettings } from "./model-resolver.ts";
 import { collectModelRouterConfigDiagnostics } from "./model-router/config-diagnostics.ts";
+import { classifyExecutorTurn } from "./model-router/executor-route.ts";
 import { classifyModelRouterRoute, type ModelRouterIntent } from "./model-router/intent-classifier.ts";
 import { ROUTE_JUDGE_MAX_OUTPUT_TOKENS, runRouteJudge } from "./model-router/route-judge.ts";
 import {
@@ -221,6 +228,7 @@ import {
 	getEvidenceBundleSnapshots,
 	getLatestEvidenceBundleSnapshot,
 } from "./research/session-evidence-bundle.ts";
+import { collectWorkspaceSources } from "./research/workspace-collector.ts";
 import type { ResourceExtensionPaths, ResourceLoader } from "./resource-loader.ts";
 import { stripResourceProfileBlocks } from "./resource-profile-blocks.ts";
 import { classifyToolTrust, UNTRUSTED_BOUNDARY_SYSTEM_RULE, wrapUntrustedText } from "./security/untrusted-boundary.ts";
@@ -354,6 +362,12 @@ export interface AgentSessionConfig {
 	extensionRunnerRef?: { current?: ExtensionRunner };
 	/** Session start event metadata emitted when extensions bind to this runtime. */
 	sessionStartEvent?: SessionStartEvent;
+	/**
+	 * Pointer-first workspace source collector for the autonomous research lane. Injected in unit
+	 * tests so they don't spawn a real ripgrep child (which would escape fake timers); production
+	 * defaults to the real, best-effort collector.
+	 */
+	collectWorkspaceSources?: typeof collectWorkspaceSources;
 }
 
 export interface ExtensionBindings {
@@ -577,6 +591,10 @@ function persistModelRouterDecision(
 	sessionManager.appendCustomEntry(MODEL_ROUTER_DECISION_CUSTOM_TYPE, decision);
 }
 
+/** Custom-entry type for G3 autonomy telemetry. Distinct from the router/lane record types so a
+ * telemetry consumer can filter on it without decoding operational snapshots. */
+const AUTONOMY_TELEMETRY_CUSTOM_TYPE = "autonomy-telemetry";
+
 /** Read a packed grep/find tool result's `details.artifactId`, if present, without `any`. */
 function extractArtifactId(message: AgentMessage | undefined): string | undefined {
 	if (!message || message.role !== "toolResult") return undefined;
@@ -698,6 +716,7 @@ export class AgentSession {
 	private _baseToolDefinitions: Map<string, ToolDefinition> = new Map();
 	private _cwd: string;
 	private _agentDir: string;
+	private _collectWorkspaceSources: typeof collectWorkspaceSources;
 	private _extensionRunnerRef?: { current?: ExtensionRunner };
 	private _initialActiveToolNames?: string[];
 	private _allowedToolNames?: Set<string>;
@@ -769,6 +788,7 @@ export class AgentSession {
 		this._customTools = config.customTools ?? [];
 		this._cwd = config.cwd;
 		this._agentDir = config.agentDir ?? getAgentDir();
+		this._collectWorkspaceSources = config.collectWorkspaceSources ?? collectWorkspaceSources;
 		this._modelRegistry = config.modelRegistry;
 		this._extensionRunnerRef = config.extensionRunnerRef;
 		this._initialActiveToolNames = config.initialActiveToolNames;
@@ -1712,7 +1732,12 @@ export class AgentSession {
 				writePayloads,
 				curation: curationSettings.enabled
 					? {
-							resolveDigest: (digestKey) => this._brainCurator.getDigest(digestKey),
+							resolveDigest: (digestKey) => {
+								const digest = this._brainCurator.getDigest(digestKey);
+								// Count serves on the REAL per-turn pass only, never the report path.
+								if (digest !== undefined && writePayloads) this._brainCurator.noteDigestServed();
+								return digest;
+							},
 							// Only the real per-turn pass enqueues work; the read-only report path
 							// (writePayloads=false) stays side-effect free.
 							onPacked: writePayloads
@@ -1815,7 +1840,12 @@ export class AgentSession {
 		this.agent.beforeToolCall = async ({ toolCall, args }) => {
 			if (
 				this._activeModelRouterRoute &&
-				shouldEscalateModelRouterTool({ tier: this._activeModelRouterRoute.tier, toolName: toolCall.name, args })
+				shouldEscalateModelRouterTool({
+					tier: this._activeModelRouterRoute.tier,
+					toolName: toolCall.name,
+					args,
+					reasonCode: this._activeModelRouterRoute.reasonCode,
+				})
 			) {
 				this._modelRouterEscalationRequested = true;
 				this.agent.abort();
@@ -2615,12 +2645,53 @@ export class AgentSession {
 		return this._modelRegistry.hasConfiguredAuth(resolved.model);
 	}
 
+	private _resolveExecutorRoute(
+		prompt: string,
+		executorPattern: string | undefined,
+	): { decision: RouteDecision; model: Model<Api> } | undefined {
+		if (!executorPattern) return undefined;
+		try {
+			const verdict = classifyExecutorTurn(prompt, this.settingsManager.getToolkitScripts());
+			if (!verdict.execute) return undefined;
+			const resolved = resolveCliModel({ cliModel: executorPattern, modelRegistry: this._modelRegistry });
+			if (!resolved.model || !this._modelRegistry.hasConfiguredAuth(resolved.model)) return undefined;
+			// Fitness gate: the executor must have PROVEN tool-calling on this host (same
+			// canonical-ref discipline as the curation gate).
+			const canonicalRef = `${resolved.model.provider}/${resolved.model.id}`;
+			const fitness = FitnessStore.forAgentDir(this._agentDir)
+				.getForHost()
+				.find((entry) => entry.model === canonicalRef);
+			const toolCall = fitness?.report.toolCall;
+			if (!toolCall || toolCall.succeeded < Math.ceil(toolCall.total * (2 / 3))) return undefined;
+			this._lastModelRouterIntent = "research";
+			return {
+				decision: {
+					tier: "cheap",
+					risk: "scoped-write",
+					confidence: 1,
+					reasonCode: "executor_direct",
+					reasons: [`Executor lane: Level-0 direct hit on toolkit script "${verdict.scriptName}"`],
+				},
+				model: resolved.model,
+			};
+		} catch {
+			return undefined;
+		}
+	}
+
 	private _resolveModelRouterTurnRoute(prompt: string): { decision: RouteDecision; model: Model<Api> } | undefined {
 		const settings = this.settingsManager.getModelRouterSettings();
 		if (!settings.enabled) {
 			this._lastModelRouterSkipReason = "disabled";
 			return undefined;
 		}
+
+		// G16 executor lane: a Level-0 DIRECT toolkit hit on a command-shaped prompt routes the
+		// whole turn to the configured local executor (tool-call-fitness-gated) instead of
+		// spending the frontier model on a one-tool reflex. Ambiguity never routes here — it
+		// stays with the big model and the reflex brain. Deterministic, so the judge is skipped.
+		const executorRoute = this._resolveExecutorRoute(prompt, settings.executorModel);
+		if (executorRoute) return executorRoute;
 
 		const decision = classifyModelRouterRoute(prompt);
 		this._lastModelRouterIntent = decision.tier === "cheap" ? "research" : "modify";
@@ -2717,6 +2788,8 @@ export class AgentSession {
 		const baseline = this._resolveModelRouterTurnRoute(prompt);
 		if (!baseline) return undefined;
 		if (options?.skipJudge) return baseline;
+		// Deterministic executor routes need no judge (Level-0 already decided).
+		if (baseline.decision.reasonCode === "executor_direct") return baseline;
 
 		const settings = this.settingsManager.getModelRouterSettings();
 		if (!settings.judgeEnabled) return baseline;
@@ -2948,6 +3021,19 @@ export class AgentSession {
 
 		if (persistDecision && completedDecision) {
 			persistModelRouterDecision(this.sessionManager, completedDecision);
+			// G3: one route event per user-facing routed turn (the escalation retry runs with
+			// persistDecision=false, so it does not double-emit). Codes/numbers only — no prompt text.
+			this._emitAutonomyTelemetry({
+				type: AUTONOMY_TELEMETRY_EVENT_TYPES.routeDecision,
+				timestamp: new Date().toISOString(),
+				payload: {
+					tier: completedDecision.route.tier,
+					risk: completedDecision.route.risk,
+					reasonCode: completedDecision.route.reasonCode,
+					confidence: completedDecision.route.confidence,
+					outcome: completedDecision.outcome,
+				},
+			});
 		}
 
 		if (thrownError) {
@@ -5998,8 +6084,24 @@ export class AgentSession {
 		return this._laneTracker.getRecords();
 	}
 
-	saveWorkerResultSnapshot(result: WorkerResult): string {
-		return appendWorkerResultSnapshot(this.sessionManager, result);
+	/**
+	 * G3: bounded autonomy-telemetry sink. Passes the whole event through {@link redactTelemetryValue}
+	 * (the taxonomy's redaction contract) before storing it, so a secret that leaked into a payload
+	 * field never lands in the session log. Observe-only: a failure here can never surface into the
+	 * turn it is measuring, so the whole body is swallowed. Payloads MUST stay small (ids, codes,
+	 * numbers) — never prompt/summary text; callers own that discipline.
+	 */
+	private _emitAutonomyTelemetry(event: AutonomyTelemetryEvent): void {
+		try {
+			const redacted = redactTelemetryValue(event) as Record<string, unknown>;
+			this.sessionManager.appendCustomEntry(AUTONOMY_TELEMETRY_CUSTOM_TYPE, { version: 1, ...redacted });
+		} catch {
+			// Telemetry is best-effort: swallow so a sink failure cannot break the observed turn.
+		}
+	}
+
+	saveWorkerResultSnapshot(result: WorkerResult, request?: WorkerRequest): string {
+		return appendWorkerResultSnapshot(this.sessionManager, result, request);
 	}
 
 	getWorkerResultSnapshots(): WorkerResult[] {
@@ -6305,9 +6407,17 @@ export class AgentSession {
 		const startedRecord = this._laneTracker.start({ type: "research", goalId: demand.goalId });
 		try {
 			let spentUsage: Usage | undefined;
+			// Best-effort, pointer-first workspace evidence. Derives search terms from the goal/requirement
+			// text (not the identity-key query) and is bounded + silent-on-failure: [] == today's behavior.
+			const workspaceSources = await this._collectWorkspaceSources({
+				query: `${demand.context}\n${demand.query}`,
+				cwd: this._cwd,
+				maxSources: settings.maxSources,
+			});
 			const result = await runResearch({
 				query: demand.query,
 				context: demand.context,
+				sources: workspaceSources,
 				envelope: this._buildResearchLaneEnvelope(settings.maxUsd, laneProfile),
 				maxUsd: settings.maxUsd,
 				maxSources: settings.maxSources,
@@ -6369,6 +6479,20 @@ export class AgentSession {
 			});
 			if (record) {
 				appendLaneRecordSnapshot(this.sessionManager, record);
+				// G3: a research lane's product is an evidence bundle, so its terminal record maps to
+				// the evidence_bundle event. Lane outcome only (status/reasonCode/cost) — no findings text.
+				this._emitAutonomyTelemetry({
+					type: AUTONOMY_TELEMETRY_EVENT_TYPES.evidenceBundle,
+					timestamp: new Date().toISOString(),
+					payload: {
+						laneId: record.laneId,
+						laneType: record.type,
+						status: record.status,
+						reasonCode: record.reasonCode ?? null,
+						costUsd: record.costUsd ?? null,
+						hasEvidence: record.evidenceEntryId !== undefined,
+					},
+				});
 			}
 			return { started: true, record, result };
 		} catch (error) {
@@ -6378,6 +6502,18 @@ export class AgentSession {
 			});
 			if (record && !this._disposed) {
 				appendLaneRecordSnapshot(this.sessionManager, record);
+				this._emitAutonomyTelemetry({
+					type: AUTONOMY_TELEMETRY_EVENT_TYPES.evidenceBundle,
+					timestamp: new Date().toISOString(),
+					payload: {
+						laneId: record.laneId,
+						laneType: record.type,
+						status: record.status,
+						reasonCode: record.reasonCode ?? null,
+						costUsd: record.costUsd ?? null,
+						hasEvidence: record.evidenceEntryId !== undefined,
+					},
+				});
 			}
 			const message = error instanceof Error ? error.message : String(error);
 			this._emit({ type: "warning", message: `Research lane failed: ${message}` });
@@ -6490,7 +6626,7 @@ export class AgentSession {
 				return { started: true, record, outcome };
 			}
 
-			this.saveWorkerResultSnapshot(outcome.result);
+			this.saveWorkerResultSnapshot(outcome.result, workerRequest);
 			if (spentUsage && (spentUsage.cost.total > 0 || spentUsage.totalTokens > 0)) {
 				this.addSpawnedUsage(spentUsage, { label: "worker-delegation", reportId: usageReportId });
 			}
@@ -6502,6 +6638,19 @@ export class AgentSession {
 			});
 			if (record) {
 				appendLaneRecordSnapshot(this.sessionManager, record);
+				// G3: worker lane terminal record -> worker_result event. Lane outcome only
+				// (status/reasonCode/cost) — never the worker's summary/changed-file text.
+				this._emitAutonomyTelemetry({
+					type: AUTONOMY_TELEMETRY_EVENT_TYPES.workerResult,
+					timestamp: new Date().toISOString(),
+					payload: {
+						laneId: record.laneId,
+						laneType: record.type,
+						status: record.status,
+						reasonCode: record.reasonCode ?? null,
+						costUsd: record.costUsd ?? null,
+					},
+				});
 			}
 			return { started: true, record, outcome };
 		} catch (error) {
@@ -6511,6 +6660,17 @@ export class AgentSession {
 			});
 			if (record && !this._disposed) {
 				appendLaneRecordSnapshot(this.sessionManager, record);
+				this._emitAutonomyTelemetry({
+					type: AUTONOMY_TELEMETRY_EVENT_TYPES.workerResult,
+					timestamp: new Date().toISOString(),
+					payload: {
+						laneId: record.laneId,
+						laneType: record.type,
+						status: record.status,
+						reasonCode: record.reasonCode ?? null,
+						costUsd: record.costUsd ?? null,
+					},
+				});
 			}
 			const message = error instanceof Error ? error.message : String(error);
 			this._emit({ type: "warning", message: `Worker delegation failed: ${message}` });
@@ -6816,17 +6976,31 @@ export class AgentSession {
 		// every pass, so advancing it for a no-op (which stores nothing) would make later passes
 		// reuse ids — and rollback keys on the id, so a collision blocks or misdirects rollback.
 		let auditSequence = getLearningAuditSnapshots(this.sessionManager.getEntries()).length;
+		// G6 evidence strength: durable proposals accumulate observation counts across passes/sessions
+		// so the gate can distinguish a one-off cue from a repeatedly-confirmed lesson. Built once per
+		// pass; every increment is best-effort (store IO must never break reflection).
+		const observationStore = ObservationStore.forAgentDir(this._agentDir);
 		let writeIndex = 0;
 		for (const write of result.writes) {
 			writeIndex += 1;
 			const proposalId = `${input.reportId ?? "reflection"}-w${writeIndex}`;
 			const proposal = proposalFromReflectionWrite(write, proposalId);
 			const rollback = rollbackPlanForReflectionWrite(write);
+			let observations = 1;
+			if (policy.enabled) {
+				try {
+					observations = observationStore.increment(observationKey(proposal.layer, proposal.summary));
+				} catch {
+					// A store read/write failure falls back to a fresh count of 1, which keeps the gate
+					// proposal-first (never spuriously auto-applies) rather than crashing the pass.
+					observations = 1;
+				}
+			}
 			const decision: LearningDecision = policy.enabled
 				? evaluateLearningDecision({
 						proposal,
 						confidence: policy.reflectionSourceConfidence,
-						observations: 1,
+						observations,
 						contradictions: 0,
 						settings: {
 							enabled: true,
@@ -6846,6 +7020,18 @@ export class AgentSession {
 					};
 
 			this.saveLearningDecisionSnapshot(decision);
+			// G3: learning-gate outcome. Codes/numbers only — never the proposal summary/memory text.
+			this._emitAutonomyTelemetry({
+				type: AUTONOMY_TELEMETRY_EVENT_TYPES.learningDecision,
+				timestamp: new Date().toISOString(),
+				payload: {
+					kind: decision.kind,
+					reasonCode: decision.reasonCode,
+					layer: proposal.layer,
+					confidence: decision.confidence,
+					requiresApproval: decision.requiresApproval,
+				},
+			});
 			if (decision.kind === "apply") {
 				await this._applyReflectionWrite(write, signal);
 			}

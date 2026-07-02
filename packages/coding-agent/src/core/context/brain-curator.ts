@@ -133,6 +133,10 @@ export interface CurationTelemetrySnapshot {
 	jobsRun: number;
 	parseFailures: number;
 	droppedJobs: number;
+	/** Times a computed digest was actually RENDERED into a GC stub on a real turn — the
+	 * pays-for-itself proxy: every serve is packed content the frontier model got a semantic
+	 * handle on without re-running tools. */
+	digestsServed: number;
 	/** Chars processed locally (an honest proxy for frontier tokens NOT spent on this work). */
 	localChars: number;
 	queued: number;
@@ -200,6 +204,7 @@ export class BrainCurator {
 	private _parseFailures = 0;
 	private _droppedJobs = 0;
 	private _localChars = 0;
+	private _digestsServed = 0;
 	private _draining = false;
 
 	enqueue(job: CurationJob): void {
@@ -216,6 +221,11 @@ export class BrainCurator {
 	getDigest(key: string): string | undefined {
 		const result = this._results.get(key);
 		return result?.ok && result.kind === "stub_digest" ? result.digest : undefined;
+	}
+
+	/** Callers report when a digest was rendered into a real (sent) prompt stub. */
+	noteDigestServed(): void {
+		this._digestsServed++;
 	}
 
 	getRelevance(key: string): { relevant: boolean; confidence: number } | undefined {
@@ -237,6 +247,7 @@ export class BrainCurator {
 			jobsRun: this._jobsRun,
 			parseFailures: this._parseFailures,
 			droppedJobs: this._droppedJobs,
+			digestsServed: this._digestsServed,
 			localChars: this._localChars,
 			queued: this._queue.size,
 			resultsHeld: this._results.size,

@@ -6367,6 +6367,15 @@ export class InteractiveMode {
 			this.showStatus(`Context curation enabled with ${modelRef} as the curator.`);
 			return;
 		}
+		if (role === "executor") {
+			const router = this.settingsManager.getModelRouterSettings();
+			this.settingsManager.setModelRouterSettings({ ...router, executorModel: modelRef });
+			const hint = router.enabled
+				? ""
+				: " Model router is currently disabled — enable it in /settings → Model Router.";
+			this.showStatus(`${modelRef} set as the toolkit executor (direct Level-0 hits route to it).${hint}`);
+			return;
+		}
 		const router = this.settingsManager.getModelRouterSettings();
 		const field =
 			role === "router-cheap"

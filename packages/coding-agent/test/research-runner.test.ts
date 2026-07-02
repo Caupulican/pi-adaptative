@@ -1,5 +1,5 @@
 import { describe, expect, it, vi } from "vitest";
-import type { CapabilityEnvelope } from "../src/core/autonomy/contracts.ts";
+import type { CapabilityEnvelope, EvidenceRef } from "../src/core/autonomy/contracts.ts";
 import {
 	buildResearchUserPrompt,
 	parseResearchFindings,
@@ -210,6 +210,57 @@ describe("runResearch", () => {
 		);
 		expect(result.status).toBe("failed");
 		expect(result.reasonCode).toBe("completion_error");
+	});
+
+	it("threads workspace sources into the prompt and bundle while preserving the provenance anchors", async () => {
+		const sources: EvidenceRef[] = [
+			{
+				id: "ws-1",
+				kind: "workspace",
+				title: "src/a.ts:12",
+				uri: "src/a.ts",
+				trusted: true,
+				excerpt: "const x = 1;",
+				metadata: { line: 12 },
+			},
+			{ id: "ws-2", kind: "workspace", title: "src/b.ts", uri: "src/b.ts", trusted: true },
+		];
+		let seenPrompt = "";
+		const result = await runResearch(
+			runnerOptions({
+				sources,
+				complete: async ({ userPrompt }) => {
+					seenPrompt = userPrompt;
+					return completionOf('{"findings":[{"summary":"ok"}]}');
+				},
+			}),
+		);
+
+		// Pointer-first sources reach the model, excerpt included.
+		expect(seenPrompt).toContain("src/a.ts:12: const x = 1;");
+		expect(seenPrompt).toContain("- src/b.ts");
+		// The bundle carries them between the fixed context/synthesis anchors.
+		expect(result.bundle?.sources.map((source) => source.id)).toEqual([
+			"src-context",
+			"ws-1",
+			"ws-2",
+			"src-synthesis",
+		]);
+	});
+
+	it("keeps the context and synthesis anchors even when workspace sources exceed the source budget", async () => {
+		const sources: EvidenceRef[] = Array.from({ length: 6 }, (_, i) => ({
+			id: `ws-${i}`,
+			kind: "workspace",
+			uri: `src/f${i}.ts`,
+			trusted: true,
+		}));
+		const result = await runResearch(runnerOptions({ sources, maxSources: 3 }));
+
+		const ids = result.bundle?.sources.map((source) => source.id) ?? [];
+		expect(ids).toHaveLength(3);
+		expect(ids[0]).toBe("src-context");
+		expect(ids.at(-1)).toBe("src-synthesis");
 	});
 
 	it("keeps the system prompt static for provider prompt caching", async () => {

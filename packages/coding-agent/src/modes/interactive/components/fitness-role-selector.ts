@@ -10,6 +10,7 @@ const FITNESS_ROLE_SELECT_LIST_LAYOUT: SelectListLayoutOptions = {
 /** Roles a freshly probed model can be assigned to, mapped to their settings by the caller. */
 export type FitnessRole =
 	| "curator"
+	| "executor"
 	| "router-cheap"
 	| "router-medium"
 	| "router-expensive"
@@ -32,6 +33,12 @@ export class FitnessRoleSelectorComponent extends Container {
 				value: "curator",
 				label: "Context curator",
 				description: "Local brain: digests GC-packed stubs, scores stale-chunk relevance (enables curation)",
+			},
+			{
+				value: "executor",
+				label: "Toolkit executor",
+				description:
+					"Owns direct toolkit commands end-to-end (Level-0 exact hits route here; needs tool-call fitness)",
 			},
 			{
 				value: "router-cheap",

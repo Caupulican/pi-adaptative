@@ -46,7 +46,9 @@ describe("BrainCurator queue and results", () => {
 		expect(results.map((result) => result.ok)).toEqual([true, false]);
 		expect(curator.getDigest("good")).toBe("retryWithJitter found in src/http/client.ts");
 		expect(curator.getDigest("bad")).toBeUndefined();
-		expect(curator.telemetry()).toMatchObject({ jobsRun: 2, parseFailures: 1, queued: 0 });
+		expect(curator.telemetry()).toMatchObject({ jobsRun: 2, parseFailures: 1, queued: 0, digestsServed: 0 });
+		curator.noteDigestServed();
+		expect(curator.telemetry().digestsServed).toBe(1);
 
 		// The failed key holds a not-ok result: re-enqueueing is a no-op, not an infinite retry.
 		curator.enqueue({ kind: "stub_digest", key: "bad", content: "again" });

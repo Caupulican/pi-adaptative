@@ -46,6 +46,7 @@ type RoutedRunContext = {
 	};
 	_runAgentPrompt: (messages: AgentMessage | AgentMessage[]) => Promise<void>;
 	_refreshCurrentModelFromRegistry?: () => void;
+	_emitAutonomyTelemetry?: (event: unknown) => void;
 	_isModelRouterRetry?: boolean;
 	_resolveModelRouterModelForIntent: (intent: "research" | "modify") => TestModel | undefined;
 	_runAgentPromptWithModelRouter?: AgentSessionRouterPrototype["_runAgentPromptWithModelRouter"];
@@ -322,6 +323,7 @@ describe("AgentSession model router turn selection", () => {
 			_resolveModelRouterModelForIntent: () => expensiveModel,
 			_runAgentPromptWithModelRouter: routerPrototype._runAgentPromptWithModelRouter,
 			_refreshCurrentModelFromRegistry: () => {},
+			_emitAutonomyTelemetry: () => {},
 			_runAgentPrompt: async () => {
 				modelDuringRun = context.agent.state.model;
 			},
@@ -367,6 +369,7 @@ describe("AgentSession model router turn selection", () => {
 			_resolveModelRouterModelForIntent: () => expensiveModel,
 			_runAgentPromptWithModelRouter: routerPrototype._runAgentPromptWithModelRouter,
 			_refreshCurrentModelFromRegistry: () => {},
+			_emitAutonomyTelemetry: () => {},
 			_runAgentPrompt: async () => {
 				modelsDuringRuns.push(context.agent.state.model?.id ?? "none");
 				const message: AssistantMessage = {
@@ -439,6 +442,7 @@ describe("G4: routed-turn capability tool filtering", () => {
 			_resolveModelRouterModelForIntent: () => expensiveModel,
 			_runAgentPromptWithModelRouter: routerPrototype._runAgentPromptWithModelRouter,
 			_refreshCurrentModelFromRegistry: () => {},
+			_emitAutonomyTelemetry: () => {},
 			_runAgentPrompt: async () => {
 				toolsDuringRun = context.agent.state.tools.map((tool) => tool.name);
 			},

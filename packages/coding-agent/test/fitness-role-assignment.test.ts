@@ -41,6 +41,12 @@ describe("/fitness role assignment", () => {
 		expect(ctx.settingsManager.getModelRouterSettings().judgeModel).toBe("ollama/pi-lifter:latest");
 	});
 
+	it("executor role persists modelRouter.executorModel", () => {
+		const ctx = context();
+		assignFitnessRole.call(ctx, "ollama/qwen3:1.7b", "executor");
+		expect(ctx.settingsManager.getModelRouterSettings().executorModel).toBe("ollama/qwen3:1.7b");
+	});
+
 	it("none records nothing but confirms where the result lives", () => {
 		const ctx = context();
 		assignFitnessRole.call(ctx, "ollama/x", "none");

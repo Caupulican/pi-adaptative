@@ -190,3 +190,34 @@ describe("runWorker", () => {
 		expect(complete).toHaveBeenCalledOnce();
 	});
 });
+
+describe("worker request persistence (G2)", () => {
+	it("round-trips the originating request alongside the result", async () => {
+		const { appendWorkerResultSnapshot, getWorkerRequestSnapshots, getWorkerResultSnapshots } = await import(
+			"../src/core/delegation/session-worker-result.ts"
+		);
+		const { SessionManager } = await import("../src/core/session-manager.ts");
+		const sessionManager = SessionManager.inMemory();
+		const request = {
+			id: "wr-1",
+			instructions: "scout the retry helpers",
+			route: { tier: "cheap", risk: "read-only", confidence: 1, reasonCode: "test", reasons: [] },
+			envelope: { id: "env-1", capabilities: ["read_files"], allowedPaths: ["src"] },
+			maxEstimatedUsd: 1,
+		};
+		const result = {
+			requestId: "wr-1",
+			status: "completed",
+			reasonCode: "ok",
+			summary: "done",
+			findings: [],
+			changedFiles: [],
+			costUsd: 0,
+		};
+		appendWorkerResultSnapshot(sessionManager, result as never, request as never);
+		const entries = sessionManager.getEntries();
+		expect(getWorkerRequestSnapshots(entries).map((r) => r.id)).toEqual(["wr-1"]);
+		expect(getWorkerRequestSnapshots(entries)[0]).toMatchObject({ envelope: { allowedPaths: ["src"] } });
+		expect(getWorkerResultSnapshots(entries)).toHaveLength(1);
+	});
+});

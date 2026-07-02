@@ -89,9 +89,20 @@ function isReadOnlyShellCommand(command: string): boolean {
 	return segments.length > 0 && segments.every(isReadOnlyShellSegment);
 }
 
-export function shouldEscalateModelRouterTool(options: { tier: ModelTier; toolName: string; args?: unknown }): boolean {
+export function shouldEscalateModelRouterTool(options: {
+	tier: ModelTier;
+	toolName: string;
+	args?: unknown;
+	/** The route's reasonCode; executor-lane turns carry "executor_direct". */
+	reasonCode?: string;
+}): boolean {
 	if (options.tier !== "cheap") return false;
 	const toolName = options.toolName.trim().toLowerCase();
+	// Executor-lane turns (G16) exist to run exactly one tool: run_toolkit_script, which enforces
+	// its own safety (danger confirmation, structural exit-code contract). Escalating on it would
+	// abort every executor turn at the moment it does its job. Any OTHER mutating tool still
+	// escalates to the expensive model as usual.
+	if (options.reasonCode === "executor_direct" && toolName === "run_toolkit_script") return false;
 	if (!toolName) return true;
 	if (READ_ONLY_TOOL_NAMES.has(toolName)) return false;
 	if (SHELL_TOOL_NAMES.has(toolName)) {

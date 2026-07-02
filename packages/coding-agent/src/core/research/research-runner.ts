@@ -33,6 +33,12 @@ export interface ResearchRunnerOptions {
 	context?: string;
 	/** Stripped research envelope - never the foreground/architect envelope. */
 	envelope: CapabilityEnvelope;
+	/**
+	 * Pointer-first workspace sources (repo-relative path + bounded excerpt, never file bodies) that
+	 * inform the pass. They are rendered into the user prompt and carried into the evidence bundle;
+	 * omitted / empty reproduces the pre-collector behavior exactly.
+	 */
+	sources?: readonly EvidenceRef[];
 	/** Budget for this pass; a post-hoc breach marks the run budget_exhausted (spend stays visible). */
 	maxUsd: number;
 	maxSources: number;
@@ -55,10 +61,22 @@ export interface ResearchRunResult {
 	costUsd: number;
 }
 
-export function buildResearchUserPrompt(args: { query: string; context?: string; maxFindings: number }): string {
+export function buildResearchUserPrompt(args: {
+	query: string;
+	context?: string;
+	sources?: readonly EvidenceRef[];
+	maxFindings: number;
+}): string {
 	const parts = [`Research query: ${args.query}`];
 	if (args.context && args.context.length > 0) {
 		parts.push("", "Context:", args.context);
+	}
+	if (args.sources && args.sources.length > 0) {
+		parts.push("", "Workspace sources (pointer-first; open the file to read full context):");
+		for (const source of args.sources) {
+			const pointer = source.title ?? source.uri ?? source.id;
+			parts.push(source.excerpt ? `- ${pointer}: ${source.excerpt}` : `- ${pointer}`);
+		}
 	}
 	parts.push("", `Return at most ${args.maxFindings} findings.`);
 	return parts.join("\n");
@@ -129,7 +147,12 @@ function buildBundle(options: ResearchRunnerOptions, parsed: ParsedResearchFindi
 		title: "Research-model synthesis",
 		trusted: false,
 	};
-	const sources = [contextRef, synthesisRef].slice(0, Math.max(1, options.maxSources));
+	// context + synthesis are the fixed provenance anchors (findings cite src-synthesis); workspace
+	// sources fill whatever budget is left between them, so the anchors are never squeezed out.
+	const budget = Math.max(1, options.maxSources);
+	const workspaceRoom = Math.max(0, budget - 2);
+	const workspaceSources = (options.sources ?? []).slice(0, workspaceRoom);
+	const sources = [contextRef, ...workspaceSources, synthesisRef].slice(0, budget);
 	const findings: Finding[] = parsed.findings.slice(0, options.maxFindings).map((finding, index) => ({
 		id: `finding-${index + 1}`,
 		summary: finding.summary,

@@ -148,6 +148,39 @@ describe("learning apply policy — audit and rollback", () => {
 		session.dispose();
 	});
 
+	it("evidence strength (G6): first observation proposes, the second auto-applies", async () => {
+		const session = await newSession({
+			enabled: true,
+			autoApplyEnabled: true,
+			confidenceThreshold: 40,
+			minObservations: 2,
+			reflectionSourceConfidence: 50,
+		});
+		const write = { kind: "memory_add", section: "MEMORY", text: "Vetted repeated fact" };
+
+		// First pass: only one observation of this lesson — the gate holds it as a proposal.
+		scriptReflection(session, [write]);
+		await runPass(session, "turn-1");
+
+		expect(readFileSync(join(agentDir, "MEMORY.md"), "utf-8")).not.toContain("Vetted repeated fact");
+		let decisions = session.getLearningDecisionSnapshots();
+		expect(decisions.at(-1)?.kind).toBe("proposal");
+		expect(decisions.at(-1)?.reasonCode).toBe("insufficient_observations");
+		expect(session.getLearningAuditRecords().at(-1)?.action).toBe("propose");
+
+		// Second pass proposes the SAME lesson — now observed twice, it clears minObservations and applies.
+		scriptReflection(session, [write]);
+		await runPass(session, "turn-2");
+
+		expect(readFileSync(join(agentDir, "MEMORY.md"), "utf-8")).toContain("Vetted repeated fact");
+		decisions = session.getLearningDecisionSnapshots();
+		expect(decisions.at(-1)?.kind).toBe("apply");
+		expect(decisions.at(-1)?.reasonCode).toBe("eligible_auto_apply");
+		expect(session.getLearningAuditRecords().at(-1)?.action).toBe("apply");
+
+		session.dispose();
+	});
+
 	it("policy enabled, skill layer not allowed: promotion becomes a proposal, no skill is written", async () => {
 		const session = await newSession({
 			enabled: true,

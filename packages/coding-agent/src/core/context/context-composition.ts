@@ -273,7 +273,7 @@ export function formatContextCompositionDashboard(report: ContextCompositionRepo
 	if (report.curation) {
 		const t = report.curation.telemetry;
 		lines.push(
-			`brain curation: ${report.curation.enabled ? "enabled" : "disabled"} — ${t.jobsRun} job(s) run, ${t.parseFailures} parse failure(s), ${t.queued} queued, ~${Math.ceil(t.localChars / 4)} tokens processed locally${
+			`brain curation: ${report.curation.enabled ? "enabled" : "disabled"} — ${t.jobsRun} job(s) run, ${t.parseFailures} parse failure(s), ${t.digestsServed} digest(s) served into stubs, ${t.queued} queued, ~${Math.ceil(t.localChars / 4)} tokens processed locally${
 				report.curation.lastSkipReason ? ` · last skip: ${report.curation.lastSkipReason}` : ""
 			}`,
 		);
