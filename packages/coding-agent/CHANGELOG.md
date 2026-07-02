@@ -131,6 +131,30 @@
 
 - Fixed adaptive scaling of compaction parameters (`reserveTokens` and `keepRecentTokens`) for models with small context windows to avoid immediate auto-compaction loops.
 - Fixed a scope redeclaration issue with `activeProfileNames` in the resource loader.
+- Fixed the semantic-memory context GC never packing the recall pages the bundled default memory
+  provider emits: active providers' page markers are now merged into the GC marker list at runtime
+  (and the generic `<memory_context` marker joined the settings default), so stale cross-session
+  recall pages no longer accumulate raw — and re-bill — for the life of the session.
+- Fixed internal tool-registry refreshes (extension `refreshTools`, memory init, `/reload`,
+  live extension load/unload) permanently shrinking the restorable tool set: they re-derived from
+  the capability/profile-filtered ACTIVE tools instead of the pre-filter request, so switching back
+  to a larger model restored only the reduced set.
+- Fixed the model router judge being consulted on internally generated continuation turns (one
+  judge call per loop iteration) and enforced the planning floor in code: a cheap downgrade of a
+  non-cheap baseline now requires the judge's explicit `trivial` verdict.
+- Fixed `model_fitness` probes: per-surface calls are now wall-clock bounded (a hung local model
+  can no longer hang the probe), tokens/sec is measured in the shipped session path, and an empty
+  judge prompt set no longer yields NaN latency.
+- Fixed reflection learning-audit ids colliding after no-op decisions (the rollback key now counts
+  only stored snapshots), which could block or misdirect `learning rollback`.
+- Fixed the lane tracker growing without bound in long sessions (terminal lanes beyond 100 are
+  evicted from memory; the session log keeps full history) and lane ids being reused after resume.
+- Fixed toolkit script execution discarding spawn-failure diagnostics: a missing runner
+  (ENOENT/EACCES) now surfaces the real cause in stderr instead of an empty `exited null`, and an
+  output-overflow kill is no longer mislabeled as a timeout. Repeated words in a request no longer
+  multiply the Level-0 matcher score into a false confident match.
+- Fixed NaN/invalid model `contextWindow` metadata leaking into capability profiles and lane
+  budgets in `off`/forced modes.
 
 
 ## [0.80.85] - 2026-06-29
