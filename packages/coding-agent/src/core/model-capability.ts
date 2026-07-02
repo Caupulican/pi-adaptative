@@ -34,7 +34,14 @@ export const MODEL_CAPABILITY_LEAN_MIN_CONTEXT = 16_384;
 export const MODEL_CAPABILITY_MINIMAL_MIN_CONTEXT = 8_192;
 
 export const MODEL_CAPABILITY_LEAN_BLOCKED_TOOLS: readonly string[] = ["delegate", "context_audit"];
-export const MODEL_CAPABILITY_MINIMAL_ALLOWED_TOOLS: readonly string[] = ["read", "bash", "edit", "write"];
+export const MODEL_CAPABILITY_MINIMAL_ALLOWED_TOOLS: readonly string[] = [
+	"read",
+	"bash",
+	"edit",
+	"write",
+	// The executor tool: minimal-class models ARE the daily-ops executors, and its schema is tiny.
+	"run_toolkit_script",
+];
 export const MODEL_CAPABILITY_CHAT_ALLOWED_TOOLS: readonly string[] = [];
 
 export const DEFAULT_LANE_MAX_OUTPUT_TOKENS = 2048;

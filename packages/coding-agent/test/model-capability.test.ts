@@ -7,7 +7,7 @@ import {
 	MODEL_CAPABILITY_MINIMAL_ALLOWED_TOOLS,
 } from "../src/core/model-capability.ts";
 
-const DEFAULT_ACTIVE = ["read", "bash", "edit", "write", "context_audit", "goal", "delegate"];
+const DEFAULT_ACTIVE = ["read", "bash", "edit", "write", "context_audit", "goal", "delegate", "run_toolkit_script"];
 
 describe("deriveModelCapabilityProfile", () => {
 	it("classifies by context window with metadata-first derivation", () => {
