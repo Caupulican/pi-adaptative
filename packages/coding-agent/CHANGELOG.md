@@ -71,6 +71,10 @@
   full extension/tool surface. Grant-all must be explicit via `allow: ["*"]`; explicitly written
   block-framed filters keep meaning "all except the listed"; themes are exempt; behavior without
   an active profile is unchanged.
+- Changed profile denial to gate the disk reads themselves: skill files and prompt templates a
+  profile denies are never read from disk (extensions were already path-filtered before loading).
+  While a restrictive profile is active, denied skills/prompts consequently no longer appear in
+  resource listings; edit profiles with no restrictive profile active to see everything.
 - Added profile-shipped subagents: research and worker lanes accept a `profile` setting whose
   model MUST be obeyed when set (unresolvable is a visible `no_lane_profile_model` skip, never a
   fallback), whose soul and thinking level ship with the lane, and whose tool grants are recorded

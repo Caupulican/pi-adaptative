@@ -133,6 +133,8 @@ export interface LoadSkillsFromDirOptions {
 	dir: string;
 	/** Source identifier for these skills */
 	source: string;
+	/** Profile UAC gate: when provided, files it denies are never read from disk. */
+	isPathAllowed?: (path: string) => boolean;
 }
 
 function createSkillSourceInfo(filePath: string, baseDir: string, source: string): SourceInfo {
@@ -169,7 +171,7 @@ function createSkillSourceInfo(filePath: string, baseDir: string, source: string
  */
 export function loadSkillsFromDir(options: LoadSkillsFromDirOptions): LoadSkillsResult {
 	const { dir, source } = options;
-	return loadSkillsFromDirInternal(dir, source, true);
+	return loadSkillsFromDirInternal(dir, source, true, undefined, undefined, options.isPathAllowed);
 }
 
 function loadSkillsFromDirInternal(
@@ -178,6 +180,7 @@ function loadSkillsFromDirInternal(
 	includeRootFiles: boolean,
 	ignoreMatcher?: IgnoreMatcher,
 	rootDir?: string,
+	isPathAllowed?: (path: string) => boolean,
 ): LoadSkillsResult {
 	const skills: Skill[] = [];
 	const diagnostics: ResourceDiagnostic[] = [];
@@ -212,6 +215,11 @@ function loadSkillsFromDirInternal(
 			const relPath = toPosixPath(relative(root, fullPath));
 			if (!isFile || ig.ignores(relPath)) {
 				continue;
+			}
+
+			// Profile UAC: a denied SKILL.md is never read from disk (its dir stays unloaded).
+			if (isPathAllowed && !isPathAllowed(fullPath)) {
+				return { skills, diagnostics };
 			}
 
 			const result = loadSkillFromFile(fullPath, source);
@@ -255,13 +263,18 @@ function loadSkillsFromDirInternal(
 			}
 
 			if (isDirectory) {
-				const subResult = loadSkillsFromDirInternal(fullPath, source, false, ig, root);
+				const subResult = loadSkillsFromDirInternal(fullPath, source, false, ig, root, isPathAllowed);
 				skills.push(...subResult.skills);
 				diagnostics.push(...subResult.diagnostics);
 				continue;
 			}
 
 			if (!isFile || !includeRootFiles || !entry.name.endsWith(".md")) {
+				continue;
+			}
+
+			// Profile UAC: a denied skill file is never read from disk.
+			if (isPathAllowed && !isPathAllowed(fullPath)) {
 				continue;
 			}
 
@@ -394,6 +407,8 @@ export interface LoadSkillsOptions {
 	skillPaths: string[];
 	/** Include default skills directories. */
 	includeDefaults: boolean;
+	/** Profile UAC gate: when provided, files it denies are never read from disk. */
+	isPathAllowed?: (path: string) => boolean;
 }
 
 /**
@@ -444,8 +459,26 @@ export function loadSkills(options: LoadSkillsOptions): LoadSkillsResult {
 	}
 
 	if (includeDefaults) {
-		addSkills(loadSkillsFromDirInternal(join(resolvedAgentDir, "skills"), "user", true));
-		addSkills(loadSkillsFromDirInternal(resolve(resolvedCwd, CONFIG_DIR_NAME, "skills"), "project", true));
+		addSkills(
+			loadSkillsFromDirInternal(
+				join(resolvedAgentDir, "skills"),
+				"user",
+				true,
+				undefined,
+				undefined,
+				options.isPathAllowed,
+			),
+		);
+		addSkills(
+			loadSkillsFromDirInternal(
+				resolve(resolvedCwd, CONFIG_DIR_NAME, "skills"),
+				"project",
+				true,
+				undefined,
+				undefined,
+				options.isPathAllowed,
+			),
+		);
 	}
 
 	const userSkillsDir = join(resolvedAgentDir, "skills");
@@ -479,8 +512,14 @@ export function loadSkills(options: LoadSkillsOptions): LoadSkillsResult {
 			const stats = statSync(resolvedPath);
 			const source = getSource(resolvedPath);
 			if (stats.isDirectory()) {
-				addSkills(loadSkillsFromDirInternal(resolvedPath, source, true));
+				addSkills(
+					loadSkillsFromDirInternal(resolvedPath, source, true, undefined, undefined, options.isPathAllowed),
+				);
 			} else if (stats.isFile() && resolvedPath.endsWith(".md")) {
+				// Profile UAC: a denied skill file is never read from disk.
+				if (options.isPathAllowed && !options.isPathAllowed(resolvedPath)) {
+					continue;
+				}
 				const result = loadSkillFromFile(resolvedPath, source);
 				if (result.skill) {
 					addSkills({ skills: [result.skill], diagnostics: result.diagnostics });

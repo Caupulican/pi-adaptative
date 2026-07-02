@@ -1076,6 +1076,8 @@ export class DefaultResourceLoader implements ResourceLoader {
 				agentDir: this.agentDir,
 				skillPaths,
 				includeDefaults: false,
+				// Profile UAC: denied skill files are never read from disk.
+				isPathAllowed: (path) => this.filterPathsByProfile([path], "skills").length > 0,
 			});
 		}
 		const resolvedSkills = this.skillsOverride ? this.skillsOverride(skillsResult) : skillsResult;
@@ -1099,6 +1101,8 @@ export class DefaultResourceLoader implements ResourceLoader {
 				agentDir: this.agentDir,
 				promptPaths,
 				includeDefaults: false,
+				// Profile UAC: denied prompt templates are never read from disk.
+				isPathAllowed: (path) => this.filterPathsByProfile([path], "prompts").length > 0,
 			});
 			promptsResult = this.dedupePrompts(allPrompts);
 		}

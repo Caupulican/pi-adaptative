@@ -144,7 +144,11 @@ function loadTemplateFromFile(filePath: string, sourceInfo: SourceInfo): PromptT
 /**
  * Scan a directory for .md files (non-recursive) and load them as prompt templates.
  */
-function loadTemplatesFromDir(dir: string, getSourceInfo: (filePath: string) => SourceInfo): PromptTemplate[] {
+function loadTemplatesFromDir(
+	dir: string,
+	getSourceInfo: (filePath: string) => SourceInfo,
+	isPathAllowed?: (path: string) => boolean,
+): PromptTemplate[] {
 	const templates: PromptTemplate[] = [];
 
 	if (!existsSync(dir)) {
@@ -170,6 +174,10 @@ function loadTemplatesFromDir(dir: string, getSourceInfo: (filePath: string) => 
 			}
 
 			if (isFile && entry.name.endsWith(".md")) {
+				// Profile UAC: a denied template file is never read from disk.
+				if (isPathAllowed && !isPathAllowed(fullPath)) {
+					continue;
+				}
 				const template = loadTemplateFromFile(fullPath, getSourceInfo(fullPath));
 				if (template) {
 					templates.push(template);
@@ -192,6 +200,8 @@ export interface LoadPromptTemplatesOptions {
 	promptPaths: string[];
 	/** Include default prompt directories. */
 	includeDefaults: boolean;
+	/** Profile UAC gate: when provided, files it denies are never read from disk. */
+	isPathAllowed?: (path: string) => boolean;
 }
 
 /**
@@ -242,8 +252,8 @@ export function loadPromptTemplates(options: LoadPromptTemplatesOptions): Prompt
 	};
 
 	if (includeDefaults) {
-		templates.push(...loadTemplatesFromDir(globalPromptsDir, getSourceInfo));
-		templates.push(...loadTemplatesFromDir(projectPromptsDir, getSourceInfo));
+		templates.push(...loadTemplatesFromDir(globalPromptsDir, getSourceInfo, options.isPathAllowed));
+		templates.push(...loadTemplatesFromDir(projectPromptsDir, getSourceInfo, options.isPathAllowed));
 	}
 
 	// 3. Load explicit prompt paths
@@ -256,8 +266,12 @@ export function loadPromptTemplates(options: LoadPromptTemplatesOptions): Prompt
 		try {
 			const stats = statSync(resolvedPath);
 			if (stats.isDirectory()) {
-				templates.push(...loadTemplatesFromDir(resolvedPath, getSourceInfo));
+				templates.push(...loadTemplatesFromDir(resolvedPath, getSourceInfo, options.isPathAllowed));
 			} else if (stats.isFile() && resolvedPath.endsWith(".md")) {
+				// Profile UAC: a denied template file is never read from disk.
+				if (options.isPathAllowed && !options.isPathAllowed(resolvedPath)) {
+					continue;
+				}
 				const template = loadTemplateFromFile(resolvedPath, getSourceInfo(resolvedPath));
 				if (template) {
 					templates.push(template);
