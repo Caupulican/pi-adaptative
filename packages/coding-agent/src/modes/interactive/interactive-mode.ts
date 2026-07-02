@@ -94,6 +94,10 @@ import {
 	resolveCliModel,
 	resolveModelScope,
 } from "../../core/model-resolver.ts";
+import { FitnessStore } from "../../core/models/fitness-store.ts";
+import { registerLocalModel, unregisterLocalModel } from "../../core/models/local-registration.ts";
+import { OllamaRuntime } from "../../core/models/local-runtime.ts";
+import { normalizeModelSource } from "../../core/models/model-ref.ts";
 import { DefaultPackageManager } from "../../core/package-manager.ts";
 import { BUILT_IN_PROVIDER_DISPLAY_NAMES } from "../../core/provider-display-names.ts";
 import { getPendingReloadBlockers } from "../../core/reload-blockers.ts";
@@ -3156,6 +3160,11 @@ export class InteractiveMode {
 				}
 				return;
 			}
+			if (text === "/models" || text.startsWith("/models ")) {
+				void this.handleModelsCommand(text.slice("/models".length).trim());
+				this.editor.setText("");
+				return;
+			}
 			if (text === "/context") {
 				this.showStatus(this.session.formatContextCompositionDashboard());
 				this.editor.setText("");
@@ -6107,6 +6116,190 @@ export class InteractiveMode {
 		this.settingsManager.setAutonomySettings({ ...this.settingsManager.getAutonomySettings(), mode }, scope);
 		this.settingsManager.setAutoLearnSettings(preset, scope);
 		this.updateAutoLearnFooter();
+	}
+
+	private _localRuntime: OllamaRuntime | undefined;
+
+	private get localRuntime(): OllamaRuntime {
+		this._localRuntime ??= new OllamaRuntime({ agentDir: getAgentDir() });
+		return this._localRuntime;
+	}
+
+	/**
+	 * /models — USER-invoked local model lifecycle (never a model-invokable tool):
+	 * list/add/remove/stop per local-model-lifecycle-design.md. Removal is explicit-only with
+	 * full disclosure; a pasted install command is parsed for its ref, never executed.
+	 */
+	private async handleModelsCommand(argsText: string): Promise<void> {
+		const [action = "list", ...rest] = argsText.split(/\s+/).filter(Boolean);
+		try {
+			if (action === "stop") {
+				const stopped = this.localRuntime.stop();
+				this.showStatus(
+					stopped.stopped
+						? "Pi-managed local model server stopped (models remain installed)."
+						: "No pi-managed server running (a system server, if any, is not pi's to stop).",
+				);
+				return;
+			}
+
+			if (action === "add") {
+				const rawRef = rest.join(" ");
+				if (!rawRef) {
+					this.showStatus(
+						"Usage: /models add <ollama-tag | hf.co/org/repo[:quant] | huggingface URL | pasted install command>",
+					);
+					return;
+				}
+				const source = normalizeModelSource(rawRef);
+				if (source.type === "rejected") {
+					this.showStatus(`Not added: ${source.reason}`);
+					return;
+				}
+				if (source.type === "api") {
+					this.showStatus(
+						`${source.ref} is an API model — nothing to install. Configure auth for the provider, then probe it with /fitness ${source.ref}.`,
+					);
+					return;
+				}
+				await this.addLocalModel(source.pullRef);
+				return;
+			}
+
+			if (action === "remove") {
+				const ref = rest[0];
+				const confirmed = rest[1] === "confirm";
+				if (!ref) {
+					this.showStatus("Usage: /models remove <ref> confirm");
+					return;
+				}
+				await this.removeLocalModel(ref, confirmed);
+				return;
+			}
+
+			await this.listLocalModels();
+		} catch (error) {
+			this.showError(error instanceof Error ? error.message : String(error));
+		}
+	}
+
+	private async ensureLocalServer(): Promise<boolean> {
+		const status = await this.localRuntime.detect();
+		if (status.serverUp) return true;
+		if (!status.binaryPath) {
+			for (const line of this.localRuntime.installGuide()) this.showStatus(line);
+			return false;
+		}
+		this.showStatus(
+			`Starting local model server (${status.binarySource} binary, owned storage: ${status.ownedModelsDir})…`,
+		);
+		const started = await this.localRuntime.start();
+		if (!started.started) {
+			this.showStatus(`Could not start the local server: ${started.reason}`);
+			return false;
+		}
+		return true;
+	}
+
+	private async listLocalModels(): Promise<void> {
+		const status = await this.localRuntime.detect();
+		if (!status.serverUp) {
+			if (!status.binaryPath) {
+				for (const line of this.localRuntime.installGuide()) this.showStatus(line);
+				return;
+			}
+			this.showStatus(
+				`Local server not running (binary: ${status.binarySource}). /models add starts it on demand; /fitness probes registered models.`,
+			);
+			return;
+		}
+		const models = await this.localRuntime.list();
+		const fitness = FitnessStore.forAgentDir(getAgentDir()).getForHost();
+		const lines = [
+			`Local models (${status.managedByPi ? `pi-managed server, storage: ${status.ownedModelsDir}` : "system server — storage owned by the system daemon"}):`,
+			...(models.length === 0 ? ["  (none installed — /models add <ref>)"] : []),
+			...models.map((model) => {
+				const report = fitness.find((entry) => entry.model === `ollama/${model.name}`);
+				const gb = (model.sizeBytes / 1e9).toFixed(2);
+				const probe = report
+					? `probed ${report.at.slice(0, 10)}: digest ${report.report.digest?.succeeded ?? "?"}/${report.report.digest?.total ?? "?"}, tool-calls ${report.report.toolCall.succeeded}/${report.report.toolCall.total}${report.report.tokensPerSecond ? `, ~${report.report.tokensPerSecond} tok/s` : ""}`
+					: `unprobed — run /fitness ollama/${model.name}`;
+				return `  - ${model.name} (${gb} GB) · ${probe}`;
+			}),
+			"Commands: /models add <ref> · /models remove <ref> confirm · /models stop",
+		];
+		for (const line of lines) this.showStatus(line);
+	}
+
+	private async addLocalModel(pullRef: string): Promise<void> {
+		if (!(await this.ensureLocalServer())) return;
+		this.showStatus(`Pulling ${pullRef}… (weights land in the server's model storage)`);
+		let lastShown = 0;
+		const pulled = await this.localRuntime.pull(pullRef, (progress) => {
+			const now = Date.now();
+			if (now - lastShown > 2000) {
+				lastShown = now;
+				this.showStatus(`  ${pullRef}: ${progress}`);
+			}
+		});
+		if (!pulled.ok) {
+			this.showStatus(`Pull failed: ${pulled.error}`);
+			return;
+		}
+		const registration = registerLocalModel({
+			agentDir: getAgentDir(),
+			ref: pullRef,
+			baseUrl: this.localRuntime.baseUrl,
+		});
+		if (!registration.ok) {
+			this.showStatus(`Pulled, but not auto-registered: ${registration.reason}`);
+			if (registration.manualSnippet) {
+				this.showStatus(`Add this to ${registration.modelsJsonPath} yourself:\n${registration.manualSnippet}`);
+			}
+			return;
+		}
+		this.session.modelRegistry.refresh();
+		this.showStatus(`${pullRef} installed and registered as ollama/${pullRef}. Probing fitness…`);
+		await this.runFitnessAndAssign(`ollama/${pullRef}`);
+	}
+
+	private async removeLocalModel(ref: string, confirmed: boolean): Promise<void> {
+		const status = await this.localRuntime.detect();
+		if (!status.serverUp) {
+			this.showStatus("Local server not running — start it (any /models action) before removing.");
+			return;
+		}
+		const models = await this.localRuntime.list();
+		const target = models.find((model) => model.name === ref);
+		if (!target) {
+			this.showStatus(
+				`${ref} is not installed. Installed: ${models.map((model) => model.name).join(", ") || "(none)"}`,
+			);
+			return;
+		}
+		if (!confirmed) {
+			// EXPLICIT USER ACTION ONLY: full disclosure, then require the confirm token.
+			const gb = (target.sizeBytes / 1e9).toFixed(2);
+			this.showStatus(
+				[
+					`Removing ${ref} will delete:`,
+					`  - model weights (${gb} GB) from ${status.managedByPi ? status.ownedModelsDir : "the system server's storage"}`,
+					`  - the ollama/${ref} entry in models.json`,
+					`  - its cached fitness report for this host`,
+					`Run: /models remove ${ref} confirm`,
+				].join("\n"),
+			);
+			return;
+		}
+		const removed = await this.localRuntime.remove(ref);
+		if (!removed.ok) {
+			this.showStatus(`Remove failed: ${removed.error}`);
+			return;
+		}
+		unregisterLocalModel({ agentDir: getAgentDir(), ref });
+		FitnessStore.forAgentDir(getAgentDir()).remove(`ollama/${ref}`);
+		this.session.modelRegistry.refresh();
+		this.showStatus(`${ref} removed: weights deleted, registration and fitness report dropped.`);
 	}
 
 	/** /fitness with no args: pick a model from the configured registry, probe it, assign a role. */

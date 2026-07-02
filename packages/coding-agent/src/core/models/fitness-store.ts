@@ -82,6 +82,16 @@ export class FitnessStore {
 		return entry;
 	}
 
+	/** Drop a model's report for the CURRENT host (uninstall cleanup). No-op when absent. */
+	remove(model: string): void {
+		const host = this.fingerprint();
+		const file = this.load();
+		if (!file.hosts[host.id]?.[model]) return;
+		delete file.hosts[host.id][model];
+		mkdirSync(dirname(this.filePath), { recursive: true });
+		writeFileSync(this.filePath, `${JSON.stringify(file, null, "\t")}\n`, "utf-8");
+	}
+
 	/** Reports for the current host (default) or an explicit host id. */
 	getForHost(hostId?: string): StoredFitnessReport[] {
 		const file = this.load();

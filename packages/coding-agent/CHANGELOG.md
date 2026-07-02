@@ -1,5 +1,21 @@
 ## [Unreleased]
 
+### Added
+
+- Added `/models`, the local model lifecycle (install -> spawn -> probe -> consume -> uninstall):
+  `/models add <ref>` accepts an ollama tag, an `hf.co/org/repo[:quant]` GGUF ref, a full
+  HuggingFace URL, or a pasted `ollama pull ...` install command (parsed for its reference, never
+  executed as shell) — pi starts its own health-checked server with OWNED model storage under
+  `<agentDir>/models/ollama` (hardened env; an already-running system server is used instead, with
+  the storage tradeoff surfaced), pulls with streamed progress, registers the model in models.json
+  so `ollama/<ref>` resolves everywhere (session, lanes, judge, curator) across sessions, and
+  auto-runs the fitness probe with one-step role assignment. `/models list` shows installed models
+  with real sizes and cached fitness summaries; `/models stop` stops the pi-managed server
+  (resource hygiene, deletes nothing). Removal is an EXPLICIT user action only — `/models remove
+  <ref>` first discloses exactly what gets deleted (weights + size, registration, fitness report)
+  and requires the confirm token; pi never removes a model on its own. Hand-authored models.json
+  files with comments are never rewritten (a manual snippet is offered instead).
+
 ## [0.80.94] - 2026-07-02
 
 ### Fixed

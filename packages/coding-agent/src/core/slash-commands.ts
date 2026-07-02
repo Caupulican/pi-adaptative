@@ -19,6 +19,10 @@ export const BUILTIN_SLASH_COMMANDS: ReadonlyArray<BuiltinSlashCommand> = [
 	{ name: "settings", description: "Open settings menu" },
 	{ name: "autonomy", description: "Autonomy mode, diagnostics, research, fitness (/autonomy status)" },
 	{
+		name: "models",
+		description: "Local model lifecycle: /models [list|add <ref-or-link>|remove <ref> confirm|stop]",
+	},
+	{
 		name: "fitness",
 		description: "Pick and probe a model for local/heavy-lifter roles, then assign it (/fitness [model] [trials])",
 	},
