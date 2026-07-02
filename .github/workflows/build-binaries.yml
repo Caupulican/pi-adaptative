@@ -118,6 +118,11 @@ jobs:
         run: npm ci --ignore-scripts
 
       - name: Build
+        # Deterministic CI: use the COMMITTED model catalogs instead of refetching live pricing
+        # that can drift between the release commit and this run (drift fails the artifact
+        # verification and aborts the npm publish).
+        env:
+          PI_SKIP_MODEL_FETCH: "1"
         run: npm run build
 
       - name: Check

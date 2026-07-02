@@ -2138,5 +2138,15 @@ export const MODELS = {
 	}
 }
 
-// Run the generator
-generateModels().catch(console.error);
+// Deterministic-build escape hatch: CI must verify the COMMITTED catalog, not refetch live
+// pricing that can drift between the release commit and the CI run (a provider repricing in
+// that window fails `git diff --exit-code` and aborts the npm publish). Local/release builds
+// never set this, so the catalog stays fresh where it matters.
+import { existsSync } from "fs";
+const committedCatalog = join(packageRoot, "src", "models.generated.ts");
+if (process.env.PI_SKIP_MODEL_FETCH === "1" && existsSync(committedCatalog)) {
+	console.log("PI_SKIP_MODEL_FETCH=1 - keeping committed models.generated.ts (no live fetch)");
+} else {
+	// Run the generator
+	generateModels().catch(console.error);
+}
