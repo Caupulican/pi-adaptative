@@ -1,5 +1,6 @@
 import { type Static, Type } from "typebox";
 import type { ToolDefinition } from "../extensions/types.ts";
+import { acceptReflexPlan, type ReflexPlan } from "../toolkit/reflex-interpreter.ts";
 import { matchToolkitScript, type ToolkitScript } from "../toolkit/script-registry.ts";
 import type { ScriptExecution } from "../toolkit/script-runner.ts";
 
@@ -32,6 +33,13 @@ export interface RunToolkitScriptDetails {
 export interface RunToolkitScriptDependencies {
 	getScripts: () => ToolkitScript[];
 	execute: (script: ToolkitScript, args: readonly string[]) => Promise<ScriptExecution>;
+	/**
+	 * Optional reflex interpreter (local brain): consulted ONLY when the deterministic Level-0
+	 * matcher is ambiguous, to resolve fuzzy phrasing ("prepare db" vs "update db") into a
+	 * registry pick. Its plan is advisory — the danger/confirm rules and structural execution
+	 * contract apply identically to brain-selected scripts.
+	 */
+	interpret?: (request: string, scripts: readonly ToolkitScript[]) => Promise<ReflexPlan | undefined>;
 }
 
 function boundedOutput(text: string, maxChars = 4000): string {
@@ -86,7 +94,19 @@ export function createRunToolkitScriptToolDefinition(deps: RunToolkitScriptDepen
 					isError: true,
 				};
 			}
-			if (match.kind === "ambiguous") {
+			let interpreted: { script: ToolkitScript; args: string[]; confidence: number } | undefined;
+			if (match.kind === "ambiguous" && deps.interpret) {
+				try {
+					const plan = await deps.interpret(input.script, scripts);
+					const accepted = acceptReflexPlan(plan, scripts);
+					if (accepted && plan) {
+						interpreted = { ...accepted, confidence: plan.confidence };
+					}
+				} catch {
+					// interpreter is best-effort; ambiguity handling below stays authoritative
+				}
+			}
+			if (match.kind === "ambiguous" && !interpreted) {
 				const shortlist = match.shortlist.map((script) => `${script.name} — ${script.description}`);
 				return {
 					content: [
@@ -99,7 +119,7 @@ export function createRunToolkitScriptToolDefinition(deps: RunToolkitScriptDepen
 				};
 			}
 
-			const script = match.script;
+			const script = interpreted?.script ?? (match as { script: ToolkitScript }).script;
 			if (script.danger && input.confirm !== true) {
 				return {
 					content: [
@@ -112,7 +132,8 @@ export function createRunToolkitScriptToolDefinition(deps: RunToolkitScriptDepen
 				};
 			}
 
-			const execution = await deps.execute(script, input.args ?? []);
+			// Explicit args from the caller win; a brain-extracted arg list fills in for fuzzy requests.
+			const execution = await deps.execute(script, input.args ?? interpreted?.args ?? []);
 			const failed = execution.exitCode !== 0 || execution.timedOut;
 			const header = failed
 				? `FAILED: ${script.name} exited ${execution.timedOut ? "by timeout" : execution.exitCode} after ${execution.durationMs}ms`
@@ -128,6 +149,9 @@ export function createRunToolkitScriptToolDefinition(deps: RunToolkitScriptDepen
 			return {
 				content: [{ type: "text" as const, text: body }],
 				details: {
+					...(interpreted
+						? { interpreter: { script: interpreted.script.name, confidence: interpreted.confidence } }
+						: {}),
 					outcome: failed ? "failed" : "executed",
 					scriptName: script.name,
 					exitCode: execution.exitCode,

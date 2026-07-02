@@ -234,6 +234,11 @@ import {
 import type { SlashCommandInfo } from "./slash-commands.ts";
 import { createSyntheticSourceInfo, type SourceInfo } from "./source-info.ts";
 import { type BuildSystemPromptOptions, buildSystemPrompt } from "./system-prompt.ts";
+import {
+	buildReflexUserPrompt,
+	parseReflexPlan,
+	REFLEX_INTERPRETER_SYSTEM_PROMPT,
+} from "./toolkit/reflex-interpreter.ts";
 import { executeToolkitScript } from "./toolkit/script-runner.ts";
 import { type BashOperations, createLocalBashOperations } from "./tools/bash.ts";
 import { createDelegateToolDefinition } from "./tools/delegate.ts";
@@ -2817,6 +2822,7 @@ export class AgentSession {
 
 		const previousModel = this.agent.state.model;
 		const previousThinkingLevel = this.agent.state.thinkingLevel;
+		const previousTurnTools = this.agent.state.tools;
 		const previousActiveModelRouterIntent = this._activeModelRouterIntent;
 		const previousActiveModelRouterRoute = this._activeModelRouterRoute;
 		const previousModelRouterSessionBuffer = this._modelRouterSessionBuffer;
@@ -2849,6 +2855,22 @@ export class AgentSession {
 		if (!modelsAreEqual(this.model, routedModel)) {
 			this.agent.state.model = routedModel;
 			this.agent.state.thinkingLevel = clampThinkingLevel(routedModel, previousThinkingLevel) as ThinkingLevel;
+			// G4: capability tool-filtering follows the ROUTED model for the turn. Without this a
+			// cheap/local routed model inherits the session model's full tool surface — schemas it
+			// pays for on every request and may not be able to drive at all.
+			const routedProfile = deriveModelCapabilityProfile({
+				contextWindow: routedModel.contextWindow,
+				mode: this.settingsManager.getModelCapabilitySettings().mode,
+			});
+			if (routedProfile.class !== "full") {
+				const allowed = new Set(
+					filterToolNamesForCapability(
+						previousTurnTools.map((tool) => tool.name),
+						routedProfile,
+					),
+				);
+				this.agent.state.tools = previousTurnTools.filter((tool) => allowed.has(tool.name));
+			}
 		}
 		try {
 			await this._runAgentPrompt(messages);
@@ -2887,6 +2909,7 @@ export class AgentSession {
 			if (modelsAreEqual(this.agent.state.model, routedModel)) {
 				this.agent.state.model = previousModel;
 				this.agent.state.thinkingLevel = previousThinkingLevel;
+				this.agent.state.tools = previousTurnTools;
 				// The registry may have changed mid-turn (command-time registerProvider): re-resolve
 				// the restored model so a provider override is not dropped with the routed model.
 				this._refreshCurrentModelFromRegistry();
@@ -4950,6 +4973,30 @@ export class AgentSession {
 			const runToolkitScriptToolDefinition = createRunToolkitScriptToolDefinition({
 				getScripts: () => this.settingsManager.getToolkitScripts(),
 				execute: (script, scriptArgs) => executeToolkitScript({ script, scriptArgs, cwd: this._cwd }),
+				// Reflex brain (fitness-gated local model): resolves ambiguous requests into a
+				// registry pick. Best-effort — absent/unfit brain keeps the shortlist behavior.
+				interpret: async (request, scripts) => {
+					const model = this._resolveCurationModelIfFit();
+					if (!model) return undefined;
+					const completion = await this.runIsolatedCompletion({
+						systemPrompt: REFLEX_INTERPRETER_SYSTEM_PROMPT,
+						messages: [
+							{
+								role: "user",
+								content: [{ type: "text", text: buildReflexUserPrompt(request, scripts) }],
+								timestamp: Date.now(),
+							},
+						],
+						model,
+						thinkingLevel: "off",
+						maxTokens: 256,
+						cacheRetention: "short",
+					});
+					if (completion.usage.cost.total > 0 || completion.usage.totalTokens > 0) {
+						this.addSpawnedUsage(completion.usage, { label: "toolkit-brain" });
+					}
+					return parseReflexPlan(completion.text);
+				},
 			});
 			this._baseToolDefinitions.set(runToolkitScriptToolDefinition.name, runToolkitScriptToolDefinition);
 		}

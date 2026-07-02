@@ -1,5 +1,19 @@
 ## [Unreleased]
 
+### Added
+
+- Added routed-turn capability tool filtering (G4): when the model router swaps a turn to a
+  cheaper model, the tool surface now follows the ROUTED model's capability class for that turn
+  (an 8k local model no longer inherits — and pays schema tokens for — background-autonomy tools
+  it cannot drive), restored with the session model afterwards.
+- Added the reflex brain to `run_toolkit_script`: when the deterministic Level-0 matcher is
+  ambiguous ("prepare db" vs "update db"), a fitness-gated local interpreter model (validated
+  10/10 on the hard registry) resolves the request into a registry pick with extracted args —
+  confidence-gated, registry-validated, and advisory only: danger confirmation and the structural
+  execution contract apply identically to brain-selected scripts, and an absent/unfit/unconfident
+  brain keeps today's shortlist behavior byte-for-byte. Brain spend is usage-accounted
+  ("toolkit-brain").
+
 ## [0.80.95] - 2026-07-02
 
 ### Added

@@ -30,7 +30,15 @@ type RouterContext = {
 
 type RoutedRunContext = {
 	model: TestModel | undefined;
-	agent: { state: { model: TestModel | undefined; thinkingLevel: ThinkingLevel; messages: AgentMessage[] } };
+	agent: {
+		state: {
+			model: TestModel | undefined;
+			thinkingLevel: ThinkingLevel;
+			messages: AgentMessage[];
+			tools: Array<{ name: string }>;
+		};
+	};
+	settingsManager: { getModelCapabilitySettings: () => { mode?: string } };
 	sessionManager: {
 		appendMessage: (message: Message) => string;
 		appendCustomEntry: (customType: string, data?: unknown) => string;
@@ -301,7 +309,8 @@ describe("AgentSession model router turn selection", () => {
 		const persistedDecisions: ModelRouterDecisionStatus[] = [];
 		const context: RoutedRunContext = {
 			model: expensiveModel,
-			agent: { state: { model: expensiveModel, thinkingLevel: "high", messages: [] } },
+			agent: { state: { model: expensiveModel, thinkingLevel: "high", messages: [], tools: [] } },
+			settingsManager: { getModelCapabilitySettings: () => ({}) },
 			sessionManager: {
 				appendMessage: () => "entry",
 				appendCustomEntry: (_customType, data) => {
@@ -342,7 +351,8 @@ describe("AgentSession model router turn selection", () => {
 		const modelsDuringRuns: string[] = [];
 		const context: RoutedRunContext & { _modelRouterEscalationRequested?: boolean } = {
 			model: expensiveModel,
-			agent: { state: { model: expensiveModel, thinkingLevel: "high", messages: [] } },
+			agent: { state: { model: expensiveModel, thinkingLevel: "high", messages: [], tools: [] } },
+			settingsManager: { getModelCapabilitySettings: () => ({}) },
 			sessionManager: {
 				appendMessage: (message) => {
 					persisted.push(message);
@@ -400,5 +410,54 @@ describe("AgentSession model router turn selection", () => {
 		expect(decisionData.route.tier).toBe("cheap");
 		expect(decisionData.outcome).toBe("escalated");
 		expect(decisionData.retryModel).toBe("anthropic/claude-sonnet-4-5");
+	});
+});
+
+describe("G4: routed-turn capability tool filtering", () => {
+	it("reduces the tool surface for a small routed model and restores it afterwards", async () => {
+		const sessionTools = [
+			{ name: "read" },
+			{ name: "bash" },
+			{ name: "edit" },
+			{ name: "write" },
+			{ name: "goal" },
+			{ name: "delegate" },
+		];
+		let toolsDuringRun: string[] = [];
+		const smallCheap = { ...cheapModel, contextWindow: 8_192 };
+		const context: RoutedRunContext = {
+			model: expensiveModel,
+			agent: {
+				state: { model: expensiveModel, thinkingLevel: "high", messages: [], tools: [...sessionTools] },
+			},
+			settingsManager: { getModelCapabilitySettings: () => ({}) },
+			sessionManager: {
+				appendMessage: () => "entry",
+				appendCustomEntry: () => "custom",
+				appendCustomMessageEntry: () => "custom",
+			},
+			_resolveModelRouterModelForIntent: () => expensiveModel,
+			_runAgentPromptWithModelRouter: routerPrototype._runAgentPromptWithModelRouter,
+			_refreshCurrentModelFromRegistry: () => {},
+			_runAgentPrompt: async () => {
+				toolsDuringRun = context.agent.state.tools.map((tool) => tool.name);
+			},
+		};
+		const route: RouteDecision = {
+			tier: "cheap",
+			risk: "read-only",
+			confidence: 0.9,
+			reasonCode: "explain",
+			reasons: [],
+		};
+
+		await routerPrototype._runAgentPromptWithModelRouter.call(context, [], smallCheap, route);
+
+		// during the routed turn: 8k window -> minimal class -> autonomy tools (goal/delegate) gone
+		expect(toolsDuringRun).not.toContain("goal");
+		expect(toolsDuringRun).not.toContain("delegate");
+		expect(toolsDuringRun).toContain("read");
+		// after: full session surface restored
+		expect(context.agent.state.tools.map((tool) => tool.name)).toEqual(sessionTools.map((tool) => tool.name));
 	});
 });
