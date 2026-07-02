@@ -72,11 +72,21 @@ function completeFor(model: string) {
 		let res = await request(true);
 		if (!res.ok) res = await request(false);
 		if (!res.ok) throw new Error(`ollama http ${res.status}`);
-		const data = (await res.json()) as { message?: { content?: string } };
+		const data = (await res.json()) as {
+			message?: { content?: string };
+			eval_count?: number;
+			eval_duration?: number;
+		};
 		let text = data.message?.content ?? "";
 		const thinkEnd = text.indexOf("</think>");
 		if (thinkEnd >= 0) text = text.slice(thinkEnd + "</think>".length);
-		return { text, costUsd: 0, stopReason: "stop" };
+		return {
+			text,
+			costUsd: 0,
+			stopReason: "stop",
+			outputTokens: data.eval_count,
+			evalMs: data.eval_duration !== undefined ? data.eval_duration / 1e6 : undefined,
+		};
 	};
 }
 

@@ -15,6 +15,10 @@ export interface FitnessCompletion {
 	text: string;
 	costUsd: number;
 	stopReason: string;
+	/** Output tokens generated (for tok/s). Optional: providers that don't report it are skipped. */
+	outputTokens?: number;
+	/** Pure generation time in ms (e.g. Ollama eval_duration). Falls back to wall-clock if absent. */
+	evalMs?: number;
 }
 
 export type FitnessComplete = (args: {
@@ -56,6 +60,8 @@ export interface LaneFitnessScore {
 	total: number;
 	outcomes: string[];
 	meanMs: number;
+	/** Mean output tokens/second across the surface's calls; undefined when not reported. */
+	tokensPerSecond?: number;
 }
 
 export interface JudgeFitnessScore {
@@ -67,10 +73,14 @@ export interface JudgeFitnessScore {
 	total: number;
 	outcomes: string[];
 	meanMs: number;
+	/** Mean output tokens/second across the judge calls; undefined when not reported. */
+	tokensPerSecond?: number;
 }
 
 export interface ModelFitnessReport {
 	trials: number;
+	/** Aggregate output tokens/second across ALL probe calls (the headline speed number). */
+	tokensPerSecond?: number;
 	research: LaneFitnessScore;
 	worker: LaneFitnessScore;
 	judge: JudgeFitnessScore;
@@ -171,6 +181,29 @@ export async function runModelFitnessProbe(options: ModelFitnessOptions): Promis
 	const now = options.now ?? Date.now;
 	let totalCostUsd = 0;
 
+	// Token-speed instrumentation: the lane runners' own contracts carry text/cost only, so the
+	// completer is wrapped once here and generation stats are accumulated per surface.
+	const overallSpeed = { tokens: 0, evalMs: 0 };
+	let surfaceSpeed = { tokens: 0, evalMs: 0 };
+	const complete: FitnessComplete = async (args) => {
+		const completion = await options.complete(args);
+		const tokens = completion.outputTokens ?? 0;
+		const evalMs = completion.evalMs ?? 0;
+		if (tokens > 0 && evalMs > 0) {
+			surfaceSpeed.tokens += tokens;
+			surfaceSpeed.evalMs += evalMs;
+			overallSpeed.tokens += tokens;
+			overallSpeed.evalMs += evalMs;
+		}
+		return completion;
+	};
+	const takeSurfaceSpeed = (): number | undefined => {
+		const speed =
+			surfaceSpeed.evalMs > 0 ? Math.round((surfaceSpeed.tokens / surfaceSpeed.evalMs) * 1000) : undefined;
+		surfaceSpeed = { tokens: 0, evalMs: 0 };
+		return speed;
+	};
+
 	const research: LaneFitnessScore = { succeeded: 0, total: trials, outcomes: [], meanMs: 0 };
 	for (let i = 0; i < trials; i++) {
 		const started = now();
@@ -188,7 +221,7 @@ export async function runModelFitnessProbe(options: ModelFitnessOptions): Promis
 			maxFindings: 5,
 			maxWallClockMs,
 			signal: options.signal,
-			complete: options.complete,
+			complete,
 		});
 		research.meanMs += now() - started;
 		totalCostUsd += result.costUsd;
@@ -196,6 +229,7 @@ export async function runModelFitnessProbe(options: ModelFitnessOptions): Promis
 		research.outcomes.push(`${result.status}/${result.reasonCode}`);
 	}
 	research.meanMs = Math.round(research.meanMs / trials);
+	research.tokensPerSecond = takeSurfaceSpeed();
 
 	const worker: LaneFitnessScore = { succeeded: 0, total: trials, outcomes: [], meanMs: 0 };
 	for (let i = 0; i < trials; i++) {
@@ -213,7 +247,7 @@ export async function runModelFitnessProbe(options: ModelFitnessOptions): Promis
 			maxWallClockMs,
 			usageReportId: `fitness:${i}`,
 			signal: options.signal,
-			complete: options.complete,
+			complete,
 		});
 		worker.meanMs += now() - started;
 		totalCostUsd += outcome.costUsd;
@@ -221,6 +255,7 @@ export async function runModelFitnessProbe(options: ModelFitnessOptions): Promis
 		worker.outcomes.push(`${outcome.result.status}/${outcome.reasonCode}`);
 	}
 	worker.meanMs = Math.round(worker.meanMs / trials);
+	worker.tokensPerSecond = takeSurfaceSpeed();
 
 	const judge: JudgeFitnessScore = {
 		parsed: 0,
@@ -239,7 +274,7 @@ export async function runModelFitnessProbe(options: ModelFitnessOptions): Promis
 			baseline: { tier: "cheap", risk: "read-only", confidence: 0.5, reasonCode: "fitness_probe", reasons: [] },
 			maxWallClockMs,
 			signal: options.signal,
-			complete: options.complete,
+			complete,
 		});
 		judge.meanMs += now() - started;
 		totalCostUsd += result.costUsd;
@@ -256,6 +291,7 @@ export async function runModelFitnessProbe(options: ModelFitnessOptions): Promis
 		);
 	}
 	judge.meanMs = Math.round(judge.meanMs / judgePrompts.length);
+	judge.tokensPerSecond = takeSurfaceSpeed();
 
 	const probeSurface = async (
 		systemPrompt: string,
@@ -266,7 +302,7 @@ export async function runModelFitnessProbe(options: ModelFitnessOptions): Promis
 		for (const task of tasks) {
 			const started = now();
 			try {
-				const completion = await options.complete({ systemPrompt, userPrompt: task, signal: options.signal });
+				const completion = await complete({ systemPrompt, userPrompt: task, signal: options.signal });
 				totalCostUsd += completion.costUsd;
 				const ok = accepts(completion.text);
 				if (ok) score.succeeded++;
@@ -281,20 +317,27 @@ export async function runModelFitnessProbe(options: ModelFitnessOptions): Promis
 	};
 
 	const search = await probeSurface(SEARCH_PROBE_SYSTEM_PROMPT, SEARCH_PROBE_TASKS, parseSearchPlan);
+	search.tokensPerSecond = takeSurfaceSpeed();
 	const toolCall = await probeSurface(TOOL_CALL_PROBE_SYSTEM_PROMPT, TOOL_CALL_PROBE_TASKS, parseToolCall);
+	toolCall.tokensPerSecond = takeSurfaceSpeed();
 
-	return { trials, research, worker, judge, search, toolCall, totalCostUsd };
+	const tokensPerSecond =
+		overallSpeed.evalMs > 0 ? Math.round((overallSpeed.tokens / overallSpeed.evalMs) * 1000) : undefined;
+
+	return { trials, tokensPerSecond, research, worker, judge, search, toolCall, totalCostUsd };
 }
 
 /** Compact human-readable report for tool output / interactive display. Bounded, no raw dumps. */
 export function formatModelFitnessReport(model: string, report: ModelFitnessReport): string {
+	const speed = (tokensPerSecond: number | undefined) =>
+		tokensPerSecond !== undefined ? `, ~${tokensPerSecond} tok/s` : "";
 	const lines = [
-		`Model fitness: ${model} (${report.trials} trials/lane)`,
-		`- research lane: ${report.research.succeeded}/${report.research.total} succeeded, mean ${report.research.meanMs}ms [${report.research.outcomes.join(", ")}]`,
-		`- worker lane:   ${report.worker.succeeded}/${report.worker.total} completed+accepted, mean ${report.worker.meanMs}ms [${report.worker.outcomes.join(", ")}]`,
-		`- search plans:  ${report.search.succeeded}/${report.search.total} well-formed, mean ${report.search.meanMs}ms`,
-		`- tool calls:    ${report.toolCall.succeeded}/${report.toolCall.total} well-formed, mean ${report.toolCall.meanMs}ms`,
-		`- route judge:   parsed ${report.judge.parsed}/${report.judge.total}, planning-elevated ${report.judge.planningElevated}/${report.judge.planningTotal}, trivial-cheap ${report.judge.trivialCheap}/${report.judge.trivialTotal}, mean ${report.judge.meanMs}ms`,
+		`Model fitness: ${model} (${report.trials} trials/lane${speed(report.tokensPerSecond)})`,
+		`- research lane: ${report.research.succeeded}/${report.research.total} succeeded, mean ${report.research.meanMs}ms${speed(report.research.tokensPerSecond)} [${report.research.outcomes.join(", ")}]`,
+		`- worker lane:   ${report.worker.succeeded}/${report.worker.total} completed+accepted, mean ${report.worker.meanMs}ms${speed(report.worker.tokensPerSecond)} [${report.worker.outcomes.join(", ")}]`,
+		`- search plans:  ${report.search.succeeded}/${report.search.total} well-formed, mean ${report.search.meanMs}ms${speed(report.search.tokensPerSecond)}`,
+		`- tool calls:    ${report.toolCall.succeeded}/${report.toolCall.total} well-formed, mean ${report.toolCall.meanMs}ms${speed(report.toolCall.tokensPerSecond)}`,
+		`- route judge:   parsed ${report.judge.parsed}/${report.judge.total}, planning-elevated ${report.judge.planningElevated}/${report.judge.planningTotal}, trivial-cheap ${report.judge.trivialCheap}/${report.judge.trivialTotal}, mean ${report.judge.meanMs}ms${speed(report.judge.tokensPerSecond)}`,
 		...report.judge.outcomes.map((outcome) => `    ${outcome}`),
 	];
 	if (report.totalCostUsd > 0) {
