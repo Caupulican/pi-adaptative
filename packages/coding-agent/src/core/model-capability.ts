@@ -118,6 +118,37 @@ export function deriveModelCapabilityProfile(args: {
 	return profileForClass("chat", "chat_only_context_window", contextWindow);
 }
 
+/** Goal-continuation (autosteer) budgets, scaled to the session's capability class. */
+export interface ContinuationBudgets {
+	/** Maximum continuation prompts per idle goal loop. */
+	maxTurns: number;
+	/** Wall-clock budget in minutes; 0 means "disabled" (upstream convention). */
+	maxWallClockMinutes: number;
+}
+
+/** Lean-class continuation caps: a 16-32k window cannot afford the full autosteer budget. */
+export const MODEL_CAPABILITY_LEAN_MAX_CONTINUE_TURNS = 2;
+export const MODEL_CAPABILITY_LEAN_MAX_CONTINUE_WALL_CLOCK_MINUTES = 5;
+
+/**
+ * Scale goal-continuation budgets to the model's capability class. Lean-window models (16-32k) keep
+ * autonomy but at a reduced budget; every other class passes the configured budget through unchanged
+ * (full stays full; minimal/chat never reach here — their background lanes are disabled upstream).
+ *
+ * Both dimensions are a straight `min(configured, cap)`: a disabled wall-clock budget (0) stays
+ * disabled because `min(0, cap) === 0`, so the cap only ever tightens an already-positive budget.
+ */
+export function scaleContinuationBudgetsForCapability(
+	profile: ModelCapabilityProfile,
+	budgets: ContinuationBudgets,
+): ContinuationBudgets {
+	if (profile.class !== "lean") return budgets;
+	return {
+		maxTurns: Math.min(budgets.maxTurns, MODEL_CAPABILITY_LEAN_MAX_CONTINUE_TURNS),
+		maxWallClockMinutes: Math.min(budgets.maxWallClockMinutes, MODEL_CAPABILITY_LEAN_MAX_CONTINUE_WALL_CLOCK_MINUTES),
+	};
+}
+
 /** Apply the profile's allow/block lists to a requested tool-name list, preserving order. */
 export function filterToolNamesForCapability(toolNames: readonly string[], profile: ModelCapabilityProfile): string[] {
 	let filtered = [...toolNames];

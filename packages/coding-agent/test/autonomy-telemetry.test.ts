@@ -1,5 +1,8 @@
-import { fauxAssistantMessage } from "@caupulican/pi-ai";
+import type { AgentTool } from "@caupulican/pi-agent-core";
+import { fauxAssistantMessage, fauxToolCall } from "@caupulican/pi-ai";
+import { Type } from "typebox";
 import { describe, expect, it } from "vitest";
+import type { GateOutcome } from "../src/core/autonomy/contracts.ts";
 import { AUTONOMY_TELEMETRY_EVENT_TYPES } from "../src/core/autonomy/telemetry-events.ts";
 import { applyGoalEvent, createGoalState } from "../src/core/goals/goal-state.ts";
 import { appendGoalStateSnapshot } from "../src/core/goals/session-goal-state.ts";
@@ -179,6 +182,157 @@ describe("autonomy telemetry emission (G3)", () => {
 			const [event] = events;
 			expect(event.payload.kind).toBe("apply");
 			expect(event.payload.reasonCode).toBe("learning_policy_disabled_legacy_apply");
+			expect(event.payload.layer).toBe("memory");
+			// No proposal summary / memory text in the payload.
+			expect(JSON.stringify(event.payload)).not.toContain("npm run check");
+		} finally {
+			harness.cleanup();
+		}
+	});
+
+	it("a gated tool call emits a gate_outcome event and appends bounded history (G8)", async () => {
+		const readParameters = Type.Object({ path: Type.String() });
+		const readTool: AgentTool<typeof readParameters> = {
+			name: "read",
+			label: "Read",
+			description: "Read a file",
+			parameters: readParameters,
+			execute: async () => ({ content: [{ type: "text", text: "ok" }], details: {} }),
+		};
+		const harness = await createHarness({ tools: [readTool] });
+		try {
+			harness.session.capabilityEnvelope = { id: "env-1", capabilities: ["read_files"] };
+			harness.setResponses([
+				fauxAssistantMessage([fauxToolCall("read", { path: "/tmp/foo.txt" })], { stopReason: "toolUse" }),
+				fauxAssistantMessage("Done"),
+			]);
+
+			await harness.session.prompt("Read a file");
+
+			const events = telemetryEvents(harness).filter(
+				(event) => event.type === AUTONOMY_TELEMETRY_EVENT_TYPES.gateOutcome,
+			);
+			expect(events).toHaveLength(1);
+			const [event] = events;
+			expect(event.version).toBe(1);
+			expect(typeof event.timestamp).toBe("string");
+			expect(event.payload.outcome).toBe("allow");
+			expect(event.payload.gate).toBe("tool_gate");
+			expect(event.payload.reasonCode).toBe("allowed_by_envelope");
+			// Codes/ids only — the gate's human-facing message must never ride along.
+			expect(event.payload.message).toBeUndefined();
+
+			// The history mirrors the emit, and the latest-outcome getter is unchanged.
+			const history = harness.session.getGateOutcomeHistory();
+			expect(history).toHaveLength(1);
+			expect(history[0]).toMatchObject({ outcome: "allow", gate: "tool_gate", reasonCode: "allowed_by_envelope" });
+			expect(typeof history[0]?.at).toBe("string");
+			expect(harness.session.getAutonomyStatusSnapshot().latestGate).toEqual({
+				outcome: "allow",
+				gate: "tool_gate",
+				reasonCode: "allowed_by_envelope",
+			});
+		} finally {
+			harness.cleanup();
+		}
+	});
+
+	it("gate-outcome history is bounded: the 51st outcome evicts the oldest, latest getter unchanged (G8)", async () => {
+		const harness = await createHarness();
+		try {
+			const record = (
+				harness.session as unknown as { _recordGateOutcome(outcome: GateOutcome): void }
+			)._recordGateOutcome.bind(harness.session);
+
+			for (let i = 1; i <= 51; i++) {
+				record({ outcome: "allow", gate: "tool_gate", reasonCode: `reason_${i}`, message: `human message ${i}` });
+			}
+
+			const history = harness.session.getGateOutcomeHistory();
+			expect(history).toHaveLength(50);
+			// The oldest (reason_1) is evicted; the surviving window is reason_2..reason_51.
+			expect(history[0]?.reasonCode).toBe("reason_2");
+			expect(history.at(-1)?.reasonCode).toBe("reason_51");
+			// The bounded entries are codes-only copies — the gate's message never lands in history.
+			expect((history[0] as unknown as Record<string, unknown>).message).toBeUndefined();
+			// Latest-outcome getter still reflects the most recent outcome (behavior unchanged by G8).
+			expect(harness.session.getAutonomyStatusSnapshot().latestGate).toEqual({
+				outcome: "allow",
+				gate: "tool_gate",
+				reasonCode: "reason_51",
+			});
+			// Returned entries are copies — mutating them cannot corrupt the internal history.
+			history[0]!.reasonCode = "mutated";
+			expect(harness.session.getGateOutcomeHistory()[0]?.reasonCode).toBe("reason_2");
+		} finally {
+			harness.cleanup();
+		}
+	});
+
+	it("a worker delegation emits a worker_request event at START with routing/scope/budget codes (G8)", async () => {
+		const harness = await createHarness({ settings: { workerDelegation: { enabled: true } } });
+		try {
+			harness.setResponses([fauxAssistantMessage(WORKER_JSON)]);
+
+			const run = await harness.session.runWorkerDelegationOnce({ instructions: "Summarize the validation rules" });
+			expect(run.started).toBe(true);
+
+			const events = telemetryEvents(harness).filter(
+				(event) => event.type === AUTONOMY_TELEMETRY_EVENT_TYPES.workerRequest,
+			);
+			expect(events).toHaveLength(1);
+			const [event] = events;
+			expect(event.version).toBe(1);
+			expect(typeof event.payload.id).toBe("string");
+			expect(event.payload.tier).toBe("cheap");
+			expect(event.payload.capabilities).toEqual(["read_files"]);
+			expect(typeof event.payload.maxEstimatedUsd).toBe("number");
+			// The worker's instructions text must never ride along in telemetry.
+			expect(JSON.stringify(event.payload)).not.toContain("validation rules");
+		} finally {
+			harness.cleanup();
+		}
+	});
+
+	it("a proposal that needs sign-off emits an approval_request event with kind/reasonCode/layer (G8)", async () => {
+		const harness = await createHarness({
+			settings: {
+				learningPolicy: {
+					enabled: true,
+					autoApplyEnabled: true,
+					confidenceThreshold: 40,
+					minObservations: 2,
+					reflectionSourceConfidence: 50,
+				},
+			},
+		});
+		try {
+			const reflectionReply = JSON.stringify({
+				rationale: "learned something",
+				writes: [{ kind: "memory_add", section: "MEMORY", text: "Always run npm run check" }],
+			});
+			harness.setResponses([fauxAssistantMessage(reflectionReply)]);
+
+			await harness.session.runReflectionPass({
+				signals: {
+					trigger: "corrective",
+					toolCallCount: 0,
+					hadCorrection: true,
+					contextHeadroomPct: 90,
+					usefulLately: 0,
+				},
+				recentTurnText: "user: remember to run checks",
+				reportId: "turn-1",
+			});
+
+			const events = telemetryEvents(harness).filter(
+				(event) => event.type === AUTONOMY_TELEMETRY_EVENT_TYPES.approvalRequest,
+			);
+			expect(events).toHaveLength(1);
+			const [event] = events;
+			expect(event.version).toBe(1);
+			expect(event.payload.kind).toBe("proposal");
+			expect(event.payload.reasonCode).toBe("insufficient_observations");
 			expect(event.payload.layer).toBe("memory");
 			// No proposal summary / memory text in the payload.
 			expect(JSON.stringify(event.payload)).not.toContain("npm run check");

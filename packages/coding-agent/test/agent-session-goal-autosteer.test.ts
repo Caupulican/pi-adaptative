@@ -49,6 +49,37 @@ describe("AgentSession goal idle autosteer", () => {
 		}
 	});
 
+	it("caps a lean-window model (16-32k) at 2 continuation turns even when more would advance the goal", async () => {
+		const harness = await createHarness({ models: [{ id: "lean-model", contextWindow: 16_384 }] });
+		try {
+			expect(harness.session.getModelCapabilityProfile().class).toBe("lean");
+			seedActiveGoal(harness);
+
+			// Supply enough turns to run well past the lean cap: if the budget were the default 20,
+			// all four continuation turns would fire. The cap must stop it at 2.
+			const responses = [fauxAssistantMessage("initial turn settled")];
+			for (let i = 1; i <= 4; i++) {
+				responses.push(
+					fauxAssistantMessage(
+						[fauxToolCall("goal", { action: "add_requirement", requirementId: `auto-${i}`, text: `Auto ${i}` })],
+						{ stopReason: "toolUse" },
+					),
+				);
+				responses.push(fauxAssistantMessage(`continued ${i}`));
+			}
+			harness.setResponses(responses);
+
+			await harness.session.prompt("start the task");
+			await vi.runAllTimersAsync();
+
+			expect(countContinuationPrompts(harness)).toBe(2);
+			// Responses for the untaken turns remain unconsumed: the loop stopped on the budget, not exhaustion.
+			expect(harness.getPendingResponseCount()).toBeGreaterThan(0);
+		} finally {
+			harness.cleanup();
+		}
+	});
+
 	it("does not auto-inject continuation prompts when autoContinueGoal is false", async () => {
 		const harness = await createHarness();
 		try {

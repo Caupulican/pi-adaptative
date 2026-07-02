@@ -2,6 +2,7 @@ import { runBoundedCompletion } from "../autonomy/bounded-completion.ts";
 import type { EvidenceRef, Finding, GateOutcome, WorkerRequest, WorkerResult } from "../autonomy/contracts.ts";
 import type { LaneTerminalStatus } from "../autonomy/lane-tracker.ts";
 import { createEvidenceBundle } from "../research/evidence-bundle.ts";
+import { type AppliedActionsReport, parseWorkerActions, type WorkerAction } from "./worker-actions.ts";
 import { validateWorkerResult } from "./worker-result.ts";
 
 /**
@@ -20,6 +21,18 @@ export const WORKER_LANE_SYSTEM_PROMPT = [
 	"Respond with STRICT JSON only - no prose, no markdown fences:",
 	'{"summary":"<what you concluded>","status":"completed"|"blocked","blockers":["<why you are stuck>"],"findings":[{"summary":"<one concrete finding>","confidence":<0..1>}]}',
 	'Use status "blocked" with blockers only when the task cannot be answered from the provided context.',
+	"Never invent file paths, APIs, or facts.",
+].join("\n");
+
+/** Write-capable variant (G2): same contract plus a structured actions array — the model never
+ * touches the filesystem; the runner applies actions through the envelope's path scope. */
+export const WORKER_WRITE_LANE_SYSTEM_PROMPT = [
+	"You are a bounded code-writing worker delegated one task by a coding agent.",
+	"You cannot run tools; you CHANGE FILES only by listing actions the runner applies for you.",
+	"Respond with STRICT JSON only - no prose, no markdown fences:",
+	'{"summary":"<what you did>","status":"completed"|"blocked","blockers":[],"findings":[{"summary":"<finding>","confidence":<0..1>}],"actions":[{"op":"write","path":"<relative path>","content":"<full file content>"},{"op":"edit","path":"<relative path>","old":"<exact text>","new":"<replacement>"}]}',
+	"Only touch paths inside your delegated scope. Keep edits minimal and exact.",
+	'Use status "blocked" with blockers when the task cannot be done from the provided context.',
 	"Never invent file paths, APIs, or facts.",
 ].join("\n");
 
@@ -43,6 +56,10 @@ export interface WorkerRunnerOptions {
 	complete: (args: { systemPrompt: string; userPrompt: string; signal?: AbortSignal }) => Promise<WorkerCompletion>;
 	signal?: AbortSignal;
 	now?: () => string;
+	/** Enables the WRITE lane: only honored when the request envelope grants "write_files". The
+	 * runner applies the worker's structured actions through the envelope path scope; refusals
+	 * and failures become blockers, never silent drops. */
+	applyActions?: (actions: readonly WorkerAction[]) => AppliedActionsReport;
 }
 
 export interface WorkerRunOutcome {
@@ -64,6 +81,7 @@ export interface ParsedWorkerOutput {
 	status: "completed" | "blocked";
 	blockers: string[];
 	findings: Array<{ summary: string; confidence?: number }>;
+	actions: WorkerAction[];
 }
 
 export function parseWorkerOutput(text: string): ParsedWorkerOutput | undefined {
@@ -105,7 +123,7 @@ export function parseWorkerOutput(text: string): ParsedWorkerOutput | undefined 
 				findings.push({ summary: findingSummary.trim(), confidence });
 			}
 		}
-		return { summary: summary.trim(), status, blockers, findings };
+		return { summary: summary.trim(), status, blockers, findings, actions: parseWorkerActions(record.actions) };
 	}
 	return undefined;
 }
@@ -165,12 +183,17 @@ export async function runWorker(options: WorkerRunnerOptions): Promise<WorkerRun
 		createdAt: now(),
 	};
 
+	// The WRITE lane requires BOTH the envelope grant and a caller-supplied applier — either
+	// alone keeps the read-only scout contract byte-for-byte.
+	const writeCapable =
+		options.request.envelope.capabilities.includes("write_files") && options.applyActions !== undefined;
+
 	const bounded = await runBoundedCompletion({
 		maxWallClockMs: options.maxWallClockMs,
 		signal: options.signal,
 		execute: (signal) =>
 			options.complete({
-				systemPrompt: WORKER_LANE_SYSTEM_PROMPT,
+				systemPrompt: writeCapable ? WORKER_WRITE_LANE_SYSTEM_PROMPT : WORKER_LANE_SYSTEM_PROMPT,
 				userPrompt: buildWorkerUserPrompt(options.request),
 				signal,
 			}),
@@ -215,11 +238,29 @@ export async function runWorker(options: WorkerRunnerOptions): Promise<WorkerRun
 	}
 
 	const evidence = buildWorkerEvidence(options.request, parsed.findings);
+	let changedFiles: string[] = [];
+	const actionBlockers: string[] = [];
+	if (writeCapable && parsed.status !== "blocked" && parsed.actions.length > 0 && options.applyActions) {
+		// Runner-side application through the envelope path scope: refusals and failures are
+		// surfaced as blockers so a partially-applied change can never look like clean success.
+		const applied = options.applyActions(parsed.actions);
+		changedFiles = applied.changedFiles;
+		for (const refusal of applied.refused) {
+			actionBlockers.push(`action refused (${refusal.path}): ${refusal.reason}`);
+		}
+		for (const failure of applied.failed) {
+			actionBlockers.push(`action failed (${failure.path}): ${failure.reason}`);
+		}
+	} else if (!writeCapable && parsed.actions.length > 0) {
+		actionBlockers.push("worker emitted file actions without a write_files envelope grant; nothing was applied");
+	}
+	const allBlockers = [...parsed.blockers, ...actionBlockers];
 	const result: WorkerResult = {
 		...baseResult,
-		status: parsed.status === "blocked" || parsed.blockers.length > 0 ? "blocked" : "completed",
+		changedFiles,
+		status: parsed.status === "blocked" || allBlockers.length > 0 ? "blocked" : "completed",
 		summary: parsed.summary,
-		...(parsed.blockers.length > 0 ? { blockers: parsed.blockers } : {}),
+		...(allBlockers.length > 0 ? { blockers: allBlockers } : {}),
 		...(evidence ? { evidence } : {}),
 	};
 

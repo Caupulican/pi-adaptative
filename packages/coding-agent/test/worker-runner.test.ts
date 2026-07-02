@@ -55,6 +55,7 @@ describe("parseWorkerOutput", () => {
 			status: "completed",
 			blockers: [],
 			findings: [],
+			actions: [],
 		});
 
 		const blocked = parseWorkerOutput('{"summary":"Cannot proceed","status":"blocked","blockers":["Missing spec"]}');
@@ -219,5 +220,83 @@ describe("worker request persistence (G2)", () => {
 		expect(getWorkerRequestSnapshots(entries).map((r) => r.id)).toEqual(["wr-1"]);
 		expect(getWorkerRequestSnapshots(entries)[0]).toMatchObject({ envelope: { allowedPaths: ["src"] } });
 		expect(getWorkerResultSnapshots(entries)).toHaveLength(1);
+	});
+});
+
+describe("worker write lane (G2)", () => {
+	it("applies actions through the envelope when write_files is granted; refusals become blockers", async () => {
+		const { runWorker } = await import("../src/core/delegation/worker-runner.ts");
+		const applied: string[] = [];
+		const request = {
+			id: "wr-write",
+			instructions: "add a helper",
+			route: { tier: "cheap", risk: "scoped-write", confidence: 1, reasonCode: "t", reasons: [] },
+			envelope: { id: "env-w", capabilities: ["read_files", "write_files"], allowedPaths: ["src"] },
+			maxEstimatedUsd: 1,
+		};
+		const outcome = await runWorker({
+			request: request as never,
+			maxUsd: 1,
+			maxWallClockMs: 0,
+			usageReportId: "u-1",
+			complete: async () => ({
+				text: JSON.stringify({
+					summary: "wrote it",
+					status: "completed",
+					blockers: [],
+					findings: [],
+					actions: [
+						{ op: "write", path: "src/helper.ts", content: "export const x = 1;" },
+						{ op: "write", path: "docs/leak.md", content: "nope" },
+					],
+				}),
+				costUsd: 0,
+				stopReason: "stop",
+			}),
+			applyActions: (actions) => {
+				for (const action of actions) applied.push(action.path);
+				return {
+					changedFiles: ["src/helper.ts"],
+					refused: [{ path: "docs/leak.md", reason: "outside scope" }],
+					failed: [],
+				};
+			},
+		});
+		expect(applied).toEqual(["src/helper.ts", "docs/leak.md"]);
+		expect(outcome.result.changedFiles).toEqual(["src/helper.ts"]);
+		// A refusal downgrades the result to blocked — a partial change can never look like clean success.
+		expect(outcome.result.status).toBe("blocked");
+		expect(outcome.result.blockers?.some((b) => b.includes("docs/leak.md"))).toBe(true);
+	});
+
+	it("without a write_files grant, emitted actions are ignored and flagged (read-only contract intact)", async () => {
+		const { runWorker } = await import("../src/core/delegation/worker-runner.ts");
+		const request = {
+			id: "wr-ro",
+			instructions: "scout",
+			route: { tier: "cheap", risk: "read-only", confidence: 1, reasonCode: "t", reasons: [] },
+			envelope: { id: "env-ro", capabilities: ["read_files"] },
+			maxEstimatedUsd: 1,
+		};
+		const outcome = await runWorker({
+			request: request as never,
+			maxUsd: 1,
+			maxWallClockMs: 0,
+			usageReportId: "u-2",
+			complete: async () => ({
+				text: JSON.stringify({
+					summary: "tried to write",
+					status: "completed",
+					blockers: [],
+					findings: [],
+					actions: [{ op: "write", path: "src/x.ts", content: "y" }],
+				}),
+				costUsd: 0,
+				stopReason: "stop",
+			}),
+		});
+		expect(outcome.result.changedFiles).toEqual([]);
+		expect(outcome.result.status).toBe("blocked");
+		expect(outcome.result.blockers?.some((b) => b.includes("without a write_files"))).toBe(true);
 	});
 });

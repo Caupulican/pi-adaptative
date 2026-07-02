@@ -60,10 +60,16 @@ import type {
 	WorkerRequest,
 	WorkerResult,
 } from "./autonomy/contracts.ts";
+import { buildForegroundEnvelope, formatForegroundEnvelopeObservation } from "./autonomy/foreground-envelope.ts";
 import { evaluateToolGate } from "./autonomy/gates.ts";
 import { type LaneRecord, LaneTracker } from "./autonomy/lane-tracker.ts";
 import { appendLaneRecordSnapshot, getLaneRecordSnapshots } from "./autonomy/session-lane-record.ts";
-import type { AutonomyDiagnosticSnapshot, AutonomyStatusSnapshot, DiagnosticEntry } from "./autonomy/status.ts";
+import type {
+	AutonomyDiagnosticSnapshot,
+	AutonomyStatusSnapshot,
+	DiagnosticEntry,
+	GateOutcomeHistoryEntry,
+} from "./autonomy/status.ts";
 import { composeSubagentSystemPrompt } from "./autonomy/subagent-prompt.ts";
 import {
 	AUTONOMY_TELEMETRY_EVENT_TYPES,
@@ -122,6 +128,7 @@ import {
 import { type CostGuardDecision, downgradeReasoning, estimateTurnCostUsd, evaluateCostGuard } from "./cost-guard.ts";
 import { DEFAULT_THINKING_LEVEL } from "./defaults.ts";
 import { appendWorkerResultSnapshot, getWorkerResultSnapshots } from "./delegation/session-worker-result.ts";
+import { applyWorkerActions } from "./delegation/worker-actions.ts";
 import { runWorker, type WorkerRunOutcome } from "./delegation/worker-runner.ts";
 import { exportSessionToHtml, type ToolHtmlRenderer } from "./export-html/index.ts";
 import { createToolHtmlRenderer } from "./export-html/tool-renderer.ts";
@@ -197,6 +204,7 @@ import {
 	deriveModelCapabilityProfile,
 	filterToolNamesForCapability,
 	type ModelCapabilityProfile,
+	scaleContinuationBudgetsForCapability,
 } from "./model-capability.ts";
 import type { ModelRegistry } from "./model-registry.ts";
 import { resolveCliModel, resolveProfileModelSettings } from "./model-resolver.ts";
@@ -595,6 +603,9 @@ function persistModelRouterDecision(
  * telemetry consumer can filter on it without decoding operational snapshots. */
 const AUTONOMY_TELEMETRY_CUSTOM_TYPE = "autonomy-telemetry";
 
+/** G8: bound on the in-memory gate-outcome history. Oldest entries evict once the cap is reached. */
+const GATE_OUTCOME_HISTORY_LIMIT = 50;
+
 /** Read a packed grep/find tool result's `details.artifactId`, if present, without `any`. */
 function extractArtifactId(message: AgentMessage | undefined): string | undefined {
 	if (!message || message.role !== "toolResult") return undefined;
@@ -665,8 +676,6 @@ export class AgentSession {
 	private readonly _laneTracker = new LaneTracker();
 	/** Session-lifetime abort for in-flight research passes (same pattern as _reflectionAbort). */
 	private readonly _researchLaneAbort = new AbortController();
-	/** Single-flight guard: at most one delegated worker runs at a time per session. */
-	private _isWorkerDelegationRunning = false;
 	/** Session-lifetime abort for in-flight delegated workers. */
 	private readonly _workerDelegationAbort = new AbortController();
 	/**
@@ -710,6 +719,8 @@ export class AgentSession {
 	// Extension system
 	private _extensionRunner!: ExtensionRunner;
 	private _turnIndex = 0;
+	/** G7: per-turn foreground CapabilityEnvelope auto-built for visibility (observe-only; not enforced). */
+	private _currentForegroundEnvelope?: CapabilityEnvelope;
 
 	private _resourceLoader: ResourceLoader;
 	private _customTools: ToolDefinition[];
@@ -745,6 +756,8 @@ export class AgentSession {
 	private _isModelRouterRetry = false;
 	private _lastModelRouterDecision?: ModelRouterDecisionStatus;
 	private _lastAutonomyGateOutcome?: GateOutcome;
+	/** G8: bounded (cap {@link GATE_OUTCOME_HISTORY_LIMIT}) history of gate outcomes; tail is latest. */
+	private readonly _gateOutcomeHistory: GateOutcomeHistoryEntry[] = [];
 	private _lastModelRouterSkipReason?: string;
 	private _lastModelRouterIntent?: ModelRouterIntent;
 	/** Lazily-built skill curator (#32) over `<agentDir>/skills`. */
@@ -1494,6 +1507,11 @@ export class AgentSession {
 				...this._resourceLoader.getAgentsDiagnostics().map((diagnostic) => diagnostic.message),
 				...this._inertExtensionWarnings,
 				...this._unboundToolGrantWarnings,
+				// G7: auto-built per-turn foreground envelope (observe-only; not enforced). Falls back to a
+				// live preview when no turn has run yet so /context always shows the current scope.
+				formatForegroundEnvelopeObservation(
+					this._currentForegroundEnvelope ?? this._buildForegroundEnvelopeFromState(),
+				),
 				// G14 (ratified): a user disable always beats a profile grant — surface the conflict.
 				...(["tools", "skills", "prompts", "extensions"] as const).flatMap((kind) =>
 					this.settingsManager
@@ -1865,7 +1883,7 @@ export class AgentSession {
 			});
 
 			if (this.capabilityEnvelope) {
-				this._lastAutonomyGateOutcome = gateResult;
+				this._recordGateOutcome(gateResult);
 			}
 
 			if (gateResult.outcome === "block" || gateResult.outcome === "ask-user") {
@@ -2112,6 +2130,7 @@ export class AgentSession {
 		} else if (event.type === "agent_end") {
 			await this._extensionRunner.emit({ type: "agent_end", messages: event.messages });
 		} else if (event.type === "turn_start") {
+			this._refreshForegroundEnvelope();
 			const extensionEvent: TurnStartEvent = {
 				type: "turn_start",
 				turnIndex: this._turnIndex,
@@ -2340,6 +2359,33 @@ export class AgentSession {
 	 */
 	getActiveToolNames(): string[] {
 		return this.agent.state.tools.map((t) => t.name);
+	}
+
+	/** G7: build a foreground {@link CapabilityEnvelope} from the live session state (active tools, cwd, cost ceiling). */
+	private _buildForegroundEnvelopeFromState(): CapabilityEnvelope {
+		return buildForegroundEnvelope({
+			turnIndex: this._turnIndex,
+			activeToolNames: this.getActiveToolNames(),
+			cwd: this._cwd,
+			maxTurnUsd: this.settingsManager.getCostGuardSettings().maxTurnUsd,
+		});
+	}
+
+	/**
+	 * G7: (re)build the foreground envelope for the current turn. Visibility only -- the foreground
+	 * envelope is NOT enforced this round. Best-effort: never throws into the turn.
+	 */
+	private _refreshForegroundEnvelope(): void {
+		try {
+			this._currentForegroundEnvelope = this._buildForegroundEnvelopeFromState();
+		} catch {
+			// Visibility only: a failure to build the envelope must never disturb the turn.
+		}
+	}
+
+	/** G7: the auto-constructed foreground envelope for the current/most-recent turn (visibility only). */
+	getForegroundEnvelope(): CapabilityEnvelope | undefined {
+		return this._currentForegroundEnvelope;
 	}
 
 	/**
@@ -2679,6 +2725,53 @@ export class AgentSession {
 		}
 	}
 
+	/** True if a run_toolkit_script tool result since `fromIndex` actually EXECUTED (not error/ambiguous). */
+	private _executorTurnExecutedScript(fromIndex: number): boolean {
+		for (const message of this.agent.state.messages.slice(fromIndex)) {
+			if ((message as { role?: string }).role !== "toolResult") continue;
+			if ((message as { toolName?: string }).toolName !== "run_toolkit_script") continue;
+			if ((message as { isError?: boolean }).isError === true) continue;
+			const outcome = (message as { details?: { outcome?: unknown } }).details?.outcome;
+			if (outcome === "executed") return true;
+		}
+		return false;
+	}
+
+	/** Ask the reflex brain to refine the last user request into an explicit toolkit instruction. */
+	private async _buildExecutorRefinedPrompt(messages: AgentMessage | AgentMessage[]): Promise<string | undefined> {
+		try {
+			const model = this._resolveCurationModelIfFit();
+			if (!model) return undefined;
+			const list = Array.isArray(messages) ? messages : [messages];
+			const request = latestUserPromptText(list.filter((m): m is AgentMessage => true));
+			if (!request) return undefined;
+			const scripts = this.settingsManager.getToolkitScripts();
+			const completion = await this.runIsolatedCompletion({
+				systemPrompt: REFLEX_INTERPRETER_SYSTEM_PROMPT,
+				messages: [
+					{
+						role: "user",
+						content: [{ type: "text", text: buildReflexUserPrompt(request, scripts) }],
+						timestamp: Date.now(),
+					},
+				],
+				model,
+				thinkingLevel: "off",
+				maxTokens: 256,
+				cacheRetention: "short",
+			});
+			if (completion.usage.cost.total > 0 || completion.usage.totalTokens > 0) {
+				this.addSpawnedUsage(completion.usage, { label: "executor-brain-warmup" });
+			}
+			const plan = parseReflexPlan(completion.text);
+			if (!plan || plan.script === "none") return undefined;
+			const argHint = plan.args.length > 0 ? ` with args ${JSON.stringify(plan.args)}` : "";
+			return `Run the toolkit script "${plan.script}"${argHint} using run_toolkit_script, then report its result exactly.`;
+		} catch {
+			return undefined;
+		}
+	}
+
 	private _resolveModelRouterTurnRoute(prompt: string): { decision: RouteDecision; model: Model<Api> } | undefined {
 		const settings = this.settingsManager.getModelRouterSettings();
 		if (!settings.enabled) {
@@ -2947,6 +3040,38 @@ export class AgentSession {
 		}
 		try {
 			await this._runAgentPrompt(messages);
+			// Speculative muscle-retry (G16 refinement): an executor-routed turn is a bet that the
+			// small model can run the toolkit command directly. If it ends WITHOUT a successful
+			// run_toolkit_script execution, retry ONCE on the same executor with the brain's
+			// refined instruction injected — the brain warms while the muscle tries, so the retry
+			// pays only when the muscle actually missed.
+			if (
+				routeDecision?.reasonCode === "executor_direct" &&
+				!this._isModelRouterRetry &&
+				!this._executorTurnExecutedScript(originalHistoryLength)
+			) {
+				const refined = await this._buildExecutorRefinedPrompt(messages);
+				if (refined) {
+					this.agent.state.messages.splice(originalHistoryLength);
+					await this._runAgentPrompt([
+						{ role: "user", content: [{ type: "text", text: refined }], timestamp: Date.now() },
+					]);
+					completedDecision = {
+						route: {
+							...routeDecision,
+							reasonCode: "executor_speculative_retry",
+							reasons: [
+								...routeDecision.reasons,
+								"Executor missed on first try; retried with brain-refined instruction",
+							],
+						},
+						routedModel: formatModelRouterModel(routedModel),
+						outcome: "routed",
+						intent: "research",
+					};
+					this._lastModelRouterDecision = completedDecision;
+				}
+			}
 			if (bufferRoutedTurn && this._modelRouterEscalationRequested) {
 				this.agent.state.messages.splice(originalHistoryLength);
 				retryModel = this._resolveModelRouterModelForIntent("modify") ?? previousModel;
@@ -6100,6 +6225,42 @@ export class AgentSession {
 		}
 	}
 
+	/**
+	 * G8: single sink for a gate outcome. Keeps the latest-outcome getter behavior identical (the
+	 * full {@link GateOutcome} still lands in `_lastAutonomyGateOutcome`), and additionally appends a
+	 * bounded codes-only entry to {@link _gateOutcomeHistory} (oldest evicted at
+	 * {@link GATE_OUTCOME_HISTORY_LIMIT}) and emits the `gate_outcome` telemetry event. The history
+	 * tail therefore always mirrors the latest outcome. Only called with an active envelope.
+	 */
+	private _recordGateOutcome(outcome: GateOutcome): void {
+		this._lastAutonomyGateOutcome = outcome;
+		const at = new Date().toISOString();
+		this._gateOutcomeHistory.push({
+			outcome: outcome.outcome,
+			gate: outcome.gate,
+			reasonCode: outcome.reasonCode,
+			at,
+		});
+		while (this._gateOutcomeHistory.length > GATE_OUTCOME_HISTORY_LIMIT) {
+			this._gateOutcomeHistory.shift();
+		}
+		// G8: gate outcome event. Codes/ids only — never the gate's human-facing message.
+		this._emitAutonomyTelemetry({
+			type: AUTONOMY_TELEMETRY_EVENT_TYPES.gateOutcome,
+			timestamp: at,
+			payload: {
+				outcome: outcome.outcome,
+				gate: outcome.gate,
+				reasonCode: outcome.reasonCode,
+			},
+		});
+	}
+
+	/** G8: copies of the bounded gate-outcome history, oldest first, latest last. */
+	getGateOutcomeHistory(): GateOutcomeHistoryEntry[] {
+		return this._gateOutcomeHistory.map((entry) => ({ ...entry }));
+	}
+
 	saveWorkerResultSnapshot(result: WorkerResult, request?: WorkerRequest): string {
 		return appendWorkerResultSnapshot(this.sessionManager, result, request);
 	}
@@ -6165,12 +6326,18 @@ export class AgentSession {
 		const snapshot = this.getGoalRuntimeSnapshot({ maxStallTurns });
 		if (snapshot.continuation.action !== "continue") return;
 
+		// Lean-window models (16-32k) keep autosteer but at a reduced budget; full passes through.
+		const scaled = scaleContinuationBudgetsForCapability(this.getModelCapabilityProfile(), {
+			maxTurns: goalContinueTurns,
+			maxWallClockMinutes: goalContinueMaxWallClockMinutes,
+		});
+
 		this._isGoalAutoContinuing = true;
 		try {
 			await this.continueGoalLoop({
-				maxTurns: goalContinueTurns,
+				maxTurns: scaled.maxTurns,
 				maxStallTurns,
-				maxWallClockMinutes: goalContinueMaxWallClockMinutes,
+				maxWallClockMinutes: scaled.maxWallClockMinutes,
 			});
 		} catch (error) {
 			const message = error instanceof Error ? error.message : String(error);
@@ -6534,7 +6701,8 @@ export class AgentSession {
 		/** Model-provided replacement for the worker role prompt (the level-0 core always remains). */
 		systemPrompt?: string;
 	}): Promise<WorkerDelegationRunOutcome> {
-		if (this._isWorkerDelegationRunning) {
+		const delegationSettings = this.settingsManager.getWorkerDelegationSettings();
+		if (this._laneTracker.getActiveCount("worker") >= delegationSettings.maxConcurrent) {
 			return { started: false, skipReason: "worker_delegation_already_running" };
 		}
 		if (this._disposed) {
@@ -6545,7 +6713,7 @@ export class AgentSession {
 			return { started: false, skipReason: "missing_instructions" };
 		}
 
-		const settings = this.settingsManager.getWorkerDelegationSettings();
+		const settings = delegationSettings;
 		if (!settings.enabled) {
 			return { started: false, skipReason: "worker_delegation_disabled" };
 		}
@@ -6556,7 +6724,6 @@ export class AgentSession {
 		}
 		const { model, laneProfile } = shipment;
 
-		this._isWorkerDelegationRunning = true;
 		this._laneTracker.ensureCounterAtLeast(getLaneRecordSnapshots(this.sessionManager.getEntries()).length + 1);
 		const startedRecord = this._laneTracker.start({ type: "worker" });
 		const maxUsd = Math.min(settings.maxUsd, this.capabilityEnvelope?.maxEstimatedUsd ?? Number.POSITIVE_INFINITY);
@@ -6573,7 +6740,13 @@ export class AgentSession {
 			envelope: {
 				id: `worker-${this.sessionId}-${startedRecord.laneId}`,
 				profileId: laneProfile?.name,
-				capabilities: ["read_files"],
+				// write_files requires BOTH the opt-in AND an explicit non-empty path scope —
+				// an unscoped write grant is refused here, not discovered at validation time.
+				capabilities:
+					settings.writeEnabled && settings.writePaths.length > 0 ? ["read_files", "write_files"] : ["read_files"],
+				...(settings.writeEnabled && settings.writePaths.length > 0
+					? { allowedPaths: [...settings.writePaths] }
+					: {}),
 				...this._laneProfileToolGrants(laneProfile),
 				maxEstimatedUsd: maxUsd,
 				createdAt: new Date().toISOString(),
@@ -6581,6 +6754,17 @@ export class AgentSession {
 			maxEstimatedUsd: maxUsd,
 			createdAt: new Date().toISOString(),
 		};
+		// G8: worker delegation START. Routing/scope codes + budget only — never the instructions text.
+		this._emitAutonomyTelemetry({
+			type: AUTONOMY_TELEMETRY_EVENT_TYPES.workerRequest,
+			timestamp: new Date().toISOString(),
+			payload: {
+				id: workerRequest.id,
+				tier: workerRequest.route.tier,
+				capabilities: [...workerRequest.envelope.capabilities],
+				maxEstimatedUsd: workerRequest.maxEstimatedUsd ?? null,
+			},
+		});
 		const usageReportId = `worker:${this.sessionId}:${startedRecord.laneId}`;
 
 		try {
@@ -6591,6 +6775,10 @@ export class AgentSession {
 				maxWallClockMs: settings.maxWallClockMs,
 				usageReportId,
 				signal: this._workerDelegationAbort.signal,
+				// Write lane (G2): runner-side action application through the envelope path scope.
+				applyActions: workerRequest.envelope.capabilities.includes("write_files")
+					? (actions) => applyWorkerActions({ actions, envelope: workerRequest.envelope, cwd: this._cwd })
+					: undefined,
 				complete: async ({ systemPrompt, userPrompt, signal }) => {
 					const completion = await this.runIsolatedCompletion({
 						// Level-0 core always survives. A model-provided prompt (delegate tool) is the most
@@ -6676,7 +6864,6 @@ export class AgentSession {
 			this._emit({ type: "warning", message: `Worker delegation failed: ${message}` });
 			return { started: true, record };
 		} finally {
-			this._isWorkerDelegationRunning = false;
 		}
 	}
 
@@ -7032,6 +7219,19 @@ export class AgentSession {
 					requiresApproval: decision.requiresApproval,
 				},
 			});
+			// G8: a proposal that needs human sign-off is an approval REQUEST. Codes/layer only —
+			// never the proposal summary/memory text (those live only in the audit snapshot).
+			if (decision.requiresApproval) {
+				this._emitAutonomyTelemetry({
+					type: AUTONOMY_TELEMETRY_EVENT_TYPES.approvalRequest,
+					timestamp: new Date().toISOString(),
+					payload: {
+						kind: decision.kind,
+						reasonCode: decision.reasonCode,
+						layer: proposal.layer,
+					},
+				});
+			}
 			if (decision.kind === "apply") {
 				await this._applyReflectionWrite(write, signal);
 			}

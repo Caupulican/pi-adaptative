@@ -1,3 +1,5 @@
+import type { GateOutcomeKind } from "./contracts.ts";
+
 export interface AutonomyStatusSnapshot {
 	latestRoute?: { tier: string; reasonCode: string; risk?: string };
 	latestGate?: { outcome: string; gate: string; reasonCode: string };
@@ -6,6 +8,17 @@ export interface AutonomyStatusSnapshot {
 	spawnedCostUsd?: number;
 	activeGoal?: { goalId: string; status: string; openRequirements?: number; stallTurns?: number };
 	activeLaneCount?: number;
+}
+
+/**
+ * One bounded entry in AgentSession's gate-outcome history (G8). Codes/ids only — never the gate's
+ * human-facing `message`. The most recent entry is the tail; `at` is an ISO timestamp.
+ */
+export interface GateOutcomeHistoryEntry {
+	outcome: GateOutcomeKind;
+	gate: string;
+	reasonCode: string;
+	at: string;
 }
 
 export interface DiagnosticEntry {

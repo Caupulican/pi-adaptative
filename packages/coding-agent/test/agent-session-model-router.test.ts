@@ -465,3 +465,44 @@ describe("G4: routed-turn capability tool filtering", () => {
 		expect(context.agent.state.tools.map((tool) => tool.name)).toEqual(sessionTools.map((tool) => tool.name));
 	});
 });
+
+describe("speculative executor retry (G16 refinement)", () => {
+	it("retries once with a brain-refined instruction when the executor turn ran no script", async () => {
+		let retried = false;
+		let runCount = 0;
+		const smallCheap = { ...cheapModel, contextWindow: 8_192 };
+		const context: RoutedRunContext & {
+			_executorTurnExecutedScript: (i: number) => boolean;
+			_buildExecutorRefinedPrompt: (m: unknown) => Promise<string | undefined>;
+		} = {
+			model: expensiveModel,
+			agent: { state: { model: expensiveModel, thinkingLevel: "high", messages: [], tools: [] } },
+			settingsManager: { getModelCapabilitySettings: () => ({}) },
+			sessionManager: {
+				appendMessage: () => "entry",
+				appendCustomEntry: () => "custom",
+				appendCustomMessageEntry: () => "custom",
+			},
+			_resolveModelRouterModelForIntent: () => expensiveModel,
+			_runAgentPromptWithModelRouter: routerPrototype._runAgentPromptWithModelRouter,
+			_refreshCurrentModelFromRegistry: () => {},
+			_emitAutonomyTelemetry: () => {},
+			_executorTurnExecutedScript: () => false, // muscle missed
+			_buildExecutorRefinedPrompt: async () => 'Run the toolkit script "restore-db" ...',
+			_runAgentPrompt: async () => {
+				runCount++;
+				if (runCount > 1) retried = true;
+			},
+		};
+		const route: RouteDecision = {
+			tier: "cheap",
+			risk: "scoped-write",
+			confidence: 1,
+			reasonCode: "executor_direct",
+			reasons: [],
+		};
+
+		await routerPrototype._runAgentPromptWithModelRouter.call(context, [], smallCheap, route);
+		expect(retried).toBe(true);
+	});
+});

@@ -1,5 +1,26 @@
 ## [Unreleased]
 
+### Added
+
+- Added code-writing workers (G2 full): with `workerDelegation.writeEnabled` plus a `writePaths`
+  scope, a delegated worker may emit structured file actions (write/edit) that the RUNNER applies
+  through the capability envelope's path scope — an out-of-scope or denied path is refused with a
+  reason and downgrades the result to blocked (a partial change can never look like clean success),
+  and a write without the grant is ignored and flagged. `workerDelegation.maxConcurrent` (1-3)
+  replaces the single-flight limit. The read-only scout contract is unchanged when writes are off.
+- Added speculative muscle-retry on executor turns: when an executor-routed turn ends without a
+  successful run_toolkit_script execution, pi retries once on the same executor with the brain's
+  refined instruction injected (the brain warms while the muscle tries, so the retry costs only
+  when the muscle actually missed); visible in the router decision as executor_speculative_retry.
+- Added gate-outcome history (G8): a bounded 50-entry history of tool-gate outcomes replaces the
+  latest-only record (getGateOutcomeHistory()), and the three remaining autonomy telemetry types
+  (gateOutcome, workerRequest, approvalRequest) now emit at their honest sites.
+- Added per-turn foreground capability envelopes (G7): each turn derives an observe-only envelope
+  (capabilities mapped from active tools, path scope = cwd, usd bound from the cost guard),
+  surfaced as a one-line /context observation and via getForegroundEnvelope().
+- Added capability-scaled goal-continuation budgets (G9): lean-class models (16-32k) now cap
+  autonomous continuation at 2 turns / 5 minutes; below 16k stays gated off, full class unchanged.
+
 ## [0.80.98] - 2026-07-02
 
 ### Added

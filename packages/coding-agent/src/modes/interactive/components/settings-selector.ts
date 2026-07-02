@@ -1148,6 +1148,21 @@ class WorkerDelegationSettingsSubmenu extends Container {
 				currentValue: String(this.state.maxWallClockMs),
 				values: RESEARCH_LANE_MAX_WALL_CLOCK_MS_VALUES,
 			},
+			{
+				id: "worker-delegation-write-enabled",
+				label: "Allow file writes",
+				description:
+					"Let workers change files (code-writing lane). Requires write paths below; actions apply through the envelope path scope",
+				currentValue: String(this.state.writeEnabled ?? false),
+				values: ["true", "false"],
+			},
+			{
+				id: "worker-delegation-max-concurrent",
+				label: "Max concurrent workers",
+				description: "How many delegated workers may run at once",
+				currentValue: String(this.state.maxConcurrent ?? 1),
+				values: ["1", "2", "3"],
+			},
 		];
 
 		this.settingsList = new SettingsList(
@@ -1167,6 +1182,12 @@ class WorkerDelegationSettingsSubmenu extends Container {
 						break;
 					case "worker-delegation-max-wall-clock-ms":
 						this.state = { ...this.state, maxWallClockMs: Number(newValue) };
+						break;
+					case "worker-delegation-write-enabled":
+						this.state = { ...this.state, writeEnabled: newValue === "true" };
+						break;
+					case "worker-delegation-max-concurrent":
+						this.state = { ...this.state, maxConcurrent: Number(newValue) };
 						break;
 					default:
 						return;

@@ -237,6 +237,9 @@ export interface WorkerDelegationSettings {
 	systemPrompt?: string; // replaces the worker role prompt (the level-0 subagent core always remains)
 	maxUsd?: number; // default: 0.50 per delegated worker; post-hoc breaches mark the lane budget_exhausted
 	maxWallClockMs?: number; // default: 120000; 0 disables the wall-clock budget
+	writeEnabled?: boolean; // default: false — grants write_files so workers may emit file actions
+	writePaths?: string[]; // envelope path scope for write workers (REQUIRED for writes; empty = writes refused)
+	maxConcurrent?: number; // default: 1, clamped [1,3] — concurrent delegated workers
 }
 
 export type ResolvedWorkerDelegationSettings = Required<
@@ -2794,6 +2797,11 @@ export class SettingsManager {
 				0,
 				MAX_WORKER_DELEGATION_MAX_WALL_CLOCK_MS,
 			),
+			writeEnabled: configured.writeEnabled === true,
+			writePaths: Array.isArray(configured.writePaths)
+				? configured.writePaths.filter((entry): entry is string => typeof entry === "string" && entry.length > 0)
+				: [],
+			maxConcurrent: sanitizeIntegerSetting(configured.maxConcurrent, 1, 1, 3),
 		};
 		if (typeof configured.model === "string" && configured.model.trim().length > 0) {
 			resolved.model = configured.model;
