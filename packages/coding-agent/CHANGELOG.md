@@ -83,6 +83,14 @@
   ANY prompt customization: lane settings (`systemPrompt`) and the delegate tool's new
   `systemPrompt` input can erase and replace everything above it — so a big session model can
   hand a small open model a minimal purpose-built prompt without shedding the safety floor.
+- Added `run_toolkit_script` (active by default, mapped to the `run_shell` capability): the
+  user's blessed daily-ops script registry (`settings.toolkit.scripts` — name, description,
+  aliases, uv/powershell/bash runner, danger flag) executed with a structural reliability
+  contract. Finding is a conservative registry lookup that NEVER guesses between near-neighbors
+  ("prepare db" vs "update-db" returns a shortlist instead of executing); the harness owns
+  invocation (fixed argv, no shell strings) and always returns exit code, stdout, and stderr —
+  a failed script is an error result by construction and can never look like success; scripts
+  flagged `danger` never run without an explicit `confirm: true`.
 - Added the `model_fitness` probe (tool + `/autonomy fitness <model> [trials]`): runs the real
   research-lane, scout-worker, and routing-judge runners plus two heavy-lifter surfaces
   (search-plan formulation, tool-call emission) against any registered model — local Ollama

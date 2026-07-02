@@ -24,6 +24,7 @@ describe("model capability auto-detection", () => {
 				"context_audit",
 				"goal",
 				"delegate",
+				"run_toolkit_script",
 			]);
 		} finally {
 			harness.cleanup();

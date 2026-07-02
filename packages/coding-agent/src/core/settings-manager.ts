@@ -22,6 +22,7 @@ import { DEFAULT_HTTP_IDLE_TIMEOUT_MS, parseHttpIdleTimeoutMs } from "./http-dis
 import { ProfileRegistry } from "./profile-registry.ts";
 import { mergeResourceProfileMap } from "./resource-profile-blocks.ts";
 import { validateSkillName } from "./skills.ts";
+import type { ToolkitScript } from "./toolkit/script-registry.ts";
 
 export interface CompactionSettings {
 	enabled?: boolean; // default: true
@@ -263,6 +264,11 @@ export interface LearningPolicySettings {
 
 export type ResolvedLearningPolicySettings = Required<LearningPolicySettings>;
 
+export interface ToolkitSettings {
+	/** The blessed daily-ops scripts run_toolkit_script may execute. Nothing else ever runs. */
+	scripts?: ToolkitScript[];
+}
+
 export type ModelCapabilityMode = "auto" | "off" | "full" | "lean" | "minimal" | "chat";
 
 export const DEFAULT_MODEL_CAPABILITY_MODE: ModelCapabilityMode = "auto";
@@ -368,6 +374,7 @@ export interface Settings {
 	workerDelegation?: WorkerDelegationSettings; // Opt-in bounded scout-worker delegation via the delegate tool
 	learningPolicy?: LearningPolicySettings; // Opt-in learning apply policy: proposal-first durable writes with audit/rollback
 	modelCapability?: ModelCapabilitySettings; // Auto-detected small-model tool/lane surface (default: auto)
+	toolkit?: ToolkitSettings; // User's blessed daily-ops script registry for run_toolkit_script
 	modelRouter?: ModelRouterSettings; // Opt-in deterministic cheap/expensive model routing foundation
 	autoLearn?: AutoLearnSettings; // Setting-gated autonomous background learning for long sessions
 	sessionDir?: string; // Custom session storage directory (same format as --session-dir CLI flag)
@@ -2791,6 +2798,34 @@ export class SettingsManager {
 				100,
 			),
 		};
+	}
+
+	getToolkitScripts(): ToolkitScript[] {
+		const configured = this.settings.toolkit?.scripts;
+		if (!Array.isArray(configured)) return [];
+		return configured.filter(
+			(script): script is ToolkitScript =>
+				Boolean(script) &&
+				typeof script.name === "string" &&
+				script.name.length > 0 &&
+				typeof script.description === "string" &&
+				typeof script.path === "string" &&
+				(script.runner === "uv" || script.runner === "powershell" || script.runner === "bash"),
+		);
+	}
+
+	setToolkitSettings(settings: ToolkitSettings, scope: SettingsScope = "global"): void {
+		if (scope === "project") {
+			const projectSettings = structuredClone(this.projectSettings);
+			projectSettings.toolkit = { ...settings };
+			this.markProjectModified("toolkit");
+			this.saveProjectSettings(projectSettings);
+			return;
+		}
+
+		this.globalSettings.toolkit = { ...settings };
+		this.markModified("toolkit");
+		this.save();
 	}
 
 	getModelCapabilitySettings(): Required<ModelCapabilitySettings> {

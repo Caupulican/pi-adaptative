@@ -227,11 +227,13 @@ import {
 import type { SlashCommandInfo } from "./slash-commands.ts";
 import { createSyntheticSourceInfo, type SourceInfo } from "./source-info.ts";
 import { type BuildSystemPromptOptions, buildSystemPrompt } from "./system-prompt.ts";
+import { executeToolkitScript } from "./toolkit/script-runner.ts";
 import { type BashOperations, createLocalBashOperations } from "./tools/bash.ts";
 import { createDelegateToolDefinition } from "./tools/delegate.ts";
 import { createGoalToolDefinition } from "./tools/goal.ts";
 import { createAllToolDefinitions } from "./tools/index.ts";
 import { createModelFitnessToolDefinition } from "./tools/model-fitness.ts";
+import { createRunToolkitScriptToolDefinition } from "./tools/run-toolkit-script.ts";
 import { createToolDefinitionFromAgentTool } from "./tools/tool-definition-wrapper.ts";
 
 // ============================================================================
@@ -4518,6 +4520,11 @@ export class AgentSession {
 				runProbe: (args) => this.runModelFitness(args),
 			});
 			this._baseToolDefinitions.set(modelFitnessToolDefinition.name, modelFitnessToolDefinition);
+			const runToolkitScriptToolDefinition = createRunToolkitScriptToolDefinition({
+				getScripts: () => this.settingsManager.getToolkitScripts(),
+				execute: (script, scriptArgs) => executeToolkitScript({ script, scriptArgs, cwd: this._cwd }),
+			});
+			this._baseToolDefinitions.set(runToolkitScriptToolDefinition.name, runToolkitScriptToolDefinition);
 		}
 
 		const extensionsResult = this._resourceLoader.getExtensions();
@@ -4548,7 +4555,7 @@ export class AgentSession {
 
 		const defaultActiveToolNames = this._baseToolsOverride
 			? Object.keys(this._baseToolsOverride)
-			: ["read", "bash", "edit", "write", "context_audit", "goal", "delegate"];
+			: ["read", "bash", "edit", "write", "context_audit", "goal", "delegate", "run_toolkit_script"];
 		const baseActiveToolNames = options.activeToolNames ?? defaultActiveToolNames;
 		this._refreshToolRegistry({
 			activeToolNames: baseActiveToolNames,
