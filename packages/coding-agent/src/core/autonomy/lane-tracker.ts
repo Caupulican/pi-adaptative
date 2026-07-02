@@ -57,6 +57,9 @@ export function cloneLaneRecordForStorage(record: LaneRecord): LaneRecord {
 	return { ...record };
 }
 
+/** Terminal records kept in memory for diagnostics; older ones are evicted (the session log holds history). */
+const MAX_TERMINAL_LANES_IN_MEMORY = 100;
+
 export class LaneTracker {
 	private readonly _lanes = new Map<string, LaneRecord>();
 	private _nextLaneNumber = 1;
@@ -64,6 +67,29 @@ export class LaneTracker {
 
 	constructor(options?: { now?: () => string }) {
 		this._now = options?.now ?? (() => new Date().toISOString());
+	}
+
+	/** Seed the id counter (e.g. from persisted lane records) so resumed sessions don't reuse ids. */
+	ensureCounterAtLeast(next: number): void {
+		if (Number.isFinite(next) && next > this._nextLaneNumber) {
+			this._nextLaneNumber = Math.floor(next);
+		}
+	}
+
+	private _evictOldTerminal(): void {
+		let terminal = 0;
+		for (const record of this._lanes.values()) {
+			if (isLaneTerminalStatus(record.status)) terminal++;
+		}
+		if (terminal <= MAX_TERMINAL_LANES_IN_MEMORY) return;
+		// Map iteration is insertion-ordered: drop oldest terminal records first.
+		for (const [laneId, record] of this._lanes) {
+			if (terminal <= MAX_TERMINAL_LANES_IN_MEMORY) break;
+			if (isLaneTerminalStatus(record.status)) {
+				this._lanes.delete(laneId);
+				terminal--;
+			}
+		}
 	}
 
 	start(args: { type: LaneType; goalId?: string }): LaneRecord {
@@ -94,6 +120,7 @@ export class LaneTracker {
 		if (args.costUsd !== undefined) next.costUsd = args.costUsd;
 		if (args.evidenceEntryId !== undefined) next.evidenceEntryId = args.evidenceEntryId;
 		this._lanes.set(laneId, next);
+		this._evictOldTerminal();
 		return { ...next };
 	}
 

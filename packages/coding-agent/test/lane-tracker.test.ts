@@ -120,6 +120,28 @@ describe("LaneTracker", () => {
 	});
 });
 
+describe("LaneTracker memory bounds", () => {
+	it("evicts oldest terminal lanes beyond the in-memory cap, never active ones", () => {
+		const { tracker } = createTracker();
+		for (let i = 0; i < 120; i++) {
+			const record = tracker.start({ type: "research" });
+			tracker.complete(record.laneId, { status: "succeeded" });
+		}
+		const active = tracker.start({ type: "worker" });
+		expect(tracker.getRecords().length).toBeLessThanOrEqual(101);
+		expect(tracker.getRecords().some((record) => record.laneId === active.laneId)).toBe(true);
+		expect(tracker.getActiveCount()).toBe(1);
+	});
+
+	it("ensureCounterAtLeast prevents id reuse after resume", () => {
+		const { tracker } = createTracker();
+		tracker.ensureCounterAtLeast(5);
+		expect(tracker.start({ type: "research" }).laneId).toBe("research-5");
+		tracker.ensureCounterAtLeast(3); // never goes backwards
+		expect(tracker.start({ type: "research" }).laneId).toBe("research-6");
+	});
+});
+
 describe("isLaneTerminalStatus", () => {
 	it("accepts terminal statuses and rejects live or unknown ones", () => {
 		expect(isLaneTerminalStatus("succeeded")).toBe(true);

@@ -44,6 +44,14 @@ describe("deriveModelCapabilityProfile", () => {
 		expect(deriveModelCapabilityProfile({ contextWindow: 2_048 }).laneMaxOutputTokens).toBe(256);
 	});
 
+	it("guards NaN context windows in every mode (no NaN lane budgets)", () => {
+		for (const mode of [undefined, "off", "minimal"] as const) {
+			const profile = deriveModelCapabilityProfile({ contextWindow: Number.NaN, mode });
+			expect(Number.isNaN(profile.laneMaxOutputTokens)).toBe(false);
+			expect(profile.laneMaxOutputTokens).toBeGreaterThan(0);
+		}
+	});
+
 	it("honors mode off and forced classes regardless of the window", () => {
 		const off = deriveModelCapabilityProfile({ contextWindow: 2_048, mode: "off" });
 		expect(off.class).toBe("full");

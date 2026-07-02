@@ -80,12 +80,17 @@ export function parseRouteJudgeVerdict(text: string): RouteJudgeVerdict | undefi
 
 /** Merge a judge verdict into the baseline decision (pure; never returns learning). */
 export function applyRouteJudgeVerdict(baseline: RouteDecision, verdict: RouteJudgeVerdict): RouteDecision {
+	// Enforce the core rule in code, not just in the judge prompt: downgrading a non-cheap
+	// baseline to cheap requires an EXPLICIT trivial verdict. An untrusted judge saying
+	// {tier:"cheap", trivial:false} for an elevated prompt keeps the baseline tier.
+	const tier =
+		verdict.tier === "cheap" && baseline.tier !== "cheap" && !verdict.trivial ? baseline.tier : verdict.tier;
 	return {
 		...baseline,
-		tier: verdict.tier,
+		tier,
 		risk: verdict.risk,
 		confidence: Math.max(baseline.confidence, 0.75),
-		reasonCode: `judge_${verdict.tier}${verdict.trivial ? "_trivial" : ""}`,
+		reasonCode: `judge_${tier}${verdict.trivial ? "_trivial" : ""}`,
 		reasons: [...baseline.reasons, `Route judge: ${verdict.reason || "no reason given"}`],
 	};
 }

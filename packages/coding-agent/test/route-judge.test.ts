@@ -79,6 +79,17 @@ describe("applyRouteJudgeVerdict", () => {
 		expect(decision.reasons.at(-1)).toContain("non-trivial planning");
 	});
 
+	it("refuses a cheap downgrade without an explicit trivial verdict (floor enforced in code)", () => {
+		const decision = applyRouteJudgeVerdict(baseline({ tier: "medium" }), {
+			tier: "cheap",
+			risk: "read-only",
+			trivial: false,
+			reason: "judge feels cheap",
+		});
+		expect(decision.tier).toBe("medium");
+		expect(decision.reasonCode).toBe("judge_medium");
+	});
+
 	it("marks trivial downgrades distinctly", () => {
 		const decision = applyRouteJudgeVerdict(baseline({ tier: "medium" }), {
 			tier: "cheap",

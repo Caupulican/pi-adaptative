@@ -91,6 +91,30 @@ describe("runModelFitnessProbe", () => {
 		expect(report.toolCall.succeeded).toBe(0);
 	});
 
+	it("handles an empty judge prompt set without NaN", async () => {
+		const report = await runModelFitnessProbe({
+			trials: 1,
+			now: () => 0,
+			judgePrompts: [],
+			complete: scriptedComplete({}),
+		});
+		expect(report.judge.meanMs).toBe(0);
+		expect(Number.isNaN(report.judge.meanMs)).toBe(false);
+	});
+
+	it("bounds the search/toolCall surfaces with the wall clock (hung model cannot hang the probe)", async () => {
+		const report = await runModelFitnessProbe({
+			trials: 1,
+			maxWallClockMs: 10,
+			complete: ({ signal }) =>
+				new Promise((_resolve, reject) => {
+					signal?.addEventListener("abort", () => reject(new Error("aborted")));
+				}),
+		});
+		expect(report.search.outcomes).toEqual(["timeout", "timeout", "timeout"]);
+		expect(report.toolCall.outcomes).toEqual(["timeout", "timeout", "timeout"]);
+	}, 20_000);
+
 	it("formats a bounded human-readable report", async () => {
 		const report = await runModelFitnessProbe({
 			trials: 1,

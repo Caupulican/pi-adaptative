@@ -1,3 +1,4 @@
+import { runBoundedCompletion } from "../autonomy/bounded-completion.ts";
 import type { CapabilityEnvelope } from "../autonomy/contracts.ts";
 import { runWorker } from "../delegation/worker-runner.ts";
 import { runRouteJudge } from "../model-router/route-judge.ts";
@@ -290,7 +291,7 @@ export async function runModelFitnessProbe(options: ModelFitnessOptions): Promis
 			`"${entry.prompt.slice(0, 40)}" -> ${tier}${result.fallbackReason ? ` (${result.fallbackReason})` : ""}`,
 		);
 	}
-	judge.meanMs = Math.round(judge.meanMs / judgePrompts.length);
+	judge.meanMs = judgePrompts.length > 0 ? Math.round(judge.meanMs / judgePrompts.length) : 0;
 	judge.tokensPerSecond = takeSurfaceSpeed();
 
 	const probeSurface = async (
@@ -301,18 +302,23 @@ export async function runModelFitnessProbe(options: ModelFitnessOptions): Promis
 		const score: LaneFitnessScore = { succeeded: 0, total: tasks.length, outcomes: [], meanMs: 0 };
 		for (const task of tasks) {
 			const started = now();
-			try {
-				const completion = await complete({ systemPrompt, userPrompt: task, signal: options.signal });
-				totalCostUsd += completion.costUsd;
-				const ok = accepts(completion.text);
+			// Same wall-clock envelope as the lane surfaces — a hung model must not hang the probe.
+			const bounded = await runBoundedCompletion({
+				maxWallClockMs,
+				signal: options.signal,
+				execute: (signal) => complete({ systemPrompt, userPrompt: task, signal }),
+			});
+			if (bounded.completion) totalCostUsd += bounded.completion.costUsd;
+			if (bounded.failure || !bounded.completion) {
+				score.outcomes.push(bounded.failure ? bounded.failure.status : "completion_error");
+			} else {
+				const ok = accepts(bounded.completion.text);
 				if (ok) score.succeeded++;
 				score.outcomes.push(ok ? "ok" : "unparseable_output");
-			} catch {
-				score.outcomes.push("completion_error");
 			}
 			score.meanMs += now() - started;
 		}
-		score.meanMs = Math.round(score.meanMs / tasks.length);
+		score.meanMs = tasks.length > 0 ? Math.round(score.meanMs / tasks.length) : 0;
 		return score;
 	};
 

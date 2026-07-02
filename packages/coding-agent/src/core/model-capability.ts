@@ -91,15 +91,18 @@ export function deriveModelCapabilityProfile(args: {
 	mode?: ModelCapabilityMode;
 }): ModelCapabilityProfile {
 	const mode = args.mode ?? "auto";
+	const contextWindow =
+		args.contextWindow !== undefined && Number.isFinite(args.contextWindow) && args.contextWindow > 0
+			? args.contextWindow
+			: undefined;
 	if (mode === "off") {
-		return profileForClass("full", "detection_disabled", args.contextWindow);
+		return profileForClass("full", "detection_disabled", contextWindow);
 	}
 	if (mode !== "auto") {
-		return profileForClass(mode, "forced_by_setting", args.contextWindow);
+		return profileForClass(mode, "forced_by_setting", contextWindow);
 	}
 
-	const contextWindow = args.contextWindow;
-	if (contextWindow === undefined || !Number.isFinite(contextWindow) || contextWindow <= 0) {
+	if (contextWindow === undefined) {
 		// Metadata missing: defaults, never guesses.
 		return profileForClass("full", "unknown_context_window_defaults", undefined);
 	}

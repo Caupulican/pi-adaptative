@@ -5831,6 +5831,7 @@ export class AgentSession {
 		const { model, laneProfile } = shipment;
 
 		this._isResearchLaneRunning = true;
+		this._laneTracker.ensureCounterAtLeast(getLaneRecordSnapshots(this.sessionManager.getEntries()).length + 1);
 		const startedRecord = this._laneTracker.start({ type: "research", goalId: demand.goalId });
 		try {
 			let spentUsage: Usage | undefined;
@@ -5950,6 +5951,7 @@ export class AgentSession {
 		const { model, laneProfile } = shipment;
 
 		this._isWorkerDelegationRunning = true;
+		this._laneTracker.ensureCounterAtLeast(getLaneRecordSnapshots(this.sessionManager.getEntries()).length + 1);
 		const startedRecord = this._laneTracker.start({ type: "worker" });
 		const maxUsd = Math.min(settings.maxUsd, this.capabilityEnvelope?.maxEstimatedUsd ?? Number.POSITIVE_INFINITY);
 		const workerRequest: WorkerRequest = {
@@ -6075,6 +6077,7 @@ export class AgentSession {
 			trials: args.trials,
 			signal: this._researchLaneAbort.signal,
 			complete: async ({ systemPrompt, userPrompt, signal }) => {
+				const callStarted = Date.now();
 				const completion = await this.runIsolatedCompletion({
 					systemPrompt,
 					messages: [{ role: "user", content: [{ type: "text", text: userPrompt }], timestamp: Date.now() }],
@@ -6084,6 +6087,7 @@ export class AgentSession {
 					signal,
 					cacheRetention: "short",
 				});
+				const callMs = Date.now() - callStarted;
 				spent.input += completion.usage.input;
 				spent.output += completion.usage.output;
 				spent.cacheRead += completion.usage.cacheRead;
@@ -6098,6 +6102,10 @@ export class AgentSession {
 					text: completion.text,
 					costUsd: completion.usage.cost.total,
 					stopReason: String(completion.stopReason),
+					// Wall-clock fallback for tok/s: providers don't expose pure eval time, so the
+					// measured call time stands in — slightly conservative (includes network/queue).
+					outputTokens: completion.usage.output,
+					evalMs: callMs,
 				};
 			},
 		});
