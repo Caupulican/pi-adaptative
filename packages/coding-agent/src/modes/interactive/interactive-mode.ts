@@ -97,6 +97,7 @@ import {
 import { DefaultPackageManager } from "../../core/package-manager.ts";
 import { BUILT_IN_PROVIDER_DISPLAY_NAMES } from "../../core/provider-display-names.ts";
 import { getPendingReloadBlockers } from "../../core/reload-blockers.ts";
+import { formatModelFitnessReport } from "../../core/research/model-fitness.ts";
 import type { ResourceDiagnostic } from "../../core/resource-loader.ts";
 import { resourceProfileSettingsChangedKinds } from "../../core/resource-profile-equality.ts";
 import { formatMissingSessionCwdPrompt, MissingSessionCwdError } from "../../core/session-cwd.ts";
@@ -6128,6 +6129,32 @@ export class InteractiveMode {
 				.catch((error: unknown) => {
 					const message = error instanceof Error ? error.message : String(error);
 					this.showStatus(`Rollback failed: ${message}`);
+				});
+			return;
+		}
+		if (action.startsWith("fitness")) {
+			const rest = action.slice("fitness".length).trim().split(/\s+/).filter(Boolean);
+			const modelPattern = rest[0];
+			if (!modelPattern) {
+				this.showStatus("Usage: /autonomy fitness <model-pattern> [trials]");
+				return;
+			}
+			const trials = rest[1] ? Number(rest[1]) : undefined;
+			this.showStatus(`Model fitness probe running on ${modelPattern}…`);
+			void this.session
+				.runModelFitness({ model: modelPattern, trials: Number.isFinite(trials) ? trials : undefined })
+				.then((outcome) => {
+					if (!outcome.started) {
+						this.showStatus(`Model fitness skipped: ${outcome.skipReason}`);
+						return;
+					}
+					this.chatContainer.addChild(new Spacer(1));
+					this.chatContainer.addChild(new Text(formatModelFitnessReport(outcome.model, outcome.report), 1, 0));
+					this.ui.requestRender();
+				})
+				.catch((error: unknown) => {
+					const message = error instanceof Error ? error.message : String(error);
+					this.showStatus(`Model fitness failed: ${message}`);
 				});
 			return;
 		}

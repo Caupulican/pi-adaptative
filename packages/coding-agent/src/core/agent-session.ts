@@ -206,6 +206,7 @@ import {
 import { shouldEscalateModelRouterTool } from "./model-router/tool-escalation.ts";
 import type { NormalizedProfile } from "./profile-registry.ts";
 import { expandPromptTemplate, type PromptTemplate } from "./prompt-templates.ts";
+import { type ModelFitnessReport, runModelFitnessProbe } from "./research/model-fitness.ts";
 import { type ResearchRunResult, runResearch } from "./research/research-runner.ts";
 import {
 	appendEvidenceBundleSnapshot,
@@ -229,6 +230,7 @@ import { type BashOperations, createLocalBashOperations } from "./tools/bash.ts"
 import { createDelegateToolDefinition } from "./tools/delegate.ts";
 import { createGoalToolDefinition } from "./tools/goal.ts";
 import { createAllToolDefinitions } from "./tools/index.ts";
+import { createModelFitnessToolDefinition } from "./tools/model-fitness.ts";
 import { createToolDefinitionFromAgentTool } from "./tools/tool-definition-wrapper.ts";
 
 // ============================================================================
@@ -4509,6 +4511,12 @@ export class AgentSession {
 				runWorkerDelegation: (args) => this.runWorkerDelegationOnce(args),
 			});
 			this._baseToolDefinitions.set(delegateToolDefinition.name, delegateToolDefinition);
+			// Registered but not default-active: probes spend tokens on the probed model, so
+			// activation is an explicit choice (settings/profile/setActiveTools or /autonomy fitness).
+			const modelFitnessToolDefinition = createModelFitnessToolDefinition({
+				runProbe: (args) => this.runModelFitness(args),
+			});
+			this._baseToolDefinitions.set(modelFitnessToolDefinition.name, modelFitnessToolDefinition);
 		}
 
 		const extensionsResult = this._resourceLoader.getExtensions();
@@ -6024,6 +6032,59 @@ export class AgentSession {
 		} finally {
 			this._isWorkerDelegationRunning = false;
 		}
+	}
+
+	/**
+	 * Probe a candidate model against the subagent contracts (research/worker/judge/search/
+	 * tool-call surfaces) via {@link runModelFitnessProbe}. The model must resolve and
+	 * authenticate; every probe call runs as an isolated completion on that model, and probe
+	 * spend is reported through spawned-usage accounting.
+	 */
+	async runModelFitness(args: {
+		model: string;
+		trials?: number;
+	}): Promise<{ started: true; model: string; report: ModelFitnessReport } | { started: false; skipReason: string }> {
+		if (this._disposed) return { started: false, skipReason: "session_disposed" };
+		const resolved = this._resolveLaneModel(args.model.trim() || undefined);
+		if (!resolved) return { started: false, skipReason: "model_unresolved_or_unauthenticated" };
+		const capability = this._laneCapabilityProfile(resolved);
+
+		const spent: Usage = {
+			input: 0,
+			output: 0,
+			cacheRead: 0,
+			cacheWrite: 0,
+			totalTokens: 0,
+			cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, total: 0 },
+		};
+		const report = await runModelFitnessProbe({
+			trials: args.trials,
+			signal: this._researchLaneAbort.signal,
+			complete: async ({ systemPrompt, userPrompt, signal }) => {
+				const completion = await this.runIsolatedCompletion({
+					systemPrompt,
+					messages: [{ role: "user", content: [{ type: "text", text: userPrompt }], timestamp: Date.now() }],
+					model: resolved,
+					thinkingLevel: "off",
+					maxTokens: capability.laneMaxOutputTokens,
+					signal,
+					cacheRetention: "short",
+				});
+				spent.input += completion.usage.input;
+				spent.output += completion.usage.output;
+				spent.totalTokens += completion.usage.totalTokens;
+				spent.cost.total += completion.usage.cost.total;
+				return {
+					text: completion.text,
+					costUsd: completion.usage.cost.total,
+					stopReason: String(completion.stopReason),
+				};
+			},
+		});
+		if (!this._disposed && (spent.cost.total > 0 || spent.totalTokens > 0)) {
+			this.addSpawnedUsage(spent, { label: "model-fitness" });
+		}
+		return { started: true, model: `${resolved.provider}/${resolved.id}`, report };
 	}
 
 	async continueGoalOnce(options: GoalContinuationOnceOptions): Promise<GoalContinuationOnceResult> {
