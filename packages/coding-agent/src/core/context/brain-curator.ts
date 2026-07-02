@@ -28,6 +28,87 @@ export const CURATION_RELEVANCE_SYSTEM_PROMPT = [
 	"When uncertain, answer relevant=true with low confidence - keeping content is the safe default.",
 ].join("\n");
 
+export const CURATION_COMPACTION_DIGEST_SYSTEM_PROMPT = [
+	"You pre-digest a chunk of an agent conversation for compaction. You never continue the conversation.",
+	"Extract ONLY durable facts: decisions made, file paths and symbols touched, errors and their causes,",
+	"user requirements, and outcomes. Respond with STRICT JSON only - no prose:",
+	'{"digest":"<bullet-style summary, max 700 characters, exact identifiers verbatim>"}',
+].join("\n");
+
+export function parseCompactionChunkDigest(text: string): string | undefined {
+	const parsed = extractJsonObject(text);
+	if (!parsed) return undefined;
+	const digest = (parsed as { digest?: unknown }).digest;
+	if (typeof digest !== "string") return undefined;
+	const trimmed = digest.trim();
+	if (trimmed.length === 0 || trimmed.length > 800) return undefined;
+	return trimmed;
+}
+
+export interface PreDigestResult {
+	text: string;
+	totalChunks: number;
+	digested: number;
+	failed: number;
+}
+
+const PRE_DIGEST_CHUNK_CHARS = 24_000;
+const PRE_DIGEST_KEEP_RECENT_CHARS = 16_000;
+const PRE_DIGEST_CHUNK_WALL_CLOCK_MS = 25_000;
+
+/**
+ * Compaction pre-digest (design surface 3): shrink the conversation text sent to the frontier
+ * summarizer by digesting OLD chunks locally, keeping the recent tail verbatim. Chunk digestion
+ * is mechanical extraction — the frontier model still writes the summary. Partial assist, never
+ * partial loss: any chunk whose digest fails (parse/timeout) passes through verbatim.
+ */
+export async function preDigestConversationText(args: {
+	text: string;
+	complete: CurationComplete;
+	signal?: AbortSignal;
+	chunkChars?: number;
+	keepRecentChars?: number;
+}): Promise<PreDigestResult> {
+	const chunkChars = args.chunkChars ?? PRE_DIGEST_CHUNK_CHARS;
+	const keepRecentChars = args.keepRecentChars ?? PRE_DIGEST_KEEP_RECENT_CHARS;
+	if (args.text.length <= chunkChars + keepRecentChars) {
+		return { text: args.text, totalChunks: 0, digested: 0, failed: 0 };
+	}
+	const cut = args.text.length - keepRecentChars;
+	const prefix = args.text.slice(0, cut);
+	const tail = args.text.slice(cut);
+	const chunks: string[] = [];
+	for (let offset = 0; offset < prefix.length; offset += chunkChars) {
+		chunks.push(prefix.slice(offset, offset + chunkChars));
+	}
+	let digested = 0;
+	let failed = 0;
+	const parts: string[] = [];
+	for (const [index, chunk] of chunks.entries()) {
+		if (args.signal?.aborted) {
+			parts.push(chunk);
+			failed++;
+			continue;
+		}
+		const bounded = await runBoundedCompletion({
+			maxWallClockMs: PRE_DIGEST_CHUNK_WALL_CLOCK_MS,
+			signal: args.signal,
+			execute: (signal) =>
+				args.complete({ systemPrompt: CURATION_COMPACTION_DIGEST_SYSTEM_PROMPT, userPrompt: chunk, signal }),
+		});
+		const digest =
+			bounded.completion && !bounded.failure ? parseCompactionChunkDigest(bounded.completion.text) : undefined;
+		if (digest !== undefined) {
+			digested++;
+			parts.push(`[locally pre-digested chunk ${index + 1}/${chunks.length} (${chunk.length} chars):]\n${digest}`);
+		} else {
+			failed++;
+			parts.push(chunk);
+		}
+	}
+	return { text: `${parts.join("\n\n")}${tail}`, totalChunks: chunks.length, digested, failed };
+}
+
 export interface CurationJob {
 	kind: "stub_digest" | "relevance";
 	/** Idempotency key: digest jobs use the GC record's content hash, relevance jobs the item id. */

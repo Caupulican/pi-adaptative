@@ -1,5 +1,18 @@
 ## [Unreleased]
 
+### Added
+
+- Added the brain-curation compaction pre-digest (design surface 3, runtime-gated): when curation
+  is enabled AND the curator model has proven itself in-session (>=5 jobs, <=5% parse failures on
+  top of the digest fitness gate), old conversation chunks are digested locally before the frontier
+  summarization call — digests plus the verbatim recent tail replace the full transcript. Any chunk
+  whose digest fails passes through verbatim (partial assist, never partial loss), and each
+  pre-digest persists an auditable session record with chars-before/after.
+- Surfaced three silent profile situations in the /context dashboard: an extension loaded but fully
+  inert (profile denies all its tools and commands), an explicit tool grant that binds to no
+  registered tool (typo or ungranted owning extension), and profile grants overridden by the user's
+  own disable list — with the precedence now documented: a user disable ALWAYS beats a profile grant.
+
 ## [0.80.91] - 2026-07-02
 
 ## [0.80.90] - 2026-07-02

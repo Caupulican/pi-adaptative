@@ -611,6 +611,7 @@ export async function generateSummary(
 	previousSummary?: string,
 	thinkingLevel?: ThinkingLevel,
 	streamFn?: StreamFn,
+	preDigest?: (conversationText: string, signal?: AbortSignal) => Promise<string>,
 ): Promise<string> {
 	const maxTokens = Math.min(
 		Math.floor(0.8 * reserveTokens),
@@ -626,7 +627,16 @@ export async function generateSummary(
 	// Serialize conversation to text so model doesn't try to continue it
 	// Convert to LLM messages first (handles custom types like bashExecution, custom, etc.)
 	const llmMessages = convertToLlm(currentMessages);
-	const conversationText = serializeConversation(llmMessages);
+	let conversationText = serializeConversation(llmMessages);
+	// Brain-curation surface 3 (opt-in, injected by the session): pre-digest old chunks locally
+	// before the frontier summarization call. Best-effort — failure keeps the verbatim text.
+	if (preDigest) {
+		try {
+			conversationText = await preDigest(conversationText, signal);
+		} catch {
+			// verbatim fallback
+		}
+	}
 
 	// Build the prompt with conversation wrapped in tags
 	let promptText = `<conversation>\n${conversationText}\n</conversation>\n\n`;
@@ -798,6 +808,7 @@ export async function compact(
 	signal?: AbortSignal,
 	thinkingLevel?: ThinkingLevel,
 	streamFn?: StreamFn,
+	preDigest?: (conversationText: string, signal?: AbortSignal) => Promise<string>,
 ): Promise<CompactionResult> {
 	const {
 		firstKeptEntryId,
@@ -828,6 +839,7 @@ export async function compact(
 						previousSummary,
 						thinkingLevel,
 						streamFn,
+						preDigest,
 					)
 				: Promise.resolve("No prior history."),
 			generateTurnPrefixSummary(
@@ -856,6 +868,7 @@ export async function compact(
 			previousSummary,
 			thinkingLevel,
 			streamFn,
+			preDigest,
 		);
 	}
 

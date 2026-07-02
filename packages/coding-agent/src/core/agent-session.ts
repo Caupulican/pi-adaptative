@@ -78,7 +78,7 @@ import {
 	shouldCompact,
 } from "./compaction/index.ts";
 // (module-scope helper for curation goal extraction defined below the imports)
-import { BrainCurator, type CurationTelemetrySnapshot } from "./context/brain-curator.ts";
+import { BrainCurator, type CurationTelemetrySnapshot, preDigestConversationText } from "./context/brain-curator.ts";
 import { type ArtifactStore, createFileArtifactStore } from "./context/context-artifacts.ts";
 import { type ContextAuditReport, runContextAudit } from "./context/context-audit.ts";
 import {
@@ -661,6 +661,9 @@ export class AgentSession {
 	 * contextPolicy.curation setting is enabled AND the model passes the digest fitness gate. */
 	private readonly _brainCurator = new BrainCurator();
 	private _lastCurationSkipReason: string | undefined = undefined;
+	private _inertExtensionWarnings: string[] = [];
+	private _lastPreDigestSkipReason: string | undefined = undefined;
+	private _unboundToolGrantWarnings: string[] = [];
 	private _toolArtifactStore: ArtifactStore | undefined = undefined;
 	private _latestContextAuditReport: ContextAuditReport | undefined = undefined;
 	private _latestPromptPolicyReport: PromptPolicyShadowReport | undefined = undefined;
@@ -1240,44 +1243,108 @@ export class AgentSession {
 	 * fitness probe on THIS host (design: unfit or unprobed models are refused with a visible
 	 * reason, never silently degraded). Fire-and-forget; never throws into a turn.
 	 */
+	/**
+	 * Resolve the curation model IFF every gate passes: setting enabled, model configured,
+	 * resolvable+authed, and digest-fitness-proven on THIS host (canonical "provider/id" ref —
+	 * runModelFitness stores reports under it, while settings.model may be a bare id or pattern).
+	 * Sets _lastCurationSkipReason on refusal; never throws.
+	 */
+	private _resolveCurationModelIfFit(): Model<Api> | undefined {
+		const settings = this.settingsManager.getContextCurationSettings();
+		if (!settings.enabled) {
+			// Never surface a stale refusal reason for a feature the user has since disabled.
+			this._lastCurationSkipReason = undefined;
+			return undefined;
+		}
+		if (!settings.model) {
+			this._lastCurationSkipReason = "curation_model_unset";
+			return undefined;
+		}
+		const resolved = resolveCliModel({ cliModel: settings.model, modelRegistry: this._modelRegistry });
+		if (!resolved.model || !this._modelRegistry.hasConfiguredAuth(resolved.model)) {
+			this._lastCurationSkipReason = "curation_model_unresolved";
+			return undefined;
+		}
+		const canonicalRef = `${resolved.model.provider}/${resolved.model.id}`;
+		const fitness = FitnessStore.forAgentDir(this._agentDir)
+			.getForHost()
+			.find((entry) => entry.model === canonicalRef);
+		const digestScore = fitness?.report.digest;
+		if (!digestScore) {
+			this._lastCurationSkipReason = "curation_model_unprobed";
+			return undefined;
+		}
+		if (digestScore.succeeded < Math.ceil(digestScore.total * (2 / 3))) {
+			this._lastCurationSkipReason = "curation_model_digest_unfit";
+			return undefined;
+		}
+		this._lastCurationSkipReason = undefined;
+		return resolved.model;
+	}
+
 	private _maybeDrainBrainCuration(): void {
 		try {
-			const settings = this.settingsManager.getContextCurationSettings();
-			if (!settings.enabled) {
-				// Never surface a stale refusal reason for a feature the user has since disabled.
-				this._lastCurationSkipReason = undefined;
-				return;
-			}
 			if (!this._brainCurator.hasWork() || this._brainCurator.isDraining) return;
-			if (!settings.model) {
-				this._lastCurationSkipReason = "curation_model_unset";
-				return;
-			}
-			const resolved = resolveCliModel({ cliModel: settings.model, modelRegistry: this._modelRegistry });
-			if (!resolved.model || !this._modelRegistry.hasConfiguredAuth(resolved.model)) {
-				this._lastCurationSkipReason = "curation_model_unresolved";
-				return;
-			}
-			// Match on the CANONICAL "provider/id" ref — runModelFitness stores reports under it,
-			// while settings.model may be a bare id or pattern; comparing raw strings would refuse
-			// forever with curation_model_unprobed even after a successful probe.
-			const canonicalRef = `${resolved.model.provider}/${resolved.model.id}`;
-			const fitness = FitnessStore.forAgentDir(this._agentDir)
-				.getForHost()
-				.find((entry) => entry.model === canonicalRef);
-			const digestScore = fitness?.report.digest;
-			if (!digestScore) {
-				this._lastCurationSkipReason = "curation_model_unprobed";
-				return;
-			}
-			if (digestScore.succeeded < Math.ceil(digestScore.total * (2 / 3))) {
-				this._lastCurationSkipReason = "curation_model_digest_unfit";
-				return;
-			}
-			this._lastCurationSkipReason = undefined;
-			void this._drainBrainCuration(resolved.model, settings.maxJobsPerTurn);
+			const model = this._resolveCurationModelIfFit();
+			if (!model) return;
+			const settings = this.settingsManager.getContextCurationSettings();
+			void this._drainBrainCuration(model, settings.maxJobsPerTurn);
 		} catch {
 			// curation is a sidecar; it must never disrupt a turn
+		}
+	}
+
+	/**
+	 * Compaction pre-digest gate (design surface 3): everything the drain gate requires PLUS a
+	 * RUNTIME reliability proof — the curator must have run >=5 jobs on this session with a parse
+	 * failure rate <=5% before it is trusted to pre-digest compaction input. Returns undefined
+	 * (verbatim compaction, byte-for-byte today's behavior) whenever any gate refuses.
+	 */
+	private _buildCompactionPreDigest(): ((text: string, signal?: AbortSignal) => Promise<string>) | undefined {
+		try {
+			const model = this._resolveCurationModelIfFit();
+			if (!model) return undefined;
+			const telemetry = this._brainCurator.telemetry();
+			if (telemetry.jobsRun < 5 || telemetry.parseFailures / telemetry.jobsRun > 0.05) {
+				this._lastPreDigestSkipReason = "curation_predigest_reliability_unproven";
+				return undefined;
+			}
+			this._lastPreDigestSkipReason = undefined;
+			return async (text, signal) => {
+				const result = await preDigestConversationText({
+					text,
+					signal,
+					complete: async ({ systemPrompt, userPrompt, signal: chunkSignal }) => {
+						const completion = await this.runIsolatedCompletion({
+							systemPrompt,
+							messages: [{ role: "user", content: [{ type: "text", text: userPrompt }], timestamp: Date.now() }],
+							model,
+							thinkingLevel: "off",
+							maxTokens: 512,
+							signal: chunkSignal,
+							cacheRetention: "short",
+						});
+						return {
+							text: completion.text,
+							costUsd: completion.usage.cost.total,
+							stopReason: String(completion.stopReason),
+						};
+					},
+				});
+				if (!this._disposed && result.totalChunks > 0) {
+					this.sessionManager.appendCustomEntry("brain-curation-predigest", {
+						version: 1,
+						totalChunks: result.totalChunks,
+						digested: result.digested,
+						failed: result.failed,
+						charsBefore: text.length,
+						charsAfter: result.text.length,
+					});
+				}
+				return result.text;
+			};
+		} catch {
+			return undefined;
 		}
 	}
 
@@ -1398,7 +1465,20 @@ export class AgentSession {
 			},
 			spawned: { cost: spawned.cost, reports: spawned.reports },
 			adjustments: { memoryEvidenceTokens, enforcementSavedTokens },
-			extraObservations: this._resourceLoader.getAgentsDiagnostics().map((diagnostic) => diagnostic.message),
+			extraObservations: [
+				...this._resourceLoader.getAgentsDiagnostics().map((diagnostic) => diagnostic.message),
+				...this._inertExtensionWarnings,
+				...this._unboundToolGrantWarnings,
+				// G14 (ratified): a user disable always beats a profile grant — surface the conflict.
+				...(["tools", "skills", "prompts", "extensions"] as const).flatMap((kind) =>
+					this.settingsManager
+						.getProfileGrantsOverriddenByUserDisable(kind)
+						.map(
+							(entry) =>
+								`profile grants ${kind} "${entry}" but your disable list overrides it (user disable wins; re-enable to use)`,
+						),
+				),
+			],
 		});
 	}
 
@@ -1413,6 +1493,7 @@ export class AgentSession {
 		model?: string;
 		telemetry: CurationTelemetrySnapshot;
 		lastSkipReason?: string;
+		lastPreDigestSkipReason?: string;
 	} {
 		const settings = this.settingsManager.getContextCurationSettings();
 		return {
@@ -1420,6 +1501,7 @@ export class AgentSession {
 			model: settings.model,
 			telemetry: this._brainCurator.telemetry(),
 			lastSkipReason: this._lastCurationSkipReason,
+			lastPreDigestSkipReason: this._lastPreDigestSkipReason,
 		};
 	}
 
@@ -3768,6 +3850,7 @@ export class AgentSession {
 					this._compactionAbortController.signal,
 					this.thinkingLevel,
 					this.agent.streamFn,
+					this._buildCompactionPreDigest(),
 				);
 				summary = result.summary;
 				firstKeptEntryId = result.firstKeptEntryId;
@@ -4108,6 +4191,7 @@ export class AgentSession {
 					this._autoCompactionAbortController.signal,
 					this.thinkingLevel,
 					this.agent.streamFn,
+					this._buildCompactionPreDigest(),
 				);
 				summary = compactResult.summary;
 				firstKeptEntryId = compactResult.firstKeptEntryId;
@@ -4469,6 +4553,7 @@ export class AgentSession {
 	}
 
 	private _filterExtensionsForRuntime(extensions: Extension[]): Extension[] {
+		this._inertExtensionWarnings = [];
 		if (this.settingsManager.getActiveResourceProfileNames().length === 0) {
 			return this.settingsManager.hasExplicitActiveResourceProfileSelection()
 				? []
@@ -4487,6 +4572,15 @@ export class AgentSession {
 				const commands = new Map(
 					Array.from(extension.commands.entries()).filter(([name]) => this._isToolOrCommandAllowedByProfile(name)),
 				);
+				// G12: an extension the profile ALLOWS whose every tool and command the tools filter
+				// then denies loads and runs lifecycle hooks but is completely uninvocable — surface
+				// it instead of presenting a "loaded" extension that silently does nothing.
+				if (extension.tools.size + extension.commands.size > 0 && tools.size + commands.size === 0) {
+					const name = extension.path.split(/[\\/]/).pop() ?? extension.path;
+					this._inertExtensionWarnings.push(
+						`extension "${name}" is loaded but fully inert: the active profile's tools filter denies all ${extension.tools.size} tool(s) and ${extension.commands.size} command(s) it contributes`,
+					);
+				}
 				return { ...extension, tools, commands };
 			});
 	}
@@ -4702,13 +4796,27 @@ export class AgentSession {
 		// stays grant-only: activation then still derives from the request/defaults above.
 		const explicitAllowPatterns = toolProfileFilter?.allow.filter((pattern) => pattern !== "*") ?? [];
 		if (explicitAllowPatterns.length > 0) {
+			const boundPatterns = new Set<string>();
 			for (const toolName of this._toolRegistry.keys()) {
 				if (!isAllowedTool(toolName)) continue;
+				for (const pattern of explicitAllowPatterns) {
+					if (matchesResourceProfilePattern(toolName, [pattern])) boundPatterns.add(pattern);
+				}
 				if (matchesResourceProfilePattern(toolName, explicitAllowPatterns)) {
 					nextActiveToolNames.push(toolName);
 					autoActivated.push(toolName);
 				}
 			}
+			// G13: an explicit grant that binds to NO registered tool is a silent no-op — typo'd
+			// name, or the owning extension is not granted/loaded. Surface it.
+			this._unboundToolGrantWarnings = explicitAllowPatterns
+				.filter((pattern) => !boundPatterns.has(pattern))
+				.map(
+					(pattern) =>
+						`profile tool grant "${pattern}" binds to no registered tool (typo, or the owning extension is not granted/loaded)`,
+				);
+		} else {
+			this._unboundToolGrantWarnings = [];
 		}
 
 		// artifact_retrieve companion auto-activation is enforced inside

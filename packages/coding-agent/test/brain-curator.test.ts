@@ -4,6 +4,7 @@ import {
 	type CurationComplete,
 	parseCurationDigest,
 	parseCurationRelevance,
+	preDigestConversationText,
 } from "../src/core/context/brain-curator.ts";
 import { createInMemoryArtifactStore } from "../src/core/context/context-artifacts.ts";
 import { runContextAudit } from "../src/core/context/context-audit.ts";
@@ -252,5 +253,44 @@ describe("session drain gate (fail-closed)", () => {
 		} finally {
 			harness.cleanup();
 		}
+	});
+});
+
+describe("compaction pre-digest (surface 3)", () => {
+	it("leaves short conversations untouched (no local calls)", async () => {
+		let calls = 0;
+		const result = await preDigestConversationText({
+			text: "short conversation",
+			complete: async () => {
+				calls++;
+				return { text: "{}", costUsd: 0, stopReason: "stop" };
+			},
+		});
+		expect(result).toEqual({ text: "short conversation", totalChunks: 0, digested: 0, failed: 0 });
+		expect(calls).toBe(0);
+	});
+
+	it("digests old chunks, keeps the recent tail verbatim, and passes failed chunks through", async () => {
+		const chunkA = "A".repeat(1000);
+		const chunkB = `the-nonce-fact ${"B".repeat(984)}`;
+		const tail = "TAIL".repeat(100); // 400 chars kept verbatim
+		const text = chunkA + chunkB + tail;
+		let call = 0;
+		const replies = ['{"digest":"chunk A said nothing durable"}', "not json"];
+		const result = await preDigestConversationText({
+			text,
+			chunkChars: 1000,
+			keepRecentChars: 400,
+			complete: async () => ({ text: replies[call++] ?? "", costUsd: 0, stopReason: "stop" }),
+		});
+		expect(result.totalChunks).toBe(2);
+		expect(result.digested).toBe(1);
+		expect(result.failed).toBe(1);
+		expect(result.text).toContain("locally pre-digested chunk 1/2");
+		expect(result.text).toContain("chunk A said nothing durable");
+		// failed chunk passes VERBATIM — partial assist, never partial loss
+		expect(result.text).toContain("the-nonce-fact");
+		expect(result.text.endsWith(tail)).toBe(true);
+		expect(result.text.length).toBeLessThan(text.length);
 	});
 });

@@ -1141,6 +1141,30 @@ export class SettingsManager {
 		};
 	}
 
+	/**
+	 * Profile grants the user's own disable list overrides. RATIFIED precedence: a user disable
+	 * (`disabledResources` / `!` overrides) is a hard off-switch that always WINS over a profile
+	 * allow (the legacy disabled filter merges into every profile filter as a block, and blocks
+	 * beat allows). This helper only SURFACES the conflict so a granted-but-disabled resource
+	 * doesn't look like a broken grant.
+	 */
+	getProfileGrantsOverriddenByUserDisable(kind: ResourceProfileKind): string[] {
+		const disabled = this.settings.disabledResources?.[kind] ?? [];
+		if (!Array.isArray(disabled) || disabled.length === 0) return [];
+		const registry = this.getProfileRegistry();
+		const conflicts = new Set<string>();
+		for (const profileName of this.getActiveResourceProfileNames()) {
+			const filter = registry.getProfile(profileName)?.resources[kind];
+			for (const allowEntry of filter?.allow ?? []) {
+				if (allowEntry === "*") continue;
+				if (disabled.includes(allowEntry) || matchesResourceProfilePattern(allowEntry, disabled)) {
+					conflicts.add(allowEntry);
+				}
+			}
+		}
+		return [...conflicts];
+	}
+
 	isResourceAllowedByProfile(kind: ResourceProfileKind, resourcePath: string, baseDir = ""): boolean {
 		const filter = this.getResourceProfileFilter(kind);
 		if (filter.allow.length > 0 && !matchesResourceProfilePattern(resourcePath, filter.allow, baseDir)) {
