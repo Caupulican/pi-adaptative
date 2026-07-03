@@ -123,6 +123,57 @@ export function getToolPath(tool: "fd" | "rg"): string | null {
 	return null;
 }
 
+/** Presence check for a SYSTEM tool the doctor only ever reports on -- never installs. */
+export interface SystemToolStatus {
+	present: boolean;
+	command?: string;
+	version?: string;
+}
+
+const PYTHON_COMMANDS = ["python3", "python"];
+
+/**
+ * Detect a usable Python interpreter. SYSTEM tool (see src/core/doctor.ts):
+ * the doctor reports presence/version, it never installs this itself.
+ *
+ * @param commands Override the candidate command names, for tests.
+ */
+export function detectPython(commands: readonly string[] = PYTHON_COMMANDS): SystemToolStatus {
+	for (const command of commands) {
+		try {
+			const result = spawnSync(command, ["--version"], { encoding: "utf-8", stdio: "pipe", timeout: 5_000 });
+			if (result.error) continue;
+			// Python 2 prints its version to stderr; Python 3 prints to stdout. Some
+			// platforms' `python` alias is one or the other, so check both.
+			const version = `${result.stdout ?? ""}${result.stderr ?? ""}`.trim() || undefined;
+			if (result.status !== 0 && !version) continue;
+			return { present: true, command, version };
+		} catch {
+			// Try the next candidate.
+		}
+	}
+	return { present: false };
+}
+
+/**
+ * Runs `<command> --version` (or `versionArgs`) and returns its trimmed
+ * combined stdout+stderr, or undefined if the command can't be run. Used by
+ * the doctor (src/core/doctor.ts) to show a version alongside a tool it has
+ * already located by some other means (e.g. getToolPath("rg"), or the binary
+ * path OllamaRuntime.detect() reports) -- callers that only need a yes/no
+ * presence check should use commandExists/getToolPath/detectPython instead.
+ */
+export function probeVersion(command: string, versionArgs: readonly string[] = ["--version"]): string | undefined {
+	try {
+		const result = spawnSync(command, versionArgs, { encoding: "utf-8", stdio: "pipe", timeout: 5_000 });
+		if (result.error) return undefined;
+		const output = `${result.stdout ?? ""}${result.stderr ?? ""}`.trim();
+		return output || undefined;
+	} catch {
+		return undefined;
+	}
+}
+
 // Fetch latest release version from GitHub
 async function getLatestVersion(repo: string): Promise<string> {
 	const response = await fetch(`https://api.github.com/repos/${repo}/releases/latest`, {

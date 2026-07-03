@@ -36,6 +36,15 @@
   handling the turn, then it escalates to the next configured tier. The runtime is owned by
   `AgentSession`, so headless/SDK turns get the same behavior and `/models` shares the one instance.
   (An interactive "install it now?" consent prompt is a planned follow-up.)
+- New `pi-adaptative doctor` command plus an update/startup preflight that verify required tooling and
+  provision what pi owns. It checks FFF native search (managed — actually installs it if missing, via
+  the same path as lazy first-use), ripgrep, ollama (binary + server status), and python, reporting
+  each as present/missing with version/detail and, for tools pi doesn't own, guide-mode install steps
+  (printed, never executed — no `curl | sh`, no `sudo`). The preflight runs automatically after a
+  successful `pi-adaptative update` (best-effort, never fails the update), so an update actually
+  provisions the managed tooling instead of leaving it to lazy first-use — closing the "ran update on
+  another machine and FFF never got installed" gap. The interactive `doctor` shows install progress;
+  the background preflight stays quiet.
 
 ### Fixed
 

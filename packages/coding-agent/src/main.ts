@@ -23,6 +23,7 @@ import {
 } from "./core/agent-session-services.ts";
 import { formatNoModelsAvailableMessage } from "./core/auth-guidance.ts";
 import { AuthStorage } from "./core/auth-storage.ts";
+import { formatDoctorReport, runDoctor, runUpdatePreflight } from "./core/doctor.ts";
 import { exportFromFile } from "./core/export-html/index.ts";
 import type { ExtensionFactory } from "./core/extensions/types.ts";
 import { configureHttpDispatcher } from "./core/http-dispatcher.ts";
@@ -601,7 +602,24 @@ export async function main(args: string[], options?: MainOptions) {
 		cleanupWindowsSelfUpdateQuarantine(getPackageDir());
 	}
 
+	if (args[0] === "doctor") {
+		// Interactive command: show fff-node install progress rather than a
+		// silent multi-second gap (runUpdatePreflight's background run stays
+		// quiet -- see the `{ silent: true }` default on runDoctor).
+		const report = await runDoctor(undefined, { silent: false });
+		console.log(formatDoctorReport(report));
+		process.exitCode = report.checks.some((check) => !check.present) ? 1 : 0;
+		return;
+	}
+
 	if (await handlePackageCommand(args)) {
+		// Verify + provision required tooling right after an update, instead of
+		// leaving it to lazy first-use (see doctor.ts's module doc). Best-effort
+		// and non-fatal: runUpdatePreflight() never throws, so a broken
+		// environment check can't turn a successful update into a failed one.
+		if (args[0] === "update" && process.exitCode !== 1) {
+			await runUpdatePreflight();
+		}
 		return;
 	}
 
