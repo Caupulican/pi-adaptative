@@ -94,7 +94,7 @@ import {
 	resolveCliModel,
 	resolveModelScope,
 } from "../../core/model-resolver.ts";
-import { formatModelSuggestions } from "../../core/models/default-model-suggestions.ts";
+import { DEFAULT_MODEL_SUGGESTIONS } from "../../core/models/default-model-suggestions.ts";
 import { FitnessStore } from "../../core/models/fitness-store.ts";
 import { registerLocalModel, unregisterLocalModel } from "../../core/models/local-registration.ts";
 import { OllamaRuntime } from "../../core/models/local-runtime.ts";
@@ -150,6 +150,7 @@ import { FooterComponent } from "./components/footer.ts";
 import { formatKeyText, keyDisplayText, keyHint, keyText, rawKeyHint } from "./components/keybinding-hints.ts";
 import { LoginDialogComponent } from "./components/login-dialog.ts";
 import { ModelSelectorComponent } from "./components/model-selector.ts";
+import { ModelSuggestionSelectorComponent } from "./components/model-suggestion-selector.ts";
 import { type AuthSelectorProvider, OAuthSelectorComponent } from "./components/oauth-selector.ts";
 import {
 	ProfileResourceEditorComponent,
@@ -6135,7 +6136,7 @@ export class InteractiveMode {
 		const [action = "list", ...rest] = argsText.split(/\s+/).filter(Boolean);
 		try {
 			if (action === "suggest" || action === "suggestions") {
-				for (const line of formatModelSuggestions()) this.showStatus(line);
+				this.showModelSuggestionSelector();
 				return;
 			}
 			if (action === "stop") {
@@ -6239,7 +6240,7 @@ export class InteractiveMode {
 		for (const line of lines) this.showStatus(line);
 	}
 
-	private async addLocalModel(pullRef: string): Promise<void> {
+	private async addLocalModel(pullRef: string, preselectRole?: FitnessRole): Promise<void> {
 		if (!(await this.ensureLocalServer())) return;
 		this.showStatus(`Pulling ${pullRef}… (weights land in the server's model storage)`);
 		let lastShown = 0;
@@ -6268,7 +6269,7 @@ export class InteractiveMode {
 		}
 		this.session.modelRegistry.refresh();
 		this.showStatus(`${pullRef} installed and registered as ollama/${pullRef}. Probing fitness…`);
-		await this.runFitnessAndAssign(`ollama/${pullRef}`);
+		await this.runFitnessAndAssign(`ollama/${pullRef}`, preselectRole);
 	}
 
 	private async removeLocalModel(ref: string, confirmed: boolean): Promise<void> {
@@ -6311,6 +6312,26 @@ export class InteractiveMode {
 	}
 
 	/** /fitness with no args: pick a model from the configured registry, probe it, assign a role. */
+	/** Pick a validated suggestion → install it → probe on this host → land its shaped role. */
+	private showModelSuggestionSelector(): void {
+		this.showSelector((done) => {
+			const selector = new ModelSuggestionSelectorComponent(
+				DEFAULT_MODEL_SUGGESTIONS,
+				async (suggestion) => {
+					done();
+					// The shaped role rides along so the post-probe selector lands on it pre-selected;
+					// non-tool-callers carry curator/judge/none, never executor, so this can't footgun.
+					await this.addLocalModel(suggestion.pullRef, suggestion.assignRole);
+				},
+				() => {
+					done();
+					this.ui.requestRender();
+				},
+			);
+			return { component: selector, focus: selector };
+		});
+	}
+
 	private showFitnessModelSelector(): void {
 		this.showSelector((done) => {
 			const selector = new ModelSelectorComponent(
@@ -6332,8 +6353,9 @@ export class InteractiveMode {
 		});
 	}
 
-	/** Probe a model's fitness, show the report, then offer one-step role assignment. */
-	private async runFitnessAndAssign(modelRef: string): Promise<void> {
+	/** Probe a model's fitness, show the report, then offer one-step role assignment. When the model
+	 * came from a validated suggestion, `preselectRole` lands its shaped role already highlighted. */
+	private async runFitnessAndAssign(modelRef: string, preselectRole?: FitnessRole): Promise<void> {
 		this.showStatus(`Model fitness probe running on ${modelRef}… (6 surfaces; local models may take a few minutes)`);
 		try {
 			const outcome = await this.session.runModelFitness({ model: modelRef });
@@ -6355,6 +6377,7 @@ export class InteractiveMode {
 						done();
 						this.ui.requestRender();
 					},
+					preselectRole,
 				);
 				return { component: selector, focus: selector };
 			});

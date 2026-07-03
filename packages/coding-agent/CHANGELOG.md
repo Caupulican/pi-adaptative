@@ -1,5 +1,14 @@
 ## [Unreleased]
 
+### Added
+
+- `/models suggest` now opens an interactive picker over the validated local-model roster instead of
+  printing a list to retype: choosing a model installs it, probes its six fitness surfaces on the
+  actual hardware, and lands the role it was shaped for already pre-selected in the assignment step —
+  so a suggested model goes from pick to installed-and-set in one flow. The suggestion's shaped
+  `assignRole` (previously unused metadata) drives the pre-selection; non-tool-calling models carry
+  curator/judge/lane roles and never pre-select the executor role.
+
 ### Fixed
 
 - Hardened the hardening sweep after a max-effort review of the working diff found nine regressions

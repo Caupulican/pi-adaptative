@@ -1,6 +1,7 @@
 import { describe, expect, it } from "vitest";
 import { DEFAULT_MODEL_SUGGESTIONS, formatModelSuggestions } from "../src/core/models/default-model-suggestions.ts";
 import { normalizeModelSource } from "../src/core/models/model-ref.ts";
+import { FITNESS_ROLE_ORDER } from "../src/modes/interactive/components/fitness-role-selector.ts";
 
 describe("default model suggestions", () => {
 	it("every suggested pullRef normalizes to a usable local source (/models add accepts it)", () => {
@@ -29,6 +30,19 @@ describe("default model suggestions", () => {
 		for (const suggestion of DEFAULT_MODEL_SUGGESTIONS.filter((s) => s.name.includes("Bonsai"))) {
 			expect(suggestion.toolCalling).toBe(false);
 			expect(suggestion.assignRole).not.toBe("executor");
+		}
+	});
+
+	it("every shaped assignRole is a role the post-probe selector can actually pre-select (not dead data)", () => {
+		// The suggestion flow feeds assignRole into FitnessRoleSelectorComponent as the pre-selected
+		// role; a value the selector doesn't offer would silently fall back to the default, quietly
+		// dropping the whole point of the shaped role. Keep the roster and the selector in lockstep.
+		for (const suggestion of DEFAULT_MODEL_SUGGESTIONS) {
+			if (suggestion.assignRole !== undefined) {
+				expect(FITNESS_ROLE_ORDER, `${suggestion.name} → ${suggestion.assignRole}`).toContain(
+					suggestion.assignRole,
+				);
+			}
 		}
 	});
 
