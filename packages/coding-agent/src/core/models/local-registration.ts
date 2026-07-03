@@ -44,7 +44,8 @@ export interface LocalRegistrationResult {
 	manualSnippet?: string;
 }
 
-const OLLAMA_PROVIDER = "ollama";
+/** Provider name pi registers pulled local models under (see registerLocalModel below). */
+export const OLLAMA_PROVIDER = "ollama";
 
 function localModelEntry(ref: string, contextWindow: number): ModelsJsonModel {
 	return {

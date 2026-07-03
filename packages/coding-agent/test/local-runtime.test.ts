@@ -60,6 +60,81 @@ describe("OllamaRuntime", () => {
 		expect(runtime.stop()).toEqual({ stopped: true });
 	});
 
+	it("startReuseExisting refuses when a server already responds (never double-serves)", async () => {
+		const runtime = new OllamaRuntime({
+			agentDir: "/agent",
+			deps: { fetchFn: async () => new Response('{"models":[]}', { status: 200 }) },
+		});
+		expect(await runtime.startReuseExisting()).toEqual({ started: false, reason: "already_running_system" });
+	});
+
+	it("startReuseExisting reports binary_missing without spawning anything", async () => {
+		const spawnFn = vi.fn();
+		const runtime = new OllamaRuntime({
+			agentDir: "/agent",
+			deps: {
+				existsFn: () => false,
+				envPath: "",
+				fetchFn: async () => new Response("", { status: 500 }),
+				spawnFn,
+			},
+		});
+		expect(await runtime.startReuseExisting()).toEqual({ started: false, reason: "binary_missing" });
+		expect(spawnFn).not.toHaveBeenCalled();
+	});
+
+	it("startReuseExisting spawns serve WITHOUT an OLLAMA_MODELS override — reuses the user's own models dir", async () => {
+		let serveEnv: NodeJS.ProcessEnv | undefined;
+		let up = false;
+		const runtime = new OllamaRuntime({
+			agentDir: `${process.cwd()}/.scratch-runtime-test-reuse`,
+			deps: {
+				existsFn: (path) => path === "/usr/bin/ollama",
+				envPath: "/usr/bin",
+				homeDir: "/home/u",
+				sleepFn: async () => {},
+				fetchFn: async () => new Response("{}", { status: up ? 200 : 500 }),
+				spawnFn: (_command, argv, options) => {
+					expect(argv).toEqual(["serve"]);
+					serveEnv = options.env;
+					up = true;
+					return { pid: 1234, kill: vi.fn(), unref: vi.fn(), on: vi.fn() } as never;
+				},
+			},
+		});
+		const result = await runtime.startReuseExisting();
+		expect(result.started).toBe(true);
+		// The whole point: no override, so Ollama falls through to its own default (~/.ollama), where
+		// the user's already-pulled models live — NOT pi's owned/isolated storage.
+		expect(serveEnv?.OLLAMA_MODELS).toBeUndefined();
+		expect(serveEnv?.OLLAMA_FLASH_ATTENTION).toBe("1");
+		expect(serveEnv?.OLLAMA_NUM_PARALLEL).toBe("1");
+		expect(runtime.stop()).toEqual({ stopped: true });
+	});
+
+	it("start (owned-storage) is unaffected by startReuseExisting existing — still sets OLLAMA_MODELS", async () => {
+		let serveEnv: NodeJS.ProcessEnv | undefined;
+		let up = false;
+		const runtime = new OllamaRuntime({
+			agentDir: `${process.cwd()}/.scratch-runtime-test-owned`,
+			deps: {
+				existsFn: (path) => path === "/usr/bin/ollama",
+				envPath: "/usr/bin",
+				homeDir: "/home/u",
+				sleepFn: async () => {},
+				fetchFn: async () => new Response("{}", { status: up ? 200 : 500 }),
+				spawnFn: (_command, _argv, options) => {
+					serveEnv = options.env;
+					up = true;
+					return { pid: 1234, kill: vi.fn(), unref: vi.fn(), on: vi.fn() } as never;
+				},
+			},
+		});
+		await runtime.start();
+		expect(serveEnv?.OLLAMA_MODELS).toContain(".scratch-runtime-test-owned/models/ollama");
+		expect(runtime.stop()).toEqual({ stopped: true });
+	});
+
 	it("lists installed models with sizes from /api/tags", async () => {
 		const runtime = new OllamaRuntime({
 			agentDir: "/agent",

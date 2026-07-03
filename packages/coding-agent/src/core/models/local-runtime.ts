@@ -129,28 +129,15 @@ export class OllamaRuntime {
 		];
 	}
 
-	/**
-	 * Start a pi-managed serve with OWNED storage and the hardened env verified on this class of
-	 * hardware. No-op (reported) when a server already responds — pi never double-serves.
-	 */
-	async start(): Promise<{ started: boolean; reason: string }> {
-		if (await this._serverUp()) {
-			return { started: false, reason: this._child ? "already_running_managed" : "already_running_system" };
-		}
-		const binary = this._findBinary();
-		if (!binary) return { started: false, reason: "binary_missing" };
-		mkdirSync(this.ownedModelsDir(), { recursive: true });
+	/** Shared spawn-then-health-poll for both start modes below; `extraEnv` is the only thing that
+	 * differs between them (owned storage vs reusing the user's own). */
+	private async _spawnAndPoll(
+		binary: { path: string },
+		extraEnv: NodeJS.ProcessEnv,
+	): Promise<{ started: boolean; reason: string }> {
 		const host = this._baseUrl.replace(/^https?:\/\//, "");
 		this._child = this._spawn(binary.path, ["serve"], {
-			env: {
-				...process.env,
-				OLLAMA_HOST: host,
-				OLLAMA_MODELS: this.ownedModelsDir(),
-				OLLAMA_FLASH_ATTENTION: "1",
-				OLLAMA_KV_CACHE_TYPE: "q8_0",
-				OLLAMA_NUM_PARALLEL: "1",
-				OLLAMA_MAX_LOADED_MODELS: "3",
-			},
+			env: { ...process.env, OLLAMA_HOST: host, ...extraEnv },
 		});
 		this._child.unref?.();
 		for (let attempt = 0; attempt < START_POLL_ATTEMPTS; attempt++) {
@@ -159,6 +146,47 @@ export class OllamaRuntime {
 		}
 		this.stop();
 		return { started: false, reason: "health_check_timeout" };
+	}
+
+	/**
+	 * Start a pi-managed serve with OWNED storage and the hardened env verified on this class of
+	 * hardware. No-op (reported) when a server already responds — pi never double-serves. Used by
+	 * `/models add` et al, where isolated per-model-pull storage is the point.
+	 */
+	async start(): Promise<{ started: boolean; reason: string }> {
+		if (await this._serverUp()) {
+			return { started: false, reason: this._child ? "already_running_managed" : "already_running_system" };
+		}
+		const binary = this._findBinary();
+		if (!binary) return { started: false, reason: "binary_missing" };
+		mkdirSync(this.ownedModelsDir(), { recursive: true });
+		return this._spawnAndPoll(binary, {
+			OLLAMA_MODELS: this.ownedModelsDir(),
+			OLLAMA_FLASH_ATTENTION: "1",
+			OLLAMA_KV_CACHE_TYPE: "q8_0",
+			OLLAMA_NUM_PARALLEL: "1",
+			OLLAMA_MAX_LOADED_MODELS: "3",
+		});
+	}
+
+	/**
+	 * Start a serve that REUSES the user's own existing models directory (no `OLLAMA_MODELS`
+	 * override — falls through to Ollama's own default, `~/.ollama`), for callers that must see the
+	 * user's already-pulled models rather than pi's isolated/owned storage. Same idempotency and
+	 * hardened perf env as {@link start}; the only difference is which storage the server sees.
+	 */
+	async startReuseExisting(): Promise<{ started: boolean; reason: string }> {
+		if (await this._serverUp()) {
+			return { started: false, reason: this._child ? "already_running_managed" : "already_running_system" };
+		}
+		const binary = this._findBinary();
+		if (!binary) return { started: false, reason: "binary_missing" };
+		return this._spawnAndPoll(binary, {
+			OLLAMA_FLASH_ATTENTION: "1",
+			OLLAMA_KV_CACHE_TYPE: "q8_0",
+			OLLAMA_NUM_PARALLEL: "1",
+			OLLAMA_MAX_LOADED_MODELS: "3",
+		});
 	}
 
 	/** Resource hygiene only: stops the pi-managed serve process; never deletes anything. */

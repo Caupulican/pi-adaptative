@@ -25,6 +25,17 @@
   so a suggested model goes from pick to installed-and-set in one flow. The suggestion's shaped
   `assignRole` (previously unused metadata) drives the pre-selection; non-tool-calling models carry
   curator/judge/lane roles and never pre-select the executor role.
+- The model router now auto-manages the local ollama server: when a turn routes to a local (ollama)
+  model, pi ensures the server is up first — reusing an already-running server and the user's own
+  `~/.ollama` models (never pi's owned storage; a reuse-mode start omits the `OLLAMA_MODELS` override
+  that `/models add` still uses) or booting one if needed — so a local-routed turn never fails just
+  because the server wasn't started yet. A per-session "confirmed up" cache skips the health check on
+  later turns (re-checked only after a connection error from the same model). If the local model
+  can't be made ready (binary missing, or the server won't boot) the turn does not dead-end: a
+  visible warning states why (install steps inline when the binary is missing) and which tier is now
+  handling the turn, then it escalates to the next configured tier. The runtime is owned by
+  `AgentSession`, so headless/SDK turns get the same behavior and `/models` shares the one instance.
+  (An interactive "install it now?" consent prompt is a planned follow-up.)
 
 ### Fixed
 

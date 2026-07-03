@@ -97,7 +97,7 @@ import {
 import { DEFAULT_MODEL_SUGGESTIONS } from "../../core/models/default-model-suggestions.ts";
 import { FitnessStore } from "../../core/models/fitness-store.ts";
 import { registerLocalModel, unregisterLocalModel } from "../../core/models/local-registration.ts";
-import { OllamaRuntime } from "../../core/models/local-runtime.ts";
+import type { OllamaRuntime } from "../../core/models/local-runtime.ts";
 import { normalizeModelSource } from "../../core/models/model-ref.ts";
 import { DefaultPackageManager } from "../../core/package-manager.ts";
 import { BUILT_IN_PROVIDER_DISPLAY_NAMES } from "../../core/provider-display-names.ts";
@@ -6141,11 +6141,14 @@ export class InteractiveMode {
 		this.updateAutoLearnFooter();
 	}
 
-	private _localRuntime: OllamaRuntime | undefined;
-
+	/**
+	 * Delegates to the session rather than keeping its own instance (#27): the model router boots a
+	 * local server through AgentSession.getLocalRuntime() before a routed turn, and `/models`
+	 * commands need to see and be able to stop that SAME pi-managed process, not an unrelated one
+	 * tracked separately here.
+	 */
 	private get localRuntime(): OllamaRuntime {
-		this._localRuntime ??= new OllamaRuntime({ agentDir: getAgentDir() });
-		return this._localRuntime;
+		return this.session.getLocalRuntime();
 	}
 
 	/**

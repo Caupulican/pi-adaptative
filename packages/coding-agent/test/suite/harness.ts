@@ -14,6 +14,7 @@ import { AuthStorage } from "../../src/core/auth-storage.ts";
 import type { ExtensionRunner } from "../../src/core/extensions/index.ts";
 import { convertToLlm } from "../../src/core/messages.ts";
 import { ModelRegistry } from "../../src/core/model-registry.ts";
+import type { LocalRuntimeDeps } from "../../src/core/models/local-runtime.ts";
 import type { collectWorkspaceSources } from "../../src/core/research/workspace-collector.ts";
 import { SessionManager } from "../../src/core/session-manager.ts";
 import type { Settings } from "../../src/core/settings-manager.ts";
@@ -72,6 +73,8 @@ export interface HarnessOptions {
 	 * real ripgrep; the collector itself is covered by test/workspace-collector.test.ts.
 	 */
 	collectWorkspaceSources?: typeof collectWorkspaceSources;
+	/** Fake fetch/spawn/exists for the local (Ollama) runtime; see test/agent-session-local-runtime.test.ts. */
+	localRuntimeDeps?: LocalRuntimeDeps;
 }
 
 export interface Harness {
@@ -188,6 +191,7 @@ export async function createHarness(options: HarnessOptions = {}): Promise<Harne
 		excludedToolNames: options.excludedToolNames,
 		extensionRunnerRef,
 		collectWorkspaceSources: options.collectWorkspaceSources ?? (async () => []),
+		localRuntimeDeps: options.localRuntimeDeps,
 	});
 
 	const events: AgentSessionEvent[] = [];
