@@ -56,6 +56,8 @@ const SETTINGS_SUBMENU_SELECT_LIST_LAYOUT: SelectListLayoutOptions = {
 
 const AUTO_LEARN_CUSTOM_MODEL_VALUE = "__custom_auto_learn_model__";
 const MODEL_ROUTER_UNSET_MODEL_VALUE = "__unset_model_router_model__";
+const MODEL_ROUTER_INHERIT_THINKING_VALUE = "__inherit_model_router_thinking__";
+const MODEL_ROUTER_INHERIT_THINKING_LABEL = "(inherit)";
 
 const THINKING_DESCRIPTIONS: Record<ThinkingLevel, string> = {
 	off: "No reasoning",
@@ -313,6 +315,21 @@ function buildModelRouterRoleModelOptions(options: {
 	});
 
 	return modelOptions;
+}
+
+function buildModelRouterThinkingOptions(inheritDescription: string): SelectItem[] {
+	return [
+		{
+			value: MODEL_ROUTER_INHERIT_THINKING_VALUE,
+			label: MODEL_ROUTER_INHERIT_THINKING_LABEL,
+			description: inheritDescription,
+		},
+		...(Object.keys(THINKING_DESCRIPTIONS) as ThinkingLevel[]).map((level) => ({
+			value: level,
+			label: level,
+			description: THINKING_DESCRIPTIONS[level],
+		})),
+	];
 }
 
 export interface SettingsConfig {
@@ -1624,6 +1641,12 @@ class ModelRouterSettingsSubmenu extends Container {
 			currentModelPattern,
 			includeActive: true,
 		});
+		const routedTierThinkingOptions = buildModelRouterThinkingOptions(
+			"Inherit the session thinking level for this turn, clamped to the routed model",
+		);
+		const judgeThinkingOptions = buildModelRouterThinkingOptions(
+			"Use today's default of off for the routing judge's own completion",
+		);
 		this.addChild(new Text(theme.bold(theme.fg("accent", "Model Router")), 0, 0));
 		this.addChild(new Spacer(1));
 
@@ -1754,6 +1777,126 @@ class ModelRouterSettingsSubmenu extends Container {
 							customEmptyHint: 'empty uses "active"',
 							customEmptyValue: AUTO_LEARN_DEFAULTS.model,
 						},
+					),
+			},
+			{
+				id: "model-router-cheap-thinking",
+				label: "Cheap thinking",
+				description:
+					"Thinking-level override for cheap-tier (read-only/research) routed turns; (inherit) keeps today's behavior: the session level, clamped to the routed model",
+				currentValue: this.state.cheapThinking ?? MODEL_ROUTER_INHERIT_THINKING_LABEL,
+				submenu: (_currentValue, done) =>
+					new SelectSubmenu(
+						"Cheap Tier Thinking",
+						"Select a thinking-level override for cheap-tier routed turns, or inherit the session level",
+						routedTierThinkingOptions,
+						this.state.cheapThinking ?? MODEL_ROUTER_INHERIT_THINKING_VALUE,
+						(value) => {
+							this.state = {
+								...this.state,
+								cheapThinking:
+									value === MODEL_ROUTER_INHERIT_THINKING_VALUE ? undefined : (value as ThinkingLevel),
+							};
+							onChange({ ...this.state }, this.scope);
+							done(this.state.cheapThinking ?? MODEL_ROUTER_INHERIT_THINKING_LABEL);
+						},
+						() => done(),
+					),
+			},
+			{
+				id: "model-router-medium-thinking",
+				label: "Medium thinking",
+				description:
+					"Thinking-level override for medium-tier (scoped implementation) routed turns; (inherit) keeps today's behavior: the session level, clamped to the routed model",
+				currentValue: this.state.mediumThinking ?? MODEL_ROUTER_INHERIT_THINKING_LABEL,
+				submenu: (_currentValue, done) =>
+					new SelectSubmenu(
+						"Medium Tier Thinking",
+						"Select a thinking-level override for medium-tier routed turns, or inherit the session level",
+						routedTierThinkingOptions,
+						this.state.mediumThinking ?? MODEL_ROUTER_INHERIT_THINKING_VALUE,
+						(value) => {
+							this.state = {
+								...this.state,
+								mediumThinking:
+									value === MODEL_ROUTER_INHERIT_THINKING_VALUE ? undefined : (value as ThinkingLevel),
+							};
+							onChange({ ...this.state }, this.scope);
+							done(this.state.mediumThinking ?? MODEL_ROUTER_INHERIT_THINKING_LABEL);
+						},
+						() => done(),
+					),
+			},
+			{
+				id: "model-router-expensive-thinking",
+				label: "Expensive thinking",
+				description:
+					"Thinking-level override for expensive-tier (modify/escalated) routed turns; (inherit) keeps today's behavior: the session level, clamped to the routed model",
+				currentValue: this.state.expensiveThinking ?? MODEL_ROUTER_INHERIT_THINKING_LABEL,
+				submenu: (_currentValue, done) =>
+					new SelectSubmenu(
+						"Expensive Tier Thinking",
+						"Select a thinking-level override for expensive-tier routed turns, or inherit the session level",
+						routedTierThinkingOptions,
+						this.state.expensiveThinking ?? MODEL_ROUTER_INHERIT_THINKING_VALUE,
+						(value) => {
+							this.state = {
+								...this.state,
+								expensiveThinking:
+									value === MODEL_ROUTER_INHERIT_THINKING_VALUE ? undefined : (value as ThinkingLevel),
+							};
+							onChange({ ...this.state }, this.scope);
+							done(this.state.expensiveThinking ?? MODEL_ROUTER_INHERIT_THINKING_LABEL);
+						},
+						() => done(),
+					),
+			},
+			{
+				id: "model-router-executor-thinking",
+				label: "Executor thinking",
+				description:
+					"Thinking-level override for the local executor-direct lane; (inherit) keeps today's behavior: the session level, clamped to the routed model",
+				currentValue: this.state.executorThinking ?? MODEL_ROUTER_INHERIT_THINKING_LABEL,
+				submenu: (_currentValue, done) =>
+					new SelectSubmenu(
+						"Executor Thinking",
+						"Select a thinking-level override for the executor-direct lane, or inherit the session level",
+						routedTierThinkingOptions,
+						this.state.executorThinking ?? MODEL_ROUTER_INHERIT_THINKING_VALUE,
+						(value) => {
+							this.state = {
+								...this.state,
+								executorThinking:
+									value === MODEL_ROUTER_INHERIT_THINKING_VALUE ? undefined : (value as ThinkingLevel),
+							};
+							onChange({ ...this.state }, this.scope);
+							done(this.state.executorThinking ?? MODEL_ROUTER_INHERIT_THINKING_LABEL);
+						},
+						() => done(),
+					),
+			},
+			{
+				id: "model-router-judge-thinking",
+				label: "Judge thinking",
+				description:
+					"Thinking-level override for the routing judge's own completion; (inherit) keeps today's default of off",
+				currentValue: this.state.judgeThinking ?? MODEL_ROUTER_INHERIT_THINKING_LABEL,
+				submenu: (_currentValue, done) =>
+					new SelectSubmenu(
+						"Judge Thinking",
+						"Select a thinking-level override for the routing judge's own completion, or inherit today's off default",
+						judgeThinkingOptions,
+						this.state.judgeThinking ?? MODEL_ROUTER_INHERIT_THINKING_VALUE,
+						(value) => {
+							this.state = {
+								...this.state,
+								judgeThinking:
+									value === MODEL_ROUTER_INHERIT_THINKING_VALUE ? undefined : (value as ThinkingLevel),
+							};
+							onChange({ ...this.state }, this.scope);
+							done(this.state.judgeThinking ?? MODEL_ROUTER_INHERIT_THINKING_LABEL);
+						},
+						() => done(),
 					),
 			},
 		];

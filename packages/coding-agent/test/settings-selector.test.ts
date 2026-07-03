@@ -764,6 +764,290 @@ describe("settings selector", () => {
 		);
 	});
 
+	it("exposes per-tier thinking settings in the Model Router submenu", () => {
+		const selector = new SettingsSelectorComponent(
+			makeConfig({
+				modelRouter: {
+					enabled: true,
+					cheapModel: "openai/gpt-5.4",
+					expensiveModel: "openai/gpt-5.4",
+					learningModel: "active",
+					cheapThinking: "low",
+					judgeThinking: "high",
+				},
+			}),
+			makeCallbacks(),
+		);
+
+		selector.getSettingsList().handleInput("model router");
+		selector.getSettingsList().handleInput("\r"); // open Model Router submenu
+		selector.getSettingsList().handleInput("\x1b[B");
+		selector.getSettingsList().handleInput("\x1b[B");
+		selector.getSettingsList().handleInput("\x1b[B");
+		selector.getSettingsList().handleInput("\x1b[B");
+		selector.getSettingsList().handleInput("\x1b[B");
+		selector.getSettingsList().handleInput("\x1b[B"); // down to "Cheap thinking"; scrolls all 5 thinking rows into view
+		const output = selector.render(180).join("\n");
+
+		expect(output).toContain("Cheap thinking");
+		expect(output).toContain("Medium thinking");
+		expect(output).toContain("Expensive thinking");
+		expect(output).toContain("Executor thinking");
+		expect(output).toContain("Judge thinking");
+		expect(output).toContain("low");
+		expect(output).toContain("high");
+		expect(output).toContain("(inherit)");
+	});
+
+	it("sets the cheap-tier thinking level from the Model Router submenu", () => {
+		const onModelRouterChange = vi.fn();
+		const selector = new SettingsSelectorComponent(
+			makeConfig({
+				modelRouter: {
+					enabled: true,
+					cheapModel: "openai/gpt-5.4",
+					expensiveModel: "openai/gpt-5.4",
+					learningModel: "active",
+				},
+			}),
+			makeCallbacks({ onModelRouterChange }),
+		);
+
+		selector.getSettingsList().handleInput("model router");
+		selector.getSettingsList().handleInput("\r");
+		selector.getSettingsList().handleInput("\x1b[B");
+		selector.getSettingsList().handleInput("\x1b[B");
+		selector.getSettingsList().handleInput("\x1b[B");
+		selector.getSettingsList().handleInput("\x1b[B");
+		selector.getSettingsList().handleInput("\x1b[B");
+		selector.getSettingsList().handleInput("\x1b[B"); // down to "Cheap thinking"
+		selector.getSettingsList().handleInput("\r"); // open Cheap Tier Thinking picker; preselects "(inherit)"
+		selector.getSettingsList().handleInput("\x1b[B"); // (inherit) -> off
+		selector.getSettingsList().handleInput("\x1b[B"); // off -> minimal
+		selector.getSettingsList().handleInput("\r"); // select "minimal"
+
+		expect(onModelRouterChange).toHaveBeenCalledWith(
+			{
+				enabled: true,
+				cheapModel: "openai/gpt-5.4",
+				expensiveModel: "openai/gpt-5.4",
+				learningModel: "active",
+				cheapThinking: "minimal",
+			},
+			"global",
+		);
+	});
+
+	it("sets the medium-tier thinking level from the Model Router submenu", () => {
+		const onModelRouterChange = vi.fn();
+		const selector = new SettingsSelectorComponent(
+			makeConfig({
+				modelRouter: {
+					enabled: true,
+					cheapModel: "openai/gpt-5.4",
+					expensiveModel: "openai/gpt-5.4",
+					learningModel: "active",
+				},
+			}),
+			makeCallbacks({ onModelRouterChange }),
+		);
+
+		selector.getSettingsList().handleInput("model router");
+		selector.getSettingsList().handleInput("\r");
+		selector.getSettingsList().handleInput("\x1b[B");
+		selector.getSettingsList().handleInput("\x1b[B");
+		selector.getSettingsList().handleInput("\x1b[B");
+		selector.getSettingsList().handleInput("\x1b[B");
+		selector.getSettingsList().handleInput("\x1b[B");
+		selector.getSettingsList().handleInput("\x1b[B");
+		selector.getSettingsList().handleInput("\x1b[B"); // down to "Medium thinking"
+		selector.getSettingsList().handleInput("\r"); // open Medium Tier Thinking picker; preselects "(inherit)"
+		selector.getSettingsList().handleInput("\x1b[B"); // (inherit) -> off
+		selector.getSettingsList().handleInput("\x1b[B"); // off -> minimal
+		selector.getSettingsList().handleInput("\x1b[B"); // minimal -> low
+		selector.getSettingsList().handleInput("\r"); // select "low"
+
+		expect(onModelRouterChange).toHaveBeenCalledWith(
+			{
+				enabled: true,
+				cheapModel: "openai/gpt-5.4",
+				expensiveModel: "openai/gpt-5.4",
+				learningModel: "active",
+				mediumThinking: "low",
+			},
+			"global",
+		);
+	});
+
+	it("sets the expensive-tier thinking level from the Model Router submenu", () => {
+		const onModelRouterChange = vi.fn();
+		const selector = new SettingsSelectorComponent(
+			makeConfig({
+				modelRouter: {
+					enabled: true,
+					cheapModel: "openai/gpt-5.4",
+					expensiveModel: "openai/gpt-5.4",
+					learningModel: "active",
+				},
+			}),
+			makeCallbacks({ onModelRouterChange }),
+		);
+
+		selector.getSettingsList().handleInput("model router");
+		selector.getSettingsList().handleInput("\r");
+		selector.getSettingsList().handleInput("\x1b[B");
+		selector.getSettingsList().handleInput("\x1b[B");
+		selector.getSettingsList().handleInput("\x1b[B");
+		selector.getSettingsList().handleInput("\x1b[B");
+		selector.getSettingsList().handleInput("\x1b[B");
+		selector.getSettingsList().handleInput("\x1b[B");
+		selector.getSettingsList().handleInput("\x1b[B");
+		selector.getSettingsList().handleInput("\x1b[B"); // down to "Expensive thinking"
+		selector.getSettingsList().handleInput("\r"); // open Expensive Tier Thinking picker; preselects "(inherit)"
+		selector.getSettingsList().handleInput("\x1b[A"); // (inherit) wraps up to "xhigh" (last option)
+		selector.getSettingsList().handleInput("\r"); // select "xhigh"
+
+		expect(onModelRouterChange).toHaveBeenCalledWith(
+			{
+				enabled: true,
+				cheapModel: "openai/gpt-5.4",
+				expensiveModel: "openai/gpt-5.4",
+				learningModel: "active",
+				expensiveThinking: "xhigh",
+			},
+			"global",
+		);
+	});
+
+	it("sets the executor thinking level from the Model Router submenu", () => {
+		const onModelRouterChange = vi.fn();
+		const selector = new SettingsSelectorComponent(
+			makeConfig({
+				modelRouter: {
+					enabled: true,
+					cheapModel: "openai/gpt-5.4",
+					expensiveModel: "openai/gpt-5.4",
+					learningModel: "active",
+				},
+			}),
+			makeCallbacks({ onModelRouterChange }),
+		);
+
+		selector.getSettingsList().handleInput("model router");
+		selector.getSettingsList().handleInput("\r");
+		selector.getSettingsList().handleInput("\x1b[B");
+		selector.getSettingsList().handleInput("\x1b[B");
+		selector.getSettingsList().handleInput("\x1b[B");
+		selector.getSettingsList().handleInput("\x1b[B");
+		selector.getSettingsList().handleInput("\x1b[B");
+		selector.getSettingsList().handleInput("\x1b[B");
+		selector.getSettingsList().handleInput("\x1b[B");
+		selector.getSettingsList().handleInput("\x1b[B");
+		selector.getSettingsList().handleInput("\x1b[B"); // down to "Executor thinking"
+		selector.getSettingsList().handleInput("\r"); // open Executor Thinking picker; preselects "(inherit)"
+		selector.getSettingsList().handleInput("\x1b[B"); // (inherit) -> off
+		selector.getSettingsList().handleInput("\r"); // select "off"
+
+		expect(onModelRouterChange).toHaveBeenCalledWith(
+			{
+				enabled: true,
+				cheapModel: "openai/gpt-5.4",
+				expensiveModel: "openai/gpt-5.4",
+				learningModel: "active",
+				executorThinking: "off",
+			},
+			"global",
+		);
+	});
+
+	it("sets the judge thinking level from the Model Router submenu", () => {
+		const onModelRouterChange = vi.fn();
+		const selector = new SettingsSelectorComponent(
+			makeConfig({
+				modelRouter: {
+					enabled: true,
+					cheapModel: "openai/gpt-5.4",
+					expensiveModel: "openai/gpt-5.4",
+					learningModel: "active",
+				},
+			}),
+			makeCallbacks({ onModelRouterChange }),
+		);
+
+		selector.getSettingsList().handleInput("model router");
+		selector.getSettingsList().handleInput("\r");
+		selector.getSettingsList().handleInput("\x1b[B");
+		selector.getSettingsList().handleInput("\x1b[B");
+		selector.getSettingsList().handleInput("\x1b[B");
+		selector.getSettingsList().handleInput("\x1b[B");
+		selector.getSettingsList().handleInput("\x1b[B");
+		selector.getSettingsList().handleInput("\x1b[B");
+		selector.getSettingsList().handleInput("\x1b[B");
+		selector.getSettingsList().handleInput("\x1b[B");
+		selector.getSettingsList().handleInput("\x1b[B");
+		selector.getSettingsList().handleInput("\x1b[B"); // down to "Judge thinking"
+		selector.getSettingsList().handleInput("\r"); // open Judge Thinking picker; preselects "(inherit)"
+		selector.getSettingsList().handleInput("\x1b[B"); // (inherit) -> off
+		selector.getSettingsList().handleInput("\x1b[B"); // off -> minimal
+		selector.getSettingsList().handleInput("\x1b[B"); // minimal -> low
+		selector.getSettingsList().handleInput("\x1b[B"); // low -> medium
+		selector.getSettingsList().handleInput("\r"); // select "medium"
+
+		expect(onModelRouterChange).toHaveBeenCalledWith(
+			{
+				enabled: true,
+				cheapModel: "openai/gpt-5.4",
+				expensiveModel: "openai/gpt-5.4",
+				learningModel: "active",
+				judgeThinking: "medium",
+			},
+			"global",
+		);
+	});
+
+	it("clears a per-tier thinking override back to (inherit) from the Model Router submenu", () => {
+		const onModelRouterChange = vi.fn();
+		const selector = new SettingsSelectorComponent(
+			makeConfig({
+				modelRouter: {
+					enabled: true,
+					cheapModel: "openai/gpt-5.4",
+					expensiveModel: "openai/gpt-5.4",
+					learningModel: "active",
+					cheapThinking: "high",
+				},
+			}),
+			makeCallbacks({ onModelRouterChange }),
+		);
+
+		selector.getSettingsList().handleInput("model router");
+		selector.getSettingsList().handleInput("\r");
+		selector.getSettingsList().handleInput("\x1b[B");
+		selector.getSettingsList().handleInput("\x1b[B");
+		selector.getSettingsList().handleInput("\x1b[B");
+		selector.getSettingsList().handleInput("\x1b[B");
+		selector.getSettingsList().handleInput("\x1b[B");
+		selector.getSettingsList().handleInput("\x1b[B"); // down to "Cheap thinking"
+		selector.getSettingsList().handleInput("\r"); // open Cheap Tier Thinking picker; preselects "high"
+		selector.getSettingsList().handleInput("\x1b[A"); // high -> medium
+		selector.getSettingsList().handleInput("\x1b[A"); // medium -> low
+		selector.getSettingsList().handleInput("\x1b[A"); // low -> minimal
+		selector.getSettingsList().handleInput("\x1b[A"); // minimal -> off
+		selector.getSettingsList().handleInput("\x1b[A"); // off -> (inherit)
+		selector.getSettingsList().handleInput("\r"); // select "(inherit)"
+
+		expect(onModelRouterChange).toHaveBeenCalledWith(
+			{
+				enabled: true,
+				cheapModel: "openai/gpt-5.4",
+				expensiveModel: "openai/gpt-5.4",
+				learningModel: "active",
+				cheapThinking: undefined,
+			},
+			"global",
+		);
+	});
+
 	it("cancels the Resources submenu with Escape and Ctrl+C", () => {
 		for (const key of ["\x1b", "\x03"]) {
 			const onCancel = vi.fn();
