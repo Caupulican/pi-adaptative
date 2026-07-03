@@ -12,8 +12,9 @@ import type {
 	FffSearchResult,
 } from "../src/core/tools/fff-search-backend.ts";
 import { hasGitignoreInTree, loadFffModule, relativePathInside } from "../src/core/tools/fff-search-backend.ts";
-import { createFindToolDefinition } from "../src/core/tools/find.ts";
-import { createGrepToolDefinition } from "../src/core/tools/grep.ts";
+import { createFindToolDefinition, tryFffFind } from "../src/core/tools/find.ts";
+import { createGrepToolDefinition, tryFffGrep } from "../src/core/tools/grep.ts";
+import { defaultSearchRouter } from "../src/core/tools/search-router.ts";
 
 interface TextToolResult {
 	content: Array<{ type: string; text?: string }>;
@@ -456,5 +457,125 @@ describe("FFF-backed built-in search tools", () => {
 
 		expect(result.details).toEqual({ matchLimitReached: 1 });
 		expect(getText(result)).toContain("1 matches limit reached");
+	});
+
+	describe("lazy FFF provisioning is not gated behind this call's own routing outcome", () => {
+		// Root cause: find/grep only ever called backend.getFinder() -- the one path
+		// that lazily installs fff-node on a fresh machine -- once the router had
+		// ALREADY decided this call wants FFF. The default result limit (find: 1000,
+		// grep: 100) always exceeds the FFF top-N threshold (20, see
+		// search-router.ts DEFAULT_SEARCH_ROUTER_THRESHOLDS), so an ordinary agent
+		// call that omits `limit` made the router bail out via "exhaustive_limit"
+		// BEFORE getFinder() was ever reached. On a fresh machine, where no earlier
+		// small-limit call had happened yet either, fff-node was therefore never
+		// provisioned at all -- search silently and permanently stayed on fd/rg.
+		//
+		// The fix: getFinder() must be primed unconditionally, regardless of what
+		// this call's own routing decision turns out to be, so a fresh machine gets
+		// a chance to install fff-node from the very first search.
+
+		it("still primes the finder for find when the default (oversized) limit routes to the fd fallback", async () => {
+			const backend = new FakeFffBackend();
+
+			const result = await tryFffFind({
+				backend,
+				router: defaultSearchRouter,
+				cwd: tempRoot,
+				searchPath: tempRoot,
+				pattern: "*.ts",
+				effectiveLimit: 1000, // DEFAULT_LIMIT from find.ts; exceeds the FFF threshold by design
+				toolCallId: "call-1",
+			});
+
+			// The routing outcome for THIS call must be unchanged: still fd, since
+			// 1000 > the FFF top-N threshold is a deliberate, measured decision.
+			expect(result).toBeUndefined();
+			// But the finder (and, on a fresh machine, the lazy install behind it)
+			// must have been kicked off regardless.
+			expect(backend.basePaths).toEqual([tempRoot]);
+		});
+
+		it("still primes the finder for grep when the default (oversized) limit routes to the rg fallback", async () => {
+			const backend = new FakeFffBackend();
+
+			const result = await tryFffGrep({
+				backend,
+				router: defaultSearchRouter,
+				cwd: tempRoot,
+				searchPath: tempRoot,
+				pattern: "TODO",
+				contextValue: 0,
+				effectiveLimit: 100, // DEFAULT_LIMIT from grep.ts; exceeds the FFF threshold by design
+				isDirectory: true,
+				toolCallId: "call-1",
+			});
+
+			expect(result).toBeUndefined();
+			expect(backend.basePaths).toEqual([tempRoot]);
+		});
+
+		it("primes the finder exactly once for find even when routing also wants FFF for this call", async () => {
+			// Guards against a naive fix that calls getFinder() twice (once to prime,
+			// once for the real routing check) instead of reusing the same call.
+			const backend = new FakeFffBackend();
+			backend.finder.searchResult = {
+				items: [fileItem("src/foo.ts")],
+				scores: [],
+				totalMatched: 1,
+				totalFiles: 1,
+			};
+
+			const result = await tryFffFind({
+				backend,
+				router: defaultSearchRouter,
+				cwd: tempRoot,
+				searchPath: tempRoot,
+				pattern: "foo",
+				effectiveLimit: 10,
+				toolCallId: "call-1",
+			});
+
+			expect(result).toBeDefined();
+			expect(backend.basePaths).toEqual([tempRoot]);
+		});
+
+		it("falls back to fd instead of failing the call when a custom backend's getFinder throws synchronously", async () => {
+			// The FffSearchBackend contract is also implemented by extension-supplied
+			// backends (e.g. SSH remote search); a non-conforming one that throws
+			// synchronously instead of rejecting must not turn "prime the finder in
+			// the background" into a failed tool call. It must degrade to "FFF
+			// unavailable for this call" just like a backend that returns undefined.
+			const throwingBackend: FffSearchBackend = {
+				getFinder(): Promise<FffFileFinder | undefined> {
+					throw new Error("synchronous boom from a non-conforming backend");
+				},
+			};
+
+			await expect(
+				tryFffFind({
+					backend: throwingBackend,
+					router: defaultSearchRouter,
+					cwd: tempRoot,
+					searchPath: tempRoot,
+					pattern: "foo",
+					effectiveLimit: 10,
+					toolCallId: "call-1",
+				}),
+			).resolves.toBeUndefined();
+
+			await expect(
+				tryFffGrep({
+					backend: throwingBackend,
+					router: defaultSearchRouter,
+					cwd: tempRoot,
+					searchPath: tempRoot,
+					pattern: "TODO",
+					contextValue: 0,
+					effectiveLimit: 10,
+					isDirectory: true,
+					toolCallId: "call-1",
+				}),
+			).resolves.toBeUndefined();
+		});
 	});
 });

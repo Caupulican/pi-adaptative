@@ -28,6 +28,20 @@
 
 ### Fixed
 
+- FFF native search now provisions itself even for ordinary searches. `find`/`grep` decide
+  FFF-vs-fallback using their default result limit (1000/100), which exceeds the router's top-N
+  threshold, so the decision is "fallback" and the tool returned *before* ever calling `getFinder()`
+  — the call that triggers the lazy managed install of `@ff-labs/fff-node`. A machine that only ran
+  default-limit searches therefore never installed FFF at all (rg/fd silently handled everything, so
+  its speed was never available). Provisioning is now decoupled from the per-call routing outcome:
+  `find`/`grep` kick off the finder unconditionally via a new `safeGetFinder` that can never reject
+  (even if a custom backend's `getFinder` throws synchronously), reusing the same in-flight promise
+  when the call does route to FFF. A genuine install failure is now retryable instead of permanently
+  gating FFF out — the finder is always evicted so the next search re-enters — while a 30s cooldown
+  throttles the npm spawn itself, so repeated searches during an outage don't respawn npm each time.
+  An explicit `--offline`/`PI_OFFLINE` directive and unsupported platforms remain a stable no-retry
+  fallback. The last install outcome is recorded (`getLastFffInstallOutcome`) for a future
+  environment `doctor` check.
 - The user's prompt now appears on screen immediately when submitted, instead of appearing to hang
   until the model router's routing judge finishes. The judge is a bounded LLM completion (seconds),
   and the turn previously built and emitted the user message only *after* awaiting it, so the prompt

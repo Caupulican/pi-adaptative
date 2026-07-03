@@ -22,6 +22,7 @@ import {
 	type FffSearchResult,
 	hasGitignoreInTree,
 	relativePathInside,
+	safeGetFinder,
 } from "./fff-search-backend.ts";
 import { pathExists, resolveToCwd } from "./path-utils.ts";
 import { getTextOutput, invalidArgText, shortenPath, str } from "./render-utils.ts";
@@ -190,7 +191,7 @@ function fffSearchOutput(
 	return formatFindResults(relativized, effectiveLimit, packing);
 }
 
-async function tryFffFind(options: {
+export async function tryFffFind(options: {
 	backend: FffSearchBackend;
 	router: SearchRouter;
 	cwd: string;
@@ -204,6 +205,21 @@ async function tryFffFind(options: {
 	rawPath?: string;
 }): Promise<{ text: string; details: FindToolDetails } | undefined> {
 	if (!(await pathExists(options.searchPath))) return undefined;
+
+	// Kick off the FFF finder -- and, on a machine where fff-node isn't provisioned
+	// yet, its lazy managed install -- unconditionally and as early as possible.
+	// Routing below can still send THIS call to the fd fallback for reasons that
+	// have nothing to do with tool availability (most commonly: the default result
+	// limit is well above the FFF top-N threshold, see search-router.ts). That
+	// outcome must not gate the install itself, or a machine that only ever issues
+	// default-limit searches would never provision fff-node at all. getFinder() is
+	// cached per basePath, so this costs nothing beyond the first call for a given
+	// cwd -- the `await` further down, when this call does want FFF, reuses this
+	// same in-flight/resolved promise instead of triggering the work twice.
+	// safeGetFinder() guarantees this can never reject (a non-conforming custom
+	// backend that throws synchronously still degrades to "unavailable"), so it
+	// can neither produce an unhandled rejection nor fail this tool call outright.
+	const finderPromise = safeGetFinder(options.backend, options.cwd);
 
 	const searchPathRelativeToCwd = relativePathInside(options.cwd, options.searchPath);
 	const glob = hasGlobSyntax(options.pattern);
@@ -231,7 +247,7 @@ async function tryFffFind(options: {
 	});
 	if (semanticRoute.backend !== "fff") return undefined;
 
-	const finder = await options.backend.getFinder(options.cwd);
+	const finder = await finderPromise;
 	const finderRoute = options.router.route({
 		tool: "find",
 		glob,

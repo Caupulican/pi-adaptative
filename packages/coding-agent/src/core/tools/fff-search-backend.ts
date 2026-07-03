@@ -1,7 +1,7 @@
 import type { Dirent } from "node:fs";
 import { readdir } from "node:fs/promises";
 import path from "node:path";
-import { ensureFffNodePackage, loadAvailableFffNodePackage } from "../../utils/tools-manager.ts";
+import { ensureFffNodePackage, isFffInstallRetryable, loadAvailableFffNodePackage } from "../../utils/tools-manager.ts";
 
 export type FffResult<T> = { ok: true; value: T } | { ok: false; error: string };
 export type FffGrepMode = "plain" | "regex" | "fuzzy";
@@ -99,12 +99,31 @@ interface FffFileFinderConstructor {
 	isAvailable?: () => boolean;
 }
 
-interface FffModule {
+export interface FffModule {
 	FileFinder: FffFileFinderConstructor;
 }
 
 export interface FffSearchBackend {
 	getFinder(basePath: string): Promise<FffFileFinder | undefined>;
+}
+
+/**
+ * Calls backend.getFinder(cwd) and guarantees the returned promise can never
+ * reject -- not even if a non-conforming backend's getFinder throws
+ * synchronously instead of returning a rejected promise (the FffSearchBackend
+ * contract is also implemented by extension-supplied backends, e.g. an SSH
+ * remote search, which aren't guaranteed to be `async`-declared). find.ts and
+ * grep.ts call this unconditionally, before routing decides whether this call
+ * even wants FFF, specifically so a broken/throwing backend degrades to
+ * "unavailable for this call" (graceful fd/rg fallback) instead of failing
+ * the whole tool call or risking an unhandled rejection.
+ */
+export async function safeGetFinder(backend: FffSearchBackend, cwd: string): Promise<FffFileFinder | undefined> {
+	try {
+		return await backend.getFinder(cwd);
+	} catch {
+		return undefined;
+	}
 }
 
 type ModuleRequire = (id: string) => unknown;
@@ -208,8 +227,33 @@ export async function hasGitignoreInTree(rootPath: string): Promise<boolean> {
 	return false;
 }
 
-class DefaultFffSearchBackend implements FffSearchBackend {
+/**
+ * The two calls DefaultFffSearchBackend.createFinder makes to lazily load and,
+ * if needed, install `@ff-labs/fff-node`. Pulled out as an injectable seam
+ * (mirroring loadFffModule's optional `requires` param) so tests can simulate
+ * a fresh machine -- and a faked install succeeding or failing -- without
+ * touching the real module-global caches or spawning a real npm install.
+ */
+export interface FffFinderDeps {
+	ensureFffModule: () => Promise<FffModule | null>;
+	ensureFffNodePackage: (silent: boolean, forceManagedInstall?: boolean) => Promise<unknown | undefined>;
+	/** Whether the last install outcome was a genuine failure worth retrying. */
+	isInstallRetryable: () => boolean;
+}
+
+const realFffFinderDeps: FffFinderDeps = {
+	ensureFffModule,
+	ensureFffNodePackage,
+	isInstallRetryable: isFffInstallRetryable,
+};
+
+export class DefaultFffSearchBackend implements FffSearchBackend {
 	private readonly finders = new Map<string, Promise<FffFileFinder | undefined>>();
+	private readonly deps: FffFinderDeps;
+
+	constructor(deps: FffFinderDeps = realFffFinderDeps) {
+		this.deps = deps;
+	}
 
 	async getFinder(basePath: string): Promise<FffFileFinder | undefined> {
 		if (isFffRuntimeDisabled()) return undefined;
@@ -219,6 +263,20 @@ class DefaultFffSearchBackend implements FffSearchBackend {
 		if (cached) return cached;
 
 		const created = this.createFinder(normalizedBasePath);
+		void created.then(
+			(finder) => {
+				// A genuine install failure (network hiccup, registry blip, ...) must
+				// not permanently gate FFF out of this basePath for the rest of the
+				// process: drop the cache entry so the NEXT search retries instead of
+				// being silently stuck on the fd/rg fallback forever. A stable
+				// "not applicable" outcome (offline mode, unsupported platform) is left
+				// cached, since retrying it would just repeat the same answer.
+				if (!finder && this.deps.isInstallRetryable() && this.finders.get(normalizedBasePath) === created) {
+					this.finders.delete(normalizedBasePath);
+				}
+			},
+			() => undefined,
+		);
 		this.finders.set(normalizedBasePath, created);
 		this.evictIfNeeded();
 		return created;
@@ -235,10 +293,10 @@ class DefaultFffSearchBackend implements FffSearchBackend {
 	}
 
 	private async createFinder(basePath: string): Promise<FffFileFinder | undefined> {
-		let fff = await ensureFffModule();
+		let fff = await this.deps.ensureFffModule();
 		if (!fff) return undefined;
 		if (fff.FileFinder.isAvailable && !fff.FileFinder.isAvailable()) {
-			const installed = await ensureFffNodePackage(true, true);
+			const installed = await this.deps.ensureFffNodePackage(true, true);
 			loadedFffModule = isFffModule(installed) ? installed : null;
 			fff = loadedFffModule;
 			if (!fff || (fff.FileFinder.isAvailable && !fff.FileFinder.isAvailable())) return undefined;

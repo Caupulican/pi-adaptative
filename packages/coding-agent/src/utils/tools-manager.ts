@@ -433,43 +433,138 @@ async function runNpmInstall(args: string[]): Promise<{ code: number | null; std
 	}
 }
 
+/**
+ * Outcome of the most recent {@link ensureFffNodePackage} call, kept for
+ * observability (e.g. a future `doctor` check) since the function itself
+ * only ever returns the loaded module or `undefined` either way.
+ *
+ * `install-failed` is distinguished from `offline`/`unsupported-platform`
+ * because it is the only one worth *retrying*: offline mode and an
+ * unsupported platform are stable for the life of the process, but a real
+ * install attempt can fail on a transient issue (registry hiccup, timeout)
+ * that may no longer apply on the next search. See
+ * DefaultFffSearchBackend.getFinder in fff-search-backend.ts, which uses
+ * this distinction to decide whether a failed finder is retryable.
+ */
+export type FffInstallOutcome =
+	| { status: "already-available" }
+	| { status: "offline" }
+	| { status: "unsupported-platform" }
+	| { status: "installed" }
+	| { status: "install-failed"; reason: string };
+
+/**
+ * How long a genuine install failure gates out a NEW npm spawn. An agent turn
+ * can fire several find/grep calls in quick succession, and each one now
+ * primes the finder in the background (see tryFffFind/tryFffGrep) -- without
+ * this, a persistently-failing install (registry down, disk full, ...) would
+ * re-spawn npm on every single one of those calls instead of once.
+ *
+ * This gates the SPAWN inside ensureFffNodePackage, not whether a failed
+ * finder is retryable (see isFffInstallRetryable): DefaultFffSearchBackend
+ * always evicts a failed finder so the next search re-enters this function,
+ * and it is THIS cooldown check -- evaluated fresh, at call time -- that
+ * decides whether that re-entry is a real attempt or a fast, spawn-free bail.
+ * (An earlier version conflated the two: it gated eviction itself on the
+ * cooldown, which is checked once, immediately after the failure it's timing
+ * -- i.e. always still within the window -- so the failed finder was never
+ * evicted and the retry never got a chance to happen at all.)
+ */
+export const FFF_INSTALL_RETRY_COOLDOWN_MS = 30_000;
+
+let lastFffInstallOutcome: FffInstallOutcome | undefined;
+let lastFffInstallFailureAt: number | undefined;
+
+/** The outcome of the last {@link ensureFffNodePackage} call, if any. */
+export function getLastFffInstallOutcome(): FffInstallOutcome | undefined {
+	return lastFffInstallOutcome;
+}
+
+/** Whether the last install outcome was a genuine failure worth retrying (as opposed to a stable "not applicable" result). Cooldown-independent by design -- see FFF_INSTALL_RETRY_COOLDOWN_MS. */
+export function isFffInstallRetryable(): boolean {
+	return lastFffInstallOutcome?.status === "install-failed";
+}
+
+/**
+ * Pure decision logic behind {@link isFffInstallCoolingDown}, exposed directly
+ * so tests can assert the cooldown boundary without faking the system clock.
+ */
+export function computeIsFffInstallCoolingDown(
+	outcome: FffInstallOutcome | undefined,
+	failedAt: number | undefined,
+	now: number,
+): boolean {
+	if (outcome?.status !== "install-failed") return false;
+	if (failedAt === undefined) return false;
+	return now - failedAt < FFF_INSTALL_RETRY_COOLDOWN_MS;
+}
+
+/** Whether a real install attempt happened too recently to try again right now. */
+function isFffInstallCoolingDown(): boolean {
+	return computeIsFffInstallCoolingDown(lastFffInstallOutcome, lastFffInstallFailureAt, Date.now());
+}
+
+/** Records a genuine install failure and stamps when it happened, so the cooldown above has a start time to measure from. */
+function recordFffInstallFailure(reason: string): void {
+	lastFffInstallOutcome = { status: "install-failed", reason };
+	lastFffInstallFailureAt = Date.now();
+}
+
 async function installManagedFffNodePackage(platformPackage: string, silent: boolean): Promise<unknown | undefined> {
-	mkdirSync(FFF_MANAGED_DIR, { recursive: true });
-	if (!existsSync(FFF_MANAGED_PACKAGE_JSON)) {
-		writeFileSync(FFF_MANAGED_PACKAGE_JSON, '{"name":"pi-managed-fff-node","private":true,"version":"0.0.0"}\n');
-	}
-
-	if (!silent) {
-		console.log(chalk.dim("FFF native search not found. Installing managed FFF package..."));
-	}
-
-	const args = [
-		"install",
-		"--ignore-scripts",
-		"--omit=dev",
-		"--include=optional",
-		"--no-audit",
-		"--no-fund",
-		"--package-lock=false",
-		"--prefix",
-		FFF_MANAGED_DIR,
-		`@ff-labs/fff-node@${FFF_NODE_VERSION}`,
-		`${platformPackage}@${FFF_NODE_VERSION}`,
-	];
-	const result = await runNpmInstall(args);
-	if (result.code !== 0) {
-		if (!silent) {
-			console.log(
-				chalk.yellow(`Failed to install FFF native search: ${result.stderr.trim() || `exit code ${result.code}`}`),
-			);
+	try {
+		mkdirSync(FFF_MANAGED_DIR, { recursive: true });
+		if (!existsSync(FFF_MANAGED_PACKAGE_JSON)) {
+			writeFileSync(FFF_MANAGED_PACKAGE_JSON, '{"name":"pi-managed-fff-node","private":true,"version":"0.0.0"}\n');
 		}
+
+		if (!silent) {
+			console.log(chalk.dim("FFF native search not found. Installing managed FFF package..."));
+		}
+
+		const args = [
+			"install",
+			"--ignore-scripts",
+			"--omit=dev",
+			"--include=optional",
+			"--no-audit",
+			"--no-fund",
+			"--package-lock=false",
+			"--prefix",
+			FFF_MANAGED_DIR,
+			`@ff-labs/fff-node@${FFF_NODE_VERSION}`,
+			`${platformPackage}@${FFF_NODE_VERSION}`,
+		];
+		const result = await runNpmInstall(args);
+		if (result.code !== 0) {
+			const reason = result.stderr.trim() || `npm exited with code ${result.code}`;
+			if (!silent) {
+				console.log(chalk.yellow(`Failed to install FFF native search: ${reason}`));
+			}
+			recordFffInstallFailure(reason);
+			return undefined;
+		}
+		const loaded = loadFffNodeWith(createRequire(pathToFileURL(FFF_MANAGED_PACKAGE_JSON).href));
+		if (!loaded) {
+			const reason = "Managed FFF install completed but @ff-labs/fff-node could not be loaded.";
+			if (!silent) {
+				console.log(chalk.yellow(reason));
+			}
+			recordFffInstallFailure(reason);
+			return undefined;
+		}
+		lastFffInstallOutcome = { status: "installed" };
+		return loaded;
+	} catch (error) {
+		// Never let a filesystem/spawn surprise (e.g. a read-only home directory)
+		// crash the caller: fall back like any other install failure, but keep
+		// the reason observable.
+		const reason = error instanceof Error ? error.message : String(error);
+		if (!silent) {
+			console.log(chalk.yellow(`Failed to install FFF native search: ${reason}`));
+		}
+		recordFffInstallFailure(reason);
 		return undefined;
 	}
-	const loaded = loadFffNodeWith(createRequire(pathToFileURL(FFF_MANAGED_PACKAGE_JSON).href));
-	if (!loaded && !silent) {
-		console.log(chalk.yellow("Managed FFF install completed but @ff-labs/fff-node could not be loaded."));
-	}
-	return loaded;
 }
 
 export async function ensureFffNodePackage(
@@ -477,12 +572,24 @@ export async function ensureFffNodePackage(
 	forceManagedInstall: boolean = false,
 ): Promise<unknown | undefined> {
 	const existing = forceManagedInstall ? undefined : loadAvailableFffNodePackage();
-	if (existing) return existing;
+	if (existing) {
+		lastFffInstallOutcome = { status: "already-available" };
+		return existing;
+	}
 
 	if (isOfflineModeEnabled()) {
 		if (!silent) {
 			console.log(chalk.yellow("FFF native search not found. Offline mode enabled, skipping install."));
 		}
+		lastFffInstallOutcome = { status: "offline" };
+		return undefined;
+	}
+
+	// A prior attempt failed too recently to try again: bail out fast (no npm
+	// spawn, no platform/libc probing) rather than repeating a doomed attempt.
+	// Leaves lastFffInstallOutcome/lastFffInstallFailureAt untouched -- this
+	// isn't a new attempt, so there's nothing new to record.
+	if (isFffInstallCoolingDown()) {
 		return undefined;
 	}
 
@@ -491,6 +598,7 @@ export async function ensureFffNodePackage(
 		if (!silent) {
 			console.log(chalk.yellow(`FFF native search is not available for ${platform()}/${arch()}.`));
 		}
+		lastFffInstallOutcome = { status: "unsupported-platform" };
 		return undefined;
 	}
 

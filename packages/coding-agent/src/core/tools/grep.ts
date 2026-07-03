@@ -24,6 +24,7 @@ import {
 	type FffSearchBackend,
 	hasGitignoreInTree,
 	relativePathInside,
+	safeGetFinder,
 } from "./fff-search-backend.ts";
 import { resolveToCwd } from "./path-utils.ts";
 import { getTextOutput, invalidArgText, shortenPath, str } from "./render-utils.ts";
@@ -345,7 +346,7 @@ function formatFffGrepResult(options: {
 	});
 }
 
-async function tryFffGrep(options: {
+export async function tryFffGrep(options: {
 	backend: FffSearchBackend;
 	router: SearchRouter;
 	cwd: string;
@@ -362,6 +363,19 @@ async function tryFffGrep(options: {
 	broadQueryTracker?: BroadQueryTracker;
 	rawPath?: string;
 }): Promise<{ text: string; details: GrepToolDetails } | undefined> {
+	// Kick off the FFF finder -- and, on a machine where fff-node isn't provisioned
+	// yet, its lazy managed install -- unconditionally and as early as possible.
+	// See the matching comment in find.ts's tryFffFind: routing below can still
+	// send THIS call to the rg fallback for reasons unrelated to tool availability
+	// (chiefly the default match limit exceeding the FFF top-N threshold), and
+	// that outcome must not gate the install itself. getFinder() is cached per
+	// basePath, so later calls -- including the `await` below -- reuse this same
+	// in-flight/resolved promise instead of doing the work twice. safeGetFinder()
+	// guarantees this can never reject (a non-conforming custom backend that
+	// throws synchronously still degrades to "unavailable"), so it can neither
+	// produce an unhandled rejection nor fail this tool call outright.
+	const finderPromise = safeGetFinder(options.backend, options.cwd);
+
 	const searchPathRelativeToCwd = relativePathInside(options.cwd, options.searchPath);
 	const baseRoute = options.router.route({
 		tool: "grep",
@@ -387,7 +401,7 @@ async function tryFffGrep(options: {
 	});
 	if (semanticRoute.backend !== "fff") return undefined;
 
-	const finder = await options.backend.getFinder(options.cwd);
+	const finder = await finderPromise;
 	const finderRoute = options.router.route({
 		tool: "grep",
 		glob: Boolean(options.glob),
