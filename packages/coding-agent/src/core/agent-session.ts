@@ -628,6 +628,10 @@ const GATE_OUTCOME_HISTORY_LIMIT = 50;
  * it has no place in the escalation ladder (#27's _ensureRouteModelReady walks this forward only). */
 const MODEL_ROUTER_TIER_ORDER: readonly ModelTier[] = ["cheap", "medium", "expensive"];
 
+/** How long the #31 "install ollama now?" confirm waits before auto-dismissing (same as a "No") —
+ * long enough to read and decide, short enough that an unattended session doesn't hang a turn on it. */
+const OLLAMA_INSTALL_CONFIRM_TIMEOUT_MS = 30_000;
+
 /** Read a packed grep/find tool result's `details.artifactId`, if present, without `any`. */
 function extractArtifactId(message: AgentMessage | undefined): string | undefined {
 	if (!message || message.role !== "toolResult") return undefined;
@@ -2914,6 +2918,58 @@ export class AgentSession {
 	}
 
 	/**
+	 * #31: the ONE case a routed local model's unreadiness can be fixed automatically is a missing
+	 * ollama binary — an unreachable server can't be helped by installing, so that reason is left to
+	 * the graceful-fallback warning below unchanged. Only offered when there's an interactive UI to
+	 * ask through: headless/RPC/print sessions have no _extensionUIContext and fall straight through,
+	 * same as declining or timing out (both resolve confirm() to false). Reverses "pi never runs
+	 * installers itself" specifically for this one path — the user is asked first, the download is
+	 * pi's own (never curl|sh), and it lands in pi's own runtimes dir (see OllamaRuntime.installManaged).
+	 *
+	 * Pauses/resumes the routing working-indicator around the confirm dialog itself (re-emitting
+	 * routing_end/routing_start — both already idempotent, see interactive-mode.ts's handlers) so an
+	 * animated spinner doesn't fight a dialog the user is trying to read and answer; the indicator
+	 * comes back for the download/extract that follows a "yes", which is genuine processing feedback.
+	 */
+	private async _maybeInstallOllamaOnConsent(
+		model: Model<Api>,
+		readiness: { ready: boolean; reason: string; installGuide?: string[] },
+	): Promise<{ ready: boolean; reason: string; installGuide?: string[]; installAttemptError?: string }> {
+		const ui = this._extensionUIContext;
+		if (!ui || readiness.ready || readiness.reason !== "binary_missing") return readiness;
+
+		const modelLabel = formatModelRouterModel(model);
+		this._emit({ type: "routing_end" });
+		let confirmed: boolean;
+		try {
+			confirmed = await ui.confirm(
+				"Install Ollama?",
+				`Ollama isn't installed, so the local model "${modelLabel}" can't run. Pi can download and ` +
+					"install it now (a large one-time download, possibly over 1 GB depending on your platform) " +
+					"into its own runtimes folder — never curl|sh, never touching anything outside pi's own " +
+					"directory. Install it now?",
+				{ timeout: OLLAMA_INSTALL_CONFIRM_TIMEOUT_MS },
+			);
+		} finally {
+			this._emit({ type: "routing_start" });
+		}
+		if (!confirmed) return readiness;
+
+		const serverUrl = this._deriveOllamaServerUrl(model.baseUrl);
+		const runtime = this.getLocalRuntime(serverUrl);
+		let installResult: { ok: boolean; error?: string };
+		try {
+			installResult = await runtime.installManaged((status) => ui.setStatus("ollama-install", status));
+		} finally {
+			ui.setStatus("ollama-install", undefined);
+		}
+		if (!installResult.ok) {
+			return { ready: false, reason: "install_failed", installAttemptError: installResult.error };
+		}
+		return this._ensureLocalModelReady(model);
+	}
+
+	/**
 	 * Router-swap gate (#27): a turn routed to a local model (any tier, including an executor-direct
 	 * route — both carry tier "cheap") must not dead-end the turn just because ollama isn't up.
 	 * Never a SILENT swap: every fallback is announced in a warning that states (i) the local model
@@ -2924,17 +2980,22 @@ export class AgentSession {
 	 * resolution (_resolveConfiguredTierModel) rather than inventing a new fallback mechanism.
 	 * Escalation is bounded: tier strictly increases each hop, so it terminates within two hops.
 	 *
-	 * Seam for a future interactive consent-gate (deferred — pending the managed-install-vs-guide
-	 * decision, see #31): this is the one place that already knows both WHY the local model failed
-	 * and WHETHER a fallback exists, so a future "install it now?" prompt slots in right here, before
-	 * the warning/escalation below runs.
+	 * Before the warning/escalation below: #31's consent gate gets one shot at fixing a missing
+	 * binary interactively (see _maybeInstallOllamaOnConsent) — declining, timing out, running
+	 * headless, or the install attempt itself failing all fall through here unchanged, just with an
+	 * honest reason (an install that failed is worded as a failed install, not re-labeled as if
+	 * nothing was ever tried).
 	 */
 	private async _ensureRouteModelReady(
 		resolved: { decision: RouteDecision; model: Model<Api> } | undefined,
 	): Promise<{ decision: RouteDecision; model: Model<Api> } | undefined> {
 		let current = resolved;
 		while (current && current.model.provider === OLLAMA_PROVIDER) {
-			const readiness = await this._ensureLocalModelReady(current.model);
+			let readiness: { ready: boolean; reason: string; installGuide?: string[]; installAttemptError?: string } =
+				await this._ensureLocalModelReady(current.model);
+			if (!readiness.ready) {
+				readiness = await this._maybeInstallOllamaOnConsent(current.model, readiness);
+			}
 			if (readiness.ready) return current;
 
 			// Walk the remaining tiers in order (never back down to cheap) and take the first one that
@@ -2952,9 +3013,11 @@ export class AgentSession {
 			}
 
 			const modelLabel = formatModelRouterModel(current.model);
-			const whyText = readiness.installGuide
-				? ["the ollama binary is not installed.", ...readiness.installGuide].join("\n")
-				: `its server is not reachable (${readiness.reason}) — check that ollama is running.`;
+			const whyText = readiness.installAttemptError
+				? `pi tried to install it just now, but the install attempt failed: ${readiness.installAttemptError}`
+				: readiness.installGuide
+					? ["the ollama binary is not installed.", ...readiness.installGuide].join("\n")
+					: `its server is not reachable (${readiness.reason}) — check that ollama is running.`;
 			const fallbackText = escalated
 				? `Falling back to the ${escalated.tier} tier for this turn.`
 				: "No other tier is configured — falling back to the session's default model.";

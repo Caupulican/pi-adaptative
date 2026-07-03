@@ -35,7 +35,19 @@
   visible warning states why (install steps inline when the binary is missing) and which tier is now
   handling the turn, then it escalates to the next configured tier. The runtime is owned by
   `AgentSession`, so headless/SDK turns get the same behavior and `/models` shares the one instance.
-  (An interactive "install it now?" consent prompt is a planned follow-up.)
+- When a routed local model is missing only because the ollama binary itself isn't installed (not
+  because its server is down), an interactive session now asks first: "Install Ollama?", noting it's
+  a large one-time download, before doing anything. A "yes" downloads the pinned ollama release for
+  the current platform straight into pi's own `runtimes/ollama` directory (never `curl | sh`, never
+  outside pi's own directory) and extracts it — `.tar.zst` archives decompress via Node's own
+  built-in zstd support when available, falling back to a system `zstd` binary, with an honest error
+  if neither exists — then the turn proceeds on the original local model with no fallback needed. A
+  "no", a timeout, an install that itself fails, or a headless/SDK session with no interactive prompt
+  to ask through all fall straight through to the existing graceful tier-escalation warning above,
+  worded to say so honestly (an install attempt that failed is reported as a failed install attempt,
+  never re-labeled as if nothing was tried). The confirm dialog pauses the routing working-indicator
+  while it's on screen and hands it back right after, so the spinner and the dialog never compete for
+  the terminal at the same time.
 - New `pi-adaptative doctor` command plus an update/startup preflight that verify required tooling and
   provision what pi owns. It checks FFF native search (managed — actually installs it if missing, via
   the same path as lazy first-use), ripgrep, ollama (binary + server status), and python, reporting

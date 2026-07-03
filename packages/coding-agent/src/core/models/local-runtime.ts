@@ -1,7 +1,22 @@
 import { type ChildProcess, spawn } from "node:child_process";
 import { existsSync, mkdirSync } from "node:fs";
-import { homedir } from "node:os";
+import { homedir, arch as osArch, platform as osPlatform } from "node:os";
 import { delimiter, join } from "node:path";
+import type { Readable, Writable } from "node:stream";
+import * as nodeZlib from "node:zlib";
+import { spawnProcess, spawnProcessSync, waitForChildProcess } from "../../utils/child-process.ts";
+
+/**
+ * `spawnProcess(..., { stdio: ["pipe", "pipe", "pipe"] })` always yields a non-null `stdin` at
+ * runtime, but child-process.ts's typed overload only narrows `.stdin` to non-null for the
+ * capture-only (`StdioNull, StdioPipe, StdioPipe`) shape, so the generic overload's `Writable |
+ * null` leaks through here. This makes the true invariant explicit and fails loudly (instead of
+ * silently misbehaving) if it's ever violated by a future stdio change.
+ */
+function requireStdin(proc: ChildProcess, label: string): Writable {
+	if (!proc.stdin) throw new Error(`${label}: no stdin pipe`);
+	return proc.stdin;
+}
 
 /**
  * Local model runtime manager (local-model-lifecycle-design.md): Ollama first, interface kept
@@ -32,6 +47,40 @@ export interface InstalledLocalModel {
 	sizeBytes: number;
 }
 
+/** Pinned ollama release for the managed installer below. Bump here when needed — one constant. */
+export const OLLAMA_PINNED_VERSION = "0.31.1";
+
+export type OllamaAssetKind = "tar-zst" | "tar-gz" | "zip";
+
+export interface OllamaReleaseAsset {
+	name: string;
+	kind: OllamaAssetKind;
+}
+
+/**
+ * Maps a platform/arch pair (node's `os.platform()`/`os.arch()`) to the exact ollama release asset
+ * name for {@link OLLAMA_PINNED_VERSION} — verified against the real ollama/ollama GitHub release
+ * and its own install.sh, not guessed: darwin ships a CLI `.tgz` (the `.app`/`.dmg`/`Ollama-*.zip`
+ * assets are the separate GUI-app installer, not what we want), linux ships `.tar.zst` per arch,
+ * windows ships `.zip` per arch. Pure and exported so it's independently testable and reusable
+ * (e.g. by a future doctor-driven managed install) without touching OllamaRuntime.
+ */
+export function resolveOllamaAsset(plat: string, architecture: string): OllamaReleaseAsset | undefined {
+	if (plat === "darwin") {
+		// Universal binary — one asset for both arm64 and x64.
+		return { name: "ollama-darwin.tgz", kind: "tar-gz" };
+	}
+	if (plat === "linux") {
+		const archName = architecture === "arm64" ? "arm64" : "amd64";
+		return { name: `ollama-linux-${archName}.tar.zst`, kind: "tar-zst" };
+	}
+	if (plat === "win32") {
+		const archName = architecture === "arm64" ? "arm64" : "amd64";
+		return { name: `ollama-windows-${archName}.zip`, kind: "zip" };
+	}
+	return undefined;
+}
+
 export interface LocalRuntimeDeps {
 	fetchFn?: typeof fetch;
 	spawnFn?: (
@@ -43,6 +92,23 @@ export interface LocalRuntimeDeps {
 	envPath?: string;
 	homeDir?: string;
 	sleepFn?: (ms: number) => Promise<void>;
+	/** os.platform()/os.arch() equivalents — injectable so asset resolution is testable per platform. */
+	platform?: () => string;
+	arch?: () => string;
+	/** Node's built-in zstd decompress transform, when THIS runtime's node:zlib has it — undefined
+	 * forces the system-zstd fallback. Injectable so tests can force either path deterministically
+	 * instead of depending on whatever Node happens to be running the test. */
+	createZstdDecompress?: () => NodeJS.ReadWriteStream;
+	/** Whether a named command exists on PATH (e.g. system `zstd`), for the extraction fallback. */
+	hasCommand?: (command: string) => boolean;
+	/** Runs the extraction step for a downloaded archive. Injectable so installManaged's
+	 * download->extract->verify orchestration is testable without a real tar/zstd/unzip pipeline;
+	 * defaults to the real spawn-based extractor. */
+	extractArchive?: (
+		input: NodeJS.ReadableStream,
+		destDir: string,
+		kind: OllamaAssetKind,
+	) => Promise<{ ok: boolean; error?: string }>;
 }
 
 const DEFAULT_BASE_URL = "http://127.0.0.1:11434";
@@ -59,6 +125,11 @@ export class OllamaRuntime {
 	private readonly _envPath: string;
 	private readonly _homeDir: string;
 	private readonly _sleep: (ms: number) => Promise<void>;
+	private readonly _platform: () => string;
+	private readonly _arch: () => string;
+	private readonly _createZstdDecompress: (() => NodeJS.ReadWriteStream) | undefined;
+	private readonly _hasCommand: (command: string) => boolean;
+	private readonly _extractArchiveOverride: LocalRuntimeDeps["extractArchive"] | undefined;
 	private _child: Pick<ChildProcess, "pid" | "kill" | "unref" | "on"> | undefined;
 
 	constructor(args: { agentDir: string; baseUrl?: string; deps?: LocalRuntimeDeps }) {
@@ -70,6 +141,23 @@ export class OllamaRuntime {
 		this._envPath = args.deps?.envPath ?? process.env.PATH ?? "";
 		this._homeDir = args.deps?.homeDir ?? homedir();
 		this._sleep = args.deps?.sleepFn ?? ((ms) => new Promise((resolve) => setTimeout(resolve, ms)));
+		this._platform = args.deps?.platform ?? osPlatform;
+		this._arch = args.deps?.arch ?? osArch;
+		// Feature-detect (not version-sniff): recent Node added zstd natively to node:zlib. Verified
+		// present on this repo's minimum supported Node (>=22.19.0); still detected at runtime rather
+		// than assumed, so an older/different Node correctly falls through to the system-zstd path.
+		// `"createZstdDecompress" in deps` (rather than `??`) so a test can force the fallback path by
+		// passing the key as explicitly undefined, distinct from omitting it (real auto-detection).
+		this._createZstdDecompress =
+			args.deps && "createZstdDecompress" in args.deps
+				? args.deps.createZstdDecompress
+				: typeof nodeZlib.createZstdDecompress === "function"
+					? () => nodeZlib.createZstdDecompress()
+					: undefined;
+		this._hasCommand =
+			args.deps?.hasCommand ??
+			((command) => spawnProcessSync(command, ["--version"], { encoding: "utf8" }).error === undefined);
+		this._extractArchiveOverride = args.deps?.extractArchive;
 	}
 
 	get baseUrl(): string {
@@ -117,16 +205,152 @@ export class OllamaRuntime {
 		};
 	}
 
-	/** GUIDE MODE: exact manual steps, printed, never executed (no `curl | sh`, no sudo). */
+	/**
+	 * Manual-steps fallback text — shown when the managed install below wasn't offered (headless),
+	 * was declined, or itself failed. #31 reversed the stance for ollama specifically: pi CAN install
+	 * it for you now (consent-gated, a controlled download into pi's own runtimes dir, never
+	 * `curl | sh`) — these steps are the alternative for when that path isn't taken.
+	 */
 	installGuide(): string[] {
 		return [
-			"Ollama is not installed. Pi never runs installers itself — manual steps (user-level, no sudo):",
+			"Ollama is not installed. Pi can install it for you now (asks first, never curl|sh) — or follow these manual steps yourself:",
 			"  1. Download the pinned release archive for your platform:",
 			"     https://github.com/ollama/ollama/releases (asset: ollama-linux-amd64.tar.zst or your platform)",
 			`  2. Extract it to ${join(this._homeDir, ".local", "share", "ollama-dist")}`,
 			"  3. Re-run your /models command - pi detects the binary automatically.",
 			"Alternatively install system-wide from https://ollama.com/download and pi will use the system server.",
 		];
+	}
+
+	/** Which decompressor to use for a `.tar.zst` asset — native (this Node's own zlib) is always
+	 * preferred when available, even if a system `zstd` ALSO exists, since it needs no external
+	 * dependency at all. Verified per-runtime by feature detection (see the constructor), not by
+	 * guessing from a Node version number. */
+	private _chooseZstdStrategy(): { kind: "native" } | { kind: "system" } | { kind: "unavailable" } {
+		if (this._createZstdDecompress) return { kind: "native" };
+		if (this._hasCommand("zstd")) return { kind: "system" };
+		return { kind: "unavailable" };
+	}
+
+	/**
+	 * Managed install (#31): a consent-gated, controlled download of the pinned ollama release into
+	 * pi's OWN runtimes dir (`<agentDir>/runtimes/ollama/`) — never `curl | sh`, never a second
+	 * server instance, and distinct from {@link start}'s owned MODEL storage (this is the binary
+	 * itself). Callers (the router's consent flow, and later a doctor-driven install) own the
+	 * consent/UI; this method only does the mechanical download+extract+verify and reports the
+	 * outcome honestly. `onProgress` is best-effort UI feedback, not a completion signal.
+	 */
+	async installManaged(onProgress?: (status: string) => void): Promise<{ ok: boolean; error?: string }> {
+		const asset = resolveOllamaAsset(this._platform(), this._arch());
+		if (!asset) return { ok: false, error: "unsupported-platform" };
+
+		onProgress?.(`Downloading ${asset.name}…`);
+		const downloadUrl = `https://github.com/ollama/ollama/releases/download/v${OLLAMA_PINNED_VERSION}/${asset.name}`;
+		let response: Response;
+		try {
+			response = await this._fetch(downloadUrl);
+		} catch (error) {
+			return { ok: false, error: `download-fail: ${error instanceof Error ? error.message : String(error)}` };
+		}
+		if (!response.ok || !response.body) {
+			return { ok: false, error: `download-fail: HTTP ${response.status}` };
+		}
+
+		const destDir = join(this._agentDir, "runtimes", "ollama");
+		mkdirSync(destDir, { recursive: true });
+
+		onProgress?.(`Extracting ${asset.name}…`);
+		const extract = this._extractArchiveOverride ?? ((input, dest, kind) => this._extractArchive(input, dest, kind));
+		const extracted = await extract(response.body as unknown as NodeJS.ReadableStream, destDir, asset.kind);
+		if (!extracted.ok) return extracted;
+
+		const binaryName = this._platform() === "win32" ? "ollama.exe" : "ollama";
+		const binaryPath = join(destDir, "bin", binaryName);
+		if (!this._exists(binaryPath)) {
+			return { ok: false, error: "extract-fail: binary not found after extraction" };
+		}
+		onProgress?.("Ollama installed.");
+		return { ok: true };
+	}
+
+	/** Real extraction: `tar-gz` lets `tar` itself gunzip; `tar-zst` decompresses first (native
+	 * node:zlib preferred, system `zstd` as fallback, an honest error if neither exists — see
+	 * {@link _chooseZstdStrategy}); `zip` needs a seekable file, so it's buffered to disk first. */
+	private async _extractArchive(
+		input: NodeJS.ReadableStream,
+		destDir: string,
+		kind: OllamaAssetKind,
+	): Promise<{ ok: boolean; error?: string }> {
+		try {
+			if (kind === "zip") {
+				return await this._extractZip(input, destDir);
+			}
+			return await this._extractTar(input, destDir, kind);
+		} catch (error) {
+			return { ok: false, error: `extract-fail: ${error instanceof Error ? error.message : String(error)}` };
+		}
+	}
+
+	private async _extractTar(
+		input: NodeJS.ReadableStream,
+		destDir: string,
+		kind: "tar-gz" | "tar-zst",
+	): Promise<{ ok: boolean; error?: string }> {
+		let decompressed: Readable = input as unknown as Readable;
+		const tarArgs = ["-xf", "-", "-C", destDir];
+		if (kind === "tar-zst") {
+			const strategy = this._chooseZstdStrategy();
+			if (strategy.kind === "unavailable") {
+				return {
+					ok: false,
+					error: "zstd-missing: this archive needs zstd to decompress and neither Node's built-in support nor a system `zstd` binary was found. Install zstd (e.g. `apt-get install zstd`, `dnf install zstd`, `pacman -S zstd`) and try again.",
+				};
+			}
+			if (strategy.kind === "native") {
+				decompressed = decompressed.pipe(
+					this._createZstdDecompress?.() as unknown as NodeJS.ReadWriteStream & Readable,
+				);
+			} else {
+				const zstdProc = spawnProcess("zstd", ["-d"], { stdio: ["pipe", "pipe", "pipe"] });
+				decompressed.pipe(requireStdin(zstdProc, "zstd"));
+				decompressed = zstdProc.stdout as unknown as Readable;
+			}
+		} else {
+			// tar itself handles gzip via -z — no separate decompression step needed.
+			tarArgs[0] = "-xzf";
+		}
+		const tarProc = spawnProcess("tar", tarArgs, { stdio: ["pipe", "pipe", "pipe"] });
+		decompressed.pipe(requireStdin(tarProc, "tar"));
+		const code = await waitForChildProcess(tarProc);
+		if (code !== 0) {
+			return { ok: false, error: `extract-fail: tar exited with code ${code}` };
+		}
+		return { ok: true };
+	}
+
+	private async _extractZip(input: NodeJS.ReadableStream, destDir: string): Promise<{ ok: boolean; error?: string }> {
+		// Zip's central directory needs seekable file access — buffer to a temp file first.
+		const { createWriteStream } = await import("node:fs");
+		const { pipeline } = await import("node:stream/promises");
+		const zipPath = join(destDir, "..", `ollama-download-${process.pid}-${Date.now()}.zip`);
+		await pipeline(input as unknown as Readable, createWriteStream(zipPath));
+		try {
+			const extractCommand = this._platform() === "win32" && this._hasCommand("tar") ? "tar" : "unzip";
+			const args = extractCommand === "tar" ? ["-xf", zipPath, "-C", destDir] : ["-q", zipPath, "-d", destDir];
+			const proc = spawnProcess(extractCommand, args, { stdio: ["ignore", "pipe", "pipe"] });
+			const code = await waitForChildProcess(proc);
+			if (code !== 0) {
+				return { ok: false, error: `extract-fail: ${extractCommand} exited with code ${code}` };
+			}
+			return { ok: true };
+		} finally {
+			try {
+				const { rmSync } = await import("node:fs");
+				rmSync(zipPath, { force: true });
+			} catch {
+				// best-effort cleanup
+			}
+		}
 	}
 
 	/** Shared spawn-then-health-poll for both start modes below; `extraEnv` is the only thing that
