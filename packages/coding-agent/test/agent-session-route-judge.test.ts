@@ -199,4 +199,100 @@ describe("AgentSession route judge", () => {
 			harness.cleanup();
 		}
 	});
+
+	// Part B: while the judge (or any other prep before the turn streams) runs, the UI has nothing to
+	// show the user other than their own echoed prompt — routing_start/routing_end bracket that gap so
+	// interactive-mode can paint a "working…" indicator for it, independent of thinking level.
+	describe("routing_start/routing_end (working-spinner-during-judge bracket)", () => {
+		it("emits routing_start before the judge is dispatched and routing_end before the turn starts streaming", async () => {
+			const harness = await createHarness({
+				models: [{ id: "cheap" }, { id: "medium" }],
+				settings: {
+					modelRouter: { enabled: true, cheapModel: "faux/cheap", mediumModel: "faux/medium" },
+				},
+			});
+			try {
+				const order: string[] = [];
+				harness.session.subscribe((event) => {
+					if (event.type === "routing_start") order.push("routing_start");
+					if (event.type === "routing_end") order.push("routing_end");
+					if (event.type === "agent_start") order.push("agent_start");
+				});
+				harness.setResponses([
+					() => {
+						order.push("judge:dispatch");
+						return fauxAssistantMessage(JUDGE_MEDIUM);
+					},
+					fauxAssistantMessage("answered on medium"),
+				]);
+
+				await harness.session.prompt("Implement a small fix and update the relevant unit test.");
+
+				expect(order).toEqual(["routing_start", "judge:dispatch", "routing_end", "agent_start"]);
+			} finally {
+				harness.cleanup();
+			}
+		});
+
+		it("emits exactly one routing_start/routing_end pair even when the router is disabled (no judge to await)", async () => {
+			const harness = await createHarness();
+			try {
+				harness.setResponses([fauxAssistantMessage("hi")]);
+
+				await harness.session.prompt("hello");
+
+				expect(harness.eventsOfType("routing_start")).toHaveLength(1);
+				expect(harness.eventsOfType("routing_end")).toHaveLength(1);
+			} finally {
+				harness.cleanup();
+			}
+		});
+
+		it("emits routing_end even when the turn fails before ever reaching the model call, so nothing is left spinning", async () => {
+			const harness = await createHarness({ withConfiguredAuth: false });
+			try {
+				harness.setResponses([fauxAssistantMessage("unreachable")]);
+
+				await expect(harness.session.prompt("hello")).rejects.toThrow();
+
+				expect(harness.eventsOfType("routing_start")).toHaveLength(1);
+				expect(harness.eventsOfType("routing_end")).toHaveLength(1);
+				// The turn never started: no agent_start reached.
+				expect(harness.eventsOfType("agent_start")).toHaveLength(0);
+			} finally {
+				harness.cleanup();
+			}
+		});
+
+		it("does not emit routing_start/routing_end when an extension's input handler fully handles the prompt", async () => {
+			const harness = await createHarness({
+				extensionFactories: [
+					(pi) => {
+						pi.on("input", async (event) => {
+							if (event.text === "ping") {
+								return { action: "handled" };
+							}
+							return { action: "continue" };
+						});
+					},
+				],
+			});
+			try {
+				harness.setResponses([fauxAssistantMessage("hi")]);
+
+				// "ping" is fully handled by the extension — never reaches the routing/prep phase.
+				await harness.session.prompt("ping");
+				expect(harness.eventsOfType("routing_start")).toHaveLength(0);
+				expect(harness.eventsOfType("routing_end")).toHaveLength(0);
+
+				// A normal prompt still gets the bracket, proving the extension isn't just swallowing
+				// the events globally.
+				await harness.session.prompt("hello");
+				expect(harness.eventsOfType("routing_start")).toHaveLength(1);
+				expect(harness.eventsOfType("routing_end")).toHaveLength(1);
+			} finally {
+				harness.cleanup();
+			}
+		});
+	});
 });

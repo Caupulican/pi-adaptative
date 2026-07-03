@@ -3375,6 +3375,27 @@ export class InteractiveMode {
 		this.footer.invalidate();
 
 		switch (event.type) {
+			// Part B: general "the system is processing" feedback for the routing/prep gap before a
+			// turn starts streaming (the judge is a real bounded LLM call, not instant) — independent
+			// of thinking level, since this isn't model-thinking. Reuses the same working loader
+			// agent_start below uses, so the hand-off into real streaming is the same
+			// stop-then-recreate it already does — no distinct spinner, no double-render.
+			case "routing_start":
+				if (!this.session.isStreaming && !this.loadingAnimation && this.workingVisible) {
+					this.loadingAnimation = this.createWorkingLoader();
+					this.statusContainer.addChild(this.loadingAnimation);
+					this.ui.requestRender();
+				}
+				break;
+
+			case "routing_end":
+				// Unconditional: covers both a clean hand-off into agent_start (which immediately
+				// stops-and-recreates its own loader anyway) and a turn that failed before ever
+				// starting, which must not leave the indicator spinning forever.
+				this.stopWorkingLoader();
+				this.ui.requestRender();
+				break;
+
 			case "agent_start":
 				this.clearActiveToolCalls();
 				if (this.settingsManager.getShowTerminalProgress()) {

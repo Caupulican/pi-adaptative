@@ -36,6 +36,14 @@
   authoritative `message_start` emitted later is suppressed exactly once (reference-keyed via a Set),
   so the message is still shown and persisted a single time, and extensions still observe it at the
   real turn start (their visible behavior is unchanged).
+- While the model router's routing/prep phase runs — the gap after the prompt paints and before the
+  turn starts streaming, during which the routing judge makes a bounded LLM call — the interactive UI
+  now shows the existing "working" indicator as general processing feedback, so that gap no longer
+  looks frozen. It shows independently of the thinking level (this is routing feedback, not
+  model-thinking) and respects the user's working-indicator toggle. New UI-only `routing_start` /
+  `routing_end` session events bracket the phase and are emitted exactly once each — `routing_end`
+  fires on both the success and failure paths, so the indicator never spins on after a turn that
+  fails before it starts — and it hands off seamlessly into the normal streaming indicator.
 - Hardened the hardening sweep after a max-effort review of the working diff found nine regressions
   and latent holes the first pass introduced or left open:
   - `endWriteStream` (newly awaited by the bash executor) hung forever when the stream had already

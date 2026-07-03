@@ -320,7 +320,14 @@ export type AgentSessionEvent =
 			errorMessage?: string;
 	  }
 	| { type: "auto_retry_start"; attempt: number; maxAttempts: number; delayMs: number; errorMessage: string }
-	| { type: "auto_retry_end"; success: boolean; attempt: number; finalError?: string };
+	| { type: "auto_retry_end"; success: boolean; attempt: number; finalError?: string }
+	// Brackets the routing/prep phase of a turn (judge + model/auth checks + compaction, etc.) — the
+	// gap between the user's prompt painting and the turn actually starting to stream, which today
+	// has no visible feedback. UI-only: no persistence, no bearing on the turn itself. Always paired
+	// exactly once per _promptUnserialized attempt that reaches past the early-return paths (queued
+	// steer/followUp, extension commands, input-transform) — never emitted for those.
+	| { type: "routing_start" }
+	| { type: "routing_end" };
 
 /** Listener function for agent session events */
 export type AgentSessionEventListener = (event: AgentSessionEvent) => void;
@@ -3439,6 +3446,13 @@ export class AgentSession {
 			this._earlyDisplayedUserMessages.add(userMessage);
 			this._emit({ type: "message_start", message: userMessage });
 
+			// Bracket the routing/prep phase (judge, model/auth checks, compaction, ...) so the UI can
+			// show general "working" feedback for it — otherwise the user stares at their own echoed
+			// prompt with nothing happening for however long the judge takes. routing_end is emitted
+			// exactly once below: either in the catch block (this phase failed) or right after the try
+			// block (this phase succeeded, whether or not it produced a turn to run).
+			this._emit({ type: "routing_start" });
+
 			const resolvedRouteInfo = await this._resolveModelRouterTurnRouteJudged(expandedText, {
 				// Internally generated turns (goal continuation, lane follow-ups) never consult the judge:
 				// the regex floor already classified them, and a 20-turn loop must not buy 20 judge calls.
@@ -3545,9 +3559,17 @@ export class AgentSession {
 			if (userMessage) {
 				this._earlyDisplayedUserMessages.delete(userMessage);
 			}
+			// The routing/prep phase (routing_start above) failed before ever reaching the turn — end
+			// it here, or the UI's "working" indicator for it spins forever with nothing behind it.
+			this._emit({ type: "routing_end" });
 			preflightResult?.(false);
 			throw error;
 		}
+
+		// The routing/prep phase is over — either we're about to hand off into the turn (which emits
+		// its own agent_start/streaming events right after), or messages is unexpectedly unset and we
+		// bail below. Either way nothing is left "routing" past this point.
+		this._emit({ type: "routing_end" });
 
 		if (!messages) {
 			return;

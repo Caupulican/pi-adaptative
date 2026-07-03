@@ -248,8 +248,12 @@ describe("AgentSession retry and event characterization", () => {
 
 		// message_start:user leads even agent_start/turn_start: it paints early (before routing),
 		// via a synthetic emit that the later, authoritative message_start (same object) suppresses.
+		// routing_start/routing_end bracket the routing/prep phase in between (the working-spinner
+		// gap) and always end before agent_start, since that's when the turn actually starts.
 		expect(normalizeEventOrder(harness.events)).toEqual([
 			"message_start:user",
+			"routing_start",
+			"routing_end",
 			"agent_start",
 			"turn_start",
 			"message_end:user",
@@ -286,6 +290,8 @@ describe("AgentSession retry and event characterization", () => {
 		expect(toolRuns).toEqual(["hello"]);
 		expect(normalizeEventOrder(harness.events)).toEqual([
 			"message_start:user",
+			"routing_start",
+			"routing_end",
 			"agent_start",
 			"turn_start",
 			"message_end:user",

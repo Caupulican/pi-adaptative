@@ -87,6 +87,10 @@ describe("AgentSession queue characterization", () => {
 		expect(commandRuns).toEqual(["hello world"]);
 		expect(harness.getPendingResponseCount()).toBe(0);
 		expect(harness.session.messages).toEqual([]);
+		// Extension-command-handled is an early return before the routing/prep phase (no turn is ever
+		// started) — the working-spinner bracket must not fire for it either.
+		expect(harness.eventsOfType("routing_start")).toHaveLength(0);
+		expect(harness.eventsOfType("routing_end")).toHaveLength(0);
 	});
 
 	it("delivers extension-origin steering messages before the next LLM call", async () => {
@@ -441,5 +445,28 @@ describe("AgentSession queue characterization", () => {
 		await harness.session.agent.waitForIdle();
 
 		expect(getUserTexts(harness)).toEqual(["hello", "conflict report"]);
+	});
+
+	// Part B (working spinner during the routing/prep phase): a queued steer() while streaming takes
+	// the early-return branch in _promptUnserialized (before the routing_start emit added for the
+	// working-spinner bracket), so it must not add a second routing_start/routing_end pair — only the
+	// ORIGINAL prompt that's actually streaming ever entered that phase.
+	it("does not emit an extra routing_start/routing_end pair for a message queued via steer()", async () => {
+		const waiting = await createWaitingHarness();
+		const { harness, waitForToolStart, promptPromise, releaseToolExecution } = waiting;
+		harnesses.push(harness);
+
+		harness.setResponses([
+			fauxAssistantMessage(fauxToolCall("wait", {}), { stopReason: "toolUse" }),
+			fauxAssistantMessage("done"),
+		]);
+
+		await waitForToolStart;
+		await harness.session.steer("queued");
+		releaseToolExecution();
+		await promptPromise;
+
+		expect(harness.eventsOfType("routing_start")).toHaveLength(1);
+		expect(harness.eventsOfType("routing_end")).toHaveLength(1);
 	});
 });
