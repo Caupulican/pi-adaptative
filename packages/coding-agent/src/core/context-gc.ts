@@ -34,8 +34,11 @@ export interface NormalizedContextGcSettings extends Omit<Required<ContextGcSett
 
 /**
  * Brain-curation hooks (both optional; absent hooks are byte-for-byte today's behavior).
- * `resolveDigest` is a pure lookup keyed by the record's content hash; `onPacked` lets the
- * caller enqueue digest work with the exact original text at the moment it is packed.
+ * `resolveDigest` is a pure lookup keyed by the record's content hash — it must return the digest
+ * already fenced in the untrusted-content boundary (e.g. BrainCurator.getDigest), with the fence's
+ * nonce fixed once at store time, since GC re-renders the stub from raw messages on every request
+ * and renders the returned string VERBATIM. `onPacked` lets the caller enqueue digest work with the
+ * exact original text at the moment it is packed.
  */
 export interface ContextGcCurationHooks {
 	resolveDigest?: (digestKey: string) => string | undefined;
@@ -61,7 +64,9 @@ export interface ContextGcPackedRecord {
 	path?: string;
 	command?: string;
 	key?: string;
-	/** Brain-curator semantic digest of the packed content (model-generated; advisory only). */
+	/** Brain-curator semantic digest of the packed content (model-generated; advisory only). Arrives
+	 * already fenced in the untrusted-content boundary (see ContextGcCurationHooks.resolveDigest) —
+	 * render verbatim, never re-wrap. */
 	digest?: string;
 }
 
@@ -341,6 +346,11 @@ function buildSummary(record: ContextGcPackedRecord): string {
 		record.command ? `command: ${cap(record.command)}` : undefined,
 		`reason: ${reasonText(record)}`,
 		`original: ${record.originalChars} chars (~${record.originalTokens} tokens)`,
+		// The digest arrives PRE-FENCED from the curator (brain-curator.ts wraps it once, in the
+		// standard untrusted-content boundary — the same treatment memory recall pages get — at the
+		// moment it is stored, not here). Render it VERBATIM: re-wrapping on every GC render would
+		// regenerate the fence's nonce each time, making the packed stub byte-different on every
+		// provider request and busting prompt caching (BUG E).
 		record.digest ? `summary (auto-digest, machine paraphrase, not authoritative): ${record.digest}` : undefined,
 		record.storagePath
 			? `exact old provider-visible text stored at: ${record.storagePath}`

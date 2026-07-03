@@ -14,6 +14,7 @@ import {
 } from "../src/core/context/context-prompt-enforcement.ts";
 import { planPromptPolicy } from "../src/core/context/context-prompt-policy.ts";
 import { applyContextGc, type ContextGcPackedRecord } from "../src/core/context-gc.ts";
+import { wrapUntrustedText } from "../src/core/security/untrusted-boundary.ts";
 import { createHarness } from "./test-harness.ts";
 
 const scripted = (replies: string[]): CurationComplete => {
@@ -44,7 +45,15 @@ describe("BrainCurator queue and results", () => {
 		});
 
 		expect(results.map((result) => result.ok)).toEqual([true, false]);
-		expect(curator.getDigest("good")).toBe("retryWithJitter found in src/http/client.ts");
+		// getDigest returns the digest already fenced in the untrusted-content boundary (wrapped once,
+		// here at drain time) — never bare model prose (design: untrusted-content-boundary).
+		const digest = curator.getDigest("good");
+		expect(digest).toContain("retryWithJitter found in src/http/client.ts");
+		expect(digest).toContain("<untrusted_content");
+		expect(digest).toContain("context-gc:auto-digest");
+		// Fixed at store time: repeated reads return the exact same fenced bytes (stable nonce), so a
+		// GC stub built from this digest is byte-identical across every render (BUG E regression).
+		expect(curator.getDigest("good")).toBe(digest);
 		expect(curator.getDigest("bad")).toBeUndefined();
 		expect(curator.telemetry()).toMatchObject({ jobsRun: 2, parseFailures: 1, queued: 0, digestsServed: 0 });
 		curator.noteDigestServed();
@@ -113,20 +122,69 @@ describe("context-gc curation hooks (surface 2: stub digests)", () => {
 		expect(packed[0]!.record.key).toBeDefined();
 	});
 
-	it("renders a resolved digest inside the stub; an absent digest leaves the stub unchanged", () => {
+	it("renders a resolved digest inside the stub verbatim; an absent digest leaves the stub unchanged", () => {
 		const messages = [bigToolResult("tc-1"), user("a"), user("b"), user("c")];
 		const first = applyContextGc(messages, gcSettings);
 		const firstText = JSON.stringify(first.messages[0]);
 		expect(firstText).not.toContain("summary:");
 
 		const key = first.report.records[0]!.key!;
+		// In production resolveDigest is backed by BrainCurator.getDigest, which returns the digest
+		// already fenced (wrapped exactly once, at store time — see the byte-stability test below).
+		// Mirror that contract here instead of handing context-gc a bare, unfenced string.
+		const fenced = wrapUntrustedText("grep hit for nonce-fact-tc-1", "context-gc:auto-digest");
 		const second = applyContextGc(messages, {
 			...gcSettings,
-			curation: { resolveDigest: (digestKey) => (digestKey === key ? "grep hit for nonce-fact-tc-1" : undefined) },
+			curation: { resolveDigest: (digestKey) => (digestKey === key ? fenced : undefined) },
 		});
 		const secondText = JSON.stringify(second.messages[0]);
-		expect(secondText).toContain("not authoritative): grep hit for nonce-fact-tc-1");
-		expect(second.report.records[0]!.digest).toBe("grep hit for nonce-fact-tc-1");
+		// The digest is derived from (attacker-influenceable) tool output, so it must be rendered inside
+		// the standard untrusted-content fence — like memory recall pages — not inlined as bare prose.
+		expect(secondText).toContain("machine paraphrase, not authoritative):");
+		expect(secondText).toContain("untrusted_content");
+		expect(secondText).toContain("context-gc:auto-digest");
+		expect(secondText).toContain("grep hit for nonce-fact-tc-1");
+		// The stored record holds exactly what resolveDigest returned (already fenced).
+		expect(second.report.records[0]!.digest).toBe(fenced);
+		// context-gc must render it VERBATIM — re-wrapping an already-fenced digest would nest
+		// boundaries (and, worse, defeat the fixed store-time nonce checked below).
+		expect(secondText.match(/<untrusted_content/g)).toHaveLength(1);
+		// A re-wrap would also neutralize (HTML-escape) the inner fence's tags as spoofing attempts,
+		// corrupting the digest bytes even where the outer tag count still looks like 1. Assert the
+		// exact pre-fenced text survives byte-for-byte.
+		expect(secondText).toContain(JSON.stringify(fenced).slice(1, -1));
+	});
+
+	it("BUG E regression: a digest resolved from BrainCurator renders byte-identically across repeated GC passes", async () => {
+		// context-gc re-executes from raw messages on EVERY provider request. If resolveDigest's
+		// result were re-fenced with a fresh nonce on each render, the packed stub — and the whole
+		// prompt prefix after it — would be byte-different on every request, busting prompt caching.
+		// The fence's nonce must be fixed once, at the point the curator STORES the digest.
+		const curator = new BrainCurator();
+		const messages = [bigToolResult("tc-1"), user("a"), user("b"), user("c")];
+		// First pass: pack and enqueue the digest job, exactly like a real per-turn GC pass would.
+		applyContextGc(messages, {
+			...gcSettings,
+			curation: {
+				onPacked: (record) => curator.enqueue({ kind: "stub_digest", key: record.key!, content: "chunk" }),
+			},
+		});
+		await curator.drain({
+			maxJobs: 1,
+			complete: scripted(['{"digest":"retryWithJitter found in src/http/client.ts"}']),
+		});
+
+		const resolveDigest = (digestKey: string) => curator.getDigest(digestKey);
+		const first = applyContextGc(messages, { ...gcSettings, curation: { resolveDigest } });
+		const second = applyContextGc(messages, { ...gcSettings, curation: { resolveDigest } });
+		const firstText = JSON.stringify(first.messages[0]);
+		const secondText = JSON.stringify(second.messages[0]);
+
+		expect(firstText).toContain("retryWithJitter found in src/http/client.ts");
+		expect(firstText).toBe(secondText);
+		// Fenced exactly once — no nested boundary from a re-wrap at render time.
+		expect(firstText.match(/<untrusted_content/g)).toHaveLength(1);
+		expect(firstText.match(/<\/untrusted_content/g)).toHaveLength(1);
 	});
 });
 

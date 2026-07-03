@@ -1,4 +1,5 @@
 import { runBoundedCompletion } from "../autonomy/bounded-completion.ts";
+import { wrapUntrustedText } from "../security/untrusted-boundary.ts";
 
 /**
  * Brain-assisted context curation (see docs/model-router-rework/brain-context-curation-design.md):
@@ -123,7 +124,15 @@ export interface CurationResult {
 	key: string;
 	kind: CurationJob["kind"];
 	ok: boolean;
+	/** Raw model-parsed digest (stub_digest jobs only): human-readable, NOT fenced. Kept as-is for
+	 * logging/audit (e.g. the session's brain-curation entry) — never render this into a provider
+	 * prompt; use `fencedDigest` (via getDigest) for that. */
 	digest?: string;
+	/** The same digest fenced in the untrusted-content boundary, wrapped exactly ONCE here at store
+	 * time (not at every context-gc render), so the fence's nonce is fixed for the life of this
+	 * result — every render of it is then byte-identical, keeping the provider's prompt-prefix cache
+	 * warm. This is what getDigest() returns and what context-gc renders verbatim into a packed stub. */
+	fencedDigest?: string;
 	relevant?: boolean;
 	confidence?: number;
 	ms: number;
@@ -185,6 +194,18 @@ export function parseCurationDigest(text: string): string | undefined {
 	return trimmed;
 }
 
+/**
+ * Fence a parsed digest in the untrusted-content boundary exactly ONCE, here at store time — the
+ * digest is a machine paraphrase of (possibly attacker-influenced) tool output, so it must never
+ * reach the provider as bare prose (design: untrusted-content-boundary). Wrapping at store time,
+ * not at every context-gc render, fixes the fence's nonce for the life of the stored result: every
+ * render of the same stored digest is then byte-identical, so the provider's prompt-prefix cache
+ * stays warm — the same pattern transcript-recall already uses for its pages.
+ */
+function fenceDigestForStorage(digest: string): string {
+	return wrapUntrustedText(digest, "context-gc:auto-digest");
+}
+
 export function parseCurationRelevance(text: string): { relevant: boolean; confidence: number } | undefined {
 	const parsed = extractJsonObject(text);
 	if (!parsed) return undefined;
@@ -218,9 +239,11 @@ export class BrainCurator {
 		this._queue.set(job.key, { ...job, content: job.content.slice(0, MAX_JOB_CONTENT_CHARS) });
 	}
 
+	/** Returns the digest already fenced in the untrusted-content boundary — callers must render it
+	 * verbatim into a provider prompt, never re-wrap it (see CurationResult.fencedDigest for why). */
 	getDigest(key: string): string | undefined {
 		const result = this._results.get(key);
-		return result?.ok && result.kind === "stub_digest" ? result.digest : undefined;
+		return result?.ok && result.kind === "stub_digest" ? result.fencedDigest : undefined;
 	}
 
 	/** Callers report when a digest was rendered into a real (sent) prompt stub. */
@@ -297,7 +320,10 @@ export class BrainCurator {
 				if (bounded.completion && !bounded.failure) {
 					if (job.kind === "stub_digest") {
 						const digest = parseCurationDigest(bounded.completion.text);
-						result = digest !== undefined ? { ...result, ok: true, digest } : result;
+						result =
+							digest !== undefined
+								? { ...result, ok: true, digest, fencedDigest: fenceDigestForStorage(digest) }
+								: result;
 					} else {
 						const relevance = parseCurationRelevance(bounded.completion.text);
 						result =
