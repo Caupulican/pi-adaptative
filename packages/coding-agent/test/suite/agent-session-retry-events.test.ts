@@ -224,9 +224,12 @@ describe("AgentSession retry and event characterization", () => {
 
 		await harness.session.prompt("hi");
 
+		// The user message paints early (see _promptUnserialized), via a public-only synthetic
+		// message_start fired before the turn actually starts — extensions never see that one, only
+		// the authoritative message_start/message_end pair once the real turn begins.
 		expect(order).toEqual([
-			"extension:message_start:user",
 			"public:message_start:user",
+			"extension:message_start:user",
 			"extension:message_end:user",
 			"public:message_end:user",
 			"extension:message_start:assistant",
@@ -243,10 +246,12 @@ describe("AgentSession retry and event characterization", () => {
 
 		await harness.session.prompt("hi");
 
+		// message_start:user leads even agent_start/turn_start: it paints early (before routing),
+		// via a synthetic emit that the later, authoritative message_start (same object) suppresses.
 		expect(normalizeEventOrder(harness.events)).toEqual([
+			"message_start:user",
 			"agent_start",
 			"turn_start",
-			"message_start:user",
 			"message_end:user",
 			"message_start:assistant",
 			"message_update",
@@ -280,9 +285,9 @@ describe("AgentSession retry and event characterization", () => {
 
 		expect(toolRuns).toEqual(["hello"]);
 		expect(normalizeEventOrder(harness.events)).toEqual([
+			"message_start:user",
 			"agent_start",
 			"turn_start",
-			"message_start:user",
 			"message_end:user",
 			"message_start:assistant",
 			"message_update",

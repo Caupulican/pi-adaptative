@@ -28,6 +28,14 @@
 
 ### Fixed
 
+- The user's prompt now appears on screen immediately when submitted, instead of appearing to hang
+  until the model router's routing judge finishes. The judge is a bounded LLM completion (seconds),
+  and the turn previously built and emitted the user message only *after* awaiting it, so the prompt
+  looked frozen right after Enter. `_promptUnserialized` now builds the user message and paints it (a
+  synthetic `message_start`) before the judge await, then reuses that same object for the turn; the
+  authoritative `message_start` emitted later is suppressed exactly once (reference-keyed via a Set),
+  so the message is still shown and persisted a single time, and extensions still observe it at the
+  real turn start (their visible behavior is unchanged).
 - Hardened the hardening sweep after a max-effort review of the working diff found nine regressions
   and latent holes the first pass introduced or left open:
   - `endWriteStream` (newly awaited by the bash executor) hung forever when the stream had already

@@ -139,4 +139,64 @@ describe("AgentSession route judge", () => {
 			harness.cleanup();
 		}
 	});
+
+	// Bug: the judge is a bounded LLM completion (seconds), not a regex — awaiting it before the
+	// user's own message is ever displayed makes the prompt appear to hang. The message must paint
+	// immediately, then routing (the judge) happens.
+	it("paints the user's message before the routing judge's completion is dispatched", async () => {
+		const harness = await createHarness({
+			models: [{ id: "cheap" }, { id: "medium" }],
+			settings: {
+				modelRouter: { enabled: true, cheapModel: "faux/cheap", mediumModel: "faux/medium" },
+			},
+		});
+		try {
+			const order: string[] = [];
+			harness.session.subscribe((event) => {
+				if (event.type === "message_start" && event.message.role === "user") {
+					order.push("message_start:user");
+				}
+			});
+			harness.setResponses([
+				() => {
+					order.push("judge:dispatch");
+					return fauxAssistantMessage(JUDGE_MEDIUM);
+				},
+				fauxAssistantMessage("answered on medium"),
+			]);
+
+			await harness.session.prompt("Implement a small fix and update the relevant unit test.");
+
+			expect(order).toEqual(["message_start:user", "judge:dispatch"]);
+		} finally {
+			harness.cleanup();
+		}
+	});
+
+	it("still displays and persists the user's message exactly once when the judge runs", async () => {
+		const harness = await createHarness({
+			models: [{ id: "cheap" }, { id: "medium" }],
+			settings: {
+				modelRouter: { enabled: true, cheapModel: "faux/cheap", mediumModel: "faux/medium" },
+			},
+		});
+		try {
+			harness.setResponses([fauxAssistantMessage(JUDGE_MEDIUM), fauxAssistantMessage("answered on medium")]);
+
+			await harness.session.prompt("Implement a small fix and update the relevant unit test.");
+
+			// Exactly one visible user message_start, no duplicate paint.
+			const userStarts = harness.eventsOfType("message_start").filter((event) => event.message.role === "user");
+			expect(userStarts).toHaveLength(1);
+
+			// Persisted transcript order is unaffected: user before assistant, no dupes.
+			const persistedRoles = harness.sessionManager
+				.getEntries()
+				.filter((entry): entry is Extract<typeof entry, { type: "message" }> => entry.type === "message")
+				.map((entry) => entry.message.role);
+			expect(persistedRoles).toEqual(["user", "assistant"]);
+		} finally {
+			harness.cleanup();
+		}
+	});
 });

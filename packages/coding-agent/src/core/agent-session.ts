@@ -1982,6 +1982,17 @@ export class AgentSession {
 	// Track last assistant message for auto-compaction check
 	private _lastAssistantMessage: AssistantMessage | undefined = undefined;
 
+	/**
+	 * User messages already painted to the UI by an early, synthetic `message_start` fired from
+	 * `_promptUnserialized` — before the model-router judge's bounded LLM call — so the prompt
+	 * appears immediately instead of hanging until routing finishes. The real agent-loop run emits
+	 * its own authoritative `message_start` for the SAME message object once the turn actually
+	 * starts; `_handleAgentEvent` consumes (deletes) it from this set to suppress that one duplicate
+	 * listener notification. Persistence is untouched: it stays keyed off `message_end`, which is
+	 * never added here and never suppressed.
+	 */
+	private _earlyDisplayedUserMessages = new Set<AgentMessage>();
+
 	/** Internal handler for agent events - shared by subscribe and reconnect */
 	private _handleAgentEvent = async (event: AgentEvent): Promise<void> => {
 		// When a user message starts, check if it's from either queue and remove it BEFORE emitting
@@ -2014,8 +2025,16 @@ export class AgentSession {
 			(event.type === "message_start" || event.type === "message_end") &&
 			(event.message.role === "user" || event.message.role === "custom");
 
+		// This is the authoritative message_start for a user message already painted early (see
+		// _promptUnserialized). Set#delete both tests and consumes membership in one step, so only
+		// this one duplicate is suppressed and a later, unrelated user message is never affected.
+		const suppressAlreadyDisplayedUserMessage =
+			event.type === "message_start" &&
+			event.message.role === "user" &&
+			this._earlyDisplayedUserMessages.delete(event.message);
+
 		// Notify all listeners
-		if (!suppressRetryPromptEvent) {
+		if (!suppressRetryPromptEvent && !suppressAlreadyDisplayedUserMessage) {
 			this._emit(event.type === "agent_end" ? { ...event, willRetry: this._willRetryAfterAgentEnd(event) } : event);
 		}
 
@@ -3325,6 +3344,10 @@ export class AgentSession {
 		let messages: AgentMessage[] | undefined;
 		let routedTurnModel: Model<Api> | undefined;
 		let routedTurnRouteDecision: RouteDecision | undefined;
+		// Built and painted early (see below) so a later throw in this try block — e.g. no model
+		// selected/authenticated — can un-register it from _earlyDisplayedUserMessages instead of
+		// leaking the reference forever.
+		let userMessage: AgentMessage | undefined;
 		// R4 effectiveness feedback: remember the recall page + the query so we can score, after the
 		// response, whether the agent actually used the recalled context.
 		let injectedRecall = "";
@@ -3399,6 +3422,23 @@ export class AgentSession {
 			// Flush any pending bash messages before the new prompt
 			this._flushPendingBashMessages();
 
+			// Build the user message now — before the router judge — and paint it to the UI
+			// immediately via a synthetic message_start. The judge is a real bounded LLM completion
+			// (seconds), not a regex; awaiting it first made the prompt appear to hang. The
+			// authoritative message_start emitted later for this SAME object is suppressed in
+			// _handleAgentEvent (see _earlyDisplayedUserMessages) so it is still shown exactly once.
+			const userContent: (TextContent | ImageContent)[] = [{ type: "text", text: expandedText }];
+			if (currentImages) {
+				userContent.push(...currentImages);
+			}
+			userMessage = {
+				role: "user",
+				content: userContent,
+				timestamp: Date.now(),
+			};
+			this._earlyDisplayedUserMessages.add(userMessage);
+			this._emit({ type: "message_start", message: userMessage });
+
 			const resolvedRouteInfo = await this._resolveModelRouterTurnRouteJudged(expandedText, {
 				// Internally generated turns (goal continuation, lane follow-ups) never consult the judge:
 				// the regex floor already classified them, and a 20-turn loop must not buy 20 judge calls.
@@ -3461,16 +3501,9 @@ export class AgentSession {
 				}
 			}
 
-			// Add user message
-			const userContent: (TextContent | ImageContent)[] = [{ type: "text", text: expandedText }];
-			if (currentImages) {
-				userContent.push(...currentImages);
-			}
-			messages.push({
-				role: "user",
-				content: userContent,
-				timestamp: Date.now(),
-			});
+			// Add user message (built earlier, before the router judge, so it could be painted
+			// immediately — see the early message_start emit above).
+			messages.push(userMessage);
 
 			// Inject any pending "nextTurn" messages as context alongside the user message
 			for (const msg of this._pendingNextTurnMessages) {
@@ -3506,6 +3539,12 @@ export class AgentSession {
 				this.agent.state.systemPrompt = this._baseSystemPrompt;
 			}
 		} catch (error) {
+			// The turn never reached _runAgentPrompt, so the authoritative message_start that would
+			// normally consume this entry (see _handleAgentEvent) never fires — un-register it here
+			// instead of leaking the reference.
+			if (userMessage) {
+				this._earlyDisplayedUserMessages.delete(userMessage);
+			}
 			preflightResult?.(false);
 			throw error;
 		}
