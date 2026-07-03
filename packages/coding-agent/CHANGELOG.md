@@ -1,5 +1,15 @@
 ## [Unreleased]
 
+### Fixed
+
+- Made the FFF lazy-install test suite environment-independent. Three tests asserted that
+  `@ff-labs/fff-node` was not resolvable — which held locally (the package resolves only via the
+  managed install) but failed in CI, where the declared dependency is installed by `npm ci`,
+  blocking v0.80.101 from publishing. `loadAvailableFffNodePackage`/`ensureFffNodePackage` now take
+  an optional injectable resolver-candidate list, and those tests pass an empty list to force the
+  "not available" precondition deterministically regardless of environment. Test-only; no runtime
+  behavior change. 0.80.102 republishes the 0.80.101 changes with this fix.
+
 ## [0.80.101] - 2026-07-03
 
 ### Added

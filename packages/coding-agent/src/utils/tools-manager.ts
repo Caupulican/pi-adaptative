@@ -460,10 +460,23 @@ function loadFffNodeWith(requireFff: ModuleRequire): unknown | undefined {
 	}
 }
 
-export function loadAvailableFffNodePackage(): unknown | undefined {
-	for (const requireFff of [moduleRequire, executableDirRequire, createManagedFffRequire()].filter(
-		(candidate): candidate is ModuleRequire => Boolean(candidate),
-	)) {
+/**
+ * @param requires Override the resolution candidates, for tests (mirrors
+ * fff-search-backend.ts's loadFffModule(requires?)). Whether this resolves
+ * depends on the ambient environment -- @ff-labs/fff-node is a real npm
+ * dependency (package.json), so moduleRequire succeeds wherever a normal
+ * `npm install`/`npm ci` provisioned it (e.g. CI) even though it fails on a
+ * dev checkout that never ran that install here (this repo resolves fff-node
+ * via the separate managed-dir path instead). A test asserting "nothing is
+ * available" must pass `[]` here rather than relying on that being true.
+ */
+export function loadAvailableFffNodePackage(requires?: readonly ModuleRequire[]): unknown | undefined {
+	const candidates =
+		requires ??
+		[moduleRequire, executableDirRequire, createManagedFffRequire()].filter((candidate): candidate is ModuleRequire =>
+			Boolean(candidate),
+		);
+	for (const requireFff of candidates) {
 		const loaded = loadFffNodeWith(requireFff);
 		if (loaded) return loaded;
 	}
@@ -621,8 +634,10 @@ async function installManagedFffNodePackage(platformPackage: string, silent: boo
 export async function ensureFffNodePackage(
 	silent: boolean = false,
 	forceManagedInstall: boolean = false,
+	/** Override the "is it already available" resolution candidates, for tests. See loadAvailableFffNodePackage's doc. */
+	requires?: readonly ModuleRequire[],
 ): Promise<unknown | undefined> {
-	const existing = forceManagedInstall ? undefined : loadAvailableFffNodePackage();
+	const existing = forceManagedInstall ? undefined : loadAvailableFffNodePackage(requires);
 	if (existing) {
 		lastFffInstallOutcome = { status: "already-available" };
 		return existing;

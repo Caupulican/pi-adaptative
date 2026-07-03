@@ -58,10 +58,20 @@ describe("tools-manager: ensureFffNodePackage graceful fallbacks", () => {
 			process.env.PI_OFFLINE = "1";
 			const toolsManager = await import("../src/utils/tools-manager.ts");
 
-			expect(toolsManager.loadAvailableFffNodePackage()).toBeUndefined();
+			// [] means "nothing is require-able" REGARDLESS of the ambient
+			// environment: @ff-labs/fff-node is a real npm dependency
+			// (package.json), so without this override, a CI box where `npm ci`
+			// actually provisioned it would see loadAvailableFffNodePackage()
+			// return the real module -- short-circuiting ensureFffNodePackage on
+			// "already-available" before it ever reaches the offline check. This
+			// exact gap broke the v0.80.101 CI publish (this file passed locally
+			// only because our dev checkout never resolves fff-node this way; see
+			// getLastFffInstallOutcome() reasoning in loadAvailableFffNodePackage's
+			// doc comment).
+			expect(toolsManager.loadAvailableFffNodePackage([])).toBeUndefined();
 
 			const start = Date.now();
-			const result = await toolsManager.ensureFffNodePackage(true);
+			const result = await toolsManager.ensureFffNodePackage(true, false, []);
 			const elapsedMs = Date.now() - start;
 
 			expect(result).toBeUndefined();
@@ -79,10 +89,13 @@ describe("tools-manager: ensureFffNodePackage graceful fallbacks", () => {
 			vi.mocked(arch).mockReturnValue("mips" as NodeJS.Architecture);
 
 			const toolsManager = await import("../src/utils/tools-manager.ts");
-			expect(toolsManager.loadAvailableFffNodePackage()).toBeUndefined();
+			// See the sibling offline-mode test above for why [] is required here
+			// regardless of whether @ff-labs/fff-node happens to be resolvable in
+			// the environment running this test.
+			expect(toolsManager.loadAvailableFffNodePackage([])).toBeUndefined();
 
 			const start = Date.now();
-			const result = await toolsManager.ensureFffNodePackage(true);
+			const result = await toolsManager.ensureFffNodePackage(true, false, []);
 			const elapsedMs = Date.now() - start;
 
 			expect(result).toBeUndefined();
@@ -159,23 +172,31 @@ describe("tools-manager: install-failed cooldown gates the npm spawn, not evicti
 
 			try {
 				const toolsManager = await import("../src/utils/tools-manager.ts");
+				// [] forces "nothing already available" on every call below,
+				// regardless of whether @ff-labs/fff-node happens to be resolvable
+				// in the environment running this test (see the offline-mode test
+				// above) -- otherwise the `existing` short-circuit in
+				// ensureFffNodePackage would return early on "already-available"
+				// and this test would never reach the install attempt it's
+				// actually proving out.
+				const noneAvailable: readonly ((id: string) => unknown)[] = [];
 
 				nowSpy.mockReturnValue(1_000_000);
-				const first = await toolsManager.ensureFffNodePackage(false);
+				const first = await toolsManager.ensureFffNodePackage(false, false, noneAvailable);
 				expect(first).toBeUndefined();
 				expect(toolsManager.getLastFffInstallOutcome()?.status).toBe("install-failed");
 				expect(attemptCount()).toBe(1);
 
 				// Still within the cooldown: must bail fast, without a new attempt.
 				nowSpy.mockReturnValue(1_000_000 + toolsManager.FFF_INSTALL_RETRY_COOLDOWN_MS - 1);
-				const second = await toolsManager.ensureFffNodePackage(false);
+				const second = await toolsManager.ensureFffNodePackage(false, false, noneAvailable);
 				expect(second).toBeUndefined();
 				expect(attemptCount()).toBe(1);
 
 				// Past the cooldown: must attempt again (it still fails, since npm
 				// is still unresolvable, but a NEW attempt is what we're proving).
 				nowSpy.mockReturnValue(1_000_000 + toolsManager.FFF_INSTALL_RETRY_COOLDOWN_MS);
-				const third = await toolsManager.ensureFffNodePackage(false);
+				const third = await toolsManager.ensureFffNodePackage(false, false, noneAvailable);
 				expect(third).toBeUndefined();
 				expect(attemptCount()).toBe(2);
 			} finally {
