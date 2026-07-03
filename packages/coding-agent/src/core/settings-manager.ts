@@ -192,6 +192,15 @@ export interface ModelRouterSettings {
 	judgeEnabled?: boolean; // default: true — the routing judge runs automatically whenever the router is enabled and a judge model resolves
 	judgeModel?: string; // model pattern for the routing-only judge; unset falls back to mediumModel
 	executorModel?: string; // model pattern for the local executor lane (direct toolkit commands); unset disables it
+	// Per-tier thinking (R1): overrides the inherited-and-clamped session thinking level for a routed
+	// turn on that tier only (see agent-session.ts's routed-turn swap). Unset reproduces today's
+	// behavior exactly — inherit the session thinking level, clamped to the routed model. learningModel
+	// already has its own thinking via autoLearn.thinkingLevel, so there is deliberately no learningThinking.
+	cheapThinking?: ThinkingLevel;
+	mediumThinking?: ThinkingLevel;
+	expensiveThinking?: ThinkingLevel;
+	executorThinking?: ThinkingLevel; // thinking level for the executor-direct lane
+	judgeThinking?: ThinkingLevel; // thinking level for the routing judge's own completion; unset keeps today's "off"
 }
 
 export const DEFAULT_RESEARCH_LANE_ENABLED = false;
@@ -2071,6 +2080,11 @@ export class SettingsManager {
 		judgeEnabled: boolean;
 		judgeModel?: string;
 		executorModel?: string;
+		cheapThinking?: ThinkingLevel;
+		mediumThinking?: ThinkingLevel;
+		expensiveThinking?: ThinkingLevel;
+		executorThinking?: ThinkingLevel;
+		judgeThinking?: ThinkingLevel;
 	} {
 		const profileSettings = this.getProfileModelRouterSettings();
 		const settings = {
@@ -2082,6 +2096,23 @@ export class SettingsManager {
 			judgeEnabled: this.settings.modelRouter?.judgeEnabled ?? true,
 			judgeModel: this.settings.modelRouter?.judgeModel?.trim() || undefined,
 			executorModel: this.settings.modelRouter?.executorModel?.trim() || undefined,
+			// Not yet profile-overridable (same as judgeModel/executorModel above): validated here so a
+			// corrupt/hand-edited value on disk never reaches the routed-turn swap in agent-session.ts.
+			cheapThinking: isThinkingLevel(this.settings.modelRouter?.cheapThinking)
+				? this.settings.modelRouter?.cheapThinking
+				: undefined,
+			mediumThinking: isThinkingLevel(this.settings.modelRouter?.mediumThinking)
+				? this.settings.modelRouter?.mediumThinking
+				: undefined,
+			expensiveThinking: isThinkingLevel(this.settings.modelRouter?.expensiveThinking)
+				? this.settings.modelRouter?.expensiveThinking
+				: undefined,
+			executorThinking: isThinkingLevel(this.settings.modelRouter?.executorThinking)
+				? this.settings.modelRouter?.executorThinking
+				: undefined,
+			judgeThinking: isThinkingLevel(this.settings.modelRouter?.judgeThinking)
+				? this.settings.modelRouter?.judgeThinking
+				: undefined,
 		};
 		return {
 			enabled: profileSettings?.enabled ?? settings.enabled,
@@ -2092,6 +2123,11 @@ export class SettingsManager {
 			judgeEnabled: profileSettings?.judgeEnabled ?? settings.judgeEnabled,
 			judgeModel: profileSettings?.judgeModel?.trim() || settings.judgeModel,
 			executorModel: profileSettings?.executorModel?.trim() || settings.executorModel,
+			cheapThinking: settings.cheapThinking,
+			mediumThinking: settings.mediumThinking,
+			expensiveThinking: settings.expensiveThinking,
+			executorThinking: settings.executorThinking,
+			judgeThinking: settings.judgeThinking,
 		};
 	}
 
@@ -2105,6 +2141,11 @@ export class SettingsManager {
 			judgeEnabled: settings.judgeEnabled ?? true,
 			judgeModel: settings.judgeModel?.trim() || undefined,
 			executorModel: settings.executorModel?.trim() || undefined,
+			cheapThinking: isThinkingLevel(settings.cheapThinking) ? settings.cheapThinking : undefined,
+			mediumThinking: isThinkingLevel(settings.mediumThinking) ? settings.mediumThinking : undefined,
+			expensiveThinking: isThinkingLevel(settings.expensiveThinking) ? settings.expensiveThinking : undefined,
+			executorThinking: isThinkingLevel(settings.executorThinking) ? settings.executorThinking : undefined,
+			judgeThinking: isThinkingLevel(settings.judgeThinking) ? settings.judgeThinking : undefined,
 		};
 		if (scope === "project") {
 			const projectSettings = structuredClone(this.projectSettings);

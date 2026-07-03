@@ -419,6 +419,46 @@ describe("SettingsManager", () => {
 			);
 			expect(manager.getModelRouterSettings().mediumModel).toBe("global-medium");
 		});
+
+		it("round-trips per-tier thinking levels through set/get", () => {
+			const manager = SettingsManager.create(projectDir, agentDir);
+			manager.setModelRouterSettings(
+				{
+					enabled: true,
+					cheapThinking: "low",
+					mediumThinking: "medium",
+					expensiveThinking: "high",
+					executorThinking: "minimal",
+					judgeThinking: "off",
+				},
+				"global",
+			);
+
+			const settings = manager.getModelRouterSettings();
+			expect(settings.cheapThinking).toBe("low");
+			expect(settings.mediumThinking).toBe("medium");
+			expect(settings.expensiveThinking).toBe("high");
+			expect(settings.executorThinking).toBe("minimal");
+			expect(settings.judgeThinking).toBe("off");
+		});
+
+		it("drops an invalid per-tier thinking level read from disk but keeps a valid sibling", () => {
+			writeFileSync(
+				join(agentDir, "settings.json"),
+				JSON.stringify({
+					modelRouter: {
+						enabled: true,
+						cheapThinking: "extreme",
+						mediumThinking: "high",
+					},
+				}),
+			);
+
+			const manager = SettingsManager.create(projectDir, agentDir);
+
+			expect(manager.getModelRouterSettings().cheapThinking).toBeUndefined();
+			expect(manager.getModelRouterSettings().mediumThinking).toBe("high");
+		});
 	});
 
 	describe("project settings directory creation", () => {

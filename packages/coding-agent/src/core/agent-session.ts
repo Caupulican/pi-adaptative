@@ -2921,7 +2921,9 @@ export class AgentSession {
 					systemPrompt,
 					messages: [{ role: "user", content: [{ type: "text", text: userPrompt }], timestamp: Date.now() }],
 					model: judgeModel,
-					thinkingLevel: "off",
+					// Per-tier thinking (R1): judgeThinking overrides the judge's own completion; unset
+					// keeps today's "off" (the judge is a cheap classification call by default).
+					thinkingLevel: settings.judgeThinking ?? "off",
 					maxTokens: ROUTE_JUDGE_MAX_OUTPUT_TOKENS,
 					signal,
 					// The judge system prompt is static — the provider can cache the prefix.
@@ -3046,7 +3048,27 @@ export class AgentSession {
 		}
 		if (!modelsAreEqual(this.model, routedModel)) {
 			this.agent.state.model = routedModel;
-			this.agent.state.thinkingLevel = clampThinkingLevel(routedModel, previousThinkingLevel) as ThinkingLevel;
+			// Per-tier thinking (R1): a configured tier/executor thinking level overrides the inherited
+			// session thinking for THIS routed turn only; unset falls back to exactly today's
+			// inherit-and-clamp behavior. Executor routes carry tier "cheap" too, so reasonCode is
+			// checked first — otherwise an executor turn would silently pick up cheapThinking instead.
+			// The judge's own completion has a separate knob (judgeThinking) applied at its call site.
+			const routerThinkingSettings = this.settingsManager.getModelRouterSettings();
+			const configuredThinking = !routeDecision
+				? undefined
+				: routeDecision.reasonCode === "executor_direct"
+					? routerThinkingSettings.executorThinking
+					: routeDecision.tier === "cheap"
+						? routerThinkingSettings.cheapThinking
+						: routeDecision.tier === "medium"
+							? routerThinkingSettings.mediumThinking
+							: routeDecision.tier === "expensive"
+								? routerThinkingSettings.expensiveThinking
+								: undefined;
+			this.agent.state.thinkingLevel = clampThinkingLevel(
+				routedModel,
+				configuredThinking ?? previousThinkingLevel,
+			) as ThinkingLevel;
 			// G4: capability tool-filtering follows the ROUTED model for the turn. Without this a
 			// cheap/local routed model inherits the session model's full tool surface — schemas it
 			// pays for on every request and may not be able to drive at all.

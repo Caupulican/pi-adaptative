@@ -2,6 +2,14 @@
 
 ### Added
 
+- Per-tier thinking level for the model router: `modelRouter` now accepts `cheapThinking`,
+  `mediumThinking`, `expensiveThinking`, `executorThinking`, and `judgeThinking`. A routed turn
+  applies the configured thinking level for its tier (clamped to the routed model), so a
+  cheap/local tier can run at `low`/`off` while the expensive tier runs at `high` — thinking level
+  is now a cost/speed lever independent of the model choice. Unset per-tier thinking reproduces
+  today's inherit-and-clamp behavior exactly; the routing judge's own bounded completion uses
+  `judgeThinking` (default `off`). Executor-direct routes are matched before the cheap tier so they
+  read `executorThinking`, not `cheapThinking`.
 - `/models suggest` now opens an interactive picker over the validated local-model roster instead of
   printing a list to retype: choosing a model installs it, probes its six fitness surfaces on the
   actual hardware, and lands the role it was shaped for already pre-selected in the assignment step —

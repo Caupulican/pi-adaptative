@@ -1,6 +1,6 @@
 import type { AgentMessage, AgentTool, ThinkingLevel } from "@caupulican/pi-agent-core";
 import type { Api, AssistantMessage, Message, Model, Usage } from "@caupulican/pi-ai";
-import { fauxAssistantMessage, fauxToolCall, getModel } from "@caupulican/pi-ai";
+import { clampThinkingLevel, fauxAssistantMessage, fauxToolCall, getModel } from "@caupulican/pi-ai";
 import { Type } from "typebox";
 import { describe, expect, it } from "vitest";
 import { AgentSession } from "../src/core/agent-session.ts";
@@ -30,6 +30,15 @@ type RouterContext = {
 	};
 };
 
+/** Per-tier thinking configuration surfaced by the real settingsManager.getModelRouterSettings(). */
+type RouterTierThinkingSettings = {
+	cheapThinking?: ThinkingLevel;
+	mediumThinking?: ThinkingLevel;
+	expensiveThinking?: ThinkingLevel;
+	executorThinking?: ThinkingLevel;
+	judgeThinking?: ThinkingLevel;
+};
+
 type RoutedRunContext = {
 	model: TestModel | undefined;
 	agent: {
@@ -41,7 +50,10 @@ type RoutedRunContext = {
 			systemPrompt?: string;
 		};
 	};
-	settingsManager: { getModelCapabilitySettings: () => { mode?: string } };
+	settingsManager: {
+		getModelCapabilitySettings: () => { mode?: string };
+		getModelRouterSettings: () => RouterTierThinkingSettings;
+	};
 	sessionManager: {
 		appendMessage: (message: Message) => string;
 		appendCustomEntry: (customType: string, data?: unknown) => string;
@@ -317,7 +329,7 @@ describe("AgentSession model router turn selection", () => {
 		const context: RoutedRunContext = {
 			model: expensiveModel,
 			agent: { state: { model: expensiveModel, thinkingLevel: "high", messages: [], tools: [] } },
-			settingsManager: { getModelCapabilitySettings: () => ({}) },
+			settingsManager: { getModelCapabilitySettings: () => ({}), getModelRouterSettings: () => ({}) },
 			sessionManager: {
 				appendMessage: () => "entry",
 				appendCustomEntry: (_customType, data) => {
@@ -353,6 +365,117 @@ describe("AgentSession model router turn selection", () => {
 		expect(persistedDecisions[0].outcome).toBe("routed");
 	});
 
+	it("keeps today's inherited-and-clamped thinking level when no per-tier thinking is configured", async () => {
+		let thinkingDuringRun: ThinkingLevel | undefined;
+		const context: RoutedRunContext = {
+			model: expensiveModel,
+			agent: { state: { model: expensiveModel, thinkingLevel: "high", messages: [], tools: [] } },
+			settingsManager: { getModelCapabilitySettings: () => ({}), getModelRouterSettings: () => ({}) },
+			sessionManager: {
+				appendMessage: () => "entry",
+				appendCustomEntry: () => "custom",
+				appendCustomMessageEntry: () => "custom",
+			},
+			_resolveModelRouterModelForIntent: () => expensiveModel,
+			_runAgentPromptWithModelRouter: routerPrototype._runAgentPromptWithModelRouter,
+			_refreshCurrentModelFromRegistry: () => {},
+			_emitAutonomyTelemetry: () => {},
+			_runAgentPrompt: async () => {
+				thinkingDuringRun = context.agent.state.thinkingLevel;
+			},
+		};
+
+		const route: RouteDecision = {
+			tier: "cheap",
+			risk: "read-only",
+			confidence: 0.9,
+			reasonCode: "explain",
+			reasons: [],
+		};
+
+		await routerPrototype._runAgentPromptWithModelRouter.call(context, [], cheapModel, route);
+
+		// Backward-compat (unset per-tier thinking): identical to today's inherit-and-clamp behavior.
+		expect(thinkingDuringRun).toBe(clampThinkingLevel(cheapModel, "high"));
+		expect(context.agent.state.thinkingLevel).toBe("high");
+	});
+
+	it("applies a configured per-tier thinking level for a routed turn and restores session thinking after", async () => {
+		let thinkingDuringRun: ThinkingLevel | undefined;
+		const context: RoutedRunContext = {
+			model: expensiveModel,
+			agent: { state: { model: expensiveModel, thinkingLevel: "high", messages: [], tools: [] } },
+			settingsManager: {
+				getModelCapabilitySettings: () => ({}),
+				getModelRouterSettings: () => ({ cheapThinking: "low" }),
+			},
+			sessionManager: {
+				appendMessage: () => "entry",
+				appendCustomEntry: () => "custom",
+				appendCustomMessageEntry: () => "custom",
+			},
+			_resolveModelRouterModelForIntent: () => expensiveModel,
+			_runAgentPromptWithModelRouter: routerPrototype._runAgentPromptWithModelRouter,
+			_refreshCurrentModelFromRegistry: () => {},
+			_emitAutonomyTelemetry: () => {},
+			_runAgentPrompt: async () => {
+				thinkingDuringRun = context.agent.state.thinkingLevel;
+			},
+		};
+
+		const route: RouteDecision = {
+			tier: "cheap",
+			risk: "read-only",
+			confidence: 0.9,
+			reasonCode: "explain",
+			reasons: [],
+		};
+
+		await routerPrototype._runAgentPromptWithModelRouter.call(context, [], cheapModel, route);
+
+		expect(thinkingDuringRun).toBe(clampThinkingLevel(cheapModel, "low"));
+		expect(context.agent.state.thinkingLevel).toBe("high");
+	});
+
+	it("applies configured executor thinking for an executor-direct route instead of the tier's cheapThinking", async () => {
+		let thinkingDuringRun: ThinkingLevel | undefined;
+		const context: RoutedRunContext & { _executorTurnExecutedScript: (i: number) => boolean } = {
+			model: expensiveModel,
+			agent: { state: { model: expensiveModel, thinkingLevel: "high", messages: [], tools: [] } },
+			settingsManager: {
+				getModelCapabilitySettings: () => ({}),
+				// A cheapThinking value is ALSO configured to prove the executor route uses executorThinking,
+				// not the tier mapping (executor routes carry tier "cheap" too).
+				getModelRouterSettings: () => ({ cheapThinking: "high", executorThinking: "minimal" }),
+			},
+			sessionManager: {
+				appendMessage: () => "entry",
+				appendCustomEntry: () => "custom",
+				appendCustomMessageEntry: () => "custom",
+			},
+			_resolveModelRouterModelForIntent: () => expensiveModel,
+			_runAgentPromptWithModelRouter: routerPrototype._runAgentPromptWithModelRouter,
+			_refreshCurrentModelFromRegistry: () => {},
+			_emitAutonomyTelemetry: () => {},
+			_executorTurnExecutedScript: () => true, // muscle hit: skip the speculative-retry branch entirely
+			_runAgentPrompt: async () => {
+				thinkingDuringRun = context.agent.state.thinkingLevel;
+			},
+		};
+
+		const route: RouteDecision = {
+			tier: "cheap",
+			risk: "scoped-write",
+			confidence: 1,
+			reasonCode: "executor_direct",
+			reasons: [],
+		};
+
+		await routerPrototype._runAgentPromptWithModelRouter.call(context, [], cheapModel, route);
+
+		expect(thinkingDuringRun).toBe(clampThinkingLevel(cheapModel, "minimal"));
+	});
+
 	it("discards buffered cheap-turn messages and retries on expensive model after escalation", async () => {
 		const persisted: Message[] = [];
 		const persistedDecisions: Array<{ customType: string; data?: unknown }> = [];
@@ -360,7 +483,7 @@ describe("AgentSession model router turn selection", () => {
 		const context: RoutedRunContext & { _modelRouterEscalationRequested?: boolean } = {
 			model: expensiveModel,
 			agent: { state: { model: expensiveModel, thinkingLevel: "high", messages: [], tools: [] } },
-			settingsManager: { getModelCapabilitySettings: () => ({}) },
+			settingsManager: { getModelCapabilitySettings: () => ({}), getModelRouterSettings: () => ({}) },
 			sessionManager: {
 				appendMessage: (message) => {
 					persisted.push(message);
@@ -446,7 +569,7 @@ describe("G4: routed-turn capability tool filtering", () => {
 					systemPrompt: "BASE_PROMPT",
 				},
 			},
-			settingsManager: { getModelCapabilitySettings: () => ({}) },
+			settingsManager: { getModelCapabilitySettings: () => ({}), getModelRouterSettings: () => ({}) },
 			sessionManager: {
 				appendMessage: () => "entry",
 				appendCustomEntry: () => "custom",
@@ -501,7 +624,7 @@ describe("G4: routed-turn capability tool filtering", () => {
 					systemPrompt: "BASE_PROMPT",
 				},
 			},
-			settingsManager: { getModelCapabilitySettings: () => ({}) },
+			settingsManager: { getModelCapabilitySettings: () => ({}), getModelRouterSettings: () => ({}) },
 			sessionManager: {
 				appendMessage: () => "entry",
 				appendCustomEntry: () => "custom",
@@ -556,7 +679,7 @@ describe("G4: routed-turn capability tool filtering", () => {
 					systemPrompt: "BASE_PROMPT",
 				},
 			},
-			settingsManager: { getModelCapabilitySettings: () => ({}) },
+			settingsManager: { getModelCapabilitySettings: () => ({}), getModelRouterSettings: () => ({}) },
 			sessionManager: {
 				appendMessage: () => "entry",
 				appendCustomEntry: () => "custom",
@@ -614,7 +737,7 @@ describe("speculative executor retry (G16 refinement)", () => {
 					systemPrompt: "BASE_PROMPT",
 				},
 			},
-			settingsManager: { getModelCapabilitySettings: () => ({}) },
+			settingsManager: { getModelCapabilitySettings: () => ({}), getModelRouterSettings: () => ({}) },
 			sessionManager: {
 				appendMessage: () => "entry",
 				appendCustomEntry: () => "custom",
@@ -665,7 +788,7 @@ describe("speculative executor retry (G16 refinement)", () => {
 					systemPrompt: "BASE_PROMPT",
 				},
 			},
-			settingsManager: { getModelCapabilitySettings: () => ({}) },
+			settingsManager: { getModelCapabilitySettings: () => ({}), getModelRouterSettings: () => ({}) },
 			sessionManager: {
 				appendMessage: () => "entry",
 				appendCustomEntry: () => "custom",
