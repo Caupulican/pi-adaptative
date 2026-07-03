@@ -6,6 +6,8 @@ import { describe, expect, it } from "vitest";
 import { AgentSession } from "../src/core/agent-session.ts";
 import type { RouteDecision } from "../src/core/autonomy/contracts.ts";
 import { MODEL_ROUTER_DECISION_CUSTOM_TYPE, type ModelRouterDecisionStatus } from "../src/core/model-router/status.ts";
+import { FitnessStore } from "../src/core/models/fitness-store.ts";
+import type { ModelFitnessReport } from "../src/core/research/model-fitness.ts";
 import { createHarness } from "./suite/harness.ts";
 
 type TestModel = Model<Api>;
@@ -36,6 +38,7 @@ type RoutedRunContext = {
 			thinkingLevel: ThinkingLevel;
 			messages: AgentMessage[];
 			tools: Array<{ name: string }>;
+			systemPrompt?: string;
 		};
 	};
 	settingsManager: { getModelCapabilitySettings: () => { mode?: string } };
@@ -44,8 +47,11 @@ type RoutedRunContext = {
 		appendCustomEntry: (customType: string, data?: unknown) => string;
 		appendCustomMessageEntry: (customType: string, content: unknown, display: string, details?: unknown) => string;
 	};
+	_baseSystemPrompt?: string;
+	_buildSystemPromptForToolNames?: (toolNames: string[]) => string;
 	_runAgentPrompt: (messages: AgentMessage | AgentMessage[]) => Promise<void>;
 	_refreshCurrentModelFromRegistry?: () => void;
+	_emit?: (event: { type: string; message?: string }) => void;
 	_emitAutonomyTelemetry?: (event: unknown) => void;
 	_isModelRouterRetry?: boolean;
 	_resolveModelRouterModelForIntent: (intent: "research" | "modify") => TestModel | undefined;
@@ -427,11 +433,18 @@ describe("G4: routed-turn capability tool filtering", () => {
 			{ name: "delegate" },
 		];
 		let toolsDuringRun: string[] = [];
+		let promptDuringRun: string | undefined;
 		const smallCheap = { ...cheapModel, contextWindow: 8_192 };
 		const context: RoutedRunContext = {
 			model: expensiveModel,
 			agent: {
-				state: { model: expensiveModel, thinkingLevel: "high", messages: [], tools: [...sessionTools] },
+				state: {
+					model: expensiveModel,
+					thinkingLevel: "high",
+					messages: [],
+					tools: [...sessionTools],
+					systemPrompt: "BASE_PROMPT",
+				},
 			},
 			settingsManager: { getModelCapabilitySettings: () => ({}) },
 			sessionManager: {
@@ -439,12 +452,15 @@ describe("G4: routed-turn capability tool filtering", () => {
 				appendCustomEntry: () => "custom",
 				appendCustomMessageEntry: () => "custom",
 			},
+			_baseSystemPrompt: "BASE_PROMPT",
+			_buildSystemPromptForToolNames: (names) => `PROMPT_FOR:${names.join(",")}`,
 			_resolveModelRouterModelForIntent: () => expensiveModel,
 			_runAgentPromptWithModelRouter: routerPrototype._runAgentPromptWithModelRouter,
 			_refreshCurrentModelFromRegistry: () => {},
 			_emitAutonomyTelemetry: () => {},
 			_runAgentPrompt: async () => {
 				toolsDuringRun = context.agent.state.tools.map((tool) => tool.name);
+				promptDuringRun = context.agent.state.systemPrompt;
 			},
 		};
 		const route: RouteDecision = {
@@ -461,8 +477,121 @@ describe("G4: routed-turn capability tool filtering", () => {
 		expect(toolsDuringRun).not.toContain("goal");
 		expect(toolsDuringRun).not.toContain("delegate");
 		expect(toolsDuringRun).toContain("read");
-		// after: full session surface restored
+		// G4: the system prompt was rebuilt for the FILTERED surface (guidelines for goal/delegate shed)
+		expect(promptDuringRun).toBe(`PROMPT_FOR:${toolsDuringRun.join(",")}`);
+		expect(promptDuringRun).not.toContain("goal");
+		expect(promptDuringRun).not.toContain("delegate");
+		// after: full session surface AND base prompt restored
 		expect(context.agent.state.tools.map((tool) => tool.name)).toEqual(sessionTools.map((tool) => tool.name));
+		expect(context.agent.state.systemPrompt).toBe("BASE_PROMPT");
+	});
+
+	it("restores tools and system prompt when the routed run throws", async () => {
+		const sessionTools = [{ name: "read" }, { name: "bash" }, { name: "goal" }, { name: "delegate" }];
+		let promptDuringRun: string | undefined;
+		const smallCheap = { ...cheapModel, contextWindow: 8_192 };
+		const context: RoutedRunContext = {
+			model: expensiveModel,
+			agent: {
+				state: {
+					model: expensiveModel,
+					thinkingLevel: "high",
+					messages: [],
+					tools: [...sessionTools],
+					systemPrompt: "BASE_PROMPT",
+				},
+			},
+			settingsManager: { getModelCapabilitySettings: () => ({}) },
+			sessionManager: {
+				appendMessage: () => "entry",
+				appendCustomEntry: () => "custom",
+				appendCustomMessageEntry: () => "custom",
+			},
+			_baseSystemPrompt: "BASE_PROMPT",
+			_buildSystemPromptForToolNames: (names) => `PROMPT_FOR:${names.join(",")}`,
+			_resolveModelRouterModelForIntent: () => expensiveModel,
+			_runAgentPromptWithModelRouter: routerPrototype._runAgentPromptWithModelRouter,
+			_refreshCurrentModelFromRegistry: () => {},
+			_emitAutonomyTelemetry: () => {},
+			_runAgentPrompt: async () => {
+				// prove the shed happened before the throw, so the finally has something to restore
+				promptDuringRun = context.agent.state.systemPrompt;
+				throw new Error("routed turn blew up");
+			},
+		};
+		const route: RouteDecision = {
+			tier: "cheap",
+			risk: "read-only",
+			confidence: 0.9,
+			reasonCode: "explain",
+			reasons: [],
+		};
+
+		await expect(routerPrototype._runAgentPromptWithModelRouter.call(context, [], smallCheap, route)).rejects.toThrow(
+			"routed turn blew up",
+		);
+
+		// the routed turn did receive the filtered prompt...
+		expect(promptDuringRun).not.toContain("goal");
+		// ...and the finally restored both tools and the base prompt despite the throw
+		expect(context.agent.state.tools.map((tool) => tool.name)).toEqual(sessionTools.map((tool) => tool.name));
+		expect(context.agent.state.systemPrompt).toBe("BASE_PROMPT");
+	});
+
+	it("Bug G: does not clobber a mid-turn extension tool/prompt change (setActiveToolsByName) when restoring", async () => {
+		const sessionTools = [{ name: "read" }, { name: "bash" }, { name: "goal" }, { name: "delegate" }];
+		const smallCheap = { ...cheapModel, contextWindow: 8_192 };
+		// What an extension's mid-turn setActiveToolsByName call assigns — brand-new references,
+		// distinct from both the pre-turn session tools AND whatever the G4 swap itself assigned.
+		const extensionTools = [{ name: "read" }, { name: "extension-tool" }];
+		const extensionPrompt = "EXTENSION_OWNED_PROMPT";
+		const context: RoutedRunContext = {
+			model: expensiveModel,
+			agent: {
+				state: {
+					model: expensiveModel,
+					thinkingLevel: "high",
+					messages: [],
+					tools: [...sessionTools],
+					systemPrompt: "BASE_PROMPT",
+				},
+			},
+			settingsManager: { getModelCapabilitySettings: () => ({}) },
+			sessionManager: {
+				appendMessage: () => "entry",
+				appendCustomEntry: () => "custom",
+				appendCustomMessageEntry: () => "custom",
+			},
+			_baseSystemPrompt: "BASE_PROMPT",
+			_buildSystemPromptForToolNames: (names) => `PROMPT_FOR:${names.join(",")}`,
+			_resolveModelRouterModelForIntent: () => expensiveModel,
+			_runAgentPromptWithModelRouter: routerPrototype._runAgentPromptWithModelRouter,
+			_refreshCurrentModelFromRegistry: () => {},
+			_emitAutonomyTelemetry: () => {},
+			_runAgentPrompt: async () => {
+				// Simulate an extension calling session.setActiveToolsByName(...) mid-turn: it rebuilds the
+				// base prompt AND reassigns both state.tools and state.systemPrompt to brand-new values,
+				// without touching the model — exactly what the real setActiveToolsByName does.
+				context.agent.state.tools = [...extensionTools];
+				context.agent.state.systemPrompt = extensionPrompt;
+			},
+		};
+		const route: RouteDecision = {
+			tier: "cheap",
+			risk: "read-only",
+			confidence: 0.9,
+			reasonCode: "explain",
+			reasons: [],
+		};
+
+		await routerPrototype._runAgentPromptWithModelRouter.call(context, [], smallCheap, route);
+
+		// Model/thinking restore is unaffected by this fix — it stays under its own guard.
+		expect(context.agent.state.model).toBe(expensiveModel);
+		// The extension's mid-turn tool/prompt surface must SURVIVE the router-swap restore, not be
+		// silently clobbered back to the stale pre-turn snapshot.
+		expect(context.agent.state.tools).toEqual(extensionTools);
+		expect(context.agent.state.systemPrompt).toBe(extensionPrompt);
 	});
 });
 
@@ -476,13 +605,23 @@ describe("speculative executor retry (G16 refinement)", () => {
 			_buildExecutorRefinedPrompt: (m: unknown) => Promise<string | undefined>;
 		} = {
 			model: expensiveModel,
-			agent: { state: { model: expensiveModel, thinkingLevel: "high", messages: [], tools: [] } },
+			agent: {
+				state: {
+					model: expensiveModel,
+					thinkingLevel: "high",
+					messages: [],
+					tools: [],
+					systemPrompt: "BASE_PROMPT",
+				},
+			},
 			settingsManager: { getModelCapabilitySettings: () => ({}) },
 			sessionManager: {
 				appendMessage: () => "entry",
 				appendCustomEntry: () => "custom",
 				appendCustomMessageEntry: () => "custom",
 			},
+			_baseSystemPrompt: "BASE_PROMPT",
+			_buildSystemPromptForToolNames: (names) => `PROMPT_FOR:${names.join(",")}`,
 			_resolveModelRouterModelForIntent: () => expensiveModel,
 			_runAgentPromptWithModelRouter: routerPrototype._runAgentPromptWithModelRouter,
 			_refreshCurrentModelFromRegistry: () => {},
@@ -504,5 +643,140 @@ describe("speculative executor retry (G16 refinement)", () => {
 
 		await routerPrototype._runAgentPromptWithModelRouter.call(context, [], smallCheap, route);
 		expect(retried).toBe(true);
+		// exactly-once: the initial executor turn + a single speculative retry, never more.
+		expect(runCount).toBe(2);
+	});
+
+	it("surfaces a warning (no retry) when the executor missed and the brain produced no refinement", async () => {
+		let runCount = 0;
+		const emitted: Array<{ type: string; message?: string }> = [];
+		const smallCheap = { ...cheapModel, contextWindow: 8_192 };
+		const context: RoutedRunContext & {
+			_executorTurnExecutedScript: (i: number) => boolean;
+			_buildExecutorRefinedPrompt: (m: unknown) => Promise<string | undefined>;
+		} = {
+			model: expensiveModel,
+			agent: {
+				state: {
+					model: expensiveModel,
+					thinkingLevel: "high",
+					messages: [],
+					tools: [],
+					systemPrompt: "BASE_PROMPT",
+				},
+			},
+			settingsManager: { getModelCapabilitySettings: () => ({}) },
+			sessionManager: {
+				appendMessage: () => "entry",
+				appendCustomEntry: () => "custom",
+				appendCustomMessageEntry: () => "custom",
+			},
+			_baseSystemPrompt: "BASE_PROMPT",
+			_buildSystemPromptForToolNames: (names) => `PROMPT_FOR:${names.join(",")}`,
+			_resolveModelRouterModelForIntent: () => expensiveModel,
+			_runAgentPromptWithModelRouter: routerPrototype._runAgentPromptWithModelRouter,
+			_refreshCurrentModelFromRegistry: () => {},
+			_emit: (event) => emitted.push(event),
+			_emitAutonomyTelemetry: () => {},
+			_executorTurnExecutedScript: () => false, // muscle missed
+			_buildExecutorRefinedPrompt: async () => undefined, // brain could not refine
+			_runAgentPrompt: async () => {
+				runCount++;
+			},
+		};
+		const route: RouteDecision = {
+			tier: "cheap",
+			risk: "scoped-write",
+			confidence: 1,
+			reasonCode: "executor_direct",
+			reasons: [],
+		};
+
+		await routerPrototype._runAgentPromptWithModelRouter.call(context, [], smallCheap, route);
+
+		// no retry happened (only the initial turn), and the miss was surfaced, not swallowed
+		expect(runCount).toBe(1);
+		const warnings = emitted.filter((event) => event.type === "warning");
+		expect(warnings).toHaveLength(1);
+		expect(warnings[0]?.message?.toLowerCase()).toContain("executor");
+	});
+});
+
+describe("executor lane fitness gate (session-level)", () => {
+	type ExecutorRouteResolver = {
+		_resolveExecutorRoute(
+			prompt: string,
+			executorPattern?: string,
+		): { decision: RouteDecision; model: TestModel } | undefined;
+	};
+
+	const laneReport = (toolCall: { succeeded: number; total: number }): ModelFitnessReport => {
+		const lane = { succeeded: 3, total: 3, outcomes: [], meanMs: 10 };
+		return {
+			trials: 3,
+			research: { ...lane },
+			worker: { ...lane },
+			search: { ...lane },
+			toolCall: { ...lane, ...toolCall },
+			digest: { ...lane },
+			judge: {
+				parsed: 0,
+				planningElevated: 0,
+				planningTotal: 0,
+				trivialCheap: 0,
+				trivialTotal: 0,
+				total: 0,
+				outcomes: [],
+				meanMs: 0,
+			},
+			totalCostUsd: 0,
+		};
+	};
+
+	const makeHarness = () =>
+		createHarness({
+			models: [{ id: "exec", contextWindow: 8_192 }],
+			settings: {
+				modelRouter: { enabled: true, executorModel: "faux/exec" },
+				toolkit: {
+					scripts: [
+						{ name: "status-report", description: "Print the status report", path: "s.sh", runner: "bash" },
+					],
+				},
+			},
+		});
+
+	const resolve = (harness: Awaited<ReturnType<typeof makeHarness>>) =>
+		(harness.session as unknown as ExecutorRouteResolver)._resolveExecutorRoute("status-report", "faux/exec");
+
+	it("does not route to the executor without a tool-call fitness report", async () => {
+		const harness = await makeHarness();
+		try {
+			expect(resolve(harness)).toBeUndefined();
+		} finally {
+			harness.cleanup();
+		}
+	});
+
+	it("does not route when tool-call success is below ceil(2/3 of trials)", async () => {
+		const harness = await makeHarness();
+		try {
+			FitnessStore.forAgentDir(harness.tempDir).save("faux/exec", laneReport({ succeeded: 1, total: 3 }));
+			expect(resolve(harness)).toBeUndefined();
+		} finally {
+			harness.cleanup();
+		}
+	});
+
+	it("routes to the executor at the ceil(2/3) tool-call threshold", async () => {
+		const harness = await makeHarness();
+		try {
+			FitnessStore.forAgentDir(harness.tempDir).save("faux/exec", laneReport({ succeeded: 2, total: 3 }));
+			const route = resolve(harness);
+			expect(route?.decision.reasonCode).toBe("executor_direct");
+			expect(route?.model.id).toBe("exec");
+		} finally {
+			harness.cleanup();
+		}
 	});
 });

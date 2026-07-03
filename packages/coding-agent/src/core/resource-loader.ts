@@ -228,18 +228,19 @@ function sanitizeContextFileContent(filePath: string, content: string): string {
 	return `[BLOCKED: ${filePath} contained potential prompt injection (${findings.join(", ")}). Content not loaded.]`;
 }
 
-function loadContextFilesFromDir(dir: string): Array<{ path: string; content: string }> {
+/**
+ * RAW (unsanitized) context files from `dir`. Sanitization/threat-scanning is DEFERRED to the caller
+ * so a profile-DENIED file's content is never processed into the session — only its embedded
+ * `<resource-profile>` blocks are read for discovery (see {@link loadRawProjectContextFiles}).
+ */
+function loadRawContextFilesFromDir(dir: string): Array<{ path: string; rawContent: string }> {
 	const candidates = ["AGENTS.md", "AGENTS.MD", "CLAUDE.md", "CLAUDE.MD", "GEMINI.md", "GEMINI.MD"];
-	const files: Array<{ path: string; content: string }> = [];
+	const files: Array<{ path: string; rawContent: string }> = [];
 	for (const filename of candidates) {
 		const filePath = join(dir, filename);
 		if (existsSync(filePath)) {
 			try {
-				const content = readFileSync(filePath, "utf-8");
-				files.push({
-					path: filePath,
-					content: sanitizeContextFileContent(filePath, content),
-				});
+				files.push({ path: filePath, rawContent: readFileSync(filePath, "utf-8") });
 			} catch (error) {
 				console.error(chalk.yellow(`Warning: Could not read ${filePath}: ${error}`));
 			}
@@ -248,30 +249,36 @@ function loadContextFilesFromDir(dir: string): Array<{ path: string; content: st
 	return files;
 }
 
-export function loadProjectContextFiles(options: {
+/**
+ * Discover project/agent context files with their RAW content (profile blocks intact, no sanitize).
+ * The agents-kind profile filter can be DEFINED inside these same files (embedded `<resource-profile>`
+ * blocks), so callers must read raw to discover profiles before knowing which files the filter denies;
+ * sanitization/exposure is then applied only to files the filter allows.
+ */
+export function loadRawProjectContextFiles(options: {
 	cwd: string;
 	agentDir: string;
 	projectTrusted?: boolean;
-}): Array<{ path: string; content?: string }> {
+}): Array<{ path: string; rawContent: string }> {
 	const resolvedCwd = resolvePath(options.cwd);
 	const resolvedAgentDir = resolvePath(options.agentDir);
 
-	const contextFiles: Array<{ path: string; content?: string }> = [];
+	const contextFiles: Array<{ path: string; rawContent: string }> = [];
 	const seenPaths = new Set<string>();
 
-	for (const globalContext of loadContextFilesFromDir(resolvedAgentDir)) {
+	for (const globalContext of loadRawContextFilesFromDir(resolvedAgentDir)) {
 		contextFiles.push(globalContext);
 		seenPaths.add(globalContext.path);
 	}
 
 	if (options.projectTrusted !== false) {
-		const ancestorContextFiles: Array<{ path: string; content?: string }> = [];
+		const ancestorContextFiles: Array<{ path: string; rawContent: string }> = [];
 
 		let currentDir = resolvedCwd;
 		const root = resolve("/");
 
 		while (true) {
-			const contextFilesInDir = loadContextFilesFromDir(currentDir).filter(
+			const contextFilesInDir = loadRawContextFilesFromDir(currentDir).filter(
 				(contextFile) => !seenPaths.has(contextFile.path),
 			);
 			if (contextFilesInDir.length > 0) {
@@ -292,6 +299,23 @@ export function loadProjectContextFiles(options: {
 	}
 
 	return contextFiles;
+}
+
+/**
+ * Discover project/agent context files with SANITIZED content (profile blocks stripped, invisible/bidi
+ * chars removed, prompt-injection scanned). Every discovered file is sanitized — callers that must
+ * respect a profile's agents-kind denial should use {@link loadRawProjectContextFiles} and sanitize
+ * only the allowed subset instead, so denied content is never processed.
+ */
+export function loadProjectContextFiles(options: {
+	cwd: string;
+	agentDir: string;
+	projectTrusted?: boolean;
+}): Array<{ path: string; content?: string }> {
+	return loadRawProjectContextFiles(options).map((file) => ({
+		path: file.path,
+		content: sanitizeContextFileContent(file.path, file.rawContent),
+	}));
 }
 
 export interface DefaultResourceLoaderOptions {
@@ -1044,19 +1068,27 @@ export class DefaultResourceLoader implements ResourceLoader {
 				}
 			}
 
+			// Read RAW content once. Sanitization/threat-scanning/exposure is deferred until AFTER the
+			// agents filter, so a profile-denied context file's content is never processed into the session.
 			const rawAgentsFiles = this.noContextFiles
 				? []
-				: loadProjectContextFiles({
+				: loadRawProjectContextFiles({
 						cwd: this.cwd,
 						agentDir: this.agentDir,
 						projectTrusted: this.settingsManager.isProjectTrusted(),
 					});
 			const agentEmbeddedProfiles: Record<string, ResourceProfileSettings> = {};
 			const activeProfileNames = this.settingsManager.getActiveResourceProfileNames();
+			// DISCOVERY read (metadata only, never loading): an embedded <resource-profile> block can live
+			// in ANY context file — including one the resulting agents filter then denies (AGENTS.md
+			// defining a profile that blocks GEMINI.md is the canonical bootstrap circularity). The filter
+			// cannot be known without first scanning every candidate file's raw content, so path-based
+			// pre-filtering is impossible for the agents kind. Only profile-block config is extracted here;
+			// a denied file's instructional content is never sanitized, threat-scanned, or exposed — it is
+			// dropped by the filter below — so the never-read-denied-CONTENT invariant holds.
 			for (const file of rawAgentsFiles) {
 				try {
-					const rawContent = readFileSync(file.path, "utf-8");
-					const { profiles } = parseResourceProfileBlocks(rawContent, { profileNames: activeProfileNames });
+					const { profiles } = parseResourceProfileBlocks(file.rawContent, { profileNames: activeProfileNames });
 					Object.assign(agentEmbeddedProfiles, mergeResourceProfileMap(agentEmbeddedProfiles, profiles));
 				} catch {}
 			}
@@ -1073,10 +1105,9 @@ export class DefaultResourceLoader implements ResourceLoader {
 						const blocked = matchesResourceProfilePattern(file.path, agentProfileFilter.block, this.cwd);
 						return allowed && !blocked;
 					})
-					.map((file) => ({
-						...file,
-						content: file.content ? stripResourceProfileBlocks(file.content) : file.content,
-					})),
+					// Sanitize (strip profile blocks + scan threats) ONLY for allowed files — the denied
+					// files' raw content was used solely for profile-block discovery above.
+					.map((file) => ({ path: file.path, content: sanitizeContextFileContent(file.path, file.rawContent) })),
 			};
 			// Strict UAC silently denying AGENTS.md/CLAUDE.md context is a sharp footgun for lean
 			// profiles — surface it loudly instead of letting instructions vanish without a trace.

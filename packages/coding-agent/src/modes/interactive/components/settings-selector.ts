@@ -903,6 +903,14 @@ class LearningPolicySettingsSubmenu extends Container {
 				values: ["true", "false"],
 			},
 			{
+				id: "learning-policy-auto-apply-supersessions",
+				label: "Auto-apply supersessions",
+				description:
+					"Allow a memory_replace/memory_remove (overwrites or deletes an existing fact) to auto-apply once otherwise eligible; off keeps every supersession a proposal",
+				currentValue: String(this.state.autoApplySupersessions ?? false),
+				values: ["true", "false"],
+			},
+			{
 				id: "learning-policy-confidence",
 				label: "Confidence threshold",
 				description: "Minimum confidence (0-100) before a write may auto-apply; below it, proposal or no-op",
@@ -931,6 +939,9 @@ class LearningPolicySettingsSubmenu extends Container {
 						break;
 					case "learning-policy-auto-apply":
 						this.state = { ...this.state, autoApplyEnabled: newValue === "true" };
+						break;
+					case "learning-policy-auto-apply-supersessions":
+						this.state = { ...this.state, autoApplySupersessions: newValue === "true" };
 						break;
 					case "learning-policy-confidence":
 						this.state = { ...this.state, confidenceThreshold: Number(newValue) };

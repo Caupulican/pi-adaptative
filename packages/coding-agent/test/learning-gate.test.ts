@@ -49,7 +49,10 @@ describe("Learning Gate (Phase 7)", () => {
 		expect(decision.requiresApproval).toBe(true);
 	});
 
-	it("confidence 89 with threshold 90 returns no-op if no evidence exists", () => {
+	it("confidence 89 with threshold 90 proposes (requires approval) even without evidence", () => {
+		// Below-threshold learning must be VISIBLE: it degrades to an approval-gated proposal, never a
+		// silent no-op. A silent no-op here was the stock-settings cliff (reflectionSourceConfidence 50 <
+		// confidenceThreshold 90, reflection writes carry no evidenceIds) that disabled learning entirely.
 		const decision = evaluateLearningDecision({
 			proposal: { ...baseProposal, evidenceIds: [] },
 			confidence: 89,
@@ -57,9 +60,9 @@ describe("Learning Gate (Phase 7)", () => {
 			contradictions: 0,
 			settings: baseSettings,
 		});
-		expect(decision.kind).toBe("no-op");
+		expect(decision.kind).toBe("proposal");
 		expect(decision.reasonCode).toBe("below_confidence_threshold");
-		expect(decision.requiresApproval).toBe(false);
+		expect(decision.requiresApproval).toBe(true);
 	});
 
 	it("confidence 90 with one observation does not auto-apply when min observations is 2", () => {
@@ -230,6 +233,49 @@ describe("Learning Gate (Phase 7)", () => {
 
 		expect(proposal.evidenceIds).toBe(evidenceIds);
 		expect(settings.allowedAutoApplyLayers).toBe(allowedLayers);
+	});
+
+	it("autoApplySupersessions true: a contradiction falls through to the standard eligibility chain and can apply", () => {
+		// Bug F: a memory_replace/memory_remove (contradictions > 0) is the reflection engine's
+		// confront-before-write signal — but with the opt-in enabled and every other gate satisfied,
+		// updating/deleting a stale fact must be no harder than adding a new contradicting one.
+		const decision = evaluateLearningDecision({
+			proposal: baseProposal,
+			confidence: 90,
+			observations: 2,
+			contradictions: 1,
+			settings: { ...baseSettings, autoApplySupersessions: true },
+		});
+		expect(decision.kind).toBe("apply");
+		expect(decision.reasonCode).toBe("eligible_auto_apply");
+		expect(decision.requiresApproval).toBe(false);
+	});
+
+	it("autoApplySupersessions true but below the confidence threshold: still proposes (fell through, not skipped)", () => {
+		const decision = evaluateLearningDecision({
+			proposal: baseProposal,
+			confidence: 50,
+			observations: 2,
+			contradictions: 1,
+			settings: { ...baseSettings, autoApplySupersessions: true },
+		});
+		expect(decision.kind).toBe("proposal");
+		expect(decision.reasonCode).toBe("below_confidence_threshold");
+		expect(decision.requiresApproval).toBe(true);
+	});
+
+	it("autoApplySupersessions defaults to falsy: contradictions still force a proposal unchanged", () => {
+		// baseSettings does not set autoApplySupersessions — the existing default-behavior contract
+		// (supersession always proposes) must stay intact for anyone not opting in.
+		const decision = evaluateLearningDecision({
+			proposal: baseProposal,
+			confidence: 99,
+			observations: 10,
+			contradictions: 1,
+			settings: baseSettings,
+		});
+		expect(decision.kind).toBe("proposal");
+		expect(decision.reasonCode).toBe("contradictions_present");
 	});
 
 	it("duplicate/paraphrased memory support can be represented as proposal.layer memory plus contradiction/evidence policy", () => {

@@ -176,7 +176,9 @@ import {
 import type { GoalState } from "./goals/goal-state.ts";
 import { appendGoalStateSnapshot, getLatestGoalStateSnapshot } from "./goals/session-goal-state.ts";
 import {
+	APPLY_WRITE_REFUSED_REASON_CODE,
 	appendLearningAuditSnapshot,
+	contradictionsForReflectionWrite,
 	getLearningAuditSnapshots,
 	type LearningAuditRecord,
 	proposalFromReflectionWrite,
@@ -694,6 +696,8 @@ export class AgentSession {
 	private readonly _brainCurator = new BrainCurator();
 	private _lastCurationSkipReason: string | undefined = undefined;
 	private _inertExtensionWarnings: string[] = [];
+	/** Extensions the active resource profile removed from the runtime set (surfaced in /context). */
+	private _profileDeniedExtensionCount = 0;
 	private _lastPreDigestSkipReason: string | undefined = undefined;
 	private _unboundToolGrantWarnings: string[] = [];
 	private _toolArtifactStore: ArtifactStore | undefined = undefined;
@@ -1505,6 +1509,7 @@ export class AgentSession {
 			adjustments: { memoryEvidenceTokens, enforcementSavedTokens },
 			extraObservations: [
 				...this._resourceLoader.getAgentsDiagnostics().map((diagnostic) => diagnostic.message),
+				...this._profileDeniedResourceObservations(),
 				...this._inertExtensionWarnings,
 				...this._unboundToolGrantWarnings,
 				// G7: auto-built per-turn foreground envelope (observe-only; not enforced). Falls back to a
@@ -2615,7 +2620,7 @@ export class AgentSession {
 - Active-task work remains primary: learning runs must not interrupt user-visible execution or claim task completion.`;
 	}
 
-	private _rebuildSystemPrompt(toolNames: string[]): string {
+	private _buildSystemPromptOptionsForToolNames(toolNames: string[]): BuildSystemPromptOptions {
 		const validToolNames = toolNames.filter((name) => this._toolRegistry.has(name));
 		const toolSnippets: Record<string, string> = {};
 		const promptGuidelines: string[] = [];
@@ -2651,7 +2656,7 @@ export class AgentSession {
 		const loadedSkills = this._resourceLoader.getActiveSkills();
 		const loadedContextFiles = this._resourceLoader.getAgentsFiles().agentsFiles;
 
-		this._baseSystemPromptOptions = {
+		return {
 			cwd: this._cwd,
 			skills: loadedSkills,
 			contextFiles: loadedContextFiles,
@@ -2662,7 +2667,22 @@ export class AgentSession {
 			promptGuidelines,
 			extensions: [...this._extensionRunner.activeExtensions],
 		};
+	}
+
+	private _rebuildSystemPrompt(toolNames: string[]): string {
+		this._baseSystemPromptOptions = this._buildSystemPromptOptionsForToolNames(toolNames);
 		return buildSystemPrompt(this._baseSystemPromptOptions);
+	}
+
+	/**
+	 * Build a system prompt for a specific tool surface WITHOUT touching the session's base prompt
+	 * state. Used for a router-swapped turn (G4): the routed model runs against a filtered tool set,
+	 * so it must also receive a system prompt whose tool guidelines/snippets match that filtered
+	 * surface — but the change is per-turn, so it must not mutate `_baseSystemPromptOptions` (which
+	 * later turns and extension events read).
+	 */
+	private _buildSystemPromptForToolNames(toolNames: string[]): string {
+		return buildSystemPrompt(this._buildSystemPromptOptionsForToolNames(toolNames));
 	}
 
 	// =========================================================================
@@ -2989,6 +3009,12 @@ export class AgentSession {
 		const previousModel = this.agent.state.model;
 		const previousThinkingLevel = this.agent.state.thinkingLevel;
 		const previousTurnTools = this.agent.state.tools;
+		const previousSystemPrompt = this.agent.state.systemPrompt;
+		// G4 swap bookkeeping (Bug G): the exact references the swap below assigns, so the finally can
+		// restore ONLY what IT put there — never assigned when no swap happens (e.g. a full-class
+		// routed profile).
+		let swappedTools: typeof previousTurnTools | undefined;
+		let swappedSystemPrompt: typeof previousSystemPrompt | undefined;
 		const previousActiveModelRouterIntent = this._activeModelRouterIntent;
 		const previousActiveModelRouterRoute = this._activeModelRouterRoute;
 		const previousModelRouterSessionBuffer = this._modelRouterSessionBuffer;
@@ -3035,7 +3061,18 @@ export class AgentSession {
 						routedProfile,
 					),
 				);
-				this.agent.state.tools = previousTurnTools.filter((tool) => allowed.has(tool.name));
+				swappedTools = previousTurnTools.filter((tool) => allowed.has(tool.name));
+				this.agent.state.tools = swappedTools;
+				// G4: the system prompt follows the ROUTED model's filtered surface too — otherwise the
+				// cheap/local model is billed for (and told about) tool guidelines/snippets it can't call.
+				// Per-turn only; restored in the finally. A live extension override of the prompt is left
+				// alone (only shed when we're on the base prompt).
+				if (this.agent.state.systemPrompt === this._baseSystemPrompt) {
+					swappedSystemPrompt = this._buildSystemPromptForToolNames(
+						this.agent.state.tools.map((tool) => tool.name),
+					);
+					this.agent.state.systemPrompt = swappedSystemPrompt;
+				}
 			}
 		}
 		try {
@@ -3070,6 +3107,16 @@ export class AgentSession {
 						intent: "research",
 					};
 					this._lastModelRouterDecision = completedDecision;
+				} else {
+					// The muscle missed AND the reflex brain could not refine the request into a toolkit
+					// instruction (no fit brain model, or no confident plan). There is deliberately NO
+					// frontier fallback here, so surface the miss instead of letting it stand silently —
+					// otherwise the routed turn just ends with an unrun command and no explanation.
+					this._emit({
+						type: "warning",
+						message:
+							"Executor lane: the toolkit command did not run and the reflex brain could not refine it into an explicit instruction; leaving the turn as-is (no automatic escalation).",
+					});
 				}
 			}
 			if (bufferRoutedTurn && this._modelRouterEscalationRequested) {
@@ -3107,7 +3154,18 @@ export class AgentSession {
 			if (modelsAreEqual(this.agent.state.model, routedModel)) {
 				this.agent.state.model = previousModel;
 				this.agent.state.thinkingLevel = previousThinkingLevel;
-				this.agent.state.tools = previousTurnTools;
+				// Symmetric restore (Bug G): undo tools/systemPrompt only if each is STILL the exact
+				// reference/string the G4 swap above assigned (never assigned at all when the routed
+				// profile was full-class — then there is nothing to restore either). An extension calling
+				// setActiveToolsByName mid-turn reassigns both to its own values without touching the
+				// model — the model guard above still passes, but that live change is legitimate and must
+				// survive rather than being silently reverted to the stale pre-turn snapshot.
+				if (swappedTools !== undefined && this.agent.state.tools === swappedTools) {
+					this.agent.state.tools = previousTurnTools;
+				}
+				if (swappedSystemPrompt !== undefined && this.agent.state.systemPrompt === swappedSystemPrompt) {
+					this.agent.state.systemPrompt = previousSystemPrompt;
+				}
 				// The registry may have changed mid-turn (command-time registerProvider): re-resolve
 				// the restored model so a provider override is not dropped with the routed model.
 				this._refreshCurrentModelFromRegistry();
@@ -4788,35 +4846,81 @@ export class AgentSession {
 
 	private _filterExtensionsForRuntime(extensions: Extension[]): Extension[] {
 		this._inertExtensionWarnings = [];
+		this._profileDeniedExtensionCount = 0;
 		if (this.settingsManager.getActiveResourceProfileNames().length === 0) {
-			return this.settingsManager.hasExplicitActiveResourceProfileSelection()
-				? []
-				: extensions.filter((extension) => extension.sourceInfo.source === "inline");
+			if (this.settingsManager.hasExplicitActiveResourceProfileSelection()) {
+				// An explicit profile selection that resolves to no active profile is a deliberate
+				// deny-all — every extension is withheld by that choice.
+				this._profileDeniedExtensionCount = extensions.length;
+				return [];
+			}
+			// No profile in play: only inline/SDK extensions load by default. That is the baseline, not
+			// a profile denial, so it is not counted as withheld.
+			return extensions.filter((extension) => extension.sourceInfo.source === "inline");
 		}
 		const hasToolOrCommandGate = this._hasToolOrCommandProfileGate();
-		return extensions
-			.filter((extension) =>
-				this.settingsManager.isResourceAllowedByProfile("extensions", extension.path, extension.sourceInfo.baseDir),
-			)
-			.map((extension) => {
-				if (!hasToolOrCommandGate) return extension;
-				const tools = new Map(
-					Array.from(extension.tools.entries()).filter(([name]) => this._isToolOrCommandAllowedByProfile(name)),
+		const allowedExtensions = extensions.filter((extension) =>
+			this.settingsManager.isResourceAllowedByProfile("extensions", extension.path, extension.sourceInfo.baseDir),
+		);
+		this._profileDeniedExtensionCount = extensions.length - allowedExtensions.length;
+		return allowedExtensions.map((extension) => {
+			if (!hasToolOrCommandGate) return extension;
+			const tools = new Map(
+				Array.from(extension.tools.entries()).filter(([name]) => this._isToolOrCommandAllowedByProfile(name)),
+			);
+			const commands = new Map(
+				Array.from(extension.commands.entries()).filter(([name]) => this._isToolOrCommandAllowedByProfile(name)),
+			);
+			// G12: an extension the profile ALLOWS whose every tool and command the tools filter
+			// then denies loads and runs lifecycle hooks but is completely uninvocable — surface
+			// it instead of presenting a "loaded" extension that silently does nothing.
+			if (extension.tools.size + extension.commands.size > 0 && tools.size + commands.size === 0) {
+				const name = extension.path.split(/[\\/]/).pop() ?? extension.path;
+				this._inertExtensionWarnings.push(
+					`extension "${name}" is loaded but fully inert: the active profile's tools filter denies all ${extension.tools.size} tool(s) and ${extension.commands.size} command(s) it contributes`,
 				);
-				const commands = new Map(
-					Array.from(extension.commands.entries()).filter(([name]) => this._isToolOrCommandAllowedByProfile(name)),
-				);
-				// G12: an extension the profile ALLOWS whose every tool and command the tools filter
-				// then denies loads and runs lifecycle hooks but is completely uninvocable — surface
-				// it instead of presenting a "loaded" extension that silently does nothing.
-				if (extension.tools.size + extension.commands.size > 0 && tools.size + commands.size === 0) {
-					const name = extension.path.split(/[\\/]/).pop() ?? extension.path;
-					this._inertExtensionWarnings.push(
-						`extension "${name}" is loaded but fully inert: the active profile's tools filter denies all ${extension.tools.size} tool(s) and ${extension.commands.size} command(s) it contributes`,
-					);
-				}
-				return { ...extension, tools, commands };
-			});
+			}
+			return { ...extension, tools, commands };
+		});
+	}
+
+	/**
+	 * /context observations for skills/prompts/extensions the active resource profile removed from
+	 * listings — the analog of the withheld-AGENTS.md warning. Strict UAC makes these silently absent,
+	 * so a lean profile's effect on the resource surface stays visible. Counts are profile-scoped
+	 * (skills/prompts via the profile-independent discovery universe filtered by the live profile
+	 * filter; extensions via the runtime filter's denied tally). Empty when nothing is withheld.
+	 *
+	 * Uses `isResourceDeniedByActiveProfile` (profile-only), not `isResourceAllowedByProfile` (which
+	 * also folds in the user's own legacy `disabledResources` list): a plain user-disabled resource
+	 * must never be misattributed to "the active resource profile" — that case is already surfaced by
+	 * the G14 disable-wins warning. With no active profile at all, the helper always reports nothing
+	 * denied, so this naturally stays silent (extensions keep their own runtime-filter-derived count,
+	 * which is already correctly zero absent a profile).
+	 */
+	private _profileDeniedResourceObservations(): string[] {
+		const observations: string[] = [];
+		const withheld = (kind: "skills" | "prompts", paths: string[]): number =>
+			paths.filter((path) => this.settingsManager.isResourceDeniedByActiveProfile(kind, path, this._cwd)).length;
+
+		const skillsWithheld = withheld("skills", this._resourceLoader.getDiscoverableSkillPaths());
+		if (skillsWithheld > 0) {
+			observations.push(
+				`${skillsWithheld} skill(s) withheld by the active resource profile — grant the "skills" kind to restore them`,
+			);
+		}
+		const promptsWithheld = withheld("prompts", this._resourceLoader.getDiscoverablePromptPaths());
+		if (promptsWithheld > 0) {
+			observations.push(
+				`${promptsWithheld} prompt(s) withheld by the active resource profile — grant the "prompts" kind to restore them`,
+			);
+		}
+		if (this._profileDeniedExtensionCount > 0) {
+			observations.push(
+				`${this._profileDeniedExtensionCount} extension(s) withheld by the active resource profile — grant the "extensions" kind to restore them`,
+			);
+		}
+		return observations;
 	}
 
 	/**
@@ -6775,6 +6879,8 @@ export class AgentSession {
 				maxWallClockMs: settings.maxWallClockMs,
 				usageReportId,
 				signal: this._workerDelegationAbort.signal,
+				// Parent validation must use the same relative-path baseline the runner reports in.
+				cwd: this._cwd,
 				// Write lane (G2): runner-side action application through the envelope path scope.
 				applyActions: workerRequest.envelope.capabilities.includes("write_files")
 					? (actions) => applyWorkerActions({ actions, envelope: workerRequest.envelope, cwd: this._cwd })
@@ -7188,7 +7294,10 @@ export class AgentSession {
 						proposal,
 						confidence: policy.reflectionSourceConfidence,
 						observations,
-						contradictions: 0,
+						// A replace/remove supersedes an existing durable fact — the reflection engine's
+						// confront-before-write conflict signal — so it routes through approval instead of
+						// silently overwriting prior memory. Additive writes contradict nothing.
+						contradictions: contradictionsForReflectionWrite(write),
 						settings: {
 							enabled: true,
 							autoApplyEnabled: policy.autoApplyEnabled,
@@ -7196,6 +7305,7 @@ export class AgentSession {
 							minObservations: policy.minObservations,
 							allowedAutoApplyLayers: policy.allowedAutoApplyLayers,
 							requireRollbackPlan: policy.requireRollbackPlan,
+							autoApplySupersessions: policy.autoApplySupersessions,
 						},
 					})
 				: {
@@ -7232,20 +7342,25 @@ export class AgentSession {
 					},
 				});
 			}
-			if (decision.kind === "apply") {
-				await this._applyReflectionWrite(write, signal);
-			}
+			// The gate's decision and the write's actual outcome are two different questions: the memory
+			// tool can refuse a write (budget exceeded, drift, threat) via details.success:false without
+			// throwing. Capture that outcome instead of assuming "decision.kind === apply" means it landed
+			// — otherwise a refused write leaves a phantom "apply" audit whose rollback later fails
+			// not-found (or, worse, misfires against whatever now occupies that text).
+			const applied = decision.kind === "apply" ? await this._applyReflectionWrite(write, signal) : false;
+			const writeFailed = decision.kind === "apply" && !applied;
 			if (decision.kind !== "no-op") {
 				auditSequence += 1;
 				appendLearningAuditSnapshot(this.sessionManager, {
 					id: `audit-${auditSequence}`,
 					proposalId,
 					layer: proposal.layer,
-					action: decision.kind === "apply" ? "apply" : "propose",
+					action: writeFailed ? "apply_failed" : decision.kind === "apply" ? "apply" : "propose",
 					summary: proposal.summary,
-					reasonCode: decision.reasonCode,
+					reasonCode: writeFailed ? APPLY_WRITE_REFUSED_REASON_CODE : decision.reasonCode,
 					decision,
-					rollback,
+					// No rollback plan on a failed apply — nothing durable landed, so there is nothing to undo.
+					rollback: writeFailed ? undefined : rollback,
 					createdAt: new Date().toISOString(),
 				});
 			}
@@ -7282,26 +7397,37 @@ export class AgentSession {
 		const rollback = audit.rollback;
 		if (!rollback) return { ok: false, reason: "no_rollback_plan" };
 
+		// Every inverse must be VERIFIED-applied before the rollback audit is appended: a silently
+		// failed inverse that still recorded "rollback" would permanently self-lock the change
+		// behind already_rolled_back while the durable write is in fact still live.
 		switch (rollback.kind) {
 			case "memory_remove": {
 				if (!rollback.target) return { ok: false, reason: "missing_rollback_target" };
-				await this._applyReflectionWrite({ kind: "memory_remove", target: rollback.target });
+				if (!(await this._applyReflectionWrite({ kind: "memory_remove", target: rollback.target }))) {
+					return { ok: false, reason: "rollback_apply_failed" };
+				}
 				break;
 			}
 			case "memory_restore": {
 				if (!rollback.target || rollback.previous === undefined) {
 					return { ok: false, reason: "missing_rollback_target" };
 				}
-				await this._applyReflectionWrite({
+				const applied = await this._applyReflectionWrite({
 					kind: "memory_replace",
 					target: rollback.target,
 					text: rollback.previous,
 				});
+				if (!applied) return { ok: false, reason: "rollback_apply_failed" };
 				break;
 			}
 			case "memory_add": {
 				if (rollback.previous === undefined) return { ok: false, reason: "missing_rollback_target" };
-				await this._applyReflectionWrite({ kind: "memory_add", section: "MEMORY", text: rollback.previous });
+				const applied = await this._applyReflectionWrite({
+					kind: "memory_add",
+					section: "MEMORY",
+					text: rollback.previous,
+				});
+				if (!applied) return { ok: false, reason: "rollback_apply_failed" };
 				break;
 			}
 			case "archive_skill": {
@@ -7330,14 +7456,15 @@ export class AgentSession {
 	/**
 	 * Apply one reflection write through the bundled `memory` tool. `memory_replace`/`memory_remove`
 	 * don't carry a target file, so we try MEMORY.md first and fall back to USER.md when the substring
-	 * isn't found there. Best-effort: failures are swallowed (reflection must never break a turn).
+	 * isn't found there. Never throws (reflection must never break a turn); returns whether the write
+	 * actually applied so callers that MUST know — rollback's once-only accounting — can react instead
+	 * of recording a success that never happened.
 	 */
-	private async _applyReflectionWrite(write: ReflectionWrite, signal?: AbortSignal): Promise<void> {
+	private async _applyReflectionWrite(write: ReflectionWrite, signal?: AbortSignal): Promise<boolean> {
 		// R7 memory-to-behavior: a recurring procedure is compiled into an executable skill file rather
 		// than stored as a flat fact. Written under the agent skills dir so it loads like any user skill.
 		if (write.kind === "promote_skill") {
-			this._promoteReflectionSkill(write.name, write.description, write.body);
-			return;
+			return this._promoteReflectionSkill(write.name, write.description, write.body);
 		}
 
 		type MemResult = { details?: { success?: boolean; error?: string } };
@@ -7350,17 +7477,22 @@ export class AgentSession {
 		) => Promise<MemResult>;
 		const memTool = this._memoryManager.getToolDefinitions().find((t) => t.name === "memory");
 		const exec = memTool?.execute as unknown as MemExec | undefined;
-		if (!exec) return;
+		if (!exec) return false;
 
 		const run = (params: Parameters<MemExec>[1]) => exec("reflection", params, signal, undefined, undefined);
 
 		if (write.kind === "memory_add") {
 			try {
-				await run({ action: "add", target: write.section === "USER" ? "user" : "memory", content: write.text });
+				const res = await run({
+					action: "add",
+					target: write.section === "USER" ? "user" : "memory",
+					content: write.text,
+				});
+				return res?.details?.success === true;
 			} catch {
 				// best-effort; reflection writes must never throw into the turn loop
+				return false;
 			}
-			return;
 		}
 
 		// replace / remove carry no target file — try MEMORY.md, then USER.md. The memory tool reports
@@ -7374,39 +7506,42 @@ export class AgentSession {
 						? { action: "replace", target, oldContent: write.target, content: write.text }
 						: { action: "remove", target, oldContent: write.target };
 				const res = await run(params);
-				if (res?.details?.success === true) return; // applied
-				if (!/not found/i.test(String(res?.details?.error ?? ""))) return; // real failure — don't misapply
+				if (res?.details?.success === true) return true; // applied
+				if (!/not found/i.test(String(res?.details?.error ?? ""))) return false; // real failure — don't misapply
 				// substring simply absent from this file — try the next target
 			} catch {
 				// defensive: if the tool ever does throw, try the next target
 			}
 		}
+		return false;
 	}
 
 	/**
 	 * R7: write a reflection-promoted skill as `<agentDir>/skills/<name>/SKILL.md` so it loads like any
 	 * user skill. Best-effort; never clobbers an existing (hand-authored) skill of the same name.
 	 */
-	private _promoteReflectionSkill(rawName: string, description: string, body: string): void {
+	private _promoteReflectionSkill(rawName: string, description: string, body: string): boolean {
 		const name = rawName
 			.trim()
 			.toLowerCase()
 			.replace(/[^a-z0-9-]+/g, "-")
 			.replace(/^-+|-+$/g, "")
 			.slice(0, 64);
-		if (!name || !body.trim()) return;
+		if (!name || !body.trim()) return false;
 		try {
 			const dir = join(this._agentDir, "skills", name);
 			const file = join(dir, "SKILL.md");
-			if (existsSync(file)) return; // do not overwrite an existing skill
+			if (existsSync(file)) return false; // do not overwrite an existing skill
 			mkdirSync(dir, { recursive: true });
 			const safeDescription = description.replace(/[\r\n]+/g, " ").trim();
 			// `promoted: true` marks this as reflection-generated so the curator (#32) can lifecycle-manage
 			// it (archive/consolidate) WITHOUT ever touching hand-authored user skills.
 			const content = `---\nname: ${name}\ndescription: ${safeDescription}\npromoted: true\n---\n\n<!-- Auto-generated by the reflection engine (R7 memory-to-behavior). Review and refine. -->\n\n${body.trim()}\n`;
 			writeFileSync(file, content, "utf-8");
+			return true;
 		} catch {
 			// promotion must never break a turn
+			return false;
 		}
 	}
 

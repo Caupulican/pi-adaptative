@@ -66,14 +66,33 @@ export function decodeResourceSelection(
 }
 
 /**
+ * Options that let the encoder distinguish a genuine grant-all from an all-enabled snapshot of an
+ * enumerated grant (e.g. a collapsed universe where every enumerated id happens to be visible).
+ *  - originalFilter: the filter the selection was decoded from. A wildcard is preserved as a
+ *    wildcard; an enumerated grant is NEVER widened into one.
+ *  - grantAll: the caller explicitly chose "grant all (including future)" — force the wildcard.
+ */
+export interface EncodeResourceSelectionOptions {
+	originalFilter?: ResourceProfileFilterSettings;
+	grantAll?: boolean;
+}
+
+function shouldEncodeGrantAllWildcard(options?: EncodeResourceSelectionOptions): boolean {
+	if (options?.grantAll) return true;
+	return options?.originalFilter?.allow?.includes("*") ?? false;
+}
+
+/**
  * Encode an enabled set back into a filter.
- *  - all enabled            -> undefined (caller omits the kind)
+ *  - all enabled            -> enumerated { allow: [...allIds] } (or { allow: ["*"] } only when the
+ *                              original was already a wildcard / the caller chose grant-all)
  *  - some but not all       -> { allow: [...enabled, in allIds order] }
  *  - none enabled           -> { block: ["*"] }
  */
 export function encodeResourceSelection(
 	enabled: Set<string>,
 	allIds: string[],
+	options?: EncodeResourceSelectionOptions,
 ): ResourceProfileFilterSettings | undefined {
 	const allIdsSet = new Set(allIds);
 
@@ -85,10 +104,13 @@ export function encodeResourceSelection(
 		}
 	}
 
-	// All enabled: grant-all must be said OUT LOUD under strict UAC — omitting the kind
-	// (returning undefined) would mean deny-all, silently corrupting a fully-granted kind.
+	// All enabled: grant-all must be said OUT LOUD under strict UAC — omitting the kind (returning
+	// undefined) would mean deny-all. But saying it out loud does NOT mean widening: an enumerated
+	// closed grant re-encodes as the explicit id list, so a no-change save over a collapsed universe
+	// cannot silently turn "grant exactly these" into "grant everything, including future resources".
+	// A wildcard is only produced when it was already a wildcard (or grant-all was chosen explicitly).
 	if (allIds.length > 0 && validEnabledCount === allIds.length) {
-		return { allow: ["*"] };
+		return shouldEncodeGrantAllWildcard(options) ? { allow: ["*"] } : { allow: [...allIds] };
 	}
 	if (allIds.length === 0) {
 		return undefined;
@@ -137,9 +159,10 @@ export function encodeResourceSelectionWithFraming(
 	enabled: Set<string>,
 	allIds: string[],
 	framing: ResourceFraming,
+	options?: EncodeResourceSelectionOptions,
 ): ResourceProfileFilterSettings | undefined {
 	if (framing === "allow") {
-		return encodeResourceSelection(enabled, allIds);
+		return encodeResourceSelection(enabled, allIds, options);
 	}
 
 	const allIdsSet = new Set(allIds);
@@ -150,9 +173,10 @@ export function encodeResourceSelectionWithFraming(
 		}
 	}
 
-	// All enabled: explicit grant-all (see encodeResourceSelection — undefined means DENIED).
+	// All enabled: explicit grant-all (see encodeResourceSelection — undefined means DENIED), but
+	// never widened to a wildcard without context — same gate as the allow-framing branch.
 	if (allIds.length > 0 && validEnabledCount === allIds.length) {
-		return { allow: ["*"] };
+		return shouldEncodeGrantAllWildcard(options) ? { allow: ["*"] } : { allow: [...allIds] };
 	}
 	if (allIds.length === 0) {
 		return undefined;

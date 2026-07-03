@@ -1,6 +1,7 @@
 import { describe, expect, it } from "vitest";
 import {
 	appendLearningAuditSnapshot,
+	contradictionsForReflectionWrite,
 	getLearningAuditSnapshots,
 	isLearningAuditRecord,
 	LEARNING_AUDIT_CUSTOM_TYPE,
@@ -68,6 +69,20 @@ describe("proposalFromReflectionWrite / rollbackPlanForReflectionWrite", () => {
 		const rollback = rollbackPlanForReflectionWrite(write);
 		expect(rollback.kind).toBe("archive_skill");
 		expect(rollback.target).toBe("release-flow");
+	});
+});
+
+describe("contradictionsForReflectionWrite", () => {
+	it("counts a replace or remove as a contradiction (it supersedes an existing fact)", () => {
+		expect(contradictionsForReflectionWrite({ kind: "memory_replace", target: "old", text: "new" })).toBe(1);
+		expect(contradictionsForReflectionWrite({ kind: "memory_remove", target: "stale" })).toBe(1);
+	});
+
+	it("counts a purely additive write as no contradiction", () => {
+		expect(contradictionsForReflectionWrite({ kind: "memory_add", section: "MEMORY", text: "new fact" })).toBe(0);
+		expect(contradictionsForReflectionWrite({ kind: "promote_skill", name: "n", description: "d", body: "b" })).toBe(
+			0,
+		);
 	});
 });
 

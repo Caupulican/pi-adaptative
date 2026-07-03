@@ -3,6 +3,7 @@ import { WORKER_LANE_SYSTEM_PROMPT } from "../src/core/delegation/worker-runner.
 import { ROUTE_JUDGE_SYSTEM_PROMPT } from "../src/core/model-router/route-judge.ts";
 import {
 	DEFAULT_JUDGE_FITNESS_PROMPTS,
+	DIGEST_PROBE_SYSTEM_PROMPT,
 	formatModelFitnessReport,
 	runModelFitnessProbe,
 	SEARCH_PROBE_SYSTEM_PROMPT,
@@ -17,6 +18,7 @@ function scriptedComplete(behavior: {
 	judge?: (userPrompt: string) => string;
 	search?: string;
 	toolCall?: string;
+	digest?: (userPrompt: string) => string;
 }) {
 	return async ({ systemPrompt, userPrompt }: { systemPrompt: string; userPrompt: string }) => {
 		let text = "not json";
@@ -25,12 +27,21 @@ function scriptedComplete(behavior: {
 		else if (systemPrompt === ROUTE_JUDGE_SYSTEM_PROMPT) text = behavior.judge?.(userPrompt) ?? "not json";
 		else if (systemPrompt === SEARCH_PROBE_SYSTEM_PROMPT) text = behavior.search ?? "not json";
 		else if (systemPrompt === TOOL_CALL_PROBE_SYSTEM_PROMPT) text = behavior.toolCall ?? "not json";
+		else if (systemPrompt === DIGEST_PROBE_SYSTEM_PROMPT) text = behavior.digest?.(userPrompt) ?? "not json";
 		return { text, costUsd: 0.001, stopReason: "stop" };
 	};
 }
 
+/**
+ * A faithful digest echoes the probe chunk's nonce back verbatim. Each probe chunk is short enough to
+ * fit the digest cap, so echoing the whole chunk guarantees the nonce is retained.
+ */
+function faithfulDigest(chunk: string): string {
+	return JSON.stringify({ digest: chunk });
+}
+
 describe("runModelFitnessProbe", () => {
-	it("scores a fully-capable model across all five surfaces", async () => {
+	it("scores a fully-capable model across all six surfaces", async () => {
 		const report = await runModelFitnessProbe({
 			trials: 2,
 			now: () => 0,
@@ -43,6 +54,7 @@ describe("runModelFitnessProbe", () => {
 						: '{"tier":"cheap","risk":"read-only","trivial":true,"reason":"trivial"}',
 				search: '{"queries":[{"pattern":"retry","glob":"**/*.ts"}]}',
 				toolCall: '{"tool":"grep","arguments":{"pattern":"resolveCliModel","path":"src/"}}',
+				digest: faithfulDigest,
 			}),
 		});
 
@@ -50,6 +62,8 @@ describe("runModelFitnessProbe", () => {
 		expect(report.worker.succeeded).toBe(2);
 		expect(report.search.succeeded).toBe(3);
 		expect(report.toolCall.succeeded).toBe(3);
+		expect(report.digest.succeeded).toBe(report.digest.total);
+		expect(report.digest.total).toBeGreaterThan(0);
 		expect(report.judge.parsed).toBe(DEFAULT_JUDGE_FITNESS_PROMPTS.length);
 		expect(report.judge.planningElevated).toBe(3);
 		expect(report.judge.trivialCheap).toBe(3);

@@ -263,6 +263,7 @@ export const DEFAULT_LEARNING_POLICY_CONFIDENCE_THRESHOLD = 90;
 export const DEFAULT_LEARNING_POLICY_MIN_OBSERVATIONS = 2;
 export const DEFAULT_LEARNING_POLICY_ALLOWED_AUTO_APPLY_LAYERS: readonly LearningPolicyLayer[] = ["memory"];
 export const DEFAULT_LEARNING_POLICY_REFLECTION_SOURCE_CONFIDENCE = 50;
+export const DEFAULT_LEARNING_POLICY_AUTO_APPLY_SUPERSESSIONS = false;
 
 export interface LearningPolicySettings {
 	enabled?: boolean; // default: false — until enabled, reflection writes keep the legacy direct-apply path (now audited)
@@ -272,6 +273,7 @@ export interface LearningPolicySettings {
 	allowedAutoApplyLayers?: LearningPolicyLayer[]; // default: ["memory"] — every other layer stays proposal-first
 	requireRollbackPlan?: boolean; // default: true — durable writes need a rollback plan to auto-apply
 	reflectionSourceConfidence?: number; // default: 50 — trust assigned to single-session reflection cues (0-100)
+	autoApplySupersessions?: boolean; // default: false — a memory_replace/memory_remove (supersedes/deletes an existing fact) stays a proposal even when otherwise eligible, unless explicitly opted in
 }
 
 export type ResolvedLearningPolicySettings = Required<LearningPolicySettings>;
@@ -1109,12 +1111,16 @@ export class SettingsManager {
 		return hasExplicitActiveResourceProfileSelection(this.settings);
 	}
 
-	getResourceProfileFilter(kind: ResourceProfileKind): Required<ResourceProfileFilterSettings> {
-		const legacyFilter = mergeResourceProfileFilters(
-			collectLegacyDisabledFilterFromSettings(this.globalSettings, kind),
-			collectLegacyDisabledFilterFromSettings(this.projectSettings, kind),
-			collectLegacyDisabledFilterFromSettings(this.directoryProfileSettings, kind),
-		);
+	/**
+	 * Aggregate ONLY the active profiles' contribution to a resource kind's filter — the user's own
+	 * legacy `disabledResources` list is not merged in. Includes the strict-UAC deny-all (an
+	 * authority-bearing kind no active profile mentions is denied outright); that denial is
+	 * profile-driven too. Shared by `getResourceProfileFilter` (which merges the legacy disable list
+	 * on top) and `isResourceDeniedByActiveProfile` (which must attribute a denial to the profile
+	 * ALONE — a user-only disable must never be reported as "withheld by the active resource
+	 * profile").
+	 */
+	private computeProfileOnlyResourceFilter(kind: ResourceProfileKind): Required<ResourceProfileFilterSettings> {
 		const profileFilter: ResourceProfileFilterSettings = {};
 		const seenProfiles = new Set<string>();
 		const registry = this.getProfileRegistry();
@@ -1138,7 +1144,19 @@ export class SettingsManager {
 			return { allow: [], block: ["*"] };
 		}
 
-		const filter = mergeResourceProfileFilters(legacyFilter, profileFilter);
+		return {
+			allow: [...new Set(profileFilter.allow ?? [])],
+			block: [...new Set(profileFilter.block ?? [])],
+		};
+	}
+
+	getResourceProfileFilter(kind: ResourceProfileKind): Required<ResourceProfileFilterSettings> {
+		const legacyFilter = mergeResourceProfileFilters(
+			collectLegacyDisabledFilterFromSettings(this.globalSettings, kind),
+			collectLegacyDisabledFilterFromSettings(this.projectSettings, kind),
+			collectLegacyDisabledFilterFromSettings(this.directoryProfileSettings, kind),
+		);
+		const filter = mergeResourceProfileFilters(legacyFilter, this.computeProfileOnlyResourceFilter(kind));
 		return {
 			allow: [...new Set(filter.allow ?? [])],
 			block: [...new Set(filter.block ?? [])],
@@ -1178,6 +1196,22 @@ export class SettingsManager {
 			return false;
 		}
 		return true;
+	}
+
+	/**
+	 * Whether the ACTIVE PROFILE alone denies this resource — the user's own legacy
+	 * `disabledResources` list is ignored. A "withheld by the active resource profile" report must
+	 * use this, not `isResourceAllowedByProfile`: that check merges the user's own disables in, so a
+	 * plain user-disabled resource (no profile even mentioning it) would otherwise be misattributed
+	 * to the profile.
+	 */
+	isResourceDeniedByActiveProfile(kind: ResourceProfileKind, resourcePath: string, baseDir = ""): boolean {
+		if (this.getActiveResourceProfileNames().length === 0) return false;
+		const filter = this.computeProfileOnlyResourceFilter(kind);
+		if (filter.allow.length > 0 && !matchesResourceProfilePattern(resourcePath, filter.allow, baseDir)) {
+			return true;
+		}
+		return matchesResourceProfilePattern(resourcePath, filter.block, baseDir);
 	}
 
 	/**
@@ -2867,6 +2901,10 @@ export class SettingsManager {
 				0,
 				100,
 			),
+			autoApplySupersessions:
+				typeof configured.autoApplySupersessions === "boolean"
+					? configured.autoApplySupersessions
+					: DEFAULT_LEARNING_POLICY_AUTO_APPLY_SUPERSESSIONS,
 		};
 	}
 

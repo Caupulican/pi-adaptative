@@ -1,5 +1,93 @@
 ## [Unreleased]
 
+### Fixed
+
+- Hardened the hardening sweep after a max-effort review of the working diff found nine regressions
+  and latent holes the first pass introduced or left open:
+  - `endWriteStream` (newly awaited by the bash executor) hung forever when the stream had already
+    errored or closed before the call — an errored stream never emits `finish`, so the `once`
+    listeners attached after the events fired and never resolved, hanging the bash tool on any spill
+    write error. It now resolves immediately for an already-finished/destroyed/closed/errored stream.
+  - The git-filter spill branch created its temp-file stream with no error handler, so a failed spill
+    write still advertised a "Full output:" path pointing at a partial or missing file. It now drops
+    the path on write error, matching the main capture path.
+  - The execution-time envelope path check resolved a target through `existsSync`, which reports
+    false for a DANGLING symlink — so a dangling symlink placed inside an allowed root resolved
+    lexically and escaped the envelope (the subsequent write follows the link). `safeRealpathSync`
+    now dereferences a dangling leaf via `lstat`/`readlink` with a hop cap, closing the escape.
+  - `applyWorkerActions` routed writes through an injectable fs seam while the scope check used the
+    real filesystem, so the two could disagree. The test-only seam (its sole injector) is removed;
+    scope check and write now share one filesystem of record.
+  - The context-GC auto-digest was fenced at RENDER time, regenerating a random boundary nonce on
+    every provider request (the GC transform re-runs per request) — a byte-unstable prompt prefix
+    that broke prefix caching, and double-wrapped/mangled an already-fenced digest. Fencing now
+    happens once at digest store time; GC renders it verbatim.
+  - A reflection write the gate marked "apply" recorded an `action:"apply"` audit with a rollback
+    plan even when the memory tool silently refused it (budget/drift/threat return `success:false`
+    without throwing) — a phantom rollback target that then failed not-found. A refused apply now
+    records an `apply_failed` audit with no rollback plan and is not rollback-eligible.
+  - The `/context` "withheld by the active resource profile" line fired even with NO active profile,
+    blaming a nonexistent profile for a plain user disable (and double-reporting alongside the
+    disable-wins warning). The count is now profile-only and empty when no profile is active.
+  - A durable `memory_replace`/`memory_remove` could never auto-apply even under a fully permissive
+    policy, because the contradiction branch short-circuited before every eligibility check — an
+    append-only incentive that degraded memory hygiene. A new `learningPolicy.autoApplySupersessions`
+    (default false, TUI-toggleable) lets a supersession fall through to the normal eligibility bars.
+  - Router-swapped turns restored the pre-turn tools/system-prompt unconditionally in `finally`,
+    silently clobbering a mid-turn extension change (e.g. `setActiveToolsByName`) that legitimately
+    replaced them. Restore now happens only when the live values are still exactly what the swap
+    assigned.
+  - The editor grant-widening guard was applied only to allow-framing: the block-framing all-enabled
+    branch still widened a closed grant to `{allow:["*"]}` for a kind the profile omitted, and the
+    editor let the literal `"*"` wildcard marker enter the working set as a fake resource id (so
+    unchecking one item under a `{allow:["*"]}` grant persisted `{allow:[…,"*"]}`, and the disabled
+    item kept loading). Both paths now gate on the same original-wildcard/grant-all check, and the
+    marker never enters the item set.
+- Fixed `executeBash` returning a full-output temp-file path before the file's write was flushed:
+  the artifact write went through an async stream that was `.end()`-ed but never awaited, so a caller
+  reading the path immediately could see partial or empty content (a load-dependent flake). The stream
+  flush is now awaited across the normal, git-filter, cancel, and error paths, so the returned path
+  always points at a complete file.
+- Fixed the context-GC auto-digest (a machine paraphrase of possibly attacker-influenced tool output)
+  being inlined into the prompt as bare prose: it is now wrapped in the standard untrusted-content
+  fence, the same boundary memory recall pages use, so an injection payload in the digest is framed as
+  data, not instructions.
+- Fixed profile-denied context files (AGENTS.md/CLAUDE.md/GEMINI.md) being read and processed as
+  content before the agents-kind profile filter: the loader now reads each candidate file's raw bytes
+  once purely to discover any embedded `<resource-profile>` blocks (unavoidable — a profile can be
+  defined in a file it then denies), and only sanitizes, threat-scans, and exposes files the profile
+  allows. A denied file's instructional content is never loaded into the session, and the redundant
+  double read of every context file is gone.
+- Fixed the profile resource editor silently widening a closed grant to a wildcard: when every id in a
+  kind's (possibly collapsed) universe was enabled, a no-change save re-encoded an enumerated grant
+  like `{allow:[alpha,beta]}` as `{allow:["*"]}`, auto-granting every future resource of that kind. The
+  save now preserves the enumerated list and only keeps `["*"]` when the grant was already a wildcard
+  (or grant-all was chosen explicitly).
+- Fixed skills, prompts, and extensions denied by the active resource profile being silently absent
+  from `/context`: it now reports "N skill(s)/prompt(s)/extension(s) withheld by the active resource
+  profile — grant the <kind> kind to restore them", the same visibility the withheld-AGENTS.md
+  warning already gave context files.
+- Fixed a silently-swallowed executor miss: when an executor-routed turn ran no toolkit command and
+  the reflex brain could not refine the request into an explicit instruction, the turn ended with no
+  retry and no explanation. It now surfaces a warning that the command did not run and no automatic
+  escalation happened (the no-frontier-fallback policy is unchanged).
+- Fixed router-swapped turns (G4) leaving the system prompt at the full tool surface: when a turn is
+  routed to a smaller model its tool set is filtered, but the system prompt still carried guidelines
+  and schemas for tools the routed model couldn't call — billed every request and confusing to a
+  cheap/local model. The prompt is now rebuilt for the routed model's filtered surface and restored
+  afterwards, including when the routed run throws.
+- Fixed the learning gate's contradiction branch being unreachable dead code: the reflection call site
+  hardcoded `contradictions: 0`, so a durable `memory_replace`/`memory_remove` — which overwrites or
+  deletes an existing memory fact (the reflection engine's confront-before-write conflict signal) —
+  could auto-apply and silently destroy prior knowledge. Such supersessions now route through the
+  contradiction branch (approval-gated proposal, audited); purely additive writes are unaffected.
+- Fixed a learning-policy cliff where enabling the policy with stock settings silently disabled
+  learning entirely: a below-confidence-threshold cue with no evidence returned a silent no-op
+  (reflectionSourceConfidence 50 < confidenceThreshold 90, reflection writes carry no evidence), so
+  every durable write was dropped with no apply and no audit trail. Below-threshold cues now degrade
+  to an approval-gated proposal that is audited and visible in `/autonomy diagnostics`, while staying
+  fail-closed — nothing auto-applies below the threshold.
+
 ## [0.80.100] - 2026-07-02
 
 ### Added

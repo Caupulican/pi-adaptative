@@ -18,7 +18,11 @@ import {
 	encodeResourceSelectionWithFraming,
 	type ResourceFraming,
 } from "../../../core/profile-resource-selection.ts";
-import type { ResourceProfileKind, ResourceProfileSettings } from "../../../core/settings-manager.ts";
+import type {
+	ResourceProfileFilterSettings,
+	ResourceProfileKind,
+	ResourceProfileSettings,
+} from "../../../core/settings-manager.ts";
 import { theme } from "../theme/theme.ts";
 import { DynamicBorder } from "./dynamic-border.ts";
 import { keyText } from "./keybinding-hints.ts";
@@ -174,6 +178,9 @@ export class ProfileResourceEditorComponent extends Container implements Focusab
 	private enabledByKind: Map<ResourceProfileKind, Set<string>> = new Map();
 	private framingByKind: Map<ResourceProfileKind, ResourceFraming> = new Map();
 	private missingIdsByKind: Map<ResourceProfileKind, Set<string>> = new Map();
+	/** The filter each kind was decoded from, so an all-enabled save preserves an enumerated grant
+	 *  (or an already-wildcard grant) instead of widening it to allow:["*"]. */
+	private originalFilterByKind: Map<ResourceProfileKind, ResourceProfileFilterSettings | undefined> = new Map();
 	private currentKindIndex = 0;
 
 	private cwd: string;
@@ -228,7 +235,13 @@ export class ProfileResourceEditorComponent extends Container implements Focusab
 			if (filter) {
 				if (filter.allow) {
 					for (const id of filter.allow) {
-						mentionedIds.add(id);
+						// "*" is a grant-all framing marker, not a resource id — the block loop below
+						// already excludes it; the allow loop must too, or it leaks into missingSet as
+						// a fake "missing item" and rides along as a phantom enabled member through
+						// decode/encode.
+						if (id !== "*") {
+							mentionedIds.add(id);
+						}
 					}
 				}
 				if (filter.block) {
@@ -255,6 +268,7 @@ export class ProfileResourceEditorComponent extends Container implements Focusab
 			const enabledSet = decodeResourceSelection(filter, [...allIds, ...missingSet]);
 			this.enabledByKind.set(kind.kind, enabledSet);
 			this.framingByKind.set(kind.kind, detectResourceFraming(filter));
+			this.originalFilterByKind.set(kind.kind, filter);
 		}
 
 		// Header
@@ -601,7 +615,11 @@ export class ProfileResourceEditorComponent extends Container implements Focusab
 			// ids that are not currently discoverable must survive a save untouched.
 			const missingSet = this.missingIdsByKind.get(kind.kind) ?? new Set<string>();
 			const allIds = [...new Set([...kind.items.map((item) => item.id), ...missingSet])];
-			const encoded = encodeResourceSelectionWithFraming(enabledSet, allIds, framing);
+			// Pass the original filter so an all-enabled save preserves an enumerated grant (and only
+			// keeps a wildcard when the grant was already a wildcard) — never widening it silently.
+			const encoded = encodeResourceSelectionWithFraming(enabledSet, allIds, framing, {
+				originalFilter: this.originalFilterByKind.get(kind.kind),
+			});
 			if (encoded !== undefined) {
 				resources[kind.kind] = encoded;
 			}

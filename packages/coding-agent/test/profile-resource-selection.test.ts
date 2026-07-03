@@ -1,5 +1,9 @@
 import { describe, expect, it } from "vitest";
-import { decodeResourceSelection, encodeResourceSelection } from "../src/core/profile-resource-selection.ts";
+import {
+	decodeResourceSelection,
+	encodeResourceSelection,
+	encodeResourceSelectionWithFraming,
+} from "../src/core/profile-resource-selection.ts";
 
 describe("profile-resource-selection", () => {
 	// Test universes
@@ -8,9 +12,23 @@ describe("profile-resource-selection", () => {
 
 	describe("encodeResourceSelection", () => {
 		describe("with toolIds universe", () => {
-			it("all enabled -> explicit grant-all (strict UAC: omitting the kind means DENIED)", () => {
+			it("all enabled -> enumerated allow-list (never widened to a wildcard without context)", () => {
+				// Grant-all is still said out loud (not undefined = DENIED), but as the explicit id list —
+				// widening to allow:["*"] only happens when the original filter was already a wildcard.
 				const enabled = new Set(toolIds);
 				const result = encodeResourceSelection(enabled, toolIds);
+				expect(result).toEqual({ allow: ["read", "bash", "edit"] });
+			});
+
+			it("all enabled with an already-wildcard original -> preserves { allow: ['*'] }", () => {
+				const enabled = new Set(toolIds);
+				const result = encodeResourceSelection(enabled, toolIds, { originalFilter: { allow: ["*"] } });
+				expect(result).toEqual({ allow: ["*"] });
+			});
+
+			it("all enabled with an explicit grant-all choice -> { allow: ['*'] }", () => {
+				const enabled = new Set(toolIds);
+				const result = encodeResourceSelection(enabled, toolIds, { grantAll: true });
 				expect(result).toEqual({ allow: ["*"] });
 			});
 
@@ -41,10 +59,10 @@ describe("profile-resource-selection", () => {
 		});
 
 		describe("with skillIds universe", () => {
-			it("all enabled -> explicit grant-all (strict UAC)", () => {
+			it("all enabled -> enumerated allow-list (never widened to a wildcard without context)", () => {
 				const enabled = new Set(skillIds);
 				const result = encodeResourceSelection(enabled, skillIds);
-				expect(result).toEqual({ allow: ["*"] });
+				expect(result).toEqual({ allow: ["a", "b", "c", "d"] });
 			});
 
 			it("subset enabled -> { allow: [...] } in allIds order", () => {
@@ -138,6 +156,52 @@ describe("profile-resource-selection", () => {
 			it("{ block: ['b', 'd'] } -> a and c", () => {
 				const result = decodeResourceSelection({ block: ["b", "d"] }, skillIds);
 				expect(result).toEqual(new Set(["a", "c"]));
+			});
+		});
+	});
+
+	describe("encodeResourceSelectionWithFraming", () => {
+		describe("block framing", () => {
+			it("all enabled, no original filter -> enumerated allow-list, never widened to a wildcard", () => {
+				const enabled = new Set(toolIds);
+				const result = encodeResourceSelectionWithFraming(enabled, toolIds, "block");
+				expect(result).toEqual({ allow: ["read", "bash", "edit"] });
+			});
+
+			it("all enabled, original filter was an enumerated block-list -> enumerated allow-list", () => {
+				// An omitted kind decodes to block framing with originalFilter undefined; a kind that was
+				// already a non-wildcard block-list must behave the same way: no wildcard widening.
+				const enabled = new Set(toolIds);
+				const result = encodeResourceSelectionWithFraming(enabled, toolIds, "block", {
+					originalFilter: { block: ["bash"] },
+				});
+				expect(result).toEqual({ allow: ["read", "bash", "edit"] });
+			});
+
+			it("all enabled, original filter was already allow:['*'] -> preserves the wildcard", () => {
+				const enabled = new Set(toolIds);
+				const result = encodeResourceSelectionWithFraming(enabled, toolIds, "block", {
+					originalFilter: { allow: ["*"] },
+				});
+				expect(result).toEqual({ allow: ["*"] });
+			});
+
+			it("all enabled, grant-all explicitly chosen -> wildcard", () => {
+				const enabled = new Set(toolIds);
+				const result = encodeResourceSelectionWithFraming(enabled, toolIds, "block", { grantAll: true });
+				expect(result).toEqual({ allow: ["*"] });
+			});
+
+			it("subset enabled -> { block: [...disabled] }, unaffected by the grant-all gate", () => {
+				const enabled = new Set(["read", "edit"]);
+				const result = encodeResourceSelectionWithFraming(enabled, toolIds, "block");
+				expect(result).toEqual({ block: ["bash"] });
+			});
+
+			it("none enabled -> { block: ['*'] }", () => {
+				const enabled = new Set<string>();
+				const result = encodeResourceSelectionWithFraming(enabled, toolIds, "block");
+				expect(result).toEqual({ block: ["*"] });
 			});
 		});
 	});

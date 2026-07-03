@@ -26,6 +26,9 @@ export interface LearningGateSettings {
 	allowedAutoApplyLayers: readonly DurableChangeLayer[];
 	requireRollbackPlan?: boolean;
 	requireEvidence?: boolean;
+	/** default: false — a memory_replace/memory_remove (supersedes/deletes an existing fact) stays an
+	 * approval-gated proposal even when otherwise eligible, unless explicitly opted in. */
+	autoApplySupersessions?: boolean;
 }
 
 const MAX_DECISION_SUMMARY_LENGTH = 240;
@@ -74,7 +77,13 @@ export function evaluateLearningDecision(args: {
 		});
 	}
 
-	if (contradictions > 0) {
+	// A replace/remove supersedes or deletes an existing fact — the reflection engine's
+	// confront-before-write conflict signal — so by default it routes through approval rather than
+	// silently overwriting prior memory. With `autoApplySupersessions` opted in, that signal no longer
+	// short-circuits the decision outright: it FALLS THROUGH to the standard eligibility chain below,
+	// so a supersession auto-applies only when everything else (threshold/observations/evidence/
+	// rollback/autoApplyEnabled/layer) also passes.
+	if (contradictions > 0 && !settings.autoApplySupersessions) {
 		return learningDecision({
 			kind: "proposal",
 			reasonCode: "contradictions_present",
@@ -86,13 +95,16 @@ export function evaluateLearningDecision(args: {
 	}
 
 	if (confidence < settings.confidenceThreshold) {
-		const hasEvidence = !!(proposal.evidenceIds && proposal.evidenceIds.length > 0);
+		// Below-threshold confidence degrades to an approval-gated proposal, never a silent no-op:
+		// learning stays fail-closed (it can only auto-apply above the threshold) while remaining
+		// VISIBLE and audited. A silent no-op here disabled learning entirely under stock settings
+		// (reflectionSourceConfidence < confidenceThreshold, reflection writes carrying no evidenceIds).
 		return learningDecision({
-			kind: hasEvidence ? "proposal" : "no-op",
+			kind: "proposal",
 			reasonCode: "below_confidence_threshold",
 			confidence,
 			summary: proposal.summary,
-			requiresApproval: hasEvidence,
+			requiresApproval: true,
 			createdAt: now,
 		});
 	}

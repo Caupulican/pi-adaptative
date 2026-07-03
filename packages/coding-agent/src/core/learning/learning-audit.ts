@@ -21,7 +21,15 @@ export interface LearningRollbackPlan {
 	instructions: string;
 }
 
-export type LearningAuditAction = "apply" | "propose" | "rollback";
+// "apply_failed" is distinct from "apply": the gate decided to apply, but the underlying write tool
+// (e.g. the memory tool) refused it (budget exceeded, drift, threat) without throwing. It must never
+// be treated as "apply" by a rollback-eligibility check — there is nothing durable to undo.
+export type LearningAuditAction = "apply" | "apply_failed" | "propose" | "rollback";
+
+/** reasonCode for an "apply_failed" audit — distinct from the gate's own reasonCode (e.g.
+ * "eligible_auto_apply") so the record is honest about WHERE it stopped: the gate approved the
+ * write, but the write tool refused it after the fact. */
+export const APPLY_WRITE_REFUSED_REASON_CODE = "apply_write_refused";
 
 export interface LearningAuditRecord {
 	id: string;
@@ -59,6 +67,24 @@ export function proposalFromReflectionWrite(write: ReflectionWrite, proposalId: 
 	};
 }
 
+/**
+ * Contradiction count a reflection write carries against existing durable knowledge. A
+ * `memory_replace`/`memory_remove` is only emitted when the reflection engine CONFRONTS an existing
+ * fact (it supersedes or deletes it) — that supersession is the gate's contradiction signal, so such
+ * a write must route through approval rather than silently overwriting prior memory. A `memory_add`
+ * or `promote_skill` is purely additive and contradicts nothing.
+ */
+export function contradictionsForReflectionWrite(write: ReflectionWrite): number {
+	switch (write.kind) {
+		case "memory_replace":
+		case "memory_remove":
+			return 1;
+		case "memory_add":
+		case "promote_skill":
+			return 0;
+	}
+}
+
 export function rollbackPlanForReflectionWrite(write: ReflectionWrite): LearningRollbackPlan {
 	switch (write.kind) {
 		case "memory_add":
@@ -89,7 +115,7 @@ export function rollbackPlanForReflectionWrite(write: ReflectionWrite): Learning
 	}
 }
 
-const AUDIT_ACTIONS: readonly string[] = ["apply", "propose", "rollback"];
+const AUDIT_ACTIONS: readonly string[] = ["apply", "apply_failed", "propose", "rollback"];
 const ROLLBACK_KINDS: readonly string[] = ["memory_remove", "memory_restore", "memory_add", "archive_skill"];
 const LAYERS: readonly string[] = ["memory", "skill", "prompt", "extension", "tool", "script", "settings", "source"];
 

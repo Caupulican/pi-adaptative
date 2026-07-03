@@ -79,13 +79,78 @@ describe("Library Manage UX - Increment 2", () => {
 			expect(decoded).toEqual(enabled);
 		});
 
-		it("should encode all enabled set as explicit grant-all (strict UAC) for block framing", () => {
+		it("encodes an all-enabled set with no grant-all context as an enumerated allow-list, not a wildcard", () => {
+			// Enabling every currently-discovered item must NOT silently widen to { allow: ["*"] } —
+			// that would auto-grant every FUTURE resource of the kind. Without an original wildcard or an
+			// explicit grantAll, the closed enumerated list is the correct encode (matches the allow-branch
+			// and the editor-save-widening guard below).
 			const enabled = new Set(allIds);
 			const encoded = encodeResourceSelectionWithFraming(enabled, allIds, "block");
-			expect(encoded).toEqual({ allow: ["*"] });
+			expect(encoded).toEqual({ allow: [...allIds] });
 
 			const decoded = decodeResourceSelection(encoded, allIds);
 			expect(decoded).toEqual(enabled);
+		});
+
+		it("encodes an all-enabled set as grant-all only when the original grant was already a wildcard", () => {
+			const enabled = new Set(allIds);
+			const encoded = encodeResourceSelectionWithFraming(enabled, allIds, "block", {
+				originalFilter: { allow: ["*"] },
+			});
+			expect(encoded).toEqual({ allow: ["*"] });
+		});
+	});
+
+	describe("editor save must not widen an enumerated grant to a wildcard", () => {
+		it("preserves an enumerated allow-list on a no-change save (collapsed universe)", () => {
+			// Profile grants exactly alpha+beta, but only alpha is currently discoverable (collapsed
+			// universe). Decoding widens the universe to alpha+beta, so both end up enabled — a
+			// no-change save must NOT re-encode that as { allow: ["*"] } (auto-granting future skills).
+			let saved: { skills?: { allow?: string[]; block?: string[] } } | undefined;
+			const editor = new ProfileResourceEditorComponent({
+				profileName: "p",
+				profileScope: "session",
+				initialResources: { skills: { allow: ["skill-alpha", "skill-beta"] } },
+				kinds: [
+					{
+						kind: "skills",
+						label: "Skills",
+						items: [{ id: "skill-alpha", path: "/catalog/skill-alpha", description: "" }],
+					},
+				],
+				onSave: (resources) => {
+					saved = resources;
+				},
+				onCancel: () => {},
+			});
+
+			(editor as unknown as { persistChanges(): void }).persistChanges();
+
+			expect(saved?.skills).toEqual({ allow: ["skill-alpha", "skill-beta"] });
+		});
+
+		it("keeps a wildcard grant that was already a wildcard", () => {
+			let saved: { skills?: { allow?: string[]; block?: string[] } } | undefined;
+			const editor = new ProfileResourceEditorComponent({
+				profileName: "p",
+				profileScope: "session",
+				initialResources: { skills: { allow: ["*"] } },
+				kinds: [
+					{
+						kind: "skills",
+						label: "Skills",
+						items: [{ id: "skill-alpha", path: "/catalog/skill-alpha", description: "" }],
+					},
+				],
+				onSave: (resources) => {
+					saved = resources;
+				},
+				onCancel: () => {},
+			});
+
+			(editor as unknown as { persistChanges(): void }).persistChanges();
+
+			expect(saved?.skills).toEqual({ allow: ["*"] });
 		});
 	});
 

@@ -1,5 +1,6 @@
 import { describe, expect, it } from "vitest";
 import {
+	DEFAULT_LEARNING_POLICY_AUTO_APPLY_SUPERSESSIONS,
 	DEFAULT_LEARNING_POLICY_CONFIDENCE_THRESHOLD,
 	DEFAULT_LEARNING_POLICY_MIN_OBSERVATIONS,
 	DEFAULT_LEARNING_POLICY_REFLECTION_SOURCE_CONFIDENCE,
@@ -17,6 +18,10 @@ describe("learning policy settings", () => {
 		expect(resolved.allowedAutoApplyLayers).toEqual(["memory"]);
 		expect(resolved.requireRollbackPlan).toBe(true);
 		expect(resolved.reflectionSourceConfidence).toBe(DEFAULT_LEARNING_POLICY_REFLECTION_SOURCE_CONFIDENCE);
+		// Bug F: a supersession (memory_replace/memory_remove) must stay proposal-first by default too —
+		// only an explicit opt-in lets it fall through to the standard auto-apply eligibility chain.
+		expect(resolved.autoApplySupersessions).toBe(DEFAULT_LEARNING_POLICY_AUTO_APPLY_SUPERSESSIONS);
+		expect(resolved.autoApplySupersessions).toBe(false);
 	});
 
 	it("filters unknown layers and clamps numeric fields to defaults", () => {
@@ -46,5 +51,17 @@ describe("learning policy settings", () => {
 		expect(resolved.enabled).toBe(true);
 		expect(resolved.autoApplyEnabled).toBe(true);
 		expect(resolved.confidenceThreshold).toBe(40);
+	});
+
+	it("round-trips autoApplySupersessions through setLearningPolicySettings", () => {
+		const settingsManager = SettingsManager.inMemory();
+
+		settingsManager.setLearningPolicySettings({
+			enabled: true,
+			autoApplyEnabled: true,
+			autoApplySupersessions: true,
+		});
+
+		expect(settingsManager.getLearningPolicySettings().autoApplySupersessions).toBe(true);
 	});
 });
