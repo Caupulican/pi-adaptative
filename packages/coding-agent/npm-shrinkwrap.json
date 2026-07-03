@@ -1,17 +1,17 @@
 {
 	"name": "@caupulican/pi-adaptative",
-	"version": "0.80.100",
+	"version": "0.80.101",
 	"lockfileVersion": 3,
 	"requires": true,
 	"packages": {
 		"": {
 			"name": "@caupulican/pi-adaptative",
-			"version": "0.80.100",
+			"version": "0.80.101",
 			"license": "MIT",
 			"dependencies": {
-				"@caupulican/pi-agent-core": "^0.80.100",
-				"@caupulican/pi-ai": "^0.80.100",
-				"@caupulican/pi-tui": "^0.80.100",
+				"@caupulican/pi-agent-core": "^0.80.101",
+				"@caupulican/pi-ai": "^0.80.101",
+				"@caupulican/pi-tui": "^0.80.101",
 				"@ff-labs/fff-node": "0.9.6",
 				"@silvia-odwyer/photon-node": "0.3.4",
 				"chalk": "5.6.2",
@@ -475,11 +475,11 @@
 			}
 		},
 		"node_modules/@caupulican/pi-agent-core": {
-			"version": "0.80.100",
-			"resolved": "https://registry.npmjs.org/@caupulican/pi-agent-core/-/pi-agent-core-0.80.100.tgz",
+			"version": "0.80.101",
+			"resolved": "https://registry.npmjs.org/@caupulican/pi-agent-core/-/pi-agent-core-0.80.101.tgz",
 			"license": "MIT",
 			"dependencies": {
-				"@caupulican/pi-ai": "^0.80.100",
+				"@caupulican/pi-ai": "^0.80.101",
 				"ignore": "7.0.5",
 				"typebox": "1.1.38",
 				"yaml": "2.9.0"
@@ -489,8 +489,8 @@
 			}
 		},
 		"node_modules/@caupulican/pi-ai": {
-			"version": "0.80.100",
-			"resolved": "https://registry.npmjs.org/@caupulican/pi-ai/-/pi-ai-0.80.100.tgz",
+			"version": "0.80.101",
+			"resolved": "https://registry.npmjs.org/@caupulican/pi-ai/-/pi-ai-0.80.101.tgz",
 			"license": "MIT",
 			"dependencies": {
 				"@anthropic-ai/sdk": "0.91.1",
@@ -512,8 +512,8 @@
 			}
 		},
 		"node_modules/@caupulican/pi-tui": {
-			"version": "0.80.100",
-			"resolved": "https://registry.npmjs.org/@caupulican/pi-tui/-/pi-tui-0.80.100.tgz",
+			"version": "0.80.101",
+			"resolved": "https://registry.npmjs.org/@caupulican/pi-tui/-/pi-tui-0.80.101.tgz",
 			"license": "MIT",
 			"dependencies": {
 				"get-east-asian-width": "1.6.0",
@@ -560,9 +560,6 @@
 			"cpu": [
 				"arm64"
 			],
-			"libc": [
-				"glibc"
-			],
 			"optional": true
 		},
 		"node_modules/@ff-labs/fff-bin-linux-arm64-musl": {
@@ -575,9 +572,6 @@
 			],
 			"cpu": [
 				"arm64"
-			],
-			"libc": [
-				"musl"
 			],
 			"optional": true
 		},
@@ -592,9 +586,6 @@
 			"cpu": [
 				"x64"
 			],
-			"libc": [
-				"glibc"
-			],
 			"optional": true
 		},
 		"node_modules/@ff-labs/fff-bin-linux-x64-musl": {
@@ -607,9 +598,6 @@
 			],
 			"cpu": [
 				"x64"
-			],
-			"libc": [
-				"musl"
 			],
 			"optional": true
 		},
@@ -1172,9 +1160,6 @@
 			"cpu": [
 				"arm64"
 			],
-			"libc": [
-				"glibc"
-			],
 			"optional": true
 		},
 		"node_modules/@yuuang/ffi-rs-linux-arm64-musl": {
@@ -1190,9 +1175,6 @@
 			],
 			"cpu": [
 				"arm64"
-			],
-			"libc": [
-				"musl"
 			],
 			"optional": true
 		},
@@ -1210,9 +1192,6 @@
 			"cpu": [
 				"x64"
 			],
-			"libc": [
-				"glibc"
-			],
 			"optional": true
 		},
 		"node_modules/@yuuang/ffi-rs-linux-x64-musl": {
@@ -1228,9 +1207,6 @@
 			],
 			"cpu": [
 				"x64"
-			],
-			"libc": [
-				"glibc"
 			],
 			"optional": true
 		},
