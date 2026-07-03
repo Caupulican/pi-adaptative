@@ -3,6 +3,7 @@ import { mkdir, mkdtemp, readFile, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { afterEach, describe, expect, it } from "vitest";
+import { ENV_AGENT_DIR } from "../src/config.ts";
 import {
 	appendRunRecord,
 	cleanupImprovementSandbox,
@@ -256,7 +257,7 @@ describe("improvement-loop persistent state", () => {
 		const dir = await tempDir();
 		const cwd = join(dir, "repo");
 		const agentDir = join(dir, "agent");
-		const envKey = "PI-ADAPTATIVE_CODING_AGENT_DIR";
+		const envKey = ENV_AGENT_DIR;
 		const previous = process.env[envKey];
 		process.env[envKey] = agentDir;
 		try {
@@ -324,7 +325,7 @@ describe("improvement-loop measurement runner", () => {
 		const dir = await tempDir();
 		const cwd = join(dir, "repo");
 		const agentDir = join(dir, "agent");
-		const envKey = "PI-ADAPTATIVE_CODING_AGENT_DIR";
+		const envKey = ENV_AGENT_DIR;
 		const previous = process.env[envKey];
 		process.env[envKey] = agentDir;
 		try {
@@ -481,7 +482,7 @@ describe("improvement-loop disposable git sandbox", () => {
 	it("exposes sandbox lifecycle through the improvement_loop tool", async () => {
 		const repo = await createTempGitRepo();
 		const agentDir = join(await tempDir(), "agent");
-		const envKey = "PI-ADAPTATIVE_CODING_AGENT_DIR";
+		const envKey = ENV_AGENT_DIR;
 		const previous = process.env[envKey];
 		process.env[envKey] = agentDir;
 		try {

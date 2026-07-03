@@ -1,5 +1,14 @@
 ## [Unreleased]
 
+### Fixed
+
+- Config-directory override environment variables are now POSIX-valid and actually usable. Because
+  `piConfig.name` is `pi-adaptative`, the derived names were `PI-ADAPTATIVE_CODING_AGENT_DIR` and
+  `PI-ADAPTATIVE_CODING_AGENT_SESSION_DIR` — but a hyphen is invalid in a shell variable name, so
+  `export PI-ADAPTATIVE_CODING_AGENT_DIR=…` is a parse error and the documented override (shown in
+  `pi --help`) silently could not be set. The names are now sanitized to
+  `PI_ADAPTATIVE_CODING_AGENT_DIR` and `PI_ADAPTATIVE_CODING_AGENT_SESSION_DIR`.
+
 ## [0.80.102] - 2026-07-03
 
 ### Fixed

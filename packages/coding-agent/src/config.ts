@@ -497,9 +497,24 @@ export const APP_TITLE: string = piConfigName ? APP_NAME : "π";
 export const CONFIG_DIR_NAME: string = pkg.piConfig?.configDir || ".pi";
 export const VERSION: string = pkg.version || "0.0.0";
 
-// e.g., PI_CODING_AGENT_DIR or TAU_CODING_AGENT_DIR
-export const ENV_AGENT_DIR = `${APP_NAME.toUpperCase()}_CODING_AGENT_DIR`;
-export const ENV_SESSION_DIR = `${APP_NAME.toUpperCase()}_CODING_AGENT_SESSION_DIR`;
+/**
+ * Build a POSIX-valid environment-variable name from an app name and a suffix.
+ *
+ * APP_NAME comes from `piConfig.name`, which may contain characters that are invalid in a shell
+ * env-var name — notably the hyphen in "pi-adaptative". A hyphenated name cannot be exported from
+ * a shell (`export PI-ADAPTATIVE_CODING_AGENT_DIR=…` is a parse error), which silently made the
+ * documented config-dir override unusable. Uppercase, collapse every character outside [A-Z0-9_]
+ * to "_", and prefix "_" if the result would start with a digit (names may not begin with one).
+ * e.g. "pi" -> PI_CODING_AGENT_DIR, "pi-adaptative" -> PI_ADAPTATIVE_CODING_AGENT_DIR.
+ */
+export function toEnvVarName(appName: string, suffix: string): string {
+	const prefix = appName.toUpperCase().replace(/[^A-Z0-9_]/g, "_");
+	const safePrefix = /^[0-9]/.test(prefix) ? `_${prefix}` : prefix;
+	return `${safePrefix}_${suffix}`;
+}
+
+export const ENV_AGENT_DIR = toEnvVarName(APP_NAME, "CODING_AGENT_DIR");
+export const ENV_SESSION_DIR = toEnvVarName(APP_NAME, "CODING_AGENT_SESSION_DIR");
 
 export function expandTildePath(path: string): string {
 	return normalizePath(path);

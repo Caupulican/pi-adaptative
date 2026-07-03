@@ -1,6 +1,7 @@
 import { existsSync, mkdirSync, readFileSync, rmSync, writeFileSync } from "fs";
 import { join, resolve } from "path";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
+import { ENV_AGENT_DIR } from "../src/config.ts";
 import { SettingsManager } from "../src/core/settings-manager.ts";
 import { InteractiveMode } from "../src/modes/interactive/interactive-mode.ts";
 import { initTheme } from "../src/modes/interactive/theme/theme.ts";
@@ -54,10 +55,8 @@ describe("Catalog, Install Resources, Config Backup & Restore", () => {
 		mkdirSync(sourceDir, { recursive: true });
 		mkdirSync(trustedSourceDir, { recursive: true });
 
-		// Set environment variable to redirect getAgentDir() in all potential variants
-		process.env.PI_CODING_AGENT_DIR = agentDir;
-		process.env.PI_ADAPTATIVE_CODING_AGENT_DIR = agentDir;
-		process.env["PI-ADAPTATIVE_CODING_AGENT_DIR"] = agentDir;
+		// Redirect getAgentDir() to the sandbox via the canonical (shell-valid) env-var name.
+		process.env[ENV_AGENT_DIR] = agentDir;
 
 		// Initialize theme for the test environment
 		initTheme("dark");
@@ -66,9 +65,7 @@ describe("Catalog, Install Resources, Config Backup & Restore", () => {
 	});
 
 	afterEach(() => {
-		delete process.env.PI_CODING_AGENT_DIR;
-		delete process.env.PI_ADAPTATIVE_CODING_AGENT_DIR;
-		delete process.env["PI-ADAPTATIVE_CODING_AGENT_DIR"];
+		delete process.env[ENV_AGENT_DIR];
 		if (existsSync(testDir)) {
 			rmSync(testDir, { recursive: true, force: true });
 		}

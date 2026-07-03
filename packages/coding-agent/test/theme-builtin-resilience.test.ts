@@ -2,6 +2,7 @@ import { mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "nod
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { afterEach, describe, expect, it, vi } from "vitest";
+import { ENV_AGENT_DIR } from "../src/config.ts";
 
 describe("built-in theme loading", () => {
 	let tempRoot: string | undefined;
@@ -38,7 +39,7 @@ describe("built-in theme loading", () => {
 		}
 
 		vi.stubEnv("PI_PACKAGE_DIR", packageDir);
-		vi.stubEnv("PI-ADAPTATIVE_CODING_AGENT_DIR", join(tempRoot, "agent"));
+		vi.stubEnv(ENV_AGENT_DIR, join(tempRoot, "agent"));
 		vi.resetModules();
 
 		const themeModule = await import("../src/modes/interactive/theme/theme.ts");
@@ -65,7 +66,7 @@ describe("built-in theme loading", () => {
 		);
 
 		vi.stubEnv("PI_PACKAGE_DIR", packageDir);
-		vi.stubEnv("PI-ADAPTATIVE_CODING_AGENT_DIR", join(tempRoot, "agent"));
+		vi.stubEnv(ENV_AGENT_DIR, join(tempRoot, "agent"));
 		vi.resetModules();
 
 		const themeModule = await import("../src/modes/interactive/theme/theme.ts");
