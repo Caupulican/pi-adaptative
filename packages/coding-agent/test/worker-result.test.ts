@@ -149,19 +149,35 @@ describe("Worker Result Validator (Phase 6)", () => {
 				expect(outcome.reasonCode).toBe("parent_review_required");
 			});
 
-			it("relative changed files resolve against the allowed root", () => {
+			it("relative changed files resolve against the session cwd (the runner's reporting baseline)", () => {
+				// applyWorkerActions reports changed files relative to the session cwd — the
+				// validator must use the SAME baseline, not the allowed root.
 				const outcome = validateWorkerResult({
 					request: testReq,
-					result: { ...baseResult, changedFiles: ["src/file.txt"] },
+					result: { ...baseResult, changedFiles: ["allowed/src/file.txt"] },
+					cwd: tempDir,
 				});
 				expect(outcome.outcome).toBe("ask-user");
 				expect(outcome.reasonCode).toBe("parent_review_required");
+			});
+
+			it("cwd-relative changed file under a denied path is blocked (no double-prefix dodge)", () => {
+				// Under the old per-root resolution, "allowed/denied/file.txt" double-prefixed to
+				// <root>/allowed/denied/file.txt, sailing past the deny rule.
+				const outcome = validateWorkerResult({
+					request: testReq,
+					result: { ...baseResult, changedFiles: ["allowed/denied/file.txt"] },
+					cwd: tempDir,
+				});
+				expect(outcome.outcome).toBe("block");
+				expect(outcome.reasonCode).toBe("changed_file_denied");
 			});
 
 			it("relative changed files cannot escape the allowed root", () => {
 				const outcome = validateWorkerResult({
 					request: testReq,
 					result: { ...baseResult, changedFiles: ["../outside/file.txt"] },
+					cwd: allowedRoot,
 				});
 				expect(outcome.outcome).toBe("block");
 				expect(outcome.reasonCode).toBe("changed_file_outside_scope");

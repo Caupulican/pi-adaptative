@@ -11,7 +11,7 @@ import type { WriteStream } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { stripAnsi } from "../utils/ansi.ts";
-import { createSafeWriteStream } from "../utils/safe-write-stream.ts";
+import { createSafeWriteStream, endWriteStream } from "../utils/safe-write-stream.ts";
 import { sanitizeBinaryOutput } from "../utils/shell.ts";
 import type { BashOperations } from "./tools/bash.ts";
 import { classifyGitCommand, executeFilteredGit } from "./tools/git-filter.ts";
@@ -74,10 +74,16 @@ export async function executeBashWithOperations(
 				let fullOutputPath = res.fullOutputPath;
 				if (fullOutputPath === undefined && rawBytes.length > DEFAULT_MAX_BYTES) {
 					const id = randomBytes(8).toString("hex");
-					fullOutputPath = join(tmpdir(), `pi-bash-${id}.log`);
-					const tempFileStream = createSafeWriteStream(fullOutputPath);
+					const spillPath = join(tmpdir(), `pi-bash-${id}.log`);
+					fullOutputPath = spillPath;
+					// On stream failure (e.g. disk full), drop the advertised path instead of
+					// pointing at a partial/missing file.
+					const tempFileStream = createSafeWriteStream(spillPath, () => {
+						fullOutputPath = undefined;
+					});
 					tempFileStream.write(rawBytes);
-					tempFileStream.end();
+					// Await the flush so the returned path points at a COMPLETE file, not one mid-write.
+					await endWriteStream(tempFileStream);
 				}
 				options.onChunk?.(res.output);
 				return {
@@ -161,7 +167,9 @@ export async function executeBashWithOperations(
 			ensureTempFile();
 		}
 		if (tempFileStream) {
-			tempFileStream.end();
+			// Await the flush so fullOutputPath refers to a fully-written file on return, not one still
+			// draining its buffer — otherwise a fast reader can see partial/empty content.
+			await endWriteStream(tempFileStream);
 		}
 		const cancelled = options?.signal?.aborted ?? false;
 
@@ -181,7 +189,7 @@ export async function executeBashWithOperations(
 				ensureTempFile();
 			}
 			if (tempFileStream) {
-				tempFileStream.end();
+				await endWriteStream(tempFileStream);
 			}
 			return {
 				output: truncationResult.truncated ? truncationResult.content : fullOutput,
@@ -193,7 +201,7 @@ export async function executeBashWithOperations(
 		}
 
 		if (tempFileStream) {
-			tempFileStream.end();
+			await endWriteStream(tempFileStream);
 		}
 
 		throw err;

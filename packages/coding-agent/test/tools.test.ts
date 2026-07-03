@@ -739,11 +739,8 @@ describe("Coding Agent Tools", () => {
 			expect(output).toMatch(/\[Showing lines \d+-\d+ of \d+\. Full output: /);
 			expect(output).not.toContain("Full output: undefined");
 
-			for (let i = 0; i < 20 && (!fullOutputPath || !existsSync(fullOutputPath)); i++) {
-				await new Promise((resolve) => setTimeout(resolve, 10));
-			}
-
-			expect(fullOutputPath).toBeDefined();
+			// No poll/sleep: the temp file is written and closed before execute resolves, so it must be
+			// complete the instant we read it.
 			expect(existsSync(fullOutputPath!)).toBe(true);
 			const fullOutput = readFileSync(fullOutputPath!, "utf-8");
 			expect(fullOutput).toContain("1\n2\n3");
@@ -757,11 +754,8 @@ describe("Coding Agent Tools", () => {
 			expect(result.truncated).toBe(true);
 			expect(fullOutputPath).toBeDefined();
 
-			for (let i = 0; i < 20 && (!fullOutputPath || !existsSync(fullOutputPath)); i++) {
-				await new Promise((resolve) => setTimeout(resolve, 10));
-			}
-
-			expect(fullOutputPath).toBeDefined();
+			// No poll/sleep: the returned path must point at a fully-flushed file the instant execute
+			// resolves. (Reading immediately is the regression guard for the unawaited-stream-flush race.)
 			expect(existsSync(fullOutputPath!)).toBe(true);
 			const fullOutput = readFileSync(fullOutputPath!, "utf-8");
 			expect(fullOutput).toContain("1\n2\n3");

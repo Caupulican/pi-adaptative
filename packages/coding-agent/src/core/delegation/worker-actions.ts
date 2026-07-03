@@ -55,22 +55,11 @@ export interface AppliedActionsReport {
 	failed: Array<{ path: string; reason: string }>;
 }
 
-export interface WorkerActionFs {
-	existsSync: typeof existsSync;
-	readFileSync: (path: string, encoding: "utf-8") => string;
-	writeFileSync: (path: string, content: string, encoding: "utf-8") => void;
-	mkdirSync: (path: string, options: { recursive: true }) => unknown;
-}
-
-const realFs: WorkerActionFs = { existsSync, readFileSync, writeFileSync, mkdirSync };
-
 export function applyWorkerActions(args: {
 	actions: readonly WorkerAction[];
 	envelope: CapabilityEnvelope;
 	cwd: string;
-	fs?: WorkerActionFs;
 }): AppliedActionsReport {
-	const fileSystem = args.fs ?? realFs;
 	const report: AppliedActionsReport = { changedFiles: [], refused: [], failed: [] };
 	for (const action of args.actions) {
 		if (!isPathWithinEnvelope(args.envelope, action.path, args.cwd)) {
@@ -81,19 +70,19 @@ export function applyWorkerActions(args: {
 		const relativePath = relative(args.cwd, target);
 		try {
 			if (action.op === "write") {
-				fileSystem.mkdirSync(dirname(target), { recursive: true });
-				fileSystem.writeFileSync(target, action.content ?? "", "utf-8");
+				mkdirSync(dirname(target), { recursive: true });
+				writeFileSync(target, action.content ?? "", "utf-8");
 			} else {
-				if (!fileSystem.existsSync(target)) {
+				if (!existsSync(target)) {
 					report.failed.push({ path: action.path, reason: "file does not exist" });
 					continue;
 				}
-				const current = fileSystem.readFileSync(target, "utf-8");
+				const current = readFileSync(target, "utf-8");
 				if (!action.old || !current.includes(action.old)) {
 					report.failed.push({ path: action.path, reason: "edit old-text not found in file" });
 					continue;
 				}
-				fileSystem.writeFileSync(target, current.replace(action.old, action.new ?? ""), "utf-8");
+				writeFileSync(target, current.replace(action.old, action.new ?? ""), "utf-8");
 			}
 			if (!report.changedFiles.includes(relativePath)) report.changedFiles.push(relativePath);
 		} catch (error) {

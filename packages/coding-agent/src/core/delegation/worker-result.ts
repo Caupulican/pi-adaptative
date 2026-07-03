@@ -59,8 +59,18 @@ export function requiresParentReview(result: WorkerResult): boolean {
 	return false;
 }
 
-export function validateWorkerResult(args: { request: WorkerRequest; result: WorkerResult }): GateOutcome {
+export function validateWorkerResult(args: {
+	request: WorkerRequest;
+	result: WorkerResult;
+	/**
+	 * Baseline for relative paths — BOTH the runner's cwd-relative `changedFiles` and the
+	 * envelope's possibly-relative path scopes resolve against this. Defaults to process.cwd()
+	 * for callers whose session cwd is the process cwd.
+	 */
+	cwd?: string;
+}): GateOutcome {
 	const { request, result } = args;
+	const baseDir = args.cwd ?? process.cwd();
 
 	if (result.requestId !== request.id) {
 		return {
@@ -110,17 +120,22 @@ export function validateWorkerResult(args: { request: WorkerRequest; result: Wor
 			};
 		}
 
+		// The runner reports changed files relative to the session cwd — resolve file and scope
+		// roots against the SAME baseline. Resolving per-root double-prefixed nested names and
+		// let a denied subtree slip past the deny rule.
+		const resolvedAllowed = request.envelope.allowedPaths.map((p) => path.resolve(baseDir, p));
+		const resolvedDenied = request.envelope.deniedPaths?.map((p) => path.resolve(baseDir, p));
 		for (const changedFile of result.changedFiles) {
 			let isInsideAny = false;
 			let isDenied = false;
 
-			for (const root of request.envelope.allowedPaths) {
-				const scopedChangedFile = path.isAbsolute(changedFile) ? changedFile : path.resolve(root, changedFile);
+			const scopedChangedFile = path.resolve(baseDir, changedFile);
+			for (const root of resolvedAllowed) {
 				const decision = checkPathScope(
 					{
 						root,
-						allowedPaths: request.envelope.allowedPaths,
-						deniedPaths: request.envelope.deniedPaths,
+						allowedPaths: resolvedAllowed,
+						deniedPaths: resolvedDenied,
 					},
 					scopedChangedFile,
 				);

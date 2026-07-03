@@ -60,6 +60,9 @@ export interface WorkerRunnerOptions {
 	 * runner applies the worker's structured actions through the envelope path scope; refusals
 	 * and failures become blockers, never silent drops. */
 	applyActions?: (actions: readonly WorkerAction[]) => AppliedActionsReport;
+	/** Session cwd — the baseline for relative changed-file and envelope paths in parent
+	 * validation. Defaults to process.cwd(). */
+	cwd?: string;
 }
 
 export interface WorkerRunOutcome {
@@ -162,8 +165,9 @@ function finishOutcome(args: {
 	laneStatus: LaneTerminalStatus;
 	reasonCode: string;
 	costUsd: number;
+	cwd?: string;
 }): WorkerRunOutcome {
-	const acceptance = validateWorkerResult({ request: args.request, result: args.result });
+	const acceptance = validateWorkerResult({ request: args.request, result: args.result, cwd: args.cwd });
 	return {
 		result: args.result,
 		acceptance,
@@ -204,6 +208,7 @@ export async function runWorker(options: WorkerRunnerOptions): Promise<WorkerRun
 		const cancelled = bounded.failure.status === "canceled" || bounded.failure.status === "timeout";
 		return finishOutcome({
 			request: options.request,
+			cwd: options.cwd,
 			result: {
 				...baseResult,
 				status: cancelled ? "cancelled" : "failed",
@@ -219,6 +224,7 @@ export async function runWorker(options: WorkerRunnerOptions): Promise<WorkerRun
 	if (!completion || completion.stopReason === "error" || completion.stopReason === "aborted") {
 		return finishOutcome({
 			request: options.request,
+			cwd: options.cwd,
 			result: { ...baseResult, status: "failed", summary: "Worker model call failed." },
 			laneStatus: "failed",
 			reasonCode: "model_error",
@@ -230,6 +236,7 @@ export async function runWorker(options: WorkerRunnerOptions): Promise<WorkerRun
 	if (!parsed) {
 		return finishOutcome({
 			request: options.request,
+			cwd: options.cwd,
 			result: { ...baseResult, status: "failed", summary: "Worker output was not valid structured JSON." },
 			laneStatus: "failed",
 			reasonCode: "unparseable_output",
@@ -267,6 +274,7 @@ export async function runWorker(options: WorkerRunnerOptions): Promise<WorkerRun
 	if (result.status === "blocked") {
 		return finishOutcome({
 			request: options.request,
+			cwd: options.cwd,
 			result,
 			laneStatus: "failed",
 			reasonCode: "worker_blocked",
@@ -277,6 +285,7 @@ export async function runWorker(options: WorkerRunnerOptions): Promise<WorkerRun
 	const overBudget = options.maxUsd > 0 && costUsd > options.maxUsd;
 	return finishOutcome({
 		request: options.request,
+		cwd: options.cwd,
 		result,
 		laneStatus: overBudget ? "budget_exhausted" : "succeeded",
 		reasonCode: overBudget ? "cost_budget_exceeded" : "worker_completed",

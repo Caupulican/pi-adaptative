@@ -1,5 +1,6 @@
 import { isAbsolute, relative, resolve, sep } from "node:path";
 import type { CapabilityEnvelope } from "./contracts.ts";
+import { safeRealpathSync } from "./path-scope.ts";
 
 /**
  * Tool-level envelope enforcement (G2 prerequisite for code-writing workers): the capability
@@ -43,15 +44,35 @@ function isWithinRoot(target: string, root: string): boolean {
 /**
  * Deny wins over allow; an empty/absent allow list means "no positive scope restriction"
  * (only denies apply) — mirroring the resource-profile filter semantics.
+ *
+ * Both the target and every scope root are resolved through the real filesystem
+ * (symlinks expanded in the existing prefix) before comparison: a pre-existing symlink
+ * under an allowed root cannot smuggle a write outside the scope, and a shortcut into a
+ * denied subtree is still denied. An unresolvable target fails closed.
  */
 export function isPathWithinEnvelope(envelope: CapabilityEnvelope, rawPath: string, cwd: string): boolean {
-	const target = resolve(cwd, rawPath);
+	let target: string;
+	try {
+		target = safeRealpathSync(resolve(cwd, rawPath));
+	} catch {
+		return false;
+	}
 	for (const denied of envelope.deniedPaths ?? []) {
-		if (isWithinRoot(target, resolve(cwd, denied))) return false;
+		try {
+			if (isWithinRoot(target, safeRealpathSync(resolve(cwd, denied)))) return false;
+		} catch {
+			// Mirror checkPathScope: an unresolvable deny root cannot match anything.
+		}
 	}
 	const allowed = envelope.allowedPaths ?? [];
 	if (allowed.length === 0) return true;
-	return allowed.some((root) => isWithinRoot(target, resolve(cwd, root)));
+	return allowed.some((root) => {
+		try {
+			return isWithinRoot(target, safeRealpathSync(resolve(cwd, root)));
+		} catch {
+			return false;
+		}
+	});
 }
 
 export interface EnvelopeScopedTool {

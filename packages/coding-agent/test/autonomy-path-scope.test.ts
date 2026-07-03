@@ -91,6 +91,29 @@ describe("path-scope", () => {
 			expect(decision.kind).toBe("inside");
 		});
 
+		it("resolves a dangling symlink escaping the root as outside, not lexically inside", () => {
+			// evil-link lives inside allowedRoot but points at a file that does not exist (dangling).
+			// existsSync follows symlinks, so it reports false for a dangling link — the leaf must
+			// still be dereferenced instead of joined onto the parent as a literal path segment.
+			const target = path.join(outsideRoot, "secret.txt");
+			const link = path.join(allowedRoot, "evil-link");
+			fs.symlinkSync(target, link);
+
+			const decision = checkPathScope({ root: allowedRoot }, link);
+			expect(decision.kind).toBe("outside");
+		});
+
+		it("maps a symlink loop to outside/unresolvable instead of resolving it lexically", () => {
+			const linkA = path.join(allowedRoot, "loop-a");
+			const linkB = path.join(allowedRoot, "loop-b");
+			fs.symlinkSync(linkB, linkA);
+			fs.symlinkSync(linkA, linkB);
+
+			const decision = checkPathScope({ root: allowedRoot }, linkA);
+			expect(decision.kind).toBe("outside");
+			expect(decision.reasonCode).toBe("unresolvable_target");
+		});
+
 		it("respects allowedPaths within root", () => {
 			const subdir1 = path.join(allowedRoot, "sub1");
 			const subdir2 = path.join(allowedRoot, "sub2");
@@ -149,6 +172,33 @@ describe("path-scope", () => {
 			expect(safeRealpathSync(targetFile)).toBe(
 				path.join(fs.realpathSync(allowedRoot), "a", "b", "c", "non-existent.txt"),
 			);
+		});
+
+		it("resolves a dangling leaf symlink to its target's resolved path, not its own lexical path", () => {
+			const target = path.join(outsideRoot, "secret.txt"); // never created — dangling
+			const link = path.join(allowedRoot, "evil-link");
+			fs.symlinkSync(target, link);
+
+			expect(safeRealpathSync(link)).toBe(path.join(fs.realpathSync(outsideRoot), "secret.txt"));
+		});
+
+		it("resolves a chain of dangling symlinks to the final target's resolved path", () => {
+			const finalTarget = path.join(outsideRoot, "secret2.txt"); // never created — dangling
+			const link2 = path.join(allowedRoot, "link2");
+			const link1 = path.join(allowedRoot, "link1");
+			fs.symlinkSync(finalTarget, link2);
+			fs.symlinkSync(link2, link1);
+
+			expect(safeRealpathSync(link1)).toBe(path.join(fs.realpathSync(outsideRoot), "secret2.txt"));
+		});
+
+		it("throws instead of looping forever on a symlink cycle", () => {
+			const linkA = path.join(allowedRoot, "loop-a");
+			const linkB = path.join(allowedRoot, "loop-b");
+			fs.symlinkSync(linkB, linkA);
+			fs.symlinkSync(linkA, linkB);
+
+			expect(() => safeRealpathSync(linkA)).toThrow();
 		});
 	});
 });
