@@ -2,6 +2,14 @@
 
 ### Added
 
+- Skills may declare a `thinking` level in their frontmatter (parsed and validated on load, invalid
+  values ignored), so a task-specific skill can carry its intended reasoning depth. The parsed value
+  is available wherever `Skill` objects flow; turn-scoped application of an active skill's thinking
+  is a follow-up (an extension can already apply it via the existing `ctx.setThinkingLevel()` hook).
+  Complements profile-level thinking, which is applied to the session across CLI startup, SDK
+  creation, `/profile` switch, and `/reload` (explicit `--thinking` still wins) — now covered by
+  tests, including its composition with per-tier router thinking (the router override wins for the
+  routed turn and restores the profile level after).
 - Per-tier thinking level for the model router: `modelRouter` now accepts `cheapThinking`,
   `mediumThinking`, `expensiveThinking`, `executorThinking`, and `judgeThinking`. A routed turn
   applies the configured thinking level for its tier (clamped to the routed model), so a

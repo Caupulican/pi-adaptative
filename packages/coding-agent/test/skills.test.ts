@@ -219,6 +219,38 @@ describe("skills", () => {
 			expect(skills).toHaveLength(1);
 			expect(skills[0].disableModelInvocation).toBe(false);
 		});
+
+		it("should parse a thinking frontmatter field", () => {
+			const { skills } = loadSkillsFromDir({
+				dir: join(fixturesDir, "thinking-level"),
+				source: "test",
+			});
+
+			expect(skills).toHaveLength(1);
+			expect(skills[0].name).toBe("thinking-level");
+			expect(skills[0].thinking).toBe("high");
+		});
+
+		it("should default thinking to undefined when not specified", () => {
+			const { skills } = loadSkillsFromDir({
+				dir: join(fixturesDir, "valid-skill"),
+				source: "test",
+			});
+
+			expect(skills).toHaveLength(1);
+			expect(skills[0].thinking).toBeUndefined();
+		});
+
+		it("should ignore an unrecognized thinking value rather than reject the skill", () => {
+			const { skills, diagnostics } = loadSkillsFromDir({
+				dir: join(fixturesDir, "thinking-level-invalid"),
+				source: "test",
+			});
+
+			expect(skills).toHaveLength(1);
+			expect(skills[0].thinking).toBeUndefined();
+			expect(diagnostics).toHaveLength(0);
+		});
 	});
 
 	describe("formatSkillsForPrompt", () => {

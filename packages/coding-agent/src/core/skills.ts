@@ -1,3 +1,4 @@
+import type { ThinkingLevel } from "@caupulican/pi-agent-core";
 import { existsSync, readdirSync, readFileSync, statSync } from "fs";
 import ignore from "ignore";
 import { basename, dirname, join, relative, resolve, sep } from "path";
@@ -16,6 +17,14 @@ const MAX_NAME_LENGTH = 64;
 const MAX_DESCRIPTION_LENGTH = 1024;
 
 const IGNORE_FILE_NAMES = [".gitignore", ".ignore", ".fdignore"];
+
+// Kept local rather than imported from settings-manager.ts's ThinkingLevel validation: that module
+// already imports validateSkillName FROM this file, so importing back would cycle. The literal set
+// is small and stable (mirrors settings-manager.ts's own VALID_THINKING_LEVELS).
+const VALID_SKILL_THINKING_LEVELS = ["off", "minimal", "low", "medium", "high", "xhigh"] as const;
+function isSkillThinkingLevel(value: unknown): value is ThinkingLevel {
+	return typeof value === "string" && (VALID_SKILL_THINKING_LEVELS as readonly string[]).includes(value);
+}
 
 type IgnoreMatcher = ReturnType<typeof ignore>;
 
@@ -70,6 +79,8 @@ export interface SkillFrontmatter {
 	name?: string;
 	description?: string;
 	"disable-model-invocation"?: boolean;
+	/** Optional thinking-level hint (R1 follow-up); see Skill.thinking. */
+	thinking?: string;
 	[key: string]: unknown;
 }
 
@@ -80,6 +91,17 @@ export interface Skill {
 	baseDir: string;
 	sourceInfo: SourceInfo;
 	disableModelInvocation: boolean;
+	/**
+	 * Optional thinking-level hint parsed from frontmatter (R1 follow-up: skill-surfaced thinking
+	 * governance, alongside resource-profile thinking). Core only parses and surfaces this value —
+	 * nothing in pi-adaptative core applies it to a session's thinking level yet. Unlike an active
+	 * resource profile (a persistent "situation", see settings-manager.ts's activeResourceProfile)
+	 * or a routed turn (bracketed by a try/finally swap/restore, see agent-session.ts's
+	 * _runAgentPromptWithModelRouter), a skill has no session-lifecycle hook marking when it starts
+	 * or stops governing a turn, so applying this is left to the consumer (e.g. a skill-router
+	 * extension) via the existing ctx.setThinkingLevel() extension API.
+	 */
+	thinking?: ThinkingLevel;
 }
 
 export interface LoadSkillsResult {
@@ -340,6 +362,7 @@ function loadSkillFromFile(
 				baseDir: skillDir,
 				sourceInfo: createSkillSourceInfo(filePath, skillDir, source),
 				disableModelInvocation: frontmatter["disable-model-invocation"] === true,
+				thinking: isSkillThinkingLevel(frontmatter.thinking) ? frontmatter.thinking : undefined,
 			},
 			diagnostics,
 		};

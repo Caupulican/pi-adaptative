@@ -87,4 +87,53 @@ describe("AgentSession reload re-applies the active profile's model/thinking", (
 
 		session.dispose();
 	});
+
+	it("switches the thinking level on reload when the active profile's thinking changes (no explicit flag)", async () => {
+		writeProfileModel("anthropic/claude-haiku-4-5", "low");
+		const settingsManager = SettingsManager.create(tempDir, agentDir);
+		const resourceLoader = new DefaultResourceLoader({ cwd: tempDir, agentDir, settingsManager });
+		await resourceLoader.reload();
+
+		// No explicit thinking passed → profile thinking applies at startup.
+		const { session } = await createAgentSession({
+			cwd: tempDir,
+			agentDir,
+			settingsManager,
+			sessionManager: SessionManager.inMemory(),
+			resourceLoader,
+		});
+		expect(session.thinkingLevel).toBe("low");
+
+		// Live edit: change the profile's thinking (model stays put), reload.
+		writeProfileModel("anthropic/claude-haiku-4-5", "high");
+		await session.reload();
+		expect(session.thinkingLevel).toBe("high");
+
+		session.dispose();
+	});
+
+	it("preserves an explicit launch thinking level across reload even if the profile differs", async () => {
+		writeProfileModel("anthropic/claude-haiku-4-5", "low");
+		const settingsManager = SettingsManager.create(tempDir, agentDir);
+		const resourceLoader = new DefaultResourceLoader({ cwd: tempDir, agentDir, settingsManager });
+		await resourceLoader.reload();
+
+		// Explicit thinking wins over the profile and must survive reload.
+		const { session } = await createAgentSession({
+			cwd: tempDir,
+			agentDir,
+			thinkingLevel: "medium",
+			isExplicitThinking: true,
+			settingsManager,
+			sessionManager: SessionManager.inMemory(),
+			resourceLoader,
+		});
+		expect(session.thinkingLevel).toBe("medium");
+
+		writeProfileModel("anthropic/claude-haiku-4-5", "high");
+		await session.reload();
+		expect(session.thinkingLevel).toBe("medium");
+
+		session.dispose();
+	});
 });
