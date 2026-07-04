@@ -73,7 +73,6 @@ import {
 	getSupportedThinkingLevels,
 	isContextOverflow,
 	modelsAreEqual,
-	resetApiProviders,
 	streamSimple,
 } from "@caupulican/pi-ai";
 import { getAgentDir, getSessionsDir } from "../config.ts";
@@ -126,36 +125,32 @@ import { appendWorkerResultSnapshot, getWorkerResultSnapshots } from "./delegati
 import type { WorkerRunOutcome } from "./delegation/worker-runner.ts";
 import { exportSessionToHtml, type ToolHtmlRenderer } from "./export-html/index.ts";
 import { createToolHtmlRenderer } from "./export-html/tool-renderer.ts";
-import { createCoreDiagnosticsToolDefinitions } from "./extensions/builtin.ts";
-import {
-	type ContextUsage,
-	type Extension,
-	type ExtensionCommandContextActions,
-	type ExtensionContext,
-	type ExtensionErrorListener,
+import type {
+	ContextUsage,
+	Extension,
+	ExtensionCommandContextActions,
+	ExtensionContext,
+	ExtensionErrorListener,
 	ExtensionRunner,
-	type ExtensionUIContext,
-	type InputSource,
-	type MessageEndEvent,
-	type MessageStartEvent,
-	type MessageUpdateEvent,
-	type ReplacedSessionContext,
-	type SessionBeforeCompactResult,
-	type SessionBeforeTreeResult,
-	type SessionStartEvent,
-	type ShutdownHandler,
-	type ToolDefinition,
-	type ToolExecutionEndEvent,
-	type ToolExecutionStartEvent,
-	type ToolExecutionUpdateEvent,
-	type ToolInfo,
-	type TreePreparation,
-	type TurnEndEvent,
-	type TurnStartEvent,
-	wrapRegisteredTools,
+	ExtensionUIContext,
+	InputSource,
+	MessageEndEvent,
+	MessageStartEvent,
+	MessageUpdateEvent,
+	ReplacedSessionContext,
+	SessionBeforeCompactResult,
+	SessionBeforeTreeResult,
+	SessionStartEvent,
+	ShutdownHandler,
+	ToolDefinition,
+	ToolExecutionEndEvent,
+	ToolExecutionStartEvent,
+	ToolExecutionUpdateEvent,
+	ToolInfo,
+	TreePreparation,
+	TurnEndEvent,
+	TurnStartEvent,
 } from "./extensions/index.ts";
-import { disposeExtensionEventSubscriptions } from "./extensions/loader.ts";
-import { emitSessionShutdownEvent } from "./extensions/runner.ts";
 import { type ChannelProvider, GatewayRegistry, type JobSchedulerProvider } from "./gateways/channel-provider.ts";
 import {
 	buildGoalContinuationPrompt,
@@ -215,6 +210,7 @@ import {
 import { collectWorkspaceSources } from "./research/workspace-collector.ts";
 import type { ResourceExtensionPaths, ResourceLoader } from "./resource-loader.ts";
 import { stripResourceProfileBlocks } from "./resource-profile-blocks.ts";
+import { RuntimeBuilder } from "./runtime-builder.ts";
 import { classifyToolTrust, wrapUntrustedText } from "./security/untrusted-boundary.ts";
 import {
 	matchesResourceProfilePattern,
@@ -222,21 +218,8 @@ import {
 	type SettingsManager,
 } from "./settings-manager.ts";
 import type { SlashCommandInfo } from "./slash-commands.ts";
-import { createSyntheticSourceInfo, type SourceInfo } from "./source-info.ts";
 import { SystemPromptBuilder } from "./system-prompt-builder.ts";
-import {
-	buildReflexUserPrompt,
-	parseReflexPlan,
-	REFLEX_INTERPRETER_SYSTEM_PROMPT,
-} from "./toolkit/reflex-interpreter.ts";
-import { executeToolkitScript } from "./toolkit/script-runner.ts";
 import { type BashOperations, createLocalBashOperations } from "./tools/bash.ts";
-import { createDelegateToolDefinition } from "./tools/delegate.ts";
-import { createGoalToolDefinition } from "./tools/goal.ts";
-import { createAllToolDefinitions } from "./tools/index.ts";
-import { createModelFitnessToolDefinition } from "./tools/model-fitness.ts";
-import { createRunToolkitScriptToolDefinition } from "./tools/run-toolkit-script.ts";
-import { createToolDefinitionFromAgentTool } from "./tools/tool-definition-wrapper.ts";
 
 // ============================================================================
 // Stream-idle watchdog wiring
@@ -568,23 +551,6 @@ export interface GoalContinuationLoopResult {
 	finalSnapshot: GoalRuntimeSnapshot;
 }
 
-interface ToolDefinitionEntry {
-	definition: ToolDefinition;
-	sourceInfo: SourceInfo;
-}
-
-interface ReloadRuntimeSnapshot {
-	extensionRunner: ExtensionRunner;
-	baseToolDefinitions: Map<string, ToolDefinition>;
-	toolRegistry: Map<string, AgentTool>;
-	toolDefinitions: Map<string, ToolDefinitionEntry>;
-	toolPromptSnippets: Map<string, string>;
-	toolPromptGuidelines: Map<string, string[]>;
-	agentTools: AgentTool[];
-	agentSystemPrompt: string;
-	baseSystemPrompt: string;
-}
-
 // ============================================================================
 // Constants
 // ============================================================================
@@ -652,7 +618,6 @@ export class AgentSession {
 
 	private _resourceLoader: ResourceLoader;
 	private _customTools: ToolDefinition[];
-	private _baseToolDefinitions: Map<string, ToolDefinition> = new Map();
 	private _cwd: string;
 	private _agentDir: string;
 	private _collectWorkspaceSources: typeof collectWorkspaceSources;
@@ -718,11 +683,10 @@ export class AgentSession {
 	// Model registry for API key resolution
 	private _modelRegistry: ModelRegistry;
 
-	// Tool registry for extension getTools/setTools
-	private _toolRegistry: Map<string, AgentTool> = new Map();
-	private _toolDefinitions: Map<string, ToolDefinitionEntry> = new Map();
-	private _toolPromptSnippets: Map<string, string> = new Map();
-	private _toolPromptGuidelines: Map<string, string[]> = new Map();
+	/** Tool-registry assembly + the self-modification-safe extension reload (see runtime-builder.ts);
+	 * owns the base/wrapped tool definitions, the live tool registry, and the per-tool prompt
+	 * snippet/guideline maps. The reload snapshot spans host/agent state reached through its deps. */
+	private readonly _runtimeBuilder: RuntimeBuilder;
 
 	// Base system prompt (without extension appends) - used to apply fresh appends each turn.
 	// The paired _baseSystemPromptOptions and their construction live in SystemPromptBuilder.
@@ -787,9 +751,9 @@ export class AgentSession {
 			getSettingsManager: () => this.settingsManager,
 			getResourceLoader: () => this._resourceLoader,
 			getMemoryManager: () => this._memory.getMemoryManager(),
-			hasTool: (name) => this._toolRegistry.has(name),
-			getToolPromptSnippet: (name) => this._toolPromptSnippets.get(name),
-			getToolPromptGuidelines: (name) => this._toolPromptGuidelines.get(name),
+			hasTool: (name) => this._runtimeBuilder.hasTool(name),
+			getToolPromptSnippet: (name) => this._runtimeBuilder.getToolPromptSnippet(name),
+			getToolPromptGuidelines: (name) => this._runtimeBuilder.getToolPromptGuidelines(name),
 			getActiveExtensions: () => this._extensionRunner.activeExtensions,
 		});
 		this._autonomyTelemetry = new AutonomyTelemetry({
@@ -884,6 +848,73 @@ export class AgentSession {
 		this._isChildSession = config.isChildSession ?? process.env.PI_CHILD_SESSION === "1";
 		this._baseToolsOverride = config.baseToolsOverride;
 		this._sessionStartEvent = config.sessionStartEvent ?? { type: "session_start", reason: "startup" };
+		this._runtimeBuilder = new RuntimeBuilder({
+			getAgent: () => this.agent,
+			getCwd: () => this._cwd,
+			getSessionManager: () => this.sessionManager,
+			getSettingsManager: () => this.settingsManager,
+			getModelRegistry: () => this._modelRegistry,
+			getResourceLoader: () => this._resourceLoader,
+			getExtensionRunner: () => this._extensionRunner,
+			setExtensionRunner: (runner) => {
+				this._extensionRunner = runner;
+				if (this._extensionRunnerRef) {
+					this._extensionRunnerRef.current = runner;
+				}
+			},
+			getBaseSystemPrompt: () => this._baseSystemPrompt,
+			setBaseSystemPrompt: (prompt) => {
+				this._baseSystemPrompt = prompt;
+			},
+			getCustomTools: () => this._customTools,
+			getBaseToolsOverride: () => this._baseToolsOverride,
+			getRequestedActiveToolNames: () => this._requestedActiveToolNames,
+			setRequestedActiveToolNames: (names) => {
+				this._requestedActiveToolNames = names;
+			},
+			getToolProfileFilter: () => this._toolProfileFilter,
+			setToolProfileFilter: (filter) => {
+				this._toolProfileFilter = filter;
+			},
+			getAllowedToolNames: () => this._allowedToolNames,
+			getExcludedToolNames: () => this._excludedToolNames,
+			deriveToolProfileFilter: () => this._deriveToolProfileFilter(),
+			isToolOrCommandAllowedByProfile: (name) => this._isToolOrCommandAllowedByProfile(name),
+			filterExtensionsForRuntime: (extensions) => this._filterExtensionsForRuntime(extensions),
+			setUnboundToolGrantWarnings: (warnings) => {
+				this._unboundToolGrantWarnings = warnings;
+			},
+			getActiveToolNames: () => this.getActiveToolNames(),
+			setActiveToolsByName: (toolNames) => this.setActiveToolsByName(toolNames),
+			normalizePromptSnippet: (text) => this._normalizePromptSnippet(text),
+			normalizePromptGuidelines: (guidelines) => this._normalizePromptGuidelines(guidelines),
+			bindExtensionCore: (runner) => this._bindExtensionCore(runner),
+			applyExtensionBindings: (runner) => this._applyExtensionBindings(runner),
+			extendResourcesFromExtensions: (reason) => this.extendResourcesFromExtensions(reason),
+			reapplyActiveProfileModelSettings: () => this._reapplyActiveProfileModelSettings(),
+			notifyExtensionsChanged: () => this._notifyExtensionsChanged(),
+			getToolArtifactStore: () => this._getToolArtifactStore(),
+			getMemoryManager: () => this._memory.getMemoryManager(),
+			getMemoryAuditDiagnostics: () => this._memory.getMemoryAuditDiagnostics(),
+			clearPendingMemoryProviders: () => this._memory.clearPendingProviders(),
+			initializeMemory: () => this._memory.initialize(),
+			getGoalStateSnapshot: () => this.getGoalStateSnapshot(),
+			saveGoalStateSnapshot: (state) => this.saveGoalStateSnapshot(state),
+			getContextGcReport: (messages) => this.getContextGcReport(messages),
+			runWorkerDelegationOnce: (request) => this.runWorkerDelegationOnce(request),
+			runModelFitness: (args) => this.runModelFitness(args),
+			resolveCurationModelIfFit: () => this._resolveCurationModelIfFit(),
+			runIsolatedCompletion: (opts) => this.runIsolatedCompletion(opts),
+			addSpawnedUsage: (usage, opts) => this.addSpawnedUsage(usage, opts),
+			createAgentContextSnapshot: () => this._createAgentContextSnapshot(),
+			getContextUsage: () => this.getContextUsage(),
+			isStreaming: () => this.isStreaming,
+			isCompacting: () => this.isCompacting,
+			getExtensionUIContext: () => this._extensionUIContext,
+			getExtensionCommandContextActions: () => this._extensionCommandContextActions,
+			getExtensionShutdownHandler: () => this._extensionShutdownHandler,
+			getExtensionErrorListener: () => this._extensionErrorListener,
+		});
 
 		// Always subscribe to agent events for internal handling
 		// (session persistence, extensions, auto-compaction, retry logic)
@@ -892,7 +923,7 @@ export class AgentSession {
 		this._installAgentContextTransform();
 		this._installAgentTurnRefresh();
 
-		this._buildRuntime({
+		this._runtimeBuilder.buildRuntime({
 			activeToolNames: this._initialActiveToolNames,
 			includeAllExtensionTools: true,
 		});
@@ -1914,17 +1945,11 @@ export class AgentSession {
 	 * Get all configured tools with name, description, parameter schema, prompt guidelines, and source metadata.
 	 */
 	getAllTools(): ToolInfo[] {
-		return Array.from(this._toolDefinitions.values()).map(({ definition, sourceInfo }) => ({
-			name: definition.name,
-			description: definition.description,
-			parameters: definition.parameters,
-			promptGuidelines: definition.promptGuidelines,
-			sourceInfo,
-		}));
+		return this._runtimeBuilder.getAllTools();
 	}
 
 	getToolDefinition(name: string): ToolDefinition | undefined {
-		return this._toolDefinitions.get(name)?.definition;
+		return this._runtimeBuilder.getToolDefinition(name);
 	}
 
 	/**
@@ -1955,7 +1980,7 @@ export class AgentSession {
 		const seen = new Set<string>();
 		const addIfRegistered = (name: string): void => {
 			if (seen.has(name)) return;
-			const tool = this._toolRegistry.get(name);
+			const tool = this._runtimeBuilder.getRegisteredTool(name);
 			if (!tool) return;
 			seen.add(name);
 			tools.push(tool);
@@ -3932,417 +3957,11 @@ export class AgentSession {
 	}
 
 	private _refreshToolRegistry(options?: { activeToolNames?: string[]; includeAllExtensionTools?: boolean }): void {
-		const previousRegistryNames = new Set(this._toolRegistry.keys());
-		// Re-derive from the pre-filter REQUEST, never from agent.state.tools: the active set is
-		// capability/profile-filtered, so feeding it back through setActiveToolsByName would
-		// permanently shrink what a later switch to a larger model (or permissive profile) restores.
-		const previousActiveToolNames = this._requestedActiveToolNames ?? this.getActiveToolNames();
-		const allowedToolNames = this._allowedToolNames;
-		const excludedToolNames = this._excludedToolNames;
-		const toolProfileFilter = this._toolProfileFilter;
-		const isAllowedTool = (name: string): boolean => {
-			if (allowedToolNames && !allowedToolNames.has(name)) return false;
-			if (excludedToolNames?.has(name)) return false;
-			if (!toolProfileFilter) return true;
-			if (toolProfileFilter.allow.length > 0 && !matchesResourceProfilePattern(name, toolProfileFilter.allow)) {
-				return false;
-			}
-			if (matchesResourceProfilePattern(name, toolProfileFilter.block)) return false;
-			return true;
-		};
-
-		const registeredTools = this._extensionRunner.getAllRegisteredTools();
-		const allCustomTools = [
-			...registeredTools,
-			...this._customTools.map((definition) => ({
-				definition,
-				sourceInfo: createSyntheticSourceInfo(`<sdk:${definition.name}>`, { source: "sdk" }),
-			})),
-			// Memory subsystem provider tools (e.g. file-store's `memory` tool).
-			...this._memory
-				.getMemoryManager()
-				.getToolDefinitions()
-				.map((definition) => ({
-					definition,
-					sourceInfo: createSyntheticSourceInfo(`<memory:${definition.name}>`, { source: "sdk" }),
-				})),
-		].filter((tool) => isAllowedTool(tool.definition.name));
-		const definitionRegistry = new Map<string, ToolDefinitionEntry>(
-			Array.from(this._baseToolDefinitions.entries())
-				.filter(([name]) => isAllowedTool(name))
-				.map(([name, definition]) => [
-					name,
-					{
-						definition,
-						sourceInfo: createSyntheticSourceInfo(`<builtin:${name}>`, { source: "builtin" }),
-					},
-				]),
-		);
-		for (const tool of allCustomTools) {
-			definitionRegistry.set(tool.definition.name, {
-				definition: tool.definition,
-				sourceInfo: tool.sourceInfo,
-			});
-		}
-		this._toolDefinitions = definitionRegistry;
-		this._toolPromptSnippets = new Map(
-			Array.from(definitionRegistry.values())
-				.map(({ definition }) => {
-					const snippet = this._normalizePromptSnippet(definition.promptSnippet);
-					return snippet ? ([definition.name, snippet] as const) : undefined;
-				})
-				.filter((entry): entry is readonly [string, string] => entry !== undefined),
-		);
-		this._toolPromptGuidelines = new Map(
-			Array.from(definitionRegistry.values())
-				.map(({ definition }) => {
-					const guidelines = this._normalizePromptGuidelines(definition.promptGuidelines);
-					return guidelines.length > 0 ? ([definition.name, guidelines] as const) : undefined;
-				})
-				.filter((entry): entry is readonly [string, string[]] => entry !== undefined),
-		);
-		const runner = this._extensionRunner;
-		const wrappedExtensionTools = wrapRegisteredTools(allCustomTools, runner);
-		const wrappedBuiltInTools = wrapRegisteredTools(
-			Array.from(this._baseToolDefinitions.values())
-				.filter((definition) => isAllowedTool(definition.name))
-				.map((definition) => ({
-					definition,
-					sourceInfo: createSyntheticSourceInfo(`<builtin:${definition.name}>`, { source: "builtin" }),
-				})),
-			runner,
-		);
-
-		const toolRegistry = new Map(wrappedBuiltInTools.map((tool) => [tool.name, tool]));
-		for (const tool of wrappedExtensionTools as AgentTool[]) {
-			toolRegistry.set(tool.name, tool);
-		}
-		this._toolRegistry = toolRegistry;
-
-		const requestedBase = options?.activeToolNames ? [...options.activeToolNames] : [...previousActiveToolNames];
-		const nextActiveToolNames = requestedBase.filter((name) => isAllowedTool(name));
-
-		const autoActivated: string[] = [];
-		if (allowedToolNames) {
-			for (const toolName of this._toolRegistry.keys()) {
-				if (allowedToolNames.has(toolName)) {
-					nextActiveToolNames.push(toolName);
-					autoActivated.push(toolName);
-				}
-			}
-		} else if (options?.includeAllExtensionTools) {
-			for (const tool of wrappedExtensionTools) {
-				nextActiveToolNames.push(tool.name);
-				autoActivated.push(tool.name);
-			}
-		} else if (!options?.activeToolNames) {
-			for (const toolName of this._toolRegistry.keys()) {
-				if (!previousRegistryNames.has(toolName)) {
-					nextActiveToolNames.push(toolName);
-					autoActivated.push(toolName);
-				}
-			}
-		}
-
-		// Strict UAC: the active profile is the COMPLETE grant, so a tool the profile names
-		// explicitly is itself a request for that tool — it must ACTIVATE from the registry even
-		// if the session never requested it. Without this, activation is only ever the requested
-		// defaults ∩ allow-list, and a profile granting non-default tools (a search-only profile's
-		// grep/find) yields an empty or truncated tool set on load and /reload. A blanket "*"
-		// stays grant-only: activation then still derives from the request/defaults above.
-		const explicitAllowPatterns = toolProfileFilter?.allow.filter((pattern) => pattern !== "*") ?? [];
-		if (explicitAllowPatterns.length > 0) {
-			const boundPatterns = new Set<string>();
-			for (const toolName of this._toolRegistry.keys()) {
-				if (!isAllowedTool(toolName)) continue;
-				for (const pattern of explicitAllowPatterns) {
-					if (matchesResourceProfilePattern(toolName, [pattern])) boundPatterns.add(pattern);
-				}
-				if (matchesResourceProfilePattern(toolName, explicitAllowPatterns)) {
-					nextActiveToolNames.push(toolName);
-					autoActivated.push(toolName);
-				}
-			}
-			// G13: an explicit grant that binds to NO registered tool is a silent no-op — typo'd
-			// name, or the owning extension is not granted/loaded. Surface it.
-			this._unboundToolGrantWarnings = explicitAllowPatterns
-				.filter((pattern) => !boundPatterns.has(pattern))
-				.map(
-					(pattern) =>
-						`profile tool grant "${pattern}" binds to no registered tool (typo, or the owning extension is not granted/loaded)`,
-				);
-		} else {
-			this._unboundToolGrantWarnings = [];
-		}
-
-		// artifact_retrieve companion auto-activation is enforced inside
-		// setActiveToolsByName() itself (not duplicated here), so every activation path --
-		// including the public, extension-exposed setActiveTools() -- gets the same
-		// guarantee, not just this settings/profile refresh flow.
-		this.setActiveToolsByName([...new Set(nextActiveToolNames)]);
-		// setActiveToolsByName just stored the profile-filtered ACTIVE set as the request; restore
-		// the true pre-filter request (plus this refresh's auto-activations) so an internal refresh
-		// can never permanently narrow it.
-		this._requestedActiveToolNames = [...new Set([...requestedBase, ...autoActivated])];
-	}
-
-	private _createReloadRuntimeSnapshot(): ReloadRuntimeSnapshot {
-		return {
-			extensionRunner: this._extensionRunner,
-			baseToolDefinitions: this._baseToolDefinitions,
-			toolRegistry: this._toolRegistry,
-			toolDefinitions: this._toolDefinitions,
-			toolPromptSnippets: this._toolPromptSnippets,
-			toolPromptGuidelines: this._toolPromptGuidelines,
-			agentTools: this.agent.state.tools,
-			agentSystemPrompt: this.agent.state.systemPrompt,
-			baseSystemPrompt: this._baseSystemPrompt,
-		};
-	}
-
-	private _restoreReloadRuntimeSnapshot(snapshot: ReloadRuntimeSnapshot): void {
-		this._extensionRunner = snapshot.extensionRunner;
-		this._baseToolDefinitions = snapshot.baseToolDefinitions;
-		this._toolRegistry = snapshot.toolRegistry;
-		this._toolDefinitions = snapshot.toolDefinitions;
-		this._toolPromptSnippets = snapshot.toolPromptSnippets;
-		this._toolPromptGuidelines = snapshot.toolPromptGuidelines;
-		this.agent.state.tools = snapshot.agentTools;
-		this.agent.state.systemPrompt = snapshot.agentSystemPrompt;
-		this._baseSystemPrompt = snapshot.baseSystemPrompt;
-		if (this._extensionRunnerRef) {
-			this._extensionRunnerRef.current = snapshot.extensionRunner;
-		}
-		this._applyExtensionBindings(snapshot.extensionRunner);
-	}
-
-	private _doctorReloadRuntime(): void {
-		const extensionErrors = this._resourceLoader.getExtensions().errors;
-		if (extensionErrors.length > 0) {
-			const summary = extensionErrors
-				.slice(0, 6)
-				.map((error) => `${error.path}: ${error.error}`)
-				.join("; ");
-			throw new Error(`Extension reload failed doctor: ${summary}`);
-		}
-
-		const missingActiveTools = this.getActiveToolNames().filter((name) => !this._toolRegistry.has(name));
-		if (missingActiveTools.length > 0) {
-			throw new Error(
-				`Extension reload failed doctor: active tool(s) missing after reload: ${missingActiveTools.join(", ")}`,
-			);
-		}
-
-		for (const tool of this.agent.state.tools) {
-			if (!this._toolDefinitions.has(tool.name)) {
-				throw new Error(`Extension reload failed doctor: tool ${tool.name} missing from definition registry`);
-			}
-		}
-
-		this._createAgentContextSnapshot();
-		this.getContextUsage();
-	}
-
-	private _buildRuntime(options: {
-		activeToolNames?: string[];
-		flagValues?: Map<string, boolean | string>;
-		includeAllExtensionTools?: boolean;
-	}): void {
-		const autoResizeImages = this.settingsManager.getImageAutoResize();
-		const shellCommandPrefix = this.settingsManager.getShellCommandPrefix();
-		const shellPath = this.settingsManager.getShellPath();
-		// grep/find must not emit a "Full output: artifact tool-output:<id>" handle that
-		// nothing can resolve. If artifact_retrieve is explicitly excluded/blocked/outside
-		// an active allowlist, don't hand grep/find an artifact store at all: they fall
-		// back to their pre-existing bounded preview/truncation behavior, with no
-		// payload/meta files ever written and no retrieval promise made.
-		const toolArtifactStore = this._isToolOrCommandAllowedByProfile("artifact_retrieve")
-			? this._getToolArtifactStore()
-			: undefined;
-		const baseToolDefinitions = this._baseToolsOverride
-			? Object.fromEntries(
-					Object.entries(this._baseToolsOverride).map(([name, tool]) => [
-						name,
-						createToolDefinitionFromAgentTool(tool),
-					]),
-				)
-			: createAllToolDefinitions(this._cwd, {
-					read: { autoResizeImages },
-					bash: { commandPrefix: shellCommandPrefix, shellPath },
-					grep: { artifactStore: toolArtifactStore },
-					find: { artifactStore: toolArtifactStore },
-					artifact_retrieve: { artifactStore: toolArtifactStore },
-				});
-
-		this._baseToolDefinitions = new Map(
-			Object.entries(baseToolDefinitions).map(([name, tool]) => [name, tool as ToolDefinition]),
-		);
-		if (!this._baseToolsOverride) {
-			for (const definition of createCoreDiagnosticsToolDefinitions(
-				() => this.getActiveToolNames(),
-				() => this.getAllTools(),
-				(messages) => this.getContextGcReport(messages),
-				() => this._memory.getMemoryAuditDiagnostics(),
-			)) {
-				this._baseToolDefinitions.set(definition.name, definition);
-			}
-			const goalToolDefinition = createGoalToolDefinition({
-				getGoalState: () => this.getGoalStateSnapshot(),
-				saveGoalState: (state) => {
-					this.saveGoalStateSnapshot(state);
-				},
-			});
-			this._baseToolDefinitions.set(goalToolDefinition.name, goalToolDefinition);
-			const delegateToolDefinition = createDelegateToolDefinition({
-				runWorkerDelegation: (args) => this.runWorkerDelegationOnce(args),
-			});
-			this._baseToolDefinitions.set(delegateToolDefinition.name, delegateToolDefinition);
-			// Registered but not default-active: probes spend tokens on the probed model, so
-			// activation is an explicit choice (settings/profile/setActiveTools or /autonomy fitness).
-			const modelFitnessToolDefinition = createModelFitnessToolDefinition({
-				runProbe: (args) => this.runModelFitness(args),
-			});
-			this._baseToolDefinitions.set(modelFitnessToolDefinition.name, modelFitnessToolDefinition);
-			const runToolkitScriptToolDefinition = createRunToolkitScriptToolDefinition({
-				getScripts: () => this.settingsManager.getToolkitScripts(),
-				execute: (script, scriptArgs) => executeToolkitScript({ script, scriptArgs, cwd: this._cwd }),
-				// Reflex brain (fitness-gated local model): resolves ambiguous requests into a
-				// registry pick. Best-effort — absent/unfit brain keeps the shortlist behavior.
-				interpret: async (request, scripts) => {
-					const model = this._resolveCurationModelIfFit();
-					if (!model) return undefined;
-					const completion = await this.runIsolatedCompletion({
-						systemPrompt: REFLEX_INTERPRETER_SYSTEM_PROMPT,
-						messages: [
-							{
-								role: "user",
-								content: [{ type: "text", text: buildReflexUserPrompt(request, scripts) }],
-								timestamp: Date.now(),
-							},
-						],
-						model,
-						thinkingLevel: "off",
-						maxTokens: 256,
-						cacheRetention: "short",
-					});
-					if (completion.usage.cost.total > 0 || completion.usage.totalTokens > 0) {
-						this.addSpawnedUsage(completion.usage, { label: "toolkit-brain" });
-					}
-					return parseReflexPlan(completion.text);
-				},
-			});
-			this._baseToolDefinitions.set(runToolkitScriptToolDefinition.name, runToolkitScriptToolDefinition);
-		}
-
-		const extensionsResult = this._resourceLoader.getExtensions();
-		if (options.flagValues) {
-			for (const [name, value] of options.flagValues) {
-				extensionsResult.runtime.flagValues.set(name, value);
-			}
-		}
-		const extensions = this._filterExtensionsForRuntime(extensionsResult.extensions);
-		const runtimeExtensionPaths = new Set(extensions.map((extension) => extension.path));
-		extensionsResult.runtime.pendingProviderRegistrations =
-			extensionsResult.runtime.pendingProviderRegistrations.filter((registration) =>
-				runtimeExtensionPaths.has(registration.extensionPath),
-			);
-
-		this._extensionRunner = new ExtensionRunner(
-			extensions,
-			extensionsResult.runtime,
-			this._cwd,
-			this.sessionManager,
-			this._modelRegistry,
-		);
-		if (this._extensionRunnerRef) {
-			this._extensionRunnerRef.current = this._extensionRunner;
-		}
-		this._bindExtensionCore(this._extensionRunner);
-		this._applyExtensionBindings(this._extensionRunner);
-
-		const defaultActiveToolNames = this._baseToolsOverride
-			? Object.keys(this._baseToolsOverride)
-			: ["read", "bash", "edit", "write", "context_audit", "goal", "delegate", "run_toolkit_script"];
-		const baseActiveToolNames = options.activeToolNames ?? defaultActiveToolNames;
-		this._refreshToolRegistry({
-			activeToolNames: baseActiveToolNames,
-			includeAllExtensionTools: options.includeAllExtensionTools,
-		});
+		this._runtimeBuilder.refreshToolRegistry(options);
 	}
 
 	async reload(): Promise<void> {
-		if (this.isStreaming) {
-			throw new Error("Cannot reload while the agent is streaming or a tool call is active");
-		}
-		if (this.isCompacting) {
-			throw new Error("Cannot reload while context compaction or branch summarization is active");
-		}
-		const previousRunner = this._extensionRunner;
-		const snapshot = this._createReloadRuntimeSnapshot();
-		// Preserve the pre-filter tool REQUEST across the rebuild, not the capability/profile-filtered
-		// active set — otherwise a reload under a small model permanently shrinks the restorable set.
-		const activeToolNames = this._requestedActiveToolNames ?? this.getActiveToolNames();
-		const previousFlagValues = previousRunner.getFlagValues();
-		const reloadErrors: string[] = [];
-		let newRunner: ExtensionRunner | undefined;
-		try {
-			await this.settingsManager.reload();
-			// Re-derive the resource-profile tool filter from the freshly reloaded settings.
-			// Unlike skills/prompts/themes (which re-filter through the resource loader on every
-			// reload), the tool filter is held on the session, so without this a live edit to the
-			// active profile's tools allow/block — or switching the active profile — would not
-			// apply on /reload and allowed tools would stay missing.
-			this._toolProfileFilter = this._deriveToolProfileFilter();
-			// Re-apply the active profile's model/thinking from the freshly reloaded settings, so a live
-			// profile edit (or switch) takes effect on /reload. Skipped when the launch used an explicit
-			// --model/--thinking flag, which must win over the profile across reloads.
-			await this._reapplyActiveProfileModelSettings();
-			await this._resourceLoader.reload({ failOnExtensionErrors: true, deferExtensionDispose: true });
-			resetApiProviders();
-			this._buildRuntime({
-				activeToolNames,
-				flagValues: previousFlagValues,
-				includeAllExtensionTools: true,
-			});
-			newRunner = this._extensionRunner;
-			const offDoctorErrors = newRunner.onError((error) => {
-				reloadErrors.push(`${error.extensionPath} ${error.event}: ${error.error}`);
-			});
-			try {
-				this._doctorReloadRuntime();
-				// Reload starts memory providers fresh; loaded extensions re-register below.
-				this._memory.clearPendingProviders();
-				const hasBindings =
-					this._extensionUIContext ||
-					this._extensionCommandContextActions ||
-					this._extensionShutdownHandler ||
-					this._extensionErrorListener;
-				if (hasBindings) {
-					await newRunner.emit({ type: "session_start", reason: "reload" });
-					await this.extendResourcesFromExtensions("reload");
-					this._doctorReloadRuntime();
-				}
-			} finally {
-				offDoctorErrors();
-			}
-			if (reloadErrors.length > 0) {
-				throw new Error(`Extension reload failed doctor: ${reloadErrors.slice(0, 6).join("; ")}`);
-			}
-			await emitSessionShutdownEvent(previousRunner, { type: "session_shutdown", reason: "reload" });
-			previousRunner.invalidate();
-			this._resourceLoader.commitReload?.();
-			// Re-derive the memory subsystem from the reloaded settings/providers.
-			await this._memory.initialize();
-		} catch (error) {
-			if (newRunner && newRunner !== previousRunner) {
-				newRunner.invalidate(
-					"This extension ctx was discarded because reload failed and Pi restored the previous valid runtime.",
-				);
-			}
-			this._resourceLoader.rollbackReload?.();
-			this._restoreReloadRuntimeSnapshot(snapshot);
-			throw error;
-		}
+		return this._runtimeBuilder.reload();
 	}
 
 	/**
@@ -4352,56 +3971,7 @@ export class AgentSession {
 	 * Falls back to full reload on error.
 	 */
 	async unloadExtensionLive(extensionPath: string): Promise<void> {
-		if (this.isStreaming) {
-			throw new Error("Cannot unload extension while the agent is streaming or a tool call is active");
-		}
-		if (this.isCompacting) {
-			throw new Error("Cannot unload extension while context compaction or branch summarization is active");
-		}
-
-		const ext = this._resourceLoader.getLoadedExtension(extensionPath);
-		if (!ext) {
-			return; // Nothing to unload
-		}
-
-		const previousRunner = this._extensionRunner;
-		try {
-			// Run session_shutdown lifecycle for this extension only
-			await this._extensionRunner.emitToExtension(ext, { type: "session_shutdown", reason: "unload" });
-
-			// Unregister its providers (keyed by the extension's own path, as registered)
-			const runtime = this._resourceLoader.getExtensions().runtime;
-			for (const name of runtime.getProvidersForExtension(ext.path)) {
-				runtime.unregisterProvider(name, ext.path);
-			}
-
-			// Dispose its event subscriptions and run disposers
-			await disposeExtensionEventSubscriptions([ext]);
-
-			// Remove from loaded extensions
-			this._resourceLoader.removeLoadedExtension(extensionPath);
-
-			// Rebuild runtime with new extension set
-			const activeToolNames = this._requestedActiveToolNames ?? this.getActiveToolNames();
-			const previousFlagValues = previousRunner.getFlagValues();
-			this._buildRuntime({
-				activeToolNames,
-				flagValues: previousFlagValues,
-				includeAllExtensionTools: true,
-			});
-			previousRunner.invalidate();
-
-			// Notify extensions-changed listeners
-			this._notifyExtensionsChanged();
-		} catch (error) {
-			// Fall back to full reload on error
-			try {
-				await this.reload();
-			} catch {
-				// Suppress nested error; original error will be thrown below
-			}
-			throw error;
-		}
+		return this._runtimeBuilder.unloadExtensionLive(extensionPath);
 	}
 
 	/**
@@ -4411,44 +3981,7 @@ export class AgentSession {
 	 * Falls back to full reload on error.
 	 */
 	async loadExtensionLive(extensionPath: string): Promise<void> {
-		if (this.isStreaming) {
-			throw new Error("Cannot load extension while the agent is streaming or a tool call is active");
-		}
-		if (this.isCompacting) {
-			throw new Error("Cannot load extension while context compaction or branch summarization is active");
-		}
-
-		const previousRunner = this._extensionRunner;
-		try {
-			// Load the extension with fresh import
-			const { extension, error } = await this._resourceLoader.loadSingleExtension(extensionPath);
-			if (error || !extension) {
-				throw new Error(error || `Failed to load extension: ${extensionPath}`);
-			}
-
-			// Rebuild runtime to aggregate tools/commands/handlers/providers
-			const activeToolNames = this._requestedActiveToolNames ?? this.getActiveToolNames();
-			const previousFlagValues = previousRunner.getFlagValues();
-			this._buildRuntime({
-				activeToolNames,
-				flagValues: previousFlagValues,
-				includeAllExtensionTools: true,
-			});
-
-			// Run session_start lifecycle for the new extension only
-			await this._extensionRunner.emitToExtension(extension, { type: "session_start", reason: "load" });
-
-			// Notify extensions-changed listeners
-			this._notifyExtensionsChanged();
-		} catch (error) {
-			// Fall back to full reload on error
-			try {
-				await this.reload();
-			} catch {
-				// Suppress nested error; original error will be thrown below
-			}
-			throw error;
-		}
+		return this._runtimeBuilder.loadExtensionLive(extensionPath);
 	}
 
 	/**
@@ -4457,84 +3990,7 @@ export class AgentSession {
 	 * Falls back to full reload if any individual load/unload fails.
 	 */
 	async reconcileLoadedExtensions(): Promise<void> {
-		if (this.isStreaming) {
-			throw new Error("Cannot reconcile extensions while the agent is streaming or a tool call is active");
-		}
-		if (this.isCompacting) {
-			throw new Error("Cannot reconcile extensions while context compaction or branch summarization is active");
-		}
-
-		try {
-			// Get all discoverable extension paths
-			const allDiscoverablePaths = await this._resourceLoader.getDiscoverableExtensionPaths();
-
-			// Get the target enabled set based on profile filters
-			const targetEnabledSet = new Set<string>();
-			for (const path of allDiscoverablePaths) {
-				if (this.settingsManager.isResourceAllowedByProfile("extensions", path)) {
-					targetEnabledSet.add(path);
-				}
-			}
-
-			// Get currently loaded set
-			const loadedExtensions = this._resourceLoader.getExtensions().extensions;
-			const loadedSet = new Set<string>();
-			for (const ext of loadedExtensions) {
-				loadedSet.add(ext.path);
-			}
-
-			// Collect unloads and loads
-			const toUnload: string[] = [];
-			const toLoad: string[] = [];
-
-			for (const path of loadedSet) {
-				if (!targetEnabledSet.has(path)) {
-					toUnload.push(path);
-				}
-			}
-
-			for (const path of targetEnabledSet) {
-				if (!loadedSet.has(path)) {
-					toLoad.push(path);
-				}
-			}
-
-			// Apply unloads first, then loads, to minimize churn
-			// Collect errors but continue through all operations
-			const errors: Error[] = [];
-
-			for (const path of toUnload) {
-				try {
-					await this.unloadExtensionLive(path);
-				} catch (error) {
-					errors.push(error instanceof Error ? error : new Error(String(error)));
-				}
-			}
-
-			for (const path of toLoad) {
-				try {
-					await this.loadExtensionLive(path);
-				} catch (error) {
-					errors.push(error instanceof Error ? error : new Error(String(error)));
-				}
-			}
-
-			// If any errors occurred, throw the first one (already fell back to full reload in load/unload)
-			if (errors.length > 0) {
-				throw errors[0];
-			}
-
-			// Single notification at the end
-			this._notifyExtensionsChanged();
-		} catch (error) {
-			// Fall back to full reload on error
-			try {
-				await this.reload();
-			} catch {
-				// Suppress nested error; original error will be thrown below
-			}
-			throw error;
-		}
+		return this._runtimeBuilder.reconcileLoadedExtensions();
 	}
 
 	// =========================================================================
