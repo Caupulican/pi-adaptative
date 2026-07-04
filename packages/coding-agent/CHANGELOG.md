@@ -7,6 +7,13 @@
   the wall-clock limit; backgrounded (`cmd &`) work is exempt by construction. Wires the
   `createSilenceWatchdog` primitive from `@caupulican/pi-agent-core`'s reliability kernel into the
   bash tool.
+- A silently dead provider stream can no longer wedge a turn forever. Every provider stream a
+  session starts is now wrapped once (at construction) with the reliability kernel's
+  `withStreamIdleWatchdog`: it bounds the wait for the first event (120s connect allowance) and the
+  gap between subsequent events (30s idle). On a stall it aborts the inner request and surfaces a
+  retryable `stream stalled` error, which the existing auto-retry path picks up — so a hung
+  connection now fails over instead of hanging. The bound is on silence, never on total runtime, so
+  a stream that keeps emitting is never cut off.
 
 ### Fixed
 - Bash commands could previously race file-tool (`edit`/`write`) mutations: because a shell command

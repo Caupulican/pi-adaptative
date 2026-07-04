@@ -21,8 +21,11 @@ import type {
 	AgentMessage,
 	AgentState,
 	AgentTool,
+	StreamFn,
+	StreamIdleOptions,
 	ThinkingLevel,
 } from "@caupulican/pi-agent-core";
+import { DEFAULT_STREAM_IDLE, withStreamIdleWatchdog } from "@caupulican/pi-agent-core";
 import type {
 	Api,
 	AssistantMessage,
@@ -268,6 +271,42 @@ import { createAllToolDefinitions } from "./tools/index.ts";
 import { createModelFitnessToolDefinition } from "./tools/model-fitness.ts";
 import { createRunToolkitScriptToolDefinition } from "./tools/run-toolkit-script.ts";
 import { createToolDefinitionFromAgentTool } from "./tools/tool-definition-wrapper.ts";
+
+// ============================================================================
+// Stream-idle watchdog wiring
+// ============================================================================
+
+/**
+ * Marks a watchdog-wrapped stream fn whose inner base was the raw `streamSimple`.
+ *
+ * The session tests `streamFn === streamSimple` in three places to decide whether it must
+ * inject request auth explicitly (the raw-provider path used in tests and no-key setups).
+ * Wrapping the fn with the idle watchdog breaks that identity, so the wrapper carries this
+ * marker and those checks go through `_isRawStreamSimple` instead. `Symbol.for` keeps the
+ * key stable regardless of how many times this module is evaluated.
+ */
+const RAW_STREAM_MARKER = Symbol.for("pi.rawStreamSimple");
+
+/** Test-only override of the stream-idle bounds. Read once per session, at construction. */
+let streamIdleOptionsOverride: Partial<StreamIdleOptions> | undefined;
+
+/**
+ * Test hook: override the stream-idle bounds so a stall can be provoked in-suite without a
+ * 30s wait. Pass `undefined` to restore the user-locked default (30s idle / 120s connect).
+ * Must be set BEFORE the session is constructed — the wiring reads it in the constructor.
+ */
+export function setStreamIdleOptionsForTests(opts: Partial<StreamIdleOptions> | undefined): void {
+	streamIdleOptionsOverride = opts;
+}
+
+/**
+ * Tag a watchdog-wrapped stream fn with whether its inner base was the raw `streamSimple`,
+ * so `_isRawStreamSimple` can see the raw-provider path through the wrapper.
+ */
+function tagRawness(wrapped: StreamFn, innerIsRawStreamSimple: boolean): StreamFn {
+	Object.defineProperty(wrapped, RAW_STREAM_MARKER, { value: innerIsRawStreamSimple });
+	return wrapped;
+}
 
 // ============================================================================
 // Skill Block Parsing
@@ -828,6 +867,19 @@ export class AgentSession {
 
 	constructor(config: AgentSessionConfig) {
 		this.agent = config.agent;
+		// Bound every provider stream this session starts against a silently dead connection: a
+		// stall aborts the inner request and surfaces as a retryable "stream stalled" error, which
+		// _isRetryableError routes into the existing auto-retry path. Wrapped exactly once, here.
+		// The wrapper reports the stall immediately and aborts the inner request; releasing the
+		// inner pump relies on the provider ending its stream after abort (real providers do — see
+		// withStreamIdleWatchdog's contract), so no extra drain is added at this wiring site.
+		// Wrapping also breaks the `streamFn === streamSimple` identity the auth-injection checks
+		// use, so the wrapper carries a rawness marker that _isRawStreamSimple reads.
+		const baseStreamFn = this.agent.streamFn;
+		this.agent.streamFn = tagRawness(
+			withStreamIdleWatchdog(baseStreamFn, streamIdleOptionsOverride ?? DEFAULT_STREAM_IDLE),
+			baseStreamFn === streamSimple,
+		);
 		this.sessionManager = config.sessionManager;
 		this.settingsManager = config.settingsManager;
 		this._scopedModels = config.scopedModels ?? [];
@@ -869,6 +921,15 @@ export class AgentSession {
 		return this._modelRegistry;
 	}
 
+	/**
+	 * True when the session's stream fn is the raw `streamSimple` provider entry (directly, or as the
+	 * base wrapped by the idle watchdog at construction). Callers use this to decide whether request
+	 * auth must be injected explicitly — see {@link RAW_STREAM_MARKER}.
+	 */
+	private _isRawStreamSimple(fn: StreamFn): boolean {
+		return fn === streamSimple || (fn as { [RAW_STREAM_MARKER]?: boolean })[RAW_STREAM_MARKER] === true;
+	}
+
 	private async _getRequiredRequestAuth(model: Model<any>): Promise<{
 		apiKey: string;
 		headers?: Record<string, string>;
@@ -899,7 +960,7 @@ export class AgentSession {
 		apiKey?: string;
 		headers?: Record<string, string>;
 	}> {
-		if (this.agent.streamFn === streamSimple) {
+		if (this._isRawStreamSimple(this.agent.streamFn)) {
 			return this._getRequiredRequestAuth(model);
 		}
 
@@ -4713,7 +4774,7 @@ export class AgentSession {
 			const compactionModel = this._resolveCompactionModel(this.model);
 			let apiKey: string | undefined;
 			let headers: Record<string, string> | undefined;
-			if (this.agent.streamFn === streamSimple) {
+			if (this._isRawStreamSimple(this.agent.streamFn)) {
 				const authResult = await this._modelRegistry.getApiKeyAndHeaders(compactionModel);
 				if (!authResult.ok || !authResult.apiKey) {
 					this._emit({
@@ -5955,8 +6016,8 @@ export class AgentSession {
 
 		const err = message.errorMessage;
 		if (this._isNonRetryableProviderLimitError(err)) return false;
-		// Match: overloaded_error, provider returned error, rate limit, 429, 500, 502, 503, 504, service unavailable, network/connection errors (including connection lost), WebSocket transport closes/errors, fetch failed, premature stream endings, HTTP/2 closed before response, terminated, retry delay exceeded
-		return /overloaded|provider.?returned.?error|rate.?limit|too many requests|429|500|502|503|504|service.?unavailable|server.?error|internal.?error|network.?error|connection.?error|connection.?refused|connection.?lost|websocket.?closed|websocket.?error|other side closed|fetch failed|upstream.?connect|reset before headers|socket hang up|ended without|stream ended before message_stop|http2 request did not get a response|timed? out|timeout|terminated|retry delay/i.test(
+		// Match: overloaded_error, provider returned error, rate limit, 429, 500, 502, 503, 504, service unavailable, network/connection errors (including connection lost), WebSocket transport closes/errors, fetch failed, premature stream endings, HTTP/2 closed before response, idle-watchdog stalls, terminated, retry delay exceeded
+		return /overloaded|provider.?returned.?error|rate.?limit|too many requests|429|500|502|503|504|service.?unavailable|server.?error|internal.?error|network.?error|connection.?error|connection.?refused|connection.?lost|websocket.?closed|websocket.?error|other side closed|fetch failed|upstream.?connect|reset before headers|socket hang up|ended without|stream ended before message_stop|http2 request did not get a response|stream stalled|timed? out|timeout|terminated|retry delay/i.test(
 			err,
 		);
 	}
@@ -7494,7 +7555,7 @@ export class AgentSession {
 		// When streamFn is the raw streamSimple (e.g. in tests), auth must be injected explicitly.
 		// Throw only when auth genuinely fails — providers that authenticate without an API key
 		// (OAuth, local no-key) legitimately return ok with an undefined apiKey.
-		if (this.agent.streamFn === streamSimple) {
+		if (this._isRawStreamSimple(this.agent.streamFn)) {
 			const auth = await this._modelRegistry.getApiKeyAndHeaders(model);
 			if (!auth.ok) {
 				throw new Error(auth.error);
