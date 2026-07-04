@@ -99,7 +99,7 @@ import { DEFAULT_MODEL_SUGGESTIONS } from "../../core/models/default-model-sugge
 import { FitnessStore } from "../../core/models/fitness-store.ts";
 import { registerLocalModel, unregisterLocalModel } from "../../core/models/local-registration.ts";
 import type { OllamaRuntime } from "../../core/models/local-runtime.ts";
-import { normalizeModelSource } from "../../core/models/model-ref.ts";
+import { matchesInstalledLocalModel, normalizeModelSource } from "../../core/models/model-ref.ts";
 import { DefaultPackageManager } from "../../core/package-manager.ts";
 import { BUILT_IN_PROVIDER_DISPLAY_NAMES } from "../../core/provider-display-names.ts";
 import { getPendingReloadBlockers } from "../../core/reload-blockers.ts";
@@ -6303,7 +6303,7 @@ export class InteractiveMode {
 			return;
 		}
 		const models = await this.localRuntime.list();
-		const target = models.find((model) => model.name === ref);
+		const target = models.find((model) => matchesInstalledLocalModel(ref, model.name));
 		if (!target) {
 			this.showStatus(
 				`${ref} is not installed. Installed: ${models.map((model) => model.name).join(", ") || "(none)"}`,

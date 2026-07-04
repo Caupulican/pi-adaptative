@@ -70,3 +70,23 @@ export function normalizeModelSource(rawInput: string): ModelSource {
 
 	return { type: "rejected", reason: "not a recognized model reference" };
 }
+
+/**
+ * Whether an installed-model listing entry (`installedName`, as `OllamaRuntime.list()` reports it)
+ * is the same model as `ref` (a user-typed reference, or a `models.json`-registered id). Ollama
+ * always reports installed models with an explicit tag — a pull with no tag is normalized to
+ * `:latest` server-side — but a `ref` is frequently bare ("llama3"), so an exact string compare
+ * alone misses that pairing. Exact match always counts; otherwise treat a bare ref against its
+ * `:latest`-tagged listing as the same model, and the reverse (a `ref` explicitly pinned to
+ * `:latest` against a bare listing), since the local-runtime interface is kept runtime-agnostic
+ * (see local-runtime.ts's module docstring) and a future/alternate runtime could list bare names.
+ * Shared by every ref-vs-installed-list comparison — see `AgentSession._warnIfManualModelChoiceIsRisky`
+ * and `removeLocalModel` in interactive-mode.ts, which had the identical bug independently.
+ */
+export function matchesInstalledLocalModel(ref: string, installedName: string): boolean {
+	if (ref === installedName) return true;
+	const hasTag = (value: string): boolean => value.includes(":");
+	if (!hasTag(ref) && installedName === `${ref}:latest`) return true;
+	if (!hasTag(installedName) && ref === `${installedName}:latest`) return true;
+	return false;
+}

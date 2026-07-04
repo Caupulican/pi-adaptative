@@ -229,4 +229,32 @@ describe("isProbeAllFailed", () => {
 		};
 		expect(isProbeAllFailed(report)).toBe(false);
 	});
+
+	it("does not flag all-failed when only the judge ran and failed (no lane surface graded at all)", () => {
+		// The vacuous-truth trap: every lane is ungraded (total: 0), so `gradedLanes.every(...)` is
+		// trivially true over an empty array. Without an explicit `gradedLanes.length > 0` guard this
+		// would wrongly read as "all lanes failed" on the judge's failure alone, with zero lane
+		// evidence behind it.
+		const emptyLane = { succeeded: 0, total: 0, outcomes: [], meanMs: 0 };
+		const report: ModelFitnessReport = {
+			trials: 0,
+			research: { ...emptyLane },
+			worker: { ...emptyLane },
+			judge: {
+				parsed: 0,
+				planningElevated: 0,
+				planningTotal: 3,
+				trivialCheap: 0,
+				trivialTotal: 3,
+				total: 6,
+				outcomes: [],
+				meanMs: 0,
+			},
+			search: { ...emptyLane },
+			toolCall: { ...emptyLane },
+			digest: { ...emptyLane },
+			totalCostUsd: 0,
+		};
+		expect(isProbeAllFailed(report)).toBe(false);
+	});
 });

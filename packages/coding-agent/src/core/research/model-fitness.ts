@@ -391,18 +391,22 @@ export async function runModelFitnessProbe(options: ModelFitnessOptions): Promis
 }
 
 /**
- * Pure verdict: true when the probe found ZERO successes on every surface it actually graded
- * (a lane/judge with total 0 — i.e. never run — carries no evidence and is excluded, so an
- * empty/degenerate report is never mistaken for a failed one). This is the gate adoption flows
- * must consult before assigning a role — see `isProbeAllFailed` callers in interactive-mode.ts
- * and agent-session.ts.
+ * Pure verdict: true when the probe found ZERO successes on every LANE surface it actually graded
+ * AND the judge (if it ran) also failed. A lane/judge with total 0 (i.e. never run) carries no
+ * evidence and is excluded from the lane check — but at least one lane must actually have been
+ * graded for an all-failed verdict at all: `gradedLanes.every(...)` is vacuously true over an
+ * empty array, so a report where only the judge ran (every research/worker/search/toolCall/digest
+ * lane is ungraded) is excluded explicitly rather than misread as "all lanes failed" on zero lane
+ * evidence. An empty/degenerate report (nothing graded at all, lanes AND judge) is likewise never
+ * mistaken for a failed one. This is the gate adoption flows must consult before assigning a role —
+ * see `isProbeAllFailed` callers in interactive-mode.ts and agent-session.ts.
  */
 export function isProbeAllFailed(report: ModelFitnessReport): boolean {
 	const lanes = [report.research, report.worker, report.search, report.toolCall, report.digest];
 	const gradedLanes = lanes.filter((lane) => lane.total > 0);
 	const judgeGraded = report.judge.total > 0;
 	if (gradedLanes.length === 0 && !judgeGraded) return false;
-	const lanesAllFailed = gradedLanes.every((lane) => lane.succeeded === 0);
+	const lanesAllFailed = gradedLanes.length > 0 && gradedLanes.every((lane) => lane.succeeded === 0);
 	const judgeFailed = !judgeGraded || report.judge.parsed === 0;
 	return lanesAllFailed && judgeFailed;
 }

@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { normalizeModelSource } from "../src/core/models/model-ref.ts";
+import { matchesInstalledLocalModel, normalizeModelSource } from "../src/core/models/model-ref.ts";
 
 describe("normalizeModelSource", () => {
 	it("normalizes ollama tags", () => {
@@ -47,5 +47,31 @@ describe("normalizeModelSource", () => {
 		expect(normalizeModelSource("https://example.com/model.bin").type).toBe("rejected");
 		expect(normalizeModelSource("").type).toBe("rejected");
 		expect(normalizeModelSource("a/b/c").type).toBe("rejected");
+	});
+});
+
+describe("matchesInstalledLocalModel", () => {
+	it("matches identical refs exactly", () => {
+		expect(matchesInstalledLocalModel("llama3:latest", "llama3:latest")).toBe(true);
+	});
+
+	it("matches a bare ref against Ollama's implicit :latest listing", () => {
+		expect(matchesInstalledLocalModel("llama3", "llama3:latest")).toBe(true);
+	});
+
+	it("matches a ref pinned to :latest against a bare listing", () => {
+		expect(matchesInstalledLocalModel("llama3:latest", "llama3")).toBe(true);
+	});
+
+	it("does not match a bare ref against a different, non-:latest tag", () => {
+		expect(matchesInstalledLocalModel("llama3", "llama3:8b")).toBe(false);
+	});
+
+	it("does not match unrelated models", () => {
+		expect(matchesInstalledLocalModel("llama3", "qwen3:latest")).toBe(false);
+	});
+
+	it("does not match a ref pinned to a specific non-latest tag against a bare listing", () => {
+		expect(matchesInstalledLocalModel("llama3:8b", "llama3")).toBe(false);
 	});
 });

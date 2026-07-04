@@ -46,14 +46,26 @@
     (research/core/research/model-fitness.ts) and, on an all-lanes-failed probe, refuses adoption
     outright: no role assigned, no settings written, just a clear "failed the fitness probe on all
     surfaces — not configured" message pointing at manual `/model` as the opt-in override. A partial
-    or full pass keeps the existing selector flow unchanged.
+    or full pass keeps the existing selector flow unchanged. The predicate itself had a latent
+    vacuous-truth gap: when every lane surface was ungraded (`total: 0`) but the judge ran and
+    failed, `gradedLanes.every(...)` was trivially true over the empty array, so a report with zero
+    lane evidence could still be read as all-lanes-failed — it now requires at least one actually
+    graded lane before returning that verdict.
   - Manual `/model <ref>` had no gate at all, so a model already known (from a stored fitness
     report) to fail on every surface, or a local Ollama model whose weights don't fit in RAM, could
     be set silently and 500 every subsequent turn (llama-server OOM). `AgentSession.setModel` is
     advisory-only here by design — a human's explicit choice is never blocked — but now emits a
     `warning` event (the same plain-text channel print/RPC modes already render, never a prompt)
     when the target has a recorded all-lanes-failed probe on this host, or is an Ollama model whose
-    installed size exceeds ~90% of `os.totalmem()`.
+    installed size exceeds ~90% of `os.totalmem()`. This advisory now also covers `cycleModel`
+    (reachable via the `app.model.cycleForward`/`cycleBackward` keybindings and the RPC
+    `cycleModel` call), which previously bypassed it entirely on both the scoped (`--models`) and
+    all-available cycle paths, silently landing on a known-bad or OOM-prone model. The Ollama
+    size/RAM lookup (and `/models remove`) also missed installed models referenced by a bare tag —
+    Ollama's `/api/tags` always reports an explicit tag, defaulting to `:latest`, so an exact-string
+    match silently skipped the check whenever a user typed a bare ref (e.g. `llama3` vs. the
+    installed `llama3:latest`); both call sites now share one `matchesInstalledLocalModel` helper
+    (`core/models/model-ref.ts`) that accounts for the bare/`:latest` pairing.
 
 ## [0.80.103] - 2026-07-03
 

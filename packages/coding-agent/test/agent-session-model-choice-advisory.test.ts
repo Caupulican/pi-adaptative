@@ -102,6 +102,60 @@ describe("AgentSession.setModel — manual choice advisories", () => {
 	});
 });
 
+describe("AgentSession.cycleModel — manual choice advisory parity", () => {
+	// cycleModel is reachable via keybindings (app.model.cycleForward/Backward) and the RPC
+	// cycleModel call, both independent of setModel — the advisory must fire there too, for both
+	// the scoped (--models flag) and unscoped (all available models) cycle paths.
+	it("warns when cycling through ALL available models lands on one with a recorded all-lanes-failed probe", async () => {
+		const harness = await createHarness({ models: [{ id: "safe-model" }, { id: "risky-model" }] });
+		try {
+			const riskyModel = harness.getModel("risky-model")!;
+			const canonicalRef = `${riskyModel.provider}/${riskyModel.id}`;
+			FitnessStore.forAgentDir(harness.tempDir).save(canonicalRef, allFailedReport());
+
+			const result = await harness.session.cycleModel("forward");
+
+			expect(result?.model.id).toBe("risky-model"); // never blocked
+			const warnings = harness.eventsOfType("warning");
+			expect(
+				warnings.some(
+					(event) =>
+						event.message.includes(canonicalRef) &&
+						event.message.includes("failed its fitness probe on all surfaces"),
+				),
+			).toBe(true);
+		} finally {
+			harness.cleanup();
+		}
+	});
+
+	it("warns when cycling through a SCOPED model set (--models) lands on one with a recorded all-lanes-failed probe", async () => {
+		const harness = await createHarness({ models: [{ id: "safe-model" }, { id: "risky-model" }] });
+		try {
+			const safeModel = harness.getModel("safe-model")!;
+			const riskyModel = harness.getModel("risky-model")!;
+			const canonicalRef = `${riskyModel.provider}/${riskyModel.id}`;
+			FitnessStore.forAgentDir(harness.tempDir).save(canonicalRef, allFailedReport());
+			harness.session.setScopedModels([{ model: safeModel }, { model: riskyModel }]);
+
+			const result = await harness.session.cycleModel("forward");
+
+			expect(result?.isScoped).toBe(true);
+			expect(result?.model.id).toBe("risky-model"); // never blocked
+			const warnings = harness.eventsOfType("warning");
+			expect(
+				warnings.some(
+					(event) =>
+						event.message.includes(canonicalRef) &&
+						event.message.includes("failed its fitness probe on all surfaces"),
+				),
+			).toBe(true);
+		} finally {
+			harness.cleanup();
+		}
+	});
+});
+
 describe("AgentSession.setModel — manual choice advisory: local (Ollama) model memory footprint", () => {
 	function registerOllamaFaux(harness: Awaited<ReturnType<typeof createHarness>>, id: string) {
 		const ollamaFaux = registerFauxProvider({ provider: "ollama", models: [{ id }] });
@@ -173,6 +227,31 @@ describe("AgentSession.setModel — manual choice advisory: local (Ollama) model
 			await harness.session.setModel(model);
 
 			expect(harness.eventsOfType("warning").some((event) => event.message.includes("RAM"))).toBe(false);
+		} finally {
+			ollamaFaux.unregister();
+			harness.cleanup();
+		}
+	});
+
+	it("warns for a bare-tag ref matched against Ollama's :latest-suffixed listing (matchesInstalledLocalModel)", async () => {
+		// Ollama's /api/tags always reports an explicit tag (defaulting to `:latest`), but the model
+		// id registered/typed here is bare — an exact-string match would miss this pairing entirely
+		// and silently skip the RAM check.
+		const harness = await createHarness({ localRuntimeDeps: tagsDeps("big-local:latest", 15 * 1024 ** 3) }); // 15GB of 16GB
+		const ollamaFaux = registerOllamaFaux(harness, "big-local");
+		try {
+			const model = ollamaFaux.getModel("big-local") as Model<string>;
+			await harness.session.setModel(model);
+
+			const warnings = harness.eventsOfType("warning");
+			expect(
+				warnings.some(
+					(event) =>
+						event.message.includes("ollama/big-local") &&
+						event.message.includes("RAM") &&
+						event.message.toLowerCase().includes("oom"),
+				),
+			).toBe(true);
 		} finally {
 			ollamaFaux.unregister();
 			harness.cleanup();

@@ -243,6 +243,7 @@ import { shouldEscalateModelRouterTool } from "./model-router/tool-escalation.ts
 import { FitnessStore, type StoredFitnessReport } from "./models/fitness-store.ts";
 import { OLLAMA_PROVIDER } from "./models/local-registration.ts";
 import { type LocalRuntimeDeps, OllamaRuntime } from "./models/local-runtime.ts";
+import { matchesInstalledLocalModel } from "./models/model-ref.ts";
 import type { NormalizedProfile } from "./profile-registry.ts";
 import { expandPromptTemplate, type PromptTemplate } from "./prompt-templates.ts";
 import { isProbeAllFailed, type ModelFitnessReport, runModelFitnessProbe } from "./research/model-fitness.ts";
@@ -4323,7 +4324,7 @@ export class AgentSession {
 		try {
 			const serverUrl = this._deriveOllamaServerUrl(model.baseUrl);
 			const installed = await this.getLocalRuntime(serverUrl).list();
-			const entry = installed.find((candidate) => candidate.name === model.id);
+			const entry = installed.find((candidate) => matchesInstalledLocalModel(model.id, candidate.name));
 			if (!entry) return;
 			const memoryBudget = totalmem() * 0.9;
 			if (entry.sizeBytes > memoryBudget) {
@@ -4379,6 +4380,7 @@ export class AgentSession {
 		await this._emitModelSelect(next.model, currentModel, "cycle");
 
 		this._checkContextWindowUsageWarning();
+		await this._warnIfManualModelChoiceIsRisky(next.model);
 
 		return { model: next.model, thinkingLevel: this.thinkingLevel, isScoped: true };
 	}
@@ -4406,6 +4408,7 @@ export class AgentSession {
 		await this._emitModelSelect(nextModel, currentModel, "cycle");
 
 		this._checkContextWindowUsageWarning();
+		await this._warnIfManualModelChoiceIsRisky(nextModel);
 
 		return { model: nextModel, thinkingLevel: this.thinkingLevel, isScoped: false };
 	}
