@@ -262,7 +262,7 @@ import {
 import { collectWorkspaceSources } from "./research/workspace-collector.ts";
 import type { ResourceExtensionPaths, ResourceLoader } from "./resource-loader.ts";
 import { stripResourceProfileBlocks } from "./resource-profile-blocks.ts";
-import { classifyToolTrust, UNTRUSTED_BOUNDARY_SYSTEM_RULE, wrapUntrustedText } from "./security/untrusted-boundary.ts";
+import { classifyToolTrust, wrapUntrustedText } from "./security/untrusted-boundary.ts";
 import {
 	matchesResourceProfilePattern,
 	type ResourceProfileFilterSettings,
@@ -270,7 +270,7 @@ import {
 } from "./settings-manager.ts";
 import type { SlashCommandInfo } from "./slash-commands.ts";
 import { createSyntheticSourceInfo, type SourceInfo } from "./source-info.ts";
-import { type BuildSystemPromptOptions, buildSystemPrompt } from "./system-prompt.ts";
+import { SystemPromptBuilder } from "./system-prompt-builder.ts";
 import {
 	buildReflexUserPrompt,
 	parseReflexPlan,
@@ -802,6 +802,9 @@ export class AgentSession {
 	/** Owns the cached per-server OllamaRuntime instances and the local-model router readiness gate
 	 * (see local-runtime-controller.ts). */
 	private readonly _localRuntimeController: LocalRuntimeController;
+	/** Assembles the session's base system prompt from live session state (see
+	 * system-prompt-builder.ts); owns the paired _baseSystemPromptOptions. */
+	private readonly _systemPromptBuilder: SystemPromptBuilder;
 	private _extensionRunnerRef?: { current?: ExtensionRunner };
 	private _initialActiveToolNames?: string[];
 	private _allowedToolNames?: Set<string>;
@@ -862,9 +865,9 @@ export class AgentSession {
 	private _toolPromptSnippets: Map<string, string> = new Map();
 	private _toolPromptGuidelines: Map<string, string[]> = new Map();
 
-	// Base system prompt (without extension appends) - used to apply fresh appends each turn
+	// Base system prompt (without extension appends) - used to apply fresh appends each turn.
+	// The paired _baseSystemPromptOptions and their construction live in SystemPromptBuilder.
 	private _baseSystemPrompt = "";
-	private _baseSystemPromptOptions!: BuildSystemPromptOptions;
 
 	constructor(config: AgentSessionConfig) {
 		this.agent = config.agent;
@@ -919,6 +922,16 @@ export class AgentSession {
 			emit: (event) => this._emit(event),
 			resolveConfiguredTierModel: (tier) => this._resolveConfiguredTierModel(tier),
 			formatModel: (model) => formatModelRouterModel(model),
+		});
+		this._systemPromptBuilder = new SystemPromptBuilder({
+			getCwd: () => this._cwd,
+			getSettingsManager: () => this.settingsManager,
+			getResourceLoader: () => this._resourceLoader,
+			getMemoryManager: () => this._memoryManager,
+			hasTool: (name) => this._toolRegistry.has(name),
+			getToolPromptSnippet: (name) => this._toolPromptSnippets.get(name),
+			getToolPromptGuidelines: (name) => this._toolPromptGuidelines.get(name),
+			getActiveExtensions: () => this._extensionRunner.activeExtensions,
 		});
 		this._modelRegistry = config.modelRegistry;
 		this._extensionRunnerRef = config.extensionRunnerRef;
@@ -2657,174 +2670,27 @@ export class AgentSession {
 		return this._resourceLoader.getActivePrompts();
 	}
 
+	// System-prompt construction lives in SystemPromptBuilder (see system-prompt-builder.ts). These
+	// stubs keep the god file's internal call surface stable while the assembly logic — situational
+	// soul, self-modification/autonomy guardrails, per-tool snippet/guideline options — lives there.
 	private _normalizePromptSnippet(text: string | undefined): string | undefined {
-		if (!text) return undefined;
-		const oneLine = text
-			.replace(/[\r\n]+/g, " ")
-			.replace(/\s+/g, " ")
-			.trim();
-		return oneLine.length > 0 ? oneLine : undefined;
+		return this._systemPromptBuilder.normalizePromptSnippet(text);
 	}
 
 	private _normalizePromptGuidelines(guidelines: string[] | undefined): string[] {
-		if (!guidelines || guidelines.length === 0) {
-			return [];
-		}
-
-		const unique = new Set<string>();
-		for (const guideline of guidelines) {
-			const normalized = guideline.trim();
-			if (normalized.length > 0) {
-				unique.add(normalized);
-			}
-		}
-		return Array.from(unique);
-	}
-
-	/**
-	 * R6: the active profile's situational soul, wrapped so the model reads it as its identity for this
-	 * situation. Empty when no active profile defines a soul.
-	 */
-	private _buildSituationSoulPrompt(): string | undefined {
-		const soul = this.settingsManager.getActiveProfileSoul();
-		if (!soul) return undefined;
-		return `<situation_soul>\n${soul}\n</situation_soul>`;
-	}
-
-	private _buildSelfModificationPrompt(): string | undefined {
-		const settings = this.settingsManager.getSelfModificationSettings();
-		if (!settings.enabled) {
-			return undefined;
-		}
-
-		// Resolve from an ordered candidate list first (portable WSL/Termux switching
-		// from settings alone), then fall back to the legacy single sourcePath.
-		const rawCandidates = [
-			...(Array.isArray(settings.sourcePaths) ? settings.sourcePaths : []),
-			...(settings.sourcePath ? [settings.sourcePath] : []),
-		]
-			.map((candidate) => candidate?.trim())
-			.filter((candidate): candidate is string => Boolean(candidate));
-
-		if (rawCandidates.length === 0) {
-			return `Pi self-modification guardrails (local setting active, source missing):
-- Self-modification is enabled, but no \`selfModification.sourcePaths\`/\`selfModification.sourcePath\` value is set.
-- Do not modify Pi core or runtime output. Ask the user to set \`selfModification.sourcePaths\` to the pi-adaptative source checkout before proceeding.`;
-		}
-
-		const resolvedCandidates = rawCandidates.map((candidate) => resolvePath(candidate, this._cwd, { trim: true }));
-		const sourcePath =
-			resolvedCandidates.find(
-				(candidate) => existsSync(candidate) && existsSync(resolvePath("package.json", candidate)),
-			) ?? resolvedCandidates[0];
-		const sourceLooksValid = existsSync(sourcePath) && existsSync(resolvePath("package.json", sourcePath));
-		const sourceStatus = sourceLooksValid
-			? sourcePath
-			: `${sourcePath} (missing or not a source checkout; ask the user to correct \`selfModification.sourcePaths\` before editing)`;
-		const autonomy = this.settingsManager.getAutonomySettings();
-		const settingsGate =
-			autonomy.mode === "full"
-				? "In autonomy.mode=full, autonomy/autoLearn setting tuning is covered by the standing autonomy grant; ask before changing credentials, provider auth, package sources, or unrelated preferences."
-				: "Ask for explicit approval before changing global settings.";
-		return `Pi self-modification guardrails (local setting active):
-- Authorized pi-adaptative source path: ${sourceStatus}
-- Only modify Pi core/harness source under the authorized source path; never patch installed node_modules or generated runtime output as the source of truth.
-- Before changing Pi itself, restate the objective and scope, inspect relevant source/docs/examples, and make the smallest auditable change.
-- Preserve user changes: check git status before and after, avoid unrelated edits, and do not overwrite concurrent work.
-- Validate with focused tests and broader checks proportional to risk before claiming success.
-- Reload/restart/renew only after source changes are saved and auditable.
-- ${settingsGate}
-- Always ask for explicit approval before publishing, pushing, tagging, or releasing.`;
-	}
-
-	private _buildAutonomyPrompt(): string | undefined {
-		const autoLearn = this.settingsManager.getAutoLearnSettings();
-		const autonomy = this.settingsManager.getAutonomySettings();
-		if (!autoLearn.enabled && autonomy.mode !== "full") {
-			return undefined;
-		}
-
-		const reflection = autoLearn.reflectionReview ?? autonomy.mode !== "off";
-		const model = autoLearn.model?.trim() || "active";
-		if (autonomy.mode === "full") {
-			return `Pi autonomy policy (mode full, standing autonomy):
-- Setting-authorized background learners may run after long sessions or corrective/complex turns using model ${model}; they may act without asking first inside this standing grant.
-- Standing grant: write high-confidence durable memory, create/patch user/project skills, create/patch small user/project extensions/tools, tune autonomy/autoLearn settings, edit the authorized selfModification.sourcePath, run validation, and leave audit/rollback evidence.
-- Hard stops still require explicit foreground approval: publish/npm release, git push, tag creation, credential/provider-auth changes, destructive user-data deletion, network-exposed services, or expanding authority beyond this policy.
-- Treat current-turn evidence as a cue, not proof; prefer deterministic or longitudinal corroboration for durable behavior changes.
-- Active-task work remains primary: autonomy runs must not interrupt user-visible execution or claim task completion without evidence.`;
-		}
-		return `Pi autonomy policy (mode ${autonomy.mode}):
-- Setting-authorized background learners may run after long sessions${reflection ? " or corrective/complex turns" : ""} using model ${model}.
-- Background learning may query durable memory and run bounded learning tools.
-- Auto-apply is limited to high-confidence durable memory when explicitly configured; tooling, skill, prompt, extension, settings, and core-source changes stay proposal/approval-gated.
-- Treat current-turn evidence as a cue, not proof; prefer longitudinal corroboration before changing durable behavior.
-- Active-task work remains primary: learning runs must not interrupt user-visible execution or claim task completion.`;
-	}
-
-	private _buildSystemPromptOptionsForToolNames(toolNames: string[]): BuildSystemPromptOptions {
-		const validToolNames = toolNames.filter((name) => this._toolRegistry.has(name));
-		const toolSnippets: Record<string, string> = {};
-		const promptGuidelines: string[] = [];
-		for (const name of validToolNames) {
-			const snippet = this._toolPromptSnippets.get(name);
-			if (snippet) {
-				toolSnippets[name] = snippet;
-			}
-
-			const toolGuidelines = this._toolPromptGuidelines.get(name);
-			if (toolGuidelines) {
-				promptGuidelines.push(...toolGuidelines);
-			}
-		}
-
-		const loaderSystemPrompt = this._resourceLoader.getSystemPrompt();
-		const loaderAppendSystemPrompt = this._resourceLoader.getAppendSystemPrompt();
-		const appendSystemPromptParts = [
-			// R6: situational soul — the active profile's identity prefix, switched atomically with the
-			// profile's capabilities/model. Most prominent, so it comes first.
-			this._buildSituationSoulPrompt(),
-			// Always-on untrusted-content boundary contract (gives the <untrusted_content> fences meaning).
-			UNTRUSTED_BOUNDARY_SYSTEM_RULE,
-			this._buildSelfModificationPrompt(),
-			this._buildAutonomyPrompt(),
-			// Memory subsystem: static, frozen-per-session block (e.g. file-store MEMORY.md/USER.md).
-			this._memoryManager.buildSystemPromptBlock() || undefined,
-			...loaderAppendSystemPrompt,
-		].filter((part): part is string => Boolean(part));
-		const appendSystemPrompt = appendSystemPromptParts.length > 0 ? appendSystemPromptParts.join("\n\n") : undefined;
-		// Only surface skills the active profile permits — the agent must not be told about (or able
-		// to invoke) a skill its profile blocks.
-		const loadedSkills = this._resourceLoader.getActiveSkills();
-		const loadedContextFiles = this._resourceLoader.getAgentsFiles().agentsFiles;
-
-		return {
-			cwd: this._cwd,
-			skills: loadedSkills,
-			contextFiles: loadedContextFiles,
-			customPrompt: loaderSystemPrompt,
-			appendSystemPrompt,
-			selectedTools: validToolNames,
-			toolSnippets,
-			promptGuidelines,
-			extensions: [...this._extensionRunner.activeExtensions],
-		};
+		return this._systemPromptBuilder.normalizePromptGuidelines(guidelines);
 	}
 
 	private _rebuildSystemPrompt(toolNames: string[]): string {
-		this._baseSystemPromptOptions = this._buildSystemPromptOptionsForToolNames(toolNames);
-		return buildSystemPrompt(this._baseSystemPromptOptions);
+		return this._systemPromptBuilder.rebuildSystemPrompt(toolNames);
 	}
 
 	/**
 	 * Build a system prompt for a specific tool surface WITHOUT touching the session's base prompt
-	 * state. Used for a router-swapped turn (G4): the routed model runs against a filtered tool set,
-	 * so it must also receive a system prompt whose tool guidelines/snippets match that filtered
-	 * surface — but the change is per-turn, so it must not mutate `_baseSystemPromptOptions` (which
-	 * later turns and extension events read).
+	 * state (G4 router-swap; see {@link SystemPromptBuilder.buildSystemPromptForToolNames}).
 	 */
 	private _buildSystemPromptForToolNames(toolNames: string[]): string {
-		return buildSystemPrompt(this._buildSystemPromptOptionsForToolNames(toolNames));
+		return this._systemPromptBuilder.buildSystemPromptForToolNames(toolNames);
 	}
 
 	// =========================================================================
@@ -3677,7 +3543,7 @@ export class AgentSession {
 				expandedText,
 				currentImages,
 				this._baseSystemPrompt,
-				this._baseSystemPromptOptions,
+				this._systemPromptBuilder.getBaseSystemPromptOptions(),
 			);
 			// Add all custom messages from extensions
 			if (result?.messages) {
