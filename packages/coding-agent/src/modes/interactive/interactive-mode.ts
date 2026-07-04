@@ -172,6 +172,7 @@ import { TreeSelectorComponent } from "./components/tree-selector.ts";
 import { TrustSelectorComponent } from "./components/trust-selector.ts";
 import { UserMessageComponent } from "./components/user-message.ts";
 import { UserMessageSelectorComponent } from "./components/user-message-selector.ts";
+import { EditorOverlayHost } from "./editor-overlay-host.ts";
 import * as historyReloadMath from "./history-reload-math.ts";
 import * as resourceDisplay from "./resource-display.ts";
 import {
@@ -338,6 +339,7 @@ export class InteractiveMode {
 	private autocompleteProviderWrappers: AutocompleteProviderFactory[] = [];
 	private fdPath: string | undefined;
 	private editorContainer: Container;
+	private overlayHost: EditorOverlayHost;
 	private footer: FooterComponent;
 	private footerDataProvider: FooterDataProvider;
 	private autoLearnController: AutoLearnController;
@@ -489,6 +491,7 @@ export class InteractiveMode {
 		this.editor = this.defaultEditor;
 		this.editorContainer = new Container();
 		this.editorContainer.addChild(this.editor as Component);
+		this.overlayHost = new EditorOverlayHost(this.editorContainer, this.ui);
 		this.footerDataProvider = new FooterDataProvider(this.sessionManager.getCwd());
 		this.footer = new FooterComponent(this.session, this.footerDataProvider);
 		this.autoLearnController = new AutoLearnController({
@@ -2055,10 +2058,7 @@ export class InteractiveMode {
 				{ tui: this.ui, timeout: opts?.timeout, onToggleToolsExpanded: () => this.toggleToolOutputExpansion() },
 			);
 
-			this.editorContainer.clear();
-			this.editorContainer.addChild(this.extensionSelector);
-			this.ui.setFocus(this.extensionSelector);
-			this.ui.requestRender();
+			this.overlayHost.swap(this.extensionSelector);
 		});
 	}
 
@@ -2067,11 +2067,8 @@ export class InteractiveMode {
 	 */
 	private hideExtensionSelector(): void {
 		this.extensionSelector?.dispose();
-		this.editorContainer.clear();
-		this.editorContainer.addChild(this.editor);
 		this.extensionSelector = undefined;
-		this.ui.setFocus(this.editor);
-		this.ui.requestRender();
+		this.overlayHost.swap(this.editor);
 	}
 
 	/**
@@ -2130,10 +2127,7 @@ export class InteractiveMode {
 				{ tui: this.ui, timeout: opts?.timeout },
 			);
 
-			this.editorContainer.clear();
-			this.editorContainer.addChild(this.extensionInput);
-			this.ui.setFocus(this.extensionInput);
-			this.ui.requestRender();
+			this.overlayHost.swap(this.extensionInput);
 		});
 	}
 
@@ -2142,11 +2136,8 @@ export class InteractiveMode {
 	 */
 	private hideExtensionInput(): void {
 		this.extensionInput?.dispose();
-		this.editorContainer.clear();
-		this.editorContainer.addChild(this.editor);
 		this.extensionInput = undefined;
-		this.ui.setFocus(this.editor);
-		this.ui.requestRender();
+		this.overlayHost.swap(this.editor);
 	}
 
 	/**
@@ -2169,10 +2160,7 @@ export class InteractiveMode {
 				},
 			);
 
-			this.editorContainer.clear();
-			this.editorContainer.addChild(this.extensionEditor);
-			this.ui.setFocus(this.extensionEditor);
-			this.ui.requestRender();
+			this.overlayHost.swap(this.extensionEditor);
 		});
 	}
 
@@ -2180,11 +2168,8 @@ export class InteractiveMode {
 	 * Hide the extension editor.
 	 */
 	private hideExtensionEditor(): void {
-		this.editorContainer.clear();
-		this.editorContainer.addChild(this.editor);
 		this.extensionEditor = undefined;
-		this.ui.setFocus(this.editor);
-		this.ui.requestRender();
+		this.overlayHost.swap(this.editor);
 	}
 
 	/**
@@ -2288,11 +2273,8 @@ export class InteractiveMode {
 		const isOverlay = options?.overlay ?? false;
 
 		const restoreEditor = () => {
-			this.editorContainer.clear();
-			this.editorContainer.addChild(this.editor);
 			this.editor.setText(savedText);
-			this.ui.restoreFocus(this.editor);
-			this.ui.requestRender();
+			this.overlayHost.swap(this.editor, { focusMode: "restore" });
 		};
 
 		return new Promise((resolve, reject) => {
@@ -2335,10 +2317,7 @@ export class InteractiveMode {
 						// Expose handle to caller for visibility control
 						options?.onHandle?.(handle);
 					} else {
-						this.editorContainer.clear();
-						this.editorContainer.addChild(component);
-						this.ui.setFocus(component);
-						this.ui.requestRender();
+						this.overlayHost.swap(component);
 					}
 				})
 				.catch((err) => {
@@ -4257,15 +4236,10 @@ export class InteractiveMode {
 	 */
 	private showSelector(create: (done: () => void) => { component: Component; focus: Component }): void {
 		const done = () => {
-			this.editorContainer.clear();
-			this.editorContainer.addChild(this.editor);
-			this.ui.restoreFocus(this.editor);
+			this.overlayHost.swap(this.editor, { focusMode: "restore", render: "none" });
 		};
 		const { component, focus } = create(done);
-		this.editorContainer.clear();
-		this.editorContainer.addChild(component);
-		this.ui.setFocus(focus);
-		this.ui.requestRender();
+		this.overlayHost.swap(component, { focus });
 	}
 
 	private getAutoLearnModelOptions(): SelectItem[] {
@@ -6952,10 +6926,7 @@ export class InteractiveMode {
 
 	private showBedrockSetupDialog(providerId: string, providerName: string): void {
 		const restoreEditor = () => {
-			this.editorContainer.clear();
-			this.editorContainer.addChild(this.editor);
-			this.ui.setFocus(this.editor);
-			this.ui.requestRender();
+			this.overlayHost.swap(this.editor);
 		};
 
 		const dialog = new LoginDialogComponent(
@@ -6972,10 +6943,7 @@ export class InteractiveMode {
 			theme.fg("accent", `  ${path.join(getDocsPath(), "providers.md")}`),
 		]);
 
-		this.editorContainer.clear();
-		this.editorContainer.addChild(dialog);
-		this.ui.setFocus(dialog);
-		this.ui.requestRender();
+		this.overlayHost.swap(dialog);
 	}
 
 	private async showApiKeyLoginDialog(providerId: string, providerName: string): Promise<void> {
@@ -6990,16 +6958,10 @@ export class InteractiveMode {
 			providerName,
 		);
 
-		this.editorContainer.clear();
-		this.editorContainer.addChild(dialog);
-		this.ui.setFocus(dialog);
-		this.ui.requestRender();
+		this.overlayHost.swap(dialog);
 
 		const restoreEditor = () => {
-			this.editorContainer.clear();
-			this.editorContainer.addChild(this.editor);
-			this.ui.setFocus(this.editor);
-			this.ui.requestRender();
+			this.overlayHost.swap(this.editor);
 		};
 
 		try {
@@ -7024,10 +6986,7 @@ export class InteractiveMode {
 	private showOAuthLoginSelect(dialog: LoginDialogComponent, prompt: OAuthSelectPrompt): Promise<string | undefined> {
 		return new Promise((resolve) => {
 			const restoreDialog = () => {
-				this.editorContainer.clear();
-				this.editorContainer.addChild(dialog);
-				this.ui.setFocus(dialog);
-				this.ui.requestRender();
+				this.overlayHost.swap(dialog);
 			};
 			const labels = prompt.options.map((option) => option.label);
 			const selector = new ExtensionSelectorComponent(
@@ -7042,10 +7001,7 @@ export class InteractiveMode {
 					resolve(undefined);
 				},
 			);
-			this.editorContainer.clear();
-			this.editorContainer.addChild(selector);
-			this.ui.setFocus(selector);
-			this.ui.requestRender();
+			this.overlayHost.swap(selector);
 		});
 	}
 
@@ -7069,10 +7025,7 @@ export class InteractiveMode {
 		);
 
 		// Show dialog in editor container
-		this.editorContainer.clear();
-		this.editorContainer.addChild(dialog);
-		this.ui.setFocus(dialog);
-		this.ui.requestRender();
+		this.overlayHost.swap(dialog);
 
 		// Promise for manual code input (racing with callback server)
 		let manualCodeResolve: ((code: string) => void) | undefined;
@@ -7084,10 +7037,7 @@ export class InteractiveMode {
 
 		// Restore editor helper
 		const restoreEditor = () => {
-			this.editorContainer.clear();
-			this.editorContainer.addChild(this.editor);
-			this.ui.setFocus(this.editor);
-			this.ui.requestRender();
+			this.overlayHost.swap(this.editor);
 		};
 
 		try {
@@ -7174,20 +7124,14 @@ export class InteractiveMode {
 		reloadBox.addChild(new DynamicBorder(borderColor));
 
 		const previousEditor = this.editor;
-		this.editorContainer.clear();
-		this.editorContainer.addChild(reloadBox);
-		this.ui.setFocus(reloadBox);
-		this.ui.requestRender(true);
+		this.overlayHost.swap(reloadBox, { render: "sync" });
 		// Let the terminal paint the reload notice before CPU-heavy extension/theme
 		// work begins. process.nextTick runs before I/O and can still make reloads
 		// appear frozen.
 		await new Promise((resolve) => setImmediate(resolve));
 
 		const dismissReloadBox = (editor: Component) => {
-			this.editorContainer.clear();
-			this.editorContainer.addChild(editor);
-			this.ui.setFocus(editor);
-			this.ui.requestRender();
+			this.overlayHost.swap(editor);
 		};
 
 		try {
@@ -7422,16 +7366,11 @@ export class InteractiveMode {
 
 		// Show cancellable loader, replacing the editor
 		const loader = new BorderedLoader(this.ui, theme, "Creating gist...");
-		this.editorContainer.clear();
-		this.editorContainer.addChild(loader);
-		this.ui.setFocus(loader);
-		this.ui.requestRender();
+		this.overlayHost.swap(loader);
 
 		const restoreEditor = () => {
 			loader.dispose();
-			this.editorContainer.clear();
-			this.editorContainer.addChild(this.editor);
-			this.ui.setFocus(this.editor);
+			this.overlayHost.swap(this.editor, { render: "none" });
 			try {
 				fs.unlinkSync(tmpFile);
 			} catch {

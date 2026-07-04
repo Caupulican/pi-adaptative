@@ -4,6 +4,7 @@ import { beforeAll, describe, expect, it } from "vitest";
 import type { ExtensionUIContext } from "../src/core/extensions/types.ts";
 import type { LocalRuntimeDeps } from "../src/core/models/local-runtime.ts";
 import type { ExtensionSelectorComponent } from "../src/modes/interactive/components/extension-selector.ts";
+import { EditorOverlayHost } from "../src/modes/interactive/editor-overlay-host.ts";
 import { InteractiveMode } from "../src/modes/interactive/interactive-mode.ts";
 import { initTheme } from "../src/modes/interactive/theme/theme.ts";
 import { createHarness } from "./suite/harness.ts";
@@ -146,6 +147,9 @@ describe("#31 real interactive smoke — install-ollama confirm through Interact
 		const fakeThis = {
 			ui,
 			editorContainer,
+			// Mirror the real InteractiveMode collaborator: showExtensionSelector/hideExtensionSelector
+			// delegate their container swap through this.overlayHost.
+			overlayHost: new EditorOverlayHost(editorContainer, ui),
 			editor,
 			extensionSelector: undefined as ExtensionSelectorComponent | undefined,
 			toggleToolOutputExpansion: () => {},
