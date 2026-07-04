@@ -5,7 +5,7 @@
  *
  * Test with: npx tsx src/cli-new.ts [args...]
  */
-import { APP_NAME } from "./config.ts";
+import { APP_NAME, VERSION } from "./config.ts";
 import { configureHttpDispatcher } from "./core/http-dispatcher.ts";
 
 process.title = APP_NAME;
@@ -19,6 +19,13 @@ configureHttpDispatcher();
 const cliArgs = process.argv.slice(2);
 const [firstArg] = cliArgs;
 const packageCommands = new Set(["install", "remove", "uninstall", "update", "list", "config"]);
+
+// Fast path: version needs nothing beyond config.ts (already loaded). Mirrors main.ts's
+// `parsed.version` output exactly; skipping main's import graph turns ~1s into ~150ms.
+if ((firstArg === "--version" || firstArg === "-v") && cliArgs.length === 1) {
+	console.log(VERSION);
+	process.exit(0);
+}
 if ((cliArgs.includes("--help") || cliArgs.includes("-h")) && !packageCommands.has(firstArg ?? "")) {
 	const [{ parseArgs, printHelp }, { takeOverStdout }] = await Promise.all([
 		import("./cli/args.ts"),
