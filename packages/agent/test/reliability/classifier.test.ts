@@ -97,4 +97,27 @@ describe("classifyFailure", () => {
 		expect(classifyFailure({ message: "please retry in 2500 ms" }).retryAfterMs).toBe(2_500);
 		expect(classifyFailure({ message: "500 internal error" }).retryAfterMs).toBeUndefined();
 	});
+
+	it("bare-substring matching for numeric status codes", () => {
+		// 429 matches as bare substring
+		expect(classifyFailure({ message: "code429" })).toMatchObject({
+			reason: "rate_limit",
+			retryable: true,
+		});
+		// 500 matches as bare substring
+		expect(classifyFailure({ message: "abc500def" })).toMatchObject({
+			reason: "server_error",
+			retryable: true,
+		});
+		// 502 matches as bare substring
+		expect(classifyFailure({ message: "x502y" })).toMatchObject({
+			reason: "server_error",
+			retryable: true,
+		});
+		// 501 must NOT match (not in the supported range)
+		expect(classifyFailure({ message: "501 Not Implemented" })).toMatchObject({
+			reason: "unknown",
+			retryable: false,
+		});
+	});
 });

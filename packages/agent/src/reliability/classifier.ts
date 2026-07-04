@@ -46,11 +46,11 @@ export interface ClassifyFailureInput {
 const BILLING_OR_QUOTA =
 	/GoUsageLimitError|FreeUsageLimitError|Monthly usage limit reached|available balance|insufficient_quota|out of budget|quota exceeded|billing/i;
 const AUTH = /\b401\b|unauthorized|invalid.?api.?key|authentication.?error|forbidden|permission.?denied/i;
-const RATE_LIMIT = /rate.?limit|too many requests|\b429\b/i;
+const RATE_LIMIT = /rate.?limit|too many requests|429/i;
 const OVERLOADED = /overloaded/i;
 const STREAM_STALL = /stream stalled|ended without|stream ended before message_stop|reset before headers/i;
 const SERVER_ERROR =
-	/\b50[0-4]\b|service.?unavailable|server.?error|internal.?error|provider.?returned.?error|upstream.?connect|http2 request did not get a response|retry delay/i;
+	/500|502|503|504|service.?unavailable|server.?error|internal.?error|provider.?returned.?error|upstream.?connect|http2 request did not get a response|retry delay/i;
 const NETWORK =
 	/network.?error|connection.?error|connection.?refused|connection.?lost|websocket.?closed|websocket.?error|other side closed|fetch failed|socket hang up|timed? out|timeout|terminated/i;
 
@@ -77,7 +77,8 @@ export function classifyFailure(input: ClassifyFailureInput): ClassifiedError {
 		message,
 	};
 
-	const withRetry = (obj: any) => (retryAfterMs !== undefined ? { ...obj, retryAfterMs } : obj);
+	const withRetry = <T extends { reason: FailureReason }>(obj: T): T | (T & { retryAfterMs: number }) =>
+		retryAfterMs !== undefined ? { ...obj, retryAfterMs } : obj;
 
 	if (input.aborted) return withRetry({ ...base, reason: "aborted" });
 	if (input.contextOverflow) return withRetry({ ...base, reason: "context_overflow", shouldCompact: true });
@@ -85,10 +86,11 @@ export function classifyFailure(input: ClassifyFailureInput): ClassifiedError {
 	if (AUTH.test(message))
 		return withRetry({ ...base, reason: "auth", shouldRotateCredential: true, shouldFallback: true });
 
-	if (RATE_LIMIT.test(message) || OVERLOADED.test(message)) {
+	const isRateLimit = RATE_LIMIT.test(message);
+	if (isRateLimit || OVERLOADED.test(message)) {
 		return withRetry({
 			...base,
-			reason: RATE_LIMIT.test(message) ? "rate_limit" : "overloaded",
+			reason: isRateLimit ? "rate_limit" : "overloaded",
 			retryable: true,
 			shouldRotateCredential: true,
 			shouldFallback: true,
