@@ -8,11 +8,10 @@
 
 import { existsSync, rmSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
-import type { AgentMessage } from "@caupulican/pi-agent-core";
+import { type AgentMessage, compactToolResultDetailsForRetention } from "@caupulican/pi-agent-core";
 import { fauxAssistantMessage, fauxToolCall } from "@caupulican/pi-ai";
 import { afterEach, describe, expect, it } from "vitest";
 import { createFileArtifactStore, isMissingArtifactMarker } from "../../src/core/context/context-artifacts.ts";
-import { compactToolResultDetailsForRetention } from "../../src/core/message-retention.ts";
 import { createHarness, type Harness } from "./harness.ts";
 
 interface ToolDetailsLike {

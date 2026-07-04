@@ -10,6 +10,7 @@
 ### Changed
 - truncate and sanitizeBinaryOutput now live in @caupulican/pi-agent-core (single canonical copy).
 - The live custom message types (BashExecutionMessage, CustomMessage, BranchSummaryMessage, CompactionSummaryMessage) and the convertToLlm transformer are promoted from coding-agent into the kernel, exported from the main entry (`@caupulican/pi-agent-core`). They populate `CustomAgentMessages` via declaration merging, so `AgentMessage` and `convertToLlm` handle these roles out of the box; apps may still extend `CustomAgentMessages` further.
+- The tool-result-details retention helpers (`compactToolResultDetailsForRetention`, `compactRetainedDetails`, `MAX_RETAINED_TOOL_RESULT_DETAILS_BYTES`, `MAX_TUI_RETAINED_DETAILS_BYTES`) are promoted from coding-agent into the kernel, exported from the main entry (`@caupulican/pi-agent-core`). The module is pure string/object manipulation with no Node dependencies, so it is browser-safe.
 
 ## [0.80.103] - 2026-07-03
 

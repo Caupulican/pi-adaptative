@@ -30,6 +30,7 @@ import {
 	type BashExecutionMessage,
 	type CustomMessage,
 	classifyFailure,
+	compactToolResultDetailsForRetention,
 	createCustomMessage,
 	DEFAULT_RETRY_POLICY,
 	DEFAULT_STREAM_IDLE,
@@ -213,7 +214,6 @@ import { MemoryManager } from "./memory/memory-manager.ts";
 import type { MemoryProvider } from "./memory/memory-provider.ts";
 import { FileStoreProvider } from "./memory/providers/file-store.ts";
 import { TranscriptRecallProvider } from "./memory/providers/transcript-recall.ts";
-import { compactToolResultDetailsForRetention } from "./message-retention.ts";
 import {
 	deriveModelCapabilityProfile,
 	filterToolNamesForCapability,

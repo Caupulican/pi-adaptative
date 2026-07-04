@@ -8,6 +8,8 @@ export * from "./messages.ts";
 export * from "./proxy.ts";
 // Reliability kernel
 export * from "./reliability/index.ts";
+// Session message retention (pure)
+export * from "./session/message-retention.ts";
 // Types
 export * from "./types.ts";
 // Shell output utilities

@@ -2,6 +2,7 @@ import {
 	type AgentMessage,
 	type BashExecutionMessage,
 	type CustomMessage,
+	compactToolResultDetailsForRetention,
 	createBranchSummaryMessage,
 	createCompactionSummaryMessage,
 	createCustomMessage,
@@ -28,7 +29,6 @@ import { createInterface } from "readline";
 import { StringDecoder } from "string_decoder";
 import { getAgentDir as getDefaultAgentDir, getSessionsDir } from "../config.ts";
 import { normalizePath, resolvePath } from "../utils/paths.ts";
-import { compactToolResultDetailsForRetention } from "./message-retention.ts";
 
 export const CURRENT_SESSION_VERSION = 3;
 
