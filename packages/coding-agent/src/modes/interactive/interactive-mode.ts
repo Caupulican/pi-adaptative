@@ -171,6 +171,8 @@ import { TreeSelectorComponent } from "./components/tree-selector.ts";
 import { TrustSelectorComponent } from "./components/trust-selector.ts";
 import { UserMessageComponent } from "./components/user-message.ts";
 import { UserMessageSelectorComponent } from "./components/user-message-selector.ts";
+import * as historyReloadMath from "./history-reload-math.ts";
+import * as resourceDisplay from "./resource-display.ts";
 import {
 	getAvailableThemes,
 	getAvailableThemesWithPaths,
@@ -188,8 +190,6 @@ import {
 	theme,
 } from "./theme/theme.ts";
 
-const TUI_HISTORY_RELOAD_MAX_LINES = 1000;
-const TUI_HISTORY_RELOAD_WRAP_WIDTH = 100;
 const TUI_HISTORY_RELOAD_CHUNK_SIZE = 20;
 const TUI_LIVE_HISTORY_MAX_COMPONENTS = 260;
 const TUI_LIVE_HISTORY_TRIM_TO_COMPONENTS = 220;
@@ -1082,22 +1082,16 @@ export class InteractiveMode {
 	// Extension System
 	// =========================================================================
 
+	// The resource-display formatters below are pure and live in ./resource-display.ts.
+	// These thin `this.`-delegates are retained so showLoadedResources' formatter
+	// injection seam (exercised via prototype stubs in interactive-mode-status.test.ts)
+	// keeps working unchanged.
 	private formatDisplayPath(p: string): string {
-		const home = os.homedir();
-		let result = p;
-
-		// Replace home directory with ~
-		if (result.startsWith(home)) {
-			result = `~${result.slice(home.length)}`;
-		}
-
-		return result;
+		return resourceDisplay.formatDisplayPath(p);
 	}
 
 	private formatExtensionDisplayPath(path: string): string {
-		let result = this.formatDisplayPath(path);
-		result = result.replace(/\/index\.ts$/, "").replace(/\/index\.js$/, "");
-		return result;
+		return resourceDisplay.formatExtensionDisplayPath(path);
 	}
 
 	private formatContextPath(p: string): string {
@@ -1115,88 +1109,24 @@ export class InteractiveMode {
 		return this.options.verbose || this.toolOutputExpanded;
 	}
 
-	/**
-	 * Get a short path relative to the package root for display.
-	 */
 	private getShortPath(fullPath: string, sourceInfo?: SourceInfo): string {
-		const baseDir = sourceInfo?.baseDir;
-		if (baseDir && this.isPackageSource(sourceInfo)) {
-			const relativePath = path.relative(path.resolve(baseDir), path.resolve(fullPath));
-			if (
-				relativePath &&
-				relativePath !== "." &&
-				!relativePath.startsWith("..") &&
-				!relativePath.startsWith(`..${path.sep}`) &&
-				!path.isAbsolute(relativePath)
-			) {
-				return relativePath.replace(/\\/g, "/");
-			}
-		}
-
-		const source = sourceInfo?.source ?? "";
-		const npmMatch = fullPath.match(/node_modules\/(@?[^/]+(?:\/[^/]+)?)\/(.*)/);
-		if (npmMatch && source.startsWith("npm:")) {
-			return npmMatch[2];
-		}
-
-		const gitMatch = fullPath.match(/git\/[^/]+\/[^/]+\/(.*)/);
-		if (gitMatch && source.startsWith("git:")) {
-			return gitMatch[1];
-		}
-
-		return this.formatDisplayPath(fullPath);
+		return resourceDisplay.getShortPath(fullPath, sourceInfo);
 	}
 
 	private getCompactPathLabel(resourcePath: string, sourceInfo?: SourceInfo): string {
-		const shortPath = this.getShortPath(resourcePath, sourceInfo);
-		const normalizedPath = shortPath.replace(/\\/g, "/");
-		const segments = normalizedPath.split("/").filter((segment) => segment.length > 0 && segment !== "~");
-		if (segments.length > 0) {
-			return segments[segments.length - 1]!;
-		}
-		return shortPath;
+		return resourceDisplay.getCompactPathLabel(resourcePath, sourceInfo);
 	}
 
 	private getCompactPackageSourceLabel(sourceInfo?: SourceInfo): string {
-		const source = sourceInfo?.source ?? "";
-		if (source.startsWith("npm:")) {
-			return source.slice("npm:".length) || source;
-		}
-
-		const gitSource = parseGitUrl(source);
-		if (gitSource) {
-			return gitSource.path || source;
-		}
-
-		return source;
+		return resourceDisplay.getCompactPackageSourceLabel(sourceInfo);
 	}
 
 	private getCompactExtensionLabel(resourcePath: string, sourceInfo?: SourceInfo): string {
-		if (!this.isPackageSource(sourceInfo)) {
-			return this.getCompactPathLabel(resourcePath, sourceInfo);
-		}
-
-		const sourceLabel = this.getCompactPackageSourceLabel(sourceInfo);
-		if (!sourceLabel) {
-			return this.getCompactPathLabel(resourcePath, sourceInfo);
-		}
-
-		const shortPath = this.getShortPath(resourcePath, sourceInfo).replace(/\\/g, "/");
-		const packagePath = shortPath.startsWith("extensions/") ? shortPath.slice("extensions/".length) : shortPath;
-		const parsedPath = path.posix.parse(packagePath);
-
-		if (parsedPath.name === "index") {
-			return !parsedPath.dir || parsedPath.dir === "." ? sourceLabel : `${sourceLabel}:${parsedPath.dir}`;
-		}
-
-		return `${sourceLabel}:${packagePath}`;
+		return resourceDisplay.getCompactExtensionLabel(resourcePath, sourceInfo);
 	}
 
 	private getCompactDisplayPathSegments(resourcePath: string): string[] {
-		return this.formatDisplayPath(resourcePath)
-			.replace(/\\/g, "/")
-			.split("/")
-			.filter((segment) => segment.length > 0 && segment !== "~");
+		return resourceDisplay.getCompactDisplayPathSegments(resourcePath);
 	}
 
 	private getCompactNonPackageExtensionLabel(
@@ -1204,99 +1134,19 @@ export class InteractiveMode {
 		index: number,
 		allPaths: Array<{ path: string; segments: string[] }>,
 	): string {
-		const segments = allPaths[index]?.segments;
-		if (!segments || segments.length === 0) {
-			return this.getCompactPathLabel(resourcePath);
-		}
-
-		for (let segmentCount = 1; segmentCount <= segments.length; segmentCount += 1) {
-			const candidate = segments.slice(-segmentCount).join("/");
-			const isUnique = allPaths.every((item, itemIndex) => {
-				if (itemIndex === index) {
-					return true;
-				}
-				return item.segments.slice(-segmentCount).join("/") !== candidate;
-			});
-
-			if (isUnique) {
-				return candidate;
-			}
-		}
-
-		return segments.join("/");
+		return resourceDisplay.getCompactNonPackageExtensionLabel(resourcePath, index, allPaths);
 	}
 
 	private getCompactExtensionLabels(extensions: Array<{ path: string; sourceInfo?: SourceInfo }>): string[] {
-		const nonPackageExtensions = extensions
-			.map((extension) => {
-				const segments = this.getCompactDisplayPathSegments(extension.path);
-				const lastSegment = segments[segments.length - 1];
-				if (segments.length > 1 && (lastSegment === "index.ts" || lastSegment === "index.js")) {
-					segments.pop();
-				}
-				return {
-					path: extension.path,
-					sourceInfo: extension.sourceInfo,
-					segments,
-				};
-			})
-			.filter((extension) => !this.isPackageSource(extension.sourceInfo));
-
-		return extensions.map((extension) => {
-			if (this.isPackageSource(extension.sourceInfo)) {
-				return this.getCompactExtensionLabel(extension.path, extension.sourceInfo);
-			}
-
-			const nonPackageIndex = nonPackageExtensions.findIndex((item) => item.path === extension.path);
-			if (nonPackageIndex === -1) {
-				return this.getCompactPathLabel(extension.path, extension.sourceInfo);
-			}
-
-			return this.getCompactNonPackageExtensionLabel(extension.path, nonPackageIndex, nonPackageExtensions);
-		});
-	}
-
-	private getDisplaySourceInfo(sourceInfo?: SourceInfo): {
-		label: string;
-		scopeLabel?: string;
-		color: "accent" | "muted";
-	} {
-		const source = sourceInfo?.source ?? "local";
-		const scope = sourceInfo?.scope ?? "project";
-		if (source === "local") {
-			if (scope === "user") {
-				return { label: "user", color: "muted" };
-			}
-			if (scope === "project") {
-				return { label: "project", color: "muted" };
-			}
-			if (scope === "temporary") {
-				return { label: "path", scopeLabel: "temp", color: "muted" };
-			}
-			return { label: "path", color: "muted" };
-		}
-
-		if (source === "cli") {
-			return { label: "path", scopeLabel: scope === "temporary" ? "temp" : undefined, color: "muted" };
-		}
-
-		const scopeLabel =
-			scope === "user" ? "user" : scope === "project" ? "project" : scope === "temporary" ? "temp" : undefined;
-		return { label: source, scopeLabel, color: "accent" };
+		return resourceDisplay.getCompactExtensionLabels(extensions);
 	}
 
 	private getScopeGroup(sourceInfo?: SourceInfo): "user" | "project" | "path" {
-		const source = sourceInfo?.source ?? "local";
-		const scope = sourceInfo?.scope ?? "project";
-		if (source === "cli" || scope === "temporary") return "path";
-		if (scope === "user") return "user";
-		if (scope === "project") return "project";
-		return "path";
+		return resourceDisplay.getScopeGroup(sourceInfo);
 	}
 
 	private isPackageSource(sourceInfo?: SourceInfo): boolean {
-		const source = sourceInfo?.source ?? "";
-		return source.startsWith("npm:") || source.startsWith("git:");
+		return resourceDisplay.isPackageSource(sourceInfo);
 	}
 
 	private buildScopeGroups(items: Array<{ path: string; sourceInfo?: SourceInfo }>): Array<{
@@ -1304,36 +1154,7 @@ export class InteractiveMode {
 		paths: Array<{ path: string; sourceInfo?: SourceInfo }>;
 		packages: Map<string, Array<{ path: string; sourceInfo?: SourceInfo }>>;
 	}> {
-		const groups: Record<
-			"user" | "project" | "path",
-			{
-				scope: "user" | "project" | "path";
-				paths: Array<{ path: string; sourceInfo?: SourceInfo }>;
-				packages: Map<string, Array<{ path: string; sourceInfo?: SourceInfo }>>;
-			}
-		> = {
-			user: { scope: "user", paths: [], packages: new Map() },
-			project: { scope: "project", paths: [], packages: new Map() },
-			path: { scope: "path", paths: [], packages: new Map() },
-		};
-
-		for (const item of items) {
-			const groupKey = this.getScopeGroup(item.sourceInfo);
-			const group = groups[groupKey];
-			const source = item.sourceInfo?.source ?? "local";
-
-			if (this.isPackageSource(item.sourceInfo)) {
-				const list = group.packages.get(source) ?? [];
-				list.push(item);
-				group.packages.set(source, list);
-			} else {
-				group.paths.push(item);
-			}
-		}
-
-		return [groups.project, groups.user, groups.path].filter(
-			(group) => group.paths.length > 0 || group.packages.size > 0,
-		);
+		return resourceDisplay.buildScopeGroups(items);
 	}
 
 	private formatScopeGroups(
@@ -1347,104 +1168,11 @@ export class InteractiveMode {
 			formatPackagePath: (item: { path: string; sourceInfo?: SourceInfo }, source: string) => string;
 		},
 	): string {
-		const lines: string[] = [];
-
-		for (const group of groups) {
-			lines.push(`  ${theme.fg("accent", group.scope)}`);
-
-			const sortedPaths = [...group.paths].sort((a, b) => a.path.localeCompare(b.path));
-			for (const item of sortedPaths) {
-				lines.push(theme.fg("dim", `    ${options.formatPath(item)}`));
-			}
-
-			const sortedPackages = Array.from(group.packages.entries()).sort(([a], [b]) => a.localeCompare(b));
-			for (const [source, items] of sortedPackages) {
-				lines.push(`    ${theme.fg("mdLink", source)}`);
-				const sortedPackagePaths = [...items].sort((a, b) => a.path.localeCompare(b.path));
-				for (const item of sortedPackagePaths) {
-					lines.push(theme.fg("dim", `      ${options.formatPackagePath(item, source)}`));
-				}
-			}
-		}
-
-		return lines.join("\n");
-	}
-
-	private findSourceInfoForPath(p: string, sourceInfos: Map<string, SourceInfo>): SourceInfo | undefined {
-		const exact = sourceInfos.get(p);
-		if (exact) return exact;
-
-		let current = p;
-		while (current.includes("/")) {
-			current = current.substring(0, current.lastIndexOf("/"));
-			const parent = sourceInfos.get(current);
-			if (parent) return parent;
-		}
-
-		return undefined;
-	}
-
-	private formatPathWithSource(p: string, sourceInfo?: SourceInfo): string {
-		if (sourceInfo) {
-			const shortPath = this.getShortPath(p, sourceInfo);
-			const { label, scopeLabel } = this.getDisplaySourceInfo(sourceInfo);
-			const labelText = scopeLabel ? `${label} (${scopeLabel})` : label;
-			return `${labelText} ${shortPath}`;
-		}
-		return this.formatDisplayPath(p);
+		return resourceDisplay.formatScopeGroups(groups, options);
 	}
 
 	private formatDiagnostics(diagnostics: readonly ResourceDiagnostic[], sourceInfos: Map<string, SourceInfo>): string {
-		const lines: string[] = [];
-
-		// Group collision diagnostics by name
-		const collisions = new Map<string, ResourceDiagnostic[]>();
-		const otherDiagnostics: ResourceDiagnostic[] = [];
-
-		for (const d of diagnostics) {
-			if (d.type === "collision" && d.collision) {
-				const list = collisions.get(d.collision.name) ?? [];
-				list.push(d);
-				collisions.set(d.collision.name, list);
-			} else {
-				otherDiagnostics.push(d);
-			}
-		}
-
-		// Format collision diagnostics grouped by name
-		for (const [name, collisionList] of collisions) {
-			const first = collisionList[0]?.collision;
-			if (!first) continue;
-			lines.push(theme.fg("warning", `  "${name}" collision:`));
-			lines.push(
-				theme.fg(
-					"dim",
-					`    ${theme.fg("success", "✓")} ${this.formatPathWithSource(first.winnerPath, this.findSourceInfoForPath(first.winnerPath, sourceInfos))}`,
-				),
-			);
-			for (const d of collisionList) {
-				if (d.collision) {
-					lines.push(
-						theme.fg(
-							"dim",
-							`    ${theme.fg("warning", "✗")} ${this.formatPathWithSource(d.collision.loserPath, this.findSourceInfoForPath(d.collision.loserPath, sourceInfos))} (skipped)`,
-						),
-					);
-				}
-			}
-		}
-
-		for (const d of otherDiagnostics) {
-			if (d.path) {
-				const formattedPath = this.formatPathWithSource(d.path, this.findSourceInfoForPath(d.path, sourceInfos));
-				lines.push(theme.fg(d.type === "error" ? "error" : "warning", `  ${formattedPath}`));
-				lines.push(theme.fg(d.type === "error" ? "error" : "warning", `    ${d.message}`));
-			} else {
-				lines.push(theme.fg(d.type === "error" ? "error" : "warning", `  ${d.message}`));
-			}
-		}
-
-		return lines.join("\n");
+		return resourceDisplay.formatDiagnostics(diagnostics, sourceInfos);
 	}
 
 	private showLoadedResources(options?: {
@@ -3379,13 +3107,10 @@ export class InteractiveMode {
 	}
 
 	/** Extract text content from a user message */
+	// Thin `this.`-delegate to the pure formatter in ./history-reload-math.ts; kept so
+	// addMessageToChat and the prototype-based interactive-mode tests resolve it via `this`.
 	private getUserMessageText(message: Message): string {
-		if (message.role !== "user") return "";
-		const textBlocks =
-			typeof message.content === "string"
-				? [{ type: "text", text: message.content }]
-				: message.content.filter((c: { type: string }) => c.type === "text");
-		return textBlocks.map((c) => (c as { text: string }).text).join("");
+		return historyReloadMath.getUserMessageText(message);
 	}
 
 	private resetLiveTuiHistoryTrim(): void {
@@ -3657,116 +3382,14 @@ export class InteractiveMode {
 		this.trimLiveTuiHistory();
 	}
 
-	private getContentText(content: unknown): string {
-		if (typeof content === "string") return content;
-		if (Array.isArray(content)) {
-			return content
-				.map((part) => {
-					const maybeText = (part as { text?: unknown }).text;
-					return typeof maybeText === "string" ? maybeText : "";
-				})
-				.join("");
-		}
-		return "";
-	}
-
-	private getTuiHistoryMessageText(message: AgentMessage): string {
-		switch (message.role) {
-			case "bashExecution":
-				return [message.command, message.output ?? ""].filter(Boolean).join("\n");
-			case "user":
-				return this.getUserMessageText(message);
-			case "assistant":
-				return this.getContentText(message.content);
-			case "toolResult":
-				return this.getContentText(message.content);
-			case "custom":
-				return this.getContentText(message.content);
-			case "compactionSummary":
-			case "branchSummary":
-				return message.summary;
-			default: {
-				const _exhaustive: never = message;
-				return JSON.stringify(_exhaustive);
-			}
-		}
-	}
-
-	private estimateTuiHistoryLines(message: AgentMessage): number {
-		const text = this.getTuiHistoryMessageText(message);
-		const hardLines = text.length > 0 ? text.split(/\r\n|\r|\n/).length : 1;
-		const wrappedLines = Math.ceil(text.length / TUI_HISTORY_RELOAD_WRAP_WIDTH);
-		// Add one line for role/tool chrome or spacing. Tool-call-only assistant messages
-		// have little text but still render a component.
-		return Math.max(1, hardLines, wrappedLines) + 1;
-	}
-
-	private trimTextToTuiHistoryTail(text: string, maxEstimatedLines: number): string {
-		const maxLines = Math.max(1, maxEstimatedLines);
-		const lines = text.split(/\r\n|\r|\n/);
-		if (lines.length > maxLines) {
-			const omitted = lines.length - maxLines;
-			return `[Earlier ${omitted} line${omitted === 1 ? "" : "s"} omitted from TUI reload history; full session remains available to the model.]\n${lines.slice(-maxLines).join("\n")}`;
-		}
-		const maxChars = Math.max(TUI_HISTORY_RELOAD_WRAP_WIDTH, maxLines * TUI_HISTORY_RELOAD_WRAP_WIDTH);
-		if (text.length > maxChars) {
-			const omitted = text.length - maxChars;
-			return `[Earlier ${omitted} character${omitted === 1 ? "" : "s"} omitted from TUI reload history; full session remains available to the model.]\n${text.slice(-maxChars)}`;
-		}
-		return text;
-	}
-
-	private trimMessageToTuiHistoryTail(message: AgentMessage, maxEstimatedLines: number): AgentMessage {
-		const text = this.getTuiHistoryMessageText(message);
-		const trimmedText = this.trimTextToTuiHistoryTail(text, maxEstimatedLines);
-		if (trimmedText === text) return message;
-		const clone = JSON.parse(JSON.stringify(message)) as AgentMessage;
-		const mutable = clone as unknown as { role?: string; content?: unknown; output?: unknown };
-		if (mutable.role === "bashExecution" && typeof mutable.output === "string") {
-			mutable.output = trimmedText;
-		} else if (mutable.role === "compactionSummary" || mutable.role === "branchSummary") {
-			(mutable as { summary?: string }).summary = trimmedText;
-		} else if (typeof mutable.content === "string") {
-			mutable.content = trimmedText;
-		} else {
-			mutable.content = [{ type: "text", text: trimmedText }];
-		}
-		return clone;
-	}
-
+	// Thin `this.`-delegate to the pure reload-window math in ./history-reload-math.ts;
+	// kept so renderSessionContext and the prototype-based history tests resolve it via `this`.
 	private messagesForTuiHistoryReload(messages: AgentMessage[]): {
 		messages: AgentMessage[];
 		omittedMessages: number;
 		estimatedLines: number;
 	} {
-		let estimatedLines = 0;
-		let start = messages.length;
-		for (let i = messages.length - 1; i >= 0; i--) {
-			const nextLines = this.estimateTuiHistoryLines(messages[i]);
-			if (start < messages.length && estimatedLines + nextLines > TUI_HISTORY_RELOAD_MAX_LINES) break;
-			estimatedLines += nextLines;
-			start = i;
-			if (estimatedLines >= TUI_HISTORY_RELOAD_MAX_LINES) break;
-		}
-		const selected = messages.slice(start);
-		if (selected.length > 0 && estimatedLines > TUI_HISTORY_RELOAD_MAX_LINES) {
-			const tailLines = selected.slice(1).reduce((sum, message) => sum + this.estimateTuiHistoryLines(message), 0);
-			const firstAllowance = TUI_HISTORY_RELOAD_MAX_LINES - tailLines;
-			if (firstAllowance <= 4) {
-				selected.shift();
-				start += 1;
-				estimatedLines = tailLines;
-			} else {
-				// Reserve room for truncation marker, role chrome, and wrap variance.
-				selected[0] = this.trimMessageToTuiHistoryTail(selected[0], firstAllowance - 4);
-				estimatedLines = tailLines + this.estimateTuiHistoryLines(selected[0]);
-			}
-		}
-		return {
-			messages: selected,
-			omittedMessages: start,
-			estimatedLines,
-		};
+		return historyReloadMath.messagesForTuiHistoryReload(messages);
 	}
 
 	/**
@@ -3809,7 +3432,7 @@ export class InteractiveMode {
 			const tuiHistory = this.messagesForTuiHistoryReload(sessionContext.messages);
 			if (tuiHistory.omittedMessages > 0) {
 				this.appendStatusToChat(
-					`Showing last ~${TUI_HISTORY_RELOAD_MAX_LINES} TUI history lines; omitted ${tuiHistory.omittedMessages} older message${tuiHistory.omittedMessages === 1 ? "" : "s"}. Full session remains available to the model.`,
+					`Showing last ~${historyReloadMath.TUI_HISTORY_RELOAD_MAX_LINES} TUI history lines; omitted ${tuiHistory.omittedMessages} older message${tuiHistory.omittedMessages === 1 ? "" : "s"}. Full session remains available to the model.`,
 					{ requestRender: false },
 				);
 			}
