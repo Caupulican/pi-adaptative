@@ -14,6 +14,7 @@ import { type AssistantMessage, type AssistantMessageEvent, EventStream, getMode
 import { afterEach, beforeEach, describe, expect, it } from "vitest";
 import { AgentSession, type AgentSessionEvent } from "../src/core/agent-session.ts";
 import { AuthStorage } from "../src/core/auth-storage.ts";
+import { CompactionSupport, type CompactionSupportDeps } from "../src/core/compaction-support.ts";
 import { ModelRegistry } from "../src/core/model-registry.ts";
 import { SettingsManager } from "../src/core/settings-manager.ts";
 import { createTestResourceLoader } from "./utilities.ts";
@@ -246,26 +247,28 @@ describe("auto-compaction never fails silently", () => {
 
 	it("raw-stream auth resolution falls back to the session model before failing", async () => {
 		const tried: string[] = [];
-		const fakeThis = {
-			_isRawStreamSimple: () => true,
-			agent: { streamFn: () => undefined },
-			_modelRegistry: {
-				getApiKeyAndHeaders: async (m: { id: string }) => {
-					tried.push(m.id);
-					if (m.id === "cheap-model") return { ok: false as const };
-					return { ok: true as const, apiKey: "session-key", headers: { h: "1" } };
-				},
+		const fakeRegistry = {
+			getApiKeyAndHeaders: async (m: { id: string }) => {
+				tried.push(m.id);
+				if (m.id === "cheap-model") return { ok: false as const };
+				return { ok: true as const, apiKey: "session-key", headers: { h: "1" } };
 			},
 		};
-		type ResolveAuth = (
-			compactionModel: { id: string },
-			sessionModel: { id: string },
-		) => Promise<{ model: { id: string }; apiKey?: string; headers?: Record<string, string>; failure?: string }>;
-		const resolve = (AgentSession.prototype as unknown as { _resolveCompactionModelAndAuth: ResolveAuth })
-			._resolveCompactionModelAndAuth;
-		expect(resolve, "_resolveCompactionModelAndAuth helper does not exist yet").toBeTypeOf("function");
+		const support = new CompactionSupport({
+			getModel: () => undefined,
+			getSettingsManager: () => {
+				throw new Error("not needed for auth resolution");
+			},
+			getModelRegistry: () => fakeRegistry as unknown as ReturnType<CompactionSupportDeps["getModelRegistry"]>,
+			isRawStream: () => true,
+			getRequiredRequestAuth: async () => ({}),
+		});
 
-		const res = await resolve.call(fakeThis, { id: "cheap-model" }, { id: "session-model" });
+		type ModelArg = Parameters<CompactionSupport["resolveModelAndAuth"]>[0];
+		const res = await support.resolveModelAndAuth(
+			{ id: "cheap-model" } as ModelArg,
+			{ id: "session-model" } as ModelArg,
+		);
 		expect(tried).toEqual(["cheap-model", "session-model"]);
 		expect(res.model.id).toBe("session-model");
 		expect(res.apiKey).toBe("session-key");
