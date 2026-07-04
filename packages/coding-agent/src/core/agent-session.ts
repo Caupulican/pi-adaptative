@@ -73,7 +73,6 @@ import type {
 	WorkerResult,
 } from "./autonomy/contracts.ts";
 import { buildForegroundEnvelope, formatForegroundEnvelopeObservation } from "./autonomy/foreground-envelope.ts";
-import { evaluateToolGate } from "./autonomy/gates.ts";
 import type { LaneRecord } from "./autonomy/lane-tracker.ts";
 import type { AutonomyDiagnosticSnapshot, AutonomyStatusSnapshot, GateOutcomeHistoryEntry } from "./autonomy/status.ts";
 import type { AutonomyTelemetryEvent } from "./autonomy/telemetry-events.ts";
@@ -102,7 +101,6 @@ import { appendWorkerResultSnapshot, getWorkerResultSnapshots } from "./delegati
 import type { WorkerRunOutcome } from "./delegation/worker-runner.ts";
 import type {
 	ContextUsage,
-	Extension,
 	ExtensionCommandContextActions,
 	ExtensionContext,
 	ExtensionErrorListener,
@@ -147,11 +145,12 @@ import {
 	type ModelCapabilityProfile,
 } from "./model-capability.ts";
 import type { ModelRegistry } from "./model-registry.ts";
-import { resolveCliModel, resolveProfileModelSettings } from "./model-resolver.ts";
+import { resolveCliModel } from "./model-resolver.ts";
 import { formatModelRouterModel, ModelRouterController } from "./model-router-controller.ts";
 import { ModelSelectionController } from "./model-selection-controller.ts";
 import type { StoredFitnessReport } from "./models/fitness-store.ts";
 import type { LocalRuntimeDeps, OllamaRuntime } from "./models/local-runtime.ts";
+import { ProfileFilterController } from "./profile-filter-controller.ts";
 import { expandPromptTemplate, type PromptTemplate } from "./prompt-templates.ts";
 import { ReflectionController } from "./reflection-controller.ts";
 import type { ModelFitnessReport } from "./research/model-fitness.ts";
@@ -165,16 +164,12 @@ import { collectWorkspaceSources } from "./research/workspace-collector.ts";
 import type { ResourceExtensionPaths, ResourceLoader } from "./resource-loader.ts";
 import { stripResourceProfileBlocks } from "./resource-profile-blocks.ts";
 import { RuntimeBuilder } from "./runtime-builder.ts";
-import { classifyToolTrust, wrapUntrustedText } from "./security/untrusted-boundary.ts";
 import { SessionAnalytics } from "./session-analytics.ts";
 import { SessionTreeNavigator } from "./session-tree-navigator.ts";
-import {
-	matchesResourceProfilePattern,
-	type ResourceProfileFilterSettings,
-	type SettingsManager,
-} from "./settings-manager.ts";
+import type { ResourceProfileFilterSettings, SettingsManager } from "./settings-manager.ts";
 import type { SlashCommandInfo } from "./slash-commands.ts";
 import { SystemPromptBuilder } from "./system-prompt-builder.ts";
+import { ToolGateController } from "./tool-gate-controller.ts";
 import type { BashOperations } from "./tools/bash.ts";
 
 // ============================================================================
@@ -548,9 +543,6 @@ export class AgentSession {
 	private _compactionAbortController: AbortController | undefined = undefined;
 	private _autoCompactionAbortController: AbortController | undefined = undefined;
 	private _overflowRecoveryAttempted = false;
-	private _inertExtensionWarnings: string[] = [];
-	/** Extensions the active resource profile removed from the runtime set (surfaced in /context). */
-	private _profileDeniedExtensionCount = 0;
 	private _unboundToolGrantWarnings: string[] = [];
 
 	// Branch summarization state
@@ -565,6 +557,10 @@ export class AgentSession {
 	/** Standalone bash-command execution (see bash-execution-controller.ts); owns the bash abort
 	 * controller and the streaming-deferred pending-message queue. */
 	private readonly _bash: BashExecutionController;
+	/** Resource-profile tool/extension gating + reload-time profile model re-apply (see profile-filter-controller.ts). */
+	private readonly _profileFilter: ProfileFilterController;
+	/** Agent tool-call gate: escalation, autonomy gating, extension hooks, untrusted boundary (see tool-gate-controller.ts). */
+	private readonly _toolGate: ToolGateController;
 
 	// Extension system
 	private _extensionRunner!: ExtensionRunner;
@@ -864,9 +860,9 @@ export class AgentSession {
 			},
 			getAllowedToolNames: () => this._allowedToolNames,
 			getExcludedToolNames: () => this._excludedToolNames,
-			deriveToolProfileFilter: () => this._deriveToolProfileFilter(),
-			isToolOrCommandAllowedByProfile: (name) => this._isToolOrCommandAllowedByProfile(name),
-			filterExtensionsForRuntime: (extensions) => this._filterExtensionsForRuntime(extensions),
+			deriveToolProfileFilter: () => this._profileFilter.deriveToolProfileFilter(),
+			isToolOrCommandAllowedByProfile: (name) => this._profileFilter.isToolOrCommandAllowedByProfile(name),
+			filterExtensionsForRuntime: (extensions) => this._profileFilter.filterExtensionsForRuntime(extensions),
 			setUnboundToolGrantWarnings: (warnings) => {
 				this._unboundToolGrantWarnings = warnings;
 			},
@@ -877,7 +873,7 @@ export class AgentSession {
 			bindExtensionCore: (runner) => this._bindExtensionCore(runner),
 			applyExtensionBindings: (runner) => this._applyExtensionBindings(runner),
 			extendResourcesFromExtensions: (reason) => this.extendResourcesFromExtensions(reason),
-			reapplyActiveProfileModelSettings: () => this._reapplyActiveProfileModelSettings(),
+			reapplyActiveProfileModelSettings: () => this._profileFilter.reapplyActiveProfileModelSettings(),
 			notifyExtensionsChanged: () => this._notifyExtensionsChanged(),
 			getToolArtifactStore: () => this._getToolArtifactStore(),
 			getMemoryManager: () => this._memory.getMemoryManager(),
@@ -944,6 +940,27 @@ export class AgentSession {
 			getSessionManager: () => this.sessionManager,
 			getSettingsManager: () => this.settingsManager,
 			isStreaming: () => this.isStreaming,
+		});
+		this._profileFilter = new ProfileFilterController({
+			getSettingsManager: () => this.settingsManager,
+			getResourceLoader: () => this._resourceLoader,
+			getModelRegistry: () => this._modelRegistry,
+			getCwd: () => this._cwd,
+			getAgent: () => this.agent,
+			getSessionManager: () => this.sessionManager,
+			getAllowedToolNames: () => this._allowedToolNames,
+			getExcludedToolNames: () => this._excludedToolNames,
+			getToolProfileFilter: () => this._toolProfileFilter,
+			isExplicitModel: () => this._isExplicitModel,
+			isExplicitThinking: () => this._isExplicitThinking,
+			setThinkingLevel: (level) => this.setThinkingLevel(level),
+		});
+		this._toolGate = new ToolGateController({
+			maybeEscalateToolCall: (toolName, args) => this._modelRouter.maybeEscalateToolCall(toolName, args),
+			getCwd: () => this._cwd,
+			getCapabilityEnvelope: () => this.capabilityEnvelope,
+			recordGateOutcome: (outcome) => this._recordGateOutcome(outcome),
+			getExtensionRunner: () => this._extensionRunner,
 		});
 
 		// Always subscribe to agent events for internal handling
@@ -1338,8 +1355,8 @@ export class AgentSession {
 			adjustments: { memoryEvidenceTokens, enforcementSavedTokens },
 			extraObservations: [
 				...this._resourceLoader.getAgentsDiagnostics().map((diagnostic) => diagnostic.message),
-				...this._profileDeniedResourceObservations(),
-				...this._inertExtensionWarnings,
+				...this._profileFilter.profileDeniedResourceObservations(),
+				...this._profileFilter.getInertExtensionWarnings(),
 				...this._unboundToolGrantWarnings,
 				// G7: auto-built per-turn foreground envelope (observe-only; not enforced). Falls back to a
 				// live preview when no turn has run yet so /context always shows the current scope.
@@ -1434,90 +1451,8 @@ export class AgentSession {
 	}
 
 	private _installAgentToolHooks(): void {
-		this.agent.beforeToolCall = async ({ toolCall, args }) => {
-			const escalation = this._modelRouter.maybeEscalateToolCall(toolCall.name, args);
-			if (escalation) {
-				return escalation;
-			}
-
-			// Autonomy tool gating
-			const gateResult = evaluateToolGate({
-				toolName: toolCall.name,
-				args,
-				cwd: this._cwd,
-				envelope: this.capabilityEnvelope,
-			});
-
-			if (this.capabilityEnvelope) {
-				this._recordGateOutcome(gateResult);
-			}
-
-			if (gateResult.outcome === "block" || gateResult.outcome === "ask-user") {
-				return {
-					block: true,
-					reason: `Tool execution blocked by autonomy gate [${gateResult.gate}]: ${gateResult.message} (${gateResult.reasonCode})`,
-				};
-			}
-
-			const runner = this._extensionRunner;
-			if (!runner.hasHandlers("tool_call")) {
-				return undefined;
-			}
-
-			try {
-				return await runner.emitToolCall({
-					type: "tool_call",
-					toolName: toolCall.name,
-					toolCallId: toolCall.id,
-					input: args as Record<string, unknown>,
-				});
-			} catch (err) {
-				if (err instanceof Error) {
-					throw err;
-				}
-				throw new Error(`Extension failed, blocking execution: ${String(err)}`);
-			}
-		};
-
-		this.agent.afterToolCall = async ({ toolCall, args, result, isError }) => {
-			const runner = this._extensionRunner;
-			let content = result.content;
-			let details = result.details;
-			let resolvedIsError = isError;
-
-			if (runner.hasHandlers("tool_result")) {
-				const hookResult = await runner.emitToolResult({
-					type: "tool_result",
-					toolName: toolCall.name,
-					toolCallId: toolCall.id,
-					input: args as Record<string, unknown>,
-					content,
-					details,
-					isError,
-				});
-				if (hookResult) {
-					content = hookResult.content ?? content;
-					details = hookResult.details;
-					resolvedIsError = hookResult.isError ?? isError;
-				}
-			}
-
-			// Untrusted-content boundary: structurally fence output from attacker-controllable sources
-			// (web/search, subagents, recall, third-party tools) so injection payloads are framed as data.
-			// First-party tools (read/grep/find/ls/edit/write/bash) are trusted and pass through unchanged.
-			if (classifyToolTrust(toolCall.name) === "untrusted") {
-				const source = `tool:${toolCall.name}`;
-				const wrapped = content.map((block) =>
-					block.type === "text" ? { ...block, text: wrapUntrustedText(block.text, source) } : block,
-				);
-				content = wrapped;
-			}
-
-			if (content === result.content && details === result.details && resolvedIsError === isError) {
-				return undefined;
-			}
-			return { content, details, isError: resolvedIsError };
-		};
+		this.agent.beforeToolCall = this._toolGate.beforeToolCall;
+		this.agent.afterToolCall = this._toolGate.afterToolCall;
 	}
 
 	// =========================================================================
@@ -3596,148 +3531,6 @@ export class AgentSession {
 				},
 			},
 		);
-	}
-
-	/**
-	 * Resolve the active resource-profile tool allow/block filter from current settings.
-	 * Mirrors the construction-time derivation (settingsManager.getResourceProfileFilter("tools"))
-	 * so reload() can re-apply it after a live settings/profile edit.
-	 */
-	private _deriveToolProfileFilter(): Required<ResourceProfileFilterSettings> {
-		const filter = this.settingsManager.getResourceProfileFilter("tools");
-		return { allow: filter.allow ?? [], block: filter.block ?? [] };
-	}
-
-	private _isToolOrCommandAllowedByProfile(name: string): boolean {
-		if (this._allowedToolNames && !this._allowedToolNames.has(name)) return false;
-		if (this._excludedToolNames?.has(name)) return false;
-		const filter = this._toolProfileFilter;
-		if (!filter) return true;
-		if (filter.allow.length > 0 && !matchesResourceProfilePattern(name, filter.allow)) return false;
-		if (matchesResourceProfilePattern(name, filter.block)) return false;
-		return true;
-	}
-
-	private _hasToolOrCommandProfileGate(): boolean {
-		return Boolean(
-			this._allowedToolNames ||
-				this._excludedToolNames ||
-				(this._toolProfileFilter &&
-					(this._toolProfileFilter.allow.length > 0 || this._toolProfileFilter.block.length > 0)),
-		);
-	}
-
-	private _filterExtensionsForRuntime(extensions: Extension[]): Extension[] {
-		this._inertExtensionWarnings = [];
-		this._profileDeniedExtensionCount = 0;
-		if (this.settingsManager.getActiveResourceProfileNames().length === 0) {
-			if (this.settingsManager.hasExplicitActiveResourceProfileSelection()) {
-				// An explicit profile selection that resolves to no active profile is a deliberate
-				// deny-all — every extension is withheld by that choice.
-				this._profileDeniedExtensionCount = extensions.length;
-				return [];
-			}
-			// No profile in play: only inline/SDK extensions load by default. That is the baseline, not
-			// a profile denial, so it is not counted as withheld.
-			return extensions.filter((extension) => extension.sourceInfo.source === "inline");
-		}
-		const hasToolOrCommandGate = this._hasToolOrCommandProfileGate();
-		const allowedExtensions = extensions.filter((extension) =>
-			this.settingsManager.isResourceAllowedByProfile("extensions", extension.path, extension.sourceInfo.baseDir),
-		);
-		this._profileDeniedExtensionCount = extensions.length - allowedExtensions.length;
-		return allowedExtensions.map((extension) => {
-			if (!hasToolOrCommandGate) return extension;
-			const tools = new Map(
-				Array.from(extension.tools.entries()).filter(([name]) => this._isToolOrCommandAllowedByProfile(name)),
-			);
-			const commands = new Map(
-				Array.from(extension.commands.entries()).filter(([name]) => this._isToolOrCommandAllowedByProfile(name)),
-			);
-			// G12: an extension the profile ALLOWS whose every tool and command the tools filter
-			// then denies loads and runs lifecycle hooks but is completely uninvocable — surface
-			// it instead of presenting a "loaded" extension that silently does nothing.
-			if (extension.tools.size + extension.commands.size > 0 && tools.size + commands.size === 0) {
-				const name = extension.path.split(/[\\/]/).pop() ?? extension.path;
-				this._inertExtensionWarnings.push(
-					`extension "${name}" is loaded but fully inert: the active profile's tools filter denies all ${extension.tools.size} tool(s) and ${extension.commands.size} command(s) it contributes`,
-				);
-			}
-			return { ...extension, tools, commands };
-		});
-	}
-
-	/**
-	 * /context observations for skills/prompts/extensions the active resource profile removed from
-	 * listings — the analog of the withheld-AGENTS.md warning. Strict UAC makes these silently absent,
-	 * so a lean profile's effect on the resource surface stays visible. Counts are profile-scoped
-	 * (skills/prompts via the profile-independent discovery universe filtered by the live profile
-	 * filter; extensions via the runtime filter's denied tally). Empty when nothing is withheld.
-	 *
-	 * Uses `isResourceDeniedByActiveProfile` (profile-only), not `isResourceAllowedByProfile` (which
-	 * also folds in the user's own legacy `disabledResources` list): a plain user-disabled resource
-	 * must never be misattributed to "the active resource profile" — that case is already surfaced by
-	 * the G14 disable-wins warning. With no active profile at all, the helper always reports nothing
-	 * denied, so this naturally stays silent (extensions keep their own runtime-filter-derived count,
-	 * which is already correctly zero absent a profile).
-	 */
-	private _profileDeniedResourceObservations(): string[] {
-		const observations: string[] = [];
-		const withheld = (kind: "skills" | "prompts", paths: string[]): number =>
-			paths.filter((path) => this.settingsManager.isResourceDeniedByActiveProfile(kind, path, this._cwd)).length;
-
-		const skillsWithheld = withheld("skills", this._resourceLoader.getDiscoverableSkillPaths());
-		if (skillsWithheld > 0) {
-			observations.push(
-				`${skillsWithheld} skill(s) withheld by the active resource profile — grant the "skills" kind to restore them`,
-			);
-		}
-		const promptsWithheld = withheld("prompts", this._resourceLoader.getDiscoverablePromptPaths());
-		if (promptsWithheld > 0) {
-			observations.push(
-				`${promptsWithheld} prompt(s) withheld by the active resource profile — grant the "prompts" kind to restore them`,
-			);
-		}
-		if (this._profileDeniedExtensionCount > 0) {
-			observations.push(
-				`${this._profileDeniedExtensionCount} extension(s) withheld by the active resource profile — grant the "extensions" kind to restore them`,
-			);
-		}
-		return observations;
-	}
-
-	/**
-	 * Re-resolve the active resource profile's model/thinking from current settings and apply it.
-	 * Only acts when the profile actually binds model/thinking AND that field was not set by an
-	 * explicit launch flag — so live profile edits apply on reload without clobbering an explicit
-	 * --model/--thinking. A no-op for profiles that don't bind a model.
-	 */
-	private async _reapplyActiveProfileModelSettings(): Promise<void> {
-		if (this._isExplicitModel && this._isExplicitThinking) return;
-		const activeProfileNames = this.settingsManager.getActiveResourceProfileNames();
-		if (activeProfileNames.length === 0) return;
-		const profileSettings = resolveProfileModelSettings({
-			activeProfileNames,
-			registry: this.settingsManager.getProfileRegistry(),
-			modelRegistry: this._modelRegistry,
-			cwd: this._cwd,
-		});
-		if (!this._isExplicitModel && profileSettings.model) {
-			const current = this.agent.state.model;
-			const next = profileSettings.model;
-			if (!current || current.provider !== next.provider || current.id !== next.id) {
-				// Mirror the startup/cycle path: set the model directly (no auth gate, no settings
-				// persist) so re-applying the profile model behaves like initial resolution rather
-				// than a runtime model switch. No model_select emit here — reload rebuilds the
-				// extension runtime and emits session_start("reload") right after, and the UI
-				// re-renders from session.model.
-				this.agent.state.model = next;
-				this.sessionManager.appendModelChange(next.provider, next.id);
-			}
-		}
-		if (!this._isExplicitThinking && profileSettings.thinkingLevel) {
-			this.setThinkingLevel(profileSettings.thinkingLevel);
-		}
 	}
 
 	/** Register a memory provider contributed by an extension; applied on the next memory (re)init. */

@@ -12,9 +12,12 @@ import { createSyntheticSourceInfo } from "../src/core/source-info.ts";
 import { createHarness } from "./test-harness.ts";
 
 type ExtensionFilterSession = {
-	_filterExtensionsForRuntime(extensions: Extension[]): Extension[];
-	_inertExtensionWarnings: string[];
-	_profileDeniedExtensionCount: number;
+	// Profile filtering moved to ProfileFilterController (P7 Task 5b); reach through _profileFilter.
+	_profileFilter: {
+		filterExtensionsForRuntime(extensions: Extension[]): Extension[];
+		_inertExtensionWarnings: string[];
+		_profileDeniedExtensionCount: number;
+	};
 	_toolProfileFilter?: { allow: string[]; block: string[] };
 	getContextCompositionReport(): { observations: string[] };
 };
@@ -80,13 +83,13 @@ describe("T5: runtime extension filter with no active profile keeps only inline/
 		const harness = createHarness();
 		try {
 			const session = harness.session as unknown as ExtensionFilterSession;
-			const kept = session._filterExtensionsForRuntime([
+			const kept = session._profileFilter.filterExtensionsForRuntime([
 				makeExtension("/x/inline-ext.ts", { source: "inline" }),
 				makeExtension("/x/external-ext.ts", { source: "external" }),
 			]);
 			expect(kept.map((extension) => extension.path)).toEqual(["/x/inline-ext.ts"]);
 			// The inline-only baseline is not a profile denial, so nothing is reported as withheld.
-			expect(session._profileDeniedExtensionCount).toBe(0);
+			expect(session._profileFilter._profileDeniedExtensionCount).toBe(0);
 		} finally {
 			harness.cleanup();
 		}
@@ -105,13 +108,13 @@ describe("T3 (G12): a profile-allowed extension left uninvocable by the tools fi
 			const session = harness.session as unknown as ExtensionFilterSession;
 			// The profile allows the extension itself, but its tools filter grants only "read".
 			session._toolProfileFilter = { allow: ["read"], block: [] };
-			const kept = session._filterExtensionsForRuntime([
+			const kept = session._profileFilter.filterExtensionsForRuntime([
 				makeExtension("/x/my-ext.ts", { source: "external", tools: ["my-tool"], commands: ["my-cmd"] }),
 			]);
 			expect(kept).toHaveLength(1);
 			expect(kept[0]!.tools.size + kept[0]!.commands.size).toBe(0);
 			expect(
-				session._inertExtensionWarnings.some(
+				session._profileFilter._inertExtensionWarnings.some(
 					(warning) => warning.includes("fully inert") && warning.includes("my-ext"),
 				),
 			).toBe(true);
@@ -225,8 +228,10 @@ describe("extensions withheld by an active profile surface in /context", () => {
 		try {
 			const session = harness.session as unknown as ExtensionFilterSession;
 			// "locked" never grants the extensions kind -> strict deny-all for extensions.
-			session._filterExtensionsForRuntime([makeExtension("/x/denied-ext.ts", { source: "external", tools: ["t"] })]);
-			expect(session._profileDeniedExtensionCount).toBe(1);
+			session._profileFilter.filterExtensionsForRuntime([
+				makeExtension("/x/denied-ext.ts", { source: "external", tools: ["t"] }),
+			]);
+			expect(session._profileFilter._profileDeniedExtensionCount).toBe(1);
 			const observations = session.getContextCompositionReport().observations;
 			expect(observations.some((line) => /extension\(s\) withheld by the active resource profile/.test(line))).toBe(
 				true,
