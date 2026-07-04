@@ -2,6 +2,7 @@
 
 ### Added
 - Retry policy with configurable jitter and exponential backoff (RetryPolicy, computeRetryDelayMs, sleepAbortable) for reliability kernel.
+- Stream-idle watchdog (withStreamIdleWatchdog, StreamIdleOptions, DEFAULT_STREAM_IDLE) wrapping a StreamFn so a silently dead connection resolves as a retryable stream_stall instead of wedging a turn forever.
 
 ## [0.80.103] - 2026-07-03
 
