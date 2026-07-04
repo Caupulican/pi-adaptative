@@ -1,4 +1,4 @@
-## [Unreleased]
+## [0.81.0] - 2026-07-04
 
 ### Added
 - Foreground bash commands with no explicit `timeout` are now killed after 600s of continuous
