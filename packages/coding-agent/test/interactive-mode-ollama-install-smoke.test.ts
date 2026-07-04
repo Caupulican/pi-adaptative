@@ -5,7 +5,7 @@ import type { ExtensionUIContext } from "../src/core/extensions/types.ts";
 import type { LocalRuntimeDeps } from "../src/core/models/local-runtime.ts";
 import type { ExtensionSelectorComponent } from "../src/modes/interactive/components/extension-selector.ts";
 import { EditorOverlayHost } from "../src/modes/interactive/editor-overlay-host.ts";
-import { InteractiveMode } from "../src/modes/interactive/interactive-mode.ts";
+import { ExtensionUiHost } from "../src/modes/interactive/extension-ui-host.ts";
 import { initTheme } from "../src/modes/interactive/theme/theme.ts";
 import { createHarness } from "./suite/harness.ts";
 
@@ -145,32 +145,35 @@ describe("#31 real interactive smoke — install-ollama confirm through Interact
 		// fakeThis (not just Reflect-bound at the call site) so that internal `this.foo(...)` dispatch
 		// inside those private methods resolves to the real implementation, not undefined.
 		const fakeThis = {
-			ui,
-			editorContainer,
-			// Mirror the real InteractiveMode collaborator: showExtensionSelector/hideExtensionSelector
-			// delegate their container swap through this.overlayHost.
-			overlayHost: new EditorOverlayHost(editorContainer, ui),
-			editor,
 			extensionSelector: undefined as ExtensionSelectorComponent | undefined,
-			toggleToolOutputExpansion: () => {},
-			footerDataProvider: { setExtensionStatus: (_key: string, text: string | undefined) => statusCalls.push(text) },
-			showExtensionSelector: Reflect.get(InteractiveMode.prototype, "showExtensionSelector"),
-			hideExtensionSelector: Reflect.get(InteractiveMode.prototype, "hideExtensionSelector"),
+			// Mirror the real ExtensionUiHost collaborator surface: showExtensionSelector/
+			// hideExtensionSelector reach the TUI, the editor, and the container swap through this.ui.
+			ui: {
+				tui: ui,
+				overlayHost: new EditorOverlayHost(editorContainer, ui),
+				getEditor: () => editor,
+				toggleToolsExpanded: () => {},
+				footerDataProvider: {
+					setExtensionStatus: (_key: string, text: string | undefined) => statusCalls.push(text),
+				},
+			},
+			showExtensionSelector: Reflect.get(ExtensionUiHost.prototype, "showExtensionSelector"),
+			hideExtensionSelector: Reflect.get(ExtensionUiHost.prototype, "hideExtensionSelector"),
 		};
 
-		const showExtensionConfirm = Reflect.get(InteractiveMode.prototype, "showExtensionConfirm") as (
+		const showExtensionConfirm = Reflect.get(ExtensionUiHost.prototype, "showExtensionConfirm") as (
 			this: typeof fakeThis,
 			title: string,
 			message: string,
 			opts?: { signal?: AbortSignal; timeout?: number },
 		) => Promise<boolean>;
-		const setExtensionStatus = Reflect.get(InteractiveMode.prototype, "setExtensionStatus") as (
+		const setExtensionStatus = Reflect.get(ExtensionUiHost.prototype, "setExtensionStatus") as (
 			this: typeof fakeThis,
 			key: string,
 			text: string | undefined,
 		) => void;
 
-		// The real ExtensionUIContext.confirm/setStatus, bound to real InteractiveMode dialog methods.
+		// The real ExtensionUIContext.confirm/setStatus, bound to real ExtensionUiHost dialog methods.
 		const realUIContext = {
 			confirm: (title: string, message: string, opts?: { signal?: AbortSignal; timeout?: number }) =>
 				showExtensionConfirm.call(fakeThis, title, message, opts),

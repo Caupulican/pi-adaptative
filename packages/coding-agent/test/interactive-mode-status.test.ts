@@ -4,6 +4,7 @@ import { type AutocompleteProvider, CombinedAutocompleteProvider, Container } fr
 import { beforeAll, describe, expect, test, vi } from "vitest";
 import type { AutocompleteProviderFactory } from "../src/core/extensions/types.ts";
 import type { SourceInfo } from "../src/core/source-info.ts";
+import { ExtensionUiHost } from "../src/modes/interactive/extension-ui-host.ts";
 import { InteractiveMode } from "../src/modes/interactive/interactive-mode.ts";
 import { initTheme } from "../src/modes/interactive/theme/theme.ts";
 
@@ -89,7 +90,7 @@ describe("InteractiveMode.setToolsExpanded", () => {
 		const chatChild = { setExpanded: vi.fn() };
 		const fakeThis: any = {
 			toolOutputExpanded: false,
-			customHeader: undefined,
+			extensionUiHost: { getCustomHeader: () => undefined },
 			builtInHeader: header,
 			chatContainer: { children: [chatChild] },
 			ui: { requestRender: vi.fn() },
@@ -211,7 +212,7 @@ describe("InteractiveMode.handleUsageCommand", () => {
 	});
 });
 
-describe("InteractiveMode.createExtensionUIContext setTheme", () => {
+describe("ExtensionUiHost.createExtensionUIContext setTheme", () => {
 	test("persists theme changes to settings manager", () => {
 		initTheme("dark");
 
@@ -222,19 +223,18 @@ describe("InteractiveMode.createExtensionUIContext setTheme", () => {
 				currentTheme = theme;
 			}),
 		};
-		const fakeThis: any = {
+		const fakeHost: any = {
 			session: { settingsManager },
-			settingsManager,
-			ui: { requestRender: vi.fn() },
+			ui: { tui: { requestRender: vi.fn() } },
 		};
 
-		const uiContext = (InteractiveMode as any).prototype.createExtensionUIContext.call(fakeThis);
+		const uiContext = (ExtensionUiHost as any).prototype.createExtensionUIContext.call(fakeHost);
 		const result = uiContext.setTheme("light");
 
 		expect(result.success).toBe(true);
 		expect(settingsManager.setTheme).toHaveBeenCalledWith("light");
 		expect(currentTheme).toBe("light");
-		expect(fakeThis.ui.requestRender).toHaveBeenCalledTimes(1);
+		expect(fakeHost.ui.tui.requestRender).toHaveBeenCalledTimes(1);
 	});
 
 	test("does not persist invalid theme names", () => {
@@ -244,34 +244,39 @@ describe("InteractiveMode.createExtensionUIContext setTheme", () => {
 			getTheme: vi.fn(() => "dark"),
 			setTheme: vi.fn(),
 		};
-		const fakeThis: any = {
+		const fakeHost: any = {
 			session: { settingsManager },
-			settingsManager,
-			ui: { requestRender: vi.fn() },
+			ui: { tui: { requestRender: vi.fn() } },
 		};
 
-		const uiContext = (InteractiveMode as any).prototype.createExtensionUIContext.call(fakeThis);
+		const uiContext = (ExtensionUiHost as any).prototype.createExtensionUIContext.call(fakeHost);
 		const result = uiContext.setTheme("__missing_theme__");
 
 		expect(result.success).toBe(false);
 		expect(settingsManager.setTheme).not.toHaveBeenCalled();
-		expect(fakeThis.ui.requestRender).not.toHaveBeenCalled();
+		expect(fakeHost.ui.tui.requestRender).not.toHaveBeenCalled();
 	});
 });
 
-describe("InteractiveMode.createExtensionUIContext addAutocompleteProvider", () => {
+describe("ExtensionUiHost.createExtensionUIContext addAutocompleteProvider", () => {
 	test("stores wrapper factories and rebuilds autocomplete immediately", () => {
 		const wrapper: AutocompleteProviderFactory = (current) => current;
-		const fakeThis = {
-			autocompleteProviderWrappers: [] as AutocompleteProviderFactory[],
-			setupAutocompleteProvider: vi.fn(),
+		const wrappers: AutocompleteProviderFactory[] = [];
+		const setupAutocompleteProvider = vi.fn();
+		const fakeHost: any = {
+			ui: {
+				pushAutocompleteProviderWrapper: (factory: AutocompleteProviderFactory) => {
+					wrappers.push(factory);
+				},
+				setupAutocompleteProvider,
+			},
 		};
 
-		const uiContext = (InteractiveMode as any).prototype.createExtensionUIContext.call(fakeThis);
+		const uiContext = (ExtensionUiHost as any).prototype.createExtensionUIContext.call(fakeHost);
 		uiContext.addAutocompleteProvider(wrapper);
 
-		expect(fakeThis.autocompleteProviderWrappers).toEqual([wrapper]);
-		expect(fakeThis.setupAutocompleteProvider).toHaveBeenCalledTimes(1);
+		expect(wrappers).toEqual([wrapper]);
+		expect(setupAutocompleteProvider).toHaveBeenCalledTimes(1);
 	});
 });
 

@@ -15,7 +15,7 @@ type ImportCommandContext = {
 	runtimeHost: { importFromJsonl: (inputPath: string, cwdOverride?: string) => Promise<{ cancelled: boolean }> };
 	showError: (message: string) => void;
 	showStatus: (message: string) => void;
-	showExtensionConfirm: (title: string, message: string) => Promise<boolean>;
+	extensionUiHost: { showExtensionConfirm: (title: string, message: string) => Promise<boolean> };
 	handleRuntimeSessionChange: () => Promise<void>;
 	renderCurrentSessionState: () => void;
 	handleFatalRuntimeError: (prefix: string, error: unknown) => Promise<never>;
@@ -62,7 +62,7 @@ describe("InteractiveMode /import parsing", () => {
 			runtimeHost: { importFromJsonl },
 			showError,
 			showStatus,
-			showExtensionConfirm,
+			extensionUiHost: { showExtensionConfirm },
 			handleRuntimeSessionChange: vi.fn(async () => {}),
 			renderCurrentSessionState: vi.fn(),
 			handleFatalRuntimeError: vi.fn(async () => {
@@ -94,7 +94,7 @@ describe("InteractiveMode /import parsing", () => {
 			runtimeHost: { importFromJsonl },
 			showError,
 			showStatus,
-			showExtensionConfirm,
+			extensionUiHost: { showExtensionConfirm },
 			handleRuntimeSessionChange: vi.fn(async () => {}),
 			renderCurrentSessionState: vi.fn(),
 			handleFatalRuntimeError: vi.fn(async () => {
@@ -127,7 +127,7 @@ describe("InteractiveMode /import parsing", () => {
 			runtimeHost: { importFromJsonl },
 			showError,
 			showStatus,
-			showExtensionConfirm,
+			extensionUiHost: { showExtensionConfirm },
 			handleRuntimeSessionChange: vi.fn(async () => {}),
 			renderCurrentSessionState: vi.fn(),
 			handleFatalRuntimeError,
