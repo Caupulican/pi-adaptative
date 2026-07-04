@@ -60,7 +60,7 @@ describe("Autonomy Status Formatters (Phase 8A)", () => {
 			expect(result).toBe("No diagnostics available.");
 		});
 
-		it("diagnostics include route/gate/cost/research/delegation/learning/goal sections when data exists", () => {
+		it("diagnostics include route/gate/cost/research/delegation/learning/goal/processMemory sections when data exists", () => {
 			const diag: AutonomyDiagnosticSnapshot = {
 				routes: [{ title: "R1", reasonCode: "rc1" }],
 				gates: [{ title: "G1", summary: "sum1" }],
@@ -69,6 +69,7 @@ describe("Autonomy Status Formatters (Phase 8A)", () => {
 				delegation: [{ title: "D1" }],
 				learning: [{ title: "L1" }],
 				goals: [{ title: "Go1" }],
+				processMemory: [{ title: "process", metadata: { rssMb: 128, heapUsedMb: 64, externalMb: 8 } }],
 			};
 			const result = formatAutonomyDiagnostics(diag);
 			expect(result).toContain("--- Routes ---");
@@ -80,6 +81,8 @@ describe("Autonomy Status Formatters (Phase 8A)", () => {
 			expect(result).toContain("--- Delegation ---");
 			expect(result).toContain("--- Learning ---");
 			expect(result).toContain("--- Goals ---");
+			expect(result).toContain("--- Process Memory ---");
+			expect(result).toContain('"rssMb":128');
 		});
 
 		it("secrets are redacted by metadata key", () => {

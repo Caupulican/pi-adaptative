@@ -9,6 +9,7 @@
  */
 
 import type { SessionManager } from "@caupulican/pi-agent-core/node";
+import { getProcessMemoryMb } from "../utils/process-memory.ts";
 import type { SessionStats, SpawnedUsageTotals } from "./agent-session.ts";
 import type { EvidenceBundle, GateOutcome, LearningDecision, WorkerResult } from "./autonomy/contracts.ts";
 import { getLaneRecordSnapshots } from "./autonomy/session-lane-record.ts";
@@ -323,6 +324,18 @@ export class AutonomyTelemetry {
 				},
 			];
 		}
+
+		const processMemory = getProcessMemoryMb();
+		snapshot.processMemory = [
+			{
+				title: "process",
+				metadata: {
+					rssMb: processMemory.rssMb,
+					heapUsedMb: processMemory.heapUsedMb,
+					externalMb: processMemory.externalMb,
+				},
+			},
+		];
 
 		return snapshot;
 	}

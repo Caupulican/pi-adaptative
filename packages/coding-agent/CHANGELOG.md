@@ -14,6 +14,11 @@
   retryable `stream stalled` error, which the existing auto-retry path picks up — so a hung
   connection now fails over instead of hanging. The bound is on silence, never on total runtime, so
   a stream that keeps emitting is never cut off.
+- Process memory (rss, heap used, external — rounded to MB) is now surfaced as self-telemetry: the
+  `/usage` command prints a "Process" section, and `getAutonomyDiagnosticSnapshot` gains a
+  `processMemory` family rendered by `formatAutonomyDiagnostics`. Unlike the snapshot's other
+  families, `processMemory` reflects live process state rather than recorded session activity, so it
+  is always present, even when nothing else has happened yet.
 
 ### Changed
 - truncate and sanitizeBinaryOutput now live in @caupulican/pi-agent-core (single canonical copy).

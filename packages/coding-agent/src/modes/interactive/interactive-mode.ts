@@ -123,6 +123,7 @@ import { parseFrontmatter } from "../../utils/frontmatter.ts";
 import { parseGitUrl } from "../../utils/git.ts";
 import { getCwdRelativePath, resolvePath } from "../../utils/paths.ts";
 import { getPiUserAgent } from "../../utils/pi-user-agent.ts";
+import { getProcessMemoryMb } from "../../utils/process-memory.ts";
 import { killTrackedDetachedChildren } from "../../utils/shell.ts";
 import { ensureTool } from "../../utils/tools-manager.ts";
 import { checkForNewPiVersion, type LatestPiRelease } from "../../utils/version-check.ts";
@@ -7661,6 +7662,10 @@ export class InteractiveMode {
 		info += `${theme.fg("dim", "Today own:")} $${daily.ownCost.toFixed(4)}\n`;
 		info += `${theme.fg("dim", "Today spawned/background:")} $${daily.spawnedCost.toFixed(4)}\n`;
 		info += `${theme.fg("dim", "Today tokens:")} ${daily.totalTokens.toLocaleString()}\n\n`;
+
+		const processMemory = getProcessMemoryMb();
+		info += `${theme.bold("Process")}\n`;
+		info += `${theme.fg("dim", "Memory:")} rss ${processMemory.rssMb}MB, heap ${processMemory.heapUsedMb}MB, external ${processMemory.externalMb}MB\n\n`;
 
 		info += `${theme.bold("Optimization state")}\n`;
 		const contextPercent = context?.percent;

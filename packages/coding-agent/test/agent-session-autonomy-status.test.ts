@@ -198,11 +198,29 @@ describe("AgentSession - Autonomy Status Snapshot", () => {
 });
 
 describe("AgentSession - Autonomy Diagnostic Snapshot", () => {
-	it("returns an empty snapshot with no fabricated families when nothing has happened yet", async () => {
+	it("returns no fabricated families when nothing has happened yet, only real process memory", async () => {
 		const harness = await createHarness({ tools: [bashTool] });
 
 		const snapshot = harness.session.getAutonomyDiagnosticSnapshot();
-		expect(snapshot).toEqual({});
+		expect(snapshot.routes).toBeUndefined();
+		expect(snapshot.gates).toBeUndefined();
+		expect(snapshot.costs).toBeUndefined();
+		expect(snapshot.research).toBeUndefined();
+		expect(snapshot.delegation).toBeUndefined();
+		expect(snapshot.learning).toBeUndefined();
+		expect(snapshot.goals).toBeUndefined();
+		// processMemory is real (not session-derived) telemetry, so unlike the other families it is
+		// always present rather than gated on recorded activity.
+		expect(snapshot.processMemory).toEqual([
+			{
+				title: "process",
+				metadata: {
+					rssMb: expect.any(Number),
+					heapUsedMb: expect.any(Number),
+					externalMb: expect.any(Number),
+				},
+			},
+		]);
 
 		await harness.cleanup();
 	});

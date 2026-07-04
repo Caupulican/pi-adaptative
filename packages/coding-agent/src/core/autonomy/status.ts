@@ -36,6 +36,7 @@ export interface AutonomyDiagnosticSnapshot {
 	delegation?: readonly DiagnosticEntry[];
 	learning?: readonly DiagnosticEntry[];
 	goals?: readonly DiagnosticEntry[];
+	processMemory?: readonly DiagnosticEntry[];
 }
 
 const REDACTED = "[REDACTED]";
@@ -153,6 +154,7 @@ export function formatAutonomyDiagnostics(args: AutonomyDiagnosticSnapshot): str
 		formatDiagnosticSection("Delegation", args.delegation),
 		formatDiagnosticSection("Learning", args.learning),
 		formatDiagnosticSection("Goals", args.goals),
+		formatDiagnosticSection("Process Memory", args.processMemory),
 	].filter((section): section is string => Boolean(section));
 
 	if (sections.length === 0) return "No diagnostics available.";
