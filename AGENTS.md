@@ -159,3 +159,14 @@ Attribution:
 ## User Override
 
 If the user's instructions conflict with any rule in this document, ask for explicit confirmation before overriding. Only then execute their instructions.
+
+## Open threads
+
+(none)
+
+## Findings
+
+### 2026-07-03 · packages/agent · workspace packages resolve `@caupulican/pi-agent-core` via its gitignored `dist/`, which goes stale silently — claude
+`packages/agent/package.json` `main` points at `./dist/index.js`, and `dist/` is gitignored (not committed). When new source is added to `packages/agent/src` (e.g. Plan 1's reliability kernel: `createSilenceWatchdog`, `classifyError`, retry policy), every other workspace package that imports `@caupulican/pi-agent-core` (e.g. `packages/coding-agent`) keeps resolving the OLD compiled `dist/` until someone runs `cd packages/agent && npm run build`. The failure mode is a plain `TypeError: X is not a function` at test time, which reads like a wiring bug in the consuming package rather than a stale build in the dependency. Before wiring any new `packages/agent` export into a consumer, rebuild `packages/agent` first and confirm the export exists in `dist/index.js` (or the relevant `dist/reliability/*.js`), not just in `src`.
+- evidence: packages/agent/package.json:6 (`"main": "./dist/index.js"`) · .gitignore:7 (`packages/*/dist/`) · packages/coding-agent/src/core/tools/bash.ts (silence watchdog wiring, Plan 2 Task 1)
+- tags: build, monorepo, packages/agent, packages/coding-agent, gotcha
