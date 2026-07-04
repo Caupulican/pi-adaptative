@@ -161,9 +161,9 @@ describe("AgentSession - Autonomy Status Snapshot", () => {
 		// We inject the mock decision directly for the pure unit test,
 		// as setting up the full model router execution environment is broad.
 		const sessionWithInternals = harness.session as unknown as {
-			_lastModelRouterDecision: ModelRouterDecisionStatus;
+			_modelRouter: { _lastModelRouterDecision: ModelRouterDecisionStatus };
 		};
-		sessionWithInternals._lastModelRouterDecision = mockDecision;
+		sessionWithInternals._modelRouter._lastModelRouterDecision = mockDecision;
 
 		const snapshot = harness.session.getAutonomyStatusSnapshot();
 		expect(snapshot.latestRoute).toBeDefined();

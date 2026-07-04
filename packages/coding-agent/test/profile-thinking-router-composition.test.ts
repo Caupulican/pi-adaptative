@@ -13,20 +13,22 @@ import { SettingsManager } from "../src/core/settings-manager.ts";
 
 type RoutedTurnPrivateAccess = {
 	_runAgentPrompt: (messages: AgentMessage | AgentMessage[]) => Promise<void>;
-	_runAgentPromptWithModelRouter: (
-		messages: AgentMessage | AgentMessage[],
-		routedModel: Model<Api>,
-		routeDecision: RouteDecision | undefined,
-		persistDecision?: boolean,
-	) => Promise<void>;
+	_modelRouter: {
+		runRoutedTurn: (
+			messages: AgentMessage | AgentMessage[],
+			routedModel: Model<Api>,
+			routeDecision: RouteDecision | undefined,
+			persistDecision?: boolean,
+		) => Promise<void>;
+	};
 };
 
 /**
  * Composition (R1 follow-up): the active resource profile sets the SESSION-level thinking via
  * setThinkingLevel (agent.state.thinkingLevel) — see createAgentSession's startup resolution and
  * _reapplyActiveProfileModelSettings. A routed turn's per-tier thinking
- * (modelRouter.cheapThinking/mediumThinking/etc, see _runAgentPromptWithModelRouter) overrides that
- * level for the ONE routed turn only and restores it in the `finally` afterward. Both mechanisms
+ * (modelRouter.cheapThinking/mediumThinking/etc, see ModelRouterController.runRoutedTurn) overrides
+ * that level for the ONE routed turn only and restores it in the `finally` afterward. Both mechanisms
  * read/write the exact same agent.state.thinkingLevel property, so this proves they compose
  * instead of fighting: the profile-set level survives a routed turn's temporary override.
  */
@@ -88,12 +90,7 @@ describe("profile-set session thinking composes with per-tier router thinking", 
 			reasons: [],
 		};
 
-		await (session as unknown as RoutedTurnPrivateAccess)._runAgentPromptWithModelRouter(
-			[],
-			cheapModel,
-			route,
-			false,
-		);
+		await (session as unknown as RoutedTurnPrivateAccess)._modelRouter.runRoutedTurn([], cheapModel, route, false);
 
 		// The per-tier override wins for the duration of the routed turn...
 		expect(thinkingDuringRoutedTurn).toBe("low");

@@ -112,7 +112,7 @@ import type { PromptPolicyGcCorrelationReport, PromptPolicyShadowReport } from "
 import type { MemoryPromptInclusionReport } from "./context/memory-diagnostics.ts";
 import type { MemoryRetrievalReport } from "./context/memory-retrieval.ts";
 import type { ContextGcReport } from "./context-gc.ts";
-import { ContextPipeline, latestUserPromptText } from "./context-pipeline.ts";
+import { ContextPipeline } from "./context-pipeline.ts";
 import {
 	aggregateDailyUsageFromSessionFiles,
 	aggregateDailyUsageFromSessionRoot,
@@ -199,24 +199,7 @@ import {
 } from "./model-capability.ts";
 import type { ModelRegistry } from "./model-registry.ts";
 import { resolveCliModel, resolveProfileModelSettings } from "./model-resolver.ts";
-import { collectModelRouterConfigDiagnostics } from "./model-router/config-diagnostics.ts";
-import { classifyExecutorTurn } from "./model-router/executor-route.ts";
-import { classifyModelRouterRoute, type ModelRouterIntent } from "./model-router/intent-classifier.ts";
-import { ROUTE_JUDGE_MAX_OUTPUT_TOKENS, runRouteJudge } from "./model-router/route-judge.ts";
-import {
-	bufferModelRouterSessionCustomMessage,
-	bufferModelRouterSessionMessage,
-	createModelRouterSessionBuffer,
-	flushModelRouterSessionBuffer,
-	type ModelRouterSessionBuffer,
-} from "./model-router/session-buffer.ts";
-import {
-	formatModelRouterStatus,
-	getRecentModelRouterDecisions,
-	MODEL_ROUTER_DECISION_CUSTOM_TYPE,
-	type ModelRouterDecisionStatus,
-} from "./model-router/status.ts";
-import { shouldEscalateModelRouterTool } from "./model-router/tool-escalation.ts";
+import { formatModelRouterModel, ModelRouterController } from "./model-router-controller.ts";
 import { FitnessStore, type StoredFitnessReport } from "./models/fitness-store.ts";
 import { OLLAMA_PROVIDER } from "./models/local-registration.ts";
 import type { LocalRuntimeDeps, OllamaRuntime } from "./models/local-runtime.ts";
@@ -613,17 +596,6 @@ const THINKING_LEVELS: ThinkingLevel[] = ["off", "minimal", "low", "medium", "hi
 // AgentSession Class
 // ============================================================================
 
-function formatModelRouterModel(model: Model<any>): string {
-	return `${model.provider}/${model.id}`;
-}
-
-function persistModelRouterDecision(
-	sessionManager: Pick<SessionManager, "appendCustomEntry">,
-	decision: ModelRouterDecisionStatus,
-): void {
-	sessionManager.appendCustomEntry(MODEL_ROUTER_DECISION_CUSTOM_TYPE, decision);
-}
-
 export class AgentSession {
 	readonly agent: Agent;
 	readonly sessionManager: SessionManager;
@@ -721,15 +693,11 @@ export class AgentSession {
 	private _lastCostGuardDecision?: CostGuardDecision;
 	/** One-shot latch so the cost guard downgrades reasoning once per over-threshold episode, not every call. */
 	private _costGuardDowngraded = false;
-	/** Active model-router intent for the current transient routed turn, if any. */
-	private _activeModelRouterIntent?: ModelRouterIntent;
-	private _activeModelRouterRoute?: RouteDecision;
-	private _modelRouterSessionBuffer?: ModelRouterSessionBuffer;
-	private _modelRouterEscalationRequested = false;
-	private _isModelRouterRetry = false;
-	private _lastModelRouterDecision?: ModelRouterDecisionStatus;
-	private _lastModelRouterSkipReason?: string;
-	private _lastModelRouterIntent?: ModelRouterIntent;
+	/** Per-turn model-router subsystem (see model-router-controller.ts); owns the transient route/intent,
+	 * the cheap-turn session buffer, the escalation/retry flags, and the sticky last-decision/skip-reason
+	 * used by the status report. Its parallel routed drive path delegates every turn back to
+	 * {@link _runAgentPrompt} so the drive loop stays host-side. */
+	private readonly _modelRouter: ModelRouterController;
 	/** Lazily-built skill curator (#32) over `<agentDir>/skills`. */
 	private _skillCuratorInstance?: SkillCurator;
 	/** Set on dispose so in-flight background reflection bails instead of writing to a dead session (Bug #21). */
@@ -811,7 +779,7 @@ export class AgentSession {
 			getLastAssistantMessage: () => this._findLastAssistantMessage(),
 			getUIContext: () => this._extensionUIContext,
 			emit: (event) => this._emit(event),
-			resolveConfiguredTierModel: (tier) => this._resolveConfiguredTierModel(tier),
+			resolveConfiguredTierModel: (tier) => this._modelRouter.resolveConfiguredTierModel(tier),
 			formatModel: (model) => formatModelRouterModel(model),
 		});
 		this._systemPromptBuilder = new SystemPromptBuilder({
@@ -826,7 +794,7 @@ export class AgentSession {
 		});
 		this._autonomyTelemetry = new AutonomyTelemetry({
 			getSessionManager: () => this.sessionManager,
-			getLastModelRouterDecision: () => this._lastModelRouterDecision,
+			getLastModelRouterDecision: () => this._modelRouter.getLastDecision(),
 			getLastResearchLaneSkipReason: () => this._backgroundLanes.getLastResearchLaneSkipReason(),
 			getSessionStats: () => this.getSessionStats(),
 			getSpawnedUsage: () => this.getSpawnedUsage(),
@@ -883,6 +851,25 @@ export class AgentSession {
 			getMemoryManager: () => this._memory.getMemoryManager(),
 			addSpawnedUsage: (usage, opts) => this.addSpawnedUsage(usage, opts),
 			runIsolatedCompletion: (opts) => this.runIsolatedCompletion(opts),
+		});
+		this._modelRouter = new ModelRouterController({
+			getAgent: () => this.agent,
+			getModel: () => this.model ?? undefined,
+			getSettingsManager: () => this.settingsManager,
+			getSessionManager: () => this.sessionManager,
+			getModelRegistry: () => this._modelRegistry,
+			getAgentDir: () => this._agentDir,
+			getReflectionSignal: () => this._reflectionAbort.signal,
+			getBaseSystemPrompt: () => this._baseSystemPrompt,
+			runAgentPrompt: (messages) => this._runAgentPrompt(messages),
+			buildSystemPromptForToolNames: (toolNames) => this._buildSystemPromptForToolNames(toolNames),
+			refreshCurrentModelFromRegistry: () => this._refreshCurrentModelFromRegistry(),
+			runIsolatedCompletion: (opts) => this.runIsolatedCompletion(opts),
+			addSpawnedUsage: (usage, opts) => this.addSpawnedUsage(usage, opts),
+			emit: (event) => this._emit(event),
+			emitAutonomyTelemetry: (event) => this._emitAutonomyTelemetry(event),
+			resolveLaneModel: (pattern) => this._backgroundLanes.resolveLaneModel(pattern),
+			resolveCurationModelIfFit: () => this._resolveCurationModelIfFit(),
 		});
 		this._modelRegistry = config.modelRegistry;
 		this._extensionRunnerRef = config.extensionRunnerRef;
@@ -1387,22 +1374,9 @@ export class AgentSession {
 
 	private _installAgentToolHooks(): void {
 		this.agent.beforeToolCall = async ({ toolCall, args }) => {
-			if (
-				this._activeModelRouterRoute &&
-				shouldEscalateModelRouterTool({
-					tier: this._activeModelRouterRoute.tier,
-					toolName: toolCall.name,
-					args,
-					reasonCode: this._activeModelRouterRoute.reasonCode,
-				})
-			) {
-				this._modelRouterEscalationRequested = true;
-				this.agent.abort();
-				return {
-					block: true,
-					reason:
-						"Model router escalation required: a cheap research turn attempted a mutating tool. Retry the turn on the configured expensive model.",
-				};
+			const escalation = this._modelRouter.maybeEscalateToolCall(toolCall.name, args);
+			if (escalation) {
+				return escalation;
 			}
 
 			// Autonomy tool gating
@@ -1547,7 +1521,7 @@ export class AgentSession {
 		await this._emitExtensionEvent(event);
 
 		const suppressRetryPromptEvent =
-			this._isModelRouterRetry &&
+			this._modelRouter.isRetryInFlight() &&
 			(event.type === "message_start" || event.type === "message_end") &&
 			(event.message.role === "user" || event.message.role === "custom");
 
@@ -1569,14 +1543,10 @@ export class AgentSession {
 		// accumulate until the interactive Node process hits the V8 heap limit.
 		if (event.type === "message_end") {
 			compactToolResultDetailsForRetention(event.message);
-			const modelRouterBuffer = this._modelRouterSessionBuffer;
-			if (modelRouterBuffer && event.message.role === "custom") {
-				bufferModelRouterSessionCustomMessage(modelRouterBuffer, event.message);
-			} else if (
-				modelRouterBuffer &&
-				(event.message.role === "user" || event.message.role === "assistant" || event.message.role === "toolResult")
-			) {
-				bufferModelRouterSessionMessage(modelRouterBuffer, event.message as Message);
+			// While a cheap routed turn is buffering, its messages are captured for later flush/discard
+			// instead of persisted here (see ModelRouterController.captureSessionMessage).
+			if (this._modelRouter.captureSessionMessage(event.message)) {
+				// buffered by the router; persistence is deferred to the routed-turn flush
 			}
 			// Check if this is a custom message from extensions
 			else if (event.message.role === "custom") {
@@ -2105,93 +2075,6 @@ export class AgentSession {
 		}
 	}
 
-	private _isModelAvailableAndAuthed(pattern: string): boolean {
-		const resolved = resolveCliModel({ cliModel: pattern, modelRegistry: this._modelRegistry });
-		if (!resolved.model) return false;
-		return this._modelRegistry.hasConfiguredAuth(resolved.model);
-	}
-
-	private _resolveExecutorRoute(
-		prompt: string,
-		executorPattern: string | undefined,
-	): { decision: RouteDecision; model: Model<Api> } | undefined {
-		if (!executorPattern) return undefined;
-		try {
-			const verdict = classifyExecutorTurn(prompt, this.settingsManager.getToolkitScripts());
-			if (!verdict.execute) return undefined;
-			const resolved = resolveCliModel({ cliModel: executorPattern, modelRegistry: this._modelRegistry });
-			if (!resolved.model || !this._modelRegistry.hasConfiguredAuth(resolved.model)) return undefined;
-			// Fitness gate: the executor must have PROVEN tool-calling on this host (same
-			// canonical-ref discipline as the curation gate).
-			const canonicalRef = `${resolved.model.provider}/${resolved.model.id}`;
-			const fitness = FitnessStore.forAgentDir(this._agentDir)
-				.getForHost()
-				.find((entry) => entry.model === canonicalRef);
-			const toolCall = fitness?.report.toolCall;
-			if (!toolCall || toolCall.succeeded < Math.ceil(toolCall.total * (2 / 3))) return undefined;
-			this._lastModelRouterIntent = "research";
-			return {
-				decision: {
-					tier: "cheap",
-					risk: "scoped-write",
-					confidence: 1,
-					reasonCode: "executor_direct",
-					reasons: [`Executor lane: Level-0 direct hit on toolkit script "${verdict.scriptName}"`],
-				},
-				model: resolved.model,
-			};
-		} catch {
-			return undefined;
-		}
-	}
-
-	/** True if a run_toolkit_script tool result since `fromIndex` actually EXECUTED (not error/ambiguous). */
-	private _executorTurnExecutedScript(fromIndex: number): boolean {
-		for (const message of this.agent.state.messages.slice(fromIndex)) {
-			if ((message as { role?: string }).role !== "toolResult") continue;
-			if ((message as { toolName?: string }).toolName !== "run_toolkit_script") continue;
-			if ((message as { isError?: boolean }).isError === true) continue;
-			const outcome = (message as { details?: { outcome?: unknown } }).details?.outcome;
-			if (outcome === "executed") return true;
-		}
-		return false;
-	}
-
-	/** Ask the reflex brain to refine the last user request into an explicit toolkit instruction. */
-	private async _buildExecutorRefinedPrompt(messages: AgentMessage | AgentMessage[]): Promise<string | undefined> {
-		try {
-			const model = this._resolveCurationModelIfFit();
-			if (!model) return undefined;
-			const list = Array.isArray(messages) ? messages : [messages];
-			const request = latestUserPromptText(list.filter((m): m is AgentMessage => true));
-			if (!request) return undefined;
-			const scripts = this.settingsManager.getToolkitScripts();
-			const completion = await this.runIsolatedCompletion({
-				systemPrompt: REFLEX_INTERPRETER_SYSTEM_PROMPT,
-				messages: [
-					{
-						role: "user",
-						content: [{ type: "text", text: buildReflexUserPrompt(request, scripts) }],
-						timestamp: Date.now(),
-					},
-				],
-				model,
-				thinkingLevel: "off",
-				maxTokens: 256,
-				cacheRetention: "short",
-			});
-			if (completion.usage.cost.total > 0 || completion.usage.totalTokens > 0) {
-				this.addSpawnedUsage(completion.usage, { label: "executor-brain-warmup" });
-			}
-			const plan = parseReflexPlan(completion.text);
-			if (!plan || plan.script === "none") return undefined;
-			const argHint = plan.args.length > 0 ? ` with args ${JSON.stringify(plan.args)}` : "";
-			return `Run the toolkit script "${plan.script}"${argHint} using run_toolkit_script, then report its result exactly.`;
-		} catch {
-			return undefined;
-		}
-	}
-
 	/**
 	 * Shared {@link OllamaRuntime} for a given server, lazily created and cached by baseUrl so every
 	 * caller — the router's readiness gate and any host UI's own model-lifecycle commands (e.g.
@@ -2220,458 +2103,9 @@ export class AgentSession {
 		return this._localRuntimeController.ensureRouteModelReady(resolved);
 	}
 
-	private _resolveModelRouterTurnRoute(prompt: string): { decision: RouteDecision; model: Model<Api> } | undefined {
-		const settings = this.settingsManager.getModelRouterSettings();
-		if (!settings.enabled) {
-			this._lastModelRouterSkipReason = "disabled";
-			return undefined;
-		}
-
-		// G16 executor lane: a Level-0 DIRECT toolkit hit on a command-shaped prompt routes the
-		// whole turn to the configured local executor (tool-call-fitness-gated) instead of
-		// spending the frontier model on a one-tool reflex. Ambiguity never routes here — it
-		// stays with the big model and the reflex brain. Deterministic, so the judge is skipped.
-		const executorRoute = this._resolveExecutorRoute(prompt, settings.executorModel);
-		if (executorRoute) return executorRoute;
-
-		const decision = classifyModelRouterRoute(prompt);
-		this._lastModelRouterIntent = decision.tier === "cheap" ? "research" : "modify";
-
-		// Learning tier must not be selected for normal user prompts
-		if (decision.tier === "learning") {
-			this._lastModelRouterSkipReason = "learning tier not supported for user prompts";
-			return undefined;
-		}
-
-		const modelPattern =
-			settings[
-				decision.tier === "cheap" ? "cheapModel" : decision.tier === "medium" ? "mediumModel" : "expensiveModel"
-			];
-		const label =
-			decision.tier === "cheap" ? "cheap model" : decision.tier === "medium" ? "medium model" : "expensive model";
-
-		if (decision.tier === "medium" && (!modelPattern || !this._isModelAvailableAndAuthed(modelPattern))) {
-			const expensivePattern = settings.expensiveModel;
-			if (expensivePattern && this._isModelAvailableAndAuthed(expensivePattern)) {
-				const resolvedExpensive = resolveCliModel({
-					cliModel: expensivePattern,
-					modelRegistry: this._modelRegistry,
-				});
-				if (resolvedExpensive.model) {
-					decision.fallbackFrom = "medium";
-					decision.tier = "expensive";
-					decision.reasonCode = "medium_unavailable_fallback_expensive";
-					decision.reasons = [...decision.reasons, "Medium model is unavailable, falling back to expensive model"];
-					decision.model = formatModelRouterModel(resolvedExpensive.model);
-					this._lastModelRouterSkipReason = undefined;
-					return { decision, model: resolvedExpensive.model };
-				}
-			}
-			this._lastModelRouterSkipReason = "medium model and expensive fallback are unavailable";
-			return undefined;
-		}
-
-		if (!modelPattern) {
-			this._lastModelRouterSkipReason = `${label} unset`;
-			return undefined;
-		}
-
-		const resolved = resolveCliModel({ cliModel: modelPattern, modelRegistry: this._modelRegistry });
-		if (!resolved.model) {
-			this._lastModelRouterSkipReason = `${label} unresolved: ${modelPattern}`;
-			return undefined;
-		}
-
-		const resolvedName = formatModelRouterModel(resolved.model);
-		if (!this._modelRegistry.hasConfiguredAuth(resolved.model)) {
-			this._lastModelRouterSkipReason = `${label} missing auth: ${resolvedName}`;
-			return undefined;
-		}
-
-		this._lastModelRouterSkipReason = undefined;
-		decision.model = resolvedName;
-		return { decision, model: resolved.model };
-	}
-
-	private _resolveModelRouterModelForIntent(intent: ModelRouterIntent): Model<Api> | undefined {
-		const settings = this.settingsManager.getModelRouterSettings();
-		const modelPattern = intent === "research" ? settings.cheapModel : settings.expensiveModel;
-		if (!modelPattern) return undefined;
-		const resolved = resolveCliModel({ cliModel: modelPattern, modelRegistry: this._modelRegistry });
-		if (!resolved.model) return undefined;
-		if (!this._modelRegistry.hasConfiguredAuth(resolved.model)) return undefined;
-		return resolved.model;
-	}
-
-	private _resolveConfiguredTierModel(tier: "cheap" | "medium" | "expensive"): Model<Api> | undefined {
-		const settings = this.settingsManager.getModelRouterSettings();
-		const pattern =
-			tier === "cheap" ? settings.cheapModel : tier === "medium" ? settings.mediumModel : settings.expensiveModel;
-		if (!pattern) return undefined;
-		const resolved = resolveCliModel({ cliModel: pattern, modelRegistry: this._modelRegistry });
-		if (!resolved.model) return undefined;
-		if (!this._modelRegistry.hasConfiguredAuth(resolved.model)) return undefined;
-		return resolved.model;
-	}
-
-	/**
-	 * Router resolution with the routing judge (auto-on with the router): the regex classifier's
-	 * decision is the baseline; when a judge model resolves (judgeModel, else mediumModel), one
-	 * bounded, tool-less completion may move the tier between cheap/medium/expensive — never to
-	 * learning. Core rule encoded in the judge prompt: planning is never cheap unless genuinely
-	 * trivial. Every fallback stays visible in the decision reasons, and judge spend reports
-	 * through spawned-usage accounting.
-	 */
-	private async _resolveModelRouterTurnRouteJudged(
-		prompt: string,
-		options?: { skipJudge?: boolean },
-	): Promise<{ decision: RouteDecision; model: Model<Api> } | undefined> {
-		const baseline = this._resolveModelRouterTurnRoute(prompt);
-		if (!baseline) return undefined;
-		if (options?.skipJudge) return baseline;
-		// Deterministic executor routes need no judge (Level-0 already decided).
-		if (baseline.decision.reasonCode === "executor_direct") return baseline;
-
-		const settings = this.settingsManager.getModelRouterSettings();
-		if (!settings.judgeEnabled) return baseline;
-		const judgePattern = settings.judgeModel ?? settings.mediumModel;
-		if (!judgePattern) return baseline;
-		const judgeModel = this._backgroundLanes.resolveLaneModel(judgePattern);
-		if (!judgeModel) return baseline;
-
-		let spentUsage: Usage | undefined;
-		const judged = await runRouteJudge({
-			prompt,
-			baseline: baseline.decision,
-			signal: this._reflectionAbort.signal,
-			complete: async ({ systemPrompt, userPrompt, signal }) => {
-				const completion = await this.runIsolatedCompletion({
-					systemPrompt,
-					messages: [{ role: "user", content: [{ type: "text", text: userPrompt }], timestamp: Date.now() }],
-					model: judgeModel,
-					// Per-tier thinking (R1): judgeThinking overrides the judge's own completion; unset
-					// keeps today's "off" (the judge is a cheap classification call by default).
-					thinkingLevel: settings.judgeThinking ?? "off",
-					maxTokens: ROUTE_JUDGE_MAX_OUTPUT_TOKENS,
-					signal,
-					// The judge system prompt is static — the provider can cache the prefix.
-					cacheRetention: "short",
-				});
-				spentUsage = completion.usage;
-				return {
-					text: completion.text,
-					costUsd: completion.usage.cost.total,
-					stopReason: String(completion.stopReason),
-				};
-			},
-		});
-		if (spentUsage && (spentUsage.cost.total > 0 || spentUsage.totalTokens > 0)) {
-			this.addSpawnedUsage(spentUsage, { label: "router-judge" });
-		}
-
-		if (!judged.verdict || judged.decision.tier === baseline.decision.tier) {
-			// Same tier (or judge fell back): keep the baseline model, carry the annotated decision.
-			return { decision: judged.decision, model: baseline.model };
-		}
-
-		const judgedTier = judged.decision.tier;
-		if (judgedTier !== "cheap" && judgedTier !== "medium" && judgedTier !== "expensive") {
-			return { decision: baseline.decision, model: baseline.model };
-		}
-		const judgedModel = this._resolveConfiguredTierModel(judgedTier);
-		if (!judgedModel) {
-			return {
-				decision: {
-					...baseline.decision,
-					reasons: [
-						...baseline.decision.reasons,
-						`Route judge chose ${judgedTier} but no model resolves for that tier; baseline kept`,
-					],
-				},
-				model: baseline.model,
-			};
-		}
-		return { decision: { ...judged.decision, model: formatModelRouterModel(judgedModel) }, model: judgedModel };
-	}
-
-	// biome-ignore lint/correctness/noUnusedPrivateClassMembers: test seam
-	private _resolveModelRouterTurnModel(prompt: string): Model<Api> | undefined {
-		const resolved = this._resolveModelRouterTurnRoute(prompt);
-		return resolved?.model;
-	}
-
+	/** Model-router status + config diagnostics report. Delegates to {@link ModelRouterController}. */
 	getModelRouterStatus(formatLabel?: (label: string) => string): string {
-		const recentDecisions = getRecentModelRouterDecisions(this.sessionManager.getEntries());
-		const lastDecision = this._lastModelRouterDecision ?? recentDecisions.at(-1);
-		const historicalDecisions = this._lastModelRouterDecision ? recentDecisions : recentDecisions.slice(0, -1);
-		const settings = this.settingsManager.getModelRouterSettings();
-		const lines = [
-			formatModelRouterStatus(
-				settings,
-				lastDecision,
-				formatLabel,
-				historicalDecisions,
-				this._lastModelRouterSkipReason,
-				this._lastModelRouterIntent ?? lastDecision?.intent,
-			),
-		];
-		const diagnostics = collectModelRouterConfigDiagnostics(settings, this._modelRegistry);
-		if (diagnostics.length > 0) {
-			lines.push(formatLabel ? formatLabel("Config diagnostics:") : "Config diagnostics:");
-			for (const diagnostic of diagnostics) {
-				lines.push(`- ${diagnostic}`);
-			}
-		}
-		return lines.join("\n");
-	}
-
-	private async _runAgentPromptWithModelRouter(
-		messages: AgentMessage | AgentMessage[],
-		routedModel: Model<Api> | undefined,
-		routeDecision: RouteDecision | undefined,
-		persistDecision = true,
-	): Promise<void> {
-		if (!routedModel) {
-			await this._runAgentPrompt(messages);
-			return;
-		}
-
-		const previousModel = this.agent.state.model;
-		const previousThinkingLevel = this.agent.state.thinkingLevel;
-		const previousTurnTools = this.agent.state.tools;
-		const previousSystemPrompt = this.agent.state.systemPrompt;
-		// G4 swap bookkeeping (Bug G): the exact references the swap below assigns, so the finally can
-		// restore ONLY what IT put there — never assigned when no swap happens (e.g. a full-class
-		// routed profile).
-		let swappedTools: typeof previousTurnTools | undefined;
-		let swappedSystemPrompt: typeof previousSystemPrompt | undefined;
-		const previousActiveModelRouterIntent = this._activeModelRouterIntent;
-		const previousActiveModelRouterRoute = this._activeModelRouterRoute;
-		const previousModelRouterSessionBuffer = this._modelRouterSessionBuffer;
-		const previousModelRouterEscalationRequested = this._modelRouterEscalationRequested;
-		const bufferRoutedTurn = routeDecision?.tier === "cheap";
-		const originalHistoryLength = this.agent.state.messages.length;
-		let retryModel: Model<Api> | undefined;
-		let completedDecision: ModelRouterDecisionStatus | undefined = routeDecision
-			? {
-					route: routeDecision,
-					routedModel: formatModelRouterModel(routedModel),
-					outcome: "routed",
-					intent: routeDecision.tier === "cheap" ? "research" : "modify",
-				}
-			: undefined;
-		let thrownError: unknown;
-		if (routeDecision) {
-			this._lastModelRouterDecision = completedDecision;
-		}
-		this._activeModelRouterIntent = routeDecision
-			? routeDecision.tier === "cheap"
-				? "research"
-				: "modify"
-			: undefined;
-		this._activeModelRouterRoute = routeDecision;
-		if (bufferRoutedTurn) {
-			this._modelRouterSessionBuffer = createModelRouterSessionBuffer();
-			this._modelRouterEscalationRequested = false;
-		}
-		if (!modelsAreEqual(this.model, routedModel)) {
-			this.agent.state.model = routedModel;
-			// Per-tier thinking (R1): a configured tier/executor thinking level overrides the inherited
-			// session thinking for THIS routed turn only; unset falls back to exactly today's
-			// inherit-and-clamp behavior. Executor routes carry tier "cheap" too, so reasonCode is
-			// checked first — otherwise an executor turn would silently pick up cheapThinking instead.
-			// The judge's own completion has a separate knob (judgeThinking) applied at its call site.
-			const routerThinkingSettings = this.settingsManager.getModelRouterSettings();
-			const configuredThinking = !routeDecision
-				? undefined
-				: routeDecision.reasonCode === "executor_direct"
-					? routerThinkingSettings.executorThinking
-					: routeDecision.tier === "cheap"
-						? routerThinkingSettings.cheapThinking
-						: routeDecision.tier === "medium"
-							? routerThinkingSettings.mediumThinking
-							: routeDecision.tier === "expensive"
-								? routerThinkingSettings.expensiveThinking
-								: undefined;
-			this.agent.state.thinkingLevel = clampThinkingLevel(
-				routedModel,
-				configuredThinking ?? previousThinkingLevel,
-			) as ThinkingLevel;
-			// G4: capability tool-filtering follows the ROUTED model for the turn. Without this a
-			// cheap/local routed model inherits the session model's full tool surface — schemas it
-			// pays for on every request and may not be able to drive at all.
-			const routedProfile = deriveModelCapabilityProfile({
-				contextWindow: routedModel.contextWindow,
-				mode: this.settingsManager.getModelCapabilitySettings().mode,
-			});
-			if (routedProfile.class !== "full") {
-				const allowed = new Set(
-					filterToolNamesForCapability(
-						previousTurnTools.map((tool) => tool.name),
-						routedProfile,
-					),
-				);
-				swappedTools = previousTurnTools.filter((tool) => allowed.has(tool.name));
-				this.agent.state.tools = swappedTools;
-				// G4: the system prompt follows the ROUTED model's filtered surface too — otherwise the
-				// cheap/local model is billed for (and told about) tool guidelines/snippets it can't call.
-				// Per-turn only; restored in the finally. A live extension override of the prompt is left
-				// alone (only shed when we're on the base prompt).
-				if (this.agent.state.systemPrompt === this._baseSystemPrompt) {
-					swappedSystemPrompt = this._buildSystemPromptForToolNames(
-						this.agent.state.tools.map((tool) => tool.name),
-					);
-					this.agent.state.systemPrompt = swappedSystemPrompt;
-				}
-			}
-		}
-		try {
-			await this._runAgentPrompt(messages);
-			// Speculative muscle-retry (G16 refinement): an executor-routed turn is a bet that the
-			// small model can run the toolkit command directly. If it ends WITHOUT a successful
-			// run_toolkit_script execution, retry ONCE on the same executor with the brain's
-			// refined instruction injected — the brain warms while the muscle tries, so the retry
-			// pays only when the muscle actually missed.
-			if (
-				routeDecision?.reasonCode === "executor_direct" &&
-				!this._isModelRouterRetry &&
-				!this._executorTurnExecutedScript(originalHistoryLength)
-			) {
-				const refined = await this._buildExecutorRefinedPrompt(messages);
-				if (refined) {
-					this.agent.state.messages.splice(originalHistoryLength);
-					await this._runAgentPrompt([
-						{ role: "user", content: [{ type: "text", text: refined }], timestamp: Date.now() },
-					]);
-					completedDecision = {
-						route: {
-							...routeDecision,
-							reasonCode: "executor_speculative_retry",
-							reasons: [
-								...routeDecision.reasons,
-								"Executor missed on first try; retried with brain-refined instruction",
-							],
-						},
-						routedModel: formatModelRouterModel(routedModel),
-						outcome: "routed",
-						intent: "research",
-					};
-					this._lastModelRouterDecision = completedDecision;
-				} else {
-					// The muscle missed AND the reflex brain could not refine the request into a toolkit
-					// instruction (no fit brain model, or no confident plan). There is deliberately NO
-					// frontier fallback here, so surface the miss instead of letting it stand silently —
-					// otherwise the routed turn just ends with an unrun command and no explanation.
-					this._emit({
-						type: "warning",
-						message:
-							"Executor lane: the toolkit command did not run and the reflex brain could not refine it into an explicit instruction; leaving the turn as-is (no automatic escalation).",
-					});
-				}
-			}
-			if (bufferRoutedTurn && this._modelRouterEscalationRequested) {
-				this.agent.state.messages.splice(originalHistoryLength);
-				retryModel = this._resolveModelRouterModelForIntent("modify") ?? previousModel;
-				completedDecision = {
-					route: routeDecision!,
-					routedModel: formatModelRouterModel(routedModel),
-					outcome: "escalated",
-					retryModel: formatModelRouterModel(retryModel),
-					intent: routeDecision!.tier === "cheap" ? "research" : "modify",
-				};
-				this._lastModelRouterDecision = completedDecision;
-			} else if (bufferRoutedTurn && this._modelRouterSessionBuffer) {
-				flushModelRouterSessionBuffer(
-					this._modelRouterSessionBuffer,
-					(message) => {
-						this.sessionManager.appendMessage(message);
-					},
-					(customType, content, display, details) => {
-						this.sessionManager.appendCustomMessageEntry(customType, content, display, details);
-					},
-				);
-			}
-		} catch (error) {
-			thrownError = error;
-			if (completedDecision) {
-				completedDecision = { ...completedDecision, outcome: "failed" };
-				this._lastModelRouterDecision = completedDecision;
-			}
-		} finally {
-			// Restore the pre-route model ONLY if the routed model is still in place: a command
-			// handler may have legitimately changed the session model mid-turn (setModel or a
-			// provider re-registration), and clobbering that would silently undo the change.
-			if (modelsAreEqual(this.agent.state.model, routedModel)) {
-				this.agent.state.model = previousModel;
-				this.agent.state.thinkingLevel = previousThinkingLevel;
-				// Symmetric restore (Bug G): undo tools/systemPrompt only if each is STILL the exact
-				// reference/string the G4 swap above assigned (never assigned at all when the routed
-				// profile was full-class — then there is nothing to restore either). An extension calling
-				// setActiveToolsByName mid-turn reassigns both to its own values without touching the
-				// model — the model guard above still passes, but that live change is legitimate and must
-				// survive rather than being silently reverted to the stale pre-turn snapshot.
-				if (swappedTools !== undefined && this.agent.state.tools === swappedTools) {
-					this.agent.state.tools = previousTurnTools;
-				}
-				if (swappedSystemPrompt !== undefined && this.agent.state.systemPrompt === swappedSystemPrompt) {
-					this.agent.state.systemPrompt = previousSystemPrompt;
-				}
-				// The registry may have changed mid-turn (command-time registerProvider): re-resolve
-				// the restored model so a provider override is not dropped with the routed model.
-				this._refreshCurrentModelFromRegistry();
-			}
-			this._activeModelRouterIntent = previousActiveModelRouterIntent;
-			this._activeModelRouterRoute = previousActiveModelRouterRoute;
-			this._modelRouterSessionBuffer = previousModelRouterSessionBuffer;
-			this._modelRouterEscalationRequested = previousModelRouterEscalationRequested;
-		}
-
-		if (retryModel && !thrownError) {
-			const previousIsModelRouterRetry = this._isModelRouterRetry;
-			try {
-				this._isModelRouterRetry = true;
-				const retryDecision: RouteDecision = {
-					tier: "expensive",
-					risk: "high-impact",
-					confidence: 1.0,
-					reasonCode: "cheap_mutating_tool_escalation",
-					reasons: ["Cheap research turn attempted a mutating tool and escalated"],
-					fallbackFrom: "cheap",
-					model: formatModelRouterModel(retryModel),
-				};
-				await this._runAgentPromptWithModelRouter(messages, retryModel, retryDecision, false);
-				this._lastModelRouterDecision = completedDecision;
-			} catch (error) {
-				thrownError = error;
-				if (completedDecision) {
-					completedDecision = { ...completedDecision, outcome: "failed" };
-					this._lastModelRouterDecision = completedDecision;
-				}
-			} finally {
-				this._isModelRouterRetry = previousIsModelRouterRetry;
-			}
-		}
-
-		if (persistDecision && completedDecision) {
-			persistModelRouterDecision(this.sessionManager, completedDecision);
-			// G3: one route event per user-facing routed turn (the escalation retry runs with
-			// persistDecision=false, so it does not double-emit). Codes/numbers only — no prompt text.
-			this._emitAutonomyTelemetry({
-				type: AUTONOMY_TELEMETRY_EVENT_TYPES.routeDecision,
-				timestamp: new Date().toISOString(),
-				payload: {
-					tier: completedDecision.route.tier,
-					risk: completedDecision.route.risk,
-					reasonCode: completedDecision.route.reasonCode,
-					confidence: completedDecision.route.confidence,
-					outcome: completedDecision.outcome,
-				},
-			});
-		}
-
-		if (thrownError) {
-			throw thrownError;
-		}
+		return this._modelRouter.getStatus(formatLabel);
 	}
 
 	private async _handlePostAgentRun(): Promise<boolean> {
@@ -2838,7 +2272,7 @@ export class AgentSession {
 			// block (this phase succeeded, whether or not it produced a turn to run).
 			this._emit({ type: "routing_start" });
 
-			const resolvedRouteInfo = await this._resolveModelRouterTurnRouteJudged(expandedText, {
+			const resolvedRouteInfo = await this._modelRouter.resolveTurnRouteJudged(expandedText, {
 				// Internally generated turns (goal continuation, lane follow-ups) never consult the judge:
 				// the regex floor already classified them, and a 20-turn loop must not buy 20 judge calls.
 				skipJudge: options?.autoContinueGoal === false,
@@ -2964,7 +2398,7 @@ export class AgentSession {
 		}
 
 		preflightResult?.(true);
-		await this._runAgentPromptWithModelRouter(messages, routedTurnModel, routedTurnRouteDecision);
+		await this._modelRouter.runRoutedTurn(messages, routedTurnModel, routedTurnRouteDecision);
 
 		// R4: score whether the agent actually used the recalled context, so the recall gate can adapt.
 		if (injectedRecall) {
