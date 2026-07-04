@@ -8,6 +8,7 @@ import {
 	createCustomMessage,
 	uuidv7,
 } from "@caupulican/pi-agent-core";
+import { normalizePath, resolvePath } from "@caupulican/pi-agent-core/node";
 import type { ImageContent, Message, TextContent } from "@caupulican/pi-ai";
 import { randomUUID } from "crypto";
 import {
@@ -28,7 +29,6 @@ import { join, resolve } from "path";
 import { createInterface } from "readline";
 import { StringDecoder } from "string_decoder";
 import { getAgentDir as getDefaultAgentDir, getSessionsDir } from "../config.ts";
-import { normalizePath, resolvePath } from "../utils/paths.ts";
 
 export const CURRENT_SESSION_VERSION = 3;
 
