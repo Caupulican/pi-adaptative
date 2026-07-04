@@ -38,7 +38,7 @@ const bashSchema = Type.Object({
 	timeout: Type.Optional(
 		Type.Number({
 			description:
-				"Timeout in seconds (optional). When set, this wall-clock limit replaces the default silence watchdog.",
+				"Timeout in seconds (optional). When set to a positive value, this wall-clock limit replaces the default silence watchdog. Zero or negative values are treated as unset, so the silence watchdog still applies.",
 		}),
 	),
 });
@@ -113,12 +113,13 @@ export function createLocalBashOperations(options?: { shellPath?: string }): Bas
 			};
 
 			// A command that keeps producing output must never be killed by this mechanism:
-			// silence bounds mute-ness, not duration. It only arms when the caller left `timeout`
-			// unset — an explicit timeout means the model took responsibility for the wall clock.
+			// silence bounds mute-ness, not duration. It arms when the caller left `timeout`
+			// unset or non-positive (treated as unset) — an explicit positive timeout means
+			// the model took responsibility for the wall clock.
 			let silenceKilled = false;
 			const silenceMs = commandSilenceMsOverride ?? DEFAULT_COMMAND_SILENCE_MS;
 			const silenceWatchdog =
-				timeout === undefined && silenceMs > 0
+				(timeout === undefined || timeout <= 0) && silenceMs > 0
 					? createSilenceWatchdog({
 							silenceMs,
 							onSilence: () => {

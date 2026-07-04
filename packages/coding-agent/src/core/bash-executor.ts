@@ -204,6 +204,16 @@ export async function executeBashWithOperations(
 			await endWriteStream(tempFileStream);
 		}
 
+		// The silence watchdog (see tools/bash.ts) throws a raw `silence:<secs>` sentinel.
+		// Map it to the same user-facing message the interactive bash tool shows, instead of
+		// leaking the sentinel to callers of this path (interactive !cmd, RPC).
+		if (err instanceof Error && err.message.startsWith("silence:")) {
+			const secs = err.message.split(":")[1];
+			throw new Error(
+				`Command killed after ${secs}s of silence (no output). If the command is legitimately quiet for long stretches, re-run it with an explicit timeout, or run it in the background with '&'.`,
+			);
+		}
+
 		throw err;
 	}
 }

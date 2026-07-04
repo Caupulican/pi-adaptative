@@ -14,6 +14,18 @@ describe("bash silence watchdog", () => {
 		}
 	}, 15_000);
 
+	it("timeout: 0 is treated as unset: silence watchdog still governs", async () => {
+		setCommandSilenceMsForTests(500);
+		try {
+			const tool = createBashTool(process.cwd());
+			await expect(tool.execute("t1b", { command: "sleep 30", timeout: 0 })).rejects.toThrow(
+				/silence|killed after .*of silence/i,
+			);
+		} finally {
+			setCommandSilenceMsForTests(undefined);
+		}
+	}, 15_000);
+
 	it("does not kill a command that keeps producing output", async () => {
 		setCommandSilenceMsForTests(500);
 		try {
