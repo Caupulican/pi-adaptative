@@ -1,5 +1,13 @@
 ## [Unreleased]
 
+### Added
+- Foreground bash commands with no explicit `timeout` are now killed after 600s of continuous
+  silence (no stdout/stderr output), not by total runtime — a command that keeps producing output
+  is never killed by this. Passing an explicit `timeout` disables the silence watchdog in favor of
+  the wall-clock limit; backgrounded (`cmd &`) work is exempt by construction. Wires the
+  `createSilenceWatchdog` primitive from `@caupulican/pi-agent-core`'s reliability kernel into the
+  bash tool.
+
 ## [0.80.103] - 2026-07-03
 
 ### Fixed

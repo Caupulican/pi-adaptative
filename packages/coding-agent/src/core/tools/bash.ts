@@ -1,7 +1,7 @@
 import { constants } from "node:fs";
 import { access as fsAccess, readdir as fsReaddir, readFile as fsReadFile, stat as fsStat } from "node:fs/promises";
 import { relative as relativePath, resolve as resolvePath } from "node:path";
-import type { AgentTool } from "@caupulican/pi-agent-core";
+import { type AgentTool, createSilenceWatchdog } from "@caupulican/pi-agent-core";
 import { Container, Text, truncateToWidth } from "@caupulican/pi-tui";
 import { spawn } from "child_process";
 import { type Static, Type } from "typebox";
@@ -23,9 +23,23 @@ import { getTextOutput, invalidArgText, str } from "./render-utils.ts";
 import { wrapToolDefinition } from "./tool-definition-wrapper.ts";
 import { DEFAULT_MAX_BYTES, DEFAULT_MAX_LINES, formatSize, type TruncationResult } from "./truncate.ts";
 
+/** Default silence bound for foreground commands without an explicit timeout (spec §2: ~10 min). */
+const DEFAULT_COMMAND_SILENCE_MS = 600_000;
+let commandSilenceMsOverride: number | undefined;
+
+/** Test hook: override the silence threshold. Pass undefined to restore the default. */
+export function setCommandSilenceMsForTests(ms: number | undefined): void {
+	commandSilenceMsOverride = ms;
+}
+
 const bashSchema = Type.Object({
 	command: Type.String({ description: "Bash command to execute" }),
-	timeout: Type.Optional(Type.Number({ description: "Timeout in seconds (optional, no default timeout)" })),
+	timeout: Type.Optional(
+		Type.Number({
+			description:
+				"Timeout in seconds (optional). When set, this wall-clock limit replaces the default silence watchdog.",
+		}),
+	),
 });
 
 export type BashToolInput = Static<typeof bashSchema>;
@@ -97,6 +111,26 @@ export function createLocalBashOperations(options?: { shellPath?: string }): Bas
 				if (child.pid) killProcessTree(child.pid);
 			};
 
+			// A command that keeps producing output must never be killed by this mechanism:
+			// silence bounds mute-ness, not duration. It only arms when the caller left `timeout`
+			// unset — an explicit timeout means the model took responsibility for the wall clock.
+			let silenceKilled = false;
+			const silenceMs = commandSilenceMsOverride ?? DEFAULT_COMMAND_SILENCE_MS;
+			const silenceWatchdog =
+				timeout === undefined && silenceMs > 0
+					? createSilenceWatchdog({
+							silenceMs,
+							onSilence: () => {
+								silenceKilled = true;
+								if (child.pid) killProcessTree(child.pid);
+							},
+						})
+					: undefined;
+			const onChunk = (data: Buffer) => {
+				silenceWatchdog?.touch();
+				onData(data);
+			};
+
 			try {
 				// Set timeout if provided.
 				if (timeout !== undefined && timeout > 0) {
@@ -106,8 +140,8 @@ export function createLocalBashOperations(options?: { shellPath?: string }): Bas
 					}, timeout * 1000);
 				}
 				// Stream stdout and stderr.
-				child.stdout?.on("data", onData);
-				child.stderr?.on("data", onData);
+				child.stdout?.on("data", onChunk);
+				child.stderr?.on("data", onChunk);
 				// Handle abort signal by killing the entire process tree.
 				if (signal) {
 					if (signal.aborted) onAbort();
@@ -122,8 +156,12 @@ export function createLocalBashOperations(options?: { shellPath?: string }): Bas
 				if (timedOut) {
 					throw new Error(`timeout:${timeout}`);
 				}
+				if (silenceKilled) {
+					throw new Error(`silence:${silenceMs / 1000}`);
+				}
 				return { exitCode };
 			} finally {
+				silenceWatchdog?.disarm();
 				if (child.pid) untrackDetachedChildPid(child.pid);
 				if (timeoutHandle) clearTimeout(timeoutHandle);
 				if (signal) signal.removeEventListener("abort", onAbort);
@@ -426,7 +464,7 @@ export function createBashToolDefinition(
 	return {
 		name: "bash",
 		label: "bash",
-		description: `Execute a bash command in the current working directory. Returns stdout and stderr. Output is truncated to last ${DEFAULT_MAX_LINES} lines or ${DEFAULT_MAX_BYTES / 1024}KB (whichever is hit first). If truncated, full output is saved to a temp file. Optionally provide a timeout in seconds.`,
+		description: `Execute a bash command in the current working directory. Returns stdout and stderr. Output is truncated to last ${DEFAULT_MAX_LINES} lines or ${DEFAULT_MAX_BYTES / 1024}KB (whichever is hit first). If truncated, full output is saved to a temp file. Optionally provide a timeout in seconds. Without an explicit timeout, the command is killed after ${DEFAULT_COMMAND_SILENCE_MS / 1000}s of continuous silence (no stdout/stderr output) rather than being bounded by total runtime; commands that keep producing output are never killed by this. Provide an explicit timeout to replace the silence watchdog with a wall-clock limit, or background long, quiet work with '&'.`,
 		promptSnippet: "Execute bash commands (ls, grep, find, etc.)",
 		parameters: bashSchema,
 		async execute(
@@ -609,6 +647,15 @@ export function createBashToolDefinition(
 					if (err instanceof Error && err.message.startsWith("timeout:")) {
 						const timeoutSecs = err.message.split(":")[1];
 						throw new Error(appendStatus(text, `Command timed out after ${timeoutSecs} seconds`));
+					}
+					if (err instanceof Error && err.message.startsWith("silence:")) {
+						const secs = err.message.split(":")[1];
+						throw new Error(
+							appendStatus(
+								text,
+								`Command killed after ${secs}s of silence (no output). If the command is legitimately quiet for long stretches, re-run it with an explicit timeout, or run it in the background with '&'.`,
+							),
+						);
 					}
 					throw err;
 				}
