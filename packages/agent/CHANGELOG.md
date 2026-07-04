@@ -1,5 +1,8 @@
 ## [Unreleased]
 
+### Added
+- Retry policy with configurable jitter and exponential backoff (RetryPolicy, computeRetryDelayMs, sleepAbortable) for reliability kernel.
+
 ## [0.80.103] - 2026-07-03
 
 ## [0.80.102] - 2026-07-03
