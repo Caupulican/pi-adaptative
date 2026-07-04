@@ -324,7 +324,7 @@ async function main(): Promise<void> {
 		thinkingLevel: "low",
 		customTools: [deterministicProbeTool() as unknown as ToolDefinition],
 		resourceLoader,
-		sessionManager: SessionManager.open(args.sessionPath),
+		sessionManager: SessionManager.open(args.sessionPath, dirname(args.sessionPath)),
 		settingsManager,
 		authStorage,
 		modelRegistry,

@@ -65,7 +65,7 @@ describe("tool result details retention on session load", () => {
 		const file = join(tempDir, "oversized.jsonl");
 		writeSessionFile(file, { payload: "x".repeat(200_000), nested: { keep: "metadata" } });
 
-		const manager = SessionManager.open(file, tempDir);
+		const manager = SessionManager.open(file, tempDir, tempDir);
 
 		const details = loadedToolResultDetails(manager) as Record<string, unknown>;
 		expect(details.piToolResultDetailsTruncated).toBe(true);
@@ -76,7 +76,7 @@ describe("tool result details retention on session load", () => {
 		const file = join(tempDir, "small.jsonl");
 		writeSessionFile(file, { summary: "kept", lines: 3 });
 
-		const manager = SessionManager.open(file, tempDir);
+		const manager = SessionManager.open(file, tempDir, tempDir);
 
 		expect(loadedToolResultDetails(manager)).toEqual({ summary: "kept", lines: 3 });
 	});
@@ -121,7 +121,7 @@ describe("tool result details retention on session load", () => {
 		writeSessionFile(file, { payload: "x".repeat(200_000) });
 		const before = readFileSync(file, "utf-8");
 
-		SessionManager.open(file, tempDir);
+		SessionManager.open(file, tempDir, tempDir);
 
 		expect(readFileSync(file, "utf-8")).toBe(before);
 	});

@@ -95,7 +95,7 @@ describe("loadEntriesFromFile", () => {
 			'{"type":"message","id":"1","parentId":null,"timestamp":"2025-01-01T00:00:01Z","message":{"role":"user","content":"hi","timestamp":1}}\n',
 		);
 
-		const sessionManager = SessionManager.open(file, tempDir);
+		const sessionManager = SessionManager.open(file, tempDir, tempDir);
 		expect(sessionManager.getSessionId()).toBe("abc");
 		expect(sessionManager.getEntries()).toHaveLength(1);
 		expect(sessionManager.buildSessionContext().messages).toEqual([{ role: "user", content: "hi", timestamp: 1 }]);
@@ -223,7 +223,7 @@ describe("SessionManager custom flat session directory", () => {
 	});
 
 	function createPersistedSession(cwd: string, label: string, id?: string): string {
-		const session = SessionManager.create(cwd, tempDir, id ? { id } : undefined);
+		const session = SessionManager.create(cwd, tempDir, tempDir, id ? { id } : undefined);
 		session.appendMessage({ role: "user", content: label, timestamp: Date.now() });
 		session.appendMessage({
 			role: "assistant",
@@ -254,13 +254,13 @@ describe("SessionManager custom flat session directory", () => {
 		await new Promise((r) => setTimeout(r, 10));
 		const sessionB = createPersistedSession(projectB, "from B");
 
-		const currentA = await SessionManager.list(projectA, tempDir);
+		const currentA = await SessionManager.list(projectA, tempDir, tempDir);
 		expect(currentA.map((session) => session.path)).toEqual([sessionA]);
 
-		const all = await SessionManager.listAll(tempDir);
+		const all = await SessionManager.listAll(tempDir, tempDir);
 		expect(new Set(all.map((session) => session.path))).toEqual(new Set([sessionA, sessionB]));
 
-		const continuedA = SessionManager.continueRecent(projectA, tempDir);
+		const continuedA = SessionManager.continueRecent(projectA, tempDir, tempDir);
 		expect(continuedA.getSessionFile()).toBe(sessionA);
 	});
 
@@ -269,10 +269,10 @@ describe("SessionManager custom flat session directory", () => {
 		await new Promise((r) => setTimeout(r, 10));
 		createPersistedSession(projectA, "hidden auto learn session", "auto-learn-reflection-test-run");
 
-		const current = await SessionManager.list(projectA, tempDir);
+		const current = await SessionManager.list(projectA, tempDir, tempDir);
 		expect(current.map((session) => session.path)).toEqual([userSession]);
 
-		const all = await SessionManager.listAll(tempDir);
+		const all = await SessionManager.listAll(tempDir, tempDir);
 		expect(all.map((session) => session.path)).toEqual([userSession]);
 	});
 
@@ -281,7 +281,7 @@ describe("SessionManager custom flat session directory", () => {
 		await new Promise((r) => setTimeout(r, 10));
 		createPersistedSession(projectA, "newer hidden auto learn session", "auto-learn-auto-test-run");
 
-		const continued = SessionManager.continueRecent(projectA, tempDir);
+		const continued = SessionManager.continueRecent(projectA, tempDir, tempDir);
 		expect(continued.getSessionFile()).toBe(userSession);
 	});
 });
@@ -302,7 +302,7 @@ describe("SessionManager.setSessionFile with corrupted files", () => {
 		const emptyFile = join(tempDir, "empty.jsonl");
 		writeFileSync(emptyFile, "");
 
-		const sm = SessionManager.open(emptyFile, tempDir);
+		const sm = SessionManager.open(emptyFile, tempDir, tempDir);
 
 		// Should have created a new session with valid header
 		expect(sm.getSessionId()).toBeTruthy();
@@ -326,7 +326,7 @@ describe("SessionManager.setSessionFile with corrupted files", () => {
 			'{"type":"message","id":"abc","parentId":"orphaned","timestamp":"2025-01-01T00:00:00Z","message":{"role":"assistant","content":"test"}}\n',
 		);
 
-		const sm = SessionManager.open(noHeaderFile, tempDir);
+		const sm = SessionManager.open(noHeaderFile, tempDir, tempDir);
 
 		// Should have created a new session with valid header
 		expect(sm.getSessionId()).toBeTruthy();
@@ -346,7 +346,7 @@ describe("SessionManager.setSessionFile with corrupted files", () => {
 		const explicitPath = join(tempDir, "my-session.jsonl");
 		writeFileSync(explicitPath, "");
 
-		const sm = SessionManager.open(explicitPath, tempDir);
+		const sm = SessionManager.open(explicitPath, tempDir, tempDir);
 
 		// The session file path should be preserved
 		expect(sm.getSessionFile()).toBe(explicitPath);
@@ -357,11 +357,11 @@ describe("SessionManager.setSessionFile with corrupted files", () => {
 		writeFileSync(corruptedFile, "garbage content\n");
 
 		// First open recovers the file
-		const sm1 = SessionManager.open(corruptedFile, tempDir);
+		const sm1 = SessionManager.open(corruptedFile, tempDir, tempDir);
 		const sessionId = sm1.getSessionId();
 
 		// Second open should load the recovered file successfully
-		const sm2 = SessionManager.open(corruptedFile, tempDir);
+		const sm2 = SessionManager.open(corruptedFile, tempDir, tempDir);
 		expect(sm2.getSessionId()).toBe(sessionId);
 		expect(sm2.getHeader()?.type).toBe("session");
 	});

@@ -42,13 +42,13 @@ describe("two session managers on the same file", () => {
 
 	it("interleaved appends produce a valid forked tree, not a corrupted file", () => {
 		const file = join(tempDir, "shared.jsonl");
-		const first = SessionManager.create(tempDir, tempDir);
+		const first = SessionManager.create(tempDir, tempDir, tempDir);
 		first.setSessionFile(file);
 		first.appendMessage(userMessage("hello"));
 		first.appendMessage(assistantMessage("hi"));
 
 		// Second process resumes the same file mid-conversation.
-		const second = SessionManager.open(file, tempDir);
+		const second = SessionManager.open(file, tempDir, tempDir);
 
 		// Both processes append from the same leaf.
 		first.appendMessage(userMessage("from first"));
@@ -66,7 +66,7 @@ describe("two session managers on the same file", () => {
 		}
 
 		// The two concurrent appends become siblings (a fork), both reachable.
-		const reopened = SessionManager.open(file, tempDir);
+		const reopened = SessionManager.open(file, tempDir, tempDir);
 		const context = reopened.buildSessionContext();
 		expect(context.messages.length).toBeGreaterThan(0);
 	});

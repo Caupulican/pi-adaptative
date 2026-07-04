@@ -107,7 +107,8 @@ import { formatModelFitnessReport, isProbeAllFailed } from "../../core/research/
 import type { ResourceDiagnostic } from "../../core/resource-loader.ts";
 import { resourceProfileSettingsChangedKinds } from "../../core/resource-profile-equality.ts";
 import { formatMissingSessionCwdPrompt, MissingSessionCwdError } from "../../core/session-cwd.ts";
-import { isAutoLearnSessionId, type SessionContext, SessionManager } from "../../core/session-manager.ts";
+import { isAutoLearnSessionId, type SessionContext, type SessionManager } from "../../core/session-manager.ts";
+import { listAllSessions, listSessions, openSession } from "../../core/session-manager-factory.ts";
 import type {
 	AutoLearnSettings,
 	AutonomyMode,
@@ -8314,12 +8315,11 @@ export class InteractiveMode {
 	private showSessionSelector(): void {
 		this.showSelector((done) => {
 			const selector = new SessionSelectorComponent(
-				(onProgress) =>
-					SessionManager.list(this.sessionManager.getCwd(), this.sessionManager.getSessionDir(), onProgress),
+				(onProgress) => listSessions(this.sessionManager.getCwd(), this.sessionManager.getSessionDir(), onProgress),
 				(onProgress) =>
 					this.sessionManager.usesDefaultSessionDir()
-						? SessionManager.listAll(onProgress)
-						: SessionManager.listAll(this.sessionManager.getSessionDir(), onProgress),
+						? listAllSessions(onProgress)
+						: listAllSessions(this.sessionManager.getSessionDir(), onProgress),
 				async (sessionPath) => {
 					done();
 					await this.handleResumeSession(sessionPath);
@@ -8336,7 +8336,7 @@ export class InteractiveMode {
 					renameSession: async (sessionFilePath: string, nextName: string | undefined) => {
 						const next = (nextName ?? "").trim();
 						if (!next) return;
-						const mgr = SessionManager.open(sessionFilePath);
+						const mgr = openSession(sessionFilePath);
 						mgr.appendSessionInfo(next);
 					},
 					showRenameHint: true,

@@ -91,7 +91,7 @@ export interface CreateAgentSessionOptions {
 	/** Resource loader. When omitted, DefaultResourceLoader is used. */
 	resourceLoader?: ResourceLoader;
 
-	/** Session manager. Default: SessionManager.create(cwd) */
+	/** Session manager. Default: SessionManager.create(cwd, agentDir, getDefaultSessionDir(cwd, agentDir)) */
 	sessionManager?: SessionManager;
 
 	/** Settings manager. Default: SettingsManager.create(cwd, agentDir) */
@@ -245,7 +245,8 @@ export async function createAgentSession(options: CreateAgentSessionOptions = {}
 	if (options.resourceProfiles && options.resourceProfiles.length > 0) {
 		settingsManager.setRuntimeResourceProfiles(options.resourceProfiles);
 	}
-	const sessionManager = options.sessionManager ?? SessionManager.create(cwd, getDefaultSessionDir(cwd, agentDir));
+	const sessionManager =
+		options.sessionManager ?? SessionManager.create(cwd, agentDir, getDefaultSessionDir(cwd, agentDir));
 
 	if (!resourceLoader) {
 		resourceLoader = new DefaultResourceLoader({ cwd, agentDir, settingsManager });

@@ -5,8 +5,8 @@ import { APP_NAME, getExportTemplateDir } from "../../config.ts";
 import { getResolvedThemeColors, getThemeExportColors } from "../../modes/interactive/theme/theme.ts";
 import { normalizePath, resolvePath } from "../../utils/paths.ts";
 import type { ToolDefinition } from "../extensions/types.ts";
-import type { SessionEntry } from "../session-manager.ts";
-import { SessionManager } from "../session-manager.ts";
+import type { SessionEntry, SessionManager } from "../session-manager.ts";
+import { openSession } from "../session-manager-factory.ts";
 
 /**
  * Interface for rendering custom tools to HTML.
@@ -293,7 +293,7 @@ export async function exportFromFile(inputPath: string, options?: ExportOptions 
 		throw new Error(`File not found: ${resolvedInputPath}`);
 	}
 
-	const sm = SessionManager.open(resolvedInputPath);
+	const sm = openSession(resolvedInputPath);
 
 	const sessionData: SessionData = {
 		header: sm.getHeader(),

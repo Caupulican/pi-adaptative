@@ -65,7 +65,7 @@ describe("SessionManager.newSession with custom id", () => {
 
 	it("uses the provided id when creating a persisted session", () => {
 		const tempDir = mkdtempSync(join(tmpdir(), "pi-session-manager-"));
-		const session = SessionManager.create(tempDir, tempDir, { id: "created-session-id" });
+		const session = SessionManager.create(tempDir, tempDir, tempDir, { id: "created-session-id" });
 
 		expect(session.getSessionId()).toBe("created-session-id");
 		expect(session.getHeader()!.id).toBe("created-session-id");
@@ -129,7 +129,7 @@ describe("SessionManager.newSession with custom id", () => {
 `,
 		);
 
-		const forked = SessionManager.forkFrom(sourcePath, tempDir, tempDir);
+		const forked = SessionManager.forkFrom(sourcePath, tempDir, tempDir, tempDir);
 		const header = forked.getHeader();
 		expect(header).not.toBeNull();
 		expect(header!.id).toMatch(UUID_V7_RE);
@@ -150,7 +150,7 @@ describe("SessionManager.newSession with custom id", () => {
 			})}\n`,
 		);
 
-		const forked = SessionManager.forkFrom(sourcePath, tempDir, tempDir, { id: "forked-session-id" });
+		const forked = SessionManager.forkFrom(sourcePath, tempDir, tempDir, tempDir, { id: "forked-session-id" });
 		const header = forked.getHeader();
 		expect(header).not.toBeNull();
 		expect(header!.id).toBe("forked-session-id");

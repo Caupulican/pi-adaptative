@@ -19,7 +19,7 @@ function createSessionFile(path: string): void {
 
 	// SessionManager only persists once it has seen at least one assistant message.
 	// Add a minimal assistant entry so subsequent appends are persisted.
-	const mgr = SessionManager.open(path);
+	const mgr = SessionManager.open(path, dirname(path));
 	mgr.appendMessage({
 		role: "assistant",
 		content: [{ type: "text", text: "hi" }],
@@ -54,7 +54,7 @@ describe("SessionInfo.modified", () => {
 		// Ensure the file mtime can differ from our message timestamp even on coarse filesystems.
 		await new Promise((r) => setTimeout(r, 10));
 
-		const mgr = SessionManager.open(filePath);
+		const mgr = SessionManager.open(filePath, dirname(filePath));
 		const msgTime = Date.now();
 		mgr.appendMessage({
 			role: "assistant",
@@ -74,7 +74,7 @@ describe("SessionInfo.modified", () => {
 			timestamp: msgTime,
 		});
 
-		const sessions = await SessionManager.list("/tmp", dirname(filePath));
+		const sessions = await SessionManager.list("/tmp", dirname(filePath), dirname(filePath));
 		const s = sessions.find((x) => x.path === filePath);
 		expect(s).toBeDefined();
 		expect(s!.modified.getTime()).toBe(msgTime);

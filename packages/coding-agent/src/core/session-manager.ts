@@ -28,7 +28,6 @@ import { readdir, stat } from "fs/promises";
 import { join, resolve } from "path";
 import { createInterface } from "readline";
 import { StringDecoder } from "string_decoder";
-import { getAgentDir as getDefaultAgentDir, getSessionsDir } from "../config.ts";
 
 export const CURRENT_SESSION_VERSION = 3;
 
@@ -446,25 +445,25 @@ function getEncodedSessionDirName(cwd: string): string {
 	return `--${encodeURIComponent(resolvePath(cwd))}--`;
 }
 
-function getLegacySessionDirPath(cwd: string, agentDir: string = getDefaultAgentDir()): string {
+function getLegacySessionDirPath(cwd: string, agentDir: string): string {
 	const resolvedCwd = resolvePath(cwd);
 	const resolvedAgentDir = resolvePath(agentDir);
 	const safePath = `--${resolvedCwd.replace(/^[/\\]/, "").replace(/[/\\:]/g, "-")}--`;
 	return join(resolvedAgentDir, "sessions", safePath);
 }
 
-function getDefaultSessionDirPath(cwd: string, agentDir: string = getDefaultAgentDir()): string {
+function getDefaultSessionDirPath(cwd: string, agentDir: string): string {
 	const resolvedAgentDir = resolvePath(agentDir);
 	return join(resolvedAgentDir, "sessions", getEncodedSessionDirName(cwd));
 }
 
-function getDefaultSessionDirCandidates(cwd: string, agentDir: string = getDefaultAgentDir()): string[] {
+function getDefaultSessionDirCandidates(cwd: string, agentDir: string): string[] {
 	const current = getDefaultSessionDirPath(cwd, agentDir);
 	const legacy = getLegacySessionDirPath(cwd, agentDir);
 	return current === legacy ? [current] : [current, legacy];
 }
 
-export function getDefaultSessionDir(cwd: string, agentDir: string = getDefaultAgentDir()): string {
+export function getDefaultSessionDir(cwd: string, agentDir: string): string {
 	const sessionDir = getDefaultSessionDirPath(cwd, agentDir);
 	if (!existsSync(sessionDir)) {
 		mkdirSync(sessionDir, { recursive: true });
@@ -844,6 +843,12 @@ export class SessionManager {
 	private sessionFile: string | undefined;
 	private sessionDir: string;
 	private cwd: string;
+	/**
+	 * Agent config dir (e.g. ~/.pi/agent) used to compute the default session-dir candidates for
+	 * usesDefaultSessionDir(). Injected explicitly by the caller — SessionManager never resolves it
+	 * from app config. Empty string for in-memory sessions (no default dir applies).
+	 */
+	private agentDir: string;
 	private persist: boolean;
 	private flushed: boolean = false;
 	private fileEntries: FileEntry[] = [];
@@ -857,10 +862,12 @@ export class SessionManager {
 		sessionDir: string,
 		sessionFile: string | undefined,
 		persist: boolean,
+		agentDir: string,
 		newSessionOptions?: NewSessionOptions,
 	) {
 		this.cwd = resolvePath(cwd);
 		this.sessionDir = normalizePath(sessionDir);
+		this.agentDir = agentDir;
 		this.persist = persist;
 		if (persist && this.sessionDir && !existsSync(this.sessionDir)) {
 			mkdirSync(this.sessionDir, { recursive: true });
@@ -990,7 +997,7 @@ export class SessionManager {
 	}
 
 	usesDefaultSessionDir(): boolean {
-		return getDefaultSessionDirCandidates(this.cwd).includes(this.sessionDir);
+		return getDefaultSessionDirCandidates(this.cwd, this.agentDir).includes(this.sessionDir);
 	}
 
 	getSessionId(): string {
@@ -1482,20 +1489,22 @@ export class SessionManager {
 	/**
 	 * Create a new session.
 	 * @param cwd Working directory (stored in session header)
-	 * @param sessionDir Optional session directory. If omitted, uses default (~/.pi/agent/sessions/<encoded-cwd>/).
+	 * @param agentDir Agent config dir used to compute the default session dir and default-dir candidates.
+	 * @param sessionDir Optional session directory. If omitted, uses default (<agentDir>/sessions/<encoded-cwd>/).
 	 */
-	static create(cwd: string, sessionDir?: string, options?: NewSessionOptions): SessionManager {
-		const dir = sessionDir ? normalizePath(sessionDir) : getDefaultSessionDir(cwd);
-		return new SessionManager(cwd, dir, undefined, true, options);
+	static create(cwd: string, agentDir: string, sessionDir?: string, options?: NewSessionOptions): SessionManager {
+		const dir = sessionDir ? normalizePath(sessionDir) : getDefaultSessionDir(cwd, agentDir);
+		return new SessionManager(cwd, dir, undefined, true, agentDir, options);
 	}
 
 	/**
 	 * Open a specific session file.
 	 * @param path Path to session file
+	 * @param agentDir Agent config dir used to compute default-dir candidates for usesDefaultSessionDir().
 	 * @param sessionDir Optional session directory for /new or /branch. If omitted, derives from file's parent.
 	 * @param cwdOverride Optional cwd override instead of the session header cwd.
 	 */
-	static open(path: string, sessionDir?: string, cwdOverride?: string): SessionManager {
+	static open(path: string, agentDir: string, sessionDir?: string, cwdOverride?: string): SessionManager {
 		const resolvedPath = resolvePath(path);
 		// Extract cwd from session header if possible, otherwise use process.cwd()
 		const entries = loadEntriesFromFile(resolvedPath);
@@ -1503,29 +1512,30 @@ export class SessionManager {
 		const cwd = cwdOverride ?? header?.cwd ?? process.cwd();
 		// If no sessionDir provided, derive from file's parent directory
 		const dir = sessionDir ? normalizePath(sessionDir) : resolve(resolvedPath, "..");
-		return new SessionManager(cwd, dir, resolvedPath, true);
+		return new SessionManager(cwd, dir, resolvedPath, true, agentDir);
 	}
 
 	/**
 	 * Continue the most recent session, or create new if none.
 	 * @param cwd Working directory
-	 * @param sessionDir Optional session directory. If omitted, uses default (~/.pi/agent/sessions/<encoded-cwd>/).
+	 * @param agentDir Agent config dir used to compute the default session dir and default-dir candidates.
+	 * @param sessionDir Optional session directory. If omitted, uses default (<agentDir>/sessions/<encoded-cwd>/).
 	 */
-	static continueRecent(cwd: string, sessionDir?: string): SessionManager {
-		const dir = sessionDir ? normalizePath(sessionDir) : getDefaultSessionDir(cwd);
-		const defaultDirs = getDefaultSessionDirCandidates(cwd);
+	static continueRecent(cwd: string, agentDir: string, sessionDir?: string): SessionManager {
+		const dir = sessionDir ? normalizePath(sessionDir) : getDefaultSessionDir(cwd, agentDir);
+		const defaultDirs = getDefaultSessionDirCandidates(cwd, agentDir);
 		const filterCwd = sessionDir !== undefined && !defaultDirs.includes(dir);
 		const searchDirs = sessionDir ? [dir] : defaultDirs;
 		const mostRecent = findMostRecentSessionInDirs(searchDirs, filterCwd ? cwd : undefined);
 		if (mostRecent) {
-			return new SessionManager(cwd, resolve(mostRecent, ".."), mostRecent, true);
+			return new SessionManager(cwd, resolve(mostRecent, ".."), mostRecent, true, agentDir);
 		}
-		return new SessionManager(cwd, dir, undefined, true);
+		return new SessionManager(cwd, dir, undefined, true, agentDir);
 	}
 
-	/** Create an in-memory session (no file persistence) */
+	/** Create an in-memory session (no file persistence). No agent dir applies (usesDefaultSessionDir is false). */
 	static inMemory(cwd: string = process.cwd()): SessionManager {
-		return new SessionManager(cwd, "", undefined, false);
+		return new SessionManager(cwd, "", undefined, false, "");
 	}
 
 	/**
@@ -1533,11 +1543,13 @@ export class SessionManager {
 	 * Creates a new session in the target cwd with the full history from the source session.
 	 * @param sourcePath Path to the source session file
 	 * @param targetCwd Target working directory (where the new session will be stored)
+	 * @param agentDir Agent config dir used to compute the default session dir for targetCwd.
 	 * @param sessionDir Optional session directory. If omitted, uses default for targetCwd.
 	 */
 	static forkFrom(
 		sourcePath: string,
 		targetCwd: string,
+		agentDir: string,
 		sessionDir?: string,
 		options?: NewSessionOptions,
 	): SessionManager {
@@ -1553,7 +1565,7 @@ export class SessionManager {
 			throw new Error(`Cannot fork: source session has no header: ${resolvedSourcePath}`);
 		}
 
-		const dir = sessionDir ? normalizePath(sessionDir) : getDefaultSessionDir(resolvedTargetCwd);
+		const dir = sessionDir ? normalizePath(sessionDir) : getDefaultSessionDir(resolvedTargetCwd, agentDir);
 		if (!existsSync(dir)) {
 			mkdirSync(dir, { recursive: true });
 		}
@@ -1585,18 +1597,24 @@ export class SessionManager {
 			}
 		}
 
-		return new SessionManager(resolvedTargetCwd, dir, newSessionFile, true);
+		return new SessionManager(resolvedTargetCwd, dir, newSessionFile, true, agentDir);
 	}
 
 	/**
 	 * List all sessions for a directory.
 	 * @param cwd Working directory (used to compute default session directory)
-	 * @param sessionDir Optional session directory. If omitted, uses default (~/.pi/agent/sessions/<encoded-cwd>/).
+	 * @param agentDir Agent config dir used to compute the default session dir and default-dir candidates.
+	 * @param sessionDir Optional session directory. If omitted, uses default (<agentDir>/sessions/<encoded-cwd>/).
 	 * @param onProgress Optional callback for progress updates (loaded, total)
 	 */
-	static async list(cwd: string, sessionDir?: string, onProgress?: SessionListProgress): Promise<SessionInfo[]> {
-		const dir = sessionDir ? normalizePath(sessionDir) : getDefaultSessionDir(cwd);
-		const defaultDirs = getDefaultSessionDirCandidates(cwd);
+	static async list(
+		cwd: string,
+		agentDir: string,
+		sessionDir?: string,
+		onProgress?: SessionListProgress,
+	): Promise<SessionInfo[]> {
+		const dir = sessionDir ? normalizePath(sessionDir) : getDefaultSessionDir(cwd, agentDir);
+		const defaultDirs = getDefaultSessionDirCandidates(cwd, agentDir);
 		const filterCwd = sessionDir !== undefined && !defaultDirs.includes(dir);
 		const resolvedCwd = resolvePath(cwd);
 		const dirs = sessionDir ? [dir] : defaultDirs;
@@ -1617,32 +1635,39 @@ export class SessionManager {
 	}
 
 	/**
-	 * List all sessions across all project directories.
+	 * List all sessions across all project directories under the sessions root.
+	 * @param sessionsDir Sessions root dir to scan for per-project subdirectories (e.g. <agentDir>/sessions).
+	 * @param customSessionDir Optional single directory to list flat instead of scanning the root.
 	 * @param onProgress Optional callback for progress updates (loaded, total)
 	 */
-	static async listAll(onProgress?: SessionListProgress): Promise<SessionInfo[]>;
-	static async listAll(sessionDir?: string, onProgress?: SessionListProgress): Promise<SessionInfo[]>;
+	static async listAll(sessionsDir: string, onProgress?: SessionListProgress): Promise<SessionInfo[]>;
 	static async listAll(
-		sessionDirOrOnProgress?: string | SessionListProgress,
+		sessionsDir: string,
+		customSessionDir?: string,
+		onProgress?: SessionListProgress,
+	): Promise<SessionInfo[]>;
+	static async listAll(
+		sessionsDir: string,
+		customSessionDirOrOnProgress?: string | SessionListProgress,
 		onProgress?: SessionListProgress,
 	): Promise<SessionInfo[]> {
 		const customSessionDir =
-			typeof sessionDirOrOnProgress === "string" ? normalizePath(sessionDirOrOnProgress) : undefined;
-		const progress = typeof sessionDirOrOnProgress === "function" ? sessionDirOrOnProgress : onProgress;
+			typeof customSessionDirOrOnProgress === "string" ? normalizePath(customSessionDirOrOnProgress) : undefined;
+		const progress = typeof customSessionDirOrOnProgress === "function" ? customSessionDirOrOnProgress : onProgress;
 		if (customSessionDir) {
 			const sessions = await listSessionsFromDir(customSessionDir, progress);
 			sessions.sort((a, b) => b.modified.getTime() - a.modified.getTime());
 			return sessions;
 		}
 
-		const sessionsDir = getSessionsDir();
+		const resolvedSessionsDir = normalizePath(sessionsDir);
 
 		try {
-			if (!existsSync(sessionsDir)) {
+			if (!existsSync(resolvedSessionsDir)) {
 				return [];
 			}
-			const entries = await readdir(sessionsDir, { withFileTypes: true });
-			const dirs = entries.filter((e) => e.isDirectory()).map((e) => join(sessionsDir, e.name));
+			const entries = await readdir(resolvedSessionsDir, { withFileTypes: true });
+			const dirs = entries.filter((e) => e.isDirectory()).map((e) => join(resolvedSessionsDir, e.name));
 
 			// Count total files first for accurate progress
 			let totalFiles = 0;

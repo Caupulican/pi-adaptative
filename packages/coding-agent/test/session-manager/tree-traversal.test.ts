@@ -468,7 +468,7 @@ describe("createBranchedSession", () => {
 
 		try {
 			// Create a persisted session with a couple of turns
-			const session = SessionManager.create(tempDir, tempDir);
+			const session = SessionManager.create(tempDir, tempDir, tempDir);
 			const id1 = session.appendMessage(userMsg("first question"));
 			session.appendMessage(assistantMsg("first answer"));
 			session.appendMessage(userMsg("second question"));
@@ -511,7 +511,7 @@ describe("createBranchedSession", () => {
 		mkdirSync(tempDir, { recursive: true });
 
 		try {
-			const session = SessionManager.create(tempDir, tempDir);
+			const session = SessionManager.create(tempDir, tempDir, tempDir);
 			session.appendMessage(userMsg("first question"));
 			const id2 = session.appendMessage(assistantMsg("first answer"));
 			session.appendMessage(userMsg("second question"));
