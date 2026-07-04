@@ -39,11 +39,10 @@ import {
 	Text,
 	TruncatedText,
 	TUI,
-	visibleWidth,
 } from "@caupulican/pi-tui";
 import chalk from "chalk";
 import { spawn, spawnSync } from "child_process";
-import { APP_NAME, APP_TITLE, getAgentDir, getDebugLogPath, getShareViewerUrl, VERSION } from "../../config.ts";
+import { APP_NAME, APP_TITLE, getAgentDir, getShareViewerUrl, VERSION } from "../../config.ts";
 import { type AgentSession, type AgentSessionEvent, parseSkillBlock } from "../../core/agent-session.ts";
 import { type AgentSessionRuntime, SessionImportFileNotFoundError } from "../../core/agent-session-runtime.ts";
 import { formatAutonomyDiagnostics } from "../../core/autonomy/status.ts";
@@ -95,13 +94,11 @@ import { readClipboardImage } from "../../utils/clipboard-image.ts";
 import { parseGitUrl } from "../../utils/git.ts";
 import { getCwdRelativePath, resolvePath } from "../../utils/paths.ts";
 import { getPiUserAgent } from "../../utils/pi-user-agent.ts";
-import { getProcessMemoryMb } from "../../utils/process-memory.ts";
 import { killTrackedDetachedChildren } from "../../utils/shell.ts";
 import { ensureTool } from "../../utils/tools-manager.ts";
 import { checkForNewPiVersion, type LatestPiRelease } from "../../utils/version-check.ts";
 import { AuthDialogsController } from "./auth-dialogs-controller.ts";
 import { AUTONOMY_MODES, AutoLearnController, type AutoLearnState } from "./auto-learn-controller.ts";
-import { ArminComponent } from "./components/armin.ts";
 import { AssistantMessageComponent } from "./components/assistant-message.ts";
 import { BashExecutionComponent } from "./components/bash-execution.ts";
 import { BorderedLoader } from "./components/bordered-loader.ts";
@@ -110,9 +107,7 @@ import { CompactionSummaryMessageComponent } from "./components/compaction-summa
 import { CountdownTimer } from "./components/countdown-timer.ts";
 import { CustomEditor } from "./components/custom-editor.ts";
 import { CustomMessageComponent } from "./components/custom-message.ts";
-import { DaxnutsComponent } from "./components/daxnuts.ts";
 import { DynamicBorder } from "./components/dynamic-border.ts";
-import { EarendilAnnouncementComponent } from "./components/earendil-announcement.ts";
 import { ExtensionEditorComponent } from "./components/extension-editor.ts";
 import { ExtensionInputComponent } from "./components/extension-input.ts";
 import { ExtensionSelectorComponent } from "./components/extension-selector.ts";
@@ -137,9 +132,11 @@ import { TreeSelectorComponent } from "./components/tree-selector.ts";
 import { TrustSelectorComponent } from "./components/trust-selector.ts";
 import { UserMessageComponent } from "./components/user-message.ts";
 import { UserMessageSelectorComponent } from "./components/user-message-selector.ts";
+import * as configBackup from "./config-backup.ts";
 import { EditorOverlayHost } from "./editor-overlay-host.ts";
 import * as historyReloadMath from "./history-reload-math.ts";
 import { ProfileMenuController } from "./profile-menu-controller.ts";
+import * as reportCommands from "./report-commands.ts";
 import * as resourceDisplay from "./resource-display.ts";
 import {
 	getAvailableThemes,
@@ -6096,92 +6093,20 @@ export class InteractiveMode {
 	}
 
 	private handleUsageCommand(): void {
-		const stats = this.session.getSessionStats();
-		const spawned = this.session.getSpawnedUsage();
-		const daily = this.session.getDailyUsageTotals();
-		const context = this.session.getContextUsage();
-		const autoLearn = this.getCurrentAutoLearnSettings();
-		const costGuard = this.session.getLastCostGuardDecision();
-
-		let info = `${theme.bold("Usage & Optimization")}\n\n`;
-		info += `${theme.bold("Session tokens")}\n`;
-		info += `${theme.fg("dim", "Input:")} ${stats.tokens.input.toLocaleString()}\n`;
-		info += `${theme.fg("dim", "Output:")} ${stats.tokens.output.toLocaleString()}\n`;
-		info += `${theme.fg("dim", "Cache read:")} ${stats.tokens.cacheRead.toLocaleString()}\n`;
-		info += `${theme.fg("dim", "Cache write:")} ${stats.tokens.cacheWrite.toLocaleString()}\n`;
-		info += `${theme.fg("dim", "Total:")} ${stats.tokens.total.toLocaleString()}\n\n`;
-
-		info += `${theme.bold("Cost")}\n`;
-		info += `${theme.fg("dim", "Session:")} $${stats.cost.toFixed(4)}\n`;
-		info += `${theme.fg("dim", "Spawned/background:")} $${spawned.cost.toFixed(4)} (${spawned.reports} reports)\n`;
-		info += `${theme.fg("dim", "Today:")} $${daily.totalCost.toFixed(4)}\n`;
-		info += `${theme.fg("dim", "Today own:")} $${daily.ownCost.toFixed(4)}\n`;
-		info += `${theme.fg("dim", "Today spawned/background:")} $${daily.spawnedCost.toFixed(4)}\n`;
-		info += `${theme.fg("dim", "Today tokens:")} ${daily.totalTokens.toLocaleString()}\n\n`;
-
-		const processMemory = getProcessMemoryMb();
-		info += `${theme.bold("Process")}\n`;
-		info += `${theme.fg("dim", "Memory:")} rss ${processMemory.rssMb}MB, heap ${processMemory.heapUsedMb}MB, external ${processMemory.externalMb}MB\n\n`;
-
-		info += `${theme.bold("Optimization state")}\n`;
-		const contextPercent = context?.percent;
-		const contextTokens = context?.tokens;
-		if (
-			context &&
-			contextPercent !== undefined &&
-			contextPercent !== null &&
-			contextTokens !== undefined &&
-			contextTokens !== null
-		) {
-			info += `${theme.fg("dim", "Context:")} ${contextPercent.toFixed(1)}% (${contextTokens.toLocaleString()}/${context.contextWindow.toLocaleString()})\n`;
-		} else {
-			info += `${theme.fg("dim", "Context:")} unknown until next provider usage sample\n`;
-		}
-		info += `${theme.fg("dim", "Auto-compaction:")} ${this.session.autoCompactionEnabled ? "enabled" : "disabled"}\n`;
-		if (costGuard) {
-			const status = costGuard.over ? "over" : "ok";
-			info += `${theme.fg("dim", "Cost guard:")} ${status} $${costGuard.estUsd.toFixed(4)}/$${costGuard.thresholdUsd.toFixed(4)} (${costGuard.action})\n`;
-		} else {
-			info += `${theme.fg("dim", "Cost guard:")} disabled\n`;
-		}
-		info += `${theme.fg("dim", "Auto Learn:")} ${autoLearn.enabled ? "enabled" : "disabled"}\n`;
-		info += `${theme.fg("dim", "Scavenger model:")} ${autoLearn.model || "active"}\n`;
-		info += `${theme.fg("dim", "Reflection review:")} ${autoLearn.reflectionReview ? "enabled" : "disabled"} (${autoLearn.reflectionMinToolCalls} tool-call trigger)\n`;
-		info += `${theme.fg("dim", "Auto Learn concurrency:")} ${autoLearn.maxConcurrentLearners} learner(s), ${autoLearn.cooldownMinutes}m cooldown\n\n`;
-
-		info += `${theme.bold("Model Router")}\n`;
-		info += `${this.session.getModelRouterStatus((label) => theme.fg("dim", label))}\n\n`;
-
-		info += `${theme.bold("Manual controls")}\n`;
-		info += `${theme.fg("dim", "/compact")}: compact the active context now\n`;
-		info += `${theme.fg("dim", "/settings")}: adjust Auto Learn, cost guard, compaction, and model-router config\n`;
-		info += `${theme.fg("dim", "/auto-learn status|run")}: inspect or launch background learning\n`;
-		info += `${theme.fg("dim", "context_audit")}: ask the agent to inspect provider-visible context contributors\n`;
-
-		this.chatContainer.addChild(new Spacer(1));
-		this.chatContainer.addChild(new Text(info, 1, 0));
-		this.ui.requestRender();
+		reportCommands.handleUsageCommand({
+			session: this.session,
+			chatContainer: this.chatContainer,
+			ui: this.ui,
+			getCurrentAutoLearnSettings: () => this.getCurrentAutoLearnSettings(),
+		});
 	}
 
 	private handleChangelogCommand(): void {
-		const changelogPath = getChangelogPath();
-		const allEntries = parseChangelog(changelogPath);
-
-		const changelogMarkdown =
-			allEntries.length > 0
-				? allEntries
-						.reverse()
-						.map((e) => e.content)
-						.join("\n\n")
-				: "No changelog entries found.";
-
-		this.chatContainer.addChild(new Spacer(1));
-		this.chatContainer.addChild(new DynamicBorder());
-		this.chatContainer.addChild(new Text(theme.bold(theme.fg("accent", "What's New")), 1, 0));
-		this.chatContainer.addChild(new Spacer(1));
-		this.chatContainer.addChild(new Markdown(changelogMarkdown, 1, 1, this.getMarkdownThemeWithSettings()));
-		this.chatContainer.addChild(new DynamicBorder());
-		this.ui.requestRender();
+		reportCommands.handleChangelogCommand({
+			chatContainer: this.chatContainer,
+			ui: this.ui,
+			getMarkdownThemeWithSettings: () => this.getMarkdownThemeWithSettings(),
+		});
 	}
 
 	/**
@@ -6199,118 +6124,15 @@ export class InteractiveMode {
 	}
 
 	private handleHotkeysCommand(): void {
-		// Navigation keybindings
-		const cursorUp = this.getEditorKeyDisplay("tui.editor.cursorUp");
-		const cursorDown = this.getEditorKeyDisplay("tui.editor.cursorDown");
-		const cursorLeft = this.getEditorKeyDisplay("tui.editor.cursorLeft");
-		const cursorRight = this.getEditorKeyDisplay("tui.editor.cursorRight");
-		const cursorWordLeft = this.getEditorKeyDisplay("tui.editor.cursorWordLeft");
-		const cursorWordRight = this.getEditorKeyDisplay("tui.editor.cursorWordRight");
-		const cursorLineStart = this.getEditorKeyDisplay("tui.editor.cursorLineStart");
-		const cursorLineEnd = this.getEditorKeyDisplay("tui.editor.cursorLineEnd");
-		const jumpForward = this.getEditorKeyDisplay("tui.editor.jumpForward");
-		const jumpBackward = this.getEditorKeyDisplay("tui.editor.jumpBackward");
-		const pageUp = this.getEditorKeyDisplay("tui.editor.pageUp");
-		const pageDown = this.getEditorKeyDisplay("tui.editor.pageDown");
-
-		// Editing keybindings
-		const submit = this.getEditorKeyDisplay("tui.input.submit");
-		const newLine = this.getEditorKeyDisplay("tui.input.newLine");
-		const deleteWordBackward = this.getEditorKeyDisplay("tui.editor.deleteWordBackward");
-		const deleteWordForward = this.getEditorKeyDisplay("tui.editor.deleteWordForward");
-		const deleteToLineStart = this.getEditorKeyDisplay("tui.editor.deleteToLineStart");
-		const deleteToLineEnd = this.getEditorKeyDisplay("tui.editor.deleteToLineEnd");
-		const yank = this.getEditorKeyDisplay("tui.editor.yank");
-		const yankPop = this.getEditorKeyDisplay("tui.editor.yankPop");
-		const undo = this.getEditorKeyDisplay("tui.editor.undo");
-		const tab = this.getEditorKeyDisplay("tui.input.tab");
-
-		// App keybindings
-		const interrupt = this.getAppKeyDisplay("app.interrupt");
-		const clear = this.getAppKeyDisplay("app.clear");
-		const exit = this.getAppKeyDisplay("app.exit");
-		const suspend = this.getAppKeyDisplay("app.suspend");
-		const cycleThinkingLevel = this.getAppKeyDisplay("app.thinking.cycle");
-		const cycleModelForward = this.getAppKeyDisplay("app.model.cycleForward");
-		const selectModel = this.getAppKeyDisplay("app.model.select");
-		const expandTools = this.getAppKeyDisplay("app.tools.expand");
-		const toggleThinking = this.getAppKeyDisplay("app.thinking.toggle");
-		const externalEditor = this.getAppKeyDisplay("app.editor.external");
-		const cycleModelBackward = this.getAppKeyDisplay("app.model.cycleBackward");
-		const followUp = this.getAppKeyDisplay("app.message.followUp");
-		const dequeue = this.getAppKeyDisplay("app.message.dequeue");
-		const pasteImage = this.getAppKeyDisplay("app.clipboard.pasteImage");
-
-		let hotkeys = `
-**Navigation**
-| Key | Action |
-|-----|--------|
-| \`${cursorUp}\` / \`${cursorDown}\` / \`${cursorLeft}\` / \`${cursorRight}\` | Move cursor / browse history (Up when empty) |
-| \`${cursorWordLeft}\` / \`${cursorWordRight}\` | Move by word |
-| \`${cursorLineStart}\` | Start of line |
-| \`${cursorLineEnd}\` | End of line |
-| \`${jumpForward}\` | Jump forward to character |
-| \`${jumpBackward}\` | Jump backward to character |
-| \`${pageUp}\` / \`${pageDown}\` | Scroll by page |
-
-**Editing**
-| Key | Action |
-|-----|--------|
-| \`${submit}\` | Send message |
-| \`${newLine}\` | New line${process.platform === "win32" ? " (Ctrl+Enter on Windows Terminal)" : ""} |
-| \`${deleteWordBackward}\` | Delete word backwards |
-| \`${deleteWordForward}\` | Delete word forwards |
-| \`${deleteToLineStart}\` | Delete to start of line |
-| \`${deleteToLineEnd}\` | Delete to end of line |
-| \`${yank}\` | Paste the most-recently-deleted text |
-| \`${yankPop}\` | Cycle through the deleted text after pasting |
-| \`${undo}\` | Undo |
-
-**Other**
-| Key | Action |
-|-----|--------|
-| \`${tab}\` | Path completion / accept autocomplete |
-| \`${interrupt}\` | Cancel autocomplete / abort streaming |
-| \`${clear}\` | Clear editor (first) / exit (second) |
-| \`${exit}\` | Exit (when editor is empty) |
-| \`${suspend}\` | Suspend to background |
-| \`${cycleThinkingLevel}\` | Cycle thinking level |
-| \`${cycleModelForward}\` / \`${cycleModelBackward}\` | Cycle models |
-| \`${selectModel}\` | Open model selector |
-| \`${expandTools}\` | Toggle tool output expansion |
-| \`${toggleThinking}\` | Toggle thinking block visibility |
-| \`${externalEditor}\` | Edit message in external editor |
-| \`${followUp}\` | Queue follow-up message |
-| \`${dequeue}\` | Restore queued messages |
-| \`${pasteImage}\` | Paste image from clipboard |
-| \`/\` | Slash commands |
-| \`!\` | Run bash command |
-| \`!!\` | Run bash command (excluded from context) |
-`;
-
-		// Add extension-registered shortcuts
-		const extensionRunner = this.session.extensionRunner;
-		const shortcuts = extensionRunner.getShortcuts(this.keybindings.getEffectiveConfig());
-		if (shortcuts.size > 0) {
-			hotkeys += `
-**Extensions**
-| Key | Action |
-|-----|--------|
-`;
-			for (const [key, shortcut] of shortcuts) {
-				const description = shortcut.description ?? shortcut.extensionPath;
-				const keyDisplay = formatKeyText(key, { capitalize: true });
-				hotkeys += `| \`${keyDisplay}\` | ${description} |\n`;
-			}
-		}
-
-		this.chatContainer.addChild(new Spacer(1));
-		this.chatContainer.addChild(new DynamicBorder());
-		this.chatContainer.addChild(new Text(theme.bold(theme.fg("accent", "Keyboard Shortcuts")), 1, 0));
-		this.chatContainer.addChild(new Spacer(1));
-		this.chatContainer.addChild(new Markdown(hotkeys.trim(), 1, 1, this.getMarkdownThemeWithSettings()));
-		this.chatContainer.addChild(new DynamicBorder());
-		this.ui.requestRender();
+		reportCommands.handleHotkeysCommand({
+			session: this.session,
+			keybindings: this.keybindings,
+			chatContainer: this.chatContainer,
+			ui: this.ui,
+			getMarkdownThemeWithSettings: () => this.getMarkdownThemeWithSettings(),
+			getAppKeyDisplay: (action) => this.getAppKeyDisplay(action),
+			getEditorKeyDisplay: (action) => this.getEditorKeyDisplay(action),
+		});
 	}
 
 	private async handleClearCommand(newSessionName?: string): Promise<void> {
@@ -6488,210 +6310,47 @@ export class InteractiveMode {
 	}
 
 	private async handleConfigBackupCommand(fileArg?: string): Promise<void> {
-		try {
-			const profilesDir = path.join(getAgentDir(), "profiles");
-			const profiles: Record<string, any> = {};
-			if (fs.existsSync(profilesDir)) {
-				const entries = fs.readdirSync(profilesDir);
-				for (const entry of entries) {
-					if (entry.endsWith(".json")) {
-						const pPath = path.join(profilesDir, entry);
-						try {
-							const content = fs.readFileSync(pPath, "utf-8");
-							profiles[entry] = JSON.parse(content);
-						} catch {
-							// skip
-						}
-					}
-				}
-			}
-
-			const backupData = {
-				profiles,
-				settings: {
-					resourceProfiles: this.settingsManager.settings.resourceProfiles,
-					activeResourceProfile: this.settingsManager.settings.activeResourceProfile,
-					externalResourceRoots: this.settingsManager.settings.externalResourceRoots,
-					trustedResourceRoots: this.settingsManager.settings.trustedResourceRoots,
-				},
-			};
-
-			let targetFile = fileArg;
-			if (!targetFile) {
-				const backupsDir = path.join(getAgentDir(), "backups");
-				fs.mkdirSync(backupsDir, { recursive: true });
-				const timestamp = new Date().toISOString().replace(/[:.]/g, "-");
-				targetFile = path.join(backupsDir, `config-${timestamp}.json`);
-			} else {
-				const resolved = this.settingsManager.canonicalizePath(targetFile);
-				if (resolved) {
-					targetFile = resolved;
-				}
-			}
-
-			fs.mkdirSync(path.dirname(targetFile), { recursive: true });
-			fs.writeFileSync(targetFile, JSON.stringify(backupData, null, 2), "utf-8");
-			this.showStatus(`Configuration backup saved to ${targetFile}`);
-		} catch (error) {
-			this.showError(error instanceof Error ? error.message : String(error));
-		}
+		await configBackup.handleConfigBackupCommand(
+			{
+				settingsManager: this.settingsManager,
+				showStatus: (message) => this.showStatus(message),
+				showError: (message) => this.showError(message),
+			},
+			fileArg,
+		);
 	}
 
 	private async handleConfigRestoreCommand(fileArg: string): Promise<void> {
-		try {
-			const trimmed = fileArg.trim();
-			if (!trimmed) {
-				this.showError("Usage: /config-restore <file>");
-				return;
-			}
-
-			const resolved = this.settingsManager.canonicalizePath(trimmed);
-			if (!resolved || !fs.existsSync(resolved)) {
-				this.showError(`Backup file does not exist: ${trimmed}`);
-				return;
-			}
-
-			let bundle: any;
-			try {
-				const content = fs.readFileSync(resolved, "utf-8");
-				bundle = JSON.parse(content);
-			} catch (error) {
-				this.showError(`Failed to parse backup file: ${error instanceof Error ? error.message : String(error)}`);
-				return;
-			}
-
-			if (!bundle || typeof bundle !== "object") {
-				this.showError("Invalid backup file: must be a JSON object");
-				return;
-			}
-
-			// Confirm before clobbering
-			const confirm = await new Promise<boolean>((resolve) => {
-				this.showSelector((done) => {
-					const submenu = new SelectSubmenu(
-						"Restore configuration?",
-						"This will overwrite existing local profiles and settings with the backup values. Do you want to continue?",
-						[
-							{ value: "yes", label: "Yes", description: "Proceed with restoration." },
-							{ value: "no", label: "No", description: "Cancel and abort." },
-						],
-						"no",
-						(value) => {
-							done();
-							resolve(value === "yes");
-						},
-						() => {
-							done();
-							resolve(false);
-						},
-					);
-					return { component: submenu, focus: submenu.getSelectList() };
-				});
-			});
-
-			if (!confirm) {
-				this.showStatus("Restore aborted.");
-				return;
-			}
-
-			// 1. Restore profile files (reusable-file scope)
-			if (bundle.profiles && typeof bundle.profiles === "object") {
-				const profilesDir = path.join(getAgentDir(), "profiles");
-				fs.mkdirSync(profilesDir, { recursive: true });
-				for (const [filename, content] of Object.entries(bundle.profiles)) {
-					const targetPath = path.join(profilesDir, filename);
-					fs.writeFileSync(targetPath, JSON.stringify(content, null, 2), "utf-8");
-				}
-			}
-
-			// 2. Restore settings
-			if (bundle.settings && typeof bundle.settings === "object") {
-				const bs = bundle.settings;
-
-				// Global profiles definitions
-				if (bs.resourceProfiles && typeof bs.resourceProfiles === "object") {
-					for (const [name, definition] of Object.entries(bs.resourceProfiles)) {
-						this.settingsManager.setProfileDefinition(name, definition as any, "global");
-					}
-				}
-
-				// Active profile selection
-				if (bs.activeResourceProfile) {
-					this.settingsManager.setActiveProfile(bs.activeResourceProfile, "global");
-				}
-
-				// External roots (trustedRoots are NOT restored, as per SECURITY requirement)
-				if (Array.isArray(bs.externalResourceRoots)) {
-					this.settingsManager.setExternalResourceRoots(bs.externalResourceRoots, "global");
-
-					const currentTrusted = this.settingsManager.getTrustedResourceRoots();
-					const newTrusted = currentTrusted.filter((r) => !bs.externalResourceRoots.includes(r));
-					this.settingsManager.setTrustedResourceRoots(newTrusted, "global");
-				}
-			}
-
-			this.showStatus("Configuration restored successfully.");
-			await this.handleReloadCommand();
-		} catch (error) {
-			this.showError(error instanceof Error ? error.message : String(error));
-		}
+		await configBackup.handleConfigRestoreCommand(
+			{
+				settingsManager: this.settingsManager,
+				showStatus: (message) => this.showStatus(message),
+				showError: (message) => this.showError(message),
+				showSelector: (create) => this.showSelector(create),
+				handleReloadCommand: () => this.handleReloadCommand(),
+			},
+			fileArg,
+		);
 	}
 
 	private handleDebugCommand(): void {
-		const width = this.ui.terminal.columns;
-		const height = this.ui.terminal.rows;
-		const allLines = this.ui.render(width);
-
-		const debugLogPath = getDebugLogPath();
-		const debugData = [
-			`Debug output at ${new Date().toISOString()}`,
-			`Terminal: ${width}x${height}`,
-			`Total lines: ${allLines.length}`,
-			"",
-			"=== All rendered lines with visible widths ===",
-			...allLines.map((line, idx) => {
-				const vw = visibleWidth(line);
-				const escaped = JSON.stringify(line);
-				return `[${idx}] (w=${vw}) ${escaped}`;
-			}),
-			"",
-			"=== Agent messages (JSONL) ===",
-			...this.session.messages.map((msg) => JSON.stringify(msg)),
-			"",
-		].join("\n");
-
-		fs.mkdirSync(path.dirname(debugLogPath), { recursive: true });
-		fs.writeFileSync(debugLogPath, debugData);
-
-		this.chatContainer.addChild(new Spacer(1));
-		this.chatContainer.addChild(
-			new Text(`${theme.fg("accent", "✓ Debug log written")}\n${theme.fg("muted", debugLogPath)}`, 1, 1),
-		);
-		this.ui.requestRender();
+		reportCommands.handleDebugCommand({
+			session: this.session,
+			chatContainer: this.chatContainer,
+			ui: this.ui,
+		});
 	}
 
 	private handleArminSaysHi(): void {
-		this.chatContainer.addChild(new Spacer(1));
-		this.chatContainer.addChild(new ArminComponent(this.ui));
-		this.ui.requestRender();
+		reportCommands.handleArminSaysHi({ chatContainer: this.chatContainer, ui: this.ui });
 	}
 
 	private handleDementedDelves(): void {
-		this.chatContainer.addChild(new Spacer(1));
-		this.chatContainer.addChild(new EarendilAnnouncementComponent());
-		this.ui.requestRender();
-	}
-
-	private handleDaxnuts(): void {
-		this.chatContainer.addChild(new Spacer(1));
-		this.chatContainer.addChild(new DaxnutsComponent(this.ui));
-		this.ui.requestRender();
+		reportCommands.handleDementedDelves({ chatContainer: this.chatContainer, ui: this.ui });
 	}
 
 	private checkDaxnutsEasterEgg(model: { provider: string; id: string }): void {
-		if (model.provider === "opencode" && model.id.toLowerCase().includes("kimi-k2.5")) {
-			this.handleDaxnuts();
-		}
+		reportCommands.checkDaxnutsEasterEgg({ chatContainer: this.chatContainer, ui: this.ui }, model);
 	}
 
 	private async handleBashCommand(command: string, excludeFromContext = false): Promise<void> {
