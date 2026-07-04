@@ -102,7 +102,7 @@ import { normalizeModelSource } from "../../core/models/model-ref.ts";
 import { DefaultPackageManager } from "../../core/package-manager.ts";
 import { BUILT_IN_PROVIDER_DISPLAY_NAMES } from "../../core/provider-display-names.ts";
 import { getPendingReloadBlockers } from "../../core/reload-blockers.ts";
-import { formatModelFitnessReport } from "../../core/research/model-fitness.ts";
+import { formatModelFitnessReport, isProbeAllFailed } from "../../core/research/model-fitness.ts";
 import type { ResourceDiagnostic } from "../../core/resource-loader.ts";
 import { resourceProfileSettingsChangedKinds } from "../../core/resource-profile-equality.ts";
 import { formatMissingSessionCwdPrompt, MissingSessionCwdError } from "../../core/session-cwd.ts";
@@ -6390,6 +6390,16 @@ export class InteractiveMode {
 			this.chatContainer.addChild(new Spacer(1));
 			this.chatContainer.addChild(new Text(formatModelFitnessReport(outcome.model, outcome.report), 1, 0));
 			this.ui.requestRender();
+			// Validate-before-load: zero successes on every probed surface means the model cannot
+			// drive any of the harness's subagent contracts on this host — refuse adoption instead
+			// of landing a role selector the user might reflexively confirm (this is the reported
+			// bug: a 0/3-everywhere model still got set as judge model and saved to Model Router).
+			if (isProbeAllFailed(outcome.report)) {
+				this.showStatus(
+					`${outcome.model} failed the fitness probe on all surfaces — not configured. Use /model to set it manually if you accept the risk.`,
+				);
+				return;
+			}
 			this.showSelector((done) => {
 				const selector = new FitnessRoleSelectorComponent(
 					outcome.model,

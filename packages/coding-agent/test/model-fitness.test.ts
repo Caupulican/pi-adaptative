@@ -5,6 +5,8 @@ import {
 	DEFAULT_JUDGE_FITNESS_PROMPTS,
 	DIGEST_PROBE_SYSTEM_PROMPT,
 	formatModelFitnessReport,
+	isProbeAllFailed,
+	type ModelFitnessReport,
 	runModelFitnessProbe,
 	SEARCH_PROBE_SYSTEM_PROMPT,
 	TOOL_CALL_PROBE_SYSTEM_PROMPT,
@@ -159,5 +161,72 @@ describe("runModelFitnessProbe", () => {
 		expect(text).toContain("Model fitness: test/model");
 		expect(text).toContain("search plans:  3/3");
 		expect(text).toContain("route judge:");
+	});
+});
+
+describe("isProbeAllFailed", () => {
+	it("flags a real all-lanes-failed probe (the reported bug: 0/3 on every surface)", async () => {
+		const report = await runModelFitnessProbe({ trials: 3, now: () => 0, complete: scriptedComplete({}) });
+		expect(isProbeAllFailed(report)).toBe(true);
+	});
+
+	it("does not flag a fully-capable probe", async () => {
+		const report = await runModelFitnessProbe({
+			trials: 2,
+			now: () => 0,
+			complete: scriptedComplete({
+				research: '{"findings":[{"summary":"finding","confidence":0.8}]}',
+				worker: '{"summary":"done"}',
+				judge: (prompt) =>
+					/plan|design|roadmap/i.test(prompt)
+						? '{"tier":"medium","risk":"read-only","trivial":false,"reason":"planning"}'
+						: '{"tier":"cheap","risk":"read-only","trivial":true,"reason":"trivial"}',
+				search: '{"queries":[{"pattern":"retry","glob":"**/*.ts"}]}',
+				toolCall: '{"tool":"grep","arguments":{"pattern":"resolveCliModel","path":"src/"}}',
+				digest: faithfulDigest,
+			}),
+		});
+		expect(isProbeAllFailed(report)).toBe(false);
+	});
+
+	it("does not flag a partial pass (e.g. only the digest surface succeeds)", async () => {
+		const report = await runModelFitnessProbe({
+			trials: 1,
+			judgePrompts: [],
+			complete: async ({ systemPrompt }) => {
+				// Echoes the FIRST digest task's nonce verbatim; that task's reply parses and is
+				// faithful, the other two digest tasks (different nonces) do not match -> partial pass.
+				const text = systemPrompt.includes("context curator")
+					? '{"digest":"retryWithJitter_zx41 in src/http/client.ts does capped exponential backoff."}'
+					: "{}";
+				return { text, costUsd: 0, stopReason: "stop" };
+			},
+		});
+		expect(report.digest.succeeded).toBeGreaterThan(0);
+		expect(isProbeAllFailed(report)).toBe(false);
+	});
+
+	it("does not flag a degenerate/empty report as failed (no lane was ever graded)", () => {
+		const emptyLane = { succeeded: 0, total: 0, outcomes: [], meanMs: 0 };
+		const report: ModelFitnessReport = {
+			trials: 0,
+			research: { ...emptyLane },
+			worker: { ...emptyLane },
+			judge: {
+				parsed: 0,
+				planningElevated: 0,
+				planningTotal: 0,
+				trivialCheap: 0,
+				trivialTotal: 0,
+				total: 0,
+				outcomes: [],
+				meanMs: 0,
+			},
+			search: { ...emptyLane },
+			toolCall: { ...emptyLane },
+			digest: { ...emptyLane },
+			totalCostUsd: 0,
+		};
+		expect(isProbeAllFailed(report)).toBe(false);
 	});
 });

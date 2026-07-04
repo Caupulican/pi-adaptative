@@ -390,6 +390,23 @@ export async function runModelFitnessProbe(options: ModelFitnessOptions): Promis
 	return { trials, tokensPerSecond, research, worker, judge, search, toolCall, digest, totalCostUsd };
 }
 
+/**
+ * Pure verdict: true when the probe found ZERO successes on every surface it actually graded
+ * (a lane/judge with total 0 — i.e. never run — carries no evidence and is excluded, so an
+ * empty/degenerate report is never mistaken for a failed one). This is the gate adoption flows
+ * must consult before assigning a role — see `isProbeAllFailed` callers in interactive-mode.ts
+ * and agent-session.ts.
+ */
+export function isProbeAllFailed(report: ModelFitnessReport): boolean {
+	const lanes = [report.research, report.worker, report.search, report.toolCall, report.digest];
+	const gradedLanes = lanes.filter((lane) => lane.total > 0);
+	const judgeGraded = report.judge.total > 0;
+	if (gradedLanes.length === 0 && !judgeGraded) return false;
+	const lanesAllFailed = gradedLanes.every((lane) => lane.succeeded === 0);
+	const judgeFailed = !judgeGraded || report.judge.parsed === 0;
+	return lanesAllFailed && judgeFailed;
+}
+
 /** Compact human-readable report for tool output / interactive display. Bounded, no raw dumps. */
 export function formatModelFitnessReport(model: string, report: ModelFitnessReport): string {
 	const speed = (tokensPerSecond: number | undefined) =>

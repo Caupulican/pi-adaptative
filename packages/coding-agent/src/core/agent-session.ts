@@ -13,6 +13,7 @@
  * Modes use this class and add their own I/O layer on top.
  */
 import { existsSync, mkdirSync, readFileSync, writeFileSync } from "node:fs";
+import { totalmem } from "node:os";
 import { basename, dirname, join } from "node:path";
 import type {
 	Agent,
@@ -242,7 +243,7 @@ import { OLLAMA_PROVIDER } from "./models/local-registration.ts";
 import { type LocalRuntimeDeps, OllamaRuntime } from "./models/local-runtime.ts";
 import type { NormalizedProfile } from "./profile-registry.ts";
 import { expandPromptTemplate, type PromptTemplate } from "./prompt-templates.ts";
-import { type ModelFitnessReport, runModelFitnessProbe } from "./research/model-fitness.ts";
+import { isProbeAllFailed, type ModelFitnessReport, runModelFitnessProbe } from "./research/model-fitness.ts";
 import { type ResearchRunResult, runResearch } from "./research/research-runner.ts";
 import {
 	appendEvidenceBundleSnapshot,
@@ -4273,6 +4274,7 @@ export class AgentSession {
 
 		await this._emitModelSelect(model, previousModel, "set");
 		this._checkContextWindowUsageWarning();
+		await this._warnIfManualModelChoiceIsRisky(model);
 
 		// Re-derive the model-capability tool surface for the new model (restores the full requested
 		// set when moving small -> large, reduces it when moving large -> small).
@@ -4286,6 +4288,52 @@ export class AgentSession {
 					message: `Small-context model detected (${capability.contextWindow ?? "unknown"} tokens, class '${capability.class}'): active tools reduced to [${this.getActiveToolNames().join(", ")}]; background lanes ${capability.backgroundLanesEnabled ? "enabled" : "disabled"}.`,
 				});
 			}
+		}
+	}
+
+	/**
+	 * Manual model choice is a deliberate human decision, not an auto-adoption flow — it is
+	 * ADVISORY ONLY: warn on evidence the model is a bad fit, but never block and never prompt
+	 * (print/RPC modes only ever see plain warning text through the existing `warning` event, the
+	 * same channel `_checkContextWindowUsageWarning` above uses). Two independent checks, both
+	 * best-effort:
+	 *  - a recorded all-lanes-failed fitness probe on THIS host (see `isProbeAllFailed`);
+	 *  - for an Ollama-served local model, weights that exceed ~90% of total system memory, which
+	 *    is the exact failure the OOM report reproduced (llama-server needs the whole model resident).
+	 */
+	private async _warnIfManualModelChoiceIsRisky(model: Model<Api>): Promise<void> {
+		const canonicalRef = `${model.provider}/${model.id}`;
+		try {
+			const fitness = FitnessStore.forAgentDir(this._agentDir)
+				.getForHost()
+				.find((entry) => entry.model === canonicalRef);
+			if (fitness && isProbeAllFailed(fitness.report)) {
+				this._emit({
+					type: "warning",
+					message: `${canonicalRef} failed its fitness probe on all surfaces on this host (probed ${fitness.at}) — it is likely to fail in production too. Proceeding because you set it manually.`,
+				});
+			}
+		} catch {
+			// advisory only; a lookup failure must never block a manual model choice
+		}
+
+		if (model.provider !== OLLAMA_PROVIDER) return;
+		try {
+			const serverUrl = this._deriveOllamaServerUrl(model.baseUrl);
+			const installed = await this.getLocalRuntime(serverUrl).list();
+			const entry = installed.find((candidate) => candidate.name === model.id);
+			if (!entry) return;
+			const memoryBudget = totalmem() * 0.9;
+			if (entry.sizeBytes > memoryBudget) {
+				const sizeGb = (entry.sizeBytes / 1e9).toFixed(1);
+				const totalGb = (totalmem() / 1e9).toFixed(1);
+				this._emit({
+					type: "warning",
+					message: `${canonicalRef} is ~${sizeGb}GB, over 90% of this machine's ${totalGb}GB RAM — llama-server is likely to OOM when it runs. Proceeding because you set it manually.`,
+				});
+			}
+		} catch {
+			// advisory only; an unreachable local server must never block a manual model choice
 		}
 	}
 

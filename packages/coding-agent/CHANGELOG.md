@@ -36,6 +36,22 @@
   POSIX so aborting kills grandchildren, not just the direct child. Spawn failures (e.g. ENOENT) are
   now surfaced via a new `ExecResult.errorMessage` field instead of being silently swallowed as a
   bare `code: 1`.
+- Model adoption ignored the fitness probe's own verdict. Two gates, both fixed:
+  - `/models suggest` (and the manual `/fitness` picker) could probe a model, get zero successes on
+    every one of the six surfaces, and still land it as judge model / Model Router settings because
+    the post-probe role selector opened regardless of the result. `runFitnessAndAssign` — the single
+    site both flows funnel through — now checks the new pure `isProbeAllFailed(report)` predicate
+    (research/core/research/model-fitness.ts) and, on an all-lanes-failed probe, refuses adoption
+    outright: no role assigned, no settings written, just a clear "failed the fitness probe on all
+    surfaces — not configured" message pointing at manual `/model` as the opt-in override. A partial
+    or full pass keeps the existing selector flow unchanged.
+  - Manual `/model <ref>` had no gate at all, so a model already known (from a stored fitness
+    report) to fail on every surface, or a local Ollama model whose weights don't fit in RAM, could
+    be set silently and 500 every subsequent turn (llama-server OOM). `AgentSession.setModel` is
+    advisory-only here by design — a human's explicit choice is never blocked — but now emits a
+    `warning` event (the same plain-text channel print/RPC modes already render, never a prompt)
+    when the target has a recorded all-lanes-failed probe on this host, or is an Ollama model whose
+    installed size exceeds ~90% of `os.totalmem()`.
 
 ## [0.80.103] - 2026-07-03
 
