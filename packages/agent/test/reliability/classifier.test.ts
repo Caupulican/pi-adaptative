@@ -91,6 +91,13 @@ describe("classifyFailure", () => {
 		expect(classifyFailure({ message: "quota exceeded, rate limited" }).reason).toBe("billing_or_quota");
 	});
 
+	it("precedence: auth beats network wording", () => {
+		const c = classifyFailure({ message: "fetch failed: 401 unauthorized" });
+		expect(c.reason).toBe("auth");
+		expect(c.retryable).toBe(false);
+		expect(c.shouldRotateCredential).toBe(true);
+	});
+
 	it("extracts retry-after hints in seconds and milliseconds", () => {
 		expect(classifyFailure({ message: "rate limited, retry after 12s" }).retryAfterMs).toBe(12_000);
 		expect(classifyFailure({ message: 'overloaded {"retryDelay":"7s"}' }).retryAfterMs).toBe(7_000);
