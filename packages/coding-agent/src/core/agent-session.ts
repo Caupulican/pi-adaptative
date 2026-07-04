@@ -12,7 +12,7 @@
  *
  * Modes use this class and add their own I/O layer on top.
  */
-import { existsSync, mkdirSync, readFileSync, writeFileSync } from "node:fs";
+import { readFileSync } from "node:fs";
 import { totalmem } from "node:os";
 import { basename, dirname, join } from "node:path";
 import type {
@@ -42,15 +42,11 @@ import {
 	type CompactionEntry,
 	type CompactionResult,
 	type CompactionSettings,
-	CURRENT_SESSION_VERSION,
 	calculateContextTokens,
-	collectEntriesForBranchSummary,
 	compact,
 	estimateContextTokens,
-	generateBranchSummary,
 	getLatestCompactionEntry,
 	prepareCompaction,
-	type SessionHeader,
 	type SessionManager,
 	shouldCompact,
 } from "@caupulican/pi-agent-core/node";
@@ -73,10 +69,8 @@ import {
 	modelsAreEqual,
 	streamSimple,
 } from "@caupulican/pi-ai";
-import { getAgentDir, getSessionsDir } from "../config.ts";
-import { theme } from "../modes/interactive/theme/theme.ts";
+import { getAgentDir } from "../config.ts";
 import { stripFrontmatter } from "../utils/frontmatter.ts";
-import { resolvePath } from "../utils/paths.ts";
 import { formatNoApiKeyFoundMessage, formatNoModelSelectedMessage } from "./auth-guidance.ts";
 import type {
 	CapabilityEnvelope,
@@ -110,19 +104,11 @@ import type { MemoryPromptInclusionReport } from "./context/memory-diagnostics.t
 import type { MemoryRetrievalReport } from "./context/memory-retrieval.ts";
 import type { ContextGcReport } from "./context-gc.ts";
 import { ContextPipeline } from "./context-pipeline.ts";
-import {
-	aggregateDailyUsageFromSessionFiles,
-	aggregateDailyUsageFromSessionRoot,
-	type DailyUsageTotals,
-	formatDailyUsageBreakdown,
-	getLocalDayWindow,
-} from "./cost/daily-usage.ts";
+import type { DailyUsageTotals } from "./cost/daily-usage.ts";
 import { type CostGuardDecision, downgradeReasoning, estimateTurnCostUsd, evaluateCostGuard } from "./cost-guard.ts";
 import { DEFAULT_THINKING_LEVEL } from "./defaults.ts";
 import { appendWorkerResultSnapshot, getWorkerResultSnapshots } from "./delegation/session-worker-result.ts";
 import type { WorkerRunOutcome } from "./delegation/worker-runner.ts";
-import { exportSessionToHtml, type ToolHtmlRenderer } from "./export-html/index.ts";
-import { createToolHtmlRenderer } from "./export-html/tool-renderer.ts";
 import type {
 	ContextUsage,
 	Extension,
@@ -137,7 +123,6 @@ import type {
 	MessageUpdateEvent,
 	ReplacedSessionContext,
 	SessionBeforeCompactResult,
-	SessionBeforeTreeResult,
 	SessionStartEvent,
 	ShutdownHandler,
 	ToolDefinition,
@@ -145,7 +130,6 @@ import type {
 	ToolExecutionStartEvent,
 	ToolExecutionUpdateEvent,
 	ToolInfo,
-	TreePreparation,
 	TurnEndEvent,
 	TurnStartEvent,
 } from "./extensions/index.ts";
@@ -192,6 +176,8 @@ import type { ResourceExtensionPaths, ResourceLoader } from "./resource-loader.t
 import { stripResourceProfileBlocks } from "./resource-profile-blocks.ts";
 import { RuntimeBuilder } from "./runtime-builder.ts";
 import { classifyToolTrust, wrapUntrustedText } from "./security/untrusted-boundary.ts";
+import { SessionAnalytics } from "./session-analytics.ts";
+import { SessionTreeNavigator } from "./session-tree-navigator.ts";
 import {
 	matchesResourceProfilePattern,
 	type ResourceProfileFilterSettings,
@@ -632,8 +618,11 @@ export class AgentSession {
 	/** R8: registry for deployment-supplied gateway channels + schedulers (lifecycle driven by the host runner). */
 	private readonly _gatewayRegistry = new GatewayRegistry();
 	/** Cache for getSpawnedUsage(), keyed by session entry count (Bug #22 — avoid O(N) per render frame). */
-	private _spawnedUsageCache?: { entryCount: number; totals: SpawnedUsageTotals };
-	private _dailyUsageCache?: { sessionDir: string; expiresAt: number; totals: DailyUsageTotals };
+	/** Usage/cost/stats accounting, /context estimate, and session export (see session-analytics.ts);
+	 * owns the spawned-usage and daily-usage memo caches. */
+	private readonly _analytics: SessionAnalytics;
+	/** In-file session-tree branch switching + fork-selector reads (see session-tree-navigator.ts). */
+	private readonly _treeNavigator: SessionTreeNavigator;
 	/** Latest proactive cost-guard decision (#34), for the host UI to surface. Undefined when disabled. */
 	private _lastCostGuardDecision?: CostGuardDecision;
 	/** One-shot latch so the cost guard downgrades reasoning once per over-threshold episode, not every call. */
@@ -921,6 +910,25 @@ export class AgentSession {
 			getExtensionCommandContextActions: () => this._extensionCommandContextActions,
 			getExtensionShutdownHandler: () => this._extensionShutdownHandler,
 			getExtensionErrorListener: () => this._extensionErrorListener,
+		});
+		this._analytics = new SessionAnalytics({
+			getState: () => this.state,
+			getMessages: () => this.messages,
+			getModel: () => this.model,
+			getSessionManager: () => this.sessionManager,
+			getSettingsManager: () => this.settingsManager,
+			getToolDefinition: (name) => this.getToolDefinition(name),
+		});
+		this._treeNavigator = new SessionTreeNavigator({
+			getSessionManager: () => this.sessionManager,
+			getModel: () => this.model,
+			getExtensionRunner: () => this._extensionRunner,
+			getRequiredRequestAuth: (model) => this._getRequiredRequestAuth(model),
+			getSettingsManager: () => this.settingsManager,
+			getAgent: () => this.agent,
+			setBranchSummaryAbort: (controller) => {
+				this._branchSummaryAbortController = controller;
+			},
 		});
 
 		// Always subscribe to agent events for internal handling
@@ -4175,419 +4183,42 @@ export class AgentSession {
 	// Tree Navigation
 	// =========================================================================
 
-	/**
-	 * Navigate to a different node in the session tree.
-	 * Unlike fork() which creates a new session file, this stays in the same file.
-	 *
-	 * @param targetId The entry ID to navigate to
-	 * @param options.summarize Whether user wants to summarize abandoned branch
-	 * @param options.customInstructions Custom instructions for summarizer
-	 * @param options.replaceInstructions If true, customInstructions replaces the default prompt
-	 * @param options.label Label to attach to the branch summary entry
-	 * @returns Result with editorText (if user message) and cancelled status
-	 */
 	async navigateTree(
 		targetId: string,
 		options: { summarize?: boolean; customInstructions?: string; replaceInstructions?: boolean; label?: string } = {},
 	): Promise<{ editorText?: string; cancelled: boolean; aborted?: boolean; summaryEntry?: BranchSummaryEntry }> {
-		const oldLeafId = this.sessionManager.getLeafId();
-
-		// No-op if already at target
-		if (targetId === oldLeafId) {
-			return { cancelled: false };
-		}
-
-		// Model required for summarization
-		if (options.summarize && !this.model) {
-			throw new Error("No model available for summarization");
-		}
-
-		const targetEntry = this.sessionManager.getEntry(targetId);
-		if (!targetEntry) {
-			throw new Error(`Entry ${targetId} not found`);
-		}
-
-		// Collect entries to summarize (from old leaf to common ancestor)
-		const { entries: entriesToSummarize, commonAncestorId } = collectEntriesForBranchSummary(
-			this.sessionManager,
-			oldLeafId,
-			targetId,
-		);
-
-		// Prepare event data - mutable so extensions can override
-		let customInstructions = options.customInstructions;
-		let replaceInstructions = options.replaceInstructions;
-		let label = options.label;
-
-		const preparation: TreePreparation = {
-			targetId,
-			oldLeafId,
-			commonAncestorId,
-			entriesToSummarize,
-			userWantsSummary: options.summarize ?? false,
-			customInstructions,
-			replaceInstructions,
-			label,
-		};
-
-		// Set up abort controller for summarization
-		this._branchSummaryAbortController = new AbortController();
-
-		try {
-			let extensionSummary: { summary: string; details?: unknown } | undefined;
-			let fromExtension = false;
-
-			// Emit session_before_tree event
-			if (this._extensionRunner.hasHandlers("session_before_tree")) {
-				const result = (await this._extensionRunner.emit({
-					type: "session_before_tree",
-					preparation,
-					signal: this._branchSummaryAbortController.signal,
-				})) as SessionBeforeTreeResult | undefined;
-
-				if (result?.cancel) {
-					return { cancelled: true };
-				}
-
-				if (result?.summary && options.summarize) {
-					extensionSummary = result.summary;
-					fromExtension = true;
-				}
-
-				// Allow extensions to override instructions and label
-				if (result?.customInstructions !== undefined) {
-					customInstructions = result.customInstructions;
-				}
-				if (result?.replaceInstructions !== undefined) {
-					replaceInstructions = result.replaceInstructions;
-				}
-				if (result?.label !== undefined) {
-					label = result.label;
-				}
-			}
-
-			// Run default summarizer if needed
-			let summaryText: string | undefined;
-			let summaryDetails: unknown;
-			if (options.summarize && entriesToSummarize.length > 0 && !extensionSummary) {
-				const model = this.model!;
-				const { apiKey, headers } = await this._getRequiredRequestAuth(model);
-				const branchSummarySettings = this.settingsManager.getBranchSummarySettings();
-				const result = await generateBranchSummary(entriesToSummarize, {
-					model,
-					apiKey,
-					headers,
-					signal: this._branchSummaryAbortController.signal,
-					customInstructions,
-					replaceInstructions,
-					reserveTokens: branchSummarySettings.reserveTokens,
-				});
-				if (result.aborted) {
-					return { cancelled: true, aborted: true };
-				}
-				if (result.error) {
-					throw new Error(result.error);
-				}
-				summaryText = result.summary;
-				summaryDetails = {
-					readFiles: result.readFiles || [],
-					modifiedFiles: result.modifiedFiles || [],
-				};
-			} else if (extensionSummary) {
-				summaryText = extensionSummary.summary;
-				summaryDetails = extensionSummary.details;
-			}
-
-			// Determine the new leaf position based on target type
-			let newLeafId: string | null;
-			let editorText: string | undefined;
-
-			if (targetEntry.type === "message" && targetEntry.message.role === "user") {
-				// User message: leaf = parent (null if root), text goes to editor
-				newLeafId = targetEntry.parentId;
-				editorText = this._extractUserMessageText(targetEntry.message.content);
-			} else if (targetEntry.type === "custom_message") {
-				// Custom message: leaf = parent (null if root), text goes to editor
-				newLeafId = targetEntry.parentId;
-				editorText =
-					typeof targetEntry.content === "string"
-						? targetEntry.content
-						: targetEntry.content
-								.filter((c): c is { type: "text"; text: string } => c.type === "text")
-								.map((c) => c.text)
-								.join("");
-			} else {
-				// Non-user message: leaf = selected node
-				newLeafId = targetId;
-			}
-
-			// Switch leaf (with or without summary)
-			// Summary is attached at the navigation target position (newLeafId), not the old branch
-			let summaryEntry: BranchSummaryEntry | undefined;
-			if (summaryText) {
-				// Create summary at target position (can be null for root)
-				const summaryId = this.sessionManager.branchWithSummary(
-					newLeafId,
-					summaryText,
-					summaryDetails,
-					fromExtension,
-				);
-				summaryEntry = this.sessionManager.getEntry(summaryId) as BranchSummaryEntry;
-
-				// Attach label to the summary entry
-				if (label) {
-					this.sessionManager.appendLabelChange(summaryId, label);
-				}
-			} else if (newLeafId === null) {
-				// No summary, navigating to root - reset leaf
-				this.sessionManager.resetLeaf();
-			} else {
-				// No summary, navigating to non-root
-				this.sessionManager.branch(newLeafId);
-			}
-
-			// Attach label to target entry when not summarizing (no summary entry to label)
-			if (label && !summaryText) {
-				this.sessionManager.appendLabelChange(targetId, label);
-			}
-
-			// Update agent state
-			const sessionContext = this.sessionManager.buildSessionContext();
-			this.agent.state.messages = sessionContext.messages;
-
-			// Emit session_tree event
-			await this._extensionRunner.emit({
-				type: "session_tree",
-				newLeafId: this.sessionManager.getLeafId(),
-				oldLeafId,
-				summaryEntry,
-				fromExtension: summaryText ? fromExtension : undefined,
-			});
-
-			// Emit to custom tools
-
-			return { editorText, cancelled: false, summaryEntry };
-		} finally {
-			this._branchSummaryAbortController = undefined;
-		}
+		return this._treeNavigator.navigateTree(targetId, options);
 	}
 
-	/**
-	 * Get all user messages from session for fork selector.
-	 */
 	getUserMessagesForForking(): Array<{ entryId: string; text: string }> {
-		const entries = this.sessionManager.getEntries();
-		const result: Array<{ entryId: string; text: string }> = [];
-
-		for (const entry of entries) {
-			if (entry.type !== "message") continue;
-			if (entry.message.role !== "user") continue;
-
-			const text = this._extractUserMessageText(entry.message.content);
-			if (text) {
-				result.push({ entryId: entry.id, text });
-			}
-		}
-
-		return result;
+		return this._treeNavigator.getUserMessagesForForking();
 	}
 
-	private _extractUserMessageText(content: string | Array<{ type: string; text?: string }>): string {
-		if (typeof content === "string") return content;
-		if (Array.isArray(content)) {
-			return content
-				.filter((c): c is { type: "text"; text: string } => c.type === "text")
-				.map((c) => c.text)
-				.join("");
-		}
-		return "";
-	}
-
-	/**
-	 * Get session statistics.
-	 */
 	getSessionStats(): SessionStats {
-		const state = this.state;
-		const userMessages = state.messages.filter((m) => m.role === "user").length;
-		const assistantMessages = state.messages.filter((m) => m.role === "assistant").length;
-		const toolResults = state.messages.filter((m) => m.role === "toolResult").length;
-
-		let toolCalls = 0;
-		let totalInput = 0;
-		let totalOutput = 0;
-		let totalCacheRead = 0;
-		let totalCacheWrite = 0;
-		let totalCost = 0;
-
-		for (const message of state.messages) {
-			if (message.role === "assistant") {
-				const assistantMsg = message as AssistantMessage;
-				toolCalls += assistantMsg.content.filter((c) => c.type === "toolCall").length;
-				totalInput += assistantMsg.usage.input;
-				totalOutput += assistantMsg.usage.output;
-				totalCacheRead += assistantMsg.usage.cacheRead;
-				totalCacheWrite += assistantMsg.usage.cacheWrite;
-				totalCost += assistantMsg.usage.cost.total;
-			}
-		}
-
-		return {
-			sessionFile: this.sessionFile,
-			sessionId: this.sessionId,
-			userMessages,
-			assistantMessages,
-			toolCalls,
-			toolResults,
-			totalMessages: state.messages.length,
-			tokens: {
-				input: totalInput,
-				output: totalOutput,
-				cacheRead: totalCacheRead,
-				cacheWrite: totalCacheWrite,
-				total: totalInput + totalOutput + totalCacheRead + totalCacheWrite,
-			},
-			cost: totalCost,
-			contextUsage: this.getContextUsage(),
-		};
+		return this._analytics.getSessionStats();
 	}
 
-	/**
-	 * Cumulative usage (full breakdown) for this session's entire spawn subtree: its own
-	 * assistant messages PLUS every `spawned_usage` report it has rolled up. Single source of
-	 * truth for "how much did this session and everything it spawned spend" — used by print-mode
-	 * to emit a child's total so a spawner can roll it up via {@link addSpawnedUsage}.
-	 *
-	 * Including the `spawned_usage` reports is what keeps the single-hop invariant intact: a child
-	 * that itself spawned grandchildren must report own + sub-usage in one number, or the parent
-	 * silently under-counts the grandchildren.
-	 */
 	getCumulativeUsage(): Usage {
-		let input = 0;
-		let output = 0;
-		let cacheRead = 0;
-		let cacheWrite = 0;
-		let totalTokens = 0;
-		let costInput = 0;
-		let costOutput = 0;
-		let costCacheRead = 0;
-		let costCacheWrite = 0;
-		let costTotal = 0;
-		const add = (usage: Usage) => {
-			input += usage.input;
-			output += usage.output;
-			cacheRead += usage.cacheRead;
-			cacheWrite += usage.cacheWrite;
-			totalTokens += usage.totalTokens;
-			costInput += usage.cost.input;
-			costOutput += usage.cost.output;
-			costCacheRead += usage.cost.cacheRead;
-			costCacheWrite += usage.cost.cacheWrite;
-			costTotal += usage.cost.total;
-		};
-		for (const message of this.state.messages) {
-			if (message.role !== "assistant") continue;
-			const usage = (message as AssistantMessage).usage;
-			if (!usage) continue;
-			add(usage);
-		}
-		// Roll up usage this session attributed to its own spawned children (single-hop).
-		for (const entry of this.sessionManager.getEntries()) {
-			if (entry.type !== "custom" || entry.customType !== SPAWNED_USAGE_CUSTOM_TYPE) continue;
-			const data = entry.data as SpawnedUsageReport | undefined;
-			if (data?.usage) add(data.usage);
-		}
-		return {
-			input,
-			output,
-			cacheRead,
-			cacheWrite,
-			totalTokens,
-			cost: {
-				input: costInput,
-				output: costOutput,
-				cacheRead: costCacheRead,
-				cacheWrite: costCacheWrite,
-				total: costTotal,
-			},
-		};
+		return this._analytics.getCumulativeUsage();
 	}
 
-	/**
-	 * Record usage spent by a spawned/subagent session so the footer can roll it into the
-	 * displayed cost. Persisted as a `CustomEntry` (`customType: "spawned_usage"`, Model A) so
-	 * it survives reload and is reconstructed exactly like main usage; a new/forked session
-	 * starts fresh because it owns a new log file.
-	 *
-	 * Idempotent on `opts.reportId`: a re-report (retry, duplicate `agent_end`) with a
-	 * previously-seen id is ignored, so cost cannot be double-counted. Honors the single-hop
-	 * invariant documented on {@link SpawnedUsageReport}.
-	 *
-	 * @returns the id of the appended entry, or `undefined` if the report was a duplicate.
-	 */
 	addSpawnedUsage(
 		usage: Usage,
 		opts?: { label?: string; sourceSessionId?: string; reportId?: string },
 	): string | undefined {
-		const reportId = opts?.reportId;
-		if (reportId) {
-			for (const entry of this.sessionManager.getEntries()) {
-				if (
-					entry.type === "custom" &&
-					entry.customType === SPAWNED_USAGE_CUSTOM_TYPE &&
-					(entry.data as SpawnedUsageReport | undefined)?.reportId === reportId
-				) {
-					return undefined;
-				}
-			}
-		}
-		const report: SpawnedUsageReport = {
-			usage,
-			label: opts?.label,
-			sourceSessionId: opts?.sourceSessionId,
-			reportId,
-		};
-		return this.sessionManager.appendCustomEntry(SPAWNED_USAGE_CUSTOM_TYPE, report);
+		return this._analytics.addSpawnedUsage(usage, opts);
 	}
 
-	/**
-	 * Aggregate all recorded spawned-usage reports (see {@link addSpawnedUsage}). Cached by the session
-	 * entry count so the interactive footer (which calls this every render frame) is O(1) between turns
-	 * instead of an O(N) scan on every keystroke (Bug #22). Recomputes only when entries change.
-	 */
 	getSpawnedUsage(): SpawnedUsageTotals {
-		const entryCount = this.sessionManager.getEntryCount?.() ?? this.sessionManager.getEntries().length;
-		if (this._spawnedUsageCache?.entryCount === entryCount) return this._spawnedUsageCache.totals;
-		let cost = 0;
-		let reports = 0;
-		for (const entry of this.sessionManager.getEntries()) {
-			if (entry.type !== "custom" || entry.customType !== SPAWNED_USAGE_CUSTOM_TYPE) continue;
-			const data = entry.data as SpawnedUsageReport | undefined;
-			if (!data?.usage) continue;
-			cost += data.usage.cost.total;
-			reports += 1;
-		}
-		const totals: SpawnedUsageTotals = { cost, reports };
-		this._spawnedUsageCache = { entryCount, totals };
-		return totals;
+		return this._analytics.getSpawnedUsage();
 	}
 
 	getDailyUsageTotals(now = new Date()): DailyUsageTotals {
-		const sessionDir = this.sessionManager.getSessionDir();
-		const scope = this.sessionManager.usesDefaultSessionDir() ? getSessionsDir() : sessionDir;
-		const nowMs = now.getTime();
-		if (this._dailyUsageCache?.sessionDir === scope && this._dailyUsageCache.expiresAt > nowMs) {
-			return this._dailyUsageCache.totals;
-		}
-		const window = getLocalDayWindow(now);
-		const totals = this.sessionManager.usesDefaultSessionDir()
-			? aggregateDailyUsageFromSessionRoot(scope, window)
-			: aggregateDailyUsageFromSessionFiles(sessionDir, window);
-		this._dailyUsageCache = { sessionDir: scope, expiresAt: nowMs + 10_000, totals };
-		return totals;
+		return this._analytics.getDailyUsageTotals(now);
 	}
 
 	getDailyUsageBreakdown(formatLabel?: (label: string) => string, now = new Date()): string {
-		return formatDailyUsageBreakdown(this.getDailyUsageTotals(now), formatLabel);
+		return this._analytics.getDailyUsageBreakdown(formatLabel, now);
 	}
 
 	/**
@@ -4762,143 +4393,23 @@ export class AgentSession {
 	}
 
 	getContextUsage(): ContextUsage | undefined {
-		const model = this.model;
-		if (!model) return undefined;
-
-		const contextWindow = model.contextWindow ?? 0;
-		if (contextWindow <= 0) return undefined;
-
-		// After compaction, the last assistant usage reflects pre-compaction context size.
-		// We can only trust usage from an assistant that responded after the latest compaction.
-		// If no such assistant exists, context token count is unknown until the next LLM response.
-		const branchEntries = this.sessionManager.getBranch();
-		const latestCompaction = getLatestCompactionEntry(branchEntries);
-
-		if (latestCompaction) {
-			// Check if there's a valid assistant usage after the compaction boundary
-			const compactionIndex = branchEntries.lastIndexOf(latestCompaction);
-			let hasPostCompactionUsage = false;
-			for (let i = branchEntries.length - 1; i > compactionIndex; i--) {
-				const entry = branchEntries[i];
-				if (entry.type === "message" && entry.message.role === "assistant") {
-					const assistant = entry.message;
-					if (assistant.stopReason !== "aborted" && assistant.stopReason !== "error") {
-						const contextTokens = calculateContextTokens(assistant.usage);
-						if (contextTokens > 0) {
-							hasPostCompactionUsage = true;
-						}
-						break;
-					}
-				}
-			}
-
-			if (!hasPostCompactionUsage) {
-				return { tokens: null, contextWindow, percent: null };
-			}
-		}
-
-		const estimate = estimateContextTokens(this.messages);
-		const percent = (estimate.tokens / contextWindow) * 100;
-
-		return {
-			tokens: estimate.tokens,
-			contextWindow,
-			percent,
-		};
+		return this._analytics.getContextUsage();
 	}
 
-	/**
-	 * Export session to HTML.
-	 * @param outputPath Optional output path (defaults to session directory)
-	 * @returns Path to exported file
-	 */
 	async exportToHtml(outputPath?: string): Promise<string> {
-		const themeName = this.settingsManager.getTheme();
-
-		// Create tool renderer if we have an extension runner (for custom tool HTML rendering)
-		const toolRenderer: ToolHtmlRenderer = createToolHtmlRenderer({
-			getToolDefinition: (name) => this.getToolDefinition(name),
-			theme,
-			cwd: this.sessionManager.getCwd(),
-		});
-
-		return await exportSessionToHtml(this.sessionManager, this.state, {
-			outputPath,
-			themeName,
-			toolRenderer,
-		});
+		return this._analytics.exportToHtml(outputPath);
 	}
 
-	/**
-	 * Export the current session branch to a JSONL file.
-	 * Writes the session header followed by all entries on the current branch path.
-	 * @param outputPath Target file path. If omitted, generates a timestamped file in cwd.
-	 * @returns The resolved output file path.
-	 */
 	exportToJsonl(outputPath?: string): string {
-		const filePath = resolvePath(
-			outputPath ?? `session-${new Date().toISOString().replace(/[:.]/g, "-")}.jsonl`,
-			process.cwd(),
-		);
-		const dir = dirname(filePath);
-		if (!existsSync(dir)) {
-			mkdirSync(dir, { recursive: true });
-		}
-
-		const header: SessionHeader = {
-			type: "session",
-			version: CURRENT_SESSION_VERSION,
-			id: this.sessionManager.getSessionId(),
-			timestamp: new Date().toISOString(),
-			cwd: this.sessionManager.getCwd(),
-		};
-
-		const branchEntries = this.sessionManager.getBranch();
-		const lines = [JSON.stringify(header)];
-
-		// Re-chain parentIds to form a linear sequence
-		let prevId: string | null = null;
-		for (const entry of branchEntries) {
-			const linear = { ...entry, parentId: prevId };
-			lines.push(JSON.stringify(linear));
-			prevId = entry.id;
-		}
-
-		writeFileSync(filePath, `${lines.join("\n")}\n`);
-		return filePath;
+		return this._analytics.exportToJsonl(outputPath);
 	}
 
 	// =========================================================================
 	// Utilities
 	// =========================================================================
 
-	/**
-	 * Get text content of last assistant message.
-	 * Useful for /copy command.
-	 * @returns Text content, or undefined if no assistant message exists
-	 */
 	getLastAssistantText(): string | undefined {
-		const lastAssistant = this.messages
-			.slice()
-			.reverse()
-			.find((m) => {
-				if (m.role !== "assistant") return false;
-				const msg = m as AssistantMessage;
-				// Skip aborted messages with no content
-				if (msg.stopReason === "aborted" && msg.content.length === 0) return false;
-				return true;
-			});
-
-		if (!lastAssistant) return undefined;
-
-		let text = "";
-		for (const content of (lastAssistant as AssistantMessage).content) {
-			if (content.type === "text") {
-				text += content.text;
-			}
-		}
-
-		return text.trim() || undefined;
+		return this._analytics.getLastAssistantText();
 	}
 
 	// =========================================================================
