@@ -94,18 +94,10 @@ import { buildForegroundEnvelope, formatForegroundEnvelopeObservation } from "./
 import { evaluateToolGate } from "./autonomy/gates.ts";
 import { type LaneRecord, LaneTracker } from "./autonomy/lane-tracker.ts";
 import { appendLaneRecordSnapshot, getLaneRecordSnapshots } from "./autonomy/session-lane-record.ts";
-import type {
-	AutonomyDiagnosticSnapshot,
-	AutonomyStatusSnapshot,
-	DiagnosticEntry,
-	GateOutcomeHistoryEntry,
-} from "./autonomy/status.ts";
+import type { AutonomyDiagnosticSnapshot, AutonomyStatusSnapshot, GateOutcomeHistoryEntry } from "./autonomy/status.ts";
 import { composeSubagentSystemPrompt } from "./autonomy/subagent-prompt.ts";
-import {
-	AUTONOMY_TELEMETRY_EVENT_TYPES,
-	type AutonomyTelemetryEvent,
-	redactTelemetryValue,
-} from "./autonomy/telemetry-events.ts";
+import { AUTONOMY_TELEMETRY_EVENT_TYPES, type AutonomyTelemetryEvent } from "./autonomy/telemetry-events.ts";
+import { AutonomyTelemetry } from "./autonomy-telemetry.ts";
 import { type BashResult, executeBashWithOperations } from "./bash-executor.ts";
 // (module-scope helper for curation goal extraction defined below the imports)
 import { BrainCurator, type CurationTelemetrySnapshot, preDigestConversationText } from "./context/brain-curator.ts";
@@ -669,13 +661,6 @@ function persistModelRouterDecision(
 	sessionManager.appendCustomEntry(MODEL_ROUTER_DECISION_CUSTOM_TYPE, decision);
 }
 
-/** Custom-entry type for G3 autonomy telemetry. Distinct from the router/lane record types so a
- * telemetry consumer can filter on it without decoding operational snapshots. */
-const AUTONOMY_TELEMETRY_CUSTOM_TYPE = "autonomy-telemetry";
-
-/** G8: bound on the in-memory gate-outcome history. Oldest entries evict once the cap is reached. */
-const GATE_OUTCOME_HISTORY_LIMIT = 50;
-
 /** Read a packed grep/find tool result's `details.artifactId`, if present, without `any`. */
 function extractArtifactId(message: AgentMessage | undefined): string | undefined {
 	if (!message || message.role !== "toolResult") return undefined;
@@ -805,6 +790,9 @@ export class AgentSession {
 	/** Assembles the session's base system prompt from live session state (see
 	 * system-prompt-builder.ts); owns the paired _baseSystemPromptOptions. */
 	private readonly _systemPromptBuilder: SystemPromptBuilder;
+	/** G3/G8 autonomy telemetry sink + status/diagnostic snapshots (see autonomy-telemetry.ts); owns
+	 * the latest gate outcome and the bounded gate-outcome history. */
+	private readonly _autonomyTelemetry: AutonomyTelemetry;
 	private _extensionRunnerRef?: { current?: ExtensionRunner };
 	private _initialActiveToolNames?: string[];
 	private _allowedToolNames?: Set<string>;
@@ -832,9 +820,6 @@ export class AgentSession {
 	private _modelRouterEscalationRequested = false;
 	private _isModelRouterRetry = false;
 	private _lastModelRouterDecision?: ModelRouterDecisionStatus;
-	private _lastAutonomyGateOutcome?: GateOutcome;
-	/** G8: bounded (cap {@link GATE_OUTCOME_HISTORY_LIMIT}) history of gate outcomes; tail is latest. */
-	private readonly _gateOutcomeHistory: GateOutcomeHistoryEntry[] = [];
 	private _lastModelRouterSkipReason?: string;
 	private _lastModelRouterIntent?: ModelRouterIntent;
 	/** Lazily-built skill curator (#32) over `<agentDir>/skills`. */
@@ -932,6 +917,20 @@ export class AgentSession {
 			getToolPromptSnippet: (name) => this._toolPromptSnippets.get(name),
 			getToolPromptGuidelines: (name) => this._toolPromptGuidelines.get(name),
 			getActiveExtensions: () => this._extensionRunner.activeExtensions,
+		});
+		this._autonomyTelemetry = new AutonomyTelemetry({
+			getSessionManager: () => this.sessionManager,
+			getLastModelRouterDecision: () => this._lastModelRouterDecision,
+			getLastResearchLaneSkipReason: () => this._lastResearchLaneSkipReason,
+			getSessionStats: () => this.getSessionStats(),
+			getSpawnedUsage: () => this.getSpawnedUsage(),
+			getDailyUsageTotals: () => this.getDailyUsageTotals?.(),
+			getGoalStateSnapshot: () => this.getGoalStateSnapshot(),
+			getActiveLaneCount: () => this._laneTracker.getActiveCount(),
+			getEvidenceBundleSnapshots: () => this.getEvidenceBundleSnapshots(),
+			getWorkerResultSnapshots: () => this.getWorkerResultSnapshots(),
+			getLearningDecisionSnapshots: () => this.getLearningDecisionSnapshots(),
+			getLearningAuditRecords: () => this.getLearningAuditRecords(),
 		});
 		this._modelRegistry = config.modelRegistry;
 		this._extensionRunnerRef = config.extensionRunnerRef;
@@ -6395,56 +6394,20 @@ export class AgentSession {
 		return this._laneTracker.getRecords();
 	}
 
-	/**
-	 * G3: bounded autonomy-telemetry sink. Passes the whole event through {@link redactTelemetryValue}
-	 * (the taxonomy's redaction contract) before storing it, so a secret that leaked into a payload
-	 * field never lands in the session log. Observe-only: a failure here can never surface into the
-	 * turn it is measuring, so the whole body is swallowed. Payloads MUST stay small (ids, codes,
-	 * numbers) — never prompt/summary text; callers own that discipline.
-	 */
+	// G3/G8 autonomy telemetry + gate-outcome history live in AutonomyTelemetry (see
+	// autonomy-telemetry.ts). These stubs keep the god file's internal call surface stable while the
+	// sink logic and the owned gate-outcome fields live there.
 	private _emitAutonomyTelemetry(event: AutonomyTelemetryEvent): void {
-		try {
-			const redacted = redactTelemetryValue(event) as Record<string, unknown>;
-			this.sessionManager.appendCustomEntry(AUTONOMY_TELEMETRY_CUSTOM_TYPE, { version: 1, ...redacted });
-		} catch {
-			// Telemetry is best-effort: swallow so a sink failure cannot break the observed turn.
-		}
+		this._autonomyTelemetry.emitTelemetry(event);
 	}
 
-	/**
-	 * G8: single sink for a gate outcome. Keeps the latest-outcome getter behavior identical (the
-	 * full {@link GateOutcome} still lands in `_lastAutonomyGateOutcome`), and additionally appends a
-	 * bounded codes-only entry to {@link _gateOutcomeHistory} (oldest evicted at
-	 * {@link GATE_OUTCOME_HISTORY_LIMIT}) and emits the `gate_outcome` telemetry event. The history
-	 * tail therefore always mirrors the latest outcome. Only called with an active envelope.
-	 */
 	private _recordGateOutcome(outcome: GateOutcome): void {
-		this._lastAutonomyGateOutcome = outcome;
-		const at = new Date().toISOString();
-		this._gateOutcomeHistory.push({
-			outcome: outcome.outcome,
-			gate: outcome.gate,
-			reasonCode: outcome.reasonCode,
-			at,
-		});
-		while (this._gateOutcomeHistory.length > GATE_OUTCOME_HISTORY_LIMIT) {
-			this._gateOutcomeHistory.shift();
-		}
-		// G8: gate outcome event. Codes/ids only — never the gate's human-facing message.
-		this._emitAutonomyTelemetry({
-			type: AUTONOMY_TELEMETRY_EVENT_TYPES.gateOutcome,
-			timestamp: at,
-			payload: {
-				outcome: outcome.outcome,
-				gate: outcome.gate,
-				reasonCode: outcome.reasonCode,
-			},
-		});
+		this._autonomyTelemetry.recordGateOutcome(outcome);
 	}
 
 	/** G8: copies of the bounded gate-outcome history, oldest first, latest last. */
 	getGateOutcomeHistory(): GateOutcomeHistoryEntry[] {
-		return this._gateOutcomeHistory.map((entry) => ({ ...entry }));
+		return this._autonomyTelemetry.getGateOutcomeHistory();
 	}
 
 	saveWorkerResultSnapshot(result: WorkerResult, request?: WorkerRequest): string {
@@ -7772,57 +7735,7 @@ export class AgentSession {
 	// =========================================================================
 
 	public getAutonomyStatusSnapshot(): AutonomyStatusSnapshot {
-		const snapshot: AutonomyStatusSnapshot = {};
-
-		if (this._lastModelRouterDecision?.route) {
-			snapshot.latestRoute = {
-				tier: this._lastModelRouterDecision.route.tier,
-				reasonCode: this._lastModelRouterDecision.route.reasonCode,
-				risk: this._lastModelRouterDecision.route.risk,
-			};
-		}
-
-		if (this._lastAutonomyGateOutcome) {
-			snapshot.latestGate = {
-				outcome: this._lastAutonomyGateOutcome.outcome,
-				gate: this._lastAutonomyGateOutcome.gate,
-				reasonCode: this._lastAutonomyGateOutcome.reasonCode,
-			};
-		}
-
-		const currentCost = this.getSessionStats().cost;
-		if (currentCost > 0) {
-			snapshot.currentCostUsd = currentCost;
-		}
-
-		const spawnedCost = this.getSpawnedUsage().cost;
-		if (spawnedCost > 0) {
-			snapshot.spawnedCostUsd = spawnedCost;
-		}
-
-		const dailyCost = this.getDailyUsageTotals?.()?.totalCost;
-		if (dailyCost !== undefined && dailyCost > 0) {
-			snapshot.dailyCostUsd = dailyCost;
-		}
-
-		const goal = this.getGoalStateSnapshot();
-		if (goal) {
-			snapshot.activeGoal = {
-				goalId: goal.goalId,
-				status: goal.status,
-				openRequirements: goal.requirements.filter((requirement) => requirement.status === "open").length,
-				stallTurns: goal.stallTurns,
-			};
-		}
-
-		// Real live count from the lane tracker — never inferred from historical snapshots. Absent
-		// while zero, matching the presence-means-signal convention of the sibling fields.
-		const activeLaneCount = this._laneTracker.getActiveCount();
-		if (activeLaneCount > 0) {
-			snapshot.activeLaneCount = activeLaneCount;
-		}
-
-		return snapshot;
+		return this._autonomyTelemetry.getStatusSnapshot();
 	}
 
 	/**
@@ -7832,141 +7745,7 @@ export class AgentSession {
 	 * recomputes a route/gate decision.
 	 */
 	public getAutonomyDiagnosticSnapshot(options?: { maxEntriesPerFamily?: number }): AutonomyDiagnosticSnapshot {
-		const maxEntriesPerFamily = options?.maxEntriesPerFamily ?? 10;
-		const snapshot: AutonomyDiagnosticSnapshot = {};
-		const goal = this.getGoalStateSnapshot();
-
-		const recentDecisions = getRecentModelRouterDecisions(this.sessionManager.getEntries(), maxEntriesPerFamily);
-		if (recentDecisions.length > 0) {
-			snapshot.routes = recentDecisions.map(
-				(decision): DiagnosticEntry => ({
-					title: decision.route.tier,
-					summary: decision.routedModel,
-					reasonCode: decision.route.reasonCode,
-					metadata: { risk: decision.route.risk, outcome: decision.outcome, intent: decision.intent },
-				}),
-			);
-		}
-
-		if (this._lastAutonomyGateOutcome) {
-			const gate = this._lastAutonomyGateOutcome;
-			snapshot.gates = [
-				{
-					title: gate.gate,
-					summary: gate.message,
-					reasonCode: gate.reasonCode,
-					metadata: { outcome: gate.outcome, reversible: gate.reversible },
-				},
-			];
-		}
-
-		const costs: DiagnosticEntry[] = [];
-		const currentCostForDiagnostics = this.getSessionStats().cost;
-		if (currentCostForDiagnostics > 0) {
-			costs.push({ title: "current", summary: `$${currentCostForDiagnostics.toFixed(4)}` });
-		}
-		const spawnedCost = this.getSpawnedUsage().cost;
-		if (spawnedCost > 0) costs.push({ title: "spawned", summary: `$${spawnedCost.toFixed(4)}` });
-		const dailyCostForDiagnostics = this.getDailyUsageTotals?.()?.totalCost;
-		if (dailyCostForDiagnostics !== undefined && dailyCostForDiagnostics > 0) {
-			costs.push({ title: "daily", summary: `$${dailyCostForDiagnostics.toFixed(4)}` });
-		}
-		if (costs.length > 0) snapshot.costs = costs;
-
-		const researchEntries: DiagnosticEntry[] = [];
-		const researchLaneRecords = getLaneRecordSnapshots(this.sessionManager.getEntries()).filter(
-			(record) => record.type === "research",
-		);
-		for (const record of researchLaneRecords.slice(-maxEntriesPerFamily)) {
-			researchEntries.push({
-				title: `Lane ${record.laneId} (${record.status})`,
-				reasonCode: record.reasonCode,
-				metadata: {
-					costUsd: record.costUsd,
-					startedAt: record.startedAt,
-					completedAt: record.completedAt,
-					goalId: record.goalId,
-				},
-			});
-		}
-		for (const bundle of this.getEvidenceBundleSnapshots().slice(-maxEntriesPerFamily)) {
-			researchEntries.push({
-				title: `Research: ${bundle.query}`,
-				metadata: { sourceCount: bundle.sources.length, findingCount: bundle.findings.length },
-			});
-		}
-		if (this._lastResearchLaneSkipReason) {
-			researchEntries.push({ title: "Last skip", reasonCode: this._lastResearchLaneSkipReason });
-		}
-		if (researchEntries.length > 0) {
-			snapshot.research = researchEntries;
-		}
-
-		const delegationEntries: DiagnosticEntry[] = [];
-		const workerLaneRecords = getLaneRecordSnapshots(this.sessionManager.getEntries()).filter(
-			(record) => record.type === "worker",
-		);
-		for (const record of workerLaneRecords.slice(-maxEntriesPerFamily)) {
-			delegationEntries.push({
-				title: `Lane ${record.laneId} (${record.status})`,
-				reasonCode: record.reasonCode,
-				metadata: { costUsd: record.costUsd, startedAt: record.startedAt, completedAt: record.completedAt },
-			});
-		}
-		const workerResults = this.getWorkerResultSnapshots();
-		for (const result of workerResults.slice(-maxEntriesPerFamily)) {
-			delegationEntries.push({
-				title: `Worker ${result.requestId} (${result.status})`,
-				summary: result.summary,
-				metadata: {
-					changedFileCount: result.changedFiles.length,
-					blockerCount: result.blockers?.length ?? 0,
-					usageReportId: result.usageReportId,
-				},
-			});
-		}
-		if (delegationEntries.length > 0) {
-			snapshot.delegation = delegationEntries;
-		}
-
-		const learningEntries: DiagnosticEntry[] = [];
-		const learningDecisions = this.getLearningDecisionSnapshots();
-		for (const decision of learningDecisions.slice(-maxEntriesPerFamily)) {
-			learningEntries.push({
-				title: `Learning (${decision.kind})`,
-				summary: decision.summary,
-				reasonCode: decision.reasonCode,
-				metadata: { confidence: decision.confidence, requiresApproval: decision.requiresApproval },
-			});
-		}
-		for (const audit of this.getLearningAuditRecords().slice(-maxEntriesPerFamily)) {
-			learningEntries.push({
-				title: `Audit ${audit.id} (${audit.action})`,
-				summary: audit.summary,
-				reasonCode: audit.reasonCode,
-				metadata: { layer: audit.layer, proposalId: audit.proposalId, rollbackOf: audit.rollbackOf },
-			});
-		}
-		if (learningEntries.length > 0) {
-			snapshot.learning = learningEntries;
-		}
-
-		if (goal) {
-			snapshot.goals = [
-				{
-					title: `Goal ${goal.goalId}`,
-					summary: goal.userGoal,
-					reasonCode: goal.status,
-					metadata: {
-						openRequirementCount: goal.requirements.filter((requirement) => requirement.status === "open").length,
-						stallTurns: goal.stallTurns,
-						blockedReason: goal.blockedReason,
-					},
-				},
-			];
-		}
-
-		return snapshot;
+		return this._autonomyTelemetry.getDiagnosticSnapshot(options);
 	}
 
 	createReplacedSessionContext(): ReplacedSessionContext {
