@@ -41,7 +41,6 @@ import { spawn, spawnSync } from "child_process";
 import { APP_NAME, APP_TITLE, getAgentDir, getShareViewerUrl, VERSION } from "../../config.ts";
 import { type AgentSession, type AgentSessionEvent, parseSkillBlock } from "../../core/agent-session.ts";
 import { type AgentSessionRuntime, SessionImportFileNotFoundError } from "../../core/agent-session-runtime.ts";
-import { formatAutonomyDiagnostics } from "../../core/autonomy/status.ts";
 import type {
 	AutocompleteProviderFactory,
 	ExtensionCommandContext,
@@ -56,15 +55,10 @@ import {
 	MAX_GOAL_CONTINUE_MAX_TURNS,
 	MAX_GOAL_CONTINUE_MAX_WALL_CLOCK_MINUTES,
 } from "../../core/goals/goal-continuation-defaults.ts";
-import { configureHttpDispatcher, formatHttpIdleTimeoutMs } from "../../core/http-dispatcher.ts";
+import { configureHttpDispatcher } from "../../core/http-dispatcher.ts";
 import { type AppKeybinding, KeybindingsManager } from "../../core/keybindings.ts";
-import { DEFAULT_MODEL_SUGGESTIONS } from "../../core/models/default-model-suggestions.ts";
-import { FitnessStore } from "../../core/models/fitness-store.ts";
-import { registerLocalModel, unregisterLocalModel } from "../../core/models/local-registration.ts";
 import type { OllamaRuntime } from "../../core/models/local-runtime.ts";
-import { matchesInstalledLocalModel, normalizeModelSource } from "../../core/models/model-ref.ts";
 import { DefaultPackageManager } from "../../core/package-manager.ts";
-import { formatModelFitnessReport, isProbeAllFailed } from "../../core/research/model-fitness.ts";
 import type { ResourceDiagnostic } from "../../core/resource-loader.ts";
 import { formatMissingSessionCwdPrompt, MissingSessionCwdError } from "../../core/session-cwd.ts";
 import type {
@@ -87,7 +81,8 @@ import { killTrackedDetachedChildren } from "../../utils/shell.ts";
 import { ensureTool } from "../../utils/tools-manager.ts";
 import { checkForNewPiVersion, type LatestPiRelease } from "../../utils/version-check.ts";
 import { AuthDialogsController } from "./auth-dialogs-controller.ts";
-import { AUTONOMY_MODES, AutoLearnController, type AutoLearnState } from "./auto-learn-controller.ts";
+import { AutoLearnController, type AutoLearnState } from "./auto-learn-controller.ts";
+import * as autonomyCommands from "./autonomy-commands.ts";
 import { AssistantMessageComponent } from "./components/assistant-message.ts";
 import { BashExecutionComponent } from "./components/bash-execution.ts";
 import { BorderedLoader } from "./components/bordered-loader.ts";
@@ -97,12 +92,10 @@ import { CountdownTimer } from "./components/countdown-timer.ts";
 import { CustomEditor } from "./components/custom-editor.ts";
 import { CustomMessageComponent } from "./components/custom-message.ts";
 import { DynamicBorder } from "./components/dynamic-border.ts";
-import { type FitnessRole, FitnessRoleSelectorComponent } from "./components/fitness-role-selector.ts";
+import type { FitnessRole } from "./components/fitness-role-selector.ts";
 import { FooterComponent } from "./components/footer.ts";
 import { formatKeyText, keyDisplayText, keyHint, keyText, rawKeyHint } from "./components/keybinding-hints.ts";
-import { ModelSelectorComponent } from "./components/model-selector.ts";
-import { ModelSuggestionSelectorComponent } from "./components/model-suggestion-selector.ts";
-import { SelectSubmenu, SettingsSelectorComponent } from "./components/settings-selector.ts";
+import { SelectSubmenu } from "./components/settings-selector.ts";
 import { SkillInvocationMessageComponent } from "./components/skill-invocation-message.ts";
 import { ToolExecutionComponent } from "./components/tool-execution.ts";
 import { ToolGroupComponent } from "./components/tool-group.ts";
@@ -117,12 +110,13 @@ import * as configBackup from "./config-backup.ts";
 import { EditorOverlayHost } from "./editor-overlay-host.ts";
 import { ExtensionUiHost } from "./extension-ui-host.ts";
 import * as historyReloadMath from "./history-reload-math.ts";
+import * as localModelCommands from "./local-model-commands.ts";
 import { ProfileMenuController } from "./profile-menu-controller.ts";
 import * as reportCommands from "./report-commands.ts";
 import * as resourceDisplay from "./resource-display.ts";
 import * as sessionFlows from "./session-flow-commands.ts";
+import * as settingsSelectorFlow from "./settings-selector-flow.ts";
 import {
-	getAvailableThemes,
 	getEditorTheme,
 	getMarkdownTheme,
 	initTheme,
@@ -3758,38 +3752,6 @@ export class InteractiveMode {
 		return this.autoLearnController.formatAutoLearnStatus();
 	}
 
-	private formatAutonomyStatus(): string {
-		const autonomy = this.settingsManager.getAutonomySettings();
-		const settings = this.getEffectiveAutoLearnSettings();
-		const autoLearnState = this.getPrunedAutoLearnState();
-		const tenant = this.getAutoLearnTenantKey();
-		const running = Object.entries(autoLearnState.runs ?? {}).filter(([, run]) => run.tenant === tenant);
-		const otherTenantRunning = Object.values(autoLearnState.runs ?? {}).filter((run) => run.tenant !== tenant).length;
-		const safety =
-			autonomy.mode === "full"
-				? "standing grant for memory, skills, user/project extensions, autonomy/autoLearn tuning, and authorized selfModification.sourcePath edits; hard stops still require explicit foreground approval"
-				: "proposal-gated outside configured high-confidence memory policy";
-		const reflectionLine =
-			autonomy.mode === "full"
-				? `Reflection review: ${settings.reflectionReview ? "enabled" : "disabled"}; post-turn when concurrency allows; cooldown=${settings.reflectionCooldownMinutes}m`
-				: `Reflection review: ${settings.reflectionReview ? "enabled" : "disabled"}; tool trigger=${settings.reflectionMinToolCalls}; cooldown=${settings.reflectionCooldownMinutes}m`;
-		return [
-			"Autonomy status",
-			`Mode: ${autonomy.mode}${autonomy.mode === "full" ? " (standing autonomy)" : ""}`,
-			`Goal loop rounds: ${autonomy.maxStallTurns}`,
-			`Auto Learn: ${settings.enabled ? "enabled" : "disabled"}; model=${settings.model}; applyHighConfidence=${settings.applyHighConfidence}`,
-			`Long-session trigger: ${settings.longSessionMessages} messages or ${settings.longSessionContextPercent}% context; cooldown=${settings.cooldownMinutes}m`,
-			reflectionLine,
-			`Running tenant learners: ${running.length}/${settings.maxConcurrentLearners}`,
-			`Other tenant learners: ${otherTenantRunning}`,
-			"History retention: 7 days for internal Auto Learn prompts/logs/sessions",
-			`Standing authority: ${safety}`,
-			`Audit/log dir: ${this.getAutoLearnDataDir()}`,
-			`Tenant artifact dir: ${this.getAutoLearnTenantDataDir()}`,
-			"Use /autonomy off|safe|balanced|full to switch presets. Advanced overrides remain in /settings → Auto Learn Advanced.",
-		].join("\n");
-	}
-
 	private applyAutonomyMode(mode: AutonomyMode, scope: SettingsScope = "global"): void {
 		const currentAutoLearn = this.settingsManager.getAutoLearnSettings();
 		const preset = this.getAutoLearnPresetForAutonomyMode(mode, currentAutoLearn);
@@ -3808,701 +3770,117 @@ export class InteractiveMode {
 		return this.session.getLocalRuntime();
 	}
 
-	/**
-	 * /models — USER-invoked local model lifecycle (never a model-invokable tool):
-	 * list/add/remove/stop per local-model-lifecycle-design.md. Removal is explicit-only with
-	 * full disclosure; a pasted install command is parsed for its ref, never executed.
-	 */
-	private async handleModelsCommand(argsText: string): Promise<void> {
-		const [action = "list", ...rest] = argsText.split(/\s+/).filter(Boolean);
-		try {
-			if (action === "suggest" || action === "suggestions") {
-				this.showModelSuggestionSelector();
-				return;
-			}
-			if (action === "stop") {
-				const stopped = this.localRuntime.stop();
-				this.showStatus(
-					stopped.stopped
-						? "Pi-managed local model server stopped (models remain installed)."
-						: "No pi-managed server running (a system server, if any, is not pi's to stop).",
-				);
-				return;
-			}
-
-			if (action === "add") {
-				const rawRef = rest.join(" ");
-				if (!rawRef) {
-					this.showStatus(
-						"Usage: /models add <ollama-tag | hf.co/org/repo[:quant] | huggingface URL | pasted install command>",
-					);
-					this.showStatus("Or start from a validated suggestion: /models suggest");
-					return;
-				}
-				const source = normalizeModelSource(rawRef);
-				if (source.type === "rejected") {
-					this.showStatus(`Not added: ${source.reason}`);
-					return;
-				}
-				if (source.type === "api") {
-					this.showStatus(
-						`${source.ref} is an API model — nothing to install. Configure auth for the provider, then probe it with /fitness ${source.ref}.`,
-					);
-					return;
-				}
-				await this.addLocalModel(source.pullRef);
-				return;
-			}
-
-			if (action === "remove") {
-				const ref = rest[0];
-				const confirmed = rest[1] === "confirm";
-				if (!ref) {
-					this.showStatus("Usage: /models remove <ref> confirm");
-					return;
-				}
-				await this.removeLocalModel(ref, confirmed);
-				return;
-			}
-
-			await this.listLocalModels();
-		} catch (error) {
-			this.showError(error instanceof Error ? error.message : String(error));
-		}
+	/** Narrow seam shared by the /models and /fitness flows. */
+	private localModelHost(): localModelCommands.LocalModelHost {
+		return {
+			localRuntime: this.localRuntime,
+			session: this.session,
+			settingsManager: this.settingsManager,
+			ui: this.ui,
+			chatContainer: this.chatContainer,
+			showStatus: (message) => this.showStatus(message),
+			showError: (message) => this.showError(message),
+			showSelector: (create) => this.showSelector(create),
+		};
 	}
 
-	private async ensureLocalServer(): Promise<boolean> {
-		const status = await this.localRuntime.detect();
-		if (status.serverUp) return true;
-		if (!status.binaryPath) {
-			for (const line of this.localRuntime.installGuide()) this.showStatus(line);
-			return false;
-		}
-		this.showStatus(
-			`Starting local model server (${status.binarySource} binary, owned storage: ${status.ownedModelsDir})…`,
-		);
-		const started = await this.localRuntime.start();
-		if (!started.started) {
-			this.showStatus(`Could not start the local server: ${started.reason}`);
-			return false;
-		}
-		return true;
-	}
-
-	private async listLocalModels(): Promise<void> {
-		const status = await this.localRuntime.detect();
-		if (!status.serverUp) {
-			if (!status.binaryPath) {
-				for (const line of this.localRuntime.installGuide()) this.showStatus(line);
-				return;
-			}
-			this.showStatus(
-				`Local server not running (binary: ${status.binarySource}). /models add starts it on demand; /fitness probes registered models.`,
-			);
-			return;
-		}
-		const models = await this.localRuntime.list();
-		const fitness = FitnessStore.forAgentDir(getAgentDir()).getForHost();
-		const lines = [
-			`Local models (${status.managedByPi ? `pi-managed server, storage: ${status.ownedModelsDir}` : "system server — storage owned by the system daemon"}):`,
-			...(models.length === 0
-				? ["  (none installed — /models add <ref>, or /models suggest for a validated roster)"]
-				: []),
-			...models.map((model) => {
-				const report = fitness.find((entry) => entry.model === `ollama/${model.name}`);
-				const gb = (model.sizeBytes / 1e9).toFixed(2);
-				const probe = report
-					? `probed ${report.at.slice(0, 10)}: digest ${report.report.digest?.succeeded ?? "?"}/${report.report.digest?.total ?? "?"}, tool-calls ${report.report.toolCall.succeeded}/${report.report.toolCall.total}${report.report.tokensPerSecond ? `, ~${report.report.tokensPerSecond} tok/s` : ""}`
-					: `unprobed — run /fitness ollama/${model.name}`;
-				return `  - ${model.name} (${gb} GB) · ${probe}`;
-			}),
-			"Commands: /models add <ref> · /models remove <ref> confirm · /models stop",
-		];
-		for (const line of lines) this.showStatus(line);
-	}
-
-	private async addLocalModel(pullRef: string, preselectRole?: FitnessRole): Promise<void> {
-		if (!(await this.ensureLocalServer())) return;
-		this.showStatus(`Pulling ${pullRef}… (weights land in the server's model storage)`);
-		let lastShown = 0;
-		const pulled = await this.localRuntime.pull(pullRef, (progress) => {
-			const now = Date.now();
-			if (now - lastShown > 2000) {
-				lastShown = now;
-				this.showStatus(`  ${pullRef}: ${progress}`);
-			}
-		});
-		if (!pulled.ok) {
-			this.showStatus(`Pull failed: ${pulled.error}`);
-			return;
-		}
-		const registration = registerLocalModel({
-			agentDir: getAgentDir(),
-			ref: pullRef,
-			baseUrl: this.localRuntime.baseUrl,
-		});
-		if (!registration.ok) {
-			this.showStatus(`Pulled, but not auto-registered: ${registration.reason}`);
-			if (registration.manualSnippet) {
-				this.showStatus(`Add this to ${registration.modelsJsonPath} yourself:\n${registration.manualSnippet}`);
-			}
-			return;
-		}
-		this.session.modelRegistry.refresh();
-		this.showStatus(`${pullRef} installed and registered as ollama/${pullRef}. Probing fitness…`);
-		await this.runFitnessAndAssign(`ollama/${pullRef}`, preselectRole);
-	}
-
-	private async removeLocalModel(ref: string, confirmed: boolean): Promise<void> {
-		const status = await this.localRuntime.detect();
-		if (!status.serverUp) {
-			this.showStatus("Local server not running — start it (any /models action) before removing.");
-			return;
-		}
-		const models = await this.localRuntime.list();
-		const target = models.find((model) => matchesInstalledLocalModel(ref, model.name));
-		if (!target) {
-			this.showStatus(
-				`${ref} is not installed. Installed: ${models.map((model) => model.name).join(", ") || "(none)"}`,
-			);
-			return;
-		}
-		if (!confirmed) {
-			// EXPLICIT USER ACTION ONLY: full disclosure, then require the confirm token.
-			const gb = (target.sizeBytes / 1e9).toFixed(2);
-			this.showStatus(
-				[
-					`Removing ${ref} will delete:`,
-					`  - model weights (${gb} GB) from ${status.managedByPi ? status.ownedModelsDir : "the system server's storage"}`,
-					`  - the ollama/${ref} entry in models.json`,
-					`  - its cached fitness report for this host`,
-					`Run: /models remove ${ref} confirm`,
-				].join("\n"),
-			);
-			return;
-		}
-		const removed = await this.localRuntime.remove(ref);
-		if (!removed.ok) {
-			this.showStatus(`Remove failed: ${removed.error}`);
-			return;
-		}
-		unregisterLocalModel({ agentDir: getAgentDir(), ref });
-		FitnessStore.forAgentDir(getAgentDir()).remove(`ollama/${ref}`);
-		this.session.modelRegistry.refresh();
-		this.showStatus(`${ref} removed: weights deleted, registration and fitness report dropped.`);
-	}
-
-	/** /fitness with no args: pick a model from the configured registry, probe it, assign a role. */
-	/** Pick a validated suggestion → install it → probe on this host → land its shaped role. */
-	private showModelSuggestionSelector(): void {
-		this.showSelector((done) => {
-			const selector = new ModelSuggestionSelectorComponent(
-				DEFAULT_MODEL_SUGGESTIONS,
-				async (suggestion) => {
-					done();
-					// The shaped role rides along so the post-probe selector lands on it pre-selected;
-					// non-tool-callers carry curator/judge/none, never executor, so this can't footgun.
-					await this.addLocalModel(suggestion.pullRef, suggestion.assignRole);
-				},
-				() => {
-					done();
-					this.ui.requestRender();
-				},
-			);
-			return { component: selector, focus: selector };
-		});
+	private handleModelsCommand(argsText: string): Promise<void> {
+		return localModelCommands.handleModelsCommand(this.localModelHost(), argsText);
 	}
 
 	private showFitnessModelSelector(): void {
-		this.showSelector((done) => {
-			const selector = new ModelSelectorComponent(
-				this.ui,
-				this.session.model,
-				this.settingsManager,
-				this.session.modelRegistry,
-				this.session.scopedModels,
-				async (model) => {
-					done();
-					await this.runFitnessAndAssign(`${model.provider}/${model.id}`);
-				},
-				() => {
-					done();
-					this.ui.requestRender();
-				},
-			);
-			return { component: selector, focus: selector };
-		});
+		localModelCommands.showFitnessModelSelector(this.localModelHost());
 	}
 
-	/** Probe a model's fitness, show the report, then offer one-step role assignment. When the model
-	 * came from a validated suggestion, `preselectRole` lands its shaped role already highlighted. */
-	private async runFitnessAndAssign(modelRef: string, preselectRole?: FitnessRole): Promise<void> {
-		this.showStatus(`Model fitness probe running on ${modelRef}… (6 surfaces; local models may take a few minutes)`);
-		try {
-			const outcome = await this.session.runModelFitness({ model: modelRef });
-			if (!outcome.started) {
-				this.showStatus(`Model fitness skipped: ${outcome.skipReason}`);
-				return;
-			}
-			this.chatContainer.addChild(new Spacer(1));
-			this.chatContainer.addChild(new Text(formatModelFitnessReport(outcome.model, outcome.report), 1, 0));
-			this.ui.requestRender();
-			// Validate-before-load: zero successes on every probed surface means the model cannot
-			// drive any of the harness's subagent contracts on this host — refuse adoption instead
-			// of landing a role selector the user might reflexively confirm (this is the reported
-			// bug: a 0/3-everywhere model still got set as judge model and saved to Model Router).
-			if (isProbeAllFailed(outcome.report)) {
-				this.showStatus(
-					`${outcome.model} failed the fitness probe on all surfaces — not configured. Use /model to set it manually if you accept the risk.`,
-				);
-				return;
-			}
-			this.showSelector((done) => {
-				const selector = new FitnessRoleSelectorComponent(
-					outcome.model,
-					(role) => {
-						done();
-						this.assignFitnessRole(outcome.model, role);
-					},
-					() => {
-						done();
-						this.ui.requestRender();
-					},
-					preselectRole,
-				);
-				return { component: selector, focus: selector };
-			});
-		} catch (error) {
-			this.showError(error instanceof Error ? error.message : String(error));
-		}
+	private runFitnessAndAssign(modelRef: string, preselectRole?: FitnessRole): Promise<void> {
+		return localModelCommands.runFitnessAndAssign(
+			{
+				session: this.session,
+				settingsManager: this.settingsManager,
+				chatContainer: this.chatContainer,
+				ui: this.ui,
+				showStatus: (message) => this.showStatus(message),
+				showError: (message) => this.showError(message),
+				showSelector: (create) => this.showSelector(create),
+			},
+			modelRef,
+			preselectRole,
+		);
 	}
 
-	/** Persist a role assignment from the post-probe selector into the matching settings. */
 	private assignFitnessRole(modelRef: string, role: FitnessRole): void {
-		if (role === "none") {
-			this.showStatus(`Fitness result for ${modelRef} saved. Assign a role later from /settings.`);
-			return;
-		}
-		if (role === "curator") {
-			const current = this.settingsManager.getContextCurationSettings();
-			this.settingsManager.setContextCurationSettings({ ...current, enabled: true, model: modelRef });
-			this.showStatus(`Context curation enabled with ${modelRef} as the curator.`);
-			return;
-		}
-		if (role === "executor") {
-			const router = this.settingsManager.getModelRouterSettings();
-			this.settingsManager.setModelRouterSettings({ ...router, executorModel: modelRef });
-			const hint = router.enabled
-				? ""
-				: " Model router is currently disabled — enable it in /settings → Model Router.";
-			this.showStatus(`${modelRef} set as the toolkit executor (direct Level-0 hits route to it).${hint}`);
-			return;
-		}
-		const router = this.settingsManager.getModelRouterSettings();
-		const field =
-			role === "router-cheap"
-				? "cheapModel"
-				: role === "router-medium"
-					? "mediumModel"
-					: role === "router-expensive"
-						? "expensiveModel"
-						: role === "judge"
-							? "judgeModel"
-							: "learningModel";
-		this.settingsManager.setModelRouterSettings({ ...router, [field]: modelRef });
-		const hint = router.enabled ? "" : " Model router is currently disabled — enable it in /settings → Model Router.";
-		this.showStatus(`${modelRef} set as ${role.replace("router-", "router ")} model.${hint}`);
+		localModelCommands.assignFitnessRole(
+			{
+				settingsManager: this.settingsManager,
+				showStatus: (message) => this.showStatus(message),
+			},
+			modelRef,
+			role,
+		);
+	}
+
+	/** Narrow seam for the /autonomy and /auto-learn command bodies. */
+	private autonomyHost(): autonomyCommands.AutonomyHost {
+		return {
+			session: this.session,
+			settingsManager: this.settingsManager,
+			chatContainer: this.chatContainer,
+			ui: this.ui,
+			showStatus: (message) => this.showStatus(message),
+			applyAutonomyMode: (mode, scope) => this.applyAutonomyMode(mode, scope),
+			launchAutoLearn: (reason, force, options) => this.launchAutoLearn(reason, force, options),
+			formatAutoLearnStatus: () => this.formatAutoLearnStatus(),
+			getEffectiveAutoLearnSettings: () => this.getEffectiveAutoLearnSettings(),
+			getPrunedAutoLearnState: () => this.getPrunedAutoLearnState(),
+			getAutoLearnTenantKey: () => this.getAutoLearnTenantKey(),
+			getAutoLearnDataDir: () => this.getAutoLearnDataDir(),
+			getAutoLearnTenantDataDir: () => this.getAutoLearnTenantDataDir(),
+		};
 	}
 
 	private handleAutonomyCommand(text: string): void {
-		const action = text.slice("/autonomy".length).trim() || "status";
-		if (AUTONOMY_MODES.includes(action as AutonomyMode)) {
-			const mode = action as AutonomyMode;
-			this.applyAutonomyMode(mode);
-			this.showStatus(`Autonomy mode set to ${mode}${mode === "full" ? " (standing autonomy)" : ""}.`);
-			return;
-		}
-		if (action === "status") {
-			this.chatContainer.addChild(new Spacer(1));
-			this.chatContainer.addChild(new Text(this.formatAutonomyStatus(), 1, 0));
-			this.ui.requestRender();
-			return;
-		}
-		if (action === "diagnostics") {
-			this.chatContainer.addChild(new Spacer(1));
-			this.chatContainer.addChild(
-				new Text(formatAutonomyDiagnostics(this.session.getAutonomyDiagnosticSnapshot()), 1, 0),
-			);
-			this.ui.requestRender();
-			return;
-		}
-		if (action.startsWith("rollback")) {
-			const auditId = action.slice("rollback".length).trim();
-			if (!auditId) {
-				this.showStatus("Usage: /autonomy rollback <auditId> (see /autonomy diagnostics for audit ids)");
-				return;
-			}
-			void this.session
-				.rollbackLearningWrite(auditId)
-				.then((result) => {
-					this.showStatus(
-						result.ok ? `Rolled back learning change ${auditId}.` : `Rollback skipped: ${result.reason}`,
-					);
-				})
-				.catch((error: unknown) => {
-					const message = error instanceof Error ? error.message : String(error);
-					this.showStatus(`Rollback failed: ${message}`);
-				});
-			return;
-		}
-		if (action.startsWith("fitness")) {
-			const rest = action.slice("fitness".length).trim().split(/\s+/).filter(Boolean);
-			const modelPattern = rest[0];
-			if (!modelPattern) {
-				this.showStatus("Usage: /autonomy fitness <model-pattern> [trials]");
-				return;
-			}
-			const trials = rest[1] ? Number(rest[1]) : undefined;
-			this.showStatus(`Model fitness probe running on ${modelPattern}…`);
-			void this.session
-				.runModelFitness({ model: modelPattern, trials: Number.isFinite(trials) ? trials : undefined })
-				.then((outcome) => {
-					if (!outcome.started) {
-						this.showStatus(`Model fitness skipped: ${outcome.skipReason}`);
-						return;
-					}
-					this.chatContainer.addChild(new Spacer(1));
-					this.chatContainer.addChild(new Text(formatModelFitnessReport(outcome.model, outcome.report), 1, 0));
-					this.ui.requestRender();
-				})
-				.catch((error: unknown) => {
-					const message = error instanceof Error ? error.message : String(error);
-					this.showStatus(`Model fitness failed: ${message}`);
-				});
-			return;
-		}
-		if (action === "research") {
-			this.showStatus("Research lane: running…");
-			void this.session
-				.runResearchLaneOnce()
-				.then((outcome) => {
-					if (!outcome.started) {
-						this.showStatus(`Research lane skipped: ${outcome.skipReason ?? "unknown"}`);
-						return;
-					}
-					const status = outcome.record?.status ?? "unknown";
-					const reason = outcome.record?.reasonCode ? ` (${outcome.record.reasonCode})` : "";
-					this.showStatus(`Research lane ${status}${reason}`);
-				})
-				.catch((error: unknown) => {
-					const message = error instanceof Error ? error.message : String(error);
-					this.showStatus(`Research lane failed: ${message}`);
-				});
-			return;
-		}
-		this.showStatus("Usage: /autonomy [status|diagnostics|research|rollback <auditId>|off|safe|balanced|full]");
+		autonomyCommands.handleAutonomyCommand(this.autonomyHost(), text);
 	}
 
 	private handleAutoLearnCommand(text: string): void {
-		const action = text.slice("/auto-learn".length).trim() || "status";
-		if (action === "run" || action === "now" || action === "run-now") {
-			this.showStatus(this.launchAutoLearn("manual", true));
-			return;
-		}
-		if (action === "status") {
-			this.chatContainer.addChild(new Spacer(1));
-			this.chatContainer.addChild(new Text(this.formatAutoLearnStatus(), 1, 0));
-			this.ui.requestRender();
-			return;
-		}
-		this.showStatus("Usage: /auto-learn [status|run]");
+		autonomyCommands.handleAutoLearnCommand(this.autonomyHost(), text);
+	}
+
+	/** Wide seam for the /settings selector; the hideThinkingBlock field is read+written here. */
+	private settingsSelectorHost(): settingsSelectorFlow.SettingsSelectorHost {
+		const self = this;
+		return {
+			session: this.session,
+			settingsManager: this.settingsManager,
+			footer: this.footer,
+			chatContainer: this.chatContainer,
+			ui: this.ui,
+			defaultEditor: this.defaultEditor,
+			editor: this.editor,
+			get hideThinkingBlock() {
+				return self.hideThinkingBlock;
+			},
+			set hideThinkingBlock(value) {
+				self.hideThinkingBlock = value;
+			},
+			showSelector: (create) => this.showSelector(create),
+			showStatus: (message) => this.showStatus(message),
+			showWarning: (message) => this.showWarning(message),
+			showError: (message) => this.showError(message),
+			getAutoLearnModelOptions: () => this.getAutoLearnModelOptions(),
+			setupAutocompleteProvider: () => this.setupAutocompleteProvider(),
+			updateEditorBorderColor: () => this.updateEditorBorderColor(),
+			rebuildChatFromMessages: () => this.rebuildChatFromMessages(),
+			validateSelfModificationSource: (settings) => this.validateSelfModificationSource(settings),
+			applyAutonomyMode: (mode, scope) => this.applyAutonomyMode(mode, scope),
+			validateAutoLearnModelValue: (value) => this.validateAutoLearnModelValue(value),
+			updateAutoLearnFooter: () => this.updateAutoLearnFooter(),
+			handleResourcesHubAction: (action) => this.handleResourcesHubAction(action),
+		};
 	}
 
 	private showSettingsSelector(): void {
-		this.showSelector((done) => {
-			const projectSettings = this.settingsManager.getProjectSettings();
-			const profileOptions = [
-				{
-					value: "(none)",
-					label: "(none)",
-					description: "Use configured profile selection (session default)",
-				},
-				...this.settingsManager
-					.getProfileRegistry()
-					.listProfiles()
-					.map((profile) => ({
-						value: profile.name,
-						label: profile.name,
-						description: profile.description ?? profile.source,
-					})),
-			];
-			const selector = new SettingsSelectorComponent(
-				{
-					autoCompact: this.session.autoCompactionEnabled,
-					showImages: this.settingsManager.getShowImages(),
-					imageWidthCells: this.settingsManager.getImageWidthCells(),
-					autoResizeImages: this.settingsManager.getImageAutoResize(),
-					blockImages: this.settingsManager.getBlockImages(),
-					enableSkillCommands: this.settingsManager.getEnableSkillCommands(),
-					steeringMode: this.session.steeringMode,
-					followUpMode: this.session.followUpMode,
-					transport: this.settingsManager.getTransport(),
-					httpIdleTimeoutMs: this.settingsManager.getHttpIdleTimeoutMs(),
-					thinkingLevel: this.session.thinkingLevel,
-					availableThinkingLevels: this.session.getAvailableThinkingLevels(),
-					currentTheme: this.settingsManager.getTheme() || "dark",
-					// The picker offers only themes the active profile permits (no-bypass). The theme
-					// registry/renderer keeps the full set, so an already-applied theme still renders
-					// even if the profile would block re-selecting it.
-					availableThemes: getAvailableThemes().filter((name) =>
-						this.settingsManager.isResourceAllowedByProfile("themes", name),
-					),
-					hideThinkingBlock: this.hideThinkingBlock,
-					collapseChangelog: this.settingsManager.getCollapseChangelog(),
-					enableInstallTelemetry: this.settingsManager.getEnableInstallTelemetry(),
-					doubleEscapeAction: this.settingsManager.getDoubleEscapeAction(),
-					treeFilterMode: this.settingsManager.getTreeFilterMode(),
-					showHardwareCursor: this.settingsManager.getShowHardwareCursor(),
-					editorPaddingX: this.settingsManager.getEditorPaddingX(),
-					autocompleteMaxVisible: this.settingsManager.getAutocompleteMaxVisible(),
-					quietStartup: this.settingsManager.getQuietStartup(),
-					clearOnShrink: this.settingsManager.getClearOnShrink(),
-					showTerminalProgress: this.settingsManager.getShowTerminalProgress(),
-					warnings: this.settingsManager.getWarnings(),
-					selfModification: this.settingsManager.getSelfModificationSettings(),
-					selfModificationScope: projectSettings.selfModification ? "project" : "global",
-					autonomy: this.settingsManager.getAutonomySettings(),
-					autonomyScope: projectSettings.autonomy ? "project" : "global",
-					researchLane: this.settingsManager.getResearchLaneSettings(),
-					researchLaneScope: projectSettings.researchLane ? "project" : "global",
-					workerDelegation: this.settingsManager.getWorkerDelegationSettings(),
-					workerDelegationScope: projectSettings.workerDelegation ? "project" : "global",
-					contextCuration: this.settingsManager.getContextCurationSettings(),
-					contextCurationScope: projectSettings.contextPolicy?.curation ? "project" : "global",
-					learningPolicy: this.settingsManager.getLearningPolicySettings(),
-					learningPolicyScope: projectSettings.learningPolicy ? "project" : "global",
-					modelCapability: this.settingsManager.getModelCapabilitySettings(),
-					modelCapabilityScope: projectSettings.modelCapability ? "project" : "global",
-					modelRouter: this.settingsManager.getModelRouterSettings(),
-					modelRouterScope: projectSettings.modelRouter ? "project" : "global",
-					autoLearn: this.settingsManager.getAutoLearnSettings(),
-					autoLearnScope: projectSettings.autoLearn ? "project" : "global",
-					autoLearnModelOptions: this.getAutoLearnModelOptions(),
-					contextPolicyEnforcement: this.settingsManager.getContextPromptEnforcementSettings(),
-					contextPolicyEnforcementScope: projectSettings.contextPolicy?.enforcement ? "project" : "global",
-					contextMemoryRetrieval: this.settingsManager.getMemoryRetrievalSettings(),
-					contextMemoryRetrievalScope: projectSettings.contextPolicy?.memory ? "project" : "global",
-					currentModelPattern: this.session.model
-						? `${this.session.model.provider}/${this.session.model.id}`
-						: undefined,
-					activeProfileName: this.settingsManager.getActiveResourceProfileNames()[0],
-					profileOptions,
-					externalResourceRoots: this.settingsManager.getExternalResourceRoots(),
-					trustedResourceRoots: this.settingsManager.getTrustedResourceRoots(),
-				},
-				{
-					onAutoCompactChange: (enabled) => {
-						this.session.setAutoCompactionEnabled(enabled);
-						this.footer.setAutoCompactEnabled(enabled);
-					},
-					onShowImagesChange: (enabled) => {
-						this.settingsManager.setShowImages(enabled);
-						for (const child of this.chatContainer.children) {
-							if (child instanceof ToolExecutionComponent || child instanceof ToolGroupComponent) {
-								child.setShowImages(enabled);
-							}
-						}
-						this.ui.requestRender();
-					},
-					onImageWidthCellsChange: (width) => {
-						this.settingsManager.setImageWidthCells(width);
-						for (const child of this.chatContainer.children) {
-							if (child instanceof ToolExecutionComponent || child instanceof ToolGroupComponent) {
-								child.setImageWidthCells(width);
-							}
-						}
-						this.ui.requestRender();
-					},
-					onAutoResizeImagesChange: (enabled) => {
-						this.settingsManager.setImageAutoResize(enabled);
-					},
-					onBlockImagesChange: (blocked) => {
-						this.settingsManager.setBlockImages(blocked);
-					},
-					onEnableSkillCommandsChange: (enabled) => {
-						this.settingsManager.setEnableSkillCommands(enabled);
-						this.setupAutocompleteProvider();
-					},
-					onSteeringModeChange: (mode) => {
-						this.session.setSteeringMode(mode);
-					},
-					onFollowUpModeChange: (mode) => {
-						this.session.setFollowUpMode(mode);
-					},
-					onTransportChange: (transport) => {
-						this.settingsManager.setTransport(transport);
-						this.session.agent.transport = transport;
-					},
-					onHttpIdleTimeoutMsChange: (timeoutMs) => {
-						this.settingsManager.setHttpIdleTimeoutMs(timeoutMs);
-						configureHttpDispatcher(timeoutMs);
-						this.showStatus(`HTTP idle timeout: ${formatHttpIdleTimeoutMs(timeoutMs)}`);
-					},
-					onThinkingLevelChange: (level) => {
-						this.session.setThinkingLevel(level);
-						this.footer.invalidate();
-						this.updateEditorBorderColor();
-					},
-					onThemeChange: (themeName) => {
-						const result = setTheme(themeName, true);
-						this.settingsManager.setTheme(themeName);
-						this.ui.invalidate();
-						if (!result.success) {
-							this.showError(`Failed to load theme "${themeName}": ${result.error}\nFell back to dark theme.`);
-						}
-					},
-					onThemePreview: (themeName) => {
-						const result = setTheme(themeName, true);
-						if (result.success) {
-							this.ui.invalidate();
-							this.ui.requestRender();
-						}
-					},
-					onHideThinkingBlockChange: (hidden) => {
-						this.hideThinkingBlock = hidden;
-						this.settingsManager.setHideThinkingBlock(hidden);
-						for (const child of this.chatContainer.children) {
-							if (child instanceof AssistantMessageComponent) {
-								child.setHideThinkingBlock(hidden);
-							}
-						}
-						void this.rebuildChatFromMessages();
-					},
-					onCollapseChangelogChange: (collapsed) => {
-						this.settingsManager.setCollapseChangelog(collapsed);
-					},
-					onEnableInstallTelemetryChange: (enabled) => {
-						this.settingsManager.setEnableInstallTelemetry(enabled);
-					},
-					onQuietStartupChange: (enabled) => {
-						this.settingsManager.setQuietStartup(enabled);
-					},
-					onDoubleEscapeActionChange: (action) => {
-						this.settingsManager.setDoubleEscapeAction(action);
-					},
-					onTreeFilterModeChange: (mode) => {
-						this.settingsManager.setTreeFilterMode(mode);
-					},
-					onShowHardwareCursorChange: (enabled) => {
-						this.settingsManager.setShowHardwareCursor(enabled);
-						this.ui.setShowHardwareCursor(enabled);
-					},
-					onEditorPaddingXChange: (padding) => {
-						this.settingsManager.setEditorPaddingX(padding);
-						this.defaultEditor.setPaddingX(padding);
-						if (this.editor !== this.defaultEditor && this.editor.setPaddingX !== undefined) {
-							this.editor.setPaddingX(padding);
-						}
-					},
-					onAutocompleteMaxVisibleChange: (maxVisible) => {
-						this.settingsManager.setAutocompleteMaxVisible(maxVisible);
-						this.defaultEditor.setAutocompleteMaxVisible(maxVisible);
-						if (this.editor !== this.defaultEditor && this.editor.setAutocompleteMaxVisible !== undefined) {
-							this.editor.setAutocompleteMaxVisible(maxVisible);
-						}
-					},
-					onClearOnShrinkChange: (enabled) => {
-						this.settingsManager.setClearOnShrink(enabled);
-						this.ui.setClearOnShrink(enabled);
-					},
-					onShowTerminalProgressChange: (enabled) => {
-						this.settingsManager.setShowTerminalProgress(enabled);
-					},
-					onWarningsChange: (warnings) => {
-						this.settingsManager.setWarnings(warnings);
-					},
-					onSelfModificationChange: (settings, scope) => {
-						this.settingsManager.setSelfModificationSettings(settings, scope);
-						const validationMessage = this.validateSelfModificationSource(settings);
-						if (validationMessage) {
-							this.showWarning(validationMessage);
-						}
-						this.showStatus(
-							`Self modification settings saved to ${scope}. Start a new session or /reload for system-prompt guardrails to fully refresh.`,
-						);
-					},
-					onAutonomyChange: (settings, scope) => {
-						this.applyAutonomyMode(settings.mode ?? "off", scope);
-						this.showStatus(`Autonomy mode ${settings.mode ?? "off"} saved to ${scope}. Use /autonomy status.`);
-					},
-					onResearchLaneChange: (settings, scope) => {
-						this.settingsManager.setResearchLaneSettings(settings, scope);
-						this.showStatus(
-							`Research lane settings saved to ${scope}. Use /autonomy research or /autonomy diagnostics.`,
-						);
-					},
-					onWorkerDelegationChange: (settings, scope) => {
-						this.settingsManager.setWorkerDelegationSettings(settings, scope);
-						this.showStatus(`Worker delegation settings saved to ${scope}. The delegate tool uses them.`);
-					},
-					onLearningPolicyChange: (settings, scope) => {
-						this.settingsManager.setLearningPolicySettings(settings, scope);
-						this.showStatus(`Learning policy saved to ${scope}.`);
-					},
-					onModelCapabilityChange: (settings, scope) => {
-						this.settingsManager.setModelCapabilitySettings(settings, scope);
-						this.showStatus(
-							`Model capability mode saved to ${scope}. Applies on the next model switch or /reload.`,
-						);
-					},
-					onContextCurationChange: (settings, scope) => {
-						this.settingsManager.setContextCurationSettings(settings, scope);
-						this.showStatus(
-							`Context curation settings saved to ${scope}. Run /fitness <model> first if the model is unprobed.`,
-						);
-					},
-					onModelRouterChange: (settings, scope) => {
-						this.settingsManager.setModelRouterSettings(settings, scope);
-						for (const value of [settings.cheapModel, settings.expensiveModel, settings.learningModel]) {
-							const validationMessage = this.validateAutoLearnModelValue(value);
-							if (validationMessage) {
-								this.showWarning(validationMessage.replace("Auto Learn model", "Model router model"));
-							}
-						}
-						this.updateAutoLearnFooter();
-						this.showStatus(
-							`Model Router settings saved to ${scope}. Use /session or /usage to inspect routing.`,
-						);
-					},
-					onAutoLearnChange: (settings, scope) => {
-						this.settingsManager.setAutoLearnSettings(settings, scope);
-						const validationMessage = this.validateAutoLearnModelValue(settings.model);
-						if (validationMessage) {
-							this.showWarning(validationMessage);
-						}
-						this.updateAutoLearnFooter();
-						this.showStatus(`Auto Learn settings saved to ${scope}. Use /auto-learn status or /auto-learn run.`);
-					},
-					onContextPolicyEnforcementChange: (settings, scope) => {
-						this.settingsManager.setContextPromptEnforcementSettings(settings, scope);
-						this.showStatus(`Context/prompt-policy settings saved to ${scope}.`);
-					},
-					onContextMemoryRetrievalChange: (settings, scope) => {
-						this.settingsManager.setMemoryRetrievalSettings(settings, scope);
-						this.showStatus(`Context/memory-retrieval settings saved to ${scope}.`);
-					},
-					onResourcesHubAction: (action) => {
-						done();
-						void this.handleResourcesHubAction(action);
-					},
-					onCancel: () => {
-						done();
-						this.ui.requestRender();
-					},
-				},
-			);
-			return { component: selector, focus: selector.getSettingsList() };
-		});
+		settingsSelectorFlow.showSettingsSelector(this.settingsSelectorHost());
 	}
 
 	private handleResourcesHubAction(action: string): Promise<void> {
