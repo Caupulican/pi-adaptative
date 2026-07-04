@@ -104,6 +104,16 @@
   though the test's own assertions passed. The mock now spreads the real module
   (`importOriginal()`) and overrides only the three functions it needs, so unmocked exports stay
   real.
+- `keyHandlersHost()` snapshotted `editor`, `session`, and `settingsManager` onto the key-handler
+  host object at `setupKeyHandlers()`'s one-time init instead of reading them live off `this`. All
+  three are swappable after init — `editor` via extension custom editors (`setEditor`, whose
+  `onEscape` delegates back through the closures installed on `defaultEditor`), and
+  `session`/`settingsManager` via `/reload`'s runtime-host swap — so Escape handling kept reading
+  the stale pre-swap objects: Escape could fail to abort bash on a reloaded session, and the
+  double-escape `/tree`/`/fork` trigger could read the wrong editor's text. `keyHandlersHost()` now
+  exposes `editor`, `session`, and `settingsManager` as live getters over the instance (matching the
+  existing `isBashMode`/`lastEscapeTime` accessor pattern); `defaultEditor` and `ui` stay plain
+  properties since they're set once and never swapped.
 
 ## [0.80.103] - 2026-07-03
 

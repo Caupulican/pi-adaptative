@@ -1460,10 +1460,16 @@ export class InteractiveMode {
 		const self = this;
 		return {
 			defaultEditor: this.defaultEditor,
-			editor: this.editor,
 			ui: this.ui,
-			session: this.session,
-			settingsManager: this.settingsManager,
+			get editor() {
+				return self.editor;
+			},
+			get session() {
+				return self.session;
+			},
+			get settingsManager() {
+				return self.settingsManager;
+			},
 			get isBashMode() {
 				return self.isBashMode;
 			},
