@@ -81,6 +81,13 @@
     match silently skipped the check whenever a user typed a bare ref (e.g. `llama3` vs. the
     installed `llama3:latest`); both call sites now share one `matchesInstalledLocalModel` helper
     (`core/models/model-ref.ts`) that accounts for the bare/`:latest` pairing.
+- `output-accumulator-io-errors.test.ts`'s `vi.mock("node:fs", ...)` factory returned only the three
+  members the test overrides (`closeSync`, `openSync`, `writeSync`), so any other `node:fs` export
+  accessed during the run — `existsSync`, read at import time by `@caupulican/pi-ai`'s
+  `env-api-keys.ts` — threw inside vitest's mock proxy and surfaced as an unhandled rejection, even
+  though the test's own assertions passed. The mock now spreads the real module
+  (`importOriginal()`) and overrides only the three functions it needs, so unmocked exports stay
+  real.
 
 ## [0.80.103] - 2026-07-03
 

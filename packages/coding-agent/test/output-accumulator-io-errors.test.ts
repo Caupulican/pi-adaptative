@@ -6,7 +6,10 @@ const fsMocks = vi.hoisted(() => ({
 	writeSync: vi.fn(),
 }));
 
-vi.mock("node:fs", () => fsMocks);
+vi.mock("node:fs", async (importOriginal) => ({
+	...(await importOriginal<typeof import("node:fs")>()),
+	...fsMocks,
+}));
 
 const { OutputAccumulator } = await import("../src/core/tools/output-accumulator.ts");
 
