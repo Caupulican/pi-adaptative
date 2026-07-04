@@ -3,6 +3,7 @@ import { fauxAssistantMessage, type Model, registerFauxProvider } from "@caupuli
 import { describe, expect, it } from "vitest";
 import type { RouteDecision } from "../src/core/autonomy/contracts.ts";
 import type { ExtensionUIContext } from "../src/core/extensions/types.ts";
+import type { LocalRuntimeController } from "../src/core/local-runtime-controller.ts";
 import type { LocalRuntimeDeps } from "../src/core/models/local-runtime.ts";
 import { OllamaRuntime } from "../src/core/models/local-runtime.ts";
 import { createHarness } from "./suite/harness.ts";
@@ -118,15 +119,11 @@ describe("AgentSession local (Ollama) runtime readiness", () => {
 		}
 	});
 
-	describe("_ensureLocalModelReady (private)", () => {
+	describe("LocalRuntimeController.ensureLocalModelReady (private)", () => {
 		function ensureReady(harness: Awaited<ReturnType<typeof createHarness>>, model: Model<Api>) {
 			return (
-				harness.session as unknown as {
-					_ensureLocalModelReady: (
-						m: Model<Api>,
-					) => Promise<{ ready: boolean; reason: string; installGuide?: string[] }>;
-				}
-			)._ensureLocalModelReady(model);
+				harness.session as unknown as { _localRuntimeController: LocalRuntimeController }
+			)._localRuntimeController.ensureLocalModelReady(model);
 		}
 
 		it("is a no-op for a non-local (non-ollama) model", async () => {
@@ -470,12 +467,8 @@ describe("AgentSession local runtime readiness — end to end through prompt()",
 describe("AgentSession local runtime readiness — confirmed-up cache", () => {
 	function ensureReady(harness: Awaited<ReturnType<typeof createHarness>>, model: Model<Api>) {
 		return (
-			harness.session as unknown as {
-				_ensureLocalModelReady: (
-					m: Model<Api>,
-				) => Promise<{ ready: boolean; reason: string; installGuide?: string[] }>;
-			}
-		)._ensureLocalModelReady(model);
+			harness.session as unknown as { _localRuntimeController: LocalRuntimeController }
+		)._localRuntimeController.ensureLocalModelReady(model);
 	}
 
 	it("skips the health-check on a second call once the server is confirmed up", async () => {

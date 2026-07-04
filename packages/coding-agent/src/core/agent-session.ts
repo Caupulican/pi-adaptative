@@ -86,7 +86,6 @@ import type {
 	EvidenceBundle,
 	GateOutcome,
 	LearningDecision,
-	ModelTier,
 	RouteDecision,
 	WorkerRequest,
 	WorkerResult,
@@ -215,6 +214,7 @@ import {
 } from "./learning/reflection-engine.ts";
 import { appendLearningDecisionSnapshot, getLearningDecisionSnapshots } from "./learning/session-learning-decision.ts";
 import { type CurationProposals, isPromotedFrontmatter, SkillCurator } from "./learning/skill-curator.ts";
+import { LocalRuntimeController } from "./local-runtime-controller.ts";
 import { EffectivenessTracker } from "./memory/effectiveness-tracker.ts";
 import { MemoryManager } from "./memory/memory-manager.ts";
 import type { MemoryProvider } from "./memory/memory-provider.ts";
@@ -248,7 +248,7 @@ import {
 import { shouldEscalateModelRouterTool } from "./model-router/tool-escalation.ts";
 import { FitnessStore, type StoredFitnessReport } from "./models/fitness-store.ts";
 import { OLLAMA_PROVIDER } from "./models/local-registration.ts";
-import { type LocalRuntimeDeps, OllamaRuntime } from "./models/local-runtime.ts";
+import type { LocalRuntimeDeps, OllamaRuntime } from "./models/local-runtime.ts";
 import { matchesInstalledLocalModel } from "./models/model-ref.ts";
 import type { NormalizedProfile } from "./profile-registry.ts";
 import { expandPromptTemplate, type PromptTemplate } from "./prompt-templates.ts";
@@ -442,8 +442,8 @@ export interface AgentSessionConfig {
 	collectWorkspaceSources?: typeof collectWorkspaceSources;
 	/**
 	 * Injected fetch/spawn/exists for the local (Ollama) runtime health-check + boot used by the
-	 * model router before a turn routed to a local model (see _ensureLocalModelReady). Unit tests
-	 * inject fakes so they never hit a real network/process; production defaults to the real ones.
+	 * model router before a turn routed to a local model (see LocalRuntimeController.ensureLocalModelReady).
+	 * Unit tests inject fakes so they never hit a real network/process; production defaults to the real ones.
 	 */
 	localRuntimeDeps?: LocalRuntimeDeps;
 }
@@ -676,14 +676,6 @@ const AUTONOMY_TELEMETRY_CUSTOM_TYPE = "autonomy-telemetry";
 /** G8: bound on the in-memory gate-outcome history. Oldest entries evict once the cap is reached. */
 const GATE_OUTCOME_HISTORY_LIMIT = 50;
 
-/** User-facing router tiers in ascending order — "learning" is never selected for a user turn, so
- * it has no place in the escalation ladder (#27's _ensureRouteModelReady walks this forward only). */
-const MODEL_ROUTER_TIER_ORDER: readonly ModelTier[] = ["cheap", "medium", "expensive"];
-
-/** How long the #31 "install ollama now?" confirm waits before auto-dismissing (same as a "No") —
- * long enough to read and decide, short enough that an unattended session doesn't hang a turn on it. */
-const OLLAMA_INSTALL_CONFIRM_TIMEOUT_MS = 30_000;
-
 /** Read a packed grep/find tool result's `details.artifactId`, if present, without `any`. */
 function extractArtifactId(message: AgentMessage | undefined): string | undefined {
 	if (!message || message.role !== "toolResult") return undefined;
@@ -807,12 +799,9 @@ export class AgentSession {
 	private _cwd: string;
 	private _agentDir: string;
 	private _collectWorkspaceSources: typeof collectWorkspaceSources;
-	private _localRuntimeDeps?: LocalRuntimeDeps;
-	/** Lazy, cached by baseUrl so the router path and any other caller share one instance per server. */
-	private _localRuntimes = new Map<string, OllamaRuntime>();
-	/** Server URLs confirmed reachable THIS session — skips the health-check round trip on every
-	 * local-routed turn once warm. Keyed the same way as _localRuntimes. */
-	private _localRuntimeConfirmedUp = new Set<string>();
+	/** Owns the cached per-server OllamaRuntime instances and the local-model router readiness gate
+	 * (see local-runtime-controller.ts). */
+	private readonly _localRuntimeController: LocalRuntimeController;
 	private _extensionRunnerRef?: { current?: ExtensionRunner };
 	private _initialActiveToolNames?: string[];
 	private _allowedToolNames?: Set<string>;
@@ -922,7 +911,15 @@ export class AgentSession {
 		this._cwd = config.cwd;
 		this._agentDir = config.agentDir ?? getAgentDir();
 		this._collectWorkspaceSources = config.collectWorkspaceSources ?? collectWorkspaceSources;
-		this._localRuntimeDeps = config.localRuntimeDeps;
+		this._localRuntimeController = new LocalRuntimeController({
+			agentDir: this._agentDir,
+			localRuntimeDeps: config.localRuntimeDeps,
+			getLastAssistantMessage: () => this._findLastAssistantMessage(),
+			getUIContext: () => this._extensionUIContext,
+			emit: (event) => this._emit(event),
+			resolveConfiguredTierModel: (tier) => this._resolveConfiguredTierModel(tier),
+			formatModel: (model) => formatModelRouterModel(model),
+		});
 		this._modelRegistry = config.modelRegistry;
 		this._extensionRunnerRef = config.extensionRunnerRef;
 		this._initialActiveToolNames = config.initialActiveToolNames;
@@ -2939,205 +2936,30 @@ export class AgentSession {
 
 	/**
 	 * Shared {@link OllamaRuntime} for a given server, lazily created and cached by baseUrl so every
-	 * caller — the router's readiness gate below and any host UI's own model-lifecycle commands
-	 * (e.g. `/models`) — sees and can stop the SAME pi-managed process instead of each tracking its
-	 * own untracked child.
+	 * caller — the router's readiness gate and any host UI's own model-lifecycle commands (e.g.
+	 * `/models`) — sees and can stop the SAME pi-managed process instead of each tracking its own
+	 * untracked child. Delegates to {@link LocalRuntimeController}.
 	 */
 	getLocalRuntime(baseUrl?: string): OllamaRuntime {
-		const key = baseUrl ?? "default";
-		let runtime = this._localRuntimes.get(key);
-		if (!runtime) {
-			runtime = new OllamaRuntime({ agentDir: this._agentDir, baseUrl, deps: this._localRuntimeDeps });
-			this._localRuntimes.set(key, runtime);
-		}
-		return runtime;
+		return this._localRuntimeController.getLocalRuntime(baseUrl);
 	}
 
 	/** models.json registers a local model's baseUrl as `<server>/v1` (OpenAI-compat); the runtime's
-	 * own health/boot endpoints are on the Ollama-native server root. */
+	 * own health/boot endpoints are on the Ollama-native server root. Delegates to
+	 * {@link LocalRuntimeController}; kept here for `_warnIfManualModelChoiceIsRisky`'s own use. */
 	private _deriveOllamaServerUrl(modelBaseUrl: string): string {
-		return modelBaseUrl.replace(/\/v1\/?$/, "");
+		return this._localRuntimeController.deriveOllamaServerUrl(modelBaseUrl);
 	}
 
 	/**
-	 * If the last assistant message in this session was an error from THIS exact local server, a
-	 * cached "confirmed up" flag would be stale (the server may have died mid-session) — drop it so
-	 * the next ensure-check is a real one instead of trusting stale state.
-	 */
-	private _invalidateLocalRuntimeIfLastCallFailed(model: Model<Api>, serverUrl: string): void {
-		const lastAssistant = this._findLastAssistantMessage();
-		if (
-			lastAssistant?.stopReason === "error" &&
-			lastAssistant.provider === OLLAMA_PROVIDER &&
-			lastAssistant.model === model.id
-		) {
-			this._localRuntimeConfirmedUp.delete(serverUrl);
-		}
-	}
-
-	/**
-	 * Ensure a routed model is actually reachable before the turn calls it. No-op (and free) for any
-	 * non-local model — this only ever does network/process work for the `ollama` provider. Caches a
-	 * "confirmed up this session" flag per server so a steady-state session pays the health-check
-	 * round trip once, not on every turn; invalidated above when a prior local call actually failed,
-	 * so a server that died mid-session gets re-detected rather than trusted forever. Boots via
-	 * `startReuseExisting()` — never owned storage — so the turn sees the user's OWN pulled models,
-	 * the same server `/models` commands and the user's own `ollama` CLI already talk to. Never
-	 * installs anything itself (installGuide is GUIDE MODE: printed, never executed).
-	 */
-	private async _ensureLocalModelReady(
-		model: Model<Api>,
-	): Promise<{ ready: boolean; reason: string; installGuide?: string[] }> {
-		if (model.provider !== OLLAMA_PROVIDER) {
-			return { ready: true, reason: "not_local" };
-		}
-		const serverUrl = this._deriveOllamaServerUrl(model.baseUrl);
-		this._invalidateLocalRuntimeIfLastCallFailed(model, serverUrl);
-		if (this._localRuntimeConfirmedUp.has(serverUrl)) {
-			return { ready: true, reason: "confirmed_up_cached" };
-		}
-		const runtime = this.getLocalRuntime(serverUrl);
-		const status = await runtime.detect();
-		if (status.serverUp) {
-			this._localRuntimeConfirmedUp.add(serverUrl);
-			return { ready: true, reason: "already_running" };
-		}
-		if (!status.binaryPath) {
-			return { ready: false, reason: "binary_missing", installGuide: runtime.installGuide() };
-		}
-		const started = await runtime.startReuseExisting();
-		if (started.started) {
-			this._localRuntimeConfirmedUp.add(serverUrl);
-		}
-		return { ready: started.started, reason: started.reason };
-	}
-
-	/**
-	 * #31: the ONE case a routed local model's unreadiness can be fixed automatically is a missing
-	 * ollama binary — an unreachable server can't be helped by installing, so that reason is left to
-	 * the graceful-fallback warning below unchanged. Only offered when there's an interactive UI to
-	 * ask through: headless/RPC/print sessions have no _extensionUIContext and fall straight through,
-	 * same as declining or timing out (both resolve confirm() to false). Reverses "pi never runs
-	 * installers itself" specifically for this one path — the user is asked first, the download is
-	 * pi's own (never curl|sh), and it lands in pi's own runtimes dir (see OllamaRuntime.installManaged).
-	 *
-	 * Pauses/resumes the routing working-indicator around the confirm dialog itself (re-emitting
-	 * routing_end/routing_start — both already idempotent, see interactive-mode.ts's handlers) so an
-	 * animated spinner doesn't fight a dialog the user is trying to read and answer; the indicator
-	 * comes back for the download/extract that follows a "yes", which is genuine processing feedback.
-	 */
-	private async _maybeInstallOllamaOnConsent(
-		model: Model<Api>,
-		readiness: { ready: boolean; reason: string; installGuide?: string[] },
-	): Promise<{ ready: boolean; reason: string; installGuide?: string[]; installAttemptError?: string }> {
-		const ui = this._extensionUIContext;
-		if (!ui || readiness.ready || readiness.reason !== "binary_missing") return readiness;
-
-		const modelLabel = formatModelRouterModel(model);
-		this._emit({ type: "routing_end" });
-		let confirmed: boolean;
-		try {
-			confirmed = await ui.confirm(
-				"Install Ollama?",
-				`Ollama isn't installed, so the local model "${modelLabel}" can't run. Pi can download and ` +
-					"install it now (a large one-time download, possibly over 1 GB depending on your platform) " +
-					"into its own runtimes folder — never curl|sh, never touching anything outside pi's own " +
-					"directory. Install it now?",
-				{ timeout: OLLAMA_INSTALL_CONFIRM_TIMEOUT_MS },
-			);
-		} finally {
-			this._emit({ type: "routing_start" });
-		}
-		if (!confirmed) return readiness;
-
-		const serverUrl = this._deriveOllamaServerUrl(model.baseUrl);
-		const runtime = this.getLocalRuntime(serverUrl);
-		let installResult: { ok: boolean; error?: string };
-		try {
-			installResult = await runtime.installManaged((status) => ui.setStatus("ollama-install", status));
-		} finally {
-			ui.setStatus("ollama-install", undefined);
-		}
-		if (!installResult.ok) {
-			return { ready: false, reason: "install_failed", installAttemptError: installResult.error };
-		}
-		return this._ensureLocalModelReady(model);
-	}
-
-	/**
-	 * Router-swap gate (#27): a turn routed to a local model (any tier, including an executor-direct
-	 * route — both carry tier "cheap") must not dead-end the turn just because ollama isn't up.
-	 * Never a SILENT swap: every fallback is announced in a warning that states (i) the local model
-	 * was unavailable and WHY — binary missing surfaces the install guide inline; any other reason
-	 * gets a "check that ollama is running" hint — and (ii) which tier is now handling the turn, so
-	 * the cost shift is never a surprise. Escalates cheap -> medium -> expensive, skipping any
-	 * unconfigured intermediate tier, reusing the router's own existing "model unavailable"
-	 * resolution (_resolveConfiguredTierModel) rather than inventing a new fallback mechanism.
-	 * Escalation is bounded: tier strictly increases each hop, so it terminates within two hops.
-	 *
-	 * Before the warning/escalation below: #31's consent gate gets one shot at fixing a missing
-	 * binary interactively (see _maybeInstallOllamaOnConsent) — declining, timing out, running
-	 * headless, or the install attempt itself failing all fall through here unchanged, just with an
-	 * honest reason (an install that failed is worded as a failed install, not re-labeled as if
-	 * nothing was ever tried).
+	 * Router-swap gate (#27): a turn routed to a local model must not dead-end the turn just because
+	 * ollama isn't up. Delegates to {@link LocalRuntimeController}; see there for the full
+	 * consent-then-escalate contract (which includes the local-model readiness check itself).
 	 */
 	private async _ensureRouteModelReady(
 		resolved: { decision: RouteDecision; model: Model<Api> } | undefined,
 	): Promise<{ decision: RouteDecision; model: Model<Api> } | undefined> {
-		let current = resolved;
-		while (current && current.model.provider === OLLAMA_PROVIDER) {
-			let readiness: { ready: boolean; reason: string; installGuide?: string[]; installAttemptError?: string } =
-				await this._ensureLocalModelReady(current.model);
-			if (!readiness.ready) {
-				readiness = await this._maybeInstallOllamaOnConsent(current.model, readiness);
-			}
-			if (readiness.ready) return current;
-
-			// Walk the remaining tiers in order (never back down to cheap) and take the first one that
-			// actually resolves — an unconfigured intermediate tier (e.g. no mediumModel set) must be
-			// skipped, not treated as "no fallback available".
-			const startIndex = MODEL_ROUTER_TIER_ORDER.indexOf(current.decision.tier);
-			let escalated: { tier: "medium" | "expensive"; model: Model<Api> } | undefined;
-			for (let i = startIndex + 1; startIndex !== -1 && i < MODEL_ROUTER_TIER_ORDER.length; i++) {
-				const tier = MODEL_ROUTER_TIER_ORDER[i] as "medium" | "expensive";
-				const model = this._resolveConfiguredTierModel(tier);
-				if (model) {
-					escalated = { tier, model };
-					break;
-				}
-			}
-
-			const modelLabel = formatModelRouterModel(current.model);
-			const whyText = readiness.installAttemptError
-				? `pi tried to install it just now, but the install attempt failed: ${readiness.installAttemptError}`
-				: readiness.installGuide
-					? ["the ollama binary is not installed.", ...readiness.installGuide].join("\n")
-					: `its server is not reachable (${readiness.reason}) — check that ollama is running.`;
-			const fallbackText = escalated
-				? `Falling back to the ${escalated.tier} tier for this turn.`
-				: "No other tier is configured — falling back to the session's default model.";
-			this._emit({
-				type: "warning",
-				message: `Local model "${modelLabel}" is unavailable: ${whyText}\n${fallbackText}`,
-			});
-
-			if (!escalated) return undefined; // no higher tier resolves — caller falls back to the session default
-			current = {
-				model: escalated.model,
-				decision: {
-					...current.decision,
-					tier: escalated.tier,
-					fallbackFrom: current.decision.tier,
-					reasonCode: "local_model_not_ready_fallback",
-					reasons: [
-						...current.decision.reasons,
-						`Local model not ready (${readiness.reason}); escalated to ${escalated.tier}`,
-					],
-					model: formatModelRouterModel(escalated.model),
-				},
-			};
-		}
-		return current;
+		return this._localRuntimeController.ensureRouteModelReady(resolved);
 	}
 
 	private _resolveModelRouterTurnRoute(prompt: string): { decision: RouteDecision; model: Model<Api> } | undefined {
