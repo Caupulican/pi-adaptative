@@ -6,12 +6,12 @@ import { afterEach, beforeAll, describe, expect, it } from "vitest";
 import { parseArgs } from "../src/cli/args.ts";
 import {
 	AUTO_LEARN_HISTORY_RETENTION_MS,
+	AutoLearnController,
 	type AutoLearnSpawnTarget,
 	buildAutoLearnSpawnArgs,
 	findAutoLearnSpawnNullByteInput,
-	InteractiveMode,
 	pruneAutoLearnConversationHistory,
-} from "../src/modes/interactive/interactive-mode.ts";
+} from "../src/modes/interactive/auto-learn-controller.ts";
 import { initTheme } from "../src/modes/interactive/theme/theme.ts";
 
 const tempDirs: string[] = [];
@@ -21,7 +21,7 @@ beforeAll(() => {
 });
 
 interface AutoLearnLaunchHarness {
-	runtimeHost: unknown;
+	deps: unknown;
 	getAutoLearnDataDir: () => string;
 	getAutoLearnSpawnTarget: () => AutoLearnSpawnTarget | undefined;
 	updateAutoLearnFooter: () => void;
@@ -140,8 +140,17 @@ function createAutoLearnHarness(
 		sessionId: options.sessionId ?? "auto-learn-test-session",
 		getContextUsage: () => undefined,
 	};
-	const harness = Object.create(InteractiveMode.prototype) as AutoLearnLaunchHarness;
-	harness.runtimeHost = { session };
+	const harness = Object.create(AutoLearnController.prototype) as AutoLearnLaunchHarness;
+	harness.deps = {
+		getSession: () => session,
+		resolveSelfModificationSource: () => undefined,
+		ui: {
+			showStatus: () => undefined,
+			footerDataProvider: { setExtensionStatus: () => undefined },
+			invalidateFooter: () => undefined,
+			requestRender: () => undefined,
+		},
+	};
 	harness.getAutoLearnDataDir = () => dataDir;
 	harness.getAutoLearnSpawnTarget = () => spawnTarget;
 	harness.updateAutoLearnFooter = () => undefined;
@@ -381,7 +390,7 @@ await new Promise((resolve) => setTimeout(resolve, 1000));
 
 	it("detects code-baked behavioral self-improvement cues as automatic reflection triggers", () => {
 		const now = Date.now();
-		const mode = Object.create(InteractiveMode.prototype) as any;
+		const mode = Object.create(AutoLearnController.prototype) as any;
 		mode.getEffectiveAutoLearnSettings = () => ({
 			enabled: true,
 			reflectionReview: true,
@@ -389,11 +398,11 @@ await new Promise((resolve) => setTimeout(resolve, 1000));
 			reflectionMinToolCalls: 99,
 			maxConcurrentLearners: 1,
 		});
-		mode.runtimeHost = {
-			session: {
+		mode.deps = {
+			getSession: () => ({
 				settingsManager: { getAutonomySettings: () => ({ mode: "balanced" }) },
 				getContextUsage: () => ({ percent: 10 }),
-			},
+			}),
 		};
 		mode.withAutoLearnStateLock = (callback: (state: unknown) => { result: unknown }) =>
 			callback({ lastReflectionByTenant: { tenant: now }, runs: {} }).result;
@@ -419,7 +428,7 @@ await new Promise((resolve) => setTimeout(resolve, 1000));
 
 	it("detects Hermes-style complex tasks as automatic reflection triggers", () => {
 		const now = Date.now();
-		const mode = Object.create(InteractiveMode.prototype) as any;
+		const mode = Object.create(AutoLearnController.prototype) as any;
 		mode.getEffectiveAutoLearnSettings = () => ({
 			enabled: true,
 			reflectionReview: true,
@@ -428,11 +437,11 @@ await new Promise((resolve) => setTimeout(resolve, 1000));
 			maxConcurrentLearners: 1,
 			complexTaskToolCalls: 5,
 		});
-		mode.runtimeHost = {
-			session: {
+		mode.deps = {
+			getSession: () => ({
 				settingsManager: { getAutonomySettings: () => ({ mode: "balanced" }) },
 				getContextUsage: () => ({ percent: 10 }),
-			},
+			}),
 		};
 		mode.withAutoLearnStateLock = (callback: (state: unknown) => { result: unknown }) =>
 			callback({ lastReflectionByTenant: { tenant: now }, runs: {} }).result;
@@ -451,14 +460,15 @@ await new Promise((resolve) => setTimeout(resolve, 1000));
 	});
 
 	it("instructs Auto Learn to code-bake behavioral self-improvements instead of stopping at memory", () => {
-		const mode = Object.create(InteractiveMode.prototype) as any;
-		mode.runtimeHost = {
-			session: {
+		const mode = Object.create(AutoLearnController.prototype) as any;
+		mode.deps = {
+			getSession: () => ({
 				settingsManager: {
 					getAutonomySettings: () => ({ mode: "full" }),
 					getSelfModificationSettings: () => ({ enabled: true, sourcePath: "/repo/pi-adaptative" }),
 				},
-			},
+			}),
+			resolveSelfModificationSource: (settings: { sourcePath?: string }) => settings.sourcePath,
 		};
 
 		const prompt = mode.buildAutoLearnPrompt(
@@ -497,7 +507,7 @@ await new Promise((resolve) => setTimeout(resolve, 1000));
 
 	it("keeps Auto Learn footer compact and free of model/log paths", () => {
 		let footerStatus: string | undefined;
-		const mode = Object.create(InteractiveMode.prototype) as any;
+		const mode = Object.create(AutoLearnController.prototype) as any;
 		mode.getEffectiveAutoLearnSettings = () => ({ enabled: true });
 		mode.getAutoLearnTenantKey = () => "tenant-a";
 		mode.getPrunedAutoLearnState = () => ({
@@ -511,13 +521,18 @@ await new Promise((resolve) => setTimeout(resolve, 1000));
 			},
 		});
 		mode.isAutoLearnPidAlive = () => true;
-		mode.footerDataProvider = {
-			setExtensionStatus: (_name: string, value: string | undefined) => {
-				footerStatus = value;
+		mode.deps = {
+			ui: {
+				showStatus: () => undefined,
+				footerDataProvider: {
+					setExtensionStatus: (_name: string, value: string | undefined) => {
+						footerStatus = value;
+					},
+				},
+				invalidateFooter: () => undefined,
+				requestRender: () => undefined,
 			},
 		};
-		mode.footer = { invalidate: () => undefined };
-		mode.ui = { requestRender: () => undefined };
 
 		mode.updateAutoLearnFooter();
 

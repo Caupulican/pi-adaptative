@@ -25,6 +25,7 @@
 - Auto-retry, stalled-stream abort, bash silence watchdog, exec kill escalation, and bash/edit write serialization now ride the shared reliability kernel (@caupulican/pi-agent-core).
 - Provider errors containing auth wording (401/unauthorized/invalid api key) are now terminal instead of retried, even when combined with transient wording (e.g. "fetch failed: 401 unauthorized") — retrying on bad credentials is pointless. Previously such mixed messages were retried.
 - Custom retry settings are now capped at 120s per backoff step (maxDelayMs). Default behavior (2s/4s/8s) is unchanged; only aggressive custom baseDelayMs/maxRetries combinations are affected.
+- The Auto Learn / native-reflection controller moved out of `interactive-mode.ts` into `modes/interactive/auto-learn-controller.ts` (new `AutoLearnController`): the disk-backed run-state machine (state.json + lockfile), the background-learner spawn/prune lifecycle, and the in-process reflection pass now live in one module. `InteractiveMode` constructs it with narrow deps (a live session accessor, the host's self-modification-source resolver, and a small UI callback surface) and delegates at every call-in point; behavior is unchanged.
 
 ### Fixed
 - `pi --help` had regressed from ~160ms to ~400ms: `config.ts`'s `normalizePath` import (needed
