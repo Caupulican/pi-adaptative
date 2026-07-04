@@ -12,6 +12,7 @@ import type {
 	AgentMessage,
 	AgentToolResult,
 	AgentToolUpdateCallback,
+	CustomMessage,
 	ThinkingLevel,
 	ToolExecutionMode,
 } from "@caupulican/pi-agent-core";
@@ -49,7 +50,6 @@ import type { ExecOptions, ExecResult } from "../exec.ts";
 import type { ReadonlyFooterDataProvider } from "../footer-data-provider.ts";
 import type { KeybindingsManager } from "../keybindings.ts";
 import type { MemoryProvider } from "../memory/memory-provider.ts";
-import type { CustomMessage } from "../messages.ts";
 import type { ModelRegistry } from "../model-registry.ts";
 import type {
 	BranchSummaryEntry,

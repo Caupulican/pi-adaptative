@@ -27,7 +27,10 @@ import type {
 	ThinkingLevel,
 } from "@caupulican/pi-agent-core";
 import {
+	type BashExecutionMessage,
+	type CustomMessage,
 	classifyFailure,
+	createCustomMessage,
 	DEFAULT_RETRY_POLICY,
 	DEFAULT_STREAM_IDLE,
 	RetryController,
@@ -211,7 +214,6 @@ import type { MemoryProvider } from "./memory/memory-provider.ts";
 import { FileStoreProvider } from "./memory/providers/file-store.ts";
 import { TranscriptRecallProvider } from "./memory/providers/transcript-recall.ts";
 import { compactToolResultDetailsForRetention } from "./message-retention.ts";
-import { type BashExecutionMessage, type CustomMessage, createCustomMessage } from "./messages.ts";
 import {
 	deriveModelCapabilityProfile,
 	filterToolNamesForCapability,

@@ -8,6 +8,7 @@ import * as fs from "node:fs";
 import * as os from "node:os";
 import * as path from "node:path";
 import type { AgentMessage } from "@caupulican/pi-agent-core";
+import { createCompactionSummaryMessage } from "@caupulican/pi-agent-core";
 import type { TruncationResult } from "@caupulican/pi-agent-core/node";
 import {
 	type AssistantMessage,
@@ -87,7 +88,6 @@ import {
 } from "../../core/goals/goal-continuation-defaults.ts";
 import { configureHttpDispatcher, formatHttpIdleTimeoutMs } from "../../core/http-dispatcher.ts";
 import { type AppKeybinding, KeybindingsManager } from "../../core/keybindings.ts";
-import { createCompactionSummaryMessage } from "../../core/messages.ts";
 import {
 	cliProviderAliases,
 	defaultModelPerProvider,

@@ -1,8 +1,8 @@
+import type { CustomMessage } from "@caupulican/pi-agent-core";
 import type { TextContent } from "@caupulican/pi-ai";
 import type { Component } from "@caupulican/pi-tui";
 import { Box, Container, Markdown, type MarkdownTheme, Spacer, Text } from "@caupulican/pi-tui";
 import type { MessageRenderer } from "../../../core/extensions/types.ts";
-import type { CustomMessage } from "../../../core/messages.ts";
 import { getMarkdownTheme, theme } from "../theme/theme.ts";
 import { renderTitleBadge } from "./tool-title.ts";
 

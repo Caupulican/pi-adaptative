@@ -1,7 +1,7 @@
 // Core session management
 
+export { convertToLlm } from "@caupulican/pi-agent-core";
 export { type Args, parseArgs } from "./cli/args.ts";
-
 // Config paths
 export { getAgentDir, VERSION } from "./config.ts";
 export {
@@ -202,7 +202,6 @@ export {
 	selectPrimaryMetric,
 	serializeRunRecord,
 } from "./core/improvement-loop.ts";
-export { convertToLlm } from "./core/messages.ts";
 export { ModelRegistry } from "./core/model-registry.ts";
 export type {
 	PackageManager,

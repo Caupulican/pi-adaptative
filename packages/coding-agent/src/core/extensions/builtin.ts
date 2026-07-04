@@ -1,9 +1,13 @@
 import type { AgentMessage } from "@caupulican/pi-agent-core";
+import {
+	createBranchSummaryMessage,
+	createCompactionSummaryMessage,
+	createCustomMessage,
+} from "@caupulican/pi-agent-core";
 import { Type } from "typebox";
 import { estimateTokens } from "../compaction/compaction.ts";
 import type { MemoryPromptInclusionReport, MemoryRetrievalDiagnostics } from "../context/memory-diagnostics.ts";
 import type { ContextGcReport } from "../context-gc.ts";
-import { createBranchSummaryMessage, createCompactionSummaryMessage, createCustomMessage } from "../messages.ts";
 import type { CompactionEntry, SessionEntry } from "../session-manager.ts";
 import type { ToolDefinition, ToolInfo } from "./types.ts";
 

@@ -2,6 +2,8 @@
 export * from "./agent.ts";
 // Loop functions
 export * from "./agent-loop.ts";
+// Custom message types + LLM transformer
+export * from "./messages.ts";
 // Proxy utilities
 export * from "./proxy.ts";
 // Reliability kernel

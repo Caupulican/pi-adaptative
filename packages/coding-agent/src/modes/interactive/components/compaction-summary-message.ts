@@ -1,5 +1,5 @@
+import type { CompactionSummaryMessage } from "@caupulican/pi-agent-core";
 import { Box, Markdown, type MarkdownTheme, Spacer, Text } from "@caupulican/pi-tui";
-import type { CompactionSummaryMessage } from "../../../core/messages.ts";
 import { getMarkdownTheme, theme } from "../theme/theme.ts";
 import { keyText } from "./keybinding-hints.ts";
 import { renderTitleBadge } from "./tool-title.ts";

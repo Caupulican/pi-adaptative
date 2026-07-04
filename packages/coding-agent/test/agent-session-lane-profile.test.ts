@@ -1,7 +1,7 @@
 import { existsSync, mkdirSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { Agent } from "@caupulican/pi-agent-core";
+import { Agent, convertToLlm } from "@caupulican/pi-agent-core";
 import { type FauxProviderRegistration, fauxAssistantMessage, registerFauxProvider } from "@caupulican/pi-ai";
 import { afterEach, beforeEach, describe, expect, it } from "vitest";
 import { getProfilesDir } from "../src/config.ts";
@@ -10,7 +10,6 @@ import { AuthStorage } from "../src/core/auth-storage.ts";
 import { SUBAGENT_CORE_SYSTEM_PROMPT } from "../src/core/autonomy/subagent-prompt.ts";
 import { applyGoalEvent, createGoalState } from "../src/core/goals/goal-state.ts";
 import { appendGoalStateSnapshot } from "../src/core/goals/session-goal-state.ts";
-import { convertToLlm } from "../src/core/messages.ts";
 import { ModelRegistry } from "../src/core/model-registry.ts";
 import { SessionManager } from "../src/core/session-manager.ts";
 import { type Settings, SettingsManager } from "../src/core/settings-manager.ts";

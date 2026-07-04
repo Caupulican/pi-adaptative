@@ -1,12 +1,12 @@
 /**
- * Custom message types and transformers for the coding agent.
+ * Custom message types and transformers for the agent kernel.
  *
- * Extends the base AgentMessage type with coding-agent specific message types,
+ * Extends the base AgentMessage type with the kernel's custom message types,
  * and provides a transformer to convert them to LLM-compatible messages.
  */
 
-import type { AgentMessage } from "@caupulican/pi-agent-core";
 import type { ImageContent, Message, TextContent } from "@caupulican/pi-ai";
+import type { AgentMessage } from "./types.ts";
 
 export const COMPACTION_SUMMARY_PREFIX = `The conversation history before this point was compacted into the following summary:
 
@@ -67,7 +67,7 @@ export interface CompactionSummaryMessage {
 }
 
 // Extend CustomAgentMessages via declaration merging
-declare module "@caupulican/pi-agent-core" {
+declare module "./types.ts" {
 	interface CustomAgentMessages {
 		bashExecution: BashExecutionMessage;
 		custom: CustomMessage;

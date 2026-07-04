@@ -17,6 +17,7 @@
 
 ### Changed
 - truncate and sanitizeBinaryOutput now live in @caupulican/pi-agent-core (single canonical copy).
+- convertToLlm and the custom message types (BashExecutionMessage, CustomMessage, BranchSummaryMessage, CompactionSummaryMessage) now come from @caupulican/pi-agent-core (moved out of `core/messages.ts`); coding-agent re-exports convertToLlm unchanged, so its public API is preserved.
 - Auto-retry, stalled-stream abort, bash silence watchdog, exec kill escalation, and bash/edit write serialization now ride the shared reliability kernel (@caupulican/pi-agent-core).
 - Provider errors containing auth wording (401/unauthorized/invalid api key) are now terminal instead of retried, even when combined with transient wording (e.g. "fetch failed: 401 unauthorized") — retrying on bad credentials is pointless. Previously such mixed messages were retried.
 - Custom retry settings are now capped at 120s per backoff step (maxDelayMs). Default behavior (2s/4s/8s) is unchanged; only aggressive custom baseDelayMs/maxRetries combinations are affected.

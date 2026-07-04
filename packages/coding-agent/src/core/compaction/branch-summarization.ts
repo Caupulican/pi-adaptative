@@ -6,14 +6,14 @@
  */
 
 import type { AgentMessage } from "@caupulican/pi-agent-core";
-import type { Model } from "@caupulican/pi-ai";
-import { completeSimple } from "@caupulican/pi-ai";
 import {
 	convertToLlm,
 	createBranchSummaryMessage,
 	createCompactionSummaryMessage,
 	createCustomMessage,
-} from "../messages.ts";
+} from "@caupulican/pi-agent-core";
+import type { Model } from "@caupulican/pi-ai";
+import { completeSimple } from "@caupulican/pi-ai";
 import type { ReadonlySessionManager, SessionEntry } from "../session-manager.ts";
 import { estimateTokens } from "./compaction.ts";
 import {
