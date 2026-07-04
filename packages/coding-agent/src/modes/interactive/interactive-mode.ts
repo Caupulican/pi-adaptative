@@ -8,6 +8,7 @@ import * as fs from "node:fs";
 import * as os from "node:os";
 import * as path from "node:path";
 import type { AgentMessage } from "@caupulican/pi-agent-core";
+import type { TruncationResult } from "@caupulican/pi-agent-core/node";
 import {
 	type AssistantMessage,
 	getProviders,
@@ -118,7 +119,6 @@ import { BUILTIN_SLASH_COMMANDS } from "../../core/slash-commands.ts";
 import type { SourceInfo } from "../../core/source-info.ts";
 import { isInstallTelemetryEnabled } from "../../core/telemetry.ts";
 import { allToolNames } from "../../core/tools/index.ts";
-import type { TruncationResult } from "../../core/tools/truncate.ts";
 import { hasProjectTrustInputs, ProjectTrustStore } from "../../core/trust-manager.ts";
 import { getChangelogPath, getNewEntries, parseChangelog } from "../../utils/changelog.ts";
 import { copyToClipboard } from "../../utils/clipboard.ts";

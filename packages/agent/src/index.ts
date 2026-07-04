@@ -8,4 +8,6 @@ export * from "./proxy.ts";
 export * from "./reliability/index.ts";
 // Types
 export * from "./types.ts";
+// Shell output utilities
+export * from "./utils/shell-output.ts";
 export { uuidv7 } from "./uuid.ts";

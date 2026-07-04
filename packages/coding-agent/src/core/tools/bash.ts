@@ -2,6 +2,12 @@ import { constants } from "node:fs";
 import { access as fsAccess, readdir as fsReaddir, readFile as fsReadFile, stat as fsStat } from "node:fs/promises";
 import { relative as relativePath, resolve as resolvePath } from "node:path";
 import { type AgentTool, createSilenceWatchdog } from "@caupulican/pi-agent-core";
+import {
+	DEFAULT_MAX_BYTES,
+	DEFAULT_MAX_LINES,
+	formatSize,
+	type TruncationResult,
+} from "@caupulican/pi-agent-core/node";
 import { Container, Text, truncateToWidth } from "@caupulican/pi-tui";
 import { spawn } from "child_process";
 import { type Static, Type } from "typebox";
@@ -22,7 +28,6 @@ import { classifyGitCommand, executeFilteredGit } from "./git-filter.ts";
 import { OutputAccumulator } from "./output-accumulator.ts";
 import { getTextOutput, invalidArgText, str } from "./render-utils.ts";
 import { wrapToolDefinition } from "./tool-definition-wrapper.ts";
-import { DEFAULT_MAX_BYTES, DEFAULT_MAX_LINES, formatSize, type TruncationResult } from "./truncate.ts";
 
 /** Default silence bound for foreground commands without an explicit timeout (spec §2: ~10 min). */
 const DEFAULT_COMMAND_SILENCE_MS = 600_000;

@@ -1,9 +1,9 @@
+import { truncateHead } from "@caupulican/pi-agent-core/node";
 import { Box, type Component, Container, getCapabilities, Image, Spacer, Text, type TUI } from "@caupulican/pi-tui";
 import type { ToolDefinition, ToolRenderContext } from "../../../core/extensions/types.ts";
 import { compactRetainedDetails, MAX_TUI_RETAINED_DETAILS_BYTES } from "../../../core/message-retention.ts";
 import { createAllToolDefinitions, type ToolName } from "../../../core/tools/index.ts";
 import { getTextOutput as getRenderedTextOutput } from "../../../core/tools/render-utils.ts";
-import { truncateHead } from "../../../core/tools/truncate.ts";
 import { convertToPng } from "../../../utils/image-convert.ts";
 import { type ThemeBg, theme } from "../theme/theme.ts";
 import { renderTitleBadge, titleBadge } from "./tool-title.ts";

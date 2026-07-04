@@ -1,12 +1,12 @@
 import * as os from "node:os";
 import { relative, sep } from "node:path";
 import { pathToFileURL } from "node:url";
+import { sanitizeBinaryOutput } from "@caupulican/pi-agent-core";
 import type { ImageContent, TextContent } from "@caupulican/pi-ai";
 import { getCapabilities, getImageDimensions, hyperlink, imageFallback } from "@caupulican/pi-tui";
 import type { Theme } from "../../modes/interactive/theme/theme.ts";
 import { stripAnsi } from "../../utils/ansi.ts";
 import { resolvePath } from "../../utils/paths.ts";
-import { sanitizeBinaryOutput } from "../../utils/shell.ts";
 
 function toDisplaySeparators(path: string): string {
 	return path.split(sep).join("/");

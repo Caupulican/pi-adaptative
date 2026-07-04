@@ -10,7 +10,7 @@
  * packing is opt-in per call site, not a global switch.
  */
 
-import { type TruncationOptions, type TruncationResult, truncateHead } from "../tools/truncate.ts";
+import { type TruncationOptions, type TruncationResult, truncateHead } from "@caupulican/pi-agent-core/node";
 import type { ArtifactStore } from "./context-artifacts.ts";
 
 export interface PackToolOutputRequest {

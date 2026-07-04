@@ -1,6 +1,13 @@
 import { basename, dirname, isAbsolute, relative, resolve as resolvePath, sep } from "node:path";
 import { StringDecoder } from "node:string_decoder";
 import type { AgentTool } from "@caupulican/pi-agent-core";
+import {
+	DEFAULT_MAX_BYTES,
+	DEFAULT_MAX_LINES,
+	formatSize,
+	type TruncationResult,
+	truncateHead,
+} from "@caupulican/pi-agent-core/node";
 import type { Api, ImageContent, Model, TextContent } from "@caupulican/pi-ai";
 import { Text } from "@caupulican/pi-tui";
 import { constants } from "fs";
@@ -16,7 +23,6 @@ import type { ToolDefinition, ToolRenderResultOptions } from "../extensions/type
 import { resolveReadPathAsync, resolveToCwd } from "./path-utils.ts";
 import { getTextOutput, renderToolPath, replaceTabs, str } from "./render-utils.ts";
 import { wrapToolDefinition } from "./tool-definition-wrapper.ts";
-import { DEFAULT_MAX_BYTES, DEFAULT_MAX_LINES, formatSize, type TruncationResult, truncateHead } from "./truncate.ts";
 
 const readSchema = Type.Object({
 	path: Type.String({ description: "Path to the file to read (relative or absolute)" }),

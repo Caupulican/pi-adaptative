@@ -10,12 +10,12 @@ import { randomBytes } from "node:crypto";
 import type { WriteStream } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
+import { sanitizeBinaryOutput } from "@caupulican/pi-agent-core";
+import { DEFAULT_MAX_BYTES, truncateTail } from "@caupulican/pi-agent-core/node";
 import { stripAnsi } from "../utils/ansi.ts";
 import { createSafeWriteStream, endWriteStream } from "../utils/safe-write-stream.ts";
-import { sanitizeBinaryOutput } from "../utils/shell.ts";
 import type { BashOperations } from "./tools/bash.ts";
 import { classifyGitCommand, executeFilteredGit } from "./tools/git-filter.ts";
-import { DEFAULT_MAX_BYTES, truncateTail } from "./tools/truncate.ts";
 
 // ============================================================================
 // Types

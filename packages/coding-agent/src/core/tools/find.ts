@@ -1,5 +1,6 @@
 import { createInterface } from "node:readline";
 import type { AgentTool } from "@caupulican/pi-agent-core";
+import { DEFAULT_MAX_BYTES, formatSize, type TruncationResult } from "@caupulican/pi-agent-core/node";
 import { Text } from "@caupulican/pi-tui";
 import { spawn } from "child_process";
 import path from "path";
@@ -28,7 +29,6 @@ import { pathExists, resolveToCwd } from "./path-utils.ts";
 import { getTextOutput, invalidArgText, shortenPath, str } from "./render-utils.ts";
 import { defaultSearchRouter, type SearchRouter } from "./search-router.ts";
 import { wrapToolDefinition } from "./tool-definition-wrapper.ts";
-import { DEFAULT_MAX_BYTES, formatSize, type TruncationResult } from "./truncate.ts";
 
 function toPosixPath(value: string): string {
 	return value.split(path.sep).join("/");

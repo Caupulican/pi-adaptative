@@ -2,7 +2,7 @@ import { randomBytes } from "node:crypto";
 import { closeSync, openSync, writeSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { DEFAULT_MAX_BYTES, DEFAULT_MAX_LINES, type TruncationResult } from "./truncate.ts";
+import { DEFAULT_MAX_BYTES, DEFAULT_MAX_LINES, type TruncationResult } from "@caupulican/pi-agent-core/node";
 
 export interface OutputAccumulatorOptions {
 	maxLines?: number;

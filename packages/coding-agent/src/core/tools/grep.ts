@@ -1,6 +1,13 @@
 import { readFile as fsReadFile, stat as fsStat } from "node:fs/promises";
 import { createInterface } from "node:readline";
 import type { AgentTool } from "@caupulican/pi-agent-core";
+import {
+	DEFAULT_MAX_BYTES,
+	formatSize,
+	GREP_MAX_LINE_LENGTH,
+	type TruncationResult,
+	truncateLine,
+} from "@caupulican/pi-agent-core/node";
 import { Text } from "@caupulican/pi-tui";
 import { spawn } from "child_process";
 import path from "path";
@@ -30,13 +37,6 @@ import { resolveToCwd } from "./path-utils.ts";
 import { getTextOutput, invalidArgText, shortenPath, str } from "./render-utils.ts";
 import { defaultSearchRouter, type SearchRouter } from "./search-router.ts";
 import { wrapToolDefinition } from "./tool-definition-wrapper.ts";
-import {
-	DEFAULT_MAX_BYTES,
-	formatSize,
-	GREP_MAX_LINE_LENGTH,
-	type TruncationResult,
-	truncateLine,
-} from "./truncate.ts";
 
 const grepSchema = Type.Object({
 	pattern: Type.String({ description: "Search pattern (regex or literal string)" }),

@@ -12,7 +12,7 @@
  * than the configured hard bounds," not "never the whole artifact."
  */
 
-import { DEFAULT_MAX_BYTES, type TruncationResult, truncateHead, truncateTail } from "../tools/truncate.ts";
+import { DEFAULT_MAX_BYTES, type TruncationResult, truncateHead, truncateTail } from "@caupulican/pi-agent-core/node";
 import type { ArtifactStore } from "./context-artifacts.ts";
 import { isMissingArtifactMarker, type MissingArtifactReason } from "./context-artifacts.ts";
 import type { ContextArtifactRef } from "./context-item.ts";

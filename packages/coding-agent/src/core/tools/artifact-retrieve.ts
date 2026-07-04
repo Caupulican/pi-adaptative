@@ -1,4 +1,5 @@
 import type { AgentTool } from "@caupulican/pi-agent-core";
+import { formatSize } from "@caupulican/pi-agent-core/node";
 import { Text } from "@caupulican/pi-tui";
 import { type Static, Type } from "typebox";
 import type { Theme } from "../../modes/interactive/theme/theme.ts";
@@ -11,7 +12,6 @@ import type { ArtifactStore } from "../context/context-artifacts.ts";
 import type { ToolDefinition } from "../extensions/types.ts";
 import { invalidArgText, str } from "./render-utils.ts";
 import { wrapToolDefinition } from "./tool-definition-wrapper.ts";
-import { formatSize } from "./truncate.ts";
 
 const ARTIFACT_ID_PREFIX = "tool-output:";
 
