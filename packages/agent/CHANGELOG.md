@@ -2,6 +2,7 @@
 
 ### Added
 - Reliability kernel: pure provider-failure classifier (ClassifiedError, FailureReason, classifyError) with four independent action flags (retry/compact/rotate-credential/fallback); retry backoff policy (RetryPolicy, computeRetryDelayMs, sleepAbortable) with configurable jitter and exponential backoff; command-silence and stream-idle watchdogs (SilenceWatchdog, withStreamIdleWatchdog, DEFAULT_STREAM_IDLE); process-tree kill primitives (isProcessAlive, killTreeNow) with liveness-based SIGTERM→SIGKILL escalation. Portable decision logic exported from main entry (`@caupulican/pi-agent-core`); Node.js-only process tree exports from Node.js conditional entry (`@caupulican/pi-agent-core/node`). Host wiring lands in follow-up changes; nothing consumes these yet.
+- RetryController: host-agnostic auto-retry driver (classifier-based, abortable backoff, event sink).
 
 ## [0.80.103] - 2026-07-03
 

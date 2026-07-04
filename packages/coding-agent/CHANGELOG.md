@@ -15,6 +15,9 @@
   connection now fails over instead of hanging. The bound is on silence, never on total runtime, so
   a stream that keeps emitting is never cut off.
 
+### Changed
+- Auto-retry, stalled-stream abort, bash silence watchdog, exec kill escalation, and bash/edit write serialization now ride the shared reliability kernel (@caupulican/pi-agent-core).
+
 ### Fixed
 - Bash commands could previously race file-tool (`edit`/`write`) mutations: because a shell command
   cannot statically declare which files it touches, it wasn't serialized against them at all. The
