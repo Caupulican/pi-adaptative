@@ -4,7 +4,6 @@
  */
 
 import * as fs from "node:fs";
-import * as os from "node:os";
 import * as path from "node:path";
 import type { AgentMessage } from "@caupulican/pi-agent-core";
 import { createCompactionSummaryMessage } from "@caupulican/pi-agent-core";
@@ -37,10 +36,10 @@ import {
 	TUI,
 } from "@caupulican/pi-tui";
 import chalk from "chalk";
-import { spawn, spawnSync } from "child_process";
-import { APP_NAME, APP_TITLE, getAgentDir, getShareViewerUrl, VERSION } from "../../config.ts";
+import { spawn } from "child_process";
+import { APP_NAME, APP_TITLE, getAgentDir, VERSION } from "../../config.ts";
 import { type AgentSession, type AgentSessionEvent, parseSkillBlock } from "../../core/agent-session.ts";
-import { type AgentSessionRuntime, SessionImportFileNotFoundError } from "../../core/agent-session-runtime.ts";
+import type { AgentSessionRuntime } from "../../core/agent-session-runtime.ts";
 import type {
 	AutocompleteProviderFactory,
 	ExtensionCommandContext,
@@ -60,7 +59,7 @@ import { type AppKeybinding, KeybindingsManager } from "../../core/keybindings.t
 import type { OllamaRuntime } from "../../core/models/local-runtime.ts";
 import { DefaultPackageManager } from "../../core/package-manager.ts";
 import type { ResourceDiagnostic } from "../../core/resource-loader.ts";
-import { formatMissingSessionCwdPrompt, MissingSessionCwdError } from "../../core/session-cwd.ts";
+import { formatMissingSessionCwdPrompt, type MissingSessionCwdError } from "../../core/session-cwd.ts";
 import type {
 	AutoLearnSettings,
 	AutonomyMode,
@@ -72,7 +71,6 @@ import type { SourceInfo } from "../../core/source-info.ts";
 import { isInstallTelemetryEnabled } from "../../core/telemetry.ts";
 import { hasProjectTrustInputs } from "../../core/trust-manager.ts";
 import { getChangelogPath, getNewEntries, parseChangelog } from "../../utils/changelog.ts";
-import { copyToClipboard } from "../../utils/clipboard.ts";
 import { readClipboardImage } from "../../utils/clipboard-image.ts";
 import { parseGitUrl } from "../../utils/git.ts";
 import { getCwdRelativePath, resolvePath } from "../../utils/paths.ts";
@@ -85,7 +83,6 @@ import { AutoLearnController, type AutoLearnState } from "./auto-learn-controlle
 import * as autonomyCommands from "./autonomy-commands.ts";
 import { AssistantMessageComponent } from "./components/assistant-message.ts";
 import { BashExecutionComponent } from "./components/bash-execution.ts";
-import { BorderedLoader } from "./components/bordered-loader.ts";
 import { BranchSummaryMessageComponent } from "./components/branch-summary-message.ts";
 import { CompactionSummaryMessageComponent } from "./components/compaction-summary-message.ts";
 import { CountdownTimer } from "./components/countdown-timer.ts";
@@ -95,7 +92,6 @@ import { DynamicBorder } from "./components/dynamic-border.ts";
 import type { FitnessRole } from "./components/fitness-role-selector.ts";
 import { FooterComponent } from "./components/footer.ts";
 import { formatKeyText, keyDisplayText, keyHint, keyText, rawKeyHint } from "./components/keybinding-hints.ts";
-import { SelectSubmenu } from "./components/settings-selector.ts";
 import { SkillInvocationMessageComponent } from "./components/skill-invocation-message.ts";
 import { ToolExecutionComponent } from "./components/tool-execution.ts";
 import { ToolGroupComponent } from "./components/tool-group.ts";
@@ -109,12 +105,15 @@ import { UserMessageComponent } from "./components/user-message.ts";
 import * as configBackup from "./config-backup.ts";
 import { EditorOverlayHost } from "./editor-overlay-host.ts";
 import { ExtensionUiHost } from "./extension-ui-host.ts";
+import { openEditorForPath, openExternalEditor } from "./external-editor.ts";
 import * as historyReloadMath from "./history-reload-math.ts";
 import * as localModelCommands from "./local-model-commands.ts";
 import { ProfileMenuController } from "./profile-menu-controller.ts";
 import * as reportCommands from "./report-commands.ts";
 import * as resourceDisplay from "./resource-display.ts";
+import * as resourceShellCommands from "./resource-shell-commands.ts";
 import * as sessionFlows from "./session-flow-commands.ts";
+import * as sessionIoCommands from "./session-io-commands.ts";
 import * as settingsSelectorFlow from "./settings-selector-flow.ts";
 import {
 	getEditorTheme,
@@ -3203,111 +3202,23 @@ export class InteractiveMode {
 		this.showStatus(`Thinking blocks: ${this.hideThinkingBlock ? "hidden" : "visible"}`);
 	}
 
-	private async openExternalEditor(): Promise<void> {
-		// Determine editor (respect $VISUAL, then $EDITOR)
-		const editorCmd = process.env.VISUAL || process.env.EDITOR;
-		if (!editorCmd) {
-			this.showWarning("No editor configured. Set $VISUAL or $EDITOR environment variable.");
-			return;
-		}
-
-		const currentText = this.editor.getExpandedText?.() ?? this.editor.getText();
-		const tmpFile = path.join(os.tmpdir(), `pi-editor-${Date.now()}.pi.md`);
-
-		try {
-			// Write current content to temp file
-			fs.writeFileSync(tmpFile, currentText, "utf-8");
-
-			// Stop TUI to release terminal
-			this.ui.stop();
-
-			// Split by space to support editor arguments (e.g., "code --wait")
-			const [editor, ...editorArgs] = editorCmd.split(" ");
-
-			process.stdout.write(`Launching external editor: ${editorCmd}\nPi will resume when the editor exits.\n`);
-
-			// Do not use spawnSync here. On Windows, synchronous child_process calls can keep
-			// Node/libuv's console input read active after ui.stop() pauses stdin, racing
-			// vim/nvim for the console input buffer until Ctrl+C cancels the pending read.
-			const status = await new Promise<number | null>((resolve) => {
-				const child = spawn(editor, [...editorArgs, tmpFile], {
-					stdio: "inherit",
-					shell: process.platform === "win32",
-				});
-				child.on("error", () => resolve(null));
-				child.on("close", (code) => resolve(code));
-			});
-
-			// On successful exit (status 0), replace editor content
-			if (status === 0) {
-				const newContent = fs.readFileSync(tmpFile, "utf-8").replace(/\n$/, "");
-				this.editor.setText(newContent);
-			}
-			// On non-zero exit, keep original text (no action needed)
-		} finally {
-			// Clean up temp file
-			try {
-				fs.unlinkSync(tmpFile);
-			} catch {
-				// Ignore cleanup errors
-			}
-
-			// Restart TUI
-			this.ui.start();
-			// Force full re-render since external editor uses alternate screen
-			this.ui.requestRender(true);
-		}
+	private openExternalEditor(): Promise<void> {
+		return openExternalEditor({
+			editor: this.editor,
+			ui: this.ui,
+			showWarning: (message) => this.showWarning(message),
+		});
 	}
 
-	private async openEditorForPath(filePath: string): Promise<boolean> {
-		let editorCmd = process.env.EDITOR || process.env.VISUAL;
-		let isFallback = false;
-		if (!editorCmd) {
-			editorCmd = "vi";
-			isFallback = true;
-		}
-
-		try {
-			// Stop TUI to release terminal
-			this.ui.stop();
-
-			// Split by space to support editor arguments (e.g., "code --wait")
-			const [editor, ...editorArgs] = editorCmd.split(" ");
-
-			process.stdout.write(
-				`Launching external editor: ${editorCmd} ${filePath}\nPi will resume when the editor exits.\n`,
-			);
-
-			const status = await new Promise<number | null>((resolve) => {
-				const child = spawn(editor, [...editorArgs, filePath], {
-					stdio: "inherit",
-					shell: process.platform === "win32",
-				});
-				child.on("error", () => resolve(null));
-				child.on("close", (code) => resolve(code));
-			});
-
-			if (status === null) {
-				if (isFallback) {
-					process.stdout.write(`\nError: Failed to launch fallback editor "vi".\n`);
-				} else {
-					process.stdout.write(`\nError: Failed to launch editor "${editorCmd}".\n`);
-				}
-				process.stdout.write(`Please set the $EDITOR or $VISUAL environment variable to edit inline.\n`);
-				process.stdout.write(`Absolute file path: ${filePath}\n\nPress Enter to return to Pi...`);
-				// Wait for enter key
-				await new Promise<void>((resolve) => {
-					process.stdin.once("data", () => resolve());
-				});
-			}
-
-			return status === 0;
-		} finally {
-			// Restart TUI
-			this.ui.start();
-			// Force full re-render since external editor uses alternate screen
-			this.ui.requestRender(true);
-		}
+	private openEditorForPath(filePath: string): Promise<boolean> {
+		return openEditorForPath(
+			{
+				editor: this.editor,
+				ui: this.ui,
+				showWarning: (message) => this.showWarning(message),
+			},
+			filePath,
+		);
 	}
 
 	// =========================================================================
@@ -4148,20 +4059,16 @@ export class InteractiveMode {
 		}
 	}
 
-	private async handleExportCommand(text: string): Promise<void> {
-		const outputPath = this.getPathCommandArgument(text, "/export");
-
-		try {
-			if (outputPath?.endsWith(".jsonl")) {
-				const filePath = this.session.exportToJsonl(outputPath);
-				this.showStatus(`Session exported to: ${filePath}`);
-			} else {
-				const filePath = await this.session.exportToHtml(outputPath);
-				this.showStatus(`Session exported to: ${filePath}`);
-			}
-		} catch (error: unknown) {
-			this.showError(`Failed to export session: ${error instanceof Error ? error.message : "Unknown error"}`);
-		}
+	private handleExportCommand(text: string): Promise<void> {
+		return sessionIoCommands.handleExportCommand(
+			{
+				session: this.session,
+				getPathCommandArgument: (t, command) => this.getPathCommandArgument(t, command),
+				showStatus: (message) => this.showStatus(message),
+				showError: (message) => this.showError(message),
+			},
+			text,
+		);
 	}
 
 	private getPathCommandArgument(text: string, command: "/export" | "/import"): string | undefined {
@@ -4193,181 +4100,60 @@ export class InteractiveMode {
 		return argsString.slice(0, firstWhitespaceIndex);
 	}
 
-	private async handleImportCommand(text: string): Promise<void> {
-		const inputPath = this.getPathCommandArgument(text, "/import");
-		if (!inputPath) {
-			this.showError("Usage: /import <path.jsonl>");
-			return;
-		}
-
-		const confirmed = await this.extensionUiHost.showExtensionConfirm(
-			"Import session",
-			`Replace current session with ${inputPath}?`,
+	private handleImportCommand(text: string): Promise<void> {
+		const self = this;
+		return sessionIoCommands.handleImportCommand(
+			{
+				getPathCommandArgument: (t, command) => this.getPathCommandArgument(t, command),
+				showError: (message) => this.showError(message),
+				showStatus: (message) => this.showStatus(message),
+				extensionUiHost: this.extensionUiHost,
+				get loadingAnimation() {
+					return self.loadingAnimation;
+				},
+				set loadingAnimation(value) {
+					self.loadingAnimation = value;
+				},
+				statusContainer: this.statusContainer,
+				runtimeHost: this.runtimeHost,
+				renderCurrentSessionState: () => this.renderCurrentSessionState(),
+				promptForMissingSessionCwd: (error) => this.promptForMissingSessionCwd(error),
+				handleFatalRuntimeError: (prefix, error) => this.handleFatalRuntimeError(prefix, error),
+			},
+			text,
 		);
-		if (!confirmed) {
-			this.showStatus("Import cancelled");
-			return;
-		}
-
-		try {
-			if (this.loadingAnimation) {
-				this.loadingAnimation.stop();
-				this.loadingAnimation = undefined;
-			}
-			this.statusContainer.clear();
-			const result = await this.runtimeHost.importFromJsonl(inputPath);
-			if (result.cancelled) {
-				this.showStatus("Import cancelled");
-				return;
-			}
-			this.renderCurrentSessionState();
-			this.showStatus(`Session imported from: ${inputPath}`);
-		} catch (error: unknown) {
-			if (error instanceof MissingSessionCwdError) {
-				const selectedCwd = await this.promptForMissingSessionCwd(error);
-				if (!selectedCwd) {
-					this.showStatus("Import cancelled");
-					return;
-				}
-				const result = await this.runtimeHost.importFromJsonl(inputPath, selectedCwd);
-				if (result.cancelled) {
-					this.showStatus("Import cancelled");
-					return;
-				}
-				this.renderCurrentSessionState();
-				this.showStatus(`Session imported from: ${inputPath}`);
-				return;
-			}
-			if (error instanceof SessionImportFileNotFoundError) {
-				this.showError(`Failed to import session: ${error.message}`);
-				return;
-			}
-			await this.handleFatalRuntimeError("Failed to import session", error);
-		}
 	}
 
-	private async handleShareCommand(): Promise<void> {
-		// Check if gh is available and logged in
-		try {
-			const authResult = spawnSync("gh", ["auth", "status"], { encoding: "utf-8" });
-			if (authResult.status !== 0) {
-				this.showError("GitHub CLI is not logged in. Run 'gh auth login' first.");
-				return;
-			}
-		} catch {
-			this.showError("GitHub CLI (gh) is not installed. Install it from https://cli.github.com/");
-			return;
-		}
-
-		// Export to a temp file
-		const tmpFile = path.join(os.tmpdir(), "session.html");
-		try {
-			await this.session.exportToHtml(tmpFile);
-		} catch (error: unknown) {
-			this.showError(`Failed to export session: ${error instanceof Error ? error.message : "Unknown error"}`);
-			return;
-		}
-
-		// Show cancellable loader, replacing the editor
-		const loader = new BorderedLoader(this.ui, theme, "Creating gist...");
-		this.overlayHost.swap(loader);
-
-		const restoreEditor = () => {
-			loader.dispose();
-			this.overlayHost.swap(this.editor, { render: "none" });
-			try {
-				fs.unlinkSync(tmpFile);
-			} catch {
-				// Ignore cleanup errors
-			}
-		};
-
-		// Create a secret gist asynchronously
-		let proc: ReturnType<typeof spawn> | null = null;
-
-		loader.onAbort = () => {
-			proc?.kill();
-			restoreEditor();
-			this.showStatus("Share cancelled");
-		};
-
-		try {
-			const result = await new Promise<{ stdout: string; stderr: string; code: number | null }>((resolve) => {
-				proc = spawn("gh", ["gist", "create", "--public=false", tmpFile]);
-				let stdout = "";
-				let stderr = "";
-				proc.stdout?.on("data", (data) => {
-					stdout += data.toString();
-				});
-				proc.stderr?.on("data", (data) => {
-					stderr += data.toString();
-				});
-				proc.on("close", (code) => resolve({ stdout, stderr, code }));
-			});
-
-			if (loader.signal.aborted) return;
-
-			restoreEditor();
-
-			if (result.code !== 0) {
-				const errorMsg = result.stderr?.trim() || "Unknown error";
-				this.showError(`Failed to create gist: ${errorMsg}`);
-				return;
-			}
-
-			// Extract gist ID from the URL returned by gh
-			// gh returns something like: https://gist.github.com/username/GIST_ID
-			const gistUrl = result.stdout?.trim();
-			const gistId = gistUrl?.split("/").pop();
-			if (!gistId) {
-				this.showError("Failed to parse gist ID from gh output");
-				return;
-			}
-
-			// Create the preview URL
-			const previewUrl = getShareViewerUrl(gistId);
-			this.showStatus(`Share URL: ${previewUrl}\nGist: ${gistUrl}`);
-		} catch (error: unknown) {
-			if (!loader.signal.aborted) {
-				restoreEditor();
-				this.showError(`Failed to create gist: ${error instanceof Error ? error.message : "Unknown error"}`);
-			}
-		}
+	private handleShareCommand(): Promise<void> {
+		return sessionIoCommands.handleShareCommand({
+			showError: (message) => this.showError(message),
+			showStatus: (message) => this.showStatus(message),
+			session: this.session,
+			ui: this.ui,
+			overlayHost: this.overlayHost,
+			editor: this.editor,
+		});
 	}
 
-	private async handleCopyCommand(): Promise<void> {
-		const text = this.session.getLastAssistantText();
-		if (!text) {
-			this.showError("No agent messages to copy yet.");
-			return;
-		}
-
-		try {
-			await copyToClipboard(text);
-			this.showStatus("Copied last agent message to clipboard");
-		} catch (error) {
-			this.showError(error instanceof Error ? error.message : String(error));
-		}
+	private handleCopyCommand(): Promise<void> {
+		return sessionIoCommands.handleCopyCommand({
+			session: this.session,
+			showError: (message) => this.showError(message),
+			showStatus: (message) => this.showStatus(message),
+		});
 	}
 
 	private handleNameCommand(text: string): void {
-		const name = text.replace(/^\/name\s*/, "").trim();
-		if (!name) {
-			const currentName = this.sessionManager.getSessionName();
-			if (currentName) {
-				this.chatContainer.addChild(new Spacer(1));
-				this.chatContainer.addChild(new Text(theme.fg("dim", `Session name: ${currentName}`), 1, 0));
-			} else {
-				this.showWarning("Usage: /name <name>");
-			}
-			this.ui.requestRender();
-			return;
-		}
-
-		this.session.setSessionName(name);
-		this.chatContainer.addChild(new Spacer(1));
-		this.chatContainer.addChild(new Text(theme.fg("dim", `Session name set: ${name}`), 1, 0));
-		this.ui.requestRender();
+		sessionIoCommands.handleNameCommand(
+			{
+				sessionManager: this.sessionManager,
+				chatContainer: this.chatContainer,
+				showWarning: (message) => this.showWarning(message),
+				session: this.session,
+				ui: this.ui,
+			},
+			text,
+		);
 	}
 
 	private parseGoalContinueCommand(
@@ -4530,89 +4316,19 @@ export class InteractiveMode {
 		}
 	}
 
-	private async handleInstallResourcesCommand(argsString: string): Promise<void> {
-		try {
-			const tokens = argsString.split(/\s+/).filter(Boolean);
-			let force = false;
-			let dir = "";
-			for (const t of tokens) {
-				if (t === "--force") {
-					force = true;
-				} else {
-					dir = t;
-				}
-			}
-
-			if (!dir) {
-				this.showError("Usage: /install-resources <dir> [--force]");
-				return;
-			}
-
-			const canonical = this.settingsManager.canonicalizePath(dir);
-			if (!canonical || !fs.existsSync(canonical)) {
-				this.showError(`Source directory does not exist: ${dir}`);
-				return;
-			}
-
-			const trustedRoots = this.settingsManager.getTrustedResourceRoots();
-			const trusted = trustedRoots.includes(canonical);
-
-			if (!trusted) {
-				const trust = await new Promise<boolean>((resolve) => {
-					this.showSelector((done) => {
-						const submenu = new SelectSubmenu(
-							"Trust external source for installation?",
-							`The directory "${canonical}" contains extensions/resources to install. Extensions can execute arbitrary code on your machine. Do you trust it?`,
-							[
-								{
-									value: "yes",
-									label: "Yes",
-									description: "Trust this directory and proceed with installation.",
-								},
-								{ value: "no", label: "No", description: "Do not trust this directory. Abort." },
-							],
-							"no",
-							(value) => {
-								done();
-								resolve(value === "yes");
-							},
-							() => {
-								done();
-								resolve(false);
-							},
-						);
-						return { component: submenu, focus: submenu.getSelectList() };
-					});
-				});
-
-				if (!trust) {
-					this.showStatus("Installation aborted. Source directory was not trusted.");
-					return;
-				}
-
-				this.settingsManager.addTrustedResourceRoot(canonical, "global");
-			}
-
-			const subdirs = ["skills", "extensions", "prompts", "themes", "profiles", "agents"];
-			const stats = { installed: [] as string[], skipped: [] as string[] };
-			const userAgentDir = getAgentDir();
-
-			for (const sub of subdirs) {
-				const srcSub = path.join(canonical, sub);
-				const destSub = path.join(userAgentDir, sub);
-				if (fs.existsSync(srcSub)) {
-					this.copyResourcesRecursively(srcSub, destSub, force, stats);
-				}
-			}
-
-			const installedCount = stats.installed.length;
-			const skippedCount = stats.skipped.length;
-			this.showStatus(`Installation complete: ${installedCount} resources installed, ${skippedCount} skipped.`);
-
-			await this.handleReloadCommand();
-		} catch (error) {
-			this.showError(error instanceof Error ? error.message : String(error));
-		}
+	private handleInstallResourcesCommand(argsString: string): Promise<void> {
+		return resourceShellCommands.handleInstallResourcesCommand(
+			{
+				settingsManager: this.settingsManager,
+				showError: (message) => this.showError(message),
+				showStatus: (message) => this.showStatus(message),
+				showSelector: (create) => this.showSelector(create),
+				handleReloadCommand: () => this.handleReloadCommand(),
+				copyResourcesRecursively: (src, dest, force, stats) =>
+					this.copyResourcesRecursively(src, dest, force, stats),
+			},
+			argsString,
+		);
 	}
 
 	/**
@@ -4622,34 +4338,13 @@ export class InteractiveMode {
 	 * hand-authored skills; archival is restorable.
 	 */
 	private handleCurateCommand(args: string): void {
-		const [sub, name] = args.split(/\s+/, 2);
-		if (sub === "archive" && name) {
-			this.showStatus(
-				this.session.archivePromotedSkill(name)
-					? `Archived promoted skill '${name}'`
-					: `Could not archive '${name}' (not a promoted skill?)`,
-			);
-			return;
-		}
-		if (sub === "restore" && name) {
-			this.showStatus(
-				this.session.restorePromotedSkill(name) ? `Restored skill '${name}'` : `Could not restore '${name}'`,
-			);
-			return;
-		}
-		const proposals = this.session.proposeSkillCuration();
-		if (proposals.archive.length === 0 && proposals.consolidate.length === 0) {
-			this.showStatus("Curator: no stale or overlapping promoted skills. Nothing to propose.");
-			return;
-		}
-		const lines: string[] = ["Skill curator proposals (nothing applied automatically):"];
-		for (const a of proposals.archive) {
-			lines.push(`  • archive '${a.name}' — ${a.reason}  →  /curate archive ${a.name}`);
-		}
-		for (const c of proposals.consolidate) {
-			lines.push(`  • consider merging '${c.names[0]}' + '${c.names[1]}' (overlap ${(c.overlap * 100) | 0}%)`);
-		}
-		this.showStatus(lines.join("\n"));
+		resourceShellCommands.handleCurateCommand(
+			{
+				session: this.session,
+				showStatus: (message) => this.showStatus(message),
+			},
+			args,
+		);
 	}
 
 	private async handleConfigBackupCommand(fileArg?: string): Promise<void> {
@@ -4696,113 +4391,46 @@ export class InteractiveMode {
 		reportCommands.checkDaxnutsEasterEgg({ chatContainer: this.chatContainer, ui: this.ui }, model);
 	}
 
-	private async handleBashCommand(command: string, excludeFromContext = false): Promise<void> {
-		const extensionRunner = this.session.extensionRunner;
-
-		// Emit user_bash event to let extensions intercept
-		const eventResult = await extensionRunner.emitUserBash({
-			type: "user_bash",
+	private handleBashCommand(command: string, excludeFromContext = false): Promise<void> {
+		const self = this;
+		return resourceShellCommands.handleBashCommand(
+			{
+				session: this.session,
+				sessionManager: this.sessionManager,
+				ui: this.ui,
+				chatContainer: this.chatContainer,
+				pendingMessagesContainer: this.pendingMessagesContainer,
+				pendingBashComponents: this.pendingBashComponents,
+				get bashComponent() {
+					return self.bashComponent;
+				},
+				set bashComponent(value) {
+					self.bashComponent = value;
+				},
+				showError: (message) => this.showError(message),
+			},
 			command,
 			excludeFromContext,
-			cwd: this.sessionManager.getCwd(),
-		});
-
-		// If extension returned a full result, use it directly
-		if (eventResult?.result) {
-			const result = eventResult.result;
-
-			// Create UI component for display
-			this.bashComponent = new BashExecutionComponent(command, this.ui, excludeFromContext);
-			if (this.session.isStreaming) {
-				this.pendingMessagesContainer.addChild(this.bashComponent);
-				this.pendingBashComponents.push(this.bashComponent);
-			} else {
-				this.chatContainer.addChild(this.bashComponent);
-			}
-
-			// Show output and complete
-			if (result.output) {
-				this.bashComponent.appendOutput(result.output);
-			}
-			this.bashComponent.setComplete(
-				result.exitCode,
-				result.cancelled,
-				result.truncated ? ({ truncated: true, content: result.output } as TruncationResult) : undefined,
-				result.fullOutputPath,
-			);
-
-			// Record the result in session
-			this.session.recordBashResult(command, result, { excludeFromContext });
-			this.bashComponent = undefined;
-			this.ui.requestRender();
-			return;
-		}
-
-		// Normal execution path (possibly with custom operations)
-		const isDeferred = this.session.isStreaming;
-		this.bashComponent = new BashExecutionComponent(command, this.ui, excludeFromContext);
-
-		if (isDeferred) {
-			// Show in pending area when agent is streaming
-			this.pendingMessagesContainer.addChild(this.bashComponent);
-			this.pendingBashComponents.push(this.bashComponent);
-		} else {
-			// Show in chat immediately when agent is idle
-			this.chatContainer.addChild(this.bashComponent);
-		}
-		this.ui.requestRender();
-
-		try {
-			const result = await this.session.executeBash(
-				command,
-				(chunk) => {
-					if (this.bashComponent) {
-						this.bashComponent.appendOutput(chunk);
-						this.ui.requestRender();
-					}
-				},
-				{ excludeFromContext, operations: eventResult?.operations },
-			);
-
-			if (this.bashComponent) {
-				this.bashComponent.setComplete(
-					result.exitCode,
-					result.cancelled,
-					result.truncated ? ({ truncated: true, content: result.output } as TruncationResult) : undefined,
-					result.fullOutputPath,
-				);
-			}
-		} catch (error) {
-			if (this.bashComponent) {
-				this.bashComponent.setComplete(undefined, false);
-			}
-			this.showError(`Bash command failed: ${error instanceof Error ? error.message : "Unknown error"}`);
-		}
-
-		this.bashComponent = undefined;
-		this.ui.requestRender();
+		);
 	}
 
-	private async handleCompactCommand(customInstructions?: string): Promise<void> {
-		const entries = this.sessionManager.getEntries();
-		const messageCount = entries.filter((e) => e.type === "message").length;
-
-		if (messageCount < 2) {
-			this.showWarning("Nothing to compact (no messages yet)");
-			return;
-		}
-
-		if (this.loadingAnimation) {
-			this.loadingAnimation.stop();
-			this.loadingAnimation = undefined;
-		}
-		this.statusContainer.clear();
-
-		try {
-			await this.session.compact(customInstructions);
-		} catch {
-			// Ignore, will be emitted as an event
-		}
+	private handleCompactCommand(customInstructions?: string): Promise<void> {
+		const self = this;
+		return resourceShellCommands.handleCompactCommand(
+			{
+				sessionManager: this.sessionManager,
+				showWarning: (message) => this.showWarning(message),
+				get loadingAnimation() {
+					return self.loadingAnimation;
+				},
+				set loadingAnimation(value) {
+					self.loadingAnimation = value;
+				},
+				statusContainer: this.statusContainer,
+				session: this.session,
+			},
+			customInstructions,
+		);
 	}
 
 	stop(): void {
