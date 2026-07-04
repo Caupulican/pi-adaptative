@@ -114,19 +114,8 @@ import {
 	type PromptPolicyShadowReport,
 	planPromptPolicy,
 } from "./context/context-prompt-policy.ts";
-import {
-	defaultMemoryPromptInclusionReport,
-	type MemoryPromptInclusionReport,
-	type MemoryRetrievalDiagnostics,
-	sanitizeMemoryRetrievalReportForDiagnostics,
-} from "./context/memory-diagnostics.ts";
-import { buildMemoryPromptBlock } from "./context/memory-prompt-block.ts";
-import {
-	type MemoryProvider as ContextMemoryProvider,
-	DEFAULT_LOCAL_MEMORY_EGRESS_POLICY,
-} from "./context/memory-provider-contract.ts";
-import { type MemoryRetrievalReport, retrieveMemoryForContext } from "./context/memory-retrieval.ts";
-import { createOkfMemoryProvider } from "./context/okf-memory-provider.ts";
+import type { MemoryPromptInclusionReport } from "./context/memory-diagnostics.ts";
+import type { MemoryRetrievalReport } from "./context/memory-retrieval.ts";
 import { applyContextGc, type ContextGcReport } from "./context-gc.ts";
 import {
 	aggregateDailyUsageFromSessionFiles,
@@ -205,11 +194,8 @@ import {
 import { appendLearningDecisionSnapshot, getLearningDecisionSnapshots } from "./learning/session-learning-decision.ts";
 import { type CurationProposals, isPromotedFrontmatter, SkillCurator } from "./learning/skill-curator.ts";
 import { LocalRuntimeController } from "./local-runtime-controller.ts";
-import { EffectivenessTracker } from "./memory/effectiveness-tracker.ts";
-import { MemoryManager } from "./memory/memory-manager.ts";
 import type { MemoryProvider } from "./memory/memory-provider.ts";
-import { FileStoreProvider } from "./memory/providers/file-store.ts";
-import { TranscriptRecallProvider } from "./memory/providers/transcript-recall.ts";
+import { MemoryController } from "./memory-controller.ts";
 import {
 	deriveModelCapabilityProfile,
 	filterToolNamesForCapability,
@@ -666,30 +652,6 @@ function extractArtifactId(message: AgentMessage | undefined): string | undefine
 	return typeof artifactId === "string" ? artifactId : undefined;
 }
 
-/**
- * Text of the most recent user message, or "" if there is none (e.g. goal-continuation
- * turns with no new user input). An empty query degrades to zero memory-retrieval results
- * by construction (see memory-provider-contract.ts's score-on-empty-query-tokens rule) --
- * no special-casing needed here beyond returning "".
- */
-function latestUserMessageText(messages: AgentMessage[]): string {
-	for (let index = messages.length - 1; index >= 0; index--) {
-		const message = messages[index];
-		if (message.role !== "user") continue;
-		if (typeof message.content === "string") return message.content;
-		const parts: string[] = [];
-		for (const part of message.content) {
-			if (part.type === "text") parts.push(part.text);
-		}
-		return parts.join("\n");
-	}
-	return "";
-}
-
-function emptyMemoryRetrievalReport(maxResults: number): MemoryRetrievalReport {
-	return { request: { query: "", maxResults }, providerReports: [], results: [], contextItems: [] };
-}
-
 export class AgentSession {
 	readonly agent: Agent;
 	readonly sessionManager: SessionManager;
@@ -738,9 +700,6 @@ export class AgentSession {
 	private _latestPromptPolicyReport: PromptPolicyShadowReport | undefined = undefined;
 	private _latestPromptPolicyGcCorrelation: PromptPolicyGcCorrelationReport | undefined = undefined;
 	private _latestPromptEnforcementReport: PromptEnforcementReport | undefined = undefined;
-	private _memoryOkfProvider: ContextMemoryProvider | undefined = undefined;
-	private _latestMemoryRetrievalReport: MemoryRetrievalReport | undefined = undefined;
-	private _latestMemoryPromptInclusionReport: MemoryPromptInclusionReport | undefined = undefined;
 
 	// Branch summarization state
 	private _branchSummaryAbortController: AbortController | undefined = undefined;
@@ -777,6 +736,10 @@ export class AgentSession {
 	 * background-lane-controller.ts); owns the lane timers/guards, the last research-lane skip
 	 * reason, the live LaneTracker, and the in-flight research/worker abort controllers. */
 	private readonly _backgroundLanes: BackgroundLaneController;
+	/** Plug-and-play memory subsystem (see memory-controller.ts); owns the OKF retrieval provider, the
+	 * latest retrieval/prompt-inclusion reports, the reload-safe MemoryManager, the recall
+	 * effectiveness tracker, and the extension-contributed pending providers. */
+	private readonly _memory: MemoryController;
 	private _extensionRunnerRef?: { current?: ExtensionRunner };
 	private _initialActiveToolNames?: string[];
 	private _allowedToolNames?: Set<string>;
@@ -784,10 +747,6 @@ export class AgentSession {
 	private _toolProfileFilter?: Required<ResourceProfileFilterSettings>;
 	private readonly _isExplicitModel: boolean;
 	private readonly _isExplicitThinking: boolean;
-	/** Plug-and-play memory subsystem. Recreated on each (re)initialize so reload is safe. */
-	private _memoryManager: MemoryManager = new MemoryManager();
-	/** R4: tracks whether injected recall is actually used, to adapt the recall gate. */
-	private readonly _effectivenessTracker = new EffectivenessTracker();
 	/** R8: registry for deployment-supplied gateway channels + schedulers (lifecycle driven by the host runner). */
 	private readonly _gatewayRegistry = new GatewayRegistry();
 	/** Cache for getSpawnedUsage(), keyed by session entry count (Bug #22 — avoid O(N) per render frame). */
@@ -813,8 +772,6 @@ export class AgentSession {
 	/** Aborts in-flight background reflection completions on dispose (Bug #21). */
 	private readonly _reflectionAbort = new AbortController();
 	private readonly _isChildSession: boolean;
-	/** Memory providers registered by extensions via pi.registerMemoryProvider, applied on (re)init. */
-	private _pendingMemoryProviders: MemoryProvider[] = [];
 	private _baseToolsOverride?: Record<string, AgentTool>;
 	private _sessionStartEvent: SessionStartEvent;
 	private _extensionUIContext?: ExtensionUIContext;
@@ -896,7 +853,7 @@ export class AgentSession {
 			getCwd: () => this._cwd,
 			getSettingsManager: () => this.settingsManager,
 			getResourceLoader: () => this._resourceLoader,
-			getMemoryManager: () => this._memoryManager,
+			getMemoryManager: () => this._memory.getMemoryManager(),
 			hasTool: (name) => this._toolRegistry.has(name),
 			getToolPromptSnippet: (name) => this._toolPromptSnippets.get(name),
 			getToolPromptGuidelines: (name) => this._toolPromptGuidelines.get(name),
@@ -939,6 +896,15 @@ export class AgentSession {
 			runIsolatedCompletion: (opts) => this.runIsolatedCompletion(opts),
 			continueGoalLoop: (options) => this.continueGoalLoop(options),
 			collectWorkspaceSources: (args) => this._collectWorkspaceSources(args),
+		});
+		this._memory = new MemoryController({
+			getSettingsManager: () => this.settingsManager,
+			getTurnIndex: () => this._turnIndex,
+			getAgentDir: () => this._agentDir,
+			getCwd: () => this._cwd,
+			getSessionId: () => this.sessionManager.getSessionId(),
+			isChildSession: () => this._isChildSession,
+			refreshToolRegistry: () => this._refreshToolRegistry(),
 		});
 		this._modelRegistry = config.modelRegistry;
 		this._extensionRunnerRef = config.extensionRunnerRef;
@@ -1235,27 +1201,6 @@ export class AgentSession {
 	private _getToolArtifactStore(): ArtifactStore {
 		this._toolArtifactStore ??= createFileArtifactStore({ baseDir: this._toolArtifactsDir() });
 		return this._toolArtifactStore;
-	}
-
-	/**
-	 * Fixed path for this slice's local Pi OKF memory documents, shared across sessions
-	 * under this agentDir (not session-scoped, unlike tool-artifacts/context-gc, since OKF
-	 * memory represents durable cross-session knowledge, not a per-session capture). Not
-	 * yet user-configurable -- see the memory-retrieval settings doc comment.
-	 */
-	private _memoryOkfDir(): string {
-		return join(this._agentDir, "okf-memory");
-	}
-
-	/**
-	 * Session-scoped, read-only local OKF memory provider. Lazily created ONLY when memory
-	 * retrieval is enabled (see `_runMemoryRetrieval`) -- never force-created, so a session
-	 * with the setting off never touches `_memoryOkfDir()` at all (no directory access, no
-	 * creation; `createOkfMemoryProvider` itself never writes/mkdirs either way).
-	 */
-	private _getMemoryOkfProvider(): ContextMemoryProvider {
-		this._memoryOkfProvider ??= createOkfMemoryProvider({ rootDir: this._memoryOkfDir() });
-		return this._memoryOkfProvider;
 	}
 
 	/**
@@ -1702,176 +1647,29 @@ export class AgentSession {
 	}
 
 	/**
-	 * Observe-only local memory retrieval (see context/memory-retrieval.ts and
-	 * context/okf-memory-provider.ts): default disabled, opt-in setting. When disabled,
-	 * never constructs the OKF provider (no directory access under `_memoryOkfDir()` at
-	 * all) and returns an empty report -- fully fail-closed. When enabled, queries the
-	 * local, read-only OKF provider with the latest user message text (empty if there is
-	 * none, e.g. a goal-continuation turn -- degrades to zero results by construction, see
-	 * `latestUserMessageText`'s doc comment) under `DEFAULT_LOCAL_MEMORY_EGRESS_POLICY`.
-	 * Retrieved items are only ever stored in the report; nothing here touches `messages`,
-	 * the transcript, or the provider-visible prompt. Never throws into a live turn: any
-	 * failure (including a provider search error) degrades to an empty report.
+	 * Context-transform hot-path delegation to {@link MemoryController.runMemoryRetrieval}. Kept as a
+	 * one-line method (not inlined) so the transform stays the single owner of the pass ordering.
 	 */
-	private async _runMemoryRetrieval(messages: AgentMessage[]): Promise<MemoryRetrievalReport> {
-		try {
-			const settings = this.settingsManager.getMemoryRetrievalSettings();
-			if (!settings.enabled) {
-				const report = emptyMemoryRetrievalReport(settings.maxResults);
-				this._latestMemoryRetrievalReport = report;
-				return report;
-			}
-			const report = await retrieveMemoryForContext(
-				[this._getMemoryOkfProvider()],
-				{ query: latestUserMessageText(messages), maxResults: settings.maxResults },
-				{
-					createdAtTurn: this._turnIndex,
-					maxResults: settings.maxResults,
-					defaultLocalPolicy: DEFAULT_LOCAL_MEMORY_EGRESS_POLICY,
-				},
-			);
-			this._latestMemoryRetrievalReport = report;
-			return report;
-		} catch {
-			const report = emptyMemoryRetrievalReport(0);
-			this._latestMemoryRetrievalReport = report;
-			return report;
-		}
+	private _runMemoryRetrieval(messages: AgentMessage[]): Promise<MemoryRetrievalReport> {
+		return this._memory.runMemoryRetrieval(messages);
 	}
 
 	/** Read-only inspection of the latest memory-retrieval report, for tests/debugging. */
 	getMemoryRetrievalReport(): MemoryRetrievalReport {
-		return this._latestMemoryRetrievalReport ?? emptyMemoryRetrievalReport(0);
+		return this._memory.getMemoryRetrievalReport();
 	}
 
 	/**
-	 * Bounded prompt-surfacing pilot for local memory evidence (see
-	 * context/memory-prompt-block.ts): opt-in, default disabled, and gated on TWO settings
-	 * (`enabled` AND `includeInPrompt`) plus a non-empty `report.contextItems` -- the first
-	 * two are belt-and-suspenders on top of the fact that `_runMemoryRetrieval` already
-	 * leaves `contextItems` empty whenever `enabled` is false, regardless of
-	 * `includeInPrompt`. Reuses the `report` this pass's `_runMemoryRetrieval` call already
-	 * computed -- never re-queries the provider here.
-	 *
-	 * Appends exactly one ephemeral `custom`/"memory_evidence" message wrapped by
-	 * `wrapUntrustedText` (the same nonce-fenced boundary + always-on system-prompt rule
-	 * used for other untrusted content) to the END of `messages`. This is purely additive
-	 * (never mutates an existing message) and purely transient: `messages` here is the
-	 * array about to be sent to the provider, not `this.agent.state.messages` or anything
-	 * persisted via `sessionManager` -- so the injected message can never reach the
-	 * transcript, regardless of how many times this pass runs.
-	 *
-	 * Also records a `MemoryPromptInclusionReport` (context/memory-diagnostics.ts) at each
-	 * branch below, for context_audit's diagnostic surface only -- this is pure bookkeeping
-	 * alongside the existing branches, not a new branch/condition: the messages returned
-	 * are unchanged by this recording.
+	 * Context-transform hot-path delegation to {@link MemoryController.maybeAppendMemoryEvidenceBlock}.
+	 * Kept as a one-line method (not inlined) so the transform stays the single owner of the pass ordering.
 	 */
 	private _maybeAppendMemoryEvidenceBlock(messages: AgentMessage[], report: MemoryRetrievalReport): AgentMessage[] {
-		try {
-			const settings = this.settingsManager.getMemoryRetrievalSettings();
-			const base = {
-				enabled: settings.enabled,
-				includeInPrompt: settings.includeInPrompt,
-				selectedItemCount: report.contextItems.length,
-			};
-			if (!settings.enabled) {
-				this._latestMemoryPromptInclusionReport = {
-					...base,
-					status: "disabled",
-					includedCount: 0,
-					omittedCount: 0,
-					blockChars: 0,
-				};
-				return messages;
-			}
-			if (!settings.includeInPrompt) {
-				this._latestMemoryPromptInclusionReport = {
-					...base,
-					status: "include_disabled",
-					includedCount: 0,
-					omittedCount: 0,
-					blockChars: 0,
-				};
-				return messages;
-			}
-			if (report.contextItems.length === 0) {
-				this._latestMemoryPromptInclusionReport = {
-					...base,
-					status: "no_results",
-					includedCount: 0,
-					omittedCount: 0,
-					blockChars: 0,
-				};
-				return messages;
-			}
-
-			const block = buildMemoryPromptBlock(report.contextItems);
-			if (!block.text) {
-				this._latestMemoryPromptInclusionReport = {
-					...base,
-					status: "empty_block",
-					includedCount: block.includedCount,
-					omittedCount: block.omittedCount,
-					blockChars: 0,
-				};
-				return messages;
-			}
-
-			const wrapped = wrapUntrustedText(block.text, "memory:pi-okf");
-			const evidenceMessage: CustomMessage = {
-				role: "custom",
-				customType: "memory_evidence",
-				content: [{ type: "text", text: wrapped }],
-				display: false,
-				timestamp: Date.now(),
-			};
-			this._latestMemoryPromptInclusionReport = {
-				...base,
-				status: "included",
-				includedCount: block.includedCount,
-				omittedCount: block.omittedCount,
-				blockChars: wrapped.length,
-				sourceLabel: "memory:pi-okf",
-			};
-			return [...messages, evidenceMessage];
-		} catch {
-			// `base` may not exist yet if the throw happened before it was computed (e.g.
-			// settings access or `report.contextItems` itself threw), so this branch cannot
-			// rely on it -- fall back to safe, fixed defaults rather than risk referencing
-			// a partially-evaluated value.
-			this._latestMemoryPromptInclusionReport = {
-				enabled: false,
-				includeInPrompt: false,
-				selectedItemCount: 0,
-				status: "failed",
-				includedCount: 0,
-				omittedCount: 0,
-				blockChars: 0,
-			};
-			return messages;
-		}
+		return this._memory.maybeAppendMemoryEvidenceBlock(messages, report);
 	}
 
 	/** Read-only inspection of the latest memory-prompt-inclusion decision, for tests/debugging and context_audit. */
 	getMemoryPromptInclusionReport(): MemoryPromptInclusionReport {
-		return this._latestMemoryPromptInclusionReport ?? defaultMemoryPromptInclusionReport();
-	}
-
-	/**
-	 * Combines the already-stored, no-arg latest reports (never re-queries the provider or
-	 * touches the OKF directory) into the safe, allow-list-projected shape context_audit
-	 * exposes. See context/memory-diagnostics.ts for why this projection is allow-list
-	 * based rather than a spread-then-delete of the raw report.
-	 */
-	private _getMemoryAuditDiagnostics(): {
-		retrieval: MemoryRetrievalDiagnostics;
-		promptInclusion: MemoryPromptInclusionReport;
-	} {
-		const settings = this.settingsManager.getMemoryRetrievalSettings();
-		return {
-			retrieval: sanitizeMemoryRetrievalReportForDiagnostics(this.getMemoryRetrievalReport(), settings),
-			promptInclusion: this.getMemoryPromptInclusionReport(),
-		};
+		return this._memory.getMemoryPromptInclusionReport();
 	}
 
 	private _applyContextGc(
@@ -1885,7 +1683,7 @@ export class AgentSession {
 			// provider-agnostic and non-empty, so without this merge the recall pages the bundled
 			// default provider actually emits are never recognized as semantic-memory pages and
 			// accumulate raw for the life of the session — the exact growth Bug #7 GC exists to stop.
-			const providerMarkers = this._memoryManager.getContextMarkers();
+			const providerMarkers = this._memory.getMemoryManager().getContextMarkers();
 			const curationSettings = this.settingsManager.getContextCurationSettings();
 			const result = applyContextGc(messages, {
 				...settings,
@@ -2469,7 +2267,10 @@ export class AgentSession {
 		this._eventListeners = [];
 		// Best-effort memory cleanup (release locks/handles). Write-side onSessionEnd is wired on a
 		// true session-end hook (P3); file-store shutdown is a no-op.
-		void this._memoryManager.shutdownAll().catch(() => {});
+		void this._memory
+			.getMemoryManager()
+			.shutdownAll()
+			.catch(() => {});
 		cleanupSessionResources(this.sessionId);
 		// Best-effort final sweep for any grep/find artifact already released (reference
 		// count zero) but not yet reclaimed -- e.g. a release whose cleanup() call failed
@@ -3343,23 +3144,6 @@ export class AgentSession {
 		return this._promptUnserialized(text, options);
 	}
 
-	/**
-	 * Zero-I/O gate for cross-session recall (R3): skip trivial turns (short acks, slash commands) so
-	 * recall only runs when it could plausibly help. The provider's similarity cutoff is the real
-	 * filter — this just avoids the index query on turns that obviously don't warrant it.
-	 */
-	private _shouldAttemptRecall(text: string): boolean {
-		const t = text.trim();
-		if (t.length < 12 || t.startsWith("/")) return false;
-		const words = t.split(/\s+/).filter((w) => w.length >= 3);
-		// R4 adaptive gate: if recall has rarely been used lately (enough samples to trust the signal),
-		// raise the bar so we only recall on clearly substantial turns — and relax it again once recall
-		// starts paying off. Never fully disabled, so the loop can recover.
-		const recallRarelyUseful =
-			this._effectivenessTracker.sampleCount >= 5 && this._effectivenessTracker.usefulLately() < 0.15;
-		return words.length >= (recallRarelyUseful ? 6 : 3);
-	}
-
 	private async _promptUnserialized(text: string, options?: PromptOptions): Promise<void> {
 		const expandPromptTemplates = options?.expandPromptTemplates ?? true;
 		const processSlashCommands = options?.processSlashCommands ?? expandPromptTemplates;
@@ -3515,9 +3299,9 @@ export class AgentSession {
 			// prefetch a relevant <memory_context> page from past sessions and prepend it as data ahead of
 			// the user message. Best-effort and gated: trivial turns are skipped, and providers return ""
 			// (no page) when nothing is relevant — so it stays net-negative and the GC packs stale pages.
-			if (this._shouldAttemptRecall(expandedText)) {
+			if (this._memory.shouldAttemptRecall(expandedText)) {
 				try {
-					const recall = await this._memoryManager.prefetch(expandedText);
+					const recall = await this._memory.getMemoryManager().prefetch(expandedText);
 					if (recall) {
 						injectedRecall = recall;
 						recallQuery = expandedText;
@@ -3607,7 +3391,7 @@ export class AgentSession {
 						.join(" ")
 				: "";
 			if (responseText) {
-				this._effectivenessTracker.recordRecallOutcome(injectedRecall, recallQuery, responseText);
+				this._memory.recordRecallOutcome(injectedRecall, recallQuery, responseText);
 			}
 		}
 
@@ -4746,7 +4530,7 @@ export class AgentSession {
 		await this._extensionRunner.emit(this._sessionStartEvent);
 		await this.extendResourcesFromExtensions(this._sessionStartEvent.reason === "reload" ? "reload" : "startup");
 		// Initialize the memory subsystem after extensions have had a chance to register providers.
-		await this._initializeMemory();
+		await this._memory.initialize();
 	}
 
 	private async extendResourcesFromExtensions(reason: "startup" | "reload"): Promise<void> {
@@ -5108,48 +4892,9 @@ export class AgentSession {
 		}
 	}
 
-	/**
-	 * (Re)build the memory subsystem: a fresh MemoryManager (reload-safe), register the bundled
-	 * file-store + any extension-contributed providers, initialize, then surface the memory tools and
-	 * the frozen system-prompt block. Best-effort: never throws into the session lifecycle.
-	 */
-	private async _initializeMemory(): Promise<void> {
-		try {
-			// Release the previous generation's providers (locks/handles) before recreating, so a
-			// reload does not orphan the old MemoryManager. No-op on first init / for file-store.
-			await this._memoryManager.shutdownAll().catch(() => {});
-			const manager = new MemoryManager();
-			manager.registerProvider(new FileStoreProvider());
-			// Bundled read-only cross-session recall (R3): indexes past-session transcripts and answers
-			// prefetch() with a <memory_context> page. Never writes.
-			manager.registerProvider(new TranscriptRecallProvider());
-			for (const provider of this._pendingMemoryProviders) {
-				try {
-					manager.registerProvider(provider);
-				} catch {
-					// Duplicate name or reserved-tool collision — skip this provider, keep the rest.
-				}
-			}
-			this._memoryManager = manager;
-			await manager.initializeAll(this.sessionManager.getSessionId(), {
-				agentDir: this._agentDir,
-				cwd: this._cwd,
-				isChildSession: this._isChildSession,
-			});
-			// Surface memory tools + the frozen memory block now that providers are initialized.
-			// _refreshToolRegistry() ends in setActiveToolsByName(), which rebuilds AND assigns the
-			// system prompt (including the memory block), so no explicit _rebuildSystemPrompt is needed.
-			this._refreshToolRegistry();
-		} catch (error) {
-			console.error("Memory subsystem init failed:", error instanceof Error ? error.message : String(error));
-		}
-	}
-
 	/** Register a memory provider contributed by an extension; applied on the next memory (re)init. */
 	registerMemoryProvider(provider: MemoryProvider): void {
-		if (!this._pendingMemoryProviders.some((p) => p.name === provider.name)) {
-			this._pendingMemoryProviders.push(provider);
-		}
+		this._memory.registerMemoryProvider(provider);
 	}
 
 	/** R8: the gateway/scheduler registry. A deployment runner registers providers and drives start/stop. */
@@ -5195,10 +4940,13 @@ export class AgentSession {
 				sourceInfo: createSyntheticSourceInfo(`<sdk:${definition.name}>`, { source: "sdk" }),
 			})),
 			// Memory subsystem provider tools (e.g. file-store's `memory` tool).
-			...this._memoryManager.getToolDefinitions().map((definition) => ({
-				definition,
-				sourceInfo: createSyntheticSourceInfo(`<memory:${definition.name}>`, { source: "sdk" }),
-			})),
+			...this._memory
+				.getMemoryManager()
+				.getToolDefinitions()
+				.map((definition) => ({
+					definition,
+					sourceInfo: createSyntheticSourceInfo(`<memory:${definition.name}>`, { source: "sdk" }),
+				})),
 		].filter((tool) => isAllowedTool(tool.definition.name));
 		const definitionRegistry = new Map<string, ToolDefinitionEntry>(
 			Array.from(this._baseToolDefinitions.entries())
@@ -5415,7 +5163,7 @@ export class AgentSession {
 				() => this.getActiveToolNames(),
 				() => this.getAllTools(),
 				(messages) => this.getContextGcReport(messages),
-				() => this._getMemoryAuditDiagnostics(),
+				() => this._memory.getMemoryAuditDiagnostics(),
 			)) {
 				this._baseToolDefinitions.set(definition.name, definition);
 			}
@@ -5544,7 +5292,7 @@ export class AgentSession {
 			try {
 				this._doctorReloadRuntime();
 				// Reload starts memory providers fresh; loaded extensions re-register below.
-				this._pendingMemoryProviders = [];
+				this._memory.clearPendingProviders();
 				const hasBindings =
 					this._extensionUIContext ||
 					this._extensionCommandContextActions ||
@@ -5565,7 +5313,7 @@ export class AgentSession {
 			previousRunner.invalidate();
 			this._resourceLoader.commitReload?.();
 			// Re-derive the memory subsystem from the reloaded settings/providers.
-			await this._initializeMemory();
+			await this._memory.initialize();
 		} catch (error) {
 			if (newRunner && newRunner !== previousRunner) {
 				newRunner.invalidate(
@@ -6684,7 +6432,7 @@ export class AgentSession {
 			recentTurnText: input.recentTurnText,
 			// Read memory FRESH (not the prefix-cache-frozen system-prompt block) so confront-before-write
 			// sees writes made earlier this session.
-			existingMemory: this._memoryManager.buildSystemPromptBlockFresh() || "",
+			existingMemory: this._memory.getMemoryManager().buildSystemPromptBlockFresh() || "",
 			plan,
 			complete,
 		});
@@ -6907,7 +6655,10 @@ export class AgentSession {
 			onUpdate: undefined,
 			ctx: undefined,
 		) => Promise<MemResult>;
-		const memTool = this._memoryManager.getToolDefinitions().find((t) => t.name === "memory");
+		const memTool = this._memory
+			.getMemoryManager()
+			.getToolDefinitions()
+			.find((t) => t.name === "memory");
 		const exec = memTool?.execute as unknown as MemExec | undefined;
 		if (!exec) return false;
 

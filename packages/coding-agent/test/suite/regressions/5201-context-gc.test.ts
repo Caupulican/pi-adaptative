@@ -299,7 +299,9 @@ describe("Context GC", () => {
 	it("session GC merges ACTIVE memory-provider markers dynamically into the semantic scan", () => {
 		const harness = createHarness();
 		try {
-			const manager = (harness.session as unknown as { _memoryManager: unknown })._memoryManager as {
+			const manager = (
+				harness.session as unknown as { _memory: { getMemoryManager(): unknown } }
+			)._memory.getMemoryManager() as {
 				providers: unknown[];
 				activeProviders: Set<string>;
 			};
