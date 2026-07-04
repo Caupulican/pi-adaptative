@@ -1,6 +1,7 @@
 import { existsSync, mkdirSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { basename, join } from "node:path";
+import { type SessionEntry, SessionManager } from "@caupulican/pi-agent-core/node";
 import { getModel, type Usage } from "@caupulican/pi-ai";
 import { afterEach, beforeEach, describe, expect, it } from "vitest";
 import { SPAWNED_USAGE_CUSTOM_TYPE } from "../src/core/agent-session.ts";
@@ -10,7 +11,6 @@ import {
 } from "../src/core/cost/session-usage.ts";
 import { DefaultResourceLoader } from "../src/core/resource-loader.ts";
 import { createAgentSession } from "../src/core/sdk.ts";
-import { type SessionEntry, SessionManager } from "../src/core/session-manager.ts";
 import { SettingsManager } from "../src/core/settings-manager.ts";
 
 /**

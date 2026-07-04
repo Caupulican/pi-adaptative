@@ -2,12 +2,12 @@ import { existsSync, mkdtempSync, readFileSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import type { AgentMessage } from "@caupulican/pi-agent-core";
+import type { SessionEntry } from "@caupulican/pi-agent-core/node";
 import type { AssistantMessage, ToolResultMessage, Usage, UserMessage } from "@caupulican/pi-ai";
 import { afterEach, describe, expect, it } from "vitest";
 import { estimateTokens } from "../../../src/core/compaction/compaction.ts";
 import { applyContextGc } from "../../../src/core/context-gc.ts";
 import { createCoreDiagnosticsToolDefinitions } from "../../../src/core/extensions/builtin.ts";
-import type { SessionEntry } from "../../../src/core/session-manager.ts";
 import { createSyntheticSourceInfo } from "../../../src/core/source-info.ts";
 import { createHarness } from "../../test-harness.ts";
 

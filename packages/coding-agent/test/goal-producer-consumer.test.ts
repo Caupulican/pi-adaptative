@@ -1,8 +1,8 @@
+import { SessionManager } from "@caupulican/pi-agent-core/node";
 import { describe, expect, it } from "vitest";
 import type { ExtensionContext } from "../src/core/extensions/types.ts";
 import { buildGoalRuntimeSnapshot } from "../src/core/goals/goal-runtime-snapshot.ts";
 import { appendGoalStateSnapshot, getLatestGoalStateSnapshot } from "../src/core/goals/session-goal-state.ts";
-import { SessionManager } from "../src/core/session-manager.ts";
 import { createGoalToolDefinition, type GoalToolInput } from "../src/core/tools/goal.ts";
 
 const ctx = undefined as unknown as ExtensionContext;

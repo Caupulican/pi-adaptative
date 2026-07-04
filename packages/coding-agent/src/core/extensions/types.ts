@@ -17,6 +17,13 @@ import type {
 	ToolExecutionMode,
 } from "@caupulican/pi-agent-core";
 import type {
+	BranchSummaryEntry,
+	CompactionEntry,
+	ReadonlySessionManager,
+	SessionEntry,
+	SessionManager,
+} from "@caupulican/pi-agent-core/node";
+import type {
 	Api,
 	AssistantMessageEvent,
 	AssistantMessageEventStream,
@@ -51,13 +58,6 @@ import type { ReadonlyFooterDataProvider } from "../footer-data-provider.ts";
 import type { KeybindingsManager } from "../keybindings.ts";
 import type { MemoryProvider } from "../memory/memory-provider.ts";
 import type { ModelRegistry } from "../model-registry.ts";
-import type {
-	BranchSummaryEntry,
-	CompactionEntry,
-	ReadonlySessionManager,
-	SessionEntry,
-	SessionManager,
-} from "../session-manager.ts";
 import type { SlashCommandInfo } from "../slash-commands.ts";
 import type { SourceInfo } from "../source-info.ts";
 import type { BuildSystemPromptOptions } from "../system-prompt.ts";

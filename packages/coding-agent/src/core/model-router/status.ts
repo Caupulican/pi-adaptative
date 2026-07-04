@@ -1,5 +1,5 @@
+import type { SessionEntry } from "@caupulican/pi-agent-core/node";
 import type { ModelTier, RouteDecision, RouteRisk } from "../autonomy/contracts.ts";
-import type { SessionEntry } from "../session-manager.ts";
 import type { ModelRouterIntent } from "./intent-classifier.ts";
 
 export const MODEL_ROUTER_DECISION_CUSTOM_TYPE = "model_router_decision";

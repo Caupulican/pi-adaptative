@@ -1,9 +1,9 @@
 import type { AgentMessage } from "@caupulican/pi-agent-core";
+import type { SessionContext } from "@caupulican/pi-agent-core/node";
 import type { AssistantMessage, ToolResultMessage, Usage } from "@caupulican/pi-ai";
 import { Container, Text, type TUI } from "@caupulican/pi-tui";
 import { beforeAll, describe, expect, test, vi } from "vitest";
 import type { AgentSessionEvent } from "../../../src/core/agent-session.ts";
-import type { SessionContext } from "../../../src/core/session-manager.ts";
 import type { ToolExecutionComponent } from "../../../src/modes/interactive/components/tool-execution.ts";
 import { ToolPanelRegistry } from "../../../src/modes/interactive/components/tool-panel-registry.ts";
 import { InteractiveMode } from "../../../src/modes/interactive/interactive-mode.ts";

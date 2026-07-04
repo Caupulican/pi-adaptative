@@ -1,6 +1,7 @@
 import { existsSync, mkdirSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
+import { SessionManager } from "@caupulican/pi-agent-core/node";
 import { fauxAssistantMessage, registerFauxProvider } from "@caupulican/pi-ai";
 import { afterEach, describe, expect, it } from "vitest";
 import {
@@ -10,7 +11,6 @@ import {
 	createAgentSessionServices,
 } from "../src/core/agent-session-runtime.ts";
 import { AuthStorage } from "../src/core/auth-storage.ts";
-import { SessionManager } from "../src/core/session-manager.ts";
 import type {
 	ExtensionFactory,
 	SessionBeforeForkEvent,

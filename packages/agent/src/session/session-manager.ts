@@ -1,14 +1,3 @@
-import {
-	type AgentMessage,
-	type BashExecutionMessage,
-	type CustomMessage,
-	compactToolResultDetailsForRetention,
-	createBranchSummaryMessage,
-	createCompactionSummaryMessage,
-	createCustomMessage,
-	uuidv7,
-} from "@caupulican/pi-agent-core";
-import { normalizePath, resolvePath } from "@caupulican/pi-agent-core/node";
 import type { ImageContent, Message, TextContent } from "@caupulican/pi-ai";
 import { randomUUID } from "crypto";
 import {
@@ -28,6 +17,17 @@ import { readdir, stat } from "fs/promises";
 import { join, resolve } from "path";
 import { createInterface } from "readline";
 import { StringDecoder } from "string_decoder";
+import {
+	type BashExecutionMessage,
+	type CustomMessage,
+	createBranchSummaryMessage,
+	createCompactionSummaryMessage,
+	createCustomMessage,
+} from "../messages.ts";
+import type { AgentMessage } from "../types.ts";
+import { normalizePath, resolvePath } from "../utils/paths.ts";
+import { uuidv7 } from "../uuid.ts";
+import { compactToolResultDetailsForRetention } from "./message-retention.ts";
 
 export const CURRENT_SESSION_VERSION = 3;
 

@@ -1,5 +1,5 @@
+import type { SessionEntry, SessionManager } from "@caupulican/pi-agent-core/node";
 import type { EvidenceBundle } from "../autonomy/contracts.ts";
-import type { SessionEntry, SessionManager } from "../session-manager.ts";
 import { cloneEvidenceBundleForStorage, isEvidenceBundle } from "./evidence-bundle.ts";
 
 export const EVIDENCE_BUNDLE_CUSTOM_TYPE = "evidence_bundle";

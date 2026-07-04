@@ -10,13 +10,13 @@
 
 import { readdirSync, statSync } from "node:fs";
 import { join, resolve } from "node:path";
-import { wrapUntrustedText } from "../../security/untrusted-boundary.ts";
 import {
 	type FileEntry,
 	getDefaultSessionDir,
 	isAutoLearnSessionId,
 	loadEntriesFromFile,
-} from "../../session-manager.ts";
+} from "@caupulican/pi-agent-core/node";
+import { wrapUntrustedText } from "../../security/untrusted-boundary.ts";
 import type { MemoryCapabilities, MemoryLifecycleContext, MemoryProvider } from "../memory-provider.ts";
 import { type TranscriptDoc, TranscriptIndex } from "../transcript-index.ts";
 

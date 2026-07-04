@@ -1,8 +1,8 @@
 import * as fs from "node:fs";
 import { basename, join } from "node:path";
+import { loadEntriesFromFile, type SessionEntry } from "@caupulican/pi-agent-core/node";
 import type { AssistantMessage, Usage } from "@caupulican/pi-ai";
 import { SPAWNED_USAGE_CUSTOM_TYPE, type SpawnedUsageReport } from "../agent-session.ts";
-import { loadEntriesFromFile, type SessionEntry } from "../session-manager.ts";
 
 function isUsage(value: unknown): value is Usage {
 	if (!value || typeof value !== "object") return false;

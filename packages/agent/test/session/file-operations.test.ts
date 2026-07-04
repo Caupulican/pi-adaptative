@@ -8,7 +8,7 @@ import {
 	getDefaultSessionDir,
 	loadEntriesFromFile,
 	SessionManager,
-} from "../../src/core/session-manager.ts";
+} from "../../src/session/session-manager.ts";
 
 describe("loadEntriesFromFile", () => {
 	let tempDir: string;

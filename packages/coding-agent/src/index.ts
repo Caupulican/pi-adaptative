@@ -1,6 +1,29 @@
 // Core session management
 
 export { convertToLlm } from "@caupulican/pi-agent-core";
+export {
+	type BranchSummaryEntry,
+	buildSessionContext,
+	type CompactionEntry,
+	CURRENT_SESSION_VERSION,
+	type CustomEntry,
+	type CustomMessageEntry,
+	type FileEntry,
+	getLatestCompactionEntry,
+	type ModelChangeEntry,
+	migrateSessionEntries,
+	type NewSessionOptions,
+	parseSessionEntries,
+	type SessionContext,
+	type SessionEntry,
+	type SessionEntryBase,
+	type SessionHeader,
+	type SessionInfo,
+	type SessionInfoEntry,
+	SessionManager,
+	type SessionMessageEntry,
+	type ThinkingLevelChangeEntry,
+} from "@caupulican/pi-agent-core/node";
 export { type Args, parseArgs } from "./cli/args.ts";
 // Config paths
 export { getAgentDir, VERSION } from "./config.ts";
@@ -260,29 +283,6 @@ export {
 	createWriteTool,
 	type PromptTemplate,
 } from "./core/sdk.ts";
-export {
-	type BranchSummaryEntry,
-	buildSessionContext,
-	type CompactionEntry,
-	CURRENT_SESSION_VERSION,
-	type CustomEntry,
-	type CustomMessageEntry,
-	type FileEntry,
-	getLatestCompactionEntry,
-	type ModelChangeEntry,
-	migrateSessionEntries,
-	type NewSessionOptions,
-	parseSessionEntries,
-	type SessionContext,
-	type SessionEntry,
-	type SessionEntryBase,
-	type SessionHeader,
-	type SessionInfo,
-	type SessionInfoEntry,
-	SessionManager,
-	type SessionMessageEntry,
-	type ThinkingLevelChangeEntry,
-} from "./core/session-manager.ts";
 export {
 	type CompactionSettings,
 	type DirectoryResourceProfileInfo,

@@ -2,7 +2,7 @@ import { mkdirSync, readFileSync, rmSync, writeFileSync } from "fs";
 import { tmpdir } from "os";
 import { join } from "path";
 import { afterEach, beforeEach, describe, expect, it } from "vitest";
-import { CURRENT_SESSION_VERSION, loadEntriesFromFile, SessionManager } from "../../src/core/session-manager.ts";
+import { CURRENT_SESSION_VERSION, loadEntriesFromFile, SessionManager } from "../../src/session/session-manager.ts";
 
 describe("tool result details retention on session load", () => {
 	let tempDir: string;

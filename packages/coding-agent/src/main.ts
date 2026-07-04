@@ -6,6 +6,7 @@
  */
 
 import { createInterface } from "node:readline";
+import { assertValidSessionId, SessionManager } from "@caupulican/pi-agent-core/node";
 import { type ImageContent, modelsAreEqual } from "@caupulican/pi-ai";
 import { ProcessTerminal, setKeybindings, TUI } from "@caupulican/pi-tui";
 import chalk from "chalk";
@@ -46,7 +47,6 @@ import {
 	MissingSessionCwdError,
 	type SessionCwdIssue,
 } from "./core/session-cwd.ts";
-import { assertValidSessionId, SessionManager } from "./core/session-manager.ts";
 import {
 	continueRecentSession,
 	createSession,

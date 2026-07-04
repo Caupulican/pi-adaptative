@@ -1,11 +1,11 @@
 import type { AgentState } from "@caupulican/pi-agent-core";
+import type { SessionEntry, SessionManager } from "@caupulican/pi-agent-core/node";
 import { existsSync, readFileSync, writeFileSync } from "fs";
 import { basename, join } from "path";
 import { APP_NAME, getExportTemplateDir } from "../../config.ts";
 import { getResolvedThemeColors, getThemeExportColors } from "../../modes/interactive/theme/theme.ts";
 import { normalizePath, resolvePath } from "../../utils/paths.ts";
 import type { ToolDefinition } from "../extensions/types.ts";
-import type { SessionEntry, SessionManager } from "../session-manager.ts";
 import { openSession } from "../session-manager-factory.ts";
 
 /**

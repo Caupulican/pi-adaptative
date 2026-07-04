@@ -12,6 +12,7 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import type { AgentTool } from "@caupulican/pi-agent-core";
 import { Agent } from "@caupulican/pi-agent-core";
+import { SessionManager } from "@caupulican/pi-agent-core/node";
 import type {
 	AssistantMessage,
 	AssistantMessageEvent,
@@ -29,7 +30,6 @@ import { createAssistantMessageEventStream } from "@caupulican/pi-ai";
 import { AgentSession, type AgentSessionEvent } from "../src/core/agent-session.ts";
 import { AuthStorage } from "../src/core/auth-storage.ts";
 import { ModelRegistry } from "../src/core/model-registry.ts";
-import { SessionManager } from "../src/core/session-manager.ts";
 import type { Settings } from "../src/core/settings-manager.ts";
 import { SettingsManager } from "../src/core/settings-manager.ts";
 import type { ExtensionFactory, ResourceLoader } from "../src/index.ts";

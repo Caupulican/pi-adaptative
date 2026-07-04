@@ -1,12 +1,12 @@
-import { setKeybindings } from "@caupulican/pi-tui";
-import { beforeAll, beforeEach, describe, expect, test } from "vitest";
-import { KeybindingsManager } from "../src/core/keybindings.ts";
 import type {
 	ModelChangeEntry,
 	SessionEntry,
 	SessionMessageEntry,
 	SessionTreeNode,
-} from "../src/core/session-manager.ts";
+} from "@caupulican/pi-agent-core/node";
+import { setKeybindings } from "@caupulican/pi-tui";
+import { beforeAll, beforeEach, describe, expect, test } from "vitest";
+import { KeybindingsManager } from "../src/core/keybindings.ts";
 import { TreeSelectorComponent } from "../src/modes/interactive/components/tree-selector.ts";
 import { initTheme } from "../src/modes/interactive/theme/theme.ts";
 

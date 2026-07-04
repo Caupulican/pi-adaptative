@@ -1,5 +1,6 @@
 import { join } from "node:path";
 import { Agent, type AgentMessage, convertToLlm, type ThinkingLevel } from "@caupulican/pi-agent-core";
+import { getDefaultSessionDir, SessionManager } from "@caupulican/pi-agent-core/node";
 import { clampThinkingLevel, type Message, type Model, streamSimple } from "@caupulican/pi-ai";
 import { getAgentDir } from "../config.ts";
 import { resolvePath } from "../utils/paths.ts";
@@ -13,7 +14,6 @@ import { findInitialModel, resolveProfileModelSettings } from "./model-resolver.
 import type { ResourceLoader } from "./resource-loader.ts";
 import { DefaultResourceLoader } from "./resource-loader.ts";
 import { parseResourceProfileInput } from "./resource-profile-blocks.ts";
-import { getDefaultSessionDir, SessionManager } from "./session-manager.ts";
 import type { ResourceProfileFilterSettings, ResourceProfileSettings } from "./settings-manager.ts";
 import { SettingsManager } from "./settings-manager.ts";
 import { isInstallTelemetryEnabled } from "./telemetry.ts";

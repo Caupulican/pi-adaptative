@@ -1,6 +1,7 @@
 import { mkdirSync, mkdtempSync, utimesSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
+import type { FileEntry, SessionEntry } from "@caupulican/pi-agent-core/node";
 import type { AssistantMessage, Usage } from "@caupulican/pi-ai";
 import { describe, expect, it } from "vitest";
 import { SPAWNED_USAGE_CUSTOM_TYPE } from "../src/core/agent-session.ts";
@@ -10,7 +11,6 @@ import {
 	aggregateDailyUsageFromSessionRoot,
 	formatDailyUsageBreakdown,
 } from "../src/core/cost/daily-usage.ts";
-import type { FileEntry, SessionEntry } from "../src/core/session-manager.ts";
 
 function usage(costTotal: number): Usage {
 	return {

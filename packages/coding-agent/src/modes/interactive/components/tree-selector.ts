@@ -1,3 +1,4 @@
+import type { SessionTreeNode } from "@caupulican/pi-agent-core/node";
 import {
 	type Component,
 	Container,
@@ -9,7 +10,6 @@ import {
 	TruncatedText,
 	truncateToWidth,
 } from "@caupulican/pi-tui";
-import type { SessionTreeNode } from "../../../core/session-manager.ts";
 import { theme } from "../theme/theme.ts";
 import { DynamicBorder } from "./dynamic-border.ts";
 import { keyHint, keyText } from "./keybinding-hints.ts";

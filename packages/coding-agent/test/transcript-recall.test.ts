@@ -1,9 +1,9 @@
 import { existsSync, mkdirSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
+import { getDefaultSessionDir } from "@caupulican/pi-agent-core/node";
 import { afterEach, beforeEach, describe, expect, it } from "vitest";
 import { TranscriptRecallProvider } from "../src/core/memory/providers/transcript-recall.ts";
-import { getDefaultSessionDir } from "../src/core/session-manager.ts";
 
 /**
  * R3 host integration: TranscriptRecallProvider indexes past-session JSONL transcripts and answers

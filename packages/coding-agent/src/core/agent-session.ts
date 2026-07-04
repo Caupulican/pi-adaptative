@@ -37,6 +37,14 @@ import {
 	RetryController,
 	withStreamIdleWatchdog,
 } from "@caupulican/pi-agent-core";
+import {
+	type BranchSummaryEntry,
+	type CompactionEntry,
+	CURRENT_SESSION_VERSION,
+	getLatestCompactionEntry,
+	type SessionHeader,
+	type SessionManager,
+} from "@caupulican/pi-agent-core/node";
 import type {
 	Api,
 	AssistantMessage,
@@ -257,8 +265,6 @@ import { collectWorkspaceSources } from "./research/workspace-collector.ts";
 import type { ResourceExtensionPaths, ResourceLoader } from "./resource-loader.ts";
 import { stripResourceProfileBlocks } from "./resource-profile-blocks.ts";
 import { classifyToolTrust, UNTRUSTED_BOUNDARY_SYSTEM_RULE, wrapUntrustedText } from "./security/untrusted-boundary.ts";
-import type { BranchSummaryEntry, CompactionEntry, SessionManager } from "./session-manager.ts";
-import { CURRENT_SESSION_VERSION, getLatestCompactionEntry, type SessionHeader } from "./session-manager.ts";
 import {
 	matchesResourceProfilePattern,
 	type ResourceProfileFilterSettings,

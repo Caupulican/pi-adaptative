@@ -1,4 +1,4 @@
-import type { SessionEntry, SessionManager } from "../session-manager.ts";
+import type { SessionEntry, SessionManager } from "@caupulican/pi-agent-core/node";
 import { cloneLaneRecordForStorage, isLaneRecord, type LaneRecord } from "./lane-tracker.ts";
 
 export const LANE_RECORD_CUSTOM_TYPE = "lane_record";

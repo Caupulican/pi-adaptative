@@ -1,4 +1,4 @@
-import type { SessionEntry, SessionManager } from "../session-manager.ts";
+import type { SessionEntry, SessionManager } from "@caupulican/pi-agent-core/node";
 import { cloneGoalStateForStorage, type GoalState, isGoalState } from "./goal-state.ts";
 
 export const GOAL_STATE_CUSTOM_TYPE = "goal_state";

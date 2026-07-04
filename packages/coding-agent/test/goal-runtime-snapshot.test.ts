@@ -1,4 +1,5 @@
 import { Agent } from "@caupulican/pi-agent-core";
+import { SessionManager } from "@caupulican/pi-agent-core/node";
 import { getModel } from "@caupulican/pi-ai";
 import { describe, expect, it } from "vitest";
 import { AgentSession } from "../src/core/agent-session.ts";
@@ -11,7 +12,6 @@ import { appendLearningDecisionSnapshot } from "../src/core/learning/session-lea
 import { ModelRegistry } from "../src/core/model-registry.ts";
 import { createEvidenceBundle } from "../src/core/research/evidence-bundle.ts";
 import { appendEvidenceBundleSnapshot } from "../src/core/research/session-evidence-bundle.ts";
-import { SessionManager } from "../src/core/session-manager.ts";
 import { SettingsManager } from "../src/core/settings-manager.ts";
 import { createTestResourceLoader } from "./utilities.ts";
 

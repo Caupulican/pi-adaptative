@@ -1,3 +1,4 @@
+import { SessionManager } from "@caupulican/pi-agent-core/node";
 import { describe, expect, it } from "vitest";
 import {
 	appendLearningAuditSnapshot,
@@ -10,7 +11,6 @@ import {
 	rollbackPlanForReflectionWrite,
 } from "../src/core/learning/learning-audit.ts";
 import type { ReflectionWrite } from "../src/core/learning/reflection-engine.ts";
-import { SessionManager } from "../src/core/session-manager.ts";
 
 function auditRecord(overrides: Partial<LearningAuditRecord> = {}): LearningAuditRecord {
 	return {

@@ -1,8 +1,8 @@
+import type { SessionEntry } from "@caupulican/pi-agent-core/node";
 import type { EvidenceBundle, LearningDecision, WorkerResult } from "../autonomy/contracts.ts";
 import { getWorkerResultSnapshots } from "../delegation/session-worker-result.ts";
 import { getLearningDecisionSnapshots } from "../learning/session-learning-decision.ts";
 import { getLatestEvidenceBundleSnapshot } from "../research/session-evidence-bundle.ts";
-import type { SessionEntry } from "../session-manager.ts";
 import { evaluateGoalContinuation, type GoalContinuationDecision } from "./goal-continuation-controller.ts";
 import type { GoalState } from "./goal-state.ts";
 import { getLatestGoalStateSnapshot } from "./session-goal-state.ts";

@@ -197,7 +197,7 @@ describe("worker request persistence (G2)", () => {
 		const { appendWorkerResultSnapshot, getWorkerRequestSnapshots, getWorkerResultSnapshots } = await import(
 			"../src/core/delegation/session-worker-result.ts"
 		);
-		const { SessionManager } = await import("../src/core/session-manager.ts");
+		const { SessionManager } = await import("@caupulican/pi-agent-core/node");
 		const sessionManager = SessionManager.inMemory();
 		const request = {
 			id: "wr-1",

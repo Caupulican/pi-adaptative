@@ -1,5 +1,5 @@
+import type { SessionEntry, SessionManager } from "@caupulican/pi-agent-core/node";
 import type { WorkerRequest, WorkerResult } from "../autonomy/contracts.ts";
-import type { SessionEntry, SessionManager } from "../session-manager.ts";
 import { cloneWorkerResultForStorage, isWorkerResult } from "./worker-result.ts";
 
 export const WORKER_RESULT_CUSTOM_TYPE = "worker_result";

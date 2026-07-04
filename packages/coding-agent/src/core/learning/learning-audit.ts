@@ -1,5 +1,5 @@
+import type { SessionEntry, SessionManager } from "@caupulican/pi-agent-core/node";
 import type { LearningDecision } from "../autonomy/contracts.ts";
-import type { SessionEntry, SessionManager } from "../session-manager.ts";
 import type { DurableChangeLayer, DurableChangeProposal } from "./learning-gate.ts";
 import type { ReflectionWrite } from "./reflection-engine.ts";
 

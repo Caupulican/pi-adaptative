@@ -1,10 +1,10 @@
-import { getAgentDir, getSessionsDir } from "../config.ts";
 import {
 	type NewSessionOptions,
 	type SessionInfo,
 	type SessionListProgress,
 	SessionManager,
-} from "./session-manager.ts";
+} from "@caupulican/pi-agent-core/node";
+import { getAgentDir, getSessionsDir } from "../config.ts";
 
 /**
  * Host-layer defaulting for SessionManager.

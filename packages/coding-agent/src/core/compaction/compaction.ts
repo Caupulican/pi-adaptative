@@ -12,9 +12,9 @@ import {
 	createCompactionSummaryMessage,
 	createCustomMessage,
 } from "@caupulican/pi-agent-core";
+import { buildSessionContext, type CompactionEntry, type SessionEntry } from "@caupulican/pi-agent-core/node";
 import type { AssistantMessage, Context, Model, SimpleStreamOptions, Usage } from "@caupulican/pi-ai";
 import { completeSimple } from "@caupulican/pi-ai";
-import { buildSessionContext, type CompactionEntry, type SessionEntry } from "../session-manager.ts";
 import {
 	computeFileLists,
 	createFileOps,

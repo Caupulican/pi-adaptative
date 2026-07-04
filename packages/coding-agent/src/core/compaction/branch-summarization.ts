@@ -12,9 +12,9 @@ import {
 	createCompactionSummaryMessage,
 	createCustomMessage,
 } from "@caupulican/pi-agent-core";
+import type { ReadonlySessionManager, SessionEntry } from "@caupulican/pi-agent-core/node";
 import type { Model } from "@caupulican/pi-ai";
 import { completeSimple } from "@caupulican/pi-ai";
-import type { ReadonlySessionManager, SessionEntry } from "../session-manager.ts";
 import { estimateTokens } from "./compaction.ts";
 import {
 	computeFileLists,

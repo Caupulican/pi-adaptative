@@ -1,3 +1,4 @@
+import type { SessionEntry } from "@caupulican/pi-agent-core/node";
 import { describe, expect, it } from "vitest";
 import type { RouteDecision } from "../src/core/autonomy/contracts.ts";
 import {
@@ -5,7 +6,6 @@ import {
 	getRecentModelRouterDecisions,
 	MODEL_ROUTER_DECISION_CUSTOM_TYPE,
 } from "../src/core/model-router/status.ts";
-import type { SessionEntry } from "../src/core/session-manager.ts";
 
 describe("model router status formatting", () => {
 	it("shows disabled state and configured models", () => {

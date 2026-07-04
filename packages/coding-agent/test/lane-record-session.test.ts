@@ -1,3 +1,4 @@
+import { SessionManager } from "@caupulican/pi-agent-core/node";
 import { describe, expect, it } from "vitest";
 import type { LaneRecord } from "../src/core/autonomy/lane-tracker.ts";
 import {
@@ -5,7 +6,6 @@ import {
 	getLaneRecordSnapshots,
 	LANE_RECORD_CUSTOM_TYPE,
 } from "../src/core/autonomy/session-lane-record.ts";
-import { SessionManager } from "../src/core/session-manager.ts";
 
 function laneRecord(overrides: Partial<LaneRecord> = {}): LaneRecord {
 	return {

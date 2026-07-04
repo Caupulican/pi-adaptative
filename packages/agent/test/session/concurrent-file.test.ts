@@ -2,7 +2,7 @@ import { mkdirSync, rmSync } from "fs";
 import { tmpdir } from "os";
 import { join } from "path";
 import { afterEach, beforeEach, describe, expect, it } from "vitest";
-import { loadEntriesFromFile, SessionManager } from "../../src/core/session-manager.ts";
+import { loadEntriesFromFile, SessionManager } from "../../src/session/session-manager.ts";
 
 function userMessage(text: string) {
 	return { role: "user" as const, content: text, timestamp: Date.now() };

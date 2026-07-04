@@ -9,7 +9,12 @@ import * as os from "node:os";
 import * as path from "node:path";
 import type { AgentMessage } from "@caupulican/pi-agent-core";
 import { createCompactionSummaryMessage } from "@caupulican/pi-agent-core";
-import type { TruncationResult } from "@caupulican/pi-agent-core/node";
+import {
+	isAutoLearnSessionId,
+	type SessionContext,
+	type SessionManager,
+	type TruncationResult,
+} from "@caupulican/pi-agent-core/node";
 import {
 	type AssistantMessage,
 	getProviders,
@@ -107,7 +112,6 @@ import { formatModelFitnessReport, isProbeAllFailed } from "../../core/research/
 import type { ResourceDiagnostic } from "../../core/resource-loader.ts";
 import { resourceProfileSettingsChangedKinds } from "../../core/resource-profile-equality.ts";
 import { formatMissingSessionCwdPrompt, MissingSessionCwdError } from "../../core/session-cwd.ts";
-import { isAutoLearnSessionId, type SessionContext, type SessionManager } from "../../core/session-manager.ts";
 import { listAllSessions, listSessions, openSession } from "../../core/session-manager-factory.ts";
 import type {
 	AutoLearnSettings,

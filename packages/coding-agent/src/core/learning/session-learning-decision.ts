@@ -1,5 +1,5 @@
+import type { SessionEntry, SessionManager } from "@caupulican/pi-agent-core/node";
 import type { LearningDecision } from "../autonomy/contracts.ts";
-import type { SessionEntry, SessionManager } from "../session-manager.ts";
 import { cloneLearningDecisionForStorage, isLearningDecision } from "./learning-gate.ts";
 
 export const LEARNING_DECISION_CUSTOM_TYPE = "learning_decision";

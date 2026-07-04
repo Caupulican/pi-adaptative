@@ -6,6 +6,7 @@ import { chmodSync, existsSync, mkdirSync, readFileSync, rmSync, writeFileSync }
 import { homedir, tmpdir } from "node:os";
 import { dirname, join } from "node:path";
 import { Agent } from "@caupulican/pi-agent-core";
+import { SessionManager } from "@caupulican/pi-agent-core/node";
 import { getModel, type OAuthCredentials, type OAuthProvider } from "@caupulican/pi-ai";
 import { getOAuthApiKey } from "@caupulican/pi-ai/oauth";
 import { AgentSession } from "../src/core/agent-session.ts";
@@ -15,7 +16,6 @@ import type { Extension, ExtensionFactory, LoadExtensionsResult } from "../src/c
 import { createExtensionRuntime, loadExtensionFromFactory } from "../src/core/extensions/loader.ts";
 import { ModelRegistry } from "../src/core/model-registry.ts";
 import type { ResourceLoader } from "../src/core/resource-loader.ts";
-import { SessionManager } from "../src/core/session-manager.ts";
 import { SettingsManager } from "../src/core/settings-manager.ts";
 import { createCodingTools } from "../src/index.ts";
 
