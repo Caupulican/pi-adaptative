@@ -5,16 +5,16 @@
  * and after compaction the session is reloaded.
  */
 
-import type { AgentMessage, StreamFn, ThinkingLevel } from "@caupulican/pi-agent-core";
+import type { AssistantMessage, Context, Model, SimpleStreamOptions, Usage } from "@caupulican/pi-ai";
+import { completeSimple } from "@caupulican/pi-ai";
 import {
 	convertToLlm,
 	createBranchSummaryMessage,
 	createCompactionSummaryMessage,
 	createCustomMessage,
-} from "@caupulican/pi-agent-core";
-import { buildSessionContext, type CompactionEntry, type SessionEntry } from "@caupulican/pi-agent-core/node";
-import type { AssistantMessage, Context, Model, SimpleStreamOptions, Usage } from "@caupulican/pi-ai";
-import { completeSimple } from "@caupulican/pi-ai";
+} from "../messages.ts";
+import { buildSessionContext, type CompactionEntry, type SessionEntry } from "../session/session-manager.ts";
+import type { AgentMessage, StreamFn, ThinkingLevel } from "../types.ts";
 import {
 	computeFileLists,
 	createFileOps,

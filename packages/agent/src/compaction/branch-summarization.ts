@@ -5,16 +5,16 @@
  * a summary of the branch being left so context isn't lost.
  */
 
-import type { AgentMessage } from "@caupulican/pi-agent-core";
+import type { Model } from "@caupulican/pi-ai";
+import { completeSimple } from "@caupulican/pi-ai";
 import {
 	convertToLlm,
 	createBranchSummaryMessage,
 	createCompactionSummaryMessage,
 	createCustomMessage,
-} from "@caupulican/pi-agent-core";
-import type { ReadonlySessionManager, SessionEntry } from "@caupulican/pi-agent-core/node";
-import type { Model } from "@caupulican/pi-ai";
-import { completeSimple } from "@caupulican/pi-ai";
+} from "../messages.ts";
+import type { ReadonlySessionManager, SessionEntry } from "../session/session-manager.ts";
+import type { AgentMessage } from "../types.ts";
 import { estimateTokens } from "./compaction.ts";
 import {
 	computeFileLists,

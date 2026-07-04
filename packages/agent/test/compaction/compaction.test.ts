@@ -1,14 +1,3 @@
-import type { AgentMessage } from "@caupulican/pi-agent-core";
-import {
-	buildSessionContext,
-	type CompactionEntry,
-	type ModelChangeEntry,
-	migrateSessionEntries,
-	parseSessionEntries,
-	type SessionEntry,
-	type SessionMessageEntry,
-	type ThinkingLevelChangeEntry,
-} from "@caupulican/pi-agent-core/node";
 import type { AssistantMessage, Usage } from "@caupulican/pi-ai";
 import { getModel } from "@caupulican/pi-ai";
 import { readFileSync } from "fs";
@@ -24,7 +13,18 @@ import {
 	getLastAssistantUsage,
 	prepareCompaction,
 	shouldCompact,
-} from "../src/core/compaction/index.ts";
+} from "../../src/compaction/index.ts";
+import {
+	buildSessionContext,
+	type CompactionEntry,
+	type ModelChangeEntry,
+	migrateSessionEntries,
+	parseSessionEntries,
+	type SessionEntry,
+	type SessionMessageEntry,
+	type ThinkingLevelChangeEntry,
+} from "../../src/session/session-manager.ts";
+import type { AgentMessage } from "../../src/types.ts";
 
 // ============================================================================
 // Test fixtures

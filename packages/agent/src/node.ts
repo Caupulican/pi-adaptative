@@ -1,3 +1,5 @@
+// Compaction + branch summarization (Node-only: transitively imports session storage via buildSessionContext)
+export * from "./compaction/index.ts";
 export * from "./index.ts";
 export * from "./reliability/node.ts";
 // Session storage (Node-only: fs/readline)

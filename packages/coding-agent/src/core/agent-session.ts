@@ -40,10 +40,19 @@ import {
 import {
 	type BranchSummaryEntry,
 	type CompactionEntry,
+	type CompactionResult,
+	type CompactionSettings,
 	CURRENT_SESSION_VERSION,
+	calculateContextTokens,
+	collectEntriesForBranchSummary,
+	compact,
+	estimateContextTokens,
+	generateBranchSummary,
 	getLatestCompactionEntry,
+	prepareCompaction,
 	type SessionHeader,
 	type SessionManager,
+	shouldCompact,
 } from "@caupulican/pi-agent-core/node";
 import type {
 	Api,
@@ -99,17 +108,6 @@ import {
 	redactTelemetryValue,
 } from "./autonomy/telemetry-events.ts";
 import { type BashResult, executeBashWithOperations } from "./bash-executor.ts";
-import {
-	type CompactionResult,
-	type CompactionSettings,
-	calculateContextTokens,
-	collectEntriesForBranchSummary,
-	compact,
-	estimateContextTokens,
-	generateBranchSummary,
-	prepareCompaction,
-	shouldCompact,
-} from "./compaction/index.ts";
 // (module-scope helper for curation goal extraction defined below the imports)
 import { BrainCurator, type CurationTelemetrySnapshot, preDigestConversationText } from "./context/brain-curator.ts";
 import { type ArtifactStore, createFileArtifactStore } from "./context/context-artifacts.ts";

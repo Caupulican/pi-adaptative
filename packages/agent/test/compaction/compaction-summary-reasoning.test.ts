@@ -1,7 +1,7 @@
-import type { AgentMessage } from "@caupulican/pi-agent-core";
 import type { AssistantMessage, Model } from "@caupulican/pi-ai";
 import { beforeEach, describe, expect, it, vi } from "vitest";
-import { type CompactionPreparation, compact, generateSummary } from "../src/core/compaction/index.ts";
+import { type CompactionPreparation, compact, generateSummary } from "../../src/compaction/index.ts";
+import type { AgentMessage } from "../../src/types.ts";
 
 const { completeSimpleMock } = vi.hoisted(() => ({
 	completeSimpleMock: vi.fn(),

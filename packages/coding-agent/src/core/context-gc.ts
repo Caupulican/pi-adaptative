@@ -2,9 +2,9 @@ import { createHash } from "node:crypto";
 import { existsSync, mkdirSync, writeFileSync } from "node:fs";
 import { isAbsolute, resolve } from "node:path";
 import type { AgentMessage } from "@caupulican/pi-agent-core";
+import { estimateTokens } from "@caupulican/pi-agent-core/node";
 import type { ToolResultMessage } from "@caupulican/pi-ai";
 import { normalizePath } from "../utils/paths.ts";
-import { estimateTokens } from "./compaction/compaction.ts";
 
 export interface SemanticMemoryGcSettings {
 	enabled?: boolean;

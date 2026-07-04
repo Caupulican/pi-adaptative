@@ -2,6 +2,7 @@
  * Core modules shared between all run modes.
  */
 
+export type { CompactionResult } from "@caupulican/pi-agent-core/node";
 export {
 	AgentSession,
 	type AgentSessionConfig,
@@ -26,7 +27,6 @@ export {
 	createAgentSessionServices,
 } from "./agent-session-services.ts";
 export { type BashExecutorOptions, type BashResult, executeBashWithOperations } from "./bash-executor.ts";
-export type { CompactionResult } from "./compaction/index.ts";
 export { createEventBus, type EventBus, type EventBusController } from "./event-bus.ts";
 // Extensions system
 export {

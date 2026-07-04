@@ -4,9 +4,8 @@ import {
 	createCompactionSummaryMessage,
 	createCustomMessage,
 } from "@caupulican/pi-agent-core";
-import type { CompactionEntry, SessionEntry } from "@caupulican/pi-agent-core/node";
+import { type CompactionEntry, estimateTokens, type SessionEntry } from "@caupulican/pi-agent-core/node";
 import { Type } from "typebox";
-import { estimateTokens } from "../compaction/compaction.ts";
 import type { MemoryPromptInclusionReport, MemoryRetrievalDiagnostics } from "../context/memory-diagnostics.ts";
 import type { ContextGcReport } from "../context-gc.ts";
 import type { ToolDefinition, ToolInfo } from "./types.ts";

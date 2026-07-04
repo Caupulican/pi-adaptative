@@ -1,19 +1,38 @@
 // Core session management
 
 export { convertToLlm } from "@caupulican/pi-agent-core";
+// Compaction
 export {
+	type BranchPreparation,
 	type BranchSummaryEntry,
+	type BranchSummaryResult,
 	buildSessionContext,
+	type CollectEntriesResult,
 	type CompactionEntry,
+	type CompactionResult,
 	CURRENT_SESSION_VERSION,
 	type CustomEntry,
 	type CustomMessageEntry,
+	type CutPointResult,
+	calculateContextTokens,
+	collectEntriesForBranchSummary,
+	compact,
+	DEFAULT_COMPACTION_SETTINGS,
+	estimateTokens,
 	type FileEntry,
+	type FileOperations,
+	findCutPoint,
+	findTurnStartIndex,
+	type GenerateBranchSummaryOptions,
+	generateBranchSummary,
+	generateSummary,
+	getLastAssistantUsage,
 	getLatestCompactionEntry,
 	type ModelChangeEntry,
 	migrateSessionEntries,
 	type NewSessionOptions,
 	parseSessionEntries,
+	prepareBranchEntries,
 	type SessionContext,
 	type SessionEntry,
 	type SessionEntryBase,
@@ -22,6 +41,8 @@ export {
 	type SessionInfoEntry,
 	SessionManager,
 	type SessionMessageEntry,
+	serializeConversation,
+	shouldCompact,
 	type ThinkingLevelChangeEntry,
 } from "@caupulican/pi-agent-core/node";
 export { type Args, parseArgs } from "./cli/args.ts";
@@ -49,29 +70,6 @@ export {
 	InMemoryAuthStorageBackend,
 	type OAuthCredential,
 } from "./core/auth-storage.ts";
-// Compaction
-export {
-	type BranchPreparation,
-	type BranchSummaryResult,
-	type CollectEntriesResult,
-	type CompactionResult,
-	type CutPointResult,
-	calculateContextTokens,
-	collectEntriesForBranchSummary,
-	compact,
-	DEFAULT_COMPACTION_SETTINGS,
-	estimateTokens,
-	type FileOperations,
-	findCutPoint,
-	findTurnStartIndex,
-	type GenerateBranchSummaryOptions,
-	generateBranchSummary,
-	generateSummary,
-	getLastAssistantUsage,
-	prepareBranchEntries,
-	serializeConversation,
-	shouldCompact,
-} from "./core/compaction/index.ts";
 export { createEventBus, type EventBus, type EventBusController } from "./core/event-bus.ts";
 // Extension system
 export type {

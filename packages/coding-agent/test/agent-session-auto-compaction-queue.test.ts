@@ -12,7 +12,8 @@ import { ModelRegistry } from "../src/core/model-registry.ts";
 import { SettingsManager } from "../src/core/settings-manager.ts";
 import { createTestResourceLoader } from "./utilities.ts";
 
-vi.mock("../src/core/compaction/index.js", () => ({
+vi.mock("@caupulican/pi-agent-core/node", async (importOriginal) => ({
+	...(await importOriginal<typeof import("@caupulican/pi-agent-core/node")>()),
 	calculateContextTokens: (usage: {
 		input: number;
 		output: number;

@@ -2,8 +2,8 @@
  * Shared utilities for compaction and branch summarization.
  */
 
-import type { AgentMessage } from "@caupulican/pi-agent-core";
 import type { Message } from "@caupulican/pi-ai";
+import type { AgentMessage } from "../types.ts";
 
 // ============================================================================
 // File Operation Tracking

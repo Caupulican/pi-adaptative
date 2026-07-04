@@ -6,10 +6,10 @@
  */
 
 import type { AgentMessage, ThinkingLevel } from "@caupulican/pi-agent-core";
+import type { CompactionResult } from "@caupulican/pi-agent-core/node";
 import type { ImageContent, Model } from "@caupulican/pi-ai";
 import type { SessionStats } from "../../core/agent-session.ts";
 import type { BashResult } from "../../core/bash-executor.ts";
-import type { CompactionResult } from "../../core/compaction/index.ts";
 import type { SourceInfo } from "../../core/source-info.ts";
 
 // ============================================================================
