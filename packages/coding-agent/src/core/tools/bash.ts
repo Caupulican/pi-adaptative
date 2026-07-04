@@ -17,6 +17,7 @@ import {
 	untrackDetachedChildPid,
 } from "../../utils/shell.ts";
 import type { ToolDefinition, ToolRenderResultOptions } from "../extensions/types.ts";
+import { withExclusiveMutationBarrier } from "./file-mutation-queue.ts";
 import { classifyGitCommand, executeFilteredGit } from "./git-filter.ts";
 import { OutputAccumulator } from "./output-accumulator.ts";
 import { getTextOutput, invalidArgText, str } from "./render-utils.ts";
@@ -631,12 +632,17 @@ export function createBashToolDefinition(
 
 				let exitCode: number | null;
 				try {
-					const result = await ops.exec(spawnContext.command, spawnContext.cwd, {
-						onData: handleData,
-						signal,
-						timeout,
-						env: spawnContext.env,
-					});
+					// Bash cannot statically declare which files a command mutates, so the
+					// actual shell execution takes the coarse exclusive barrier: it waits for
+					// in-flight edit/write mutations to drain and blocks new ones meanwhile.
+					const result = await withExclusiveMutationBarrier(() =>
+						ops.exec(spawnContext.command, spawnContext.cwd, {
+							onData: handleData,
+							signal,
+							timeout,
+							env: spawnContext.env,
+						}),
+					);
 					exitCode = result.exitCode;
 				} catch (err) {
 					const snapshot = await finishOutput();

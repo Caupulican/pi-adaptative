@@ -9,6 +9,13 @@
   bash tool.
 
 ### Fixed
+- Bash commands could previously race file-tool (`edit`/`write`) mutations: because a shell command
+  cannot statically declare which files it touches, it wasn't serialized against them at all. The
+  bash tool's foreground command execution now goes through a readers-writer barrier shared with
+  `withFileMutationQueue`: file mutations are readers (still parallel with each other across
+  different files), and bash is the sole writer — it waits for all in-flight/queued file mutations
+  to drain, then runs exclusively while blocking new ones, and queues FIFO against other bash
+  invocations. New `withExclusiveMutationBarrier` in `file-mutation-queue.ts`.
 - `execCommand`'s kill path (used by aborted/timed-out commands, including extensions' `ctx.exec`)
   now actually escalates to SIGKILL: it previously gated escalation on `ChildProcess.killed`, which
   Node sets the moment a signal is *sent* rather than when the process dies, so a child trapping
