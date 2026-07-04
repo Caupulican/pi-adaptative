@@ -1,6 +1,6 @@
 import { describe, expect, it, vi } from "vitest";
 import type { NormalizedProfile } from "../src/core/profile-registry.ts";
-import { InteractiveMode } from "../src/modes/interactive/interactive-mode.ts";
+import { ProfileMenuController } from "../src/modes/interactive/profile-menu-controller.ts";
 
 type ProfileApplyContext = {
 	settingsManager: {
@@ -28,25 +28,25 @@ type ProfileApplyContext = {
 		) => void;
 		setThinkingLevel: (thinking: string, options?: { persistSettings?: boolean }) => void;
 	};
-	handleReloadCommand: () => Promise<void>;
-	footerDataProvider: {
-		setExtensionStatus: (statusType: string, value: string) => void;
+	ui: {
+		handleReloadCommand: () => Promise<void>;
+		footerDataProvider: {
+			setExtensionStatus: (statusType: string, value: string) => void;
+		};
+		invalidateFooter: () => void;
+		updateEditorBorderColor: () => void;
+		showStatus: (message: string) => void;
+		showError: (message: string) => void;
+		maybeWarnAboutAnthropicSubscriptionAuth: (model: { provider: string; id: string; name?: string }) => void;
+		checkDaxnutsEasterEgg: (model: { provider: string; id: string; name?: string }) => void;
 	};
-	footer: {
-		invalidate: () => void;
-	};
-	updateEditorBorderColor: () => void;
-	showStatus: (message: string) => void;
-	showError: (message: string) => void;
-	maybeWarnAboutAnthropicSubscriptionAuth: (model: { provider: string; id: string; name?: string }) => void;
-	checkDaxnutsEasterEgg: (model: { provider: string; id: string; name?: string }) => void;
 };
 
 type InteractiveModeProfilePrototype = {
 	applyProfile(this: ProfileApplyContext, profileName: string): Promise<void>;
 };
 
-const interactiveModePrototype = InteractiveMode.prototype as unknown as InteractiveModeProfilePrototype;
+const profileMenuPrototype = ProfileMenuController.prototype as unknown as InteractiveModeProfilePrototype;
 
 describe("InteractiveMode /profiles", () => {
 	it("resolves relative profile refs from cwd before applying", async () => {
@@ -88,17 +88,19 @@ describe("InteractiveMode /profiles", () => {
 				setModel: vi.fn(),
 				setThinkingLevel: vi.fn(),
 			},
-			handleReloadCommand,
-			footerDataProvider: { setExtensionStatus: vi.fn() },
-			footer: { invalidate: vi.fn() },
-			updateEditorBorderColor: vi.fn(),
-			showStatus,
-			showError,
-			maybeWarnAboutAnthropicSubscriptionAuth: vi.fn(),
-			checkDaxnutsEasterEgg: vi.fn(),
+			ui: {
+				handleReloadCommand,
+				footerDataProvider: { setExtensionStatus: vi.fn() },
+				invalidateFooter: vi.fn(),
+				updateEditorBorderColor: vi.fn(),
+				showStatus,
+				showError,
+				maybeWarnAboutAnthropicSubscriptionAuth: vi.fn(),
+				checkDaxnutsEasterEgg: vi.fn(),
+			},
 		};
 
-		await interactiveModePrototype.applyProfile.call(context, "./reviewer.json");
+		await profileMenuPrototype.applyProfile.call(context, "./reviewer.json");
 
 		expect(profileRegistryResolve).toHaveBeenCalledWith("./reviewer.json", "/tmp/workspace");
 		expect(context.settingsManager.setRuntimeResourceProfiles).toHaveBeenCalledWith(["reviewer"]);
@@ -148,17 +150,19 @@ describe("InteractiveMode /profiles", () => {
 				setModel: vi.fn(),
 				setThinkingLevel: vi.fn(),
 			},
-			handleReloadCommand,
-			footerDataProvider: { setExtensionStatus: vi.fn() },
-			footer: { invalidate: vi.fn() },
-			updateEditorBorderColor: vi.fn(),
-			showStatus,
-			showError,
-			maybeWarnAboutAnthropicSubscriptionAuth: vi.fn(),
-			checkDaxnutsEasterEgg: vi.fn(),
+			ui: {
+				handleReloadCommand,
+				footerDataProvider: { setExtensionStatus: vi.fn() },
+				invalidateFooter: vi.fn(),
+				updateEditorBorderColor: vi.fn(),
+				showStatus,
+				showError,
+				maybeWarnAboutAnthropicSubscriptionAuth: vi.fn(),
+				checkDaxnutsEasterEgg: vi.fn(),
+			},
 		};
 
-		await interactiveModePrototype.applyProfile.call(context, "core-setup");
+		await profileMenuPrototype.applyProfile.call(context, "core-setup");
 
 		expect(getProfile).toHaveBeenCalledWith("core-setup");
 		expect(resolveProfileRef).not.toHaveBeenCalled();
@@ -213,17 +217,19 @@ describe("InteractiveMode /profiles", () => {
 				setModel,
 				setThinkingLevel,
 			},
-			handleReloadCommand,
-			footerDataProvider: { setExtensionStatus: vi.fn() },
-			footer: { invalidate: vi.fn() },
-			updateEditorBorderColor: vi.fn(),
-			showStatus,
-			showError,
-			maybeWarnAboutAnthropicSubscriptionAuth: vi.fn(),
-			checkDaxnutsEasterEgg: vi.fn(),
+			ui: {
+				handleReloadCommand,
+				footerDataProvider: { setExtensionStatus: vi.fn() },
+				invalidateFooter: vi.fn(),
+				updateEditorBorderColor: vi.fn(),
+				showStatus,
+				showError,
+				maybeWarnAboutAnthropicSubscriptionAuth: vi.fn(),
+				checkDaxnutsEasterEgg: vi.fn(),
+			},
 		};
 
-		await interactiveModePrototype.applyProfile.call(context, "runtime-model");
+		await profileMenuPrototype.applyProfile.call(context, "runtime-model");
 
 		expect(modelRegistryRefresh).toHaveBeenCalledTimes(1);
 		expect(setModel).toHaveBeenCalledWith(

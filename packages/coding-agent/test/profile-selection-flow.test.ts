@@ -1,9 +1,9 @@
 import { describe, expect, it, vi } from "vitest";
 import { SettingsManager } from "../src/core/settings-manager.ts";
-import { InteractiveMode } from "../src/modes/interactive/interactive-mode.ts";
+import { ProfileMenuController } from "../src/modes/interactive/profile-menu-controller.ts";
 import { createTestResourceLoader } from "./utilities.ts";
 
-const prototype = InteractiveMode.prototype as unknown as {
+const prototype = ProfileMenuController.prototype as unknown as {
 	getProfileResourceKinds(this: unknown): Promise<Array<{ kind: string; items: unknown[] }>>;
 	applyProfile(this: unknown, profileName: string): Promise<void>;
 };
@@ -36,13 +36,15 @@ describe("profile selection persistence", () => {
 				setModel: vi.fn(async () => {}),
 				setThinkingLevel: vi.fn(),
 			},
-			handleReloadCommand: vi.fn(async () => {}),
-			footerDataProvider: { setExtensionStatus: vi.fn() },
-			footer: { invalidate: vi.fn() },
-			updateEditorBorderColor: vi.fn(),
-			showStatus: vi.fn(),
-			showError: vi.fn(),
-			showWarning: vi.fn(),
+			ui: {
+				handleReloadCommand: vi.fn(async () => {}),
+				footerDataProvider: { setExtensionStatus: vi.fn() },
+				invalidateFooter: vi.fn(),
+				updateEditorBorderColor: vi.fn(),
+				showStatus: vi.fn(),
+				showError: vi.fn(),
+				showWarning: vi.fn(),
+			},
 		};
 	}
 
