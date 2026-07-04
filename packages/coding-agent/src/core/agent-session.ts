@@ -13,7 +13,6 @@
  * Modes use this class and add their own I/O layer on top.
  */
 import { readFileSync } from "node:fs";
-import { totalmem } from "node:os";
 import { basename, dirname, join } from "node:path";
 import type {
 	Agent,
@@ -27,7 +26,6 @@ import type {
 	ThinkingLevel,
 } from "@caupulican/pi-agent-core";
 import {
-	type BashExecutionMessage,
 	type CustomMessage,
 	classifyFailure,
 	compactToolResultDetailsForRetention,
@@ -61,14 +59,7 @@ import type {
 	TextContent,
 	Usage,
 } from "@caupulican/pi-ai";
-import {
-	clampThinkingLevel,
-	cleanupSessionResources,
-	getSupportedThinkingLevels,
-	isContextOverflow,
-	modelsAreEqual,
-	streamSimple,
-} from "@caupulican/pi-ai";
+import { cleanupSessionResources, isContextOverflow, streamSimple } from "@caupulican/pi-ai";
 import { getAgentDir } from "../config.ts";
 import { stripFrontmatter } from "../utils/frontmatter.ts";
 import { formatNoApiKeyFoundMessage, formatNoModelSelectedMessage } from "./auth-guidance.ts";
@@ -88,7 +79,8 @@ import type { AutonomyDiagnosticSnapshot, AutonomyStatusSnapshot, GateOutcomeHis
 import type { AutonomyTelemetryEvent } from "./autonomy/telemetry-events.ts";
 import { AutonomyTelemetry } from "./autonomy-telemetry.ts";
 import { BackgroundLaneController } from "./background-lane-controller.ts";
-import { type BashResult, executeBashWithOperations } from "./bash-executor.ts";
+import { BashExecutionController } from "./bash-execution-controller.ts";
+import type { BashResult } from "./bash-executor.ts";
 // (module-scope helper for curation goal extraction defined below the imports)
 import type { CurationTelemetrySnapshot } from "./context/brain-curator.ts";
 import type { ArtifactStore } from "./context/context-artifacts.ts";
@@ -106,7 +98,6 @@ import type { ContextGcReport } from "./context-gc.ts";
 import { ContextPipeline } from "./context-pipeline.ts";
 import type { DailyUsageTotals } from "./cost/daily-usage.ts";
 import { type CostGuardDecision, downgradeReasoning, estimateTurnCostUsd, evaluateCostGuard } from "./cost-guard.ts";
-import { DEFAULT_THINKING_LEVEL } from "./defaults.ts";
 import { appendWorkerResultSnapshot, getWorkerResultSnapshots } from "./delegation/session-worker-result.ts";
 import type { WorkerRunOutcome } from "./delegation/worker-runner.ts";
 import type {
@@ -158,13 +149,12 @@ import {
 import type { ModelRegistry } from "./model-registry.ts";
 import { resolveCliModel, resolveProfileModelSettings } from "./model-resolver.ts";
 import { formatModelRouterModel, ModelRouterController } from "./model-router-controller.ts";
-import { FitnessStore, type StoredFitnessReport } from "./models/fitness-store.ts";
-import { OLLAMA_PROVIDER } from "./models/local-registration.ts";
+import { ModelSelectionController } from "./model-selection-controller.ts";
+import type { StoredFitnessReport } from "./models/fitness-store.ts";
 import type { LocalRuntimeDeps, OllamaRuntime } from "./models/local-runtime.ts";
-import { matchesInstalledLocalModel } from "./models/model-ref.ts";
 import { expandPromptTemplate, type PromptTemplate } from "./prompt-templates.ts";
 import { ReflectionController } from "./reflection-controller.ts";
-import { isProbeAllFailed, type ModelFitnessReport } from "./research/model-fitness.ts";
+import type { ModelFitnessReport } from "./research/model-fitness.ts";
 import type { ResearchRunResult } from "./research/research-runner.ts";
 import {
 	appendEvidenceBundleSnapshot,
@@ -185,7 +175,7 @@ import {
 } from "./settings-manager.ts";
 import type { SlashCommandInfo } from "./slash-commands.ts";
 import { SystemPromptBuilder } from "./system-prompt-builder.ts";
-import { type BashOperations, createLocalBashOperations } from "./tools/bash.ts";
+import type { BashOperations } from "./tools/bash.ts";
 
 // ============================================================================
 // Stream-idle watchdog wiring
@@ -521,9 +511,6 @@ export interface GoalContinuationLoopResult {
 // Constants
 // ============================================================================
 
-/** Standard thinking levels */
-const THINKING_LEVELS: ThinkingLevel[] = ["off", "minimal", "low", "medium", "high"];
-
 // ============================================================================
 // AgentSession Class
 // ============================================================================
@@ -573,8 +560,11 @@ export class AgentSession {
 	private _retryController!: RetryController;
 
 	// Bash execution state
-	private _bashAbortController: AbortController | undefined = undefined;
-	private _pendingBashMessages: BashExecutionMessage[] = [];
+	/** User-facing model + thinking-level selection (see model-selection-controller.ts). */
+	private readonly _modelSelection: ModelSelectionController;
+	/** Standalone bash-command execution (see bash-execution-controller.ts); owns the bash abort
+	 * controller and the streaming-deferred pending-message queue. */
+	private readonly _bash: BashExecutionController;
 
 	// Extension system
 	private _extensionRunner!: ExtensionRunner;
@@ -929,6 +919,31 @@ export class AgentSession {
 			setBranchSummaryAbort: (controller) => {
 				this._branchSummaryAbortController = controller;
 			},
+		});
+		this._modelSelection = new ModelSelectionController({
+			getAgent: () => this.agent,
+			getModel: () => this.model,
+			getThinkingLevel: () => this.thinkingLevel,
+			getModelRegistry: () => this._modelRegistry,
+			getSessionManager: () => this.sessionManager,
+			getSettingsManager: () => this.settingsManager,
+			getExtensionRunner: () => this._extensionRunner,
+			getAgentDir: () => this._agentDir,
+			getScopedModels: () => this._scopedModels,
+			getRequestedActiveToolNames: () => this._requestedActiveToolNames,
+			getActiveToolNames: () => this.getActiveToolNames(),
+			setActiveToolsByName: (names) => this.setActiveToolsByName(names),
+			getModelCapabilityProfile: () => this.getModelCapabilityProfile(),
+			emit: (event) => this._emit(event),
+			checkContextWindowUsageWarning: () => this._checkContextWindowUsageWarning(),
+			deriveOllamaServerUrl: (baseUrl) => this._deriveOllamaServerUrl(baseUrl),
+			getLocalRuntime: (serverUrl) => this.getLocalRuntime(serverUrl),
+		});
+		this._bash = new BashExecutionController({
+			getAgent: () => this.agent,
+			getSessionManager: () => this.sessionManager,
+			getSettingsManager: () => this.settingsManager,
+			isStreaming: () => this.isStreaming,
 		});
 
 		// Always subscribe to agent events for internal handling
@@ -2780,258 +2795,32 @@ export class AgentSession {
 	// Model Management
 	// =========================================================================
 
-	private async _emitModelSelect(
-		nextModel: Model<any>,
-		previousModel: Model<any> | undefined,
-		source: "set" | "cycle" | "restore",
-	): Promise<void> {
-		if (modelsAreEqual(previousModel, nextModel)) return;
-		await this._extensionRunner.emit({
-			type: "model_select",
-			model: nextModel,
-			previousModel,
-			source,
-		});
-	}
-
-	/**
-	 * Set model directly.
-	 * Validates that auth is configured, saves to session and settings.
-	 * @throws Error if no auth is configured for the model
-	 */
 	async setModel(model: Model<any>, options: { persistSettings?: boolean } = {}): Promise<void> {
-		if (!this._modelRegistry.hasConfiguredAuth(model)) {
-			throw new Error(`No API key for ${model.provider}/${model.id}`);
-		}
-
-		const persistSettings = options.persistSettings ?? true;
-		const previousModel = this.model;
-		const thinkingLevel = this._getThinkingLevelForModelSwitch();
-		this.agent.state.model = model;
-		this.sessionManager.appendModelChange(model.provider, model.id);
-		if (persistSettings) {
-			this.settingsManager.setDefaultModelAndProvider(model.provider, model.id);
-		}
-
-		// Re-clamp thinking level for new model's capabilities
-		this.setThinkingLevel(thinkingLevel, { persistSettings });
-
-		await this._emitModelSelect(model, previousModel, "set");
-		this._checkContextWindowUsageWarning();
-		await this._warnIfManualModelChoiceIsRisky(model);
-
-		// Re-derive the model-capability tool surface for the new model (restores the full requested
-		// set when moving small -> large, reduces it when moving large -> small).
-		if (this._requestedActiveToolNames) {
-			const before = this.getActiveToolNames().join(",");
-			this.setActiveToolsByName(this._requestedActiveToolNames);
-			const capability = this.getModelCapabilityProfile();
-			if (capability.class !== "full" && this.getActiveToolNames().join(",") !== before) {
-				this._emit({
-					type: "warning",
-					message: `Small-context model detected (${capability.contextWindow ?? "unknown"} tokens, class '${capability.class}'): active tools reduced to [${this.getActiveToolNames().join(", ")}]; background lanes ${capability.backgroundLanesEnabled ? "enabled" : "disabled"}.`,
-				});
-			}
-		}
+		return this._modelSelection.setModel(model, options);
 	}
 
-	/**
-	 * Manual model choice is a deliberate human decision, not an auto-adoption flow — it is
-	 * ADVISORY ONLY: warn on evidence the model is a bad fit, but never block and never prompt
-	 * (print/RPC modes only ever see plain warning text through the existing `warning` event, the
-	 * same channel `_checkContextWindowUsageWarning` above uses). Two independent checks, both
-	 * best-effort:
-	 *  - a recorded all-lanes-failed fitness probe on THIS host (see `isProbeAllFailed`);
-	 *  - for an Ollama-served local model, weights that exceed ~90% of total system memory, which
-	 *    is the exact failure the OOM report reproduced (llama-server needs the whole model resident).
-	 */
-	private async _warnIfManualModelChoiceIsRisky(model: Model<Api>): Promise<void> {
-		const canonicalRef = `${model.provider}/${model.id}`;
-		try {
-			const fitness = FitnessStore.forAgentDir(this._agentDir)
-				.getForHost()
-				.find((entry) => entry.model === canonicalRef);
-			if (fitness && isProbeAllFailed(fitness.report)) {
-				this._emit({
-					type: "warning",
-					message: `${canonicalRef} failed its fitness probe on all surfaces on this host (probed ${fitness.at}) — it is likely to fail in production too. Proceeding because you set it manually.`,
-				});
-			}
-		} catch {
-			// advisory only; a lookup failure must never block a manual model choice
-		}
-
-		if (model.provider !== OLLAMA_PROVIDER) return;
-		try {
-			const serverUrl = this._deriveOllamaServerUrl(model.baseUrl);
-			const installed = await this.getLocalRuntime(serverUrl).list();
-			const entry = installed.find((candidate) => matchesInstalledLocalModel(model.id, candidate.name));
-			if (!entry) return;
-			const memoryBudget = totalmem() * 0.9;
-			if (entry.sizeBytes > memoryBudget) {
-				const sizeGb = (entry.sizeBytes / 1e9).toFixed(1);
-				const totalGb = (totalmem() / 1e9).toFixed(1);
-				this._emit({
-					type: "warning",
-					message: `${canonicalRef} is ~${sizeGb}GB, over 90% of this machine's ${totalGb}GB RAM — llama-server is likely to OOM when it runs. Proceeding because you set it manually.`,
-				});
-			}
-		} catch {
-			// advisory only; an unreachable local server must never block a manual model choice
-		}
-	}
-
-	/**
-	 * Cycle to next/previous model.
-	 * Uses scoped models (from --models flag) if available, otherwise all available models.
-	 * @param direction - "forward" (default) or "backward"
-	 * @returns The new model info, or undefined if only one model available
-	 */
 	async cycleModel(direction: "forward" | "backward" = "forward"): Promise<ModelCycleResult | undefined> {
-		if (this._scopedModels.length > 0) {
-			return this._cycleScopedModel(direction);
-		}
-		return this._cycleAvailableModel(direction);
-	}
-
-	private async _cycleScopedModel(direction: "forward" | "backward"): Promise<ModelCycleResult | undefined> {
-		const scopedModels = this._scopedModels.filter((scoped) => this._modelRegistry.hasConfiguredAuth(scoped.model));
-		if (scopedModels.length <= 1) return undefined;
-
-		const currentModel = this.model;
-		let currentIndex = scopedModels.findIndex((sm) => modelsAreEqual(sm.model, currentModel));
-
-		if (currentIndex === -1) currentIndex = 0;
-		const len = scopedModels.length;
-		const nextIndex = direction === "forward" ? (currentIndex + 1) % len : (currentIndex - 1 + len) % len;
-		const next = scopedModels[nextIndex];
-		const thinkingLevel = this._getThinkingLevelForModelSwitch(next.thinkingLevel);
-
-		// Apply model
-		this.agent.state.model = next.model;
-		this.sessionManager.appendModelChange(next.model.provider, next.model.id);
-		this.settingsManager.setDefaultModelAndProvider(next.model.provider, next.model.id);
-
-		// Apply thinking level.
-		// - Explicit scoped model thinking level overrides current session level
-		// - Undefined scoped model thinking level inherits the current session preference
-		// setThinkingLevel clamps to model capabilities.
-		this.setThinkingLevel(thinkingLevel);
-
-		await this._emitModelSelect(next.model, currentModel, "cycle");
-
-		this._checkContextWindowUsageWarning();
-		await this._warnIfManualModelChoiceIsRisky(next.model);
-
-		return { model: next.model, thinkingLevel: this.thinkingLevel, isScoped: true };
-	}
-
-	private async _cycleAvailableModel(direction: "forward" | "backward"): Promise<ModelCycleResult | undefined> {
-		const availableModels = await this._modelRegistry.getAvailable();
-		if (availableModels.length <= 1) return undefined;
-
-		const currentModel = this.model;
-		let currentIndex = availableModels.findIndex((m) => modelsAreEqual(m, currentModel));
-
-		if (currentIndex === -1) currentIndex = 0;
-		const len = availableModels.length;
-		const nextIndex = direction === "forward" ? (currentIndex + 1) % len : (currentIndex - 1 + len) % len;
-		const nextModel = availableModels[nextIndex];
-
-		const thinkingLevel = this._getThinkingLevelForModelSwitch();
-		this.agent.state.model = nextModel;
-		this.sessionManager.appendModelChange(nextModel.provider, nextModel.id);
-		this.settingsManager.setDefaultModelAndProvider(nextModel.provider, nextModel.id);
-
-		// Re-clamp thinking level for new model's capabilities
-		this.setThinkingLevel(thinkingLevel);
-
-		await this._emitModelSelect(nextModel, currentModel, "cycle");
-
-		this._checkContextWindowUsageWarning();
-		await this._warnIfManualModelChoiceIsRisky(nextModel);
-
-		return { model: nextModel, thinkingLevel: this.thinkingLevel, isScoped: false };
+		return this._modelSelection.cycleModel(direction);
 	}
 
 	// =========================================================================
 	// Thinking Level Management
 	// =========================================================================
 
-	/**
-	 * Set thinking level.
-	 * Clamps to model capabilities based on available thinking levels.
-	 * Saves to session and settings only if the level actually changes.
-	 */
 	setThinkingLevel(level: ThinkingLevel, options: { persistSettings?: boolean } = {}): void {
-		const availableLevels = this.getAvailableThinkingLevels();
-		const effectiveLevel = availableLevels.includes(level) ? level : this._clampThinkingLevel(level, availableLevels);
-
-		// Only persist if actually changing
-		const previousLevel = this.agent.state.thinkingLevel;
-		const isChanging = effectiveLevel !== previousLevel;
-		const persistSettings = options.persistSettings ?? true;
-
-		this.agent.state.thinkingLevel = effectiveLevel;
-
-		if (isChanging) {
-			this.sessionManager.appendThinkingLevelChange(effectiveLevel);
-			if (persistSettings && (this.supportsThinking() || effectiveLevel !== "off")) {
-				this.settingsManager.setDefaultThinkingLevel(effectiveLevel);
-			}
-			this._emit({ type: "thinking_level_changed", level: effectiveLevel });
-			void this._extensionRunner.emit({
-				type: "thinking_level_select",
-				level: effectiveLevel,
-				previousLevel,
-			});
-		}
+		this._modelSelection.setThinkingLevel(level, options);
 	}
 
-	/**
-	 * Cycle to next thinking level.
-	 * @returns New level, or undefined if model doesn't support thinking
-	 */
 	cycleThinkingLevel(): ThinkingLevel | undefined {
-		if (!this.supportsThinking()) return undefined;
-
-		const levels = this.getAvailableThinkingLevels();
-		const currentIndex = levels.indexOf(this.thinkingLevel);
-		const nextIndex = (currentIndex + 1) % levels.length;
-		const nextLevel = levels[nextIndex];
-
-		this.setThinkingLevel(nextLevel);
-		return nextLevel;
+		return this._modelSelection.cycleThinkingLevel();
 	}
 
-	/**
-	 * Get available thinking levels for current model.
-	 * The provider will clamp to what the specific model supports internally.
-	 */
 	getAvailableThinkingLevels(): ThinkingLevel[] {
-		if (!this.model) return THINKING_LEVELS;
-		return getSupportedThinkingLevels(this.model) as ThinkingLevel[];
+		return this._modelSelection.getAvailableThinkingLevels();
 	}
 
-	/**
-	 * Check if current model supports thinking/reasoning.
-	 */
 	supportsThinking(): boolean {
-		return !!this.model?.reasoning;
-	}
-
-	private _getThinkingLevelForModelSwitch(explicitLevel?: ThinkingLevel): ThinkingLevel {
-		if (explicitLevel !== undefined) {
-			return explicitLevel;
-		}
-		if (!this.supportsThinking()) {
-			return this.settingsManager.getDefaultThinkingLevel() ?? DEFAULT_THINKING_LEVEL;
-		}
-		return this.thinkingLevel;
-	}
-
-	private _clampThinkingLevel(level: ThinkingLevel, _availableLevels: ThinkingLevel[]): ThinkingLevel {
-		return this.model ? (clampThinkingLevel(this.model, level) as ThinkingLevel) : "off";
+		return this._modelSelection.supportsThinking();
 	}
 
 	// =========================================================================
@@ -4062,109 +3851,34 @@ export class AgentSession {
 	// Bash Execution
 	// =========================================================================
 
-	/**
-	 * Execute a bash command.
-	 * Adds result to agent context and session.
-	 * @param command The bash command to execute
-	 * @param onChunk Optional streaming callback for output
-	 * @param options.excludeFromContext If true, command output won't be sent to LLM (!! prefix)
-	 * @param options.operations Custom BashOperations for remote execution
-	 */
 	async executeBash(
 		command: string,
 		onChunk?: (chunk: string) => void,
 		options?: { excludeFromContext?: boolean; operations?: BashOperations },
 	): Promise<BashResult> {
-		this._bashAbortController = new AbortController();
-
-		// Apply command prefix if configured (e.g., "shopt -s expand_aliases" for alias support)
-		const prefix = this.settingsManager.getShellCommandPrefix();
-		const shellPath = this.settingsManager.getShellPath();
-		const resolvedCommand = prefix ? `${prefix}\n${command}` : command;
-		const enableGitFilter = !options?.operations && !prefix && !shellPath;
-
-		try {
-			const result = await executeBashWithOperations(
-				resolvedCommand,
-				this.sessionManager.getCwd(),
-				options?.operations ?? createLocalBashOperations({ shellPath }),
-				{
-					onChunk,
-					signal: this._bashAbortController.signal,
-					enableGitFilter,
-				},
-			);
-
-			this.recordBashResult(command, result, options);
-			return result;
-		} finally {
-			this._bashAbortController = undefined;
-		}
+		return this._bash.executeBash(command, onChunk, options);
 	}
 
-	/**
-	 * Record a bash execution result in session history.
-	 * Used by executeBash and by extensions that handle bash execution themselves.
-	 */
 	recordBashResult(command: string, result: BashResult, options?: { excludeFromContext?: boolean }): void {
-		const bashMessage: BashExecutionMessage = {
-			role: "bashExecution",
-			command,
-			output: result.output,
-			exitCode: result.exitCode,
-			cancelled: result.cancelled,
-			truncated: result.truncated,
-			fullOutputPath: result.fullOutputPath,
-			timestamp: Date.now(),
-			excludeFromContext: options?.excludeFromContext,
-		};
-
-		// If agent is streaming, defer adding to avoid breaking tool_use/tool_result ordering
-		if (this.isStreaming) {
-			// Queue for later - will be flushed on agent_end
-			this._pendingBashMessages.push(bashMessage);
-		} else {
-			// Add to agent state immediately
-			this.agent.state.messages.push(bashMessage);
-
-			// Save to session
-			this.sessionManager.appendMessage(bashMessage);
-		}
+		this._bash.recordBashResult(command, result, options);
 	}
 
-	/**
-	 * Cancel running bash command.
-	 */
 	abortBash(): void {
-		this._bashAbortController?.abort();
+		this._bash.abortBash();
 	}
 
 	/** Whether a bash command is currently running */
 	get isBashRunning(): boolean {
-		return this._bashAbortController !== undefined;
+		return this._bash.isBashRunning;
 	}
 
 	/** Whether there are pending bash messages waiting to be flushed */
 	get hasPendingBashMessages(): boolean {
-		return this._pendingBashMessages.length > 0;
+		return this._bash.hasPendingBashMessages;
 	}
 
-	/**
-	 * Flush pending bash messages to agent state and session.
-	 * Called after agent turn completes to maintain proper message ordering.
-	 */
 	private _flushPendingBashMessages(): void {
-		if (this._pendingBashMessages.length === 0) return;
-
-		for (const bashMessage of this._pendingBashMessages) {
-			// Add to agent state
-			this.agent.state.messages.push(bashMessage);
-
-			// Save to session
-			this.sessionManager.appendMessage(bashMessage);
-		}
-
-		this._pendingBashMessages = [];
+		this._bash.flushPendingBashMessages();
 	}
 
 	// =========================================================================
