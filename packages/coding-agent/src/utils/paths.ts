@@ -1,9 +1,9 @@
 import { realpathSync } from "node:fs";
 import { isAbsolute, relative, sep } from "node:path";
-import { normalizePath, type PathInputOptions, resolvePath } from "@caupulican/pi-agent-core/node";
+import { normalizePath, type PathInputOptions, resolvePath } from "@caupulican/pi-agent-core/paths";
 import { spawnProcessSync } from "./child-process.ts";
 
-// normalizePath/resolvePath (and PathInputOptions) are promoted into the kernel node entry.
+// normalizePath/resolvePath (and PathInputOptions) are promoted into the kernel's pure paths module.
 // Re-export them so existing coding-agent consumers keep importing from this module unchanged.
 export { normalizePath, type PathInputOptions, resolvePath };
 

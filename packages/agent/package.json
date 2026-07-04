@@ -14,6 +14,10 @@
 			"types": "./dist/node.d.ts",
 			"import": "./dist/node.js"
 		},
+		"./paths": {
+			"types": "./dist/utils/paths.d.ts",
+			"import": "./dist/utils/paths.js"
+		},
 		"./package.json": "./package.json"
 	},
 	"files": [

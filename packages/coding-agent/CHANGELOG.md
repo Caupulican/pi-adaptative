@@ -27,6 +27,12 @@
 - Custom retry settings are now capped at 120s per backoff step (maxDelayMs). Default behavior (2s/4s/8s) is unchanged; only aggressive custom baseDelayMs/maxRetries combinations are affected.
 
 ### Fixed
+- `pi --help` had regressed from ~160ms to ~400ms: `config.ts`'s `normalizePath` import (needed
+  just to resolve `PI_PACKAGE_DIR`) went through `utils/paths.ts`, which re-exported from
+  `@caupulican/pi-agent-core/node` — a barrel that also loads `SessionManager`, compaction,
+  messages, and process-tree, none of which the help path needs. `utils/paths.ts` now imports from
+  the kernel's new granular `@caupulican/pi-agent-core/paths` subpath instead, restoring `--help` to
+  its ~160ms baseline; behavior and the re-exported surface are unchanged.
 - Bash commands could previously race file-tool (`edit`/`write`) mutations: because a shell command
   cannot statically declare which files it touches, it wasn't serialized against them at all. The
   bash tool's foreground command execution now goes through a readers-writer barrier shared with
