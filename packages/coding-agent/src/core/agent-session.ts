@@ -260,6 +260,12 @@ export type AgentSessionEvent =
 			aborted: boolean;
 			willRetry: boolean;
 			errorMessage?: string;
+			/**
+			 * Benign no-op explanation for auto-compaction (e.g. "nothing to compact yet"). Auto
+			 * bails must never be silent: without a result, either errorMessage (real failure) or
+			 * skipReason (harmless skip) is set so the UI can show why nothing changed.
+			 */
+			skipReason?: string;
 	  }
 	| { type: "auto_retry_start"; attempt: number; maxAttempts: number; delayMs: number; errorMessage: string }
 	| { type: "auto_retry_end"; success: boolean; attempt: number; finalError?: string }
@@ -1026,6 +1032,41 @@ export class AgentSession {
 
 		const result = await this._modelRegistry.getApiKeyAndHeaders(model);
 		return result.ok ? { apiKey: result.apiKey, headers: result.headers } : {};
+	}
+
+	/**
+	 * Resolve the summarizer model AND its request auth for auto-compaction. The cheap auxiliary
+	 * model (#30) can be nominally available yet fail key resolution at request time (expired
+	 * OAuth, revoked key). Falling back to the session model keeps auto-compaction working in
+	 * exactly the situations where manual /compact works; only when neither resolves do we fail —
+	 * and then with a concrete message instead of a silent no-op.
+	 */
+	private async _resolveCompactionModelAndAuth(
+		compactionModel: Model<any>,
+		sessionModel: Model<any>,
+	): Promise<{ model: Model<any>; apiKey?: string; headers?: Record<string, string>; failure?: string }> {
+		if (this._isRawStreamSimple(this.agent.streamFn)) {
+			let auth = await this._modelRegistry.getApiKeyAndHeaders(compactionModel);
+			if (auth.ok && auth.apiKey) {
+				return { model: compactionModel, apiKey: auth.apiKey, headers: auth.headers };
+			}
+			const isSameModel =
+				compactionModel.provider === sessionModel.provider && compactionModel.id === sessionModel.id;
+			if (!isSameModel) {
+				auth = await this._modelRegistry.getApiKeyAndHeaders(sessionModel);
+				if (auth.ok && auth.apiKey) {
+					return { model: sessionModel, apiKey: auth.apiKey, headers: auth.headers };
+				}
+			}
+			return {
+				model: sessionModel,
+				failure: `no usable API key for the summarizer (tried ${compactionModel.id}${isSameModel ? "" : ` and ${sessionModel.id}`})`,
+			};
+		}
+
+		// Custom streamFn owns auth injection (CLI path) — resolve best-effort, never fail here.
+		const { apiKey, headers } = await this._getCompactionRequestAuth(compactionModel);
+		return { model: compactionModel, apiKey, headers };
 	}
 
 	/**
@@ -3110,42 +3151,46 @@ export class AgentSession {
 					result: undefined,
 					aborted: false,
 					willRetry: false,
+					skipReason: "no model selected",
 				});
 				return false;
 			}
 
-			// Summarize with the cheap auxiliary model when available (cost guard, #30).
-			const compactionModel = this._resolveCompactionModel(this.model);
-			let apiKey: string | undefined;
-			let headers: Record<string, string> | undefined;
-			if (this._isRawStreamSimple(this.agent.streamFn)) {
-				const authResult = await this._modelRegistry.getApiKeyAndHeaders(compactionModel);
-				if (!authResult.ok || !authResult.apiKey) {
-					this._emit({
-						type: "compaction_end",
-						reason,
-						result: undefined,
-						aborted: false,
-						willRetry: false,
-					});
-					return false;
-				}
-				apiKey = authResult.apiKey;
-				headers = authResult.headers;
-			} else {
-				({ apiKey, headers } = await this._getCompactionRequestAuth(compactionModel));
-			}
-
-			const pathEntries = this.sessionManager.getBranch();
-
-			const preparation = prepareCompaction(pathEntries, settings);
-			if (!preparation) {
+			// Summarize with the cheap auxiliary model when available (cost guard, #30). If its auth
+			// turns out unusable at request time (e.g. expired token), fall back to the session model —
+			// the one manual /compact demonstrably works with — before giving up.
+			const resolvedCompaction = await this._resolveCompactionModelAndAuth(
+				this._resolveCompactionModel(this.model),
+				this.model,
+			);
+			if (resolvedCompaction.failure) {
 				this._emit({
 					type: "compaction_end",
 					reason,
 					result: undefined,
 					aborted: false,
 					willRetry: false,
+					errorMessage: `Auto-compaction failed: ${resolvedCompaction.failure}`,
+				});
+				return false;
+			}
+			const compactionModel = resolvedCompaction.model;
+			const apiKey = resolvedCompaction.apiKey;
+			const headers = resolvedCompaction.headers;
+
+			const pathEntries = this.sessionManager.getBranch();
+
+			const preparation = prepareCompaction(pathEntries, settings);
+			if (!preparation) {
+				const lastEntry = pathEntries[pathEntries.length - 1];
+				this._emit({
+					type: "compaction_end",
+					reason,
+					result: undefined,
+					aborted: false,
+					willRetry: false,
+					skipReason:
+						lastEntry?.type === "compaction" ? "already compacted" : "nothing to compact (session too small)",
 				});
 				return false;
 			}

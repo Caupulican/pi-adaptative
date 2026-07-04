@@ -2100,6 +2100,10 @@ export class InteractiveMode {
 						this.chatContainer.addChild(new Spacer(1));
 						this.chatContainer.addChild(new Text(theme.fg("error", event.errorMessage), 1, 0));
 					}
+				} else if (event.skipReason) {
+					// Benign auto-compaction no-op: still tell the user WHY nothing changed —
+					// an invisible skip is indistinguishable from broken compaction.
+					this.showStatus(`Auto-compaction skipped: ${event.skipReason}`);
 				}
 				void this.flushCompactionQueue({ willRetry: event.willRetry });
 				this.ui.requestRender();
