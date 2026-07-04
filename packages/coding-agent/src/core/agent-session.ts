@@ -58,11 +58,9 @@ import type {
 	Api,
 	AssistantMessage,
 	CacheRetention,
-	Context,
 	ImageContent,
 	Message,
 	Model,
-	SimpleStreamOptions,
 	StopReason,
 	TextContent,
 	Usage,
@@ -93,7 +91,7 @@ import { buildForegroundEnvelope, formatForegroundEnvelopeObservation } from "./
 import { evaluateToolGate } from "./autonomy/gates.ts";
 import type { LaneRecord } from "./autonomy/lane-tracker.ts";
 import type { AutonomyDiagnosticSnapshot, AutonomyStatusSnapshot, GateOutcomeHistoryEntry } from "./autonomy/status.ts";
-import { AUTONOMY_TELEMETRY_EVENT_TYPES, type AutonomyTelemetryEvent } from "./autonomy/telemetry-events.ts";
+import type { AutonomyTelemetryEvent } from "./autonomy/telemetry-events.ts";
 import { AutonomyTelemetry } from "./autonomy-telemetry.ts";
 import { BackgroundLaneController } from "./background-lane-controller.ts";
 import { type BashResult, executeBashWithOperations } from "./bash-executor.ts";
@@ -152,11 +150,8 @@ import type {
 	TurnStartEvent,
 } from "./extensions/index.ts";
 import { type ChannelProvider, GatewayRegistry, type JobSchedulerProvider } from "./gateways/channel-provider.ts";
-import {
-	buildGoalContinuationPrompt,
-	type GoalContinuationPrompt,
-	type GoalContinuationPromptLimits,
-} from "./goals/goal-continuation-prompt.ts";
+import { GoalLoopController } from "./goal-loop-controller.ts";
+import type { GoalContinuationPrompt, GoalContinuationPromptLimits } from "./goals/goal-continuation-prompt.ts";
 import {
 	buildGoalRuntimeSnapshot,
 	type GoalRuntimeSnapshot,
@@ -164,24 +159,8 @@ import {
 } from "./goals/goal-runtime-snapshot.ts";
 import type { GoalState } from "./goals/goal-state.ts";
 import { appendGoalStateSnapshot, getLatestGoalStateSnapshot } from "./goals/session-goal-state.ts";
-import {
-	APPLY_WRITE_REFUSED_REASON_CODE,
-	appendLearningAuditSnapshot,
-	contradictionsForReflectionWrite,
-	getLearningAuditSnapshots,
-	type LearningAuditRecord,
-	proposalFromReflectionWrite,
-	rollbackPlanForReflectionWrite,
-} from "./learning/learning-audit.ts";
-import { evaluateLearningDecision } from "./learning/learning-gate.ts";
-import { ObservationStore, observationKey } from "./learning/observation-store.ts";
-import {
-	type DemandSignals,
-	decideDemand,
-	ReflectionEngine,
-	type ReflectionResult,
-	type ReflectionWrite,
-} from "./learning/reflection-engine.ts";
+import type { LearningAuditRecord } from "./learning/learning-audit.ts";
+import type { DemandSignals, ReflectionResult } from "./learning/reflection-engine.ts";
 import { appendLearningDecisionSnapshot, getLearningDecisionSnapshots } from "./learning/session-learning-decision.ts";
 import { type CurationProposals, isPromotedFrontmatter, SkillCurator } from "./learning/skill-curator.ts";
 import { LocalRuntimeController } from "./local-runtime-controller.ts";
@@ -200,6 +179,7 @@ import { OLLAMA_PROVIDER } from "./models/local-registration.ts";
 import type { LocalRuntimeDeps, OllamaRuntime } from "./models/local-runtime.ts";
 import { matchesInstalledLocalModel } from "./models/model-ref.ts";
 import { expandPromptTemplate, type PromptTemplate } from "./prompt-templates.ts";
+import { ReflectionController } from "./reflection-controller.ts";
 import { isProbeAllFailed, type ModelFitnessReport } from "./research/model-fitness.ts";
 import type { ResearchRunResult } from "./research/research-runner.ts";
 import {
@@ -669,6 +649,12 @@ export class AgentSession {
 	private _disposed = false;
 	/** Aborts in-flight background reflection completions on dispose (Bug #21). */
 	private readonly _reflectionAbort = new AbortController();
+	/** Native reflection engine + learning-apply/rollback path (see reflection-controller.ts); owns no
+	 * session state, applies durable writes through the bundled memory tool and the session log. */
+	private readonly _reflection: ReflectionController;
+	/** Bounded goal auto-continuation loop (see goal-loop-controller.ts); reads goal state fresh
+	 * each pass and re-enters the session's own prompt path. */
+	private readonly _goalContinuation: GoalLoopController;
 	private readonly _isChildSession: boolean;
 	private _baseToolsOverride?: Record<string, AgentTool>;
 	private _sessionStartEvent: SessionStartEvent;
@@ -834,6 +820,27 @@ export class AgentSession {
 			emitAutonomyTelemetry: (event) => this._emitAutonomyTelemetry(event),
 			resolveLaneModel: (pattern) => this._backgroundLanes.resolveLaneModel(pattern),
 			resolveCurationModelIfFit: () => this._resolveCurationModelIfFit(),
+		});
+		this._reflection = new ReflectionController({
+			getModel: () => this.model,
+			getAgent: () => this.agent,
+			isRawStreamSimple: () => this._isRawStreamSimple(this.agent.streamFn),
+			getModelRegistry: () => this._modelRegistry,
+			getMemoryManager: () => this._memory.getMemoryManager(),
+			getSettingsManager: () => this.settingsManager,
+			getSessionManager: () => this.sessionManager,
+			getAgentDir: () => this._agentDir,
+			isChildSession: () => this._isChildSession,
+			isDisposed: () => this._disposed,
+			getReflectionSignal: () => this._reflectionAbort.signal,
+			archivePromotedSkill: (name) => this.archivePromotedSkill(name),
+			emitAutonomyTelemetry: (event) => this._emitAutonomyTelemetry(event),
+			addSpawnedUsage: (usage, opts) => this.addSpawnedUsage(usage, opts),
+			saveLearningDecisionSnapshot: (decision) => this.saveLearningDecisionSnapshot(decision),
+		});
+		this._goalContinuation = new GoalLoopController({
+			getGoalRuntimeSnapshot: (settings) => this.getGoalRuntimeSnapshot(settings),
+			prompt: (text, options) => this.prompt(text, options),
 		});
 		this._modelRegistry = config.modelRegistry;
 		this._extensionRunnerRef = config.extensionRunnerRef;
@@ -4714,162 +4721,24 @@ export class AgentSession {
 	}
 
 	async continueGoalOnce(options: GoalContinuationOnceOptions): Promise<GoalContinuationOnceResult> {
-		const snapshot = this.getGoalRuntimeSnapshot({ maxStallTurns: options.maxStallTurns });
-
-		if (snapshot.continuation.action !== "continue") {
-			return { submitted: false, snapshot };
-		}
-
-		const prompt = buildGoalContinuationPrompt({ snapshot, limits: options.promptLimits });
-		await this.prompt(prompt.text, {
-			expandPromptTemplates: false,
-			processSlashCommands: false,
-			autoContinueGoal: false,
-		});
-
-		return { submitted: true, snapshot, prompt };
+		return this._goalContinuation.continueGoalOnce(options);
 	}
 
 	async continueGoalLoop(options: GoalContinuationLoopOptions): Promise<GoalContinuationLoopResult> {
-		let turnsSubmitted = 0;
-		const now = options.now ?? Date.now;
-		const maxWallClockMs =
-			typeof options.maxWallClockMinutes === "number" && options.maxWallClockMinutes > 0
-				? options.maxWallClockMinutes * 60_000
-				: undefined;
-		const startedAt = now();
-		const hasReachedWallClockBudget = () => maxWallClockMs !== undefined && now() - startedAt >= maxWallClockMs;
-		const snapshot = () => this.getGoalRuntimeSnapshot({ maxStallTurns: options.maxStallTurns });
-
-		if (options.maxTurns <= 0) {
-			return {
-				turnsSubmitted: 0,
-				stopReason: "max_turns_reached",
-				finalSnapshot: snapshot(),
-			};
-		}
-
-		if (hasReachedWallClockBudget()) {
-			return { turnsSubmitted, stopReason: "wall_clock_budget_reached", finalSnapshot: snapshot() };
-		}
-
-		while (turnsSubmitted < options.maxTurns) {
-			const beforeSnapshot = snapshot();
-			if (beforeSnapshot.continuation.action !== "continue") {
-				return { turnsSubmitted, stopReason: "continuation_not_allowed", finalSnapshot: beforeSnapshot };
-			}
-
-			const state = beforeSnapshot.goalState;
-			const beforeKey = state
-				? `${state.goalId}:${state.updatedAt}:${state.events.length}:${state.stallTurns}:${state.status}`
-				: undefined;
-
-			const result = await this.continueGoalOnce(options);
-			if (result.submitted) {
-				turnsSubmitted++;
-			}
-
-			if (hasReachedWallClockBudget()) {
-				return { turnsSubmitted, stopReason: "wall_clock_budget_reached", finalSnapshot: snapshot() };
-			}
-
-			const afterSnapshot = snapshot();
-			if (afterSnapshot.continuation.action !== "continue") {
-				return { turnsSubmitted, stopReason: "continuation_not_allowed", finalSnapshot: afterSnapshot };
-			}
-
-			const afterState = afterSnapshot.goalState;
-			const afterKey = afterState
-				? `${afterState.goalId}:${afterState.updatedAt}:${afterState.events.length}:${afterState.stallTurns}:${afterState.status}`
-				: undefined;
-
-			if (beforeKey === afterKey) {
-				return { turnsSubmitted, stopReason: "goal_state_not_advanced", finalSnapshot: afterSnapshot };
-			}
-		}
-
-		return {
-			turnsSubmitted,
-			stopReason: "max_turns_reached",
-			finalSnapshot: snapshot(),
-		};
+		return this._goalContinuation.continueGoalLoop(options);
 	}
 
 	/**
-	 * Run a one-shot LLM completion fully ISOLATED from the main session — the load-bearing
-	 * primitive for the native reflection engine (adaptive-agent design §6c/§7).
-	 *
-	 * Isolation invariants (audited by codex): builds a fresh {@link Context} (no main history), runs
-	 * with `tools: []`, sets `cacheRetention: "none"`, and passes **no `sessionId`** — so it cannot
-	 * mutate `agent.state.messages`, cannot append session entries, cannot touch the tool registry,
-	 * and cannot churn the main session's prompt cache. Mirrors `generateSummary()`'s mechanics.
-	 *
-	 * Returns the result even on an error/aborted stop reason (callers — e.g. a background reflection
-	 * microtask — decide whether to act); it does not throw on a model-level error.
+	 * Run a one-shot LLM completion fully ISOLATED from the main session — the load-bearing primitive
+	 * for native reflection (see reflection-controller.ts for the isolation invariants).
 	 */
 	async runIsolatedCompletion(opts: IsolatedCompletionOptions): Promise<IsolatedCompletionResult> {
-		const model = opts.model ?? this.model;
-		if (!model) {
-			throw new Error("runIsolatedCompletion: no model available");
-		}
-		const thinkingLevel = opts.thinkingLevel ?? "off";
-
-		// Fresh, isolated context: explicit messages, no tools, nothing from the main session.
-		const context: Context = {
-			systemPrompt: opts.systemPrompt,
-			messages: opts.messages,
-			tools: [],
-		};
-
-		// Isolate the prompt cache and DELIBERATELY omit sessionId so no session-aware caching/routing
-		// can entangle this call with the main session.
-		const options: SimpleStreamOptions = {
-			maxTokens: opts.maxTokens,
-			signal: opts.signal,
-			cacheRetention: opts.cacheRetention ?? "none",
-		};
-		// pi-ai's `reasoning` option does not include "off" (that's the provider default already).
-		if (thinkingLevel !== "off") {
-			options.reasoning = thinkingLevel;
-		}
-
-		// When streamFn is the raw streamSimple (e.g. in tests), auth must be injected explicitly.
-		// Throw only when auth genuinely fails — providers that authenticate without an API key
-		// (OAuth, local no-key) legitimately return ok with an undefined apiKey.
-		if (this._isRawStreamSimple(this.agent.streamFn)) {
-			const auth = await this._modelRegistry.getApiKeyAndHeaders(model);
-			if (!auth.ok) {
-				throw new Error(auth.error);
-			}
-			options.apiKey = auth.apiKey;
-			options.headers = auth.headers;
-		}
-
-		const stream = await this.agent.streamFn(model, context, options);
-		const result = await stream.result();
-		const text = result.content
-			.filter((c): c is TextContent => c.type === "text")
-			.map((c) => c.text)
-			.join("");
-		const usage: Usage = result.usage ?? {
-			input: 0,
-			output: 0,
-			cacheRead: 0,
-			cacheWrite: 0,
-			totalTokens: 0,
-			cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, total: 0 },
-		};
-		return { text, usage, stopReason: result.stopReason };
+		return this._reflection.runIsolatedCompletion(opts);
 	}
 
 	/**
-	 * Native end-of-loop reflection pass (R2). Demand-gates (zero-I/O), and when warranted runs the
-	 * {@link ReflectionEngine} via an isolated completion ({@link runIsolatedCompletion}), applies the
-	 * resulting memory writes through the bundled `memory` tool, and accounts the reflection's token
-	 * cost via the cost-aggregation surface so it stays visible and net-negative-auditable.
-	 *
-	 * Returns `null` when the gate skips (or in a child session, which must not learn). The whole pass
-	 * is best-effort: a model/parse error yields no writes, never throws into the caller.
+	 * Native end-of-loop reflection pass (R2). Delegates to {@link ReflectionController}; returns null
+	 * when the demand gate skips or in a child session.
 	 */
 	async runReflectionPass(input: {
 		signals: DemandSignals;
@@ -4880,327 +4749,16 @@ export class AgentSession {
 		/** Stable id so a duplicate scheduling/retry of the same pass can't double-count its cost. */
 		reportId?: string;
 	}): Promise<ReflectionResult | null> {
-		if (this._isChildSession || this._disposed) return null;
-		const plan = decideDemand(input.signals);
-		if (plan.act === "skip") return null;
-
-		// Bug #21: tie this background pass to the session lifetime. Disposing the session aborts the
-		// in-flight completion (input.signal can add a more specific abort).
-		const signal = input.signal
-			? AbortSignal.any([input.signal, this._reflectionAbort.signal])
-			: this._reflectionAbort.signal;
-
-		const complete = (systemPrompt: string, userPrompt: string) =>
-			this.runIsolatedCompletion({
-				systemPrompt,
-				messages: [{ role: "user", content: [{ type: "text", text: userPrompt }], timestamp: Date.now() }],
-				model: input.model,
-				thinkingLevel: input.thinkingLevel ?? "low",
-				maxTokens: plan.tokenBudget,
-				signal,
-				// The reflection system prompt is static (#33) — let the provider cache the prefix so
-				// repeated passes only pay for the variable tail.
-				cacheRetention: "short",
-			});
-
-		const result = await new ReflectionEngine().reflect({
-			recentTurnText: input.recentTurnText,
-			// Read memory FRESH (not the prefix-cache-frozen system-prompt block) so confront-before-write
-			// sees writes made earlier this session.
-			existingMemory: this._memory.getMemoryManager().buildSystemPromptBlockFresh() || "",
-			plan,
-			complete,
-		});
-
-		// Bug #21: if the session was disposed while the completion was in flight, do NOT write memory
-		// or skills against the dead session.
-		if (this._disposed) return result;
-
-		// Learning apply policy: every durable write is converted to a proposal, decided by the
-		// learning gate, and audited with a rollback plan. With the policy disabled (default) the
-		// legacy direct-apply behavior is preserved — but now leaves audit records with rollback info.
-		const policy = this.settingsManager.getLearningPolicySettings();
-		// The audit id sequence counts STORED snapshots only: it reseeds from the stored count on
-		// every pass, so advancing it for a no-op (which stores nothing) would make later passes
-		// reuse ids — and rollback keys on the id, so a collision blocks or misdirects rollback.
-		let auditSequence = getLearningAuditSnapshots(this.sessionManager.getEntries()).length;
-		// G6 evidence strength: durable proposals accumulate observation counts across passes/sessions
-		// so the gate can distinguish a one-off cue from a repeatedly-confirmed lesson. Built once per
-		// pass; every increment is best-effort (store IO must never break reflection).
-		const observationStore = ObservationStore.forAgentDir(this._agentDir);
-		let writeIndex = 0;
-		for (const write of result.writes) {
-			writeIndex += 1;
-			const proposalId = `${input.reportId ?? "reflection"}-w${writeIndex}`;
-			const proposal = proposalFromReflectionWrite(write, proposalId);
-			const rollback = rollbackPlanForReflectionWrite(write);
-			let observations = 1;
-			if (policy.enabled) {
-				try {
-					observations = observationStore.increment(observationKey(proposal.layer, proposal.summary));
-				} catch {
-					// A store read/write failure falls back to a fresh count of 1, which keeps the gate
-					// proposal-first (never spuriously auto-applies) rather than crashing the pass.
-					observations = 1;
-				}
-			}
-			const decision: LearningDecision = policy.enabled
-				? evaluateLearningDecision({
-						proposal,
-						confidence: policy.reflectionSourceConfidence,
-						observations,
-						// A replace/remove supersedes an existing durable fact — the reflection engine's
-						// confront-before-write conflict signal — so it routes through approval instead of
-						// silently overwriting prior memory. Additive writes contradict nothing.
-						contradictions: contradictionsForReflectionWrite(write),
-						settings: {
-							enabled: true,
-							autoApplyEnabled: policy.autoApplyEnabled,
-							confidenceThreshold: policy.confidenceThreshold,
-							minObservations: policy.minObservations,
-							allowedAutoApplyLayers: policy.allowedAutoApplyLayers,
-							requireRollbackPlan: policy.requireRollbackPlan,
-							autoApplySupersessions: policy.autoApplySupersessions,
-						},
-					})
-				: {
-						kind: "apply",
-						reasonCode: "learning_policy_disabled_legacy_apply",
-						confidence: 0,
-						summary: proposal.summary,
-						requiresApproval: false,
-					};
-
-			this.saveLearningDecisionSnapshot(decision);
-			// G3: learning-gate outcome. Codes/numbers only — never the proposal summary/memory text.
-			this._emitAutonomyTelemetry({
-				type: AUTONOMY_TELEMETRY_EVENT_TYPES.learningDecision,
-				timestamp: new Date().toISOString(),
-				payload: {
-					kind: decision.kind,
-					reasonCode: decision.reasonCode,
-					layer: proposal.layer,
-					confidence: decision.confidence,
-					requiresApproval: decision.requiresApproval,
-				},
-			});
-			// G8: a proposal that needs human sign-off is an approval REQUEST. Codes/layer only —
-			// never the proposal summary/memory text (those live only in the audit snapshot).
-			if (decision.requiresApproval) {
-				this._emitAutonomyTelemetry({
-					type: AUTONOMY_TELEMETRY_EVENT_TYPES.approvalRequest,
-					timestamp: new Date().toISOString(),
-					payload: {
-						kind: decision.kind,
-						reasonCode: decision.reasonCode,
-						layer: proposal.layer,
-					},
-				});
-			}
-			// The gate's decision and the write's actual outcome are two different questions: the memory
-			// tool can refuse a write (budget exceeded, drift, threat) via details.success:false without
-			// throwing. Capture that outcome instead of assuming "decision.kind === apply" means it landed
-			// — otherwise a refused write leaves a phantom "apply" audit whose rollback later fails
-			// not-found (or, worse, misfires against whatever now occupies that text).
-			const applied = decision.kind === "apply" ? await this._applyReflectionWrite(write, signal) : false;
-			const writeFailed = decision.kind === "apply" && !applied;
-			if (decision.kind !== "no-op") {
-				auditSequence += 1;
-				appendLearningAuditSnapshot(this.sessionManager, {
-					id: `audit-${auditSequence}`,
-					proposalId,
-					layer: proposal.layer,
-					action: writeFailed ? "apply_failed" : decision.kind === "apply" ? "apply" : "propose",
-					summary: proposal.summary,
-					reasonCode: writeFailed ? APPLY_WRITE_REFUSED_REASON_CODE : decision.reasonCode,
-					decision,
-					// No rollback plan on a failed apply — nothing durable landed, so there is nothing to undo.
-					rollback: writeFailed ? undefined : rollback,
-					createdAt: new Date().toISOString(),
-				});
-			}
-		}
-
-		// Account the reflection's spend so it surfaces in the footer roll-up (net-token visibility).
-		// Idempotent on reportId so a retried/duplicated pass cannot double-count.
-		if (result.usage.cost.total > 0 || result.usage.totalTokens > 0) {
-			this.addSpawnedUsage(result.usage, { label: "reflection", reportId: input.reportId });
-		}
-		return result;
+		return this._reflection.runReflectionPass(input);
 	}
 
 	getLearningAuditRecords(): LearningAuditRecord[] {
-		return getLearningAuditSnapshots(this.sessionManager.getEntries());
+		return this._reflection.getLearningAuditRecords();
 	}
 
-	/**
-	 * Roll back one applied durable learning change by executing the inverse operation recorded in
-	 * its audit record (memory ops run through the same bundled memory-tool path as the original
-	 * apply; promoted skills are archived). Appends a linked "rollback" audit record on success so
-	 * the change history stays complete and a change cannot be rolled back twice.
-	 */
+	/** Roll back one applied durable learning change. Delegates to {@link ReflectionController}. */
 	async rollbackLearningWrite(auditId: string): Promise<{ ok: boolean; reason: string }> {
-		if (this._disposed) return { ok: false, reason: "session_disposed" };
-
-		const audits = this.getLearningAuditRecords();
-		const audit = audits.find((record) => record.id === auditId);
-		if (!audit) return { ok: false, reason: "audit_not_found" };
-		if (audit.action !== "apply") return { ok: false, reason: "not_an_applied_change" };
-		if (audits.some((record) => record.action === "rollback" && record.rollbackOf === auditId)) {
-			return { ok: false, reason: "already_rolled_back" };
-		}
-		const rollback = audit.rollback;
-		if (!rollback) return { ok: false, reason: "no_rollback_plan" };
-
-		// Every inverse must be VERIFIED-applied before the rollback audit is appended: a silently
-		// failed inverse that still recorded "rollback" would permanently self-lock the change
-		// behind already_rolled_back while the durable write is in fact still live.
-		switch (rollback.kind) {
-			case "memory_remove": {
-				if (!rollback.target) return { ok: false, reason: "missing_rollback_target" };
-				if (!(await this._applyReflectionWrite({ kind: "memory_remove", target: rollback.target }))) {
-					return { ok: false, reason: "rollback_apply_failed" };
-				}
-				break;
-			}
-			case "memory_restore": {
-				if (!rollback.target || rollback.previous === undefined) {
-					return { ok: false, reason: "missing_rollback_target" };
-				}
-				const applied = await this._applyReflectionWrite({
-					kind: "memory_replace",
-					target: rollback.target,
-					text: rollback.previous,
-				});
-				if (!applied) return { ok: false, reason: "rollback_apply_failed" };
-				break;
-			}
-			case "memory_add": {
-				if (rollback.previous === undefined) return { ok: false, reason: "missing_rollback_target" };
-				const applied = await this._applyReflectionWrite({
-					kind: "memory_add",
-					section: "MEMORY",
-					text: rollback.previous,
-				});
-				if (!applied) return { ok: false, reason: "rollback_apply_failed" };
-				break;
-			}
-			case "archive_skill": {
-				if (!rollback.target) return { ok: false, reason: "missing_rollback_target" };
-				if (!this.archivePromotedSkill(rollback.target)) {
-					return { ok: false, reason: "skill_archive_failed" };
-				}
-				break;
-			}
-		}
-
-		appendLearningAuditSnapshot(this.sessionManager, {
-			id: `${audit.id}-rollback`,
-			proposalId: audit.proposalId,
-			layer: audit.layer,
-			action: "rollback",
-			summary: `Rolled back: ${audit.summary}`,
-			reasonCode: "user_requested_rollback",
-			decision: audit.decision,
-			rollbackOf: audit.id,
-			createdAt: new Date().toISOString(),
-		});
-		return { ok: true, reason: "rollback_applied" };
-	}
-
-	/**
-	 * Apply one reflection write through the bundled `memory` tool. `memory_replace`/`memory_remove`
-	 * don't carry a target file, so we try MEMORY.md first and fall back to USER.md when the substring
-	 * isn't found there. Never throws (reflection must never break a turn); returns whether the write
-	 * actually applied so callers that MUST know — rollback's once-only accounting — can react instead
-	 * of recording a success that never happened.
-	 */
-	private async _applyReflectionWrite(write: ReflectionWrite, signal?: AbortSignal): Promise<boolean> {
-		// R7 memory-to-behavior: a recurring procedure is compiled into an executable skill file rather
-		// than stored as a flat fact. Written under the agent skills dir so it loads like any user skill.
-		if (write.kind === "promote_skill") {
-			return this._promoteReflectionSkill(write.name, write.description, write.body);
-		}
-
-		type MemResult = { details?: { success?: boolean; error?: string } };
-		type MemExec = (
-			toolCallId: string,
-			params: { action: string; target: string; content?: string; oldContent?: string },
-			signal: AbortSignal | undefined,
-			onUpdate: undefined,
-			ctx: undefined,
-		) => Promise<MemResult>;
-		const memTool = this._memory
-			.getMemoryManager()
-			.getToolDefinitions()
-			.find((t) => t.name === "memory");
-		const exec = memTool?.execute as unknown as MemExec | undefined;
-		if (!exec) return false;
-
-		const run = (params: Parameters<MemExec>[1]) => exec("reflection", params, signal, undefined, undefined);
-
-		if (write.kind === "memory_add") {
-			try {
-				const res = await run({
-					action: "add",
-					target: write.section === "USER" ? "user" : "memory",
-					content: write.text,
-				});
-				return res?.details?.success === true;
-			} catch {
-				// best-effort; reflection writes must never throw into the turn loop
-				return false;
-			}
-		}
-
-		// replace / remove carry no target file — try MEMORY.md, then USER.md. The memory tool reports
-		// outcomes via `details.success` (it catches its own errors rather than throwing). Only a
-		// genuine "not found in the file" justifies trying the other file; a real failure for a file
-		// (budget exceeded / drift) must NOT fall through and mutate the wrong target.
-		for (const target of ["memory", "user"] as const) {
-			try {
-				const params =
-					write.kind === "memory_replace"
-						? { action: "replace", target, oldContent: write.target, content: write.text }
-						: { action: "remove", target, oldContent: write.target };
-				const res = await run(params);
-				if (res?.details?.success === true) return true; // applied
-				if (!/not found/i.test(String(res?.details?.error ?? ""))) return false; // real failure — don't misapply
-				// substring simply absent from this file — try the next target
-			} catch {
-				// defensive: if the tool ever does throw, try the next target
-			}
-		}
-		return false;
-	}
-
-	/**
-	 * R7: write a reflection-promoted skill as `<agentDir>/skills/<name>/SKILL.md` so it loads like any
-	 * user skill. Best-effort; never clobbers an existing (hand-authored) skill of the same name.
-	 */
-	private _promoteReflectionSkill(rawName: string, description: string, body: string): boolean {
-		const name = rawName
-			.trim()
-			.toLowerCase()
-			.replace(/[^a-z0-9-]+/g, "-")
-			.replace(/^-+|-+$/g, "")
-			.slice(0, 64);
-		if (!name || !body.trim()) return false;
-		try {
-			const dir = join(this._agentDir, "skills", name);
-			const file = join(dir, "SKILL.md");
-			if (existsSync(file)) return false; // do not overwrite an existing skill
-			mkdirSync(dir, { recursive: true });
-			const safeDescription = description.replace(/[\r\n]+/g, " ").trim();
-			// `promoted: true` marks this as reflection-generated so the curator (#32) can lifecycle-manage
-			// it (archive/consolidate) WITHOUT ever touching hand-authored user skills.
-			const content = `---\nname: ${name}\ndescription: ${safeDescription}\npromoted: true\n---\n\n<!-- Auto-generated by the reflection engine (R7 memory-to-behavior). Review and refine. -->\n\n${body.trim()}\n`;
-			writeFileSync(file, content, "utf-8");
-			return true;
-		} catch {
-			// promotion must never break a turn
-			return false;
-		}
+		return this._reflection.rollbackLearningWrite(auditId);
 	}
 
 	getContextUsage(): ContextUsage | undefined {
