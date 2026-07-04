@@ -1,5 +1,4 @@
-import type { ImageContent, Message, TextContent } from "@caupulican/pi-ai";
-import { randomUUID } from "crypto";
+import { randomUUID } from "node:crypto";
 import {
 	appendFileSync,
 	closeSync,
@@ -12,11 +11,12 @@ import {
 	renameSync,
 	statSync,
 	writeFileSync,
-} from "fs";
-import { readdir, stat } from "fs/promises";
-import { join, resolve } from "path";
-import { createInterface } from "readline";
-import { StringDecoder } from "string_decoder";
+} from "node:fs";
+import { readdir, stat } from "node:fs/promises";
+import { join, resolve } from "node:path";
+import { createInterface } from "node:readline";
+import { StringDecoder } from "node:string_decoder";
+import type { ImageContent, Message, TextContent } from "@caupulican/pi-ai";
 import {
 	type BashExecutionMessage,
 	type CustomMessage,
