@@ -3,6 +3,7 @@
  */
 
 import { spawn } from "node:child_process";
+import { killTree } from "@caupulican/pi-agent-core/node";
 import { waitForChildProcess } from "../utils/child-process.ts";
 
 /** Default per-stream retention for command output, in UTF-16 code units (~bytes for ASCII). */
@@ -38,6 +39,8 @@ export interface ExecResult {
 	stdoutTruncated: boolean;
 	/** True when stderr exceeded maxBuffer and only its tail was retained. */
 	stderrTruncated: boolean;
+	/** Present when the process failed to spawn (e.g. ENOENT); code is 1 in that case. */
+	errorMessage?: string;
 }
 
 export interface RollingOutputBuffer {
@@ -91,6 +94,12 @@ export async function execCommand(
 			cwd,
 			shell: false,
 			stdio: ["ignore", "pipe", "pipe"],
+			detached: process.platform !== "win32",
+		});
+
+		let spawnError: string | undefined;
+		proc.once("error", (err) => {
+			spawnError = err.message;
 		});
 
 		const maxBuffer =
@@ -101,15 +110,9 @@ export async function execCommand(
 		let timeoutId: NodeJS.Timeout | undefined;
 
 		const killProcess = () => {
-			if (!killed) {
+			if (!killed && proc.pid) {
 				killed = true;
-				proc.kill("SIGTERM");
-				// Force kill after 5 seconds if SIGTERM doesn't work
-				setTimeout(() => {
-					if (!proc.killed) {
-						proc.kill("SIGKILL");
-					}
-				}, 5000);
+				void killTree(proc.pid, { graceMs: 5000 });
 			}
 		};
 
@@ -149,6 +152,7 @@ export async function execCommand(
 				killed,
 				stdoutTruncated: stdout.truncated(),
 				stderrTruncated: stderr.truncated(),
+				...(spawnError !== undefined ? { errorMessage: spawnError } : {}),
 			});
 		};
 
@@ -156,6 +160,11 @@ export async function execCommand(
 		// held open by detached descendants.
 		waitForChildProcess(proc)
 			.then((code) => settle(code ?? 0))
-			.catch((_err) => settle(1));
+			.catch((err) => {
+				if (spawnError === undefined) {
+					spawnError = err instanceof Error ? err.message : String(err);
+				}
+				settle(1);
+			});
 	});
 }

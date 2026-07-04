@@ -8,6 +8,16 @@
   `createSilenceWatchdog` primitive from `@caupulican/pi-agent-core`'s reliability kernel into the
   bash tool.
 
+### Fixed
+- `execCommand`'s kill path (used by aborted/timed-out commands, including extensions' `ctx.exec`)
+  now actually escalates to SIGKILL: it previously gated escalation on `ChildProcess.killed`, which
+  Node sets the moment a signal is *sent* rather than when the process dies, so a child trapping
+  SIGTERM survived forever. The kill path now delegates to the reliability kernel's `killTree`
+  (liveness-probed SIGTERM → SIGKILL escalation). Commands also spawn in their own process group on
+  POSIX so aborting kills grandchildren, not just the direct child. Spawn failures (e.g. ENOENT) are
+  now surfaced via a new `ExecResult.errorMessage` field instead of being silently swallowed as a
+  bare `code: 1`.
+
 ## [0.80.103] - 2026-07-03
 
 ### Fixed
