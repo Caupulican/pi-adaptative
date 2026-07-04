@@ -22,7 +22,6 @@ import {
 	TruncatedText,
 	TUI,
 } from "@caupulican/pi-tui";
-import chalk from "chalk";
 import { APP_NAME, APP_TITLE, VERSION } from "../../config.ts";
 import { type AgentSession, type AgentSessionEvent, parseSkillBlock } from "../../core/agent-session.ts";
 import type { AgentSessionRuntime } from "../../core/agent-session-runtime.ts";
@@ -53,15 +52,15 @@ import type {
 } from "../../core/settings-manager.ts";
 import { BUILTIN_SLASH_COMMANDS } from "../../core/slash-commands.ts";
 import type { SourceInfo } from "../../core/source-info.ts";
-import { readClipboardImage } from "../../utils/clipboard-image.ts";
 import { getCwdRelativePath, resolvePath } from "../../utils/paths.ts";
-import { killTrackedDetachedChildren } from "../../utils/shell.ts";
 import { ensureTool } from "../../utils/tools-manager.ts";
 import { checkForNewPiVersion, type LatestPiRelease } from "../../utils/version-check.ts";
 import { AuthDialogsController } from "./auth-dialogs-controller.ts";
 import { AutoLearnController, type AutoLearnState } from "./auto-learn-controller.ts";
 import * as autocompleteProvider from "./autocomplete-provider.ts";
 import * as autonomyCommands from "./autonomy-commands.ts";
+import * as clipboardInput from "./clipboard-input.ts";
+import * as compactionQueue from "./compaction-queue.ts";
 import { AssistantMessageComponent } from "./components/assistant-message.ts";
 import { BashExecutionComponent } from "./components/bash-execution.ts";
 import { BranchSummaryMessageComponent } from "./components/branch-summary-message.ts";
@@ -88,6 +87,7 @@ import { EditorOverlayHost } from "./editor-overlay-host.ts";
 import { ExtensionUiHost } from "./extension-ui-host.ts";
 import { openEditorForPath, openExternalEditor } from "./external-editor.ts";
 import * as historyReloadMath from "./history-reload-math.ts";
+import * as keyHandlers from "./key-handlers.ts";
 import * as localModelCommands from "./local-model-commands.ts";
 import { ProfileMenuController } from "./profile-menu-controller.ts";
 import * as reportCommands from "./report-commands.ts";
@@ -96,6 +96,7 @@ import * as resourceShellCommands from "./resource-shell-commands.ts";
 import * as sessionFlows from "./session-flow-commands.ts";
 import * as sessionIoCommands from "./session-io-commands.ts";
 import * as settingsSelectorFlow from "./settings-selector-flow.ts";
+import * as signalLifecycle from "./signal-lifecycle.ts";
 import * as startupChecks from "./startup-checks.ts";
 import {
 	getEditorTheme,
@@ -159,16 +160,6 @@ type CompactionQueuedMessage = {
 	mode: "steer" | "followUp";
 	images?: ImageContent[];
 };
-
-const DEAD_TERMINAL_ERROR_CODES = new Set(["EIO", "EPIPE", "ENOTCONN"]);
-
-function isDeadTerminalError(error: unknown): boolean {
-	if (!error || typeof error !== "object" || !("code" in error)) {
-		return false;
-	}
-	const code = (error as NodeJS.ErrnoException).code;
-	return code !== undefined && DEAD_TERMINAL_ERROR_CODES.has(code);
-}
 
 const ANTHROPIC_SUBSCRIPTION_AUTH_WARNING =
 	"Anthropic subscription auth is active. Third-party harness usage draws from extra usage and is billed per token, not your Claude plan limits. Manage extra usage at https://claude.ai/settings/usage.";
@@ -1462,126 +1453,99 @@ export class InteractiveMode {
 	// =========================================================================
 
 	private setupKeyHandlers(): void {
-		// Set up handlers on defaultEditor - they use this.editor for text access
-		// so they work correctly regardless of which editor is active
-		this.defaultEditor.onEscape = () => {
-			if (this.session.isStreaming) {
-				this.restoreQueuedMessagesToEditor({ abort: true });
-			} else if (this.session.isBashRunning) {
-				this.session.abortBash();
-			} else if (this.isBashMode) {
-				this.editor.setText("");
-				this.isBashMode = false;
-				this.updateEditorBorderColor();
-			} else if (!this.editor.getText().trim()) {
-				// Double-escape with empty editor triggers /tree, /fork, or nothing based on setting
-				const action = this.settingsManager.getDoubleEscapeAction();
-				if (action !== "none") {
-					const now = Date.now();
-					if (now - this.lastEscapeTime < 500) {
-						if (action === "tree") {
-							this.showTreeSelector();
-						} else {
-							this.showUserMessageSelector();
-						}
-						this.lastEscapeTime = 0;
-					} else {
-						this.lastEscapeTime = now;
-					}
-				}
-			}
-		};
+		keyHandlers.setupKeyHandlers(this.keyHandlersHost());
+	}
 
-		// Register app action handlers
-		this.defaultEditor.onAction("app.clear", () => this.handleCtrlC());
-		this.defaultEditor.onCtrlD = () => this.handleCtrlD();
-		this.defaultEditor.onAction("app.suspend", () => this.handleCtrlZ());
-		this.defaultEditor.onAction("app.thinking.cycle", () => this.cycleThinkingLevel());
-		this.defaultEditor.onAction("app.model.cycleForward", () => this.cycleModel("forward"));
-		this.defaultEditor.onAction("app.model.cycleBackward", () => this.cycleModel("backward"));
-
-		// Global debug handler on TUI (works regardless of focus)
-		this.ui.onDebug = () => this.handleDebugCommand();
-		this.defaultEditor.onAction("app.model.select", () => void this.showModelSelector());
-		this.defaultEditor.onAction("app.tools.expand", () => this.loadTuiHistoryOnDemand());
-		this.defaultEditor.onAction("app.thinking.toggle", () => void this.toggleThinkingBlockVisibility());
-		this.defaultEditor.onAction("app.editor.external", () => this.openExternalEditor());
-		this.defaultEditor.onAction("app.message.followUp", () => this.handleFollowUp());
-		this.defaultEditor.onAction("app.message.dequeue", () => this.handleDequeue());
-		// Plain Up arrow on an empty editor recalls queued messages for editing
-		// before history navigation. Many terminals (e.g. Windows Terminal) swallow
-		// the alt-chord bindings, so the queue must be reachable without them.
-		this.defaultEditor.onRecallQueued = () => this.restoreQueuedMessagesToEditor() > 0;
-		this.defaultEditor.onAction("app.session.new", () => this.handleClearCommand());
-		this.defaultEditor.onAction("app.session.tree", () => this.showTreeSelector());
-		this.defaultEditor.onAction("app.session.fork", () => this.showUserMessageSelector());
-		this.defaultEditor.onAction("app.session.resume", () => this.showSessionSelector());
-
-		this.defaultEditor.onChange = (text: string) => {
-			const wasBashMode = this.isBashMode;
-			this.isBashMode = text.trimStart().startsWith("!");
-			if (wasBashMode !== this.isBashMode) {
-				this.updateEditorBorderColor();
-			}
-		};
-
-		// Handle clipboard image paste (triggered on Ctrl+V)
-		this.defaultEditor.onPasteImage = () => {
-			this.handleClipboardImagePaste();
+	private keyHandlersHost(): keyHandlers.KeyHandlersHost {
+		const self = this;
+		return {
+			defaultEditor: this.defaultEditor,
+			editor: this.editor,
+			ui: this.ui,
+			session: this.session,
+			settingsManager: this.settingsManager,
+			get isBashMode() {
+				return self.isBashMode;
+			},
+			set isBashMode(value) {
+				self.isBashMode = value;
+			},
+			get lastEscapeTime() {
+				return self.lastEscapeTime;
+			},
+			set lastEscapeTime(value) {
+				self.lastEscapeTime = value;
+			},
+			restoreQueuedMessagesToEditor: (options) => this.restoreQueuedMessagesToEditor(options),
+			updateEditorBorderColor: () => this.updateEditorBorderColor(),
+			showTreeSelector: (id) => this.showTreeSelector(id),
+			showUserMessageSelector: (name) => this.showUserMessageSelector(name),
+			handleCtrlC: () => this.handleCtrlC(),
+			handleCtrlD: () => this.handleCtrlD(),
+			handleCtrlZ: () => this.handleCtrlZ(),
+			cycleThinkingLevel: () => this.cycleThinkingLevel(),
+			cycleModel: (direction) => this.cycleModel(direction),
+			handleDebugCommand: () => this.handleDebugCommand(),
+			showModelSelector: (input) => this.showModelSelector(input),
+			loadTuiHistoryOnDemand: () => this.loadTuiHistoryOnDemand(),
+			toggleThinkingBlockVisibility: () => this.toggleThinkingBlockVisibility(),
+			openExternalEditor: () => this.openExternalEditor(),
+			handleFollowUp: () => this.handleFollowUp(),
+			handleDequeue: () => this.handleDequeue(),
+			handleClearCommand: (name) => this.handleClearCommand(name),
+			showSessionSelector: () => this.showSessionSelector(),
+			handleClipboardImagePaste: () => this.handleClipboardImagePaste(),
 		};
 	}
 
-	private async handleClipboardImagePaste(): Promise<void> {
-		try {
-			const image = await readClipboardImage();
-			if (!image) {
-				return;
-			}
-
-			const label = this.nextClipboardImageLabel();
-			const mimeType = image.mimeType.split(";")[0]?.trim().toLowerCase() || image.mimeType;
-			this.pendingClipboardImages.push({
-				label,
-				content: {
-					type: "image",
-					data: Buffer.from(image.bytes).toString("base64"),
-					mimeType,
-				},
-			});
-
-			this.editor.insertTextAtCursor?.(`${label} `);
-			this.showStatus(`Attached clipboard image ${label} (${mimeType})`);
-			this.ui.requestRender();
-		} catch (error: unknown) {
-			const message = error instanceof Error ? error.message : String(error);
-			this.showWarning(`Failed to paste image: ${message}`);
-		}
-	}
-
-	private nextClipboardImageLabel(): string {
-		if (this.pendingClipboardImages.length === 0) {
-			this.clipboardImageCounter = 0;
-		}
-		this.clipboardImageCounter += 1;
-		return `[Image #${this.clipboardImageCounter}]`;
+	private handleClipboardImagePaste(): Promise<void> {
+		const self = this;
+		return clipboardInput.handleClipboardImagePaste({
+			get pendingClipboardImages() {
+				return self.pendingClipboardImages;
+			},
+			set pendingClipboardImages(value) {
+				self.pendingClipboardImages = value;
+			},
+			get clipboardImageCounter() {
+				return self.clipboardImageCounter;
+			},
+			set clipboardImageCounter(value) {
+				self.clipboardImageCounter = value;
+			},
+			editor: this.editor,
+			ui: this.ui,
+			showStatus: (message) => this.showStatus(message),
+			showWarning: (message) => this.showWarning(message),
+		});
 	}
 
 	private takeClipboardImagesForText(text: string): ImageContent[] | undefined {
-		if (this.pendingClipboardImages.length === 0) {
-			return undefined;
-		}
-
-		const images = this.pendingClipboardImages
-			.filter((image) => text.includes(image.label))
-			.map((image) => image.content);
-		this.pendingClipboardImages = [];
-		this.clipboardImageCounter = 0;
-		return images.length > 0 ? images : undefined;
+		const self = this;
+		return clipboardInput.takeClipboardImagesForText(
+			{
+				get pendingClipboardImages() {
+					return self.pendingClipboardImages;
+				},
+				set pendingClipboardImages(value) {
+					self.pendingClipboardImages = value;
+				},
+				get clipboardImageCounter() {
+					return self.clipboardImageCounter;
+				},
+				set clipboardImageCounter(value) {
+					self.clipboardImageCounter = value;
+				},
+			},
+			text,
+		);
 	}
 
 	private buildUserInputSubmission(text: string): UserInputSubmission {
-		const images = this.takeClipboardImagesForText(text);
-		return images ? { text, images } : { text };
+		return clipboardInput.buildUserInputSubmission(
+			{ takeClipboardImagesForText: (t) => this.takeClipboardImagesForText(t) },
+			text,
+		);
 	}
 
 	private setupEditorSubmitHandler(): void {
@@ -2673,172 +2637,61 @@ export class InteractiveMode {
 	 */
 	private isShuttingDown = false;
 
-	private async shutdown(options?: { fromSignal?: boolean }): Promise<void> {
-		if (this.isShuttingDown) return;
-		this.isShuttingDown = true;
-		this.unregisterSignalHandlers();
-
-		if (options?.fromSignal) {
-			// Signal-triggered shutdown (SIGTERM/SIGHUP). Emit extension cleanup
-			// (session_shutdown) BEFORE touching the terminal. Extension teardown
-			// such as removing sockets does not write to the tty, so it must not be
-			// skipped if a later terminal-restore write fails on a dead or stalled
-			// terminal. If the terminal is gone, the restore writes below emit EIO,
-			// which the stdout/stderr error handler turns into emergencyTerminalExit;
-			// the render loop is already idle, so this cannot hot-spin (see #4144).
-			await this.runtimeHost.dispose();
-			await this.ui.terminal.drainInput(1000);
-			this.stop();
-			process.exit(0);
-		}
-
-		// Interactive quit (Ctrl+D, Ctrl+C, /quit, extension shutdown()). Stop the
-		// TUI before emitting shutdown events so extension UI cleanup cannot repaint
-		// the final frame while the process is exiting.
-		// Drain any in-flight Kitty key release events before stopping.
-		// This prevents escape sequences from leaking to the parent shell over slow SSH.
-		await this.ui.terminal.drainInput(1000);
-
-		this.stop();
-		await this.runtimeHost.dispose();
-
-		const resumeCommand = formatResumeCommand(this.sessionManager);
-		if (resumeCommand) {
-			process.stdout.write(`${chalk.dim("To resume this session:")} ${resumeCommand}\n`);
-		}
-
-		process.exit(0);
+	private shutdown(options?: { fromSignal?: boolean }): Promise<void> {
+		const self = this;
+		return signalLifecycle.shutdown(
+			{
+				get isShuttingDown() {
+					return self.isShuttingDown;
+				},
+				set isShuttingDown(value) {
+					self.isShuttingDown = value;
+				},
+				get signalCleanupHandlers() {
+					return self.signalCleanupHandlers;
+				},
+				set signalCleanupHandlers(value) {
+					self.signalCleanupHandlers = value;
+				},
+				get shutdownRequested() {
+					return self.shutdownRequested;
+				},
+				runtimeHost: this.runtimeHost,
+				ui: this.ui,
+				stop: () => this.stop(),
+				formatResumeCommand: () => formatResumeCommand(this.sessionManager),
+				showStatus: (message) => this.showStatus(message),
+				shutdown: (opts) => this.shutdown(opts),
+				unregisterSignalHandlers: () => this.unregisterSignalHandlers(),
+				emergencyTerminalExit: () => this.emergencyTerminalExit(),
+				uncaughtCrash: (error) => this.uncaughtCrash(error),
+			},
+			options,
+		);
 	}
 
 	private emergencyTerminalExit(): never {
-		this.isShuttingDown = true;
-		this.unregisterSignalHandlers();
-		killTrackedDetachedChildren();
-		// The terminal is gone. Do not run normal shutdown because TUI and
-		// extension cleanup can write restore sequences and re-trigger EIO.
-		process.exit(129);
+		return signalLifecycle.emergencyTerminalExit(this as unknown as signalLifecycle.SignalLifecycleHost);
 	}
 
-	/**
-	 * Last-resort handler for uncaught exceptions. The TUI puts stdin into raw
-	 * mode and hides the cursor; without this handler, an uncaught throw from
-	 * anywhere (e.g. an extension's async `ChildProcess.on("exit")` callback)
-	 * tears down the process while leaving the terminal in raw mode with no
-	 * cursor, requiring `stty sane && reset` to recover.
-	 *
-	 * Unlike emergencyTerminalExit, the terminal is still alive here, so we
-	 * call ui.stop() to restore cooked mode, the cursor, and disable bracketed
-	 * paste / Kitty / modifyOtherKeys sequences.
-	 */
 	private uncaughtCrash(error: Error): never {
-		if (this.isShuttingDown) {
-			process.exit(1);
-		}
-		this.isShuttingDown = true;
-		try {
-			this.unregisterSignalHandlers();
-		} catch {}
-		try {
-			killTrackedDetachedChildren();
-		} catch {}
-		try {
-			this.ui.stop();
-		} catch {}
-		console.error("pi exiting due to uncaughtException:");
-		console.error(error);
-		process.exit(1);
+		return signalLifecycle.uncaughtCrash(this as unknown as signalLifecycle.SignalLifecycleHost, error);
 	}
 
-	/**
-	 * Check if shutdown was requested and perform shutdown if so.
-	 */
-	private async checkShutdownRequested(): Promise<void> {
-		if (!this.shutdownRequested) return;
-		await this.shutdown();
+	private checkShutdownRequested(): Promise<void> {
+		return signalLifecycle.checkShutdownRequested(this as unknown as signalLifecycle.SignalLifecycleHost);
 	}
 
 	private registerSignalHandlers(): void {
-		this.unregisterSignalHandlers();
-
-		const signals: NodeJS.Signals[] = ["SIGTERM"];
-		if (process.platform !== "win32") {
-			signals.push("SIGHUP");
-		}
-
-		for (const signal of signals) {
-			const handler = () => {
-				// SIGHUP no longer hard-exits: graceful shutdown emits session_shutdown
-				// first, then attempts terminal restore. A genuinely dead terminal
-				// surfaces as an EIO on the restore writes, which the stdout/stderr
-				// error handler converts into emergencyTerminalExit (see #4144, #5080).
-				killTrackedDetachedChildren();
-				void this.shutdown({ fromSignal: true });
-			};
-			process.prependListener(signal, handler);
-			this.signalCleanupHandlers.push(() => process.off(signal, handler));
-		}
-
-		const terminalErrorHandler = (error: Error) => {
-			if (isDeadTerminalError(error)) {
-				this.emergencyTerminalExit();
-			}
-			throw error;
-		};
-		process.stdout.on("error", terminalErrorHandler);
-		process.stderr.on("error", terminalErrorHandler);
-		this.signalCleanupHandlers.push(() => process.stdout.off("error", terminalErrorHandler));
-		this.signalCleanupHandlers.push(() => process.stderr.off("error", terminalErrorHandler));
-
-		// Restore the terminal before the process dies on any uncaught throw.
-		// Without this, an unhandled exception from extension code (or anywhere
-		// in pi) leaves the terminal in raw mode with no cursor.
-		const uncaughtExceptionHandler = (error: Error) => this.uncaughtCrash(error);
-		process.prependListener("uncaughtException", uncaughtExceptionHandler);
-		this.signalCleanupHandlers.push(() => process.off("uncaughtException", uncaughtExceptionHandler));
+		signalLifecycle.registerSignalHandlers(this as unknown as signalLifecycle.SignalLifecycleHost);
 	}
 
 	private unregisterSignalHandlers(): void {
-		for (const cleanup of this.signalCleanupHandlers) {
-			cleanup();
-		}
-		this.signalCleanupHandlers = [];
+		signalLifecycle.unregisterSignalHandlers(this as unknown as signalLifecycle.SignalLifecycleHost);
 	}
 
 	private handleCtrlZ(): void {
-		if (process.platform === "win32") {
-			this.showStatus("Suspend to background is not supported on Windows");
-			return;
-		}
-
-		// Keep the event loop alive while suspended. Without this, stopping the TUI
-		// can leave Node with no ref'ed handles, causing the process to exit on fg
-		// before the SIGCONT handler gets a chance to restore the terminal.
-		const suspendKeepAlive = setInterval(() => {}, 2 ** 30);
-
-		// Ignore SIGINT while suspended so Ctrl+C in the terminal does not
-		// kill the backgrounded process. The handler is removed on resume.
-		const ignoreSigint = () => {};
-		process.on("SIGINT", ignoreSigint);
-
-		// Set up handler to restore TUI when resumed
-		process.once("SIGCONT", () => {
-			clearInterval(suspendKeepAlive);
-			process.removeListener("SIGINT", ignoreSigint);
-			this.ui.start();
-			this.ui.requestRender(true);
-		});
-
-		try {
-			// Stop the TUI (restore terminal to normal mode)
-			this.ui.stop();
-
-			// Send SIGTSTP to process group (pid=0 means all processes in group)
-			process.kill(0, "SIGTSTP");
-		} catch (error) {
-			clearInterval(suspendKeepAlive);
-			process.removeListener("SIGINT", ignoreSigint);
-			throw error;
-		}
+		signalLifecycle.handleCtrlZ({ ui: this.ui, showStatus: (message) => this.showStatus(message) });
 	}
 
 	private async handleFollowUp(): Promise<void> {
@@ -3111,91 +2964,24 @@ export class InteractiveMode {
 		return !!extensionRunner.getCommand(commandName);
 	}
 
-	private async flushCompactionQueue(options?: { willRetry?: boolean }): Promise<void> {
-		if (this.compactionQueuedMessages.length === 0) {
-			return;
-		}
-
-		const queuedMessages = [...this.compactionQueuedMessages];
-		this.compactionQueuedMessages = [];
-		this.updatePendingMessagesDisplay();
-
-		const restoreQueue = (error: unknown) => {
-			this.session.clearQueue();
-			this.compactionQueuedMessages = queuedMessages;
-			this.updatePendingMessagesDisplay();
-			this.showError(
-				`Failed to send queued message${queuedMessages.length > 1 ? "s" : ""}: ${
-					error instanceof Error ? error.message : String(error)
-				}`,
-			);
-		};
-
-		try {
-			if (options?.willRetry) {
-				// When retry is pending, queue messages for the retry turn
-				for (const message of queuedMessages) {
-					if (this.isExtensionCommand(message.text)) {
-						await this.session.prompt(message.text);
-					} else if (message.mode === "followUp") {
-						await this.session.followUp(message.text, message.images);
-					} else {
-						await this.session.steer(message.text, message.images);
-					}
-				}
-				this.updatePendingMessagesDisplay();
-				return;
-			}
-
-			// Find first non-extension-command message to use as prompt
-			const firstPromptIndex = queuedMessages.findIndex((message) => !this.isExtensionCommand(message.text));
-			if (firstPromptIndex === -1) {
-				// All extension commands - execute them all
-				for (const message of queuedMessages) {
-					await this.session.prompt(message.text);
-				}
-				return;
-			}
-
-			// Execute any extension commands before the first prompt
-			const preCommands = queuedMessages.slice(0, firstPromptIndex);
-			const firstPrompt = queuedMessages[firstPromptIndex];
-			const rest = queuedMessages.slice(firstPromptIndex + 1);
-
-			for (const message of preCommands) {
-				await this.session.prompt(message.text);
-			}
-
-			// Send first prompt (starts streaming). Auto-compaction can finish while the
-			// agent is still processing; in that case, queue the message with the same
-			// steering/follow-up mode instead of surfacing an internal streamingBehavior error.
-			const promptOptions = this.session.isStreaming
-				? { images: firstPrompt.images, streamingBehavior: firstPrompt.mode }
-				: { images: firstPrompt.images };
-			const promptPromise = this.session
-				.prompt(firstPrompt.text, promptOptions)
-				.catch((error) => {
-					restoreQueue(error);
-				})
-				.finally(() => {
-					this.refreshAutonomyFooterStatus();
-				});
-
-			// Queue remaining messages
-			for (const message of rest) {
-				if (this.isExtensionCommand(message.text)) {
-					await this.session.prompt(message.text);
-				} else if (message.mode === "followUp") {
-					await this.session.followUp(message.text, message.images);
-				} else {
-					await this.session.steer(message.text, message.images);
-				}
-			}
-			this.updatePendingMessagesDisplay();
-			void promptPromise;
-		} catch (error) {
-			restoreQueue(error);
-		}
+	private flushCompactionQueue(options?: { willRetry?: boolean }): Promise<void> {
+		const self = this;
+		return compactionQueue.flushCompactionQueue(
+			{
+				get compactionQueuedMessages() {
+					return self.compactionQueuedMessages;
+				},
+				set compactionQueuedMessages(value) {
+					self.compactionQueuedMessages = value;
+				},
+				session: this.session,
+				updatePendingMessagesDisplay: () => this.updatePendingMessagesDisplay(),
+				showError: (message) => this.showError(message),
+				isExtensionCommand: (text) => this.isExtensionCommand(text),
+				refreshAutonomyFooterStatus: () => this.refreshAutonomyFooterStatus(),
+			},
+			options,
+		);
 	}
 
 	/** Move pending bash components from pending area to chat */
