@@ -14,13 +14,17 @@ import { createHarness } from "./suite/harness.ts";
 
 type PreDigestSession = {
 	settingsManager: { setContextCurationSettings: (s: object) => void };
-	_brainCurator: {
-		enqueue: (job: { kind: "stub_digest"; key: string; content: string }) => void;
-		drain: (opts: { maxJobs: number; complete: CurationComplete }) => Promise<unknown>;
-		telemetry: () => { jobsRun: number; parseFailures: number };
+	// _brainCurator + _lastPreDigestSkipReason moved to ContextPipeline (god-file decomposition);
+	// _buildCompactionPreDigest stays on AgentSession as a one-line delegation to the pipeline.
+	_pipeline: {
+		_brainCurator: {
+			enqueue: (job: { kind: "stub_digest"; key: string; content: string }) => void;
+			drain: (opts: { maxJobs: number; complete: CurationComplete }) => Promise<unknown>;
+			telemetry: () => { jobsRun: number; parseFailures: number };
+		};
+		_lastPreDigestSkipReason: string | undefined;
 	};
 	_buildCompactionPreDigest: () => ((text: string, signal?: AbortSignal) => Promise<string>) | undefined;
-	_lastPreDigestSkipReason: string | undefined;
 };
 
 const scripted = (replies: string[]): CurationComplete => {
@@ -63,9 +67,9 @@ const makeHarness = async () => {
 /** Drive the curator's telemetry directly (bypassing the session model) to a chosen jobs/failures mix. */
 const runCuratorJobs = async (session: PreDigestSession, replies: string[]) => {
 	for (let i = 0; i < replies.length; i++) {
-		session._brainCurator.enqueue({ kind: "stub_digest", key: `k${i}`, content: `chunk ${i}` });
+		session._pipeline._brainCurator.enqueue({ kind: "stub_digest", key: `k${i}`, content: `chunk ${i}` });
 	}
-	await session._brainCurator.drain({ maxJobs: replies.length, complete: scripted(replies) });
+	await session._pipeline._brainCurator.drain({ maxJobs: replies.length, complete: scripted(replies) });
 };
 
 describe("compaction pre-digest reliability gate (surface 3)", () => {
@@ -74,9 +78,9 @@ describe("compaction pre-digest reliability gate (surface 3)", () => {
 		try {
 			const session = harness.session as unknown as PreDigestSession;
 			// Fresh session: jobsRun is 0, below the 5-job floor.
-			expect(session._brainCurator.telemetry().jobsRun).toBe(0);
+			expect(session._pipeline._brainCurator.telemetry().jobsRun).toBe(0);
 			expect(session._buildCompactionPreDigest()).toBeUndefined();
-			expect(session._lastPreDigestSkipReason).toBe("curation_predigest_reliability_unproven");
+			expect(session._pipeline._lastPreDigestSkipReason).toBe("curation_predigest_reliability_unproven");
 		} finally {
 			harness.cleanup();
 		}
@@ -94,11 +98,11 @@ describe("compaction pre-digest reliability gate (surface 3)", () => {
 				'{"digest":"d"}',
 				"not json",
 			]);
-			const telemetry = session._brainCurator.telemetry();
+			const telemetry = session._pipeline._brainCurator.telemetry();
 			expect(telemetry.jobsRun).toBe(5);
 			expect(telemetry.parseFailures).toBe(1);
 			expect(session._buildCompactionPreDigest()).toBeUndefined();
-			expect(session._lastPreDigestSkipReason).toBe("curation_predigest_reliability_unproven");
+			expect(session._pipeline._lastPreDigestSkipReason).toBe("curation_predigest_reliability_unproven");
 		} finally {
 			harness.cleanup();
 		}
@@ -115,11 +119,11 @@ describe("compaction pre-digest reliability gate (surface 3)", () => {
 				'{"digest":"d"}',
 				'{"digest":"e"}',
 			]);
-			const telemetry = session._brainCurator.telemetry();
+			const telemetry = session._pipeline._brainCurator.telemetry();
 			expect(telemetry.jobsRun).toBe(5);
 			expect(telemetry.parseFailures).toBe(0);
 			expect(typeof session._buildCompactionPreDigest()).toBe("function");
-			expect(session._lastPreDigestSkipReason).toBeUndefined();
+			expect(session._pipeline._lastPreDigestSkipReason).toBeUndefined();
 		} finally {
 			harness.cleanup();
 		}

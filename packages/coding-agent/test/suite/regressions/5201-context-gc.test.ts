@@ -210,10 +210,15 @@ describe("Context GC", () => {
 		const harness = createHarness();
 		try {
 			const agentDir = join(harness.tempDir, "agent-state");
-			const session = harness.session as unknown as { _agentDir: string; _contextGcStorageDir(): string };
+			// _contextGcStorageDir moved to ContextPipeline (god-file decomposition); it derives the dir
+			// from the session's agentDir via a deps accessor, so setting _agentDir still steers it.
+			const session = harness.session as unknown as {
+				_agentDir: string;
+				_pipeline: { _contextGcStorageDir(): string };
+			};
 			session._agentDir = agentDir;
 
-			const storageDir = session._contextGcStorageDir();
+			const storageDir = session._pipeline._contextGcStorageDir();
 			expect(storageDir).toBe(join(agentDir, "context-gc", harness.sessionManager.getSessionId()));
 			expect(storageDir).not.toBe(
 				join(harness.sessionManager.getSessionDir(), "context-gc", harness.sessionManager.getSessionId()),

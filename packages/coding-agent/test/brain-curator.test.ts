@@ -295,12 +295,14 @@ describe("session drain gate (fail-closed)", () => {
 		try {
 			const session = harness.session as unknown as {
 				settingsManager: { setContextCurationSettings: (s: object) => void };
-				_brainCurator: { enqueue: (job: object) => void };
+				// _brainCurator moved to ContextPipeline (god-file decomposition); _maybeDrainBrainCuration +
+				// getContextCurationStatus stay on AgentSession as one-line delegations to the pipeline.
+				_pipeline: { _brainCurator: { enqueue: (job: object) => void } };
 				_maybeDrainBrainCuration: () => void;
 				getContextCurationStatus: () => { lastSkipReason?: string; telemetry: { jobsRun: number } };
 			};
 			session.settingsManager.setContextCurationSettings({ enabled: true });
-			session._brainCurator.enqueue({ kind: "stub_digest", key: "k1", content: "chunk" });
+			session._pipeline._brainCurator.enqueue({ kind: "stub_digest", key: "k1", content: "chunk" });
 			session._maybeDrainBrainCuration();
 			expect(session.getContextCurationStatus().lastSkipReason).toBe("curation_model_unset");
 			expect(session.getContextCurationStatus().telemetry.jobsRun).toBe(0);
