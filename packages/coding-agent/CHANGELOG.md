@@ -1,5 +1,11 @@
 ## [Unreleased]
 
+### Added
+- Phase-aware stream watchdog wiring in `AgentSession`, utilizing the new `StreamStallSettings` (`connectMs`, `activeIdleMs`, `quietIdleMs`) exposed and validated by `SettingsManager`.
+- Compaction stream stalls are now fully retryable. Both manual and auto-compaction are wrapped in `_compactWithRetry`, ensuring transient stream stalls during summarization trigger retries rather than hard failures.
+
+### Changed
+- Increased `DEFAULT_HTTP_IDLE_TIMEOUT_MS` to 660s (from 120s) to support up to 10-minute quiet idles during long think phases without premature HTTP-layer kills.
 ## [0.81.0] - 2026-07-04
 
 ### Added

@@ -1,5 +1,7 @@
 ## [Unreleased]
 
+### Added
+- Reliability kernel: `SilenceWatchdog` now supports dynamic re-arming via `touch()` and `withStreamIdleWatchdog` uses `idleBoundFor` to apply phase-aware bounds (`connectMs`, `activeIdleMs`, `quietIdleMs`) based on the stream's state (thinking vs text).
 ## [0.81.0] - 2026-07-04
 
 ### Breaking Changes
