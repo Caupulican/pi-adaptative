@@ -3640,6 +3640,7 @@ export class AgentSession {
 		return classifyFailure({
 			message: message.errorMessage,
 			contextOverflow: isContextOverflow(message, contextWindow),
+			provider: message.provider,
 		}).retryable;
 	}
 
