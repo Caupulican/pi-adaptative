@@ -28,6 +28,8 @@ describe("ModelSuggestionSelectorComponent", () => {
 		}
 		// The Bonsai models cannot call tools; the picker must say so where an executor role is a footgun.
 		expect(output).toContain("no tool-calling");
+		expect(output).toContain("FastContext-1.0-4B");
+		expect(output).toContain("Repository scout");
 	});
 
 	it("selecting an entry returns the whole suggestion (ref + shaped role), not just a string", () => {

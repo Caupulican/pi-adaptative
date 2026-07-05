@@ -26,6 +26,16 @@ describe("default model suggestions", () => {
 		);
 	});
 
+	it("keeps FastContext immediately after the executor entries as the scout suggestion", () => {
+		const fastContextIndex = DEFAULT_MODEL_SUGGESTIONS.findIndex((s) => s.name === "FastContext-1.0-4B");
+		expect(fastContextIndex).toBe(2);
+		expect(DEFAULT_MODEL_SUGGESTIONS[fastContextIndex]).toMatchObject({
+			pullRef: "hf.co/KikoCis/FastContext-1.0-4B-longctx-imatrix-GGUF:fastcontext4b.Q4_K_M.imx.gguf",
+			assignRole: "scout",
+			toolCalling: true,
+		});
+	});
+
 	it("Ternary-Bonsai models are marked as non-tool-calling (lane/brain only, never executor)", () => {
 		for (const suggestion of DEFAULT_MODEL_SUGGESTIONS.filter((s) => s.name.includes("Bonsai"))) {
 			expect(suggestion.toolCalling).toBe(false);
@@ -49,6 +59,7 @@ describe("default model suggestions", () => {
 	it("renders a bounded roster naming each model, its role, and its add command", () => {
 		const text = formatModelSuggestions().join("\n");
 		expect(text).toContain("qwen3:1.7b → Toolkit executor");
+		expect(text).toContain("FastContext-1.0-4B → Repository scout");
 		expect(text).toContain("/models add hf.co/prism-ml/Ternary-Bonsai-4B-gguf");
 		expect(text).toContain("[no tool-calling]");
 		expect(text).toContain("probe on YOUR hardware with /fitness");

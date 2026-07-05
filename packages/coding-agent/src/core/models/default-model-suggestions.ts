@@ -51,6 +51,16 @@ export const DEFAULT_MODEL_SUGGESTIONS: readonly ModelSuggestion[] = [
 			"Fastest local option; on harder requests it can narrate without executing, so prefer it only when speed dominates and requests are simple.",
 	},
 	{
+		name: "FastContext-1.0-4B",
+		pullRef: "hf.co/KikoCis/FastContext-1.0-4B-longctx-imatrix-GGUF:fastcontext4b.Q4_K_M.imx.gguf",
+		role: "Repository scout (context_scout)",
+		toolCalling: true,
+		assignRole: "scout",
+		rationale:
+			"The model the context_scout lane is built around (Plan 9): 4B Qwen3, 256K context, trained for read-only repo exploration returning file:line citations. /fitness must pass the tool-calls + research lanes before assignment.",
+		note: "Q4 ≈ 2.5 GB; ~5-6 GB peak with 32-64K KV. Qwen3 template caveat: if tool calls fail the probe, use the Modelfile recipe in docs/scout.md.",
+	},
+	{
 		name: "Ternary-Bonsai-1.7B",
 		pullRef: "hf.co/prism-ml/Ternary-Bonsai-1.7B-gguf",
 		role: "Search scout (heavy-lifter)",
