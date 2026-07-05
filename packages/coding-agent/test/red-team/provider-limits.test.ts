@@ -2,8 +2,12 @@ import type { Agent } from "@caupulican/pi-agent-core";
 import { classifyFailure, DEFAULT_RETRY_POLICY } from "@caupulican/pi-agent-core";
 import type { Api, AssistantMessage, Model } from "@caupulican/pi-ai";
 import { describe, expect, it } from "vitest";
+import { AgentSession } from "../../src/core/agent-session.ts";
+import type { RouteDecision } from "../../src/core/autonomy/contracts.ts";
 import { BillingFailoverController, ExhaustedProviderRegistry } from "../../src/core/billing-failover-controller.ts";
 import type { ModelRegistry } from "../../src/core/model-registry.ts";
+import { ModelRouterController } from "../../src/core/model-router-controller.ts";
+import { resolveScoutModel } from "../../src/core/runtime-builder.ts";
 import {
 	createChaosProvider,
 	expectBoundedOutbound,
@@ -43,19 +47,51 @@ function assistantError(modelRef: Model<Api>, errorMessage: string): AssistantMe
 }
 
 function registry(subscription: boolean): ModelRegistry {
+	const models = [codexSpark, codexDefault, meteredSelected];
 	return {
+		getAll: () => models,
 		find: (provider: string, id: string) =>
-			provider === codexSpark.provider && id === codexSpark.id
-				? codexSpark
-				: provider === codexDefault.provider && id === codexDefault.id
-					? codexDefault
-					: provider === meteredSelected.provider && id === meteredSelected.id
-						? meteredSelected
-						: undefined,
+			models.find((candidate) => candidate.provider === provider && candidate.id === id),
 		hasConfiguredAuth: () => true,
+		getApiKeyAndHeaders: async () => ({ ok: true, apiKey: "test-key", headers: undefined }),
 		isUsingOAuth: (candidate: Model<Api>) => subscription && candidate.provider === "openai-codex",
 	} as unknown as ModelRegistry;
 }
+
+type RouterHarness = {
+	_lastModelRouterSkipReason?: string;
+	_resolveExecutorRoute: () => undefined;
+	deps: {
+		getSettingsManager: () => {
+			getModelRouterSettings: () => { enabled: boolean; cheapModel: string; expensiveModel: string };
+		};
+		getSessionManager: () => { getEntries: () => [] };
+		getAgentDir: () => string;
+		getModelRegistry: () => ModelRegistry;
+		isModelExhausted: (model: Model<Api>) => boolean;
+		getFailoverStatus: () => { exhausted: string[]; lastNotice?: string };
+	};
+};
+
+const routerPrototype = ModelRouterController.prototype as unknown as {
+	_resolveModelRouterTurnRoute(
+		this: RouterHarness,
+		prompt: string,
+	): { decision: RouteDecision; model: Model<Api> } | undefined;
+};
+
+type CompactWithRetryHarness = {
+	settingsManager: { getRetrySettings: () => { enabled: boolean; maxRetries: number; baseDelayMs: number } };
+};
+
+const agentSessionPrototype = AgentSession.prototype as unknown as {
+	_compactWithRetry(
+		this: CompactWithRetryHarness,
+		run: () => Promise<unknown>,
+		signal: AbortSignal,
+		provider?: string,
+	): Promise<unknown>;
+};
 
 function controller(startModel: Model<Api>, subscription: boolean, exhausted = new ExhaustedProviderRegistry()) {
 	const warnings: string[] = [];
@@ -144,28 +180,73 @@ describe("provider limit red-team matrix", () => {
 		expect(classifyFailure({ message: codexLiteral }).reason).toBe("billing_or_quota");
 	});
 
-	it("Quota mid-compaction (summarizer model)", () => {
-		const classified = classifyFailure({ message: codexLiteral, provider: "openai-codex" });
-		expect(classified.reason).toBe("billing_or_quota");
-		expectNoSilentTerminal({ ended: true, visibleMessages: ["compaction failed: provider quota/limit reached"] });
+	it("Quota mid-compaction (summarizer model)", async () => {
+		const harness: CompactWithRetryHarness = {
+			settingsManager: { getRetrySettings: () => ({ enabled: true, maxRetries: 2, baseDelayMs: 1 }) },
+		};
+		let surfaced = "";
+		try {
+			await agentSessionPrototype._compactWithRetry.call(
+				harness,
+				async () => {
+					throw new Error(codexLiteral);
+				},
+				new AbortController().signal,
+				"openai-codex",
+			);
+		} catch (error) {
+			surfaced = error instanceof Error ? error.message : String(error);
+		}
+		expect(surfaced).toBe(codexLiteral);
+		expectNoSilentTerminal({ ended: true, visibleMessages: [surfaced] });
 	});
 
 	it("Quota on a routed cheap turn", () => {
-		expectNoSilentTerminal({ ended: true, visibleMessages: ["Routing: skipped (cheap model exhausted: quota)"] });
+		const exhausted = new ExhaustedProviderRegistry();
+		exhausted.markExhausted("openai-codex/codex-spark");
+		const harness: RouterHarness = {
+			_resolveExecutorRoute: () => undefined,
+			deps: {
+				getSettingsManager: () => ({
+					getModelRouterSettings: () => ({
+						enabled: true,
+						cheapModel: "openai-codex/codex-spark",
+						expensiveModel: "openai-codex/gpt-5.5",
+					}),
+				}),
+				getSessionManager: () => ({ getEntries: () => [] }),
+				getAgentDir: () => "/tmp/pi-red-team-router",
+				getModelRegistry: () => registry(true),
+				isModelExhausted: (candidate) => exhausted.isExhausted(`${candidate.provider}/${candidate.id}`),
+				getFailoverStatus: () => ({ exhausted: exhausted.snapshot() }),
+			},
+		};
+		expect(routerPrototype._resolveModelRouterTurnRoute.call(harness, "Explain this code block")).toBeUndefined();
+		const skipReason = harness._lastModelRouterSkipReason;
+		expect(skipReason).toBe("cheap model exhausted: quota");
+		if (!skipReason) throw new Error("expected router skip reason");
+		expectNoSilentTerminal({ ended: true, visibleMessages: [skipReason] });
 	});
 
-	it("Quota during a scout run", () => {
-		expectNoSilentTerminal({
-			ended: true,
-			visibleMessages: ["scout unavailable: openai-codex/codex-spark exhausted: quota"],
-		});
+	it("Quota during a scout run", async () => {
+		const exhausted = new ExhaustedProviderRegistry();
+		exhausted.markExhausted("openai-codex/codex-spark");
+		const resolved = await resolveScoutModel(
+			registry(true),
+			"openai-codex/codex-spark",
+			"/tmp/pi-red-team-scout",
+			(candidate) => exhausted.isExhausted(`${candidate.provider}/${candidate.id}`),
+		);
+		expect(resolved).toEqual({ failure: "openai-codex/codex-spark exhausted: quota" });
+		if (!("failure" in resolved) || !resolved.failure) throw new Error("expected scout failure");
+		expectNoSilentTerminal({ ended: true, visibleMessages: [resolved.failure] });
 	});
 
 	it("Auth expiry mid-turn", () => {
 		const classified = classifyFailure({ message: "401 unauthorized", provider: "openai-codex" });
 		expect(classified.reason).toBe("auth");
 		expect(classified.retryable).toBe(false);
-		expectNoSilentTerminal({ ended: true, visibleMessages: ["authentication failed"] });
+		expectNoSilentTerminal({ ended: true, visibleMessages: [classified.message] });
 	});
 
 	it("Failover ping-pong (A exhausted → hop B → B quota → A recovers)", async () => {
@@ -185,8 +266,9 @@ describe("provider limit red-team matrix", () => {
 	it("Abort during failover handling", () => {
 		const chaos = createChaosProvider([{ type: "mid_stream_abort", message: "aborted" }]);
 		chaos.call("openai-codex/codex-spark");
-		expect(classifyFailure({ message: "aborted", aborted: true, provider: "openai-codex" }).reason).toBe("aborted");
+		const classified = classifyFailure({ message: "aborted", aborted: true, provider: "openai-codex" });
+		expect(classified.reason).toBe("aborted");
 		expectBoundedOutbound(chaos, 1);
-		expectNoSilentTerminal({ ended: true, visibleMessages: ["aborted"] });
+		expectNoSilentTerminal({ ended: true, visibleMessages: [classified.message] });
 	});
 });
