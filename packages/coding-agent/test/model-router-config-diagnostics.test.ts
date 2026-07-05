@@ -2,7 +2,6 @@ import { mkdtempSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import type { Model } from "@caupulican/pi-ai";
-import { getModel } from "@caupulican/pi-ai";
 import { describe, expect, it } from "vitest";
 import type { ModelRegistry } from "../src/core/model-registry.ts";
 import { collectModelRouterConfigDiagnostics } from "../src/core/model-router/config-diagnostics.ts";
@@ -14,9 +13,24 @@ type RegistryStub = {
 	hasConfiguredAuth: (model: Model<any>) => boolean;
 };
 
-const cheapModel = getModel("anthropic", "claude-haiku-4-5")!;
-const mediumModel = getModel("anthropic", "claude-3-5-sonnet-20241022")!;
-const expensiveModel = getModel("anthropic", "claude-sonnet-4-5")!;
+function model(id: string): Model<any> {
+	return {
+		id,
+		name: id,
+		provider: "anthropic",
+		api: "messages",
+		baseUrl: "https://example.test",
+		reasoning: false,
+		input: ["text"],
+		cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 },
+		contextWindow: 200000,
+		maxTokens: 8192,
+	};
+}
+
+const cheapModel = model("claude-haiku-4-5");
+const mediumModel = model("claude-3-5-sonnet-20241022");
+const expensiveModel = model("claude-sonnet-4-5");
 
 function lane(succeeded = 3, total = 3): LaneFitnessScore {
 	return { succeeded, total, outcomes: [], meanMs: 1 };

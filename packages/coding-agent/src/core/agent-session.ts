@@ -535,15 +535,10 @@ export class AgentSession {
 	private _eventListeners: AgentSessionEventListener[] = [];
 	private _extensionsChangedListeners: Array<() => void> = [];
 
-	/** Tracks pending steering messages for UI display. Removed when delivered. */
 	private _steeringMessages: string[] = [];
-	/** Tracks pending follow-up messages for UI display. Removed when delivered. */
 	private _followUpMessages: string[] = [];
-	/** Tracks extension slash commands queued while the agent is streaming. */
 	private _queuedExtensionCommands: string[] = [];
-	/** Messages queued to be included with the next user prompt as context ("asides"). */
 	private _pendingNextTurnMessages: CustomMessage[] = [];
-	/** Serializes prompt() submissions made while streaming so queued steering/follow-ups keep user-typed FIFO order. */
 	private _streamingPromptSubmissionTail: Promise<void> = Promise.resolve();
 	/**
 	 * The last tool set requested via setActiveToolsByName BEFORE model-capability filtering, so
@@ -560,14 +555,9 @@ export class AgentSession {
 
 	private _retryController!: RetryController;
 
-	/** User-facing model + thinking-level selection (see model-selection-controller.ts). */
 	private readonly _modelSelection: ModelSelectionController;
-	/** Standalone bash-command execution (see bash-execution-controller.ts); owns the bash abort
-	 * controller and the streaming-deferred pending-message queue. */
 	private readonly _bash: BashExecutionController;
-	/** Resource-profile tool/extension gating + reload-time profile model re-apply (see profile-filter-controller.ts). */
 	private readonly _profileFilter: ProfileFilterController;
-	/** Agent tool-call gate: escalation, autonomy gating, extension hooks, untrusted boundary (see tool-gate-controller.ts). */
 	private readonly _toolGate: ToolGateController;
 
 	private _extensionRunner!: ExtensionRunner;
@@ -579,8 +569,6 @@ export class AgentSession {
 	private _cwd: string;
 	private _agentDir: string;
 	private _collectWorkspaceSources: typeof collectWorkspaceSources;
-	/** Owns the cached per-server OllamaRuntime instances and the local-model router readiness gate
-	 * (see local-runtime-controller.ts). */
 	private readonly _localRuntimeController: LocalRuntimeController;
 	/** Assembles the session's base system prompt from live session state (see
 	 * system-prompt-builder.ts); owns the paired _baseSystemPromptOptions. */
@@ -1040,8 +1028,8 @@ export class AgentSession {
 		throw new Error(formatNoApiKeyFoundMessage(model.provider));
 	}
 
-	// Summarizer model selection, request auth (with session-model fallback), and window-adapted
-	// settings live in CompactionSupport (see compaction-support.ts). Same-signature delegations.
+	// Summarizer model/thinking selection, request auth (with session-model fallback), and
+	// window-adapted settings live in CompactionSupport (see compaction-support.ts).
 	private _getCompactionRequestAuth(model: Model<any>): Promise<{
 		apiKey?: string;
 		headers?: Record<string, string>;
@@ -1058,6 +1046,13 @@ export class AgentSession {
 
 	private _resolveCompactionModel(sessionModel: Model<any>): Model<any> {
 		return this._compactionSupport.resolveModel(sessionModel);
+	}
+
+	private _resolveCompactionThinkingLevel(
+		compactionModel: Model<any>,
+		sessionModel: Model<any>,
+	): ThinkingLevel | undefined {
+		return this._compactionSupport.resolveThinkingLevel(this.thinkingLevel, compactionModel, sessionModel);
 	}
 
 	/**
@@ -2095,7 +2090,6 @@ export class AgentSession {
 		return this._localRuntimeController.ensureRouteModelReady(resolved);
 	}
 
-	/** Model-router status + config diagnostics report. Delegates to {@link ModelRouterController}. */
 	getModelRouterStatus(formatLabel?: (label: string) => string): string {
 		return this._modelRouter.getStatus(formatLabel);
 	}
@@ -2804,6 +2798,7 @@ export class AgentSession {
 			}
 
 			const compactionModel = this._resolveCompactionModel(this.model);
+			const compactionThinkingLevel = this._resolveCompactionThinkingLevel(compactionModel, this.model);
 			const { apiKey, headers } = await this._getCompactionRequestAuth(compactionModel);
 
 			const pathEntries = this.sessionManager.getBranch();
@@ -2864,7 +2859,7 @@ export class AgentSession {
 							headers,
 							customInstructions,
 							compactionSignal,
-							this.thinkingLevel,
+							compactionThinkingLevel,
 							this.agent.streamFn,
 							this._buildCompactionPreDigest(),
 						),
@@ -3136,6 +3131,7 @@ export class AgentSession {
 					if (!preparation) {
 						throw new Error("already compacted");
 					}
+					const compactionThinkingLevel = this._resolveCompactionThinkingLevel(compactModel, model);
 
 					if (this._extensionRunner.hasHandlers("session_before_compact")) {
 						const extensionResult = (await this._extensionRunner.emit({
@@ -3164,7 +3160,7 @@ export class AgentSession {
 								headers,
 								undefined,
 								signal,
-								this.thinkingLevel,
+								compactionThinkingLevel,
 								this.agent.streamFn,
 								this._buildCompactionPreDigest(),
 								{ chunked: params.chunked },
@@ -3238,6 +3234,7 @@ export class AgentSession {
 
 			if (extensionCancelled || signal.aborted) {
 				this._emit({ type: "compaction_end", reason, result: undefined, aborted: true, willRetry: false });
+
 				return false;
 			}
 

@@ -5,6 +5,7 @@
  * Extracted verbatim from AgentSession (agent-session.ts) as a narrow-deps collaborator; the
  * session keeps same-signature private delegations at every call-in point.
  */
+import type { ThinkingLevel } from "@caupulican/pi-agent-core";
 import type { CompactionSettings } from "@caupulican/pi-agent-core/node";
 import type { Model } from "@caupulican/pi-ai";
 import type { ModelRegistry } from "./model-registry.ts";
@@ -98,34 +99,56 @@ export class CompactionSupport {
 		return { model: compactionModel, apiKey, headers };
 	}
 
+	private getExplicitCompactionModelSetting(): string | undefined {
+		const setting = this.deps.getSettingsManager().getCompactionModel().trim();
+		return setting && setting !== "auto" ? setting : undefined;
+	}
+
+	private resolveConfiguredModel(pattern: string): Model<any> | undefined {
+		const registry = this.deps.getModelRegistry();
+		const resolved = resolveCliModel({ cliModel: pattern, modelRegistry: registry });
+		if (!resolved.model || !registry.hasConfiguredAuth(resolved.model)) return undefined;
+		return resolved.model;
+	}
+
+	private resolveDefaultModel(sessionModel: Model<any>): Model<any> {
+		const router = this.deps.getSettingsManager().getModelRouterSettings();
+		if (!router.enabled || !router.cheapModel) return sessionModel;
+		return this.resolveConfiguredModel(router.cheapModel) ?? sessionModel;
+	}
+
+	private modelsAreEqual(left: Model<any>, right: Model<any>): boolean {
+		return left.provider === right.provider && left.id === right.id;
+	}
+
 	/**
-	 * Resolve the model used to SUMMARIZE during compaction (cost guard, #30). A compaction summary is an
-	 * extraction task — it does not need the main (expensive) model. Selection:
+	 * Resolve the model used to SUMMARIZE during compaction. Selection:
 	 *   - an explicit `compaction.model` setting wins, but only if its provider is authed (else fall back);
-	 *   - `"auto"` (default) picks the CHEAPEST authed model whose context window can hold a compaction
-	 *     (capability floor), and ONLY if it is strictly cheaper than the session model — so we never
-	 *     downgrade to an equally-priced but weaker summarizer (agy's floor: don't degrade the checkpoint);
+	 *   - `"auto"`/unset follows the model router's configured cheap model when the router is enabled;
 	 *   - otherwise the session model is used (safe default).
 	 */
 	resolveModel(sessionModel: Model<any>): Model<any> {
-		const registry = this.deps.getModelRegistry();
-		const setting = this.deps.getSettingsManager().getCompactionModel();
-		if (setting && setting !== "auto") {
-			const resolved = resolveCliModel({ cliModel: setting, modelRegistry: registry });
-			if (resolved.model && registry.hasConfiguredAuth(resolved.model)) return resolved.model;
-			return sessionModel; // configured but unusable → don't break compaction
+		const explicitSetting = this.getExplicitCompactionModelSetting();
+		if (explicitSetting) return this.resolveConfiguredModel(explicitSetting) ?? sessionModel;
+		return this.resolveDefaultModel(sessionModel);
+	}
+
+	/** Default compaction should never inherit expensive session thinking. */
+	resolveThinkingLevel(
+		sessionThinkingLevel: ThinkingLevel | undefined,
+		compactionModel: Model<any>,
+		sessionModel: Model<any>,
+	): ThinkingLevel | undefined {
+		if (this.getExplicitCompactionModelSetting()) return sessionThinkingLevel;
+
+		const router = this.deps.getSettingsManager().getModelRouterSettings();
+		if (router.enabled && router.cheapModel) {
+			const routerModel = this.resolveConfiguredModel(router.cheapModel);
+			if (routerModel && this.modelsAreEqual(routerModel, compactionModel)) {
+				return router.cheapThinking ?? "low";
+			}
 		}
-		// "auto": cheapest authed model that can summarize a large context AND is cheaper than the session
-		// model. The context-window floor keeps a tiny local model from being picked for a big summary.
-		const FLOOR_CONTEXT = 64_000;
-		const sessionInputCost = sessionModel.cost?.input ?? Number.POSITIVE_INFINITY;
-		let best: Model<any> | undefined;
-		for (const m of registry.getAvailable()) {
-			if ((m.contextWindow ?? 0) < FLOOR_CONTEXT) continue;
-			const cost = m.cost?.input ?? Number.POSITIVE_INFINITY;
-			if (cost >= sessionInputCost) continue; // only ever pick something cheaper than the session model
-			if (!best || cost < (best.cost?.input ?? Number.POSITIVE_INFINITY)) best = m;
-		}
-		return best ?? sessionModel;
+
+		return this.modelsAreEqual(compactionModel, sessionModel) ? "low" : sessionThinkingLevel;
 	}
 }

@@ -4,7 +4,7 @@ import { join } from "node:path";
 import type { AgentMessage } from "@caupulican/pi-agent-core";
 import { Agent } from "@caupulican/pi-agent-core";
 import { SessionManager } from "@caupulican/pi-agent-core/node";
-import { type AssistantMessage, getModel } from "@caupulican/pi-ai";
+import type { AssistantMessage, Model } from "@caupulican/pi-ai";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { AgentSession } from "../src/core/agent-session.ts";
 import { AuthStorage } from "../src/core/auth-storage.ts";
@@ -71,7 +71,18 @@ describe("AgentSession auto-compaction queue resume", () => {
 		mkdirSync(tempDir, { recursive: true });
 		vi.useFakeTimers();
 
-		const model = getModel("anthropic", "claude-sonnet-4-5")!;
+		const model: Model<any> = {
+			id: "claude-sonnet-4-5",
+			name: "claude-sonnet-4-5",
+			provider: "anthropic",
+			api: "messages",
+			baseUrl: "https://example.test",
+			reasoning: false,
+			input: ["text"],
+			cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 },
+			contextWindow: 200000,
+			maxTokens: 8192,
+		};
 		const agent = new Agent({
 			initialState: {
 				model,

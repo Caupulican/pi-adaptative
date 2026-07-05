@@ -1,5 +1,6 @@
 ## [Unreleased]
 
+
 ### Added
 - Added `context_scout` and `ScoutController`, a bounded read-only repository scout with citation validity checks.
 - Added FastContext scout install docs, a 10 GB reference profile, a consolidated per-tier model+thinking screen in Model Router settings, and a thinking-level picker during `/fitness` role assignment.
@@ -10,6 +11,9 @@
 - Auto-compaction now uses the kernel closed loop and surfaces verification warnings from accepted fallback summaries.
 - Router status now shows each tier's thinking level, including `thinking (inherit)`.
 - Refactored executor and curation fitness gates onto the shared model-router fitness bar without changing their proof-required behavior.
+
+## [0.81.2] - 2026-07-05
+
 
 ## [0.81.1] - 2026-07-05
 
@@ -70,6 +74,7 @@
 - The residual autonomy/session/runtime clusters moved out of `agent-session.ts` into eight new `core/` collaborator classes, bringing the file under the 4,000-line cap (5,387 → 3,963): `reflection-controller.ts` (`ReflectionController` — the native end-of-loop reflection pass, the isolated-completion primitive, and the gated learning-apply/rollback path), `goal-loop-controller.ts` (`GoalLoopController` — the bounded goal auto-continuation loop), `session-analytics.ts` (`SessionAnalytics` — usage/cost/stats accounting, the /context window estimate, and HTML/JSONL export, owning the spawned-usage and daily-usage memo caches), `session-tree-navigator.ts` (`SessionTreeNavigator` — in-file branch switching + fork-selector reads), `model-selection-controller.ts` (`ModelSelectionController` — the manual model switch/cycle and thinking-level set/cycle/clamp, distinct from the per-turn `ModelRouterController`), `bash-execution-controller.ts` (`BashExecutionController` — the `/bash` path and its streaming-deferred pending-message queue), `profile-filter-controller.ts` (`ProfileFilterController` — resource-profile tool/extension gating and reload-time profile model re-apply), and `tool-gate-controller.ts` (`ToolGateController` — the agent `beforeToolCall`/`afterToolCall` hooks: router escalation, autonomy gating, extension tool hooks, and the untrusted-content output boundary). `AgentSession` constructs each with narrow lazy accessor deps and keeps same-signature public delegations at every call-in point, so callers, the constructor dep closures, and the drive loop are untouched (the `model`/`thinkingLevel` getters, the branch-summary abort controller read by `isCompacting`, and the bash-flush call sites all stay host-side). The drive loop (`_promptUnserialized`/`_handleAgentEvent`/`_handlePostAgentRun`), compaction, the retry bridge, and the extension-core wiring stay host-side. Bodies are verbatim; behavior is unchanged.
 
 ### Fixed
+- Default compaction model selection now respects the Model Router cheap model when enabled, otherwise falls back to the active session model with low reasoning instead of picking the globally cheapest authed model (which could route summarization through `openrouter/auto`).
 - `pi --version` resolved through the full application import graph (~1s to print a version string). A fast path in the CLI entry now answers `--version`/`-v` from already-loaded config (~150ms, −85%); any combined invocation still routes through the full parser unchanged.
 - Auto-compaction could fail or skip invisibly: three bail paths (no model, summarizer auth failure, nothing to compact) ended with no result and no reason, and the TUI rendered nothing for that combination — indistinguishable from broken compaction. Every auto-compaction outcome now carries a `result`, an `errorMessage`, or a new `skipReason` on `compaction_end`, and the TUI renders all of them. The cheap summarizer model (#30) also falls back to the session model when its key resolution fails at request time instead of silently giving up.
 - `pi --help` had regressed from ~160ms to ~400ms: `config.ts`'s `normalizePath` import (needed
