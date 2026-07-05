@@ -1,6 +1,8 @@
 import type { Model } from "@caupulican/pi-ai";
 import type { ModelRegistry } from "../model-registry.ts";
 import { resolveCliModel } from "../model-resolver.ts";
+import { FitnessStore } from "../models/fitness-store.ts";
+import { evaluateSurfaceFitness, type FitnessGatedSurface } from "./fitness-gate.ts";
 import type { ModelRouterStatusSettings } from "./status.ts";
 
 function formatModel(model: Model<any>): string {
@@ -26,9 +28,32 @@ function collectModelRouterModelDiagnostics(
 	return [];
 }
 
+function collectFitnessGateDiagnostic(
+	label: "cheap model" | "medium model" | "expensive model",
+	surface: FitnessGatedSurface,
+	modelPattern: string | undefined,
+	modelRegistry: ModelRegistry,
+	agentDir: string | undefined,
+): string[] {
+	if (!agentDir || !modelPattern) return [];
+	const resolved = resolveCliModel({ cliModel: modelPattern, modelRegistry });
+	if (!resolved.model || !modelRegistry.hasConfiguredAuth(resolved.model)) return [];
+	const modelRef = formatModel(resolved.model);
+	const fitness = FitnessStore.forAgentDir(agentDir)
+		.getForHost()
+		.find((entry) => entry.model === modelRef);
+	const verdict = evaluateSurfaceFitness(surface, fitness?.report);
+	if (verdict.fit) return [];
+	if (verdict.reason === "unprobed") return [`Model router ${label} is unprobed for the fitness gate: ${modelRef}.`];
+	return [
+		`Model router ${label} is unfit for the fitness gate: ${modelRef} (${verdict.lane} ${verdict.succeeded}/${verdict.total}).`,
+	];
+}
+
 export function collectModelRouterConfigDiagnostics(
 	settings: ModelRouterStatusSettings,
 	modelRegistry: ModelRegistry,
+	agentDir?: string,
 ): string[] {
 	if (!settings.enabled) return [];
 	return [
@@ -50,5 +75,30 @@ export function collectModelRouterConfigDiagnostics(
 			settings.expensiveModel,
 			modelRegistry,
 		),
+		...(settings.fitnessGate
+			? [
+					...collectFitnessGateDiagnostic(
+						"cheap model",
+						"router_cheap",
+						settings.cheapModel,
+						modelRegistry,
+						agentDir,
+					),
+					...collectFitnessGateDiagnostic(
+						"medium model",
+						"router_medium",
+						settings.mediumModel,
+						modelRegistry,
+						agentDir,
+					),
+					...collectFitnessGateDiagnostic(
+						"expensive model",
+						"router_expensive",
+						settings.expensiveModel,
+						modelRegistry,
+						agentDir,
+					),
+				]
+			: []),
 	];
 }

@@ -1,8 +1,13 @@
+import { mkdtempSync, rmSync } from "node:fs";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
 import type { Model } from "@caupulican/pi-ai";
 import { getModel } from "@caupulican/pi-ai";
 import { describe, expect, it } from "vitest";
 import type { ModelRegistry } from "../src/core/model-registry.ts";
 import { collectModelRouterConfigDiagnostics } from "../src/core/model-router/config-diagnostics.ts";
+import { FitnessStore } from "../src/core/models/fitness-store.ts";
+import type { LaneFitnessScore, ModelFitnessReport } from "../src/core/research/model-fitness.ts";
 
 type RegistryStub = {
 	getAll: () => Model<any>[];
@@ -12,6 +17,33 @@ type RegistryStub = {
 const cheapModel = getModel("anthropic", "claude-haiku-4-5")!;
 const mediumModel = getModel("anthropic", "claude-3-5-sonnet-20241022")!;
 const expensiveModel = getModel("anthropic", "claude-sonnet-4-5")!;
+
+function lane(succeeded = 3, total = 3): LaneFitnessScore {
+	return { succeeded, total, outcomes: [], meanMs: 1 };
+}
+
+function report(overrides: Partial<ModelFitnessReport> = {}): ModelFitnessReport {
+	return {
+		trials: 3,
+		research: lane(),
+		worker: lane(),
+		judge: {
+			parsed: 3,
+			planningElevated: 3,
+			planningTotal: 3,
+			trivialCheap: 3,
+			trivialTotal: 3,
+			total: 3,
+			outcomes: [],
+			meanMs: 1,
+		},
+		search: lane(),
+		toolCall: lane(),
+		digest: lane(),
+		totalCostUsd: 0,
+		...overrides,
+	};
+}
 
 function createRegistry(authenticatedModels: Model<any>[] = [cheapModel, mediumModel, expensiveModel]): RegistryStub {
 	return {
@@ -64,6 +96,30 @@ describe("model router config diagnostics", () => {
 				createRegistry() as unknown as ModelRegistry,
 			),
 		).toEqual(["Model router medium model is unresolved: definitely-not-a-model."]);
+	});
+
+	it("warns about fitness-gated configured models with failed relevant lanes", () => {
+		const agentDir = mkdtempSync(join(tmpdir(), "pi-router-diagnostics-"));
+		try {
+			FitnessStore.forAgentDir(agentDir).save("anthropic/claude-haiku-4-5", report({ research: lane(1, 3) }));
+			expect(
+				collectModelRouterConfigDiagnostics(
+					{
+						enabled: true,
+						fitnessGate: true,
+						cheapModel: "anthropic/claude-haiku-4-5",
+						mediumModel: "anthropic/claude-3-5-sonnet-20241022",
+						expensiveModel: "anthropic/claude-sonnet-4-5",
+					},
+					createRegistry() as unknown as ModelRegistry,
+					agentDir,
+				),
+			).toContain(
+				"Model router cheap model is unfit for the fitness gate: anthropic/claude-haiku-4-5 (research 1/3).",
+			);
+		} finally {
+			rmSync(agentDir, { recursive: true, force: true });
+		}
 	});
 
 	it("warns about resolved model-router models without configured auth", () => {

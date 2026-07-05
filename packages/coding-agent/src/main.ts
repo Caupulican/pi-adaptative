@@ -799,7 +799,7 @@ export async function main(args: string[], options?: MainOptions) {
 		];
 
 		diagnostics.push(
-			...collectModelRouterConfigDiagnostics(settingsManager.getModelRouterSettings(), modelRegistry).map(
+			...collectModelRouterConfigDiagnostics(settingsManager.getModelRouterSettings(), modelRegistry, agentDir).map(
 				(message) => ({
 					type: "warning" as const,
 					message,
