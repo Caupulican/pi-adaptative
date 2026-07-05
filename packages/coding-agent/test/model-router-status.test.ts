@@ -18,9 +18,11 @@ describe("model router status formatting", () => {
 		});
 
 		expect(text).toContain("Status: disabled");
-		expect(text).toContain("Cheap model: cheap");
-		expect(text).toContain("Medium model: medium");
-		expect(text).toContain("Expensive model: expensive");
+		expect(text).toContain("Cheap model: cheap · thinking (inherit)");
+		expect(text).toContain("Medium model: medium · thinking (inherit)");
+		expect(text).toContain("Expensive model: expensive · thinking (inherit)");
+		expect(text).toContain("Executor model: unset · thinking (inherit)");
+		expect(text).toContain("Judge model: unset · thinking (inherit)");
 		expect(text).toContain("Learning model: learner");
 		expect(text).toContain("Routing: inactive (disabled)");
 		expect(text).toContain("Latest intent: none");
@@ -162,6 +164,40 @@ describe("model router status formatting", () => {
 		);
 
 		expect(text).toContain("Last decision: cheap/read-only -> cheap (explain, failed)");
+	});
+
+	it("shows per-tier fitness only when the gate is enabled", () => {
+		const gateOff = formatModelRouterStatus(
+			{ enabled: true, cheapModel: "cheap", mediumModel: "medium", expensiveModel: "expensive" },
+			undefined,
+			undefined,
+			[],
+			undefined,
+			undefined,
+			{
+				cheap: { status: "fit" },
+				medium: { status: "unprobed" },
+				expensive: { status: "unfit", lane: "worker", succeeded: 1, total: 3 },
+			},
+		);
+		expect(gateOff).not.toContain("fitness");
+
+		const gateOn = formatModelRouterStatus(
+			{ enabled: true, fitnessGate: true, cheapModel: "cheap", mediumModel: "medium", expensiveModel: "expensive" },
+			undefined,
+			undefined,
+			[],
+			undefined,
+			undefined,
+			{
+				cheap: { status: "fit" },
+				medium: { status: "unprobed" },
+				expensive: { status: "unfit", lane: "worker", succeeded: 1, total: 3 },
+			},
+		);
+		expect(gateOn).toContain("Cheap model: cheap · thinking (inherit) · fitness fit");
+		expect(gateOn).toContain("Medium model: medium · thinking (inherit) · fitness unprobed");
+		expect(gateOn).toContain("Expensive model: expensive · thinking (inherit) · fitness UNFIT (worker 1/3)");
 	});
 
 	it("shows medium and expensive routed decisions clearly", () => {

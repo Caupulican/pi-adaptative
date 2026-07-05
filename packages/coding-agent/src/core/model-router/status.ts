@@ -1,16 +1,56 @@
+import type { ThinkingLevel } from "@caupulican/pi-agent-core";
 import type { SessionEntry } from "@caupulican/pi-agent-core/node";
 import type { ModelTier, RouteDecision, RouteRisk } from "../autonomy/contracts.ts";
 import type { ModelRouterIntent } from "./intent-classifier.ts";
 
 export const MODEL_ROUTER_DECISION_CUSTOM_TYPE = "model_router_decision";
 
+export type ModelRouterTierFitnessStatus =
+	| { status: "fit" }
+	| { status: "unprobed" }
+	| { status: "unfit"; lane: string; succeeded: number; total: number };
+
+export type ModelRouterFitnessStatuses = Partial<
+	Record<"cheap" | "medium" | "expensive", ModelRouterTierFitnessStatus>
+>;
+
 export type ModelRouterStatusSettings = {
 	enabled: boolean;
+	fitnessGate?: boolean;
 	cheapModel?: string;
+	cheapThinking?: ThinkingLevel;
 	mediumModel?: string;
+	mediumThinking?: ThinkingLevel;
 	expensiveModel?: string;
+	expensiveThinking?: ThinkingLevel;
 	learningModel?: string;
+	executorModel?: string;
+	executorThinking?: ThinkingLevel;
+	judgeModel?: string;
+	judgeThinking?: ThinkingLevel;
 };
+
+const MODEL_ROUTER_INHERIT_THINKING_LABEL = "(inherit)";
+
+function getThinkingLabel(level: ThinkingLevel | undefined): string {
+	return level ?? MODEL_ROUTER_INHERIT_THINKING_LABEL;
+}
+
+function formatModelWithThinking(
+	label: string,
+	model: string | undefined,
+	level: ThinkingLevel | undefined,
+	fitness?: ModelRouterTierFitnessStatus,
+): string {
+	const fitnessSuffix = fitness ? ` · fitness ${formatFitness(fitness)}` : "";
+	return `${label} ${model ?? "unset"} · thinking ${getThinkingLabel(level)}${fitnessSuffix}`;
+}
+
+function formatFitness(fitness: ModelRouterTierFitnessStatus): string {
+	if (fitness.status === "fit") return "fit";
+	if (fitness.status === "unprobed") return "unprobed";
+	return `UNFIT (${fitness.lane} ${fitness.succeeded}/${fitness.total})`;
+}
 
 export type ModelRouterDecisionStatus = {
 	route: RouteDecision;
@@ -84,13 +124,31 @@ export function formatModelRouterStatus(
 	recentDecisions: ModelRouterDecisionStatus[] = [],
 	lastSkipReason?: string,
 	latestIntent?: ModelRouterIntent,
+	fitnessStatuses?: ModelRouterFitnessStatuses,
 ): string {
 	const effectiveLastDecision = lastSkipReason ? undefined : lastDecision;
 	const lines = [
 		`${formatLabel("Status:")} ${settings.enabled ? "enabled" : "disabled"}`,
-		`${formatLabel("Cheap model:")} ${settings.cheapModel ?? "unset"}`,
-		`${formatLabel("Medium model:")} ${settings.mediumModel ?? "unset"}`,
-		`${formatLabel("Expensive model:")} ${settings.expensiveModel ?? "unset"}`,
+		formatModelWithThinking(
+			formatLabel("Cheap model:"),
+			settings.cheapModel,
+			settings.cheapThinking,
+			settings.fitnessGate ? fitnessStatuses?.cheap : undefined,
+		),
+		formatModelWithThinking(
+			formatLabel("Medium model:"),
+			settings.mediumModel,
+			settings.mediumThinking,
+			settings.fitnessGate ? fitnessStatuses?.medium : undefined,
+		),
+		formatModelWithThinking(
+			formatLabel("Expensive model:"),
+			settings.expensiveModel,
+			settings.expensiveThinking,
+			settings.fitnessGate ? fitnessStatuses?.expensive : undefined,
+		),
+		formatModelWithThinking(formatLabel("Executor model:"), settings.executorModel, settings.executorThinking),
+		formatModelWithThinking(formatLabel("Judge model:"), settings.judgeModel, settings.judgeThinking),
 		`${formatLabel("Learning model:")} ${settings.learningModel ?? "active"}`,
 	];
 	if (!settings.enabled) {

@@ -11,10 +11,22 @@
  * wrappers unchanged.
  */
 
-import type { Component, Container, TUI } from "@caupulican/pi-tui";
-import { Spacer, Text } from "@caupulican/pi-tui";
+import type { ThinkingLevel } from "@caupulican/pi-agent-core";
+import { getSupportedThinkingLevels } from "@caupulican/pi-ai";
+import {
+	type Component,
+	Container,
+	type SelectItem,
+	SelectList,
+	type SelectListLayoutOptions,
+	Spacer,
+	Text,
+	type TUI,
+} from "@caupulican/pi-tui";
 import { getAgentDir } from "../../config.ts";
 import type { AgentSession } from "../../core/agent-session.ts";
+import type { ModelRegistry } from "../../core/model-registry.ts";
+import { resolveCliModel } from "../../core/model-resolver.ts";
 import { DEFAULT_MODEL_SUGGESTIONS } from "../../core/models/default-model-suggestions.ts";
 import { FitnessStore } from "../../core/models/fitness-store.ts";
 import { registerLocalModel, unregisterLocalModel } from "../../core/models/local-registration.ts";
@@ -22,11 +34,47 @@ import type { OllamaRuntime } from "../../core/models/local-runtime.ts";
 import { matchesInstalledLocalModel, normalizeModelSource } from "../../core/models/model-ref.ts";
 import { formatModelFitnessReport, isProbeAllFailed } from "../../core/research/model-fitness.ts";
 import type { SettingsManager } from "../../core/settings-manager.ts";
+import { DynamicBorder } from "./components/dynamic-border.ts";
 import { type FitnessRole, FitnessRoleSelectorComponent } from "./components/fitness-role-selector.ts";
 import { ModelSelectorComponent } from "./components/model-selector.ts";
 import { ModelSuggestionSelectorComponent } from "./components/model-suggestion-selector.ts";
+import { getSelectListTheme } from "./theme/theme.ts";
 
 type SelectorFactory = (done: () => void) => { component: Component; focus: Component };
+
+const MODEL_ROUTER_THINKING_SELECT_LIST_LAYOUT: SelectListLayoutOptions = {
+	minPrimaryColumnWidth: 12,
+	maxPrimaryColumnWidth: 32,
+};
+
+const MODEL_ROUTER_THINKING_INHERIT_VALUE = "__inherit_model_router_thinking__";
+const MODEL_ROUTER_THINKING_INHERIT_LABEL = "(inherit)";
+
+const THINKING_LEVEL_DESCRIPTIONS: Record<ThinkingLevel, string> = {
+	off: "No reasoning",
+	minimal: "Very brief reasoning (~1k tokens)",
+	low: "Light reasoning (~2k tokens)",
+	medium: "Moderate reasoning (~8k tokens)",
+	high: "Deep reasoning (~16k tokens)",
+	xhigh: "Maximum reasoning (~32k tokens)",
+};
+
+const MODEL_ROUTER_THINKING_FALLBACK_LEVELS: readonly ThinkingLevel[] = [
+	"off",
+	"minimal",
+	"low",
+	"medium",
+	"high",
+	"xhigh",
+];
+
+type RouterThinkingLevel = ThinkingLevel | typeof MODEL_ROUTER_THINKING_INHERIT_VALUE;
+type ModelRouterThinkingField =
+	| "cheapThinking"
+	| "mediumThinking"
+	| "expensiveThinking"
+	| "executorThinking"
+	| "judgeThinking";
 
 /** Narrow seam for persisting a probed model's role — matches the fitness-role test. */
 export interface AssignRoleHost {
@@ -36,7 +84,7 @@ export interface AssignRoleHost {
 
 /** Seam for the fitness probe + role-selector flow — matches the fitness-probe-gate test. */
 export interface RunFitnessHost {
-	readonly session: Pick<AgentSession, "runModelFitness">;
+	readonly session: Pick<AgentSession, "runModelFitness"> & { modelRegistry?: ModelRegistry };
 	readonly settingsManager: SettingsManager;
 	readonly chatContainer: Container;
 	readonly ui: TUI;
@@ -57,6 +105,55 @@ export interface LocalModelHost {
 	showSelector(create: SelectorFactory): void;
 }
 
+class ModelRouterThinkingSelectorComponent extends Container {
+	private selectList: SelectList;
+
+	constructor(
+		currentLevel: RouterThinkingLevel,
+		availableLevels: ThinkingLevel[],
+		onSelect: (level: RouterThinkingLevel) => void,
+		onCancel: () => void,
+	) {
+		super();
+
+		const thinkingOptions: SelectItem[] = [
+			{
+				value: MODEL_ROUTER_THINKING_INHERIT_VALUE,
+				label: MODEL_ROUTER_THINKING_INHERIT_LABEL,
+				description: "Use current session default for this tier.",
+			},
+			...availableLevels.map((level) => ({
+				value: level,
+				label: level,
+				description: THINKING_LEVEL_DESCRIPTIONS[level],
+			})),
+		];
+
+		this.addChild(new DynamicBorder());
+
+		this.selectList = new SelectList(
+			thinkingOptions,
+			thinkingOptions.length,
+			getSelectListTheme(),
+			MODEL_ROUTER_THINKING_SELECT_LIST_LAYOUT,
+		);
+
+		const index = thinkingOptions.findIndex((item) => item.value === currentLevel);
+		if (index !== -1) {
+			this.selectList.setSelectedIndex(index);
+		}
+
+		this.selectList.onSelect = (item) => {
+			onSelect(item.value as RouterThinkingLevel);
+		};
+		this.selectList.onCancel = () => {
+			onCancel();
+		};
+
+		this.addChild(this.selectList);
+		this.addChild(new DynamicBorder());
+	}
+}
 /**
  * /models — USER-invoked local model lifecycle (never a model-invokable tool):
  * list/add/remove/stop per local-model-lifecycle-design.md. Removal is explicit-only with
@@ -283,6 +380,72 @@ export function showFitnessModelSelector(host: LocalModelHost): void {
 	});
 }
 
+/** Resolve the routed model's supported thinking levels for a fitness-assignment flow, with a safe fallback. */
+function getModelThinkingLevels(modelRegistry: ModelRegistry | undefined, modelRef: string): ThinkingLevel[] {
+	if (!modelRegistry) {
+		return [...MODEL_ROUTER_THINKING_FALLBACK_LEVELS];
+	}
+	const resolved = resolveCliModel({ cliModel: modelRef, modelRegistry });
+	if (!resolved.model) {
+		return [...MODEL_ROUTER_THINKING_FALLBACK_LEVELS];
+	}
+	return getSupportedThinkingLevels(resolved.model);
+}
+
+function getModelRouterThinkingField(role: FitnessRole): ModelRouterThinkingField | undefined {
+	if (role === "router-cheap") {
+		return "cheapThinking";
+	}
+	if (role === "router-medium") {
+		return "mediumThinking";
+	}
+	if (role === "router-expensive") {
+		return "expensiveThinking";
+	}
+	if (role === "executor") {
+		return "executorThinking";
+	}
+	if (role === "judge") {
+		return "judgeThinking";
+	}
+	return undefined;
+}
+
+function promptForModelRouterThinking(host: RunFitnessHost, modelRef: string, role: FitnessRole): void {
+	const thinkingField = getModelRouterThinkingField(role);
+	if (!thinkingField) {
+		return;
+	}
+
+	const modelRegistry = host.session.modelRegistry;
+	const availableLevels = getModelThinkingLevels(modelRegistry, modelRef);
+	const settings = host.settingsManager.getModelRouterSettings();
+	const configuredThinking = settings[thinkingField];
+	const currentThinking =
+		configuredThinking && availableLevels.includes(configuredThinking)
+			? configuredThinking
+			: MODEL_ROUTER_THINKING_INHERIT_VALUE;
+
+	host.showSelector((done) => {
+		const selector = new ModelRouterThinkingSelectorComponent(
+			currentThinking,
+			availableLevels,
+			(level) => {
+				done();
+				host.settingsManager.setModelRouterSettings({
+					...settings,
+					[thinkingField]: level === MODEL_ROUTER_THINKING_INHERIT_VALUE ? undefined : level,
+				});
+			},
+			() => {
+				done();
+				host.ui.requestRender();
+			},
+		);
+		return { component: selector, focus: selector };
+	});
+}
+
 /** Probe a model's fitness, show the report, then offer one-step role assignment. When the model
  * came from a validated suggestion, `preselectRole` lands its shaped role already highlighted. */
 export async function runFitnessAndAssign(
@@ -316,6 +479,7 @@ export async function runFitnessAndAssign(
 				(role) => {
 					done();
 					assignFitnessRole(host, outcome.model, role);
+					promptForModelRouterThinking(host, outcome.model, role);
 				},
 				() => {
 					done();
