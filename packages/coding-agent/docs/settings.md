@@ -116,18 +116,28 @@ Hard stops still require explicit foreground approval even in `full`: publishing
 
 | Setting | Type | Default | Description |
 |---------|------|---------|-------------|
-| `modelRouter.enabled` | boolean | `false` | Enable deterministic cheap/expensive model routing |
+| `modelRouter.enabled` | boolean | `false` | Enable deterministic cheap/medium/expensive model routing |
+| `modelRouter.fitnessGate` | boolean | `false` | Opt-in subtractive gate: when a tier model has a host-local failed probe for its router lanes, skip or fall back instead of routing to it; unprobed tier models still route |
 | `modelRouter.cheapModel` | string | - | Model pattern for read-only, research, explanation, and question turns |
-| `modelRouter.expensiveModel` | string | - | Model pattern for modify, implementation, and escalated tool-heavy turns |
+| `modelRouter.mediumModel` | string | - | Model pattern for scoped implementation/planning turns |
+| `modelRouter.expensiveModel` | string | - | Model pattern for high-impact, modify, implementation, and escalated tool-heavy turns |
 | `modelRouter.learningModel` | string | `"active"` | Model pattern for background reflection, learn, and skill-creator work; `"active"` uses the current session model |
 
-Use `/settings` → **Model Router** to configure these fields globally or for the current project's `.pi/settings.json`. `/session` and `/usage` show the active router state and diagnostics. Profile files can also include a `modelRouter` block so a situation can carry its own cheap, expensive, and learning/reflection models together with its model, thinking level, soul, and resource filters.
+Use `/settings` → **Model Router** to configure these fields globally or for the current project's `.pi/settings.json`. `/session` and `/usage` show the active router state, diagnostics, and per-tier fitness when the gate is enabled. Profile files can also include a `modelRouter` block so a situation can carry its own cheap, medium, expensive, and learning/reflection models together with its model, thinking level, soul, and resource filters.
+
+Fitness applicability is intentionally split by autonomy level:
+
+- Class A autonomous adoption requires proof on this host: executor direct uses `toolCall`, curation uses `digest`, and scout `"auto"` uses `research` + `toolCall`.
+- Class B routed turns are subtractive and opt-in via `modelRouter.fitnessGate`: cheap uses `research` + `toolCall`; medium/expensive use `worker` + `toolCall`; the routing judge uses parsed `judge` output. Unprobed tier models pass.
+- Class C explicit user choices are sovereign: explicit `/model` and explicit `scout.model` patterns are not router-gated, except for the existing all-lanes-failed adoption backstop and runtime output checks.
 
 ```json
 {
   "modelRouter": {
     "enabled": true,
+    "fitnessGate": true,
     "cheapModel": "openrouter/google/gemini-flash-latest",
+    "mediumModel": "anthropic/claude-sonnet-4-5",
     "expensiveModel": "openai-codex/gpt-5.5",
     "learningModel": "anthropic/claude-haiku-4-5"
   }
