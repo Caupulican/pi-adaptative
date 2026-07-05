@@ -63,6 +63,22 @@ describe("model router tool escalation", () => {
 		).toBe(true);
 	});
 
+	it("still escalates mutating tools from a cheap FastContext-shaped route", () => {
+		const fastContextShape = {
+			research: { succeeded: 3, total: 3 },
+			toolCall: { succeeded: 3, total: 3 },
+			worker: { succeeded: 0, total: 3 },
+		};
+
+		expect(fastContextShape.worker.succeeded).toBeLessThan(fastContextShape.worker.total);
+		// Tool escalation is tier-only by design: fitness never enters this predicate.
+		expect(shouldEscalateModelRouterTool({ tier: "cheap", toolName: "write" })).toBe(true);
+		expect(shouldEscalateModelRouterTool({ tier: "cheap", toolName: "edit" })).toBe(true);
+		expect(
+			shouldEscalateModelRouterTool({ tier: "cheap", toolName: "bash", args: { command: "echo hi > out.txt" } }),
+		).toBe(true);
+	});
+
 	it("does not escalate medium-routed turns", () => {
 		expect(shouldEscalateModelRouterTool({ tier: "medium", toolName: "write" })).toBe(false);
 		expect(shouldEscalateModelRouterTool({ tier: "medium", toolName: "bash", args: { command: "rm -rf /" } })).toBe(
