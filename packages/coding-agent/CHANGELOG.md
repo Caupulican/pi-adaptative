@@ -1,5 +1,15 @@
 ## [Unreleased]
 
+### Added
+- Added `context_scout` and `ScoutController`, a bounded read-only repository scout with citation validity checks.
+- Added FastContext scout install docs, a 10 GB reference profile, a consolidated per-tier model+thinking screen in Model Router settings, and a thinking-level picker during `/fitness` role assignment.
+- Added opt-in `modelRouter.fitnessGate` routing: probed-unfit tier models are blocked subtractively, scout `auto` selection now requires passed fitness proof, and router status/settings surface the gate.
+
+### Changed
+- Auto-compaction now uses the kernel closed loop and surfaces verification warnings from accepted fallback summaries.
+- Router status now shows each tier's thinking level, including `thinking (inherit)`.
+- Refactored executor and curation fitness gates onto the shared model-router fitness bar without changing their proof-required behavior.
+
 ## [0.81.1] - 2026-07-05
 
 ### Added

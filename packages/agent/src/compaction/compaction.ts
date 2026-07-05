@@ -15,6 +15,7 @@ import {
 } from "../messages.ts";
 import { buildSessionContext, type CompactionEntry, type SessionEntry } from "../session/session-manager.ts";
 import type { AgentMessage, StreamFn, ThinkingLevel } from "../types.ts";
+import { type CompactionFacts, extractCompactionFacts, renderFactsBlock } from "./extraction.ts";
 import {
 	computeFileLists,
 	createFileOps,
@@ -24,6 +25,7 @@ import {
 	SUMMARIZATION_SYSTEM_PROMPT,
 	serializeConversation,
 } from "./utils.ts";
+import { buildRetryPrompt, type VerificationReport, verifySummary } from "./verification.ts";
 
 // ============================================================================
 // File Operation Tracking
@@ -106,6 +108,7 @@ export interface CompactionResult<T = unknown> {
 	tokensBefore: number;
 	/** Extension-specific data (e.g., ArtifactIndex, version markers for structured compaction) */
 	details?: T;
+	verification?: VerificationReport;
 }
 
 // ============================================================================
@@ -496,77 +499,36 @@ export function findCutPoint(
 // Summarization
 // ============================================================================
 
-const SUMMARIZATION_PROMPT = `The messages above are a conversation to summarize. Create a structured context checkpoint summary that another LLM will use to continue the work.
-
-Use this EXACT format:
-
-## Goal
-[What is the user trying to accomplish? Can be multiple items if the session covers different tasks.]
-
+const SUMMARIZATION_PROMPT = `Checkpoint the conversation above. Format from your instructions, sections in this order:
+## Active Task
+### Mandatory Rules
+## Files
+## Done
 ## Constraints & Preferences
-- [Any constraints, preferences, or requirements mentioned by user]
-- [Or "(none)" if none were mentioned]
-
-## Progress
-### Done
-- [x] [Completed tasks/changes]
-
-### In Progress
-- [ ] [Current work]
-
-### Blocked
-- [Issues preventing progress, if any]
-
 ## Key Decisions
-- **[Decision]**: [Brief rationale]
-
-## Next Steps
-1. [Ordered list of what should happen next]
-
+## Blocked / Open
 ## Critical Context
-- [Any data, examples, or references needed to continue]
-- [Or "(none)" if not applicable]
 
-Keep each section concise. Preserve exact file paths, function names, and error messages.`;
+Pre-extracted facts (verified by tooling — include ALL of them, merged with what you read):
+<facts>
+{FACTS_BLOCK}
+</facts>
 
-const UPDATE_SUMMARIZATION_PROMPT = `The messages above are NEW conversation messages to incorporate into the existing summary provided in <previous-summary> tags.
+Budget: ~{BUDGET} tokens. Concrete beats complete.`;
 
-Update the existing structured summary with new information. RULES:
-- PRESERVE all existing information from the previous summary
-- ADD new progress, decisions, and context from the new messages
-- UPDATE the Progress section: move items from "In Progress" to "Done" when completed
-- UPDATE "Next Steps" based on what was accomplished
-- PRESERVE exact file paths, function names, and error messages
-- If something is no longer relevant, you may remove it
+const UPDATE_SUMMARIZATION_PROMPT = `Update the checkpoint in <previous-summary> with the NEW turns above. RULES:
+- PRESERVE every existing ### Mandatory Rules bullet VERBATIM; append new ones.
+- Continue the ## Done numbering; move finished work from Blocked/Open.
+- Update ## Active Task to the newest unfulfilled user input; apply the cancellation rule.
+- Keep ## Files current (add new, keep still-relevant, drop obsolete).
+- Preserve exact paths, commands, errors.
 
-Use this EXACT format:
+Same section order. Pre-extracted facts:
+<facts>
+{FACTS_BLOCK}
+</facts>
 
-## Goal
-[Preserve existing goals, add new ones if the task expanded]
-
-## Constraints & Preferences
-- [Preserve existing, add new ones discovered]
-
-## Progress
-### Done
-- [x] [Include previously done items AND newly completed items]
-
-### In Progress
-- [ ] [Current work - update based on progress]
-
-### Blocked
-- [Current blockers - remove if resolved]
-
-## Key Decisions
-- **[Decision]**: [Brief rationale] (preserve all previous, add new)
-
-## Next Steps
-1. [Update based on current state]
-
-## Critical Context
-- [Preserve important context, add new if needed]
-
-Keep each section concise. Preserve exact file paths, function names, and error messages.`;
+Budget: ~{BUDGET} tokens.`;
 
 function createSummarizationOptions(
 	model: Model<any>,
@@ -612,53 +574,64 @@ export async function generateSummary(
 	thinkingLevel?: ThinkingLevel,
 	streamFn?: StreamFn,
 	preDigest?: (conversationText: string, signal?: AbortSignal) => Promise<string>,
+	factsBlock = "files:\nactions:\nprohibitions:",
+	chunked = false,
 ): Promise<string> {
-	const maxTokens = Math.min(
-		Math.floor(0.8 * reserveTokens),
-		model.maxTokens > 0 ? model.maxTokens : Number.POSITIVE_INFINITY,
-	);
+	const summaryBudget = getSummaryBudget(reserveTokens, model);
+	const maxTokens = summaryBudget;
 
-	// Use update prompt if we have a previous summary, otherwise initial prompt
-	let basePrompt = previousSummary ? UPDATE_SUMMARIZATION_PROMPT : SUMMARIZATION_PROMPT;
+	let promptSuffix = fillPromptTemplate(
+		previousSummary ? UPDATE_SUMMARIZATION_PROMPT : SUMMARIZATION_PROMPT,
+		factsBlock,
+		summaryBudget,
+	);
 	if (customInstructions) {
-		basePrompt = `${basePrompt}\n\nAdditional focus: ${customInstructions}`;
+		promptSuffix = `${promptSuffix}\n\nAdditional focus: ${customInstructions}`;
 	}
 
-	// Serialize conversation to text so model doesn't try to continue it
-	// Convert to LLM messages first (handles custom types like bashExecution, custom, etc.)
 	const llmMessages = convertToLlm(currentMessages);
 	let conversationText = serializeConversation(llmMessages);
-	// Brain-curation surface 3 (opt-in, injected by the session): pre-digest old chunks locally
-	// before the frontier summarization call. Best-effort — failure keeps the verbatim text.
 	if (preDigest) {
 		try {
 			conversationText = await preDigest(conversationText, signal);
 		} catch {
-			// verbatim fallback
+			// Keep the verbatim conversation when an optional pre-digest fails.
 		}
 	}
 
-	// Build the prompt with conversation wrapped in tags
-	let promptText = `<conversation>\n${conversationText}\n</conversation>\n\n`;
-	if (previousSummary) {
-		promptText += `<previous-summary>\n${previousSummary}\n</previous-summary>\n\n`;
+	const inputBound = getSummarizerInputBound(model, maxTokens);
+	const initialPromptText = buildSummarizationPrompt(conversationText, previousSummary, promptSuffix);
+	if (estimateStringTokens(initialPromptText) > inputBound) {
+		if (!chunked) {
+			throw new Error("input-overflow: summarization request exceeds summarizer window");
+		}
+		conversationText = await summarizeChunks(
+			conversationText,
+			model,
+			maxTokens,
+			apiKey,
+			headers,
+			signal,
+			thinkingLevel,
+			streamFn,
+			inputBound,
+		);
 	}
-	promptText += basePrompt;
 
-	const summarizationMessages = [
-		{
-			role: "user" as const,
-			content: [{ type: "text" as const, text: promptText }],
-			timestamp: Date.now(),
-		},
-	];
-
-	const completionOptions = createSummarizationOptions(model, maxTokens, apiKey, headers, signal, thinkingLevel);
-
+	const promptText = buildSummarizationPrompt(conversationText, previousSummary, promptSuffix);
 	const response = await completeSummarization(
 		model,
-		{ systemPrompt: SUMMARIZATION_SYSTEM_PROMPT, messages: summarizationMessages },
-		completionOptions,
+		{
+			systemPrompt: SUMMARIZATION_SYSTEM_PROMPT,
+			messages: [
+				{
+					role: "user",
+					content: [{ type: "text", text: promptText }],
+					timestamp: Date.now(),
+				},
+			],
+		},
+		createSummarizationOptions(model, maxTokens, apiKey, headers, signal, thinkingLevel),
 		streamFn,
 	);
 
@@ -666,12 +639,146 @@ export async function generateSummary(
 		throw new Error(`Summarization failed: ${response.errorMessage || "Unknown error"}`);
 	}
 
-	const textContent = response.content
-		.filter((c): c is { type: "text"; text: string } => c.type === "text")
-		.map((c) => c.text)
-		.join("\n");
+	return truncateSummaryToBudget(extractTextContent(response), summaryBudget);
+}
 
-	return textContent;
+function fillPromptTemplate(template: string, factsBlock: string, budget: number): string {
+	return template.replaceAll("{FACTS_BLOCK}", factsBlock).replaceAll("{BUDGET}", String(budget));
+}
+
+function getSummaryBudget(reserveTokens: number, model: Model<any>): number {
+	const modelMaxTokens = model.maxTokens > 0 ? model.maxTokens : Number.POSITIVE_INFINITY;
+	return Math.max(1, Math.min(1_500, Math.floor(0.8 * reserveTokens), modelMaxTokens));
+}
+
+function getSummarizerInputBound(model: Model<any>, maxTokens: number): number {
+	const contextWindow = model.contextWindow > 0 ? model.contextWindow : Number.POSITIVE_INFINITY;
+	return contextWindow === Number.POSITIVE_INFINITY ? contextWindow : Math.max(1, contextWindow - maxTokens - 2_000);
+}
+
+function buildSummarizationPrompt(
+	conversationText: string,
+	previousSummary: string | undefined,
+	promptSuffix: string,
+): string {
+	let promptText = `<conversation>\n${conversationText}\n</conversation>\n\n`;
+	if (previousSummary) {
+		promptText += `<previous-summary>\n${previousSummary}\n</previous-summary>\n\n`;
+	}
+	return promptText + promptSuffix;
+}
+
+async function summarizeChunks(
+	conversationText: string,
+	model: Model<any>,
+	maxTokens: number,
+	apiKey: string | undefined,
+	headers: Record<string, string> | undefined,
+	signal: AbortSignal | undefined,
+	thinkingLevel: ThinkingLevel | undefined,
+	streamFn: StreamFn | undefined,
+	inputBound: number,
+): Promise<string> {
+	const maxChunkTokens = Math.max(1, inputBound);
+	const maxChunkChars = Math.max(1, maxChunkTokens * 4);
+	const chunks = splitText(conversationText, maxChunkChars);
+	const retainedChunks = chunks.slice(-4);
+	const omittedChunks = chunks.length - retainedChunks.length;
+	const summaries: string[] = [];
+
+	for (let i = 0; i < retainedChunks.length; i++) {
+		const promptText = `<conversation-chunk index="${i + 1}" total="${retainedChunks.length}">\n${retainedChunks[i]}\n</conversation-chunk>\n\nSummarize this chunk for a later checkpoint merge. Preserve exact file paths, commands, errors, user prohibitions, and active work. Output concise notes only.`;
+		const response = await completeSummarization(
+			model,
+			{
+				systemPrompt: SUMMARIZATION_SYSTEM_PROMPT,
+				messages: [
+					{
+						role: "user",
+						content: [{ type: "text", text: promptText }],
+						timestamp: Date.now(),
+					},
+				],
+			},
+			createSummarizationOptions(model, maxTokens, apiKey, headers, signal, thinkingLevel),
+			streamFn,
+		);
+		if (response.stopReason === "error") {
+			throw new Error(`Summarization failed: ${response.errorMessage || "Unknown error"}`);
+		}
+		summaries.push(extractTextContent(response));
+	}
+
+	const omittedNote =
+		omittedChunks > 0
+			? `## Critical Context\n${omittedChunks} older oversized chunks omitted; deterministic facts supplied separately.\n\n`
+			: "";
+	return `${omittedNote}${summaries.join("\n\n")}`;
+}
+
+function splitText(text: string, maxChars: number): string[] {
+	const chunks: string[] = [];
+	for (let start = 0; start < text.length; start += maxChars) {
+		chunks.push(text.slice(start, start + maxChars));
+	}
+	return chunks.length > 0 ? chunks : [""];
+}
+
+function extractTextContent(message: AssistantMessage): string {
+	return message.content
+		.filter((content): content is { type: "text"; text: string } => content.type === "text")
+		.map((content) => content.text)
+		.join("\n");
+}
+
+function truncateSummaryToBudget(summary: string, budget: number): string {
+	const maxTokens = Math.floor(budget * 1.3);
+	if (estimateStringTokens(summary) <= maxTokens) {
+		return summary;
+	}
+
+	let current = summary;
+	for (const heading of [
+		"Critical Context",
+		"Blocked / Open",
+		"Key Decisions",
+		"Constraints & Preferences",
+		"Done",
+		"Files",
+	]) {
+		const next = removeSummarySection(current, heading);
+		if (next === current) {
+			continue;
+		}
+		current = next;
+		if (estimateStringTokens(current) <= maxTokens) {
+			return current;
+		}
+	}
+	return current;
+}
+
+function removeSummarySection(summary: string, heading: string): string {
+	const lines = summary.split(/\r?\n/);
+	const kept: string[] = [];
+	let skipping = false;
+	for (const line of lines) {
+		const match = /^(?:##|###)\s+(.+?)\s*$/.exec(line);
+		if (match) {
+			skipping = match[1].trim().toLowerCase() === heading.toLowerCase();
+			if (skipping) {
+				continue;
+			}
+		}
+		if (!skipping) {
+			kept.push(line);
+		}
+	}
+	return kept.join("\n").trim();
+}
+
+function estimateStringTokens(text: string): number {
+	return Math.ceil(text.length / 4);
 }
 
 // ============================================================================
@@ -692,6 +799,8 @@ export interface CompactionPreparation {
 	previousSummary?: string;
 	/** File operations extracted from messagesToSummarize */
 	fileOps: FileOperations;
+	/** Facts extracted from the compacted span for verification gating */
+	facts?: CompactionFacts;
 	/** Compaction settions from settings.jsonl	*/
 	settings: CompactionSettings;
 }
@@ -761,6 +870,8 @@ export function prepareCompaction(
 		}
 	}
 
+	const facts = extractCompactionFacts(pathEntries, boundaryStart, historyEnd);
+
 	return {
 		firstKeptEntryId,
 		messagesToSummarize,
@@ -769,6 +880,7 @@ export function prepareCompaction(
 		tokensBefore,
 		previousSummary,
 		fileOps,
+		facts,
 		settings,
 	};
 }
@@ -809,6 +921,7 @@ export async function compact(
 	thinkingLevel?: ThinkingLevel,
 	streamFn?: StreamFn,
 	preDigest?: (conversationText: string, signal?: AbortSignal) => Promise<string>,
+	executionOptions?: { chunked?: boolean; allowVerificationFailure?: boolean },
 ): Promise<CompactionResult> {
 	const {
 		firstKeptEntryId,
@@ -819,57 +932,99 @@ export async function compact(
 		previousSummary,
 		fileOps,
 		settings,
+		facts: factsFromPreparation,
 	} = preparation;
 
-	// Generate summaries (can be parallel if both needed) and merge into one
-	let summary: string;
+	const facts = factsFromPreparation ?? {
+		files: [],
+		actions: [],
+		prohibitions: [],
+		cancelledText: "",
+		activeTaskSource: "",
+	};
+	const factsBlock = renderFactsBlock(facts);
+	let verification: VerificationReport | undefined;
+	let summary = "";
 
-	if (isSplitTurn && turnPrefixMessages.length > 0) {
-		// Generate both summaries in parallel
-		const [historyResult, turnPrefixResult] = await Promise.all([
-			messagesToSummarize.length > 0
-				? generateSummary(
-						messagesToSummarize,
-						model,
-						settings.reserveTokens,
-						apiKey,
-						headers,
-						signal,
-						customInstructions,
-						previousSummary,
-						thinkingLevel,
-						streamFn,
-						preDigest,
-					)
-				: Promise.resolve("No prior history."),
-			generateTurnPrefixSummary(
-				turnPrefixMessages,
+	if (isSplitTurn && messagesToSummarize.length > 0) {
+		let historySummary = "No prior history.";
+		let historyInstructions = customInstructions;
+		for (let attempt = 0; attempt < 2; attempt++) {
+			historySummary = await generateSummary(
+				messagesToSummarize,
 				model,
 				settings.reserveTokens,
 				apiKey,
 				headers,
 				signal,
+				historyInstructions,
+				previousSummary,
 				thinkingLevel,
 				streamFn,
-			),
-		]);
-		// Merge into single summary
-		summary = `${historyResult}\n\n---\n\n**Turn Context (split turn):**\n\n${turnPrefixResult}`;
-	} else {
-		// Just generate history summary
-		summary = await generateSummary(
-			messagesToSummarize,
+				preDigest,
+				factsBlock,
+				executionOptions?.chunked ?? false,
+			);
+
+			verification = verifySummary(historySummary, facts);
+			if (verification.ok) {
+				break;
+			}
+
+			if (attempt >= 1) {
+				if (executionOptions?.allowVerificationFailure) {
+					break;
+				}
+				throw new Error(`gate-failed: ${formatVerificationFailures(verification)}`);
+			}
+
+			historyInstructions = buildRetryPrompt(verification, historySummary);
+		}
+
+		const turnPrefixSummary = await generateTurnPrefixSummary(
+			turnPrefixMessages,
 			model,
 			settings.reserveTokens,
 			apiKey,
 			headers,
 			signal,
-			customInstructions,
-			previousSummary,
 			thinkingLevel,
 			streamFn,
-			preDigest,
 		);
+		summary = `${historySummary}\n\n---\n\n**Turn Context (split turn):**\n\n${turnPrefixSummary}`;
+	} else {
+		let customSummaryInstructions = customInstructions;
+		for (let attempt = 0; attempt < 2; attempt++) {
+			summary = await generateSummary(
+				messagesToSummarize,
+				model,
+				settings.reserveTokens,
+				apiKey,
+				headers,
+				signal,
+				customSummaryInstructions,
+				previousSummary,
+				thinkingLevel,
+				streamFn,
+				preDigest,
+				factsBlock,
+				executionOptions?.chunked ?? false,
+			);
+
+			verification = verifySummary(summary, facts);
+			if (verification.ok) {
+				break;
+			}
+
+			if (attempt >= 1) {
+				if (executionOptions?.allowVerificationFailure) {
+					break;
+				}
+				throw new Error(`gate-failed: ${formatVerificationFailures(verification)}`);
+			}
+
+			customSummaryInstructions = buildRetryPrompt(verification, summary);
+		}
 	}
 
 	// Compute file lists and append to summary
@@ -879,6 +1034,69 @@ export async function compact(
 	if (!firstKeptEntryId) {
 		throw new Error("First kept entry has no UUID - session may need migration");
 	}
+
+	return {
+		summary,
+		firstKeptEntryId,
+		tokensBefore,
+		details: { readFiles, modifiedFiles } as CompactionDetails,
+		verification,
+	};
+}
+
+function formatVerificationFailures(verification: VerificationReport): string {
+	return verification.failures.map((failure) => `${failure.check}: ${failure.detail}`).join(", ");
+}
+
+export function createDeterministicCompaction(preparation: CompactionPreparation): CompactionResult {
+	const { firstKeptEntryId, tokensBefore, fileOps, facts } = preparation;
+	if (!firstKeptEntryId) {
+		throw new Error("First kept entry has no UUID - session may need migration");
+	}
+
+	const { readFiles, modifiedFiles } = computeFileLists(fileOps);
+	const factsText = renderFactsBlock(
+		facts ?? {
+			files: [],
+			actions: [],
+			prohibitions: [],
+			cancelledText: "",
+			activeTaskSource: "",
+		},
+	);
+	const fileLines = facts?.files.length
+		? facts.files.map((file) => `- ${file.path} — ${file.note || file.kind} (${file.kind})`)
+		: [`- read: ${readFiles.length}`, `- modified: ${modifiedFiles.length}`];
+	const mandatoryRuleLines = facts?.prohibitions.length ? facts.prohibitions.map((rule) => `- ${rule}`) : ["(none)"];
+	const doneLines = facts?.actions.length
+		? facts.actions.map((action, index) => `${index + 1}. ${action}`)
+		: ["1. CHECKPOINT deterministic fallback — repeated compaction retries exhausted"];
+	const summary = [
+		"## Active Task",
+		facts?.activeTaskSource ? `User: ${facts.activeTaskSource}` : "Continue from the deterministic compact snapshot.",
+		"",
+		"### Mandatory Rules",
+		...mandatoryRuleLines,
+		"",
+		"## Files",
+		...fileLines,
+		"",
+		"## Done",
+		...doneLines,
+		"",
+		"## Constraints & Preferences",
+		"Preserve exact file paths, commands, line numbers, and error strings.",
+		"",
+		"## Key Decisions",
+		"- Deterministic checkpoint used after repeated compaction retries.",
+		"",
+		"## Blocked / Open",
+		"(none)",
+		"",
+		"## Critical Context",
+		"- Deterministic facts-only checkpoint; no LLM summary was accepted.",
+		factsText,
+	].join("\n");
 
 	return {
 		summary,

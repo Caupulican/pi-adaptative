@@ -129,6 +129,6 @@ describe("generateSummary reasoning options", () => {
 
 		await compact(preparation, createModel(false, 128000), "test-key");
 
-		expect(completeSimpleMock.mock.calls.map((call) => call[2]?.maxTokens)).toEqual([128000, 128000]);
+		expect(completeSimpleMock.mock.calls.map((call) => call[2]?.maxTokens)).toEqual([1500, 128000]);
 	});
 });

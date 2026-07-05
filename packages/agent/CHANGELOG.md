@@ -1,5 +1,11 @@
 ## [Unreleased]
 
+### Added
+- Added deterministic compaction-facts extraction, script verification, closed-loop auto-compaction orchestration, bounded chunked summarization, output truncation, and the self-calibrating `TokenBudget`.
+
+### Changed
+- Compaction checkpoints now use the caveman checkpoint format with `### Mandatory Rules`, a cached worked example, and pre-seeded facts.
+
 ## [0.81.1] - 2026-07-05
 
 ### Added

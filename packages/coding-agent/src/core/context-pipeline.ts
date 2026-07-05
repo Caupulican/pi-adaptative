@@ -25,7 +25,12 @@
 
 import { join } from "node:path";
 import type { AgentMessage } from "@caupulican/pi-agent-core";
-import { estimateContextTokens, getLatestCompactionEntry, type SessionManager } from "@caupulican/pi-agent-core/node";
+import {
+	estimateContextTokens,
+	getLatestCompactionEntry,
+	type SessionManager,
+	TokenBudget,
+} from "@caupulican/pi-agent-core/node";
 import type { Api, AssistantMessage, Model, Usage } from "@caupulican/pi-ai";
 import type { IsolatedCompletionOptions, IsolatedCompletionResult } from "./agent-session.ts";
 import { BrainCurator, type CurationTelemetrySnapshot, preDigestConversationText } from "./context/brain-curator.ts";
@@ -42,6 +47,7 @@ import { applyContextGc, type ContextGcReport } from "./context-gc.ts";
 import type { MemoryManager } from "./memory/memory-manager.ts";
 import type { ModelRegistry } from "./model-registry.ts";
 import { resolveCliModel } from "./model-resolver.ts";
+import { evaluateSurfaceFitness } from "./model-router/fitness-gate.ts";
 import { FitnessStore } from "./models/fitness-store.ts";
 import type { SettingsManager } from "./settings-manager.ts";
 
@@ -109,6 +115,7 @@ export class ContextPipeline {
 	private _latestPromptPolicyReport: PromptPolicyShadowReport | undefined = undefined;
 	private _latestPromptPolicyGcCorrelation: PromptPolicyGcCorrelationReport | undefined = undefined;
 	private _latestPromptEnforcementReport: PromptEnforcementReport | undefined = undefined;
+	private readonly _tokenBudget = new TokenBudget();
 
 	private readonly deps: ContextPipelineDeps;
 
@@ -350,13 +357,10 @@ export class ContextPipeline {
 		const fitness = FitnessStore.forAgentDir(this.deps.getAgentDir())
 			.getForHost()
 			.find((entry) => entry.model === canonicalRef);
-		const digestScore = fitness?.report.digest;
-		if (!digestScore) {
-			this._lastCurationSkipReason = "curation_model_unprobed";
-			return undefined;
-		}
-		if (digestScore.succeeded < Math.ceil(digestScore.total * (2 / 3))) {
-			this._lastCurationSkipReason = "curation_model_digest_unfit";
+		const verdict = evaluateSurfaceFitness("curation", fitness?.report);
+		if (!verdict.fit) {
+			this._lastCurationSkipReason =
+				verdict.reason === "unprobed" ? "curation_model_unprobed" : "curation_model_digest_unfit";
 			return undefined;
 		}
 		this._lastCurationSkipReason = undefined;
@@ -626,19 +630,59 @@ export class ContextPipeline {
 
 	estimateCurrentContextTokens(messages: AgentMessage[]): number {
 		const estimate = estimateContextTokens(messages);
-		const compactionEntry = getLatestCompactionEntry(this.deps.getSessionManager().getBranch());
-		if (estimate.lastUsageIndex === null || !compactionEntry) {
-			return estimate.tokens;
+		if (estimate.lastUsageIndex === null) {
+			return this._tokenBudget.estimateDelta(estimateConversationChars(messages));
 		}
+
 		const usageMessage = messages[estimate.lastUsageIndex];
-		if (usageMessage?.role !== "assistant") {
+		const compactionEntry = getLatestCompactionEntry(this.deps.getSessionManager().getBranch());
+		if (usageMessage?.role !== "assistant" || !compactionEntry) {
 			return estimate.tokens;
 		}
 		const usageTimestamp = (usageMessage as AssistantMessage).timestamp;
 		const compactionTimestamp = new Date(compactionEntry.timestamp).getTime();
 		if (usageTimestamp <= compactionTimestamp) {
-			return estimate.trailingTokens;
+			return this._tokenBudget.estimateDelta(estimateConversationChars(messages));
 		}
-		return estimate.tokens;
+
+		const coveredChars = estimateConversationChars(messages, 0, estimate.lastUsageIndex + 1);
+		const deltaChars = estimateConversationChars(messages, estimate.lastUsageIndex + 1, messages.length);
+		this._tokenBudget.anchor(estimate.usageTokens, coveredChars);
+		return this._tokenBudget.current(deltaChars, estimate.tokens);
 	}
+}
+
+/**
+ * Estimate covered characters from the provider-visible context messages.
+ */
+function estimateConversationChars(messages: AgentMessage[], start = 0, end = messages.length): number {
+	let total = 0;
+	for (let index = Math.max(0, start); index < Math.min(messages.length, end); index++) {
+		const message = messages[index];
+		if (!message) continue;
+		const rawContent = (message as { content?: unknown }).content;
+		if (typeof rawContent === "string") {
+			total += rawContent.length;
+			continue;
+		}
+		if (!Array.isArray(rawContent)) {
+			continue;
+		}
+		for (const block of rawContent) {
+			if (typeof block === "string") {
+				total += block.length;
+				continue;
+			}
+			if (!block || typeof block !== "object") {
+				continue;
+			}
+			if (typeof (block as { text?: unknown }).text === "string") {
+				total += (block as { text?: string }).text?.length ?? 0;
+			}
+			if (typeof (block as { thinking?: unknown }).thinking === "string") {
+				total += (block as { thinking?: string }).thinking?.length ?? 0;
+			}
+		}
+	}
+	return total;
 }
