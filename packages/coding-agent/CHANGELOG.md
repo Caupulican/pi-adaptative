@@ -3,6 +3,9 @@
 ### Added
 - Added FastContext-1.0-4B and Ornith-1.0-9B to `/models` suggestions for one-step pull, probe, and role assignment; added the `scout` fitness role that writes `scout.model` and `scout.enabled`, gated on the `scout_auto` fitness exam.
 
+### Changed
+- Compaction summarizer selection now consults the fitness doctrine (digest lane, subtractive) and the exhausted-provider registry; every fallback is visible.
+
 ## [0.81.3] - 2026-07-05
 
 

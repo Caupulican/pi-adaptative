@@ -130,6 +130,7 @@ Fitness applicability is intentionally split by autonomy level:
 
 - Class A autonomous adoption requires proof on this host: executor direct uses `toolCall`, curation uses `digest`, and scout `"auto"` uses `research` + `toolCall`.
 - Class B routed turns are subtractive and opt-in via `modelRouter.fitnessGate`: cheap uses `research` + `toolCall`; medium/expensive use `worker` + `toolCall`; the routing judge uses parsed `judge` output. Unprobed tier models pass.
+- Compaction summarizer auto-selection is always-on subtractive composition: when `compaction.model` is `auto`, a router cheap model with a probed failed `digest` lane falls back to the session model; unprobed cheap models still pass, and exhausted explicit/cheap summarizers fall back visibly.
 - Class C explicit user choices are sovereign: explicit `/model` and explicit `scout.model` patterns are not router-gated, except for the existing all-lanes-failed adoption backstop and runtime output checks.
 
 ```json
@@ -188,6 +189,7 @@ When enabled, Auto Learn keeps a small shared state file for visibility/cooldown
 | Setting | Type | Default | Description |
 |---------|------|---------|-------------|
 | `compaction.enabled` | boolean | `true` | Enable auto-compaction |
+| `compaction.model` | string | `"auto"` | Summarizer model pattern. `auto` follows router cheap when available, but always consults exhausted-provider state and the subtractive `digest` fitness surface before falling back visibly to the session model. |
 | `compaction.reserveTokens` | number | `16384` | Tokens reserved for LLM response |
 | `compaction.keepRecentTokens` | number | `20000` | Recent tokens to keep (not summarized) |
 

@@ -1,3 +1,6 @@
+import { mkdtempSync } from "node:fs";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
 import type { Agent } from "@caupulican/pi-agent-core";
 import { classifyFailure, DEFAULT_RETRY_POLICY } from "@caupulican/pi-agent-core";
 import type { Api, AssistantMessage, Model } from "@caupulican/pi-ai";
@@ -5,9 +8,13 @@ import { describe, expect, it } from "vitest";
 import { AgentSession } from "../../src/core/agent-session.ts";
 import type { RouteDecision } from "../../src/core/autonomy/contracts.ts";
 import { BillingFailoverController, ExhaustedProviderRegistry } from "../../src/core/billing-failover-controller.ts";
+import { CompactionSupport } from "../../src/core/compaction-support.ts";
 import type { ModelRegistry } from "../../src/core/model-registry.ts";
 import { ModelRouterController } from "../../src/core/model-router-controller.ts";
+import { FitnessStore } from "../../src/core/models/fitness-store.ts";
+import type { LaneFitnessScore, ModelFitnessReport } from "../../src/core/research/model-fitness.ts";
 import { resolveScoutModel } from "../../src/core/runtime-builder.ts";
+import { SettingsManager } from "../../src/core/settings-manager.ts";
 import {
 	createChaosProvider,
 	expectBoundedOutbound,
@@ -46,8 +53,8 @@ function assistantError(modelRef: Model<Api>, errorMessage: string): AssistantMe
 	} as unknown as AssistantMessage;
 }
 
-function registry(subscription: boolean): ModelRegistry {
-	const models = [codexSpark, codexDefault, meteredSelected];
+function registry(subscription: boolean, extraModels: Model<Api>[] = []): ModelRegistry {
+	const models = [codexSpark, codexDefault, meteredSelected, ...extraModels];
 	return {
 		getAll: () => models,
 		find: (provider: string, id: string) =>
@@ -58,9 +65,70 @@ function registry(subscription: boolean): ModelRegistry {
 	} as unknown as ModelRegistry;
 }
 
+function lane(succeeded = 3, total = 3): LaneFitnessScore {
+	return { succeeded, total, outcomes: [], meanMs: 1 };
+}
+
+function report(overrides: Partial<ModelFitnessReport> = {}): ModelFitnessReport {
+	return {
+		trials: 3,
+		research: lane(),
+		worker: lane(),
+		judge: {
+			parsed: 3,
+			planningElevated: 3,
+			planningTotal: 3,
+			trivialCheap: 3,
+			trivialTotal: 3,
+			total: 3,
+			outcomes: [],
+			meanMs: 1,
+		},
+		search: lane(),
+		toolCall: lane(),
+		digest: lane(),
+		totalCostUsd: 0,
+		...overrides,
+	};
+}
+
+function compactionHarness(options: { agentDir: string; exhausted?: ExhaustedProviderRegistry }) {
+	const warnings: string[] = [];
+	const settings = SettingsManager.inMemory();
+	settings.setModelRouterSettings({
+		...settings.getModelRouterSettings(),
+		enabled: true,
+		cheapModel: "openai-codex/codex-spark",
+	});
+	const exhausted = options.exhausted ?? new ExhaustedProviderRegistry();
+	return {
+		support: new CompactionSupport({
+			getModel: () => codexDefault,
+			getSettingsManager: () => settings,
+			getModelRegistry: () => registry(true),
+			isRawStream: () => false,
+			getRequiredRequestAuth: async () => ({}),
+			isModelExhausted: (ref) => exhausted.isExhausted(ref),
+			getStoredFitnessReport: (ref) =>
+				FitnessStore.forAgentDir(options.agentDir)
+					.getForHost()
+					.find((entry) => entry.model === ref)?.report,
+			emitWarning: (message) => warnings.push(message),
+		}),
+		warnings,
+	};
+}
+
 type RouterHarness = {
 	_lastModelRouterSkipReason?: string;
 	_resolveExecutorRoute: () => undefined;
+	_routerSurfaceForTier?: (
+		tier: "cheap" | "medium" | "expensive",
+	) => "router_cheap" | "router_medium" | "router_expensive";
+	_evaluateModelFitness?: (
+		surface: "router_cheap" | "router_medium" | "router_expensive",
+		model: Model<Api>,
+	) => { fit: true; probed: boolean } | { fit: false; reason: "unprobed" | "lane_failed" };
 	deps: {
 		getSettingsManager: () => {
 			getModelRouterSettings: () => { enabled: boolean; cheapModel: string; expensiveModel: string };
@@ -74,6 +142,11 @@ type RouterHarness = {
 };
 
 const routerPrototype = ModelRouterController.prototype as unknown as {
+	_routerSurfaceForTier(tier: "cheap" | "medium" | "expensive"): "router_cheap" | "router_medium" | "router_expensive";
+	_evaluateModelFitness(
+		surface: "router_cheap" | "router_medium" | "router_expensive",
+		model: Model<Api>,
+	): { fit: true; probed: boolean } | { fit: false; reason: "unprobed" | "lane_failed" };
 	_resolveModelRouterTurnRoute(
 		this: RouterHarness,
 		prompt: string,
@@ -226,6 +299,61 @@ describe("provider limit red-team matrix", () => {
 		expect(skipReason).toBe("cheap model exhausted: quota");
 		if (!skipReason) throw new Error("expected router skip reason");
 		expectNoSilentTerminal({ ended: true, visibleMessages: [skipReason] });
+	});
+
+	it("Compaction fires while router cheap is quota-exhausted", () => {
+		const exhausted = new ExhaustedProviderRegistry();
+		exhausted.markExhausted("openai-codex/codex-spark");
+		const harness = compactionHarness({
+			agentDir: mkdtempSync(join(tmpdir(), "pi-red-team-compaction-exhausted-")),
+			exhausted,
+		});
+		const selected = harness.support.resolveModel(codexDefault);
+		expect(selected).toBe(codexDefault);
+		expect(harness.warnings).toContain("Compaction summarizer fallback:exhausted");
+		expectNoSilentTerminal({ ended: true, visibleMessages: harness.warnings });
+	});
+
+	it("Digest-failed router cheap is blocked from compaction but can still route research", () => {
+		const agentDir = mkdtempSync(join(tmpdir(), "pi-red-team-compaction-digest-"));
+		FitnessStore.forAgentDir(agentDir).save(
+			"openai-codex/codex-spark",
+			report({ digest: lane(1, 3), research: lane(3, 3), toolCall: lane(3, 3) }),
+			"2026-07-05T00:00:00.000Z",
+		);
+		const compaction = compactionHarness({ agentDir });
+		expect(compaction.support.resolveModel(codexDefault)).toBe(codexDefault);
+		expect(compaction.warnings).toContain("Compaction summarizer fallback:digest_unfit(1/3)");
+
+		const routerHarness: RouterHarness = {
+			_resolveExecutorRoute: () => undefined,
+			_routerSurfaceForTier: (tier) => routerPrototype._routerSurfaceForTier.call(routerHarness, tier),
+			_evaluateModelFitness: (surface, candidate) =>
+				routerPrototype._evaluateModelFitness.call(routerHarness, surface, candidate),
+			deps: {
+				getSettingsManager: () => ({
+					getModelRouterSettings: () => ({
+						enabled: true,
+						fitnessGate: true,
+						cheapModel: "openai-codex/codex-spark",
+						expensiveModel: "openai-codex/gpt-5.5",
+					}),
+				}),
+				getSessionManager: () => ({ getEntries: () => [] }),
+				getAgentDir: () => agentDir,
+				getModelRegistry: () => registry(true),
+				isModelExhausted: () => false,
+				getFailoverStatus: () => ({ exhausted: [] }),
+			},
+		};
+		const routed = routerPrototype._resolveModelRouterTurnRoute.call(routerHarness, "Find references to this symbol");
+		expect(routed?.model).toBe(codexSpark);
+	});
+
+	it("Unprobed router cheap remains eligible for compaction", () => {
+		const harness = compactionHarness({ agentDir: mkdtempSync(join(tmpdir(), "pi-red-team-compaction-unprobed-")) });
+		expect(harness.support.resolveModel(codexDefault)).toBe(codexSpark);
+		expect(harness.warnings).toEqual([]);
 	});
 
 	it("Quota during a scout run", async () => {
