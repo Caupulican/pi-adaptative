@@ -1,9 +1,38 @@
 import type { SimpleStreamOptions } from "@caupulican/pi-ai";
 import { fauxAssistantMessage } from "@caupulican/pi-ai";
 import { describe, expect, it } from "vitest";
+import { FitnessStore } from "../src/core/models/fitness-store.ts";
+import type { LaneFitnessScore, ModelFitnessReport } from "../src/core/research/model-fitness.ts";
 import { createHarness } from "./suite/harness.ts";
 
 const JUDGE_MEDIUM = '{"tier":"medium","risk":"read-only","trivial":false,"reason":"non-trivial planning"}';
+
+function lane(succeeded = 3, total = 3): LaneFitnessScore {
+	return { succeeded, total, outcomes: [], meanMs: 1 };
+}
+
+function report(overrides: Partial<ModelFitnessReport> = {}): ModelFitnessReport {
+	return {
+		trials: 3,
+		research: lane(),
+		worker: lane(),
+		judge: {
+			parsed: 3,
+			planningElevated: 3,
+			planningTotal: 3,
+			trivialCheap: 3,
+			trivialTotal: 3,
+			total: 3,
+			outcomes: [],
+			meanMs: 1,
+		},
+		search: lane(),
+		toolCall: lane(),
+		digest: lane(),
+		totalCostUsd: 0,
+		...overrides,
+	};
+}
 
 describe("AgentSession route judge", () => {
 	it("upgrades a cheap baseline to medium when the judge says so, and runs the turn on the medium model", async () => {
@@ -77,6 +106,40 @@ describe("AgentSession route judge", () => {
 				(_context, _options, _state, model) => {
 					turnModelId = model.id;
 					return fauxAssistantMessage("answered directly");
+				},
+			]);
+
+			await harness.session.prompt("what does the session manager do?");
+
+			expect(turnModelId).toBe("cheap");
+			expect(harness.getPendingResponseCount()).toBe(0);
+		} finally {
+			harness.cleanup();
+		}
+	});
+
+	it("keeps the baseline and skips the judge when the judge lane is known unfit", async () => {
+		const harness = await createHarness({
+			models: [{ id: "cheap" }, { id: "medium" }],
+			settings: {
+				modelRouter: {
+					enabled: true,
+					fitnessGate: true,
+					cheapModel: "faux/cheap",
+					mediumModel: "faux/medium",
+				},
+			},
+		});
+		try {
+			FitnessStore.forAgentDir(harness.tempDir).save(
+				"faux/medium",
+				report({ judge: { ...report().judge, parsed: 1, total: 3 } }),
+			);
+			let turnModelId: string | undefined;
+			harness.setResponses([
+				(_context, _options, _state, model) => {
+					turnModelId = model.id;
+					return fauxAssistantMessage("answered on cheap");
 				},
 			]);
 

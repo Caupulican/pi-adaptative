@@ -38,6 +38,11 @@ import type { ModelRegistry } from "./model-registry.ts";
 import { resolveCliModel } from "./model-resolver.ts";
 import { collectModelRouterConfigDiagnostics } from "./model-router/config-diagnostics.ts";
 import { classifyExecutorTurn } from "./model-router/executor-route.ts";
+import {
+	evaluateSurfaceFitness,
+	type FitnessGatedSurface,
+	type FitnessGateVerdict,
+} from "./model-router/fitness-gate.ts";
 import { classifyModelRouterRoute, type ModelRouterIntent } from "./model-router/intent-classifier.ts";
 import { ROUTE_JUDGE_MAX_OUTPUT_TOKENS, runRouteJudge } from "./model-router/route-judge.ts";
 import {
@@ -52,6 +57,7 @@ import {
 	getRecentModelRouterDecisions,
 	MODEL_ROUTER_DECISION_CUSTOM_TYPE,
 	type ModelRouterDecisionStatus,
+	type ModelRouterFitnessStatuses,
 } from "./model-router/status.ts";
 import { shouldEscalateModelRouterTool } from "./model-router/tool-escalation.ts";
 import { FitnessStore } from "./models/fitness-store.ts";
@@ -197,6 +203,69 @@ export class ModelRouterController {
 		return this.deps.getModelRegistry().hasConfiguredAuth(resolved.model);
 	}
 
+	private _evaluateModelFitness(surface: FitnessGatedSurface, model: Model<Api>): FitnessGateVerdict {
+		const fitness = FitnessStore.forAgentDir(this.deps.getAgentDir())
+			.getForHost()
+			.find((entry) => entry.model === formatModelRouterModel(model));
+		return evaluateSurfaceFitness(surface, fitness?.report);
+	}
+
+	private _formatFitnessFailure(verdict: Exclude<FitnessGateVerdict, { fit: true }>): string {
+		return verdict.reason === "unprobed" ? "unprobed" : `${verdict.lane} ${verdict.succeeded}/${verdict.total}`;
+	}
+
+	private _routerSurfaceForTier(tier: "cheap" | "medium" | "expensive"): FitnessGatedSurface {
+		return tier === "cheap" ? "router_cheap" : tier === "medium" ? "router_medium" : "router_expensive";
+	}
+
+	private _getRouterTierFitnessStatuses(): ModelRouterFitnessStatuses {
+		const settings = this.deps.getSettingsManager().getModelRouterSettings();
+		const statuses: ModelRouterFitnessStatuses = {};
+		for (const tier of ["cheap", "medium", "expensive"] as const) {
+			const pattern =
+				tier === "cheap" ? settings.cheapModel : tier === "medium" ? settings.mediumModel : settings.expensiveModel;
+			if (!pattern) continue;
+			const resolved = resolveCliModel({ cliModel: pattern, modelRegistry: this.deps.getModelRegistry() });
+			if (!resolved.model || !this.deps.getModelRegistry().hasConfiguredAuth(resolved.model)) continue;
+			const verdict = this._evaluateModelFitness(this._routerSurfaceForTier(tier), resolved.model);
+			statuses[tier] = verdict.fit
+				? { status: verdict.probed ? "fit" : "unprobed" }
+				: verdict.reason === "unprobed"
+					? { status: "unprobed" }
+					: { status: "unfit", lane: verdict.lane, succeeded: verdict.succeeded, total: verdict.total };
+		}
+		return statuses;
+	}
+
+	private _resolveExpensiveFallbackRoute(
+		decision: RouteDecision,
+		reasonCode: string,
+		reason: string,
+	): { decision: RouteDecision; model: Model<Api> } | undefined {
+		const settings = this.deps.getSettingsManager().getModelRouterSettings();
+		const expensivePattern = settings.expensiveModel;
+		if (!expensivePattern || !this._isModelAvailableAndAuthed(expensivePattern)) return undefined;
+		const resolvedExpensive = resolveCliModel({
+			cliModel: expensivePattern,
+			modelRegistry: this.deps.getModelRegistry(),
+		});
+		if (!resolvedExpensive.model) return undefined;
+		if (settings.fitnessGate) {
+			const verdict = this._evaluateModelFitness("router_expensive", resolvedExpensive.model);
+			if (!verdict.fit) {
+				this._lastModelRouterSkipReason = `expensive model unfit: ${this._formatFitnessFailure(verdict)} (fitness gate)`;
+				return undefined;
+			}
+		}
+		decision.fallbackFrom = "medium";
+		decision.tier = "expensive";
+		decision.reasonCode = reasonCode;
+		decision.reasons = [...decision.reasons, reason];
+		decision.model = formatModelRouterModel(resolvedExpensive.model);
+		this._lastModelRouterSkipReason = undefined;
+		return { decision, model: resolvedExpensive.model };
+	}
+
 	private _resolveExecutorRoute(
 		prompt: string,
 		executorPattern: string | undefined,
@@ -209,12 +278,7 @@ export class ModelRouterController {
 			if (!resolved.model || !this.deps.getModelRegistry().hasConfiguredAuth(resolved.model)) return undefined;
 			// Fitness gate: the executor must have PROVEN tool-calling on this host (same
 			// canonical-ref discipline as the curation gate).
-			const canonicalRef = `${resolved.model.provider}/${resolved.model.id}`;
-			const fitness = FitnessStore.forAgentDir(this.deps.getAgentDir())
-				.getForHost()
-				.find((entry) => entry.model === canonicalRef);
-			const toolCall = fitness?.report.toolCall;
-			if (!toolCall || toolCall.succeeded < Math.ceil(toolCall.total * (2 / 3))) return undefined;
+			if (!this._evaluateModelFitness("executor", resolved.model).fit) return undefined;
 			this._lastModelRouterIntent = "research";
 			return {
 				decision: {
@@ -309,23 +373,13 @@ export class ModelRouterController {
 			decision.tier === "cheap" ? "cheap model" : decision.tier === "medium" ? "medium model" : "expensive model";
 
 		if (decision.tier === "medium" && (!modelPattern || !this._isModelAvailableAndAuthed(modelPattern))) {
-			const expensivePattern = settings.expensiveModel;
-			if (expensivePattern && this._isModelAvailableAndAuthed(expensivePattern)) {
-				const resolvedExpensive = resolveCliModel({
-					cliModel: expensivePattern,
-					modelRegistry: this.deps.getModelRegistry(),
-				});
-				if (resolvedExpensive.model) {
-					decision.fallbackFrom = "medium";
-					decision.tier = "expensive";
-					decision.reasonCode = "medium_unavailable_fallback_expensive";
-					decision.reasons = [...decision.reasons, "Medium model is unavailable, falling back to expensive model"];
-					decision.model = formatModelRouterModel(resolvedExpensive.model);
-					this._lastModelRouterSkipReason = undefined;
-					return { decision, model: resolvedExpensive.model };
-				}
-			}
-			this._lastModelRouterSkipReason = "medium model and expensive fallback are unavailable";
+			const fallback = this._resolveExpensiveFallbackRoute(
+				decision,
+				"medium_unavailable_fallback_expensive",
+				"Medium model is unavailable, falling back to expensive model",
+			);
+			if (fallback) return fallback;
+			this._lastModelRouterSkipReason ??= "medium model and expensive fallback are unavailable";
 			return undefined;
 		}
 
@@ -344,6 +398,23 @@ export class ModelRouterController {
 		if (!this.deps.getModelRegistry().hasConfiguredAuth(resolved.model)) {
 			this._lastModelRouterSkipReason = `${label} missing auth: ${resolvedName}`;
 			return undefined;
+		}
+
+		if (settings.fitnessGate) {
+			const verdict = this._evaluateModelFitness(this._routerSurfaceForTier(decision.tier), resolved.model);
+			if (!verdict.fit) {
+				if (decision.tier === "medium") {
+					const failure = this._formatFitnessFailure(verdict);
+					const fallback = this._resolveExpensiveFallbackRoute(
+						decision,
+						"medium_unfit_fallback_expensive",
+						`Medium model is unfit (${failure}); falling back to expensive model`,
+					);
+					if (fallback) return fallback;
+				}
+				this._lastModelRouterSkipReason = `${decision.tier} model unfit: ${this._formatFitnessFailure(verdict)} (fitness gate)`;
+				return undefined;
+			}
 		}
 
 		this._lastModelRouterSkipReason = undefined;
@@ -396,6 +467,21 @@ export class ModelRouterController {
 		if (!judgePattern) return baseline;
 		const judgeModel = this.deps.resolveLaneModel(judgePattern);
 		if (!judgeModel) return baseline;
+		if (settings.fitnessGate) {
+			const verdict = this._evaluateModelFitness("router_judge", judgeModel);
+			if (!verdict.fit) {
+				return {
+					decision: {
+						...baseline.decision,
+						reasons: [
+							...baseline.decision.reasons,
+							`routing judge skipped: ${formatModelRouterModel(judgeModel)} unfit (${this._formatFitnessFailure(verdict)})`,
+						],
+					},
+					model: baseline.model,
+				};
+			}
+		}
 
 		let spentUsage: Usage | undefined;
 		const judged = await runRouteJudge({
@@ -471,9 +557,14 @@ export class ModelRouterController {
 				historicalDecisions,
 				this._lastModelRouterSkipReason,
 				this._lastModelRouterIntent ?? lastDecision?.intent,
+				settings.fitnessGate ? this._getRouterTierFitnessStatuses() : undefined,
 			),
 		];
-		const diagnostics = collectModelRouterConfigDiagnostics(settings, this.deps.getModelRegistry());
+		const diagnostics = collectModelRouterConfigDiagnostics(
+			settings,
+			this.deps.getModelRegistry(),
+			this.deps.getAgentDir(),
+		);
 		if (diagnostics.length > 0) {
 			lines.push(formatLabel ? formatLabel("Config diagnostics:") : "Config diagnostics:");
 			for (const diagnostic of diagnostics) {

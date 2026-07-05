@@ -17,12 +17,14 @@ type RouterSettings = {
 	cheapModel?: string;
 	mediumModel?: string;
 	expensiveModel?: string;
+	fitnessGate?: boolean;
 };
 
 type RouterContext = {
 	deps: {
 		getSettingsManager: () => { getModelRouterSettings: () => RouterSettings };
 		getSessionManager: () => { getEntries: () => [] };
+		getAgentDir: () => string;
 		getModelRegistry: () => {
 			getAll: () => TestModel[];
 			hasConfiguredAuth: (model: TestModel) => boolean;
@@ -87,10 +89,38 @@ type ModelRouterControllerPrototype = {
 	): Promise<void>;
 };
 
+type RuntimeRouterResolver = {
+	_resolveModelRouterTurnRoute(prompt: string): { decision: RouteDecision; model: TestModel } | undefined;
+};
+
 const routerPrototype = ModelRouterController.prototype as unknown as ModelRouterControllerPrototype;
 const cheapModel = getModel("anthropic", "claude-haiku-4-5")! as TestModel;
 const mediumModel = getModel("anthropic", "claude-3-5-sonnet-20241022")! as TestModel;
 const expensiveModel = getModel("anthropic", "claude-sonnet-4-5")! as TestModel;
+
+function fitnessReport(overrides: Partial<ModelFitnessReport> = {}): ModelFitnessReport {
+	const lane = { succeeded: 3, total: 3, outcomes: [], meanMs: 10 };
+	return {
+		trials: 3,
+		research: { ...lane },
+		worker: { ...lane },
+		search: { ...lane },
+		toolCall: { ...lane },
+		digest: { ...lane },
+		judge: {
+			parsed: 3,
+			planningElevated: 3,
+			planningTotal: 3,
+			trivialCheap: 3,
+			trivialTotal: 3,
+			total: 3,
+			outcomes: [],
+			meanMs: 0,
+		},
+		totalCostUsd: 0,
+		...overrides,
+	};
+}
 
 const bashParameters = Type.Object({ command: Type.String() });
 const bashTool: AgentTool<typeof bashParameters> = {
@@ -120,6 +150,7 @@ function createContext(
 		deps: {
 			getSettingsManager: () => ({ getModelRouterSettings: () => settings }),
 			getSessionManager: () => ({ getEntries: () => [] }),
+			getAgentDir: () => "/tmp/pi-router-test-agent-dir",
 			getModelRegistry: () => ({
 				getAll: () => [cheapModel, mediumModel, expensiveModel],
 				hasConfiguredAuth: (model: TestModel) =>
@@ -233,6 +264,107 @@ describe("AgentSession model router turn selection", () => {
 		expect(resolved?.decision.tier).toBe("expensive");
 		expect(resolved?.decision.fallbackFrom).toBe("medium");
 		expect(resolved?.decision.reasonCode).toBe("medium_unavailable_fallback_expensive");
+	});
+
+	it("keeps gate-off router behavior when a configured model has a failed fitness report", async () => {
+		const harness = await createHarness({
+			models: [{ id: "cheap" }, { id: "expensive" }],
+			settings: {
+				modelRouter: { enabled: true, cheapModel: "faux/cheap", expensiveModel: "faux/expensive" },
+			},
+		});
+		try {
+			FitnessStore.forAgentDir(harness.tempDir).save(
+				"faux/cheap",
+				fitnessReport({ research: { succeeded: 1, total: 3, outcomes: [], meanMs: 10 } }),
+			);
+			const route = (
+				harness.session as unknown as { _modelRouter: RuntimeRouterResolver }
+			)._modelRouter._resolveModelRouterTurnRoute("Explain this code block");
+			expect(route?.model.id).toBe("cheap");
+		} finally {
+			harness.cleanup();
+		}
+	});
+
+	it("skips a routed cheap turn when the opt-in fitness gate sees a failed research lane", async () => {
+		const harness = await createHarness({
+			models: [{ id: "cheap" }, { id: "expensive" }],
+			settings: {
+				modelRouter: {
+					enabled: true,
+					fitnessGate: true,
+					cheapModel: "faux/cheap",
+					expensiveModel: "faux/expensive",
+				},
+			},
+		});
+		try {
+			FitnessStore.forAgentDir(harness.tempDir).save(
+				"faux/cheap",
+				fitnessReport({ research: { succeeded: 1, total: 3, outcomes: [], meanMs: 10 } }),
+			);
+			const route = (
+				harness.session as unknown as { _modelRouter: RuntimeRouterResolver }
+			)._modelRouter._resolveModelRouterTurnRoute("Explain this code block");
+			expect(route).toBeUndefined();
+			expect(harness.session.getModelRouterStatus()).toContain(
+				"Routing: skipped (cheap model unfit: research 1/3 (fitness gate))",
+			);
+		} finally {
+			harness.cleanup();
+		}
+	});
+
+	it("falls back from an unfit medium model to a fit expensive model", async () => {
+		const harness = await createHarness({
+			models: [{ id: "cheap" }, { id: "medium" }, { id: "expensive" }],
+			settings: {
+				modelRouter: {
+					enabled: true,
+					fitnessGate: true,
+					cheapModel: "faux/cheap",
+					mediumModel: "faux/medium",
+					expensiveModel: "faux/expensive",
+				},
+			},
+		});
+		try {
+			FitnessStore.forAgentDir(harness.tempDir).save(
+				"faux/medium",
+				fitnessReport({ worker: { succeeded: 1, total: 3, outcomes: [], meanMs: 10 } }),
+			);
+			FitnessStore.forAgentDir(harness.tempDir).save("faux/expensive", fitnessReport());
+			const route = (
+				harness.session as unknown as { _modelRouter: RuntimeRouterResolver }
+			)._modelRouter._resolveModelRouterTurnRoute("Implement a small fix and update the relevant unit test.");
+			expect(route?.model.id).toBe("expensive");
+			expect(route?.decision.reasonCode).toBe("medium_unfit_fallback_expensive");
+		} finally {
+			harness.cleanup();
+		}
+	});
+
+	it("routes an unprobed model normally when the subtractive fitness gate is enabled", async () => {
+		const harness = await createHarness({
+			models: [{ id: "cheap" }, { id: "expensive" }],
+			settings: {
+				modelRouter: {
+					enabled: true,
+					fitnessGate: true,
+					cheapModel: "faux/cheap",
+					expensiveModel: "faux/expensive",
+				},
+			},
+		});
+		try {
+			const route = (
+				harness.session as unknown as { _modelRouter: RuntimeRouterResolver }
+			)._modelRouter._resolveModelRouterTurnRoute("Explain this code block");
+			expect(route?.model.id).toBe("cheap");
+		} finally {
+			harness.cleanup();
+		}
 	});
 
 	it("refuses to route to a configured model without auth", () => {
