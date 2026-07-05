@@ -13440,13 +13440,13 @@ export const MODELS = {
 			reasoning: true,
 			input: ["text"],
 			cost: {
-				input: 0.756,
-				output: 2.3760000000000003,
-				cacheRead: 0.14040000000000002,
+				input: 0.7546,
+				output: 2.3716,
+				cacheRead: 0.14014000000000001,
 				cacheWrite: 0,
 			},
 			contextWindow: 1048576,
-			maxTokens: 128000,
+			maxTokens: 131072,
 		} satisfies Model<"openai-completions">,
 		"z-ai/glm-5v-turbo": {
 			id: "z-ai/glm-5v-turbo",

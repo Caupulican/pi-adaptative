@@ -1,4 +1,4 @@
-## [Unreleased]
+## [0.81.1] - 2026-07-05
 
 ### Added
 - Phase-aware stream watchdog wiring in `AgentSession`, utilizing the new `StreamStallSettings` (`connectMs`, `activeIdleMs`, `quietIdleMs`) exposed and validated by `SettingsManager`.
