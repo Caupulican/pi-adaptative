@@ -2241,6 +2241,19 @@ export class SettingsManager {
 		};
 	}
 
+	setScoutSettings(settings: ScoutSettings, scope: SettingsScope = "global"): void {
+		if (scope === "project") {
+			const projectSettings = structuredClone(this.projectSettings);
+			projectSettings.scout = { ...settings };
+			this.markProjectModified("scout");
+			this.saveProjectSettings(projectSettings);
+			return;
+		}
+		this.globalSettings.scout = { ...settings };
+		this.markModified("scout");
+		this.save();
+	}
+
 	getContextGcSettings(): {
 		enabled: boolean;
 		preserveRecentMessages: number;

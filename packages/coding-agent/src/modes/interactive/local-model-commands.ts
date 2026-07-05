@@ -27,6 +27,7 @@ import { getAgentDir } from "../../config.ts";
 import type { AgentSession } from "../../core/agent-session.ts";
 import type { ModelRegistry } from "../../core/model-registry.ts";
 import { resolveCliModel } from "../../core/model-resolver.ts";
+import { evaluateSurfaceFitness } from "../../core/model-router/fitness-gate.ts";
 import { DEFAULT_MODEL_SUGGESTIONS } from "../../core/models/default-model-suggestions.ts";
 import { FitnessStore } from "../../core/models/fitness-store.ts";
 import { registerLocalModel, unregisterLocalModel } from "../../core/models/local-registration.ts";
@@ -478,6 +479,16 @@ export async function runFitnessAndAssign(
 				outcome.model,
 				(role) => {
 					done();
+					if (role === "scout") {
+						const verdict = evaluateSurfaceFitness("scout_auto", outcome.report);
+						if (!verdict.fit) {
+							const reason = verdict.reason === "lane_failed" ? `failed ${verdict.lane}` : "was not probed";
+							host.showStatus(
+								`${outcome.model} not assigned as scout: ${reason} on the scout_auto fitness exam. Use the docs/scout.md Modelfile recipe, then rerun /fitness.`,
+							);
+							return;
+						}
+					}
 					assignFitnessRole(host, outcome.model, role);
 					promptForModelRouterThinking(host, outcome.model, role);
 				},
@@ -511,6 +522,11 @@ export function assignFitnessRole(host: AssignRoleHost, modelRef: string, role: 
 		host.settingsManager.setModelRouterSettings({ ...router, executorModel: modelRef });
 		const hint = router.enabled ? "" : " Model router is currently disabled — enable it in /settings → Model Router.";
 		host.showStatus(`${modelRef} set as the toolkit executor (direct Level-0 hits route to it).${hint}`);
+		return;
+	}
+	if (role === "scout") {
+		host.settingsManager.setScoutSettings({ enabled: true, model: modelRef });
+		host.showStatus(`${modelRef} set as the repository scout (context_scout enabled).`);
 		return;
 	}
 	const router = host.settingsManager.getModelRouterSettings();

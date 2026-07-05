@@ -65,6 +65,42 @@ function context(runModelFitness: (args: { model: string }) => Promise<unknown>)
 	return { ctx, statuses, errors, selectorOpened: () => selectorOpened };
 }
 
+function scoutContext(runModelFitness: (args: { model: string }) => Promise<unknown>) {
+	const statuses: string[] = [];
+	let selectorOpened = 0;
+	let scoutSettings = { enabled: false, model: "auto" };
+	const ctx = {
+		session: { runModelFitness },
+		chatContainer: { addChild: vi.fn() },
+		ui: { requestRender: vi.fn() },
+		settingsManager: {
+			getScoutSettings: () => ({ ...scoutSettings }),
+			setScoutSettings: (settings: { enabled: boolean; model: string }) => {
+				scoutSettings = settings;
+			},
+			getModelRouterSettings: () => ({ enabled: true }),
+			setModelRouterSettings: () => {},
+		},
+		showStatus: vi.fn((text: string) => statuses.push(text)),
+		showError: vi.fn((text: string) => statuses.push(text)),
+		showSelector: vi.fn((create) => {
+			selectorOpened += 1;
+			const created = create(() => {});
+			const list = (created.component as { selectList?: { onSelect: (item: { value: string }) => void } })
+				.selectList;
+			list?.onSelect({ value: "scout" });
+		}),
+	} as RunFitnessAndAssignContext & {
+		settingsManager: {
+			getScoutSettings: () => { enabled: boolean; model: string };
+			setScoutSettings: (settings: { enabled: boolean; model: string }) => void;
+			getModelRouterSettings: () => RouterProbeSettings;
+			setModelRouterSettings: (settings: RouterProbeSettings) => void;
+		};
+	};
+	return { ctx, statuses, selectorOpened: () => selectorOpened, getScoutSettings: () => ({ ...scoutSettings }) };
+}
+
 function routerContext(
 	runModelFitness: (args: { model: string }) => Promise<unknown>,
 	startingModelRouter: RouterProbeSettings,
@@ -179,6 +215,38 @@ describe("runFitnessAndAssign gates adoption on the probe verdict", () => {
 
 		expect(selectorOpened()).toBe(false);
 		expect(statuses.some((line) => line.includes("Model fitness skipped"))).toBe(true);
+	});
+
+	it("assigns scout only when the scout_auto gate passes and skips the thinking picker", async () => {
+		const report = await runModelFitnessProbe({ trials: 1, now: () => 0, complete: allPassingComplete });
+		report.research = { ...report.research, succeeded: 1 };
+		report.toolCall = { ...report.toolCall, succeeded: 3 };
+		const { ctx, selectorOpened, getScoutSettings } = scoutContext(async (args) => ({
+			started: true,
+			model: args.model,
+			report,
+		}));
+
+		await runFitnessAndAssign.call(ctx, "ollama/fastcontext");
+
+		expect(selectorOpened()).toBe(1);
+		expect(getScoutSettings()).toEqual({ enabled: true, model: "ollama/fastcontext" });
+	});
+
+	it("refuses scout assignment when scout_auto fails and names the lane", async () => {
+		const report = await runModelFitnessProbe({ trials: 1, now: () => 0, complete: allPassingComplete });
+		report.research = { ...report.research, succeeded: 0 };
+		report.toolCall = { ...report.toolCall, succeeded: 3 };
+		const { ctx, statuses, getScoutSettings } = scoutContext(async (args) => ({
+			started: true,
+			model: args.model,
+			report,
+		}));
+
+		await runFitnessAndAssign.call(ctx, "ollama/fastcontext");
+
+		expect(getScoutSettings()).toEqual({ enabled: false, model: "auto" });
+		expect(statuses.some((line) => line.includes("failed research") && line.includes("docs/scout.md"))).toBe(true);
 	});
 
 	it("persists router-think profile after assigning a router role from fitness", async () => {

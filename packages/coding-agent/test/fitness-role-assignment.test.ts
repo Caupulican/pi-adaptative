@@ -47,6 +47,12 @@ describe("/fitness role assignment", () => {
 		expect(ctx.settingsManager.getModelRouterSettings().executorModel).toBe("ollama/qwen3:1.7b");
 	});
 
+	it("scout role enables scout with the probed model", () => {
+		const ctx = context();
+		assignFitnessRole.call(ctx, "ollama/fastcontext", "scout");
+		expect(ctx.settingsManager.getScoutSettings()).toEqual({ enabled: true, model: "ollama/fastcontext" });
+	});
+
 	it("none records nothing but confirms where the result lives", () => {
 		const ctx = context();
 		assignFitnessRole.call(ctx, "ollama/x", "none");

@@ -11,6 +11,7 @@ const FITNESS_ROLE_SELECT_LIST_LAYOUT: SelectListLayoutOptions = {
 export type FitnessRole =
 	| "curator"
 	| "executor"
+	| "scout"
 	| "router-cheap"
 	| "router-medium"
 	| "router-expensive"
@@ -29,6 +30,12 @@ const FITNESS_ROLE_ITEMS: readonly SelectItem[] = [
 		value: "executor",
 		label: "Toolkit executor",
 		description: "Owns direct toolkit commands end-to-end (Level-0 exact hits route here; needs tool-call fitness)",
+	},
+	{
+		value: "scout",
+		label: "Scout (context_scout)",
+		description:
+			"Repository scout role; writes scout.model and enables the scout tool after scout_auto fitness passes",
 	},
 	{
 		value: "router-cheap",
