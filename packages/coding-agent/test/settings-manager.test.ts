@@ -1520,4 +1520,33 @@ describe("SettingsManager", () => {
 			});
 		});
 	});
+
+	describe("stream-stall settings", () => {
+		it("returns undefined fields when unset (defaults live at the wiring site)", () => {
+			const settings = SettingsManager.inMemory({});
+			expect(settings.getStreamStallSettings()).toEqual({
+				connectMs: undefined,
+				activeIdleMs: undefined,
+				quietIdleMs: undefined,
+			});
+		});
+
+		it("returns validated user-set bounds", () => {
+			const settings = SettingsManager.inMemory({
+				retry: { stall: { connectMs: 60_000, activeIdleMs: 360_000, quietIdleMs: 900_000 } },
+			});
+			expect(settings.getStreamStallSettings()).toEqual({
+				connectMs: 60_000,
+				activeIdleMs: 360_000,
+				quietIdleMs: 900_000,
+			});
+		});
+
+		it("rejects zero/negative/non-numeric bounds loudly (a 0 bound would stall instantly)", () => {
+			const zero = SettingsManager.inMemory({ retry: { stall: { quietIdleMs: 0 } } });
+			expect(() => zero.getStreamStallSettings()).toThrow(/retry.stall.quietIdleMs/);
+			const negative = SettingsManager.inMemory({ retry: { stall: { activeIdleMs: -5 } } });
+			expect(() => negative.getStreamStallSettings()).toThrow(/retry.stall.activeIdleMs/);
+		});
+	});
 });

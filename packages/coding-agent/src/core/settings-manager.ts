@@ -108,11 +108,18 @@ export interface ProviderRetrySettings {
 	maxRetryDelayMs?: number; // default: 60000 (max server-requested delay before failing)
 }
 
+export interface StreamStallSettings {
+	connectMs?: number; // default: 120000 — max wait for the first stream event
+	activeIdleMs?: number; // default: 180000 — max event gap while content is flowing
+	quietIdleMs?: number; // default: 600000 — max event gap during prefill/unstreamed thinking; keep below httpIdleTimeoutMs
+}
+
 export interface RetrySettings {
 	enabled?: boolean; // default: true
 	maxRetries?: number; // default: 3
 	baseDelayMs?: number; // default: 2000 (exponential backoff: 2s, 4s, 8s)
 	provider?: ProviderRetrySettings;
+	stall?: StreamStallSettings; // stream-stall watchdog bounds (pi-agent-core reliability/watchdogs.ts)
 }
 
 export interface TerminalSettings {
@@ -401,7 +408,7 @@ export interface Settings {
 	modelRouter?: ModelRouterSettings; // Opt-in deterministic cheap/expensive model routing foundation
 	autoLearn?: AutoLearnSettings; // Setting-gated autonomous background learning for long sessions
 	sessionDir?: string; // Custom session storage directory (same format as --session-dir CLI flag)
-	httpIdleTimeoutMs?: number; // HTTP header/body idle timeout in milliseconds; 0 disables it
+	httpIdleTimeoutMs?: number; // HTTP header/body idle timeout in ms; 0 disables it. Keep above retry.stall.quietIdleMs or the HTTP layer kills quiet streams before the stall watchdog can
 	websocketConnectTimeoutMs?: number; // WebSocket connect/open handshake timeout in milliseconds; 0 disables it
 }
 
@@ -563,6 +570,15 @@ function parseTimeoutSetting(value: unknown, settingName: string): number | unde
 		throw new Error(`Invalid ${settingName} setting: ${String(value)}`);
 	}
 	return undefined;
+}
+
+/** Stall bounds must be strictly positive — 0 is not "disabled" here (it would stall instantly). */
+function parseStallBoundMs(value: unknown, settingName: string): number | undefined {
+	if (value === undefined) return undefined;
+	if (typeof value !== "number" || !Number.isFinite(value) || value <= 0) {
+		throw new Error(`Invalid ${settingName} setting: ${String(value)}`);
+	}
+	return Math.floor(value);
 }
 
 function sanitizeIntegerSetting(value: unknown, fallback: number, min: number, max: number): number {
@@ -2346,6 +2362,20 @@ export class SettingsManager {
 			enabled: this.getRetryEnabled(),
 			maxRetries: this.settings.retry?.maxRetries ?? 3,
 			baseDelayMs: this.settings.retry?.baseDelayMs ?? 2000,
+		};
+	}
+
+	/**
+	 * Stream-stall watchdog bounds (pi-agent-core reliability/watchdogs.ts). Returns only the
+	 * fields the user set, validated; unset fields fall back to DEFAULT_STREAM_IDLE at the
+	 * wiring site (agent-session constructor). Resolved per request, so edits apply live.
+	 */
+	getStreamStallSettings(): { connectMs?: number; activeIdleMs?: number; quietIdleMs?: number } {
+		const stall = this.settings.retry?.stall;
+		return {
+			connectMs: parseStallBoundMs(stall?.connectMs, "retry.stall.connectMs"),
+			activeIdleMs: parseStallBoundMs(stall?.activeIdleMs, "retry.stall.activeIdleMs"),
+			quietIdleMs: parseStallBoundMs(stall?.quietIdleMs, "retry.stall.quietIdleMs"),
 		};
 	}
 

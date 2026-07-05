@@ -34,9 +34,10 @@ describe("stream-idle watchdog wiring", () => {
 		});
 
 	it("a stalled provider stream aborts into an auto-retry instead of hanging", async () => {
-		// Tight bounds so the wired watchdog fires within the test. Set BEFORE the session is
-		// constructed — the wiring reads the override once, in the constructor.
-		setStreamIdleOptionsForTests({ idleMs: 300, connectMs: 300 });
+		// Tight bounds so the wired watchdog fires within the test. The override is read
+		// per-request by the wiring's options resolver, so it may be set at any point
+		// before the request that should stall.
+		setStreamIdleOptionsForTests({ connectMs: 300, activeIdleMs: 300, quietIdleMs: 300 });
 
 		const harness = await createHarness({
 			settings: { retry: { enabled: true, maxRetries: 3, baseDelayMs: 1 } },

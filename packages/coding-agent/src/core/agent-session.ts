@@ -29,10 +29,12 @@ import {
 	type CustomMessage,
 	classifyFailure,
 	compactToolResultDetailsForRetention,
+	computeRetryDelayMs,
 	createCustomMessage,
 	DEFAULT_RETRY_POLICY,
-	DEFAULT_STREAM_IDLE,
 	RetryController,
+	type RetryPolicy,
+	sleepAbortable,
 	withStreamIdleWatchdog,
 } from "@caupulican/pi-agent-core";
 import {
@@ -187,13 +189,14 @@ import type { BashOperations } from "./tools/bash.ts";
  */
 const RAW_STREAM_MARKER = Symbol.for("pi.rawStreamSimple");
 
-/** Test-only override of the stream-idle bounds. Read once per session, at construction. */
+/** Test-only override of the stream-idle bounds. Read per-request by the wiring's resolver. */
 let streamIdleOptionsOverride: Partial<StreamIdleOptions> | undefined;
 
 /**
  * Test hook: override the stream-idle bounds so a stall can be provoked in-suite without a
- * 30s wait. Pass `undefined` to restore the user-locked default (30s idle / 120s connect).
- * Must be set BEFORE the session is constructed — the wiring reads it in the constructor.
+ * multi-minute wait. Pass `undefined` to restore the user-locked defaults (connect 120s /
+ * active 180s / quiet 600s, or the user's retry.stall settings). Applies per request — it
+ * may be set or changed at any time before the request that should observe it.
  */
 export function setStreamIdleOptionsForTests(opts: Partial<StreamIdleOptions> | undefined): void {
 	streamIdleOptionsOverride = opts;
@@ -672,8 +675,14 @@ export class AgentSession {
 		// Wrapping also breaks the `streamFn === streamSimple` identity the auth-injection checks
 		// use, so the wrapper carries a rawness marker that _isRawStreamSimple reads.
 		const baseStreamFn = this.agent.streamFn;
+		// `this.settingsManager` is assigned below; the resolver closes over the config reference
+		// because the wrapper must be installed before that assignment runs.
+		const stallSettingsSource = config.settingsManager;
 		this.agent.streamFn = tagRawness(
-			withStreamIdleWatchdog(baseStreamFn, streamIdleOptionsOverride ?? DEFAULT_STREAM_IDLE),
+			withStreamIdleWatchdog(baseStreamFn, () => ({
+				...stallSettingsSource.getStreamStallSettings(),
+				...streamIdleOptionsOverride,
+			})),
 			baseStreamFn === streamSimple,
 		);
 		this.sessionManager = config.sessionManager;
@@ -2844,16 +2853,21 @@ export class AgentSession {
 				details = extensionCompaction.details;
 			} else {
 				// Generate compaction result
-				const result = await compact(
-					preparation,
-					compactionModel,
-					apiKey,
-					headers,
-					customInstructions,
-					this._compactionAbortController.signal,
-					this.thinkingLevel,
-					this.agent.streamFn,
-					this._buildCompactionPreDigest(),
+				const compactionSignal = this._compactionAbortController!.signal;
+				const result = await this._compactWithRetry(
+					() =>
+						compact(
+							preparation,
+							compactionModel,
+							apiKey,
+							headers,
+							customInstructions,
+							compactionSignal,
+							this.thinkingLevel,
+							this.agent.streamFn,
+							this._buildCompactionPreDigest(),
+						),
+					compactionSignal,
 				);
 				summary = result.summary;
 				firstKeptEntryId = result.firstKeptEntryId;
@@ -3172,16 +3186,21 @@ export class AgentSession {
 				details = extensionCompaction.details;
 			} else {
 				// Generate compaction result
-				const compactResult = await compact(
-					preparation,
-					compactionModel,
-					apiKey,
-					headers,
-					undefined,
-					this._autoCompactionAbortController.signal,
-					this.thinkingLevel,
-					this.agent.streamFn,
-					this._buildCompactionPreDigest(),
+				const autoCompactionSignal = this._autoCompactionAbortController!.signal;
+				const compactResult = await this._compactWithRetry(
+					() =>
+						compact(
+							preparation,
+							compactionModel,
+							apiKey,
+							headers,
+							undefined,
+							autoCompactionSignal,
+							this.thinkingLevel,
+							this.agent.streamFn,
+							this._buildCompactionPreDigest(),
+						),
+					autoCompactionSignal,
 				);
 				summary = compactResult.summary;
 				firstKeptEntryId = compactResult.firstKeptEntryId;
@@ -3254,6 +3273,42 @@ export class AgentSession {
 			return false;
 		} finally {
 			this._autoCompactionAbortController = undefined;
+		}
+	}
+
+	/**
+	 * Run one compaction attempt, retrying retryable provider failures (stream stalls,
+	 * 429/5xx, network drops) with the session's retry policy. The reliability kernel
+	 * classifies a stall as retryable by design (see withStreamIdleWatchdog); without this
+	 * loop a single transient killed the whole compaction while ordinary turns survived the
+	 * same failure via auto-retry. Caller aborts are never retried; sleepAbortable rejects
+	 * with the abort reason if the signal fires mid-backoff.
+	 */
+	private async _compactWithRetry(
+		run: () => Promise<CompactionResult>,
+		signal: AbortSignal,
+	): Promise<CompactionResult> {
+		const retrySettings = this.settingsManager.getRetrySettings();
+		const maxAttempts = retrySettings.enabled ? Math.max(1, retrySettings.maxRetries + 1) : 1;
+		const policy: RetryPolicy = {
+			maxAttempts,
+			baseDelayMs: retrySettings.baseDelayMs,
+			maxDelayMs: DEFAULT_RETRY_POLICY.maxDelayMs,
+			jitterRatio: 0,
+		};
+		for (let attempt = 1; ; attempt++) {
+			try {
+				return await run();
+			} catch (error) {
+				if (signal.aborted || attempt >= maxAttempts) throw error;
+				const message = error instanceof Error ? error.message : String(error);
+				const classified = classifyFailure({ message });
+				if (!classified.retryable) throw error;
+				await sleepAbortable(
+					computeRetryDelayMs(policy, attempt, { retryAfterMs: classified.retryAfterMs }),
+					signal,
+				);
+			}
 		}
 	}
 

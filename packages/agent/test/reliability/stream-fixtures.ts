@@ -29,6 +29,25 @@ export function makeTextStartEvent(): AssistantMessageEvent {
 	return { type: "text_start", contentIndex: 0, partial: baseAssistantMessage() };
 }
 
+/** A minimal "start" event: connected, but no content blocks yet (prefill/queue phase). */
+export function makeStartEvent(): AssistantMessageEvent {
+	return { type: "start", partial: baseAssistantMessage() };
+}
+
+/** A thinking delta: the latest content block is a thinking block (quiet phase). */
+export function makeThinkingDeltaEvent(): AssistantMessageEvent {
+	const partial = baseAssistantMessage();
+	partial.content = [{ type: "thinking", thinking: "…" }];
+	return { type: "thinking_delta", contentIndex: 0, delta: "…", partial };
+}
+
+/** A text delta: the latest content block is text (active phase — content is flowing). */
+export function makeTextDeltaEvent(): AssistantMessageEvent {
+	const partial = baseAssistantMessage();
+	partial.content = [{ type: "text", text: "…" }];
+	return { type: "text_delta", contentIndex: 0, delta: "…", partial };
+}
+
 /**
  * A minimal final AssistantMessage for a given stop reason, shaped like the message
  * providers construct on completion/abort/error (see anthropic.ts's catch block).

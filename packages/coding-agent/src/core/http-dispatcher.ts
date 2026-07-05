@@ -1,12 +1,17 @@
 import * as undici from "undici";
 
-export const DEFAULT_HTTP_IDLE_TIMEOUT_MS = 300_000;
+// Must stay strictly greater than the stall watchdog's quiet bound (600s — see
+// pi-agent-core DEFAULT_STREAM_IDLE): undici's body/headers timeouts are idle timeouts
+// between chunks, so a lower value here would kill quiet-but-healthy streams before the
+// phase-aware watchdog ever sees the gap. 660s = quiet bound + 60s margin.
+export const DEFAULT_HTTP_IDLE_TIMEOUT_MS = 660_000;
 
 export const HTTP_IDLE_TIMEOUT_CHOICES = [
 	{ label: "30 sec", timeoutMs: 30_000 },
 	{ label: "1 min", timeoutMs: 60_000 },
 	{ label: "2 min", timeoutMs: 120_000 },
 	{ label: "5 min", timeoutMs: 300_000 },
+	{ label: "11 min", timeoutMs: 660_000 },
 	{ label: "disabled", timeoutMs: 0 },
 ] as const;
 
