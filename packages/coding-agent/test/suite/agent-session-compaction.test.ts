@@ -10,6 +10,7 @@ import { createHarness, type Harness } from "./harness.ts";
 type SessionWithCompactionInternals = {
 	_checkCompaction: (assistantMessage: AssistantMessage, skipAbortedCheck?: boolean) => Promise<boolean>;
 	_runAutoCompaction: (reason: "overflow" | "threshold", willRetry: boolean) => Promise<boolean>;
+	_resolveCompactionModel: (sessionModel: Model<string>) => Model<string>;
 };
 
 function createUsage(totalTokens: number) {
@@ -161,6 +162,67 @@ describe("AgentSession compaction characterization", () => {
 		const compactionEntries = harness.sessionManager.getEntries().filter((entry) => entry.type === "compaction");
 		expect(compactionEntries).toHaveLength(1);
 		expect(getStreamCallCount()).toBe(1);
+	});
+
+	it("uses the model-router cheap model for default compaction model selection", async () => {
+		const harness = await createHarness({
+			models: [
+				{ id: "frontier", cost: { input: 5, output: 15, cacheRead: 0, cacheWrite: 0 } },
+				{ id: "router-cheap", cost: { input: 4, output: 12, cacheRead: 0, cacheWrite: 0 } },
+				{ id: "cost-router", cost: { input: -1_000_000, output: -1_000_000, cacheRead: 0, cacheWrite: 0 } },
+			],
+			settings: { modelRouter: { enabled: true, cheapModel: "faux/router-cheap" } },
+		});
+		harnesses.push(harness);
+		const sessionInternals = harness.session as unknown as SessionWithCompactionInternals;
+
+		const compactionModel = sessionInternals._resolveCompactionModel(harness.getModel());
+
+		expect(compactionModel.id).toBe("router-cheap");
+	});
+
+	it("falls back to the session model for default compaction model selection", async () => {
+		const harness = await createHarness({
+			models: [
+				{ id: "frontier", cost: { input: 5, output: 15, cacheRead: 0, cacheWrite: 0 } },
+				{ id: "cost-router", cost: { input: -1_000_000, output: -1_000_000, cacheRead: 0, cacheWrite: 0 } },
+			],
+		});
+		harnesses.push(harness);
+		const sessionInternals = harness.session as unknown as SessionWithCompactionInternals;
+
+		const compactionModel = sessionInternals._resolveCompactionModel(harness.getModel());
+
+		expect(compactionModel.id).toBe("frontier");
+	});
+
+	it("uses low thinking for default compaction on the session model", async () => {
+		const harness = await createHarness({
+			models: [{ id: "frontier", reasoning: true }],
+		});
+		harnesses.push(harness);
+		seedCompactableSession(harness);
+		harness.session.setThinkingLevel("xhigh");
+		let observedReasoning: unknown;
+		harness.session.agent.streamFn = (model, _context, options) => {
+			observedReasoning = options?.reasoning;
+			const stream = createAssistantMessageEventStream();
+			queueMicrotask(() => {
+				const message: AssistantMessage = {
+					...fauxAssistantMessage("summary with low thinking"),
+					api: model.api,
+					provider: model.provider,
+					model: model.id,
+					usage: createUsage(10),
+				};
+				stream.push({ type: "done", reason: "stop", message });
+			});
+			return stream;
+		};
+
+		await harness.session.compact();
+
+		expect(observedReasoning).toBe("low");
 	});
 
 	it("cancels in-progress manual compaction when abortCompaction is called", async () => {

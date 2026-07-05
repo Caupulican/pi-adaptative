@@ -1040,8 +1040,8 @@ export class AgentSession {
 		throw new Error(formatNoApiKeyFoundMessage(model.provider));
 	}
 
-	// Summarizer model selection, request auth (with session-model fallback), and window-adapted
-	// settings live in CompactionSupport (see compaction-support.ts). Same-signature delegations.
+	// Summarizer model/thinking selection, request auth (with session-model fallback), and
+	// window-adapted settings live in CompactionSupport (see compaction-support.ts).
 	private _getCompactionRequestAuth(model: Model<any>): Promise<{
 		apiKey?: string;
 		headers?: Record<string, string>;
@@ -1058,6 +1058,13 @@ export class AgentSession {
 
 	private _resolveCompactionModel(sessionModel: Model<any>): Model<any> {
 		return this._compactionSupport.resolveModel(sessionModel);
+	}
+
+	private _resolveCompactionThinkingLevel(
+		compactionModel: Model<any>,
+		sessionModel: Model<any>,
+	): ThinkingLevel | undefined {
+		return this._compactionSupport.resolveThinkingLevel(this.thinkingLevel, compactionModel, sessionModel);
 	}
 
 	/**
@@ -2803,6 +2810,7 @@ export class AgentSession {
 			}
 
 			const compactionModel = this._resolveCompactionModel(this.model);
+			const compactionThinkingLevel = this._resolveCompactionThinkingLevel(compactionModel, this.model);
 			const { apiKey, headers } = await this._getCompactionRequestAuth(compactionModel);
 
 			const pathEntries = this.sessionManager.getBranch();
@@ -2863,7 +2871,7 @@ export class AgentSession {
 							headers,
 							customInstructions,
 							compactionSignal,
-							this.thinkingLevel,
+							compactionThinkingLevel,
 							this.agent.streamFn,
 							this._buildCompactionPreDigest(),
 						),
@@ -3105,9 +3113,9 @@ export class AgentSession {
 				return false;
 			}
 
-			// Summarize with the cheap auxiliary model when available (cost guard, #30). If its auth
-			// turns out unusable at request time (e.g. expired token), fall back to the session model —
-			// the one manual /compact demonstrably works with — before giving up.
+			// Summarize with the configured/default compaction model. If its auth turns out unusable at
+			// request time (e.g. expired token), fall back to the session model — the one manual /compact
+			// demonstrably works with — before giving up.
 			const resolvedCompaction = await this._resolveCompactionModelAndAuth(
 				this._resolveCompactionModel(this.model),
 				this.model,
@@ -3124,6 +3132,7 @@ export class AgentSession {
 				return false;
 			}
 			const compactionModel = resolvedCompaction.model;
+			const compactionThinkingLevel = this._resolveCompactionThinkingLevel(compactionModel, this.model);
 			const apiKey = resolvedCompaction.apiKey;
 			const headers = resolvedCompaction.headers;
 
@@ -3196,7 +3205,7 @@ export class AgentSession {
 							headers,
 							undefined,
 							autoCompactionSignal,
-							this.thinkingLevel,
+							compactionThinkingLevel,
 							this.agent.streamFn,
 							this._buildCompactionPreDigest(),
 						),
