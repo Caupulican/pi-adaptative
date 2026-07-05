@@ -1,5 +1,6 @@
 import { describe, expect, it } from "vitest";
 import { classifyFailure } from "../../src/reliability/classifier.ts";
+import { PROVIDER_FAILURE_SIGNATURES } from "../../src/reliability/provider-signatures.ts";
 
 describe("classifyFailure", () => {
 	it("classifies rate limits as retryable + rotate + fallback", () => {
@@ -46,7 +47,14 @@ describe("classifyFailure", () => {
 	});
 
 	it("classifies billing/quota as non-retryable but fallback-eligible", () => {
-		for (const msg of ["insufficient_quota", "Monthly usage limit reached", "billing hard limit", "out of budget"]) {
+		for (const msg of [
+			"insufficient_quota",
+			"Monthly usage limit reached",
+			"billing hard limit",
+			"out of budget",
+			"You have hit your ChatGPT usage limit (plus plan). Try again in ~90 min.",
+			"usage_limit_reached",
+		]) {
 			const c = classifyFailure({ message: msg });
 			expect(c.retryable, msg).toBe(false);
 			expect(c.shouldFallback, msg).toBe(true);
@@ -82,6 +90,22 @@ describe("classifyFailure", () => {
 			retryable: false,
 			shouldFallback: false,
 		});
+	});
+
+	it("classifies every provider signature row before the generic ladder", () => {
+		for (const [provider, signatures] of Object.entries(PROVIDER_FAILURE_SIGNATURES)) {
+			for (const signature of signatures) {
+				const message = signature.source.includes("openai-codex")
+					? "You have hit your ChatGPT usage limit (plus plan). Try again in ~90 min."
+					: signature.pattern.source;
+				const c = classifyFailure({ provider, message });
+				expect(c.reason, `${provider} ${signature.source}`).toBe(signature.reason);
+				if (signature.reason === "billing_or_quota") {
+					expect(c.retryable).toBe(false);
+					expect(c.shouldFallback).toBe(true);
+				}
+			}
+		}
 	});
 
 	it("precedence: overflow beats retryable patterns; billing beats rate-limit words", () => {

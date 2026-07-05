@@ -12,6 +12,8 @@
  * `contextOverflow` in.
  */
 
+import { PROVIDER_FAILURE_SIGNATURES } from "./provider-signatures.ts";
+
 export type FailureReason =
 	| "overloaded"
 	| "rate_limit"
@@ -41,10 +43,12 @@ export interface ClassifyFailureInput {
 	contextOverflow?: boolean;
 	/** True when the failure came from an intentional abort (stopReason "aborted"). */
 	aborted?: boolean;
+	/** Provider id; provider-specific signatures are checked before generic patterns. */
+	provider?: string;
 }
 
 const BILLING_OR_QUOTA =
-	/GoUsageLimitError|FreeUsageLimitError|Monthly usage limit reached|available balance|insufficient_quota|out of budget|quota exceeded|billing/i;
+	/GoUsageLimitError|FreeUsageLimitError|Monthly usage limit reached|available balance|insufficient_quota|out of budget|quota exceeded|billing|usage.?limit(?:s)?\s*(?:reached|exceeded|hit)|usage_limit_reached|hit your usage limit|hit your ChatGPT usage limit/i;
 const AUTH = /\b401\b|unauthorized|invalid.?api.?key|authentication.?error|forbidden|permission.?denied/i;
 const RATE_LIMIT = /rate.?limit|too many requests|429/i;
 const OVERLOADED = /overloaded/i;
@@ -82,6 +86,23 @@ export function classifyFailure(input: ClassifyFailureInput): ClassifiedError {
 
 	if (input.aborted) return withRetry({ ...base, reason: "aborted" });
 	if (input.contextOverflow) return withRetry({ ...base, reason: "context_overflow", shouldCompact: true });
+	const providerSignatures = input.provider ? (PROVIDER_FAILURE_SIGNATURES[input.provider] ?? []) : [];
+	for (const signature of providerSignatures) {
+		if (signature.pattern.test(message)) {
+			return withRetry({
+				...base,
+				reason: signature.reason,
+				shouldFallback: signature.reason === "billing_or_quota" || signature.reason === "auth",
+				shouldRotateCredential: signature.reason === "auth",
+				retryable:
+					signature.reason === "rate_limit" ||
+					signature.reason === "overloaded" ||
+					signature.reason === "server_error" ||
+					signature.reason === "network" ||
+					signature.reason === "stream_stall",
+			});
+		}
+	}
 	if (BILLING_OR_QUOTA.test(message)) return withRetry({ ...base, reason: "billing_or_quota", shouldFallback: true });
 	if (AUTH.test(message))
 		return withRetry({ ...base, reason: "auth", shouldRotateCredential: true, shouldFallback: true });
