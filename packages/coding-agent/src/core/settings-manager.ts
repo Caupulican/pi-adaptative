@@ -32,6 +32,11 @@ export interface CompactionSettings {
 	model?: string; // default: "auto" — cheap auxiliary model for the summary; "auto" picks cheapest authed, else the session model
 }
 
+export interface ScoutSettings {
+	enabled?: boolean; // default: false
+	model?: string; // default: "auto" — resolve an installed FastContext model, else return unavailable from the tool
+}
+
 export interface SemanticMemoryGcSettings {
 	enabled?: boolean; // default: true
 	preserveRecentPages?: number; // default: 2
@@ -197,6 +202,7 @@ export interface ModelRouterSettings {
 	expensiveModel?: string; // model pattern for modify/tool-heavy turns
 	learningModel?: string; // model pattern for background reflection/learn/skill-creator work; "active" uses session model
 	judgeEnabled?: boolean; // default: true — the routing judge runs automatically whenever the router is enabled and a judge model resolves
+	fitnessGate?: boolean; // default: false — opt-in; blocks tier models whose probed relevant lane failed (Class B, subtractive)
 	judgeModel?: string; // model pattern for the routing-only judge; unset falls back to mediumModel
 	executorModel?: string; // model pattern for the local executor lane (direct toolkit commands); unset disables it
 	// Per-tier thinking (R1): overrides the inherited-and-clamped session thinking level for a routed
@@ -360,6 +366,7 @@ export interface Settings {
 	/** Resource catalog directory (round resource management): the folder pi installs/updates/backs up from. */
 	catalogDir?: string;
 	compaction?: CompactionSettings;
+	scout?: ScoutSettings;
 	/** Proactive per-turn cost guard (#34). */
 	costGuard?: { maxTurnUsd?: number; action?: "warn" | "downgrade" };
 	/** Skill curator (#32): auto-archive stale reflection-promoted skills at session start. */
@@ -650,12 +657,31 @@ function normalizeModelRouterSettings(value: unknown): ModelRouterSettings | und
 	if (!value || typeof value !== "object" || Array.isArray(value)) return undefined;
 	const input = value as Record<string, unknown>;
 	const settings: ModelRouterSettings = {};
-	if (typeof input.enabled === "boolean") settings.enabled = input.enabled;
-	for (const key of ["cheapModel", "mediumModel", "expensiveModel", "learningModel"] as const) {
+	for (const key of ["enabled", "judgeEnabled", "fitnessGate"] as const) {
+		if (typeof input[key] === "boolean") settings[key] = input[key];
+	}
+	for (const key of [
+		"cheapModel",
+		"mediumModel",
+		"expensiveModel",
+		"learningModel",
+		"judgeModel",
+		"executorModel",
+	] as const) {
 		const candidate = input[key];
 		if (typeof candidate !== "string") continue;
 		const trimmed = candidate.trim();
 		if (trimmed) settings[key] = trimmed;
+	}
+	for (const key of [
+		"cheapThinking",
+		"mediumThinking",
+		"expensiveThinking",
+		"executorThinking",
+		"judgeThinking",
+	] as const) {
+		const candidate = input[key];
+		if (isThinkingLevel(candidate)) settings[key] = candidate;
 	}
 	return Object.keys(settings).length > 0 ? settings : undefined;
 }
@@ -2096,6 +2122,7 @@ export class SettingsManager {
 		judgeEnabled: boolean;
 		judgeModel?: string;
 		executorModel?: string;
+		fitnessGate: boolean;
 		cheapThinking?: ThinkingLevel;
 		mediumThinking?: ThinkingLevel;
 		expensiveThinking?: ThinkingLevel;
@@ -2110,6 +2137,7 @@ export class SettingsManager {
 			expensiveModel: this.settings.modelRouter?.expensiveModel?.trim() || undefined,
 			learningModel: this.settings.modelRouter?.learningModel?.trim() || undefined,
 			judgeEnabled: this.settings.modelRouter?.judgeEnabled ?? true,
+			fitnessGate: this.settings.modelRouter?.fitnessGate ?? false,
 			judgeModel: this.settings.modelRouter?.judgeModel?.trim() || undefined,
 			executorModel: this.settings.modelRouter?.executorModel?.trim() || undefined,
 			// Not yet profile-overridable (same as judgeModel/executorModel above): validated here so a
@@ -2137,6 +2165,7 @@ export class SettingsManager {
 			expensiveModel: profileSettings?.expensiveModel?.trim() || settings.expensiveModel,
 			learningModel: profileSettings?.learningModel?.trim() || settings.learningModel,
 			judgeEnabled: profileSettings?.judgeEnabled ?? settings.judgeEnabled,
+			fitnessGate: profileSettings?.fitnessGate ?? settings.fitnessGate,
 			judgeModel: profileSettings?.judgeModel?.trim() || settings.judgeModel,
 			executorModel: profileSettings?.executorModel?.trim() || settings.executorModel,
 			cheapThinking: settings.cheapThinking,
@@ -2155,6 +2184,7 @@ export class SettingsManager {
 			expensiveModel: settings.expensiveModel?.trim() || undefined,
 			learningModel: settings.learningModel?.trim() || undefined,
 			judgeEnabled: settings.judgeEnabled ?? true,
+			fitnessGate: settings.fitnessGate ?? false,
 			judgeModel: settings.judgeModel?.trim() || undefined,
 			executorModel: settings.executorModel?.trim() || undefined,
 			cheapThinking: isThinkingLevel(settings.cheapThinking) ? settings.cheapThinking : undefined,
@@ -2192,6 +2222,13 @@ export class SettingsManager {
 			reserveTokens: this.getCompactionReserveTokens(),
 			keepRecentTokens: this.getCompactionKeepRecentTokens(),
 			triggerPercent: this.getCompactionTriggerPercent(),
+		};
+	}
+
+	getScoutSettings(): { enabled: boolean; model: string } {
+		return {
+			enabled: this.settings.scout?.enabled ?? false,
+			model: this.settings.scout?.model ?? "auto",
 		};
 	}
 

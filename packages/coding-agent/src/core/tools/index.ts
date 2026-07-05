@@ -27,6 +27,14 @@ export {
 	createLocalBashOperations,
 } from "./bash.ts";
 export {
+	CONTEXT_SCOUT_GUIDANCE,
+	type ContextScoutToolDependencies,
+	type ContextScoutToolDetails,
+	type ContextScoutToolInput,
+	createContextScoutToolDefinition,
+	formatScoutResult,
+} from "./context-scout.ts";
+export {
 	createEditTool,
 	createEditToolDefinition,
 	type EditOperations,

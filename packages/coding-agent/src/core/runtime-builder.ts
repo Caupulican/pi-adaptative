@@ -33,6 +33,8 @@
  * `_refreshToolRegistry` delegation for its internal callers.
  */
 
+import { existsSync, readFileSync } from "node:fs";
+import { isAbsolute, join } from "node:path";
 import type { Agent, AgentContext, AgentMessage, AgentTool } from "@caupulican/pi-agent-core";
 import type { SessionManager } from "@caupulican/pi-agent-core/node";
 import type { Api, Model, Usage } from "@caupulican/pi-ai";
@@ -63,8 +65,12 @@ import { emitSessionShutdownEvent } from "./extensions/runner.ts";
 import type { GoalState } from "./goals/goal-state.ts";
 import type { MemoryManager } from "./memory/memory-manager.ts";
 import type { ModelRegistry } from "./model-registry.ts";
+import { resolveCliModel } from "./model-resolver.ts";
+import { evaluateSurfaceFitness } from "./model-router/fitness-gate.ts";
+import { FitnessStore } from "./models/fitness-store.ts";
 import type { ModelFitnessReport } from "./research/model-fitness.ts";
 import type { ResourceLoader } from "./resource-loader.ts";
+import { ScoutController } from "./scout-controller.ts";
 import {
 	matchesResourceProfilePattern,
 	type ResourceProfileFilterSettings,
@@ -77,10 +83,14 @@ import {
 	REFLEX_INTERPRETER_SYSTEM_PROMPT,
 } from "./toolkit/reflex-interpreter.ts";
 import { executeToolkitScript } from "./toolkit/script-runner.ts";
+import { createContextScoutToolDefinition } from "./tools/context-scout.ts";
 import { createDelegateToolDefinition } from "./tools/delegate.ts";
+import { createFindTool } from "./tools/find.ts";
 import { createGoalToolDefinition } from "./tools/goal.ts";
+import { createGrepTool } from "./tools/grep.ts";
 import { createAllToolDefinitions } from "./tools/index.ts";
 import { createModelFitnessToolDefinition } from "./tools/model-fitness.ts";
+import { createReadTool } from "./tools/read.ts";
 import { createRunToolkitScriptToolDefinition } from "./tools/run-toolkit-script.ts";
 import { createToolDefinitionFromAgentTool } from "./tools/tool-definition-wrapper.ts";
 
@@ -106,6 +116,8 @@ export interface RuntimeBuilderDeps {
 	getAgent(): Agent;
 	/** Workspace root, passed to the tool-definition factory and the extension runner. */
 	getCwd(): string;
+	/** Agent state root, including the host-keyed fitness store. */
+	getAgentDir(): string;
 	/** Session log, passed to the extension runner. */
 	getSessionManager(): SessionManager;
 	/** Tool/shell/toolkit/resource settings + reload target (settingsManager.reload()). */
@@ -232,6 +244,32 @@ export class RuntimeBuilder {
 
 	constructor(deps: RuntimeBuilderDeps) {
 		this.deps = deps;
+	}
+
+	private async _runContextScout(
+		query: string,
+		maxTurns: number | undefined,
+		artifactStore: ArtifactStore | undefined,
+	) {
+		const cwd = this.deps.getCwd();
+		const controller = new ScoutController({
+			resolveScoutModel: async () =>
+				resolveScoutModel(
+					this.deps.getModelRegistry(),
+					this.deps.getSettingsManager().getScoutSettings().model,
+					this.deps.getAgentDir(),
+				),
+			getCwd: () => cwd,
+			buildReadOnlyTools: (toolCwd) => [
+				createReadTool(toolCwd),
+				createGrepTool(toolCwd, { artifactStore }),
+				createFindTool(toolCwd, { artifactStore }),
+			],
+			streamFn: this.deps.getAgent().streamFn,
+			fileExists: (path) => existsSync(resolveCwdPath(cwd, path)),
+			countLines: (path) => countFileLines(resolveCwdPath(cwd, path)),
+		});
+		return controller.run(query, maxTurns);
 	}
 
 	/** Whether a tool name is present in the live wrapped registry. */
@@ -546,6 +584,12 @@ export class RuntimeBuilder {
 				runProbe: (args) => this.deps.runModelFitness(args),
 			});
 			this._baseToolDefinitions.set(modelFitnessToolDefinition.name, modelFitnessToolDefinition);
+			if (settingsManager.getScoutSettings().enabled) {
+				const contextScoutToolDefinition = createContextScoutToolDefinition({
+					runScout: (input) => this._runContextScout(input.query, input.maxTurns, toolArtifactStore),
+				});
+				this._baseToolDefinitions.set(contextScoutToolDefinition.name, contextScoutToolDefinition);
+			}
 			const runToolkitScriptToolDefinition = createRunToolkitScriptToolDefinition({
 				getScripts: () => this.deps.getSettingsManager().getToolkitScripts(),
 				execute: (script, scriptArgs) => executeToolkitScript({ script, scriptArgs, cwd: this.deps.getCwd() }),
@@ -603,7 +647,17 @@ export class RuntimeBuilder {
 
 		const defaultActiveToolNames = baseToolsOverride
 			? Object.keys(baseToolsOverride)
-			: ["read", "bash", "edit", "write", "context_audit", "goal", "delegate", "run_toolkit_script"];
+			: [
+					"read",
+					"bash",
+					"edit",
+					"write",
+					"context_audit",
+					"goal",
+					"delegate",
+					"run_toolkit_script",
+					...(settingsManager.getScoutSettings().enabled ? ["context_scout"] : []),
+				];
 		const baseActiveToolNames = options.activeToolNames ?? defaultActiveToolNames;
 		this.refreshToolRegistry({
 			activeToolNames: baseActiveToolNames,
@@ -876,5 +930,51 @@ export class RuntimeBuilder {
 			}
 			throw error;
 		}
+	}
+}
+
+export async function resolveScoutModel(modelRegistry: ModelRegistry, modelSetting: string, agentDir: string) {
+	const model =
+		modelSetting === "auto"
+			? findFastContextModel(modelRegistry)
+			: resolveCliModel({ cliModel: modelSetting, modelRegistry }).model;
+	if (!model) {
+		return { failure: `no scout model matched ${modelSetting}` };
+	}
+	if (modelSetting === "auto") {
+		const modelRef = `${model.provider}/${model.id}`;
+		const fitness = FitnessStore.forAgentDir(agentDir)
+			.getForHost()
+			.find((entry) => entry.model === modelRef);
+		const verdict = evaluateSurfaceFitness("scout_auto", fitness?.report);
+		if (!verdict.fit) {
+			return verdict.reason === "unprobed"
+				? { failure: `${modelRef} unprobed — run /fitness before auto-selection` }
+				: { failure: `${modelRef} unfit (${verdict.lane} ${verdict.succeeded}/${verdict.total})` };
+		}
+	}
+	const auth = await modelRegistry.getApiKeyAndHeaders(model);
+	if (!auth.ok) {
+		return { failure: auth.error ?? `no usable auth for scout model ${model.provider}/${model.id}` };
+	}
+	return { model, apiKey: auth.apiKey, headers: auth.headers };
+}
+
+function findFastContextModel(modelRegistry: ModelRegistry) {
+	return modelRegistry.getAll().find((model) => {
+		const text = `${model.provider}/${model.id} ${model.name}`.toLowerCase();
+		return text.includes("fastcontext");
+	});
+}
+
+function resolveCwdPath(cwd: string, path: string): string {
+	return isAbsolute(path) ? path : join(cwd, path);
+}
+
+function countFileLines(path: string): number | undefined {
+	try {
+		return readFileSync(path, "utf8").split(/\r?\n/).length;
+	} catch {
+		return undefined;
 	}
 }
