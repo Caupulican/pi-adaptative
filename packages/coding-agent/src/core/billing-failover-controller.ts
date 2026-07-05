@@ -38,9 +38,22 @@ export interface BillingFailoverControllerDeps {
 
 export class BillingFailoverController {
 	private readonly deps: BillingFailoverControllerDeps;
+	private lastNotice: string | undefined;
 
 	constructor(deps: BillingFailoverControllerDeps) {
 		this.deps = deps;
+	}
+
+	isExhausted(ref: string): boolean {
+		return this.deps.exhausted.isExhausted(ref);
+	}
+
+	snapshotExhausted(): string[] {
+		return this.deps.exhausted.snapshot();
+	}
+
+	getLastNotice(): string | undefined {
+		return this.lastNotice;
 	}
 
 	async handleAssistantError(message: AssistantMessage): Promise<boolean> {
@@ -64,6 +77,7 @@ export class BillingFailoverController {
 		if (action.action === "failover") {
 			this.deps.agent.state.model = hop as Model<Api>;
 		}
+		this.lastNotice = action.notice;
 		this.deps.emit({ type: "warning", message: action.notice });
 		return true;
 	}

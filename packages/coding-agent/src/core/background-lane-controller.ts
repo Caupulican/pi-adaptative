@@ -67,6 +67,8 @@ export interface BackgroundLaneControllerDeps {
 	getSettingsManager(): SettingsManager;
 	/** Resolves a configured lane model pattern against configured auth. */
 	getModelRegistry(): ModelRegistry;
+	/** Session-scoped provider/model quota exhaustion guard. */
+	isModelExhausted(model: Model<Api>): boolean;
 	/** The session's current model — lanes inherit it unless a lane model is explicitly configured. */
 	getModel(): Model<Api> | undefined;
 	/** Foreground cost ceiling — a lane budget is clamped to it, never exceeds it. */
@@ -362,6 +364,9 @@ export class BackgroundLaneController {
 		} else {
 			model = this.deps.getModel() ?? undefined;
 			if (!model) return { ok: false, skipReason: missingModelReason };
+		}
+		if (this.deps.isModelExhausted(model)) {
+			return { ok: false, skipReason: `${model.provider}/${model.id} model exhausted: quota` };
 		}
 		return { ok: true, model, laneProfile };
 	}

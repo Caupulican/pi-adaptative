@@ -92,6 +92,8 @@ export interface ModelRouterControllerDeps {
 	getSessionManager(): SessionManager;
 	/** Resolves configured route/judge/executor model patterns against configured auth. */
 	getModelRegistry(): ModelRegistry;
+	/** Session-scoped provider/model quota exhaustion guard. */
+	isModelExhausted(model: Model<Api>): boolean;
 	/** Root dir the host-keyed {@link FitnessStore} lives under (executor tool-call fitness gate). */
 	getAgentDir(): string;
 	/** Aborts the judge's bounded completion when the session is disposed. */
@@ -250,6 +252,10 @@ export class ModelRouterController {
 			modelRegistry: this.deps.getModelRegistry(),
 		});
 		if (!resolvedExpensive.model) return undefined;
+		if (this.deps.isModelExhausted(resolvedExpensive.model)) {
+			this._lastModelRouterSkipReason = "expensive model exhausted: quota";
+			return undefined;
+		}
 		if (settings.fitnessGate) {
 			const verdict = this._evaluateModelFitness("router_expensive", resolvedExpensive.model);
 			if (!verdict.fit) {
@@ -400,6 +406,19 @@ export class ModelRouterController {
 			return undefined;
 		}
 
+		if (this.deps.isModelExhausted(resolved.model)) {
+			if (decision.tier === "medium") {
+				const fallback = this._resolveExpensiveFallbackRoute(
+					decision,
+					"medium_exhausted_fallback_expensive",
+					"Medium model exhausted: quota; falling back to expensive model",
+				);
+				if (fallback) return fallback;
+			}
+			this._lastModelRouterSkipReason = `${decision.tier} model exhausted: quota`;
+			return undefined;
+		}
+
 		if (settings.fitnessGate) {
 			const verdict = this._evaluateModelFitness(this._routerSurfaceForTier(decision.tier), resolved.model);
 			if (!verdict.fit) {
@@ -429,7 +448,7 @@ export class ModelRouterController {
 		const resolved = resolveCliModel({ cliModel: modelPattern, modelRegistry: this.deps.getModelRegistry() });
 		if (!resolved.model) return undefined;
 		if (!this.deps.getModelRegistry().hasConfiguredAuth(resolved.model)) return undefined;
-		return resolved.model;
+		return this.deps.isModelExhausted(resolved.model) ? undefined : resolved.model;
 	}
 
 	resolveConfiguredTierModel(tier: "cheap" | "medium" | "expensive"): Model<Api> | undefined {
@@ -440,7 +459,7 @@ export class ModelRouterController {
 		const resolved = resolveCliModel({ cliModel: pattern, modelRegistry: this.deps.getModelRegistry() });
 		if (!resolved.model) return undefined;
 		if (!this.deps.getModelRegistry().hasConfiguredAuth(resolved.model)) return undefined;
-		return resolved.model;
+		return this.deps.isModelExhausted(resolved.model) ? undefined : resolved.model;
 	}
 
 	/**

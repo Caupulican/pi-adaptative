@@ -572,7 +572,6 @@ export class AgentSession {
 
 	private _extensionRunner!: ExtensionRunner;
 	private _turnIndex = 0;
-	/** G7: per-turn foreground CapabilityEnvelope auto-built for visibility (observe-only; not enforced). */
 	private _currentForegroundEnvelope?: CapabilityEnvelope;
 
 	private _resourceLoader: ResourceLoader;
@@ -610,14 +609,11 @@ export class AgentSession {
 	private readonly _isExplicitModel: boolean;
 	private readonly _isExplicitThinking: boolean;
 	private readonly _gatewayRegistry = new GatewayRegistry();
-	/** Cache for getSpawnedUsage(), keyed by session entry count (Bug #22 — avoid O(N) per render frame). */
 	/** Usage/cost/stats accounting, /context estimate, and session export (see session-analytics.ts);
 	 * owns the spawned-usage and daily-usage memo caches. */
 	private readonly _analytics: SessionAnalytics;
-	/** In-file session-tree branch switching + fork-selector reads (see session-tree-navigator.ts). */
 	private readonly _treeNavigator: SessionTreeNavigator;
 	private _lastCostGuardDecision?: CostGuardDecision;
-	/** One-shot latch so the cost guard downgrades reasoning once per over-threshold episode, not every call. */
 	private _costGuardDowngraded = false;
 	/** Per-turn model-router subsystem (see model-router-controller.ts); owns the transient route/intent,
 	 * the cheap-turn session buffer, the escalation/retry flags, and the sticky last-decision/skip-reason
@@ -750,6 +746,7 @@ export class AgentSession {
 			getSessionManager: () => this.sessionManager,
 			getSettingsManager: () => this.settingsManager,
 			getModelRegistry: () => this._modelRegistry,
+			isModelExhausted: (model) => this._billingFailover.isExhausted(`${model.provider}/${model.id}`),
 			getModel: () => this.model ?? undefined,
 			getCapabilityEnvelope: () => this.capabilityEnvelope,
 			getModelCapabilityProfile: () => this.getModelCapabilityProfile(),
@@ -807,6 +804,7 @@ export class AgentSession {
 			getSettingsManager: () => this.settingsManager,
 			getSessionManager: () => this.sessionManager,
 			getModelRegistry: () => this._modelRegistry,
+			isModelExhausted: (model) => this._billingFailover.isExhausted(`${model.provider}/${model.id}`),
 			getAgentDir: () => this._agentDir,
 			getReflectionSignal: () => this._reflectionAbort.signal,
 			getBaseSystemPrompt: () => this._baseSystemPrompt,
@@ -860,6 +858,7 @@ export class AgentSession {
 			getSessionManager: () => this.sessionManager,
 			getSettingsManager: () => this.settingsManager,
 			getModelRegistry: () => this._modelRegistry,
+			isModelExhausted: (model) => this._billingFailover.isExhausted(`${model.provider}/${model.id}`),
 			getResourceLoader: () => this._resourceLoader,
 			getExtensionRunner: () => this._extensionRunner,
 			setExtensionRunner: (runner) => {

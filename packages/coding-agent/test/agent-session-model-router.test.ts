@@ -1,6 +1,6 @@
 import type { AgentMessage, AgentTool, ThinkingLevel } from "@caupulican/pi-agent-core";
 import type { Api, AssistantMessage, Message, Model, Usage } from "@caupulican/pi-ai";
-import { clampThinkingLevel, fauxAssistantMessage, fauxToolCall, getModel } from "@caupulican/pi-ai";
+import { clampThinkingLevel, fauxAssistantMessage, fauxToolCall } from "@caupulican/pi-ai";
 import { Type } from "typebox";
 import { describe, expect, it } from "vitest";
 import type { RouteDecision } from "../src/core/autonomy/contracts.ts";
@@ -21,6 +21,7 @@ type RouterSettings = {
 };
 
 type RouterContext = {
+	_lastModelRouterSkipReason?: string;
 	deps: {
 		getSettingsManager: () => { getModelRouterSettings: () => RouterSettings };
 		getSessionManager: () => { getEntries: () => [] };
@@ -29,6 +30,7 @@ type RouterContext = {
 			getAll: () => TestModel[];
 			hasConfiguredAuth: (model: TestModel) => boolean;
 		};
+		isModelExhausted: (model: TestModel) => boolean;
 	};
 };
 
@@ -94,9 +96,22 @@ type RuntimeRouterResolver = {
 };
 
 const routerPrototype = ModelRouterController.prototype as unknown as ModelRouterControllerPrototype;
-const cheapModel = getModel("anthropic", "claude-haiku-4-5")! as TestModel;
-const mediumModel = getModel("anthropic", "claude-3-5-sonnet-20241022")! as TestModel;
-const expensiveModel = getModel("anthropic", "claude-sonnet-4-5")! as TestModel;
+function testModel(id: string): TestModel {
+	return {
+		id,
+		name: id,
+		provider: "anthropic",
+		api: "messages",
+		input: ["text"],
+		cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 },
+		contextWindow: 200000,
+		maxTokens: 8192,
+	} as TestModel;
+}
+
+const cheapModel = testModel("claude-haiku-4-5");
+const mediumModel = testModel("claude-3-5-sonnet-20241022");
+const expensiveModel = testModel("claude-sonnet-4-5");
 
 function fitnessReport(overrides: Partial<ModelFitnessReport> = {}): ModelFitnessReport {
 	const lane = { succeeded: 3, total: 3, outcomes: [], meanMs: 10 };
@@ -145,6 +160,7 @@ function createUsage(): Usage {
 function createContext(
 	settings: RouterSettings,
 	authenticatedModels: TestModel[] = [cheapModel, mediumModel, expensiveModel],
+	exhaustedModels: TestModel[] = [],
 ): RouterContext {
 	return Object.assign(Object.create(ModelRouterController.prototype), {
 		deps: {
@@ -152,12 +168,14 @@ function createContext(
 			getSessionManager: () => ({ getEntries: () => [] }),
 			getAgentDir: () => "/tmp/pi-router-test-agent-dir",
 			getModelRegistry: () => ({
-				getAll: () => [cheapModel, mediumModel, expensiveModel],
+				getAll: () => [cheapModel, mediumModel, expensiveModel].filter((model) => model !== undefined),
 				hasConfiguredAuth: (model: TestModel) =>
 					authenticatedModels.some(
 						(candidate) => candidate.provider === model.provider && candidate.id === model.id,
 					),
 			}),
+			isModelExhausted: (model: TestModel) =>
+				exhaustedModels.some((candidate) => candidate.provider === model.provider && candidate.id === model.id),
 		},
 	});
 }
@@ -264,6 +282,41 @@ describe("AgentSession model router turn selection", () => {
 		expect(resolved?.decision.tier).toBe("expensive");
 		expect(resolved?.decision.fallbackFrom).toBe("medium");
 		expect(resolved?.decision.reasonCode).toBe("medium_unavailable_fallback_expensive");
+	});
+
+	it("skips exhausted cheap models with a visible quota reason", () => {
+		const context = createContext(
+			{
+				enabled: true,
+				cheapModel: "anthropic/claude-haiku-4-5",
+				expensiveModel: "anthropic/claude-sonnet-4-5",
+			},
+			undefined,
+			[cheapModel],
+		);
+
+		expect(routerPrototype._resolveModelRouterTurnRoute.call(context, "Explain this code block")).toBeUndefined();
+		expect(context._lastModelRouterSkipReason).toBe("cheap model exhausted: quota");
+	});
+
+	it("falls back from exhausted medium to expensive", () => {
+		const context = createContext(
+			{
+				enabled: true,
+				cheapModel: "anthropic/claude-haiku-4-5",
+				mediumModel: "anthropic/claude-3-5-sonnet-20241022",
+				expensiveModel: "anthropic/claude-sonnet-4-5",
+			},
+			undefined,
+			[mediumModel],
+		);
+
+		const route = routerPrototype._resolveModelRouterTurnRoute.call(
+			context,
+			"Implement a small fix and update the relevant unit test.",
+		);
+		expect(route?.model.id).toBe("claude-sonnet-4-5");
+		expect(route?.decision.reasonCode).toBe("medium_exhausted_fallback_expensive");
 	});
 
 	it("keeps gate-off router behavior when a configured model has a failed fitness report", async () => {

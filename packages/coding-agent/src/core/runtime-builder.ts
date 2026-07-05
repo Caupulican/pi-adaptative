@@ -124,6 +124,8 @@ export interface RuntimeBuilderDeps {
 	getSettingsManager(): SettingsManager;
 	/** Model registry, passed to the extension runner and profile model re-resolution. */
 	getModelRegistry(): ModelRegistry;
+	/** Session-scoped provider/model quota exhaustion guard. */
+	isModelExhausted(model: Model<Api>): boolean;
 	/** Extension/skill/prompt/theme discovery + the reload/commit/rollback generation swap. */
 	getResourceLoader(): ResourceLoader;
 
@@ -258,6 +260,7 @@ export class RuntimeBuilder {
 					this.deps.getModelRegistry(),
 					this.deps.getSettingsManager().getScoutSettings().model,
 					this.deps.getAgentDir(),
+					(model) => this.deps.isModelExhausted(model),
 				),
 			getCwd: () => cwd,
 			buildReadOnlyTools: (toolCwd) => [
@@ -933,13 +936,21 @@ export class RuntimeBuilder {
 	}
 }
 
-export async function resolveScoutModel(modelRegistry: ModelRegistry, modelSetting: string, agentDir: string) {
+export async function resolveScoutModel(
+	modelRegistry: ModelRegistry,
+	modelSetting: string,
+	agentDir: string,
+	isModelExhausted: (model: Model<Api>) => boolean = () => false,
+) {
 	const model =
 		modelSetting === "auto"
 			? findFastContextModel(modelRegistry)
 			: resolveCliModel({ cliModel: modelSetting, modelRegistry }).model;
 	if (!model) {
 		return { failure: `no scout model matched ${modelSetting}` };
+	}
+	if (isModelExhausted(model)) {
+		return { failure: `${model.provider}/${model.id} exhausted: quota` };
 	}
 	if (modelSetting === "auto") {
 		const modelRef = `${model.provider}/${model.id}`;

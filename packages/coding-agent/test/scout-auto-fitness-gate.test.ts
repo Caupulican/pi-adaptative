@@ -67,6 +67,21 @@ describe("scout auto fitness gate", () => {
 		}
 	});
 
+	it("rejects exhausted scout models with an S5 unavailable failure", async () => {
+		const harness = await createHarness({ models: [{ id: "fastcontext-local" }] });
+		try {
+			const resolved = await resolveScoutModel(
+				harness.session.modelRegistry,
+				"faux/fastcontext-local",
+				harness.tempDir,
+				(model) => model.id === "fastcontext-local",
+			);
+			expect(resolved).toEqual({ failure: "faux/fastcontext-local exhausted: quota" });
+		} finally {
+			harness.cleanup();
+		}
+	});
+
 	it("leaves an explicit scout model pattern ungated", async () => {
 		const harness = await createHarness({ models: [{ id: "fastcontext-local" }] });
 		try {
