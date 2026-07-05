@@ -10,6 +10,8 @@ import type { CompactionSettings } from "@caupulican/pi-agent-core/node";
 import type { Model } from "@caupulican/pi-ai";
 import type { ModelRegistry } from "./model-registry.ts";
 import { resolveCliModel } from "./model-resolver.ts";
+import { evaluateSurfaceFitness } from "./model-router/fitness-gate.ts";
+import type { ModelFitnessReport } from "./research/model-fitness.ts";
 import type { SettingsManager } from "./settings-manager.ts";
 
 export interface CompactionSupportDeps {
@@ -20,10 +22,14 @@ export interface CompactionSupportDeps {
 	isRawStream(): boolean;
 	/** Host auth resolution that THROWS with a user-actionable message when no key exists. */
 	getRequiredRequestAuth(model: Model<any>): Promise<{ apiKey?: string; headers?: Record<string, string> }>;
+	isModelExhausted(ref: string): boolean;
+	getStoredFitnessReport(ref: string): ModelFitnessReport | undefined;
+	emitWarning(message: string): void;
 }
 
 export class CompactionSupport {
 	private readonly deps: CompactionSupportDeps;
+	private lastSelectionReason: string | undefined;
 
 	constructor(deps: CompactionSupportDeps) {
 		this.deps = deps;
@@ -104,17 +110,47 @@ export class CompactionSupport {
 		return setting && setting !== "auto" ? setting : undefined;
 	}
 
-	private resolveConfiguredModel(pattern: string): Model<any> | undefined {
+	private modelRef(model: Model<any>): string {
+		return `${model.provider}/${model.id}`;
+	}
+
+	private resolveConfiguredModel(pattern: string): { model?: Model<any>; cause?: "unresolved" | "unauthed" } {
 		const registry = this.deps.getModelRegistry();
 		const resolved = resolveCliModel({ cliModel: pattern, modelRegistry: registry });
-		if (!resolved.model || !registry.hasConfiguredAuth(resolved.model)) return undefined;
-		return resolved.model;
+		if (!resolved.model) return { cause: "unresolved" };
+		if (!registry.hasConfiguredAuth(resolved.model)) return { cause: "unauthed" };
+		return { model: resolved.model };
+	}
+
+	private selectConfiguredModel(pattern: string): { model?: Model<any>; cause?: string } {
+		const resolved = this.resolveConfiguredModel(pattern);
+		if (!resolved.model) return { cause: resolved.cause };
+		if (this.deps.isModelExhausted(this.modelRef(resolved.model))) return { cause: "exhausted" };
+		return { model: resolved.model };
 	}
 
 	private resolveDefaultModel(sessionModel: Model<any>): Model<any> {
 		const router = this.deps.getSettingsManager().getModelRouterSettings();
-		if (!router.enabled || !router.cheapModel) return sessionModel;
-		return this.resolveConfiguredModel(router.cheapModel) ?? sessionModel;
+		if (!router.enabled || !router.cheapModel) {
+			this.lastSelectionReason = "session_default";
+			return sessionModel;
+		}
+		const selected = this.selectConfiguredModel(router.cheapModel);
+		if (!selected.model) {
+			this.lastSelectionReason = `fallback:${selected.cause}`;
+			return sessionModel;
+		}
+		const fitness = this.deps.getStoredFitnessReport(this.modelRef(selected.model));
+		const verdict = evaluateSurfaceFitness("compaction", fitness);
+		if (!verdict.fit) {
+			this.lastSelectionReason =
+				verdict.reason === "lane_failed"
+					? `fallback:digest_unfit(${verdict.succeeded}/${verdict.total})`
+					: "fallback:unprobed";
+			return sessionModel;
+		}
+		this.lastSelectionReason = "router_cheap";
+		return selected.model;
 	}
 
 	private modelsAreEqual(left: Model<any>, right: Model<any>): boolean {
@@ -129,8 +165,17 @@ export class CompactionSupport {
 	 */
 	resolveModel(sessionModel: Model<any>): Model<any> {
 		const explicitSetting = this.getExplicitCompactionModelSetting();
-		if (explicitSetting) return this.resolveConfiguredModel(explicitSetting) ?? sessionModel;
-		return this.resolveDefaultModel(sessionModel);
+		if (explicitSetting) {
+			const selected = this.selectConfiguredModel(explicitSetting);
+			this.lastSelectionReason = selected.model ? "explicit" : `fallback:${selected.cause}`;
+			if (!selected.model) this.deps.emitWarning(`Compaction summarizer ${this.lastSelectionReason}`);
+			return selected.model ?? sessionModel;
+		}
+		const model = this.resolveDefaultModel(sessionModel);
+		if (this.lastSelectionReason?.startsWith("fallback:")) {
+			this.deps.emitWarning(`Compaction summarizer ${this.lastSelectionReason}`);
+		}
+		return model;
 	}
 
 	/** Default compaction should never inherit expensive session thinking. */
@@ -143,7 +188,7 @@ export class CompactionSupport {
 
 		const router = this.deps.getSettingsManager().getModelRouterSettings();
 		if (router.enabled && router.cheapModel) {
-			const routerModel = this.resolveConfiguredModel(router.cheapModel);
+			const routerModel = this.resolveConfiguredModel(router.cheapModel).model;
 			if (routerModel && this.modelsAreEqual(routerModel, compactionModel)) {
 				return router.cheapThinking ?? "low";
 			}

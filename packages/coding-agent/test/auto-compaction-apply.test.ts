@@ -8,16 +8,114 @@
 import { existsSync, mkdirSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { Agent } from "@caupulican/pi-agent-core";
+import { Agent, type ThinkingLevel } from "@caupulican/pi-agent-core";
 import { SessionManager } from "@caupulican/pi-agent-core/node";
-import { type AssistantMessage, type AssistantMessageEvent, EventStream, getModel } from "@caupulican/pi-ai";
+import {
+	type AssistantMessage,
+	type AssistantMessageEvent,
+	EventStream,
+	getModel,
+	type Model,
+} from "@caupulican/pi-ai";
 import { afterEach, beforeEach, describe, expect, it } from "vitest";
 import { AgentSession, type AgentSessionEvent } from "../src/core/agent-session.ts";
 import { AuthStorage } from "../src/core/auth-storage.ts";
 import { CompactionSupport, type CompactionSupportDeps } from "../src/core/compaction-support.ts";
 import { ModelRegistry } from "../src/core/model-registry.ts";
+import type { LaneFitnessScore, ModelFitnessReport } from "../src/core/research/model-fitness.ts";
 import { SettingsManager } from "../src/core/settings-manager.ts";
 import { createTestResourceLoader } from "./utilities.ts";
+
+function lane(succeeded = 3, total = 3): LaneFitnessScore {
+	return { succeeded, total, outcomes: [], meanMs: 1 };
+}
+
+function report(overrides: Partial<ModelFitnessReport> = {}): ModelFitnessReport {
+	return {
+		trials: 3,
+		research: lane(),
+		worker: lane(),
+		judge: {
+			parsed: 3,
+			planningElevated: 3,
+			planningTotal: 3,
+			trivialCheap: 3,
+			trivialTotal: 3,
+			total: 3,
+			outcomes: [],
+			meanMs: 1,
+		},
+		search: lane(),
+		toolCall: lane(),
+		digest: lane(),
+		totalCostUsd: 0,
+		...overrides,
+	};
+}
+
+function model(id: string): Model<"openai-completions"> {
+	return {
+		id,
+		name: id,
+		api: "openai-completions",
+		provider: "test",
+		baseUrl: "https://example.test",
+		reasoning: false,
+		input: ["text"],
+		cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 },
+		contextWindow: 128000,
+		maxTokens: 16000,
+	};
+}
+
+function compactionSupportFixture(options: {
+	compactionModel?: string;
+	routerEnabled?: boolean;
+	cheapModel?: string;
+	cheapThinking?: ThinkingLevel;
+	exhausted?: readonly string[];
+	fitness?: Record<string, ModelFitnessReport>;
+	authed?: readonly string[];
+}): {
+	support: CompactionSupport;
+	sessionModel: Model<"openai-completions">;
+	cheapModel: Model<"openai-completions">;
+	warnings: string[];
+} {
+	const sessionModel = model("session");
+	const cheapModel = model("cheap");
+	const settings = {
+		getCompactionModel: () => options.compactionModel ?? "auto",
+		getModelRouterSettings: () => ({
+			enabled: options.routerEnabled ?? false,
+			cheapModel: options.cheapModel,
+			cheapThinking: options.cheapThinking,
+		}),
+	};
+	const models = [sessionModel, cheapModel];
+	const authed = new Set(options.authed ?? models.map((entry) => `${entry.provider}/${entry.id}`));
+	const registry = {
+		getAll: () => models,
+		hasConfiguredAuth: (entry: Model<"openai-completions">) => authed.has(`${entry.provider}/${entry.id}`),
+	} as unknown as ModelRegistry;
+	const exhausted = new Set(options.exhausted ?? []);
+	const warnings: string[] = [];
+	return {
+		support: new CompactionSupport({
+			getModel: () => sessionModel,
+			getSettingsManager: () => settings as ReturnType<CompactionSupportDeps["getSettingsManager"]>,
+			getModelRegistry: () => registry,
+			isRawStream: () => false,
+			getRequiredRequestAuth: async () => ({}),
+			isModelExhausted: (ref) => exhausted.has(ref),
+			getStoredFitnessReport: (ref) => options.fitness?.[ref],
+			emitWarning: (message) => warnings.push(message),
+		}),
+		sessionModel,
+		cheapModel,
+		warnings,
+	};
+}
 
 class MockAssistantStream extends EventStream<AssistantMessageEvent, AssistantMessage> {
 	constructor() {
@@ -245,6 +343,54 @@ describe("auto-compaction never fails silently", () => {
 		expect(reason, "no-op compaction_end must carry skipReason or errorMessage — silent bail").toBeTruthy();
 	}, 15_000);
 
+	it("compaction selection falls back from exhausted explicit and cheap models with visible reasons", () => {
+		const explicit = compactionSupportFixture({ compactionModel: "test/cheap", exhausted: ["test/cheap"] });
+		expect(explicit.support.resolveModel(explicit.sessionModel)).toBe(explicit.sessionModel);
+		expect(explicit.warnings).toContain("Compaction summarizer fallback:exhausted");
+
+		const cheap = compactionSupportFixture({
+			routerEnabled: true,
+			cheapModel: "test/cheap",
+			exhausted: ["test/cheap"],
+		});
+		expect(cheap.support.resolveModel(cheap.sessionModel)).toBe(cheap.sessionModel);
+		expect(cheap.warnings).toContain("Compaction summarizer fallback:exhausted");
+	});
+
+	it("compaction selection applies the digest gate subtractively to router cheap", () => {
+		const failed = compactionSupportFixture({
+			routerEnabled: true,
+			cheapModel: "test/cheap",
+			fitness: { "test/cheap": report({ digest: lane(1, 3), research: lane(3, 3), toolCall: lane(3, 3) }) },
+		});
+		expect(failed.support.resolveModel(failed.sessionModel)).toBe(failed.sessionModel);
+		expect(failed.warnings).toContain("Compaction summarizer fallback:digest_unfit(1/3)");
+
+		const unprobed = compactionSupportFixture({ routerEnabled: true, cheapModel: "test/cheap" });
+		expect(unprobed.support.resolveModel(unprobed.sessionModel)).toBe(unprobed.cheapModel);
+		expect(unprobed.warnings).toEqual([]);
+
+		const passed = compactionSupportFixture({
+			routerEnabled: true,
+			cheapModel: "test/cheap",
+			fitness: { "test/cheap": report({ digest: lane(3, 3) }) },
+		});
+		expect(passed.support.resolveModel(passed.sessionModel)).toBe(passed.cheapModel);
+		expect(passed.warnings).toEqual([]);
+	});
+
+	it("gate-redirected compaction selection uses session thinking, not router cheap thinking", () => {
+		const fixture = compactionSupportFixture({
+			routerEnabled: true,
+			cheapModel: "test/cheap",
+			cheapThinking: "minimal",
+			fitness: { "test/cheap": report({ digest: lane(1, 3) }) },
+		});
+		const selected = fixture.support.resolveModel(fixture.sessionModel);
+		expect(selected).toBe(fixture.sessionModel);
+		expect(fixture.support.resolveThinkingLevel("high", selected, fixture.sessionModel)).toBe("low");
+	});
+
 	it("raw-stream auth resolution falls back to the session model before failing", async () => {
 		const tried: string[] = [];
 		const fakeRegistry = {
@@ -262,6 +408,9 @@ describe("auto-compaction never fails silently", () => {
 			getModelRegistry: () => fakeRegistry as unknown as ReturnType<CompactionSupportDeps["getModelRegistry"]>,
 			isRawStream: () => true,
 			getRequiredRequestAuth: async () => ({}),
+			isModelExhausted: () => false,
+			getStoredFitnessReport: () => undefined,
+			emitWarning: () => {},
 		});
 
 		type ModelArg = Parameters<CompactionSupport["resolveModelAndAuth"]>[0];

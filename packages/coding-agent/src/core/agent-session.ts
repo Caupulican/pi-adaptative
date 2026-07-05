@@ -765,6 +765,9 @@ export class AgentSession {
 			getModelRegistry: () => this._modelRegistry,
 			isRawStream: () => this._isRawStreamSimple(this.agent.streamFn),
 			getRequiredRequestAuth: (model) => this._getRequiredRequestAuth(model),
+			isModelExhausted: (ref) => this._billingFailover.isExhausted(ref),
+			getStoredFitnessReport: (ref) => this.getStoredFitnessReports().find((entry) => entry.model === ref)?.report,
+			emitWarning: (message) => this._emit({ type: "warning", message }),
 		});
 		this._pipeline = new ContextPipeline({
 			getTurnIndex: () => this._turnIndex,
