@@ -43,7 +43,13 @@ describe("model router fitness gate doctrine", () => {
 	});
 
 	it("splits unprobed models by Class A proof-required vs Class B subtractive surfaces", () => {
-		const classB: FitnessGatedSurface[] = ["router_cheap", "router_medium", "router_expensive", "router_judge"];
+		const classB: FitnessGatedSurface[] = [
+			"compaction",
+			"router_cheap",
+			"router_medium",
+			"router_expensive",
+			"router_judge",
+		];
 		for (const surface of classB) {
 			expect(evaluateSurfaceFitness(surface, undefined)).toEqual({ fit: true, probed: false });
 		}
@@ -53,6 +59,17 @@ describe("model router fitness gate doctrine", () => {
 	});
 
 	it("maps each surface to its doctrine lane set", () => {
+		expect(evaluateSurfaceFitness("compaction", report({ digest: lane(1, 3) }))).toEqual({
+			fit: false,
+			reason: "lane_failed",
+			lane: "digest",
+			succeeded: 1,
+			total: 3,
+		});
+		expect(evaluateSurfaceFitness("compaction", report({ digest: lane(3, 3), worker: lane(0, 3) }))).toEqual({
+			fit: true,
+			probed: true,
+		});
 		expect(evaluateSurfaceFitness("router_cheap", report({ worker: lane(0, 3) }))).toEqual({
 			fit: true,
 			probed: true,

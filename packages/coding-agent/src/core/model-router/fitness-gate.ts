@@ -2,10 +2,13 @@ import type { ModelFitnessReport } from "../research/model-fitness.ts";
 
 /**
  * Fitness applicability doctrine: Class A autonomous adoption requires proof; Class B routed turns
- * are subtractive-only and pass unprobed models. Class C explicit user choices are deliberately not
- * selection-gated here. The `search` lane is probed and reported but has no selection-time consumer yet.
+ * are subtractive-only and pass unprobed models. Compaction is always-on subtractive composition:
+ * digest-failed probed cheap summarizers fall back, while unprobed models pass. Class C explicit
+ * user choices are deliberately not selection-gated here. The `search` lane is probed and reported
+ * but has no selection-time consumer yet.
  */
 export type FitnessGatedSurface =
+	| "compaction"
 	| "router_cheap"
 	| "router_medium"
 	| "router_expensive"
@@ -24,6 +27,7 @@ type FitnessLane = "research" | "worker" | "judge" | "toolCall" | "digest";
 const CLASS_A_SURFACES = new Set<FitnessGatedSurface>(["executor", "curation", "scout_auto"]);
 
 const SURFACE_LANES: Record<FitnessGatedSurface, readonly FitnessLane[]> = {
+	compaction: ["digest"],
 	router_cheap: ["research", "toolCall"],
 	router_medium: ["worker", "toolCall"],
 	router_expensive: ["worker", "toolCall"],
