@@ -110,7 +110,7 @@ interface RequestBody {
 // ============================================================================
 
 function isTerminalRateLimitError(errorText: string): boolean {
-	return /GoUsageLimitError|FreeUsageLimitError|Monthly usage limit reached|available balance|insufficient_quota|out of budget|quota exceeded|billing/i.test(
+	return /GoUsageLimitError|FreeUsageLimitError|Monthly usage limit reached|available balance|insufficient_quota|out of budget|quota exceeded|billing|usage.?limit(?:s)?\s*(?:reached|exceeded|hit)|hit your usage limit/i.test(
 		errorText,
 	);
 }
@@ -354,8 +354,8 @@ export const streamOpenAICodexResponses: StreamFunction<"openai-codex-responses"
 						}
 					}
 					lastError = error instanceof Error ? error : new Error(String(error));
-					// Network errors are retryable
-					if (attempt < maxRetries && !lastError.message.includes("usage limit")) {
+					// Network errors are retryable unless the thrown message is a terminal quota/usage limit.
+					if (attempt < maxRetries && !isTerminalRateLimitError(lastError.message)) {
 						const delayMs = BASE_DELAY_MS * 2 ** attempt;
 						await abortableSleep(delayMs, options?.signal);
 						continue;
