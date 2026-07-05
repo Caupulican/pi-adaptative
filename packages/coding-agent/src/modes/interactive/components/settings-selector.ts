@@ -118,6 +118,14 @@ function optionalStringValue(value: string | undefined, fallback = "(not set)"):
 	return trimmed && trimmed.length > 0 ? trimmed : fallback;
 }
 
+function routerTierValue(
+	model: string | undefined,
+	thinking: ThinkingLevel | undefined,
+	fallback = "(not set)",
+): string {
+	return `${optionalStringValue(model, fallback)} · thinking ${thinking ?? MODEL_ROUTER_INHERIT_THINKING_LABEL}`;
+}
+
 function normalizeOptionalString(value: string): string | undefined {
 	const trimmed = value.trim();
 	return trimmed.length > 0 ? trimmed : undefined;
@@ -220,7 +228,8 @@ function contextMemoryRetrievalSummary(settings: MemoryRetrievalSettings): strin
 
 function modelRouterSummary(settings: ModelRouterSettings): string {
 	const state = settings.enabled ? "enabled" : "disabled";
-	return `${state} · cheap: ${optionalStringValue(settings.cheapModel)} · medium: ${optionalStringValue(settings.mediumModel)} · expensive: ${optionalStringValue(settings.expensiveModel)} · learn: ${optionalStringValue(settings.learningModel, "active")}`;
+	const gate = settings.fitnessGate ? "gate on" : "gate off";
+	return `${state} · ${gate} · cheap: ${optionalStringValue(settings.cheapModel)} · medium: ${optionalStringValue(settings.mediumModel)} · expensive: ${optionalStringValue(settings.expensiveModel)} · learn: ${optionalStringValue(settings.learningModel, "active")}`;
 }
 
 function buildAutoLearnModelOptions(
@@ -1635,6 +1644,20 @@ class ModelRouterSettingsSubmenu extends Container {
 			includeActive: false,
 			unsetDescription: "Clear expensive routing model; modify turns fall back to the active session model",
 		});
+		const judgeModelOptions = buildModelRouterRoleModelOptions({
+			currentValue: this.state.judgeModel,
+			configuredModelOptions: modelOptions,
+			currentModelPattern,
+			includeActive: false,
+			unsetDescription: "Clear judge model; routing judge falls back to the medium model",
+		});
+		const executorModelOptions = buildModelRouterRoleModelOptions({
+			currentValue: this.state.executorModel,
+			configuredModelOptions: modelOptions,
+			currentModelPattern,
+			includeActive: false,
+			unsetDescription: "Clear executor lane model; direct toolkit execution stays disabled",
+		});
 		const learningModelOptions = buildModelRouterRoleModelOptions({
 			currentValue: this.state.learningModel,
 			configuredModelOptions: modelOptions,
@@ -1669,7 +1692,7 @@ class ModelRouterSettingsSubmenu extends Container {
 				id: "model-router-cheap",
 				label: "Cheap model",
 				description: "Pick the model for read-only, research, explanation, and question turns",
-				currentValue: optionalStringValue(this.state.cheapModel),
+				currentValue: routerTierValue(this.state.cheapModel, this.state.cheapThinking),
 				submenu: (_currentValue, done) =>
 					new ModelSelectionSubmenu(
 						cheapModelOptions,
@@ -1680,7 +1703,7 @@ class ModelRouterSettingsSubmenu extends Container {
 								cheapModel: value === MODEL_ROUTER_UNSET_MODEL_VALUE ? undefined : value,
 							};
 							onChange({ ...this.state }, this.scope);
-							done(optionalStringValue(this.state.cheapModel));
+							done(routerTierValue(this.state.cheapModel, this.state.cheapThinking));
 						},
 						() => done(),
 						{
@@ -1698,7 +1721,7 @@ class ModelRouterSettingsSubmenu extends Container {
 				id: "model-router-medium",
 				label: "Medium model",
 				description: "Pick the model for normal scoped implementation, edits, tests, and mechanical refactors",
-				currentValue: optionalStringValue(this.state.mediumModel),
+				currentValue: routerTierValue(this.state.mediumModel, this.state.mediumThinking),
 				submenu: (_currentValue, done) =>
 					new ModelSelectionSubmenu(
 						mediumModelOptions,
@@ -1709,7 +1732,7 @@ class ModelRouterSettingsSubmenu extends Container {
 								mediumModel: value === MODEL_ROUTER_UNSET_MODEL_VALUE ? undefined : value,
 							};
 							onChange({ ...this.state }, this.scope);
-							done(optionalStringValue(this.state.mediumModel));
+							done(routerTierValue(this.state.mediumModel, this.state.mediumThinking));
 						},
 						() => done(),
 						{
@@ -1727,7 +1750,7 @@ class ModelRouterSettingsSubmenu extends Container {
 				id: "model-router-expensive",
 				label: "Expensive model",
 				description: "Pick the model for modify, implementation, and escalated tool-heavy turns",
-				currentValue: optionalStringValue(this.state.expensiveModel),
+				currentValue: routerTierValue(this.state.expensiveModel, this.state.expensiveThinking),
 				submenu: (_currentValue, done) =>
 					new ModelSelectionSubmenu(
 						expensiveModelOptions,
@@ -1738,7 +1761,7 @@ class ModelRouterSettingsSubmenu extends Container {
 								expensiveModel: value === MODEL_ROUTER_UNSET_MODEL_VALUE ? undefined : value,
 							};
 							onChange({ ...this.state }, this.scope);
-							done(optionalStringValue(this.state.expensiveModel));
+							done(routerTierValue(this.state.expensiveModel, this.state.expensiveThinking));
 						},
 						() => done(),
 						{
@@ -1746,6 +1769,62 @@ class ModelRouterSettingsSubmenu extends Container {
 							description:
 								"Choose from models available through configured subscription/API accounts. Type to filter; manual is fallback.",
 							customTitle: "Custom Expensive / Modify Model",
+							customDescription: "Enter a provider/model pattern from pi --list-models.",
+							customEmptyHint: "empty clears the setting",
+							customEmptyValue: MODEL_ROUTER_UNSET_MODEL_VALUE,
+						},
+					),
+			},
+			{
+				id: "model-router-judge",
+				label: "Judge model",
+				description: "Pick the routing-judge model; unset falls back to the medium model",
+				currentValue: routerTierValue(this.state.judgeModel, this.state.judgeThinking, "medium fallback"),
+				submenu: (_currentValue, done) =>
+					new ModelSelectionSubmenu(
+						judgeModelOptions,
+						this.state.judgeModel ?? MODEL_ROUTER_UNSET_MODEL_VALUE,
+						(value) => {
+							this.state = {
+								...this.state,
+								judgeModel: value === MODEL_ROUTER_UNSET_MODEL_VALUE ? undefined : value,
+							};
+							onChange({ ...this.state }, this.scope);
+							done(routerTierValue(this.state.judgeModel, this.state.judgeThinking, "medium fallback"));
+						},
+						() => done(),
+						{
+							title: "Routing Judge Model",
+							description: "Choose from configured models. Type to filter; manual is fallback.",
+							customTitle: "Custom Routing Judge Model",
+							customDescription: "Enter a provider/model pattern from pi --list-models.",
+							customEmptyHint: "empty clears the setting",
+							customEmptyValue: MODEL_ROUTER_UNSET_MODEL_VALUE,
+						},
+					),
+			},
+			{
+				id: "model-router-executor",
+				label: "Executor model",
+				description: "Pick the local executor lane model; unset disables direct toolkit execution",
+				currentValue: routerTierValue(this.state.executorModel, this.state.executorThinking),
+				submenu: (_currentValue, done) =>
+					new ModelSelectionSubmenu(
+						executorModelOptions,
+						this.state.executorModel ?? MODEL_ROUTER_UNSET_MODEL_VALUE,
+						(value) => {
+							this.state = {
+								...this.state,
+								executorModel: value === MODEL_ROUTER_UNSET_MODEL_VALUE ? undefined : value,
+							};
+							onChange({ ...this.state }, this.scope);
+							done(routerTierValue(this.state.executorModel, this.state.executorThinking));
+						},
+						() => done(),
+						{
+							title: "Executor Lane Model",
+							description: "Choose from configured models. Type to filter; manual is fallback.",
+							customTitle: "Custom Executor Lane Model",
 							customDescription: "Enter a provider/model pattern from pi --list-models.",
 							customEmptyHint: "empty clears the setting",
 							customEmptyValue: MODEL_ROUTER_UNSET_MODEL_VALUE,
@@ -1899,6 +1978,13 @@ class ModelRouterSettingsSubmenu extends Container {
 						() => done(),
 					),
 			},
+			{
+				id: "model-router-fitness-gate",
+				label: "Fitness gate",
+				description: "Opt-in subtractive gate: blocks tier models only when their probed router lane failed",
+				currentValue: booleanSettingValue(this.state.fitnessGate),
+				values: ["false", "true"],
+			},
 		];
 
 		this.settingsList = new SettingsList(
@@ -1912,6 +1998,9 @@ class ModelRouterSettingsSubmenu extends Container {
 						break;
 					case "model-router-enabled":
 						this.state = { ...this.state, enabled: newValue === "true" };
+						break;
+					case "model-router-fitness-gate":
+						this.state = { ...this.state, fitnessGate: newValue === "true" };
 						break;
 					default:
 						return;

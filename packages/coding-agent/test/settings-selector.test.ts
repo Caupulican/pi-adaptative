@@ -645,7 +645,9 @@ describe("settings selector", () => {
 		selector.getSettingsList().handleInput("\x1b[B");
 		selector.getSettingsList().handleInput("\x1b[B");
 		selector.getSettingsList().handleInput("\x1b[B");
-		selector.getSettingsList().handleInput("\x1b[B"); // One more Down arrow because of Medium model
+		selector.getSettingsList().handleInput("\x1b[B");
+		selector.getSettingsList().handleInput("\x1b[B");
+		selector.getSettingsList().handleInput("\x1b[B"); // One more Down arrow because of Executor and Learning rows
 		selector.getSettingsList().handleInput("\r");
 		selector.getSettingsList().handleInput("\x1b[A");
 		selector.getSettingsList().handleInput("\r");
@@ -764,6 +766,29 @@ describe("settings selector", () => {
 		);
 	});
 
+	it("exposes the Model Router fitness gate toggle in its submenu", () => {
+		const selector = new SettingsSelectorComponent(
+			makeConfig({
+				modelRouter: {
+					enabled: true,
+					fitnessGate: true,
+					cheapModel: "openai/gpt-5.4",
+					expensiveModel: "openai/gpt-5.4",
+					learningModel: "active",
+				},
+			}),
+			makeCallbacks(),
+		);
+
+		selector.getSettingsList().handleInput("model router");
+		selector.getSettingsList().handleInput("\r");
+		for (let i = 0; i < 10; i++) selector.getSettingsList().handleInput("\x1b[B");
+		const output = selector.render(180).join("\n");
+
+		expect(output).toContain("Fitness gate");
+		expect(output).toContain("on");
+	});
+
 	it("exposes per-tier thinking settings in the Model Router submenu", () => {
 		const selector = new SettingsSelectorComponent(
 			makeConfig({
@@ -781,6 +806,8 @@ describe("settings selector", () => {
 
 		selector.getSettingsList().handleInput("model router");
 		selector.getSettingsList().handleInput("\r"); // open Model Router submenu
+		selector.getSettingsList().handleInput("\x1b[B");
+		selector.getSettingsList().handleInput("\x1b[B");
 		selector.getSettingsList().handleInput("\x1b[B");
 		selector.getSettingsList().handleInput("\x1b[B");
 		selector.getSettingsList().handleInput("\x1b[B");
@@ -820,6 +847,8 @@ describe("settings selector", () => {
 		selector.getSettingsList().handleInput("\x1b[B");
 		selector.getSettingsList().handleInput("\x1b[B");
 		selector.getSettingsList().handleInput("\x1b[B");
+		selector.getSettingsList().handleInput("\x1b[B");
+		selector.getSettingsList().handleInput("\x1b[B");
 		selector.getSettingsList().handleInput("\x1b[B"); // down to "Cheap thinking"
 		selector.getSettingsList().handleInput("\r"); // open Cheap Tier Thinking picker; preselects "(inherit)"
 		selector.getSettingsList().handleInput("\x1b[B"); // (inherit) -> off
@@ -854,6 +883,8 @@ describe("settings selector", () => {
 
 		selector.getSettingsList().handleInput("model router");
 		selector.getSettingsList().handleInput("\r");
+		selector.getSettingsList().handleInput("\x1b[B");
+		selector.getSettingsList().handleInput("\x1b[B");
 		selector.getSettingsList().handleInput("\x1b[B");
 		selector.getSettingsList().handleInput("\x1b[B");
 		selector.getSettingsList().handleInput("\x1b[B");
@@ -902,6 +933,8 @@ describe("settings selector", () => {
 		selector.getSettingsList().handleInput("\x1b[B");
 		selector.getSettingsList().handleInput("\x1b[B");
 		selector.getSettingsList().handleInput("\x1b[B");
+		selector.getSettingsList().handleInput("\x1b[B");
+		selector.getSettingsList().handleInput("\x1b[B");
 		selector.getSettingsList().handleInput("\x1b[B"); // down to "Expensive thinking"
 		selector.getSettingsList().handleInput("\r"); // open Expensive Tier Thinking picker; preselects "(inherit)"
 		selector.getSettingsList().handleInput("\x1b[A"); // (inherit) wraps up to "xhigh" (last option)
@@ -943,6 +976,8 @@ describe("settings selector", () => {
 		selector.getSettingsList().handleInput("\x1b[B");
 		selector.getSettingsList().handleInput("\x1b[B");
 		selector.getSettingsList().handleInput("\x1b[B");
+		selector.getSettingsList().handleInput("\x1b[B");
+		selector.getSettingsList().handleInput("\x1b[B");
 		selector.getSettingsList().handleInput("\x1b[B"); // down to "Executor thinking"
 		selector.getSettingsList().handleInput("\r"); // open Executor Thinking picker; preselects "(inherit)"
 		selector.getSettingsList().handleInput("\x1b[B"); // (inherit) -> off
@@ -976,6 +1011,8 @@ describe("settings selector", () => {
 
 		selector.getSettingsList().handleInput("model router");
 		selector.getSettingsList().handleInput("\r");
+		selector.getSettingsList().handleInput("\x1b[B");
+		selector.getSettingsList().handleInput("\x1b[B");
 		selector.getSettingsList().handleInput("\x1b[B");
 		selector.getSettingsList().handleInput("\x1b[B");
 		selector.getSettingsList().handleInput("\x1b[B");
@@ -1027,7 +1064,9 @@ describe("settings selector", () => {
 		selector.getSettingsList().handleInput("\x1b[B");
 		selector.getSettingsList().handleInput("\x1b[B");
 		selector.getSettingsList().handleInput("\x1b[B");
-		selector.getSettingsList().handleInput("\x1b[B"); // down to "Cheap thinking"
+		selector.getSettingsList().handleInput("\x1b[B");
+		selector.getSettingsList().handleInput("\x1b[B");
+		selector.getSettingsList().handleInput("\x1b[B");
 		selector.getSettingsList().handleInput("\r"); // open Cheap Tier Thinking picker; preselects "high"
 		selector.getSettingsList().handleInput("\x1b[A"); // high -> medium
 		selector.getSettingsList().handleInput("\x1b[A"); // medium -> low
