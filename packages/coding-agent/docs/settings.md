@@ -122,6 +122,7 @@ Hard stops still require explicit foreground approval even in `full`: publishing
 | `modelRouter.mediumModel` | string | - | Model pattern for scoped implementation/planning turns |
 | `modelRouter.expensiveModel` | string | - | Model pattern for high-impact, modify, implementation, and escalated tool-heavy turns |
 | `modelRouter.learningModel` | string | `"active"` | Model pattern for background reflection, learn, and skill-creator work; `"active"` uses the current session model |
+| `failover.subscriptionHop` | boolean | `true` | Allow subscription/OAuth quota failures to switch once to an authenticated provider default; metered/API-key quota failures always halt for explicit user choice |
 
 Use `/settings` → **Model Router** to configure these fields globally or for the current project's `.pi/settings.json`. `/session` and `/usage` show the active router state, diagnostics, and per-tier fitness when the gate is enabled. Profile files can also include a `modelRouter` block so a situation can carry its own cheap, medium, expensive, and learning/reflection models together with its model, thinking level, soul, and resource filters.
 

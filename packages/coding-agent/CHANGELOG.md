@@ -4,6 +4,7 @@
 - Added `context_scout` and `ScoutController`, a bounded read-only repository scout with citation validity checks.
 - Added FastContext scout install docs, a 10 GB reference profile, a consolidated per-tier model+thinking screen in Model Router settings, and a thinking-level picker during `/fitness` role assignment.
 - Added opt-in `modelRouter.fitnessGate` routing: probed-unfit tier models are blocked subtractively, scout `auto` selection now requires passed fitness proof, and router status/settings surface the gate.
+- Added provider quota failover handling: subscription usage limits halt retries and can hop once to an authenticated provider default; metered quota failures halt for explicit user choice.
 
 ### Changed
 - Auto-compaction now uses the kernel closed loop and surfaces verification warnings from accepted fallback summaries.

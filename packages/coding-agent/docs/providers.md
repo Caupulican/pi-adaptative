@@ -21,6 +21,8 @@ Use `/login` in interactive mode, then select a provider, or pass one directly (
 
 Use `/logout` to clear credentials. Tokens are stored per provider in `~/.pi/agent/auth.json` and auto-refresh when expired.
 
+If a subscription provider reports a terminal usage limit, Pi stops retrying that exhausted model, announces the condition, and switches the session to that provider's default model when it is authenticated and not already exhausted. API-key/metered quota failures do not auto-hop; Pi halts the turn and asks you to switch models, wait for the limit window, or resend explicitly.
+
 ## Running Multiple Providers at Once
 
 Pi does not keep a single global active provider for running agents. Each Pi process/session has its own selected model, and `auth.json` can hold credentials for many providers at the same time. After logging in to both subscription providers, start separate terminals with explicit provider or model selection:

@@ -84,6 +84,7 @@ import { AutonomyTelemetry } from "./autonomy-telemetry.ts";
 import { BackgroundLaneController } from "./background-lane-controller.ts";
 import { BashExecutionController } from "./bash-execution-controller.ts";
 import type { BashResult } from "./bash-executor.ts";
+import { BillingFailoverController, ExhaustedProviderRegistry } from "./billing-failover-controller.ts";
 import { CompactionSupport } from "./compaction-support.ts";
 // (module-scope helper for curation goal extraction defined below the imports)
 import type { CurationTelemetrySnapshot } from "./context/brain-curator.ts";
@@ -550,19 +551,15 @@ export class AgentSession {
 	 */
 	private _requestedActiveToolNames: string[] | undefined;
 
-	// Compaction/context hygiene state
 	private _compactionAbortController: AbortController | undefined = undefined;
 	private _autoCompactionAbortController: AbortController | undefined = undefined;
 	private _overflowRecoveryAttempted = false;
 	private _unboundToolGrantWarnings: string[] = [];
 
-	// Branch summarization state
 	private _branchSummaryAbortController: AbortController | undefined = undefined;
 
-	// Auto-retry driver — owns the attempt counter and abortable backoff (reliability kernel).
 	private _retryController!: RetryController;
 
-	// Bash execution state
 	/** User-facing model + thinking-level selection (see model-selection-controller.ts). */
 	private readonly _modelSelection: ModelSelectionController;
 	/** Standalone bash-command execution (see bash-execution-controller.ts); owns the bash abort
@@ -573,7 +570,6 @@ export class AgentSession {
 	/** Agent tool-call gate: escalation, autonomy gating, extension hooks, untrusted boundary (see tool-gate-controller.ts). */
 	private readonly _toolGate: ToolGateController;
 
-	// Extension system
 	private _extensionRunner!: ExtensionRunner;
 	private _turnIndex = 0;
 	/** G7: per-turn foreground CapabilityEnvelope auto-built for visibility (observe-only; not enforced). */
@@ -601,7 +597,6 @@ export class AgentSession {
 	 * latest retrieval/prompt-inclusion reports, the reload-safe MemoryManager, the recall
 	 * effectiveness tracker, and the extension-contributed pending providers. */
 	private readonly _memory: MemoryController;
-	/** Summarizer model/auth/settings resolution (see compaction-support.ts). */
 	private readonly _compactionSupport: CompactionSupport;
 	/** Per-turn context-shaping subsystem (see context-pipeline.ts); owns the latest
 	 * audit/policy/correlation/enforcement/gc reports, the brain-curation sidecar + its skip reasons,
@@ -614,7 +609,6 @@ export class AgentSession {
 	private _toolProfileFilter?: Required<ResourceProfileFilterSettings>;
 	private readonly _isExplicitModel: boolean;
 	private readonly _isExplicitThinking: boolean;
-	/** R8: registry for deployment-supplied gateway channels + schedulers (lifecycle driven by the host runner). */
 	private readonly _gatewayRegistry = new GatewayRegistry();
 	/** Cache for getSpawnedUsage(), keyed by session entry count (Bug #22 — avoid O(N) per render frame). */
 	/** Usage/cost/stats accounting, /context estimate, and session export (see session-analytics.ts);
@@ -622,7 +616,6 @@ export class AgentSession {
 	private readonly _analytics: SessionAnalytics;
 	/** In-file session-tree branch switching + fork-selector reads (see session-tree-navigator.ts). */
 	private readonly _treeNavigator: SessionTreeNavigator;
-	/** Latest proactive cost-guard decision (#34), for the host UI to surface. Undefined when disabled. */
 	private _lastCostGuardDecision?: CostGuardDecision;
 	/** One-shot latch so the cost guard downgrades reasoning once per over-threshold episode, not every call. */
 	private _costGuardDowngraded = false;
@@ -631,11 +624,9 @@ export class AgentSession {
 	 * used by the status report. Its parallel routed drive path delegates every turn back to
 	 * {@link _runAgentPrompt} so the drive loop stays host-side. */
 	private readonly _modelRouter: ModelRouterController;
-	/** Lazily-built skill curator (#32) over `<agentDir>/skills`. */
+	private readonly _billingFailover: BillingFailoverController;
 	private _skillCuratorInstance?: SkillCurator;
-	/** Set on dispose so in-flight background reflection bails instead of writing to a dead session (Bug #21). */
 	private _disposed = false;
-	/** Aborts in-flight background reflection completions on dispose (Bug #21). */
 	private readonly _reflectionAbort = new AbortController();
 	/** Native reflection engine + learning-apply/rollback path (see reflection-controller.ts); owns no
 	 * session state, applies durable writes through the bundled memory tool and the session log. */
@@ -654,7 +645,6 @@ export class AgentSession {
 	private _extensionErrorListener?: ExtensionErrorListener;
 	private _extensionErrorUnsubscriber?: () => void;
 
-	// Model registry for API key resolution
 	private _modelRegistry: ModelRegistry;
 
 	/** Tool-registry assembly + the self-modification-safe extension reload (see runtime-builder.ts);
@@ -750,6 +740,7 @@ export class AgentSession {
 			getLearningDecisionSnapshots: () => this.getLearningDecisionSnapshots(),
 			getLearningAuditRecords: () => this.getLearningAuditRecords(),
 		});
+		this._modelRegistry = config.modelRegistry;
 		this._backgroundLanes = new BackgroundLaneController({
 			isDisposed: () => this._disposed,
 			isChildSession: () => this._isChildSession,
@@ -803,6 +794,13 @@ export class AgentSession {
 			addSpawnedUsage: (usage, opts) => this.addSpawnedUsage(usage, opts),
 			runIsolatedCompletion: (opts) => this.runIsolatedCompletion(opts),
 		});
+		this._billingFailover = new BillingFailoverController({
+			agent: this.agent,
+			modelRegistry: this._modelRegistry,
+			exhausted: new ExhaustedProviderRegistry(),
+			subscriptionHop: this.settingsManager.getFailoverSettings().subscriptionHop,
+			emit: (event) => this._emit(event),
+		});
 		this._modelRouter = new ModelRouterController({
 			getAgent: () => this.agent,
 			getModel: () => this.model ?? undefined,
@@ -843,7 +841,6 @@ export class AgentSession {
 			getGoalRuntimeSnapshot: (settings) => this.getGoalRuntimeSnapshot(settings),
 			prompt: (text, options) => this.prompt(text, options),
 		});
-		this._modelRegistry = config.modelRegistry;
 		this._extensionRunnerRef = config.extensionRunnerRef;
 		this._initialActiveToolNames = config.initialActiveToolNames;
 		this._allowedToolNames = config.allowedToolNames ? new Set(config.allowedToolNames) : undefined;
@@ -2113,6 +2110,7 @@ export class AgentSession {
 		if (this._isRetryableError(msg) && (await this._prepareRetry(msg))) {
 			return true;
 		}
+		if (await this._billingFailover.handleAssistantError(msg)) return false;
 
 		if (msg.stopReason === "error" && this._retryController.attempt > 0) {
 			this._emit({
@@ -2871,6 +2869,7 @@ export class AgentSession {
 							this._buildCompactionPreDigest(),
 						),
 					compactionSignal,
+					compactionModel.provider,
 				);
 				summary = result.summary;
 				firstKeptEntryId = result.firstKeptEntryId;
@@ -3171,6 +3170,7 @@ export class AgentSession {
 								{ chunked: params.chunked },
 							),
 						signal,
+						compactModel.provider,
 					);
 					return { result: compactResult };
 				},
@@ -3287,6 +3287,7 @@ export class AgentSession {
 	private async _compactWithRetry(
 		run: () => Promise<CompactionResult>,
 		signal: AbortSignal,
+		provider?: string,
 	): Promise<CompactionResult> {
 		const retrySettings = this.settingsManager.getRetrySettings();
 		const maxAttempts = retrySettings.enabled ? Math.max(1, retrySettings.maxRetries + 1) : 1;
@@ -3302,7 +3303,7 @@ export class AgentSession {
 			} catch (error) {
 				if (signal.aborted || attempt >= maxAttempts) throw error;
 				const message = error instanceof Error ? error.message : String(error);
-				const classified = classifyFailure({ message });
+				const classified = classifyFailure({ message, provider });
 				if (!classified.retryable) throw error;
 				await sleepAbortable(
 					computeRetryDelayMs(policy, attempt, { retryAfterMs: classified.retryAfterMs }),

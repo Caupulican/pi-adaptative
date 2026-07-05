@@ -100,6 +100,7 @@ export class RetryController {
 		const classified = classifyFailure({
 			message: message.errorMessage ?? "",
 			contextOverflow: isContextOverflow(message, this.getContextWindow()),
+			provider: message.provider,
 		});
 		if (!classified.retryable) {
 			return false;

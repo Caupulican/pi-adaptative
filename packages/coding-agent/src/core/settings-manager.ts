@@ -195,6 +195,10 @@ export interface AutonomySettings {
 	goalAutoContinueDelayMs?: number; // default: 0; delay before idle auto-continuation starts
 }
 
+export interface FailoverSettings {
+	subscriptionHop?: boolean; // default: true; subscription quota can hop once to an authenticated provider default
+}
+
 export interface ModelRouterSettings {
 	enabled?: boolean; // default: false — routing is opt-in until escalation safeguards are complete
 	cheapModel?: string; // model pattern for read-only/research turns
@@ -413,6 +417,7 @@ export interface Settings {
 	modelCapability?: ModelCapabilitySettings; // Auto-detected small-model tool/lane surface (default: auto)
 	toolkit?: ToolkitSettings; // User's blessed daily-ops script registry for run_toolkit_script
 	modelRouter?: ModelRouterSettings; // Opt-in deterministic cheap/expensive model routing foundation
+	failover?: FailoverSettings; // Provider quota behavior; metered quota always halts for explicit user choice
 	autoLearn?: AutoLearnSettings; // Setting-gated autonomous background learning for long sessions
 	sessionDir?: string; // Custom session storage directory (same format as --session-dir CLI flag)
 	httpIdleTimeoutMs?: number; // HTTP header/body idle timeout in ms; 0 disables it. Keep above retry.stall.quietIdleMs or the HTTP layer kills quiet streams before the stall watchdog can
@@ -2094,6 +2099,10 @@ export class SettingsManager {
 			maxTurnUsd: this.settings.costGuard?.maxTurnUsd ?? 2.5,
 			action: this.settings.costGuard?.action ?? "warn",
 		};
+	}
+
+	getFailoverSettings(): Required<FailoverSettings> {
+		return { subscriptionHop: this.settings.failover?.subscriptionHop ?? true };
 	}
 
 	private getProfileModelRouterSettings(): ModelRouterSettings | undefined {
