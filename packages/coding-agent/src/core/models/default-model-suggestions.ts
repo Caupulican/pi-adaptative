@@ -61,6 +61,16 @@ export const DEFAULT_MODEL_SUGGESTIONS: readonly ModelSuggestion[] = [
 		note: "Q4 ≈ 2.5 GB; ~5-6 GB peak with 32-64K KV. Qwen3 template caveat: if tool calls fail the probe, use the Modelfile recipe in docs/scout.md.",
 	},
 	{
+		name: "Ornith-1.0-9B",
+		pullRef: "hf.co/deepreinforce-ai/Ornith-1.0-9B-GGUF:Q4_K_M",
+		role: "Agentic-coding worker / router cheap tier",
+		toolCalling: true,
+		assignRole: "router-cheap",
+		rationale:
+			"External candidate (not from pi's own validation research): MIT, Qwen 3.5 base, RL-trained for agentic coding with native tool-calling — the strongest local worker SHAPE in the roster. /fitness on your hardware is the validator.",
+		note: "Q4_K_M ≈ 5.6 GB weights, ~7-8 GB peak with KV — on a 10 GB box run it as the ONLY local model. Qwen 3.5 arch: confirm pi's pinned Ollama supports it and probe tool-calls with /fitness before assigning (template derives from the GGUF). Larger boxes: consider router-medium after a passed worker lane.",
+	},
+	{
 		name: "Ternary-Bonsai-1.7B",
 		pullRef: "hf.co/prism-ml/Ternary-Bonsai-1.7B-gguf",
 		role: "Search scout (heavy-lifter)",

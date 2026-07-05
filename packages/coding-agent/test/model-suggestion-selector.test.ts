@@ -30,6 +30,8 @@ describe("ModelSuggestionSelectorComponent", () => {
 		expect(output).toContain("no tool-calling");
 		expect(output).toContain("FastContext-1.0-4B");
 		expect(output).toContain("Repository scout");
+		expect(output).toContain("Ornith-1.0-9B");
+		expect(output).toContain("Agentic-coding worker");
 	});
 
 	it("selecting an entry returns the whole suggestion (ref + shaped role), not just a string", () => {

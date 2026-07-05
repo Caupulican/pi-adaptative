@@ -26,12 +26,18 @@ describe("default model suggestions", () => {
 		);
 	});
 
-	it("keeps FastContext immediately after the executor entries as the scout suggestion", () => {
+	it("keeps FastContext and Ornith immediately after the executor entries", () => {
 		const fastContextIndex = DEFAULT_MODEL_SUGGESTIONS.findIndex((s) => s.name === "FastContext-1.0-4B");
 		expect(fastContextIndex).toBe(2);
 		expect(DEFAULT_MODEL_SUGGESTIONS[fastContextIndex]).toMatchObject({
 			pullRef: "hf.co/KikoCis/FastContext-1.0-4B-longctx-imatrix-GGUF:fastcontext4b.Q4_K_M.imx.gguf",
 			assignRole: "scout",
+			toolCalling: true,
+		});
+		expect(DEFAULT_MODEL_SUGGESTIONS[fastContextIndex + 1]).toMatchObject({
+			name: "Ornith-1.0-9B",
+			pullRef: "hf.co/deepreinforce-ai/Ornith-1.0-9B-GGUF:Q4_K_M",
+			assignRole: "router-cheap",
 			toolCalling: true,
 		});
 	});
@@ -60,6 +66,7 @@ describe("default model suggestions", () => {
 		const text = formatModelSuggestions().join("\n");
 		expect(text).toContain("qwen3:1.7b → Toolkit executor");
 		expect(text).toContain("FastContext-1.0-4B → Repository scout");
+		expect(text).toContain("Ornith-1.0-9B → Agentic-coding worker");
 		expect(text).toContain("/models add hf.co/prism-ml/Ternary-Bonsai-4B-gguf");
 		expect(text).toContain("[no tool-calling]");
 		expect(text).toContain("probe on YOUR hardware with /fitness");
