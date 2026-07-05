@@ -45,6 +45,7 @@ For the full first-run flow, see [Quickstart](quickstart.md).
 - [Keybindings](keybindings.md) - default shortcuts and custom keybindings.
 - [Sessions](sessions.md) - session management, branching, and tree navigation.
 - [Compaction](compaction.md) - context compaction and branch summarization.
+- [FastContext scout](scout.md) - read-only repository scout setup and 10 GB local profile.
 
 ## Customization
 
