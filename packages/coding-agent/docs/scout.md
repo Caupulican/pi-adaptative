@@ -4,7 +4,9 @@ Pi can delegate broad repository exploration to a bounded read-only scout throug
 
 ## Install the reference local model
 
-Pull the verified Q4 GGUF tag:
+One-step path: run `/models suggest`, choose `FastContext-1.0-4B`, let pi pull and probe it, then confirm the scout role. The assignment writes `scout.model` and sets `scout.enabled = true` only after the `scout_auto` exam passes.
+
+Manual fallback: pull the verified Q4 GGUF tag:
 
 ```bash
 ollama pull hf.co/KikoCis/FastContext-1.0-4B-longctx-imatrix-GGUF:fastcontext4b.Q4_K_M.imx.gguf
@@ -12,7 +14,7 @@ ollama pull hf.co/KikoCis/FastContext-1.0-4B-longctx-imatrix-GGUF:fastcontext4b.
 
 The Hugging Face repository also exposes `fastcontext4b.IQ3_M.imx.gguf`; use the Q4 tag above unless you need the smaller IQ3 quant.
 
-After pulling:
+After pulling manually:
 
 1. Start pi in the target repo.
 2. Run `/models` and confirm the Ollama model appears.

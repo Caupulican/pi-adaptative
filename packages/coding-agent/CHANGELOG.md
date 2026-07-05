@@ -1,5 +1,8 @@
 ## [Unreleased]
 
+### Added
+- Added FastContext-1.0-4B and Ornith-1.0-9B to `/models` suggestions for one-step pull, probe, and role assignment; added the `scout` fitness role that writes `scout.model` and `scout.enabled`, gated on the `scout_auto` fitness exam.
+
 ## [0.81.3] - 2026-07-05
 
 

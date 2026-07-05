@@ -36,6 +36,15 @@ For local models (Ollama, LM Studio, vLLM), only `id` is required per model:
 
 The `apiKey` is required but Ollama ignores it, so any value works.
 
+## Curated Local Suggestions
+
+Run `/models suggest` to choose from pi's curated local-model roster. Pi pulls the selected model through the managed Ollama runtime, probes it with `/fitness` on your hardware, then offers the shaped role assignment.
+
+Current baked suggestions include:
+
+- FastContext-1.0-4B → repository scout (`context_scout`): the model the scout lane is built around, not a pi benchmark claim. Q4 is about 2.5 GB weights; expect about 5-6 GB peak with 32K-64K KV. Assignment writes `scout.model` and enables `scout.enabled` only after the `scout_auto` exam passes.
+- Ornith-1.0-9B → agentic-coding worker / router cheap tier: an external candidate, not from pi's own validation research. Q4_K_M is about 5.6 GB weights; expect about 7-8 GB peak with KV, and run it as the only local model on a 10 GB box. `/fitness` on your hardware is the validator.
+
 Some OpenAI-compatible servers do not understand the `developer` role used for reasoning-capable models. For those providers, set `compat.supportsDeveloperRole` to `false` so pi sends the system prompt as a `system` message instead. If the server also does not support `reasoning_effort`, set `compat.supportsReasoningEffort` to `false` too.
 
 You can set `compat` at the provider level to apply to all models, or at the model level to override a specific model. This commonly applies to Ollama, vLLM, SGLang, and similar OpenAI-compatible servers.
