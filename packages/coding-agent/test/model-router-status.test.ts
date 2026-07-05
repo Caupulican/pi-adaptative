@@ -123,6 +123,25 @@ describe("model router status formatting", () => {
 		);
 	});
 
+	it("shows exhausted entries and the last failover notice", () => {
+		const text = formatModelRouterStatus(
+			{ enabled: true, cheapModel: "cheap", expensiveModel: "expensive" },
+			undefined,
+			undefined,
+			[],
+			undefined,
+			undefined,
+			undefined,
+			{
+				exhausted: ["openai-codex/codex-spark", "openai-codex/gpt-5.5"],
+				lastNotice: "codex-spark quota reached — switched to openai-codex/gpt-5.5",
+			},
+		);
+
+		expect(text).toContain("Exhausted models: openai-codex/codex-spark, openai-codex/gpt-5.5");
+		expect(text).toContain("Last failover: codex-spark quota reached — switched to openai-codex/gpt-5.5");
+	});
+
 	it("shows history without duplicating the latest persisted decision", () => {
 		const route1: RouteDecision = {
 			tier: "expensive",

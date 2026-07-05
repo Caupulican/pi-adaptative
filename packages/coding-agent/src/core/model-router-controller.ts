@@ -57,6 +57,7 @@ import {
 	getRecentModelRouterDecisions,
 	MODEL_ROUTER_DECISION_CUSTOM_TYPE,
 	type ModelRouterDecisionStatus,
+	type ModelRouterFailoverStatus,
 	type ModelRouterFitnessStatuses,
 } from "./model-router/status.ts";
 import { shouldEscalateModelRouterTool } from "./model-router/tool-escalation.ts";
@@ -94,6 +95,8 @@ export interface ModelRouterControllerDeps {
 	getModelRegistry(): ModelRegistry;
 	/** Session-scoped provider/model quota exhaustion guard. */
 	isModelExhausted(model: Model<Api>): boolean;
+	/** Status snapshot for B5 exhausted models and the last failover notice. */
+	getFailoverStatus(): ModelRouterFailoverStatus;
 	/** Root dir the host-keyed {@link FitnessStore} lives under (executor tool-call fitness gate). */
 	getAgentDir(): string;
 	/** Aborts the judge's bounded completion when the session is disposed. */
@@ -577,6 +580,7 @@ export class ModelRouterController {
 				this._lastModelRouterSkipReason,
 				this._lastModelRouterIntent ?? lastDecision?.intent,
 				settings.fitnessGate ? this._getRouterTierFitnessStatuses() : undefined,
+				this.deps.getFailoverStatus(),
 			),
 		];
 		const diagnostics = collectModelRouterConfigDiagnostics(

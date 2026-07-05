@@ -31,6 +31,7 @@ type RouterContext = {
 			hasConfiguredAuth: (model: TestModel) => boolean;
 		};
 		isModelExhausted: (model: TestModel) => boolean;
+		getFailoverStatus: () => { exhausted: string[]; lastNotice?: string };
 	};
 };
 
@@ -176,6 +177,7 @@ function createContext(
 			}),
 			isModelExhausted: (model: TestModel) =>
 				exhaustedModels.some((candidate) => candidate.provider === model.provider && candidate.id === model.id),
+			getFailoverStatus: () => ({ exhausted: [] }),
 		},
 	});
 }

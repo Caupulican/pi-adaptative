@@ -3,6 +3,7 @@ import { classifyFailure } from "@caupulican/pi-agent-core";
 import type { Api, AssistantMessage, Model } from "@caupulican/pi-ai";
 import { decideBillingFailover } from "./billing-failover.ts";
 import type { ModelRegistry } from "./model-registry.ts";
+import type { ModelRouterFailoverStatus } from "./model-router/status.ts";
 
 const DEFAULT_MODEL_PER_PROVIDER: Record<string, string> = {
 	"openai-codex": "gpt-5.5",
@@ -54,6 +55,10 @@ export class BillingFailoverController {
 
 	getLastNotice(): string | undefined {
 		return this.lastNotice;
+	}
+
+	getStatus(): ModelRouterFailoverStatus {
+		return { exhausted: this.snapshotExhausted(), lastNotice: this.lastNotice };
 	}
 
 	async handleAssistantError(message: AssistantMessage): Promise<boolean> {

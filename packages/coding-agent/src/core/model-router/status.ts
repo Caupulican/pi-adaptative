@@ -14,6 +14,8 @@ export type ModelRouterFitnessStatuses = Partial<
 	Record<"cheap" | "medium" | "expensive", ModelRouterTierFitnessStatus>
 >;
 
+export type ModelRouterFailoverStatus = { exhausted: string[]; lastNotice?: string };
+
 export type ModelRouterStatusSettings = {
 	enabled: boolean;
 	fitnessGate?: boolean;
@@ -125,6 +127,7 @@ export function formatModelRouterStatus(
 	lastSkipReason?: string,
 	latestIntent?: ModelRouterIntent,
 	fitnessStatuses?: ModelRouterFitnessStatuses,
+	failoverStatus?: ModelRouterFailoverStatus,
 ): string {
 	const effectiveLastDecision = lastSkipReason ? undefined : lastDecision;
 	const lines = [
@@ -165,6 +168,12 @@ export function formatModelRouterStatus(
 		lines.push(`${formatLabel("Last decision:")} none`);
 	} else {
 		lines.push(`${formatLabel("Last decision:")} ${formatDecision(effectiveLastDecision)}`);
+	}
+	if (failoverStatus?.exhausted.length) {
+		lines.push(`${formatLabel("Exhausted models:")} ${failoverStatus.exhausted.join(", ")}`);
+	}
+	if (failoverStatus?.lastNotice) {
+		lines.push(`${formatLabel("Last failover:")} ${failoverStatus.lastNotice}`);
 	}
 	if (recentDecisions.length > 0) {
 		lines.push(formatLabel("Recent decisions:"));
