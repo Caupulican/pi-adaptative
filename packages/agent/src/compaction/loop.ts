@@ -126,6 +126,9 @@ export async function runCompactionLoop(deps: CompactionLoopDeps): Promise<Compa
 				branch,
 			));
 		} catch (error) {
+			if (deps.signal?.aborted) {
+				return { kind: "failed", reason: "aborted", cycles: cycle };
+			}
 			lastCause = mapFailureCause(error);
 			if (lastCause === "aborted") {
 				return { kind: "failed", reason: lastCause, cycles: cycle };
@@ -254,7 +257,7 @@ function mapFailureCause(error: unknown): string {
 		)
 	)
 		return "provider-failure";
-	if (message.includes("auto-compaction-cancelled") || message.includes("aborted")) return "aborted";
+	if (message.includes("auto-compaction-cancelled")) return "aborted";
 	if (message.includes("auth") || message.includes("api key") || message.includes("not compacted"))
 		return "auth-failed";
 	return "unknown-failure";

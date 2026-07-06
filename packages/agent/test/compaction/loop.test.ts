@@ -386,6 +386,32 @@ describe("runCompactionLoop", () => {
 		expect(outcome.result.summary).toBe("deterministic");
 	});
 
+	it("does not treat provider ECONNABORTED text as a user abort", async () => {
+		const summarizeAndVerify = vi.fn(async () => {
+			summarizeCalls += 1;
+			if (summarizeCalls === 1) throw new Error("socket was aborted by provider");
+			return { result: createResult("recovered") };
+		});
+
+		const outcome = expectSuccess(
+			await runCompactionLoop({
+				getBranch: () => branch,
+				measureLiveTokens: scriptedMeasure([1200, 1100, 900]),
+				getTriggerThreshold: () => 1000,
+				getMargin: () => 10,
+				resolveModelAndAuth: async () => ({ model: createModel() }),
+				summarizeAndVerify,
+				buildDeterministicCheckpoint: async () => ({ result: createResult("deterministic") }),
+				apply: async () => {},
+				onTransition: () => {},
+				signal: new AbortController().signal,
+			}),
+		);
+
+		expect(summarizeAndVerify).toHaveBeenCalledTimes(2);
+		expect(outcome.result.summary).toBe("recovered");
+	});
+
 	it("aborts cleanly when signal is raised between cycles", async () => {
 		const controller = new AbortController();
 		const measureLiveTokens = vi.fn(() => {

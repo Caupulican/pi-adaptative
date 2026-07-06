@@ -4,6 +4,7 @@
 - Fixed provider-failure classification so numeric HTTP status patterns only match standalone codes, not digits embedded in longer tokens.
 - Fixed the compaction loop so an effect-not-restored retry can continue after the host appends the loop's own compaction entry and deterministic checkpoint preparation failures return failed outcomes instead of escaping the loop.
 - Removed unused compaction verification-bypass execution options so manual compaction keeps the normal verification gate.
+- Fixed compaction-loop failure mapping so provider errors containing "aborted" retry normally unless the compaction signal was actually aborted.
 
 ## [0.81.5] - 2026-07-06
 
