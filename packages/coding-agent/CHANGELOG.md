@@ -9,6 +9,7 @@
 
 ### Fixed
 - Fixed executor speculative retry persistence so the discarded first attempt is removed from the routed-turn session buffer before the refined retry is saved.
+- Fixed the bash tool optimizer so `grep`/`rg` regex patterns fall through to the real command instead of being treated as literal substring searches.
 
 ## [0.81.3] - 2026-07-05
 

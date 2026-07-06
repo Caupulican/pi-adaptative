@@ -773,6 +773,26 @@ describe("Coding Agent Tools", () => {
 			expect(result.details?.fullOutputPath).toBeDefined();
 		});
 
+		it("does not native-optimize grep regex patterns as literal substrings", async () => {
+			const testFile = join(testDir, "grep-regex.py");
+			writeFileSync(testFile, "import os\nprint('x')\n");
+			const bash = createBashTool(testDir);
+
+			const result = await bash.execute("test-grep-regex", { command: `grep '^import' ${testFile}` });
+
+			expect(getTextOutput(result).trim()).toBe("import os");
+		});
+
+		it("still native-optimizes grep literal patterns", async () => {
+			const testFile = join(testDir, "grep-literal.txt");
+			writeFileSync(testFile, "abc\nxyz\n");
+			const bash = createBashTool(testDir);
+
+			const result = await bash.execute("test-grep-literal", { command: `grep abc ${testFile}` });
+
+			expect(getTextOutput(result).trim()).toBe("abc");
+		});
+
 		it("should optimize eligible simple commands natively", async () => {
 			const searchDir = join(testDir, "optimized-find");
 			mkdirSync(searchDir);

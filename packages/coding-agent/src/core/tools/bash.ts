@@ -419,6 +419,7 @@ async function tryOptimizeCommand(
 		} else if (cmd === "grep" || cmd === "rg") {
 			if (args.length === 3 && !args[1].startsWith("-") && !args[2].startsWith("-")) {
 				const patternStr = unquote(args[1]);
+				if (/[\\^$.|?*+()[\]{}]/.test(patternStr)) return { optimized: false };
 				const filePath = resolveToCwd(args[2], cwd);
 				const content = await fsReadFile(filePath, "utf-8");
 				const lines = content.split("\n");
