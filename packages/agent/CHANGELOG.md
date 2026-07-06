@@ -1,4 +1,4 @@
-## [Unreleased]
+## [0.81.6] - 2026-07-06
 
 ### Fixed
 - Fixed prohibition extraction so pasted documents (user messages over 1500 chars) no longer flood the mandatory-rules gate; harvested rules are capped at the 8 most recent.

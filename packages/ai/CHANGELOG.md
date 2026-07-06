@@ -1,4 +1,4 @@
-## [Unreleased]
+## [0.81.6] - 2026-07-06
 
 ### Fixed
 - Fixed OpenAI Codex OAuth token expiry to apply the standard 5-minute early-refresh buffer.

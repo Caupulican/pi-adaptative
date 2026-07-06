@@ -1,4 +1,4 @@
-## [Unreleased]
+## [0.81.6] - 2026-07-06
 
 ### Fixed
 - Fixed interactive-mode `renderSessionContext` to serialize overlapping rebuild calls on a queue so that the newest generation wins the commit and the visible container remains intact.
