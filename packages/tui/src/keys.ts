@@ -1331,6 +1331,8 @@ export function parseKey(data: string): string | undefined {
 
 const KITTY_CSI_U_REGEX = /^\x1b\[(\d+)(?::(\d*))?(?::(\d+))?(?:;(\d+))?(?::(\d+))?u$/;
 const KITTY_PRINTABLE_ALLOWED_MODIFIERS = MODIFIERS.shift | LOCK_MASK;
+const KITTY_FUNCTIONAL_PUA_START = 0xe000;
+const KITTY_FUNCTIONAL_PUA_END = 0xf8ff;
 
 /**
  * Decode a Kitty CSI-u sequence into a printable character, if applicable.
@@ -1371,8 +1373,14 @@ export function decodeKittyPrintable(data: string): string | undefined {
 		effectiveCodepoint = shiftedKey;
 	}
 	effectiveCodepoint = normalizeKittyFunctionalCodepoint(effectiveCodepoint);
-	// Drop control characters or invalid codepoints.
-	if (!Number.isFinite(effectiveCodepoint) || effectiveCodepoint < 32) return undefined;
+	// Drop control characters, invalid codepoints, or Kitty functional PUA keys that are not printable.
+	if (
+		!Number.isFinite(effectiveCodepoint) ||
+		effectiveCodepoint < 32 ||
+		(effectiveCodepoint >= KITTY_FUNCTIONAL_PUA_START && effectiveCodepoint <= KITTY_FUNCTIONAL_PUA_END)
+	) {
+		return undefined;
+	}
 
 	try {
 		return String.fromCodePoint(effectiveCodepoint);

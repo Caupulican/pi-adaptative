@@ -506,6 +506,13 @@ describe("decodeKittyPrintable", () => {
 		assert.strictEqual(decodeKittyPrintable("\x1b[57416u"), ",");
 		assert.strictEqual(decodeKittyPrintable("\x1b[57417u"), undefined);
 	});
+
+	it("should reject unprintable Kitty functional PUA keys", () => {
+		assert.strictEqual(decodeKittyPrintable("\x1b[57363u"), undefined);
+		assert.strictEqual(decodeKittyPrintable("\x1b[57376u"), undefined);
+		assert.strictEqual(decodeKittyPrintable("\x1b[57427u"), undefined);
+		assert.strictEqual(decodeKittyPrintable("\x1b[97u"), "a");
+	});
 });
 
 describe("decodePrintableKey", () => {
