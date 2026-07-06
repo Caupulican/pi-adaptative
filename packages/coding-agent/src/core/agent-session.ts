@@ -2910,11 +2910,7 @@ export class AgentSession {
 								compactionThinkingLevel,
 								this.agent.streamFn,
 								this._buildCompactionPreDigest(),
-								{
-									chunked: params.chunked,
-									allowVerificationFailure: true,
-									skipVerification: true,
-								},
+								{ chunked: params.chunked },
 							),
 						signal,
 						model.provider,

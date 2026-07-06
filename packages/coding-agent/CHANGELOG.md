@@ -2,7 +2,7 @@
 
 ### Fixed
 - Fixed local-model compaction capacity checks to use measured served context-window evidence from the fitness probe instead of trusting the registered window guess, including tail-truncating local servers by requiring start and end capacity needles.
-- Fixed manual `/compact` to preserve authoritative extension results and successful manual summaries while reserving deterministic checkpoints for gate-retry exhaustion and surfacing provider failures.
+- Fixed manual `/compact` to preserve authoritative extension results, keep normal summary verification enabled, reserve deterministic checkpoints for gate-retry exhaustion, and surface provider failures.
 - Fixed provider-failure corpus recording to write once per failed assistant message with the overflow-aware classification.
 - Fixed startup migrations and project-trust reads to leave malformed `models.json` / `trust.json` files untouched instead of crashing startup.
 - Fixed interactive mode to rebind the live extensions-changed UI refresh listener after session switches.

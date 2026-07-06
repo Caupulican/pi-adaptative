@@ -958,7 +958,7 @@ export async function compact(
 	thinkingLevel?: ThinkingLevel,
 	streamFn?: StreamFn,
 	preDigest?: (conversationText: string, signal?: AbortSignal) => Promise<string>,
-	executionOptions?: { chunked?: boolean; allowVerificationFailure?: boolean; skipVerification?: boolean },
+	executionOptions?: { chunked?: boolean },
 ): Promise<CompactionResult> {
 	const {
 		firstKeptEntryId,
@@ -1003,17 +1003,12 @@ export async function compact(
 				executionOptions?.chunked ?? false,
 			);
 
-			verification = executionOptions?.skipVerification
-				? { ok: true, failures: [] }
-				: verifySummary(historySummary, facts);
+			verification = verifySummary(historySummary, facts);
 			if (verification.ok) {
 				break;
 			}
 
 			if (attempt >= 1) {
-				if (executionOptions?.allowVerificationFailure) {
-					break;
-				}
 				throw new Error(`gate-failed: ${formatVerificationFailures(verification)}`);
 			}
 
@@ -1050,15 +1045,12 @@ export async function compact(
 				executionOptions?.chunked ?? false,
 			);
 
-			verification = executionOptions?.skipVerification ? { ok: true, failures: [] } : verifySummary(summary, facts);
+			verification = verifySummary(summary, facts);
 			if (verification.ok) {
 				break;
 			}
 
 			if (attempt >= 1) {
-				if (executionOptions?.allowVerificationFailure) {
-					break;
-				}
 				throw new Error(`gate-failed: ${formatVerificationFailures(verification)}`);
 			}
 
