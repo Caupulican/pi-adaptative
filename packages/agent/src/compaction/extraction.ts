@@ -150,8 +150,8 @@ function appearsCreated(message: AgentMessage): boolean {
 
 function splitSentenceLines(text: string): string[] {
 	return text
-		.split(/[.!?\n]+/)
-		.map((line) => line.trim())
+		.split(/(?<=[.!?])\s+|\n+/)
+		.map((line) => line.trim().replace(/[.!?]+$/, ""))
 		.filter(Boolean);
 }
 

@@ -3,6 +3,7 @@
 ### Fixed
 - Fixed shell-output sanitization to remove lone surrogates, DEL, and C1 controls while preserving valid Unicode pairs.
 - Fixed public agent-loop streams to complete with an error assistant message when the detached async loop fails before normal `agent_end`.
+- Fixed compaction prohibition extraction to avoid splitting version-number sentences into mid-clause rule fragments.
 
 ## [0.81.6] - 2026-07-06
 

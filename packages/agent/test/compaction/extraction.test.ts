@@ -182,6 +182,20 @@ describe("extractCompactionFacts", () => {
 		expect(facts.activeTaskSource).toBe("Resume");
 	});
 
+	it("does not harvest subordinate prohibition fragments as standalone rules", () => {
+		resetEntryCounter();
+		const text =
+			"v0.81.4-v0.81.6 are done and released/committed — do not touch them beyond what these two plans specify.";
+		const facts = extractCompactionFacts([createMessageEntry(createUserMessage(text))], 0, 1);
+
+		expect(facts.prohibitions).toEqual([
+			"v0.81.4-v0.81.6 are done and released/committed — do not touch them beyond what these two plans specify",
+		]);
+		expect(facts.prohibitions).not.toContain(
+			"are done and released/committed — do not touch them beyond what these two plans specify",
+		);
+	});
+
 	it("does not harvest prohibitions from pasted documents and caps the rule set", () => {
 		resetEntryCounter();
 		// A pasted instruction document (field incident: 13 fragment rules extracted from one
