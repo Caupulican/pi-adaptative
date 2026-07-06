@@ -123,8 +123,10 @@ ${input.recentTurnText}
 
 Analyze this turn against the existing memory and output your memory updates.`;
 
+		let usage: Usage | undefined;
 		try {
 			const compResult = await input.complete(systemPrompt, userPrompt);
+			usage = compResult.usage;
 			const text = compResult.text;
 
 			const jsonMatch = text.match(/```json\s*([\s\S]*?)\s*```/) || text.match(/{[\s\S]*}/);
@@ -186,7 +188,7 @@ Analyze this turn against the existing memory and output your memory updates.`;
 			};
 			return {
 				writes: [],
-				usage: emptyUsage,
+				usage: usage ?? emptyUsage,
 				rationale: `Error during reflection: ${String(err)}`,
 			};
 		}

@@ -144,6 +144,21 @@ Some conversational prelude.
 
 		const result = await engine.reflect(input);
 		expect(result.writes).toEqual([]);
+		expect(result.usage).toEqual(defaultUsage);
 		expect(result.rationale).toContain("Failed to locate JSON response");
+	});
+
+	it("preserves usage when fenced JSON is malformed", async () => {
+		const engine = new ReflectionEngine();
+		const result = await engine.reflect({
+			recentTurnText: "...",
+			existingMemory: "",
+			plan: { act: "reflect", reason: "test", tokenBudget: 1000 },
+			complete: async () => ({ text: "```json\n{ bad json\n```", usage: defaultUsage, stopReason: "stop" }),
+		});
+
+		expect(result.writes).toEqual([]);
+		expect(result.usage).toEqual(defaultUsage);
+		expect(result.rationale).toContain("Error during reflection");
 	});
 });
