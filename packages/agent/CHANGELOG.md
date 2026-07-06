@@ -1,5 +1,8 @@
 ## [Unreleased]
 
+### Fixed
+- Fixed provider-failure classification so numeric HTTP status patterns only match standalone codes, not digits embedded in longer tokens.
+
 ## [0.81.5] - 2026-07-06
 
 ### Fixed

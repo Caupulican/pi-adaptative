@@ -129,23 +129,14 @@ describe("classifyFailure", () => {
 		expect(classifyFailure({ message: "500 internal error" }).retryAfterMs).toBeUndefined();
 	});
 
-	it("bare-substring matching for numeric status codes", () => {
-		// 429 matches as bare substring
-		expect(classifyFailure({ message: "code429" })).toMatchObject({
-			reason: "rate_limit",
-			retryable: true,
-		});
-		// 500 matches as bare substring
-		expect(classifyFailure({ message: "abc500def" })).toMatchObject({
-			reason: "server_error",
-			retryable: true,
-		});
-		// 502 matches as bare substring
-		expect(classifyFailure({ message: "x502y" })).toMatchObject({
-			reason: "server_error",
-			retryable: true,
-		});
-		// 501 must NOT match (not in the supported range)
+	it("matches numeric status codes only as standalone codes", () => {
+		for (const message of ["429", "HTTP 429 Too Many Requests", "status:429", "(500)", "502 Bad Gateway"]) {
+			expect(classifyFailure({ message }).retryable, message).toBe(true);
+		}
+		expect(classifyFailure({ message: "code429" })).toMatchObject({ reason: "unknown", retryable: false });
+		expect(classifyFailure({ message: "4290" })).toMatchObject({ reason: "unknown", retryable: false });
+		expect(classifyFailure({ message: "abc500def" })).toMatchObject({ reason: "unknown", retryable: false });
+		expect(classifyFailure({ message: "x502y" })).toMatchObject({ reason: "unknown", retryable: false });
 		expect(classifyFailure({ message: "501 Not Implemented" })).toMatchObject({
 			reason: "unknown",
 			retryable: false,

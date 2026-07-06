@@ -50,11 +50,11 @@ export interface ClassifyFailureInput {
 const BILLING_OR_QUOTA =
 	/GoUsageLimitError|FreeUsageLimitError|Monthly usage limit reached|available balance|insufficient_quota|out of budget|quota exceeded|billing|usage.?limit(?:s)?\s*(?:reached|exceeded|hit)|usage_limit_reached|hit your usage limit|hit your ChatGPT usage limit/i;
 const AUTH = /\b401\b|unauthorized|invalid.?api.?key|authentication.?error|forbidden|permission.?denied/i;
-const RATE_LIMIT = /rate.?limit|too many requests|429/i;
+const RATE_LIMIT = /rate.?limit|too many requests|(?<![A-Za-z0-9])429(?![A-Za-z0-9])/i;
 const OVERLOADED = /overloaded/i;
 const STREAM_STALL = /stream stalled|ended without|stream ended before message_stop|reset before headers/i;
 const SERVER_ERROR =
-	/500|502|503|504|service.?unavailable|server.?error|internal.?error|provider.?returned.?error|upstream.?connect|http2 request did not get a response|retry delay/i;
+	/(?<![A-Za-z0-9])(?:500|502|503|504)(?![A-Za-z0-9])|service.?unavailable|server.?error|internal.?error|provider.?returned.?error|upstream.?connect|http2 request did not get a response|retry delay/i;
 const NETWORK =
 	/network.?error|connection.?error|connection.?refused|connection.?lost|websocket.?closed|websocket.?error|other side closed|fetch failed|socket hang up|timed? out|timeout|terminated/i;
 
