@@ -309,6 +309,23 @@ function extractZipArchive(archivePath: string, extractDir: string, assetName: s
 }
 
 // Download and install a tool
+const toolDownloadPromises = new Map<"fd" | "rg", Promise<string | undefined>>();
+
+export function runExclusiveToolDownload(
+	tool: "fd" | "rg",
+	installer: () => Promise<string | undefined>,
+): Promise<string | undefined> {
+	const existing = toolDownloadPromises.get(tool);
+	if (existing) return existing;
+	const promise = installer().finally(() => {
+		if (toolDownloadPromises.get(tool) === promise) {
+			toolDownloadPromises.delete(tool);
+		}
+	});
+	toolDownloadPromises.set(tool, promise);
+	return promise;
+}
+
 async function downloadTool(tool: "fd" | "rg"): Promise<string> {
 	const config = TOOLS[tool];
 	if (!config) throw new Error(`Unknown tool: ${tool}`);
@@ -708,7 +725,7 @@ export async function ensureTool(tool: "fd" | "rg", silent: boolean = false): Pr
 	}
 
 	try {
-		const path = await downloadTool(tool);
+		const path = await runExclusiveToolDownload(tool, () => downloadTool(tool));
 		if (!silent) {
 			console.log(chalk.dim(`${config.name} installed to ${path}`));
 		}
