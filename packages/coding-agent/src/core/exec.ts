@@ -3,6 +3,7 @@
  */
 
 import { spawn } from "node:child_process";
+import { StringDecoder } from "node:string_decoder";
 import { killTree } from "@caupulican/pi-agent-core/node";
 import { waitForChildProcess } from "../utils/child-process.ts";
 
@@ -106,6 +107,8 @@ export async function execCommand(
 			options?.maxBuffer !== undefined && options.maxBuffer > 0 ? options.maxBuffer : DEFAULT_EXEC_MAX_BUFFER;
 		const stdout = createRollingOutputBuffer(maxBuffer);
 		const stderr = createRollingOutputBuffer(maxBuffer);
+		const stdoutDecoder = new StringDecoder("utf8");
+		const stderrDecoder = new StringDecoder("utf8");
 		let killed = false;
 		let timeoutId: NodeJS.Timeout | undefined;
 
@@ -132,15 +135,17 @@ export async function execCommand(
 			}, options.timeout);
 		}
 
-		proc.stdout?.on("data", (data) => {
-			stdout.push(data.toString());
+		proc.stdout?.on("data", (data: Buffer) => {
+			stdout.push(stdoutDecoder.write(data));
 		});
 
-		proc.stderr?.on("data", (data) => {
-			stderr.push(data.toString());
+		proc.stderr?.on("data", (data: Buffer) => {
+			stderr.push(stderrDecoder.write(data));
 		});
 
 		const settle = (code: number) => {
+			stdout.push(stdoutDecoder.end());
+			stderr.push(stderrDecoder.end());
 			if (timeoutId) clearTimeout(timeoutId);
 			if (options?.signal) {
 				options.signal.removeEventListener("abort", killProcess);

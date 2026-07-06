@@ -9,6 +9,7 @@
 - Fixed reflection-engine malformed-response handling to preserve provider usage after completed calls.
 - Fixed research-lane spend limits to clamp configured lane budgets to the foreground capability envelope.
 - Fixed failure-corpus secret redaction for separator-bearing `sk-proj-` and `sk-ant-` API key formats.
+- Fixed shared exec output decoding to preserve multibyte UTF-8 characters split across stdout/stderr chunks.
 
 ## [0.81.6] - 2026-07-06
 

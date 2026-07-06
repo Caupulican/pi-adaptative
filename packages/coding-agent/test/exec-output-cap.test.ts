@@ -2,6 +2,18 @@ import { describe, expect, it } from "vitest";
 import { execCommand } from "../src/core/exec.ts";
 
 describe("execCommand output retention", () => {
+	it("decodes multibyte stdout characters across chunk boundaries", async () => {
+		const result = await execCommand(
+			process.execPath,
+			[
+				"-e",
+				"process.stdout.write(Buffer.from([0xf0,0x9f])); setTimeout(() => process.stdout.write(Buffer.from([0x8e,0x89])), 5);",
+			],
+			process.cwd(),
+		);
+
+		expect(result.stdout).toBe("🎉");
+	});
 	it("caps runaway stdout to the configured buffer and flags truncation", async () => {
 		const result = await execCommand(
 			process.execPath,
