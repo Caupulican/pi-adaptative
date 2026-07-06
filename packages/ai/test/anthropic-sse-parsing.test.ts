@@ -1,7 +1,7 @@
 import type Anthropic from "@anthropic-ai/sdk";
 import { Type } from "typebox";
 import { describe, expect, it } from "vitest";
-import { getModel } from "../src/models.ts";
+import { calculateCost, getModel } from "../src/models.ts";
 import { streamAnthropic } from "../src/providers/anthropic.ts";
 import type { Context, ToolCall } from "../src/types.ts";
 
@@ -185,5 +185,28 @@ describe("Anthropic raw SSE parsing", () => {
 		expect(result.stopReason).toBe("stop");
 		expect(result.errorMessage).toBeUndefined();
 		expect(result.content).toEqual([{ type: "text", text: "Hello" }]);
+		const expectedTotal =
+			result.usage.cost.input +
+			result.usage.cost.output +
+			result.usage.cost.cacheRead +
+			result.usage.cost.cacheWrite;
+		expect(result.usage.cost.total).toBe(expectedTotal);
+		expect(result.usage.cost.output).toBeGreaterThan(0);
+	});
+
+	it("preserves explicitly provider-supplied usage cost totals", () => {
+		const model = getModel("anthropic", "claude-haiku-4-5");
+		const usage = {
+			input: 12,
+			output: 5,
+			cacheRead: 0,
+			cacheWrite: 0,
+			totalTokens: 17,
+			cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, total: 123 },
+		};
+
+		calculateCost(model, usage, { providerSuppliedTotal: true });
+
+		expect(usage.cost.total).toBe(123);
 	});
 });

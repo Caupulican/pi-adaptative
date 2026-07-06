@@ -1,5 +1,8 @@
 ## [Unreleased]
 
+### Fixed
+- Fixed streamed Anthropic usage cost totals so output-token cost recomputes after `message_delta` instead of staying at the input-only `message_start` total.
+
 ## [0.81.3] - 2026-07-05
 
 ## [0.81.2] - 2026-07-05

@@ -345,7 +345,9 @@ export async function processResponsesStream<TApi extends Api>(
 				cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, total: (response.usage as any).cost || 0 },
 			};
 		}
-		calculateCost(model, output.usage);
+		calculateCost(model, output.usage, {
+			providerSuppliedTotal: Boolean((response.usage as { cost?: number }).cost),
+		});
 		applyFuguUltraPricing(model, output.usage);
 		if (options?.applyServiceTierPricing) {
 			const serviceTier = options.resolveServiceTier

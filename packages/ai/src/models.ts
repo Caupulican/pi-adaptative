@@ -36,12 +36,16 @@ export function getModels<TProvider extends KnownProvider>(
 	return models ? (Array.from(models.values()) as Model<ModelApi<TProvider, keyof (typeof MODELS)[TProvider]>>[]) : [];
 }
 
-export function calculateCost<TApi extends Api>(model: Model<TApi>, usage: Usage): Usage["cost"] {
+export function calculateCost<TApi extends Api>(
+	model: Model<TApi>,
+	usage: Usage,
+	options: { providerSuppliedTotal?: boolean } = {},
+): Usage["cost"] {
 	usage.cost.input = (model.cost.input / 1000000) * usage.input;
 	usage.cost.output = (model.cost.output / 1000000) * usage.output;
 	usage.cost.cacheRead = (model.cost.cacheRead / 1000000) * usage.cacheRead;
 	usage.cost.cacheWrite = (model.cost.cacheWrite / 1000000) * usage.cacheWrite;
-	if (usage.cost.total <= 0) {
+	if (!options.providerSuppliedTotal) {
 		usage.cost.total = usage.cost.input + usage.cost.output + usage.cost.cacheRead + usage.cost.cacheWrite;
 	}
 	return usage.cost;

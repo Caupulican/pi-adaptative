@@ -1053,7 +1053,7 @@ function parseChunkUsage(
 		totalTokens: input + outputTokens + cacheReadTokens + cacheWriteTokens,
 		cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, total: rawUsage.cost || 0 },
 	};
-	calculateCost(model, usage);
+	calculateCost(model, usage, { providerSuppliedTotal: Boolean(rawUsage.cost) });
 	return usage;
 }
 
