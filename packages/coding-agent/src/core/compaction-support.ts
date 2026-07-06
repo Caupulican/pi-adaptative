@@ -37,6 +37,10 @@ export class CompactionSupport {
 		this.deps = deps;
 	}
 
+	getLastSelectionReason(): string | undefined {
+		return this.lastSelectionReason;
+	}
+
 	getAdaptedSettings(): CompactionSettings {
 		const settings = this.deps.getSettingsManager().getCompactionSettings();
 		const model = this.deps.getModel();

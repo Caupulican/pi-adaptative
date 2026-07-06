@@ -2,6 +2,7 @@
 
 ### Fixed
 - Fixed local-model compaction capacity checks to use measured served context-window evidence from the fitness probe instead of trusting the registered window guess.
+- Fixed manual `/compact` to use the auto-compaction retry ladder and deterministic checkpoint fallback instead of failing after one summarizer gate error.
 
 ## [0.81.5] - 2026-07-06
 

@@ -11,6 +11,7 @@ type SessionWithCompactionInternals = {
 	_checkCompaction: (assistantMessage: AssistantMessage, skipAbortedCheck?: boolean) => Promise<boolean>;
 	_runAutoCompaction: (reason: "overflow" | "threshold", willRetry: boolean) => Promise<boolean>;
 	_resolveCompactionModel: (sessionModel: Model<string>) => Model<string>;
+	_compactWithRetry: () => Promise<never>;
 };
 
 function createUsage(totalTokens: number) {
@@ -148,6 +149,25 @@ describe("AgentSession compaction characterization", () => {
 
 		expect(result.summary).toBe("summary from custom stream");
 		expect(getStreamCallCount()).toBe(1);
+	});
+
+	it("manual compaction falls through the retry ladder to a deterministic checkpoint on gate failure", async () => {
+		const harness = await createHarness({ withConfiguredAuth: true });
+		harnesses.push(harness);
+		seedCompactableSession(harness);
+		const sessionInternals = harness.session as unknown as SessionWithCompactionInternals;
+		let callCount = 0;
+		sessionInternals._compactWithRetry = async () => {
+			callCount++;
+			throw new Error("gate-failed: missing ## Files");
+		};
+
+		const result = await harness.session.compact();
+
+		expect(result.summary).toContain("Deterministic checkpoint");
+		expect(callCount).toBeGreaterThan(1);
+		const compactionEntries = harness.sessionManager.getEntries().filter((entry) => entry.type === "compaction");
+		expect(compactionEntries).toHaveLength(1);
 	});
 
 	it("auto-compacts with a custom streamFn when registry auth is absent", async () => {
