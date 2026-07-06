@@ -1,4 +1,4 @@
-## [Unreleased]
+## [0.81.4] - 2026-07-06
 
 ### Added
 - Added `summarizerCanIngest` so hosts can reject compaction summarizer candidates whose context window cannot hold the actual summarization input.
