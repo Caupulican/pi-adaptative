@@ -433,6 +433,18 @@ describe("StdinBuffer", () => {
 			assert.deepStrictEqual(emittedPaste, ["Hello 世界 🎉"]);
 			assert.deepStrictEqual(emittedSequences, []);
 		});
+
+		it("should flush unterminated bracketed paste and resume normal input", async () => {
+			processInput("\x1b[200~unterminated");
+			assert.deepStrictEqual(emittedPaste, []);
+			assert.deepStrictEqual(emittedSequences, []);
+
+			await wait(15);
+			processInput("x");
+
+			assert.deepStrictEqual(emittedPaste, ["unterminated"]);
+			assert.deepStrictEqual(emittedSequences, ["x"]);
+		});
 	});
 
 	describe("Destroy", () => {

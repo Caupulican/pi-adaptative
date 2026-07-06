@@ -3,6 +3,7 @@
 ### Fixed
 - Fixed Kitty keyboard protocol decoding so unprintable functional PUA keys are not inserted as prompt text.
 - Fixed ANSI measurement to treat all complete CSI sequences as zero-width without swallowing following visible text.
+- Fixed unterminated bracketed paste input to flush after the stdin buffer timeout and resume normal key handling.
 
 ## [0.81.6] - 2026-07-06
 

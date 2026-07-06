@@ -274,6 +274,7 @@ export type StdinBufferEventMap = {
 export class StdinBuffer extends EventEmitter<StdinBufferEventMap> {
 	private buffer: string = "";
 	private timeout: ReturnType<typeof setTimeout> | null = null;
+	private pasteTimeout: ReturnType<typeof setTimeout> | null = null;
 	private readonly timeoutMs: number;
 	private pasteMode: boolean = false;
 	private pasteBuffer: string = "";
@@ -316,20 +317,8 @@ export class StdinBuffer extends EventEmitter<StdinBufferEventMap> {
 			this.pasteBuffer += this.buffer;
 			this.buffer = "";
 
-			const endIndex = this.pasteBuffer.indexOf(BRACKETED_PASTE_END);
-			if (endIndex !== -1) {
-				const pastedContent = this.pasteBuffer.slice(0, endIndex);
-				const remaining = this.pasteBuffer.slice(endIndex + BRACKETED_PASTE_END.length);
-
-				this.pasteMode = false;
-				this.pasteBuffer = "";
-				this.pendingKittyPrintableCodepoint = undefined;
-
-				this.emit("paste", pastedContent);
-
-				if (remaining.length > 0) {
-					this.process(remaining);
-				}
+			if (!this.emitCompletePasteIfPresent()) {
+				this.armPasteTimeout();
 			}
 			return;
 		}
@@ -350,20 +339,8 @@ export class StdinBuffer extends EventEmitter<StdinBufferEventMap> {
 			this.pasteBuffer = this.buffer;
 			this.buffer = "";
 
-			const endIndex = this.pasteBuffer.indexOf(BRACKETED_PASTE_END);
-			if (endIndex !== -1) {
-				const pastedContent = this.pasteBuffer.slice(0, endIndex);
-				const remaining = this.pasteBuffer.slice(endIndex + BRACKETED_PASTE_END.length);
-
-				this.pasteMode = false;
-				this.pasteBuffer = "";
-				this.pendingKittyPrintableCodepoint = undefined;
-
-				this.emit("paste", pastedContent);
-
-				if (remaining.length > 0) {
-					this.process(remaining);
-				}
+			if (!this.emitCompletePasteIfPresent()) {
+				this.armPasteTimeout();
 			}
 			return;
 		}
@@ -384,6 +361,44 @@ export class StdinBuffer extends EventEmitter<StdinBufferEventMap> {
 				}
 			}, this.timeoutMs);
 		}
+	}
+
+	private emitCompletePasteIfPresent(): boolean {
+		const endIndex = this.pasteBuffer.indexOf(BRACKETED_PASTE_END);
+		if (endIndex === -1) return false;
+
+		const pastedContent = this.pasteBuffer.slice(0, endIndex);
+		const remaining = this.pasteBuffer.slice(endIndex + BRACKETED_PASTE_END.length);
+		this.closePasteMode();
+		this.emit("paste", pastedContent);
+
+		if (remaining.length > 0) {
+			this.process(remaining);
+		}
+		return true;
+	}
+
+	private armPasteTimeout(): void {
+		if (this.pasteTimeout) {
+			clearTimeout(this.pasteTimeout);
+		}
+		this.pasteTimeout = setTimeout(() => {
+			this.pasteTimeout = null;
+			if (!this.pasteMode) return;
+			const pastedContent = this.pasteBuffer;
+			this.closePasteMode();
+			this.emit("paste", pastedContent);
+		}, this.timeoutMs);
+	}
+
+	private closePasteMode(): void {
+		if (this.pasteTimeout) {
+			clearTimeout(this.pasteTimeout);
+			this.pasteTimeout = null;
+		}
+		this.pasteMode = false;
+		this.pasteBuffer = "";
+		this.pendingKittyPrintableCodepoint = undefined;
 	}
 
 	private emitDataSequence(sequence: string): void {
@@ -417,6 +432,10 @@ export class StdinBuffer extends EventEmitter<StdinBufferEventMap> {
 		if (this.timeout) {
 			clearTimeout(this.timeout);
 			this.timeout = null;
+		}
+		if (this.pasteTimeout) {
+			clearTimeout(this.pasteTimeout);
+			this.pasteTimeout = null;
 		}
 		this.buffer = "";
 		this.pasteMode = false;
