@@ -248,6 +248,34 @@ describe("model router status formatting", () => {
 		expect(textExp).toContain("Last decision: expensive/approval-required -> expensive (release_or_publish, routed)");
 	});
 
+	it("renders provider failure corpus counters only when nonzero", () => {
+		const zero = formatModelRouterStatus(
+			{ enabled: true },
+			undefined,
+			(label) => label,
+			[],
+			undefined,
+			undefined,
+			undefined,
+			{ exhausted: [], failureStats: { total: 0, unknown: 0 } },
+		);
+		expect(zero).not.toContain("Provider failures:");
+
+		const text = formatModelRouterStatus(
+			{ enabled: true },
+			undefined,
+			(label) => label,
+			[],
+			undefined,
+			undefined,
+			undefined,
+			{ exhausted: [], failureStats: { total: 3, unknown: 2 } },
+		);
+		expect(text).toContain(
+			"Provider failures: 3 provider failures this session (2 unclassified — see failure corpus)",
+		);
+	});
+
 	it("extracts recent persisted decisions from session custom entries and ignores malformed safely", () => {
 		const validRoute: RouteDecision = {
 			tier: "cheap",

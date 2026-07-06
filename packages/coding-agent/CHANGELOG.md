@@ -2,6 +2,7 @@
 
 ### Added
 - Added FastContext-1.0-4B and Ornith-1.0-9B to `/models` suggestions for one-step pull, probe, and role assignment; added the `scout` fitness role that writes `scout.model` and `scout.enabled`, gated on the `scout_auto` fitness exam.
+- Added a bounded, redacted local provider-failure corpus plus provider-failure status counts for unknown-classification evidence gathering.
 
 ### Changed
 - Compaction summarizer selection now consults the fitness doctrine (digest lane, subtractive) and the exhausted-provider registry; every fallback is visible.

@@ -23,6 +23,18 @@ Use `/logout` to clear credentials. Tokens are stored per provider in `~/.pi/age
 
 If a subscription provider reports a terminal usage limit, Pi stops retrying that exhausted model, announces the condition, and switches the session to that provider's default model when it is authenticated and not already exhausted. API-key/metered quota failures do not auto-hop; Pi halts the turn and asks you to switch models, wait for the limit window, or resend explicitly.
 
+## Provider Failure Evidence Corpus
+
+Pi records local provider failures to `~/.pi/agent/state/failure-corpus.jsonl` so unclassified provider messages become reviewable evidence. Records contain `{ts, provider, modelId, reason, retryable, message}`; messages are truncated to 500 characters and redacted for `sk-...` keys, `Bearer ...` tokens, and long base64-like secrets. The file stays local, is never uploaded by pi, and is rotated to 512 KB / newest 1,000 records. You may delete it at any time.
+
+Evidence grades for adding future provider signatures:
+
+- Grade A: executable SDK fixture that constructs the vendor SDK error and classifies its actual `.message`.
+- Grade B: redacted corpus capture from real traffic.
+- Grade C: literal adapter throw-site in pi source.
+
+Promotion procedure: evidence → provider signature row with source/grade → paired fixture tests with and without provider context → red-team ledger closure. Documentation memory alone is not admissible evidence.
+
 ## Running Multiple Providers at Once
 
 Pi does not keep a single global active provider for running agents. Each Pi process/session has its own selected model, and `auth.json` can hold credentials for many providers at the same time. After logging in to both subscription providers, start separate terminals with explicit provider or model selection:

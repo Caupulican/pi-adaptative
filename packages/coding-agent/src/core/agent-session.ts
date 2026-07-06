@@ -788,7 +788,7 @@ export class AgentSession {
 			getSessionManager: () => this.sessionManager,
 			getModelRegistry: () => this._modelRegistry,
 			isModelExhausted: (model) => this._billingFailover.isExhausted(`${model.provider}/${model.id}`),
-			getFailoverStatus: () => this._billingFailover.getStatus(),
+			getFailoverStatus: () => ({ ...this._billingFailover.getStatus(), failureStats: this._failureCorpus.stats() }),
 			getAgentDir: () => this._agentDir,
 			getReflectionSignal: () => this._reflectionAbort.signal,
 			getBaseSystemPrompt: () => this._baseSystemPrompt,

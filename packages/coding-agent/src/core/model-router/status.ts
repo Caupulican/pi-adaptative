@@ -14,7 +14,11 @@ export type ModelRouterFitnessStatuses = Partial<
 	Record<"cheap" | "medium" | "expensive", ModelRouterTierFitnessStatus>
 >;
 
-export type ModelRouterFailoverStatus = { exhausted: string[]; lastNotice?: string };
+export type ModelRouterFailoverStatus = {
+	exhausted: string[];
+	lastNotice?: string;
+	failureStats?: { total: number; unknown: number };
+};
 
 export type ModelRouterStatusSettings = {
 	enabled: boolean;
@@ -174,6 +178,12 @@ export function formatModelRouterStatus(
 	}
 	if (failoverStatus?.lastNotice) {
 		lines.push(`${formatLabel("Last failover:")} ${failoverStatus.lastNotice}`);
+	}
+	if (failoverStatus?.failureStats && failoverStatus.failureStats.total > 0) {
+		const { total, unknown } = failoverStatus.failureStats;
+		lines.push(
+			`${formatLabel("Provider failures:")} ${total} provider failures this session (${unknown} unclassified — see failure corpus)`,
+		);
 	}
 	if (recentDecisions.length > 0) {
 		lines.push(formatLabel("Recent decisions:"));
