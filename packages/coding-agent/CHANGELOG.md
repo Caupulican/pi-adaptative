@@ -8,6 +8,7 @@
 - Fixed scout truncation accounting to count assistant output tokens against the output-token cap instead of total input plus output tokens.
 - Fixed reflection-engine malformed-response handling to preserve provider usage after completed calls.
 - Fixed research-lane spend limits to clamp configured lane budgets to the foreground capability envelope.
+- Fixed failure-corpus secret redaction for separator-bearing `sk-proj-` and `sk-ant-` API key formats.
 
 ## [0.81.6] - 2026-07-06
 

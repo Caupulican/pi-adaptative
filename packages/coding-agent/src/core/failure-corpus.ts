@@ -82,7 +82,7 @@ export class FailureCorpusRecorder {
 
 export function redactSecrets(message: string): string {
 	return message
-		.replace(/sk-[A-Za-z0-9]{8,}/g, "[redacted]")
+		.replace(/sk-(?:proj-|ant-)?[A-Za-z0-9._-]{8,}/g, "[redacted]")
 		.replace(/Bearer\s+[A-Za-z0-9._~+/=-]+/gi, "Bearer [redacted]")
 		.replace(/[A-Za-z0-9+/]{40,}={0,2}/g, "[redacted]");
 }
