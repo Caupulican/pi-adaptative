@@ -50,6 +50,8 @@ export async function runCompactionLoop(deps: CompactionLoopDeps): Promise<Compa
 	let lastParams: CompactionCycleParams | undefined;
 	let lastObservedTokens: number | undefined;
 	let appliedResult: CompactionResult | undefined;
+	let ownTrailingCompactionId: string | undefined;
+	let ownTrailingCompactionNeedsRetry = false;
 	let baseKeepRecent = deps.getBaseKeepRecentTokens ? deps.getBaseKeepRecentTokens() : DEFAULT_KEEP_RECENT;
 	if (!Number.isFinite(baseKeepRecent) || baseKeepRecent <= 0) {
 		baseKeepRecent = DEFAULT_KEEP_RECENT;
@@ -61,11 +63,13 @@ export async function runCompactionLoop(deps: CompactionLoopDeps): Promise<Compa
 		}
 
 		const branch = deps.getBranch();
-		if (branch.length > 0 && branch[branch.length - 1]?.type === "compaction") {
-			if (appliedResult) {
-				return { kind: "success", result: appliedResult, cycles: cycle - 1 };
+		const trailingEntry = branch[branch.length - 1];
+		if (branch.length > 0 && trailingEntry?.type === "compaction") {
+			if (appliedResult && trailingEntry.id === ownTrailingCompactionId) {
+				if (!ownTrailingCompactionNeedsRetry) return { kind: "success", result: appliedResult, cycles: cycle - 1 };
+			} else {
+				return { kind: "skip", reason: "already compacted" };
 			}
-			return { kind: "skip", reason: "already compacted" };
 		}
 
 		const observedTokens = deps.measureLiveTokens();
@@ -130,12 +134,17 @@ export async function runCompactionLoop(deps: CompactionLoopDeps): Promise<Compa
 		}
 		await deps.apply(result);
 		appliedResult = result;
+		const branchAfterApply = deps.getBranch();
+		const trailingAfterApply = branchAfterApply[branchAfterApply.length - 1];
+		ownTrailingCompactionId = trailingAfterApply?.type === "compaction" ? trailingAfterApply.id : undefined;
 
 		const measuredAfter = deps.measureLiveTokens();
 		if (measuredAfter <= deps.getTriggerThreshold() - deps.getMargin()) {
+			ownTrailingCompactionNeedsRetry = false;
 			return { kind: "success", result, cycles: cycle };
 		}
 
+		ownTrailingCompactionNeedsRetry = true;
 		lastCause = "effect-not-restored";
 		deps.onTransition({ cycle: cycle + 1, from: "step5", cause: lastCause });
 	}

@@ -208,7 +208,18 @@ describe("runCompactionLoop", () => {
 				resolveModelAndAuth: async () => ({ model: createModel() }),
 				summarizeAndVerify,
 				buildDeterministicCheckpoint: async () => ({ result: createResult("det") }),
-				apply: async () => {},
+				apply: async (result) => {
+					branch.push({
+						type: "compaction",
+						id: `compaction-${summarizeCalls}`,
+						parentId: branch.at(-1)?.id ?? null,
+						timestamp: new Date().toISOString(),
+						summary: result.summary,
+						firstKeptEntryId: result.firstKeptEntryId,
+						tokensBefore: result.tokensBefore,
+						details: result.details,
+					});
+				},
 				onTransition: () => {},
 			}),
 		);
