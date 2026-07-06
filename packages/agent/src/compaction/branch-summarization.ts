@@ -5,7 +5,7 @@
  * a summary of the branch being left so context isn't lost.
  */
 
-import type { Model } from "@caupulican/pi-ai";
+import type { AssistantMessage, Context, Model, SimpleStreamOptions } from "@caupulican/pi-ai";
 import { completeSimple } from "@caupulican/pi-ai";
 import {
 	convertToLlm,
@@ -13,8 +13,9 @@ import {
 	createCompactionSummaryMessage,
 	createCustomMessage,
 } from "../messages.ts";
+import { classifyFailure } from "../reliability/classifier.ts";
 import type { ReadonlySessionManager, SessionEntry } from "../session/session-manager.ts";
-import type { AgentMessage } from "../types.ts";
+import type { AgentMessage, StreamFn } from "../types.ts";
 import { estimateTokens } from "./compaction.ts";
 import {
 	computeFileLists,
@@ -77,6 +78,8 @@ export interface GenerateBranchSummaryOptions {
 	replaceInstructions?: boolean;
 	/** Tokens reserved for prompt + LLM response (default 16384) */
 	reserveTokens?: number;
+	/** Optional wrapped stream function (watchdog/retry-capable host path). */
+	streamFn?: StreamFn;
 }
 
 // ============================================================================
@@ -280,11 +283,31 @@ Keep each section concise. Preserve exact file paths, function names, and error 
  * @param entries - Session entries to summarize (chronological order)
  * @param options - Generation options
  */
+async function completeBranchSummary(
+	model: Model<any>,
+	context: Context,
+	options: SimpleStreamOptions,
+	streamFn?: StreamFn,
+): Promise<AssistantMessage> {
+	if (!streamFn) return completeSimple(model, context, options);
+	const stream = await streamFn(model, context, options);
+	return stream.result();
+}
+
 export async function generateBranchSummary(
 	entries: SessionEntry[],
 	options: GenerateBranchSummaryOptions,
 ): Promise<BranchSummaryResult> {
-	const { model, apiKey, headers, signal, customInstructions, replaceInstructions, reserveTokens = 16384 } = options;
+	const {
+		model,
+		apiKey,
+		headers,
+		signal,
+		customInstructions,
+		replaceInstructions,
+		reserveTokens = 16384,
+		streamFn,
+	} = options;
 
 	// Token budget = context window minus reserved space for prompt + response
 	const contextWindow = model.contextWindow || 128000;
@@ -320,12 +343,21 @@ export async function generateBranchSummary(
 		},
 	];
 
-	// Call LLM for summarization
-	const response = await completeSimple(
-		model,
-		{ systemPrompt: SUMMARIZATION_SYSTEM_PROMPT, messages: summarizationMessages },
-		{ apiKey, headers, signal, maxTokens: 2048 },
-	);
+	// Call LLM for summarization. Retry transient provider/watchdog failures so branch summaries
+	// use the same reliability doctrine as compaction instead of bypassing the host stream wrapper.
+	let response: AssistantMessage | undefined;
+	for (let attempt = 0; attempt < 3; attempt++) {
+		response = await completeBranchSummary(
+			model,
+			{ systemPrompt: SUMMARIZATION_SYSTEM_PROMPT, messages: summarizationMessages },
+			{ apiKey, headers, signal, maxTokens: 2048 },
+			streamFn,
+		);
+		if (response.stopReason !== "error") break;
+		const classified = classifyFailure({ message: response.errorMessage ?? "", provider: response.provider });
+		if (!classified.retryable || signal.aborted) break;
+	}
+	if (!response) return { error: "Summarization failed" };
 
 	// Check if aborted or errored
 	if (response.stopReason === "aborted") {

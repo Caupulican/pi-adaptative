@@ -152,6 +152,7 @@ export class SessionTreeNavigator {
 					customInstructions,
 					replaceInstructions,
 					reserveTokens: branchSummarySettings.reserveTokens,
+					streamFn: this.deps.getAgent().streamFn,
 				});
 				if (result.aborted) {
 					return { cancelled: true, aborted: true };

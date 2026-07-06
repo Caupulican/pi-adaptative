@@ -7,6 +7,7 @@
 - Fixed compaction-loop failure mapping so provider errors containing "aborted" retry normally unless the compaction signal was actually aborted.
 - Fixed watchdog-wrapped and proxied streams that close without a terminal event to emit a synthetic error result instead of leaving `result()` unresolved.
 - Fixed compaction chunk sizing to leave input-bound headroom for per-chunk instructions and corrected the token-estimator comment.
+- Fixed branch summarization to use the host's wrapped stream path and retry retryable stream failures instead of bypassing the reliability kernel.
 
 ## [0.81.5] - 2026-07-06
 
