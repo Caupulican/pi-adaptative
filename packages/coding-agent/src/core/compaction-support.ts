@@ -6,7 +6,7 @@
  * session keeps same-signature private delegations at every call-in point.
  */
 import type { ThinkingLevel } from "@caupulican/pi-agent-core";
-import type { CompactionSettings } from "@caupulican/pi-agent-core/node";
+import { type CompactionSettings, summarizerCanIngest } from "@caupulican/pi-agent-core/node";
 import type { Model } from "@caupulican/pi-ai";
 import type { ModelRegistry } from "./model-registry.ts";
 import { resolveCliModel } from "./model-resolver.ts";
@@ -24,6 +24,8 @@ export interface CompactionSupportDeps {
 	getRequiredRequestAuth(model: Model<any>): Promise<{ apiKey?: string; headers?: Record<string, string> }>;
 	isModelExhausted(ref: string): boolean;
 	getStoredFitnessReport(ref: string): ModelFitnessReport | undefined;
+	/** Estimated tokens of the summarization input (live context; over-estimates, which is safe). */
+	estimateSummarizationInputTokens(): number;
 	emitWarning(message: string): void;
 }
 
@@ -140,6 +142,15 @@ export class CompactionSupport {
 			this.lastSelectionReason = `fallback:${selected.cause}`;
 			return sessionModel;
 		}
+		// Capacity is a hard constraint, independent of the fitness doctrine: a summarizer whose
+		// window cannot hold the actual span produces recall-empty checkpoints (local servers
+		// silently truncate over-window prompts instead of erroring), and the verification gate
+		// then fails deterministically.
+		const estimatedInputTokens = this.deps.estimateSummarizationInputTokens();
+		if (!summarizerCanIngest(selected.model, estimatedInputTokens)) {
+			this.lastSelectionReason = `fallback:window_too_small(~${Math.ceil(estimatedInputTokens / 1000)}k input vs ${selected.model.contextWindow} window)`;
+			return sessionModel;
+		}
 		const fitness = this.deps.getStoredFitnessReport(this.modelRef(selected.model));
 		const verdict = evaluateSurfaceFitness("compaction", fitness);
 		if (!verdict.fit) {
@@ -169,6 +180,16 @@ export class CompactionSupport {
 			const selected = this.selectConfiguredModel(explicitSetting);
 			this.lastSelectionReason = selected.model ? "explicit" : `fallback:${selected.cause}`;
 			if (!selected.model) this.deps.emitWarning(`Compaction summarizer ${this.lastSelectionReason}`);
+			// An explicit user choice is honored (Class C doctrine), but silently sending an
+			// over-window prompt yields a recall-empty summary — warn with the numbers.
+			if (selected.model) {
+				const estimatedInputTokens = this.deps.estimateSummarizationInputTokens();
+				if (!summarizerCanIngest(selected.model, estimatedInputTokens)) {
+					this.deps.emitWarning(
+						`Compaction summarizer (explicit setting) likely cannot ingest the current context: ~${Math.ceil(estimatedInputTokens / 1000)}k input tokens vs a ${selected.model.contextWindow}-token window`,
+					);
+				}
+			}
 			return selected.model ?? sessionModel;
 		}
 		const model = this.resolveDefaultModel(sessionModel);

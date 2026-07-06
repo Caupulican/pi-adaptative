@@ -148,6 +148,37 @@ describe("runCompactionLoop", () => {
 		expect(outcome.cycles).toBe(2);
 	});
 
+	it("escalates to the session tier when the summarizer length-stops", async () => {
+		const measureLiveTokens = scriptedMeasure([1200, 1200, 100]);
+		const summarizeAndVerify = vi.fn(async (params: CompactionCycleParams) => {
+			summarizeCalls += 1;
+			if (summarizeCalls === 1) {
+				expect(params.modelTier).toBe("cheap");
+				throw new Error("summary-length-stop: summarizer hit its output cap before completing the checkpoint");
+			}
+			expect(params.modelTier).toBe("session");
+			return { result: createResult("session-retry") };
+		});
+
+		const outcome = expectSuccess(
+			await runCompactionLoop({
+				getBranch: () => branch,
+				measureLiveTokens,
+				getTriggerThreshold: () => 1000,
+				getMargin: () => 10,
+				getBaseKeepRecentTokens: () => 800,
+				resolveModelAndAuth: async () => ({ model: createModel() }),
+				summarizeAndVerify,
+				buildDeterministicCheckpoint: async () => ({ result: createResult("det") }),
+				apply: async () => {},
+				onTransition: () => {},
+			}),
+		);
+
+		expect(summarizeAndVerify).toHaveBeenCalledTimes(2);
+		expect(outcome.cycles).toBe(2);
+	});
+
 	it("retries with chunked on effect-not-restored and decreasing keepRecent", async () => {
 		const measureLiveTokens = scriptedMeasure([1400, 1300, 1300, 1300, 1300, 800]);
 		const summarizeAndVerify = vi.fn(async (params: CompactionCycleParams) => {

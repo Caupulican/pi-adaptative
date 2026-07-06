@@ -172,7 +172,7 @@ function selectCycleParams(
 		deterministicOnly: false,
 	};
 
-	if (cause === "gate-failed" || cause === "auth-failed") {
+	if (cause === "gate-failed" || cause === "auth-failed" || cause === "length-stop") {
 		params.modelTier = "session";
 	} else if (cause === "input-overflow") {
 		params.chunked = true;
@@ -224,6 +224,8 @@ function mapFailureCause(error: unknown): string {
 	const message = error instanceof Error ? error.message : typeof error === "string" ? error : "";
 	if (message.includes("gate-failed")) return "gate-failed";
 	if (message.includes("input-overflow")) return "input-overflow";
+	// A length-stopped summary lost gated sections; escalating the tier buys a larger output cap.
+	if (message.includes("summary-length-stop")) return "length-stop";
 	if (message.includes("auto-compaction-cancelled") || message.includes("aborted")) return "aborted";
 	if (message.includes("auth") || message.includes("api key") || message.includes("not compacted"))
 		return "auth-failed";

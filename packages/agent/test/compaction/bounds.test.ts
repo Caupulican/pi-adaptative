@@ -30,7 +30,7 @@ function createModel(contextWindow: number, maxTokens = 2048): Model<"anthropic-
 	};
 }
 
-function response(text: string): AssistantMessage {
+function response(text: string, stopReason: AssistantMessage["stopReason"] = "stop"): AssistantMessage {
 	return {
 		role: "assistant",
 		content: [{ type: "text", text }],
@@ -45,7 +45,7 @@ function response(text: string): AssistantMessage {
 			totalTokens: 20,
 			cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, total: 0 },
 		},
-		stopReason: "stop",
+		stopReason,
 		timestamp: Date.now(),
 	};
 }
@@ -126,5 +126,84 @@ describe("compaction bounds", () => {
 		expect(summary).toContain("## Active Task");
 		expect(summary).toContain("### Mandatory Rules");
 		expect(summary).not.toContain("## Critical Context");
+	});
+
+	it("never drops the gate-checked Files/Done sections when truncating oversized output", async () => {
+		const oversized = [
+			"## Active Task",
+			"Keep this active task",
+			"",
+			"## Files",
+			"- src/a.ts — modified",
+			"",
+			"## Done",
+			"1. EDIT src/a.ts — done",
+			"",
+			"## Key Decisions",
+			"z".repeat(6000),
+			"",
+			"## Critical Context",
+			"z".repeat(6000),
+		].join("\n");
+		completeSimpleMock.mockResolvedValue(response(oversized));
+
+		const summary = await generateSummary(messages(10), createModel(200000), 1000, "test-key");
+
+		expect(summary).toContain("## Files");
+		expect(summary).toContain("## Done");
+		expect(summary).not.toContain("## Key Decisions");
+		expect(summary).not.toContain("## Critical Context");
+	});
+
+	it("throws summary-length-stop when the summarizer hits its output cap", async () => {
+		completeSimpleMock.mockResolvedValue(response("## Active Task\ntruncated mid-", "length"));
+
+		await expect(generateSummary(messages(10), createModel(200000), 16384, "test-key")).rejects.toThrow(
+			"summary-length-stop",
+		);
+	});
+
+	it("scales the summary output budget with the facts block instead of length-stopping on it", async () => {
+		completeSimpleMock.mockResolvedValue(response("## Active Task\nok"));
+		const smallFacts = "files:\nactions:\nprohibitions:";
+		const bigFacts = `files:\n${Array.from({ length: 60 }, (_, i) => `modified: src/dir/file-${i}.ts — EDIT`).join("\n")}\nactions:\n${Array.from({ length: 80 }, (_, i) => `EDIT src/dir/file-${i % 60}.ts — ok`).join("\n")}\nprohibitions:`;
+
+		await generateSummary(
+			messages(10),
+			createModel(200000),
+			16384,
+			"test-key",
+			undefined,
+			undefined,
+			undefined,
+			undefined,
+			undefined,
+			undefined,
+			undefined,
+			smallFacts,
+		);
+		const smallBudget = completeSimpleMock.mock.calls[0]?.[2]?.maxTokens as number;
+
+		completeSimpleMock.mockClear();
+		completeSimpleMock.mockResolvedValue(response("## Active Task\nok"));
+		await generateSummary(
+			messages(10),
+			createModel(200000),
+			16384,
+			"test-key",
+			undefined,
+			undefined,
+			undefined,
+			undefined,
+			undefined,
+			undefined,
+			undefined,
+			bigFacts,
+		);
+		const bigBudget = completeSimpleMock.mock.calls[0]?.[2]?.maxTokens as number;
+
+		expect(smallBudget).toBe(1500);
+		expect(bigBudget).toBeGreaterThan(smallBudget);
+		expect(bigBudget).toBeLessThanOrEqual(4000);
 	});
 });

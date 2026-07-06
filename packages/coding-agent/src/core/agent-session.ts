@@ -755,6 +755,9 @@ export class AgentSession {
 			getRequiredRequestAuth: (model) => this._getRequiredRequestAuth(model),
 			isModelExhausted: (ref) => this._billingFailover.isExhausted(ref),
 			getStoredFitnessReport: (ref) => this.getStoredFitnessReports().find((entry) => entry.model === ref)?.report,
+			// Live context is an over-estimate of the span to summarize (includes the kept tail) —
+			// conservative in the safe direction for the summarizer capacity check.
+			estimateSummarizationInputTokens: () => this._pipeline.estimateCurrentContextTokens(this.agent.state.messages),
 			emitWarning: (message) => this._emit({ type: "warning", message }),
 		});
 		this._pipeline = new ContextPipeline({

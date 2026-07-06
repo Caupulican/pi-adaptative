@@ -221,7 +221,33 @@ describe("extractCompactionFacts", () => {
 				"actions:\n" +
 				"EDIT src/b.ts — done\n" +
 				"prohibitions:\n" +
-				"Do not delete",
+				"Do not delete\n" +
+				"active task:\n" +
+				"Keep going",
 		);
+	});
+
+	it("facts block carries the active task text (bounded) so the gate's demand always reaches the prompt", () => {
+		const longTask = `fix the wedge ${"y".repeat(5000)}`;
+		const block = renderFactsBlock({
+			files: [],
+			actions: [],
+			prohibitions: [],
+			cancelledText: "",
+			activeTaskSource: longTask,
+		});
+
+		expect(block).toContain("active task:\nfix the wedge");
+		const taskLine = block.split("active task:\n")[1];
+		expect(taskLine.length).toBeLessThanOrEqual(4000);
+
+		const emptyBlock = renderFactsBlock({
+			files: [],
+			actions: [],
+			prohibitions: [],
+			cancelledText: "",
+			activeTaskSource: "",
+		});
+		expect(emptyBlock.endsWith("active task:")).toBe(true);
 	});
 });

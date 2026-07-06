@@ -577,7 +577,7 @@ export async function generateSummary(
 	factsBlock = "files:\nactions:\nprohibitions:",
 	chunked = false,
 ): Promise<string> {
-	const summaryBudget = getSummaryBudget(reserveTokens, model);
+	const summaryBudget = getSummaryBudget(reserveTokens, model, factsBlock);
 	const maxTokens = summaryBudget;
 
 	let promptSuffix = fillPromptTemplate(
@@ -638,6 +638,11 @@ export async function generateSummary(
 	if (response.stopReason === "error") {
 		throw new Error(`Summarization failed: ${response.errorMessage || "Unknown error"}`);
 	}
+	// A length-stopped checkpoint silently lost its tail sections — gating it as if complete
+	// guarantees a verification failure. Fail loudly so the compaction ladder escalates instead.
+	if (response.stopReason === "length") {
+		throw new Error("summary-length-stop: summarizer hit its output cap before completing the checkpoint");
+	}
 
 	return truncateSummaryToBudget(extractTextContent(response), summaryBudget);
 }
@@ -646,14 +651,40 @@ function fillPromptTemplate(template: string, factsBlock: string, budget: number
 	return template.replaceAll("{FACTS_BLOCK}", factsBlock).replaceAll("{BUDGET}", String(budget));
 }
 
-function getSummaryBudget(reserveTokens: number, model: Model<any>): number {
+const SUMMARY_BUDGET_BASE_TOKENS = 1_500;
+/** Hard ceiling for the facts-scaled summary budget; also the worst case selection must assume. */
+export const SUMMARY_BUDGET_MAX_TOKENS = 4_000;
+/** Prompt-side margin beyond the raw conversation input (system prompt, tags, instructions). */
+const SUMMARIZER_PROMPT_MARGIN_TOKENS = 2_000;
+
+function getSummaryBudget(reserveTokens: number, model: Model<any>, factsBlock?: string): number {
 	const modelMaxTokens = model.maxTokens > 0 ? model.maxTokens : Number.POSITIVE_INFINITY;
-	return Math.max(1, Math.min(1_500, Math.floor(0.8 * reserveTokens), modelMaxTokens));
+	// The verification gate demands the summary restate every extracted fact (modified files,
+	// actions, rules). A fixed budget makes large spans structurally fail: the model length-stops
+	// and the gated sections are the casualties. Scale the budget with the demand, bounded.
+	const factsTokens = factsBlock ? estimateStringTokens(factsBlock) : 0;
+	const demandBudget = Math.min(SUMMARY_BUDGET_MAX_TOKENS, Math.max(SUMMARY_BUDGET_BASE_TOKENS, factsTokens + 500));
+	return Math.max(1, Math.min(demandBudget, Math.floor(0.8 * reserveTokens), modelMaxTokens));
 }
 
 function getSummarizerInputBound(model: Model<any>, maxTokens: number): number {
 	const contextWindow = model.contextWindow > 0 ? model.contextWindow : Number.POSITIVE_INFINITY;
-	return contextWindow === Number.POSITIVE_INFINITY ? contextWindow : Math.max(1, contextWindow - maxTokens - 2_000);
+	return contextWindow === Number.POSITIVE_INFINITY
+		? contextWindow
+		: Math.max(1, contextWindow - maxTokens - SUMMARIZER_PROMPT_MARGIN_TOKENS);
+}
+
+/**
+ * Whether a candidate summarizer can ingest a summarization input of the given size in ONE
+ * request (unchunked), using the same window arithmetic as {@link getSummarizerInputBound} with
+ * the worst-case (facts-scaled) summary budget. Hosts use this at SELECTION time: a model that
+ * fails this must not be handed the job — chunking cannot rescue recall-gated summarization, and
+ * local servers silently truncate over-window prompts instead of erroring.
+ */
+export function summarizerCanIngest(model: Model<any>, estimatedInputTokens: number): boolean {
+	const contextWindow = model.contextWindow > 0 ? model.contextWindow : Number.POSITIVE_INFINITY;
+	if (contextWindow === Number.POSITIVE_INFINITY) return true;
+	return estimatedInputTokens <= contextWindow - SUMMARY_BUDGET_MAX_TOKENS - SUMMARIZER_PROMPT_MARGIN_TOKENS;
 }
 
 function buildSummarizationPrompt(
@@ -738,14 +769,9 @@ function truncateSummaryToBudget(summary: string, budget: number): string {
 	}
 
 	let current = summary;
-	for (const heading of [
-		"Critical Context",
-		"Blocked / Open",
-		"Key Decisions",
-		"Constraints & Preferences",
-		"Done",
-		"Files",
-	]) {
+	// Never drop "Files" or "Done" here: the verification gate checks exactly those sections
+	// (files-modified/read-recall, actions-overlap), so deleting them guarantees gate failure.
+	for (const heading of ["Critical Context", "Blocked / Open", "Key Decisions", "Constraints & Preferences"]) {
 		const next = removeSummarySection(current, heading);
 		if (next === current) {
 			continue;

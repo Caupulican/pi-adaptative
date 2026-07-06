@@ -403,5 +403,12 @@ export function renderFactsBlock(facts: CompactionFacts): string {
 	for (const prohibition of facts.prohibitions) {
 		lines.push(prohibition);
 	}
+	// The active-task gate demands near-verbatim recall of this text, but the conversation the
+	// summarizer sees may be pre-digested or truncated — the facts block is the one channel
+	// guaranteed to reach the prompt, so the gated text must ride in it (bounded).
+	lines.push("active task:");
+	if (facts.activeTaskSource) {
+		lines.push(clampText(facts.activeTaskSource, 4000));
+	}
 	return lines.join("\n");
 }

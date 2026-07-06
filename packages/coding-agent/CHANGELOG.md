@@ -13,6 +13,7 @@
 - Fixed the bash tool `find` optimizer so symlinked directories are listed but not recursively followed outside the search tree.
 - Fixed HTML session export asset injection so dollar sequences in template and vendor JavaScript are preserved exactly.
 - Added the missing `/goal` command so users can start or inspect the goal ledger instead of only invoking `/goal-continue`.
+- Fixed compaction summarizer selection to reject candidates whose context window cannot ingest the live span (visible `window_too_small` fallback to the session model), and to warn when an explicit `compaction.model` setting cannot ingest it.
 
 ## [0.81.3] - 2026-07-05
 

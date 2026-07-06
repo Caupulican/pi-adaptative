@@ -1,7 +1,13 @@
 ## [Unreleased]
 
+### Added
+- Added `summarizerCanIngest` so hosts can reject compaction summarizer candidates whose context window cannot hold the actual summarization input.
+
 ### Fixed
 - Fixed turn retry backoff so provider `retryAfterMs` hints are honored and capped by the retry policy.
+- Fixed the compaction summary budget to scale with the extracted facts block (bounded at 4000 tokens) instead of length-stopping on large spans; a length-stopped summary now fails loudly (`summary-length-stop`) and the compaction cycle escalates to the session tier.
+- Fixed summary truncation so the gate-checked `## Files` and `## Done` sections are never deleted.
+- Fixed the compaction facts block to carry the (bounded) active-task text, so the active-task verification gate stays satisfiable when the conversation input is pre-digested or truncated.
 
 ## [0.81.3] - 2026-07-05
 

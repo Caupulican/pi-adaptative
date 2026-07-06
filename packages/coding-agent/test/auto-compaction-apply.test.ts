@@ -109,6 +109,8 @@ function compactionSupportFixture(options: {
 			getRequiredRequestAuth: async () => ({}),
 			isModelExhausted: (ref) => exhausted.has(ref),
 			getStoredFitnessReport: (ref) => options.fitness?.[ref],
+			// Small span: capacity never interferes with the behaviors under test here.
+			estimateSummarizationInputTokens: () => 1_000,
 			emitWarning: (message) => warnings.push(message),
 		}),
 		sessionModel,
@@ -410,6 +412,7 @@ describe("auto-compaction never fails silently", () => {
 			getRequiredRequestAuth: async () => ({}),
 			isModelExhausted: () => false,
 			getStoredFitnessReport: () => undefined,
+			estimateSummarizationInputTokens: () => 1_000,
 			emitWarning: () => {},
 		});
 

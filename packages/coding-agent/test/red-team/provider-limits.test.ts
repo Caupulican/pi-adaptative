@@ -113,6 +113,8 @@ function compactionHarness(options: { agentDir: string; exhausted?: ExhaustedPro
 				FitnessStore.forAgentDir(options.agentDir)
 					.getForHost()
 					.find((entry) => entry.model === ref)?.report,
+			// Small span: capacity never interferes with the failover behaviors under test here.
+			estimateSummarizationInputTokens: () => 1_000,
 			emitWarning: (message) => warnings.push(message),
 		}),
 		warnings,
@@ -155,6 +157,8 @@ const routerPrototype = ModelRouterController.prototype as unknown as {
 
 type CompactWithRetryHarness = {
 	settingsManager: { getRetrySettings: () => { enabled: boolean; maxRetries: number; baseDelayMs: number } };
+	/** _compactWithRetry records every caught provider failure to the corpus before deciding on retry. */
+	_failureCorpus: { record: (args: unknown) => void };
 };
 
 const agentSessionPrototype = AgentSession.prototype as unknown as {
@@ -256,6 +260,7 @@ describe("provider limit red-team matrix", () => {
 	it("Quota mid-compaction (summarizer model)", async () => {
 		const harness: CompactWithRetryHarness = {
 			settingsManager: { getRetrySettings: () => ({ enabled: true, maxRetries: 2, baseDelayMs: 1 }) },
+			_failureCorpus: { record: () => {} },
 		};
 		let surfaced = "";
 		try {
