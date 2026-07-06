@@ -346,7 +346,8 @@ export async function processResponsesStream<TApi extends Api>(
 			};
 		}
 		calculateCost(model, output.usage, {
-			providerSuppliedTotal: Boolean((response.usage as { cost?: number }).cost),
+			// response.usage is absent on some streams; this call sits outside the guard above.
+			providerSuppliedTotal: Boolean((response.usage as { cost?: number } | undefined)?.cost),
 		});
 		applyFuguUltraPricing(model, output.usage);
 		if (options?.applyServiceTierPricing) {
