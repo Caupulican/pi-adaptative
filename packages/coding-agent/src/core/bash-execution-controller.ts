@@ -22,7 +22,7 @@ export interface BashExecutionControllerDeps {
 }
 
 export class BashExecutionController {
-	private _bashAbortController: AbortController | undefined = undefined;
+	private _bashAbortControllers = new Set<AbortController>();
 	private _pendingBashMessages: BashExecutionMessage[] = [];
 
 	private readonly deps: BashExecutionControllerDeps;
@@ -36,7 +36,8 @@ export class BashExecutionController {
 		onChunk?: (chunk: string) => void,
 		options?: { excludeFromContext?: boolean; operations?: BashOperations },
 	): Promise<BashResult> {
-		this._bashAbortController = new AbortController();
+		const abortController = new AbortController();
+		this._bashAbortControllers.add(abortController);
 
 		// Apply command prefix if configured (e.g., "shopt -s expand_aliases" for alias support)
 		const prefix = this.deps.getSettingsManager().getShellCommandPrefix();
@@ -51,7 +52,7 @@ export class BashExecutionController {
 				options?.operations ?? createLocalBashOperations({ shellPath }),
 				{
 					onChunk,
-					signal: this._bashAbortController.signal,
+					signal: abortController.signal,
 					enableGitFilter,
 				},
 			);
@@ -59,7 +60,7 @@ export class BashExecutionController {
 			this.recordBashResult(command, result, options);
 			return result;
 		} finally {
-			this._bashAbortController = undefined;
+			this._bashAbortControllers.delete(abortController);
 		}
 	}
 
@@ -97,12 +98,14 @@ export class BashExecutionController {
 	 * Cancel running bash command.
 	 */
 	abortBash(): void {
-		this._bashAbortController?.abort();
+		for (const controller of this._bashAbortControllers) {
+			controller.abort();
+		}
 	}
 
 	/** Whether a bash command is currently running */
 	get isBashRunning(): boolean {
-		return this._bashAbortController !== undefined;
+		return this._bashAbortControllers.size > 0;
 	}
 
 	/** Whether there are pending bash messages waiting to be flushed */
