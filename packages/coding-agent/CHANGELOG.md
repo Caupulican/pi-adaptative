@@ -7,6 +7,9 @@
 ### Changed
 - Compaction summarizer selection now consults the fitness doctrine (digest lane, subtractive) and the exhausted-provider registry; every fallback is visible.
 
+### Fixed
+- Fixed executor speculative retry persistence so the discarded first attempt is removed from the routed-turn session buffer before the refined retry is saved.
+
 ## [0.81.3] - 2026-07-05
 
 

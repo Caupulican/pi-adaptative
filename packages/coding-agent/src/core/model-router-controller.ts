@@ -713,6 +713,7 @@ export class ModelRouterController {
 				const refined = await this._buildExecutorRefinedPrompt(messages);
 				if (refined) {
 					agent.state.messages.splice(originalHistoryLength);
+					if (bufferRoutedTurn) this._modelRouterSessionBuffer = createModelRouterSessionBuffer();
 					await this.deps.runAgentPrompt([
 						{ role: "user", content: [{ type: "text", text: refined }], timestamp: Date.now() },
 					]);

@@ -90,6 +90,7 @@ type ModelRouterControllerPrototype = {
 		routedModel: TestModel | undefined,
 		routeDecision: RouteDecision | undefined,
 	): Promise<void>;
+	captureSessionMessage(this: RoutedRunContext, message: AgentMessage): boolean;
 };
 
 type RuntimeRouterResolver = {
@@ -987,6 +988,85 @@ describe("speculative executor retry (G16 refinement)", () => {
 		expect(retried).toBe(true);
 		// exactly-once: the initial executor turn + a single speculative retry, never more.
 		expect(runCount).toBe(2);
+	});
+
+	it("does not persist the discarded first executor attempt after speculative retry", async () => {
+		let runCount = 0;
+		const persisted: Message[] = [];
+		const smallCheap = { ...cheapModel, contextWindow: 8_192 };
+		const context: RoutedRunContext & {
+			_executorTurnExecutedScript: (i: number) => boolean;
+			_buildExecutorRefinedPrompt: (m: unknown) => Promise<string | undefined>;
+			captureSessionMessage: ModelRouterControllerPrototype["captureSessionMessage"];
+		} = {
+			agent: {
+				state: {
+					model: expensiveModel,
+					thinkingLevel: "high",
+					messages: [],
+					tools: [],
+					systemPrompt: "BASE_PROMPT",
+				},
+			},
+			deps: {
+				getModel: () => expensiveModel,
+				getAgent: () => context.agent,
+				getSettingsManager: () => ({ getModelCapabilitySettings: () => ({}), getModelRouterSettings: () => ({}) }),
+				getSessionManager: () => ({
+					appendMessage: (message) => {
+						persisted.push(message);
+						return "entry";
+					},
+					appendCustomEntry: () => "custom",
+					appendCustomMessageEntry: () => "custom",
+				}),
+				getBaseSystemPrompt: () => "BASE_PROMPT",
+				buildSystemPromptForToolNames: (names) => `PROMPT_FOR:${names.join(",")}`,
+				runAgentPrompt: async (messages) => {
+					runCount++;
+					const userMessages = Array.isArray(messages) ? messages : [messages];
+					for (const message of userMessages) routerPrototype.captureSessionMessage.call(context, message);
+					routerPrototype.captureSessionMessage.call(context, {
+						role: "assistant",
+						content: [{ type: "text", text: `attempt-${runCount}` }],
+						api: smallCheap.api,
+						provider: smallCheap.provider,
+						model: smallCheap.id,
+						stopReason: "stop",
+						timestamp: runCount,
+						usage: createUsage(),
+					});
+				},
+				refreshCurrentModelFromRegistry: () => {},
+				emitAutonomyTelemetry: () => {},
+			},
+			_resolveModelRouterModelForIntent: () => expensiveModel,
+			runRoutedTurn: routerPrototype.runRoutedTurn,
+			captureSessionMessage: routerPrototype.captureSessionMessage,
+			_executorTurnExecutedScript: () => false,
+			_buildExecutorRefinedPrompt: async () => "Refined executor instruction",
+		};
+		const route: RouteDecision = {
+			tier: "cheap",
+			risk: "scoped-write",
+			confidence: 1,
+			reasonCode: "executor_direct",
+			reasons: [],
+		};
+
+		await routerPrototype.runRoutedTurn.call(
+			context,
+			[{ role: "user", content: "run tool", timestamp: 1 }],
+			smallCheap,
+			route,
+		);
+
+		expect(persisted.filter((message) => message.role === "user")).toHaveLength(1);
+		expect(
+			persisted
+				.filter((message): message is AssistantMessage => message.role === "assistant")
+				.map((message) => (message.content[0] as { text: string }).text),
+		).toEqual(["attempt-2"]);
 	});
 
 	it("surfaces a warning (no retry) when the executor missed and the brain produced no refinement", async () => {
