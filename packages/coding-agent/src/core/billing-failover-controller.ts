@@ -35,6 +35,12 @@ export interface BillingFailoverControllerDeps {
 	emit(event: { type: "warning"; message: string }): void;
 	exhausted: ExhaustedProviderRegistry;
 	subscriptionHop?: boolean;
+	recordFailure?(args: {
+		provider?: string;
+		modelId?: string;
+		message: string;
+		classified: ReturnType<typeof classifyFailure>;
+	}): void;
 }
 
 export class BillingFailoverController {
@@ -64,6 +70,12 @@ export class BillingFailoverController {
 	async handleAssistantError(message: AssistantMessage): Promise<boolean> {
 		if (message.stopReason !== "error") return false;
 		const classified = classifyFailure({ message: message.errorMessage ?? "", provider: message.provider });
+		this.deps.recordFailure?.({
+			provider: message.provider,
+			modelId: message.model,
+			message: message.errorMessage ?? "",
+			classified,
+		});
 		if (classified.reason !== "billing_or_quota") return false;
 		const failedModel = this.deps.modelRegistry.find(message.provider, message.model) ?? this.deps.agent.state.model;
 		const failedRef = `${failedModel.provider}/${failedModel.id}`;

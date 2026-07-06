@@ -1,17 +1,3 @@
-/**
- * AgentSession - Core abstraction for agent lifecycle and session management.
- *
- * This class is shared between all run modes (interactive, print, rpc).
- * It encapsulates:
- * - Agent state access
- * - Event subscription with automatic session persistence
- * - Model and thinking level management
- * - Compaction (manual and auto)
- * - Bash execution
- * - Session switching and branching
- *
- * Modes use this class and add their own I/O layer on top.
- */
 import { readFileSync } from "node:fs";
 import { basename, dirname, join } from "node:path";
 import type {
@@ -128,6 +114,7 @@ import type {
 	TurnEndEvent,
 	TurnStartEvent,
 } from "./extensions/index.ts";
+import { FailureCorpusRecorder } from "./failure-corpus.ts";
 import { type ChannelProvider, GatewayRegistry, type JobSchedulerProvider } from "./gateways/channel-provider.ts";
 import { GoalLoopController } from "./goal-loop-controller.ts";
 import type { GoalContinuationPrompt, GoalContinuationPromptLimits } from "./goals/goal-continuation-prompt.ts";
@@ -609,6 +596,7 @@ export class AgentSession {
 	 * {@link _runAgentPrompt} so the drive loop stays host-side. */
 	private readonly _modelRouter: ModelRouterController;
 	private readonly _billingFailover: BillingFailoverController;
+	private readonly _failureCorpus: FailureCorpusRecorder;
 	private _skillCuratorInstance?: SkillCurator;
 	private _disposed = false;
 	private readonly _reflectionAbort = new AbortController();
@@ -782,12 +770,16 @@ export class AgentSession {
 			addSpawnedUsage: (usage, opts) => this.addSpawnedUsage(usage, opts),
 			runIsolatedCompletion: (opts) => this.runIsolatedCompletion(opts),
 		});
+		this._failureCorpus = new FailureCorpusRecorder({
+			filePath: join(this._agentDir, "state", "failure-corpus.jsonl"),
+		});
 		this._billingFailover = new BillingFailoverController({
 			agent: this.agent,
 			modelRegistry: this._modelRegistry,
 			exhausted: new ExhaustedProviderRegistry(),
 			subscriptionHop: this.settingsManager.getFailoverSettings().subscriptionHop,
 			emit: (event) => this._emit(event),
+			recordFailure: (args) => this._failureCorpus.record(args),
 		});
 		this._modelRouter = new ModelRouterController({
 			getAgent: () => this.agent,
@@ -3304,6 +3296,7 @@ export class AgentSession {
 				if (signal.aborted || attempt >= maxAttempts) throw error;
 				const message = error instanceof Error ? error.message : String(error);
 				const classified = classifyFailure({ message, provider });
+				this._failureCorpus.record({ provider, message, classified });
 				if (!classified.retryable) throw error;
 				await sleepAbortable(
 					computeRetryDelayMs(policy, attempt, { retryAfterMs: classified.retryAfterMs }),
@@ -3638,11 +3631,18 @@ export class AgentSession {
 	private _isRetryableError(message: AssistantMessage): boolean {
 		if (message.stopReason !== "error" || !message.errorMessage) return false;
 		const contextWindow = this.model?.contextWindow ?? 0;
-		return classifyFailure({
+		const classified = classifyFailure({
 			message: message.errorMessage,
 			contextOverflow: isContextOverflow(message, contextWindow),
 			provider: message.provider,
-		}).retryable;
+		});
+		this._failureCorpus.record({
+			provider: message.provider,
+			modelId: message.model,
+			message: message.errorMessage,
+			classified,
+		});
+		return classified.retryable;
 	}
 
 	/**
