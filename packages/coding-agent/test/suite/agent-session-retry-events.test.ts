@@ -143,6 +143,20 @@ describe("AgentSession retry and event characterization", () => {
 		expect(harness.eventsOfType("auto_retry_start")).toEqual([]);
 	});
 
+	it("records exactly one failure-corpus row per failed assistant message", async () => {
+		const harness = await createHarness({ settings: { retry: { enabled: false } } });
+		harnesses.push(harness);
+		harness.setResponses([
+			fauxAssistantMessage("", { stopReason: "error", errorMessage: "overloaded_error" }),
+			fauxAssistantMessage("", { stopReason: "error", errorMessage: "subscription quota exceeded" }),
+		]);
+
+		await harness.session.prompt("transient");
+		await harness.session.prompt("billing");
+
+		expect(harness.session.getModelRouterStatus()).toContain("Provider failures: 2 provider failures this session");
+	});
+
 	it("cancels retry sleep when abortRetry is called", async () => {
 		const harness = await createHarness({ settings: { retry: { enabled: true, maxRetries: 3, baseDelayMs: 100 } } });
 		harnesses.push(harness);

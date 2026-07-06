@@ -7,6 +7,7 @@ import type {
 	AgentMessage,
 	AgentState,
 	AgentTool,
+	ClassifiedError,
 	StreamFn,
 	StreamIdleOptions,
 	ThinkingLevel,
@@ -2103,10 +2104,19 @@ export class AgentSession {
 			return false;
 		}
 
-		if (this._isRetryableError(msg) && (await this._prepareRetry(msg))) {
+		const classified = this._classifyAssistantError(msg);
+		if (classified) {
+			this._failureCorpus.record({
+				provider: msg.provider,
+				modelId: msg.model,
+				message: msg.errorMessage ?? "",
+				classified,
+			});
+		}
+		if (classified?.retryable && (await this._prepareRetry(msg))) {
 			return true;
 		}
-		if (await this._billingFailover.handleAssistantError(msg)) return false;
+		if (await this._billingFailover.handleAssistantError(msg, classified)) return false;
 
 		if (msg.stopReason === "error" && this._retryController.attempt > 0) {
 			this._emit({
@@ -3646,21 +3656,18 @@ export class AgentSession {
 	 * are terminal; context overflow is handled by compaction, not retry. The verdict comes from the
 	 * reliability kernel's classifier, fed the host-computed context-overflow flag.
 	 */
-	private _isRetryableError(message: AssistantMessage): boolean {
-		if (message.stopReason !== "error" || !message.errorMessage) return false;
+	private _classifyAssistantError(message: AssistantMessage): ClassifiedError | undefined {
+		if (message.stopReason !== "error" || !message.errorMessage) return undefined;
 		const contextWindow = this.model?.contextWindow ?? 0;
-		const classified = classifyFailure({
+		return classifyFailure({
 			message: message.errorMessage,
 			contextOverflow: isContextOverflow(message, contextWindow),
 			provider: message.provider,
 		});
-		this._failureCorpus.record({
-			provider: message.provider,
-			modelId: message.model,
-			message: message.errorMessage,
-			classified,
-		});
-		return classified.retryable;
+	}
+
+	private _isRetryableError(message: AssistantMessage): boolean {
+		return this._classifyAssistantError(message)?.retryable ?? false;
 	}
 
 	/**

@@ -1,5 +1,5 @@
 import type { Agent } from "@caupulican/pi-agent-core";
-import { classifyFailure } from "@caupulican/pi-agent-core";
+import { type ClassifiedError, classifyFailure } from "@caupulican/pi-agent-core";
 import type { Api, AssistantMessage, Model } from "@caupulican/pi-ai";
 import { decideBillingFailover } from "./billing-failover.ts";
 import type { ModelRegistry } from "./model-registry.ts";
@@ -67,15 +67,9 @@ export class BillingFailoverController {
 		return { exhausted: this.snapshotExhausted(), lastNotice: this.lastNotice };
 	}
 
-	async handleAssistantError(message: AssistantMessage): Promise<boolean> {
+	async handleAssistantError(message: AssistantMessage, classified?: ClassifiedError): Promise<boolean> {
 		if (message.stopReason !== "error") return false;
-		const classified = classifyFailure({ message: message.errorMessage ?? "", provider: message.provider });
-		this.deps.recordFailure?.({
-			provider: message.provider,
-			modelId: message.model,
-			message: message.errorMessage ?? "",
-			classified,
-		});
+		classified ??= classifyFailure({ message: message.errorMessage ?? "", provider: message.provider });
 		if (classified.reason !== "billing_or_quota") return false;
 		const failedModel = this.deps.modelRegistry.find(message.provider, message.model) ?? this.deps.agent.state.model;
 		const failedRef = `${failedModel.provider}/${failedModel.id}`;
