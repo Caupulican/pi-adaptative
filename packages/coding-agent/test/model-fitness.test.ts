@@ -163,7 +163,7 @@ describe("runModelFitnessProbe", () => {
 		expect(text).toContain("route judge:");
 	});
 
-	it("measures served context capacity by halving until a needle-recall prompt fits", async () => {
+	it("measures served context capacity by halving until both start and end needles fit", async () => {
 		const servedWindow = 4_096;
 		const report = await runModelFitnessProbe({
 			trials: 1,
@@ -174,9 +174,9 @@ describe("runModelFitnessProbe", () => {
 					return { text: "{}", costUsd: 0, stopReason: "stop" };
 				}
 				const estimatedInputTokens = Math.ceil((systemPrompt.length + userPrompt.length) / 4);
-				const match = /NEEDLE_[0-9A-F_]+/.exec(userPrompt);
+				const needles = userPrompt.match(/NEEDLE_(?:START|END)_[0-9A-F_]+/g) ?? [];
 				return {
-					text: estimatedInputTokens <= servedWindow ? (match?.[0] ?? "") : "needle missing",
+					text: estimatedInputTokens <= servedWindow ? needles.join(" ") : "needle missing",
 					costUsd: 0,
 					stopReason: "stop",
 				};
@@ -189,6 +189,23 @@ describe("runModelFitnessProbe", () => {
 		expect(capacity.servedContextWindow).toBeLessThanOrEqual(servedWindow);
 		expect(capacity.servedContextWindow).toBeGreaterThan(servedWindow / 2);
 		expect(formatModelFitnessReport("ollama/tiny", report)).toContain("served window");
+	});
+
+	it("does not over-measure capacity when a server silently keeps only the prompt tail", async () => {
+		const servedWindow = 4_096;
+		const report = await runModelFitnessProbe({
+			trials: 1,
+			judgePrompts: [],
+			capacityProbe: { registeredContextWindow: 16_384 },
+			complete: async ({ userPrompt }) => {
+				const servedTail = userPrompt.slice(-servedWindow * 4);
+				const needles = servedTail.match(/NEEDLE_(?:START|END)_[0-9A-F_]+/g) ?? [];
+				return { text: needles.join(" "), costUsd: 0, stopReason: "stop" };
+			},
+		});
+
+		expect(report.capacity?.servedContextWindow).toBeLessThan(16_384);
+		expect(report.capacity?.servedContextWindow).toBeLessThanOrEqual(servedWindow);
 	});
 });
 

@@ -249,10 +249,13 @@ function fitnessEnvelope(): CapabilityEnvelope {
 	};
 }
 
-function buildCapacityProbePrompt(targetTokens: number, needle: string): string {
-	const targetChars = Math.max(needle.length + 64, targetTokens * 4 - CAPACITY_PROBE_SYSTEM_PROMPT.length);
-	const prefix = "CAPACITY PROBE START\n";
-	const suffix = `\n${needle}\nCAPACITY PROBE END`;
+function buildCapacityProbePrompt(targetTokens: number, startNeedle: string, endNeedle: string): string {
+	const targetChars = Math.max(
+		startNeedle.length + endNeedle.length + 64,
+		targetTokens * 4 - CAPACITY_PROBE_SYSTEM_PROMPT.length,
+	);
+	const prefix = `CAPACITY PROBE START\n${startNeedle}\n`;
+	const suffix = `\n${endNeedle}\nCAPACITY PROBE END`;
 	const fillerLength = Math.max(0, targetChars - prefix.length - suffix.length);
 	return `${prefix}${"x ".repeat(Math.ceil(fillerLength / 2)).slice(0, fillerLength)}${suffix}`;
 }
@@ -266,7 +269,9 @@ async function measureServedContextWindow(args: {
 }): Promise<{ score: CapacityFitnessScore; costUsd: number }> {
 	const registered = Math.max(1, Math.floor(args.probe.registeredContextWindow));
 	const minWindow = Math.max(1, Math.floor(args.probe.minContextWindow ?? 1024));
-	const needle = `NEEDLE_${registered.toString(16).toUpperCase()}_${minWindow.toString(16).toUpperCase()}`;
+	const nonce = `${registered.toString(16).toUpperCase()}_${minWindow.toString(16).toUpperCase()}`;
+	const startNeedle = `NEEDLE_START_${nonce}`;
+	const endNeedle = `NEEDLE_END_${nonce}`;
 	const score: CapacityFitnessScore = {
 		registeredContextWindow: registered,
 		servedContextWindow: 0,
@@ -285,13 +290,14 @@ async function measureServedContextWindow(args: {
 			execute: (signal) =>
 				args.complete({
 					systemPrompt: CAPACITY_PROBE_SYSTEM_PROMPT,
-					userPrompt: buildCapacityProbePrompt(candidate, needle),
+					userPrompt: buildCapacityProbePrompt(candidate, startNeedle, endNeedle),
 					signal,
 				}),
 		});
 		score.meanMs += args.now() - started;
 		if (bounded.completion) costUsd += bounded.completion.costUsd;
-		const recalled = bounded.completion && !bounded.failure && bounded.completion.text.trim() === needle;
+		const output = bounded.completion?.text.trim() ?? "";
+		const recalled = !bounded.failure && output.includes(startNeedle) && output.includes(endNeedle);
 		score.outcomes.push(`${candidate}:${recalled ? "ok" : (bounded.failure?.status ?? "miss")}`);
 		if (recalled) {
 			score.servedContextWindow = candidate;

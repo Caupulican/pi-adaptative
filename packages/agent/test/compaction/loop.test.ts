@@ -1,6 +1,11 @@
 import type { Model } from "@caupulican/pi-ai";
 import { beforeEach, describe, expect, it, vi } from "vitest";
-import { type CompactionCycleParams, type CompactionResult, runCompactionLoop } from "../../src/compaction/index.ts";
+import {
+	type CompactionCycleParams,
+	type CompactionResult,
+	prepareCompaction,
+	runCompactionLoop,
+} from "../../src/compaction/index.ts";
 import type { SessionEntry, SessionMessageEntry } from "../../src/session/session-manager.ts";
 
 function createModel(): Model<"anthropic-messages"> {
@@ -27,6 +32,22 @@ function createBranch(): SessionEntry[] {
 		message: { role: "user", content: "x", timestamp: Date.now() },
 	};
 	return [entry];
+}
+
+function createLongBranch(): SessionEntry[] {
+	let parentId: string | null = null;
+	return Array.from({ length: 8 }, (_, index): SessionMessageEntry => {
+		const id = `entry-${index + 1}`;
+		const entry: SessionMessageEntry = {
+			type: "message",
+			id,
+			parentId,
+			timestamp: new Date(Date.now() + index).toISOString(),
+			message: { role: "user", content: `${"long context ".repeat(120)} ${index}`, timestamp: Date.now() + index },
+		};
+		parentId = id;
+		return entry;
+	});
 }
 
 function createResult(summary = "checkpoint"): CompactionResult {
@@ -228,6 +249,63 @@ describe("runCompactionLoop", () => {
 		expect(outcome.cycles).toBe(3);
 	});
 
+	it("re-prepares a real branch after its own compaction entry is appended", async () => {
+		branch = createLongBranch();
+		const measureLiveTokens = scriptedMeasure([3000, 2500, 2500, 900]);
+		let previousSummaryOnRetry: string | undefined;
+		const summarizeAndVerify = vi.fn(
+			async (params: CompactionCycleParams, _model, _apiKey, _headers, currentBranch) => {
+				summarizeCalls += 1;
+				const preparation = prepareCompaction(
+					currentBranch,
+					{ enabled: true, triggerPercent: 0.7, reserveTokens: 500, keepRecentTokens: params.keepRecentTokens },
+					{ allowTrailingCompactionAsPrevious: true },
+				);
+				expect(preparation).toBeDefined();
+				if (!preparation) throw new Error("prepare failed");
+				if (summarizeCalls === 2) previousSummaryOnRetry = preparation.previousSummary;
+				return {
+					result: {
+						summary: `summary-${summarizeCalls}`,
+						firstKeptEntryId: preparation.firstKeptEntryId,
+						tokensBefore: preparation.tokensBefore,
+						details: { readFiles: [], modifiedFiles: [] },
+					},
+				};
+			},
+		);
+
+		const outcome = expectSuccess(
+			await runCompactionLoop({
+				getBranch: () => branch,
+				measureLiveTokens,
+				getTriggerThreshold: () => 1000,
+				getMargin: () => 10,
+				getBaseKeepRecentTokens: () => 600,
+				resolveModelAndAuth: async () => ({ model: createModel() }),
+				summarizeAndVerify,
+				buildDeterministicCheckpoint: async () => ({ result: createResult("det") }),
+				apply: async (result) => {
+					branch.push({
+						type: "compaction",
+						id: `compaction-${summarizeCalls}`,
+						parentId: branch.at(-1)?.id ?? null,
+						timestamp: new Date().toISOString(),
+						summary: result.summary,
+						firstKeptEntryId: result.firstKeptEntryId,
+						tokensBefore: result.tokensBefore,
+						details: result.details,
+					});
+				},
+				onTransition: () => {},
+			}),
+		);
+
+		expect(summarizeAndVerify).toHaveBeenCalledTimes(2);
+		expect(previousSummaryOnRetry).toBe("summary-1");
+		expect(outcome.cycles).toBe(2);
+	});
+
 	it("forces progress when failure causes an identical retry plan", async () => {
 		const measureLiveTokens = scriptedMeasure([1200, 1200, 1200, 900]);
 		const summarizeAndVerify = vi.fn(async (params: CompactionCycleParams) => {
@@ -257,6 +335,26 @@ describe("runCompactionLoop", () => {
 		expect(summarizeAndVerify).toHaveBeenCalledTimes(3);
 		expect(summarizeAndVerify.mock.calls[1]?.[0]?.chunked).toBe(true);
 		expect(outcome.cycles).toBe(3);
+	});
+
+	it("returns a failed outcome when deterministic checkpoint preparation fails", async () => {
+		const outcome = await runCompactionLoop({
+			getBranch: () => branch,
+			measureLiveTokens: () => 1200,
+			getTriggerThreshold: () => 1000,
+			getMargin: () => 10,
+			resolveModelAndAuth: async () => ({ model: createModel() }),
+			summarizeAndVerify: async () => {
+				throw new Error("gate-failed");
+			},
+			buildDeterministicCheckpoint: async () => {
+				throw new Error("already compacted");
+			},
+			apply: async () => {},
+			onTransition: () => {},
+		});
+
+		expect(outcome).toMatchObject({ kind: "failed", reason: "unknown-failure" });
 	});
 
 	it("falls back to deterministic checkpoint on full retry exhaustion", async () => {

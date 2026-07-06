@@ -840,8 +840,10 @@ export interface CompactionPreparation {
 export function prepareCompaction(
 	pathEntries: SessionEntry[],
 	settings: CompactionSettings,
+	options?: { allowTrailingCompactionAsPrevious?: boolean },
 ): CompactionPreparation | undefined {
-	if (pathEntries.length > 0 && pathEntries[pathEntries.length - 1].type === "compaction") {
+	const trailingEntry = pathEntries[pathEntries.length - 1];
+	if (trailingEntry?.type === "compaction" && !options?.allowTrailingCompactionAsPrevious) {
 		return undefined;
 	}
 
@@ -861,7 +863,10 @@ export function prepareCompaction(
 		const firstKeptEntryIndex = pathEntries.findIndex((entry) => entry.id === prevCompaction.firstKeptEntryId);
 		boundaryStart = firstKeptEntryIndex >= 0 ? firstKeptEntryIndex : prevCompactionIndex + 1;
 	}
-	const boundaryEnd = pathEntries.length;
+	const boundaryEnd =
+		options?.allowTrailingCompactionAsPrevious && pathEntries[pathEntries.length - 1]?.type === "compaction"
+			? pathEntries.length - 1
+			: pathEntries.length;
 
 	const tokensBefore = estimateContextTokens(buildSessionContext(pathEntries).messages).tokens;
 
@@ -953,7 +958,7 @@ export async function compact(
 	thinkingLevel?: ThinkingLevel,
 	streamFn?: StreamFn,
 	preDigest?: (conversationText: string, signal?: AbortSignal) => Promise<string>,
-	executionOptions?: { chunked?: boolean; allowVerificationFailure?: boolean },
+	executionOptions?: { chunked?: boolean; allowVerificationFailure?: boolean; skipVerification?: boolean },
 ): Promise<CompactionResult> {
 	const {
 		firstKeptEntryId,
@@ -998,7 +1003,9 @@ export async function compact(
 				executionOptions?.chunked ?? false,
 			);
 
-			verification = verifySummary(historySummary, facts);
+			verification = executionOptions?.skipVerification
+				? { ok: true, failures: [] }
+				: verifySummary(historySummary, facts);
 			if (verification.ok) {
 				break;
 			}
@@ -1043,7 +1050,7 @@ export async function compact(
 				executionOptions?.chunked ?? false,
 			);
 
-			verification = verifySummary(summary, facts);
+			verification = executionOptions?.skipVerification ? { ok: true, failures: [] } : verifySummary(summary, facts);
 			if (verification.ok) {
 				break;
 			}

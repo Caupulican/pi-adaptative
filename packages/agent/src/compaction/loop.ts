@@ -33,6 +33,7 @@ export interface CompactionLoopDeps {
 	apply(result: CompactionResult): Promise<void> | void;
 	onTransition(info: { cycle: number; from: string; cause: string }): void;
 	getBaseKeepRecentTokens?(): number;
+	verifyPostApplyEffect?(): boolean;
 	signal?: AbortSignal;
 }
 
@@ -92,9 +93,13 @@ export async function runCompactionLoop(deps: CompactionLoopDeps): Promise<Compa
 			if (deps.signal?.aborted) {
 				return { kind: "failed", reason: "aborted", cycles: cycle - 1 };
 			}
-			const { result } = await Promise.resolve(deps.buildDeterministicCheckpoint());
-			await deps.apply(result);
-			return { kind: "success", result, cycles: cycle };
+			try {
+				const { result } = await Promise.resolve(deps.buildDeterministicCheckpoint());
+				await deps.apply(result);
+				return { kind: "success", result, cycles: cycle };
+			} catch (error) {
+				return { kind: "failed", reason: mapFailureCause(error), cycles: cycle };
+			}
 		}
 
 		let modelInfo: ModelAndAuth;
@@ -123,7 +128,10 @@ export async function runCompactionLoop(deps: CompactionLoopDeps): Promise<Compa
 		} catch (error) {
 			lastCause = mapFailureCause(error);
 			if (lastCause === "aborted") {
-				return { kind: "failed", reason: "aborted", cycles: cycle };
+				return { kind: "failed", reason: lastCause, cycles: cycle };
+			}
+			if (lastCause === "provider-failure") {
+				return { kind: "failed", reason: error instanceof Error ? error.message : String(error), cycles: cycle };
 			}
 			deps.onTransition({ cycle: cycle + 1, from: "step3", cause: lastCause });
 			continue;
@@ -137,6 +145,11 @@ export async function runCompactionLoop(deps: CompactionLoopDeps): Promise<Compa
 		const branchAfterApply = deps.getBranch();
 		const trailingAfterApply = branchAfterApply[branchAfterApply.length - 1];
 		ownTrailingCompactionId = trailingAfterApply?.type === "compaction" ? trailingAfterApply.id : undefined;
+
+		if (deps.verifyPostApplyEffect?.() === false) {
+			ownTrailingCompactionNeedsRetry = false;
+			return { kind: "success", result, cycles: cycle };
+		}
 
 		const measuredAfter = deps.measureLiveTokens();
 		if (measuredAfter <= deps.getTriggerThreshold() - deps.getMargin()) {
@@ -235,6 +248,12 @@ function mapFailureCause(error: unknown): string {
 	if (message.includes("input-overflow")) return "input-overflow";
 	// A length-stopped summary lost gated sections; escalating the tier buys a larger output cap.
 	if (message.includes("summary-length-stop")) return "length-stop";
+	if (
+		/stream stalled|overloaded|rate.?limit|too many requests|service.?unavailable|server.?error|network.?error|fetch failed|timeout|timed out/i.test(
+			message,
+		)
+	)
+		return "provider-failure";
 	if (message.includes("auto-compaction-cancelled") || message.includes("aborted")) return "aborted";
 	if (message.includes("auth") || message.includes("api key") || message.includes("not compacted"))
 		return "auth-failed";

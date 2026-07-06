@@ -2811,7 +2811,9 @@ export class AgentSession {
 
 			const sessionModel = this.model;
 			const selectedCompactionModel = this._resolveCompactionModel(sessionModel);
-			await this._getCompactionRequestAuth(selectedCompactionModel);
+			if (this._isRawStreamSimple(this.agent.streamFn)) {
+				await this._getCompactionRequestAuth(selectedCompactionModel);
+			}
 			const selectionReason = this._getLastCompactionSelectionReason() ?? "unknown";
 			const settings = this._getAdaptedCompactionSettings();
 			const initialBranch = this.sessionManager.getBranch();
@@ -2840,6 +2842,36 @@ export class AgentSession {
 					fromExtension = true;
 				}
 			}
+			if (extensionCompaction) {
+				this.sessionManager.appendCompaction(
+					extensionCompaction.summary,
+					extensionCompaction.firstKeptEntryId,
+					extensionCompaction.tokensBefore,
+					extensionCompaction.details,
+					true,
+				);
+				this.agent.state.messages = this.sessionManager.buildSessionContext().messages;
+				const savedCompactionEntry = this.sessionManager
+					.getEntries()
+					.find((entry) => entry.type === "compaction" && entry.summary === extensionCompaction.summary) as
+					| CompactionEntry
+					| undefined;
+				if (this._extensionRunner && savedCompactionEntry) {
+					await this._extensionRunner.emit({
+						type: "session_compact",
+						compactionEntry: savedCompactionEntry,
+						fromExtension: true,
+					});
+				}
+				this._emit({
+					type: "compaction_end",
+					reason: "manual",
+					result: extensionCompaction,
+					aborted: false,
+					willRetry: false,
+				});
+				return extensionCompaction;
+			}
 
 			let appliedResult: CompactionResult | undefined;
 			const signal = this._compactionAbortController.signal;
@@ -2855,10 +2887,14 @@ export class AgentSession {
 					return { model, apiKey, headers };
 				},
 				summarizeAndVerify: async (params, model, apiKey, headers, branch) => {
-					const preparation = prepareCompaction(branch, {
-						...settings,
-						keepRecentTokens: params.keepRecentTokens,
-					});
+					const preparation = prepareCompaction(
+						branch,
+						{
+							...settings,
+							keepRecentTokens: params.keepRecentTokens,
+						},
+						{ allowTrailingCompactionAsPrevious: true },
+					);
 					if (!preparation) throw new Error("Nothing to compact (session too small)");
 					if (extensionCompaction) return { result: extensionCompaction };
 					const compactionThinkingLevel = this._resolveCompactionThinkingLevel(model, sessionModel);
@@ -2874,7 +2910,11 @@ export class AgentSession {
 								compactionThinkingLevel,
 								this.agent.streamFn,
 								this._buildCompactionPreDigest(),
-								{ chunked: params.chunked },
+								{
+									chunked: params.chunked,
+									allowVerificationFailure: true,
+									skipVerification: true,
+								},
 							),
 						signal,
 						model.provider,
@@ -2906,6 +2946,7 @@ export class AgentSession {
 					}
 					appliedResult = result;
 				},
+				verifyPostApplyEffect: () => false,
 				onTransition: ({ cycle, cause }) => {
 					this._emit({
 						type: "warning",
