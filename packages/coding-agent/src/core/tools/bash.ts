@@ -436,15 +436,12 @@ async function tryOptimizeCommand(
 				const searchPath = args.length === 2 ? resolveToCwd(args[1], cwd) : cwd;
 				const walk = async (dir: string): Promise<string[]> => {
 					let results: string[] = [];
-					const entries = await fsReaddir(dir);
+					const entries = await fsReaddir(dir, { withFileTypes: true });
 					for (const entry of entries) {
-						const full = resolvePath(dir, entry);
-						const entryStat = await fsStat(full);
-						if (entryStat.isDirectory()) {
-							results.push(full);
+						const full = resolvePath(dir, entry.name);
+						results.push(full);
+						if (entry.isDirectory()) {
 							results = results.concat(await walk(full));
-						} else {
-							results.push(full);
 						}
 					}
 					return results;

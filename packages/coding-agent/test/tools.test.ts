@@ -1,5 +1,5 @@
 import { applyPatch } from "diff";
-import { chmodSync, existsSync, mkdirSync, readFileSync, rmSync, writeFileSync } from "fs";
+import { chmodSync, existsSync, mkdirSync, readFileSync, rmSync, symlinkSync, writeFileSync } from "fs";
 import { tmpdir } from "os";
 import { join } from "path";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
@@ -791,6 +791,22 @@ describe("Coding Agent Tools", () => {
 			const result = await bash.execute("test-grep-literal", { command: `grep abc ${testFile}` });
 
 			expect(getTextOutput(result).trim()).toBe("abc");
+		});
+
+		it("native find does not recurse into symlinked directories", async () => {
+			const searchDir = join(testDir, "optimized-find-symlinks");
+			const outsideDir = join(testDir, "optimized-find-outside");
+			mkdirSync(searchDir);
+			mkdirSync(outsideDir);
+			writeFileSync(join(outsideDir, "escaped.txt"), "escape");
+			symlinkSync(outsideDir, join(searchDir, "out-link"));
+			const bash = createBashTool(testDir);
+
+			const result = await bash.execute("test-find-symlink", { command: `find ${searchDir}` });
+			const output = getTextOutput(result).trim().split("\n");
+
+			expect(output).toContain("out-link");
+			expect(output).not.toContain("out-link/escaped.txt");
 		});
 
 		it("should optimize eligible simple commands natively", async () => {
