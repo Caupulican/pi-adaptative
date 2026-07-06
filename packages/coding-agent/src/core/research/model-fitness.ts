@@ -45,6 +45,12 @@ export const DEFAULT_JUDGE_FITNESS_PROMPTS: readonly JudgeFitnessPrompt[] = [
 	{ prompt: "why is this test flaky?", planning: false },
 ];
 
+export interface CapacityProbeOptions {
+	registeredContextWindow: number;
+	/** Smallest candidate window to try before declaring the capacity unknown. Default 1024. */
+	minContextWindow?: number;
+}
+
 export interface ModelFitnessOptions {
 	complete: FitnessComplete;
 	/** Trials per lane surface. Default 3. */
@@ -52,6 +58,8 @@ export interface ModelFitnessOptions {
 	/** Wall-clock budget per call in ms. Default 120000. */
 	maxWallClockMs?: number;
 	judgePrompts?: readonly JudgeFitnessPrompt[];
+	/** Optional local-model capacity lane: measures the actually served context window. */
+	capacityProbe?: CapacityProbeOptions;
 	signal?: AbortSignal;
 	/** Injected clock for latency measurement (test seam). Defaults to Date.now. */
 	now?: () => number;
@@ -79,6 +87,13 @@ export interface JudgeFitnessScore {
 	tokensPerSecond?: number;
 }
 
+export interface CapacityFitnessScore {
+	registeredContextWindow: number;
+	servedContextWindow: number;
+	outcomes: string[];
+	meanMs: number;
+}
+
 export interface ModelFitnessReport {
 	trials: number;
 	/** Aggregate output tokens/second across ALL probe calls (the headline speed number). */
@@ -92,6 +107,8 @@ export interface ModelFitnessReport {
 	toolCall: LaneFitnessScore;
 	/** Curator surface: can the model digest a context chunk to strict JSON WITHOUT losing key facts? */
 	digest: LaneFitnessScore;
+	/** Local-model capacity lane: measured context window the server actually serves. */
+	capacity?: CapacityFitnessScore;
 	totalCostUsd: number;
 }
 
@@ -108,6 +125,12 @@ export const TOOL_CALL_PROBE_SYSTEM_PROMPT = [
 	"grep(pattern: string, path: string) - search files under a path for a pattern.",
 	"Respond to every task with STRICT JSON only - no prose:",
 	'{"tool":"grep","arguments":{"pattern":"<pattern>","path":"<path>"}}',
+].join("\n");
+
+export const CAPACITY_PROBE_SYSTEM_PROMPT = [
+	"You are a context-window capacity probe for a local model server.",
+	"Find the unique NEEDLE token in the user's text and echo that token only.",
+	"Do not summarize, explain, or add punctuation.",
 ].join("\n");
 
 const SEARCH_PROBE_TASKS: readonly string[] = [
@@ -224,6 +247,61 @@ function fitnessEnvelope(): CapabilityEnvelope {
 		maxEstimatedUsd: 1,
 		createdAt: new Date().toISOString(),
 	};
+}
+
+function buildCapacityProbePrompt(targetTokens: number, needle: string): string {
+	const targetChars = Math.max(needle.length + 64, targetTokens * 4 - CAPACITY_PROBE_SYSTEM_PROMPT.length);
+	const prefix = "CAPACITY PROBE START\n";
+	const suffix = `\n${needle}\nCAPACITY PROBE END`;
+	const fillerLength = Math.max(0, targetChars - prefix.length - suffix.length);
+	return `${prefix}${"x ".repeat(Math.ceil(fillerLength / 2)).slice(0, fillerLength)}${suffix}`;
+}
+
+async function measureServedContextWindow(args: {
+	probe: CapacityProbeOptions;
+	complete: FitnessComplete;
+	maxWallClockMs: number;
+	signal?: AbortSignal;
+	now: () => number;
+}): Promise<{ score: CapacityFitnessScore; costUsd: number }> {
+	const registered = Math.max(1, Math.floor(args.probe.registeredContextWindow));
+	const minWindow = Math.max(1, Math.floor(args.probe.minContextWindow ?? 1024));
+	const needle = `NEEDLE_${registered.toString(16).toUpperCase()}_${minWindow.toString(16).toUpperCase()}`;
+	const score: CapacityFitnessScore = {
+		registeredContextWindow: registered,
+		servedContextWindow: 0,
+		outcomes: [],
+		meanMs: 0,
+	};
+	let candidate = registered;
+	let costUsd = 0;
+	let calls = 0;
+	while (candidate >= minWindow) {
+		const started = args.now();
+		calls++;
+		const bounded = await runBoundedCompletion({
+			maxWallClockMs: args.maxWallClockMs,
+			signal: args.signal,
+			execute: (signal) =>
+				args.complete({
+					systemPrompt: CAPACITY_PROBE_SYSTEM_PROMPT,
+					userPrompt: buildCapacityProbePrompt(candidate, needle),
+					signal,
+				}),
+		});
+		score.meanMs += args.now() - started;
+		if (bounded.completion) costUsd += bounded.completion.costUsd;
+		const recalled = bounded.completion && !bounded.failure && bounded.completion.text.trim() === needle;
+		score.outcomes.push(`${candidate}:${recalled ? "ok" : (bounded.failure?.status ?? "miss")}`);
+		if (recalled) {
+			score.servedContextWindow = candidate;
+			break;
+		}
+		candidate = Math.floor(candidate / 2);
+	}
+	if (score.servedContextWindow === 0) score.servedContextWindow = minWindow;
+	score.meanMs = calls > 0 ? Math.round(score.meanMs / calls) : 0;
+	return { score, costUsd };
 }
 
 export async function runModelFitnessProbe(options: ModelFitnessOptions): Promise<ModelFitnessReport> {
@@ -384,10 +462,23 @@ export async function runModelFitnessProbe(options: ModelFitnessOptions): Promis
 	);
 	digest.tokensPerSecond = takeSurfaceSpeed();
 
+	let capacity: CapacityFitnessScore | undefined;
+	if (options.capacityProbe) {
+		const result = await measureServedContextWindow({
+			probe: options.capacityProbe,
+			complete,
+			maxWallClockMs,
+			signal: options.signal,
+			now,
+		});
+		capacity = result.score;
+		totalCostUsd += result.costUsd;
+	}
+
 	const tokensPerSecond =
 		overallSpeed.evalMs > 0 ? Math.round((overallSpeed.tokens / overallSpeed.evalMs) * 1000) : undefined;
 
-	return { trials, tokensPerSecond, research, worker, judge, search, toolCall, digest, totalCostUsd };
+	return { trials, tokensPerSecond, research, worker, judge, search, toolCall, digest, capacity, totalCostUsd };
 }
 
 /**
@@ -422,6 +513,11 @@ export function formatModelFitnessReport(model: string, report: ModelFitnessRepo
 		`- search plans:  ${report.search.succeeded}/${report.search.total} well-formed, mean ${report.search.meanMs}ms${speed(report.search.tokensPerSecond)}`,
 		`- tool calls:    ${report.toolCall.succeeded}/${report.toolCall.total} well-formed, mean ${report.toolCall.meanMs}ms${speed(report.toolCall.tokensPerSecond)}`,
 		`- digests:       ${report.digest.succeeded}/${report.digest.total} faithful, mean ${report.digest.meanMs}ms${speed(report.digest.tokensPerSecond)}`,
+		...(report.capacity
+			? [
+					`- capacity:      served window ${report.capacity.servedContextWindow}/${report.capacity.registeredContextWindow} tokens, mean ${report.capacity.meanMs}ms`,
+				]
+			: []),
 		`- route judge:   parsed ${report.judge.parsed}/${report.judge.total}, planning-elevated ${report.judge.planningElevated}/${report.judge.planningTotal}, trivial-cheap ${report.judge.trivialCheap}/${report.judge.trivialTotal}, mean ${report.judge.meanMs}ms${speed(report.judge.tokensPerSecond)}`,
 		...report.judge.outcomes.map((outcome) => `    ${outcome}`),
 	];

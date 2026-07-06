@@ -16,6 +16,8 @@ interface ModelsJsonModel {
 	id: string;
 	name?: string;
 	contextWindow?: number;
+	/** Measured by the local capacity probe; compaction uses min(contextWindow, servedContextWindow). */
+	servedContextWindow?: number;
 	maxTokens?: number;
 	reasoning?: boolean;
 	input?: string[];
@@ -47,11 +49,12 @@ export interface LocalRegistrationResult {
 /** Provider name pi registers pulled local models under (see registerLocalModel below). */
 export const OLLAMA_PROVIDER = "ollama";
 
-function localModelEntry(ref: string, contextWindow: number): ModelsJsonModel {
+function localModelEntry(ref: string, contextWindow: number, servedContextWindow?: number): ModelsJsonModel {
 	return {
 		id: ref,
 		name: ref,
 		contextWindow,
+		...(servedContextWindow !== undefined ? { servedContextWindow } : {}),
 		maxTokens: 2048,
 		reasoning: false,
 		input: ["text"],
@@ -76,10 +79,11 @@ export function registerLocalModel(args: {
 	ref: string;
 	baseUrl: string;
 	contextWindow?: number;
+	servedContextWindow?: number;
 }): LocalRegistrationResult {
 	const modelsJsonPath = join(args.agentDir, "models.json");
 	const contextWindow = args.contextWindow ?? 8192;
-	const entry = localModelEntry(args.ref, contextWindow);
+	const entry = localModelEntry(args.ref, contextWindow, args.servedContextWindow);
 	const providerBase = {
 		baseUrl: `${args.baseUrl.replace(/\/$/, "")}/v1`,
 		api: "openai-completions",

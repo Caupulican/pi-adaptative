@@ -131,6 +131,17 @@ export class CompactionSupport {
 		return { model: resolved.model };
 	}
 
+	private effectiveContextWindow(model: Model<any>): number {
+		const registered = model.contextWindow > 0 ? model.contextWindow : Number.POSITIVE_INFINITY;
+		const served = this.deps.getStoredFitnessReport(this.modelRef(model))?.capacity?.servedContextWindow;
+		return served && served > 0 ? Math.min(registered, served) : registered;
+	}
+
+	private modelWithEffectiveWindow(model: Model<any>): Model<any> {
+		const contextWindow = this.effectiveContextWindow(model);
+		return contextWindow === model.contextWindow ? model : { ...model, contextWindow };
+	}
+
 	private resolveDefaultModel(sessionModel: Model<any>): Model<any> {
 		const router = this.deps.getSettingsManager().getModelRouterSettings();
 		if (!router.enabled || !router.cheapModel) {
@@ -147,8 +158,9 @@ export class CompactionSupport {
 		// silently truncate over-window prompts instead of erroring), and the verification gate
 		// then fails deterministically.
 		const estimatedInputTokens = this.deps.estimateSummarizationInputTokens();
-		if (!summarizerCanIngest(selected.model, estimatedInputTokens)) {
-			this.lastSelectionReason = `fallback:window_too_small(~${Math.ceil(estimatedInputTokens / 1000)}k input vs ${selected.model.contextWindow} window)`;
+		const effectiveWindow = this.effectiveContextWindow(selected.model);
+		if (!summarizerCanIngest(this.modelWithEffectiveWindow(selected.model), estimatedInputTokens)) {
+			this.lastSelectionReason = `fallback:window_too_small(~${Math.ceil(estimatedInputTokens / 1000)}k input vs ${effectiveWindow} window)`;
 			return sessionModel;
 		}
 		const fitness = this.deps.getStoredFitnessReport(this.modelRef(selected.model));
@@ -184,9 +196,10 @@ export class CompactionSupport {
 			// over-window prompt yields a recall-empty summary — warn with the numbers.
 			if (selected.model) {
 				const estimatedInputTokens = this.deps.estimateSummarizationInputTokens();
-				if (!summarizerCanIngest(selected.model, estimatedInputTokens)) {
+				const effectiveWindow = this.effectiveContextWindow(selected.model);
+				if (!summarizerCanIngest(this.modelWithEffectiveWindow(selected.model), estimatedInputTokens)) {
 					this.deps.emitWarning(
-						`Compaction summarizer (explicit setting) likely cannot ingest the current context: ~${Math.ceil(estimatedInputTokens / 1000)}k input tokens vs a ${selected.model.contextWindow}-token window`,
+						`Compaction summarizer (explicit setting) likely cannot ingest the current context: ~${Math.ceil(estimatedInputTokens / 1000)}k input tokens vs a ${effectiveWindow}-token window`,
 					);
 				}
 			}

@@ -667,8 +667,14 @@ function getSummaryBudget(reserveTokens: number, model: Model<any>, factsBlock?:
 	return Math.max(1, Math.min(demandBudget, Math.floor(0.8 * reserveTokens), modelMaxTokens));
 }
 
+function getEffectiveContextWindow(model: Model<any>): number {
+	const registered = model.contextWindow > 0 ? model.contextWindow : Number.POSITIVE_INFINITY;
+	const served = (model as { servedContextWindow?: unknown }).servedContextWindow;
+	return typeof served === "number" && served > 0 ? Math.min(registered, served) : registered;
+}
+
 function getSummarizerInputBound(model: Model<any>, maxTokens: number): number {
-	const contextWindow = model.contextWindow > 0 ? model.contextWindow : Number.POSITIVE_INFINITY;
+	const contextWindow = getEffectiveContextWindow(model);
 	return contextWindow === Number.POSITIVE_INFINITY
 		? contextWindow
 		: Math.max(1, contextWindow - maxTokens - SUMMARIZER_PROMPT_MARGIN_TOKENS);
@@ -682,7 +688,7 @@ function getSummarizerInputBound(model: Model<any>, maxTokens: number): number {
  * local servers silently truncate over-window prompts instead of erroring.
  */
 export function summarizerCanIngest(model: Model<any>, estimatedInputTokens: number): boolean {
-	const contextWindow = model.contextWindow > 0 ? model.contextWindow : Number.POSITIVE_INFINITY;
+	const contextWindow = getEffectiveContextWindow(model);
 	if (contextWindow === Number.POSITIVE_INFINITY) return true;
 	return estimatedInputTokens <= contextWindow - SUMMARY_BUDGET_MAX_TOKENS - SUMMARIZER_PROMPT_MARGIN_TOKENS;
 }

@@ -763,6 +763,10 @@ export class BackgroundLaneController {
 		const report = await runModelFitnessProbe({
 			trials: args.trials,
 			signal: this._researchLaneAbort.signal,
+			capacityProbe:
+				resolved.provider === "ollama" && resolved.contextWindow > 0
+					? { registeredContextWindow: resolved.contextWindow }
+					: undefined,
 			complete: async ({ systemPrompt, userPrompt, signal }) => {
 				const callStarted = Date.now();
 				const completion = await this.deps.runIsolatedCompletion({

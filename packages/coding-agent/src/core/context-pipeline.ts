@@ -337,6 +337,14 @@ export class ContextPipeline {
 	 * runModelFitness stores reports under it, while settings.model may be a bare id or pattern).
 	 * Sets _lastCurationSkipReason on refusal; never throws.
 	 */
+	private _effectiveContextWindowFromFitness(model: Model<Api>): number {
+		const registered = model.contextWindow > 0 ? model.contextWindow : Number.POSITIVE_INFINITY;
+		const capacity = FitnessStore.forAgentDir(this.deps.getAgentDir())
+			.getForHost()
+			.find((entry) => entry.model === `${model.provider}/${model.id}`)?.report.capacity?.servedContextWindow;
+		return capacity && capacity > 0 ? Math.min(registered, capacity) : registered;
+	}
+
 	resolveCurationModelIfFit(): Model<Api> | undefined {
 		const settings = this.deps.getSettingsManager().getContextCurationSettings();
 		if (!settings.enabled) {
@@ -396,9 +404,14 @@ export class ContextPipeline {
 			}
 			this._lastPreDigestSkipReason = undefined;
 			return async (text, signal) => {
+				const effectiveWindow = this._effectiveContextWindowFromFitness(model);
+				const chunkChars = Number.isFinite(effectiveWindow)
+					? Math.max(1_000, Math.floor((effectiveWindow - 1024) * 4))
+					: undefined;
 				const result = await preDigestConversationText({
 					text,
 					signal,
+					chunkChars,
 					complete: async ({ systemPrompt, userPrompt, signal: chunkSignal }) => {
 						const completion = await this.deps.runIsolatedCompletion({
 							systemPrompt,

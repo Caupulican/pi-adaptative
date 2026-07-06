@@ -1,5 +1,8 @@
 ## [Unreleased]
 
+### Fixed
+- Fixed local-model compaction capacity checks to use measured served context-window evidence from the fitness probe instead of trusting the registered window guess.
+
 ## [0.81.5] - 2026-07-06
 
 ## [0.81.4] - 2026-07-06

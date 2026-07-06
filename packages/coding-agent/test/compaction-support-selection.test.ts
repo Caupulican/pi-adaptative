@@ -26,12 +26,18 @@ function makeModel(provider: string, id: string, contextWindow: number): Model<a
 	};
 }
 
-function createSupport(opts: { estimatedInputTokens: number; warnings: string[]; explicitModel?: string }): {
+function createSupport(opts: {
+	estimatedInputTokens: number;
+	warnings: string[];
+	explicitModel?: string;
+	cheapContextWindow?: number;
+	servedContextWindow?: number;
+}): {
 	support: CompactionSupport;
 	cheap: Model<any>;
 	session: Model<any>;
 } {
-	const cheap = makeModel("ollama", "tiny", 8192);
+	const cheap = makeModel("ollama", "tiny", opts.cheapContextWindow ?? 8192);
 	const session = makeModel("anthropic", "big", 200000);
 	const registry = {
 		getAll: () => [cheap, session],
@@ -48,7 +54,34 @@ function createSupport(opts: { estimatedInputTokens: number; warnings: string[];
 		isRawStream: () => false,
 		getRequiredRequestAuth: async () => ({}),
 		isModelExhausted: () => false,
-		getStoredFitnessReport: () => undefined,
+		getStoredFitnessReport: () =>
+			opts.servedContextWindow === undefined
+				? undefined
+				: {
+						trials: 1,
+						capacity: {
+							registeredContextWindow: opts.cheapContextWindow ?? 8192,
+							servedContextWindow: opts.servedContextWindow,
+							outcomes: [],
+							meanMs: 0,
+						},
+						research: { succeeded: 0, total: 0, outcomes: [], meanMs: 0 },
+						worker: { succeeded: 0, total: 0, outcomes: [], meanMs: 0 },
+						judge: {
+							parsed: 0,
+							planningElevated: 0,
+							planningTotal: 0,
+							trivialCheap: 0,
+							trivialTotal: 0,
+							total: 0,
+							outcomes: [],
+							meanMs: 0,
+						},
+						search: { succeeded: 0, total: 0, outcomes: [], meanMs: 0 },
+						toolCall: { succeeded: 0, total: 0, outcomes: [], meanMs: 0 },
+						digest: { succeeded: 1, total: 1, outcomes: ["ok"], meanMs: 0 },
+						totalCostUsd: 0,
+					},
 		estimateSummarizationInputTokens: () => opts.estimatedInputTokens,
 		emitWarning: (message) => opts.warnings.push(message),
 	};
@@ -88,5 +121,20 @@ describe("compaction summarizer capacity selection", () => {
 
 		expect(resolved).toBe(cheap);
 		expect(warnings.some((message) => message.includes("cannot ingest"))).toBe(true);
+	});
+
+	it("uses the served local-model window from fitness capacity evidence instead of the registered guess", () => {
+		const warnings: string[] = [];
+		const { support, session } = createSupport({
+			estimatedInputTokens: 60_000,
+			warnings,
+			cheapContextWindow: 200_000,
+			servedContextWindow: 8_192,
+		});
+
+		const resolved = support.resolveModel(session);
+
+		expect(resolved).toBe(session);
+		expect(warnings.some((message) => message.includes("window_too_small") && message.includes("8192"))).toBe(true);
 	});
 });
