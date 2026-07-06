@@ -45,6 +45,7 @@ const JWT_CLAIM_PATH = "https://api.openai.com/auth";
 
 type OAuthToken = { access: string; refresh: string; expires: number };
 type TokenOperation = "exchange" | "refresh";
+const TOKEN_EXPIRY_EARLY_REFRESH_MS = 5 * 60 * 1000;
 
 function getCallbackHost(): string {
 	return typeof process !== "undefined" ? process.env.PI_OAUTH_CALLBACK_HOST || "127.0.0.1" : "127.0.0.1";
@@ -147,7 +148,7 @@ async function readTokenResponse(response: Response, operation: TokenOperation):
 	return {
 		access: json.access_token,
 		refresh: json.refresh_token,
-		expires: Date.now() + json.expires_in * 1000,
+		expires: Date.now() + json.expires_in * 1000 - TOKEN_EXPIRY_EARLY_REFRESH_MS,
 	};
 }
 

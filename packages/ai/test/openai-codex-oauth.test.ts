@@ -149,7 +149,7 @@ describe("OpenAI Codex OAuth", () => {
 		await expect(credentialsPromise).resolves.toMatchObject({
 			access: accessToken,
 			refresh: "refresh-token",
-			expires: startTime.getTime() + 5000 + 3600 * 1000,
+			expires: startTime.getTime() + 5000 + 3600 * 1000 - 5 * 60 * 1000,
 			accountId: "account-123",
 		});
 		expect(pollTimes).toEqual([startTime.getTime(), startTime.getTime() + 5000]);
@@ -424,6 +424,28 @@ describe("OpenAI Codex OAuth", () => {
 		).rejects.toThrow(
 			'OpenAI Codex device auth failed with status 500: {"error":"server_error","error_description":"try again later"}',
 		);
+	});
+
+	it("applies the early-refresh buffer to refreshed OpenAI Codex tokens", async () => {
+		const now = new Date("2026-07-06T12:00:00.000Z");
+		vi.setSystemTime(now);
+		const accessToken = createAccessToken("account-refresh");
+		vi.stubGlobal(
+			"fetch",
+			vi.fn(async () =>
+				jsonResponse({
+					access_token: accessToken,
+					refresh_token: "new-refresh-token",
+					expires_in: 3600,
+				}),
+			),
+		);
+
+		await expect(refreshOpenAICodexToken("old-refresh-token")).resolves.toMatchObject({
+			access: accessToken,
+			refresh: "new-refresh-token",
+			expires: now.getTime() + 3600 * 1000 - 5 * 60 * 1000,
+		});
 	});
 
 	it("does not write token refresh failures to stderr", async () => {
