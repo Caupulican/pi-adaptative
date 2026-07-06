@@ -5,6 +5,7 @@
 - Fixed manual `/compact` to preserve authoritative extension results and successful manual summaries while reserving deterministic checkpoints for gate-retry exhaustion and surfacing provider failures.
 - Fixed provider-failure corpus recording to write once per failed assistant message with the overflow-aware classification.
 - Fixed startup migrations and project-trust reads to leave malformed `models.json` / `trust.json` files untouched instead of crashing startup.
+- Fixed interactive mode to rebind the live extensions-changed UI refresh listener after session switches.
 
 ## [0.81.5] - 2026-07-06
 

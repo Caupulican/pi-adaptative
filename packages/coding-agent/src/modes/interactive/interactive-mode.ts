@@ -653,9 +653,7 @@ export class InteractiveMode {
 		await this.rebindCurrentSession();
 
 		// Register extensions-changed listener for live reload UI refresh
-		this.unsubscribeExtensionsChanged = this.session.onExtensionsChanged(() => {
-			this.refreshUIAfterExtensionsChanged();
-		});
+		this.subscribeToExtensionsChanged();
 
 		// Render initial messages AFTER showing loaded resources
 		await this.renderInitialMessages();
@@ -1231,9 +1229,17 @@ export class InteractiveMode {
 		this.applyRuntimeSettings();
 		await this.bindCurrentSessionExtensions();
 		this.subscribeToAgent();
+		this.subscribeToExtensionsChanged();
 		await this.updateAvailableProviderCount();
 		this.updateEditorBorderColor();
 		this.updateTerminalTitle();
+	}
+
+	private subscribeToExtensionsChanged(): void {
+		this.unsubscribeExtensionsChanged?.();
+		this.unsubscribeExtensionsChanged = this.session.onExtensionsChanged(() => {
+			this.refreshUIAfterExtensionsChanged();
+		});
 	}
 
 	private async handleFatalRuntimeError(prefix: string, error: unknown): Promise<never> {
