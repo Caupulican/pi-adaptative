@@ -99,6 +99,22 @@ describe("RetryController", () => {
 		expect(await controller.prepareRetry(failure)).toBe(false);
 	});
 
+	it("honors provider retry-after hints and caps them at maxDelayMs", async () => {
+		const hinted = errorMessage("rate limit exceeded; retry in 20s");
+		const first = setup({ messages: [hinted], policy: { baseDelayMs: 4, maxDelayMs: 30_000 } });
+		const firstPending = first.controller.prepareRetry(hinted);
+		expect(first.startInfos[0].delayMs).toBe(20_000);
+		first.controller.abort();
+		await firstPending;
+
+		const capped = errorMessage("rate limit exceeded; retry in 999s");
+		const second = setup({ messages: [capped], policy: { baseDelayMs: 4, maxDelayMs: 30_000 } });
+		const secondPending = second.controller.prepareRetry(capped);
+		expect(second.startInfos[0].delayMs).toBe(30_000);
+		second.controller.abort();
+		await secondPending;
+	});
+
 	it("feeds the attempt number into the policy backoff: successive delays double", async () => {
 		const failure = errorMessage("overloaded_error");
 		const { controller, startInfos } = setup({ messages: [failure], policy: { maxAttempts: 3, baseDelayMs: 4 } });

@@ -113,7 +113,7 @@ export class RetryController {
 			return false;
 		}
 
-		const delayMs = computeRetryDelayMs(policy, this._attempt);
+		const delayMs = computeRetryDelayMs(policy, this._attempt, { retryAfterMs: classified.retryAfterMs });
 
 		// The retry window counts as active work from the instant listeners hear about it:
 		// isRetrying must already be true inside onRetryStart handlers so prompts arriving there

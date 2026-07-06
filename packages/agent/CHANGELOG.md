@@ -1,5 +1,8 @@
 ## [Unreleased]
 
+### Fixed
+- Fixed turn retry backoff so provider `retryAfterMs` hints are honored and capped by the retry policy.
+
 ## [0.81.3] - 2026-07-05
 
 
