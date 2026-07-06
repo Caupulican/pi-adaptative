@@ -50,6 +50,10 @@ import { runResearch } from "./research/research-runner.ts";
 import type { collectWorkspaceSources } from "./research/workspace-collector.ts";
 import type { SettingsManager } from "./settings-manager.ts";
 
+export function clampLaneMaxUsd(settingsMaxUsd: number, foregroundMaxEstimatedUsd?: number): number {
+	return Math.min(settingsMaxUsd, foregroundMaxEstimatedUsd ?? Number.POSITIVE_INFINITY);
+}
+
 export interface BackgroundLaneControllerDeps {
 	/** A disposed session must never schedule/persist a lane or continuation. */
 	isDisposed(): boolean;
@@ -389,10 +393,7 @@ export class BackgroundLaneController {
 			profileId: laneProfile?.name,
 			capabilities: ["research", "read_files", "memory_read"],
 			...this._laneProfileToolGrants(laneProfile),
-			maxEstimatedUsd: Math.min(
-				maxUsd,
-				this.deps.getCapabilityEnvelope()?.maxEstimatedUsd ?? Number.POSITIVE_INFINITY,
-			),
+			maxEstimatedUsd: clampLaneMaxUsd(maxUsd, this.deps.getCapabilityEnvelope()?.maxEstimatedUsd),
 			createdAt: new Date().toISOString(),
 		};
 	}
@@ -444,12 +445,13 @@ export class BackgroundLaneController {
 				cwd: this.deps.getCwd(),
 				maxSources: settings.maxSources,
 			});
+			const maxUsd = clampLaneMaxUsd(settings.maxUsd, this.deps.getCapabilityEnvelope()?.maxEstimatedUsd);
 			const result = await runResearch({
 				query: demand.query,
 				context: demand.context,
 				sources: workspaceSources,
-				envelope: this._buildResearchLaneEnvelope(settings.maxUsd, laneProfile),
-				maxUsd: settings.maxUsd,
+				envelope: this._buildResearchLaneEnvelope(maxUsd, laneProfile),
+				maxUsd,
 				maxSources: settings.maxSources,
 				maxFindings: settings.maxFindings,
 				maxWallClockMs: settings.maxWallClockMs,
