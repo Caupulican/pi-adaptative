@@ -64,6 +64,8 @@ export function repairJson(json: string): string {
 					index += 5;
 					continue;
 				}
+				repaired += "\\\\";
+				continue;
 			}
 
 			if (VALID_JSON_ESCAPES.has(nextChar)) {

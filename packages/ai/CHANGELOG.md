@@ -2,6 +2,7 @@
 
 ### Fixed
 - Fixed streamed Anthropic usage cost totals so output-token cost recomputes after `message_delta` instead of staying at the input-only `message_start` total.
+- Fixed JSON repair for invalid `\\u` escapes so malformed streamed tool-call arguments can still parse instead of falling back to empty objects.
 
 ## [0.81.3] - 2026-07-05
 
