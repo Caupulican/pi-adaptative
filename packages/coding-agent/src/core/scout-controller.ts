@@ -100,7 +100,7 @@ export class ScoutController {
 			}
 			turnsUsed += 1;
 			lastAssistantText = assistantText(event.message);
-			outputTokens += event.message.usage?.totalTokens ?? 0;
+			outputTokens += getScoutOutputTokenCount(event.message);
 			this.deps.onEvent?.({ type: "scout_turn", detail: `turn ${turnsUsed}` });
 			if (hasFinalAnswer(lastAssistantText)) {
 				return;
@@ -142,6 +142,10 @@ export class ScoutController {
 		this.deps.onEvent?.({ type: "scout_end", detail: finalResult.failure ?? "ok" });
 		return finalResult;
 	}
+}
+
+export function getScoutOutputTokenCount(message: { usage?: { output?: number } }): number {
+	return message.usage?.output ?? 0;
 }
 
 export function parseScoutAnswer(

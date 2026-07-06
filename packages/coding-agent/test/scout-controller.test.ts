@@ -2,7 +2,12 @@ import type { AgentTool } from "@caupulican/pi-agent-core";
 import type { Model } from "@caupulican/pi-ai";
 import { type AssistantMessage, type AssistantMessageEvent, EventStream } from "@caupulican/pi-ai";
 import { describe, expect, it } from "vitest";
-import { parseScoutAnswer, ScoutController, type ScoutControllerDeps } from "../src/core/scout-controller.ts";
+import {
+	getScoutOutputTokenCount,
+	parseScoutAnswer,
+	ScoutController,
+	type ScoutControllerDeps,
+} from "../src/core/scout-controller.ts";
 
 class MockAssistantStream extends EventStream<AssistantMessageEvent, AssistantMessage> {
 	constructor() {
@@ -32,7 +37,11 @@ function createModel(): Model<"anthropic-messages"> {
 	};
 }
 
-function assistantMessage(text: string, stopReason: AssistantMessage["stopReason"] = "stop"): AssistantMessage {
+function assistantMessage(
+	text: string,
+	stopReason: AssistantMessage["stopReason"] = "stop",
+	usage: Partial<NonNullable<AssistantMessage["usage"]>> = {},
+): AssistantMessage {
 	return {
 		role: "assistant",
 		content: [{ type: "text", text }],
@@ -40,12 +49,12 @@ function assistantMessage(text: string, stopReason: AssistantMessage["stopReason
 		provider: "anthropic",
 		model: "fastcontext-test",
 		usage: {
-			input: 10,
-			output: 10,
-			cacheRead: 0,
-			cacheWrite: 0,
-			totalTokens: 20,
-			cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, total: 0 },
+			input: usage.input ?? 10,
+			output: usage.output ?? 10,
+			cacheRead: usage.cacheRead ?? 0,
+			cacheWrite: usage.cacheWrite ?? 0,
+			totalTokens: usage.totalTokens ?? 20,
+			cost: usage.cost ?? { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, total: 0 },
 		},
 		stopReason,
 		timestamp: Date.now(),
@@ -133,6 +142,14 @@ src/ok.ts:1-2
 			failure: "scout unavailable: no model",
 			turnsUsed: 0,
 		});
+	});
+
+	it("counts assistant output tokens, not input tokens, against the scout output-token cap", () => {
+		expect(
+			getScoutOutputTokenCount(
+				assistantMessage("partial", "stop", { input: 50_000, output: 10, totalTokens: 50_010 }),
+			),
+		).toBe(10);
 	});
 
 	it("marks a run truncated when the final answer is absent at the turn cap", async () => {

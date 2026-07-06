@@ -5,6 +5,7 @@
 - Fixed extension `tool_call` event dispatch so a throwing handler emits diagnostics without skipping later handlers.
 - Fixed settings overlay merging to recurse through nested objects while still replacing arrays.
 - Fixed root-session migration to extract filenames correctly from both POSIX and Windows-style paths.
+- Fixed scout truncation accounting to count assistant output tokens against the output-token cap instead of total input plus output tokens.
 
 ## [0.81.6] - 2026-07-06
 
