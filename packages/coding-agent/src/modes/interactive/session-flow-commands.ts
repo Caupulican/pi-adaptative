@@ -586,18 +586,24 @@ export async function handleGoalCommand(host: GoalCommandHost, text: string): Pr
 		return;
 	}
 	host.session.saveGoalStateSnapshot(started.state);
+	// Deterministic producer completion: a goal with zero open requirements evaluates to
+	// finalize/no_open_requirements, so the loop would be undrivable whenever the model skips
+	// decomposition (observed in the field). Seed one requirement from the goal text itself —
+	// the model's decomposition below refines alongside it.
+	const seeded = applyGoalAction(
+		started.state,
+		{ action: "add_requirement", requirementId: `${goalId}-r1`, text: goalText },
+		now,
+	);
+	if (seeded.ok) {
+		host.session.saveGoalStateSnapshot(seeded.state);
+	}
 	await host.session.sendUserMessage(
-		`Start goal: ${goalText}\n\nUse the goal tool this turn to decompose this goal into concrete open requirements with add_requirement actions.`,
+		`Start goal: ${goalText}\n\nUse the goal tool this turn to decompose this goal into concrete open requirements with add_requirement actions, and satisfy_requirement ${goalId}-r1 once the decomposed requirements cover it.`,
 	);
 	const result = await host.session.continueGoalLoop({ maxTurns: 1, maxStallTurns: 20, maxWallClockMinutes: 0 });
 	const continuation = result.finalSnapshot.continuation;
-	if (continuation.reasonCode === "no_open_requirements") {
-		host.showStatus(
-			"Goal started, but no open requirements were added (no_open_requirements). Use the goal tool to add requirements.",
-		);
-	} else {
-		host.showStatus(`Goal started: ${continuation.action}/${continuation.reasonCode}.`);
-	}
+	host.showStatus(`Goal started: ${continuation.action}/${continuation.reasonCode}.`);
 	host.refreshAutonomyFooterStatus();
 }
 

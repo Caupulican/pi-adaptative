@@ -1,6 +1,8 @@
 ## [Unreleased]
 
 ### Fixed
+- `/goal <text>` now deterministically seeds one open requirement from the goal text, so the continuation loop is drivable even when the model skips decomposition.
+- Compaction retry warnings now name the summarizer selection reason and the input-size estimate, so gate failures identify the responsible model without a post-mortem.
 - Fixed local-model compaction capacity checks to use measured served context-window evidence from the fitness probe instead of trusting the registered window guess, including tail-truncating local servers by requiring start and end capacity needles.
 - Fixed manual `/compact` to preserve authoritative extension results, keep normal summary verification enabled, reserve deterministic checkpoints for gate-retry exhaustion, and surface provider failures.
 - Fixed provider-failure corpus recording to write once per failed assistant message with the overflow-aware classification.

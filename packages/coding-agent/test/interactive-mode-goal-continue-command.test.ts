@@ -124,7 +124,7 @@ describe("InteractiveMode /goal-continue command", () => {
 		expect(statuses[0]).toContain("Goal: none (ask-user/missing_goal_state)");
 	});
 
-	it("starts a goal, asks the model to add requirements, and warns when none are added", async () => {
+	it("starts a goal, deterministically seeds one requirement, then asks the model to decompose", async () => {
 		const statuses: string[] = [];
 		const saved: GoalState[] = [];
 		const prompts: string[] = [];
@@ -164,8 +164,14 @@ describe("InteractiveMode /goal-continue command", () => {
 		await interactiveModePrototype.handleGoalCommand.call(context, "/goal ship the thing");
 
 		expect(saved[0].userGoal).toBe("ship the thing");
+		// The deterministic seed makes the continuation loop drivable even when the model skips
+		// decomposition (field incident: goal wedged at finalize/no_open_requirements).
+		expect(saved[1]?.requirements).toHaveLength(1);
+		expect(saved[1]?.requirements[0]?.text).toBe("ship the thing");
+		expect(saved[1]?.requirements[0]?.status).toBe("open");
 		expect(prompts[0]).toContain("Use the goal tool this turn to decompose this goal");
-		expect(statuses.at(-1)).toContain("no_open_requirements");
+		expect(prompts[0]).toContain("satisfy_requirement");
+		expect(statuses.at(-1)).toContain("Goal started");
 	});
 
 	it("parses default and explicit bounded arguments", () => {

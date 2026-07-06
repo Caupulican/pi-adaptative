@@ -182,6 +182,28 @@ describe("extractCompactionFacts", () => {
 		expect(facts.activeTaskSource).toBe("Resume");
 	});
 
+	it("does not harvest prohibitions from pasted documents and caps the rule set", () => {
+		resetEntryCounter();
+		// A pasted instruction document (field incident: 13 fragment rules extracted from one
+		// paste, making the mandatory-rules gate demand the checkpoint reproduce the document).
+		const pastedDoc = `Execute the plan.\n${Array.from({ length: 13 }, (_, i) => `Rule ${i}: never do thing number ${i} under any circumstances, and do not forget it.`).join("\n")}\n${"filler ".repeat(300)}`;
+		expect(pastedDoc.length).toBeGreaterThan(1500);
+		const u1 = createMessageEntry(createUserMessage(pastedDoc));
+		const fromDoc = extractCompactionFacts([u1], 0, 1);
+		expect(fromDoc.prohibitions).toEqual([]);
+		expect(fromDoc.activeTaskSource).toBe(pastedDoc);
+
+		resetEntryCounter();
+		// Spoken prohibitions still harvest, bounded to the most recent 8.
+		const entries = Array.from({ length: 12 }, (_, i) =>
+			createMessageEntry(createUserMessage(`do not touch module-${i}`)),
+		);
+		const spoken = extractCompactionFacts(entries, 0, entries.length);
+		expect(spoken.prohibitions).toHaveLength(8);
+		expect(spoken.prohibitions[0]).toBe("do not touch module-4");
+		expect(spoken.prohibitions[7]).toBe("do not touch module-11");
+	});
+
 	it("does not treat everyday 'stop the server' phrasing as a reversal of prior work", () => {
 		resetEntryCounter();
 

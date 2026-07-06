@@ -86,9 +86,12 @@ describe("compaction bounds", () => {
 			true,
 		);
 
-		expect(completeSimpleMock).toHaveBeenCalledTimes(4);
+		// Chunk headroom (W4.4) shrinks each chunk below the input bound, so this fixture now
+		// splits into more chunks; the retained-chunk cap (4) plus the final merge = 5 calls.
+		expect(completeSimpleMock).toHaveBeenCalledTimes(5);
 		expect(completeSimpleMock.mock.calls[0]?.[1].messages[0]?.content[0]?.text).toContain("conversation-chunk");
-		expect(completeSimpleMock.mock.calls[3]?.[1].messages[0]?.content[0]?.text).toContain(
+		expect(completeSimpleMock.mock.calls[3]?.[1].messages[0]?.content[0]?.text).toContain("conversation-chunk");
+		expect(completeSimpleMock.mock.calls[4]?.[1].messages[0]?.content[0]?.text).toContain(
 			"Checkpoint the conversation",
 		);
 	});

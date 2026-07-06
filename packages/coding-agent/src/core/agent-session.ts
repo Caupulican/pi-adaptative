@@ -1047,6 +1047,17 @@ export class AgentSession {
 		return this._compactionSupport.resolveModel(sessionModel);
 	}
 
+	/**
+	 * One bounded diagnostic clause for compaction retry warnings: which summarizer selection won
+	 * (and why) plus the input-size estimate the capacity check consumed — the two facts every
+	 * gate-failure post-mortem has needed (2026-07-06 field incidents).
+	 */
+	private _describeCompactionSummarizer(): string {
+		const reason = this._compactionSupport.getLastSelectionReason() ?? "unresolved";
+		const estimate = this._pipeline.estimateCurrentContextTokens(this.agent.state.messages);
+		return `summarizer: ${reason}, ~${Math.ceil(estimate / 1000)}k est input`;
+	}
+
 	private _getLastCompactionSelectionReason(): string | undefined {
 		return this._compactionSupport.getLastSelectionReason();
 	}
@@ -2946,7 +2957,7 @@ export class AgentSession {
 				onTransition: ({ cycle, cause }) => {
 					this._emit({
 						type: "warning",
-						message: `manual compaction cycle ${cycle}: ${cause} — retrying from step 0`,
+						message: `manual compaction cycle ${cycle}: ${cause} — retrying from step 0 (${this._describeCompactionSummarizer()})`,
 					});
 				},
 				signal,
@@ -3266,7 +3277,7 @@ export class AgentSession {
 				onTransition: ({ cycle, cause }) => {
 					this._emit({
 						type: "warning",
-						message: `auto-compaction cycle ${cycle}: ${cause} — retrying from step 0`,
+						message: `auto-compaction cycle ${cycle}: ${cause} — retrying from step 0 (${this._describeCompactionSummarizer()})`,
 					});
 				},
 				signal,

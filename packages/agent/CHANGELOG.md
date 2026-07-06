@@ -1,6 +1,7 @@
 ## [Unreleased]
 
 ### Fixed
+- Fixed prohibition extraction so pasted documents (user messages over 1500 chars) no longer flood the mandatory-rules gate; harvested rules are capped at the 8 most recent.
 - Fixed provider-failure classification so numeric HTTP status patterns only match standalone codes, not digits embedded in longer tokens.
 - Fixed the compaction loop so an effect-not-restored retry can continue after the host appends the loop's own compaction entry and deterministic checkpoint preparation failures return failed outcomes instead of escaping the loop.
 - Removed unused compaction verification-bypass execution options so manual compaction keeps the normal verification gate.

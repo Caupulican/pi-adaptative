@@ -27,6 +27,11 @@ const PROHIBITION_PATTERN = /\b(do not|don't|never|stop (?:doing|using|changing)
 const REVERSAL_PATTERN =
 	/\b(undo|revert|roll back|never mind|scrap that|forget (?:it|that)|stop (?:that|this|it|everything|working on))\b/i;
 
+/** User messages longer than this are documents/pastes, not spoken prohibitions. */
+const PROHIBITION_SOURCE_MAX_CHARS = 1_500;
+/** Upper bound on gate-demanded rules; most recent win (same bounding rationale as Done carry-over). */
+const MAX_PROHIBITIONS = 8;
+
 const FILE_KIND_PRIORITY: Record<NonNullable<ToolCallFact["finalKind"]>, number> = {
 	read: 1,
 	created: 2,
@@ -233,15 +238,22 @@ export function extractCompactionFacts(entries: SessionEntry[], start: number, e
 
 			if (userText) {
 				activeTaskSource = userText;
-				for (const sentence of splitSentenceLines(userText)) {
-					if (!PROHIBITION_PATTERN.test(sentence)) {
-						continue;
-					}
-					const normalized = clampText(sentence, 160);
-					const dedupeKey = normalized.toLowerCase();
-					if (!seenProhibitions.has(dedupeKey)) {
-						seenProhibitions.add(dedupeKey);
-						prohibitions.push(normalized);
+				// Mandatory Rules exist for SPOKEN durable prohibitions ("do not touch X"), not for
+				// documents. A long pasted text (plan, instruction file) can contain dozens of
+				// "never/do not" lines; harvesting them makes the verification gate demand the
+				// checkpoint reproduce the document (2026-07-06 field incident: 13 fragment rules
+				// extracted from one pasted instruction). Documents live on disk; skip them here.
+				if (userText.length <= PROHIBITION_SOURCE_MAX_CHARS) {
+					for (const sentence of splitSentenceLines(userText)) {
+						if (!PROHIBITION_PATTERN.test(sentence)) {
+							continue;
+						}
+						const normalized = clampText(sentence, 160);
+						const dedupeKey = normalized.toLowerCase();
+						if (!seenProhibitions.has(dedupeKey)) {
+							seenProhibitions.add(dedupeKey);
+							prohibitions.push(normalized);
+						}
 					}
 				}
 			}
@@ -388,7 +400,7 @@ export function extractCompactionFacts(entries: SessionEntry[], start: number, e
 			return a.path.localeCompare(b.path);
 		}),
 		actions,
-		prohibitions,
+		prohibitions: prohibitions.slice(-MAX_PROHIBITIONS),
 		cancelledText: cancelledParts.join("\n"),
 		activeTaskSource,
 	};
