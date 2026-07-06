@@ -136,7 +136,7 @@ describe("InteractiveMode TUI reload history cap", () => {
 		}
 	});
 
-	test("offscreen history rebuild swaps once without partial chunk renders", async () => {
+	function createRenderContext() {
 		const ctx = Object.create((InteractiveMode as any).prototype);
 		ctx.chatContainer = new Container();
 		ctx.chatContainer.addChild(new Text("OLD", 0, 0));
@@ -149,6 +149,7 @@ describe("InteractiveMode TUI reload history cap", () => {
 		ctx.clearRenderedToolPanelState = vi.fn();
 		ctx.getMarkdownThemeWithSettings = vi.fn(() => undefined);
 		ctx.renderGeneration = 0;
+		ctx.renderQueue = Promise.resolve();
 		ctx.liveHistoryHiddenNotice = undefined;
 		ctx.liveHistoryHiddenComponents = 0;
 		ctx.lastStatusSpacer = undefined;
@@ -159,6 +160,11 @@ describe("InteractiveMode TUI reload history cap", () => {
 		ctx.addMessageToChat = (message: AgentMessage) => {
 			ctx.chatContainer.addChild(new Text(getText(message), 0, 0));
 		};
+		return ctx;
+	}
+
+	test("offscreen history rebuild swaps once without partial chunk renders", async () => {
+		const ctx = createRenderContext();
 
 		const messages = Array.from({ length: 45 }, (_, index) => makeUserMessage(`message-${index}`));
 		await (InteractiveMode as any).prototype.renderSessionContext.call(ctx, { messages });
@@ -168,5 +174,23 @@ describe("InteractiveMode TUI reload history cap", () => {
 		expect(rendered).not.toContain("OLD");
 		expect(rendered).toContain("message-0");
 		expect(rendered).toContain("message-44");
+	});
+
+	test("two overlapped renderSessionContext calls finish with the visible container intact", async () => {
+		const ctx = createRenderContext();
+		const visibleChatContainer = ctx.chatContainer;
+		const renderSessionContext = (InteractiveMode as any).prototype.renderSessionContext;
+		const first = Array.from({ length: 45 }, (_, index) => makeUserMessage(`old-${index}`));
+		const second = Array.from({ length: 45 }, (_, index) => makeUserMessage(`new-${index}`));
+
+		const firstRender = renderSessionContext.call(ctx, { messages: first });
+		await Promise.resolve();
+		const secondRender = renderSessionContext.call(ctx, { messages: second });
+		await Promise.all([firstRender, secondRender]);
+
+		expect(ctx.chatContainer).toBe(visibleChatContainer);
+		const rendered = ctx.chatContainer.render(120).join("\n");
+		expect(rendered).toContain("new-44");
+		expect(rendered).not.toContain("old-44");
 	});
 });

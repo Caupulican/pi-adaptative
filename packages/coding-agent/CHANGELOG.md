@@ -1,6 +1,7 @@
 ## [Unreleased]
 
 ### Fixed
+- Fixed interactive-mode `renderSessionContext` to serialize overlapping rebuild calls on a queue so that the newest generation wins the commit and the visible container remains intact.
 - `/goal <text>` now deterministically seeds one open requirement from the goal text, so the continuation loop is drivable even when the model skips decomposition.
 - Compaction retry warnings now name the summarizer selection reason and the input-size estimate, so gate failures identify the responsible model without a post-mortem.
 - Fixed local-model compaction capacity checks to use measured served context-window evidence from the fitness probe instead of trusting the registered window guess, including tail-truncating local servers by requiring start and end capacity needles.

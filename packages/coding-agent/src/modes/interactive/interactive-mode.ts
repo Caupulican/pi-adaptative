@@ -2472,114 +2472,125 @@ export class InteractiveMode {
 	 * @param options.populateHistory Add user messages to editor history
 	 */
 	private renderGeneration = 0;
+	private renderQueue?: Promise<void>;
 
 	private async renderSessionContext(
 		sessionContext: SessionContext,
 		options: { updateFooter?: boolean; populateHistory?: boolean } = {},
 	): Promise<void> {
-		// Build long history offscreen, then atomically swap it into the visible
-		// chat container. This keeps the TUI responsive without flashing blank or
-		// partial transcript frames during resume/reload/compaction rebuilds.
-		const generation = ++this.renderGeneration;
-		let processed = 0;
-		let committed = false;
+		const run = async () => {
+			// Build long history offscreen, then atomically swap it into the visible
+			// chat container. This keeps the TUI responsive without flashing blank or
+			// partial transcript frames during resume/reload/compaction rebuilds.
+			this.renderGeneration = (this.renderGeneration ?? 0) + 1;
+			const generation = this.renderGeneration;
+			let processed = 0;
+			let committed = false;
 
-		const visibleChatContainer = this.chatContainer;
-		const previousLiveHistoryHiddenNotice = this.liveHistoryHiddenNotice;
-		const previousLiveHistoryHiddenComponents = this.liveHistoryHiddenComponents;
-		const previousLastStatusSpacer = this.lastStatusSpacer;
-		const previousLastStatusText = this.lastStatusText;
-		const stagingChatContainer = new Container();
+			const visibleChatContainer = this.chatContainer;
+			const previousLiveHistoryHiddenNotice = this.liveHistoryHiddenNotice;
+			const previousLiveHistoryHiddenComponents = this.liveHistoryHiddenComponents;
+			const previousLastStatusSpacer = this.lastStatusSpacer;
+			const previousLastStatusText = this.lastStatusText;
+			const stagingChatContainer = new Container();
 
-		this.chatContainer = stagingChatContainer;
-		this.resetLiveTuiHistoryTrim();
-		this.clearRenderedToolPanelState();
-		const renderedPendingTools = new Map<string, ToolExecutionComponent>();
+			this.chatContainer = stagingChatContainer;
+			this.resetLiveTuiHistoryTrim();
+			this.clearRenderedToolPanelState();
+			const renderedPendingTools = new Map<string, ToolExecutionComponent>();
 
-		try {
-			if (options.updateFooter) {
-				this.footer.invalidate();
-				this.updateEditorBorderColor();
-			}
-
-			const tuiHistory = this.messagesForTuiHistoryReload(sessionContext.messages);
-			if (tuiHistory.omittedMessages > 0) {
-				this.appendStatusToChat(
-					`Showing last ~${historyReloadMath.TUI_HISTORY_RELOAD_MAX_LINES} TUI history lines; omitted ${tuiHistory.omittedMessages} older message${tuiHistory.omittedMessages === 1 ? "" : "s"}. Full session remains available to the model.`,
-					{ requestRender: false },
-				);
-			}
-
-			for (const message of tuiHistory.messages) {
-				if (processed > 0 && processed % TUI_HISTORY_RELOAD_CHUNK_SIZE === 0) {
-					await new Promise((resolve) => setImmediate(resolve));
-					if (generation !== this.renderGeneration) return;
+			try {
+				if (options.updateFooter) {
+					this.footer.invalidate();
+					this.updateEditorBorderColor();
 				}
-				processed++;
-				// Assistant messages need special handling for tool calls
-				if (message.role === "assistant") {
-					this.addMessageToChat(message);
-					// Render tool call components
-					for (const content of message.content) {
-						if (content.type === "toolCall") {
-							const component = this.attachToolExecutionComponent(content.name, content.id, content.arguments);
 
-							if (message.stopReason === "aborted" || message.stopReason === "error") {
-								let errorMessage: string;
-								if (message.stopReason === "aborted") {
-									const retryAttempt = this.session.retryAttempt;
-									errorMessage =
-										retryAttempt > 0
-											? `Aborted after ${retryAttempt} retry attempt${retryAttempt > 1 ? "s" : ""}`
-											: "Operation aborted";
+				const tuiHistory = this.messagesForTuiHistoryReload(sessionContext.messages);
+				if (tuiHistory.omittedMessages > 0) {
+					this.appendStatusToChat(
+						`Showing last ~${historyReloadMath.TUI_HISTORY_RELOAD_MAX_LINES} TUI history lines; omitted ${tuiHistory.omittedMessages} older message${tuiHistory.omittedMessages === 1 ? "" : "s"}. Full session remains available to the model.`,
+						{ requestRender: false },
+					);
+				}
+
+				for (const message of tuiHistory.messages) {
+					if (processed > 0 && processed % TUI_HISTORY_RELOAD_CHUNK_SIZE === 0) {
+						await new Promise((resolve) => setImmediate(resolve));
+						if (generation !== this.renderGeneration) return;
+					}
+					processed++;
+					// Assistant messages need special handling for tool calls
+					if (message.role === "assistant") {
+						this.addMessageToChat(message);
+						// Render tool call components
+						for (const content of message.content) {
+							if (content.type === "toolCall") {
+								const component = this.attachToolExecutionComponent(
+									content.name,
+									content.id,
+									content.arguments,
+								);
+
+								if (message.stopReason === "aborted" || message.stopReason === "error") {
+									let errorMessage: string;
+									if (message.stopReason === "aborted") {
+										const retryAttempt = this.session.retryAttempt;
+										errorMessage =
+											retryAttempt > 0
+												? `Aborted after ${retryAttempt} retry attempt${retryAttempt > 1 ? "s" : ""}`
+												: "Operation aborted";
+									} else {
+										errorMessage = message.errorMessage || "Error";
+									}
+									component.updateResult({ content: [{ type: "text", text: errorMessage }], isError: true });
+									this.toolPanels.finish(content.id);
 								} else {
-									errorMessage = message.errorMessage || "Error";
+									renderedPendingTools.set(content.id, component);
 								}
-								component.updateResult({ content: [{ type: "text", text: errorMessage }], isError: true });
-								this.toolPanels.finish(content.id);
-							} else {
-								renderedPendingTools.set(content.id, component);
 							}
 						}
+					} else if (message.role === "toolResult") {
+						// Match tool results to pending tool components
+						const component = renderedPendingTools.get(message.toolCallId);
+						if (component) {
+							component.updateResult(message);
+							renderedPendingTools.delete(message.toolCallId);
+							this.toolPanels.finish(message.toolCallId);
+						}
+					} else {
+						// All other messages use standard rendering
+						this.addMessageToChat(message, options);
 					}
-				} else if (message.role === "toolResult") {
-					// Match tool results to pending tool components
-					const component = renderedPendingTools.get(message.toolCallId);
-					if (component) {
-						component.updateResult(message);
-						renderedPendingTools.delete(message.toolCallId);
-						this.toolPanels.finish(message.toolCallId);
-					}
+				}
+
+				if (generation !== this.renderGeneration) return;
+				visibleChatContainer.children = stagingChatContainer.children;
+				committed = true;
+			} finally {
+				const stagedLiveHistoryHiddenNotice = this.liveHistoryHiddenNotice;
+				const stagedLiveHistoryHiddenComponents = this.liveHistoryHiddenComponents;
+				const stagedLastStatusSpacer = this.lastStatusSpacer;
+				const stagedLastStatusText = this.lastStatusText;
+
+				this.chatContainer = visibleChatContainer;
+				if (committed) {
+					this.liveHistoryHiddenNotice = stagedLiveHistoryHiddenNotice;
+					this.liveHistoryHiddenComponents = stagedLiveHistoryHiddenComponents;
+					this.lastStatusSpacer = stagedLastStatusSpacer;
+					this.lastStatusText = stagedLastStatusText;
 				} else {
-					// All other messages use standard rendering
-					this.addMessageToChat(message, options);
+					this.liveHistoryHiddenNotice = previousLiveHistoryHiddenNotice;
+					this.liveHistoryHiddenComponents = previousLiveHistoryHiddenComponents;
+					this.lastStatusSpacer = previousLastStatusSpacer;
+					this.lastStatusText = previousLastStatusText;
 				}
 			}
 
-			if (generation !== this.renderGeneration) return;
-			visibleChatContainer.children = stagingChatContainer.children;
-			committed = true;
-		} finally {
-			const stagedLiveHistoryHiddenNotice = this.liveHistoryHiddenNotice;
-			const stagedLiveHistoryHiddenComponents = this.liveHistoryHiddenComponents;
-			const stagedLastStatusSpacer = this.lastStatusSpacer;
-			const stagedLastStatusText = this.lastStatusText;
+			if (committed) this.ui.requestRender();
+		};
 
-			this.chatContainer = visibleChatContainer;
-			if (committed) {
-				this.liveHistoryHiddenNotice = stagedLiveHistoryHiddenNotice;
-				this.liveHistoryHiddenComponents = stagedLiveHistoryHiddenComponents;
-				this.lastStatusSpacer = stagedLastStatusSpacer;
-				this.lastStatusText = stagedLastStatusText;
-			} else {
-				this.liveHistoryHiddenNotice = previousLiveHistoryHiddenNotice;
-				this.liveHistoryHiddenComponents = previousLiveHistoryHiddenComponents;
-				this.lastStatusSpacer = previousLastStatusSpacer;
-				this.lastStatusText = previousLastStatusText;
-			}
-		}
-
-		if (committed) this.ui.requestRender();
+		this.renderQueue = (this.renderQueue ?? Promise.resolve()).then(run, run);
+		return this.renderQueue;
 	}
 
 	async renderInitialMessages(options: { forceHistoryLoad?: boolean } = {}): Promise<void> {
