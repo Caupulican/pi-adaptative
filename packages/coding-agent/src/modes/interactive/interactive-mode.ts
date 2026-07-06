@@ -430,7 +430,12 @@ export class InteractiveMode {
 				widgetContainerBelow: this.widgetContainerBelow,
 				getEditor: () => this.editor,
 				setEditor: (editor) => {
+					const previousEditor = this.editor;
 					this.editor = editor;
+					if (previousEditor !== editor && previousEditor !== this.defaultEditor) {
+						const disposableEditor = previousEditor as typeof previousEditor & { dispose?: () => void };
+						disposableEditor.dispose?.();
+					}
 				},
 				getBuiltInHeader: () => this.builtInHeader,
 				getAutocompleteProvider: () => this.autocompleteProvider,

@@ -12,6 +12,7 @@
 - Fixed shared exec output decoding to preserve multibyte UTF-8 characters split across stdout/stderr chunks.
 - Fixed overlapping bash execution cancellation so aborting bash cancels every running command instead of only the latest one.
 - Fixed concurrent first-run managed-tool downloads to share one in-flight download per tool.
+- Fixed interactive-mode cleanup leaks by sequence-guarding current-scope session loads and disposing replaced custom editors.
 
 ## [0.81.6] - 2026-07-06
 

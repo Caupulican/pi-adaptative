@@ -699,6 +699,7 @@ export class SessionSelectorComponent extends Container implements Focusable {
 	private renameSession?: (sessionPath: string, currentName: string | undefined) => Promise<void>;
 	private currentLoading = false;
 	private allLoading = false;
+	private currentLoadSeq = 0;
 	private allLoadSeq = 0;
 
 	private mode: "list" | "rename" = "list";
@@ -917,14 +918,15 @@ export class SessionSelectorComponent extends Container implements Focusable {
 			this.allLoading = true;
 		}
 
-		const seq = scope === "all" ? ++this.allLoadSeq : undefined;
+		const seq = scope === "all" ? ++this.allLoadSeq : ++this.currentLoadSeq;
 		this.header.setScope(scope);
 		this.header.setLoading(true);
 		this.requestRender();
 
 		const onProgress = (loaded: number, total: number) => {
 			if (scope !== this.scope) return;
-			if (seq !== undefined && seq !== this.allLoadSeq) return;
+			if (scope === "current" && seq !== this.currentLoadSeq) return;
+			if (scope === "all" && seq !== this.allLoadSeq) return;
 			this.header.setProgress(loaded, total);
 			this.requestRender();
 		};
@@ -943,7 +945,8 @@ export class SessionSelectorComponent extends Container implements Focusable {
 			}
 
 			if (scope !== this.scope) return;
-			if (seq !== undefined && seq !== this.allLoadSeq) return;
+			if (scope === "current" && seq !== this.currentLoadSeq) return;
+			if (scope === "all" && seq !== this.allLoadSeq) return;
 
 			this.header.setLoading(false);
 			this.sessionList.setSessions(sessions, showCwd);
@@ -960,7 +963,8 @@ export class SessionSelectorComponent extends Container implements Focusable {
 			}
 
 			if (scope !== this.scope) return;
-			if (seq !== undefined && seq !== this.allLoadSeq) return;
+			if (scope === "current" && seq !== this.currentLoadSeq) return;
+			if (scope === "all" && seq !== this.allLoadSeq) return;
 
 			const message = err instanceof Error ? err.message : String(err);
 			this.header.setLoading(false);
