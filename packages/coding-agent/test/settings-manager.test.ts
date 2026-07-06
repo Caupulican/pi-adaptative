@@ -26,6 +26,41 @@ describe("SettingsManager", () => {
 		}
 	});
 
+	describe("settings merge", () => {
+		it("recursively merges nested objects and replaces arrays", () => {
+			writeFileSync(
+				join(agentDir, "settings.json"),
+				JSON.stringify({
+					retry: {
+						provider: { timeoutMs: 1000, maxRetryDelayMs: 5000 },
+						stall: { connectMs: 10, activeIdleMs: 20 },
+					},
+					enabledModels: ["global/model"],
+				}),
+			);
+			writeFileSync(
+				join(projectDir, ".pi", "settings.json"),
+				JSON.stringify({
+					retry: {
+						provider: { maxRetries: 7 },
+						stall: { quietIdleMs: 30 },
+					},
+					enabledModels: ["project/model"],
+				}),
+			);
+
+			const manager = SettingsManager.create(projectDir, agentDir);
+
+			expect(manager.getProviderRetrySettings()).toEqual({
+				timeoutMs: 1000,
+				maxRetries: 7,
+				maxRetryDelayMs: 5000,
+			});
+			expect(manager.getStreamStallSettings()).toEqual({ connectMs: 10, activeIdleMs: 20, quietIdleMs: 30 });
+			expect(manager.getEnabledModels()).toEqual(["project/model"]);
+		});
+	});
+
 	describe("preserves externally added settings", () => {
 		it("should preserve enabledModels when changing thinking level", async () => {
 			// Create initial settings file
