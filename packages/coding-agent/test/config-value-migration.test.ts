@@ -3,7 +3,14 @@ import * as os from "node:os";
 import * as path from "node:path";
 import { afterEach, describe, expect, it, vi } from "vitest";
 import { ENV_AGENT_DIR } from "../src/config.ts";
-import { runMigrations } from "../src/migrations.ts";
+import { getMigratedSessionFileName, runMigrations } from "../src/migrations.ts";
+
+describe("session migration path helpers", () => {
+	it("extracts the basename from Windows-style session paths", () => {
+		expect(getMigratedSessionFileName("C:\\Users\\me\\.pi\\agent\\abc.jsonl")).toBe("abc.jsonl");
+		expect(getMigratedSessionFileName("/home/me/.pi/agent/def.jsonl")).toBe("def.jsonl");
+	});
+});
 
 describe("config value env var syntax migration", () => {
 	const tempDirs: string[] = [];

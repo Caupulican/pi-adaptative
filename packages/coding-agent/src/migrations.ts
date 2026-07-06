@@ -217,6 +217,11 @@ function migrateExplicitEnvVarConfigValues(): void {
  *
  * See: https://github.com/earendil-works/pi-mono/issues/320
  */
+export function getMigratedSessionFileName(file: string): string | undefined {
+	const fileName = file.split(/[\\/]/).pop();
+	return fileName || undefined;
+}
+
 export function migrateSessionsFromAgentRoot(): void {
 	const agentDir = getAgentDir();
 
@@ -254,8 +259,9 @@ export function migrateSessionsFromAgentRoot(): void {
 			}
 
 			// Move the file
-			const fileName = file.split("/").pop() || file.split("\\").pop();
-			const newPath = join(correctDir, fileName!);
+			const fileName = getMigratedSessionFileName(file);
+			if (!fileName) continue;
+			const newPath = join(correctDir, fileName);
 
 			if (existsSync(newPath)) continue; // Skip if target exists
 

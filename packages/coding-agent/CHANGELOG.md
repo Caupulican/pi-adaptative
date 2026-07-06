@@ -4,6 +4,7 @@
 - Fixed native reflection cost deduplication to derive report IDs from a stable turn digest instead of an absent message id.
 - Fixed extension `tool_call` event dispatch so a throwing handler emits diagnostics without skipping later handlers.
 - Fixed settings overlay merging to recurse through nested objects while still replacing arrays.
+- Fixed root-session migration to extract filenames correctly from both POSIX and Windows-style paths.
 
 ## [0.81.6] - 2026-07-06
 
