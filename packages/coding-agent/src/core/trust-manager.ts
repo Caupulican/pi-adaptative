@@ -14,7 +14,7 @@ function normalizeCwd(cwd: string): string {
 	return canonicalizePath(resolvePath(cwd));
 }
 
-function readTrustFile(path: string): TrustFile {
+function readTrustFile(path: string): TrustFile | undefined {
 	if (!existsSync(path)) {
 		return {};
 	}
@@ -22,9 +22,8 @@ function readTrustFile(path: string): TrustFile {
 	let parsed: unknown;
 	try {
 		parsed = JSON.parse(readFileSync(path, "utf-8"));
-	} catch (error) {
-		const message = error instanceof Error ? error.message : String(error);
-		throw new Error(`Failed to read trust store ${path}: ${message}`);
+	} catch {
+		return undefined;
 	}
 
 	if (typeof parsed !== "object" || parsed === null || Array.isArray(parsed)) {
@@ -133,6 +132,7 @@ export class ProjectTrustStore {
 	get(cwd: string): ProjectTrustDecision {
 		return withTrustFileLock(this.trustPath, () => {
 			const data = readTrustFile(this.trustPath);
+			if (!data) return null;
 			const value = data[normalizeCwd(cwd)];
 			return value === true || value === false ? value : null;
 		});
@@ -141,6 +141,7 @@ export class ProjectTrustStore {
 	set(cwd: string, decision: ProjectTrustDecision): void {
 		withTrustFileLock(this.trustPath, () => {
 			const data = readTrustFile(this.trustPath);
+			if (!data) return;
 			const key = normalizeCwd(cwd);
 			if (decision === null) {
 				delete data[key];

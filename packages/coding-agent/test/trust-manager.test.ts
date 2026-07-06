@@ -33,13 +33,13 @@ describe("ProjectTrustStore", () => {
 		expect(store.get(cwd)).toBeNull();
 	});
 
-	it("fails loudly without overwriting malformed trust stores", () => {
+	it("leaves malformed trust stores untouched instead of crashing startup reads", () => {
 		const trustPath = join(agentDir, "trust.json");
 		writeFileSync(trustPath, "{not json", "utf-8");
 		const store = new ProjectTrustStore(agentDir);
 
-		expect(() => store.get(cwd)).toThrow(/Failed to read trust store/);
-		expect(() => store.set(cwd, true)).toThrow(/Failed to read trust store/);
+		expect(store.get(cwd)).toBeNull();
+		expect(() => store.set(cwd, true)).not.toThrow();
 		expect(readFileSync(trustPath, "utf-8")).toBe("{not json");
 	});
 

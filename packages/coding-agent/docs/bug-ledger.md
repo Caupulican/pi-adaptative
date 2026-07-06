@@ -88,7 +88,7 @@ updates. Sign the "Found by" column.
 | 59 | medium | tui / input | `packages/tui/src/keys.ts:1375` | W6.1 Kitty PUA functional keys decode as printable invisible text. | 2026-07-05 harness bug hunt | suspected |
 | 60 | medium | tui / measurement | `packages/tui/src/utils.ts:295` | W6.2 extractAnsiCode CSI terminator set is too narrow and can swallow visible text after non-SGR CSI. | 2026-07-05 harness bug hunt | suspected |
 | 61 | low | tui / stdin buffer | `packages/tui/src/stdin-buffer.ts:315` | W6.3 Bracketed paste without end marker can leave pasteMode set forever. | 2026-07-05 harness bug hunt | suspected |
-| 62 | high | coding-agent / startup migrations | `packages/coding-agent/src/migrations.ts:147` | W7.1 Malformed models.json hard-crashes startup migrations; trust-manager parse has similar unguarded path. | 2026-07-05 harness bug hunt | open |
+| 62 | high | coding-agent / startup migrations | `packages/coding-agent/src/migrations.ts:147` | W7.1 Malformed models.json hard-crashes startup migrations; trust-manager parse has similar unguarded path. | 2026-07-05 harness bug hunt | fixed: pending |
 | 63 | medium | coding-agent / settings | `packages/coding-agent/src/core/settings-manager.ts:427` | W7.2 deepMergeSettings documents recursive merge but only merges one level. | 2026-07-05 harness bug hunt | open |
 | 64 | low | coding-agent / migrations | `packages/coding-agent/src/migrations.ts:252` | W7.3 Windows session migration basename extraction silently no-ops. | 2026-07-05 harness bug hunt | open |
 | 65 | medium | coding-agent / scout | `packages/coding-agent/src/core/scout-controller.ts:103` | W8.1 Scout budget counts total tokens against an output-token cap, causing premature truncation. | 2026-07-05 harness bug hunt | suspected |

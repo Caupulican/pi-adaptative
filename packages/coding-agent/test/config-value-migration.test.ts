@@ -68,6 +68,17 @@ describe("config value env var syntax migration", () => {
 		expect(logMessage).toContain('auth.json["anthropic"].key: ANTHROPIC_API_KEY -> $ANTHROPIC_API_KEY');
 	});
 
+	it("leaves malformed models.json untouched instead of throwing during startup migrations", () => {
+		const agentDir = createAgentDir();
+		const modelsPath = path.join(agentDir, "models.json");
+		const malformed = '{"providers":{"custom":{"apiKey":"CUSTOM_API_KEY"}';
+		fs.writeFileSync(modelsPath, malformed, "utf-8");
+
+		withAgentDir(agentDir, () => expect(() => runMigrations(agentDir)).not.toThrow());
+
+		expect(fs.readFileSync(modelsPath, "utf-8")).toBe(malformed);
+	});
+
 	it("rewrites legacy uppercase models.json API key and header values", () => {
 		const agentDir = createAgentDir();
 		fs.writeFileSync(

@@ -4,6 +4,7 @@
 - Fixed local-model compaction capacity checks to use measured served context-window evidence from the fitness probe instead of trusting the registered window guess, including tail-truncating local servers by requiring start and end capacity needles.
 - Fixed manual `/compact` to preserve authoritative extension results and successful manual summaries while reserving deterministic checkpoints for gate-retry exhaustion and surfacing provider failures.
 - Fixed provider-failure corpus recording to write once per failed assistant message with the overflow-aware classification.
+- Fixed startup migrations and project-trust reads to leave malformed `models.json` / `trust.json` files untouched instead of crashing startup.
 
 ## [0.81.5] - 2026-07-06
 
