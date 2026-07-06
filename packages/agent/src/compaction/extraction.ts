@@ -21,7 +21,11 @@ interface ToolCallFact {
 }
 
 const PROHIBITION_PATTERN = /\b(do not|don't|never|stop (?:doing|using|changing)|no more)\b/i;
-const REVERSAL_PATTERN = /\b(stop|undo|revert|roll back|never mind|scrap that|forget (?:it|that))\b/i;
+// Deliberately narrow: a bare "stop" ("stop the server and rerun") is everyday phrasing, not a
+// reversal of the prior work — matching it marked whole turns cancelled and made the
+// cancelled-work gate fight the recall gates (2026-07-06 incident).
+const REVERSAL_PATTERN =
+	/\b(undo|revert|roll back|never mind|scrap that|forget (?:it|that)|stop (?:that|this|it|everything|working on))\b/i;
 
 const FILE_KIND_PRIORITY: Record<NonNullable<ToolCallFact["finalKind"]>, number> = {
 	read: 1,

@@ -182,6 +182,25 @@ describe("extractCompactionFacts", () => {
 		expect(facts.activeTaskSource).toBe("Resume");
 	});
 
+	it("does not treat everyday 'stop the server' phrasing as a reversal of prior work", () => {
+		resetEntryCounter();
+
+		const u1 = createMessageEntry(createUserMessage("start"));
+		const a1 = createMessageEntry(createAssistantMessage([{ type: "text", text: "edited the wedge handler" }]));
+		const u2 = createMessageEntry(createUserMessage("stop the server and rerun the tests"));
+
+		const facts = extractCompactionFacts([u1, a1, u2], 0, 3);
+		expect(facts.cancelledText).toBe("");
+
+		resetEntryCounter();
+		const v1 = createMessageEntry(createUserMessage("start"));
+		const v2 = createMessageEntry(createAssistantMessage([{ type: "text", text: "edited the wedge handler" }]));
+		const v3 = createMessageEntry(createUserMessage("revert that, wrong direction"));
+
+		const reversed = extractCompactionFacts([v1, v2, v3], 0, 3);
+		expect(reversed.cancelledText).toContain("edited the wedge handler");
+	});
+
 	it("picks activeTaskSource as last user message", () => {
 		resetEntryCounter();
 

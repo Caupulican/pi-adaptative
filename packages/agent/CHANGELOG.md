@@ -1,5 +1,10 @@
 ## [Unreleased]
 
+### Fixed
+- Fixed the compaction actions gate for the update path (resumed sessions): it now measures recall of the NEW span's actions in `## Done` (asymmetric containment) instead of symmetric Jaccard, which punished faithfully carried-over history and made 2nd+ compactions fail deterministically; the update prompt now also bounds Done carry-over (15 most recent items verbatim, older compressed).
+- Fixed the cancelled-work gate so required file paths are excluded from the leakage measure — a reversal message naming a modified file no longer makes `cancelled-work-dropped` and `files-modified-recall` mutually unsatisfiable.
+- Narrowed the reversal trigger so everyday phrasing like "stop the server" no longer marks the whole prior turn as cancelled work.
+
 ## [0.81.4] - 2026-07-06
 
 ### Added

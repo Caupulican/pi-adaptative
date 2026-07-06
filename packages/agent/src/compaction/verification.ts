@@ -14,7 +14,7 @@ export const FILES_READ_RECALL_THRESHOLD = 0.8;
 export const ACTIVE_TASK_CONTAINMENT_THRESHOLD = 0.9;
 export const MANDATORY_RULES_RECALL_THRESHOLD = 0.7;
 export const CANCELLED_WORK_DROPPED_THRESHOLD = 0.1;
-export const ACTIONS_OVERLAP_THRESHOLD = 0.5;
+export const ACTIONS_RECALL_THRESHOLD = 0.6;
 
 const SECTION_FILES = "files";
 const SECTION_DONE = "done";
@@ -75,7 +75,12 @@ export function verifySummary(summary: string, facts: CompactionFacts): Verifica
 
 	if (facts.cancelledText) {
 		const summaryOutsideMandatoryRules = removeSection(summary, SECTION_MANDATORY_RULES);
-		const score = containment(tokenSet(facts.cancelledText), tokenSet(summaryOutsideMandatoryRules));
+		// File paths from the facts are REQUIRED elsewhere (files-modified/read-recall demand them
+		// in ## Files), so counting them as cancelled-work leakage would make the two gates
+		// unsatisfiable together whenever a reversal message references a touched file.
+		const factPathTokens = tokenSet(facts.files.map((file) => file.path).join("\n"));
+		const cancelledTokens = new Set([...tokenSet(facts.cancelledText)].filter((token) => !factPathTokens.has(token)));
+		const score = containment(cancelledTokens, tokenSet(summaryOutsideMandatoryRules));
 		if (score > CANCELLED_WORK_DROPPED_THRESHOLD) {
 			failures.push({
 				check: "cancelled-work-dropped",
@@ -85,11 +90,14 @@ export function verifySummary(summary: string, facts: CompactionFacts): Verifica
 	}
 
 	if (facts.actions.length > 0) {
-		const score = jaccard(tokenSet(facts.actions.join("\n")), tokenSet(doneSection));
-		if (score < ACTIONS_OVERLAP_THRESHOLD) {
+		// Asymmetric on purpose: the update path carries prior ## Done items forward (bounded), so a
+		// symmetric overlap metric would punish faithful carry-over — the gate demands only that the
+		// NEW span's actions are recalled in ## Done, however much history rides alongside them.
+		const score = containment(tokenSet(facts.actions.join("\n")), tokenSet(doneSection));
+		if (score < ACTIONS_RECALL_THRESHOLD) {
 			failures.push({
-				check: "actions-overlap",
-				detail: `Done/actions Jaccard ${formatScore(score)} below ${ACTIONS_OVERLAP_THRESHOLD}`,
+				check: "actions-recall",
+				detail: `New-action recall in ## Done ${formatScore(score)} below ${ACTIONS_RECALL_THRESHOLD}`,
 			});
 		}
 	}

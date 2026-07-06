@@ -518,7 +518,7 @@ Budget: ~{BUDGET} tokens. Concrete beats complete.`;
 
 const UPDATE_SUMMARIZATION_PROMPT = `Update the checkpoint in <previous-summary> with the NEW turns above. RULES:
 - PRESERVE every existing ### Mandatory Rules bullet VERBATIM; append new ones.
-- Continue the ## Done numbering; move finished work from Blocked/Open.
+- Continue the ## Done numbering. Keep the 15 most recent numbered items verbatim; compress everything older into the single first line "1. (earlier work compressed) <one line>". The checkpoint must not grow without bound across updates.
 - Update ## Active Task to the newest unfulfilled user input; apply the cancellation rule.
 - Keep ## Files current (add new, keep still-relevant, drop obsolete).
 - Preserve exact paths, commands, errors.

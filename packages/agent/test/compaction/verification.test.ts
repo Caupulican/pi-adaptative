@@ -97,13 +97,52 @@ describe("verifySummary", () => {
 		expect(report.failures.some((failure) => failure.check === "cancelled-work-dropped")).toBe(true);
 	});
 
-	it("checks action overlap with the ## Done section", () => {
+	it("fails when the ## Done section omits the new span's actions", () => {
 		const report = verifySummary(
 			goodSummary.replace("EDIT src/fetcher.ts — added retry loop", "looked around"),
 			baseFacts,
 		);
 		expect(report.ok).toBe(false);
-		expect(report.failures.some((failure) => failure.check === "actions-overlap")).toBe(true);
+		expect(report.failures.some((failure) => failure.check === "actions-recall")).toBe(true);
+	});
+
+	it("accepts faithful Done carry-over on the update path (resumed-session regression)", () => {
+		// 2026-07-06 incident: symmetric Jaccard punished carrying prior Done items forward, so every
+		// 2nd+ compaction of a long session (any resumed session that compacts again) trended toward
+		// deterministic gate failure. Recall of the NEW actions must be the only demand.
+		const carriedDone = Array.from(
+			{ length: 30 },
+			(_, i) => `${i + 1}. EDIT src/legacy-area/file-${i}.ts — earlier session work item ${i}`,
+		).join("\n");
+		const updated = goodSummary.replace(
+			"## Done\n1. EDIT src/fetcher.ts — added retry loop\n2. RUN npm test — 2 failed: fetcher.test.ts",
+			`## Done\n${carriedDone}\n31. EDIT src/fetcher.ts — added retry loop\n32. RUN npm test — 2 failed: fetcher.test.ts`,
+		);
+		expect(updated).toContain("31. EDIT src/fetcher.ts");
+		expect(verifySummary(updated, baseFacts)).toEqual({ ok: true, failures: [] });
+	});
+
+	it("does not count required file paths as cancelled-work leakage", () => {
+		// A reversal message that names a modified file must not make cancelled-work-dropped and
+		// files-modified-recall mutually unsatisfiable: the path is demanded in ## Files.
+		const facts: CompactionFacts = {
+			...baseFacts,
+			cancelledText: "reworked src/fetcher.ts wrapped adapter attempt",
+		};
+		const summary = `## Active Task
+User: Fix the two failing tests now
+
+### Mandatory Rules
+- DO NOT touch the legacy client; the wrapped adapter attempt was cancelled.
+
+## Files
+- src/fetcher.ts — retry loop (modified)
+- test/fetcher.test.ts — read; 2 failing tests
+
+## Done
+1. EDIT src/fetcher.ts — added retry loop
+2. RUN npm test — 2 failed: fetcher.test.ts`;
+		expect(verifySummary(summary, facts)).toEqual({ ok: true, failures: [] });
 	});
 
 	it("short-circuits empty facts to ok", () => {
