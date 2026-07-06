@@ -466,6 +466,36 @@ describe("ExtensionRunner", () => {
 	});
 
 	describe("error handling", () => {
+		it("isolates throwing tool_call handlers and still runs later handlers", async () => {
+			const extCode = `
+				export default function(pi) {
+					pi.on("tool_call", async () => {
+						throw new Error("tool call boom");
+					});
+					pi.on("tool_call", async (event) => {
+						event.input.secondHandlerRan = true;
+						return { block: true, reason: "blocked by second handler" };
+					});
+				}
+			`;
+			fs.writeFileSync(path.join(extensionsDir, "tool-call-throws.ts"), extCode);
+
+			const result = await discoverAndLoadExtensions([], tempDir, tempDir);
+			const runner = new ExtensionRunner(result.extensions, result.runtime, tempDir, sessionManager, modelRegistry);
+			const errors: Array<{ event: string; error: string }> = [];
+			runner.onError((err) => {
+				errors.push(err);
+			});
+			const input: Record<string, unknown> = {};
+
+			await expect(
+				runner.emitToolCall({ type: "tool_call", toolCallId: "call-1", toolName: "custom", input }),
+			).rejects.toThrow("tool call boom");
+
+			expect(input.secondHandlerRan).toBe(true);
+			expect(errors).toMatchObject([{ event: "tool_call", error: "tool call boom" }]);
+		});
+
 		it("calls error listeners when handler throws", async () => {
 			const extCode = `
 				export default function(pi) {
