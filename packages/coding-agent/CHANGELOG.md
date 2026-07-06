@@ -6,6 +6,7 @@
 - Fixed provider-failure corpus recording to write once per failed assistant message with the overflow-aware classification.
 - Fixed startup migrations and project-trust reads to leave malformed `models.json` / `trust.json` files untouched instead of crashing startup.
 - Fixed interactive mode to rebind the live extensions-changed UI refresh listener after session switches.
+- Fixed extension factory and lazy-load failures to dispose partial event-bus subscriptions before retry or rollback.
 
 ## [0.81.5] - 2026-07-06
 

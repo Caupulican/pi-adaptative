@@ -512,7 +512,12 @@ export async function loadExtension(
 
 		const extension = createExtension(extensionPath, resolvedPath);
 		const api = createExtensionAPI(extension, runtime, cwd, eventBus);
-		await factory(api);
+		try {
+			await factory(api);
+		} catch (err) {
+			await disposeExtensionEventSubscriptions([extension]);
+			throw err;
+		}
 
 		return { extension, error: null };
 	} catch (err) {
@@ -565,6 +570,7 @@ function createLazyExtension(
 	lazyTools: LazyToolManifest[],
 ): Extension {
 	const extension = createExtension(extensionPath, resolvedPath);
+	let restoreLazyToolPlaceholders = (): void => {};
 	const load = async (): Promise<void> => {
 		if (extension.lazy?.loaded) return;
 		if (extension.lazy?.loading) return extension.lazy.loading;
@@ -586,19 +592,30 @@ function createLazyExtension(
 		try {
 			await loading;
 		} catch (err) {
+			await disposeExtensionEventSubscriptions([extension]);
+			extension.handlers.clear();
+			extension.messageRenderers.clear();
+			extension.commands.clear();
+			extension.flags.clear();
+			extension.shortcuts.clear();
+			extension.tools.clear();
+			restoreLazyToolPlaceholders();
 			if (extension.lazy) extension.lazy.loading = undefined;
 			throw err;
 		}
 	};
 
 	extension.lazy = { loaded: false, load };
-	for (const tool of lazyTools) {
-		const name = String(tool.name).trim();
-		extension.tools.set(name, {
-			definition: createLazyToolDefinition(extension, tool, load),
-			sourceInfo: extension.sourceInfo,
-		});
-	}
+	restoreLazyToolPlaceholders = () => {
+		for (const tool of lazyTools) {
+			const name = String(tool.name).trim();
+			extension.tools.set(name, {
+				definition: createLazyToolDefinition(extension, tool, load),
+				sourceInfo: extension.sourceInfo,
+			});
+		}
+	};
+	restoreLazyToolPlaceholders();
 	return extension;
 }
 
@@ -615,7 +632,12 @@ export async function loadExtensionFromFactory(
 	const extension = createExtension(extensionPath, extensionPath);
 	const resolvedCwd = resolvePath(cwd);
 	const api = createExtensionAPI(extension, runtime, resolvedCwd, eventBus);
-	await factory(api);
+	try {
+		await factory(api);
+	} catch (err) {
+		await disposeExtensionEventSubscriptions([extension]);
+		throw err;
+	}
 	return extension;
 }
 
