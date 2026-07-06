@@ -47,9 +47,15 @@ export function agentLoop(
 		},
 		signal,
 		streamFn,
-	).then((messages) => {
-		stream.end(messages);
-	});
+	)
+		.catch(async (error) => {
+			const messages = [createLoopFailureMessage(error, config, signal?.aborted ?? false)];
+			stream.push({ type: "agent_end", messages });
+			return messages;
+		})
+		.then((messages) => {
+			stream.end(messages);
+		});
 
 	return stream;
 }
@@ -86,9 +92,15 @@ export function agentLoopContinue(
 		},
 		signal,
 		streamFn,
-	).then((messages) => {
-		stream.end(messages);
-	});
+	)
+		.catch(async (error) => {
+			const messages = [createLoopFailureMessage(error, config, signal?.aborted ?? false)];
+			stream.push({ type: "agent_end", messages });
+			return messages;
+		})
+		.then((messages) => {
+			stream.end(messages);
+		});
 
 	return stream;
 }
@@ -141,6 +153,27 @@ export async function runAgentLoopContinue(
 
 	await runLoop(currentContext, newMessages, config, signal, emit, streamFn);
 	return newMessages;
+}
+
+function createLoopFailureMessage(error: unknown, config: AgentLoopConfig, aborted: boolean): AssistantMessage {
+	return {
+		role: "assistant",
+		content: [{ type: "text", text: "" }],
+		api: config.model.api,
+		provider: config.model.provider,
+		model: config.model.id,
+		usage: {
+			input: 0,
+			output: 0,
+			cacheRead: 0,
+			cacheWrite: 0,
+			totalTokens: 0,
+			cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, total: 0 },
+		},
+		stopReason: aborted ? "aborted" : "error",
+		errorMessage: error instanceof Error ? error.message : String(error),
+		timestamp: Date.now(),
+	};
 }
 
 function createAgentStream(): EventStream<AgentEvent, AgentMessage[]> {

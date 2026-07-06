@@ -81,6 +81,30 @@ function identityConverter(messages: AgentMessage[]): Message[] {
 }
 
 describe("agentLoop with AgentMessage", () => {
+	it("emits agent_end when the async loop fails before producing a model response", async () => {
+		const context: AgentContext = { systemPrompt: "You are helpful.", messages: [], tools: [] };
+		const stream = agentLoop([createUserMessage("hello")], context, {
+			model: createModel(),
+			convertToLlm: () => {
+				throw new Error("converter exploded");
+			},
+		});
+		const events: AgentEvent[] = [];
+		for await (const event of stream) {
+			events.push(event);
+		}
+
+		const result = await Promise.race([
+			stream.result(),
+			new Promise<"timeout">((resolve) => setTimeout(() => resolve("timeout"), 25)),
+		]);
+		expect(result).not.toBe("timeout");
+		const messages = result as AgentMessage[];
+		expect(messages).toHaveLength(1);
+		expect(messages[0]).toMatchObject({ role: "assistant", stopReason: "error", errorMessage: "converter exploded" });
+		expect(events.at(-1)).toMatchObject({ type: "agent_end", messages });
+	});
+
 	it("should emit events with AgentMessage types", async () => {
 		const context: AgentContext = {
 			systemPrompt: "You are helpful.",
