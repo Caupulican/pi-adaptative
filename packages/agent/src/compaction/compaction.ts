@@ -293,7 +293,8 @@ function estimateTextAndImageContentChars(content: string | Array<{ type: string
 
 /**
  * Estimate token count for a message using chars/4 heuristic.
- * This is conservative (overestimates tokens).
+ * This is a rough planning heuristic; code and structured text can be denser than 4 chars/token,
+ * so callers that must stay under a provider bound need additional headroom.
  */
 export function estimateTokens(message: AgentMessage): number {
 	let chars = 0;
@@ -705,6 +706,16 @@ function buildSummarizationPrompt(
 	return promptText + promptSuffix;
 }
 
+const CHUNK_SUMMARIZATION_HEADROOM_TOKENS = 1000;
+
+export function getChunkSummarizationTokenBudget(inputBound: number): number {
+	return Math.max(1, inputBound - CHUNK_SUMMARIZATION_HEADROOM_TOKENS);
+}
+
+export function buildChunkSummarizationPrompt(chunk: string, index: number, total: number): string {
+	return `<conversation-chunk index="${index}" total="${total}">\n${chunk}\n</conversation-chunk>\n\nSummarize this chunk for a later checkpoint merge. Preserve exact file paths, commands, errors, user prohibitions, and active work. Output concise notes only.`;
+}
+
 async function summarizeChunks(
 	conversationText: string,
 	model: Model<any>,
@@ -716,7 +727,7 @@ async function summarizeChunks(
 	streamFn: StreamFn | undefined,
 	inputBound: number,
 ): Promise<string> {
-	const maxChunkTokens = Math.max(1, inputBound);
+	const maxChunkTokens = getChunkSummarizationTokenBudget(inputBound);
 	const maxChunkChars = Math.max(1, maxChunkTokens * 4);
 	const chunks = splitText(conversationText, maxChunkChars);
 	const retainedChunks = chunks.slice(-4);
@@ -724,7 +735,7 @@ async function summarizeChunks(
 	const summaries: string[] = [];
 
 	for (let i = 0; i < retainedChunks.length; i++) {
-		const promptText = `<conversation-chunk index="${i + 1}" total="${retainedChunks.length}">\n${retainedChunks[i]}\n</conversation-chunk>\n\nSummarize this chunk for a later checkpoint merge. Preserve exact file paths, commands, errors, user prohibitions, and active work. Output concise notes only.`;
+		const promptText = buildChunkSummarizationPrompt(retainedChunks[i], i + 1, retainedChunks.length);
 		const response = await completeSummarization(
 			model,
 			{
@@ -809,7 +820,7 @@ function removeSummarySection(summary: string, heading: string): string {
 	return kept.join("\n").trim();
 }
 
-function estimateStringTokens(text: string): number {
+export function estimateStringTokens(text: string): number {
 	return Math.ceil(text.length / 4);
 }
 
