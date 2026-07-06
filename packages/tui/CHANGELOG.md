@@ -1,4 +1,4 @@
-## [Unreleased]
+## [0.81.7] - 2026-07-06
 
 ### Fixed
 - Fixed Kitty keyboard protocol decoding so unprintable functional PUA keys are not inserted as prompt text.

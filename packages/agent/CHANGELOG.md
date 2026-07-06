@@ -1,4 +1,4 @@
-## [Unreleased]
+## [0.81.7] - 2026-07-06
 
 ### Fixed
 - Fixed shell-output sanitization to remove lone surrogates, DEL, and C1 controls while preserving valid Unicode pairs.
