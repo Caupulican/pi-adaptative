@@ -22,6 +22,8 @@ import type {
 } from "../../core/agent-session.ts";
 import type { AgentSessionRuntime } from "../../core/agent-session-runtime.ts";
 import type { ExtensionCommandContext } from "../../core/extensions/index.ts";
+import type { GoalState } from "../../core/goals/goal-state.ts";
+import { applyGoalAction } from "../../core/goals/goal-tool-core.ts";
 import type { KeybindingsManager } from "../../core/keybindings.ts";
 import { findExactModelReferenceMatch, resolveModelScope } from "../../core/model-resolver.ts";
 import { MissingSessionCwdError } from "../../core/session-cwd.ts";
@@ -544,6 +546,60 @@ export async function handleCloneCommand(host: CloneCommandHost, newSessionName?
 export type ParsedGoalContinueCommand =
 	| { ok: true; maxTurns: number; maxStallTurns: number; maxWallClockMinutes: number }
 	| { ok: false; error: string };
+
+export interface GoalCommandHost {
+	readonly session: {
+		getGoalStateSnapshot: () => GoalState | undefined;
+		saveGoalStateSnapshot: (state: GoalState) => string;
+		sendUserMessage: (content: string) => Promise<void>;
+		continueGoalLoop: (options: GoalContinuationLoopOptions) => Promise<GoalContinuationLoopResult>;
+		getGoalRuntimeSnapshot: (settings: {
+			maxStallTurns: number;
+		}) => ReturnType<AgentSession["getGoalRuntimeSnapshot"]>;
+	};
+	showStatus(message: string): void;
+	showError(message: string): void;
+	refreshAutonomyFooterStatus(): void;
+}
+
+function formatGoalStatus(snapshot: ReturnType<AgentSession["getGoalRuntimeSnapshot"]>): string {
+	const state = snapshot.goalState;
+	if (!state) return `Goal: none (${snapshot.continuation.action}/${snapshot.continuation.reasonCode})`;
+	return `Goal: ${state.userGoal}\nStatus: ${state.status}\nRequirements: open ${snapshot.continuation.openRequirementIds.length}, blocked ${snapshot.continuation.blockedRequirementIds.length}, satisfied ${snapshot.continuation.satisfiedRequirementIds.length}\nContinuation: ${snapshot.continuation.action}/${snapshot.continuation.reasonCode}`;
+}
+
+export async function handleGoalCommand(host: GoalCommandHost, text: string): Promise<void> {
+	const goalText = text.replace(/^\/goal\s*/, "").trim();
+	if (!goalText) {
+		host.showStatus(formatGoalStatus(host.session.getGoalRuntimeSnapshot({ maxStallTurns: 20 })));
+		return;
+	}
+	const now = new Date().toISOString();
+	const goalId = `goal-${Date.now().toString(36)}`;
+	const started = applyGoalAction(
+		host.session.getGoalStateSnapshot(),
+		{ action: "start", goalId, userGoal: goalText },
+		now,
+	);
+	if (!started.ok) {
+		host.showError(started.error);
+		return;
+	}
+	host.session.saveGoalStateSnapshot(started.state);
+	await host.session.sendUserMessage(
+		`Start goal: ${goalText}\n\nUse the goal tool this turn to decompose this goal into concrete open requirements with add_requirement actions.`,
+	);
+	const result = await host.session.continueGoalLoop({ maxTurns: 1, maxStallTurns: 20, maxWallClockMinutes: 0 });
+	const continuation = result.finalSnapshot.continuation;
+	if (continuation.reasonCode === "no_open_requirements") {
+		host.showStatus(
+			"Goal started, but no open requirements were added (no_open_requirements). Use the goal tool to add requirements.",
+		);
+	} else {
+		host.showStatus(`Goal started: ${continuation.action}/${continuation.reasonCode}.`);
+	}
+	host.refreshAutonomyFooterStatus();
+}
 
 export interface GoalContinueCommandHost {
 	readonly session: {

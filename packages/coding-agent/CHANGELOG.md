@@ -12,6 +12,7 @@
 - Fixed the bash tool optimizer so `grep`/`rg` regex patterns fall through to the real command instead of being treated as literal substring searches.
 - Fixed the bash tool `find` optimizer so symlinked directories are listed but not recursively followed outside the search tree.
 - Fixed HTML session export asset injection so dollar sequences in template and vendor JavaScript are preserved exactly.
+- Added the missing `/goal` command so users can start or inspect the goal ledger instead of only invoking `/goal-continue`.
 
 ## [0.81.3] - 2026-07-05
 

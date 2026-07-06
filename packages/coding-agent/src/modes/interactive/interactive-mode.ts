@@ -1691,6 +1691,11 @@ export class InteractiveMode {
 				this.editor.setText("");
 				return;
 			}
+			if (text === "/goal" || text.startsWith("/goal ")) {
+				await this.handleGoalCommand(text);
+				this.editor.setText("");
+				return;
+			}
 			if (text === "/goal-continue" || text.startsWith("/goal-continue ")) {
 				await this.handleGoalContinueCommand(text);
 				this.editor.setText("");
@@ -3719,6 +3724,18 @@ export class InteractiveMode {
 			return { ok: false, error: usage };
 		}
 		return { ok: true, maxTurns, maxStallTurns, maxWallClockMinutes };
+	}
+
+	private async handleGoalCommand(text: string): Promise<void> {
+		await sessionFlows.handleGoalCommand(
+			{
+				session: this.session,
+				showStatus: (message) => this.showStatus(message),
+				showError: (message) => this.showError(message),
+				refreshAutonomyFooterStatus: () => this.refreshAutonomyFooterStatus(),
+			},
+			text,
+		);
 	}
 
 	private async handleGoalContinueCommand(text: string): Promise<void> {

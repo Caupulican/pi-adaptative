@@ -29,6 +29,10 @@ export const BUILTIN_SLASH_COMMANDS: ReadonlyArray<BuiltinSlashCommand> = [
 	{ name: "context", description: "Context composition dashboard: what rides on every request" },
 	{ name: "auto-learn", description: "Show Auto Learn/reflection status or run now (/auto-learn run)" },
 	{
+		name: "goal",
+		description: "Start or show the goal ledger (/goal <text> to start, /goal to show status)",
+	},
+	{
 		name: "goal-continue",
 		description: "Continue the current goal loop explicitly (/goal-continue [turns] [stalls])",
 	},
