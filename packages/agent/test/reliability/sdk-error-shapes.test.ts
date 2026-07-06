@@ -1,5 +1,6 @@
 import Anthropic from "@anthropic-ai/sdk";
 import { ApiError } from "@google/genai";
+import { SDKError } from "@mistralai/mistralai/models/errors";
 import OpenAI from "openai";
 import { describe, expect, it } from "vitest";
 import { classifyFailure } from "../../src/reliability/classifier.ts";
@@ -14,6 +15,14 @@ type FixtureExpectation = {
 };
 
 const headers = new Headers();
+
+function mistralSdkError(status: number, body: object): string {
+	return new SDKError("Mistral API error", {
+		response: new Response("", { status, headers: { "content-type": "application/json" } }),
+		request: new Request("https://api.mistral.ai/v1/chat/completions"),
+		body: JSON.stringify(body),
+	}).message;
+}
 
 function fixtureExpectations(): FixtureExpectation[] {
 	return [
@@ -85,6 +94,22 @@ function fixtureExpectations(): FixtureExpectation[] {
 			genericReason: "rate_limit",
 		},
 		{
+			provider: "mistral",
+			message: mistralSdkError(429, { message: "Rate limit exceeded", type: "rate_limit" }),
+			reason: "rate_limit",
+			genericReason: "rate_limit",
+		},
+		{
+			provider: "mistral",
+			message: mistralSdkError(402, {
+				message: "Insufficient credits. Please add credits to continue.",
+				type: "payment_required",
+			}),
+			reason: "billing_or_quota",
+			genericReason: "unknown",
+			provisional: true,
+		},
+		{
 			provider: "openrouter",
 			message: OpenAI.APIError.generate(
 				402,
@@ -119,6 +144,7 @@ function fixtureExpectations(): FixtureExpectation[] {
 
 const providerRowFixtureCoverage: Record<string, readonly string[]> = {
 	anthropic: ["Your credit balance is too low"],
+	mistral: ["Insufficient credits"],
 	openrouter: ["Insufficient credits"],
 	"openai-codex": ["You have hit your ChatGPT usage limit"],
 };
@@ -141,6 +167,9 @@ describe("SDK-rendered provider error messages", () => {
 			row.pattern.test("Insufficient credits"),
 		);
 		expect(openrouter?.provisional).toBe(true);
+		expect(
+			PROVIDER_FAILURE_SIGNATURES.mistral?.find((row) => row.pattern.test("Insufficient credits"))?.provisional,
+		).toBe(true);
 	});
 
 	it("keeps provider signature rows paired with executable fixtures", () => {

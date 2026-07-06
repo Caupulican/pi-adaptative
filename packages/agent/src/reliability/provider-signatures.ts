@@ -18,6 +18,14 @@ export const PROVIDER_FAILURE_SIGNATURES: Record<string, readonly ProviderSignat
 			source: "sdk:@anthropic-ai/sdk@0.91.1 node_modules/@anthropic-ai/sdk/core/error.js",
 		},
 	],
+	mistral: [
+		{
+			reason: "billing_or_quota",
+			pattern: /insufficient credits/i,
+			source: "sdk:@mistralai/mistralai@2.2.1 node_modules/@mistralai/mistralai/esm/models/errors/sdkerror.js",
+			provisional: true,
+		},
+	],
 	openrouter: [
 		{
 			reason: "billing_or_quota",
