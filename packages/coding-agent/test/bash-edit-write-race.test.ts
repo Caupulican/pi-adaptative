@@ -1,6 +1,14 @@
 import { describe, expect, it } from "vitest";
 import { withExclusiveMutationBarrier, withFileMutationQueue } from "../src/core/tools/file-mutation-queue.ts";
 
+async function waitUntil(predicate: () => boolean): Promise<void> {
+	for (let i = 0; i < 100; i++) {
+		if (predicate()) return;
+		await new Promise((resolve) => setTimeout(resolve, 1));
+	}
+	throw new Error("condition was not reached");
+}
+
 function deferred() {
 	let resolve!: () => void;
 	const promise = new Promise<void>((r) => {
@@ -18,11 +26,11 @@ describe("mutation barrier", () => {
 			await fileGate.promise;
 			order.push("file-end");
 		});
-		await new Promise((r) => setTimeout(r, 10));
+		await waitUntil(() => order.includes("file-start"));
 		const exclusive = withExclusiveMutationBarrier(async () => {
 			order.push("bash");
 		});
-		await new Promise((r) => setTimeout(r, 10));
+		await waitUntil(() => order.includes("file-start") && !order.includes("bash"));
 		fileGate.resolve();
 		await Promise.all([filing, exclusive]);
 		expect(order).toEqual(["file-start", "file-end", "bash"]);
@@ -36,11 +44,11 @@ describe("mutation barrier", () => {
 			await bashGate.promise;
 			order.push("bash-end");
 		});
-		await new Promise((r) => setTimeout(r, 10));
+		await waitUntil(() => order.includes("bash-start"));
 		const filing = withFileMutationQueue("/tmp/b.txt", async () => {
 			order.push("file");
 		});
-		await new Promise((r) => setTimeout(r, 10));
+		await waitUntil(() => order.includes("bash-start") && !order.includes("file"));
 		bashGate.resolve();
 		await Promise.all([exclusive, filing]);
 		expect(order).toEqual(["bash-start", "bash-end", "file"]);
@@ -54,11 +62,11 @@ describe("mutation barrier", () => {
 			await g1.promise;
 			order.push("c1-end");
 		});
-		await new Promise((r) => setTimeout(r, 10));
+		await waitUntil(() => order.includes("c1-start"));
 		const p2 = withFileMutationQueue("/tmp/c2.txt", async () => {
 			order.push("c2");
 		});
-		await new Promise((r) => setTimeout(r, 20));
+		await waitUntil(() => order.includes("c2"));
 		expect(order).toContain("c2"); // c2 ran while c1 was still holding its file lock
 		g1.resolve();
 		await Promise.all([p1, p2]);

@@ -13,6 +13,7 @@
 - Fixed overlapping bash execution cancellation so aborting bash cancels every running command instead of only the latest one.
 - Fixed concurrent first-run managed-tool downloads to share one in-flight download per tool.
 - Fixed interactive-mode cleanup leaks by sequence-guarding current-scope session loads and disposing replaced custom editors.
+- Fixed the mutation-barrier regression test to wait on explicit scheduling conditions instead of timing sleeps.
 
 ## [0.81.6] - 2026-07-06
 
