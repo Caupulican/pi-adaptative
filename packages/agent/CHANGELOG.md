@@ -5,6 +5,7 @@
 - Fixed the compaction loop so an effect-not-restored retry can continue after the host appends the loop's own compaction entry and deterministic checkpoint preparation failures return failed outcomes instead of escaping the loop.
 - Removed unused compaction verification-bypass execution options so manual compaction keeps the normal verification gate.
 - Fixed compaction-loop failure mapping so provider errors containing "aborted" retry normally unless the compaction signal was actually aborted.
+- Fixed watchdog-wrapped and proxied streams that close without a terminal event to emit a synthetic error result instead of leaving `result()` unresolved.
 
 ## [0.81.5] - 2026-07-06
 

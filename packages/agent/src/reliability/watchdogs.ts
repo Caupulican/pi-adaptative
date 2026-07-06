@@ -205,6 +205,7 @@ export function withStreamIdleWatchdog(
 			silenceMs: opts.connectMs,
 			onSilence: () => stall(currentPhase, currentBoundMs),
 		});
+		let terminalPushed = false;
 
 		void (async () => {
 			try {
@@ -231,11 +232,20 @@ export function withStreamIdleWatchdog(
 					// later) and could fire a spurious stall on an already-finished stream.
 					const terminal = event.type === "done" || event.type === "error";
 					if (terminal) {
+						terminalPushed = true;
 						watchdog.disarm();
 						callerSignal?.removeEventListener("abort", onCallerAbort);
 					}
 					outer.push(event);
 					if (terminal) return;
+				}
+				if (!terminalPushed && !stalled && !callerAborted) {
+					const description = "stream ended before terminal event";
+					outer.push({
+						type: "error",
+						reason: "error",
+						error: { ...latest, stopReason: "error", errorMessage: description },
+					});
 				}
 			} finally {
 				watchdog.disarm();

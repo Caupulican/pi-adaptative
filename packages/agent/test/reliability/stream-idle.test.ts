@@ -118,6 +118,18 @@ describe("withStreamIdleWatchdog (phase-aware)", () => {
 		expect(result.errorMessage).not.toMatch(/stream stalled/);
 	});
 
+	it("turns inner stream end without terminal event into an error result", async () => {
+		const fake = makeFakeStreamFn();
+		const wrapped = withStreamIdleWatchdog(fake.streamFn, BOUNDS);
+		const stream = await wrapped({} as never, {} as never, {});
+		fake.inner.push(makeStartEvent());
+		fake.inner.push(makeTextDeltaEvent());
+		fake.inner.end();
+		const result = await stream.result();
+		expect(result.stopReason).toBe("error");
+		expect(result.errorMessage).toContain("stream ended before terminal event");
+	});
+
 	it("disarms after clean completion — no late aborts", async () => {
 		const fake = makeFakeStreamFn();
 		const wrapped = withStreamIdleWatchdog(fake.streamFn, BOUNDS);
