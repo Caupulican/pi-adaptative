@@ -670,7 +670,7 @@ export const streamAnthropic: StreamFunction<"anthropic-messages", AnthropicOpti
 					}
 				} else if (event.type === "message_delta") {
 					if (event.delta.stop_reason) {
-						output.stopReason = mapStopReason(event.delta.stop_reason);
+						output.stopReason = mapAnthropicStopReason(event.delta.stop_reason);
 					}
 					// Only update usage fields if present (not null).
 					// Preserves input_tokens from message_start when proxies omit it in message_delta.
@@ -1240,7 +1240,7 @@ function convertTools(
 	});
 }
 
-function mapStopReason(reason: Anthropic.Messages.StopReason | string): StopReason {
+export function mapAnthropicStopReason(reason: Anthropic.Messages.StopReason | string): StopReason {
 	switch (reason) {
 		case "end_turn":
 			return "stop";
@@ -1258,6 +1258,7 @@ function mapStopReason(reason: Anthropic.Messages.StopReason | string): StopReas
 			return "error";
 		default:
 			// Handle unknown stop reasons gracefully (API may add new values)
-			throw new Error(`Unhandled stop reason: ${reason}`);
+			console.warn(`Unhandled Anthropic stop reason: ${reason}`);
+			return "stop";
 	}
 }

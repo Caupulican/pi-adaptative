@@ -1,5 +1,8 @@
 ## [Unreleased]
 
+### Fixed
+- Fixed Anthropic streaming to tolerate unknown future stop reasons by mapping them to `stop` with a warning instead of throwing.
+
 ## [0.81.6] - 2026-07-06
 
 ### Fixed

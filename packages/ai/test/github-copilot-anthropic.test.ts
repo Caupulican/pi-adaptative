@@ -1,11 +1,12 @@
 import { describe, expect, it, vi } from "vitest";
 import { getModel } from "../src/models.ts";
-import { streamAnthropic } from "../src/providers/anthropic.ts";
+import { mapAnthropicStopReason, streamAnthropic } from "../src/providers/anthropic.ts";
 import type { Context } from "../src/types.ts";
 
 const mockState = vi.hoisted(() => ({
 	constructorOpts: undefined as Record<string, unknown> | undefined,
 	createParams: undefined as Record<string, unknown> | undefined,
+	stopReason: "end_turn",
 }));
 
 vi.mock("@anthropic-ai/sdk", () => {
@@ -20,9 +21,10 @@ vi.mock("@anthropic-ai/sdk", () => {
 			})}\n`,
 			`event: message_delta\ndata: ${JSON.stringify({
 				type: "message_delta",
-				delta: { stop_reason: "end_turn" },
+				delta: { stop_reason: mockState.stopReason },
 				usage: { output_tokens: 5 },
 			})}\n`,
+			`event: message_stop\ndata: ${JSON.stringify({ type: "message_stop" })}\n`,
 		].join("\n");
 
 		return new Response(body, {
@@ -53,6 +55,26 @@ describe("Copilot Claude via Anthropic Messages", () => {
 		systemPrompt: "You are a helpful assistant.",
 		messages: [{ role: "user", content: "Hello", timestamp: Date.now() }],
 	};
+
+	it("maps unknown stop reasons to stop instead of throwing", async () => {
+		mockState.stopReason = "model_context_window_exceeded";
+		const model = getModel("github-copilot", "claude-sonnet-4.6");
+		const events = [];
+
+		for await (const event of streamAnthropic(model, context, { apiKey: "tid_copilot_session_test_token" })) {
+			events.push(event);
+		}
+
+		expect(events.at(-1)).toMatchObject({ type: "done", message: { stopReason: "stop" } });
+		mockState.stopReason = "end_turn";
+	});
+
+	it("maps known Anthropic stop reasons", () => {
+		expect(mapAnthropicStopReason("end_turn")).toBe("stop");
+		expect(mapAnthropicStopReason("max_tokens")).toBe("length");
+		expect(mapAnthropicStopReason("tool_use")).toBe("toolUse");
+		expect(mapAnthropicStopReason("future_reason")).toBe("stop");
+	});
 
 	it("uses Bearer auth, Copilot headers, and valid Anthropic Messages payload", async () => {
 		const model = getModel("github-copilot", "claude-sonnet-4.6");
