@@ -187,6 +187,47 @@ describe("AgentSession compaction characterization", () => {
 		expect(getStreamCallCount()).toBe(1);
 	});
 
+	it("overflow auto-compaction applies once even when measured context is below threshold", async () => {
+		const harness = await createHarness({
+			settings: { compaction: { reserveTokens: 10_000 } },
+			models: [{ id: "faux-1", contextWindow: 200_000 }],
+			extensionFactories: [
+				(pi) => {
+					pi.on("session_before_compact", async (event) => ({
+						compaction: {
+							summary: "overflow compacted",
+							firstKeptEntryId: event.preparation.firstKeptEntryId,
+							tokensBefore: event.preparation.tokensBefore,
+							details: { source: "overflow-test" },
+						},
+					}));
+				},
+			],
+		});
+		harnesses.push(harness);
+		const now = Date.now();
+		harness.sessionManager.appendMessage({
+			role: "user",
+			content: [{ type: "text", text: "message to compact" }],
+			timestamp: now - 1000,
+		});
+		harness.sessionManager.appendMessage(
+			createAssistant(harness, {
+				stopReason: "stop",
+				totalTokens: 100,
+				timestamp: now - 500,
+			}),
+		);
+		harness.session.agent.state.messages = harness.sessionManager.buildSessionContext().messages;
+		const sessionInternals = harness.session as unknown as SessionWithCompactionInternals;
+
+		await expect(sessionInternals._runAutoCompaction("overflow", true)).resolves.toBe(true);
+
+		const compactionEntries = harness.sessionManager.getEntries().filter((entry) => entry.type === "compaction");
+		expect(compactionEntries).toHaveLength(1);
+		expect(compactionEntries[0]?.summary).toBe("overflow compacted");
+	});
+
 	it("uses the model-router cheap model for default compaction model selection", async () => {
 		const harness = await createHarness({
 			models: [

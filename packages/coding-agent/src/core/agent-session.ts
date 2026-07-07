@@ -3182,8 +3182,10 @@ export class AgentSession {
 			const outcome = await runCompactionLoop({
 				getBranch: () => this.sessionManager.getBranch(),
 				measureLiveTokens: () => this._pipeline.estimateCurrentContextTokens(this.agent.state.messages),
-				shouldCompact: (tokens) =>
-					shouldCompact(tokens, contextWindow, settings, model.autoCompactionTriggerTokens),
+				shouldCompact:
+					reason === "overflow"
+						? () => true
+						: (tokens) => shouldCompact(tokens, contextWindow, settings, model.autoCompactionTriggerTokens),
 				getPostApplyMargin: () => margin,
 				getBaseKeepRecentTokens: () => settings.keepRecentTokens,
 				resolveModelAndAuth: async (modelTier) =>
@@ -3270,6 +3272,7 @@ export class AgentSession {
 						});
 					}
 				},
+				verifyPostApplyEffect: reason === "overflow" ? () => false : undefined,
 				onTransition: ({ cycle, cause, detail }) => {
 					this._emit({
 						type: "warning",
