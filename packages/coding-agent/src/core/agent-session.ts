@@ -49,6 +49,7 @@ import type {
 	Model,
 	StopReason,
 	TextContent,
+	TextToolProtocolParseEvent,
 	TextToolProtocolVariant,
 	Tool,
 	ToolArgumentValidationTelemetryEvent,
@@ -198,6 +199,7 @@ const RAW_STREAM_MARKER = Symbol.for("pi.rawStreamSimple");
 const MODEL_ADAPTATION_REPAIR_THRESHOLD = 3;
 const TEXT_TOOL_PROTOCOL_VERSION = 1;
 const TEXT_TOOL_PROTOCOL_TRIALS_PER_VARIANT = 2;
+const TEXT_TOOL_PROTOCOL_PARSE_FAILURE_THRESHOLD = 3;
 const TEXT_TOOL_PROTOCOL_VARIANTS: readonly TextToolProtocolVariant[] = ["tool-tag", "tool-call", "fenced-json"];
 const TEXT_TOOL_PROTOCOL_ECHO_TOOL = {
 	name: "echo",
@@ -586,6 +588,8 @@ export class AgentSession {
 	private readonly _localRuntimeController: LocalRuntimeController;
 	private readonly _modelAdaptationStore: ModelAdaptationStore;
 	private readonly _repairModeSessionCounts = new Map<string, number>();
+	private readonly _textProtocolParseFailures = new Map<string, { signature: string; repeats: number }>();
+	private _textProtocolParseObservedThisTurn = false;
 	/** Assembles the session's base system prompt from live session state (see
 	 * system-prompt-builder.ts); owns the paired _baseSystemPromptOptions. */
 	private readonly _systemPromptBuilder: SystemPromptBuilder;
@@ -708,6 +712,7 @@ export class AgentSession {
 		this._cwd = config.cwd;
 		this._agentDir = config.agentDir ?? getAgentDir();
 		this._modelAdaptationStore = ModelAdaptationStore.forAgentDir(this._agentDir);
+		this.agent.onTextToolProtocolParse = (event) => this._handleTextToolProtocolParse(event);
 		this._applyToolRepairLayerSettings();
 		this._collectWorkspaceSources = config.collectWorkspaceSources ?? collectWorkspaceSources;
 		this._localRuntimeController = new LocalRuntimeController({
@@ -1288,10 +1293,11 @@ export class AgentSession {
 	}
 
 	private _textProtocolFlag(model: Model<Api> | undefined): boolean {
-		// Phase 7 gating hierarchy: PI_TEXT_TOOL_CALL_PROTOCOL_DISABLED env kill >
-		// settings.toolRepair.textProtocol global force/kill > Model.textToolCallProtocol
-		// per-model flag > probed verdict. Native provider tool calls still win when emitted;
-		// this flag only enables the text-protocol fallback lane.
+		// Phase 7 gating hierarchy: PI_TEXT_TOOL_CALL_PROTOCOL_DISABLED is resolved
+		// in _toolRepairSettings() as the env kill switch, then settings.toolRepair.textProtocol
+		// force-enables/disables globally, then Model.textToolCallProtocol opts in per model.
+		// The calibration store is consulted after this flag; native provider tool calls still
+		// win when emitted, and this only enables the text-protocol fallback lane.
 		const override = this._toolRepairSettings().textProtocol;
 		return override ?? model?.textToolCallProtocol === true;
 	}
@@ -1348,24 +1354,33 @@ export class AgentSession {
 
 		const profile = this._modelAdaptationStore.get(modelKey);
 		if (profile.protocol?.version === TEXT_TOOL_PROTOCOL_VERSION) {
+			if (profile.protocol.status === "failed") {
+				this.agent.textToolCallProtocol = undefined;
+				throw new Error(
+					`Previous text tool protocol calibration failed for ${modelKey} at ${profile.protocol.attemptedAt}. ` +
+						`Variants tried: ${profile.protocol.variantsTried.join(", ")}. ` +
+						`Run /toolhealth for details or /toolprotocol-reset ${modelKey} to retry calibration.`,
+				);
+			}
 			this.agent.textToolCallProtocol = { variant: profile.protocol.variant as TextToolProtocolVariant };
 			return;
 		}
 
+		const variantsTried: string[] = [];
 		for (const variant of TEXT_TOOL_PROTOCOL_VARIANTS) {
+			variantsTried.push(variant);
 			let passed = true;
 			for (let trial = 0; trial < TEXT_TOOL_PROTOCOL_TRIALS_PER_VARIANT; trial++) {
 				const ok = await this._runTextProtocolTrial(model, variant, `pi-calibration-${trial + 1}`);
 				if (!ok) {
 					passed = false;
-					break;
 				}
 			}
 			if (passed) {
 				const calibratedAt = new Date().toISOString();
 				this._modelAdaptationStore.setProtocol(
 					modelKey,
-					{ version: TEXT_TOOL_PROTOCOL_VERSION, variant, calibratedAt },
+					{ version: TEXT_TOOL_PROTOCOL_VERSION, status: "calibrated", variant, calibratedAt },
 					calibratedAt,
 				);
 				this.agent.textToolCallProtocol = { variant };
@@ -1374,7 +1389,67 @@ export class AgentSession {
 		}
 
 		this.agent.textToolCallProtocol = undefined;
-		throw new Error(`Model ${modelKey} cannot follow the text tool protocol after calibration.`);
+		const attemptedAt = new Date().toISOString();
+		this._modelAdaptationStore.setProtocol(
+			modelKey,
+			{ version: TEXT_TOOL_PROTOCOL_VERSION, status: "failed", attemptedAt, variantsTried },
+			attemptedAt,
+		);
+		throw new Error(
+			`Model ${modelKey} cannot follow the text tool protocol after calibration. ` +
+				`Run /toolhealth for details or /toolprotocol-reset ${modelKey} to retry calibration.`,
+		);
+	}
+
+	private _handleTextToolProtocolParse(event: TextToolProtocolParseEvent): void {
+		this._textProtocolParseObservedThisTurn = true;
+		const modelKey = `${event.provider}/${event.model}`;
+		if (event.status === "parsed") {
+			this._textProtocolParseFailures.delete(modelKey);
+			return;
+		}
+		const signature = `${event.variant}:${event.reason ?? "failed"}`;
+		const previous = this._textProtocolParseFailures.get(modelKey);
+		const repeats = previous?.signature === signature ? previous.repeats + 1 : 1;
+		this._textProtocolParseFailures.set(modelKey, { signature, repeats });
+		if (repeats < TEXT_TOOL_PROTOCOL_PARSE_FAILURE_THRESHOLD) return;
+
+		const profile = this._modelAdaptationStore.get(modelKey);
+		if (profile.protocol?.version === TEXT_TOOL_PROTOCOL_VERSION && profile.protocol.status !== "failed") {
+			this._modelAdaptationStore.removeProtocol(modelKey);
+			this.agent.textToolCallProtocol = undefined;
+		}
+		this._textProtocolParseFailures.delete(modelKey);
+	}
+
+	private _recordTextToolProtocolParseOutcomeFromLastAssistant(): void {
+		if (this._textProtocolParseObservedThisTurn) return;
+		const protocol = this.agent.textToolCallProtocol;
+		if (protocol === false || protocol === true || !protocol?.variant) return;
+		const response = this._findLastAssistantMessage();
+		if (!response) return;
+		const responseText = response.content
+			.filter((content): content is TextContent => content.type === "text")
+			.map((content) => content.text)
+			.join("\n");
+		if (!responseText) return;
+
+		const parsed = parseTextToolCalls(responseText, this.agent.state.tools);
+		const attempted = parsed.attempted || this._looksLikeTextToolProtocolAttempt(responseText);
+		if (!attempted) return;
+		this._handleTextToolProtocolParse({
+			provider: this.agent.state.model.provider,
+			model: this.agent.state.model.id,
+			variant: protocol.variant,
+			status: parsed.calls.length > 0 ? "parsed" : "failed",
+			reason: parsed.failure,
+			callCount: parsed.calls.length,
+			textLength: responseText.length,
+		});
+	}
+
+	private _looksLikeTextToolProtocolAttempt(text: string): boolean {
+		return /<tool\b|<tool_call\b|```(?:json|tool|tool_call)?[\s\S]*"name"\s*:/i.test(text);
 	}
 
 	private _recordToolValidationBounce(event: ToolArgumentValidationTelemetryEvent): void {
@@ -1632,6 +1707,12 @@ export class AgentSession {
 
 	removeToolRepairRule(model: string, mode: string): boolean {
 		return this._modelAdaptationStore.removeRule(model, mode);
+	}
+
+	resetToolProtocolCalibration(model: string): boolean {
+		const removed = this._modelAdaptationStore.removeProtocol(model);
+		this._textProtocolParseFailures.delete(model);
+		return removed;
 	}
 
 	/** Curation status for diagnostics/dashboard: settings, live telemetry, last refusal reason. */
@@ -2652,7 +2733,9 @@ export class AgentSession {
 		}
 
 		preflightResult?.(true);
+		this._textProtocolParseObservedThisTurn = false;
 		await this._modelRouter.runRoutedTurn(messages, routedTurnModel, routedTurnRouteDecision);
+		this._recordTextToolProtocolParseOutcomeFromLastAssistant();
 
 		// R4: score whether the agent actually used the recalled context, so the recall gate can adapt.
 		if (injectedRecall) {

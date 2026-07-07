@@ -218,7 +218,7 @@ If your command is slow, expensive, rate-limited, or should keep using a previou
 | `compat` | No | provider `compat` | Provider compatibility overrides. Merged with provider-level `compat` when both are set. |
 | `textToolCallProtocol` | No | omitted | Set `true` to enable pi's text tool-call protocol fallback for a pure-text model that cannot emit native provider tool calls. |
 
-`textToolCallProtocol` is a per-model opt-in. It is overridden by the emergency global setting `toolRepair.textProtocol` and by the `PI_TEXT_TOOL_CALL_PROTOCOL_DISABLED=1` environment kill switch. Native provider tool calls still take precedence when the model emits them; this flag enables only the text-protocol fallback lane.
+`textToolCallProtocol` is a per-model opt-in. It is overridden by the emergency global setting `toolRepair.textProtocol` and by the `PI_TEXT_TOOL_CALL_PROTOCOL_DISABLED=1` environment kill switch. Native provider tool calls still take precedence when the model emits them; this flag enables only the text-protocol fallback lane. Failed calibration is remembered for the host/model until `/toolprotocol-reset <provider/model>` clears it.
 
 Current behavior:
 - `/model` and `--list-models` list entries by model `id`.

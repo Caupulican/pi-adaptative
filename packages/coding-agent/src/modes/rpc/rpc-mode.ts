@@ -578,6 +578,12 @@ export async function runRpcMode(runtimeHost: AgentSessionRuntime): Promise<neve
 				});
 			}
 
+			case "reset_tool_protocol": {
+				return success(id, "reset_tool_protocol", {
+					removed: session.resetToolProtocolCalibration(command.model),
+				});
+			}
+
 			case "export_html": {
 				const path = await session.exportToHtml(command.outputPath);
 				return success(id, "export_html", { path });

@@ -185,7 +185,7 @@ describe("text tool protocol calibration", () => {
 		expect(realRequest?.context.systemPrompt).not.toContain("pi-calibration-");
 	});
 
-	it("fails clearly after bounded calibration attempts without sending real work", async () => {
+	it("persists failed calibration, fast-fails until explicit reset, then reruns the ladder", async () => {
 		const model = createModel("failing-model");
 		const requests: CapturedRequest[] = [];
 		const created = await createSession(model, requests, () => "I cannot emit that envelope.");
@@ -196,8 +196,85 @@ describe("text tool protocol calibration", () => {
 			created.modelRegistry.unregisterProvider(model.provider);
 		}
 
-		expect(requests.length).toBeLessThanOrEqual(6);
+		expect(requests.length).toBe(6);
 		expect(requests.every((request) => isCalibration(request.context))).toBe(true);
-		expect(ModelAdaptationStore.forAgentDir(agentDir).get(`${model.provider}/${model.id}`).protocol).toBeUndefined();
+		expect(ModelAdaptationStore.forAgentDir(agentDir).get(`${model.provider}/${model.id}`).protocol).toMatchObject({
+			version: 1,
+			status: "failed",
+			variantsTried: ["tool-tag", "tool-call", "fenced-json"],
+		});
+
+		const fastFailRequests: CapturedRequest[] = [];
+		const fastFail = await createSession(model, fastFailRequests, () => "unexpected request");
+		try {
+			await expect(fastFail.session.prompt("real work again")).rejects.toThrow(
+				/previous text tool protocol calibration failed/i,
+			);
+		} finally {
+			fastFail.session.dispose();
+			fastFail.modelRegistry.unregisterProvider(model.provider);
+		}
+		expect(fastFailRequests).toHaveLength(0);
+
+		const resetSession = await createSession(model, [], () => "unused");
+		try {
+			expect(resetSession.session.resetToolProtocolCalibration(`${model.provider}/${model.id}`)).toBe(true);
+		} finally {
+			resetSession.session.dispose();
+			resetSession.modelRegistry.unregisterProvider(model.provider);
+		}
+
+		const resetRequests: CapturedRequest[] = [];
+		const afterReset = await createSession(model, resetRequests, (context) => {
+			if (!isCalibration(context)) return "done";
+			return `<tool name="echo">{"data":"${calibrationToken(context)}"}</tool>`;
+		});
+		try {
+			await expect(afterReset.session.prompt("real work after reset")).resolves.toBeUndefined();
+		} finally {
+			afterReset.session.dispose();
+			afterReset.modelRegistry.unregisterProvider(model.provider);
+		}
+		expect(resetRequests.filter((request) => isCalibration(request.context))).toHaveLength(2);
+		expect(ModelAdaptationStore.forAgentDir(agentDir).get(`${model.provider}/${model.id}`).protocol).toMatchObject({
+			version: 1,
+			status: "calibrated",
+			variant: "tool-tag",
+		});
+	});
+
+	it("invalidates a calibrated variant after repeated live parse failures and recalibrates once", async () => {
+		const model = createModel("stale-protocol-model");
+		ModelAdaptationStore.forAgentDir(agentDir).setProtocol(`${model.provider}/${model.id}`, {
+			version: 1,
+			status: "calibrated",
+			variant: "tool-tag",
+			calibratedAt: "2026-07-07T00:00:00.000Z",
+		});
+		const requests: CapturedRequest[] = [];
+		const created = await createSession(model, requests, (context) => {
+			if (isCalibration(context)) return `<tool name="echo">{"data":"${calibrationToken(context)}"}</tool>`;
+			return `<tool_call>{"name":"unknown_tool","arguments":{}}</tool_call>`;
+		});
+		try {
+			await created.session.prompt("first malformed live turn");
+			await created.session.prompt("second malformed live turn");
+			await created.session.prompt("third malformed live turn");
+			expect(
+				ModelAdaptationStore.forAgentDir(agentDir).get(`${model.provider}/${model.id}`).protocol,
+			).toBeUndefined();
+
+			await created.session.prompt("recalibrate before this turn");
+		} finally {
+			created.session.dispose();
+			created.modelRegistry.unregisterProvider(model.provider);
+		}
+
+		expect(requests.filter((request) => isCalibration(request.context))).toHaveLength(2);
+		expect(ModelAdaptationStore.forAgentDir(agentDir).get(`${model.provider}/${model.id}`).protocol).toMatchObject({
+			version: 1,
+			status: "calibrated",
+			variant: "tool-tag",
+		});
 	});
 });

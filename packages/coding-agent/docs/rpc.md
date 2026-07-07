@@ -574,6 +574,24 @@ Response:
 }
 ```
 
+#### reset_tool_protocol
+
+Remove a stored text tool protocol calibration or failed-calibration record for a model.
+
+```json
+{"type": "reset_tool_protocol", "model": "provider/model"}
+```
+
+Response:
+```json
+{
+  "type": "response",
+  "command": "reset_tool_protocol",
+  "success": true,
+  "data": { "removed": true }
+}
+```
+
 #### export_html
 
 Export session to an HTML file.

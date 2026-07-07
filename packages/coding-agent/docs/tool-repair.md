@@ -26,9 +26,10 @@ Example project settings:
 
 - Interactive tool panels show `[repaired arguments]` when execution used repaired arguments.
 - RPC `tool_execution_start`, `tool_execution_update`, and `tool_execution_end` events include a `repair` object when arguments were repaired.
-- `/toolhealth` prints model adaptation records for this host: calibrated text protocol, learned standing rules, and teach statistics.
+- `/toolhealth` prints model adaptation records for this host: calibrated or failed text protocol, learned standing rules, and teach statistics.
 - `/toolrule-remove <provider/model> <mode>` removes one learned standing rule from the host-local adaptation store.
-- RPC exposes the same controls through `get_tool_repair_health` and `remove_tool_repair_rule`.
+- `/toolprotocol-reset <provider/model>` removes a stored text protocol calibration or failed-calibration record so the next turn can calibrate again.
+- RPC exposes the same controls through `get_tool_repair_health`, `remove_tool_repair_rule`, and `reset_tool_protocol`.
 
 ## Replay new failure shapes
 
@@ -62,6 +63,12 @@ The repair registry currently names these deterministic modes:
 
 Use `/toolhealth` to see which modes have become learned standing rules for the active host/model. If a learned rule becomes harmful, remove that mode with `/toolrule-remove`.
 
+## Text protocol calibration recovery
+
+Confirmed behavior: when text tool-call protocol calibration fails for every variant, Pi stores a host-local failed record and subsequent turns for that model fail fast until an explicit reset. Use `/toolprotocol-reset <provider/model>` (or RPC `reset_tool_protocol`) after changing the model, server template, or prompt configuration.
+
+For a previously calibrated model, repeated live parse failures invalidate the stored protocol after three matching failures. The next turn reruns calibration before using the text protocol again.
+
 ## Source map
 
 Confirmed against current source:
@@ -71,5 +78,5 @@ Confirmed against current source:
 - Agent repair event metadata and teach-note gate: `packages/agent/src/types.ts`, `packages/agent/src/agent-loop.ts`.
 - Interactive marker: `packages/coding-agent/src/modes/interactive/components/tool-execution.ts`.
 - Settings/env kill switches: `packages/coding-agent/src/core/settings-manager.ts`, `packages/coding-agent/src/core/tool-repair-settings.ts`.
-- Health and rule removal: `packages/coding-agent/src/core/tool-repair-health.ts`, `packages/coding-agent/src/core/models/adaptation-store.ts`, `packages/coding-agent/src/core/slash-commands.ts`, `packages/coding-agent/src/modes/rpc/rpc-mode.ts`.
+- Health, rule removal, and protocol reset: `packages/coding-agent/src/core/tool-repair-health.ts`, `packages/coding-agent/src/core/models/adaptation-store.ts`, `packages/coding-agent/src/core/slash-commands.ts`, `packages/coding-agent/src/modes/interactive/interactive-mode.ts`, `packages/coding-agent/src/modes/rpc/rpc-mode.ts`.
 - Failure corpus and replay: `packages/coding-agent/src/core/failure-corpus.ts`, `scripts/tool-repair-replay.mjs`.

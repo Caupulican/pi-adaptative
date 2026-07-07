@@ -62,14 +62,22 @@ describe("text tool-call protocol", () => {
 	it("leaves prose and unknown tools as text", () => {
 		const tools = [makeTool()];
 
-		expect(parseTextToolCalls("please call echo", tools)).toEqual({ calls: [], text: "please call echo" });
+		expect(parseTextToolCalls("please call echo", tools)).toEqual({
+			calls: [],
+			text: "please call echo",
+			attempted: false,
+		});
 		expect(parseTextToolCalls('Before <tool name="echo">{"value":"hi"}</tool>', tools)).toEqual({
 			calls: [],
 			text: 'Before <tool name="echo">{"value":"hi"}</tool>',
+			attempted: true,
+			failure: "mixed-prose",
 		});
 		expect(parseTextToolCalls('<tool name="missing">{"value":"hi"}</tool>', tools)).toEqual({
 			calls: [],
 			text: '<tool name="missing">{"value":"hi"}</tool>',
+			attempted: true,
+			failure: "unrecognized",
 		});
 	});
 

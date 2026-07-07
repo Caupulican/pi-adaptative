@@ -44,6 +44,28 @@ describe("tool repair health", () => {
 		expect(report).toContain("taught=3 before=4 after=1");
 	});
 
+	it("renders failed protocol calibration records with reset guidance", () => {
+		const store = ModelAdaptationStore.forAgentDir(tempAgentDir(), {
+			fingerprint: () => ({ id: "host", cpu: "cpu", cores: 8, totalMemGb: 32 }),
+		});
+		store.save("provider/model", {
+			rules: [],
+			protocol: {
+				version: 1,
+				status: "failed",
+				attemptedAt: "2026-07-06T00:00:00.000Z",
+				variantsTried: ["tool-tag", "tool-call", "fenced-json"],
+			},
+			teachStats: {},
+		});
+
+		const report = formatToolRepairHealthReport(store, new Date("2026-07-07T00:00:00.000Z"));
+
+		expect(report).toContain("protocol: v1 failed 1d ago");
+		expect(report).toContain("variants tried: tool-tag, tool-call, fenced-json");
+		expect(report).toContain("/toolprotocol-reset provider/model");
+	});
+
 	it("removes a standing rule from persistent storage", () => {
 		const agentDir = tempAgentDir();
 		const store = ModelAdaptationStore.forAgentDir(agentDir, {

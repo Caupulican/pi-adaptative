@@ -56,6 +56,7 @@ export type RpcCommand =
 	| { id?: string; type: "get_session_stats" }
 	| { id?: string; type: "get_tool_repair_health" }
 	| { id?: string; type: "remove_tool_repair_rule"; model: string; mode: string }
+	| { id?: string; type: "reset_tool_protocol"; model: string }
 	| { id?: string; type: "export_html"; outputPath?: string }
 	| { id?: string; type: "switch_session"; sessionPath: string }
 	| { id?: string; type: "fork"; entryId: string }
@@ -174,6 +175,7 @@ export type RpcResponse =
 	| { id?: string; type: "response"; command: "get_session_stats"; success: true; data: SessionStats }
 	| { id?: string; type: "response"; command: "get_tool_repair_health"; success: true; data: { report: string } }
 	| { id?: string; type: "response"; command: "remove_tool_repair_rule"; success: true; data: { removed: boolean } }
+	| { id?: string; type: "response"; command: "reset_tool_protocol"; success: true; data: { removed: boolean } }
 	| { id?: string; type: "response"; command: "export_html"; success: true; data: { path: string } }
 	| { id?: string; type: "response"; command: "switch_session"; success: true; data: { cancelled: boolean } }
 	| { id?: string; type: "response"; command: "fork"; success: true; data: { text: string; cancelled: boolean } }

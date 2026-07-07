@@ -1,6 +1,10 @@
 import type { AssistantMessageDiagnostic } from "./utils/diagnostics.ts";
 import type { AssistantMessageEventStream } from "./utils/event-stream.ts";
-import type { TextToolProtocolOptions } from "./utils/tool-repair/text-protocol.ts";
+import type {
+	TextToolProtocolOptions,
+	TextToolProtocolParseFailure,
+	TextToolProtocolVariant,
+} from "./utils/tool-repair/text-protocol.ts";
 
 export type { AssistantMessageEventStream } from "./utils/event-stream.ts";
 
@@ -84,6 +88,16 @@ export interface ProviderResponse {
 	headers: Record<string, string>;
 }
 
+export interface TextToolProtocolParseEvent {
+	provider: string;
+	model: string;
+	variant: TextToolProtocolVariant;
+	status: "parsed" | "failed";
+	callCount: number;
+	textLength: number;
+	reason?: TextToolProtocolParseFailure;
+}
+
 export interface StreamOptions {
 	temperature?: number;
 	maxTokens?: number;
@@ -159,6 +173,8 @@ export interface StreamOptions {
 	 * recognized envelopes in assistant text back into ToolCall blocks.
 	 */
 	textToolCallProtocol?: boolean | TextToolProtocolOptions;
+	/** Shape-only result of text-protocol parsing, used for model adaptation. */
+	onTextToolProtocolParse?: (event: TextToolProtocolParseEvent) => void | Promise<void>;
 }
 
 export type ProviderStreamOptions = StreamOptions & Record<string, unknown>;

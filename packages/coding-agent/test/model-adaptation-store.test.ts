@@ -49,6 +49,28 @@ describe("ModelAdaptationStore", () => {
 		});
 	});
 
+	it("round-trips failed protocol calibration records and removes protocol status", () => {
+		const agentDir = tempAgentDir();
+		dirs.push(agentDir);
+		const adaptation = store(agentDir);
+
+		adaptation.setProtocol("provider/model", {
+			version: 1,
+			status: "failed",
+			attemptedAt: at(2),
+			variantsTried: ["tool-tag", "tool-call", "fenced-json"],
+		});
+
+		expect(store(agentDir).get("provider/model", new Date(at(3))).protocol).toEqual({
+			version: 1,
+			status: "failed",
+			attemptedAt: at(2),
+			variantsTried: ["tool-tag", "tool-call", "fenced-json"],
+		});
+		expect(adaptation.removeProtocol("provider/model")).toBe(true);
+		expect(store(agentDir).get("provider/model", new Date(at(3))).protocol).toBeUndefined();
+	});
+
 	it("enforces the five-rule cap by dropping the oldest last-fired rule", () => {
 		const agentDir = tempAgentDir();
 		dirs.push(agentDir);

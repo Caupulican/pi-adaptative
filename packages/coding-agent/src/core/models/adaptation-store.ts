@@ -13,11 +13,19 @@ export interface ModelAdaptationRule {
 	lastFiredAt: string;
 }
 
-export interface ModelProtocolCalibration {
-	version: number;
-	variant: string;
-	calibratedAt: string;
-}
+export type ModelProtocolCalibration =
+	| {
+			version: number;
+			status?: "calibrated";
+			variant: string;
+			calibratedAt: string;
+	  }
+	| {
+			version: number;
+			status: "failed";
+			attemptedAt: string;
+			variantsTried: string[];
+	  };
 
 export interface ModelTeachStats {
 	taught: number;
@@ -71,9 +79,16 @@ function isRule(value: unknown): value is ModelAdaptationRule {
 }
 
 function isProtocol(value: unknown): value is ModelProtocolCalibration {
+	if (!isRecord(value) || typeof value.version !== "number") return false;
+	if (value.status === "failed") {
+		return (
+			typeof value.attemptedAt === "string" &&
+			Array.isArray(value.variantsTried) &&
+			value.variantsTried.every((variant) => typeof variant === "string")
+		);
+	}
 	return (
-		isRecord(value) &&
-		typeof value.version === "number" &&
+		(value.status === undefined || value.status === "calibrated") &&
 		typeof value.variant === "string" &&
 		typeof value.calibratedAt === "string"
 	);
@@ -211,9 +226,17 @@ export class ModelAdaptationStore {
 	}
 
 	setProtocol(model: string, protocol: ModelProtocolCalibration, at?: string): StoredModelAdaptation {
-		const now = at ?? protocol.calibratedAt;
+		const now = at ?? (protocol.status === "failed" ? protocol.attemptedAt : protocol.calibratedAt);
 		const profile = this.get(model, new Date(now));
 		return this.store(model, { ...profile, protocol }, now);
+	}
+
+	removeProtocol(model: string, at = new Date()): boolean {
+		const profile = this.get(model, at);
+		if (!profile.protocol) return false;
+		const { protocol: _protocol, ...rest } = profile;
+		this.store(model, rest, at.toISOString());
+		return true;
 	}
 
 	setTeachStats(model: string, mode: string, stats: ModelTeachStats, at?: string): StoredModelAdaptation {

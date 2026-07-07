@@ -95,6 +95,7 @@ export interface AgentOptions {
 	onPayload?: SimpleStreamOptions["onPayload"];
 	onResponse?: SimpleStreamOptions["onResponse"];
 	textToolCallProtocol?: SimpleStreamOptions["textToolCallProtocol"];
+	onTextToolProtocolParse?: SimpleStreamOptions["onTextToolProtocolParse"];
 	beforeToolCall?: (context: BeforeToolCallContext, signal?: AbortSignal) => Promise<BeforeToolCallResult | undefined>;
 	afterToolCall?: (context: AfterToolCallContext, signal?: AbortSignal) => Promise<AfterToolCallResult | undefined>;
 	onToolArgumentValidation?: (event: ToolArgumentValidationTelemetryEvent) => void;
@@ -176,6 +177,7 @@ export class Agent {
 	public onPayload?: SimpleStreamOptions["onPayload"];
 	public onResponse?: SimpleStreamOptions["onResponse"];
 	public textToolCallProtocol?: SimpleStreamOptions["textToolCallProtocol"];
+	public onTextToolProtocolParse?: SimpleStreamOptions["onTextToolProtocolParse"];
 	public beforeToolCall?: (
 		context: BeforeToolCallContext,
 		signal?: AbortSignal,
@@ -215,6 +217,7 @@ export class Agent {
 		this.onPayload = options.onPayload;
 		this.onResponse = options.onResponse;
 		this.textToolCallProtocol = options.textToolCallProtocol;
+		this.onTextToolProtocolParse = options.onTextToolProtocolParse;
 		this.beforeToolCall = options.beforeToolCall;
 		this.afterToolCall = options.afterToolCall;
 		this.onToolArgumentValidation = options.onToolArgumentValidation;
@@ -443,6 +446,7 @@ export class Agent {
 			onPayload: this.onPayload,
 			onResponse: this.onResponse,
 			textToolCallProtocol: this.textToolCallProtocol,
+			onTextToolProtocolParse: this.onTextToolProtocolParse,
 			transport: this.transport,
 			thinkingBudgets: this.thinkingBudgets,
 			maxRetryDelayMs: this.maxRetryDelayMs,

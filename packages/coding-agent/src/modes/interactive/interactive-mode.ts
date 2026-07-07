@@ -1673,6 +1673,17 @@ export class InteractiveMode {
 				this.editor.setText("");
 				return;
 			}
+			if (text.startsWith("/toolprotocol-reset")) {
+				const model = text.slice("/toolprotocol-reset".length).trim();
+				const message = model
+					? this.session.resetToolProtocolCalibration(model)
+						? `Reset text tool protocol calibration for ${model}.`
+						: `No text tool protocol calibration found for ${model}.`
+					: "Usage: /toolprotocol-reset <provider/model>";
+				this.showStatus(message);
+				this.editor.setText("");
+				return;
+			}
 			if (text === "/scoped-models") {
 				this.editor.setText("");
 				await this.showModelsSelector();

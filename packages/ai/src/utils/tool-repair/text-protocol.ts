@@ -1,8 +1,12 @@
 import type { Tool, ToolCall } from "../../types.ts";
 
+export type TextToolProtocolParseFailure = "overlap" | "mixed-prose" | "unrecognized";
+
 export interface ParsedTextToolCalls {
 	calls: ToolCall[];
 	text: string;
+	attempted: boolean;
+	failure?: TextToolProtocolParseFailure;
 }
 
 export type TextToolProtocolVariant = "tool-tag" | "tool-call" | "fenced-json";
@@ -203,14 +207,17 @@ export function generateTextToolProtocolPrimer(tools: readonly Tool[], options?:
 }
 
 export function parseTextToolCalls(text: string, knownTools: readonly Tool[]): ParsedTextToolCalls {
-	if (knownTools.length === 0) return { calls: [], text };
+	if (knownTools.length === 0) return { calls: [], text, attempted: false };
 	const matches = findToolEnvelopes(text);
-	if (matches.length === 0 || hasOverlap(matches)) return { calls: [], text };
+	if (matches.length === 0) return { calls: [], text, attempted: false };
+	if (hasOverlap(matches)) return { calls: [], text, attempted: true, failure: "overlap" };
 	const remainder = remainingText(text, matches);
-	if (remainder === undefined) return { calls: [], text };
+	if (remainder === undefined) return { calls: [], text, attempted: true, failure: "mixed-prose" };
 	const names = knownToolNames(knownTools);
 	const calls = matches
 		.map((match, index) => parseEnvelope(match, names, index + 1))
 		.filter((call): call is ToolCall => call !== undefined);
-	return calls.length > 0 ? { calls, text: remainder.trim() } : { calls: [], text };
+	return calls.length > 0
+		? { calls, text: remainder.trim(), attempted: true }
+		: { calls: [], text, attempted: true, failure: "unrecognized" };
 }

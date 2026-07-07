@@ -166,6 +166,11 @@ If the user's instructions conflict with any rule in this document, ask for expl
 
 ## Findings
 
+### 2026-07-07 · packages/coding-agent · failed text-protocol calibration is now explicit, persistent, and resettable — claude
+P7.2 is closed: text protocol calibration now stores a `status: "failed"` record after the bounded variant ladder fails, fast-fails future turns for that host/model until `/toolprotocol-reset <provider/model>` or RPC `reset_tool_protocol` clears it, and invalidates a previously calibrated protocol after three repeated live parse failures so the next turn recalibrates. Health output now shows failed protocol records with reset guidance instead of silently rerunning calibration every turn.
+- evidence: packages/coding-agent/src/core/agent-session.ts:1295 · packages/coding-agent/src/core/agent-session.ts:1395 · packages/coding-agent/src/core/agent-session.ts:1404 · packages/coding-agent/src/core/models/adaptation-store.ts:230 · packages/coding-agent/src/core/tool-repair-health.ts:27 · packages/coding-agent/test/model-protocol-calibration.test.ts:188
+- tags: tool-repair, text-protocol, calibration, packages/coding-agent, roadmap-p7
+
 ### 2026-07-07 · packages/coding-agent · tool-repair operator docs cover controls, diagnostics, and replay — claude
 R50 is closed: `docs/tool-repair.md` now documents the shipped repair/teach/text-protocol contract, visible repaired-call signals, `/toolhealth`, `/toolrule-remove`, RPC equivalents, replay commands, and registry mode names; `docs/index.md`, `docs/settings.md`, `docs/usage.md`, and `docs/rpc.md` link the operator surface where users already look for settings, commands, and RPC protocol details.
 - evidence: packages/coding-agent/docs/tool-repair.md:1 · packages/coding-agent/docs/tool-repair.md:9 · packages/coding-agent/docs/tool-repair.md:29 · packages/coding-agent/docs/settings.md:153 · packages/coding-agent/docs/rpc.md:541 · packages/coding-agent/docs/index.md:49

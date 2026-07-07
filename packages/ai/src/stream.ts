@@ -10,6 +10,7 @@ import type {
 	ProviderStreamOptions,
 	SimpleStreamOptions,
 	StreamOptions,
+	TextToolProtocolParseEvent,
 } from "./types.ts";
 import { AssistantMessageEventStream } from "./utils/event-stream.ts";
 import {
@@ -45,12 +46,25 @@ function withTextToolProtocolContext(context: Context, options: StreamOptions | 
 	};
 }
 
+async function notifyTextToolProtocolParse(
+	options: StreamOptions | undefined,
+	event: TextToolProtocolParseEvent,
+): Promise<void> {
+	try {
+		await options?.onTextToolProtocolParse?.(event);
+	} catch {
+		// Parse telemetry must not change provider stream semantics.
+	}
+}
+
 function withTextToolProtocolResult(
 	stream: AssistantMessageEventStream,
+	model: Model<Api>,
 	context: Context,
 	options: StreamOptions | undefined,
 ): AssistantMessageEventStream {
-	if (!normalizeTextToolProtocolOptions(options?.textToolCallProtocol) || !context.tools?.length) return stream;
+	const protocolOptions = normalizeTextToolProtocolOptions(options?.textToolCallProtocol);
+	if (!protocolOptions || !context.tools?.length) return stream;
 	const wrapped = new AssistantMessageEventStream();
 	void (async () => {
 		for await (const event of stream) {
@@ -63,11 +77,31 @@ function withTextToolProtocolResult(
 				wrapped.push(event);
 				continue;
 			}
-			const parsed = parseTextToolCalls(message.content[0].text, context.tools ?? []);
+			const text = message.content[0].text;
+			const parsed = parseTextToolCalls(text, context.tools ?? []);
 			if (parsed.calls.length === 0) {
+				if (parsed.failure) {
+					await notifyTextToolProtocolParse(options, {
+						provider: model.provider,
+						model: model.id,
+						variant: protocolOptions.variant ?? "tool-tag",
+						status: "failed",
+						callCount: 0,
+						textLength: text.length,
+						reason: parsed.failure,
+					});
+				}
 				wrapped.push(event);
 				continue;
 			}
+			await notifyTextToolProtocolParse(options, {
+				provider: model.provider,
+				model: model.id,
+				variant: protocolOptions.variant ?? "tool-tag",
+				status: "parsed",
+				callCount: parsed.calls.length,
+				textLength: text.length,
+			});
 			const content = parsed.text ? [{ type: "text" as const, text: parsed.text }, ...parsed.calls] : parsed.calls;
 			wrapped.push({
 				type: "done",
@@ -97,6 +131,7 @@ export function stream<TApi extends Api>(
 	const protocolContext = withTextToolProtocolContext(context, resolvedOptions);
 	return withTextToolProtocolResult(
 		provider.stream(model, protocolContext, resolvedOptions),
+		model,
 		protocolContext,
 		resolvedOptions,
 	);
@@ -121,6 +156,7 @@ export function streamSimple<TApi extends Api>(
 	const protocolContext = withTextToolProtocolContext(context, resolvedOptions);
 	return withTextToolProtocolResult(
 		provider.streamSimple(model, protocolContext, resolvedOptions),
+		model,
 		protocolContext,
 		resolvedOptions,
 	);

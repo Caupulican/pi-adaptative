@@ -20,9 +20,17 @@ export function formatToolRepairHealthReport(store: ModelAdaptationStore, now: D
 	for (const entry of profiles) {
 		lines.push(`${entry.model}`);
 		const protocol = entry.profile.protocol;
-		lines.push(
-			`  protocol: ${protocol ? `v${protocol.version} ${protocol.variant} calibrated ${formatAgeDays(protocol.calibratedAt, now)}` : "none"}`,
-		);
+		if (!protocol) {
+			lines.push("  protocol: none");
+		} else if (protocol.status === "failed") {
+			lines.push(`  protocol: v${protocol.version} failed ${formatAgeDays(protocol.attemptedAt, now)}`);
+			lines.push(`  variants tried: ${protocol.variantsTried.join(", ")}`);
+			lines.push(`  reset: /toolprotocol-reset ${entry.model}`);
+		} else {
+			lines.push(
+				`  protocol: v${protocol.version} ${protocol.variant} calibrated ${formatAgeDays(protocol.calibratedAt, now)}`,
+			);
+		}
 		if (entry.profile.rules.length === 0) {
 			lines.push("  rules: none");
 		} else {

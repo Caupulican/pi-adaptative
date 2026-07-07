@@ -2,6 +2,7 @@
 
 ### Fixed
 - Fixed custom model registration to preserve `textToolCallProtocol` and show it in `--list-models`.
+- Fixed text tool protocol calibration failures to persist, fail fast until explicit reset, and invalidate stale calibrated protocols after repeated live parse failures.
 
 ## [0.81.12] - 2026-07-07
 

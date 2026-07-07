@@ -32,6 +32,10 @@ export const BUILTIN_SLASH_COMMANDS: ReadonlyArray<BuiltinSlashCommand> = [
 		name: "toolrule-remove",
 		description: "Remove a learned tool repair standing rule (/toolrule-remove <model> <mode>)",
 	},
+	{
+		name: "toolprotocol-reset",
+		description: "Reset text tool protocol calibration for a model (/toolprotocol-reset <provider/model>)",
+	},
 	{ name: "auto-learn", description: "Show Auto Learn/reflection status or run now (/auto-learn run)" },
 	{
 		name: "goal",
