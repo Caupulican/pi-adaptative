@@ -240,6 +240,7 @@ function migrateV1ToV2(entries: FileEntry[]): void {
 		}
 
 		entry.id = generateId(ids);
+		ids.add(entry.id);
 		entry.parentId = prevId;
 		prevId = entry.id;
 
@@ -595,7 +596,13 @@ export function findMostRecentSession(sessionDir: string, cwd?: string): string 
 					!isAutoLearnSessionId(file.header.id) &&
 					(!resolvedCwd || sessionCwdMatches(getSessionHeaderCwd(file.header), resolvedCwd)),
 			)
-			.map(({ path }) => ({ path, mtime: statSync(path).mtime }))
+			.flatMap(({ path }) => {
+				try {
+					return [{ path, mtime: statSync(path).mtime }];
+				} catch {
+					return [];
+				}
+			})
 			.sort((a, b) => b.mtime.getTime() - a.mtime.getTime());
 
 		return files[0]?.path || null;

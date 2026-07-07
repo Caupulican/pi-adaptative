@@ -1,5 +1,9 @@
 ## [Unreleased]
 
+### Fixed
+- Fixed v1 session migration to retry generated entry IDs on collision.
+- Fixed recent-session lookup to skip files that vanish during stat instead of aborting the scan.
+
 ## [0.81.7] - 2026-07-06
 
 ### Fixed
