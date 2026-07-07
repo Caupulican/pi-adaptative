@@ -21,7 +21,6 @@ import {
 	createFileOps,
 	extractFileOpsFromMessage,
 	type FileOperations,
-	formatFileOperations,
 	SUMMARIZATION_SYSTEM_PROMPT,
 	serializeConversation,
 } from "./utils.ts";
@@ -1025,7 +1024,9 @@ export async function compact(
 
 	const facts = factsFromPreparation ?? {
 		files: [],
+		workingSet: [],
 		actions: [],
+		errorFacts: [],
 		prohibitions: [],
 		cancelledText: "",
 		activeTaskSource: "",
@@ -1109,9 +1110,7 @@ export async function compact(
 		}
 	}
 
-	// Compute file lists and append to summary
 	const { readFiles, modifiedFiles } = computeFileLists(fileOps);
-	summary += formatFileOperations(readFiles, modifiedFiles);
 
 	if (!firstKeptEntryId) {
 		throw new Error("First kept entry has no UUID - session may need migration");
@@ -1140,7 +1139,9 @@ export function createDeterministicCompaction(preparation: CompactionPreparation
 	const factsText = renderFactsBlock(
 		facts ?? {
 			files: [],
+			workingSet: [],
 			actions: [],
+			errorFacts: [],
 			prohibitions: [],
 			cancelledText: "",
 			activeTaskSource: "",

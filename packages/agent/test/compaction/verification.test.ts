@@ -7,7 +7,12 @@ const baseFacts: CompactionFacts = {
 		{ path: "src/fetcher.ts", kind: "modified", note: "EDIT" },
 		{ path: "test/fetcher.test.ts", kind: "read", note: "READ" },
 	],
+	workingSet: [
+		{ path: "src/fetcher.ts", kind: "modified", note: "EDIT" },
+		{ path: "test/fetcher.test.ts", kind: "read", note: "READ" },
+	],
 	actions: ["EDIT src/fetcher.ts — added retry loop", "RUN npm test — 2 failed: fetcher.test.ts"],
+	errorFacts: [],
 	prohibitions: ["do not touch the legacy client"],
 	cancelledText: "wrapped legacy client adapter",
 	activeTaskSource: "Fix the two failing tests now",
@@ -54,7 +59,9 @@ describe("verifySummary", () => {
 		const facts: CompactionFacts = {
 			...baseFacts,
 			files: [{ path: "docs/design.md", kind: "read", note: "READ" }],
+			workingSet: [{ path: "docs/design.md", kind: "read", note: "READ" }],
 			actions: [],
+			errorFacts: [],
 			prohibitions: [],
 			cancelledText: "",
 			activeTaskSource: "",
@@ -147,7 +154,15 @@ User: Fix the two failing tests now
 
 	it("short-circuits empty facts to ok", () => {
 		expect(
-			verifySummary("", { files: [], actions: [], prohibitions: [], cancelledText: "", activeTaskSource: "" }),
+			verifySummary("", {
+				files: [],
+				workingSet: [],
+				actions: [],
+				errorFacts: [],
+				prohibitions: [],
+				cancelledText: "",
+				activeTaskSource: "",
+			}),
 		).toEqual({ ok: true, failures: [] });
 	});
 });

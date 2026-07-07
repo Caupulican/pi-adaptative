@@ -1,9 +1,22 @@
 import type { SessionEntry } from "../session/session-manager.ts";
 import type { AgentMessage } from "../types.ts";
 
+export interface CompactionFileFact {
+	path: string;
+	kind: "modified" | "created" | "read";
+	note: string;
+}
+
+export interface CompactionErrorFact {
+	operation: string;
+	error: string;
+}
+
 export interface CompactionFacts {
-	files: Array<{ path: string; kind: "modified" | "created" | "read"; note: string }>;
+	files: CompactionFileFact[];
+	workingSet: CompactionFileFact[];
 	actions: string[];
+	errorFacts: CompactionErrorFact[];
 	prohibitions: string[];
 	cancelledText: string;
 	activeTaskSource: string;
@@ -32,6 +45,10 @@ const PROHIBITION_SOURCE_MAX_CHARS = 1_500;
 const MAX_PROHIBITIONS = 8;
 /** Upper bound on gate-demanded actions; mirrors the prompt's "15 most recent Done items" rule. */
 const MAX_ACTIONS = 15;
+const MAX_WORKING_SET_FILES = 8;
+const MAX_ERROR_FACTS = 5;
+const ERROR_LINE_MAX_CHARS = 160;
+const COMMAND_PREFIX_MAX_CHARS = 80;
 /** Shared clamp for the active-task text because verification can only demand what the prompt receives. */
 export const ACTIVE_TASK_SOURCE_MAX_CHARS = 4_000;
 
@@ -197,15 +214,51 @@ function isHarnessPlumbingTarget(target: string | undefined): boolean {
 	);
 }
 
+function normalizeOperationTarget(toolName: string, path: string | undefined): string {
+	if (!path) return "(unknown)";
+	if (toolName !== "bash") return path;
+	return clampText(path.replace(/\s+/g, " ").trim(), COMMAND_PREFIX_MAX_CHARS);
+}
+
+function operationKey(toolName: string, path: string | undefined): string {
+	return `${toolName}:${normalizeOperationTarget(toolName, path)}`;
+}
+
+function operationLabel(toolName: string, path: string | undefined): string {
+	return `${toolCallVerb(toolName)} ${normalizeOperationTarget(toolName, path)}`;
+}
+
+function firstErrorLine(text: string): string {
+	const line = text
+		.split(/\r?\n/)
+		.map((part) => part.trim())
+		.find(Boolean);
+	return clampText(line ?? "failed", ERROR_LINE_MAX_CHARS);
+}
+
+function isFailureToolResult(message: AgentMessage, text: string): boolean {
+	if (message.role !== "toolResult") return false;
+	if ((message as { isError?: unknown }).isError === true) return true;
+	return /\b(exit code|failed|failure|error|exception|traceback)\b/i.test(text);
+}
+
 export function extractCompactionFacts(entries: SessionEntry[], start: number, end: number): CompactionFacts {
 	const rangeStart = Math.max(0, start);
 	const rangeEnd = Math.min(entries.length, Math.max(rangeStart, end));
 
 	if (rangeStart >= rangeEnd) {
-		return { files: [], actions: [], prohibitions: [], cancelledText: "", activeTaskSource: "" };
+		return {
+			files: [],
+			workingSet: [],
+			actions: [],
+			errorFacts: [],
+			prohibitions: [],
+			cancelledText: "",
+			activeTaskSource: "",
+		};
 	}
 
-	const filesByPath = new Map<string, { path: string; kind: "modified" | "created" | "read"; note: string }>();
+	const filesByPath = new Map<string, CompactionFileFact & { lastTouch: number }>();
 	const filesNotes = new Map<string, string>();
 	const seenProhibitions = new Set<string>();
 	const actionFacts: ToolCallFact[] = [];
@@ -213,6 +266,7 @@ export function extractCompactionFacts(entries: SessionEntry[], start: number, e
 	const pendingByOrder: number[] = [];
 
 	const actions: string[] = [];
+	const openErrors = new Map<string, CompactionErrorFact & { lastTouch: number }>();
 	const prohibitions: string[] = [];
 	let activeTaskSource = "";
 	const cancelledParts: string[] = [];
@@ -260,6 +314,17 @@ export function extractCompactionFacts(entries: SessionEntry[], start: number, e
 			if (messageText) {
 				sinceLastUser.push(messageText);
 			}
+		}
+
+		if (message.role === "assistant" && (message as { stopReason?: unknown }).stopReason === "error") {
+			const errorMessage = (message as { errorMessage?: unknown }).errorMessage;
+			openErrors.set("assistant:error", {
+				operation: "ASSISTANT response",
+				error: firstErrorLine(typeof errorMessage === "string" ? errorMessage : messageToText(message)),
+				lastTouch: i,
+			});
+		} else if (message.role === "assistant" && (message as { stopReason?: unknown }).stopReason === "stop") {
+			openErrors.delete("assistant:error");
 		}
 
 		if (message.role === "assistant" && Array.isArray(message.content)) {
@@ -328,10 +393,25 @@ export function extractCompactionFacts(entries: SessionEntry[], start: number, e
 					const nextKind = fact.finalKind;
 					const note = fact.verb;
 					if (!existing || FILE_KIND_PRIORITY[nextKind] > FILE_KIND_PRIORITY[existing.kind]) {
-						filesByPath.set(fact.path, { path: fact.path, kind: nextKind, note });
+						filesByPath.set(fact.path, { path: fact.path, kind: nextKind, note, lastTouch: i });
 					} else if (existing.kind === nextKind) {
 						existing.note = note;
+						existing.lastTouch = i;
+					} else {
+						existing.lastTouch = i;
 					}
+				}
+
+				const resultText = messageToText(message);
+				const key = operationKey(fact.name, fact.path);
+				if (isFailureToolResult(message, resultText)) {
+					openErrors.set(key, {
+						operation: operationLabel(fact.name, fact.path),
+						error: firstErrorLine(resultText),
+						lastTouch: i,
+					});
+				} else {
+					openErrors.delete(key);
 				}
 
 				const pendingPos = pendingByOrder.indexOf(matchedIndex);
@@ -359,7 +439,12 @@ export function extractCompactionFacts(entries: SessionEntry[], start: number, e
 			continue;
 		}
 		if (action.finalKind && action.path && !filesByPath.has(action.path)) {
-			filesByPath.set(action.path, { path: action.path, kind: action.finalKind, note: action.verb });
+			filesByPath.set(action.path, {
+				path: action.path,
+				kind: action.finalKind,
+				note: action.verb,
+				lastTouch: actionFacts.indexOf(action),
+			});
 		}
 
 		actions.push(`${action.verb} ${action.path ?? "(unknown)"}`);
@@ -384,14 +469,23 @@ export function extractCompactionFacts(entries: SessionEntry[], start: number, e
 		}
 	}
 
+	const files = Array.from(filesByPath.values())
+		.sort(
+			(a, b) =>
+				b.lastTouch - a.lastTouch ||
+				FILE_KIND_PRIORITY[b.kind] - FILE_KIND_PRIORITY[a.kind] ||
+				a.path.localeCompare(b.path),
+		)
+		.map(({ lastTouch: _lastTouch, ...file }) => file);
+
 	return {
-		files: Array.from(filesByPath.values()).sort((a, b) => {
-			if (a.path === b.path) {
-				return FILE_KIND_PRIORITY[a.kind] - FILE_KIND_PRIORITY[b.kind];
-			}
-			return a.path.localeCompare(b.path);
-		}),
+		files,
+		workingSet: files.slice(0, MAX_WORKING_SET_FILES),
 		actions: dedupeMostRecent(actions).slice(-MAX_ACTIONS),
+		errorFacts: Array.from(openErrors.values())
+			.sort((a, b) => a.lastTouch - b.lastTouch)
+			.slice(-MAX_ERROR_FACTS)
+			.map(({ lastTouch: _lastTouch, ...error }) => error),
 		prohibitions: prohibitions.slice(-MAX_PROHIBITIONS),
 		cancelledText: cancelledParts.join("\n"),
 		activeTaskSource,
@@ -417,9 +511,17 @@ export function renderFactsBlock(facts: CompactionFacts): string {
 	for (const file of facts.files) {
 		lines.push(`${file.kind}: ${file.path} — ${file.note}`);
 	}
+	lines.push("working set:");
+	for (const file of facts.workingSet) {
+		lines.push(`${file.path} — ${file.note || file.kind}`);
+	}
 	lines.push("actions:");
 	for (const action of facts.actions) {
 		lines.push(action);
+	}
+	lines.push("open errors:");
+	for (const error of facts.errorFacts) {
+		lines.push(`${error.operation}: ${error.error}`);
 	}
 	lines.push("prohibitions:");
 	for (const prohibition of facts.prohibitions) {

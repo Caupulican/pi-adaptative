@@ -1,5 +1,8 @@
 ## [Unreleased]
 
+### Fixed
+- Added checkpoint v2 extraction facts for open errors and working-set recency, with deterministic fallback parity and no post-gate file appendix.
+
 ## [0.81.8] - 2026-07-07
 
 ### Fixed

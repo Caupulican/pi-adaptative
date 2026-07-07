@@ -1,5 +1,6 @@
 import type { AssistantMessage, Message, ToolResultMessage, UserMessage } from "@caupulican/pi-ai";
 import { describe, expect, it } from "vitest";
+import { type CompactionPreparation, createDeterministicCompaction } from "../../src/compaction/compaction.ts";
 import { extractCompactionFacts, renderFactsBlock } from "../../src/compaction/extraction.ts";
 import type { SessionMessageEntry } from "../../src/session/session-manager.ts";
 
@@ -65,6 +66,7 @@ function createToolResult(
 	toolName: string,
 	text: string,
 	details?: Record<string, unknown>,
+	isError = false,
 ): ToolResultMessage<Record<string, unknown>> {
 	return {
 		role: "toolResult",
@@ -72,7 +74,7 @@ function createToolResult(
 		toolName,
 		content: [{ type: "text", text }],
 		details,
-		isError: false,
+		isError,
 		timestamp: Date.now(),
 	};
 }
@@ -325,12 +327,108 @@ describe("extractCompactionFacts", () => {
 		expect(facts.actions).toEqual(["READ src/real.ts"]);
 	});
 
+	it("keeps only unresolved error facts by operation", () => {
+		resetEntryCounter();
+		const failedRead = createMessageEntry(
+			createAssistantMessage([
+				{ type: "toolCall", id: "tc-read-fail", name: "read", arguments: { path: "src/a.ts" } },
+			]),
+		);
+		const failedReadResult = createMessageEntry(
+			createToolResult("tc-read-fail", "read", "Error: file missing\nstack trace", undefined, true),
+		);
+		const successfulRead = createMessageEntry(
+			createAssistantMessage([
+				{ type: "toolCall", id: "tc-read-ok", name: "read", arguments: { path: "src/a.ts" } },
+			]),
+		);
+		const successfulReadResult = createMessageEntry(createToolResult("tc-read-ok", "read", "ok"));
+		const failedEdit = createMessageEntry(
+			createAssistantMessage([
+				{ type: "toolCall", id: "tc-edit-fail", name: "edit", arguments: { path: "src/a.ts" } },
+			]),
+		);
+		const failedEditResult = createMessageEntry(
+			createToolResult("tc-edit-fail", "edit", "Exit code 1: patch failed", undefined, true),
+		);
+
+		const facts = extractCompactionFacts(
+			[failedRead, failedReadResult, successfulRead, successfulReadResult, failedEdit, failedEditResult],
+			0,
+			6,
+		);
+
+		expect(facts.errorFacts).toEqual([{ operation: "EDIT src/a.ts", error: "Exit code 1: patch failed" }]);
+	});
+
+	it("orders the working set by last touch and caps it to recent files", () => {
+		resetEntryCounter();
+		const entries: SessionMessageEntry[] = [];
+		for (let i = 0; i < 10; i++) {
+			entries.push(
+				createMessageEntry(
+					createAssistantMessage([
+						{ type: "toolCall", id: `tc-${i}`, name: "read", arguments: { path: `src/file-${i}.ts` } },
+					]),
+				),
+			);
+		}
+
+		const facts = extractCompactionFacts(entries, 0, entries.length);
+
+		expect(facts.files.map((file) => file.path).slice(0, 3)).toEqual([
+			"src/file-9.ts",
+			"src/file-8.ts",
+			"src/file-7.ts",
+		]);
+		expect(facts.workingSet.map((file) => file.path)).toEqual([
+			"src/file-9.ts",
+			"src/file-8.ts",
+			"src/file-7.ts",
+			"src/file-6.ts",
+			"src/file-5.ts",
+			"src/file-4.ts",
+			"src/file-3.ts",
+			"src/file-2.ts",
+		]);
+	});
+
+	it("renders extraction facts in deterministic fallback checkpoints", () => {
+		const preparation: CompactionPreparation = {
+			firstKeptEntryId: "kept",
+			messagesToSummarize: [],
+			turnPrefixMessages: [],
+			isSplitTurn: false,
+			tokensBefore: 123,
+			fileOps: { read: new Set(), written: new Set(), edited: new Set() },
+			settings: { enabled: true, reserveTokens: 1000, keepRecentTokens: 100 },
+			facts: {
+				files: [{ path: "src/open.ts", kind: "modified", note: "EDIT" }],
+				workingSet: [{ path: "src/open.ts", kind: "modified", note: "EDIT" }],
+				actions: ["EDIT src/open.ts"],
+				errorFacts: [{ operation: "TEST npm test", error: "1 failed: open.test.ts" }],
+				prohibitions: [],
+				cancelledText: "",
+				activeTaskSource: "Fix open test failure",
+			},
+		};
+
+		const result = createDeterministicCompaction(preparation);
+
+		expect(result.summary).toContain("## Files\n- src/open.ts — EDIT (modified)");
+		expect(result.summary).toContain("## Critical Context");
+		expect(result.summary).toContain("working set:\nsrc/open.ts — EDIT");
+		expect(result.summary).toContain("open errors:\nTEST npm test: 1 failed: open.test.ts");
+	});
+
 	it("returns empty facts for empty input", () => {
 		resetEntryCounter();
 		const facts = extractCompactionFacts([], 0, 0);
 
 		expect(facts.files).toEqual([]);
+		expect(facts.workingSet).toEqual([]);
 		expect(facts.actions).toEqual([]);
+		expect(facts.errorFacts).toEqual([]);
 		expect(facts.prohibitions).toEqual([]);
 		expect(facts.cancelledText).toBe("");
 		expect(facts.activeTaskSource).toBe("");
@@ -342,7 +440,9 @@ describe("extractCompactionFacts", () => {
 				{ path: "src/a.ts", kind: "read", note: "read file" },
 				{ path: "src/b.ts", kind: "modified", note: "edited" },
 			],
+			workingSet: [{ path: "src/b.ts", kind: "modified", note: "edited" }],
 			actions: ["EDIT src/b.ts"],
+			errorFacts: [{ operation: "TEST npm test", error: "2 failed: fetcher.test.ts" }],
 			prohibitions: ["Do not delete"],
 			cancelledText: "",
 			activeTaskSource: "Keep going",
@@ -352,8 +452,12 @@ describe("extractCompactionFacts", () => {
 			"files:\n" +
 				"read: src/a.ts — read file\n" +
 				"modified: src/b.ts — edited\n" +
+				"working set:\n" +
+				"src/b.ts — edited\n" +
 				"actions:\n" +
 				"EDIT src/b.ts\n" +
+				"open errors:\n" +
+				"TEST npm test: 2 failed: fetcher.test.ts\n" +
 				"prohibitions:\n" +
 				"Do not delete\n" +
 				"active task:\n" +
@@ -365,7 +469,9 @@ describe("extractCompactionFacts", () => {
 		const longTask = `fix the wedge ${"y".repeat(5000)}`;
 		const block = renderFactsBlock({
 			files: [],
+			workingSet: [],
 			actions: [],
+			errorFacts: [],
 			prohibitions: [],
 			cancelledText: "",
 			activeTaskSource: longTask,
@@ -377,7 +483,9 @@ describe("extractCompactionFacts", () => {
 
 		const emptyBlock = renderFactsBlock({
 			files: [],
+			workingSet: [],
 			actions: [],
+			errorFacts: [],
 			prohibitions: [],
 			cancelledText: "",
 			activeTaskSource: "",
