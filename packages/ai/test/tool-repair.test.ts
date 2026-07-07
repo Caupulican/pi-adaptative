@@ -93,6 +93,38 @@ describe("tool argument repair", () => {
 		).toEqual({ limit: 10, ignoreCase: false, filter: "minimal", count: 2, numbers: [1, 2] });
 	});
 
+	it("normalizes root property key casing", () => {
+		const tool = makeTool("read", Type.Object({ path: Type.String(), limit: Type.Optional(Type.Number()) }));
+
+		expect(validateToolArguments(tool, makeCall("read", { Path: "README.md" }))).toEqual({ path: "README.md" });
+	});
+
+	it("repairs text-protocol JSON strings with smart quote delimiters", () => {
+		const tool = makeTool("read", Type.Object({ path: Type.String() }));
+
+		expect(
+			validateToolArguments(tool, {
+				type: "toolCall",
+				id: "call-1",
+				name: "read",
+				arguments: '{"path:”README.md”}' as unknown as ToolCall["arguments"],
+			}),
+		).toEqual({ path: "README.md" });
+	});
+
+	it("salvages declared properties from malformed text-protocol JSON object strings", () => {
+		const tool = makeTool("read", Type.Object({ path: Type.String() }));
+
+		expect(
+			validateToolArguments(tool, {
+				type: "toolCall",
+				id: "call-1",
+				name: "read",
+				arguments: '{"path":"README.md" extra:1000}' as unknown as ToolCall["arguments"],
+			}),
+		).toEqual({ path: "README.md" });
+	});
+
 	it("repairs named bash command shapes", () => {
 		const tool = makeTool("bash", Type.Object({ command: Type.String(), timeout: Type.Optional(Type.Number()) }));
 
@@ -110,12 +142,14 @@ describe("tool argument repair", () => {
 			"nullOptionalDrop",
 			"nullRequiredBounce",
 			"jsonStringParse",
+			"jsonObjectPropertySalvage",
 			"singleObjectWrap",
 			"bareScalarWrap",
 			"emptyObjectPlaceholder",
 			"numberFromString",
 			"boolFromString",
 			"enumCaseNormalize",
+			"propertyCaseNormalize",
 			"singleElementUnwrap",
 			"stringifiedNumberInArray",
 			"bashCommandArgvJoin",

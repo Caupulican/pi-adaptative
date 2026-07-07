@@ -18,15 +18,17 @@ is in its parent's `required`; `def(P)` = P has a schema `default`.
 |---|---|---|---|---|---|---|
 | 1 | nullOptionalDrop | type mismatch at P | `null`, `!req(P)` | delete key P | always (absence is valid for optional) | "sent null for optional `P` → omit the field instead" |
 | 1b | nullRequiredBounce | type mismatch at P | `null`, `req(P)`, `!def(P)` | none | never (bounce) | "`P` is required and cannot be null → send a real value" |
-| 2 | jsonStringParse | expect array\|object at P, got string | `"[...]"`/`"{...}"` | `JSON.parse(s)` | parsed matches expect(P) AND sub-checks | "sent `P` as a quoted JSON string → send a raw JSON array/object" |
+| 2 | jsonStringParse | expect array\|object at P, got string | `"[...]"`/`"{...}"`, including text-protocol smart-quote delimiter drift | `JSON.parse(s)`; if strict parse fails, normalize `“`/`”` delimiters and the observed missing object-key quote pattern, then parse | parsed matches expect(P) AND sub-checks | "sent `P` as a quoted JSON string → send a raw JSON array/object" |
+| 2b | jsonObjectPropertySalvage | expect object at P, got malformed object string | e.g. `{"path":"x" extra:1000}` | extract schema-declared JSON literal property values into a new object | each declared property appears at most once, no undeclared value is kept, and whole-object Check passes | "sent `P` as malformed JSON with recoverable declared properties → keep the schema-declared properties" |
 | 3 | singleObjectWrap | expect array at P, got object | `{...}` | `[obj]` | `[obj]` passes `items(P)` | "sent one object where `P` takes a list → wrap it in `[ ]`" |
 | 4 | bareScalarWrap | expect array at P, got scalar | string/number/bool | `[v]` | `[v]` passes `items(P)` | "sent a single value where `P` takes a list → wrap it in `[ ]`" |
 | 5 | emptyObjectPlaceholder | expect scalar at P (or array whose `items` reject `{}`), got object | `{}` | delete key P | `!req(P)` (schema default applies) else bounce | "sent `{}` as a placeholder → omit `P`; its default applies" |
 | 6 | numberFromString | expect number/integer at P, got string | `"42"`, numeric | `Number(s)` | finite (and integer if integer(P)) | "sent `P` as a quoted number → send a bare number" |
 | 7 | boolFromString | expect boolean at P, got string | `"true"`/`"false"` | `s === "true"` | exact match only (never truthiness) | "sent `P` as a quoted boolean → send bare true/false" |
 | 8 | enumCaseNormalize | expect enum at P, got string not in set | case/space variant | match case-insensitively/trimmed to one enum member | exactly one member matches | "`P` must be one of `a|b|c` → matched `<value>`" |
-| 9 | singleElementUnwrap | expect scalar at P, got 1-elem array | `[v]` | `v` | `v` passes expect(P) AND `length===1` | "sent `P` as a 1-item list where a single value was expected → send the value" |
-| 10 | stringifiedNumberInArray | expect number[] at P, got string[] | `["1","2"]` | map `Number` | all finite | "list `P` holds quoted numbers → send bare numbers" |
+| 9 | propertyCaseNormalize | root object has key K whose casing differs from a declared schema property | e.g. `Path` for `path` | rename K to the schema key | exactly one declared root property matches case-insensitively and the canonical key is absent | "sent `P` with different property-key casing → use the schema key casing" |
+| 10 | singleElementUnwrap | expect scalar at P, got 1-elem array | `[v]` | `v` | `v` passes expect(P) AND `length===1` | "sent `P` as a 1-item list where a single value was expected → send the value" |
+| 11 | stringifiedNumberInArray | expect number[] at P, got string[] | `["1","2"]` | map `Number` | all finite | "list `P` holds quoted numbers → send bare numbers" |
 
 Rules that keep this deterministic and safe:
 - **Repairs never invent a value.** 5 relies on the schema `default`; nothing
@@ -34,13 +36,14 @@ Rules that keep this deterministic and safe:
 - **Guard is mandatory.** Every transform runs on a clone and is kept ONLY if
   it Checks against the sub-schema at P. A transform whose guard fails leaves
   args untouched and falls through to the next applicable mode, then bounce.
-- **Order within one path:** 2 (parse) → 8/6/7 (coerce scalar) → 3/4/10 (wrap)
-  → 9 (unwrap) → 5 (placeholder-drop) → 1 (null-drop). Parse before wrap so a
+- **Order within one path:** 2 (strict/quote-normalized parse) → 2b (declared-property salvage) → 8/6/7 (coerce scalar) → 3/4/11 (wrap)
+  → 10 (unwrap) → 5 (placeholder-drop) → 1 (null-drop). Parse before wrap so a
   stringified array becomes an array, not a wrapped string. Across paths:
-  instance-path order.
+  instance-path order. Root property-key casing repair runs before these per-path
+  transforms because required-property validator errors do not carry the misspelled key path.
 - **One re-Check.** After all per-path transforms, Check the whole args once.
   Pass → return repaired; fail → bounce. Never loop transforms.
-- Modes 6–10 are the increment past the original four; each is guard-gated so
+- Modes 2b and 6–11 are the increment past the original four; each is guard-gated so
   it can only ever turn an invalid call into a valid one, never change a
   valid call (the hot path never reaches them — see Performance).
 
@@ -104,10 +107,13 @@ The failure grammar only ever runs on ALREADY-FAILED calls. The hot path
    `validator.Check(args)` (cached compiled validator) and returns the SAME
    object — no clone, no walk, no grammar lookup. This is the ~99% path for
    strong models and it is unchanged from today's cost.
-2. **Repairs are O(errors), not O(schema).** The analyzer walks the
+2. **Repairs are bounded on the failed path.** The analyzer walks the
    validator's error list (already produced by the failed Check), not the
-   schema tree. Each error maps to at most a few candidate modes by a static
-   dispatch table keyed on `(expect, got)` — a Map lookup, not a scan.
+   schema tree; the exceptions are `propertyCaseNormalize` and
+   `jsonObjectPropertySalvage`, which scan only root object keys or declared
+   object properties after a failed Check. Each
+   path error maps to at most a few candidate modes by a static dispatch table
+   keyed on `(expect, got)` — a Map lookup, not a scan.
 3. **No per-call compilation.** errorSignature matchers are precompiled
    constants; note templates are format strings; the registry is built once
    at module load. Nothing in the repair path constructs a RegExp, compiles a

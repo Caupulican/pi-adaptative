@@ -51,12 +51,14 @@ The repair registry currently names these deterministic modes:
 - `nullOptionalDrop`
 - `nullRequiredBounce`
 - `jsonStringParse`
+- `jsonObjectPropertySalvage`
 - `singleObjectWrap`
 - `bareScalarWrap`
 - `emptyObjectPlaceholder`
 - `numberFromString`
 - `boolFromString`
 - `enumCaseNormalize`
+- `propertyCaseNormalize`
 - `singleElementUnwrap`
 - `stringifiedNumberInArray`
 - `bashCommandArgvJoin`

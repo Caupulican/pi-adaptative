@@ -2,12 +2,14 @@ export const TOOL_REPAIR_MODE_NAMES = [
 	"nullOptionalDrop",
 	"nullRequiredBounce",
 	"jsonStringParse",
+	"jsonObjectPropertySalvage",
 	"singleObjectWrap",
 	"bareScalarWrap",
 	"emptyObjectPlaceholder",
 	"numberFromString",
 	"boolFromString",
 	"enumCaseNormalize",
+	"propertyCaseNormalize",
 	"singleElementUnwrap",
 	"stringifiedNumberInArray",
 	"bashCommandArgvJoin",
@@ -41,6 +43,13 @@ export const TOOL_REPAIR_REGISTRY: readonly ToolRepairRegistryEntry[] = [
 			"Send raw JSON arrays/objects where the tool schema expects arrays/objects; do not quote them as JSON strings.",
 	},
 	{
+		name: "jsonObjectPropertySalvage",
+		noteTemplate:
+			"sent `{path}` as malformed JSON with recoverable declared properties -> keep the schema-declared properties",
+		standingRule:
+			"When sending JSON objects, use strict JSON syntax with commas between properties and no extra text inside the object.",
+	},
+	{
 		name: "singleObjectWrap",
 		noteTemplate: "sent one object where `{path}` takes a list -> wrap it in [ ]",
 		standingRule: "Wrap a single object in [ ] when the tool schema expects a list.",
@@ -69,6 +78,11 @@ export const TOOL_REPAIR_REGISTRY: readonly ToolRepairRegistryEntry[] = [
 		name: "enumCaseNormalize",
 		noteTemplate: "`{path}` matched a declared enum value after case/space normalization",
 		standingRule: "Use enum values exactly as declared, preserving case and spacing.",
+	},
+	{
+		name: "propertyCaseNormalize",
+		noteTemplate: "sent `{path}` with different property-key casing -> use the schema key casing",
+		standingRule: "Use tool argument property names exactly as declared in the schema, preserving case.",
 	},
 	{
 		name: "singleElementUnwrap",

@@ -234,6 +234,7 @@ function classifyModes(toolName: string, issue: Omit<ToolRepairIssue, "modes">):
 
 	if (typeof issue.value === "string" && (isArraySchema(issue.schema) || isObjectSchema(issue.schema))) {
 		modes.push("jsonStringParse");
+		if (isObjectSchema(issue.schema)) modes.push("jsonObjectPropertySalvage");
 	}
 	if (isArraySchema(issue.schema) && isRecord(issue.value)) {
 		modes.push("singleObjectWrap", "emptyObjectPlaceholder");

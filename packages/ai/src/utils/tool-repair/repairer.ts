@@ -115,18 +115,66 @@ function findNormalizedEnumValue(schema: JsonSchemaObject, value: string): strin
 	return matches.length === 1 ? matches[0] : undefined;
 }
 
-function parseJsonContainer(value: string, schema: JsonSchemaObject): unknown | undefined {
-	const trimmed = value.trim();
-	if (!trimmed.startsWith("[") && !trimmed.startsWith("{")) return undefined;
+function parsedContainerMatchesSchemaType(parsed: unknown, schema: JsonSchemaObject): boolean {
+	const expectedTypes = getSchemaTypes(schema);
+	if (expectedTypes.includes("array") && !Array.isArray(parsed)) return false;
+	if (expectedTypes.includes("object") && (!isRecord(parsed) || Array.isArray(parsed))) return false;
+	return true;
+}
+
+function normalizeJsonQuoteDrift(value: string): string | undefined {
+	if (!/[“”]/.test(value)) return undefined;
+	const normalizedQuotes = value.replaceAll("“", '"').replaceAll("”", '"');
+	return normalizedQuotes.replace(/"([A-Za-z_][A-Za-z0-9_-]*)\s*:\s*"/g, '"$1":"');
+}
+
+function escapeRegExp(value: string): string {
+	return value.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
+}
+
+function parseJsonLiteralToken(token: string): unknown | undefined {
 	try {
-		const parsed: unknown = JSON.parse(trimmed);
-		const expectedTypes = getSchemaTypes(schema);
-		if (expectedTypes.includes("array") && !Array.isArray(parsed)) return undefined;
-		if (expectedTypes.includes("object") && (!isRecord(parsed) || Array.isArray(parsed))) return undefined;
-		return parsed;
+		return JSON.parse(token) as unknown;
 	} catch {
 		return undefined;
 	}
+}
+
+function salvageDeclaredObjectProperties(value: string, schema: JsonSchemaObject): Record<string, unknown> | undefined {
+	const properties = schema.properties;
+	if (!properties) return undefined;
+	const trimmed = value.trim();
+	if (!trimmed.startsWith("{") || !trimmed.endsWith("}")) return undefined;
+	const normalized = normalizeJsonQuoteDrift(trimmed) ?? trimmed;
+	const salvaged: Record<string, unknown> = {};
+	for (const key of Object.keys(properties)) {
+		const pattern = new RegExp(
+			`"${escapeRegExp(key)}"\\s*:\\s*("(?:\\\\.|[^"\\\\])*"|-?\\d+(?:\\.\\d+)?(?:[eE][+-]?\\d+)?|true|false|null)`,
+			"g",
+		);
+		const matches = [...normalized.matchAll(pattern)];
+		if (matches.length > 1) return undefined;
+		const token = matches[0]?.[1];
+		if (token === undefined) continue;
+		const parsed = parseJsonLiteralToken(token);
+		if (parsed === undefined && token !== "null") return undefined;
+		salvaged[key] = parsed;
+	}
+	return Object.keys(salvaged).length > 0 ? salvaged : undefined;
+}
+
+function parseJsonContainer(value: string, schema: JsonSchemaObject): unknown | undefined {
+	const trimmed = value.trim();
+	if (!trimmed.startsWith("[") && !trimmed.startsWith("{")) return undefined;
+	for (const candidate of [trimmed, normalizeJsonQuoteDrift(trimmed)]) {
+		if (candidate === undefined) continue;
+		try {
+			const parsed: unknown = JSON.parse(candidate);
+			if (!parsedContainerMatchesSchemaType(parsed, schema)) continue;
+			return parsed;
+		} catch {}
+	}
+	return undefined;
 }
 
 function parseNumber(value: string, schema: JsonSchemaObject): number | undefined {
@@ -168,6 +216,10 @@ function transformValue(
 				? { type: "set", value: parseJsonContainer(issue.value, issue.schema) }
 				: undefined;
 		}
+		case "jsonObjectPropertySalvage":
+			return typeof issue.value === "string"
+				? { type: "set", value: salvageDeclaredObjectProperties(issue.value, issue.schema) }
+				: undefined;
 		case "singleObjectWrap":
 			return isRecord(issue.value) ? { type: "set", value: [issue.value] } : undefined;
 		case "bareScalarWrap":
@@ -236,6 +288,32 @@ function refreshIssueValue(candidate: Record<string, unknown>, issue: ToolRepair
 	return { ...issue, value: getValueAtPath(candidate, issue.path) };
 }
 
+function normalizeRootPropertyCase(
+	args: Record<string, unknown>,
+	schema: Tool["parameters"],
+): { args: Record<string, unknown>; repairs: AppliedToolRepair[] } | undefined {
+	if (!isRecord(args)) return undefined;
+	const schemaRecord = isJsonSchemaObject(schema) ? schema : undefined;
+	const properties = schemaRecord?.properties;
+	if (!properties) return undefined;
+	const canonicalByLower = new Map<string, string[]>();
+	for (const key of Object.keys(properties)) {
+		const lower = key.toLowerCase();
+		canonicalByLower.set(lower, [...(canonicalByLower.get(lower) ?? []), key]);
+	}
+	const next = { ...args };
+	const repairs: AppliedToolRepair[] = [];
+	for (const key of Object.keys(args)) {
+		const matches = canonicalByLower.get(key.toLowerCase()) ?? [];
+		const canonical = matches.length === 1 ? matches[0] : undefined;
+		if (!canonical || canonical === key || canonical in next) continue;
+		next[canonical] = next[key];
+		delete next[key];
+		repairs.push({ name: "propertyCaseNormalize", path: canonical });
+	}
+	return repairs.length > 0 ? { args: next, repairs } : undefined;
+}
+
 export function repairToolArguments(
 	toolName: string,
 	schema: Tool["parameters"],
@@ -243,12 +321,21 @@ export function repairToolArguments(
 	errors: readonly ValidationErrorLike[],
 	checkWholeArgs: (candidate: Record<string, unknown>) => boolean,
 ): ToolRepairResult | undefined {
-	const issues = analyzeToolArgumentErrors(toolName, schema, args, errors);
-	if (issues.length === 0) return undefined;
-
 	let candidate = structuredClone(args);
 	const repairsApplied: ToolRepairModeName[] = [];
 	const repairs: AppliedToolRepair[] = [];
+	const caseNormalized = normalizeRootPropertyCase(candidate, schema);
+	if (caseNormalized) {
+		candidate = caseNormalized.args;
+		repairsApplied.push(...caseNormalized.repairs.map((repair) => repair.name));
+		repairs.push(...caseNormalized.repairs);
+	}
+	const issues = analyzeToolArgumentErrors(toolName, schema, args, errors);
+	if (issues.length === 0) {
+		return repairsApplied.length > 0 && checkWholeArgs(candidate)
+			? { args: candidate, repairsApplied, repairs }
+			: undefined;
+	}
 
 	for (const issue of issues) {
 		if (issue.modes.includes("nullRequiredBounce")) continue;
