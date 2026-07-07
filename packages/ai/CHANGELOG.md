@@ -7,6 +7,7 @@
 - Fixed environment API key lookup to stay browser-safe when `process` is absent.
 - Fixed Gemini <3 tool-result image routing so consecutive function responses stay grouped before the separate image turn.
 - Fixed Google Vertex Gemma 4 thinking configuration parity with Google Generative AI.
+- Fixed OpenAI Responses streams to emit text/refusal deltas when providers omit `content_part.added` events.
 
 ## [0.81.11] - 2026-07-07
 

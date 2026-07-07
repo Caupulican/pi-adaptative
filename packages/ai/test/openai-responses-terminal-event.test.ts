@@ -1,7 +1,7 @@
 import type { ResponseStreamEvent } from "openai/resources/responses/responses.js";
 import { describe, expect, it } from "vitest";
 import { processResponsesStream } from "../src/providers/openai-responses-shared.ts";
-import type { AssistantMessage, Model } from "../src/types.ts";
+import type { AssistantMessage, AssistantMessageEvent, Model } from "../src/types.ts";
 import { AssistantMessageEventStream } from "../src/utils/event-stream.ts";
 
 function createModel(): Model<"openai-responses"> {
@@ -130,6 +130,72 @@ async function* createIncompleteEvents(): AsyncIterable<ResponseStreamEvent> {
 	} as ResponseStreamEvent;
 }
 
+async function* createOutputTextDeltasWithoutContentPartEvents(): AsyncIterable<ResponseStreamEvent> {
+	yield {
+		type: "response.output_item.added",
+		item: { id: "msg_text", type: "message", role: "assistant", status: "in_progress", content: [] },
+	} as unknown as ResponseStreamEvent;
+	yield {
+		type: "response.output_text.delta",
+		item_id: "msg_text",
+		content_index: 0,
+		delta: "Hello",
+	} as unknown as ResponseStreamEvent;
+	yield {
+		type: "response.output_text.delta",
+		item_id: "msg_text",
+		content_index: 0,
+		delta: " world",
+	} as unknown as ResponseStreamEvent;
+	yield {
+		type: "response.output_item.done",
+		item: {
+			id: "msg_text",
+			type: "message",
+			role: "assistant",
+			status: "completed",
+			content: [{ type: "output_text", text: "Hello world", annotations: [] }],
+		},
+	} as unknown as ResponseStreamEvent;
+	yield {
+		type: "response.completed",
+		response: { id: "resp_text", status: "completed" },
+	} as unknown as ResponseStreamEvent;
+}
+
+async function* createRefusalDeltasWithoutContentPartEvents(): AsyncIterable<ResponseStreamEvent> {
+	yield {
+		type: "response.output_item.added",
+		item: { id: "msg_refusal", type: "message", role: "assistant", status: "in_progress", content: [] },
+	} as unknown as ResponseStreamEvent;
+	yield {
+		type: "response.refusal.delta",
+		item_id: "msg_refusal",
+		content_index: 0,
+		delta: "No",
+	} as unknown as ResponseStreamEvent;
+	yield {
+		type: "response.refusal.delta",
+		item_id: "msg_refusal",
+		content_index: 0,
+		delta: " thanks",
+	} as unknown as ResponseStreamEvent;
+	yield {
+		type: "response.output_item.done",
+		item: {
+			id: "msg_refusal",
+			type: "message",
+			role: "assistant",
+			status: "completed",
+			content: [{ type: "refusal", refusal: "No thanks" }],
+		},
+	} as unknown as ResponseStreamEvent;
+	yield {
+		type: "response.completed",
+		response: { id: "resp_refusal", status: "completed" },
+	} as unknown as ResponseStreamEvent;
+}
+
 describe("OpenAI Responses terminal events", () => {
 	it("rejects streams that end before a terminal response event", async () => {
 		const model = createModel();
@@ -204,5 +270,42 @@ describe("OpenAI Responses terminal events", () => {
 		expect(output.usage.input).toBe(25);
 		expect(output.usage.cacheRead).toBe(5);
 		expect(output.usage.output).toBe(12);
+	});
+
+	it("emits output text deltas even when content_part.added is absent", async () => {
+		const model = createModel();
+		const output = createOutput(model);
+		const stream = new AssistantMessageEventStream();
+
+		await processResponsesStream(createOutputTextDeltasWithoutContentPartEvents(), output, stream, model);
+		stream.end(output);
+
+		const events: AssistantMessageEvent[] = [];
+		for await (const event of stream) {
+			events.push(event);
+		}
+		expect(events.flatMap((event) => (event.type === "text_delta" ? [event.delta] : []))).toEqual([
+			"Hello",
+			" world",
+		]);
+		expect(output.content).toHaveLength(1);
+		expect(output.content[0]).toMatchObject({ type: "text", text: "Hello world" });
+	});
+
+	it("emits refusal deltas even when content_part.added is absent", async () => {
+		const model = createModel();
+		const output = createOutput(model);
+		const stream = new AssistantMessageEventStream();
+
+		await processResponsesStream(createRefusalDeltasWithoutContentPartEvents(), output, stream, model);
+		stream.end(output);
+
+		const events: AssistantMessageEvent[] = [];
+		for await (const event of stream) {
+			events.push(event);
+		}
+		expect(events.flatMap((event) => (event.type === "text_delta" ? [event.delta] : []))).toEqual(["No", " thanks"]);
+		expect(output.content).toHaveLength(1);
+		expect(output.content[0]).toMatchObject({ type: "text", text: "No thanks" });
 	});
 });

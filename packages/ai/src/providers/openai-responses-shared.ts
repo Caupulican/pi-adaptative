@@ -9,6 +9,8 @@ import type {
 	ResponseInputImage,
 	ResponseInputText,
 	ResponseOutputMessage,
+	ResponseOutputRefusal,
+	ResponseOutputText,
 	ResponseReasoningItem,
 	ResponseStreamEvent,
 } from "openai/resources/responses/responses.js";
@@ -312,6 +314,22 @@ export async function processResponsesStream<TApi extends Api>(
 	let sawTerminalResponseEvent = false;
 	const blocks = output.content;
 	const blockIndex = () => blocks.length - 1;
+	const ensureMessageOutputTextPart = (): ResponseOutputText | undefined => {
+		if (currentItem?.type !== "message") return undefined;
+		const lastPart = currentItem.content[currentItem.content.length - 1];
+		if (lastPart?.type === "output_text") return lastPart;
+		const part: ResponseOutputText = { type: "output_text", text: "", annotations: [] };
+		currentItem.content.push(part);
+		return part;
+	};
+	const ensureMessageRefusalPart = (): ResponseOutputRefusal | undefined => {
+		if (currentItem?.type !== "message") return undefined;
+		const lastPart = currentItem.content[currentItem.content.length - 1];
+		if (lastPart?.type === "refusal") return lastPart;
+		const part: ResponseOutputRefusal = { type: "refusal", refusal: "" };
+		currentItem.content.push(part);
+		return part;
+	};
 	const finalizeResponse = (
 		response: Extract<ResponseStreamEvent, { type: "response.completed" | "response.incomplete" }>["response"],
 	): void => {
@@ -445,11 +463,8 @@ export async function processResponsesStream<TApi extends Api>(
 			}
 		} else if (event.type === "response.output_text.delta") {
 			if (currentItem?.type === "message" && currentBlock?.type === "text") {
-				if (!currentItem.content || currentItem.content.length === 0) {
-					continue;
-				}
-				const lastPart = currentItem.content[currentItem.content.length - 1];
-				if (lastPart?.type === "output_text") {
+				const lastPart = ensureMessageOutputTextPart();
+				if (lastPart) {
 					currentBlock.text += event.delta;
 					lastPart.text += event.delta;
 					stream.push({
@@ -462,11 +477,8 @@ export async function processResponsesStream<TApi extends Api>(
 			}
 		} else if (event.type === "response.refusal.delta") {
 			if (currentItem?.type === "message" && currentBlock?.type === "text") {
-				if (!currentItem.content || currentItem.content.length === 0) {
-					continue;
-				}
-				const lastPart = currentItem.content[currentItem.content.length - 1];
-				if (lastPart?.type === "refusal") {
+				const lastPart = ensureMessageRefusalPart();
+				if (lastPart) {
 					currentBlock.text += event.delta;
 					lastPart.refusal += event.delta;
 					stream.push({
