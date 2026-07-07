@@ -26,6 +26,8 @@
 	"files": [
 		"dist",
 		"docs",
+		"!docs/bug-ledger.md",
+		"!docs/*bug-*.md",
 		"examples",
 		"CHANGELOG.md",
 		"npm-shrinkwrap.json"
