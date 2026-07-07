@@ -1,5 +1,7 @@
 ## [Unreleased]
 
+0.81.10/0.81.11 retracted before distribution; changes are folded into this section for 0.81.12.
+
 ### Fixed
 - Fixed external editor resolution so both inline and path-edit flows prefer `$VISUAL` before `$EDITOR`.
 - Fixed registered extension models without token limits to receive default context and max-output limits.
@@ -14,10 +16,6 @@
 - Added tool repair health reporting, learned-rule removal, visible repaired-call markers, and repair/teach/protocol kill switches.
 - Fixed delegated worker action parsing to use the shared tool-argument validation repair path.
 - Documented tool repair diagnostics, controls, and replay workflow.
-
-## [0.81.11] - 2026-07-07
-
-## [0.81.10] - 2026-07-07
 
 ## [0.81.9] - 2026-07-07
 

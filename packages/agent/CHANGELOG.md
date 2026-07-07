@@ -1,5 +1,7 @@
 ## [Unreleased]
 
+0.81.10/0.81.11 retracted before distribution; changes are folded into this section for 0.81.12.
+
 ### Fixed
 - Fixed agent failure messages to use fresh zero-usage objects instead of sharing mutable usage state.
 - Fixed watchdog-wrapped streams to settle with an aborted result when caller abort makes the inner stream end without a terminal event.
@@ -13,12 +15,6 @@
 - Added catalogued guidance lines to matching tool execution errors.
 - Added agent-loop forwarding for calibrated text tool-call protocol variants.
 - Added repaired-tool execution markers and independent repair/teach layer switches.
-
-## [0.81.11] - 2026-07-07
-
-## [0.81.10] - 2026-07-07
-
-### Fixed
 - Fixed checkpoint v2 open-error extraction to classify tool failures from authoritative/structured outcome signals instead of matching error words in successful tool content; compaction facts now include retained recent messages so checkpoints carry the current task state.
 
 ## [0.81.9] - 2026-07-07

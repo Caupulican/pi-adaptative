@@ -1,5 +1,7 @@
 ## [Unreleased]
 
+0.81.10/0.81.11 retracted before distribution; changes are folded into this section for 0.81.12.
+
 ### Fixed
 - Fixed Amazon Bedrock redacted reasoning round-trips and unsupported image-format downgrades.
 - Fixed transcript transforms to drop tool results for skipped errored assistant tool calls.
@@ -25,10 +27,6 @@
 - Added text tool-call protocol variants for per-model calibration.
 - Added an offline tool-repair corpus replay helper for sanitized validation bounce fixtures.
 - Added a validation option to disable deterministic tool-argument repair while retaining bounces.
-
-## [0.81.11] - 2026-07-07
-
-## [0.81.10] - 2026-07-07
 
 ## [0.81.9] - 2026-07-07
 

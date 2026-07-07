@@ -1,11 +1,9 @@
 ## [Unreleased]
 
+0.81.10/0.81.11 retracted before distribution; changes are folded into this section for 0.81.12.
+
 ### Fixed
 - Fixed stdin buffering to preserve escape remainders across bracketed paste boundaries.
-
-## [0.81.11] - 2026-07-07
-
-## [0.81.10] - 2026-07-07
 
 ## [0.81.9] - 2026-07-07
 
