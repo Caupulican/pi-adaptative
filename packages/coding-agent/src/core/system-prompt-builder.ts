@@ -16,6 +16,7 @@ import { existsSync } from "node:fs";
 import { resolvePath } from "../utils/paths.ts";
 import type { Extension } from "./extensions/types.ts";
 import type { MemoryManager } from "./memory/memory-manager.ts";
+import type { ModelAdaptationRule } from "./models/adaptation-store.ts";
 import type { ResourceLoader } from "./resource-loader.ts";
 import { UNTRUSTED_BOUNDARY_SYSTEM_RULE } from "./security/untrusted-boundary.ts";
 import type { SettingsManager } from "./settings-manager.ts";
@@ -36,6 +37,8 @@ export interface SystemPromptBuilderDeps {
 	getToolPromptSnippet(name: string): string | undefined;
 	/** The extra guideline bullets registered for a tool, if any. */
 	getToolPromptGuidelines(name: string): string[] | undefined;
+	/** The standing tool-shape rules learned for the session's current model. */
+	getModelAdaptationRules(): readonly ModelAdaptationRule[];
 	/** The session's currently active extensions. */
 	getActiveExtensions(): ReadonlyArray<Extension>;
 }
@@ -135,6 +138,13 @@ export class SystemPromptBuilder {
 - Always ask for explicit approval before publishing, pushing, tagging, or releasing.`;
 	}
 
+	private _buildModelAdaptationPrompt(): string | undefined {
+		const rules = this.deps.getModelAdaptationRules();
+		if (rules.length === 0) return undefined;
+		const lines = rules.map((rule) => `- ${rule.text}`);
+		return `Per-model tool-call shape rules (learned for the current model):\n${lines.join("\n")}`;
+	}
+
 	private _buildAutonomyPrompt(): string | undefined {
 		const autoLearn = this.deps.getSettingsManager().getAutoLearnSettings();
 		const autonomy = this.deps.getSettingsManager().getAutonomySettings();
@@ -186,6 +196,7 @@ export class SystemPromptBuilder {
 			UNTRUSTED_BOUNDARY_SYSTEM_RULE,
 			this._buildSelfModificationPrompt(),
 			this._buildAutonomyPrompt(),
+			this._buildModelAdaptationPrompt(),
 			// Memory subsystem: static, frozen-per-session block (e.g. file-store MEMORY.md/USER.md).
 			this.deps.getMemoryManager().buildSystemPromptBlock() || undefined,
 			...loaderAppendSystemPrompt,

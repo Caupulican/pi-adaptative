@@ -7,6 +7,7 @@
 - Fixed edit tool argument preparation to leave stringified `edits` for the shared validation repair layer.
 - Added session analytics aggregation for shape-only tool argument validation telemetry.
 - Added a host-keyed per-model adaptation store for repair rules, protocol calibration, and teach statistics.
+- Added learned per-model tool-shape rules to system prompt assembly after repeated repair telemetry.
 
 ## [0.81.11] - 2026-07-07
 

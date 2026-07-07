@@ -48,9 +48,16 @@ import type {
 	Model,
 	StopReason,
 	TextContent,
+	ToolArgumentValidationTelemetryEvent,
+	ToolRepairModeName,
 	Usage,
 } from "@caupulican/pi-ai";
-import { cleanupSessionResources, isContextOverflow, streamSimple } from "@caupulican/pi-ai";
+import {
+	cleanupSessionResources,
+	formatToolRepairStandingRule,
+	isContextOverflow,
+	streamSimple,
+} from "@caupulican/pi-ai";
 import { getAgentDir } from "../config.ts";
 import { stripFrontmatter } from "../utils/frontmatter.ts";
 import { formatNoApiKeyFoundMessage, formatNoModelSelectedMessage } from "./auth-guidance.ts";
@@ -141,6 +148,7 @@ import {
 import type { ModelRegistry } from "./model-registry.ts";
 import { formatModelRouterModel, ModelRouterController } from "./model-router-controller.ts";
 import { ModelSelectionController } from "./model-selection-controller.ts";
+import { ModelAdaptationStore } from "./models/adaptation-store.ts";
 import type { StoredFitnessReport } from "./models/fitness-store.ts";
 import type { LocalRuntimeDeps, OllamaRuntime } from "./models/local-runtime.ts";
 import { ProfileFilterController } from "./profile-filter-controller.ts";
@@ -179,6 +187,7 @@ import type { BashOperations } from "./tools/bash.ts";
  * key stable regardless of how many times this module is evaluated.
  */
 const RAW_STREAM_MARKER = Symbol.for("pi.rawStreamSimple");
+const MODEL_ADAPTATION_REPAIR_THRESHOLD = 3;
 
 /** Test-only override of the stream-idle bounds. Read per-request by the wiring's resolver. */
 let streamIdleOptionsOverride: Partial<StreamIdleOptions> | undefined;
@@ -559,6 +568,8 @@ export class AgentSession {
 	private _agentDir: string;
 	private _collectWorkspaceSources: typeof collectWorkspaceSources;
 	private readonly _localRuntimeController: LocalRuntimeController;
+	private readonly _modelAdaptationStore: ModelAdaptationStore;
+	private readonly _repairModeSessionCounts = new Map<string, number>();
 	/** Assembles the session's base system prompt from live session state (see
 	 * system-prompt-builder.ts); owns the paired _baseSystemPromptOptions. */
 	private readonly _systemPromptBuilder: SystemPromptBuilder;
@@ -680,6 +691,7 @@ export class AgentSession {
 		this._customTools = config.customTools ?? [];
 		this._cwd = config.cwd;
 		this._agentDir = config.agentDir ?? getAgentDir();
+		this._modelAdaptationStore = ModelAdaptationStore.forAgentDir(this._agentDir);
 		this._collectWorkspaceSources = config.collectWorkspaceSources ?? collectWorkspaceSources;
 		this._localRuntimeController = new LocalRuntimeController({
 			agentDir: this._agentDir,
@@ -698,6 +710,7 @@ export class AgentSession {
 			hasTool: (name) => this._runtimeBuilder.hasTool(name),
 			getToolPromptSnippet: (name) => this._runtimeBuilder.getToolPromptSnippet(name),
 			getToolPromptGuidelines: (name) => this._runtimeBuilder.getToolPromptGuidelines(name),
+			getModelAdaptationRules: () => this._getModelAdaptationRulesForPrompt(),
 			getActiveExtensions: () => this._extensionRunner.activeExtensions,
 		});
 		this._autonomyTelemetry = new AutonomyTelemetry({
@@ -921,6 +934,7 @@ export class AgentSession {
 		this.agent.onToolArgumentValidation = (event) => {
 			previousToolArgumentValidation?.(event);
 			this._analytics.recordToolArgumentValidation(event);
+			this._handleModelAdaptationTelemetry(event);
 		};
 		this._treeNavigator = new SessionTreeNavigator({
 			getSessionManager: () => this.sessionManager,
@@ -1232,6 +1246,66 @@ export class AgentSession {
 			messages: this.agent.state.messages.slice(),
 			tools: this.agent.state.tools.slice(),
 		};
+	}
+
+	private _modelAdaptationKeyFor(model: Model<Api> | undefined): string | undefined {
+		return model ? formatModelRouterModel(model) : undefined;
+	}
+
+	private _getModelAdaptationRulesForPrompt() {
+		const modelKey = this._modelAdaptationKeyFor(this.agent.state.model);
+		return modelKey ? this._modelAdaptationStore.get(modelKey).rules : [];
+	}
+
+	private _repairSessionCount(modelKey: string, mode: ToolRepairModeName): number {
+		const key = `${modelKey}\0${mode}`;
+		const count = (this._repairModeSessionCounts.get(key) ?? 0) + 1;
+		this._repairModeSessionCounts.set(key, count);
+		return count;
+	}
+
+	private _handleModelAdaptationTelemetry(event: ToolArgumentValidationTelemetryEvent): void {
+		if (event.outcome !== "repaired" || event.repairsApplied.length === 0) return;
+		const modelKey =
+			event.provider && event.model
+				? `${event.provider}/${event.model}`
+				: this._modelAdaptationKeyFor(this.agent.state.model);
+		if (!modelKey) return;
+
+		try {
+			for (const mode of [...new Set(event.repairsApplied)]) {
+				const profile = this._modelAdaptationStore.get(modelKey);
+				const stats = profile.teachStats[mode] ?? { taught: 0, recurrenceBefore: 0, recurrenceAfter: 0 };
+				if (profile.rules.some((rule) => rule.mode === mode)) {
+					this._modelAdaptationStore.markRuleFired(modelKey, mode);
+					this._modelAdaptationStore.setTeachStats(modelKey, mode, {
+						...stats,
+						recurrenceAfter: stats.recurrenceAfter + 1,
+					});
+					continue;
+				}
+
+				const recurrenceBefore = stats.recurrenceBefore + 1;
+				this._modelAdaptationStore.setTeachStats(modelKey, mode, { ...stats, recurrenceBefore });
+				const sessionCount = this._repairSessionCount(modelKey, mode);
+				if (
+					sessionCount >= MODEL_ADAPTATION_REPAIR_THRESHOLD ||
+					recurrenceBefore >= MODEL_ADAPTATION_REPAIR_THRESHOLD
+				) {
+					this._modelAdaptationStore.addRule(modelKey, {
+						mode,
+						text: formatToolRepairStandingRule(mode),
+					});
+					this._modelAdaptationStore.setTeachStats(modelKey, mode, {
+						...stats,
+						taught: stats.taught + 1,
+						recurrenceBefore,
+					});
+				}
+			}
+		} catch {
+			// Model adaptation is best-effort; failed telemetry persistence must not affect the turn.
+		}
 	}
 
 	/** Tool-build call-site delegation to {@link ContextPipeline.getToolArtifactStore}. */
