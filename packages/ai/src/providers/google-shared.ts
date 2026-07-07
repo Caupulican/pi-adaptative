@@ -2,8 +2,15 @@
  * Shared utilities for Google Generative AI and Google Vertex providers.
  */
 
-import { type Content, FinishReason, FunctionCallingConfigMode, type Part } from "@google/genai";
-import type { Context, ImageContent, Model, StopReason, TextContent, Tool } from "../types.ts";
+import {
+	type Content,
+	FinishReason,
+	FunctionCallingConfigMode,
+	ThinkingLevel as GenAiThinkingLevel,
+	type Part,
+	type ThinkingConfig,
+} from "@google/genai";
+import type { Context, ImageContent, Model, StopReason, TextContent, ThinkingBudgets, Tool } from "../types.ts";
 import { sanitizeSurrogates } from "../utils/sanitize-unicode.ts";
 import { transformMessages } from "./transform-messages.ts";
 
@@ -14,6 +21,146 @@ type GoogleApiType = "google-generative-ai" | "google-vertex";
  * Mirrors Google's ThinkingLevel enum values.
  */
 export type GoogleThinkingLevel = "THINKING_LEVEL_UNSPECIFIED" | "MINIMAL" | "LOW" | "MEDIUM" | "HIGH";
+export type GoogleThinkingEffort = "minimal" | "low" | "medium" | "high";
+
+export interface GoogleThinkingConfigFields {
+	thinkingLevel?: GoogleThinkingLevel;
+	thinkingBudget?: number;
+}
+
+const GOOGLE_THINKING_LEVEL_MAP: Record<GoogleThinkingLevel, GenAiThinkingLevel> = {
+	THINKING_LEVEL_UNSPECIFIED: GenAiThinkingLevel.THINKING_LEVEL_UNSPECIFIED,
+	MINIMAL: GenAiThinkingLevel.MINIMAL,
+	LOW: GenAiThinkingLevel.LOW,
+	MEDIUM: GenAiThinkingLevel.MEDIUM,
+	HIGH: GenAiThinkingLevel.HIGH,
+};
+
+function isGemma4Model(modelId: string): boolean {
+	return /gemma-?4/.test(modelId.toLowerCase());
+}
+
+function isGemini3ProModel(modelId: string): boolean {
+	return /gemini-3(?:\.\d+)?-pro/.test(modelId.toLowerCase());
+}
+
+function isGemini3FlashModel(modelId: string): boolean {
+	return /gemini-3(?:\.\d+)?-flash/.test(modelId.toLowerCase());
+}
+
+function getGoogleThinkingLevel(modelId: string, effort: GoogleThinkingEffort): GoogleThinkingLevel {
+	if (isGemini3ProModel(modelId)) {
+		switch (effort) {
+			case "minimal":
+			case "low":
+				return "LOW";
+			case "medium":
+			case "high":
+				return "HIGH";
+		}
+	}
+	if (isGemma4Model(modelId)) {
+		switch (effort) {
+			case "minimal":
+			case "low":
+				return "MINIMAL";
+			case "medium":
+			case "high":
+				return "HIGH";
+		}
+	}
+	switch (effort) {
+		case "minimal":
+			return "MINIMAL";
+		case "low":
+			return "LOW";
+		case "medium":
+			return "MEDIUM";
+		case "high":
+			return "HIGH";
+	}
+}
+
+function getGoogleThinkingBudget(
+	modelId: string,
+	effort: GoogleThinkingEffort,
+	customBudgets?: ThinkingBudgets,
+): number {
+	const customBudget = customBudgets?.[effort];
+	if (customBudget !== undefined) {
+		return customBudget;
+	}
+
+	const normalizedModelId = modelId.toLowerCase();
+	if (normalizedModelId.includes("2.5-pro")) {
+		const budgets: Record<GoogleThinkingEffort, number> = {
+			minimal: 128,
+			low: 2048,
+			medium: 8192,
+			high: 32768,
+		};
+		return budgets[effort];
+	}
+
+	if (normalizedModelId.includes("2.5-flash-lite")) {
+		const budgets: Record<GoogleThinkingEffort, number> = {
+			minimal: 512,
+			low: 2048,
+			medium: 8192,
+			high: 24576,
+		};
+		return budgets[effort];
+	}
+
+	if (normalizedModelId.includes("2.5-flash")) {
+		const budgets: Record<GoogleThinkingEffort, number> = {
+			minimal: 128,
+			low: 2048,
+			medium: 8192,
+			high: 24576,
+		};
+		return budgets[effort];
+	}
+
+	return -1;
+}
+
+export function resolveGoogleThinkingConfig(
+	modelId: string,
+	effort: GoogleThinkingEffort,
+	customBudgets?: ThinkingBudgets,
+): GoogleThinkingConfigFields {
+	if (isGemini3ProModel(modelId) || isGemini3FlashModel(modelId) || isGemma4Model(modelId)) {
+		return { thinkingLevel: getGoogleThinkingLevel(modelId, effort) };
+	}
+	return { thinkingBudget: getGoogleThinkingBudget(modelId, effort, customBudgets) };
+}
+
+export function resolveDisabledGoogleThinkingConfig(modelId: string): GoogleThinkingConfigFields {
+	// Google docs: Gemini 3.1 Pro cannot disable thinking, and Gemini 3 Flash / Flash-Lite
+	// do not support full thinking-off either. For those models, use the lowest supported
+	// thinkingLevel without includeThoughts so hidden thinking remains invisible to pi.
+	if (isGemini3ProModel(modelId)) {
+		return { thinkingLevel: "LOW" };
+	}
+	if (isGemini3FlashModel(modelId) || isGemma4Model(modelId)) {
+		return { thinkingLevel: "MINIMAL" };
+	}
+
+	// Gemini 2.x supports disabling via thinkingBudget = 0.
+	return { thinkingBudget: 0 };
+}
+
+export function toGoogleGenAiThinkingConfig(
+	fields: GoogleThinkingConfigFields,
+	includeThoughts = false,
+): ThinkingConfig {
+	return {
+		...(includeThoughts ? { includeThoughts: true } : {}),
+		...(fields.thinkingLevel ? { thinkingLevel: GOOGLE_THINKING_LEVEL_MAP[fields.thinkingLevel] } : {}),
+		...(fields.thinkingBudget !== undefined ? { thinkingBudget: fields.thinkingBudget } : {}),
+	};
+}
 
 /**
  * Determines whether a streamed Gemini `Part` should be treated as "thinking".
