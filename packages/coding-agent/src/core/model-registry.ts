@@ -147,6 +147,9 @@ const ProviderCompatSchema = Type.Union([
 ]);
 
 // Schema for custom model definition
+const DEFAULT_MODEL_CONTEXT_WINDOW = 128000;
+const DEFAULT_MODEL_MAX_TOKENS = 16384;
+
 // Most fields are optional with sensible defaults for local models (Ollama, LM Studio, etc.)
 const ModelDefinitionSchema = Type.Object({
 	id: Type.String({ minLength: 1 }),
@@ -674,8 +677,8 @@ export class ModelRegistry {
 					thinkingLevelMap: modelDef.thinkingLevelMap,
 					input: (modelDef.input ?? ["text"]) as ("text" | "image")[],
 					cost: modelDef.cost ?? defaultCost,
-					contextWindow: modelDef.contextWindow ?? 128000,
-					maxTokens: modelDef.maxTokens ?? 16384,
+					contextWindow: modelDef.contextWindow ?? DEFAULT_MODEL_CONTEXT_WINDOW,
+					maxTokens: modelDef.maxTokens ?? DEFAULT_MODEL_MAX_TOKENS,
 					headers: undefined,
 					compat,
 				} as Model<Api>);
@@ -987,8 +990,8 @@ export class ModelRegistry {
 					thinkingLevelMap: modelDef.thinkingLevelMap,
 					input: modelDef.input as ("text" | "image")[],
 					cost: modelDef.cost,
-					contextWindow: modelDef.contextWindow,
-					maxTokens: modelDef.maxTokens,
+					contextWindow: modelDef.contextWindow ?? DEFAULT_MODEL_CONTEXT_WINDOW,
+					maxTokens: modelDef.maxTokens ?? DEFAULT_MODEL_MAX_TOKENS,
 					headers: undefined,
 					compat: modelDef.compat,
 				} as Model<Api>);
@@ -1036,8 +1039,8 @@ export interface ProviderConfigInput {
 		thinkingLevelMap?: Model<Api>["thinkingLevelMap"];
 		input: ("text" | "image")[];
 		cost: { input: number; output: number; cacheRead: number; cacheWrite: number };
-		contextWindow: number;
-		maxTokens: number;
+		contextWindow?: number;
+		maxTokens?: number;
 		headers?: Record<string, string>;
 		compat?: Model<Api>["compat"];
 	}>;

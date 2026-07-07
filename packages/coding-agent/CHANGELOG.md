@@ -2,6 +2,7 @@
 
 ### Fixed
 - Fixed external editor resolution so both inline and path-edit flows prefer `$VISUAL` before `$EDITOR`.
+- Fixed registered extension models without token limits to receive default context and max-output limits.
 
 ## [0.81.11] - 2026-07-07
 

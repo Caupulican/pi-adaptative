@@ -5,6 +5,7 @@ import type { AnthropicMessagesCompat, Api, Context, Model, OpenAICompletionsCom
 import { getApiProvider } from "@caupulican/pi-ai";
 import { getOAuthProvider } from "@caupulican/pi-ai/oauth";
 import { afterEach, beforeEach, describe, expect, test, vi } from "vitest";
+import { listModels } from "../src/cli/list-models.ts";
 import { AuthStorage } from "../src/core/auth-storage.ts";
 import { clearApiKeyCache, ModelRegistry, type ProviderConfigInput } from "../src/core/model-registry.ts";
 import { clearDeprecationWarningsForTests } from "../src/utils/deprecation.ts";
@@ -940,6 +941,32 @@ describe("ModelRegistry", () => {
 					process.env.CUSTOM_NAME = originalEnv;
 				}
 			}
+		});
+
+		test("registerProvider fills token limit defaults for models without explicit limits", async () => {
+			const registry = ModelRegistry.create(authStorage, modelsJsonPath);
+			const logSpy = vi.spyOn(console, "log").mockImplementation(() => {});
+
+			registry.registerProvider("defaulted-provider", {
+				baseUrl: "https://provider.test/v1",
+				apiKey: "test-key",
+				api: "openai-completions",
+				models: [
+					{
+						id: "defaulted-model",
+						name: "Defaulted Model",
+						reasoning: false,
+						input: ["text"],
+						cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 },
+					},
+				],
+			});
+
+			const model = registry.find("defaulted-provider", "defaulted-model");
+			expect(model?.contextWindow).toBe(128000);
+			expect(model?.maxTokens).toBe(16384);
+			await expect(listModels(registry, "defaulted-model")).resolves.toBeUndefined();
+			expect(logSpy).toHaveBeenCalled();
 		});
 
 		test("failed registerProvider does not persist invalid streamSimple config", () => {
