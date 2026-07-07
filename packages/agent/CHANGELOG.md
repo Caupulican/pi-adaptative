@@ -1,5 +1,8 @@
 ## [Unreleased]
 
+### Fixed
+- Fixed agent failure messages to use fresh zero-usage objects instead of sharing mutable usage state.
+
 ## [0.81.11] - 2026-07-07
 
 ## [0.81.10] - 2026-07-07

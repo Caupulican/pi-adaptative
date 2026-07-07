@@ -25,6 +25,7 @@ import type {
 	StreamFn,
 	ToolExecutionMode,
 } from "./types.ts";
+import { createEmptyUsage } from "./usage.ts";
 
 export type { QueueMode } from "./types.ts";
 
@@ -33,15 +34,6 @@ function defaultConvertToLlm(messages: AgentMessage[]): Message[] {
 		(message) => message.role === "user" || message.role === "assistant" || message.role === "toolResult",
 	);
 }
-
-const EMPTY_USAGE = {
-	input: 0,
-	output: 0,
-	cacheRead: 0,
-	cacheWrite: 0,
-	totalTokens: 0,
-	cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, total: 0 },
-};
 
 const DEFAULT_MODEL = {
 	id: "unknown",
@@ -485,7 +477,7 @@ export class Agent {
 			api: this._state.model.api,
 			provider: this._state.model.provider,
 			model: this._state.model.id,
-			usage: EMPTY_USAGE,
+			usage: createEmptyUsage(),
 			stopReason: aborted ? "aborted" : "error",
 			errorMessage: error instanceof Error ? error.message : String(error),
 			timestamp: Date.now(),

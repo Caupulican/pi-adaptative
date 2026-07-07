@@ -22,6 +22,7 @@ import type {
 	StreamFn,
 } from "./types.ts";
 import { DEFAULT_MAX_STALL_TURNS } from "./types.ts";
+import { createEmptyUsage } from "./usage.ts";
 
 export type AgentEventSink = (event: AgentEvent) => Promise<void> | void;
 
@@ -162,14 +163,7 @@ function createLoopFailureMessage(error: unknown, config: AgentLoopConfig, abort
 		api: config.model.api,
 		provider: config.model.provider,
 		model: config.model.id,
-		usage: {
-			input: 0,
-			output: 0,
-			cacheRead: 0,
-			cacheWrite: 0,
-			totalTokens: 0,
-			cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, total: 0 },
-		},
+		usage: createEmptyUsage(),
 		stopReason: aborted ? "aborted" : "error",
 		errorMessage: error instanceof Error ? error.message : String(error),
 		timestamp: Date.now(),

@@ -131,6 +131,30 @@ describe("Agent", () => {
 		expect(agent.state.errorMessage).toBe("provider exploded");
 	});
 
+	it("creates fresh usage objects for thrown run failures", async () => {
+		const agent = new Agent({
+			streamFn: () => {
+				throw new Error("provider exploded");
+			},
+		});
+
+		await agent.prompt("first");
+		await agent.prompt("second");
+
+		const failureMessages = agent.state.messages.filter((message) => message.role === "assistant");
+		const firstFailure = failureMessages[0];
+		const secondFailure = failureMessages[1];
+		if (firstFailure?.role !== "assistant" || secondFailure?.role !== "assistant") {
+			throw new Error("Expected two assistant failure messages");
+		}
+
+		expect(firstFailure.usage).not.toBe(secondFailure.usage);
+		expect(firstFailure.usage.cost).not.toBe(secondFailure.usage.cost);
+
+		firstFailure.usage.cost.total = 123;
+		expect(secondFailure.usage.cost.total).toBe(0);
+	});
+
 	it("should await async subscribers before prompt resolves", async () => {
 		const barrier = createDeferred();
 		const agent = new Agent({
