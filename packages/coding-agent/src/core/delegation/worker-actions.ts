@@ -1,5 +1,8 @@
 import { existsSync, mkdirSync, readFileSync, writeFileSync } from "node:fs";
 import { dirname, relative, resolve } from "node:path";
+import type { Tool, ToolArgumentValidationOptions } from "@caupulican/pi-ai";
+import { validateToolArguments } from "@caupulican/pi-ai";
+import { Type } from "typebox";
 import type { CapabilityEnvelope } from "../autonomy/contracts.ts";
 import { isPathWithinEnvelope } from "../autonomy/envelope-enforcement.ts";
 
@@ -26,8 +29,40 @@ export interface WorkerAction {
 const MAX_ACTIONS = 20;
 const MAX_CONTENT_CHARS = 512 * 1024;
 
-export function parseWorkerActions(raw: unknown): WorkerAction[] {
-	if (!Array.isArray(raw)) return [];
+const workerActionSchema = Type.Union([
+	Type.Object({
+		op: Type.Literal("write"),
+		path: Type.String({ minLength: 1 }),
+		content: Type.String({ maxLength: MAX_CONTENT_CHARS }),
+	}),
+	Type.Object({
+		op: Type.Literal("edit"),
+		path: Type.String({ minLength: 1 }),
+		old: Type.String({ minLength: 1 }),
+		new: Type.String({ maxLength: MAX_CONTENT_CHARS }),
+	}),
+]);
+
+const workerActionsTool: Tool = {
+	name: "worker_actions",
+	description: "Worker filesystem action list",
+	parameters: Type.Object({ actions: Type.Array(workerActionSchema) }),
+};
+
+function validateWorkerActions(raw: unknown, validation?: ToolArgumentValidationOptions): unknown[] {
+	try {
+		const validated = validateToolArguments(
+			workerActionsTool,
+			{ type: "toolCall", id: "worker-actions", name: "worker_actions", arguments: { actions: raw } },
+			validation,
+		).actions;
+		return Array.isArray(validated) ? validated : [];
+	} catch {
+		return [];
+	}
+}
+
+function sanitizeWorkerActions(raw: readonly unknown[]): WorkerAction[] {
 	const actions: WorkerAction[] = [];
 	for (const entry of raw.slice(0, MAX_ACTIONS)) {
 		if (!entry || typeof entry !== "object") continue;
@@ -44,6 +79,11 @@ export function parseWorkerActions(raw: unknown): WorkerAction[] {
 		}
 	}
 	return actions;
+}
+
+export function parseWorkerActions(raw: unknown, validation?: ToolArgumentValidationOptions): WorkerAction[] {
+	if (Array.isArray(raw)) return sanitizeWorkerActions(validateWorkerActions(sanitizeWorkerActions(raw), validation));
+	return sanitizeWorkerActions(validateWorkerActions(raw, validation));
 }
 
 export interface AppliedActionsReport {

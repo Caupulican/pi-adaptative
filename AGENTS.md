@@ -166,6 +166,11 @@ If the user's instructions conflict with any rule in this document, ask for expl
 
 ## Findings
 
+### 2026-07-07 · packages/coding-agent · delegated worker actions now pass through shared tool validation — claude
+R49 is closed for the known bypass: `parseWorkerActions` now validates action arrays through the shared `validateToolArguments` choke point (including repaired stringified arrays and telemetry) before deterministic apply-time envelope enforcement. Audit result for the other enumerated paths: main agent loop and extension tools already enter through `prepareToolCall`; SDK consumers use the agent loop; RPC `bash` is direct user command execution, not model-output tool execution, so it intentionally does not repair model-emitted arguments.
+- evidence: packages/coding-agent/src/core/delegation/worker-actions.ts:52 · packages/coding-agent/src/core/delegation/worker-actions.ts:84 · packages/coding-agent/test/worker-actions.test.ts:20 · packages/agent/src/agent-loop.ts:798
+- tags: tool-repair, validation, delegation, packages/coding-agent, roadmap-r49
+
 ### 2026-07-07 · packages/agent,ai,coding-agent · tool-repair visibility and control surface is live — claude
 R48 is closed: repaired tool executions now carry a `repair` marker through agent events (RPC-visible) and the interactive tool panel renders `[repaired arguments]`; `/toolhealth`, RPC `get_tool_repair_health`, and `formatToolRepairHealthReport` expose per-model learned rules/protocol/teach stats; `/toolrule-remove`, RPC `remove_tool_repair_rule`, and `ModelAdaptationStore.removeRule` remove standing rules persistently. Independent repair/teach/text-protocol switches resolve from `settings.toolRepair.{repair,teach,textProtocol}` and env kills `PI_TOOL_REPAIR_DISABLED`, `PI_TOOL_REPAIR_TEACH_DISABLED`, `PI_TEXT_TOOL_CALL_PROTOCOL_DISABLED`.
 - evidence: packages/agent/src/types.ts:460 · packages/agent/src/agent-loop.ts:1061 · packages/coding-agent/src/modes/interactive/components/tool-execution.ts:250 · packages/coding-agent/src/core/tool-repair-health.ts:15 · packages/coding-agent/src/core/tool-repair-settings.ts:16 · packages/coding-agent/src/core/models/adaptation-store.ts:195 · packages/coding-agent/src/core/slash-commands.ts:30
