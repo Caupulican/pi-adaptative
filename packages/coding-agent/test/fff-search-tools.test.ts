@@ -209,7 +209,7 @@ describe("FFF-backed built-in search tools", () => {
 		)) as TextToolResult;
 
 		expect(backend.basePaths).toEqual([tempRoot]);
-		expect(backend.finder.globCalls).toEqual([{ pattern: "src/**/*.ts", options: { pageSize: 5 } }]);
+		expect(backend.finder.globCalls).toEqual([{ pattern: "src/**/*.ts", options: { pageSize: 6 } }]);
 		expect(getText(result)).toContain("foo.ts");
 		expect(getText(result)).toContain("nested/");
 		expect(getText(result)).toContain("bar.ts");
@@ -262,10 +262,10 @@ describe("FFF-backed built-in search tools", () => {
 				options: {
 					mode: "plain",
 					smartCase: false,
-					maxMatchesPerFile: 3,
+					maxMatchesPerFile: 4,
 					beforeContext: 1,
 					afterContext: 1,
-					pageSize: 3,
+					pageSize: 4,
 				},
 			},
 		]);
@@ -331,7 +331,7 @@ describe("FFF-backed built-in search tools", () => {
 			ctx,
 		)) as TextToolResult;
 
-		expect(backend.finder.searchCalls).toEqual([{ query: "src/ foo", options: { pageSize: 10 } }]);
+		expect(backend.finder.searchCalls).toEqual([{ query: "src/ foo", options: { pageSize: 11 } }]);
 		expect(getText(result)).toContain("foo.ts");
 		expect(getText(result)).not.toContain("other/");
 	});
@@ -355,16 +355,16 @@ describe("FFF-backed built-in search tools", () => {
 			ctx,
 		)) as TextToolResult;
 
-		expect(backend.finder.globCalls).toEqual([{ pattern: "src/**/*.ts", options: { pageSize: 5 } }]);
+		expect(backend.finder.globCalls).toEqual([{ pattern: "src/**/*.ts", options: { pageSize: 6 } }]);
 		expect(getText(result)).toBe("No files found matching pattern");
 	});
 
 	it("reports find limit metadata for FFF-backed results", async () => {
 		const backend = new FakeFffBackend();
 		backend.finder.searchResult = {
-			items: [fileItem("src/foo.ts")],
+			items: [fileItem("src/foo.ts"), fileItem("src/bar.ts")],
 			scores: [],
-			totalMatched: 1,
+			totalMatched: 2,
 			totalFiles: 2,
 		};
 
@@ -380,6 +380,8 @@ describe("FFF-backed built-in search tools", () => {
 
 		expect(result.details).toEqual({ resultLimitReached: 1 });
 		expect(getText(result)).toContain("1 results limit reached");
+		expect(getText(result)).toContain("foo.ts");
+		expect(getText(result)).not.toContain("bar.ts");
 	});
 
 	it("filters FFF grep matches to the requested file path", async () => {

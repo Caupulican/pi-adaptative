@@ -267,9 +267,10 @@ export async function tryFffFind(options: {
 		rawPath: options.rawPath,
 	};
 
+	const probeLimit = options.effectiveLimit + 1;
 	if (glob) {
 		const result = finder.glob(fffGlobPattern(options.pattern, searchPathRelativeToCwd), {
-			pageSize: options.effectiveLimit,
+			pageSize: probeLimit,
 		});
 		return result.ok
 			? fffSearchOutput(result.value, searchPathRelativeToCwd, options.effectiveLimit, packing)
@@ -278,7 +279,7 @@ export async function tryFffFind(options: {
 
 	const pathConstraint = searchPathRelativeToCwd ? `${searchPathRelativeToCwd}/` : "";
 	const result = finder.fileSearch(fffQueryParts([pathConstraint, options.pattern]), {
-		pageSize: options.effectiveLimit,
+		pageSize: probeLimit,
 	});
 	return result.ok
 		? fffSearchOutput(result.value, searchPathRelativeToCwd, options.effectiveLimit, packing)
@@ -294,10 +295,12 @@ function formatFindResults(
 		return { text: "No files found matching pattern", details: {} };
 	}
 
+	const resultLimitReached = relativized.length > effectiveLimit;
+	const displayedResults = resultLimitReached ? relativized.slice(0, effectiveLimit) : relativized;
 	const dirGroups = new Map<string, string[]>();
 	const extCounts = new Map<string, number>();
 
-	for (const p of relativized) {
+	for (const p of displayedResults) {
 		const dir = path.dirname(p);
 		const base = path.basename(p);
 		const dirKey = dir === "." ? "./" : `${dir}/`;
@@ -326,7 +329,6 @@ function formatFindResults(
 		.map(([ext, count]) => `${ext}: ${count}`);
 	const extSummary = `Extensions: ${extSummaryParts.join(", ")}`;
 
-	const resultLimitReached = relativized.length >= effectiveLimit;
 	const rawOutput = formattedLines.join("\n");
 	// Measure -> pack (artifact-backed if oversized and a store was provided) -> notices.
 	const packed = packToolOutput(
@@ -380,7 +382,7 @@ function formatFindResults(
 			details.invalidationCandidate = true;
 		}
 	}
-	if (relativized.length > 0) {
+	if (displayedResults.length > 0) {
 		resultOutput += `\n\n[Summary - ${extSummary}]`;
 	}
 	if (notices.length > 0) {
@@ -442,6 +444,7 @@ export function createFindToolDefinition(
 					try {
 						const searchPath = resolveToCwd(searchDir || ".", cwd);
 						const effectiveLimit = limit ?? DEFAULT_LIMIT;
+						const probeLimit = effectiveLimit + 1;
 						const ops = customOps ?? defaultFindOperations;
 
 						let effectivePattern = pattern;
@@ -490,7 +493,7 @@ export function createFindToolDefinition(
 							}
 							const results = await ops.glob(effectivePattern, searchPath, {
 								ignore: ["**/node_modules/**", "**/.git/**"],
-								limit: effectiveLimit,
+								limit: probeLimit,
 							});
 							if (signal?.aborted) {
 								settle(() => reject(new Error("Operation aborted")));
@@ -539,7 +542,7 @@ export function createFindToolDefinition(
 							"--hidden",
 							"--no-require-git",
 							"--max-results",
-							String(effectiveLimit),
+							String(probeLimit),
 						];
 						if (ignoreCase) {
 							args.push("--ignore-case");

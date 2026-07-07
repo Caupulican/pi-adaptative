@@ -315,8 +315,13 @@ function formatFffGrepResult(options: {
 
 	const outputLines: string[] = [];
 	const linesTruncated = { value: false };
+	const resultLimitReached =
+		options.result.items.length > options.effectiveLimit || Boolean(options.result.nextCursor);
+	const displayedMatches = resultLimitReached
+		? options.result.items.slice(0, options.effectiveLimit)
+		: options.result.items;
 	let currentPath = "";
-	for (const match of options.result.items) {
+	for (const match of displayedMatches) {
 		const displayPath = fffDisplayPath(match, options);
 		if (!displayPath) continue;
 		if (displayPath !== currentPath) {
@@ -341,7 +346,7 @@ function formatFffGrepResult(options: {
 		pattern: options.pattern,
 		rawPath: options.rawPath,
 		glob: options.glob,
-		matchLimitReached: options.result.nextCursor ? options.effectiveLimit : false,
+		matchLimitReached: resultLimitReached ? options.effectiveLimit : false,
 		linesTruncated: linesTruncated.value,
 	});
 }
@@ -421,13 +426,14 @@ export async function tryFffGrep(options: {
 	});
 	if (!query) return undefined;
 
+	const probeLimit = options.effectiveLimit + 1;
 	const result = finder.grep(query, {
 		mode: options.literal ? "plain" : "regex",
 		smartCase: false,
-		maxMatchesPerFile: options.effectiveLimit,
+		maxMatchesPerFile: probeLimit,
 		beforeContext: options.contextValue,
 		afterContext: options.contextValue,
-		pageSize: options.effectiveLimit,
+		pageSize: probeLimit,
 	});
 	if (!result.ok || result.value.regexFallbackError) return undefined;
 	return formatFffGrepResult({
@@ -629,7 +635,7 @@ export function createGrepToolDefinition(
 						// Collect matches during streaming, then format them after rg exits.
 						const matches: Array<{ filePath: string; lineNumber: number; lineText?: string }> = [];
 						rl.on("line", (line) => {
-							if (!line.trim() || matchCount >= effectiveLimit) return;
+							if (!line.trim() || matchLimitReached) return;
 							let event: any;
 							try {
 								event = JSON.parse(line);
@@ -638,15 +644,16 @@ export function createGrepToolDefinition(
 							}
 							if (event.type === "match") {
 								matchCount++;
+								if (matchCount > effectiveLimit) {
+									matchLimitReached = true;
+									stopChild(true);
+									return;
+								}
 								const filePath = event.data?.path?.text;
 								const lineNumber = event.data?.line_number;
 								const lineText = event.data?.lines?.text;
 								if (filePath && typeof lineNumber === "number")
 									matches.push({ filePath, lineNumber, lineText });
-								if (matchCount >= effectiveLimit) {
-									matchLimitReached = true;
-									stopChild(true);
-								}
 							}
 						});
 
