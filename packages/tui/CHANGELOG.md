@@ -1,5 +1,8 @@
 ## [Unreleased]
 
+### Fixed
+- Fixed stdin buffering to preserve escape remainders across bracketed paste boundaries.
+
 ## [0.81.11] - 2026-07-07
 
 ## [0.81.10] - 2026-07-07

@@ -420,6 +420,20 @@ describe("StdinBuffer", () => {
 			assert.deepStrictEqual(emittedPaste, ["pasted"]);
 		});
 
+		it("should preserve a lone escape before a paste", () => {
+			processInput("\x1b\x1b[200~pasted\x1b[201~");
+
+			assert.deepStrictEqual(emittedSequences, ["\x1b"]);
+			assert.deepStrictEqual(emittedPaste, ["pasted"]);
+		});
+
+		it("should complete a partial CSI sequence around a paste", () => {
+			processInput("\x1b[\x1b[200~pasted\x1b[201~A");
+
+			assert.deepStrictEqual(emittedSequences, ["\x1b[A"]);
+			assert.deepStrictEqual(emittedPaste, ["pasted"]);
+		});
+
 		it("should handle paste with newlines", () => {
 			processInput("\x1b[200~line1\nline2\nline3\x1b[201~");
 

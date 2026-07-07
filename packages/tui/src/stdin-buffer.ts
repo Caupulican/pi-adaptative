@@ -278,6 +278,7 @@ export class StdinBuffer extends EventEmitter<StdinBufferEventMap> {
 	private readonly timeoutMs: number;
 	private pasteMode: boolean = false;
 	private pasteBuffer: string = "";
+	private pendingPrePasteRemainder: string = "";
 	private pendingKittyPrintableCodepoint: number | undefined;
 
 	constructor(options: StdinBufferOptions = {}) {
@@ -331,6 +332,11 @@ export class StdinBuffer extends EventEmitter<StdinBufferEventMap> {
 				for (const sequence of result.sequences) {
 					this.emitDataSequence(sequence);
 				}
+				if (result.remainder === "\x1b") {
+					this.emitDataSequence(result.remainder);
+				} else {
+					this.pendingPrePasteRemainder = result.remainder;
+				}
 			}
 
 			this.pendingKittyPrintableCodepoint = undefined;
@@ -368,7 +374,7 @@ export class StdinBuffer extends EventEmitter<StdinBufferEventMap> {
 		if (endIndex === -1) return false;
 
 		const pastedContent = this.pasteBuffer.slice(0, endIndex);
-		const remaining = this.pasteBuffer.slice(endIndex + BRACKETED_PASTE_END.length);
+		const remaining = this.pendingPrePasteRemainder + this.pasteBuffer.slice(endIndex + BRACKETED_PASTE_END.length);
 		this.closePasteMode();
 		this.emit("paste", pastedContent);
 
@@ -386,8 +392,12 @@ export class StdinBuffer extends EventEmitter<StdinBufferEventMap> {
 			this.pasteTimeout = null;
 			if (!this.pasteMode) return;
 			const pastedContent = this.pasteBuffer;
+			const remaining = this.pendingPrePasteRemainder;
 			this.closePasteMode();
 			this.emit("paste", pastedContent);
+			if (remaining.length > 0) {
+				this.process(remaining);
+			}
 		}, this.timeoutMs);
 	}
 
@@ -398,6 +408,7 @@ export class StdinBuffer extends EventEmitter<StdinBufferEventMap> {
 		}
 		this.pasteMode = false;
 		this.pasteBuffer = "";
+		this.pendingPrePasteRemainder = "";
 		this.pendingKittyPrintableCodepoint = undefined;
 	}
 
@@ -440,6 +451,7 @@ export class StdinBuffer extends EventEmitter<StdinBufferEventMap> {
 		this.buffer = "";
 		this.pasteMode = false;
 		this.pasteBuffer = "";
+		this.pendingPrePasteRemainder = "";
 		this.pendingKittyPrintableCodepoint = undefined;
 	}
 
