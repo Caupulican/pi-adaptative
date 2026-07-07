@@ -5,6 +5,7 @@
 - Fixed registered extension models without token limits to receive default context and max-output limits.
 - Fixed grep/find result-limit notices so exact-limit result sets are not reported as truncated.
 - Fixed edit tool argument preparation to leave stringified `edits` for the shared validation repair layer.
+- Added session analytics aggregation for shape-only tool argument validation telemetry.
 
 ## [0.81.11] - 2026-07-07
 

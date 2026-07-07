@@ -78,6 +78,48 @@ function syncAgentMessages(session: AgentSession, sessionManager: SessionManager
 }
 
 describe("AgentSession.getSessionStats", () => {
+	it("aggregates tool argument validation telemetry", () => {
+		const { session, sessionManager } = createSession();
+
+		try {
+			session.agent.onToolArgumentValidation?.({
+				outcome: "clean",
+				model: "claude-sonnet-4-5",
+				provider: "anthropic",
+				tool: "read",
+				failureModes: [],
+				repairsApplied: [],
+			});
+			session.agent.onToolArgumentValidation?.({
+				outcome: "repaired",
+				model: "claude-sonnet-4-5",
+				provider: "anthropic",
+				tool: "edit",
+				failureModes: ["jsonStringParse"],
+				repairsApplied: ["jsonStringParse"],
+			});
+			session.agent.onToolArgumentValidation?.({
+				outcome: "bounced",
+				model: "claude-sonnet-4-5",
+				provider: "anthropic",
+				tool: "bash",
+				failureModes: ["bashCommandUnwrap"],
+				repairsApplied: [],
+			});
+
+			expect(session.getSessionStats().toolArgumentValidation).toEqual({
+				clean: 1,
+				repaired: 1,
+				bounced: 1,
+				failureModes: { jsonStringParse: 1, bashCommandUnwrap: 1 },
+				repairsApplied: { jsonStringParse: 1 },
+			});
+			expect(sessionManager.getEntries().filter((entry) => entry.type === "custom")).toHaveLength(3);
+		} finally {
+			session.dispose();
+		}
+	});
+
 	it("exposes the current context usage alongside token totals", () => {
 		const { session, sessionManager } = createSession();
 

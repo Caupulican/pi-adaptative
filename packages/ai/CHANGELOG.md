@@ -13,6 +13,7 @@
 - Fixed OpenAI-compatible streamed tool calls to synthesize missing ids and disambiguate duplicates.
 - Fixed OpenAI-compatible truncated streams to mark incomplete tool arguments as provider tool errors instead of allowing execution with partial JSON.
 - Fixed tool validation bounce messages to include compact expected schema fragments, examples, and per-path received values.
+- Added shape-only telemetry hooks for tool argument validation outcomes and repairs.
 
 ## [0.81.11] - 2026-07-07
 

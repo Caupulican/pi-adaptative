@@ -8,6 +8,7 @@ import type {
 	streamSimple,
 	TextContent,
 	Tool,
+	ToolArgumentValidationTelemetryEvent,
 	ToolResultMessage,
 } from "@caupulican/pi-ai";
 import type { Static, TSchema } from "typebox";
@@ -276,6 +277,12 @@ export interface AgentLoopConfig extends SimpleStreamOptions {
 	 * Default: "parallel"
 	 */
 	toolExecution?: ToolExecutionMode;
+
+	/**
+	 * Observe tool argument validation outcomes. Events contain only shape metadata
+	 * (outcome, model/provider/tool, failure modes, repairs) and never argument values.
+	 */
+	onToolArgumentValidation?: (event: ToolArgumentValidationTelemetryEvent) => void;
 
 	/**
 	 * Called before a tool is executed, after arguments have been validated.

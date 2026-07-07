@@ -19,7 +19,7 @@ import {
 	type SessionHeader,
 	type SessionManager,
 } from "@caupulican/pi-agent-core/node";
-import type { AssistantMessage, Model, Usage } from "@caupulican/pi-ai";
+import type { AssistantMessage, Model, ToolArgumentValidationTelemetryEvent, Usage } from "@caupulican/pi-ai";
 import { getSessionsDir } from "../config.ts";
 import { theme } from "../modes/interactive/theme/theme.ts";
 import { resolvePath } from "../utils/paths.ts";
@@ -40,6 +40,20 @@ import { exportSessionToHtml, type ToolHtmlRenderer } from "./export-html/index.
 import { createToolHtmlRenderer } from "./export-html/tool-renderer.ts";
 import type { ContextUsage, ToolDefinition } from "./extensions/index.ts";
 import type { SettingsManager } from "./settings-manager.ts";
+
+export const TOOL_ARGUMENT_VALIDATION_CUSTOM_TYPE = "tool_argument_validation";
+
+export interface ToolArgumentValidationStats {
+	clean: number;
+	repaired: number;
+	bounced: number;
+	failureModes: Record<string, number>;
+	repairsApplied: Record<string, number>;
+}
+
+export interface ToolArgumentValidationRecord extends ToolArgumentValidationTelemetryEvent {
+	version: 1;
+}
 
 export interface SessionAnalyticsDeps {
 	/** Live agent state — assistant-message usage and message counts are read from here. */
@@ -93,6 +107,8 @@ export class SessionAnalytics {
 			}
 		}
 
+		const toolArgumentValidation = this.getToolArgumentValidationStats();
+
 		return {
 			sessionFile: this.deps.getSessionManager().getSessionFile(),
 			sessionId: this.deps.getSessionManager().getSessionId(),
@@ -110,7 +126,42 @@ export class SessionAnalytics {
 			},
 			cost: totalCost,
 			contextUsage: this.getContextUsage(),
+			toolArgumentValidation,
 		};
+	}
+
+	recordToolArgumentValidation(event: ToolArgumentValidationTelemetryEvent): void {
+		try {
+			const record: ToolArgumentValidationRecord = { version: 1, ...event };
+			this.deps.getSessionManager().appendCustomEntry(TOOL_ARGUMENT_VALIDATION_CUSTOM_TYPE, record);
+		} catch {
+			// Telemetry is best-effort and must never affect the observed turn.
+		}
+	}
+
+	getToolArgumentValidationStats(): ToolArgumentValidationStats {
+		const stats: ToolArgumentValidationStats = {
+			clean: 0,
+			repaired: 0,
+			bounced: 0,
+			failureModes: {},
+			repairsApplied: {},
+		};
+
+		for (const entry of this.deps.getSessionManager().getEntries()) {
+			if (entry.type !== "custom" || entry.customType !== TOOL_ARGUMENT_VALIDATION_CUSTOM_TYPE) continue;
+			const record = entry.data as ToolArgumentValidationRecord | undefined;
+			if (!record || record.version !== 1) continue;
+			stats[record.outcome] += 1;
+			for (const mode of record.failureModes) {
+				stats.failureModes[mode] = (stats.failureModes[mode] ?? 0) + 1;
+			}
+			for (const repair of record.repairsApplied) {
+				stats.repairsApplied[repair] = (stats.repairsApplied[repair] ?? 0) + 1;
+			}
+		}
+
+		return stats;
 	}
 
 	/**

@@ -660,7 +660,11 @@ async function prepareToolCall(
 
 	try {
 		const preparedToolCall = prepareToolCallArguments(tool, toolCall);
-		const validatedArgs = validateToolArguments(tool, preparedToolCall);
+		const validatedArgs = validateToolArguments(tool, preparedToolCall, {
+			model: config.model.id,
+			provider: config.model.provider,
+			telemetry: config.onToolArgumentValidation,
+		});
 		if (config.beforeToolCall) {
 			const beforeResult = await config.beforeToolCall(
 				{

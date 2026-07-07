@@ -1,12 +1,46 @@
 import { Compile } from "typebox/compile";
 import type { TLocalizedValidationError } from "typebox/error";
 import type { Tool, ToolCall } from "../types.ts";
+import { analyzeToolArgumentErrors } from "./tool-repair/analyzer.ts";
+import type { ToolRepairModeName } from "./tool-repair/registry.ts";
 import { repairToolArguments } from "./tool-repair/repairer.ts";
 
 const validatorCache = new WeakMap<object, ReturnType<typeof Compile>>();
 const EXPECTED_FRAGMENT_MAX_LENGTH = 320;
 const RECEIVED_VALUE_MAX_LENGTH = 200;
 const MISSING_VALUE = Symbol("missing");
+
+export type ToolArgumentValidationOutcome = "clean" | "repaired" | "bounced";
+
+export interface ToolArgumentValidationTelemetryEvent {
+	outcome: ToolArgumentValidationOutcome;
+	provider?: string;
+	model?: string;
+	tool: string;
+	failureModes: ToolRepairModeName[];
+	repairsApplied: ToolRepairModeName[];
+}
+
+export interface ToolArgumentValidationOptions {
+	model?: string;
+	provider?: string;
+	telemetry?: (event: ToolArgumentValidationTelemetryEvent) => void;
+}
+
+function emitToolArgumentValidationTelemetry(
+	options: ToolArgumentValidationOptions | undefined,
+	event: Omit<ToolArgumentValidationTelemetryEvent, "model" | "provider">,
+): void {
+	try {
+		options?.telemetry?.({ ...event, model: options.model, provider: options.provider });
+	} catch {
+		// Telemetry is observe-only; never fail validation because a sink failed.
+	}
+}
+
+function uniqueRepairModes(modes: Iterable<ToolRepairModeName>): ToolRepairModeName[] {
+	return [...new Set(modes)];
+}
 
 function getValidator(schema: Tool["parameters"]): ReturnType<typeof Compile> {
 	const key = schema as object;
@@ -232,12 +266,16 @@ function formatValidationErrors(errors: readonly TLocalizedValidationError[], ar
  * @returns The validated arguments
  * @throws Error if tool is not found or validation fails
  */
-export function validateToolCall(tools: Tool[], toolCall: ToolCall): Record<string, unknown> {
+export function validateToolCall(
+	tools: Tool[],
+	toolCall: ToolCall,
+	options?: ToolArgumentValidationOptions,
+): Record<string, unknown> {
 	const tool = tools.find((t) => t.name === toolCall.name);
 	if (!tool) {
 		throw new Error(`Tool "${toolCall.name}" not found`);
 	}
-	return validateToolArguments(tool, toolCall);
+	return validateToolArguments(tool, toolCall, options);
 }
 
 /**
@@ -252,21 +290,46 @@ export function validateToolCall(tools: Tool[], toolCall: ToolCall): Record<stri
  * @returns The validated (and potentially repaired) arguments
  * @throws Error with formatted message if validation fails
  */
-export function validateToolArguments(tool: Tool, toolCall: ToolCall): Record<string, unknown> {
+export function validateToolArguments(
+	tool: Tool,
+	toolCall: ToolCall,
+	options?: ToolArgumentValidationOptions,
+): Record<string, unknown> {
 	const args = toolCall.arguments;
 	const validator = getValidator(tool.parameters);
 
 	if (validator.Check(args)) {
+		emitToolArgumentValidationTelemetry(options, {
+			outcome: "clean",
+			tool: toolCall.name,
+			failureModes: [],
+			repairsApplied: [],
+		});
 		return args;
 	}
 
 	const validationErrors = [...validator.Errors(args)] as TLocalizedValidationError[];
+	const repairIssues = analyzeToolArgumentErrors(toolCall.name, tool.parameters, args, validationErrors);
+	const failureModes = uniqueRepairModes(repairIssues.flatMap((issue) => issue.modes));
 	const repaired = repairToolArguments(toolCall.name, tool.parameters, args, validationErrors, (candidate) =>
 		validator.Check(candidate),
 	);
 	if (repaired) {
+		emitToolArgumentValidationTelemetry(options, {
+			outcome: "repaired",
+			tool: toolCall.name,
+			failureModes,
+			repairsApplied: uniqueRepairModes(repaired.repairsApplied),
+		});
 		return repaired.args;
 	}
+
+	emitToolArgumentValidationTelemetry(options, {
+		outcome: "bounced",
+		tool: toolCall.name,
+		failureModes,
+		repairsApplied: [],
+	});
 
 	const errorMessage = `Validation failed for tool "${toolCall.name}":\n${formatValidationErrors(
 		validationErrors,

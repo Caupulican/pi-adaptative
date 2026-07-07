@@ -157,7 +157,7 @@ import { collectWorkspaceSources } from "./research/workspace-collector.ts";
 import type { ResourceExtensionPaths, ResourceLoader } from "./resource-loader.ts";
 import { stripResourceProfileBlocks } from "./resource-profile-blocks.ts";
 import { RuntimeBuilder } from "./runtime-builder.ts";
-import { SessionAnalytics } from "./session-analytics.ts";
+import { SessionAnalytics, type ToolArgumentValidationStats } from "./session-analytics.ts";
 import { SessionTreeNavigator } from "./session-tree-navigator.ts";
 import type { ResourceProfileFilterSettings, SettingsManager } from "./settings-manager.ts";
 import type { SlashCommandInfo } from "./slash-commands.ts";
@@ -388,6 +388,7 @@ export interface SessionStats {
 	};
 	cost: number;
 	contextUsage?: ContextUsage;
+	toolArgumentValidation: ToolArgumentValidationStats;
 }
 
 /** customType for spawned-usage roll-up entries (Cost Aggregation, Model A). */
@@ -916,6 +917,11 @@ export class AgentSession {
 			getSettingsManager: () => this.settingsManager,
 			getToolDefinition: (name) => this.getToolDefinition(name),
 		});
+		const previousToolArgumentValidation = this.agent.onToolArgumentValidation;
+		this.agent.onToolArgumentValidation = (event) => {
+			previousToolArgumentValidation?.(event);
+			this._analytics.recordToolArgumentValidation(event);
+		};
 		this._treeNavigator = new SessionTreeNavigator({
 			getSessionManager: () => this.sessionManager,
 			getModel: () => this.model,

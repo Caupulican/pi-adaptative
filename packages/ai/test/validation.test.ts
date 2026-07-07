@@ -83,6 +83,71 @@ describe("validateToolArguments", () => {
 		}
 	});
 
+	it("emits shape-only validation telemetry for clean, repaired, and bounced calls", () => {
+		const tool: Tool = {
+			name: "count",
+			description: "Count",
+			parameters: Type.Object({ count: Type.Number() }),
+		};
+		const events: unknown[] = [];
+		const telemetry = (event: unknown) => events.push(event);
+
+		expect(
+			validateToolArguments(
+				tool,
+				{ type: "toolCall", id: "tool-1", name: "count", arguments: { count: 1 } },
+				{ model: "test-model", provider: "test-provider", telemetry },
+			),
+		).toBeDefined();
+		expect(
+			validateToolArguments(
+				tool,
+				{ type: "toolCall", id: "tool-2", name: "count", arguments: { count: "42" as unknown as number } },
+				{ model: "test-model", provider: "test-provider", telemetry },
+			),
+		).toEqual({ count: 42 });
+		expect(() =>
+			validateToolArguments(
+				tool,
+				{
+					type: "toolCall",
+					id: "tool-3",
+					name: "count",
+					arguments: { count: "secret-value" as unknown as number },
+				},
+				{ model: "test-model", provider: "test-provider", telemetry },
+			),
+		).toThrow("Validation failed");
+
+		expect(events).toEqual([
+			{
+				outcome: "clean",
+				model: "test-model",
+				provider: "test-provider",
+				tool: "count",
+				failureModes: [],
+				repairsApplied: [],
+			},
+			{
+				outcome: "repaired",
+				model: "test-model",
+				provider: "test-provider",
+				tool: "count",
+				failureModes: ["numberFromString"],
+				repairsApplied: ["numberFromString"],
+			},
+			{
+				outcome: "bounced",
+				model: "test-model",
+				provider: "test-provider",
+				tool: "count",
+				failureModes: ["numberFromString"],
+				repairsApplied: [],
+			},
+		]);
+		expect(JSON.stringify(events)).not.toContain("secret-value");
+	});
+
 	it("includes expected schema fragments and received values in validation bounces", () => {
 		const tool: Tool = {
 			name: "search",

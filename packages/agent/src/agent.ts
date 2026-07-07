@@ -6,6 +6,7 @@ import {
 	streamSimple,
 	type TextContent,
 	type ThinkingBudgets,
+	type ToolArgumentValidationTelemetryEvent,
 	type Transport,
 } from "@caupulican/pi-ai";
 import { runAgentLoop, runAgentLoopContinue } from "./agent-loop.ts";
@@ -95,6 +96,7 @@ export interface AgentOptions {
 	onResponse?: SimpleStreamOptions["onResponse"];
 	beforeToolCall?: (context: BeforeToolCallContext, signal?: AbortSignal) => Promise<BeforeToolCallResult | undefined>;
 	afterToolCall?: (context: AfterToolCallContext, signal?: AbortSignal) => Promise<AfterToolCallResult | undefined>;
+	onToolArgumentValidation?: (event: ToolArgumentValidationTelemetryEvent) => void;
 	prepareNextTurn?: (
 		signal?: AbortSignal,
 	) => Promise<AgentLoopTurnUpdate | undefined> | AgentLoopTurnUpdate | undefined;
@@ -176,6 +178,7 @@ export class Agent {
 		context: AfterToolCallContext,
 		signal?: AbortSignal,
 	) => Promise<AfterToolCallResult | undefined>;
+	public onToolArgumentValidation?: (event: ToolArgumentValidationTelemetryEvent) => void;
 	public prepareNextTurn?: (
 		signal?: AbortSignal,
 	) => Promise<AgentLoopTurnUpdate | undefined> | AgentLoopTurnUpdate | undefined;
@@ -203,6 +206,7 @@ export class Agent {
 		this.onResponse = options.onResponse;
 		this.beforeToolCall = options.beforeToolCall;
 		this.afterToolCall = options.afterToolCall;
+		this.onToolArgumentValidation = options.onToolArgumentValidation;
 		this.prepareNextTurn = options.prepareNextTurn;
 		this.steeringQueue = new PendingMessageQueue(options.steeringMode ?? "one-at-a-time");
 		this.followUpQueue = new PendingMessageQueue(options.followUpMode ?? "one-at-a-time");
@@ -428,6 +432,7 @@ export class Agent {
 			maxRetryDelayMs: this.maxRetryDelayMs,
 			maxStallTurns: this.maxStallTurns,
 			toolExecution: this.toolExecution,
+			onToolArgumentValidation: this.onToolArgumentValidation,
 			beforeToolCall: this.beforeToolCall,
 			afterToolCall: this.afterToolCall,
 			prepareNextTurn: this.prepareNextTurn ? async () => await this.prepareNextTurn?.(this.signal) : undefined,
