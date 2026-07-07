@@ -146,7 +146,9 @@ describe("text tool protocol calibration", () => {
 
 		const protocol = ModelAdaptationStore.forAgentDir(agentDir).get(`${model.provider}/${model.id}`).protocol;
 		expect(protocol).toMatchObject({ version: 1, variant: "tool-tag" });
-		expect(requests.filter((request) => isCalibration(request.context))).toHaveLength(2);
+		const calibrationRequests = requests.filter((request) => isCalibration(request.context));
+		expect(calibrationRequests).toHaveLength(2);
+		expect(calibrationRequests.every((request) => !("tools" in request.context))).toBe(true);
 		const realRequest = requests.at(-1);
 		expect(realRequest?.options?.textToolCallProtocol).toMatchObject({ variant: "tool-tag" });
 		expect(JSON.stringify(realRequest?.context)).not.toContain("pi-calibration-");
@@ -248,6 +250,32 @@ describe("text tool protocol calibration", () => {
 			status: "calibrated",
 			variant: "tool-tag",
 		});
+	});
+
+	it("rejects native tool-call content during text-pure calibration trials", async () => {
+		const model = createModel("native-during-text-calibration-model");
+		const requests: CapturedRequest[] = [];
+		const created = await createSession(model, requests, (context) => {
+			if (!isCalibration(context)) return "done";
+			return [
+				{
+					type: "toolCall",
+					id: "native-calibration",
+					name: "echo",
+					arguments: { data: calibrationToken(context) },
+				},
+			];
+		});
+		try {
+			await expect(created.session.prompt("real work")).rejects.toThrow(/cannot follow the text tool protocol/i);
+		} finally {
+			created.session.dispose();
+			created.modelRegistry.unregisterProvider(model.provider);
+		}
+
+		expect(requests).toHaveLength(3);
+		expect(requests.every((request) => isCalibration(request.context))).toBe(true);
+		expect(requests.every((request) => !("tools" in request.context))).toBe(true);
 	});
 
 	it("invalidates a calibrated variant after repeated live parse failures and recalibrates once", async () => {

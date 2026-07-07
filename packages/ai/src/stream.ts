@@ -11,6 +11,7 @@ import type {
 	SimpleStreamOptions,
 	StreamOptions,
 	TextToolProtocolParseEvent,
+	Tool,
 } from "./types.ts";
 import { AssistantMessageEventStream } from "./utils/event-stream.ts";
 import {
@@ -35,13 +36,36 @@ function withEnvApiKey<TOptions extends StreamOptions>(
 	return { ...options, apiKey } as TOptions;
 }
 
+function escapeRegExp(value: string): string {
+	return value.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
+}
+
+function lastUserText(context: Context): string {
+	const message = context.messages.findLast((entry) => entry.role === "user");
+	if (!message) return "";
+	if (typeof message.content === "string") return message.content;
+	return message.content
+		.filter((block) => block.type === "text")
+		.map((block) => block.text)
+		.join("\n");
+}
+
+function selectTextProtocolPrimerTools(context: Context): readonly Tool[] {
+	const tools = context.tools ?? [];
+	const text = lastUserText(context);
+	if (!text) return tools;
+	const mentioned = tools.filter((tool) => new RegExp(`(^|\\W)${escapeRegExp(tool.name)}(\\W|$)`, "i").test(text));
+	return mentioned.length > 0 ? mentioned : tools;
+}
+
 function withTextToolProtocolContext(context: Context, options: StreamOptions | undefined): Context {
 	const protocolOptions = normalizeTextToolProtocolOptions(options?.textToolCallProtocol);
 	if (!protocolOptions || !context.tools?.length) return context;
-	const primer = generateTextToolProtocolPrimer(context.tools, protocolOptions);
+	const primer = generateTextToolProtocolPrimer(selectTextProtocolPrimerTools(context), protocolOptions);
 	if (!primer) return context;
+	const { tools: _tools, ...providerContext } = context;
 	return {
-		...context,
+		...providerContext,
 		systemPrompt: context.systemPrompt ? `${context.systemPrompt}\n\n${primer}` : primer,
 	};
 }
@@ -64,7 +88,8 @@ function withTextToolProtocolResult(
 	options: StreamOptions | undefined,
 ): AssistantMessageEventStream {
 	const protocolOptions = normalizeTextToolProtocolOptions(options?.textToolCallProtocol);
-	if (!protocolOptions || !context.tools?.length) return stream;
+	const tools = context.tools ?? [];
+	if (!protocolOptions || tools.length === 0) return stream;
 	const wrapped = new AssistantMessageEventStream();
 	void (async () => {
 		for await (const event of stream) {
@@ -73,22 +98,36 @@ function withTextToolProtocolResult(
 				continue;
 			}
 			const message = event.message;
-			if (message.content.length !== 1 || message.content[0]?.type !== "text") {
-				wrapped.push(event);
-				continue;
+			const content: AssistantMessage["content"] = [];
+			let callCount = 0;
+			let textLength = 0;
+			let failure: TextToolProtocolParseEvent["reason"] | undefined;
+			for (const block of message.content) {
+				if (block.type !== "text") {
+					content.push(block);
+					continue;
+				}
+				textLength += block.text.length;
+				const parsed = parseTextToolCalls(block.text, tools);
+				if (parsed.calls.length === 0) {
+					if (parsed.failure) failure ??= parsed.failure;
+					content.push(block);
+					continue;
+				}
+				callCount += parsed.calls.length;
+				if (parsed.text) content.push({ ...block, text: parsed.text });
+				content.push(...parsed.calls);
 			}
-			const text = message.content[0].text;
-			const parsed = parseTextToolCalls(text, context.tools ?? []);
-			if (parsed.calls.length === 0) {
-				if (parsed.failure) {
+			if (callCount === 0) {
+				if (failure) {
 					await notifyTextToolProtocolParse(options, {
 						provider: model.provider,
 						model: model.id,
 						variant: protocolOptions.variant ?? "tool-tag",
 						status: "failed",
 						callCount: 0,
-						textLength: text.length,
-						reason: parsed.failure,
+						textLength,
+						reason: failure,
 					});
 				}
 				wrapped.push(event);
@@ -99,10 +138,9 @@ function withTextToolProtocolResult(
 				model: model.id,
 				variant: protocolOptions.variant ?? "tool-tag",
 				status: "parsed",
-				callCount: parsed.calls.length,
-				textLength: text.length,
+				callCount,
+				textLength,
 			});
-			const content = parsed.text ? [{ type: "text" as const, text: parsed.text }, ...parsed.calls] : parsed.calls;
 			wrapped.push({
 				type: "done",
 				reason: "toolUse",
@@ -132,7 +170,7 @@ export function stream<TApi extends Api>(
 	return withTextToolProtocolResult(
 		provider.stream(model, protocolContext, resolvedOptions),
 		model,
-		protocolContext,
+		context,
 		resolvedOptions,
 	);
 }
@@ -157,7 +195,7 @@ export function streamSimple<TApi extends Api>(
 	return withTextToolProtocolResult(
 		provider.streamSimple(model, protocolContext, resolvedOptions),
 		model,
-		protocolContext,
+		context,
 		resolvedOptions,
 	);
 }

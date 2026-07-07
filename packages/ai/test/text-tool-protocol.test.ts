@@ -1,6 +1,6 @@
 import { readFileSync } from "node:fs";
 import { afterEach, describe, expect, it } from "vitest";
-import { complete, fauxAssistantMessage, registerFauxProvider } from "../src/index.ts";
+import { complete, fauxAssistantMessage, fauxThinking, registerFauxProvider } from "../src/index.ts";
 import type { Context, Tool } from "../src/types.ts";
 import { TOOL_REPAIR_MODE_NAMES } from "../src/utils/tool-repair/registry.ts";
 import { generateTextToolProtocolPrimer, parseTextToolCalls } from "../src/utils/tool-repair/text-protocol.ts";
@@ -28,10 +28,49 @@ describe("text tool-call protocol", () => {
 	it("generates a primer from the live tool list", () => {
 		const primer = generateTextToolProtocolPrimer([makeTool("echo"), makeTool("search")]);
 
-		expect(primer).toContain('<pi:call name="TOOL_NAME">');
+		expect(primer).toContain('<pi:call name="TOOL">{"arg":"value"}</pi:call>');
 		expect(primer).toContain("echo");
 		expect(primer).toContain("search");
 		expect(primer).toContain("value");
+		expect(primer).toContain('<pi:call name="echo">{"value":"value"}</pi:call>');
+	});
+
+	it("prefers core read and edit worked examples when present", () => {
+		const readTool: Tool = {
+			name: "read",
+			description: "Read a file",
+			parameters: {
+				type: "object",
+				properties: { path: { type: "string" } },
+				required: ["path"],
+			} as Tool["parameters"],
+		};
+		const editTool: Tool = {
+			name: "edit",
+			description: "Edit a file",
+			parameters: {
+				type: "object",
+				properties: {
+					path: { type: "string" },
+					edits: {
+						type: "array",
+						items: {
+							type: "object",
+							properties: { oldText: { type: "string" }, newText: { type: "string" } },
+							required: ["oldText", "newText"],
+						},
+					},
+				},
+				required: ["path", "edits"],
+			} as Tool["parameters"],
+		};
+
+		const primer = generateTextToolProtocolPrimer([makeTool("bash"), readTool, editTool]);
+
+		expect(primer).toContain('<pi:call name="read">{"path":"src/index.ts"}</pi:call>');
+		expect(primer).toContain(
+			'<pi:call name="edit">{"path":"src/index.ts","edits":[{"oldText":"foo","newText":"bar"}]}</pi:call>',
+		);
 	});
 
 	it("parses grammar-supported envelopes into tool calls", () => {
@@ -46,6 +85,35 @@ describe("text tool-call protocol", () => {
 		expect(parseTextToolCalls('```tool\n{"name":"echo","arguments":{"value":"hi"}}\n```', tools).calls).toMatchObject(
 			[{ type: "toolCall", name: "echo", arguments: { value: "hi" }, source: "text-protocol" }],
 		);
+	});
+
+	it("parses tolerated pure-text envelope spelling drift", () => {
+		const parsedSingleQuotes = parseTextToolCalls("<pi:call name='read'>{'path': 'package.json'}</pi:call >", [
+			makeTool("read"),
+		]);
+		const parsedBareKey = parseTextToolCalls('<pi:call name="echo">{value:"hi"}</pi:call>', [makeTool("echo")]);
+		const parsedBareValue = parseTextToolCalls('<pi:call name="echo">{"value":hi}</pi:call>', [makeTool("echo")]);
+		const parsedUnclosed = parseTextToolCalls('<pi:call name="echo">{"value":"hi"}戴</fill>', [makeTool("echo")]);
+		const parsedTrailingProse = parseTextToolCalls('<pi:call name="echo">{"value":"hi"} - Echo a value</pi:call>', [
+			makeTool("echo"),
+		]);
+
+		expect(parsedSingleQuotes.calls).toMatchObject([
+			{ type: "toolCall", name: "read", arguments: { path: "package.json" }, source: "text-protocol" },
+		]);
+		expect(parsedBareKey.calls).toMatchObject([
+			{ type: "toolCall", name: "echo", arguments: { value: "hi" }, source: "text-protocol" },
+		]);
+		expect(parsedBareValue.calls).toMatchObject([
+			{ type: "toolCall", name: "echo", arguments: { value: "hi" }, source: "text-protocol" },
+		]);
+		expect(parsedUnclosed.calls).toMatchObject([
+			{ type: "toolCall", name: "echo", arguments: { value: "hi" }, source: "text-protocol" },
+		]);
+		expect(parsedUnclosed.text).toBe("戴</fill>");
+		expect(parsedTrailingProse.calls).toMatchObject([
+			{ type: "toolCall", name: "echo", arguments: { value: "hi" }, source: "text-protocol" },
+		]);
 	});
 
 	it("preserves prose outside envelopes and keeps multi-call order", () => {
@@ -121,31 +189,89 @@ describe("text tool-call protocol", () => {
 		});
 	});
 
-	it("injects the primer and converts final text only when the flag is enabled", async () => {
+	it("injects the primer without sending native tool definitions to the provider", async () => {
 		const registration = registerFauxProvider();
 		registrations.push(registration);
 		const tools = [makeTool()];
 		const context: Context = { systemPrompt: "base", messages: [], tools };
-		let promptedWithPrimer = false;
+		let activeRequest: Context | undefined;
+		let inactiveRequest: Context | undefined;
 
 		registration.setResponses([
 			(requestContext) => {
-				promptedWithPrimer = requestContext.systemPrompt?.includes("Text tool-call protocol is enabled.") ?? false;
+				activeRequest = requestContext;
 				return fauxAssistantMessage('<pi:call name="echo">{"value":"hi"}</pi:call>');
 			},
-			fauxAssistantMessage('<pi:call name="echo">{"value":"hi"}</pi:call>'),
+			(requestContext) => {
+				inactiveRequest = requestContext;
+				return fauxAssistantMessage('<pi:call name="echo">{"value":"hi"}</pi:call>');
+			},
 		]);
 
 		const converted = await complete(registration.getModel(), context, { textToolCallProtocol: true });
-		expect(promptedWithPrimer).toBe(true);
+		expect(activeRequest?.systemPrompt).toContain("Text tool-call protocol is enabled.");
+		expect(activeRequest && "tools" in activeRequest).toBe(false);
 		expect(converted.stopReason).toBe("toolUse");
 		expect(converted.content).toMatchObject([
 			{ type: "toolCall", name: "echo", arguments: { value: "hi" }, source: "text-protocol" },
 		]);
 
 		const unchanged = await complete(registration.getModel(), context, { textToolCallProtocol: false });
+		expect(inactiveRequest?.tools).toBe(tools);
 		expect(unchanged.content).toMatchObject([
 			{ type: "text", text: '<pi:call name="echo">{"value":"hi"}</pi:call>' },
+		]);
+	});
+
+	it("narrows the primer to an explicitly named tool while parsing against the original tool list", async () => {
+		const registration = registerFauxProvider();
+		registrations.push(registration);
+		const context: Context = {
+			systemPrompt: "base",
+			messages: [
+				{
+					role: "user",
+					content: [{ type: "text", text: "Use the read tool." }],
+					timestamp: Date.now(),
+				},
+			],
+			tools: [makeTool("echo"), makeTool("read")],
+		};
+		let activeRequest: Context | undefined;
+		registration.setResponses([
+			(requestContext) => {
+				activeRequest = requestContext;
+				return fauxAssistantMessage('<pi:call name="echo">{"value":"hi"}</pi:call>');
+			},
+		]);
+
+		const converted = await complete(registration.getModel(), context, { textToolCallProtocol: true });
+
+		expect(activeRequest?.systemPrompt).toContain("read(value:string)");
+		expect(activeRequest?.systemPrompt).not.toContain("echo(value:string)");
+		expect(converted.content).toMatchObject([
+			{ type: "toolCall", name: "echo", arguments: { value: "hi" }, source: "text-protocol" },
+		]);
+	});
+
+	it("parses text envelopes from thinking plus text done messages", async () => {
+		const registration = registerFauxProvider();
+		registrations.push(registration);
+		const context: Context = { systemPrompt: "base", messages: [], tools: [makeTool()] };
+
+		registration.setResponses([
+			fauxAssistantMessage([
+				fauxThinking("I should use the protocol."),
+				{ type: "text", text: '<pi:call name="echo">{"value":"hi"}</pi:call>' },
+			]),
+		]);
+
+		const converted = await complete(registration.getModel(), context, { textToolCallProtocol: true });
+
+		expect(converted.stopReason).toBe("toolUse");
+		expect(converted.content).toMatchObject([
+			{ type: "thinking", thinking: "I should use the protocol." },
+			{ type: "toolCall", name: "echo", arguments: { value: "hi" }, source: "text-protocol" },
 		]);
 	});
 

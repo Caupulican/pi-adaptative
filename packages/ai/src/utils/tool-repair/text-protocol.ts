@@ -25,17 +25,10 @@ interface EnvelopeMatch {
 	body: string;
 }
 
-const MAX_SCHEMA_CHARS = 600;
 const DEFAULT_TEXT_TOOL_PROTOCOL_VARIANT: TextToolProtocolVariant = "tool-tag";
 
 function isRecord(value: unknown): value is Record<string, unknown> {
 	return typeof value === "object" && value !== null && !Array.isArray(value);
-}
-
-function compactJson(value: unknown, maxChars = MAX_SCHEMA_CHARS): string {
-	const json = JSON.stringify(value);
-	if (json.length <= maxChars) return json;
-	return `${json.slice(0, maxChars - 1)}…`;
 }
 
 function escapeAttribute(value: string): string {
@@ -54,16 +47,69 @@ function knownToolNames(tools: readonly Tool[]): Set<string> {
 	return new Set(tools.map((tool) => tool.name));
 }
 
+function findJsonObjectEnd(text: string, start: number): number | undefined {
+	let index = start;
+	while (/\s/.test(text[index] ?? "")) index++;
+	if (text[index] !== "{") return undefined;
+	let depth = 0;
+	let inString = false;
+	let escaped = false;
+	for (; index < text.length; index++) {
+		const char = text[index];
+		if (inString) {
+			if (escaped) {
+				escaped = false;
+				continue;
+			}
+			if (char === "\\") {
+				escaped = true;
+				continue;
+			}
+			if (char === '"') inString = false;
+			continue;
+		}
+		if (char === '"') {
+			inString = true;
+			continue;
+		}
+		if (char === "{") depth++;
+		if (char === "}") {
+			depth--;
+			if (depth === 0) return index + 1;
+		}
+	}
+	return undefined;
+}
+
+function isInsideMatch(index: number, matches: readonly EnvelopeMatch[]): boolean {
+	return matches.some((match) => index >= match.start && index < match.end);
+}
+
 function findToolEnvelopes(text: string): EnvelopeMatch[] {
 	const matches: EnvelopeMatch[] = [];
-	const piCallEnvelope = /<pi:call\s+name="([^"]+)"\s*>([\s\S]*?)<\/pi:call>/g;
+	const piCallEnvelope = /<pi:call\s+name=(["'])(.*?)\1\s*>([\s\S]*?)<\/pi:call\s*>/g;
 	for (const match of text.matchAll(piCallEnvelope)) {
 		matches.push({
 			kind: "pi_call",
 			start: match.index,
 			end: match.index + match[0].length,
-			name: unescapeAttribute(match[1] ?? ""),
-			body: match[2] ?? "",
+			name: unescapeAttribute(match[2] ?? ""),
+			body: match[3] ?? "",
+		});
+	}
+
+	const openPiCallEnvelope = /<pi:call\s+name=(["'])(.*?)\1\s*>/g;
+	for (const match of text.matchAll(openPiCallEnvelope)) {
+		if (isInsideMatch(match.index, matches)) continue;
+		const bodyStart = match.index + match[0].length;
+		const bodyEnd = findJsonObjectEnd(text, bodyStart);
+		if (bodyEnd === undefined) continue;
+		matches.push({
+			kind: "pi_call",
+			start: match.index,
+			end: bodyEnd,
+			name: unescapeAttribute(match[2] ?? ""),
+			body: text.slice(bodyStart, bodyEnd),
 		});
 	}
 
@@ -118,10 +164,58 @@ function coerceArguments(value: unknown): {
 	return { arguments: value as Record<string, unknown>, rawArguments: { value } };
 }
 
+function normalizeSingleQuotedJson(raw: string): string | undefined {
+	const trimmed = raw.trim();
+	if (!/^\{[\s\S]*\}$/.test(trimmed)) return undefined;
+	if (!/'[^'\\]*(?:\\.[^'\\]*)*'/.test(trimmed)) return undefined;
+	return trimmed.replace(/'([^'\\]*(?:\\.[^'\\]*)*)'/g, (_match, inner: string) => {
+		return JSON.stringify(inner.replace(/\\'/g, "'"));
+	});
+}
+
+function normalizeBareJsonObject(raw: string): string | undefined {
+	const trimmed = raw.trim();
+	if (!/^\{[\s\S]*\}$/.test(trimmed)) return undefined;
+	let changed = false;
+	let normalized = trimmed.replace(
+		/([{,]\s*)([A-Za-z_][A-Za-z0-9_-]*)(\s*:)/g,
+		(_match, prefix: string, key: string, suffix: string) => {
+			changed = true;
+			return `${prefix}${JSON.stringify(key)}${suffix}`;
+		},
+	);
+	normalized = normalized.replace(/:\s*([A-Za-z_./-][A-Za-z0-9_./:-]*)(?=\s*[,}])/g, (_match, value: string) => {
+		if (["true", "false", "null"].includes(value)) return `:${value}`;
+		changed = true;
+		return `:${JSON.stringify(value)}`;
+	});
+	return changed ? normalized : undefined;
+}
+
+function normalizedJsonCandidates(raw: string): string[] {
+	const candidates: string[] = [];
+	const objectEnd = findJsonObjectEnd(raw, 0);
+	if (objectEnd !== undefined && raw.slice(objectEnd).trim()) candidates.push(raw.slice(0, objectEnd));
+	const singleQuoted = normalizeSingleQuotedJson(raw);
+	if (singleQuoted) candidates.push(singleQuoted);
+	const bare = normalizeBareJsonObject(raw);
+	if (bare) candidates.push(bare);
+	const singleQuotedBare = singleQuoted ? normalizeBareJsonObject(singleQuoted) : undefined;
+	if (singleQuotedBare) candidates.push(singleQuotedBare);
+	return candidates;
+}
+
 function parseJsonValue(raw: string): { ok: true; value: unknown } | { ok: false } {
 	try {
 		return { ok: true, value: JSON.parse(raw) as unknown };
 	} catch {
+		for (const normalized of normalizedJsonCandidates(raw)) {
+			try {
+				return { ok: true, value: JSON.parse(normalized) as unknown };
+			} catch {
+				// Try the next bounded normalization candidate.
+			}
+		}
 		return { ok: false };
 	}
 }
@@ -203,20 +297,158 @@ function formatVariantEnvelope(variant: TextToolProtocolVariant, toolName: strin
 	return `<pi:call name="${escapeAttribute(toolName)}">${argsJson}</pi:call>`;
 }
 
+function schemaRecord(value: unknown): Record<string, unknown> | undefined {
+	return isRecord(value) ? value : undefined;
+}
+
+function firstString(value: unknown): string | undefined {
+	return typeof value === "string" ? value : undefined;
+}
+
+function schemaType(schema: Record<string, unknown>): string | undefined {
+	const type = schema.type;
+	if (typeof type === "string") return type;
+	if (!Array.isArray(type)) return undefined;
+	return type.filter(firstString).find((entry) => entry !== "null");
+}
+
+function stringExampleForProperty(propertyName: string | undefined): string {
+	if (propertyName === "path") return "src/index.ts";
+	if (propertyName === "command") return "echo ok";
+	if (propertyName === "oldText") return "foo";
+	if (propertyName === "newText") return "bar";
+	if (propertyName === "content") return "text";
+	return "value";
+}
+
+function exampleValueForSchema(schemaValue: unknown, propertyName?: string): unknown {
+	const schema = schemaRecord(schemaValue);
+	if (!schema) return stringExampleForProperty(propertyName);
+	const constValue = schema.const;
+	if (constValue !== undefined) return constValue;
+	const enumValues = Array.isArray(schema.enum) ? schema.enum : [];
+	if (enumValues.length > 0) return enumValues[0];
+	const defaultValue = schema.default;
+	if (defaultValue !== undefined) return defaultValue;
+	const type = schemaType(schema);
+	if (type === "number" || type === "integer") return 1;
+	if (type === "boolean") return true;
+	if (type === "array") return [exampleValueForSchema(schema.items, propertyName)];
+	if (type === "object") return exampleArgumentsForParameters(schema);
+	return stringExampleForProperty(propertyName);
+}
+
+function requiredPropertyNames(parameters: Record<string, unknown> | undefined): string[] {
+	return Array.isArray(parameters?.required) ? parameters.required.filter(firstString) : [];
+}
+
+function exampleArgumentsForParameters(parametersValue: unknown): Record<string, unknown> {
+	const parameters = schemaRecord(parametersValue);
+	const properties = schemaRecord(parameters?.properties);
+	if (!properties) return {};
+	const args: Record<string, unknown> = {};
+	for (const name of requiredPropertyNames(parameters)) {
+		args[name] = exampleValueForSchema(properties[name], name);
+	}
+	return args;
+}
+
+function typeLabel(schemaValue: unknown): string {
+	const schema = schemaRecord(schemaValue);
+	if (!schema) return "string";
+	const enumValues = Array.isArray(schema.enum) ? schema.enum : [];
+	if (enumValues.length > 0 && enumValues.every((entry) => ["string", "number", "boolean"].includes(typeof entry))) {
+		return enumValues.map(String).join("|");
+	}
+	const type = schemaType(schema);
+	if (type === "integer" || type === "number") return "number";
+	if (type === "boolean") return "bool";
+	if (type === "array") return `${typeLabel(schema.items)}[]`;
+	if (type === "object") {
+		const properties = schemaRecord(schema.properties);
+		if (!properties) return "{}";
+		const entries = Object.entries(properties)
+			.slice(0, 4)
+			.map(([name, value]) => `${name}:${typeLabel(value)}`);
+		const suffix = Object.keys(properties).length > entries.length ? ",..." : "";
+		return `{${entries.join(",")}${suffix}}`;
+	}
+	return "string";
+}
+
+function orderedPropertyNames(properties: Record<string, unknown>, required: readonly string[]): string[] {
+	const requiredSet = new Set(required);
+	return [
+		...required.filter((name) => name in properties),
+		...Object.keys(properties).filter((name) => !requiredSet.has(name)),
+	];
+}
+
+function formatDefault(value: unknown): string {
+	const json = JSON.stringify(value);
+	return json ? `=${json}` : "";
+}
+
+function formatToolProjection(tool: Tool): string {
+	const parameters = schemaRecord(tool.parameters);
+	const properties = schemaRecord(parameters?.properties);
+	const required = requiredPropertyNames(parameters);
+	const requiredSet = new Set(required);
+	const args = properties
+		? orderedPropertyNames(properties, required)
+				.map((name) => {
+					const schema = schemaRecord(properties[name]);
+					const optional = requiredSet.has(name) ? "" : "?";
+					const defaultText = schema && "default" in schema ? formatDefault(schema.default) : "";
+					return `${name}:${typeLabel(schema)}${optional}${defaultText}`;
+				})
+				.join(", ")
+		: "";
+	const description = tool.description.replace(/\s+/g, " ").trim();
+	return `${tool.name}(${args}) - ${description}`;
+}
+
+function toolHasArrayParameter(tool: Tool): boolean {
+	const parameters = schemaRecord(tool.parameters);
+	const properties = schemaRecord(parameters?.properties);
+	if (!properties) return false;
+	return Object.values(properties).some((schemaValue) => schemaType(schemaRecord(schemaValue) ?? {}) === "array");
+}
+
+function exampleTools(tools: readonly Tool[]): Tool[] {
+	const examples: Tool[] = [];
+	const readTool = tools.find((tool) => tool.name === "read");
+	if (readTool) examples.push(readTool);
+	if (examples.length === 0) examples.push(tools[0]);
+	const editTool = tools.find((tool) => tool.name === "edit" && !examples.includes(tool));
+	const arrayTool = editTool ?? tools.find((tool) => !examples.includes(tool) && toolHasArrayParameter(tool));
+	if (arrayTool) examples.push(arrayTool);
+	return examples;
+}
+
+function protocolHeader(variant: TextToolProtocolVariant): string[] {
+	return [
+		"Text tool-call protocol is enabled.",
+		"When calling tools, output only one or more envelopes and no prose:",
+		formatVariantEnvelope(variant, "TOOL", '{"arg":"value"}'),
+		"Arguments must be valid JSON objects. Use double quotes for JSON keys and string values. Arrays are JSON arrays [ ], never quoted strings. Omit optional args you do not need - do not send null.",
+		"Never output markdown code blocks, raw shell commands, file paths, or invented tool results instead of a tool call; use the envelope and wait for the real result.",
+	];
+}
+
 export function generateTextToolProtocolPrimer(tools: readonly Tool[], options?: TextToolProtocolOptions): string {
 	if (tools.length === 0) return "";
 	const variant = options?.variant ?? DEFAULT_TEXT_TOOL_PROTOCOL_VARIANT;
-	const lines = [
-		"Text tool-call protocol is enabled.",
-		"When calling tools, output only one or more envelopes and no prose:",
-		formatVariantEnvelope(variant, "TOOL_NAME", '{"argument":"value"}'),
-		"Available tools:",
-	];
-	for (const tool of tools) {
-		lines.push(`- ${escapeAttribute(tool.name)}: ${tool.description}; args schema ${compactJson(tool.parameters)}`);
+	const lines = [...protocolHeader(variant), "Examples:"];
+	for (const tool of exampleTools(tools)) {
+		lines.push(
+			formatVariantEnvelope(variant, tool.name, JSON.stringify(exampleArgumentsForParameters(tool.parameters))),
+		);
 	}
-	const exampleTool = tools[0];
-	lines.push("Examples:", formatVariantEnvelope(variant, exampleTool.name, "{}"));
+	lines.push("Available tools:");
+	for (const tool of tools) {
+		lines.push(formatToolProjection(tool));
+	}
 	return lines.join("\n");
 }
 

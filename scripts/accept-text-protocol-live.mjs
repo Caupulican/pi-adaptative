@@ -1,11 +1,15 @@
 #!/usr/bin/env node
-import { mkdtemp, rm } from "node:fs/promises";
-import { tmpdir } from "node:os";
+import { copyFile, mkdir, mkdtemp, rm, writeFile } from "node:fs/promises";
+import { homedir, tmpdir } from "node:os";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
 import { spawn } from "node:child_process";
 
-const DEFAULT_MODELS = ["qwen3:1.7b", "qwen3:0.6b"];
+const DEFAULT_MODELS = ["qwen3:1.7b", "gemma3:1b"];
+const EXPECTED_VERDICTS = new Map([
+	["qwen3:1.7b", "native"],
+	["gemma3:1b", "text-protocol"],
+]);
 const TIMEOUT_MS = 180_000;
 const root = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "..");
 
@@ -88,13 +92,22 @@ async function runModel(model, keepSessions) {
 	const scratch = await mkdtemp(path.join(tmpdir(), `pi-c10-toolproto-${model.replace(/[^a-zA-Z0-9_.-]/g, "-")}-`));
 	const sessionDir = path.join(scratch, "sessions");
 	const agentDir = path.join(scratch, "agent");
+	await mkdir(agentDir, { recursive: true });
+	await copyFile(path.join(homedir(), ".pi", "agent", "models.json"), path.join(agentDir, "models.json"));
+	await writeFile(path.join(agentDir, "auth.json"), JSON.stringify({ ollama: { type: "api_key", key: "ollama" } }), "utf8");
 	const state = { events: [], listeners: new Set(), stderr: "" };
 	const child = spawn(
 		path.join(root, "pi-test.sh"),
 		["--mode", "rpc", "--provider", "ollama", "--model", model, "--session-dir", sessionDir, "--no-extensions"],
 		{
 			cwd: root,
-			env: { ...process.env, PI_CODING_AGENT_DIR: agentDir },
+			env: {
+				...process.env,
+				PI_CODING_AGENT_DIR: agentDir,
+				PI_CODING_AGENT_SESSION_DIR: sessionDir,
+				PI_ADAPTATIVE_CODING_AGENT_DIR: agentDir,
+				PI_ADAPTATIVE_CODING_AGENT_SESSION_DIR: sessionDir,
+			},
 			stdio: ["pipe", "pipe", "pipe"],
 		},
 	);
@@ -122,12 +135,25 @@ async function runModel(model, keepSessions) {
 		const probe = probeResponse.data.results.find((entry) => entry.model === `ollama/${model}`);
 		if (!probe) throw new Error(`tool_probe did not return ollama/${model}`);
 		if (probe.verdict === "none") throw new Error(`ollama/${model} failed tool probe: ${probe.diagnostic || "none"}`);
+		const expectedVerdict = EXPECTED_VERDICTS.get(model);
+		if (expectedVerdict && probe.verdict !== expectedVerdict) {
+			throw new Error(`ollama/${model} expected ${expectedVerdict} probe verdict, got ${probe.verdict}`);
+		}
+		if (probe.verdict === "text-protocol" && !probe.variant) {
+			throw new Error(`ollama/${model} returned text-protocol without a calibrated variant`);
+		}
 
-		const marker = `pi-live-ok-${model.replace(/[^a-zA-Z0-9_.-]/g, "-")}`;
+		const marker = "piliveok";
+		const markerPath = path.join(tmpdir(), "pi-text-protocol-live-marker.txt");
+		await writeFile(markerPath, marker, "utf8");
+		const prompt =
+			probe.verdict === "text-protocol"
+				? `Output exactly this text and nothing else: <pi:call name="read">{"path":"${markerPath}"}</pi:call>`
+				: `Use the read tool to read exactly: ${markerPath}. Do not answer without using the read tool.`;
 		writeJson(child, {
 			id: `prompt-${model}`,
 			type: "prompt",
-			message: `Use the bash tool to run exactly: printf '${marker}'. Do not answer without using the bash tool.`,
+			message: prompt,
 		});
 		const promptResponse = await waitForEvent(
 			state,
@@ -138,12 +164,12 @@ async function runModel(model, keepSessions) {
 		if (!promptResponse.success) throw new Error(promptResponse.error || `prompt failed for ${model}`);
 		const toolEvent = await waitForEvent(
 			state,
-			(event) => event.type === "tool_execution_end" && event.toolName === "bash",
-			`bash tool execution for ${model}`,
+			(event) => event.type === "tool_execution_end" && event.toolName === "read",
+			`read tool execution for ${model}`,
 		);
-		if (toolEvent.isError) throw new Error(`bash tool failed for ${model}: ${JSON.stringify(toolEvent.result)}`);
+		if (toolEvent.isError) throw new Error(`read tool failed for ${model}: ${JSON.stringify(toolEvent.result)}`);
 		if (!JSON.stringify(toolEvent.result).includes(marker)) {
-			throw new Error(`bash result for ${model} did not include marker ${marker}: ${JSON.stringify(toolEvent.result)}`);
+			throw new Error(`read result for ${model} did not include marker ${marker}: ${JSON.stringify(toolEvent.result)}`);
 		}
 		return { model, verdict: probe.verdict, variant: probe.variant || "-", marker, sessionDir };
 	} finally {

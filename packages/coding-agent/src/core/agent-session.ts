@@ -1340,7 +1340,6 @@ export class AgentSession {
 		return {
 			systemPrompt: `${primer}\n\n${instruction}`,
 			messages: [{ role: "user", content: [{ type: "text", text: instruction }], timestamp: Date.now() }],
-			tools: [TEXT_TOOL_PROTOCOL_ECHO_TOOL],
 		};
 	}
 
@@ -1361,7 +1360,7 @@ export class AgentSession {
 				messages: [{ role: "user", content: [{ type: "text", text: instruction }], timestamp: Date.now() }],
 				tools: [TEXT_TOOL_PROTOCOL_ECHO_TOOL],
 			},
-			{ textToolCallProtocol: false, maxRetries: 0 },
+			{ textToolCallProtocol: false, maxRetries: 0, temperature: 0, maxTokens: 256 },
 		);
 		return this._messageHasEchoProbe(await stream.result(), token);
 	}
@@ -1374,9 +1373,10 @@ export class AgentSession {
 		const stream = await this._streamForToolProbe(model, this._textProtocolCalibrationContext(variant, token), {
 			textToolCallProtocol: false,
 			maxRetries: 0,
+			temperature: 0,
+			maxTokens: 256,
 		});
 		const message = await stream.result();
-		if (this._messageHasEchoProbe(message, token)) return true;
 		const text = message.content
 			.filter((block): block is TextContent => block.type === "text")
 			.map((block) => block.text)
