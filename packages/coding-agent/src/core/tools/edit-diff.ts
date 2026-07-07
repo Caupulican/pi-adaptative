@@ -63,10 +63,7 @@ export interface FuzzyMatchResult {
 	matchLength: number;
 	/** Whether fuzzy matching was used (false = exact match) */
 	usedFuzzyMatch: boolean;
-	/**
-	 * The content to use for replacement operations.
-	 * When exact match: original content. When fuzzy match: normalized content.
-	 */
+	/** The original content replacements should be applied to. */
 	contentForReplacement: string;
 }
 
@@ -89,9 +86,8 @@ export interface AppliedEditsResult {
 
 /**
  * Find oldText in content, trying exact match first, then fuzzy match.
- * When fuzzy matching is used, the returned contentForReplacement is the
- * fuzzy-normalized version of the content (trailing whitespace stripped,
- * Unicode quotes/dashes normalized to ASCII).
+ * Fuzzy matching searches normalized text, but returned spans still refer to
+ * the original content so replacement does not normalize unrelated text.
  */
 export function fuzzyFindText(content: string, oldText: string): FuzzyMatchResult {
 	// Try exact match first
@@ -121,15 +117,12 @@ export function fuzzyFindText(content: string, oldText: string): FuzzyMatchResul
 		};
 	}
 
-	// When fuzzy matching, we work in the normalized space for replacement.
-	// This means the output will have normalized whitespace/quotes/dashes,
-	// which is acceptable since we're fixing minor formatting differences anyway.
 	return {
 		found: true,
 		index: fuzzyIndex,
 		matchLength: fuzzyOldText.length,
 		usedFuzzyMatch: true,
-		contentForReplacement: fuzzyContent,
+		contentForReplacement: content,
 	};
 }
 
@@ -138,10 +131,70 @@ export function stripBom(content: string): { bom: string; text: string } {
 	return content.startsWith("\uFEFF") ? { bom: "\uFEFF", text: content.slice(1) } : { bom: "", text: content };
 }
 
-function countOccurrences(content: string, oldText: string): number {
+function countExactOccurrences(content: string, oldText: string): number {
+	return content.split(oldText).length - 1;
+}
+
+function countFuzzyOccurrences(content: string, oldText: string): number {
 	const fuzzyContent = normalizeForFuzzyMatch(content);
 	const fuzzyOldText = normalizeForFuzzyMatch(oldText);
 	return fuzzyContent.split(fuzzyOldText).length - 1;
+}
+
+function getLineStarts(content: string): number[] {
+	const starts = [0];
+	for (let i = 0; i < content.length; i++) {
+		if (content[i] === "\n") starts.push(i + 1);
+	}
+	return starts;
+}
+
+function lineColumnAt(lineStarts: number[], index: number): { lineIndex: number; column: number } {
+	let low = 0;
+	let high = lineStarts.length - 1;
+	while (low <= high) {
+		const mid = Math.floor((low + high) / 2);
+		if (lineStarts[mid] <= index) low = mid + 1;
+		else high = mid - 1;
+	}
+	const lineIndex = Math.max(0, high);
+	return { lineIndex, column: index - lineStarts[lineIndex] };
+}
+
+function lineTextAt(content: string, lineStarts: number[], lineIndex: number): string {
+	const start = lineStarts[lineIndex];
+	const nextStart = lineStarts[lineIndex + 1] ?? content.length;
+	const end = nextStart > start && content[nextStart - 1] === "\n" ? nextStart - 1 : nextStart;
+	return content.slice(start, end);
+}
+
+function normalizedColumnToOriginalColumn(line: string, normalizedColumn: number): number {
+	if (normalizedColumn <= 0) return 0;
+	let originalColumn = 0;
+	for (const char of line) {
+		const nextColumn = originalColumn + char.length;
+		if (normalizeForFuzzyMatch(line.slice(0, nextColumn)).length >= normalizedColumn) return nextColumn;
+		originalColumn = nextColumn;
+	}
+	return line.length;
+}
+
+function mapFuzzySpanToOriginal(
+	originalContent: string,
+	normalizedIndex: number,
+	normalizedLength: number,
+): { index: number; length: number } {
+	const fuzzyContent = normalizeForFuzzyMatch(originalContent);
+	const fuzzyLineStarts = getLineStarts(fuzzyContent);
+	const originalLineStarts = getLineStarts(originalContent);
+	const start = lineColumnAt(fuzzyLineStarts, normalizedIndex);
+	const end = lineColumnAt(fuzzyLineStarts, normalizedIndex + normalizedLength);
+	const startLine = lineTextAt(originalContent, originalLineStarts, start.lineIndex);
+	const endLine = lineTextAt(originalContent, originalLineStarts, end.lineIndex);
+	const originalStart =
+		originalLineStarts[start.lineIndex] + normalizedColumnToOriginalColumn(startLine, start.column);
+	const originalEnd = originalLineStarts[end.lineIndex] + normalizedColumnToOriginalColumn(endLine, end.column);
+	return { index: originalStart, length: originalEnd - originalStart };
 }
 
 function getNotFoundError(path: string, editIndex: number, totalEdits: number): Error {
@@ -186,9 +239,9 @@ function getNoChangeError(path: string, totalEdits: number): Error {
  * Apply one or more exact-text replacements to LF-normalized content.
  *
  * All edits are matched against the same original content. Replacements are
- * then applied in reverse order so offsets remain stable. If any edit needs
- * fuzzy matching, the operation runs in fuzzy-normalized content space to
- * preserve current single-edit behavior.
+ * then applied in reverse order so offsets remain stable. Fuzzy matching uses
+ * normalized text only for finding the span; the final splice is always made
+ * into the original content.
  */
 export function applyEditsToNormalizedContent(
 	normalizedContent: string,
@@ -206,11 +259,7 @@ export function applyEditsToNormalizedContent(
 		}
 	}
 
-	const initialMatches = normalizedEdits.map((edit) => fuzzyFindText(normalizedContent, edit.oldText));
-	const baseContent = initialMatches.some((match) => match.usedFuzzyMatch)
-		? normalizeForFuzzyMatch(normalizedContent)
-		: normalizedContent;
-
+	const baseContent = normalizedContent;
 	const matchedEdits: MatchedEdit[] = [];
 	for (let i = 0; i < normalizedEdits.length; i++) {
 		const edit = normalizedEdits[i];
@@ -219,15 +268,21 @@ export function applyEditsToNormalizedContent(
 			throw getNotFoundError(path, i, normalizedEdits.length);
 		}
 
-		const occurrences = countOccurrences(baseContent, edit.oldText);
+		const occurrences = matchResult.usedFuzzyMatch
+			? countFuzzyOccurrences(baseContent, edit.oldText)
+			: countExactOccurrences(baseContent, edit.oldText);
 		if (occurrences > 1) {
 			throw getDuplicateError(path, i, normalizedEdits.length, occurrences);
 		}
 
+		const replacementSpan = matchResult.usedFuzzyMatch
+			? mapFuzzySpanToOriginal(baseContent, matchResult.index, matchResult.matchLength)
+			: { index: matchResult.index, length: matchResult.matchLength };
+
 		matchedEdits.push({
 			editIndex: i,
-			matchIndex: matchResult.index,
-			matchLength: matchResult.matchLength,
+			matchIndex: replacementSpan.index,
+			matchLength: replacementSpan.length,
 			newText: edit.newText,
 		});
 	}
