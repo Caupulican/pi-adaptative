@@ -408,6 +408,60 @@ describe("resolveCliModel", () => {
 		expect(result.model?.provider).toBe("openrouter");
 		expect(result.model?.id).toBe("qwen/qwen3-coder:exacto");
 	});
+
+	test("prefers the single authenticated provider for ambiguous bare model ids", () => {
+		const duplicateModels = [
+			{ ...mockModels[1], provider: "unauthenticated", id: "shared-model" },
+			{ ...mockModels[1], provider: "authenticated", id: "shared-model" },
+		];
+		const registry = {
+			getAll: () => duplicateModels,
+			getAvailable: () => [duplicateModels[1]],
+		} as unknown as Parameters<typeof resolveCliModel>[0]["modelRegistry"];
+
+		const result = resolveCliModel({ cliModel: "shared-model", modelRegistry: registry });
+
+		expect(result.error).toBeUndefined();
+		expect(result.model?.provider).toBe("authenticated");
+	});
+
+	test("rejects ambiguous bare model ids when multiple authenticated providers match", () => {
+		const duplicateModels = [
+			{ ...mockModels[1], provider: "provider-a", id: "shared-model" },
+			{ ...mockModels[1], provider: "provider-b", id: "shared-model" },
+		];
+		const registry = {
+			getAll: () => duplicateModels,
+			getAvailable: () => duplicateModels,
+		} as unknown as Parameters<typeof resolveCliModel>[0]["modelRegistry"];
+
+		const result = resolveCliModel({ cliModel: "shared-model", modelRegistry: registry });
+
+		expect(result.model).toBeUndefined();
+		expect(result.error).toContain("ambiguous");
+		expect(result.error).toContain("provider-a/shared-model");
+		expect(result.error).toContain("provider-b/shared-model");
+	});
+
+	test("keeps unique bare model ids and provider/id references unchanged", () => {
+		const duplicateModels = [
+			{ ...mockModels[1], provider: "provider-a", id: "shared-model" },
+			{ ...mockModels[1], provider: "provider-b", id: "shared-model" },
+			{ ...mockModels[1], provider: "provider-c", id: "unique-model" },
+		];
+		const registry = {
+			getAll: () => duplicateModels,
+			getAvailable: () => duplicateModels,
+		} as unknown as Parameters<typeof resolveCliModel>[0]["modelRegistry"];
+
+		const unique = resolveCliModel({ cliModel: "unique-model", modelRegistry: registry });
+		expect(unique.error).toBeUndefined();
+		expect(unique.model?.provider).toBe("provider-c");
+
+		const canonical = resolveCliModel({ cliModel: "provider-b/shared-model", modelRegistry: registry });
+		expect(canonical.error).toBeUndefined();
+		expect(canonical.model?.provider).toBe("provider-b");
+	});
 });
 
 describe("resolveCliProviderDefault", () => {

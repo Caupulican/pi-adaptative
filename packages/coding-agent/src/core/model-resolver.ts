@@ -353,6 +353,11 @@ export interface ResolveCliModelResult {
 	error: string | undefined;
 }
 
+function formatAmbiguousModelReferenceError(modelReference: string, matches: Model<Api>[]): string {
+	const candidates = matches.map((model) => `${model.provider}/${model.id}`).sort();
+	return `Model "${modelReference}" is ambiguous. Use one of: ${candidates.join(", ")}.`;
+}
+
 /**
  * Resolve a single model from CLI flags.
  *
@@ -423,11 +428,36 @@ export function resolveCliModel(options: {
 	// This handles models whose IDs naturally contain slashes (e.g. OpenRouter-style IDs).
 	if (!provider) {
 		const lower = cliModel.toLowerCase();
-		const exact = availableModels.find(
-			(m) => m.id.toLowerCase() === lower || `${m.provider}/${m.id}`.toLowerCase() === lower,
-		);
-		if (exact) {
-			return { model: exact, warning: undefined, thinkingLevel: undefined, error: undefined };
+		const exactReferenceMatches = availableModels.filter((m) => `${m.provider}/${m.id}`.toLowerCase() === lower);
+		if (exactReferenceMatches.length === 1) {
+			return { model: exactReferenceMatches[0], warning: undefined, thinkingLevel: undefined, error: undefined };
+		}
+		if (exactReferenceMatches.length > 1) {
+			return {
+				model: undefined,
+				warning: undefined,
+				thinkingLevel: undefined,
+				error: formatAmbiguousModelReferenceError(cliModel, exactReferenceMatches),
+			};
+		}
+
+		const idMatches = availableModels.filter((m) => m.id.toLowerCase() === lower);
+		if (idMatches.length === 1) {
+			return { model: idMatches[0], warning: undefined, thinkingLevel: undefined, error: undefined };
+		}
+		if (idMatches.length > 1) {
+			const authenticatedMatches = modelRegistry
+				.getAvailable()
+				.filter((available) => idMatches.some((match) => modelsAreEqual(available, match)));
+			if (authenticatedMatches.length === 1) {
+				return { model: authenticatedMatches[0], warning: undefined, thinkingLevel: undefined, error: undefined };
+			}
+			return {
+				model: undefined,
+				warning: undefined,
+				thinkingLevel: undefined,
+				error: formatAmbiguousModelReferenceError(cliModel, idMatches),
+			};
 		}
 	}
 
