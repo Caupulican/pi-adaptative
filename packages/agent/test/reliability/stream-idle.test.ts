@@ -118,6 +118,28 @@ describe("withStreamIdleWatchdog (phase-aware)", () => {
 		expect(result.errorMessage).not.toMatch(/stream stalled/);
 	});
 
+	it("settles as aborted when caller abort makes the inner stream end without a terminal event", async () => {
+		const fake = makeFakeStreamFn();
+		const ac = new AbortController();
+		const wrapped = withStreamIdleWatchdog(fake.streamFn, BOUNDS);
+		const stream = await wrapped({} as never, {} as never, { signal: ac.signal });
+		ac.abort();
+		fake.inner.end();
+
+		const timedOut = "timed-out" as const;
+		const race = Promise.race([
+			stream.result(),
+			new Promise<typeof timedOut>((resolve) => setTimeout(() => resolve(timedOut), 1)),
+		]);
+		await vi.advanceTimersByTimeAsync(1);
+		const result = await race;
+
+		expect(result).not.toBe(timedOut);
+		if (result === timedOut) return;
+		expect(result.stopReason).toBe("aborted");
+		expect(result.errorMessage).toContain("stream aborted before terminal event");
+	});
+
 	it("turns inner stream end without terminal event into an error result", async () => {
 		const fake = makeFakeStreamFn();
 		const wrapped = withStreamIdleWatchdog(fake.streamFn, BOUNDS);

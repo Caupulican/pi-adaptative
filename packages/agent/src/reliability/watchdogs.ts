@@ -117,8 +117,9 @@ function partialFromEvent(event: AssistantMessageEvent): AssistantMessage {
  * so settings changes apply without rewrapping.
  *
  * A caller-initiated abort (via the options `signal`) is never treated as a stall: it
- * is chained into the wrapper's own controller and the inner stream's own abort result
- * is forwarded untouched.
+ * is chained into the wrapper's own controller. The inner stream's abort result is
+ * forwarded untouched when it provides one; if it just ends, the wrapper synthesizes
+ * an aborted terminal event so the returned stream always settles.
  */
 export function withStreamIdleWatchdog(
 	streamFn: StreamFn,
@@ -239,12 +240,15 @@ export function withStreamIdleWatchdog(
 					outer.push(event);
 					if (terminal) return;
 				}
-				if (!terminalPushed && !stalled && !callerAborted) {
-					const description = "stream ended before terminal event";
+				if (!terminalPushed && !stalled) {
+					const stopReason = callerAborted ? "aborted" : "error";
+					const description = callerAborted
+						? "stream aborted before terminal event"
+						: "stream ended before terminal event";
 					outer.push({
 						type: "error",
-						reason: "error",
-						error: { ...latest, stopReason: "error", errorMessage: description },
+						reason: stopReason,
+						error: { ...latest, stopReason, errorMessage: description },
 					});
 				}
 			} finally {
