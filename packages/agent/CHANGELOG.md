@@ -1,4 +1,4 @@
-## [Unreleased]
+## [0.81.9] - 2026-07-07
 
 ### Fixed
 - Added checkpoint v2 update-path coverage for clearing resolved open problems and refreshing stale working-set entries.
