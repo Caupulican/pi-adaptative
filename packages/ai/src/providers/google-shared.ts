@@ -12,6 +12,7 @@ import {
 } from "@google/genai";
 import type { Context, ImageContent, Model, StopReason, TextContent, ThinkingBudgets, Tool } from "../types.ts";
 import { sanitizeSurrogates } from "../utils/sanitize-unicode.ts";
+import { createToolNameMap, type ToolNameMap } from "../utils/tool-names.ts";
 import { transformMessages } from "./transform-messages.ts";
 
 type GoogleApiType = "google-generative-ai" | "google-vertex";
@@ -235,7 +236,11 @@ function supportsMultimodalFunctionResponse(modelId: string): boolean {
 /**
  * Convert internal messages to Gemini Content[] format.
  */
-export function convertMessages<T extends GoogleApiType>(model: Model<T>, context: Context): Content[] {
+export function convertMessages<T extends GoogleApiType>(
+	model: Model<T>,
+	context: Context,
+	toolNameMap: ToolNameMap = createToolNameMap(context.tools ?? []),
+): Content[] {
 	const contents: Content[] = [];
 	const normalizeToolCallId = (id: string): string => {
 		if (!requiresToolCallId(model.id)) return id;
@@ -315,7 +320,7 @@ export function convertMessages<T extends GoogleApiType>(model: Model<T>, contex
 					const thoughtSignature = resolveThoughtSignature(isSameProviderAndModel, block.thoughtSignature);
 					const part: Part = {
 						functionCall: {
-							name: block.name,
+							name: toolNameMap.toProviderName(block.name),
 							args: block.arguments ?? {},
 							...(requiresToolCallId(model.id) ? { id: block.id } : {}),
 						},
@@ -359,7 +364,7 @@ export function convertMessages<T extends GoogleApiType>(model: Model<T>, contex
 			const includeId = requiresToolCallId(model.id);
 			const functionResponsePart: Part = {
 				functionResponse: {
-					name: msg.toolName,
+					name: toolNameMap.toProviderName(msg.toolName),
 					response: msg.isError ? { error: responseValue } : { output: responseValue },
 					...(hasImages && modelSupportsMultimodalFunctionResponse && { parts: imageParts }),
 					...(includeId ? { id: msg.toolCallId } : {}),
@@ -428,12 +433,13 @@ function sanitizeForOpenApi(schema: unknown): unknown {
 export function convertTools(
 	tools: Tool[],
 	useParameters = false,
+	toolNameMap: ToolNameMap = createToolNameMap(tools),
 ): { functionDeclarations: Record<string, unknown>[] }[] | undefined {
 	if (tools.length === 0) return undefined;
 	return [
 		{
 			functionDeclarations: tools.map((tool) => ({
-				name: tool.name,
+				name: toolNameMap.toProviderName(tool.name),
 				description: tool.description,
 				...(useParameters
 					? { parameters: sanitizeForOpenApi(tool.parameters as unknown) }

@@ -34,6 +34,7 @@ import { AssistantMessageEventStream } from "../utils/event-stream.ts";
 import { headersToRecord } from "../utils/headers.ts";
 import { parseStreamingJsonState } from "../utils/json-parse.ts";
 import { sanitizeSurrogates } from "../utils/sanitize-unicode.ts";
+import { createToolNameMap, type ToolNameMap } from "../utils/tool-names.ts";
 import { isCloudflareProvider, resolveCloudflareBaseUrl } from "./cloudflare.ts";
 import { buildCopilotDynamicHeaders, hasCopilotVisionInput } from "./github-copilot-headers.ts";
 import { clampOpenAIPromptCacheKey } from "./openai-prompt-cache.ts";
@@ -185,6 +186,7 @@ export const streamOpenAICompletions: StreamFunction<"openai-completions", OpenA
 			let syntheticToolCallOrdinal = 0;
 			const pendingReasoningDetailsById = new Map<string, string>();
 			const blocks = output.content as StreamingBlock[];
+			const toolNameMap = createToolNameMap(context.tools ?? []);
 			const getContentIndex = (block: StreamingBlock) => blocks.indexOf(block);
 			const finishBlock = (block: StreamingBlock) => {
 				const contentIndex = getContentIndex(block);
@@ -272,7 +274,7 @@ export const streamOpenAICompletions: StreamFunction<"openai-completions", OpenA
 					block = {
 						type: "toolCall",
 						id: allocateToolCallId(toolCall.id, streamIndex),
-						name: toolCall.function?.name || "",
+						name: toolCall.function?.name ? toolNameMap.toOriginalName(toolCall.function.name) : "",
 						arguments: {},
 						partialArgs: "",
 						partialArgsComplete: true,
@@ -388,7 +390,7 @@ export const streamOpenAICompletions: StreamFunction<"openai-completions", OpenA
 						for (const toolCall of choice.delta.tool_calls) {
 							const block = ensureToolCallBlock(toolCall);
 							if (!block.name && toolCall.function?.name) {
-								block.name = toolCall.function.name;
+								block.name = toolNameMap.toOriginalName(toolCall.function.name);
 							}
 
 							let delta = "";
@@ -547,7 +549,8 @@ function buildParams(
 	compat: ResolvedOpenAICompletionsCompat = getCompat(model),
 	cacheRetention: CacheRetention = resolveCacheRetention(options?.cacheRetention),
 ) {
-	const messages = convertMessages(model, context, compat);
+	const toolNameMap = createToolNameMap(context.tools ?? []);
+	const messages = convertMessages(model, context, compat, toolNameMap);
 	const cacheControl = getCompatCacheControl(compat, cacheRetention);
 
 	const params: OpenAI.Chat.Completions.ChatCompletionCreateParamsStreaming = {
@@ -583,7 +586,7 @@ function buildParams(
 	}
 
 	if (context.tools && context.tools.length > 0) {
-		params.tools = convertTools(context.tools, compat);
+		params.tools = convertTools(context.tools, compat, toolNameMap);
 		if (compat.zaiToolStream) {
 			(params as any).tool_stream = true;
 		}
@@ -597,7 +600,13 @@ function buildParams(
 	}
 
 	if (options?.toolChoice) {
-		params.tool_choice = options.toolChoice;
+		params.tool_choice =
+			typeof options.toolChoice === "object"
+				? {
+						type: "function",
+						function: { name: toolNameMap.toProviderName(options.toolChoice.function.name) },
+					}
+				: options.toolChoice;
 	}
 
 	if (compat.thinkingFormat === "zai" && model.reasoning) {
@@ -789,6 +798,7 @@ export function convertMessages(
 	model: Model<"openai-completions">,
 	context: Context,
 	compat: ResolvedOpenAICompletionsCompat,
+	toolNameMap: ToolNameMap = createToolNameMap(context.tools ?? []),
 ): ChatCompletionMessageParam[] {
 	const params: ChatCompletionMessageParam[] = [];
 
@@ -919,7 +929,7 @@ export function convertMessages(
 					id: tc.id,
 					type: "function" as const,
 					function: {
-						name: tc.name,
+						name: toolNameMap.toProviderName(tc.name),
 						arguments: JSON.stringify(tc.arguments),
 					},
 				}));
@@ -1034,11 +1044,12 @@ export function convertMessages(
 function convertTools(
 	tools: Tool[],
 	compat: ResolvedOpenAICompletionsCompat,
+	toolNameMap: ToolNameMap = createToolNameMap(tools),
 ): OpenAI.Chat.Completions.ChatCompletionTool[] {
 	return tools.map((tool) => ({
 		type: "function",
 		function: {
-			name: tool.name,
+			name: toolNameMap.toProviderName(tool.name),
 			description: tool.description,
 			parameters: tool.parameters as any, // TypeBox already generates JSON Schema
 			// Only include strict if provider supports it. Some reject unknown fields.

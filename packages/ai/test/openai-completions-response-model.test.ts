@@ -7,13 +7,15 @@ import type { Model } from "../src/types.ts";
 
 const mockState = vi.hoisted(() => ({
 	chunks: [] as unknown[],
+	requests: [] as unknown[],
 }));
 
 vi.mock("openai", () => {
 	class FakeOpenAI {
 		chat = {
 			completions: {
-				create: () => {
+				create: (params: unknown) => {
+					mockState.requests.push(params);
 					const chunks = mockState.chunks;
 					const stream = {
 						async *[Symbol.asyncIterator]() {
@@ -56,6 +58,7 @@ function openRouterAuto(): Model<"openai-completions"> {
 describe("openai-completions responseModel", () => {
 	beforeEach(() => {
 		mockState.chunks = [];
+		mockState.requests = [];
 	});
 
 	it("surfaces routed chunk.model on responseModel without changing model", async () => {
@@ -194,6 +197,108 @@ describe("openai-completions responseModel", () => {
 		const toolCalls = message.content.filter((block) => block.type === "toolCall");
 		expect(toolCalls.map((toolCall) => toolCall.id)).toEqual(["dup", "dup_2"]);
 		expect(toolCalls.map((toolCall) => toolCall.name)).toEqual(["first", "second"]);
+	});
+
+	it("round-trips sanitized OpenAI-compatible tool names", async () => {
+		mockState.chunks = [
+			{
+				id: "chatcmpl-sanitized-tool",
+				model: "openrouter/auto",
+				choices: [
+					{
+						index: 0,
+						delta: {
+							tool_calls: [
+								{
+									index: 0,
+									id: "call_1",
+									type: "function",
+									function: { name: "mcp_server_do-thing", arguments: '{"value":"ok"}' },
+								},
+							],
+						},
+						finish_reason: "tool_calls",
+					},
+				],
+				usage: {
+					prompt_tokens: 1,
+					completion_tokens: 1,
+					prompt_tokens_details: { cached_tokens: 0 },
+					completion_tokens_details: { reasoning_tokens: 0 },
+				},
+			},
+		];
+
+		const message = await complete(
+			openRouterAuto(),
+			{
+				messages: [{ role: "user", content: "hi", timestamp: Date.now() }],
+				tools: [
+					{
+						name: "mcp.server:do-thing",
+						description: "Do thing",
+						parameters: { type: "object", properties: { value: { type: "string" } }, required: ["value"] },
+					},
+				],
+			},
+			{ apiKey: "test" },
+		);
+
+		const request = mockState.requests[0] as { tools?: Array<{ function: { name: string } }> };
+		const toolCall = message.content.find((block) => block.type === "toolCall");
+		expect(request.tools?.[0]?.function.name).toBe("mcp_server_do-thing");
+		expect(toolCall).toMatchObject({ type: "toolCall", name: "mcp.server:do-thing" });
+	});
+
+	it("disambiguates colliding sanitized OpenAI-compatible tool names", async () => {
+		mockState.chunks = [
+			{
+				id: "chatcmpl-sanitized-collision",
+				model: "openrouter/auto",
+				choices: [
+					{
+						index: 0,
+						delta: {
+							tool_calls: [
+								{
+									index: 0,
+									id: "call_1",
+									type: "function",
+									function: { name: "mcp_server_do_thing_2", arguments: "{}" },
+								},
+							],
+						},
+						finish_reason: "tool_calls",
+					},
+				],
+				usage: {
+					prompt_tokens: 1,
+					completion_tokens: 1,
+					prompt_tokens_details: { cached_tokens: 0 },
+					completion_tokens_details: { reasoning_tokens: 0 },
+				},
+			},
+		];
+
+		const message = await complete(
+			openRouterAuto(),
+			{
+				messages: [{ role: "user", content: "hi", timestamp: Date.now() }],
+				tools: [
+					{ name: "mcp.server:do_thing", description: "First", parameters: { type: "object", properties: {} } },
+					{ name: "mcp/server:do_thing", description: "Second", parameters: { type: "object", properties: {} } },
+				],
+			},
+			{ apiKey: "test" },
+		);
+
+		const request = mockState.requests[0] as { tools?: Array<{ function: { name: string } }> };
+		const toolCall = message.content.find((block) => block.type === "toolCall");
+		expect(request.tools?.map((tool) => tool.function.name)).toEqual([
+			"mcp_server_do_thing",
+			"mcp_server_do_thing_2",
+		]);
+		expect(toolCall).toMatchObject({ type: "toolCall", name: "mcp/server:do_thing" });
 	});
 
 	it("marks truncated streamed tool arguments as provider tool errors", async () => {

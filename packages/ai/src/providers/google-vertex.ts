@@ -21,6 +21,7 @@ import type {
 import { formatProviderError, normalizeProviderError } from "../utils/error-body.ts";
 import { AssistantMessageEventStream } from "../utils/event-stream.ts";
 import { sanitizeSurrogates } from "../utils/sanitize-unicode.ts";
+import { createToolNameMap } from "../utils/tool-names.ts";
 import type { GoogleThinkingEffort, GoogleThinkingLevel } from "./google-shared.ts";
 import {
 	convertMessages,
@@ -90,6 +91,7 @@ export const streamGoogleVertex: StreamFunction<"google-vertex", GoogleVertexOpt
 				params = nextParams as GenerateContentParameters;
 			}
 			const googleStream = await client.models.generateContentStream(params);
+			const toolNameMap = createToolNameMap(context.tools ?? []);
 
 			stream.push({ type: "start", partial: output });
 			let currentBlock: TextContent | ThinkingContent | null = null;
@@ -193,7 +195,7 @@ export const streamGoogleVertex: StreamFunction<"google-vertex", GoogleVertexOpt
 							const toolCall: ToolCall = {
 								type: "toolCall",
 								id: toolCallId,
-								name: part.functionCall.name || "",
+								name: toolNameMap.toOriginalName(part.functionCall.name || ""),
 								arguments: (part.functionCall.args as Record<string, any>) ?? {},
 								...(part.thoughtSignature && { thoughtSignature: part.thoughtSignature }),
 							};
@@ -412,7 +414,8 @@ function buildParams(
 	context: Context,
 	options: GoogleVertexOptions = {},
 ): GenerateContentParameters {
-	const contents = convertMessages(model, context);
+	const toolNameMap = createToolNameMap(context.tools ?? []);
+	const contents = convertMessages(model, context, toolNameMap);
 
 	const generationConfig: GenerateContentConfig = {};
 	if (options.temperature !== undefined) {
@@ -425,7 +428,7 @@ function buildParams(
 	const config: GenerateContentConfig = {
 		...(Object.keys(generationConfig).length > 0 && generationConfig),
 		...(context.systemPrompt && { systemInstruction: sanitizeSurrogates(context.systemPrompt) }),
-		...(context.tools && context.tools.length > 0 && { tools: convertTools(context.tools) }),
+		...(context.tools && context.tools.length > 0 && { tools: convertTools(context.tools, false, toolNameMap) }),
 	};
 
 	if (context.tools && context.tools.length > 0 && options.toolChoice) {
