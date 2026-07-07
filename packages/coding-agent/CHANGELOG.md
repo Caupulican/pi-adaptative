@@ -1,5 +1,8 @@
 ## [Unreleased]
 
+### Fixed
+- Fixed git log filtering to preserve user arguments while applying default compact-log limits.
+
 ## [0.81.7] - 2026-07-06
 
 ### Fixed

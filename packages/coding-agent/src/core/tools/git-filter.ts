@@ -433,12 +433,10 @@ async function handleLog(
 		(arg) => arg.startsWith("--pretty") || arg.startsWith("--format") || arg === "--oneline",
 	);
 
-	if (hasLimit || hasPretty) {
-		const res = await runGitQuery(cwd, globalOptions, ["log", ...args], options);
-		return resultFromQuery(res, rawText(res), res.status ?? 0);
-	}
+	const logArgs = hasLimit ? ["log", ...args] : ["log", "-n", "10", "--no-merges", ...args];
+	const res = await runGitQuery(cwd, globalOptions, logArgs, options);
+	if (hasPretty) return resultFromQuery(res, rawText(res), res.status ?? 0);
 
-	const res = await runGitQuery(cwd, globalOptions, ["log", "-n", "10", "--no-merges"], options);
 	const rawOut = rawText(res);
 	if (res.status !== 0) return { output: rawOut, exitCode: res.status ?? 1, rawOut, rawBytes: res.rawBytes };
 

@@ -121,6 +121,44 @@ describe("Git Output Filter - Subcommands", () => {
 		expect(res.output).not.toContain("Author:");
 	});
 
+	it("should preserve user git log filters while applying default compaction", async () => {
+		for (let i = 1; i <= 12; i++) {
+			const fileName = i % 2 === 0 ? "even.txt" : "odd.txt";
+			writeFileSync(join(testRepoDir, fileName), `commit ${i}\n`);
+			execSync(`git add ${fileName}`, { cwd: testRepoDir });
+			const authorName = i % 3 === 0 ? "Filtered Author" : "Other Author";
+			execSync(
+				`git commit --author="${authorName} <author${i}@example.com>" -m "${authorName} ${i}\n\nBody ${i}\nSigned-off-by: Me"`,
+				{
+					cwd: testRepoDir,
+				},
+			);
+		}
+
+		const authorRes = await executeFilteredGit(testRepoDir, "log", [], ["--author=Filtered Author"]);
+		expect(authorRes.exitCode).toBe(0);
+		expect(authorRes.output).toContain("Filtered Author 12");
+		expect(authorRes.output).toContain("Filtered Author 9");
+		expect(authorRes.output).not.toContain("Other Author");
+
+		const pathRes = await executeFilteredGit(testRepoDir, "log", [], ["odd.txt"]);
+		expect(pathRes.exitCode).toBe(0);
+		expect(pathRes.output).toContain("Other Author 11");
+		expect(pathRes.output).toContain("Other Author 1");
+		expect(pathRes.output).not.toContain("Filtered Author 12");
+
+		const bareRes = await executeFilteredGit(testRepoDir, "log", [], []);
+		expect(bareRes.exitCode).toBe(0);
+		expect((bareRes.output.match(/^commit /gm) ?? []).length).toBe(10);
+		expect(bareRes.output).not.toContain("Signed-off-by:");
+		expect(bareRes.output).not.toContain("Author:");
+
+		const onelineRes = await executeFilteredGit(testRepoDir, "log", [], ["--oneline", "-5"]);
+		expect(onelineRes.exitCode).toBe(0);
+		expect(onelineRes.output.trim().split("\n")).toHaveLength(5);
+		expect(onelineRes.output).toMatch(/^[0-9a-f]{7} /m);
+	});
+
 	it("should handle diff compaction", async () => {
 		writeFileSync(join(testRepoDir, "file1.txt"), "hello\n");
 		execSync("git add file1.txt", { cwd: testRepoDir });
