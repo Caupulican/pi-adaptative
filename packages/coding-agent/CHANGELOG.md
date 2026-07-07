@@ -9,6 +9,7 @@
 - Added a host-keyed per-model adaptation store for repair rules, protocol calibration, and teach statistics.
 - Added learned per-model tool-shape rules to system prompt assembly after repeated repair telemetry.
 - Added per-model teach-efficacy aggregation for tool argument validation telemetry.
+- Added per-model text tool-call protocol calibration before the first real turn.
 
 ## [0.81.11] - 2026-07-07
 

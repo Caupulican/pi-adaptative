@@ -12,7 +12,11 @@ import type {
 	StreamOptions,
 } from "./types.ts";
 import { AssistantMessageEventStream } from "./utils/event-stream.ts";
-import { generateTextToolProtocolPrimer, parseTextToolCalls } from "./utils/tool-repair/text-protocol.ts";
+import {
+	generateTextToolProtocolPrimer,
+	normalizeTextToolProtocolOptions,
+	parseTextToolCalls,
+} from "./utils/tool-repair/text-protocol.ts";
 
 export { getEnvApiKey } from "./env-api-keys.ts";
 
@@ -31,8 +35,9 @@ function withEnvApiKey<TOptions extends StreamOptions>(
 }
 
 function withTextToolProtocolContext(context: Context, options: StreamOptions | undefined): Context {
-	if (!options?.textToolCallProtocol || !context.tools?.length) return context;
-	const primer = generateTextToolProtocolPrimer(context.tools);
+	const protocolOptions = normalizeTextToolProtocolOptions(options?.textToolCallProtocol);
+	if (!protocolOptions || !context.tools?.length) return context;
+	const primer = generateTextToolProtocolPrimer(context.tools, protocolOptions);
 	if (!primer) return context;
 	return {
 		...context,
@@ -45,7 +50,7 @@ function withTextToolProtocolResult(
 	context: Context,
 	options: StreamOptions | undefined,
 ): AssistantMessageEventStream {
-	if (!options?.textToolCallProtocol || !context.tools?.length) return stream;
+	if (!normalizeTextToolProtocolOptions(options?.textToolCallProtocol) || !context.tools?.length) return stream;
 	const wrapped = new AssistantMessageEventStream();
 	void (async () => {
 		for await (const event of stream) {

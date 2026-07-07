@@ -5,6 +5,12 @@ export interface ParsedTextToolCalls {
 	text: string;
 }
 
+export type TextToolProtocolVariant = "tool-tag" | "tool-call" | "fenced-json";
+
+export interface TextToolProtocolOptions {
+	variant?: TextToolProtocolVariant;
+}
+
 type EnvelopeKind = "tool" | "tool_call" | "fenced_json";
 
 interface EnvelopeMatch {
@@ -16,6 +22,7 @@ interface EnvelopeMatch {
 }
 
 const MAX_SCHEMA_CHARS = 600;
+const DEFAULT_TEXT_TOOL_PROTOCOL_VARIANT: TextToolProtocolVariant = "tool-tag";
 
 function isRecord(value: unknown): value is Record<string, unknown> {
 	return typeof value === "object" && value !== null && !Array.isArray(value);
@@ -67,7 +74,7 @@ function findToolEnvelopes(text: string): EnvelopeMatch[] {
 	}
 
 	const trimmed = text.trim();
-	const fence = /^```(?:json)?\s*\n?([\s\S]*?)\n?```$/i.exec(trimmed);
+	const fence = /^```(?:json|tool|tool_call)?\s*\n?([\s\S]*?)\n?```$/i.exec(trimmed);
 	if (fence?.[1]) {
 		const start = text.indexOf(trimmed);
 		matches.push({ kind: "fenced_json", start, end: start + trimmed.length, body: fence[1] });
@@ -164,23 +171,34 @@ function parseEnvelope(match: EnvelopeMatch, names: ReadonlySet<string>, index: 
 	};
 }
 
-export function generateTextToolProtocolPrimer(tools: readonly Tool[]): string {
+export function normalizeTextToolProtocolOptions(
+	option: boolean | TextToolProtocolOptions | undefined,
+): TextToolProtocolOptions | undefined {
+	if (!option) return undefined;
+	if (option === true) return { variant: DEFAULT_TEXT_TOOL_PROTOCOL_VARIANT };
+	return { variant: option.variant ?? DEFAULT_TEXT_TOOL_PROTOCOL_VARIANT };
+}
+
+function formatVariantEnvelope(variant: TextToolProtocolVariant, toolName: string, argsJson: string): string {
+	if (variant === "tool-call") return `<tool_call>{"name":"${toolName}","arguments":${argsJson}}</tool_call>`;
+	if (variant === "fenced-json") return `\`\`\`tool_call\n{"name":"${toolName}","arguments":${argsJson}}\n\`\`\``;
+	return `<tool name="${escapeAttribute(toolName)}">${argsJson}</tool>`;
+}
+
+export function generateTextToolProtocolPrimer(tools: readonly Tool[], options?: TextToolProtocolOptions): string {
 	if (tools.length === 0) return "";
+	const variant = options?.variant ?? DEFAULT_TEXT_TOOL_PROTOCOL_VARIANT;
 	const lines = [
 		"Text tool-call protocol is enabled.",
 		"When calling tools, output only one or more envelopes and no prose:",
-		'<tool name="TOOL_NAME">{"argument":"value"}</tool>',
+		formatVariantEnvelope(variant, "TOOL_NAME", '{"argument":"value"}'),
 		"Available tools:",
 	];
 	for (const tool of tools) {
 		lines.push(`- ${escapeAttribute(tool.name)}: ${tool.description}; args schema ${compactJson(tool.parameters)}`);
 	}
 	const exampleTool = tools[0];
-	lines.push(
-		"Examples:",
-		`<tool name="${escapeAttribute(exampleTool.name)}">{}</tool>`,
-		`<tool_call>{"name":"${exampleTool.name}","arguments":{}}</tool_call>`,
-	);
+	lines.push("Examples:", formatVariantEnvelope(variant, exampleTool.name, "{}"));
 	return lines.join("\n");
 }
 

@@ -22,6 +22,7 @@
 - Added central standing-rule text for tool argument repair modes.
 - Added teach-state and execution-outcome fields to tool argument validation telemetry.
 - Added a central catalogue for teachable tool execution error guidance.
+- Added text tool-call protocol variants for per-model calibration.
 
 ## [0.81.11] - 2026-07-07
 

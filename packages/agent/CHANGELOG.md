@@ -11,6 +11,7 @@
 - Added in-band guidance after repeated identical tool execution failures.
 - Linked tool argument validation telemetry to teach state and same-call execution outcome.
 - Added catalogued guidance lines to matching tool execution errors.
+- Added agent-loop forwarding for calibrated text tool-call protocol variants.
 
 ## [0.81.11] - 2026-07-07
 

@@ -1,5 +1,6 @@
 import type { AssistantMessageDiagnostic } from "./utils/diagnostics.ts";
 import type { AssistantMessageEventStream } from "./utils/event-stream.ts";
+import type { TextToolProtocolOptions } from "./utils/tool-repair/text-protocol.ts";
 
 export type { AssistantMessageEventStream } from "./utils/event-stream.ts";
 
@@ -157,7 +158,7 @@ export interface StreamOptions {
 	 * When enabled, pi adds a deterministic text tool-call primer and converts
 	 * recognized envelopes in assistant text back into ToolCall blocks.
 	 */
-	textToolCallProtocol?: boolean;
+	textToolCallProtocol?: boolean | TextToolProtocolOptions;
 }
 
 export type ProviderStreamOptions = StreamOptions & Record<string, unknown>;
@@ -601,6 +602,8 @@ export interface Model<TApi extends Api> {
 	 * Use this when a provider has a cost or quality boundary before the hard context window.
 	 */
 	autoCompactionTriggerTokens?: number;
+	/** Use the text tool-call protocol instead of native provider tool calls for this model. */
+	textToolCallProtocol?: boolean;
 	maxTokens: number;
 	headers?: Record<string, string>;
 	/** Compatibility overrides for OpenAI-compatible APIs. If not set, auto-detected from baseUrl. */

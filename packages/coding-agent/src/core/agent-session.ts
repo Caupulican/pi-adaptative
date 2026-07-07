@@ -43,11 +43,14 @@ import type {
 	Api,
 	AssistantMessage,
 	CacheRetention,
+	Context,
 	ImageContent,
 	Message,
 	Model,
 	StopReason,
 	TextContent,
+	TextToolProtocolVariant,
+	Tool,
 	ToolArgumentValidationTelemetryEvent,
 	ToolRepairModeName,
 	Usage,
@@ -55,9 +58,12 @@ import type {
 import {
 	cleanupSessionResources,
 	formatToolRepairStandingRule,
+	generateTextToolProtocolPrimer,
 	isContextOverflow,
+	parseTextToolCalls,
 	streamSimple,
 } from "@caupulican/pi-ai";
+import { Type } from "typebox";
 import { getAgentDir } from "../config.ts";
 import { stripFrontmatter } from "../utils/frontmatter.ts";
 import { formatNoApiKeyFoundMessage, formatNoModelSelectedMessage } from "./auth-guidance.ts";
@@ -188,6 +194,14 @@ import type { BashOperations } from "./tools/bash.ts";
  */
 const RAW_STREAM_MARKER = Symbol.for("pi.rawStreamSimple");
 const MODEL_ADAPTATION_REPAIR_THRESHOLD = 3;
+const TEXT_TOOL_PROTOCOL_VERSION = 1;
+const TEXT_TOOL_PROTOCOL_TRIALS_PER_VARIANT = 2;
+const TEXT_TOOL_PROTOCOL_VARIANTS: readonly TextToolProtocolVariant[] = ["tool-tag", "tool-call", "fenced-json"];
+const TEXT_TOOL_PROTOCOL_ECHO_TOOL = {
+	name: "echo",
+	description: "Echo calibration data",
+	parameters: Type.Object({ data: Type.String() }),
+} satisfies Tool;
 
 /** Test-only override of the stream-idle bounds. Read per-request by the wiring's resolver. */
 let streamIdleOptionsOverride: Partial<StreamIdleOptions> | undefined;
@@ -1258,6 +1272,91 @@ export class AgentSession {
 		return modelKey ? this._modelAdaptationStore.get(modelKey).rules : [];
 	}
 
+	private _textProtocolFlag(model: Model<Api> | undefined): boolean {
+		return model?.textToolCallProtocol === true;
+	}
+
+	private _textProtocolCalibrationContext(variant: TextToolProtocolVariant, token: string): Context {
+		const primer = generateTextToolProtocolPrimer([TEXT_TOOL_PROTOCOL_ECHO_TOOL], { variant });
+		const instruction = `Text tool protocol calibration trial. Using the protocol above, call echo with data exactly "${token}". Output only the tool-call envelope.`;
+		return {
+			systemPrompt: `${primer}\n\n${instruction}`,
+			messages: [{ role: "user", content: [{ type: "text", text: instruction }], timestamp: Date.now() }],
+			tools: [TEXT_TOOL_PROTOCOL_ECHO_TOOL],
+		};
+	}
+
+	private async _runTextProtocolTrial(
+		model: Model<Api>,
+		variant: TextToolProtocolVariant,
+		token: string,
+	): Promise<boolean> {
+		const stream = await this.agent.streamFn(model, this._textProtocolCalibrationContext(variant, token), {
+			textToolCallProtocol: false,
+			maxRetries: 0,
+		});
+		const message = await stream.result();
+		if (
+			message.content.some(
+				(block) => block.type === "toolCall" && block.name === "echo" && block.arguments.data === token,
+			)
+		) {
+			return true;
+		}
+		const text = message.content
+			.filter((block): block is TextContent => block.type === "text")
+			.map((block) => block.text)
+			.join("\n")
+			.trim();
+		if (!text) return false;
+		const parsed = parseTextToolCalls(text, [TEXT_TOOL_PROTOCOL_ECHO_TOOL]);
+		return parsed.calls.some((call) => call.name === "echo" && call.arguments.data === token);
+	}
+
+	private async _ensureTextToolProtocolForActiveModel(): Promise<void> {
+		const model = this.agent.state.model;
+		if (!this._textProtocolFlag(model)) {
+			this.agent.textToolCallProtocol = undefined;
+			return;
+		}
+
+		const modelKey = this._modelAdaptationKeyFor(model);
+		if (!modelKey) {
+			this.agent.textToolCallProtocol = true;
+			return;
+		}
+
+		const profile = this._modelAdaptationStore.get(modelKey);
+		if (profile.protocol?.version === TEXT_TOOL_PROTOCOL_VERSION) {
+			this.agent.textToolCallProtocol = { variant: profile.protocol.variant as TextToolProtocolVariant };
+			return;
+		}
+
+		for (const variant of TEXT_TOOL_PROTOCOL_VARIANTS) {
+			let passed = true;
+			for (let trial = 0; trial < TEXT_TOOL_PROTOCOL_TRIALS_PER_VARIANT; trial++) {
+				const ok = await this._runTextProtocolTrial(model, variant, `pi-calibration-${trial + 1}`);
+				if (!ok) {
+					passed = false;
+					break;
+				}
+			}
+			if (passed) {
+				const calibratedAt = new Date().toISOString();
+				this._modelAdaptationStore.setProtocol(
+					modelKey,
+					{ version: TEXT_TOOL_PROTOCOL_VERSION, variant, calibratedAt },
+					calibratedAt,
+				);
+				this.agent.textToolCallProtocol = { variant };
+				return;
+			}
+		}
+
+		this.agent.textToolCallProtocol = undefined;
+		throw new Error(`Model ${modelKey} cannot follow the text tool protocol after calibration.`);
+	}
+
 	private _tagModelAdaptationRuleTeaching(
 		event: ToolArgumentValidationTelemetryEvent,
 	): ToolArgumentValidationTelemetryEvent {
@@ -2166,6 +2265,7 @@ export class AgentSession {
 		try {
 			const maxGoalLoopRounds = this.settingsManager.getAutonomySettings().maxStallTurns;
 			this.agent.maxStallTurns = maxGoalLoopRounds;
+			await this._ensureTextToolProtocolForActiveModel();
 			let goalLoopRounds = 1;
 			await this.agent.prompt(messages);
 			while ((maxGoalLoopRounds === 0 || goalLoopRounds < maxGoalLoopRounds) && (await this._handlePostAgentRun())) {
