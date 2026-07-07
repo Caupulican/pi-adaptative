@@ -216,9 +216,13 @@ If your command is slow, expensive, rate-limited, or should keep using a previou
 | `maxTokens` | No | `16384` | Maximum output tokens |
 | `cost` | No | all zeros | `{"input": 0, "output": 0, "cacheRead": 0, "cacheWrite": 0}` (per million tokens) |
 | `compat` | No | provider `compat` | Provider compatibility overrides. Merged with provider-level `compat` when both are set. |
+| `textToolCallProtocol` | No | omitted | Set `true` to enable pi's text tool-call protocol fallback for a pure-text model that cannot emit native provider tool calls. |
+
+`textToolCallProtocol` is a per-model opt-in. It is overridden by the emergency global setting `toolRepair.textProtocol` and by the `PI_TEXT_TOOL_CALL_PROTOCOL_DISABLED=1` environment kill switch. Native provider tool calls still take precedence when the model emits them; this flag enables only the text-protocol fallback lane.
 
 Current behavior:
 - `/model` and `--list-models` list entries by model `id`.
+- `--list-models` shows `text-tools: yes` when `textToolCallProtocol` is enabled for a model.
 - The configured `name` is used for model matching and detail/status text.
 
 ### Thinking Level Map
@@ -323,7 +327,7 @@ Use `modelOverrides` to customize specific built-in models without replacing the
 }
 ```
 
-`modelOverrides` supports these fields per model: `name`, `reasoning`, `input`, `cost` (partial), `contextWindow`, `maxTokens`, `headers`, `compat`.
+`modelOverrides` supports these fields per model: `name`, `reasoning`, `input`, `cost` (partial), `contextWindow`, `textToolCallProtocol`, `maxTokens`, `headers`, `compat`.
 
 Behavior notes:
 - `modelOverrides` are applied to built-in provider models.

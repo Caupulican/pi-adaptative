@@ -1288,6 +1288,10 @@ export class AgentSession {
 	}
 
 	private _textProtocolFlag(model: Model<Api> | undefined): boolean {
+		// Phase 7 gating hierarchy: PI_TEXT_TOOL_CALL_PROTOCOL_DISABLED env kill >
+		// settings.toolRepair.textProtocol global force/kill > Model.textToolCallProtocol
+		// per-model flag > probed verdict. Native provider tool calls still win when emitted;
+		// this flag only enables the text-protocol fallback lane.
 		const override = this._toolRepairSettings().textProtocol;
 		return override ?? model?.textToolCallProtocol === true;
 	}

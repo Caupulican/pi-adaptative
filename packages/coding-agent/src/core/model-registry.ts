@@ -168,6 +168,7 @@ const ModelDefinitionSchema = Type.Object({
 		}),
 	),
 	contextWindow: Type.Optional(Type.Number()),
+	textToolCallProtocol: Type.Optional(Type.Boolean()),
 	maxTokens: Type.Optional(Type.Number()),
 	headers: Type.Optional(Type.Record(Type.String(), Type.String())),
 	compat: Type.Optional(ProviderCompatSchema),
@@ -188,6 +189,7 @@ const ModelOverrideSchema = Type.Object({
 		}),
 	),
 	contextWindow: Type.Optional(Type.Number()),
+	textToolCallProtocol: Type.Optional(Type.Boolean()),
 	maxTokens: Type.Optional(Type.Number()),
 	headers: Type.Optional(Type.Record(Type.String(), Type.String())),
 	compat: Type.Optional(ProviderCompatSchema),
@@ -382,6 +384,7 @@ function applyModelOverride(model: Model<Api>, override: ModelOverride): Model<A
 	}
 	if (override.input !== undefined) result.input = override.input as ("text" | "image")[];
 	if (override.contextWindow !== undefined) result.contextWindow = override.contextWindow;
+	if (override.textToolCallProtocol !== undefined) result.textToolCallProtocol = override.textToolCallProtocol;
 	if (override.maxTokens !== undefined) result.maxTokens = override.maxTokens;
 
 	// Merge cost (partial override)
@@ -678,6 +681,7 @@ export class ModelRegistry {
 					input: (modelDef.input ?? ["text"]) as ("text" | "image")[],
 					cost: modelDef.cost ?? defaultCost,
 					contextWindow: modelDef.contextWindow ?? DEFAULT_MODEL_CONTEXT_WINDOW,
+					textToolCallProtocol: modelDef.textToolCallProtocol,
 					maxTokens: modelDef.maxTokens ?? DEFAULT_MODEL_MAX_TOKENS,
 					headers: undefined,
 					compat,
@@ -991,6 +995,7 @@ export class ModelRegistry {
 					input: modelDef.input as ("text" | "image")[],
 					cost: modelDef.cost,
 					contextWindow: modelDef.contextWindow ?? DEFAULT_MODEL_CONTEXT_WINDOW,
+					textToolCallProtocol: modelDef.textToolCallProtocol,
 					maxTokens: modelDef.maxTokens ?? DEFAULT_MODEL_MAX_TOKENS,
 					headers: undefined,
 					compat: modelDef.compat,
@@ -1040,6 +1045,7 @@ export interface ProviderConfigInput {
 		input: ("text" | "image")[];
 		cost: { input: number; output: number; cacheRead: number; cacheWrite: number };
 		contextWindow?: number;
+		textToolCallProtocol?: boolean;
 		maxTokens?: number;
 		headers?: Record<string, string>;
 		compat?: Model<Api>["compat"];

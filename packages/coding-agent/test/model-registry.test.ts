@@ -423,6 +423,52 @@ describe("ModelRegistry", () => {
 			}
 		});
 
+		test("models.json custom models preserve textToolCallProtocol", () => {
+			writeRawModelsJson({
+				demo: {
+					baseUrl: "https://example.com/v1",
+					apiKey: "DEMO_KEY",
+					api: "openai-completions",
+					models: [
+						{
+							id: "phone-model",
+							reasoning: false,
+							input: ["text"],
+							textToolCallProtocol: true,
+						},
+					],
+				},
+			});
+
+			const registry = ModelRegistry.create(authStorage, modelsJsonPath);
+			const model = registry.find("demo", "phone-model");
+
+			expect(registry.getError()).toBeUndefined();
+			expect(model?.textToolCallProtocol).toBe(true);
+		});
+
+		test("models.json leaves textToolCallProtocol absent when omitted", () => {
+			writeRawModelsJson({
+				demo: {
+					baseUrl: "https://example.com/v1",
+					apiKey: "DEMO_KEY",
+					api: "openai-completions",
+					models: [
+						{
+							id: "native-model",
+							reasoning: false,
+							input: ["text"],
+						},
+					],
+				},
+			});
+
+			const registry = ModelRegistry.create(authStorage, modelsJsonPath);
+
+			expect(registry.getError()).toBeUndefined();
+			expect(registry.find("demo", "native-model")?.textToolCallProtocol).toBeUndefined();
+		});
+
 		test("model schema accepts thinkingLevelMap and compat schema accepts supportsStrictMode and cacheControlFormat", () => {
 			writeRawModelsJson({
 				demo: {
@@ -941,6 +987,36 @@ describe("ModelRegistry", () => {
 					process.env.CUSTOM_NAME = originalEnv;
 				}
 			}
+		});
+
+		test("registerProvider preserves textToolCallProtocol and listModels shows it", async () => {
+			const registry = ModelRegistry.create(authStorage, modelsJsonPath);
+			const logSpy = vi.spyOn(console, "log").mockImplementation(() => {});
+
+			registry.registerProvider("text-protocol-provider", {
+				baseUrl: "https://provider.test/v1",
+				apiKey: "test-key",
+				api: "openai-completions",
+				models: [
+					{
+						id: "phone-model",
+						name: "Phone Model",
+						reasoning: false,
+						input: ["text"],
+						cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 },
+						contextWindow: 128000,
+						maxTokens: 4096,
+						textToolCallProtocol: true,
+					},
+				],
+			});
+
+			expect(registry.find("text-protocol-provider", "phone-model")?.textToolCallProtocol).toBe(true);
+
+			await expect(listModels(registry, "phone-model")).resolves.toBeUndefined();
+			const output = logSpy.mock.calls.map((call) => call.join(" ")).join("\n");
+			expect(output).toContain("text-tools");
+			expect(output).toMatch(/phone-model\s+128K\s+4\.1K\s+no\s+no\s+yes/);
 		});
 
 		test("registerProvider fills token limit defaults for models without explicit limits", async () => {

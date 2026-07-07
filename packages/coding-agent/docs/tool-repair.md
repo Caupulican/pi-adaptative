@@ -8,7 +8,7 @@ Pi validates every model-emitted tool call against its TypeBox schema before exe
 - Repair is validate-then-repair: schema-valid arguments are returned unchanged; only invalid arguments enter the repair layer.
 - Repair can be disabled independently from teaching with `toolRepair.repair: false` or `PI_TOOL_REPAIR_DISABLED=1`. When repair is disabled, invalid calls bounce instead of executing repaired arguments.
 - Teaching can be disabled independently with `toolRepair.teach: false` or `PI_TOOL_REPAIR_TEACH_DISABLED=1`. Repairs can still execute; the in-band "Tool argument repair note" is suppressed.
-- Text tool-call protocol calibration can be disabled with `toolRepair.textProtocol: false` or `PI_TEXT_TOOL_CALL_PROTOCOL_DISABLED=1`.
+- Text tool-call protocol calibration can be enabled per model with `textToolCallProtocol: true` in `models.json`. Use `toolRepair.textProtocol` only as a global emergency force/kill switch; `PI_TEXT_TOOL_CALL_PROTOCOL_DISABLED=1` always disables it.
 
 Example project settings:
 
