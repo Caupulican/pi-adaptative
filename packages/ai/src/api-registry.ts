@@ -35,6 +35,7 @@ interface ApiProviderInternal {
 type RegisteredApiProvider = {
 	provider: ApiProviderInternal;
 	sourceId?: string;
+	previous?: RegisteredApiProvider;
 };
 
 const apiProviderRegistry = new Map<string, RegisteredApiProvider>();
@@ -67,6 +68,7 @@ export function registerApiProvider<TApi extends Api, TOptions extends StreamOpt
 	provider: ApiProvider<TApi, TOptions>,
 	sourceId?: string,
 ): void {
+	const previous = apiProviderRegistry.get(provider.api);
 	apiProviderRegistry.set(provider.api, {
 		provider: {
 			api: provider.api,
@@ -74,6 +76,7 @@ export function registerApiProvider<TApi extends Api, TOptions extends StreamOpt
 			streamSimple: wrapStreamSimple(provider.api, provider.streamSimple),
 		},
 		sourceId,
+		previous,
 	});
 }
 
@@ -85,9 +88,24 @@ export function getApiProviders(): ApiProviderInternal[] {
 	return Array.from(apiProviderRegistry.values(), (entry) => entry.provider);
 }
 
+function removeApiProviderSource(
+	entry: RegisteredApiProvider | undefined,
+	sourceId: string,
+): RegisteredApiProvider | undefined {
+	if (!entry) return undefined;
+	if (entry.sourceId === sourceId) return entry.previous;
+
+	const previous = removeApiProviderSource(entry.previous, sourceId);
+	if (previous === entry.previous) return entry;
+	return { ...entry, previous };
+}
+
 export function unregisterApiProviders(sourceId: string): void {
 	for (const [api, entry] of apiProviderRegistry.entries()) {
-		if (entry.sourceId === sourceId) {
+		const replacement = removeApiProviderSource(entry, sourceId);
+		if (replacement) {
+			apiProviderRegistry.set(api, replacement);
+		} else {
 			apiProviderRegistry.delete(api);
 		}
 	}
