@@ -41,11 +41,30 @@ describe("compaction stall retry", () => {
 		await harness.session.prompt("one");
 		await harness.session.prompt("two");
 
+		const recoveredSummary = [
+			"## Active Task",
+			"two",
+			"",
+			"### Mandatory Rules",
+			"(none)",
+			"",
+			"## Working Set",
+			"(none)",
+			"",
+			"## Files",
+			"(none)",
+			"",
+			"## Open Problems",
+			"(none)",
+			"",
+			"## Done",
+			"(none)",
+		].join("\n");
 		// Queue for the compaction's summarization calls: first stalls, second recovers.
-		harness.setResponses([hangUntilAborted, fauxAssistantMessage("recovered summary")]);
+		harness.setResponses([hangUntilAborted, fauxAssistantMessage(recoveredSummary)]);
 
 		const result = await harness.session.compact();
-		expect(result.summary).toBe("recovered summary");
+		expect(result.summary).toBe(recoveredSummary);
 		expect(harness.sessionManager.getEntries().some((entry) => entry.type === "compaction")).toBe(true);
 	}, 5000);
 
