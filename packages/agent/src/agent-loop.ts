@@ -665,6 +665,10 @@ async function prepareToolCall(
 			provider: config.model.provider,
 			telemetry: config.onToolArgumentValidation,
 		});
+		if (validatedArgs !== toolCall.arguments) {
+			toolCall.rawArguments ??= toolCall.arguments;
+			toolCall.arguments = validatedArgs;
+		}
 		if (config.beforeToolCall) {
 			const beforeResult = await config.beforeToolCall(
 				{

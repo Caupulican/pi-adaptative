@@ -15,6 +15,7 @@
 - Fixed tool validation bounce messages to include compact expected schema fragments, examples, and per-path received values.
 - Added shape-only telemetry hooks for tool argument validation outcomes and repairs.
 - Fixed tool name sanitization and reverse mapping for OpenAI-compatible and Google provider tool calls.
+- Added a diagnostic `rawArguments` field for repaired tool calls.
 
 ## [0.81.11] - 2026-07-07
 

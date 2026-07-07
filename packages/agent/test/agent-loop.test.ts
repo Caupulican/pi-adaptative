@@ -331,6 +331,64 @@ describe("agentLoop with AgentMessage", () => {
 		}
 	});
 
+	it("stores repaired tool args on the assistant message while preserving raw args", async () => {
+		const toolSchema = Type.Object({ count: Type.Number() });
+		const executed: number[] = [];
+		const tool: AgentTool<typeof toolSchema, { count: number }> = {
+			name: "count",
+			label: "Count",
+			description: "Count tool",
+			parameters: toolSchema,
+			async execute(_toolCallId, params) {
+				executed.push(params.count);
+				return { content: [{ type: "text", text: String(params.count) }], details: { count: params.count } };
+			},
+		};
+
+		const context: AgentContext = { systemPrompt: "", messages: [], tools: [tool] };
+		const userPrompt: AgentMessage = createUserMessage("count");
+		const config: AgentLoopConfig = { model: createModel(), convertToLlm: identityConverter };
+
+		let callIndex = 0;
+		const streamFn = () => {
+			const stream = new MockAssistantStream();
+			queueMicrotask(() => {
+				if (callIndex === 0) {
+					const message = createAssistantMessage(
+						[{ type: "toolCall", id: "tool-1", name: "count", arguments: { count: "42" as unknown as number } }],
+						"toolUse",
+					);
+					stream.push({ type: "done", reason: "toolUse", message });
+				} else {
+					const message = createAssistantMessage([{ type: "text", text: "done" }]);
+					stream.push({ type: "done", reason: "stop", message });
+				}
+				callIndex++;
+			});
+			return stream;
+		};
+
+		const stream = agentLoop([userPrompt], context, config, undefined, streamFn);
+		for await (const _ of stream) {
+			// consume
+		}
+
+		const messages = await stream.result();
+		const assistant = messages.find(
+			(message) => message.role === "assistant" && message.content[0]?.type === "toolCall",
+		);
+		const toolCall =
+			assistant?.role === "assistant" ? assistant.content.find((block) => block.type === "toolCall") : undefined;
+		expect(executed).toEqual([42]);
+		expect(toolCall).toMatchObject({
+			type: "toolCall",
+			id: "tool-1",
+			name: "count",
+			arguments: { count: 42 },
+			rawArguments: { count: "42" },
+		});
+	});
+
 	it("bounces provider-marked tool call errors without executing the tool", async () => {
 		const toolSchema = Type.Object({ value: Type.Optional(Type.String()) });
 		const executed: unknown[] = [];

@@ -5,6 +5,7 @@
 - Fixed watchdog-wrapped streams to settle with an aborted result when caller abort makes the inner stream end without a terminal event.
 - Fixed provider-marked tool call errors to bounce as tool results without executing the tool.
 - Added agent-loop forwarding for shape-only tool argument validation telemetry.
+- Fixed repaired tool calls to store repaired arguments on the assistant message while preserving raw arguments for diagnostics.
 
 ## [0.81.11] - 2026-07-07
 
