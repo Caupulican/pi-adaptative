@@ -85,6 +85,12 @@ describe("text tool-call protocol", () => {
 		expect(parseTextToolCalls('```tool\n{"name":"echo","arguments":{"value":"hi"}}\n```', tools).calls).toMatchObject(
 			[{ type: "toolCall", name: "echo", arguments: { value: "hi" }, source: "text-protocol" }],
 		);
+		expect(parseTextToolCalls('```json\n{"name":"echo","arguments":{"value":"hi"}}\n```', tools).calls).toMatchObject(
+			[{ type: "toolCall", name: "echo", arguments: { value: "hi" }, source: "text-protocol" }],
+		);
+		expect(
+			parseTextToolCalls('```json\n{"tool":{"name":"echo","arguments":{"value":"hi"}}}\n```', tools).calls,
+		).toMatchObject([{ type: "toolCall", name: "echo", arguments: { value: "hi" }, source: "text-protocol" }]);
 	});
 
 	it("parses tolerated pure-text envelope spelling drift", () => {

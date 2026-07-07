@@ -1,20 +1,21 @@
 #!/usr/bin/env node
-import { copyFile, mkdir, mkdtemp, rm, writeFile } from "node:fs/promises";
+import { copyFile, mkdir, mkdtemp, readFile, rm, unlink, writeFile } from "node:fs/promises";
 import { homedir, tmpdir } from "node:os";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
 import { spawn } from "node:child_process";
 
-const DEFAULT_MODELS = ["qwen3:1.7b", "gemma3:1b"];
+const DEFAULT_MODELS = ["ollama/qwen3:1.7b", "ollama/gemma3:1b", "openai-codex/gpt-5.5"];
 const EXPECTED_VERDICTS = new Map([
-	["qwen3:1.7b", "native"],
-	["gemma3:1b", "text-protocol"],
+	["ollama/qwen3:1.7b", "native"],
+	["ollama/gemma3:1b", "text-protocol"],
 ]);
+const PROBE_ONLY_MODELS = new Set(["openai-codex/gpt-5.5"]);
 const TIMEOUT_MS = 180_000;
 const root = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "..");
 
 function usage() {
-	console.log(`Usage: node scripts/accept-text-protocol-live.mjs [--model <ollama-model>]... [--keep-sessions]\n\nRuns C10-style scratch-session live acceptance against local Ollama models.\nDefault models: ${DEFAULT_MODELS.join(", ")}\nRequires local Ollama with the requested models already pulled.`);
+	console.log(`Usage: node scripts/accept-text-protocol-live.mjs [--model <provider/model>]... [--keep-sessions]\n\nRuns C10-style scratch-session live acceptance. Bare model names are treated as ollama/<model>.\nDefault models: ${DEFAULT_MODELS.join(", ")}\nRequires local Ollama with requested Ollama models already pulled and auth for non-Ollama providers.`);
 }
 
 function parseArgs(argv) {
@@ -43,6 +44,30 @@ function writeJson(child, value) {
 	child.stdin.write(`${JSON.stringify(value)}\n`);
 }
 
+function parseModelRef(input) {
+	if (input.includes("/")) {
+		const [provider, ...modelParts] = input.split("/");
+		return { provider, model: modelParts.join("/"), ref: input };
+	}
+	return { provider: "ollama", model: input, ref: `ollama/${input}` };
+}
+
+async function readJsonIfExists(filePath) {
+	try {
+		return JSON.parse(await readFile(filePath, "utf8"));
+	} catch (error) {
+		if (error && typeof error === "object" && "code" in error && error.code === "ENOENT") return {};
+		throw error;
+	}
+}
+
+async function hydrateAgentDir(agentDir) {
+	await copyFile(path.join(homedir(), ".pi", "agent", "models.json"), path.join(agentDir, "models.json"));
+	const auth = await readJsonIfExists(path.join(homedir(), ".pi", "agent", "auth.json"));
+	auth.ollama ??= { type: "api_key", key: "ollama" };
+	await writeFile(path.join(agentDir, "auth.json"), JSON.stringify(auth), "utf8");
+}
+
 function makeLineReader(stream, onLine) {
 	let buffer = "";
 	stream.setEncoding("utf8");
@@ -66,8 +91,12 @@ function parseJsonLine(line) {
 	}
 }
 
-function waitForEvent(state, predicate, description, timeoutMs = TIMEOUT_MS) {
-	for (const event of state.events) {
+function delay(ms) {
+	return new Promise((resolve) => setTimeout(resolve, ms));
+}
+
+function waitForEvent(state, predicate, description, timeoutMs = TIMEOUT_MS, startIndex = 0) {
+	for (const event of state.events.slice(startIndex)) {
 		if (predicate(event)) return Promise.resolve(event);
 	}
 	return new Promise((resolve, reject) => {
@@ -88,17 +117,63 @@ function waitForEvent(state, predicate, description, timeoutMs = TIMEOUT_MS) {
 	});
 }
 
-async function runModel(model, keepSessions) {
-	const scratch = await mkdtemp(path.join(tmpdir(), `pi-c10-toolproto-${model.replace(/[^a-zA-Z0-9_.-]/g, "-")}-`));
+function isReadToolResultEvent(event) {
+	return event.type === "message_end" && event.message?.role === "toolResult" && event.message.toolName === "read";
+}
+
+function eventIsError(event) {
+	if (event.type === "tool_execution_end") return event.isError;
+	return event.message?.isError;
+}
+
+function eventResultJson(event) {
+	if (event.type === "tool_execution_end") return JSON.stringify(event.result);
+	return JSON.stringify(event.message?.content);
+}
+
+async function waitForIdle(child, state, targetRef) {
+	for (let attempt = 0; attempt < 60; attempt++) {
+		const id = `idle-${targetRef}-${Date.now()}-${attempt}`;
+		const startIndex = state.events.length;
+		writeJson(child, { id, type: "get_state" });
+		const response = await waitForEvent(
+			state,
+			(event) => event.id === id && event.type === "response" && event.command === "get_state",
+			`get_state response for ${targetRef}`,
+			30_000,
+			startIndex,
+		);
+		if (!response.success) throw new Error(response.error || `get_state failed for ${targetRef}`);
+		if (!response.data?.isStreaming) return;
+		await delay(1_000);
+	}
+	throw new Error(`Timed out waiting for idle state for ${targetRef}`);
+}
+
+async function runModel(modelRef, keepSessions) {
+	const target = parseModelRef(modelRef);
+	const scratch = await mkdtemp(path.join(tmpdir(), `pi-c10-toolproto-${target.ref.replace(/[^a-zA-Z0-9_.-]/g, "-")}-`));
 	const sessionDir = path.join(scratch, "sessions");
 	const agentDir = path.join(scratch, "agent");
 	await mkdir(agentDir, { recursive: true });
-	await copyFile(path.join(homedir(), ".pi", "agent", "models.json"), path.join(agentDir, "models.json"));
-	await writeFile(path.join(agentDir, "auth.json"), JSON.stringify({ ollama: { type: "api_key", key: "ollama" } }), "utf8");
+	await hydrateAgentDir(agentDir);
 	const state = { events: [], listeners: new Set(), stderr: "" };
+	let markerPath;
 	const child = spawn(
 		path.join(root, "pi-test.sh"),
-		["--mode", "rpc", "--provider", "ollama", "--model", model, "--session-dir", sessionDir, "--no-extensions"],
+		[
+			"--mode",
+			"rpc",
+			"--provider",
+			target.provider,
+			"--model",
+			target.model,
+			"--session-dir",
+			sessionDir,
+			"--system-prompt",
+			"",
+			"--no-extensions",
+		],
 		{
 			cwd: root,
 			env: {
@@ -125,57 +200,85 @@ async function runModel(model, keepSessions) {
 	});
 
 	try {
-		writeJson(child, { id: `probe-${model}`, type: "tool_probe", model: `ollama/${model}` });
+		writeJson(child, { id: `probe-${target.ref}`, type: "tool_probe", model: target.ref });
 		const probeResponse = await waitForEvent(
 			state,
-			(event) => event.id === `probe-${model}` && event.type === "response" && event.command === "tool_probe",
-			`tool_probe response for ${model}`,
+			(event) => event.id === `probe-${target.ref}` && event.type === "response" && event.command === "tool_probe",
+			`tool_probe response for ${target.ref}`,
 		);
-		if (!probeResponse.success) throw new Error(probeResponse.error || `tool_probe failed for ${model}`);
-		const probe = probeResponse.data.results.find((entry) => entry.model === `ollama/${model}`);
-		if (!probe) throw new Error(`tool_probe did not return ollama/${model}`);
-		if (probe.verdict === "none") throw new Error(`ollama/${model} failed tool probe: ${probe.diagnostic || "none"}`);
-		const expectedVerdict = EXPECTED_VERDICTS.get(model);
+		if (!probeResponse.success) throw new Error(probeResponse.error || `tool_probe failed for ${target.ref}`);
+		const probe = probeResponse.data.results.find((entry) => entry.model === target.ref);
+		if (!probe) throw new Error(`tool_probe did not return ${target.ref}`);
+		const expectedVerdict = EXPECTED_VERDICTS.get(target.ref);
 		if (expectedVerdict && probe.verdict !== expectedVerdict) {
-			throw new Error(`ollama/${model} expected ${expectedVerdict} probe verdict, got ${probe.verdict}`);
+			throw new Error(`${target.ref} expected ${expectedVerdict} probe verdict, got ${probe.verdict}`);
+		}
+		if (probe.verdict === "none" && !PROBE_ONLY_MODELS.has(target.ref)) {
+			throw new Error(`${target.ref} failed tool probe: ${probe.diagnostic || "none"}`);
 		}
 		if (probe.verdict === "text-protocol" && !probe.variant) {
-			throw new Error(`ollama/${model} returned text-protocol without a calibrated variant`);
+			throw new Error(`${target.ref} returned text-protocol without a calibrated variant`);
+		}
+		if (PROBE_ONLY_MODELS.has(target.ref)) {
+			return { model: target.ref, verdict: probe.verdict, variant: probe.variant || "-", marker: "probe-only", sessionDir };
 		}
 
-		const marker = "piliveok";
-		const markerPath = path.join(tmpdir(), "pi-text-protocol-live-marker.txt");
+		const marker = `xok-${Math.random().toString(36).slice(2, 10)}`;
+		markerPath = path.join(tmpdir(), `x-${Date.now()}-${Math.random().toString(36).slice(2, 10)}.txt`);
 		await writeFile(markerPath, marker, "utf8");
-		const prompt =
-			probe.verdict === "text-protocol"
-				? `Output exactly this text and nothing else: <pi:call name="read">{"path":"${markerPath}"}</pi:call>`
-				: `Use the read tool to read exactly: ${markerPath}. Do not answer without using the read tool.`;
-		writeJson(child, {
-			id: `prompt-${model}`,
-			type: "prompt",
-			message: prompt,
-		});
-		const promptResponse = await waitForEvent(
-			state,
-			(event) => event.id === `prompt-${model}` && event.type === "response" && event.command === "prompt",
-			`prompt preflight response for ${model}`,
-			60_000,
-		);
-		if (!promptResponse.success) throw new Error(promptResponse.error || `prompt failed for ${model}`);
-		const toolEvent = await waitForEvent(
-			state,
-			(event) => event.type === "tool_execution_end" && event.toolName === "read",
-			`read tool execution for ${model}`,
-		);
-		if (toolEvent.isError) throw new Error(`read tool failed for ${model}: ${JSON.stringify(toolEvent.result)}`);
-		if (!JSON.stringify(toolEvent.result).includes(marker)) {
-			throw new Error(`read result for ${model} did not include marker ${marker}: ${JSON.stringify(toolEvent.result)}`);
+		const prompts = [`Read the file ${markerPath} and tell me exactly what it contains.`];
+		let toolEvent;
+		for (const [index, message] of prompts.entries()) {
+			const promptId = `prompt-${target.ref}-${index + 1}`;
+			const promptStartIndex = state.events.length;
+			writeJson(child, { id: promptId, type: "prompt", message });
+			const promptResponse = await waitForEvent(
+				state,
+				(event) => event.id === promptId && event.type === "response" && event.command === "prompt",
+				`prompt preflight response for ${target.ref}`,
+				60_000,
+				promptStartIndex,
+			);
+			if (!promptResponse.success) throw new Error(promptResponse.error || `prompt failed for ${target.ref}`);
+			let turnEvent;
+			try {
+				turnEvent = await waitForEvent(
+					state,
+					(event) =>
+						(event.type === "tool_execution_end" && event.toolName === "read") ||
+						isReadToolResultEvent(event) ||
+						(event.type === "message_end" &&
+							event.message?.role === "assistant" &&
+							event.message.stopReason !== "toolUse") ||
+						event.type === "agent_end",
+					`read tool execution or turn end for ${target.ref}`,
+					120_000,
+					promptStartIndex,
+				);
+			} catch {
+				await waitForIdle(child, state, target.ref);
+				continue;
+			}
+			if (turnEvent.type === "tool_execution_end" || isReadToolResultEvent(turnEvent)) {
+				toolEvent = turnEvent;
+				break;
+			}
+			await waitForIdle(child, state, target.ref);
 		}
-		return { model, verdict: probe.verdict, variant: probe.variant || "-", marker, sessionDir };
+		if (!toolEvent) throw new Error(`read tool execution for ${target.ref} did not occur`);
+		const resultJson = eventResultJson(toolEvent);
+		if (eventIsError(toolEvent)) throw new Error(`read tool failed for ${target.ref}: ${resultJson}`);
+		if (!resultJson.includes(marker)) {
+			throw new Error(`read result for ${target.ref} did not include marker ${marker}: ${resultJson}`);
+		}
+		return { model: target.ref, verdict: probe.verdict, variant: probe.variant || "-", marker, sessionDir };
 	} finally {
 		child.stdin.end();
 		child.kill("SIGTERM");
-		if (!keepSessions) await rm(scratch, { recursive: true, force: true });
+		if (!keepSessions) {
+			await rm(scratch, { recursive: true, force: true });
+			if (markerPath) await unlink(markerPath).catch(() => undefined);
+		}
 	}
 }
 

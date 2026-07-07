@@ -6,6 +6,7 @@ import type {
 	Api,
 	AssistantMessage,
 	Context,
+	Message,
 	Model,
 	ProviderStreamOptions,
 	SimpleStreamOptions,
@@ -35,15 +36,50 @@ function withEnvApiKey<TOptions extends StreamOptions>(
 	return { ...options, apiKey } as TOptions;
 }
 
+function withTextProtocolUserReminder(message: Message): Message {
+	if (message.role !== "user") return message;
+	const reminder =
+		"Tool-use reminder: if this request asks to read a file, call exactly one tool named read before answering; do not guess file contents.";
+	if (typeof message.content === "string") return { ...message, content: `${message.content}\n\n${reminder}` };
+	return { ...message, content: [...message.content, { type: "text", text: reminder }] };
+}
+
+function withTextProtocolCurrentTurnReminder(messages: readonly Message[]): Message[] {
+	let lastUserIndex = -1;
+	for (let index = messages.length - 1; index >= 0; index--) {
+		if (messages[index]?.role === "user") {
+			lastUserIndex = index;
+			break;
+		}
+	}
+	return messages.map((message, index) => (index === lastUserIndex ? withTextProtocolUserReminder(message) : message));
+}
+
 function withTextToolProtocolContext(context: Context, options: StreamOptions | undefined): Context {
 	const protocolOptions = normalizeTextToolProtocolOptions(options?.textToolCallProtocol);
 	if (!protocolOptions || !context.tools?.length) return context;
 	const primer = generateTextToolProtocolPrimer(context.tools, protocolOptions);
 	if (!primer) return context;
 	const { tools: _tools, ...providerContext } = context;
+	const messages = context.messages.length
+		? [
+				{
+					role: "user" as const,
+					content: [
+						{
+							type: "text" as const,
+							text: `Tool-call instructions for this conversation:\n${primer}\n\nDo not answer this instruction. Apply it to subsequent user requests. If the next user request asks to read a file, your first response must be a read tool call and nothing else.`,
+						},
+					],
+					timestamp: 0,
+				},
+				...withTextProtocolCurrentTurnReminder(context.messages),
+			]
+		: context.messages;
 	return {
 		...providerContext,
 		systemPrompt: context.systemPrompt ? `${context.systemPrompt}\n\n${primer}` : primer,
+		messages,
 	};
 }
 

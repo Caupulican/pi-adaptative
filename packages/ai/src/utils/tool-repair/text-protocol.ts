@@ -128,7 +128,7 @@ function findToolEnvelopes(text: string): EnvelopeMatch[] {
 		});
 	}
 
-	const fence = /```(?:tool|tool_call)\s*\n([\s\S]*?)\n?```/gi;
+	const fence = /```(?:tool|tool_call|json)\s*\n([\s\S]*?)\n?```/gi;
 	for (const match of text.matchAll(fence)) {
 		matches.push({
 			kind: "fenced_json",
@@ -273,9 +273,10 @@ function parseEnvelope(match: EnvelopeMatch, names: readonly string[], index: nu
 		};
 	}
 
-	const nameValue = parsed.name ?? parsed.tool;
+	const wrappedTool = isRecord(parsed.tool) ? parsed.tool : undefined;
+	const nameValue = parsed.name ?? (typeof parsed.tool === "string" ? parsed.tool : undefined) ?? wrappedTool?.name;
 	if (typeof nameValue !== "string") return undefined;
-	const argsValue = parsed.arguments ?? parsed.args ?? {};
+	const argsValue = parsed.arguments ?? parsed.args ?? wrappedTool?.arguments ?? wrappedTool?.args ?? {};
 	const args = coerceArguments(argsValue);
 	return {
 		type: "toolCall",
@@ -437,6 +438,10 @@ function protocolHeader(variant: TextToolProtocolVariant): string[] {
 		"When calling tools, output only one or more envelopes and no prose:",
 		formatVariantEnvelope(variant, "TOOL", '{"arg":"value"}'),
 		"Arguments must be valid JSON objects. Use double quotes for JSON keys and string values. Arrays are JSON arrays [ ], never quoted strings. Omit optional args you do not need - do not send null.",
+		"User requests about files, directories, searches, edits, writes, or shell commands require a tool envelope first; do not describe results yourself.",
+		'If the user asks to read /tmp/example.txt, output exactly: <pi:call name="read">{"path":"/tmp/example.txt"}</pi:call>',
+		'For any request to read a file path, call read with {"path":"THE_PATH"}; never output {"file_path":..., "content":...} or invented file contents.',
+		"Never write raw shell commands such as read -t PATH, cat PATH, or ls PATH; use a tool-call envelope instead.",
 		"Never output markdown code blocks, raw shell commands, file paths, or invented tool results instead of a tool call; use the envelope and wait for the real result.",
 	];
 }
