@@ -15,6 +15,7 @@ export const TOOL_REPAIR_MODE_NAMES = [
 ] as const;
 
 export type ToolRepairModeName = (typeof TOOL_REPAIR_MODE_NAMES)[number];
+export type ToolRepairFailureModeName = ToolRepairModeName | "other";
 
 export interface ToolRepairRegistryEntry {
 	name: ToolRepairModeName;

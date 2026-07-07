@@ -2,7 +2,11 @@ import { Compile } from "typebox/compile";
 import type { TLocalizedValidationError } from "typebox/error";
 import type { Tool, ToolCall } from "../types.ts";
 import { analyzeToolArgumentErrors } from "./tool-repair/analyzer.ts";
-import { formatToolRepairNote, type ToolRepairModeName } from "./tool-repair/registry.ts";
+import {
+	formatToolRepairNote,
+	type ToolRepairFailureModeName,
+	type ToolRepairModeName,
+} from "./tool-repair/registry.ts";
 import { repairToolArguments } from "./tool-repair/repairer.ts";
 
 const validatorCache = new WeakMap<object, ReturnType<typeof Compile>>();
@@ -14,13 +18,22 @@ export type ToolArgumentValidationOutcome = "clean" | "repaired" | "bounced";
 export type ToolArgumentTeachState = "none" | "note" | "rule";
 export type ToolArgumentExecutionOutcome = "not_run" | "succeeded" | "failed";
 
+export interface ToolArgumentFailureShapeEntry {
+	path: string;
+	expectedType: string;
+	receivedType: string;
+	keyword?: string;
+}
+
 export interface ToolArgumentValidationTelemetryEvent {
 	outcome: ToolArgumentValidationOutcome;
 	provider?: string;
 	model?: string;
 	tool: string;
-	failureModes: ToolRepairModeName[];
+	failureModes: ToolRepairFailureModeName[];
 	repairsApplied: ToolRepairModeName[];
+	failureShape?: ToolArgumentFailureShapeEntry[];
+	errorKeywords?: string[];
 	taught: ToolArgumentTeachState;
 	executionOutcome: ToolArgumentExecutionOutcome;
 }
@@ -64,6 +77,11 @@ function emitToolArgumentValidationTelemetry(
 
 function uniqueRepairModes(modes: Iterable<ToolRepairModeName>): ToolRepairModeName[] {
 	return [...new Set(modes)];
+}
+
+function uniqueFailureModes(modes: Iterable<ToolRepairModeName>): ToolRepairFailureModeName[] {
+	const uniqueModes = uniqueRepairModes(modes);
+	return uniqueModes.length > 0 ? uniqueModes : ["other"];
 }
 
 function getValidator(schema: Tool["parameters"]): ReturnType<typeof Compile> {
@@ -166,6 +184,54 @@ function receivedValueAtPath(args: unknown, pathSegments: readonly string[]): un
 		return MISSING_VALUE;
 	}
 	return current;
+}
+
+function receivedTypeOf(value: unknown): string {
+	if (value === MISSING_VALUE) return "missing";
+	if (value === null) return "null";
+	if (Array.isArray(value)) return "array";
+	return typeof value;
+}
+
+function expectedTypeOf(schema: unknown): string {
+	const record = asRecord(schema);
+	if (!record) return "unknown";
+	if (Array.isArray(record.type)) return record.type.filter((type) => typeof type === "string").join("|") || "unknown";
+	if (typeof record.type === "string") return record.type;
+	if (literalValues(record)) return "enum";
+	if (record.properties !== undefined) return "object";
+	if (record.items !== undefined) return "array";
+	return "unknown";
+}
+
+function formatFailureShape(
+	errors: readonly TLocalizedValidationError[],
+	args: unknown,
+	schema: unknown,
+): ToolArgumentFailureShapeEntry[] {
+	const seen = new Set<string>();
+	const shape: ToolArgumentFailureShapeEntry[] = [];
+	for (const error of errors) {
+		const path = formatValidationPath(error);
+		const pathSegments = path === "root" ? [] : path.split(".");
+		const expectedSchema = schemaAtPath(schema, pathSegments);
+		const value = receivedValueAtPath(args, pathSegments);
+		const entry = {
+			path,
+			expectedType: expectedTypeOf(expectedSchema),
+			receivedType: receivedTypeOf(value),
+			keyword: error.keyword,
+		};
+		const key = `${entry.path}\0${entry.expectedType}\0${entry.receivedType}\0${entry.keyword}`;
+		if (seen.has(key)) continue;
+		seen.add(key);
+		shape.push(entry);
+	}
+	return shape;
+}
+
+function errorKeywords(errors: readonly TLocalizedValidationError[]): string[] {
+	return [...new Set(errors.map((error) => error.keyword))].sort();
 }
 
 function literalValues(schema: unknown): unknown[] | undefined {
@@ -350,7 +416,7 @@ export function validateToolArguments(
 
 	const validationErrors = [...validator.Errors(args)] as TLocalizedValidationError[];
 	const repairIssues = analyzeToolArgumentErrors(toolCall.name, tool.parameters, args, validationErrors);
-	const failureModes = uniqueRepairModes(repairIssues.flatMap((issue) => issue.modes));
+	const failureModes = uniqueFailureModes(repairIssues.flatMap((issue) => issue.modes));
 	const repaired = repairToolArguments(toolCall.name, tool.parameters, args, validationErrors, (candidate) =>
 		validator.Check(candidate),
 	);
@@ -374,6 +440,8 @@ export function validateToolArguments(
 		tool: toolCall.name,
 		failureModes,
 		repairsApplied: [],
+		failureShape: formatFailureShape(validationErrors, toolCall.arguments, tool.parameters),
+		errorKeywords: errorKeywords(validationErrors),
 	});
 
 	const errorMessage = `Validation failed for tool "${toolCall.name}":\n${formatValidationErrors(

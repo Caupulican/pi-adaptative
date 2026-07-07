@@ -23,6 +23,7 @@
 - Added teach-state and execution-outcome fields to tool argument validation telemetry.
 - Added a central catalogue for teachable tool execution error guidance.
 - Added text tool-call protocol variants for per-model calibration.
+- Added an offline tool-repair corpus replay helper for sanitized validation bounce fixtures.
 
 ## [0.81.11] - 2026-07-07
 

@@ -127,6 +127,8 @@ describe("validateToolArguments", () => {
 				tool: "count",
 				failureModes: [],
 				repairsApplied: [],
+				taught: "none",
+				executionOutcome: "not_run",
 			},
 			{
 				outcome: "repaired",
@@ -135,6 +137,8 @@ describe("validateToolArguments", () => {
 				tool: "count",
 				failureModes: ["numberFromString"],
 				repairsApplied: ["numberFromString"],
+				taught: "none",
+				executionOutcome: "not_run",
 			},
 			{
 				outcome: "bounced",
@@ -143,6 +147,12 @@ describe("validateToolArguments", () => {
 				tool: "count",
 				failureModes: ["numberFromString"],
 				repairsApplied: [],
+				taught: "none",
+				executionOutcome: "not_run",
+				failureShape: [
+					{ path: "count", expectedType: "number", receivedType: "string", keyword: expect.any(String) },
+				],
+				errorKeywords: [expect.any(String)],
 			},
 		]);
 		expect(JSON.stringify(events)).not.toContain("secret-value");

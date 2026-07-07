@@ -253,7 +253,7 @@ function classifyModes(toolName: string, issue: Omit<ToolRepairIssue, "modes">):
 	if (Array.isArray(issue.value) && issue.value.length === 1 && isScalarSchema(issue.schema)) {
 		modes.push("singleElementUnwrap");
 	}
-	if (isEmptyObject(issue.value) && isScalarSchema(issue.schema)) {
+	if (!issue.required && isEmptyObject(issue.value) && isScalarSchema(issue.schema)) {
 		modes.push("emptyObjectPlaceholder");
 	}
 	if (issue.value === null) {

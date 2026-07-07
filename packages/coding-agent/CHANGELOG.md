@@ -10,6 +10,7 @@
 - Added learned per-model tool-shape rules to system prompt assembly after repeated repair telemetry.
 - Added per-model teach-efficacy aggregation for tool argument validation telemetry.
 - Added per-model text tool-call protocol calibration before the first real turn.
+- Added sanitized tool-validation bounce records to the local failure corpus for repair-mode discovery.
 
 ## [0.81.11] - 2026-07-07
 

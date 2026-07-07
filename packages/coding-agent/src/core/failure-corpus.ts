@@ -2,7 +2,7 @@ import { appendFileSync, existsSync, mkdirSync, readFileSync, statSync, writeFil
 import { dirname } from "node:path";
 import type { ClassifiedError } from "@caupulican/pi-agent-core";
 
-export interface FailureCorpusRecord {
+export interface ProviderFailureCorpusRecord {
 	ts: string;
 	provider?: string;
 	modelId?: string;
@@ -10,6 +10,26 @@ export interface FailureCorpusRecord {
 	retryable: boolean;
 	message: string;
 }
+
+export interface ToolValidationFailureShapeEntry {
+	path: string;
+	expectedType: string;
+	receivedType: string;
+	keyword?: string;
+}
+
+export interface ToolValidationFailureCorpusRecord {
+	kind: "tool_validation";
+	ts: string;
+	provider?: string;
+	modelId?: string;
+	tool: string;
+	failureModes: string[];
+	shape: ToolValidationFailureShapeEntry[];
+	errorKeywords: string[];
+}
+
+export type FailureCorpusRecord = ProviderFailureCorpusRecord | ToolValidationFailureCorpusRecord;
 
 export interface FailureCorpusStats {
 	total: number;
@@ -48,25 +68,48 @@ export class FailureCorpusRecorder {
 	record(args: { provider?: string; modelId?: string; message: string; classified: ClassifiedError }): void {
 		this.total += 1;
 		if (args.classified.reason === "unknown") this.unknown += 1;
+		this.appendRecord({
+			ts: this.now().toISOString(),
+			provider: args.provider,
+			modelId: args.modelId,
+			reason: args.classified.reason,
+			retryable: args.classified.retryable,
+			message: redactSecrets(args.message).slice(0, MAX_MESSAGE_CHARS),
+		});
+	}
+
+	recordToolValidation(args: {
+		provider?: string;
+		modelId?: string;
+		tool: string;
+		failureModes: readonly string[];
+		shape: readonly ToolValidationFailureShapeEntry[];
+		errorKeywords?: readonly string[];
+	}): void {
+		this.appendRecord({
+			kind: "tool_validation",
+			ts: this.now().toISOString(),
+			provider: args.provider,
+			modelId: args.modelId,
+			tool: args.tool,
+			failureModes: [...new Set(args.failureModes)].sort(),
+			shape: sanitizeToolValidationShape(args.shape),
+			errorKeywords: [...new Set(args.errorKeywords ?? [])].sort(),
+		});
+	}
+
+	stats(): FailureCorpusStats {
+		return { total: this.total, unknown: this.unknown };
+	}
+
+	private appendRecord(record: FailureCorpusRecord): void {
 		try {
 			this.fs.mkdirSync(dirname(this.filePath), { recursive: true });
-			const record: FailureCorpusRecord = {
-				ts: this.now().toISOString(),
-				provider: args.provider,
-				modelId: args.modelId,
-				reason: args.classified.reason,
-				retryable: args.classified.retryable,
-				message: redactSecrets(args.message).slice(0, MAX_MESSAGE_CHARS),
-			};
 			this.fs.appendFileSync(this.filePath, `${JSON.stringify(record)}\n`, "utf-8");
 			this.rotateIfNeeded();
 		} catch (error) {
 			this.debug(`failure corpus write skipped: ${error instanceof Error ? error.message : String(error)}`);
 		}
-	}
-
-	stats(): FailureCorpusStats {
-		return { total: this.total, unknown: this.unknown };
 	}
 
 	private rotateIfNeeded(): void {
@@ -78,6 +121,17 @@ export class FailureCorpusRecorder {
 			.slice(-MAX_ROTATED_RECORDS);
 		this.fs.writeFileSync(this.filePath, `${lines.join("\n")}\n`, "utf-8");
 	}
+}
+
+function sanitizeToolValidationShape(
+	shape: readonly ToolValidationFailureShapeEntry[],
+): ToolValidationFailureShapeEntry[] {
+	return shape.map((entry) => ({
+		path: entry.path,
+		expectedType: entry.expectedType,
+		receivedType: entry.receivedType,
+		...(entry.keyword ? { keyword: entry.keyword } : {}),
+	}));
 }
 
 export function redactSecrets(message: string): string {

@@ -44,6 +44,7 @@ export type {
 } from "./utils/oauth/types.ts";
 export * from "./utils/overflow.ts";
 export * from "./utils/tool-repair/registry.ts";
+export * from "./utils/tool-repair/replay.ts";
 export * from "./utils/tool-repair/text-protocol.ts";
 export * from "./utils/typebox-helpers.ts";
 export * from "./utils/validation.ts";

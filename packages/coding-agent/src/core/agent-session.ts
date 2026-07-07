@@ -949,6 +949,7 @@ export class AgentSession {
 			const taggedEvent = this._tagModelAdaptationRuleTeaching(event);
 			previousToolArgumentValidation?.(taggedEvent);
 			this._analytics.recordToolArgumentValidation(taggedEvent);
+			this._recordToolValidationBounce(taggedEvent);
 			this._handleModelAdaptationTelemetry(taggedEvent);
 		};
 		this._treeNavigator = new SessionTreeNavigator({
@@ -1355,6 +1356,18 @@ export class AgentSession {
 
 		this.agent.textToolCallProtocol = undefined;
 		throw new Error(`Model ${modelKey} cannot follow the text tool protocol after calibration.`);
+	}
+
+	private _recordToolValidationBounce(event: ToolArgumentValidationTelemetryEvent): void {
+		if (event.outcome !== "bounced" || !event.failureShape || event.failureShape.length === 0) return;
+		this._failureCorpus.recordToolValidation({
+			provider: event.provider ?? this.agent.state.model?.provider,
+			modelId: event.model ?? this.agent.state.model?.id,
+			tool: event.tool,
+			failureModes: event.failureModes,
+			shape: event.failureShape,
+			errorKeywords: event.errorKeywords,
+		});
 	}
 
 	private _tagModelAdaptationRuleTeaching(
