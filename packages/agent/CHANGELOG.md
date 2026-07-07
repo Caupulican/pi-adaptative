@@ -1,5 +1,8 @@
 ## [Unreleased]
 
+### Fixed
+- Fixed checkpoint v2 open-error extraction to classify tool failures from authoritative/structured outcome signals instead of matching error words in successful tool content; compaction facts now include retained recent messages so checkpoints carry the current task state.
+
 ## [0.81.9] - 2026-07-07
 
 ### Fixed

@@ -963,7 +963,7 @@ export function prepareCompaction(
 		}
 	}
 
-	const facts = extractCompactionFacts(pathEntries, boundaryStart, historyEnd);
+	const facts = extractCompactionFacts(pathEntries, boundaryStart, boundaryEnd);
 
 	return {
 		firstKeptEntryId,

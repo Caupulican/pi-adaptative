@@ -1,6 +1,10 @@
 import type { AssistantMessage, Message, ToolResultMessage, UserMessage } from "@caupulican/pi-ai";
 import { describe, expect, it } from "vitest";
-import { type CompactionPreparation, createDeterministicCompaction } from "../../src/compaction/compaction.ts";
+import {
+	type CompactionPreparation,
+	createDeterministicCompaction,
+	prepareCompaction,
+} from "../../src/compaction/compaction.ts";
 import { extractCompactionFacts, renderFactsBlock } from "../../src/compaction/extraction.ts";
 import { verifySummary } from "../../src/compaction/verification.ts";
 import type { SessionMessageEntry } from "../../src/session/session-manager.ts";
@@ -362,6 +366,107 @@ describe("extractCompactionFacts", () => {
 		expect(facts.errorFacts).toEqual([{ operation: "EDIT src/a.ts", error: "Exit code 1: patch failed" }]);
 	});
 
+	it("classifies error facts from signals, not content", () => {
+		resetEntryCounter();
+		const successfulGitAddCall = createMessageEntry(
+			createAssistantMessage([
+				{
+					type: "toolCall",
+					id: "tc-git-add",
+					name: "bash",
+					arguments: { command: "git add packages/agent/src/compaction/extraction.ts" },
+				},
+			]),
+		);
+		const successfulGitAddResult = createMessageEntry(
+			createToolResult(
+				"tc-git-add",
+				"bash",
+				"M packages/agent/src/compaction/extraction.ts\nM packages/agent/test/compaction/extraction.test.ts",
+			),
+		);
+		const readWithFailureWordsCall = createMessageEntry(
+			createAssistantMessage([
+				{ type: "toolCall", id: "tc-read", name: "read", arguments: { path: "src/providers/bedrock.ts" } },
+			]),
+		);
+		const readWithFailureWordsResult = createMessageEntry(
+			createToolResult(
+				"tc-read",
+				"read",
+				'import { ProviderError } from "./errors.ts";\nthrow new Error("failed request");',
+			),
+		);
+		const exitCodeCall = createMessageEntry(
+			createAssistantMessage([{ type: "toolCall", id: "tc-exit", name: "bash", arguments: { command: "false" } }]),
+		);
+		const exitCodeResult = createMessageEntry(
+			createToolResult("tc-exit", "bash", "Command exited with code 1", undefined, false),
+		);
+		const vitestCall = createMessageEntry(
+			createAssistantMessage([
+				{
+					type: "toolCall",
+					id: "tc-vitest",
+					name: "bash",
+					arguments: { command: "cd packages/ai && npm test -- bedrock-convert-messages.test.ts" },
+				},
+			]),
+		);
+		const vitestResult = createMessageEntry(
+			createToolResult(
+				"tc-vitest",
+				"bash",
+				"> @caupulican/pi-ai@0.81.7 test\n> vitest --run\n\nFAIL test/bedrock-convert-messages.test.ts > preserves redacted thinking\nCommand exited with code 1",
+			),
+		);
+		const authoritativeReadFailureCall = createMessageEntry(
+			createAssistantMessage([
+				{ type: "toolCall", id: "tc-read-fail", name: "read", arguments: { path: "src/missing.ts" } },
+			]),
+		);
+		const authoritativeReadFailureResult = createMessageEntry(
+			createToolResult("tc-read-fail", "read", "File not found", undefined, true),
+		);
+		const structuredExitCall = createMessageEntry(
+			createAssistantMessage([
+				{ type: "toolCall", id: "tc-structured", name: "bash", arguments: { command: "npm run lint" } },
+			]),
+		);
+		const structuredExitResult = createMessageEntry(
+			createToolResult("tc-structured", "bash", "lint output", { exitCode: 2 }, false),
+		);
+
+		const facts = extractCompactionFacts(
+			[
+				successfulGitAddCall,
+				successfulGitAddResult,
+				readWithFailureWordsCall,
+				readWithFailureWordsResult,
+				exitCodeCall,
+				exitCodeResult,
+				vitestCall,
+				vitestResult,
+				authoritativeReadFailureCall,
+				authoritativeReadFailureResult,
+				structuredExitCall,
+				structuredExitResult,
+			],
+			0,
+			12,
+		);
+
+		expect(facts.errorFacts).toEqual([
+			{ operation: "RUN false", error: "Command exited with code 1" },
+			{
+				operation: "RUN cd packages/ai && npm test -- bedrock-convert-messages.test.ts",
+				error: "FAIL test/bedrock-convert-messages.test.ts > preserves redacted thinking",
+			},
+			{ operation: "READ src/missing.ts", error: "File not found" },
+			{ operation: "RUN npm run lint", error: "lint output" },
+		]);
+	});
+
 	it("orders the working set by last touch and caps it to recent files", () => {
 		resetEntryCounter();
 		const entries: SessionMessageEntry[] = [];
@@ -391,6 +496,46 @@ describe("extractCompactionFacts", () => {
 			"src/file-4.ts",
 			"src/file-3.ts",
 			"src/file-2.ts",
+		]);
+	});
+
+	it("preparation facts include retained recent messages so checkpoints carry current state", () => {
+		resetEntryCounter();
+		const oldUser = createMessageEntry(createUserMessage(`old work ${"x".repeat(2000)}`));
+		const oldAssistant = createMessageEntry(
+			createAssistantMessage([{ type: "toolCall", id: "tc-old", name: "read", arguments: { path: "src/old.ts" } }]),
+		);
+		const currentUser = createMessageEntry(createUserMessage("fix the bedrock redacted thinking regression"));
+		const currentFailureCall = createMessageEntry(
+			createAssistantMessage([
+				{
+					type: "toolCall",
+					id: "tc-bedrock",
+					name: "bash",
+					arguments: { command: "cd packages/ai && vitest bedrock-convert-messages.test.ts" },
+				},
+			]),
+		);
+		const currentFailureResult = createMessageEntry(
+			createToolResult(
+				"tc-bedrock",
+				"bash",
+				"FAIL test/bedrock-convert-messages.test.ts > captures streamed redacted reasoning content",
+			),
+		);
+
+		const preparation = prepareCompaction(
+			[oldUser, oldAssistant, currentUser, currentFailureCall, currentFailureResult],
+			{ enabled: true, reserveTokens: 1000, keepRecentTokens: 1 },
+		);
+
+		expect(preparation).toBeDefined();
+		expect(preparation!.facts?.activeTaskSource).toBe("fix the bedrock redacted thinking regression");
+		expect(preparation!.facts?.errorFacts).toEqual([
+			{
+				operation: "RUN cd packages/ai && vitest bedrock-convert-messages.test.ts",
+				error: "FAIL test/bedrock-convert-messages.test.ts > captures streamed redacted reasoning content",
+			},
 		]);
 	});
 

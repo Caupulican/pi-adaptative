@@ -228,18 +228,43 @@ function operationLabel(toolName: string, path: string | undefined): string {
 	return `${toolCallVerb(toolName)} ${normalizeOperationTarget(toolName, path)}`;
 }
 
-function firstErrorLine(text: string): string {
-	const line = text
+function resultExitCode(message: AgentMessage): number | undefined {
+	const details = (message as { details?: unknown }).details;
+	if (!details || typeof details !== "object") return undefined;
+	const raw = (details as { exitCode?: unknown }).exitCode;
+	if (typeof raw === "number" && Number.isFinite(raw)) return raw;
+	if (typeof raw === "string" && /^\d+$/.test(raw)) return Number(raw);
+	return undefined;
+}
+
+function isOutcomeBearingTool(toolName: string | undefined): boolean {
+	return toolName === "bash";
+}
+
+function failureSignalLine(text: string): string | undefined {
+	return text
 		.split(/\r?\n/)
 		.map((part) => part.trim())
-		.find(Boolean);
+		.find((line) => /exited with code [1-9]\d*/i.test(line) || /^(error|fatal|✗|FAIL)\b/i.test(line));
+}
+
+function firstErrorLine(text: string): string {
+	const line =
+		failureSignalLine(text) ??
+		text
+			.split(/\r?\n/)
+			.map((part) => part.trim())
+			.find(Boolean);
 	return clampText(line ?? "failed", ERROR_LINE_MAX_CHARS);
 }
 
 function isFailureToolResult(message: AgentMessage, text: string): boolean {
 	if (message.role !== "toolResult") return false;
 	if ((message as { isError?: unknown }).isError === true) return true;
-	return /\b(exit code|failed|failure|error|exception|traceback)\b/i.test(text);
+	const exitCode = resultExitCode(message);
+	if (exitCode !== undefined) return exitCode !== 0;
+	const toolName = (message as { toolName?: unknown }).toolName;
+	return typeof toolName === "string" && isOutcomeBearingTool(toolName) && failureSignalLine(text) !== undefined;
 }
 
 export function extractCompactionFacts(entries: SessionEntry[], start: number, end: number): CompactionFacts {
@@ -314,17 +339,6 @@ export function extractCompactionFacts(entries: SessionEntry[], start: number, e
 			if (messageText) {
 				sinceLastUser.push(messageText);
 			}
-		}
-
-		if (message.role === "assistant" && (message as { stopReason?: unknown }).stopReason === "error") {
-			const errorMessage = (message as { errorMessage?: unknown }).errorMessage;
-			openErrors.set("assistant:error", {
-				operation: "ASSISTANT response",
-				error: firstErrorLine(typeof errorMessage === "string" ? errorMessage : messageToText(message)),
-				lastTouch: i,
-			});
-		} else if (message.role === "assistant" && (message as { stopReason?: unknown }).stopReason === "stop") {
-			openErrors.delete("assistant:error");
 		}
 
 		if (message.role === "assistant" && Array.isArray(message.content)) {
