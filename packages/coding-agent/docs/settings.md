@@ -146,6 +146,26 @@ Fitness applicability is intentionally split by autonomy level:
 }
 ```
 
+### Tool Repair
+
+| Setting | Type | Default | Description |
+|---------|------|---------|-------------|
+| `toolRepair.repair` | boolean | `true` | Enable deterministic repair of invalid model-emitted tool arguments before execution |
+| `toolRepair.teach` | boolean | `true` | Enable in-band repair teaching notes on repaired tool results |
+| `toolRepair.textProtocol` | boolean | model-dependent | Override text tool-call protocol calibration for models that need text envelopes |
+
+Environment kill switches override settings: `PI_TOOL_REPAIR_DISABLED=1`, `PI_TOOL_REPAIR_TEACH_DISABLED=1`, and `PI_TEXT_TOOL_CALL_PROTOCOL_DISABLED=1`. See [Tool repair](tool-repair.md) for diagnostics and replay.
+
+```json
+{
+  "toolRepair": {
+    "repair": true,
+    "teach": true,
+    "textProtocol": true
+  }
+}
+```
+
 ### Auto Learn Advanced
 
 | Setting | Type | Default | Description |

@@ -166,6 +166,11 @@ If the user's instructions conflict with any rule in this document, ask for expl
 
 ## Findings
 
+### 2026-07-07 · packages/coding-agent · tool-repair operator docs cover controls, diagnostics, and replay — claude
+R50 is closed: `docs/tool-repair.md` now documents the shipped repair/teach/text-protocol contract, visible repaired-call signals, `/toolhealth`, `/toolrule-remove`, RPC equivalents, replay commands, and registry mode names; `docs/index.md`, `docs/settings.md`, `docs/usage.md`, and `docs/rpc.md` link the operator surface where users already look for settings, commands, and RPC protocol details.
+- evidence: packages/coding-agent/docs/tool-repair.md:1 · packages/coding-agent/docs/tool-repair.md:9 · packages/coding-agent/docs/tool-repair.md:29 · packages/coding-agent/docs/settings.md:153 · packages/coding-agent/docs/rpc.md:541 · packages/coding-agent/docs/index.md:49
+- tags: docs, tool-repair, operator-playbook, packages/coding-agent, roadmap-r50
+
 ### 2026-07-07 · packages/coding-agent · delegated worker actions now pass through shared tool validation — claude
 R49 is closed for the known bypass: `parseWorkerActions` now validates action arrays through the shared `validateToolArguments` choke point (including repaired stringified arrays and telemetry) before deterministic apply-time envelope enforcement. Audit result for the other enumerated paths: main agent loop and extension tools already enter through `prepareToolCall`; SDK consumers use the agent loop; RPC `bash` is direct user command execution, not model-output tool execution, so it intentionally does not repair model-emitted arguments.
 - evidence: packages/coding-agent/src/core/delegation/worker-actions.ts:52 · packages/coding-agent/src/core/delegation/worker-actions.ts:84 · packages/coding-agent/test/worker-actions.test.ts:20 · packages/agent/src/agent-loop.ts:798

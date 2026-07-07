@@ -538,6 +538,42 @@ Response:
 
 `contextUsage` is omitted when no model or context window is available. `contextUsage.tokens` and `contextUsage.percent` are `null` immediately after compaction until a fresh post-compaction assistant response provides valid usage data.
 
+#### get_tool_repair_health
+
+Return the same tool repair health report shown by `/toolhealth`.
+
+```json
+{"type": "get_tool_repair_health"}
+```
+
+Response:
+```json
+{
+  "type": "response",
+  "command": "get_tool_repair_health",
+  "success": true,
+  "data": { "report": "Tool repair health..." }
+}
+```
+
+#### remove_tool_repair_rule
+
+Remove one learned tool repair standing rule for a model/mode pair.
+
+```json
+{"type": "remove_tool_repair_rule", "model": "provider/model", "mode": "jsonStringParse"}
+```
+
+Response:
+```json
+{
+  "type": "response",
+  "command": "remove_tool_repair_rule",
+  "success": true,
+  "data": { "removed": true }
+}
+```
+
 #### export_html
 
 Export session to an HTML file.

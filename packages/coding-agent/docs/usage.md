@@ -53,6 +53,8 @@ Type `/` in the editor to open command completion. Extensions can register custo
 | `/reload` | Reload keybindings, extensions, skills, prompts, and context files |
 | `/hotkeys` | Show all keyboard shortcuts |
 | `/changelog` | Display version history |
+| `/toolhealth` | Show tool repair diagnostics and learned standing rules |
+| `/toolrule-remove <model> <mode>` | Remove one learned tool repair standing rule |
 | `/quit` | Quit pi |
 
 ## Message Queue
