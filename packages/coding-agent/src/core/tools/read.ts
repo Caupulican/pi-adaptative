@@ -106,6 +106,7 @@ async function scanLines(
 		const buffer = Buffer.allocUnsafe(SLICE_SCAN_CHUNK_BYTES);
 		let pending = "";
 		let index = 0;
+		let emittedAnyLine = false;
 		while (true) {
 			const { bytesRead } = await handle.read(buffer, 0, buffer.length, null);
 			if (bytesRead === 0) break;
@@ -113,6 +114,7 @@ async function scanLines(
 			let lineStart = 0;
 			let newlineIndex = pending.indexOf("\n", lineStart);
 			while (newlineIndex !== -1) {
+				emittedAnyLine = true;
 				if (!onLine(pending.slice(lineStart, newlineIndex), index++)) return;
 				lineStart = newlineIndex + 1;
 				newlineIndex = pending.indexOf("\n", lineStart);
@@ -120,7 +122,9 @@ async function scanLines(
 			pending = pending.slice(lineStart);
 		}
 		pending += decoder.end();
-		onLine(pending, index);
+		if (pending.length > 0 || !emittedAnyLine) {
+			onLine(pending, index);
+		}
 	} finally {
 		await handle.close();
 	}
@@ -201,6 +205,12 @@ function trimTrailingEmptyLines(lines: string[]): string[] {
 		end--;
 	}
 	return lines.slice(0, end);
+}
+
+function splitContentLines(text: string): string[] {
+	const lines = text.split("\n");
+	if (text.endsWith("\n")) lines.pop();
+	return lines;
 }
 
 function getNonVisionImageNote(model: Model<Api> | undefined): string | undefined {
@@ -460,7 +470,7 @@ export function createReadToolDefinition(
 									const buffer = await ops.readFile(absolutePath);
 									const textContent = buffer.toString("utf-8");
 									textContentForJsonCheck = textContent;
-									const allLines = textContent.split("\n");
+									const allLines = splitContentLines(textContent);
 									totalFileLines = allLines.length;
 									// Apply offset/tail if specified. Convert from 1-indexed input to 0-indexed array access.
 									if (offset !== undefined) {

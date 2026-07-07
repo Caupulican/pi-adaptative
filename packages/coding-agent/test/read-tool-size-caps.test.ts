@@ -58,6 +58,36 @@ describe("read tool sliced reads for oversized files", () => {
 		expect(text).not.toContain("line-00000");
 	});
 
+	it("returns the requested tail lines for newline-terminated small files", async () => {
+		const file = join(tempDir, "tail-small.txt");
+		writeFileSync(file, "a\nb\nc\n");
+
+		const tool = createReadTool(tempDir, { maxTextReadBytes: 8 * 1024 });
+		const result = await tool.execute("read-tail-small", { path: file, tail: 2, lineNumbers: true });
+
+		expect(textOf(result)).toBe("2: b\n3: c");
+	});
+
+	it("returns the requested tail lines for newline-terminated oversized files", async () => {
+		const file = join(tempDir, "tail-large.txt");
+		writeFileSync(file, "a\nb\nc\n");
+
+		const tool = createReadTool(tempDir, { maxTextReadBytes: 1 });
+		const result = await tool.execute("read-tail-large", { path: file, tail: 2, lineNumbers: true });
+
+		expect(textOf(result)).toBe("2: b\n3: c");
+	});
+
+	it("keeps tail behavior unchanged for files without a trailing newline", async () => {
+		const file = join(tempDir, "tail-no-newline.txt");
+		writeFileSync(file, "a\nb\nc");
+
+		const tool = createReadTool(tempDir, { maxTextReadBytes: 1 });
+		const result = await tool.execute("read-tail-no-newline", { path: file, tail: 2, lineNumbers: true });
+
+		expect(textOf(result)).toBe("2: b\n3: c");
+	});
+
 	it("reads small files exactly as before", async () => {
 		const file = join(tempDir, "small.txt");
 		writeFileSync(file, "alpha\nbeta\ngamma\n");
