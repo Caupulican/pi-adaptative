@@ -78,7 +78,7 @@ function seedCompactableSession(harness: Harness): void {
 	harness.sessionManager.appendMessage(
 		createAssistant(harness, {
 			stopReason: "stop",
-			totalTokens: 100,
+			totalTokens: 190_000,
 			timestamp: now - 500,
 		}),
 	);
