@@ -16,6 +16,7 @@
 - Added shape-only telemetry hooks for tool argument validation outcomes and repairs.
 - Fixed tool name sanitization and reverse mapping for OpenAI-compatible and Google provider tool calls.
 - Added a diagnostic `rawArguments` field for repaired tool calls.
+- Added an opt-in text tool-call protocol that injects a generated primer and converts explicit text envelopes into tool calls for non-native serving stacks.
 
 ## [0.81.11] - 2026-07-07
 

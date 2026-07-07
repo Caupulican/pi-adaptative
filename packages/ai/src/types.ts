@@ -152,6 +152,12 @@ export interface StreamOptions {
 	 * For example, Anthropic uses `user_id` for abuse tracking and rate limiting.
 	 */
 	metadata?: Record<string, unknown>;
+	/**
+	 * Opt-in compatibility mode for models served without native tool-call parsing.
+	 * When enabled, pi adds a deterministic text tool-call primer and converts
+	 * recognized envelopes in assistant text back into ToolCall blocks.
+	 */
+	textToolCallProtocol?: boolean;
 }
 
 export type ProviderStreamOptions = StreamOptions & Record<string, unknown>;
@@ -259,6 +265,7 @@ export interface ToolCall {
 	name: string;
 	arguments: Record<string, any>;
 	rawArguments?: Record<string, unknown>;
+	source?: "text-protocol";
 	errorMessage?: string;
 	thoughtSignature?: string; // Google-specific: opaque signature for reusing thought context
 }

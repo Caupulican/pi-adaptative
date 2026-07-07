@@ -5,13 +5,14 @@ import { getEnvApiKey } from "./env-api-keys.ts";
 import type {
 	Api,
 	AssistantMessage,
-	AssistantMessageEventStream,
 	Context,
 	Model,
 	ProviderStreamOptions,
 	SimpleStreamOptions,
 	StreamOptions,
 } from "./types.ts";
+import { AssistantMessageEventStream } from "./utils/event-stream.ts";
+import { generateTextToolProtocolPrimer, parseTextToolCalls } from "./utils/tool-repair/text-protocol.ts";
 
 export { getEnvApiKey } from "./env-api-keys.ts";
 
@@ -29,6 +30,50 @@ function withEnvApiKey<TOptions extends StreamOptions>(
 	return { ...options, apiKey } as TOptions;
 }
 
+function withTextToolProtocolContext(context: Context, options: StreamOptions | undefined): Context {
+	if (!options?.textToolCallProtocol || !context.tools?.length) return context;
+	const primer = generateTextToolProtocolPrimer(context.tools);
+	if (!primer) return context;
+	return {
+		...context,
+		systemPrompt: context.systemPrompt ? `${context.systemPrompt}\n\n${primer}` : primer,
+	};
+}
+
+function withTextToolProtocolResult(
+	stream: AssistantMessageEventStream,
+	context: Context,
+	options: StreamOptions | undefined,
+): AssistantMessageEventStream {
+	if (!options?.textToolCallProtocol || !context.tools?.length) return stream;
+	const wrapped = new AssistantMessageEventStream();
+	void (async () => {
+		for await (const event of stream) {
+			if (event.type !== "done") {
+				wrapped.push(event);
+				continue;
+			}
+			const message = event.message;
+			if (message.content.length !== 1 || message.content[0]?.type !== "text") {
+				wrapped.push(event);
+				continue;
+			}
+			const parsed = parseTextToolCalls(message.content[0].text, context.tools ?? []);
+			if (parsed.calls.length === 0) {
+				wrapped.push(event);
+				continue;
+			}
+			const content = parsed.text ? [{ type: "text" as const, text: parsed.text }, ...parsed.calls] : parsed.calls;
+			wrapped.push({
+				type: "done",
+				reason: "toolUse",
+				message: { ...message, content, stopReason: "toolUse" },
+			});
+		}
+	})();
+	return wrapped;
+}
+
 function resolveApiProvider(api: Api) {
 	const provider = getApiProvider(api);
 	if (!provider) {
@@ -43,7 +88,13 @@ export function stream<TApi extends Api>(
 	options?: ProviderStreamOptions,
 ): AssistantMessageEventStream {
 	const provider = resolveApiProvider(model.api);
-	return provider.stream(model, context, withEnvApiKey(model, options) as StreamOptions);
+	const resolvedOptions = withEnvApiKey(model, options) as StreamOptions;
+	const protocolContext = withTextToolProtocolContext(context, resolvedOptions);
+	return withTextToolProtocolResult(
+		provider.stream(model, protocolContext, resolvedOptions),
+		protocolContext,
+		resolvedOptions,
+	);
 }
 
 export async function complete<TApi extends Api>(
@@ -61,7 +112,13 @@ export function streamSimple<TApi extends Api>(
 	options?: SimpleStreamOptions,
 ): AssistantMessageEventStream {
 	const provider = resolveApiProvider(model.api);
-	return provider.streamSimple(model, context, withEnvApiKey(model, options));
+	const resolvedOptions = withEnvApiKey(model, options);
+	const protocolContext = withTextToolProtocolContext(context, resolvedOptions);
+	return withTextToolProtocolResult(
+		provider.streamSimple(model, protocolContext, resolvedOptions),
+		protocolContext,
+		resolvedOptions,
+	);
 }
 
 export async function completeSimple<TApi extends Api>(
