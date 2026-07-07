@@ -11,7 +11,6 @@ import type {
 	SimpleStreamOptions,
 	StreamOptions,
 	TextToolProtocolParseEvent,
-	Tool,
 } from "./types.ts";
 import { AssistantMessageEventStream } from "./utils/event-stream.ts";
 import {
@@ -36,32 +35,10 @@ function withEnvApiKey<TOptions extends StreamOptions>(
 	return { ...options, apiKey } as TOptions;
 }
 
-function escapeRegExp(value: string): string {
-	return value.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
-}
-
-function lastUserText(context: Context): string {
-	const message = context.messages.findLast((entry) => entry.role === "user");
-	if (!message) return "";
-	if (typeof message.content === "string") return message.content;
-	return message.content
-		.filter((block) => block.type === "text")
-		.map((block) => block.text)
-		.join("\n");
-}
-
-function selectTextProtocolPrimerTools(context: Context): readonly Tool[] {
-	const tools = context.tools ?? [];
-	const text = lastUserText(context);
-	if (!text) return tools;
-	const mentioned = tools.filter((tool) => new RegExp(`(^|\\W)${escapeRegExp(tool.name)}(\\W|$)`, "i").test(text));
-	return mentioned.length > 0 ? mentioned : tools;
-}
-
 function withTextToolProtocolContext(context: Context, options: StreamOptions | undefined): Context {
 	const protocolOptions = normalizeTextToolProtocolOptions(options?.textToolCallProtocol);
 	if (!protocolOptions || !context.tools?.length) return context;
-	const primer = generateTextToolProtocolPrimer(selectTextProtocolPrimerTools(context), protocolOptions);
+	const primer = generateTextToolProtocolPrimer(context.tools, protocolOptions);
 	if (!primer) return context;
 	const { tools: _tools, ...providerContext } = context;
 	return {

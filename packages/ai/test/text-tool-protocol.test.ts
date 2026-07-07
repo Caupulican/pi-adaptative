@@ -223,37 +223,6 @@ describe("text tool-call protocol", () => {
 		]);
 	});
 
-	it("narrows the primer to an explicitly named tool while parsing against the original tool list", async () => {
-		const registration = registerFauxProvider();
-		registrations.push(registration);
-		const context: Context = {
-			systemPrompt: "base",
-			messages: [
-				{
-					role: "user",
-					content: [{ type: "text", text: "Use the read tool." }],
-					timestamp: Date.now(),
-				},
-			],
-			tools: [makeTool("echo"), makeTool("read")],
-		};
-		let activeRequest: Context | undefined;
-		registration.setResponses([
-			(requestContext) => {
-				activeRequest = requestContext;
-				return fauxAssistantMessage('<pi:call name="echo">{"value":"hi"}</pi:call>');
-			},
-		]);
-
-		const converted = await complete(registration.getModel(), context, { textToolCallProtocol: true });
-
-		expect(activeRequest?.systemPrompt).toContain("read(value:string)");
-		expect(activeRequest?.systemPrompt).not.toContain("echo(value:string)");
-		expect(converted.content).toMatchObject([
-			{ type: "toolCall", name: "echo", arguments: { value: "hi" }, source: "text-protocol" },
-		]);
-	});
-
 	it("parses text envelopes from thinking plus text done messages", async () => {
 		const registration = registerFauxProvider();
 		registrations.push(registration);
