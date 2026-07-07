@@ -7,6 +7,7 @@
 - Fixed RPC input validation so non-command JSON lines return errors without terminating the process.
 - Fixed `read` tail results to return the requested content lines for newline-terminated files.
 - Fixed initial CLI prompt construction to separate stdin, `@file`, and message sources with blank lines.
+- Fixed worker edit actions to insert replacement text literally when it contains JavaScript `$` replacement patterns.
 
 ## [0.81.7] - 2026-07-06
 

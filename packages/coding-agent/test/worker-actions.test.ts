@@ -62,6 +62,20 @@ describe("applyWorkerActions (execution-time envelope enforcement)", () => {
 		expect(readFileSync(join(cwd, "src", "b.ts"), "utf-8")).toBe("the bar value");
 	});
 
+	it("inserts edit replacement text literally when it contains dollar patterns", () => {
+		writeFileSync(join(cwd, "src", "b.ts"), "before TOKEN after", "utf-8");
+		const replacement = "$$ $& $` $'";
+
+		const report = applyWorkerActions({
+			actions: [{ op: "edit", path: "src/b.ts", old: "TOKEN", new: replacement }],
+			envelope,
+			cwd,
+		});
+
+		expect(report.failed).toEqual([]);
+		expect(readFileSync(join(cwd, "src", "b.ts"), "utf-8")).toBe(`before ${replacement} after`);
+	});
+
 	it("REFUSES out-of-scope and denied paths at execution time — never silently writes them", () => {
 		const report = applyWorkerActions({
 			actions: [

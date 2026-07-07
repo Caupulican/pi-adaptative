@@ -82,7 +82,11 @@ export function applyWorkerActions(args: {
 					report.failed.push({ path: action.path, reason: "edit old-text not found in file" });
 					continue;
 				}
-				writeFileSync(target, current.replace(action.old, action.new ?? ""), "utf-8");
+				writeFileSync(
+					target,
+					current.replace(action.old, () => action.new ?? ""),
+					"utf-8",
+				);
 			}
 			if (!report.changedFiles.includes(relativePath)) report.changedFiles.push(relativePath);
 		} catch (error) {
