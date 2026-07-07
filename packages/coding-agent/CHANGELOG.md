@@ -1,5 +1,8 @@
 ## [Unreleased]
 
+### Fixed
+- Fixed external editor resolution so both inline and path-edit flows prefer `$VISUAL` before `$EDITOR`.
+
 ## [0.81.11] - 2026-07-07
 
 ## [0.81.10] - 2026-07-07

@@ -20,9 +20,12 @@ export interface ExternalEditorHost {
 	showWarning(message: string): void;
 }
 
+function resolveEditorCommand(): string | undefined {
+	return process.env.VISUAL || process.env.EDITOR;
+}
+
 export async function openExternalEditor(host: ExternalEditorHost): Promise<void> {
-	// Determine editor (respect $VISUAL, then $EDITOR)
-	const editorCmd = process.env.VISUAL || process.env.EDITOR;
+	const editorCmd = resolveEditorCommand();
 	if (!editorCmd) {
 		host.showWarning("No editor configured. Set $VISUAL or $EDITOR environment variable.");
 		return;
@@ -77,7 +80,7 @@ export async function openExternalEditor(host: ExternalEditorHost): Promise<void
 }
 
 export async function openEditorForPath(host: ExternalEditorHost, filePath: string): Promise<boolean> {
-	let editorCmd = process.env.EDITOR || process.env.VISUAL;
+	let editorCmd = resolveEditorCommand();
 	let isFallback = false;
 	if (!editorCmd) {
 		editorCmd = "vi";
