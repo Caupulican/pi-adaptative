@@ -1,4 +1,4 @@
-## [Unreleased]
+## [0.81.14] - 2026-07-07
 
 ### Fixed
 - Fixed text protocol model gating so persisted probe verdicts opt in only text-protocol models after env/settings/model gates, while unflagged native models do not receive the primer.

@@ -1,4 +1,4 @@
-## [Unreleased]
+## [0.81.14] - 2026-07-07
 
 ### Fixed
 - Fixed text tool protocol completion to withhold native provider tool definitions while the text protocol is active, parse replies against the original tool set, and preserve native-tool controls when the flag is absent.
