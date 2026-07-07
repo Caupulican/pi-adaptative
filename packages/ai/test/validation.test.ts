@@ -60,34 +60,20 @@ describe("validateToolArguments", () => {
 		}
 	});
 
-	it("coerces serialized plain JSON schemas with AJV-compatible primitive rules", () => {
+	it("repairs serialized plain JSON schemas with deterministic scalar rules", () => {
 		const passingCases: Array<{
 			schema: Tool["parameters"];
 			input: unknown;
 			expected: unknown;
 		}> = [
 			{ schema: { type: "number" } as Tool["parameters"], input: "42", expected: 42 },
-			{ schema: { type: "number" } as Tool["parameters"], input: true, expected: 1 },
-			{ schema: { type: "number" } as Tool["parameters"], input: null, expected: 0 },
 			{ schema: { type: "integer" } as Tool["parameters"], input: "42", expected: 42 },
 			{ schema: { type: "boolean" } as Tool["parameters"], input: "true", expected: true },
 			{ schema: { type: "boolean" } as Tool["parameters"], input: "false", expected: false },
-			{ schema: { type: "boolean" } as Tool["parameters"], input: 1, expected: true },
-			{ schema: { type: "boolean" } as Tool["parameters"], input: 0, expected: false },
-			{ schema: { type: "string" } as Tool["parameters"], input: null, expected: "" },
-			{ schema: { type: "string" } as Tool["parameters"], input: true, expected: "true" },
-			{ schema: { type: "null" } as Tool["parameters"], input: "", expected: null },
-			{ schema: { type: "null" } as Tool["parameters"], input: 0, expected: null },
-			{ schema: { type: "null" } as Tool["parameters"], input: false, expected: null },
 			{
 				schema: { type: ["number", "string"] } as Tool["parameters"],
 				input: "1",
 				expected: "1",
-			},
-			{
-				schema: { type: ["boolean", "number"] } as Tool["parameters"],
-				input: "1",
-				expected: 1,
 			},
 		];
 
@@ -106,6 +92,8 @@ describe("validateToolArguments", () => {
 			{ schema: { type: "boolean" } as Tool["parameters"], input: "0" },
 			{ schema: { type: "null" } as Tool["parameters"], input: "null" },
 			{ schema: { type: "integer" } as Tool["parameters"], input: "42.1" },
+			{ schema: { type: "number" } as Tool["parameters"], input: null },
+			{ schema: { type: "string" } as Tool["parameters"], input: null },
 		];
 
 		for (const testCase of failingCases) {

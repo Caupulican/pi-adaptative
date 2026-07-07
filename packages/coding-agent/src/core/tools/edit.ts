@@ -99,14 +99,6 @@ function prepareEditArguments(input: unknown): EditToolInput {
 
 	const args = input as Record<string, unknown>;
 
-	// Some models (Opus 4.6, GLM-5.1) send edits as a JSON string instead of an array
-	if (typeof args.edits === "string") {
-		try {
-			const parsed = JSON.parse(args.edits);
-			if (Array.isArray(parsed)) args.edits = parsed;
-		} catch {}
-	}
-
 	const legacy = args as LegacyEditToolInput;
 	if (typeof legacy.oldText !== "string" || typeof legacy.newText !== "string") {
 		return args as EditToolInput;

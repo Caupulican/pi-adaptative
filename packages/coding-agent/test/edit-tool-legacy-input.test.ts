@@ -90,7 +90,7 @@ describe("edit tool prepareArguments", () => {
 });
 
 describe("edit tool stringified edits", () => {
-	it("parses edits from a JSON string", () => {
+	it("leaves JSON-string edits for the shared validation repair layer", () => {
 		const definition = createEditToolDefinition(process.cwd());
 		const prepared = definition.prepareArguments!({
 			path: "file.txt",
@@ -98,7 +98,7 @@ describe("edit tool stringified edits", () => {
 		});
 		expect(prepared).toEqual({
 			path: "file.txt",
-			edits: [{ oldText: "a", newText: "b" }],
+			edits: JSON.stringify([{ oldText: "a", newText: "b" }]),
 		});
 	});
 
