@@ -1,6 +1,7 @@
 ## [Unreleased]
 
 ### Fixed
+- Fixed text tool protocol options to carry calibrated variants through stream completion.
 - Fixed text tool protocol parsing to use the canonical `<pi:call>` grammar while preserving supported inbound variants and routing stringified arguments through shared repair.
 
 ## [0.81.12] - 2026-07-07
