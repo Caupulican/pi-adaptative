@@ -83,6 +83,62 @@ describe("validateToolArguments", () => {
 		}
 	});
 
+	it("includes expected schema fragments and received values in validation bounces", () => {
+		const tool: Tool = {
+			name: "search",
+			description: "Search",
+			parameters: Type.Object({
+				query: Type.Object({
+					limit: Type.Number({ minimum: 1 }),
+					mode: Type.Union([Type.Literal("fast"), Type.Literal("deep")]),
+				}),
+			}),
+		};
+		const toolCall: ToolCall = {
+			type: "toolCall",
+			id: "tool-1",
+			name: "search",
+			arguments: { query: { limit: "many", mode: "slow" } },
+		};
+
+		expect(() => validateToolArguments(tool, toolCall)).toThrow(
+			/Validation failed for tool "search":\n[\s\S]*query\.limit:[\s\S]*Expected schema: \{"type":"number","minimum":1\}[\s\S]*Example: 1[\s\S]*Received: "many"[\s\S]*query\.mode:[\s\S]*Expected schema: \{"enum":\["fast","deep"\]\}[\s\S]*Example: "fast"[\s\S]*Received: "slow"/,
+		);
+	});
+
+	it("caps oversized expected schema fragments without dropping failing paths", () => {
+		const tool: Tool = {
+			name: "select",
+			description: "Select",
+			parameters: {
+				type: "object",
+				properties: {
+					first: { enum: Array.from({ length: 80 }, (_, index) => `first-${index}`) },
+					second: { enum: Array.from({ length: 80 }, (_, index) => `second-${index}`) },
+				},
+				required: ["first", "second"],
+			} as Tool["parameters"],
+		};
+		const toolCall: ToolCall = {
+			type: "toolCall",
+			id: "tool-1",
+			name: "select",
+			arguments: { first: "nope", second: "nope" },
+		};
+
+		try {
+			validateToolArguments(tool, toolCall);
+			throw new Error("validation unexpectedly passed");
+		} catch (error) {
+			const message = String(error instanceof Error ? error.message : error);
+			expect(message).toContain("first:");
+			expect(message).toContain("second:");
+			expect(message).toContain("Expected schema:");
+			expect(message).toContain("...[truncated]");
+			expect(message.length).toBeLessThan(5000);
+		}
+	});
+
 	it("rejects invalid coercions for serialized plain JSON schemas", () => {
 		const failingCases: Array<{
 			schema: Tool["parameters"];
