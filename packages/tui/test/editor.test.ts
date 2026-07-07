@@ -783,6 +783,37 @@ describe("Editor component", () => {
 			assert.strictEqual(contentLines[1], "ト"); // 1 char = 2 columns (+ padding)
 		});
 
+		it("wraps single wide graphemes at width 1 without recursion", () => {
+			for (const text of ["中", "😀", "a中b"]) {
+				const chunks = wordWrapLine(text, 1);
+				const reconstructed = chunks.map((chunk) => text.slice(chunk.startIndex, chunk.endIndex)).join("");
+				assert.strictEqual(reconstructed, text);
+			}
+		});
+
+		it("keeps paste markers visually splittable in a width-1 layout", () => {
+			const marker = "[paste #1 +20 lines]";
+			const line = `A${marker}B`;
+			const segments: Intl.SegmentData[] = [
+				{ segment: "A", index: 0, input: line },
+				{ segment: marker, index: 1, input: line },
+				{ segment: "B", index: 1 + marker.length, input: line },
+			];
+
+			const chunks = wordWrapLine(line, 1, segments);
+			const reconstructed = chunks.map((chunk) => line.slice(chunk.startIndex, chunk.endIndex)).join("");
+			assert.strictEqual(reconstructed, line);
+			assert.ok(chunks.every((chunk) => visibleWidth(chunk.text) <= 1));
+		});
+
+		it("renders narrow CJK editor layouts without overflowing the stack", () => {
+			for (const width of [1, 2]) {
+				const editor = new Editor(createTestTUI(width), defaultEditorTheme);
+				editor.setText("中");
+				assert.doesNotThrow(() => editor.render(width));
+			}
+		});
+
 		it("handles mixed ASCII and wide characters in wrapping", () => {
 			const editor = new Editor(createTestTUI(), defaultEditorTheme);
 			const width = 15 + 1; // +1 col reserved for cursor

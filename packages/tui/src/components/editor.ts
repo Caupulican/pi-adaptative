@@ -154,11 +154,23 @@ export function wordWrapLine(line: string, maxWidth: number, preSegmented?: Intl
 		}
 
 		if (gWidth > maxWidth) {
-			// Single atomic segment wider than maxWidth (e.g. paste marker
-			// in a narrow terminal). Re-wrap it at grapheme granularity.
+			const subGraphemes = [...graphemeSegmenter.segment(grapheme)];
+			if (subGraphemes.length <= 1) {
+				// A grapheme is atomic. If it is wider than the layout width,
+				// render it as an overflowing visual chunk instead of recursing
+				// with identical arguments.
+				const endIndex = charIndex + grapheme.length;
+				chunks.push({ text: grapheme, startIndex: charIndex, endIndex });
+				chunkStart = endIndex;
+				currentWidth = 0;
+				wrapOppIndex = -1;
+				continue;
+			}
 
-			// The segment remains logically atomic for cursor
-			// movement / editing — the split is purely visual for word-wrap layout.
+			// Multi-grapheme atomic segments wider than maxWidth (e.g. paste
+			// markers in a narrow terminal) can still be visually split at
+			// grapheme granularity. The segment remains logically atomic for
+			// cursor movement / editing.
 			const subChunks = wordWrapLine(grapheme, maxWidth);
 			for (let j = 0; j < subChunks.length - 1; j++) {
 				const sc = subChunks[j]!;
@@ -185,7 +197,9 @@ export function wordWrapLine(line: string, maxWidth: number, preSegmented?: Intl
 	}
 
 	// Push final chunk.
-	chunks.push({ text: line.slice(chunkStart), startIndex: chunkStart, endIndex: line.length });
+	if (chunkStart < line.length || chunks.length === 0) {
+		chunks.push({ text: line.slice(chunkStart), startIndex: chunkStart, endIndex: line.length });
+	}
 
 	return chunks;
 }
