@@ -24,9 +24,16 @@ User: Fix the two failing tests now
 ### Mandatory Rules
 - DO NOT touch the legacy client; the cancelled wrapped legacy client adapter is forbidden.
 
-## Files
-- src/fetcher.ts — edited retry loop (modified)
+## Working Set
+- src/fetcher.ts — edited retry loop
 - test/fetcher.test.ts — read; 2 failing tests
+
+## Files
+- src/fetcher.ts
+- test/fetcher.test.ts
+
+## Open Problems
+(none)
 
 ## Done
 1. EDIT src/fetcher.ts — added retry loop
@@ -50,9 +57,37 @@ describe("verifySummary", () => {
 	});
 
 	it("requires every modified or created path verbatim in ## Files", () => {
-		const report = verifySummary(goodSummary.replace("src/fetcher.ts", "src/other.ts"), baseFacts);
+		const report = verifySummary(
+			goodSummary.replace("## Files\n- src/fetcher.ts", "## Files\n- src/other.ts"),
+			baseFacts,
+		);
 		expect(report.ok).toBe(false);
 		expect(report.failures.some((failure) => failure.check === "files-modified-recall")).toBe(true);
+	});
+
+	it("requires working-set paths in ## Working Set", () => {
+		const report = verifySummary(
+			goodSummary.replace("src/fetcher.ts — edited retry loop", "src/other.ts"),
+			baseFacts,
+		);
+		expect(report.ok).toBe(false);
+		expect(report.failures.some((failure) => failure.check === "working-set-recall")).toBe(true);
+	});
+
+	it("requires open errors in ## Open Problems", () => {
+		const facts: CompactionFacts = {
+			...baseFacts,
+			errorFacts: [{ operation: "TEST npm test", error: "2 failed: fetcher.test.ts" }],
+		};
+		const summary = goodSummary.replace(
+			"## Open Problems\n(none)",
+			"## Open Problems\n- TEST npm test: 2 failed: fetcher.test.ts",
+		);
+		expect(verifySummary(summary, facts)).toEqual({ ok: true, failures: [] });
+
+		const report = verifySummary(summary.replace("TEST npm test: 2 failed: fetcher.test.ts", "tests failed"), facts);
+		expect(report.ok).toBe(false);
+		expect(report.failures.some((failure) => failure.check === "open-errors-recall")).toBe(true);
 	});
 
 	it("uses containment for read paths so small needles survive large file sections", () => {
@@ -72,14 +107,43 @@ describe("verifySummary", () => {
 ### Mandatory Rules
 (none)
 
+## Working Set
+- docs/design.md — current design notes
+
 ## Files
-- docs/design.md — read among many unrelated details alpha beta gamma delta epsilon zeta eta theta iota kappa
+- docs/design.md
+
+## Open Problems
+(none)
 
 ## Done
 (none)`;
 		expect(verifySummary(summary, facts).ok).toBe(true);
 		expect(containment(tokenSet("docs/design.md"), tokenSet(summary))).toBe(1);
 		expect(jaccard(tokenSet("docs/design.md"), tokenSet(summary))).toBeLessThan(0.5);
+	});
+
+	it("passes when a checkpoint transcribes the facts block", () => {
+		const factsText = [
+			"## Active Task",
+			baseFacts.activeTaskSource,
+			"",
+			"### Mandatory Rules",
+			baseFacts.prohibitions.join("\n"),
+			"",
+			"## Working Set",
+			baseFacts.workingSet.map((file) => `${file.path} ${file.note}`).join("\n"),
+			"",
+			"## Files",
+			baseFacts.files.map((file) => file.path).join("\n"),
+			"",
+			"## Open Problems",
+			baseFacts.errorFacts.map((error) => `${error.operation}: ${error.error}`).join("\n") || "(none)",
+			"",
+			"## Done",
+			baseFacts.actions.join("\n"),
+		].join("\n");
+		expect(verifySummary(factsText, baseFacts)).toEqual({ ok: true, failures: [] });
 	});
 
 	it("checks active task containment", () => {
@@ -142,9 +206,16 @@ User: Fix the two failing tests now
 ### Mandatory Rules
 - DO NOT touch the legacy client; the wrapped adapter attempt was cancelled.
 
-## Files
-- src/fetcher.ts — retry loop (modified)
+## Working Set
+- src/fetcher.ts — retry loop
 - test/fetcher.test.ts — read; 2 failing tests
+
+## Files
+- src/fetcher.ts
+- test/fetcher.test.ts
+
+## Open Problems
+(none)
 
 ## Done
 1. EDIT src/fetcher.ts — added retry loop

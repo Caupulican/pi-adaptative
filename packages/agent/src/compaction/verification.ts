@@ -15,8 +15,11 @@ export const ACTIVE_TASK_CONTAINMENT_THRESHOLD = 0.9;
 export const MANDATORY_RULES_RECALL_THRESHOLD = 0.7;
 export const CANCELLED_WORK_DROPPED_THRESHOLD = 0.1;
 export const ACTIONS_RECALL_THRESHOLD = 0.6;
+export const OPEN_ERRORS_RECALL_THRESHOLD = 0.7;
 
 const SECTION_FILES = "files";
+const SECTION_WORKING_SET = "working set";
+const SECTION_OPEN_PROBLEMS = "open problems";
 const SECTION_DONE = "done";
 const SECTION_ACTIVE_TASK = "active task";
 const SECTION_MANDATORY_RULES = "mandatory rules";
@@ -29,6 +32,8 @@ export function verifySummary(summary: string, facts: CompactionFacts): Verifica
 	const sections = extractSections(summary);
 	const failures: VerificationFailure[] = [];
 	const filesSection = sections[SECTION_FILES] ?? "";
+	const workingSetSection = sections[SECTION_WORKING_SET] ?? "";
+	const openProblemsSection = sections[SECTION_OPEN_PROBLEMS] ?? "";
 	const doneSection = sections[SECTION_DONE] ?? "";
 	const activeTaskSection = sections[SECTION_ACTIVE_TASK] ?? "";
 	const mandatoryRulesSection = sections[SECTION_MANDATORY_RULES] ?? "";
@@ -39,6 +44,15 @@ export function verifySummary(summary: string, facts: CompactionFacts): Verifica
 		failures.push({
 			check: "files-modified-recall",
 			detail: `Missing modified/created files in ## Files: ${missingModifiedFiles.join(", ")}`,
+		});
+	}
+
+	const workingSetPaths = facts.workingSet.map((file) => file.path);
+	const missingWorkingSetPaths = workingSetPaths.filter((path) => !workingSetSection.includes(path));
+	if (missingWorkingSetPaths.length > 0) {
+		failures.push({
+			check: "working-set-recall",
+			detail: `Missing working-set files in ## Working Set: ${missingWorkingSetPaths.join(", ")}`,
 		});
 	}
 
@@ -88,6 +102,16 @@ export function verifySummary(summary: string, facts: CompactionFacts): Verifica
 			failures.push({
 				check: "cancelled-work-dropped",
 				detail: `Cancelled work leakage ${formatScore(score)} above ${CANCELLED_WORK_DROPPED_THRESHOLD}`,
+			});
+		}
+	}
+
+	for (const error of facts.errorFacts) {
+		const score = containment(tokenSet(`${error.operation}: ${error.error}`), tokenSet(openProblemsSection));
+		if (score < OPEN_ERRORS_RECALL_THRESHOLD) {
+			failures.push({
+				check: "open-errors-recall",
+				detail: `Open error recall ${formatScore(score)} below ${OPEN_ERRORS_RECALL_THRESHOLD}: ${error.operation}`,
 			});
 		}
 	}
@@ -154,7 +178,9 @@ export function jaccard(a: Set<string>, b: Set<string>): number {
 function factsAreEmpty(facts: CompactionFacts): boolean {
 	return (
 		facts.files.length === 0 &&
+		facts.workingSet.length === 0 &&
 		facts.actions.length === 0 &&
+		facts.errorFacts.length === 0 &&
 		facts.prohibitions.length === 0 &&
 		facts.cancelledText === "" &&
 		facts.activeTaskSource === ""

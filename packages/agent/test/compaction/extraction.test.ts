@@ -2,6 +2,7 @@ import type { AssistantMessage, Message, ToolResultMessage, UserMessage } from "
 import { describe, expect, it } from "vitest";
 import { type CompactionPreparation, createDeterministicCompaction } from "../../src/compaction/compaction.ts";
 import { extractCompactionFacts, renderFactsBlock } from "../../src/compaction/extraction.ts";
+import { verifySummary } from "../../src/compaction/verification.ts";
 import type { SessionMessageEntry } from "../../src/session/session-manager.ts";
 
 let entryCounter = 0;
@@ -415,10 +416,13 @@ describe("extractCompactionFacts", () => {
 
 		const result = createDeterministicCompaction(preparation);
 
-		expect(result.summary).toContain("## Files\n- src/open.ts — EDIT (modified)");
+		expect(result.summary).toContain("## Working Set\n- src/open.ts — EDIT");
+		expect(result.summary).toContain("## Files\n- src/open.ts");
+		expect(result.summary).toContain("## Open Problems\n- TEST npm test: 1 failed: open.test.ts");
 		expect(result.summary).toContain("## Critical Context");
 		expect(result.summary).toContain("working set:\nsrc/open.ts — EDIT");
 		expect(result.summary).toContain("open errors:\nTEST npm test: 1 failed: open.test.ts");
+		expect(verifySummary(result.summary, preparation.facts!)).toEqual({ ok: true, failures: [] });
 	});
 
 	it("returns empty facts for empty input", () => {

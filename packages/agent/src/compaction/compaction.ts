@@ -502,12 +502,15 @@ export function findCutPoint(
 const SUMMARIZATION_PROMPT = `Checkpoint the conversation above. Format from your instructions, sections in this order:
 ## Active Task
 ### Mandatory Rules
+## Working Set
 ## Files
+## Open Problems
 ## Done
-## Constraints & Preferences
 ## Key Decisions
-## Blocked / Open
+## Constraints & Preferences
 ## Critical Context
+
+Do NOT carry resolved/transient errors, superseded approaches, or file contents. Record paths and intent, never bodies.
 
 Pre-extracted facts (verified by tooling — include ALL of them, merged with what you read):
 <facts>
@@ -521,7 +524,10 @@ const UPDATE_SUMMARIZATION_PROMPT = `Update the checkpoint in <previous-summary>
 - Continue the ## Done numbering. Keep the 15 most recent numbered items verbatim; compress everything older into the single first line "1. (earlier work compressed) <one line>". The checkpoint must not grow without bound across updates.
 - Update ## Active Task to the newest unfulfilled user input; apply the cancellation rule.
 - Keep ## Files current (add new, keep still-relevant, drop obsolete).
+- Drop previous ## Open Problems resolved by the new turns.
+- Drop ## Working Set files untouched since the previous checkpoint unless the active task references them.
 - Preserve exact paths, commands, errors.
+- Do NOT carry resolved/transient errors, superseded approaches, or file contents. Record paths and intent, never bodies.
 
 Same section order. Pre-extracted facts:
 <facts>
@@ -1147,9 +1153,15 @@ export function createDeterministicCompaction(preparation: CompactionPreparation
 			activeTaskSource: "",
 		},
 	);
+	const workingSetLines = facts?.workingSet.length
+		? facts.workingSet.map((file) => `- ${file.path} — ${file.note || file.kind}`)
+		: ["(none)"];
 	const fileLines = facts?.files.length
-		? facts.files.map((file) => `- ${file.path} — ${file.note || file.kind} (${file.kind})`)
+		? facts.files.map((file) => `- ${file.path}`)
 		: [`- read: ${readFiles.length}`, `- modified: ${modifiedFiles.length}`];
+	const openProblemLines = facts?.errorFacts.length
+		? facts.errorFacts.map((error) => `- ${error.operation}: ${error.error}`)
+		: ["(none)"];
 	const mandatoryRuleLines = facts?.prohibitions.length ? facts.prohibitions.map((rule) => `- ${rule}`) : ["(none)"];
 	const doneLines = facts?.actions.length
 		? facts.actions.map((action, index) => `${index + 1}. ${action}`)
@@ -1161,20 +1173,23 @@ export function createDeterministicCompaction(preparation: CompactionPreparation
 		"### Mandatory Rules",
 		...mandatoryRuleLines,
 		"",
+		"## Working Set",
+		...workingSetLines,
+		"",
 		"## Files",
 		...fileLines,
+		"",
+		"## Open Problems",
+		...openProblemLines,
 		"",
 		"## Done",
 		...doneLines,
 		"",
-		"## Constraints & Preferences",
-		"Preserve exact file paths, commands, line numbers, and error strings.",
-		"",
 		"## Key Decisions",
 		"- Deterministic checkpoint used after repeated compaction retries.",
 		"",
-		"## Blocked / Open",
-		"(none)",
+		"## Constraints & Preferences",
+		"Preserve exact file paths, commands, line numbers, and error strings.",
 		"",
 		"## Critical Context",
 		"- Deterministic facts-only checkpoint; no LLM summary was accepted.",

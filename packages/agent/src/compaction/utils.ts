@@ -175,8 +175,11 @@ RULES:
 - Recent turns weigh heaviest. Old turns contribute only rules, decisions, and file knowledge.
 - ## Active Task: the user's most recent UNFULFILLED input, near-verbatim. A question awaiting an answer IS an active task. If the user's last signal cancels earlier work (stop/undo/never mind), record the cancellation and DROP the cancelled work everywhere.
 - ### Mandatory Rules: every user prohibition ("do not X", "never Y", "stop doing Z") as one bullet each, imperative, with source turn if known. PRESERVE existing rules verbatim. A user-corrected mistake appears ONLY here as "DO NOT <mistake>" — the mistaken work itself must not survive.
-- ## Files: one line per file that matters — path — why it matters (modified/created/read).
+- ## Working Set: the currently active/recent files — path — why they matter.
+- ## Files: bare paths only; modified files must all appear, read files should be recalled when relevant.
+- ## Open Problems: unresolved errors only — command/operation plus first error line. Drop resolved/transient errors.
 - ## Done: numbered caveman log — "N. VERB target — outcome". Exact paths, commands, line numbers, error strings.
+- Do NOT carry resolved/transient errors, superseded approaches, or file contents. Record paths and intent, never bodies.
 - Sections with nothing: write "(none)".
 
 EXAMPLE INPUT (excerpt):
@@ -194,22 +197,26 @@ User: "Fix the two failing tests" (fetcher.test.ts) — retry work continues, le
 ### Mandatory Rules
 - DO NOT touch the legacy client (user, twice)
 
+## Working Set
+- test/fetcher.test.ts — 2 failing, current focus
+- src/fetcher.ts — retry loop added
+
 ## Files
-- src/fetcher.ts — retry loop added (modified)
-- test/fetcher.test.ts — 2 failing, current focus (read)
+- src/fetcher.ts
+- test/fetcher.test.ts
+
+## Open Problems
+- TEST npm test: 2 failed: fetcher.test.ts
 
 ## Done
 1. EDIT src/fetcher.ts — added retry loop
 2. TEST npm test — 2 failed: fetcher.test.ts
 
-## Constraints & Preferences
-(none)
-
 ## Key Decisions
 (none)
 
-## Blocked / Open
-- 2 fetcher tests failing
+## Constraints & Preferences
+(none)
 
 ## Critical Context
 (none)
