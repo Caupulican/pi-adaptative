@@ -5,6 +5,7 @@
 - Fixed transcript transforms to drop tool results for skipped errored assistant tool calls.
 - Fixed API provider unregister to restore shadowed providers in override order.
 - Fixed environment API key lookup to stay browser-safe when `process` is absent.
+- Fixed Gemini <3 tool-result image routing so consecutive function responses stay grouped before the separate image turn.
 
 ## [0.81.11] - 2026-07-07
 

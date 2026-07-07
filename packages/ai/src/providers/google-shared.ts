@@ -96,8 +96,18 @@ export function convertMessages<T extends GoogleApiType>(model: Model<T>, contex
 	};
 
 	const transformedMessages = transformMessages(context.messages, model, normalizeToolCallId);
+	let pendingToolResultImageParts: Part[] = [];
+	const flushPendingToolResultImages = (): void => {
+		if (pendingToolResultImageParts.length === 0) return;
+		contents.push({
+			role: "user",
+			parts: [{ text: "Tool result image:" }, ...pendingToolResultImageParts],
+		});
+		pendingToolResultImageParts = [];
+	};
 
 	for (const msg of transformedMessages) {
+		if (msg.role !== "toolResult") flushPendingToolResultImages();
 		if (msg.role === "user") {
 			if (typeof msg.content === "string") {
 				contents.push({
@@ -221,16 +231,15 @@ export function convertMessages<T extends GoogleApiType>(model: Model<T>, contex
 				});
 			}
 
-			// For Gemini < 3, add images in a separate user message
+			// For Gemini < 3, add images in a separate user message after the consecutive
+			// functionResponse group closes so later tool results still merge into that group.
 			if (hasImages && !modelSupportsMultimodalFunctionResponse) {
-				contents.push({
-					role: "user",
-					parts: [{ text: "Tool result image:" }, ...imageParts],
-				});
+				pendingToolResultImageParts.push(...imageParts);
 			}
 		}
 	}
 
+	flushPendingToolResultImages();
 	return contents;
 }
 
