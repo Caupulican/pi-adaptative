@@ -1,5 +1,9 @@
 ## [Unreleased]
 
+### Fixed
+- Fixed text tool protocol completion to withhold native provider tool definitions while the text protocol is active, parse replies against the original tool set, and preserve native-tool controls when the flag is absent.
+- Fixed shared tool-argument repair to normalize schema property casing and recover declared properties from malformed text-protocol JSON object strings.
+
 ## [0.81.13] - 2026-07-07
 
 ### Fixed

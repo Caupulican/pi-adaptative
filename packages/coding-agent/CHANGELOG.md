@@ -1,5 +1,9 @@
 ## [Unreleased]
 
+### Fixed
+- Fixed text protocol model gating so persisted probe verdicts opt in only text-protocol models after env/settings/model gates, while unflagged native models do not receive the primer.
+- Documented the `propertyCaseNormalize` and `jsonObjectPropertySalvage` repair modes in the operator docs and bundled tool-repair skill.
+
 ## [0.81.13] - 2026-07-07
 
 ### Fixed
