@@ -33,6 +33,28 @@ function mockToken(): string {
 	return `aaa.${payload}.bbb`;
 }
 
+function createCodexModel(): Model<"openai-codex-responses"> {
+	return {
+		id: "gpt-5.1-codex",
+		name: "GPT-5.1 Codex",
+		api: "openai-codex-responses",
+		provider: "openai-codex",
+		baseUrl: "https://chatgpt.com/backend-api",
+		reasoning: true,
+		input: ["text"],
+		cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 },
+		contextWindow: 400000,
+		maxTokens: 128000,
+	};
+}
+
+function createCodexContext(): Context {
+	return {
+		systemPrompt: "You are a helpful assistant.",
+		messages: [{ role: "user", content: "Say hello", timestamp: Date.now() }],
+	};
+}
+
 function buildSSEPayload({
 	status,
 	includeDone = false,
@@ -81,6 +103,105 @@ function buildSSEPayload({
 }
 
 describe("openai-codex streaming", () => {
+	it("emits an error event for cancelled SSE responses", async () => {
+		const sse = `data: ${JSON.stringify({
+			type: "response.completed",
+			response: {
+				status: "cancelled",
+				usage: { input_tokens: 1, output_tokens: 0, total_tokens: 1, input_tokens_details: { cached_tokens: 0 } },
+			},
+		})}\n\n`;
+		const encoder = new TextEncoder();
+		const body = new ReadableStream<Uint8Array>({
+			start(controller) {
+				controller.enqueue(encoder.encode(sse));
+				controller.close();
+			},
+		});
+		vi.stubGlobal(
+			"fetch",
+			vi.fn(async (input: string | URL) => {
+				const url = typeof input === "string" ? input : input.toString();
+				if (url === "https://api.github.com/repos/openai/codex/releases/latest") {
+					return new Response(JSON.stringify({ tag_name: "rust-v0.0.0" }), { status: 200 });
+				}
+				if (url.startsWith("https://raw.githubusercontent.com/openai/codex/")) {
+					return new Response("PROMPT", { status: 200, headers: { etag: '"etag"' } });
+				}
+				return new Response(body, { status: 200, headers: { "content-type": "text/event-stream" } });
+			}),
+		);
+
+		const events = [];
+		for await (const event of streamOpenAICodexResponses(createCodexModel(), createCodexContext(), {
+			apiKey: mockToken(),
+			transport: "sse",
+		})) {
+			events.push(event);
+		}
+
+		expect(events.at(-1)).toMatchObject({ type: "error", reason: "error" });
+		expect(events.some((event) => event.type === "done")).toBe(false);
+	});
+
+	it("emits an error event for cancelled WebSocket responses", async () => {
+		class MockWebSocket {
+			private listeners = new Map<string, Set<(event: unknown) => void>>();
+			constructor() {
+				queueMicrotask(() => this.dispatch("open", {}));
+			}
+			addEventListener(type: string, listener: (event: unknown) => void): void {
+				let listeners = this.listeners.get(type);
+				if (!listeners) {
+					listeners = new Set();
+					this.listeners.set(type, listeners);
+				}
+				listeners.add(listener);
+			}
+			removeEventListener(type: string, listener: (event: unknown) => void): void {
+				this.listeners.get(type)?.delete(listener);
+			}
+			send(_data: string): void {
+				queueMicrotask(() => {
+					this.dispatch("message", {
+						data: JSON.stringify({
+							type: "response.completed",
+							response: {
+								status: "cancelled",
+								usage: {
+									input_tokens: 1,
+									output_tokens: 0,
+									total_tokens: 1,
+									input_tokens_details: { cached_tokens: 0 },
+								},
+							},
+						}),
+					});
+				});
+			}
+			close(): void {}
+			private dispatch(type: string, event: unknown): void {
+				for (const listener of this.listeners.get(type) ?? []) listener(event);
+			}
+		}
+		vi.stubGlobal(
+			"fetch",
+			vi.fn(async () => new Response("unexpected", { status: 500 })),
+		);
+		vi.stubGlobal("WebSocket", MockWebSocket);
+
+		const events = [];
+		for await (const event of streamOpenAICodexResponses(createCodexModel(), createCodexContext(), {
+			apiKey: mockToken(),
+			transport: "websocket",
+		})) {
+			events.push(event);
+		}
+
+		expect(events.at(-1)).toMatchObject({ type: "error", reason: "error" });
+		expect(events.some((event) => event.type === "done")).toBe(false);
+	});
+
 	it("streams SSE responses into AssistantMessageEventStream", async () => {
 		const tempDir = mkdtempSync(join(tmpdir(), "pi-codex-stream-"));
 		process.env.PI_CODING_AGENT_DIR = tempDir;

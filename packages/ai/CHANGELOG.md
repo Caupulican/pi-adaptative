@@ -3,6 +3,7 @@
 ### Fixed
 - Fixed Anthropic-compatible streamed tool calls to preserve arguments seeded in `content_block_start` when no JSON deltas arrive.
 - Fixed OAuth token refresh to single-flight concurrent expired-token requests per provider.
+- Fixed OpenAI Codex SSE and WebSocket streams to emit error events for failed or cancelled terminal responses.
 
 ## [0.81.7] - 2026-07-06
 

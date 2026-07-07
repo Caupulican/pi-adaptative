@@ -64,6 +64,12 @@ const DEFAULT_WEBSOCKET_CONNECT_TIMEOUT_MS = 15_000;
 const CODEX_TOOL_CALL_PROVIDERS = new Set(["openai", "openai-codex", "opencode"]);
 const WEBSOCKET_MESSAGE_TOO_BIG_CLOSE_CODE = 1009;
 
+function assertSuccessfulTerminalResponse(output: AssistantMessage): void {
+	if (output.stopReason === "error" || output.stopReason === "aborted") {
+		throw new Error(output.errorMessage || `OpenAI Codex response ended with stop reason ${output.stopReason}`);
+	}
+}
+
 const CODEX_RESPONSE_STATUSES = new Set<CodexResponseStatus>([
 	"completed",
 	"incomplete",
@@ -260,6 +266,7 @@ export const streamOpenAICodexResponses: StreamFunction<"openai-codex-responses"
 					if (options?.signal?.aborted) {
 						throw new Error("Request was aborted");
 					}
+					assertSuccessfulTerminalResponse(output);
 					stream.push({
 						type: "done",
 						reason: output.stopReason as "stop" | "length" | "toolUse",
@@ -379,6 +386,7 @@ export const streamOpenAICodexResponses: StreamFunction<"openai-codex-responses"
 				throw new Error("Request was aborted");
 			}
 
+			assertSuccessfulTerminalResponse(output);
 			stream.push({ type: "done", reason: output.stopReason as "stop" | "length" | "toolUse", message: output });
 			stream.end();
 		} catch (error) {
