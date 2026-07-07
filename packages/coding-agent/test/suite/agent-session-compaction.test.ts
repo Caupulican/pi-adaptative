@@ -143,11 +143,30 @@ describe("AgentSession compaction characterization", () => {
 		const harness = await createHarness({ withConfiguredAuth: false });
 		harnesses.push(harness);
 		seedCompactableSession(harness);
-		const getStreamCallCount = useSummaryStreamFn(harness, "summary from custom stream");
+		const summary = [
+			"## Active Task",
+			"message to compact",
+			"",
+			"### Mandatory Rules",
+			"(none)",
+			"",
+			"## Working Set",
+			"(none)",
+			"",
+			"## Files",
+			"(none)",
+			"",
+			"## Open Problems",
+			"(none)",
+			"",
+			"## Done",
+			"(none)",
+		].join("\n");
+		const getStreamCallCount = useSummaryStreamFn(harness, summary);
 
 		const result = await harness.session.compact();
 
-		expect(result.summary).toBe("summary from custom stream");
+		expect(result.summary).toBe(summary);
 		expect(getStreamCallCount()).toBe(1);
 	});
 
