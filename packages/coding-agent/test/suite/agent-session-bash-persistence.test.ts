@@ -163,9 +163,11 @@ describe("AgentSession bash and persistence characterization", () => {
 			"custom_message",
 			"message",
 			"message",
+			"custom",
 			"message",
 			"message",
 		]);
+		expect(entries[3]).toMatchObject({ type: "custom", customType: "tool_argument_validation" });
 		expect(harness.session.messages.map((message) => message.role)).toEqual([
 			"custom",
 			"user",
