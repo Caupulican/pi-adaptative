@@ -1,4 +1,4 @@
-## [Unreleased]
+## [0.81.13] - 2026-07-07
 
 ### Fixed
 - Fixed agent stream requests to forward calibrated text tool protocol variant options.

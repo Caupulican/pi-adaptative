@@ -1,4 +1,4 @@
-## [Unreleased]
+## [0.81.13] - 2026-07-07
 
 ### Fixed
 - Fixed text tool protocol options to carry calibrated variants through stream completion.

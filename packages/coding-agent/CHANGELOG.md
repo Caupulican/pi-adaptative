@@ -1,4 +1,4 @@
-## [Unreleased]
+## [0.81.13] - 2026-07-07
 
 ### Fixed
 - Fixed custom model registration to preserve `textToolCallProtocol` and show it in `--list-models`.
