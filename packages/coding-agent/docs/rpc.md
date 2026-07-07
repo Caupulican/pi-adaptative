@@ -556,6 +556,27 @@ Response:
 }
 ```
 
+#### tool_probe
+
+Probe one model, or every currently authenticated model when `model` is omitted, for native tool-call support first and text-protocol fallback second. The verdict is stored in the host-local adaptation store.
+
+```json
+{"type": "tool_probe", "model": "provider/model"}
+```
+
+Response:
+```json
+{
+  "type": "response",
+  "command": "tool_probe",
+  "success": true,
+  "data": {
+    "results": [{ "model": "provider/model", "verdict": "text-protocol", "variant": "tool-tag" }],
+    "table": "Tool probe results:..."
+  }
+}
+```
+
 #### remove_tool_repair_rule
 
 Remove one learned tool repair standing rule for a model/mode pair.

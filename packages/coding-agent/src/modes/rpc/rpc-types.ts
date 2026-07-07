@@ -8,7 +8,7 @@
 import type { AgentMessage, ThinkingLevel } from "@caupulican/pi-agent-core";
 import type { CompactionResult } from "@caupulican/pi-agent-core/node";
 import type { ImageContent, Model } from "@caupulican/pi-ai";
-import type { SessionStats } from "../../core/agent-session.ts";
+import type { SessionStats, ToolProbeReport } from "../../core/agent-session.ts";
 import type { BashResult } from "../../core/bash-executor.ts";
 import type { SourceInfo } from "../../core/source-info.ts";
 
@@ -55,6 +55,7 @@ export type RpcCommand =
 	// Session
 	| { id?: string; type: "get_session_stats" }
 	| { id?: string; type: "get_tool_repair_health" }
+	| { id?: string; type: "tool_probe"; model?: string }
 	| { id?: string; type: "remove_tool_repair_rule"; model: string; mode: string }
 	| { id?: string; type: "reset_tool_protocol"; model: string }
 	| { id?: string; type: "export_html"; outputPath?: string }
@@ -174,6 +175,7 @@ export type RpcResponse =
 	// Session
 	| { id?: string; type: "response"; command: "get_session_stats"; success: true; data: SessionStats }
 	| { id?: string; type: "response"; command: "get_tool_repair_health"; success: true; data: { report: string } }
+	| { id?: string; type: "response"; command: "tool_probe"; success: true; data: ToolProbeReport }
 	| { id?: string; type: "response"; command: "remove_tool_repair_rule"; success: true; data: { removed: boolean } }
 	| { id?: string; type: "response"; command: "reset_tool_protocol"; success: true; data: { removed: boolean } }
 	| { id?: string; type: "response"; command: "export_html"; success: true; data: { path: string } }

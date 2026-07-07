@@ -1661,6 +1661,18 @@ export class InteractiveMode {
 				this.editor.setText("");
 				return;
 			}
+			if (text === "/toolprobe" || text.startsWith("/toolprobe ")) {
+				const target = text.slice("/toolprobe".length).trim();
+				this.editor.setText("");
+				this.showStatus("Running tool probe...");
+				try {
+					const report = await this.session.probeToolCalling(target || undefined);
+					this.showStatus(report.table);
+				} catch (error: unknown) {
+					this.showWarning(error instanceof Error ? error.message : String(error));
+				}
+				return;
+			}
 			if (text.startsWith("/toolrule-remove")) {
 				const [model, mode] = text.slice("/toolrule-remove".length).trim().split(/\s+/, 2);
 				const message =

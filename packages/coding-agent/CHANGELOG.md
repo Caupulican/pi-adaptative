@@ -3,6 +3,7 @@
 ### Fixed
 - Fixed custom model registration to preserve `textToolCallProtocol` and show it in `--list-models`.
 - Fixed text tool protocol calibration failures to persist, fail fast until explicit reset, and invalidate stale calibrated protocols after repeated live parse failures.
+- Added `/toolprobe` and RPC `tool_probe` to live-probe native/text-protocol tool-call support and persist host-local verdicts.
 
 ## [0.81.12] - 2026-07-07
 

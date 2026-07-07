@@ -92,34 +92,38 @@ as code (not prose):
   grep, find).
 - **Failure grammar** (`references/failure-grammar.md`) — how a malformed
   call is recognized and repaired: the `errorSignature → transform → guard →
-  note` table (modes 1–10, tool-agnostic) plus the tool-specific rows for
-  bash (`command` as argv-array or object-wrapper, `timeout` as string/{}),
-  edit, read/ls/grep/find. This is what `analyzer.ts` classifies against.
+  note` table (tool-agnostic modes, including the required-null bounce) plus
+  the tool-specific rows for bash (`command` as argv-array or object-wrapper,
+  `timeout` as string/{}), edit, read/ls/grep/find. This is what `analyzer.ts`
+  classifies against.
 
 ## The catalogue (summary; full table in references/failure-grammar.md)
 
 | # | Name | Model emits | Repair (guard-gated) |
 |---|---|---|---|
-| 1 | nullOptionalDrop | `null` for an optional field | delete key (required+null → bounce) |
-| 2 | jsonStringParse | `"[...]"`/`"{...}"` string where container expected | JSON.parse; keep if it matches + checks |
-| 3 | singleObjectWrap | single object where array-of-objects expected | wrap `[obj]` if it passes `items` |
-| 4 | bareScalarWrap | bare scalar where array expected | wrap `[v]` if it passes `items` |
-| 5 | emptyObjectPlaceholder | `{}` placeholder where scalar expected | delete if optional (default applies); else bounce |
-| 6 | numberFromString | `"42"` where number expected | `Number(s)` if finite |
-| 7 | boolFromString | `"true"`/`"false"` where bool expected | exact map (never truthiness) |
-| 8 | enumCaseNormalize | case/space enum variant | match to the one member, else bounce |
-| 9 | singleElementUnwrap | `[v]` where scalar expected | unwrap if 1 elem and checks |
-| 10 | stringifiedNumberInArray | `["1","2"]` where number[] expected | map Number if all finite |
+| 1 | nullOptionalDrop | `null` for an optional field | delete key |
+| 2 | nullRequiredBounce | `null` for a required field | no repair; bounce with required-value feedback |
+| 3 | jsonStringParse | `"[...]"`/`"{...}"` string where container expected | JSON.parse; keep if it matches + checks |
+| 4 | singleObjectWrap | single object where array-of-objects expected | wrap `[obj]` if it passes `items` |
+| 5 | bareScalarWrap | bare scalar where array expected | wrap `[v]` if it passes `items` |
+| 6 | emptyObjectPlaceholder | `{}` placeholder where scalar expected | delete if optional (default applies); else bounce |
+| 7 | numberFromString | `"42"` where number expected | `Number(s)` if finite |
+| 8 | boolFromString | `"true"`/`"false"` where bool expected | exact map (never truthiness) |
+| 9 | enumCaseNormalize | case/space enum variant | match to the one member, else bounce |
+| 10 | singleElementUnwrap | `[v]` where scalar expected | unwrap if 1 elem and checks |
+| 11 | stringifiedNumberInArray | `["1","2"]` where number[] expected | map Number if all finite |
+| 12 | bashCommandArgvJoin | bash `command` sent as an argv list | join string values with spaces |
+| 13 | bashCommandUnwrap | bash `command` sent as a single-key object wrapper | unwrap the string-valued wrapper |
 
-Plus bash-specific: `bashCommandArgvJoin` (argv list → joined string) and
-`bashCommandUnwrap` (`{cmd}` → string). Every entry is a NAMED registry entry
+Every entry is a NAMED registry entry
 `{name, errorSignature, transform, guard, noteTemplate}` — one table powers
 the repair, the teach note, the telemetry tag, and the docs row: the
 deterministic set of what pi can and will repair. Repairs NEVER invent values
 and are ALWAYS guard-gated (kept only if the transform Checks), so a repair
-can only ever turn an invalid call valid, never alter a valid one. Modes 6–10
-and the bash rows are the increment past the original four; they cost the hot
-path nothing because they run only on already-failed calls (see decision 2a).
+can only ever turn an invalid call valid, never alter a valid one. The scalar,
+array-number, and bash rows are the increment past the original four; they cost
+the hot path nothing because they run only on already-failed calls (see decision
+2a).
 
 ## Method for an improvement pass
 

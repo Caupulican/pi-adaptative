@@ -19,6 +19,16 @@ export function formatToolRepairHealthReport(store: ModelAdaptationStore, now: D
 	const lines = [chalk.bold("Tool repair health")];
 	for (const entry of profiles) {
 		lines.push(`${entry.model}`);
+		const toolProbe = entry.profile.toolProbe;
+		if (!toolProbe) {
+			lines.push("  tool probe: none");
+		} else {
+			const variant = toolProbe.variant ? ` (${toolProbe.variant})` : "";
+			lines.push(
+				`  tool probe: v${toolProbe.version} ${toolProbe.status}${variant} ${formatAgeDays(toolProbe.probedAt, now)}`,
+			);
+			if (toolProbe.diagnostic) lines.push(`  probe diagnostic: ${toolProbe.diagnostic}`);
+		}
 		const protocol = entry.profile.protocol;
 		if (!protocol) {
 			lines.push("  protocol: none");

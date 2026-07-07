@@ -28,6 +28,7 @@ export const BUILTIN_SLASH_COMMANDS: ReadonlyArray<BuiltinSlashCommand> = [
 	},
 	{ name: "context", description: "Context composition dashboard: what rides on every request" },
 	{ name: "toolhealth", description: "Show tool repair diagnostics and learned standing rules" },
+	{ name: "toolprobe", description: "Probe native/text tool-call support (/toolprobe [provider/model])" },
 	{
 		name: "toolrule-remove",
 		description: "Remove a learned tool repair standing rule (/toolrule-remove <model> <mode>)",

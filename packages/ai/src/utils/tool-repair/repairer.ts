@@ -214,15 +214,22 @@ function transformValue(
 	}
 }
 
-function applyTransform(candidate: Record<string, unknown>, issue: ToolRepairIssue, mode: ToolRepairModeName): boolean {
+function applyTransform(
+	candidate: Record<string, unknown>,
+	issue: ToolRepairIssue,
+	mode: ToolRepairModeName,
+): Record<string, unknown> | undefined {
 	const transform = transformValue(issue, mode);
-	if (!transform) return false;
+	if (!transform) return undefined;
 	if (transform.type === "delete") {
-		return deleteValueAtPath(candidate, issue.path);
+		return deleteValueAtPath(candidate, issue.path) ? candidate : undefined;
 	}
-	if (transform.value === undefined) return false;
-	if (!schemaChecks(issue.schema, transform.value)) return false;
-	return setValueAtPath(candidate, issue.path, transform.value);
+	if (transform.value === undefined) return undefined;
+	if (!schemaChecks(issue.schema, transform.value)) return undefined;
+	if (issue.path.length === 0) {
+		return isRecord(transform.value) ? transform.value : undefined;
+	}
+	return setValueAtPath(candidate, issue.path, transform.value) ? candidate : undefined;
 }
 
 function refreshIssueValue(candidate: Record<string, unknown>, issue: ToolRepairIssue): ToolRepairIssue {
@@ -239,7 +246,7 @@ export function repairToolArguments(
 	const issues = analyzeToolArgumentErrors(toolName, schema, args, errors);
 	if (issues.length === 0) return undefined;
 
-	const candidate = structuredClone(args);
+	let candidate = structuredClone(args);
 	const repairsApplied: ToolRepairModeName[] = [];
 	const repairs: AppliedToolRepair[] = [];
 
@@ -248,7 +255,9 @@ export function repairToolArguments(
 		const currentIssue = refreshIssueValue(candidate, issue);
 		for (const mode of currentIssue.modes) {
 			if (mode === "nullRequiredBounce") continue;
-			if (applyTransform(candidate, currentIssue, mode)) {
+			const nextCandidate = applyTransform(candidate, currentIssue, mode);
+			if (nextCandidate) {
+				candidate = nextCandidate;
 				repairsApplied.push(mode);
 				repairs.push({ name: mode, path: formatRepairPath(currentIssue.path) });
 				break;

@@ -18,27 +18,30 @@ import { ModelAdaptationStore } from "../src/core/models/adaptation-store.ts";
 import { createAgentSession } from "../src/core/sdk.ts";
 import { SettingsManager } from "../src/core/settings-manager.ts";
 
-type TextProtocolModel = Model<Api> & { textToolCallProtocol: true };
+type TestModel = Model<Api> & { textToolCallProtocol?: true };
 
 interface CapturedRequest {
 	context: Context;
 	options?: SimpleStreamOptions;
 }
 
-function createModel(id = "phone-model"): TextProtocolModel {
-	return {
+function createModel(id = "phone-model", options: { provider?: string; textProtocol?: boolean } = {}): TestModel {
+	const model: TestModel = {
 		id,
 		name: id,
 		api: "openai-completions",
-		provider: "phone-provider",
+		provider: options.provider ?? "phone-provider",
 		baseUrl: "https://phone.invalid/v1",
 		reasoning: false,
 		input: ["text"],
 		cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 },
 		contextWindow: 128000,
 		maxTokens: 4096,
-		textToolCallProtocol: true,
 	};
+	if (options.textProtocol !== false) {
+		model.textToolCallProtocol = true;
+	}
+	return model;
 }
 
 function messageText(context: Context): string {
@@ -56,11 +59,15 @@ function isCalibration(context: Context): boolean {
 	return (context.systemPrompt ?? "").includes("Text tool protocol calibration trial");
 }
 
-function createDoneStream(model: Model<Api>, text: string) {
+function isNativeToolProbe(context: Context): boolean {
+	return (context.systemPrompt ?? "").includes("Native tool-call capability probe");
+}
+
+function createDoneStream(model: Model<Api>, content: string | AssistantMessage["content"]) {
 	const stream = createAssistantMessageEventStream();
 	const message: AssistantMessage = {
 		role: "assistant",
-		content: [{ type: "text", text }],
+		content: typeof content === "string" ? [{ type: "text", text: content }] : content,
 		api: model.api,
 		provider: model.provider,
 		model: model.id,
@@ -97,9 +104,9 @@ describe("text tool protocol calibration", () => {
 	});
 
 	async function createSession(
-		model: TextProtocolModel,
+		model: TestModel,
 		requests: CapturedRequest[],
-		respond: (context: Context, index: number) => string,
+		respond: (context: Context, index: number, model: Model<Api>) => string | AssistantMessage["content"],
 	) {
 		const authStorage = AuthStorage.create(join(agentDir, "auth.json"));
 		authStorage.setRuntimeApiKey(model.provider, "test-api-key");
@@ -108,7 +115,7 @@ describe("text tool protocol calibration", () => {
 			api: model.api,
 			streamSimple: (streamModel, context, options) => {
 				requests.push({ context, options });
-				return createDoneStream(streamModel, respond(context, requests.length));
+				return createDoneStream(streamModel, respond(context, requests.length, streamModel));
 			},
 		});
 		const created = await createAgentSession({
@@ -128,7 +135,7 @@ describe("text tool protocol calibration", () => {
 		const requests: CapturedRequest[] = [];
 		const first = await createSession(model, requests, (context) => {
 			if (!isCalibration(context)) return "done";
-			return `<tool name="echo">{"data":"${calibrationToken(context)}"}</tool>`;
+			return `<pi:call name="echo">{"data":"${calibrationToken(context)}"}</pi:call>`;
 		});
 		try {
 			await first.session.prompt("real work");
@@ -196,7 +203,7 @@ describe("text tool protocol calibration", () => {
 			created.modelRegistry.unregisterProvider(model.provider);
 		}
 
-		expect(requests.length).toBe(6);
+		expect(requests.length).toBe(3);
 		expect(requests.every((request) => isCalibration(request.context))).toBe(true);
 		expect(ModelAdaptationStore.forAgentDir(agentDir).get(`${model.provider}/${model.id}`).protocol).toMatchObject({
 			version: 1,
@@ -227,7 +234,7 @@ describe("text tool protocol calibration", () => {
 		const resetRequests: CapturedRequest[] = [];
 		const afterReset = await createSession(model, resetRequests, (context) => {
 			if (!isCalibration(context)) return "done";
-			return `<tool name="echo">{"data":"${calibrationToken(context)}"}</tool>`;
+			return `<pi:call name="echo">{"data":"${calibrationToken(context)}"}</pi:call>`;
 		});
 		try {
 			await expect(afterReset.session.prompt("real work after reset")).resolves.toBeUndefined();
@@ -253,8 +260,8 @@ describe("text tool protocol calibration", () => {
 		});
 		const requests: CapturedRequest[] = [];
 		const created = await createSession(model, requests, (context) => {
-			if (isCalibration(context)) return `<tool name="echo">{"data":"${calibrationToken(context)}"}</tool>`;
-			return `<tool_call>{"name":"unknown_tool","arguments":{}}</tool_call>`;
+			if (isCalibration(context)) return `<pi:call name="echo">{"data":"${calibrationToken(context)}"}</pi:call>`;
+			return `<pi:call name="echo">{"data":"live"}`;
 		});
 		try {
 			await created.session.prompt("first malformed live turn");
@@ -276,5 +283,82 @@ describe("text tool protocol calibration", () => {
 			status: "calibrated",
 			variant: "tool-tag",
 		});
+	});
+
+	it("does not inject the text primer for the gpt-5.5 native path without an explicit flag", async () => {
+		const model = createModel("gpt-5.5", { provider: "openai-codex", textProtocol: false });
+		const requests: CapturedRequest[] = [];
+		const created = await createSession(model, requests, () => "native done");
+		try {
+			await created.session.prompt("native work");
+		} finally {
+			created.session.dispose();
+			created.modelRegistry.unregisterProvider(model.provider);
+		}
+
+		expect(requests).toHaveLength(1);
+		expect(requests[0]?.context.systemPrompt ?? "").not.toContain("Text tool-call protocol is enabled.");
+		expect(requests[0]?.options?.textToolCallProtocol).toBeUndefined();
+	});
+
+	it("probes native, text-protocol, and none verdicts and persists them per model", async () => {
+		const requests: CapturedRequest[] = [];
+		const nativeModel = createModel("native-model", { provider: "native-provider", textProtocol: false });
+		const textModel = createModel("text-model", { provider: "text-provider", textProtocol: false });
+		const noneModel = createModel("none-model", { provider: "none-provider", textProtocol: false });
+		const respondForModel = (streamModel: Model<Api>, context: Context): string | AssistantMessage["content"] => {
+			if (isNativeToolProbe(context) && streamModel.id === "native-model") {
+				return [
+					{ type: "toolCall", id: "native-probe", name: "echo", arguments: { data: calibrationToken(context) } },
+				];
+			}
+			if (isCalibration(context) && streamModel.id === "text-model") {
+				return `<pi:call name="echo">{"data":"${calibrationToken(context)}"}</pi:call>`;
+			}
+			return "no tools";
+		};
+		const created = await createSession(nativeModel, requests, (context, _index, streamModel) =>
+			respondForModel(streamModel, context),
+		);
+		for (const model of [nativeModel, textModel, noneModel]) {
+			created.modelRegistry.registerProvider(model.provider, {
+				api: model.api,
+				baseUrl: model.baseUrl,
+				apiKey: "test-key",
+				streamSimple: (streamModel, context, options) => {
+					requests.push({ context, options });
+					return createDoneStream(streamModel, respondForModel(streamModel, context));
+				},
+				models: [model],
+			});
+		}
+
+		try {
+			const report = await created.session.probeToolCalling();
+			const registeredResults = report.results.filter((result) =>
+				["native-provider", "text-provider", "none-provider"].some((provider) =>
+					result.model.startsWith(`${provider}/`),
+				),
+			);
+			expect(registeredResults).toMatchObject([
+				{ model: "native-provider/native-model", verdict: "native" },
+				{ model: "text-provider/text-model", verdict: "text-protocol", variant: "tool-tag" },
+				{ model: "none-provider/none-model", verdict: "none" },
+			]);
+			expect(report.table).toContain("text-provider/text-model");
+		} finally {
+			created.session.dispose();
+			for (const model of [nativeModel, textModel, noneModel]) {
+				created.modelRegistry.unregisterProvider(model.provider);
+			}
+		}
+
+		const store = ModelAdaptationStore.forAgentDir(agentDir);
+		expect(store.get("native-provider/native-model").toolProbe).toMatchObject({ status: "native" });
+		expect(store.get("text-provider/text-model").toolProbe).toMatchObject({
+			status: "text-protocol",
+			variant: "tool-tag",
+		});
+		expect(store.get("none-provider/none-model").toolProbe).toMatchObject({ status: "none" });
 	});
 });

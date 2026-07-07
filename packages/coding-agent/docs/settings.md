@@ -154,7 +154,7 @@ Fitness applicability is intentionally split by autonomy level:
 | `toolRepair.teach` | boolean | `true` | Enable in-band repair teaching notes on repaired tool results |
 | `toolRepair.textProtocol` | boolean | model-dependent | Emergency global override for text tool-call protocol calibration. Prefer per-model `textToolCallProtocol` in `models.json` for deterministic model setup. |
 
-Text protocol precedence is: `PI_TEXT_TOOL_CALL_PROTOCOL_DISABLED=1` kills it, then `toolRepair.textProtocol` force-enables or disables it globally, then per-model `textToolCallProtocol` applies. Native provider tool calls still take precedence when the model emits them; the text protocol is the fallback lane for pure-text models. Failed calibration is stored per host/model and can be cleared with `/toolprotocol-reset <provider/model>`.
+Text protocol precedence is: `PI_TEXT_TOOL_CALL_PROTOCOL_DISABLED=1` kills it, then `toolRepair.textProtocol` force-enables or disables it globally, then per-model `textToolCallProtocol` applies, then a persisted `/toolprobe` text-protocol verdict applies to that exact model. Native provider tool calls still take precedence when the model emits them; the text protocol is the fallback lane for pure-text models. Failed calibration is stored per host/model and can be cleared with `/toolprotocol-reset <provider/model>`.
 
 Environment kill switches override settings: `PI_TOOL_REPAIR_DISABLED=1`, `PI_TOOL_REPAIR_TEACH_DISABLED=1`, and `PI_TEXT_TOOL_CALL_PROTOCOL_DISABLED=1`. See [Tool repair](tool-repair.md) for diagnostics, reset controls, and replay.
 

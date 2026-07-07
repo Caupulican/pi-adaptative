@@ -27,6 +27,16 @@ export type ModelProtocolCalibration =
 			variantsTried: string[];
 	  };
 
+export type ModelToolProbeVerdict = "native" | "text-protocol" | "none";
+
+export interface ModelToolProbe {
+	version: number;
+	status: ModelToolProbeVerdict;
+	probedAt: string;
+	variant?: string;
+	diagnostic?: string;
+}
+
 export interface ModelTeachStats {
 	taught: number;
 	recurrenceBefore: number;
@@ -36,6 +46,7 @@ export interface ModelTeachStats {
 export interface ModelAdaptationProfile {
 	rules: ModelAdaptationRule[];
 	protocol?: ModelProtocolCalibration;
+	toolProbe?: ModelToolProbe;
 	teachStats: Record<string, ModelTeachStats>;
 }
 
@@ -60,6 +71,7 @@ function normalizeProfile(profile: Partial<ModelAdaptationProfile> | undefined):
 	return {
 		rules: Array.isArray(profile?.rules) ? profile.rules.filter(isRule) : [],
 		...(isProtocol(profile?.protocol) && { protocol: profile.protocol }),
+		...(isToolProbe(profile?.toolProbe) && { toolProbe: profile.toolProbe }),
 		teachStats: isRecord(profile?.teachStats) ? filterTeachStats(profile.teachStats) : {},
 	};
 }
@@ -91,6 +103,17 @@ function isProtocol(value: unknown): value is ModelProtocolCalibration {
 		(value.status === undefined || value.status === "calibrated") &&
 		typeof value.variant === "string" &&
 		typeof value.calibratedAt === "string"
+	);
+}
+
+function isToolProbe(value: unknown): value is ModelToolProbe {
+	return (
+		isRecord(value) &&
+		typeof value.version === "number" &&
+		(value.status === "native" || value.status === "text-protocol" || value.status === "none") &&
+		typeof value.probedAt === "string" &&
+		(value.variant === undefined || typeof value.variant === "string") &&
+		(value.diagnostic === undefined || typeof value.diagnostic === "string")
 	);
 }
 
@@ -229,6 +252,12 @@ export class ModelAdaptationStore {
 		const now = at ?? (protocol.status === "failed" ? protocol.attemptedAt : protocol.calibratedAt);
 		const profile = this.get(model, new Date(now));
 		return this.store(model, { ...profile, protocol }, now);
+	}
+
+	setToolProbe(model: string, toolProbe: ModelToolProbe, at?: string): StoredModelAdaptation {
+		const now = at ?? toolProbe.probedAt;
+		const profile = this.get(model, new Date(now));
+		return this.store(model, { ...profile, toolProbe }, now);
 	}
 
 	removeProtocol(model: string, at = new Date()): boolean {

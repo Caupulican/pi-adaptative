@@ -15,7 +15,7 @@ export interface TextToolProtocolOptions {
 	variant?: TextToolProtocolVariant;
 }
 
-type EnvelopeKind = "tool" | "tool_call" | "fenced_json";
+type EnvelopeKind = "pi_call" | "tool_call" | "fenced_json";
 
 interface EnvelopeMatch {
 	kind: EnvelopeKind;
@@ -56,10 +56,10 @@ function knownToolNames(tools: readonly Tool[]): Set<string> {
 
 function findToolEnvelopes(text: string): EnvelopeMatch[] {
 	const matches: EnvelopeMatch[] = [];
-	const toolEnvelope = /<tool\s+name="([^"]+)">([\s\S]*?)<\/tool>/g;
-	for (const match of text.matchAll(toolEnvelope)) {
+	const piCallEnvelope = /<pi:call\s+name="([^"]+)"\s*>([\s\S]*?)<\/pi:call>/g;
+	for (const match of text.matchAll(piCallEnvelope)) {
 		matches.push({
-			kind: "tool",
+			kind: "pi_call",
 			start: match.index,
 			end: match.index + match[0].length,
 			name: unescapeAttribute(match[1] ?? ""),
@@ -77,11 +77,14 @@ function findToolEnvelopes(text: string): EnvelopeMatch[] {
 		});
 	}
 
-	const trimmed = text.trim();
-	const fence = /^```(?:json|tool|tool_call)?\s*\n?([\s\S]*?)\n?```$/i.exec(trimmed);
-	if (fence?.[1]) {
-		const start = text.indexOf(trimmed);
-		matches.push({ kind: "fenced_json", start, end: start + trimmed.length, body: fence[1] });
+	const fence = /```(?:tool|tool_call)\s*\n([\s\S]*?)\n?```/gi;
+	for (const match of text.matchAll(fence)) {
+		matches.push({
+			kind: "fenced_json",
+			start: match.index,
+			end: match.index + match[0].length,
+			body: match[1] ?? "",
+		});
 	}
 
 	return matches.sort((a, b) => a.start - b.start);
@@ -96,7 +99,7 @@ function hasOverlap(matches: readonly EnvelopeMatch[]): boolean {
 	return false;
 }
 
-function remainingText(text: string, matches: readonly EnvelopeMatch[]): string | undefined {
+function remainingText(text: string, matches: readonly EnvelopeMatch[]): string {
 	let cursor = 0;
 	const pieces: string[] = [];
 	for (const match of matches) {
@@ -104,8 +107,7 @@ function remainingText(text: string, matches: readonly EnvelopeMatch[]): string 
 		cursor = match.end;
 	}
 	pieces.push(text.slice(cursor));
-	const remainder = pieces.join("");
-	return remainder.trim().length === 0 ? remainder : undefined;
+	return pieces.join("");
 }
 
 function coerceArguments(value: unknown): {
@@ -113,56 +115,67 @@ function coerceArguments(value: unknown): {
 	rawArguments?: Record<string, unknown>;
 } {
 	if (isRecord(value)) return { arguments: value };
-	return { arguments: {}, rawArguments: { value } };
+	return { arguments: value as Record<string, unknown>, rawArguments: { value } };
+}
+
+function parseJsonValue(raw: string): { ok: true; value: unknown } | { ok: false } {
+	try {
+		return { ok: true, value: JSON.parse(raw) as unknown };
+	} catch {
+		return { ok: false };
+	}
 }
 
 function parseJsonObject(raw: string): Record<string, unknown> | undefined {
-	try {
-		const parsed = JSON.parse(raw);
-		return isRecord(parsed) ? parsed : undefined;
-	} catch {
-		return undefined;
-	}
+	const parsed = parseJsonValue(raw);
+	return parsed.ok && isRecord(parsed.value) ? parsed.value : undefined;
 }
 
-function extractNameFromMalformedJson(raw: string, names: ReadonlySet<string>): string | undefined {
-	for (const name of names) {
-		if (raw.includes(`"${name}"`)) return name;
-	}
-	return undefined;
+function textToolErrorMessage(name: string, names: readonly string[]): string | undefined {
+	if (names.includes(name)) return undefined;
+	return `Unknown tool "${name}". Valid tools: ${names.join(", ")}.`;
 }
 
-function parseEnvelope(match: EnvelopeMatch, names: ReadonlySet<string>, index: number): ToolCall | undefined {
-	if (match.kind === "tool") {
-		if (!match.name || !names.has(match.name)) return undefined;
-		const parsed = parseJsonObject(match.body);
-		const args = parsed ? { arguments: parsed } : { arguments: {}, rawArguments: { text: match.body.trim() } };
-		return {
-			type: "toolCall",
-			id: `text-tool-${index}`,
-			name: match.name,
-			arguments: args.arguments,
-			rawArguments: args.rawArguments,
-			source: "text-protocol",
-		};
-	}
+function extractNameFromMalformedJson(raw: string): string | undefined {
+	const match = /"(?:name|tool)"\s*:\s*"([^"]+)"/.exec(raw);
+	return match?.[1];
+}
+
+function parsePiCallEnvelope(match: EnvelopeMatch, names: readonly string[], index: number): ToolCall | undefined {
+	if (!match.name) return undefined;
+	const parsed = parseJsonValue(match.body);
+	const args = parsed.ok ? coerceArguments(parsed.value) : coerceArguments(match.body.trim());
+	return {
+		type: "toolCall",
+		id: `text-tool-${index}`,
+		name: match.name,
+		arguments: args.arguments,
+		rawArguments: parsed.ok ? args.rawArguments : { text: match.body.trim() },
+		source: "text-protocol",
+		errorMessage: textToolErrorMessage(match.name, names),
+	};
+}
+
+function parseEnvelope(match: EnvelopeMatch, names: readonly string[], index: number): ToolCall | undefined {
+	if (match.kind === "pi_call") return parsePiCallEnvelope(match, names, index);
 
 	const parsed = parseJsonObject(match.body);
 	if (!parsed) {
-		const name = extractNameFromMalformedJson(match.body, names);
+		const name = extractNameFromMalformedJson(match.body);
 		if (!name) return undefined;
 		return {
 			type: "toolCall",
 			id: `text-tool-${index}`,
 			name,
-			arguments: {},
+			arguments: match.body.trim() as unknown as Record<string, unknown>,
 			rawArguments: { text: match.body.trim() },
 			source: "text-protocol",
+			errorMessage: textToolErrorMessage(name, names),
 		};
 	}
 
 	const nameValue = parsed.name ?? parsed.tool;
-	if (typeof nameValue !== "string" || !names.has(nameValue)) return undefined;
+	if (typeof nameValue !== "string") return undefined;
 	const argsValue = parsed.arguments ?? parsed.args ?? {};
 	const args = coerceArguments(argsValue);
 	return {
@@ -172,6 +185,7 @@ function parseEnvelope(match: EnvelopeMatch, names: ReadonlySet<string>, index: 
 		arguments: args.arguments,
 		rawArguments: args.rawArguments,
 		source: "text-protocol",
+		errorMessage: textToolErrorMessage(nameValue, names),
 	};
 }
 
@@ -186,7 +200,7 @@ export function normalizeTextToolProtocolOptions(
 function formatVariantEnvelope(variant: TextToolProtocolVariant, toolName: string, argsJson: string): string {
 	if (variant === "tool-call") return `<tool_call>{"name":"${toolName}","arguments":${argsJson}}</tool_call>`;
 	if (variant === "fenced-json") return `\`\`\`tool_call\n{"name":"${toolName}","arguments":${argsJson}}\n\`\`\``;
-	return `<tool name="${escapeAttribute(toolName)}">${argsJson}</tool>`;
+	return `<pi:call name="${escapeAttribute(toolName)}">${argsJson}</pi:call>`;
 }
 
 export function generateTextToolProtocolPrimer(tools: readonly Tool[], options?: TextToolProtocolOptions): string {
@@ -212,8 +226,7 @@ export function parseTextToolCalls(text: string, knownTools: readonly Tool[]): P
 	if (matches.length === 0) return { calls: [], text, attempted: false };
 	if (hasOverlap(matches)) return { calls: [], text, attempted: true, failure: "overlap" };
 	const remainder = remainingText(text, matches);
-	if (remainder === undefined) return { calls: [], text, attempted: true, failure: "mixed-prose" };
-	const names = knownToolNames(knownTools);
+	const names = [...knownToolNames(knownTools)];
 	const calls = matches
 		.map((match, index) => parseEnvelope(match, names, index + 1))
 		.filter((call): call is ToolCall => call !== undefined);

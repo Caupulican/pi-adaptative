@@ -572,6 +572,10 @@ export async function runRpcMode(runtimeHost: AgentSessionRuntime): Promise<neve
 				return success(id, "get_tool_repair_health", { report: session.formatToolRepairHealthReport() });
 			}
 
+			case "tool_probe": {
+				return success(id, "tool_probe", await session.probeToolCalling(command.model));
+			}
+
 			case "remove_tool_repair_rule": {
 				return success(id, "remove_tool_repair_rule", {
 					removed: session.removeToolRepairRule(command.model, command.mode),
