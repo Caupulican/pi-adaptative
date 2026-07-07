@@ -79,6 +79,77 @@ function createFakeAnthropicClient(response: Response): Anthropic {
 }
 
 describe("Anthropic raw SSE parsing", () => {
+	it("keeps content_block_start tool input when no deltas arrive", async () => {
+		const model = getModel("anthropic", "claude-haiku-4-5");
+		const context: Context = {
+			messages: [{ role: "user", content: "Use the lookup tool.", timestamp: Date.now() }],
+			tools: [
+				{
+					name: "lookup",
+					description: "Look up a value.",
+					parameters: Type.Object({ value: Type.String() }),
+				},
+			],
+		};
+		const baseEvents = [
+			{
+				event: "message_start",
+				data: JSON.stringify({
+					type: "message_start",
+					message: { id: "msg_test", usage: { input_tokens: 12, output_tokens: 0 } },
+				}),
+			},
+			{
+				event: "content_block_start",
+				data: JSON.stringify({
+					type: "content_block_start",
+					index: 0,
+					content_block: {
+						type: "tool_use",
+						id: "toolu_test",
+						name: "lookup",
+						input: { value: "seeded" },
+					},
+				}),
+			},
+		] satisfies Array<{ event: string; data: string }>;
+		const stopEvents = [
+			{ event: "content_block_stop", data: JSON.stringify({ type: "content_block_stop", index: 0 }) },
+			{
+				event: "message_delta",
+				data: JSON.stringify({
+					type: "message_delta",
+					delta: { stop_reason: "tool_use" },
+					usage: { output_tokens: 5 },
+				}),
+			},
+			{ event: "message_stop", data: JSON.stringify({ type: "message_stop" }) },
+		] satisfies Array<{ event: string; data: string }>;
+
+		const seededOnly = await streamAnthropic(model, context, {
+			client: createFakeAnthropicClient(createSseResponse([...baseEvents, ...stopEvents])),
+		}).result();
+		expect((seededOnly.content[0] as ToolCall).arguments).toEqual({ value: "seeded" });
+
+		const mixed = await streamAnthropic(model, context, {
+			client: createFakeAnthropicClient(
+				createSseResponse([
+					...baseEvents,
+					{
+						event: "content_block_delta",
+						data: JSON.stringify({
+							type: "content_block_delta",
+							index: 0,
+							delta: { type: "input_json_delta", partial_json: '{"value":"delta"}' },
+						}),
+					},
+					...stopEvents,
+				]),
+			),
+		}).result();
+		expect((mixed.content[0] as ToolCall).arguments).toEqual({ value: "delta" });
+	});
+
 	it("repairs malformed SSE JSON and malformed streamed tool JSON", async () => {
 		const model = getModel("anthropic", "claude-haiku-4-5");
 		const context: Context = {
