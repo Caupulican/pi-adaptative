@@ -72,8 +72,8 @@ describe("compaction bounds", () => {
 
 		await generateSummary(
 			messages(9000),
-			createModel(3000),
-			100,
+			createModel(5500),
+			2000,
 			"test-key",
 			undefined,
 			undefined,
@@ -86,12 +86,11 @@ describe("compaction bounds", () => {
 			true,
 		);
 
-		// Chunk headroom (W4.4) shrinks each chunk below the input bound, so this fixture now
-		// splits into more chunks; the retained-chunk cap (4) plus the final merge = 5 calls.
-		expect(completeSimpleMock).toHaveBeenCalledTimes(5);
+		// Chunking is map-reduce: every chunk is summarized before the final checkpoint merge.
+		expect(completeSimpleMock).toHaveBeenCalledTimes(4);
 		expect(completeSimpleMock.mock.calls[0]?.[1].messages[0]?.content[0]?.text).toContain("conversation-chunk");
-		expect(completeSimpleMock.mock.calls[3]?.[1].messages[0]?.content[0]?.text).toContain("conversation-chunk");
-		expect(completeSimpleMock.mock.calls[4]?.[1].messages[0]?.content[0]?.text).toContain(
+		expect(completeSimpleMock.mock.calls[2]?.[1].messages[0]?.content[0]?.text).toContain("conversation-chunk");
+		expect(completeSimpleMock.mock.calls[3]?.[1].messages[0]?.content[0]?.text).toContain(
 			"Checkpoint the conversation",
 		);
 	});
@@ -120,7 +119,7 @@ describe("compaction bounds", () => {
 			"- blocked",
 			"",
 			"## Critical Context",
-			"z".repeat(6000),
+			"z".repeat(12000),
 		].join("\n");
 		completeSimpleMock.mockResolvedValue(response(oversized));
 
@@ -143,10 +142,10 @@ describe("compaction bounds", () => {
 			"1. EDIT src/a.ts — done",
 			"",
 			"## Key Decisions",
-			"z".repeat(6000),
+			"z".repeat(12000),
 			"",
 			"## Critical Context",
-			"z".repeat(6000),
+			"z".repeat(12000),
 		].join("\n");
 		completeSimpleMock.mockResolvedValue(response(oversized));
 
@@ -207,6 +206,28 @@ describe("compaction bounds", () => {
 
 		expect(smallBudget).toBe(1500);
 		expect(bigBudget).toBeGreaterThan(smallBudget);
-		expect(bigBudget).toBeLessThanOrEqual(4000);
+		expect(bigBudget).toBeGreaterThanOrEqual(Math.ceil(bigFacts.length / 4) + 500);
+	});
+
+	it("throws for deterministic compaction when bounded gate demand cannot fit reserve", async () => {
+		const hugeFacts = `files:\n${"modified: src/a.ts — EDIT\n".repeat(1000)}actions:\n${"EDIT src/a.ts\n".repeat(1000)}prohibitions:`;
+
+		await expect(
+			generateSummary(
+				messages(10),
+				createModel(200000, 20000),
+				1000,
+				"test-key",
+				undefined,
+				undefined,
+				undefined,
+				undefined,
+				undefined,
+				undefined,
+				undefined,
+				hugeFacts,
+			),
+		).rejects.toThrow("summary-demand-exceeds-reserve");
+		expect(completeSimpleMock).not.toHaveBeenCalled();
 	});
 });

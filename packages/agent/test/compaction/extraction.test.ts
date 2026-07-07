@@ -126,20 +126,27 @@ describe("extractCompactionFacts", () => {
 		expect(facts.files.find((f) => f.path === "src/file.ts")?.kind).toBe("modified");
 	});
 
-	it("generates one action line per tool call and truncates outcome at 80 chars", () => {
+	it("generates bounded action lines from verb and path only", () => {
 		resetEntryCounter();
 
-		const longOutcome = "x".repeat(120);
-		const assistant = createMessageEntry(
-			createAssistantMessage([{ type: "toolCall", id: "tc-1", name: "edit", arguments: { path: "src/long.ts" } }]),
-		);
-		const result = createMessageEntry(createToolResult("tc-1", "edit", longOutcome));
-		const facts = extractCompactionFacts([assistant, result], 0, 2);
+		const entries: SessionMessageEntry[] = [];
+		for (let i = 0; i < 18; i++) {
+			entries.push(
+				createMessageEntry(
+					createAssistantMessage([
+						{ type: "toolCall", id: `tc-${i}`, name: "edit", arguments: { path: `src/file-${i}.ts` } },
+					]),
+				),
+			);
+			entries.push(createMessageEntry(createToolResult(`tc-${i}`, "edit", `noisy outcome ${i} ${"x".repeat(120)}`)));
+		}
 
-		expect(facts.actions).toHaveLength(1);
-		const action = facts.actions[0];
-		expect(action.startsWith("EDIT src/long.ts — ")).toBe(true);
-		expect(action).toBe(`EDIT src/long.ts — ${"x".repeat(80)}`);
+		const facts = extractCompactionFacts(entries, 0, entries.length);
+
+		expect(facts.actions).toHaveLength(15);
+		expect(facts.actions[0]).toBe("EDIT src/file-3.ts");
+		expect(facts.actions[14]).toBe("EDIT src/file-17.ts");
+		expect(facts.actions.join("\n")).not.toContain("noisy outcome");
 	});
 
 	it("extracts prohibitions from user messages and dedups with sentence split", () => {
@@ -205,7 +212,7 @@ describe("extractCompactionFacts", () => {
 		const u1 = createMessageEntry(createUserMessage(pastedDoc));
 		const fromDoc = extractCompactionFacts([u1], 0, 1);
 		expect(fromDoc.prohibitions).toEqual([]);
-		expect(fromDoc.activeTaskSource).toBe(pastedDoc);
+		expect(fromDoc.activeTaskSource).toBe(pastedDoc.slice(0, 4000));
 
 		resetEntryCounter();
 		// Spoken prohibitions still harvest, bounded to the most recent 8.
@@ -246,6 +253,41 @@ describe("extractCompactionFacts", () => {
 		expect(facts.activeTaskSource).toBe("second");
 	});
 
+	it("excludes harness plumbing paths from file and action facts", () => {
+		resetEntryCounter();
+
+		const contextGcRead = createMessageEntry(
+			createAssistantMessage([
+				{
+					type: "toolCall",
+					id: "tc-context-gc",
+					name: "read",
+					arguments: { path: "/home/user/.pi/agent/context-gc/session/blob.txt" },
+				},
+			]),
+		);
+		const bashLog = createMessageEntry(
+			createAssistantMessage([
+				{
+					type: "toolCall",
+					id: "tc-bash",
+					name: "bash",
+					arguments: { command: "tail -n 20 /tmp/pi-bash-abc123.log" },
+				},
+			]),
+		);
+		const realRead = createMessageEntry(
+			createAssistantMessage([
+				{ type: "toolCall", id: "tc-real", name: "read", arguments: { path: "src/real.ts" } },
+			]),
+		);
+
+		const facts = extractCompactionFacts([contextGcRead, bashLog, realRead], 0, 3);
+
+		expect(facts.files.map((file) => file.path)).toEqual(["src/real.ts"]);
+		expect(facts.actions).toEqual(["READ src/real.ts"]);
+	});
+
 	it("returns empty facts for empty input", () => {
 		resetEntryCounter();
 		const facts = extractCompactionFacts([], 0, 0);
@@ -263,7 +305,7 @@ describe("extractCompactionFacts", () => {
 				{ path: "src/a.ts", kind: "read", note: "read file" },
 				{ path: "src/b.ts", kind: "modified", note: "edited" },
 			],
-			actions: ["EDIT src/b.ts — done"],
+			actions: ["EDIT src/b.ts"],
 			prohibitions: ["Do not delete"],
 			cancelledText: "",
 			activeTaskSource: "Keep going",
@@ -274,7 +316,7 @@ describe("extractCompactionFacts", () => {
 				"read: src/a.ts — read file\n" +
 				"modified: src/b.ts — edited\n" +
 				"actions:\n" +
-				"EDIT src/b.ts — done\n" +
+				"EDIT src/b.ts\n" +
 				"prohibitions:\n" +
 				"Do not delete\n" +
 				"active task:\n" +

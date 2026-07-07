@@ -1,4 +1,4 @@
-import type { CompactionFacts } from "./extraction.ts";
+import { ACTIVE_TASK_SOURCE_MAX_CHARS, type CompactionFacts } from "./extraction.ts";
 
 export interface VerificationFailure {
 	check: string;
@@ -54,7 +54,10 @@ export function verifySummary(summary: string, facts: CompactionFacts): Verifica
 	}
 
 	if (facts.activeTaskSource) {
-		const score = containment(tokenSet(facts.activeTaskSource), tokenSet(activeTaskSection));
+		const score = containment(
+			tokenSet(facts.activeTaskSource.slice(0, ACTIVE_TASK_SOURCE_MAX_CHARS)),
+			tokenSet(activeTaskSection),
+		);
 		if (score < ACTIVE_TASK_CONTAINMENT_THRESHOLD) {
 			failures.push({
 				check: "active-task-containment",

@@ -653,19 +653,26 @@ function fillPromptTemplate(template: string, factsBlock: string, budget: number
 }
 
 const SUMMARY_BUDGET_BASE_TOKENS = 1_500;
-/** Hard ceiling for the facts-scaled summary budget; also the worst case selection must assume. */
+/** Worst-case selection assumption for summary output when exact bounded facts are not available. */
 export const SUMMARY_BUDGET_MAX_TOKENS = 4_000;
 /** Prompt-side margin beyond the raw conversation input (system prompt, tags, instructions). */
 const SUMMARIZER_PROMPT_MARGIN_TOKENS = 2_000;
 
 function getSummaryBudget(reserveTokens: number, model: Model<any>, factsBlock?: string): number {
 	const modelMaxTokens = model.maxTokens > 0 ? model.maxTokens : Number.POSITIVE_INFINITY;
-	// The verification gate demands the summary restate every extracted fact (modified files,
-	// actions, rules). A fixed budget makes large spans structurally fail: the model length-stops
-	// and the gated sections are the casualties. Scale the budget with the demand, bounded.
+	// Verification demand is bounded at extraction time, so the summary budget can be derived from
+	// the actual gate demand instead of a blind hard cap. If the demanded facts cannot fit inside the
+	// caller's reserve budget, deterministic compaction is the only honest path.
 	const factsTokens = factsBlock ? estimateStringTokens(factsBlock) : 0;
-	const demandBudget = Math.min(SUMMARY_BUDGET_MAX_TOKENS, Math.max(SUMMARY_BUDGET_BASE_TOKENS, factsTokens + 500));
-	return Math.max(1, Math.min(demandBudget, Math.floor(0.8 * reserveTokens), modelMaxTokens));
+	const gateDemandBudget = factsTokens + 500;
+	const demandBudget = Math.max(SUMMARY_BUDGET_BASE_TOKENS, gateDemandBudget);
+	const reserveBudget = Math.floor(0.8 * reserveTokens);
+	if (factsTokens > reserveBudget || gateDemandBudget > modelMaxTokens) {
+		throw new Error(
+			`summary-demand-exceeds-reserve: required ${factsTokens} fact tokens, reserve budget ${reserveBudget}, model max ${modelMaxTokens}`,
+		);
+	}
+	return Math.max(1, demandBudget);
 }
 
 function getEffectiveContextWindow(model: Model<any>): number {
@@ -730,12 +737,10 @@ async function summarizeChunks(
 	const maxChunkTokens = getChunkSummarizationTokenBudget(inputBound);
 	const maxChunkChars = Math.max(1, maxChunkTokens * 4);
 	const chunks = splitText(conversationText, maxChunkChars);
-	const retainedChunks = chunks.slice(-4);
-	const omittedChunks = chunks.length - retainedChunks.length;
 	const summaries: string[] = [];
 
-	for (let i = 0; i < retainedChunks.length; i++) {
-		const promptText = buildChunkSummarizationPrompt(retainedChunks[i], i + 1, retainedChunks.length);
+	for (let i = 0; i < chunks.length; i++) {
+		const promptText = buildChunkSummarizationPrompt(chunks[i], i + 1, chunks.length);
 		const response = await completeSummarization(
 			model,
 			{
@@ -757,11 +762,7 @@ async function summarizeChunks(
 		summaries.push(extractTextContent(response));
 	}
 
-	const omittedNote =
-		omittedChunks > 0
-			? `## Critical Context\n${omittedChunks} older oversized chunks omitted; deterministic facts supplied separately.\n\n`
-			: "";
-	return `${omittedNote}${summaries.join("\n\n")}`;
+	return summaries.join("\n\n");
 }
 
 function splitText(text: string, maxChars: number): string[] {

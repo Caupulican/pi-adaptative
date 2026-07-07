@@ -18,8 +18,8 @@ export interface ModelAndAuth {
 
 export interface CompactionLoopDeps {
 	measureLiveTokens(): number;
-	getTriggerThreshold(): number;
-	getMargin(): number;
+	shouldCompact(tokens: number): boolean;
+	getPostApplyMargin(): number;
 	getBranch(): SessionEntry[];
 	resolveModelAndAuth(modelTier: CompactionCycleParams["modelTier"]): Promise<ModelAndAuth>;
 	summarizeAndVerify(
@@ -31,7 +31,7 @@ export interface CompactionLoopDeps {
 	): Promise<{ result: CompactionResult }>;
 	buildDeterministicCheckpoint(): Promise<{ result: CompactionResult }> | { result: CompactionResult };
 	apply(result: CompactionResult): Promise<void> | void;
-	onTransition(info: { cycle: number; from: string; cause: string }): void;
+	onTransition(info: { cycle: number; from: string; cause: string; detail?: string }): void;
 	getBaseKeepRecentTokens?(): number;
 	verifyPostApplyEffect?(): boolean;
 	signal?: AbortSignal;
@@ -51,6 +51,7 @@ export async function runCompactionLoop(deps: CompactionLoopDeps): Promise<Compa
 	let lastParams: CompactionCycleParams | undefined;
 	let lastObservedTokens: number | undefined;
 	let appliedResult: CompactionResult | undefined;
+	let lastModelKey: string | undefined;
 	let ownTrailingCompactionId: string | undefined;
 	let ownTrailingCompactionNeedsRetry = false;
 	let baseKeepRecent = deps.getBaseKeepRecentTokens ? deps.getBaseKeepRecentTokens() : DEFAULT_KEEP_RECENT;
@@ -74,7 +75,7 @@ export async function runCompactionLoop(deps: CompactionLoopDeps): Promise<Compa
 		}
 
 		const observedTokens = deps.measureLiveTokens();
-		if (observedTokens <= deps.getTriggerThreshold()) {
+		if (!deps.shouldCompact(observedTokens)) {
 			return {
 				kind: "skip",
 				reason:
@@ -85,9 +86,8 @@ export async function runCompactionLoop(deps: CompactionLoopDeps): Promise<Compa
 		}
 
 		const selectedParams = selectCycleParams(cycle, lastCause, lastParams, baseKeepRecent);
-		const params = enforceMonotonicProgress(selectedParams, lastParams, observedTokens, lastObservedTokens);
+		let params = enforceMonotonicProgress(selectedParams, lastParams, observedTokens, lastObservedTokens, lastCause);
 		lastObservedTokens = observedTokens;
-		lastParams = params;
 
 		if (params.deterministicOnly || cycle > MAX_LLM_CYCLES) {
 			if (deps.signal?.aborted) {
@@ -98,7 +98,7 @@ export async function runCompactionLoop(deps: CompactionLoopDeps): Promise<Compa
 				await deps.apply(result);
 				return { kind: "success", result, cycles: cycle };
 			} catch (error) {
-				return { kind: "failed", reason: mapFailureCause(error), cycles: cycle };
+				return { kind: "failed", reason: mapFailureCause(error).cause, cycles: cycle };
 			}
 		}
 
@@ -115,6 +115,17 @@ export async function runCompactionLoop(deps: CompactionLoopDeps): Promise<Compa
 			deps.onTransition({ cycle: cycle + 1, from: "step0", cause: lastCause });
 			continue;
 		}
+		const currentModelKey = modelKey(modelInfo.model);
+		if (
+			(lastCause === "gate-failed" || lastCause === "length-stop") &&
+			lastParams &&
+			params.modelTier !== lastParams.modelTier &&
+			lastModelKey === currentModelKey
+		) {
+			params = { ...params, modelTier: lastParams.modelTier };
+		}
+		lastParams = params;
+		lastModelKey = currentModelKey;
 
 		let result: CompactionResult;
 		try {
@@ -129,14 +140,24 @@ export async function runCompactionLoop(deps: CompactionLoopDeps): Promise<Compa
 			if (deps.signal?.aborted) {
 				return { kind: "failed", reason: "aborted", cycles: cycle };
 			}
-			lastCause = mapFailureCause(error);
+			const failure = mapFailureCause(error);
+			lastCause = failure.cause;
 			if (lastCause === "aborted") {
 				return { kind: "failed", reason: lastCause, cycles: cycle };
 			}
 			if (lastCause === "provider-failure") {
 				return { kind: "failed", reason: error instanceof Error ? error.message : String(error), cycles: cycle };
 			}
-			deps.onTransition({ cycle: cycle + 1, from: "step3", cause: lastCause });
+			if (lastCause === "deterministic-required") {
+				try {
+					const { result: deterministicResult } = await Promise.resolve(deps.buildDeterministicCheckpoint());
+					await deps.apply(deterministicResult);
+					return { kind: "success", result: deterministicResult, cycles: cycle };
+				} catch (deterministicError) {
+					return { kind: "failed", reason: mapFailureCause(deterministicError).cause, cycles: cycle };
+				}
+			}
+			deps.onTransition({ cycle: cycle + 1, from: "step3", cause: lastCause, detail: failure.detail });
 			continue;
 		}
 
@@ -155,7 +176,7 @@ export async function runCompactionLoop(deps: CompactionLoopDeps): Promise<Compa
 		}
 
 		const measuredAfter = deps.measureLiveTokens();
-		if (measuredAfter <= deps.getTriggerThreshold() - deps.getMargin()) {
+		if (!deps.shouldCompact(measuredAfter + deps.getPostApplyMargin())) {
 			ownTrailingCompactionNeedsRetry = false;
 			return { kind: "success", result, cycles: cycle };
 		}
@@ -214,6 +235,7 @@ function enforceMonotonicProgress(
 	lastParams: CompactionCycleParams | undefined,
 	observedTokens: number,
 	lastObservedTokens: number | undefined,
+	lastCause: string,
 ): CompactionCycleParams {
 	if (
 		!lastParams ||
@@ -223,6 +245,9 @@ function enforceMonotonicProgress(
 		return params;
 	}
 	if (!sameParams(params, lastParams)) {
+		return params;
+	}
+	if (lastCause === "gate-failed") {
 		return params;
 	}
 
@@ -236,6 +261,10 @@ function enforceMonotonicProgress(
 	return { ...params, modelTier: params.modelTier === "cheap" ? "session" : "cheap" };
 }
 
+function modelKey(model: Model<any>): string {
+	return `${model.provider}:${model.id}:${model.api}:${model.baseUrl ?? ""}`;
+}
+
 function sameParams(a: CompactionCycleParams, b: CompactionCycleParams): boolean {
 	return (
 		a.modelTier === b.modelTier &&
@@ -245,20 +274,27 @@ function sameParams(a: CompactionCycleParams, b: CompactionCycleParams): boolean
 	);
 }
 
-function mapFailureCause(error: unknown): string {
+function mapFailureCause(error: unknown): { cause: string; detail?: string } {
 	const message = error instanceof Error ? error.message : typeof error === "string" ? error : "";
-	if (message.includes("gate-failed")) return "gate-failed";
-	if (message.includes("input-overflow")) return "input-overflow";
+	if (message.includes("gate-failed")) return { cause: "gate-failed", detail: boundedDetail(message) };
+	if (message.includes("summary-demand-exceeds-reserve"))
+		return { cause: "deterministic-required", detail: boundedDetail(message) };
+	if (message.includes("input-overflow")) return { cause: "input-overflow", detail: boundedDetail(message) };
 	// A length-stopped summary lost gated sections; escalating the tier buys a larger output cap.
-	if (message.includes("summary-length-stop")) return "length-stop";
+	if (message.includes("summary-length-stop")) return { cause: "length-stop", detail: boundedDetail(message) };
 	if (
 		/stream stalled|overloaded|rate.?limit|too many requests|service.?unavailable|server.?error|network.?error|fetch failed|timeout|timed out/i.test(
 			message,
 		)
 	)
-		return "provider-failure";
-	if (message.includes("auto-compaction-cancelled")) return "aborted";
+		return { cause: "provider-failure", detail: boundedDetail(message) };
+	if (message.includes("auto-compaction-cancelled")) return { cause: "aborted", detail: boundedDetail(message) };
 	if (message.includes("auth") || message.includes("api key") || message.includes("not compacted"))
-		return "auth-failed";
-	return "unknown-failure";
+		return { cause: "auth-failed", detail: boundedDetail(message) };
+	return { cause: "unknown-failure", detail: boundedDetail(message) };
+}
+
+function boundedDetail(message: string): string | undefined {
+	if (!message) return undefined;
+	return message.length > 500 ? `${message.slice(0, 500)}…` : message;
 }

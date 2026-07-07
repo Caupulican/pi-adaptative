@@ -16,7 +16,6 @@ interface ToolCallFact {
 	baseKind: "modified" | "created" | "read" | null;
 	finalKind: "modified" | "created" | "read" | null;
 	verb: string;
-	outcome: string;
 	resolved: boolean;
 }
 
@@ -31,6 +30,10 @@ const REVERSAL_PATTERN =
 const PROHIBITION_SOURCE_MAX_CHARS = 1_500;
 /** Upper bound on gate-demanded rules; most recent win (same bounding rationale as Done carry-over). */
 const MAX_PROHIBITIONS = 8;
+/** Upper bound on gate-demanded actions; mirrors the prompt's "15 most recent Done items" rule. */
+const MAX_ACTIONS = 15;
+/** Shared clamp for the active-task text because verification can only demand what the prompt receives. */
+export const ACTIVE_TASK_SOURCE_MAX_CHARS = 4_000;
 
 const FILE_KIND_PRIORITY: Record<NonNullable<ToolCallFact["finalKind"]>, number> = {
 	read: 1,
@@ -101,23 +104,6 @@ function assistantToolCallTarget(name: string, rawArgs: unknown): string | undef
 
 function clampText(text: string, maxLen: number): string {
 	return text.length > maxLen ? text.slice(0, maxLen) : text;
-}
-
-function firstLine(text: string): string {
-	for (const line of text.split("\n")) {
-		const trimmed = line.trim();
-		if (trimmed) {
-			return trimmed;
-		}
-	}
-	return "";
-}
-
-function firstOutcome(message: AgentMessage): string {
-	if (message.role !== "toolResult") {
-		return "";
-	}
-	return firstLine(messageToText(message));
 }
 
 function appearsCreated(message: AgentMessage): boolean {
@@ -202,6 +188,15 @@ function toolCallVerb(name: string): string {
 	return TOOL_VERB_BY_NAME[name] ?? name.toUpperCase();
 }
 
+function isHarnessPlumbingTarget(target: string | undefined): boolean {
+	if (!target) return false;
+	return (
+		target.includes("/.pi/agent/context-gc/") ||
+		target.includes("~/.pi/agent/context-gc/") ||
+		/\/tmp\/pi-bash-[^\s]+\.log\b/.test(target)
+	);
+}
+
 export function extractCompactionFacts(entries: SessionEntry[], start: number, end: number): CompactionFacts {
 	const rangeStart = Math.max(0, start);
 	const rangeEnd = Math.min(entries.length, Math.max(rangeStart, end));
@@ -237,7 +232,7 @@ export function extractCompactionFacts(entries: SessionEntry[], start: number, e
 			sinceLastUser.length = 0;
 
 			if (userText) {
-				activeTaskSource = userText;
+				activeTaskSource = clampText(userText, ACTIVE_TASK_SOURCE_MAX_CHARS);
 				// Mandatory Rules exist for SPOKEN durable prohibitions ("do not touch X"), not for
 				// documents. A long pasted text (plan, instruction file) can contain dozens of
 				// "never/do not" lines; harvesting them makes the verification gate demand the
@@ -283,7 +278,6 @@ export function extractCompactionFacts(entries: SessionEntry[], start: number, e
 					baseKind,
 					finalKind: baseKind,
 					verb,
-					outcome: "",
 					resolved: false,
 				};
 				actionFacts.push(fact);
@@ -324,23 +318,19 @@ export function extractCompactionFacts(entries: SessionEntry[], start: number, e
 
 			if (matchedIndex !== undefined) {
 				const fact = actionFacts[matchedIndex];
-				const outcome = firstOutcome(message);
-				fact.outcome = outcome;
 				fact.resolved = true;
 				if (fact.baseKind === "modified" && appearsCreated(message)) {
 					fact.finalKind = "created";
 				}
 
-				const finalOutcome = clampText(fact.outcome, 80);
-				fact.outcome = finalOutcome;
-				if (fact.path && fact.finalKind) {
+				if (fact.path && fact.finalKind && !isHarnessPlumbingTarget(fact.path)) {
 					const existing = filesByPath.get(fact.path);
 					const nextKind = fact.finalKind;
 					const note = fact.verb;
 					if (!existing || FILE_KIND_PRIORITY[nextKind] > FILE_KIND_PRIORITY[existing.kind]) {
 						filesByPath.set(fact.path, { path: fact.path, kind: nextKind, note });
 					} else if (existing.kind === nextKind) {
-						existing.note = `${note}: ${finalOutcome}`;
+						existing.note = note;
 					}
 				}
 
@@ -365,12 +355,14 @@ export function extractCompactionFacts(entries: SessionEntry[], start: number, e
 	}
 
 	for (const action of actionFacts) {
+		if (isHarnessPlumbingTarget(action.path)) {
+			continue;
+		}
 		if (action.finalKind && action.path && !filesByPath.has(action.path)) {
-			const note = action.outcome ? `${action.verb}: ${action.outcome}` : action.verb;
-			filesByPath.set(action.path, { path: action.path, kind: action.finalKind, note });
+			filesByPath.set(action.path, { path: action.path, kind: action.finalKind, note: action.verb });
 		}
 
-		actions.push(`${action.verb} ${action.path ?? "(unknown)"} — ${action.outcome}`);
+		actions.push(`${action.verb} ${action.path ?? "(unknown)"}`);
 	}
 
 	for (const file of filesByPath.values()) {
@@ -399,7 +391,7 @@ export function extractCompactionFacts(entries: SessionEntry[], start: number, e
 			}
 			return a.path.localeCompare(b.path);
 		}),
-		actions,
+		actions: actions.slice(-MAX_ACTIONS),
 		prohibitions: prohibitions.slice(-MAX_PROHIBITIONS),
 		cancelledText: cancelledParts.join("\n"),
 		activeTaskSource,
@@ -424,7 +416,7 @@ export function renderFactsBlock(facts: CompactionFacts): string {
 	// guaranteed to reach the prompt, so the gated text must ride in it (bounded).
 	lines.push("active task:");
 	if (facts.activeTaskSource) {
-		lines.push(clampText(facts.activeTaskSource, 4000));
+		lines.push(clampText(facts.activeTaskSource, ACTIVE_TASK_SOURCE_MAX_CHARS));
 	}
 	return lines.join("\n");
 }

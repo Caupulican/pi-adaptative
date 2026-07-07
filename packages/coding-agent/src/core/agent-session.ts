@@ -2888,8 +2888,8 @@ export class AgentSession {
 			const signal = this._compactionAbortController.signal;
 			const outcome = await runCompactionLoop({
 				measureLiveTokens: () => Math.max(this._estimateCurrentContextTokens(this.agent.state.messages), 1),
-				getTriggerThreshold: () => 0,
-				getMargin: () => 0,
+				shouldCompact: () => true,
+				getPostApplyMargin: () => 0,
 				getBranch: () => this.sessionManager.getBranch(),
 				getBaseKeepRecentTokens: () => settings.keepRecentTokens,
 				resolveModelAndAuth: async (modelTier) => {
@@ -3178,17 +3178,13 @@ export class AgentSession {
 			}
 
 			const contextWindow = model.contextWindow;
-			const triggerThreshold = Math.max(0, contextWindow - settings.reserveTokens);
 			const margin = Math.max(0, Math.floor(0.01 * contextWindow));
-			let measureReads = 0;
 			const outcome = await runCompactionLoop({
 				getBranch: () => this.sessionManager.getBranch(),
-				measureLiveTokens: () => {
-					const measured = this._pipeline.estimateCurrentContextTokens(this.agent.state.messages);
-					return measureReads++ === 0 ? Math.max(measured, triggerThreshold + 1) : measured;
-				},
-				getTriggerThreshold: () => triggerThreshold,
-				getMargin: () => margin,
+				measureLiveTokens: () => this._pipeline.estimateCurrentContextTokens(this.agent.state.messages),
+				shouldCompact: (tokens) =>
+					shouldCompact(tokens, contextWindow, settings, model.autoCompactionTriggerTokens),
+				getPostApplyMargin: () => margin,
 				getBaseKeepRecentTokens: () => settings.keepRecentTokens,
 				resolveModelAndAuth: async (modelTier) =>
 					this._resolveCompactionModelAndAuth(
@@ -3274,10 +3270,10 @@ export class AgentSession {
 						});
 					}
 				},
-				onTransition: ({ cycle, cause }) => {
+				onTransition: ({ cycle, cause, detail }) => {
 					this._emit({
 						type: "warning",
-						message: `auto-compaction cycle ${cycle}: ${cause} — retrying from step 0 (${this._describeCompactionSummarizer()})`,
+						message: `auto-compaction cycle ${cycle}: ${cause}${detail ? ` (${detail})` : ""} — retrying from step 0 (${this._describeCompactionSummarizer()})`,
 					});
 				},
 				signal,

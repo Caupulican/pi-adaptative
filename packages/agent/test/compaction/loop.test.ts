@@ -8,10 +8,10 @@ import {
 } from "../../src/compaction/index.ts";
 import type { SessionEntry, SessionMessageEntry } from "../../src/session/session-manager.ts";
 
-function createModel(): Model<"anthropic-messages"> {
+function createModel(id = "test-model"): Model<"anthropic-messages"> {
 	return {
-		id: "test-model",
-		name: "test-model",
+		id,
+		name: id,
 		api: "anthropic-messages",
 		provider: "anthropic",
 		baseUrl: "https://api.openai.com",
@@ -88,8 +88,8 @@ describe("runCompactionLoop", () => {
 			await runCompactionLoop({
 				getBranch: () => branch,
 				measureLiveTokens,
-				getTriggerThreshold: () => 1000,
-				getMargin: () => 10,
+				shouldCompact: (tokens) => tokens > 1000,
+				getPostApplyMargin: () => 10,
 				getBaseKeepRecentTokens: () => 800,
 				resolveModelAndAuth: vi.fn(async () => ({ model: createModel() })),
 				summarizeAndVerify: vi.fn(async () => ({ result: createResult("primary") })),
@@ -107,7 +107,7 @@ describe("runCompactionLoop", () => {
 	it("retries with session model after gate failure", async () => {
 		const measureLiveTokens = scriptedMeasure([1200, 1200, 100]);
 		const resolveModelAndAuth = vi.fn(async (modelTier: CompactionCycleParams["modelTier"]) => ({
-			model: modelTier === "cheap" ? createModel() : createModel(),
+			model: modelTier === "cheap" ? createModel("cheap-model") : createModel("session-model"),
 		}));
 		const summarizeAndVerify = vi.fn(async (_params: CompactionCycleParams) => {
 			summarizeCalls += 1;
@@ -121,8 +121,8 @@ describe("runCompactionLoop", () => {
 			await runCompactionLoop({
 				getBranch: () => branch,
 				measureLiveTokens,
-				getTriggerThreshold: () => 1000,
-				getMargin: () => 10,
+				shouldCompact: (tokens) => tokens > 1000,
+				getPostApplyMargin: () => 10,
 				getBaseKeepRecentTokens: () => 800,
 				resolveModelAndAuth,
 				summarizeAndVerify,
@@ -136,6 +136,69 @@ describe("runCompactionLoop", () => {
 		expect(summarizeAndVerify).toHaveBeenCalledTimes(2);
 		expect(summarizeAndVerify.mock.calls[1]?.[0]?.modelTier).toBe("session");
 		expect(outcome.cycles).toBe(2);
+	});
+
+	it("skips the session-tier rung when it resolves to the identical model", async () => {
+		const measureLiveTokens = scriptedMeasure([1200, 1200, 100]);
+		const summarizeAndVerify = vi.fn(async (params: CompactionCycleParams) => {
+			summarizeCalls += 1;
+			if (summarizeCalls === 1) {
+				throw new Error("gate-failed: files-read-recall failed");
+			}
+			expect(params.modelTier).toBe("cheap");
+			return { result: createResult("same-model-retry") };
+		});
+
+		const outcome = expectSuccess(
+			await runCompactionLoop({
+				getBranch: () => branch,
+				measureLiveTokens,
+				shouldCompact: (tokens) => tokens > 1000,
+				getPostApplyMargin: () => 10,
+				getBaseKeepRecentTokens: () => 800,
+				resolveModelAndAuth: async () => ({ model: createModel("same-model") }),
+				summarizeAndVerify,
+				buildDeterministicCheckpoint: async () => ({ result: createResult("deterministic") }),
+				apply: async () => {},
+				onTransition: () => {},
+			}),
+		);
+
+		expect(summarizeAndVerify).toHaveBeenCalledTimes(2);
+		expect(outcome.result.summary).toBe("same-model-retry");
+	});
+
+	it("keeps retrying under the shared fractional trigger and reaches deterministic fallback", async () => {
+		const measureLiveTokens = scriptedMeasure([1500, 1500, 1500, 1500]);
+		const summarizeAndVerify = vi.fn(async () => {
+			summarizeCalls += 1;
+			throw new Error("gate-failed: actions-recall failed");
+		});
+		const buildDeterministicCheckpoint = vi.fn(async () => ({ result: createResult("deterministic") }));
+		const transitions: string[] = [];
+
+		const outcome = expectSuccess(
+			await runCompactionLoop({
+				getBranch: () => branch,
+				measureLiveTokens,
+				// Fractional trigger equivalent: live tokens are above 1000, below a hypothetical hard 2000.
+				shouldCompact: (tokens) => tokens > 1000,
+				getPostApplyMargin: () => 10,
+				getBaseKeepRecentTokens: () => 800,
+				resolveModelAndAuth: async () => ({ model: createModel() }),
+				summarizeAndVerify,
+				buildDeterministicCheckpoint,
+				apply: async () => {},
+				onTransition: ({ cause, detail }) => transitions.push(`${cause}:${detail ?? ""}`),
+			}),
+		);
+
+		expect(measureLiveTokens.mock.results[0]?.value).toBe(1500);
+		expect(summarizeAndVerify).toHaveBeenCalledTimes(3);
+		expect(buildDeterministicCheckpoint).toHaveBeenCalledTimes(1);
+		expect(transitions[0]).toContain("actions-recall failed");
+		expect(outcome.cycles).toBe(4);
+		expect(outcome.result.summary).toBe("deterministic");
 	});
 
 	it("retries with chunked on input overflow", async () => {
@@ -154,8 +217,8 @@ describe("runCompactionLoop", () => {
 			await runCompactionLoop({
 				getBranch: () => branch,
 				measureLiveTokens,
-				getTriggerThreshold: () => 1000,
-				getMargin: () => 10,
+				shouldCompact: (tokens) => tokens > 1000,
+				getPostApplyMargin: () => 10,
 				getBaseKeepRecentTokens: () => 800,
 				resolveModelAndAuth: async () => ({ model: createModel() }),
 				summarizeAndVerify,
@@ -185,10 +248,12 @@ describe("runCompactionLoop", () => {
 			await runCompactionLoop({
 				getBranch: () => branch,
 				measureLiveTokens,
-				getTriggerThreshold: () => 1000,
-				getMargin: () => 10,
+				shouldCompact: (tokens) => tokens > 1000,
+				getPostApplyMargin: () => 10,
 				getBaseKeepRecentTokens: () => 800,
-				resolveModelAndAuth: async () => ({ model: createModel() }),
+				resolveModelAndAuth: async (modelTier) => ({
+					model: modelTier === "cheap" ? createModel("cheap-model") : createModel("session-model"),
+				}),
 				summarizeAndVerify,
 				buildDeterministicCheckpoint: async () => ({ result: createResult("det") }),
 				apply: async () => {},
@@ -223,8 +288,8 @@ describe("runCompactionLoop", () => {
 			await runCompactionLoop({
 				getBranch: () => branch,
 				measureLiveTokens,
-				getTriggerThreshold: () => 1000,
-				getMargin: () => 10,
+				shouldCompact: (tokens) => tokens > 1000,
+				getPostApplyMargin: () => 10,
 				getBaseKeepRecentTokens: () => 1200,
 				resolveModelAndAuth: async () => ({ model: createModel() }),
 				summarizeAndVerify,
@@ -279,8 +344,8 @@ describe("runCompactionLoop", () => {
 			await runCompactionLoop({
 				getBranch: () => branch,
 				measureLiveTokens,
-				getTriggerThreshold: () => 1000,
-				getMargin: () => 10,
+				shouldCompact: (tokens) => tokens > 1000,
+				getPostApplyMargin: () => 10,
 				getBaseKeepRecentTokens: () => 600,
 				resolveModelAndAuth: async () => ({ model: createModel() }),
 				summarizeAndVerify,
@@ -321,8 +386,8 @@ describe("runCompactionLoop", () => {
 			await runCompactionLoop({
 				getBranch: () => branch,
 				measureLiveTokens,
-				getTriggerThreshold: () => 1000,
-				getMargin: () => 10,
+				shouldCompact: (tokens) => tokens > 1000,
+				getPostApplyMargin: () => 10,
 				getBaseKeepRecentTokens: () => 800,
 				resolveModelAndAuth: async () => ({ model: createModel() }),
 				summarizeAndVerify,
@@ -341,8 +406,8 @@ describe("runCompactionLoop", () => {
 		const outcome = await runCompactionLoop({
 			getBranch: () => branch,
 			measureLiveTokens: () => 1200,
-			getTriggerThreshold: () => 1000,
-			getMargin: () => 10,
+			shouldCompact: (tokens) => tokens > 1000,
+			getPostApplyMargin: () => 10,
 			resolveModelAndAuth: async () => ({ model: createModel() }),
 			summarizeAndVerify: async () => {
 				throw new Error("gate-failed");
@@ -369,8 +434,8 @@ describe("runCompactionLoop", () => {
 			await runCompactionLoop({
 				getBranch: () => branch,
 				measureLiveTokens,
-				getTriggerThreshold: () => 1000,
-				getMargin: () => 10,
+				shouldCompact: (tokens) => tokens > 1000,
+				getPostApplyMargin: () => 10,
 				getBaseKeepRecentTokens: () => 1000,
 				resolveModelAndAuth: async () => ({ model: createModel() }),
 				summarizeAndVerify,
@@ -397,8 +462,8 @@ describe("runCompactionLoop", () => {
 			await runCompactionLoop({
 				getBranch: () => branch,
 				measureLiveTokens: scriptedMeasure([1200, 1100, 900]),
-				getTriggerThreshold: () => 1000,
-				getMargin: () => 10,
+				shouldCompact: (tokens) => tokens > 1000,
+				getPostApplyMargin: () => 10,
 				resolveModelAndAuth: async () => ({ model: createModel() }),
 				summarizeAndVerify,
 				buildDeterministicCheckpoint: async () => ({ result: createResult("deterministic") }),
@@ -430,8 +495,8 @@ describe("runCompactionLoop", () => {
 		const outcome = await runCompactionLoop({
 			getBranch: () => branch,
 			measureLiveTokens,
-			getTriggerThreshold: () => 1000,
-			getMargin: () => 10,
+			shouldCompact: (tokens) => tokens > 1000,
+			getPostApplyMargin: () => 10,
 			getBaseKeepRecentTokens: () => 1000,
 			resolveModelAndAuth: async () => ({ model: createModel() }),
 			summarizeAndVerify,
@@ -452,8 +517,8 @@ describe("runCompactionLoop", () => {
 		const outcome = await runCompactionLoop({
 			getBranch: () => branch,
 			measureLiveTokens: () => 900,
-			getTriggerThreshold: () => 1000,
-			getMargin: () => 10,
+			shouldCompact: (tokens) => tokens > 1000,
+			getPostApplyMargin: () => 10,
 			resolveModelAndAuth: vi.fn(),
 			summarizeAndVerify: vi.fn(),
 			buildDeterministicCheckpoint: vi.fn(),
