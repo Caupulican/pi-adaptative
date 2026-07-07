@@ -7,6 +7,7 @@
 - Added agent-loop forwarding for shape-only tool argument validation telemetry.
 - Fixed repaired tool calls to store repaired arguments on the assistant message while preserving raw arguments for diagnostics.
 - Added repeated tool validation failure escalation with enriched schema/example feedback.
+- Added throttled in-band teach-back notes on repaired tool results.
 
 ## [0.81.11] - 2026-07-07
 

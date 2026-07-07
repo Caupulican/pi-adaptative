@@ -83,3 +83,7 @@ export function getToolRepairRegistryEntry(name: ToolRepairModeName): ToolRepair
 	if (!entry) throw new Error(`Unknown tool repair mode: ${name}`);
 	return entry;
 }
+
+export function formatToolRepairNote(name: ToolRepairModeName, path: string): string {
+	return getToolRepairRegistryEntry(name).noteTemplate.replaceAll("{path}", path);
+}

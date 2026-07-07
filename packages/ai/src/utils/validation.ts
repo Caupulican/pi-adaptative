@@ -2,7 +2,7 @@ import { Compile } from "typebox/compile";
 import type { TLocalizedValidationError } from "typebox/error";
 import type { Tool, ToolCall } from "../types.ts";
 import { analyzeToolArgumentErrors } from "./tool-repair/analyzer.ts";
-import type { ToolRepairModeName } from "./tool-repair/registry.ts";
+import { formatToolRepairNote, type ToolRepairModeName } from "./tool-repair/registry.ts";
 import { repairToolArguments } from "./tool-repair/repairer.ts";
 
 const validatorCache = new WeakMap<object, ReturnType<typeof Compile>>();
@@ -345,11 +345,16 @@ export function validateToolArguments(
 		validator.Check(candidate),
 	);
 	if (repaired) {
+		const repairsApplied = uniqueRepairModes(repaired.repairsApplied);
+		toolCall.repairNotes = repaired.repairs.map(
+			(repair) =>
+				`[harness] ${repair.name}: ${formatToolRepairNote(repair.name, repair.path)}; executed with repaired arguments.`,
+		);
 		emitToolArgumentValidationTelemetry(options, {
 			outcome: "repaired",
 			tool: toolCall.name,
 			failureModes,
-			repairsApplied: uniqueRepairModes(repaired.repairsApplied),
+			repairsApplied,
 		});
 		return repaired.args;
 	}

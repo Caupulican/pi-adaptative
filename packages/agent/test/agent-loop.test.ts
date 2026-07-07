@@ -453,6 +453,80 @@ describe("agentLoop with AgentMessage", () => {
 		expect(escalations).toEqual([]);
 	});
 
+	it("adds throttled teach-back notes to repaired tool results", async () => {
+		const toolSchema = Type.Object({ items: Type.Array(Type.Object({ value: Type.String() })) });
+		const executed: string[] = [];
+		const tool: AgentTool<typeof toolSchema, { items: Array<{ value: string }> }> = {
+			name: "collect",
+			label: "Collect",
+			description: "Collect items",
+			parameters: toolSchema,
+			async execute(_toolCallId, params) {
+				executed.push(params.items[0]?.value ?? "");
+				return {
+					content: [{ type: "text", text: `ran ${params.items[0]?.value ?? ""}` }],
+					details: { items: params.items },
+				};
+			},
+		};
+		const context: AgentContext = { systemPrompt: "", messages: [], tools: [tool] };
+		const config: AgentLoopConfig = { model: createModel(), convertToLlm: identityConverter };
+		let callIndex = 0;
+		const streamFn = () => {
+			const stream = new MockAssistantStream();
+			queueMicrotask(() => {
+				if (callIndex < 5) {
+					stream.push({
+						type: "done",
+						reason: "toolUse",
+						message: createAssistantMessage(
+							[
+								{
+									type: "toolCall",
+									id: `tool-${callIndex}`,
+									name: "collect",
+									arguments: { items: JSON.stringify([{ value: String(callIndex + 1) }]) },
+								},
+							],
+							"toolUse",
+						),
+					});
+				} else {
+					stream.push({
+						type: "done",
+						reason: "stop",
+						message: createAssistantMessage([{ type: "text", text: "done" }]),
+					});
+				}
+				callIndex++;
+			});
+			return stream;
+		};
+
+		const stream = agentLoop([createUserMessage("collect")], context, config, undefined, streamFn);
+		for await (const _ of stream) {
+			// consume
+		}
+
+		const messages = await stream.result();
+		const toolResults = messages.filter((message) => message.role === "toolResult");
+		const resultTexts = toolResults.map((message) =>
+			message.content
+				.filter((block) => block.type === "text")
+				.map((block) => block.text)
+				.join("\n"),
+		);
+		expect(executed).toEqual(["1", "2", "3", "4", "5"]);
+		expect(resultTexts.map((text) => text.includes("[harness] jsonStringParse:"))).toEqual([
+			true,
+			false,
+			false,
+			false,
+			true,
+		]);
+		expect(resultTexts[0]).toContain("send a raw JSON array/object");
+	});
+
 	it("stores repaired tool args on the assistant message while preserving raw args", async () => {
 		const toolSchema = Type.Object({ count: Type.Number() });
 		const executed: number[] = [];

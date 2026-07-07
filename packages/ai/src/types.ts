@@ -265,6 +265,7 @@ export interface ToolCall {
 	name: string;
 	arguments: Record<string, any>;
 	rawArguments?: Record<string, unknown>;
+	repairNotes?: string[];
 	source?: "text-protocol";
 	errorMessage?: string;
 	thoughtSignature?: string; // Google-specific: opaque signature for reusing thought context

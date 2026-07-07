@@ -14,12 +14,18 @@ import {
 } from "./analyzer.ts";
 import type { ToolRepairModeName } from "./registry.ts";
 
+export interface AppliedToolRepair {
+	name: ToolRepairModeName;
+	path: string;
+}
+
 const schemaValidatorCache = new WeakMap<object, ReturnType<typeof Compile>>();
 const bashCommandWrapperKeys = new Set(["cmd", "command", "script"]);
 
 export interface ToolRepairResult {
 	args: Record<string, unknown>;
 	repairsApplied: ToolRepairModeName[];
+	repairs: AppliedToolRepair[];
 }
 
 function getSchemaValidator(schema: JsonSchemaObject): ReturnType<typeof Compile> | undefined {
@@ -235,6 +241,7 @@ export function repairToolArguments(
 
 	const candidate = structuredClone(args);
 	const repairsApplied: ToolRepairModeName[] = [];
+	const repairs: AppliedToolRepair[] = [];
 
 	for (const issue of issues) {
 		if (issue.modes.includes("nullRequiredBounce")) continue;
@@ -243,6 +250,7 @@ export function repairToolArguments(
 			if (mode === "nullRequiredBounce") continue;
 			if (applyTransform(candidate, currentIssue, mode)) {
 				repairsApplied.push(mode);
+				repairs.push({ name: mode, path: formatRepairPath(currentIssue.path) });
 				break;
 			}
 		}
@@ -250,7 +258,7 @@ export function repairToolArguments(
 
 	if (repairsApplied.length === 0) return undefined;
 	if (!checkWholeArgs(candidate)) return undefined;
-	return { args: candidate, repairsApplied };
+	return { args: candidate, repairsApplied, repairs };
 }
 
 export function formatRepairSummary(repairsApplied: readonly ToolRepairModeName[]): string {
