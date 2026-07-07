@@ -4,6 +4,7 @@
 - Fixed Amazon Bedrock redacted reasoning round-trips and unsupported image-format downgrades.
 - Fixed transcript transforms to drop tool results for skipped errored assistant tool calls.
 - Fixed API provider unregister to restore shadowed providers in override order.
+- Fixed environment API key lookup to stay browser-safe when `process` is absent.
 
 ## [0.81.11] - 2026-07-07
 

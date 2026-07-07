@@ -7,6 +7,20 @@ const originalGitHubToken = process.env.GITHUB_TOKEN;
 const originalSakanaApiKey = process.env.SAKANA_API_KEY;
 const originalFuguApiKey = process.env.FUGU_API_KEY;
 
+function withoutProcess(callback: () => void): void {
+	const descriptor = Object.getOwnPropertyDescriptor(globalThis, "process");
+	Object.defineProperty(globalThis, "process", { value: undefined, configurable: true, writable: true });
+	try {
+		callback();
+	} finally {
+		if (descriptor) {
+			Object.defineProperty(globalThis, "process", descriptor);
+		} else {
+			delete (globalThis as { process?: unknown }).process;
+		}
+	}
+}
+
 afterEach(() => {
 	if (originalCopilotGitHubToken === undefined) {
 		delete process.env.COPILOT_GITHUB_TOKEN;
@@ -72,5 +86,12 @@ describe("environment API keys", () => {
 
 		expect(findEnvKeys("fugu")).toEqual(["FUGU_API_KEY"]);
 		expect(getEnvApiKey("fugu")).toBe("fugu-token");
+	});
+
+	it("does not read env keys without a process global", () => {
+		withoutProcess(() => {
+			expect(findEnvKeys("openai")).toBeUndefined();
+			expect(getEnvApiKey("openai")).toBeUndefined();
+		});
 	});
 });

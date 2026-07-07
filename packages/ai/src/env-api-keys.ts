@@ -27,17 +27,24 @@ import type { KnownProvider } from "./types.ts";
 
 let _procEnvCache: Map<string, string> | null = null;
 
+type ProcessEnv = Record<string, string | undefined>;
+
+function getProcessEnv(): ProcessEnv | undefined {
+	if (typeof process === "undefined") return undefined;
+	return process.env;
+}
+
 /**
  * Fallback for https://github.com/oven-sh/bun/issues/27802
  * Bun compiled binaries have an empty `process.env` inside sandbox
  * environments on Linux. We can recover the env from `/proc/self/environ`.
  */
 function getProcEnv(key: string): string | undefined {
-	if (!process.versions?.bun) return undefined;
-	if (typeof process === "undefined") return undefined;
+	const procEnv = getProcessEnv();
+	if (!procEnv || !process.versions?.bun) return undefined;
 
 	// If process.env already has entries, the bug is not triggered.
-	if (Object.keys(process.env).length > 0) return undefined;
+	if (Object.keys(procEnv).length > 0) return undefined;
 
 	if (_procEnvCache === null) {
 		_procEnvCache = new Map();
@@ -62,6 +69,9 @@ let cachedVertexAdcCredentialsExists: boolean | null = null;
 
 function hasVertexAdcCredentials(): boolean {
 	if (cachedVertexAdcCredentialsExists === null) {
+		const procEnv = getProcessEnv();
+		if (!procEnv) return false;
+
 		// If node modules haven't loaded yet (async import race at startup),
 		// return false WITHOUT caching so the next call retries once they're ready.
 		// Only cache false permanently in a browser environment where fs is never available.
@@ -75,7 +85,7 @@ function hasVertexAdcCredentials(): boolean {
 		}
 
 		// Check GOOGLE_APPLICATION_CREDENTIALS env var first (standard way)
-		const gacPath = process.env.GOOGLE_APPLICATION_CREDENTIALS || getProcEnv("GOOGLE_APPLICATION_CREDENTIALS");
+		const gacPath = procEnv.GOOGLE_APPLICATION_CREDENTIALS || getProcEnv("GOOGLE_APPLICATION_CREDENTIALS");
 		if (gacPath) {
 			cachedVertexAdcCredentialsExists = _existsSync(gacPath);
 		} else {
@@ -153,7 +163,10 @@ export function findEnvKeys(provider: string): string[] | undefined {
 	const envVars = getApiKeyEnvVars(provider);
 	if (!envVars) return undefined;
 
-	const found = envVars.filter((envVar) => !!process.env[envVar] || !!getProcEnv(envVar));
+	const procEnv = getProcessEnv();
+	if (!procEnv) return undefined;
+
+	const found = envVars.filter((envVar) => !!procEnv[envVar] || !!getProcEnv(envVar));
 	return found.length > 0 ? found : undefined;
 }
 
@@ -166,8 +179,9 @@ export function getEnvApiKey(provider: KnownProvider): string | undefined;
 export function getEnvApiKey(provider: string): string | undefined;
 export function getEnvApiKey(provider: string): string | undefined {
 	const envKeys = findEnvKeys(provider);
+	const procEnv = getProcessEnv();
 	if (envKeys?.[0]) {
-		return process.env[envKeys[0]] || getProcEnv(envKeys[0]);
+		return procEnv?.[envKeys[0]] || getProcEnv(envKeys[0]);
 	}
 
 	// Vertex AI supports either an explicit API key or Application Default Credentials.
@@ -175,12 +189,12 @@ export function getEnvApiKey(provider: string): string | undefined {
 	if (provider === "google-vertex") {
 		const hasCredentials = hasVertexAdcCredentials();
 		const hasProject = !!(
-			process.env.GOOGLE_CLOUD_PROJECT ||
-			process.env.GCLOUD_PROJECT ||
+			procEnv?.GOOGLE_CLOUD_PROJECT ||
+			procEnv?.GCLOUD_PROJECT ||
 			getProcEnv("GOOGLE_CLOUD_PROJECT") ||
 			getProcEnv("GCLOUD_PROJECT")
 		);
-		const hasLocation = !!(process.env.GOOGLE_CLOUD_LOCATION || getProcEnv("GOOGLE_CLOUD_LOCATION"));
+		const hasLocation = !!(procEnv?.GOOGLE_CLOUD_LOCATION || getProcEnv("GOOGLE_CLOUD_LOCATION"));
 
 		if (hasCredentials && hasProject && hasLocation) {
 			return "<authenticated>";
@@ -196,12 +210,12 @@ export function getEnvApiKey(provider: string): string | undefined {
 		// 5. AWS_CONTAINER_CREDENTIALS_FULL_URI - ECS task roles (full URI)
 		// 6. AWS_WEB_IDENTITY_TOKEN_FILE - IRSA (IAM Roles for Service Accounts)
 		if (
-			process.env.AWS_PROFILE ||
-			(process.env.AWS_ACCESS_KEY_ID && process.env.AWS_SECRET_ACCESS_KEY) ||
-			process.env.AWS_BEARER_TOKEN_BEDROCK ||
-			process.env.AWS_CONTAINER_CREDENTIALS_RELATIVE_URI ||
-			process.env.AWS_CONTAINER_CREDENTIALS_FULL_URI ||
-			process.env.AWS_WEB_IDENTITY_TOKEN_FILE ||
+			procEnv?.AWS_PROFILE ||
+			(procEnv?.AWS_ACCESS_KEY_ID && procEnv?.AWS_SECRET_ACCESS_KEY) ||
+			procEnv?.AWS_BEARER_TOKEN_BEDROCK ||
+			procEnv?.AWS_CONTAINER_CREDENTIALS_RELATIVE_URI ||
+			procEnv?.AWS_CONTAINER_CREDENTIALS_FULL_URI ||
+			procEnv?.AWS_WEB_IDENTITY_TOKEN_FILE ||
 			getProcEnv("AWS_PROFILE") ||
 			(getProcEnv("AWS_ACCESS_KEY_ID") && getProcEnv("AWS_SECRET_ACCESS_KEY")) ||
 			getProcEnv("AWS_BEARER_TOKEN_BEDROCK") ||

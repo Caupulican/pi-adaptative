@@ -1,4 +1,4 @@
-import { complete, createAssistantMessageEventStream, getModel, getProviders, Type } from "@caupulican/pi-ai";
+import { complete, createAssistantMessageEventStream, getEnvApiKey, getModel, getProviders, Type } from "@caupulican/pi-ai";
 import { Agent, streamProxy } from "@caupulican/pi-agent-core";
 
 // Keep this entry browser-safe. It is bundled by scripts/check-browser-smoke.mjs
@@ -18,4 +18,5 @@ console.log(
 	typeof stream.push,
 	agent.hasQueuedMessages(),
 	typeof streamProxy,
+	getEnvApiKey("openai") ?? "no-env-key",
 );
