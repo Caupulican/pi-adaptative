@@ -290,6 +290,78 @@ describe("compaction bounds", () => {
 		expect(prompts.some((prompt) => prompt.includes("Checkpoint the conversation"))).toBe(false);
 	});
 
+	it("instructs update summaries to refresh working set and clear resolved open problems", async () => {
+		completeSimpleMock.mockResolvedValue(
+			response(
+				[
+					"## Active Task",
+					"Fix current issue",
+					"",
+					"### Mandatory Rules",
+					"(none)",
+					"",
+					"## Working Set",
+					"- src/new.ts — EDIT",
+					"",
+					"## Files",
+					"- src/new.ts",
+					"",
+					"## Open Problems",
+					"(none)",
+					"",
+					"## Done",
+					"1. TEST npm test — passed",
+				].join("\n"),
+			),
+		);
+		const previousSummary = [
+			"## Active Task",
+			"Fix old issue",
+			"",
+			"### Mandatory Rules",
+			"- DO NOT skip tests",
+			"",
+			"## Working Set",
+			"- src/old.ts — stale",
+			"",
+			"## Open Problems",
+			"- TEST npm test: 1 failed: old.test.ts",
+		].join("\n");
+		const factsBlock = [
+			"files:",
+			"modified: src/new.ts — EDIT",
+			"working set:",
+			"src/new.ts — EDIT",
+			"actions:",
+			"TEST npm test — passed",
+			"open errors:",
+			"prohibitions:",
+			"active task:",
+			"Fix current issue",
+		].join("\n");
+
+		await generateSummary(
+			messages(10),
+			createModel(200000),
+			16384,
+			"test-key",
+			undefined,
+			undefined,
+			undefined,
+			previousSummary,
+			undefined,
+			undefined,
+			undefined,
+			factsBlock,
+		);
+
+		const prompt = firstPromptText(completeSimpleMock.mock.calls[0] ?? []);
+		expect(prompt).toContain("Drop previous ## Open Problems resolved by the new turns.");
+		expect(prompt).toContain("Drop ## Working Set files untouched since the previous checkpoint");
+		expect(prompt).toContain(previousSummary);
+		expect(prompt).toContain(factsBlock);
+	});
+
 	it("throws for deterministic compaction when bounded gate demand cannot fit reserve", async () => {
 		const hugeFacts = `files:\n${"modified: src/a.ts — EDIT\n".repeat(1000)}actions:\n${"EDIT src/a.ts\n".repeat(1000)}prohibitions:`;
 

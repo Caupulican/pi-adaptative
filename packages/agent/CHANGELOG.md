@@ -1,6 +1,7 @@
 ## [Unreleased]
 
 ### Fixed
+- Added checkpoint v2 update-path coverage for clearing resolved open problems and refreshing stale working-set entries.
 - Added checkpoint v2 prompt sections and verification gates for working-set files and open errors.
 - Added checkpoint v2 extraction facts for open errors and working-set recency, with deterministic fallback parity and no post-gate file appendix.
 
