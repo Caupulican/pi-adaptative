@@ -4,6 +4,7 @@
 - Fixed git log filtering to preserve user arguments while applying default compact-log limits.
 - Fixed fuzzy edit replacements to preserve unrelated file bytes and report diffs from the actual on-disk change.
 - Fixed edit duplicate detection so exact matches are counted exactly before falling back to fuzzy ambiguity checks.
+- Fixed RPC input validation so non-command JSON lines return errors without terminating the process.
 
 ## [0.81.7] - 2026-07-06
 

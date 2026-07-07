@@ -91,6 +91,10 @@ function getPromptResponses(outputLines: string[], id: string): ParsedOutputLine
 	);
 }
 
+function getResponses(outputLines: string[], command: string): ParsedOutputLine[] {
+	return parseOutputLines(outputLines).filter((record) => record.type === "response" && record.command === command);
+}
+
 function sleep(ms: number): Promise<void> {
 	return new Promise((resolve) => setTimeout(resolve, ms));
 }
@@ -188,6 +192,35 @@ describe("RPC prompt response semantics", () => {
 	afterEach(() => {
 		rpcIo.outputLines = [];
 		rpcIo.lineHandler = undefined;
+	});
+
+	it("rejects non-command JSON lines and continues serving later commands", async () => {
+		const { lineHandler, cleanup } = await startRpcMode({ withAuth: true, responseDelayMs: 0 });
+
+		try {
+			for (const line of ["null", "42", '"str"', "[]", '{"type":123}']) {
+				lineHandler(line);
+			}
+
+			await vi.waitFor(() => {
+				const invalidResponses = getResponses(rpcIo.outputLines, "invalid_command");
+				expect(invalidResponses).toHaveLength(5);
+				expect(invalidResponses.every((response) => response.success === false)).toBe(true);
+			});
+
+			rpcIo.outputLines = [];
+			lineHandler(JSON.stringify({ id: "valid-after-invalid", type: "get_commands" }));
+
+			await vi.waitFor(() => {
+				const responses = parseOutputLines(rpcIo.outputLines).filter(
+					(record) => record.id === "valid-after-invalid" && record.type === "response",
+				);
+				expect(responses).toHaveLength(1);
+				expect(responses[0]).toMatchObject({ command: "get_commands", success: true });
+			});
+		} finally {
+			await cleanup();
+		}
 	});
 
 	it("emits one failure response when prompt preflight rejects", async () => {

@@ -718,14 +718,26 @@ export async function runRpcMode(runtimeHost: AgentSessionRuntime): Promise<neve
 			return;
 		}
 
+		if (typeof parsed !== "object" || parsed === null || Array.isArray(parsed)) {
+			output(error(undefined, "invalid_command", "Invalid command: expected an object with a string type."));
+			await waitForRawStdoutBackpressure();
+			return;
+		}
+		const parsedRecord = parsed as Record<string, unknown>;
+		if (typeof parsedRecord.type !== "string") {
+			output(error(undefined, "invalid_command", "Invalid command: expected an object with a string type."));
+			await waitForRawStdoutBackpressure();
+			return;
+		}
+		if (parsedRecord.id !== undefined && typeof parsedRecord.id !== "string") {
+			output(error(undefined, "invalid_command", "Invalid command: id must be a string when provided."));
+			await waitForRawStdoutBackpressure();
+			return;
+		}
+
 		// Handle extension UI responses
-		if (
-			typeof parsed === "object" &&
-			parsed !== null &&
-			"type" in parsed &&
-			parsed.type === "extension_ui_response"
-		) {
-			const response = parsed as RpcExtensionUIResponse;
+		if (parsedRecord.type === "extension_ui_response") {
+			const response = parsedRecord as RpcExtensionUIResponse;
 			const pending = pendingExtensionRequests.get(response.id);
 			if (pending) {
 				pendingExtensionRequests.delete(response.id);
@@ -734,7 +746,9 @@ export async function runRpcMode(runtimeHost: AgentSessionRuntime): Promise<neve
 			return;
 		}
 
-		const command = parsed as RpcCommand;
+		const command = parsedRecord as RpcCommand;
+		const commandId = command.id;
+		const commandType = command.type;
 		try {
 			const response = await handleCommand(command);
 			if (response) {
@@ -744,11 +758,7 @@ export async function runRpcMode(runtimeHost: AgentSessionRuntime): Promise<neve
 			await checkShutdownRequested();
 		} catch (commandError: unknown) {
 			output(
-				error(
-					command.id,
-					command.type,
-					commandError instanceof Error ? commandError.message : String(commandError),
-				),
+				error(commandId, commandType, commandError instanceof Error ? commandError.message : String(commandError)),
 			);
 			await waitForRawStdoutBackpressure();
 		}
