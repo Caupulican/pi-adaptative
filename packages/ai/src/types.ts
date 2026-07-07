@@ -574,6 +574,11 @@ export interface Model<TApi extends Api> {
 	 */
 	thinkingLevelMap?: ThinkingLevelMap;
 	input: ("text" | "image")[];
+	/**
+	 * Optional list of image MIME types this model accepts. When omitted, providers
+	 * that support images preserve all image blocks.
+	 */
+	supportedImageMimeTypes?: string[];
 	cost: {
 		input: number; // $/million tokens
 		output: number; // $/million tokens

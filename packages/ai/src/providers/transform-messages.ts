@@ -12,12 +12,16 @@ import type {
 const NON_VISION_USER_IMAGE_PLACEHOLDER = "(image omitted: model does not support images)";
 const NON_VISION_TOOL_IMAGE_PLACEHOLDER = "(tool image omitted: model does not support images)";
 
-function replaceImagesWithPlaceholder(content: (TextContent | ImageContent)[], placeholder: string): TextContent[] {
-	const result: TextContent[] = [];
+function replaceUnsupportedImagesWithPlaceholder(
+	content: (TextContent | ImageContent)[],
+	placeholder: string,
+	isSupported: (block: ImageContent) => boolean,
+): (TextContent | ImageContent)[] {
+	const result: (TextContent | ImageContent)[] = [];
 	let previousWasPlaceholder = false;
 
 	for (const block of content) {
-		if (block.type === "image") {
+		if (block.type === "image" && !isSupported(block)) {
 			if (!previousWasPlaceholder) {
 				result.push({ type: "text", text: placeholder });
 			}
@@ -26,29 +30,52 @@ function replaceImagesWithPlaceholder(content: (TextContent | ImageContent)[], p
 		}
 
 		result.push(block);
-		previousWasPlaceholder = block.text === placeholder;
+		previousWasPlaceholder = block.type === "text" && block.text === placeholder;
 	}
 
 	return result;
 }
 
+function createImageSupportPredicate<TApi extends Api>(model: Model<TApi>): (block: ImageContent) => boolean {
+	if (!model.input.includes("image")) {
+		return () => false;
+	}
+
+	if (!model.supportedImageMimeTypes) {
+		return () => true;
+	}
+
+	const supportedMimeTypes = new Set(model.supportedImageMimeTypes.map((mimeType) => mimeType.toLowerCase()));
+	return (block) => supportedMimeTypes.has(block.mimeType.toLowerCase());
+}
+
 function downgradeUnsupportedImages<TApi extends Api>(messages: Message[], model: Model<TApi>): Message[] {
-	if (model.input.includes("image")) {
+	if (model.input.includes("image") && !model.supportedImageMimeTypes) {
 		return messages;
 	}
+
+	const isSupportedImage = createImageSupportPredicate(model);
 
 	return messages.map((msg) => {
 		if (msg.role === "user" && Array.isArray(msg.content)) {
 			return {
 				...msg,
-				content: replaceImagesWithPlaceholder(msg.content, NON_VISION_USER_IMAGE_PLACEHOLDER),
+				content: replaceUnsupportedImagesWithPlaceholder(
+					msg.content,
+					NON_VISION_USER_IMAGE_PLACEHOLDER,
+					isSupportedImage,
+				),
 			};
 		}
 
 		if (msg.role === "toolResult") {
 			return {
 				...msg,
-				content: replaceImagesWithPlaceholder(msg.content, NON_VISION_TOOL_IMAGE_PLACEHOLDER),
+				content: replaceUnsupportedImagesWithPlaceholder(
+					msg.content,
+					NON_VISION_TOOL_IMAGE_PLACEHOLDER,
+					isSupportedImage,
+				),
 			};
 		}
 

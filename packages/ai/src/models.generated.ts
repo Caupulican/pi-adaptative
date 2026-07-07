@@ -13,6 +13,7 @@ export const MODELS = {
 			baseUrl: "https://bedrock-runtime.us-east-1.amazonaws.com",
 			reasoning: true,
 			input: ["text", "image"],
+			supportedImageMimeTypes: ["image/jpeg", "image/jpg", "image/png", "image/gif", "image/webp"],
 			cost: {
 				input: 0.33,
 				output: 2.75,
@@ -30,6 +31,7 @@ export const MODELS = {
 			baseUrl: "https://bedrock-runtime.us-east-1.amazonaws.com",
 			reasoning: false,
 			input: ["text", "image"],
+			supportedImageMimeTypes: ["image/jpeg", "image/jpg", "image/png", "image/gif", "image/webp"],
 			cost: {
 				input: 0.06,
 				output: 0.24,
@@ -64,6 +66,7 @@ export const MODELS = {
 			baseUrl: "https://bedrock-runtime.us-east-1.amazonaws.com",
 			reasoning: false,
 			input: ["text", "image"],
+			supportedImageMimeTypes: ["image/jpeg", "image/jpg", "image/png", "image/gif", "image/webp"],
 			cost: {
 				input: 0.8,
 				output: 3.2,
@@ -81,6 +84,7 @@ export const MODELS = {
 			baseUrl: "https://bedrock-runtime.us-east-1.amazonaws.com",
 			reasoning: true,
 			input: ["text", "image"],
+			supportedImageMimeTypes: ["image/jpeg", "image/jpg", "image/png", "image/gif", "image/webp"],
 			cost: {
 				input: 10,
 				output: 50,
@@ -98,6 +102,7 @@ export const MODELS = {
 			baseUrl: "https://bedrock-runtime.us-east-1.amazonaws.com",
 			reasoning: true,
 			input: ["text", "image"],
+			supportedImageMimeTypes: ["image/jpeg", "image/jpg", "image/png", "image/gif", "image/webp"],
 			cost: {
 				input: 1,
 				output: 5,
@@ -115,6 +120,7 @@ export const MODELS = {
 			baseUrl: "https://bedrock-runtime.us-east-1.amazonaws.com",
 			reasoning: true,
 			input: ["text", "image"],
+			supportedImageMimeTypes: ["image/jpeg", "image/jpg", "image/png", "image/gif", "image/webp"],
 			cost: {
 				input: 15,
 				output: 75,
@@ -132,6 +138,7 @@ export const MODELS = {
 			baseUrl: "https://bedrock-runtime.us-east-1.amazonaws.com",
 			reasoning: true,
 			input: ["text", "image"],
+			supportedImageMimeTypes: ["image/jpeg", "image/jpg", "image/png", "image/gif", "image/webp"],
 			cost: {
 				input: 5,
 				output: 25,
@@ -150,6 +157,7 @@ export const MODELS = {
 			reasoning: true,
 			thinkingLevelMap: {"xhigh":"max"},
 			input: ["text", "image"],
+			supportedImageMimeTypes: ["image/jpeg", "image/jpg", "image/png", "image/gif", "image/webp"],
 			cost: {
 				input: 5,
 				output: 25,
@@ -168,6 +176,7 @@ export const MODELS = {
 			reasoning: true,
 			thinkingLevelMap: {"xhigh":"xhigh"},
 			input: ["text", "image"],
+			supportedImageMimeTypes: ["image/jpeg", "image/jpg", "image/png", "image/gif", "image/webp"],
 			cost: {
 				input: 5,
 				output: 25,
@@ -186,6 +195,7 @@ export const MODELS = {
 			reasoning: true,
 			thinkingLevelMap: {"xhigh":"xhigh"},
 			input: ["text", "image"],
+			supportedImageMimeTypes: ["image/jpeg", "image/jpg", "image/png", "image/gif", "image/webp"],
 			cost: {
 				input: 5,
 				output: 25,
@@ -203,6 +213,7 @@ export const MODELS = {
 			baseUrl: "https://bedrock-runtime.us-east-1.amazonaws.com",
 			reasoning: true,
 			input: ["text", "image"],
+			supportedImageMimeTypes: ["image/jpeg", "image/jpg", "image/png", "image/gif", "image/webp"],
 			cost: {
 				input: 3,
 				output: 15,
@@ -220,6 +231,7 @@ export const MODELS = {
 			baseUrl: "https://bedrock-runtime.us-east-1.amazonaws.com",
 			reasoning: true,
 			input: ["text", "image"],
+			supportedImageMimeTypes: ["image/jpeg", "image/jpg", "image/png", "image/gif", "image/webp"],
 			cost: {
 				input: 3,
 				output: 15,
@@ -237,6 +249,7 @@ export const MODELS = {
 			baseUrl: "https://bedrock-runtime.us-east-1.amazonaws.com",
 			reasoning: true,
 			input: ["text", "image"],
+			supportedImageMimeTypes: ["image/jpeg", "image/jpg", "image/png", "image/gif", "image/webp"],
 			cost: {
 				input: 2,
 				output: 10,
@@ -254,6 +267,7 @@ export const MODELS = {
 			baseUrl: "https://bedrock-runtime.us-east-1.amazonaws.com",
 			reasoning: true,
 			input: ["text", "image"],
+			supportedImageMimeTypes: ["image/jpeg", "image/jpg", "image/png", "image/gif", "image/webp"],
 			cost: {
 				input: 1,
 				output: 5,
@@ -272,6 +286,7 @@ export const MODELS = {
 			reasoning: true,
 			thinkingLevelMap: {"xhigh":"max"},
 			input: ["text", "image"],
+			supportedImageMimeTypes: ["image/jpeg", "image/jpg", "image/png", "image/gif", "image/webp"],
 			cost: {
 				input: 16.5,
 				output: 82.5,
@@ -290,6 +305,7 @@ export const MODELS = {
 			reasoning: true,
 			thinkingLevelMap: {"xhigh":"xhigh"},
 			input: ["text", "image"],
+			supportedImageMimeTypes: ["image/jpeg", "image/jpg", "image/png", "image/gif", "image/webp"],
 			cost: {
 				input: 5,
 				output: 25,
@@ -307,6 +323,7 @@ export const MODELS = {
 			baseUrl: "https://bedrock-runtime.us-east-1.amazonaws.com",
 			reasoning: true,
 			input: ["text", "image"],
+			supportedImageMimeTypes: ["image/jpeg", "image/jpg", "image/png", "image/gif", "image/webp"],
 			cost: {
 				input: 3,
 				output: 15,
@@ -324,6 +341,7 @@ export const MODELS = {
 			baseUrl: "https://bedrock-runtime.us-east-1.amazonaws.com",
 			reasoning: true,
 			input: ["text", "image"],
+			supportedImageMimeTypes: ["image/jpeg", "image/jpg", "image/png", "image/gif", "image/webp"],
 			cost: {
 				input: 3.3,
 				output: 16.5,
@@ -341,6 +359,7 @@ export const MODELS = {
 			baseUrl: "https://bedrock-runtime.us-east-1.amazonaws.com",
 			reasoning: true,
 			input: ["text", "image"],
+			supportedImageMimeTypes: ["image/jpeg", "image/jpg", "image/png", "image/gif", "image/webp"],
 			cost: {
 				input: 2,
 				output: 10,
@@ -409,6 +428,7 @@ export const MODELS = {
 			baseUrl: "https://bedrock-runtime.eu-central-1.amazonaws.com",
 			reasoning: true,
 			input: ["text", "image"],
+			supportedImageMimeTypes: ["image/jpeg", "image/jpg", "image/png", "image/gif", "image/webp"],
 			cost: {
 				input: 11,
 				output: 55,
@@ -426,6 +446,7 @@ export const MODELS = {
 			baseUrl: "https://bedrock-runtime.eu-central-1.amazonaws.com",
 			reasoning: true,
 			input: ["text", "image"],
+			supportedImageMimeTypes: ["image/jpeg", "image/jpg", "image/png", "image/gif", "image/webp"],
 			cost: {
 				input: 1.1,
 				output: 5.5,
@@ -443,6 +464,7 @@ export const MODELS = {
 			baseUrl: "https://bedrock-runtime.eu-central-1.amazonaws.com",
 			reasoning: true,
 			input: ["text", "image"],
+			supportedImageMimeTypes: ["image/jpeg", "image/jpg", "image/png", "image/gif", "image/webp"],
 			cost: {
 				input: 5.5,
 				output: 27.5,
@@ -461,6 +483,7 @@ export const MODELS = {
 			reasoning: true,
 			thinkingLevelMap: {"xhigh":"max"},
 			input: ["text", "image"],
+			supportedImageMimeTypes: ["image/jpeg", "image/jpg", "image/png", "image/gif", "image/webp"],
 			cost: {
 				input: 5.5,
 				output: 27.5,
@@ -479,6 +502,7 @@ export const MODELS = {
 			reasoning: true,
 			thinkingLevelMap: {"xhigh":"xhigh"},
 			input: ["text", "image"],
+			supportedImageMimeTypes: ["image/jpeg", "image/jpg", "image/png", "image/gif", "image/webp"],
 			cost: {
 				input: 5.5,
 				output: 27.5,
@@ -497,6 +521,7 @@ export const MODELS = {
 			reasoning: true,
 			thinkingLevelMap: {"xhigh":"xhigh"},
 			input: ["text", "image"],
+			supportedImageMimeTypes: ["image/jpeg", "image/jpg", "image/png", "image/gif", "image/webp"],
 			cost: {
 				input: 5.5,
 				output: 27.5,
@@ -514,6 +539,7 @@ export const MODELS = {
 			baseUrl: "https://bedrock-runtime.eu-central-1.amazonaws.com",
 			reasoning: true,
 			input: ["text", "image"],
+			supportedImageMimeTypes: ["image/jpeg", "image/jpg", "image/png", "image/gif", "image/webp"],
 			cost: {
 				input: 3.3,
 				output: 16.5,
@@ -531,6 +557,7 @@ export const MODELS = {
 			baseUrl: "https://bedrock-runtime.eu-central-1.amazonaws.com",
 			reasoning: true,
 			input: ["text", "image"],
+			supportedImageMimeTypes: ["image/jpeg", "image/jpg", "image/png", "image/gif", "image/webp"],
 			cost: {
 				input: 3.3,
 				output: 16.5,
@@ -548,6 +575,7 @@ export const MODELS = {
 			baseUrl: "https://bedrock-runtime.eu-central-1.amazonaws.com",
 			reasoning: true,
 			input: ["text", "image"],
+			supportedImageMimeTypes: ["image/jpeg", "image/jpg", "image/png", "image/gif", "image/webp"],
 			cost: {
 				input: 2.2,
 				output: 11,
@@ -565,6 +593,7 @@ export const MODELS = {
 			baseUrl: "https://bedrock-runtime.us-east-1.amazonaws.com",
 			reasoning: true,
 			input: ["text", "image"],
+			supportedImageMimeTypes: ["image/jpeg", "image/jpg", "image/png", "image/gif", "image/webp"],
 			cost: {
 				input: 10,
 				output: 50,
@@ -582,6 +611,7 @@ export const MODELS = {
 			baseUrl: "https://bedrock-runtime.us-east-1.amazonaws.com",
 			reasoning: true,
 			input: ["text", "image"],
+			supportedImageMimeTypes: ["image/jpeg", "image/jpg", "image/png", "image/gif", "image/webp"],
 			cost: {
 				input: 1,
 				output: 5,
@@ -599,6 +629,7 @@ export const MODELS = {
 			baseUrl: "https://bedrock-runtime.us-east-1.amazonaws.com",
 			reasoning: true,
 			input: ["text", "image"],
+			supportedImageMimeTypes: ["image/jpeg", "image/jpg", "image/png", "image/gif", "image/webp"],
 			cost: {
 				input: 5,
 				output: 25,
@@ -617,6 +648,7 @@ export const MODELS = {
 			reasoning: true,
 			thinkingLevelMap: {"xhigh":"max"},
 			input: ["text", "image"],
+			supportedImageMimeTypes: ["image/jpeg", "image/jpg", "image/png", "image/gif", "image/webp"],
 			cost: {
 				input: 5,
 				output: 25,
@@ -635,6 +667,7 @@ export const MODELS = {
 			reasoning: true,
 			thinkingLevelMap: {"xhigh":"xhigh"},
 			input: ["text", "image"],
+			supportedImageMimeTypes: ["image/jpeg", "image/jpg", "image/png", "image/gif", "image/webp"],
 			cost: {
 				input: 5,
 				output: 25,
@@ -653,6 +686,7 @@ export const MODELS = {
 			reasoning: true,
 			thinkingLevelMap: {"xhigh":"xhigh"},
 			input: ["text", "image"],
+			supportedImageMimeTypes: ["image/jpeg", "image/jpg", "image/png", "image/gif", "image/webp"],
 			cost: {
 				input: 5,
 				output: 25,
@@ -670,6 +704,7 @@ export const MODELS = {
 			baseUrl: "https://bedrock-runtime.us-east-1.amazonaws.com",
 			reasoning: true,
 			input: ["text", "image"],
+			supportedImageMimeTypes: ["image/jpeg", "image/jpg", "image/png", "image/gif", "image/webp"],
 			cost: {
 				input: 3,
 				output: 15,
@@ -687,6 +722,7 @@ export const MODELS = {
 			baseUrl: "https://bedrock-runtime.us-east-1.amazonaws.com",
 			reasoning: true,
 			input: ["text", "image"],
+			supportedImageMimeTypes: ["image/jpeg", "image/jpg", "image/png", "image/gif", "image/webp"],
 			cost: {
 				input: 3,
 				output: 15,
@@ -704,6 +740,7 @@ export const MODELS = {
 			baseUrl: "https://bedrock-runtime.us-east-1.amazonaws.com",
 			reasoning: true,
 			input: ["text", "image"],
+			supportedImageMimeTypes: ["image/jpeg", "image/jpg", "image/png", "image/gif", "image/webp"],
 			cost: {
 				input: 2,
 				output: 10,
@@ -721,6 +758,7 @@ export const MODELS = {
 			baseUrl: "https://bedrock-runtime.us-east-1.amazonaws.com",
 			reasoning: false,
 			input: ["text", "image"],
+			supportedImageMimeTypes: ["image/jpeg", "image/jpg", "image/png", "image/gif", "image/webp"],
 			cost: {
 				input: 0.12,
 				output: 0.2,
@@ -738,6 +776,7 @@ export const MODELS = {
 			baseUrl: "https://bedrock-runtime.us-east-1.amazonaws.com",
 			reasoning: false,
 			input: ["text", "image"],
+			supportedImageMimeTypes: ["image/jpeg", "image/jpg", "image/png", "image/gif", "image/webp"],
 			cost: {
 				input: 0.04,
 				output: 0.08,
@@ -755,6 +794,7 @@ export const MODELS = {
 			baseUrl: "https://bedrock-runtime.us-east-1.amazonaws.com",
 			reasoning: true,
 			input: ["text", "image"],
+			supportedImageMimeTypes: ["image/jpeg", "image/jpg", "image/png", "image/gif", "image/webp"],
 			cost: {
 				input: 1,
 				output: 5,
@@ -773,6 +813,7 @@ export const MODELS = {
 			reasoning: true,
 			thinkingLevelMap: {"xhigh":"xhigh"},
 			input: ["text", "image"],
+			supportedImageMimeTypes: ["image/jpeg", "image/jpg", "image/png", "image/gif", "image/webp"],
 			cost: {
 				input: 5,
 				output: 25,
@@ -791,6 +832,7 @@ export const MODELS = {
 			reasoning: true,
 			thinkingLevelMap: {"xhigh":"xhigh"},
 			input: ["text", "image"],
+			supportedImageMimeTypes: ["image/jpeg", "image/jpg", "image/png", "image/gif", "image/webp"],
 			cost: {
 				input: 5,
 				output: 25,
@@ -808,6 +850,7 @@ export const MODELS = {
 			baseUrl: "https://bedrock-runtime.us-east-1.amazonaws.com",
 			reasoning: true,
 			input: ["text", "image"],
+			supportedImageMimeTypes: ["image/jpeg", "image/jpg", "image/png", "image/gif", "image/webp"],
 			cost: {
 				input: 3,
 				output: 15,
@@ -825,6 +868,7 @@ export const MODELS = {
 			baseUrl: "https://bedrock-runtime.us-east-1.amazonaws.com",
 			reasoning: true,
 			input: ["text", "image"],
+			supportedImageMimeTypes: ["image/jpeg", "image/jpg", "image/png", "image/gif", "image/webp"],
 			cost: {
 				input: 3,
 				output: 15,
@@ -842,6 +886,7 @@ export const MODELS = {
 			baseUrl: "https://bedrock-runtime.us-east-1.amazonaws.com",
 			reasoning: true,
 			input: ["text", "image"],
+			supportedImageMimeTypes: ["image/jpeg", "image/jpg", "image/png", "image/gif", "image/webp"],
 			cost: {
 				input: 2,
 				output: 10,
@@ -910,6 +955,7 @@ export const MODELS = {
 			baseUrl: "https://bedrock-runtime.us-east-1.amazonaws.com",
 			reasoning: false,
 			input: ["text", "image"],
+			supportedImageMimeTypes: ["image/jpeg", "image/jpg", "image/png", "image/gif", "image/webp"],
 			cost: {
 				input: 0.24,
 				output: 0.97,
@@ -927,6 +973,7 @@ export const MODELS = {
 			baseUrl: "https://bedrock-runtime.us-east-1.amazonaws.com",
 			reasoning: false,
 			input: ["text", "image"],
+			supportedImageMimeTypes: ["image/jpeg", "image/jpg", "image/png", "image/gif", "image/webp"],
 			cost: {
 				input: 0.17,
 				output: 0.66,
@@ -1012,6 +1059,7 @@ export const MODELS = {
 			baseUrl: "https://bedrock-runtime.us-east-1.amazonaws.com",
 			reasoning: true,
 			input: ["text", "image"],
+			supportedImageMimeTypes: ["image/jpeg", "image/jpg", "image/png", "image/gif", "image/webp"],
 			cost: {
 				input: 0.5,
 				output: 1.5,
@@ -1046,6 +1094,7 @@ export const MODELS = {
 			baseUrl: "https://bedrock-runtime.us-east-1.amazonaws.com",
 			reasoning: false,
 			input: ["text", "image"],
+			supportedImageMimeTypes: ["image/jpeg", "image/jpg", "image/png", "image/gif", "image/webp"],
 			cost: {
 				input: 0.1,
 				output: 0.1,
@@ -1080,6 +1129,7 @@ export const MODELS = {
 			baseUrl: "https://bedrock-runtime.us-east-1.amazonaws.com",
 			reasoning: false,
 			input: ["text", "image"],
+			supportedImageMimeTypes: ["image/jpeg", "image/jpg", "image/png", "image/gif", "image/webp"],
 			cost: {
 				input: 0.5,
 				output: 1.5,
@@ -1097,6 +1147,7 @@ export const MODELS = {
 			baseUrl: "https://bedrock-runtime.us-east-1.amazonaws.com",
 			reasoning: false,
 			input: ["text", "image"],
+			supportedImageMimeTypes: ["image/jpeg", "image/jpg", "image/png", "image/gif", "image/webp"],
 			cost: {
 				input: 2,
 				output: 6,
@@ -1165,6 +1216,7 @@ export const MODELS = {
 			baseUrl: "https://bedrock-runtime.us-east-1.amazonaws.com",
 			reasoning: true,
 			input: ["text", "image"],
+			supportedImageMimeTypes: ["image/jpeg", "image/jpg", "image/png", "image/gif", "image/webp"],
 			cost: {
 				input: 0.6,
 				output: 3,
@@ -1182,6 +1234,7 @@ export const MODELS = {
 			baseUrl: "https://bedrock-runtime.us-east-1.amazonaws.com",
 			reasoning: false,
 			input: ["text", "image"],
+			supportedImageMimeTypes: ["image/jpeg", "image/jpg", "image/png", "image/gif", "image/webp"],
 			cost: {
 				input: 0.2,
 				output: 0.6,
@@ -1251,6 +1304,7 @@ export const MODELS = {
 			reasoning: true,
 			thinkingLevelMap: {"xhigh":"xhigh"},
 			input: ["text", "image"],
+			supportedImageMimeTypes: ["image/jpeg", "image/jpg", "image/png", "image/gif", "image/webp"],
 			cost: {
 				input: 2.75,
 				output: 16.5,
@@ -1269,6 +1323,7 @@ export const MODELS = {
 			reasoning: true,
 			thinkingLevelMap: {"xhigh":"xhigh"},
 			input: ["text", "image"],
+			supportedImageMimeTypes: ["image/jpeg", "image/jpg", "image/png", "image/gif", "image/webp"],
 			cost: {
 				input: 5.5,
 				output: 33,
@@ -1490,6 +1545,7 @@ export const MODELS = {
 			baseUrl: "https://bedrock-runtime.us-east-1.amazonaws.com",
 			reasoning: false,
 			input: ["text", "image"],
+			supportedImageMimeTypes: ["image/jpeg", "image/jpg", "image/png", "image/gif", "image/webp"],
 			cost: {
 				input: 0.3,
 				output: 1.5,
@@ -1507,6 +1563,7 @@ export const MODELS = {
 			baseUrl: "https://bedrock-runtime.us-east-1.amazonaws.com",
 			reasoning: true,
 			input: ["text", "image"],
+			supportedImageMimeTypes: ["image/jpeg", "image/jpg", "image/png", "image/gif", "image/webp"],
 			cost: {
 				input: 10,
 				output: 50,
@@ -1524,6 +1581,7 @@ export const MODELS = {
 			baseUrl: "https://bedrock-runtime.us-east-1.amazonaws.com",
 			reasoning: true,
 			input: ["text", "image"],
+			supportedImageMimeTypes: ["image/jpeg", "image/jpg", "image/png", "image/gif", "image/webp"],
 			cost: {
 				input: 1,
 				output: 5,
@@ -1541,6 +1599,7 @@ export const MODELS = {
 			baseUrl: "https://bedrock-runtime.us-east-1.amazonaws.com",
 			reasoning: true,
 			input: ["text", "image"],
+			supportedImageMimeTypes: ["image/jpeg", "image/jpg", "image/png", "image/gif", "image/webp"],
 			cost: {
 				input: 15,
 				output: 75,
@@ -1558,6 +1617,7 @@ export const MODELS = {
 			baseUrl: "https://bedrock-runtime.us-east-1.amazonaws.com",
 			reasoning: true,
 			input: ["text", "image"],
+			supportedImageMimeTypes: ["image/jpeg", "image/jpg", "image/png", "image/gif", "image/webp"],
 			cost: {
 				input: 5,
 				output: 25,
@@ -1576,6 +1636,7 @@ export const MODELS = {
 			reasoning: true,
 			thinkingLevelMap: {"xhigh":"max"},
 			input: ["text", "image"],
+			supportedImageMimeTypes: ["image/jpeg", "image/jpg", "image/png", "image/gif", "image/webp"],
 			cost: {
 				input: 5,
 				output: 25,
@@ -1594,6 +1655,7 @@ export const MODELS = {
 			reasoning: true,
 			thinkingLevelMap: {"xhigh":"xhigh"},
 			input: ["text", "image"],
+			supportedImageMimeTypes: ["image/jpeg", "image/jpg", "image/png", "image/gif", "image/webp"],
 			cost: {
 				input: 5,
 				output: 25,
@@ -1612,6 +1674,7 @@ export const MODELS = {
 			reasoning: true,
 			thinkingLevelMap: {"xhigh":"xhigh"},
 			input: ["text", "image"],
+			supportedImageMimeTypes: ["image/jpeg", "image/jpg", "image/png", "image/gif", "image/webp"],
 			cost: {
 				input: 5,
 				output: 25,
@@ -1629,6 +1692,7 @@ export const MODELS = {
 			baseUrl: "https://bedrock-runtime.us-east-1.amazonaws.com",
 			reasoning: true,
 			input: ["text", "image"],
+			supportedImageMimeTypes: ["image/jpeg", "image/jpg", "image/png", "image/gif", "image/webp"],
 			cost: {
 				input: 3,
 				output: 15,
@@ -1646,6 +1710,7 @@ export const MODELS = {
 			baseUrl: "https://bedrock-runtime.us-east-1.amazonaws.com",
 			reasoning: true,
 			input: ["text", "image"],
+			supportedImageMimeTypes: ["image/jpeg", "image/jpg", "image/png", "image/gif", "image/webp"],
 			cost: {
 				input: 3,
 				output: 15,
@@ -1663,6 +1728,7 @@ export const MODELS = {
 			baseUrl: "https://bedrock-runtime.us-east-1.amazonaws.com",
 			reasoning: true,
 			input: ["text", "image"],
+			supportedImageMimeTypes: ["image/jpeg", "image/jpg", "image/png", "image/gif", "image/webp"],
 			cost: {
 				input: 2,
 				output: 10,
@@ -1697,6 +1763,7 @@ export const MODELS = {
 			baseUrl: "https://bedrock-runtime.us-east-1.amazonaws.com",
 			reasoning: false,
 			input: ["text", "image"],
+			supportedImageMimeTypes: ["image/jpeg", "image/jpg", "image/png", "image/gif", "image/webp"],
 			cost: {
 				input: 0.24,
 				output: 0.97,
@@ -1714,6 +1781,7 @@ export const MODELS = {
 			baseUrl: "https://bedrock-runtime.us-east-1.amazonaws.com",
 			reasoning: false,
 			input: ["text", "image"],
+			supportedImageMimeTypes: ["image/jpeg", "image/jpg", "image/png", "image/gif", "image/webp"],
 			cost: {
 				input: 0.17,
 				output: 0.66,
@@ -1765,6 +1833,7 @@ export const MODELS = {
 			baseUrl: "https://bedrock-runtime.us-east-1.amazonaws.com",
 			reasoning: true,
 			input: ["text", "image"],
+			supportedImageMimeTypes: ["image/jpeg", "image/jpg", "image/png", "image/gif", "image/webp"],
 			cost: {
 				input: 1.25,
 				output: 2.5,

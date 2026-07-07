@@ -2046,7 +2046,11 @@ async function generateModels() {
 		}));
 	allModels.push(...azureOpenAiModels);
 
+	const bedrockSupportedImageMimeTypes = ["image/jpeg", "image/jpg", "image/png", "image/gif", "image/webp"];
 	for (const model of allModels) {
+		if (model.api === "bedrock-converse-stream" && model.input.includes("image")) {
+			model.supportedImageMimeTypes = bedrockSupportedImageMimeTypes;
+		}
 		applyThinkingLevelMetadata(model);
 	}
 
@@ -2101,6 +2105,9 @@ export const MODELS = {
 				output += `\t\t\tthinkingLevelMap: ${JSON.stringify(model.thinkingLevelMap)},\n`;
 			}
 			output += `\t\t\tinput: [${model.input.map(i => `"${i}"`).join(", ")}],\n`;
+			if (model.supportedImageMimeTypes) {
+				output += `\t\t\tsupportedImageMimeTypes: [${model.supportedImageMimeTypes.map((mimeType) => `"${mimeType}"`).join(", ")}],\n`;
+			}
 			output += `\t\t\tcost: {\n`;
 			output += `\t\t\t\tinput: ${model.cost.input},\n`;
 			output += `\t\t\t\toutput: ${model.cost.output},\n`;

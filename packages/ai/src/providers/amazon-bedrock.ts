@@ -466,6 +466,13 @@ function handleContentBlockDelta(
 					partial: output,
 				});
 			}
+			if (delta.reasoningContent.redactedContent) {
+				thinkingBlock.redacted = true;
+				thinkingBlock.thinkingSignature = appendBase64Bytes(
+					thinkingBlock.thinkingSignature,
+					delta.reasoningContent.redactedContent,
+				);
+			}
 			if (delta.reasoningContent.signature) {
 				thinkingBlock.thinkingSignature =
 					(thinkingBlock.thinkingSignature || "") + delta.reasoningContent.signature;
@@ -746,6 +753,17 @@ function convertMessages(
 							});
 							break;
 						case "thinking": {
+							if (c.redacted) {
+								if (c.thinkingSignature?.trim()) {
+									contentBlocks.push({
+										reasoningContent: {
+											redactedContent: base64ToBytes(c.thinkingSignature),
+										},
+									});
+								}
+								break;
+							}
+
 							// Skip empty thinking blocks
 							const thinking = sanitizeSurrogates(c.thinking);
 							if (thinking.trim().length === 0) continue;
@@ -997,6 +1015,33 @@ function buildAdditionalModelRequestFields(
 	return undefined;
 }
 
+function bytesToBase64(bytes: Uint8Array): string {
+	let binary = "";
+	for (const byte of bytes) {
+		binary += String.fromCharCode(byte);
+	}
+	return btoa(binary);
+}
+
+function base64ToBytes(data: string): Uint8Array {
+	const binaryString = atob(data);
+	const bytes = new Uint8Array(binaryString.length);
+	for (let i = 0; i < binaryString.length; i++) {
+		bytes[i] = binaryString.charCodeAt(i);
+	}
+	return bytes;
+}
+
+function appendBase64Bytes(existingBase64: string | undefined, bytes: Uint8Array): string {
+	if (!existingBase64) return bytesToBase64(bytes);
+
+	const existing = base64ToBytes(existingBase64);
+	const merged = new Uint8Array(existing.length + bytes.length);
+	merged.set(existing);
+	merged.set(bytes, existing.length);
+	return bytesToBase64(merged);
+}
+
 function createImageBlock(mimeType: string, data: string) {
 	let format: ImageFormat;
 	switch (mimeType) {
@@ -1017,11 +1062,5 @@ function createImageBlock(mimeType: string, data: string) {
 			throw new Error(`Unknown image type: ${mimeType}`);
 	}
 
-	const binaryString = atob(data);
-	const bytes = new Uint8Array(binaryString.length);
-	for (let i = 0; i < binaryString.length; i++) {
-		bytes[i] = binaryString.charCodeAt(i);
-	}
-
-	return { source: { bytes }, format };
+	return { source: { bytes: base64ToBytes(data) }, format };
 }

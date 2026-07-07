@@ -1,5 +1,8 @@
 ## [Unreleased]
 
+### Fixed
+- Fixed Amazon Bedrock redacted reasoning round-trips and unsupported image-format downgrades.
+
 ## [0.81.11] - 2026-07-07
 
 ## [0.81.10] - 2026-07-07
