@@ -24,20 +24,21 @@ export function buildInitialMessage({
 	stdinContent,
 }: InitialMessageInput): InitialMessageResult {
 	const parts: string[] = [];
-	if (stdinContent !== undefined) {
-		parts.push(stdinContent);
-	}
-	if (fileText) {
-		parts.push(fileText);
-	}
+	const addPart = (part: string | undefined): void => {
+		if (part === undefined || part.length === 0) return;
+		parts.push(part.replace(/\n+$/, ""));
+	};
+
+	addPart(stdinContent);
+	addPart(fileText);
 
 	if (parsed.messages.length > 0) {
-		parts.push(parsed.messages[0]);
+		addPart(parsed.messages[0]);
 		parsed.messages.shift();
 	}
 
 	return {
-		initialMessage: parts.length > 0 ? parts.join("") : undefined,
+		initialMessage: parts.length > 0 ? parts.join("\n\n") : undefined,
 		initialImages: fileImages && fileImages.length > 0 ? fileImages : undefined,
 	};
 }

@@ -6,6 +6,7 @@
 - Fixed edit duplicate detection so exact matches are counted exactly before falling back to fuzzy ambiguity checks.
 - Fixed RPC input validation so non-command JSON lines return errors without terminating the process.
 - Fixed `read` tail results to return the requested content lines for newline-terminated files.
+- Fixed initial CLI prompt construction to separate stdin, `@file`, and message sources with blank lines.
 
 ## [0.81.7] - 2026-07-06
 

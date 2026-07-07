@@ -19,7 +19,7 @@ describe("buildInitialMessage", () => {
 			stdinContent: "README contents\n",
 		});
 
-		expect(result.initialMessage).toBe("README contents\nSummarize the text given");
+		expect(result.initialMessage).toBe("README contents\n\nSummarize the text given");
 		expect(parsed.messages).toEqual([]);
 	});
 
@@ -34,6 +34,29 @@ describe("buildInitialMessage", () => {
 		expect(parsed.messages).toEqual([]);
 	});
 
+	test("combines file text and first CLI message in one prompt", () => {
+		const parsed = createArgs(["Explain it", "Second message"]);
+		const result = buildInitialMessage({
+			parsed,
+			fileText: "file\n",
+		});
+
+		expect(result.initialMessage).toBe("file\n\nExplain it");
+		expect(parsed.messages).toEqual(["Second message"]);
+	});
+
+	test("combines stdin and file text in one prompt", () => {
+		const parsed = createArgs();
+		const result = buildInitialMessage({
+			parsed,
+			stdinContent: "stdin\n",
+			fileText: "file\n",
+		});
+
+		expect(result.initialMessage).toBe("stdin\n\nfile");
+		expect(parsed.messages).toEqual([]);
+	});
+
 	test("combines stdin, file text, and first CLI message in one prompt", () => {
 		const parsed = createArgs(["Explain it", "Second message"]);
 		const result = buildInitialMessage({
@@ -42,7 +65,7 @@ describe("buildInitialMessage", () => {
 			fileText: "file\n",
 		});
 
-		expect(result.initialMessage).toBe("stdin\nfile\nExplain it");
+		expect(result.initialMessage).toBe("stdin\n\nfile\n\nExplain it");
 		expect(parsed.messages).toEqual(["Second message"]);
 	});
 });
