@@ -8,7 +8,9 @@ import {
 	type Context,
 	EventStream,
 	streamSimple,
+	type ToolArgumentExecutionOutcome,
 	ToolArgumentValidationError,
+	type ToolArgumentValidationTelemetryEvent,
 	type ToolResultMessage,
 	validateToolArguments,
 } from "@caupulican/pi-ai";
@@ -536,6 +538,7 @@ async function executeToolCallsSequential(
 		let finalized: FinalizedToolCallOutcome;
 		if (preparation.kind === "immediate") {
 			resetExecutionFailureTracker(executionFailureTracker);
+			emitToolArgumentValidationTelemetry(config, preparation.validationEvent, "not_run", "none");
 			finalized = {
 				toolCall,
 				result: preparation.result,
@@ -603,6 +606,7 @@ async function executeToolCallsParallel(
 		);
 		if (preparation.kind === "immediate") {
 			resetExecutionFailureTracker(executionFailureTracker);
+			emitToolArgumentValidationTelemetry(config, preparation.validationEvent, "not_run", "none");
 			const finalized = {
 				toolCall,
 				result: preparation.result,
@@ -657,12 +661,14 @@ type PreparedToolCall = {
 	toolCall: AgentToolCall;
 	tool: AgentTool<any>;
 	args: unknown;
+	validationEvent?: ToolArgumentValidationTelemetryEvent;
 };
 
 type ImmediateToolCallOutcome = {
 	kind: "immediate";
 	result: AgentToolResult<any>;
 	isError: boolean;
+	validationEvent?: ToolArgumentValidationTelemetryEvent;
 };
 
 type ExecutedToolCallOutcome = {
@@ -718,6 +724,16 @@ function prepareToolCallArguments(tool: AgentTool<any>, toolCall: AgentToolCall)
 function resetValidationFailureTracker(tracker: ToolValidationFailureTracker): void {
 	tracker.signature = undefined;
 	tracker.repeats = 0;
+}
+
+function emitToolArgumentValidationTelemetry(
+	config: AgentLoopConfig,
+	event: ToolArgumentValidationTelemetryEvent | undefined,
+	executionOutcome: ToolArgumentExecutionOutcome,
+	taught: ToolArgumentValidationTelemetryEvent["taught"],
+): void {
+	if (!event) return;
+	config.onToolArgumentValidation?.({ ...event, executionOutcome, taught });
 }
 
 function toolValidationEscalationThreshold(config: AgentLoopConfig): number {
@@ -789,12 +805,15 @@ async function prepareToolCall(
 		};
 	}
 
+	let validationEvent: ToolArgumentValidationTelemetryEvent | undefined;
 	try {
 		const preparedToolCall = prepareToolCallArguments(tool, toolCall);
 		const validatedArgs = validateToolArguments(tool, preparedToolCall, {
 			model: config.model.id,
 			provider: config.model.provider,
-			telemetry: config.onToolArgumentValidation,
+			telemetry: (event) => {
+				validationEvent = event;
+			},
 		});
 		resetValidationFailureTracker(validationFailureTracker);
 		if (preparedToolCall.repairNotes) {
@@ -819,6 +838,7 @@ async function prepareToolCall(
 					kind: "immediate",
 					result: createErrorToolResult("Operation aborted"),
 					isError: true,
+					validationEvent,
 				};
 			}
 			if (beforeResult?.block) {
@@ -826,6 +846,7 @@ async function prepareToolCall(
 					kind: "immediate",
 					result: createErrorToolResult(beforeResult.reason || "Tool execution was blocked"),
 					isError: true,
+					validationEvent,
 				};
 			}
 		}
@@ -834,6 +855,7 @@ async function prepareToolCall(
 				kind: "immediate",
 				result: createErrorToolResult("Operation aborted"),
 				isError: true,
+				validationEvent,
 			};
 		}
 		return {
@@ -841,6 +863,7 @@ async function prepareToolCall(
 			toolCall,
 			tool,
 			args: validatedArgs,
+			validationEvent,
 		};
 	} catch (error) {
 		const message = isToolArgumentValidationError(error)
@@ -852,6 +875,7 @@ async function prepareToolCall(
 			kind: "immediate",
 			result: createErrorToolResult(message),
 			isError: true,
+			validationEvent,
 		};
 	}
 }
@@ -910,12 +934,15 @@ function appendRepairTeachNotes(
 	result: AgentToolResult<any>,
 	toolCall: AgentToolCall,
 	tracker: ToolRepairTeachTracker,
-): AgentToolResult<any> {
+): { result: AgentToolResult<any>; taught: boolean } {
 	const notes = (toolCall.repairNotes ?? []).filter((note) => shouldEmitRepairTeachNote(toolCall.name, note, tracker));
-	if (notes.length === 0) return result;
+	if (notes.length === 0) return { result, taught: false };
 	return {
-		...result,
-		content: [...result.content, { type: "text", text: notes.join("\n") }],
+		result: {
+			...result,
+			content: [...result.content, { type: "text", text: notes.join("\n") }],
+		},
+		taught: true,
 	};
 }
 
@@ -1001,9 +1028,17 @@ async function finalizeExecutedToolCall(
 		resetExecutionFailureTracker(executionFailureTracker);
 	}
 
+	const repaired = appendRepairTeachNotes(result, prepared.toolCall, repairTeachTracker);
+	emitToolArgumentValidationTelemetry(
+		config,
+		prepared.validationEvent,
+		isError ? "failed" : "succeeded",
+		repaired.taught ? "note" : "none",
+	);
+
 	return {
 		toolCall: prepared.toolCall,
-		result: appendRepairTeachNotes(result, prepared.toolCall, repairTeachTracker),
+		result: repaired.result,
 		isError,
 	};
 }

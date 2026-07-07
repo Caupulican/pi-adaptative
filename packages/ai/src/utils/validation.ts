@@ -11,6 +11,8 @@ const RECEIVED_VALUE_MAX_LENGTH = 200;
 const MISSING_VALUE = Symbol("missing");
 
 export type ToolArgumentValidationOutcome = "clean" | "repaired" | "bounced";
+export type ToolArgumentTeachState = "none" | "note" | "rule";
+export type ToolArgumentExecutionOutcome = "not_run" | "succeeded" | "failed";
 
 export interface ToolArgumentValidationTelemetryEvent {
 	outcome: ToolArgumentValidationOutcome;
@@ -19,6 +21,8 @@ export interface ToolArgumentValidationTelemetryEvent {
 	tool: string;
 	failureModes: ToolRepairModeName[];
 	repairsApplied: ToolRepairModeName[];
+	taught: ToolArgumentTeachState;
+	executionOutcome: ToolArgumentExecutionOutcome;
 }
 
 export interface ToolArgumentValidationOptions {
@@ -43,10 +47,16 @@ export class ToolArgumentValidationError extends Error {
 
 function emitToolArgumentValidationTelemetry(
 	options: ToolArgumentValidationOptions | undefined,
-	event: Omit<ToolArgumentValidationTelemetryEvent, "model" | "provider">,
+	event: Omit<ToolArgumentValidationTelemetryEvent, "model" | "provider" | "taught" | "executionOutcome">,
 ): void {
 	try {
-		options?.telemetry?.({ ...event, model: options.model, provider: options.provider });
+		options?.telemetry?.({
+			...event,
+			model: options.model,
+			provider: options.provider,
+			taught: "none",
+			executionOutcome: "not_run",
+		});
 	} catch {
 		// Telemetry is observe-only; never fail validation because a sink failed.
 	}

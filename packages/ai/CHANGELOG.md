@@ -20,6 +20,7 @@
 - Added structured tool argument validation errors for repeated-failure handling.
 - Added repair-note metadata for successful tool argument repairs.
 - Added central standing-rule text for tool argument repair modes.
+- Added teach-state and execution-outcome fields to tool argument validation telemetry.
 
 ## [0.81.11] - 2026-07-07
 

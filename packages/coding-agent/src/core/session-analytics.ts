@@ -19,7 +19,14 @@ import {
 	type SessionHeader,
 	type SessionManager,
 } from "@caupulican/pi-agent-core/node";
-import type { AssistantMessage, Model, ToolArgumentValidationTelemetryEvent, Usage } from "@caupulican/pi-ai";
+import type {
+	AssistantMessage,
+	Model,
+	ToolArgumentExecutionOutcome,
+	ToolArgumentTeachState,
+	ToolArgumentValidationTelemetryEvent,
+	Usage,
+} from "@caupulican/pi-ai";
 import { getSessionsDir } from "../config.ts";
 import { theme } from "../modes/interactive/theme/theme.ts";
 import { resolvePath } from "../utils/paths.ts";
@@ -43,12 +50,23 @@ import type { SettingsManager } from "./settings-manager.ts";
 
 export const TOOL_ARGUMENT_VALIDATION_CUSTOM_TYPE = "tool_argument_validation";
 
+export interface ToolArgumentValidationTeachEfficacy {
+	recurrenceBefore: number;
+	recurrenceAfter: number;
+	repairedThenSucceeded: number;
+	repairedThenFailed: number;
+	repairedThenNotRun: number;
+}
+
 export interface ToolArgumentValidationStats {
 	clean: number;
 	repaired: number;
 	bounced: number;
 	failureModes: Record<string, number>;
 	repairsApplied: Record<string, number>;
+	taught: Record<ToolArgumentTeachState, number>;
+	executionOutcome: Record<ToolArgumentExecutionOutcome, number>;
+	teachEfficacy: Record<string, ToolArgumentValidationTeachEfficacy>;
 }
 
 export interface ToolArgumentValidationRecord extends ToolArgumentValidationTelemetryEvent {
@@ -146,6 +164,21 @@ export class SessionAnalytics {
 			bounced: 0,
 			failureModes: {},
 			repairsApplied: {},
+			taught: { none: 0, note: 0, rule: 0 },
+			executionOutcome: { not_run: 0, succeeded: 0, failed: 0 },
+			teachEfficacy: {},
+		};
+
+		const getEfficacy = (record: ToolArgumentValidationRecord, mode: string): ToolArgumentValidationTeachEfficacy => {
+			const key = `${record.provider ?? "unknown"}/${record.model ?? "unknown"}:${mode}`;
+			stats.teachEfficacy[key] ??= {
+				recurrenceBefore: 0,
+				recurrenceAfter: 0,
+				repairedThenSucceeded: 0,
+				repairedThenFailed: 0,
+				repairedThenNotRun: 0,
+			};
+			return stats.teachEfficacy[key];
 		};
 
 		for (const entry of this.deps.getSessionManager().getEntries()) {
@@ -153,11 +186,32 @@ export class SessionAnalytics {
 			const record = entry.data as ToolArgumentValidationRecord | undefined;
 			if (!record || record.version !== 1) continue;
 			stats[record.outcome] += 1;
+			const taught = record.taught ?? "none";
+			const executionOutcome = record.executionOutcome ?? "not_run";
+			stats.taught[taught] += 1;
+			stats.executionOutcome[executionOutcome] += 1;
+			const modes = new Set([...record.failureModes, ...record.repairsApplied]);
 			for (const mode of record.failureModes) {
 				stats.failureModes[mode] = (stats.failureModes[mode] ?? 0) + 1;
 			}
 			for (const repair of record.repairsApplied) {
 				stats.repairsApplied[repair] = (stats.repairsApplied[repair] ?? 0) + 1;
+			}
+			for (const mode of modes) {
+				const efficacy = getEfficacy(record, mode);
+				if (taught === "none") {
+					efficacy.recurrenceBefore++;
+				} else {
+					efficacy.recurrenceAfter++;
+				}
+			}
+			if (record.outcome === "repaired") {
+				for (const repair of record.repairsApplied) {
+					const efficacy = getEfficacy(record, repair);
+					if (executionOutcome === "succeeded") efficacy.repairedThenSucceeded++;
+					if (executionOutcome === "failed") efficacy.repairedThenFailed++;
+					if (executionOutcome === "not_run") efficacy.repairedThenNotRun++;
+				}
 			}
 		}
 

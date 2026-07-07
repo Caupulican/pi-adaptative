@@ -932,9 +932,10 @@ export class AgentSession {
 		});
 		const previousToolArgumentValidation = this.agent.onToolArgumentValidation;
 		this.agent.onToolArgumentValidation = (event) => {
-			previousToolArgumentValidation?.(event);
-			this._analytics.recordToolArgumentValidation(event);
-			this._handleModelAdaptationTelemetry(event);
+			const taggedEvent = this._tagModelAdaptationRuleTeaching(event);
+			previousToolArgumentValidation?.(taggedEvent);
+			this._analytics.recordToolArgumentValidation(taggedEvent);
+			this._handleModelAdaptationTelemetry(taggedEvent);
 		};
 		this._treeNavigator = new SessionTreeNavigator({
 			getSessionManager: () => this.sessionManager,
@@ -1255,6 +1256,27 @@ export class AgentSession {
 	private _getModelAdaptationRulesForPrompt() {
 		const modelKey = this._modelAdaptationKeyFor(this.agent.state.model);
 		return modelKey ? this._modelAdaptationStore.get(modelKey).rules : [];
+	}
+
+	private _tagModelAdaptationRuleTeaching(
+		event: ToolArgumentValidationTelemetryEvent,
+	): ToolArgumentValidationTelemetryEvent {
+		if (event.taught !== "none") return event;
+		const modelKey =
+			event.provider && event.model
+				? `${event.provider}/${event.model}`
+				: this._modelAdaptationKeyFor(this.agent.state.model);
+		if (!modelKey) return event;
+		try {
+			const rules = this._modelAdaptationStore.get(modelKey).rules;
+			const modes = new Set([...event.failureModes, ...event.repairsApplied]);
+			if (rules.some((rule) => modes.has(rule.mode as ToolRepairModeName))) {
+				return { ...event, taught: "rule" };
+			}
+		} catch {
+			// Adaptation telemetry tagging is best-effort; leave the original event unchanged.
+		}
+		return event;
 	}
 
 	private _repairSessionCount(modelKey: string, mode: ToolRepairModeName): number {

@@ -53,6 +53,8 @@ function repairEvent(model: Model<Api>): ToolArgumentValidationTelemetryEvent {
 		tool: "collect",
 		failureModes: ["jsonStringParse"],
 		repairsApplied: ["jsonStringParse"],
+		taught: "none",
+		executionOutcome: "succeeded",
 	};
 }
 

@@ -514,6 +514,75 @@ describe("agentLoop with AgentMessage", () => {
 		expect(toolResults[1]?.content[1]).toEqual({ type: "text", text: "ENOENT: missing file" });
 	});
 
+	it("links repaired validation telemetry to teach state and execution outcome without arguments", async () => {
+		const toolSchema = Type.Object({ items: Type.Array(Type.Object({ value: Type.String() })) });
+		const tool: AgentTool<typeof toolSchema, { items: Array<{ value: string }> }> = {
+			name: "collect",
+			label: "Collect",
+			description: "Collect items",
+			parameters: toolSchema,
+			async execute(_toolCallId, params) {
+				return { content: [{ type: "text", text: "ok" }], details: params };
+			},
+		};
+		const telemetry: NonNullable<AgentLoopConfig["onToolArgumentValidation"]>[] = [];
+		const events: Parameters<NonNullable<AgentLoopConfig["onToolArgumentValidation"]>>[0][] = [];
+		telemetry.push((event) => events.push(event));
+		const context: AgentContext = { systemPrompt: "", messages: [], tools: [tool] };
+		const config: AgentLoopConfig = {
+			model: createModel(),
+			convertToLlm: identityConverter,
+			onToolArgumentValidation: telemetry[0],
+		};
+		let callIndex = 0;
+		const streamFn = () => {
+			const stream = new MockAssistantStream();
+			queueMicrotask(() => {
+				if (callIndex === 0) {
+					stream.push({
+						type: "done",
+						reason: "toolUse",
+						message: createAssistantMessage(
+							[
+								{
+									type: "toolCall",
+									id: "tool-1",
+									name: "collect",
+									arguments: { items: JSON.stringify([{ value: "secret-value" }]) },
+								},
+							],
+							"toolUse",
+						),
+					});
+				} else {
+					stream.push({
+						type: "done",
+						reason: "stop",
+						message: createAssistantMessage([{ type: "text", text: "done" }]),
+					});
+				}
+				callIndex++;
+			});
+			return stream;
+		};
+
+		const stream = agentLoop([createUserMessage("collect")], context, config, undefined, streamFn);
+		for await (const _ of stream) {
+			// consume
+		}
+
+		expect(events).toEqual([
+			expect.objectContaining({
+				outcome: "repaired",
+				failureModes: expect.arrayContaining(["jsonStringParse"]),
+				repairsApplied: ["jsonStringParse"],
+				taught: "note",
+				executionOutcome: "succeeded",
+			}),
+		]);
+		expect(JSON.stringify(events)).not.toContain("secret-value");
+	});
+
 	it("adds throttled teach-back notes to repaired tool results", async () => {
 		const toolSchema = Type.Object({ items: Type.Array(Type.Object({ value: Type.String() })) });
 		const executed: string[] = [];

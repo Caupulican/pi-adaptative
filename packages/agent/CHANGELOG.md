@@ -9,6 +9,7 @@
 - Added repeated tool validation failure escalation with enriched schema/example feedback.
 - Added throttled in-band teach-back notes on repaired tool results.
 - Added in-band guidance after repeated identical tool execution failures.
+- Linked tool argument validation telemetry to teach state and same-call execution outcome.
 
 ## [0.81.11] - 2026-07-07
 

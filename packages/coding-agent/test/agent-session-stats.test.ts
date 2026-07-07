@@ -89,6 +89,8 @@ describe("AgentSession.getSessionStats", () => {
 				tool: "read",
 				failureModes: [],
 				repairsApplied: [],
+				taught: "none",
+				executionOutcome: "succeeded",
 			});
 			session.agent.onToolArgumentValidation?.({
 				outcome: "repaired",
@@ -97,6 +99,8 @@ describe("AgentSession.getSessionStats", () => {
 				tool: "edit",
 				failureModes: ["jsonStringParse"],
 				repairsApplied: ["jsonStringParse"],
+				taught: "note",
+				executionOutcome: "succeeded",
 			});
 			session.agent.onToolArgumentValidation?.({
 				outcome: "bounced",
@@ -105,6 +109,8 @@ describe("AgentSession.getSessionStats", () => {
 				tool: "bash",
 				failureModes: ["bashCommandUnwrap"],
 				repairsApplied: [],
+				taught: "none",
+				executionOutcome: "not_run",
 			});
 
 			expect(session.getSessionStats().toolArgumentValidation).toEqual({
@@ -113,6 +119,24 @@ describe("AgentSession.getSessionStats", () => {
 				bounced: 1,
 				failureModes: { jsonStringParse: 1, bashCommandUnwrap: 1 },
 				repairsApplied: { jsonStringParse: 1 },
+				taught: { none: 2, note: 1, rule: 0 },
+				executionOutcome: { not_run: 1, succeeded: 2, failed: 0 },
+				teachEfficacy: {
+					"anthropic/claude-sonnet-4-5:bashCommandUnwrap": {
+						recurrenceBefore: 1,
+						recurrenceAfter: 0,
+						repairedThenSucceeded: 0,
+						repairedThenFailed: 0,
+						repairedThenNotRun: 0,
+					},
+					"anthropic/claude-sonnet-4-5:jsonStringParse": {
+						recurrenceBefore: 0,
+						recurrenceAfter: 1,
+						repairedThenSucceeded: 1,
+						repairedThenFailed: 0,
+						repairedThenNotRun: 0,
+					},
+				},
 			});
 			expect(sessionManager.getEntries().filter((entry) => entry.type === "custom")).toHaveLength(3);
 		} finally {
