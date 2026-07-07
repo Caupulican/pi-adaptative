@@ -453,6 +453,67 @@ describe("agentLoop with AgentMessage", () => {
 		expect(escalations).toEqual([]);
 	});
 
+	it("teaches after repeated identical execution failures before runaway stop", async () => {
+		const toolSchema = Type.Object({ path: Type.String() });
+		const tool: AgentTool<typeof toolSchema, { path: string }> = {
+			name: "read_file",
+			label: "Read file",
+			description: "Read a file",
+			parameters: toolSchema,
+			async execute() {
+				throw new TypeError("ENOENT: missing file");
+			},
+		};
+		const context: AgentContext = { systemPrompt: "", messages: [], tools: [tool] };
+		const config: AgentLoopConfig = { model: createModel(), convertToLlm: identityConverter, maxStallTurns: 12 };
+		let callIndex = 0;
+		const streamFn = () => {
+			const stream = new MockAssistantStream();
+			queueMicrotask(() => {
+				if (callIndex < 2) {
+					stream.push({
+						type: "done",
+						reason: "toolUse",
+						message: createAssistantMessage(
+							[
+								{
+									type: "toolCall",
+									id: `tool-${callIndex}`,
+									name: "read_file",
+									arguments: { path: "missing.txt" },
+								},
+							],
+							"toolUse",
+						),
+					});
+				} else {
+					stream.push({
+						type: "done",
+						reason: "stop",
+						message: createAssistantMessage([{ type: "text", text: "done" }]),
+					});
+				}
+				callIndex++;
+			});
+			return stream;
+		};
+
+		const stream = agentLoop([createUserMessage("read")], context, config, undefined, streamFn);
+		for await (const _ of stream) {
+			// consume
+		}
+
+		const messages = await stream.result();
+		const toolResults = messages.filter((message) => message.role === "toolResult");
+		expect(toolResults).toHaveLength(2);
+		expect(toolResults[0]?.content[0]).toEqual({ type: "text", text: "ENOENT: missing file" });
+		expect(toolResults[1]?.content[0]).toMatchObject({
+			type: "text",
+			text: expect.stringContaining("failed twice with the same TypeError error"),
+		});
+		expect(toolResults[1]?.content[1]).toEqual({ type: "text", text: "ENOENT: missing file" });
+	});
+
 	it("adds throttled teach-back notes to repaired tool results", async () => {
 		const toolSchema = Type.Object({ items: Type.Array(Type.Object({ value: Type.String() })) });
 		const executed: string[] = [];
