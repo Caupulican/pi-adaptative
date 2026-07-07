@@ -85,8 +85,8 @@ function isReadOnlyShellSegment(segment: string): boolean {
 
 function isReadOnlyShellCommand(command: string): boolean {
 	if (!command || MUTATING_SHELL_TOKEN_RE.test(command)) return false;
-	const segments = command.split(/\s*&&\s*/).map((segment) => segment.trim());
-	return segments.length > 0 && segments.every(isReadOnlyShellSegment);
+	const segments = command.split(/\s*(?:&&|\|\||[;|\r\n])\s*/).map((segment) => segment.trim());
+	return segments.length > 0 && segments.every((segment) => segment.length > 0 && isReadOnlyShellSegment(segment));
 }
 
 export function shouldEscalateModelRouterTool(options: {

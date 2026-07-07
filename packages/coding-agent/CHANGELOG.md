@@ -8,6 +8,7 @@
 - Fixed `read` tail results to return the requested content lines for newline-terminated files.
 - Fixed initial CLI prompt construction to separate stdin, `@file`, and message sources with blank lines.
 - Fixed worker edit actions to insert replacement text literally when it contains JavaScript `$` replacement patterns.
+- Fixed cheap-tier shell tool escalation to fail closed on compound commands containing mutating segments.
 
 ## [0.81.7] - 2026-07-06
 

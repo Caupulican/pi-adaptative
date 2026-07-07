@@ -63,6 +63,20 @@ describe("model router tool escalation", () => {
 		).toBe(true);
 	});
 
+	it("escalates compound shell commands unless every segment is read-only", () => {
+		for (const command of ["grep a; rm b", "git log | patch -p1", "ls || ./run.sh", "git status\n./deploy.sh"]) {
+			expect(shouldEscalateModelRouterTool({ tier: "cheap", toolName: "bash", args: { command } })).toBe(true);
+		}
+
+		expect(
+			shouldEscalateModelRouterTool({
+				tier: "cheap",
+				toolName: "bash",
+				args: { command: "git status && git log --oneline -3" },
+			}),
+		).toBe(false);
+	});
+
 	it("still escalates mutating tools from a cheap FastContext-shaped route", () => {
 		const fastContextShape = {
 			research: { succeeded: 3, total: 3 },
