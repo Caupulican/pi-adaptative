@@ -605,6 +605,7 @@ export class AgentSession {
 	private readonly _repairModeSessionCounts = new Map<string, number>();
 	private readonly _textProtocolParseFailures = new Map<string, { signature: string; repeats: number }>();
 	private _textProtocolParseObservedThisTurn = false;
+	private _textProtocolValidationOutcomeThisTurn: TextToolProtocolParseEvent | undefined;
 	/** Assembles the session's base system prompt from live session state (see
 	 * system-prompt-builder.ts); owns the paired _baseSystemPromptOptions. */
 	private readonly _systemPromptBuilder: SystemPromptBuilder;
@@ -973,6 +974,7 @@ export class AgentSession {
 			previousToolArgumentValidation?.(taggedEvent);
 			this._analytics.recordToolArgumentValidation(taggedEvent);
 			this._recordToolValidationBounce(taggedEvent);
+			this._handleTextToolProtocolValidationOutcome(taggedEvent);
 			this._handleModelAdaptationTelemetry(taggedEvent);
 		};
 		this._treeNavigator = new SessionTreeNavigator({
@@ -1552,10 +1554,7 @@ export class AgentSession {
 	private _handleTextToolProtocolParse(event: TextToolProtocolParseEvent): void {
 		this._textProtocolParseObservedThisTurn = true;
 		const modelKey = `${event.provider}/${event.model}`;
-		if (event.status === "parsed") {
-			this._textProtocolParseFailures.delete(modelKey);
-			return;
-		}
+		if (event.status === "parsed") return;
 		const signature = `${event.variant}:${event.reason ?? "failed"}`;
 		const previous = this._textProtocolParseFailures.get(modelKey);
 		const repeats = previous?.signature === signature ? previous.repeats + 1 : 1;
@@ -1570,7 +1569,38 @@ export class AgentSession {
 		this._textProtocolParseFailures.delete(modelKey);
 	}
 
+	private _handleTextToolProtocolValidationOutcome(event: ToolArgumentValidationTelemetryEvent): void {
+		if (event.source !== "text-protocol") return;
+		const protocol = this.agent.textToolCallProtocol;
+		const variant = protocol === true ? "tool-tag" : protocol ? protocol.variant : undefined;
+		if (!variant) return;
+		const status = event.outcome === "bounced" ? "failed" : "parsed";
+		if (this._textProtocolValidationOutcomeThisTurn?.status === "parsed" && status === "failed") return;
+		this._textProtocolValidationOutcomeThisTurn = {
+			provider: event.provider ?? this.agent.state.model.provider,
+			model: event.model ?? this.agent.state.model.id,
+			variant,
+			status,
+			callCount: 1,
+			textLength: 0,
+			...(status === "failed" && {
+				reason: event.errorKeywords?.includes("unknown_tool") ? "unknown-tool" : "validation-failed",
+			}),
+		};
+	}
+
 	private _recordTextToolProtocolParseOutcomeFromLastAssistant(): void {
+		const validationOutcome = this._textProtocolValidationOutcomeThisTurn;
+		this._textProtocolValidationOutcomeThisTurn = undefined;
+		if (validationOutcome?.status === "parsed") {
+			this._textProtocolParseObservedThisTurn = true;
+			this._textProtocolParseFailures.delete(`${validationOutcome.provider}/${validationOutcome.model}`);
+			return;
+		}
+		if (validationOutcome) {
+			this._handleTextToolProtocolParse(validationOutcome);
+			return;
+		}
 		if (this._textProtocolParseObservedThisTurn) return;
 		const protocol = this.agent.textToolCallProtocol;
 		if (protocol === false || protocol === true || !protocol?.variant) return;
@@ -2882,6 +2912,7 @@ export class AgentSession {
 
 		preflightResult?.(true);
 		this._textProtocolParseObservedThisTurn = false;
+		this._textProtocolValidationOutcomeThisTurn = undefined;
 		await this._modelRouter.runRoutedTurn(messages, routedTurnModel, routedTurnRouteDecision);
 		this._recordTextToolProtocolParseOutcomeFromLastAssistant();
 

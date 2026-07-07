@@ -711,6 +711,25 @@ function prepareToolCallArguments(tool: AgentTool<any>, toolCall: AgentToolCall)
 	};
 }
 
+function createValidationBounceTelemetry(
+	config: AgentLoopConfig,
+	toolCall: AgentToolCall,
+	errorKeyword: string,
+): ToolArgumentValidationTelemetryEvent {
+	return {
+		outcome: "bounced",
+		provider: config.model.provider,
+		model: config.model.id,
+		tool: toolCall.name,
+		source: toolCall.source,
+		failureModes: ["other"],
+		repairsApplied: [],
+		errorKeywords: [errorKeyword],
+		taught: "none",
+		executionOutcome: "not_run",
+	};
+}
+
 function resetValidationFailureTracker(tracker: ToolValidationFailureTracker): void {
 	tracker.signature = undefined;
 	tracker.repeats = 0;
@@ -783,6 +802,7 @@ async function prepareToolCall(
 			kind: "immediate",
 			result: createErrorToolResult(toolCall.errorMessage),
 			isError: true,
+			validationEvent: createValidationBounceTelemetry(config, toolCall, "unknown_tool"),
 		};
 	}
 
@@ -792,6 +812,7 @@ async function prepareToolCall(
 			kind: "immediate",
 			result: createErrorToolResult(`Tool ${toolCall.name} not found`),
 			isError: true,
+			validationEvent: createValidationBounceTelemetry(config, toolCall, "unknown_tool"),
 		};
 	}
 

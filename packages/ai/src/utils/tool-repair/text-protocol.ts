@@ -1,6 +1,11 @@
 import type { Tool, ToolCall } from "../../types.ts";
 
-export type TextToolProtocolParseFailure = "overlap" | "mixed-prose" | "unrecognized";
+export type TextToolProtocolParseFailure =
+	| "overlap"
+	| "mixed-prose"
+	| "unrecognized"
+	| "unknown-tool"
+	| "validation-failed";
 
 export interface ParsedTextToolCalls {
 	calls: ToolCall[];

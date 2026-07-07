@@ -30,6 +30,7 @@ export interface ToolArgumentValidationTelemetryEvent {
 	provider?: string;
 	model?: string;
 	tool: string;
+	source?: ToolCall["source"];
 	failureModes: ToolRepairFailureModeName[];
 	repairsApplied: ToolRepairModeName[];
 	failureShape?: ToolArgumentFailureShapeEntry[];
@@ -409,6 +410,7 @@ export function validateToolArguments(
 		emitToolArgumentValidationTelemetry(options, {
 			outcome: "clean",
 			tool: toolCall.name,
+			source: toolCall.source,
 			failureModes: [],
 			repairsApplied: [],
 		});
@@ -433,6 +435,7 @@ export function validateToolArguments(
 		emitToolArgumentValidationTelemetry(options, {
 			outcome: "repaired",
 			tool: toolCall.name,
+			source: toolCall.source,
 			failureModes,
 			repairsApplied,
 		});
@@ -442,6 +445,7 @@ export function validateToolArguments(
 	emitToolArgumentValidationTelemetry(options, {
 		outcome: "bounced",
 		tool: toolCall.name,
+		source: toolCall.source,
 		failureModes,
 		repairsApplied: [],
 		failureShape: formatFailureShape(validationErrors, toolCall.arguments, tool.parameters),
