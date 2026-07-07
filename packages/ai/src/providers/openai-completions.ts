@@ -32,7 +32,7 @@ import type {
 import { formatProviderError, normalizeProviderError } from "../utils/error-body.ts";
 import { AssistantMessageEventStream } from "../utils/event-stream.ts";
 import { headersToRecord } from "../utils/headers.ts";
-import { parseStreamingJson } from "../utils/json-parse.ts";
+import { parseStreamingJsonState } from "../utils/json-parse.ts";
 import { sanitizeSurrogates } from "../utils/sanitize-unicode.ts";
 import { isCloudflareProvider, resolveCloudflareBaseUrl } from "./cloudflare.ts";
 import { buildCopilotDynamicHeaders, hasCopilotVisionInput } from "./github-copilot-headers.ts";
@@ -169,6 +169,7 @@ export const streamOpenAICompletions: StreamFunction<"openai-completions", OpenA
 
 			interface StreamingToolCallBlock extends ToolCall {
 				partialArgs?: string;
+				partialArgsComplete?: boolean;
 				streamIndex?: number;
 			}
 			type StreamingBlock = TextContent | ThinkingContent | StreamingToolCallBlock;
@@ -205,10 +206,13 @@ export const streamOpenAICompletions: StreamFunction<"openai-completions", OpenA
 						partial: output,
 					});
 				} else if (block.type === "toolCall") {
-					block.arguments = parseStreamingJson(block.partialArgs);
+					const parseResult = parseStreamingJsonState(block.partialArgs);
+					block.arguments = parseResult.value;
+					block.partialArgsComplete = parseResult.complete;
 					// Finalize in-place and strip the scratch buffers so replay only
 					// carries parsed arguments.
 					delete block.partialArgs;
+					delete block.partialArgsComplete;
 					delete block.streamIndex;
 					stream.push({
 						type: "toolcall_end",
@@ -271,6 +275,7 @@ export const streamOpenAICompletions: StreamFunction<"openai-completions", OpenA
 						name: toolCall.function?.name || "",
 						arguments: {},
 						partialArgs: "",
+						partialArgsComplete: true,
 						streamIndex,
 					};
 					if (streamIndex !== undefined) {
@@ -390,7 +395,9 @@ export const streamOpenAICompletions: StreamFunction<"openai-completions", OpenA
 							if (toolCall.function?.arguments) {
 								delta = toolCall.function.arguments;
 								block.partialArgs = (block.partialArgs ?? "") + toolCall.function.arguments;
-								block.arguments = parseStreamingJson(block.partialArgs);
+								const parseResult = parseStreamingJsonState(block.partialArgs);
+								block.arguments = parseResult.value;
+								block.partialArgsComplete = parseResult.complete;
 							}
 							stream.push({
 								type: "toolcall_delta",
@@ -414,6 +421,14 @@ export const streamOpenAICompletions: StreamFunction<"openai-completions", OpenA
 								}
 							}
 						}
+					}
+				}
+			}
+
+			if (output.stopReason !== "toolUse") {
+				for (const block of blocks) {
+					if (block.type === "toolCall" && block.partialArgs?.trim() && block.partialArgsComplete === false) {
+						block.errorMessage = `Tool call arguments were truncated before complete JSON was received (stop reason: ${output.stopReason}). Retry the tool call with complete JSON arguments.`;
 					}
 				}
 			}
@@ -442,6 +457,7 @@ export const streamOpenAICompletions: StreamFunction<"openai-completions", OpenA
 				delete (block as { index?: number }).index;
 				// Streaming scratch buffers are only used during parsing; never persist them.
 				delete (block as { partialArgs?: string }).partialArgs;
+				delete (block as { partialArgsComplete?: boolean }).partialArgsComplete;
 				delete (block as { streamIndex?: number }).streamIndex;
 			}
 			output.stopReason = options?.signal?.aborted ? "aborted" : "error";

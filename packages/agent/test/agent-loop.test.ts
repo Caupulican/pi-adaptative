@@ -331,6 +331,70 @@ describe("agentLoop with AgentMessage", () => {
 		}
 	});
 
+	it("bounces provider-marked tool call errors without executing the tool", async () => {
+		const toolSchema = Type.Object({ value: Type.Optional(Type.String()) });
+		const executed: unknown[] = [];
+		const tool: AgentTool<typeof toolSchema, { value?: string }> = {
+			name: "echo",
+			label: "Echo",
+			description: "Echo tool",
+			parameters: toolSchema,
+			async execute(_toolCallId, params) {
+				executed.push(params);
+				return { content: [{ type: "text", text: "should not run" }], details: {} };
+			},
+		};
+
+		const context: AgentContext = { systemPrompt: "", messages: [], tools: [tool] };
+		const userPrompt: AgentMessage = createUserMessage("echo something");
+		const config: AgentLoopConfig = { model: createModel(), convertToLlm: identityConverter };
+
+		let callIndex = 0;
+		const streamFn = () => {
+			const stream = new MockAssistantStream();
+			queueMicrotask(() => {
+				if (callIndex === 0) {
+					const message = createAssistantMessage(
+						[
+							{
+								type: "toolCall",
+								id: "tool-1",
+								name: "echo",
+								arguments: { value: "partial" },
+								errorMessage: "Tool call arguments were truncated before complete JSON was received.",
+							},
+						],
+						"length",
+					);
+					stream.push({ type: "done", reason: "length", message });
+				} else {
+					const message = createAssistantMessage([{ type: "text", text: "done" }]);
+					stream.push({ type: "done", reason: "stop", message });
+				}
+				callIndex++;
+			});
+			return stream;
+		};
+
+		const stream = agentLoop([userPrompt], context, config, undefined, streamFn);
+		for await (const _ of stream) {
+			// consume
+		}
+
+		const messages = await stream.result();
+		const toolResult = messages.find((message) => message.role === "toolResult");
+		expect(executed).toEqual([]);
+		expect(toolResult).toMatchObject({
+			role: "toolResult",
+			isError: true,
+			toolCallId: "tool-1",
+			toolName: "echo",
+		});
+		expect(toolResult?.content).toEqual([
+			{ type: "text", text: "Tool call arguments were truncated before complete JSON was received." },
+		]);
+	});
+
 	it("should execute mutated beforeToolCall args without revalidation", async () => {
 		const toolSchema = Type.Object({ value: Type.String() });
 		const executed: Array<string | number> = [];

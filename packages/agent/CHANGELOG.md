@@ -3,6 +3,7 @@
 ### Fixed
 - Fixed agent failure messages to use fresh zero-usage objects instead of sharing mutable usage state.
 - Fixed watchdog-wrapped streams to settle with an aborted result when caller abort makes the inner stream end without a terminal event.
+- Fixed provider-marked tool call errors to bounce as tool results without executing the tool.
 
 ## [0.81.11] - 2026-07-07
 

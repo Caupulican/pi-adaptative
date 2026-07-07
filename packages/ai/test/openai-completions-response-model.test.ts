@@ -196,6 +196,95 @@ describe("openai-completions responseModel", () => {
 		expect(toolCalls.map((toolCall) => toolCall.name)).toEqual(["first", "second"]);
 	});
 
+	it("marks truncated streamed tool arguments as provider tool errors", async () => {
+		mockState.chunks = [
+			{
+				id: "chatcmpl-truncated-tool",
+				model: "openrouter/auto",
+				choices: [
+					{
+						index: 0,
+						delta: {
+							tool_calls: [
+								{
+									index: 0,
+									id: "call_1",
+									type: "function",
+									function: { name: "echo", arguments: '{"value":"hel' },
+								},
+							],
+						},
+						finish_reason: "length",
+					},
+				],
+				usage: {
+					prompt_tokens: 1,
+					completion_tokens: 1,
+					prompt_tokens_details: { cached_tokens: 0 },
+					completion_tokens_details: { reasoning_tokens: 0 },
+				},
+			},
+		];
+
+		const message = await complete(
+			openRouterAuto(),
+			{ messages: [{ role: "user", content: "hi", timestamp: Date.now() }] },
+			{ apiKey: "test" },
+		);
+
+		const toolCall = message.content.find((block) => block.type === "toolCall");
+		expect(message.stopReason).toBe("length");
+		expect(toolCall).toMatchObject({
+			type: "toolCall",
+			id: "call_1",
+			name: "echo",
+			errorMessage:
+				"Tool call arguments were truncated before complete JSON was received (stop reason: length). Retry the tool call with complete JSON arguments.",
+		});
+	});
+
+	it("does not mark complete streamed tool arguments", async () => {
+		mockState.chunks = [
+			{
+				id: "chatcmpl-complete-tool",
+				model: "openrouter/auto",
+				choices: [
+					{
+						index: 0,
+						delta: {
+							tool_calls: [
+								{
+									index: 0,
+									id: "call_1",
+									type: "function",
+									function: { name: "echo", arguments: '{"value":"hello"}' },
+								},
+							],
+						},
+						finish_reason: "tool_calls",
+					},
+				],
+				usage: {
+					prompt_tokens: 1,
+					completion_tokens: 1,
+					prompt_tokens_details: { cached_tokens: 0 },
+					completion_tokens_details: { reasoning_tokens: 0 },
+				},
+			},
+		];
+
+		const message = await complete(
+			openRouterAuto(),
+			{ messages: [{ role: "user", content: "hi", timestamp: Date.now() }] },
+			{ apiKey: "test" },
+		);
+
+		const toolCall = message.content.find((block) => block.type === "toolCall");
+		expect(message.stopReason).toBe("toolUse");
+		expect(toolCall).toMatchObject({ type: "toolCall", id: "call_1", name: "echo", arguments: { value: "hello" } });
+		expect(toolCall).not.toHaveProperty("errorMessage");
+	});
+
 	it("buffers reasoning_details that arrive before matching streamed tool calls", async () => {
 		const detail = { type: "reasoning.encrypted", id: "call_1", data: "encrypted" };
 		mockState.chunks = [

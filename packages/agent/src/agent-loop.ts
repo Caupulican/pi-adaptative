@@ -641,6 +641,14 @@ async function prepareToolCall(
 	config: AgentLoopConfig,
 	signal: AbortSignal | undefined,
 ): Promise<PreparedToolCall | ImmediateToolCallOutcome> {
+	if (toolCall.errorMessage) {
+		return {
+			kind: "immediate",
+			result: createErrorToolResult(toolCall.errorMessage),
+			isError: true,
+		};
+	}
+
 	const tool = currentContext.tools?.find((t) => t.name === toolCall.name);
 	if (!tool) {
 		return {
