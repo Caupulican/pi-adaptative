@@ -107,3 +107,40 @@ export function formatToolRepairNote(name: ToolRepairModeName, path: string): st
 export function formatToolRepairStandingRule(name: ToolRepairModeName): string {
 	return getToolRepairRegistryEntry(name).standingRule;
 }
+
+export const TOOL_EXECUTION_ERROR_CATALOGUE = [
+	{
+		name: "commandNotFound",
+		guidance: "Command was not found; check the command name or available tools before retrying.",
+		matches(message: string): boolean {
+			return /^spawn \S+ ENOENT\b/i.test(message) || /(?:^|\n|:)\s*command not found\b/i.test(message);
+		},
+	},
+	{
+		name: "fileNotFound",
+		guidance: "Path was not found; list the parent directory or re-read the path before retrying.",
+		matches(message: string): boolean {
+			return /\bENOENT\b/i.test(message) || /no such file or directory/i.test(message);
+		},
+	},
+	{
+		name: "editOldTextNotFound",
+		guidance: "Re-read the target file and use the exact current text before retrying.",
+		matches(message: string): boolean {
+			return /(?:oldText|old text|exact text).*(?:not found|no match|failed to match|must match)/is.test(message);
+		},
+	},
+	{
+		name: "pathOutsideCwd",
+		guidance: "Choose a path inside the current working directory, or ask before changing scope.",
+		matches(message: string): boolean {
+			return /outside (?:the )?(?:current working directory|cwd|workspace|root)/i.test(message);
+		},
+	},
+] as const;
+
+export type ToolExecutionErrorClass = (typeof TOOL_EXECUTION_ERROR_CATALOGUE)[number]["name"];
+
+export function getToolExecutionErrorGuidance(errorMessage: string): string | undefined {
+	return TOOL_EXECUTION_ERROR_CATALOGUE.find((entry) => entry.matches(errorMessage))?.guidance;
+}

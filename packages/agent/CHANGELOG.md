@@ -10,6 +10,7 @@
 - Added throttled in-band teach-back notes on repaired tool results.
 - Added in-band guidance after repeated identical tool execution failures.
 - Linked tool argument validation telemetry to teach state and same-call execution outcome.
+- Added catalogued guidance lines to matching tool execution errors.
 
 ## [0.81.11] - 2026-07-07
 

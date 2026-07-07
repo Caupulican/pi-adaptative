@@ -461,7 +461,7 @@ describe("agentLoop with AgentMessage", () => {
 			description: "Read a file",
 			parameters: toolSchema,
 			async execute() {
-				throw new TypeError("ENOENT: missing file");
+				throw new TypeError("backend exploded");
 			},
 		};
 		const context: AgentContext = { systemPrompt: "", messages: [], tools: [tool] };
@@ -506,12 +506,74 @@ describe("agentLoop with AgentMessage", () => {
 		const messages = await stream.result();
 		const toolResults = messages.filter((message) => message.role === "toolResult");
 		expect(toolResults).toHaveLength(2);
-		expect(toolResults[0]?.content[0]).toEqual({ type: "text", text: "ENOENT: missing file" });
+		expect(toolResults[0]?.content[0]).toEqual({ type: "text", text: "backend exploded" });
 		expect(toolResults[1]?.content[0]).toMatchObject({
 			type: "text",
 			text: expect.stringContaining("failed twice with the same TypeError error"),
 		});
-		expect(toolResults[1]?.content[1]).toEqual({ type: "text", text: "ENOENT: missing file" });
+		expect(toolResults[1]?.content[1]).toEqual({ type: "text", text: "backend exploded" });
+	});
+
+	it("adds catalogued guidance to matching tool execution errors", async () => {
+		const toolSchema = Type.Object({ path: Type.String() });
+		const tool: AgentTool<typeof toolSchema, { path: string }> = {
+			name: "read_file",
+			label: "Read file",
+			description: "Read a file",
+			parameters: toolSchema,
+			async execute() {
+				throw new Error("ENOENT: no such file or directory, open 'missing.txt'");
+			},
+		};
+		const context: AgentContext = { systemPrompt: "", messages: [], tools: [tool] };
+		const config: AgentLoopConfig = { model: createModel(), convertToLlm: identityConverter };
+		let callIndex = 0;
+		const streamFn = () => {
+			const stream = new MockAssistantStream();
+			queueMicrotask(() => {
+				if (callIndex === 0) {
+					stream.push({
+						type: "done",
+						reason: "toolUse",
+						message: createAssistantMessage(
+							[
+								{
+									type: "toolCall",
+									id: "tool-1",
+									name: "read_file",
+									arguments: { path: "missing.txt" },
+								},
+							],
+							"toolUse",
+						),
+					});
+				} else {
+					stream.push({
+						type: "done",
+						reason: "stop",
+						message: createAssistantMessage([{ type: "text", text: "done" }]),
+					});
+				}
+				callIndex++;
+			});
+			return stream;
+		};
+
+		const stream = agentLoop([createUserMessage("read")], context, config, undefined, streamFn);
+		for await (const _ of stream) {
+			// consume
+		}
+
+		const messages = await stream.result();
+		const toolResult = messages.find((message) => message.role === "toolResult");
+		expect(toolResult?.content[0]).toEqual({
+			type: "text",
+			text: "ENOENT: no such file or directory, open 'missing.txt'",
+		});
+		expect(toolResult?.content[1]).toEqual({
+			type: "text",
+			text: "[harness] Path was not found; list the parent directory or re-read the path before retrying.",
+		});
 	});
 
 	it("links repaired validation telemetry to teach state and execution outcome without arguments", async () => {

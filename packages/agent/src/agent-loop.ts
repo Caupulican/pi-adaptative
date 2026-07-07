@@ -7,6 +7,7 @@ import {
 	type AssistantMessage,
 	type Context,
 	EventStream,
+	getToolExecutionErrorGuidance,
 	streamSimple,
 	type ToolArgumentExecutionOutcome,
 	ToolArgumentValidationError,
@@ -910,8 +911,9 @@ async function executePreparedToolCall(
 		return { result, isError: false };
 	} catch (error) {
 		await Promise.all(updateEvents);
+		const message = error instanceof Error ? error.message : String(error);
 		return {
-			result: createErrorToolResult(error instanceof Error ? error.message : String(error)),
+			result: createErrorToolResultWithGuidance(message),
 			isError: true,
 			errorClass: error instanceof Error ? error.name : typeof error,
 		};
@@ -1046,6 +1048,18 @@ async function finalizeExecutedToolCall(
 function createErrorToolResult(message: string): AgentToolResult<any> {
 	return {
 		content: [{ type: "text", text: message }],
+		details: {},
+	};
+}
+
+function createErrorToolResultWithGuidance(message: string): AgentToolResult<any> {
+	const guidance = getToolExecutionErrorGuidance(message);
+	if (!guidance) return createErrorToolResult(message);
+	return {
+		content: [
+			{ type: "text", text: message },
+			{ type: "text", text: `[harness] ${guidance}` },
+		],
 		details: {},
 	};
 }
