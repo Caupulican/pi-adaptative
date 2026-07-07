@@ -2,6 +2,7 @@
 
 ### Fixed
 - Fixed Amazon Bedrock redacted reasoning round-trips and unsupported image-format downgrades.
+- Fixed transcript transforms to drop tool results for skipped errored assistant tool calls.
 
 ## [0.81.11] - 2026-07-07
 
