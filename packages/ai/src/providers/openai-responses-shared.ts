@@ -339,17 +339,20 @@ export async function processResponsesStream<TApi extends Api>(
 		}
 		if (response?.usage) {
 			const inputDetails = response.usage.input_tokens_details as InputTokenDetailsWithOrchestration | undefined;
+			const outputDetails = response.usage.output_tokens_details as OutputTokenDetailsWithOrchestration | undefined;
 			const cachedTokens = inputDetails?.cached_tokens || 0;
 			let inputTokens = (response.usage.input_tokens || 0) - cachedTokens;
 			let outputTokens = response.usage.output_tokens || 0;
 			let cacheReadTokens = cachedTokens;
+			let totalTokens = response.usage.total_tokens || 0;
 			if (model.provider === "fugu") {
-				const outputDetails = response.usage.output_tokens_details as
-					| OutputTokenDetailsWithOrchestration
-					| undefined;
-				inputTokens += inputDetails?.orchestration_input_tokens || 0;
-				cacheReadTokens += inputDetails?.orchestration_input_cached_tokens || 0;
-				outputTokens += outputDetails?.orchestration_output_tokens || 0;
+				const orchestrationInputTokens = inputDetails?.orchestration_input_tokens || 0;
+				const orchestrationInputCachedTokens = inputDetails?.orchestration_input_cached_tokens || 0;
+				const orchestrationOutputTokens = outputDetails?.orchestration_output_tokens || 0;
+				inputTokens += orchestrationInputTokens;
+				cacheReadTokens += orchestrationInputCachedTokens;
+				outputTokens += orchestrationOutputTokens;
+				totalTokens += orchestrationInputTokens + orchestrationInputCachedTokens + orchestrationOutputTokens;
 			}
 			output.usage = {
 				// OpenAI includes cached tokens in input_tokens, so subtract to get non-cached input.
@@ -359,7 +362,7 @@ export async function processResponsesStream<TApi extends Api>(
 				output: outputTokens,
 				cacheRead: cacheReadTokens,
 				cacheWrite: 0,
-				totalTokens: response.usage.total_tokens || 0,
+				totalTokens,
 				cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, total: (response.usage as any).cost || 0 },
 			};
 		}

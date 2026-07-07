@@ -84,7 +84,7 @@ async function* createCompletedEventsWithOrchestrationUsage(): AsyncIterable<Res
 			usage: {
 				input_tokens: 20,
 				output_tokens: 7,
-				total_tokens: 66,
+				total_tokens: 27,
 				input_tokens_details: {
 					cached_tokens: 2,
 					orchestration_input_tokens: 30,
