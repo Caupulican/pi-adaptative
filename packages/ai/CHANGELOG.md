@@ -2,6 +2,7 @@
 
 ### Fixed
 - Fixed Anthropic-compatible streamed tool calls to preserve arguments seeded in `content_block_start` when no JSON deltas arrive.
+- Fixed OAuth token refresh to single-flight concurrent expired-token requests per provider.
 
 ## [0.81.7] - 2026-07-06
 

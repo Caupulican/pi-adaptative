@@ -110,6 +110,8 @@ export function getOAuthProviderInfoList(): OAuthProviderInfo[] {
 // High-level API (uses provider registry)
 // ============================================================================
 
+const inFlightRefreshes = new Map<OAuthProviderId, Promise<OAuthCredentials>>();
+
 /**
  * Refresh token for any OAuth provider.
  * @deprecated Use getOAuthProvider(id).refreshToken() instead
@@ -148,8 +150,15 @@ export async function getOAuthApiKey(
 
 	// Refresh if expired
 	if (Date.now() >= creds.expires) {
+		let refresh = inFlightRefreshes.get(providerId);
+		if (!refresh) {
+			refresh = provider.refreshToken(creds).finally(() => {
+				inFlightRefreshes.delete(providerId);
+			});
+			inFlightRefreshes.set(providerId, refresh);
+		}
 		try {
-			creds = await provider.refreshToken(creds);
+			creds = await refresh;
 		} catch (_error) {
 			throw new Error(`Failed to refresh OAuth token for ${providerId}`);
 		}
