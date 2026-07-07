@@ -2954,10 +2954,10 @@ export class AgentSession {
 					appliedResult = result;
 				},
 				verifyPostApplyEffect: () => false,
-				onTransition: ({ cycle, cause }) => {
+				onTransition: ({ cycle, cause, detail }) => {
 					this._emit({
 						type: "warning",
-						message: `manual compaction cycle ${cycle}: ${cause} — retrying from step 0 (${this._describeCompactionSummarizer()})`,
+						message: `manual compaction cycle ${cycle}: ${cause}${detail ? ` (${detail})` : ""} — retrying from step 0 (${this._describeCompactionSummarizer()})`,
 					});
 				},
 				signal,

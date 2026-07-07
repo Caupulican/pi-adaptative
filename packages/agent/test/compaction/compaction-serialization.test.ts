@@ -44,6 +44,35 @@ describe("serializeConversation", () => {
 		expect(result).not.toContain("truncated");
 	});
 
+	it("should truncate long assistant thinking blocks", () => {
+		const longThinking = "t".repeat(5000);
+		const messages: Message[] = [
+			{
+				role: "assistant",
+				content: [{ type: "thinking", thinking: longThinking }],
+				api: "anthropic",
+				provider: "anthropic",
+				model: "test",
+				usage: {
+					input: 0,
+					output: 0,
+					cacheRead: 0,
+					cacheWrite: 0,
+					totalTokens: 0,
+					cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, total: 0 },
+				},
+				stopReason: "stop",
+				timestamp: Date.now(),
+			},
+		];
+
+		const result = serializeConversation(messages);
+
+		expect(result).toContain("[Assistant thinking]:");
+		expect(result).toContain("[... 3000 more characters truncated]");
+		expect(result).not.toContain("t".repeat(3000));
+	});
+
 	it("should not truncate assistant or user messages", () => {
 		const longText = "y".repeat(5000);
 		const messages: Message[] = [

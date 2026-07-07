@@ -54,6 +54,11 @@ function messages(chars: number): AgentMessage[] {
 	return [{ role: "user", content: "x".repeat(chars), timestamp: Date.now() }];
 }
 
+function firstPromptText(call: unknown[]): string {
+	const request = call[1] as { messages: Array<{ content: Array<{ text: string }> }> };
+	return request.messages[0]?.content[0]?.text ?? "";
+}
+
 describe("compaction bounds", () => {
 	beforeEach(() => {
 		completeSimpleMock.mockReset();
@@ -207,6 +212,82 @@ describe("compaction bounds", () => {
 		expect(smallBudget).toBe(1500);
 		expect(bigBudget).toBeGreaterThan(smallBudget);
 		expect(bigBudget).toBeGreaterThanOrEqual(Math.ceil(bigFacts.length / 4) + 500);
+	});
+
+	it("clamps the base summary budget to tiny model maxTokens", async () => {
+		completeSimpleMock.mockResolvedValue(response("## Active Task\nok"));
+
+		await generateSummary(messages(10), createModel(200000, 1000), 16384, "test-key");
+
+		expect(completeSimpleMock.mock.calls[0]?.[2]?.maxTokens).toBe(1000);
+	});
+
+	it("runs another reduce pass when merged chunk summaries still exceed the input bound", async () => {
+		let chunkCalls = 0;
+		completeSimpleMock.mockImplementation(
+			(_model, request: { messages: Array<{ content: Array<{ text: string }> }> }) => {
+				const prompt = request.messages[0]?.content[0]?.text ?? "";
+				if (prompt.includes("conversation-chunk")) {
+					chunkCalls += 1;
+					return Promise.resolve(response(chunkCalls <= 21 ? "s".repeat(4000) : "reduced chunk"));
+				}
+				return Promise.resolve(response("## Active Task\nfinal"));
+			},
+		);
+
+		await generateSummary(
+			messages(80_000),
+			createModel(5000, 1000),
+			4000,
+			"test-key",
+			undefined,
+			undefined,
+			undefined,
+			undefined,
+			undefined,
+			undefined,
+			undefined,
+			"files:\nactions:\nprohibitions:",
+			true,
+		);
+
+		const prompts = completeSimpleMock.mock.calls.map(firstPromptText);
+		expect(chunkCalls).toBeGreaterThan(21);
+		expect(prompts[21]).toContain("conversation-chunk");
+		expect(prompts[prompts.length - 1]).toContain("Checkpoint the conversation");
+	});
+
+	it("throws input-overflow instead of sending an over-window prompt after bounded reduce passes", async () => {
+		completeSimpleMock.mockImplementation(
+			(_model, request: { messages: Array<{ content: Array<{ text: string }> }> }) => {
+				const prompt = request.messages[0]?.content[0]?.text ?? "";
+				if (prompt.includes("conversation-chunk")) {
+					return Promise.resolve(response("s".repeat(4000)));
+				}
+				return Promise.resolve(response("## Active Task\nshould not send"));
+			},
+		);
+
+		await expect(
+			generateSummary(
+				messages(80_000),
+				createModel(5000, 1000),
+				4000,
+				"test-key",
+				undefined,
+				undefined,
+				undefined,
+				undefined,
+				undefined,
+				undefined,
+				undefined,
+				"files:\nactions:\nprohibitions:",
+				true,
+			),
+		).rejects.toThrow("input-overflow");
+
+		const prompts = completeSimpleMock.mock.calls.map(firstPromptText);
+		expect(prompts.some((prompt) => prompt.includes("Checkpoint the conversation"))).toBe(false);
 	});
 
 	it("throws for deterministic compaction when bounded gate demand cannot fit reserve", async () => {

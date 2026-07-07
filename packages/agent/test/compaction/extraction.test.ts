@@ -253,6 +253,43 @@ describe("extractCompactionFacts", () => {
 		expect(facts.activeTaskSource).toBe("second");
 	});
 
+	it("dedupes actions before applying the 15-action cap, keeping the most recent occurrence", () => {
+		resetEntryCounter();
+		const entries: SessionMessageEntry[] = [];
+		for (let i = 0; i < 15; i++) {
+			entries.push(
+				createMessageEntry(
+					createAssistantMessage([
+						{
+							type: "toolCall",
+							id: `tc-distinct-${i}`,
+							name: "edit",
+							arguments: { path: `src/distinct-${i}.ts` },
+						},
+					]),
+				),
+			);
+		}
+		for (let i = 0; i < 6; i++) {
+			entries.push(
+				createMessageEntry(
+					createAssistantMessage([
+						{ type: "toolCall", id: `tc-foo-${i}`, name: "edit", arguments: { path: "foo.ts" } },
+					]),
+				),
+			);
+		}
+
+		const facts = extractCompactionFacts(entries, 0, entries.length);
+
+		expect(facts.actions).toHaveLength(15);
+		expect(facts.actions.filter((action) => action === "EDIT foo.ts")).toHaveLength(1);
+		for (let i = 1; i < 15; i++) {
+			expect(facts.actions).toContain(`EDIT src/distinct-${i}.ts`);
+		}
+		expect(facts.actions).not.toContain("EDIT src/distinct-0.ts");
+	});
+
 	it("excludes harness plumbing paths from file and action facts", () => {
 		resetEntryCounter();
 

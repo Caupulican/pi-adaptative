@@ -616,10 +616,15 @@ export async function generateSummary(
 			thinkingLevel,
 			streamFn,
 			inputBound,
+			previousSummary,
+			promptSuffix,
 		);
 	}
 
 	const promptText = buildSummarizationPrompt(conversationText, previousSummary, promptSuffix);
+	if (estimateStringTokens(promptText) > inputBound) {
+		throw new Error("input-overflow: chunked summarization merge still exceeds summarizer window");
+	}
 	const response = await completeSummarization(
 		model,
 		{
@@ -672,7 +677,7 @@ function getSummaryBudget(reserveTokens: number, model: Model<any>, factsBlock?:
 			`summary-demand-exceeds-reserve: required ${factsTokens} fact tokens, reserve budget ${reserveBudget}, model max ${modelMaxTokens}`,
 		);
 	}
-	return Math.max(1, demandBudget);
+	return Math.max(1, Math.min(demandBudget, modelMaxTokens));
 }
 
 function getEffectiveContextWindow(model: Model<any>): number {
@@ -724,6 +729,40 @@ export function buildChunkSummarizationPrompt(chunk: string, index: number, tota
 }
 
 async function summarizeChunks(
+	conversationText: string,
+	model: Model<any>,
+	maxTokens: number,
+	apiKey: string | undefined,
+	headers: Record<string, string> | undefined,
+	signal: AbortSignal | undefined,
+	thinkingLevel: ThinkingLevel | undefined,
+	streamFn: StreamFn | undefined,
+	inputBound: number,
+	previousSummary: string | undefined,
+	promptSuffix: string,
+): Promise<string> {
+	let reducedText = conversationText;
+	for (let pass = 0; pass < 3; pass++) {
+		const summary = await summarizeChunkPass(
+			reducedText,
+			model,
+			maxTokens,
+			apiKey,
+			headers,
+			signal,
+			thinkingLevel,
+			streamFn,
+			inputBound,
+		);
+		if (estimateStringTokens(buildSummarizationPrompt(summary, previousSummary, promptSuffix)) <= inputBound) {
+			return summary;
+		}
+		reducedText = summary;
+	}
+	throw new Error("input-overflow: chunked summarization merge still exceeds summarizer window");
+}
+
+async function summarizeChunkPass(
 	conversationText: string,
 	model: Model<any>,
 	maxTokens: number,

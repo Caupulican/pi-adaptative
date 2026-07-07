@@ -391,11 +391,25 @@ export function extractCompactionFacts(entries: SessionEntry[], start: number, e
 			}
 			return a.path.localeCompare(b.path);
 		}),
-		actions: actions.slice(-MAX_ACTIONS),
+		actions: dedupeMostRecent(actions).slice(-MAX_ACTIONS),
 		prohibitions: prohibitions.slice(-MAX_PROHIBITIONS),
 		cancelledText: cancelledParts.join("\n"),
 		activeTaskSource,
 	};
+}
+
+function dedupeMostRecent(values: string[]): string[] {
+	const seen = new Set<string>();
+	const kept: string[] = [];
+	for (let i = values.length - 1; i >= 0; i--) {
+		const value = values[i];
+		if (seen.has(value)) {
+			continue;
+		}
+		seen.add(value);
+		kept.push(value);
+	}
+	return kept.reverse();
 }
 
 export function renderFactsBlock(facts: CompactionFacts): string {

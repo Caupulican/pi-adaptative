@@ -87,6 +87,8 @@ export function formatFileOperations(readFiles: string[], modifiedFiles: string[
 
 /** Maximum characters for a tool result in serialized summaries. */
 const TOOL_RESULT_MAX_CHARS = 2000;
+/** Maximum characters for non-gated assistant thinking in serialized summaries. */
+const ASSISTANT_THINKING_MAX_CHARS = 2000;
 
 /**
  * Truncate text to a maximum character length for summarization.
@@ -139,7 +141,9 @@ export function serializeConversation(messages: Message[]): string {
 			}
 
 			if (thinkingParts.length > 0) {
-				parts.push(`[Assistant thinking]: ${thinkingParts.join("\n")}`);
+				parts.push(
+					`[Assistant thinking]: ${truncateForSummary(thinkingParts.join("\n"), ASSISTANT_THINKING_MAX_CHARS)}`,
+				);
 			}
 			if (textParts.length > 0) {
 				parts.push(`[Assistant]: ${textParts.join("\n")}`);

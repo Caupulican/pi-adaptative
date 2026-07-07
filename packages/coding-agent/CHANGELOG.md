@@ -1,6 +1,7 @@
 ## [Unreleased]
 
 ### Fixed
+- Fixed manual compaction retry warnings to include verification failure details.
 - Fixed auto-compaction custom-stream regression coverage to seed sessions above the real trigger threshold.
 - Fixed overflow-triggered auto-compaction to apply one checkpoint before retrying the provider request even when measured tokens are below the configured threshold.
 - Fixed git log filtering to preserve user arguments while applying default compact-log limits.
