@@ -17,6 +17,7 @@
 - Fixed tool name sanitization and reverse mapping for OpenAI-compatible and Google provider tool calls.
 - Added a diagnostic `rawArguments` field for repaired tool calls.
 - Added an opt-in text tool-call protocol that injects a generated primer and converts explicit text envelopes into tool calls for non-native serving stacks.
+- Added structured tool argument validation errors for repeated-failure handling.
 
 ## [0.81.11] - 2026-07-07
 

@@ -97,6 +97,8 @@ export interface AgentOptions {
 	beforeToolCall?: (context: BeforeToolCallContext, signal?: AbortSignal) => Promise<BeforeToolCallResult | undefined>;
 	afterToolCall?: (context: AfterToolCallContext, signal?: AbortSignal) => Promise<AfterToolCallResult | undefined>;
 	onToolArgumentValidation?: (event: ToolArgumentValidationTelemetryEvent) => void;
+	toolValidationEscalationThreshold?: number;
+	onToolValidationEscalation?: AgentLoopConfig["onToolValidationEscalation"];
 	prepareNextTurn?: (
 		signal?: AbortSignal,
 	) => Promise<AgentLoopTurnUpdate | undefined> | AgentLoopTurnUpdate | undefined;
@@ -179,6 +181,8 @@ export class Agent {
 		signal?: AbortSignal,
 	) => Promise<AfterToolCallResult | undefined>;
 	public onToolArgumentValidation?: (event: ToolArgumentValidationTelemetryEvent) => void;
+	public toolValidationEscalationThreshold?: number;
+	public onToolValidationEscalation?: AgentLoopConfig["onToolValidationEscalation"];
 	public prepareNextTurn?: (
 		signal?: AbortSignal,
 	) => Promise<AgentLoopTurnUpdate | undefined> | AgentLoopTurnUpdate | undefined;
@@ -207,6 +211,8 @@ export class Agent {
 		this.beforeToolCall = options.beforeToolCall;
 		this.afterToolCall = options.afterToolCall;
 		this.onToolArgumentValidation = options.onToolArgumentValidation;
+		this.toolValidationEscalationThreshold = options.toolValidationEscalationThreshold;
+		this.onToolValidationEscalation = options.onToolValidationEscalation;
 		this.prepareNextTurn = options.prepareNextTurn;
 		this.steeringQueue = new PendingMessageQueue(options.steeringMode ?? "one-at-a-time");
 		this.followUpQueue = new PendingMessageQueue(options.followUpMode ?? "one-at-a-time");
@@ -433,6 +439,8 @@ export class Agent {
 			maxStallTurns: this.maxStallTurns,
 			toolExecution: this.toolExecution,
 			onToolArgumentValidation: this.onToolArgumentValidation,
+			toolValidationEscalationThreshold: this.toolValidationEscalationThreshold,
+			onToolValidationEscalation: this.onToolValidationEscalation,
 			beforeToolCall: this.beforeToolCall,
 			afterToolCall: this.afterToolCall,
 			prepareNextTurn: this.prepareNextTurn ? async () => await this.prepareNextTurn?.(this.signal) : undefined,

@@ -331,6 +331,128 @@ describe("agentLoop with AgentMessage", () => {
 		}
 	});
 
+	it("enriches the third identical validation bounce and emits escalation", async () => {
+		const toolSchema = Type.Object({ count: Type.Number() });
+		let executed = 0;
+		const tool: AgentTool<typeof toolSchema, { count: number }> = {
+			name: "count",
+			label: "Count",
+			description: "Count tool",
+			parameters: toolSchema,
+			async execute(_toolCallId, params) {
+				executed++;
+				return { content: [{ type: "text", text: String(params.count) }], details: { count: params.count } };
+			},
+		};
+		const escalations: Array<{ tool: string; repeats: number }> = [];
+		const context: AgentContext = { systemPrompt: "", messages: [], tools: [tool] };
+		const userPrompt: AgentMessage = createUserMessage("count");
+		const config: AgentLoopConfig = {
+			model: createModel(),
+			convertToLlm: identityConverter,
+			onToolValidationEscalation: (event) => escalations.push({ tool: event.tool, repeats: event.repeats }),
+		};
+
+		let callIndex = 0;
+		const streamFn = () => {
+			const stream = new MockAssistantStream();
+			queueMicrotask(() => {
+				if (callIndex < 3) {
+					stream.push({
+						type: "done",
+						reason: "toolUse",
+						message: createAssistantMessage(
+							[{ type: "toolCall", id: `tool-${callIndex}`, name: "count", arguments: { count: "nope" } }],
+							"toolUse",
+						),
+					});
+				} else {
+					stream.push({
+						type: "done",
+						reason: "stop",
+						message: createAssistantMessage([{ type: "text", text: "done" }]),
+					});
+				}
+				callIndex++;
+			});
+			return stream;
+		};
+
+		const stream = agentLoop([userPrompt], context, config, undefined, streamFn);
+		for await (const _ of stream) {
+			// consume
+		}
+
+		const messages = await stream.result();
+		const toolResults = messages.filter((message) => message.role === "toolResult");
+		expect(executed).toBe(0);
+		expect(escalations).toEqual([{ tool: "count", repeats: 3 }]);
+		const thirdResultText = toolResults[2]?.content[0]?.type === "text" ? toolResults[2].content[0].text : undefined;
+		expect(thirdResultText).toContain("Repeated validation failure (3 identical attempts)");
+		expect(thirdResultText).toContain("Full tool schema:");
+		expect(thirdResultText).toContain("Valid example:");
+	});
+
+	it("does not accumulate distinct validation failures", async () => {
+		const toolSchema = Type.Object({ count: Type.Number() });
+		const tool: AgentTool<typeof toolSchema, { count: number }> = {
+			name: "count",
+			label: "Count",
+			description: "Count tool",
+			parameters: toolSchema,
+			async execute(_toolCallId, params) {
+				return { content: [{ type: "text", text: String(params.count) }], details: { count: params.count } };
+			},
+		};
+		const escalations: unknown[] = [];
+		const context: AgentContext = { systemPrompt: "", messages: [], tools: [tool] };
+		const userPrompt: AgentMessage = createUserMessage("count");
+		const config: AgentLoopConfig = {
+			model: createModel(),
+			convertToLlm: identityConverter,
+			onToolValidationEscalation: (event) => escalations.push(event),
+		};
+		const argumentsByTurn = [{ count: "nope" }, {}, { count: "nope" }];
+		let callIndex = 0;
+		const streamFn = () => {
+			const stream = new MockAssistantStream();
+			queueMicrotask(() => {
+				if (callIndex < argumentsByTurn.length) {
+					stream.push({
+						type: "done",
+						reason: "toolUse",
+						message: createAssistantMessage(
+							[
+								{
+									type: "toolCall",
+									id: `tool-${callIndex}`,
+									name: "count",
+									arguments: argumentsByTurn[callIndex] ?? {},
+								},
+							],
+							"toolUse",
+						),
+					});
+				} else {
+					stream.push({
+						type: "done",
+						reason: "stop",
+						message: createAssistantMessage([{ type: "text", text: "done" }]),
+					});
+				}
+				callIndex++;
+			});
+			return stream;
+		};
+
+		const stream = agentLoop([userPrompt], context, config, undefined, streamFn);
+		for await (const _ of stream) {
+			// consume
+		}
+
+		expect(escalations).toEqual([]);
+	});
+
 	it("stores repaired tool args on the assistant message while preserving raw args", async () => {
 		const toolSchema = Type.Object({ count: Type.Number() });
 		const executed: number[] = [];

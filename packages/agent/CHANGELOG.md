@@ -6,6 +6,7 @@
 - Fixed provider-marked tool call errors to bounce as tool results without executing the tool.
 - Added agent-loop forwarding for shape-only tool argument validation telemetry.
 - Fixed repaired tool calls to store repaired arguments on the assistant message while preserving raw arguments for diagnostics.
+- Added repeated tool validation failure escalation with enriched schema/example feedback.
 
 ## [0.81.11] - 2026-07-07
 

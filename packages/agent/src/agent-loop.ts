@@ -8,6 +8,7 @@ import {
 	type Context,
 	EventStream,
 	streamSimple,
+	ToolArgumentValidationError,
 	type ToolResultMessage,
 	validateToolArguments,
 } from "@caupulican/pi-ai";
@@ -225,6 +226,7 @@ async function runLoop(
 	// it. `0` disables.
 	const stallLimit = config.maxStallTurns ?? DEFAULT_MAX_STALL_TURNS;
 	const stallWindow: string[] = [];
+	const validationFailureTracker: ToolValidationFailureTracker = { repeats: 0 };
 	// Check for steering messages at start (user may have typed while waiting)
 	let pendingMessages: AgentMessage[] = (await config.getSteeringMessages?.()) || [];
 
@@ -267,7 +269,14 @@ async function runLoop(
 			const toolResults: ToolResultMessage[] = [];
 			hasMoreToolCalls = false;
 			if (toolCalls.length > 0) {
-				const executedToolBatch = await executeToolCalls(currentContext, message, config, signal, emit);
+				const executedToolBatch = await executeToolCalls(
+					currentContext,
+					message,
+					config,
+					validationFailureTracker,
+					signal,
+					emit,
+				);
 				toolResults.push(...executedToolBatch.messages);
 				hasMoreToolCalls = !executedToolBatch.terminate;
 
@@ -449,6 +458,7 @@ async function executeToolCalls(
 	currentContext: AgentContext,
 	assistantMessage: AssistantMessage,
 	config: AgentLoopConfig,
+	validationFailureTracker: ToolValidationFailureTracker,
 	signal: AbortSignal | undefined,
 	emit: AgentEventSink,
 ): Promise<ExecutedToolCallBatch> {
@@ -457,9 +467,25 @@ async function executeToolCalls(
 		(tc) => currentContext.tools?.find((t) => t.name === tc.name)?.executionMode === "sequential",
 	);
 	if (config.toolExecution === "sequential" || hasSequentialToolCall) {
-		return executeToolCallsSequential(currentContext, assistantMessage, toolCalls, config, signal, emit);
+		return executeToolCallsSequential(
+			currentContext,
+			assistantMessage,
+			toolCalls,
+			config,
+			validationFailureTracker,
+			signal,
+			emit,
+		);
 	}
-	return executeToolCallsParallel(currentContext, assistantMessage, toolCalls, config, signal, emit);
+	return executeToolCallsParallel(
+		currentContext,
+		assistantMessage,
+		toolCalls,
+		config,
+		validationFailureTracker,
+		signal,
+		emit,
+	);
 }
 
 type ExecutedToolCallBatch = {
@@ -472,6 +498,7 @@ async function executeToolCallsSequential(
 	assistantMessage: AssistantMessage,
 	toolCalls: AgentToolCall[],
 	config: AgentLoopConfig,
+	validationFailureTracker: ToolValidationFailureTracker,
 	signal: AbortSignal | undefined,
 	emit: AgentEventSink,
 ): Promise<ExecutedToolCallBatch> {
@@ -486,7 +513,14 @@ async function executeToolCallsSequential(
 			args: toolCall.arguments,
 		});
 
-		const preparation = await prepareToolCall(currentContext, assistantMessage, toolCall, config, signal);
+		const preparation = await prepareToolCall(
+			currentContext,
+			assistantMessage,
+			toolCall,
+			config,
+			validationFailureTracker,
+			signal,
+		);
 		let finalized: FinalizedToolCallOutcome;
 		if (preparation.kind === "immediate") {
 			finalized = {
@@ -528,6 +562,7 @@ async function executeToolCallsParallel(
 	assistantMessage: AssistantMessage,
 	toolCalls: AgentToolCall[],
 	config: AgentLoopConfig,
+	validationFailureTracker: ToolValidationFailureTracker,
 	signal: AbortSignal | undefined,
 	emit: AgentEventSink,
 ): Promise<ExecutedToolCallBatch> {
@@ -541,7 +576,14 @@ async function executeToolCallsParallel(
 			args: toolCall.arguments,
 		});
 
-		const preparation = await prepareToolCall(currentContext, assistantMessage, toolCall, config, signal);
+		const preparation = await prepareToolCall(
+			currentContext,
+			assistantMessage,
+			toolCall,
+			config,
+			validationFailureTracker,
+			signal,
+		);
 		if (preparation.kind === "immediate") {
 			const finalized = {
 				toolCall,
@@ -616,6 +658,14 @@ type FinalizedToolCallOutcome = {
 
 type FinalizedToolCallEntry = FinalizedToolCallOutcome | (() => Promise<FinalizedToolCallOutcome>);
 
+type ToolValidationFailureTracker = {
+	signature?: string;
+	repeats: number;
+	escalatedSignature?: string;
+};
+
+const DEFAULT_TOOL_VALIDATION_ESCALATION_THRESHOLD = 3;
+
 function shouldTerminateToolBatch(finalizedCalls: FinalizedToolCallOutcome[]): boolean {
 	return finalizedCalls.length > 0 && finalizedCalls.every((finalized) => finalized.result.terminate === true);
 }
@@ -634,11 +684,61 @@ function prepareToolCallArguments(tool: AgentTool<any>, toolCall: AgentToolCall)
 	};
 }
 
+function resetValidationFailureTracker(tracker: ToolValidationFailureTracker): void {
+	tracker.signature = undefined;
+	tracker.repeats = 0;
+}
+
+function toolValidationEscalationThreshold(config: AgentLoopConfig): number {
+	return config.toolValidationEscalationThreshold ?? DEFAULT_TOOL_VALIDATION_ESCALATION_THRESHOLD;
+}
+
+function isToolArgumentValidationError(error: unknown): error is ToolArgumentValidationError {
+	return (
+		error instanceof ToolArgumentValidationError ||
+		(error instanceof Error &&
+			error.name === "ToolArgumentValidationError" &&
+			typeof (error as { toolName?: unknown }).toolName === "string" &&
+			typeof (error as { signature?: unknown }).signature === "string" &&
+			typeof (error as { enrichment?: unknown }).enrichment === "string")
+	);
+}
+
+function handleValidationFailure(
+	error: ToolArgumentValidationError,
+	config: AgentLoopConfig,
+	tracker: ToolValidationFailureTracker,
+): string {
+	if (tracker.signature === error.signature) {
+		tracker.repeats++;
+	} else {
+		tracker.signature = error.signature;
+		tracker.repeats = 1;
+		tracker.escalatedSignature = undefined;
+	}
+
+	const threshold = toolValidationEscalationThreshold(config);
+	if (threshold <= 0 || tracker.repeats < threshold || tracker.escalatedSignature === error.signature) {
+		return error.message;
+	}
+
+	tracker.escalatedSignature = error.signature;
+	config.onToolValidationEscalation?.({
+		tool: error.toolName,
+		signature: error.signature,
+		repeats: tracker.repeats,
+		model: config.model.id,
+		provider: config.model.provider,
+	});
+	return `${error.message}\n\nRepeated validation failure (${tracker.repeats} identical attempts). Use this full schema and example before retrying:\n${error.enrichment}`;
+}
+
 async function prepareToolCall(
 	currentContext: AgentContext,
 	assistantMessage: AssistantMessage,
 	toolCall: AgentToolCall,
 	config: AgentLoopConfig,
+	validationFailureTracker: ToolValidationFailureTracker,
 	signal: AbortSignal | undefined,
 ): Promise<PreparedToolCall | ImmediateToolCallOutcome> {
 	if (toolCall.errorMessage) {
@@ -665,6 +765,7 @@ async function prepareToolCall(
 			provider: config.model.provider,
 			telemetry: config.onToolArgumentValidation,
 		});
+		resetValidationFailureTracker(validationFailureTracker);
 		if (validatedArgs !== toolCall.arguments) {
 			toolCall.rawArguments ??= toolCall.arguments;
 			toolCall.arguments = validatedArgs;
@@ -708,9 +809,14 @@ async function prepareToolCall(
 			args: validatedArgs,
 		};
 	} catch (error) {
+		const message = isToolArgumentValidationError(error)
+			? handleValidationFailure(error, config, validationFailureTracker)
+			: error instanceof Error
+				? error.message
+				: String(error);
 		return {
 			kind: "immediate",
-			result: createErrorToolResult(error instanceof Error ? error.message : String(error)),
+			result: createErrorToolResult(message),
 			isError: true,
 		};
 	}

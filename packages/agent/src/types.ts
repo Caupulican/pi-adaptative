@@ -131,6 +131,14 @@ export interface AgentLoopTurnUpdate {
 	thinkingLevel?: ThinkingLevel;
 }
 
+export interface ToolValidationEscalationEvent {
+	tool: string;
+	signature: string;
+	repeats: number;
+	model: string;
+	provider: string;
+}
+
 export interface PrepareNextTurnContext extends ShouldStopAfterTurnContext {}
 
 /**
@@ -283,6 +291,18 @@ export interface AgentLoopConfig extends SimpleStreamOptions {
 	 * (outcome, model/provider/tool, failure modes, repairs) and never argument values.
 	 */
 	onToolArgumentValidation?: (event: ToolArgumentValidationTelemetryEvent) => void;
+
+	/**
+	 * Number of consecutive identical validation bounces before adding full schema/example feedback
+	 * and notifying the host. Set to 0 to disable. Default: 3.
+	 */
+	toolValidationEscalationThreshold?: number;
+
+	/**
+	 * Fired when a repeated identical tool validation failure reaches the escalation threshold.
+	 * Hosts with model routers can use this signal to move the next turn off a cheap route.
+	 */
+	onToolValidationEscalation?: (event: ToolValidationEscalationEvent) => void;
 
 	/**
 	 * Called before a tool is executed, after arguments have been validated.

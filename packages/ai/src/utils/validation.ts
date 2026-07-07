@@ -27,6 +27,20 @@ export interface ToolArgumentValidationOptions {
 	telemetry?: (event: ToolArgumentValidationTelemetryEvent) => void;
 }
 
+export class ToolArgumentValidationError extends Error {
+	public readonly toolName: string;
+	public readonly signature: string;
+	public readonly enrichment: string;
+
+	constructor(message: string, options: { toolName: string; signature: string; enrichment: string }) {
+		super(message);
+		this.name = "ToolArgumentValidationError";
+		this.toolName = options.toolName;
+		this.signature = options.signature;
+		this.enrichment = options.enrichment;
+	}
+}
+
 function emitToolArgumentValidationTelemetry(
 	options: ToolArgumentValidationOptions | undefined,
 	event: Omit<ToolArgumentValidationTelemetryEvent, "model" | "provider">,
@@ -259,6 +273,22 @@ function formatValidationErrors(errors: readonly TLocalizedValidationError[], ar
 	);
 }
 
+function validationFailureSignature(errors: readonly TLocalizedValidationError[]): string {
+	return JSON.stringify(
+		errors.map((error) => ({
+			path: formatValidationPath(error),
+			keyword: error.keyword,
+			message: error.message,
+		})),
+	);
+}
+
+function formatValidationEnrichment(tool: Tool): string {
+	const example = minimalExample(tool.parameters);
+	const exampleText = example === undefined ? "" : `\nValid example:\n${formatCompactJson(example, 2000)}`;
+	return `Full tool schema:\n${formatCompactJson(tool.parameters, 4000)}${exampleText}`;
+}
+
 /**
  * Finds a tool by name and validates the tool call arguments against its TypeBox schema
  * @param tools Array of tool definitions
@@ -337,5 +367,9 @@ export function validateToolArguments(
 		tool.parameters,
 	)}\n\nReceived arguments:\n${truncateText(JSON.stringify(toolCall.arguments, null, 2), 2000)}`;
 
-	throw new Error(errorMessage);
+	throw new ToolArgumentValidationError(errorMessage, {
+		toolName: toolCall.name,
+		signature: validationFailureSignature(validationErrors),
+		enrichment: formatValidationEnrichment(tool),
+	});
 }
