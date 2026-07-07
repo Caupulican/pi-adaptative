@@ -179,6 +179,9 @@ export const streamOpenAICompletions: StreamFunction<"openai-completions", OpenA
 			let hasFinishReason = false;
 			const toolCallBlocksByIndex = new Map<number, StreamingToolCallBlock>();
 			const toolCallBlocksById = new Map<string, StreamingToolCallBlock>();
+			const toolCallIdCounts = new Map<string, number>();
+			const usedToolCallIds = new Set<string>();
+			let syntheticToolCallOrdinal = 0;
 			const pendingReasoningDetailsById = new Map<string, string>();
 			const blocks = output.content as StreamingBlock[];
 			const getContentIndex = (block: StreamingBlock) => blocks.indexOf(block);
@@ -242,16 +245,29 @@ export const streamOpenAICompletions: StreamFunction<"openai-completions", OpenA
 					pendingReasoningDetailsById.delete(id);
 				}
 			};
+			const allocateToolCallId = (rawId: string | undefined, streamIndex: number | undefined) => {
+				const fallbackOrdinal = streamIndex ?? syntheticToolCallOrdinal++;
+				const baseId = rawId && rawId.length > 0 ? rawId : `call_${fallbackOrdinal}`;
+				let count = toolCallIdCounts.get(baseId) ?? 0;
+				let candidate = count === 0 ? baseId : `${baseId}_${count + 1}`;
+				while (usedToolCallIds.has(candidate)) {
+					count++;
+					candidate = `${baseId}_${count + 1}`;
+				}
+				toolCallIdCounts.set(baseId, count + 1);
+				usedToolCallIds.add(candidate);
+				return candidate;
+			};
 			const ensureToolCallBlock = (toolCall: StreamingToolCallDelta) => {
 				const streamIndex = typeof toolCall.index === "number" ? toolCall.index : undefined;
 				let block = streamIndex !== undefined ? toolCallBlocksByIndex.get(streamIndex) : undefined;
-				if (!block && toolCall.id) {
+				if (!block && streamIndex === undefined && toolCall.id) {
 					block = toolCallBlocksById.get(toolCall.id);
 				}
 				if (!block) {
 					block = {
 						type: "toolCall",
-						id: toolCall.id || "",
+						id: allocateToolCallId(toolCall.id, streamIndex),
 						name: toolCall.function?.name || "",
 						arguments: {},
 						partialArgs: "",
@@ -260,7 +276,7 @@ export const streamOpenAICompletions: StreamFunction<"openai-completions", OpenA
 					if (streamIndex !== undefined) {
 						toolCallBlocksByIndex.set(streamIndex, block);
 					}
-					if (toolCall.id) {
+					if (toolCall.id && !toolCallBlocksById.has(toolCall.id)) {
 						toolCallBlocksById.set(toolCall.id, block);
 					}
 					blocks.push(block);
@@ -275,10 +291,9 @@ export const streamOpenAICompletions: StreamFunction<"openai-completions", OpenA
 					toolCallBlocksByIndex.set(streamIndex, block);
 				}
 				if (toolCall.id) {
-					if (!block.id) {
-						block.id = toolCall.id;
+					if (!toolCallBlocksById.has(toolCall.id)) {
+						toolCallBlocksById.set(toolCall.id, block);
 					}
-					toolCallBlocksById.set(toolCall.id, block);
 					attachPendingReasoningDetail(block, toolCall.id);
 				}
 				return block;
@@ -367,10 +382,6 @@ export const streamOpenAICompletions: StreamFunction<"openai-completions", OpenA
 					if (choice?.delta?.tool_calls) {
 						for (const toolCall of choice.delta.tool_calls) {
 							const block = ensureToolCallBlock(toolCall);
-							if (!block.id && toolCall.id) {
-								block.id = toolCall.id;
-								toolCallBlocksById.set(toolCall.id, block);
-							}
 							if (!block.name && toolCall.function?.name) {
 								block.name = toolCall.function.name;
 							}

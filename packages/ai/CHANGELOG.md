@@ -10,6 +10,7 @@
 - Fixed OpenAI Responses streams to emit text/refusal deltas when providers omit `content_part.added` events.
 - Fixed Sakana Fugu Responses usage totals to include orchestration tokens.
 - Added deterministic validation repair for common malformed tool-call argument shapes.
+- Fixed OpenAI-compatible streamed tool calls to synthesize missing ids and disambiguate duplicates.
 
 ## [0.81.11] - 2026-07-07
 

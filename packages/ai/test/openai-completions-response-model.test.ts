@@ -112,6 +112,90 @@ describe("openai-completions responseModel", () => {
 		expect(message.responseModel).toBeUndefined();
 	});
 
+	it("synthesizes ids for streamed tool calls that omit them", async () => {
+		mockState.chunks = [
+			{
+				id: "chatcmpl-missing-id",
+				model: "openrouter/auto",
+				choices: [
+					{
+						index: 0,
+						delta: {
+							tool_calls: [
+								{ index: 0, type: "function", function: { name: "first", arguments: '{"value":1}' } },
+								{ index: 1, type: "function", function: { name: "second", arguments: '{"value":2}' } },
+							],
+						},
+						finish_reason: "tool_calls",
+					},
+				],
+				usage: {
+					prompt_tokens: 1,
+					completion_tokens: 1,
+					prompt_tokens_details: { cached_tokens: 0 },
+					completion_tokens_details: { reasoning_tokens: 0 },
+				},
+			},
+		];
+
+		const message = await complete(
+			openRouterAuto(),
+			{ messages: [{ role: "user", content: "hi", timestamp: Date.now() }] },
+			{ apiKey: "test" },
+		);
+
+		const toolCalls = message.content.filter((block) => block.type === "toolCall");
+		expect(toolCalls.map((toolCall) => toolCall.id)).toEqual(["call_0", "call_1"]);
+		expect(toolCalls.map((toolCall) => toolCall.name)).toEqual(["first", "second"]);
+	});
+
+	it("disambiguates duplicate streamed tool call ids", async () => {
+		mockState.chunks = [
+			{
+				id: "chatcmpl-duplicate-id",
+				model: "openrouter/auto",
+				choices: [
+					{
+						index: 0,
+						delta: {
+							tool_calls: [
+								{
+									index: 0,
+									id: "dup",
+									type: "function",
+									function: { name: "first", arguments: '{"value":1}' },
+								},
+								{
+									index: 1,
+									id: "dup",
+									type: "function",
+									function: { name: "second", arguments: '{"value":2}' },
+								},
+							],
+						},
+						finish_reason: "tool_calls",
+					},
+				],
+				usage: {
+					prompt_tokens: 1,
+					completion_tokens: 1,
+					prompt_tokens_details: { cached_tokens: 0 },
+					completion_tokens_details: { reasoning_tokens: 0 },
+				},
+			},
+		];
+
+		const message = await complete(
+			openRouterAuto(),
+			{ messages: [{ role: "user", content: "hi", timestamp: Date.now() }] },
+			{ apiKey: "test" },
+		);
+
+		const toolCalls = message.content.filter((block) => block.type === "toolCall");
+		expect(toolCalls.map((toolCall) => toolCall.id)).toEqual(["dup", "dup_2"]);
+		expect(toolCalls.map((toolCall) => toolCall.name)).toEqual(["first", "second"]);
+	});
+
 	it("buffers reasoning_details that arrive before matching streamed tool calls", async () => {
 		const detail = { type: "reasoning.encrypted", id: "call_1", data: "encrypted" };
 		mockState.chunks = [
