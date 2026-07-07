@@ -192,6 +192,14 @@ export class ModelAdaptationStore {
 		return this.store(model, { ...profile, rules: mergeRule(profile.rules, nextRule) }, at);
 	}
 
+	removeRule(model: string, mode: string, at = new Date()): boolean {
+		const profile = this.get(model, at);
+		const rules = profile.rules.filter((rule) => rule.mode !== mode);
+		if (rules.length === profile.rules.length) return false;
+		this.store(model, { ...profile, rules }, at.toISOString());
+		return true;
+	}
+
 	/** Update last-fired recency for an existing rule. No-op when absent. */
 	markRuleFired(model: string, mode: string, at = new Date()): StoredModelAdaptation | undefined {
 		const profile = this.get(model, at);

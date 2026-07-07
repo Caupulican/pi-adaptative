@@ -24,6 +24,7 @@
 - Added a central catalogue for teachable tool execution error guidance.
 - Added text tool-call protocol variants for per-model calibration.
 - Added an offline tool-repair corpus replay helper for sanitized validation bounce fixtures.
+- Added a validation option to disable deterministic tool-argument repair while retaining bounces.
 
 ## [0.81.11] - 2026-07-07
 

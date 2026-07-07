@@ -286,6 +286,12 @@ export interface AgentLoopConfig extends SimpleStreamOptions {
 	 */
 	toolExecution?: ToolExecutionMode;
 
+	/** Disable deterministic tool-argument repair while keeping validation bounces. Default: enabled. */
+	toolArgumentRepairEnabled?: boolean;
+
+	/** Disable in-band tool repair teaching notes. Default: enabled. */
+	toolArgumentTeachEnabled?: boolean;
+
 	/**
 	 * Observe tool argument validation outcomes. Events contain only shape metadata
 	 * (outcome, model/provider/tool, failure modes, repairs) and never argument values.
@@ -451,6 +457,12 @@ export interface AgentContext {
  * listeners for that event are still part of run settlement. The agent becomes
  * idle only after those listeners finish.
  */
+export interface ToolCallRepairInfo {
+	repaired: true;
+	rawArguments?: Record<string, unknown>;
+	notes?: string[];
+}
+
 export type AgentEvent =
 	// Agent lifecycle
 	| { type: "agent_start" }
@@ -464,6 +476,20 @@ export type AgentEvent =
 	| { type: "message_update"; message: AgentMessage; assistantMessageEvent: AssistantMessageEvent }
 	| { type: "message_end"; message: AgentMessage }
 	// Tool execution lifecycle
-	| { type: "tool_execution_start"; toolCallId: string; toolName: string; args: any }
-	| { type: "tool_execution_update"; toolCallId: string; toolName: string; args: any; partialResult: any }
-	| { type: "tool_execution_end"; toolCallId: string; toolName: string; result: any; isError: boolean };
+	| { type: "tool_execution_start"; toolCallId: string; toolName: string; args: any; repair?: ToolCallRepairInfo }
+	| {
+			type: "tool_execution_update";
+			toolCallId: string;
+			toolName: string;
+			args: any;
+			partialResult: any;
+			repair?: ToolCallRepairInfo;
+	  }
+	| {
+			type: "tool_execution_end";
+			toolCallId: string;
+			toolName: string;
+			result: any;
+			isError: boolean;
+			repair?: ToolCallRepairInfo;
+	  };

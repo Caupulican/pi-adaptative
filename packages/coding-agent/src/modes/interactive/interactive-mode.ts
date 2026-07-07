@@ -5,10 +5,10 @@
 
 import * as fs from "node:fs";
 import * as path from "node:path";
-import type { AgentMessage } from "@caupulican/pi-agent-core";
+import type { AgentMessage, ToolCallRepairInfo } from "@caupulican/pi-agent-core";
 import { createCompactionSummaryMessage } from "@caupulican/pi-agent-core";
 import type { SessionContext, SessionManager, TruncationResult } from "@caupulican/pi-agent-core/node";
-import type { AssistantMessage, ImageContent, Message, Model } from "@caupulican/pi-ai";
+import type { AssistantMessage, ImageContent, Message, Model, ToolCall } from "@caupulican/pi-ai";
 import type { AutocompleteProvider, EditorComponent, Keybinding, MarkdownTheme, SelectItem } from "@caupulican/pi-tui";
 import {
 	type Component,
@@ -1326,21 +1326,26 @@ export class InteractiveMode {
 		}
 	}
 
-	private attachToolExecutionComponent(toolName: string, toolCallId: string, args: any): ToolExecutionComponent {
+	private attachToolExecutionComponent(
+		toolName: string,
+		toolCallId: string,
+		args: any,
+		repair?: ToolCallRepairInfo,
+	): ToolExecutionComponent {
 		const actionKey = getToolPanelActionKey(this.getToolPanelScope(), toolName, args);
 		const toolDefinition = this.getRegisteredToolDefinition(toolName);
 		const reuseInPlace = shouldReuseToolPanelInPlace(toolName, args);
 		const existing = this.toolPanels.getReusable(actionKey, { allowActive: reuseInPlace });
 		if (existing) {
 			if (reuseInPlace && actionKey) {
-				existing.resetInvocation(toolName, toolCallId, args, toolDefinition);
+				existing.resetInvocation(toolName, toolCallId, args, toolDefinition, repair);
 				existing.setExpanded(this.toolOutputExpanded);
 				this.toolPanels.replaceActiveForAction(toolCallId, existing, actionKey);
 				this.ui.requestRender();
 				return existing;
 			}
 			this.detachToolExecutionComponent(existing);
-			existing.resetInvocation(toolName, toolCallId, args, toolDefinition);
+			existing.resetInvocation(toolName, toolCallId, args, toolDefinition, repair);
 			existing.setExpanded(this.toolOutputExpanded);
 			this.appendToolExecutionComponent(existing, true);
 			this.toolPanels.register(toolCallId, existing, actionKey);
@@ -1353,6 +1358,7 @@ export class InteractiveMode {
 			{
 				showImages: this.settingsManager.getShowImages(),
 				imageWidthCells: this.settingsManager.getImageWidthCells(),
+				repair,
 			},
 			toolDefinition,
 			this.ui,
@@ -1647,6 +1653,23 @@ export class InteractiveMode {
 			}
 			if (text === "/context") {
 				this.showStatus(this.session.formatContextCompositionDashboard());
+				this.editor.setText("");
+				return;
+			}
+			if (text === "/toolhealth") {
+				this.showStatus(this.session.formatToolRepairHealthReport());
+				this.editor.setText("");
+				return;
+			}
+			if (text.startsWith("/toolrule-remove")) {
+				const [model, mode] = text.slice("/toolrule-remove".length).trim().split(/\s+/, 2);
+				const message =
+					model && mode
+						? this.session.removeToolRepairRule(model, mode)
+							? `Removed tool repair rule ${mode} for ${model}.`
+							: `No tool repair rule ${mode} found for ${model}.`
+						: "Usage: /toolrule-remove <provider/model> <mode>";
+				this.showStatus(message);
 				this.editor.setText("");
 				return;
 			}
@@ -1997,8 +2020,15 @@ export class InteractiveMode {
 
 			case "tool_execution_start": {
 				let component = this.toolPanels.getActive(event.toolCallId);
-				if (!component) component = this.attachToolExecutionComponent(event.toolName, event.toolCallId, event.args);
-				component.markExecutionStarted();
+				if (!component)
+					component = this.attachToolExecutionComponent(
+						event.toolName,
+						event.toolCallId,
+						event.args,
+						event.repair,
+					);
+				else component.updateArgs(event.args, event.repair);
+				component.markExecutionStarted(event.repair);
 				this.ui.requestRender();
 				break;
 			}
@@ -2006,6 +2036,7 @@ export class InteractiveMode {
 			case "tool_execution_update": {
 				const component = this.toolPanels.getActive(event.toolCallId);
 				if (component) {
+					component.updateArgs(event.args, event.repair);
 					component.updateResult({ ...event.partialResult, isError: false }, true);
 					this.ui.requestRender();
 				}
@@ -2248,15 +2279,25 @@ export class InteractiveMode {
 		})();
 	}
 
+	private getToolCallRepairInfo(toolCall: ToolCall): ToolCallRepairInfo | undefined {
+		if (!toolCall.rawArguments && !toolCall.repairNotes?.length) return undefined;
+		return {
+			repaired: true,
+			...(toolCall.rawArguments ? { rawArguments: toolCall.rawArguments } : {}),
+			...(toolCall.repairNotes?.length ? { notes: toolCall.repairNotes } : {}),
+		};
+	}
+
 	private attachStreamingToolPanels(message: AssistantMessage): void {
 		for (const content of message.content) {
 			if (content.type !== "toolCall") continue;
+			const repair = this.getToolCallRepairInfo(content);
 			if (!this.toolPanels.hasActive(content.id)) {
-				this.attachToolExecutionComponent(content.name, content.id, content.arguments);
+				this.attachToolExecutionComponent(content.name, content.id, content.arguments, repair);
 			} else {
 				const component = this.toolPanels.getActive(content.id);
 				if (component) {
-					component.updateArgs(content.arguments);
+					component.updateArgs(content.arguments, repair);
 				}
 			}
 		}

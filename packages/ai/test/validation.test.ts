@@ -158,6 +158,24 @@ describe("validateToolArguments", () => {
 		expect(JSON.stringify(events)).not.toContain("secret-value");
 	});
 
+	it("can disable deterministic repair while keeping validation bounces", () => {
+		const tool: Tool = {
+			name: "count",
+			description: "Count",
+			parameters: Type.Object({ count: Type.Number() }),
+		};
+		const events: unknown[] = [];
+
+		expect(() =>
+			validateToolArguments(
+				tool,
+				{ type: "toolCall", id: "tool-1", name: "count", arguments: { count: "42" as unknown as number } },
+				{ repairEnabled: false, telemetry: (event) => events.push(event) },
+			),
+		).toThrow("Validation failed");
+		expect(events).toMatchObject([{ outcome: "bounced", failureModes: ["numberFromString"], repairsApplied: [] }]);
+	});
+
 	it("includes expected schema fragments and received values in validation bounces", () => {
 		const tool: Tool = {
 			name: "search",

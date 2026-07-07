@@ -14,6 +14,7 @@ import type {
 	AgentToolUpdateCallback,
 	CustomMessage,
 	ThinkingLevel,
+	ToolCallRepairInfo,
 	ToolExecutionMode,
 } from "@caupulican/pi-agent-core";
 import type {
@@ -425,6 +426,8 @@ export interface ToolRenderContext<TState = any, TArgs = any> {
 	showImages: boolean;
 	/** Whether the current result is an error. */
 	isError: boolean;
+	/** Repair metadata when the harness validated and changed tool arguments before execution. */
+	repair?: ToolCallRepairInfo;
 	/** True when renderCall is producing a collapsed grouped-tool summary. */
 	toolGroupSummary?: boolean;
 }

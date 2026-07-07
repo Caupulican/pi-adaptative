@@ -12,6 +12,7 @@
 - Linked tool argument validation telemetry to teach state and same-call execution outcome.
 - Added catalogued guidance lines to matching tool execution errors.
 - Added agent-loop forwarding for calibrated text tool-call protocol variants.
+- Added repaired-tool execution markers and independent repair/teach layer switches.
 
 ## [0.81.11] - 2026-07-07
 

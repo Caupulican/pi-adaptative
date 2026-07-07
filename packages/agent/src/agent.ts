@@ -98,6 +98,8 @@ export interface AgentOptions {
 	beforeToolCall?: (context: BeforeToolCallContext, signal?: AbortSignal) => Promise<BeforeToolCallResult | undefined>;
 	afterToolCall?: (context: AfterToolCallContext, signal?: AbortSignal) => Promise<AfterToolCallResult | undefined>;
 	onToolArgumentValidation?: (event: ToolArgumentValidationTelemetryEvent) => void;
+	toolArgumentRepairEnabled?: boolean;
+	toolArgumentTeachEnabled?: boolean;
 	toolValidationEscalationThreshold?: number;
 	onToolValidationEscalation?: AgentLoopConfig["onToolValidationEscalation"];
 	prepareNextTurn?: (
@@ -183,6 +185,8 @@ export class Agent {
 		signal?: AbortSignal,
 	) => Promise<AfterToolCallResult | undefined>;
 	public onToolArgumentValidation?: (event: ToolArgumentValidationTelemetryEvent) => void;
+	public toolArgumentRepairEnabled?: boolean;
+	public toolArgumentTeachEnabled?: boolean;
 	public toolValidationEscalationThreshold?: number;
 	public onToolValidationEscalation?: AgentLoopConfig["onToolValidationEscalation"];
 	public prepareNextTurn?: (
@@ -214,6 +218,8 @@ export class Agent {
 		this.beforeToolCall = options.beforeToolCall;
 		this.afterToolCall = options.afterToolCall;
 		this.onToolArgumentValidation = options.onToolArgumentValidation;
+		this.toolArgumentRepairEnabled = options.toolArgumentRepairEnabled;
+		this.toolArgumentTeachEnabled = options.toolArgumentTeachEnabled;
 		this.toolValidationEscalationThreshold = options.toolValidationEscalationThreshold;
 		this.onToolValidationEscalation = options.onToolValidationEscalation;
 		this.prepareNextTurn = options.prepareNextTurn;
@@ -442,6 +448,8 @@ export class Agent {
 			maxRetryDelayMs: this.maxRetryDelayMs,
 			maxStallTurns: this.maxStallTurns,
 			toolExecution: this.toolExecution,
+			toolArgumentRepairEnabled: this.toolArgumentRepairEnabled,
+			toolArgumentTeachEnabled: this.toolArgumentTeachEnabled,
 			onToolArgumentValidation: this.onToolArgumentValidation,
 			toolValidationEscalationThreshold: this.toolValidationEscalationThreshold,
 			onToolValidationEscalation: this.onToolValidationEscalation,

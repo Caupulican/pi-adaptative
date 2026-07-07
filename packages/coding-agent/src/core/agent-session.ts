@@ -177,6 +177,8 @@ import type { ResourceProfileFilterSettings, SettingsManager } from "./settings-
 import type { SlashCommandInfo } from "./slash-commands.ts";
 import { SystemPromptBuilder } from "./system-prompt-builder.ts";
 import { ToolGateController } from "./tool-gate-controller.ts";
+import { formatToolRepairHealthReport } from "./tool-repair-health.ts";
+import { resolveCurrentToolRepairSettings } from "./tool-repair-settings.ts";
 import type { BashOperations } from "./tools/bash.ts";
 
 // ============================================================================
@@ -706,6 +708,7 @@ export class AgentSession {
 		this._cwd = config.cwd;
 		this._agentDir = config.agentDir ?? getAgentDir();
 		this._modelAdaptationStore = ModelAdaptationStore.forAgentDir(this._agentDir);
+		this._applyToolRepairLayerSettings();
 		this._collectWorkspaceSources = config.collectWorkspaceSources ?? collectWorkspaceSources;
 		this._localRuntimeController = new LocalRuntimeController({
 			agentDir: this._agentDir,
@@ -1268,13 +1271,25 @@ export class AgentSession {
 		return model ? formatModelRouterModel(model) : undefined;
 	}
 
+	private _toolRepairSettings() {
+		return resolveCurrentToolRepairSettings(this.settingsManager.settings);
+	}
+
+	private _applyToolRepairLayerSettings(): void {
+		const settings = this._toolRepairSettings();
+		this.agent.toolArgumentRepairEnabled = settings.repair;
+		this.agent.toolArgumentTeachEnabled = settings.teach;
+	}
+
 	private _getModelAdaptationRulesForPrompt() {
+		if (!this._toolRepairSettings().teach) return [];
 		const modelKey = this._modelAdaptationKeyFor(this.agent.state.model);
 		return modelKey ? this._modelAdaptationStore.get(modelKey).rules : [];
 	}
 
 	private _textProtocolFlag(model: Model<Api> | undefined): boolean {
-		return model?.textToolCallProtocol === true;
+		const override = this._toolRepairSettings().textProtocol;
+		return override ?? model?.textToolCallProtocol === true;
 	}
 
 	private _textProtocolCalibrationContext(variant: TextToolProtocolVariant, token: string): Context {
@@ -1373,7 +1388,7 @@ export class AgentSession {
 	private _tagModelAdaptationRuleTeaching(
 		event: ToolArgumentValidationTelemetryEvent,
 	): ToolArgumentValidationTelemetryEvent {
-		if (event.taught !== "none") return event;
+		if (!this._toolRepairSettings().teach || event.taught !== "none") return event;
 		const modelKey =
 			event.provider && event.model
 				? `${event.provider}/${event.model}`
@@ -1399,7 +1414,8 @@ export class AgentSession {
 	}
 
 	private _handleModelAdaptationTelemetry(event: ToolArgumentValidationTelemetryEvent): void {
-		if (event.outcome !== "repaired" || event.repairsApplied.length === 0) return;
+		if (!this._toolRepairSettings().teach || event.outcome !== "repaired" || event.repairsApplied.length === 0)
+			return;
 		const modelKey =
 			event.provider && event.model
 				? `${event.provider}/${event.model}`
@@ -1604,6 +1620,14 @@ export class AgentSession {
 	/** Bounded plain-text rendering of {@link getContextCompositionReport} for the /context command. */
 	formatContextCompositionDashboard(): string {
 		return formatContextCompositionDashboard(this.getContextCompositionReport());
+	}
+
+	formatToolRepairHealthReport(): string {
+		return formatToolRepairHealthReport(this._modelAdaptationStore);
+	}
+
+	removeToolRepairRule(model: string, mode: string): boolean {
+		return this._modelAdaptationStore.removeRule(model, mode);
 	}
 
 	/** Curation status for diagnostics/dashboard: settings, live telemetry, last refusal reason. */
@@ -2389,6 +2413,7 @@ export class AgentSession {
 	}
 
 	private async _promptUnserialized(text: string, options?: PromptOptions): Promise<void> {
+		this._applyToolRepairLayerSettings();
 		const expandPromptTemplates = options?.expandPromptTemplates ?? true;
 		const processSlashCommands = options?.processSlashCommands ?? expandPromptTemplates;
 		const preflightResult = options?.preflightResult;

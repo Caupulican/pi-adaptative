@@ -1,4 +1,8 @@
-import { compactRetainedDetails, MAX_TUI_RETAINED_DETAILS_BYTES } from "@caupulican/pi-agent-core";
+import {
+	compactRetainedDetails,
+	MAX_TUI_RETAINED_DETAILS_BYTES,
+	type ToolCallRepairInfo,
+} from "@caupulican/pi-agent-core";
 import { truncateHead } from "@caupulican/pi-agent-core/node";
 import { Box, type Component, Container, getCapabilities, Image, Spacer, Text, type TUI } from "@caupulican/pi-tui";
 import type { ToolDefinition, ToolRenderContext } from "../../../core/extensions/types.ts";
@@ -11,6 +15,7 @@ import { renderTitleBadge, titleBadge } from "./tool-title.ts";
 export interface ToolExecutionOptions {
 	showImages?: boolean;
 	imageWidthCells?: number;
+	repair?: ToolCallRepairInfo;
 }
 
 // Components only use built-in definitions for display (renderers, grouping), so one
@@ -38,6 +43,7 @@ export class ToolExecutionComponent extends Container {
 	private toolName: string;
 	private toolCallId: string;
 	private args: any;
+	private repair: ToolCallRepairInfo | undefined;
 	private expanded = false;
 	private showImages: boolean;
 	private imageWidthCells: number;
@@ -70,6 +76,7 @@ export class ToolExecutionComponent extends Container {
 		this.toolName = toolName;
 		this.toolCallId = toolCallId;
 		this.args = args;
+		this.repair = options.repair;
 		this.toolDefinition = toolDefinition;
 		this.builtInToolDefinition = getBuiltInToolDefinitions(cwd)[toolName as ToolName];
 		this.toolGroup = this.resolveToolGroup();
@@ -157,6 +164,7 @@ export class ToolExecutionComponent extends Container {
 			expanded: this.expanded,
 			showImages: this.showImages,
 			isError: this.result?.isError ?? false,
+			repair: this.repair,
 			toolGroupSummary,
 		};
 	}
@@ -184,10 +192,12 @@ export class ToolExecutionComponent extends Container {
 		toolCallId: string,
 		args: any,
 		toolDefinition: ToolDefinition<any, any> | undefined,
+		repair?: ToolCallRepairInfo,
 	): void {
 		this.toolName = toolName;
 		this.toolCallId = toolCallId;
 		this.args = args;
+		this.repair = repair;
 		this.toolDefinition = toolDefinition;
 		this.builtInToolDefinition = getBuiltInToolDefinitions(this.cwd)[toolName as ToolName];
 		this.toolGroup = this.resolveToolGroup();
@@ -215,6 +225,10 @@ export class ToolExecutionComponent extends Container {
 		});
 	}
 
+	private createRepairMarker(): Component | undefined {
+		return this.repair?.repaired ? new Text(theme.fg("dim", "[repaired arguments]"), 0, 0) : undefined;
+	}
+
 	private createResultFallback(): Component | undefined {
 		const output = this.getTextOutput();
 		if (!output) {
@@ -233,12 +247,14 @@ export class ToolExecutionComponent extends Container {
 		return new Text(`${theme.fg("toolOutput", truncation.content)}\n${note}`, 0, 0);
 	}
 
-	updateArgs(args: any): void {
+	updateArgs(args: any, repair?: ToolCallRepairInfo): void {
 		this.args = args;
+		this.repair = repair;
 		this.updateDisplay();
 	}
 
-	markExecutionStarted(): void {
+	markExecutionStarted(repair?: ToolCallRepairInfo): void {
+		this.repair = repair;
 		this.executionStarted = true;
 		this.updateDisplay();
 		this.ui.requestRender();
@@ -368,6 +384,12 @@ export class ToolExecutionComponent extends Container {
 				}
 			}
 
+			const repairMarker = this.createRepairMarker();
+			if (repairMarker) {
+				renderContainer.addChild(repairMarker);
+				hasContent = true;
+			}
+
 			if (this.result) {
 				const resultRenderer = this.getResultRenderer();
 				if (!resultRenderer) {
@@ -452,6 +474,9 @@ export class ToolExecutionComponent extends Container {
 			label: this.getDisplayLabel(),
 			status: this.titleBadgeStatus(),
 		});
+		if (this.repair?.repaired) {
+			text += `\n${theme.fg("dim", "[repaired arguments]")}`;
+		}
 		const content = JSON.stringify(this.args, null, 2);
 		if (content) {
 			text += `\n\n${content}`;

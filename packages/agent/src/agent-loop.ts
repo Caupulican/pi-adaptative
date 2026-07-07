@@ -24,6 +24,7 @@ import type {
 	AgentToolCall,
 	AgentToolResult,
 	StreamFn,
+	ToolCallRepairInfo,
 } from "./types.ts";
 import { DEFAULT_MAX_STALL_TURNS } from "./types.ts";
 import { createEmptyUsage } from "./usage.ts";
@@ -521,13 +522,6 @@ async function executeToolCallsSequential(
 	const messages: ToolResultMessage[] = [];
 
 	for (const toolCall of toolCalls) {
-		await emit({
-			type: "tool_execution_start",
-			toolCallId: toolCall.id,
-			toolName: toolCall.name,
-			args: toolCall.arguments,
-		});
-
 		const preparation = await prepareToolCall(
 			currentContext,
 			assistantMessage,
@@ -536,6 +530,7 @@ async function executeToolCallsSequential(
 			validationFailureTracker,
 			signal,
 		);
+		await emitToolExecutionStart(toolCall, emit);
 		let finalized: FinalizedToolCallOutcome;
 		if (preparation.kind === "immediate") {
 			resetExecutionFailureTracker(executionFailureTracker);
@@ -590,13 +585,6 @@ async function executeToolCallsParallel(
 	const finalizedCalls: FinalizedToolCallEntry[] = [];
 
 	for (const toolCall of toolCalls) {
-		await emit({
-			type: "tool_execution_start",
-			toolCallId: toolCall.id,
-			toolName: toolCall.name,
-			args: toolCall.arguments,
-		});
-
 		const preparation = await prepareToolCall(
 			currentContext,
 			assistantMessage,
@@ -605,6 +593,7 @@ async function executeToolCallsParallel(
 			validationFailureTracker,
 			signal,
 		);
+		await emitToolExecutionStart(toolCall, emit);
 		if (preparation.kind === "immediate") {
 			resetExecutionFailureTracker(executionFailureTracker);
 			emitToolArgumentValidationTelemetry(config, preparation.validationEvent, "not_run", "none");
@@ -812,6 +801,7 @@ async function prepareToolCall(
 		const validatedArgs = validateToolArguments(tool, preparedToolCall, {
 			model: config.model.id,
 			provider: config.model.provider,
+			repairEnabled: config.toolArgumentRepairEnabled !== false,
 			telemetry: (event) => {
 				validationEvent = event;
 			},
@@ -936,7 +926,9 @@ function appendRepairTeachNotes(
 	result: AgentToolResult<any>,
 	toolCall: AgentToolCall,
 	tracker: ToolRepairTeachTracker,
+	config: AgentLoopConfig,
 ): { result: AgentToolResult<any>; taught: boolean } {
+	if (config.toolArgumentTeachEnabled === false) return { result, taught: false };
 	const notes = (toolCall.repairNotes ?? []).filter((note) => shouldEmitRepairTeachNote(toolCall.name, note, tracker));
 	if (notes.length === 0) return { result, taught: false };
 	return {
@@ -1030,7 +1022,7 @@ async function finalizeExecutedToolCall(
 		resetExecutionFailureTracker(executionFailureTracker);
 	}
 
-	const repaired = appendRepairTeachNotes(result, prepared.toolCall, repairTeachTracker);
+	const repaired = appendRepairTeachNotes(result, prepared.toolCall, repairTeachTracker, config);
 	emitToolArgumentValidationTelemetry(
 		config,
 		prepared.validationEvent,
@@ -1064,6 +1056,25 @@ function createErrorToolResultWithGuidance(message: string): AgentToolResult<any
 	};
 }
 
+async function emitToolExecutionStart(toolCall: AgentToolCall, emit: AgentEventSink): Promise<void> {
+	await emit({
+		type: "tool_execution_start",
+		toolCallId: toolCall.id,
+		toolName: toolCall.name,
+		args: toolCall.arguments,
+		repair: getToolCallRepairInfo(toolCall),
+	});
+}
+
+function getToolCallRepairInfo(toolCall: AgentToolCall): ToolCallRepairInfo | undefined {
+	if (!toolCall.rawArguments && !toolCall.repairNotes?.length) return undefined;
+	return {
+		repaired: true,
+		...(toolCall.rawArguments ? { rawArguments: toolCall.rawArguments } : {}),
+		...(toolCall.repairNotes?.length ? { notes: toolCall.repairNotes } : {}),
+	};
+}
+
 async function emitToolExecutionEnd(finalized: FinalizedToolCallOutcome, emit: AgentEventSink): Promise<void> {
 	await emit({
 		type: "tool_execution_end",
@@ -1071,6 +1082,7 @@ async function emitToolExecutionEnd(finalized: FinalizedToolCallOutcome, emit: A
 		toolName: finalized.toolCall.name,
 		result: finalized.result,
 		isError: finalized.isError,
+		repair: getToolCallRepairInfo(finalized.toolCall),
 	});
 }
 

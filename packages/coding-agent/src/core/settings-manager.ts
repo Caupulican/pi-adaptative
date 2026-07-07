@@ -358,6 +358,12 @@ export interface DisabledResourcesSettings {
 	tools?: string[];
 }
 
+export interface ToolRepairSettings {
+	repair?: boolean;
+	teach?: boolean;
+	textProtocol?: boolean;
+}
+
 export interface Settings {
 	lastChangelogVersion?: string;
 	defaultProvider?: string;
@@ -417,6 +423,7 @@ export interface Settings {
 	modelCapability?: ModelCapabilitySettings; // Auto-detected small-model tool/lane surface (default: auto)
 	toolkit?: ToolkitSettings; // User's blessed daily-ops script registry for run_toolkit_script
 	modelRouter?: ModelRouterSettings; // Opt-in deterministic cheap/expensive model routing foundation
+	toolRepair?: ToolRepairSettings; // Tool-argument repair, teach, and text-protocol kill switches
 	failover?: FailoverSettings; // Provider quota behavior; metered quota always halts for explicit user choice
 	autoLearn?: AutoLearnSettings; // Setting-gated autonomous background learning for long sessions
 	sessionDir?: string; // Custom session storage directory (same format as --session-dir CLI flag)

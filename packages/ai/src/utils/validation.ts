@@ -42,6 +42,7 @@ export interface ToolArgumentValidationOptions {
 	model?: string;
 	provider?: string;
 	telemetry?: (event: ToolArgumentValidationTelemetryEvent) => void;
+	repairEnabled?: boolean;
 }
 
 export class ToolArgumentValidationError extends Error {
@@ -417,9 +418,12 @@ export function validateToolArguments(
 	const validationErrors = [...validator.Errors(args)] as TLocalizedValidationError[];
 	const repairIssues = analyzeToolArgumentErrors(toolCall.name, tool.parameters, args, validationErrors);
 	const failureModes = uniqueFailureModes(repairIssues.flatMap((issue) => issue.modes));
-	const repaired = repairToolArguments(toolCall.name, tool.parameters, args, validationErrors, (candidate) =>
-		validator.Check(candidate),
-	);
+	const repaired =
+		options?.repairEnabled === false
+			? undefined
+			: repairToolArguments(toolCall.name, tool.parameters, args, validationErrors, (candidate) =>
+					validator.Check(candidate),
+				);
 	if (repaired) {
 		const repairsApplied = uniqueRepairModes(repaired.repairsApplied);
 		toolCall.repairNotes = repaired.repairs.map(

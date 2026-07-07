@@ -568,6 +568,16 @@ export async function runRpcMode(runtimeHost: AgentSessionRuntime): Promise<neve
 				return success(id, "get_session_stats", stats);
 			}
 
+			case "get_tool_repair_health": {
+				return success(id, "get_tool_repair_health", { report: session.formatToolRepairHealthReport() });
+			}
+
+			case "remove_tool_repair_rule": {
+				return success(id, "remove_tool_repair_rule", {
+					removed: session.removeToolRepairRule(command.model, command.mode),
+				});
+			}
+
 			case "export_html": {
 				const path = await session.exportToHtml(command.outputPath);
 				return success(id, "export_html", { path });

@@ -27,6 +27,11 @@ export const BUILTIN_SLASH_COMMANDS: ReadonlyArray<BuiltinSlashCommand> = [
 		description: "Pick and probe a model for local/heavy-lifter roles, then assign it (/fitness [model] [trials])",
 	},
 	{ name: "context", description: "Context composition dashboard: what rides on every request" },
+	{ name: "toolhealth", description: "Show tool repair diagnostics and learned standing rules" },
+	{
+		name: "toolrule-remove",
+		description: "Remove a learned tool repair standing rule (/toolrule-remove <model> <mode>)",
+	},
 	{ name: "auto-learn", description: "Show Auto Learn/reflection status or run now (/auto-learn run)" },
 	{
 		name: "goal",

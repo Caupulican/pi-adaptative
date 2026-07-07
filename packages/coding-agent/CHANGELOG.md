@@ -11,6 +11,7 @@
 - Added per-model teach-efficacy aggregation for tool argument validation telemetry.
 - Added per-model text tool-call protocol calibration before the first real turn.
 - Added sanitized tool-validation bounce records to the local failure corpus for repair-mode discovery.
+- Added tool repair health reporting, learned-rule removal, visible repaired-call markers, and repair/teach/protocol kill switches.
 
 ## [0.81.11] - 2026-07-07
 
