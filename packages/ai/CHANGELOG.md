@@ -1,4 +1,4 @@
-## [Unreleased]
+## [0.81.8] - 2026-07-07
 
 ### Fixed
 - Fixed Anthropic-compatible streamed tool calls to preserve arguments seeded in `content_block_start` when no JSON deltas arrive.

@@ -1,4 +1,4 @@
-## [Unreleased]
+## [0.81.8] - 2026-07-07
 
 ### Fixed
 - Fixed compaction checkpoints to bound and dedupe gated facts, clamp tiny-model summary budgets, reduce oversized chunk merges before the final request, and truncate assistant thinking in summarization input.

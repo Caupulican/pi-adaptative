@@ -1,4 +1,4 @@
-## [Unreleased]
+## [0.81.8] - 2026-07-07
 
 ### Fixed
 - Fixed manual compaction retry warnings to include verification failure details.

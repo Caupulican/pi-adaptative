@@ -1,4 +1,4 @@
-## [Unreleased]
+## [0.81.8] - 2026-07-07
 
 ### Fixed
 - Fixed editor wrapping to avoid recursive overflow on width-1 wide graphemes.
