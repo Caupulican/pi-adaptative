@@ -15,6 +15,7 @@ export const DEFAULT_ADAPTIVE_STREAM_IDLE_CEILING_MS = 30 * 60 * 1000;
 export interface ModelPerfProfile {
 	prefillTokensPerSecond?: number;
 	decodeTokensPerSecond?: number;
+	loadMs?: number;
 	samples: number;
 	updatedAt: string;
 }
@@ -25,6 +26,7 @@ export interface ModelPerfSample {
 	headersToFirstTokenMs?: number;
 	requestToFirstTokenMs?: number;
 	firstTokenToDoneMs?: number;
+	loadMs?: number;
 	at?: string;
 }
 
@@ -33,6 +35,7 @@ export interface AdaptiveStreamIdleInput {
 	profile?: ModelPerfProfile;
 	promptTokens: number;
 	ceilingMs?: number;
+	localClass?: boolean;
 }
 
 export interface ModelPerfProfileStreamRecorder {
@@ -49,6 +52,7 @@ export function isModelPerfProfile(value: unknown): value is ModelPerfProfile {
 	return (
 		(record.prefillTokensPerSecond === undefined || isPositiveFiniteNumber(record.prefillTokensPerSecond)) &&
 		(record.decodeTokensPerSecond === undefined || isPositiveFiniteNumber(record.decodeTokensPerSecond)) &&
+		(record.loadMs === undefined || isPositiveFiniteNumber(record.loadMs)) &&
 		typeof samples === "number" &&
 		Number.isInteger(samples) &&
 		samples >= 0 &&
@@ -57,7 +61,11 @@ export function isModelPerfProfile(value: unknown): value is ModelPerfProfile {
 }
 
 export function hasUsableModelPerfSample(sample: ModelPerfSample): boolean {
-	return prefillRateFromSample(sample) !== undefined || decodeRateFromSample(sample) !== undefined;
+	return (
+		prefillRateFromSample(sample) !== undefined ||
+		decodeRateFromSample(sample) !== undefined ||
+		isPositiveFiniteNumber(sample.loadMs)
+	);
 }
 
 export function updateModelPerfProfile(
@@ -67,7 +75,8 @@ export function updateModelPerfProfile(
 ): ModelPerfProfile | undefined {
 	const prefillRate = prefillRateFromSample(sample);
 	const decodeRate = decodeRateFromSample(sample);
-	if (prefillRate === undefined && decodeRate === undefined) return current;
+	const loadMs = isPositiveFiniteNumber(sample.loadMs) ? sample.loadMs : undefined;
+	if (prefillRate === undefined && decodeRate === undefined && loadMs === undefined) return current;
 
 	const previousSamples = current?.samples ?? 0;
 	return {
@@ -83,6 +92,8 @@ export function updateModelPerfProfile(
 		...(decodeRate === undefined && current?.decodeTokensPerSecond !== undefined
 			? { decodeTokensPerSecond: current.decodeTokensPerSecond }
 			: {}),
+		...(loadMs !== undefined && { loadMs: updateEwma(current?.loadMs, loadMs, previousSamples) }),
+		...(loadMs === undefined && current?.loadMs !== undefined ? { loadMs: current.loadMs } : {}),
 		samples: previousSamples + 1,
 		updatedAt: at,
 	};
@@ -90,16 +101,30 @@ export function updateModelPerfProfile(
 
 export function resolveAdaptiveStreamIdleOptions(input: AdaptiveStreamIdleInput): Partial<StreamIdleOptions> {
 	const profile = input.profile;
-	const prefillRate = profile?.prefillTokensPerSecond;
-	if (!profile || !prefillRate || profile.samples < 1 || input.promptTokens <= 0) return {};
+	const result: Partial<StreamIdleOptions> = {};
+	const localConnectDefaultMs = input.localClass
+		? Math.max(input.base.connectMs, input.base.quietIdleMs)
+		: input.base.connectMs;
+	const quietCeilingMs = Math.max(input.base.quietIdleMs, input.ceilingMs ?? DEFAULT_ADAPTIVE_STREAM_IDLE_CEILING_MS);
+	const connectCeilingMs = Math.max(localConnectDefaultMs, input.ceilingMs ?? DEFAULT_ADAPTIVE_STREAM_IDLE_CEILING_MS);
 
-	const expectedPrefillMs = (input.promptTokens / prefillRate) * 1000;
-	if (!Number.isFinite(expectedPrefillMs) || expectedPrefillMs <= 0) return {};
+	const expectedPrefillMs = expectedPrefillFromProfile(profile, input.promptTokens);
+	if (expectedPrefillMs !== undefined) {
+		const quietIdleMs = adaptiveBound(input.base.quietIdleMs, quietCeilingMs, expectedPrefillMs);
+		if (quietIdleMs > input.base.quietIdleMs) result.quietIdleMs = quietIdleMs;
+	}
 
-	const targetMs = Math.ceil(Math.max(input.base.quietIdleMs, expectedPrefillMs * 3));
-	const ceilingMs = Math.max(input.base.quietIdleMs, input.ceilingMs ?? DEFAULT_ADAPTIVE_STREAM_IDLE_CEILING_MS);
-	const quietIdleMs = Math.min(targetMs, ceilingMs);
-	return quietIdleMs > input.base.quietIdleMs ? { quietIdleMs } : {};
+	if (input.localClass) {
+		const expectedConnectWorkMs =
+			expectedPrefillMs !== undefined ? expectedPrefillMs + (profile?.loadMs ?? 0) : profile?.loadMs;
+		const connectMs =
+			expectedConnectWorkMs !== undefined
+				? adaptiveBound(localConnectDefaultMs, connectCeilingMs, expectedConnectWorkMs)
+				: localConnectDefaultMs;
+		if (connectMs > input.base.connectMs) result.connectMs = connectMs;
+	}
+
+	return result;
 }
 
 export function estimateContextPromptTokens(context: Context): number {
@@ -200,8 +225,21 @@ function isFirstTokenEvent(event: AssistantMessageEvent): boolean {
 	);
 }
 
+function expectedPrefillFromProfile(profile: ModelPerfProfile | undefined, promptTokens: number): number | undefined {
+	const prefillRate = profile?.prefillTokensPerSecond;
+	if (!profile || profile.samples < 1 || !prefillRate || promptTokens <= 0) return undefined;
+	const expectedPrefillMs = (promptTokens / prefillRate) * 1000;
+	return Number.isFinite(expectedPrefillMs) && expectedPrefillMs > 0 ? expectedPrefillMs : undefined;
+}
+
+function adaptiveBound(defaultMs: number, ceilingMs: number, expectedMs: number): number {
+	return Math.min(Math.ceil(Math.max(defaultMs, expectedMs * 3)), ceilingMs);
+}
+
 function prefillRateFromSample(sample: ModelPerfSample): number | undefined {
-	const durationMs = sample.headersToFirstTokenMs ?? sample.requestToFirstTokenMs;
+	const durationMs = isPositiveFiniteNumber(sample.headersToFirstTokenMs)
+		? sample.headersToFirstTokenMs
+		: sample.requestToFirstTokenMs;
 	return tokensPerSecond(sample.promptTokens, durationMs);
 }
 

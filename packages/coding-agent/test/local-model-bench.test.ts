@@ -80,12 +80,14 @@ function completeFor(model: string) {
 			prompt_eval_duration?: number;
 			eval_count?: number;
 			eval_duration?: number;
+			load_duration?: number;
 		};
 		ModelAdaptationStore.forAgentDir(getAgentDir()).recordPerfSample(`ollama/${model}`, {
 			promptTokens: data.prompt_eval_count,
 			completionTokens: data.eval_count,
 			requestToFirstTokenMs: data.prompt_eval_duration !== undefined ? data.prompt_eval_duration / 1e6 : undefined,
 			firstTokenToDoneMs: data.eval_duration !== undefined ? data.eval_duration / 1e6 : undefined,
+			loadMs: data.load_duration !== undefined ? data.load_duration / 1e6 : undefined,
 		});
 		let text = data.message?.content ?? "";
 		const thinkEnd = text.indexOf("</think>");

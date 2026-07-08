@@ -734,6 +734,7 @@ export class AgentSession {
 					base: { ...DEFAULT_STREAM_IDLE, ...configured },
 					profile,
 					promptTokens: estimateContextPromptTokens(context),
+					localClass: this._isWarmableLocalModel(model),
 					ceilingMs:
 						httpIdleTimeoutMs === 0
 							? DEFAULT_ADAPTIVE_STREAM_IDLE_CEILING_MS
