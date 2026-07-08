@@ -1,5 +1,11 @@
 ## [Unreleased]
 
+### Added
+- Added the function XML text tool protocol variant for MiniCPM/SGLang-style `<function name="X"><param name="k">value</param></function>` calls.
+
+### Fixed
+- Improved Ollama OpenAI-compatible context-size errors to name the model and point to `OLLAMA_CONTEXT_LENGTH` or per-model `num_ctx` instead of surfacing a bare 400.
+
 ## [0.81.15] - 2026-07-07
 
 ## [0.81.14] - 2026-07-07

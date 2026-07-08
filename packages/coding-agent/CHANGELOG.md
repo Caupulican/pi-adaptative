@@ -1,5 +1,12 @@
 ## [Unreleased]
 
+### Added
+- Added graded `/toolprobe` native capability reporting and persistence so native verdicts require both an echo probe and a task-scale read probe, while echo-only or absent native support can calibrate the text protocol.
+- Added MiniCPM5-1B to the text-protocol live acceptance fleet with function XML variant coverage.
+
+### Fixed
+- Documented the Ollama serving-context requirement for local OpenAI-compatible models.
+
 ## [0.81.15] - 2026-07-07
 
 ## [0.81.14] - 2026-07-07
