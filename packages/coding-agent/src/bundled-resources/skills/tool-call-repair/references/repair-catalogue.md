@@ -17,6 +17,24 @@ will repair; the same entry powers the repair, the teach note, the telemetry
 tag, and the docs table. Adding a repair means adding one entry plus its
 fixtures, nothing else.
 
+Registry mode names currently in force:
+
+- `nullOptionalDrop`
+- `nullRequiredBounce`
+- `jsonStringParse`
+- `jsonObjectPropertySalvage`
+- `singleObjectWrap`
+- `bareScalarWrap`
+- `emptyObjectPlaceholder`
+- `numberFromString`
+- `boolFromString`
+- `enumCaseNormalize`
+- `propertyCaseNormalize`
+- `singleElementUnwrap`
+- `stringifiedNumberInArray`
+- `bashCommandArgvJoin`
+- `bashCommandUnwrap`
+
 ### 1. null-for-optional (`nullOptionalDrop`)
 - Error signature: type mismatch at path P, received `null`, P not in the
   parent's `required` list.

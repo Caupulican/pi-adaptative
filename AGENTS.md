@@ -166,6 +166,11 @@ If the user's instructions conflict with any rule in this document, ask for expl
 
 ## Findings
 
+### 2026-07-08 · packages/ai,coding-agent · P7.5 registry/docs and repair fixture coverage closed — claude
+P7.5 is closed: the tool-repair test suite now asserts every `TOOL_REPAIR_MODE_NAMES` entry is present in the operator doc and bundled skill repair catalogue, and the R31 fixture matrix includes one repair fixture for every executable registry mode plus one bounce fixture for every registry mode. The bundled repair catalogue now lists all current registry names explicitly, including the salvage/case/array/bash modes added after the original grammar note.
+- evidence: packages/ai/test/tool-repair.test.ts:141 · packages/ai/test/tool-repair.test.ts:158 · packages/ai/test/tool-repair.test.ts:170 · packages/coding-agent/src/bundled-resources/skills/tool-call-repair/references/repair-catalogue.md:20
+- tags: tool-repair, docs, fixture-matrix, p7.5, packages/ai, packages/coding-agent
+
 ### 2026-07-08 · scripts,coding-agent · live acceptance and local bench now feed adaptive stall profiling — claude
 P5 landed: the live text-protocol acceptance harness writes scratch-session stall settings from the host/model perf profile when present, otherwise CPU-safe quiet bounds with HTTP idle disabled, so protocol correctness runs are not measuring watchdog strictness. The opt-in local model bench now records Ollama prompt/decode timing into the host adaptation store so bench runs pre-warm P2's adaptive resolver for later real sessions.
 - evidence: scripts/accept-text-protocol-live.mjs:122 · scripts/accept-text-protocol-live.mjs:141 · scripts/accept-text-protocol-live.mjs:143 · packages/coding-agent/test/local-model-bench.test.ts:84 · packages/coding-agent/test/local-model-bench.test.ts:87

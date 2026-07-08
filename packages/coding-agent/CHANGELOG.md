@@ -7,6 +7,9 @@
 - Added a runtime residency arbiter core for fitting, evicting, refusing, and reserving local model loads across runtime adapters.
 - Added local acceptance/bench perf-profile hydration so live protocol checks and opt-in local benches feed adaptive stall bounds.
 
+### Fixed
+- Documented every tool-repair registry mode in the bundled repair catalogue and covered the registry/docs link with tests.
+
 ## [0.81.16] - 2026-07-08
 
 ### Added
