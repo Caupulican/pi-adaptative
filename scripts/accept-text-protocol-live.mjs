@@ -1,28 +1,26 @@
 #!/usr/bin/env node
-import { copyFile, mkdir, mkdtemp, readFile, rm, unlink, writeFile } from "node:fs/promises";
+import { mkdir, mkdtemp, readFile, rm, unlink, writeFile } from "node:fs/promises";
 import { homedir, tmpdir } from "node:os";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
 import { spawn } from "node:child_process";
 
-const DEFAULT_MODELS = [
-	"ollama/qwen3:1.7b",
-	"ollama/gemma3:1b",
-	"ollama/hf.co/openbmb/MiniCPM5-1B-GGUF:Q8_0",
-	"openai-codex/gpt-5.5",
-];
+const MINICPM_PROVIDER = "sglang";
+const MINICPM_MODEL_ID = "openbmb/MiniCPM5-1B";
+const MINICPM_MODEL_REF = `${MINICPM_PROVIDER}/${MINICPM_MODEL_ID}`;
+const DEFAULT_MODELS = ["ollama/qwen3:1.7b", "ollama/gemma3:1b", MINICPM_MODEL_REF, "openai-codex/gpt-5.5"];
 const EXPECTED_VERDICTS = new Map([
 	["ollama/qwen3:1.7b", "native"],
 	["ollama/gemma3:1b", "text-protocol"],
-	["ollama/hf.co/openbmb/MiniCPM5-1B-GGUF:Q8_0", "text-protocol"],
+	[MINICPM_MODEL_REF, "text-protocol"],
 ]);
-const EXPECTED_VARIANTS = new Map([["ollama/hf.co/openbmb/MiniCPM5-1B-GGUF:Q8_0", "function-xml"]]);
+const EXPECTED_VARIANTS = new Map([[MINICPM_MODEL_REF, "function-xml"]]);
 const PROBE_ONLY_MODELS = new Set(["openai-codex/gpt-5.5"]);
 const TIMEOUT_MS = 180_000;
 const root = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "..");
 
 function usage() {
-	console.log(`Usage: node scripts/accept-text-protocol-live.mjs [--model <provider/model>]... [--keep-sessions]\n\nRuns C10-style scratch-session live acceptance. Bare model names are treated as ollama/<model>.\nDefault models: ${DEFAULT_MODELS.join(", ")}\nRequires local Ollama with requested Ollama models already pulled and auth for non-Ollama providers.`);
+	console.log(`Usage: node scripts/accept-text-protocol-live.mjs [--model <provider/model>]... [--keep-sessions]\n\nRuns C10-style scratch-session live acceptance. Bare model names are treated as ollama/<model>.\nDefault models: ${DEFAULT_MODELS.join(", ")}\nRequires local Ollama with requested Ollama models already pulled, auth for non-Ollama providers, and an OpenAI-compatible SGLang server for ${MINICPM_MODEL_ID} at PI_MINICPM_BASE_URL/SGLANG_BASE_URL or http://127.0.0.1:30000/v1.`);
 }
 
 function parseArgs(argv) {
@@ -68,8 +66,49 @@ async function readJsonIfExists(filePath) {
 	}
 }
 
+function miniCpmBaseUrl() {
+	return process.env.PI_MINICPM_BASE_URL || process.env.SGLANG_BASE_URL || "http://127.0.0.1:30000/v1";
+}
+
+function ensureMiniCpmFullBaseProvider(modelsConfig) {
+	// Preserve the user's configured models. The full-base MiniCPM entry is scratch-only for this
+	// acceptance run; it does not remove or replace existing Ollama/GGUF entries.
+	modelsConfig.providers ??= {};
+	modelsConfig.providers[MINICPM_PROVIDER] ??= {
+		baseUrl: miniCpmBaseUrl(),
+		api: "openai-completions",
+		apiKey: "sglang",
+		compat: {
+			supportsDeveloperRole: false,
+			supportsReasoningEffort: false,
+		},
+		models: [],
+	};
+	const provider = modelsConfig.providers[MINICPM_PROVIDER];
+	provider.baseUrl ??= miniCpmBaseUrl();
+	provider.api ??= "openai-completions";
+	provider.apiKey ??= "sglang";
+	provider.compat ??= {};
+	provider.compat.supportsDeveloperRole ??= false;
+	provider.compat.supportsReasoningEffort ??= false;
+	provider.models ??= [];
+	if (!provider.models.some((model) => model.id === MINICPM_MODEL_ID)) {
+		provider.models.push({
+			id: MINICPM_MODEL_ID,
+			name: "MiniCPM5-1B (full base)",
+			contextWindow: 131_072,
+			maxTokens: 2048,
+			reasoning: false,
+			input: ["text"],
+			cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 },
+		});
+	}
+}
+
 async function hydrateAgentDir(agentDir) {
-	await copyFile(path.join(homedir(), ".pi", "agent", "models.json"), path.join(agentDir, "models.json"));
+	const modelsConfig = await readJsonIfExists(path.join(homedir(), ".pi", "agent", "models.json"));
+	ensureMiniCpmFullBaseProvider(modelsConfig);
+	await writeFile(path.join(agentDir, "models.json"), JSON.stringify(modelsConfig, null, 2), "utf8");
 	const auth = await readJsonIfExists(path.join(homedir(), ".pi", "agent", "auth.json"));
 	auth.ollama ??= { type: "api_key", key: "ollama" };
 	await writeFile(path.join(agentDir, "auth.json"), JSON.stringify(auth), "utf8");
