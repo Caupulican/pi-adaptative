@@ -1,5 +1,18 @@
 ## [Unreleased]
 
+### Added
+- Added a local cold-start live acceptance gate for stock-stall Ollama tool-call turns.
+- Added runtime residency adapters for Ollama, pi-managed Transformers, and advisory external serves.
+
+### Changed
+- Made the pi-owned Ollama model store canonical, with `/models import` adopting user-store models by hardlink/copy instead of re-download.
+- Routed local model activation through the residency arbiter before serving or warming local models.
+
+### Fixed
+- Fixed local-class adaptive stall handling to raise cold connect bounds from measured prefill/load timing while keeping remote no-profile connect bounds unchanged.
+- Fixed local context sizing to derive GGUF metadata by architecture key/suffix instead of architecture name lists.
+- Fixed pi-managed Transformers venv setup to validate pip and interpreter coherence, repair with `ensurepip`, recreate stale venvs, and surface venv package install guidance.
+
 ## [0.81.20] - 2026-07-08
 
 ### Fixed
