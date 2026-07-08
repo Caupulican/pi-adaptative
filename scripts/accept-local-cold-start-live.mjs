@@ -1,5 +1,6 @@
 #!/usr/bin/env node
 import { spawn } from "node:child_process";
+import { existsSync } from "node:fs";
 import { mkdir, mkdtemp, readFile, rm, unlink, writeFile } from "node:fs/promises";
 import { createServer } from "node:net";
 import { homedir, tmpdir } from "node:os";
@@ -11,12 +12,40 @@ const TIMEOUT_MS = Number(process.env.PI_ACCEPT_COLD_TIMEOUT_MS ?? 900_000);
 const root = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "..");
 
 function usage() {
-	console.log(`Usage: node scripts/accept-local-cold-start-live.mjs [--model <ollama/model>] [--store <ollama-models-dir>] [--keep-session]\n\nStarts a fresh isolated Ollama serve on a random loopback port with STOCK pi stall settings, unloads the requested model, then runs one real read-tool turn through pi RPC. The turn fails if a stream stall appears.\n\nDefault model: ${DEFAULT_MODEL}\nDefault store: PI_ACCEPT_OLLAMA_MODELS or ~/.pi/agent/models/ollama`);
+	console.log(`Usage: node scripts/accept-local-cold-start-live.mjs [--model <ollama/model>] [--store <ollama-models-dir>] [--keep-session]\n\nStarts a fresh isolated Ollama serve on a random loopback port with STOCK pi stall settings, unloads the requested model, then runs one real read-tool turn through pi RPC. The turn fails if a stream stall appears.\n\nDefault model: ${DEFAULT_MODEL}\nDefault store: PI_ACCEPT_OLLAMA_MODELS, else the pi-owned store when it contains the model, else ~/.ollama/models`);
+}
+
+function agentDirFromEnv() {
+	return process.env.PI_CODING_AGENT_DIR || process.env.PI_ADAPTATIVE_CODING_AGENT_DIR || path.join(homedir(), ".pi", "agent");
+}
+
+function resolveOllamaBin() {
+	if (process.env.OLLAMA_BIN) return process.env.OLLAMA_BIN;
+	for (const candidate of [
+		path.join(agentDirFromEnv(), "runtimes", "ollama", "bin", "ollama"),
+		path.join(homedir(), ".local", "share", "ollama-dist", "bin", "ollama"),
+	]) {
+		if (existsSync(candidate)) return candidate;
+	}
+	return "ollama";
+}
+
+function manifestPathFor(storeDir, model) {
+	const [name, tag = "latest"] = model.split(":");
+	if (name.startsWith("hf.co/")) return path.join(storeDir, "manifests", ...name.split("/"), tag);
+	return path.join(storeDir, "manifests", "registry.ollama.ai", "library", name, tag);
+}
+
+function defaultStoreFor(model) {
+	if (process.env.PI_ACCEPT_OLLAMA_MODELS) return process.env.PI_ACCEPT_OLLAMA_MODELS;
+	const owned = path.join(agentDirFromEnv(), "models", "ollama");
+	if (existsSync(manifestPathFor(owned, model))) return owned;
+	return path.join(homedir(), ".ollama", "models");
 }
 
 function parseArgs(argv) {
 	let modelRef = DEFAULT_MODEL;
-	let storeDir = process.env.PI_ACCEPT_OLLAMA_MODELS || path.join(homedir(), ".pi", "agent", "models", "ollama");
+	let explicitStoreDir;
 	let keepSession = false;
 	for (let index = 0; index < argv.length; index++) {
 		const arg = argv[index];
@@ -29,7 +58,7 @@ function parseArgs(argv) {
 			continue;
 		}
 		if (arg === "--store" && argv[index + 1]) {
-			storeDir = argv[++index];
+			explicitStoreDir = argv[++index];
 			continue;
 		}
 		if (arg === "--keep-session") {
@@ -39,7 +68,8 @@ function parseArgs(argv) {
 		throw new Error(`Unknown argument: ${arg}`);
 	}
 	if (!modelRef.startsWith("ollama/")) throw new Error("Cold-start acceptance currently requires an ollama/<model> ref");
-	return { modelRef, model: modelRef.slice("ollama/".length), storeDir, keepSession };
+	const model = modelRef.slice("ollama/".length);
+	return { modelRef, model, storeDir: explicitStoreDir ?? defaultStoreFor(model), keepSession };
 }
 
 async function freePort() {
@@ -258,7 +288,7 @@ async function main() {
 	const args = parseArgs(process.argv.slice(2));
 	const port = await freePort();
 	const baseUrl = `http://127.0.0.1:${port}`;
-	const ollamaBin = process.env.OLLAMA_BIN || "ollama";
+	const ollamaBin = resolveOllamaBin();
 	const serve = spawn(ollamaBin, ["serve"], {
 		env: {
 			...process.env,
@@ -269,6 +299,11 @@ async function main() {
 		},
 		stdio: ["ignore", "ignore", "inherit"],
 	});
+	const serveStart = Promise.race([
+		new Promise((resolve) => setTimeout(resolve, 200)),
+		new Promise((_, reject) => serve.once("error", reject)),
+	]);
+	await serveStart;
 	const scratch = await mkdtemp(path.join(tmpdir(), "pi-cold-local-"));
 	const agentDir = path.join(scratch, "agent");
 	const sessionDir = path.join(scratch, "sessions");
