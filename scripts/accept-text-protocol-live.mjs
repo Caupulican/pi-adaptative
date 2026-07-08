@@ -16,7 +16,7 @@ const EXPECTED_VERDICTS = new Map([
 ]);
 const EXPECTED_VARIANTS = new Map();
 const PROBE_ONLY_MODELS = new Set(["openai-codex/gpt-5.5"]);
-const TIMEOUT_MS = 180_000;
+const TIMEOUT_MS = Number(process.env.PI_ACCEPT_LIVE_TIMEOUT_MS ?? 600_000);
 const root = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "..");
 
 function usage() {
