@@ -86,38 +86,30 @@ function chooseContextRung(args: {
 }
 
 function deriveKvShape(modelInfo: Record<string, unknown>): { elementsPerToken: number } | undefined {
-	const layers = firstPositiveNumber(modelInfo, ["llama.block_count", "qwen2.block_count", "gemma3.block_count"]);
+	const layers = modelInfoNumber(modelInfo, "block_count");
 	if (!layers) return undefined;
-	const headCountKv = firstPositiveNumber(modelInfo, [
-		"llama.attention.head_count_kv",
-		"qwen2.attention.head_count_kv",
-		"gemma3.attention.head_count_kv",
-	]);
-	const keyLength = firstPositiveNumber(modelInfo, [
-		"llama.attention.key_length",
-		"qwen2.attention.key_length",
-		"gemma3.attention.key_length",
-	]);
-	const valueLength = firstPositiveNumber(modelInfo, [
-		"llama.attention.value_length",
-		"qwen2.attention.value_length",
-		"gemma3.attention.value_length",
-	]);
+	const headCountKv = modelInfoNumber(modelInfo, "attention.head_count_kv");
+	const keyLength = modelInfoNumber(modelInfo, "attention.key_length");
+	const valueLength = modelInfoNumber(modelInfo, "attention.value_length");
 	if (headCountKv && keyLength && valueLength) {
 		return { elementsPerToken: layers * headCountKv * (keyLength + valueLength) };
 	}
-	const embeddingLength = firstPositiveNumber(modelInfo, [
-		"llama.embedding_length",
-		"qwen2.embedding_length",
-		"gemma3.embedding_length",
-	]);
+	const embeddingLength = modelInfoNumber(modelInfo, "embedding_length");
 	return embeddingLength ? { elementsPerToken: layers * embeddingLength * 2 } : undefined;
 }
 
-function firstPositiveNumber(record: Record<string, unknown>, keys: readonly string[]): number | undefined {
-	for (const key of keys) {
-		const value = record[key];
-		if (typeof value === "number" && Number.isFinite(value) && value > 0) return value;
+function modelInfoNumber(record: Record<string, unknown>, suffix: string): number | undefined {
+	const architecture = typeof record["general.architecture"] === "string" ? record["general.architecture"].trim() : "";
+	if (architecture) return positiveNumber(record[`${architecture}.${suffix}`]);
+	for (const [key, value] of Object.entries(record)) {
+		if (key.endsWith(`.${suffix}`)) {
+			const matched = positiveNumber(value);
+			if (matched) return matched;
+		}
 	}
 	return undefined;
+}
+
+function positiveNumber(value: unknown): number | undefined {
+	return typeof value === "number" && Number.isFinite(value) && value > 0 ? value : undefined;
 }
