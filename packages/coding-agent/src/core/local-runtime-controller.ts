@@ -13,8 +13,13 @@ import type { Api, AssistantMessage, Model } from "@caupulican/pi-ai";
 import type { AgentSessionEvent } from "./agent-session.ts";
 import type { RouteDecision } from "./autonomy/contracts.ts";
 import type { ExtensionUIContext } from "./extensions/index.ts";
-import { OLLAMA_PROVIDER } from "./models/local-registration.ts";
-import { type LocalRuntimeDeps, OllamaRuntime } from "./models/local-runtime.ts";
+import { HF_TRANSFORMERS_PROVIDER, OLLAMA_PROVIDER } from "./models/local-registration.ts";
+import {
+	type LocalRuntimeDeps,
+	OllamaRuntime,
+	resolveTransformersBaseUrl,
+	TransformersRuntime,
+} from "./models/local-runtime.ts";
 
 /** User-facing router tiers in ascending order — "learning" is never selected for a user turn, so
  * it has no place in the escalation ladder (#27's ensureRouteModelReady walks this forward only). */
@@ -46,6 +51,8 @@ export interface LocalRuntimeControllerDeps {
 export class LocalRuntimeController {
 	/** Lazy, cached by baseUrl so the router path and any other caller share one instance per server. */
 	private readonly _runtimes = new Map<string, OllamaRuntime>();
+	/** Lazy, cached by model+baseUrl so the router and `/models` share one sidecar handle per HF model. */
+	private readonly _transformersRuntimes = new Map<string, TransformersRuntime>();
 	/** Server URLs confirmed reachable THIS session — skips the health-check round trip on every
 	 * local-routed turn once warm. Keyed the same way as _runtimes. */
 	private readonly _confirmedUp = new Set<string>();
@@ -72,10 +79,34 @@ export class LocalRuntimeController {
 		return runtime;
 	}
 
+	getTransformersRuntime(modelId: string, baseUrl?: string): TransformersRuntime {
+		const resolvedBaseUrl = baseUrl?.replace(/\/$/, "") ?? resolveTransformersBaseUrl(modelId);
+		const key = `${modelId}\0${resolvedBaseUrl}`;
+		let runtime = this._transformersRuntimes.get(key);
+		if (!runtime) {
+			runtime = new TransformersRuntime({
+				agentDir: this.deps.agentDir,
+				modelId,
+				baseUrl: resolvedBaseUrl,
+				deps: this.deps.localRuntimeDeps,
+			});
+			this._transformersRuntimes.set(key, runtime);
+		}
+		return runtime;
+	}
+
 	/** models.json registers a local model's baseUrl as `<server>/v1` (OpenAI-compat); the runtime's
 	 * own health/boot endpoints are on the Ollama-native server root. */
 	deriveOllamaServerUrl(modelBaseUrl: string): string {
 		return modelBaseUrl.replace(/\/v1\/?$/, "");
+	}
+
+	private deriveOpenAICompatServerUrl(modelBaseUrl: string): string {
+		return modelBaseUrl.replace(/\/v1\/?$/, "");
+	}
+
+	private isManagedLocalProvider(provider: string): boolean {
+		return provider === OLLAMA_PROVIDER || provider === HF_TRANSFORMERS_PROVIDER;
 	}
 
 	/**
@@ -83,26 +114,26 @@ export class LocalRuntimeController {
 	 * cached "confirmed up" flag would be stale (the server may have died mid-session) — drop it so
 	 * the next ensure-check is a real one instead of trusting stale state.
 	 */
+	private confirmationKey(model: Model<Api>, serverUrl: string): string {
+		return model.provider === HF_TRANSFORMERS_PROVIDER ? `${serverUrl}\0${model.id}` : serverUrl;
+	}
+
 	private invalidateIfLastCallFailed(model: Model<Api>, serverUrl: string): void {
 		const lastAssistant = this.deps.getLastAssistantMessage();
 		if (
 			lastAssistant?.stopReason === "error" &&
-			lastAssistant.provider === OLLAMA_PROVIDER &&
+			lastAssistant.provider === model.provider &&
 			lastAssistant.model === model.id
 		) {
-			this._confirmedUp.delete(serverUrl);
+			this._confirmedUp.delete(this.confirmationKey(model, serverUrl));
 		}
 	}
 
 	/**
-	 * Ensure a routed model is actually reachable before the turn calls it. No-op (and free) for any
-	 * non-local model — this only ever does network/process work for the `ollama` provider. Caches a
-	 * "confirmed up this session" flag per server so a steady-state session pays the health-check
-	 * round trip once, not on every turn; invalidated above when a prior local call actually failed,
-	 * so a server that died mid-session gets re-detected rather than trusted forever. Boots via
-	 * `startReuseExisting()` — never owned storage — so the turn sees the user's OWN pulled models,
-	 * the same server `/models` commands and the user's own `ollama` CLI already talk to. Never
-	 * installs anything itself (installGuide is GUIDE MODE: printed, never executed).
+	 * Ensure a routed managed-local model is actually reachable before the turn calls it. No-op (and
+	 * free) for non-local/API models. Caches a "confirmed up this session" flag per server (and per
+	 * Transformers model) so steady-state routing pays the health-check round trip once; invalidated
+	 * above when a prior local call failed so a dead sidecar gets re-detected instead of trusted.
 	 */
 	async ensureLocalModelReady(
 		model: Model<Api>,
@@ -111,14 +142,15 @@ export class LocalRuntimeController {
 			return { ready: true, reason: "not_local" };
 		}
 		const serverUrl = this.deriveOllamaServerUrl(model.baseUrl);
+		const confirmedKey = this.confirmationKey(model, serverUrl);
 		this.invalidateIfLastCallFailed(model, serverUrl);
-		if (this._confirmedUp.has(serverUrl)) {
+		if (this._confirmedUp.has(confirmedKey)) {
 			return { ready: true, reason: "confirmed_up_cached" };
 		}
 		const runtime = this.getLocalRuntime(serverUrl);
 		const status = await runtime.detect();
 		if (status.serverUp) {
-			this._confirmedUp.add(serverUrl);
+			this._confirmedUp.add(confirmedKey);
 			return { ready: true, reason: "already_running" };
 		}
 		if (!status.binaryPath) {
@@ -126,9 +158,38 @@ export class LocalRuntimeController {
 		}
 		const started = await runtime.startReuseExisting();
 		if (started.started) {
-			this._confirmedUp.add(serverUrl);
+			this._confirmedUp.add(confirmedKey);
 		}
 		return { ready: started.started, reason: started.reason };
+	}
+
+	async ensureTransformersModelReady(
+		model: Model<Api>,
+	): Promise<{ ready: boolean; reason: string; installGuide?: string[] }> {
+		if (model.provider !== HF_TRANSFORMERS_PROVIDER) {
+			return { ready: true, reason: "not_transformers" };
+		}
+		const serverUrl = this.deriveOpenAICompatServerUrl(model.baseUrl);
+		const confirmedKey = this.confirmationKey(model, serverUrl);
+		this.invalidateIfLastCallFailed(model, serverUrl);
+		if (this._confirmedUp.has(confirmedKey)) {
+			return { ready: true, reason: "confirmed_up_cached" };
+		}
+		const runtime = this.getTransformersRuntime(model.id, serverUrl);
+		const status = await runtime.detect();
+		if (status.serverUp) {
+			this._confirmedUp.add(confirmedKey);
+			return { ready: true, reason: "already_running" };
+		}
+		if (!status.runtimeInstalled) {
+			return { ready: false, reason: "runtime_missing", installGuide: runtime.installGuide() };
+		}
+		const started = await runtime.start();
+		if (started.started || started.reason === "already_running") {
+			this._confirmedUp.add(confirmedKey);
+			return { ready: true, reason: started.reason };
+		}
+		return { ready: false, reason: started.reason };
 	}
 
 	/**
@@ -183,6 +244,53 @@ export class LocalRuntimeController {
 		return this.ensureLocalModelReady(model);
 	}
 
+	private async maybeInstallTransformersOnConsent(
+		model: Model<Api>,
+		readiness: { ready: boolean; reason: string; installGuide?: string[] },
+	): Promise<{ ready: boolean; reason: string; installGuide?: string[]; installAttemptError?: string }> {
+		const ui = this.deps.getUIContext();
+		if (!ui || readiness.ready || readiness.reason !== "runtime_missing") return readiness;
+
+		const modelLabel = this.deps.formatModel(model);
+		this.deps.emit({ type: "routing_end" });
+		let confirmed: boolean;
+		try {
+			confirmed = await ui.confirm(
+				"Install Transformers runtime?",
+				`The Hugging Face model "${modelLabel}" needs a pi-managed Python venv with Transformers ` +
+					"and CPU PyTorch before it can run. Pi will install those packages into its own runtimes " +
+					"folder, download the model into a pi-owned Hugging Face cache, and leave system Python, " +
+					"your Ollama models, and your user HF cache untouched. Install it now?",
+				{ timeout: OLLAMA_INSTALL_CONFIRM_TIMEOUT_MS },
+			);
+		} finally {
+			this.deps.emit({ type: "routing_start" });
+		}
+		if (!confirmed) return readiness;
+
+		const serverUrl = this.deriveOpenAICompatServerUrl(model.baseUrl);
+		const runtime = this.getTransformersRuntime(model.id, serverUrl);
+		let installResult: { ok: boolean; error?: string };
+		try {
+			installResult = await runtime.installManaged((status) => ui.setStatus("transformers-install", status));
+		} finally {
+			ui.setStatus("transformers-install", undefined);
+		}
+		if (!installResult.ok) {
+			return { ready: false, reason: "install_failed", installAttemptError: installResult.error };
+		}
+		let downloadResult: { ok: boolean; error?: string };
+		try {
+			downloadResult = await runtime.downloadModel((status) => ui.setStatus("transformers-download", status));
+		} finally {
+			ui.setStatus("transformers-download", undefined);
+		}
+		if (!downloadResult.ok) {
+			return { ready: false, reason: "download_failed", installAttemptError: downloadResult.error };
+		}
+		return this.ensureTransformersModelReady(model);
+	}
+
 	/**
 	 * Router-swap gate (#27): a turn routed to a local model (any tier, including an executor-direct
 	 * route — both carry tier "cheap") must not dead-end the turn just because ollama isn't up.
@@ -204,11 +312,16 @@ export class LocalRuntimeController {
 		resolved: { decision: RouteDecision; model: Model<Api> } | undefined,
 	): Promise<{ decision: RouteDecision; model: Model<Api> } | undefined> {
 		let current = resolved;
-		while (current && current.model.provider === OLLAMA_PROVIDER) {
+		while (current && this.isManagedLocalProvider(current.model.provider)) {
 			let readiness: { ready: boolean; reason: string; installGuide?: string[]; installAttemptError?: string } =
-				await this.ensureLocalModelReady(current.model);
+				current.model.provider === OLLAMA_PROVIDER
+					? await this.ensureLocalModelReady(current.model)
+					: await this.ensureTransformersModelReady(current.model);
 			if (!readiness.ready) {
-				readiness = await this.maybeInstallOllamaOnConsent(current.model, readiness);
+				readiness =
+					current.model.provider === OLLAMA_PROVIDER
+						? await this.maybeInstallOllamaOnConsent(current.model, readiness)
+						: await this.maybeInstallTransformersOnConsent(current.model, readiness);
 			}
 			if (readiness.ready) return current;
 
@@ -227,11 +340,19 @@ export class LocalRuntimeController {
 			}
 
 			const modelLabel = this.deps.formatModel(current.model);
+			const localRuntimeName = current.model.provider === OLLAMA_PROVIDER ? "ollama" : "Transformers";
 			const whyText = readiness.installAttemptError
 				? `pi tried to install it just now, but the install attempt failed: ${readiness.installAttemptError}`
 				: readiness.installGuide
-					? ["the ollama binary is not installed.", ...readiness.installGuide].join("\n")
-					: `its server is not reachable (${readiness.reason}) — check that ollama is running.`;
+					? [
+							current.model.provider === OLLAMA_PROVIDER
+								? "the ollama binary is not installed."
+								: "the pi-managed Transformers runtime is not installed.",
+							...readiness.installGuide,
+						].join("\n")
+					: current.model.provider === OLLAMA_PROVIDER
+						? `its ${localRuntimeName} server is not reachable (${readiness.reason}) — check that ollama is running.`
+						: `its ${localRuntimeName} server is not reachable (${readiness.reason}) — check that the runtime is running.`;
 			const fallbackText = escalated
 				? `Falling back to the ${escalated.tier} tier for this turn.`
 				: "No other tier is configured — falling back to the session's default model.";

@@ -3,9 +3,9 @@ import type { FitnessRole } from "../../modes/interactive/components/fitness-rol
 /**
  * Curated local-model suggestions: a starting roster validated during pi-adaptative's own
  * small-model research so a user does not have to know WHICH model fits WHICH role. Each entry is
- * a pull ref (accepted by /models add) plus the role it was validated for and whether it can call
- * tools (Ternary-Bonsai GGUFs ship without a tool-calling template, so they are lane/brain models,
- * never executors).
+ * an install ref (accepted by /models add) plus the role it was validated for and whether it can use
+ * tools. Native tool-calling remains preferred when it works; text-protocol models are listed only
+ * when their runtime is pi-managed and the fitness/probe path can calibrate that fallback.
  *
  * Honesty: these are SUGGESTIONS, not guarantees. Fitness is a property of the model AND the host
  * hardware, so no per-model score is baked in here — `/models add` auto-probes on the actual
@@ -21,7 +21,7 @@ export interface ModelSuggestion {
 	pullRef: string;
 	/** Role this model was validated/shaped for. */
 	role: string;
-	/** True if the model has native tool-calling (required for the executor role). */
+	/** True if the model can use tools after host-local probing/calibration (required for executor). */
 	toolCalling: boolean;
 	/** The /fitness assignment target this suggestion maps to, when there is a single-setting slot. */
 	assignRole?: FitnessRole;
@@ -49,6 +49,16 @@ export const DEFAULT_MODEL_SUGGESTIONS: readonly ModelSuggestion[] = [
 		assignRole: "executor",
 		rationale:
 			"Fastest local option; on harder requests it can narrate without executing, so prefer it only when speed dominates and requests are simple.",
+	},
+	{
+		name: "MiniCPM5-1B (full-base)",
+		pullRef: "hf.co/openbmb/MiniCPM5-1B",
+		role: "Full-base Transformers executor / tiny local muscle",
+		toolCalling: true,
+		assignRole: "executor",
+		rationale:
+			"Full-base Hugging Face MiniCPM5-1B target: pi installs an isolated Transformers runtime and probes native tool-calling first, then calibrates the text protocol only if native tool calls do not work.",
+		note: "Not GGUF/quantized: weights and Python deps land under pi-owned runtime/cache directories, separate from Ollama and system Python.",
 	},
 	{
 		name: "FastContext-1.0-4B",

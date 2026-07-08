@@ -4,10 +4,10 @@ import { normalizeModelSource } from "../src/core/models/model-ref.ts";
 import { FITNESS_ROLE_ORDER } from "../src/modes/interactive/components/fitness-role-selector.ts";
 
 describe("default model suggestions", () => {
-	it("every suggested pullRef normalizes to a usable local source (/models add accepts it)", () => {
+	it("every suggested pullRef normalizes to an installable local source (/models add accepts it)", () => {
 		for (const suggestion of DEFAULT_MODEL_SUGGESTIONS) {
 			const source = normalizeModelSource(suggestion.pullRef);
-			expect(source.type, `${suggestion.name}: ${suggestion.pullRef}`).toBe("local");
+			expect(["local", "transformers"], `${suggestion.name}: ${suggestion.pullRef}`).toContain(source.type);
 		}
 	});
 
@@ -28,7 +28,8 @@ describe("default model suggestions", () => {
 
 	it("keeps FastContext and Ornith immediately after the executor entries", () => {
 		const fastContextIndex = DEFAULT_MODEL_SUGGESTIONS.findIndex((s) => s.name === "FastContext-1.0-4B");
-		expect(fastContextIndex).toBe(2);
+		const firstNonExecutorIndex = DEFAULT_MODEL_SUGGESTIONS.findIndex((s) => s.assignRole !== "executor");
+		expect(fastContextIndex).toBe(firstNonExecutorIndex);
 		expect(DEFAULT_MODEL_SUGGESTIONS[fastContextIndex]).toMatchObject({
 			pullRef: "hf.co/KikoCis/FastContext-1.0-4B-longctx-imatrix-GGUF:fastcontext4b.Q4_K_M.imx.gguf",
 			assignRole: "scout",
@@ -67,6 +68,8 @@ describe("default model suggestions", () => {
 		expect(text).toContain("qwen3:1.7b → Toolkit executor");
 		expect(text).toContain("FastContext-1.0-4B → Repository scout");
 		expect(text).toContain("Ornith-1.0-9B → Agentic-coding worker");
+		expect(text).toContain("MiniCPM5-1B (full-base) → Full-base Transformers executor");
+		expect(text).toContain("/models add hf.co/openbmb/MiniCPM5-1B");
 		expect(text).toContain("/models add hf.co/prism-ml/Ternary-Bonsai-4B-gguf");
 		expect(text).toContain("[no tool-calling]");
 		expect(text).toContain("probe on YOUR hardware with /fitness");

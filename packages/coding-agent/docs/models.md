@@ -6,6 +6,7 @@ Add custom providers and models (Ollama, vLLM, LM Studio, proxies) via `~/.pi/ag
 
 - [Minimal Example](#minimal-example)
 - [Full Example](#full-example)
+- [Curated Local Suggestions](#curated-local-suggestions)
 - [Ollama serving context](#ollama-serving-context)
 - [Supported APIs](#supported-apis)
 - [Provider Configuration](#provider-configuration)
@@ -39,10 +40,13 @@ The `apiKey` is required but Ollama ignores it, so any value works.
 
 ## Curated Local Suggestions
 
-Run `/models suggest` to choose from pi's curated local-model roster. Pi pulls the selected model through the managed Ollama runtime, probes it with `/fitness` on your hardware, then offers the shaped role assignment.
+Run `/models suggest` to choose from pi's curated local-model roster. Pi installs the selected model through the matching managed local runtime, probes it with `/fitness` on your hardware, then offers the shaped role assignment.
+
+Confirmed from source: Ollama/GGUF suggestions install through pi's managed Ollama runtime. Curated full-base Hugging Face suggestions install through the pi-managed Transformers runtime, which creates a venv under `~/.pi/agent/runtimes/hf-transformers`, caches HF weights under `~/.pi/agent/models/huggingface`, and registers models under provider `pi-hf-transformers` with OpenAI-compatible `/v1` endpoints. This keeps full-base HF models separate from system Python, user HF cache, and Ollama model storage.
 
 Current baked suggestions include:
 
+- MiniCPM5-1B (full-base) → full-base Transformers executor / tiny local muscle. Install with `/models add hf.co/openbmb/MiniCPM5-1B`. This is the full-base Hugging Face model, not a GGUF/quantized artifact. Pi probes native tool-calling first and uses the text tool protocol only if native tool calls do not work.
 - FastContext-1.0-4B → repository scout (`context_scout`): the model the scout lane is built around, not a pi benchmark claim. Q4 is about 2.5 GB weights; expect about 5-6 GB peak with 32K-64K KV. Assignment writes `scout.model` and enables `scout.enabled` only after the `scout_auto` exam passes.
 - Ornith-1.0-9B → agentic-coding worker / router cheap tier: an external candidate, not from pi's own validation research. Q4_K_M is about 5.6 GB weights; expect about 7-8 GB peak with KV, and run it as the only local model on a 10 GB box. `/fitness` on your hardware is the validator.
 

@@ -1,9 +1,11 @@
 import { type ChildProcess, spawn } from "node:child_process";
-import { existsSync, mkdirSync } from "node:fs";
+import { createWriteStream, existsSync, mkdirSync, rmSync } from "node:fs";
 import { homedir, arch as osArch, platform as osPlatform } from "node:os";
 import { delimiter, join } from "node:path";
 import type { Readable, Writable } from "node:stream";
+import { pipeline } from "node:stream/promises";
 import * as nodeZlib from "node:zlib";
+import { getBundledResourcesDir } from "../../config.ts";
 import { spawnProcess, spawnProcessSync, waitForChildProcess } from "../../utils/child-process.ts";
 
 /**
@@ -81,6 +83,20 @@ export function resolveOllamaAsset(plat: string, architecture: string): OllamaRe
 	return undefined;
 }
 
+export interface RuntimeCommandResult {
+	ok: boolean;
+	stdout: string;
+	stderr: string;
+	code?: number | null;
+	error?: string;
+}
+
+export type RuntimeCommandRunner = (
+	command: string,
+	args: string[],
+	options?: { env?: NodeJS.ProcessEnv; onOutput?: (chunk: string) => void },
+) => Promise<RuntimeCommandResult>;
+
 export interface LocalRuntimeDeps {
 	fetchFn?: typeof fetch;
 	spawnFn?: (
@@ -92,9 +108,14 @@ export interface LocalRuntimeDeps {
 	envPath?: string;
 	homeDir?: string;
 	sleepFn?: (ms: number) => Promise<void>;
-	/** os.platform()/os.arch() equivalents — injectable so asset resolution is testable per platform. */
+	/** os.platform()/os.arch() equivalents — injectable so asset/runtime resolution is testable per platform. */
 	platform?: () => string;
 	arch?: () => string;
+	/** Runs a runtime-management command (Python venv/pip/download probe). Injectable so tests never
+	 * install packages or hit the network. */
+	runCommand?: RuntimeCommandRunner;
+	/** Override for bundled runtime helper scripts, used by tests and source/binary packaging checks. */
+	transformersServerScriptPath?: string;
 	/** Node's built-in zstd decompress transform, when THIS runtime's node:zlib has it — undefined
 	 * forces the system-zstd fallback. Injectable so tests can force either path deterministically
 	 * instead of depending on whatever Node happens to be running the test. */
@@ -115,6 +136,72 @@ const DEFAULT_BASE_URL = "http://127.0.0.1:11434";
 const HEALTH_TIMEOUT_MS = 2_000;
 const START_POLL_ATTEMPTS = 20;
 const START_POLL_INTERVAL_MS = 500;
+const TRANSFORMERS_PORT_BASE = 18_100;
+const TRANSFORMERS_PORT_SPAN = 1_000;
+const TRANSFORMERS_START_POLL_ATTEMPTS = 240;
+const TRANSFORMERS_RUNTIME_DIR_NAME = "hf-transformers";
+const TRANSFORMERS_VENV_DIR_NAME = "venv";
+const TRANSFORMERS_SERVER_RELATIVE_PATH = join("runtimes", "hf-transformers-openai-server.py");
+const TRANSFORMERS_PINNED_PACKAGES = ["transformers==5.13.0", "huggingface-hub==1.22.0", "safetensors==0.8.0"];
+const TORCH_PINNED_VERSION = "2.12.1";
+
+async function runCommandDefault(
+	command: string,
+	args: string[],
+	options: { env?: NodeJS.ProcessEnv; onOutput?: (chunk: string) => void } = {},
+): Promise<RuntimeCommandResult> {
+	try {
+		const proc = spawnProcess(command, args, {
+			stdio: ["ignore", "pipe", "pipe"],
+			env: options.env ? { ...process.env, ...options.env } : process.env,
+		});
+		let stdout = "";
+		let stderr = "";
+		proc.stdout.setEncoding("utf8");
+		proc.stderr.setEncoding("utf8");
+		proc.stdout.on("data", (chunk: string) => {
+			stdout += chunk;
+			options.onOutput?.(chunk);
+		});
+		proc.stderr.on("data", (chunk: string) => {
+			stderr += chunk;
+			options.onOutput?.(chunk);
+		});
+		const code = await waitForChildProcess(proc);
+		return {
+			ok: code === 0,
+			stdout,
+			stderr,
+			code,
+			...(code === 0 ? {} : { error: stderr.trim() || stdout.trim() || `exit code ${code ?? "unknown"}` }),
+		};
+	} catch (error) {
+		return {
+			ok: false,
+			stdout: "",
+			stderr: "",
+			error: error instanceof Error ? error.message : String(error),
+		};
+	}
+}
+
+function sanitizeCommandOutput(value: string | undefined): string {
+	return value?.trim().split("\n").slice(-3).join("\n") || "unknown error";
+}
+
+function hashString(value: string): number {
+	let hash = 2_166_136_261;
+	for (let index = 0; index < value.length; index++) {
+		hash ^= value.charCodeAt(index);
+		hash = Math.imul(hash, 16_777_619) >>> 0;
+	}
+	return hash;
+}
+
+export function resolveTransformersBaseUrl(modelId: string): string {
+	const port = TRANSFORMERS_PORT_BASE + (hashString(modelId) % TRANSFORMERS_PORT_SPAN);
+	return `http://127.0.0.1:${port}`;
+}
 
 export class OllamaRuntime {
 	private readonly _agentDir: string;
@@ -330,8 +417,6 @@ export class OllamaRuntime {
 
 	private async _extractZip(input: NodeJS.ReadableStream, destDir: string): Promise<{ ok: boolean; error?: string }> {
 		// Zip's central directory needs seekable file access — buffer to a temp file first.
-		const { createWriteStream } = await import("node:fs");
-		const { pipeline } = await import("node:stream/promises");
 		const zipPath = join(destDir, "..", `ollama-download-${process.pid}-${Date.now()}.zip`);
 		await pipeline(input as unknown as Readable, createWriteStream(zipPath));
 		try {
@@ -345,7 +430,6 @@ export class OllamaRuntime {
 			return { ok: true };
 		} finally {
 			try {
-				const { rmSync } = await import("node:fs");
 				rmSync(zipPath, { force: true });
 			} catch {
 				// best-effort cleanup
@@ -504,5 +588,268 @@ export class OllamaRuntime {
 		} catch (error) {
 			return { ok: false, error: error instanceof Error ? error.message : String(error) };
 		}
+	}
+}
+
+export interface TransformersRuntimeStatus {
+	runtimeInstalled: boolean;
+	serverUp: boolean;
+	baseUrl: string;
+	modelId: string;
+	venvDir: string;
+	cacheDir: string;
+	serverScriptPath: string;
+}
+
+export class TransformersRuntime {
+	private readonly _agentDir: string;
+	private readonly _modelId: string;
+	private readonly _baseUrl: string;
+	private readonly _fetch: typeof fetch;
+	private readonly _spawn: NonNullable<LocalRuntimeDeps["spawnFn"]>;
+	private readonly _exists: (path: string) => boolean;
+	private readonly _sleep: (ms: number) => Promise<void>;
+	private readonly _platform: () => string;
+	private readonly _runCommand: RuntimeCommandRunner;
+	private readonly _serverScriptPath: string;
+	private _proc?: Pick<ChildProcess, "pid" | "kill" | "unref" | "on">;
+
+	constructor(args: { agentDir: string; modelId: string; baseUrl?: string; deps?: LocalRuntimeDeps }) {
+		this._agentDir = args.agentDir;
+		this._modelId = args.modelId;
+		this._baseUrl = args.baseUrl?.replace(/\/$/, "") ?? resolveTransformersBaseUrl(args.modelId);
+		this._fetch = args.deps?.fetchFn ?? fetch;
+		this._spawn = args.deps?.spawnFn ?? ((command, argv, options) => spawn(command, argv, { env: options.env }));
+		this._exists = args.deps?.existsFn ?? existsSync;
+		this._sleep = args.deps?.sleepFn ?? ((ms) => new Promise((resolve) => setTimeout(resolve, ms)));
+		this._platform = args.deps?.platform ?? osPlatform;
+		this._runCommand = args.deps?.runCommand ?? runCommandDefault;
+		this._serverScriptPath =
+			args.deps?.transformersServerScriptPath ?? join(getBundledResourcesDir(), TRANSFORMERS_SERVER_RELATIVE_PATH);
+	}
+
+	get baseUrl(): string {
+		return this._baseUrl;
+	}
+
+	get modelId(): string {
+		return this._modelId;
+	}
+
+	get runtimeDir(): string {
+		return join(this._agentDir, "runtimes", TRANSFORMERS_RUNTIME_DIR_NAME);
+	}
+
+	get venvDir(): string {
+		return join(this.runtimeDir, TRANSFORMERS_VENV_DIR_NAME);
+	}
+
+	get cacheDir(): string {
+		return join(this._agentDir, "models", "huggingface");
+	}
+
+	get pythonPath(): string {
+		return this._platform() === "win32"
+			? join(this.venvDir, "Scripts", "python.exe")
+			: join(this.venvDir, "bin", "python");
+	}
+
+	private get serverPort(): string {
+		const parsed = new URL(this._baseUrl);
+		return parsed.port || (parsed.protocol === "https:" ? "443" : "80");
+	}
+
+	private get serverHost(): string {
+		return new URL(this._baseUrl).hostname;
+	}
+
+	private runtimeEnv(): NodeJS.ProcessEnv {
+		const venvBin = this._platform() === "win32" ? join(this.venvDir, "Scripts") : join(this.venvDir, "bin");
+		return {
+			...process.env,
+			VIRTUAL_ENV: this.venvDir,
+			PATH: `${venvBin}${delimiter}${process.env.PATH ?? ""}`,
+			PYTHONNOUSERSITE: "1",
+			HF_HOME: this.cacheDir,
+			HUGGINGFACE_HUB_CACHE: join(this.cacheDir, "hub"),
+			TRANSFORMERS_CACHE: join(this.cacheDir, "transformers"),
+			HF_HUB_DISABLE_TELEMETRY: "1",
+		};
+	}
+
+	private async serverUp(): Promise<boolean> {
+		try {
+			const response = await this._fetch(`${this._baseUrl}/health`, {
+				signal: AbortSignal.timeout(HEALTH_TIMEOUT_MS),
+			});
+			if (!response.ok) return false;
+			const body = (await response.json().catch(() => undefined)) as { model?: unknown } | undefined;
+			return body?.model === this._modelId;
+		} catch {
+			return false;
+		}
+	}
+
+	async detect(): Promise<TransformersRuntimeStatus> {
+		return {
+			runtimeInstalled: this._exists(this.pythonPath),
+			serverUp: await this.serverUp(),
+			baseUrl: this._baseUrl,
+			modelId: this._modelId,
+			venvDir: this.venvDir,
+			cacheDir: this.cacheDir,
+			serverScriptPath: this._serverScriptPath,
+		};
+	}
+
+	private pythonCandidates(): Array<{ command: string; args: string[] }> {
+		return this._platform() === "win32"
+			? [
+					{ command: "py", args: ["-3"] },
+					{ command: "python", args: [] },
+				]
+			: [
+					{ command: "python3", args: [] },
+					{ command: "python", args: [] },
+				];
+	}
+
+	private async findPython(): Promise<{ command: string; args: string[] } | undefined> {
+		for (const candidate of this.pythonCandidates()) {
+			const result = await this._runCommand(candidate.command, [...candidate.args, "--version"]);
+			if (result.ok) return candidate;
+		}
+		return undefined;
+	}
+
+	private torchInstallArgs(): string[] {
+		if (this._platform() === "darwin") {
+			return ["-m", "pip", "install", `torch==${TORCH_PINNED_VERSION}`];
+		}
+		return [
+			"-m",
+			"pip",
+			"install",
+			`torch==${TORCH_PINNED_VERSION}+cpu`,
+			"--index-url",
+			"https://download.pytorch.org/whl/cpu",
+		];
+	}
+
+	private async runPython(args: string[], onProgress?: (status: string) => void): Promise<RuntimeCommandResult> {
+		return this._runCommand(this.pythonPath, args, {
+			env: this.runtimeEnv(),
+			onOutput: onProgress
+				? (chunk) => {
+						const line = chunk.trim();
+						if (line) onProgress(line);
+					}
+				: undefined,
+		});
+	}
+
+	async installManaged(onProgress?: (status: string) => void): Promise<{ ok: boolean; error?: string }> {
+		mkdirSync(this.runtimeDir, { recursive: true });
+		mkdirSync(this.cacheDir, { recursive: true });
+		if (!this._exists(this.pythonPath)) {
+			const python = await this.findPython();
+			if (!python) return { ok: false, error: "python-missing" };
+			onProgress?.(`creating isolated Python venv at ${this.venvDir}`);
+			const venv = await this._runCommand(python.command, [...python.args, "-m", "venv", this.venvDir]);
+			if (!venv.ok) return { ok: false, error: `venv-fail: ${sanitizeCommandOutput(venv.error ?? venv.stderr)}` };
+		}
+		if (!this._exists(this.pythonPath)) {
+			return { ok: false, error: `venv-fail: ${this.pythonPath} was not created` };
+		}
+
+		onProgress?.("upgrading pip inside pi-managed venv");
+		const pip = await this.runPython(["-m", "pip", "install", "--upgrade", "pip"], onProgress);
+		if (!pip.ok) return { ok: false, error: `pip-upgrade-fail: ${sanitizeCommandOutput(pip.error ?? pip.stderr)}` };
+
+		onProgress?.("installing pinned Transformers runtime packages");
+		const transformers = await this.runPython(["-m", "pip", "install", ...TRANSFORMERS_PINNED_PACKAGES], onProgress);
+		if (!transformers.ok) {
+			return {
+				ok: false,
+				error: `transformers-install-fail: ${sanitizeCommandOutput(transformers.error ?? transformers.stderr)}`,
+			};
+		}
+
+		onProgress?.("installing pinned CPU PyTorch backend");
+		const torch = await this.runPython(this.torchInstallArgs(), onProgress);
+		if (!torch.ok)
+			return { ok: false, error: `torch-install-fail: ${sanitizeCommandOutput(torch.error ?? torch.stderr)}` };
+
+		const verify = await this.runPython([
+			"-c",
+			"import torch, transformers, huggingface_hub; print(transformers.__version__)",
+		]);
+		if (!verify.ok)
+			return { ok: false, error: `verify-fail: ${sanitizeCommandOutput(verify.error ?? verify.stderr)}` };
+		return { ok: true };
+	}
+
+	async downloadModel(onProgress?: (status: string) => void): Promise<{ ok: boolean; error?: string }> {
+		if (!this._exists(this.pythonPath)) return { ok: false, error: "runtime-missing" };
+		if (!this._exists(this._serverScriptPath))
+			return { ok: false, error: `server-script-missing: ${this._serverScriptPath}` };
+		mkdirSync(this.cacheDir, { recursive: true });
+		onProgress?.(`downloading ${this._modelId} into ${this.cacheDir}`);
+		const result = await this.runPython(
+			[this._serverScriptPath, "--model-id", this._modelId, "--cache-dir", this.cacheDir, "--download-only"],
+			onProgress,
+		);
+		return result.ok
+			? { ok: true }
+			: { ok: false, error: `download-fail: ${sanitizeCommandOutput(result.error ?? result.stderr)}` };
+	}
+
+	async start(): Promise<{ started: boolean; reason: string }> {
+		if (await this.serverUp()) return { started: false, reason: "already_running" };
+		if (!this._exists(this.pythonPath)) return { started: false, reason: "runtime_missing" };
+		if (!this._exists(this._serverScriptPath)) return { started: false, reason: "server_script_missing" };
+		mkdirSync(this.cacheDir, { recursive: true });
+		const env = this.runtimeEnv();
+		this._proc = this._spawn(
+			this.pythonPath,
+			[
+				this._serverScriptPath,
+				"--model-id",
+				this._modelId,
+				"--host",
+				this.serverHost,
+				"--port",
+				this.serverPort,
+				"--cache-dir",
+				this.cacheDir,
+			],
+			{ env },
+		);
+		this._proc.unref?.();
+		for (let attempt = 0; attempt < TRANSFORMERS_START_POLL_ATTEMPTS; attempt++) {
+			if (await this.serverUp()) return { started: true, reason: "started" };
+			await this._sleep(START_POLL_INTERVAL_MS);
+		}
+		this.stop();
+		return { started: false, reason: "health_check_timeout" };
+	}
+
+	stop(): { stopped: boolean } {
+		if (!this._proc) return { stopped: false };
+		this._proc.kill();
+		this._proc = undefined;
+		return { stopped: true };
+	}
+
+	installGuide(): string[] {
+		return [
+			"Hugging Face Transformers runtime is not installed for this model.",
+			`Pi can install it into its own venv at ${this.venvDir} and cache weights under ${this.cacheDir}.`,
+			"Manual equivalent:",
+			`  python3 -m venv ${this.venvDir}`,
+			`  ${this.pythonPath} -m pip install --upgrade pip`,
+			`  ${this.pythonPath} -m pip install ${TRANSFORMERS_PINNED_PACKAGES.join(" ")}`,
+			`  ${this.pythonPath} ${this.torchInstallArgs().join(" ")}`,
+		];
 	}
 }

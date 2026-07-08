@@ -15,10 +15,27 @@ describe("normalizeModelSource", () => {
 		expect(normalizeModelSource("hf.co/org/repo")).toEqual({ type: "local", pullRef: "hf.co/org/repo" });
 	});
 
-	it("normalizes full HuggingFace URLs to hf.co refs", () => {
+	it("routes curated full-base Hugging Face models to the pi-managed Transformers runtime", () => {
+		expect(normalizeModelSource("hf.co/openbmb/MiniCPM5-1B")).toEqual({
+			type: "transformers",
+			modelId: "openbmb/MiniCPM5-1B",
+			ref: "hf.co/openbmb/MiniCPM5-1B",
+		});
+		expect(normalizeModelSource("hf.co/openbmb/MiniCPM5-1B:Q8_0")).toEqual({
+			type: "local",
+			pullRef: "hf.co/openbmb/MiniCPM5-1B:Q8_0",
+		});
+	});
+
+	it("normalizes full HuggingFace URLs to the matching local runtime ref", () => {
 		expect(normalizeModelSource("https://huggingface.co/prism-ml/Ternary-Bonsai-1.7B-gguf/tree/main")).toEqual({
 			type: "local",
 			pullRef: "hf.co/prism-ml/Ternary-Bonsai-1.7B-gguf",
+		});
+		expect(normalizeModelSource("https://huggingface.co/openbmb/MiniCPM5-1B/tree/main")).toEqual({
+			type: "transformers",
+			modelId: "openbmb/MiniCPM5-1B",
+			ref: "hf.co/openbmb/MiniCPM5-1B",
 		});
 	});
 

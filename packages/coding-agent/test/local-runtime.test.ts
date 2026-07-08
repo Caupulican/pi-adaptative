@@ -1,5 +1,11 @@
 import { describe, expect, it, vi } from "vitest";
-import { OllamaRuntime, resolveOllamaAsset } from "../src/core/models/local-runtime.ts";
+import {
+	OllamaRuntime,
+	type RuntimeCommandRunner,
+	resolveOllamaAsset,
+	resolveTransformersBaseUrl,
+	TransformersRuntime,
+} from "../src/core/models/local-runtime.ts";
 
 function ndjsonResponse(lines: object[]): Response {
 	const body = lines.map((line) => JSON.stringify(line)).join("\n");
@@ -27,6 +33,78 @@ describe("resolveOllamaAsset", () => {
 
 	it("returns undefined for an unsupported platform", () => {
 		expect(resolveOllamaAsset("sunos", "x64")).toBeUndefined();
+	});
+});
+
+describe("TransformersRuntime", () => {
+	it("derives stable localhost base URLs per model without using Ollama's port", () => {
+		const first = resolveTransformersBaseUrl("openbmb/MiniCPM5-1B");
+		expect(first).toBe(resolveTransformersBaseUrl("openbmb/MiniCPM5-1B"));
+		expect(first).toMatch(/^http:\/\/127\.0\.0\.1:18\d\d\d$/);
+		expect(first).not.toBe("http://127.0.0.1:11434");
+	});
+
+	it("installs Transformers into a pi-owned venv with pinned CPU packages", async () => {
+		const agentDir = `${process.cwd()}/.scratch-transformers-runtime-install`;
+		let venvCreated = false;
+		const commands: Array<{ command: string; args: string[] }> = [];
+		const runCommand: RuntimeCommandRunner = async (command, args) => {
+			commands.push({ command, args });
+			if (args.includes("venv")) venvCreated = true;
+			return { ok: true, stdout: "", stderr: "" };
+		};
+		const runtime = new TransformersRuntime({
+			agentDir,
+			modelId: "openbmb/MiniCPM5-1B",
+			deps: {
+				runCommand,
+				existsFn: (path) => venvCreated && path === `${agentDir}/runtimes/hf-transformers/venv/bin/python`,
+				platform: () => "linux",
+			},
+		});
+
+		await expect(runtime.installManaged()).resolves.toEqual({ ok: true });
+		expect(commands[0]).toEqual({ command: "python3", args: ["--version"] });
+		expect(commands.some((entry) => entry.args.join(" ").includes("transformers==5.13.0"))).toBe(true);
+		expect(commands.some((entry) => entry.args.join(" ").includes("torch==2.12.1+cpu"))).toBe(true);
+		expect(commands.some((entry) => entry.args.join(" ").includes("https://download.pytorch.org/whl/cpu"))).toBe(
+			true,
+		);
+	});
+
+	it("starts the bundled sidecar with pi-owned Hugging Face cache env", async () => {
+		let up = false;
+		let serveEnv: NodeJS.ProcessEnv | undefined;
+		let serveArgs: string[] = [];
+		const agentDir = `${process.cwd()}/.scratch-transformers-runtime-start`;
+		const runtime = new TransformersRuntime({
+			agentDir,
+			modelId: "openbmb/MiniCPM5-1B",
+			baseUrl: "http://127.0.0.1:18123",
+			deps: {
+				existsFn: (path) =>
+					path === `${agentDir}/runtimes/hf-transformers/venv/bin/python` || path === "/tmp/server.py",
+				transformersServerScriptPath: "/tmp/server.py",
+				sleepFn: async () => {},
+				fetchFn: async () =>
+					new Response(JSON.stringify({ model: "openbmb/MiniCPM5-1B" }), { status: up ? 200 : 500 }),
+				spawnFn: (_command, args, options) => {
+					serveArgs = args;
+					serveEnv = options.env;
+					up = true;
+					return { pid: 1234, kill: vi.fn(), unref: vi.fn(), on: vi.fn() } as never;
+				},
+			},
+		});
+
+		await expect(runtime.start()).resolves.toEqual({ started: true, reason: "started" });
+		expect(serveArgs).toContain("--model-id");
+		expect(serveArgs).toContain("openbmb/MiniCPM5-1B");
+		expect(serveArgs).toContain("--port");
+		expect(serveArgs).toContain("18123");
+		expect(serveEnv?.HF_HOME).toBe(`${agentDir}/models/huggingface`);
+		expect(serveEnv?.PYTHONNOUSERSITE).toBe("1");
+		expect(serveEnv?.OLLAMA_MODELS).toBeUndefined();
 	});
 });
 

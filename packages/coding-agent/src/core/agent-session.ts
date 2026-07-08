@@ -158,7 +158,7 @@ import { formatModelRouterModel, ModelRouterController } from "./model-router-co
 import { ModelSelectionController } from "./model-selection-controller.ts";
 import { ModelAdaptationStore, type ModelToolProbe, type NativeToolProbeGrade } from "./models/adaptation-store.ts";
 import type { StoredFitnessReport } from "./models/fitness-store.ts";
-import type { LocalRuntimeDeps, OllamaRuntime } from "./models/local-runtime.ts";
+import type { LocalRuntimeDeps, OllamaRuntime, TransformersRuntime } from "./models/local-runtime.ts";
 import { ProfileFilterController } from "./profile-filter-controller.ts";
 import { expandPromptTemplate, type PromptTemplate } from "./prompt-templates.ts";
 import { ReflectionController } from "./reflection-controller.ts";
@@ -2663,6 +2663,10 @@ export class AgentSession {
 	 */
 	getLocalRuntime(baseUrl?: string): OllamaRuntime {
 		return this._localRuntimeController.getLocalRuntime(baseUrl);
+	}
+
+	getTransformersRuntime(modelId: string, baseUrl?: string): TransformersRuntime {
+		return this._localRuntimeController.getTransformersRuntime(modelId, baseUrl);
 	}
 
 	/** models.json registers a local model's baseUrl as `<server>/v1` (OpenAI-compat); the runtime's

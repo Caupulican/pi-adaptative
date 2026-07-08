@@ -3,6 +3,7 @@
 ### Added
 - Added graded `/toolprobe` native capability reporting and persistence so native verdicts require both an echo probe and a task-scale read probe, while echo-only or absent native support can calibrate the text protocol.
 - Added MiniCPM5-1B to the text-protocol live acceptance fleet with function XML variant coverage.
+- Added a pi-managed Hugging Face Transformers runtime path for curated full-base local model suggestions, starting with `openbmb/MiniCPM5-1B`, using an isolated venv and pi-owned HF cache.
 
 ### Fixed
 - Documented the Ollama serving-context requirement for local OpenAI-compatible models.

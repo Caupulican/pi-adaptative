@@ -41,7 +41,7 @@ import {
 } from "../../core/goals/goal-continuation-defaults.ts";
 import { configureHttpDispatcher } from "../../core/http-dispatcher.ts";
 import { type AppKeybinding, KeybindingsManager } from "../../core/keybindings.ts";
-import type { OllamaRuntime } from "../../core/models/local-runtime.ts";
+import type { OllamaRuntime, TransformersRuntime } from "../../core/models/local-runtime.ts";
 import type { ResourceDiagnostic } from "../../core/resource-loader.ts";
 import { formatMissingSessionCwdPrompt, type MissingSessionCwdError } from "../../core/session-cwd.ts";
 import type {
@@ -3294,6 +3294,10 @@ export class InteractiveMode {
 		return this.session.getLocalRuntime();
 	}
 
+	private getTransformersRuntime(modelId: string, baseUrl?: string): TransformersRuntime {
+		return this.session.getTransformersRuntime(modelId, baseUrl);
+	}
+
 	/** Narrow seam shared by the /models and /fitness flows. */
 	private localModelHost(): localModelCommands.LocalModelHost {
 		return {
@@ -3302,6 +3306,7 @@ export class InteractiveMode {
 			settingsManager: this.settingsManager,
 			ui: this.ui,
 			chatContainer: this.chatContainer,
+			getTransformersRuntime: (modelId, baseUrl) => this.getTransformersRuntime(modelId, baseUrl),
 			showStatus: (message) => this.showStatus(message),
 			showError: (message) => this.showError(message),
 			showSelector: (create) => this.showSelector(create),

@@ -30,8 +30,14 @@ import { resolveCliModel } from "../../core/model-resolver.ts";
 import { evaluateSurfaceFitness } from "../../core/model-router/fitness-gate.ts";
 import { DEFAULT_MODEL_SUGGESTIONS } from "../../core/models/default-model-suggestions.ts";
 import { FitnessStore } from "../../core/models/fitness-store.ts";
-import { registerLocalModel, unregisterLocalModel } from "../../core/models/local-registration.ts";
-import type { OllamaRuntime } from "../../core/models/local-runtime.ts";
+import {
+	HF_TRANSFORMERS_PROVIDER,
+	registerLocalModel,
+	registerTransformersModel,
+	unregisterLocalModel,
+	unregisterTransformersModel,
+} from "../../core/models/local-registration.ts";
+import type { OllamaRuntime, TransformersRuntime } from "../../core/models/local-runtime.ts";
 import { matchesInstalledLocalModel, normalizeModelSource } from "../../core/models/model-ref.ts";
 import { formatModelFitnessReport, isProbeAllFailed } from "../../core/research/model-fitness.ts";
 import type { SettingsManager } from "../../core/settings-manager.ts";
@@ -101,6 +107,7 @@ export interface LocalModelHost {
 	readonly settingsManager: SettingsManager;
 	readonly ui: TUI;
 	readonly chatContainer: Container;
+	getTransformersRuntime(modelId: string, baseUrl?: string): TransformersRuntime;
 	showStatus(message: string): void;
 	showError(message: string): void;
 	showSelector(create: SelectorFactory): void;
@@ -169,9 +176,17 @@ export async function handleModelsCommand(host: LocalModelHost, argsText: string
 		}
 		if (action === "stop") {
 			const stopped = host.localRuntime.stop();
+			let stoppedTransformers = 0;
+			for (const model of host.session.modelRegistry
+				.getAll()
+				.filter((entry) => entry.provider === HF_TRANSFORMERS_PROVIDER)) {
+				const serverUrl = model.baseUrl.replace(/\/v1\/?$/, "");
+				if (host.getTransformersRuntime(model.id, serverUrl).stop().stopped) stoppedTransformers++;
+			}
+			const stoppedAny = stopped.stopped || stoppedTransformers > 0;
 			host.showStatus(
-				stopped.stopped
-					? "Pi-managed local model server stopped (models remain installed)."
+				stoppedAny
+					? `Pi-managed local model server stopped${stoppedTransformers > 0 ? ` (${stoppedTransformers} Transformers sidecar(s))` : ""}; models remain installed.`
 					: "No pi-managed server running (a system server, if any, is not pi's to stop).",
 			);
 			return;
@@ -181,7 +196,7 @@ export async function handleModelsCommand(host: LocalModelHost, argsText: string
 			const rawRef = rest.join(" ");
 			if (!rawRef) {
 				host.showStatus(
-					"Usage: /models add <ollama-tag | hf.co/org/repo[:quant] | huggingface URL | pasted install command>",
+					"Usage: /models add <ollama-tag | hf.co/org/repo[:quant] | curated HF full-base ref | huggingface URL | pasted install command>",
 				);
 				host.showStatus("Or start from a validated suggestion: /models suggest");
 				return;
@@ -197,6 +212,10 @@ export async function handleModelsCommand(host: LocalModelHost, argsText: string
 				);
 				return;
 			}
+			if (source.type === "transformers") {
+				await addTransformersModel(host, source.modelId);
+				return;
+			}
 			await addLocalModel(host, source.pullRef);
 			return;
 		}
@@ -206,6 +225,11 @@ export async function handleModelsCommand(host: LocalModelHost, argsText: string
 			const confirmed = rest[1] === "confirm";
 			if (!ref) {
 				host.showStatus("Usage: /models remove <ref> confirm");
+				return;
+			}
+			const source = normalizeModelSource(ref);
+			if (source.type === "transformers") {
+				await removeTransformersModel(host, source.modelId, confirmed);
 				return;
 			}
 			await removeLocalModel(host, ref, confirmed);
@@ -238,23 +262,45 @@ export async function ensureLocalServer(host: LocalModelHost): Promise<boolean> 
 
 export async function listLocalModels(host: LocalModelHost): Promise<void> {
 	const status = await host.localRuntime.detect();
-	if (!status.serverUp) {
-		if (!status.binaryPath) {
-			for (const line of host.localRuntime.installGuide()) host.showStatus(line);
-			return;
-		}
-		host.showStatus(
-			`Local server not running (binary: ${status.binarySource}). /models add starts it on demand; /fitness probes registered models.`,
-		);
-		return;
-	}
-	const models = await host.localRuntime.list();
+	const models = status.serverUp ? await host.localRuntime.list() : [];
+	const ollamaLines = status.serverUp
+		? [
+				`Ollama models (${status.managedByPi ? `pi-managed server, storage: ${status.ownedModelsDir}` : "system server — storage owned by the system daemon"}):`,
+				...(models.length === 0
+					? ["  (none installed — /models add <ref>, or /models suggest for a validated roster)"]
+					: []),
+			]
+		: [
+				"Ollama models:",
+				...(status.binaryPath
+					? [
+							`  server not running (binary: ${status.binarySource}). /models add starts it on demand; /fitness probes registered models.`,
+						]
+					: host.localRuntime.installGuide().map((line) => `  ${line}`)),
+			];
 	const fitness = FitnessStore.forAgentDir(getAgentDir()).getForHost();
+	const transformersModels = host.session.modelRegistry
+		.getAll()
+		.filter((model) => model.provider === HF_TRANSFORMERS_PROVIDER);
+	const transformersLines = await Promise.all(
+		transformersModels.map(async (model) => {
+			const serverUrl = model.baseUrl.replace(/\/v1\/?$/, "");
+			const runtime = host.getTransformersRuntime(model.id, serverUrl);
+			const runtimeStatus = await runtime.detect();
+			const report = fitness.find((entry) => entry.model === `${HF_TRANSFORMERS_PROVIDER}/${model.id}`);
+			const readiness = runtimeStatus.serverUp
+				? "server running"
+				: runtimeStatus.runtimeInstalled
+					? "runtime installed"
+					: "runtime missing";
+			const probe = report
+				? `probed ${report.at.slice(0, 10)}: digest ${report.report.digest?.succeeded ?? "?"}/${report.report.digest?.total ?? "?"}, tool-calls ${report.report.toolCall.succeeded}/${report.report.toolCall.total}${report.report.tokensPerSecond ? `, ~${report.report.tokensPerSecond} tok/s` : ""}`
+				: `unprobed — run /fitness ${HF_TRANSFORMERS_PROVIDER}/${model.id}`;
+			return `  - ${model.id} (${readiness}, cache: ${runtimeStatus.cacheDir}) · ${probe}`;
+		}),
+	);
 	const lines = [
-		`Local models (${status.managedByPi ? `pi-managed server, storage: ${status.ownedModelsDir}` : "system server — storage owned by the system daemon"}):`,
-		...(models.length === 0
-			? ["  (none installed — /models add <ref>, or /models suggest for a validated roster)"]
-			: []),
+		...ollamaLines,
 		...models.map((model) => {
 			const report = fitness.find((entry) => entry.model === `ollama/${model.name}`);
 			const gb = (model.sizeBytes / 1e9).toFixed(2);
@@ -263,6 +309,7 @@ export async function listLocalModels(host: LocalModelHost): Promise<void> {
 				: `unprobed — run /fitness ollama/${model.name}`;
 			return `  - ${model.name} (${gb} GB) · ${probe}`;
 		}),
+		...(transformersLines.length > 0 ? ["Pi-managed Transformers models:", ...transformersLines] : []),
 		"Commands: /models add <ref> · /models remove <ref> confirm · /models stop",
 	];
 	for (const line of lines) host.showStatus(line);
@@ -298,6 +345,58 @@ export async function addLocalModel(host: LocalModelHost, pullRef: string, prese
 	host.session.modelRegistry.refresh();
 	host.showStatus(`${pullRef} installed and registered as ollama/${pullRef}. Probing fitness…`);
 	await runFitnessAndAssign(host, `ollama/${pullRef}`, preselectRole);
+}
+
+export async function addTransformersModel(
+	host: LocalModelHost,
+	modelId: string,
+	preselectRole?: FitnessRole,
+): Promise<void> {
+	const runtime = host.getTransformersRuntime(modelId);
+	let status = await runtime.detect();
+	if (!status.runtimeInstalled) {
+		host.showStatus(`Installing isolated Transformers runtime for ${modelId} at ${status.venvDir}…`);
+		const installed = await runtime.installManaged((progress) => host.showStatus(`  transformers: ${progress}`));
+		if (!installed.ok) {
+			host.showStatus(`Transformers runtime install failed: ${installed.error}`);
+			return;
+		}
+		status = await runtime.detect();
+	}
+	if (!status.runtimeInstalled) {
+		host.showStatus(`Transformers runtime is still unavailable at ${status.venvDir}.`);
+		return;
+	}
+
+	const downloaded = await runtime.downloadModel((progress) => host.showStatus(`  ${modelId}: ${progress}`));
+	if (!downloaded.ok) {
+		host.showStatus(`Model download failed: ${downloaded.error}`);
+		return;
+	}
+
+	const started = await runtime.start();
+	if (!started.started && started.reason !== "already_running") {
+		host.showStatus(`Could not start Transformers sidecar: ${started.reason}`);
+		return;
+	}
+
+	const registration = registerTransformersModel({
+		agentDir: getAgentDir(),
+		modelId,
+		baseUrl: runtime.baseUrl,
+	});
+	if (!registration.ok) {
+		host.showStatus(`Installed, but not auto-registered: ${registration.reason}`);
+		if (registration.manualSnippet) {
+			host.showStatus(`Add this to ${registration.modelsJsonPath} yourself:\n${registration.manualSnippet}`);
+		}
+		return;
+	}
+	host.session.modelRegistry.refresh();
+	host.showStatus(
+		`${modelId} installed in pi-managed Transformers and registered as ${HF_TRANSFORMERS_PROVIDER}/${modelId}. Probing fitness…`,
+	);
+	await runFitnessAndAssign(host, `${HF_TRANSFORMERS_PROVIDER}/${modelId}`, preselectRole);
 }
 
 export async function removeLocalModel(host: LocalModelHost, ref: string, confirmed: boolean): Promise<void> {
@@ -339,6 +438,34 @@ export async function removeLocalModel(host: LocalModelHost, ref: string, confir
 	host.showStatus(`${ref} removed: weights deleted, registration and fitness report dropped.`);
 }
 
+async function removeTransformersModel(host: LocalModelHost, modelId: string, confirmed: boolean): Promise<void> {
+	const runtime = host.getTransformersRuntime(modelId);
+	const status = await runtime.detect();
+	if (!confirmed) {
+		host.showStatus(
+			[
+				`Removing ${modelId} will delete:`,
+				`  - the ${HF_TRANSFORMERS_PROVIDER}/${modelId} entry in models.json`,
+				`  - its cached fitness report for this host`,
+				`It will stop this session's Transformers sidecar if running. Cached weights remain under ${status.cacheDir}.`,
+				`Run: /models remove hf.co/${modelId} confirm`,
+			].join("\n"),
+		);
+		return;
+	}
+	runtime.stop();
+	const registration = unregisterTransformersModel({ agentDir: getAgentDir(), modelId });
+	if (!registration.ok) {
+		host.showStatus(`Remove failed: ${registration.reason}`);
+		return;
+	}
+	FitnessStore.forAgentDir(getAgentDir()).remove(`${HF_TRANSFORMERS_PROVIDER}/${modelId}`);
+	host.session.modelRegistry.refresh();
+	host.showStatus(
+		`${modelId} registration and fitness report dropped; cached weights remain under ${status.cacheDir}.`,
+	);
+}
+
 /** /fitness with no args: pick a model from the configured registry, probe it, assign a role. */
 /** Pick a validated suggestion → install it → probe on this host → land its shaped role. */
 export function showModelSuggestionSelector(host: LocalModelHost): void {
@@ -349,7 +476,18 @@ export function showModelSuggestionSelector(host: LocalModelHost): void {
 				done();
 				// The shaped role rides along so the post-probe selector lands on it pre-selected;
 				// non-tool-callers carry curator/judge/none, never executor, so this can't footgun.
-				await addLocalModel(host, suggestion.pullRef, suggestion.assignRole);
+				const source = normalizeModelSource(suggestion.pullRef);
+				if (source.type === "transformers") {
+					await addTransformersModel(host, source.modelId, suggestion.assignRole);
+					return;
+				}
+				if (source.type === "local") {
+					await addLocalModel(host, source.pullRef, suggestion.assignRole);
+					return;
+				}
+				host.showStatus(
+					`Suggestion ${suggestion.name} is not installable: ${source.type === "rejected" ? source.reason : source.ref}`,
+				);
 			},
 			() => {
 				done();

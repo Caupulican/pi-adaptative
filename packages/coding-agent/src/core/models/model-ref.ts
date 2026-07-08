@@ -9,12 +9,22 @@
 export type ModelSource =
 	| { type: "api"; ref: string }
 	| { type: "local"; pullRef: string }
+	| { type: "transformers"; modelId: string; ref: string }
 	| { type: "rejected"; reason: string };
 
 const OLLAMA_TAG = /^[a-z0-9][a-z0-9._-]*(?::[A-Za-z0-9._-]+)?$/;
 const HF_REF = /^hf\.co\/([\w.-]+)\/([\w.-]+)(?::([\w.-]+))?$/i;
 const HF_URL = /^https?:\/\/(?:www\.)?huggingface\.co\/([\w.-]+)\/([\w.-]+)(?:\/.*)?$/i;
 const SHELL_METACHARS = /[;&|`$<>(){}\\]/;
+const PI_MANAGED_TRANSFORMERS_MODEL_IDS = new Set(["openbmb/MiniCPM5-1B"]);
+
+function normalizeHuggingFaceReference(org: string, repo: string, quant?: string): ModelSource {
+	const modelId = `${org}/${repo}`;
+	if (!quant && PI_MANAGED_TRANSFORMERS_MODEL_IDS.has(modelId)) {
+		return { type: "transformers", modelId, ref: `hf.co/${modelId}` };
+	}
+	return { type: "local", pullRef: `hf.co/${modelId}${quant ? `:${quant}` : ""}` };
+}
 
 export function normalizeModelSource(rawInput: string): ModelSource {
 	const input = rawInput.trim();
@@ -37,16 +47,17 @@ export function normalizeModelSource(rawInput: string): ModelSource {
 		return { type: "rejected", reason: "not a recognized model reference (contains spaces or shell characters)" };
 	}
 
-	// Full HuggingFace URL -> hf.co pull ref (org/repo; a :quant suffix must be given explicitly).
+	// Full HuggingFace URL -> either a pi-managed Transformers model (curated full-base ids) or an
+	// Ollama hf.co pull ref (GGUF/quant refs still belong to Ollama and keep their :quant suffix).
 	const hfUrl = HF_URL.exec(input);
 	if (hfUrl) {
-		return { type: "local", pullRef: `hf.co/${hfUrl[1]}/${hfUrl[2]}` };
+		return normalizeHuggingFaceReference(hfUrl[1]!, hfUrl[2]!);
 	}
 
 	// hf.co/org/repo[:quant]
 	const hfRef = HF_REF.exec(input);
 	if (hfRef) {
-		return { type: "local", pullRef: `hf.co/${hfRef[1]}/${hfRef[2]}${hfRef[3] ? `:${hfRef[3]}` : ""}` };
+		return normalizeHuggingFaceReference(hfRef[1]!, hfRef[2]!, hfRef[3]);
 	}
 
 	if (input.includes("://")) {

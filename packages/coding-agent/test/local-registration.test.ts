@@ -2,7 +2,12 @@ import { existsSync, mkdirSync, readFileSync, rmSync, writeFileSync } from "node
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { afterEach, beforeEach, describe, expect, it } from "vitest";
-import { registerLocalModel, unregisterLocalModel } from "../src/core/models/local-registration.ts";
+import {
+	registerLocalModel,
+	registerTransformersModel,
+	unregisterLocalModel,
+	unregisterTransformersModel,
+} from "../src/core/models/local-registration.ts";
 
 describe("local model registration in models.json", () => {
 	let agentDir: string;
@@ -43,6 +48,33 @@ describe("local model registration in models.json", () => {
 		const json = JSON.parse(readFileSync(join(agentDir, "models.json"), "utf-8"));
 		expect(json.providers.corp).toBeDefined();
 		expect(json.providers.ollama).toBeUndefined();
+	});
+
+	it("registers pi-managed Transformers models without touching Ollama entries", () => {
+		registerLocalModel({ agentDir, ref: "qwen3:1.7b", baseUrl: "http://127.0.0.1:11434" });
+		const result = registerTransformersModel({
+			agentDir,
+			modelId: "openbmb/MiniCPM5-1B",
+			baseUrl: "http://127.0.0.1:18123",
+		});
+		expect(result.ok).toBe(true);
+
+		const json = JSON.parse(readFileSync(join(agentDir, "models.json"), "utf-8"));
+		expect(json.providers.ollama.models.map((model: { id: string }) => model.id)).toEqual(["qwen3:1.7b"]);
+		expect(json.providers["pi-hf-transformers"].api).toBe("openai-completions");
+		expect(json.providers["pi-hf-transformers"].apiKey).toBe("pi-transformers");
+		expect(json.providers["pi-hf-transformers"].models).toEqual([
+			expect.objectContaining({
+				id: "openbmb/MiniCPM5-1B",
+				baseUrl: "http://127.0.0.1:18123/v1",
+				contextWindow: 131_072,
+			}),
+		]);
+		const removed = unregisterTransformersModel({ agentDir, modelId: "openbmb/MiniCPM5-1B" });
+		expect(removed.ok).toBe(true);
+		const afterRemove = JSON.parse(readFileSync(join(agentDir, "models.json"), "utf-8"));
+		expect(afterRemove.providers.ollama.models.map((model: { id: string }) => model.id)).toEqual(["qwen3:1.7b"]);
+		expect(afterRemove.providers["pi-hf-transformers"]).toBeUndefined();
 	});
 
 	it("NEVER rewrites a hand-authored file with comments; hands back a manual snippet", () => {

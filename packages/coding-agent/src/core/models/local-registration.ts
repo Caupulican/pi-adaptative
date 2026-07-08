@@ -15,13 +15,17 @@ import { join } from "node:path";
 interface ModelsJsonModel {
 	id: string;
 	name?: string;
+	api?: string;
+	baseUrl?: string;
 	contextWindow?: number;
 	/** Measured by the local capacity probe; compaction uses min(contextWindow, servedContextWindow). */
 	servedContextWindow?: number;
 	maxTokens?: number;
 	reasoning?: boolean;
+	textToolCallProtocol?: boolean;
 	input?: string[];
 	cost?: { input: number; output: number; cacheRead: number; cacheWrite: number };
+	compat?: Record<string, unknown>;
 }
 
 interface ModelsJson {
@@ -48,6 +52,8 @@ export interface LocalRegistrationResult {
 
 /** Provider name pi registers pulled local models under (see registerLocalModel below). */
 export const OLLAMA_PROVIDER = "ollama";
+/** Provider name for pi-managed Hugging Face Transformers sidecar models. */
+export const HF_TRANSFORMERS_PROVIDER = "pi-hf-transformers";
 
 function localModelEntry(ref: string, contextWindow: number, servedContextWindow?: number): ModelsJsonModel {
 	return {
@@ -59,6 +65,20 @@ function localModelEntry(ref: string, contextWindow: number, servedContextWindow
 		reasoning: false,
 		input: ["text"],
 		cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 },
+	};
+}
+
+function transformersModelEntry(args: { modelId: string; baseUrl: string; contextWindow?: number }): ModelsJsonModel {
+	return {
+		id: args.modelId,
+		name: args.modelId,
+		baseUrl: `${args.baseUrl.replace(/\/$/, "")}/v1`,
+		contextWindow: args.contextWindow ?? 131_072,
+		maxTokens: 1024,
+		reasoning: false,
+		input: ["text"],
+		cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 },
+		compat: { supportsUsageInStreaming: false },
 	};
 }
 
@@ -118,6 +138,50 @@ export function registerLocalModel(args: {
 	return { ok: true, modelsJsonPath };
 }
 
+export function registerTransformersModel(args: {
+	agentDir: string;
+	modelId: string;
+	baseUrl: string;
+	contextWindow?: number;
+}): LocalRegistrationResult {
+	const modelsJsonPath = join(args.agentDir, "models.json");
+	const entry = transformersModelEntry(args);
+	const providerBase = {
+		name: "Hugging Face Transformers (pi-managed)",
+		baseUrl: entry.baseUrl,
+		api: "openai-completions",
+		apiKey: "pi-transformers",
+	};
+	const { json, reason } = loadStrict(modelsJsonPath);
+	if (!json) {
+		return {
+			ok: false,
+			modelsJsonPath,
+			reason,
+			manualSnippet: JSON.stringify(
+				{ providers: { [HF_TRANSFORMERS_PROVIDER]: { ...providerBase, models: [entry] } } },
+				null,
+				"\t",
+			),
+		};
+	}
+	json.providers[HF_TRANSFORMERS_PROVIDER] ??= { ...providerBase, models: [] };
+	const provider = json.providers[HF_TRANSFORMERS_PROVIDER];
+	provider.name ??= providerBase.name;
+	provider.baseUrl ??= providerBase.baseUrl;
+	provider.api ??= providerBase.api;
+	provider.apiKey ??= providerBase.apiKey;
+	provider.models ??= [];
+	const existing = provider.models.findIndex((model) => model.id === args.modelId);
+	if (existing >= 0) {
+		provider.models[existing] = { ...provider.models[existing], ...entry };
+	} else {
+		provider.models.push(entry);
+	}
+	writeFileSync(modelsJsonPath, `${JSON.stringify(json, null, "\t")}\n`, "utf-8");
+	return { ok: true, modelsJsonPath };
+}
+
 export function unregisterLocalModel(args: { agentDir: string; ref: string }): LocalRegistrationResult {
 	const modelsJsonPath = join(args.agentDir, "models.json");
 	const { json, reason } = loadStrict(modelsJsonPath);
@@ -131,6 +195,22 @@ export function unregisterLocalModel(args: { agentDir: string; ref: string }): L
 	// if they added any models themselves — only an all-pi-managed empty list is removed).
 	if (provider.models.length === 0) {
 		delete json.providers[OLLAMA_PROVIDER];
+	}
+	writeFileSync(modelsJsonPath, `${JSON.stringify(json, null, "\t")}\n`, "utf-8");
+	return { ok: true, modelsJsonPath };
+}
+
+export function unregisterTransformersModel(args: { agentDir: string; modelId: string }): LocalRegistrationResult {
+	const modelsJsonPath = join(args.agentDir, "models.json");
+	const { json, reason } = loadStrict(modelsJsonPath);
+	if (!json) return { ok: false, modelsJsonPath, reason };
+	const provider = json.providers[HF_TRANSFORMERS_PROVIDER];
+	if (!provider?.models) return { ok: true, modelsJsonPath };
+	const before = provider.models.length;
+	provider.models = provider.models.filter((model) => model.id !== args.modelId);
+	if (provider.models.length === before) return { ok: true, modelsJsonPath };
+	if (provider.models.length === 0) {
+		delete json.providers[HF_TRANSFORMERS_PROVIDER];
 	}
 	writeFileSync(modelsJsonPath, `${JSON.stringify(json, null, "\t")}\n`, "utf-8");
 	return { ok: true, modelsJsonPath };
