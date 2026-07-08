@@ -11,6 +11,7 @@
  * wrappers unchanged.
  */
 
+import { totalmem } from "node:os";
 import type { ThinkingLevel } from "@caupulican/pi-agent-core";
 import { getSupportedThinkingLevels } from "@caupulican/pi-ai";
 import {
@@ -28,6 +29,11 @@ import type { AgentSession } from "../../core/agent-session.ts";
 import type { ModelRegistry } from "../../core/model-registry.ts";
 import { resolveCliModel } from "../../core/model-resolver.ts";
 import { evaluateSurfaceFitness } from "../../core/model-router/fitness-gate.ts";
+import {
+	deriveLocalContextSizing,
+	renderOllamaContextModelfile,
+	sizedLocalModelRef,
+} from "../../core/models/context-sizing.ts";
 import { DEFAULT_MODEL_SUGGESTIONS } from "../../core/models/default-model-suggestions.ts";
 import { FitnessStore } from "../../core/models/fitness-store.ts";
 import {
@@ -330,10 +336,36 @@ export async function addLocalModel(host: LocalModelHost, pullRef: string, prese
 		host.showStatus(`Pull failed: ${pulled.error}`);
 		return;
 	}
+	const installed = await host.localRuntime.list().catch(() => []);
+	const installedEntry = installed.find((entry) => matchesInstalledLocalModel(pullRef, entry.name));
+	const shown = await host.localRuntime.show(pullRef);
+	const sizing =
+		installedEntry && shown.ok
+			? deriveLocalContextSizing({
+					host: { totalMemBytes: totalmem() },
+					model: { modelInfo: shown.info.modelInfo, weightsBytes: installedEntry.sizeBytes },
+					runtime: { supportsKvQuantization: true },
+				})
+			: undefined;
+	let registeredRef = pullRef;
+	if (sizing) {
+		const sizedRef = sizedLocalModelRef(pullRef, sizing.numCtx);
+		const created = await host.localRuntime.createFromModelfile({
+			name: sizedRef,
+			modelfile: renderOllamaContextModelfile({ from: pullRef, numCtx: sizing.numCtx }),
+		});
+		if (!created.ok) {
+			host.showStatus(`Pulled, but could not create sized context model: ${created.error}`);
+			return;
+		}
+		registeredRef = sizedRef;
+	}
 	const registration = registerLocalModel({
 		agentDir: getAgentDir(),
-		ref: pullRef,
+		ref: registeredRef,
 		baseUrl: host.localRuntime.baseUrl,
+		contextWindow: sizing?.numCtx,
+		servedContextWindow: sizing?.numCtx,
 	});
 	if (!registration.ok) {
 		host.showStatus(`Pulled, but not auto-registered: ${registration.reason}`);
@@ -343,8 +375,8 @@ export async function addLocalModel(host: LocalModelHost, pullRef: string, prese
 		return;
 	}
 	host.session.modelRegistry.refresh();
-	host.showStatus(`${pullRef} installed and registered as ollama/${pullRef}. Probing fitness…`);
-	await runFitnessAndAssign(host, `ollama/${pullRef}`, preselectRole);
+	host.showStatus(`${pullRef} installed and registered as ollama/${registeredRef}. Probing fitness…`);
+	await runFitnessAndAssign(host, `ollama/${registeredRef}`, preselectRole);
 }
 
 export async function addTransformersModel(

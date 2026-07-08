@@ -37,6 +37,7 @@ describe("openai-completions provider errors", () => {
 		expect(formatted).toContain("ollama/qwen3:1.7b");
 		expect(formatted).toContain("OLLAMA_CONTEXT_LENGTH");
 		expect(formatted).toContain("num_ctx");
+		expect(formatted).toContain("re-derives num_ctx");
 		expect(formatted).toContain("Do not lower pi's models.json contextWindow");
 	});
 });

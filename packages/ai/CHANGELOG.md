@@ -1,5 +1,8 @@
 ## [Unreleased]
 
+### Fixed
+- Improved Ollama context-size remediation text to point pi-managed installs at re-derived `num_ctx` sizing.
+
 ## [0.81.16] - 2026-07-08
 
 ### Added

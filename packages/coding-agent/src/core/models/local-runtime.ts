@@ -49,6 +49,10 @@ export interface InstalledLocalModel {
 	sizeBytes: number;
 }
 
+export interface OllamaModelInfo {
+	modelInfo: Record<string, unknown>;
+}
+
 /** Pinned ollama release for the managed installer below. Bump here when needed — one constant. */
 export const OLLAMA_PINNED_VERSION = "0.31.1";
 
@@ -518,6 +522,50 @@ export class OllamaRuntime {
 		return (data.models ?? [])
 			.filter((model): model is { name: string; size?: number } => typeof model.name === "string")
 			.map((model) => ({ name: model.name, sizeBytes: model.size ?? 0 }));
+	}
+
+	async show(ref: string): Promise<{ ok: true; info: OllamaModelInfo } | { ok: false; error: string }> {
+		try {
+			const response = await this._fetch(`${this._baseUrl}/api/show`, {
+				method: "POST",
+				headers: { "content-type": "application/json" },
+				body: JSON.stringify({ model: ref }),
+				signal: AbortSignal.timeout(10_000),
+			});
+			if (!response.ok) {
+				return {
+					ok: false,
+					error: `show failed: HTTP ${response.status} ${await response.text().catch(() => "")}`,
+				};
+			}
+			const data = (await response.json()) as { model_info?: Record<string, unknown> };
+			return { ok: true, info: { modelInfo: data.model_info ?? {} } };
+		} catch (error) {
+			return { ok: false, error: error instanceof Error ? error.message : String(error) };
+		}
+	}
+
+	async createFromModelfile(args: {
+		name: string;
+		modelfile: string;
+	}): Promise<{ ok: true } | { ok: false; error: string }> {
+		try {
+			const response = await this._fetch(`${this._baseUrl}/api/create`, {
+				method: "POST",
+				headers: { "content-type": "application/json" },
+				body: JSON.stringify({ model: args.name, modelfile: args.modelfile, stream: false }),
+				signal: AbortSignal.timeout(60_000),
+			});
+			if (!response.ok) {
+				return {
+					ok: false,
+					error: `create failed: HTTP ${response.status} ${await response.text().catch(() => "")}`,
+				};
+			}
+			return { ok: true };
+		} catch (error) {
+			return { ok: false, error: error instanceof Error ? error.message : String(error) };
+		}
 	}
 
 	/** Pull a model through the server API (weights land in the SERVER's models dir). */

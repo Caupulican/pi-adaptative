@@ -119,6 +119,41 @@ describe("AgentSession local (Ollama) runtime readiness", () => {
 		}
 	});
 
+	it("show and createFromModelfile use Ollama metadata/create endpoints", async () => {
+		const bodies: unknown[] = [];
+		const runtime = new OllamaRuntime({
+			agentDir: "/tmp/pi-test",
+			deps: {
+				fetchFn: (async (input: Parameters<typeof fetch>[0], init: Parameters<typeof fetch>[1]) => {
+					bodies.push(init?.body ? JSON.parse(String(init.body)) : undefined);
+					const url = String(input);
+					if (url.endsWith("/api/show")) {
+						return Response.json({ model_info: { "llama.block_count": 1 } });
+					}
+					if (url.endsWith("/api/create")) return Response.json({ status: "success" });
+					return new Response("not found", { status: 404 });
+				}) as unknown as typeof fetch,
+				existsFn: () => true,
+				spawnFn: fakeChild,
+				sleepFn: async () => {},
+			},
+		});
+
+		expect(await runtime.show("qwen3:1.7b")).toEqual({ ok: true, info: { modelInfo: { "llama.block_count": 1 } } });
+		expect(
+			await runtime.createFromModelfile({
+				name: "pi-qwen3-1.7b:ctx8192",
+				modelfile: "FROM qwen3:1.7b\nPARAMETER num_ctx 8192\n",
+			}),
+		).toEqual({ ok: true });
+		expect(bodies).toContainEqual({ model: "qwen3:1.7b" });
+		expect(bodies).toContainEqual({
+			model: "pi-qwen3-1.7b:ctx8192",
+			modelfile: "FROM qwen3:1.7b\nPARAMETER num_ctx 8192\n",
+			stream: false,
+		});
+	});
+
 	describe("LocalRuntimeController.ensureLocalModelReady (private)", () => {
 		function ensureReady(harness: Awaited<ReturnType<typeof createHarness>>, model: Model<Api>) {
 			return (

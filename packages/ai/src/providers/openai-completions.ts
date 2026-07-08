@@ -111,7 +111,7 @@ export function formatOpenAICompletionsProviderError(error: unknown, model: Mode
 	return (
 		`${formatted}\n` +
 		`Ollama context action for ${model.provider}/${model.id}: Ollama rejected this request because it exceeds the model's served context window. ` +
-		`Raise the Ollama serving context with OLLAMA_CONTEXT_LENGTH or a per-model num_ctx value, then retry. ` +
+		`Raise the Ollama serving context with OLLAMA_CONTEXT_LENGTH or a per-model num_ctx value, then retry; for pi-managed installs, re-run /models add so pi re-derives num_ctx from host and model metadata. ` +
 		`Do not lower pi's models.json contextWindow to mask this backend limit.`
 	);
 }
