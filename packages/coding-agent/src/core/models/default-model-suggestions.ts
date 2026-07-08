@@ -81,6 +81,16 @@ export const DEFAULT_MODEL_SUGGESTIONS: readonly ModelSuggestion[] = [
 		note: "Q4_K_M ≈ 5.6 GB weights, ~7-8 GB peak with KV — on a 10 GB box run it as the ONLY local model. Qwen 3.5 arch: confirm pi's pinned Ollama supports it and probe tool-calls with /fitness before assigning (template derives from the GGUF). Larger boxes: consider router-medium after a passed worker lane.",
 	},
 	{
+		name: "Bonsai-4B (GGUF Q1_0)",
+		pullRef: "hf.co/prism-ml/Bonsai-4B-gguf:Q1_0",
+		role: "Context curator / reflex brain / lighter lane analyst",
+		toolCalling: false,
+		assignRole: "curator",
+		rationale:
+			"Lighter Bonsai lane model for context curation and structured local analysis; the exact Q1_0 artifact keeps /models suggest one-step.",
+		note: "Recommended when Bonsai-8B is too heavy. Pi pulls this exact GGUF through managed Ollama, probes /fitness on the host, then offers the curator role.",
+	},
+	{
 		name: "Ternary-Bonsai-1.7B",
 		pullRef: "hf.co/prism-ml/Ternary-Bonsai-1.7B-gguf",
 		role: "Search scout (heavy-lifter)",

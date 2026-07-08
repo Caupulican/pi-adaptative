@@ -21,9 +21,11 @@ describe("default model suggestions", () => {
 		expect(DEFAULT_MODEL_SUGGESTIONS.some((s) => s.pullRef === "qwen3:1.7b" && s.assignRole === "executor")).toBe(
 			true,
 		);
-		expect(DEFAULT_MODEL_SUGGESTIONS.some((s) => s.name.includes("Bonsai-4B") && s.assignRole === "curator")).toBe(
-			true,
-		);
+		expect(
+			DEFAULT_MODEL_SUGGESTIONS.some(
+				(s) => s.pullRef === "hf.co/prism-ml/Bonsai-4B-gguf:Q1_0" && s.assignRole === "curator",
+			),
+		).toBe(true);
 	});
 
 	it("keeps FastContext and Ornith immediately after the executor entries", () => {
@@ -43,11 +45,22 @@ describe("default model suggestions", () => {
 		});
 	});
 
-	it("Ternary-Bonsai models are marked as non-tool-calling (lane/brain only, never executor)", () => {
+	it("Bonsai models are marked as non-tool-calling (lane/brain only, never executor)", () => {
 		for (const suggestion of DEFAULT_MODEL_SUGGESTIONS.filter((s) => s.name.includes("Bonsai"))) {
 			expect(suggestion.toolCalling).toBe(false);
 			expect(suggestion.assignRole).not.toBe("executor");
 		}
+	});
+
+	it("pins the recommended Bonsai-4B artifact so the suggestion flow is one-step", () => {
+		expect(DEFAULT_MODEL_SUGGESTIONS).toContainEqual(
+			expect.objectContaining({
+				name: "Bonsai-4B (GGUF Q1_0)",
+				pullRef: "hf.co/prism-ml/Bonsai-4B-gguf:Q1_0",
+				assignRole: "curator",
+				toolCalling: false,
+			}),
+		);
 	});
 
 	it("every shaped assignRole is a role the post-probe selector can actually pre-select (not dead data)", () => {
@@ -70,6 +83,7 @@ describe("default model suggestions", () => {
 		expect(text).toContain("Ornith-1.0-9B → Agentic-coding worker");
 		expect(text).toContain("MiniCPM5-1B (full-base) → Full-base Transformers executor");
 		expect(text).toContain("/models add hf.co/openbmb/MiniCPM5-1B");
+		expect(text).toContain("/models add hf.co/prism-ml/Bonsai-4B-gguf:Q1_0");
 		expect(text).toContain("/models add hf.co/prism-ml/Ternary-Bonsai-4B-gguf");
 		expect(text).toContain("[no tool-calling]");
 		expect(text).toContain("probe on YOUR hardware with /fitness");

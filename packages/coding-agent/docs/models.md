@@ -51,6 +51,7 @@ Current baked suggestions include:
 - MiniCPM5-1B (full-base) → full-base Transformers executor / tiny local muscle. Install with `/models add hf.co/openbmb/MiniCPM5-1B`. This is the full-base Hugging Face model, not a GGUF/quantized artifact. Pi probes native tool-calling first and uses the text tool protocol only if native tool calls do not work.
 - FastContext-1.0-4B → repository scout (`context_scout`): the model the scout lane is built around, not a pi benchmark claim. Q4 is about 2.5 GB weights; expect about 5-6 GB peak with 32K-64K KV. Assignment writes `scout.model` and enables `scout.enabled` only after the `scout_auto` exam passes.
 - Ornith-1.0-9B → agentic-coding worker / router cheap tier: an external candidate, not from pi's own validation research. Q4_K_M is about 5.6 GB weights; expect about 7-8 GB peak with KV, and run it as the only local model on a 10 GB box. `/fitness` on your hardware is the validator.
+- Bonsai-4B (GGUF Q1_0) → context curator / reflex brain / lighter lane analyst. Install with `/models add hf.co/prism-ml/Bonsai-4B-gguf:Q1_0`, or choose it from `/models suggest` for the one-step managed Ollama pull, host-local `/fitness` probe, and curator-role preselection.
 
 Some OpenAI-compatible servers do not understand the `developer` role used for reasoning-capable models. For those providers, set `compat.supportsDeveloperRole` to `false` so pi sends the system prompt as a `system` message instead. If the server also does not support `reasoning_effort`, set `compat.supportsReasoningEffort` to `false` too.
 

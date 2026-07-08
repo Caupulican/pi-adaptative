@@ -1,5 +1,11 @@
 ## [Unreleased]
 
+### Added
+- Added an exact Bonsai-4B GGUF Q1_0 curated local-model suggestion for one-step managed Ollama setup and curator-role probing.
+
+### Fixed
+- Excluded local-only planning docs from npm package file selection even when they exist in a local checkout.
+
 ## [0.81.17] - 2026-07-08
 
 ### Added
