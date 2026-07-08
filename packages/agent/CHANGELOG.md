@@ -1,4 +1,4 @@
-## [Unreleased]
+## [0.81.17] - 2026-07-08
 
 ### Changed
 - Changed stream-idle option resolvers to receive the current model, context, and stream options for per-request tuning.
