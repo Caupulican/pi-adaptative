@@ -1,3 +1,6 @@
+import { copyFileSync, mkdirSync, mkdtempSync, readFileSync, rmSync, statSync, writeFileSync } from "node:fs";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import {
 	OllamaRuntime,
@@ -339,6 +342,120 @@ describe("OllamaRuntime", () => {
 		await runtime.start();
 		expect(serveEnv?.OLLAMA_MODELS).toContain(".scratch-runtime-test-owned/models/ollama");
 		expect(runtime.stop()).toEqual({ stopped: true });
+	});
+
+	it("detect identifies the active store for owned and explicit user-store serves", async () => {
+		const root = mkdtempSync(join(tmpdir(), "pi-ollama-active-store-"));
+		async function startRuntime(useOwnedStore: boolean) {
+			let up = false;
+			const runtime = new OllamaRuntime({
+				agentDir: join(root, `agent-${useOwnedStore ? "owned" : "user"}`),
+				deps: {
+					existsFn: (path) => path === "/usr/bin/ollama",
+					envPath: "/usr/bin",
+					homeDir: "/home/u",
+					sleepFn: async () => {},
+					fetchFn: async () =>
+						new Response(JSON.stringify({ models: [{ name: "qwen3:1.7b", size: 1 }] }), {
+							status: up ? 200 : 500,
+						}),
+					spawnFn: () => {
+						up = true;
+						return { pid: 1234, kill: vi.fn(), unref: vi.fn(), on: vi.fn() } as never;
+					},
+				},
+			});
+			const started = useOwnedStore ? await runtime.start() : await runtime.startReuseExisting();
+			expect(started.started).toBe(true);
+			return { runtime, status: await runtime.detect() };
+		}
+
+		try {
+			const owned = await startRuntime(true);
+			expect(owned.status.activeStore).toMatchObject({
+				kind: "pi-owned",
+				path: owned.runtime.ownedModelsDir(),
+				modelCount: 1,
+			});
+			expect(owned.runtime.stop()).toEqual({ stopped: true });
+
+			const user = await startRuntime(false);
+			expect(user.status.activeStore).toMatchObject({
+				kind: "user",
+				path: user.runtime.userModelsDir(),
+				modelCount: 1,
+			});
+			expect(user.runtime.stop()).toEqual({ stopped: true });
+		} finally {
+			rmSync(root, { recursive: true, force: true });
+		}
+	});
+
+	it("imports user Ollama models into the pi-owned store with idempotent blob hardlinks", () => {
+		const root = mkdtempSync(join(tmpdir(), "pi-ollama-import-"));
+		try {
+			const homeDir = join(root, "home");
+			const agentDir = join(root, "agent");
+			const userStore = join(homeDir, ".ollama", "models");
+			const manifest = join(userStore, "manifests", "registry.ollama.ai", "library", "qwen3", "latest");
+			const blob = join(userStore, "blobs", "sha256-abc");
+			mkdirSync(join(userStore, "blobs"), { recursive: true });
+			mkdirSync(join(userStore, "manifests", "registry.ollama.ai", "library", "qwen3"), { recursive: true });
+			writeFileSync(manifest, "manifest", "utf-8");
+			writeFileSync(blob, "blob", "utf-8");
+
+			const runtime = new OllamaRuntime({ agentDir, deps: { homeDir } });
+			const first = runtime.importUserModels();
+			expect(first).toMatchObject({ manifestsImported: 1, blobsHardlinked: 1, blobsCopied: 0, blobsSkipped: 0 });
+			expect(
+				readFileSync(
+					join(runtime.ownedModelsDir(), "manifests", "registry.ollama.ai", "library", "qwen3", "latest"),
+					"utf-8",
+				),
+			).toBe("manifest");
+			const ownedBlob = join(runtime.ownedModelsDir(), "blobs", "sha256-abc");
+			expect(readFileSync(ownedBlob, "utf-8")).toBe("blob");
+			expect(statSync(ownedBlob).ino).toBe(statSync(blob).ino);
+			expect(readFileSync(blob, "utf-8")).toBe("blob");
+
+			const second = runtime.importUserModels();
+			expect(second).toMatchObject({
+				manifestsImported: 0,
+				manifestsSkipped: 1,
+				blobsHardlinked: 0,
+				blobsSkipped: 1,
+			});
+		} finally {
+			rmSync(root, { recursive: true, force: true });
+		}
+	});
+
+	it("falls back to blob copies when hardlinking crosses filesystems", () => {
+		const root = mkdtempSync(join(tmpdir(), "pi-ollama-import-copy-"));
+		try {
+			const homeDir = join(root, "home");
+			const agentDir = join(root, "agent");
+			const userStore = join(homeDir, ".ollama", "models");
+			const blob = join(userStore, "blobs", "sha256-def");
+			mkdirSync(join(userStore, "blobs"), { recursive: true });
+			writeFileSync(blob, "blob-copy", "utf-8");
+			const runtime = new OllamaRuntime({
+				agentDir,
+				deps: {
+					homeDir,
+					linkFile: () => {
+						throw Object.assign(new Error("cross device"), { code: "EXDEV" });
+					},
+					copyFile: copyFileSync,
+				},
+			});
+
+			const result = runtime.importUserModels();
+			expect(result).toMatchObject({ blobsHardlinked: 0, blobsCopied: 1 });
+			expect(readFileSync(join(runtime.ownedModelsDir(), "blobs", "sha256-def"), "utf-8")).toBe("blob-copy");
+		} finally {
+			rmSync(root, { recursive: true, force: true });
+		}
 	});
 
 	it("lists installed models with sizes from /api/tags", async () => {

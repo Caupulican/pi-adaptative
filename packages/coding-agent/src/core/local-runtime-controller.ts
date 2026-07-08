@@ -29,6 +29,21 @@ const MODEL_ROUTER_TIER_ORDER: readonly ("cheap" | "medium" | "expensive")[] = [
  * long enough to read and decide, short enough that an unattended session doesn't hang a turn on it. */
 const OLLAMA_INSTALL_CONFIRM_TIMEOUT_MS = 30_000;
 
+function parseWrongOllamaStoreReason(
+	reason: string,
+): { activePath: string; modelCount: number; ownedPath: string } | undefined {
+	if (!reason.startsWith("wrong_store:")) return undefined;
+	const parts = reason.slice("wrong_store:".length).split(":");
+	if (parts.length < 3) return undefined;
+	const [activePath, countText, ...ownedPathParts] = parts;
+	const modelCount = Number(countText);
+	return {
+		activePath,
+		modelCount: Number.isFinite(modelCount) ? modelCount : 0,
+		ownedPath: ownedPathParts.join(":"),
+	};
+}
+
 export interface LocalRuntimeControllerDeps {
 	/** Root directory OllamaRuntime instances are scoped under — fixed for the session's lifetime. */
 	agentDir: string;
@@ -150,13 +165,19 @@ export class LocalRuntimeController {
 		const runtime = this.getLocalRuntime(serverUrl);
 		const status = await runtime.detect();
 		if (status.serverUp) {
-			this._confirmedUp.add(confirmedKey);
-			return { ready: true, reason: "already_running" };
+			if (status.activeStore?.kind === "pi-owned") {
+				this._confirmedUp.add(confirmedKey);
+				return { ready: true, reason: "already_running" };
+			}
+			return {
+				ready: false,
+				reason: `wrong_store:${status.activeStore?.path ?? "external/unknown"}:${status.activeStore?.modelCount ?? 0}:${status.ownedModelsDir}`,
+			};
 		}
 		if (!status.binaryPath) {
 			return { ready: false, reason: "binary_missing", installGuide: runtime.installGuide() };
 		}
-		const started = await runtime.startReuseExisting();
+		const started = await runtime.start();
 		if (started.started) {
 			this._confirmedUp.add(confirmedKey);
 		}
@@ -341,6 +362,7 @@ export class LocalRuntimeController {
 
 			const modelLabel = this.deps.formatModel(current.model);
 			const localRuntimeName = current.model.provider === OLLAMA_PROVIDER ? "ollama" : "Transformers";
+			const wrongStore = parseWrongOllamaStoreReason(readiness.reason);
 			const whyText = readiness.installAttemptError
 				? `pi tried to install it just now, but the install attempt failed: ${readiness.installAttemptError}`
 				: readiness.installGuide
@@ -350,9 +372,11 @@ export class LocalRuntimeController {
 								: "the pi-managed Transformers runtime is not installed.",
 							...readiness.installGuide,
 						].join("\n")
-					: current.model.provider === OLLAMA_PROVIDER
-						? `its ${localRuntimeName} server is not reachable (${readiness.reason}) — check that ollama is running.`
-						: `its ${localRuntimeName} server is not reachable (${readiness.reason}) — check that the runtime is running.`;
+					: wrongStore
+						? `an Ollama server is already running with store ${wrongStore.activePath} (${wrongStore.modelCount} model(s)); pi's owned store is ${wrongStore.ownedPath}. Stop the other server or run /models import, then retry.`
+						: current.model.provider === OLLAMA_PROVIDER
+							? `its ${localRuntimeName} server is not reachable (${readiness.reason}) — check that ollama is running.`
+							: `its ${localRuntimeName} server is not reachable (${readiness.reason}) — check that the runtime is running.`;
 			const fallbackText = escalated
 				? `Falling back to the ${escalated.tier} tier for this turn.`
 				: "No other tier is configured — falling back to the session's default model.";

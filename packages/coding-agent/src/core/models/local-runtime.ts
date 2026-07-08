@@ -1,7 +1,17 @@
 import { type ChildProcess, spawn } from "node:child_process";
-import { createWriteStream, existsSync, mkdirSync, rmSync } from "node:fs";
+import {
+	copyFileSync,
+	createWriteStream,
+	type Dirent,
+	existsSync,
+	linkSync,
+	mkdirSync,
+	readdirSync,
+	rmSync,
+	statSync,
+} from "node:fs";
 import { homedir, arch as osArch, platform as osPlatform } from "node:os";
-import { delimiter, join } from "node:path";
+import { delimiter, dirname, join, relative } from "node:path";
 import type { Readable, Writable } from "node:stream";
 import { pipeline } from "node:stream/promises";
 import * as nodeZlib from "node:zlib";
@@ -24,14 +34,21 @@ function requireStdin(proc: ChildProcess, label: string): Writable {
  * Local model runtime manager (local-model-lifecycle-design.md): Ollama first, interface kept
  * runtime-agnostic. Pi SPAWNS the serve process itself with OWNED model storage
  * (`OLLAMA_MODELS=<agentDir>/models/ollama`) so every downloaded weight lives inside pi's tree —
- * per-model disk accounting is trivial and full cleanup is one directory. If a system server is
- * already running, pi uses it instead of double-installing, with the honest tradeoff surfaced:
- * storage then lives in the system daemon's dir and removal control is limited to `ollama rm`.
+ * per-model disk accounting is trivial and full cleanup is one directory. User-level Ollama stores
+ * can be imported into the owned store, but are never silently served or deleted.
  *
  * Hard boundaries (design "Hard boundaries"): lifecycle actions are USER commands only — this
  * module is never exposed as a model-invokable tool; install is GUIDE MODE (exact manual steps,
  * never `curl | sh`); removal is explicit, disclosed, and never automatic.
  */
+
+export type OllamaStoreKind = "pi-owned" | "user" | "external";
+
+export interface OllamaStoreSummary {
+	kind: OllamaStoreKind;
+	path: string;
+	modelCount: number;
+}
 
 export interface LocalRuntimeStatus {
 	binaryPath?: string;
@@ -40,13 +57,28 @@ export interface LocalRuntimeStatus {
 	serverUrl: string;
 	/** True when the responding server is a child process pi spawned (owned storage applies). */
 	managedByPi: boolean;
-	/** Owned weights directory (only meaningful for pi-managed serves). */
+	/** Owned weights directory. This is pi's canonical Ollama store. */
 	ownedModelsDir: string;
+	userModelsDir: string;
+	ownedStore: OllamaStoreSummary;
+	userStore: OllamaStoreSummary;
+	activeStore?: OllamaStoreSummary;
 }
 
 export interface InstalledLocalModel {
 	name: string;
 	sizeBytes: number;
+}
+
+export interface OllamaImportResult {
+	sourceDir: string;
+	targetDir: string;
+	manifestsImported: number;
+	manifestsSkipped: number;
+	blobsHardlinked: number;
+	blobsCopied: number;
+	blobsSkipped: number;
+	bytesImported: number;
 }
 
 export interface OllamaModelInfo {
@@ -109,6 +141,8 @@ export interface LocalRuntimeDeps {
 		options: { env: NodeJS.ProcessEnv },
 	) => Pick<ChildProcess, "pid" | "kill" | "unref" | "on">;
 	existsFn?: (path: string) => boolean;
+	linkFile?: (source: string, target: string) => void;
+	copyFile?: (source: string, target: string) => void;
 	envPath?: string;
 	homeDir?: string;
 	sleepFn?: (ms: number) => Promise<void>;
@@ -149,6 +183,18 @@ const TRANSFORMERS_SERVER_RELATIVE_PATH = join("runtimes", "hf-transformers-open
 const TRANSFORMERS_PINNED_PACKAGES = ["transformers==5.13.0", "huggingface-hub==1.22.0", "safetensors==0.8.0"];
 const TRANSFORMERS_REQUIRED_MODULES = ["torch", "transformers", "huggingface_hub", "safetensors"];
 const TORCH_PINNED_VERSION = "2.12.1";
+
+function isCrossDeviceLinkError(error: unknown): boolean {
+	return typeof error === "object" && error !== null && (error as { code?: unknown }).code === "EXDEV";
+}
+
+function fileSizeBytes(path: string): number {
+	try {
+		return statSync(path).size;
+	} catch {
+		return 0;
+	}
+}
 
 async function runCommandDefault(
 	command: string,
@@ -214,6 +260,8 @@ export class OllamaRuntime {
 	private readonly _fetch: typeof fetch;
 	private readonly _spawn: NonNullable<LocalRuntimeDeps["spawnFn"]>;
 	private readonly _exists: (path: string) => boolean;
+	private readonly _linkFile: (source: string, target: string) => void;
+	private readonly _copyFile: (source: string, target: string) => void;
 	private readonly _envPath: string;
 	private readonly _homeDir: string;
 	private readonly _sleep: (ms: number) => Promise<void>;
@@ -223,6 +271,7 @@ export class OllamaRuntime {
 	private readonly _hasCommand: (command: string) => boolean;
 	private readonly _extractArchiveOverride: LocalRuntimeDeps["extractArchive"] | undefined;
 	private _child: Pick<ChildProcess, "pid" | "kill" | "unref" | "on"> | undefined;
+	private _childModelsDir: string | undefined;
 
 	constructor(args: { agentDir: string; baseUrl?: string; deps?: LocalRuntimeDeps }) {
 		this._agentDir = args.agentDir;
@@ -230,6 +279,8 @@ export class OllamaRuntime {
 		this._fetch = args.deps?.fetchFn ?? fetch;
 		this._spawn = args.deps?.spawnFn ?? ((command, argv, options) => spawn(command, argv, options));
 		this._exists = args.deps?.existsFn ?? existsSync;
+		this._linkFile = args.deps?.linkFile ?? linkSync;
+		this._copyFile = args.deps?.copyFile ?? copyFileSync;
 		this._envPath = args.deps?.envPath ?? process.env.PATH ?? "";
 		this._homeDir = args.deps?.homeDir ?? homedir();
 		this._sleep = args.deps?.sleepFn ?? ((ms) => new Promise((resolve) => setTimeout(resolve, ms)));
@@ -260,6 +311,35 @@ export class OllamaRuntime {
 		return join(this._agentDir, "models", "ollama");
 	}
 
+	userModelsDir(): string {
+		return join(this._homeDir, ".ollama", "models");
+	}
+
+	private _storeSummary(kind: OllamaStoreKind, path: string): OllamaStoreSummary {
+		return { kind, path, modelCount: this._countStoreModels(path) };
+	}
+
+	private _countStoreModels(storeDir: string): number {
+		return this._walkFiles(join(storeDir, "manifests")).length;
+	}
+
+	private _walkFiles(root: string): string[] {
+		if (!this._exists(root)) return [];
+		let entries: Dirent[];
+		try {
+			entries = readdirSync(root, { withFileTypes: true });
+		} catch {
+			return [];
+		}
+		const files: string[] = [];
+		for (const entry of entries) {
+			const path = join(root, entry.name);
+			if (entry.isDirectory()) files.push(...this._walkFiles(path));
+			else if (entry.isFile()) files.push(path);
+		}
+		return files;
+	}
+
 	private _findBinary(): { path: string; source: "system" | "user" | "pi-owned" } | undefined {
 		const piOwned = join(this._agentDir, "runtimes", "ollama", "bin", "ollama");
 		if (this._exists(piOwned)) return { path: piOwned, source: "pi-owned" };
@@ -274,27 +354,124 @@ export class OllamaRuntime {
 	}
 
 	private async _serverUp(): Promise<boolean> {
+		return (await this._serverModels()).up;
+	}
+
+	private async _serverModels(): Promise<{ up: boolean; modelCount: number }> {
 		try {
 			const response = await this._fetch(`${this._baseUrl}/api/tags`, {
 				signal: AbortSignal.timeout(HEALTH_TIMEOUT_MS),
 			});
-			return response.ok;
+			if (!response.ok) return { up: false, modelCount: 0 };
+			const data = (await response.json().catch(() => ({}))) as { models?: unknown };
+			return { up: true, modelCount: Array.isArray(data.models) ? data.models.length : 0 };
 		} catch {
-			return false;
+			return { up: false, modelCount: 0 };
 		}
+	}
+
+	private _activeStoreSummary(
+		serverModelCount: number,
+		ownedStore: OllamaStoreSummary,
+		userStore: OllamaStoreSummary,
+	): OllamaStoreSummary {
+		if (this._childModelsDir) {
+			return {
+				kind: this._childModelsDir === this.ownedModelsDir() ? "pi-owned" : "user",
+				path: this._childModelsDir,
+				modelCount: serverModelCount,
+			};
+		}
+		if (
+			serverModelCount > 0 &&
+			serverModelCount === ownedStore.modelCount &&
+			serverModelCount !== userStore.modelCount
+		) {
+			return { ...ownedStore, modelCount: serverModelCount };
+		}
+		if (
+			serverModelCount > 0 &&
+			serverModelCount === userStore.modelCount &&
+			serverModelCount !== ownedStore.modelCount
+		) {
+			return { ...userStore, modelCount: serverModelCount };
+		}
+		return { kind: "external", path: "external/unknown", modelCount: serverModelCount };
 	}
 
 	async detect(): Promise<LocalRuntimeStatus> {
 		const binary = this._findBinary();
-		const serverUp = await this._serverUp();
+		const serverModels = await this._serverModels();
+		const ownedStore = this._storeSummary("pi-owned", this.ownedModelsDir());
+		const userStore = this._storeSummary("user", this.userModelsDir());
+		const activeStore = serverModels.up
+			? this._activeStoreSummary(serverModels.modelCount, ownedStore, userStore)
+			: undefined;
 		return {
 			binaryPath: binary?.path,
 			binarySource: binary?.source,
-			serverUp,
+			serverUp: serverModels.up,
 			serverUrl: this._baseUrl,
-			managedByPi: this._child !== undefined && serverUp,
+			managedByPi: this._child !== undefined && serverModels.up,
 			ownedModelsDir: this.ownedModelsDir(),
+			userModelsDir: this.userModelsDir(),
+			ownedStore,
+			userStore,
+			activeStore,
 		};
+	}
+
+	importUserModels(): OllamaImportResult {
+		const sourceDir = this.userModelsDir();
+		const targetDir = this.ownedModelsDir();
+		const result: OllamaImportResult = {
+			sourceDir,
+			targetDir,
+			manifestsImported: 0,
+			manifestsSkipped: 0,
+			blobsHardlinked: 0,
+			blobsCopied: 0,
+			blobsSkipped: 0,
+			bytesImported: 0,
+		};
+		if (sourceDir === targetDir || !this._exists(sourceDir)) return result;
+		mkdirSync(targetDir, { recursive: true });
+		this._importManifestFiles(join(sourceDir, "manifests"), join(targetDir, "manifests"), result);
+		this._importBlobFiles(join(sourceDir, "blobs"), join(targetDir, "blobs"), result);
+		return result;
+	}
+
+	private _importManifestFiles(sourceRoot: string, targetRoot: string, result: OllamaImportResult): void {
+		for (const source of this._walkFiles(sourceRoot)) {
+			const target = join(targetRoot, relative(sourceRoot, source));
+			if (this._exists(target)) {
+				result.manifestsSkipped++;
+				continue;
+			}
+			mkdirSync(dirname(target), { recursive: true });
+			this._copyFile(source, target);
+			result.manifestsImported++;
+		}
+	}
+
+	private _importBlobFiles(sourceRoot: string, targetRoot: string, result: OllamaImportResult): void {
+		for (const source of this._walkFiles(sourceRoot)) {
+			const target = join(targetRoot, relative(sourceRoot, source));
+			if (this._exists(target)) {
+				result.blobsSkipped++;
+				continue;
+			}
+			mkdirSync(dirname(target), { recursive: true });
+			try {
+				this._linkFile(source, target);
+				result.blobsHardlinked++;
+			} catch (error) {
+				if (!isCrossDeviceLinkError(error)) throw error;
+				this._copyFile(source, target);
+				result.blobsCopied++;
+			}
+			result.bytesImported += fileSizeBytes(target);
+		}
 	}
 
 	/**
@@ -449,9 +626,9 @@ export class OllamaRuntime {
 		extraEnv: NodeJS.ProcessEnv,
 	): Promise<{ started: boolean; reason: string }> {
 		const host = this._baseUrl.replace(/^https?:\/\//, "");
-		this._child = this._spawn(binary.path, ["serve"], {
-			env: { ...process.env, OLLAMA_HOST: host, ...extraEnv },
-		});
+		const env: NodeJS.ProcessEnv = { ...process.env, OLLAMA_HOST: host, ...extraEnv };
+		this._childModelsDir = env.OLLAMA_MODELS ?? this.userModelsDir();
+		this._child = this._spawn(binary.path, ["serve"], { env });
 		this._child.unref?.();
 		for (let attempt = 0; attempt < START_POLL_ATTEMPTS; attempt++) {
 			if (await this._serverUp()) return { started: true, reason: "started" };
@@ -513,6 +690,7 @@ export class OllamaRuntime {
 			// already gone
 		}
 		this._child = undefined;
+		this._childModelsDir = undefined;
 		return { stopped: true };
 	}
 

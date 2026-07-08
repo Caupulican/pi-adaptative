@@ -198,6 +198,16 @@ export async function handleModelsCommand(host: LocalModelHost, argsText: string
 			return;
 		}
 
+		if (action === "import") {
+			const imported = host.localRuntime.importUserModels();
+			host.showStatus(
+				`Imported Ollama models from ${imported.sourceDir} into pi-owned store ${imported.targetDir}: ` +
+					`${imported.manifestsImported} manifest(s), ${imported.blobsHardlinked} blob(s) hardlinked, ` +
+					`${imported.blobsCopied} blob(s) copied, ${imported.blobsSkipped + imported.manifestsSkipped} existing file(s) skipped.`,
+			);
+			return;
+		}
+
 		if (action === "add") {
 			const rawRef = rest.join(" ");
 			if (!rawRef) {
@@ -248,9 +258,22 @@ export async function handleModelsCommand(host: LocalModelHost, argsText: string
 	}
 }
 
+function formatOllamaStore(store: { kind: string; path: string; modelCount: number } | undefined): string {
+	if (!store) return "unknown store (0 model(s))";
+	return `${store.path} [${store.kind}, ${store.modelCount} model(s)]`;
+}
+
 export async function ensureLocalServer(host: LocalModelHost): Promise<boolean> {
 	const status = await host.localRuntime.detect();
-	if (status.serverUp) return true;
+	if (status.serverUp) {
+		if (status.activeStore?.kind === "pi-owned") return true;
+		host.showStatus(
+			`Ollama is already running on ${status.serverUrl} with store ${formatOllamaStore(status.activeStore)}; ` +
+				`pi's canonical store is ${status.ownedModelsDir} (${status.ownedStore.modelCount} model(s)). ` +
+				"Stop the other serve or run /models import before adding models.",
+		);
+		return false;
+	}
 	if (!status.binaryPath) {
 		for (const line of host.localRuntime.installGuide()) host.showStatus(line);
 		return false;
@@ -271,9 +294,9 @@ export async function listLocalModels(host: LocalModelHost): Promise<void> {
 	const models = status.serverUp ? await host.localRuntime.list() : [];
 	const ollamaLines = status.serverUp
 		? [
-				`Ollama models (${status.managedByPi ? `pi-managed server, storage: ${status.ownedModelsDir}` : "system server — storage owned by the system daemon"}):`,
+				`Ollama models (active store: ${formatOllamaStore(status.activeStore)}; pi-owned store: ${status.ownedModelsDir} with ${status.ownedStore.modelCount} model(s)):`,
 				...(models.length === 0
-					? ["  (none installed — /models add <ref>, or /models suggest for a validated roster)"]
+					? ["  (none installed — /models add <ref>, /models import, or /models suggest for a validated roster)"]
 					: []),
 			]
 		: [
@@ -316,14 +339,14 @@ export async function listLocalModels(host: LocalModelHost): Promise<void> {
 			return `  - ${model.name} (${gb} GB) · ${probe}`;
 		}),
 		...(transformersLines.length > 0 ? ["Pi-managed Transformers models:", ...transformersLines] : []),
-		"Commands: /models add <ref> · /models remove <ref> confirm · /models stop",
+		"Commands: /models import · /models add <ref> · /models remove <ref> confirm · /models stop",
 	];
 	for (const line of lines) host.showStatus(line);
 }
 
 export async function addLocalModel(host: LocalModelHost, pullRef: string, preselectRole?: FitnessRole): Promise<void> {
 	if (!(await ensureLocalServer(host))) return;
-	host.showStatus(`Pulling ${pullRef}… (weights land in the server's model storage)`);
+	host.showStatus(`Pulling ${pullRef}… (weights land in pi's owned Ollama store)`);
 	let lastShown = 0;
 	const pulled = await host.localRuntime.pull(pullRef, (progress) => {
 		const now = Date.now();

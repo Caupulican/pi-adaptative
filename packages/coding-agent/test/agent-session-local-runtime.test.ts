@@ -172,11 +172,12 @@ describe("AgentSession local (Ollama) runtime readiness", () => {
 			}
 		});
 
-		it("reports ready immediately when the server already responds", async () => {
+		it("reports a running non-owned Ollama store instead of silently using it", async () => {
 			const harness = await createHarness({ localRuntimeDeps: upDeps() });
 			try {
 				const result = await ensureReady(harness, localModel());
-				expect(result.ready).toBe(true);
+				expect(result.ready).toBe(false);
+				expect(result.reason).toContain("wrong_store:external/unknown");
 			} finally {
 				harness.cleanup();
 			}
@@ -288,7 +289,7 @@ describe("AgentSession local (Ollama) runtime readiness", () => {
 		});
 
 		it("passes a ready local model through unchanged", async () => {
-			const harness = await createHarness({ localRuntimeDeps: upDeps() });
+			const harness = await createHarness({ localRuntimeDeps: bootableDeps() });
 			try {
 				const route = cheapRoute(localModel());
 				const result = await ensureRouteReady(harness, route);
@@ -430,7 +431,7 @@ function registerOllamaFaux(harness: Awaited<ReturnType<typeof createHarness>>, 
 }
 
 describe("AgentSession local runtime readiness — end to end through prompt()", () => {
-	it("boots the local model's server before the turn (reusing the user's own models, not owned storage) and runs the turn on it", async () => {
+	it("boots the local model's server before the turn with pi-owned storage and runs the turn on it", async () => {
 		let serveEnv: NodeJS.ProcessEnv | undefined;
 		const harness = await createHarness({
 			settings: { modelRouter: { enabled: true, cheapModel: "ollama/qwen3:0.6b" } },
@@ -453,8 +454,8 @@ describe("AgentSession local runtime readiness — end to end through prompt()",
 			expect(harness.eventsOfType("warning")).toHaveLength(0);
 			expect(serveEnv?.OLLAMA_NUM_PARALLEL).toBe("1");
 			expect(serveEnv?.OLLAMA_KEEP_ALIVE).toBe("30m");
-			// The router's boot path must reuse the user's OWN models dir, never pi's owned storage.
-			expect(serveEnv?.OLLAMA_MODELS).toBeUndefined();
+			// The router's boot path uses the same canonical pi-owned store as /models add.
+			expect(serveEnv?.OLLAMA_MODELS).toContain("models/ollama");
 		} finally {
 			ollamaFaux.unregister();
 			harness.cleanup();
@@ -510,13 +511,20 @@ describe("AgentSession local runtime readiness — confirmed-up cache", () => {
 
 	it("skips the health-check on a second call once the server is confirmed up", async () => {
 		let fetchCalls = 0;
+		let up = false;
 		const harness = await createHarness({
 			localRuntimeDeps: {
-				...upDeps(),
+				existsFn: (path) => path.includes("ollama-dist"),
 				fetchFn: (async () => {
 					fetchCalls++;
+					if (!up) throw new Error("ECONNREFUSED");
 					return new Response("{}", { status: 200 });
 				}) as unknown as typeof fetch,
+				spawnFn: () => {
+					up = true;
+					return fakeChild();
+				},
+				sleepFn: async () => {},
 			},
 		});
 		try {
@@ -526,7 +534,7 @@ describe("AgentSession local runtime readiness — confirmed-up cache", () => {
 			expect(first.ready).toBe(true);
 			expect(second.ready).toBe(true);
 			expect(second.reason).toBe("confirmed_up_cached");
-			expect(fetchCalls).toBe(1);
+			expect(fetchCalls).toBe(3);
 		} finally {
 			harness.cleanup();
 		}

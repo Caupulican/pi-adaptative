@@ -171,12 +171,15 @@ async function checkOllama(deps: DoctorDeps): Promise<DoctorCheck> {
 	}
 	const version = firstLine(deps.probeVersion(status.binaryPath));
 	const versionSuffix = version ? `, ${version}` : "";
+	const activeStore = status.activeStore
+		? `${status.activeStore.path} [${status.activeStore.kind}, ${status.activeStore.modelCount} model(s)]`
+		: `none; pi-owned store ${status.ownedModelsDir} has ${status.ownedStore.modelCount} model(s)`;
 	return {
 		id: "ollama",
 		label: "Ollama (local model runtime)",
 		kind: "system",
 		present: true,
-		detail: `binary: ${status.binaryPath} [${status.binarySource}]${versionSuffix}; server: ${status.serverUp ? "up" : "down"} at ${status.serverUrl}`,
+		detail: `binary: ${status.binaryPath} [${status.binarySource}]${versionSuffix}; server: ${status.serverUp ? "up" : "down"} at ${status.serverUrl}; active store: ${activeStore}`,
 	};
 }
 
