@@ -1,4 +1,4 @@
-## [Unreleased]
+## [0.81.18] - 2026-07-08
 
 ### Added
 - Added an exact Bonsai-4B GGUF Q1_0 curated local-model suggestion for one-step managed Ollama setup and curator-role probing.
