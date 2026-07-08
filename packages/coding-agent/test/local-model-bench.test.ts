@@ -1,4 +1,6 @@
 import { describe, expect, it } from "vitest";
+import { getAgentDir } from "../src/config.ts";
+import { ModelAdaptationStore } from "../src/core/models/adaptation-store.ts";
 import { formatModelFitnessReport, runModelFitnessProbe } from "../src/core/research/model-fitness.ts";
 
 /**
@@ -74,9 +76,17 @@ function completeFor(model: string) {
 		if (!res.ok) throw new Error(`ollama http ${res.status}`);
 		const data = (await res.json()) as {
 			message?: { content?: string };
+			prompt_eval_count?: number;
+			prompt_eval_duration?: number;
 			eval_count?: number;
 			eval_duration?: number;
 		};
+		ModelAdaptationStore.forAgentDir(getAgentDir()).recordPerfSample(`ollama/${model}`, {
+			promptTokens: data.prompt_eval_count,
+			completionTokens: data.eval_count,
+			requestToFirstTokenMs: data.prompt_eval_duration !== undefined ? data.prompt_eval_duration / 1e6 : undefined,
+			firstTokenToDoneMs: data.eval_duration !== undefined ? data.eval_duration / 1e6 : undefined,
+		});
 		let text = data.message?.content ?? "";
 		const thinkEnd = text.indexOf("</think>");
 		if (thinkEnd >= 0) text = text.slice(thinkEnd + "</think>".length);

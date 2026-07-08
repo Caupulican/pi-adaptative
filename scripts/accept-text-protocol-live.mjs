@@ -17,6 +17,9 @@ const EXPECTED_VERDICTS = new Map([
 const EXPECTED_VARIANTS = new Map();
 const PROBE_ONLY_MODELS = new Set(["openai-codex/gpt-5.5"]);
 const TIMEOUT_MS = Number(process.env.PI_ACCEPT_LIVE_TIMEOUT_MS ?? 600_000);
+const CPU_SAFE_STALL = { connectMs: 120_000, activeIdleMs: 180_000, quietIdleMs: 900_000 };
+const PROFILE_PROMPT_TOKENS = 8_000;
+const ADAPTIVE_STALL_CEILING_MS = 30 * 60_000;
 const root = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "..");
 
 function usage() {
@@ -107,13 +110,40 @@ function ensureMiniCpmFullBaseProvider(modelsConfig) {
 	}
 }
 
-async function hydrateAgentDir(agentDir) {
+async function perfProfileFor(modelRef) {
+	const store = await readJsonIfExists(path.join(homedir(), ".pi", "agent", "state", "model-adaptation.json"));
+	for (const models of Object.values(store.hosts ?? {})) {
+		const entry = models?.[modelRef];
+		if (entry?.profile?.perf?.samples > 0) return entry.profile.perf;
+	}
+	return undefined;
+}
+
+function stallSettingsFromPerf(perf) {
+	if (!perf?.prefillTokensPerSecond || perf.prefillTokensPerSecond <= 0) return CPU_SAFE_STALL;
+	const expectedPrefillMs = (PROFILE_PROMPT_TOKENS / perf.prefillTokensPerSecond) * 1000;
+	return {
+		...CPU_SAFE_STALL,
+		quietIdleMs: Math.min(
+			ADAPTIVE_STALL_CEILING_MS,
+			Math.max(CPU_SAFE_STALL.quietIdleMs, Math.ceil(expectedPrefillMs * 3)),
+		),
+	};
+}
+
+async function hydrateAgentDir(agentDir, modelRef) {
 	const modelsConfig = await readJsonIfExists(path.join(homedir(), ".pi", "agent", "models.json"));
 	ensureMiniCpmFullBaseProvider(modelsConfig);
 	await writeFile(path.join(agentDir, "models.json"), JSON.stringify(modelsConfig, null, 2), "utf8");
 	const auth = await readJsonIfExists(path.join(homedir(), ".pi", "agent", "auth.json"));
 	auth.ollama ??= { type: "api_key", key: "ollama" };
 	await writeFile(path.join(agentDir, "auth.json"), JSON.stringify(auth), "utf8");
+	const stall = stallSettingsFromPerf(await perfProfileFor(modelRef));
+	await writeFile(
+		path.join(agentDir, "settings.json"),
+		JSON.stringify({ retry: { stall }, httpIdleTimeoutMs: 0 }, null, 2),
+		"utf8",
+	);
 }
 
 function makeLineReader(stream, onLine) {
@@ -204,7 +234,7 @@ async function runModel(modelRef, keepSessions) {
 	const sessionDir = path.join(scratch, "sessions");
 	const agentDir = path.join(scratch, "agent");
 	await mkdir(agentDir, { recursive: true });
-	await hydrateAgentDir(agentDir);
+	await hydrateAgentDir(agentDir, target.ref);
 	const state = { events: [], listeners: new Set(), stderr: "" };
 	let markerPath;
 	const child = spawn(

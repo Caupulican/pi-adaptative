@@ -166,6 +166,11 @@ If the user's instructions conflict with any rule in this document, ask for expl
 
 ## Findings
 
+### 2026-07-08 · scripts,coding-agent · live acceptance and local bench now feed adaptive stall profiling — claude
+P5 landed: the live text-protocol acceptance harness writes scratch-session stall settings from the host/model perf profile when present, otherwise CPU-safe quiet bounds with HTTP idle disabled, so protocol correctness runs are not measuring watchdog strictness. The opt-in local model bench now records Ollama prompt/decode timing into the host adaptation store so bench runs pre-warm P2's adaptive resolver for later real sessions.
+- evidence: scripts/accept-text-protocol-live.mjs:122 · scripts/accept-text-protocol-live.mjs:141 · scripts/accept-text-protocol-live.mjs:143 · packages/coding-agent/test/local-model-bench.test.ts:84 · packages/coding-agent/test/local-model-bench.test.ts:87
+- tags: local-models, acceptance, bench, perf-profile, watchdog, packages/coding-agent, p5
+
 ### 2026-07-08 · packages/coding-agent · runtime residency arbiter plans local loads across adapter classes — claude
 P6 landed: `planRuntimeResidency` is a pure host-RAM planner over resident models, requested load, reservations, pinning, dwell windows, residency-control grade, and recent eviction records. It returns deterministic fit/evict/refuse decisions, keeps advisory residents observe-only, protects the active model, blocks ping-pong plans, and handles reflex-pipeline reservations as all-or-nothing loads; faux adapters exercise the `full`, `keep-alive`, and `advisory` contract shapes.
 - evidence: packages/coding-agent/src/core/models/runtime-arbiter.ts:42 · packages/coding-agent/src/core/models/runtime-arbiter.ts:50 · packages/coding-agent/test/runtime-arbiter.test.ts:63 · packages/coding-agent/test/runtime-arbiter.test.ts:87 · packages/coding-agent/test/runtime-arbiter.test.ts:105 · packages/coding-agent/test/runtime-arbiter.test.ts:135
