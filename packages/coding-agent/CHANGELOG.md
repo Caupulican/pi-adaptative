@@ -1,4 +1,4 @@
-## [Unreleased]
+## [0.81.21] - 2026-07-08
 
 ### Added
 - Added a local cold-start live acceptance gate for stock-stall Ollama tool-call turns.
