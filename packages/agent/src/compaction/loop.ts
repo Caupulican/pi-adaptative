@@ -75,7 +75,7 @@ export async function runCompactionLoop(deps: CompactionLoopDeps): Promise<Compa
 		}
 
 		const observedTokens = deps.measureLiveTokens();
-		if (!deps.shouldCompact(observedTokens)) {
+		if (cycle === 1 && !deps.shouldCompact(observedTokens)) {
 			return {
 				kind: "skip",
 				reason:

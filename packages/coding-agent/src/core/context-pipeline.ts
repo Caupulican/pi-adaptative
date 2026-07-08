@@ -116,6 +116,9 @@ export class ContextPipeline {
 	private _latestPromptPolicyGcCorrelation: PromptPolicyGcCorrelationReport | undefined = undefined;
 	private _latestPromptEnforcementReport: PromptEnforcementReport | undefined = undefined;
 	private readonly _tokenBudget = new TokenBudget();
+	private _hasTokenBudgetAnchor = false;
+	private _tokenBudgetAnchorCompactionId: string | undefined = undefined;
+	private _lastTokenBudgetAnchorKey: string | undefined = undefined;
 
 	private readonly deps: ContextPipelineDeps;
 
@@ -641,6 +644,42 @@ export class ContextPipeline {
 		);
 	}
 
+	observeProviderUsage(messages: AgentMessage[], usageMessage: AssistantMessage): void {
+		if (usageMessage.stopReason === "error" || usageMessage.stopReason === "aborted") {
+			return;
+		}
+
+		const estimate = estimateContextTokens(messages);
+		if (estimate.lastUsageIndex === null || messages[estimate.lastUsageIndex] !== usageMessage) {
+			return;
+		}
+
+		const compactionEntry = getLatestCompactionEntry(this.deps.getSessionManager().getBranch());
+		if (!compactionEntry) {
+			return;
+		}
+
+		const compactionTimestamp = new Date(compactionEntry.timestamp).getTime();
+		if (usageMessage.timestamp <= compactionTimestamp) {
+			return;
+		}
+
+		const coveredChars = estimateConversationChars(messages, 0, estimate.lastUsageIndex + 1);
+		if (estimate.usageTokens <= 0 || coveredChars <= 0) {
+			return;
+		}
+
+		const anchorKey = `${compactionEntry.id}:${usageMessage.timestamp}:${estimate.usageTokens}:${coveredChars}`;
+		if (anchorKey === this._lastTokenBudgetAnchorKey) {
+			return;
+		}
+
+		this._tokenBudget.anchor(estimate.usageTokens, coveredChars);
+		this._hasTokenBudgetAnchor = true;
+		this._tokenBudgetAnchorCompactionId = compactionEntry.id;
+		this._lastTokenBudgetAnchorKey = anchorKey;
+	}
+
 	estimateCurrentContextTokens(messages: AgentMessage[]): number {
 		const estimate = estimateContextTokens(messages);
 		if (estimate.lastUsageIndex === null) {
@@ -658,9 +697,11 @@ export class ContextPipeline {
 			return this._tokenBudget.estimateDelta(estimateConversationChars(messages));
 		}
 
-		const coveredChars = estimateConversationChars(messages, 0, estimate.lastUsageIndex + 1);
+		if (!this._hasTokenBudgetAnchor || this._tokenBudgetAnchorCompactionId !== compactionEntry.id) {
+			return estimate.tokens;
+		}
+
 		const deltaChars = estimateConversationChars(messages, estimate.lastUsageIndex + 1, messages.length);
-		this._tokenBudget.anchor(estimate.usageTokens, coveredChars);
 		return this._tokenBudget.current(deltaChars, estimate.tokens);
 	}
 }

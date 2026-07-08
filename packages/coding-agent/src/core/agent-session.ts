@@ -2234,6 +2234,7 @@ export class AgentSession {
 		// accumulate until the interactive Node process hits the V8 heap limit.
 		if (event.type === "message_end") {
 			compactToolResultDetailsForRetention(event.message);
+			let messagePersisted = false;
 			// While a cheap routed turn is buffering, its messages are captured for later flush/discard
 			// instead of persisted here (see ModelRouterController.captureSessionMessage).
 			if (this._modelRouter.captureSessionMessage(event.message)) {
@@ -2248,6 +2249,7 @@ export class AgentSession {
 					event.message.display,
 					event.message.details,
 				);
+				messagePersisted = true;
 			} else if (
 				event.message.role === "user" ||
 				event.message.role === "assistant" ||
@@ -2255,6 +2257,7 @@ export class AgentSession {
 			) {
 				// Regular LLM message - persist as SessionMessageEntry
 				this.sessionManager.appendMessage(event.message);
+				messagePersisted = true;
 			}
 			// Other message types (bashExecution, compactionSummary, branchSummary) are persisted elsewhere
 
@@ -2263,6 +2266,9 @@ export class AgentSession {
 				this._lastAssistantMessage = event.message;
 
 				const assistantMsg = event.message as AssistantMessage;
+				if (messagePersisted) {
+					this._pipeline.observeProviderUsage(this.agent.state.messages, assistantMsg);
+				}
 				if (assistantMsg.stopReason !== "error") {
 					this._overflowRecoveryAttempted = false;
 				}
@@ -3849,6 +3855,21 @@ export class AgentSession {
 		return false;
 	}
 
+	private _measureLiveContextTokensForCompaction(): number {
+		const estimatedTokens = this._pipeline.estimateCurrentContextTokens(this.agent.state.messages);
+		const assistantMessage = findLastAssistantMessage(this.agent.state.messages);
+		if (!assistantMessage || assistantMessage.stopReason === "error" || assistantMessage.stopReason === "aborted") {
+			return estimatedTokens;
+		}
+
+		const compactionEntry = getLatestCompactionEntry(this.sessionManager.getBranch());
+		if (compactionEntry && assistantMessage.timestamp <= new Date(compactionEntry.timestamp).getTime()) {
+			return estimatedTokens;
+		}
+
+		return Math.max(calculateContextTokens(assistantMessage.usage), estimatedTokens);
+	}
+
 	/**
 	 * Internal: Run auto-compaction with events.
 	 */
@@ -3879,7 +3900,7 @@ export class AgentSession {
 			const margin = Math.max(0, Math.floor(0.01 * contextWindow));
 			const outcome = await runCompactionLoop({
 				getBranch: () => this.sessionManager.getBranch(),
-				measureLiveTokens: () => this._pipeline.estimateCurrentContextTokens(this.agent.state.messages),
+				measureLiveTokens: () => this._measureLiveContextTokensForCompaction(),
 				shouldCompact:
 					reason === "overflow"
 						? () => true
@@ -4767,4 +4788,14 @@ export class AgentSession {
 	get extensionRunner(): ExtensionRunner {
 		return this._extensionRunner;
 	}
+}
+
+function findLastAssistantMessage(messages: AgentMessage[]): AssistantMessage | undefined {
+	for (let i = messages.length - 1; i >= 0; i--) {
+		const message = messages[i];
+		if (message.role === "assistant") {
+			return message;
+		}
+	}
+	return undefined;
 }

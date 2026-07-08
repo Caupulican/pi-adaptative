@@ -201,6 +201,35 @@ describe("runCompactionLoop", () => {
 		expect(outcome.result.summary).toBe("deterministic");
 	});
 
+	it("does not skip within threshold after a paid gate failure", async () => {
+		const measureLiveTokens = scriptedMeasure([1500, 900, 900, 900]);
+		const summarizeAndVerify = vi.fn(async () => {
+			summarizeCalls += 1;
+			throw new Error("gate-failed: actions-recall failed");
+		});
+		const buildDeterministicCheckpoint = vi.fn(async () => ({ result: createResult("deterministic") }));
+
+		const outcome = expectSuccess(
+			await runCompactionLoop({
+				getBranch: () => branch,
+				measureLiveTokens,
+				shouldCompact: (tokens) => tokens > 1000,
+				getPostApplyMargin: () => 10,
+				getBaseKeepRecentTokens: () => 800,
+				resolveModelAndAuth: async () => ({ model: createModel() }),
+				summarizeAndVerify,
+				buildDeterministicCheckpoint,
+				apply: async () => {},
+				onTransition: () => {},
+			}),
+		);
+
+		expect(summarizeAndVerify).toHaveBeenCalledTimes(3);
+		expect(buildDeterministicCheckpoint).toHaveBeenCalledTimes(1);
+		expect(outcome.cycles).toBe(4);
+		expect(outcome.result.summary).toBe("deterministic");
+	});
+
 	it("retries with chunked on input overflow", async () => {
 		const measureLiveTokens = scriptedMeasure([1200, 1200, 100]);
 		const summarizeAndVerify = vi.fn(async (params: CompactionCycleParams) => {

@@ -1,5 +1,8 @@
 ## [Unreleased]
 
+### Fixed
+- Fixed auto-compaction retries to skip within-threshold only at loop entry so gate-failed attempts can reach the deterministic checkpoint fallback.
+
 ## [0.81.18] - 2026-07-08
 
 ## [0.81.17] - 2026-07-08

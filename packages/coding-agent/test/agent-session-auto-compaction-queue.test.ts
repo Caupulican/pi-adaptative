@@ -418,6 +418,60 @@ describe("AgentSession auto-compaction queue resume", () => {
 		expect(runAutoCompactionSpy).toHaveBeenCalledWith("threshold", false);
 	});
 
+	it("should use the max of real usage and estimates inside the auto-compaction loop", async () => {
+		const events: unknown[] = [];
+		session.subscribe((event) => events.push(event));
+		const model = session.model!;
+		const liveTokens = model.contextWindow + 1;
+		const userMessage = {
+			role: "user" as const,
+			content: [{ type: "text" as const, text: "large prompt" }],
+			timestamp: Date.now(),
+		};
+		const successfulAssistant: AssistantMessage = {
+			role: "assistant",
+			content: [{ type: "text", text: "large successful response" }],
+			api: model.api,
+			provider: model.provider,
+			model: model.id,
+			usage: {
+				input: liveTokens - 1,
+				output: 1,
+				cacheRead: 0,
+				cacheWrite: 0,
+				totalTokens: liveTokens,
+				cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, total: 0 },
+			},
+			stopReason: "stop",
+			timestamp: Date.now() + 1,
+		};
+		session.agent.state.messages = [userMessage, successfulAssistant];
+		sessionManager.appendMessage(userMessage);
+		sessionManager.appendMessage(successfulAssistant);
+
+		const pipeline = (
+			session as unknown as {
+				_pipeline: { estimateCurrentContextTokens: (messages: AgentMessage[]) => number };
+			}
+		)._pipeline;
+		vi.spyOn(pipeline, "estimateCurrentContextTokens").mockReturnValue(100);
+		const measureLiveTokens = (
+			session as unknown as { _measureLiveContextTokensForCompaction: () => number }
+		)._measureLiveContextTokensForCompaction.bind(session);
+		expect(measureLiveTokens()).toBe(liveTokens);
+		const runAutoCompaction = (
+			session as unknown as {
+				_runAutoCompaction: (reason: "overflow" | "threshold", willRetry: boolean) => Promise<boolean>;
+			}
+		)._runAutoCompaction.bind(session);
+
+		await runAutoCompaction("threshold", false);
+		expect(events).toContainEqual(
+			expect.objectContaining({ type: "compaction_end", result: expect.objectContaining({ summary: "compacted" }) }),
+		);
+		expect(sessionManager.getEntries().some((entry) => entry.type === "compaction")).toBe(true);
+	});
+
 	it("should ignore stale pre-compaction assistant usage in provider preflight transform", async () => {
 		const model = session.model!;
 		const preCompactionTimestamp = Date.now() - 10_000;
