@@ -86,6 +86,36 @@ function isImageContentBlock(block: { type: string }): block is ImageContent {
 	return block.type === "image";
 }
 
+function isOllamaModel(model: Model<"openai-completions">): boolean {
+	return model.provider === "ollama" || model.baseUrl.includes(":11434");
+}
+
+function isOllamaContextSizeError(
+	model: Model<"openai-completions">,
+	normalized: ReturnType<typeof normalizeProviderError>,
+	formatted: string,
+): boolean {
+	if (!isOllamaModel(model)) return false;
+	const text = `${normalized.message}\n${normalized.body ?? ""}\n${formatted}`.toLowerCase();
+	return (
+		text.includes("exceed_context_size_error") ||
+		text.includes("prompt too long") ||
+		(text.includes("context") && text.includes("exceed"))
+	);
+}
+
+export function formatOpenAICompletionsProviderError(error: unknown, model: Model<"openai-completions">): string {
+	const normalized = normalizeProviderError(error);
+	const formatted = formatProviderError(normalized);
+	if (!isOllamaContextSizeError(model, normalized, formatted)) return formatted;
+	return (
+		`${formatted}\n` +
+		`Ollama context action for ${model.provider}/${model.id}: Ollama rejected this request because it exceeds the model's served context window. ` +
+		`Raise the Ollama serving context with OLLAMA_CONTEXT_LENGTH or a per-model num_ctx value, then retry. ` +
+		`Do not lower pi's models.json contextWindow to mask this backend limit.`
+	);
+}
+
 export interface OpenAICompletionsOptions extends StreamOptions {
 	toolChoice?: "auto" | "none" | "required" | { type: "function"; function: { name: string } };
 	reasoningEffort?: "minimal" | "low" | "medium" | "high" | "xhigh";
@@ -463,7 +493,7 @@ export const streamOpenAICompletions: StreamFunction<"openai-completions", OpenA
 				delete (block as { streamIndex?: number }).streamIndex;
 			}
 			output.stopReason = options?.signal?.aborted ? "aborted" : "error";
-			output.errorMessage = formatProviderError(normalizeProviderError(error));
+			output.errorMessage = formatOpenAICompletionsProviderError(error, model);
 			// Some providers via OpenRouter give additional information in this field.
 			const rawMetadata = (error as any)?.error?.metadata?.raw;
 			if (rawMetadata && !output.errorMessage.includes(String(rawMetadata))) {

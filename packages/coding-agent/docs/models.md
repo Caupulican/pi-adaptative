@@ -6,6 +6,7 @@ Add custom providers and models (Ollama, vLLM, LM Studio, proxies) via `~/.pi/ag
 
 - [Minimal Example](#minimal-example)
 - [Full Example](#full-example)
+- [Ollama serving context](#ollama-serving-context)
 - [Supported APIs](#supported-apis)
 - [Provider Configuration](#provider-configuration)
 - [Model Configuration](#model-configuration)
@@ -126,6 +127,17 @@ Use `google-generative-ai` with a `baseUrl` to add models from Google AI Studio,
 ```
 
 The `baseUrl` is required when adding custom models to the `google-generative-ai` API type.
+
+## Ollama serving context
+
+`contextWindow` in `models.json` tells pi how much context the model should be allowed to use. Ollama must also serve the model with a matching context size. If the Ollama server keeps its default `n_ctx`/`num_ctx` lower than the configured `contextWindow`, Ollama can reject OpenAI-compatible requests with `exceed_context_size_error` before pi can use the advertised window.
+
+Raise Ollama's serving context instead of lowering `contextWindow` to hide the mismatch:
+
+- set `OLLAMA_CONTEXT_LENGTH` for the Ollama server process; or
+- configure a per-model `num_ctx` value in the Ollama model options / Modelfile you serve.
+
+When an Ollama OpenAI-compatible request fails with `exceed_context_size_error`, pi surfaces the model name and this remediation hint in the provider error.
 
 ## Supported APIs
 
