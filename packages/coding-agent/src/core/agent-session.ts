@@ -1,4 +1,5 @@
-import { readFileSync } from "node:fs";
+import { readFileSync, rmSync, writeFileSync } from "node:fs";
+import { tmpdir } from "node:os";
 import { basename, dirname, join } from "node:path";
 import type {
 	Agent,
@@ -1390,7 +1391,7 @@ export class AgentSession {
 				messages: [{ role: "user", content: [{ type: "text", text: instruction }], timestamp: Date.now() }],
 				tools: [NATIVE_TOOL_PROBE_READ_TOOL],
 			},
-			{ textToolCallProtocol: false, maxRetries: 0, temperature: 0, maxTokens: 256 },
+			{ textToolCallProtocol: false, maxRetries: 0, temperature: 0, maxTokens: 768 },
 		);
 		return this._messageHasToolCallWithStringArgument(await stream.result(), "read", "path", path);
 	}
@@ -1412,12 +1413,17 @@ export class AgentSession {
 	}
 
 	private async _gradeNativeToolCallingForModel(model: Model<Api>, token: string): Promise<NativeToolProbeGrade> {
-		const path = join(this._cwd, "package.json");
-		const taskPassed = await this._runNativeReadTaskProbeTrial(model, path);
-		const echoPassed = await this._runNativeEchoToolProbeTrial(model, token);
-		if (taskPassed && echoPassed) return "task";
-		if (echoPassed) return "echo-only";
-		return "absent";
+		const path = join(tmpdir(), `pi-native-probe-${process.pid}-${Date.now()}.txt`);
+		writeFileSync(path, token, "utf-8");
+		try {
+			const taskPassed = await this._runNativeReadTaskProbeTrial(model, path);
+			if (taskPassed) return "task";
+			const echoPassed = await this._runNativeEchoToolProbeTrial(model, token);
+			if (echoPassed) return "echo-only";
+			return "absent";
+		} finally {
+			rmSync(path, { force: true });
+		}
 	}
 
 	private async _runTextProtocolTrial(

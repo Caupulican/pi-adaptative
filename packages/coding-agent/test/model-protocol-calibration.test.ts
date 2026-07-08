@@ -343,10 +343,14 @@ describe("text tool protocol calibration", () => {
 	it("probes native, text-protocol, and none verdicts and persists them per model", async () => {
 		const requests: CapturedRequest[] = [];
 		const nativeModel = createModel("native-model", { provider: "native-provider", textProtocol: false });
+		const taskOnlyModel = createModel("task-only-model", { provider: "task-provider", textProtocol: false });
 		const textModel = createModel("text-model", { provider: "text-provider", textProtocol: false });
 		const noneModel = createModel("none-model", { provider: "none-provider", textProtocol: false });
 		const respondForModel = (streamModel: Model<Api>, context: Context): string | AssistantMessage["content"] => {
-			if (isNativeReadTaskProbe(context) && streamModel.id === "native-model") {
+			if (
+				isNativeReadTaskProbe(context) &&
+				(streamModel.id === "native-model" || streamModel.id === "task-only-model")
+			) {
 				return [
 					{
 						type: "toolCall",
@@ -374,7 +378,7 @@ describe("text tool protocol calibration", () => {
 		const created = await createSession(nativeModel, requests, (context, _index, streamModel) =>
 			respondForModel(streamModel, context),
 		);
-		for (const model of [nativeModel, textModel, noneModel]) {
+		for (const model of [nativeModel, taskOnlyModel, textModel, noneModel]) {
 			created.modelRegistry.registerProvider(model.provider, {
 				api: model.api,
 				baseUrl: model.baseUrl,
@@ -390,12 +394,13 @@ describe("text tool protocol calibration", () => {
 		try {
 			const report = await created.session.probeToolCalling();
 			const registeredResults = report.results.filter((result) =>
-				["native-provider", "text-provider", "none-provider"].some((provider) =>
+				["native-provider", "task-provider", "text-provider", "none-provider"].some((provider) =>
 					result.model.startsWith(`${provider}/`),
 				),
 			);
 			expect(registeredResults).toMatchObject([
 				{ model: "native-provider/native-model", verdict: "native", nativeGrade: "task" },
+				{ model: "task-provider/task-only-model", verdict: "native", nativeGrade: "task" },
 				{
 					model: "text-provider/text-model",
 					verdict: "text-protocol",
@@ -408,13 +413,17 @@ describe("text tool protocol calibration", () => {
 			expect(report.table).toContain("text-provider/text-model | text-protocol | tool-tag | echo-only");
 		} finally {
 			created.session.dispose();
-			for (const model of [nativeModel, textModel, noneModel]) {
+			for (const model of [nativeModel, taskOnlyModel, textModel, noneModel]) {
 				created.modelRegistry.unregisterProvider(model.provider);
 			}
 		}
 
 		const store = ModelAdaptationStore.forAgentDir(agentDir);
 		expect(store.get("native-provider/native-model").toolProbe).toMatchObject({
+			status: "native",
+			nativeGrade: "task",
+		});
+		expect(store.get("task-provider/task-only-model").toolProbe).toMatchObject({
 			status: "native",
 			nativeGrade: "task",
 		});

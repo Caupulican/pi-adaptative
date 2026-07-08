@@ -200,6 +200,20 @@ def _extract_native_function_calls(text: str) -> tuple[str, list[dict[str, Any]]
     return "".join(remaining_parts).strip(), calls
 
 
+def _function_call_stopping_criteria(prompt_token_count: int) -> Any:
+    from transformers import StoppingCriteria, StoppingCriteriaList
+
+    class StopAfterFunctionCall(StoppingCriteria):
+        def __call__(self, input_ids: Any, _scores: Any, **_kwargs: Any) -> bool:
+            generated_ids = input_ids[0][prompt_token_count:]
+            if int(generated_ids.shape[-1]) == 0:
+                return False
+            text = _TOKENIZER.decode(generated_ids, skip_special_tokens=False)
+            return bool(_FUNCTION_CALL_RE.search(text))
+
+    return StoppingCriteriaList([StopAfterFunctionCall()])
+
+
 def _generate(request: dict[str, Any]) -> str:
     tokenizer = _TOKENIZER
     model = _MODEL
@@ -212,13 +226,16 @@ def _generate(request: dict[str, Any]) -> str:
     options = _generation_options(request)
     eos_token_id = getattr(tokenizer, "eos_token_id", None)
     pad_token_id = getattr(tokenizer, "pad_token_id", None) or eos_token_id
+    generation_args: dict[str, Any] = {
+        **encoded,
+        "eos_token_id": eos_token_id,
+        "pad_token_id": pad_token_id,
+        **options,
+    }
+    if isinstance(request.get("tools"), list) and request.get("tools"):
+        generation_args["stopping_criteria"] = _function_call_stopping_criteria(input_length)
     with torch.inference_mode():
-        output = model.generate(
-            **encoded,
-            eos_token_id=eos_token_id,
-            pad_token_id=pad_token_id,
-            **options,
-        )
+        output = model.generate(**generation_args)
     generated = output[0][input_length:]
     return _clean_generated_text(tokenizer.decode(generated, skip_special_tokens=False))
 

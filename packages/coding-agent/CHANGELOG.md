@@ -6,6 +6,7 @@
 - Added a pi-managed Hugging Face Transformers runtime path for curated full-base local model suggestions, starting with `openbmb/MiniCPM5-1B`, using an isolated venv and pi-owned HF cache.
 
 ### Fixed
+- Fixed tool probing so a real task-scale native tool call wins without requiring a separate echo-only probe, and the MiniCPM sidecar stops generation after a complete native function call.
 - Documented the Ollama serving-context requirement for local OpenAI-compatible models.
 
 ## [0.81.15] - 2026-07-07
