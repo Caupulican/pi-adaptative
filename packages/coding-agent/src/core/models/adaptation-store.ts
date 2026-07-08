@@ -28,12 +28,14 @@ export type ModelProtocolCalibration =
 	  };
 
 export type ModelToolProbeVerdict = "native" | "text-protocol" | "none";
+export type NativeToolProbeGrade = "task" | "echo-only" | "absent";
 
 export interface ModelToolProbe {
 	version: number;
 	status: ModelToolProbeVerdict;
 	probedAt: string;
 	variant?: string;
+	nativeGrade?: NativeToolProbeGrade;
 	diagnostic?: string;
 }
 
@@ -113,6 +115,10 @@ function isToolProbe(value: unknown): value is ModelToolProbe {
 		(value.status === "native" || value.status === "text-protocol" || value.status === "none") &&
 		typeof value.probedAt === "string" &&
 		(value.variant === undefined || typeof value.variant === "string") &&
+		(value.nativeGrade === undefined ||
+			value.nativeGrade === "task" ||
+			value.nativeGrade === "echo-only" ||
+			value.nativeGrade === "absent") &&
 		(value.diagnostic === undefined || typeof value.diagnostic === "string")
 	);
 }

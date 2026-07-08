@@ -59,8 +59,19 @@ function isCalibration(context: Context): boolean {
 	return (context.systemPrompt ?? "").includes("Text tool protocol calibration trial");
 }
 
-function isNativeToolProbe(context: Context): boolean {
-	return (context.systemPrompt ?? "").includes("Native tool-call capability probe");
+function isNativeReadTaskProbe(context: Context): boolean {
+	return (context.systemPrompt ?? "").includes("task-scale read");
+}
+
+function isNativeEchoProbe(context: Context): boolean {
+	return (context.systemPrompt ?? "").includes("echo-only");
+}
+
+function nativeReadProbePath(context: Context): string {
+	const text = `${context.systemPrompt ?? ""}\n${messageText(context)}`;
+	const match = /path exactly "([^"]+)"/.exec(text);
+	if (!match?.[1]) throw new Error(`missing native read probe path in ${text}`);
+	return match[1];
 }
 
 function createDoneStream(model: Model<Api>, content: string | AssistantMessage["content"]) {
@@ -335,9 +346,24 @@ describe("text tool protocol calibration", () => {
 		const textModel = createModel("text-model", { provider: "text-provider", textProtocol: false });
 		const noneModel = createModel("none-model", { provider: "none-provider", textProtocol: false });
 		const respondForModel = (streamModel: Model<Api>, context: Context): string | AssistantMessage["content"] => {
-			if (isNativeToolProbe(context) && streamModel.id === "native-model") {
+			if (isNativeReadTaskProbe(context) && streamModel.id === "native-model") {
 				return [
-					{ type: "toolCall", id: "native-probe", name: "echo", arguments: { data: calibrationToken(context) } },
+					{
+						type: "toolCall",
+						id: "native-read-probe",
+						name: "read",
+						arguments: { path: nativeReadProbePath(context) },
+					},
+				];
+			}
+			if (isNativeEchoProbe(context) && (streamModel.id === "native-model" || streamModel.id === "text-model")) {
+				return [
+					{
+						type: "toolCall",
+						id: "native-echo-probe",
+						name: "echo",
+						arguments: { data: calibrationToken(context) },
+					},
 				];
 			}
 			if (isCalibration(context) && streamModel.id === "text-model") {
@@ -369,11 +395,17 @@ describe("text tool protocol calibration", () => {
 				),
 			);
 			expect(registeredResults).toMatchObject([
-				{ model: "native-provider/native-model", verdict: "native" },
-				{ model: "text-provider/text-model", verdict: "text-protocol", variant: "tool-tag" },
-				{ model: "none-provider/none-model", verdict: "none" },
+				{ model: "native-provider/native-model", verdict: "native", nativeGrade: "task" },
+				{
+					model: "text-provider/text-model",
+					verdict: "text-protocol",
+					variant: "tool-tag",
+					nativeGrade: "echo-only",
+				},
+				{ model: "none-provider/none-model", verdict: "none", nativeGrade: "absent" },
 			]);
-			expect(report.table).toContain("text-provider/text-model");
+			expect(report.table).toContain("Native grade");
+			expect(report.table).toContain("text-provider/text-model | text-protocol | tool-tag | echo-only");
 		} finally {
 			created.session.dispose();
 			for (const model of [nativeModel, textModel, noneModel]) {
@@ -382,11 +414,15 @@ describe("text tool protocol calibration", () => {
 		}
 
 		const store = ModelAdaptationStore.forAgentDir(agentDir);
-		expect(store.get("native-provider/native-model").toolProbe).toMatchObject({ status: "native" });
+		expect(store.get("native-provider/native-model").toolProbe).toMatchObject({
+			status: "native",
+			nativeGrade: "task",
+		});
 		expect(store.get("text-provider/text-model").toolProbe).toMatchObject({
 			status: "text-protocol",
 			variant: "tool-tag",
+			nativeGrade: "echo-only",
 		});
-		expect(store.get("none-provider/none-model").toolProbe).toMatchObject({ status: "none" });
+		expect(store.get("none-provider/none-model").toolProbe).toMatchObject({ status: "none", nativeGrade: "absent" });
 	});
 });

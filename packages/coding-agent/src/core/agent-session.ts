@@ -156,7 +156,7 @@ import {
 import type { ModelRegistry } from "./model-registry.ts";
 import { formatModelRouterModel, ModelRouterController } from "./model-router-controller.ts";
 import { ModelSelectionController } from "./model-selection-controller.ts";
-import { ModelAdaptationStore, type ModelToolProbe } from "./models/adaptation-store.ts";
+import { ModelAdaptationStore, type ModelToolProbe, type NativeToolProbeGrade } from "./models/adaptation-store.ts";
 import type { StoredFitnessReport } from "./models/fitness-store.ts";
 import type { LocalRuntimeDeps, OllamaRuntime } from "./models/local-runtime.ts";
 import { ProfileFilterController } from "./profile-filter-controller.ts";
@@ -211,6 +211,11 @@ const TEXT_TOOL_PROTOCOL_ECHO_TOOL = {
 	name: "echo",
 	description: "Echo calibration data",
 	parameters: Type.Object({ data: Type.String() }),
+} satisfies Tool;
+const NATIVE_TOOL_PROBE_READ_TOOL = {
+	name: "read",
+	description: "Read file contents",
+	parameters: Type.Object({ path: Type.String() }),
 } satisfies Tool;
 
 /** Test-only override of the stream-idle bounds. Read per-request by the wiring's resolver. */
@@ -401,6 +406,7 @@ export interface ToolProbeResult {
 	model: string;
 	verdict: ToolProbeVerdict;
 	variant?: TextToolProtocolVariant;
+	nativeGrade?: NativeToolProbeGrade;
 	diagnostic?: string;
 }
 
@@ -1350,26 +1356,68 @@ export class AgentSession {
 		};
 	}
 
-	private _messageHasEchoProbe(message: AssistantMessage, token: string): boolean {
-		return message.content.some(
-			(block) => block.type === "toolCall" && block.name === "echo" && block.arguments.data === token,
-		);
+	private _messageHasToolCallWithStringArgument(
+		message: AssistantMessage,
+		toolName: string,
+		argName: string,
+		argValue: string,
+	): boolean {
+		return message.content.some((block) => {
+			if (block.type !== "toolCall" || block.name !== toolName) return false;
+			const args = block.arguments as unknown;
+			return (
+				typeof args === "object" &&
+				args !== null &&
+				!Array.isArray(args) &&
+				(args as Record<string, unknown>)[argName] === argValue
+			);
+		});
 	}
 
-	private async _runNativeToolProbeTrial(model: Model<Api>, token: string): Promise<boolean> {
+	private _nativeToolProbeSystemPrompt(instruction: string): string {
+		const base = (this.agent.state.systemPrompt ?? "").trim();
+		return base ? `${base}\n\n${instruction}` : instruction;
+	}
+
+	private async _runNativeReadTaskProbeTrial(model: Model<Api>, path: string): Promise<boolean> {
 		const instruction =
-			`Native tool-call capability probe. Use provider-native tool calling, not prose. ` +
+			`Native tool-call capability probe: task-scale read. Use provider-native tool calling, not prose. ` +
+			`Call read exactly once with path exactly "${path}".`;
+		const stream = await this._streamForToolProbe(
+			model,
+			{
+				systemPrompt: this._nativeToolProbeSystemPrompt(instruction),
+				messages: [{ role: "user", content: [{ type: "text", text: instruction }], timestamp: Date.now() }],
+				tools: [NATIVE_TOOL_PROBE_READ_TOOL],
+			},
+			{ textToolCallProtocol: false, maxRetries: 0, temperature: 0, maxTokens: 256 },
+		);
+		return this._messageHasToolCallWithStringArgument(await stream.result(), "read", "path", path);
+	}
+
+	private async _runNativeEchoToolProbeTrial(model: Model<Api>, token: string): Promise<boolean> {
+		const instruction =
+			`Native tool-call capability probe: echo-only. Use provider-native tool calling, not prose. ` +
 			`Call echo with data exactly "${token}".`;
 		const stream = await this._streamForToolProbe(
 			model,
 			{
-				systemPrompt: instruction,
+				systemPrompt: this._nativeToolProbeSystemPrompt(instruction),
 				messages: [{ role: "user", content: [{ type: "text", text: instruction }], timestamp: Date.now() }],
 				tools: [TEXT_TOOL_PROTOCOL_ECHO_TOOL],
 			},
 			{ textToolCallProtocol: false, maxRetries: 0, temperature: 0, maxTokens: 256 },
 		);
-		return this._messageHasEchoProbe(await stream.result(), token);
+		return this._messageHasToolCallWithStringArgument(await stream.result(), "echo", "data", token);
+	}
+
+	private async _gradeNativeToolCallingForModel(model: Model<Api>, token: string): Promise<NativeToolProbeGrade> {
+		const path = join(this._cwd, "package.json");
+		const taskPassed = await this._runNativeReadTaskProbeTrial(model, path);
+		const echoPassed = await this._runNativeEchoToolProbeTrial(model, token);
+		if (taskPassed && echoPassed) return "task";
+		if (echoPassed) return "echo-only";
+		return "absent";
 	}
 
 	private async _runTextProtocolTrial(
@@ -1482,13 +1530,18 @@ export class AgentSession {
 	}
 
 	private _formatToolProbeReport(results: readonly ToolProbeResult[]): string {
-		const lines = ["Tool probe results:", "Model | Verdict | Variant | Diagnostic", "--- | --- | --- | ---"];
+		const lines = [
+			"Tool probe results:",
+			"Model | Verdict | Variant | Native grade | Diagnostic",
+			"--- | --- | --- | --- | ---",
+		];
 		for (const result of results) {
 			lines.push(
 				[
 					result.model,
 					result.verdict,
 					result.variant ?? "-",
+					result.nativeGrade ?? "-",
 					result.diagnostic ? result.diagnostic.replace(/\s+/g, " ").slice(0, 160) : "-",
 				].join(" | "),
 			);
@@ -1503,12 +1556,23 @@ export class AgentSession {
 	private async _probeToolCallingForModel(model: Model<Api>): Promise<ToolProbeResult> {
 		const modelKey = this._modelRef(model);
 		const probedAt = new Date().toISOString();
+		let nativeGrade: NativeToolProbeGrade = "absent";
 		let diagnostic: string | undefined;
 		try {
-			if (await this._runNativeToolProbeTrial(model, "pi-native-probe")) {
-				this._storeToolProbe(modelKey, { version: TEXT_TOOL_PROTOCOL_VERSION, status: "native", probedAt });
-				return { model: modelKey, verdict: "native" };
+			nativeGrade = await this._gradeNativeToolCallingForModel(model, "pi-native-probe");
+			if (nativeGrade === "task") {
+				this._storeToolProbe(modelKey, {
+					version: TEXT_TOOL_PROTOCOL_VERSION,
+					status: "native",
+					probedAt,
+					nativeGrade,
+				});
+				return { model: modelKey, verdict: "native", nativeGrade };
 			}
+			diagnostic =
+				nativeGrade === "echo-only"
+					? "Native echo probe passed but task-scale read probe failed."
+					: "Native task-scale read and echo probes did not produce provider-native tool calls.";
 		} catch (error) {
 			diagnostic = error instanceof Error ? error.message : String(error);
 		}
@@ -1521,16 +1585,24 @@ export class AgentSession {
 					status: "text-protocol",
 					probedAt: calibrated.calibratedAt,
 					variant: calibrated.variant,
+					nativeGrade,
+					diagnostic,
 				});
-				return { model: modelKey, verdict: "text-protocol", variant: calibrated.variant };
+				return { model: modelKey, verdict: "text-protocol", variant: calibrated.variant, nativeGrade, diagnostic };
 			}
-			diagnostic ??= `Text protocol variants failed: ${calibrated.variantsTried.join(", ")}`;
+			diagnostic = `${diagnostic ? `${diagnostic} ` : ""}Text protocol variants failed: ${calibrated.variantsTried.join(", ")}`;
 		} catch (error) {
 			diagnostic = error instanceof Error ? error.message : String(error);
 		}
 
-		this._storeToolProbe(modelKey, { version: TEXT_TOOL_PROTOCOL_VERSION, status: "none", probedAt, diagnostic });
-		return { model: modelKey, verdict: "none", diagnostic };
+		this._storeToolProbe(modelKey, {
+			version: TEXT_TOOL_PROTOCOL_VERSION,
+			status: "none",
+			probedAt,
+			nativeGrade,
+			diagnostic,
+		});
+		return { model: modelKey, verdict: "none", nativeGrade, diagnostic };
 	}
 
 	private async _resolveToolProbeModels(target?: string): Promise<Model<Api>[]> {

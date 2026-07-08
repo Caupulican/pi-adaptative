@@ -24,8 +24,9 @@ export function formatToolRepairHealthReport(store: ModelAdaptationStore, now: D
 			lines.push("  tool probe: none");
 		} else {
 			const variant = toolProbe.variant ? ` (${toolProbe.variant})` : "";
+			const nativeGrade = toolProbe.nativeGrade ? ` native=${toolProbe.nativeGrade}` : "";
 			lines.push(
-				`  tool probe: v${toolProbe.version} ${toolProbe.status}${variant} ${formatAgeDays(toolProbe.probedAt, now)}`,
+				`  tool probe: v${toolProbe.version} ${toolProbe.status}${variant}${nativeGrade} ${formatAgeDays(toolProbe.probedAt, now)}`,
 			);
 			if (toolProbe.diagnostic) lines.push(`  probe diagnostic: ${toolProbe.diagnostic}`);
 		}
