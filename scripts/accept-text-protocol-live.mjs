@@ -5,22 +5,22 @@ import path from "node:path";
 import { fileURLToPath } from "node:url";
 import { spawn } from "node:child_process";
 
-const MINICPM_PROVIDER = "sglang";
+const MINICPM_PROVIDER = "pi-hf-transformers";
 const MINICPM_MODEL_ID = "openbmb/MiniCPM5-1B";
 const MINICPM_MODEL_REF = `${MINICPM_PROVIDER}/${MINICPM_MODEL_ID}`;
 const DEFAULT_MODELS = ["ollama/qwen3:1.7b", "ollama/gemma3:1b", MINICPM_MODEL_REF, "openai-codex/gpt-5.5"];
 const EXPECTED_VERDICTS = new Map([
 	["ollama/qwen3:1.7b", "native"],
 	["ollama/gemma3:1b", "text-protocol"],
-	[MINICPM_MODEL_REF, "text-protocol"],
+	[MINICPM_MODEL_REF, "native"],
 ]);
-const EXPECTED_VARIANTS = new Map([[MINICPM_MODEL_REF, "function-xml"]]);
+const EXPECTED_VARIANTS = new Map();
 const PROBE_ONLY_MODELS = new Set(["openai-codex/gpt-5.5"]);
 const TIMEOUT_MS = 180_000;
 const root = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "..");
 
 function usage() {
-	console.log(`Usage: node scripts/accept-text-protocol-live.mjs [--model <provider/model>]... [--keep-sessions]\n\nRuns C10-style scratch-session live acceptance. Bare model names are treated as ollama/<model>.\nDefault models: ${DEFAULT_MODELS.join(", ")}\nRequires local Ollama with requested Ollama models already pulled, auth for non-Ollama providers, and an OpenAI-compatible SGLang server for ${MINICPM_MODEL_ID} at PI_MINICPM_BASE_URL/SGLANG_BASE_URL or http://127.0.0.1:30000/v1.`);
+	console.log(`Usage: node scripts/accept-text-protocol-live.mjs [--model <provider/model>]... [--keep-sessions]\n\nRuns C10-style scratch-session live acceptance. Bare model names are treated as ollama/<model>.\nDefault models: ${DEFAULT_MODELS.join(", ")}\nRequires local Ollama with requested Ollama models already pulled, auth for non-Ollama providers, and the pi-managed MiniCPM Transformers sidecar for ${MINICPM_MODEL_ID} at PI_MINICPM_BASE_URL or http://127.0.0.1:18839/v1.`);
 }
 
 function parseArgs(argv) {
@@ -67,17 +67,19 @@ async function readJsonIfExists(filePath) {
 }
 
 function miniCpmBaseUrl() {
-	return process.env.PI_MINICPM_BASE_URL || process.env.SGLANG_BASE_URL || "http://127.0.0.1:30000/v1";
+	return process.env.PI_MINICPM_BASE_URL || "http://127.0.0.1:18839/v1";
 }
 
 function ensureMiniCpmFullBaseProvider(modelsConfig) {
 	// Preserve the user's configured models. The full-base MiniCPM entry is scratch-only for this
-	// acceptance run; it does not remove or replace existing Ollama/GGUF entries.
+	// acceptance run; it does not remove or replace existing Ollama/GGUF entries. MiniCPM is a
+	// native tool-calling target here: the pi-managed sidecar translates its function dialect into
+	// provider-native tool_calls so the shared validation/repair layer can handle malformed args.
 	modelsConfig.providers ??= {};
 	modelsConfig.providers[MINICPM_PROVIDER] ??= {
 		baseUrl: miniCpmBaseUrl(),
 		api: "openai-completions",
-		apiKey: "sglang",
+		apiKey: "pi-transformers",
 		compat: {
 			supportsDeveloperRole: false,
 			supportsReasoningEffort: false,
@@ -87,7 +89,7 @@ function ensureMiniCpmFullBaseProvider(modelsConfig) {
 	const provider = modelsConfig.providers[MINICPM_PROVIDER];
 	provider.baseUrl ??= miniCpmBaseUrl();
 	provider.api ??= "openai-completions";
-	provider.apiKey ??= "sglang";
+	provider.apiKey ??= "pi-transformers";
 	provider.compat ??= {};
 	provider.compat.supportsDeveloperRole ??= false;
 	provider.compat.supportsReasoningEffort ??= false;
