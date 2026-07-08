@@ -14,13 +14,13 @@ export interface ParsedTextToolCalls {
 	failure?: TextToolProtocolParseFailure;
 }
 
-export type TextToolProtocolVariant = "tool-tag" | "tool-call" | "fenced-json";
+export type TextToolProtocolVariant = "tool-tag" | "tool-call" | "fenced-json" | "function-xml";
 
 export interface TextToolProtocolOptions {
 	variant?: TextToolProtocolVariant;
 }
 
-type EnvelopeKind = "pi_call" | "tool_call" | "fenced_json";
+type EnvelopeKind = "pi_call" | "tool_call" | "fenced_json" | "function_xml";
 
 interface EnvelopeMatch {
 	kind: EnvelopeKind;
@@ -43,8 +43,22 @@ function escapeAttribute(value: string): string {
 function unescapeAttribute(value: string): string {
 	return value
 		.replace(/&quot;/g, '"')
+		.replace(/&apos;/g, "'")
 		.replace(/&lt;/g, "<")
 		.replace(/&gt;/g, ">")
+		.replace(/&amp;/g, "&");
+}
+
+function escapeXmlText(value: string): string {
+	return value.replace(/&/g, "&amp;").replace(/</g, "&lt;").replace(/>/g, "&gt;");
+}
+
+function unescapeXmlText(value: string): string {
+	return value
+		.replace(/&lt;/g, "<")
+		.replace(/&gt;/g, ">")
+		.replace(/&apos;/g, "'")
+		.replace(/&quot;/g, '"')
 		.replace(/&amp;/g, "&");
 }
 
@@ -135,6 +149,17 @@ function findToolEnvelopes(text: string): EnvelopeMatch[] {
 			start: match.index,
 			end: match.index + match[0].length,
 			body: match[1] ?? "",
+		});
+	}
+
+	const functionEnvelope = /<function\s+name=(["'])(.*?)\1\s*>([\s\S]*?)<\/function\s*>/g;
+	for (const match of text.matchAll(functionEnvelope)) {
+		matches.push({
+			kind: "function_xml",
+			start: match.index,
+			end: match.index + match[0].length,
+			name: unescapeAttribute(match[2] ?? ""),
+			body: match[3] ?? "",
 		});
 	}
 
@@ -255,8 +280,36 @@ function parsePiCallEnvelope(match: EnvelopeMatch, names: readonly string[], ind
 	};
 }
 
+function parseFunctionXmlEnvelope(match: EnvelopeMatch, names: readonly string[], index: number): ToolCall | undefined {
+	if (!match.name) return undefined;
+	if (/<\/?function\b/i.test(match.body)) return undefined;
+	const params: Record<string, string> = {};
+	let cursor = 0;
+	let sawParam = false;
+	const paramPattern = /<param\s+name=(["'])(.*?)\1\s*>([\s\S]*?)<\/param\s*>/g;
+	for (const param of match.body.matchAll(paramPattern)) {
+		if (match.body.slice(cursor, param.index).trim()) return undefined;
+		const name = unescapeAttribute(param[2] ?? "");
+		if (!name || name in params) return undefined;
+		params[name] = unescapeXmlText((param[3] ?? "").trim());
+		cursor = param.index + param[0].length;
+		sawParam = true;
+	}
+	if (match.body.slice(cursor).trim()) return undefined;
+	if (!sawParam) return undefined;
+	return {
+		type: "toolCall",
+		id: `text-tool-${index}`,
+		name: match.name,
+		arguments: params,
+		source: "text-protocol",
+		errorMessage: textToolErrorMessage(match.name, names),
+	};
+}
+
 function parseEnvelope(match: EnvelopeMatch, names: readonly string[], index: number): ToolCall | undefined {
 	if (match.kind === "pi_call") return parsePiCallEnvelope(match, names, index);
+	if (match.kind === "function_xml") return parseFunctionXmlEnvelope(match, names, index);
 
 	const parsed = parseJsonObject(match.body);
 	if (!parsed) {
@@ -297,9 +350,27 @@ export function normalizeTextToolProtocolOptions(
 	return { variant: option.variant ?? DEFAULT_TEXT_TOOL_PROTOCOL_VARIANT };
 }
 
+function functionXmlParamValue(value: unknown): string {
+	if (typeof value === "string") return value;
+	const json = JSON.stringify(value);
+	return json ?? String(value);
+}
+
+function formatFunctionXmlEnvelope(toolName: string, argsJson: string): string {
+	const args = parseJsonObject(argsJson) ?? {};
+	const params = Object.entries(args)
+		.map(
+			([name, value]) =>
+				`<param name="${escapeAttribute(name)}">${escapeXmlText(functionXmlParamValue(value))}</param>`,
+		)
+		.join("");
+	return `<function name="${escapeAttribute(toolName)}">${params}</function>`;
+}
+
 function formatVariantEnvelope(variant: TextToolProtocolVariant, toolName: string, argsJson: string): string {
 	if (variant === "tool-call") return `<tool_call>{"name":"${toolName}","arguments":${argsJson}}</tool_call>`;
 	if (variant === "fenced-json") return `\`\`\`tool_call\n{"name":"${toolName}","arguments":${argsJson}}\n\`\`\``;
+	if (variant === "function-xml") return formatFunctionXmlEnvelope(toolName, argsJson);
 	return `<pi:call name="${escapeAttribute(toolName)}">${argsJson}</pi:call>`;
 }
 

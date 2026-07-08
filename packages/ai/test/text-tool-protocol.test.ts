@@ -91,6 +91,38 @@ describe("text tool-call protocol", () => {
 		expect(
 			parseTextToolCalls('```json\n{"tool":{"name":"echo","arguments":{"value":"hi"}}}\n```', tools).calls,
 		).toMatchObject([{ type: "toolCall", name: "echo", arguments: { value: "hi" }, source: "text-protocol" }]);
+		expect(
+			parseTextToolCalls('<function name="echo"><param name="value">hi</param></function>', tools).calls,
+		).toMatchObject([{ type: "toolCall", name: "echo", arguments: { value: "hi" }, source: "text-protocol" }]);
+	});
+
+	it("parses function XML envelopes without guessing ambiguous bodies", () => {
+		const tools = [makeTool("echo"), makeTool("read")];
+		const primer = generateTextToolProtocolPrimer([makeTool()], { variant: "function-xml" });
+		const parsed = parseTextToolCalls(
+			'Before <function name="echo"><param name="value">hi</param></function> between <function name="read"><param name="path">/tmp/a</param></function> after',
+			tools,
+		);
+		const ambiguous = parseTextToolCalls(
+			'<function name="echo"><param name="value">hi</param> trailing</function>',
+			tools,
+		);
+		const duplicate = parseTextToolCalls(
+			'<function name="echo"><param name="value">a</param><param name="value">b</param></function>',
+			tools,
+		);
+		const nested = parseTextToolCalls(
+			'<function name="echo"><function name="read"><param name="path">/tmp/a</param></function></function>',
+			tools,
+		);
+
+		expect(primer).toContain('<function name="echo"><param name="value">value</param></function>');
+		expect(parsed.text).toBe("Before  between  after");
+		expect(parsed.calls.map((call) => call.name)).toEqual(["echo", "read"]);
+		expect(parsed.calls.map((call) => call.arguments)).toEqual([{ value: "hi" }, { path: "/tmp/a" }]);
+		expect(ambiguous).toMatchObject({ calls: [], attempted: true, failure: "unrecognized" });
+		expect(duplicate).toMatchObject({ calls: [], attempted: true, failure: "unrecognized" });
+		expect(nested).toMatchObject({ calls: [], attempted: true, failure: "unrecognized" });
 	});
 
 	it("parses tolerated pure-text envelope spelling drift", () => {

@@ -205,12 +205,12 @@ describe("text tool protocol calibration", () => {
 			created.modelRegistry.unregisterProvider(model.provider);
 		}
 
-		expect(requests.length).toBe(3);
+		expect(requests.length).toBe(4);
 		expect(requests.every((request) => isCalibration(request.context))).toBe(true);
 		expect(ModelAdaptationStore.forAgentDir(agentDir).get(`${model.provider}/${model.id}`).protocol).toMatchObject({
 			version: 1,
 			status: "failed",
-			variantsTried: ["tool-tag", "tool-call", "fenced-json"],
+			variantsTried: ["tool-tag", "tool-call", "fenced-json", "function-xml"],
 		});
 
 		const fastFailRequests: CapturedRequest[] = [];
@@ -273,7 +273,7 @@ describe("text tool protocol calibration", () => {
 			created.modelRegistry.unregisterProvider(model.provider);
 		}
 
-		expect(requests).toHaveLength(3);
+		expect(requests).toHaveLength(4);
 		expect(requests.every((request) => isCalibration(request.context))).toBe(true);
 		expect(requests.every((request) => !("tools" in request.context))).toBe(true);
 	});

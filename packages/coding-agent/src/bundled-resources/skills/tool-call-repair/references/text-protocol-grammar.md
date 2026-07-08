@@ -54,11 +54,18 @@ pre-trained on other stacks' conventions.
 2. `<tool_call>{"name":"X","arguments":{...}}</tool_call>` (common OSS
    convention; `arguments` may itself be a JSON STRING — that is exactly
    R31 mode 2, handed straight to the repairer).
-3. Fenced block tagged `tool`/`tool_call`:
+3. Fenced block tagged `tool`/`tool_call`/`json`:
    ```` ```tool\n{"name":"X","arguments":{...}}\n``` ````
+4. XML function-call convention:
+   `<function name="X"><param name="k">value</param></function>`.
+   The scanner requires an explicit `</function>` close tag. Each `param`
+   becomes a string-valued argument; R31 owns string-to-number, string-to-bool,
+   and JSON-string coercion after parsing. Nested `<function>` bodies,
+   duplicate param names, or non-whitespace text inside the function body are
+   ambiguous and are refused rather than guessed.
 Everything else is prose. Ambiguous text is NEVER guessed into a call
-(doctrine: no heuristic soup). Unknown `tool-name` → not a call; it becomes a
-bounce with the "unknown tool" note listing valid names.
+(doctrine: no heuristic soup). Unknown `tool-name` → a text-protocol bounce with
+an "unknown tool" note listing valid names.
 
 ## 3. Schema -> primer projection (how the dictionary is generated)
 
@@ -135,7 +142,7 @@ string }` where:
 
 The trial tool is `echo(data:string)` (harness-provided, side-effect-free).
 Calibration asks the model to `echo` a known token via the protocol and
-checks the parser round-trips it. Grammar variants tried on failure, in
-order: (a) restate header + one example; (b) drop to fenced-block variant 3
-if angle-bracket tags fail; (c) shrink the dictionary to the single tool
-under test. The variant that first round-trips is persisted per model (R46).
+checks the parser round-trips it. Grammar variants tried on failure are the
+parser's supported variants in deterministic order: canonical `<pi:call>`,
+`<tool_call>`, fenced JSON/tool blocks, then XML `<function>`. The variant that
+first round-trips is persisted per model (R46).

@@ -201,7 +201,12 @@ const MODEL_ADAPTATION_REPAIR_THRESHOLD = 3;
 const TEXT_TOOL_PROTOCOL_VERSION = 1;
 const TEXT_TOOL_PROTOCOL_TRIALS_PER_VARIANT = 2;
 const TEXT_TOOL_PROTOCOL_PARSE_FAILURE_THRESHOLD = 3;
-const TEXT_TOOL_PROTOCOL_VARIANTS: readonly TextToolProtocolVariant[] = ["tool-tag", "tool-call", "fenced-json"];
+const TEXT_TOOL_PROTOCOL_VARIANTS: readonly TextToolProtocolVariant[] = [
+	"tool-tag",
+	"tool-call",
+	"fenced-json",
+	"function-xml",
+];
 const TEXT_TOOL_PROTOCOL_ECHO_TOOL = {
 	name: "echo",
 	description: "Echo calibration data",
