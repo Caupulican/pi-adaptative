@@ -1,4 +1,4 @@
-## [Unreleased]
+## [0.81.19] - 2026-07-08
 
 ### Fixed
 - Fixed post-compaction token measurement to keep passive estimates idempotent and use the same max real-usage/estimate basis as the auto-compaction trigger.
