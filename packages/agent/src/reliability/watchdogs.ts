@@ -54,9 +54,12 @@ export function createSilenceWatchdog(opts: SilenceWatchdogOptions): SilenceWatc
 // --- Stream-idle watchdog (wraps a StreamFn) -------------------------------
 
 import {
+	type Api,
 	type AssistantMessage,
 	type AssistantMessageEvent,
 	createAssistantMessageEventStream,
+	type Model,
+	type ProviderResponse,
 } from "@caupulican/pi-ai";
 import type { StreamFn } from "../types.ts";
 
@@ -147,7 +150,6 @@ export function withStreamIdleWatchdog(
 		if (callerAborted) controller.abort(callerSignal?.reason);
 		else callerSignal?.addEventListener("abort", onCallerAbort, { once: true });
 
-		const inner = await streamFn(model, context, { ...streamOptions, signal: controller.signal });
 		const outer = createAssistantMessageEventStream();
 
 		// Seeded so a connect-phase stall (no event ever arrived) still has a base message
@@ -171,6 +173,7 @@ export function withStreamIdleWatchdog(
 		};
 		let stalled = false;
 		let firstEventSeen = false;
+		let transportConfirmed = false;
 
 		// The idle bound adapts per event: quiet while nothing/thinking, active while
 		// text/toolCall content is flowing. Mutable so the onSilence closure always
@@ -205,6 +208,22 @@ export function withStreamIdleWatchdog(
 		let watchdog = createSilenceWatchdog({
 			silenceMs: opts.connectMs,
 			onSilence: () => stall(currentPhase, currentBoundMs),
+		});
+		const markTransportConfirmed = () => {
+			if (callerAborted || stalled || firstEventSeen || transportConfirmed) return;
+			transportConfirmed = true;
+			currentPhase = "quiet";
+			currentBoundMs = opts.quietIdleMs;
+			watchdog.touch(opts.quietIdleMs);
+		};
+		const originalOnResponse = streamOptions?.onResponse;
+		const inner = await streamFn(model, context, {
+			...streamOptions,
+			signal: controller.signal,
+			onResponse: async (response: ProviderResponse, responseModel: Model<Api>) => {
+				markTransportConfirmed();
+				await originalOnResponse?.(response, responseModel);
+			},
 		});
 		let terminalPushed = false;
 

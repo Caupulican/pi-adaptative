@@ -166,6 +166,11 @@ If the user's instructions conflict with any rule in this document, ask for expl
 
 ## Findings
 
+### 2026-07-08 · packages/agent · stream-idle watchdog switches to quiet timing after response headers — claude
+P1 landed: `withStreamIdleWatchdog` now wraps provider `onResponse` callbacks and treats HTTP response headers as transport confirmation before the first streamed event, so slow prefill after admission is charged to `quietIdleMs`; streams that never receive headers or events still fail under the original `connectMs` bound.
+- evidence: packages/agent/src/reliability/watchdogs.ts:212 · packages/agent/src/reliability/watchdogs.ts:223 · packages/agent/test/reliability/stream-idle.test.ts:50 · packages/agent/test/reliability/stream-idle.test.ts:54
+- tags: reliability, watchdog, local-models, packages/agent, p1
+
 ### 2026-07-08 · models/serving · native tool-calling capability is serving-stack-scoped, not a property of the weights — claude
 The same GGUF weights (byte-identical by sha256: the Ollama manifest's model-layer digest equals the HF LFS oid) have NO native tool channel under plain llama-cpp-python `create_chat_completion` (no server-side `<tool_call>` parsing; markup arrives as text — text-protocol territory) but a WORKING native channel under Ollama (tool-aware chat-template layer + server-side parsing into structured `tool_calls` — probed native/task, live-verified). Tool-probe verdicts must therefore stay keyed by provider/model ref as the adaptation store already does; never generalize a verdict across runtimes, and treat the runtime as part of model identity in any lifecycle or residency-arbiter work.
 - evidence: packages/coding-agent/src/core/models/adaptation-store.ts (host+ref keying) · scripts/accept-text-protocol-live.mjs (live acceptance, 2026-07-08 run: native read executed)

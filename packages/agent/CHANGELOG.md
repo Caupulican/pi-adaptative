@@ -1,5 +1,8 @@
 ## [Unreleased]
 
+### Fixed
+- Fixed stream-idle watchdogs to treat HTTP response headers as transport confirmation before the first streamed token.
+
 ## [0.81.16] - 2026-07-08
 
 ## [0.81.15] - 2026-07-07

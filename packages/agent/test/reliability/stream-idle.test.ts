@@ -20,6 +20,19 @@ function makeFakeStreamFn() {
 	return { inner, streamFn, signal: () => receivedSignal };
 }
 
+function makeResponseAwareFakeStreamFn(responseDelayMs: number) {
+	const inner = createAssistantMessageEventStream();
+	let receivedSignal: AbortSignal | undefined;
+	const streamFn: StreamFn = (model, _context, options) => {
+		receivedSignal = options?.signal;
+		setTimeout(() => {
+			void options?.onResponse?.({ status: 200, headers: {} }, model);
+		}, responseDelayMs);
+		return inner;
+	};
+	return { inner, streamFn, signal: () => receivedSignal };
+}
+
 // Distinct values per phase so a test failing on the wrong bound is unambiguous.
 const BOUNDS: Partial<StreamIdleOptions> = { connectMs: 120_000, activeIdleMs: 30_000, quietIdleMs: 90_000 };
 
@@ -34,8 +47,26 @@ describe("withStreamIdleWatchdog (phase-aware)", () => {
 		vi.advanceTimersByTime(120_000);
 		const result = await stream.result();
 		expect(result.stopReason).toBe("error");
-		expect(result.errorMessage).toMatch(/stream stalled/);
+		expect(result.errorMessage).toMatch(/stream stalled: no events for 120000ms \(connect phase\)/);
 		expect(fake.signal()?.aborted).toBe(true);
+	});
+
+	it("switches to the quiet bound when response headers arrive before the first stream event", async () => {
+		const fake = makeResponseAwareFakeStreamFn(1_000);
+		const wrapped = withStreamIdleWatchdog(fake.streamFn, {
+			connectMs: 2_000,
+			activeIdleMs: 1_000,
+			quietIdleMs: 10_000,
+		});
+		const stream = await wrapped({} as never, {} as never, {});
+
+		await vi.advanceTimersByTimeAsync(2_001);
+		expect(fake.signal()?.aborted).toBe(false);
+
+		fake.inner.push(makeStartEvent());
+		fake.inner.push({ type: "done", reason: "stop", message: makeErrorAssistantMessage("stop", undefined) });
+		const result = await stream.result();
+		expect(result.stopReason).toBe("stop");
 	});
 
 	it("quiet phase (connected, no content blocks yet) uses quietIdleMs, not activeIdleMs", async () => {
