@@ -44,6 +44,8 @@ Run `/models suggest` to choose from pi's curated local-model roster. Pi install
 
 Confirmed from source: Ollama/GGUF suggestions install through pi's managed Ollama runtime. Curated full-base Hugging Face suggestions install through the pi-managed Transformers runtime, which creates a venv under `~/.pi/agent/runtimes/hf-transformers`, caches HF weights under `~/.pi/agent/models/huggingface`, and registers models under provider `pi-hf-transformers` with OpenAI-compatible `/v1` endpoints. This keeps full-base HF models separate from system Python, user HF cache, and Ollama model storage.
 
+For MiniCPM5-1B, the shipped pi-managed Transformers sidecar parses the model's `<function><param>` dialect into OpenAI `tool_calls`, so that runtime can pass the graded probe as native/tool-task. Plain OpenAI-compatible servers that do not perform that parsing exercise pi's text-protocol fallback instead, using the `function-xml` variant after the native task probe demotes.
+
 Current baked suggestions include:
 
 - MiniCPM5-1B (full-base) → full-base Transformers executor / tiny local muscle. Install with `/models add hf.co/openbmb/MiniCPM5-1B`. This is the full-base Hugging Face model, not a GGUF/quantized artifact. Pi probes native tool-calling first and uses the text tool protocol only if native tool calls do not work.
