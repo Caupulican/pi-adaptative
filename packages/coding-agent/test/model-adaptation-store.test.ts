@@ -49,6 +49,30 @@ describe("ModelAdaptationStore", () => {
 		});
 	});
 
+	it("round-trips perf profiles as host-keyed model adaptation data", () => {
+		const agentDir = tempAgentDir();
+		dirs.push(agentDir);
+		const adaptation = store(agentDir);
+
+		adaptation.recordPerfSample(
+			"provider/model",
+			{
+				promptTokens: 1_000,
+				completionTokens: 100,
+				headersToFirstTokenMs: 2_000,
+				firstTokenToDoneMs: 1_000,
+			},
+			at(2),
+		);
+
+		expect(store(agentDir).get("provider/model", new Date(at(3))).perf).toEqual({
+			prefillTokensPerSecond: 500,
+			decodeTokensPerSecond: 100,
+			samples: 1,
+			updatedAt: at(2),
+		});
+	});
+
 	it("round-trips failed protocol calibration records and removes protocol status", () => {
 		const agentDir = tempAgentDir();
 		dirs.push(agentDir);

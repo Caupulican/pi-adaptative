@@ -90,7 +90,7 @@ export const DEFAULT_STREAM_IDLE: StreamIdleOptions = {
 };
 
 /** Re-resolved at the start of every request, so hosts can wire live-tunable settings. */
-export type StreamIdleOptionsResolver = () => Partial<StreamIdleOptions>;
+export type StreamIdleOptionsResolver = (...args: Parameters<StreamFn>) => Partial<StreamIdleOptions>;
 
 /** Extracts the current AssistantMessage snapshot carried by any stream event variant. */
 function partialFromEvent(event: AssistantMessageEvent): AssistantMessage {
@@ -129,7 +129,7 @@ export function withStreamIdleWatchdog(
 	options?: Partial<StreamIdleOptions> | StreamIdleOptionsResolver,
 ): StreamFn {
 	return async (model, context, streamOptions) => {
-		const resolved = typeof options === "function" ? options() : options;
+		const resolved = typeof options === "function" ? options(model, context, streamOptions) : options;
 		const cleaned: Partial<StreamIdleOptions> = {};
 		if (resolved) {
 			for (const [key, val] of Object.entries(resolved)) {

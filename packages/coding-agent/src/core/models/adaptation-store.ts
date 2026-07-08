@@ -1,6 +1,13 @@
 import { existsSync, mkdirSync, readFileSync, writeFileSync } from "node:fs";
 import { dirname, join } from "node:path";
 import { currentHostFingerprint, type HostFingerprint } from "./fitness-store.ts";
+import {
+	hasUsableModelPerfSample,
+	isModelPerfProfile,
+	type ModelPerfProfile,
+	type ModelPerfSample,
+	updateModelPerfProfile,
+} from "./perf-profile.ts";
 
 const STORE_VERSION = 1;
 const MAX_RULES_PER_MODEL = 5;
@@ -49,6 +56,7 @@ export interface ModelAdaptationProfile {
 	rules: ModelAdaptationRule[];
 	protocol?: ModelProtocolCalibration;
 	toolProbe?: ModelToolProbe;
+	perf?: ModelPerfProfile;
 	teachStats: Record<string, ModelTeachStats>;
 }
 
@@ -74,6 +82,7 @@ function normalizeProfile(profile: Partial<ModelAdaptationProfile> | undefined):
 		rules: Array.isArray(profile?.rules) ? profile.rules.filter(isRule) : [],
 		...(isProtocol(profile?.protocol) && { protocol: profile.protocol }),
 		...(isToolProbe(profile?.toolProbe) && { toolProbe: profile.toolProbe }),
+		...(isModelPerfProfile(profile?.perf) && { perf: profile.perf }),
 		teachStats: isRecord(profile?.teachStats) ? filterTeachStats(profile.teachStats) : {},
 	};
 }
@@ -264,6 +273,15 @@ export class ModelAdaptationStore {
 		const now = at ?? toolProbe.probedAt;
 		const profile = this.get(model, new Date(now));
 		return this.store(model, { ...profile, toolProbe }, now);
+	}
+
+	recordPerfSample(model: string, sample: ModelPerfSample, at?: string): StoredModelAdaptation | undefined {
+		if (!hasUsableModelPerfSample(sample)) return undefined;
+		const now = at ?? sample.at ?? new Date().toISOString();
+		const profile = this.get(model, new Date(now));
+		const perf = updateModelPerfProfile(profile.perf, sample, now);
+		if (!perf) return undefined;
+		return this.store(model, { ...profile, perf }, now);
 	}
 
 	removeProtocol(model: string, at = new Date()): boolean {

@@ -20,6 +20,7 @@ import {
 	computeRetryDelayMs,
 	createCustomMessage,
 	DEFAULT_RETRY_POLICY,
+	DEFAULT_STREAM_IDLE,
 	RetryController,
 	type RetryPolicy,
 	sleepAbortable,
@@ -160,6 +161,12 @@ import { ModelSelectionController } from "./model-selection-controller.ts";
 import { ModelAdaptationStore, type ModelToolProbe, type NativeToolProbeGrade } from "./models/adaptation-store.ts";
 import type { StoredFitnessReport } from "./models/fitness-store.ts";
 import type { LocalRuntimeDeps, OllamaRuntime, TransformersRuntime } from "./models/local-runtime.ts";
+import {
+	DEFAULT_ADAPTIVE_STREAM_IDLE_CEILING_MS,
+	estimateContextPromptTokens,
+	resolveAdaptiveStreamIdleOptions,
+	withModelPerfProfile,
+} from "./models/perf-profile.ts";
 import { ProfileFilterController } from "./profile-filter-controller.ts";
 import { expandPromptTemplate, type PromptTemplate } from "./prompt-templates.ts";
 import { ReflectionController } from "./reflection-controller.ts";
@@ -699,15 +706,37 @@ export class AgentSession {
 		// withStreamIdleWatchdog's contract), so no extra drain is added at this wiring site.
 		// Wrapping also breaks the `streamFn === streamSimple` identity the auth-injection checks
 		// use, so the wrapper carries a rawness marker that _isRawStreamSimple reads.
+		const agentDir = config.agentDir ?? getAgentDir();
+		const modelAdaptationStore = ModelAdaptationStore.forAgentDir(agentDir);
 		const baseStreamFn = this.agent.streamFn;
+		const profiledStreamFn = withModelPerfProfile(baseStreamFn, {
+			modelKey: (model) => formatModelRouterModel(model),
+			recordSample: (modelKey, sample) => {
+				modelAdaptationStore.recordPerfSample(modelKey, sample);
+			},
+		});
 		// `this.settingsManager` is assigned below; the resolver closes over the config reference
 		// because the wrapper must be installed before that assignment runs.
 		const stallSettingsSource = config.settingsManager;
 		this.agent.streamFn = tagRawness(
-			withStreamIdleWatchdog(baseStreamFn, () => ({
-				...stallSettingsSource.getStreamStallSettings(),
-				...streamIdleOptionsOverride,
-			})),
+			withStreamIdleWatchdog(profiledStreamFn, (model, context) => {
+				const configured = {
+					...stallSettingsSource.getStreamStallSettings(),
+					...streamIdleOptionsOverride,
+				};
+				const httpIdleTimeoutMs = stallSettingsSource.getHttpIdleTimeoutMs();
+				const profile = modelAdaptationStore.get(formatModelRouterModel(model)).perf;
+				const adaptive = resolveAdaptiveStreamIdleOptions({
+					base: { ...DEFAULT_STREAM_IDLE, ...configured },
+					profile,
+					promptTokens: estimateContextPromptTokens(context),
+					ceilingMs:
+						httpIdleTimeoutMs === 0
+							? DEFAULT_ADAPTIVE_STREAM_IDLE_CEILING_MS
+							: Math.max(DEFAULT_STREAM_IDLE.quietIdleMs, httpIdleTimeoutMs - 60_000),
+				});
+				return { ...configured, ...adaptive };
+			}),
 			baseStreamFn === streamSimple,
 		);
 		this.sessionManager = config.sessionManager;
@@ -738,8 +767,8 @@ export class AgentSession {
 		this._resourceLoader = config.resourceLoader;
 		this._customTools = config.customTools ?? [];
 		this._cwd = config.cwd;
-		this._agentDir = config.agentDir ?? getAgentDir();
-		this._modelAdaptationStore = ModelAdaptationStore.forAgentDir(this._agentDir);
+		this._agentDir = agentDir;
+		this._modelAdaptationStore = modelAdaptationStore;
 		this.agent.onTextToolProtocolParse = (event) => this._handleTextToolProtocolParse(event);
 		this._applyToolRepairLayerSettings();
 		this._collectWorkspaceSources = config.collectWorkspaceSources ?? collectWorkspaceSources;

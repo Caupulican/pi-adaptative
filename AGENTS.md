@@ -166,6 +166,11 @@ If the user's instructions conflict with any rule in this document, ask for expl
 
 ## Findings
 
+### 2026-07-08 · packages/coding-agent,agent · streamed perf profiles adapt quiet stall bounds per host/model — claude
+P2 landed: successful streams now record host/model prefill and decode EWMA samples in the adaptation store; the per-request stream-idle resolver receives model/context metadata and raises `quietIdleMs` from measured prefill throughput when samples exist, while no-profile requests return the configured/default timing unchanged.
+- evidence: packages/coding-agent/src/core/models/adaptation-store.ts:278 · packages/coding-agent/src/core/models/perf-profile.ts:89 · packages/coding-agent/src/core/models/perf-profile.ts:108 · packages/coding-agent/src/core/agent-session.ts:712 · packages/coding-agent/src/core/agent-session.ts:729 · packages/coding-agent/test/model-perf-profile.test.ts:76 · packages/coding-agent/test/model-perf-profile.test.ts:122
+- tags: reliability, perf-profile, local-models, watchdog, packages/coding-agent, packages/agent, p2
+
 ### 2026-07-08 · packages/agent · stream-idle watchdog switches to quiet timing after response headers — claude
 P1 landed: `withStreamIdleWatchdog` now wraps provider `onResponse` callbacks and treats HTTP response headers as transport confirmation before the first streamed event, so slow prefill after admission is charged to `quietIdleMs`; streams that never receive headers or events still fail under the original `connectMs` bound.
 - evidence: packages/agent/src/reliability/watchdogs.ts:212 · packages/agent/src/reliability/watchdogs.ts:223 · packages/agent/test/reliability/stream-idle.test.ts:50 · packages/agent/test/reliability/stream-idle.test.ts:54

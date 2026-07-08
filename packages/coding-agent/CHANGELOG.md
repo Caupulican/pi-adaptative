@@ -1,5 +1,8 @@
 ## [Unreleased]
 
+### Added
+- Added host-local model perf profiles that record streamed prefill/decode rates and adapt quiet stall bounds from measured throughput.
+
 ## [0.81.16] - 2026-07-08
 
 ### Added

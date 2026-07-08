@@ -1,5 +1,8 @@
 ## [Unreleased]
 
+### Changed
+- Changed stream-idle option resolvers to receive the current model, context, and stream options for per-request tuning.
+
 ### Fixed
 - Fixed stream-idle watchdogs to treat HTTP response headers as transport confirmation before the first streamed token.
 
