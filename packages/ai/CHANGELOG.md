@@ -1,4 +1,4 @@
-## [Unreleased]
+## [0.81.16] - 2026-07-08
 
 ### Added
 - Added the function XML text tool protocol variant for models that emit `<function name="X"><param name="k">value</param></function>` text without provider-native tool-call translation.

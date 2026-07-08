@@ -1,4 +1,4 @@
-## [Unreleased]
+## [0.81.16] - 2026-07-08
 
 ### Added
 - Added graded `/toolprobe` native capability reporting and persistence so native verdicts require both an echo probe and a task-scale read probe, while echo-only or absent native support can calibrate the text protocol.
