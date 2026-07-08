@@ -166,6 +166,11 @@ If the user's instructions conflict with any rule in this document, ask for expl
 
 ## Findings
 
+### 2026-07-08 · packages/coding-agent · provider standing prefix has a session-level stability regression — claude
+P3a landed: the suite now captures consecutive faux-provider request contexts from one session and asserts the serialized provider payloads share a byte-identical common prefix through the standing prompt/tool prefix before appended history begins. This guards against future timestamps, counters, or other volatile fields being introduced before the append point; the coding-agent suite also aliases the current package scope to source so the regression does not exercise stale workspace `dist/` builds.
+- evidence: packages/coding-agent/test/suite/agent-session-prefix-stability.test.ts:27 · packages/coding-agent/test/suite/agent-session-prefix-stability.test.ts:47 · packages/coding-agent/test/suite/agent-session-prefix-stability.test.ts:49 · packages/coding-agent/vitest.config.ts:33
+- tags: local-models, prefix-cache, regression-test, packages/coding-agent, p3a
+
 ### 2026-07-08 · packages/coding-agent,agent · streamed perf profiles adapt quiet stall bounds per host/model — claude
 P2 landed: successful streams now record host/model prefill and decode EWMA samples in the adaptation store; the per-request stream-idle resolver receives model/context metadata and raises `quietIdleMs` from measured prefill throughput when samples exist, while no-profile requests return the configured/default timing unchanged.
 - evidence: packages/coding-agent/src/core/models/adaptation-store.ts:278 · packages/coding-agent/src/core/models/perf-profile.ts:89 · packages/coding-agent/src/core/models/perf-profile.ts:108 · packages/coding-agent/src/core/agent-session.ts:712 · packages/coding-agent/src/core/agent-session.ts:729 · packages/coding-agent/test/model-perf-profile.test.ts:76 · packages/coding-agent/test/model-perf-profile.test.ts:122
