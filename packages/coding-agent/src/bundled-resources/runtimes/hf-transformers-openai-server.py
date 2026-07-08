@@ -53,17 +53,13 @@ def _message_text(content: Any) -> str:
     return "" if content is None else str(content)
 
 
-def _decode_arguments(arguments: Any) -> dict[str, Any]:
-    if isinstance(arguments, dict):
-        return arguments
+def _decode_arguments(arguments: Any) -> Any:
     if isinstance(arguments, str):
         try:
-            parsed = json.loads(arguments)
-            if isinstance(parsed, dict):
-                return parsed
-        except Exception:
-            return {}
-    return {}
+            return json.loads(arguments)
+        except json.JSONDecodeError as error:
+            raise ValueError(f"tool_call function.arguments must be valid JSON: {error.msg}") from error
+    return arguments
 
 
 def _normalize_tool_calls(tool_calls: Any) -> list[dict[str, Any]]:
@@ -79,12 +75,14 @@ def _normalize_tool_calls(tool_calls: Any) -> list[dict[str, Any]]:
         name = function.get("name")
         if not isinstance(name, str) or not name:
             continue
-        normalized.append(
-            {
-                "type": "function",
-                "function": {"name": name, "arguments": _decode_arguments(function.get("arguments"))},
-            }
-        )
+        normalized_call: dict[str, Any] = {
+            "type": "function",
+            "function": {"name": name, "arguments": _decode_arguments(function.get("arguments"))},
+        }
+        tool_call_id = tool_call.get("id")
+        if isinstance(tool_call_id, str) and tool_call_id:
+            normalized_call["id"] = tool_call_id
+        normalized.append(normalized_call)
     return normalized
 
 
@@ -105,26 +103,23 @@ def _normalize_messages(messages: Any) -> list[dict[str, Any]]:
             tool_calls = _normalize_tool_calls(message.get("tool_calls"))
             if tool_calls:
                 normalized_message["tool_calls"] = tool_calls
+        if role == "tool":
+            tool_call_id = message.get("tool_call_id")
+            if isinstance(tool_call_id, str) and tool_call_id:
+                normalized_message["tool_call_id"] = tool_call_id
         normalized.append(normalized_message)
     return normalized
 
 
 def _render_prompt(messages: list[dict[str, Any]], tools: Any) -> str:
     tokenizer = _TOKENIZER
-    try:
-        kwargs: dict[str, Any] = {
-            "tokenize": False,
-            "add_generation_prompt": True,
-        }
-        if isinstance(tools, list) and tools:
-            kwargs["tools"] = tools
-        return tokenizer.apply_chat_template(messages, **kwargs)
-    except Exception:
-        rendered: list[str] = []
-        for message in messages:
-            rendered.append(f"{message['role']}: {message['content']}")
-        rendered.append("assistant:")
-        return "\n".join(rendered)
+    kwargs: dict[str, Any] = {
+        "tokenize": False,
+        "add_generation_prompt": True,
+    }
+    if isinstance(tools, list) and tools:
+        kwargs["tools"] = tools
+    return tokenizer.apply_chat_template(messages, **kwargs)
 
 
 def _generation_options(request: dict[str, Any]) -> dict[str, Any]:
