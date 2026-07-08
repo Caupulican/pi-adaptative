@@ -416,6 +416,8 @@ describe("AgentSession local runtime readiness — end to end through prompt()",
 				.map((part) => part.text);
 			expect(assistantTexts).toEqual(["answered locally"]);
 			expect(harness.eventsOfType("warning")).toHaveLength(0);
+			expect(serveEnv?.OLLAMA_NUM_PARALLEL).toBe("1");
+			expect(serveEnv?.OLLAMA_KEEP_ALIVE).toBe("30m");
 			// The router's boot path must reuse the user's OWN models dir, never pi's owned storage.
 			expect(serveEnv?.OLLAMA_MODELS).toBeUndefined();
 		} finally {

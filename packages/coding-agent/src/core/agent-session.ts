@@ -621,6 +621,10 @@ export class AgentSession {
 	private _collectWorkspaceSources: typeof collectWorkspaceSources;
 	private readonly _localRuntimeController: LocalRuntimeController;
 	private readonly _modelAdaptationStore: ModelAdaptationStore;
+	private _prefixWarmer:
+		| { modelKey: string; controller: AbortController; timer: NodeJS.Timeout | undefined }
+		| undefined;
+	private readonly _completedPrefixWarms = new Set<string>();
 	private readonly _repairModeSessionCounts = new Map<string, number>();
 	private readonly _textProtocolParseFailures = new Map<string, { signature: string; repeats: number }>();
 	private _textProtocolParseObservedThisTurn = false;
@@ -1087,11 +1091,78 @@ export class AgentSession {
 			activeToolNames: this._initialActiveToolNames,
 			includeAllExtensionTools: true,
 		});
+		this._scheduleLocalPrefixWarm(this.agent.state.model, "session-start");
 	}
 
 	/** Model registry for API key resolution and model discovery */
 	get modelRegistry(): ModelRegistry {
 		return this._modelRegistry;
+	}
+
+	private _scheduleLocalPrefixWarm(model: Model<any> | undefined, _reason: "session-start" | "selection"): void {
+		if (!model || !this._isWarmableLocalModel(model)) return;
+		const modelKey = formatModelRouterModel(model);
+		if (this._completedPrefixWarms.has(modelKey) || this._prefixWarmer?.modelKey === modelKey) return;
+		this._cancelPrefixWarm();
+		const controller = new AbortController();
+		const timer = setTimeout(() => {
+			const warmer = this._prefixWarmer;
+			if (!warmer || warmer.controller !== controller || controller.signal.aborted) return;
+			warmer.timer = undefined;
+			void this._runLocalPrefixWarm(model, modelKey, controller);
+		}, 0);
+		timer.unref?.();
+		this._prefixWarmer = { modelKey, controller, timer };
+	}
+
+	private _cancelPrefixWarm(): void {
+		const warmer = this._prefixWarmer;
+		if (!warmer) return;
+		if (warmer.timer) clearTimeout(warmer.timer);
+		warmer.controller.abort(new Error("prefix warmer preempted"));
+		this._prefixWarmer = undefined;
+	}
+
+	private async _runLocalPrefixWarm(model: Model<any>, modelKey: string, controller: AbortController): Promise<void> {
+		try {
+			const options: SimpleStreamOptions = {
+				maxTokens: 1,
+				signal: controller.signal,
+				onPayload: this.agent.onPayload,
+				onResponse: this.agent.onResponse,
+			};
+			if (this._isRawStreamSimple(this.agent.streamFn)) {
+				const auth = await this._getRequiredRequestAuth(model);
+				options.apiKey = auth.apiKey;
+				options.headers = auth.headers;
+			}
+			if (controller.signal.aborted) return;
+			const stream = await this.agent.streamFn(
+				model,
+				{
+					systemPrompt: this._baseSystemPrompt,
+					tools: this.agent.state.tools,
+					messages: [],
+				},
+				options,
+			);
+			await stream.result();
+			if (!controller.signal.aborted) this._completedPrefixWarms.add(modelKey);
+		} catch {
+			// Best-effort cache warm only; a miss must never affect the real turn.
+		} finally {
+			if (this._prefixWarmer?.controller === controller) this._prefixWarmer = undefined;
+		}
+	}
+
+	private _isWarmableLocalModel(model: Model<any>): boolean {
+		if (model.api !== "openai-completions") return false;
+		try {
+			const hostname = new URL(model.baseUrl).hostname.toLowerCase();
+			return hostname === "localhost" || hostname === "127.0.0.1" || hostname === "::1" || hostname === "[::1]";
+		} catch {
+			return false;
+		}
 	}
 
 	/**
@@ -2416,6 +2487,7 @@ export class AgentSession {
 			this.abortCompaction();
 			this.abortBranchSummary();
 			this.abortBash();
+			this._cancelPrefixWarm();
 			this.agent.abort();
 			// R8: stop any deployment-registered gateway channels / schedulers.
 			void this._gatewayRegistry.stop().catch(() => {});
@@ -2793,6 +2865,7 @@ export class AgentSession {
 
 	private async _promptUnserialized(text: string, options?: PromptOptions): Promise<void> {
 		this._applyToolRepairLayerSettings();
+		this._cancelPrefixWarm();
 		const expandPromptTemplates = options?.expandPromptTemplates ?? true;
 		const processSlashCommands = options?.processSlashCommands ?? expandPromptTemplates;
 		const preflightResult = options?.preflightResult;
@@ -3373,11 +3446,14 @@ export class AgentSession {
 	// =========================================================================
 
 	async setModel(model: Model<any>, options: { persistSettings?: boolean } = {}): Promise<void> {
-		return this._modelSelection.setModel(model, options);
+		await this._modelSelection.setModel(model, options);
+		this._scheduleLocalPrefixWarm(this.agent.state.model, "selection");
 	}
 
 	async cycleModel(direction: "forward" | "backward" = "forward"): Promise<ModelCycleResult | undefined> {
-		return this._modelSelection.cycleModel(direction);
+		const result = await this._modelSelection.cycleModel(direction);
+		this._scheduleLocalPrefixWarm(result?.model, "selection");
+		return result;
 	}
 
 	// =========================================================================

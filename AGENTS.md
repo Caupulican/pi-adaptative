@@ -166,6 +166,11 @@ If the user's instructions conflict with any rule in this document, ask for expl
 
 ## Findings
 
+### 2026-07-08 · packages/coding-agent · local prefix warming and managed residency defaults reduce cold-turn waste — claude
+P3b/P3c landed: warmable local-class models are detected from OpenAI-compatible API class plus loopback base URL, then session start or manual selection schedules a best-effort `maxTokens: 1` standing-prefix request; a real prompt cancels the warmer before the turn proceeds. Managed Ollama spawns now set `OLLAMA_KEEP_ALIVE=30m` alongside single-parallelism so local cache residency survives normal interactive pauses.
+- evidence: packages/coding-agent/src/core/agent-session.ts:1094 · packages/coding-agent/src/core/agent-session.ts:1102 · packages/coding-agent/src/core/agent-session.ts:1126 · packages/coding-agent/src/core/agent-session.ts:1158 · packages/coding-agent/src/core/models/local-runtime.ts:476 · packages/coding-agent/src/core/models/local-runtime.ts:497 · packages/coding-agent/test/suite/agent-session-prefix-warmer.test.ts:132 · packages/coding-agent/test/suite/agent-session-prefix-warmer.test.ts:155 · packages/coding-agent/test/agent-session-local-runtime.test.ts:420
+- tags: local-models, prefix-cache, residency, ollama, packages/coding-agent, p3b, p3c
+
 ### 2026-07-08 · packages/coding-agent · provider standing prefix has a session-level stability regression — claude
 P3a landed: the suite now captures consecutive faux-provider request contexts from one session and asserts the serialized provider payloads share a byte-identical common prefix through the standing prompt/tool prefix before appended history begins. This guards against future timestamps, counters, or other volatile fields being introduced before the append point; the coding-agent suite also aliases the current package scope to source so the regression does not exercise stale workspace `dist/` builds.
 - evidence: packages/coding-agent/test/suite/agent-session-prefix-stability.test.ts:27 · packages/coding-agent/test/suite/agent-session-prefix-stability.test.ts:47 · packages/coding-agent/test/suite/agent-session-prefix-stability.test.ts:49 · packages/coding-agent/vitest.config.ts:33
