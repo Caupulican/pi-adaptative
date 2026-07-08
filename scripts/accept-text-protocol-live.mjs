@@ -292,7 +292,8 @@ async function runModel(modelRef, keepSessions) {
 		markerPath = path.join(tmpdir(), `x-${Date.now()}-${Math.random().toString(36).slice(2, 10)}.txt`);
 		await writeFile(markerPath, marker, "utf8");
 		const prompts = [`Read the file ${markerPath} and tell me exactly what it contains.`];
-		let toolEvent;
+		let successfulToolEvent;
+		let lastReadEvent;
 		for (const [index, message] of prompts.entries()) {
 			const promptId = `prompt-${target.ref}-${index + 1}`;
 			const promptStartIndex = state.events.length;
@@ -305,35 +306,38 @@ async function runModel(modelRef, keepSessions) {
 				promptStartIndex,
 			);
 			if (!promptResponse.success) throw new Error(promptResponse.error || `prompt failed for ${target.ref}`);
-			let turnEvent;
 			try {
-				turnEvent = await waitForEvent(
+				await waitForEvent(
 					state,
 					(event) =>
-						(event.type === "tool_execution_end" && event.toolName === "read") ||
-						isReadToolResultEvent(event) ||
 						(event.type === "message_end" &&
 							event.message?.role === "assistant" &&
 							event.message.stopReason !== "toolUse") ||
 						event.type === "agent_end",
-					`read tool execution or turn end for ${target.ref}`,
-					120_000,
+					`turn end for ${target.ref}`,
+					TIMEOUT_MS,
 					promptStartIndex,
 				);
 			} catch {
 				await waitForIdle(child, state, target.ref);
-				continue;
 			}
-			if (turnEvent.type === "tool_execution_end" || isReadToolResultEvent(turnEvent)) {
-				toolEvent = turnEvent;
-				break;
+			const readEvents = state.events
+				.slice(promptStartIndex)
+				.filter((event) => event.type === "tool_execution_end" || isReadToolResultEvent(event));
+			for (const event of readEvents) {
+				lastReadEvent = event;
+				const resultJson = eventResultJson(event);
+				if (!eventIsError(event) && resultJson.includes(marker)) {
+					successfulToolEvent = event;
+					break;
+				}
 			}
-			await waitForIdle(child, state, target.ref);
+			if (successfulToolEvent) break;
 		}
-		if (!toolEvent) throw new Error(`read tool execution for ${target.ref} did not occur`);
-		const resultJson = eventResultJson(toolEvent);
-		if (eventIsError(toolEvent)) throw new Error(`read tool failed for ${target.ref}: ${resultJson}`);
-		if (!resultJson.includes(marker)) {
+		if (!lastReadEvent) throw new Error(`read tool execution for ${target.ref} did not occur`);
+		if (!successfulToolEvent) {
+			const resultJson = eventResultJson(lastReadEvent);
+			if (eventIsError(lastReadEvent)) throw new Error(`read tool failed for ${target.ref}: ${resultJson}`);
 			throw new Error(`read result for ${target.ref} did not include marker ${marker}: ${resultJson}`);
 		}
 		return {
