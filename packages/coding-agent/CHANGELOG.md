@@ -4,6 +4,7 @@
 - Added host-local model perf profiles that record streamed prefill/decode rates and adapt quiet stall bounds from measured throughput.
 - Added local OpenAI-compatible prefix warming and longer managed Ollama residency defaults for local-model startup.
 - Added local-model context sizing that derives `num_ctx` from host RAM and model metadata, then creates a sized Ollama Modelfile alias for managed installs.
+- Added a runtime residency arbiter core for fitting, evicting, refusing, and reserving local model loads across runtime adapters.
 
 ## [0.81.16] - 2026-07-08
 

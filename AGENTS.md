@@ -166,6 +166,11 @@ If the user's instructions conflict with any rule in this document, ask for expl
 
 ## Findings
 
+### 2026-07-08 · packages/coding-agent · runtime residency arbiter plans local loads across adapter classes — claude
+P6 landed: `planRuntimeResidency` is a pure host-RAM planner over resident models, requested load, reservations, pinning, dwell windows, residency-control grade, and recent eviction records. It returns deterministic fit/evict/refuse decisions, keeps advisory residents observe-only, protects the active model, blocks ping-pong plans, and handles reflex-pipeline reservations as all-or-nothing loads; faux adapters exercise the `full`, `keep-alive`, and `advisory` contract shapes.
+- evidence: packages/coding-agent/src/core/models/runtime-arbiter.ts:42 · packages/coding-agent/src/core/models/runtime-arbiter.ts:50 · packages/coding-agent/test/runtime-arbiter.test.ts:63 · packages/coding-agent/test/runtime-arbiter.test.ts:87 · packages/coding-agent/test/runtime-arbiter.test.ts:105 · packages/coding-agent/test/runtime-arbiter.test.ts:135
+- tags: local-models, residency, runtime-arbiter, memory-budget, packages/coding-agent, p6
+
 ### 2026-07-08 · packages/coding-agent,ai · managed local installs derive served context and write a sized Ollama Modelfile alias — claude
 P4 landed: local install now derives the largest fitting context rung from host RAM, model weight size, and `/api/show` architecture metadata, prefers q8 KV sizing when it unlocks a larger rung, creates a deterministic sized Ollama alias with `PARAMETER num_ctx`, and registers that alias with the derived served context. Ollama context-size errors now point pi-managed users at re-running `/models add` to re-derive `num_ctx` instead of masking the backend limit in `models.json`.
 - evidence: packages/coding-agent/src/core/models/context-sizing.ts:28 · packages/coding-agent/src/core/models/context-sizing.ts:55 · packages/coding-agent/src/modes/interactive/local-model-commands.ts:344 · packages/coding-agent/src/modes/interactive/local-model-commands.ts:353 · packages/coding-agent/src/core/models/local-runtime.ts:545 · packages/ai/src/providers/openai-completions.ts:114 · packages/coding-agent/test/local-context-sizing.test.ts:15 · packages/coding-agent/test/agent-session-local-runtime.test.ts:122 · packages/ai/test/openai-completions-error.test.ts:40
