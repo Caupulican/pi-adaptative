@@ -5,11 +5,18 @@ import path from "node:path";
 import { fileURLToPath } from "node:url";
 import { spawn } from "node:child_process";
 
-const DEFAULT_MODELS = ["ollama/qwen3:1.7b", "ollama/gemma3:1b", "openai-codex/gpt-5.5"];
+const DEFAULT_MODELS = [
+	"ollama/qwen3:1.7b",
+	"ollama/gemma3:1b",
+	"ollama/hf.co/openbmb/MiniCPM5-1B-GGUF:Q8_0",
+	"openai-codex/gpt-5.5",
+];
 const EXPECTED_VERDICTS = new Map([
 	["ollama/qwen3:1.7b", "native"],
 	["ollama/gemma3:1b", "text-protocol"],
+	["ollama/hf.co/openbmb/MiniCPM5-1B-GGUF:Q8_0", "text-protocol"],
 ]);
+const EXPECTED_VARIANTS = new Map([["ollama/hf.co/openbmb/MiniCPM5-1B-GGUF:Q8_0", "function-xml"]]);
 const PROBE_ONLY_MODELS = new Set(["openai-codex/gpt-5.5"]);
 const TIMEOUT_MS = 180_000;
 const root = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "..");
@@ -216,11 +223,28 @@ async function runModel(modelRef, keepSessions) {
 		if (probe.verdict === "none" && !PROBE_ONLY_MODELS.has(target.ref)) {
 			throw new Error(`${target.ref} failed tool probe: ${probe.diagnostic || "none"}`);
 		}
+		if (probe.verdict === "native" && probe.nativeGrade !== "task") {
+			throw new Error(`${target.ref} returned native without task native grade: ${probe.nativeGrade || "-"}`);
+		}
 		if (probe.verdict === "text-protocol" && !probe.variant) {
 			throw new Error(`${target.ref} returned text-protocol without a calibrated variant`);
 		}
+		if (probe.verdict === "text-protocol" && probe.nativeGrade === "task") {
+			throw new Error(`${target.ref} calibrated text-protocol even though native task probe passed`);
+		}
+		const expectedVariant = EXPECTED_VARIANTS.get(target.ref);
+		if (expectedVariant && probe.variant !== expectedVariant) {
+			throw new Error(`${target.ref} expected ${expectedVariant} variant, got ${probe.variant || "-"}`);
+		}
 		if (PROBE_ONLY_MODELS.has(target.ref)) {
-			return { model: target.ref, verdict: probe.verdict, variant: probe.variant || "-", marker: "probe-only", sessionDir };
+			return {
+				model: target.ref,
+				verdict: probe.verdict,
+				variant: probe.variant || "-",
+				nativeGrade: probe.nativeGrade || "-",
+				marker: "probe-only",
+				sessionDir,
+			};
 		}
 
 		const marker = `xok-${Math.random().toString(36).slice(2, 10)}`;
@@ -271,7 +295,14 @@ async function runModel(modelRef, keepSessions) {
 		if (!resultJson.includes(marker)) {
 			throw new Error(`read result for ${target.ref} did not include marker ${marker}: ${resultJson}`);
 		}
-		return { model: target.ref, verdict: probe.verdict, variant: probe.variant || "-", marker, sessionDir };
+		return {
+			model: target.ref,
+			verdict: probe.verdict,
+			variant: probe.variant || "-",
+			nativeGrade: probe.nativeGrade || "-",
+			marker,
+			sessionDir,
+		};
 	} finally {
 		child.stdin.end();
 		child.kill("SIGTERM");
@@ -286,10 +317,10 @@ async function main() {
 	const { models, keepSessions } = parseArgs(process.argv.slice(2));
 	const results = [];
 	for (const model of models) results.push(await runModel(model, keepSessions));
-	console.log("model | verdict | variant | marker");
-	console.log("--- | --- | --- | ---");
+	console.log("model | verdict | variant | nativeGrade | marker");
+	console.log("--- | --- | --- | --- | ---");
 	for (const result of results) {
-		console.log(`${result.model} | ${result.verdict} | ${result.variant} | ${result.marker}`);
+		console.log(`${result.model} | ${result.verdict} | ${result.variant} | ${result.nativeGrade} | ${result.marker}`);
 	}
 	if (keepSessions) {
 		for (const result of results) console.log(`session ${result.model}: ${result.sessionDir}`);
