@@ -142,6 +142,107 @@ describe("TransformersRuntime", () => {
 		});
 	});
 
+	it("repairs an orphaned venv by bootstrapping pip before package installation", async () => {
+		const agentDir = mkdtempSync(join(tmpdir(), "pi-transformers-orphan-"));
+		const venvDir = join(agentDir, "runtimes", "hf-transformers", "venv");
+		const pythonPath = join(venvDir, "bin", "python");
+		mkdirSync(venvDir, { recursive: true });
+		writeFileSync(join(venvDir, "pyvenv.cfg"), "home = /usr\n");
+		let pipChecks = 0;
+		const commands: Array<{ command: string; args: string[] }> = [];
+		const runtime = new TransformersRuntime({
+			agentDir,
+			modelId: "openbmb/MiniCPM5-1B",
+			deps: {
+				existsFn: (path) => path === pythonPath || path === join(venvDir, "pyvenv.cfg"),
+				platform: () => "linux",
+				runCommand: async (command, args) => {
+					commands.push({ command, args });
+					const joined = args.join(" ");
+					if (command === pythonPath && joined === "-m pip --version") {
+						pipChecks++;
+						return pipChecks === 1
+							? { ok: false, stdout: "", stderr: "No module named pip" }
+							: { ok: true, stdout: "pip 25", stderr: "" };
+					}
+					if (command === pythonPath && joined.includes("sys.base_prefix")) {
+						return { ok: true, stdout: "/usr\n", stderr: "" };
+					}
+					return { ok: true, stdout: "", stderr: "" };
+				},
+			},
+		});
+
+		await expect(runtime.installManaged()).resolves.toEqual({ ok: true });
+		const commandArgs = commands.map((entry) => entry.args.join(" "));
+		expect(commandArgs.indexOf("-m ensurepip --upgrade")).toBeGreaterThan(commandArgs.indexOf("-m pip --version"));
+		expect(commandArgs.indexOf("-m pip install --upgrade pip")).toBeGreaterThan(
+			commandArgs.lastIndexOf("-m pip --version"),
+		);
+	});
+
+	it("recreates a stale venv whose pyvenv.cfg points at a different interpreter", async () => {
+		const agentDir = mkdtempSync(join(tmpdir(), "pi-transformers-stale-"));
+		const venvDir = join(agentDir, "runtimes", "hf-transformers", "venv");
+		const pythonPath = join(venvDir, "bin", "python");
+		mkdirSync(venvDir, { recursive: true });
+		writeFileSync(join(venvDir, "pyvenv.cfg"), "home = /old/python\n");
+		let recreated = false;
+		const commands: Array<{ command: string; args: string[] }> = [];
+		const runtime = new TransformersRuntime({
+			agentDir,
+			modelId: "openbmb/MiniCPM5-1B",
+			deps: {
+				existsFn: (path) => path === pythonPath || (!recreated && path === join(venvDir, "pyvenv.cfg")),
+				platform: () => "linux",
+				runCommand: async (command, args) => {
+					commands.push({ command, args });
+					if (command === "python" && args[0] === "--version") return { ok: true, stdout: "Python 3", stderr: "" };
+					if (command === "python" && args.includes("venv")) {
+						recreated = true;
+						return { ok: true, stdout: "", stderr: "" };
+					}
+					if (command === pythonPath && args.join(" ").includes("sys.base_prefix")) {
+						return { ok: true, stdout: "/new/python\n", stderr: "" };
+					}
+					return { ok: true, stdout: "", stderr: "" };
+				},
+			},
+		});
+
+		await expect(runtime.installManaged()).resolves.toEqual({ ok: true });
+		expect(commands).toContainEqual({ command: "python", args: ["-m", "venv", venvDir] });
+		expect(recreated).toBe(true);
+	});
+
+	it("returns an actionable venv package command when Python cannot create a venv", async () => {
+		const agentDir = mkdtempSync(join(tmpdir(), "pi-transformers-no-venv-"));
+		const runtime = new TransformersRuntime({
+			agentDir,
+			modelId: "openbmb/MiniCPM5-1B",
+			deps: {
+				existsFn: () => false,
+				platform: () => "linux",
+				runCommand: async (command, args) => {
+					if (command === "python" && args[0] === "--version") return { ok: true, stdout: "Python 3", stderr: "" };
+					if (command === "python" && args.includes("venv")) {
+						return {
+							ok: false,
+							stdout: "",
+							stderr: "The virtual environment was not created because ensurepip is not available.",
+						};
+					}
+					return { ok: true, stdout: "", stderr: "" };
+				},
+			},
+		});
+
+		const result = await runtime.installManaged();
+		expect(result.ok).toBe(false);
+		expect(result.error).toContain("Install Python venv support");
+		expect(result.error).toContain("python3-venv");
+	});
+
 	it("starts the bundled sidecar with pi-owned Hugging Face cache env", async () => {
 		let up = false;
 		let serveEnv: NodeJS.ProcessEnv | undefined;

@@ -7,6 +7,7 @@ import {
 	linkSync,
 	mkdirSync,
 	readdirSync,
+	readFileSync,
 	rmSync,
 	statSync,
 } from "node:fs";
@@ -1030,19 +1031,106 @@ export class TransformersRuntime {
 		return result.ok;
 	}
 
+	private readPyvenvHome(): string | undefined {
+		const pyvenvCfg = join(this.venvDir, "pyvenv.cfg");
+		if (!this._exists(pyvenvCfg)) return undefined;
+		try {
+			const text = readFileSync(pyvenvCfg, "utf8");
+			const homeLine = text
+				.split(/\r?\n/)
+				.map((line) => line.trim())
+				.find((line) => line.toLowerCase().startsWith("home ="));
+			return homeLine?.slice(homeLine.indexOf("=") + 1).trim() || undefined;
+		} catch {
+			return undefined;
+		}
+	}
+
+	private async venvInterpreterCoherent(): Promise<boolean> {
+		const pyvenvHome = this.readPyvenvHome();
+		if (!pyvenvHome) return false;
+		const base = await this.runPython(["-c", "import sys; print(sys.base_prefix or sys.prefix)"]);
+		if (!base.ok) return false;
+		const basePrefix = base.stdout.trim();
+		if (!basePrefix) return true;
+		return pyvenvHome === basePrefix || pyvenvHome.startsWith(basePrefix) || basePrefix.startsWith(pyvenvHome);
+	}
+
+	private async venvHealthy(): Promise<boolean> {
+		const pip = await this.runPython(["-m", "pip", "--version"]);
+		return pip.ok && (await this.venvInterpreterCoherent());
+	}
+
+	private linuxVenvPackageCommand(): string {
+		try {
+			const osRelease = readFileSync("/etc/os-release", "utf8").toLowerCase();
+			if (osRelease.includes("alpine")) return "sudo apk add python3 py3-pip";
+			if (osRelease.includes("fedora") || osRelease.includes("rhel") || osRelease.includes("centos")) {
+				return "sudo dnf install python3";
+			}
+		} catch {
+			// fall through to the most common Debian/Ubuntu package split.
+		}
+		return "sudo apt install python3-venv";
+	}
+
+	private venvInstallHint(): string {
+		if (this._platform() === "darwin") return "install Python from python.org or run: brew install python";
+		if (this._platform() === "win32") return "install Python 3 from python.org, then run: py -3 -m venv <path>";
+		if (this._platform() === "linux") return this.linuxVenvPackageCommand();
+		return "install Python with venv/ensurepip support for this platform";
+	}
+
+	private venvFailure(error: string | undefined): { ok: false; error: string } {
+		return {
+			ok: false,
+			error: `venv-fail: ${sanitizeCommandOutput(error)}. Install Python venv support: ${this.venvInstallHint()}`,
+		};
+	}
+
+	private async createVenv(onProgress?: (status: string) => void): Promise<{ ok: boolean; error?: string }> {
+		const python = await this.findPython();
+		if (!python) return { ok: false, error: "python-missing" };
+		onProgress?.(`creating isolated Python venv at ${this.venvDir}`);
+		const venv = await this._runCommand(python.command, [...python.args, "-m", "venv", this.venvDir]);
+		if (!venv.ok) return this.venvFailure(venv.error ?? venv.stderr);
+		if (!this._exists(this.pythonPath)) return this.venvFailure(`${this.pythonPath} was not created`);
+		return { ok: true };
+	}
+
+	private async repairExistingVenv(onProgress?: (status: string) => void): Promise<{ ok: boolean; error?: string }> {
+		if (await this.venvHealthy()) return { ok: true };
+		onProgress?.("repairing pi-managed Transformers venv with ensurepip");
+		const ensurepip = await this.runPython(["-m", "ensurepip", "--upgrade"], onProgress);
+		if (ensurepip.ok && (await this.venvHealthy())) return { ok: true };
+		onProgress?.("recreating pi-managed Transformers venv");
+		rmSync(this.venvDir, { recursive: true, force: true });
+		return this.createVenv(onProgress);
+	}
+
+	private async ensurePipAvailable(onProgress?: (status: string) => void): Promise<{ ok: boolean; error?: string }> {
+		const pip = await this.runPython(["-m", "pip", "--version"]);
+		if (pip.ok) return { ok: true };
+		onProgress?.("bootstrapping pip inside pi-managed venv");
+		const ensurepip = await this.runPython(["-m", "ensurepip", "--upgrade"], onProgress);
+		if (!ensurepip.ok) return this.venvFailure(ensurepip.error ?? ensurepip.stderr);
+		const verified = await this.runPython(["-m", "pip", "--version"]);
+		return verified.ok ? { ok: true } : this.venvFailure(verified.error ?? verified.stderr);
+	}
+
 	async installManaged(onProgress?: (status: string) => void): Promise<{ ok: boolean; error?: string }> {
 		mkdirSync(this.runtimeDir, { recursive: true });
 		mkdirSync(this.cacheDir, { recursive: true });
-		if (!this._exists(this.pythonPath)) {
-			const python = await this.findPython();
-			if (!python) return { ok: false, error: "python-missing" };
-			onProgress?.(`creating isolated Python venv at ${this.venvDir}`);
-			const venv = await this._runCommand(python.command, [...python.args, "-m", "venv", this.venvDir]);
-			if (!venv.ok) return { ok: false, error: `venv-fail: ${sanitizeCommandOutput(venv.error ?? venv.stderr)}` };
+		if (this._exists(this.pythonPath)) {
+			const repaired = await this.repairExistingVenv(onProgress);
+			if (!repaired.ok) return repaired;
 		}
 		if (!this._exists(this.pythonPath)) {
-			return { ok: false, error: `venv-fail: ${this.pythonPath} was not created` };
+			const created = await this.createVenv(onProgress);
+			if (!created.ok) return created;
 		}
+		const pipReady = await this.ensurePipAvailable(onProgress);
+		if (!pipReady.ok) return pipReady;
 
 		onProgress?.("upgrading pip inside pi-managed venv");
 		const pip = await this.runPython(["-m", "pip", "install", "--upgrade", "pip"], onProgress);
