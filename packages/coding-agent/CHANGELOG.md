@@ -1,4 +1,4 @@
-## [Unreleased]
+## [0.81.20] - 2026-07-08
 
 ### Fixed
 - Fixed pi-managed Transformers setup to resolve the environment Python before creating its venv and to repair existing incomplete venvs before Hugging Face model downloads.
