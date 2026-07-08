@@ -1,4 +1,4 @@
-import { describe, expect, it, vi } from "vitest";
+import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import {
 	OllamaRuntime,
 	type RuntimeCommandRunner,
@@ -11,6 +11,14 @@ function ndjsonResponse(lines: object[]): Response {
 	const body = lines.map((line) => JSON.stringify(line)).join("\n");
 	return new Response(body, { status: 200 });
 }
+
+beforeEach(() => {
+	vi.stubEnv("PYTHON", "");
+});
+
+afterEach(() => {
+	vi.unstubAllEnvs();
+});
 
 // Verified against the real ollama/ollama GitHub release (v0.31.1) and its own install.sh, not
 // guessed: darwin ships a CLI .tgz (distinct from the Ollama.app/.dmg GUI installer), linux ships
@@ -64,12 +72,71 @@ describe("TransformersRuntime", () => {
 		});
 
 		await expect(runtime.installManaged()).resolves.toEqual({ ok: true });
-		expect(commands[0]).toEqual({ command: "python3", args: ["--version"] });
+		expect(commands[0]).toEqual({ command: "python", args: ["--version"] });
 		expect(commands.some((entry) => entry.args.join(" ").includes("transformers==5.13.0"))).toBe(true);
 		expect(commands.some((entry) => entry.args.join(" ").includes("torch==2.12.1+cpu"))).toBe(true);
 		expect(commands.some((entry) => entry.args.join(" ").includes("https://download.pytorch.org/whl/cpu"))).toBe(
 			true,
 		);
+	});
+
+	it("honors the PYTHON environment interpreter before PATH defaults", async () => {
+		vi.stubEnv("PYTHON", "python3.11");
+		const agentDir = `${process.cwd()}/.scratch-transformers-runtime-python-env`;
+		let venvCreated = false;
+		const commands: Array<{ command: string; args: string[] }> = [];
+		const runCommand: RuntimeCommandRunner = async (command, args) => {
+			commands.push({ command, args });
+			if (args.includes("venv")) venvCreated = true;
+			return { ok: true, stdout: "", stderr: "" };
+		};
+		const runtime = new TransformersRuntime({
+			agentDir,
+			modelId: "openbmb/MiniCPM5-1B",
+			deps: {
+				runCommand,
+				existsFn: (path) => venvCreated && path === `${agentDir}/runtimes/hf-transformers/venv/bin/python`,
+				platform: () => "linux",
+			},
+		});
+
+		await expect(runtime.installManaged()).resolves.toEqual({ ok: true });
+		expect(commands[0]).toEqual({ command: "python3.11", args: ["--version"] });
+		expect(commands[1]).toEqual({
+			command: "python3.11",
+			args: ["-m", "venv", `${agentDir}/runtimes/hf-transformers/venv`],
+		});
+	});
+
+	it("falls back to python3 only after environment python is unavailable", async () => {
+		const agentDir = `${process.cwd()}/.scratch-transformers-runtime-python-fallback`;
+		let venvCreated = false;
+		const commands: Array<{ command: string; args: string[] }> = [];
+		const runCommand: RuntimeCommandRunner = async (command, args) => {
+			commands.push({ command, args });
+			if (command === "python" && args[0] === "--version") {
+				return { ok: false, stdout: "", stderr: "not found" };
+			}
+			if (args.includes("venv")) venvCreated = true;
+			return { ok: true, stdout: "", stderr: "" };
+		};
+		const runtime = new TransformersRuntime({
+			agentDir,
+			modelId: "openbmb/MiniCPM5-1B",
+			deps: {
+				runCommand,
+				existsFn: (path) => venvCreated && path === `${agentDir}/runtimes/hf-transformers/venv/bin/python`,
+				platform: () => "linux",
+			},
+		});
+
+		await expect(runtime.installManaged()).resolves.toEqual({ ok: true });
+		expect(commands[0]).toEqual({ command: "python", args: ["--version"] });
+		expect(commands[1]).toEqual({ command: "python3", args: ["--version"] });
+		expect(commands[2]).toEqual({
+			command: "python3",
+			args: ["-m", "venv", `${agentDir}/runtimes/hf-transformers/venv`],
+		});
 	});
 
 	it("starts the bundled sidecar with pi-owned Hugging Face cache env", async () => {
@@ -105,6 +172,43 @@ describe("TransformersRuntime", () => {
 		expect(serveEnv?.HF_HOME).toBe(`${agentDir}/models/huggingface`);
 		expect(serveEnv?.PYTHONNOUSERSITE).toBe("1");
 		expect(serveEnv?.OLLAMA_MODELS).toBeUndefined();
+	});
+
+	it("treats an existing venv with missing Transformers modules as not installed", async () => {
+		const agentDir = `${process.cwd()}/.scratch-transformers-runtime-missing-deps`;
+		const commands: Array<{ command: string; args: string[] }> = [];
+		const runtime = new TransformersRuntime({
+			agentDir,
+			modelId: "openbmb/MiniCPM5-1B",
+			deps: {
+				existsFn: (path) => path === `${agentDir}/runtimes/hf-transformers/venv/bin/python`,
+				fetchFn: async () => new Response("{}", { status: 500 }),
+				runCommand: async (command, args) => {
+					commands.push({ command, args });
+					return { ok: false, stdout: "", stderr: "missing huggingface_hub" };
+				},
+			},
+		});
+
+		const status = await runtime.detect();
+
+		expect(status.runtimeInstalled).toBe(false);
+		expect(commands).toHaveLength(1);
+		expect(commands[0]?.args[1]).toContain("huggingface_hub");
+	});
+
+	it("reports incomplete Transformers runtime dependencies before model download", async () => {
+		const agentDir = `${process.cwd()}/.scratch-transformers-runtime-download-missing-deps`;
+		const runtime = new TransformersRuntime({
+			agentDir,
+			modelId: "openbmb/MiniCPM5-1B",
+			deps: {
+				existsFn: (path) => path === `${agentDir}/runtimes/hf-transformers/venv/bin/python`,
+				runCommand: async () => ({ ok: false, stdout: "", stderr: "missing huggingface_hub" }),
+			},
+		});
+
+		await expect(runtime.downloadModel()).resolves.toEqual({ ok: false, error: "runtime-dependencies-missing" });
 	});
 });
 

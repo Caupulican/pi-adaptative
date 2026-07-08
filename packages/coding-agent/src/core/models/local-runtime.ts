@@ -147,6 +147,7 @@ const TRANSFORMERS_RUNTIME_DIR_NAME = "hf-transformers";
 const TRANSFORMERS_VENV_DIR_NAME = "venv";
 const TRANSFORMERS_SERVER_RELATIVE_PATH = join("runtimes", "hf-transformers-openai-server.py");
 const TRANSFORMERS_PINNED_PACKAGES = ["transformers==5.13.0", "huggingface-hub==1.22.0", "safetensors==0.8.0"];
+const TRANSFORMERS_REQUIRED_MODULES = ["torch", "transformers", "huggingface_hub", "safetensors"];
 const TORCH_PINNED_VERSION = "2.12.1";
 
 async function runCommandDefault(
@@ -741,9 +742,10 @@ export class TransformersRuntime {
 	}
 
 	async detect(): Promise<TransformersRuntimeStatus> {
+		const serverUp = await this.serverUp();
 		return {
-			runtimeInstalled: this._exists(this.pythonPath),
-			serverUp: await this.serverUp(),
+			runtimeInstalled: this._exists(this.pythonPath) && (serverUp || (await this.runtimeDependenciesInstalled())),
+			serverUp,
 			baseUrl: this._baseUrl,
 			modelId: this._modelId,
 			venvDir: this.venvDir,
@@ -753,15 +755,11 @@ export class TransformersRuntime {
 	}
 
 	private pythonCandidates(): Array<{ command: string; args: string[] }> {
+		const envPython = process.env.PYTHON?.trim();
+		const envCandidates = envPython ? [{ command: envPython, args: [] }] : [];
 		return this._platform() === "win32"
-			? [
-					{ command: "py", args: ["-3"] },
-					{ command: "python", args: [] },
-				]
-			: [
-					{ command: "python3", args: [] },
-					{ command: "python", args: [] },
-				];
+			? [...envCandidates, { command: "py", args: ["-3"] }, { command: "python", args: [] }]
+			: [...envCandidates, { command: "python", args: [] }, { command: "python3", args: [] }];
 	}
 
 	private async findPython(): Promise<{ command: string; args: string[] } | undefined> {
@@ -796,6 +794,16 @@ export class TransformersRuntime {
 					}
 				: undefined,
 		});
+	}
+
+	private async runtimeDependenciesInstalled(): Promise<boolean> {
+		if (!this._exists(this.pythonPath)) return false;
+		const modules = JSON.stringify(TRANSFORMERS_REQUIRED_MODULES);
+		const result = await this.runPython([
+			"-c",
+			`import importlib.util, sys; missing = [name for name in ${modules} if importlib.util.find_spec(name) is None]; sys.exit(1 if missing else 0)`,
+		]);
+		return result.ok;
 	}
 
 	async installManaged(onProgress?: (status: string) => void): Promise<{ ok: boolean; error?: string }> {
@@ -841,6 +849,7 @@ export class TransformersRuntime {
 
 	async downloadModel(onProgress?: (status: string) => void): Promise<{ ok: boolean; error?: string }> {
 		if (!this._exists(this.pythonPath)) return { ok: false, error: "runtime-missing" };
+		if (!(await this.runtimeDependenciesInstalled())) return { ok: false, error: "runtime-dependencies-missing" };
 		if (!this._exists(this._serverScriptPath))
 			return { ok: false, error: `server-script-missing: ${this._serverScriptPath}` };
 		mkdirSync(this.cacheDir, { recursive: true });
@@ -896,7 +905,7 @@ export class TransformersRuntime {
 			"Hugging Face Transformers runtime is not installed for this model.",
 			`Pi can install it into its own venv at ${this.venvDir} and cache weights under ${this.cacheDir}.`,
 			"Manual equivalent:",
-			`  python3 -m venv ${this.venvDir}`,
+			`  python -m venv ${this.venvDir}`,
 			`  ${this.pythonPath} -m pip install --upgrade pip`,
 			`  ${this.pythonPath} -m pip install ${TRANSFORMERS_PINNED_PACKAGES.join(" ")}`,
 			`  ${this.pythonPath} ${this.torchInstallArgs().join(" ")}`,
