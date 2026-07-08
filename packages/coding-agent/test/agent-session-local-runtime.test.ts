@@ -529,12 +529,13 @@ describe("AgentSession local runtime readiness — confirmed-up cache", () => {
 		});
 		try {
 			const first = await ensureReady(harness, localModel());
+			const fetchCallsAfterFirstReady = fetchCalls;
 			const second = await ensureReady(harness, localModel());
 
 			expect(first.ready).toBe(true);
 			expect(second.ready).toBe(true);
 			expect(second.reason).toBe("confirmed_up_cached");
-			expect(fetchCalls).toBe(3);
+			expect(fetchCalls).toBe(fetchCallsAfterFirstReady);
 		} finally {
 			harness.cleanup();
 		}

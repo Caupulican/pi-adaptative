@@ -70,6 +70,13 @@ export interface InstalledLocalModel {
 	sizeBytes: number;
 }
 
+interface OllamaPsModel {
+	name?: string;
+	model?: string;
+	size?: number;
+	size_vram?: number;
+}
+
 export interface OllamaImportResult {
 	sourceDir: string;
 	targetDir: string;
@@ -701,6 +708,45 @@ export class OllamaRuntime {
 		return (data.models ?? [])
 			.filter((model): model is { name: string; size?: number } => typeof model.name === "string")
 			.map((model) => ({ name: model.name, sizeBytes: model.size ?? 0 }));
+	}
+
+	async listResidentModels(): Promise<InstalledLocalModel[]> {
+		const response = await this._fetch(`${this._baseUrl}/api/ps`, { signal: AbortSignal.timeout(10_000) });
+		if (!response.ok) throw new Error(`ollama ps failed: HTTP ${response.status}`);
+		const data = (await response.json()) as { models?: OllamaPsModel[] };
+		return (data.models ?? [])
+			.map((model) => ({ name: model.name ?? model.model, sizeBytes: model.size_vram ?? model.size ?? 0 }))
+			.filter((model): model is InstalledLocalModel => typeof model.name === "string" && model.name.length > 0);
+	}
+
+	async ensureResident(model: string): Promise<{ ok: boolean; error?: string }> {
+		return this._postKeepAlive(model, "30m");
+	}
+
+	async releaseResident(model: string): Promise<{ ok: boolean; error?: string }> {
+		return this._postKeepAlive(model, 0);
+	}
+
+	private async _postKeepAlive(model: string, keepAlive: string | number): Promise<{ ok: boolean; error?: string }> {
+		try {
+			const response = await this._fetch(`${this._baseUrl}/api/generate`, {
+				method: "POST",
+				headers: { "content-type": "application/json" },
+				body: JSON.stringify({
+					model,
+					prompt: "",
+					stream: false,
+					keep_alive: keepAlive,
+					options: { num_predict: 0 },
+				}),
+				signal: AbortSignal.timeout(60_000),
+			});
+			if (!response.ok)
+				return { ok: false, error: `HTTP ${response.status}: ${await response.text().catch(() => "")}` };
+			return { ok: true };
+		} catch (error) {
+			return { ok: false, error: error instanceof Error ? error.message : String(error) };
+		}
 	}
 
 	async show(ref: string): Promise<{ ok: true; info: OllamaModelInfo } | { ok: false; error: string }> {

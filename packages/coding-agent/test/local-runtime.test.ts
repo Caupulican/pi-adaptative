@@ -469,6 +469,30 @@ describe("OllamaRuntime", () => {
 		expect(await runtime.list()).toEqual([{ name: "qwen3:1.7b", sizeBytes: 1_400_000_000 }]);
 	});
 
+	it("lists, loads, and releases resident Ollama models through native keep_alive endpoints", async () => {
+		const requests: Array<{ url: string; body?: unknown }> = [];
+		const runtime = new OllamaRuntime({
+			agentDir: "/agent",
+			deps: {
+				fetchFn: async (input, init) => {
+					requests.push({ url: String(input), body: init?.body ? JSON.parse(String(init.body)) : undefined });
+					if (String(input).endsWith("/api/ps")) {
+						return new Response(JSON.stringify({ models: [{ model: "qwen3:1.7b", size_vram: 123 }] }), {
+							status: 200,
+						});
+					}
+					return new Response("{}", { status: 200 });
+				},
+			},
+		});
+
+		expect(await runtime.listResidentModels()).toEqual([{ name: "qwen3:1.7b", sizeBytes: 123 }]);
+		expect(await runtime.ensureResident("qwen3:1.7b")).toEqual({ ok: true });
+		expect(await runtime.releaseResident("qwen3:1.7b")).toEqual({ ok: true });
+		expect(requests.at(-2)?.body).toMatchObject({ model: "qwen3:1.7b", keep_alive: "30m" });
+		expect(requests.at(-1)?.body).toMatchObject({ model: "qwen3:1.7b", keep_alive: 0 });
+	});
+
 	it("pull streams progress and reports upstream errors honestly", async () => {
 		const statuses: string[] = [];
 		const okRuntime = new OllamaRuntime({

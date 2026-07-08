@@ -160,6 +160,7 @@ import { formatModelRouterModel, ModelRouterController } from "./model-router-co
 import { ModelSelectionController } from "./model-selection-controller.ts";
 import { ModelAdaptationStore, type ModelToolProbe, type NativeToolProbeGrade } from "./models/adaptation-store.ts";
 import type { StoredFitnessReport } from "./models/fitness-store.ts";
+import { HF_TRANSFORMERS_PROVIDER, OLLAMA_PROVIDER } from "./models/local-registration.ts";
 import type { LocalRuntimeDeps, OllamaRuntime, TransformersRuntime } from "./models/local-runtime.ts";
 import {
 	DEFAULT_ADAPTIVE_STREAM_IDLE_CEILING_MS,
@@ -1136,6 +1137,20 @@ export class AgentSession {
 				const auth = await this._getRequiredRequestAuth(model);
 				options.apiKey = auth.apiKey;
 				options.headers = auth.headers;
+			}
+			if (controller.signal.aborted) return;
+			if (model.provider === OLLAMA_PROVIDER || model.provider === HF_TRANSFORMERS_PROVIDER) {
+				await this._localRuntimeController.ensureRouteModelReady({
+					decision: {
+						tier: "cheap",
+						risk: "read-only",
+						confidence: 1,
+						reasonCode: "prefix_warmer",
+						reasons: ["prefix warmer residency"],
+						model: `${model.provider}/${model.id}`,
+					},
+					model,
+				});
 			}
 			if (controller.signal.aborted) return;
 			const stream = await this.agent.streamFn(

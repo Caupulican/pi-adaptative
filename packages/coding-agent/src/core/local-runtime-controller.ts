@@ -9,6 +9,7 @@
  * the whole AgentSession.
  */
 
+import { totalmem } from "node:os";
 import type { Api, AssistantMessage, Model } from "@caupulican/pi-ai";
 import type { AgentSessionEvent } from "./agent-session.ts";
 import type { RouteDecision } from "./autonomy/contracts.ts";
@@ -20,6 +21,12 @@ import {
 	resolveTransformersBaseUrl,
 	TransformersRuntime,
 } from "./models/local-runtime.ts";
+import { matchesInstalledLocalModel } from "./models/model-ref.ts";
+import {
+	OllamaRuntimeResidencyAdapter,
+	RuntimeResidencyArbiter,
+	TransformersRuntimeResidencyAdapter,
+} from "./models/runtime-arbiter.ts";
 
 /** User-facing router tiers in ascending order — "learning" is never selected for a user turn, so
  * it has no place in the escalation ladder (#27's ensureRouteModelReady walks this forward only). */
@@ -144,6 +151,59 @@ export class LocalRuntimeController {
 		}
 	}
 
+	private async ensureOllamaResident(
+		model: Model<Api>,
+		runtime: OllamaRuntime,
+	): Promise<{ ok: boolean; reason?: string }> {
+		let bytes = 0;
+		try {
+			const installed = await runtime.list();
+			bytes = installed.find((entry) => matchesInstalledLocalModel(model.id, entry.name))?.sizeBytes ?? 0;
+		} catch {
+			// Residency is best-effort; a list failure falls back to a zero-byte admission request.
+		}
+		const arbiter = new RuntimeResidencyArbiter({
+			budgetBytes: Math.floor(totalmem() * 0.85),
+			adapters: [new OllamaRuntimeResidencyAdapter("ollama", runtime)],
+		});
+		try {
+			const plan = await arbiter.ensureResident("ollama", {
+				model: model.id,
+				bytes,
+				role: "active",
+				priority: 100,
+				nowMs: Date.now(),
+				pinActiveModel: model.id,
+			});
+			return plan.status === "fits" ? { ok: true } : { ok: false, reason: `residency_refused:${plan.reason}` };
+		} catch (error) {
+			return { ok: false, reason: `residency_error:${error instanceof Error ? error.message : String(error)}` };
+		}
+	}
+
+	private async ensureTransformersResident(
+		model: Model<Api>,
+		runtime: TransformersRuntime,
+	): Promise<{ ok: boolean; reason?: string }> {
+		const arbiter = new RuntimeResidencyArbiter({
+			budgetBytes: Math.floor(totalmem() * 0.85),
+			adapters: [new TransformersRuntimeResidencyAdapter(`transformers:${model.id}`, runtime, model.id, 0)],
+		});
+		try {
+			const plan = await arbiter.ensureResident(`transformers:${model.id}`, {
+				model: model.id,
+				bytes: 0,
+				role: "active",
+				priority: 100,
+				nowMs: Date.now(),
+				pinActiveModel: model.id,
+			});
+			return plan.status === "fits" ? { ok: true } : { ok: false, reason: `residency_refused:${plan.reason}` };
+		} catch (error) {
+			return { ok: false, reason: `residency_error:${error instanceof Error ? error.message : String(error)}` };
+		}
+	}
+
 	/**
 	 * Ensure a routed managed-local model is actually reachable before the turn calls it. No-op (and
 	 * free) for non-local/API models. Caches a "confirmed up this session" flag per server (and per
@@ -166,6 +226,8 @@ export class LocalRuntimeController {
 		const status = await runtime.detect();
 		if (status.serverUp) {
 			if (status.activeStore?.kind === "pi-owned") {
+				const resident = await this.ensureOllamaResident(model, runtime);
+				if (!resident.ok) return { ready: false, reason: resident.reason ?? "residency_refused" };
 				this._confirmedUp.add(confirmedKey);
 				return { ready: true, reason: "already_running" };
 			}
@@ -179,6 +241,8 @@ export class LocalRuntimeController {
 		}
 		const started = await runtime.start();
 		if (started.started) {
+			const resident = await this.ensureOllamaResident(model, runtime);
+			if (!resident.ok) return { ready: false, reason: resident.reason ?? "residency_refused" };
 			this._confirmedUp.add(confirmedKey);
 		}
 		return { ready: started.started, reason: started.reason };
@@ -199,6 +263,8 @@ export class LocalRuntimeController {
 		const runtime = this.getTransformersRuntime(model.id, serverUrl);
 		const status = await runtime.detect();
 		if (status.serverUp) {
+			const resident = await this.ensureTransformersResident(model, runtime);
+			if (!resident.ok) return { ready: false, reason: resident.reason ?? "residency_refused" };
 			this._confirmedUp.add(confirmedKey);
 			return { ready: true, reason: "already_running" };
 		}
@@ -207,6 +273,8 @@ export class LocalRuntimeController {
 		}
 		const started = await runtime.start();
 		if (started.started || started.reason === "already_running") {
+			const resident = await this.ensureTransformersResident(model, runtime);
+			if (!resident.ok) return { ready: false, reason: resident.reason ?? "residency_refused" };
 			this._confirmedUp.add(confirmedKey);
 			return { ready: true, reason: started.reason };
 		}

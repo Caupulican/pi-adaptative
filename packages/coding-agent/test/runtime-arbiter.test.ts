@@ -1,9 +1,13 @@
 import { describe, expect, it } from "vitest";
 import {
+	AdvisoryRuntimeResidencyAdapter,
+	OllamaRuntimeResidencyAdapter,
 	planRuntimeResidency,
 	type ResidencyControl,
 	type RuntimeResidencyAdapter,
+	RuntimeResidencyArbiter,
 	type RuntimeResidentModel,
+	TransformersRuntimeResidencyAdapter,
 } from "../src/core/models/runtime-arbiter.ts";
 
 function resident(overrides: Partial<RuntimeResidentModel>): RuntimeResidentModel {
@@ -144,5 +148,77 @@ describe("runtime residency arbiter", () => {
 		expect((await full.list()).map((entry) => entry.model)).toEqual([]);
 		expect((await keepAlive.list()).map((entry) => entry.model).sort()).toEqual(["new-ollama-model", "ollama-model"]);
 		expect((await advisory.list()).map((entry) => entry.model)).toEqual(["external-model"]);
+	});
+
+	it("adapts real Ollama, Transformers, and external residency contract shapes", async () => {
+		const loaded = new Set(["ollama-a"]);
+		const ollama = new OllamaRuntimeResidencyAdapter("ollama", {
+			listResidentModels: async () => [...loaded].map((name) => ({ name, sizeBytes: 2_000 })),
+			ensureResident: async (model) => {
+				loaded.add(model);
+				return { ok: true };
+			},
+			releaseResident: async (model) => {
+				loaded.delete(model);
+				return { ok: true };
+			},
+		});
+		let sidecarRunning = true;
+		const transformers = new TransformersRuntimeResidencyAdapter(
+			"transformers",
+			{
+				detect: async () => ({ serverUp: sidecarRunning }) as never,
+				start: async () => {
+					sidecarRunning = true;
+					return { started: true, reason: "started" };
+				},
+				stop: () => {
+					sidecarRunning = false;
+					return { stopped: true };
+				},
+			},
+			"sidecar-model",
+			1_000,
+		);
+		const external = new AdvisoryRuntimeResidencyAdapter("external", [
+			{ model: "external-model", bytes: 3_000, lastUsedAtMs: 0, priority: 0 },
+		]);
+
+		expect((await ollama.list())[0]).toMatchObject({ residencyControl: "keep-alive" });
+		expect((await transformers.list())[0]).toMatchObject({ residencyControl: "full", model: "sidecar-model" });
+		await external.release("external-model");
+		expect((await external.list())[0]).toMatchObject({ residencyControl: "advisory" });
+	});
+
+	it("applies arbiter evictions and refuses synthetic 10GB reservations honestly", async () => {
+		const ollama = new FauxRuntimeAdapter("ollama", "keep-alive", ["resident-9b"]);
+		const transformers = new FauxRuntimeAdapter("transformers", "full");
+		const arbiter = new RuntimeResidencyArbiter({ budgetBytes: 10_000, adapters: [ollama, transformers] });
+
+		const fit = await arbiter.ensureResident("transformers", {
+			model: "brain-1.7b",
+			bytes: 1_500,
+			role: "router",
+			priority: 8,
+			nowMs: 10,
+			reservations: [{ model: "muscle-9b", bytes: 8_300, priority: 10 }],
+		});
+		expect(fit.status).toBe("fits");
+		expect(fit.evict.map((entry) => entry.model)).toEqual(["resident-9b"]);
+		expect((await ollama.list()).map((entry) => entry.model)).toEqual([]);
+		expect((await transformers.list()).map((entry) => entry.model)).toEqual(["brain-1.7b"]);
+
+		const refuse = await new RuntimeResidencyArbiter({
+			budgetBytes: 10_000,
+			adapters: [new FauxRuntimeAdapter("ollama", "keep-alive")],
+		}).ensureResident("ollama", {
+			model: "muscle-9b",
+			bytes: 9_000,
+			role: "active",
+			priority: 10,
+			nowMs: 10,
+			reservations: [{ model: "brain-1.7b", bytes: 1_700, priority: 8 }],
+		});
+		expect(refuse).toMatchObject({ status: "refuse", reason: "insufficient-evictable-memory" });
 	});
 });
