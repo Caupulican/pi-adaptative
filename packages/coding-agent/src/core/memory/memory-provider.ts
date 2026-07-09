@@ -1,3 +1,4 @@
+import type { MemoryPromptBudget } from "../context/memory-prompt-budget.ts";
 import type { ToolDefinition } from "../extensions/types.ts";
 
 export type MemorySurface = "context" | "routing" | "tooling" | "parametric";
@@ -19,7 +20,7 @@ export interface MemoryProvider {
 	initialize(sessionId: string, ctx: MemoryLifecycleContext): Promise<void>;
 	shutdown(): Promise<void>;
 	// context surface:
-	systemPromptBlock?(): string;
+	systemPromptBlock?(budget?: MemoryPromptBudget): string;
 	prefetch?(query: string): Promise<string>;
 	syncTurn?(user: string, assistant: string): Promise<void>;
 	onPreCompress?(): Promise<string>;

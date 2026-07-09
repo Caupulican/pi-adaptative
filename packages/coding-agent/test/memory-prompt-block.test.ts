@@ -1,10 +1,11 @@
 import { describe, expect, it } from "vitest";
-import type { ContextItem } from "../src/core/context/context-item.ts";
+import { estimateTokensFromText, type ContextItem } from "../src/core/context/context-item.ts";
 import {
 	buildMemoryPromptBlock,
 	MEMORY_PROMPT_BLOCK_MAX_CHARS_PER_ITEM,
 	MEMORY_PROMPT_BLOCK_MAX_TOTAL_CHARS,
 } from "../src/core/context/memory-prompt-block.ts";
+import { resolveMemoryPromptBudget } from "../src/core/context/memory-prompt-budget.ts";
 
 function memoryItem(summary: string, overrides: Partial<ContextItem> = {}): ContextItem {
 	return {
@@ -101,5 +102,17 @@ describe("buildMemoryPromptBlock", () => {
 		expect(result.includedCount).toBe(1);
 		expect(result.omittedCount).toBe(1);
 		expect(result.text).toContain("1. real content here");
+	});
+
+	it("strictly respects compact memory budgets when provided", () => {
+		const budget = resolveMemoryPromptBudget({ contextWindow: 1024, configuredMaxResults: 20 });
+		const result = buildMemoryPromptBlock(
+			Array.from({ length: 20 }, (_, index) => memoryItem(`compact memory line ${index}`)),
+			{ budget },
+		);
+
+		expect(result.text?.split("\n").length).toBeLessThanOrEqual(10);
+		expect(estimateTokensFromText(result.text ?? "")).toBeLessThanOrEqual(200);
+		expect(result.omittedCount).toBeGreaterThan(0);
 	});
 });

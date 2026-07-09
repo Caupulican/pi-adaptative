@@ -2,6 +2,7 @@ import { existsSync, promises as fs, mkdirSync, writeFileSync } from "fs";
 import { join } from "path";
 import lockfile from "proper-lockfile";
 import { type Static, Type } from "typebox";
+import type { MemoryPromptBudget } from "../../context/memory-prompt-budget.ts";
 import type { ToolDefinition } from "../../extensions/types.ts";
 import { hasInvisibleUnicode, scanContextFileThreats, stripInvisibleUnicode } from "../../resource-loader.ts";
 import { jaccard, tokenize } from "../../tools/skill-audit.ts";
@@ -96,7 +97,7 @@ export class FileStoreProvider implements MemoryProvider {
 		this.lastWrittenUser = await fs.readFile(this.userFilePath, "utf-8");
 	}
 
-	public systemPromptBlock(): string {
+	public systemPromptBlock(budget?: MemoryPromptBudget): string {
 		const sanitize = (content: string) => {
 			// Strip hidden/bidi-control chars before injecting memory into the prompt (defence in depth: the
 			// write path already blocks them, but a file edited out-of-band could carry them). Strip #31.
@@ -135,7 +136,11 @@ export class FileStoreProvider implements MemoryProvider {
 			return "";
 		}
 
-		return `=== Persistent Memory (file-store) ===\n[System Note: Below is a snapshot of your persistent memory. You can update these using the 'memory' tool.]\n\n${blocks.join("\n\n")}`;
+		const block = `=== Persistent Memory (file-store) ===\n[System Note: Below is a snapshot of your persistent memory. You can update these using the 'memory' tool.]\n\n${blocks.join("\n\n")}`;
+		if (budget?.compact && (block.split("\n").length > budget.maxLines || block.length > budget.maxChars)) {
+			return "";
+		}
+		return block;
 	}
 
 	public async prefetch(_query: string): Promise<string> {

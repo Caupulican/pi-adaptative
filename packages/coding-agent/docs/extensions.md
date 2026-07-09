@@ -1815,6 +1815,38 @@ pi.registerTool({
 });
 ```
 
+### Context Memory Providers
+
+Extensions can register local retrieval-style memory providers with `pi.registerContextMemoryProvider(provider)`. These providers participate in Pi's tiered, budgeted memory prompt: standing rules/current work first, long-term retrieval only when triggered, and a hard 10-line/~200-token cap on models with `contextWindow <= 2048`.
+
+Providers must implement the context memory contract (`id`, `label`, `source`, `capabilities`, `search`, `fetch`). Use `source: "custom_local"` and `capabilities.localOnly: true` for user-owned local stores such as Automata. External/networked providers are blocked by default egress policy unless explicitly enabled.
+
+```typescript
+pi.registerContextMemoryProvider({
+  id: "my-local-memory",
+  label: "My Local Memory",
+  source: "custom_local",
+  capabilities: {
+    search: true,
+    fetch: true,
+    write: false,
+    delete: false,
+    shortTerm: false,
+    longTerm: true,
+    graph: false,
+    citations: true,
+    scopes: ["project", "user", "global"],
+    localOnly: true,
+  },
+  async search(request) {
+    return [];
+  },
+  async fetch(ref) {
+    return undefined;
+  },
+});
+```
+
 **Signaling errors:** To mark a tool execution as failed (sets `isError: true` on the result and reports it to the LLM), throw an error from `execute`. Returning a value never sets the error flag regardless of what properties you include in the return object.
 
 **Early termination:** Return `terminate: true` from `execute()` to hint that the automatic follow-up LLM call should be skipped after the current tool batch. This only takes effect when every finalized tool result in that batch is terminating. See [examples/extensions/structured-output.ts](../examples/extensions/structured-output.ts) for a minimal example where the agent ends on a final structured-output tool call.

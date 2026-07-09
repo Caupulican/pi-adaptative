@@ -66,19 +66,14 @@ export interface ContextPromptEnforcementSettings {
 
 /**
  * Local memory retrieval (see context/memory-retrieval.ts, context/memory-prompt-block.ts):
- * when `enabled`, each turn queries the local, read-only Pi OKF memory provider under
- * `<agentDir>/okf-memory` (fixed path, not user-configurable in this slice) and stores a
- * report of source-labeled evidence. By default (`includeInPrompt` false) this is
- * report-only -- nothing is injected into the provider-visible prompt or transcript. When
- * `includeInPrompt` is also true, a single bounded, source-labeled, untrusted-content-
- * wrapped evidence block is appended to the provider-visible prompt each turn (never
- * written to the transcript/session history). External/non-local providers are never
- * constructed or queried by this setting.
+ * default-on for local, safe-auto sources. Prompt inclusion is still budget-gated per turn;
+ * compact models get at most a 10-line/~200-token source-labeled block or no memory block.
+ * External/non-local providers remain blocked unless explicitly allowed by policy.
  */
 export interface MemoryRetrievalSettings {
-	enabled?: boolean; // default: false -- no behavior change unless explicitly opted in
+	enabled?: boolean; // default: true -- local safe-auto retrieval
 	maxResults?: number; // default: 5, clamped to [1, 20]
-	includeInPrompt?: boolean; // default: false -- requires `enabled` too; report-only otherwise
+	includeInPrompt?: boolean; // default: true -- budget-gated safe-auto prompt inclusion
 }
 
 export interface ContextCurationSettings {
@@ -2371,11 +2366,11 @@ export class SettingsManager {
 
 	getMemoryRetrievalSettings(): { enabled: boolean; maxResults: number; includeInPrompt: boolean } {
 		return {
-			enabled: this.settings.contextPolicy?.memory?.enabled ?? false,
+			enabled: this.settings.contextPolicy?.memory?.enabled ?? true,
 			maxResults: clampMemoryRetrievalMaxResults(
 				this.settings.contextPolicy?.memory?.maxResults ?? MEMORY_RETRIEVAL_MAX_RESULTS_DEFAULT,
 			),
-			includeInPrompt: this.settings.contextPolicy?.memory?.includeInPrompt ?? false,
+			includeInPrompt: this.settings.contextPolicy?.memory?.includeInPrompt ?? true,
 		};
 	}
 

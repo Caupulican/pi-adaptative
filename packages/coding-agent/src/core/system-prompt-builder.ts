@@ -14,6 +14,7 @@
 
 import { existsSync } from "node:fs";
 import { resolvePath } from "../utils/paths.ts";
+import { resolveMemoryPromptBudget } from "./context/memory-prompt-budget.ts";
 import type { Extension } from "./extensions/types.ts";
 import type { MemoryManager } from "./memory/memory-manager.ts";
 import type { ModelAdaptationRule } from "./models/adaptation-store.ts";
@@ -41,6 +42,8 @@ export interface SystemPromptBuilderDeps {
 	getModelAdaptationRules(): readonly ModelAdaptationRule[];
 	/** The session's currently active extensions. */
 	getActiveExtensions(): ReadonlyArray<Extension>;
+	/** Active model context window, used to compact-cap static memory prompt blocks. */
+	getContextWindow(): number | undefined;
 }
 
 export class SystemPromptBuilder {
@@ -138,6 +141,15 @@ export class SystemPromptBuilder {
 - Always ask for explicit approval before publishing, pushing, tagging, or releasing.`;
 	}
 
+	private _buildStaticMemoryPrompt(): string | undefined {
+		const contextWindow = this.deps.getContextWindow();
+		const budget =
+			contextWindow !== undefined && contextWindow <= 2048
+				? resolveMemoryPromptBudget({ contextWindow, configuredMaxResults: 3 })
+				: undefined;
+		return this.deps.getMemoryManager().buildSystemPromptBlock(budget) || undefined;
+	}
+
 	private _buildModelAdaptationPrompt(): string | undefined {
 		const rules = this.deps.getModelAdaptationRules();
 		if (rules.length === 0) return undefined;
@@ -198,7 +210,7 @@ export class SystemPromptBuilder {
 			this._buildAutonomyPrompt(),
 			this._buildModelAdaptationPrompt(),
 			// Memory subsystem: static, frozen-per-session block (e.g. file-store MEMORY.md/USER.md).
-			this.deps.getMemoryManager().buildSystemPromptBlock() || undefined,
+			this._buildStaticMemoryPrompt(),
 			...loaderAppendSystemPrompt,
 		].filter((part): part is string => Boolean(part));
 		const appendSystemPrompt = appendSystemPromptParts.length > 0 ? appendSystemPromptParts.join("\n\n") : undefined;

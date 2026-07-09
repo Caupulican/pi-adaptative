@@ -26,13 +26,18 @@ import {
 	type MemoryRetrievalDiagnostics,
 	sanitizeMemoryRetrievalReportForDiagnostics,
 } from "./context/memory-diagnostics.ts";
-import { buildMemoryPromptBlock } from "./context/memory-prompt-block.ts";
+import { collectCurrentWorkMemory } from "./context/current-work-memory.ts";
+import { createFileStoreMemoryProvider } from "./context/file-store-memory-provider.ts";
+import { shouldQueryLongTermMemory } from "./context/long-term-memory-trigger.ts";
+import { resolveMemoryPromptBudget, type MemoryPromptBudget } from "./context/memory-prompt-budget.ts";
+import { composeTieredMemoryPromptBlock, type MemoryTierCandidate } from "./context/memory-tier-composer.ts";
 import {
 	type MemoryProvider as ContextMemoryProvider,
 	DEFAULT_LOCAL_MEMORY_EGRESS_POLICY,
 } from "./context/memory-provider-contract.ts";
 import { type MemoryRetrievalReport, retrieveMemoryForContext } from "./context/memory-retrieval.ts";
 import { createOkfMemoryProvider } from "./context/okf-memory-provider.ts";
+import type { GoalState } from "./goals/goal-state.ts";
 import { EffectivenessTracker } from "./memory/effectiveness-tracker.ts";
 import { MemoryManager } from "./memory/memory-manager.ts";
 import type { MemoryProvider } from "./memory/memory-provider.ts";
@@ -43,9 +48,9 @@ import type { SettingsManager } from "./settings-manager.ts";
 
 /**
  * Text of the most recent user message, or "" if there is none (e.g. goal-continuation
- * turns with no new user input). An empty query degrades to zero memory-retrieval results
- * by construction (see memory-provider-contract.ts's score-on-empty-query-tokens rule) --
- * no special-casing needed here beyond returning "".
+ * turns with no new user input). An empty query is still valid: standing user preferences may
+ * surface from the file-store retrieval fallback when the static memory prompt cannot fit,
+ * while long-term providers remain gated by shouldQueryLongTermMemory().
  */
 function latestUserMessageText(messages: AgentMessage[]): string {
 	for (let index = messages.length - 1; index >= 0; index--) {
@@ -66,7 +71,7 @@ function emptyMemoryRetrievalReport(maxResults: number): MemoryRetrievalReport {
 }
 
 export interface MemoryControllerDeps {
-	/** Memory-retrieval + prompt-inclusion settings (the opt-in gates for retrieval and surfacing). */
+	/** Memory-retrieval + prompt-inclusion settings (default-on gates for retrieval and surfacing). */
 	getSettingsManager(): SettingsManager;
 	/** Current turn index, stamped into a retrieval request's `createdAtTurn`. */
 	getTurnIndex(): number;
@@ -80,10 +85,15 @@ export interface MemoryControllerDeps {
 	isChildSession(): boolean;
 	/** Re-derive the tool registry after (re)init so the newly-surfaced memory tools take effect. */
 	refreshToolRegistry(): void;
+	/** Active model context window, used to cap prompt-visible memory. */
+	getContextWindow(): number | undefined;
+	/** Latest active goal state, used for short-term current-work memory. */
+	getGoalState(): GoalState | undefined;
 }
 
 export class MemoryController {
 	private _memoryOkfProvider: ContextMemoryProvider | undefined = undefined;
+	private _fileStoreMemoryProvider: ContextMemoryProvider | undefined = undefined;
 	private _latestMemoryRetrievalReport: MemoryRetrievalReport | undefined = undefined;
 	private _latestMemoryPromptInclusionReport: MemoryPromptInclusionReport | undefined = undefined;
 	/** Plug-and-play memory subsystem. Recreated on each (re)initialize so reload is safe. */
@@ -92,6 +102,8 @@ export class MemoryController {
 	private readonly _effectivenessTracker = new EffectivenessTracker();
 	/** Memory providers registered by extensions via pi.registerMemoryProvider, applied on (re)init. */
 	private _pendingMemoryProviders: MemoryProvider[] = [];
+	/** Context-memory providers registered by extensions via pi.registerContextMemoryProvider. */
+	private _pendingContextMemoryProviders: ContextMemoryProvider[] = [];
 
 	private readonly deps: MemoryControllerDeps;
 
@@ -125,14 +137,37 @@ export class MemoryController {
 		return this._memoryOkfProvider;
 	}
 
+	private _getFileStoreMemoryProvider(): ContextMemoryProvider {
+		this._fileStoreMemoryProvider ??= createFileStoreMemoryProvider({
+			memoryFilePath: join(this.deps.getAgentDir(), "MEMORY.md"),
+			userFilePath: join(this.deps.getAgentDir(), "USER.md"),
+		});
+		return this._fileStoreMemoryProvider;
+	}
+
+	private _memoryBudget(configuredMaxResults: number) {
+		return resolveMemoryPromptBudget({
+			contextWindow: this.deps.getContextWindow(),
+			configuredMaxResults,
+		});
+	}
+
+	private _shouldQueryFileStoreFallback(budget: MemoryPromptBudget): boolean {
+		// MEMORY.md/USER.md are already injected through the static file-store prompt on
+		// normal windows, so querying them again would duplicate provider-visible memory.
+		// In compact windows the static block can be omitted because it does not fit; only
+		// then use the retrieval view to surface a few budget-pruned lines.
+		if (!budget.enabled || !budget.compact) return false;
+		return this._memoryManager.buildSystemPromptBlock(budget).trim().length === 0;
+	}
+
 	/**
 	 * Observe-only local memory retrieval (see context/memory-retrieval.ts and
-	 * context/okf-memory-provider.ts): default disabled, opt-in setting. When disabled,
-	 * never constructs the OKF provider (no directory access under `_memoryOkfDir()` at
-	 * all) and returns an empty report -- fully fail-closed. When enabled, queries the
-	 * local, read-only OKF provider with the latest user message text (empty if there is
-	 * none, e.g. a goal-continuation turn -- degrades to zero results by construction, see
-	 * `latestUserMessageText`'s doc comment) under `DEFAULT_LOCAL_MEMORY_EGRESS_POLICY`.
+	 * context/okf-memory-provider.ts): default-on, but settings-gated. When disabled,
+	 * never constructs built-in context-memory providers (no directory access under
+	 * `_memoryOkfDir()` at all) and returns an empty report -- fully fail-closed. When enabled,
+	 * queries local, read-only providers with the latest user message text (empty if there is
+	 * none, e.g. a goal-continuation turn) under `DEFAULT_LOCAL_MEMORY_EGRESS_POLICY`.
 	 * Retrieved items are only ever stored in the report; nothing here touches `messages`,
 	 * the transcript, or the provider-visible prompt. Never throws into a live turn: any
 	 * failure (including a provider search error) degrades to an empty report.
@@ -145,12 +180,26 @@ export class MemoryController {
 				this._latestMemoryRetrievalReport = report;
 				return report;
 			}
+			const query = latestUserMessageText(messages);
+			const budget = this._memoryBudget(settings.maxResults);
+			const currentWork = collectCurrentWorkMemory({ goalState: this.deps.getGoalState() });
+			const longTermDecision = shouldQueryLongTermMemory({
+				latestUserText: query,
+				goalState: this.deps.getGoalState(),
+				budget,
+				currentWorkCandidateCount: currentWork.length,
+			});
+			const providers = this._shouldQueryFileStoreFallback(budget) ? [this._getFileStoreMemoryProvider()] : [];
+			if (longTermDecision.shouldQuery) {
+				providers.push(this._getMemoryOkfProvider(), ...this._pendingContextMemoryProviders);
+			}
+			const maxResults = budget.enabled ? Math.min(settings.maxResults, budget.maxResults) : settings.maxResults;
 			const report = await retrieveMemoryForContext(
-				[this._getMemoryOkfProvider()],
-				{ query: latestUserMessageText(messages), maxResults: settings.maxResults },
+				providers,
+				{ query, maxResults },
 				{
 					createdAtTurn: this.deps.getTurnIndex(),
-					maxResults: settings.maxResults,
+					maxResults,
 					defaultLocalPolicy: DEFAULT_LOCAL_MEMORY_EGRESS_POLICY,
 				},
 			);
@@ -168,10 +217,39 @@ export class MemoryController {
 		return this._latestMemoryRetrievalReport ?? emptyMemoryRetrievalReport(0);
 	}
 
+	private _candidateForContextItem(item: MemoryRetrievalReport["contextItems"][number]): MemoryTierCandidate | undefined {
+		const summary = item.summary?.trim();
+		if (!summary) return undefined;
+		const ref = item.primaryRef?.type === "memory" ? item.primaryRef.ref : undefined;
+		const sourceLabel =
+			ref?.providerId === "pi-file-store" && ref.kind === "user_preference"
+				? "rule:user"
+				: `memory:${ref?.providerId ?? item.source}`;
+		const tier = ref?.kind === "user_preference" ? "standing" : "long_term";
+		return {
+			id: item.id,
+			tier,
+			sourceLabel,
+			summary,
+			score: 0.5,
+			evidenceRefs: item.evidenceRefs,
+		};
+	}
+
+	private _memoryCandidates(report: MemoryRetrievalReport): MemoryTierCandidate[] {
+		return [
+			...collectCurrentWorkMemory({ goalState: this.deps.getGoalState() }),
+			...report.contextItems.flatMap((item) => {
+				const candidate = this._candidateForContextItem(item);
+				return candidate === undefined ? [] : [candidate];
+			}),
+		];
+	}
+
 	/**
-	 * Bounded prompt-surfacing pilot for local memory evidence (see
-	 * context/memory-prompt-block.ts): opt-in, default disabled, and gated on TWO settings
-	 * (`enabled` AND `includeInPrompt`) plus a non-empty `report.contextItems` -- the first
+	 * Bounded prompt-surfacing for local memory evidence (see context/memory-tier-composer.ts):
+	 * default-on, but gated on TWO settings (`enabled` AND `includeInPrompt`) plus at least one
+	 * current-work, standing, or retrieved memory candidate -- the first
 	 * two are belt-and-suspenders on top of the fact that `runMemoryRetrieval` already
 	 * leaves `contextItems` empty whenever `enabled` is false, regardless of
 	 * `includeInPrompt`. Reuses the `report` this pass's `runMemoryRetrieval` call already
@@ -193,10 +271,11 @@ export class MemoryController {
 	maybeAppendMemoryEvidenceBlock(messages: AgentMessage[], report: MemoryRetrievalReport): AgentMessage[] {
 		try {
 			const settings = this.deps.getSettingsManager().getMemoryRetrievalSettings();
+			const candidates = this._memoryCandidates(report);
 			const base = {
 				enabled: settings.enabled,
 				includeInPrompt: settings.includeInPrompt,
-				selectedItemCount: report.contextItems.length,
+				selectedItemCount: candidates.length,
 			};
 			if (!settings.enabled) {
 				this._latestMemoryPromptInclusionReport = {
@@ -218,7 +297,7 @@ export class MemoryController {
 				};
 				return messages;
 			}
-			if (report.contextItems.length === 0) {
+			if (candidates.length === 0) {
 				this._latestMemoryPromptInclusionReport = {
 					...base,
 					status: "no_results",
@@ -229,7 +308,8 @@ export class MemoryController {
 				return messages;
 			}
 
-			const block = buildMemoryPromptBlock(report.contextItems);
+			const budget = this._memoryBudget(settings.maxResults);
+			const block = composeTieredMemoryPromptBlock(candidates, budget);
 			if (!block.text) {
 				this._latestMemoryPromptInclusionReport = {
 					...base,
@@ -241,7 +321,7 @@ export class MemoryController {
 				return messages;
 			}
 
-			const wrapped = wrapUntrustedText(block.text, "memory:pi-okf");
+			const wrapped = wrapUntrustedText(block.text, "memory:tiered");
 			const evidenceMessage: CustomMessage = {
 				role: "custom",
 				customType: "memory_evidence",
@@ -255,7 +335,7 @@ export class MemoryController {
 				includedCount: block.includedCount,
 				omittedCount: block.omittedCount,
 				blockChars: wrapped.length,
-				sourceLabel: "memory:pi-okf",
+				sourceLabel: "memory:tiered",
 			};
 			return [...messages, evidenceMessage];
 		} catch {
@@ -364,8 +444,18 @@ export class MemoryController {
 		}
 	}
 
+	/** Register a retrieval-style context memory provider contributed by an extension. */
+	registerContextMemoryProvider(provider: ContextMemoryProvider): void {
+		if (!this._pendingContextMemoryProviders.some((p) => p.id === provider.id)) {
+			this._pendingContextMemoryProviders.push(provider);
+		}
+	}
+
 	/** Reload starts memory providers fresh; loaded extensions re-register before the next `initialize()`. */
 	clearPendingProviders(): void {
 		this._pendingMemoryProviders = [];
+		this._pendingContextMemoryProviders = [];
+		this._memoryOkfProvider = undefined;
+		this._fileStoreMemoryProvider = undefined;
 	}
 }

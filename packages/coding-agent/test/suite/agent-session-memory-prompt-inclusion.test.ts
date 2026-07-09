@@ -1,7 +1,6 @@
 /**
- * Bounded prompt surfacing for retrieved local memory (follow-up to the observe-only
- * retrieval slice): opt-in via a SEPARATE `includeInPrompt` setting, default disabled, and
- * only ever takes effect when `enabled` (retrieval itself) is also true. Proves the
+ * Bounded prompt surfacing for retrieved local memory: safe-auto prompt inclusion is default-on
+ * but still budget-gated, and only ever takes effect when `enabled` (retrieval itself) is true. Proves the
  * injected block is (a) additive-only (never mutates existing messages), (b) wrapped in
  * the existing untrusted-content boundary with a correct source label, (c) bounded by
  * memory-prompt-block.ts's character caps, and (d) never written to the transcript.
@@ -63,10 +62,10 @@ function contextUserTexts(context: Context): string[] {
 }
 
 function hasMemoryEvidenceBlock(context: Context): boolean {
-	return contextUserTexts(context).some((text) => text.includes('source="memory:pi-okf"'));
+	return contextUserTexts(context).some((text) => text.includes('source="memory:tiered"'));
 }
 
-describe("AgentSession live memory prompt inclusion (opt-in, default disabled)", () => {
+describe("AgentSession live memory prompt inclusion (safe-auto, budget-gated)", () => {
 	const harnesses: Harness[] = [];
 
 	afterEach(() => {
@@ -75,25 +74,14 @@ describe("AgentSession live memory prompt inclusion (opt-in, default disabled)",
 		}
 	});
 
-	it("R1: default (includeInPrompt unset) is identical to the a9a65996 baseline, even with real retrieval results", async () => {
-		const baselineHarness = await createHarness({});
+	it("R1: default safe-auto includes relevant retrieved local memory", async () => {
 		const retrievalHarness = await createHarness({
 			settings: { contextPolicy: { memory: { enabled: true, maxResults: 5 } } },
 		});
-		harnesses.push(baselineHarness, retrievalHarness);
+		harnesses.push(retrievalHarness);
 
 		const doc = okfDocument("Widget rollout", "Notes on widget rollout.", "Body text about widgets.");
-		writeOkfFile(baselineHarness, "note.okf.md", doc);
 		writeOkfFile(retrievalHarness, "note.okf.md", doc);
-
-		let baselineCaptured: Context | undefined;
-		baselineHarness.setResponses([
-			(context) => {
-				baselineCaptured = context;
-				return fauxAssistantMessage("ok");
-			},
-		]);
-		await baselineHarness.session.prompt("tell me about widgets");
 
 		let retrievalCaptured: Context | undefined;
 		retrievalHarness.setResponses([
@@ -102,13 +90,9 @@ describe("AgentSession live memory prompt inclusion (opt-in, default disabled)",
 				return fauxAssistantMessage("ok");
 			},
 		]);
-		await retrievalHarness.session.prompt("tell me about widgets");
+		await retrievalHarness.session.prompt("recall widgets");
 
-		expect(normalizeContext(retrievalCaptured as Context, retrievalHarness.tempDir)).toEqual(
-			normalizeContext(baselineCaptured as Context, baselineHarness.tempDir),
-		);
-		expect(hasMemoryEvidenceBlock(retrievalCaptured as Context)).toBe(false);
-		// Non-vacuous: retrieval really found something even though nothing was injected.
+		expect(hasMemoryEvidenceBlock(retrievalCaptured as Context)).toBe(true);
 		expect(retrievalHarness.session.getMemoryRetrievalReport().contextItems.length).toBeGreaterThan(0);
 	});
 
@@ -130,7 +114,7 @@ describe("AgentSession live memory prompt inclusion (opt-in, default disabled)",
 				return fauxAssistantMessage("ok");
 			},
 		]);
-		await harness.session.prompt("tell me about widgets");
+		await harness.session.prompt("recall widgets");
 
 		expect(hasMemoryEvidenceBlock(captured as Context)).toBe(false);
 		expect(harness.session.getMemoryRetrievalReport().contextItems.length).toBeGreaterThan(0);
@@ -205,9 +189,9 @@ describe("AgentSession live memory prompt inclusion (opt-in, default disabled)",
 		expect(lastMessage?.role).toBe("user");
 		const lastText = contextUserTexts(after).at(-1) ?? "";
 		expect(lastText).toContain("<untrusted_content");
-		expect(lastText).toContain('source="memory:pi-okf"');
+		expect(lastText).toContain('source="memory:tiered"');
 		expect(lastText).toContain("pi-okf/project/design_decision");
-		expect(lastText).toContain("Local memory evidence");
+		expect(lastText).toContain("Local memory");
 	});
 
 	it("R5: an oversized OKF description is truncated in the actual injected block", async () => {
@@ -264,8 +248,8 @@ describe("AgentSession live memory prompt inclusion (opt-in, default disabled)",
 
 		expect(harness.session.getMemoryRetrievalReport().contextItems).toHaveLength(1);
 		const lastText = contextUserTexts(captured as Context).at(-1) ?? "";
-		expect(lastText).toContain("1. [pi-okf");
-		expect(lastText).not.toContain("2. [pi-okf");
+		expect(lastText).toContain("- memory:pi-okf [pi-okf");
+		expect(lastText).not.toContain("Widget rollout B");
 	});
 
 	it("R9: a malformed OKF file with includeInPrompt true does not throw/block, and still surfaces a valid sibling", async () => {
@@ -338,10 +322,10 @@ describe("AgentSession live memory prompt inclusion (opt-in, default disabled)",
 			);
 
 		expect(hasMemoryEvidenceInMessages(harness.session.messages)).toBe(false);
-		const branchMessages = harness.sessionManager
-			.getBranch()
-			.filter((entry): entry is Extract<typeof entry, { type: "message" }> => entry.type === "message")
-			.map((entry) => entry.message);
+		const branchMessages: AgentMessage[] = [];
+		for (const entry of harness.sessionManager.getBranch()) {
+			if (entry.type === "message") branchMessages.push(entry.message);
+		}
 		expect(hasMemoryEvidenceInMessages(branchMessages)).toBe(false);
 	});
 

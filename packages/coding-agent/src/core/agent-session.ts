@@ -142,6 +142,7 @@ import {
 	type GoalRuntimeSnapshot,
 	type GoalRuntimeSnapshotSettings,
 } from "./goals/goal-runtime-snapshot.ts";
+import type { MemoryProvider as ContextMemoryProvider } from "./context/memory-provider-contract.ts";
 import type { GoalState } from "./goals/goal-state.ts";
 import { appendGoalStateSnapshot, getLatestGoalStateSnapshot } from "./goals/session-goal-state.ts";
 import type { LearningAuditRecord } from "./learning/learning-audit.ts";
@@ -809,6 +810,7 @@ export class AgentSession {
 			getToolPromptGuidelines: (name) => this._runtimeBuilder.getToolPromptGuidelines(name),
 			getModelAdaptationRules: () => this._getModelAdaptationRulesForPrompt(),
 			getActiveExtensions: () => this._extensionRunner.activeExtensions,
+			getContextWindow: () => this.model?.contextWindow,
 		});
 		this._autonomyTelemetry = new AutonomyTelemetry({
 			getSessionManager: () => this.sessionManager,
@@ -856,6 +858,8 @@ export class AgentSession {
 			getSessionId: () => this.sessionManager.getSessionId(),
 			isChildSession: () => this._isChildSession,
 			refreshToolRegistry: () => this._refreshToolRegistry(),
+			getContextWindow: () => this.model?.contextWindow,
+			getGoalState: () => this.getGoalStateSnapshot(),
 		});
 		this._compactionSupport = new CompactionSupport({
 			getModel: () => this.model,
@@ -4318,6 +4322,7 @@ export class AgentSession {
 				setThinkingLevel: (level) => this.setThinkingLevel(level),
 				getExternalResourceRoots: () => this.settingsManager.getEffectiveExternalResourceRoots(),
 				registerMemoryProvider: (provider) => this.registerMemoryProvider(provider),
+				registerContextMemoryProvider: (provider) => this.registerContextMemoryProvider(provider),
 				reportSpawnedUsage: (usage, opts) => {
 					this.addSpawnedUsage(usage, opts);
 				},
@@ -4388,6 +4393,10 @@ export class AgentSession {
 	/** Register a memory provider contributed by an extension; applied on the next memory (re)init. */
 	registerMemoryProvider(provider: MemoryProvider): void {
 		this._memory.registerMemoryProvider(provider);
+	}
+
+	registerContextMemoryProvider(provider: ContextMemoryProvider): void {
+		this._memory.registerContextMemoryProvider(provider);
 	}
 
 	/** R8: the gateway/scheduler registry. A deployment runner registers providers and drives start/stop. */

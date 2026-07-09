@@ -68,6 +68,7 @@ describe("ExtensionRunner", () => {
 		setThinkingLevel: () => {},
 		getExternalResourceRoots: () => [],
 		registerMemoryProvider: () => {},
+		registerContextMemoryProvider: () => {},
 		reportSpawnedUsage: () => {},
 	};
 

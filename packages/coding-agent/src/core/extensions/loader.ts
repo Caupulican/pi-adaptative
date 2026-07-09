@@ -198,6 +198,7 @@ export function createExtensionRuntime(): ExtensionRuntime {
 		setThinkingLevel: notInitialized,
 		getExternalResourceRoots: notInitialized,
 		registerMemoryProvider: notInitialized,
+		registerContextMemoryProvider: notInitialized,
 		reportSpawnedUsage: notInitialized,
 		flagValues: new Map(),
 		pendingProviderRegistrations: [],
@@ -360,6 +361,11 @@ function createExtensionAPI(
 		registerMemoryProvider(provider) {
 			runtime.assertActive();
 			runtime.registerMemoryProvider(provider);
+		},
+
+		registerContextMemoryProvider(provider) {
+			runtime.assertActive();
+			runtime.registerContextMemoryProvider(provider);
 		},
 
 		reportSpawnedUsage(usage, opts) {

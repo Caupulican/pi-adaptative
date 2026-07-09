@@ -1,3 +1,4 @@
+import type { MemoryPromptBudget } from "../context/memory-prompt-budget.ts";
 import type { ToolDefinition } from "../extensions/types.ts";
 import type { MemoryLifecycleContext, MemoryProvider } from "./memory-provider.ts";
 
@@ -6,7 +7,7 @@ export class MemoryManager {
 	private readonly activeProviders: Set<string> = new Set();
 	private readonly registeredToolNames: Set<string> = new Set();
 	private ctx?: MemoryLifecycleContext;
-	private systemPromptBlockCache?: string;
+	private systemPromptBlockCache?: { key: string; text: string };
 
 	// Core reserved tool names to prevent hijacking or schema corruption.
 	private static readonly RESERVED_CORE_TOOL_NAMES = new Set([
@@ -75,13 +76,18 @@ export class MemoryManager {
 		}
 	}
 
-	public buildSystemPromptBlock(): string {
-		if (this.systemPromptBlockCache !== undefined) {
-			return this.systemPromptBlockCache;
+	public buildSystemPromptBlock(budget?: MemoryPromptBudget): string {
+		const key =
+			budget === undefined
+				? "none"
+				: `${budget.enabled}:${budget.compact}:${budget.maxLines}:${budget.maxEstimatedTokens}:${budget.maxChars}`;
+		if (this.systemPromptBlockCache !== undefined && this.systemPromptBlockCache.key === key) {
+			return this.systemPromptBlockCache.text;
 		}
 
-		this.systemPromptBlockCache = this._composeSystemPromptBlock();
-		return this.systemPromptBlockCache;
+		const text = this._composeSystemPromptBlock(budget);
+		this.systemPromptBlockCache = { key, text };
+		return text;
 	}
 
 	/**
@@ -90,18 +96,18 @@ export class MemoryManager {
 	 * (including writes made earlier in the same session) without churning the prefix-cache-stable
 	 * system prompt block.
 	 */
-	public buildSystemPromptBlockFresh(): string {
-		return this._composeSystemPromptBlock();
+	public buildSystemPromptBlockFresh(budget?: MemoryPromptBudget): string {
+		return this._composeSystemPromptBlock(budget);
 	}
 
-	private _composeSystemPromptBlock(): string {
+	private _composeSystemPromptBlock(budget?: MemoryPromptBudget): string {
 		const blocks: string[] = [];
 		for (const p of this.providers) {
 			if (!this.activeProviders.has(p.name) || !p.systemPromptBlock) {
 				continue;
 			}
 			try {
-				const block = p.systemPromptBlock();
+				const block = p.systemPromptBlock(budget);
 				if (block) {
 					blocks.push(block);
 				}

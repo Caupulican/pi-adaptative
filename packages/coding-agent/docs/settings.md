@@ -257,6 +257,28 @@ Semantic memory packing only targets tool results and Automata/Mind custom conte
 }
 ```
 
+### Context Memory
+
+| Setting | Type | Default | Description |
+|---------|------|---------|-------------|
+| `contextPolicy.memory.enabled` | boolean | `true` | Enable local safe-auto memory retrieval |
+| `contextPolicy.memory.includeInPrompt` | boolean | `true` | Include retrieved memory only when the active model budget permits it |
+| `contextPolicy.memory.maxResults` | number | `5` | Maximum retrieval results before tier/budget pruning; clamped to 1-20 |
+
+For models with `contextWindow <= 2048`, provider-visible memory is capped to 10 lines and about 200 estimated tokens total. If standing/current-work/long-term memory cannot fit that cap, Pi skips the memory block rather than overflowing context. `MEMORY.md`/`USER.md` stay in the static file-store prompt on normal windows; Pi uses the retrieval view for those files only when that static block cannot fit a compact model budget, avoiding duplicate prompt content. Custom local memory layers, such as Automata, should register a context provider with `pi.registerContextMemoryProvider`; core ships only local file-store and OKF readers. Long-term providers remain local-only by default; external memory egress requires explicit policy.
+
+```json
+{
+  "contextPolicy": {
+    "memory": {
+      "enabled": true,
+      "includeInPrompt": true,
+      "maxResults": 5
+    }
+  }
+}
+```
+
 ### Branch Summary
 
 | Setting | Type | Default | Description |

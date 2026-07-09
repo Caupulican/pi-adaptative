@@ -58,6 +58,7 @@ import type { EventBus } from "../event-bus.ts";
 import type { ExecOptions, ExecResult } from "../exec.ts";
 import type { ReadonlyFooterDataProvider } from "../footer-data-provider.ts";
 import type { KeybindingsManager } from "../keybindings.ts";
+import type { MemoryProvider as ContextMemoryProvider } from "../context/memory-provider-contract.ts";
 import type { MemoryProvider } from "../memory/memory-provider.ts";
 import type { ModelRegistry } from "../model-registry.ts";
 import type { SlashCommandInfo } from "../slash-commands.ts";
@@ -1252,6 +1253,9 @@ export interface ExtensionAPI {
 	/** Register a memory provider with the session's MemoryManager (applied on next memory (re)init). */
 	registerMemoryProvider(provider: MemoryProvider): void;
 
+	/** Register a retrieval-style context memory provider for budgeted memory prompts. */
+	registerContextMemoryProvider(provider: ContextMemoryProvider): void;
+
 	/**
 	 * Report usage spent by a session this extension spawned (subagent or `pi` subprocess) so the
 	 * parent footer can roll it into the displayed cost (Cost Aggregation).
@@ -1541,6 +1545,7 @@ export interface ExtensionActions {
 	setThinkingLevel: SetThinkingLevelHandler;
 	getExternalResourceRoots: () => string[];
 	registerMemoryProvider: (provider: MemoryProvider) => void;
+	registerContextMemoryProvider: (provider: ContextMemoryProvider) => void;
 	reportSpawnedUsage: (usage: Usage, opts?: { label?: string; sourceSessionId?: string; reportId?: string }) => void;
 }
 
