@@ -103,6 +103,14 @@ export interface RouteJudgeRunResult {
 	costUsd: number;
 }
 
+function judgeFallbackDecision(baseline: RouteDecision, reason: string): RouteDecision {
+	return {
+		...baseline,
+		reasonCode: "judge_unavailable_fallback",
+		reasons: [...baseline.reasons, reason],
+	};
+}
+
 /**
  * Run the judge over a baseline decision. The completion executor is injected (production:
  * AgentSession.runIsolatedCompletion on the judge model). Never throws; every failure keeps the
@@ -133,17 +141,14 @@ export async function runRouteJudge(args: {
 
 	if (bounded.failure || !bounded.completion) {
 		return {
-			decision: {
-				...args.baseline,
-				reasons: [...args.baseline.reasons, "Route judge unavailable; baseline kept"],
-			},
+			decision: judgeFallbackDecision(args.baseline, "Route judge unavailable; baseline kept"),
 			fallbackReason: bounded.failure ? `judge_${bounded.failure.reasonCode}` : "judge_unavailable_fallback",
 			costUsd,
 		};
 	}
 	if (bounded.completion.stopReason === "error" || bounded.completion.stopReason === "aborted") {
 		return {
-			decision: { ...args.baseline, reasons: [...args.baseline.reasons, "Route judge errored; baseline kept"] },
+			decision: judgeFallbackDecision(args.baseline, "Route judge errored; baseline kept"),
 			fallbackReason: "judge_model_error",
 			costUsd,
 		};
@@ -152,7 +157,7 @@ export async function runRouteJudge(args: {
 	const verdict = parseRouteJudgeVerdict(bounded.completion.text);
 	if (!verdict) {
 		return {
-			decision: { ...args.baseline, reasons: [...args.baseline.reasons, "Route judge unparseable; baseline kept"] },
+			decision: judgeFallbackDecision(args.baseline, "Route judge unparseable; baseline kept"),
 			fallbackReason: "judge_unparseable_fallback",
 			costUsd,
 		};

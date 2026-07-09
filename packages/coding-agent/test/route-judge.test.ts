@@ -129,6 +129,7 @@ describe("runRouteJudge", () => {
 			complete: async () => ({ text: "I think medium is fine", costUsd: 0.001, stopReason: "stop" }),
 		});
 		expect(unparseable.decision.tier).toBe("cheap");
+		expect(unparseable.decision.reasonCode).toBe("judge_unavailable_fallback");
 		expect(unparseable.fallbackReason).toBe("judge_unparseable_fallback");
 
 		const errored = await runRouteJudge({
@@ -136,6 +137,7 @@ describe("runRouteJudge", () => {
 			baseline: baseline(),
 			complete: async () => ({ text: "", costUsd: 0, stopReason: "error" }),
 		});
+		expect(errored.decision.reasonCode).toBe("judge_unavailable_fallback");
 		expect(errored.fallbackReason).toBe("judge_model_error");
 
 		const timedOut = await runRouteJudge({
@@ -148,6 +150,7 @@ describe("runRouteJudge", () => {
 				}),
 		});
 		expect(timedOut.fallbackReason).toBe("judge_wall_clock_exceeded");
+		expect(timedOut.decision.reasonCode).toBe("judge_unavailable_fallback");
 		expect(timedOut.decision.tier).toBe("cheap");
 	});
 

@@ -84,10 +84,65 @@ describe("AgentSession route judge", () => {
 				},
 			]);
 
-			await harness.session.prompt("what does the session manager do?");
+			await harness.session.prompt("session manager concurrency implications");
 
 			expect(turnModelId).toBe("cheap");
 			expect(harness.getPendingResponseCount()).toBe(0);
+		} finally {
+			harness.cleanup();
+		}
+	});
+
+	it("does not call the judge on static high-confidence read-only routes", async () => {
+		const harness = await createHarness({
+			models: [{ id: "cheap" }, { id: "medium" }],
+			settings: {
+				modelRouter: { enabled: true, cheapModel: "faux/cheap", mediumModel: "faux/medium" },
+			},
+		});
+		try {
+			const calls: string[] = [];
+			harness.setResponses([
+				(_context, _options, _state, model) => {
+					calls.push(model.id);
+					return fauxAssistantMessage("answered directly on cheap");
+				},
+				() => {
+					throw new Error("judge should not be called for static read-only route");
+				},
+			]);
+
+			await harness.session.prompt("what does the session manager do?");
+
+			expect(calls).toEqual(["cheap"]);
+			expect(harness.getPendingResponseCount()).toBe(1);
+		} finally {
+			harness.cleanup();
+		}
+	});
+
+	it("preserves judge fallback reason codes in persisted route decisions", async () => {
+		const harness = await createHarness({
+			models: [{ id: "cheap" }, { id: "medium" }],
+			settings: {
+				modelRouter: { enabled: true, cheapModel: "faux/cheap", mediumModel: "faux/medium" },
+			},
+		});
+		try {
+			harness.setResponses([fauxAssistantMessage("garbage verdict"), fauxAssistantMessage("answered on baseline")]);
+
+			await harness.session.prompt("how should we plan this migration?");
+
+			const decision = harness.sessionManager
+				.getEntries()
+				.filter(
+					(
+						entry,
+					): entry is Extract<ReturnType<typeof harness.sessionManager.getEntries>[number], { type: "custom" }> =>
+						entry.type === "custom" && entry.customType === "model_router_decision",
+				)
+				.at(-1)?.data as { route?: { reasonCode?: string } } | undefined;
+			expect(decision?.route?.reasonCode).toBe("judge_unavailable_fallback");
 		} finally {
 			harness.cleanup();
 		}

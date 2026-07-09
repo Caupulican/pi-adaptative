@@ -74,6 +74,28 @@ export function formatModelRouterModel(model: Model<Api>): string {
 	return `${model.provider}/${model.id}`;
 }
 
+const ROUTE_JUDGE_STATIC_FAST_PATH_REASON_CODES = new Set([
+	"empty_prompt",
+	"read_only_question",
+	"release_or_publish",
+	"security_or_auth",
+	"destructive_or_git_history",
+	"settings_or_self_modification",
+	"architecture_or_ambiguous",
+]);
+
+function shouldSkipRouteJudgeForStaticDecision(decision: RouteDecision): boolean {
+	return ROUTE_JUDGE_STATIC_FAST_PATH_REASON_CODES.has(decision.reasonCode);
+}
+
+function withJudgeUnavailableFallback(decision: RouteDecision, reason: string): RouteDecision {
+	return {
+		...decision,
+		reasonCode: "judge_unavailable_fallback",
+		reasons: [...decision.reasons, reason],
+	};
+}
+
 function persistModelRouterDecision(
 	sessionManager: Pick<SessionManager, "appendCustomEntry">,
 	decision: ModelRouterDecisionStatus,
@@ -485,10 +507,19 @@ export class ModelRouterController {
 
 		const settings = this.deps.getSettingsManager().getModelRouterSettings();
 		if (!settings.judgeEnabled) return baseline;
+		if (shouldSkipRouteJudgeForStaticDecision(baseline.decision)) return baseline;
 		const judgePattern = settings.judgeModel ?? settings.mediumModel;
 		if (!judgePattern) return baseline;
 		const judgeModel = this.deps.resolveLaneModel(judgePattern);
-		if (!judgeModel) return baseline;
+		if (!judgeModel) {
+			return {
+				decision: withJudgeUnavailableFallback(
+					baseline.decision,
+					`routing judge unavailable: ${judgePattern} did not resolve; baseline kept`,
+				),
+				model: baseline.model,
+			};
+		}
 		if (settings.fitnessGate) {
 			const verdict = this._evaluateModelFitness("router_judge", judgeModel);
 			if (!verdict.fit) {

@@ -23,7 +23,7 @@ const ARCHITECTURE_MUTATE_RE = /\b(rewrite|redesign|change|modify|rearchitect)\s
 const PLANNING_CORE_RE = /\b(plan|planning|roadmap|strategy)\b/i;
 const PLANNING_DESIGN_WORD_RE = /\b(design|architect\w*|structure|approach)\b/i;
 const PLANNING_PROSPECTIVE_RE =
-	/\b(how (?:should|would|do we|can we)|what(?:'s| is) the best|propose|draft|come up with|figure out|decide (?:on|how))\b/i;
+	/\b(how (?:should|would|do we|can we)|what(?:'s| is) the (?:best|cleanest|right)|propose|draft|come up with|figure out|decide (?:on|how))\b/i;
 
 function isPlanningPrompt(text: string): boolean {
 	return PLANNING_CORE_RE.test(text) || (PLANNING_DESIGN_WORD_RE.test(text) && PLANNING_PROSPECTIVE_RE.test(text));

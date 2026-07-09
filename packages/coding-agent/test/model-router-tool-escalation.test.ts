@@ -77,6 +77,18 @@ describe("model router tool escalation", () => {
 		).toBe(false);
 	});
 
+	it("escalates read-looking shell commands that contain nested execution constructs", () => {
+		for (const command of [
+			"cat $(./rewrite-cache)",
+			"cat `./rewrite-cache`",
+			"find . -type f -exec ./rewrite-cache {} \\;",
+			"grep TODO files | xargs ./rewrite-cache",
+			"cat package.json >/etc/pi-owned",
+		]) {
+			expect(shouldEscalateModelRouterTool({ tier: "cheap", toolName: "bash", args: { command } })).toBe(true);
+		}
+	});
+
 	it("still escalates mutating tools from a cheap FastContext-shaped route", () => {
 		const fastContextShape = {
 			research: { succeeded: 3, total: 3 },
