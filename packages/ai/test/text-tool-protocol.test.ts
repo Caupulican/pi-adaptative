@@ -234,6 +234,7 @@ describe("text tool-call protocol", () => {
 		const context: Context = { systemPrompt: "base", messages: [], tools };
 		let activeRequest: Context | undefined;
 		let inactiveRequest: Context | undefined;
+		const inactiveParseEvents: unknown[] = [];
 
 		registration.setResponses([
 			(requestContext) => {
@@ -254,8 +255,14 @@ describe("text tool-call protocol", () => {
 			{ type: "toolCall", name: "echo", arguments: { value: "hi" }, source: "text-protocol" },
 		]);
 
-		const unchanged = await complete(registration.getModel(), context, { textToolCallProtocol: false });
+		const unchanged = await complete(registration.getModel(), context, {
+			textToolCallProtocol: false,
+			onTextToolProtocolParse: (event) => {
+				inactiveParseEvents.push(event);
+			},
+		});
 		expect(inactiveRequest?.tools).toBe(tools);
+		expect(inactiveParseEvents).toEqual([]);
 		expect(unchanged.content).toMatchObject([
 			{ type: "text", text: '<pi:call name="echo">{"value":"hi"}</pi:call>' },
 		]);

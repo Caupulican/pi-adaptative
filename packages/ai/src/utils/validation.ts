@@ -407,13 +407,6 @@ export function validateToolArguments(
 	const validator = getValidator(tool.parameters);
 
 	if (validator.Check(args)) {
-		emitToolArgumentValidationTelemetry(options, {
-			outcome: "clean",
-			tool: toolCall.name,
-			source: toolCall.source,
-			failureModes: [],
-			repairsApplied: [],
-		});
 		return args;
 	}
 

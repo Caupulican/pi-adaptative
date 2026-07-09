@@ -17,6 +17,19 @@ describe("parseWorkerActions", () => {
 		expect(parsed.map((a) => a.path)).toEqual(["src/a.ts", "src/b.ts"]);
 	});
 
+	it("does not emit validation telemetry for already-valid action arrays", () => {
+		const events: unknown[] = [];
+		const actions = [{ op: "write", path: "src/a.ts", content: "x" }];
+		const parsed = parseWorkerActions(actions, {
+			provider: "worker",
+			model: "local",
+			telemetry: (event) => events.push(event),
+		});
+
+		expect(parsed).toEqual(actions);
+		expect(events).toEqual([]);
+	});
+
 	it("repairs stringified action arrays through the shared tool validation layer", () => {
 		const events: unknown[] = [];
 		const parsed = parseWorkerActions(JSON.stringify([{ op: "edit", path: "src/b.ts", old: "foo", new: "bar" }]), {

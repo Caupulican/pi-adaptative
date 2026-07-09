@@ -83,7 +83,25 @@ describe("validateToolArguments", () => {
 		}
 	});
 
-	it("emits shape-only validation telemetry for clean, repaired, and bounced calls", () => {
+	it("returns valid arguments unchanged without telemetry hot-path work", () => {
+		const tool: Tool = {
+			name: "count",
+			description: "Count",
+			parameters: Type.Object({ count: Type.String(), mode: Type.Optional(Type.Literal("42")) }),
+		};
+		const args = { count: "42", mode: "42" };
+		const events: unknown[] = [];
+		const result = validateToolArguments(
+			tool,
+			{ type: "toolCall", id: "tool-1", name: "count", arguments: args },
+			{ model: "test-model", provider: "test-provider", telemetry: (event) => events.push(event) },
+		);
+
+		expect(result).toBe(args);
+		expect(events).toEqual([]);
+	});
+
+	it("emits shape-only validation telemetry for repaired and bounced calls", () => {
 		const tool: Tool = {
 			name: "count",
 			description: "Count",
@@ -92,13 +110,6 @@ describe("validateToolArguments", () => {
 		const events: unknown[] = [];
 		const telemetry = (event: unknown) => events.push(event);
 
-		expect(
-			validateToolArguments(
-				tool,
-				{ type: "toolCall", id: "tool-1", name: "count", arguments: { count: 1 } },
-				{ model: "test-model", provider: "test-provider", telemetry },
-			),
-		).toBeDefined();
 		expect(
 			validateToolArguments(
 				tool,
@@ -120,16 +131,6 @@ describe("validateToolArguments", () => {
 		).toThrow("Validation failed");
 
 		expect(events).toEqual([
-			{
-				outcome: "clean",
-				model: "test-model",
-				provider: "test-provider",
-				tool: "count",
-				failureModes: [],
-				repairsApplied: [],
-				taught: "none",
-				executionOutcome: "not_run",
-			},
 			{
 				outcome: "repaired",
 				model: "test-model",
