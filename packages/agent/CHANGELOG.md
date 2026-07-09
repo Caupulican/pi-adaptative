@@ -1,4 +1,4 @@
-## [Unreleased]
+## [0.81.23] - 2026-07-09
 
 ### Changed
 - Made deterministic tool-argument repair always active in the agent loop, with `PI_TOOL_REPAIR_DISABLED` retained only as an emergency diagnostic kill switch.

@@ -1,4 +1,4 @@
-## [Unreleased]
+## [0.81.23] - 2026-07-09
 
 ### Added
 - Added background worker-thread tool-recovery logging with bounded queue/drop counters surfaced in `/toolhealth`.

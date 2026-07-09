@@ -1,4 +1,4 @@
-## [Unreleased]
+## [0.81.23] - 2026-07-09
 
 ### Fixed
 - Fixed wrapping of very long plain ASCII tool-output lines to chunk without grapheme segmentation.
