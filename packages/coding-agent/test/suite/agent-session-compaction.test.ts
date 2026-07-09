@@ -367,6 +367,34 @@ describe("AgentSession compaction characterization", () => {
 		await expect(sessionInternals._runAutoCompaction("threshold", false)).resolves.toBe(true);
 	});
 
+	it("preserves queued messages when compaction fails", async () => {
+		let harness: Harness;
+		harness = await createHarness({
+			settings: { compaction: { keepRecentTokens: 1 } },
+			extensionFactories: [
+				(pi) => {
+					pi.on("session_before_compact", async () => {
+						harness.session.agent.followUp({
+							role: "user",
+							content: [{ type: "text", text: "queued after compaction failure" }],
+							timestamp: Date.now(),
+						});
+						throw new Error("synthetic compaction failure");
+					});
+				},
+			],
+		});
+		harnesses.push(harness);
+		harness.setResponses([fauxAssistantMessage("one"), fauxAssistantMessage("two")]);
+		await harness.session.prompt("first");
+		await harness.session.prompt("second");
+
+		const sessionInternals = harness.session as unknown as SessionWithCompactionInternals;
+
+		await expect(sessionInternals._runAutoCompaction("overflow", false)).resolves.toBe(true);
+		expect(harness.session.agent.hasQueuedMessages()).toBe(true);
+	});
+
 	it("does not retry overflow recovery more than once", async () => {
 		const harness = await createHarness();
 		harnesses.push(harness);

@@ -3909,7 +3909,7 @@ export class AgentSession {
 					willRetry: false,
 					skipReason: "no model selected",
 				});
-				return false;
+				return hadQueuedMessages || this.agent.hasQueuedMessages();
 			}
 
 			const contextWindow = model.contextWindow;
@@ -4032,7 +4032,7 @@ export class AgentSession {
 			if (outcome.kind === "failed") {
 				if (outcome.reason === "aborted") {
 					this._emit({ type: "compaction_end", reason, result: undefined, aborted: true, willRetry: false });
-					return false;
+					return hadQueuedMessages || this.agent.hasQueuedMessages();
 				}
 				throw new Error(outcome.reason);
 			}
@@ -4040,7 +4040,7 @@ export class AgentSession {
 			if (extensionCancelled || signal.aborted) {
 				this._emit({ type: "compaction_end", reason, result: undefined, aborted: true, willRetry: false });
 
-				return false;
+				return hadQueuedMessages || this.agent.hasQueuedMessages();
 			}
 
 			const result = outcome.kind === "success" ? outcome.result : lastCompaction;
@@ -4072,7 +4072,7 @@ export class AgentSession {
 						? `Context overflow recovery failed: ${errorMessage}`
 						: `Auto-compaction failed: ${errorMessage}`,
 			});
-			return false;
+			return hadQueuedMessages || this.agent.hasQueuedMessages();
 		} finally {
 			this._autoCompactionAbortController = undefined;
 		}
