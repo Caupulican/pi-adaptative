@@ -1,5 +1,8 @@
 ## [Unreleased]
 
+### Added
+- Added a bounded active-branch user-input history reader for prompt recall.
+
 ## [0.81.21] - 2026-07-08
 
 ## [0.81.20] - 2026-07-08

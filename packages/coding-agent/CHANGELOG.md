@@ -1,5 +1,10 @@
 ## [Unreleased]
 
+### Fixed
+- Fixed model-router judge handling so static decisions bypass the judge, judge-unavailable fallback preserves the baseline reason, and nested shell execution forms escalate correctly.
+- Fixed auto-compaction failure and abort paths to preserve queued steering-message processing.
+- Fixed resumed long sessions to populate prompt input recall immediately while keeping transcript rendering lazy.
+
 ## [0.81.21] - 2026-07-08
 
 ### Added
