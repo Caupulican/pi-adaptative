@@ -168,6 +168,21 @@ If the user's instructions conflict with any rule in this document, ask for expl
 
 ## Findings
 
+### 2026-07-09 · packages/ai · live GPT-5.5 reasoning summaries can include an empty HTML comment tail inside a valid summary — claude
+A live OpenAI Codex GPT-5.5 SSE capture showed `response.reasoning_summary_text.delta` framing where useful summary text was followed by `<!-- -->`, and `response.reasoning_summary_text.done`/`response.reasoning_summary_part.done` carried the combined `summary_text`. The prior delimiter-only filter did not cover this embedded tail. Shared Responses stream parsing now strips the empty comment tail before emitting thinking deltas and before storing reasoning signatures, while keeping real summary text.
+- evidence: packages/ai/test/data/openai-codex-gpt55-reasoning-summary-tail.ndjson:1 · packages/ai/src/providers/openai-responses-shared.ts:305 · packages/ai/test/openai-codex-stream.test.ts:205
+- tags: openai-codex, gpt-5.5, reasoning-summary, packages/ai, root-cause
+
+### 2026-07-09 · packages/ai · ChatGPT subscription usage exposes server reset windows, not USD spend — claude
+Current codex-rs parses ChatGPT subscription meter state from response headers as `RateLimitSnapshot` records keyed by header families such as `x-codex-*` and `x-codex-bengalfox-*`, with `reset-at` epoch seconds, optional `reset-after-seconds`, `window-minutes`, and `used-percent`. A live capture from this host returned reset fields for both default and bengalfox families. Pi now records these as redacted assistant diagnostics and leaves `(sub)` cost semantics unchanged: token usage remains token accounting, not paid API spend.
+- evidence: /home/caudev/GitHub/external/codex/codex-rs/codex-api/src/rate_limits.rs:22 · /home/caudev/GitHub/external/codex/codex-rs/codex-api/src/sse/responses.rs:40 · packages/ai/src/providers/openai-codex-responses.ts:166 · packages/ai/test/openai-codex-stream.test.ts:237
+- tags: openai-codex, subscription-usage, rate-limits, diagnostics, packages/ai
+
+### 2026-07-09 · upstream sweep · selected upstream fixes were deconstructed and rebuilt locally — claude
+The 508-commit upstream delta was inventoried into an excluded local doc, with 176 relevant provider/model/session/compaction/auth/router commits classified. Adopt-now outcomes: Bun socket-drop wording added to the retry classifier; dynamic provider `modelOverrides` now apply to registered concrete models; OpenAI Codex GPT-5.5 summary parsing fixed from live evidence; model catalogue regenerated. Large-session streaming, Windows context traversal, and context-visible custom-message compaction accounting were already satisfied by local implementations, so no duplicate code was added.
+- evidence: packages/coding-agent/docs/model-router-rework/upstream-sweep-2026-07-09.md:1 · packages/agent/src/reliability/classifier.ts:58 · packages/coding-agent/src/core/model-registry.ts:978 · packages/agent/src/session/session-manager.ts:475 · packages/agent/src/compaction/compaction.ts:88
+- tags: upstream-sweep, local-reimplementation, retry, model-registry, compaction, packages/agent, packages/coding-agent
+
 ### 2026-07-08 · packages/coding-agent · local runtime closeout makes owned storage, residency, and cold acceptance explicit — claude
 The local runtime path now treats the pi-owned Ollama store as canonical: user-store models are imported by manifest copy plus blob hardlink/copy, a running non-owned store is reported instead of silently reused, and `/models`/doctor surface store counts. Local activation flows through runtime residency adapters before use, and the cold-start live acceptance script starts an isolated Ollama serve with stock stall settings and verifies a real read-tool turn.
 - evidence: packages/coding-agent/src/core/models/local-runtime.ts:432 · packages/coding-agent/src/core/local-runtime-controller.ts:170 · packages/coding-agent/src/core/models/runtime-arbiter.ts:52 · packages/coding-agent/src/modes/interactive/local-model-commands.ts:201 · scripts/accept-local-cold-start-live.mjs:14 · package.json:31

@@ -19,6 +19,8 @@ Footer cost labels match the `/usage`, `/session`, and autonomy status cost line
 - **TODAY** is this host's active session-storage total for the local calendar day; it rolls over at local midnight.
 - **SUBAGENTS** appears only when delegated/spawned workers reported cost in the current session, and that amount is already included in **CURRENT**.
 
+For ChatGPT Plus/Pro via OpenAI Codex OAuth, token usage is still recorded for context/cost estimates, but subscription quota windows come from OpenAI Codex response headers. Those windows reset at the server-provided `x-codex-*-reset-at` epoch seconds and may include multiple metered families; they are not the same as Pi's local-midnight **TODAY** window and are not treated as paid API spend.
+
 The editor can be replaced temporarily by built-in UI such as `/settings` or by custom extension UI.
 
 ### Editor Features

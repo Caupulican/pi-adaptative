@@ -1,5 +1,10 @@
 ## [Unreleased]
 
+### Fixed
+- Fixed OpenAI Responses reasoning summaries to strip empty HTML comment tails embedded in otherwise valid summary text.
+- Added OpenAI Codex subscription rate-limit reset diagnostics from `x-codex-*` response headers without treating subscription usage as paid API spend.
+- Regenerated the model catalogue.
+
 ## [0.81.25] - 2026-07-09
 
 ## [0.81.24] - 2026-07-09

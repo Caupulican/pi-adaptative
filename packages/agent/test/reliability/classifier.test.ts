@@ -23,6 +23,7 @@ describe("classifyFailure", () => {
 			"network error: fetch failed",
 			"connection lost",
 			"socket hang up",
+			"Socket connection was closed unexpectedly",
 			"stream ended before message_stop",
 			"stream stalled: no events for 30000ms",
 			"Request timed out",

@@ -974,6 +974,12 @@ export class ModelRegistry {
 		}
 
 		this.storeProviderRequestConfig(providerName, config);
+		const modelOverrides = config.modelOverrides ? new Map(Object.entries(config.modelOverrides)) : undefined;
+		if (config.modelOverrides) {
+			for (const [modelId, modelOverride] of Object.entries(config.modelOverrides)) {
+				this.storeModelHeaders(providerName, modelId, modelOverride.headers);
+			}
+		}
 
 		if (config.models && config.models.length > 0) {
 			// Full replacement: remove existing models for this provider
@@ -984,7 +990,7 @@ export class ModelRegistry {
 				const api = modelDef.api || config.api;
 				this.storeModelHeaders(providerName, modelDef.id, modelDef.headers);
 
-				this.models.push({
+				const model = {
 					id: modelDef.id,
 					name: modelDef.name,
 					api: api as Api,
@@ -999,7 +1005,9 @@ export class ModelRegistry {
 					maxTokens: modelDef.maxTokens ?? DEFAULT_MODEL_MAX_TOKENS,
 					headers: undefined,
 					compat: modelDef.compat,
-				} as Model<Api>);
+				} as Model<Api>;
+				const modelOverride = modelOverrides?.get(model.id);
+				this.models.push(modelOverride ? applyModelOverride(model, modelOverride) : model);
 			}
 
 			// Apply OAuth modifyModels if credentials exist (e.g., to update baseUrl)
@@ -1050,4 +1058,5 @@ export interface ProviderConfigInput {
 		headers?: Record<string, string>;
 		compat?: Model<Api>["compat"];
 	}>;
+	modelOverrides?: Record<string, ModelOverride>;
 }

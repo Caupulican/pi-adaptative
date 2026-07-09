@@ -1,5 +1,8 @@
 ## [Unreleased]
 
+### Fixed
+- Fixed retry classification for Bun socket drops reported as closed socket connections.
+
 ## [0.81.25] - 2026-07-09
 
 ### Fixed

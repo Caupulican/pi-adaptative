@@ -92,6 +92,20 @@ export interface OpenAICodexResponsesOptions extends StreamOptions {
 
 type CodexResponseStatus = "completed" | "incomplete" | "failed" | "cancelled" | "queued" | "in_progress";
 
+type CodexRateLimitWindow = {
+	resetsAt?: number;
+	resetAfterSeconds?: number;
+	windowMinutes?: number;
+	usedPercent?: number;
+};
+
+type CodexRateLimitSnapshot = {
+	limitId: string;
+	limitName?: string;
+	primary?: CodexRateLimitWindow;
+	secondary?: CodexRateLimitWindow;
+};
+
 interface RequestBody {
 	model: string;
 	store?: boolean;
@@ -183,6 +197,73 @@ function createSSEHeaderTimeout(): { signal: AbortSignal; clear: () => void; err
 		clear: () => clearTimeout(timeout),
 		error: () => error,
 	};
+}
+
+function parseHeaderNumber(headers: Headers, name: string): number | undefined {
+	const value = headers.get(name);
+	if (!value) return undefined;
+	const parsed = Number(value);
+	return Number.isFinite(parsed) ? parsed : undefined;
+}
+
+function parseCodexRateLimitWindow(
+	headers: Headers,
+	prefix: string,
+	windowName: string,
+): CodexRateLimitWindow | undefined {
+	const window: CodexRateLimitWindow = {};
+	const headerPrefix = `${prefix}-${windowName}`;
+	const usedPercent = parseHeaderNumber(headers, `${headerPrefix}-used-percent`);
+	const windowMinutes = parseHeaderNumber(headers, `${headerPrefix}-window-minutes`);
+	const resetsAt = parseHeaderNumber(headers, `${headerPrefix}-reset-at`);
+	const resetAfterSeconds = parseHeaderNumber(headers, `${headerPrefix}-reset-after-seconds`);
+	if (usedPercent !== undefined) window.usedPercent = usedPercent;
+	if (windowMinutes !== undefined) window.windowMinutes = windowMinutes;
+	if (resetsAt !== undefined) window.resetsAt = resetsAt;
+	if (resetAfterSeconds !== undefined) window.resetAfterSeconds = resetAfterSeconds;
+	return Object.keys(window).length > 0 ? window : undefined;
+}
+
+function normalizeCodexLimitId(limitId: string): string {
+	return limitId.trim().toLowerCase().replace(/-/g, "_");
+}
+
+function parseCodexSubscriptionRateLimits(headers: Headers): CodexRateLimitSnapshot[] {
+	const limitIds = new Set<string>(["codex"]);
+	for (const key of headers.keys()) {
+		const match = /^x-(.+)-primary-(?:used-percent|window-minutes|reset-at|reset-after-seconds)$/i.exec(key);
+		if (match?.[1]) {
+			limitIds.add(normalizeCodexLimitId(match[1]));
+		}
+	}
+
+	return [...limitIds]
+		.sort()
+		.map((limitId) => {
+			const headerPrefix = `x-${limitId.replace(/_/g, "-")}`;
+			const primary = parseCodexRateLimitWindow(headers, headerPrefix, "primary");
+			const secondary = parseCodexRateLimitWindow(headers, headerPrefix, "secondary");
+			const limitName = headers.get(`${headerPrefix}-limit-name`)?.trim() || undefined;
+			return { limitId, limitName, primary, secondary };
+		})
+		.filter((snapshot) => snapshot.primary || snapshot.secondary || snapshot.limitName);
+}
+
+function appendCodexSubscriptionRateLimitDiagnostics(output: AssistantMessage, headers: Headers): void {
+	const snapshots = parseCodexSubscriptionRateLimits(headers);
+	if (snapshots.length === 0) return;
+	output.diagnostics = [
+		...(output.diagnostics ?? []),
+		{
+			type: "openai_codex_subscription_rate_limits",
+			timestamp: Date.now(),
+			details: {
+				rollover: "server_reset_at_epoch_seconds",
+				unit: "subscription_metered_limit_window",
+				rateLimits: snapshots,
+			},
+		},
+	];
 }
 
 // ============================================================================
@@ -379,6 +460,7 @@ export const streamOpenAICodexResponses: StreamFunction<"openai-codex-responses"
 				throw new Error("No response body");
 			}
 
+			appendCodexSubscriptionRateLimitDiagnostics(output, response.headers);
 			stream.push({ type: "start", partial: output });
 			await processStream(response, output, stream, model, options);
 

@@ -1,5 +1,8 @@
 ## [Unreleased]
 
+### Fixed
+- Fixed dynamically registered provider models to honor configured `modelOverrides`.
+
 ## [0.81.25] - 2026-07-09
 
 ### Fixed

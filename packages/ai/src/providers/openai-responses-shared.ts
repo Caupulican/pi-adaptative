@@ -303,15 +303,21 @@ export function convertResponsesTools(tools: Tool[], options?: ConvertResponsesT
 // =============================================================================
 
 const REASONING_SUMMARY_DELIMITER_ONLY = /^<!--\s*-->$/;
+const REASONING_SUMMARY_EMPTY_HTML_COMMENT = /(?:\n\s*)*<!--\s*-->\s*$/;
 
 function isReasoningSummaryDelimiterOnly(text: string): boolean {
 	return REASONING_SUMMARY_DELIMITER_ONLY.test(text.trim());
 }
 
+function cleanReasoningSummaryText(text: string): string {
+	if (isReasoningSummaryDelimiterOnly(text)) return "";
+	return text.replace(REASONING_SUMMARY_EMPTY_HTML_COMMENT, "").trimEnd();
+}
+
 function normalizeReasoningSummaryText(parts: readonly { text?: string }[] | undefined): string {
 	return (parts ?? [])
-		.map((part) => part.text ?? "")
-		.filter((text) => text.trim().length > 0 && !isReasoningSummaryDelimiterOnly(text))
+		.map((part) => cleanReasoningSummaryText(part.text ?? ""))
+		.filter((text) => text.trim().length > 0)
 		.join("\n\n");
 }
 
@@ -445,8 +451,11 @@ export async function processResponsesStream<TApi extends Api>(
 			if (currentItem?.type === "reasoning" && currentBlock?.type === "thinking") {
 				currentItem.summary = currentItem.summary || [];
 				const lastPart = currentItem.summary[currentItem.summary.length - 1];
-				const partText = lastPart?.text ?? currentReasoningSummaryPartText;
-				if (partText.trim().length > 0 && !isReasoningSummaryDelimiterOnly(partText)) {
+				const partText = cleanReasoningSummaryText(lastPart?.text ?? currentReasoningSummaryPartText);
+				if (lastPart) {
+					lastPart.text = partText;
+				}
+				if (partText.trim().length > 0) {
 					const delta = `${partText}\n\n`;
 					currentBlock.thinking += delta;
 					stream.push({
@@ -537,6 +546,11 @@ export async function processResponsesStream<TApi extends Api>(
 			const item = event.item;
 
 			if (item.type === "reasoning" && currentBlock?.type === "thinking") {
+				if (item.summary) {
+					item.summary = item.summary
+						.map((part) => ({ ...part, text: cleanReasoningSummaryText(part.text ?? "") }))
+						.filter((part) => part.text.trim().length > 0);
+				}
 				const summaryText = normalizeReasoningSummaryText(item.summary);
 				const contentText = item.content?.map((c) => c.text).join("\n\n") || "";
 				currentBlock.thinking = summaryText || contentText || currentBlock.thinking;

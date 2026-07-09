@@ -56,7 +56,7 @@ const STREAM_STALL = /stream stalled|ended without|stream ended before message_s
 const SERVER_ERROR =
 	/(?<![A-Za-z0-9])(?:500|502|503|504)(?![A-Za-z0-9])|service.?unavailable|server.?error|internal.?error|provider.?returned.?error|upstream.?connect|http2 request did not get a response|retry delay/i;
 const NETWORK =
-	/network.?error|connection.?error|connection.?refused|connection.?lost|websocket.?closed|websocket.?error|other side closed|fetch failed|socket hang up|timed? out|timeout|terminated/i;
+	/network.?error|connection.?error|connection.?refused|connection.?lost|websocket.?closed|websocket.?error|other side closed|fetch failed|socket hang up|socket connection was closed|timed? out|timeout|terminated/i;
 
 const RETRY_AFTER_S = /retry.?(?:after|in)\s+(\d+(?:\.\d+)?)\s*s\b|"retryDelay"\s*:\s*"(\d+(?:\.\d+)?)s"/i;
 const RETRY_AFTER_MS = /retry.?(?:after|in)\s+(\d+)\s*ms\b/i;

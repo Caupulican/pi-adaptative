@@ -1,6 +1,7 @@
-import { mkdtempSync } from "node:fs";
+import { mkdtempSync, readFileSync } from "node:fs";
 import { tmpdir } from "node:os";
-import { join } from "node:path";
+import { dirname, join } from "node:path";
+import { fileURLToPath } from "node:url";
 import { afterEach, describe, expect, it, vi } from "vitest";
 import {
 	getOpenAICodexWebSocketDebugStats,
@@ -12,6 +13,7 @@ import { cleanupSessionResources } from "../src/session-resources.ts";
 import type { Context, Model } from "../src/types.ts";
 
 const originalAgentDir = process.env.PI_CODING_AGENT_DIR;
+const __dirname = dirname(fileURLToPath(import.meta.url));
 
 afterEach(() => {
 	vi.unstubAllGlobals();
@@ -200,6 +202,97 @@ describe("openai-codex streaming", () => {
 
 		expect(events.at(-1)).toMatchObject({ type: "error", reason: "error" });
 		expect(events.some((event) => event.type === "done")).toBe(false);
+	});
+
+	it("strips the live GPT-5.5 empty HTML comment tail from reasoning summaries", async () => {
+		const token = mockToken();
+		const fixture = readFileSync(join(__dirname, "data", "openai-codex-gpt55-reasoning-summary-tail.ndjson"), "utf8")
+			.trim()
+			.split("\n")
+			.map((line) => `data: ${line}`)
+			.join("\n\n");
+		const encoder = new TextEncoder();
+		const stream = new ReadableStream<Uint8Array>({
+			start(controller) {
+				controller.enqueue(encoder.encode(`${fixture}\n\n`));
+				controller.close();
+			},
+		});
+
+		vi.stubGlobal(
+			"fetch",
+			vi.fn(async () => new Response(stream, { status: 200, headers: { "content-type": "text/event-stream" } })),
+		);
+
+		const result = await streamOpenAICodexResponses(createCodexModel(), createCodexContext(), {
+			apiKey: token,
+			transport: "sse",
+		}).result();
+
+		const thinking = result.content.find((content) => content.type === "thinking");
+		expect(thinking).toMatchObject({ type: "thinking", thinking: "**Confirming exact answer requirement**" });
+		expect(JSON.stringify(thinking)).not.toContain("<!--");
+		expect(result.content.find((content) => content.type === "text")).toMatchObject({ type: "text", text: "OK" });
+	});
+
+	it("attaches Codex subscription rate-limit reset diagnostics from response headers", async () => {
+		const token = mockToken();
+		const encoder = new TextEncoder();
+		const stream = new ReadableStream<Uint8Array>({
+			start(controller) {
+				controller.enqueue(encoder.encode(buildSSEPayload({ status: "completed" })));
+				controller.close();
+			},
+		});
+
+		vi.stubGlobal(
+			"fetch",
+			vi.fn(
+				async () =>
+					new Response(stream, {
+						status: 200,
+						headers: {
+							"content-type": "text/event-stream",
+							"x-codex-primary-reset-after-seconds": "15325",
+							"x-codex-primary-reset-at": "1783612570",
+							"x-codex-secondary-reset-after-seconds": "396966",
+							"x-codex-secondary-reset-at": "1783994211",
+							"x-codex-bengalfox-primary-used-percent": "40.5",
+							"x-codex-bengalfox-primary-window-minutes": "300",
+							"x-codex-bengalfox-primary-reset-at": "1783615246",
+							"x-codex-bengalfox-limit-name": "gpt-5.5",
+						},
+					}),
+			),
+		);
+
+		const result = await streamOpenAICodexResponses(createCodexModel(), createCodexContext(), {
+			apiKey: token,
+			transport: "sse",
+		}).result();
+
+		expect(result.usage.cost.total).toBe(0);
+		expect(result.diagnostics).toContainEqual(
+			expect.objectContaining({
+				type: "openai_codex_subscription_rate_limits",
+				details: expect.objectContaining({
+					rollover: "server_reset_at_epoch_seconds",
+					unit: "subscription_metered_limit_window",
+					rateLimits: expect.arrayContaining([
+						expect.objectContaining({
+							limitId: "codex",
+							primary: { resetAfterSeconds: 15325, resetsAt: 1783612570 },
+							secondary: { resetAfterSeconds: 396966, resetsAt: 1783994211 },
+						}),
+						expect.objectContaining({
+							limitId: "codex_bengalfox",
+							limitName: "gpt-5.5",
+							primary: { usedPercent: 40.5, windowMinutes: 300, resetsAt: 1783615246 },
+						}),
+					]),
+				}),
+			}),
+		);
 	});
 
 	it("streams SSE responses into AssistantMessageEventStream", async () => {

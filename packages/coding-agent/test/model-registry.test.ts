@@ -1019,6 +1019,39 @@ describe("ModelRegistry", () => {
 			expect(output).toMatch(/phone-model\s+128K\s+4\.1K\s+no\s+no\s+yes/);
 		});
 
+		test("registerProvider applies modelOverrides to dynamically registered provider models", () => {
+			const registry = ModelRegistry.create(authStorage, modelsJsonPath);
+
+			registry.registerProvider("dynamic-provider", {
+				baseUrl: "https://provider.test/v1",
+				apiKey: "test-key",
+				api: "openai-completions",
+				models: [
+					{
+						id: "dynamic-model",
+						name: "Dynamic Model",
+						reasoning: false,
+						input: ["text"],
+						cost: { input: 1, output: 2, cacheRead: 0.1, cacheWrite: 0 },
+					},
+				],
+				modelOverrides: {
+					"dynamic-model": {
+						name: "Overridden Dynamic Model",
+						cost: { input: 3 },
+						contextWindow: 64000,
+						headers: { "x-model-route": "override" },
+					},
+				},
+			});
+
+			const model = registry.find("dynamic-provider", "dynamic-model");
+			expect(model?.name).toBe("Overridden Dynamic Model");
+			expect(model?.cost).toEqual({ input: 3, output: 2, cacheRead: 0.1, cacheWrite: 0 });
+			expect(model?.contextWindow).toBe(64000);
+			expect(model?.maxTokens).toBe(16384);
+		});
+
 		test("registerProvider fills token limit defaults for models without explicit limits", async () => {
 			const registry = ModelRegistry.create(authStorage, modelsJsonPath);
 			const logSpy = vi.spyOn(console, "log").mockImplementation(() => {});
