@@ -1,4 +1,4 @@
-## [Unreleased]
+## [0.81.26] - 2026-07-09
 
 ### Fixed
 - Fixed OpenAI Responses reasoning summaries to strip empty HTML comment tails embedded in otherwise valid summary text.
