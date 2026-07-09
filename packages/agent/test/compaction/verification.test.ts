@@ -1,6 +1,19 @@
 import { describe, expect, it } from "vitest";
 import type { CompactionFacts } from "../../src/compaction/extraction.ts";
-import { containment, jaccard, tokenSet, verifySummary } from "../../src/compaction/index.ts";
+import {
+	ACTIONS_RECALL_THRESHOLD,
+	ACTIVE_TASK_CONTAINMENT_THRESHOLD,
+	CANCELLED_WORK_DROPPED_THRESHOLD,
+	containment,
+	deterministicallyFillSummaryGaps,
+	FILES_READ_RECALL_THRESHOLD,
+	isCompactionSummaryStructurallyUsable,
+	jaccard,
+	MANDATORY_RULES_RECALL_THRESHOLD,
+	OPEN_ERRORS_RECALL_THRESHOLD,
+	tokenSet,
+	verifySummary,
+} from "../../src/compaction/index.ts";
 
 const baseFacts: CompactionFacts = {
 	files: [
@@ -221,6 +234,63 @@ User: Fix the two failing tests now
 1. EDIT src/fetcher.ts — added retry loop
 2. RUN npm test — 2 failed: fetcher.test.ts`;
 		expect(verifySummary(summary, facts)).toEqual({ ok: true, failures: [] });
+	});
+
+	it("deterministically gap-fills missing gate demands and removes cancelled leakage", () => {
+		const facts: CompactionFacts = {
+			...baseFacts,
+			errorFacts: [{ operation: "TEST npm test", error: "2 failed: fetcher.test.ts" }],
+		};
+		const incomplete = `## Active Task
+Continue
+
+### Mandatory Rules
+(none)
+
+## Working Set
+(none)
+
+## Files
+(none)
+
+## Open Problems
+(none)
+
+## Done
+1. wrapped legacy client adapter`;
+
+		const initial = verifySummary(incomplete, facts);
+		expect(initial.ok).toBe(false);
+
+		const filled = deterministicallyFillSummaryGaps(incomplete, facts);
+
+		expect(filled.changed).toBe(true);
+		expect(filled.verification).toEqual({ ok: true, failures: [] });
+		expect(filled.summary).toContain("User: Fix the two failing tests now");
+		expect(filled.summary).toContain("- do not touch the legacy client");
+		expect(filled.summary).toContain("- src/fetcher.ts — EDIT");
+		expect(filled.summary).toContain("- test/fetcher.test.ts");
+		expect(filled.summary).toContain("- TEST npm test: 2 failed: fetcher.test.ts");
+		expect(filled.summary).toContain("1. EDIT src/fetcher.ts — added retry loop");
+		expect(filled.summary).not.toContain("1. wrapped legacy client adapter");
+	});
+
+	it("does not gap-fill empty or unparseable summaries", () => {
+		expect(isCompactionSummaryStructurallyUsable("")).toBe(false);
+		expect(isCompactionSummaryStructurallyUsable("not a checkpoint")).toBe(false);
+		const filled = deterministicallyFillSummaryGaps("not a checkpoint", baseFacts);
+		expect(filled.summary).toBe("not a checkpoint");
+		expect(filled.changed).toBe(false);
+		expect(filled.verification.ok).toBe(false);
+	});
+
+	it("diff-guards verification thresholds against weakening", () => {
+		expect(FILES_READ_RECALL_THRESHOLD).toBe(0.8);
+		expect(ACTIVE_TASK_CONTAINMENT_THRESHOLD).toBe(0.9);
+		expect(MANDATORY_RULES_RECALL_THRESHOLD).toBe(0.7);
+		expect(CANCELLED_WORK_DROPPED_THRESHOLD).toBe(0.1);
+		expect(ACTIONS_RECALL_THRESHOLD).toBe(0.6);
+		expect(OPEN_ERRORS_RECALL_THRESHOLD).toBe(0.7);
 	});
 
 	it("short-circuits empty facts to ok", () => {

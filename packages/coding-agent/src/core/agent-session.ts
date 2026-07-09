@@ -436,6 +436,12 @@ export interface ModelCycleResult {
 }
 
 /** Session statistics for /session command */
+export interface CompactionGateStats {
+	gateFailures: number;
+	deterministicGapFills: number;
+	compactionsWithGateFailures: number;
+}
+
 export interface SessionStats {
 	sessionFile: string | undefined;
 	sessionId: string;
@@ -454,6 +460,7 @@ export interface SessionStats {
 	cost: number;
 	contextUsage?: ContextUsage;
 	toolArgumentValidation: ToolArgumentValidationStats;
+	compactionGates: CompactionGateStats;
 }
 
 /** customType for spawned-usage roll-up entries (Cost Aggregation, Model A). */

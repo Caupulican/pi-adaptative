@@ -1,9 +1,10 @@
 import type { AssistantMessage, Usage } from "@caupulican/pi-ai";
-import { getModel } from "@caupulican/pi-ai";
+import { createAssistantMessageEventStream, getModel } from "@caupulican/pi-ai";
 import { readFileSync } from "fs";
 import { join } from "path";
 import { beforeEach, describe, expect, it } from "vitest";
 import {
+	type CompactionPreparation,
 	type CompactionSettings,
 	calculateContextTokens,
 	compact,
@@ -24,7 +25,7 @@ import {
 	type SessionMessageEntry,
 	type ThinkingLevelChangeEntry,
 } from "../../src/session/session-manager.ts";
-import type { AgentMessage } from "../../src/types.ts";
+import type { AgentMessage, StreamFn } from "../../src/types.ts";
 
 // ============================================================================
 // Test fixtures
@@ -64,6 +65,12 @@ function createAssistantMessage(text: string, usage?: Usage): AssistantMessage {
 		provider: "anthropic",
 		model: "claude-sonnet-4-5",
 	};
+}
+
+function createDoneStream(message: AssistantMessage): ReturnType<typeof createAssistantMessageEventStream> {
+	const stream = createAssistantMessageEventStream();
+	stream.push({ type: "done", reason: "stop", message });
+	return stream;
 }
 
 let entryCounter = 0;
@@ -505,6 +512,175 @@ describe("prepareCompaction with previous compaction", () => {
 		expect(summarizedText).toContain("user msg 3 - kept by compaction1");
 		expect(summarizedText).not.toContain("First summary");
 		expect(preparation!.previousSummary).toBe("First summary");
+	});
+});
+
+describe("compact verification gap-fill", () => {
+	const facts = {
+		files: [
+			{ path: "src/fetcher.ts", kind: "modified" as const, note: "EDIT" },
+			{ path: "test/fetcher.test.ts", kind: "read" as const, note: "READ" },
+		],
+		workingSet: [{ path: "src/fetcher.ts", kind: "modified" as const, note: "EDIT" }],
+		actions: ["EDIT src/fetcher.ts", "RUN npm test"],
+		errorFacts: [{ operation: "RUN npm test", error: "2 failed: fetcher.test.ts" }],
+		prohibitions: ["do not touch the legacy client"],
+		cancelledText: "wrapped legacy client adapter",
+		activeTaskSource: "Fix the two failing tests now",
+	};
+
+	function createPreparation(): CompactionPreparation {
+		return {
+			firstKeptEntryId: "kept-entry",
+			messagesToSummarize: [createUserMessage("Fix the two failing tests now")],
+			turnPrefixMessages: [],
+			isSplitTurn: false,
+			tokensBefore: 1200,
+			fileOps: { read: new Set(), written: new Set(), edited: new Set() },
+			settings: { ...DEFAULT_COMPACTION_SETTINGS, reserveTokens: 4000, keepRecentTokens: 100 },
+			facts,
+		};
+	}
+
+	it("fills missing gate items deterministically without a second summarizer call", async () => {
+		const model = getModel("anthropic", "claude-sonnet-4-5")!;
+		const prompts: string[] = [];
+		const streamFn: StreamFn = async (_model, context) => {
+			const userMessage = context.messages[0];
+			const text = Array.isArray(userMessage.content)
+				? userMessage.content
+						.filter((part): part is { type: "text"; text: string } => part.type === "text")
+						.map((part) => part.text)
+						.join("\n")
+				: userMessage.content;
+			prompts.push(text);
+			return createDoneStream(
+				createAssistantMessage(`## Active Task
+Continue
+
+### Mandatory Rules
+(none)
+
+## Working Set
+(none)
+
+## Files
+(none)
+
+## Open Problems
+(none)
+
+## Done
+(none)`),
+			);
+		};
+
+		const result = await compact(
+			createPreparation(),
+			model,
+			"test-key",
+			undefined,
+			undefined,
+			undefined,
+			undefined,
+			streamFn,
+		);
+
+		expect(prompts).toHaveLength(1);
+		expect(prompts[0]).toContain("files-modified-recall (must appear in ## Files):\nsrc/fetcher.ts");
+		expect(prompts[0]).toContain(
+			"files-read-recall (must appear in ## Files, containment threshold applies):\ntest/fetcher.test.ts",
+		);
+		expect(prompts[0]).toContain("working-set-recall (must appear in ## Working Set):\nsrc/fetcher.ts — EDIT");
+		expect(prompts[0]).toContain(
+			"open-errors-recall (must appear in ## Open Problems):\nRUN npm test: 2 failed: fetcher.test.ts",
+		);
+		expect(prompts[0]).toContain("actions-recall (must appear in ## Done):\nEDIT src/fetcher.ts\nRUN npm test");
+		expect(prompts[0]).toContain(
+			"mandatory-rules-recall (must appear in ### Mandatory Rules):\ndo not touch the legacy client",
+		);
+		expect(prompts[0]).toContain(
+			"active-task-containment (must appear in ## Active Task):\nFix the two failing tests now",
+		);
+		expect(prompts[0]).toContain(
+			"cancelled-work-dropped (must NOT appear outside ### Mandatory Rules):\nwrapped legacy client adapter",
+		);
+		expect(result.verification).toEqual({ ok: true, failures: [] });
+		expect(result.verificationGateFailures).toHaveLength(1);
+		expect(result.deterministicGapFills).toBe(1);
+		expect((result.details as { verificationGateFailures?: number } | undefined)?.verificationGateFailures).toBe(1);
+		expect(result.summary).toContain("- src/fetcher.ts");
+		expect(result.summary).toContain("- RUN npm test: 2 failed: fetcher.test.ts");
+		expect(result.summary).toContain("1. EDIT src/fetcher.ts");
+	});
+
+	it("fails before the LLM when enumerated gate demand exceeds the reserve", async () => {
+		const model = getModel("anthropic", "claude-sonnet-4-5")!;
+		let calls = 0;
+		const preparation = createPreparation();
+		preparation.settings = { ...preparation.settings, reserveTokens: 100 };
+		preparation.facts = {
+			...facts,
+			activeTaskSource: `Fix the wedge ${"x ".repeat(3000)}`,
+		};
+		const streamFn: StreamFn = async () => {
+			calls++;
+			return createDoneStream(createAssistantMessage("unused"));
+		};
+
+		await expect(
+			compact(preparation, model, "test-key", undefined, undefined, undefined, undefined, streamFn),
+		).rejects.toThrow("summary-demand-exceeds-reserve");
+		expect(calls).toBe(0);
+	});
+
+	it("reserves LLM retries for unparseable summaries", async () => {
+		const model = getModel("anthropic", "claude-sonnet-4-5")!;
+		let calls = 0;
+		const streamFn: StreamFn = async () => {
+			calls++;
+			return createDoneStream(
+				createAssistantMessage(
+					calls === 1
+						? "not a checkpoint"
+						: `## Active Task
+Fix the two failing tests now
+
+### Mandatory Rules
+- do not touch the legacy client
+
+## Working Set
+- src/fetcher.ts — EDIT
+
+## Files
+- src/fetcher.ts
+- test/fetcher.test.ts
+
+## Open Problems
+- RUN npm test: 2 failed: fetcher.test.ts
+
+## Done
+1. EDIT src/fetcher.ts
+2. RUN npm test`,
+				),
+			);
+		};
+
+		const result = await compact(
+			createPreparation(),
+			model,
+			"test-key",
+			undefined,
+			undefined,
+			undefined,
+			undefined,
+			streamFn,
+		);
+
+		expect(calls).toBe(2);
+		expect(result.verificationGateFailures).toEqual([]);
+		expect(result.deterministicGapFills).toBe(0);
+		expect(result.verification).toEqual({ ok: true, failures: [] });
 	});
 });
 

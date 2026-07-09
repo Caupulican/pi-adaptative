@@ -144,6 +144,36 @@ describe("AgentSession.getSessionStats", () => {
 		}
 	});
 
+	it("aggregates persisted compaction gate failure telemetry", () => {
+		const { session, sessionManager } = createSession();
+
+		try {
+			sessionManager.appendMessage(createUserMessage("first", 1));
+			const keptUserId = sessionManager.appendMessage(createUserMessage("second", 2));
+			sessionManager.appendCompaction("summary", keptUserId, 1000, {
+				readFiles: [],
+				modifiedFiles: [],
+				verificationGateFailures: 2,
+				deterministicGapFills: 1,
+			});
+			sessionManager.appendCompaction("summary 2", keptUserId, 800, {
+				readFiles: [],
+				modifiedFiles: [],
+				verificationGateFailures: 0,
+				deterministicGapFills: 0,
+			});
+			syncAgentMessages(session, sessionManager);
+
+			expect(session.getSessionStats().compactionGates).toEqual({
+				gateFailures: 2,
+				deterministicGapFills: 1,
+				compactionsWithGateFailures: 1,
+			});
+		} finally {
+			session.dispose();
+		}
+	});
+
 	it("exposes the current context usage alongside token totals", () => {
 		const { session, sessionManager } = createSession();
 

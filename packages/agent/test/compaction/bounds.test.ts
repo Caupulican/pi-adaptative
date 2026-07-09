@@ -66,9 +66,22 @@ describe("compaction bounds", () => {
 	});
 
 	it("throws input-overflow when a non-chunked summarization request exceeds the summarizer bound", async () => {
-		await expect(generateSummary(messages(9000), createModel(3000), 100, "test-key")).rejects.toThrow(
-			"input-overflow",
-		);
+		await expect(
+			generateSummary(
+				messages(20000),
+				createModel(3000),
+				100,
+				"test-key",
+				undefined,
+				undefined,
+				undefined,
+				undefined,
+				undefined,
+				undefined,
+				undefined,
+				"verification demands:",
+			),
+		).rejects.toThrow("input-overflow");
 		expect(completeSimpleMock).not.toHaveBeenCalled();
 	});
 

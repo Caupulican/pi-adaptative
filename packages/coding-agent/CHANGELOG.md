@@ -1,5 +1,8 @@
 ## [Unreleased]
 
+### Fixed
+- Added session-level compaction gate failure and deterministic gap-fill telemetry to make nonzero gate-failure rates visible in stats and `/session` output.
+
 ## [0.81.24] - 2026-07-09
 
 ### Fixed

@@ -30,6 +30,7 @@ interface ToolCallFact {
 	finalKind: "modified" | "created" | "read" | null;
 	verb: string;
 	resolved: boolean;
+	failed: boolean;
 }
 
 const PROHIBITION_PATTERN = /\b(do not|don't|never|stop (?:doing|using|changing)|no more)\b/i;
@@ -241,6 +242,10 @@ function isOutcomeBearingTool(toolName: string | undefined): boolean {
 	return toolName === "bash";
 }
 
+function isOpenProblemTool(toolName: string | undefined): boolean {
+	return toolName === "bash" || toolName === "edit" || toolName === "write";
+}
+
 function failureSignalLine(text: string): string | undefined {
 	return text
 		.split(/\r?\n/)
@@ -358,6 +363,7 @@ export function extractCompactionFacts(entries: SessionEntry[], start: number, e
 					finalKind: baseKind,
 					verb,
 					resolved: false,
+					failed: false,
 				};
 				actionFacts.push(fact);
 				const index = actionFacts.length - 1;
@@ -397,12 +403,15 @@ export function extractCompactionFacts(entries: SessionEntry[], start: number, e
 
 			if (matchedIndex !== undefined) {
 				const fact = actionFacts[matchedIndex];
+				const resultText = messageToText(message);
+				const failed = isFailureToolResult(message, resultText);
 				fact.resolved = true;
-				if (fact.baseKind === "modified" && appearsCreated(message)) {
+				fact.failed = failed;
+				if (!failed && fact.baseKind === "modified" && appearsCreated(message)) {
 					fact.finalKind = "created";
 				}
 
-				if (fact.path && fact.finalKind && !isHarnessPlumbingTarget(fact.path)) {
+				if (!failed && fact.path && fact.finalKind && !isHarnessPlumbingTarget(fact.path)) {
 					const existing = filesByPath.get(fact.path);
 					const nextKind = fact.finalKind;
 					const note = fact.verb;
@@ -416,15 +425,14 @@ export function extractCompactionFacts(entries: SessionEntry[], start: number, e
 					}
 				}
 
-				const resultText = messageToText(message);
 				const key = operationKey(fact.name, fact.path);
-				if (isFailureToolResult(message, resultText)) {
+				if (failed && isOpenProblemTool(fact.name)) {
 					openErrors.set(key, {
 						operation: operationLabel(fact.name, fact.path),
 						error: firstErrorLine(resultText),
 						lastTouch: i,
 					});
-				} else {
+				} else if (!failed) {
 					openErrors.delete(key);
 				}
 
@@ -452,7 +460,10 @@ export function extractCompactionFacts(entries: SessionEntry[], start: number, e
 		if (isHarnessPlumbingTarget(action.path)) {
 			continue;
 		}
-		if (action.finalKind && action.path && !filesByPath.has(action.path)) {
+		if (action.resolved && action.failed && action.name !== "bash") {
+			continue;
+		}
+		if ((!action.resolved || !action.failed) && action.finalKind && action.path && !filesByPath.has(action.path)) {
 			filesByPath.set(action.path, {
 				path: action.path,
 				kind: action.finalKind,
@@ -521,32 +532,41 @@ function dedupeMostRecent(values: string[]): string[] {
 }
 
 export function renderFactsBlock(facts: CompactionFacts): string {
-	const lines: string[] = ["files:"];
-	for (const file of facts.files) {
-		lines.push(`${file.kind}: ${file.path} — ${file.note}`);
+	const lines: string[] = ["verification demands:"];
+	lines.push("files-modified-recall (must appear in ## Files):");
+	for (const file of facts.files.filter((file) => file.kind !== "read")) {
+		lines.push(file.path);
 	}
-	lines.push("working set:");
+	lines.push("files-read-recall (must appear in ## Files, containment threshold applies):");
+	for (const file of facts.files.filter((file) => file.kind === "read")) {
+		lines.push(file.path);
+	}
+	lines.push("working-set-recall (must appear in ## Working Set):");
 	for (const file of facts.workingSet) {
 		lines.push(`${file.path} — ${file.note || file.kind}`);
 	}
-	lines.push("actions:");
-	for (const action of facts.actions) {
-		lines.push(action);
-	}
-	lines.push("open errors:");
+	lines.push("open-errors-recall (must appear in ## Open Problems):");
 	for (const error of facts.errorFacts) {
 		lines.push(`${error.operation}: ${error.error}`);
 	}
-	lines.push("prohibitions:");
+	lines.push("actions-recall (must appear in ## Done):");
+	for (const action of facts.actions) {
+		lines.push(action);
+	}
+	lines.push("mandatory-rules-recall (must appear in ### Mandatory Rules):");
 	for (const prohibition of facts.prohibitions) {
 		lines.push(prohibition);
 	}
 	// The active-task gate demands near-verbatim recall of this text, but the conversation the
 	// summarizer sees may be pre-digested or truncated — the facts block is the one channel
 	// guaranteed to reach the prompt, so the gated text must ride in it (bounded).
-	lines.push("active task:");
+	lines.push("active-task-containment (must appear in ## Active Task):");
 	if (facts.activeTaskSource) {
 		lines.push(clampText(facts.activeTaskSource, ACTIVE_TASK_SOURCE_MAX_CHARS));
+	}
+	lines.push("cancelled-work-dropped (must NOT appear outside ### Mandatory Rules):");
+	if (facts.cancelledText) {
+		lines.push(facts.cancelledText);
 	}
 	return lines.join("\n");
 }

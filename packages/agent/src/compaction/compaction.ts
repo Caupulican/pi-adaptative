@@ -24,7 +24,13 @@ import {
 	SUMMARIZATION_SYSTEM_PROMPT,
 	serializeConversation,
 } from "./utils.ts";
-import { buildRetryPrompt, type VerificationReport, verifySummary } from "./verification.ts";
+import {
+	buildRetryPrompt,
+	deterministicallyFillSummaryGaps,
+	isCompactionSummaryStructurallyUsable,
+	type VerificationReport,
+	verifySummary,
+} from "./verification.ts";
 
 // ============================================================================
 // File Operation Tracking
@@ -34,6 +40,8 @@ import { buildRetryPrompt, type VerificationReport, verifySummary } from "./veri
 export interface CompactionDetails {
 	readFiles: string[];
 	modifiedFiles: string[];
+	verificationGateFailures?: number;
+	deterministicGapFills?: number;
 }
 
 /**
@@ -108,6 +116,8 @@ export interface CompactionResult<T = unknown> {
 	/** Extension-specific data (e.g., ArtifactIndex, version markers for structured compaction) */
 	details?: T;
 	verification?: VerificationReport;
+	verificationGateFailures?: VerificationReport[];
+	deterministicGapFills?: number;
 }
 
 // ============================================================================
@@ -512,7 +522,7 @@ const SUMMARIZATION_PROMPT = `Checkpoint the conversation above. Format from you
 
 Do NOT carry resolved/transient errors, superseded approaches, or file contents. Record paths and intent, never bodies.
 
-Pre-extracted facts (verified by tooling — include ALL of them, merged with what you read):
+Verification checklist (the verifier checks exactly these channels; satisfy every listed include/drop demand):
 <facts>
 {FACTS_BLOCK}
 </facts>
@@ -529,7 +539,7 @@ const UPDATE_SUMMARIZATION_PROMPT = `Update the checkpoint in <previous-summary>
 - Preserve exact paths, commands, errors.
 - Do NOT carry resolved/transient errors, superseded approaches, or file contents. Record paths and intent, never bodies.
 
-Same section order. Pre-extracted facts:
+Same section order. Verification checklist (the verifier checks exactly these channels; satisfy every listed include/drop demand):
 <facts>
 {FACTS_BLOCK}
 </facts>
@@ -580,7 +590,7 @@ export async function generateSummary(
 	thinkingLevel?: ThinkingLevel,
 	streamFn?: StreamFn,
 	preDigest?: (conversationText: string, signal?: AbortSignal) => Promise<string>,
-	factsBlock = "files:\nactions:\nprohibitions:",
+	factsBlock = "verification demands:\nfiles-modified-recall (must appear in ## Files):\nfiles-read-recall (must appear in ## Files, containment threshold applies):\nworking-set-recall (must appear in ## Working Set):\nopen-errors-recall (must appear in ## Open Problems):\nactions-recall (must appear in ## Done):\nmandatory-rules-recall (must appear in ### Mandatory Rules):\nactive-task-containment (must appear in ## Active Task):\ncancelled-work-dropped (must NOT appear outside ### Mandatory Rules):",
 	chunked = false,
 ): Promise<string> {
 	const summaryBudget = getSummaryBudget(reserveTokens, model, factsBlock);
@@ -1039,6 +1049,8 @@ export async function compact(
 	};
 	const factsBlock = renderFactsBlock(facts);
 	let verification: VerificationReport | undefined;
+	const verificationGateFailures: VerificationReport[] = [];
+	let deterministicGapFills = 0;
 	let summary = "";
 
 	if (isSplitTurn && messagesToSummarize.length > 0) {
@@ -1066,11 +1078,24 @@ export async function compact(
 				break;
 			}
 
-			if (attempt >= 1) {
-				throw new Error(`gate-failed: ${formatVerificationFailures(verification)}`);
+			if (!isCompactionSummaryStructurallyUsable(historySummary)) {
+				if (attempt >= 1) {
+					throw new Error(`gate-failed: ${formatVerificationFailures(verification)}`);
+				}
+				historyInstructions = buildRetryPrompt(verification, historySummary);
+				continue;
 			}
 
-			historyInstructions = buildRetryPrompt(verification, historySummary);
+			verificationGateFailures.push(verification);
+			const filled = deterministicallyFillSummaryGaps(historySummary, facts);
+			if (filled.verification.ok) {
+				historySummary = filled.summary;
+				verification = filled.verification;
+				if (filled.changed) deterministicGapFills++;
+				break;
+			}
+
+			throw new Error(`gate-failed: ${formatVerificationFailures(filled.verification)}`);
 		}
 
 		const turnPrefixSummary = await generateTurnPrefixSummary(
@@ -1108,11 +1133,24 @@ export async function compact(
 				break;
 			}
 
-			if (attempt >= 1) {
-				throw new Error(`gate-failed: ${formatVerificationFailures(verification)}`);
+			if (!isCompactionSummaryStructurallyUsable(summary)) {
+				if (attempt >= 1) {
+					throw new Error(`gate-failed: ${formatVerificationFailures(verification)}`);
+				}
+				customSummaryInstructions = buildRetryPrompt(verification, summary);
+				continue;
 			}
 
-			customSummaryInstructions = buildRetryPrompt(verification, summary);
+			verificationGateFailures.push(verification);
+			const filled = deterministicallyFillSummaryGaps(summary, facts);
+			if (filled.verification.ok) {
+				summary = filled.summary;
+				verification = filled.verification;
+				if (filled.changed) deterministicGapFills++;
+				break;
+			}
+
+			throw new Error(`gate-failed: ${formatVerificationFailures(filled.verification)}`);
 		}
 	}
 
@@ -1126,8 +1164,15 @@ export async function compact(
 		summary,
 		firstKeptEntryId,
 		tokensBefore,
-		details: { readFiles, modifiedFiles } as CompactionDetails,
+		details: {
+			readFiles,
+			modifiedFiles,
+			verificationGateFailures: verificationGateFailures.length,
+			deterministicGapFills,
+		} as CompactionDetails,
 		verification,
+		verificationGateFailures,
+		deterministicGapFills,
 	};
 }
 
@@ -1200,7 +1245,7 @@ export function createDeterministicCompaction(preparation: CompactionPreparation
 		summary,
 		firstKeptEntryId,
 		tokensBefore,
-		details: { readFiles, modifiedFiles } as CompactionDetails,
+		details: { readFiles, modifiedFiles, verificationGateFailures: 0, deterministicGapFills: 0 } as CompactionDetails,
 	};
 }
 

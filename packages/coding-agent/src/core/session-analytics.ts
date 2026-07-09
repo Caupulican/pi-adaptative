@@ -145,6 +145,7 @@ export class SessionAnalytics {
 		}
 
 		const toolArgumentValidation = this.getToolArgumentValidationStats();
+		const compactionGates = this.getCompactionGateStats();
 
 		return {
 			sessionFile: this.deps.getSessionManager().getSessionFile(),
@@ -164,7 +165,28 @@ export class SessionAnalytics {
 			cost: totalCost,
 			contextUsage: this.getContextUsage(),
 			toolArgumentValidation,
+			compactionGates,
 		};
+	}
+
+	getCompactionGateStats(): SessionStats["compactionGates"] {
+		let gateFailures = 0;
+		let deterministicGapFills = 0;
+		let compactionsWithGateFailures = 0;
+		for (const entry of this.deps.getSessionManager().getEntries()) {
+			if (entry.type !== "compaction") continue;
+			const details = entry.details;
+			if (!details || typeof details !== "object") continue;
+			const rawGateFailures = (details as { verificationGateFailures?: unknown }).verificationGateFailures;
+			const rawGapFills = (details as { deterministicGapFills?: unknown }).deterministicGapFills;
+			const entryGateFailures =
+				typeof rawGateFailures === "number" && Number.isFinite(rawGateFailures) ? rawGateFailures : 0;
+			const entryGapFills = typeof rawGapFills === "number" && Number.isFinite(rawGapFills) ? rawGapFills : 0;
+			gateFailures += entryGateFailures;
+			deterministicGapFills += entryGapFills;
+			if (entryGateFailures > 0) compactionsWithGateFailures++;
+		}
+		return { gateFailures, deterministicGapFills, compactionsWithGateFailures };
 	}
 
 	recordToolArgumentValidation(record: ToolArgumentValidationLogRecord): void {

@@ -93,6 +93,12 @@ export function handleUsageCommand(host: UsageReportHost): void {
 		info += `${theme.fg("dim", "Context:")} unknown until next provider usage sample\n`;
 	}
 	info += `${theme.fg("dim", "Auto-compaction:")} ${host.session.autoCompactionEnabled ? "enabled" : "disabled"}\n`;
+	const compactionGates = stats.compactionGates ?? {
+		gateFailures: 0,
+		deterministicGapFills: 0,
+		compactionsWithGateFailures: 0,
+	};
+	info += `${theme.fg("dim", "Compaction gate failures:")} ${compactionGates.gateFailures} (${compactionGates.deterministicGapFills} deterministic gap-fill)\n`;
 	if (costGuard) {
 		const status = costGuard.over ? "over" : "ok";
 		info += `${theme.fg("dim", "Cost guard:")} ${status} $${costGuard.estUsd.toFixed(4)}/$${costGuard.thresholdUsd.toFixed(4)} (${costGuard.action})\n`;

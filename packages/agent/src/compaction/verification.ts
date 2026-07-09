@@ -10,6 +10,12 @@ export interface VerificationReport {
 	failures: VerificationFailure[];
 }
 
+export interface DeterministicGapFillResult {
+	summary: string;
+	verification: VerificationReport;
+	changed: boolean;
+}
+
 export const FILES_READ_RECALL_THRESHOLD = 0.8;
 export const ACTIVE_TASK_CONTAINMENT_THRESHOLD = 0.9;
 export const MANDATORY_RULES_RECALL_THRESHOLD = 0.7;
@@ -23,6 +29,28 @@ const SECTION_OPEN_PROBLEMS = "open problems";
 const SECTION_DONE = "done";
 const SECTION_ACTIVE_TASK = "active task";
 const SECTION_MANDATORY_RULES = "mandatory rules";
+const SECTION_KEY_DECISIONS = "key decisions";
+const SECTION_CONSTRAINTS = "constraints & preferences";
+const SECTION_CRITICAL_CONTEXT = "critical context";
+
+interface ParsedSummarySection {
+	heading: string;
+	normalized: string;
+	level: "##" | "###";
+	lines: string[];
+}
+
+const REQUIRED_SUMMARY_SECTIONS: Array<{ heading: string; normalized: string; level: "##" | "###" }> = [
+	{ heading: "Active Task", normalized: SECTION_ACTIVE_TASK, level: "##" },
+	{ heading: "Mandatory Rules", normalized: SECTION_MANDATORY_RULES, level: "###" },
+	{ heading: "Working Set", normalized: SECTION_WORKING_SET, level: "##" },
+	{ heading: "Files", normalized: SECTION_FILES, level: "##" },
+	{ heading: "Open Problems", normalized: SECTION_OPEN_PROBLEMS, level: "##" },
+	{ heading: "Done", normalized: SECTION_DONE, level: "##" },
+	{ heading: "Key Decisions", normalized: SECTION_KEY_DECISIONS, level: "##" },
+	{ heading: "Constraints & Preferences", normalized: SECTION_CONSTRAINTS, level: "##" },
+	{ heading: "Critical Context", normalized: SECTION_CRITICAL_CONTEXT, level: "##" },
+];
 
 export function verifySummary(summary: string, facts: CompactionFacts): VerificationReport {
 	if (factsAreEmpty(facts)) {
@@ -132,10 +160,209 @@ export function verifySummary(summary: string, facts: CompactionFacts): Verifica
 	return { ok: failures.length === 0, failures };
 }
 
+export function isCompactionSummaryStructurallyUsable(summary: string): boolean {
+	if (summary.trim().length === 0) return false;
+	const sections = extractSections(summary);
+	return (
+		sections[SECTION_ACTIVE_TASK] !== undefined ||
+		sections[SECTION_FILES] !== undefined ||
+		sections[SECTION_DONE] !== undefined ||
+		sections[SECTION_WORKING_SET] !== undefined ||
+		sections[SECTION_OPEN_PROBLEMS] !== undefined
+	);
+}
+
+export function deterministicallyFillSummaryGaps(summary: string, facts: CompactionFacts): DeterministicGapFillResult {
+	if (!isCompactionSummaryStructurallyUsable(summary)) {
+		return { summary, verification: verifySummary(summary, facts), changed: false };
+	}
+
+	const sections = parseSummarySections(summary);
+	const sectionByName = new Map<string, ParsedSummarySection>();
+	const extraSections: ParsedSummarySection[] = [];
+	for (const section of sections) {
+		if (REQUIRED_SUMMARY_SECTIONS.some((required) => required.normalized === section.normalized)) {
+			const existing = sectionByName.get(section.normalized);
+			if (existing) {
+				existing.lines.push(...section.lines);
+			} else {
+				sectionByName.set(section.normalized, section);
+			}
+		} else {
+			extraSections.push(section);
+		}
+	}
+
+	for (const required of REQUIRED_SUMMARY_SECTIONS) {
+		if (!sectionByName.has(required.normalized)) {
+			sectionByName.set(required.normalized, {
+				heading: required.heading,
+				normalized: required.normalized,
+				level: required.level,
+				lines: ["(none)"],
+			});
+		}
+	}
+
+	removeCancelledWorkLines(sectionByName, facts);
+
+	if (facts.activeTaskSource) {
+		const activeTask = sectionByName.get(SECTION_ACTIVE_TASK)!;
+		if (
+			containment(tokenSet(facts.activeTaskSource), tokenSet(activeTask.lines.join("\n"))) <
+			ACTIVE_TASK_CONTAINMENT_THRESHOLD
+		) {
+			appendContentLine(activeTask.lines, `User: ${facts.activeTaskSource}`);
+		}
+	}
+
+	const mandatoryRules = sectionByName.get(SECTION_MANDATORY_RULES)!;
+	for (const rule of facts.prohibitions) {
+		if (containment(tokenSet(rule), tokenSet(mandatoryRules.lines.join("\n"))) < MANDATORY_RULES_RECALL_THRESHOLD) {
+			appendContentLine(mandatoryRules.lines, `- ${rule}`);
+		}
+	}
+
+	const workingSet = sectionByName.get(SECTION_WORKING_SET)!;
+	for (const file of facts.workingSet) {
+		if (!workingSet.lines.join("\n").includes(file.path)) {
+			appendContentLine(workingSet.lines, `- ${file.path} — ${file.note || file.kind}`);
+		}
+	}
+
+	const files = sectionByName.get(SECTION_FILES)!;
+	for (const file of facts.files) {
+		if (!files.lines.join("\n").includes(file.path)) {
+			appendContentLine(files.lines, `- ${file.path}`);
+		}
+	}
+
+	const openProblems = sectionByName.get(SECTION_OPEN_PROBLEMS)!;
+	for (const error of facts.errorFacts) {
+		const required = `${error.operation}: ${error.error}`;
+		if (containment(tokenSet(required), tokenSet(openProblems.lines.join("\n"))) < OPEN_ERRORS_RECALL_THRESHOLD) {
+			appendContentLine(openProblems.lines, `- ${required}`);
+		}
+	}
+
+	const done = sectionByName.get(SECTION_DONE)!;
+	const doneText = done.lines.join("\n");
+	if (
+		facts.actions.length > 0 &&
+		containment(tokenSet(facts.actions.join("\n")), tokenSet(doneText)) < ACTIONS_RECALL_THRESHOLD
+	) {
+		let nextNumber = findNextDoneNumber(done.lines);
+		for (const action of facts.actions) {
+			if (done.lines.join("\n").includes(action)) {
+				continue;
+			}
+			appendContentLine(done.lines, `${nextNumber}. ${action}`);
+			nextNumber++;
+		}
+	}
+
+	const filledSummary = renderSummarySections(sectionByName, extraSections);
+	return {
+		summary: filledSummary,
+		verification: verifySummary(filledSummary, facts),
+		changed: filledSummary !== summary,
+	};
+}
+
 export function buildRetryPrompt(report: VerificationReport, previousAttempt?: string): string {
 	const failures = report.failures.map((failure) => `${failure.check}: ${failure.detail}`).join("; ");
 	const previous = previousAttempt ? `\n\n<previous-attempt>\n${previousAttempt}\n</previous-attempt>` : "";
 	return `Your previous checkpoint failed verification: ${failures}. Fix ONLY these omissions.${previous}`;
+}
+
+function parseSummarySections(summary: string): ParsedSummarySection[] {
+	const sections: ParsedSummarySection[] = [];
+	let current: ParsedSummarySection | undefined;
+
+	for (const line of summary.split(/\r?\n/)) {
+		const match = /^(##|###)\s+(.+?)\s*$/.exec(line);
+		if (match) {
+			current = {
+				heading: match[2],
+				normalized: normalizeHeading(match[2]),
+				level: match[1] as "##" | "###",
+				lines: [],
+			};
+			sections.push(current);
+			continue;
+		}
+		if (current) {
+			current.lines.push(line);
+		}
+	}
+
+	return sections;
+}
+
+function renderSummarySections(
+	sectionByName: Map<string, ParsedSummarySection>,
+	extraSections: ParsedSummarySection[],
+): string {
+	const rendered: string[] = [];
+	for (const required of REQUIRED_SUMMARY_SECTIONS) {
+		const section = sectionByName.get(required.normalized)!;
+		rendered.push(`${required.level} ${required.heading}`);
+		const body = normalizeSectionLines(section.lines);
+		rendered.push(...body);
+		rendered.push("");
+	}
+	for (const section of extraSections) {
+		rendered.push(`${section.level} ${section.heading}`);
+		rendered.push(...normalizeSectionLines(section.lines));
+		rendered.push("");
+	}
+	return rendered.join("\n").trimEnd();
+}
+
+function normalizeSectionLines(lines: string[]): string[] {
+	const trimmed = lines.map((line) => line.trimEnd());
+	while (trimmed.length > 0 && trimmed[0].trim() === "") trimmed.shift();
+	while (trimmed.length > 0 && trimmed[trimmed.length - 1].trim() === "") trimmed.pop();
+	return trimmed.length > 0 ? trimmed : ["(none)"];
+}
+
+function appendContentLine(lines: string[], line: string): void {
+	const normalized = normalizeSectionLines(lines).filter((existing) => existing.trim() !== "(none)");
+	normalized.push(line);
+	lines.length = 0;
+	lines.push(...normalized);
+}
+
+function findNextDoneNumber(lines: string[]): number {
+	let max = 0;
+	for (const line of lines) {
+		const match = /^\s*(\d+)\./.exec(line);
+		if (!match) continue;
+		max = Math.max(max, Number(match[1]));
+	}
+	return max + 1;
+}
+
+function removeCancelledWorkLines(sectionByName: Map<string, ParsedSummarySection>, facts: CompactionFacts): void {
+	if (!facts.cancelledText) return;
+	const factPathTokens = tokenSet(facts.files.map((file) => file.path).join("\n"));
+	const cancelledTokens = new Set([...tokenSet(facts.cancelledText)].filter((token) => !factPathTokens.has(token)));
+	if (cancelledTokens.size === 0) return;
+
+	for (const section of sectionByName.values()) {
+		if (section.normalized === SECTION_MANDATORY_RULES) continue;
+		section.lines = section.lines.filter((line) => !lineShouldBeDroppedAsCancelledWork(line, cancelledTokens));
+	}
+}
+
+function lineShouldBeDroppedAsCancelledWork(line: string, cancelledTokens: Set<string>): boolean {
+	const lineTokens = tokenSet(line);
+	if (lineTokens.size === 0) return false;
+	let overlap = 0;
+	for (const token of lineTokens) {
+		if (cancelledTokens.has(token)) overlap++;
+	}
+	return overlap >= 2 && overlap / lineTokens.size >= 0.6;
 }
 
 export function tokenSet(text: string): Set<string> {

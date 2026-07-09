@@ -332,7 +332,7 @@ describe("extractCompactionFacts", () => {
 		expect(facts.actions).toEqual(["READ src/real.ts"]);
 	});
 
-	it("keeps only unresolved error facts by operation", () => {
+	it("keeps only unresolved open-problem errors by operation", () => {
 		resetEntryCounter();
 		const failedRead = createMessageEntry(
 			createAssistantMessage([
@@ -363,6 +363,8 @@ describe("extractCompactionFacts", () => {
 			6,
 		);
 
+		expect(facts.files).toEqual([{ path: "src/a.ts", kind: "read", note: "READ" }]);
+		expect(facts.actions).toEqual(["READ src/a.ts"]);
 		expect(facts.errorFacts).toEqual([{ operation: "EDIT src/a.ts", error: "Exit code 1: patch failed" }]);
 	});
 
@@ -462,9 +464,40 @@ describe("extractCompactionFacts", () => {
 				operation: "RUN cd packages/ai && npm test -- bedrock-convert-messages.test.ts",
 				error: "FAIL test/bedrock-convert-messages.test.ts > preserves redacted thinking",
 			},
-			{ operation: "READ src/missing.ts", error: "File not found" },
 			{ operation: "RUN npm run lint", error: "lint output" },
 		]);
+		expect(facts.files.map((file) => file.path)).not.toContain("src/missing.ts");
+		expect(facts.actions).not.toContain("READ src/missing.ts");
+	});
+
+	it("does not promote failed inspection reads into gated file/action/open-error facts", () => {
+		resetEntryCounter();
+		const failedFooterReadCall = createMessageEntry(
+			createAssistantMessage([
+				{
+					type: "toolCall",
+					id: "tc-footer-read",
+					name: "read",
+					arguments: { path: "packages/coding-agent/test/footer.test.ts" },
+				},
+			]),
+		);
+		const failedFooterReadResult = createMessageEntry(
+			createToolResult(
+				"tc-footer-read",
+				"read",
+				"ENOENT: no such file or directory, access '/repo/packages/coding-agent/test/footer.test.ts'",
+				undefined,
+				true,
+			),
+		);
+
+		const facts = extractCompactionFacts([failedFooterReadCall, failedFooterReadResult], 0, 2);
+
+		expect(facts.files).toEqual([]);
+		expect(facts.workingSet).toEqual([]);
+		expect(facts.actions).toEqual([]);
+		expect(facts.errorFacts).toEqual([]);
 	});
 
 	it("orders the working set by last touch and caps it to recent files", () => {
@@ -565,8 +598,10 @@ describe("extractCompactionFacts", () => {
 		expect(result.summary).toContain("## Files\n- src/open.ts");
 		expect(result.summary).toContain("## Open Problems\n- TEST npm test: 1 failed: open.test.ts");
 		expect(result.summary).toContain("## Critical Context");
-		expect(result.summary).toContain("working set:\nsrc/open.ts — EDIT");
-		expect(result.summary).toContain("open errors:\nTEST npm test: 1 failed: open.test.ts");
+		expect(result.summary).toContain("working-set-recall (must appear in ## Working Set):\nsrc/open.ts — EDIT");
+		expect(result.summary).toContain(
+			"open-errors-recall (must appear in ## Open Problems):\nTEST npm test: 1 failed: open.test.ts",
+		);
 		expect(verifySummary(result.summary, preparation.facts!)).toEqual({ ok: true, failures: [] });
 	});
 
@@ -598,19 +633,22 @@ describe("extractCompactionFacts", () => {
 		});
 
 		expect(block).toBe(
-			"files:\n" +
-				"read: src/a.ts — read file\n" +
-				"modified: src/b.ts — edited\n" +
-				"working set:\n" +
+			"verification demands:\n" +
+				"files-modified-recall (must appear in ## Files):\n" +
+				"src/b.ts\n" +
+				"files-read-recall (must appear in ## Files, containment threshold applies):\n" +
+				"src/a.ts\n" +
+				"working-set-recall (must appear in ## Working Set):\n" +
 				"src/b.ts — edited\n" +
-				"actions:\n" +
-				"EDIT src/b.ts\n" +
-				"open errors:\n" +
+				"open-errors-recall (must appear in ## Open Problems):\n" +
 				"TEST npm test: 2 failed: fetcher.test.ts\n" +
-				"prohibitions:\n" +
+				"actions-recall (must appear in ## Done):\n" +
+				"EDIT src/b.ts\n" +
+				"mandatory-rules-recall (must appear in ### Mandatory Rules):\n" +
 				"Do not delete\n" +
-				"active task:\n" +
-				"Keep going",
+				"active-task-containment (must appear in ## Active Task):\n" +
+				"Keep going\n" +
+				"cancelled-work-dropped (must NOT appear outside ### Mandatory Rules):",
 		);
 	});
 
@@ -626,8 +664,10 @@ describe("extractCompactionFacts", () => {
 			activeTaskSource: longTask,
 		});
 
-		expect(block).toContain("active task:\nfix the wedge");
-		const taskLine = block.split("active task:\n")[1];
+		expect(block).toContain("active-task-containment (must appear in ## Active Task):\nfix the wedge");
+		const taskLine = block
+			.split("active-task-containment (must appear in ## Active Task):\n")[1]
+			.split("\ncancelled-work-dropped")[0];
 		expect(taskLine.length).toBeLessThanOrEqual(4000);
 
 		const emptyBlock = renderFactsBlock({
@@ -639,6 +679,7 @@ describe("extractCompactionFacts", () => {
 			cancelledText: "",
 			activeTaskSource: "",
 		});
-		expect(emptyBlock.endsWith("active task:")).toBe(true);
+		expect(emptyBlock).toContain("active-task-containment (must appear in ## Active Task):\n");
+		expect(emptyBlock.endsWith("cancelled-work-dropped (must NOT appear outside ### Mandatory Rules):")).toBe(true);
 	});
 });
