@@ -1,4 +1,4 @@
-## [Unreleased]
+## [0.81.25] - 2026-07-09
 
 ### Fixed
 - Fixed compaction verification to ignore failed read-tool noise, enumerate exact gate demands in summarizer prompts, and deterministically gap-fill missing gate facts before retrying the LLM.
