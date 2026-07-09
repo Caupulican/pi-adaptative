@@ -294,13 +294,23 @@ describe("FooterDataProvider autonomy status", () => {
 		provider.setAutonomyStatusSnapshot({
 			latestRoute: { tier: "cheap", reasonCode: "allowed" },
 			latestGate: { gate: "learning", outcome: "allow", reasonCode: "ok" },
-			currentCostUsd: 1.23,
+			costSummary: {
+				ownCost: 1.23,
+				subagentCost: 0,
+				subagentReports: 0,
+				currentCost: 1.23,
+				todayCost: 0,
+				todayOwnCost: 0,
+				todaySubagentCost: 0,
+				todayWindow: { startMs: 0, endMs: 86_400_000 },
+				todayRollover: "local-midnight",
+			},
 		});
 
 		const status = provider.getAutonomyStatus();
 		expect(status).toContain("Route: cheap");
 		expect(status).toContain("Gate: learning = allow (ok)");
-		expect(status).toContain("Costs: current: $1.2300");
+		expect(status).toContain("Costs: CURRENT $1.2300, TODAY $0.0000");
 
 		provider.dispose();
 	});
@@ -310,7 +320,17 @@ describe("FooterDataProvider autonomy status", () => {
 		const provider = new FooterDataProvider(repoDir);
 
 		provider.setAutonomyStatusSnapshot({
-			currentCostUsd: 1.23,
+			costSummary: {
+				ownCost: 1.23,
+				subagentCost: 0,
+				subagentReports: 0,
+				currentCost: 1.23,
+				todayCost: 0,
+				todayOwnCost: 0,
+				todaySubagentCost: 0,
+				todayWindow: { startMs: 0, endMs: 86_400_000 },
+				todayRollover: "local-midnight",
+			},
 		});
 		expect(provider.getAutonomyStatus()).toBeDefined();
 

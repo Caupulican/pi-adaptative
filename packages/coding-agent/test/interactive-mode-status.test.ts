@@ -124,14 +124,17 @@ describe("InteractiveMode.handleSessionCommand", () => {
 					tokens: { input: 10, output: 20, cacheRead: 0, cacheWrite: 0, total: 30 },
 					cost: 0,
 				}),
-				getDailyUsageTotals: () => ({
-					totalCost: 0,
+				getCostSummary: () => ({
 					ownCost: 0,
-					spawnedCost: 0,
-					sessionCount: 0,
-					spawnedReportCount: 0,
+					subagentCost: 0,
+					subagentReports: 0,
+					currentCost: 0,
+					todayCost: 0,
+					todayOwnCost: 0,
+					todaySubagentCost: 0,
+					todayWindow: { startMs: 0, endMs: 86_400_000 },
+					todayRollover: "local-midnight",
 				}),
-				getDailyUsageBreakdown: vi.fn(),
 				getModelRouterStatus: (formatLabel: (label: string) => string) =>
 					`${formatLabel("Status:")} enabled\n${formatLabel("Routing:")} skipped (expensive model missing auth: anthropic/claude-sonnet-4-5)\n${formatLabel("Latest intent:")} modify\n${formatLabel("Last decision:")} none`,
 			},
@@ -161,18 +164,16 @@ describe("InteractiveMode.handleUsageCommand", () => {
 					tokens: { input: 1_000, output: 500, cacheRead: 250, cacheWrite: 125, total: 1_875 },
 					cost: 0.1234,
 				}),
-				getSpawnedUsage: () => ({ cost: 0.25, reports: 3 }),
-				getDailyUsageTotals: () => ({
-					ownCost: 0.5,
-					spawnedCost: 0.25,
-					totalCost: 0.75,
-					input: 10_000,
-					output: 2_000,
-					cacheRead: 4_000,
-					cacheWrite: 1_000,
-					totalTokens: 17_000,
-					sessions: 2,
-					reports: 3,
+				getCostSummary: () => ({
+					ownCost: 0.1234,
+					subagentCost: 0.25,
+					subagentReports: 3,
+					currentCost: 0.3734,
+					todayCost: 0.75,
+					todayOwnCost: 0.5,
+					todaySubagentCost: 0.25,
+					todayWindow: { startMs: 0, endMs: 86_400_000 },
+					todayRollover: "local-midnight",
 				}),
 				getContextUsage: () => ({ percent: 66.6, tokens: 66_600, contextWindow: 100_000 }),
 				autoCompactionEnabled: true,
@@ -196,8 +197,10 @@ describe("InteractiveMode.handleUsageCommand", () => {
 		expect(output).toContain("Usage & Optimization");
 		expect(output).toContain("Session tokens");
 		expect(output).toContain("Cost");
-		expect(output).toContain("Spawned/background: $0.2500 (3 reports)");
-		expect(output).toContain("Today: $0.7500");
+		expect(output).toContain("CURRENT (session): $0.3734");
+		expect(output).toContain("SUBAGENTS (included in CURRENT): $0.2500 (3 reports)");
+		expect(output).toContain("TODAY (host local day): $0.7500");
+		expect(output).toContain("Today rollover: local midnight");
 		expect(output).toContain("Context: 66.6% (66,600/100,000)");
 		expect(output).toContain("Auto-compaction: enabled");
 		expect(output).toContain("Cost guard: over $1.2300/$1.0000 (warn)");

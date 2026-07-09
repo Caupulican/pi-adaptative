@@ -1,6 +1,7 @@
 import { isAbsolute, relative, resolve, sep } from "node:path";
 import { type Component, truncateToWidth, visibleWidth } from "@caupulican/pi-tui";
 import type { AgentSession } from "../../../core/agent-session.ts";
+import { formatFooterCostParts } from "../../../core/cost/cost-summary.ts";
 import type { ReadonlyFooterDataProvider } from "../../../core/footer-data-provider.ts";
 import { theme } from "../theme/theme.ts";
 
@@ -111,10 +112,6 @@ type FooterUsageSnapshot = {
 	totalOutput: number;
 	totalCacheRead: number;
 	totalCacheWrite: number;
-	totalCost: number;
-	/** Rolled-up cost of spawned/subagent sessions (Cost Aggregation). 0 when none. */
-	totalSpawnedCost: number;
-	dailyTotalCost: number;
 	contextUsage: ReturnType<AgentSession["getContextUsage"]>;
 };
 
@@ -169,7 +166,6 @@ export class FooterComponent implements Component {
 		let totalOutput = 0;
 		let totalCacheRead = 0;
 		let totalCacheWrite = 0;
-		let totalCost = 0;
 
 		const entries = this.session.sessionManager.getEntries();
 		for (let i = 0; i < entries.length; i++) {
@@ -181,13 +177,7 @@ export class FooterComponent implements Component {
 			totalOutput += usage.output;
 			totalCacheRead += usage.cacheRead;
 			totalCacheWrite += usage.cacheWrite;
-			totalCost += usage.cost.total;
 		}
-
-		// Roll up spawned/subagent cost (Cost Aggregation, Model A). Derived from the same
-		// session entries, so the {entryCount} cache key above busts when new reports land.
-		const totalSpawnedCost = this.session.getSpawnedUsage().cost;
-		const dailyTotalCost = this.session.getDailyUsageTotals?.().totalCost ?? 0;
 
 		const snapshot: FooterUsageSnapshot = {
 			entryCount,
@@ -196,9 +186,6 @@ export class FooterComponent implements Component {
 			totalOutput,
 			totalCacheRead,
 			totalCacheWrite,
-			totalCost,
-			totalSpawnedCost,
-			dailyTotalCost,
 			// Calculate context usage from session (handles compaction correctly).
 			// After compaction, tokens are unknown until the next LLM response.
 			contextUsage: this.session.getContextUsage(),
@@ -210,16 +197,8 @@ export class FooterComponent implements Component {
 	render(width: number): string[] {
 		const state = this.session.state;
 		const usageSnapshot = this.getUsageSnapshot(state.messages?.length ?? 0);
-		const {
-			totalInput,
-			totalOutput,
-			totalCacheRead,
-			totalCacheWrite,
-			totalCost,
-			totalSpawnedCost,
-			dailyTotalCost,
-			contextUsage,
-		} = usageSnapshot;
+		const { totalInput, totalOutput, totalCacheRead, totalCacheWrite, contextUsage } = usageSnapshot;
+		const costSummary = this.session.getCostSummary();
 		const contextWindow = contextUsage?.contextWindow ?? state.model?.contextWindow ?? 0;
 		const contextPercentValue = contextUsage?.percent ?? 0;
 		const contextPercent = contextUsage?.percent !== null ? contextPercentValue.toFixed(1) : "?";
@@ -246,16 +225,7 @@ export class FooterComponent implements Component {
 		if (totalCacheRead) statsParts.push(`R${formatTokens(totalCacheRead)}`);
 		if (totalCacheWrite) statsParts.push(`W${formatTokens(totalCacheWrite)}`);
 
-		// Show cost with "(sub)" indicator if using OAuth subscription
-		const usingSubscription = state.model ? this.session.modelRegistry.isUsingOAuth(state.model) : false;
-		const grandTotalCost = totalCost + totalSpawnedCost;
-		if (grandTotalCost || usingSubscription) {
-			const costStr = `$${grandTotalCost.toFixed(3)}${usingSubscription ? " (sub)" : ""}`;
-			statsParts.push(costStr);
-		}
-		if (dailyTotalCost) {
-			statsParts.push(`day:$${dailyTotalCost.toFixed(3)}`);
-		}
+		statsParts.push(...formatFooterCostParts(costSummary));
 
 		// Colorize context percentage based on usage
 		let contextPercentStr: string;

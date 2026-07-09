@@ -13,6 +13,12 @@ The interface has four main areas:
 - **Editor** - where you type; border color indicates the current thinking level
 - **Footer** - working directory, session name, token/cache usage, cost, context usage, and current model
 
+Footer cost labels match the `/usage`, `/session`, and autonomy status cost line:
+
+- **CURRENT** is the current session file's total recorded cost, including assistant usage and any **SUBAGENTS** cost.
+- **TODAY** is this host's active session-storage total for the local calendar day; it rolls over at local midnight.
+- **SUBAGENTS** appears only when delegated/spawned workers reported cost in the current session, and that amount is already included in **CURRENT**.
+
 The editor can be replaced temporarily by built-in UI such as `/settings` or by custom extension UI.
 
 ### Editor Features

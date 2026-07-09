@@ -105,6 +105,7 @@ import type { MemoryPromptInclusionReport } from "./context/memory-diagnostics.t
 import type { MemoryRetrievalReport } from "./context/memory-retrieval.ts";
 import type { ContextGcReport } from "./context-gc.ts";
 import { ContextPipeline } from "./context-pipeline.ts";
+import type { SessionCostSummary } from "./cost/cost-summary.ts";
 import type { DailyUsageTotals } from "./cost/daily-usage.ts";
 import { type CostGuardDecision, downgradeReasoning, estimateTurnCostUsd, evaluateCostGuard } from "./cost-guard.ts";
 import { appendWorkerResultSnapshot, getWorkerResultSnapshots } from "./delegation/session-worker-result.ts";
@@ -806,9 +807,7 @@ export class AgentSession {
 			getSessionManager: () => this.sessionManager,
 			getLastModelRouterDecision: () => this._modelRouter.getLastDecision(),
 			getLastResearchLaneSkipReason: () => this._backgroundLanes.getLastResearchLaneSkipReason(),
-			getSessionStats: () => this.getSessionStats(),
-			getSpawnedUsage: () => this.getSpawnedUsage(),
-			getDailyUsageTotals: () => this.getDailyUsageTotals?.(),
+			getCostSummary: () => this.getCostSummary(),
 			getGoalStateSnapshot: () => this.getGoalStateSnapshot(),
 			getActiveLaneCount: () => this._backgroundLanes.getActiveLaneCount(),
 			getEvidenceBundleSnapshots: () => this.getEvidenceBundleSnapshots(),
@@ -4573,6 +4572,10 @@ export class AgentSession {
 
 	getDailyUsageTotals(now = new Date()): DailyUsageTotals {
 		return this._analytics.getDailyUsageTotals(now);
+	}
+
+	getCostSummary(now = new Date()): SessionCostSummary {
+		return this._analytics.getCostSummary(now);
 	}
 
 	getDailyUsageBreakdown(formatLabel?: (label: string) => string, now = new Date()): string {

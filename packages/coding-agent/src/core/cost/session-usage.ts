@@ -112,6 +112,7 @@ export function aggregateCumulativeUsageFromSessionEntries(entries: SessionEntry
 		costTotal += usage.cost.total;
 	};
 
+	const seenSpawnedReportIds = new Set<string>();
 	for (const entry of entries) {
 		if (entry.type === "message" && entry.message.role === "assistant") {
 			const usage = (entry.message as AssistantMessage).usage;
@@ -120,9 +121,12 @@ export function aggregateCumulativeUsageFromSessionEntries(entries: SessionEntry
 			}
 		} else if (entry.type === "custom" && entry.customType === SPAWNED_USAGE_CUSTOM_TYPE) {
 			const data = entry.data as SpawnedUsageReport | undefined;
-			if (data?.usage && isUsage(data.usage)) {
-				add(data.usage);
+			if (!data?.usage || !isUsage(data.usage)) continue;
+			if (data.reportId) {
+				if (seenSpawnedReportIds.has(data.reportId)) continue;
+				seenSpawnedReportIds.add(data.reportId);
 			}
+			add(data.usage);
 		}
 	}
 

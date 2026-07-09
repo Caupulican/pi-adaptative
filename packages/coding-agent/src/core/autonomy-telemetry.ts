@@ -10,7 +10,6 @@
 
 import type { SessionManager } from "@caupulican/pi-agent-core/node";
 import { getProcessMemoryMb } from "../utils/process-memory.ts";
-import type { SessionStats, SpawnedUsageTotals } from "./agent-session.ts";
 import type { EvidenceBundle, GateOutcome, LearningDecision, WorkerResult } from "./autonomy/contracts.ts";
 import { getLaneRecordSnapshots } from "./autonomy/session-lane-record.ts";
 import type {
@@ -24,7 +23,7 @@ import {
 	type AutonomyTelemetryEvent,
 	redactTelemetryValue,
 } from "./autonomy/telemetry-events.ts";
-import type { DailyUsageTotals } from "./cost/daily-usage.ts";
+import { hasCostSummarySignal, hasSubagentCostSignal, type SessionCostSummary } from "./cost/cost-summary.ts";
 import type { GoalState } from "./goals/goal-state.ts";
 import type { LearningAuditRecord } from "./learning/learning-audit.ts";
 import { getRecentModelRouterDecisions, type ModelRouterDecisionStatus } from "./model-router/status.ts";
@@ -43,12 +42,8 @@ export interface AutonomyTelemetryDeps {
 	getLastModelRouterDecision(): ModelRouterDecisionStatus | undefined;
 	/** Reason the last research lane was skipped, if any — surfaced in the diagnostic's research family. */
 	getLastResearchLaneSkipReason(): string | undefined;
-	/** This session's own usage totals (cost only is read). */
-	getSessionStats(): SessionStats;
-	/** Spawned-child usage totals (cost only is read). */
-	getSpawnedUsage(): SpawnedUsageTotals;
-	/** Cross-session daily usage totals, if trackable — preserves the source's optional-call semantics. */
-	getDailyUsageTotals(): DailyUsageTotals | undefined;
+	/** Single source of truth for CURRENT/TODAY/SUBAGENTS display costs. */
+	getCostSummary(): SessionCostSummary;
 	/** Current goal state, if a goal is active. */
 	getGoalStateSnapshot(): GoalState | undefined;
 	/** Live count of active lanes from the lane tracker — never inferred from historical snapshots. */
@@ -146,19 +141,9 @@ export class AutonomyTelemetry {
 			};
 		}
 
-		const currentCost = this.deps.getSessionStats().cost;
-		if (currentCost > 0) {
-			snapshot.currentCostUsd = currentCost;
-		}
-
-		const spawnedCost = this.deps.getSpawnedUsage().cost;
-		if (spawnedCost > 0) {
-			snapshot.spawnedCostUsd = spawnedCost;
-		}
-
-		const dailyCost = this.deps.getDailyUsageTotals()?.totalCost;
-		if (dailyCost !== undefined && dailyCost > 0) {
-			snapshot.dailyCostUsd = dailyCost;
+		const costSummary = this.deps.getCostSummary();
+		if (hasCostSummarySignal(costSummary)) {
+			snapshot.costSummary = costSummary;
 		}
 
 		const goal = this.deps.getGoalStateSnapshot();
@@ -220,15 +205,18 @@ export class AutonomyTelemetry {
 		}
 
 		const costs: DiagnosticEntry[] = [];
-		const currentCostForDiagnostics = this.deps.getSessionStats().cost;
-		if (currentCostForDiagnostics > 0) {
-			costs.push({ title: "current", summary: `$${currentCostForDiagnostics.toFixed(4)}` });
+		const costSummary = this.deps.getCostSummary();
+		if (costSummary.currentCost > 0 || hasSubagentCostSignal(costSummary)) {
+			costs.push({ title: "CURRENT", summary: `$${costSummary.currentCost.toFixed(4)}` });
 		}
-		const spawnedCost = this.deps.getSpawnedUsage().cost;
-		if (spawnedCost > 0) costs.push({ title: "spawned", summary: `$${spawnedCost.toFixed(4)}` });
-		const dailyCostForDiagnostics = this.deps.getDailyUsageTotals()?.totalCost;
-		if (dailyCostForDiagnostics !== undefined && dailyCostForDiagnostics > 0) {
-			costs.push({ title: "daily", summary: `$${dailyCostForDiagnostics.toFixed(4)}` });
+		if (costSummary.todayCost > 0) {
+			costs.push({ title: "TODAY", summary: `$${costSummary.todayCost.toFixed(4)}` });
+		}
+		if (hasSubagentCostSignal(costSummary)) {
+			costs.push({
+				title: "SUBAGENTS",
+				summary: `$${costSummary.subagentCost.toFixed(4)} included in CURRENT`,
+			});
 		}
 		if (costs.length > 0) snapshot.costs = costs;
 

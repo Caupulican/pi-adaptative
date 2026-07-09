@@ -26,13 +26,21 @@ describe("Autonomy Status Formatters (Phase 8A)", () => {
 			expect(status).toContain("Gate: research_gate = allow (allowed)");
 		});
 
-		it("current/daily/spawned costs appear when present", () => {
+		it("CURRENT/TODAY/SUBAGENTS costs appear when present", () => {
 			const status = formatAutonomyStatus({
-				currentCostUsd: 0.12345,
-				dailyCostUsd: 1.5,
-				spawnedCostUsd: 0.05,
+				costSummary: {
+					ownCost: 0.07345,
+					subagentCost: 0.05,
+					subagentReports: 1,
+					currentCost: 0.12345,
+					todayCost: 1.5,
+					todayOwnCost: 1.25,
+					todaySubagentCost: 0.25,
+					todayWindow: { startMs: 0, endMs: 86_400_000 },
+					todayRollover: "local-midnight",
+				},
 			});
-			expect(status).toContain("Costs: current: $0.1235, daily: $1.5000, spawned: $0.0500");
+			expect(status).toContain("Costs: CURRENT $0.1235, TODAY $1.5000, SUBAGENTS $0.0500 (included in CURRENT)");
 		});
 
 		it("active goal appears when present", () => {

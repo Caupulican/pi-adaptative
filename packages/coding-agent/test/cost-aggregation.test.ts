@@ -237,6 +237,39 @@ describe("Cost aggregation (spawned-usage roll-up)", () => {
 			expect(result.totalTokens).toBe(300);
 		});
 
+		it("deduplicates duplicate spawned report ids while preserving distinct subagent reports", () => {
+			const entries: SessionEntry[] = [
+				{
+					type: "custom",
+					id: "sub-a",
+					parentId: null,
+					timestamp: new Date().toISOString(),
+					customType: SPAWNED_USAGE_CUSTOM_TYPE,
+					data: { usage: usage(0.2), reportId: "sub-a" },
+				},
+				{
+					type: "custom",
+					id: "sub-b",
+					parentId: "sub-a",
+					timestamp: new Date().toISOString(),
+					customType: SPAWNED_USAGE_CUSTOM_TYPE,
+					data: { usage: usage(0.3), reportId: "sub-b" },
+				},
+				{
+					type: "custom",
+					id: "sub-b-duplicate",
+					parentId: "sub-b",
+					timestamp: new Date().toISOString(),
+					customType: SPAWNED_USAGE_CUSTOM_TYPE,
+					data: { usage: usage(0.3), reportId: "sub-b" },
+				},
+			];
+
+			const result = aggregateCumulativeUsageFromSessionEntries(entries);
+			expect(result.cost.total).toBeCloseTo(0.5, 10);
+			expect(result.totalTokens).toBe(300);
+		});
+
 		it("ignores malformed spawned usage", () => {
 			const entries: SessionEntry[] = [
 				{

@@ -110,20 +110,21 @@ describe("AgentSession - Autonomy Status Snapshot", () => {
 		await harness.cleanup();
 	});
 
-	it("includes cost metrics from existing session facts", async () => {
+	it("includes cost metrics from the shared cost summary", async () => {
 		const harness = await createHarness({ tools: [bashTool] });
 		harness.session.addSpawnedUsage(usage(0.25), { reportId: "status-cost" });
 
 		const snapshot = harness.session.getAutonomyStatusSnapshot();
-		expect(snapshot.spawnedCostUsd).toBeCloseTo(0.25, 10);
+		expect(snapshot.costSummary?.subagentCost).toBeCloseTo(0.25, 10);
+		expect(snapshot.costSummary?.currentCost).toBeCloseTo(0.25, 10);
 
 		await harness.cleanup();
 	});
 
-	it("includes currentCostUsd from the session's own assistant-message usage, excluding spawned cost", async () => {
+	it("includes CURRENT as own assistant-message usage plus spawned cost", async () => {
 		const harness = await createHarness({ tools: [bashTool] });
 		const model = harness.getModel();
-		harness.session.agent.state.messages.push({
+		harness.session.sessionManager.appendMessage({
 			role: "assistant",
 			content: [{ type: "text", text: "done" }],
 			api: model.api,
@@ -136,8 +137,9 @@ describe("AgentSession - Autonomy Status Snapshot", () => {
 		harness.session.addSpawnedUsage(usage(0.5), { reportId: "status-current-cost" });
 
 		const snapshot = harness.session.getAutonomyStatusSnapshot();
-		expect(snapshot.currentCostUsd).toBeCloseTo(0.75, 10);
-		expect(snapshot.spawnedCostUsd).toBeCloseTo(0.5, 10);
+		expect(snapshot.costSummary?.ownCost).toBeCloseTo(0.75, 10);
+		expect(snapshot.costSummary?.subagentCost).toBeCloseTo(0.5, 10);
+		expect(snapshot.costSummary?.currentCost).toBeCloseTo(1.25, 10);
 
 		await harness.cleanup();
 	});
@@ -283,37 +285,28 @@ describe("AgentSession - Autonomy Diagnostic Snapshot", () => {
 		await harness.cleanup();
 	});
 
-	it("costs family reflects current (own-session), spawned, and daily cost when non-zero", async () => {
+	it("costs family reflects CURRENT, TODAY, and SUBAGENTS from the shared cost summary when non-zero", async () => {
 		const harness = await createHarness({ tools: [bashTool] });
-		const model = harness.getModel();
-		harness.session.agent.state.messages.push({
-			role: "assistant",
-			content: [{ type: "text", text: "done" }],
-			api: model.api,
-			provider: model.provider,
-			model: model.id,
-			usage: usage(0.75),
-			stopReason: "stop",
-			timestamp: 1,
-		});
-		harness.session.addSpawnedUsage(usage(0.5), { reportId: "diag-cost" });
-		harness.session.getDailyUsageTotals = () => ({
-			ownCost: 0,
-			spawnedCost: 0,
-			totalCost: 0.25,
-			input: 0,
-			output: 0,
-			cacheRead: 0,
-			cacheWrite: 0,
-			totalTokens: 0,
-			sessions: 0,
-			reports: 0,
+		harness.session.getCostSummary = () => ({
+			ownCost: 0.75,
+			subagentCost: 0.5,
+			subagentReports: 1,
+			currentCost: 1.25,
+			todayCost: 0.25,
+			todayOwnCost: 0.25,
+			todaySubagentCost: 0,
+			todayWindow: { startMs: 0, endMs: 86_400_000 },
+			todayRollover: "local-midnight",
 		});
 
 		const snapshot = harness.session.getAutonomyDiagnosticSnapshot();
-		expect(snapshot.costs?.some((entry) => entry.title === "current" && entry.summary === "$0.7500")).toBe(true);
-		expect(snapshot.costs?.some((entry) => entry.title === "spawned" && entry.summary === "$0.5000")).toBe(true);
-		expect(snapshot.costs?.some((entry) => entry.title === "daily" && entry.summary === "$0.2500")).toBe(true);
+		expect(snapshot.costs?.some((entry) => entry.title === "CURRENT" && entry.summary === "$1.2500")).toBe(true);
+		expect(
+			snapshot.costs?.some(
+				(entry) => entry.title === "SUBAGENTS" && entry.summary === "$0.5000 included in CURRENT",
+			),
+		).toBe(true);
+		expect(snapshot.costs?.some((entry) => entry.title === "TODAY" && entry.summary === "$0.2500")).toBe(true);
 
 		await harness.cleanup();
 	});

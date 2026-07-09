@@ -647,8 +647,7 @@ export async function handleGoalContinueCommand(host: GoalContinueCommandHost, t
 export interface SessionInfoCommandHost {
 	readonly session: {
 		getSessionStats: () => ReturnType<AgentSession["getSessionStats"]>;
-		getDailyUsageTotals: () => ReturnType<AgentSession["getDailyUsageTotals"]>;
-		getDailyUsageBreakdown: (formatLabel: (label: string) => string) => string;
+		getCostSummary: () => ReturnType<AgentSession["getCostSummary"]>;
 		getModelRouterStatus: (formatLabel: (label: string) => string) => string;
 	};
 	readonly sessionManager: { getSessionName: () => string | undefined };
@@ -683,11 +682,15 @@ export function handleSessionCommand(host: SessionInfoCommandHost): void {
 	}
 	info += `${theme.fg("dim", "Total:")} ${stats.tokens.total.toLocaleString()}\n`;
 
-	const dailyUsage = host.session.getDailyUsageTotals();
-	if (stats.cost > 0 || dailyUsage.totalCost > 0) {
+	const costs = host.session.getCostSummary();
+	if (costs.currentCost > 0 || costs.todayCost > 0 || costs.subagentReports > 0) {
 		info += `\n${theme.bold("Cost")}\n`;
-		info += `${theme.fg("dim", "Total:")} $${stats.cost.toFixed(4)}\n`;
-		info += `${host.session.getDailyUsageBreakdown((label) => theme.fg("dim", label))}`;
+		info += `${theme.fg("dim", "CURRENT (session):")} $${costs.currentCost.toFixed(4)}\n`;
+		if (costs.subagentReports > 0 || costs.subagentCost > 0) {
+			info += `${theme.fg("dim", "SUBAGENTS (included in CURRENT):")} $${costs.subagentCost.toFixed(4)} (${costs.subagentReports} reports)\n`;
+		}
+		info += `${theme.fg("dim", "TODAY (host local day):")} $${costs.todayCost.toFixed(4)}\n`;
+		info += `${theme.fg("dim", "Today rollover:")} local midnight`;
 	}
 
 	info += `\n\n${theme.bold("Model Router")}\n`;

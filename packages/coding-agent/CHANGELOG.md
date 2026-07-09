@@ -1,5 +1,8 @@
 ## [Unreleased]
 
+### Fixed
+- Fixed cost displays to use one CURRENT/TODAY/SUBAGENTS summary across the footer and autonomy cost line, with subagent cost included in CURRENT and local-midnight TODAY rollover.
+
 ## [0.81.23] - 2026-07-09
 
 ### Added

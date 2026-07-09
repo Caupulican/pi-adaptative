@@ -37,6 +37,11 @@ import {
 	type SpawnedUsageTotals,
 } from "./agent-session.ts";
 import {
+	aggregateCurrentSessionCostsFromEntries,
+	createSessionCostSummary,
+	type SessionCostSummary,
+} from "./cost/cost-summary.ts";
+import {
 	aggregateDailyUsageFromSessionFiles,
 	aggregateDailyUsageFromSessionRoot,
 	type DailyUsageTotals,
@@ -97,8 +102,14 @@ export interface SessionAnalyticsDeps {
 export class SessionAnalytics {
 	/** Memoized spawned-usage totals, keyed by session entry count (Bug #22: O(1) between turns). */
 	private _spawnedUsageCache?: { entryCount: number; totals: SpawnedUsageTotals };
-	/** Memoized daily usage totals with a short TTL, keyed by the resolved scope dir. */
-	private _dailyUsageCache?: { sessionDir: string; expiresAt: number; totals: DailyUsageTotals };
+	/** Memoized daily usage totals with a short TTL, keyed by the resolved scope dir and local-day window. */
+	private _dailyUsageCache?: {
+		sessionDir: string;
+		windowStartMs: number;
+		windowEndMs: number;
+		expiresAt: number;
+		totals: DailyUsageTotals;
+	};
 	/** Live recovery telemetry records already snapshotted for the worker; keyed to dedupe sidecar reads. */
 	private readonly _toolArgumentValidationRecords = new Map<string, ToolArgumentValidationLogRecord>();
 
@@ -292,10 +303,16 @@ export class SessionAnalytics {
 			add(usage);
 		}
 		// Roll up usage this session attributed to its own spawned children (single-hop).
+		const seenSpawnedReportIds = new Set<string>();
 		for (const entry of this.deps.getSessionManager().getEntries()) {
 			if (entry.type !== "custom" || entry.customType !== SPAWNED_USAGE_CUSTOM_TYPE) continue;
 			const data = entry.data as SpawnedUsageReport | undefined;
-			if (data?.usage) add(data.usage);
+			if (!data?.usage) continue;
+			if (data.reportId) {
+				if (seenSpawnedReportIds.has(data.reportId)) continue;
+				seenSpawnedReportIds.add(data.reportId);
+			}
+			add(data.usage);
 		}
 		return {
 			input,
@@ -359,18 +376,19 @@ export class SessionAnalytics {
 		const sessionManager = this.deps.getSessionManager();
 		const entryCount = sessionManager.getEntryCount?.() ?? sessionManager.getEntries().length;
 		if (this._spawnedUsageCache?.entryCount === entryCount) return this._spawnedUsageCache.totals;
-		let cost = 0;
-		let reports = 0;
-		for (const entry of sessionManager.getEntries()) {
-			if (entry.type !== "custom" || entry.customType !== SPAWNED_USAGE_CUSTOM_TYPE) continue;
-			const data = entry.data as SpawnedUsageReport | undefined;
-			if (!data?.usage) continue;
-			cost += data.usage.cost.total;
-			reports += 1;
-		}
-		const totals: SpawnedUsageTotals = { cost, reports };
+		const current = aggregateCurrentSessionCostsFromEntries(sessionManager.getEntries());
+		const totals: SpawnedUsageTotals = { cost: current.subagentCost, reports: current.subagentReports };
 		this._spawnedUsageCache = { entryCount, totals };
 		return totals;
+	}
+
+	getCostSummary(now = new Date()): SessionCostSummary {
+		const window = getLocalDayWindow(now);
+		return createSessionCostSummary({
+			entries: this.deps.getSessionManager().getEntries(),
+			dailyTotals: this.getDailyUsageTotals(now),
+			todayWindow: window,
+		});
 	}
 
 	getDailyUsageTotals(now = new Date()): DailyUsageTotals {
@@ -378,14 +396,25 @@ export class SessionAnalytics {
 		const sessionDir = sessionManager.getSessionDir();
 		const scope = sessionManager.usesDefaultSessionDir() ? getSessionsDir() : sessionDir;
 		const nowMs = now.getTime();
-		if (this._dailyUsageCache?.sessionDir === scope && this._dailyUsageCache.expiresAt > nowMs) {
+		const window = getLocalDayWindow(now);
+		if (
+			this._dailyUsageCache?.sessionDir === scope &&
+			this._dailyUsageCache.windowStartMs === window.startMs &&
+			this._dailyUsageCache.windowEndMs === window.endMs &&
+			this._dailyUsageCache.expiresAt > nowMs
+		) {
 			return this._dailyUsageCache.totals;
 		}
-		const window = getLocalDayWindow(now);
 		const totals = sessionManager.usesDefaultSessionDir()
 			? aggregateDailyUsageFromSessionRoot(scope, window)
 			: aggregateDailyUsageFromSessionFiles(sessionDir, window);
-		this._dailyUsageCache = { sessionDir: scope, expiresAt: nowMs + 10_000, totals };
+		this._dailyUsageCache = {
+			sessionDir: scope,
+			windowStartMs: window.startMs,
+			windowEndMs: window.endMs,
+			expiresAt: Math.min(nowMs + 10_000, window.endMs),
+			totals,
+		};
 		return totals;
 	}
 

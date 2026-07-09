@@ -1,6 +1,7 @@
 import { visibleWidth } from "@caupulican/pi-tui";
 import { beforeAll, describe, expect, it } from "vitest";
 import type { AgentSession } from "../src/core/agent-session.ts";
+import type { SessionCostSummary } from "../src/core/cost/cost-summary.ts";
 import type { ReadonlyFooterDataProvider } from "../src/core/footer-data-provider.ts";
 import { FooterComponent, formatCwdForFooter } from "../src/modes/interactive/components/footer.ts";
 import { initTheme } from "../src/modes/interactive/theme/theme.ts";
@@ -21,6 +22,8 @@ function createSession(options: {
 	thinkingLevel?: string;
 	usage?: AssistantUsage;
 	dailyCost?: number;
+	subagentCost?: number;
+	subagentReports?: number;
 }): AgentSession {
 	const usage = options.usage;
 	const entries =
@@ -35,6 +38,21 @@ function createSession(options: {
 						},
 					},
 				];
+
+	const ownCost = usage?.cost.total ?? 0;
+	const subagentCost = options.subagentCost ?? 0;
+	const subagentReports = options.subagentReports ?? (subagentCost > 0 ? 1 : 0);
+	const costSummary: SessionCostSummary = {
+		ownCost,
+		subagentCost,
+		subagentReports,
+		currentCost: ownCost + subagentCost,
+		todayCost: options.dailyCost ?? 0,
+		todayOwnCost: 0,
+		todaySubagentCost: 0,
+		todayWindow: { startMs: 0, endMs: 86_400_000 },
+		todayRollover: "local-midnight",
+	};
 
 	const session = {
 		state: {
@@ -52,8 +70,9 @@ function createSession(options: {
 			getCwd: () => "/tmp/project",
 		},
 		getContextUsage: () => ({ contextWindow: 200_000, percent: 12.3 }),
-		getSpawnedUsage: () => ({ cost: 0, reports: 0 }),
+		getSpawnedUsage: () => ({ cost: subagentCost, reports: subagentReports }),
 		getDailyUsageTotals: () => ({ totalCost: options.dailyCost ?? 0 }),
+		getCostSummary: () => costSummary,
 		modelRegistry: {
 			isUsingOAuth: () => false,
 		},
@@ -152,13 +171,29 @@ describe("FooterComponent width handling", () => {
 		expect(statusLine).not.toContain("(learning) (learning)");
 	});
 
-	it("shows the active-day cost total in the visible stats line", () => {
-		const session = createSession({ sessionName: "", dailyCost: 2.415 });
+	it("shows the contract cost labels in the visible stats line", () => {
+		const session = createSession({
+			sessionName: "",
+			usage: {
+				input: 12_345,
+				output: 6_789,
+				cacheRead: 0,
+				cacheWrite: 0,
+				cost: { total: 1.25 },
+			},
+			dailyCost: 2.415,
+			subagentCost: 0.5,
+			subagentReports: 2,
+		});
 		const footer = new FooterComponent(session, createFooterData(1));
 
-		const statsLine = stripAnsi(footer.render(120)[1] ?? "");
+		const statsLine = stripAnsi(footer.render(160)[1] ?? "");
 
-		expect(statsLine).toContain("day:$2.415");
+		expect(statsLine).toContain("CURRENT:$1.750");
+		expect(statsLine).toContain("TODAY:$2.415");
+		expect(statsLine).toContain("SUBAGENTS:$0.500 in CURRENT");
+		expect(statsLine).not.toContain("day:");
+		expect(statsLine).not.toContain("(sub)");
 	});
 
 	it("renders autonomy status on the status line when present", () => {

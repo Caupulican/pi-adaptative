@@ -53,8 +53,7 @@ export interface DebugReportHost extends ReportRenderHost {
 
 export function handleUsageCommand(host: UsageReportHost): void {
 	const stats = host.session.getSessionStats();
-	const spawned = host.session.getSpawnedUsage();
-	const daily = host.session.getDailyUsageTotals();
+	const costs = host.session.getCostSummary();
 	const context = host.session.getContextUsage();
 	const autoLearn = host.getCurrentAutoLearnSettings();
 	const costGuard = host.session.getLastCostGuardDecision();
@@ -68,12 +67,12 @@ export function handleUsageCommand(host: UsageReportHost): void {
 	info += `${theme.fg("dim", "Total:")} ${stats.tokens.total.toLocaleString()}\n\n`;
 
 	info += `${theme.bold("Cost")}\n`;
-	info += `${theme.fg("dim", "Session:")} $${stats.cost.toFixed(4)}\n`;
-	info += `${theme.fg("dim", "Spawned/background:")} $${spawned.cost.toFixed(4)} (${spawned.reports} reports)\n`;
-	info += `${theme.fg("dim", "Today:")} $${daily.totalCost.toFixed(4)}\n`;
-	info += `${theme.fg("dim", "Today own:")} $${daily.ownCost.toFixed(4)}\n`;
-	info += `${theme.fg("dim", "Today spawned/background:")} $${daily.spawnedCost.toFixed(4)}\n`;
-	info += `${theme.fg("dim", "Today tokens:")} ${daily.totalTokens.toLocaleString()}\n\n`;
+	info += `${theme.fg("dim", "CURRENT (session):")} $${costs.currentCost.toFixed(4)}\n`;
+	if (costs.subagentReports > 0 || costs.subagentCost > 0) {
+		info += `${theme.fg("dim", "SUBAGENTS (included in CURRENT):")} $${costs.subagentCost.toFixed(4)} (${costs.subagentReports} reports)\n`;
+	}
+	info += `${theme.fg("dim", "TODAY (host local day):")} $${costs.todayCost.toFixed(4)}\n`;
+	info += `${theme.fg("dim", "Today rollover:")} local midnight\n\n`;
 
 	const processMemory = getProcessMemoryMb();
 	info += `${theme.bold("Process")}\n`;

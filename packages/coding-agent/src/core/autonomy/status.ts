@@ -1,11 +1,10 @@
+import { formatStatusCostSummary, type SessionCostSummary } from "../cost/cost-summary.ts";
 import type { GateOutcomeKind } from "./contracts.ts";
 
 export interface AutonomyStatusSnapshot {
 	latestRoute?: { tier: string; reasonCode: string; risk?: string };
 	latestGate?: { outcome: string; gate: string; reasonCode: string };
-	currentCostUsd?: number;
-	dailyCostUsd?: number;
-	spawnedCostUsd?: number;
+	costSummary?: SessionCostSummary;
 	activeGoal?: { goalId: string; status: string; openRequirements?: number; stallTurns?: number };
 	activeLaneCount?: number;
 }
@@ -44,10 +43,6 @@ const CIRCULAR = "[Circular]";
 const MAX_STRING_LENGTH = 200;
 const SENSITIVE_KEYS = ["token", "secret", "key", "credential", "password", "authorization"];
 const SENSITIVE_VALUE_REGEX = /bearer\s+[\w\-._]+|api[-_]?key[-_]?[\w\-._]+|sk-[\w\-._]+/i;
-
-function formatCost(value: number): string {
-	return Number.isFinite(value) ? `$${value.toFixed(4)}` : "$0.0000";
-}
 
 function redactAndTruncateString(value: string): string {
 	if (SENSITIVE_VALUE_REGEX.test(value)) return REDACTED;
@@ -100,12 +95,8 @@ export function formatAutonomyStatus(args: AutonomyStatusSnapshot): string {
 		);
 	}
 
-	const costs: string[] = [];
-	if (args.currentCostUsd !== undefined) costs.push(`current: ${formatCost(args.currentCostUsd)}`);
-	if (args.dailyCostUsd !== undefined) costs.push(`daily: ${formatCost(args.dailyCostUsd)}`);
-	if (args.spawnedCostUsd !== undefined) costs.push(`spawned: ${formatCost(args.spawnedCostUsd)}`);
-	if (costs.length > 0) {
-		parts.push(`Costs: ${costs.join(", ")}`);
+	if (args.costSummary) {
+		parts.push(`Costs: ${formatStatusCostSummary(args.costSummary)}`);
 	}
 
 	if (args.activeGoal) {
