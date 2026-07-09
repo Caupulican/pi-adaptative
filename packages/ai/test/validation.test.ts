@@ -159,7 +159,7 @@ describe("validateToolArguments", () => {
 		expect(JSON.stringify(events)).not.toContain("secret-value");
 	});
 
-	it("can disable deterministic repair while keeping validation bounces", () => {
+	it("honors the internal diagnostic repair kill while keeping validation bounces", () => {
 		const tool: Tool = {
 			name: "count",
 			description: "Count",

@@ -1,5 +1,11 @@
 ## [Unreleased]
 
+### Added
+- Added background worker-thread tool-recovery logging with bounded queue/drop counters surfaced in `/toolhealth`.
+
+### Changed
+- Made tool-argument repair a built-in path by removing the `toolRepair.repair` setting; `toolRepair.logging` now controls only recovery log writes.
+
 ## [0.81.22] - 2026-07-09
 
 ### Fixed

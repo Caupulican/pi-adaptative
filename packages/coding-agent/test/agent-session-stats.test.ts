@@ -114,13 +114,13 @@ describe("AgentSession.getSessionStats", () => {
 			});
 
 			expect(session.getSessionStats().toolArgumentValidation).toEqual({
-				clean: 1,
+				clean: 0,
 				repaired: 1,
 				bounced: 1,
 				failureModes: { jsonStringParse: 1, bashCommandUnwrap: 1 },
 				repairsApplied: { jsonStringParse: 1 },
-				taught: { none: 2, note: 1, rule: 0 },
-				executionOutcome: { not_run: 1, succeeded: 2, failed: 0 },
+				taught: { none: 1, note: 1, rule: 0 },
+				executionOutcome: { not_run: 1, succeeded: 1, failed: 0 },
 				teachEfficacy: {
 					"anthropic/claude-sonnet-4-5:bashCommandUnwrap": {
 						recurrenceBefore: 1,
@@ -138,7 +138,7 @@ describe("AgentSession.getSessionStats", () => {
 					},
 				},
 			});
-			expect(sessionManager.getEntries().filter((entry) => entry.type === "custom")).toHaveLength(3);
+			expect(sessionManager.getEntries().filter((entry) => entry.type === "custom")).toHaveLength(0);
 		} finally {
 			session.dispose();
 		}

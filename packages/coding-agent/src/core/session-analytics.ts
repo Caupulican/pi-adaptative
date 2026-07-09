@@ -8,7 +8,7 @@
  * /context window estimate, and HTML/JSONL export of the current branch.
  */
 
-import { existsSync, mkdirSync, writeFileSync } from "node:fs";
+import { existsSync, mkdirSync, readFileSync, writeFileSync } from "node:fs";
 import { dirname } from "node:path";
 import type { AgentMessage, AgentState } from "@caupulican/pi-agent-core";
 import {
@@ -47,6 +47,10 @@ import { exportSessionToHtml, type ToolHtmlRenderer } from "./export-html/index.
 import { createToolHtmlRenderer } from "./export-html/tool-renderer.ts";
 import type { ContextUsage, ToolDefinition } from "./extensions/index.ts";
 import type { SettingsManager } from "./settings-manager.ts";
+import {
+	isToolArgumentValidationLogRecord,
+	type ToolArgumentValidationLogRecord,
+} from "./tool-recovery-log-records.ts";
 
 export const TOOL_ARGUMENT_VALIDATION_CUSTOM_TYPE = "tool_argument_validation";
 
@@ -86,6 +90,8 @@ export interface SessionAnalyticsDeps {
 	getSettingsManager(): SettingsManager;
 	/** Resolve a tool definition for the HTML export's custom-tool renderer. */
 	getToolDefinition(name: string): ToolDefinition | undefined;
+	/** Sidecar recovery telemetry log; read on demand so turn handling never writes session custom entries. */
+	getToolRecoveryEventLogPath(): string;
 }
 
 export class SessionAnalytics {
@@ -93,6 +99,8 @@ export class SessionAnalytics {
 	private _spawnedUsageCache?: { entryCount: number; totals: SpawnedUsageTotals };
 	/** Memoized daily usage totals with a short TTL, keyed by the resolved scope dir. */
 	private _dailyUsageCache?: { sessionDir: string; expiresAt: number; totals: DailyUsageTotals };
+	/** Live recovery telemetry records already snapshotted for the worker; keyed to dedupe sidecar reads. */
+	private readonly _toolArgumentValidationRecords = new Map<string, ToolArgumentValidationLogRecord>();
 
 	private readonly deps: SessionAnalyticsDeps;
 
@@ -148,13 +156,26 @@ export class SessionAnalytics {
 		};
 	}
 
-	recordToolArgumentValidation(event: ToolArgumentValidationTelemetryEvent): void {
+	recordToolArgumentValidation(record: ToolArgumentValidationLogRecord): void {
+		this._toolArgumentValidationRecords.set(record.recordId, record);
+	}
+
+	private readToolArgumentValidationSidecarRecords(): ToolArgumentValidationLogRecord[] {
+		const filePath = this.deps.getToolRecoveryEventLogPath();
+		if (!existsSync(filePath)) return [];
+		const records: ToolArgumentValidationLogRecord[] = [];
 		try {
-			const record: ToolArgumentValidationRecord = { version: 1, ...event };
-			this.deps.getSessionManager().appendCustomEntry(TOOL_ARGUMENT_VALIDATION_CUSTOM_TYPE, record);
+			const sessionId = this.deps.getSessionManager().getSessionId();
+			for (const line of readFileSync(filePath, "utf-8").split("\n")) {
+				if (line.trim().length === 0) continue;
+				const parsed = JSON.parse(line) as unknown;
+				if (!isToolArgumentValidationLogRecord(parsed) || parsed.sessionId !== sessionId) continue;
+				records.push(parsed);
+			}
 		} catch {
-			// Telemetry is best-effort and must never affect the observed turn.
+			return [];
 		}
+		return records;
 	}
 
 	getToolArgumentValidationStats(): ToolArgumentValidationStats {
@@ -181,10 +202,10 @@ export class SessionAnalytics {
 			return stats.teachEfficacy[key];
 		};
 
-		for (const entry of this.deps.getSessionManager().getEntries()) {
-			if (entry.type !== "custom" || entry.customType !== TOOL_ARGUMENT_VALIDATION_CUSTOM_TYPE) continue;
-			const record = entry.data as ToolArgumentValidationRecord | undefined;
-			if (!record || record.version !== 1) continue;
+		const seen = new Set<string>();
+		const consume = (record: ToolArgumentValidationRecord, key: string): void => {
+			if (seen.has(key)) return;
+			seen.add(key);
 			stats[record.outcome] += 1;
 			const taught = record.taught ?? "none";
 			const executionOutcome = record.executionOutcome ?? "not_run";
@@ -213,6 +234,19 @@ export class SessionAnalytics {
 					if (executionOutcome === "not_run") efficacy.repairedThenNotRun++;
 				}
 			}
+		};
+
+		for (const entry of this.deps.getSessionManager().getEntries()) {
+			if (entry.type !== "custom" || entry.customType !== TOOL_ARGUMENT_VALIDATION_CUSTOM_TYPE) continue;
+			const record = entry.data as ToolArgumentValidationRecord | undefined;
+			if (!record || record.version !== 1) continue;
+			consume(record, `legacy:${entry.id}`);
+		}
+		for (const record of this.readToolArgumentValidationSidecarRecords()) {
+			consume(record, record.recordId);
+		}
+		for (const record of this._toolArgumentValidationRecords.values()) {
+			consume(record, record.recordId);
 		}
 
 		return stats;

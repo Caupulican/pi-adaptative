@@ -1,5 +1,6 @@
 import chalk from "chalk";
 import type { ModelAdaptationStore, StoredModelAdaptation } from "./models/adaptation-store.ts";
+import type { ToolRecoveryLoggerStats } from "./tool-recovery-logger.ts";
 
 function formatAgeDays(iso: string, now: Date): string {
 	const ms = Date.parse(iso);
@@ -12,11 +13,25 @@ function sortProfiles(profiles: StoredModelAdaptation[]): StoredModelAdaptation[
 	return [...profiles].sort((left, right) => left.model.localeCompare(right.model));
 }
 
-export function formatToolRepairHealthReport(store: ModelAdaptationStore, now: Date = new Date()): string {
-	const profiles = sortProfiles(store.getForHost());
-	if (profiles.length === 0) return "Tool repair health: no model adaptation records for this host.";
+function formatLoggerStats(stats: ToolRecoveryLoggerStats | undefined): string[] {
+	if (!stats) return [];
+	return [
+		`recovery logging: ${stats.enabled ? "enabled" : "disabled"} queued=${stats.queued} inFlight=${stats.inFlight} dropped=${stats.dropped} failures=${stats.failures} workerStarts=${stats.workerStarts} crashes=${stats.workerCrashes} respawns=${stats.respawns}`,
+	];
+}
 
-	const lines = [chalk.bold("Tool repair health")];
+export function formatToolRepairHealthReport(
+	store: ModelAdaptationStore,
+	now: Date = new Date(),
+	loggerStats?: ToolRecoveryLoggerStats,
+): string {
+	const profiles = sortProfiles(store.getForHost());
+	if (profiles.length === 0) {
+		const loggerLines = formatLoggerStats(loggerStats);
+		return ["Tool repair health: no model adaptation records for this host.", ...loggerLines].join("\n");
+	}
+
+	const lines = [chalk.bold("Tool repair health"), ...formatLoggerStats(loggerStats)];
 	for (const entry of profiles) {
 		lines.push(`${entry.model}`);
 		const toolProbe = entry.profile.toolProbe;

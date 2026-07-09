@@ -50,6 +50,47 @@ const MAX_MESSAGE_CHARS = 500;
 const MAX_FILE_BYTES = 512 * 1024;
 const MAX_ROTATED_RECORDS = 1000;
 
+export function createToolValidationFailureCorpusRecord(args: {
+	provider?: string;
+	modelId?: string;
+	tool: string;
+	failureModes: readonly string[];
+	shape: readonly ToolValidationFailureShapeEntry[];
+	errorKeywords?: readonly string[];
+	ts: string;
+}): ToolValidationFailureCorpusRecord {
+	return {
+		kind: "tool_validation",
+		ts: args.ts,
+		provider: args.provider,
+		modelId: args.modelId,
+		tool: args.tool,
+		failureModes: [...new Set(args.failureModes)].sort(),
+		shape: sanitizeToolValidationShape(args.shape),
+		errorKeywords: [...new Set(args.errorKeywords ?? [])].sort(),
+	};
+}
+
+export function writeFailureCorpusRecord(
+	filePath: string,
+	record: FailureCorpusRecord,
+	fs: FailureCorpusFs = DEFAULT_FS,
+): void {
+	fs.mkdirSync(dirname(filePath), { recursive: true });
+	fs.appendFileSync(filePath, `${JSON.stringify(record)}\n`, "utf-8");
+	rotateFailureCorpusIfNeeded(filePath, fs);
+}
+
+function rotateFailureCorpusIfNeeded(filePath: string, fs: FailureCorpusFs): void {
+	if (!fs.existsSync(filePath) || fs.statSync(filePath).size <= MAX_FILE_BYTES) return;
+	const lines = fs
+		.readFileSync(filePath, "utf-8")
+		.split("\n")
+		.filter((line) => line.trim().length > 0)
+		.slice(-MAX_ROTATED_RECORDS);
+	fs.writeFileSync(filePath, `${lines.join("\n")}\n`, "utf-8");
+}
+
 export class FailureCorpusRecorder {
 	private total = 0;
 	private unknown = 0;
@@ -86,16 +127,7 @@ export class FailureCorpusRecorder {
 		shape: readonly ToolValidationFailureShapeEntry[];
 		errorKeywords?: readonly string[];
 	}): void {
-		this.appendRecord({
-			kind: "tool_validation",
-			ts: this.now().toISOString(),
-			provider: args.provider,
-			modelId: args.modelId,
-			tool: args.tool,
-			failureModes: [...new Set(args.failureModes)].sort(),
-			shape: sanitizeToolValidationShape(args.shape),
-			errorKeywords: [...new Set(args.errorKeywords ?? [])].sort(),
-		});
+		this.appendRecord(createToolValidationFailureCorpusRecord({ ...args, ts: this.now().toISOString() }));
 	}
 
 	stats(): FailureCorpusStats {
@@ -104,22 +136,10 @@ export class FailureCorpusRecorder {
 
 	private appendRecord(record: FailureCorpusRecord): void {
 		try {
-			this.fs.mkdirSync(dirname(this.filePath), { recursive: true });
-			this.fs.appendFileSync(this.filePath, `${JSON.stringify(record)}\n`, "utf-8");
-			this.rotateIfNeeded();
+			writeFailureCorpusRecord(this.filePath, record, this.fs);
 		} catch (error) {
 			this.debug(`failure corpus write skipped: ${error instanceof Error ? error.message : String(error)}`);
 		}
-	}
-
-	private rotateIfNeeded(): void {
-		if (!this.fs.existsSync(this.filePath) || this.fs.statSync(this.filePath).size <= MAX_FILE_BYTES) return;
-		const lines = this.fs
-			.readFileSync(this.filePath, "utf-8")
-			.split("\n")
-			.filter((line) => line.trim().length > 0)
-			.slice(-MAX_ROTATED_RECORDS);
-		this.fs.writeFileSync(this.filePath, `${lines.join("\n")}\n`, "utf-8");
 	}
 }
 
@@ -136,7 +156,7 @@ function sanitizeToolValidationShape(
 
 export function redactSecrets(message: string): string {
 	return message
-		.replace(/sk-(?:proj-|ant-)?[A-Za-z0-9._-]{8,}/g, "[redacted]")
-		.replace(/Bearer\s+[A-Za-z0-9._~+/=-]+/gi, "Bearer [redacted]")
-		.replace(/[A-Za-z0-9+/]{40,}={0,2}/g, "[redacted]");
+		.replace(/sk-(?:proj-|ant-)?[A-Za-z0-9._-]{8,}/g, "[REDACTED]")
+		.replace(/Bearer\s+[A-Za-z0-9._~+/=-]+/gi, "Bearer [REDACTED]")
+		.replace(/[A-Za-z0-9+/]{40,}={0,2}/g, "[REDACTED]");
 }

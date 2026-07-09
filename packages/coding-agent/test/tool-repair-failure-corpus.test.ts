@@ -28,7 +28,7 @@ describe("tool repair failure corpus", () => {
 		if (tempDir) rmSync(tempDir, { recursive: true, force: true });
 	});
 
-	function createSession() {
+	function createSession(options?: { logging?: boolean }) {
 		const authStorage = AuthStorage.inMemory();
 		authStorage.setRuntimeApiKey(model.provider, "test-key");
 		return new AgentSession({
@@ -37,7 +37,9 @@ describe("tool repair failure corpus", () => {
 				initialState: { model, systemPrompt: "", tools: [] },
 			}),
 			sessionManager: SessionManager.inMemory(tempDir),
-			settingsManager: SettingsManager.inMemory(),
+			settingsManager: SettingsManager.inMemory(
+				options?.logging === false ? { toolRepair: { logging: false } } : undefined,
+			),
 			cwd: tempDir,
 			agentDir,
 			modelRegistry: ModelRegistry.inMemory(authStorage),
@@ -45,7 +47,14 @@ describe("tool repair failure corpus", () => {
 		});
 	}
 
-	it("writes only bounced sanitized shapes to the failure corpus", () => {
+	async function waitForFile(path: string): Promise<void> {
+		for (let attempt = 0; attempt < 50; attempt++) {
+			if (existsSync(path)) return;
+			await new Promise((resolve) => setTimeout(resolve, 10));
+		}
+	}
+
+	it("writes only bounced sanitized shapes to the failure corpus", async () => {
 		const session = createSession();
 		try {
 			session.agent.onToolArgumentValidation?.({
@@ -80,11 +89,13 @@ describe("tool repair failure corpus", () => {
 				executionOutcome: "not_run",
 				failureShape: [{ path: "count", expectedType: "number", receivedType: "object" }],
 			});
+			await session.flushToolRecoveryLogsForTests();
 		} finally {
 			session.dispose();
 		}
 
 		const corpusPath = join(agentDir, "state", "failure-corpus.jsonl");
+		await waitForFile(corpusPath);
 		expect(existsSync(corpusPath)).toBe(true);
 		const lines = readFileSync(corpusPath, "utf-8").trim().split("\n");
 		expect(lines).toHaveLength(1);
@@ -102,5 +113,30 @@ describe("tool repair failure corpus", () => {
 			shape: [{ path: "count", expectedType: "number", receivedType: "object" }],
 		});
 		expect(JSON.stringify(record)).not.toContain("secret-value");
+	});
+
+	it("does not enqueue or write recovery logs when logging is disabled", async () => {
+		const session = createSession({ logging: false });
+		try {
+			session.agent.onToolArgumentValidation?.({
+				outcome: "bounced",
+				provider: model.provider,
+				model: model.id,
+				tool: "count",
+				failureModes: ["other"],
+				repairsApplied: [],
+				taught: "none",
+				executionOutcome: "not_run",
+				failureShape: [{ path: "count", expectedType: "number", receivedType: "object" }],
+			});
+			await session.flushToolRecoveryLogsForTests();
+		} finally {
+			session.dispose();
+		}
+
+		await new Promise((resolve) => setTimeout(resolve, 50));
+		expect(existsSync(join(agentDir, "state", "tool-recovery-events.jsonl"))).toBe(false);
+		expect(existsSync(join(agentDir, "state", "failure-corpus.jsonl"))).toBe(false);
+		expect(session.getSessionStats().toolArgumentValidation.bounced).toBe(0);
 	});
 });

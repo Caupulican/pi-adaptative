@@ -286,9 +286,6 @@ export interface AgentLoopConfig extends SimpleStreamOptions {
 	 */
 	toolExecution?: ToolExecutionMode;
 
-	/** Disable deterministic tool-argument repair while keeping validation bounces. Default: enabled. */
-	toolArgumentRepairEnabled?: boolean;
-
 	/** Disable in-band tool repair teaching notes. Default: enabled. */
 	toolArgumentTeachEnabled?: boolean;
 

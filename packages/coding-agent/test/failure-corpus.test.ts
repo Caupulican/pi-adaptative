@@ -58,12 +58,12 @@ describe("FailureCorpusRecorder", () => {
 			redactSecrets(
 				"sk-123456789abcdef Bearer abcdefghijklmnopqrstuvwxyz0123456789 abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMN==",
 			),
-		).toBe("[redacted] Bearer [redacted] [redacted]");
+		).toBe("[REDACTED] Bearer [REDACTED] [REDACTED]");
 	});
 
 	it("redacts separator-bearing provider API key formats", () => {
 		expect(redactSecrets("openai sk-proj-abcd_efgh-ijklmnop anthropic sk-ant-api03-abcd-efgh_ijklmnop")).toBe(
-			"openai [redacted] anthropic [redacted]",
+			"openai [REDACTED] anthropic [REDACTED]",
 		);
 	});
 

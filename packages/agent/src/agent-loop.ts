@@ -749,6 +749,13 @@ function toolValidationEscalationThreshold(config: AgentLoopConfig): number {
 	return config.toolValidationEscalationThreshold ?? DEFAULT_TOOL_VALIDATION_ESCALATION_THRESHOLD;
 }
 
+function isToolArgumentRepairEmergencyDisabled(): boolean {
+	const env = typeof process === "object" && process ? process.env : undefined;
+	const value = env?.PI_TOOL_REPAIR_DISABLED;
+	if (!value) return false;
+	return ["1", "true", "yes", "on"].includes(value.trim().toLowerCase());
+}
+
 function isToolArgumentValidationError(error: unknown): error is ToolArgumentValidationError {
 	return (
 		error instanceof ToolArgumentValidationError ||
@@ -822,7 +829,7 @@ async function prepareToolCall(
 		const validatedArgs = validateToolArguments(tool, preparedToolCall, {
 			model: config.model.id,
 			provider: config.model.provider,
-			repairEnabled: config.toolArgumentRepairEnabled !== false,
+			repairEnabled: !isToolArgumentRepairEmergencyDisabled(),
 			telemetry: (event) => {
 				validationEvent = event;
 			},

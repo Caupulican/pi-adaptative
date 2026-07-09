@@ -188,6 +188,8 @@ import type { ResourceProfileFilterSettings, SettingsManager } from "./settings-
 import type { SlashCommandInfo } from "./slash-commands.ts";
 import { SystemPromptBuilder } from "./system-prompt-builder.ts";
 import { ToolGateController } from "./tool-gate-controller.ts";
+import { TOOL_RECOVERY_EVENT_LOG_FILE } from "./tool-recovery-log-records.ts";
+import { ToolRecoveryLogger } from "./tool-recovery-logger.ts";
 import { formatToolRepairHealthReport } from "./tool-repair-health.ts";
 import { resolveCurrentToolRepairSettings } from "./tool-repair-settings.ts";
 import type { BashOperations } from "./tools/bash.ts";
@@ -670,6 +672,8 @@ export class AgentSession {
 	private readonly _modelRouter: ModelRouterController;
 	private readonly _billingFailover: BillingFailoverController;
 	private readonly _failureCorpus: FailureCorpusRecorder;
+	private readonly _toolRecoveryLogger: ToolRecoveryLogger;
+	private readonly _toolRecoveryEventLogPath: string;
 	private _skillCuratorInstance?: SkillCurator;
 	private _disposed = false;
 	private readonly _reflectionAbort = new AbortController();
@@ -873,8 +877,17 @@ export class AgentSession {
 			addSpawnedUsage: (usage, opts) => this.addSpawnedUsage(usage, opts),
 			runIsolatedCompletion: (opts) => this.runIsolatedCompletion(opts),
 		});
+		const failureCorpusPath = join(this._agentDir, "state", "failure-corpus.jsonl");
+		this._toolRecoveryEventLogPath = join(this._agentDir, "state", TOOL_RECOVERY_EVENT_LOG_FILE);
+		const toolRepairSettings = this._toolRepairSettings();
 		this._failureCorpus = new FailureCorpusRecorder({
-			filePath: join(this._agentDir, "state", "failure-corpus.jsonl"),
+			filePath: failureCorpusPath,
+		});
+		this._toolRecoveryLogger = new ToolRecoveryLogger({
+			enabled: toolRepairSettings.logging,
+			sessionId: this.sessionManager.getSessionId(),
+			eventLogPath: this._toolRecoveryEventLogPath,
+			failureCorpusPath,
 		});
 		this._billingFailover = new BillingFailoverController({
 			agent: this.agent,
@@ -1014,13 +1027,15 @@ export class AgentSession {
 			getSessionManager: () => this.sessionManager,
 			getSettingsManager: () => this.settingsManager,
 			getToolDefinition: (name) => this.getToolDefinition(name),
+			getToolRecoveryEventLogPath: () => this._toolRecoveryEventLogPath,
 		});
 		const previousToolArgumentValidation = this.agent.onToolArgumentValidation;
 		this.agent.onToolArgumentValidation = (event) => {
 			const taggedEvent = this._tagModelAdaptationRuleTeaching(event);
 			previousToolArgumentValidation?.(taggedEvent);
-			this._analytics.recordToolArgumentValidation(taggedEvent);
-			this._recordToolValidationBounce(taggedEvent);
+			const logRecord = this._toolRecoveryLogger.recordToolArgumentValidation(taggedEvent);
+			if (!logRecord) return;
+			this._analytics.recordToolArgumentValidation(logRecord);
 			this._handleTextToolProtocolValidationOutcome(taggedEvent);
 			this._handleModelAdaptationTelemetry(taggedEvent);
 		};
@@ -1427,7 +1442,6 @@ export class AgentSession {
 
 	private _applyToolRepairLayerSettings(): void {
 		const settings = this._toolRepairSettings();
-		this.agent.toolArgumentRepairEnabled = settings.repair;
 		this.agent.toolArgumentTeachEnabled = settings.teach;
 	}
 
@@ -1829,18 +1843,6 @@ export class AgentSession {
 		return /<pi:call\b|<tool_call\b|```(?:tool|tool_call)[\s\S]*"name"\s*:/i.test(text);
 	}
 
-	private _recordToolValidationBounce(event: ToolArgumentValidationTelemetryEvent): void {
-		if (event.outcome !== "bounced" || !event.failureShape || event.failureShape.length === 0) return;
-		this._failureCorpus.recordToolValidation({
-			provider: event.provider ?? this.agent.state.model?.provider,
-			modelId: event.model ?? this.agent.state.model?.id,
-			tool: event.tool,
-			failureModes: event.failureModes,
-			shape: event.failureShape,
-			errorKeywords: event.errorKeywords,
-		});
-	}
-
 	private _tagModelAdaptationRuleTeaching(
 		event: ToolArgumentValidationTelemetryEvent,
 	): ToolArgumentValidationTelemetryEvent {
@@ -2079,7 +2081,11 @@ export class AgentSession {
 	}
 
 	formatToolRepairHealthReport(): string {
-		return formatToolRepairHealthReport(this._modelAdaptationStore);
+		return formatToolRepairHealthReport(this._modelAdaptationStore, new Date(), this._toolRecoveryLogger.getStats());
+	}
+
+	async flushToolRecoveryLogsForTests(timeoutMs = 1000): Promise<void> {
+		await this._toolRecoveryLogger.flush(timeoutMs);
 	}
 
 	removeToolRepairRule(model: string, mode: string): boolean {
@@ -2540,6 +2546,7 @@ export class AgentSession {
 			.getMemoryManager()
 			.shutdownAll()
 			.catch(() => {});
+		void this._toolRecoveryLogger.shutdown().catch(() => {});
 		cleanupSessionResources(this.sessionId);
 		// Best-effort final sweep for any grep/find artifact already released (reference
 		// count zero) but not yet reclaimed -- e.g. a release whose cleanup() call failed

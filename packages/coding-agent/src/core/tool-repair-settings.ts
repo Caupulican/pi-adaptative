@@ -4,6 +4,7 @@ export interface ResolvedToolRepairSettings {
 	repair: boolean;
 	teach: boolean;
 	textProtocol: boolean | undefined;
+	logging: boolean;
 }
 
 type EnvLike = Record<string, string | undefined>;
@@ -18,11 +19,12 @@ export function resolveToolRepairSettings(
 	env: EnvLike,
 ): ResolvedToolRepairSettings {
 	return {
-		repair: !isTruthyEnvFlag(env.PI_TOOL_REPAIR_DISABLED) && settings.toolRepair?.repair !== false,
+		repair: !isTruthyEnvFlag(env.PI_TOOL_REPAIR_DISABLED),
 		teach: !isTruthyEnvFlag(env.PI_TOOL_REPAIR_TEACH_DISABLED) && settings.toolRepair?.teach !== false,
 		textProtocol: isTruthyEnvFlag(env.PI_TEXT_TOOL_CALL_PROTOCOL_DISABLED)
 			? false
 			: settings.toolRepair?.textProtocol,
+		logging: settings.toolRepair?.logging !== false,
 	};
 }
 

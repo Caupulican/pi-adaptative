@@ -6,8 +6,9 @@ Pi validates every model-emitted tool call against its TypeBox schema before exe
 
 - The shared validation choke point is `validateToolArguments` in `packages/ai/src/utils/validation.ts`.
 - Repair is validate-then-repair: schema-valid arguments are returned unchanged; only invalid arguments enter the repair layer.
-- Repair can be disabled independently from teaching with `toolRepair.repair: false` or `PI_TOOL_REPAIR_DISABLED=1`. When repair is disabled, invalid calls bounce instead of executing repaired arguments.
+- Repair is built-in and has no settings toggle. `PI_TOOL_REPAIR_DISABLED=1` is only an emergency diagnostic kill switch; normal configuration should leave repair on.
 - Teaching can be disabled independently with `toolRepair.teach: false` or `PI_TOOL_REPAIR_TEACH_DISABLED=1`. Repairs can still execute; the in-band "Tool argument repair note" is suppressed.
+- Tool-recovery logging can be disabled with `toolRepair.logging: false`. Repairs still run, but Pi does not enqueue recovery records or spawn the background recovery-log worker.
 - Text tool-call protocol calibration can be enabled per model with `textToolCallProtocol: true` in `models.json`. `/toolprobe [provider/model]` can also persist a host-local text-protocol verdict for one model after a live probe. Use `toolRepair.textProtocol` only as a global emergency force/kill switch; `PI_TEXT_TOOL_CALL_PROTOCOL_DISABLED=1` always disables it.
 
 Example project settings:
@@ -15,9 +16,9 @@ Example project settings:
 ```json
 {
   "toolRepair": {
-    "repair": true,
     "teach": true,
-    "textProtocol": true
+    "textProtocol": true,
+    "logging": true
   }
 }
 ```
@@ -26,7 +27,7 @@ Example project settings:
 
 - Interactive tool panels show `[repaired arguments]` when execution used repaired arguments.
 - RPC `tool_execution_start`, `tool_execution_update`, and `tool_execution_end` events include a `repair` object when arguments were repaired.
-- `/toolhealth` prints model adaptation records for this host: tool-probe verdicts, calibrated or failed text protocol, learned standing rules, and teach statistics.
+- `/toolhealth` prints model adaptation records for this host: tool-probe verdicts, calibrated or failed text protocol, learned standing rules, teach statistics, and recovery-log worker counters.
 - `/toolrule-remove <provider/model> <mode>` removes one learned standing rule from the host-local adaptation store.
 - `/toolprotocol-reset <provider/model>` removes a stored text protocol calibration or failed-calibration record so the next turn can calibrate again.
 - `/toolprobe [provider/model]` probes the current fleet or one explicit model for native tool calls first, then text-protocol fallback, persists the verdict in the host-local adaptation store, and prints a report table.
@@ -42,7 +43,7 @@ node scripts/tool-repair-replay.mjs ~/.pi/agent/state/failure-corpus.jsonl --jso
 node scripts/tool-repair-replay.mjs ~/.pi/agent/sessions/<session>.jsonl --fixtures /tmp/tool-repair-fixtures.json
 ```
 
-The replay helper reads `tool_validation` corpus records and bounced `tool_argument_validation` session entries. Records contain shape metadata, failure modes, and error keywords; they do not store full tool arguments.
+The replay helper reads `tool_validation` corpus records and legacy bounced `tool_argument_validation` session entries. Current recovery telemetry is written by a dedicated `node:worker_threads` worker to `state/tool-recovery-events.jsonl`; bounced records also append sanitized `tool_validation` corpus rows. Records contain shape metadata, failure modes, and error keywords; they do not store full tool arguments.
 
 ## Repair modes
 
@@ -76,10 +77,10 @@ For a previously calibrated model, repeated live parse failures invalidate the s
 
 Confirmed against current source:
 
-- Shared validation and repair switch: `packages/ai/src/utils/validation.ts`.
+- Shared validation and repair choke point: `packages/ai/src/utils/validation.ts`.
 - Repair mode names and standing-rule text: `packages/ai/src/utils/tool-repair/registry.ts`.
 - Agent repair event metadata and teach-note gate: `packages/agent/src/types.ts`, `packages/agent/src/agent-loop.ts`.
 - Interactive marker: `packages/coding-agent/src/modes/interactive/components/tool-execution.ts`.
 - Settings/env kill switches: `packages/coding-agent/src/core/settings-manager.ts`, `packages/coding-agent/src/core/tool-repair-settings.ts`.
 - Health, tool probing, rule removal, and protocol reset: `packages/coding-agent/src/core/tool-repair-health.ts`, `packages/coding-agent/src/core/models/adaptation-store.ts`, `packages/coding-agent/src/core/slash-commands.ts`, `packages/coding-agent/src/modes/interactive/interactive-mode.ts`, `packages/coding-agent/src/modes/rpc/rpc-mode.ts`.
-- Failure corpus and replay: `packages/coding-agent/src/core/failure-corpus.ts`, `scripts/tool-repair-replay.mjs`.
+- Recovery logging, failure corpus, and replay: `packages/coding-agent/src/core/tool-recovery-logger.ts`, `packages/coding-agent/src/core/tool-recovery-log-worker.ts`, `packages/coding-agent/src/core/failure-corpus.ts`, `scripts/tool-repair-replay.mjs`.

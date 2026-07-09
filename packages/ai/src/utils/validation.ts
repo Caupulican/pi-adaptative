@@ -43,6 +43,7 @@ export interface ToolArgumentValidationOptions {
 	model?: string;
 	provider?: string;
 	telemetry?: (event: ToolArgumentValidationTelemetryEvent) => void;
+	/** Internal emergency diagnostic kill; user settings do not disable deterministic repair. */
 	repairEnabled?: boolean;
 }
 
