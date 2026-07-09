@@ -130,18 +130,20 @@ describe("ToolRecoveryLogger", () => {
 		await logger.shutdown(10);
 	});
 
-	it("contains worker failures without throwing into the caller", async () => {
+	it("contains worker write failures without throwing into the caller", async () => {
 		const dir = makeTempDir();
-		const workerPath = join(dir, "throw-worker.mjs");
-		writeFileSync(
-			workerPath,
-			"import { parentPort } from 'node:worker_threads';\nparentPort.on('message', () => { throw new Error('boom'); });\n",
-			"utf-8",
-		);
-		const logger = createLogger(dir, { workerSpecifier: pathToFileURL(workerPath) });
+		writeFileSync(join(dir, "state"), "not a directory", "utf-8");
+		const logger = new ToolRecoveryLogger({
+			enabled: true,
+			sessionId: "session-1",
+			eventLogPath: join(dir, "state", "tool-recovery-events.jsonl"),
+			failureCorpusPath: join(dir, "state", "failure-corpus.jsonl"),
+			batchSize: 1,
+			now: () => new Date("2026-07-08T00:00:00Z"),
+		});
 
 		expect(() => logger.recordToolArgumentValidation(createEvent("repaired"))).not.toThrow();
-		await logger.flush(100);
+		await logger.flush(1_000);
 
 		expect(logger.getStats().failures).toBeGreaterThan(0);
 		await logger.shutdown(10);
