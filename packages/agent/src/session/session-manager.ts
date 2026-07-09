@@ -1300,6 +1300,40 @@ export class SessionManager {
 	}
 
 	/**
+	 * Return recent user-entered prompt text for input recall, oldest entry first.
+	 * This walks only the active branch and does not build/render full session context.
+	 */
+	getRecentUserInputHistory(limit = 100): string[] {
+		const maxEntries = Number.isFinite(limit) ? Math.max(0, Math.floor(limit)) : 100;
+		if (maxEntries === 0) return [];
+		const history: string[] = [];
+		let entry = this.leafId ? this.byId.get(this.leafId) : undefined;
+		while (entry && history.length < maxEntries) {
+			if (entry.type === "message" && entry.message.role === "user") {
+				const text = this.getUserInputText(entry.message);
+				if (text) history.push(text);
+			}
+			entry = entry.parentId ? this.byId.get(entry.parentId) : undefined;
+		}
+		return history.reverse();
+	}
+
+	private getUserInputText(message: AgentMessage): string | undefined {
+		if (message.role !== "user") return undefined;
+		const content = message.content;
+		if (typeof content === "string") {
+			const text = content.trim();
+			return text.length > 0 ? text : undefined;
+		}
+		const text = content
+			.filter((part): part is TextContent => part.type === "text")
+			.map((part) => part.text)
+			.join("")
+			.trim();
+		return text.length > 0 ? text : undefined;
+	}
+
+	/**
 	 * Get the session as a tree structure. Returns a shallow defensive copy of all entries.
 	 * A well-formed session has exactly one root (first entry with parentId === null).
 	 * Orphaned entries (broken parent chain) are also returned as roots.

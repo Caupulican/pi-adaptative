@@ -39,6 +39,9 @@ export interface EditorComponent extends Component {
 	/** Add text to history for up/down navigation */
 	addToHistory?(text: string): void;
 
+	/** Replace the full input-history recall buffer, oldest entry first. */
+	setHistory?(texts: readonly string[]): void;
+
 	// =========================================================================
 	// Advanced text manipulation (optional)
 	// =========================================================================

@@ -53,3 +53,39 @@ describe("SessionManager.saveCustomEntry", () => {
 		expect(ctx.messages).toHaveLength(2); // only message entries
 	});
 });
+
+describe("SessionManager.getRecentUserInputHistory", () => {
+	it("returns active-branch user prompts oldest first without assistant messages", () => {
+		const session = SessionManager.inMemory();
+		session.appendMessage({ role: "user", content: "first", timestamp: 1 });
+		session.appendMessage({
+			role: "assistant",
+			content: [{ type: "text", text: "reply" }],
+			api: "anthropic-messages",
+			provider: "anthropic",
+			model: "test",
+			usage: {
+				input: 1,
+				output: 1,
+				cacheRead: 0,
+				cacheWrite: 0,
+				totalTokens: 2,
+				cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, total: 0 },
+			},
+			stopReason: "stop",
+			timestamp: 2,
+		});
+		session.appendMessage({
+			role: "user",
+			content: [
+				{ type: "text", text: "second " },
+				{ type: "image", data: "aaa", mimeType: "image/png" },
+				{ type: "text", text: "prompt" },
+			],
+			timestamp: 3,
+		});
+
+		expect(session.getRecentUserInputHistory()).toEqual(["first", "second prompt"]);
+		expect(session.getRecentUserInputHistory(1)).toEqual(["second prompt"]);
+	});
+});

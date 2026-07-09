@@ -2245,6 +2245,31 @@ export class InteractiveMode {
 		return historyReloadMath.getUserMessageText(message);
 	}
 
+	private setEditorInputHistory(history: readonly string[]): void {
+		if (this.editor.setHistory) {
+			this.editor.setHistory(history);
+			return;
+		}
+		for (const text of history) {
+			this.editor.addToHistory?.(text);
+		}
+	}
+
+	private populateEditorInputHistoryFromMessages(messages: readonly AgentMessage[]): void {
+		const history = messages
+			.filter((message): message is Message => message.role === "user")
+			.map((message) => this.getUserMessageText(message).trim())
+			.filter((text) => text.length > 0)
+			.slice(-100);
+		this.setEditorInputHistory(history);
+	}
+
+	private populateEditorInputHistoryFromSession(): void {
+		const sessionManager = this.sessionManager as { getRecentUserInputHistory?: (limit?: number) => string[] };
+		const history = sessionManager.getRecentUserInputHistory?.(100);
+		if (history) this.setEditorInputHistory(history);
+	}
+
 	private resetLiveTuiHistoryTrim(): void {
 		this.liveHistoryHiddenNotice = undefined;
 		this.liveHistoryHiddenComponents = 0;
@@ -2664,6 +2689,7 @@ export class InteractiveMode {
 
 	async renderInitialMessages(options: { forceHistoryLoad?: boolean } = {}): Promise<void> {
 		if (!options.forceHistoryLoad) {
+			this.populateEditorInputHistoryFromSession();
 			this.tuiHistoryLoaded = false;
 			this.showDeferredHistoryPlaceholder({ requestRender: true });
 			this.footer.invalidate();
@@ -2674,9 +2700,9 @@ export class InteractiveMode {
 		// Get aligned messages and entries from session context only when the user
 		// explicitly requests TUI history. The model/session state is already loaded.
 		const context = this.sessionManager.buildSessionContext();
+		this.populateEditorInputHistoryFromMessages(context.messages);
 		await this.renderSessionContext(context, {
 			updateFooter: true,
-			populateHistory: true,
 		});
 		this.tuiHistoryLoaded = true;
 

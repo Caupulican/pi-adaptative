@@ -377,6 +377,15 @@ export class Editor implements Component, Focusable {
 		}
 	}
 
+	/** Replace the prompt history buffer. Input is oldest entry first. */
+	setHistory(texts: readonly string[]): void {
+		this.history = [];
+		this.historyIndex = -1;
+		for (const text of texts) {
+			this.addToHistory(text);
+		}
+	}
+
 	private isEditorEmpty(): boolean {
 		return this.state.lines.length === 1 && this.state.lines[0] === "";
 	}

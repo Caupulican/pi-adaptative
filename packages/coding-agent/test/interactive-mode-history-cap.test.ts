@@ -84,7 +84,7 @@ describe("InteractiveMode TUI reload history cap", () => {
 		expect(ctx.chatContainer.children[0]).toBe(ctx.liveHistoryHiddenNotice);
 	});
 
-	test("defers initial history load until explicit shortcut request", async () => {
+	test("loads input recall while deferring initial render history", async () => {
 		const ctx = Object.create((InteractiveMode as any).prototype);
 		ctx.chatContainer = new Container();
 		ctx.ui = { requestRender: vi.fn() };
@@ -92,8 +92,10 @@ describe("InteractiveMode TUI reload history cap", () => {
 		ctx.updateEditorBorderColor = vi.fn();
 		ctx.clearRenderedToolPanelState = vi.fn();
 		ctx.toolPanels = { activeEntries: () => [] };
+		ctx.editor = { setHistory: vi.fn() };
 		const sessionManager = {
 			getEntryCount: () => 42,
+			getRecentUserInputHistory: vi.fn(() => ["first prompt", "second prompt"]),
 			getEntries: vi.fn(() => {
 				throw new Error("history should not be loaded at startup");
 			}),
@@ -105,6 +107,9 @@ describe("InteractiveMode TUI reload history cap", () => {
 
 		await (InteractiveMode as any).prototype.renderInitialMessages.call(ctx);
 
+		expect(sessionManager.getRecentUserInputHistory).toHaveBeenCalledWith(100);
+		expect(ctx.editor.setHistory).toHaveBeenCalledWith(["first prompt", "second prompt"]);
+		expect(sessionManager.getEntries).not.toHaveBeenCalled();
 		expect(sessionManager.buildSessionContext).not.toHaveBeenCalled();
 		expect(ctx.chatContainer.render(120).join("\n")).toContain("Press");
 		expect(ctx.chatContainer.render(120).join("\n")).toContain("load session history");

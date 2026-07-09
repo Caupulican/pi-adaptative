@@ -59,6 +59,16 @@ describe("Editor component", () => {
 			assert.strictEqual(editor.getText(), "second prompt");
 		});
 
+		it("recalls the newest entry after setHistory replaces the buffer", () => {
+			const editor = new Editor(createTestTUI(), defaultEditorTheme);
+			editor.addToHistory("stale prompt");
+			editor.setHistory(["first prompt", "second prompt"]);
+
+			editor.handleInput("\x1b[A"); // Up arrow
+
+			assert.strictEqual(editor.getText(), "second prompt");
+		});
+
 		it("recalls queued messages on Up arrow before falling back to history", () => {
 			const editor = new Editor(createTestTUI(), defaultEditorTheme);
 			editor.addToHistory("older history entry");
