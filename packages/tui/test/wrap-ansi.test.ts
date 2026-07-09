@@ -1,4 +1,5 @@
 import assert from "node:assert";
+import { performance } from "node:perf_hooks";
 import { describe, it } from "node:test";
 import { visibleWidth, wrapTextWithAnsi } from "../src/utils.ts";
 
@@ -153,6 +154,18 @@ describe("wrapTextWithAnsi", () => {
 			for (let i = 0; i < wrapped.length - 1; i++) {
 				assert.strictEqual(wrapped[i].endsWith("\x1b[0m"), false);
 			}
+		});
+
+		it("wraps very long plain ASCII words without grapheme segmentation cost", () => {
+			const text = "x".repeat(1_000_000);
+			const start = performance.now();
+			const wrapped = wrapTextWithAnsi(text, 80);
+			const elapsedMs = performance.now() - start;
+
+			assert.strictEqual(wrapped.length, 12_500);
+			assert.strictEqual(wrapped[0], "x".repeat(80));
+			assert.strictEqual(wrapped.at(-1), "x".repeat(80));
+			assert.ok(elapsedMs < 250, `long ASCII wrap took ${elapsedMs.toFixed(1)}ms`);
 		});
 	});
 });

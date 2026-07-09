@@ -688,9 +688,21 @@ export function wrapTextWithAnsi(text: string, width: number): string[] {
 	return result.length > 0 ? result : [""];
 }
 
+function breakPlainAsciiWord(word: string, width: number): string[] {
+	const lines: string[] = [];
+	for (let start = 0; start < word.length; start += width) {
+		lines.push(word.slice(start, start + width));
+	}
+	return lines;
+}
+
 function wrapSingleLine(line: string, width: number): string[] {
 	if (!line) {
 		return [""];
+	}
+
+	if (width > 0 && line.length > width * 4 && !line.includes(" ") && isPrintableAscii(line)) {
+		return breakPlainAsciiWord(line, width);
 	}
 
 	const visibleLength = visibleWidth(line);
@@ -786,6 +798,17 @@ export function isPunctuationChar(char: string): boolean {
 }
 
 function breakLongWord(word: string, width: number, tracker: AnsiCodeTracker): string[] {
+	if (width > 0 && isPrintableAscii(word)) {
+		const activeCodes = tracker.getActiveCodes();
+		const lineEndReset = tracker.getLineEndReset();
+		const lines: string[] = [];
+		for (let start = 0; start < word.length; start += width) {
+			const isFinal = start + width >= word.length;
+			lines.push(`${activeCodes}${word.slice(start, start + width)}${isFinal ? "" : lineEndReset}`);
+		}
+		return lines.length > 0 ? lines : [activeCodes];
+	}
+
 	const lines: string[] = [];
 	let currentLine = tracker.getActiveCodes();
 	let currentWidth = 0;

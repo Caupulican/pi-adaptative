@@ -1,5 +1,8 @@
 ## [Unreleased]
 
+### Fixed
+- Fixed wrapping of very long plain ASCII tool-output lines to chunk without grapheme segmentation.
+
 ## [0.81.22] - 2026-07-09
 
 ### Added
