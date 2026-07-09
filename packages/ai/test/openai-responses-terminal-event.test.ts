@@ -196,6 +196,59 @@ async function* createRefusalDeltasWithoutContentPartEvents(): AsyncIterable<Res
 	} as unknown as ResponseStreamEvent;
 }
 
+async function* createCapturedReasoningSummaryDelimiterEvents(): AsyncIterable<ResponseStreamEvent> {
+	yield {
+		type: "response.output_item.added",
+		item: { id: "rs_captured", type: "reasoning", summary: [], content: [] },
+	} as unknown as ResponseStreamEvent;
+	yield {
+		type: "response.reasoning_summary_part.added",
+		item_id: "rs_captured",
+		part: { type: "summary_text", text: "" },
+	} as unknown as ResponseStreamEvent;
+	yield {
+		type: "response.reasoning_summary_text.delta",
+		item_id: "rs_captured",
+		delta: "<!-- -->",
+	} as unknown as ResponseStreamEvent;
+	yield {
+		type: "response.reasoning_summary_part.done",
+		item_id: "rs_captured",
+		part: { type: "summary_text", text: "<!-- -->" },
+	} as unknown as ResponseStreamEvent;
+	yield {
+		type: "response.reasoning_summary_part.added",
+		item_id: "rs_captured",
+		part: { type: "summary_text", text: "" },
+	} as unknown as ResponseStreamEvent;
+	yield {
+		type: "response.reasoning_summary_text.delta",
+		item_id: "rs_captured",
+		delta: "Checking the repository state.",
+	} as unknown as ResponseStreamEvent;
+	yield {
+		type: "response.reasoning_summary_part.done",
+		item_id: "rs_captured",
+		part: { type: "summary_text", text: "Checking the repository state." },
+	} as unknown as ResponseStreamEvent;
+	yield {
+		type: "response.output_item.done",
+		item: {
+			id: "rs_captured",
+			type: "reasoning",
+			summary: [
+				{ type: "summary_text", text: "<!-- -->" },
+				{ type: "summary_text", text: "Checking the repository state." },
+			],
+			content: [],
+		},
+	} as unknown as ResponseStreamEvent;
+	yield {
+		type: "response.completed",
+		response: { id: "resp_reasoning_summary", status: "completed" },
+	} as unknown as ResponseStreamEvent;
+}
+
 describe("OpenAI Responses terminal events", () => {
 	it("rejects streams that end before a terminal response event", async () => {
 		const model = createModel();
@@ -307,5 +360,24 @@ describe("OpenAI Responses terminal events", () => {
 		expect(events.flatMap((event) => (event.type === "text_delta" ? [event.delta] : []))).toEqual(["No", " thanks"]);
 		expect(output.content).toHaveLength(1);
 		expect(output.content[0]).toMatchObject({ type: "text", text: "No thanks" });
+	});
+
+	it("filters delimiter-only reasoning summary parts before they become thinking content", async () => {
+		const model = createModel();
+		const output = createOutput(model);
+		const stream = new AssistantMessageEventStream();
+
+		await processResponsesStream(createCapturedReasoningSummaryDelimiterEvents(), output, stream, model);
+		stream.end(output);
+
+		const events: AssistantMessageEvent[] = [];
+		for await (const event of stream) {
+			events.push(event);
+		}
+		const thinkingDeltas = events.flatMap((event) => (event.type === "thinking_delta" ? [event.delta] : []));
+		expect(thinkingDeltas.join("")).toBe("Checking the repository state.\n\n");
+		expect(thinkingDeltas.join("")).not.toContain("<!-- -->");
+		expect(output.content).toHaveLength(1);
+		expect(output.content[0]).toMatchObject({ type: "thinking", thinking: "Checking the repository state." });
 	});
 });

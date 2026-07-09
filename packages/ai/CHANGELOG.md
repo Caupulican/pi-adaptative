@@ -1,5 +1,8 @@
 ## [Unreleased]
 
+### Fixed
+- Fixed OpenAI Responses reasoning summaries to filter delimiter-only summary parts before they become thinking content.
+
 ## [0.81.22] - 2026-07-09
 
 ### Fixed

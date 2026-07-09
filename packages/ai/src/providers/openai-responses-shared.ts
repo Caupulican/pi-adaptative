@@ -302,6 +302,19 @@ export function convertResponsesTools(tools: Tool[], options?: ConvertResponsesT
 // Stream processing
 // =============================================================================
 
+const REASONING_SUMMARY_DELIMITER_ONLY = /^<!--\s*-->$/;
+
+function isReasoningSummaryDelimiterOnly(text: string): boolean {
+	return REASONING_SUMMARY_DELIMITER_ONLY.test(text.trim());
+}
+
+function normalizeReasoningSummaryText(parts: readonly { text?: string }[] | undefined): string {
+	return (parts ?? [])
+		.map((part) => part.text ?? "")
+		.filter((text) => text.trim().length > 0 && !isReasoningSummaryDelimiterOnly(text))
+		.join("\n\n");
+}
+
 export async function processResponsesStream<TApi extends Api>(
 	openaiStream: AsyncIterable<ResponseStreamEvent>,
 	output: AssistantMessage,
@@ -311,6 +324,7 @@ export async function processResponsesStream<TApi extends Api>(
 ): Promise<void> {
 	let currentItem: ResponseReasoningItem | ResponseOutputMessage | ResponseFunctionToolCall | null = null;
 	let currentBlock: ThinkingContent | TextContent | (ToolCall & { partialJson: string }) | null = null;
+	let currentReasoningSummaryPartText = "";
 	let sawTerminalResponseEvent = false;
 	const blocks = output.content;
 	const blockIndex = () => blocks.length - 1;
@@ -392,6 +406,7 @@ export async function processResponsesStream<TApi extends Api>(
 			if (item.type === "reasoning") {
 				currentItem = item;
 				currentBlock = { type: "thinking", thinking: "" };
+				currentReasoningSummaryPartText = "";
 				output.content.push(currentBlock);
 				stream.push({ type: "thinking_start", contentIndex: blockIndex(), partial: output });
 			} else if (item.type === "message") {
@@ -415,36 +430,33 @@ export async function processResponsesStream<TApi extends Api>(
 			if (currentItem && currentItem.type === "reasoning") {
 				currentItem.summary = currentItem.summary || [];
 				currentItem.summary.push(event.part);
+				currentReasoningSummaryPartText = event.part.text ?? "";
 			}
 		} else if (event.type === "response.reasoning_summary_text.delta") {
-			if (currentItem?.type === "reasoning" && currentBlock?.type === "thinking") {
+			if (currentItem?.type === "reasoning") {
 				currentItem.summary = currentItem.summary || [];
 				const lastPart = currentItem.summary[currentItem.summary.length - 1];
 				if (lastPart) {
-					currentBlock.thinking += event.delta;
 					lastPart.text += event.delta;
-					stream.push({
-						type: "thinking_delta",
-						contentIndex: blockIndex(),
-						delta: event.delta,
-						partial: output,
-					});
+					currentReasoningSummaryPartText += event.delta;
 				}
 			}
 		} else if (event.type === "response.reasoning_summary_part.done") {
 			if (currentItem?.type === "reasoning" && currentBlock?.type === "thinking") {
 				currentItem.summary = currentItem.summary || [];
 				const lastPart = currentItem.summary[currentItem.summary.length - 1];
-				if (lastPart) {
-					currentBlock.thinking += "\n\n";
-					lastPart.text += "\n\n";
+				const partText = lastPart?.text ?? currentReasoningSummaryPartText;
+				if (partText.trim().length > 0 && !isReasoningSummaryDelimiterOnly(partText)) {
+					const delta = `${partText}\n\n`;
+					currentBlock.thinking += delta;
 					stream.push({
 						type: "thinking_delta",
 						contentIndex: blockIndex(),
-						delta: "\n\n",
+						delta,
 						partial: output,
 					});
 				}
+				currentReasoningSummaryPartText = "";
 			}
 		} else if (event.type === "response.reasoning_text.delta") {
 			if (currentItem?.type === "reasoning" && currentBlock?.type === "thinking") {
@@ -525,7 +537,7 @@ export async function processResponsesStream<TApi extends Api>(
 			const item = event.item;
 
 			if (item.type === "reasoning" && currentBlock?.type === "thinking") {
-				const summaryText = item.summary?.map((s) => s.text).join("\n\n") || "";
+				const summaryText = normalizeReasoningSummaryText(item.summary);
 				const contentText = item.content?.map((c) => c.text).join("\n\n") || "";
 				currentBlock.thinking = summaryText || contentText || currentBlock.thinking;
 				currentBlock.thinkingSignature = JSON.stringify(item);
