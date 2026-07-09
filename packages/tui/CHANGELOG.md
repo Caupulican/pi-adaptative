@@ -1,4 +1,4 @@
-## [Unreleased]
+## [0.81.22] - 2026-07-09
 
 ### Added
 - Added editor prompt-history replacement support for restoring input recall without replaying transcript rendering.

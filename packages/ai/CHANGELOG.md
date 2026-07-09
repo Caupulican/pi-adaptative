@@ -1,4 +1,4 @@
-## [Unreleased]
+## [0.81.22] - 2026-07-09
 
 ### Fixed
 - Fixed tool-argument validation to return valid arguments without allocating clean-path telemetry.

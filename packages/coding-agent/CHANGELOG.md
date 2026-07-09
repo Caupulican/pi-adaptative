@@ -1,4 +1,4 @@
-## [Unreleased]
+## [0.81.22] - 2026-07-09
 
 ### Fixed
 - Fixed model-router judge handling so static decisions bypass the judge, judge-unavailable fallback preserves the baseline reason, and nested shell execution forms escalate correctly.
