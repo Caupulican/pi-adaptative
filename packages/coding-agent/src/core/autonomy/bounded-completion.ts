@@ -18,6 +18,17 @@ export interface BoundedCompletionOutcome {
 	failure?: { status: BoundedCompletionFailureStatus; reasonCode: string };
 }
 
+type ExecutorSettlement = { kind: "completion"; completion: BoundedCompletion } | { kind: "error"; error: unknown };
+
+function abortFailure(args: {
+	externalSignal?: AbortSignal;
+	timeoutSignal: AbortSignal;
+}): BoundedCompletionOutcome["failure"] {
+	if (args.externalSignal?.aborted) return { status: "canceled", reasonCode: "external_abort" };
+	if (args.timeoutSignal.aborted) return { status: "timeout", reasonCode: "wall_clock_exceeded" };
+	return { status: "failed", reasonCode: "completion_error" };
+}
+
 export async function runBoundedCompletion(args: {
 	/** Wall-clock budget in milliseconds; 0 disables. */
 	maxWallClockMs: number;
@@ -26,8 +37,19 @@ export async function runBoundedCompletion(args: {
 	execute: (signal: AbortSignal) => Promise<BoundedCompletion>;
 }): Promise<BoundedCompletionOutcome> {
 	const timeoutController = new AbortController();
+	let resolveAbort!: () => void;
+	const abortPromise = new Promise<{ kind: "abort" }>((resolve) => {
+		resolveAbort = () => resolve({ kind: "abort" });
+	});
+	const onExternalAbort = (): void => resolveAbort();
+	args.signal?.addEventListener("abort", onExternalAbort, { once: true });
 	const timeoutTimer =
-		args.maxWallClockMs > 0 ? setTimeout(() => timeoutController.abort(), args.maxWallClockMs) : undefined;
+		args.maxWallClockMs > 0
+			? setTimeout(() => {
+					timeoutController.abort();
+					resolveAbort();
+				}, args.maxWallClockMs)
+			: undefined;
 	if (timeoutTimer && typeof timeoutTimer === "object" && "unref" in timeoutTimer) {
 		const { unref } = timeoutTimer as { unref?: () => void };
 		unref?.call(timeoutTimer);
@@ -36,28 +58,56 @@ export async function runBoundedCompletion(args: {
 	if (args.signal) signals.push(args.signal);
 	const signal = AbortSignal.any(signals);
 
-	let completion: BoundedCompletion;
+	let settled: ExecutorSettlement | undefined;
+	const execution = Promise.resolve()
+		.then(() => args.execute(signal))
+		.then<ExecutorSettlement, ExecutorSettlement>(
+			(completion) => {
+				settled = { kind: "completion", completion };
+				return settled;
+			},
+			(error: unknown) => {
+				settled = { kind: "error", error };
+				return settled;
+			},
+		);
+	if (args.signal?.aborted) resolveAbort();
+
 	try {
-		completion = await args.execute(signal);
-	} catch {
-		if (args.signal?.aborted) {
-			return { failure: { status: "canceled", reasonCode: "external_abort" } };
+		const winner = await Promise.race([execution, abortPromise]);
+		if (winner.kind === "abort") {
+			// An abort and a completion can settle in the same microtask turn. Give the already-queued
+			// executor handlers one chance to retain that completion (and its visible spend) without
+			// ever waiting for a non-cooperative executor. Later settlement remains observed by
+			// `execution`'s rejection handler, preventing an unhandled rejection after this returns.
+			for (let flush = 0; flush < 4 && settled === undefined; flush++) {
+				await Promise.resolve();
+			}
+			return {
+				...(settled?.kind === "completion" ? { completion: settled.completion } : {}),
+				failure: abortFailure({ externalSignal: args.signal, timeoutSignal: timeoutController.signal }),
+			};
 		}
-		if (timeoutController.signal.aborted) {
-			return { failure: { status: "timeout", reasonCode: "wall_clock_exceeded" } };
+
+		if (winner.kind === "error") {
+			return {
+				failure:
+					args.signal?.aborted || timeoutController.signal.aborted
+						? abortFailure({ externalSignal: args.signal, timeoutSignal: timeoutController.signal })
+						: { status: "failed", reasonCode: "completion_error" },
+			};
 		}
-		return { failure: { status: "failed", reasonCode: "completion_error" } };
+
+		const completion = winner.completion;
+		if (args.signal?.aborted || timeoutController.signal.aborted) {
+			return {
+				completion,
+				failure: abortFailure({ externalSignal: args.signal, timeoutSignal: timeoutController.signal }),
+			};
+		}
+		return { completion };
 	} finally {
 		if (timeoutTimer !== undefined) clearTimeout(timeoutTimer);
+		args.signal?.removeEventListener("abort", onExternalAbort);
 	}
-
-	// An abort can race a completion that settled without throwing; the abort still wins, but the
-	// settled completion is passed through so callers can account its spend.
-	if (args.signal?.aborted) {
-		return { completion, failure: { status: "canceled", reasonCode: "external_abort" } };
-	}
-	if (timeoutController.signal.aborted) {
-		return { completion, failure: { status: "timeout", reasonCode: "wall_clock_exceeded" } };
-	}
-	return { completion };
 }

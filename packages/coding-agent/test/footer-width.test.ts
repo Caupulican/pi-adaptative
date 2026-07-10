@@ -2,7 +2,8 @@ import { visibleWidth } from "@caupulican/pi-tui";
 import { beforeAll, describe, expect, it } from "vitest";
 import type { AgentSession } from "../src/core/agent-session.ts";
 import type { SessionCostSummary } from "../src/core/cost/cost-summary.ts";
-import type { ReadonlyFooterDataProvider } from "../src/core/footer-data-provider.ts";
+import type { CostGuardDecision } from "../src/core/cost-guard.ts";
+import { FooterDataProvider, type ReadonlyFooterDataProvider } from "../src/core/footer-data-provider.ts";
 import { FooterComponent, formatCwdForFooter } from "../src/modes/interactive/components/footer.ts";
 import { initTheme } from "../src/modes/interactive/theme/theme.ts";
 
@@ -24,6 +25,8 @@ function createSession(options: {
 	dailyCost?: number;
 	subagentCost?: number;
 	subagentReports?: number;
+	costGuardDecision?: CostGuardDecision;
+	subscription?: boolean;
 }): AgentSession {
 	const usage = options.usage;
 	const entries =
@@ -73,8 +76,9 @@ function createSession(options: {
 		getSpawnedUsage: () => ({ cost: subagentCost, reports: subagentReports }),
 		getDailyUsageTotals: () => ({ totalCost: options.dailyCost ?? 0 }),
 		getCostSummary: () => costSummary,
+		getLastCostGuardDecision: () => options.costGuardDecision,
 		modelRegistry: {
-			isUsingOAuth: () => false,
+			isUsingOAuth: () => options.subscription ?? false,
 		},
 	};
 
@@ -194,6 +198,74 @@ describe("FooterComponent width handling", () => {
 		expect(statsLine).toContain("SUBAGENTS:$0.500 in CURRENT");
 		expect(statsLine).not.toContain("day:");
 		expect(statsLine).not.toContain("(sub)");
+	});
+
+	it("renders session costs once when the autonomy snapshot also carries costs", () => {
+		const session = createSession({
+			sessionName: "",
+			usage: {
+				input: 12_345,
+				output: 6_789,
+				cacheRead: 0,
+				cacheWrite: 0,
+				cost: { total: 1.25 },
+			},
+			dailyCost: 2.415,
+		});
+		const footerData = new FooterDataProvider("/tmp/project");
+		try {
+			footerData.setAutonomyStatusSnapshot({
+				latestRoute: { tier: "direct", reasonCode: "allowed" },
+				costSummary: session.getCostSummary(),
+			});
+			const rendered = stripAnsi(new FooterComponent(session, footerData).render(200).join("\n"));
+
+			expect(rendered.match(/CURRENT:/g)).toHaveLength(1);
+			expect(rendered.match(/TODAY:/g)).toHaveLength(1);
+			expect(rendered).toContain("Route: direct - allowed");
+			expect(rendered).not.toContain("Costs:");
+		} finally {
+			footerData.dispose();
+		}
+	});
+
+	it("renders an over-ceiling guard warning once without duplicating cost totals", () => {
+		const session = createSession({
+			sessionName: "",
+			usage: {
+				input: 300_000,
+				output: 1_000,
+				cacheRead: 0,
+				cacheWrite: 0,
+				cost: { total: 2.1 },
+			},
+			dailyCost: 2.1,
+			costGuardDecision: { over: true, estUsd: 3.25, thresholdUsd: 2.5, action: "warn" },
+		});
+		const rendered = stripAnsi(new FooterComponent(session, createFooterData(1)).render(200).join("\n"));
+
+		expect(rendered).toContain("GUARD:$3.25/turn");
+		expect(rendered.match(/GUARD:/g)).toHaveLength(1);
+		expect(rendered.match(/CURRENT:/g)).toHaveLength(1);
+		expect(rendered.match(/TODAY:/g)).toHaveLength(1);
+	});
+
+	it("marks subscription-equivalent current cost without duplicating the cost bar", () => {
+		const session = createSession({
+			sessionName: "",
+			subscription: true,
+			usage: {
+				input: 1_000,
+				output: 100,
+				cacheRead: 0,
+				cacheWrite: 0,
+				cost: { total: 0.25 },
+			},
+		});
+		const rendered = stripAnsi(new FooterComponent(session, createFooterData(1)).render(160).join("\n"));
+
+		expect(rendered).toContain("CURRENT:$0.250 (sub)");
+		expect(rendered.match(/CURRENT:/g)).toHaveLength(1);
 	});
 
 	it("renders autonomy status on the status line when present", () => {

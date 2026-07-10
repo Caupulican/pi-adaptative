@@ -1,6 +1,16 @@
 import type { MemoryPromptBudget } from "../context/memory-prompt-budget.ts";
+import {
+	DEFAULT_EXTERNAL_MEMORY_EGRESS_POLICY,
+	hasSecretLikeMemoryText,
+	type MemoryEgressPolicy,
+} from "../context/memory-provider-contract.ts";
 import type { ToolDefinition } from "../extensions/types.ts";
+import { wrapUntrustedText } from "../security/untrusted-boundary.ts";
 import type { MemoryLifecycleContext, MemoryProvider } from "./memory-provider.ts";
+
+export interface MemoryPrefetchOptions {
+	externalEgressPolicy?: MemoryEgressPolicy;
+}
 
 export class MemoryManager {
 	private readonly providers: MemoryProvider[] = [];
@@ -118,16 +128,28 @@ export class MemoryManager {
 		return blocks.join("\n\n");
 	}
 
-	public async prefetch(query: string): Promise<string> {
+	public async prefetch(query: string, options: MemoryPrefetchOptions = {}): Promise<string> {
 		const results: string[] = [];
 		for (const p of this.providers) {
 			if (!this.activeProviders.has(p.name) || !p.prefetch) {
 				continue;
 			}
+			if (p.egress !== "local") {
+				const policy = options.externalEgressPolicy ?? DEFAULT_EXTERNAL_MEMORY_EGRESS_POLICY;
+				if (
+					!policy.enabled ||
+					!policy.allowExternalEgress ||
+					!policy.allowQueryText ||
+					query.length > policy.maxOutboundChars ||
+					(policy.redactSecretLikeText && hasSecretLikeMemoryText(query))
+				) {
+					continue;
+				}
+			}
 			try {
 				const text = await p.prefetch(query);
 				if (text) {
-					results.push(text);
+					results.push(wrapUntrustedText(text, `memory:${p.name}`));
 				}
 			} catch (err) {
 				console.error(`Memory provider ${p.name} failed during prefetch:`, err);

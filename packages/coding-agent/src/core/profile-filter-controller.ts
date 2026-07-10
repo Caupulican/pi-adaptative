@@ -12,7 +12,7 @@ import type { Agent, ThinkingLevel } from "@caupulican/pi-agent-core";
 import type { SessionManager } from "@caupulican/pi-agent-core/node";
 import type { Extension } from "./extensions/index.ts";
 import type { ModelRegistry } from "./model-registry.ts";
-import { resolveProfileModelSettings } from "./model-resolver.ts";
+import { findInitialModel, resolveProfileModelSettings } from "./model-resolver.ts";
 import type { ResourceLoader } from "./resource-loader.ts";
 import {
 	matchesResourceProfilePattern,
@@ -41,11 +41,21 @@ export interface ProfileFilterControllerDeps {
 	setThinkingLevel(level: ThinkingLevel): void;
 }
 
+export interface ProfileFilterReloadSnapshot {
+	inertExtensionWarnings: string[];
+	profileDeniedExtensionCount: number;
+	profileControlledModel: boolean;
+	profileControlledThinking: boolean;
+}
+
 export class ProfileFilterController {
 	/** G12: extensions loaded but rendered fully inert by the profile's tools filter. */
 	private _inertExtensionWarnings: string[] = [];
 	/** Count of extensions withheld by the active resource profile (for the /context observation). */
 	private _profileDeniedExtensionCount = 0;
+	/** Whether the last applied profile generation, rather than the base session selection, owns the field. */
+	private _profileControlledModel = false;
+	private _profileControlledThinking = false;
 
 	private readonly deps: ProfileFilterControllerDeps;
 
@@ -56,6 +66,22 @@ export class ProfileFilterController {
 	/** Inert-extension warnings tracked by the last {@link filterExtensionsForRuntime} pass. */
 	getInertExtensionWarnings(): string[] {
 		return this._inertExtensionWarnings;
+	}
+
+	createReloadSnapshot(): ProfileFilterReloadSnapshot {
+		return {
+			inertExtensionWarnings: [...this._inertExtensionWarnings],
+			profileDeniedExtensionCount: this._profileDeniedExtensionCount,
+			profileControlledModel: this._profileControlledModel,
+			profileControlledThinking: this._profileControlledThinking,
+		};
+	}
+
+	restoreReloadSnapshot(snapshot: ProfileFilterReloadSnapshot): void {
+		this._inertExtensionWarnings = [...snapshot.inertExtensionWarnings];
+		this._profileDeniedExtensionCount = snapshot.profileDeniedExtensionCount;
+		this._profileControlledModel = snapshot.profileControlledModel;
+		this._profileControlledThinking = snapshot.profileControlledThinking;
 	}
 
 	/**
@@ -182,16 +208,38 @@ export class ProfileFilterController {
 		if (this.deps.isExplicitModel() && this.deps.isExplicitThinking()) return;
 		const settingsManager = this.deps.getSettingsManager();
 		const activeProfileNames = settingsManager.getActiveResourceProfileNames();
-		if (activeProfileNames.length === 0) return;
-		const profileSettings = resolveProfileModelSettings({
-			activeProfileNames,
-			registry: settingsManager.getProfileRegistry(),
-			modelRegistry: this.deps.getModelRegistry(),
-			cwd: this.deps.getCwd(),
-		});
-		if (!this.deps.isExplicitModel() && profileSettings.model) {
+		const profileSettings =
+			activeProfileNames.length > 0
+				? resolveProfileModelSettings({
+						activeProfileNames,
+						registry: settingsManager.getProfileRegistry(),
+						modelRegistry: this.deps.getModelRegistry(),
+						cwd: this.deps.getCwd(),
+					})
+				: {};
+		if (profileSettings.error) {
+			throw new Error(`Profile model resolution error: ${profileSettings.error}`);
+		}
+		const mustRestoreBaseModel =
+			!this.deps.isExplicitModel() && this._profileControlledModel && !profileSettings.model;
+		const mustRestoreBaseThinking =
+			!this.deps.isExplicitThinking() && this._profileControlledThinking && !profileSettings.thinkingLevel;
+		const baseSelection =
+			mustRestoreBaseModel || mustRestoreBaseThinking
+				? await findInitialModel({
+						scopedModels: [],
+						isContinuing: true,
+						defaultProvider: settingsManager.getDefaultProvider(),
+						defaultModelId: settingsManager.getDefaultModel(),
+						defaultThinkingLevel: settingsManager.getDefaultThinkingLevel(),
+						modelRegistry: this.deps.getModelRegistry(),
+					})
+				: undefined;
+		let modelChanged = false;
+		const nextModel = profileSettings.model ?? (mustRestoreBaseModel ? baseSelection?.model : undefined);
+		if (!this.deps.isExplicitModel() && nextModel) {
 			const current = this.deps.getAgent().state.model;
-			const next = profileSettings.model;
+			const next = nextModel;
 			if (!current || current.provider !== next.provider || current.id !== next.id) {
 				// Mirror the startup/cycle path: set the model directly (no auth gate, no settings
 				// persist) so re-applying the profile model behaves like initial resolution rather
@@ -200,10 +248,19 @@ export class ProfileFilterController {
 				// re-renders from session.model.
 				this.deps.getAgent().state.model = next;
 				this.deps.getSessionManager().appendModelChange(next.provider, next.id);
+				modelChanged = true;
 			}
 		}
+		this._profileControlledModel = !this.deps.isExplicitModel() && Boolean(profileSettings.model);
 		if (!this.deps.isExplicitThinking() && profileSettings.thinkingLevel) {
 			this.deps.setThinkingLevel(profileSettings.thinkingLevel);
+		} else if (mustRestoreBaseThinking && baseSelection) {
+			this.deps.setThinkingLevel(baseSelection.thinkingLevel);
+		} else if (modelChanged) {
+			// A model-only situation switch still has to clamp the inherited/explicit level. This
+			// prevents Sol/Terra Ultra from leaking into Luna or another model that stops at Max.
+			this.deps.setThinkingLevel(this.deps.getAgent().state.thinkingLevel);
 		}
+		this._profileControlledThinking = !this.deps.isExplicitThinking() && Boolean(profileSettings.thinkingLevel);
 	}
 }

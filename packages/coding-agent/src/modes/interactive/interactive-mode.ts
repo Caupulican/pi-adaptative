@@ -387,8 +387,7 @@ export class InteractiveMode {
 				invalidateFooter: () => this.footer.invalidate(),
 				updateEditorBorderColor: () => this.updateEditorBorderColor(),
 				openEditorForPath: (filePath) => this.openEditorForPath(filePath),
-				handleReloadCommand: () => this.handleReloadCommand(),
-				reconcileExtensionsAndRefreshUI: (profileName) => this.reconcileExtensionsAndRefreshUI(profileName),
+				handleReloadCommand: () => this.handleReloadCommandWithResult(),
 				maybeWarnAboutAnthropicSubscriptionAuth: (model) =>
 					void this.maybeWarnAboutAnthropicSubscriptionAuth(model),
 				checkDaxnutsEasterEgg: (model) => this.checkDaxnutsEasterEgg(model),
@@ -3558,13 +3557,18 @@ export class InteractiveMode {
 	// =========================================================================
 
 	private async handleReloadCommand(): Promise<void> {
+		await this.handleReloadCommandWithResult();
+	}
+
+	/** Reload and report whether the previous runtime was replaced successfully. */
+	private async handleReloadCommandWithResult(): Promise<boolean> {
 		if (this.session.isStreaming) {
 			this.showWarning("Wait for the current response to finish before reloading.");
-			return;
+			return false;
 		}
 		if (this.session.isCompacting) {
 			this.showWarning("Wait for compaction to finish before reloading.");
-			return;
+			return false;
 		}
 
 		this.extensionUiHost.resetExtensionUI();
@@ -3629,9 +3633,11 @@ export class InteractiveMode {
 				this.showError(`models.json error: ${modelsJsonError}`);
 			}
 			this.showStatus("Reloaded keybindings, extensions, skills, prompts, themes");
+			return true;
 		} catch (error) {
 			dismissReloadBox(previousEditor as Component);
 			this.showError(`Reload failed: ${error instanceof Error ? error.message : String(error)}`);
+			return false;
 		}
 	}
 
@@ -3678,28 +3684,6 @@ export class InteractiveMode {
 			this.ui.requestRender();
 		} catch (error) {
 			this.showError(`Extension refresh failed: ${error instanceof Error ? error.message : String(error)}`);
-		}
-	}
-
-	/**
-	 * Reconcile extensions for the active profile and refresh UI.
-	 * Used when only extensions change in the active profile to avoid full reload.
-	 */
-	private async reconcileExtensionsAndRefreshUI(profileName: string): Promise<void> {
-		try {
-			await this.session.reconcileLoadedExtensions();
-			const active = this.settingsManager.getActiveResourceProfileNames()[0] ?? "(none)";
-			this.footerDataProvider.setExtensionStatus("profile", active);
-			this.footer.invalidate();
-			this.updateEditorBorderColor();
-		} catch (error) {
-			// On error, fall back to full reload
-			try {
-				await this.refreshAfterProfileMutation(profileName);
-			} catch {
-				// If full reload also fails, show error
-				this.showError(`Failed to reconcile extensions: ${error instanceof Error ? error.message : String(error)}`);
-			}
 		}
 	}
 
@@ -4021,7 +4005,7 @@ export class InteractiveMode {
 				showStatus: (message) => this.showStatus(message),
 				showError: (message) => this.showError(message),
 				showSelector: (create) => this.showSelector(create),
-				handleReloadCommand: () => this.handleReloadCommand(),
+				handleReloadCommand: () => this.handleReloadCommandWithResult(),
 			},
 			fileArg,
 		);

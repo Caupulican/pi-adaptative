@@ -1,7 +1,6 @@
 import Anthropic from "@anthropic-ai/sdk";
 import { ApiError } from "@google/genai";
 import { SDKError } from "@mistralai/mistralai/models/errors";
-import OpenAI from "openai";
 import { describe, expect, it } from "vitest";
 import { classifyFailure } from "../../src/reliability/classifier.ts";
 import { PROVIDER_FAILURE_SIGNATURES } from "../../src/reliability/provider-signatures.ts";
@@ -15,6 +14,11 @@ type FixtureExpectation = {
 };
 
 const headers = new Headers();
+// Exact `.message` shapes emitted by the OpenAI SDK pinned by pi-ai. Keep them as
+// fixtures here because pi-agent-core deliberately has no provider-SDK dependency.
+const OPENAI_QUOTA_MESSAGE = "429 You exceeded your current quota, please check your plan and billing details.";
+const OPENAI_RATE_LIMIT_MESSAGE = "429 Rate limit reached for gpt";
+const OPENROUTER_CREDITS_MESSAGE = "402 Insufficient credits. Add more credits to continue.";
 
 function mistralSdkError(status: number, body: object): string {
 	return new SDKError("Mistral API error", {
@@ -61,35 +65,13 @@ function fixtureExpectations(): FixtureExpectation[] {
 		},
 		{
 			provider: "openai",
-			message: OpenAI.APIError.generate(
-				429,
-				{
-					error: {
-						message: "You exceeded your current quota, please check your plan and billing details.",
-						type: "insufficient_quota",
-						code: "insufficient_quota",
-					},
-				},
-				undefined,
-				headers,
-			).message,
+			message: OPENAI_QUOTA_MESSAGE,
 			reason: "billing_or_quota",
 			genericReason: "billing_or_quota",
 		},
 		{
 			provider: "openai",
-			message: OpenAI.APIError.generate(
-				429,
-				{
-					error: {
-						message: "Rate limit reached for gpt",
-						type: "rate_limit_exceeded",
-						code: "rate_limit_exceeded",
-					},
-				},
-				undefined,
-				headers,
-			).message,
+			message: OPENAI_RATE_LIMIT_MESSAGE,
 			reason: "rate_limit",
 			genericReason: "rate_limit",
 		},
@@ -111,12 +93,7 @@ function fixtureExpectations(): FixtureExpectation[] {
 		},
 		{
 			provider: "openrouter",
-			message: OpenAI.APIError.generate(
-				402,
-				{ error: { message: "Insufficient credits. Add more credits to continue.", code: 402 } },
-				undefined,
-				headers,
-			).message,
+			message: OPENROUTER_CREDITS_MESSAGE,
 			reason: "billing_or_quota",
 			genericReason: "unknown",
 			provisional: true,

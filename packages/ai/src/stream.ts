@@ -44,15 +44,11 @@ function withTextProtocolUserReminder(message: Message): Message {
 	return { ...message, content: [...message.content, { type: "text", text: reminder }] };
 }
 
-function withTextProtocolCurrentTurnReminder(messages: readonly Message[]): Message[] {
-	let lastUserIndex = -1;
-	for (let index = messages.length - 1; index >= 0; index--) {
-		if (messages[index]?.role === "user") {
-			lastUserIndex = index;
-			break;
-		}
-	}
-	return messages.map((message, index) => (index === lastUserIndex ? withTextProtocolUserReminder(message) : message));
+function withTextProtocolUserReminders(messages: readonly Message[]): Message[] {
+	// Apply the same transformation to historical user turns. A reminder added only
+	// to the live turn disappears when that turn becomes history, changing the prior
+	// request prefix and defeating provider prompt-cache reuse.
+	return messages.map(withTextProtocolUserReminder);
 }
 
 function withTextToolProtocolContext(context: Context, options: StreamOptions | undefined): Context {
@@ -73,7 +69,7 @@ function withTextToolProtocolContext(context: Context, options: StreamOptions | 
 					],
 					timestamp: 0,
 				},
-				...withTextProtocolCurrentTurnReminder(context.messages),
+				...withTextProtocolUserReminders(context.messages),
 			]
 		: context.messages;
 	return {

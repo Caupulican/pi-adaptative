@@ -11,7 +11,7 @@
  * it. Treat `MAX_CHARS_PER_ITEM`/`MAX_TOTAL_CHARS` as load-bearing, not merely defensive.
  */
 
-import { estimateByteLength, estimateLineCount, estimateTokensFromText, type ContextItem } from "./context-item.ts";
+import { type ContextItem, estimateByteLength, estimateLineCount, estimateTokensFromText } from "./context-item.ts";
 import type { MemoryPromptBudget } from "./memory-prompt-budget.ts";
 
 export const MEMORY_PROMPT_BLOCK_MAX_CHARS_PER_ITEM = 300;
@@ -75,7 +75,10 @@ export function buildMemoryPromptBlock(
 		const line = `${lines.length + 1}. ${truncate(summary, maxCharsPerItem)}`;
 		const additionalChars = line.length + 1; // +1 for the joining newline
 		const candidateText = [header, ...lines, line].join("\n");
-		if (lines.length > 0 && (totalChars + additionalChars > maxTotalChars || !blockFits(candidateText, options.budget))) {
+		if (
+			lines.length > 0 &&
+			(totalChars + additionalChars > maxTotalChars || !blockFits(candidateText, options.budget))
+		) {
 			omittedCount++;
 			continue;
 		}

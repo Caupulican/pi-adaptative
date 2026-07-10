@@ -11,10 +11,16 @@ describe("worker delegation settings", () => {
 
 		const resolved = settingsManager.getWorkerDelegationSettings();
 
-		expect(resolved.enabled).toBe(false);
+		expect(resolved.enabled).toBe(true);
 		expect(resolved.model).toBeUndefined();
 		expect(resolved.maxUsd).toBe(DEFAULT_WORKER_DELEGATION_MAX_USD);
 		expect(resolved.maxWallClockMs).toBe(DEFAULT_WORKER_DELEGATION_MAX_WALL_CLOCK_MS);
+	});
+
+	it("honors an explicit disable", () => {
+		const settingsManager = SettingsManager.inMemory({ workerDelegation: { enabled: false } });
+
+		expect(settingsManager.getWorkerDelegationSettings().enabled).toBe(false);
 	});
 
 	it("honors configured values and falls back on invalid ones", () => {

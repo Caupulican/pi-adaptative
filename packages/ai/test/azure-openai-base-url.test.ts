@@ -13,6 +13,7 @@ interface CapturedAzureClientOptions {
 
 interface CapturedAzureResponsesPayload {
 	prompt_cache_key?: string;
+	reasoning?: Record<string, unknown>;
 }
 
 const azureMock = vi.hoisted(() => ({
@@ -142,6 +143,30 @@ describe("azure-openai-responses base URL normalization", () => {
 		}).result();
 
 		expect(azureMock.lastParams?.prompt_cache_key).toBe("x".repeat(64));
+	});
+
+	it("omits reasoning summary when reasoningSummary is explicitly null", async () => {
+		const model = { ...getModel("azure-openai-responses", "gpt-4o-mini"), reasoning: true };
+		await streamAzureOpenAIResponses(model, context, {
+			apiKey: "test-api-key",
+			azureBaseUrl: "https://my-resource.openai.azure.com",
+			reasoningEffort: "high",
+			reasoningSummary: null,
+		}).result();
+
+		expect(azureMock.lastParams?.reasoning).toMatchObject({ effort: "high" });
+		expect(azureMock.lastParams?.reasoning).not.toHaveProperty("summary");
+	});
+
+	it("preserves default reasoning when reasoningSummary alone is null", async () => {
+		const model = { ...getModel("azure-openai-responses", "gpt-4o-mini"), reasoning: true };
+		await streamAzureOpenAIResponses(model, context, {
+			apiKey: "test-api-key",
+			azureBaseUrl: "https://my-resource.openai.azure.com",
+			reasoningSummary: null,
+		}).result();
+
+		expect(azureMock.lastParams?.reasoning).toEqual({ effort: "medium" });
 	});
 
 	it("builds correct default URL from AZURE_OPENAI_RESOURCE_NAME", async () => {

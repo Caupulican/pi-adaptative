@@ -1,6 +1,7 @@
 import type { StreamFn, StreamIdleOptions } from "@caupulican/pi-agent-core";
 import {
 	type Api,
+	type AssistantMessage,
 	type AssistantMessageEvent,
 	type Context,
 	createAssistantMessageEventStream,
@@ -10,6 +11,8 @@ import {
 
 const PERF_EWMA_ALPHA = 0.3;
 const CHARS_PER_TOKEN_ESTIMATE = 4;
+const DEFERRED_HEADERS_MAX_GAP_MS = 100;
+const DEFERRED_HEADERS_MIN_REQUEST_MS = 1_000;
 export const DEFAULT_ADAPTIVE_STREAM_IDLE_CEILING_MS = 30 * 60 * 1000;
 
 export interface ModelPerfProfile {
@@ -145,44 +148,99 @@ export function withModelPerfProfile(streamFn: StreamFn, recorder: ModelPerfProf
 		let responseHeadersAtMs: number | undefined;
 		let firstTokenAtMs: number | undefined;
 		const originalOnResponse = streamOptions?.onResponse;
-		const inner = await streamFn(model, context, {
-			...streamOptions,
-			onResponse: async (response: ProviderResponse, responseModel: Model<Api>) => {
-				responseHeadersAtMs ??= nowMs();
-				await originalOnResponse?.(response, responseModel);
-			},
-		});
 		const outer = createAssistantMessageEventStream();
+		let latest = emptyAssistantMessage(model);
+		let inner: Awaited<ReturnType<StreamFn>>;
+		try {
+			inner = await streamFn(model, context, {
+				...streamOptions,
+				onResponse: async (response: ProviderResponse, responseModel: Model<Api>) => {
+					responseHeadersAtMs ??= nowMs();
+					await originalOnResponse?.(response, responseModel);
+				},
+			});
+		} catch (error) {
+			outer.push(perfStreamFailure(latest, streamOptions?.signal?.aborted === true, error));
+			return outer;
+		}
 
 		void (async () => {
 			let terminalPushed = false;
-			for await (const event of inner) {
-				if (firstTokenAtMs === undefined && isFirstTokenEvent(event)) {
-					firstTokenAtMs = nowMs();
+			try {
+				for await (const event of inner) {
+					latest = assistantMessageFromEvent(event);
+					if (firstTokenAtMs === undefined && isFirstTokenEvent(event)) {
+						firstTokenAtMs = nowMs();
+					}
+					if (event.type === "done") {
+						terminalPushed = true;
+						recordSuccessfulStreamSample({
+							completionTokens: event.message.usage.output,
+							doneAtMs: nowMs(),
+							firstTokenAtMs,
+							model,
+							nowIso,
+							promptTokens:
+								event.message.usage.input + event.message.usage.cacheRead + event.message.usage.cacheWrite,
+							recorder,
+							requestStartedAtMs,
+							responseHeadersAtMs,
+						});
+					} else if (event.type === "error") {
+						terminalPushed = true;
+					}
+					outer.push(event);
+					if (terminalPushed) return;
 				}
-				if (event.type === "done") {
-					terminalPushed = true;
-					recordSuccessfulStreamSample({
-						completionTokens: event.message.usage.output,
-						doneAtMs: nowMs(),
-						firstTokenAtMs,
-						model,
-						nowIso,
-						promptTokens: event.message.usage.input,
-						recorder,
-						requestStartedAtMs,
-						responseHeadersAtMs,
-					});
-				} else if (event.type === "error") {
-					terminalPushed = true;
-				}
-				outer.push(event);
-				if (terminalPushed) return;
+				outer.push(perfStreamFailure(latest, streamOptions?.signal?.aborted === true));
+			} catch (error) {
+				outer.push(perfStreamFailure(latest, streamOptions?.signal?.aborted === true, error));
 			}
-			outer.end();
 		})();
 
 		return outer;
+	};
+}
+
+function assistantMessageFromEvent(event: AssistantMessageEvent): AssistantMessage {
+	if (event.type === "done") return event.message;
+	if (event.type === "error") return event.error;
+	return event.partial;
+}
+
+function emptyAssistantMessage(model: Model<Api>): AssistantMessage {
+	return {
+		role: "assistant",
+		content: [],
+		api: model.api,
+		provider: model.provider,
+		model: model.id,
+		usage: {
+			input: 0,
+			output: 0,
+			cacheRead: 0,
+			cacheWrite: 0,
+			totalTokens: 0,
+			cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, total: 0 },
+		},
+		stopReason: "stop",
+		timestamp: Date.now(),
+	};
+}
+
+function perfStreamFailure(latest: AssistantMessage, aborted: boolean, error?: unknown): AssistantMessageEvent {
+	const stopReason = aborted ? "aborted" : "error";
+	const detail = error instanceof Error ? `: ${error.message}` : error === undefined ? "" : `: ${String(error)}`;
+	return {
+		type: "error",
+		reason: stopReason,
+		error: {
+			...latest,
+			stopReason,
+			errorMessage: aborted
+				? `stream aborted before terminal event${detail}`
+				: `stream ended without terminal event${detail}`,
+		},
 	};
 }
 
@@ -200,15 +258,20 @@ function recordSuccessfulStreamSample(input: {
 	if (input.firstTokenAtMs === undefined) return;
 	const modelKey = input.recorder.modelKey(input.model);
 	if (!modelKey) return;
+	const requestToFirstTokenMs = input.firstTokenAtMs - input.requestStartedAtMs;
 	const sample: ModelPerfSample = {
 		promptTokens: input.promptTokens,
 		completionTokens: input.completionTokens,
-		requestToFirstTokenMs: input.firstTokenAtMs - input.requestStartedAtMs,
+		requestToFirstTokenMs,
 		firstTokenToDoneMs: input.doneAtMs - input.firstTokenAtMs,
 		at: input.nowIso(),
 	};
 	if (input.responseHeadersAtMs !== undefined) {
-		sample.headersToFirstTokenMs = input.firstTokenAtMs - input.responseHeadersAtMs;
+		const headersToFirstTokenMs = input.firstTokenAtMs - input.responseHeadersAtMs;
+		const headersWereEffectivelyDeferred =
+			requestToFirstTokenMs >= DEFERRED_HEADERS_MIN_REQUEST_MS &&
+			headersToFirstTokenMs <= DEFERRED_HEADERS_MAX_GAP_MS;
+		if (!headersWereEffectivelyDeferred) sample.headersToFirstTokenMs = headersToFirstTokenMs;
 	}
 	if (!hasUsableModelPerfSample(sample)) return;
 	try {

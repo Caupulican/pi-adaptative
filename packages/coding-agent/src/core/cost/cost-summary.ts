@@ -88,10 +88,14 @@ function formatCost(value: number, precision: number): string {
 	return `$${value.toFixed(precision)}`;
 }
 
-export function formatFooterCostParts(summary: SessionCostSummary, precision = 3): string[] {
+export function formatFooterCostParts(
+	summary: SessionCostSummary,
+	precision = 3,
+	options: { subscription?: boolean } = {},
+): string[] {
 	const parts: string[] = [];
-	if (summary.currentCost > 0 || hasSubagentCostSignal(summary)) {
-		parts.push(`CURRENT:${formatCost(summary.currentCost, precision)}`);
+	if (summary.currentCost > 0 || hasSubagentCostSignal(summary) || options.subscription) {
+		parts.push(`CURRENT:${formatCost(summary.currentCost, precision)}${options.subscription ? " (sub)" : ""}`);
 	}
 	if (summary.todayCost > 0) {
 		parts.push(`TODAY:${formatCost(summary.todayCost, precision)}`);

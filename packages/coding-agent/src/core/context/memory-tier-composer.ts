@@ -1,8 +1,8 @@
 import {
+	type ContextEvidenceRef,
 	estimateByteLength,
 	estimateLineCount,
 	estimateTokensFromText,
-	type ContextEvidenceRef,
 } from "./context-item.ts";
 import type { MemoryPromptBudget } from "./memory-prompt-budget.ts";
 import { hasSecretLikeMemoryText } from "./memory-provider-contract.ts";

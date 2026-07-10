@@ -21,7 +21,12 @@ const MODEL = { api: "openai-completions", provider: "faux", id: "slow-local" } 
 const CONTEXT = { messages: [{ role: "user", content: "hello" }] } as Context;
 const BASE_IDLE: StreamIdleOptions = { connectMs: 500, activeIdleMs: 500, quietIdleMs: 1_000 };
 
-function assistantMessage(inputTokens: number, outputTokens: number): AssistantMessage {
+function assistantMessage(
+	inputTokens: number,
+	outputTokens: number,
+	cacheReadTokens = 0,
+	cacheWriteTokens = 0,
+): AssistantMessage {
 	return {
 		role: "assistant",
 		content: [{ type: "text", text: "ok" }],
@@ -31,9 +36,9 @@ function assistantMessage(inputTokens: number, outputTokens: number): AssistantM
 		usage: {
 			input: inputTokens,
 			output: outputTokens,
-			cacheRead: 0,
-			cacheWrite: 0,
-			totalTokens: inputTokens + outputTokens,
+			cacheRead: cacheReadTokens,
+			cacheWrite: cacheWriteTokens,
+			totalTokens: inputTokens + outputTokens + cacheReadTokens + cacheWriteTokens,
 			cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, total: 0 },
 		},
 		stopReason: "stop",
@@ -57,11 +62,13 @@ function slowSuccessfulStreamFn(): StreamFn {
 	};
 }
 
-function deferredHeadersSuccessfulStreamFn(firstTokenDelayMs: number): StreamFn {
+function deferredHeadersSuccessfulStreamFn(firstTokenDelayMs: number, headerLeadMs = 0): StreamFn {
 	return (model, _context, options) => {
 		const inner = createAssistantMessageEventStream();
 		setTimeout(() => {
 			void options?.onResponse?.({ status: 200, headers: {} }, model);
+		}, firstTokenDelayMs - headerLeadMs);
+		setTimeout(() => {
 			inner.push({ type: "text_delta", contentIndex: 0, delta: "o", partial: assistantMessage(1_000, 100) });
 		}, firstTokenDelayMs);
 		setTimeout(() => {
@@ -174,6 +181,92 @@ describe("model perf profile", () => {
 		).toEqual({ quietIdleMs: 6_000, connectMs: 6_000 });
 	});
 
+	it("profiles the full prompt footprint including cache reads and writes", async () => {
+		vi.useFakeTimers();
+		const samples: Array<{ promptTokens?: number }> = [];
+		const profiled = withModelPerfProfile(
+			(model, _context, options) => {
+				const inner = createAssistantMessageEventStream();
+				setTimeout(() => {
+					void options?.onResponse?.({ status: 200, headers: {} }, model);
+				}, 100);
+				setTimeout(() => {
+					inner.push({
+						type: "text_delta",
+						contentIndex: 0,
+						delta: "o",
+						partial: assistantMessage(100, 10, 800, 100),
+					});
+				}, 1_100);
+				setTimeout(() => {
+					inner.push({ type: "done", reason: "stop", message: assistantMessage(100, 10, 800, 100) });
+				}, 1_200);
+				return inner;
+			},
+			{
+				modelKey: () => "faux/cached",
+				recordSample: (_key, sample) => samples.push(sample),
+				nowMs: () => Date.now(),
+			},
+		);
+
+		const stream = await profiled(MODEL, CONTEXT, {});
+		await vi.advanceTimersByTimeAsync(1_200);
+		await stream.result();
+
+		expect(samples).toMatchObject([{ promptTokens: 1_000 }]);
+	});
+
+	it("turns a premature inner end into a terminal profiling error", async () => {
+		const profiled = withModelPerfProfile(
+			() => {
+				const inner = createAssistantMessageEventStream();
+				inner.end();
+				return inner;
+			},
+			{ modelKey: () => "faux/premature", recordSample: vi.fn() },
+		);
+
+		const result = await (await profiled(MODEL, CONTEXT, {})).result();
+
+		expect(result.stopReason).toBe("error");
+		expect(result.errorMessage).toContain("stream ended without terminal event");
+	});
+
+	it("turns rejected provider setup into a terminal profiling error", async () => {
+		const profiled = withModelPerfProfile(
+			async () => {
+				throw new Error("socket setup failed");
+			},
+			{ modelKey: () => "faux/rejected", recordSample: vi.fn() },
+		);
+
+		const result = await (await profiled(MODEL, CONTEXT, {})).result();
+
+		expect(result.stopReason).toBe("error");
+		expect(result.errorMessage).toContain("stream ended without terminal event: socket setup failed");
+	});
+
+	it("turns iterator failures into terminal profiling errors", async () => {
+		const profiled = withModelPerfProfile(
+			() => {
+				const inner = createAssistantMessageEventStream();
+				inner[Symbol.asyncIterator] = () => ({
+					next: async () => {
+						throw new Error("iterator failed");
+					},
+				});
+				return inner;
+			},
+			{ modelKey: () => "faux/iterator", recordSample: vi.fn() },
+		);
+
+		const result = await (await profiled(MODEL, CONTEXT, {})).result();
+
+		expect(result.stopReason).toBe("error");
+		expect(result.errorMessage).toContain("stream ended without terminal event: iterator failed");
+	});
+
 	it("falls back to request-to-first-token timing when headers are deferred until the first token", async () => {
 		vi.useFakeTimers();
 		const agentDir = mkdtempSync(join(tmpdir(), "pi-perf-profile-"));
@@ -195,6 +288,26 @@ describe("model perf profile", () => {
 		await stream.result();
 
 		expect(store.get(modelKey).perf?.prefillTokensPerSecond).toBeCloseTo(909.09, 2);
+	});
+
+	it("treats a tiny positive header lead after a long wait as deferred headers", async () => {
+		vi.useFakeTimers();
+		const samples: Array<{ headersToFirstTokenMs?: number; requestToFirstTokenMs?: number }> = [];
+		const profiled = withModelPerfProfile(deferredHeadersSuccessfulStreamFn(2_500, 5), {
+			modelKey: () => "faux/deferred-positive-gap",
+			recordSample: (_key, sample) => samples.push(sample),
+			nowMs: () => Date.now(),
+		});
+
+		const stream = await profiled(MODEL, CONTEXT, {});
+		await vi.advanceTimersByTimeAsync(2_600);
+		await stream.result();
+
+		expect(samples).toMatchObject([{ requestToFirstTokenMs: 2_500 }]);
+		expect(samples[0]?.headersToFirstTokenMs).toBeUndefined();
+		expect(
+			updateModelPerfProfile(undefined, { ...samples[0], promptTokens: 1_000 })?.prefillTokensPerSecond,
+		).toBeCloseTo(400, 2);
 	});
 
 	it("lets a profiled local deferred-headers stream outlive the stock connect bound", async () => {

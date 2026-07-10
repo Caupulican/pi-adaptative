@@ -353,7 +353,7 @@ export const streamSimpleBedrock: StreamFunction<"bedrock-converse-stream", Simp
 	options?: SimpleStreamOptions,
 ): AssistantMessageEventStream => {
 	const base = buildBaseOptions(model, options, undefined);
-	if (!options?.reasoning) {
+	if (!options?.reasoning || options.reasoning === "off") {
 		return streamBedrock(model, context, { ...base, reasoning: undefined } satisfies BedrockOptions);
 	}
 
@@ -990,10 +990,15 @@ function buildAdditionalModelRequestFields(
 						medium: 8192,
 						high: 16384,
 						xhigh: 16384, // Claude doesn't support xhigh, clamp to high
+						max: 16384, // Claude doesn't support max, clamp to high
+						ultra: 16384, // Ultra orchestration does not raise Claude's wire effort
 					};
 
-					// Custom budgets override defaults (xhigh not in ThinkingBudgets, use high)
-					const level = options.reasoning === "xhigh" ? "high" : options.reasoning;
+					// Custom budgets override defaults (extended levels are not in ThinkingBudgets, use high).
+					const level =
+						options.reasoning === "xhigh" || options.reasoning === "max" || options.reasoning === "ultra"
+							? "high"
+							: options.reasoning;
 					const budget = options.thinkingBudgets?.[level] ?? defaultBudgets[options.reasoning];
 
 					return {

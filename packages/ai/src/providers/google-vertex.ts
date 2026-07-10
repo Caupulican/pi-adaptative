@@ -292,7 +292,7 @@ export const streamSimpleGoogleVertex: StreamFunction<"google-vertex", SimpleStr
 	options?: SimpleStreamOptions,
 ): AssistantMessageEventStream => {
 	const base = buildBaseOptions(model, options, undefined);
-	if (!options?.reasoning) {
+	if (!options?.reasoning || options.reasoning === "off") {
 		return streamGoogleVertex(model, context, {
 			...base,
 			thinking: { enabled: false },
@@ -300,7 +300,13 @@ export const streamSimpleGoogleVertex: StreamFunction<"google-vertex", SimpleStr
 	}
 
 	const clampedReasoning = clampThinkingLevel(model, options.reasoning);
-	const effort = (clampedReasoning === "off" ? "high" : clampedReasoning) as GoogleThinkingEffort;
+	if (clampedReasoning === "off") {
+		return streamGoogleVertex(model, context, {
+			...base,
+			thinking: { enabled: false },
+		} satisfies GoogleVertexOptions);
+	}
+	const effort = clampedReasoning as GoogleThinkingEffort;
 	const thinkingConfig = resolveGoogleThinkingConfig(model.id, effort, options.thinkingBudgets);
 
 	return streamGoogleVertex(model, context, {

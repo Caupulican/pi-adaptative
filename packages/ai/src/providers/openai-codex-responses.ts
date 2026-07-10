@@ -3,6 +3,7 @@ import type {
 	Tool as OpenAITool,
 	ResponseCreateParamsStreaming,
 	ResponseInput,
+	ResponseInputItem,
 	ResponseStreamEvent,
 } from "openai/resources/responses/responses.js";
 
@@ -63,6 +64,8 @@ const DEFAULT_SSE_HEADER_TIMEOUT_MS = 20_000;
 const DEFAULT_WEBSOCKET_CONNECT_TIMEOUT_MS = 15_000;
 const CODEX_TOOL_CALL_PROVIDERS = new Set(["openai", "openai-codex", "opencode"]);
 const WEBSOCKET_MESSAGE_TOO_BIG_CLOSE_CODE = 1009;
+const OPENAI_INTERNAL_CODEX_RESPONSES_LITE_HEADER = "x-openai-internal-codex-responses-lite";
+const WS_RESPONSES_LITE_CLIENT_METADATA_KEY = "ws_request_header_x_openai_internal_codex_responses_lite";
 
 function assertSuccessfulTerminalResponse(output: AssistantMessage): void {
 	if (output.stopReason === "error" || output.stopReason === "aborted") {
@@ -84,7 +87,7 @@ const CODEX_RESPONSE_STATUSES = new Set<CodexResponseStatus>([
 // ============================================================================
 
 export interface OpenAICodexResponsesOptions extends StreamOptions {
-	reasoningEffort?: "none" | "minimal" | "low" | "medium" | "high" | "xhigh";
+	reasoningEffort?: "none" | "minimal" | "low" | "medium" | "high" | "xhigh" | "max" | "ultra";
 	reasoningSummary?: "auto" | "concise" | "detailed" | "off" | "on" | null;
 	serviceTier?: ResponseCreateParamsStreaming["service_tier"];
 	textVerbosity?: "low" | "medium" | "high";
@@ -117,11 +120,12 @@ interface RequestBody {
 	tool_choice?: "auto";
 	parallel_tool_calls?: boolean;
 	temperature?: number;
-	reasoning?: { effort?: string; summary?: string };
+	reasoning?: { effort?: string; summary?: string; context?: "auto" | "current_turn" | "all_turns" };
 	service_tier?: ResponseCreateParamsStreaming["service_tier"];
 	text?: { verbosity?: string };
 	include?: string[];
 	prompt_cache_key?: string;
+	client_metadata?: Record<string, string>;
 	[key: string]: unknown;
 }
 
@@ -309,7 +313,14 @@ export const streamOpenAICodexResponses: StreamFunction<"openai-codex-responses"
 				body = nextBody as RequestBody;
 			}
 			const websocketRequestId = options?.sessionId || createCodexRequestId();
-			const sseHeaders = buildSSEHeaders(model.headers, options?.headers, accountId, apiKey, options?.sessionId);
+			const sseHeaders = buildSSEHeaders(
+				model.headers,
+				options?.headers,
+				accountId,
+				apiKey,
+				options?.sessionId,
+				model.openaiResponsesLite === true,
+			);
 			const websocketHeaders = buildWebSocketHeaders(
 				model.headers,
 				options?.headers,
@@ -498,7 +509,7 @@ export const streamSimpleOpenAICodexResponses: StreamFunction<"openai-codex-resp
 
 	const base = buildBaseOptions(model, options, apiKey);
 	const clampedReasoning = options?.reasoning ? clampThinkingLevel(model, options.reasoning) : undefined;
-	const reasoningEffort = clampedReasoning === "off" ? undefined : clampedReasoning;
+	const reasoningEffort = clampedReasoning === "off" ? "none" : clampedReasoning;
 
 	return streamOpenAICodexResponses(model, context, {
 		...base,
@@ -515,19 +526,40 @@ function buildRequestBody(
 	context: Context,
 	options?: OpenAICodexResponsesOptions,
 ): RequestBody {
-	const messages = convertResponsesMessages(model, context, CODEX_TOOL_CALL_PROVIDERS);
+	const lite = model.openaiResponsesLite === true;
+	const messages = convertResponsesMessages(model, context, CODEX_TOOL_CALL_PROVIDERS, {
+		imageDetail: lite ? null : "auto",
+	});
+	const instructions = buildResponsesInstructions(context) || "You are a helpful assistant.";
+	const tools =
+		context.tools && context.tools.length > 0 ? convertResponsesTools(context.tools, { strict: null }) : [];
+	const input: ResponseInput = lite
+		? [
+				{
+					type: "additional_tools",
+					role: "developer",
+					tools,
+				} satisfies ResponseInputItem.AdditionalTools,
+				{
+					type: "message",
+					role: "developer",
+					content: [{ type: "input_text", text: instructions }],
+				} satisfies ResponseInputItem.Message,
+				...messages,
+			]
+		: messages;
 
 	const body: RequestBody = {
 		model: model.id,
 		store: false,
 		stream: true,
-		instructions: buildResponsesInstructions(context) || "You are a helpful assistant.",
-		input: messages,
+		...(lite ? {} : { instructions }),
+		input,
 		text: { verbosity: options?.textVerbosity || "low" },
 		include: ["reasoning.encrypted_content"],
 		prompt_cache_key: clampOpenAIPromptCacheKey(options?.sessionId),
 		tool_choice: "auto",
-		parallel_tool_calls: true,
+		parallel_tool_calls: !lite,
 	};
 
 	if (options?.temperature !== undefined) {
@@ -538,19 +570,23 @@ function buildRequestBody(
 		body.service_tier = options.serviceTier;
 	}
 
-	if (context.tools && context.tools.length > 0) {
-		body.tools = convertResponsesTools(context.tools, { strict: null });
+	if (!lite && tools.length > 0) {
+		body.tools = tools;
 	}
 
-	if (options?.reasoningEffort !== undefined) {
-		const effort =
-			options.reasoningEffort === "none"
-				? (model.thinkingLevelMap?.off ?? "none")
-				: (model.thinkingLevelMap?.[options.reasoningEffort] ?? options.reasoningEffort);
+	const requestedEffort = options?.reasoningEffort ?? (lite ? model.defaultThinkingLevel : undefined);
+	if (requestedEffort !== undefined) {
+		const reasoningDisabled = requestedEffort === "none";
+		const effort = reasoningDisabled
+			? (model.thinkingLevelMap?.off ?? "none")
+			: (model.thinkingLevelMap?.[requestedEffort] ?? requestedEffort);
 		if (effort !== null) {
 			body.reasoning = {
 				effort,
-				summary: options.reasoningSummary ?? "auto",
+				...(!reasoningDisabled && options?.reasoningSummary !== null
+					? { summary: options?.reasoningSummary ?? "auto" }
+					: {}),
+				...(lite ? { context: options?.reasoningContext ?? "all_turns" } : {}),
 			};
 		}
 	}
@@ -1406,6 +1442,15 @@ async function processWebSocketStream(
 	// WebSocket continuation still works via connection-scoped previous_response_id state.
 	const fullBody = body;
 	const requestBody = useCachedContext && entry ? buildCachedWebSocketRequestBody(entry, fullBody) : fullBody;
+	const wireRequestBody = model.openaiResponsesLite
+		? {
+				...requestBody,
+				client_metadata: {
+					...requestBody.client_metadata,
+					[WS_RESPONSES_LITE_CLIENT_METADATA_KEY]: "true",
+				},
+			}
+		: requestBody;
 	const stats = options?.sessionId ? getOrCreateWebSocketDebugStats(options.sessionId) : undefined;
 	if (stats) {
 		stats.requests++;
@@ -1425,7 +1470,7 @@ async function processWebSocketStream(
 		}
 	}
 	try {
-		socket.send(JSON.stringify({ type: "response.create", ...requestBody }));
+		socket.send(JSON.stringify({ type: "response.create", ...wireRequestBody }));
 		await processResponsesStream(
 			startWebSocketOutputOnFirstEvent(
 				mapCodexEvents(parseWebSocket(socket, options?.signal, idleTimeoutMs)),
@@ -1546,11 +1591,15 @@ function buildSSEHeaders(
 	accountId: string,
 	token: string,
 	sessionId?: string,
+	useResponsesLite = false,
 ): Headers {
 	const headers = buildBaseCodexHeaders(initHeaders, additionalHeaders, accountId, token);
 	headers.set("OpenAI-Beta", "responses=experimental");
 	headers.set("accept", "text/event-stream");
 	headers.set("content-type", "application/json");
+	if (useResponsesLite) {
+		headers.set(OPENAI_INTERNAL_CODEX_RESPONSES_LITE_HEADER, "true");
+	}
 
 	if (sessionId) {
 		headers.set("session-id", sessionId);

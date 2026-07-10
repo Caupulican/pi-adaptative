@@ -1,3 +1,4 @@
+import { hasSecretLikeText } from "../security/secret-text.ts";
 import {
 	type ContextEvidenceRef,
 	type ContextItem,
@@ -164,13 +165,8 @@ export const DEFAULT_LOCAL_MEMORY_EGRESS_POLICY: MemoryEgressPolicy = {
 	redactSecretLikeText: true,
 };
 
-const SECRET_LIKE_PATTERNS: readonly RegExp[] = [
-	/\b(?:api[_-]?key|access[_-]?token|secret|password)\b\s*[:=]\s*\S+/i,
-	/-----BEGIN [A-Z ]*PRIVATE KEY-----/,
-];
-
 export function hasSecretLikeMemoryText(text: string): boolean {
-	return SECRET_LIKE_PATTERNS.some((pattern) => pattern.test(text));
+	return hasSecretLikeText(text);
 }
 
 export function validateMemorySearchRequest(

@@ -54,11 +54,11 @@ import type {
 import type { Static, TSchema } from "typebox";
 import type { Theme } from "../../modes/interactive/theme/theme.ts";
 import type { BashResult } from "../bash-executor.ts";
+import type { MemoryProvider as ContextMemoryProvider } from "../context/memory-provider-contract.ts";
 import type { EventBus } from "../event-bus.ts";
 import type { ExecOptions, ExecResult } from "../exec.ts";
 import type { ReadonlyFooterDataProvider } from "../footer-data-provider.ts";
 import type { KeybindingsManager } from "../keybindings.ts";
-import type { MemoryProvider as ContextMemoryProvider } from "../context/memory-provider-contract.ts";
 import type { MemoryProvider } from "../memory/memory-provider.ts";
 import type { ModelRegistry } from "../model-registry.ts";
 import type { SlashCommandInfo } from "../slash-commands.ts";
@@ -1414,6 +1414,8 @@ export interface ProviderModelConfig {
 	baseUrl?: string;
 	/** Whether the model supports extended thinking. */
 	reasoning: boolean;
+	/** Model-specific reasoning level used when callers do not choose one explicitly. */
+	defaultThinkingLevel?: Model<Api>["defaultThinkingLevel"];
 	/** Maps pi thinking levels to provider/model-specific values; null marks a level unsupported. */
 	thinkingLevelMap?: Model<Api>["thinkingLevelMap"];
 	/** Supported input types. */
@@ -1522,6 +1524,9 @@ export interface ExtensionRuntimeState {
 	providersByExtension: Map<string, Set<string>>;
 	/** Get the list of provider names owned by an extension. */
 	getProvidersForExtension: (extensionPath: string) => string[];
+	/** Memory-provider objects owned by each extension generation, for exact live unload. */
+	memoryProvidersByExtension: Map<string, Set<MemoryProvider>>;
+	contextMemoryProvidersByExtension: Map<string, Set<ContextMemoryProvider>>;
 }
 
 /**

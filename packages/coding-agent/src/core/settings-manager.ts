@@ -20,7 +20,7 @@ import {
 } from "./goals/goal-continuation-defaults.ts";
 import { DEFAULT_HTTP_IDLE_TIMEOUT_MS, parseHttpIdleTimeoutMs } from "./http-dispatcher.ts";
 import { ProfileRegistry } from "./profile-registry.ts";
-import { mergeResourceProfileMap } from "./resource-profile-blocks.ts";
+import { mergeResourceProfileMap, mergeResourceProfileSettings } from "./resource-profile-blocks.ts";
 import { validateSkillName } from "./skills.ts";
 import type { ToolkitScript } from "./toolkit/script-registry.ts";
 
@@ -28,7 +28,7 @@ export interface CompactionSettings {
 	enabled?: boolean; // default: true
 	reserveTokens?: number; // default: 16384
 	keepRecentTokens?: number; // default: 20000
-	triggerPercent?: number; // default: 0.7 — also compact past this fraction of the window (cost guard)
+	triggerPercent?: number; // default: 0.7 — early context-efficiency threshold, separate from the USD cost guard
 	model?: string; // default: "auto" — cheap auxiliary model for the summary; "auto" picks cheapest authed, else the session model
 }
 
@@ -74,6 +74,7 @@ export interface MemoryRetrievalSettings {
 	enabled?: boolean; // default: true -- local safe-auto retrieval
 	maxResults?: number; // default: 5, clamped to [1, 20]
 	includeInPrompt?: boolean; // default: true -- budget-gated safe-auto prompt inclusion
+	allowExternalEgress?: boolean; // default: false -- explicit opt-in for raw query egress
 }
 
 export interface ContextCurationSettings {
@@ -111,7 +112,7 @@ export interface ProviderRetrySettings {
 export interface StreamStallSettings {
 	connectMs?: number; // default: 120000 — max wait for the first stream event
 	activeIdleMs?: number; // default: 180000 — max event gap while content is flowing
-	quietIdleMs?: number; // default: 600000 — max event gap during prefill/unstreamed thinking; keep below httpIdleTimeoutMs
+	quietIdleMs?: number; // default: 600000 — max event gap during prefill/unstreamed thinking; clamped below nonzero httpIdleTimeoutMs
 }
 
 export interface RetrySettings {
@@ -155,7 +156,7 @@ export interface SelfModificationSettings {
 	sourcePaths?: string[]; // Ordered candidate source trees; first existing wins. Enables portable WSL/Termux switching from settings alone.
 }
 
-export type AutoLearnThinkingLevel = "off" | "minimal" | "low" | "medium" | "high" | "xhigh";
+export type AutoLearnThinkingLevel = "off" | "minimal" | "low" | "medium" | "high" | "xhigh" | "max" | "ultra";
 
 export interface AutoLearnSettings {
 	enabled?: boolean; // default: false - autonomously trigger background history scavenging for long sessions
@@ -232,7 +233,7 @@ export const MAX_RESEARCH_LANE_MAX_RUNS_PER_SESSION = 100;
 export interface ResearchLaneSettings {
 	enabled?: boolean; // default: false — autonomous background research is opt-in
 	model?: string; // model pattern; unset inherits the session model the lane was shipped from
-	profile?: string; // resource profile shipped with the lane: its model/soul/thinking/tool grants govern the lane
+	profile?: string; // shipped profile; model/soul/thinking plus grants over classified read-only lane tools govern it
 	systemPrompt?: string; // replaces the lane role prompt (the level-0 subagent core always remains)
 	maxUsd?: number; // default: 0.25 per research pass; post-hoc breaches mark the lane budget_exhausted
 	maxSources?: number; // default: 8 evidence sources per bundle
@@ -245,16 +246,16 @@ export interface ResearchLaneSettings {
 export type ResolvedResearchLaneSettings = Required<Omit<ResearchLaneSettings, "model" | "profile" | "systemPrompt">> &
 	Pick<ResearchLaneSettings, "model" | "profile" | "systemPrompt">;
 
-export const DEFAULT_WORKER_DELEGATION_ENABLED = false;
+export const DEFAULT_WORKER_DELEGATION_ENABLED = true;
 export const DEFAULT_WORKER_DELEGATION_MAX_USD = 0.5;
 export const DEFAULT_WORKER_DELEGATION_MAX_WALL_CLOCK_MS = 120_000;
 export const MAX_WORKER_DELEGATION_MAX_USD = 5;
 export const MAX_WORKER_DELEGATION_MAX_WALL_CLOCK_MS = 3_600_000;
 
 export interface WorkerDelegationSettings {
-	enabled?: boolean; // default: false — the delegate tool refuses (with a reason) until enabled
+	enabled?: boolean; // default: true for capable models; explicit false is a hard off-switch
 	model?: string; // model pattern; unset inherits the session model the lane was shipped from
-	profile?: string; // resource profile shipped with the worker: its model/soul/thinking/tool grants govern the lane
+	profile?: string; // shipped profile; tool grants filter classified lane tools (opaque extension tools stay unavailable)
 	systemPrompt?: string; // replaces the worker role prompt (the level-0 subagent core always remains)
 	maxUsd?: number; // default: 0.50 per delegated worker; post-hoc breaches mark the lane budget_exhausted
 	maxWallClockMs?: number; // default: 120000; 0 disables the wall-clock budget
@@ -363,7 +364,7 @@ export interface Settings {
 	lastChangelogVersion?: string;
 	defaultProvider?: string;
 	defaultModel?: string;
-	defaultThinkingLevel?: "off" | "minimal" | "low" | "medium" | "high" | "xhigh";
+	defaultThinkingLevel?: ThinkingLevel;
 	transport?: TransportSetting; // default: "auto"
 	steeringMode?: "all" | "one-at-a-time";
 	followUpMode?: "all" | "one-at-a-time";
@@ -395,7 +396,7 @@ export interface Settings {
 	externalResourceRoots?: string[]; // External directory roots to scan for resources
 	trustedResourceRoots?: string[]; // Explicitly trusted external directory roots (canonical absolute paths)
 	disabledResources?: DisabledResourcesSettings; // Legacy reversible block filters for extensions/skills/prompts/themes/agents/tools
-	resourceProfiles?: Record<string, ResourceProfileSettings>; // Named resource allow/block filters
+	resourceProfiles?: Record<string, ResourceProfileSettings | ProfileDefinitionInput>; // Named resource filters, optionally with full situation metadata
 	activeResourceProfile?: string | string[]; // Active profile name(s), applied after global/project/directory settings merge
 	activeResourceProfiles?: string[]; // Active profile names, equivalent to activeResourceProfile array
 	enableSkillCommands?: boolean; // default: true - register skills as /skill:name commands
@@ -413,7 +414,7 @@ export interface Settings {
 	selfModification?: SelfModificationSettings; // Local guardrails for modifying the pi-adaptative source/harness
 	autonomy?: AutonomySettings; // Low-config autonomy preset controlling background learning/reflection defaults
 	researchLane?: ResearchLaneSettings; // Opt-in autonomous read-only research lane producing evidence bundles
-	workerDelegation?: WorkerDelegationSettings; // Opt-in bounded scout-worker delegation via the delegate tool
+	workerDelegation?: WorkerDelegationSettings; // Bounded scout-worker delegation; enabled by default on capable models
 	learningPolicy?: LearningPolicySettings; // Opt-in learning apply policy: proposal-first durable writes with audit/rollback
 	modelCapability?: ModelCapabilitySettings; // Auto-detected small-model tool/lane surface (default: auto)
 	toolkit?: ToolkitSettings; // User's blessed daily-ops script registry for run_toolkit_script
@@ -422,7 +423,7 @@ export interface Settings {
 	failover?: FailoverSettings; // Provider quota behavior; metered quota always halts for explicit user choice
 	autoLearn?: AutoLearnSettings; // Setting-gated autonomous background learning for long sessions
 	sessionDir?: string; // Custom session storage directory (same format as --session-dir CLI flag)
-	httpIdleTimeoutMs?: number; // HTTP header/body idle timeout in ms; 0 disables it. Keep above retry.stall.quietIdleMs or the HTTP layer kills quiet streams before the stall watchdog can
+	httpIdleTimeoutMs?: number; // HTTP header/body idle timeout in ms; 0 disables it. Nonzero values constrain every stream-watchdog phase below this timeout
 	websocketConnectTimeoutMs?: number; // WebSocket connect/open handshake timeout in milliseconds; 0 disables it
 }
 
@@ -541,10 +542,20 @@ function hasExplicitActiveResourceProfileSelection(settings: Settings): boolean 
 	return Object.hasOwn(settings, "activeResourceProfiles") || Object.hasOwn(settings, "activeResourceProfile");
 }
 
+function hasExplicitEmptyActiveResourceProfileSelection(settings: Settings): boolean {
+	return (
+		Object.hasOwn(settings, "activeResourceProfiles") &&
+		normalizeResourceProfileNames(settings.activeResourceProfiles).length === 0
+	);
+}
+
 function normalizeActiveResourceProfiles(settings: Settings): string[] {
-	const explicitProfiles = normalizeResourceProfileNames(settings.activeResourceProfiles);
-	const values =
-		explicitProfiles.length > 0 ? explicitProfiles : normalizeResourceProfileNames(settings.activeResourceProfile);
+	// The array form is canonical when present, including an explicit empty array. Falling through
+	// from `activeResourceProfiles: []` to the scalar alias would resurrect a lower-precedence or
+	// legacy selection and makes it impossible to persist a durable "none" choice.
+	const values = Object.hasOwn(settings, "activeResourceProfiles")
+		? normalizeResourceProfileNames(settings.activeResourceProfiles)
+		: normalizeResourceProfileNames(settings.activeResourceProfile);
 	if (
 		values.length === 0 &&
 		!hasExplicitActiveResourceProfileSelection(settings) &&
@@ -607,7 +618,7 @@ function sanitizeNumberSetting(value: unknown, fallback: number, min: number, ma
 	return value;
 }
 
-export type ThinkingLevel = "off" | "minimal" | "low" | "medium" | "high" | "xhigh";
+export type ThinkingLevel = "off" | "minimal" | "low" | "medium" | "high" | "xhigh" | "max" | "ultra";
 
 export interface ProfileDefinitionInput {
 	name?: string;
@@ -625,7 +636,7 @@ export interface ProfileDefinitionInput {
 
 export type ProfilePersistenceScope = "session" | "directory" | "project" | "global" | "reusable-file";
 
-const VALID_THINKING_LEVELS = ["off", "minimal", "low", "medium", "high", "xhigh"] as const;
+const VALID_THINKING_LEVELS = ["off", "minimal", "low", "medium", "high", "xhigh", "max", "ultra"] as const;
 function isThinkingLevel(value: unknown): value is ThinkingLevel {
 	return typeof value === "string" && VALID_THINKING_LEVELS.includes(value as ThinkingLevel);
 }
@@ -693,12 +704,12 @@ function normalizeModelRouterSettings(value: unknown): ModelRouterSettings | und
 	return Object.keys(settings).length > 0 ? settings : undefined;
 }
 
-function parseProfileFileDefinition(content: string): ProfileDefinitionInput {
+function parseProfileFileDefinition(content: string, fallbackName?: string): ProfileDefinitionInput {
 	const parsed = JSON.parse(content) as Record<string, unknown>;
 	if (!parsed || typeof parsed !== "object" || Array.isArray(parsed)) {
 		throw new Error("profile file must contain a JSON object");
 	}
-	const name = typeof parsed.name === "string" ? parsed.name.trim() : undefined;
+	const name = (typeof parsed.name === "string" ? parsed.name.trim() : undefined) || fallbackName;
 	if (!name) {
 		throw new Error("profile name is required");
 	}
@@ -724,6 +735,8 @@ export interface SettingsManagerCreateOptions {
 export interface SettingsStorage {
 	withLock(scope: SettingsScope, fn: (current: string | undefined) => string | undefined): void;
 	getProfilesDir?(): string;
+	/** Base directory used to resolve explicit ./ or ../ profile references. */
+	getProfileResolutionBaseDir?(): string;
 }
 
 export interface SettingsError {
@@ -731,7 +744,36 @@ export interface SettingsError {
 	error: Error;
 }
 
+/** In-memory settings generation captured around an atomic runtime reload. */
+export interface SettingsReloadSnapshot {
+	globalSettings: Settings;
+	projectSettings: Settings;
+	directoryProfileSettings: Settings;
+	runtimeResourceProfiles: string[] | undefined;
+	inlineResourceProfileDefinitions: Record<string, ProfileDefinitionInput>;
+	discoveredResourceProfileDefinitions: Record<string, ResourceProfileSettings>;
+	effectiveSettings: Settings;
+	projectTrusted: boolean;
+	modifiedFields: Set<keyof Settings>;
+	modifiedNestedFields: Map<keyof Settings, Set<string>>;
+	modifiedProjectFields: Set<keyof Settings>;
+	modifiedProjectNestedFields: Map<keyof Settings, Set<string>>;
+	globalSettingsLoadError: Error | null;
+	projectSettingsLoadError: Error | null;
+	directoryProfileInfo: DirectoryResourceProfileInfo | null;
+	errors: SettingsError[];
+}
+
+export interface GlobalResourceProfileConfiguration {
+	resourceProfiles?: Settings["resourceProfiles"];
+	activeResourceProfile?: Settings["activeResourceProfile"];
+	activeResourceProfiles?: Settings["activeResourceProfiles"];
+	externalResourceRoots?: string[];
+	trustedResourceRoots?: string[];
+}
+
 export class FileSettingsStorage implements SettingsStorage {
+	private profileResolutionBaseDir: string;
 	private globalSettingsPath: string;
 	private projectSettingsPath: string;
 	private directoryProfileInfo: DirectoryResourceProfileInfo;
@@ -740,6 +782,7 @@ export class FileSettingsStorage implements SettingsStorage {
 	constructor(cwd: string, agentDir: string) {
 		const resolvedCwd = resolvePath(cwd);
 		const resolvedAgentDir = resolvePath(agentDir);
+		this.profileResolutionBaseDir = resolvedCwd;
 		this.globalSettingsPath = join(resolvedAgentDir, "settings.json");
 		this.projectSettingsPath = join(resolvedCwd, CONFIG_DIR_NAME, "settings.json");
 		this.directoryProfileInfo = getDirectoryResourceProfileInfo(resolvedCwd, resolvedAgentDir);
@@ -752,6 +795,10 @@ export class FileSettingsStorage implements SettingsStorage {
 
 	getProfilesDir(): string {
 		return this.profilesDir;
+	}
+
+	getProfileResolutionBaseDir(): string {
+		return this.profileResolutionBaseDir;
 	}
 
 	readDirectoryResourceProfile(): string | undefined {
@@ -851,7 +898,7 @@ export class SettingsManager {
 	private projectSettings: Settings;
 	private directoryProfileSettings: Settings;
 	private runtimeResourceProfiles: string[] | undefined;
-	private inlineResourceProfileDefinitions: Record<string, ResourceProfileSettings> = {};
+	private inlineResourceProfileDefinitions: Record<string, ProfileDefinitionInput> = {};
 	private discoveredResourceProfileDefinitions: Record<string, ResourceProfileSettings> = {};
 	settings: Settings;
 	private projectTrusted: boolean;
@@ -916,8 +963,14 @@ export class SettingsManager {
 		// Mirror getActiveResourceProfileNames()'s source precedence (runtime profiles from
 		// --resource-profile take priority) so a bad runtime profile name still surfaces a
 		// "profile not found" diagnostic instead of silently applying zero filtering.
-		if (this.runtimeResourceProfiles && this.runtimeResourceProfiles.length > 0) {
+		if (this.runtimeResourceProfiles !== undefined) {
 			return normalizeResourceProfileNames(this.runtimeResourceProfiles);
+		}
+		// `/profiles none` is persisted globally as an explicit empty array. It is a durable
+		// user-level off switch and must dominate project/directory/default/external fallbacks until
+		// the user explicitly selects another profile.
+		if (hasExplicitEmptyActiveResourceProfileSelection(this.globalSettings)) {
+			return [];
 		}
 		const explicitProfiles =
 			this.settings.activeResourceProfiles && this.settings.activeResourceProfiles.length > 0
@@ -955,17 +1008,26 @@ export class SettingsManager {
 			this.reportProfileDiagnostic("global", `Profile diagnostic${path}: ${diagnostic.message}`);
 		}
 		for (const profileName of this.getActiveProfileNamesForDiagnostics()) {
-			if (!this.profileRegistry.getProfile(profileName)) {
+			if (!this.resolveProfileFromRegistry(this.profileRegistry, profileName)) {
 				this.reportProfileDiagnostic("global", `Active profile not found: ${profileName}`);
 			}
 		}
 	}
 
+	private resolveProfileFromRegistry(registry: ProfileRegistry, profileRef: string) {
+		return profileRef.startsWith("./") || profileRef.startsWith("../")
+			? registry.resolveProfileRef(profileRef, this.storage.getProfileResolutionBaseDir?.() ?? process.cwd())
+			: registry.getProfile(profileRef);
+	}
+
 	private mergeEffectiveSettings(): Settings {
 		let merged = deepMergeSettings(this.globalSettings, this.projectSettings);
 		merged = deepMergeSettings(merged, this.directoryProfileSettings);
-		if (this.runtimeResourceProfiles) {
-			merged = deepMergeSettings(merged, { activeResourceProfiles: this.runtimeResourceProfiles });
+		if (this.runtimeResourceProfiles !== undefined) {
+			merged = deepMergeSettings(merged, {
+				activeResourceProfile: this.runtimeResourceProfiles,
+				activeResourceProfiles: this.runtimeResourceProfiles,
+			});
 		}
 		return merged;
 	}
@@ -1156,8 +1218,11 @@ export class SettingsManager {
 	}
 
 	getActiveResourceProfileNames(): string[] {
-		if (this.runtimeResourceProfiles && this.runtimeResourceProfiles.length > 0) {
+		if (this.runtimeResourceProfiles !== undefined) {
 			return [...this.runtimeResourceProfiles];
+		}
+		if (hasExplicitEmptyActiveResourceProfileSelection(this.globalSettings)) {
+			return [];
 		}
 		const names = normalizeActiveResourceProfiles(this.settings);
 		return names.length > 0 || hasExplicitActiveResourceProfileSelection(this.settings)
@@ -1166,7 +1231,10 @@ export class SettingsManager {
 	}
 
 	hasExplicitActiveResourceProfileSelection(): boolean {
-		return hasExplicitActiveResourceProfileSelection(this.settings);
+		// An explicit empty runtime/settings selection means "no profile", not an invalid profile
+		// whose authority should collapse to deny-all. Non-empty unresolved refs remain explicit and
+		// are diagnosed/strictly denied through the normal active-profile path.
+		return this.getActiveResourceProfileNames().length > 0;
 	}
 
 	/**
@@ -1187,7 +1255,7 @@ export class SettingsManager {
 		for (const profileName of activeProfileNames) {
 			if (seenProfiles.has(profileName)) continue;
 			seenProfiles.add(profileName);
-			const kindFilter = registry.getProfile(profileName)?.resources[kind];
+			const kindFilter = this.resolveProfileFromRegistry(registry, profileName)?.resources[kind];
 			if (kindFilter && ((kindFilter.allow?.length ?? 0) > 0 || (kindFilter.block?.length ?? 0) > 0)) {
 				kindMentionedByProfile = true;
 			}
@@ -1234,7 +1302,7 @@ export class SettingsManager {
 		const registry = this.getProfileRegistry();
 		const conflicts = new Set<string>();
 		for (const profileName of this.getActiveResourceProfileNames()) {
-			const filter = registry.getProfile(profileName)?.resources[kind];
+			const filter = this.resolveProfileFromRegistry(registry, profileName)?.resources[kind];
 			for (const allowEntry of filter?.allow ?? []) {
 				if (allowEntry === "*") continue;
 				if (disabled.includes(allowEntry) || matchesResourceProfilePattern(allowEntry, disabled)) {
@@ -1284,7 +1352,7 @@ export class SettingsManager {
 		for (const profileName of this.getActiveResourceProfileNames()) {
 			if (seen.has(profileName)) continue;
 			seen.add(profileName);
-			const soul = registry.getProfile(profileName)?.soul?.trim();
+			const soul = this.resolveProfileFromRegistry(registry, profileName)?.soul?.trim();
 			if (soul) return soul;
 		}
 		return undefined;
@@ -1355,6 +1423,51 @@ export class SettingsManager {
 		this.recomputeSettings();
 	}
 
+	/** Capture the complete in-memory settings generation before runtime reload mutates it. */
+	createReloadSnapshot(): SettingsReloadSnapshot {
+		return {
+			globalSettings: structuredClone(this.globalSettings),
+			projectSettings: structuredClone(this.projectSettings),
+			directoryProfileSettings: structuredClone(this.directoryProfileSettings),
+			runtimeResourceProfiles:
+				this.runtimeResourceProfiles === undefined ? undefined : [...this.runtimeResourceProfiles],
+			inlineResourceProfileDefinitions: structuredClone(this.inlineResourceProfileDefinitions),
+			discoveredResourceProfileDefinitions: structuredClone(this.discoveredResourceProfileDefinitions),
+			effectiveSettings: structuredClone(this.settings),
+			projectTrusted: this.projectTrusted,
+			modifiedFields: new Set(this.modifiedFields),
+			modifiedNestedFields: this.cloneModifiedNestedFields(this.modifiedNestedFields),
+			modifiedProjectFields: new Set(this.modifiedProjectFields),
+			modifiedProjectNestedFields: this.cloneModifiedNestedFields(this.modifiedProjectNestedFields),
+			globalSettingsLoadError: this.globalSettingsLoadError,
+			projectSettingsLoadError: this.projectSettingsLoadError,
+			directoryProfileInfo: this.directoryProfileInfo ? { ...this.directoryProfileInfo } : null,
+			errors: [...this.errors],
+		};
+	}
+
+	/** Restore a failed runtime reload without changing the on-disk settings generation. */
+	restoreReloadSnapshot(snapshot: SettingsReloadSnapshot): void {
+		this.globalSettings = structuredClone(snapshot.globalSettings);
+		this.projectSettings = structuredClone(snapshot.projectSettings);
+		this.directoryProfileSettings = structuredClone(snapshot.directoryProfileSettings);
+		this.runtimeResourceProfiles =
+			snapshot.runtimeResourceProfiles === undefined ? undefined : [...snapshot.runtimeResourceProfiles];
+		this.inlineResourceProfileDefinitions = structuredClone(snapshot.inlineResourceProfileDefinitions);
+		this.discoveredResourceProfileDefinitions = structuredClone(snapshot.discoveredResourceProfileDefinitions);
+		this.settings = structuredClone(snapshot.effectiveSettings);
+		this.projectTrusted = snapshot.projectTrusted;
+		this.modifiedFields = new Set(snapshot.modifiedFields);
+		this.modifiedNestedFields = this.cloneModifiedNestedFields(snapshot.modifiedNestedFields);
+		this.modifiedProjectFields = new Set(snapshot.modifiedProjectFields);
+		this.modifiedProjectNestedFields = this.cloneModifiedNestedFields(snapshot.modifiedProjectNestedFields);
+		this.globalSettingsLoadError = snapshot.globalSettingsLoadError;
+		this.projectSettingsLoadError = snapshot.projectSettingsLoadError;
+		this.directoryProfileInfo = snapshot.directoryProfileInfo ? { ...snapshot.directoryProfileInfo } : null;
+		this.errors = [...snapshot.errors];
+		this.refreshProfileRegistry();
+	}
+
 	/** Apply additional overrides on top of current settings */
 	applyOverrides(overrides: Partial<Settings>): void {
 		this.settings = deepMergeSettings(this.settings, overrides);
@@ -1362,13 +1475,24 @@ export class SettingsManager {
 
 	/** Select runtime-only resource profiles, e.g. from CLI/subagent launch options. */
 	setRuntimeResourceProfiles(profileNames: string[]): void {
-		this.runtimeResourceProfiles = profileNames.length > 0 ? [...profileNames] : undefined;
+		this.runtimeResourceProfiles = normalizeResourceProfileNames(profileNames);
 		this.recomputeSettings();
 	}
 
 	/** Add one-shot profile definitions from CLI/SDK/ephemeral agent launch input. Never writes to disk. */
-	addInlineResourceProfileDefinitions(profiles: Record<string, ResourceProfileSettings>): void {
-		this.inlineResourceProfileDefinitions = mergeResourceProfileMap(this.inlineResourceProfileDefinitions, profiles);
+	addInlineResourceProfileDefinitions(
+		profiles: Record<string, ResourceProfileSettings | ProfileDefinitionInput>,
+	): void {
+		const next = { ...this.inlineResourceProfileDefinitions };
+		for (const [name, input] of Object.entries(profiles)) {
+			const existing = next[name];
+			const definition = Object.hasOwn(input, "resources")
+				? (input as ProfileDefinitionInput)
+				: { resources: input as ResourceProfileSettings };
+			const resources = mergeResourceProfileSettings(existing?.resources, definition.resources);
+			next[name] = this.mergeProfileDefinition(name, definition, resources, existing);
+		}
+		this.inlineResourceProfileDefinitions = next;
 		this.refreshProfileRegistry();
 	}
 
@@ -1399,6 +1523,14 @@ export class SettingsManager {
 		return trimmed;
 	}
 
+	private normalizeProfileSelection(profileName: string): string {
+		const trimmed = profileName.trim();
+		if (trimmed.startsWith("./") || trimmed.startsWith("../")) {
+			return trimmed;
+		}
+		return this.normalizeProfileName(trimmed);
+	}
+
 	private sanitizeProfileResources(resources: ResourceProfileSettings): ResourceProfileSettings {
 		const result: ResourceProfileSettings = {};
 		for (const kind of ["extensions", "skills", "prompts", "themes", "agents", "tools"] as const) {
@@ -1414,14 +1546,113 @@ export class SettingsManager {
 		return result;
 	}
 
+	private decodeStoredProfileDefinition(
+		name: string,
+		stored: ResourceProfileSettings | ProfileDefinitionInput | undefined,
+	): ProfileDefinitionInput {
+		if (stored && Object.hasOwn(stored, "resources")) {
+			const definition = stored as ProfileDefinitionInput;
+			return { ...definition, name, resources: this.sanitizeProfileResources(definition.resources) };
+		}
+		return {
+			name,
+			resources: this.sanitizeProfileResources((stored as ResourceProfileSettings | undefined) ?? {}),
+		};
+	}
+
+	private mergeProfileDefinition(
+		name: string,
+		definition: ProfileDefinitionInput,
+		resources: ResourceProfileSettings,
+		existing?: ResourceProfileSettings | ProfileDefinitionInput,
+	): ProfileDefinitionInput {
+		const previous = this.decodeStoredProfileDefinition(name, existing);
+		return {
+			...previous,
+			name,
+			resources,
+			description: definition.description ?? previous.description,
+			model: definition.model ?? previous.model,
+			thinking: definition.thinking ?? previous.thinking,
+			modelRouter: definition.modelRouter ?? previous.modelRouter,
+			soul: definition.soul ?? previous.soul,
+		};
+	}
+
+	private encodeStoredProfileDefinition(
+		definition: ProfileDefinitionInput,
+	): ResourceProfileSettings | ProfileDefinitionInput | undefined {
+		const hasMetadata = Boolean(
+			definition.description || definition.model || definition.thinking || definition.modelRouter || definition.soul,
+		);
+		if (hasMetadata) return definition;
+		return Object.keys(definition.resources).length > 0 ? definition.resources : undefined;
+	}
+
 	private setActiveProfileInSettings(settings: Settings, profileName: string | undefined): void {
 		if (profileName) {
 			settings.activeResourceProfile = profileName;
 			settings.activeResourceProfiles = [profileName];
 			return;
 		}
-		delete settings.activeResourceProfiles;
+		settings.activeResourceProfiles = [];
 		delete settings.activeResourceProfile;
+	}
+
+	private rewriteActiveProfileReference(settings: Settings, oldName: string, newName: string | undefined): boolean {
+		let changed = false;
+		const rewrite = (values: string[]): string[] => {
+			const next = values.flatMap((value) => {
+				if (value !== oldName) return [value];
+				changed = true;
+				return newName ? [newName] : [];
+			});
+			return [...new Set(next)];
+		};
+
+		if (settings.activeResourceProfiles !== undefined) {
+			const next = rewrite(normalizeResourceProfileNames(settings.activeResourceProfiles));
+			if (next.length > 0) settings.activeResourceProfiles = next;
+			else delete settings.activeResourceProfiles;
+		}
+		if (settings.activeResourceProfile !== undefined) {
+			const next = rewrite(normalizeResourceProfileNames(settings.activeResourceProfile));
+			if (next.length === 0) delete settings.activeResourceProfile;
+			else
+				settings.activeResourceProfile =
+					Array.isArray(settings.activeResourceProfile) || next.length > 1 ? next : next[0];
+		}
+		return changed;
+	}
+
+	private rewriteReusableProfileSelections(oldName: string, newName: string | undefined): void {
+		if (this.runtimeResourceProfiles?.includes(oldName)) {
+			this.runtimeResourceProfiles = [
+				...new Set(
+					this.runtimeResourceProfiles.flatMap((profile) =>
+						profile === oldName ? (newName ? [newName] : []) : [profile],
+					),
+				),
+			];
+		}
+
+		if (this.rewriteActiveProfileReference(this.globalSettings, oldName, newName)) {
+			this.markModified("activeResourceProfile");
+			this.markModified("activeResourceProfiles");
+			this.save();
+		}
+
+		const projectSettings = structuredClone(this.projectSettings);
+		if (this.rewriteActiveProfileReference(projectSettings, oldName, newName)) {
+			this.markProjectModified("activeResourceProfile");
+			this.markProjectModified("activeResourceProfiles");
+			this.saveProjectSettings(projectSettings);
+		}
+
+		if (this.rewriteActiveProfileReference(this.directoryProfileSettings, oldName, newName)) {
+			this.persistDirectoryProfiles(() => {});
+		}
+		this.recomputeSettings();
 	}
 
 	private persistDirectoryProfiles(update: (settings: Settings) => void): void {
@@ -1476,8 +1707,9 @@ export class SettingsManager {
 
 		if (scope === "session") {
 			const next = { ...this.inlineResourceProfileDefinitions };
-			if (Object.keys(resources).length > 0) {
-				next[name] = resources;
+			const payload = this.mergeProfileDefinition(name, definition, resources, next[name]);
+			if (this.encodeStoredProfileDefinition(payload)) {
+				next[name] = payload;
 			} else {
 				delete next[name];
 			}
@@ -1489,8 +1721,11 @@ export class SettingsManager {
 		if (scope === "global") {
 			const next = structuredClone(this.globalSettings);
 			next.resourceProfiles = { ...(next.resourceProfiles ?? {}) };
-			if (Object.keys(resources).length > 0) {
-				next.resourceProfiles[name] = resources;
+			const stored = this.encodeStoredProfileDefinition(
+				this.mergeProfileDefinition(name, definition, resources, next.resourceProfiles[name]),
+			);
+			if (stored) {
+				next.resourceProfiles[name] = stored;
 			} else {
 				delete next.resourceProfiles[name];
 			}
@@ -1506,8 +1741,11 @@ export class SettingsManager {
 		if (scope === "project") {
 			this.updateProjectSettings("resourceProfiles", (settings) => {
 				const next = structuredClone(settings.resourceProfiles ?? {});
-				if (Object.keys(resources).length > 0) {
-					next[name] = resources;
+				const stored = this.encodeStoredProfileDefinition(
+					this.mergeProfileDefinition(name, definition, resources, next[name]),
+				);
+				if (stored) {
+					next[name] = stored;
 				} else {
 					delete next[name];
 				}
@@ -1523,8 +1761,11 @@ export class SettingsManager {
 		if (scope === "directory") {
 			this.persistDirectoryProfiles((current) => {
 				const next = { ...(current.resourceProfiles ?? {}) };
-				if (Object.keys(resources).length > 0) {
-					next[name] = resources;
+				const stored = this.encodeStoredProfileDefinition(
+					this.mergeProfileDefinition(name, definition, resources, next[name]),
+				);
+				if (stored) {
+					next[name] = stored;
 				} else {
 					delete next[name];
 				}
@@ -1539,17 +1780,9 @@ export class SettingsManager {
 
 		const path = this.getProfileFilePath(name);
 		const existing = existsSync(path)
-			? parseProfileFileDefinition(readFileSync(path, "utf-8"))
+			? parseProfileFileDefinition(readFileSync(path, "utf-8"), name)
 			: { name, resources: {} };
-		const payload: ProfileDefinitionInput = {
-			...existing,
-			name,
-			resources,
-			description: definition.description ?? existing.description,
-			model: definition.model ?? existing.model,
-			thinking: definition.thinking ?? existing.thinking,
-			modelRouter: definition.modelRouter ?? existing.modelRouter,
-		};
+		const payload = this.mergeProfileDefinition(name, definition, resources, existing);
 		mkdirSync(dirname(path), { recursive: true });
 		writeFileSync(path, JSON.stringify(payload, null, 2), "utf-8");
 	}
@@ -1644,6 +1877,7 @@ export class SettingsManager {
 			throw new Error(`Profile not found: ${name}`);
 		}
 		rmSync(profilePath, { force: true });
+		this.rewriteReusableProfileSelections(name, undefined);
 	}
 
 	renameProfile(profileName: string, newProfileName: string, scope: ProfilePersistenceScope): void {
@@ -1752,17 +1986,18 @@ export class SettingsManager {
 		if (existsSync(newPath)) {
 			throw new Error(`Profile already exists: ${newName}`);
 		}
-		const parsed = parseProfileFileDefinition(readFileSync(oldPath, "utf-8"));
+		const parsed = parseProfileFileDefinition(readFileSync(oldPath, "utf-8"), oldName);
 		parsed.name = newName;
 		writeFileSync(newPath, JSON.stringify(parsed, null, 2), "utf-8");
 		rmSync(oldPath, { force: true });
+		this.rewriteReusableProfileSelections(oldName, newName);
 	}
 
 	/**
 	 * Set active profile selection in the selected scope.
 	 */
 	setActiveProfile(profileName: string | undefined, scope: Exclude<ProfilePersistenceScope, "reusable-file">): void {
-		const name = profileName ? this.normalizeProfileName(profileName) : undefined;
+		const name = profileName ? this.normalizeProfileSelection(profileName) : undefined;
 		if (scope === "session") {
 			if (name) {
 				this.setRuntimeResourceProfiles([name]);
@@ -1778,7 +2013,7 @@ export class SettingsManager {
 				this.globalSettings.activeResourceProfiles = [name];
 			} else {
 				delete this.globalSettings.activeResourceProfile;
-				delete this.globalSettings.activeResourceProfiles;
+				this.globalSettings.activeResourceProfiles = [];
 			}
 			this.markModified("activeResourceProfile");
 			this.markModified("activeResourceProfiles");
@@ -1795,6 +2030,68 @@ export class SettingsManager {
 
 		this.persistDirectoryProfiles((current) => {
 			this.setActiveProfileInSettings(current, name);
+		});
+	}
+
+	/** Atomically replace the global profile/authority fields used by config restore and rollback. */
+	replaceGlobalResourceProfileConfiguration(configuration: GlobalResourceProfileConfiguration): void {
+		const next = structuredClone(this.globalSettings);
+		const replace = <K extends keyof GlobalResourceProfileConfiguration>(key: K): void => {
+			const value = configuration[key];
+			if (value === undefined) {
+				delete next[key];
+			} else {
+				next[key] = structuredClone(value) as Settings[K];
+			}
+			this.markModified(key);
+		};
+		replace("resourceProfiles");
+		replace("activeResourceProfile");
+		replace("activeResourceProfiles");
+		replace("externalResourceRoots");
+		replace("trustedResourceRoots");
+		this.globalSettings = next;
+		this.save();
+	}
+
+	/** Restore one profile definition's persistent owner after a post-doctor commit failure. */
+	restoreProfileDefinitionFromReloadSnapshot(
+		profileName: string,
+		scope: Exclude<ProfilePersistenceScope, "reusable-file">,
+		snapshot: SettingsReloadSnapshot,
+	): void {
+		const name = this.normalizeProfileName(profileName);
+		if (scope === "session") {
+			const previous = snapshot.inlineResourceProfileDefinitions[name];
+			if (previous) this.inlineResourceProfileDefinitions[name] = structuredClone(previous);
+			else delete this.inlineResourceProfileDefinitions[name];
+			this.refreshProfileRegistry();
+			return;
+		}
+
+		const restoreDefinition = (settings: Settings, previous: Settings): void => {
+			const definitions = structuredClone(settings.resourceProfiles ?? {});
+			const oldDefinition = previous.resourceProfiles?.[name];
+			if (oldDefinition) definitions[name] = structuredClone(oldDefinition);
+			else delete definitions[name];
+			if (Object.keys(definitions).length > 0) settings.resourceProfiles = definitions;
+			else delete settings.resourceProfiles;
+		};
+
+		if (scope === "global") {
+			restoreDefinition(this.globalSettings, snapshot.globalSettings);
+			this.markModified("resourceProfiles");
+			this.save();
+			return;
+		}
+		if (scope === "project") {
+			this.updateProjectSettings("resourceProfiles", (settings) => {
+				restoreDefinition(settings, snapshot.projectSettings);
+			});
+			return;
+		}
+		this.persistDirectoryProfiles((settings) => {
+			restoreDefinition(settings, snapshot.directoryProfileSettings);
 		});
 	}
 
@@ -2034,11 +2331,11 @@ export class SettingsManager {
 		this.save();
 	}
 
-	getDefaultThinkingLevel(): "off" | "minimal" | "low" | "medium" | "high" | "xhigh" | undefined {
+	getDefaultThinkingLevel(): ThinkingLevel | undefined {
 		return this.settings.defaultThinkingLevel;
 	}
 
-	setDefaultThinkingLevel(level: "off" | "minimal" | "low" | "medium" | "high" | "xhigh"): void {
+	setDefaultThinkingLevel(level: ThinkingLevel): void {
 		this.globalSettings.defaultThinkingLevel = level;
 		this.markModified("defaultThinkingLevel");
 		this.save();
@@ -2092,7 +2389,7 @@ export class SettingsManager {
 
 	/**
 	 * Proactive per-turn cost guard (#34). Default ON in WARN-only mode with a high anomaly-catching
-	 * ceiling so an unusually expensive turn surfaces a visible footer notice without ever silently
+	 * projection threshold so an unusually expensive turn surfaces a visible footer notice without silently
 	 * changing behavior. Set `maxTurnUsd: 0` to disable, or `action: "downgrade"` to also auto-reduce
 	 * reasoning effort over the ceiling.
 	 */
@@ -2110,16 +2407,26 @@ export class SettingsManager {
 	private getProfileModelRouterSettings(): ModelRouterSettings | undefined {
 		const activeProfileNames = this.getActiveResourceProfileNames();
 		if (activeProfileNames.length === 0) return undefined;
+		const registry = this.getProfileRegistry();
 		const merged: ModelRouterSettings = {};
 		for (let index = activeProfileNames.length - 1; index >= 0; index--) {
-			const profile = this.profileRegistry.getProfile(activeProfileNames[index]);
+			const profile = this.resolveProfileFromRegistry(registry, activeProfileNames[index]);
 			const router = profile?.modelRouter;
 			if (!router) continue;
 			if (router.enabled !== undefined) merged.enabled = router.enabled;
+			if (router.judgeEnabled !== undefined) merged.judgeEnabled = router.judgeEnabled;
+			if (router.fitnessGate !== undefined) merged.fitnessGate = router.fitnessGate;
 			if (router.cheapModel !== undefined) merged.cheapModel = router.cheapModel;
 			if (router.mediumModel !== undefined) merged.mediumModel = router.mediumModel;
 			if (router.expensiveModel !== undefined) merged.expensiveModel = router.expensiveModel;
 			if (router.learningModel !== undefined) merged.learningModel = router.learningModel;
+			if (router.judgeModel !== undefined) merged.judgeModel = router.judgeModel;
+			if (router.executorModel !== undefined) merged.executorModel = router.executorModel;
+			if (router.cheapThinking !== undefined) merged.cheapThinking = router.cheapThinking;
+			if (router.mediumThinking !== undefined) merged.mediumThinking = router.mediumThinking;
+			if (router.expensiveThinking !== undefined) merged.expensiveThinking = router.expensiveThinking;
+			if (router.executorThinking !== undefined) merged.executorThinking = router.executorThinking;
+			if (router.judgeThinking !== undefined) merged.judgeThinking = router.judgeThinking;
 		}
 		return Object.keys(merged).length > 0 ? merged : undefined;
 	}
@@ -2151,8 +2458,6 @@ export class SettingsManager {
 			fitnessGate: this.settings.modelRouter?.fitnessGate ?? false,
 			judgeModel: this.settings.modelRouter?.judgeModel?.trim() || undefined,
 			executorModel: this.settings.modelRouter?.executorModel?.trim() || undefined,
-			// Not yet profile-overridable (same as judgeModel/executorModel above): validated here so a
-			// corrupt/hand-edited value on disk never reaches the routed-turn swap in agent-session.ts.
 			cheapThinking: isThinkingLevel(this.settings.modelRouter?.cheapThinking)
 				? this.settings.modelRouter?.cheapThinking
 				: undefined,
@@ -2179,11 +2484,11 @@ export class SettingsManager {
 			fitnessGate: profileSettings?.fitnessGate ?? settings.fitnessGate,
 			judgeModel: profileSettings?.judgeModel?.trim() || settings.judgeModel,
 			executorModel: profileSettings?.executorModel?.trim() || settings.executorModel,
-			cheapThinking: settings.cheapThinking,
-			mediumThinking: settings.mediumThinking,
-			expensiveThinking: settings.expensiveThinking,
-			executorThinking: settings.executorThinking,
-			judgeThinking: settings.judgeThinking,
+			cheapThinking: profileSettings?.cheapThinking ?? settings.cheapThinking,
+			mediumThinking: profileSettings?.mediumThinking ?? settings.mediumThinking,
+			expensiveThinking: profileSettings?.expensiveThinking ?? settings.expensiveThinking,
+			executorThinking: profileSettings?.executorThinking ?? settings.executorThinking,
+			judgeThinking: profileSettings?.judgeThinking ?? settings.judgeThinking,
 		};
 	}
 
@@ -2288,6 +2593,7 @@ export class SettingsManager {
 				"automata_graph_pointer_pack",
 				"learning_query_memory",
 				"subagent",
+				"delegate",
 				"task_steps",
 				"task_background",
 				"task_goal",
@@ -2364,13 +2670,19 @@ export class SettingsManager {
 		this.save();
 	}
 
-	getMemoryRetrievalSettings(): { enabled: boolean; maxResults: number; includeInPrompt: boolean } {
+	getMemoryRetrievalSettings(): {
+		enabled: boolean;
+		maxResults: number;
+		includeInPrompt: boolean;
+		allowExternalEgress: boolean;
+	} {
 		return {
 			enabled: this.settings.contextPolicy?.memory?.enabled ?? true,
 			maxResults: clampMemoryRetrievalMaxResults(
 				this.settings.contextPolicy?.memory?.maxResults ?? MEMORY_RETRIEVAL_MAX_RESULTS_DEFAULT,
 			),
 			includeInPrompt: this.settings.contextPolicy?.memory?.includeInPrompt ?? true,
+			allowExternalEgress: this.settings.contextPolicy?.memory?.allowExternalEgress === true,
 		};
 	}
 
@@ -2380,6 +2692,7 @@ export class SettingsManager {
 			maxResults:
 				settings.maxResults === undefined ? undefined : clampMemoryRetrievalMaxResults(settings.maxResults),
 			includeInPrompt: settings.includeInPrompt,
+			allowExternalEgress: settings.allowExternalEgress,
 		};
 		if (scope === "project") {
 			const projectSettings = structuredClone(this.projectSettings);

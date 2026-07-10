@@ -23,7 +23,7 @@ import {
 } from "./chaos-provider.ts";
 
 const codexSpark = model("openai-codex", "codex-spark");
-const codexDefault = model("openai-codex", "gpt-5.5");
+const codexDefault = model("openai-codex", "gpt-5.6-sol");
 const meteredSelected = model("metered", "selected");
 const codexLiteral = "You have hit your ChatGPT usage limit. Try again in 2 hours.";
 
@@ -189,8 +189,8 @@ describe("provider limit red-team matrix", () => {
 		chaos.call("openai-codex/codex-spark");
 		await expect(harness.failover.handleAssistantError(assistantError(codexSpark, codexLiteral))).resolves.toBe(true);
 		chaos.call(`${harness.agent.state.model.provider}/${harness.agent.state.model.id}`);
-		expect(harness.agent.state.model.id).toBe("gpt-5.5");
-		expect(harness.warnings[0]).toContain("switched to openai-codex/gpt-5.5");
+		expect(harness.agent.state.model.id).toBe("gpt-5.6-sol");
+		expect(harness.warnings[0]).toContain("switched to openai-codex/gpt-5.6-sol");
 		expectBoundedOutbound(chaos, 2);
 		expectNoSilentTerminal({ ended: true, visibleMessages: harness.warnings });
 	});
@@ -217,10 +217,10 @@ describe("provider limit red-team matrix", () => {
 		const harness = controller(codexSpark, true);
 		chaos.call("openai-codex/codex-spark");
 		await harness.failover.handleAssistantError(assistantError(codexSpark, codexLiteral));
-		chaos.call("openai-codex/gpt-5.5");
+		chaos.call("openai-codex/gpt-5.6-sol");
 		await harness.failover.handleAssistantError(assistantError(codexDefault, codexLiteral));
-		expect(harness.exhausted.snapshot().sort()).toEqual(["openai-codex/codex-spark", "openai-codex/gpt-5.5"]);
-		expect(harness.agent.state.model.id).toBe("gpt-5.5");
+		expect(harness.exhausted.snapshot().sort()).toEqual(["openai-codex/codex-spark", "openai-codex/gpt-5.6-sol"]);
+		expect(harness.agent.state.model.id).toBe("gpt-5.6-sol");
 		expectBoundedOutbound(chaos, 2);
 		expectNoSilentTerminal({ ended: true, visibleMessages: harness.warnings });
 	});
@@ -289,7 +289,7 @@ describe("provider limit red-team matrix", () => {
 					getModelRouterSettings: () => ({
 						enabled: true,
 						cheapModel: "openai-codex/codex-spark",
-						expensiveModel: "openai-codex/gpt-5.5",
+						expensiveModel: "openai-codex/gpt-5.6-sol",
 					}),
 				}),
 				getSessionManager: () => ({ getEntries: () => [] }),
@@ -341,7 +341,7 @@ describe("provider limit red-team matrix", () => {
 						enabled: true,
 						fitnessGate: true,
 						cheapModel: "openai-codex/codex-spark",
-						expensiveModel: "openai-codex/gpt-5.5",
+						expensiveModel: "openai-codex/gpt-5.6-sol",
 					}),
 				}),
 				getSessionManager: () => ({ getEntries: () => [] }),
@@ -390,7 +390,7 @@ describe("provider limit red-team matrix", () => {
 		const harness = controller(codexSpark, true);
 		chaos.call("openai-codex/codex-spark");
 		await harness.failover.handleAssistantError(assistantError(codexSpark, codexLiteral));
-		chaos.call("openai-codex/gpt-5.5");
+		chaos.call("openai-codex/gpt-5.6-sol");
 		await harness.failover.handleAssistantError(assistantError(codexDefault, codexLiteral));
 		expectBoundedOutbound(chaos, 2);
 		expect(harness.warnings.at(-1)).toContain("wait for the limit window");

@@ -267,6 +267,13 @@ export class ExtensionRunner {
 		this.modelRegistry = modelRegistry;
 	}
 
+	/** Provider names owned by this extension generation, used for atomic reload replacement. */
+	getRegisteredProviderNames(): string[] {
+		return [
+			...new Set(Array.from(this.runtime.providersByExtension.values()).flatMap((providers) => [...providers])),
+		];
+	}
+
 	bindCore(
 		actions: ExtensionActions,
 		contextActions: ExtensionContextActions,

@@ -16,7 +16,6 @@ import {
 	isAutoLearnSessionId,
 	loadEntriesFromFile,
 } from "@caupulican/pi-agent-core/node";
-import { wrapUntrustedText } from "../../security/untrusted-boundary.ts";
 import type { MemoryCapabilities, MemoryLifecycleContext, MemoryProvider } from "../memory-provider.ts";
 import { type TranscriptDoc, TranscriptIndex } from "../transcript-index.ts";
 
@@ -32,6 +31,7 @@ const MAX_FILE_BYTES = 8_000_000;
 
 export class TranscriptRecallProvider implements MemoryProvider {
 	readonly name = "transcript-recall";
+	readonly egress = "local";
 	private index: TranscriptIndex | undefined;
 	private currentSessionId = "";
 	private cwd = "";
@@ -75,12 +75,9 @@ export class TranscriptRecallProvider implements MemoryProvider {
 		// terms must appear before a session is considered relevant.
 		const hits = index.query(query, { k: 3, minScore: 0.34, maxSnippetChars: 600 });
 		if (hits.length === 0) return "";
-		// Recalled past text is UNTRUSTED (it may itself contain injected instructions or a forged
-		// `</memory_context>` to break out). Fence each snippet with the untrusted-content boundary so a
-		// payload can't escape and be replayed as a current instruction (design: recall = untrusted).
-		const body = hits
-			.map((h) => `- (${h.timestamp ?? "earlier session"}) ${wrapUntrustedText(h.snippet, "transcript-recall")}`)
-			.join("\n");
+		// MemoryManager centrally source-labels and fences every provider's complete recall page. Keep
+		// this provider output raw here so the built-in path is wrapped exactly once like extensions.
+		const body = hits.map((h) => `- (${h.timestamp ?? "earlier session"}) ${h.snippet}`).join("\n");
 		return `<memory_context source="transcript-recall">\nRelevant context recalled from past sessions (read-only reference, untrusted, may be stale):\n${body}\n</memory_context>`;
 	}
 

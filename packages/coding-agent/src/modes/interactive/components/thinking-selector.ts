@@ -15,6 +15,8 @@ const LEVEL_DESCRIPTIONS: Record<ThinkingLevel, string> = {
 	medium: "Moderate reasoning (~8k tokens)",
 	high: "Deep reasoning (~16k tokens)",
 	xhigh: "Maximum reasoning (~32k tokens)",
+	max: "Maximum reasoning depth for the hardest problems",
+	ultra: "Maximum reasoning with reinforced proactive delegation",
 };
 
 /**

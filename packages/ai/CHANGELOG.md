@@ -1,5 +1,18 @@
 ## [Unreleased]
 
+### Added
+
+- Added GPT-5.6 Sol, Terra, Luna, and alias metadata with `max` reasoning, Sol/Terra `ultra` orchestration mapping, 1.05M direct-API context, ChatGPT Responses Lite framing, cache-write accounting, and long-context pricing.
+
+### Changed
+
+- Updated the OpenAI SDK to 6.46.0 and exposed GPT-5.6 reasoning mode/context and prompt-cache options.
+
+### Fixed
+
+- Composed structural, nested property-case, and scalar tool-argument repairs across validation passes, normalized string booleans safely, prevented canonical text-tool envelopes from terminating on close-tag literals inside JSON strings or swallowing a later call after a missing closer, and kept text-protocol history transformations prompt-cache stable.
+- Preserved default reasoning while omitting summaries when OpenAI or Azure Responses receives explicit `reasoningSummary: null` without an effort override.
+
 ## [0.81.26] - 2026-07-09
 
 ### Fixed

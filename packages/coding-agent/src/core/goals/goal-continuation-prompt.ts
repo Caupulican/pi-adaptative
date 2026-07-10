@@ -1,3 +1,4 @@
+import { wrapUntrustedText } from "../security/untrusted-boundary.ts";
 import type { GoalRuntimeSnapshot } from "./goal-runtime-snapshot.ts";
 
 export interface GoalContinuationPromptLimits {
@@ -135,10 +136,15 @@ export function buildGoalContinuationPrompt(args: {
 
 	if (workers.length > 0) {
 		out.push("Worker Results:");
-		const limit = limits.maxWorkerResults;
-		const toShow = workers.slice(0, limit);
+		const limit = Math.max(0, Math.floor(limits.maxWorkerResults));
+		const toShow = limit > 0 ? workers.slice(-limit) : [];
 		for (const w of toShow) {
-			out.push(`- ${w.requestId} [${w.status}]: ${truncateField(w.summary)}`);
+			out.push(
+				wrapUntrustedText(
+					`- ${truncateField(w.requestId)} [${w.status}]: ${truncateField(w.summary)}`,
+					"goal-continuation-worker-result",
+				),
+			);
 		}
 		if (workers.length > limit) {
 			out.push(`... ${workers.length - limit} more worker results omitted`);

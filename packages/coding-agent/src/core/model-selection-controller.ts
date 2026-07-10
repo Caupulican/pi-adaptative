@@ -45,6 +45,8 @@ export interface ModelSelectionControllerDeps {
 	getActiveToolNames(): string[];
 	setActiveToolsByName(toolNames: string[]): void;
 	getModelCapabilityProfile(): ModelCapabilityProfile;
+	/** Rebuild the base prompt after a live orchestration-level change without altering requested tools. */
+	refreshBaseSystemPrompt(): void;
 	/** Session event emit (warnings + thinking_level_changed; model_select goes via the extension runner). */
 	emit(event: AgentSessionEvent): void;
 	/** Context-window-usage warning check (session-owned, compaction-adjacent). */
@@ -97,13 +99,17 @@ export class ModelSelectionController {
 
 		// Re-clamp thinking level for new model's capabilities
 		this.setThinkingLevel(thinkingLevel, { persistSettings });
+		this._resyncToolSurfaceForModel();
 
 		await this._emitModelSelect(model, previousModel, "set");
 		this.deps.checkContextWindowUsageWarning();
 		await this._warnIfManualModelChoiceIsRisky(model);
+	}
 
+	private _resyncToolSurfaceForModel(): void {
 		// Re-derive the model-capability tool surface for the new model (restores the full requested
-		// set when moving small -> large, reduces it when moving large -> small).
+		// set when moving small -> large, reduces it when moving large -> small). Every switch path,
+		// including model cycling and RPC commands that delegate to it, must pass through this seam.
 		const requestedActiveToolNames = this.deps.getRequestedActiveToolNames();
 		if (requestedActiveToolNames) {
 			const before = this.deps.getActiveToolNames().join(",");
@@ -202,6 +208,7 @@ export class ModelSelectionController {
 		// - Undefined scoped model thinking level inherits the current session preference
 		// setThinkingLevel clamps to model capabilities.
 		this.setThinkingLevel(thinkingLevel);
+		this._resyncToolSurfaceForModel();
 
 		await this._emitModelSelect(next.model, currentModel, "cycle");
 
@@ -230,6 +237,7 @@ export class ModelSelectionController {
 
 		// Re-clamp thinking level for new model's capabilities
 		this.setThinkingLevel(thinkingLevel);
+		this._resyncToolSurfaceForModel();
 
 		await this._emitModelSelect(nextModel, currentModel, "cycle");
 
@@ -256,6 +264,7 @@ export class ModelSelectionController {
 		this.deps.getAgent().state.thinkingLevel = effectiveLevel;
 
 		if (isChanging) {
+			this.deps.refreshBaseSystemPrompt();
 			this.deps.getSessionManager().appendThinkingLevelChange(effectiveLevel);
 			if (persistSettings && (this.supportsThinking() || effectiveLevel !== "off")) {
 				this.deps.getSettingsManager().setDefaultThinkingLevel(effectiveLevel);

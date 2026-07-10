@@ -166,6 +166,37 @@ describe("text tool-call protocol", () => {
 		expect(parsed.calls.map((call) => call.arguments.value)).toEqual(["a", "b"]);
 	});
 
+	it("does not terminate a canonical envelope on a close-tag literal inside JSON", () => {
+		const parsed = parseTextToolCalls('<pi:call name="echo">{"value":"literal </pi:call> text"}</pi:call>', [
+			makeTool(),
+		]);
+
+		expect(parsed).toMatchObject({
+			attempted: true,
+			text: "",
+			calls: [
+				{
+					name: "echo",
+					arguments: { value: "literal </pi:call> text" },
+					source: "text-protocol",
+				},
+			],
+		});
+	});
+
+	it("does not let an unclosed call consume the next call's closer", () => {
+		const parsed = parseTextToolCalls('<pi:call name="a">{"x":1}<pi:call name="b">{"x":2}</pi:call>', [
+			makeTool("a"),
+			makeTool("b"),
+		]);
+
+		expect(parsed).toMatchObject({ attempted: true, text: "" });
+		expect(parsed.calls.map((call) => ({ name: call.name, arguments: call.arguments }))).toEqual([
+			{ name: "a", arguments: { x: 1 } },
+			{ name: "b", arguments: { x: 2 } },
+		]);
+	});
+
 	it("turns unknown tools and malformed known envelopes into bouncable tool calls", () => {
 		const tools = [makeTool("echo"), makeTool("read")];
 		const unknown = parseTextToolCalls('<pi:call name="missing">{"value":"hi"}</pi:call>', tools);
@@ -266,6 +297,42 @@ describe("text tool-call protocol", () => {
 		expect(unchanged.content).toMatchObject([
 			{ type: "text", text: '<pi:call name="echo">{"value":"hi"}</pi:call>' },
 		]);
+	});
+
+	it("keeps transformed historical user turns stable for prompt-cache reuse", async () => {
+		const registration = registerFauxProvider();
+		registrations.push(registration);
+		const tools = [makeTool()];
+		const captured: Context[] = [];
+		registration.setResponses([
+			(context) => {
+				captured.push(context);
+				return fauxAssistantMessage("first done");
+			},
+			(context) => {
+				captured.push(context);
+				return fauxAssistantMessage("second done");
+			},
+		]);
+		const firstUser = { role: "user" as const, content: "first", timestamp: 1 };
+		const first = await complete(
+			registration.getModel(),
+			{ systemPrompt: "base", messages: [firstUser], tools },
+			{ textToolCallProtocol: true },
+		);
+
+		await complete(
+			registration.getModel(),
+			{
+				systemPrompt: "base",
+				messages: [firstUser, first, { role: "user", content: "second", timestamp: 2 }],
+				tools,
+			},
+			{ textToolCallProtocol: true },
+		);
+
+		expect(captured).toHaveLength(2);
+		expect(captured[0]?.messages[1]).toEqual(captured[1]?.messages[1]);
 	});
 
 	it("parses text envelopes from thinking plus text done messages", async () => {

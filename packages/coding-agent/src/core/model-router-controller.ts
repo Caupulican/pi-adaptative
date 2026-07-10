@@ -678,55 +678,57 @@ export class ModelRouterController {
 			this._modelRouterSessionBuffer = createModelRouterSessionBuffer();
 			this._modelRouterEscalationRequested = false;
 		}
-		if (!modelsAreEqual(this.deps.getModel(), routedModel)) {
+		const routerThinkingSettings = this.deps.getSettingsManager().getModelRouterSettings();
+		const configuredThinking = !routeDecision
+			? undefined
+			: routeDecision.reasonCode === "executor_direct"
+				? routerThinkingSettings.executorThinking
+				: routeDecision.tier === "cheap"
+					? routerThinkingSettings.cheapThinking
+					: routeDecision.tier === "medium"
+						? routerThinkingSettings.mediumThinking
+						: routeDecision.tier === "expensive"
+							? routerThinkingSettings.expensiveThinking
+							: undefined;
+		const routedThinkingLevel = clampThinkingLevel(
+			routedModel,
+			configuredThinking ?? previousThinkingLevel,
+		) as ThinkingLevel;
+		const modelChanged = !modelsAreEqual(this.deps.getModel(), routedModel);
+		const thinkingChanged = routedThinkingLevel !== previousThinkingLevel;
+		if (modelChanged || thinkingChanged) {
 			agent.state.model = routedModel;
 			// Per-tier thinking (R1): a configured tier/executor thinking level overrides the inherited
 			// session thinking for THIS routed turn only; unset falls back to exactly today's
 			// inherit-and-clamp behavior. Executor routes carry tier "cheap" too, so reasonCode is
 			// checked first — otherwise an executor turn would silently pick up cheapThinking instead.
 			// The judge's own completion has a separate knob (judgeThinking) applied at its call site.
-			const routerThinkingSettings = this.deps.getSettingsManager().getModelRouterSettings();
-			const configuredThinking = !routeDecision
-				? undefined
-				: routeDecision.reasonCode === "executor_direct"
-					? routerThinkingSettings.executorThinking
-					: routeDecision.tier === "cheap"
-						? routerThinkingSettings.cheapThinking
-						: routeDecision.tier === "medium"
-							? routerThinkingSettings.mediumThinking
-							: routeDecision.tier === "expensive"
-								? routerThinkingSettings.expensiveThinking
-								: undefined;
-			agent.state.thinkingLevel = clampThinkingLevel(
-				routedModel,
-				configuredThinking ?? previousThinkingLevel,
-			) as ThinkingLevel;
+			agent.state.thinkingLevel = routedThinkingLevel;
 			// G4: capability tool-filtering follows the ROUTED model for the turn. Without this a
 			// cheap/local routed model inherits the session model's full tool surface — schemas it
 			// pays for on every request and may not be able to drive at all.
-			const routedProfile = deriveModelCapabilityProfile({
-				contextWindow: routedModel.contextWindow,
-				mode: this.deps.getSettingsManager().getModelCapabilitySettings().mode,
-			});
-			if (routedProfile.class !== "full") {
-				const allowed = new Set(
-					filterToolNamesForCapability(
-						previousTurnTools.map((tool) => tool.name),
-						routedProfile,
-					),
-				);
-				swappedTools = previousTurnTools.filter((tool) => allowed.has(tool.name));
-				agent.state.tools = swappedTools;
-				// G4: the system prompt follows the ROUTED model's filtered surface too — otherwise the
-				// cheap/local model is billed for (and told about) tool guidelines/snippets it can't call.
-				// Per-turn only; restored in the finally. A live extension override of the prompt is left
-				// alone (only shed when we're on the base prompt).
-				if (agent.state.systemPrompt === this.deps.getBaseSystemPrompt()) {
-					swappedSystemPrompt = this.deps.buildSystemPromptForToolNames(
-						agent.state.tools.map((tool) => tool.name),
+			if (modelChanged) {
+				const routedProfile = deriveModelCapabilityProfile({
+					contextWindow: routedModel.contextWindow,
+					mode: this.deps.getSettingsManager().getModelCapabilitySettings().mode,
+				});
+				if (routedProfile.class !== "full") {
+					const allowed = new Set(
+						filterToolNamesForCapability(
+							previousTurnTools.map((tool) => tool.name),
+							routedProfile,
+						),
 					);
-					agent.state.systemPrompt = swappedSystemPrompt;
+					swappedTools = previousTurnTools.filter((tool) => allowed.has(tool.name));
+					agent.state.tools = swappedTools;
 				}
+			}
+			// The routed prompt follows both the routed tool surface and its effective thinking mode.
+			// This removes an Ultra policy during max/Luna routes, including same-model tier overrides.
+			// Per-turn only; a live extension override is preserved rather than silently replaced.
+			if (agent.state.systemPrompt === this.deps.getBaseSystemPrompt()) {
+				swappedSystemPrompt = this.deps.buildSystemPromptForToolNames(agent.state.tools.map((tool) => tool.name));
+				agent.state.systemPrompt = swappedSystemPrompt;
 			}
 		}
 		try {

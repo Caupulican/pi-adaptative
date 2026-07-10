@@ -45,13 +45,29 @@ export function calculateCost<TApi extends Api>(
 	usage.cost.output = (model.cost.output / 1000000) * usage.output;
 	usage.cost.cacheRead = (model.cost.cacheRead / 1000000) * usage.cacheRead;
 	usage.cost.cacheWrite = (model.cost.cacheWrite / 1000000) * usage.cacheWrite;
+	const longContextPricing = model.longContextPricing;
+	if (longContextPricing && usage.input + usage.cacheRead + usage.cacheWrite > longContextPricing.thresholdTokens) {
+		usage.cost.input *= longContextPricing.inputMultiplier;
+		usage.cost.cacheRead *= longContextPricing.inputMultiplier;
+		usage.cost.cacheWrite *= longContextPricing.inputMultiplier;
+		usage.cost.output *= longContextPricing.outputMultiplier;
+	}
 	if (!options.providerSuppliedTotal) {
 		usage.cost.total = usage.cost.input + usage.cost.output + usage.cost.cacheRead + usage.cost.cacheWrite;
 	}
 	return usage.cost;
 }
 
-const EXTENDED_THINKING_LEVELS: ModelThinkingLevel[] = ["off", "minimal", "low", "medium", "high", "xhigh"];
+const EXTENDED_THINKING_LEVELS: ModelThinkingLevel[] = [
+	"off",
+	"minimal",
+	"low",
+	"medium",
+	"high",
+	"xhigh",
+	"max",
+	"ultra",
+];
 
 export function getSupportedThinkingLevels<TApi extends Api>(model: Model<TApi>): ModelThinkingLevel[] {
 	if (!model.reasoning) return ["off"];
@@ -59,7 +75,7 @@ export function getSupportedThinkingLevels<TApi extends Api>(model: Model<TApi>)
 	return EXTENDED_THINKING_LEVELS.filter((level) => {
 		const mapped = model.thinkingLevelMap?.[level];
 		if (mapped === null) return false;
-		if (level === "xhigh") return mapped !== undefined;
+		if (level === "xhigh" || level === "max" || level === "ultra") return mapped !== undefined;
 		return true;
 	});
 }

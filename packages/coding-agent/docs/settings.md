@@ -19,7 +19,7 @@ Edit directly or use `/settings` for common options.
 |---------|------|---------|-------------|
 | `defaultProvider` | string | - | Default provider (e.g., `"anthropic"`, `"openai"`) |
 | `defaultModel` | string | - | Default model ID |
-| `defaultThinkingLevel` | string | - | `"off"`, `"minimal"`, `"low"`, `"medium"`, `"high"`, `"xhigh"` |
+| `defaultThinkingLevel` | string | model default | `"off"`, `"minimal"`, `"low"`, `"medium"`, `"high"`, `"xhigh"`, `"max"`, or `"ultra"` |
 | `hideThinkingBlock` | boolean | `false` | Hide thinking blocks in output |
 | `thinkingBudgets` | object | - | Custom token budgets per thinking level |
 
@@ -146,6 +146,21 @@ Fitness applicability is intentionally split by autonomy level:
 }
 ```
 
+### Worker Delegation
+
+Delegation is available by default when the active model and UAC tool surface support it. Ultra reinforces proactive use but does not own or unlock the capability. Each worker gets a fresh classified tool surface (`read`, `grep`, `find`, and `ls`); its shipped profile filters those names with the same glob semantics as foreground UAC. `delegate`, shell, memory/lifecycle tools, and opaque extension tools are never inherited into the child. Workers remain read-only unless the write toggle, a non-empty path scope, and the shipped profile all grant `write` or `edit`.
+
+| Setting | Type | Default | Description |
+|---------|------|---------|-------------|
+| `workerDelegation.enabled` | boolean | `true` | Enable bounded delegation on capability-eligible models; explicit `false` is a hard off-switch |
+| `workerDelegation.model` | string | active model | Optional worker model pattern |
+| `workerDelegation.profile` | string | - | Complete situation profile shipped with the worker; named and workspace-relative (`./`/`../`) references are supported |
+| `workerDelegation.maxUsd` | number | `0.5` | Maximum estimated USD per worker, clamped to 0-5 and to the parent envelope |
+| `workerDelegation.maxWallClockMs` | number | `120000` | Per-worker wall-clock budget; `0` disables this bound |
+| `workerDelegation.maxConcurrent` | number | `1` | Concurrent worker limit, clamped to 1-3 |
+| `workerDelegation.writeEnabled` | boolean | `false` | Make `write`/`edit` eligible only when `writePaths` is non-empty and the lane profile grants them |
+| `workerDelegation.writePaths` | string[] | `[]` | Relative or absolute path roots enforced for direct child tools and structured-action fallback writes |
+
 ### Tool Repair
 
 | Setting | Type | Default | Description |
@@ -216,6 +231,7 @@ When enabled, Auto Learn keeps a small shared state file for visibility/cooldown
 | `compaction.model` | string | `"auto"` | Summarizer model pattern. `auto` follows router cheap when available, but always consults exhausted-provider state and the subtractive `digest` fitness surface before falling back visibly to the session model. |
 | `compaction.reserveTokens` | number | `16384` | Tokens reserved for LLM response |
 | `compaction.keepRecentTokens` | number | `20000` | Recent tokens to keep (not summarized) |
+| `compaction.triggerPercent` | number | `0.7` | Context-efficiency trigger as a fraction of the model window; separate from the USD cost guard |
 
 ```json
 {
@@ -226,6 +242,15 @@ When enabled, Auto Learn keeps a small shared state file for visibility/cooldown
   }
 }
 ```
+
+### Cost Guard
+
+| Setting | Type | Default | Description |
+|---------|------|---------|-------------|
+| `costGuard.maxTurnUsd` | number | `2.5` | Projected per-turn USD warning ceiling; `0` disables the guard |
+| `costGuard.action` | string | `"warn"` | `"warn"` only reports the estimate; `"downgrade"` also lowers reasoning one rung for that request without changing saved/profile state |
+
+The projection uses the session response reserve, cached-input rates, and model-declared long-context tiers. ChatGPT subscription usage is marked `(sub)` and does not enter the USD guard.
 
 ### Context GC
 
@@ -264,8 +289,9 @@ Semantic memory packing only targets tool results and Automata/Mind custom conte
 | `contextPolicy.memory.enabled` | boolean | `true` | Enable local safe-auto memory retrieval |
 | `contextPolicy.memory.includeInPrompt` | boolean | `true` | Include retrieved memory only when the active model budget permits it |
 | `contextPolicy.memory.maxResults` | number | `5` | Maximum retrieval results before tier/budget pruning; clamped to 1-20 |
+| `contextPolicy.memory.allowExternalEgress` | boolean | `false` | Explicitly allow eligible external memory providers to receive bounded, non-secret-like query text |
 
-For models with `contextWindow <= 2048`, provider-visible memory is capped to 10 lines and about 200 estimated tokens total. If standing/current-work/long-term memory cannot fit that cap, Pi skips the memory block rather than overflowing context. `MEMORY.md`/`USER.md` stay in the static file-store prompt on normal windows; Pi uses the retrieval view for those files only when that static block cannot fit a compact model budget, avoiding duplicate prompt content. Custom local memory layers, such as Automata, should register a context provider with `pi.registerContextMemoryProvider`; core ships only local file-store and OKF readers. Long-term providers remain local-only by default; external memory egress requires explicit policy.
+For models with `contextWindow <= 2048`, provider-visible memory is capped to 10 lines and about 200 estimated tokens total. If standing/current-work/long-term memory cannot fit that cap, Pi skips the memory block rather than overflowing context. `MEMORY.md`/`USER.md` stay in the static file-store prompt on normal windows; Pi uses the retrieval view for those files only when that static block cannot fit a compact model budget, avoiding duplicate prompt content. Custom local memory layers, such as Automata, should register a context provider with `pi.registerContextMemoryProvider`; core ships only local file-store and OKF readers. Legacy providers must declare `egress: "local"` to participate in safe-auto recall; omitted classifications fail closed as external. External memory egress requires the visible `/settings` consent or `allowExternalEgress: true`, remains bounded to 2,000 characters, and rejects labeled credentials, bearer/basic tokens, common raw provider tokens, private keys, and signed URLs. Every legacy provider recall page is centrally source-labeled and fenced as untrusted data. Live extension load/unload immediately rebuilds the memory generation, activating new providers and shutting down/removing only those owned by the unloaded extension.
 
 ```json
 {
@@ -273,7 +299,8 @@ For models with `contextWindow <= 2048`, provider-visible memory is capped to 10
     "memory": {
       "enabled": true,
       "includeInPrompt": true,
-      "maxResults": 5
+      "maxResults": 5,
+      "allowExternalEgress": false
     }
   }
 }
@@ -323,7 +350,7 @@ Keep `retry.provider.maxRetries` at `0` unless provider-level retries are explic
 | `steeringMode` | string | `"one-at-a-time"` | How steering messages are sent: `"all"` or `"one-at-a-time"` |
 | `followUpMode` | string | `"one-at-a-time"` | How follow-up messages are sent: `"all"` or `"one-at-a-time"` |
 | `transport` | string | `"auto"` | Preferred transport for providers that support multiple transports: `"sse"`, `"websocket"`, `"websocket-cached"`, or `"auto"` |
-| `httpIdleTimeoutMs` | number | `300000` | HTTP header/body idle timeout in milliseconds, also used by providers with explicit stream idle timeouts. Set to `0` to disable. |
+| `httpIdleTimeoutMs` | number | `660000` | HTTP header/body idle timeout. Nonzero values constrain every phase-aware stream watchdog below the transport timeout; `0` disables only the HTTP bound. |
 | `websocketConnectTimeoutMs` | number | `15000` | WebSocket connect/open handshake timeout in milliseconds for providers that support WebSocket transports. Set to `0` to disable. |
 
 ### Terminal & Images
@@ -396,8 +423,8 @@ Paths in `~/.pi/agent/settings.json` resolve relative to `~/.pi/agent`. Paths in
 | `prompts` | string[] | `[]` | Local prompt template paths or directories |
 | `themes` | string[] | `[]` | Local theme file paths or directories |
 | `enableSkillCommands` | boolean | `true` | Register skills as `/skill:name` commands |
-| `resourceProfiles` | object | `{}` | Named resource allow/block filters for `extensions`, `skills`, `prompts`, `themes`, `agents`, and `tools` |
-| `~/.pi/agent/profiles/*.json` | files | - | Reusable named profile definitions with optional model/thinking metadata |
+| `resourceProfiles` | object | `{}` | Named complete situations or legacy allow/block filters for `extensions`, `skills`, `prompts`, `themes`, `agents`, and `tools` |
+| `~/.pi/agent/profiles/*.json` | files | - | Reusable named situations with model, thinking, soul, router, and resource metadata |
 | `activeResourceProfile` | string/string[] | - | Active profile name(s) |
 | `activeResourceProfiles` | string[] | - | Active profile names; equivalent to array form of `activeResourceProfile` |
 | `disabledResources` | object | `{}` | Legacy block filters; still supported and merged into resource profiles |
@@ -432,7 +459,7 @@ See [packages.md](packages.md) for package management details.
 
 #### resourceProfiles
 
-Resource profiles dynamically filter resources after discovery. Each resource kind supports `allow` and `block` arrays. If `allow` is non-empty, only matching resources load; `block` is applied after allow. Patterns match relative paths, absolute paths, file names, and containing directory names.
+Resource profiles dynamically filter resources after discovery. Each resource kind supports `allow` and `block` arrays. If `allow` is non-empty, only matching resources load; `block` is applied after allow. Under strict UAC, an unmentioned kind is denied and granting an entire kind requires `allow: ["*"]`. Patterns match relative paths, absolute paths, file names, and containing directory names.
 
 ```json
 {

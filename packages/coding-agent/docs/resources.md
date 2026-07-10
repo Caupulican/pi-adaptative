@@ -38,14 +38,18 @@ When no source or profile exists yet, the hub surfaces a first-run nudge — **"
 
 ## Resource profiles
 
-A profile is an allow/block contract over six kinds: `extensions`, `skills`, `prompts`, `themes`, `agents`, and `tools`. Each kind takes glob-style patterns:
+A profile is a complete allow/block contract over six kinds: `extensions`, `skills`, `prompts`, `themes`, `agents`, and `tools`. Each kind takes glob-style patterns:
 
 - **`allow`** — when non-empty, only matching resources of that kind stay available.
 - **`block`** — removed after `allow` is applied.
 
-Empty `allow` means "allow all of this kind." `block: ["*"]` means "none."
+Under strict UAC, an unmentioned kind is denied. Granting every resource of a kind must be explicit with `allow: ["*"]`; `block: ["*"]` means "none." This keeps a saved situation exact when new extensions, tools, or other resources are installed later.
 
-A profile may also bind a **model**, **thinking level**, and **modelRouter** block that apply when the profile is active. Thinking is one of `off`, `minimal`, `low`, `medium`, `high`, `xhigh`. Explicit CLI flags still win over a profile's foreground model/thinking, which in turn win over the settings default. A profile's `modelRouter` block overrides the matching global/project router fields while that situation is active, including the background learning/reflection model.
+A profile may also bind a **model**, **thinking level**, **soul**, and **modelRouter** block that apply when the profile is active. Thinking is one of `off`, `minimal`, `low`, `medium`, `high`, `xhigh`, `max`, or `ultra`. Ultra uses the model's strongest mapped reasoning level and reinforces proactive delegation when the `delegate` tool is granted; delegation itself remains available independently on capable models. Explicit CLI flags still win over a profile's foreground model/thinking, which in turn win over the settings default. A profile's `modelRouter` block overrides matching global/project router fields while that situation is active.
+
+Pi activates the complete situation as one runtime generation: model/router, thinking, soul, extensions, skills, prompts, agents, themes, and tools are reloaded together. A failed reload restores the prior valid generation instead of persisting a partial selection.
+
+Built-in research and worker lanes also ship a profile as one unit: its model, thinking, soul, and tool filter govern the isolated child loop. Lane tool globs expand to exact names over Pi's classified lane surface. Research can receive only `read`, `grep`, `find`, and `ls`; workers can additionally receive `write` and `edit` only with the explicit write setting and path roots. Recursive delegation, shell, memory/lifecycle tools, and extension tools without capability metadata stay fail-closed. A concrete profile grant that cannot bind to this classified surface produces a deduplicated warning instead of silently gaining authority.
 
 Profiles are stored in settings under `resourceProfiles`, and the active one(s) in `activeResourceProfile`:
 
@@ -53,15 +57,19 @@ Profiles are stored in settings under `resourceProfiles`, and the active one(s) 
 {
   "resourceProfiles": {
     "review": {
-      "tools": { "allow": ["read", "grep", "find", "ls", "bash"] },
-      "extensions": { "block": ["*"] }
+      "thinking": "high",
+      "soul": "Review carefully and do not edit files.",
+      "resources": {
+        "tools": { "allow": ["read", "grep", "find", "ls", "bash"] },
+        "extensions": { "block": ["*"] }
+      }
     }
   },
   "activeResourceProfile": "review"
 }
 ```
 
-`activeResourceProfile` accepts a single name or an array; multiple active profiles are merged. Switch the active profile any time with `/profiles`.
+`activeResourceProfile` accepts a single name or an array; multiple active profiles are merged. Legacy resource-only entries without the `resources` wrapper remain accepted. Switch the active profile any time with `/profiles`.
 
 > The older `disabledResources` block lists still work as a simple reversible "turn these off" filter. Profiles are the richer, named, reusable form.
 
@@ -169,7 +177,7 @@ Back up your personal configuration — profile definitions and resource setting
 /config-restore my.json    # merges it back, after confirmation
 ```
 
-The backup bundles your profiles and the resource settings (`resourceProfiles`, `activeResourceProfile`, `externalResourceRoots`, `trustedResourceRoots`). It does **not** copy the catalog itself — that is what your git repository is for.
+The backup bundles complete profile situations and resource settings (`resourceProfiles`, `activeResourceProfile`, `externalResourceRoots`, `trustedResourceRoots`). It does **not** copy the catalog itself — that is what your git repository is for.
 
 > **Security:** restore is deliberately cautious. Restored external roots come back **untrusted**, so a new machine re-prompts before any code loads, and restore confirms before overwriting existing local config.
 

@@ -117,7 +117,9 @@ describe("MemoryController context retrieval", () => {
 		const report = await controller.runMemoryRetrieval([userMessage("hello")]);
 
 		expect(report.providerReports.map((entry) => entry.providerId)).toContain("pi-file-store");
-		expect(report.contextItems.some((item) => (item.summary ?? "").includes("User prefers compact memory line "))).toBe(true);
+		expect(
+			report.contextItems.some((item) => (item.summary ?? "").includes("User prefers compact memory line ")),
+		).toBe(true);
 	});
 
 	it("adds current-work memory to the prompt even without retrieval hits", () => {

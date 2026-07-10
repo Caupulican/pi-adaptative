@@ -3,7 +3,8 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { SessionManager } from "@caupulican/pi-agent-core/node";
 import { getModel } from "@caupulican/pi-ai";
-import { afterEach, beforeEach, describe, expect, it } from "vitest";
+import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
+import { createAgentSessionFromServices, createAgentSessionServices } from "../src/core/agent-session-services.ts";
 import { DefaultResourceLoader } from "../src/core/resource-loader.ts";
 import { createAgentSession } from "../src/core/sdk.ts";
 import { SettingsManager } from "../src/core/settings-manager.ts";
@@ -134,6 +135,121 @@ describe("AgentSession reload re-applies the active profile's model/thinking", (
 		await session.reload();
 		expect(session.thinkingLevel).toBe("medium");
 
+		session.dispose();
+	});
+
+	it("loads settings exactly once and does not persist profile thinking as the global default", async () => {
+		writeFileSync(
+			join(agentDir, "settings.json"),
+			JSON.stringify({ activeResourceProfile: "p", defaultThinkingLevel: "low" }),
+			"utf-8",
+		);
+		writeProfileModel("anthropic/claude-haiku-4-5", "high");
+		const settingsManager = SettingsManager.create(tempDir, agentDir);
+		const resourceLoader = new DefaultResourceLoader({ cwd: tempDir, agentDir, settingsManager });
+		await resourceLoader.reload();
+		const { session } = await createAgentSession({
+			cwd: tempDir,
+			agentDir,
+			settingsManager,
+			sessionManager: SessionManager.inMemory(),
+			resourceLoader,
+		});
+		const reloadSettings = vi.spyOn(settingsManager, "reload");
+
+		await session.reload();
+
+		expect(reloadSettings).toHaveBeenCalledTimes(1);
+		expect(session.thinkingLevel).toBe("high");
+		expect(settingsManager.getGlobalSettings().defaultThinkingLevel).toBe("low");
+		session.dispose();
+	});
+
+	it("preserves non-explicit model and thinking provenance through the services startup path", async () => {
+		writeProfileModel("anthropic/claude-haiku-4-5", "low");
+		const settingsManager = SettingsManager.create(tempDir, agentDir);
+		const services = await createAgentSessionServices({ cwd: tempDir, agentDir, settingsManager });
+		const { session } = await createAgentSessionFromServices({
+			services,
+			sessionManager: SessionManager.inMemory(),
+			model: getModel("anthropic", "claude-haiku-4-5")!,
+			thinkingLevel: "low",
+			isExplicitModel: false,
+			isExplicitThinking: false,
+		});
+
+		writeProfileModel("anthropic/claude-sonnet-4-5", "high");
+		await session.reload();
+
+		expect(session.model?.id).toBe("claude-sonnet-4-5");
+		expect(session.thinkingLevel).toBe("high");
+		session.dispose();
+	});
+
+	it("serializes a follow-up reload when settings mutate during an active generation", async () => {
+		writeFileSync(
+			join(agentDir, "settings.json"),
+			JSON.stringify({
+				activeResourceProfiles: ["p"],
+				resourceProfiles: {
+					p: {
+						model: "anthropic/claude-haiku-4-5",
+						thinking: "low",
+						resources: {},
+					},
+				},
+			}),
+			"utf-8",
+		);
+		const settingsManager = SettingsManager.create(tempDir, agentDir);
+		const resourceLoader = new DefaultResourceLoader({ cwd: tempDir, agentDir, settingsManager });
+		await resourceLoader.reload();
+		const { session } = await createAgentSession({
+			cwd: tempDir,
+			agentDir,
+			settingsManager,
+			sessionManager: SessionManager.inMemory(),
+			resourceLoader,
+		});
+		let releaseFirstReload!: () => void;
+		let firstSettingsRead!: () => void;
+		const firstSettingsReadPromise = new Promise<void>((resolve) => {
+			firstSettingsRead = resolve;
+		});
+		const releaseFirstReloadPromise = new Promise<void>((resolve) => {
+			releaseFirstReload = resolve;
+		});
+		const reloadSettingsOriginal = settingsManager.reload.bind(settingsManager);
+		const reloadSettings = vi.spyOn(settingsManager, "reload");
+		reloadSettings.mockImplementationOnce(async () => {
+			await reloadSettingsOriginal();
+			firstSettingsRead();
+			await releaseFirstReloadPromise;
+		});
+
+		const firstReload = session.reload();
+		await firstSettingsReadPromise;
+		writeFileSync(
+			join(agentDir, "settings.json"),
+			JSON.stringify({
+				activeResourceProfiles: ["p"],
+				resourceProfiles: {
+					p: {
+						model: "anthropic/claude-sonnet-4-5",
+						thinking: "high",
+						resources: {},
+					},
+				},
+			}),
+			"utf-8",
+		);
+		const followUpReload = session.reload();
+		releaseFirstReload();
+		await Promise.all([firstReload, followUpReload]);
+
+		expect(reloadSettings).toHaveBeenCalledTimes(2);
+		expect(session.model?.id).toBe("claude-sonnet-4-5");
+		expect(session.thinkingLevel).toBe("high");
 		session.dispose();
 	});
 });

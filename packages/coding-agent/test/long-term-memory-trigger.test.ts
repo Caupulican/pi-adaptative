@@ -1,6 +1,6 @@
 import { describe, expect, it } from "vitest";
-import { resolveMemoryPromptBudget } from "../src/core/context/memory-prompt-budget.ts";
 import { shouldQueryLongTermMemory } from "../src/core/context/long-term-memory-trigger.ts";
+import { resolveMemoryPromptBudget } from "../src/core/context/memory-prompt-budget.ts";
 
 describe("shouldQueryLongTermMemory", () => {
 	it("fires for explicit recall and durable identifiers", () => {
@@ -36,7 +36,9 @@ describe("shouldQueryLongTermMemory", () => {
 	});
 
 	it("fails closed on disabled budgets and secret-like queries", () => {
-		expect(shouldQueryLongTermMemory({ latestUserText: "recall", budget: resolveMemoryPromptBudget({}) })).toMatchObject({
+		expect(
+			shouldQueryLongTermMemory({ latestUserText: "recall", budget: resolveMemoryPromptBudget({}) }),
+		).toMatchObject({
 			shouldQuery: false,
 			reason: "budget_disabled",
 		});

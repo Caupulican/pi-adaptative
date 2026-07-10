@@ -6,7 +6,7 @@ import type { ModelRegistry } from "./model-registry.ts";
 import type { ModelRouterFailoverStatus } from "./model-router/status.ts";
 
 const DEFAULT_MODEL_PER_PROVIDER: Record<string, string> = {
-	"openai-codex": "gpt-5.5",
+	"openai-codex": "gpt-5.6-sol",
 };
 
 export class ExhaustedProviderRegistry {

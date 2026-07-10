@@ -23,7 +23,9 @@ describe("resolveMemoryPromptBudget", () => {
 	});
 
 	it("fails closed when there is no headroom", () => {
-		expect(resolveMemoryPromptBudget({ contextWindow: 1024, currentPromptTokens: 900, reservedTokens: 200 })).toMatchObject({
+		expect(
+			resolveMemoryPromptBudget({ contextWindow: 1024, currentPromptTokens: 900, reservedTokens: 200 }),
+		).toMatchObject({
 			enabled: false,
 			compact: true,
 			reason: "no_context_headroom",

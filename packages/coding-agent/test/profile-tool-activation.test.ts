@@ -77,4 +77,33 @@ describe("profile tool grants activate", () => {
 			session.dispose();
 		}
 	});
+
+	it("does not leak profile A's explicit activation into a later wildcard profile B", async () => {
+		const settingsManager = SettingsManager.create(tempDir, agentDir);
+		settingsManager.addInlineResourceProfileDefinitions({
+			explicit: { tools: { allow: ["grep"] } },
+			permissive: { tools: { allow: ["*"] } },
+		});
+		settingsManager.setRuntimeResourceProfiles(["explicit"]);
+		const resourceLoader = new DefaultResourceLoader({ cwd: tempDir, agentDir, settingsManager });
+		await resourceLoader.reload();
+		const { session } = await createAgentSession({
+			cwd: tempDir,
+			agentDir,
+			model: getModel("anthropic", "claude-sonnet-4-5")!,
+			settingsManager,
+			sessionManager: SessionManager.inMemory(),
+			resourceLoader,
+		});
+
+		try {
+			expect(session.getActiveToolNames()).toContain("grep");
+			settingsManager.setRuntimeResourceProfiles(["permissive"]);
+			await session.reload();
+			expect(session.getActiveToolNames()).not.toContain("grep");
+			expect(session.getActiveToolNames()).toContain("read");
+		} finally {
+			session.dispose();
+		}
+	});
 });

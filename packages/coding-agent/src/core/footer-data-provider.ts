@@ -133,7 +133,16 @@ export class FooterDataProvider {
 		if (snapshot === undefined) {
 			this.autonomyStatus = undefined;
 		} else {
-			this.autonomyStatus = formatAutonomyStatus(snapshot);
+			// Cost already has one compact, authoritative rendering in FooterComponent's
+			// stats line. Keep this provider scoped to autonomy-only status so the same
+			// CURRENT/TODAY/SUBAGENTS summary is not rendered again on a third line.
+			const footerSnapshot: AutonomyStatusSnapshot = { ...snapshot, costSummary: undefined };
+			const hasAutonomyStatus =
+				footerSnapshot.latestRoute !== undefined ||
+				footerSnapshot.latestGate !== undefined ||
+				footerSnapshot.activeGoal !== undefined ||
+				footerSnapshot.activeLaneCount !== undefined;
+			this.autonomyStatus = hasAutonomyStatus ? formatAutonomyStatus(footerSnapshot) : undefined;
 		}
 	}
 

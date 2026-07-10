@@ -78,6 +78,29 @@ describe("AgentSession model and extension characterization", () => {
 		expect(harness.session.cycleThinkingLevel()).toBeUndefined();
 	});
 
+	it("exposes and cycles explicitly supported max and ultra thinking levels", async () => {
+		const harness = await createHarness({ models: [{ id: "faux-1", reasoning: true }] });
+		harnesses.push(harness);
+		const model = harness.getModel("faux-1")!;
+		model.thinkingLevelMap = { xhigh: "xhigh", max: "max", ultra: "max" };
+
+		expect(harness.session.getAvailableThinkingLevels()).toEqual([
+			"off",
+			"minimal",
+			"low",
+			"medium",
+			"high",
+			"xhigh",
+			"max",
+			"ultra",
+		]);
+
+		harness.session.setThinkingLevel("xhigh");
+		expect(harness.session.cycleThinkingLevel()).toBe("max");
+		expect(harness.session.cycleThinkingLevel()).toBe("ultra");
+		expect(harness.session.thinkingLevel).toBe("ultra");
+	});
+
 	it("throws when setModel is called without configured auth", async () => {
 		const harness = await createHarness({
 			models: [

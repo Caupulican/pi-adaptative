@@ -8,6 +8,9 @@ export function buildBaseOptions(_model: Model<Api>, options?: SimpleStreamOptio
 		apiKey: apiKey || options?.apiKey,
 		transport: options?.transport,
 		cacheRetention: options?.cacheRetention,
+		reasoningMode: options?.reasoningMode,
+		reasoningContext: options?.reasoningContext,
+		promptCacheOptions: options?.promptCacheOptions,
 		sessionId: options?.sessionId,
 		headers: options?.headers,
 		onPayload: options?.onPayload,
@@ -20,8 +23,10 @@ export function buildBaseOptions(_model: Model<Api>, options?: SimpleStreamOptio
 	};
 }
 
-export function clampReasoning(effort: ThinkingLevel | undefined): Exclude<ThinkingLevel, "xhigh"> | undefined {
-	return effort === "xhigh" ? "high" : effort;
+export function clampReasoning(
+	effort: ThinkingLevel | undefined,
+): Exclude<ThinkingLevel, "xhigh" | "max" | "ultra"> | undefined {
+	return effort === "xhigh" || effort === "max" || effort === "ultra" ? "high" : effort;
 }
 
 export function adjustMaxTokensForThinking(

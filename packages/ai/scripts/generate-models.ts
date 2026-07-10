@@ -205,6 +205,10 @@ const OPENAI_RESPONSES_NONE_REASONING_MODELS = new Set([
 	"gpt-5.4-mini",
 	"gpt-5.4-nano",
 	"gpt-5.5",
+	"gpt-5.6",
+	"gpt-5.6-sol",
+	"gpt-5.6-terra",
+	"gpt-5.6-luna",
 ]);
 
 function mergeThinkingLevelMap(model: Model<any>, map: NonNullable<Model<any>["thinkingLevelMap"]>): void {
@@ -235,7 +239,19 @@ function supportsOpenAiXhigh(modelId: string): boolean {
 		modelId.includes("gpt-5.2") ||
 		modelId.includes("gpt-5.3") ||
 		modelId.includes("gpt-5.4") ||
-		modelId.includes("gpt-5.5")
+		modelId.includes("gpt-5.5") ||
+		modelId.includes("gpt-5.6")
+	);
+}
+
+function isOpenAiGpt56(modelId: string): boolean {
+	return modelId.includes("gpt-5.6");
+}
+
+function supportsPiUltra(model: Model<Api>): boolean {
+	return (
+		(model.provider === "openai" || model.provider === "openai-codex") &&
+		(model.id === "gpt-5.6" || model.id.includes("gpt-5.6-sol") || model.id.includes("gpt-5.6-terra"))
 	);
 }
 
@@ -297,7 +313,17 @@ function applyThinkingLevelMetadata(model: Model<any>): void {
 	if (supportsOpenAiXhigh(model.id)) {
 		mergeThinkingLevelMap(model, { xhigh: "xhigh" });
 	}
+	if (isOpenAiGpt56(model.id)) {
+		mergeThinkingLevelMap(model, { max: "max" });
+	}
+	if (supportsPiUltra(model)) {
+		// Ultra is pi-side proactive orchestration; GPT-5.6 receives max on the wire.
+		mergeThinkingLevelMap(model, { ultra: "max" });
+	}
 	if (model.provider === "openai" && model.id === "gpt-5.5") {
+		mergeThinkingLevelMap(model, { minimal: null });
+	}
+	if (model.provider === "openai" && isOpenAiGpt56(model.id)) {
 		mergeThinkingLevelMap(model, { minimal: null });
 	}
 	if (model.id.endsWith("gpt-5.5-pro")) {
@@ -342,6 +368,9 @@ function applyThinkingLevelMetadata(model: Model<any>): void {
 	}
 	if (model.provider === "openai-codex" && supportsOpenAiXhigh(model.id)) {
 		mergeThinkingLevelMap(model, { minimal: "low" });
+	}
+	if (model.provider === "openai-codex" && isOpenAiGpt56(model.id)) {
+		mergeThinkingLevelMap(model, { off: null, minimal: null });
 	}
 	if (model.provider === "openrouter" && model.id.startsWith("inception/mercury-2")) {
 		// Mercury 2 in instant mode (reasoning_effort: "none") disables tool calling.
@@ -1477,6 +1506,44 @@ async function generateModels() {
 		});
 	}
 
+	// GPT-5.6 public API metadata is kept explicit so the alias and the full family
+	// remain available even when models.dev is still rolling out catalogue updates.
+	const openAiGpt56Models = [
+		{ id: "gpt-5.6", name: "GPT-5.6", input: 5, output: 30, cacheRead: 0.5 },
+		{ id: "gpt-5.6-sol", name: "GPT-5.6 Sol", input: 5, output: 30, cacheRead: 0.5 },
+		{ id: "gpt-5.6-terra", name: "GPT-5.6 Terra", input: 2.5, output: 15, cacheRead: 0.25 },
+		{ id: "gpt-5.6-luna", name: "GPT-5.6 Luna", input: 1, output: 6, cacheRead: 0.1 },
+	] as const;
+	for (const spec of openAiGpt56Models) {
+		const metadata = {
+			name: spec.name,
+			reasoning: true,
+			defaultThinkingLevel: "medium" as const,
+			input: ["text", "image"] as ("text" | "image")[],
+			cost: {
+				input: spec.input,
+				output: spec.output,
+				cacheRead: spec.cacheRead,
+				cacheWrite: spec.input * 1.25,
+			},
+			contextWindow: 1_050_000,
+			longContextPricing: { thresholdTokens: 272_000, inputMultiplier: 2, outputMultiplier: 1.5 },
+			maxTokens: 128_000,
+		};
+		const existing = allModels.find((model) => model.provider === "openai" && model.id === spec.id);
+		if (existing) {
+			Object.assign(existing, metadata);
+		} else {
+			allModels.push({
+				id: spec.id,
+				api: "openai-responses",
+				baseUrl: "https://api.openai.com/v1",
+				provider: "openai",
+				...metadata,
+			});
+		}
+	}
+
 	// Add missing gpt models
 	if (!allModels.some(m => m.provider === "openai" && m.id === "gpt-5-chat-latest")) {
 		allModels.push({
@@ -1674,9 +1741,10 @@ async function generateModels() {
 
 	// OpenAI Codex (ChatGPT OAuth) models
 	// NOTE: These are not fetched from models.dev; we keep a small, explicit list to avoid aliases.
-	// Context window is based on observed server limits (400s above ~272k), not marketing numbers.
+	// Context windows follow the ChatGPT Codex catalogue, not public API limits.
 	const CODEX_BASE_URL = "https://chatgpt.com/backend-api";
 	const CODEX_CONTEXT = 272000;
+	const CODEX_GPT_5_6_CONTEXT = 372000;
 	const CODEX_SPARK_CONTEXT = 128000;
 	const CODEX_MAX_TOKENS = 128000;
 	const codexModels: Model<"openai-codex-responses">[] = [
@@ -1750,6 +1818,48 @@ async function generateModels() {
 			input: ["text", "image"],
 			cost: { input: 5, output: 30, cacheRead: 0.5, cacheWrite: 0 },
 			contextWindow: CODEX_CONTEXT,
+			maxTokens: CODEX_MAX_TOKENS,
+		},
+		{
+			id: "gpt-5.6-sol",
+			name: "GPT-5.6 Sol",
+			api: "openai-codex-responses",
+			provider: "openai-codex",
+			baseUrl: CODEX_BASE_URL,
+			reasoning: true,
+			defaultThinkingLevel: "low",
+			openaiResponsesLite: true,
+			input: ["text", "image"],
+			cost: { input: 5, output: 30, cacheRead: 0.5, cacheWrite: 6.25 },
+			contextWindow: CODEX_GPT_5_6_CONTEXT,
+			maxTokens: CODEX_MAX_TOKENS,
+		},
+		{
+			id: "gpt-5.6-terra",
+			name: "GPT-5.6 Terra",
+			api: "openai-codex-responses",
+			provider: "openai-codex",
+			baseUrl: CODEX_BASE_URL,
+			reasoning: true,
+			defaultThinkingLevel: "medium",
+			openaiResponsesLite: true,
+			input: ["text", "image"],
+			cost: { input: 2.5, output: 15, cacheRead: 0.25, cacheWrite: 3.125 },
+			contextWindow: CODEX_GPT_5_6_CONTEXT,
+			maxTokens: CODEX_MAX_TOKENS,
+		},
+		{
+			id: "gpt-5.6-luna",
+			name: "GPT-5.6 Luna",
+			api: "openai-codex-responses",
+			provider: "openai-codex",
+			baseUrl: CODEX_BASE_URL,
+			reasoning: true,
+			defaultThinkingLevel: "medium",
+			openaiResponsesLite: true,
+			input: ["text", "image"],
+			cost: { input: 1, output: 6, cacheRead: 0.1, cacheWrite: 1.25 },
+			contextWindow: CODEX_GPT_5_6_CONTEXT,
 			maxTokens: CODEX_MAX_TOKENS,
 		},
 	];
@@ -2037,7 +2147,13 @@ async function generateModels() {
 	allModels.push(...vertexModels);
 
 	const azureOpenAiModels: Model<Api>[] = allModels
-		.filter((model) => model.provider === "openai" && model.api === "openai-responses")
+		.filter(
+			(model) =>
+				model.provider === "openai" &&
+				model.api === "openai-responses" &&
+				// Azure availability is deployment-specific and is not yet documented for GPT-5.6.
+				!isOpenAiGpt56(model.id),
+		)
 		.map((model) => ({
 			...model,
 			api: "azure-openai-responses",
@@ -2101,8 +2217,17 @@ export const MODELS = {
 `;
 			}
 			output += `\t\t\treasoning: ${model.reasoning},\n`;
+			if (model.defaultThinkingLevel) {
+				output += `\t\t\tdefaultThinkingLevel: "${model.defaultThinkingLevel}",\n`;
+			}
 			if (model.thinkingLevelMap) {
 				output += `\t\t\tthinkingLevelMap: ${JSON.stringify(model.thinkingLevelMap)},\n`;
+			}
+			if (model.openaiResponsesLite) {
+				output += `\t\t\topenaiResponsesLite: true,\n`;
+			}
+			if (model.longContextPricing) {
+				output += `\t\t\tlongContextPricing: ${JSON.stringify(model.longContextPricing)},\n`;
 			}
 			output += `\t\t\tinput: [${model.input.map(i => `"${i}"`).join(", ")}],\n`;
 			if (model.supportedImageMimeTypes) {

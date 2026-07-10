@@ -65,7 +65,7 @@ function formatOpenAIResponsesError(error: unknown): string {
 
 // OpenAI Responses-specific options
 export interface OpenAIResponsesOptions extends StreamOptions {
-	reasoningEffort?: "minimal" | "low" | "medium" | "high" | "xhigh";
+	reasoningEffort?: "none" | "minimal" | "low" | "medium" | "high" | "xhigh" | "max" | "ultra";
 	reasoningSummary?: "auto" | "detailed" | "concise" | null;
 	serviceTier?: ResponseCreateParamsStreaming["service_tier"];
 }
@@ -172,8 +172,9 @@ export const streamSimpleOpenAIResponses: StreamFunction<"openai-responses", Sim
 	}
 
 	const base = buildBaseOptions(model, options, apiKey);
-	const clampedReasoning = options?.reasoning ? clampThinkingLevel(model, options.reasoning) : undefined;
-	const reasoningEffort = clampedReasoning === "off" ? undefined : clampedReasoning;
+	const requestedReasoning = options?.reasoning ?? model.defaultThinkingLevel;
+	const clampedReasoning = requestedReasoning ? clampThinkingLevel(model, requestedReasoning) : undefined;
+	const reasoningEffort = clampedReasoning === "off" ? "none" : clampedReasoning;
 
 	return streamOpenAIResponses(model, context, {
 		...base,
@@ -247,15 +248,23 @@ function buildParams(model: Model<"openai-responses">, context: Context, options
 
 	const cacheRetention = resolveCacheRetention(options?.cacheRetention);
 	const compat = getCompat(model);
+	const isGpt56 = model.provider === "openai" && model.id.startsWith("gpt-5.6");
 	const params: ResponseCreateParamsStreaming = {
 		model: model.id,
 		instructions: buildResponsesInstructions(context),
 		input: messages,
 		stream: true,
 		prompt_cache_key: cacheRetention === "none" ? undefined : clampOpenAIPromptCacheKey(options?.sessionId),
-		prompt_cache_retention: getPromptCacheRetention(compat, cacheRetention),
+		...(cacheRetention !== "none" && isGpt56
+			? { prompt_cache_options: options?.promptCacheOptions ?? { mode: "implicit" as const, ttl: "30m" as const } }
+			: {}),
+		...(isGpt56 ? {} : { prompt_cache_retention: getPromptCacheRetention(compat, cacheRetention) }),
 		store: false,
 	};
+	const safetyIdentifier = options?.metadata?.safety_identifier;
+	if (typeof safetyIdentifier === "string" && safetyIdentifier.length > 0) {
+		params.safety_identifier = safetyIdentifier;
+	}
 
 	if (options?.maxTokens) {
 		params.max_output_tokens = options?.maxTokens;
@@ -274,16 +283,28 @@ function buildParams(model: Model<"openai-responses">, context: Context, options
 	}
 
 	if (model.reasoning) {
-		if (options?.reasoningEffort || options?.reasoningSummary) {
+		if (
+			options?.reasoningEffort ||
+			options?.reasoningSummary !== undefined ||
+			options?.reasoningMode ||
+			options?.reasoningContext
+		) {
 			const effort = options?.reasoningEffort
-				? (model.thinkingLevelMap?.[options.reasoningEffort] ?? options.reasoningEffort)
+				? options.reasoningEffort === "none"
+					? (model.thinkingLevelMap?.off ?? "none")
+					: (model.thinkingLevelMap?.[options.reasoningEffort] ?? options.reasoningEffort)
 				: "medium";
+			const reasoningDisabled = options?.reasoningEffort === "none";
 			const supportsReasoningSummary = model.provider !== "fugu" || model.id === "fugu-ultra";
 			params.reasoning = {
 				effort: effort as NonNullable<typeof params.reasoning>["effort"],
-				...(supportsReasoningSummary ? { summary: options?.reasoningSummary || "auto" } : {}),
+				...(supportsReasoningSummary && !reasoningDisabled && options?.reasoningSummary !== null
+					? { summary: options?.reasoningSummary ?? "auto" }
+					: {}),
+				...(options?.reasoningMode ? { mode: options.reasoningMode } : {}),
+				...(options?.reasoningContext ? { context: options.reasoningContext } : {}),
 			};
-			if (supportsReasoningSummary) {
+			if (supportsReasoningSummary && !reasoningDisabled) {
 				params.include = ["reasoning.encrypted_content"];
 			}
 		} else if (model.provider !== "github-copilot" && model.thinkingLevelMap?.off !== null) {

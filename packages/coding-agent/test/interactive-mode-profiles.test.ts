@@ -1,6 +1,9 @@
 import { describe, expect, it, vi } from "vitest";
 import type { NormalizedProfile } from "../src/core/profile-registry.ts";
-import { ProfileMenuController } from "../src/modes/interactive/profile-menu-controller.ts";
+import {
+	NO_ACTIVE_PROFILE_DESCRIPTION,
+	ProfileMenuController,
+} from "../src/modes/interactive/profile-menu-controller.ts";
 
 type ProfileApplyContext = {
 	settingsManager: {
@@ -10,6 +13,9 @@ type ProfileApplyContext = {
 		};
 		setRuntimeResourceProfiles: (profiles: string[]) => void;
 		setActiveProfile: (name: string | undefined, scope: string) => void;
+		flush: () => Promise<void>;
+		createReloadSnapshot: () => unknown;
+		restoreReloadSnapshot: (snapshot: unknown) => void;
 	};
 	sessionManager: {
 		getCwd: () => string;
@@ -18,6 +24,8 @@ type ProfileApplyContext = {
 		modelRegistry: {
 			getAll: () => Array<{ provider: string; id: string; name?: string }>;
 			refresh: () => void;
+			createReloadSnapshot: () => unknown;
+			restoreReloadSnapshot: (snapshot: unknown) => void;
 		};
 		sessionManager: {
 			appendCustomEntry: (key: string, value: unknown) => void;
@@ -29,7 +37,7 @@ type ProfileApplyContext = {
 		setThinkingLevel: (thinking: string, options?: { persistSettings?: boolean }) => void;
 	};
 	ui: {
-		handleReloadCommand: () => Promise<void>;
+		handleReloadCommand: () => Promise<boolean>;
 		footerDataProvider: {
 			setExtensionStatus: (statusType: string, value: string) => void;
 		};
@@ -49,6 +57,12 @@ type InteractiveModeProfilePrototype = {
 const profileMenuPrototype = ProfileMenuController.prototype as unknown as InteractiveModeProfilePrototype;
 
 describe("InteractiveMode /profiles", () => {
+	it("describes the profileless extension baseline without claiming every resource is enabled", () => {
+		expect(NO_ACTIVE_PROFILE_DESCRIPTION).toContain("inline SDK extensions load");
+		expect(NO_ACTIVE_PROFILE_DESCRIPTION).toContain("discovered extensions stay withheld");
+		expect(NO_ACTIVE_PROFILE_DESCRIPTION).not.toContain("all resources enabled");
+	});
+
 	it("resolves relative profile refs from cwd before applying", async () => {
 		const profileRegistryResolve = vi
 			.fn<(ref: string, fromDir: string) => NormalizedProfile | undefined>()
@@ -65,7 +79,7 @@ describe("InteractiveMode /profiles", () => {
 		const setRuntimeResourceProfiles = vi.fn();
 		const setActiveProfile = vi.fn();
 		const appendCustomEntry = vi.fn();
-		const handleReloadCommand = vi.fn(async () => {});
+		const handleReloadCommand = vi.fn(async () => true);
 		const showStatus = vi.fn();
 		const showError = vi.fn();
 
@@ -78,11 +92,16 @@ describe("InteractiveMode /profiles", () => {
 				}),
 				setRuntimeResourceProfiles,
 				setActiveProfile,
+				flush: async () => {},
+				createReloadSnapshot: vi.fn(() => ({})),
+				restoreReloadSnapshot: vi.fn(),
 			},
 			session: {
 				modelRegistry: {
 					getAll: () => [{ provider: "openai", id: "gpt-4-mini", name: "gpt-4-mini" }],
 					refresh: vi.fn(),
+					createReloadSnapshot: vi.fn(() => ({})),
+					restoreReloadSnapshot: vi.fn(),
 				},
 				sessionManager: { appendCustomEntry },
 				setModel: vi.fn(),
@@ -103,9 +122,10 @@ describe("InteractiveMode /profiles", () => {
 		await profileMenuPrototype.applyProfile.call(context, "./reviewer.json");
 
 		expect(profileRegistryResolve).toHaveBeenCalledWith("./reviewer.json", "/tmp/workspace");
-		expect(context.settingsManager.setRuntimeResourceProfiles).toHaveBeenCalledWith(["reviewer"]);
+		expect(context.settingsManager.setRuntimeResourceProfiles).toHaveBeenCalledWith(["./reviewer.json"]);
+		expect(context.settingsManager.setActiveProfile).toHaveBeenCalledWith("./reviewer.json", "global");
 		expect(appendCustomEntry).toHaveBeenCalledWith("pi.activeResourceProfiles", {
-			profiles: ["reviewer"],
+			profiles: ["./reviewer.json"],
 		});
 		expect(handleReloadCommand).toHaveBeenCalledTimes(1);
 		expect(showStatus).toHaveBeenCalledWith("Profile: reviewer");
@@ -127,7 +147,7 @@ describe("InteractiveMode /profiles", () => {
 		const setRuntimeResourceProfiles = vi.fn();
 		const setActiveProfile = vi.fn();
 		const appendCustomEntry = vi.fn();
-		const handleReloadCommand = vi.fn(async () => {});
+		const handleReloadCommand = vi.fn(async () => true);
 		const showStatus = vi.fn();
 		const showError = vi.fn();
 
@@ -140,11 +160,16 @@ describe("InteractiveMode /profiles", () => {
 				}),
 				setRuntimeResourceProfiles,
 				setActiveProfile,
+				flush: async () => {},
+				createReloadSnapshot: vi.fn(() => ({})),
+				restoreReloadSnapshot: vi.fn(),
 			},
 			session: {
 				modelRegistry: {
 					getAll: () => [{ provider: "openai", id: "gpt-4-mini", name: "gpt-4-mini" }],
 					refresh: vi.fn(),
+					createReloadSnapshot: vi.fn(() => ({})),
+					restoreReloadSnapshot: vi.fn(),
 				},
 				sessionManager: { appendCustomEntry },
 				setModel: vi.fn(),
@@ -174,7 +199,7 @@ describe("InteractiveMode /profiles", () => {
 		expect(showError).not.toHaveBeenCalled();
 	});
 
-	it("applies profile model and thinking changes without persistence", async () => {
+	it("stages profile model and thinking for the atomic runtime reload", async () => {
 		const profileWithModel: NormalizedProfile = {
 			name: "runtime-model",
 			model: "openai/gpt-4-mini",
@@ -194,7 +219,7 @@ describe("InteractiveMode /profiles", () => {
 		const setThinkingLevel = vi.fn();
 		const modelRegistryRefresh = vi.fn();
 		const appendCustomEntry = vi.fn();
-		const handleReloadCommand = vi.fn(async () => {});
+		const handleReloadCommand = vi.fn(async () => true);
 		const showStatus = vi.fn();
 		const showError = vi.fn();
 
@@ -207,11 +232,16 @@ describe("InteractiveMode /profiles", () => {
 				}),
 				setRuntimeResourceProfiles,
 				setActiveProfile,
+				flush: async () => {},
+				createReloadSnapshot: vi.fn(() => ({})),
+				restoreReloadSnapshot: vi.fn(),
 			},
 			session: {
 				modelRegistry: {
 					getAll: () => [{ provider: "openai", id: "gpt-4-mini", name: "gpt-4-mini" }],
 					refresh: modelRegistryRefresh,
+					createReloadSnapshot: vi.fn(() => ({})),
+					restoreReloadSnapshot: vi.fn(),
 				},
 				sessionManager: { appendCustomEntry },
 				setModel,
@@ -232,11 +262,8 @@ describe("InteractiveMode /profiles", () => {
 		await profileMenuPrototype.applyProfile.call(context, "runtime-model");
 
 		expect(modelRegistryRefresh).toHaveBeenCalledTimes(1);
-		expect(setModel).toHaveBeenCalledWith(
-			{ provider: "openai", id: "gpt-4-mini", name: "gpt-4-mini" },
-			{ persistSettings: false },
-		);
-		expect(setThinkingLevel).toHaveBeenCalledWith("low", { persistSettings: false });
+		expect(setModel).not.toHaveBeenCalled();
+		expect(setThinkingLevel).not.toHaveBeenCalled();
 		expect(context.settingsManager.setRuntimeResourceProfiles).toHaveBeenCalledWith(["runtime-model"]);
 		expect(appendCustomEntry).toHaveBeenCalledWith("pi.activeResourceProfiles", {
 			profiles: ["runtime-model"],

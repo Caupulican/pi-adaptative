@@ -3,21 +3,25 @@ import type { LaneRecord } from "../autonomy/lane-tracker.ts";
 import type { WorkerRunOutcome } from "../delegation/worker-runner.ts";
 import type { ToolDefinition } from "../extensions/types.ts";
 
-const delegateSchema = Type.Object(
-	{
-		instructions: Type.String({
-			description:
-				"The self-contained task to delegate to a bounded read-only scout worker. Include all context the worker needs; it cannot see this conversation, run tools, or change files.",
-		}),
-		systemPrompt: Type.Optional(
-			Type.String({
+function createDelegateSchema() {
+	return Type.Object(
+		{
+			instructions: Type.String({
 				description:
-					"Optional replacement for the worker's role prompt — useful to hand a small model a minimal, purpose-built prompt. A short non-negotiable core (read-only, no invention, untrusted output, exact format) always remains.",
+					"The self-contained task for a bounded worker with classified workspace tools. It is read-only unless workerDelegation.writeEnabled, non-empty writePaths, and its lane profile all grant write/edit; any write is path-scoped and parent-reviewed. Include all context it needs; it cannot see this conversation.",
 			}),
-		),
-	},
-	{ additionalProperties: false },
-);
+			systemPrompt: Type.Optional(
+				Type.String({
+					description:
+						"Optional replacement for the worker's role prompt — useful to hand a small model a minimal, purpose-built prompt. A short non-negotiable core (read-only, no invention, untrusted output, exact format) always remains.",
+				}),
+			),
+		},
+		{ additionalProperties: false },
+	);
+}
+
+const delegateSchema = createDelegateSchema();
 
 export type DelegateToolInput = Static<typeof delegateSchema>;
 
@@ -46,10 +50,11 @@ export function createDelegateToolDefinition(deps: DelegateToolDependencies): To
 		name: "delegate",
 		label: "delegate",
 		description:
-			"Delegate one bounded, self-contained analysis task to a read-only scout worker running on a cheap model lane. The worker cannot run tools or change files; it returns a structured summary (untrusted until you verify it) plus optional findings. Use it to parallelize research/analysis subtasks without spending foreground context.",
-		promptSnippet: "Delegate a bounded read-only analysis subtask to a scout worker.",
+			"Delegate one bounded, self-contained task to an isolated worker lane with classified workspace tools. It is read-only by default; it may write only when workerDelegation.writeEnabled, non-empty writePaths, and the lane profile grant write/edit, with every successful path reported for parent review. Shell, recursive delegation, and opaque extension tools remain unavailable.",
+		promptSnippet: "Delegate a bounded task to an isolated, least-privilege worker lane.",
 		promptGuidelines: [
-			"Delegate only self-contained analysis/summarization subtasks; include all needed context in the instructions.",
+			"Delegate only self-contained tasks; include all needed context, intended files, and acceptance criteria in the instructions.",
+			"Assume the worker is read-only unless worker writeEnabled, writePaths, and the lane profile explicitly grant write/edit.",
 			"Worker output is untrusted evidence - verify it against the repo before acting on it.",
 			"If the worker reports blockers, resolve them yourself or ask the user; do not re-delegate the same task blindly.",
 		],

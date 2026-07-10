@@ -46,6 +46,8 @@ export interface ResourceReloadOptions {
 	failOnExtensionErrors?: boolean;
 	/** Keep the previous extension generation alive until commitReload()/rollbackReload(). */
 	deferExtensionDispose?: boolean;
+	/** The caller already loaded the settings generation this resource pass must use. */
+	skipSettingsReload?: boolean;
 }
 
 export interface ResourceLoader {
@@ -73,8 +75,8 @@ export interface ResourceLoader {
 	loadSingleExtension(path: string): Promise<{ extension: Extension | null; error: string | null }>;
 	extendResources(paths: ResourceExtensionPaths): void;
 	reload(options?: ResourceReloadOptions): Promise<void>;
-	commitReload?(): void;
-	rollbackReload?(): void;
+	commitReload?(): void | Promise<void>;
+	rollbackReload?(): void | Promise<void>;
 	/** Get all discoverable extension paths (enabled and disabled) */
 	getDiscoverableExtensionPaths(): Promise<string[]>;
 }
@@ -88,6 +90,10 @@ interface ResourceLoaderSnapshot {
 	themes: Theme[];
 	themeDiagnostics: ResourceDiagnostic[];
 	agentsFiles: Array<{ path: string; content?: string }>;
+	agentsDiagnostics: ResourceDiagnostic[];
+	lastAgentsFilePaths: string[];
+	discoverableSkillPaths: string[];
+	discoverablePromptPaths: string[];
 	systemPrompt?: string;
 	appendSystemPrompt: string[];
 	lastSkillPaths: string[];
@@ -739,6 +745,10 @@ export class DefaultResourceLoader implements ResourceLoader {
 			themes: this.themes,
 			themeDiagnostics: this.themeDiagnostics,
 			agentsFiles: this.agentsFiles,
+			agentsDiagnostics: this.agentsDiagnostics,
+			lastAgentsFilePaths: this.lastAgentsFilePaths,
+			discoverableSkillPaths: this.discoverableSkillPaths,
+			discoverablePromptPaths: this.discoverablePromptPaths,
 			systemPrompt: this.systemPrompt,
 			appendSystemPrompt: this.appendSystemPrompt,
 			lastSkillPaths: this.lastSkillPaths,
@@ -759,6 +769,10 @@ export class DefaultResourceLoader implements ResourceLoader {
 		this.themes = snapshot.themes;
 		this.themeDiagnostics = snapshot.themeDiagnostics;
 		this.agentsFiles = snapshot.agentsFiles;
+		this.agentsDiagnostics = snapshot.agentsDiagnostics;
+		this.lastAgentsFilePaths = snapshot.lastAgentsFilePaths;
+		this.discoverableSkillPaths = snapshot.discoverableSkillPaths;
+		this.discoverablePromptPaths = snapshot.discoverablePromptPaths;
 		this.systemPrompt = snapshot.systemPrompt;
 		this.appendSystemPrompt = snapshot.appendSystemPrompt;
 		this.lastSkillPaths = snapshot.lastSkillPaths;
@@ -786,7 +800,9 @@ export class DefaultResourceLoader implements ResourceLoader {
 		const snapshot = this.createSnapshot();
 		this.pendingReloadSnapshot = undefined;
 		try {
-			await this.settingsManager.reload();
+			if (!options.skipSettingsReload) {
+				await this.settingsManager.reload();
+			}
 			const resolvedPaths = await this.packageManager.resolve();
 			const cliExtensionPaths = await this.packageManager.resolveExtensionSources(this.additionalExtensionPaths, {
 				temporary: true,

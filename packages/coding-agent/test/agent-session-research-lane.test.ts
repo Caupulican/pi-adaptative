@@ -1,4 +1,6 @@
-import { fauxAssistantMessage } from "@caupulican/pi-ai";
+import { writeFileSync } from "node:fs";
+import { join } from "node:path";
+import { fauxAssistantMessage, fauxToolCall } from "@caupulican/pi-ai";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { getLaneRecordSnapshots } from "../src/core/autonomy/session-lane-record.ts";
 import { applyGoalEvent, createGoalState, type GoalState } from "../src/core/goals/goal-state.ts";
@@ -119,6 +121,58 @@ describe("AgentSession research lane (explicit runs)", () => {
 			harness.cleanup();
 		}
 	});
+
+	it("uses the materialized read-only tool loop without leaking recursive or write authority", async () => {
+		const harness = await createHarness();
+		try {
+			seedActiveGoal(harness);
+			writeFileSync(join(harness.tempDir, "evidence.txt"), "verified research evidence\n", "utf-8");
+			let firstTurnTools: string[] = [];
+			harness.setResponses([
+				(context) => {
+					firstTurnTools = context.tools?.map((tool) => tool.name) ?? [];
+					return fauxAssistantMessage([fauxToolCall("read", { path: "evidence.txt" })], {
+						stopReason: "toolUse",
+					});
+				},
+				(context) => {
+					expect(context.messages.map((message) => message.role)).toEqual(["user", "assistant", "toolResult"]);
+					return fauxAssistantMessage(RESEARCH_JSON);
+				},
+			]);
+
+			const outcome = await harness.session.runResearchLaneOnce();
+
+			expect(outcome.record?.status).toBe("succeeded");
+			expect(firstTurnTools).toEqual(["read", "grep", "find", "ls"]);
+			expect(firstTurnTools).not.toContain("write");
+			expect(firstTurnTools).not.toContain("delegate");
+			expect(harness.getPendingResponseCount()).toBe(0);
+		} finally {
+			harness.cleanup();
+		}
+	});
+
+	it("gates an explicit run against the configured research model", async () => {
+		const harness = await createHarness({
+			models: [
+				{ id: "foreground", contextWindow: 200_000 },
+				{ id: "tiny-research", contextWindow: 4_096 },
+			],
+			settings: { researchLane: { enabled: true, model: "faux/tiny-research" } },
+		});
+		try {
+			seedActiveGoal(harness);
+
+			const outcome = await harness.session.runResearchLaneOnce();
+
+			expect(outcome).toEqual({ started: false, skipReason: "model_research_unsupported" });
+			expect(researchLaneRecords(harness)).toHaveLength(0);
+			expect(harness.getPendingResponseCount()).toBe(0);
+		} finally {
+			harness.cleanup();
+		}
+	});
 });
 
 describe("AgentSession research lane (idle trigger)", () => {
@@ -147,6 +201,39 @@ describe("AgentSession research lane (idle trigger)", () => {
 			expect(bundle?.query).toBe("goal:g1 requirements:req-1");
 			expect(researchLaneRecords(harness)).toHaveLength(1);
 			expect(harness.getPendingResponseCount()).toBe(0);
+		} finally {
+			harness.cleanup();
+		}
+	});
+
+	it("auto-runs on a capable configured lane model even when the foreground model is tiny", async () => {
+		const harness = await createHarness({
+			models: [
+				{ id: "tiny-foreground", contextWindow: 4_096 },
+				{ id: "research-model", contextWindow: 200_000 },
+			],
+			settings: {
+				researchLane: { enabled: true, model: "faux/research-model" },
+				autonomy: { mode: "balanced", goalAutoContinue: false },
+			},
+		});
+		try {
+			seedActiveGoal(harness);
+			let laneModelId: string | undefined;
+			harness.setResponses([
+				fauxAssistantMessage("turn done"),
+				(_context, _options, _state, model) => {
+					laneModelId = model.id;
+					return fauxAssistantMessage(RESEARCH_JSON);
+				},
+			]);
+
+			await harness.session.prompt("please work on the goal");
+			await vi.runAllTimersAsync();
+
+			expect(laneModelId).toBe("research-model");
+			expect(researchLaneRecords(harness)).toHaveLength(1);
+			expect(harness.session.getEvidenceBundleSnapshot()?.query).toBe("goal:g1 requirements:req-1");
 		} finally {
 			harness.cleanup();
 		}

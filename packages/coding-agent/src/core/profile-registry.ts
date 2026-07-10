@@ -6,6 +6,7 @@ import { resolvePath } from "../utils/paths.ts";
 import { mergeResourceProfileSettings } from "./resource-profile-blocks.ts";
 import type {
 	ModelRouterSettings,
+	ProfileDefinitionInput,
 	ResourceProfileKind,
 	ResourceProfileSettings,
 	Settings,
@@ -46,7 +47,7 @@ export interface ProfileRegistryOptions {
 	globalSettings: Settings;
 	projectSettings: Settings;
 	directoryProfileSettings: Settings;
-	inlineResourceProfileDefinitions: Record<string, ResourceProfileSettings>;
+	inlineResourceProfileDefinitions: Record<string, ProfileDefinitionInput>;
 	discoveredResourceProfileDefinitions: Record<string, ResourceProfileSettings>;
 	profilesDir?: string;
 	externalResourceRoots?: string[];
@@ -116,7 +117,7 @@ function normalizeThinking(value: unknown): ThinkingLevel | undefined {
 	const thinking = asNonEmptyString(value);
 	if (!thinking) return undefined;
 	if (!isValidThinkingLevel(thinking)) {
-		throw new Error(`thinking must be one of off, minimal, low, medium, high, xhigh`);
+		throw new Error(`thinking must be one of off, minimal, low, medium, high, xhigh, max, ultra`);
 	}
 	return thinking;
 }
@@ -124,10 +125,34 @@ function normalizeThinking(value: unknown): ThinkingLevel | undefined {
 function normalizeModelRouterSettings(value: unknown): ModelRouterSettings | undefined {
 	if (!isRecord(value)) return undefined;
 	const settings: ModelRouterSettings = {};
-	if (typeof value.enabled === "boolean") settings.enabled = value.enabled;
-	for (const key of ["cheapModel", "mediumModel", "expensiveModel", "learningModel"] as const) {
+	for (const key of ["enabled", "judgeEnabled", "fitnessGate"] as const) {
+		const candidate = value[key];
+		if (typeof candidate === "boolean") settings[key] = candidate;
+	}
+	for (const key of [
+		"cheapModel",
+		"mediumModel",
+		"expensiveModel",
+		"learningModel",
+		"judgeModel",
+		"executorModel",
+	] as const) {
 		const candidate = asNonEmptyString(value[key]);
 		if (candidate) settings[key] = candidate;
+	}
+	for (const key of [
+		"cheapThinking",
+		"mediumThinking",
+		"expensiveThinking",
+		"executorThinking",
+		"judgeThinking",
+	] as const) {
+		const candidate = asNonEmptyString(value[key]);
+		if (!candidate) continue;
+		if (!isValidThinkingLevel(candidate)) {
+			throw new Error(`${key} must be one of off, minimal, low, medium, high, xhigh, max, ultra`);
+		}
+		settings[key] = candidate;
 	}
 	return Object.keys(settings).length > 0 ? settings : undefined;
 }
@@ -177,17 +202,50 @@ function normalizeSettingsProfiles(
 	sourcePath?: string,
 ): Array<Omit<NormalizedProfile, "source"> & { source?: ProfileSource }> {
 	const profiles: Array<Omit<NormalizedProfile, "source"> & { source?: ProfileSource }> = [];
-	for (const [name, resources] of Object.entries(settings.resourceProfiles ?? {})) {
+	for (const [name, definition] of Object.entries(settings.resourceProfiles ?? {})) {
 		const nameErrors = validateProfileName(name);
 		if (nameErrors.length > 0) continue;
+		if (isRecord(definition) && Object.hasOwn(definition, "resources")) {
+			profiles.push(
+				normalizeWrapperProfile({
+					value: { ...definition, name },
+					source,
+					sourcePath,
+					baseDir,
+					fallbackName: name,
+				}),
+			);
+			continue;
+		}
 		profiles.push({
 			name,
-			resources: mergeResourceProfileSettings(undefined, resources),
+			resources: mergeResourceProfileSettings(undefined, definition as ResourceProfileSettings),
 			sourcePath,
 			baseDir,
 		});
 	}
 	return profiles.map((profile) => ({ ...profile, source }));
+}
+
+function normalizeInlineDefinitions(
+	definitions: Record<string, ProfileDefinitionInput>,
+	source: ProfileSource,
+): NormalizedProfile[] {
+	const profiles: NormalizedProfile[] = [];
+	for (const [name, definition] of Object.entries(definitions)) {
+		try {
+			profiles.push(
+				normalizeWrapperProfile({
+					value: { ...definition, name },
+					source,
+					fallbackName: name,
+				}),
+			);
+		} catch {
+			// Inline names/definitions are validated at the SettingsManager API boundary.
+		}
+	}
+	return profiles;
 }
 
 function loadSettingsFileProfiles(sourcePath: string, source: ProfileSource): NormalizedProfile[] {
@@ -274,7 +332,7 @@ export class ProfileRegistry {
 			candidates.push({ profile, precedence, order: order++ });
 		};
 
-		for (const profile of normalizeDefinitions(this.options.inlineResourceProfileDefinitions, "inline")) {
+		for (const profile of normalizeInlineDefinitions(this.options.inlineResourceProfileDefinitions, "inline")) {
 			add(profile, 1);
 		}
 		for (const profile of normalizeSettingsProfiles(this.options.directoryProfileSettings, "directory-overlay")) {

@@ -97,6 +97,7 @@ describe("runIsolatedCompletion isolation invariants", () => {
 		// Isolation of the OUTGOING call.
 		expect(capturedContext?.tools).toEqual([]);
 		expect(capturedOptions?.cacheRetention).toBe("none");
+		expect(capturedOptions?.reasoning).toBe("off");
 		expect(capturedOptions?.sessionId).toBeUndefined();
 		// Main history was NOT used as the context.
 		expect(capturedContext?.messages).toHaveLength(1);

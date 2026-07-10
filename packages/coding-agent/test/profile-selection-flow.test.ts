@@ -1,11 +1,39 @@
-import { describe, expect, it, vi } from "vitest";
-import { SettingsManager } from "../src/core/settings-manager.ts";
+import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
+import { beforeAll, describe, expect, it, vi } from "vitest";
+import { type ResourceProfileSettings, SettingsManager } from "../src/core/settings-manager.ts";
 import { ProfileMenuController } from "../src/modes/interactive/profile-menu-controller.ts";
+import { initTheme } from "../src/modes/interactive/theme/theme.ts";
 import { createTestResourceLoader } from "./utilities.ts";
+
+beforeAll(() => {
+	initTheme("dark");
+});
 
 const prototype = ProfileMenuController.prototype as unknown as {
 	getProfileResourceKinds(this: unknown): Promise<Array<{ kind: string; items: unknown[] }>>;
+	openLibraryEditorForProfile(
+		this: unknown,
+		profileName: string,
+		initialScope: "session" | "directory" | "project" | "global" | "reusable-file",
+	): Promise<void>;
+	saveProfileResources(
+		this: unknown,
+		profile: unknown,
+		originalResources: ResourceProfileSettings,
+		resources: ResourceProfileSettings,
+		scope: "session" | "directory" | "project" | "global" | "reusable-file",
+		isActiveProfile: boolean,
+	): Promise<void>;
+	rollbackValidatedProfileMutation(this: unknown, snapshot: unknown, definition?: unknown): Promise<unknown>;
 	applyProfile(this: unknown, profileName: string): Promise<void>;
+	deleteProfileFromSource(this: unknown, profileName: string): Promise<void>;
+	refreshAfterProfileMutation(this: unknown, profileName: string): Promise<void>;
+	scopeForProfileSource(
+		this: unknown,
+		source: string,
+	): "session" | "directory" | "project" | "global" | "reusable-file";
 };
 
 describe("getProfileResourceKinds", () => {
@@ -28,16 +56,24 @@ describe("getProfileResourceKinds", () => {
 });
 
 describe("profile selection persistence", () => {
-	function context(settingsManager: SettingsManager) {
+	function context(settingsManager: SettingsManager, reloadSucceeded = true) {
 		return {
 			settingsManager,
+			rollbackValidatedProfileMutation: prototype.rollbackValidatedProfileMutation,
+			scopeForProfileSource: prototype.scopeForProfileSource,
 			session: {
 				sessionManager: { appendCustomEntry: vi.fn() },
+				modelRegistry: {
+					refresh: vi.fn(),
+					getAll: vi.fn(() => []),
+					createReloadSnapshot: vi.fn(() => ({})),
+					restoreReloadSnapshot: vi.fn(),
+				},
 				setModel: vi.fn(async () => {}),
 				setThinkingLevel: vi.fn(),
 			},
 			ui: {
-				handleReloadCommand: vi.fn(async () => {}),
+				handleReloadCommand: vi.fn(async () => reloadSucceeded),
 				footerDataProvider: { setExtensionStatus: vi.fn() },
 				invalidateFooter: vi.fn(),
 				updateEditorBorderColor: vi.fn(),
@@ -64,6 +100,462 @@ describe("profile selection persistence", () => {
 			activeResourceProfiles: ["scout"],
 		});
 		await prototype.applyProfile.call(context(settingsManager), "none");
-		expect(settingsManager.getGlobalSettings().activeResourceProfiles).toBeUndefined();
+		expect(settingsManager.getGlobalSettings().activeResourceProfiles).toEqual([]);
+	});
+
+	it("persists /profiles none across restart instead of falling back to default or external-root profiles", async () => {
+		const root = mkdtempSync(join(tmpdir(), "pi-profile-none-"));
+		try {
+			const agentDir = join(root, "agent");
+			const projectDir = join(root, "project");
+			const externalRoot = join(root, "external");
+			mkdirSync(agentDir, { recursive: true });
+			mkdirSync(projectDir, { recursive: true });
+			mkdirSync(externalRoot, { recursive: true });
+			writeFileSync(
+				join(agentDir, "settings.json"),
+				JSON.stringify({
+					activeResourceProfiles: ["default"],
+					resourceProfiles: { default: { tools: { allow: ["read"] } } },
+					externalResourceRoots: [externalRoot],
+					trustedResourceRoots: [externalRoot],
+				}),
+			);
+			writeFileSync(
+				join(externalRoot, "settings.json"),
+				JSON.stringify({
+					activeResourceProfiles: ["external-default"],
+					resourceProfiles: { "external-default": { tools: { allow: ["grep"] } } },
+				}),
+			);
+			const settingsManager = SettingsManager.create(projectDir, agentDir);
+			settingsManager.setProfileDefinition(
+				"project-active",
+				{ resources: { tools: { allow: ["write"] } } },
+				"project",
+			);
+			settingsManager.setActiveProfile("project-active", "project");
+			settingsManager.setProfileDefinition(
+				"directory-active",
+				{ resources: { tools: { allow: ["bash"] } } },
+				"directory",
+			);
+			settingsManager.setActiveProfile("directory-active", "directory");
+			await settingsManager.flush();
+
+			await prototype.applyProfile.call(context(settingsManager), "none");
+			await settingsManager.flush();
+
+			const restarted = SettingsManager.create(projectDir, agentDir);
+			expect(restarted.getGlobalSettings().activeResourceProfiles).toEqual([]);
+			expect(restarted.getActiveResourceProfileNames()).toEqual([]);
+			expect(restarted.getResourceProfileFilter("tools")).toEqual({ allow: [], block: [] });
+		} finally {
+			rmSync(root, { recursive: true, force: true });
+		}
+	});
+
+	it("does not persist or expose a staged profile when runtime reload fails", async () => {
+		const settingsManager = SettingsManager.inMemory({
+			resourceProfiles: {
+				stable: { tools: { allow: ["read"] } },
+				broken: { tools: { allow: ["bash"] } },
+			},
+			activeResourceProfiles: ["stable"],
+		});
+		const failedContext = context(settingsManager, false);
+
+		await prototype.applyProfile.call(failedContext, "broken");
+
+		expect(settingsManager.getGlobalSettings().activeResourceProfiles).toEqual(["stable"]);
+		expect(settingsManager.getActiveResourceProfileNames()).toEqual(["stable"]);
+		expect(failedContext.session.sessionManager.appendCustomEntry).not.toHaveBeenCalled();
+		expect(failedContext.ui.showStatus).not.toHaveBeenCalled();
+	});
+
+	it("reverses the validated profile runtime when selection persistence throws", async () => {
+		const settingsManager = SettingsManager.inMemory({
+			resourceProfiles: {
+				stable: { tools: { allow: ["read"] } },
+				next: { tools: { allow: ["bash"] } },
+			},
+			activeResourceProfiles: ["stable"],
+		});
+		const failedContext = context(settingsManager, true);
+		vi.spyOn(settingsManager, "setActiveProfile").mockImplementationOnce(() => {
+			throw new Error("selection write failed");
+		});
+
+		await prototype.applyProfile.call(failedContext, "next");
+
+		expect(failedContext.ui.handleReloadCommand).toHaveBeenCalledTimes(2);
+		expect(settingsManager.getActiveResourceProfileNames()).toEqual(["stable"]);
+		expect(settingsManager.getGlobalSettings().activeResourceProfiles).toEqual(["stable"]);
+		expect(failedContext.ui.showStatus).not.toHaveBeenCalled();
+		expect(failedContext.ui.showError).toHaveBeenCalledWith("selection write failed");
+	});
+
+	it("reverses the profileless runtime when clearing-selection persistence throws", async () => {
+		const settingsManager = SettingsManager.inMemory({
+			resourceProfiles: { stable: { tools: { allow: ["read"] } } },
+			activeResourceProfiles: ["stable"],
+		});
+		const failedContext = context(settingsManager, true);
+		vi.spyOn(settingsManager, "setActiveProfile").mockImplementationOnce(() => {
+			throw new Error("clear write failed");
+		});
+
+		await prototype.applyProfile.call(failedContext, "none");
+
+		expect(failedContext.ui.handleReloadCommand).toHaveBeenCalledTimes(2);
+		expect(settingsManager.getActiveResourceProfileNames()).toEqual(["stable"]);
+		expect(settingsManager.getGlobalSettings().activeResourceProfiles).toEqual(["stable"]);
+		expect(failedContext.ui.showStatus).not.toHaveBeenCalled();
+		expect(failedContext.ui.showError).toHaveBeenCalledWith("clear write failed");
+	});
+
+	it("keeps an active profile definition and selection when deletion reload fails", async () => {
+		const settingsManager = SettingsManager.inMemory({
+			resourceProfiles: {
+				stable: {
+					model: "anthropic/claude-sonnet-4-5",
+					resources: { extensions: { allow: ["stable.ts"] }, tools: { allow: ["stable_tool"] } },
+				},
+			},
+			activeResourceProfiles: ["stable"],
+		});
+		const failedContext = context(settingsManager, false);
+
+		await prototype.deleteProfileFromSource.call(failedContext, "stable");
+
+		expect(settingsManager.getProfileRegistry().getProfile("stable")).toBeDefined();
+		expect(settingsManager.getActiveResourceProfileNames()).toEqual(["stable"]);
+		expect(settingsManager.getGlobalSettings().activeResourceProfiles).toEqual(["stable"]);
+		expect(failedContext.ui.showStatus).not.toHaveBeenCalled();
+	});
+
+	it("restores the prior runtime when deletion throws after the none generation reloaded", async () => {
+		const settingsManager = SettingsManager.inMemory({
+			resourceProfiles: { stable: { tools: { allow: ["read"] } } },
+			activeResourceProfiles: ["stable"],
+		});
+		const rollbackContext = context(settingsManager, true);
+		vi.spyOn(settingsManager, "deleteProfile").mockImplementation(() => {
+			throw new Error("delete failed");
+		});
+
+		await prototype.deleteProfileFromSource.call(rollbackContext, "stable");
+
+		expect(rollbackContext.ui.handleReloadCommand).toHaveBeenCalledTimes(2);
+		expect(settingsManager.getActiveResourceProfileNames()).toEqual(["stable"]);
+		expect(settingsManager.getProfileRegistry().getProfile("stable")).toBeDefined();
+		expect(rollbackContext.ui.showError).toHaveBeenCalledWith("delete failed");
+	});
+
+	it("restores a deleted definition before reversing a later selection-write failure", async () => {
+		const root = mkdtempSync(join(tmpdir(), "pi-profile-delete-rollback-"));
+		try {
+			const agentDir = join(root, "agent");
+			const projectDir = join(root, "project");
+			mkdirSync(agentDir, { recursive: true });
+			mkdirSync(projectDir, { recursive: true });
+			const settingsManager = SettingsManager.create(projectDir, agentDir);
+			settingsManager.setProfileDefinition("stable", { resources: { tools: { allow: ["read"] } } }, "global");
+			settingsManager.setActiveProfile("stable", "global");
+			await settingsManager.flush();
+			const rollbackContext = context(settingsManager, true);
+			vi.spyOn(settingsManager, "setActiveProfile").mockImplementationOnce(() => {
+				throw new Error("clear selection failed");
+			});
+
+			await prototype.deleteProfileFromSource.call(rollbackContext, "stable");
+			await settingsManager.flush();
+
+			const restarted = SettingsManager.create(projectDir, agentDir);
+			expect(rollbackContext.ui.handleReloadCommand).toHaveBeenCalledTimes(2);
+			expect(restarted.getProfileRegistry().getProfile("stable")).toBeDefined();
+			expect(restarted.getActiveResourceProfileNames()).toEqual(["stable"]);
+			expect(rollbackContext.ui.showStatus).not.toHaveBeenCalled();
+			expect(rollbackContext.ui.showError).toHaveBeenCalledWith("clear selection failed");
+		} finally {
+			rmSync(root, { recursive: true, force: true });
+		}
+	});
+
+	it("deleting an active directory profile persists none over lower-scope defaults", async () => {
+		const root = mkdtempSync(join(tmpdir(), "pi-profile-delete-none-"));
+		try {
+			const agentDir = join(root, "agent");
+			const projectDir = join(root, "project");
+			mkdirSync(agentDir, { recursive: true });
+			mkdirSync(projectDir, { recursive: true });
+			writeFileSync(
+				join(agentDir, "settings.json"),
+				JSON.stringify({
+					activeResourceProfiles: ["default"],
+					resourceProfiles: { default: { tools: { allow: ["read"] } } },
+				}),
+			);
+			const settingsManager = SettingsManager.create(projectDir, agentDir);
+			settingsManager.setProfileDefinition(
+				"directory-active",
+				{ resources: { tools: { allow: ["bash"] } } },
+				"directory",
+			);
+			settingsManager.setActiveProfile("directory-active", "directory");
+			await settingsManager.flush();
+
+			await prototype.deleteProfileFromSource.call(context(settingsManager), "directory-active");
+			await settingsManager.flush();
+
+			const restarted = SettingsManager.create(projectDir, agentDir);
+			expect(restarted.getProfileRegistry().getProfile("directory-active")).toBeUndefined();
+			expect(restarted.getGlobalSettings().activeResourceProfiles).toEqual([]);
+			expect(restarted.getActiveResourceProfileNames()).toEqual([]);
+		} finally {
+			rmSync(root, { recursive: true, force: true });
+		}
+	});
+
+	it("deletes a project-settings profile from the project definition that owns it", async () => {
+		const root = mkdtempSync(join(tmpdir(), "pi-profile-project-delete-"));
+		try {
+			const agentDir = join(root, "agent");
+			const projectDir = join(root, "project");
+			mkdirSync(agentDir, { recursive: true });
+			mkdirSync(projectDir, { recursive: true });
+			const settingsManager = SettingsManager.create(projectDir, agentDir);
+			settingsManager.setProfileDefinition("project-only", { resources: { tools: { allow: ["read"] } } }, "project");
+			await settingsManager.flush();
+			expect(settingsManager.getProfileRegistry().getProfile("project-only")?.source).toBe("project-settings");
+
+			await prototype.deleteProfileFromSource.call(context(settingsManager), "project-only");
+			await settingsManager.flush();
+
+			expect(settingsManager.getProjectSettings().resourceProfiles?.["project-only"]).toBeUndefined();
+			expect(settingsManager.getProfileRegistry().getProfile("project-only")).toBeUndefined();
+		} finally {
+			rmSync(root, { recursive: true, force: true });
+		}
+	});
+
+	it("refuses deletion when the winning definition belongs to an external settings source", async () => {
+		const root = mkdtempSync(join(tmpdir(), "pi-profile-external-delete-"));
+		try {
+			const agentDir = join(root, "agent");
+			const projectDir = join(root, "project");
+			const externalRoot = join(root, "external");
+			mkdirSync(agentDir, { recursive: true });
+			mkdirSync(projectDir, { recursive: true });
+			mkdirSync(externalRoot, { recursive: true });
+			writeFileSync(
+				join(externalRoot, "settings.json"),
+				JSON.stringify({ resourceProfiles: { shared: { tools: { allow: ["read"] } } } }),
+			);
+			const settingsManager = SettingsManager.create(projectDir, agentDir);
+			settingsManager.setExternalResourceRoots([externalRoot], "global");
+			settingsManager.setTrustedResourceRoots([externalRoot], "global");
+			await settingsManager.flush();
+			expect(settingsManager.getProfileRegistry().getProfile("shared")?.source).toBe("external-settings");
+			const deletionContext = context(settingsManager);
+
+			await prototype.deleteProfileFromSource.call(deletionContext, "shared");
+
+			expect(settingsManager.getProfileRegistry().getProfile("shared")?.source).toBe("external-settings");
+			expect(deletionContext.ui.handleReloadCommand).not.toHaveBeenCalled();
+			expect(deletionContext.ui.showStatus).not.toHaveBeenCalled();
+			expect(deletionContext.ui.showError).toHaveBeenCalledWith(expect.stringContaining("read-only source"));
+		} finally {
+			rmSync(root, { recursive: true, force: true });
+		}
+	});
+
+	it("lets reload resolve a model contributed by the profile's newly granted extension", async () => {
+		const settingsManager = SettingsManager.inMemory({
+			resourceProfiles: {
+				stable: { tools: { allow: ["read"] } },
+				"extension-model": {
+					model: "extension-provider/sol",
+					resources: {
+						extensions: { allow: ["<inline:1>"] },
+						tools: { allow: ["*"] },
+					},
+				},
+			},
+			activeResourceProfiles: ["stable"],
+		});
+		const failedContext = context(settingsManager, false);
+
+		await prototype.applyProfile.call(failedContext, "extension-model");
+
+		expect(failedContext.ui.handleReloadCommand).toHaveBeenCalledTimes(1);
+		expect(failedContext.session.modelRegistry.restoreReloadSnapshot).toHaveBeenCalledTimes(1);
+		expect(settingsManager.getActiveResourceProfileNames()).toEqual(["stable"]);
+		expect(failedContext.ui.showError).not.toHaveBeenCalledWith(expect.stringContaining("Model not found"));
+	});
+});
+
+describe("active profile library edits", () => {
+	it("routes an extensions-only provider grant through the full runtime reload", async () => {
+		const settingsManager = SettingsManager.inMemory({
+			resourceProfiles: {
+				provider: {
+					resources: {
+						extensions: { allow: ["<inline:old>"] },
+						tools: { allow: ["*"] },
+					},
+				},
+			},
+			activeResourceProfiles: ["provider"],
+		});
+		let editor: { onSave: (resources: ResourceProfileSettings) => void } | undefined;
+		const handleReloadCommand = vi.fn(async () => true);
+		const context = {
+			settingsManager,
+			saveProfileResources: prototype.saveProfileResources,
+			rollbackValidatedProfileMutation: prototype.rollbackValidatedProfileMutation,
+			sessionManager: { getCwd: () => "/workspace" },
+			getProfileResourceKinds: vi.fn(async () => [
+				{
+					kind: "extensions",
+					label: "Extensions",
+					items: [{ id: "<inline:1>", path: "<inline:1>" }],
+				},
+			]),
+			refreshAfterProfileMutation: prototype.refreshAfterProfileMutation,
+			ui: {
+				handleReloadCommand,
+				footerDataProvider: { setExtensionStatus: vi.fn() },
+				invalidateFooter: vi.fn(),
+				updateEditorBorderColor: vi.fn(),
+				requestRender: vi.fn(),
+				showError: vi.fn(),
+				showStatus: vi.fn(),
+				showSelector: (create: (done: () => void) => { component: unknown; focus: unknown }) => {
+					const selection = create(vi.fn());
+					editor = selection.component as { onSave: (resources: ResourceProfileSettings) => void };
+				},
+			},
+		};
+
+		await prototype.openLibraryEditorForProfile.call(context, "provider", "session");
+		expect(editor).toBeDefined();
+		editor!.onSave({
+			extensions: { allow: ["<inline:1>"] },
+			tools: { allow: ["*"] },
+		});
+
+		await vi.waitFor(() => expect(handleReloadCommand).toHaveBeenCalledTimes(1));
+		expect(settingsManager.getProfileRegistry().getProfile("provider")?.resources.extensions).toEqual({
+			allow: ["<inline:1>"],
+		});
+	});
+
+	it("restores the active definition and withholds saved status when reload validation fails", async () => {
+		const settingsManager = SettingsManager.inMemory({
+			resourceProfiles: {
+				provider: {
+					resources: {
+						extensions: { allow: ["<inline:old>"] },
+						tools: { allow: ["*"] },
+					},
+				},
+			},
+			activeResourceProfiles: ["provider"],
+		});
+		let editor: { onSave: (resources: ResourceProfileSettings) => void } | undefined;
+		const handleReloadCommand = vi.fn(async () => false);
+		const showStatus = vi.fn();
+		const context = {
+			settingsManager,
+			saveProfileResources: prototype.saveProfileResources,
+			rollbackValidatedProfileMutation: prototype.rollbackValidatedProfileMutation,
+			sessionManager: { getCwd: () => "/workspace" },
+			getProfileResourceKinds: vi.fn(async () => [{ kind: "tools", label: "Tools", items: [] }]),
+			ui: {
+				handleReloadCommand,
+				footerDataProvider: { setExtensionStatus: vi.fn() },
+				invalidateFooter: vi.fn(),
+				updateEditorBorderColor: vi.fn(),
+				requestRender: vi.fn(),
+				showError: vi.fn(),
+				showStatus,
+				showSelector: (create: (done: () => void) => { component: unknown; focus: unknown }) => {
+					const selection = create(vi.fn());
+					editor = selection.component as { onSave: (resources: ResourceProfileSettings) => void };
+				},
+			},
+		};
+
+		await prototype.openLibraryEditorForProfile.call(context, "provider", "session");
+		editor!.onSave({ extensions: { allow: ["<inline:broken>"] }, tools: { allow: ["*"] } });
+		await vi.waitFor(() => expect(handleReloadCommand).toHaveBeenCalledTimes(1));
+
+		expect(settingsManager.getProfileRegistry().getProfile("provider")?.resources.extensions).toEqual({
+			allow: ["<inline:old>"],
+		});
+		expect(showStatus).not.toHaveBeenCalled();
+	});
+
+	it("restores the persistent definition before reversing a post-doctor commit failure", async () => {
+		const root = mkdtempSync(join(tmpdir(), "pi-profile-edit-rollback-"));
+		try {
+			const agentDir = join(root, "agent");
+			const projectDir = join(root, "project");
+			mkdirSync(agentDir, { recursive: true });
+			mkdirSync(projectDir, { recursive: true });
+			const settingsManager = SettingsManager.create(projectDir, agentDir);
+			settingsManager.setProfileDefinition(
+				"provider",
+				{
+					resources: {
+						extensions: { allow: ["old.js"] },
+						tools: { allow: ["*"] },
+					},
+				},
+				"global",
+			);
+			settingsManager.setActiveProfile("provider", "global");
+			await settingsManager.flush();
+			let editor: { onSave: (resources: ResourceProfileSettings) => void } | undefined;
+			const handleReloadCommand = vi.fn(async () => true);
+			const showStatus = vi.fn();
+			const showError = vi.fn();
+			vi.spyOn(settingsManager, "reload").mockRejectedValueOnce(new Error("post-commit reload failed"));
+			const context = {
+				settingsManager,
+				saveProfileResources: prototype.saveProfileResources,
+				rollbackValidatedProfileMutation: prototype.rollbackValidatedProfileMutation,
+				sessionManager: { getCwd: () => projectDir },
+				getProfileResourceKinds: vi.fn(async () => [{ kind: "tools", label: "Tools", items: [] }]),
+				ui: {
+					handleReloadCommand,
+					footerDataProvider: { setExtensionStatus: vi.fn() },
+					invalidateFooter: vi.fn(),
+					updateEditorBorderColor: vi.fn(),
+					requestRender: vi.fn(),
+					showError,
+					showStatus,
+					showSelector: (create: (done: () => void) => { component: unknown; focus: unknown }) => {
+						const selection = create(vi.fn());
+						editor = selection.component as { onSave: (resources: ResourceProfileSettings) => void };
+					},
+				},
+			};
+
+			await prototype.openLibraryEditorForProfile.call(context, "provider", "global");
+			editor!.onSave({ extensions: { allow: ["new.js"] }, tools: { allow: ["*"] } });
+			await vi.waitFor(() => expect(showError).toHaveBeenCalledWith("post-commit reload failed"));
+			await settingsManager.flush();
+
+			const restarted = SettingsManager.create(projectDir, agentDir);
+			expect(restarted.getProfileRegistry().getProfile("provider")?.resources.extensions).toEqual({
+				allow: ["old.js"],
+			});
+			expect(handleReloadCommand).toHaveBeenCalledTimes(2);
+			expect(showStatus).not.toHaveBeenCalled();
+		} finally {
+			rmSync(root, { recursive: true, force: true });
+		}
 	});
 });

@@ -56,4 +56,24 @@ describe("stream-idle watchdog wiring", () => {
 		expect(harness.faux.state.callCount).toBe(2);
 		expect(getAssistantTexts(harness)).toContain("recovered after stall");
 	}, 5000);
+
+	it("constrains the watchdog below a shorter nonzero HTTP idle timeout", async () => {
+		setStreamIdleOptionsForTests({ connectMs: 300, activeIdleMs: 300, quietIdleMs: 300 });
+
+		const harness = await createHarness({
+			settings: {
+				httpIdleTimeoutMs: 50,
+				retry: { enabled: true, maxRetries: 1, baseDelayMs: 1 },
+			},
+		});
+		harnesses.push(harness);
+		harness.setResponses([hangUntilAborted, fauxAssistantMessage("recovered before HTTP timeout")]);
+
+		await harness.session.prompt("test short HTTP timeout");
+
+		const retries = harness.eventsOfType("auto_retry_start");
+		expect(retries).toHaveLength(1);
+		expect(retries[0].errorMessage).toContain("no events for 45ms (quiet phase)");
+		expect(getAssistantTexts(harness)).toContain("recovered before HTTP timeout");
+	}, 5000);
 });

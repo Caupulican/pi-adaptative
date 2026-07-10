@@ -171,6 +171,7 @@ describe("runWorker", () => {
 		const timedOut = await runWorker(
 			runnerOptions({
 				maxWallClockMs: 10,
+				getChangedFiles: () => ["src/already-written.ts"],
 				complete: ({ signal }) =>
 					new Promise((_resolve, reject) => {
 						signal?.addEventListener("abort", () => reject(new Error("aborted")));
@@ -180,6 +181,7 @@ describe("runWorker", () => {
 		expect(timedOut.result.status).toBe("cancelled");
 		expect(timedOut.laneStatus).toBe("timeout");
 		expect(timedOut.reasonCode).toBe("wall_clock_exceeded");
+		expect(timedOut.result.changedFiles).toEqual(["src/already-written.ts"]);
 	});
 
 	it("keeps the worker system prompt static for provider prompt caching", async () => {

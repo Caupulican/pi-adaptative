@@ -231,6 +231,16 @@ describe("skills", () => {
 			expect(skills[0].thinking).toBe("high");
 		});
 
+		it("should parse an ultra thinking frontmatter field", () => {
+			const { skills } = loadSkillsFromDir({
+				dir: join(fixturesDir, "thinking-level-ultra"),
+				source: "test",
+			});
+
+			expect(skills).toHaveLength(1);
+			expect(skills[0].thinking).toBe("ultra");
+		});
+
 		it("should default thinking to undefined when not specified", () => {
 			const { skills } = loadSkillsFromDir({
 				dir: join(fixturesDir, "valid-skill"),

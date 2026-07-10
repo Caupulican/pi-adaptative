@@ -66,8 +66,8 @@ type RoutedRunContext = {
 			appendCustomEntry: (customType: string, data?: unknown) => string;
 			appendCustomMessageEntry: (customType: string, content: unknown, display: string, details?: unknown) => string;
 		};
-		getBaseSystemPrompt?: () => string;
-		buildSystemPromptForToolNames?: (toolNames: string[]) => string;
+		getBaseSystemPrompt: () => string;
+		buildSystemPromptForToolNames: (toolNames: string[]) => string;
 		runAgentPrompt: (messages: AgentMessage | AgentMessage[]) => Promise<void>;
 		refreshCurrentModelFromRegistry?: () => void;
 		emit?: (event: { type: string; message?: string }) => void;
@@ -533,6 +533,8 @@ describe("AgentSession model router turn selection", () => {
 					},
 					appendCustomMessageEntry: () => "custom",
 				}),
+				getBaseSystemPrompt: () => "BASE_PROMPT",
+				buildSystemPromptForToolNames: (names) => `PROMPT_FOR:${names.join(",")}`,
 				runAgentPrompt: async () => {
 					modelDuringRun = context.agent.state.model;
 				},
@@ -574,6 +576,8 @@ describe("AgentSession model router turn selection", () => {
 					appendCustomEntry: () => "custom",
 					appendCustomMessageEntry: () => "custom",
 				}),
+				getBaseSystemPrompt: () => "BASE_PROMPT",
+				buildSystemPromptForToolNames: (names) => `PROMPT_FOR:${names.join(",")}`,
 				runAgentPrompt: async () => {
 					thinkingDuringRun = context.agent.state.thinkingLevel;
 				},
@@ -615,6 +619,8 @@ describe("AgentSession model router turn selection", () => {
 					appendCustomEntry: () => "custom",
 					appendCustomMessageEntry: () => "custom",
 				}),
+				getBaseSystemPrompt: () => "BASE_PROMPT",
+				buildSystemPromptForToolNames: (names) => `PROMPT_FOR:${names.join(",")}`,
 				runAgentPrompt: async () => {
 					thinkingDuringRun = context.agent.state.thinkingLevel;
 				},
@@ -657,6 +663,8 @@ describe("AgentSession model router turn selection", () => {
 					appendCustomEntry: () => "custom",
 					appendCustomMessageEntry: () => "custom",
 				}),
+				getBaseSystemPrompt: () => "BASE_PROMPT",
+				buildSystemPromptForToolNames: (names) => `PROMPT_FOR:${names.join(",")}`,
 				runAgentPrompt: async () => {
 					thinkingDuringRun = context.agent.state.thinkingLevel;
 				},
@@ -702,6 +710,8 @@ describe("AgentSession model router turn selection", () => {
 					},
 					appendCustomMessageEntry: () => "custom",
 				}),
+				getBaseSystemPrompt: () => "BASE_PROMPT",
+				buildSystemPromptForToolNames: (names) => `PROMPT_FOR:${names.join(",")}`,
 				runAgentPrompt: async () => {
 					modelsDuringRuns.push(context.agent.state.model?.id ?? "none");
 					const message: AssistantMessage = {

@@ -18,7 +18,7 @@ export const defaultModelPerProvider: Record<KnownProvider, string> = {
 	openai: "gpt-5.4",
 	fugu: "fugu",
 	"azure-openai-responses": "gpt-5.4",
-	"openai-codex": "gpt-5.5",
+	"openai-codex": "gpt-5.6-sol",
 	deepseek: "deepseek-v4-pro",
 	google: "gemini-3.1-pro-preview",
 	"google-vertex": "gemini-3.1-pro-preview",
@@ -582,6 +582,10 @@ export interface InitialModelResult {
 	fallbackMessage: string | undefined;
 }
 
+function resolveInitialThinkingLevel(model: Model<Api>, explicitThinkingLevel?: ThinkingLevel): ThinkingLevel {
+	return explicitThinkingLevel ?? model.defaultThinkingLevel ?? DEFAULT_THINKING_LEVEL;
+}
+
 /**
  * Find the initial model to use based on priority:
  * 1. CLI args (provider + optional model)
@@ -612,7 +616,6 @@ export async function findInitialModel(options: {
 	} = options;
 
 	let model: Model<Api> | undefined;
-	let thinkingLevel: ThinkingLevel = DEFAULT_THINKING_LEVEL;
 
 	// 1. CLI args take priority
 	if (cliProvider || cliModel) {
@@ -628,7 +631,11 @@ export async function findInitialModel(options: {
 			process.exit(1);
 		}
 		if (resolved.model) {
-			return { model: resolved.model, thinkingLevel: DEFAULT_THINKING_LEVEL, fallbackMessage: undefined };
+			return {
+				model: resolved.model,
+				thinkingLevel: resolveInitialThinkingLevel(resolved.model, resolved.thinkingLevel ?? defaultThinkingLevel),
+				fallbackMessage: undefined,
+			};
 		}
 	}
 
@@ -636,7 +643,10 @@ export async function findInitialModel(options: {
 	if (scopedModels.length > 0 && !isContinuing) {
 		return {
 			model: scopedModels[0].model,
-			thinkingLevel: scopedModels[0].thinkingLevel ?? defaultThinkingLevel ?? DEFAULT_THINKING_LEVEL,
+			thinkingLevel: resolveInitialThinkingLevel(
+				scopedModels[0].model,
+				scopedModels[0].thinkingLevel ?? defaultThinkingLevel,
+			),
 			fallbackMessage: undefined,
 		};
 	}
@@ -646,10 +656,11 @@ export async function findInitialModel(options: {
 		const found = modelRegistry.find(defaultProvider, defaultModelId);
 		if (found) {
 			model = found;
-			if (defaultThinkingLevel) {
-				thinkingLevel = defaultThinkingLevel;
-			}
-			return { model, thinkingLevel, fallbackMessage: undefined };
+			return {
+				model,
+				thinkingLevel: resolveInitialThinkingLevel(model, defaultThinkingLevel),
+				fallbackMessage: undefined,
+			};
 		}
 	}
 
@@ -662,16 +673,28 @@ export async function findInitialModel(options: {
 			const defaultId = defaultModelPerProvider[provider];
 			const match = availableModels.find((m) => m.provider === provider && m.id === defaultId);
 			if (match) {
-				return { model: match, thinkingLevel: DEFAULT_THINKING_LEVEL, fallbackMessage: undefined };
+				return {
+					model: match,
+					thinkingLevel: resolveInitialThinkingLevel(match, defaultThinkingLevel),
+					fallbackMessage: undefined,
+				};
 			}
 		}
 
 		// If no default found, use first available
-		return { model: availableModels[0], thinkingLevel: DEFAULT_THINKING_LEVEL, fallbackMessage: undefined };
+		return {
+			model: availableModels[0],
+			thinkingLevel: resolveInitialThinkingLevel(availableModels[0], defaultThinkingLevel),
+			fallbackMessage: undefined,
+		};
 	}
 
 	// 5. No model found
-	return { model: undefined, thinkingLevel: DEFAULT_THINKING_LEVEL, fallbackMessage: undefined };
+	return {
+		model: undefined,
+		thinkingLevel: defaultThinkingLevel ?? DEFAULT_THINKING_LEVEL,
+		fallbackMessage: undefined,
+	};
 }
 
 /**

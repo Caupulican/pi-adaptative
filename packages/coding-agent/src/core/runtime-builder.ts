@@ -35,10 +35,9 @@
 
 import { existsSync, readFileSync } from "node:fs";
 import { isAbsolute, join } from "node:path";
-import type { Agent, AgentContext, AgentMessage, AgentTool } from "@caupulican/pi-agent-core";
+import type { Agent, AgentContext, AgentMessage, AgentTool, ThinkingLevel } from "@caupulican/pi-agent-core";
 import type { SessionManager } from "@caupulican/pi-agent-core/node";
 import type { Api, Model, Usage } from "@caupulican/pi-ai";
-import { resetApiProviders } from "@caupulican/pi-ai";
 import type {
 	IsolatedCompletionOptions,
 	IsolatedCompletionResult,
@@ -47,6 +46,7 @@ import type {
 import type { ArtifactStore } from "./context/context-artifacts.ts";
 import type { MemoryPromptInclusionReport, MemoryRetrievalDiagnostics } from "./context/memory-diagnostics.ts";
 import type { ContextGcReport } from "./context-gc.ts";
+import { DEFAULT_ACTIVE_TOOL_NAMES } from "./default-tool-surface.ts";
 import { createCoreDiagnosticsToolDefinitions } from "./extensions/builtin.ts";
 import {
 	type ContextUsage,
@@ -64,10 +64,12 @@ import { disposeExtensionEventSubscriptions } from "./extensions/loader.ts";
 import { emitSessionShutdownEvent } from "./extensions/runner.ts";
 import type { GoalState } from "./goals/goal-state.ts";
 import type { MemoryManager } from "./memory/memory-manager.ts";
+import type { MemoryControllerReloadSnapshot } from "./memory-controller.ts";
 import type { ModelRegistry } from "./model-registry.ts";
 import { resolveCliModel } from "./model-resolver.ts";
 import { evaluateSurfaceFitness } from "./model-router/fitness-gate.ts";
 import { FitnessStore } from "./models/fitness-store.ts";
+import type { ProfileFilterReloadSnapshot } from "./profile-filter-controller.ts";
 import type { ModelFitnessReport } from "./research/model-fitness.ts";
 import type { ResourceLoader } from "./resource-loader.ts";
 import { ScoutController } from "./scout-controller.ts";
@@ -101,6 +103,16 @@ interface ToolDefinitionEntry {
 
 interface ReloadRuntimeSnapshot {
 	extensionRunner: ExtensionRunner;
+	settings: ReturnType<SettingsManager["createReloadSnapshot"]>;
+	modelRegistry: ReturnType<ModelRegistry["createReloadSnapshot"]>;
+	model: Model<Api>;
+	thinkingLevel: ThinkingLevel;
+	sessionLeafId: string | null;
+	toolProfileFilter: Required<ResourceProfileFilterSettings> | undefined;
+	requestedActiveToolNames: string[] | undefined;
+	memory: MemoryControllerReloadSnapshot;
+	profileFilter: ProfileFilterReloadSnapshot;
+	unboundToolGrantWarnings: string[];
 	baseToolDefinitions: Map<string, ToolDefinition>;
 	toolRegistry: Map<string, AgentTool>;
 	toolDefinitions: Map<string, ToolDefinitionEntry>;
@@ -158,6 +170,9 @@ export interface RuntimeBuilderDeps {
 	filterExtensionsForRuntime(extensions: Extension[]): Extension[];
 	/** Sink for the G13 unbound-profile-tool-grant warnings surfaced in /context. */
 	setUnboundToolGrantWarnings(warnings: string[]): void;
+	getUnboundToolGrantWarnings(): string[];
+	createProfileFilterReloadSnapshot(): ProfileFilterReloadSnapshot;
+	restoreProfileFilterReloadSnapshot(snapshot: ProfileFilterReloadSnapshot): void;
 
 	/** Currently-active tool names (reads agent.state.tools; the pre-filter fallback for a rebuild). */
 	getActiveToolNames(): string[];
@@ -187,6 +202,8 @@ export interface RuntimeBuilderDeps {
 	getMemoryAuditDiagnostics(): { retrieval: MemoryRetrievalDiagnostics; promptInclusion: MemoryPromptInclusionReport };
 	/** Drop extension-contributed pending memory providers before a reload re-registers them. */
 	clearPendingMemoryProviders(): void;
+	createMemoryReloadSnapshot(): MemoryControllerReloadSnapshot;
+	restoreMemoryReloadSnapshot(snapshot: MemoryControllerReloadSnapshot): void;
 	/** (Re)derive the memory subsystem from reloaded settings/providers. */
 	initializeMemory(): Promise<void>;
 
@@ -241,6 +258,8 @@ export class RuntimeBuilder {
 	private _toolPromptSnippets: Map<string, string> = new Map();
 	private _toolPromptGuidelines: Map<string, string[]> = new Map();
 	private _baseToolDefinitions: Map<string, ToolDefinition> = new Map();
+	private _reloadPromise: Promise<void> | undefined;
+	private _reloadRequested = false;
 
 	private readonly deps: RuntimeBuilderDeps;
 
@@ -403,24 +422,24 @@ export class RuntimeBuilder {
 		const requestedBase = options?.activeToolNames ? [...options.activeToolNames] : [...previousActiveToolNames];
 		const nextActiveToolNames = requestedBase.filter((name) => isAllowedTool(name));
 
-		const autoActivated: string[] = [];
+		const persistentAutoActivated: string[] = [];
 		if (allowedToolNames) {
 			for (const toolName of this._toolRegistry.keys()) {
 				if (allowedToolNames.has(toolName)) {
 					nextActiveToolNames.push(toolName);
-					autoActivated.push(toolName);
+					persistentAutoActivated.push(toolName);
 				}
 			}
 		} else if (options?.includeAllExtensionTools) {
 			for (const tool of wrappedExtensionTools) {
 				nextActiveToolNames.push(tool.name);
-				autoActivated.push(tool.name);
+				persistentAutoActivated.push(tool.name);
 			}
 		} else if (!options?.activeToolNames) {
 			for (const toolName of this._toolRegistry.keys()) {
 				if (!previousRegistryNames.has(toolName)) {
 					nextActiveToolNames.push(toolName);
-					autoActivated.push(toolName);
+					persistentAutoActivated.push(toolName);
 				}
 			}
 		}
@@ -441,7 +460,6 @@ export class RuntimeBuilder {
 				}
 				if (matchesResourceProfilePattern(toolName, explicitAllowPatterns)) {
 					nextActiveToolNames.push(toolName);
-					autoActivated.push(toolName);
 				}
 			}
 			// G13: an explicit grant that binds to NO registered tool is a silent no-op — typo'd
@@ -464,15 +482,30 @@ export class RuntimeBuilder {
 		// guarantee, not just this settings/profile refresh flow.
 		this.deps.setActiveToolsByName([...new Set(nextActiveToolNames)]);
 		// setActiveToolsByName just stored the profile-filtered ACTIVE set as the request; restore
-		// the true pre-filter request (plus this refresh's auto-activations) so an internal refresh
-		// can never permanently narrow it.
-		this.deps.setRequestedActiveToolNames([...new Set([...requestedBase, ...autoActivated])]);
+		// the true pre-filter request (plus non-profile auto-activations) so an internal refresh can
+		// never permanently narrow it. Explicit profile grants are generation-local activations: if
+		// profile A names grep and profile B later grants "*", A must not pin grep into B's request.
+		this.deps.setRequestedActiveToolNames([...new Set([...requestedBase, ...persistentAutoActivated])]);
 	}
 
 	private _createReloadRuntimeSnapshot(): ReloadRuntimeSnapshot {
 		const agent = this.deps.getAgent();
+		const toolProfileFilter = this.deps.getToolProfileFilter();
+		const requestedActiveToolNames = this.deps.getRequestedActiveToolNames();
 		return {
 			extensionRunner: this.deps.getExtensionRunner(),
+			settings: this.deps.getSettingsManager().createReloadSnapshot(),
+			modelRegistry: this.deps.getModelRegistry().createReloadSnapshot(),
+			model: agent.state.model,
+			thinkingLevel: agent.state.thinkingLevel,
+			sessionLeafId: this.deps.getSessionManager().getLeafId(),
+			toolProfileFilter: toolProfileFilter
+				? { allow: [...toolProfileFilter.allow], block: [...toolProfileFilter.block] }
+				: undefined,
+			requestedActiveToolNames: requestedActiveToolNames ? [...requestedActiveToolNames] : undefined,
+			memory: this.deps.createMemoryReloadSnapshot(),
+			profileFilter: this.deps.createProfileFilterReloadSnapshot(),
+			unboundToolGrantWarnings: [...this.deps.getUnboundToolGrantWarnings()],
 			baseToolDefinitions: this._baseToolDefinitions,
 			toolRegistry: this._toolRegistry,
 			toolDefinitions: this._toolDefinitions,
@@ -485,6 +518,19 @@ export class RuntimeBuilder {
 	}
 
 	private _restoreReloadRuntimeSnapshot(snapshot: ReloadRuntimeSnapshot): void {
+		this.deps.getSettingsManager().restoreReloadSnapshot(snapshot.settings);
+		this.deps.getModelRegistry().restoreReloadSnapshot(snapshot.modelRegistry);
+		this.deps.setToolProfileFilter(
+			snapshot.toolProfileFilter
+				? { allow: [...snapshot.toolProfileFilter.allow], block: [...snapshot.toolProfileFilter.block] }
+				: undefined,
+		);
+		this.deps.setRequestedActiveToolNames(
+			snapshot.requestedActiveToolNames ? [...snapshot.requestedActiveToolNames] : undefined,
+		);
+		this.deps.restoreMemoryReloadSnapshot(snapshot.memory);
+		this.deps.restoreProfileFilterReloadSnapshot(snapshot.profileFilter);
+		this.deps.setUnboundToolGrantWarnings([...snapshot.unboundToolGrantWarnings]);
 		// setExtensionRunner restores both _extensionRunner and _extensionRunnerRef.current together
 		// (the same field-then-ref pair the host wrote at every assignment site); nothing reads the
 		// ref between the two writes, so folding them is unobservable.
@@ -495,9 +541,17 @@ export class RuntimeBuilder {
 		this._toolPromptSnippets = snapshot.toolPromptSnippets;
 		this._toolPromptGuidelines = snapshot.toolPromptGuidelines;
 		const agent = this.deps.getAgent();
+		agent.state.model = snapshot.model;
+		agent.state.thinkingLevel = snapshot.thinkingLevel;
 		agent.state.tools = snapshot.agentTools;
 		agent.state.systemPrompt = snapshot.agentSystemPrompt;
 		this.deps.setBaseSystemPrompt(snapshot.baseSystemPrompt);
+		const sessionManager = this.deps.getSessionManager();
+		if (snapshot.sessionLeafId === null) {
+			sessionManager.resetLeaf();
+		} else {
+			sessionManager.branch(snapshot.sessionLeafId);
+		}
 		this.deps.applyExtensionBindings(snapshot.extensionRunner);
 	}
 
@@ -532,7 +586,8 @@ export class RuntimeBuilder {
 		activeToolNames?: string[];
 		flagValues?: Map<string, boolean | string>;
 		includeAllExtensionTools?: boolean;
-	}): void {
+		onError?: ExtensionErrorListener;
+	}): (() => void) | undefined {
 		const settingsManager = this.deps.getSettingsManager();
 		const autoResizeImages = settingsManager.getImageAutoResize();
 		const shellCommandPrefix = settingsManager.getShellCommandPrefix();
@@ -644,31 +699,60 @@ export class RuntimeBuilder {
 			this.deps.getSessionManager(),
 			this.deps.getModelRegistry(),
 		);
+		const offBuildErrors = options.onError ? runner.onError(options.onError) : undefined;
 		this.deps.setExtensionRunner(runner);
-		this.deps.bindExtensionCore(runner);
+		try {
+			this.deps.bindExtensionCore(runner);
+		} catch (error) {
+			offBuildErrors?.();
+			throw error;
+		}
 		this.deps.applyExtensionBindings(runner);
 
 		const defaultActiveToolNames = baseToolsOverride
 			? Object.keys(baseToolsOverride)
-			: [
-					"read",
-					"bash",
-					"edit",
-					"write",
-					"context_audit",
-					"goal",
-					"delegate",
-					"run_toolkit_script",
-					...(settingsManager.getScoutSettings().enabled ? ["context_scout"] : []),
-				];
+			: [...DEFAULT_ACTIVE_TOOL_NAMES, ...(settingsManager.getScoutSettings().enabled ? ["context_scout"] : [])];
 		const baseActiveToolNames = options.activeToolNames ?? defaultActiveToolNames;
 		this.refreshToolRegistry({
 			activeToolNames: baseActiveToolNames,
 			includeAllExtensionTools: options.includeAllExtensionTools,
 		});
+		return offBuildErrors;
 	}
 
-	async reload(): Promise<void> {
+	reload(): Promise<void> {
+		if (this._reloadPromise) {
+			// State can change while a generation is being validated. Coalesce any number of
+			// overlapping requests into one follow-up generation instead of silently treating a
+			// later profile/settings mutation as part of the already-snapshotted generation.
+			this._reloadRequested = true;
+			return this._reloadPromise;
+		}
+		const reloadPromise = this._drainReloadRequests();
+		this._reloadPromise = reloadPromise;
+		return reloadPromise;
+	}
+
+	private async _drainReloadRequests(): Promise<void> {
+		let finalError: unknown;
+		try {
+			do {
+				this._reloadRequested = false;
+				try {
+					await this._reloadOnce();
+					finalError = undefined;
+				} catch (error) {
+					finalError = error;
+				}
+			} while (this._reloadRequested);
+			if (finalError !== undefined) throw finalError;
+		} finally {
+			this._reloadPromise = undefined;
+			this._reloadRequested = false;
+		}
+	}
+
+	private async _reloadOnce(): Promise<void> {
 		if (this.deps.isStreaming()) {
 			throw new Error("Cannot reload while the agent is streaming or a tool call is active");
 		}
@@ -681,8 +765,10 @@ export class RuntimeBuilder {
 		// active set — otherwise a reload under a small model permanently shrinks the restorable set.
 		const activeToolNames = this.deps.getRequestedActiveToolNames() ?? this.deps.getActiveToolNames();
 		const previousFlagValues = previousRunner.getFlagValues();
+		const previousExtensionProviderNames = previousRunner.getRegisteredProviderNames();
 		const reloadErrors: string[] = [];
 		let newRunner: ExtensionRunner | undefined;
+		let offReloadErrors: (() => void) | undefined;
 		try {
 			await this.deps.getSettingsManager().reload();
 			// Re-derive the resource-profile tool filter from the freshly reloaded settings.
@@ -691,21 +777,30 @@ export class RuntimeBuilder {
 			// active profile's tools allow/block — or switching the active profile — would not
 			// apply on /reload and allowed tools would stay missing.
 			this.deps.setToolProfileFilter(this.deps.deriveToolProfileFilter());
-			// Re-apply the active profile's model/thinking from the freshly reloaded settings, so a live
-			// profile edit (or switch) takes effect on /reload. Skipped when the launch used an explicit
-			// --model/--thinking flag, which must win over the profile across reloads.
-			await this.deps.reapplyActiveProfileModelSettings();
-			await this.deps.getResourceLoader().reload({ failOnExtensionErrors: true, deferExtensionDispose: true });
-			resetApiProviders();
-			this.buildRuntime({
+			// Resource discovery must consume this exact settings generation. A second settings read here
+			// could combine profile state from one generation with resources from the next.
+			await this.deps.getResourceLoader().reload({
+				failOnExtensionErrors: true,
+				deferExtensionDispose: true,
+				skipSettingsReload: true,
+			});
+			// Replace the previous extension-owned provider generation before binding the new one. The
+			// bulk refresh also preserves API/OAuth streams for surviving non-extension providers.
+			this.deps.getModelRegistry().unregisterProviders(previousExtensionProviderNames);
+			offReloadErrors = this.buildRuntime({
 				activeToolNames,
 				flagValues: previousFlagValues,
 				includeAllExtensionTools: true,
+				onError: (error) => {
+					reloadErrors.push(`${error.extensionPath} ${error.event}: ${error.error}`);
+				},
 			});
 			newRunner = this.deps.getExtensionRunner();
-			const offDoctorErrors = newRunner.onError((error) => {
-				reloadErrors.push(`${error.extensionPath} ${error.event}: ${error.error}`);
-			});
+			// Extensions are now bound and their queued providers/models are registered, so a profile may
+			// safely select a model contributed by an extension granted in that same profile generation.
+			await this.deps.reapplyActiveProfileModelSettings();
+			// Model capability and system-prompt/tool exposure must reflect the newly selected model.
+			this.refreshToolRegistry({ activeToolNames, includeAllExtensionTools: true });
 			try {
 				this._doctorReloadRuntime();
 				// Reload starts memory providers fresh; loaded extensions re-register below.
@@ -721,23 +816,25 @@ export class RuntimeBuilder {
 					this._doctorReloadRuntime();
 				}
 			} finally {
-				offDoctorErrors();
+				offReloadErrors?.();
+				offReloadErrors = undefined;
 			}
 			if (reloadErrors.length > 0) {
 				throw new Error(`Extension reload failed doctor: ${reloadErrors.slice(0, 6).join("; ")}`);
 			}
 			await emitSessionShutdownEvent(previousRunner, { type: "session_shutdown", reason: "reload" });
 			previousRunner.invalidate();
-			this.deps.getResourceLoader().commitReload?.();
+			await this.deps.getResourceLoader().commitReload?.();
 			// Re-derive the memory subsystem from the reloaded settings/providers.
 			await this.deps.initializeMemory();
 		} catch (error) {
+			offReloadErrors?.();
 			if (newRunner && newRunner !== previousRunner) {
 				newRunner.invalidate(
 					"This extension ctx was discarded because reload failed and Pi restored the previous valid runtime.",
 				);
 			}
-			this.deps.getResourceLoader().rollbackReload?.();
+			await this.deps.getResourceLoader().rollbackReload?.();
 			this._restoreReloadRuntimeSnapshot(snapshot);
 			throw error;
 		}
@@ -769,6 +866,8 @@ export class RuntimeBuilder {
 
 			// Unregister its providers (keyed by the extension's own path, as registered)
 			const runtime = this.deps.getResourceLoader().getExtensions().runtime;
+			const ownedMemoryProviders = runtime.memoryProvidersByExtension.get(ext.path) ?? new Set();
+			const ownedContextMemoryProviders = runtime.contextMemoryProvidersByExtension.get(ext.path) ?? new Set();
 			for (const name of runtime.getProvidersForExtension(ext.path)) {
 				runtime.unregisterProvider(name, ext.path);
 			}
@@ -788,6 +887,19 @@ export class RuntimeBuilder {
 				includeAllExtensionTools: true,
 			});
 			previousRunner.invalidate();
+			const memorySnapshot = this.deps.createMemoryReloadSnapshot();
+			this.deps.restoreMemoryReloadSnapshot({
+				...memorySnapshot,
+				pendingMemoryProviders: memorySnapshot.pendingMemoryProviders.filter(
+					(provider) => !ownedMemoryProviders.has(provider),
+				),
+				pendingContextMemoryProviders: memorySnapshot.pendingContextMemoryProviders.filter(
+					(provider) => !ownedContextMemoryProviders.has(provider),
+				),
+			});
+			runtime.memoryProvidersByExtension.delete(ext.path);
+			runtime.contextMemoryProvidersByExtension.delete(ext.path);
+			await this.deps.initializeMemory();
 
 			// Notify extensions-changed listeners
 			this.deps.notifyExtensionsChanged();
@@ -835,6 +947,9 @@ export class RuntimeBuilder {
 
 			// Run session_start lifecycle for the new extension only
 			await this.deps.getExtensionRunner().emitToExtension(extension, { type: "session_start", reason: "load" });
+			// Activate newly registered legacy/context providers immediately. Reinitialization also
+			// refreshes provider tools and preserves all providers owned by existing extensions.
+			await this.deps.initializeMemory();
 
 			// Notify extensions-changed listeners
 			this.deps.notifyExtensionsChanged();

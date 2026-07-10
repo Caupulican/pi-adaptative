@@ -1,4 +1,4 @@
-import { describe, expect, it } from "vitest";
+import { describe, expect, it, vi } from "vitest";
 import { runBoundedCompletion } from "../src/core/autonomy/bounded-completion.ts";
 
 describe("runBoundedCompletion", () => {
@@ -21,6 +21,52 @@ describe("runBoundedCompletion", () => {
 		});
 		expect(outcome.completion).toBeUndefined();
 		expect(outcome.failure).toEqual({ status: "timeout", reasonCode: "wall_clock_exceeded" });
+	});
+
+	it("returns at the wall-clock bound when the executor never settles or observes abort", async () => {
+		vi.useFakeTimers();
+		try {
+			let executionSignal: AbortSignal | undefined;
+			const pending = runBoundedCompletion({
+				maxWallClockMs: 10,
+				execute: (signal) => {
+					executionSignal = signal;
+					return new Promise(() => {});
+				},
+			});
+
+			await vi.advanceTimersByTimeAsync(10);
+
+			expect(await pending).toEqual({
+				failure: { status: "timeout", reasonCode: "wall_clock_exceeded" },
+			});
+			expect(executionSignal?.aborted).toBe(true);
+		} finally {
+			vi.useRealTimers();
+		}
+	});
+
+	it("observes a late executor rejection after returning a timeout", async () => {
+		vi.useFakeTimers();
+		try {
+			let rejectLate!: (error: Error) => void;
+			const pending = runBoundedCompletion({
+				maxWallClockMs: 10,
+				execute: () =>
+					new Promise((_resolve, reject) => {
+						rejectLate = reject;
+					}),
+			});
+
+			await vi.advanceTimersByTimeAsync(10);
+			expect((await pending).failure).toEqual({ status: "timeout", reasonCode: "wall_clock_exceeded" });
+
+			rejectLate(new Error("late executor failure"));
+			await Promise.resolve();
+			await Promise.resolve();
+		} finally {
+			vi.useRealTimers();
+		}
 	});
 
 	it("maps an external abort to canceled, winning over timeout", async () => {

@@ -75,9 +75,12 @@ describe("context_audit: safe local-memory diagnostics (no leakage, read-only)",
 		}
 	});
 
-	it("R14: before any turn and with memory disabled, reports 'disabled' with no OKF directory access/creation", async () => {
+	it("R14: explicit hard-off reports 'disabled' with no OKF directory access/creation", async () => {
 		const harness = await createHarness({
 			initialActiveToolNames: ["read", "bash", "edit", "write", "context_audit", "goal"],
+			settings: {
+				contextPolicy: { memory: { enabled: false, includeInPrompt: false, maxResults: 5 } },
+			},
 		});
 		harnesses.push(harness);
 		expect(existsSync(memoryDir(harness))).toBe(false);
@@ -92,10 +95,10 @@ describe("context_audit: safe local-memory diagnostics (no leakage, read-only)",
 		expect((result.details?.memory as { retrieval?: { enabled?: boolean } })?.retrieval?.enabled).toBe(false);
 	});
 
-	it("R13: include_disabled -- retrieval enabled, includeInPrompt false/unset", async () => {
+	it("R13: include_disabled -- retrieval enabled, includeInPrompt explicitly false", async () => {
 		const harness = await createHarness({
 			initialActiveToolNames: ["read", "bash", "edit", "write", "context_audit", "goal"],
-			settings: { contextPolicy: { memory: { enabled: true, maxResults: 5 } } },
+			settings: { contextPolicy: { memory: { enabled: true, includeInPrompt: false, maxResults: 5 } } },
 		});
 		harnesses.push(harness);
 		writeOkfFile(harness, "note.okf.md", okfDocument("Widget rollout", "Notes on widgets.", "Body about widgets."));
@@ -144,14 +147,10 @@ describe("context_audit: safe local-memory diagnostics (no leakage, read-only)",
 		expect(auditText(result)).toContain("provider pi-okf: queried (1 result(s))");
 	});
 
-	it("R13/R14 (test-only): empty_block and failed are reachable and correctly recorded, even though real OKF documents cannot produce them", async () => {
-		// Real OKF documents always yield a non-empty "[provider/scope/kind] <description>"
-		// summary (parseOkfMemoryDocument requires a non-empty description), so
-		// buildMemoryPromptBlock's "all summaries empty" branch, and the outer catch, are
-		// structurally unreachable via any real product path. Invoking the private method
-		// directly here (narrow, test-only, flagged to PM) is the only way to prove these
-		// two status codes are still recorded correctly if the invariant above is ever
-		// violated by a future change.
+	it("R13/R14 (test-only): empty_block and failed are reachable and correctly recorded", async () => {
+		// A non-empty candidate can still produce an empty block when the tier composer rejects
+		// secret-like text. The outer catch remains test-only because normal reports expose plain
+		// arrays. Invoke the private boundary narrowly to verify both diagnostic outcomes.
 		const harness = await createHarness({
 			initialActiveToolNames: ["read", "bash", "edit", "write", "context_audit", "goal"],
 			settings: { contextPolicy: { memory: { enabled: true, includeInPrompt: true, maxResults: 5 } } },
@@ -162,7 +161,7 @@ describe("context_audit: safe local-memory diagnostics (no leakage, read-only)",
 			_maybeAppendMemoryEvidenceBlock: (messages: AgentMessage[], report: MemoryRetrievalReport) => AgentMessage[];
 		};
 
-		const emptySummaryReport: MemoryRetrievalReport = {
+		const rejectedSummaryReport: MemoryRetrievalReport = {
 			request: { query: "x", maxResults: 5 },
 			providerReports: [],
 			results: [],
@@ -173,13 +172,13 @@ describe("context_audit: safe local-memory diagnostics (no leakage, read-only)",
 					retentionClass: "useful",
 					source: "memory",
 					createdAtTurn: 0,
-					summary: "   ",
+					summary: "api_key: sk-test-secret-value",
 					tokenEstimate: 1,
 					byteEstimate: 1,
 				},
 			],
 		};
-		internals._maybeAppendMemoryEvidenceBlock([], emptySummaryReport);
+		internals._maybeAppendMemoryEvidenceBlock([], rejectedSummaryReport);
 		expect(harness.session.getMemoryPromptInclusionReport().status).toBe("empty_block");
 
 		const throwingReport = {

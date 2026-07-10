@@ -25,15 +25,19 @@ export interface LongTermMemoryTriggerDecision {
 }
 
 const EXPLICIT_RECALL_RE = /\b(recall|remember|memory|memories|resume|previous|prior|before|history)\b/i;
-const PREFERENCE_RE = /\b(preferences?|prefers?|rules?|instructions?|policy|how should|how do you usually|project context|user context)\b/i;
-const DURABLE_ID_RE = /\b(?:goal-[a-z0-9-]+|[A-Z]+-\d+|#[0-9]+|[a-f0-9]{8,40}|build\s*#?\d+|artifact|trello|jenkins|branch)\b/i;
+const PREFERENCE_RE =
+	/\b(preferences?|prefers?|rules?|instructions?|policy|how should|how do you usually|project context|user context)\b/i;
+const DURABLE_ID_RE =
+	/\b(?:goal-[a-z0-9-]+|[A-Z]+-\d+|#[0-9]+|[a-f0-9]{8,40}|build\s*#?\d+|artifact|trello|jenkins|branch)\b/i;
 const MISSING_BACKGROUND_RE = /\b(context|background|what did|where were|what was|remind me|familiar|ready)\b/i;
 
 function substantial(text: string): boolean {
-	return text
-		.trim()
-		.split(/\s+/)
-		.filter((word) => word.length >= 3).length >= 3;
+	return (
+		text
+			.trim()
+			.split(/\s+/)
+			.filter((word) => word.length >= 3).length >= 3
+	);
 }
 
 export function shouldQueryLongTermMemory(input: LongTermMemoryTriggerInput): LongTermMemoryTriggerDecision {
@@ -47,7 +51,11 @@ export function shouldQueryLongTermMemory(input: LongTermMemoryTriggerInput): Lo
 	if (MISSING_BACKGROUND_RE.test(text)) return { shouldQuery: true, reason: "missing_background" };
 
 	const activeGoal = input.goalState?.status === "active" ? input.goalState : undefined;
-	if (activeGoal !== undefined && text.length === 0 && activeGoal.requirements.some((requirement) => requirement.status === "open")) {
+	if (
+		activeGoal !== undefined &&
+		text.length === 0 &&
+		activeGoal.requirements.some((requirement) => requirement.status === "open")
+	) {
 		return { shouldQuery: true, reason: "goal_continuation_missing_context" };
 	}
 

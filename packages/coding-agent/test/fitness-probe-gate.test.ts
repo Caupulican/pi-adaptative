@@ -1,7 +1,10 @@
 import type { ThinkingLevel } from "@caupulican/pi-agent-core";
-import { describe, expect, it, vi } from "vitest";
+import type { Model } from "@caupulican/pi-ai";
+import { beforeAll, describe, expect, it, vi } from "vitest";
+import type { ModelRegistry } from "../src/core/model-registry.ts";
 import { runModelFitnessProbe } from "../src/core/research/model-fitness.ts";
 import { InteractiveMode } from "../src/modes/interactive/interactive-mode.ts";
+import { initTheme } from "../src/modes/interactive/theme/theme.ts";
 
 /**
  * Reproduces the reported bug at the boundary where /models suggest (and the manual /fitness
@@ -14,7 +17,10 @@ import { InteractiveMode } from "../src/modes/interactive/interactive-mode.ts";
  */
 
 type RunFitnessAndAssignContext = {
-	session: { runModelFitness: (args: { model: string }) => Promise<unknown> };
+	session: {
+		runModelFitness: (args: { model: string }) => Promise<unknown>;
+		modelRegistry?: ModelRegistry;
+	};
 	chatContainer: { addChild: (child: unknown) => void };
 	ui: { requestRender: () => void };
 	showStatus: (text: string) => void;
@@ -107,9 +113,27 @@ function routerContext(
 ) {
 	const statuses: string[] = [];
 	let selectorOpened = 0;
+	let thinkingSelectorOutput = "";
 	let lastModelRouterSettings = { ...startingModelRouter };
+	const model: Model<"openai-completions"> = {
+		id: "good-model",
+		name: "Good Model",
+		api: "openai-completions",
+		provider: "ollama",
+		baseUrl: "http://127.0.0.1:11434/v1",
+		reasoning: true,
+		thinkingLevelMap: { xhigh: "xhigh", max: "max", ultra: "max" },
+		input: ["text"],
+		cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 },
+		contextWindow: 128000,
+		maxTokens: 16384,
+	};
+	const modelRegistry = {
+		getAll: () => [model],
+		getAvailable: () => [model],
+	} as unknown as ModelRegistry;
 	const ctx = {
-		session: { runModelFitness },
+		session: { runModelFitness, modelRegistry },
 		chatContainer: { addChild: vi.fn() },
 		ui: { requestRender: vi.fn() },
 		settingsManager: {
@@ -125,15 +149,22 @@ function routerContext(
 		showSelector: vi.fn((create) => {
 			selectorOpened += 1;
 			const created = create(() => {});
-			const list = (created.component as { selectList?: { onSelect: (item: { value: string }) => void } })
-				.selectList;
-			if (!list?.onSelect) return;
+			const component = created.component as {
+				selectList?: {
+					onSelect: (item: { value: string }) => void;
+					render: (width: number) => string[];
+				};
+			};
+			const list = component.selectList;
 
 			if (selectorOpened === 1) {
+				if (!list?.onSelect) return;
 				list.onSelect({ value: "router-cheap" });
 				return;
 			}
-			list.onSelect({ value: "off" });
+			thinkingSelectorOutput = list?.render(180).join("\n") ?? "";
+			if (!list?.onSelect) return;
+			list.onSelect({ value: "ultra" });
 		}),
 	} as RunFitnessAndAssignContext & {
 		settingsManager: {
@@ -145,6 +176,7 @@ function routerContext(
 		ctx,
 		statuses,
 		selectorOpened: () => selectorOpened,
+		thinkingSelectorOutput: () => thinkingSelectorOutput,
 		getModelRouterSettings: () => ({ ...lastModelRouterSettings }),
 	};
 }
@@ -175,6 +207,10 @@ const allPassingComplete = async ({ systemPrompt }: { systemPrompt: string }) =>
 };
 
 describe("runFitnessAndAssign gates adoption on the probe verdict", () => {
+	beforeAll(() => {
+		initTheme("dark");
+	});
+
 	it("refuses adoption and never opens the role selector when every surface scored 0", async () => {
 		const report = await runModelFitnessProbe({ trials: 3, now: () => 0, complete: allFailingComplete });
 		const { ctx, statuses, selectorOpened } = context(async (args) => ({
@@ -251,7 +287,7 @@ describe("runFitnessAndAssign gates adoption on the probe verdict", () => {
 
 	it("persists router-think profile after assigning a router role from fitness", async () => {
 		const report = await runModelFitnessProbe({ trials: 1, now: () => 0, complete: allPassingComplete });
-		const { ctx, selectorOpened, getModelRouterSettings } = routerContext(
+		const { ctx, selectorOpened, thinkingSelectorOutput, getModelRouterSettings } = routerContext(
 			async (args) => ({
 				started: true,
 				model: args.model,
@@ -263,9 +299,11 @@ describe("runFitnessAndAssign gates adoption on the probe verdict", () => {
 		await runFitnessAndAssign.call(ctx, "ollama/good-model");
 
 		expect(selectorOpened()).toBe(2);
+		expect(thinkingSelectorOutput()).toContain("Maximum reasoning depth for the hardest problems");
+		expect(thinkingSelectorOutput()).toContain("Maximum reasoning with reinforced proactive delegation");
 		expect(getModelRouterSettings()).toMatchObject({
 			cheapModel: "ollama/good-model",
-			cheapThinking: "off",
+			cheapThinking: "ultra",
 		});
 	});
 });

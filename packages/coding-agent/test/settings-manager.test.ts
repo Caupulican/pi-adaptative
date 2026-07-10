@@ -82,13 +82,13 @@ describe("SettingsManager", () => {
 			writeFileSync(settingsPath, JSON.stringify(currentSettings, null, 2));
 
 			// User changes thinking level via Shift+Tab
-			manager.setDefaultThinkingLevel("high");
+			manager.setDefaultThinkingLevel("ultra");
 			await manager.flush();
 
 			// Verify enabledModels is preserved
 			const savedSettings = JSON.parse(readFileSync(settingsPath, "utf-8"));
 			expect(savedSettings.enabledModels).toEqual(["claude-opus-4-5", "gpt-5.2-codex"]);
-			expect(savedSettings.defaultThinkingLevel).toBe("high");
+			expect(savedSettings.defaultThinkingLevel).toBe("ultra");
 			expect(savedSettings.theme).toBe("dark");
 			expect(savedSettings.defaultModel).toBe("claude-sonnet");
 		});
@@ -352,7 +352,7 @@ describe("SettingsManager", () => {
 			manager.setAutoLearnSettings({
 				enabled: true,
 				model: "openai/gpt-5.5",
-				thinkingLevel: "high",
+				thinkingLevel: "max",
 				reflectionReview: true,
 				reflectionMinToolCalls: 8,
 				reflectionCooldownMinutes: 30,
@@ -363,7 +363,7 @@ describe("SettingsManager", () => {
 			expect(savedSettings.autoLearn).toMatchObject({
 				enabled: true,
 				model: "openai/gpt-5.5",
-				thinkingLevel: "high",
+				thinkingLevel: "max",
 				reflectionReview: true,
 				reflectionMinToolCalls: 8,
 				reflectionCooldownMinutes: 30,
@@ -464,9 +464,9 @@ describe("SettingsManager", () => {
 					enabled: true,
 					cheapThinking: "low",
 					mediumThinking: "medium",
-					expensiveThinking: "high",
+					expensiveThinking: "max",
 					executorThinking: "minimal",
-					judgeThinking: "off",
+					judgeThinking: "ultra",
 				},
 				"global",
 			);
@@ -474,9 +474,9 @@ describe("SettingsManager", () => {
 			const settings = manager.getModelRouterSettings();
 			expect(settings.cheapThinking).toBe("low");
 			expect(settings.mediumThinking).toBe("medium");
-			expect(settings.expensiveThinking).toBe("high");
+			expect(settings.expensiveThinking).toBe("max");
 			expect(settings.executorThinking).toBe("minimal");
-			expect(settings.judgeThinking).toBe("off");
+			expect(settings.judgeThinking).toBe("ultra");
 		});
 
 		it("drops an invalid per-tier thinking level read from disk but keeps a valid sibling", () => {
@@ -486,7 +486,8 @@ describe("SettingsManager", () => {
 					modelRouter: {
 						enabled: true,
 						cheapThinking: "extreme",
-						mediumThinking: "high",
+						mediumThinking: "max",
+						expensiveThinking: "ultra",
 					},
 				}),
 			);
@@ -494,7 +495,8 @@ describe("SettingsManager", () => {
 			const manager = SettingsManager.create(projectDir, agentDir);
 
 			expect(manager.getModelRouterSettings().cheapThinking).toBeUndefined();
-			expect(manager.getModelRouterSettings().mediumThinking).toBe("high");
+			expect(manager.getModelRouterSettings().mediumThinking).toBe("max");
+			expect(manager.getModelRouterSettings().expensiveThinking).toBe("ultra");
 		});
 	});
 
@@ -698,13 +700,14 @@ describe("SettingsManager", () => {
 	});
 
 	describe("contextPolicy memory retrieval settings", () => {
-		it("defaults to disabled with the documented default maxResults", () => {
+		it("defaults to safe local retrieval and prompt inclusion with the documented maxResults", () => {
 			const manager = SettingsManager.create(projectDir, agentDir);
 
 			expect(manager.getMemoryRetrievalSettings()).toEqual({
-				enabled: false,
+				enabled: true,
 				maxResults: 5,
-				includeInPrompt: false,
+				includeInPrompt: true,
+				allowExternalEgress: false,
 			});
 		});
 
@@ -720,7 +723,8 @@ describe("SettingsManager", () => {
 			expect(manager.getMemoryRetrievalSettings()).toEqual({
 				enabled: true,
 				maxResults: 8,
-				includeInPrompt: false,
+				includeInPrompt: true,
+				allowExternalEgress: false,
 			});
 		});
 
@@ -736,7 +740,8 @@ describe("SettingsManager", () => {
 			expect(manager.getMemoryRetrievalSettings()).toEqual({
 				enabled: true,
 				maxResults: 3,
-				includeInPrompt: false,
+				includeInPrompt: true,
+				allowExternalEgress: false,
 			});
 		});
 
@@ -767,7 +772,8 @@ describe("SettingsManager", () => {
 			expect(manager.getMemoryRetrievalSettings()).toEqual({
 				enabled: true,
 				maxResults: 20,
-				includeInPrompt: false,
+				includeInPrompt: true,
+				allowExternalEgress: false,
 			});
 		});
 
@@ -823,9 +829,9 @@ describe("SettingsManager", () => {
 			expect(savedAfterMemoryChange.contextPolicy.memory).toEqual({ enabled: false, maxResults: 3 });
 		});
 
-		it("defaults includeInPrompt to false", () => {
+		it("defaults includeInPrompt to true for budget-gated local memory", () => {
 			const manager = SettingsManager.create(projectDir, agentDir);
-			expect(manager.getMemoryRetrievalSettings().includeInPrompt).toBe(false);
+			expect(manager.getMemoryRetrievalSettings().includeInPrompt).toBe(true);
 		});
 
 		it("should save and read back includeInPrompt globally", async () => {
@@ -841,6 +847,7 @@ describe("SettingsManager", () => {
 				enabled: true,
 				maxResults: 5,
 				includeInPrompt: true,
+				allowExternalEgress: false,
 			});
 		});
 
@@ -857,6 +864,7 @@ describe("SettingsManager", () => {
 				enabled: true,
 				maxResults: 5,
 				includeInPrompt: true,
+				allowExternalEgress: false,
 			});
 		});
 
@@ -882,7 +890,35 @@ describe("SettingsManager", () => {
 				enabled: true,
 				maxResults: 8,
 				includeInPrompt: true,
+				allowExternalEgress: false,
 			});
+		});
+
+		it("requires and persists an explicit external memory egress opt-in", async () => {
+			const settingsPath = join(agentDir, "settings.json");
+			const manager = SettingsManager.create(projectDir, agentDir);
+
+			manager.setMemoryRetrievalSettings({
+				enabled: true,
+				maxResults: 5,
+				includeInPrompt: true,
+				allowExternalEgress: true,
+			});
+			await manager.flush();
+
+			expect(JSON.parse(readFileSync(settingsPath, "utf-8")).contextPolicy.memory.allowExternalEgress).toBe(true);
+			expect(manager.getMemoryRetrievalSettings().allowExternalEgress).toBe(true);
+		});
+
+		it("does not treat a malformed truthy external-egress value as consent", () => {
+			writeFileSync(
+				join(agentDir, "settings.json"),
+				JSON.stringify({ contextPolicy: { memory: { allowExternalEgress: "true" } } }),
+			);
+
+			const manager = SettingsManager.create(projectDir, agentDir);
+
+			expect(manager.getMemoryRetrievalSettings().allowExternalEgress).toBe(false);
 		});
 	});
 
@@ -1207,7 +1243,7 @@ describe("SettingsManager", () => {
 					name: "reviewer",
 					description: "Review safely",
 					model: "anthropic/claude-sonnet-4",
-					thinking: "low",
+					thinking: "ultra",
 					resources: {
 						tools: { allow: ["read", "grep"] },
 					},
@@ -1221,7 +1257,7 @@ describe("SettingsManager", () => {
 			expect(profile?.source).toBe("profile-file");
 			expect(profile?.description).toBe("Review safely");
 			expect(profile?.model).toBe("anthropic/claude-sonnet-4");
-			expect(profile?.thinking).toBe("low");
+			expect(profile?.thinking).toBe("ultra");
 			expect(manager.getResourceProfileFilter("tools")).toEqual({ allow: ["read", "grep"], block: [] });
 		});
 
@@ -1316,6 +1352,20 @@ describe("SettingsManager", () => {
 			const manager = SettingsManager.create(projectDir, agentDir);
 			const errors = manager.drainErrors();
 			expect(errors.some((entry) => /Profile diagnostic/.test(entry.error.message))).toBe(true);
+		});
+
+		it("reports max and ultra in invalid profile thinking diagnostics", () => {
+			const profilesDir = join(agentDir, "profiles");
+			mkdirSync(profilesDir, { recursive: true });
+			writeFileSync(
+				join(profilesDir, "invalid-thinking.json"),
+				JSON.stringify({ name: "invalid-thinking", thinking: "turbo", resources: {} }),
+			);
+
+			const manager = SettingsManager.create(projectDir, agentDir);
+			const errors = manager.drainErrors().map((entry) => entry.error.message);
+
+			expect(errors.some((message) => message.includes("xhigh, max, ultra"))).toBe(true);
 		});
 
 		it("refreshes profile diagnostics after profile files are fixed", async () => {

@@ -286,7 +286,7 @@
 				},
 				"thinkingXhigh": {
 					"$ref": "#/$defs/colorValue",
-					"description": "Thinking level border: xhigh (OpenAI codex-max only)"
+					"description": "Highest-intensity thinking border shared by xhigh, max, and ultra"
 				},
 				"bashMode": {
 					"$ref": "#/$defs/colorValue",

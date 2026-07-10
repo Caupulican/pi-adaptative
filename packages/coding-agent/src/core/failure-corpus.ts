@@ -1,6 +1,7 @@
 import { appendFileSync, existsSync, mkdirSync, readFileSync, statSync, writeFileSync } from "node:fs";
 import { dirname } from "node:path";
 import type { ClassifiedError } from "@caupulican/pi-agent-core";
+import { redactKnownSecrets } from "./security/secret-text.ts";
 
 export interface ProviderFailureCorpusRecord {
 	ts: string;
@@ -155,8 +156,5 @@ function sanitizeToolValidationShape(
 }
 
 export function redactSecrets(message: string): string {
-	return message
-		.replace(/sk-(?:proj-|ant-)?[A-Za-z0-9._-]{8,}/g, "[REDACTED]")
-		.replace(/Bearer\s+[A-Za-z0-9._~+/=-]+/gi, "Bearer [REDACTED]")
-		.replace(/[A-Za-z0-9+/]{40,}={0,2}/g, "[REDACTED]");
+	return redactKnownSecrets(message).replace(/[A-Za-z0-9+/]{40,}={0,2}/g, "[REDACTED]");
 }

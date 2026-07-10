@@ -321,12 +321,7 @@ async function runLoop(
 				config = {
 					...config,
 					model: nextTurnSnapshot.model ?? config.model,
-					reasoning:
-						nextTurnSnapshot.thinkingLevel === undefined
-							? config.reasoning
-							: nextTurnSnapshot.thinkingLevel === "off"
-								? undefined
-								: nextTurnSnapshot.thinkingLevel,
+					reasoning: nextTurnSnapshot.thinkingLevel ?? config.reasoning,
 				};
 			}
 
@@ -392,10 +387,18 @@ async function streamAssistantResponse(
 	// Resolve API key (important for expiring tokens)
 	const resolvedApiKey =
 		(config.getApiKey ? await config.getApiKey(config.model.provider) : undefined) || config.apiKey;
+	const requestReasoning = config.resolveRequestReasoning
+		? config.resolveRequestReasoning(config.reasoning, {
+				model: config.model,
+				context: llmContext,
+				maxTokens: config.maxTokens,
+			})
+		: config.reasoning;
 
 	const response = await streamFunction(config.model, llmContext, {
 		...config,
 		apiKey: resolvedApiKey,
+		reasoning: requestReasoning,
 		signal,
 	});
 

@@ -49,7 +49,7 @@ describe("model capability auto-detection", () => {
 
 			expect(getLaneRecordSnapshots(harness.sessionManager.getEntries())).toHaveLength(0);
 			const diagnostics = harness.session.getAutonomyDiagnosticSnapshot();
-			expect(diagnostics.research?.some((entry) => entry.reasonCode === "model_context_too_small")).toBe(true);
+			expect(diagnostics.research?.some((entry) => entry.reasonCode === "model_research_unsupported")).toBe(true);
 			expect(harness.getPendingResponseCount()).toBe(0);
 		} finally {
 			harness.cleanup();
@@ -89,7 +89,7 @@ describe("model capability auto-detection", () => {
 		try {
 			const fullSet = harness.session.getActiveToolNames();
 			expect(fullSet).toContain("goal");
-			const delegateSnippet = "Delegate a bounded read-only analysis subtask";
+			const delegateSnippet = "Delegate a bounded task to an isolated, least-privilege worker lane.";
 			expect(harness.session.systemPrompt).toContain(delegateSnippet);
 
 			await harness.session.setModel(harness.getModel("small-model")!);
@@ -120,6 +120,31 @@ describe("model capability auto-detection", () => {
 			expect(harness.session.getActiveToolNames()).toEqual(["read", "bash", "edit", "write", "run_toolkit_script"]);
 
 			await harness.session.setModel(harness.getModel("big-model")!);
+			expect(harness.session.getActiveToolNames()).toEqual(fullSet);
+		} finally {
+			harness.cleanup();
+		}
+	});
+
+	it("re-derives and restores the capability tool surface when cycling full to small and back", async () => {
+		const harness = await createHarness({
+			models: [
+				{ id: "big-model", contextWindow: 200_000 },
+				{ id: "small-model", contextWindow: 8_192 },
+			],
+		});
+		try {
+			harness.session.setScopedModels([
+				{ model: harness.getModel("big-model")! },
+				{ model: harness.getModel("small-model")! },
+			]);
+			const fullSet = harness.session.getActiveToolNames();
+			const firstCycle = await harness.session.cycleModel("forward");
+			expect(firstCycle?.model.id).toBe("small-model");
+			expect(harness.session.getActiveToolNames()).toEqual(["read", "bash", "edit", "write", "run_toolkit_script"]);
+
+			const secondCycle = await harness.session.cycleModel("forward");
+			expect(secondCycle?.model.id).toBe("big-model");
 			expect(harness.session.getActiveToolNames()).toEqual(fullSet);
 		} finally {
 			harness.cleanup();

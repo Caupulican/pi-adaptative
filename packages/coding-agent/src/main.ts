@@ -841,6 +841,8 @@ export async function main(args: string[], options?: MainOptions) {
 			sessionStartEvent,
 			model: sessionOptions.model,
 			thinkingLevel: sessionOptions.thinkingLevel,
+			isExplicitModel: sessionOptions.isExplicitModel,
+			isExplicitThinking: sessionOptions.isExplicitThinking,
 			scopedModels: sessionOptions.scopedModels,
 			tools: sessionOptions.tools,
 			excludeTools: sessionOptions.excludeTools,

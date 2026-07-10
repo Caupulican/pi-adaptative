@@ -41,10 +41,6 @@ function getSchemaValidator(schema: JsonSchemaObject): ReturnType<typeof Compile
 	}
 }
 
-function schemaChecks(schema: JsonSchemaObject, value: unknown): boolean {
-	return getSchemaValidator(schema)?.Check(value) === true;
-}
-
 function setValueAtPath(target: Record<string, unknown>, path: readonly string[], value: unknown): boolean {
 	if (path.length === 0) return false;
 	let cursor: unknown = target;
@@ -234,10 +230,12 @@ function transformValue(
 			const parsed = typeof issue.value === "string" ? parseNumber(issue.value, issue.schema) : undefined;
 			return parsed === undefined ? undefined : { type: "set", value: parsed };
 		}
-		case "boolFromString":
-			if (issue.value === "true") return { type: "set", value: true };
-			if (issue.value === "false") return { type: "set", value: false };
+		case "boolFromString": {
+			const normalized = typeof issue.value === "string" ? issue.value.trim().toLowerCase() : undefined;
+			if (normalized === "true") return { type: "set", value: true };
+			if (normalized === "false") return { type: "set", value: false };
 			return undefined;
+		}
 		case "enumCaseNormalize": {
 			const enumValue =
 				typeof issue.value === "string" ? findNormalizedEnumValue(issue.schema, issue.value) : undefined;
@@ -277,7 +275,6 @@ function applyTransform(
 		return deleteValueAtPath(candidate, issue.path) ? candidate : undefined;
 	}
 	if (transform.value === undefined) return undefined;
-	if (!schemaChecks(issue.schema, transform.value)) return undefined;
 	if (issue.path.length === 0) {
 		return isRecord(transform.value) ? transform.value : undefined;
 	}
@@ -288,30 +285,59 @@ function refreshIssueValue(candidate: Record<string, unknown>, issue: ToolRepair
 	return { ...issue, value: getValueAtPath(candidate, issue.path) };
 }
 
-function normalizeRootPropertyCase(
-	args: Record<string, unknown>,
-	schema: Tool["parameters"],
-): { args: Record<string, unknown>; repairs: AppliedToolRepair[] } | undefined {
-	if (!isRecord(args)) return undefined;
-	const schemaRecord = isJsonSchemaObject(schema) ? schema : undefined;
-	const properties = schemaRecord?.properties;
-	if (!properties) return undefined;
+function normalizePropertyCaseAtPath(
+	value: unknown,
+	schema: JsonSchemaObject,
+	path: readonly string[],
+	repairs: AppliedToolRepair[],
+): void {
+	if (Array.isArray(value)) {
+		if (!isJsonSchemaObject(schema.items)) return;
+		for (let index = 0; index < value.length; index++) {
+			normalizePropertyCaseAtPath(value[index], schema.items, [...path, String(index)], repairs);
+		}
+		return;
+	}
+	if (!isRecord(value) || !schema.properties) return;
+
 	const canonicalByLower = new Map<string, string[]>();
-	for (const key of Object.keys(properties)) {
+	for (const key of Object.keys(schema.properties)) {
 		const lower = key.toLowerCase();
 		canonicalByLower.set(lower, [...(canonicalByLower.get(lower) ?? []), key]);
 	}
-	const next = { ...args };
-	const repairs: AppliedToolRepair[] = [];
-	for (const key of Object.keys(args)) {
+	for (const key of Object.keys(value)) {
 		const matches = canonicalByLower.get(key.toLowerCase()) ?? [];
 		const canonical = matches.length === 1 ? matches[0] : undefined;
-		if (!canonical || canonical === key || canonical in next) continue;
-		next[canonical] = next[key];
-		delete next[key];
-		repairs.push({ name: "propertyCaseNormalize", path: canonical });
+		if (!canonical || canonical === key || canonical in value) continue;
+		value[canonical] = value[key];
+		delete value[key];
+		repairs.push({ name: "propertyCaseNormalize", path: formatRepairPath([...path, canonical]) });
 	}
-	return repairs.length > 0 ? { args: next, repairs } : undefined;
+
+	for (const [key, propertySchema] of Object.entries(schema.properties)) {
+		if (!(key in value)) continue;
+		normalizePropertyCaseAtPath(value[key], propertySchema, [...path, key], repairs);
+	}
+}
+
+function normalizePropertyCase(args: Record<string, unknown>, schema: Tool["parameters"]): AppliedToolRepair[] {
+	if (!isRecord(args) || !isJsonSchemaObject(schema)) return [];
+	const repairs: AppliedToolRepair[] = [];
+	normalizePropertyCaseAtPath(args, schema, [], repairs);
+	return repairs;
+}
+
+function validationErrorsForCandidate(
+	schema: Tool["parameters"],
+	candidate: Record<string, unknown>,
+): ValidationErrorLike[] | undefined {
+	const validator = getSchemaValidator(schema as JsonSchemaObject);
+	if (!validator) return undefined;
+	return [...validator.Errors(candidate)].map((error) => ({
+		instancePath: error.instancePath,
+		keyword: error.keyword,
+		message: error.message,
+	}));
 }
 
 export function repairToolArguments(
@@ -324,37 +350,43 @@ export function repairToolArguments(
 	let candidate = structuredClone(args);
 	const repairsApplied: ToolRepairModeName[] = [];
 	const repairs: AppliedToolRepair[] = [];
-	const caseNormalized = normalizeRootPropertyCase(candidate, schema);
-	if (caseNormalized) {
-		candidate = caseNormalized.args;
-		repairsApplied.push(...caseNormalized.repairs.map((repair) => repair.name));
-		repairs.push(...caseNormalized.repairs);
-	}
-	const issues = analyzeToolArgumentErrors(toolName, schema, args, errors);
-	if (issues.length === 0) {
-		return repairsApplied.length > 0 && checkWholeArgs(candidate)
-			? { args: candidate, repairsApplied, repairs }
-			: undefined;
-	}
+	let currentErrors: readonly ValidationErrorLike[] = errors;
+	const maxPasses = 8;
 
-	for (const issue of issues) {
-		if (issue.modes.includes("nullRequiredBounce")) continue;
-		const currentIssue = refreshIssueValue(candidate, issue);
-		for (const mode of currentIssue.modes) {
-			if (mode === "nullRequiredBounce") continue;
-			const nextCandidate = applyTransform(candidate, currentIssue, mode);
-			if (nextCandidate) {
+	for (let pass = 0; pass < maxPasses; pass++) {
+		const caseRepairs = normalizePropertyCase(candidate, schema);
+		if (caseRepairs.length > 0) {
+			repairsApplied.push(...caseRepairs.map((repair) => repair.name));
+			repairs.push(...caseRepairs);
+			if (checkWholeArgs(candidate)) return { args: candidate, repairsApplied, repairs };
+			currentErrors = validationErrorsForCandidate(schema, candidate) ?? currentErrors;
+		}
+
+		const issues = analyzeToolArgumentErrors(toolName, schema, candidate, currentErrors);
+		let transformed = false;
+		for (const issue of issues) {
+			if (issue.modes.includes("nullRequiredBounce")) continue;
+			const currentIssue = refreshIssueValue(candidate, issue);
+			for (const mode of currentIssue.modes) {
+				if (mode === "nullRequiredBounce") continue;
+				const nextCandidate = applyTransform(candidate, currentIssue, mode);
+				if (!nextCandidate) continue;
 				candidate = nextCandidate;
 				repairsApplied.push(mode);
 				repairs.push({ name: mode, path: formatRepairPath(currentIssue.path) });
+				transformed = true;
 				break;
 			}
 		}
+
+		if (checkWholeArgs(candidate)) return { args: candidate, repairsApplied, repairs };
+		if (!transformed) return undefined;
+		const nextErrors = validationErrorsForCandidate(schema, candidate);
+		if (!nextErrors || nextErrors.length === 0) return undefined;
+		currentErrors = nextErrors;
 	}
 
-	if (repairsApplied.length === 0) return undefined;
-	if (!checkWholeArgs(candidate)) return undefined;
-	return { args: candidate, repairsApplied, repairs };
+	return undefined;
 }
 
 export function formatRepairSummary(repairsApplied: readonly ToolRepairModeName[]): string {

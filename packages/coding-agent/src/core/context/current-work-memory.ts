@@ -14,13 +14,27 @@ function shortText(text: string, maxChars: number): string {
 }
 
 function requirementSummary(requirements: readonly Requirement[]): string {
-	const open = requirements.filter((requirement) => requirement.status === "open").map((requirement) => requirement.text);
+	const open = requirements
+		.filter((requirement) => requirement.status === "open")
+		.map((requirement) => requirement.text);
 	const blocked = requirements
 		.filter((requirement) => requirement.status === "blocked")
 		.map((requirement) => requirement.text);
 	const parts: string[] = [];
-	if (open.length > 0) parts.push(`open: ${open.slice(0, 3).map((text) => shortText(text, 64)).join("; ")}`);
-	if (blocked.length > 0) parts.push(`blocked: ${blocked.slice(0, 2).map((text) => shortText(text, 64)).join("; ")}`);
+	if (open.length > 0)
+		parts.push(
+			`open: ${open
+				.slice(0, 3)
+				.map((text) => shortText(text, 64))
+				.join("; ")}`,
+		);
+	if (blocked.length > 0)
+		parts.push(
+			`blocked: ${blocked
+				.slice(0, 2)
+				.map((text) => shortText(text, 64))
+				.join("; ")}`,
+		);
 	return parts.join(" | ");
 }
 

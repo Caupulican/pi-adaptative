@@ -584,6 +584,79 @@ export default (pi) => {
 			}
 		});
 
+		it("activates and removes extension-owned memory providers without a full reload", async () => {
+			const extDir = join(tempDir, "live-memory-provider");
+			const shutdownMarker = join(tempDir, "memory-provider-shutdown");
+			mkdirSync(extDir, { recursive: true });
+			const extFile = join(extDir, "index.ts");
+			writeFileSync(
+				extFile,
+				`
+import { writeFileSync } from "node:fs";
+
+export default (pi) => {
+	pi.on("session_start", async () => {
+		pi.registerMemoryProvider({
+			name: "live-memory",
+			egress: "local",
+			isAvailable: () => true,
+			getCapabilities: () => ({ surfaces: ["context"] }),
+			initialize: async () => {},
+			shutdown: async () => { writeFileSync(${JSON.stringify(shutdownMarker)}, "done", "utf8"); },
+			prefetch: async (query) => "live legacy recall: " + query,
+		});
+		pi.registerContextMemoryProvider({
+			id: "live-context-memory",
+			label: "Live Context Memory",
+			source: "custom_local",
+			capabilities: {
+				search: true, fetch: true, write: false, delete: false,
+				shortTerm: false, longTerm: true, graph: false, citations: true,
+				scopes: ["project"], localOnly: true,
+			},
+			search: async () => [{
+				item: {
+					id: "live-item", providerId: "live-context-memory", source: "custom_local",
+					kind: "fact", scope: "project", durability: "durable",
+					summary: "live context result",
+					refs: [{ providerId: "live-context-memory", itemId: "live-item", scope: "project", kind: "fact" }],
+					evidenceRefs: [],
+				},
+				score: 1,
+				reason: "test",
+			}],
+			fetch: async () => undefined,
+		});
+	});
+};
+				`,
+			);
+			const memory = (
+				session as unknown as {
+					_memory: {
+						prefetchRecall(query: string): Promise<string>;
+						runMemoryRetrieval(messages: Array<{ role: "user"; content: string; timestamp: number }>): Promise<{
+							providerReports: Array<{ providerId: string }>;
+						}>;
+					};
+				}
+			)._memory;
+			const query = "recall the deployment state from memory";
+
+			await session.loadExtensionLive(extFile);
+			expect(await memory.prefetchRecall(query)).toContain("live legacy recall");
+			expect(
+				(await memory.runMemoryRetrieval([{ role: "user", content: query, timestamp: 0 }])).providerReports,
+			).toContainEqual(expect.objectContaining({ providerId: "live-context-memory" }));
+
+			await session.unloadExtensionLive(extFile);
+			expect(existsSync(shutdownMarker)).toBe(true);
+			expect(await memory.prefetchRecall(query)).not.toContain("live legacy recall");
+			expect(
+				(await memory.runMemoryRetrieval([{ role: "user", content: query, timestamp: 0 }])).providerReports,
+			).not.toContainEqual(expect.objectContaining({ providerId: "live-context-memory" }));
+		});
+
 		it.skipIf(!API_KEY)("session_start lifecycle event is emitted on loadExtensionLive", async () => {
 			const extDir = join(tempDir, "lifecycle-start");
 			mkdirSync(extDir, { recursive: true });

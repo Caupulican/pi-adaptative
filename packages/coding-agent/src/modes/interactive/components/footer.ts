@@ -225,7 +225,15 @@ export class FooterComponent implements Component {
 		if (totalCacheRead) statsParts.push(`R${formatTokens(totalCacheRead)}`);
 		if (totalCacheWrite) statsParts.push(`W${formatTokens(totalCacheWrite)}`);
 
-		statsParts.push(...formatFooterCostParts(costSummary));
+		const usingSubscription = state.model ? this.session.modelRegistry.isUsingOAuth(state.model) : false;
+		statsParts.push(...formatFooterCostParts(costSummary, 3, { subscription: usingSubscription }));
+
+		// Keep the warning-only guard proactive without duplicating the authoritative
+		// CURRENT/TODAY/SUBAGENTS totals rendered above.
+		const costGuard = this.session.getLastCostGuardDecision?.();
+		if (costGuard?.over) {
+			statsParts.push(theme.fg("warning", `GUARD:$${costGuard.estUsd.toFixed(2)}/turn`));
+		}
 
 		// Colorize context percentage based on usage
 		let contextPercentStr: string;

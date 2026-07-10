@@ -21,7 +21,7 @@ const IGNORE_FILE_NAMES = [".gitignore", ".ignore", ".fdignore"];
 // Kept local rather than imported from settings-manager.ts's ThinkingLevel validation: that module
 // already imports validateSkillName FROM this file, so importing back would cycle. The literal set
 // is small and stable (mirrors settings-manager.ts's own VALID_THINKING_LEVELS).
-const VALID_SKILL_THINKING_LEVELS = ["off", "minimal", "low", "medium", "high", "xhigh"] as const;
+const VALID_SKILL_THINKING_LEVELS = ["off", "minimal", "low", "medium", "high", "xhigh", "max", "ultra"] as const;
 function isSkillThinkingLevel(value: unknown): value is ThinkingLevel {
 	return typeof value === "string" && (VALID_SKILL_THINKING_LEVELS as readonly string[]).includes(value);
 }

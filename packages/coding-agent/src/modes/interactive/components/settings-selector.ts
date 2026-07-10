@@ -66,6 +66,8 @@ const THINKING_DESCRIPTIONS: Record<ThinkingLevel, string> = {
 	medium: "Moderate reasoning (~8k tokens)",
 	high: "Deep reasoning (~16k tokens)",
 	xhigh: "Maximum reasoning (~32k tokens)",
+	max: "Maximum reasoning depth for the hardest problems",
+	ultra: "Maximum reasoning with reinforced proactive delegation",
 };
 
 const AUTONOMY_MODES: AutonomyMode[] = ["off", "safe", "balanced", "full"];
@@ -91,9 +93,10 @@ const CONTEXT_POLICY_ENFORCEMENT_DEFAULTS = {
 const CONTEXT_MEMORY_RETRIEVAL_MAX_RESULTS_VALUES = ["1", "3", "5", "10", "20"];
 
 const CONTEXT_MEMORY_RETRIEVAL_DEFAULTS = {
-	enabled: false,
+	enabled: true,
 	maxResults: 5,
-	includeInPrompt: false,
+	includeInPrompt: true,
+	allowExternalEgress: false,
 } as const;
 
 const AUTO_LEARN_DEFAULTS = {
@@ -220,10 +223,13 @@ function contextPolicyEnforcementSummary(settings: ContextPromptEnforcementSetti
 }
 
 function contextMemoryRetrievalSummary(settings: MemoryRetrievalSettings): string {
-	if (!(settings.enabled ?? CONTEXT_MEMORY_RETRIEVAL_DEFAULTS.enabled)) return "disabled";
+	const externalEgress = settings.allowExternalEgress ?? CONTEXT_MEMORY_RETRIEVAL_DEFAULTS.allowExternalEgress;
+	if (!(settings.enabled ?? CONTEXT_MEMORY_RETRIEVAL_DEFAULTS.enabled)) {
+		return `disabled (${externalEgress ? "external consent on" : "external off"})`;
+	}
 	const maxResults = settings.maxResults ?? CONTEXT_MEMORY_RETRIEVAL_DEFAULTS.maxResults;
 	const includeInPrompt = settings.includeInPrompt ?? CONTEXT_MEMORY_RETRIEVAL_DEFAULTS.includeInPrompt;
-	return `enabled (max ${maxResults} results${includeInPrompt ? ", in prompt" : ""})`;
+	return `enabled (max ${maxResults}${includeInPrompt ? ", in prompt" : ""}, ${externalEgress ? "external on" : "local only"})`;
 }
 
 function modelRouterSummary(settings: ModelRouterSettings): string {
@@ -326,14 +332,17 @@ function buildModelRouterRoleModelOptions(options: {
 	return modelOptions;
 }
 
-function buildModelRouterThinkingOptions(inheritDescription: string): SelectItem[] {
+function buildModelRouterThinkingOptions(
+	inheritDescription: string,
+	availableLevels: ThinkingLevel[] = Object.keys(THINKING_DESCRIPTIONS) as ThinkingLevel[],
+): SelectItem[] {
 	return [
 		{
 			value: MODEL_ROUTER_INHERIT_THINKING_VALUE,
 			label: MODEL_ROUTER_INHERIT_THINKING_LABEL,
 			description: inheritDescription,
 		},
-		...(Object.keys(THINKING_DESCRIPTIONS) as ThinkingLevel[]).map((level) => ({
+		...availableLevels.map((level) => ({
 			value: level,
 			label: level,
 			description: THINKING_DESCRIPTIONS[level],
@@ -396,6 +405,8 @@ export interface SettingsConfig {
 	contextMemoryRetrievalScope?: SettingsScope;
 	currentModelPattern?: string;
 	autoLearnModelOptions?: SelectItem[];
+	/** Resolve the concrete thinking surface for a configured model pattern. */
+	resolveModelThinkingLevels?: (modelPattern: string | undefined) => ThinkingLevel[] | undefined;
 	activeProfileName?: string;
 	profileOptions?: SelectItem[];
 	externalResourceRoots?: string[];
@@ -1167,7 +1178,8 @@ class WorkerDelegationSettingsSubmenu extends Container {
 			{
 				id: "worker-delegation-enabled",
 				label: "Enabled",
-				description: "Allow the delegate tool to run bounded, read-only scout workers on a cheap model lane",
+				description:
+					"Allow capable models to run bounded scout workers; enabled by default, and explicit false is a hard off-switch",
 				currentValue: String(this.state.enabled),
 				values: ["true", "false"],
 			},
@@ -1529,7 +1541,12 @@ class ContextMemoryRetrievalSettingsSubmenu extends Container {
 	) {
 		super();
 
-		this.state = { ...settings };
+		this.state = {
+			enabled: settings.enabled ?? CONTEXT_MEMORY_RETRIEVAL_DEFAULTS.enabled,
+			maxResults: settings.maxResults ?? CONTEXT_MEMORY_RETRIEVAL_DEFAULTS.maxResults,
+			includeInPrompt: settings.includeInPrompt ?? CONTEXT_MEMORY_RETRIEVAL_DEFAULTS.includeInPrompt,
+			allowExternalEgress: settings.allowExternalEgress ?? CONTEXT_MEMORY_RETRIEVAL_DEFAULTS.allowExternalEgress,
+		};
 		this.scope = scope;
 
 		const items: SettingItem[] = [
@@ -1545,7 +1562,7 @@ class ContextMemoryRetrievalSettingsSubmenu extends Container {
 				id: "context-memory-enabled",
 				label: "Local memory retrieval",
 				description:
-					"Opt-in: each turn, search local Pi OKF memory documents (under <agent dir>/okf-memory) for evidence related to the latest message. By default this is observe-only (recorded for inspection only). Enable 'Include in prompt' below to also surface a bounded, source-labeled evidence block to the model. Local-only; never queries an external provider.",
+					"Default on: search local Pi memory for relevant evidence. Explicit false is a hard off-switch for both legacy recall and context retrieval. External providers remain blocked by the separate consent below.",
 				currentValue: booleanSettingValue(this.state.enabled, CONTEXT_MEMORY_RETRIEVAL_DEFAULTS.enabled),
 				values: ["false", "true"],
 			},
@@ -1560,10 +1577,21 @@ class ContextMemoryRetrievalSettingsSubmenu extends Container {
 				id: "context-memory-include-in-prompt",
 				label: "Include in prompt",
 				description:
-					"Opt-in, requires 'Local memory retrieval' enabled above: surfaces retrieved memory as a bounded, source-labeled, untrusted-evidence block in the model prompt only -- never the transcript, never treated as an instruction or rule. Default off.",
+					"Default on and budget-gated: surface retrieved memory as bounded, source-labeled untrusted evidence in the model prompt only -- never the transcript or an instruction.",
 				currentValue: booleanSettingValue(
 					this.state.includeInPrompt,
 					CONTEXT_MEMORY_RETRIEVAL_DEFAULTS.includeInPrompt,
+				),
+				values: ["false", "true"],
+			},
+			{
+				id: "context-memory-allow-external-egress",
+				label: "Allow external queries",
+				description:
+					"Explicit consent to send bounded query text to eligible external memory providers. Default off; secret-like and oversized queries still fail closed, and returned recall is centrally fenced as untrusted data.",
+				currentValue: booleanSettingValue(
+					this.state.allowExternalEgress,
+					CONTEXT_MEMORY_RETRIEVAL_DEFAULTS.allowExternalEgress,
 				),
 				values: ["false", "true"],
 			},
@@ -1586,6 +1614,9 @@ class ContextMemoryRetrievalSettingsSubmenu extends Container {
 						break;
 					case "context-memory-include-in-prompt":
 						this.state = { ...this.state, includeInPrompt: newValue === "true" };
+						break;
+					case "context-memory-allow-external-egress":
+						this.state = { ...this.state, allowExternalEgress: newValue === "true" };
 						break;
 					default:
 						return;
@@ -1612,6 +1643,7 @@ class ModelRouterSettingsSubmenu extends Container {
 		settings: ModelRouterSettings,
 		currentModelPattern: string | undefined,
 		modelOptions: SelectItem[] | undefined,
+		resolveModelThinkingLevels: SettingsConfig["resolveModelThinkingLevels"],
 		onChange: (settings: ModelRouterSettings, scope: SettingsScope) => void,
 		onCancel: () => void,
 		scope: SettingsScope = "global",
@@ -1622,6 +1654,20 @@ class ModelRouterSettingsSubmenu extends Container {
 			enabled: settings.enabled ?? false,
 			learningModel: settings.learningModel ?? "active",
 		};
+		const levelsForModel = (modelPattern: string | undefined): ThinkingLevel[] | undefined =>
+			resolveModelThinkingLevels?.(modelPattern ?? currentModelPattern);
+		const keepSupportedThinking = (
+			level: ThinkingLevel | undefined,
+			modelPattern: string | undefined,
+		): ThinkingLevel | undefined => {
+			const levels = levelsForModel(modelPattern);
+			return level && levels && !levels.includes(level) ? undefined : level;
+		};
+		this.state.cheapThinking = keepSupportedThinking(this.state.cheapThinking, this.state.cheapModel);
+		this.state.mediumThinking = keepSupportedThinking(this.state.mediumThinking, this.state.mediumModel);
+		this.state.expensiveThinking = keepSupportedThinking(this.state.expensiveThinking, this.state.expensiveModel);
+		this.state.executorThinking = keepSupportedThinking(this.state.executorThinking, this.state.executorModel);
+		this.state.judgeThinking = keepSupportedThinking(this.state.judgeThinking, this.state.judgeModel);
 		this.scope = scope;
 		const cheapModelOptions = buildModelRouterRoleModelOptions({
 			currentValue: this.state.cheapModel,
@@ -1664,12 +1710,16 @@ class ModelRouterSettingsSubmenu extends Container {
 			currentModelPattern,
 			includeActive: true,
 		});
-		const routedTierThinkingOptions = buildModelRouterThinkingOptions(
-			"Inherit the session thinking level for this turn, clamped to the routed model",
-		);
-		const judgeThinkingOptions = buildModelRouterThinkingOptions(
-			"Use today's default of off for the routing judge's own completion",
-		);
+		const routedTierThinkingOptions = (modelPattern: string | undefined) =>
+			buildModelRouterThinkingOptions(
+				"Inherit the session thinking level for this turn, clamped to the routed model",
+				levelsForModel(modelPattern),
+			);
+		const judgeThinkingOptions = () =>
+			buildModelRouterThinkingOptions(
+				"Use today's default of off for the routing judge's own completion",
+				levelsForModel(this.state.judgeModel),
+			);
 		this.addChild(new Text(theme.bold(theme.fg("accent", "Model Router")), 0, 0));
 		this.addChild(new Spacer(1));
 
@@ -1698,9 +1748,11 @@ class ModelRouterSettingsSubmenu extends Container {
 						cheapModelOptions,
 						this.state.cheapModel ?? MODEL_ROUTER_UNSET_MODEL_VALUE,
 						(value) => {
+							const cheapModel = value === MODEL_ROUTER_UNSET_MODEL_VALUE ? undefined : value;
 							this.state = {
 								...this.state,
-								cheapModel: value === MODEL_ROUTER_UNSET_MODEL_VALUE ? undefined : value,
+								cheapModel,
+								cheapThinking: keepSupportedThinking(this.state.cheapThinking, cheapModel),
 							};
 							onChange({ ...this.state }, this.scope);
 							done(routerTierValue(this.state.cheapModel, this.state.cheapThinking));
@@ -1727,9 +1779,11 @@ class ModelRouterSettingsSubmenu extends Container {
 						mediumModelOptions,
 						this.state.mediumModel ?? MODEL_ROUTER_UNSET_MODEL_VALUE,
 						(value) => {
+							const mediumModel = value === MODEL_ROUTER_UNSET_MODEL_VALUE ? undefined : value;
 							this.state = {
 								...this.state,
-								mediumModel: value === MODEL_ROUTER_UNSET_MODEL_VALUE ? undefined : value,
+								mediumModel,
+								mediumThinking: keepSupportedThinking(this.state.mediumThinking, mediumModel),
 							};
 							onChange({ ...this.state }, this.scope);
 							done(routerTierValue(this.state.mediumModel, this.state.mediumThinking));
@@ -1756,9 +1810,11 @@ class ModelRouterSettingsSubmenu extends Container {
 						expensiveModelOptions,
 						this.state.expensiveModel ?? MODEL_ROUTER_UNSET_MODEL_VALUE,
 						(value) => {
+							const expensiveModel = value === MODEL_ROUTER_UNSET_MODEL_VALUE ? undefined : value;
 							this.state = {
 								...this.state,
-								expensiveModel: value === MODEL_ROUTER_UNSET_MODEL_VALUE ? undefined : value,
+								expensiveModel,
+								expensiveThinking: keepSupportedThinking(this.state.expensiveThinking, expensiveModel),
 							};
 							onChange({ ...this.state }, this.scope);
 							done(routerTierValue(this.state.expensiveModel, this.state.expensiveThinking));
@@ -1785,9 +1841,11 @@ class ModelRouterSettingsSubmenu extends Container {
 						judgeModelOptions,
 						this.state.judgeModel ?? MODEL_ROUTER_UNSET_MODEL_VALUE,
 						(value) => {
+							const judgeModel = value === MODEL_ROUTER_UNSET_MODEL_VALUE ? undefined : value;
 							this.state = {
 								...this.state,
-								judgeModel: value === MODEL_ROUTER_UNSET_MODEL_VALUE ? undefined : value,
+								judgeModel,
+								judgeThinking: keepSupportedThinking(this.state.judgeThinking, judgeModel),
 							};
 							onChange({ ...this.state }, this.scope);
 							done(routerTierValue(this.state.judgeModel, this.state.judgeThinking, "medium fallback"));
@@ -1813,9 +1871,11 @@ class ModelRouterSettingsSubmenu extends Container {
 						executorModelOptions,
 						this.state.executorModel ?? MODEL_ROUTER_UNSET_MODEL_VALUE,
 						(value) => {
+							const executorModel = value === MODEL_ROUTER_UNSET_MODEL_VALUE ? undefined : value;
 							this.state = {
 								...this.state,
-								executorModel: value === MODEL_ROUTER_UNSET_MODEL_VALUE ? undefined : value,
+								executorModel,
+								executorThinking: keepSupportedThinking(this.state.executorThinking, executorModel),
 							};
 							onChange({ ...this.state }, this.scope);
 							done(routerTierValue(this.state.executorModel, this.state.executorThinking));
@@ -1868,7 +1928,7 @@ class ModelRouterSettingsSubmenu extends Container {
 					new SelectSubmenu(
 						"Cheap Tier Thinking",
 						"Select a thinking-level override for cheap-tier routed turns, or inherit the session level",
-						routedTierThinkingOptions,
+						routedTierThinkingOptions(this.state.cheapModel),
 						this.state.cheapThinking ?? MODEL_ROUTER_INHERIT_THINKING_VALUE,
 						(value) => {
 							this.state = {
@@ -1892,7 +1952,7 @@ class ModelRouterSettingsSubmenu extends Container {
 					new SelectSubmenu(
 						"Medium Tier Thinking",
 						"Select a thinking-level override for medium-tier routed turns, or inherit the session level",
-						routedTierThinkingOptions,
+						routedTierThinkingOptions(this.state.mediumModel),
 						this.state.mediumThinking ?? MODEL_ROUTER_INHERIT_THINKING_VALUE,
 						(value) => {
 							this.state = {
@@ -1916,7 +1976,7 @@ class ModelRouterSettingsSubmenu extends Container {
 					new SelectSubmenu(
 						"Expensive Tier Thinking",
 						"Select a thinking-level override for expensive-tier routed turns, or inherit the session level",
-						routedTierThinkingOptions,
+						routedTierThinkingOptions(this.state.expensiveModel),
 						this.state.expensiveThinking ?? MODEL_ROUTER_INHERIT_THINKING_VALUE,
 						(value) => {
 							this.state = {
@@ -1940,7 +2000,7 @@ class ModelRouterSettingsSubmenu extends Container {
 					new SelectSubmenu(
 						"Executor Thinking",
 						"Select a thinking-level override for the executor-direct lane, or inherit the session level",
-						routedTierThinkingOptions,
+						routedTierThinkingOptions(this.state.executorModel),
 						this.state.executorThinking ?? MODEL_ROUTER_INHERIT_THINKING_VALUE,
 						(value) => {
 							this.state = {
@@ -1964,7 +2024,7 @@ class ModelRouterSettingsSubmenu extends Container {
 					new SelectSubmenu(
 						"Judge Thinking",
 						"Select a thinking-level override for the routing judge's own completion, or inherit today's off default",
-						judgeThinkingOptions,
+						judgeThinkingOptions(),
 						this.state.judgeThinking ?? MODEL_ROUTER_INHERIT_THINKING_VALUE,
 						(value) => {
 							this.state = {
@@ -2292,7 +2352,7 @@ export class SettingsSelectorComponent extends Container {
 				id: "worker-delegation",
 				label: "Worker Delegation",
 				description:
-					"Opt-in bounded scout-worker delegation: the delegate tool runs read-only workers on a cheap model lane",
+					"Default-on for capable models: bounded scout workers remain available at every thinking level; Ultra reinforces proactive use",
 				currentValue: workerDelegationSummary(currentWorkerDelegation),
 				submenu: (_currentValue, done) =>
 					new WorkerDelegationSettingsSubmenu(
@@ -2368,6 +2428,7 @@ export class SettingsSelectorComponent extends Container {
 						currentModelRouter,
 						config.currentModelPattern,
 						config.autoLearnModelOptions,
+						config.resolveModelThinkingLevels,
 						(settings, scope) => {
 							currentModelRouter = { ...settings };
 							callbacks.onModelRouterChange(settings, scope);
@@ -2415,7 +2476,7 @@ export class SettingsSelectorComponent extends Container {
 				id: "context-memory-retrieval",
 				label: "Context / Memory Retrieval",
 				description:
-					"Opt-in local memory retrieval: searches local Pi OKF memory documents each turn and records source-labeled evidence for inspection. Prompt inclusion is off by default and only occurs when 'Include in prompt' is enabled. Never queries an external provider.",
+					"Default-on local safe-auto recall with budgeted prompt evidence. External query egress is a separate visible consent and remains off by default.",
 				currentValue: contextMemoryRetrievalSummary(currentContextMemoryRetrieval),
 				submenu: (_currentValue, done) =>
 					new ContextMemoryRetrievalSettingsSubmenu(
@@ -2446,12 +2507,12 @@ export class SettingsSelectorComponent extends Container {
 			{
 				id: "thinking",
 				label: "Thinking level",
-				description: "Reasoning depth for thinking-capable models",
+				description: "Reasoning depth; supported Ultra models also reinforce proactive delegation",
 				currentValue: config.thinkingLevel,
 				submenu: (currentValue, done) =>
 					new SelectSubmenu(
 						"Thinking Level",
-						"Select reasoning depth for thinking-capable models",
+						"Select reasoning depth; Ultra reinforces delegation already available to capable models",
 						config.availableThinkingLevels.map((level) => ({
 							value: level,
 							label: level,

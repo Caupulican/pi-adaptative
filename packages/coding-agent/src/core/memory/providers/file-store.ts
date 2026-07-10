@@ -54,6 +54,7 @@ type MemoryParams = Static<typeof memorySchema>;
 
 export class FileStoreProvider implements MemoryProvider {
 	public readonly name = "file-store";
+	public readonly egress = "local";
 
 	private ctx?: MemoryLifecycleContext;
 	private memoryFilePath = "";

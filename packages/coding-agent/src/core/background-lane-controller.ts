@@ -15,6 +15,7 @@
  * controller never touches `prompt()`, the last-assistant-message, retry, or streaming state.
  */
 
+import path from "node:path";
 import type { SessionManager } from "@caupulican/pi-agent-core/node";
 import type { Api, Model, Usage } from "@caupulican/pi-ai";
 import type {
@@ -28,11 +29,13 @@ import type {
 	WorkerDelegationRunOutcome,
 } from "./agent-session.ts";
 import type { CapabilityEnvelope, EvidenceBundle, WorkerRequest, WorkerResult } from "./autonomy/contracts.ts";
+import { createLaneToolSurface, type LaneToolSurface } from "./autonomy/lane-tool-surface.ts";
 import { type LaneRecord, LaneTracker } from "./autonomy/lane-tracker.ts";
+import { safeRealpathSync } from "./autonomy/path-scope.ts";
 import { appendLaneRecordSnapshot, getLaneRecordSnapshots } from "./autonomy/session-lane-record.ts";
 import { composeSubagentSystemPrompt } from "./autonomy/subagent-prompt.ts";
 import { AUTONOMY_TELEMETRY_EVENT_TYPES, type AutonomyTelemetryEvent } from "./autonomy/telemetry-events.ts";
-import { applyWorkerActions } from "./delegation/worker-actions.ts";
+import { applyWorkerActions, type WorkerAction } from "./delegation/worker-actions.ts";
 import { runWorker } from "./delegation/worker-runner.ts";
 import type { GoalRuntimeSnapshot, GoalRuntimeSnapshotSettings } from "./goals/goal-runtime-snapshot.ts";
 import type { GoalState } from "./goals/goal-state.ts";
@@ -75,6 +78,8 @@ export interface BackgroundLaneControllerDeps {
 	isModelExhausted(model: Model<Api>): boolean;
 	/** The session's current model — lanes inherit it unless a lane model is explicitly configured. */
 	getModel(): Model<Api> | undefined;
+	/** Tool/profile gate: delegation is unavailable when the active surface removes `delegate`. */
+	isDelegateToolActive(): boolean;
 	/** Foreground cost ceiling — a lane budget is clamped to it, never exceeds it. */
 	getCapabilityEnvelope(): CapabilityEnvelope | undefined;
 	/** Capability profile of the SESSION model (gates background lanes, scales continuation budgets). */
@@ -98,7 +103,7 @@ export interface BackgroundLaneControllerDeps {
 		usage: Usage,
 		opts?: { label?: string; sourceSessionId?: string; reportId?: string },
 	): string | undefined;
-	/** One-shot LLM call fully isolated from the main session — the lane execution primitive. */
+	/** Bounded LLM call fully isolated from the main session; lanes may supply a child tool loop. */
 	runIsolatedCompletion(opts: IsolatedCompletionOptions): Promise<IsolatedCompletionResult>;
 	/** Drive-loop boundary: the session's bounded goal-continuation loop (owns `prompt()`, not us). */
 	continueGoalLoop(options: GoalContinuationLoopOptions): Promise<GoalContinuationLoopResult>;
@@ -123,6 +128,8 @@ export class BackgroundLaneController {
 	private readonly _researchLaneAbort = new AbortController();
 	/** Session-lifetime abort for in-flight delegated workers. */
 	private readonly _workerDelegationAbort = new AbortController();
+	/** Session-local de-duplication for fail-closed profile grants that cannot bind to lane tools. */
+	private readonly _warnedUnboundLaneToolGrants = new Set<string>();
 
 	private readonly deps: BackgroundLaneControllerDeps;
 
@@ -264,11 +271,6 @@ export class BackgroundLaneController {
 	scheduleResearchLaneFromIdle(): void {
 		if (this._isResearchLaneRunning || this.deps.isDisposed() || this.deps.isChildSession()) return;
 
-		if (!this.deps.getModelCapabilityProfile().backgroundLanesEnabled) {
-			this._lastResearchLaneSkipReason = "model_context_too_small";
-			return;
-		}
-
 		const research = this.deps.getSettingsManager().getResearchLaneSettings();
 		if (!research.enabled) {
 			this._lastResearchLaneSkipReason = "research_lane_disabled";
@@ -287,6 +289,15 @@ export class BackgroundLaneController {
 			return;
 		}
 		if (!this._buildResearchLaneDemand()) return;
+		const shipment = this._resolveLaneShipment(research, "no_research_model");
+		if (!shipment.ok) {
+			this._lastResearchLaneSkipReason = shipment.skipReason;
+			return;
+		}
+		if (!this._laneCapabilityProfile(shipment.model).backgroundLanesEnabled) {
+			this._lastResearchLaneSkipReason = "model_research_unsupported";
+			return;
+		}
 
 		this.clearResearchLaneTimer();
 		this._researchLaneTimer = setTimeout(() => {
@@ -352,7 +363,12 @@ export class BackgroundLaneController {
 	): { ok: true; model: Model<Api>; laneProfile?: NormalizedProfile } | { ok: false; skipReason: string } {
 		let laneProfile: NormalizedProfile | undefined;
 		if (laneSettings.profile) {
-			laneProfile = this.deps.getSettingsManager().getProfileRegistry().getProfile(laneSettings.profile);
+			const profileRef = laneSettings.profile.trim();
+			const registry = this.deps.getSettingsManager().getProfileRegistry();
+			laneProfile =
+				profileRef.startsWith("./") || profileRef.startsWith("../")
+					? registry.resolveProfileRef(profileRef, this.deps.getCwd())
+					: registry.getProfile(profileRef);
 			if (!laneProfile) {
 				return { ok: false, skipReason: "lane_profile_not_found" };
 			}
@@ -375,24 +391,30 @@ export class BackgroundLaneController {
 		return { ok: true, model, laneProfile };
 	}
 
-	/** UAC tool grants from a shipped lane profile, recorded on the lane envelope. */
-	private _laneProfileToolGrants(
-		laneProfile?: NormalizedProfile,
-	): Pick<CapabilityEnvelope, "allowedTools" | "deniedTools"> {
-		const toolsFilter = laneProfile?.resources.tools;
-		return {
-			...(toolsFilter?.allow && toolsFilter.allow.length > 0 ? { allowedTools: [...toolsFilter.allow] } : {}),
-			...(toolsFilter?.block && toolsFilter.block.length > 0 ? { deniedTools: [...toolsFilter.block] } : {}),
-		};
+	private _warnUnboundLaneToolGrants(laneProfile: NormalizedProfile | undefined, surface: LaneToolSurface): void {
+		if (!laneProfile || surface.unboundAllowPatterns.length === 0) return;
+		const warningKey = `${laneProfile.name}\0${[...surface.unboundAllowPatterns].sort().join("\0")}`;
+		if (this._warnedUnboundLaneToolGrants.has(warningKey)) return;
+		this._warnedUnboundLaneToolGrants.add(warningKey);
+		this.deps.emit({
+			type: "warning",
+			message: `Lane profile '${laneProfile.name}' grants unavailable isolated-lane tools: ${surface.unboundAllowPatterns.join(", ")}. Only classified lane tools can execute.`,
+		});
 	}
 
 	/** Stripped research envelope — never the foreground/architect envelope. */
-	private _buildResearchLaneEnvelope(maxUsd: number, laneProfile?: NormalizedProfile): CapabilityEnvelope {
+	private _buildResearchLaneEnvelope(
+		maxUsd: number,
+		laneProfile: NormalizedProfile | undefined,
+		surface: LaneToolSurface,
+	): CapabilityEnvelope {
 		return {
 			id: `research-${this.deps.getSessionId()}-${Date.now()}`,
 			profileId: laneProfile?.name,
 			capabilities: ["research", "read_files", "memory_read"],
-			...this._laneProfileToolGrants(laneProfile),
+			allowedTools: [...surface.allowedTools],
+			deniedTools: [...surface.deniedTools],
+			allowedPaths: [this.deps.getCwd()],
 			maxEstimatedUsd: clampLaneMaxUsd(maxUsd, this.deps.getCapabilityEnvelope()?.maxEstimatedUsd),
 			createdAt: new Date().toISOString(),
 		};
@@ -430,6 +452,11 @@ export class BackgroundLaneController {
 			return { started: false, skipReason: shipment.skipReason };
 		}
 		const { model, laneProfile } = shipment;
+		const laneCapability = this._laneCapabilityProfile(model);
+		if (!laneCapability.backgroundLanesEnabled) {
+			this._lastResearchLaneSkipReason = "model_research_unsupported";
+			return { started: false, skipReason: "model_research_unsupported" };
+		}
 
 		this._isResearchLaneRunning = true;
 		this._laneTracker.ensureCounterAtLeast(
@@ -446,11 +473,13 @@ export class BackgroundLaneController {
 				maxSources: settings.maxSources,
 			});
 			const maxUsd = clampLaneMaxUsd(settings.maxUsd, this.deps.getCapabilityEnvelope()?.maxEstimatedUsd);
+			const toolSurface = createLaneToolSurface({ cwd: this.deps.getCwd(), profile: laneProfile });
+			this._warnUnboundLaneToolGrants(laneProfile, toolSurface);
 			const result = await runResearch({
 				query: demand.query,
 				context: demand.context,
 				sources: workspaceSources,
-				envelope: this._buildResearchLaneEnvelope(maxUsd, laneProfile),
+				envelope: this._buildResearchLaneEnvelope(maxUsd, laneProfile, toolSurface),
 				maxUsd,
 				maxSources: settings.maxSources,
 				maxFindings: settings.maxFindings,
@@ -468,7 +497,10 @@ export class BackgroundLaneController {
 						messages: [{ role: "user", content: [{ type: "text", text: userPrompt }], timestamp: Date.now() }],
 						model,
 						thinkingLevel: laneProfile?.thinking ?? "off",
-						maxTokens: this._laneCapabilityProfile(model).laneMaxOutputTokens,
+						maxTokens: laneCapability.laneMaxOutputTokens,
+						tools: toolSurface.tools,
+						maxTurns: 6,
+						beforeToolCall: toolSurface.beforeToolCall,
 						signal,
 						// Core/soul/role are all static per configuration — the provider can cache the prefix.
 						cacheRetention: "short",
@@ -579,6 +611,9 @@ export class BackgroundLaneController {
 		}
 
 		const settings = delegationSettings;
+		if (!this.deps.isDelegateToolActive()) {
+			return { started: false, skipReason: "delegate_tool_inactive" };
+		}
 		if (!settings.enabled) {
 			return { started: false, skipReason: "worker_delegation_disabled" };
 		}
@@ -588,6 +623,10 @@ export class BackgroundLaneController {
 			return { started: false, skipReason: shipment.skipReason };
 		}
 		const { model, laneProfile } = shipment;
+		const laneCapability = this._laneCapabilityProfile(model);
+		if (!laneCapability.backgroundLanesEnabled) {
+			return { started: false, skipReason: "model_delegation_unsupported" };
+		}
 
 		this._laneTracker.ensureCounterAtLeast(
 			getLaneRecordSnapshots(this.deps.getSessionManager().getEntries()).length + 1,
@@ -597,27 +636,37 @@ export class BackgroundLaneController {
 			settings.maxUsd,
 			this.deps.getCapabilityEnvelope()?.maxEstimatedUsd ?? Number.POSITIVE_INFINITY,
 		);
+		const writeEnabled = settings.writeEnabled && settings.writePaths.length > 0;
+		const toolSurface = createLaneToolSurface({
+			cwd: this.deps.getCwd(),
+			profile: laneProfile,
+			writeEnabled,
+			writePaths: settings.writePaths,
+		});
+		this._warnUnboundLaneToolGrants(laneProfile, toolSurface);
+		const allowedActionOps = new Set<WorkerAction["op"]>(
+			toolSurface.allowedTools.filter((name): name is WorkerAction["op"] => name === "write" || name === "edit"),
+		);
+		const writeGranted = writeEnabled && allowedActionOps.size > 0;
 		const workerRequest: WorkerRequest = {
 			id: startedRecord.laneId,
 			instructions,
 			route: {
 				tier: "cheap",
-				risk: "read-only",
+				risk: writeGranted ? "scoped-write" : "read-only",
 				confidence: 1,
 				reasonCode: "scout_worker",
-				reasons: ["Read-only scout delegation"],
+				reasons: [writeGranted ? "Path-scoped worker delegation" : "Read-only scout delegation"],
 			},
 			envelope: {
 				id: `worker-${this.deps.getSessionId()}-${startedRecord.laneId}`,
 				profileId: laneProfile?.name,
 				// write_files requires BOTH the opt-in AND an explicit non-empty path scope —
 				// an unscoped write grant is refused here, not discovered at validation time.
-				capabilities:
-					settings.writeEnabled && settings.writePaths.length > 0 ? ["read_files", "write_files"] : ["read_files"],
-				...(settings.writeEnabled && settings.writePaths.length > 0
-					? { allowedPaths: [...settings.writePaths] }
-					: {}),
-				...this._laneProfileToolGrants(laneProfile),
+				capabilities: writeGranted ? ["read_files", "write_files"] : ["read_files"],
+				...(writeGranted ? { allowedPaths: [...settings.writePaths] } : {}),
+				allowedTools: [...toolSurface.allowedTools],
+				deniedTools: [...toolSurface.deniedTools],
 				maxEstimatedUsd: maxUsd,
 				createdAt: new Date().toISOString(),
 			},
@@ -639,17 +688,39 @@ export class BackgroundLaneController {
 
 		try {
 			let spentUsage: Usage | undefined;
+			const toolChangedFiles = new Set<string>();
+			const toolIssues = new Set<string>();
 			const outcome = await runWorker({
 				request: workerRequest,
 				maxUsd,
 				maxWallClockMs: settings.maxWallClockMs,
 				usageReportId,
+				getChangedFiles: () => [...toolChangedFiles],
 				signal: this._workerDelegationAbort.signal,
 				// Parent validation must use the same relative-path baseline the runner reports in.
 				cwd: this.deps.getCwd(),
 				// Write lane (G2): runner-side action application through the envelope path scope.
 				applyActions: workerRequest.envelope.capabilities.includes("write_files")
-					? (actions) => applyWorkerActions({ actions, envelope: workerRequest.envelope, cwd: this.deps.getCwd() })
+					? (actions) => {
+							const permitted = actions.filter((action) => allowedActionOps.has(action.op));
+							const applied = applyWorkerActions({
+								actions: permitted,
+								envelope: workerRequest.envelope,
+								cwd: this.deps.getCwd(),
+							});
+							return {
+								...applied,
+								refused: [
+									...actions
+										.filter((action) => !allowedActionOps.has(action.op))
+										.map((action) => ({
+											path: action.path,
+											reason: `${action.op} is not granted by the lane profile`,
+										})),
+									...applied.refused,
+								],
+							};
+						}
 					: undefined,
 				complete: async ({ systemPrompt, userPrompt, signal }) => {
 					const completion = await this.deps.runIsolatedCompletion({
@@ -663,7 +734,44 @@ export class BackgroundLaneController {
 						messages: [{ role: "user", content: [{ type: "text", text: userPrompt }], timestamp: Date.now() }],
 						model,
 						thinkingLevel: laneProfile?.thinking ?? "off",
-						maxTokens: this._laneCapabilityProfile(model).laneMaxOutputTokens,
+						maxTokens: laneCapability.laneMaxOutputTokens,
+						tools: toolSurface.tools,
+						maxTurns: 6,
+						beforeToolCall: async (context, toolSignal) => {
+							const decision = await toolSurface.beforeToolCall(context, toolSignal);
+							if (decision?.block) {
+								toolIssues.add(`${context.toolCall.name} blocked: ${decision.reason ?? "capability denied"}`);
+							}
+							return decision;
+						},
+						afterToolCall: async ({ toolCall, args, isError }) => {
+							// This hook runs only for a validated, gate-approved tool that actually entered
+							// execution. Record a direct mutation target before inspecting `isError`: write/edit
+							// may have changed disk and then observed cancellation, timeout, or a late I/O error.
+							// Pre-gate/profile/path refusals never reach afterToolCall, so they remain unreported.
+							if (toolCall.name === "write" || toolCall.name === "edit") {
+								if (args && typeof args === "object" && !Array.isArray(args)) {
+									const rawPath = (args as Record<string, unknown>).path;
+									if (typeof rawPath === "string" && rawPath.length > 0) {
+										const absolutePath = path.isAbsolute(rawPath)
+											? path.resolve(rawPath)
+											: path.resolve(this.deps.getCwd(), rawPath);
+										let canonicalPath = absolutePath;
+										try {
+											canonicalPath = safeRealpathSync(absolutePath);
+										} catch {
+											// Execution was attempted; preserve conservative accounting with the lexical path.
+										}
+										toolChangedFiles.add(path.relative(this.deps.getCwd(), canonicalPath));
+									}
+								}
+							}
+							if (isError) {
+								toolIssues.add(`${toolCall.name} failed during isolated execution`);
+								return undefined;
+							}
+							return undefined;
+						},
 						signal,
 						// Core/soul/role are all static per configuration — the provider can cache the prefix.
 						cacheRetention: "short",
@@ -673,6 +781,8 @@ export class BackgroundLaneController {
 						text: completion.text,
 						costUsd: completion.usage.cost.total,
 						stopReason: String(completion.stopReason),
+						changedFiles: [...toolChangedFiles],
+						blockers: [...toolIssues],
 					};
 				},
 			});

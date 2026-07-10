@@ -9,29 +9,30 @@ import { validateWorkerResult } from "./worker-result.ts";
  * Pure orchestration for one bounded scout-worker delegation: bounded isolated completion ->
  * parse -> `WorkerResult` -> parent validation via {@link validateWorkerResult}.
  *
- * Slice scope: scout (read-only) workers only — the completion receives text prompts, no tools, so
- * `changedFiles` is always empty. Code-writing workers stay out until a real execution envelope
- * enforces path scope at tool level. Worker output is untrusted until the parent verifies it.
+ * The injected completion may be a bounded child tool loop. Its tool surface is built and gated by
+ * the host; this module keeps the structured-output contract and treats every result as untrusted
+ * until parent validation succeeds.
  */
 
 /** Static across calls so callers can use `cacheRetention: "short"`. */
 export const WORKER_LANE_SYSTEM_PROMPT = [
 	"You are a bounded read-only scout worker delegated one task by a coding agent.",
-	"You cannot run tools or change files; produce your best analysis of the delegated task.",
+	"Use only the read-only tools provided to inspect the workspace. You cannot change files or delegate more workers.",
 	"Respond with STRICT JSON only - no prose, no markdown fences:",
 	'{"summary":"<what you concluded>","status":"completed"|"blocked","blockers":["<why you are stuck>"],"findings":[{"summary":"<one concrete finding>","confidence":<0..1>}]}',
 	'Use status "blocked" with blockers only when the task cannot be answered from the provided context.',
 	"Never invent file paths, APIs, or facts.",
 ].join("\n");
 
-/** Write-capable variant (G2): same contract plus a structured actions array — the model never
- * touches the filesystem; the runner applies actions through the envelope's path scope. */
+/** Write-capable variant (G2): direct tools are execution-gated and reported; structured actions
+ * remain as a fallback for models without a native tool channel and use the same path scope. */
 export const WORKER_WRITE_LANE_SYSTEM_PROMPT = [
 	"You are a bounded code-writing worker delegated one task by a coding agent.",
-	"You cannot run tools; you CHANGE FILES only by listing actions the runner applies for you.",
+	"Use only the provided read tools and path-scoped write/edit tools. You cannot run shell commands or delegate workers.",
 	"Respond with STRICT JSON only - no prose, no markdown fences:",
 	'{"summary":"<what you did>","status":"completed"|"blocked","blockers":[],"findings":[{"summary":"<finding>","confidence":<0..1>}],"actions":[{"op":"write","path":"<relative path>","content":"<full file content>"},{"op":"edit","path":"<relative path>","old":"<exact text>","new":"<replacement>"}]}',
 	"Only touch paths inside your delegated scope. Keep edits minimal and exact.",
+	"If you changed a file with a provided tool, do not repeat that change in actions; actions are for changes not already applied.",
 	'Use status "blocked" with blockers when the task cannot be done from the provided context.',
 	"Never invent file paths, APIs, or facts.",
 ].join("\n");
@@ -40,6 +41,10 @@ export interface WorkerCompletion {
 	text: string;
 	costUsd: number;
 	stopReason: string;
+	/** Files successfully changed by the child tool loop before it produced the final JSON. */
+	changedFiles?: readonly string[];
+	/** Capability refusals or execution failures observed inside the child tool loop. */
+	blockers?: readonly string[];
 }
 
 export interface WorkerRunnerOptions {
@@ -54,6 +59,8 @@ export interface WorkerRunnerOptions {
 	 */
 	usageReportId: string;
 	complete: (args: { systemPrompt: string; userPrompt: string; signal?: AbortSignal }) => Promise<WorkerCompletion>;
+	/** Live successful child-tool mutations, including writes completed before timeout/cancellation. */
+	getChangedFiles?: () => readonly string[];
 	signal?: AbortSignal;
 	now?: () => string;
 	/** Enables the WRITE lane: only honored when the request envelope grants "write_files". The
@@ -203,6 +210,7 @@ export async function runWorker(options: WorkerRunnerOptions): Promise<WorkerRun
 			}),
 	});
 	const costUsd = bounded.completion?.costUsd ?? 0;
+	const liveChangedFiles = [...new Set(options.getChangedFiles?.() ?? [])];
 
 	if (bounded.failure) {
 		const cancelled = bounded.failure.status === "canceled" || bounded.failure.status === "timeout";
@@ -211,6 +219,7 @@ export async function runWorker(options: WorkerRunnerOptions): Promise<WorkerRun
 			cwd: options.cwd,
 			result: {
 				...baseResult,
+				changedFiles: liveChangedFiles,
 				status: cancelled ? "cancelled" : "failed",
 				summary: `Worker did not complete: ${bounded.failure.reasonCode}`,
 			},
@@ -220,12 +229,14 @@ export async function runWorker(options: WorkerRunnerOptions): Promise<WorkerRun
 		});
 	}
 
-	const completion = bounded.completion;
+	const completion = bounded.completion as WorkerCompletion | undefined;
+	const completionChangedFiles = [...new Set([...liveChangedFiles, ...(completion?.changedFiles ?? [])])];
+	const completionBaseResult = { ...baseResult, changedFiles: completionChangedFiles };
 	if (!completion || completion.stopReason === "error" || completion.stopReason === "aborted") {
 		return finishOutcome({
 			request: options.request,
 			cwd: options.cwd,
-			result: { ...baseResult, status: "failed", summary: "Worker model call failed." },
+			result: { ...completionBaseResult, status: "failed", summary: "Worker model call failed." },
 			laneStatus: "failed",
 			reasonCode: "model_error",
 			costUsd,
@@ -237,7 +248,11 @@ export async function runWorker(options: WorkerRunnerOptions): Promise<WorkerRun
 		return finishOutcome({
 			request: options.request,
 			cwd: options.cwd,
-			result: { ...baseResult, status: "failed", summary: "Worker output was not valid structured JSON." },
+			result: {
+				...completionBaseResult,
+				status: "failed",
+				summary: "Worker output was not valid structured JSON.",
+			},
 			laneStatus: "failed",
 			reasonCode: "unparseable_output",
 			costUsd,
@@ -245,13 +260,16 @@ export async function runWorker(options: WorkerRunnerOptions): Promise<WorkerRun
 	}
 
 	const evidence = buildWorkerEvidence(options.request, parsed.findings);
-	let changedFiles: string[] = [];
-	const actionBlockers: string[] = [];
+	let changedFiles: string[] = [...completionChangedFiles];
+	const actionBlockers: string[] = [...(completion.blockers ?? [])];
+	if (!writeCapable && completionChangedFiles.length > 0) {
+		actionBlockers.push("worker reported file changes without a write_files envelope grant");
+	}
 	if (writeCapable && parsed.status !== "blocked" && parsed.actions.length > 0 && options.applyActions) {
 		// Runner-side application through the envelope path scope: refusals and failures are
 		// surfaced as blockers so a partially-applied change can never look like clean success.
 		const applied = options.applyActions(parsed.actions);
-		changedFiles = applied.changedFiles;
+		changedFiles = [...new Set([...changedFiles, ...applied.changedFiles])];
 		for (const refusal of applied.refused) {
 			actionBlockers.push(`action refused (${refusal.path}): ${refusal.reason}`);
 		}

@@ -18,21 +18,29 @@ export interface ModelTokenCost {
 /**
  * Estimate the USD cost of one turn: the whole current context is billed as input, plus up to
  * `maxOutputTokens` of output. `cachedInputTokens` (prefix-cache hits) are billed at the cheaper
- * cache-read rate instead of the full input rate. This is an UPPER bound on the turn (it assumes the
- * model emits its full output budget), which is what a spending ceiling should bound against.
+ * cache-read rate. Fresh input is billed once at the higher of the uncached-input and cache-write
+ * rates because a provider may select that prefix for a new cache write. This is an UPPER bound on
+ * the turn (it also assumes the model emits its full output budget), which is what a spending ceiling
+ * should bound against.
  */
 export function estimateTurnCostUsd(args: {
 	inputTokens: number;
 	maxOutputTokens: number;
 	cost: ModelTokenCost;
 	cachedInputTokens?: number;
+	longContextPricing?: { thresholdTokens: number; inputMultiplier: number; outputMultiplier: number };
 }): number {
 	const { inputTokens, maxOutputTokens, cost } = args;
 	const cached = Math.max(0, Math.min(args.cachedInputTokens ?? 0, inputTokens));
 	const freshInput = inputTokens - cached;
 	const cacheReadRate = cost.cacheRead ?? cost.input;
-	const inputUsd = (freshInput * cost.input + cached * cacheReadRate) / 1_000_000;
-	const outputUsd = (Math.max(0, maxOutputTokens) * cost.output) / 1_000_000;
+	const freshInputRate = Math.max(cost.input, cost.cacheWrite ?? cost.input);
+	const longContextPricing = args.longContextPricing;
+	const useLongContextTier = longContextPricing && inputTokens > longContextPricing.thresholdTokens;
+	const inputMultiplier = useLongContextTier ? longContextPricing.inputMultiplier : 1;
+	const outputMultiplier = useLongContextTier ? longContextPricing.outputMultiplier : 1;
+	const inputUsd = ((freshInput * freshInputRate + cached * cacheReadRate) * inputMultiplier) / 1_000_000;
+	const outputUsd = (Math.max(0, maxOutputTokens) * cost.output * outputMultiplier) / 1_000_000;
 	return inputUsd + outputUsd;
 }
 
@@ -40,14 +48,14 @@ export function estimateTurnCostUsd(args: {
 export type CostGuardAction = "warn" | "downgrade";
 
 export interface CostGuardSettings {
-	/** Per-turn USD ceiling. `0` (default) disables the guard entirely. */
+	/** Per-turn projected USD threshold. `0` disables the guard entirely. */
 	maxTurnUsd: number;
 	/** Over the ceiling: `warn` (surface a notice) or `downgrade` (also reduce reasoning effort). */
 	action: CostGuardAction;
 }
 
 export const DEFAULT_COST_GUARD_SETTINGS: CostGuardSettings = {
-	maxTurnUsd: 0,
+	maxTurnUsd: 2.5,
 	action: "warn",
 };
 
@@ -71,15 +79,37 @@ export function evaluateCostGuard(estUsd: number, settings: CostGuardSettings): 
 }
 
 /** Reasoning levels in descending cost order, used to pick the next-cheaper level on a downgrade. */
-const REASONING_LADDER = ["xhigh", "high", "medium", "low", "minimal", "off"] as const;
+const REASONING_LADDER = ["ultra", "max", "xhigh", "high", "medium", "low", "minimal", "off"] as const;
 export type ReasoningLevel = (typeof REASONING_LADDER)[number];
+export type ReasoningEffortMap = Readonly<Partial<Record<ReasoningLevel, string | null>>>;
+
+function effectiveReasoningEffort(level: ReasoningLevel, effortMap: ReasoningEffortMap | undefined): string | null {
+	const mapped = effortMap?.[level];
+	return mapped === undefined ? level : mapped;
+}
 
 /**
- * One step down the reasoning ladder (cost reduction) from `current`. Returns `current` unchanged when
- * already at the floor or unrecognized — the guard never raises effort, only lowers it.
+ * One supported step down the reasoning ladder (cost reduction) from `current`. When
+ * `supportedLevels` is provided, unsupported intermediate levels are skipped instead of relying on a
+ * provider clamp that may move back upward. Returns `current` unchanged when already at the model's
+ * floor or unrecognized — the guard never raises effort, only lowers it.
  */
-export function downgradeReasoning(current: string): ReasoningLevel | string {
+export function downgradeReasoning(
+	current: string,
+	supportedLevels?: readonly ReasoningLevel[],
+	effortMap?: ReasoningEffortMap,
+): ReasoningLevel | string {
 	const i = REASONING_LADDER.indexOf(current as ReasoningLevel);
 	if (i < 0) return current;
-	return REASONING_LADDER[Math.min(i + 1, REASONING_LADDER.length - 1)];
+	if (!supportedLevels) {
+		return REASONING_LADDER[Math.min(i + 1, REASONING_LADDER.length - 1)];
+	}
+	const supported = new Set<ReasoningLevel>(supportedLevels);
+	const currentEffort = effectiveReasoningEffort(current as ReasoningLevel, effortMap);
+	for (let nextIndex = i + 1; nextIndex < REASONING_LADDER.length; nextIndex++) {
+		const candidate = REASONING_LADDER[nextIndex];
+		if (supported.has(candidate) && effectiveReasoningEffort(candidate, effortMap) !== currentEffort)
+			return candidate;
+	}
+	return current;
 }

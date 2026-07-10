@@ -1,5 +1,5 @@
-import { describe, expect, test } from "vitest";
-import { parseArgs } from "../src/cli/args.ts";
+import { describe, expect, test, vi } from "vitest";
+import { parseArgs, printHelp } from "../src/cli/args.ts";
 
 describe("parseArgs", () => {
 	describe("--version flag", () => {
@@ -30,6 +30,18 @@ describe("parseArgs", () => {
 		test("parses -h shorthand", () => {
 			const result = parseArgs(["-h"]);
 			expect(result.help).toBe(true);
+		});
+
+		test("lists max and ultra thinking levels", () => {
+			const log = vi.spyOn(console, "log").mockImplementation(() => {});
+			try {
+				printHelp();
+				expect(log.mock.calls.map((call) => call.join(" ")).join("\n")).toContain(
+					"off, minimal, low, medium, high, xhigh, max, ultra",
+				);
+			} finally {
+				log.mockRestore();
+			}
 		});
 	});
 
@@ -146,9 +158,20 @@ describe("parseArgs", () => {
 			expect(result.export).toBe("session.jsonl");
 		});
 
-		test("parses --thinking", () => {
-			const result = parseArgs(["--thinking", "high"]);
-			expect(result.thinking).toBe("high");
+		test.each(["high", "xhigh", "max", "ultra"] as const)("parses --thinking %s", (level) => {
+			const result = parseArgs(["--thinking", level]);
+			expect(result.thinking).toBe(level);
+		});
+
+		test("reports the complete valid list for an invalid thinking level", () => {
+			const result = parseArgs(["--thinking", "turbo"]);
+			expect(result.diagnostics).toEqual([
+				{
+					type: "warning",
+					message:
+						'Invalid thinking level "turbo". Valid values: off, minimal, low, medium, high, xhigh, max, ultra',
+				},
+			]);
 		});
 
 		test("parses --models as comma-separated list", () => {

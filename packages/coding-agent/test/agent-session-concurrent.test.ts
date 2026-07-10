@@ -58,6 +58,17 @@ function createAssistantMessage(text: string, stopReason: AssistantMessage["stop
 	};
 }
 
+function waitForAssistantStart(activeSession: AgentSession): Promise<void> {
+	return new Promise((resolve) => {
+		let unsubscribe = () => {};
+		unsubscribe = activeSession.subscribe((event) => {
+			if (event.type !== "message_start" || event.message.role !== "assistant") return;
+			unsubscribe();
+			resolve();
+		});
+	});
+}
+
 describe("AgentSession concurrent prompt guard", () => {
 	let session: AgentSession;
 	let tempDir: string;
@@ -131,10 +142,9 @@ describe("AgentSession concurrent prompt guard", () => {
 		createSession();
 
 		// Start first prompt (don't await, it will block until abort)
+		const assistantStarted = waitForAssistantStart(session);
 		const firstPrompt = session.prompt("First message");
-
-		// Wait a tick for isStreaming to be set
-		await new Promise((resolve) => setTimeout(resolve, 10));
+		await assistantStarted;
 
 		// Verify we're streaming
 		expect(session.isStreaming).toBe(true);
@@ -153,8 +163,9 @@ describe("AgentSession concurrent prompt guard", () => {
 		createSession();
 
 		// Start first prompt
+		const assistantStarted = waitForAssistantStart(session);
 		const firstPrompt = session.prompt("First message");
-		await new Promise((resolve) => setTimeout(resolve, 10));
+		await assistantStarted;
 
 		// steer should work while streaming
 		expect(() => session.steer("Steering message")).not.toThrow();
@@ -169,8 +180,9 @@ describe("AgentSession concurrent prompt guard", () => {
 		createSession();
 
 		// Start first prompt
+		const assistantStarted = waitForAssistantStart(session);
 		const firstPrompt = session.prompt("First message");
-		await new Promise((resolve) => setTimeout(resolve, 10));
+		await assistantStarted;
 
 		// followUp should work while streaming
 		expect(() => session.followUp("Follow-up message")).not.toThrow();
@@ -185,6 +197,10 @@ describe("AgentSession concurrent prompt guard", () => {
 		const model = getModel("anthropic", "claude-sonnet-4-5")!;
 		let firstStreamAborted = false;
 		let sawSteeringMessage = false;
+		let releaseFirstStream = () => {};
+		const firstStreamReleased = new Promise<void>((resolve) => {
+			releaseFirstStream = resolve;
+		});
 
 		const agent = new Agent({
 			getApiKey: () => "test-key",
@@ -206,7 +222,7 @@ describe("AgentSession concurrent prompt guard", () => {
 							.join("\n");
 					});
 				const stream = new MockAssistantStream();
-				queueMicrotask(() => {
+				queueMicrotask(async () => {
 					if (userTexts.includes("Steer now")) {
 						sawSteeringMessage = true;
 						stream.push({ type: "start", partial: createAssistantMessage("") });
@@ -215,18 +231,17 @@ describe("AgentSession concurrent prompt guard", () => {
 					}
 
 					stream.push({ type: "start", partial: createAssistantMessage("printing") });
-					setTimeout(() => {
-						if (options?.signal?.aborted) {
-							firstStreamAborted = true;
-							stream.push({
-								type: "error",
-								reason: "aborted",
-								error: createAssistantMessage("", "aborted"),
-							});
-							return;
-						}
-						stream.push({ type: "done", reason: "stop", message: createAssistantMessage("First completed") });
-					}, 20);
+					await firstStreamReleased;
+					if (options?.signal?.aborted) {
+						firstStreamAborted = true;
+						stream.push({
+							type: "error",
+							reason: "aborted",
+							error: createAssistantMessage("", "aborted"),
+						});
+						return;
+					}
+					stream.push({ type: "done", reason: "stop", message: createAssistantMessage("First completed") });
 				});
 				return stream;
 			},
@@ -247,11 +262,13 @@ describe("AgentSession concurrent prompt guard", () => {
 			resourceLoader: createTestResourceLoader(),
 		});
 
+		const assistantStarted = waitForAssistantStart(session);
 		const firstPrompt = session.prompt("First message");
-		await new Promise((resolve) => setTimeout(resolve, 10));
+		await assistantStarted;
 		expect(session.isStreaming).toBe(true);
 
 		await session.prompt("Steer now", { streamingBehavior: "steer" });
+		releaseFirstStream();
 		await firstPrompt;
 
 		const assistantTexts = sessionManager
@@ -354,8 +371,9 @@ describe("AgentSession concurrent prompt guard", () => {
 			resourceLoader: createTestResourceLoader({ extensionsResult }),
 		});
 
+		const assistantStarted = waitForAssistantStart(session);
 		const firstPrompt = session.prompt("start");
-		await new Promise((resolve) => setTimeout(resolve, 10));
+		await assistantStarted;
 		expect(session.isStreaming).toBe(true);
 
 		const firstSteer = session.prompt("first steer", { streamingBehavior: "steer" });
@@ -463,8 +481,9 @@ describe("AgentSession concurrent prompt guard", () => {
 			}
 		});
 
+		const assistantStarted = waitForAssistantStart(session);
 		const firstPrompt = session.prompt("First message");
-		await new Promise((resolve) => setTimeout(resolve, 10));
+		await assistantStarted;
 		expect(session.isStreaming).toBe(true);
 
 		const pi = (

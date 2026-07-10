@@ -8,17 +8,18 @@ import { evaluateResearchRequest } from "./research-gate.ts";
  * parse -> evidence bundle. The model executor is injected so this stays provider-free and
  * session-free; production wires `AgentSession.runIsolatedCompletion` in.
  *
- * The lane is read-only by construction: the executor receives text prompts only, and the output
- * is an `EvidenceBundle` whose model-synthesized findings are marked untrusted.
+ * The lane is read-only by construction: the host may provide a classified read-only child tool
+ * surface, and the output is an `EvidenceBundle` whose model-synthesized findings are untrusted.
  */
 
 /** Static across calls so callers can use `cacheRetention: "short"` and only pay for the variable tail. */
 export const RESEARCH_LANE_SYSTEM_PROMPT = [
 	"You are a read-only research lane for a coding agent.",
 	"You receive a research query plus bounded context and produce findings that help satisfy open goal requirements.",
+	"Use only the provided read-only workspace tools. You cannot change files or delegate more workers.",
 	"Respond with STRICT JSON only - no prose, no markdown fences:",
 	'{"findings":[{"summary":"<one concrete, actionable finding>","confidence":<0..1>}]}',
-	"Base findings only on the provided context. Never invent file paths, APIs, or facts.",
+	"Base findings only on the provided context and files you inspect with those tools. Never invent file paths, APIs, or facts.",
 ].join("\n");
 
 export interface ResearchCompletion {
@@ -147,12 +148,13 @@ function buildBundle(options: ResearchRunnerOptions, parsed: ParsedResearchFindi
 		title: "Research-model synthesis",
 		trusted: false,
 	};
-	// context + synthesis are the fixed provenance anchors (findings cite src-synthesis); workspace
-	// sources fill whatever budget is left between them, so the anchors are never squeezed out.
+	// Context + synthesis are the fixed provenance anchors (findings cite src-synthesis); workspace
+	// sources fill whatever budget is left between them. A one-source budget must reserve synthesis
+	// because retaining context instead would leave generated findings with a dangling evidence ID.
 	const budget = Math.max(1, options.maxSources);
 	const workspaceRoom = Math.max(0, budget - 2);
 	const workspaceSources = (options.sources ?? []).slice(0, workspaceRoom);
-	const sources = [contextRef, ...workspaceSources, synthesisRef].slice(0, budget);
+	const sources = budget === 1 ? [synthesisRef] : [contextRef, ...workspaceSources, synthesisRef];
 	const findings: Finding[] = parsed.findings.slice(0, options.maxFindings).map((finding, index) => ({
 		id: `finding-${index + 1}`,
 		summary: finding.summary,

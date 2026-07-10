@@ -20,22 +20,23 @@
 
 import { join } from "node:path";
 import type { AgentMessage, CustomMessage } from "@caupulican/pi-agent-core";
+import { collectCurrentWorkMemory } from "./context/current-work-memory.ts";
+import { createFileStoreMemoryProvider } from "./context/file-store-memory-provider.ts";
+import { shouldQueryLongTermMemory } from "./context/long-term-memory-trigger.ts";
 import {
 	defaultMemoryPromptInclusionReport,
 	type MemoryPromptInclusionReport,
 	type MemoryRetrievalDiagnostics,
 	sanitizeMemoryRetrievalReportForDiagnostics,
 } from "./context/memory-diagnostics.ts";
-import { collectCurrentWorkMemory } from "./context/current-work-memory.ts";
-import { createFileStoreMemoryProvider } from "./context/file-store-memory-provider.ts";
-import { shouldQueryLongTermMemory } from "./context/long-term-memory-trigger.ts";
-import { resolveMemoryPromptBudget, type MemoryPromptBudget } from "./context/memory-prompt-budget.ts";
-import { composeTieredMemoryPromptBlock, type MemoryTierCandidate } from "./context/memory-tier-composer.ts";
+import { type MemoryPromptBudget, resolveMemoryPromptBudget } from "./context/memory-prompt-budget.ts";
 import {
 	type MemoryProvider as ContextMemoryProvider,
+	DEFAULT_EXTERNAL_MEMORY_EGRESS_POLICY,
 	DEFAULT_LOCAL_MEMORY_EGRESS_POLICY,
 } from "./context/memory-provider-contract.ts";
 import { type MemoryRetrievalReport, retrieveMemoryForContext } from "./context/memory-retrieval.ts";
+import { composeTieredMemoryPromptBlock, type MemoryTierCandidate } from "./context/memory-tier-composer.ts";
 import { createOkfMemoryProvider } from "./context/okf-memory-provider.ts";
 import type { GoalState } from "./goals/goal-state.ts";
 import { EffectivenessTracker } from "./memory/effectiveness-tracker.ts";
@@ -70,6 +71,13 @@ function emptyMemoryRetrievalReport(maxResults: number): MemoryRetrievalReport {
 	return { request: { query: "", maxResults }, providerReports: [], results: [], contextItems: [] };
 }
 
+const ENABLED_EXTERNAL_MEMORY_EGRESS_POLICY = {
+	...DEFAULT_EXTERNAL_MEMORY_EGRESS_POLICY,
+	enabled: true,
+	allowedScopes: DEFAULT_LOCAL_MEMORY_EGRESS_POLICY.allowedScopes,
+	allowExternalEgress: true,
+} as const;
+
 export interface MemoryControllerDeps {
 	/** Memory-retrieval + prompt-inclusion settings (default-on gates for retrieval and surfacing). */
 	getSettingsManager(): SettingsManager;
@@ -89,6 +97,14 @@ export interface MemoryControllerDeps {
 	getContextWindow(): number | undefined;
 	/** Latest active goal state, used for short-term current-work memory. */
 	getGoalState(): GoalState | undefined;
+}
+
+/** Extension-contributed memory state staged across an atomic runtime reload. */
+export interface MemoryControllerReloadSnapshot {
+	pendingMemoryProviders: MemoryProvider[];
+	pendingContextMemoryProviders: ContextMemoryProvider[];
+	memoryOkfProvider: ContextMemoryProvider | undefined;
+	fileStoreMemoryProvider: ContextMemoryProvider | undefined;
 }
 
 export class MemoryController {
@@ -201,6 +217,9 @@ export class MemoryController {
 					createdAtTurn: this.deps.getTurnIndex(),
 					maxResults,
 					defaultLocalPolicy: DEFAULT_LOCAL_MEMORY_EGRESS_POLICY,
+					defaultExternalPolicy: settings.allowExternalEgress
+						? ENABLED_EXTERNAL_MEMORY_EGRESS_POLICY
+						: DEFAULT_EXTERNAL_MEMORY_EGRESS_POLICY,
 				},
 			);
 			this._latestMemoryRetrievalReport = report;
@@ -217,7 +236,9 @@ export class MemoryController {
 		return this._latestMemoryRetrievalReport ?? emptyMemoryRetrievalReport(0);
 	}
 
-	private _candidateForContextItem(item: MemoryRetrievalReport["contextItems"][number]): MemoryTierCandidate | undefined {
+	private _candidateForContextItem(
+		item: MemoryRetrievalReport["contextItems"][number],
+	): MemoryTierCandidate | undefined {
 		const summary = item.summary?.trim();
 		if (!summary) return undefined;
 		const ref = item.primaryRef?.type === "memory" ? item.primaryRef.ref : undefined;
@@ -384,6 +405,7 @@ export class MemoryController {
 	 * filter — this just avoids the index query on turns that obviously don't warrant it.
 	 */
 	shouldAttemptRecall(text: string): boolean {
+		if (!this.deps.getSettingsManager().getMemoryRetrievalSettings().enabled) return false;
 		const t = text.trim();
 		if (t.length < 12 || t.startsWith("/")) return false;
 		const words = t.split(/\s+/).filter((w) => w.length >= 3);
@@ -393,6 +415,17 @@ export class MemoryController {
 		const recallRarelyUseful =
 			this._effectivenessTracker.sampleCount >= 5 && this._effectivenessTracker.usefulLately() < 0.15;
 		return words.length >= (recallRarelyUseful ? 6 : 3);
+	}
+
+	/** Legacy recall prefetch with the same hard-off and explicit external-egress policy as context retrieval. */
+	async prefetchRecall(query: string): Promise<string> {
+		const settings = this.deps.getSettingsManager().getMemoryRetrievalSettings();
+		if (!settings.enabled) return "";
+		return this._memoryManager.prefetch(query, {
+			externalEgressPolicy: settings.allowExternalEgress
+				? ENABLED_EXTERNAL_MEMORY_EGRESS_POLICY
+				: DEFAULT_EXTERNAL_MEMORY_EGRESS_POLICY,
+		});
 	}
 
 	/** R4: score whether the agent actually used an injected recall page, so the recall gate can adapt. */
@@ -449,6 +482,22 @@ export class MemoryController {
 		if (!this._pendingContextMemoryProviders.some((p) => p.id === provider.id)) {
 			this._pendingContextMemoryProviders.push(provider);
 		}
+	}
+
+	createReloadSnapshot(): MemoryControllerReloadSnapshot {
+		return {
+			pendingMemoryProviders: [...this._pendingMemoryProviders],
+			pendingContextMemoryProviders: [...this._pendingContextMemoryProviders],
+			memoryOkfProvider: this._memoryOkfProvider,
+			fileStoreMemoryProvider: this._fileStoreMemoryProvider,
+		};
+	}
+
+	restoreReloadSnapshot(snapshot: MemoryControllerReloadSnapshot): void {
+		this._pendingMemoryProviders = [...snapshot.pendingMemoryProviders];
+		this._pendingContextMemoryProviders = [...snapshot.pendingContextMemoryProviders];
+		this._memoryOkfProvider = snapshot.memoryOkfProvider;
+		this._fileStoreMemoryProvider = snapshot.fileStoreMemoryProvider;
 	}
 
 	/** Reload starts memory providers fresh; loaded extensions re-register before the next `initialize()`. */

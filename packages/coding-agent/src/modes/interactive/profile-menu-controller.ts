@@ -12,12 +12,14 @@
 
 import * as fs from "node:fs";
 import * as path from "node:path";
-import type { Model } from "@caupulican/pi-ai";
+import type { Api, Model } from "@caupulican/pi-ai";
 import type { Component, SelectItem, TUI } from "@caupulican/pi-tui";
 import { getAgentDir } from "../../config.ts";
 import type { AgentSession } from "../../core/agent-session.ts";
 import { resolveCliModel } from "../../core/model-resolver.ts";
+import type { NormalizedProfile } from "../../core/profile-registry.ts";
 import { resourceProfileSettingsChangedKinds } from "../../core/resource-profile-equality.ts";
+import type { SettingsReloadSnapshot } from "../../core/settings-manager.ts";
 import { validateSkillName } from "../../core/skills.ts";
 import { allToolNames } from "../../core/tools/index.ts";
 import { parseFrontmatter } from "../../utils/frontmatter.ts";
@@ -29,7 +31,41 @@ import {
 } from "./components/profile-resource-editor.ts";
 import { ProfileSelectorComponent } from "./components/profile-selector.ts";
 import { SelectSubmenu } from "./components/settings-selector.ts";
+import { captureProfileFiles, restoreProfileFiles } from "./config-backup.ts";
 import { getAvailableThemesWithPaths } from "./theme/theme.ts";
+
+type WritableProfileScope = "session" | "directory" | "project" | "global" | "reusable-file";
+
+export const NO_ACTIVE_PROFILE_DESCRIPTION =
+	"Baseline resources; inline SDK extensions load, discovered extensions stay withheld";
+
+function deletionScopeForProfile(profile: NormalizedProfile): WritableProfileScope | undefined {
+	switch (profile.source) {
+		case "inline":
+			return "session";
+		case "directory-overlay":
+			return "directory";
+		case "project-settings":
+			return "project";
+		case "global-settings":
+			return "global";
+		case "profile-file": {
+			const localProfilePath = path.resolve(getAgentDir(), "profiles", `${profile.name}.json`);
+			return profile.sourcePath && path.resolve(profile.sourcePath) === localProfilePath
+				? "reusable-file"
+				: undefined;
+		}
+		case "embedded":
+		case "external-settings":
+			return undefined;
+	}
+}
+
+interface ProfileDefinitionRollbackTarget {
+	profileName: string;
+	scope: WritableProfileScope;
+	profileFilesSnapshot?: ReturnType<typeof captureProfileFiles>;
+}
 
 export interface ProfileMenuControllerUi {
 	showSelector(create: (done: () => void) => { component: Component; focus: Component }): void;
@@ -42,9 +78,8 @@ export interface ProfileMenuControllerUi {
 	invalidateFooter(): void;
 	updateEditorBorderColor(): void;
 	openEditorForPath(filePath: string): Promise<boolean>;
-	handleReloadCommand(): Promise<void>;
-	reconcileExtensionsAndRefreshUI(profileName: string): Promise<void>;
-	maybeWarnAboutAnthropicSubscriptionAuth(model?: Model<any>): void;
+	handleReloadCommand(): Promise<boolean>;
+	maybeWarnAboutAnthropicSubscriptionAuth(model?: Model<Api>): void;
 	checkDaxnutsEasterEgg(model: { provider: string; id: string }): void;
 	showSettingsSelector(): void;
 	getAutoLearnModelOptions(): SelectItem[];
@@ -103,7 +138,7 @@ export class ProfileMenuController {
 		const activeNames = this.settingsManager.getActiveResourceProfileNames();
 
 		const options = [
-			{ value: "(none)", label: "(none)", description: "No active profile/situation (all resources enabled)" },
+			{ value: "(none)", label: "(none)", description: NO_ACTIVE_PROFILE_DESCRIPTION },
 			...profiles.map((p) => ({
 				value: p.name,
 				label: p.name,
@@ -240,8 +275,9 @@ export class ProfileMenuController {
 				"",
 				(value) => {
 					done();
-					this.deleteProfileFromSource(value);
-					void this.ui.showSettingsSelector();
+					void this.deleteProfileFromSource(value).then(() => {
+						void this.ui.showSettingsSelector();
+					});
 				},
 				() => {
 					done();
@@ -396,10 +432,10 @@ export class ProfileMenuController {
 					model: profileModel ?? undefined,
 					resources: {},
 				},
-				"directory",
+				"reusable-file",
 			);
 			await this.applyProfile(trimmed);
-			void this.openLibraryEditorForProfile(trimmed, "directory");
+			void this.openLibraryEditorForProfile(trimmed, "reusable-file");
 		} catch (error) {
 			this.ui.showError(error instanceof Error ? error.message : String(error));
 			void this.openLibraryManagerFlow();
@@ -613,32 +649,7 @@ export class ProfileMenuController {
 				externalResourceRoots: this.settingsManager.getExternalResourceRoots(),
 				onSave: (resources) => {
 					done();
-					try {
-						this.settingsManager.setProfileDefinition(
-							profileName,
-							{
-								name: profileName,
-								description: profile!.description,
-								model: profile!.model,
-								thinking: profile!.thinking,
-								resources,
-							},
-							currentScope,
-						);
-						this.ui.showStatus(`Saved profile "${profileName}" to ${currentScope}.`);
-						if (isActiveProfile) {
-							const changedKinds = resourceProfileSettingsChangedKinds(originalResources, resources);
-							if (changedKinds.size === 1 && changedKinds.has("extensions")) {
-								void this.ui.reconcileExtensionsAndRefreshUI(profileName);
-							} else if (changedKinds.size > 0) {
-								void this.refreshAfterProfileMutation(profileName);
-							} else {
-								this.ui.requestRender();
-							}
-						}
-					} catch (error) {
-						this.ui.showError(error instanceof Error ? error.message : String(error));
-					}
+					void this.saveProfileResources(profile, originalResources, resources, currentScope, isActiveProfile);
 				},
 				onCancel: () => {
 					done();
@@ -669,6 +680,118 @@ export class ProfileMenuController {
 
 			return { component: editor, focus: editor };
 		});
+	}
+
+	private async saveProfileResources(
+		profile: NormalizedProfile,
+		originalResources: NormalizedProfile["resources"],
+		resources: NormalizedProfile["resources"],
+		scope: WritableProfileScope,
+		isActiveProfile: boolean,
+	): Promise<void> {
+		const definition = {
+			name: profile.name,
+			description: profile.description,
+			model: profile.model,
+			thinking: profile.thinking,
+			modelRouter: profile.modelRouter,
+			soul: profile.soul,
+			resources,
+		};
+		const changedKinds = resourceProfileSettingsChangedKinds(originalResources, resources);
+		if (!isActiveProfile || changedKinds.size === 0) {
+			try {
+				this.settingsManager.setProfileDefinition(profile.name, definition, scope);
+				this.ui.showStatus(`Saved profile "${profile.name}" to ${scope}.`);
+				this.ui.requestRender();
+			} catch (error) {
+				this.ui.showError(error instanceof Error ? error.message : String(error));
+			}
+			return;
+		}
+
+		const settingsSnapshot = this.settingsManager.createReloadSnapshot();
+		const profilesDir = path.join(getAgentDir(), "profiles");
+		const profileFilesSnapshot = scope === "reusable-file" ? captureProfileFiles(profilesDir) : undefined;
+		let stagedRuntimeApplied = false;
+		try {
+			// Validate the edited authority surface as a session overlay first. Persistent scopes are
+			// written only after the complete runtime generation passes its reload doctor.
+			this.settingsManager.setProfileDefinition(profile.name, definition, "session");
+			if (!(await this.ui.handleReloadCommand())) {
+				this.settingsManager.restoreReloadSnapshot(settingsSnapshot);
+				return;
+			}
+			stagedRuntimeApplied = true;
+
+			if (scope !== "session") {
+				this.settingsManager.setProfileDefinition(profile.name, definition, scope);
+				await this.settingsManager.flush();
+				// Drop the validation-only inline winner, then refresh the registry from the now-validated
+				// persistent definition. The live runtime already represents these identical resources.
+				this.settingsManager.restoreReloadSnapshot(settingsSnapshot);
+				await this.settingsManager.reload();
+			}
+
+			const active = this.settingsManager.getActiveResourceProfileNames()[0] ?? "(none)";
+			this.ui.footerDataProvider.setExtensionStatus("profile", active);
+			this.ui.invalidateFooter();
+			this.ui.updateEditorBorderColor();
+			this.ui.showStatus(`Saved profile "${profile.name}" to ${scope}.`);
+		} catch (error) {
+			const rollbackError = stagedRuntimeApplied
+				? await this.rollbackValidatedProfileMutation(settingsSnapshot, {
+						profileName: profile.name,
+						scope,
+						profileFilesSnapshot,
+					})
+				: undefined;
+			if (!stagedRuntimeApplied) this.settingsManager.restoreReloadSnapshot(settingsSnapshot);
+			const message = error instanceof Error ? error.message : String(error);
+			this.ui.showError(
+				rollbackError
+					? `${message}; rollback failed: ${rollbackError instanceof Error ? rollbackError.message : String(rollbackError)}`
+					: message,
+			);
+		}
+	}
+
+	private async rollbackValidatedProfileMutation(
+		settingsSnapshot: SettingsReloadSnapshot,
+		definition?: ProfileDefinitionRollbackTarget,
+	): Promise<unknown> {
+		const errors: string[] = [];
+		try {
+			if (definition?.scope === "reusable-file") {
+				restoreProfileFiles(path.join(getAgentDir(), "profiles"), definition.profileFilesSnapshot!);
+			} else if (definition && definition.scope !== "session") {
+				this.settingsManager.restoreProfileDefinitionFromReloadSnapshot(
+					definition.profileName,
+					definition.scope,
+					settingsSnapshot,
+				);
+			}
+			const global = settingsSnapshot.globalSettings;
+			this.settingsManager.replaceGlobalResourceProfileConfiguration({
+				resourceProfiles: global.resourceProfiles,
+				activeResourceProfile: global.activeResourceProfile,
+				activeResourceProfiles: global.activeResourceProfiles,
+				externalResourceRoots: global.externalResourceRoots,
+				trustedResourceRoots: global.trustedResourceRoots,
+			});
+			await this.settingsManager.flush();
+		} catch (error) {
+			errors.push(`persistence: ${error instanceof Error ? error.message : String(error)}`);
+		}
+		this.settingsManager.restoreReloadSnapshot(settingsSnapshot);
+		try {
+			if (!(await this.ui.handleReloadCommand())) {
+				errors.push("runtime: the previous profile runtime could not be restored");
+			}
+		} catch (error) {
+			errors.push(`runtime: ${error instanceof Error ? error.message : String(error)}`);
+		}
+		return errors.length > 0 ? new Error(errors.join("; ")) : undefined;
 	}
 
 	private async promptScopeChangeForProfile(
@@ -741,21 +864,37 @@ export class ProfileMenuController {
 		const normalizedName = profileName.trim();
 		const normalizedLower = normalizedName.toLowerCase();
 		if (normalizedName.length === 0 || normalizedLower === "none" || normalizedLower === "(none)") {
+			const settingsSnapshot = this.settingsManager.createReloadSnapshot();
+			let stagedRuntimeApplied = false;
 			try {
 				this.settingsManager.setRuntimeResourceProfiles([]);
-				// Clearing must also survive restarts (otherwise the old global selection returns).
+				if (!(await this.ui.handleReloadCommand())) {
+					this.settingsManager.restoreReloadSnapshot(settingsSnapshot);
+					return;
+				}
+				stagedRuntimeApplied = true;
+				// Persist only after the new runtime generation passes its reload doctor.
 				this.settingsManager.setActiveProfile(undefined, "global");
+				await this.settingsManager.flush();
 				this.session.sessionManager.appendCustomEntry("pi.activeResourceProfiles", {
 					profiles: [],
 				});
-				await this.ui.handleReloadCommand();
 				const activeProfileName = this.settingsManager.getActiveResourceProfileNames()[0] ?? "(none)";
 				this.ui.footerDataProvider.setExtensionStatus("profile", activeProfileName);
 				this.ui.invalidateFooter();
 				this.ui.updateEditorBorderColor();
 				this.ui.showStatus(`Profile: ${activeProfileName}`);
 			} catch (error) {
-				this.ui.showError(error instanceof Error ? error.message : String(error));
+				const rollbackError = stagedRuntimeApplied
+					? await this.rollbackValidatedProfileMutation(settingsSnapshot)
+					: undefined;
+				if (!stagedRuntimeApplied) this.settingsManager.restoreReloadSnapshot(settingsSnapshot);
+				const message = error instanceof Error ? error.message : String(error);
+				this.ui.showError(
+					rollbackError
+						? `${message}; rollback failed: ${rollbackError instanceof Error ? rollbackError.message : String(rollbackError)}`
+						: message,
+				);
 			}
 			return;
 		}
@@ -770,68 +909,88 @@ export class ProfileMenuController {
 			return;
 		}
 
+		const settingsSnapshot = this.settingsManager.createReloadSnapshot();
+		const modelRegistrySnapshot = profile.model ? this.session.modelRegistry.createReloadSnapshot() : undefined;
+		let stagedRuntimeApplied = false;
 		try {
-			let appliedModel: Model<any> | undefined;
+			const activeProfileRef =
+				normalizedName.startsWith("./") || normalizedName.startsWith("../") ? normalizedName : profile.name;
+			let requestedModel: Model<Api> | undefined;
 			if (profile.model) {
 				this.session.modelRegistry.refresh();
 				const resolved = resolveCliModel({ cliModel: profile.model, modelRegistry: this.session.modelRegistry });
-				if (resolved.error) {
-					this.ui.showError(resolved.error);
-					return;
-				}
-				if (resolved.warning) {
+				// The profile may grant an extension that contributes this model. The current generation
+				// cannot validate that case; the atomic reload binds new providers before authoritative
+				// profile resolution and rolls back if the model is still unresolved.
+				if (!resolved.error && resolved.warning) {
 					this.ui.showWarning(resolved.warning);
 				}
-				if (resolved.model) {
-					await this.session.setModel(resolved.model, { persistSettings: false });
-					appliedModel = resolved.model;
-				}
-				if (resolved.thinkingLevel && !profile.thinking) {
-					this.session.setThinkingLevel(resolved.thinkingLevel, { persistSettings: false });
-				}
+				if (!resolved.error) requestedModel = resolved.model;
 			}
-			if (profile.thinking) {
-				this.session.setThinkingLevel(profile.thinking, { persistSettings: false });
+
+			// Stage the complete situation in memory. Runtime reload applies model/thinking, resource
+			// grants, extensions, skills, prompts, and soul together; explicit launch overrides still win.
+			this.settingsManager.setRuntimeResourceProfiles([activeProfileRef]);
+			if (!(await this.ui.handleReloadCommand())) {
+				this.settingsManager.restoreReloadSnapshot(settingsSnapshot);
+				if (modelRegistrySnapshot) this.session.modelRegistry.restoreReloadSnapshot(modelRegistrySnapshot);
+				return;
 			}
-			this.settingsManager.setRuntimeResourceProfiles([profile.name]);
-			// Selection must survive pi restarts: persist globally (like model/theme selections).
-			// Runtime + session-entry alone made every /profile choice evaporate on exit.
-			this.settingsManager.setActiveProfile(profile.name, "global");
+			stagedRuntimeApplied = true;
+
+			// Selection survives restarts only after the new runtime generation passes its reload doctor.
+			this.settingsManager.setActiveProfile(activeProfileRef, "global");
+			await this.settingsManager.flush();
 			this.session.sessionManager.appendCustomEntry("pi.activeResourceProfiles", {
-				profiles: [profile.name],
+				profiles: [activeProfileRef],
 			});
-			await this.ui.handleReloadCommand();
 			this.ui.footerDataProvider.setExtensionStatus("profile", profile.name);
 			this.ui.invalidateFooter();
 			this.ui.updateEditorBorderColor();
 			this.ui.showStatus(`Profile: ${profile.name}`);
-			if (appliedModel) {
-				void this.ui.maybeWarnAboutAnthropicSubscriptionAuth(appliedModel);
-				this.ui.checkDaxnutsEasterEgg(appliedModel);
+			if (
+				requestedModel &&
+				this.session.model?.provider === requestedModel.provider &&
+				this.session.model.id === requestedModel.id
+			) {
+				void this.ui.maybeWarnAboutAnthropicSubscriptionAuth(requestedModel);
+				this.ui.checkDaxnutsEasterEgg(requestedModel);
 			}
 		} catch (error) {
-			this.ui.showError(error instanceof Error ? error.message : String(error));
+			const rollbackError = stagedRuntimeApplied
+				? await this.rollbackValidatedProfileMutation(settingsSnapshot)
+				: undefined;
+			if (!stagedRuntimeApplied) this.settingsManager.restoreReloadSnapshot(settingsSnapshot);
+			if (modelRegistrySnapshot) this.session.modelRegistry.restoreReloadSnapshot(modelRegistrySnapshot);
+			const message = error instanceof Error ? error.message : String(error);
+			this.ui.showError(
+				rollbackError
+					? `${message}; rollback failed: ${rollbackError instanceof Error ? rollbackError.message : String(rollbackError)}`
+					: message,
+			);
 		}
 	}
 
 	/** Map where a profile currently lives to the scope we should write it back to. */
-	private scopeForProfileSource(source: string): "session" | "directory" | "project" | "global" | "reusable-file" {
+	private scopeForProfileSource(source: string): WritableProfileScope {
 		switch (source) {
 			case "profile-file":
 				return "reusable-file";
 			case "directory-overlay":
 			case "embedded":
 				return "directory";
+			case "project-settings":
+				return "project";
 			case "inline":
 				return "session";
 			default:
-				return "global"; // "settings"
+				return "global";
 		}
 	}
 
 	async refreshAfterProfileMutation(profileName: string): Promise<void> {
 		if (this.settingsManager.getActiveResourceProfileNames().includes(profileName)) {
-			await this.ui.handleReloadCommand();
+			if (!(await this.ui.handleReloadCommand())) return;
 			const active = this.settingsManager.getActiveResourceProfileNames()[0] ?? "(none)";
 			this.ui.footerDataProvider.setExtensionStatus("profile", active);
 			this.ui.invalidateFooter();
@@ -999,19 +1158,78 @@ export class ProfileMenuController {
 		}
 	}
 
-	private deleteProfileFromSource(profileName: string): void {
-		const profile = this.settingsManager.getProfileRegistry().getProfile(profileName);
+	private async deleteProfileFromSource(profileName: string): Promise<void> {
+		const registry = this.settingsManager.getProfileRegistry();
+		const profile = registry.getProfile(profileName);
 		if (!profile) {
 			this.ui.showError(`Profile not found: ${profileName}`);
 			return;
 		}
-		const scope = this.scopeForProfileSource(profile.source);
+		const scope = deletionScopeForProfile(profile);
+		if (!scope) {
+			const location = profile.sourcePath ? ` at ${profile.sourcePath}` : "";
+			this.ui.showError(
+				`Profile "${profileName}" comes from read-only source ${profile.source}${location}; edit or remove that source definition directly.`,
+			);
+			return;
+		}
+		const wasActive = this.settingsManager.getActiveResourceProfileNames().some((profileRef) => {
+			if (profileRef === profileName || profileRef === profile.name) return true;
+			const activeProfile =
+				profileRef.startsWith("./") || profileRef.startsWith("../")
+					? registry.resolveProfileRef(profileRef, this.sessionManager.getCwd())
+					: registry.getProfile(profileRef);
+			return Boolean(
+				activeProfile && activeProfile.name === profile.name && activeProfile.sourcePath === profile.sourcePath,
+			);
+		});
+		const settingsSnapshot = this.settingsManager.createReloadSnapshot();
+		const profileFilesSnapshot =
+			scope === "reusable-file" ? captureProfileFiles(path.join(getAgentDir(), "profiles")) : undefined;
+		let switchedToNone = false;
 		try {
+			if (wasActive) {
+				// Stage an explicit empty runtime selection while the definition is still intact. The
+				// full reload can now remove the profile's extensions, tools, providers, model, and
+				// memory generation atomically. Persisting the deletion is deliberately deferred until
+				// that generation passes its doctor, so a failed reload has no on-disk deletion to undo.
+				this.settingsManager.setRuntimeResourceProfiles([]);
+				if (!(await this.ui.handleReloadCommand())) {
+					this.settingsManager.restoreReloadSnapshot(settingsSnapshot);
+					return;
+				}
+				switchedToNone = true;
+			}
+
 			this.settingsManager.deleteProfile(profileName, scope);
+			const remaining = this.settingsManager.getProfileRegistry().getProfile(profileName);
+			if (remaining && remaining.source === profile.source && remaining.sourcePath === profile.sourcePath) {
+				throw new Error(`Profile "${profileName}" was not removed from ${profile.source}.`);
+			}
+			if (wasActive) {
+				this.settingsManager.setActiveProfile(undefined, "global");
+				await this.settingsManager.flush();
+				this.session.sessionManager.appendCustomEntry("pi.activeResourceProfiles", { profiles: [] });
+				this.ui.footerDataProvider.setExtensionStatus("profile", "(none)");
+				this.ui.invalidateFooter();
+				this.ui.updateEditorBorderColor();
+			}
 			this.ui.showStatus(`Deleted profile "${profileName}" from ${scope}.`);
-			void this.refreshAfterProfileMutation(profileName);
 		} catch (error) {
-			this.ui.showError(error instanceof Error ? error.message : String(error));
+			const rollbackError = switchedToNone
+				? await this.rollbackValidatedProfileMutation(settingsSnapshot, {
+						profileName,
+						scope,
+						profileFilesSnapshot,
+					})
+				: undefined;
+			if (!switchedToNone) this.settingsManager.restoreReloadSnapshot(settingsSnapshot);
+			const message = error instanceof Error ? error.message : String(error);
+			this.ui.showError(
+				rollbackError
+					? `${message}; rollback failed: ${rollbackError instanceof Error ? rollbackError.message : String(rollbackError)}`
+					: message,
+			);
 		}
 	}
 

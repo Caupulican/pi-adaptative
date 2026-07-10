@@ -12,6 +12,13 @@ export interface CompactionErrorFact {
 	error: string;
 }
 
+export interface CompactionDelegatedWorkerFact {
+	/** Worker-authored text is evidence for the parent, never a verified decision or completion claim. */
+	trust: "UNTRUSTED";
+	task: string;
+	summary: string;
+}
+
 export interface CompactionFacts {
 	files: CompactionFileFact[];
 	workingSet: CompactionFileFact[];
@@ -20,6 +27,8 @@ export interface CompactionFacts {
 	prohibitions: string[];
 	cancelledText: string;
 	activeTaskSource: string;
+	/** Latest-first worker evidence retained only by deterministic checkpoints. */
+	delegatedWorkerFacts?: CompactionDelegatedWorkerFact[];
 }
 
 interface ToolCallFact {
@@ -50,6 +59,9 @@ const MAX_WORKING_SET_FILES = 8;
 const MAX_ERROR_FACTS = 5;
 const ERROR_LINE_MAX_CHARS = 160;
 const COMMAND_PREFIX_MAX_CHARS = 80;
+const MAX_DELEGATED_WORKER_FACTS = 4;
+const DELEGATED_WORKER_TASK_MAX_CHARS = 240;
+const DELEGATED_WORKER_SUMMARY_MAX_CHARS = 600;
 /** Shared clamp for the active-task text because verification can only demand what the prompt receives. */
 export const ACTIVE_TASK_SOURCE_MAX_CHARS = 4_000;
 
@@ -122,6 +134,60 @@ function assistantToolCallTarget(name: string, rawArgs: unknown): string | undef
 
 function clampText(text: string, maxLen: number): string {
 	return text.length > maxLen ? text.slice(0, maxLen) : text;
+}
+
+function isPlainRecord(value: unknown): value is Record<string, unknown> {
+	if (!value || typeof value !== "object" || Array.isArray(value)) return false;
+	const prototype = Object.getPrototypeOf(value);
+	return prototype === Object.prototype || prototype === null;
+}
+
+function normalizeDelegatedWorkerText(text: string, maxLen: number): string {
+	return clampText(text.replace(/\s+/g, " ").trim(), maxLen);
+}
+
+function extractDelegatedWorkerFact(entry: SessionEntry): CompactionDelegatedWorkerFact | undefined {
+	if (entry.type !== "custom" || entry.customType !== "worker_result" || !isPlainRecord(entry.data)) {
+		return undefined;
+	}
+	if (entry.data.version !== 1 || !isPlainRecord(entry.data.result)) return undefined;
+
+	const result = entry.data.result;
+	if (typeof result.requestId !== "string" || typeof result.summary !== "string") return undefined;
+	if (typeof result.status !== "string" || !["completed", "blocked", "failed", "cancelled"].includes(result.status)) {
+		return undefined;
+	}
+	if (!Array.isArray(result.changedFiles) || !result.changedFiles.every((file) => typeof file === "string")) {
+		return undefined;
+	}
+
+	const request = entry.data.request;
+	const instructions =
+		isPlainRecord(request) && typeof request.instructions === "string" ? request.instructions : undefined;
+	const task = normalizeDelegatedWorkerText(
+		instructions ?? `Worker request ${result.requestId}`,
+		DELEGATED_WORKER_TASK_MAX_CHARS,
+	);
+	const summary = normalizeDelegatedWorkerText(result.summary, DELEGATED_WORKER_SUMMARY_MAX_CHARS);
+
+	return {
+		trust: "UNTRUSTED",
+		task: task || "(empty task)",
+		summary: summary || "(empty summary)",
+	};
+}
+
+function extractDelegatedWorkerFacts(
+	entries: readonly SessionEntry[],
+	start: number,
+	end: number,
+): CompactionDelegatedWorkerFact[] {
+	const facts: CompactionDelegatedWorkerFact[] = [];
+	for (let i = end - 1; i >= start && facts.length < MAX_DELEGATED_WORKER_FACTS; i--) {
+		const fact = extractDelegatedWorkerFact(entries[i]);
+		if (fact) facts.push(fact);
+	}
+	return facts;
 }
 
 function appearsCreated(message: AgentMessage): boolean {
@@ -285,8 +351,10 @@ export function extractCompactionFacts(entries: SessionEntry[], start: number, e
 			prohibitions: [],
 			cancelledText: "",
 			activeTaskSource: "",
+			delegatedWorkerFacts: [],
 		};
 	}
+	const delegatedWorkerFacts = extractDelegatedWorkerFacts(entries, rangeStart, rangeEnd);
 
 	const filesByPath = new Map<string, CompactionFileFact & { lastTouch: number }>();
 	const filesNotes = new Map<string, string>();
@@ -514,6 +582,7 @@ export function extractCompactionFacts(entries: SessionEntry[], start: number, e
 		prohibitions: prohibitions.slice(-MAX_PROHIBITIONS),
 		cancelledText: cancelledParts.join("\n"),
 		activeTaskSource,
+		delegatedWorkerFacts,
 	};
 }
 

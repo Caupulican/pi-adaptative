@@ -38,6 +38,8 @@ export interface FauxModelDefinition {
 	id: string;
 	name?: string;
 	reasoning?: boolean;
+	defaultThinkingLevel?: Model<string>["defaultThinkingLevel"];
+	thinkingLevelMap?: Model<string>["thinkingLevelMap"];
 	input?: ("text" | "image")[];
 	cost?: { input: number; output: number; cacheRead: number; cacheWrite: number };
 	contextWindow?: number;
@@ -95,7 +97,7 @@ export function fauxAssistantMessage(
 
 export type FauxResponseFactory = (
 	context: Context,
-	options: StreamOptions | undefined,
+	options: SimpleStreamOptions | undefined,
 	state: { callCount: number },
 	model: Model<string>,
 ) => AssistantMessage | Promise<AssistantMessage>;
@@ -422,13 +424,15 @@ export function registerFauxProvider(options: RegisterFauxProviderOptions = {}):
 		provider,
 		baseUrl: DEFAULT_BASE_URL,
 		reasoning: definition.reasoning ?? false,
+		defaultThinkingLevel: definition.defaultThinkingLevel,
+		thinkingLevelMap: definition.thinkingLevelMap ? { ...definition.thinkingLevelMap } : undefined,
 		input: definition.input ?? ["text", "image"],
 		cost: definition.cost ?? { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 },
 		contextWindow: definition.contextWindow ?? 128000,
 		maxTokens: definition.maxTokens ?? 16384,
 	})) as [Model<string>, ...Model<string>[]];
 
-	const stream: StreamFunction<string, StreamOptions> = (requestModel, context, streamOptions) => {
+	const stream: StreamFunction<string, SimpleStreamOptions> = (requestModel, context, streamOptions) => {
 		const outer = createAssistantMessageEventStream();
 		const step = pendingResponses.shift();
 		state.callCount++;

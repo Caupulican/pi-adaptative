@@ -1,6 +1,9 @@
+import { existsSync, mkdirSync, readFileSync } from "node:fs";
+import { join } from "node:path";
 import { fauxAssistantMessage, fauxToolCall } from "@caupulican/pi-ai";
 import { describe, expect, it } from "vitest";
 import { getLaneRecordSnapshots } from "../src/core/autonomy/session-lane-record.ts";
+import { getWorkerRequestSnapshots } from "../src/core/delegation/session-worker-result.ts";
 import { createHarness, type Harness } from "./suite/harness.ts";
 
 const WORKER_JSON =
@@ -11,12 +14,48 @@ function workerLaneRecords(harness: Harness) {
 }
 
 describe("AgentSession worker delegation", () => {
-	it("skips when worker delegation is disabled (default)", async () => {
+	it("runs bounded read-only delegation by default on a capable model", async () => {
 		const harness = await createHarness();
 		try {
+			harness.setResponses([fauxAssistantMessage(WORKER_JSON)]);
 			const run = await harness.session.runWorkerDelegationOnce({ instructions: "Scout something" });
-			expect(run.started).toBe(false);
-			expect(run.skipReason).toBe("worker_delegation_disabled");
+			expect(run.started).toBe(true);
+			expect(getWorkerRequestSnapshots(harness.sessionManager.getEntries())[0]?.envelope.capabilities).toEqual([
+				"read_files",
+			]);
+		} finally {
+			harness.cleanup();
+		}
+	});
+
+	it("keeps an explicit delegation disable independent of Ultra", async () => {
+		const harness = await createHarness({
+			settings: { workerDelegation: { enabled: false } },
+		});
+		try {
+			const model = harness.session.model;
+			if (!model) throw new Error("Expected harness model");
+			model.thinkingLevelMap = { max: "max", ultra: "max" };
+			harness.session.setThinkingLevel("ultra");
+			const run = await harness.session.runWorkerDelegationOnce({ instructions: "Scout safely" });
+			expect(run).toMatchObject({ started: false, skipReason: "worker_delegation_disabled" });
+		} finally {
+			harness.cleanup();
+		}
+	});
+
+	it("gates delegation against the configured worker model rather than the foreground model", async () => {
+		const harness = await createHarness({
+			models: [
+				{ id: "foreground", contextWindow: 128_000 },
+				{ id: "tiny-worker", contextWindow: 4_096 },
+			],
+			settings: { workerDelegation: { enabled: true, model: "faux/tiny-worker" } },
+		});
+		try {
+			const run = await harness.session.runWorkerDelegationOnce({ instructions: "Scout safely" });
+
+			expect(run).toMatchObject({ started: false, skipReason: "model_delegation_unsupported" });
 			expect(workerLaneRecords(harness)).toHaveLength(0);
 		} finally {
 			harness.cleanup();
@@ -81,6 +120,83 @@ describe("AgentSession worker delegation", () => {
 			expect(run.outcome?.accepted).toBe(false);
 			expect(run.outcome?.acceptance.outcome).toBe("block");
 			expect(harness.session.getWorkerResultSnapshots()[0]?.status).toBe("blocked");
+		} finally {
+			harness.cleanup();
+		}
+	});
+
+	it("executes a direct scoped write and reports it for parent review", async () => {
+		const harness = await createHarness({
+			settings: { workerDelegation: { enabled: true, writeEnabled: true, writePaths: ["src"] } },
+		});
+		try {
+			mkdirSync(join(harness.tempDir, "src"), { recursive: true });
+			harness.setResponses([
+				fauxAssistantMessage(
+					[fauxToolCall("write", { path: "src/direct.ts", content: "export const direct = true;\n" })],
+					{ stopReason: "toolUse" },
+				),
+				fauxAssistantMessage('{"summary":"direct write complete","actions":[]}'),
+			]);
+
+			const run = await harness.session.runWorkerDelegationOnce({ instructions: "Write the direct helper" });
+
+			expect(readFileSync(join(harness.tempDir, "src/direct.ts"), "utf-8")).toBe("export const direct = true;\n");
+			expect(run.outcome?.result.changedFiles).toEqual(["src/direct.ts"]);
+			expect(run.outcome?.acceptance).toMatchObject({
+				outcome: "ask-user",
+				reasonCode: "parent_review_required",
+			});
+			const request = getWorkerRequestSnapshots(harness.sessionManager.getEntries())[0];
+			expect(request?.envelope.allowedTools).toEqual(["read", "grep", "find", "ls", "write", "edit"]);
+			expect(request?.envelope.allowedTools).not.toContain("delegate");
+		} finally {
+			harness.cleanup();
+		}
+	});
+
+	it("blocks and reports a direct write outside the configured scope", async () => {
+		const harness = await createHarness({
+			settings: { workerDelegation: { enabled: true, writeEnabled: true, writePaths: ["src"] } },
+		});
+		try {
+			mkdirSync(join(harness.tempDir, "src"), { recursive: true });
+			harness.setResponses([
+				fauxAssistantMessage([fauxToolCall("write", { path: "outside.ts", content: "not allowed\n" })], {
+					stopReason: "toolUse",
+				}),
+				fauxAssistantMessage('{"summary":"write was refused"}'),
+			]);
+
+			const run = await harness.session.runWorkerDelegationOnce({ instructions: "Try the scoped write" });
+
+			expect(existsSync(join(harness.tempDir, "outside.ts"))).toBe(false);
+			expect(run.outcome?.result.changedFiles).toEqual([]);
+			expect(run.outcome?.result.status).toBe("blocked");
+			expect(run.outcome?.result.blockers?.some((blocker) => blocker.includes("write blocked"))).toBe(true);
+		} finally {
+			harness.cleanup();
+		}
+	});
+
+	it("reports a failed direct edit target conservatively for parent review", async () => {
+		const harness = await createHarness({
+			settings: { workerDelegation: { enabled: true, writeEnabled: true, writePaths: ["src"] } },
+		});
+		try {
+			mkdirSync(join(harness.tempDir, "src"), { recursive: true });
+			harness.setResponses([
+				fauxAssistantMessage([fauxToolCall("edit", { path: "src/missing.ts", oldText: "x", newText: "y" })], {
+					stopReason: "toolUse",
+				}),
+				fauxAssistantMessage('{"summary":"edit failed"}'),
+			]);
+
+			const run = await harness.session.runWorkerDelegationOnce({ instructions: "Edit the missing helper" });
+
+			expect(run.outcome?.result.changedFiles).toEqual(["src/missing.ts"]);
+			expect(run.outcome?.result.status).toBe("blocked");
+			expect(run.outcome?.result.blockers).toContain("edit failed during isolated execution");
 		} finally {
 			harness.cleanup();
 		}

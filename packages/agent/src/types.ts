@@ -1,6 +1,8 @@
 import type {
+	Api,
 	AssistantMessage,
 	AssistantMessageEvent,
+	Context,
 	ImageContent,
 	Message,
 	Model,
@@ -202,6 +204,15 @@ export interface AgentLoopConfig extends SimpleStreamOptions {
 	transformContext?: (messages: AgentMessage[], signal?: AbortSignal) => Promise<AgentMessage[]>;
 
 	/**
+	 * Resolve the reasoning effort after context transformation and immediately before the provider
+	 * request. This supports request-local policy decisions that must not mutate persisted agent state.
+	 */
+	resolveRequestReasoning?: (
+		reasoning: SimpleStreamOptions["reasoning"],
+		request: { model: Model<Api>; context: Context; maxTokens?: number },
+	) => SimpleStreamOptions["reasoning"];
+
+	/**
 	 * Resolves an API key dynamically for each LLM call.
 	 *
 	 * Useful for short-lived OAuth tokens (e.g., GitHub Copilot) that may expire
@@ -332,10 +343,12 @@ export interface AgentLoopConfig extends SimpleStreamOptions {
 
 /**
  * Thinking/reasoning level for models that support it.
- * Note: "xhigh" is only supported by selected model families. Use model thinking-level metadata
- * from @caupulican/pi-ai to detect support for a concrete model.
+ * Note: "xhigh", "max", and "ultra" are only supported by selected model families. "ultra" maps
+ * to the model's maximum provider effort and reinforces proactive orchestration in capable hosts;
+ * delegation can remain available at lower levels. Use model thinking-level metadata from
+ * @caupulican/pi-ai to detect support for a concrete model.
  */
-export type ThinkingLevel = "off" | "minimal" | "low" | "medium" | "high" | "xhigh";
+export type ThinkingLevel = "off" | "minimal" | "low" | "medium" | "high" | "xhigh" | "max" | "ultra";
 
 /**
  * Extensible interface for custom app messages.

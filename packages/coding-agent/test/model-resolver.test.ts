@@ -64,20 +64,36 @@ const mockOpenRouterModels: Model<"anthropic-messages">[] = [
 	},
 ];
 
-const mockOpenAICodexModel: Model<"anthropic-messages"> = {
-	id: "gpt-5.5",
-	name: "GPT-5.5 (Codex)",
-	api: "anthropic-messages",
-	provider: "openai-codex",
-	baseUrl: "https://chatgpt.com/backend-api/codex",
-	reasoning: true,
-	input: ["text", "image"],
-	cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 },
-	contextWindow: 272000,
-	maxTokens: 64000,
-};
+const mockOpenAICodexModels: Model<"anthropic-messages">[] = [
+	{
+		id: "gpt-5.6-sol",
+		name: "GPT-5.6 Sol (Codex)",
+		api: "anthropic-messages",
+		provider: "openai-codex",
+		baseUrl: "https://chatgpt.com/backend-api/codex",
+		reasoning: true,
+		defaultThinkingLevel: "low",
+		input: ["text", "image"],
+		cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 },
+		contextWindow: 372000,
+		maxTokens: 128000,
+	},
+	{
+		id: "gpt-5.6-terra",
+		name: "GPT-5.6 Terra (Codex)",
+		api: "anthropic-messages",
+		provider: "openai-codex",
+		baseUrl: "https://chatgpt.com/backend-api/codex",
+		reasoning: true,
+		defaultThinkingLevel: "medium",
+		input: ["text", "image"],
+		cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 },
+		contextWindow: 372000,
+		maxTokens: 128000,
+	},
+];
 
-const allModels = [...mockModels, ...mockOpenRouterModels, mockOpenAICodexModel];
+const allModels = [...mockModels, ...mockOpenRouterModels, ...mockOpenAICodexModels];
 
 describe("parseModelPattern", () => {
 	describe("simple patterns without colons", () => {
@@ -119,7 +135,7 @@ describe("parseModelPattern", () => {
 		});
 
 		test("all valid thinking levels work", () => {
-			for (const level of ["off", "minimal", "low", "medium", "high", "xhigh"]) {
+			for (const level of ["off", "minimal", "low", "medium", "high", "xhigh", "max", "ultra"]) {
 				const result = parseModelPattern(`sonnet:${level}`, allModels);
 				expect(result.model?.id).toBe("claude-sonnet-4-5");
 				expect(result.thinkingLevel).toBe(level);
@@ -243,12 +259,12 @@ describe("resolveCliModel", () => {
 
 		const chatgptResult = resolveCliModel({
 			cliProvider: "chatgpt",
-			cliModel: "gpt-5.5",
+			cliModel: "gpt-5.6-sol",
 			modelRegistry: registry,
 		});
 		expect(chatgptResult.error).toBeUndefined();
 		expect(chatgptResult.model?.provider).toBe("openai-codex");
-		expect(chatgptResult.model?.id).toBe("gpt-5.5");
+		expect(chatgptResult.model?.id).toBe("gpt-5.6-sol");
 
 		const claudeResult = resolveCliModel({
 			cliProvider: "claude",
@@ -477,7 +493,7 @@ describe("resolveCliProviderDefault", () => {
 
 		expect(result.error).toBeUndefined();
 		expect(result.model?.provider).toBe("openai-codex");
-		expect(result.model?.id).toBe("gpt-5.5");
+		expect(result.model?.id).toBe("gpt-5.6-sol");
 	});
 
 	test("selects provider defaults through friendly aliases", () => {
@@ -492,7 +508,7 @@ describe("resolveCliProviderDefault", () => {
 
 		expect(result.error).toBeUndefined();
 		expect(result.model?.provider).toBe("openai-codex");
-		expect(result.model?.id).toBe("gpt-5.5");
+		expect(result.model?.id).toBe("gpt-5.6-sol");
 	});
 
 	test("returns a clear error for unknown provider-only selection", () => {
@@ -513,7 +529,7 @@ describe("resolveCliProviderDefault", () => {
 describe("default model selection", () => {
 	test("openai defaults track current models", () => {
 		expect(defaultModelPerProvider.openai).toBe("gpt-5.4");
-		expect(defaultModelPerProvider["openai-codex"]).toBe("gpt-5.5");
+		expect(defaultModelPerProvider["openai-codex"]).toBe("gpt-5.6-sol");
 	});
 
 	test("zai, minimax, and cerebras defaults track current models", () => {
@@ -540,7 +556,45 @@ describe("default model selection", () => {
 		});
 
 		expect(result.model?.provider).toBe("openai-codex");
-		expect(result.model?.id).toBe("gpt-5.5");
+		expect(result.model?.id).toBe("gpt-5.6-sol");
+		expect(result.thinkingLevel).toBe("low");
+	});
+
+	test("uses catalog thinking defaults when no scoped or user default is provided", async () => {
+		const terra = mockOpenAICodexModels.find((model) => model.id === "gpt-5.6-terra");
+		if (!terra) throw new Error("missing Terra fixture");
+		const registry = {} as Parameters<typeof findInitialModel>[0]["modelRegistry"];
+
+		const result = await findInitialModel({
+			scopedModels: [{ model: terra }],
+			isContinuing: false,
+			modelRegistry: registry,
+		});
+
+		expect(result.model?.id).toBe("gpt-5.6-terra");
+		expect(result.thinkingLevel).toBe("medium");
+	});
+
+	test("scoped and user thinking defaults override catalog metadata", async () => {
+		const terra = mockOpenAICodexModels.find((model) => model.id === "gpt-5.6-terra");
+		if (!terra) throw new Error("missing Terra fixture");
+		const registry = {} as Parameters<typeof findInitialModel>[0]["modelRegistry"];
+
+		const userDefault = await findInitialModel({
+			scopedModels: [{ model: terra }],
+			isContinuing: false,
+			defaultThinkingLevel: "high",
+			modelRegistry: registry,
+		});
+		const scopedDefault = await findInitialModel({
+			scopedModels: [{ model: terra, thinkingLevel: "low" }],
+			isContinuing: false,
+			defaultThinkingLevel: "high",
+			modelRegistry: registry,
+		});
+
+		expect(userDefault.thinkingLevel).toBe("high");
+		expect(scopedDefault.thinkingLevel).toBe("low");
 	});
 
 	test("findInitialModel accepts explicit provider custom model ids", async () => {

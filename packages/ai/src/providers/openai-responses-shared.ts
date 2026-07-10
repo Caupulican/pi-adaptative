@@ -81,14 +81,33 @@ export interface ConvertResponsesToolsOptions {
 	strict?: boolean | null;
 }
 
+export interface ConvertResponsesMessagesOptions {
+	/** null omits image detail for transports such as ChatGPT Responses Lite. */
+	imageDetail?: "auto" | null;
+}
+
 interface InputTokenDetailsWithOrchestration {
 	cached_tokens?: number;
+	cache_write_tokens?: number;
 	orchestration_input_tokens?: number;
 	orchestration_input_cached_tokens?: number;
 }
 
 interface OutputTokenDetailsWithOrchestration {
 	orchestration_output_tokens?: number;
+}
+
+function createResponseInputImage(imageUrl: string, imageDetail: "auto" | null): ResponseInputImage {
+	const inputImage: ResponseInputImage = {
+		type: "input_image",
+		detail: imageDetail ?? "auto",
+		image_url: imageUrl,
+	};
+	if (imageDetail === null) {
+		// Responses Lite requires the image detail property to be absent.
+		delete (inputImage as Partial<ResponseInputImage>).detail;
+	}
+	return inputImage;
 }
 
 function applyFuguUltraPricing<TApi extends Api>(model: Model<TApi>, usage: Usage): void {
@@ -119,8 +138,10 @@ export function convertResponsesMessages<TApi extends Api>(
 	model: Model<TApi>,
 	context: Context,
 	allowedToolCallProviders: ReadonlySet<string>,
+	options?: ConvertResponsesMessagesOptions,
 ): ResponseInput {
 	const messages: ResponseInput = [];
+	const imageDetail = options?.imageDetail === undefined ? "auto" : options.imageDetail;
 
 	const normalizeIdPart = (part: string): string => {
 		const sanitized = part.replace(/[^a-zA-Z0-9_-]/g, "_");
@@ -165,11 +186,7 @@ export function convertResponsesMessages<TApi extends Api>(
 							text: sanitizeSurrogates(item.text),
 						} satisfies ResponseInputText;
 					}
-					return {
-						type: "input_image",
-						detail: "auto",
-						image_url: `data:${item.mimeType};base64,${item.data}`,
-					} satisfies ResponseInputImage;
+					return createResponseInputImage(`data:${item.mimeType};base64,${item.data}`, imageDetail);
 				});
 				if (content.length === 0) continue;
 				messages.push({
@@ -258,11 +275,9 @@ export function convertResponsesMessages<TApi extends Api>(
 
 				for (const block of msg.content) {
 					if (block.type === "image") {
-						contentParts.push({
-							type: "input_image",
-							detail: "auto",
-							image_url: `data:${block.mimeType};base64,${block.data}`,
-						});
+						contentParts.push(
+							createResponseInputImage(`data:${block.mimeType};base64,${block.data}`, imageDetail),
+						);
 					}
 				}
 
@@ -361,7 +376,8 @@ export async function processResponsesStream<TApi extends Api>(
 			const inputDetails = response.usage.input_tokens_details as InputTokenDetailsWithOrchestration | undefined;
 			const outputDetails = response.usage.output_tokens_details as OutputTokenDetailsWithOrchestration | undefined;
 			const cachedTokens = inputDetails?.cached_tokens || 0;
-			let inputTokens = (response.usage.input_tokens || 0) - cachedTokens;
+			const cacheWriteTokens = inputDetails?.cache_write_tokens || 0;
+			let inputTokens = Math.max(0, (response.usage.input_tokens || 0) - cachedTokens - cacheWriteTokens);
 			let outputTokens = response.usage.output_tokens || 0;
 			let cacheReadTokens = cachedTokens;
 			let totalTokens = response.usage.total_tokens || 0;
@@ -381,7 +397,7 @@ export async function processResponsesStream<TApi extends Api>(
 				input: inputTokens,
 				output: outputTokens,
 				cacheRead: cacheReadTokens,
-				cacheWrite: 0,
+				cacheWrite: cacheWriteTokens,
 				totalTokens,
 				cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, total: (response.usage as any).cost || 0 },
 			};

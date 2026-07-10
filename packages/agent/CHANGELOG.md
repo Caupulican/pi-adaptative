@@ -1,5 +1,16 @@
 ## [Unreleased]
 
+### Added
+
+- Added `max` and orchestration-level `ultra` thinking levels to the public agent API.
+- Added bounded, explicitly untrusted delegated-worker evidence to deterministic compaction checkpoints.
+- Added a request-local reasoning resolver that receives the routed model and complete provider context after transformation without mutating persisted agent state.
+
+### Fixed
+
+- Preserved explicit reasoning `off` through agent configuration and next-turn snapshots so request-local provider resolution does not erase it as an unspecified default.
+- Converted rejected, prematurely ended, iterator-failed, and unresolved-setup provider streams into bounded terminal retryable errors instead of leaving turns unresolved; caller abort can now terminate before an inner stream exists.
+
 ## [0.81.26] - 2026-07-09
 
 ### Fixed

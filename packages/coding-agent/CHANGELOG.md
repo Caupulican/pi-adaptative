@@ -1,5 +1,32 @@
 ## [Unreleased]
 
+### Added
+
+- Added first-class `max` and reinforced-orchestration `ultra` thinking-level support across CLI, settings, profiles, skills, custom model metadata, selectors, themes, and cost-guard downgrades.
+
+### Changed
+
+- Bounded delegation context by packing stale `delegate` results while retaining retrievable originals, and made goal continuation prioritize and structurally fence the newest worker snapshots.
+- Enabled bounded delegation by default for capability-eligible models while preserving explicit disable, profile/tool, concurrency, cost, time, write-scope, and validation gates; Ultra now strengthens proactive delegation without owning the capability.
+- Enabled local safe-auto memory retrieval and budget-gated prompt inclusion by default while retaining explicit disable and compact-model caps.
+- Applied delegation and research capability gates to each resolved lane model, so configured lane models neither inherit nor bypass the foreground model's capacity verdict.
+- Upgraded profile-shipped research and worker lanes to isolated, turn-bounded child tool loops with exact glob-expanded UAC surfaces, read/write path enforcement, multi-turn usage accounting, direct-write reporting, relative profile references, and fail-closed diagnostics for opaque tool grants.
+- Rebuilt routed-turn prompts for effective thinking changes, including same-model tier overrides, and made the cost guard account for the actual routed model, full provider-bound prompt/tool surface, and model-declared long-context pricing while projecting output from the session reserve instead of a model's absolute output ceiling; opt-in downgrades affect the imminent request without mutating routed/profile/session thinking, and the exported default matches the runtime's warning-only `$2.50` default. The USD warning guard remains independent from the `0.7` compaction trigger and does not impose an artificial ceiling on GPT-5.6's public context window.
+
+### Fixed
+
+- Made `contextPolicy.memory.enabled: false` authoritative for both retrieval paths; fail-closed legacy/opaque memory query egress unless a provider is explicitly local or external egress is explicitly enabled; centrally source-fenced all legacy recall output; blocked common raw tokens, bearer credentials, and signed URLs; synchronized live-loaded/unloaded extension memory providers; and exposed the external-egress consent in `/settings`.
+- Synchronized profile UAC across SDK, startup, editing, and reload: SDK sessions retain the shared goal/delegation/toolkit defaults and accept complete one-shot situations; extension-provided profile models resolve on startup; reusable situations preserve soul and complete router settings; relative references and explicit empty selections apply consistently; and failed generations roll back settings, providers, memory, tools, model/thinking, discovery state, and diagnostics together.
+- Made profile edits, selection changes, deletion, and configuration restore transactional across runtime validation and persistent storage; backups now round-trip canonical multi-profile and explicit-none selections without restoring external-root trust.
+- Removed the duplicate CURRENT/TODAY/SUBAGENTS cost summary from the autonomy footer line; the compact footer stats remain authoritative and `/cost` retains the detailed report.
+- Restored the proactive over-ceiling cost-guard warning in that authoritative footer line without duplicating session totals.
+- Restored the `(sub)` marker for subscription-equivalent current cost and stopped applying USD cost-guard projections to ChatGPT subscription usage.
+- Counted cached-read and cache-write tokens in adaptive prefill profiling, rejected effectively deferred response headers as a false prefill boundary, and made the profiler terminate cleanly when an inner provider stream rejects or ends without a terminal event.
+- Kept the stream-stall watchdog authoritative for short HTTP idle settings by constraining every watchdog phase and its adaptive ceiling below each nonzero transport timeout; disabling the HTTP timeout still leaves adaptive watchdog protection active.
+- Kept research evidence provenance valid when `maxSources` is one by reserving the synthesis source cited by generated findings.
+- Re-clamped thinking, resynchronized the capability-filtered tool surface, and rebuilt the base prompt on every model set/cycle path so model switches cannot expose stale tools or orchestration guidance.
+- Preserved generated models' default thinking level and thinking-level map in faux-provider registrations so GPT-5.6 and Ultra harness runs exercise the production capability contract.
+
 ## [0.81.26] - 2026-07-09
 
 ### Fixed

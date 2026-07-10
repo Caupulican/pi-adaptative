@@ -126,7 +126,32 @@ describe("session cost summary", () => {
 		});
 
 		expect(formatFooterCostParts(summary)).toEqual(["CURRENT:$0.700", "TODAY:$0.700"]);
+		expect(formatFooterCostParts(summary, 3, { subscription: true })).toEqual([
+			"CURRENT:$0.700 (sub)",
+			"TODAY:$0.700",
+		]);
 		expect(formatStatusCostSummary(summary)).toBe("CURRENT $0.7000, TODAY $0.7000");
+	});
+
+	it("keeps the subscription marker visible when pricing-equivalent usage is still zero", () => {
+		const summary = createSessionCostSummary({
+			entries: [],
+			dailyTotals: {
+				ownCost: 0,
+				spawnedCost: 0,
+				totalCost: 0,
+				input: 0,
+				output: 0,
+				cacheRead: 0,
+				cacheWrite: 0,
+				totalTokens: 0,
+				sessions: 0,
+				reports: 0,
+			},
+			todayWindow: { startMs: 0, endMs: 86_400_000 },
+		});
+
+		expect(formatFooterCostParts(summary, 3, { subscription: true })).toEqual(["CURRENT:$0.000 (sub)"]);
 	});
 
 	it("rolls TODAY at local midnight without changing CURRENT mid-session", () => {

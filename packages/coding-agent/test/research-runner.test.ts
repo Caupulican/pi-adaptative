@@ -263,6 +263,23 @@ describe("runResearch", () => {
 		expect(ids.at(-1)).toBe("src-synthesis");
 	});
 
+	it("keeps every finding evidence reference inside a one-source budget", async () => {
+		const result = await runResearch(
+			runnerOptions({
+				maxSources: 1,
+				complete: async () => completionOf('{"findings":[{"summary":"first"},{"summary":"second"}]}'),
+			}),
+		);
+
+		expect(result.bundle?.sources.map((source) => source.id)).toEqual(["src-synthesis"]);
+		const sourceIds = new Set(result.bundle?.sources.map((source) => source.id));
+		for (const finding of result.bundle?.findings ?? []) {
+			for (const evidenceId of finding.evidenceIds) {
+				expect(sourceIds.has(evidenceId)).toBe(true);
+			}
+		}
+	});
+
 	it("keeps the system prompt static for provider prompt caching", async () => {
 		let seenSystemPrompt: string | undefined;
 		await runResearch(

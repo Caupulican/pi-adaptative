@@ -1,5 +1,6 @@
 import { createAssistantMessageEventStream } from "@caupulican/pi-ai";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
+import { classifyFailure } from "../../src/reliability/classifier.ts";
 import { type StreamIdleOptions, withStreamIdleWatchdog } from "../../src/reliability/watchdogs.ts";
 import type { StreamFn } from "../../src/types.ts";
 import {
@@ -180,7 +181,94 @@ describe("withStreamIdleWatchdog (phase-aware)", () => {
 		fake.inner.end();
 		const result = await stream.result();
 		expect(result.stopReason).toBe("error");
-		expect(result.errorMessage).toContain("stream ended before terminal event");
+		expect(result.errorMessage).toContain("stream ended without terminal event");
+		expect(classifyFailure({ message: result.errorMessage ?? "" })).toMatchObject({
+			reason: "stream_stall",
+			retryable: true,
+		});
+	});
+
+	it("converts rejected stream setup into a terminal retryable error", async () => {
+		const wrapped = withStreamIdleWatchdog(async () => {
+			throw new Error("socket connection was closed");
+		}, BOUNDS);
+
+		const result = await (await wrapped({} as never, {} as never, {})).result();
+
+		expect(result.stopReason).toBe("error");
+		expect(result.errorMessage).toContain("stream ended without terminal event: socket connection was closed");
+		expect(classifyFailure({ message: result.errorMessage ?? "" }).retryable).toBe(true);
+	});
+
+	it("bounds a never-resolving async stream setup and resolves ready on the connect stall", async () => {
+		const wrapped = withStreamIdleWatchdog(async () => await new Promise<never>(() => {}), {
+			connectMs: 100,
+			activeIdleMs: 1_000,
+			quietIdleMs: 1_000,
+		});
+
+		const returned = wrapped({} as never, {} as never, {});
+		expect(returned).toBeInstanceOf(Promise);
+
+		await vi.advanceTimersByTimeAsync(100);
+		const stream = await returned;
+		const result = await stream.result();
+		expect(result.stopReason).toBe("error");
+		expect(result.errorMessage).toContain("stream stalled: no events for 100ms (connect phase)");
+	});
+
+	it("settles a pre-aborted request without starting async stream setup", async () => {
+		const setup = vi.fn(async () => await new Promise<never>(() => {}));
+		const controller = new AbortController();
+		controller.abort(new Error("already cancelled"));
+		const wrapped = withStreamIdleWatchdog(setup, BOUNDS);
+
+		const returned = wrapped({} as never, {} as never, { signal: controller.signal });
+		expect(returned).toBeInstanceOf(Promise);
+
+		const stream = await returned;
+		const result = await stream.result();
+		expect(result.stopReason).toBe("aborted");
+		expect(result.errorMessage).toContain("stream aborted before terminal event during stream setup");
+		expect(setup).not.toHaveBeenCalled();
+	});
+
+	it("does not pump a stream whose async setup resolves after a connect stall", async () => {
+		const inner = createAssistantMessageEventStream();
+		const iterator = vi.spyOn(inner, Symbol.asyncIterator);
+		let resolveSetup: ((stream: typeof inner) => void) | undefined;
+		const wrapped = withStreamIdleWatchdog(
+			() =>
+				new Promise<typeof inner>((resolve) => {
+					resolveSetup = resolve;
+				}),
+			{ connectMs: 100, activeIdleMs: 1_000, quietIdleMs: 1_000 },
+		);
+
+		const returned = wrapped({} as never, {} as never, {});
+		await vi.advanceTimersByTimeAsync(100);
+		const stream = await returned;
+		await stream.result();
+
+		resolveSetup?.(inner);
+		await Promise.resolve();
+		expect(iterator).not.toHaveBeenCalled();
+	});
+
+	it("converts an async-iterator failure into a terminal retryable error", async () => {
+		const inner = createAssistantMessageEventStream();
+		inner[Symbol.asyncIterator] = () => ({
+			next: async () => {
+				throw new Error("terminated");
+			},
+		});
+		const wrapped = withStreamIdleWatchdog(() => inner, BOUNDS);
+
+		const result = await (await wrapped({} as never, {} as never, {})).result();
+
+		expect(result.stopReason).toBe("error");
+		expect(result.errorMessage).toContain("stream ended without terminal event: terminated");
+		expect(classifyFailure({ message: result.errorMessage ?? "" }).retryable).toBe(true);
 	});
 
 	it("disarms after clean completion — no late aborts", async () => {

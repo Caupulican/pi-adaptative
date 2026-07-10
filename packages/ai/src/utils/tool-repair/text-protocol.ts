@@ -106,27 +106,26 @@ function isInsideMatch(index: number, matches: readonly EnvelopeMatch[]): boolea
 
 function findToolEnvelopes(text: string): EnvelopeMatch[] {
 	const matches: EnvelopeMatch[] = [];
-	const piCallEnvelope = /<pi:call\s+name=(["'])(.*?)\1\s*>([\s\S]*?)<\/pi:call\s*>/g;
-	for (const match of text.matchAll(piCallEnvelope)) {
-		matches.push({
-			kind: "pi_call",
-			start: match.index,
-			end: match.index + match[0].length,
-			name: unescapeAttribute(match[2] ?? ""),
-			body: match[3] ?? "",
-		});
-	}
-
 	const openPiCallEnvelope = /<pi:call\s+name=(["'])(.*?)\1\s*>/g;
 	for (const match of text.matchAll(openPiCallEnvelope)) {
 		if (isInsideMatch(match.index, matches)) continue;
 		const bodyStart = match.index + match[0].length;
-		const bodyEnd = findJsonObjectEnd(text, bodyStart);
+		const jsonEnd = findJsonObjectEnd(text, bodyStart);
+		const closePattern = /<\/pi:call\s*>/g;
+		closePattern.lastIndex = jsonEnd ?? bodyStart;
+		const candidateClose = closePattern.exec(text);
+		const textBeforeClose = candidateClose ? text.slice(jsonEnd ?? bodyStart, candidateClose.index) : undefined;
+		const closeMatch =
+			candidateClose &&
+			(jsonEnd !== undefined ? textBeforeClose?.trim() === "" : !/<pi:call\b/.test(textBeforeClose ?? ""))
+				? candidateClose
+				: undefined;
+		const bodyEnd = closeMatch?.index ?? jsonEnd;
 		if (bodyEnd === undefined) continue;
 		matches.push({
 			kind: "pi_call",
 			start: match.index,
-			end: bodyEnd,
+			end: closeMatch ? closeMatch.index + closeMatch[0].length : bodyEnd,
 			name: unescapeAttribute(match[2] ?? ""),
 			body: text.slice(bodyStart, bodyEnd),
 		});

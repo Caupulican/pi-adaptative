@@ -486,6 +486,8 @@ describe("ModelRegistry", () => {
 							thinkingLevelMap: {
 								minimal: null,
 								high: "max",
+								max: "max",
+								ultra: "max",
 							},
 							compat: {
 								supportsStrictMode: false,
@@ -501,7 +503,7 @@ describe("ModelRegistry", () => {
 			const compat = model?.compat as OpenAICompletionsCompat | undefined;
 
 			expect(registry.getError()).toBeUndefined();
-			expect(model?.thinkingLevelMap).toEqual({ minimal: null, high: "max" });
+			expect(model?.thinkingLevelMap).toEqual({ minimal: null, high: "max", max: "max", ultra: "max" });
 			expect(compat?.supportsStrictMode).toBe(false);
 			expect(compat?.cacheControlFormat).toBe("anthropic");
 		});
@@ -678,6 +680,7 @@ describe("ModelRegistry", () => {
 					modelOverrides: {
 						"anthropic/claude-sonnet-4": {
 							name: "Custom Sonnet Name",
+							thinkingLevelMap: { max: "max", ultra: "max" },
 						},
 					},
 				},
@@ -688,6 +691,7 @@ describe("ModelRegistry", () => {
 
 			const sonnet = models.find((m) => m.id === "anthropic/claude-sonnet-4");
 			expect(sonnet?.name).toBe("Custom Sonnet Name");
+			expect(sonnet?.thinkingLevelMap).toMatchObject({ max: "max", ultra: "max" });
 
 			// Other models should be unchanged
 			const opus = models.find((m) => m.id === "anthropic/claude-opus-4");
@@ -1050,6 +1054,31 @@ describe("ModelRegistry", () => {
 			expect(model?.cost).toEqual({ input: 3, output: 2, cacheRead: 0.1, cacheWrite: 0 });
 			expect(model?.contextWindow).toBe(64000);
 			expect(model?.maxTokens).toBe(16384);
+		});
+
+		test("registerProvider accepts max and ultra thinking metadata", () => {
+			const registry = ModelRegistry.create(authStorage, modelsJsonPath);
+
+			registry.registerProvider("extended-thinking-provider", {
+				baseUrl: "https://provider.test/v1",
+				apiKey: "test-key",
+				api: "openai-completions",
+				models: [
+					{
+						id: "extended-thinking-model",
+						name: "Extended Thinking Model",
+						reasoning: true,
+						thinkingLevelMap: { max: "max", ultra: "max" },
+						input: ["text"],
+						cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 },
+					},
+				],
+			});
+
+			expect(registry.find("extended-thinking-provider", "extended-thinking-model")?.thinkingLevelMap).toEqual({
+				max: "max",
+				ultra: "max",
+			});
 		});
 
 		test("registerProvider fills token limit defaults for models without explicit limits", async () => {

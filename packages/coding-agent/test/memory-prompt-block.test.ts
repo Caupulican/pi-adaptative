@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { estimateTokensFromText, type ContextItem } from "../src/core/context/context-item.ts";
+import { type ContextItem, estimateTokensFromText } from "../src/core/context/context-item.ts";
 import {
 	buildMemoryPromptBlock,
 	MEMORY_PROMPT_BLOCK_MAX_CHARS_PER_ITEM,

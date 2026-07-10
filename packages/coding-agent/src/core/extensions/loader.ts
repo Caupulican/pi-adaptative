@@ -179,6 +179,11 @@ export function createExtensionRuntime(): ExtensionRuntime {
 	};
 
 	const providersByExtension = new Map<string, Set<string>>();
+	const memoryProvidersByExtension = new Map<string, Set<Parameters<ExtensionRuntime["registerMemoryProvider"]>[0]>>();
+	const contextMemoryProvidersByExtension = new Map<
+		string,
+		Set<Parameters<ExtensionRuntime["registerContextMemoryProvider"]>[0]>
+	>();
 
 	const runtime: ExtensionRuntime = {
 		sendMessage: notInitialized,
@@ -220,6 +225,8 @@ export function createExtensionRuntime(): ExtensionRuntime {
 		getProvidersForExtension: (extensionPath: string) => {
 			return [...(providersByExtension.get(extensionPath) ?? [])];
 		},
+		memoryProvidersByExtension,
+		contextMemoryProvidersByExtension,
 	};
 
 	return runtime;
@@ -361,11 +368,17 @@ function createExtensionAPI(
 		registerMemoryProvider(provider) {
 			runtime.assertActive();
 			runtime.registerMemoryProvider(provider);
+			const providers = runtime.memoryProvidersByExtension.get(extension.path) ?? new Set();
+			providers.add(provider);
+			runtime.memoryProvidersByExtension.set(extension.path, providers);
 		},
 
 		registerContextMemoryProvider(provider) {
 			runtime.assertActive();
 			runtime.registerContextMemoryProvider(provider);
+			const providers = runtime.contextMemoryProvidersByExtension.get(extension.path) ?? new Set();
+			providers.add(provider);
+			runtime.contextMemoryProvidersByExtension.set(extension.path, providers);
 		},
 
 		reportSpawnedUsage(usage, opts) {

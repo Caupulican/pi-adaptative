@@ -12,9 +12,15 @@
 
 import { existsSync, mkdirSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
-import type { Agent, ThinkingLevel } from "@caupulican/pi-agent-core";
+import {
+	type Agent,
+	type AgentContext,
+	type AgentLoopConfig,
+	runAgentLoop,
+	type ThinkingLevel,
+} from "@caupulican/pi-agent-core";
 import type { SessionManager } from "@caupulican/pi-agent-core/node";
-import type { Context, Model, SimpleStreamOptions, TextContent, Usage } from "@caupulican/pi-ai";
+import type { AssistantMessage, Context, Model, SimpleStreamOptions, TextContent, Usage } from "@caupulican/pi-ai";
 import type { IsolatedCompletionOptions, IsolatedCompletionResult } from "./agent-session.ts";
 import type { LearningDecision } from "./autonomy/contracts.ts";
 import { AUTONOMY_TELEMETRY_EVENT_TYPES, type AutonomyTelemetryEvent } from "./autonomy/telemetry-events.ts";
@@ -84,13 +90,13 @@ export class ReflectionController {
 	}
 
 	/**
-	 * Run a one-shot LLM completion fully ISOLATED from the main session — the load-bearing
-	 * primitive for the native reflection engine (adaptive-agent design §6c/§7).
+	 * Run an LLM completion fully ISOLATED from the main session — the load-bearing primitive for
+	 * reflection and bounded child lanes (adaptive-agent design §6c/§7).
 	 *
-	 * Isolation invariants (audited by codex): builds a fresh {@link Context} (no main history), runs
-	 * with `tools: []`, sets `cacheRetention: "none"`, and passes **no `sessionId`** — so it cannot
-	 * mutate `agent.state.messages`, cannot append session entries, cannot touch the tool registry,
-	 * and cannot churn the main session's prompt cache. Mirrors `generateSummary()`'s mechanics.
+	 * Isolation invariants (audited by codex): builds fresh context (no main history), defaults to no
+	 * tools, and passes **no `sessionId`**. A tool-enabled call receives only caller-owned tools and
+	 * hooks, and is turn-bounded. It cannot mutate `agent.state.messages`, append session entries, or
+	 * touch the foreground tool registry. Mirrors `generateSummary()`'s one-shot mechanics otherwise.
 	 *
 	 * Returns the result even on an error/aborted stop reason (callers — e.g. a background reflection
 	 * microtask — decide whether to act); it does not throw on a model-level error.
@@ -102,11 +108,11 @@ export class ReflectionController {
 		}
 		const thinkingLevel = opts.thinkingLevel ?? "off";
 
-		// Fresh, isolated context: explicit messages, no tools, nothing from the main session.
+		// Fresh, isolated context: explicit messages, caller-owned tools only, nothing from the main session.
 		const context: Context = {
 			systemPrompt: opts.systemPrompt,
 			messages: opts.messages,
-			tools: [],
+			tools: opts.tools ?? [],
 		};
 
 		// Isolate the prompt cache and DELIBERATELY omit sessionId so no session-aware caching/routing
@@ -115,11 +121,8 @@ export class ReflectionController {
 			maxTokens: opts.maxTokens,
 			signal: opts.signal,
 			cacheRetention: opts.cacheRetention ?? "none",
+			reasoning: thinkingLevel,
 		};
-		// pi-ai's `reasoning` option does not include "off" (that's the provider default already).
-		if (thinkingLevel !== "off") {
-			options.reasoning = thinkingLevel;
-		}
 
 		// When streamFn is the raw streamSimple (e.g. in tests), auth must be injected explicitly.
 		// Throw only when auth genuinely fails — providers that authenticate without an API key
@@ -131,6 +134,88 @@ export class ReflectionController {
 			}
 			options.apiKey = auth.apiKey;
 			options.headers = auth.headers;
+		}
+
+		if (opts.tools && opts.tools.length > 0) {
+			const agent = this.deps.getAgent();
+			const requestedMaxTurns =
+				typeof opts.maxTurns === "number" && Number.isFinite(opts.maxTurns) ? Math.floor(opts.maxTurns) : 6;
+			const maxTurns = Math.max(1, Math.min(12, requestedMaxTurns));
+			let completedTurns = 0;
+			const childContext: AgentContext = {
+				systemPrompt: opts.systemPrompt,
+				messages: [],
+				tools: [...opts.tools],
+			};
+			const loopConfig: AgentLoopConfig = {
+				model,
+				maxTokens: opts.maxTokens,
+				cacheRetention: opts.cacheRetention ?? "none",
+				reasoning: thinkingLevel,
+				...(options.apiKey !== undefined ? { apiKey: options.apiKey } : {}),
+				...(options.headers !== undefined ? { headers: options.headers } : {}),
+				temperature: agent.textToolCallProtocol ? 0 : undefined,
+				textToolCallProtocol: agent.textToolCallProtocol,
+				onTextToolProtocolParse: agent.onTextToolProtocolParse,
+				transport: agent.transport,
+				thinkingBudgets: agent.thinkingBudgets,
+				maxRetryDelayMs: agent.maxRetryDelayMs,
+				maxStallTurns: Math.max(2, Math.min(maxTurns, agent.maxStallTurns ?? maxTurns)),
+				toolExecution: "sequential",
+				toolArgumentTeachEnabled: agent.toolArgumentTeachEnabled,
+				toolValidationEscalationThreshold: agent.toolValidationEscalationThreshold,
+				beforeToolCall: opts.beforeToolCall,
+				afterToolCall: opts.afterToolCall,
+				shouldStopAfterTurn: () => {
+					completedTurns += 1;
+					return completedTurns >= maxTurns;
+				},
+				convertToLlm: agent.convertToLlm,
+			};
+			const messages = await runAgentLoop(
+				opts.messages,
+				childContext,
+				loopConfig,
+				() => {},
+				opts.signal,
+				agent.streamFn,
+			);
+			const assistantMessages = messages.filter(
+				(message): message is AssistantMessage => message.role === "assistant",
+			);
+			const finalAssistant = assistantMessages.at(-1);
+			if (!finalAssistant) {
+				throw new Error("runIsolatedCompletion: child loop produced no assistant message");
+			}
+			const usage = assistantMessages.reduce<Usage>(
+				(total, message) => ({
+					input: total.input + message.usage.input,
+					output: total.output + message.usage.output,
+					cacheRead: total.cacheRead + message.usage.cacheRead,
+					cacheWrite: total.cacheWrite + message.usage.cacheWrite,
+					totalTokens: total.totalTokens + message.usage.totalTokens,
+					cost: {
+						input: total.cost.input + message.usage.cost.input,
+						output: total.cost.output + message.usage.cost.output,
+						cacheRead: total.cost.cacheRead + message.usage.cost.cacheRead,
+						cacheWrite: total.cost.cacheWrite + message.usage.cost.cacheWrite,
+						total: total.cost.total + message.usage.cost.total,
+					},
+				}),
+				{
+					input: 0,
+					output: 0,
+					cacheRead: 0,
+					cacheWrite: 0,
+					totalTokens: 0,
+					cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, total: 0 },
+				},
+			);
+			const text = finalAssistant.content
+				.filter((content): content is TextContent => content.type === "text")
+				.map((content) => content.text)
+				.join("");
+			return { text, usage, stopReason: finalAssistant.stopReason };
 		}
 
 		const stream = await this.deps.getAgent().streamFn(model, context, options);

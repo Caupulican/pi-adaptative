@@ -66,7 +66,7 @@ export type KnownImagesProvider = "openrouter";
 
 export type ImagesProvider = KnownImagesProvider | string;
 
-export type ThinkingLevel = "minimal" | "low" | "medium" | "high" | "xhigh";
+export type ThinkingLevel = "minimal" | "low" | "medium" | "high" | "xhigh" | "max" | "ultra";
 export type ModelThinkingLevel = "off" | ThinkingLevel;
 export type ThinkingLevelMap = Partial<Record<ModelThinkingLevel, string | null>>;
 
@@ -80,6 +80,13 @@ export interface ThinkingBudgets {
 
 // Base options all providers share
 export type CacheRetention = "none" | "short" | "long";
+export type ReasoningMode = "standard" | "pro";
+export type ReasoningContext = "auto" | "current_turn" | "all_turns";
+
+export interface PromptCacheOptions {
+	mode: "implicit" | "explicit";
+	ttl: "30m";
+}
 
 export type Transport = "sse" | "websocket" | "websocket-cached" | "auto";
 
@@ -113,6 +120,12 @@ export interface StreamOptions {
 	 * Default: "short".
 	 */
 	cacheRetention?: CacheRetention;
+	/** OpenAI Responses reasoning execution mode. Ignored by providers that do not support it. */
+	reasoningMode?: ReasoningMode;
+	/** OpenAI Responses persisted-reasoning scope. Ignored by providers that do not support it. */
+	reasoningContext?: ReasoningContext;
+	/** GPT-5.6 prompt-cache policy. Ignored by providers that do not support it. */
+	promptCacheOptions?: PromptCacheOptions;
 	/**
 	 * Optional session identifier for providers that support session-based caching.
 	 * Providers can use this to enable prompt caching, request routing, or other
@@ -223,7 +236,7 @@ export type ProviderImagesOptions = ImagesOptions & Record<string, unknown>;
 
 // Unified options with reasoning passed to streamSimple() and completeSimple()
 export interface SimpleStreamOptions extends StreamOptions {
-	reasoning?: ThinkingLevel;
+	reasoning?: ModelThinkingLevel;
 	/** Custom token budgets for thinking levels (token-based providers only) */
 	thinkingBudgets?: ThinkingBudgets;
 }
@@ -595,11 +608,21 @@ export interface Model<TApi extends Api> {
 	provider: Provider;
 	baseUrl: string;
 	reasoning: boolean;
+	/** Model-specific reasoning level used when callers do not choose one explicitly. */
+	defaultThinkingLevel?: ThinkingLevel;
 	/**
 	 * Maps pi thinking levels to provider/model-specific values.
 	 * Missing keys use provider defaults. null marks a level as unsupported.
 	 */
 	thinkingLevelMap?: ThinkingLevelMap;
+	/** Use the ChatGPT Codex Responses Lite request framing for this model. */
+	openaiResponsesLite?: boolean;
+	/** Optional full-request pricing tier activated by total input tokens above a threshold. */
+	longContextPricing?: {
+		thresholdTokens: number;
+		inputMultiplier: number;
+		outputMultiplier: number;
+	};
 	input: ("text" | "image")[];
 	/**
 	 * Optional list of image MIME types this model accepts. When omitted, providers

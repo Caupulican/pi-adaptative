@@ -46,7 +46,9 @@ function tokenSet(text: string): Set<string> {
 
 function scoreItem(queryTokens: Set<string>, item: MemoryItem): number {
 	if (queryTokens.size === 0) return item.kind === "user_preference" ? 0.2 : 0;
-	const haystack = tokenSet([item.title, item.summary].filter((part): part is string => part !== undefined).join("\n"));
+	const haystack = tokenSet(
+		[item.title, item.summary].filter((part): part is string => part !== undefined).join("\n"),
+	);
 	let overlap = 0;
 	for (const token of queryTokens) {
 		if (haystack.has(token)) overlap++;

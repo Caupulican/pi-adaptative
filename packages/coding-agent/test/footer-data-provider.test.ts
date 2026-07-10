@@ -287,7 +287,7 @@ describe("FooterDataProvider autonomy status", () => {
 		provider.dispose();
 	});
 
-	it("setting an autonomy snapshot stores formatted status containing route/gate/cost data", () => {
+	it("setting an autonomy snapshot stores route/gate status without duplicating footer cost data", () => {
 		const repoDir = createPlainRepo(tempDir);
 		const provider = new FooterDataProvider(repoDir);
 
@@ -310,12 +310,13 @@ describe("FooterDataProvider autonomy status", () => {
 		const status = provider.getAutonomyStatus();
 		expect(status).toContain("Route: cheap");
 		expect(status).toContain("Gate: learning = allow (ok)");
-		expect(status).toContain("Costs: CURRENT $1.2300, TODAY $0.0000");
+		expect(status).not.toContain("Costs:");
+		expect(status).not.toContain("CURRENT");
 
 		provider.dispose();
 	});
 
-	it("setting undefined clears the status", () => {
+	it("does not create a second footer line for a cost-only autonomy snapshot", () => {
 		const repoDir = createPlainRepo(tempDir);
 		const provider = new FooterDataProvider(repoDir);
 
@@ -331,6 +332,19 @@ describe("FooterDataProvider autonomy status", () => {
 				todayWindow: { startMs: 0, endMs: 86_400_000 },
 				todayRollover: "local-midnight",
 			},
+		});
+
+		expect(provider.getAutonomyStatus()).toBeUndefined();
+
+		provider.dispose();
+	});
+
+	it("setting undefined clears the status", () => {
+		const repoDir = createPlainRepo(tempDir);
+		const provider = new FooterDataProvider(repoDir);
+
+		provider.setAutonomyStatusSnapshot({
+			latestRoute: { tier: "cheap", reasonCode: "allowed" },
 		});
 		expect(provider.getAutonomyStatus()).toBeDefined();
 

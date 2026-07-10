@@ -58,7 +58,7 @@ describe("FailureCorpusRecorder", () => {
 			redactSecrets(
 				"sk-123456789abcdef Bearer abcdefghijklmnopqrstuvwxyz0123456789 abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMN==",
 			),
-		).toBe("[REDACTED] Bearer [REDACTED] [REDACTED]");
+		).toBe("[REDACTED] [REDACTED] [REDACTED]");
 	});
 
 	it("redacts separator-bearing provider API key formats", () => {

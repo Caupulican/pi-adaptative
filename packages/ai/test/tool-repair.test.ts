@@ -99,7 +99,7 @@ const repairFixtures: readonly RepairFixture[] = [
 		expected: { path: "README.md" },
 	},
 	{ mode: "numberFromString", tool: requiredNumberTool, args: { value: "42" }, expected: { value: 42 } },
-	{ mode: "boolFromString", tool: requiredBoolTool, args: { enabled: "false" }, expected: { enabled: false } },
+	{ mode: "boolFromString", tool: requiredBoolTool, args: { enabled: " False " }, expected: { enabled: false } },
 	{
 		mode: "enumCaseNormalize",
 		tool: searchTool,
@@ -277,6 +277,26 @@ describe("tool argument repair", () => {
 		const tool = makeTool("read", Type.Object({ path: Type.String(), limit: Type.Optional(Type.Number()) }));
 
 		expect(validateToolArguments(tool, makeCall("read", { Path: "README.md" }))).toEqual({ path: "README.md" });
+	});
+
+	it("composes container, nested property-case, and scalar repairs to a valid result", () => {
+		const tool = makeTool(
+			"configure",
+			Type.Object({
+				payload: Type.Object({ enabled: Type.Boolean(), count: Type.Integer() }),
+			}),
+		);
+		const call = makeCall("configure", {
+			payload: '{"Enabled":"false","count":"2"}',
+		});
+
+		expect(validateToolArguments(tool, call)).toEqual({ payload: { enabled: false, count: 2 } });
+		expect(call.repairNotes).toEqual([
+			expect.stringContaining("jsonStringParse"),
+			expect.stringContaining("propertyCaseNormalize"),
+			expect.stringContaining("numberFromString"),
+			expect.stringContaining("boolFromString"),
+		]);
 	});
 
 	it("repairs text-protocol JSON strings with smart quote delimiters", () => {

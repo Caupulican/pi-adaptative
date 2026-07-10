@@ -57,6 +57,9 @@ export function handleUsageCommand(host: UsageReportHost): void {
 	const context = host.session.getContextUsage();
 	const autoLearn = host.getCurrentAutoLearnSettings();
 	const costGuard = host.session.getLastCostGuardDecision();
+	const activeModel = host.session.model;
+	const usingSubscription = activeModel ? host.session.modelRegistry.isUsingOAuth(activeModel) : false;
+	const isChatGptSubscription = usingSubscription && activeModel?.provider === "openai-codex";
 
 	let info = `${theme.bold("Usage & Optimization")}\n\n`;
 	info += `${theme.bold("Session tokens")}\n`;
@@ -67,7 +70,7 @@ export function handleUsageCommand(host: UsageReportHost): void {
 	info += `${theme.fg("dim", "Total:")} ${stats.tokens.total.toLocaleString()}\n\n`;
 
 	info += `${theme.bold("Cost")}\n`;
-	info += `${theme.fg("dim", "CURRENT (session):")} $${costs.currentCost.toFixed(4)}\n`;
+	info += `${theme.fg("dim", "CURRENT (session):")} $${costs.currentCost.toFixed(4)}${usingSubscription ? " (sub)" : ""}\n`;
 	if (costs.subagentReports > 0 || costs.subagentCost > 0) {
 		info += `${theme.fg("dim", "SUBAGENTS (included in CURRENT):")} $${costs.subagentCost.toFixed(4)} (${costs.subagentReports} reports)\n`;
 	}
@@ -99,7 +102,9 @@ export function handleUsageCommand(host: UsageReportHost): void {
 		compactionsWithGateFailures: 0,
 	};
 	info += `${theme.fg("dim", "Compaction gate failures:")} ${compactionGates.gateFailures} (${compactionGates.deterministicGapFills} deterministic gap-fill)\n`;
-	if (costGuard) {
+	if (isChatGptSubscription) {
+		info += `${theme.fg("dim", "Cost guard:")} not applicable to ChatGPT subscription usage\n`;
+	} else if (costGuard) {
 		const status = costGuard.over ? "over" : "ok";
 		info += `${theme.fg("dim", "Cost guard:")} ${status} $${costGuard.estUsd.toFixed(4)}/$${costGuard.thresholdUsd.toFixed(4)} (${costGuard.action})\n`;
 	} else {

@@ -128,7 +128,7 @@ export function withStreamIdleWatchdog(
 	streamFn: StreamFn,
 	options?: Partial<StreamIdleOptions> | StreamIdleOptionsResolver,
 ): StreamFn {
-	return async (model, context, streamOptions) => {
+	return (model, context, streamOptions) => {
 		const resolved = typeof options === "function" ? options(model, context, streamOptions) : options;
 		const cleaned: Partial<StreamIdleOptions> = {};
 		if (resolved) {
@@ -143,14 +143,17 @@ export function withStreamIdleWatchdog(
 		const controller = new AbortController();
 		const callerSignal = streamOptions?.signal;
 		let callerAborted = callerSignal?.aborted ?? false;
-		const onCallerAbort = () => {
-			callerAborted = true;
-			controller.abort(callerSignal?.reason);
-		};
-		if (callerAborted) controller.abort(callerSignal?.reason);
-		else callerSignal?.addEventListener("abort", onCallerAbort, { once: true });
-
 		const outer = createAssistantMessageEventStream();
+		let readySettled = false;
+		let resolveReady: (stream: typeof outer) => void = () => {};
+		const ready = new Promise<typeof outer>((resolve) => {
+			resolveReady = resolve;
+		});
+		const settleReady = () => {
+			if (readySettled) return;
+			readySettled = true;
+			resolveReady(outer);
+		};
 
 		// Seeded so a connect-phase stall (no event ever arrived) still has a base message
 		// to report on; overwritten with the latest real snapshot once events start flowing.
@@ -174,6 +177,8 @@ export function withStreamIdleWatchdog(
 		let stalled = false;
 		let firstEventSeen = false;
 		let transportConfirmed = false;
+		let streamSetupSettled = false;
+		let terminalPushed = false;
 
 		// The idle bound adapts per event: quiet while nothing/thinking, active while
 		// text/toolCall content is flowing. Mutable so the onSilence closure always
@@ -192,7 +197,7 @@ export function withStreamIdleWatchdog(
 		// are contractually expected to end their stream after abort, but the watchdog does
 		// not depend on that to report the stall itself.
 		const stall = (phase: StallPhase, elapsedMs: number) => {
-			if (callerAborted || stalled) return;
+			if (callerAborted || stalled || terminalPushed) return;
 			stalled = true;
 			opts.onStall?.({ phase, elapsedMs });
 			const description = `stream stalled: no events for ${elapsedMs}ms (${phase} phase)`;
@@ -202,7 +207,10 @@ export function withStreamIdleWatchdog(
 				stopReason: "error",
 				errorMessage: description,
 			};
+			terminalPushed = true;
 			outer.push({ type: "error", reason: "error", error: message });
+			settleReady();
+			callerSignal?.removeEventListener("abort", onCallerAbort);
 		};
 
 		let watchdog = createSilenceWatchdog({
@@ -217,18 +225,73 @@ export function withStreamIdleWatchdog(
 			watchdog.touch(opts.quietIdleMs);
 		};
 		const originalOnResponse = streamOptions?.onResponse;
-		const inner = await streamFn(model, context, {
-			...streamOptions,
-			signal: controller.signal,
-			onResponse: async (response: ProviderResponse, responseModel: Model<Api>) => {
-				markTransportConfirmed();
-				await originalOnResponse?.(response, responseModel);
-			},
-		});
-		let terminalPushed = false;
+		const pushSetupAbort = () => {
+			if (streamSetupSettled || terminalPushed || stalled) return;
+			terminalPushed = true;
+			watchdog.disarm();
+			callerSignal?.removeEventListener("abort", onCallerAbort);
+			outer.push({
+				type: "error",
+				reason: "aborted",
+				error: {
+					...latest,
+					stopReason: "aborted",
+					errorMessage: "stream aborted before terminal event during stream setup",
+				},
+			});
+			settleReady();
+		};
+		const onCallerAbort = () => {
+			callerAborted = true;
+			controller.abort(callerSignal?.reason);
+			pushSetupAbort();
+		};
+		if (callerAborted) {
+			onCallerAbort();
+			return ready;
+		}
+		callerSignal?.addEventListener("abort", onCallerAbort, { once: true });
 
 		void (async () => {
 			try {
+				let inner: Awaited<ReturnType<StreamFn>>;
+				try {
+					inner = await streamFn(model, context, {
+						...streamOptions,
+						signal: controller.signal,
+						onResponse: async (response: ProviderResponse, responseModel: Model<Api>) => {
+							markTransportConfirmed();
+							await originalOnResponse?.(response, responseModel);
+						},
+					});
+					streamSetupSettled = true;
+					settleReady();
+				} catch (error) {
+					streamSetupSettled = true;
+					if (terminalPushed || stalled) return;
+					watchdog.disarm();
+					callerSignal?.removeEventListener("abort", onCallerAbort);
+					const stopReason = callerAborted ? "aborted" : "error";
+					const detail = error instanceof Error ? `: ${error.message}` : `: ${String(error)}`;
+					terminalPushed = true;
+					outer.push({
+						type: "error",
+						reason: stopReason,
+						error: {
+							...latest,
+							stopReason,
+							errorMessage: callerAborted
+								? `stream aborted before terminal event${detail}`
+								: `stream ended without terminal event${detail}`,
+						},
+					});
+					settleReady();
+					return;
+				}
+
+				// A setup promise may resolve after a connect stall or caller abort. The outer
+				// stream is already terminal in that case, so never attach a late event pump.
+				if (terminalPushed || stalled || callerAborted) return;
 				for await (const event of inner) {
 					if (stalled) break;
 					latest = partialFromEvent(event);
@@ -263,12 +326,31 @@ export function withStreamIdleWatchdog(
 					const stopReason = callerAborted ? "aborted" : "error";
 					const description = callerAborted
 						? "stream aborted before terminal event"
-						: "stream ended before terminal event";
+						: "stream ended without terminal event";
+					terminalPushed = true;
 					outer.push({
 						type: "error",
 						reason: stopReason,
 						error: { ...latest, stopReason, errorMessage: description },
 					});
+				}
+			} catch (error) {
+				if (!terminalPushed && !stalled) {
+					const stopReason = callerAborted ? "aborted" : "error";
+					const detail = error instanceof Error ? `: ${error.message}` : `: ${String(error)}`;
+					terminalPushed = true;
+					outer.push({
+						type: "error",
+						reason: stopReason,
+						error: {
+							...latest,
+							stopReason,
+							errorMessage: callerAborted
+								? `stream aborted before terminal event${detail}`
+								: `stream ended without terminal event${detail}`,
+						},
+					});
+					settleReady();
 				}
 			} finally {
 				watchdog.disarm();
@@ -276,6 +358,6 @@ export function withStreamIdleWatchdog(
 			}
 		})();
 
-		return outer;
+		return ready;
 	};
 }

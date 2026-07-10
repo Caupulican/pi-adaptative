@@ -96,7 +96,19 @@ const ThinkingLevelMapSchema = Type.Object({
 	medium: Type.Optional(ThinkingLevelMapValueSchema),
 	high: Type.Optional(ThinkingLevelMapValueSchema),
 	xhigh: Type.Optional(ThinkingLevelMapValueSchema),
+	max: Type.Optional(ThinkingLevelMapValueSchema),
+	ultra: Type.Optional(ThinkingLevelMapValueSchema),
 });
+
+const ModelDefaultThinkingLevelSchema = Type.Union([
+	Type.Literal("minimal"),
+	Type.Literal("low"),
+	Type.Literal("medium"),
+	Type.Literal("high"),
+	Type.Literal("xhigh"),
+	Type.Literal("max"),
+	Type.Literal("ultra"),
+]);
 
 const OpenAICompletionsCompatSchema = Type.Object({
 	supportsStore: Type.Optional(Type.Boolean()),
@@ -157,6 +169,7 @@ const ModelDefinitionSchema = Type.Object({
 	api: Type.Optional(Type.String({ minLength: 1 })),
 	baseUrl: Type.Optional(Type.String({ minLength: 1 })),
 	reasoning: Type.Optional(Type.Boolean()),
+	defaultThinkingLevel: Type.Optional(ModelDefaultThinkingLevelSchema),
 	thinkingLevelMap: Type.Optional(ThinkingLevelMapSchema),
 	input: Type.Optional(Type.Array(Type.Union([Type.Literal("text"), Type.Literal("image")]))),
 	cost: Type.Optional(
@@ -178,6 +191,7 @@ const ModelDefinitionSchema = Type.Object({
 const ModelOverrideSchema = Type.Object({
 	name: Type.Optional(Type.String({ minLength: 1 })),
 	reasoning: Type.Optional(Type.Boolean()),
+	defaultThinkingLevel: Type.Optional(ModelDefaultThinkingLevelSchema),
 	thinkingLevelMap: Type.Optional(ThinkingLevelMapSchema),
 	input: Type.Optional(Type.Array(Type.Union([Type.Literal("text"), Type.Literal("image")]))),
 	cost: Type.Optional(
@@ -379,6 +393,7 @@ function applyModelOverride(model: Model<Api>, override: ModelOverride): Model<A
 	// Simple field overrides
 	if (override.name !== undefined) result.name = override.name;
 	if (override.reasoning !== undefined) result.reasoning = override.reasoning;
+	if (override.defaultThinkingLevel !== undefined) result.defaultThinkingLevel = override.defaultThinkingLevel;
 	if (override.thinkingLevelMap !== undefined) {
 		result.thinkingLevelMap = { ...model.thinkingLevelMap, ...override.thinkingLevelMap };
 	}
@@ -677,6 +692,7 @@ export class ModelRegistry {
 					provider: providerName,
 					baseUrl,
 					reasoning: modelDef.reasoning ?? false,
+					defaultThinkingLevel: modelDef.defaultThinkingLevel,
 					thinkingLevelMap: modelDef.thinkingLevelMap,
 					input: (modelDef.input ?? ["text"]) as ("text" | "image")[],
 					cost: modelDef.cost ?? defaultCost,
@@ -892,6 +908,42 @@ export class ModelRegistry {
 		this.upsertRegisteredProvider(providerName, migratedConfig);
 	}
 
+	/** Capture all mutable registry state before a runtime generation is rebuilt. */
+	createReloadSnapshot(): ModelRegistryReloadSnapshot {
+		return {
+			models: [...this.models],
+			providerRequestConfigs: new Map(
+				Array.from(this.providerRequestConfigs, ([name, config]) => [name, { ...config }]),
+			),
+			modelRequestHeaders: new Map(Array.from(this.modelRequestHeaders, ([key, headers]) => [key, { ...headers }])),
+			registeredProviders: new Map(
+				Array.from(this.registeredProviders, ([name, config]) => [name, cloneProviderConfigInput(config)]),
+			),
+			loadError: this.loadError,
+		};
+	}
+
+	/** Restore a captured generation, including global API/OAuth registrations. */
+	restoreReloadSnapshot(snapshot: ModelRegistryReloadSnapshot): void {
+		this.models = [...snapshot.models];
+		this.providerRequestConfigs = new Map(
+			Array.from(snapshot.providerRequestConfigs, ([name, config]) => [name, { ...config }]),
+		);
+		this.modelRequestHeaders = new Map(
+			Array.from(snapshot.modelRequestHeaders, ([key, headers]) => [key, { ...headers }]),
+		);
+		this.registeredProviders = new Map(
+			Array.from(snapshot.registeredProviders, ([name, config]) => [name, cloneProviderConfigInput(config)]),
+		);
+		this.loadError = snapshot.loadError;
+
+		resetApiProviders();
+		resetOAuthProviders();
+		for (const [providerName, config] of this.registeredProviders) {
+			this.registerProviderIntegrations(providerName, config);
+		}
+	}
+
 	/**
 	 * Unregister a previously registered provider.
 	 *
@@ -902,9 +954,16 @@ export class ModelRegistry {
 	 * Has no effect if the provider was never registered.
 	 */
 	unregisterProvider(providerName: string): void {
-		if (!this.registeredProviders.has(providerName)) return;
-		this.registeredProviders.delete(providerName);
-		this.refresh();
+		this.unregisterProviders([providerName]);
+	}
+
+	/** Remove a provider generation in one refresh so surviving dynamic streams remain registered. */
+	unregisterProviders(providerNames: Iterable<string>): void {
+		let changed = false;
+		for (const providerName of providerNames) {
+			changed = this.registeredProviders.delete(providerName) || changed;
+		}
+		if (changed) this.refresh();
 	}
 
 	/**
@@ -950,7 +1009,7 @@ export class ModelRegistry {
 		}
 	}
 
-	private applyProviderConfig(providerName: string, config: ProviderConfigInput): void {
+	private registerProviderIntegrations(providerName: string, config: ProviderConfigInput): void {
 		// Register OAuth provider if provided
 		if (config.oauth) {
 			// Ensure the OAuth provider ID matches the provider name
@@ -972,6 +1031,10 @@ export class ModelRegistry {
 				`provider:${providerName}`,
 			);
 		}
+	}
+
+	private applyProviderConfig(providerName: string, config: ProviderConfigInput): void {
+		this.registerProviderIntegrations(providerName, config);
 
 		this.storeProviderRequestConfig(providerName, config);
 		const modelOverrides = config.modelOverrides ? new Map(Object.entries(config.modelOverrides)) : undefined;
@@ -997,6 +1060,7 @@ export class ModelRegistry {
 					provider: providerName,
 					baseUrl: modelDef.baseUrl ?? config.baseUrl!,
 					reasoning: modelDef.reasoning,
+					defaultThinkingLevel: modelDef.defaultThinkingLevel,
 					thinkingLevelMap: modelDef.thinkingLevelMap,
 					input: modelDef.input as ("text" | "image")[],
 					cost: modelDef.cost,
@@ -1017,14 +1081,16 @@ export class ModelRegistry {
 					this.models = config.oauth.modifyModels(this.models, cred);
 				}
 			}
-		} else if (config.baseUrl || config.headers) {
-			// Override-only: update baseUrl for existing models. Request headers are resolved per request.
+		} else if (config.baseUrl || config.headers || modelOverrides) {
+			// Override-only: update concrete existing models. Request headers are resolved per request.
 			this.models = this.models.map((m) => {
 				if (m.provider !== providerName) return m;
-				return {
+				const updated = {
 					...m,
 					baseUrl: config.baseUrl ?? m.baseUrl,
 				};
+				const modelOverride = modelOverrides?.get(m.id);
+				return modelOverride ? applyModelOverride(updated, modelOverride) : updated;
 			});
 		}
 	}
@@ -1049,6 +1115,7 @@ export interface ProviderConfigInput {
 		api?: Api;
 		baseUrl?: string;
 		reasoning: boolean;
+		defaultThinkingLevel?: Model<Api>["defaultThinkingLevel"];
 		thinkingLevelMap?: Model<Api>["thinkingLevelMap"];
 		input: ("text" | "image")[];
 		cost: { input: number; output: number; cacheRead: number; cacheWrite: number };
@@ -1059,4 +1126,43 @@ export interface ProviderConfigInput {
 		compat?: Model<Api>["compat"];
 	}>;
 	modelOverrides?: Record<string, ModelOverride>;
+}
+
+export interface ModelRegistryReloadSnapshot {
+	models: Model<Api>[];
+	providerRequestConfigs: Map<string, ProviderRequestConfig>;
+	modelRequestHeaders: Map<string, Record<string, string>>;
+	registeredProviders: Map<string, ProviderConfigInput>;
+	loadError: string | undefined;
+}
+
+function cloneProviderConfigInput(config: ProviderConfigInput): ProviderConfigInput {
+	return {
+		...config,
+		headers: config.headers ? { ...config.headers } : undefined,
+		oauth: config.oauth ? { ...config.oauth } : undefined,
+		models: config.models?.map((model) => ({
+			...model,
+			thinkingLevelMap: model.thinkingLevelMap ? { ...model.thinkingLevelMap } : undefined,
+			input: [...model.input],
+			cost: { ...model.cost },
+			headers: model.headers ? { ...model.headers } : undefined,
+			compat: model.compat ? { ...model.compat } : undefined,
+		})),
+		modelOverrides: config.modelOverrides
+			? Object.fromEntries(
+					Object.entries(config.modelOverrides).map(([modelId, override]) => [
+						modelId,
+						{
+							...override,
+							thinkingLevelMap: override.thinkingLevelMap ? { ...override.thinkingLevelMap } : undefined,
+							input: override.input ? [...override.input] : undefined,
+							cost: override.cost ? { ...override.cost } : undefined,
+							headers: override.headers ? { ...override.headers } : undefined,
+							compat: override.compat ? { ...override.compat } : undefined,
+						},
+					]),
+				)
+			: undefined,
+	};
 }

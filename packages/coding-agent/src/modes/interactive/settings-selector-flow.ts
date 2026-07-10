@@ -8,9 +8,11 @@
  * flows); interactive-mode keeps a thin wrapper building the host once.
  */
 
+import { getSupportedThinkingLevels } from "@caupulican/pi-ai";
 import type { Component, Container, EditorComponent, SelectItem, TUI } from "@caupulican/pi-tui";
 import type { AgentSession } from "../../core/agent-session.ts";
 import { configureHttpDispatcher, formatHttpIdleTimeoutMs } from "../../core/http-dispatcher.ts";
+import { resolveCliModel } from "../../core/model-resolver.ts";
 import type {
 	AutonomyMode,
 	SelfModificationSettings,
@@ -119,6 +121,11 @@ export function showSettingsSelector(host: SettingsSelectorHost): void {
 				autoLearn: host.settingsManager.getAutoLearnSettings(),
 				autoLearnScope: projectSettings.autoLearn ? "project" : "global",
 				autoLearnModelOptions: host.getAutoLearnModelOptions(),
+				resolveModelThinkingLevels: (modelPattern) => {
+					if (!modelPattern) return host.session.getAvailableThinkingLevels();
+					const resolved = resolveCliModel({ cliModel: modelPattern, modelRegistry: host.session.modelRegistry });
+					return resolved.model ? getSupportedThinkingLevels(resolved.model) : undefined;
+				},
 				contextPolicyEnforcement: host.settingsManager.getContextPromptEnforcementSettings(),
 				contextPolicyEnforcementScope: projectSettings.contextPolicy?.enforcement ? "project" : "global",
 				contextMemoryRetrieval: host.settingsManager.getMemoryRetrievalSettings(),

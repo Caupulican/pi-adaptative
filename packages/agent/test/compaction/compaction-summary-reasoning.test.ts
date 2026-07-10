@@ -56,25 +56,28 @@ describe("generateSummary reasoning options", () => {
 		completeSimpleMock.mockResolvedValue(mockSummaryResponse);
 	});
 
-	it("uses the provided thinking level for reasoning-capable models", async () => {
-		await generateSummary(
-			messages,
-			createModel(true),
-			2000,
-			"test-key",
-			undefined,
-			undefined,
-			undefined,
-			undefined,
-			"medium",
-		);
+	it.each(["medium", "max", "ultra"] as const)(
+		"uses the provided %s thinking level for reasoning-capable models",
+		async (thinkingLevel) => {
+			await generateSummary(
+				messages,
+				createModel(true),
+				2000,
+				"test-key",
+				undefined,
+				undefined,
+				undefined,
+				undefined,
+				thinkingLevel,
+			);
 
-		expect(completeSimpleMock).toHaveBeenCalledTimes(1);
-		expect(completeSimpleMock.mock.calls[0][2]).toMatchObject({
-			reasoning: "medium",
-			apiKey: "test-key",
-		});
-	});
+			expect(completeSimpleMock).toHaveBeenCalledTimes(1);
+			expect(completeSimpleMock.mock.calls[0][2]).toMatchObject({
+				reasoning: thinkingLevel,
+				apiKey: "test-key",
+			});
+		},
+	);
 
 	it("does not set reasoning when thinking is off", async () => {
 		await generateSummary(

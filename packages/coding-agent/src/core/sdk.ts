@@ -7,6 +7,7 @@ import { resolvePath } from "../utils/paths.ts";
 import { AgentSession } from "./agent-session.ts";
 import { formatNoModelsAvailableMessage } from "./auth-guidance.ts";
 import { AuthStorage } from "./auth-storage.ts";
+import { DEFAULT_ACTIVE_TOOL_NAMES } from "./default-tool-surface.ts";
 import { DEFAULT_THINKING_LEVEL } from "./defaults.ts";
 import type { ExtensionRunner, LoadExtensionsResult, SessionStartEvent, ToolDefinition } from "./extensions/index.ts";
 import { ModelRegistry } from "./model-registry.ts";
@@ -14,7 +15,11 @@ import { findInitialModel, resolveProfileModelSettings } from "./model-resolver.
 import type { ResourceLoader } from "./resource-loader.ts";
 import { DefaultResourceLoader } from "./resource-loader.ts";
 import { parseResourceProfileInput } from "./resource-profile-blocks.ts";
-import type { ResourceProfileFilterSettings, ResourceProfileSettings } from "./settings-manager.ts";
+import type {
+	ProfileDefinitionInput,
+	ResourceProfileFilterSettings,
+	ResourceProfileSettings,
+} from "./settings-manager.ts";
 import { SettingsManager } from "./settings-manager.ts";
 import { isInstallTelemetryEnabled } from "./telemetry.ts";
 import { time } from "./timings.ts";
@@ -44,7 +49,7 @@ export interface CreateAgentSessionOptions {
 
 	/** Model to use. Default: from settings, else first available */
 	model?: Model<any>;
-	/** Thinking level. Default: from settings, else 'medium' (clamped to model capabilities) */
+	/** Thinking level. Default: from settings, then the model's declared default, else 'medium'. */
 	thinkingLevel?: ThinkingLevel;
 	/**
 	 * Whether `model` came from an explicit CLI/SDK flag (vs. profile/settings resolution).
@@ -63,15 +68,16 @@ export interface CreateAgentSessionOptions {
 	 * Optional default tool suppression mode when no explicit allowlist is provided.
 	 *
 	 * - "all": start with no tools enabled
-	 * - "builtin": disable the default built-in tools (read, bash, edit, write, context_audit)
+	 * - "builtin": disable the default built-in tools (read, bash, edit, write, context_audit,
+	 *   goal, delegate, and run_toolkit_script)
 	 *   but keep extension/custom tools enabled
 	 */
 	noTools?: "all" | "builtin";
 	/**
 	 * Optional allowlist of tool names.
 	 *
-	 * When omitted, pi enables the default built-in tools (read, bash, edit, write, context_audit)
-	 * and leaves extension/custom tools enabled unless `noTools` changes that default.
+	 * When omitted, pi enables the shared default built-in tool surface and leaves extension/custom
+	 * tools enabled unless `noTools` changes that default.
 	 * When provided, only the listed tool names are enabled.
 	 */
 	tools?: string[];
@@ -79,8 +85,8 @@ export interface CreateAgentSessionOptions {
 	excludeTools?: string[];
 	/** Optional resource-profile allow/block filters for tool names. */
 	toolProfileFilter?: ResourceProfileFilterSettings;
-	/** Optional one-shot profile definitions. Never persisted to disk. */
-	resourceProfileDefinitions?: Record<string, ResourceProfileSettings>;
+	/** Optional one-shot resource filters or complete situation profiles. Never persisted to disk. */
+	resourceProfileDefinitions?: Record<string, ResourceProfileSettings | ProfileDefinitionInput>;
 	/** Optional one-shot profile definitions as JSON or <resource-profile> tag text. Never persisted to disk. */
 	resourceProfileJson?: string | string[];
 	/** Optional runtime profile selection. Never persisted to disk. */
@@ -231,6 +237,10 @@ export async function createAgentSession(options: CreateAgentSessionOptions = {}
 	const modelRegistry = options.modelRegistry ?? ModelRegistry.create(authStorage, modelsPath);
 
 	const settingsManager = options.settingsManager ?? SettingsManager.create(cwd, agentDir);
+	const needsProfileReload =
+		options.resourceProfileDefinitions !== undefined ||
+		options.resourceProfileJson !== undefined ||
+		options.resourceProfiles !== undefined;
 	if (options.resourceProfileDefinitions) {
 		settingsManager.addInlineResourceProfileDefinitions(options.resourceProfileDefinitions);
 	}
@@ -242,7 +252,7 @@ export async function createAgentSession(options: CreateAgentSessionOptions = {}
 			settingsManager.addInlineResourceProfileDefinitions(parseResourceProfileInput(input).profiles);
 		}
 	}
-	if (options.resourceProfiles && options.resourceProfiles.length > 0) {
+	if (options.resourceProfiles !== undefined) {
 		settingsManager.setRuntimeResourceProfiles(options.resourceProfiles);
 	}
 	const sessionManager =
@@ -250,6 +260,9 @@ export async function createAgentSession(options: CreateAgentSessionOptions = {}
 
 	if (!resourceLoader) {
 		resourceLoader = new DefaultResourceLoader({ cwd, agentDir, settingsManager });
+		await resourceLoader.reload();
+		time("resourceLoader.reload");
+	} else if (needsProfileReload) {
 		await resourceLoader.reload();
 		time("resourceLoader.reload");
 	}
@@ -305,6 +318,9 @@ export async function createAgentSession(options: CreateAgentSessionOptions = {}
 			modelRegistry,
 		});
 		model = result.model;
+		if (thinkingLevel === undefined && !(hasExistingSession && hasThinkingEntry)) {
+			thinkingLevel = result.thinkingLevel;
+		}
 		if (!model) {
 			modelFallbackMessage = formatNoModelsAvailableMessage();
 		} else if (modelFallbackMessage) {
@@ -316,12 +332,13 @@ export async function createAgentSession(options: CreateAgentSessionOptions = {}
 	if (thinkingLevel === undefined && hasExistingSession) {
 		thinkingLevel = hasThinkingEntry
 			? (existingSession.thinkingLevel as ThinkingLevel)
-			: (settingsManager.getDefaultThinkingLevel() ?? DEFAULT_THINKING_LEVEL);
+			: (settingsManager.getDefaultThinkingLevel() ?? model?.defaultThinkingLevel ?? DEFAULT_THINKING_LEVEL);
 	}
 
-	// Fall back to settings default
+	// Fall back to the user's default, then the selected model's own default.
 	if (thinkingLevel === undefined) {
-		thinkingLevel = settingsManager.getDefaultThinkingLevel() ?? DEFAULT_THINKING_LEVEL;
+		thinkingLevel =
+			settingsManager.getDefaultThinkingLevel() ?? model?.defaultThinkingLevel ?? DEFAULT_THINKING_LEVEL;
 	}
 
 	// Clamp to model capabilities
@@ -331,7 +348,10 @@ export async function createAgentSession(options: CreateAgentSessionOptions = {}
 		thinkingLevel = clampThinkingLevel(model, thinkingLevel) as ThinkingLevel;
 	}
 
-	const defaultActiveToolNames = ["read", "bash", "edit", "write", "context_audit"];
+	const defaultActiveToolNames = [
+		...DEFAULT_ACTIVE_TOOL_NAMES,
+		...(settingsManager.getScoutSettings().enabled ? ["context_scout"] : []),
+	];
 	const toolProfileFilter = options.toolProfileFilter ?? settingsManager.getResourceProfileFilter("tools");
 	const allowedToolNames = options.tools ?? (options.noTools === "all" ? [] : undefined);
 	const excludedToolNames = options.excludeTools;
@@ -482,6 +502,20 @@ export async function createAgentSession(options: CreateAgentSessionOptions = {}
 		isChildSession: options.isChildSession ?? process.env.PI_CHILD_SESSION === "1",
 		sessionStartEvent: options.sessionStartEvent,
 	});
+	try {
+		// The initial runtime has now bound providers from profile-granted extensions. Re-resolve the
+		// profile model against that authoritative registry generation, then resync model capability.
+		await session.reapplyActiveProfileModelSettings();
+		if (modelFallbackMessage?.startsWith("Profile model resolution error:")) {
+			modelFallbackMessage = undefined;
+		}
+	} catch (error) {
+		// Preserve the established non-fatal fallback for a genuinely unresolved profile model.
+		if (!modelFallbackMessage?.startsWith("Profile model resolution error:")) {
+			session.dispose();
+			throw error;
+		}
+	}
 	const extensionsResult = resourceLoader.getExtensions();
 
 	return {

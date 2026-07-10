@@ -125,6 +125,7 @@ export const DEFAULT_CONTEXT_GC_SETTINGS: NormalizedContextGcSettings = {
 		"automata_graph_pointer_pack",
 		"learning_query_memory",
 		"subagent",
+		"delegate",
 		"task_steps",
 		"task_background",
 		"task_goal",

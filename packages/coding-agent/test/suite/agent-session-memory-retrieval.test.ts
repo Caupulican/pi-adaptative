@@ -1,10 +1,8 @@
 /**
- * First live-integration slice for local context memory retrieval: observe-only, opt-in,
- * default disabled. Proves the local Pi OKF memory provider is really wired into the live
- * AgentSession transform pipeline (queried, results parsed into labeled ContextItems,
- * stored in a read-only report) WITHOUT ever changing the provider-visible message array,
- * the transcript, or touching an external provider. "Surfacing" retrieved memory into the
- * prompt itself is explicitly out of scope for this slice (see PM plan).
+ * Live-integration coverage for local safe-auto context memory retrieval. Proves explicit
+ * hard-off never queries, while explicit observe-only mode wires the local Pi OKF provider
+ * into the AgentSession transform pipeline (queried, results parsed into labeled ContextItems,
+ * stored in a read-only report) WITHOUT changing the provider-visible message array or transcript.
  */
 
 import { existsSync, mkdirSync, writeFileSync } from "node:fs";
@@ -56,7 +54,7 @@ function normalizeContext(context: Context, tempDir: string): unknown {
 	};
 }
 
-describe("AgentSession live local memory retrieval (observe-only, default disabled)", () => {
+describe("AgentSession live local memory retrieval", () => {
 	const harnesses: Harness[] = [];
 
 	afterEach(() => {
@@ -65,10 +63,12 @@ describe("AgentSession live local memory retrieval (observe-only, default disabl
 		}
 	});
 
-	it("R2: default disabled never queries the provider (empty report) even with a real OKF file present", async () => {
-		const harness = await createHarness({});
+	it("R2: explicit hard-off never queries the provider even with a real OKF file present", async () => {
+		const harness = await createHarness({
+			settings: { contextPolicy: { memory: { enabled: false, includeInPrompt: false } } },
+		});
 		harnesses.push(harness);
-		// A real OKF file exists on disk, but the setting is off by default -- it must
+		// A real OKF file exists on disk, but the setting is explicitly off -- it must
 		// never be read. An empty providerReports proves retrieveMemoryForContext (and
 		// therefore the provider) was never even invoked, not just that it found nothing.
 		writeOkfFile(harness, "note.okf.md", okfDocument("Widget rollout", "Notes on widget rollout.", "Body text."));
@@ -82,8 +82,10 @@ describe("AgentSession live local memory retrieval (observe-only, default disabl
 		expect(report.providerReports).toEqual([]);
 	});
 
-	it("R2b: with no OKF directory at all, disabled default never creates one", async () => {
-		const harness = await createHarness({});
+	it("R2b: explicit hard-off never creates a missing OKF directory", async () => {
+		const harness = await createHarness({
+			settings: { contextPolicy: { memory: { enabled: false, includeInPrompt: false } } },
+		});
 		harnesses.push(harness);
 		expect(existsSync(memoryDir(harness))).toBe(false);
 
@@ -95,10 +97,10 @@ describe("AgentSession live local memory retrieval (observe-only, default disabl
 
 	it("R1: provider-visible messages are identical whether memory retrieval is enabled or disabled", async () => {
 		const disabledHarness = await createHarness({
-			settings: { contextPolicy: { memory: { enabled: false, maxResults: 5 } } },
+			settings: { contextPolicy: { memory: { enabled: false, includeInPrompt: false, maxResults: 5 } } },
 		});
 		const enabledHarness = await createHarness({
-			settings: { contextPolicy: { memory: { enabled: true, maxResults: 5 } } },
+			settings: { contextPolicy: { memory: { enabled: true, includeInPrompt: false, maxResults: 5 } } },
 		});
 		harnesses.push(disabledHarness, enabledHarness);
 
@@ -113,7 +115,7 @@ describe("AgentSession live local memory retrieval (observe-only, default disabl
 				return fauxAssistantMessage("ok");
 			},
 		]);
-		await disabledHarness.session.prompt("tell me about widgets");
+		await disabledHarness.session.prompt("what was the widget rollout plan?");
 
 		let enabledCaptured: Context | undefined;
 		enabledHarness.setResponses([
@@ -122,7 +124,7 @@ describe("AgentSession live local memory retrieval (observe-only, default disabl
 				return fauxAssistantMessage("ok");
 			},
 		]);
-		await enabledHarness.session.prompt("tell me about widgets");
+		await enabledHarness.session.prompt("what was the widget rollout plan?");
 
 		expect(normalizeContext(enabledCaptured as Context, enabledHarness.tempDir)).toEqual(
 			normalizeContext(disabledCaptured as Context, disabledHarness.tempDir),
@@ -162,7 +164,7 @@ describe("AgentSession live local memory retrieval (observe-only, default disabl
 		expect(item.primaryRef).toMatchObject({ type: "memory" });
 	});
 
-	it("R6: with no latest user message, the query degrades to empty -> zero results, no throw", async () => {
+	it("R6: with no latest user message, the empty query deterministically skips long-term providers", async () => {
 		const harness = await createHarness({
 			settings: { contextPolicy: { memory: { enabled: true, maxResults: 5 } } },
 		});
@@ -186,13 +188,14 @@ describe("AgentSession live local memory retrieval (observe-only, default disabl
 		];
 
 		await expect(harness.session.agent.transformContext?.(toolResultOnly)).resolves.toBeDefined();
+		const firstReport = harness.session.getMemoryRetrievalReport();
+		await expect(harness.session.agent.transformContext?.(toolResultOnly)).resolves.toBeDefined();
 
 		const report = harness.session.getMemoryRetrievalReport();
+		expect(report).toEqual(firstReport);
 		expect(report.request.query).toBe("");
 		expect(report.results).toEqual([]);
-		expect(report.providerReports).toEqual([
-			expect.objectContaining({ providerId: "pi-okf", status: "queried", resultCount: 0 }),
-		]);
+		expect(report.providerReports).toEqual([]);
 	});
 
 	it("a malformed OKF file does not throw or block the turn; a valid sibling is still returned", async () => {

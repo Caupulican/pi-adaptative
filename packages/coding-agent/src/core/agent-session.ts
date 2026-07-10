@@ -5,6 +5,7 @@ import type {
 	Agent,
 	AgentContext,
 	AgentEvent,
+	AgentLoopConfig,
 	AgentMessage,
 	AgentState,
 	AgentTool,
@@ -63,7 +64,9 @@ import {
 	cleanupSessionResources,
 	formatToolRepairStandingRule,
 	generateTextToolProtocolPrimer,
+	getSupportedThinkingLevels,
 	isContextOverflow,
+	modelsAreEqual,
 	parseTextToolCalls,
 	streamSimple,
 } from "@caupulican/pi-ai";
@@ -102,6 +105,7 @@ import {
 import type { PromptEnforcementReport } from "./context/context-prompt-enforcement.ts";
 import type { PromptPolicyGcCorrelationReport, PromptPolicyShadowReport } from "./context/context-prompt-policy.ts";
 import type { MemoryPromptInclusionReport } from "./context/memory-diagnostics.ts";
+import type { MemoryProvider as ContextMemoryProvider } from "./context/memory-provider-contract.ts";
 import type { MemoryRetrievalReport } from "./context/memory-retrieval.ts";
 import type { ContextGcReport } from "./context-gc.ts";
 import { ContextPipeline } from "./context-pipeline.ts";
@@ -142,9 +146,9 @@ import {
 	type GoalRuntimeSnapshot,
 	type GoalRuntimeSnapshotSettings,
 } from "./goals/goal-runtime-snapshot.ts";
-import type { MemoryProvider as ContextMemoryProvider } from "./context/memory-provider-contract.ts";
 import type { GoalState } from "./goals/goal-state.ts";
 import { appendGoalStateSnapshot, getLatestGoalStateSnapshot } from "./goals/session-goal-state.ts";
+import { constrainStreamIdleToHttpTimeout } from "./http-dispatcher.ts";
 import type { LearningAuditRecord } from "./learning/learning-audit.ts";
 import type { DemandSignals, ReflectionResult } from "./learning/reflection-engine.ts";
 import { appendLearningDecisionSnapshot, getLearningDecisionSnapshots } from "./learning/session-learning-decision.ts";
@@ -496,8 +500,8 @@ export interface SpawnedUsageTotals {
 }
 
 /**
- * Options for {@link AgentSession.runIsolatedCompletion} — a one-shot LLM call fully isolated from
- * the main session (used by the native reflection engine, R2). See the adaptive-agent design §6c/§7.
+ * Options for {@link AgentSession.runIsolatedCompletion} — an LLM call fully isolated from the main
+ * session. With no tools it is one-shot (reflection); lane callers may supply a bounded child loop.
  */
 export interface IsolatedCompletionOptions {
 	/** System prompt for the isolated call. */
@@ -510,6 +514,14 @@ export interface IsolatedCompletionOptions {
 	thinkingLevel?: ThinkingLevel;
 	/** Output token cap. */
 	maxTokens?: number;
+	/** Fresh tools owned by the isolated child. Omitted/empty preserves one-shot behavior. */
+	tools?: AgentTool[];
+	/** Maximum assistant turns for a tool-enabled child loop. Ignored by one-shot calls. */
+	maxTurns?: number;
+	/** Child-only capability/path gate. Never inherited from the foreground session. */
+	beforeToolCall?: AgentLoopConfig["beforeToolCall"];
+	/** Child-only result observer (for example, successful scoped-write accounting). */
+	afterToolCall?: AgentLoopConfig["afterToolCall"];
 	/** Abort signal. */
 	signal?: AbortSignal;
 	/**
@@ -673,7 +685,6 @@ export class AgentSession {
 	private readonly _analytics: SessionAnalytics;
 	private readonly _treeNavigator: SessionTreeNavigator;
 	private _lastCostGuardDecision?: CostGuardDecision;
-	private _costGuardDowngraded = false;
 	/** Per-turn model-router subsystem (see model-router-controller.ts); owns the transient route/intent,
 	 * the cheap-turn session buffer, the escalation/retry flags, and the sticky last-decision/skip-reason
 	 * used by the status report. Its parallel routed drive path delegates every turn back to
@@ -727,6 +738,18 @@ export class AgentSession {
 		const agentDir = config.agentDir ?? getAgentDir();
 		const modelAdaptationStore = ModelAdaptationStore.forAgentDir(agentDir);
 		const baseStreamFn = this.agent.streamFn;
+		const previousResolveRequestReasoning = this.agent.resolveRequestReasoning?.bind(this.agent);
+		this.agent.resolveRequestReasoning = (reasoning, request) => {
+			const resolvedReasoning = previousResolveRequestReasoning
+				? previousResolveRequestReasoning(reasoning, request)
+				: reasoning;
+			return this._resolveCostGuardRequestReasoning(
+				request.model,
+				request.context,
+				resolvedReasoning,
+				request.maxTokens,
+			);
+		};
 		const profiledStreamFn = withModelPerfProfile(baseStreamFn, {
 			modelKey: (model) => formatModelRouterModel(model),
 			recordSample: (modelKey, sample) => {
@@ -743,18 +766,19 @@ export class AgentSession {
 					...streamIdleOptionsOverride,
 				};
 				const httpIdleTimeoutMs = stallSettingsSource.getHttpIdleTimeoutMs();
+				const httpBounded = constrainStreamIdleToHttpTimeout(
+					{ ...DEFAULT_STREAM_IDLE, ...configured },
+					httpIdleTimeoutMs,
+				);
 				const profile = modelAdaptationStore.get(formatModelRouterModel(model)).perf;
 				const adaptive = resolveAdaptiveStreamIdleOptions({
-					base: { ...DEFAULT_STREAM_IDLE, ...configured },
+					base: httpBounded.options,
 					profile,
 					promptTokens: estimateContextPromptTokens(context),
 					localClass: this._isWarmableLocalModel(model),
-					ceilingMs:
-						httpIdleTimeoutMs === 0
-							? DEFAULT_ADAPTIVE_STREAM_IDLE_CEILING_MS
-							: Math.max(DEFAULT_STREAM_IDLE.quietIdleMs, httpIdleTimeoutMs - 60_000),
+					ceilingMs: httpBounded.adaptiveCeilingMs ?? DEFAULT_ADAPTIVE_STREAM_IDLE_CEILING_MS,
 				});
-				return { ...configured, ...adaptive };
+				return { ...httpBounded.options, ...adaptive };
 			}),
 			baseStreamFn === streamSimple,
 		);
@@ -811,6 +835,7 @@ export class AgentSession {
 			getModelAdaptationRules: () => this._getModelAdaptationRulesForPrompt(),
 			getActiveExtensions: () => this._extensionRunner.activeExtensions,
 			getContextWindow: () => this.model?.contextWindow,
+			getThinkingLevel: () => this.thinkingLevel,
 		});
 		this._autonomyTelemetry = new AutonomyTelemetry({
 			getSessionManager: () => this.sessionManager,
@@ -836,6 +861,7 @@ export class AgentSession {
 			getModelRegistry: () => this._modelRegistry,
 			isModelExhausted: (model) => this._billingFailover.isExhausted(`${model.provider}/${model.id}`),
 			getModel: () => this.model ?? undefined,
+			isDelegateToolActive: () => this.getActiveToolNames().includes("delegate"),
 			getCapabilityEnvelope: () => this.capabilityEnvelope,
 			getModelCapabilityProfile: () => this.getModelCapabilityProfile(),
 			emit: (event) => this._emit(event),
@@ -999,6 +1025,9 @@ export class AgentSession {
 			setUnboundToolGrantWarnings: (warnings) => {
 				this._unboundToolGrantWarnings = warnings;
 			},
+			getUnboundToolGrantWarnings: () => this._unboundToolGrantWarnings,
+			createProfileFilterReloadSnapshot: () => this._profileFilter.createReloadSnapshot(),
+			restoreProfileFilterReloadSnapshot: (snapshot) => this._profileFilter.restoreReloadSnapshot(snapshot),
 			getActiveToolNames: () => this.getActiveToolNames(),
 			setActiveToolsByName: (toolNames) => this.setActiveToolsByName(toolNames),
 			normalizePromptSnippet: (text) => this._normalizePromptSnippet(text),
@@ -1012,6 +1041,8 @@ export class AgentSession {
 			getMemoryManager: () => this._memory.getMemoryManager(),
 			getMemoryAuditDiagnostics: () => this._memory.getMemoryAuditDiagnostics(),
 			clearPendingMemoryProviders: () => this._memory.clearPendingProviders(),
+			createMemoryReloadSnapshot: () => this._memory.createReloadSnapshot(),
+			restoreMemoryReloadSnapshot: (snapshot) => this._memory.restoreReloadSnapshot(snapshot),
 			initializeMemory: () => this._memory.initialize(),
 			getGoalStateSnapshot: () => this.getGoalStateSnapshot(),
 			saveGoalStateSnapshot: (state) => this.saveGoalStateSnapshot(state),
@@ -1074,6 +1105,7 @@ export class AgentSession {
 			getActiveToolNames: () => this.getActiveToolNames(),
 			setActiveToolsByName: (names) => this.setActiveToolsByName(names),
 			getModelCapabilityProfile: () => this.getModelCapabilityProfile(),
+			refreshBaseSystemPrompt: () => this._refreshBaseSystemPrompt(),
 			emit: (event) => this._emit(event),
 			checkContextWindowUsageWarning: () => this._checkContextWindowUsageWarning(),
 			deriveOllamaServerUrl: (baseUrl) => this._deriveOllamaServerUrl(baseUrl),
@@ -1097,7 +1129,7 @@ export class AgentSession {
 			getToolProfileFilter: () => this._toolProfileFilter,
 			isExplicitModel: () => this._isExplicitModel,
 			isExplicitThinking: () => this._isExplicitThinking,
-			setThinkingLevel: (level) => this.setThinkingLevel(level),
+			setThinkingLevel: (level) => this.setThinkingLevel(level, { persistSettings: false }),
 		});
 		this._toolGate = new ToolGateController({
 			maybeEscalateToolCall: (toolName, args) => this._modelRouter.maybeEscalateToolCall(toolName, args),
@@ -1334,43 +1366,50 @@ export class AgentSession {
 			// character caps are the only budget protection for this block -- load-bearing,
 			// not merely defensive.
 			const gcMessages = this._maybeAppendMemoryEvidenceBlock(enforcementResult.messages, memoryReport);
-			this._applyCostGuard(gcMessages);
 			return gcMessages;
 		};
 	}
 
 	/**
-	 * Proactive per-turn cost guard (#34): estimate the USD cost of the about-to-be-submitted turn and,
-	 * when it exceeds the user's ceiling, record a warning decision (for the host UI to surface) and —
-	 * if configured to `downgrade` — step reasoning effort down ONCE per over-threshold episode to curb a
-	 * runaway billing spike. Disabled by default (`maxTurnUsd<=0`), so it never alters behavior unless the
-	 * user opts in. Best-effort: never throws into the turn.
+	 * Resolve the foreground request's cost policy after routing/context conversion, when the actual
+	 * model, full system prompt, converted messages, and tool schemas are known. The guard is a
+	 * projection threshold rather than a hard output cap: warning mode never reduces capability, while
+	 * opt-in downgrade changes only this request's reasoning effort. Best-effort: never throws.
 	 */
-	private _applyCostGuard(messages: AgentMessage[]): void {
+	private _resolveCostGuardRequestReasoning(
+		model: Model<Api>,
+		context: Context,
+		reasoning: SimpleStreamOptions["reasoning"],
+		requestMaxTokens: number | undefined,
+	): SimpleStreamOptions["reasoning"] {
 		try {
 			const guard = this.settingsManager.getCostGuardSettings();
-			if (guard.maxTurnUsd <= 0 || !this.model?.cost) {
+			const isChatGptSubscription = model.provider === "openai-codex" && this._modelRegistry.isUsingOAuth(model);
+			if (guard.maxTurnUsd <= 0 || !model.cost || isChatGptSubscription) {
 				this._lastCostGuardDecision = undefined;
-				return;
+				return reasoning;
 			}
-			const inputTokens = this._estimateCurrentContextTokens(messages);
-			const maxOutputTokens = this.model.maxTokens ?? 4096;
-			const estUsd = estimateTurnCostUsd({ inputTokens, maxOutputTokens, cost: this.model.cost });
+			const inputTokens = estimateContextPromptTokens(context);
+			// Use an explicit request cap when present; otherwise project against the session response
+			// reserve instead of a frontier model's theoretical 128K output maximum.
+			const maxOutputTokens = Math.min(
+				model.maxTokens ?? 4096,
+				requestMaxTokens ?? this.settingsManager.getCompactionReserveTokens(),
+			);
+			const estUsd = estimateTurnCostUsd({
+				inputTokens,
+				maxOutputTokens,
+				cost: model.cost,
+				longContextPricing: model.longContextPricing,
+			});
 			const decision = evaluateCostGuard(estUsd, { maxTurnUsd: guard.maxTurnUsd, action: guard.action });
 			this._lastCostGuardDecision = decision;
-			if (!decision.over) {
-				this._costGuardDowngraded = false; // back under the ceiling — re-arm the one-shot downgrade
-				return;
-			}
-			if (guard.action === "downgrade" && !this._costGuardDowngraded && this.supportsThinking()) {
-				const next = downgradeReasoning(this.thinkingLevel);
-				if (next !== this.thinkingLevel) {
-					this.setThinkingLevel(next as ThinkingLevel);
-					this._costGuardDowngraded = true;
-				}
-			}
+			if (!decision.over || guard.action !== "downgrade" || reasoning === undefined) return reasoning;
+			const next = downgradeReasoning(reasoning, getSupportedThinkingLevels(model), model.thinkingLevelMap);
+			return next as NonNullable<SimpleStreamOptions["reasoning"]>;
 		} catch {
 			// cost guard must never disrupt a turn
+			return reasoning;
 		}
 	}
 
@@ -2772,6 +2811,14 @@ export class AgentSession {
 		return this._systemPromptBuilder.rebuildSystemPrompt(toolNames);
 	}
 
+	private _refreshBaseSystemPrompt(): void {
+		const previousBaseSystemPrompt = this._baseSystemPrompt;
+		this._baseSystemPrompt = this._rebuildSystemPrompt(this.getActiveToolNames());
+		if (this.agent.state.systemPrompt === previousBaseSystemPrompt) {
+			this.agent.state.systemPrompt = this._baseSystemPrompt;
+		}
+	}
+
 	/**
 	 * Build a system prompt for a specific tool surface WITHOUT touching the session's base prompt
 	 * state (G4 router-swap; see {@link SystemPromptBuilder.buildSystemPromptForToolNames}).
@@ -3061,7 +3108,7 @@ export class AgentSession {
 			// (no page) when nothing is relevant — so it stays net-negative and the GC packs stale pages.
 			if (this._memory.shouldAttemptRecall(expandedText)) {
 				try {
-					const recall = await this._memory.getMemoryManager().prefetch(expandedText);
+					const recall = await this._memory.prefetchRecall(expandedText);
 					if (recall) {
 						injectedRecall = recall;
 						recallQuery = expandedText;
@@ -3487,6 +3534,17 @@ export class AgentSession {
 	async setModel(model: Model<any>, options: { persistSettings?: boolean } = {}): Promise<void> {
 		await this._modelSelection.setModel(model, options);
 		this._scheduleLocalPrefixWarm(this.agent.state.model, "selection");
+	}
+
+	/** Re-resolve startup profile model/thinking after allowed extension providers are bound. */
+	async reapplyActiveProfileModelSettings(): Promise<void> {
+		const previousModel = this.model;
+		await this._profileFilter.reapplyActiveProfileModelSettings();
+		const activeToolNames = this._requestedActiveToolNames ?? this.getActiveToolNames();
+		this._refreshToolRegistry({ activeToolNames, includeAllExtensionTools: true });
+		if (!modelsAreEqual(previousModel, this.model)) {
+			this._scheduleLocalPrefixWarm(this.model, "selection");
+		}
 	}
 
 	async cycleModel(direction: "forward" | "backward" = "forward"): Promise<ModelCycleResult | undefined> {

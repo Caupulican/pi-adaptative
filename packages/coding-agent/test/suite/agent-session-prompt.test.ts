@@ -254,7 +254,7 @@ describe("AgentSession prompt characterization", () => {
 		expect(harness.getPendingResponseCount()).toBe(1);
 	});
 
-	it("does not expose or dispatch extension commands when no resource profile is active", async () => {
+	it("keeps inline extension commands available when the explicit profile selection is none", async () => {
 		const commandRuns: string[] = [];
 		const harness = await createHarness({
 			settings: { activeResourceProfiles: [] },
@@ -270,9 +270,11 @@ describe("AgentSession prompt characterization", () => {
 			],
 		});
 		harnesses.push(harness);
-		harness.setResponses([fauxAssistantMessage("model saw default command text")]);
+		harness.setResponses([fauxAssistantMessage("should stay queued")]);
 
-		expect(harness.session.extensionRunner.getRegisteredCommands()).toEqual([]);
+		expect(harness.session.extensionRunner.getRegisteredCommands().map((command) => command.name)).toEqual([
+			"testcmd",
+		]);
 		expect(harness.session.getActiveToolNames()).toEqual([
 			"read",
 			"bash",
@@ -283,6 +285,33 @@ describe("AgentSession prompt characterization", () => {
 			"delegate",
 			"run_toolkit_script",
 		]);
+
+		await harness.session.prompt("/testcmd should-run");
+
+		expect(commandRuns).toEqual(["ran"]);
+		expect(harness.session.messages).toEqual([]);
+		expect(harness.getPendingResponseCount()).toBe(1);
+	});
+
+	it("does not expose or dispatch extension commands for an unresolved explicit resource profile", async () => {
+		const commandRuns: string[] = [];
+		const harness = await createHarness({
+			settings: { activeResourceProfiles: ["missing-profile"] },
+			extensionFactories: [
+				(pi) => {
+					pi.registerCommand("testcmd", {
+						description: "Test command",
+						handler: async () => {
+							commandRuns.push("ran");
+						},
+					});
+				},
+			],
+		});
+		harnesses.push(harness);
+		harness.setResponses([fauxAssistantMessage("model saw denied command text")]);
+
+		expect(harness.session.extensionRunner.getRegisteredCommands()).toEqual([]);
 
 		await harness.session.prompt("/testcmd should-not-run");
 

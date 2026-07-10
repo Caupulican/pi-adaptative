@@ -117,11 +117,13 @@ describe("profile-shipped lanes", () => {
 		let seenModelId: string | undefined;
 		let seenSystemPrompt: string | undefined;
 		let seenReasoning: unknown;
+		let seenTools: string[] = [];
 		faux.setResponses([
 			(context, options, _state, model) => {
 				seenModelId = model.id;
 				seenSystemPrompt = context.systemPrompt;
 				seenReasoning = (options as { reasoning?: unknown } | undefined)?.reasoning;
+				seenTools = context.tools?.map((tool) => tool.name) ?? [];
 				return fauxAssistantMessage(RESEARCH_JSON);
 			},
 		]);
@@ -134,6 +136,7 @@ describe("profile-shipped lanes", () => {
 		expect(seenSystemPrompt?.startsWith(SUBAGENT_CORE_SYSTEM_PROMPT)).toBe(true);
 		expect(seenSystemPrompt).toContain("SCOUT mode");
 		expect(seenReasoning).toBe("low");
+		expect(seenTools).toEqual(["read", "grep"]);
 		expect(outcome.result?.gateOutcome.outcome).toBe("allow");
 	});
 
@@ -154,6 +157,53 @@ describe("profile-shipped lanes", () => {
 		const outcome = await activeSession.runResearchLaneOnce();
 		expect(outcome.started).toBe(false);
 		expect(outcome.skipReason).toBe("lane_profile_not_found");
+	});
+
+	it("resolves an explicit relative lane profile against the workspace cwd", async () => {
+		writeFileSync(
+			join(tempDir, "relative-lane.json"),
+			JSON.stringify({
+				name: "relative-lane",
+				model: `${faux.getModel().provider}/scout-model`,
+				resources: { tools: { allow: ["read"] } },
+			}),
+			"utf-8",
+		);
+		const activeSession = await newSession({
+			researchLane: { enabled: true, profile: "./relative-lane.json" },
+		});
+		let seenTools: string[] = [];
+		let seenModel = "";
+		faux.setResponses([
+			(context, _options, _state, model) => {
+				seenTools = context.tools?.map((tool) => tool.name) ?? [];
+				seenModel = model.id;
+				return fauxAssistantMessage(RESEARCH_JSON);
+			},
+		]);
+
+		const outcome = await activeSession.runResearchLaneOnce({ query: "relative profile" });
+
+		expect(outcome.record?.status).toBe("succeeded");
+		expect(seenModel).toBe("scout-model");
+		expect(seenTools).toEqual(["read"]);
+	});
+
+	it("warns once per unbound classified-tool grant set", async () => {
+		writeProfile("opaque", {
+			resources: { tools: { allow: ["read", "extension_mutator"] } },
+		});
+		const activeSession = await newSession({ researchLane: { enabled: true, profile: "opaque" } });
+		const warnings: string[] = [];
+		activeSession.subscribe((event) => {
+			if (event.type === "warning") warnings.push(event.message);
+		});
+		faux.setResponses([fauxAssistantMessage(RESEARCH_JSON), fauxAssistantMessage(RESEARCH_JSON)]);
+
+		await activeSession.runResearchLaneOnce({ query: "first" });
+		await activeSession.runResearchLaneOnce({ query: "second" });
+
+		expect(warnings.filter((warning) => warning.includes("extension_mutator"))).toHaveLength(1);
 	});
 
 	it("lets a delegate-call system prompt replace the worker role prompt but never the core", async () => {

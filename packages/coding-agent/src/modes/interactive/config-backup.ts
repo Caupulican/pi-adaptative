@@ -13,7 +13,15 @@ import * as fs from "node:fs";
 import * as path from "node:path";
 import type { Component } from "@caupulican/pi-tui";
 import { getAgentDir } from "../../config.ts";
-import type { SettingsManager } from "../../core/settings-manager.ts";
+import type {
+	GlobalResourceProfileConfiguration,
+	ModelRouterSettings,
+	ProfileDefinitionInput,
+	ResourceProfileSettings,
+	Settings,
+	SettingsManager,
+	ThinkingLevel,
+} from "../../core/settings-manager.ts";
 import { SelectSubmenu } from "./components/settings-selector.ts";
 
 export interface ConfigBackupHost {
@@ -24,19 +32,161 @@ export interface ConfigBackupHost {
 
 export interface ConfigRestoreHost extends ConfigBackupHost {
 	showSelector(create: (done: () => void) => { component: Component; focus: Component }): void;
-	handleReloadCommand(): Promise<void>;
+	handleReloadCommand(): Promise<boolean>;
+}
+
+const PROFILE_THINKING_LEVELS = new Set<ThinkingLevel>([
+	"off",
+	"minimal",
+	"low",
+	"medium",
+	"high",
+	"xhigh",
+	"max",
+	"ultra",
+]);
+
+function isRecord(value: unknown): value is Record<string, unknown> {
+	return Boolean(value) && typeof value === "object" && !Array.isArray(value);
+}
+
+function decodeBackupProfile(name: string, value: unknown): ProfileDefinitionInput | undefined {
+	if (!isRecord(value)) return undefined;
+	const isWrapper = Object.hasOwn(value, "resources");
+	const resources = isWrapper ? value.resources : value;
+	if (!isRecord(resources)) return undefined;
+	const thinking =
+		typeof value.thinking === "string" && PROFILE_THINKING_LEVELS.has(value.thinking as ThinkingLevel)
+			? (value.thinking as ThinkingLevel)
+			: undefined;
+	return {
+		name,
+		description: typeof value.description === "string" ? value.description : undefined,
+		model: typeof value.model === "string" ? value.model : undefined,
+		thinking,
+		modelRouter: isRecord(value.modelRouter) ? (value.modelRouter as ModelRouterSettings) : undefined,
+		soul: typeof value.soul === "string" ? value.soul : undefined,
+		resources: resources as ResourceProfileSettings,
+	};
+}
+
+export interface ProfileFilesSnapshot {
+	directoryExisted: boolean;
+	files: Map<string, string>;
+}
+
+function canonicalActiveResourceProfiles(settings: Settings): string[] {
+	const values = settings.activeResourceProfiles ?? settings.activeResourceProfile ?? [];
+	const entries = Array.isArray(values) ? values : [values];
+	return [...new Set(entries.map((entry) => entry.trim()).filter((entry) => entry.length > 0))];
+}
+
+function decodeStringArray(label: string, value: unknown): string[] {
+	if (!Array.isArray(value) || value.some((entry) => typeof entry !== "string")) {
+		throw new Error(`Invalid backup file: ${label} must be an array of strings`);
+	}
+	return [...new Set(value.map((entry) => entry.trim()).filter((entry) => entry.length > 0))];
+}
+
+function decodeActiveResourceProfiles(settings: Record<string, unknown>): string[] {
+	if (Object.hasOwn(settings, "activeResourceProfiles")) {
+		return decodeStringArray("settings.activeResourceProfiles", settings.activeResourceProfiles);
+	}
+	const legacy = settings.activeResourceProfile;
+	if (legacy === undefined) return [];
+	if (typeof legacy === "string") return legacy.trim() ? [legacy.trim()] : [];
+	return decodeStringArray("settings.activeResourceProfile", legacy);
+}
+
+function decodeResourceProfiles(value: unknown): Record<string, ProfileDefinitionInput> {
+	if (value === undefined) return {};
+	if (!isRecord(value)) {
+		throw new Error("Invalid backup file: settings.resourceProfiles must be an object");
+	}
+	const profiles: Record<string, ProfileDefinitionInput> = {};
+	for (const [name, definition] of Object.entries(value)) {
+		const decoded = decodeBackupProfile(name, definition);
+		if (!decoded) throw new Error(`Invalid backup file: malformed resource profile "${name}"`);
+		profiles[name] = decoded;
+	}
+	return profiles;
+}
+
+function decodeProfileFiles(value: unknown): Record<string, unknown> {
+	if (value === undefined) return {};
+	if (!isRecord(value)) throw new Error("Invalid backup file: profiles must be an object");
+	for (const filename of Object.keys(value)) {
+		if (path.basename(filename) !== filename || !filename.endsWith(".json")) {
+			throw new Error(`Invalid backup file: unsafe profile filename "${filename}"`);
+		}
+	}
+	return value;
+}
+
+export function captureProfileFiles(profilesDir: string): ProfileFilesSnapshot {
+	const files = new Map<string, string>();
+	if (!fs.existsSync(profilesDir)) return { directoryExisted: false, files };
+	for (const filename of fs.readdirSync(profilesDir)) {
+		if (!filename.endsWith(".json")) continue;
+		const profilePath = path.join(profilesDir, filename);
+		if (!fs.lstatSync(profilePath).isFile()) continue;
+		files.set(filename, fs.readFileSync(profilePath, "utf-8"));
+	}
+	return { directoryExisted: true, files };
+}
+
+function clearProfileFiles(profilesDir: string): void {
+	if (!fs.existsSync(profilesDir)) return;
+	for (const filename of fs.readdirSync(profilesDir)) {
+		if (!filename.endsWith(".json")) continue;
+		const profilePath = path.join(profilesDir, filename);
+		const stat = fs.lstatSync(profilePath);
+		if (stat.isFile() || stat.isSymbolicLink()) fs.rmSync(profilePath, { force: true });
+	}
+}
+
+function replaceProfileFiles(profilesDir: string, profiles: Record<string, unknown>): void {
+	fs.mkdirSync(profilesDir, { recursive: true });
+	clearProfileFiles(profilesDir);
+	for (const [filename, content] of Object.entries(profiles)) {
+		const serialized = JSON.stringify(content, null, 2);
+		if (serialized === undefined) throw new Error(`Invalid backup file: profile "${filename}" is not serializable`);
+		fs.writeFileSync(path.join(profilesDir, filename), serialized, "utf-8");
+	}
+}
+
+export function restoreProfileFiles(profilesDir: string, snapshot: ProfileFilesSnapshot): void {
+	clearProfileFiles(profilesDir);
+	if (snapshot.files.size > 0) fs.mkdirSync(profilesDir, { recursive: true });
+	for (const [filename, content] of snapshot.files) {
+		fs.writeFileSync(path.join(profilesDir, filename), content, "utf-8");
+	}
+	if (!snapshot.directoryExisted && fs.existsSync(profilesDir) && fs.readdirSync(profilesDir).length === 0) {
+		fs.rmdirSync(profilesDir);
+	}
+}
+
+function profileConfigurationFromSettings(settings: Settings): GlobalResourceProfileConfiguration {
+	return {
+		resourceProfiles: settings.resourceProfiles,
+		activeResourceProfile: settings.activeResourceProfile,
+		activeResourceProfiles: settings.activeResourceProfiles,
+		externalResourceRoots: settings.externalResourceRoots,
+		trustedResourceRoots: settings.trustedResourceRoots,
+	};
 }
 
 export async function handleConfigBackupCommand(host: ConfigBackupHost, fileArg?: string): Promise<void> {
 	try {
 		const profilesDir = path.join(getAgentDir(), "profiles");
-		const profiles: Record<string, any> = {};
+		const profiles: Record<string, unknown> = {};
 		if (fs.existsSync(profilesDir)) {
 			const entries = fs.readdirSync(profilesDir);
 			for (const entry of entries) {
 				if (entry.endsWith(".json")) {
 					const pPath = path.join(profilesDir, entry);
 					try {
+						if (!fs.lstatSync(pPath).isFile()) continue;
 						const content = fs.readFileSync(pPath, "utf-8");
 						profiles[entry] = JSON.parse(content);
 					} catch {
@@ -46,13 +196,15 @@ export async function handleConfigBackupCommand(host: ConfigBackupHost, fileArg?
 			}
 		}
 
+		const globalSettings = host.settingsManager.getGlobalSettings();
 		const backupData = {
+			version: 2,
 			profiles,
 			settings: {
-				resourceProfiles: host.settingsManager.settings.resourceProfiles,
-				activeResourceProfile: host.settingsManager.settings.activeResourceProfile,
-				externalResourceRoots: host.settingsManager.settings.externalResourceRoots,
-				trustedResourceRoots: host.settingsManager.settings.trustedResourceRoots,
+				resourceProfiles: globalSettings.resourceProfiles ?? {},
+				activeResourceProfiles: canonicalActiveResourceProfiles(globalSettings),
+				externalResourceRoots: globalSettings.externalResourceRoots ?? [],
+				trustedResourceRoots: globalSettings.trustedResourceRoots ?? [],
 			},
 		};
 
@@ -91,7 +243,7 @@ export async function handleConfigRestoreCommand(host: ConfigRestoreHost, fileAr
 			return;
 		}
 
-		let bundle: any;
+		let bundle: unknown;
 		try {
 			const content = fs.readFileSync(resolved, "utf-8");
 			bundle = JSON.parse(content);
@@ -100,8 +252,26 @@ export async function handleConfigRestoreCommand(host: ConfigRestoreHost, fileAr
 			return;
 		}
 
-		if (!bundle || typeof bundle !== "object") {
+		if (!isRecord(bundle)) {
 			host.showError("Invalid backup file: must be a JSON object");
+			return;
+		}
+
+		let profileFiles: Record<string, unknown>;
+		let restoredResourceProfiles: Record<string, ProfileDefinitionInput>;
+		let restoredActiveProfiles: string[];
+		let restoredExternalRoots: string[];
+		try {
+			profileFiles = decodeProfileFiles(bundle.profiles);
+			const backupSettings = isRecord(bundle.settings) ? bundle.settings : {};
+			restoredResourceProfiles = decodeResourceProfiles(backupSettings.resourceProfiles);
+			restoredActiveProfiles = decodeActiveResourceProfiles(backupSettings);
+			restoredExternalRoots = decodeStringArray(
+				"settings.externalResourceRoots",
+				backupSettings.externalResourceRoots ?? [],
+			);
+		} catch (error) {
+			host.showError(error instanceof Error ? error.message : String(error));
 			return;
 		}
 
@@ -134,44 +304,47 @@ export async function handleConfigRestoreCommand(host: ConfigRestoreHost, fileAr
 			return;
 		}
 
-		// 1. Restore profile files (reusable-file scope)
-		if (bundle.profiles && typeof bundle.profiles === "object") {
-			const profilesDir = path.join(getAgentDir(), "profiles");
-			fs.mkdirSync(profilesDir, { recursive: true });
-			for (const [filename, content] of Object.entries(bundle.profiles)) {
-				const targetPath = path.join(profilesDir, filename);
-				fs.writeFileSync(targetPath, JSON.stringify(content, null, 2), "utf-8");
+		const profilesDir = path.join(getAgentDir(), "profiles");
+		const profileFilesSnapshot = captureProfileFiles(profilesDir);
+		const settingsSnapshot = host.settingsManager.createReloadSnapshot();
+		let restoreStarted = false;
+		try {
+			restoreStarted = true;
+			replaceProfileFiles(profilesDir, profileFiles);
+			const currentTrusted = settingsSnapshot.globalSettings.trustedResourceRoots ?? [];
+			host.settingsManager.replaceGlobalResourceProfileConfiguration({
+				resourceProfiles: Object.keys(restoredResourceProfiles).length > 0 ? restoredResourceProfiles : undefined,
+				activeResourceProfiles: restoredActiveProfiles,
+				externalResourceRoots: restoredExternalRoots,
+				// Security boundary: roots named by a backup never become trusted through restore.
+				trustedResourceRoots: currentTrusted.filter((root) => !restoredExternalRoots.includes(root)),
+			});
+			await host.settingsManager.flush();
+			if (!(await host.handleReloadCommand())) {
+				throw new Error("restored configuration failed runtime validation");
 			}
-		}
-
-		// 2. Restore settings
-		if (bundle.settings && typeof bundle.settings === "object") {
-			const bs = bundle.settings;
-
-			// Global profiles definitions
-			if (bs.resourceProfiles && typeof bs.resourceProfiles === "object") {
-				for (const [name, definition] of Object.entries(bs.resourceProfiles)) {
-					host.settingsManager.setProfileDefinition(name, definition as any, "global");
+			host.showStatus("Configuration restored successfully.");
+		} catch (error) {
+			let rollbackError: unknown;
+			if (restoreStarted) {
+				try {
+					restoreProfileFiles(profilesDir, profileFilesSnapshot);
+					host.settingsManager.replaceGlobalResourceProfileConfiguration(
+						profileConfigurationFromSettings(settingsSnapshot.globalSettings),
+					);
+					await host.settingsManager.flush();
+					host.settingsManager.restoreReloadSnapshot(settingsSnapshot);
+				} catch (restoreError) {
+					rollbackError = restoreError;
 				}
 			}
-
-			// Active profile selection
-			if (bs.activeResourceProfile) {
-				host.settingsManager.setActiveProfile(bs.activeResourceProfile, "global");
-			}
-
-			// External roots (trustedRoots are NOT restored, as per SECURITY requirement)
-			if (Array.isArray(bs.externalResourceRoots)) {
-				host.settingsManager.setExternalResourceRoots(bs.externalResourceRoots, "global");
-
-				const currentTrusted = host.settingsManager.getTrustedResourceRoots();
-				const newTrusted = currentTrusted.filter((r) => !bs.externalResourceRoots.includes(r));
-				host.settingsManager.setTrustedResourceRoots(newTrusted, "global");
-			}
+			const message = error instanceof Error ? error.message : String(error);
+			host.showError(
+				rollbackError
+					? `Configuration restore failed: ${message}; rollback failed: ${rollbackError instanceof Error ? rollbackError.message : String(rollbackError)}`
+					: `Configuration restore failed: ${message}; previous configuration restored`,
+			);
 		}
-
-		host.showStatus("Configuration restored successfully.");
-		await host.handleReloadCommand();
 	} catch (error) {
 		host.showError(error instanceof Error ? error.message : String(error));
 	}

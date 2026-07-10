@@ -5,7 +5,7 @@ import { BillingFailoverController, ExhaustedProviderRegistry } from "../src/cor
 import type { ModelRegistry } from "../src/core/model-registry.ts";
 
 const failed = model("codex-spark");
-const fallback = model("gpt-5.5");
+const fallback = model("gpt-5.6-sol");
 
 function model(id: string): Model<Api> {
 	return {
@@ -38,7 +38,7 @@ function registry(subscription: boolean, includeFallback = true): ModelRegistry 
 		find: (provider: string, id: string) =>
 			provider === "openai-codex" && id === "codex-spark"
 				? failed
-				: provider === "openai-codex" && id === "gpt-5.5" && includeFallback
+				: provider === "openai-codex" && id === "gpt-5.6-sol" && includeFallback
 					? fallback
 					: undefined,
 		hasConfiguredAuth: () => true,
@@ -60,8 +60,8 @@ describe("BillingFailoverController", () => {
 		await expect(
 			controller.handleAssistantError(message("You have hit your ChatGPT usage limit. Try again later.")),
 		).resolves.toBe(true);
-		expect(agent.state.model.id).toBe("gpt-5.5");
-		expect(warnings).toEqual(["codex-spark quota reached — switched to openai-codex/gpt-5.5"]);
+		expect(agent.state.model.id).toBe("gpt-5.6-sol");
+		expect(warnings).toEqual(["codex-spark quota reached — switched to openai-codex/gpt-5.6-sol"]);
 	});
 
 	it("halts metered quota failures without changing models", async () => {
@@ -82,7 +82,7 @@ describe("BillingFailoverController", () => {
 	it("does not re-hop into an exhausted fallback", async () => {
 		const warnings: string[] = [];
 		const exhausted = new ExhaustedProviderRegistry();
-		exhausted.markExhausted("openai-codex/gpt-5.5");
+		exhausted.markExhausted("openai-codex/gpt-5.6-sol");
 		const agent = { state: { model: failed } } as unknown as Agent;
 		const controller = new BillingFailoverController({
 			agent,

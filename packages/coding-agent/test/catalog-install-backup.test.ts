@@ -211,7 +211,24 @@ describe("Catalog, Install Resources, Config Backup & Restore", () => {
 			// Setup settings
 			manager.setExternalResourceRoots(["/some/root"], "global");
 			manager.setTrustedResourceRoots(["/some/root"], "global");
-			manager.setActiveProfile("p1", "global");
+			manager.setProfileDefinition(
+				"global-rich",
+				{
+					model: "openai-codex/gpt-5.6-terra",
+					thinking: "max",
+					soul: "Restore this situation.",
+					modelRouter: { enabled: true, cheapThinking: "low" },
+					resources: { tools: { allow: ["read", "delegate"] } },
+				},
+				"global",
+			);
+			const configured = manager.getGlobalSettings();
+			manager.replaceGlobalResourceProfileConfiguration({
+				resourceProfiles: configured.resourceProfiles,
+				activeResourceProfiles: ["p1", "global-rich"],
+				externalResourceRoots: configured.externalResourceRoots,
+				trustedResourceRoots: configured.trustedResourceRoots,
+			});
 
 			const backupFile = join(testDir, "backup.json");
 
@@ -222,17 +239,23 @@ describe("Catalog, Install Resources, Config Backup & Restore", () => {
 				showSelector: vi.fn((fn: any) => {
 					fn(() => {});
 				}),
-				handleReloadCommand: vi.fn(async () => {}),
+				handleReloadCommand: vi.fn(async () => true),
+				handleReloadCommandWithResult: vi.fn(async () => true),
 			};
 
 			// Backup
 			await handleConfigBackupCommand.call(context, backupFile);
 			expect(existsSync(backupFile)).toBe(true);
+			expect(JSON.parse(readFileSync(backupFile, "utf-8")).settings.activeResourceProfiles).toEqual([
+				"p1",
+				"global-rich",
+			]);
 
 			// Let's modify/clear current settings and profiles
 			rmSync(join(profilesDir, "p1.json"), { force: true });
 			manager.setExternalResourceRoots([], "global");
 			manager.setTrustedResourceRoots([], "global");
+			manager.deleteProfile("global-rich", "global");
 			manager.setActiveProfile("default", "global");
 
 			// Restore, first simulate cancellation
@@ -252,7 +275,82 @@ describe("Catalog, Install Resources, Config Backup & Restore", () => {
 			// Settings restored, but externalResourceRoots brought back UNTRUSTED
 			expect(manager.getExternalResourceRoots()).toContain("/some/root");
 			expect(manager.getTrustedResourceRoots()).not.toContain("/some/root");
-			expect(manager.settings.activeResourceProfile).toBe("p1");
+			expect(manager.getActiveResourceProfileNames()).toEqual(["p1", "global-rich"]);
+			expect(manager.getProfileRegistry().getProfile("global-rich")).toMatchObject({
+				model: "openai-codex/gpt-5.6-terra",
+				thinking: "max",
+				soul: "Restore this situation.",
+				modelRouter: { enabled: true, cheapThinking: "low" },
+				resources: { tools: { allow: ["read", "delegate"] } },
+			});
+		});
+
+		it("round-trips an explicit no-profile selection", async () => {
+			const manager = SettingsManager.create(projectDir, agentDir);
+			manager.setProfileDefinition("p1", { resources: { tools: { allow: ["read"] } } }, "global");
+			manager.setActiveProfile(undefined, "global");
+			await manager.flush();
+			const backupFile = join(testDir, "none-backup.json");
+			const context = {
+				settingsManager: manager,
+				showError: vi.fn(),
+				showStatus: vi.fn(),
+				showSelector: vi.fn((fn: (done: () => void) => unknown) => fn(() => {})),
+				handleReloadCommand: vi.fn(async () => true),
+				handleReloadCommandWithResult: vi.fn(async () => true),
+			};
+
+			await handleConfigBackupCommand.call(context, backupFile);
+			manager.setActiveProfile("p1", "global");
+			await manager.flush();
+			mockSelectorChoice = "yes";
+			await handleConfigRestoreCommand.call(context, backupFile);
+
+			expect(manager.getGlobalSettings().activeResourceProfiles).toEqual([]);
+			expect(manager.getActiveResourceProfileNames()).toEqual([]);
+		});
+
+		it("restores profile files and global authority settings when reload validation fails", async () => {
+			const manager = SettingsManager.create(projectDir, agentDir);
+			const profilesDir = join(agentDir, "profiles");
+			mkdirSync(profilesDir, { recursive: true });
+			writeFileSync(join(profilesDir, "stable.json"), JSON.stringify({ name: "stable", resources: {} }));
+			manager.setProfileDefinition("stable-global", { resources: { tools: { allow: ["read"] } } }, "global");
+			manager.setActiveProfile("stable-global", "global");
+			await manager.flush();
+
+			const backupFile = join(testDir, "failing-restore.json");
+			writeFileSync(
+				backupFile,
+				JSON.stringify({
+					version: 2,
+					profiles: { "replacement.json": { name: "replacement", resources: {} } },
+					settings: {
+						resourceProfiles: { replacement: { tools: { allow: ["bash"] } } },
+						activeResourceProfiles: ["replacement"],
+						externalResourceRoots: [],
+					},
+				}),
+			);
+			const context = {
+				settingsManager: manager,
+				showError: vi.fn(),
+				showStatus: vi.fn(),
+				showSelector: vi.fn((fn: (done: () => void) => unknown) => fn(() => {})),
+				handleReloadCommand: vi.fn(async () => false),
+				handleReloadCommandWithResult: vi.fn(async () => false),
+			};
+			mockSelectorChoice = "yes";
+
+			await handleConfigRestoreCommand.call(context, backupFile);
+
+			expect(existsSync(join(profilesDir, "stable.json"))).toBe(true);
+			expect(existsSync(join(profilesDir, "replacement.json"))).toBe(false);
+			expect(manager.getActiveResourceProfileNames()).toEqual(["stable-global"]);
+			expect(manager.getProfileRegistry().getProfile("stable-global")).toBeDefined();
+			expect(manager.getProfileRegistry().getProfile("replacement")).toBeUndefined();
+			expect(context.showStatus).not.toHaveBeenCalledWith("Configuration restored successfully.");
+			expect(context.showError).toHaveBeenCalledWith(expect.stringContaining("previous configuration restored"));
 		});
 	});
 });

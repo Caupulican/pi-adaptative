@@ -53,6 +53,10 @@ export interface CreateAgentSessionFromServicesOptions {
 	sessionStartEvent?: SessionStartEvent;
 	model?: Model<any>;
 	thinkingLevel?: ThinkingLevel;
+	/** Preserve whether the foreground model came from an explicit launch flag. */
+	isExplicitModel?: boolean;
+	/** Preserve whether the thinking level came from an explicit launch flag. */
+	isExplicitThinking?: boolean;
 	scopedModels?: Array<{ model: Model<any>; thinkingLevel?: ThinkingLevel }>;
 	tools?: string[];
 	excludeTools?: CreateAgentSessionOptions["excludeTools"];
@@ -151,9 +155,28 @@ export async function createAgentSessionServices(
 
 	const diagnostics: AgentSessionRuntimeDiagnostic[] = [];
 	const extensionsResult = resourceLoader.getExtensions();
+	const activeProfileNames = settingsManager.getActiveResourceProfileNames();
+	const runtimeExtensionPaths = new Set(
+		(activeProfileNames.length === 0
+			? extensionsResult.extensions.filter((extension) => extension.sourceInfo.source === "inline")
+			: extensionsResult.extensions.filter((extension) =>
+					settingsManager.isResourceAllowedByProfile("extensions", extension.path, extension.sourceInfo.baseDir),
+				)
+		).map((extension) => extension.path),
+	);
 	for (const { name, config, extensionPath } of extensionsResult.runtime.pendingProviderRegistrations) {
+		// Initial model resolution needs providers before AgentSession binds its runner, but it must
+		// observe the same UAC-filtered extension generation as RuntimeBuilder. Registrations from
+		// withheld extensions remain inert and are discarded with the pending queue below.
+		if (!runtimeExtensionPaths.has(extensionPath)) continue;
 		try {
 			modelRegistry.registerProvider(name, config);
+			let ownedProviders = extensionsResult.runtime.providersByExtension.get(extensionPath);
+			if (!ownedProviders) {
+				ownedProviders = new Set();
+				extensionsResult.runtime.providersByExtension.set(extensionPath, ownedProviders);
+			}
+			ownedProviders.add(name);
 		} catch (error) {
 			const message = error instanceof Error ? error.message : String(error);
 			diagnostics.push({
@@ -189,7 +212,7 @@ export async function createAgentSessionFromServices(
 	const needsProfileReload =
 		options.resourceProfileDefinitions !== undefined ||
 		options.resourceProfileJson !== undefined ||
-		(options.resourceProfiles !== undefined && options.resourceProfiles.length > 0);
+		options.resourceProfiles !== undefined;
 	if (options.resourceProfileDefinitions) {
 		options.services.settingsManager.addInlineResourceProfileDefinitions(options.resourceProfileDefinitions);
 	}
@@ -203,7 +226,7 @@ export async function createAgentSessionFromServices(
 			);
 		}
 	}
-	if (options.resourceProfiles && options.resourceProfiles.length > 0) {
+	if (options.resourceProfiles !== undefined) {
 		options.services.settingsManager.setRuntimeResourceProfiles(options.resourceProfiles);
 	}
 	if (needsProfileReload) {
@@ -220,6 +243,8 @@ export async function createAgentSessionFromServices(
 		sessionManager: options.sessionManager,
 		model: options.model,
 		thinkingLevel: options.thinkingLevel,
+		isExplicitModel: options.isExplicitModel,
+		isExplicitThinking: options.isExplicitThinking,
 		scopedModels: options.scopedModels,
 		tools: options.tools,
 		excludeTools: options.excludeTools,

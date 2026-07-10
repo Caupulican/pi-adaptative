@@ -115,6 +115,20 @@ describe("settings selector", () => {
 		setKeybindings(new KeybindingsManager());
 	});
 
+	it("labels max reasoning and ultra orchestration in the thinking selector", () => {
+		const selector = new SettingsSelectorComponent(
+			makeConfig({ thinkingLevel: "max", availableThinkingLevels: ["max", "ultra"] }),
+			makeCallbacks(),
+		);
+
+		selector.getSettingsList().handleInput("thinking level");
+		selector.getSettingsList().handleInput("\r");
+		const output = selector.render(180).join("\n");
+
+		expect(output).toContain("Maximum reasoning depth for the hardest problems");
+		expect(output).toContain("Maximum reasoning with reinforced proactive delegation");
+	});
+
 	it("exposes self modification settings in the searchable settings TUI", () => {
 		const selector = new SettingsSelectorComponent(
 			makeConfig({ selfModification: { enabled: true, sourcePath: "/src/pi-adaptative" } }),
@@ -341,7 +355,7 @@ describe("settings selector", () => {
 		selector.getSettingsList().handleInput("memory retrieval");
 		const topLevelOutput = selector.render(180).join("\n");
 		expect(topLevelOutput).toContain("Context / Memory Retrieval");
-		expect(topLevelOutput).toContain("enabled (max 5 results)");
+		expect(topLevelOutput).toContain("enabled (max 5, in prompt, local only)");
 
 		selector.getSettingsList().handleInput("\r");
 		const output = selector.render(180).join("\n");
@@ -349,20 +363,20 @@ describe("settings selector", () => {
 		expect(output).toContain("Local memory retrieval");
 		expect(output).toContain("Max results");
 
-		// The local-only / observe-only note lives in the enabled item's description.
+		// The default-on / hard-off contract lives in the enabled item's description.
 		selector.getSettingsList().handleInput("\x1b[B");
 		const enabledItemOutput = selector.render(180).join("\n");
-		expect(enabledItemOutput).toContain("okf-memory");
-		expect(enabledItemOutput).toContain("Local-only");
+		expect(enabledItemOutput).toContain("Default on");
+		expect(enabledItemOutput).toContain("hard off-switch");
 	});
 
-	it("shows disabled as the default summary when context/memory-retrieval is not configured", () => {
+	it("shows local safe-auto retrieval as the default when it is not configured", () => {
 		const selector = new SettingsSelectorComponent(makeConfig({ contextMemoryRetrieval: {} }), makeCallbacks());
 
 		selector.getSettingsList().handleInput("memory retrieval");
 		const output = selector.render(180).join("\n");
 
-		expect(output).toContain("disabled");
+		expect(output).toContain("enabled (max 5, in prompt, local only)");
 	});
 
 	it("persists toggling context/memory-retrieval on from its submenu", () => {
@@ -377,7 +391,10 @@ describe("settings selector", () => {
 		selector.getSettingsList().handleInput("\x1b[B"); // down to "Local memory retrieval"
 		selector.getSettingsList().handleInput("\r"); // cycle false -> true
 
-		expect(onContextMemoryRetrievalChange).toHaveBeenCalledWith({ enabled: true, maxResults: 5 }, "global");
+		expect(onContextMemoryRetrievalChange).toHaveBeenCalledWith(
+			{ enabled: true, maxResults: 5, includeInPrompt: true, allowExternalEgress: false },
+			"global",
+		);
 	});
 
 	it("persists context/memory-retrieval maxResults only as one of the discrete safe values (no free-text entry)", () => {
@@ -393,7 +410,10 @@ describe("settings selector", () => {
 		selector.getSettingsList().handleInput("\x1b[B"); // down to "Max results"
 		selector.getSettingsList().handleInput("\r"); // cycle 5 -> 10 (next in ["1","3","5","10","20"])
 
-		expect(onContextMemoryRetrievalChange).toHaveBeenLastCalledWith({ enabled: true, maxResults: 10 }, "global");
+		expect(onContextMemoryRetrievalChange).toHaveBeenLastCalledWith(
+			{ enabled: true, maxResults: 10, includeInPrompt: true, allowExternalEgress: false },
+			"global",
+		);
 
 		// Every value ever offered by the cycling list is inside the settings-manager's
 		// hard [1, 20] clamp range -- there is no way to reach an out-of-range value
@@ -426,7 +446,7 @@ describe("settings selector", () => {
 
 		selector.getSettingsList().handleInput("memory retrieval");
 		const topLevelOutput = selector.render(180).join("\n");
-		expect(topLevelOutput).toContain("enabled (max 5 results, in prompt)");
+		expect(topLevelOutput).toContain("enabled (max 5, in prompt, local only)");
 
 		selector.getSettingsList().handleInput("\r");
 		const output = selector.render(180).join("\n");
@@ -441,7 +461,7 @@ describe("settings selector", () => {
 		// The description may line-wrap in the rendered output, so check substrings that
 		// survive wrapping rather than the exact phrase.
 		expect(includeItemOutput).toContain("transcript");
-		expect(includeItemOutput).toContain("untrusted-evidence");
+		expect(includeItemOutput).toContain("untrusted evidence");
 	});
 
 	it("persists toggling Include in prompt on from its submenu", () => {
@@ -459,7 +479,35 @@ describe("settings selector", () => {
 		selector.getSettingsList().handleInput("\r"); // cycle false -> true
 
 		expect(onContextMemoryRetrievalChange).toHaveBeenCalledWith(
-			{ enabled: true, maxResults: 5, includeInPrompt: true },
+			{ enabled: true, maxResults: 5, includeInPrompt: true, allowExternalEgress: false },
+			"global",
+		);
+	});
+
+	it("shows and persists explicit external memory-query consent", () => {
+		const onContextMemoryRetrievalChange = vi.fn();
+		const selector = new SettingsSelectorComponent(
+			makeConfig({
+				contextMemoryRetrieval: {
+					enabled: true,
+					maxResults: 5,
+					includeInPrompt: true,
+					allowExternalEgress: false,
+				},
+			}),
+			makeCallbacks({ onContextMemoryRetrievalChange }),
+		);
+
+		selector.getSettingsList().handleInput("memory retrieval");
+		selector.getSettingsList().handleInput("\r");
+		for (let index = 0; index < 4; index++) selector.getSettingsList().handleInput("\x1b[B");
+		const output = selector.render(180).join("\n");
+		expect(output).toContain("Allow external queries");
+		expect(output).toContain("Explicit consent");
+		selector.getSettingsList().handleInput("\r");
+
+		expect(onContextMemoryRetrievalChange).toHaveBeenCalledWith(
+			{ enabled: true, maxResults: 5, includeInPrompt: true, allowExternalEgress: true },
 			"global",
 		);
 	});
@@ -937,8 +985,8 @@ describe("settings selector", () => {
 		selector.getSettingsList().handleInput("\x1b[B");
 		selector.getSettingsList().handleInput("\x1b[B"); // down to "Expensive thinking"
 		selector.getSettingsList().handleInput("\r"); // open Expensive Tier Thinking picker; preselects "(inherit)"
-		selector.getSettingsList().handleInput("\x1b[A"); // (inherit) wraps up to "xhigh" (last option)
-		selector.getSettingsList().handleInput("\r"); // select "xhigh"
+		selector.getSettingsList().handleInput("\x1b[A"); // (inherit) wraps up to "ultra" (last option)
+		selector.getSettingsList().handleInput("\r"); // select "ultra"
 
 		expect(onModelRouterChange).toHaveBeenCalledWith(
 			{
@@ -946,10 +994,37 @@ describe("settings selector", () => {
 				cheapModel: "openai/gpt-5.4",
 				expensiveModel: "openai/gpt-5.4",
 				learningModel: "active",
-				expensiveThinking: "xhigh",
+				expensiveThinking: "ultra",
 			},
 			"global",
 		);
+	});
+
+	it("does not offer Ultra to a routed model whose metadata stops at Max", () => {
+		const selector = new SettingsSelectorComponent(
+			makeConfig({
+				modelRouter: {
+					enabled: true,
+					expensiveModel: "openai/gpt-5.6-luna",
+					expensiveThinking: "ultra",
+				},
+				resolveModelThinkingLevels: (modelPattern) =>
+					modelPattern === "openai/gpt-5.6-luna"
+						? ["off", "minimal", "low", "medium", "high", "xhigh", "max"]
+						: ["off", "minimal", "low", "medium", "high", "xhigh", "max", "ultra"],
+			}),
+			makeCallbacks(),
+		);
+
+		selector.getSettingsList().handleInput("model router");
+		selector.getSettingsList().handleInput("\r");
+		for (let index = 0; index < 10; index++) selector.getSettingsList().handleInput("\x1b[B");
+		selector.getSettingsList().handleInput("\r");
+		const output = selector.render(180).join("\n");
+
+		expect(output).toContain("Maximum reasoning depth for the hardest problems");
+		expect(output).not.toContain("reinforced proactive delegation");
+		expect(output).not.toContain("ultra");
 	});
 
 	it("sets the executor thinking level from the Model Router submenu", () => {
