@@ -821,6 +821,11 @@ export class ModelRegistry {
 		}
 	}
 
+	/** Recover a locally stored OAuth credential rejected by the provider. */
+	async recoverRejectedOAuthApiKey(providerId: string, rejectedApiKey: string): Promise<string | undefined> {
+		return this.authStorage.recoverRejectedOAuthApiKey(providerId, rejectedApiKey);
+	}
+
 	/**
 	 * Return auth status for a provider, including request auth configured in models.json.
 	 * This intentionally does not execute command-backed config values.

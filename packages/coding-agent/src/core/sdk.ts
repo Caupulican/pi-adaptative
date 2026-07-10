@@ -426,6 +426,10 @@ export async function createAgentSession(options: CreateAgentSessionOptions = {}
 			return streamSimple(model, context, {
 				...options,
 				apiKey: auth.apiKey,
+				onAuthRejection:
+					auth.apiKey && model.provider === "openai-codex-responses"
+						? async () => modelRegistry.recoverRejectedOAuthApiKey(model.provider, auth.apiKey as string)
+						: options?.onAuthRejection,
 				timeoutMs,
 				websocketConnectTimeoutMs,
 				maxRetries: options?.maxRetries ?? providerRetrySettings.maxRetries,

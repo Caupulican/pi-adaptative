@@ -453,6 +453,41 @@ export class AuthStorage {
 	}
 
 	/**
+	 * Recover an OAuth credential rejected before a response body was consumed.
+	 * The lock re-checks the file so a concurrent process's rotation wins without
+	 * causing an unnecessary refresh.
+	 */
+	async recoverRejectedOAuthApiKey(providerId: string, rejectedApiKey: string): Promise<string | undefined> {
+		if (this.runtimeOverrides.has(providerId)) return undefined;
+		const provider = getOAuthProvider(providerId);
+		if (!provider) return undefined;
+
+		return this.storage.withLockAsync(async (current) => {
+			const currentData = this.parseStorageData(current);
+			this.data = currentData;
+			const credential = currentData[providerId];
+			if (credential?.type !== "oauth") return { result: undefined };
+
+			const currentKey = provider.getApiKey(credential);
+			if (currentKey !== rejectedApiKey && Date.now() < credential.expires) {
+				return { result: currentKey };
+			}
+
+			try {
+				const refreshed = await provider.refreshToken(credential);
+				const nextCredential: OAuthCredential = { type: "oauth", ...refreshed };
+				const nextData = { ...currentData, [providerId]: nextCredential };
+				this.data = nextData;
+				this.loadError = null;
+				return { result: provider.getApiKey(nextCredential), next: JSON.stringify(nextData, null, 2) };
+			} catch (error) {
+				this.recordError(error);
+				return { result: undefined };
+			}
+		});
+	}
+
+	/**
 	 * Get API key for a provider.
 	 * Priority:
 	 * 1. Runtime override (CLI --api-key)

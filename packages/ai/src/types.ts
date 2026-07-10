@@ -106,6 +106,15 @@ export interface TextToolProtocolParseEvent {
 }
 
 export interface StreamOptions {
+	/**
+	 * Recover one rejected OAuth credential before any response body is consumed.
+	 * The callback must not expose credentials in diagnostics.
+	 */
+	onAuthRejection?: (event: {
+		providerId: string;
+		status: 401;
+		attempt: number;
+	}) => string | undefined | Promise<string | undefined>;
 	temperature?: number;
 	maxTokens?: number;
 	signal?: AbortSignal;

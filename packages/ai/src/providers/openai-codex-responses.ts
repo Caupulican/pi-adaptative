@@ -33,7 +33,7 @@ import type {
 	StreamOptions,
 	Usage,
 } from "../types.ts";
-import { abortableSleep, combineAbortSignals } from "../utils/abort-signals.ts";
+import { abortableSleep } from "../utils/abort-signals.ts";
 import {
 	appendAssistantMessageDiagnostic,
 	createAssistantMessageDiagnostic,
@@ -60,7 +60,6 @@ const JWT_CLAIM_PATH = "https://api.openai.com/auth" as const;
 const DEFAULT_MAX_RETRIES = 0;
 const BASE_DELAY_MS = 1000;
 const DEFAULT_MAX_RETRY_DELAY_MS = 60_000;
-const DEFAULT_SSE_HEADER_TIMEOUT_MS = 20_000;
 const DEFAULT_WEBSOCKET_CONNECT_TIMEOUT_MS = 15_000;
 const CODEX_TOOL_CALL_PROVIDERS = new Set(["openai", "openai-codex", "opencode"]);
 const WEBSOCKET_MESSAGE_TOO_BIG_CLOSE_CODE = 1009;
@@ -189,20 +188,6 @@ function normalizeTimeoutMs(value: number | undefined): number | undefined {
 	return Math.floor(value);
 }
 
-function createSSEHeaderTimeout(): { signal: AbortSignal; clear: () => void; error: () => Error | undefined } {
-	const controller = new AbortController();
-	let error: Error | undefined;
-	const timeout = setTimeout(() => {
-		error = new Error(`Codex SSE response headers timed out after ${DEFAULT_SSE_HEADER_TIMEOUT_MS}ms`);
-		controller.abort(error);
-	}, DEFAULT_SSE_HEADER_TIMEOUT_MS);
-	return {
-		signal: controller.signal,
-		clear: () => clearTimeout(timeout),
-		error: () => error,
-	};
-}
-
 function parseHeaderNumber(headers: Headers, name: string): number | undefined {
 	const value = headers.get(name);
 	if (!value) return undefined;
@@ -313,7 +298,7 @@ export const streamOpenAICodexResponses: StreamFunction<"openai-codex-responses"
 				body = nextBody as RequestBody;
 			}
 			const websocketRequestId = options?.sessionId || createCodexRequestId();
-			const sseHeaders = buildSSEHeaders(
+			let sseHeaders = buildSSEHeaders(
 				model.headers,
 				options?.headers,
 				accountId,
@@ -382,6 +367,7 @@ export const streamOpenAICodexResponses: StreamFunction<"openai-codex-responses"
 						}),
 					);
 					recordWebSocketFailure(options?.sessionId, error);
+					markCodexRouteRetrySse(options?.sessionId);
 					if (websocketStarted) {
 						throw error;
 					}
@@ -393,6 +379,7 @@ export const streamOpenAICodexResponses: StreamFunction<"openai-codex-responses"
 			let response: Response | undefined;
 			let lastError: Error | undefined;
 			const maxRetries = options?.maxRetries ?? DEFAULT_MAX_RETRIES;
+			let authRecoveryAttempt = 0;
 
 			for (let attempt = 0; attempt <= maxRetries; attempt++) {
 				if (options?.signal?.aborted) {
@@ -400,22 +387,12 @@ export const streamOpenAICodexResponses: StreamFunction<"openai-codex-responses"
 				}
 
 				try {
-					const headerTimeout = createSSEHeaderTimeout();
-					const combinedSignal = combineAbortSignals([options?.signal, headerTimeout.signal]);
-					try {
-						response = await fetch(resolveCodexUrl(model.baseUrl), {
-							method: "POST",
-							headers: sseHeaders,
-							body: bodyJson,
-							signal: combinedSignal.signal,
-						});
-					} catch (error) {
-						const timeoutError = headerTimeout.error();
-						throw timeoutError && !options?.signal?.aborted ? timeoutError : error;
-					} finally {
-						combinedSignal.cleanup();
-						headerTimeout.clear();
-					}
+					response = await fetch(resolveCodexUrl(model.baseUrl), {
+						method: "POST",
+						headers: sseHeaders,
+						body: bodyJson,
+						signal: options?.signal,
+					});
 					await options?.onResponse?.(
 						{ status: response.status, headers: headersToRecord(response.headers) },
 						model,
@@ -423,6 +400,26 @@ export const streamOpenAICodexResponses: StreamFunction<"openai-codex-responses"
 
 					if (response.ok) {
 						break;
+					}
+
+					if (response.status === 401 && authRecoveryAttempt === 0 && options?.onAuthRejection) {
+						authRecoveryAttempt = 1;
+						const replacementKey = await options.onAuthRejection({
+							providerId: model.provider,
+							status: 401,
+							attempt: authRecoveryAttempt,
+						});
+						if (replacementKey) {
+							sseHeaders = buildSSEHeaders(
+								model.headers,
+								options?.headers,
+								extractAccountId(replacementKey),
+								replacementKey,
+								options?.sessionId,
+								model.openaiResponsesLite === true,
+							);
+							continue;
+						}
 					}
 
 					const errorText = await response.text();
@@ -474,6 +471,7 @@ export const streamOpenAICodexResponses: StreamFunction<"openai-codex-responses"
 			appendCodexSubscriptionRateLimitDiagnostics(output, response.headers);
 			stream.push({ type: "start", partial: output });
 			await processStream(response, output, stream, model, options);
+			markSseSuccess(options?.sessionId);
 
 			if (options?.signal?.aborted) {
 				throw new Error("Request was aborted");
@@ -759,32 +757,23 @@ async function* parseSSE(response: Response, signal?: AbortSignal): AsyncGenerat
 			if (signal?.aborted) {
 				throw new Error("Request was aborted");
 			}
-			if (done) break;
+			if (done) {
+				buffer += decoder.decode();
+				if (buffer.trim().length > 0) {
+					const finalEvent = parseSSEFrame(buffer);
+					if (finalEvent !== undefined) yield finalEvent;
+				}
+				break;
+			}
 			buffer += decoder.decode(value, { stream: true });
 
-			let idx = buffer.indexOf("\n\n");
-			while (idx !== -1) {
-				const chunk = buffer.slice(0, idx);
-				buffer = buffer.slice(idx + 2);
-
-				const dataLines = chunk
-					.split("\n")
-					.filter((l) => l.startsWith("data:"))
-					.map((l) => l.slice(5).trim());
-				if (dataLines.length > 0) {
-					const data = dataLines.join("\n").trim();
-					if (data && data !== "[DONE]") {
-						try {
-							yield JSON.parse(data) as Record<string, unknown>;
-						} catch (cause) {
-							throw new CodexProtocolError(`Invalid Codex SSE JSON: ${formatThrownValue(cause)}`, {
-								cause,
-								payload: data,
-							});
-						}
-					}
-				}
-				idx = buffer.indexOf("\n\n");
+			let separator = findSSESeparator(buffer);
+			while (separator) {
+				const [idx, length] = separator;
+				const event = parseSSEFrame(buffer.slice(0, idx));
+				buffer = buffer.slice(idx + length);
+				if (event !== undefined) yield event;
+				separator = findSSESeparator(buffer);
 			}
 			if (buffer.length > MAX_SSE_LINE_CHARS) {
 				// A delimiter-less stream would otherwise grow this buffer without bound.
@@ -799,6 +788,29 @@ async function* parseSSE(response: Response, signal?: AbortSignal): AsyncGenerat
 		try {
 			reader.releaseLock();
 		} catch {}
+	}
+}
+
+function findSSESeparator(buffer: string): [number, number] | undefined {
+	const match = /(?:\r\n\r\n|\n\n|\r\r)/.exec(buffer);
+	return match?.index === undefined ? undefined : [match.index, match[0].length];
+}
+
+function parseSSEFrame(chunk: string): Record<string, unknown> | undefined {
+	const dataLines = chunk
+		.split(/\r?\n|\r/)
+		.filter((line) => line.startsWith("data:"))
+		.map((line) => line.slice(5).trim());
+	if (dataLines.length === 0) return undefined;
+	const data = dataLines.join("\n").trim();
+	if (!data || data === "[DONE]") return undefined;
+	try {
+		return JSON.parse(data) as Record<string, unknown>;
+	} catch (cause) {
+		throw new CodexProtocolError(`Invalid or truncated Codex SSE JSON: ${formatThrownValue(cause)}`, {
+			cause,
+			payload: data,
+		});
 	}
 }
 
@@ -827,6 +839,7 @@ interface CachedWebSocketContinuationState {
 
 interface CachedWebSocketConnection {
 	socket: WebSocketLike;
+	authIdentity: string;
 	busy: boolean;
 	idleTimer?: ReturnType<typeof setTimeout>;
 	continuation?: CachedWebSocketContinuationState;
@@ -851,7 +864,8 @@ export interface OpenAICodexWebSocketDebugStats {
 
 const websocketSessionCache = new Map<string, CachedWebSocketConnection>();
 const websocketDebugStats = new Map<string, OpenAICodexWebSocketDebugStats>();
-const websocketSseFallbackSessions = new Set<string>();
+type CodexRouteState = "healthy" | "retry_sse" | "unsupported";
+const websocketRouteStates = new Map<string, CodexRouteState>();
 
 function getOrCreateWebSocketDebugStats(sessionId: string): OpenAICodexWebSocketDebugStats {
 	let stats = websocketDebugStats.get(sessionId);
@@ -881,11 +895,11 @@ export function getOpenAICodexWebSocketDebugStats(sessionId: string): OpenAICode
 export function resetOpenAICodexWebSocketDebugStats(sessionId?: string): void {
 	if (sessionId) {
 		websocketDebugStats.delete(sessionId);
-		websocketSseFallbackSessions.delete(sessionId);
+		websocketRouteStates.delete(sessionId);
 		return;
 	}
 	websocketDebugStats.clear();
-	websocketSseFallbackSessions.clear();
+	websocketRouteStates.clear();
 }
 
 export function closeOpenAICodexWebSocketSessions(sessionId?: string): void {
@@ -910,8 +924,19 @@ registerSessionResourceCleanup(closeOpenAICodexWebSocketSessions);
 // outlive the session in long-running processes that switch sessions.
 registerSessionResourceCleanup(resetOpenAICodexWebSocketDebugStats);
 
+function getCodexRouteState(sessionId: string | undefined): CodexRouteState {
+	return sessionId ? (websocketRouteStates.get(sessionId) ?? "healthy") : "healthy";
+}
+
 function isWebSocketSseFallbackActive(sessionId: string | undefined): boolean {
-	return sessionId ? websocketSseFallbackSessions.has(sessionId) : false;
+	return getCodexRouteState(sessionId) !== "healthy";
+}
+
+function markSseSuccess(sessionId: string | undefined): void {
+	if (!sessionId) return;
+	websocketRouteStates.set(sessionId, "healthy");
+	const stats = getOrCreateWebSocketDebugStats(sessionId);
+	stats.websocketFallbackActive = false;
 }
 
 function recordWebSocketSseFallback(sessionId: string | undefined): void {
@@ -921,14 +946,17 @@ function recordWebSocketSseFallback(sessionId: string | undefined): void {
 	stats.websocketFallbackActive = isWebSocketSseFallbackActive(sessionId);
 }
 
+function markCodexRouteRetrySse(sessionId: string | undefined): void {
+	if (!sessionId) return;
+	websocketRouteStates.set(sessionId, "retry_sse");
+	getOrCreateWebSocketDebugStats(sessionId).websocketFallbackActive = true;
+}
+
 function recordWebSocketFailure(sessionId: string | undefined, error: unknown): void {
 	if (!sessionId) return;
-	websocketSseFallbackSessions.add(sessionId);
-
 	const stats = getOrCreateWebSocketDebugStats(sessionId);
 	stats.websocketFailures++;
 	stats.lastWebSocketError = formatThrownValue(error);
-	stats.websocketFallbackActive = true;
 }
 
 type WebSocketConstructor = new (
@@ -1093,6 +1121,7 @@ async function acquireWebSocket(
 	url: string,
 	headers: Headers,
 	sessionId: string | undefined,
+	authIdentity: string,
 	signal?: AbortSignal,
 	connectTimeoutMs?: number,
 ): Promise<{
@@ -1111,7 +1140,12 @@ async function acquireWebSocket(
 	}
 
 	const cached = websocketSessionCache.get(sessionId);
-	if (cached) {
+	if (cached && cached.authIdentity !== authIdentity) {
+		closeWebSocketSilently(cached.socket);
+		if (cached.idleTimer) clearTimeout(cached.idleTimer);
+		websocketSessionCache.delete(sessionId);
+	}
+	if (cached && cached.authIdentity === authIdentity) {
 		if (cached.idleTimer) {
 			clearTimeout(cached.idleTimer);
 			cached.idleTimer = undefined;
@@ -1150,7 +1184,7 @@ async function acquireWebSocket(
 	}
 
 	const socket = await connectWebSocket(url, headers, signal, connectTimeoutMs);
-	const entry: CachedWebSocketConnection = { socket, busy: true };
+	const entry: CachedWebSocketConnection = { socket, authIdentity, busy: true };
 	websocketSessionCache.set(sessionId, entry);
 	return {
 		socket,
@@ -1433,6 +1467,7 @@ async function processWebSocketStream(
 		url,
 		headers,
 		options?.sessionId,
+		options?.apiKey ?? "",
 		options?.signal,
 		websocketConnectTimeoutMs,
 	);

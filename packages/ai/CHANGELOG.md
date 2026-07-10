@@ -1,5 +1,9 @@
 ## [Unreleased]
 
+### Fixed
+
+- Removed the Codex SSE response-header timeout so caller-owned stream watchdogs can govern long GPT-5.6 admissions, reset transient WebSocket fallback state after successful SSE, and hardened SSE frame parsing across chunk boundaries and EOF.
+
 ## [0.81.27] - 2026-07-10
 
 ### Added

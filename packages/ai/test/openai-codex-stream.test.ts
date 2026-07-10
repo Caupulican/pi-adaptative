@@ -526,7 +526,7 @@ describe("openai-codex streaming", () => {
 		expect(result.stopReason).toBe("length");
 	});
 
-	it("aborts SSE fetch when response headers do not arrive", async () => {
+	it("preserves caller cancellation while waiting for SSE response headers", async () => {
 		vi.useFakeTimers();
 		const token = mockToken();
 
@@ -572,17 +572,18 @@ describe("openai-codex streaming", () => {
 			messages: [{ role: "user", content: "Say hello", timestamp: Date.now() }],
 		};
 
+		const controller = new AbortController();
 		const resultPromise = streamOpenAICodexResponses(model, context, {
 			apiKey: token,
 			transport: "sse",
+			signal: controller.signal,
 		}).result();
 		await vi.advanceTimersByTimeAsync(0);
 		expect(fetchMock).toHaveBeenCalledTimes(1);
 
-		await vi.advanceTimersByTimeAsync(20_000);
+		controller.abort(new Error("caller cancelled"));
 		const result = await resultPromise;
-		expect(result.stopReason).toBe("error");
-		expect(result.errorMessage).toBe("Codex SSE response headers timed out after 20000ms");
+		expect(result.stopReason).toBe("aborted");
 	});
 
 	it("aborts SSE body reads after response headers arrive", async () => {
@@ -1397,7 +1398,7 @@ describe("openai-codex streaming", () => {
 		expect(getOpenAICodexWebSocketDebugStats("ws-connect-timeout")).toMatchObject({
 			websocketFailures: 1,
 			sseFallbacks: 1,
-			websocketFallbackActive: true,
+			websocketFallbackActive: false,
 			lastWebSocketError: "WebSocket connect timeout after 50ms",
 		});
 	});
@@ -1500,7 +1501,7 @@ describe("openai-codex streaming", () => {
 		expect(getOpenAICodexWebSocketDebugStats("ws-idle-before-start")).toMatchObject({
 			websocketFailures: 1,
 			sseFallbacks: 1,
-			websocketFallbackActive: true,
+			websocketFallbackActive: false,
 		});
 	});
 
