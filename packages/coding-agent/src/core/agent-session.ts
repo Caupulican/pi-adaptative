@@ -327,7 +327,13 @@ export type AgentSessionEvent =
 	// exactly once per _promptUnserialized attempt that reaches past the early-return paths (queued
 	// steer/followUp, extension commands, input-transform) — never emitted for those.
 	| { type: "routing_start" }
-	| { type: "routing_end" };
+	| { type: "routing_end" }
+	| {
+			type: "delegate_workers";
+			active: number;
+			completedSinceFlush: number;
+			failedSinceFlush: number;
+	  };
 
 /** Listener function for agent session events */
 export type AgentSessionEventListener = (event: AgentSessionEvent) => void;
@@ -1053,6 +1059,9 @@ export class AgentSession {
 			getGoalStateSnapshot: () => this.getGoalStateSnapshot(),
 			saveGoalStateSnapshot: (state) => this.saveGoalStateSnapshot(state),
 			getContextGcReport: (messages) => this.getContextGcReport(messages),
+			startWorkerDelegation: (request) => this._backgroundLanes.startWorkerDelegation(request),
+			getWorkerLaneRecords: () => this._backgroundLanes.getLaneRecords(),
+			getWorkerResultSnapshots: () => this.getWorkerResultSnapshots(),
 			runWorkerDelegationOnce: (request) => this.runWorkerDelegationOnce(request),
 			runModelFitness: (args) => this.runModelFitness(args),
 			resolveCurationModelIfFit: () => this._resolveCurationModelIfFit(),
@@ -2777,6 +2786,9 @@ export class AgentSession {
 		) {
 			addIfRegistered("artifact_retrieve");
 		}
+		if (validToolNames.includes("delegate")) {
+			addIfRegistered("delegate_status");
+		}
 
 		this.agent.state.tools = tools;
 
@@ -3255,6 +3267,7 @@ export class AgentSession {
 			}
 		}
 
+		this._backgroundLanes.drainQueuedWorkerDelegations();
 		this._backgroundLanes.scheduleGoalAutoContinueFromIdle(options);
 		this._backgroundLanes.scheduleResearchLaneFromIdle();
 	}

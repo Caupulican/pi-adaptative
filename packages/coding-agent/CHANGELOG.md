@@ -1,5 +1,9 @@
 ## [Unreleased]
 
+### Fixed
+
+- Made delegated workers session-owned background jobs with non-blocking starts, explicit local-foreground queuing, bounded `delegate_status` retrieval, and safe read-only plain-text result handling.
+
 ## [0.81.27] - 2026-07-10
 
 ### Added

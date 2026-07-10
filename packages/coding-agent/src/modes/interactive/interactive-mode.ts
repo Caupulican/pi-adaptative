@@ -1971,6 +1971,20 @@ export class InteractiveMode {
 				this.showWarning(event.message);
 				break;
 
+			case "delegate_workers": {
+				const status =
+					event.active > 0
+						? `${event.active} running`
+						: event.failedSinceFlush > 0
+							? `${event.failedSinceFlush} failed`
+							: event.completedSinceFlush > 0
+								? "done"
+								: undefined;
+				this.footerDataProvider.setExtensionStatus("delegate", status ? `delegate: ${status}` : undefined);
+				this.footer.invalidate();
+				break;
+			}
+
 			case "message_start":
 				if (event.message.role === "custom") {
 					this.addMessageToChat(event.message);

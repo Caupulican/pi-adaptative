@@ -94,14 +94,40 @@ export interface ParsedWorkerOutput {
 	actions: WorkerAction[];
 }
 
+function balancedObjectCandidates(text: string): string[] {
+	const candidates: string[] = [];
+	for (let start = 0; start < text.length; start++) {
+		if (text[start] !== "{") continue;
+		let depth = 0;
+		let inString = false;
+		let escaped = false;
+		for (let index = start; index < text.length; index++) {
+			const character = text[index];
+			if (inString) {
+				if (escaped) escaped = false;
+				else if (character === "\\") escaped = true;
+				else if (character === '"') inString = false;
+				continue;
+			}
+			if (character === '"') {
+				inString = true;
+			} else if (character === "{") {
+				depth++;
+			} else if (character === "}" && --depth === 0) {
+				candidates.push(text.slice(start, index + 1));
+				break;
+			}
+		}
+	}
+	return candidates;
+}
+
 export function parseWorkerOutput(text: string): ParsedWorkerOutput | undefined {
 	const trimmed = text.trim();
 	const candidates: string[] = [trimmed];
 	const fenced = /```(?:json)?\s*([\s\S]*?)```/.exec(trimmed);
 	if (fenced?.[1]) candidates.push(fenced[1].trim());
-	const start = trimmed.indexOf("{");
-	const end = trimmed.lastIndexOf("}");
-	if (start >= 0 && end > start) candidates.push(trimmed.slice(start, end + 1));
+	candidates.push(...balancedObjectCandidates(trimmed));
 
 	for (const candidate of candidates) {
 		let parsed: unknown;
@@ -245,6 +271,26 @@ export async function runWorker(options: WorkerRunnerOptions): Promise<WorkerRun
 
 	const parsed = parseWorkerOutput(completion.text);
 	if (!parsed) {
+		const readOnlyPlainText =
+			!writeCapable &&
+			completion.stopReason === "stop" &&
+			completion.text.trim().length > 0 &&
+			completionChangedFiles.length === 0;
+		if (readOnlyPlainText) {
+			return finishOutcome({
+				request: options.request,
+				cwd: options.cwd,
+				result: {
+					...completionBaseResult,
+					status: "completed",
+					outputFormat: "plain_text",
+					summary: completion.text.trim().slice(0, 8000),
+				},
+				laneStatus: "succeeded",
+				reasonCode: "worker_completed_plain_text",
+				costUsd,
+			});
+		}
 		return finishOutcome({
 			request: options.request,
 			cwd: options.cwd,

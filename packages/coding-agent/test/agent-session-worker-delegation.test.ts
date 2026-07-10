@@ -219,7 +219,7 @@ describe("AgentSession worker delegation", () => {
 			expect(workerLaneRecords(harness)[0]?.status).toBe("succeeded");
 
 			const serialized = JSON.stringify(harness.session.messages);
-			expect(serialized).toContain("UNTRUSTED");
+			expect(serialized).not.toContain("UNTRUSTED");
 			expect(harness.getPendingResponseCount()).toBe(0);
 		} finally {
 			harness.cleanup();

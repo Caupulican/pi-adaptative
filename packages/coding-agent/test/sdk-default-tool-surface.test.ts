@@ -40,7 +40,11 @@ describe("SDK default tool surface", () => {
 			sessionManager: SessionManager.inMemory(),
 		});
 		try {
-			expect(session.getActiveToolNames()).toEqual(DEFAULT_ACTIVE_TOOL_NAMES);
+			expect(session.getActiveToolNames()).toEqual([
+				...DEFAULT_ACTIVE_TOOL_NAMES,
+				"artifact_retrieve",
+				"delegate_status",
+			]);
 			expect(session.getActiveToolNames()).toContain("delegate");
 		} finally {
 			session.dispose();
@@ -105,7 +109,11 @@ describe("SDK default tool surface", () => {
 		try {
 			expect(reload).toHaveBeenCalledTimes(1);
 			expect(settingsManager.getActiveResourceProfileNames()).toEqual([]);
-			expect(session.getActiveToolNames()).toEqual(DEFAULT_ACTIVE_TOOL_NAMES);
+			expect(session.getActiveToolNames()).toEqual([
+				...DEFAULT_ACTIVE_TOOL_NAMES,
+				"artifact_retrieve",
+				"delegate_status",
+			]);
 		} finally {
 			session.dispose();
 		}
@@ -131,7 +139,11 @@ describe("SDK default tool surface", () => {
 		});
 		try {
 			expect(settingsManager.getActiveResourceProfileNames()).toEqual([]);
-			expect(session.getActiveToolNames()).toEqual(DEFAULT_ACTIVE_TOOL_NAMES);
+			expect(session.getActiveToolNames()).toEqual([
+				...DEFAULT_ACTIVE_TOOL_NAMES,
+				"artifact_retrieve",
+				"delegate_status",
+			]);
 		} finally {
 			session.dispose();
 		}

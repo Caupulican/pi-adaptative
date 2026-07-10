@@ -30,7 +30,7 @@ import type {
 } from "./agent-session.ts";
 import type { CapabilityEnvelope, EvidenceBundle, WorkerRequest, WorkerResult } from "./autonomy/contracts.ts";
 import { createLaneToolSurface, type LaneToolSurface } from "./autonomy/lane-tool-surface.ts";
-import { type LaneRecord, LaneTracker } from "./autonomy/lane-tracker.ts";
+import { type LaneRecord, type LaneStatus, LaneTracker } from "./autonomy/lane-tracker.ts";
 import { safeRealpathSync } from "./autonomy/path-scope.ts";
 import { appendLaneRecordSnapshot, getLaneRecordSnapshots } from "./autonomy/session-lane-record.ts";
 import { composeSubagentSystemPrompt } from "./autonomy/subagent-prompt.ts";
@@ -130,8 +130,35 @@ export class BackgroundLaneController {
 	private readonly _workerDelegationAbort = new AbortController();
 	/** Session-local de-duplication for fail-closed profile grants that cannot bind to lane tools. */
 	private readonly _warnedUnboundLaneToolGrants = new Set<string>();
+	/** Every background execution is retained until its terminal result is observed. */
+	private readonly _workerPromises = new Map<string, Promise<WorkerDelegationRunOutcome>>();
+	private readonly _queuedWorkers = new Map<string, { instructions: string; systemPrompt?: string }>();
+	private _workerNotificationTimer: ReturnType<typeof setTimeout> | undefined;
+	private _workersCompletedSinceFlush = 0;
+	private _workersFailedSinceFlush = 0;
 
 	private readonly deps: BackgroundLaneControllerDeps;
+
+	private _scheduleWorkerNotification(): void {
+		if (this._workerNotificationTimer !== undefined) return;
+		this._workerNotificationTimer = setTimeout(() => {
+			this._workerNotificationTimer = undefined;
+			this.deps.emit({
+				type: "delegate_workers",
+				active: this._laneTracker.getActiveCount("worker"),
+				completedSinceFlush: this._workersCompletedSinceFlush,
+				failedSinceFlush: this._workersFailedSinceFlush,
+			});
+			this._workersCompletedSinceFlush = 0;
+			this._workersFailedSinceFlush = 0;
+		}, 75);
+	}
+
+	private _recordWorkerTerminal(status: LaneStatus): void {
+		if (status === "succeeded") this._workersCompletedSinceFlush++;
+		else this._workersFailedSinceFlush++;
+		this._scheduleWorkerNotification();
+	}
 
 	constructor(deps: BackgroundLaneControllerDeps) {
 		this.deps = deps;
@@ -593,13 +620,56 @@ export class BackgroundLaneController {
 	 * {@link validateWorkerResult} before acceptance, and persist result + lane record + spawned
 	 * usage (idempotent per-lane reportId). Consumed by the `delegate` tool.
 	 */
-	async runWorkerDelegationOnce(request: {
+	startWorkerDelegation(request: {
 		instructions: string;
 		/** Model-provided replacement for the worker role prompt (the level-0 core always remains). */
 		systemPrompt?: string;
-	}): Promise<WorkerDelegationRunOutcome> {
+	}): { started: false; skipReason: string } | { started: true; record: LaneRecord } {
+		const settings = this.deps.getSettingsManager().getWorkerDelegationSettings();
+		const foreground = this.deps.getModel();
+		const managedLocal = foreground?.provider === "ollama" || foreground?.provider === "transformers";
+		if (managedLocal) {
+			if (
+				this._queuedWorkers.size >= 8 ||
+				this._laneTracker.getActiveCount("worker") >= settings.maxConcurrent + 8
+			) {
+				return { started: false, skipReason: "worker_delegation_queue_full" };
+			}
+			const record = this._laneTracker.enqueue({ type: "worker" });
+			this._queuedWorkers.set(record.laneId, request);
+			this._scheduleWorkerNotification();
+			return { started: true, record };
+		}
+		let startedRecord: LaneRecord | undefined;
+		const promise = this.runWorkerDelegationOnce(request, (record) => {
+			startedRecord = record;
+		});
+		if (!startedRecord) {
+			// Preparation is synchronous up to the first isolated completion await. A promise that
+			// rejected before producing a lane is still observed below, so it cannot become unhandled.
+			void promise.catch(() => undefined);
+			return { started: false, skipReason: "worker_not_started" };
+		}
+		this._workerPromises.set(startedRecord.laneId, promise);
+		void promise.then(
+			() => this._workerPromises.delete(startedRecord?.laneId ?? ""),
+			() => this._workerPromises.delete(startedRecord?.laneId ?? ""),
+		);
+		return { started: true, record: startedRecord };
+	}
+
+	async runWorkerDelegationOnce(
+		request: {
+			instructions: string;
+			/** Model-provided replacement for the worker role prompt (the level-0 core always remains). */
+			systemPrompt?: string;
+		},
+		onStarted?: (record: LaneRecord) => void,
+		existingRecord?: LaneRecord,
+	): Promise<WorkerDelegationRunOutcome> {
 		const delegationSettings = this.deps.getSettingsManager().getWorkerDelegationSettings();
-		if (this._laneTracker.getActiveCount("worker") >= delegationSettings.maxConcurrent) {
+		const activeWorkers = this._laneTracker.getActiveCount("worker") - (existingRecord ? 1 : 0);
+		if (activeWorkers >= delegationSettings.maxConcurrent) {
 			return { started: false, skipReason: "worker_delegation_already_running" };
 		}
 		if (this.deps.isDisposed()) {
@@ -631,7 +701,9 @@ export class BackgroundLaneController {
 		this._laneTracker.ensureCounterAtLeast(
 			getLaneRecordSnapshots(this.deps.getSessionManager().getEntries()).length + 1,
 		);
-		const startedRecord = this._laneTracker.start({ type: "worker" });
+		const startedRecord = existingRecord ?? this._laneTracker.start({ type: "worker" });
+		if (existingRecord) this._laneTracker.markRunning(existingRecord.laneId);
+		onStarted?.(startedRecord);
 		const maxUsd = Math.min(
 			settings.maxUsd,
 			this.deps.getCapabilityEnvelope()?.maxEstimatedUsd ?? Number.POSITIVE_INFINITY,
@@ -793,6 +865,7 @@ export class BackgroundLaneController {
 					status: "canceled",
 					reasonCode: "session_disposed",
 				});
+				if (record) this._recordWorkerTerminal(record.status);
 				return { started: true, record, outcome };
 			}
 
@@ -807,6 +880,7 @@ export class BackgroundLaneController {
 				costUsd: outcome.costUsd,
 			});
 			if (record) {
+				this._recordWorkerTerminal(record.status);
 				appendLaneRecordSnapshot(this.deps.getSessionManager(), record);
 				// G3: worker lane terminal record -> worker_result event. Lane outcome only
 				// (status/reasonCode/cost) — never the worker's summary/changed-file text.
@@ -828,6 +902,7 @@ export class BackgroundLaneController {
 				status: "failed",
 				reasonCode: "worker_delegation_error",
 			});
+			if (record) this._recordWorkerTerminal(record.status);
 			if (record && !this.deps.isDisposed()) {
 				appendLaneRecordSnapshot(this.deps.getSessionManager(), record);
 				this.deps.emitAutonomyTelemetry({
@@ -927,6 +1002,45 @@ export class BackgroundLaneController {
 			// best-effort persistence
 		}
 		return { started: true, model: modelRef, report };
+	}
+
+	/** Start queued local workers at the owner session's foreground-idle boundary. */
+	drainQueuedWorkerDelegations(): void {
+		for (const [laneId, request] of [...this._queuedWorkers]) {
+			if (
+				this._laneTracker.getActiveCount("worker") >
+				this.deps.getSettingsManager().getWorkerDelegationSettings().maxConcurrent
+			)
+				break;
+			const record = this._laneTracker.getRecords().find((candidate) => candidate.laneId === laneId);
+			if (!record) {
+				this._queuedWorkers.delete(laneId);
+				continue;
+			}
+			this._queuedWorkers.delete(laneId);
+			const promise = this.runWorkerDelegationOnce(request, undefined, record);
+			this._workerPromises.set(laneId, promise);
+			void promise.then(
+				(outcome) => {
+					if (!outcome.started) {
+						const terminal = this._laneTracker.complete(laneId, {
+							status: "canceled",
+							reasonCode: outcome.skipReason,
+						});
+						if (terminal) this._recordWorkerTerminal(terminal.status);
+					}
+					this._workerPromises.delete(laneId);
+				},
+				() => {
+					const terminal = this._laneTracker.complete(laneId, {
+						status: "failed",
+						reasonCode: "worker_background_error",
+					});
+					if (terminal) this._recordWorkerTerminal(terminal.status);
+					this._workerPromises.delete(laneId);
+				},
+			);
+		}
 	}
 
 	/** Fitness reports persisted for THIS host (measured evidence for architect/profile decisions). */

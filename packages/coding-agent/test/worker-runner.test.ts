@@ -125,12 +125,13 @@ describe("runWorker", () => {
 		expect(outcome.reasonCode).toBe("worker_blocked");
 	});
 
-	it("fails on unparseable output while preserving spend", async () => {
+	it("salvages read-only plain text as bounded untrusted output while preserving spend", async () => {
 		const outcome = await runWorker(runnerOptions({ complete: async () => completionOf("plain prose", 0.03) }));
-		expect(outcome.result.status).toBe("failed");
-		expect(outcome.accepted).toBe(false);
-		expect(outcome.laneStatus).toBe("failed");
-		expect(outcome.reasonCode).toBe("unparseable_output");
+		expect(outcome.result.status).toBe("completed");
+		expect(outcome.result.outputFormat).toBe("plain_text");
+		expect(outcome.result.summary).toBe("plain prose");
+		expect(outcome.laneStatus).toBe("succeeded");
+		expect(outcome.reasonCode).toBe("worker_completed_plain_text");
 		expect(outcome.costUsd).toBe(0.03);
 	});
 

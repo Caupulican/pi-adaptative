@@ -6,6 +6,7 @@ import { cloneEvidenceBundleForStorage, isEvidenceBundle } from "../research/evi
 export function cloneWorkerResultForStorage(result: WorkerResult): WorkerResult {
 	return {
 		...result,
+		...(result.outputFormat ? { outputFormat: result.outputFormat } : {}),
 		changedFiles: [...result.changedFiles],
 		blockers: result.blockers ? [...result.blockers] : undefined,
 		evidence: result.evidence ? cloneEvidenceBundleForStorage(result.evidence) : undefined,
@@ -27,6 +28,8 @@ export function isWorkerResult(value: unknown): value is WorkerResult {
 		return false;
 	}
 	if (typeof obj.summary !== "string") return false;
+	if (obj.outputFormat !== undefined && obj.outputFormat !== "structured" && obj.outputFormat !== "plain_text")
+		return false;
 
 	if (!Array.isArray(obj.changedFiles) || !obj.changedFiles.every((f) => typeof f === "string")) {
 		return false;

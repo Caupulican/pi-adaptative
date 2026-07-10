@@ -43,6 +43,8 @@ import type {
 	IsolatedCompletionResult,
 	WorkerDelegationRunOutcome,
 } from "./agent-session.ts";
+import type { WorkerResult } from "./autonomy/contracts.ts";
+import type { LaneRecord } from "./autonomy/lane-tracker.ts";
 import type { ArtifactStore } from "./context/context-artifacts.ts";
 import type { MemoryPromptInclusionReport, MemoryRetrievalDiagnostics } from "./context/memory-diagnostics.ts";
 import type { ContextGcReport } from "./context-gc.ts";
@@ -87,6 +89,7 @@ import {
 import { executeToolkitScript } from "./toolkit/script-runner.ts";
 import { createContextScoutToolDefinition } from "./tools/context-scout.ts";
 import { createDelegateToolDefinition } from "./tools/delegate.ts";
+import { createDelegateStatusToolDefinition } from "./tools/delegate-status.ts";
 import { createFindTool } from "./tools/find.ts";
 import { createGoalToolDefinition } from "./tools/goal.ts";
 import { createGrepTool } from "./tools/grep.ts";
@@ -212,7 +215,14 @@ export interface RuntimeBuilderDeps {
 	saveGoalStateSnapshot(state: GoalState): string;
 	/** Context-gc report for the core diagnostics tool. */
 	getContextGcReport(messages: AgentMessage[]): ContextGcReport;
-	/** Worker-delegation runner for the delegate tool. */
+	/** Non-blocking worker-delegation starter for the delegate tool. */
+	startWorkerDelegation(request: {
+		instructions: string;
+		systemPrompt?: string;
+	}): { started: false; skipReason: string } | { started: true; record: LaneRecord };
+	getWorkerLaneRecords(): LaneRecord[];
+	getWorkerResultSnapshots(): WorkerResult[];
+	/** Worker-delegation runner for SDK/test through-completion calls. */
 	runWorkerDelegationOnce(request: {
 		instructions: string;
 		systemPrompt?: string;
@@ -633,9 +643,15 @@ export class RuntimeBuilder {
 			});
 			this._baseToolDefinitions.set(goalToolDefinition.name, goalToolDefinition);
 			const delegateToolDefinition = createDelegateToolDefinition({
+				startWorkerDelegation: (args) => this.deps.startWorkerDelegation(args),
 				runWorkerDelegation: (args) => this.deps.runWorkerDelegationOnce(args),
 			});
+			const delegateStatusToolDefinition = createDelegateStatusToolDefinition({
+				getLaneRecords: () => this.deps.getWorkerLaneRecords(),
+				getWorkerResultSnapshots: () => this.deps.getWorkerResultSnapshots(),
+			});
 			this._baseToolDefinitions.set(delegateToolDefinition.name, delegateToolDefinition);
+			this._baseToolDefinitions.set(delegateStatusToolDefinition.name, delegateStatusToolDefinition);
 			// Registered but not default-active: probes spend tokens on the probed model, so
 			// activation is an explicit choice (settings/profile/setActiveTools or /autonomy fitness).
 			const modelFitnessToolDefinition = createModelFitnessToolDefinition({

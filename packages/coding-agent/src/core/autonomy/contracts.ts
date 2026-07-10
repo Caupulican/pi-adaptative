@@ -142,10 +142,13 @@ export interface WorkerRequest {
 
 export type WorkerResultStatus = "completed" | "blocked" | "failed" | "cancelled";
 
+export type WorkerOutputFormat = "structured" | "plain_text";
+
 export interface WorkerResult {
 	requestId: string;
 	status: WorkerResultStatus;
 	summary: string;
+	outputFormat?: WorkerOutputFormat;
 	evidence?: EvidenceBundle;
 	changedFiles: readonly string[];
 	blockers?: readonly string[];

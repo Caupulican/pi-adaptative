@@ -92,17 +92,29 @@ export class LaneTracker {
 		}
 	}
 
-	start(args: { type: LaneType; goalId?: string }): LaneRecord {
+	enqueue(args: { type: LaneType; goalId?: string }): LaneRecord {
 		const laneId = `${args.type}-${this._nextLaneNumber++}`;
 		const record: LaneRecord = {
 			laneId,
 			type: args.type,
-			status: "running",
-			startedAt: this._now(),
+			status: "queued",
 		};
 		if (args.goalId !== undefined) record.goalId = args.goalId;
 		this._lanes.set(laneId, record);
 		return { ...record };
+	}
+
+	markRunning(laneId: string): LaneRecord | undefined {
+		const record = this._lanes.get(laneId);
+		if (!record || record.status !== "queued") return undefined;
+		const next = { ...record, status: "running" as const, startedAt: this._now() };
+		this._lanes.set(laneId, next);
+		return { ...next };
+	}
+
+	start(args: { type: LaneType; goalId?: string }): LaneRecord {
+		const record = this.enqueue(args);
+		return this.markRunning(record.laneId) as LaneRecord;
 	}
 
 	complete(

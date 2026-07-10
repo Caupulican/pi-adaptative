@@ -42,6 +42,10 @@ export interface DelegateToolDetails {
 }
 
 export interface DelegateToolDependencies {
+	startWorkerDelegation?: (args: {
+		instructions: string;
+		systemPrompt?: string;
+	}) => { started: false; skipReason: string } | { started: true; record: LaneRecord };
 	runWorkerDelegation: (args: { instructions: string; systemPrompt?: string }) => Promise<DelegateRunOutcome>;
 }
 
@@ -66,10 +70,29 @@ export function createDelegateToolDefinition(deps: DelegateToolDependencies): To
 			content: Array<{ type: "text"; text: string }>;
 			details: DelegateToolDetails;
 		}> {
-			const run = await deps.runWorkerDelegation({
+			const request = {
 				instructions: input.instructions,
 				...(input.systemPrompt ? { systemPrompt: input.systemPrompt } : {}),
-			});
+			};
+			if (deps.startWorkerDelegation) {
+				const started = deps.startWorkerDelegation(request);
+				if (!started.started) {
+					return {
+						content: [{ type: "text" as const, text: `delegate skipped: ${started.skipReason}` }],
+						details: { started: false, skipReason: started.skipReason },
+					};
+				}
+				return {
+					content: [
+						{
+							type: "text" as const,
+							text: `delegate started (${started.record.status}) — retrieve with delegate_status`,
+						},
+					],
+					details: { started: true, laneId: started.record.laneId, status: started.record.status },
+				};
+			}
+			const run = await deps.runWorkerDelegation(request);
 			if (!run.started) {
 				const reason = run.skipReason ?? "unknown";
 				return {
