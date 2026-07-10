@@ -51,9 +51,11 @@ describe("regression #5109: exclude tools", () => {
 			expect(allToolNames).toContain("bash");
 			expect(allToolNames).toContain("dynamic_tool");
 			expect(harness.session.getActiveToolNames().sort()).toEqual([
+				"artifact_retrieve",
 				"bash",
 				"context_audit",
 				"delegate",
+				"delegate_status",
 				"dynamic_tool",
 				"edit",
 				"goal",

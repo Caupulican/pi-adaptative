@@ -25,7 +25,7 @@ function scriptedComplete(behavior: {
 	return async ({ systemPrompt, userPrompt }: { systemPrompt: string; userPrompt: string }) => {
 		let text = "not json";
 		if (systemPrompt === RESEARCH_LANE_SYSTEM_PROMPT) text = behavior.research ?? "not json";
-		else if (systemPrompt === WORKER_LANE_SYSTEM_PROMPT) text = behavior.worker ?? "not json";
+		else if (systemPrompt === WORKER_LANE_SYSTEM_PROMPT) text = behavior.worker ?? "";
 		else if (systemPrompt === ROUTE_JUDGE_SYSTEM_PROMPT) text = behavior.judge?.(userPrompt) ?? "not json";
 		else if (systemPrompt === SEARCH_PROBE_SYSTEM_PROMPT) text = behavior.search ?? "not json";
 		else if (systemPrompt === TOOL_CALL_PROBE_SYSTEM_PROMPT) text = behavior.toolCall ?? "not json";
@@ -211,7 +211,11 @@ describe("runModelFitnessProbe", () => {
 
 describe("isProbeAllFailed", () => {
 	it("flags a real all-lanes-failed probe (the reported bug: 0/3 on every surface)", async () => {
-		const report = await runModelFitnessProbe({ trials: 3, now: () => 0, complete: scriptedComplete({}) });
+		const report = await runModelFitnessProbe({
+			trials: 3,
+			now: () => 0,
+			complete: scriptedComplete({ worker: "" }),
+		});
 		expect(isProbeAllFailed(report)).toBe(true);
 	});
 

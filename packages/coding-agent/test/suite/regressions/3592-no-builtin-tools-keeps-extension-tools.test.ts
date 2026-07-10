@@ -83,6 +83,7 @@ describe("regression #3592: no-builtin-tools keeps extension tools enabled", () 
 			"bash",
 			"context_audit",
 			"delegate",
+			"delegate_status",
 			"dynamic_tool",
 			"edit",
 			"extensionify",

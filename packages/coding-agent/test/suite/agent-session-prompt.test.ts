@@ -284,6 +284,8 @@ describe("AgentSession prompt characterization", () => {
 			"goal",
 			"delegate",
 			"run_toolkit_script",
+			"artifact_retrieve",
+			"delegate_status",
 		]);
 
 		await harness.session.prompt("/testcmd should-run");

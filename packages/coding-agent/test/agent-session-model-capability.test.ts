@@ -25,6 +25,8 @@ describe("model capability auto-detection", () => {
 				"goal",
 				"delegate",
 				"run_toolkit_script",
+				"artifact_retrieve",
+				"delegate_status",
 			]);
 		} finally {
 			harness.cleanup();
@@ -40,7 +42,14 @@ describe("model capability auto-detection", () => {
 			const profile = harness.session.getModelCapabilityProfile();
 			expect(profile.class).toBe("minimal");
 			expect(profile.backgroundLanesEnabled).toBe(false);
-			expect(harness.session.getActiveToolNames()).toEqual(["read", "bash", "edit", "write", "run_toolkit_script"]);
+			expect(harness.session.getActiveToolNames()).toEqual([
+				"read",
+				"bash",
+				"edit",
+				"write",
+				"run_toolkit_script",
+				"artifact_retrieve",
+			]);
 
 			// Idle turn with an active goal: neither goal auto-continue nor research may fire.
 			seedActiveGoal(harness);
@@ -93,7 +102,14 @@ describe("model capability auto-detection", () => {
 			expect(harness.session.systemPrompt).toContain(delegateSnippet);
 
 			await harness.session.setModel(harness.getModel("small-model")!);
-			expect(harness.session.getActiveToolNames()).toEqual(["read", "bash", "edit", "write", "run_toolkit_script"]);
+			expect(harness.session.getActiveToolNames()).toEqual([
+				"read",
+				"bash",
+				"edit",
+				"write",
+				"run_toolkit_script",
+				"artifact_retrieve",
+			]);
 			expect(harness.session.systemPrompt).not.toContain(delegateSnippet);
 
 			await harness.session.setModel(harness.getModel("big-model")!);
@@ -117,7 +133,14 @@ describe("model capability auto-detection", () => {
 			// trigger: it must re-derive from the pre-filter REQUEST, or the reduced active set
 			// leaks into the request and the later big-model switch restores only the reduced set.
 			(harness.session as unknown as { _refreshToolRegistry: () => void })._refreshToolRegistry();
-			expect(harness.session.getActiveToolNames()).toEqual(["read", "bash", "edit", "write", "run_toolkit_script"]);
+			expect(harness.session.getActiveToolNames()).toEqual([
+				"read",
+				"bash",
+				"edit",
+				"write",
+				"run_toolkit_script",
+				"artifact_retrieve",
+			]);
 
 			await harness.session.setModel(harness.getModel("big-model")!);
 			expect(harness.session.getActiveToolNames()).toEqual(fullSet);
@@ -141,7 +164,14 @@ describe("model capability auto-detection", () => {
 			const fullSet = harness.session.getActiveToolNames();
 			const firstCycle = await harness.session.cycleModel("forward");
 			expect(firstCycle?.model.id).toBe("small-model");
-			expect(harness.session.getActiveToolNames()).toEqual(["read", "bash", "edit", "write", "run_toolkit_script"]);
+			expect(harness.session.getActiveToolNames()).toEqual([
+				"read",
+				"bash",
+				"edit",
+				"write",
+				"run_toolkit_script",
+				"artifact_retrieve",
+			]);
 
 			const secondCycle = await harness.session.cycleModel("forward");
 			expect(secondCycle?.model.id).toBe("big-model");

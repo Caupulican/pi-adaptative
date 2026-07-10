@@ -1,5 +1,9 @@
 ## [Unreleased]
 
+### Fixed
+
+- Updated capability, fitness, and regression coverage for the artifact and delegation companion tools and plain-text worker results.
+
 ## [0.81.28] - 2026-07-10
 
 ### Fixed

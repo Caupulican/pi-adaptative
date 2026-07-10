@@ -182,7 +182,7 @@ function routerContext(
 }
 
 /** A scripted completer that never returns parseable output on any surface — the all-failed case. */
-const allFailingComplete = async () => ({ text: "not json", costUsd: 0, stopReason: "stop" });
+const allFailingComplete = async () => ({ text: "", costUsd: 0, stopReason: "stop" });
 
 /** A scripted completer that passes every surface — the fully-capable case. */
 const allPassingComplete = async ({ systemPrompt }: { systemPrompt: string }) => {
