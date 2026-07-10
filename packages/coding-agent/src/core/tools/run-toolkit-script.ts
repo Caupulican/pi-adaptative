@@ -1,4 +1,6 @@
 import { type Static, Type } from "typebox";
+import type { ArtifactStore } from "../context/context-artifacts.ts";
+import { formatArtifactNotice, packToolOutput } from "../context/tool-output-packer.ts";
 import type { ToolDefinition } from "../extensions/types.ts";
 import { acceptReflexPlan, type ReflexPlan } from "../toolkit/reflex-interpreter.ts";
 import { matchToolkitScript, type ToolkitScript } from "../toolkit/script-registry.ts";
@@ -28,11 +30,13 @@ export interface RunToolkitScriptDetails {
 	exitCode?: number | null;
 	durationMs?: number;
 	shortlist?: string[];
+	artifactId?: string;
 }
 
 export interface RunToolkitScriptDependencies {
 	getScripts: () => ToolkitScript[];
 	execute: (script: ToolkitScript, args: readonly string[]) => Promise<ScriptExecution>;
+	artifactStore?: ArtifactStore;
 	/**
 	 * Optional reflex interpreter (local brain): consulted ONLY when the deterministic Level-0
 	 * matcher is ambiguous, to resolve fuzzy phrasing ("prepare db" vs "update db") into a
@@ -40,10 +44,6 @@ export interface RunToolkitScriptDependencies {
 	 * contract apply identically to brain-selected scripts.
 	 */
 	interpret?: (request: string, scripts: readonly ToolkitScript[]) => Promise<ReflexPlan | undefined>;
-}
-
-function boundedOutput(text: string, maxChars = 4000): string {
-	return text.length <= maxChars ? text : `${text.slice(0, maxChars)}\n… (truncated)`;
 }
 
 export function createRunToolkitScriptToolDefinition(deps: RunToolkitScriptDependencies): ToolDefinition {
@@ -60,7 +60,7 @@ export function createRunToolkitScriptToolDefinition(deps: RunToolkitScriptDepen
 		],
 		parameters: runToolkitScriptSchema,
 		async execute(
-			_toolCallId,
+			toolCallId,
 			input: RunToolkitScriptInput,
 		): Promise<{
 			content: Array<{ type: "text"; text: string }>;
@@ -138,13 +138,28 @@ export function createRunToolkitScriptToolDefinition(deps: RunToolkitScriptDepen
 			const header = failed
 				? `FAILED: ${script.name} exited ${execution.timedOut ? "by timeout" : execution.exitCode} after ${execution.durationMs}ms`
 				: `${script.name} succeeded in ${execution.durationMs}ms`;
-			const body = [
+			const rawBody = [
 				header,
-				execution.stdout.trim() ? `stdout:\n${boundedOutput(execution.stdout.trim())}` : "stdout: (empty)",
-				execution.stderr.trim() ? `stderr:\n${boundedOutput(execution.stderr.trim())}` : "",
+				execution.stdout.trim() ? `stdout:\n${execution.stdout.trim()}` : "stdout: (empty)",
+				execution.stderr.trim() ? `stderr:\n${execution.stderr.trim()}` : "",
 			]
 				.filter(Boolean)
 				.join("\n");
+			const packed = packToolOutput(
+				{
+					toolName: "run_toolkit_script",
+					command: script.name,
+					path: script.path,
+					rawContent: rawBody,
+					reproducible: false,
+					truncation: { maxLines: 400, maxBytes: 8 * 1024 },
+				},
+				deps.artifactStore,
+				toolCallId,
+			);
+			const body = packed.artifactId
+				? `${packed.content}\n\n[${formatArtifactNotice(packed.artifactId)}]`
+				: packed.content;
 
 			return {
 				content: [{ type: "text" as const, text: body }],
@@ -156,6 +171,7 @@ export function createRunToolkitScriptToolDefinition(deps: RunToolkitScriptDepen
 					scriptName: script.name,
 					exitCode: execution.exitCode,
 					durationMs: execution.durationMs,
+					...(packed.artifactId ? { artifactId: packed.artifactId } : {}),
 				},
 				...(failed ? { isError: true } : {}),
 			};

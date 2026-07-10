@@ -172,12 +172,36 @@ describe("AgentSession local (Ollama) runtime readiness", () => {
 			}
 		});
 
-		it("reports a running non-owned Ollama store instead of silently using it", async () => {
+		it("reports a missing requested model on a running configured Ollama server", async () => {
 			const harness = await createHarness({ localRuntimeDeps: upDeps() });
 			try {
 				const result = await ensureReady(harness, localModel());
 				expect(result.ready).toBe(false);
-				expect(result.reason).toContain("wrong_store:external/unknown");
+				expect(result.reason).toContain("model_missing_on_server:qwen3:0.6b");
+			} finally {
+				harness.cleanup();
+			}
+		});
+
+		it("reuses a running configured Ollama server when it exposes the requested model", async () => {
+			const urls: string[] = [];
+			const harness = await createHarness({
+				localRuntimeDeps: {
+					...upDeps(),
+					fetchFn: (async (url: string) => {
+						urls.push(String(url));
+						if (String(url).endsWith("/api/tags")) {
+							return Response.json({ models: [{ name: "qwen3:0.6b", size: 1_000 }] });
+						}
+						if (String(url).endsWith("/api/ps")) return Response.json({ models: [] });
+						return new Response("{}", { status: 200 });
+					}) as unknown as typeof fetch,
+				},
+			});
+			try {
+				const result = await ensureReady(harness, localModel());
+				expect(result).toEqual({ ready: true, reason: "already_running_configured_server" });
+				expect(urls.some((url) => url.endsWith("/api/generate"))).toBe(false);
 			} finally {
 				harness.cleanup();
 			}
@@ -431,6 +455,45 @@ function registerOllamaFaux(harness: Awaited<ReturnType<typeof createHarness>>, 
 }
 
 describe("AgentSession local runtime readiness — end to end through prompt()", () => {
+	it("boots a manually selected local session model even when the model router is disabled", async () => {
+		const harness = await createHarness({ localRuntimeDeps: bootableDeps() });
+		const ollamaFaux = registerOllamaFaux(harness, ["qwen3:0.6b"]);
+		try {
+			await harness.session.setModel(ollamaFaux.models[0]);
+			ollamaFaux.setResponses([fauxAssistantMessage("manual local ready")]);
+
+			await harness.session.prompt("Answer locally");
+
+			const last = harness.session.messages.at(-1);
+			expect(last?.role).toBe("assistant");
+			expect(last && last.role === "assistant" ? last.content : []).toContainEqual({
+				type: "text",
+				text: "manual local ready",
+			});
+		} finally {
+			ollamaFaux.unregister();
+			harness.cleanup();
+		}
+	});
+
+	it("boots a configured local model before an isolated/background completion", async () => {
+		const harness = await createHarness({ localRuntimeDeps: bootableDeps() });
+		const ollamaFaux = registerOllamaFaux(harness, ["qwen3:0.6b"]);
+		try {
+			ollamaFaux.setResponses([fauxAssistantMessage("isolated local ready")]);
+			const result = await harness.session.runIsolatedCompletion({
+				systemPrompt: "isolated",
+				messages: [{ role: "user", content: "inspect", timestamp: Date.now() }],
+				model: ollamaFaux.models[0],
+			});
+
+			expect(result.text).toBe("isolated local ready");
+		} finally {
+			ollamaFaux.unregister();
+			harness.cleanup();
+		}
+	});
+
 	it("boots the local model's server before the turn with pi-owned storage and runs the turn on it", async () => {
 		let serveEnv: NodeJS.ProcessEnv | undefined;
 		const harness = await createHarness({
@@ -542,13 +605,17 @@ describe("AgentSession local runtime readiness — confirmed-up cache", () => {
 	});
 
 	it("re-checks after a local-model turn's assistant response comes back as a connection-shaped error", async () => {
-		let fetchCalls = 0;
+		let tagCalls = 0;
 		const harness = await createHarness({
 			settings: { modelRouter: { enabled: true, cheapModel: "ollama/qwen3:0.6b" } },
 			localRuntimeDeps: {
 				...upDeps(),
-				fetchFn: (async () => {
-					fetchCalls++;
+				fetchFn: (async (url: string) => {
+					if (String(url).endsWith("/api/tags")) {
+						tagCalls++;
+						return Response.json({ models: [{ name: "qwen3:0.6b", size: 1_000 }] });
+					}
+					if (String(url).endsWith("/api/ps")) return Response.json({ models: [] });
 					return new Response("{}", { status: 200 });
 				}) as unknown as typeof fetch,
 			},
@@ -557,11 +624,11 @@ describe("AgentSession local runtime readiness — confirmed-up cache", () => {
 		try {
 			ollamaFaux.setResponses([fauxAssistantMessage("", { stopReason: "error", errorMessage: "connection reset" })]);
 			await harness.session.prompt("Explain this code block").catch(() => {});
-			expect(fetchCalls).toBe(1); // confirmed up once, before the (failed) call
+			expect(tagCalls).toBe(1); // one detect also carries the requested-model presence list
 
 			ollamaFaux.appendResponses([fauxAssistantMessage("recovered")]);
 			await harness.session.prompt("Explain this code block again");
-			expect(fetchCalls).toBe(2); // the prior error invalidated the cache — re-checked
+			expect(tagCalls).toBe(2); // the prior error invalidated the cache — one fresh detect
 		} finally {
 			ollamaFaux.unregister();
 			harness.cleanup();

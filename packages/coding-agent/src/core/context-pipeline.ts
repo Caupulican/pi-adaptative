@@ -49,6 +49,7 @@ import type { ModelRegistry } from "./model-registry.ts";
 import { resolveCliModel } from "./model-resolver.ts";
 import { evaluateSurfaceFitness } from "./model-router/fitness-gate.ts";
 import { FitnessStore } from "./models/fitness-store.ts";
+import { HF_TRANSFORMERS_PROVIDER, OLLAMA_PROVIDER } from "./models/local-registration.ts";
 import type { SettingsManager } from "./settings-manager.ts";
 
 /** Latest user prompt text in the provider-visible array (curation goal line; bounded by caller). */
@@ -66,7 +67,7 @@ export function latestUserPromptText(messages: AgentMessage[]): string {
 	return "";
 }
 
-/** Read a packed grep/find tool result's `details.artifactId`, if present, without `any`. */
+/** Read a packed artifact-producing tool result's `details.artifactId`, if present, without `any`. */
 function extractArtifactId(message: AgentMessage | undefined): string | undefined {
 	if (!message || message.role !== "toolResult") return undefined;
 	const details = (message as { details?: unknown }).details;
@@ -84,6 +85,8 @@ export interface ContextPipelineDeps {
 	getSettingsManager(): SettingsManager;
 	/** Resolves a configured curation model pattern against configured auth. */
 	getModelRegistry(): ModelRegistry;
+	/** Foreground model currently executing the transformed request. */
+	getModel(): Model<Api> | undefined;
 	/** Root dir the host-keyed {@link FitnessStore} and per-session gc/artifact storage live under. */
 	getAgentDir(): string;
 	/** Workspace root, passed to the context-gc pass. */
@@ -136,7 +139,7 @@ export class ContextPipeline {
 
 	/**
 	 * Session-scoped, filesystem-backed artifact store for first-capture-then-bound tool
-	 * output (grep/find only, for now -- see tool-output-artifacts.md). Lazily created and
+	 * output (grep/find/run_toolkit_script -- see tool-output-artifacts.md). Lazily created and
 	 * cached so every tool construction in this session shares one store instance.
 	 *
 	 * `packToolOutput()` registers a reference (the packing tool call's id) at pack time
@@ -383,6 +386,17 @@ export class ContextPipeline {
 			if (!this._brainCurator.hasWork() || this._brainCurator.isDraining) return;
 			const model = this.resolveCurationModelIfFit();
 			if (!model) return;
+			const foregroundModel = this.deps.getModel();
+			const foregroundIsManagedLocal =
+				foregroundModel?.provider === OLLAMA_PROVIDER || foregroundModel?.provider === HF_TRANSFORMERS_PROVIDER;
+			const curatorIsManagedLocal =
+				model.provider === OLLAMA_PROVIDER || model.provider === HF_TRANSFORMERS_PROVIDER;
+			if (foregroundIsManagedLocal && curatorIsManagedLocal) {
+				// Local foreground accuracy/latency wins. A fire-and-forget curator can otherwise reach
+				// a single-parallel server first and make the user's request wait behind sidecar work.
+				this._lastCurationSkipReason = "curation_deferred_for_local_foreground";
+				return;
+			}
 			const settings = this.deps.getSettingsManager().getContextCurationSettings();
 			void this._drainBrainCuration(model, settings.maxJobsPerTurn);
 		} catch {
@@ -601,8 +615,8 @@ export class ContextPipeline {
 	}
 
 	/**
-	 * Reference-release + cleanup lifecycle: once context-gc has packed a grep/find tool
-	 * result out of the live prompt (the message is no longer current/active working
+	 * Reference-release + cleanup lifecycle: once context-gc has packed an artifact-producing
+	 * tool result (grep/find/run_toolkit_script) out of the live prompt (the message is no longer current/active working
 	 * context -- see contracts-and-retention.md's "ephemeral"/"expired" retention
 	 * classes), release the pack-time reference `packToolOutput()` registered for it, and
 	 * opportunistically reclaim now-unreferenced artifacts. This is the other half of the
@@ -619,7 +633,8 @@ export class ContextPipeline {
 
 		let releasedAny = false;
 		for (const record of report.records) {
-			if (record.toolName !== "grep" && record.toolName !== "find") continue;
+			if (record.toolName !== "grep" && record.toolName !== "find" && record.toolName !== "run_toolkit_script")
+				continue;
 			const artifactId = extractArtifactId(messages[record.messageIndex]);
 			if (!artifactId) continue;
 			if (store.removeReference(artifactId, record.toolCallId)) releasedAny = true;

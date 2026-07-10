@@ -80,6 +80,8 @@ export interface ReflectionControllerDeps {
 	): string | undefined;
 	/** Persist a learning-gate decision snapshot to the session log. */
 	saveLearningDecisionSnapshot(decision: LearningDecision): string;
+	/** Ensure a managed-local model is running/resident before any isolated lane calls it. */
+	ensureModelReady(model: Model<any>): Promise<void>;
 }
 
 export class ReflectionController {
@@ -106,6 +108,7 @@ export class ReflectionController {
 		if (!model) {
 			throw new Error("runIsolatedCompletion: no model available");
 		}
+		await this.deps.ensureModelReady(model);
 		const thinkingLevel = opts.thinkingLevel ?? "off";
 
 		// Fresh, isolated context: explicit messages, caller-owned tools only, nothing from the main session.
@@ -163,7 +166,9 @@ export class ReflectionController {
 				maxStallTurns: Math.max(2, Math.min(maxTurns, agent.maxStallTurns ?? maxTurns)),
 				toolExecution: "sequential",
 				toolArgumentTeachEnabled: agent.toolArgumentTeachEnabled,
+				onToolArgumentValidation: agent.onToolArgumentValidation,
 				toolValidationEscalationThreshold: agent.toolValidationEscalationThreshold,
+				onToolValidationEscalation: agent.onToolValidationEscalation,
 				beforeToolCall: opts.beforeToolCall,
 				afterToolCall: opts.afterToolCall,
 				shouldStopAfterTurn: () => {

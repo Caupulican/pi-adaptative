@@ -24,6 +24,8 @@ import {
 import { matchesInstalledLocalModel } from "./models/model-ref.ts";
 import {
 	OllamaRuntimeResidencyAdapter,
+	type RuntimeEvictionRecord,
+	type RuntimeResidencyAdapter,
 	RuntimeResidencyArbiter,
 	TransformersRuntimeResidencyAdapter,
 } from "./models/runtime-arbiter.ts";
@@ -78,6 +80,9 @@ export class LocalRuntimeController {
 	/** Server URLs confirmed reachable THIS session — skips the health-check round trip on every
 	 * local-routed turn once warm. Keyed the same way as _runtimes. */
 	private readonly _confirmedUp = new Set<string>();
+	/** All live runtime adapters participate in one session-wide residency view. */
+	private readonly _residencyAdapters = new Map<string, RuntimeResidencyAdapter>();
+	private readonly _recentEvictions: RuntimeEvictionRecord[] = [];
 
 	private readonly deps: LocalRuntimeControllerDeps;
 
@@ -154,27 +159,36 @@ export class LocalRuntimeController {
 	private async ensureOllamaResident(
 		model: Model<Api>,
 		runtime: OllamaRuntime,
+		knownSizeBytes?: number,
 	): Promise<{ ok: boolean; reason?: string }> {
-		let bytes = 0;
-		try {
-			const installed = await runtime.list();
-			bytes = installed.find((entry) => matchesInstalledLocalModel(model.id, entry.name))?.sizeBytes ?? 0;
-		} catch {
-			// Residency is best-effort; a list failure falls back to a zero-byte admission request.
+		let bytes = knownSizeBytes ?? 0;
+		if (knownSizeBytes === undefined) {
+			try {
+				const installed = await runtime.list();
+				bytes = installed.find((entry) => matchesInstalledLocalModel(model.id, entry.name))?.sizeBytes ?? 0;
+			} catch {
+				// Residency is best-effort; a list failure falls back to a zero-byte admission request.
+			}
 		}
-		const arbiter = new RuntimeResidencyArbiter({
-			budgetBytes: Math.floor(totalmem() * 0.85),
-			adapters: [new OllamaRuntimeResidencyAdapter("ollama", runtime)],
-		});
+		const serverUrl = this.deriveOllamaServerUrl(model.baseUrl);
+		const adapterId = `ollama:${serverUrl}`;
+		this._residencyAdapters.set(adapterId, new OllamaRuntimeResidencyAdapter(adapterId, runtime));
+		const arbiter = this.createResidencyArbiter();
 		try {
-			const plan = await arbiter.ensureResident("ollama", {
+			const nowMs = Date.now();
+			const plan = await arbiter.ensureResident(adapterId, {
 				model: model.id,
 				bytes,
 				role: "active",
 				priority: 100,
-				nowMs: Date.now(),
+				nowMs,
 				pinActiveModel: model.id,
+				recentEvictions: this._recentEvictions,
+				// Cold Ollama loads can legitimately take several minutes. The actual adaptive stream
+				// owns that wait; readiness must not front-run it with a 60-second empty generation.
+				loadModel: false,
 			});
+			this.recordEvictions(plan.evict, model.id, nowMs, adapterId);
 			return plan.status === "fits" ? { ok: true } : { ok: false, reason: `residency_refused:${plan.reason}` };
 		} catch (error) {
 			return { ok: false, reason: `residency_error:${error instanceof Error ? error.message : String(error)}` };
@@ -185,23 +199,97 @@ export class LocalRuntimeController {
 		model: Model<Api>,
 		runtime: TransformersRuntime,
 	): Promise<{ ok: boolean; reason?: string }> {
-		const arbiter = new RuntimeResidencyArbiter({
-			budgetBytes: Math.floor(totalmem() * 0.85),
-			adapters: [new TransformersRuntimeResidencyAdapter(`transformers:${model.id}`, runtime, model.id, 0)],
-		});
+		const serverUrl = this.deriveOpenAICompatServerUrl(model.baseUrl);
+		const adapterId = `transformers:${model.id}:${serverUrl}`;
+		this._residencyAdapters.set(adapterId, new TransformersRuntimeResidencyAdapter(adapterId, runtime, model.id, 0));
+		const arbiter = this.createResidencyArbiter();
 		try {
-			const plan = await arbiter.ensureResident(`transformers:${model.id}`, {
+			const nowMs = Date.now();
+			const plan = await arbiter.ensureResident(adapterId, {
 				model: model.id,
 				bytes: 0,
 				role: "active",
 				priority: 100,
-				nowMs: Date.now(),
+				nowMs,
 				pinActiveModel: model.id,
+				recentEvictions: this._recentEvictions,
+				loadModel: false,
 			});
+			this.recordEvictions(plan.evict, model.id, nowMs, adapterId);
 			return plan.status === "fits" ? { ok: true } : { ok: false, reason: `residency_refused:${plan.reason}` };
 		} catch (error) {
 			return { ok: false, reason: `residency_error:${error instanceof Error ? error.message : String(error)}` };
 		}
+	}
+
+	private createResidencyArbiter(): RuntimeResidencyArbiter {
+		return new RuntimeResidencyArbiter({
+			budgetBytes: Math.floor(totalmem() * 0.85),
+			adapters: [...this._residencyAdapters.values()],
+		});
+	}
+
+	private recordEvictions(
+		evicted: readonly { adapterId: string; model: string }[],
+		loaded: string,
+		atMs: number,
+		loadedAdapterId: string,
+	): void {
+		for (const resident of evicted) {
+			this._recentEvictions.push({
+				evicted: resident.model,
+				loaded,
+				atMs,
+				evictedAdapterId: resident.adapterId,
+				loadedAdapterId,
+			});
+		}
+		const cutoff = atMs - 5 * 60_000;
+		while (this._recentEvictions[0]?.atMs < cutoff) this._recentEvictions.shift();
+	}
+
+	/**
+	 * Readiness gate for every isolated/background completion. Unlike the foreground route gate it
+	 * never prompts or changes tiers: lanes either use the configured model or fail visibly.
+	 */
+	async ensureIsolatedModelReady(model: Model<Api>): Promise<void> {
+		if (!this.isManagedLocalProvider(model.provider)) return;
+		const readiness =
+			model.provider === OLLAMA_PROVIDER
+				? await this.ensureLocalModelReady(model)
+				: await this.ensureTransformersModelReady(model);
+		if (readiness.ready) return;
+		const guide = readiness.installGuide?.length ? `\n${readiness.installGuide.join("\n")}` : "";
+		throw new Error(
+			`Managed local model ${this.deps.formatModel(model)} is unavailable for isolated execution (${readiness.reason}).${guide}`,
+		);
+	}
+
+	/**
+	 * Readiness gate for a manually selected/default foreground model when no router route owns the
+	 * turn. Interactive sessions may offer the same managed-install consent as routed turns; the
+	 * selected model is never silently replaced.
+	 */
+	async ensureForegroundModelReady(model: Model<Api>): Promise<void> {
+		if (!this.isManagedLocalProvider(model.provider)) return;
+		let readiness: {
+			ready: boolean;
+			reason: string;
+			installGuide?: string[];
+			installAttemptError?: string;
+		} =
+			model.provider === OLLAMA_PROVIDER
+				? await this.ensureLocalModelReady(model)
+				: await this.ensureTransformersModelReady(model);
+		if (!readiness.ready) {
+			readiness =
+				model.provider === OLLAMA_PROVIDER
+					? await this.maybeInstallOllamaOnConsent(model, readiness)
+					: await this.maybeInstallTransformersOnConsent(model, readiness);
+		}
+		if (readiness.ready) return;
+		const detail = readiness.installAttemptError ?? readiness.installGuide?.join("\n") ?? readiness.reason;
+		throw new Error(`Managed local model ${this.deps.formatModel(model)} is unavailable: ${detail}`);
 	}
 
 	/**
@@ -225,15 +313,22 @@ export class LocalRuntimeController {
 		const runtime = this.getLocalRuntime(serverUrl);
 		const status = await runtime.detect();
 		if (status.serverUp) {
-			if (status.activeStore?.kind === "pi-owned") {
-				const resident = await this.ensureOllamaResident(model, runtime);
-				if (!resident.ok) return { ready: false, reason: resident.reason ?? "residency_refused" };
-				this._confirmedUp.add(confirmedKey);
-				return { ready: true, reason: "already_running" };
+			// Server ownership is not a capability boundary. Reuse a configured user/system server
+			// when it exposes the requested model; this preserves its accelerator settings and warm
+			// cache instead of forcing a slower duplicate Pi-owned process/store.
+			const installedEntry = status.serverModels.find((entry) => matchesInstalledLocalModel(model.id, entry.name));
+			if (!installedEntry) {
+				return {
+					ready: false,
+					reason: `model_missing_on_server:${model.id}:${status.activeStore?.path ?? "external/unknown"}`,
+				};
 			}
+			const resident = await this.ensureOllamaResident(model, runtime, installedEntry.sizeBytes);
+			if (!resident.ok) return { ready: false, reason: resident.reason ?? "residency_refused" };
+			this._confirmedUp.add(confirmedKey);
 			return {
-				ready: false,
-				reason: `wrong_store:${status.activeStore?.path ?? "external/unknown"}:${status.activeStore?.modelCount ?? 0}:${status.ownedModelsDir}`,
+				ready: true,
+				reason: status.managedByPi ? "already_running_managed" : "already_running_configured_server",
 			};
 		}
 		if (!status.binaryPath) {

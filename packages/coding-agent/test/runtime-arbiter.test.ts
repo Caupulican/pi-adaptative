@@ -221,4 +221,46 @@ describe("runtime residency arbiter", () => {
 		});
 		expect(refuse).toMatchObject({ status: "refuse", reason: "insufficient-evictable-memory" });
 	});
+
+	it("keeps identical model names distinct across runtime adapters when planning memory", async () => {
+		const first = new FauxRuntimeAdapter("ollama-11434", "keep-alive", ["same-model"]);
+		const second = new FauxRuntimeAdapter("ollama-22345", "keep-alive");
+		const arbiter = new RuntimeResidencyArbiter({ budgetBytes: 1_000, adapters: [first, second] });
+
+		const plan = await arbiter.ensureResident("ollama-22345", {
+			model: "same-model",
+			bytes: 1_000,
+			role: "active",
+			priority: 10,
+			nowMs: 1,
+		});
+
+		expect(plan.status).toBe("fits");
+		expect(plan.evict).toMatchObject([{ adapterId: "ollama-11434", model: "same-model" }]);
+		expect((await second.list()).map((entry) => entry.model)).toEqual(["same-model"]);
+	});
+
+	it("can admit without synchronously loading and skips redundant loads for resident models", async () => {
+		const adapter = new FauxRuntimeAdapter("ollama", "keep-alive", ["warm"]);
+		const arbiter = new RuntimeResidencyArbiter({ budgetBytes: 10_000, adapters: [adapter] });
+
+		await arbiter.ensureResident("ollama", {
+			model: "cold",
+			bytes: 1_000,
+			role: "active",
+			priority: 10,
+			nowMs: 1,
+			loadModel: false,
+		});
+		expect((await adapter.list()).map((entry) => entry.model)).toEqual(["warm"]);
+
+		await arbiter.ensureResident("ollama", {
+			model: "warm",
+			bytes: 1_000,
+			role: "active",
+			priority: 10,
+			nowMs: 2,
+		});
+		expect((await adapter.list()).map((entry) => entry.model)).toEqual(["warm"]);
+	});
 });

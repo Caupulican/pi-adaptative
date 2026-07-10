@@ -369,6 +369,26 @@ describe("AgentSession live tool construction wires a session-scoped file Artifa
 			expect(harness.session.getActiveToolNames()).toContain("artifact_retrieve");
 		});
 
+		it("setActiveToolsByName(['run_toolkit_script']) auto-activates artifact_retrieve", async () => {
+			const harness = await createHarness({
+				initialActiveToolNames: ["read", "bash", "edit", "write", "context_audit", "goal"],
+			});
+			harnesses.push(harness);
+
+			harness.session.setActiveToolsByName([
+				"read",
+				"bash",
+				"edit",
+				"write",
+				"context_audit",
+				"goal",
+				"run_toolkit_script",
+			]);
+
+			expect(harness.session.getActiveToolNames()).toContain("run_toolkit_script");
+			expect(harness.session.getActiveToolNames()).toContain("artifact_retrieve");
+		});
+
 		it("setActiveToolsByName(['grep']) alone auto-activates artifact_retrieve, and a live packed id is retrievable", async () => {
 			const harness = await createHarness({
 				initialActiveToolNames: ["read", "bash", "edit", "write", "context_audit", "goal"],

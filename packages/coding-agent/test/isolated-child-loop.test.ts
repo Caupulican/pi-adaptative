@@ -114,4 +114,51 @@ describe("isolated child tool loop", () => {
 			harness.cleanup();
 		}
 	});
+
+	it("forwards isolated tool-repair telemetry through the session hook", async () => {
+		const harness = await createHarness();
+		try {
+			const events: unknown[] = [];
+			const previous = harness.session.agent.onToolArgumentValidation;
+			harness.session.agent.onToolArgumentValidation = (event) => {
+				events.push(event);
+				previous?.(event);
+			};
+			const execute = vi.fn(async (_toolCallId: string, _args: unknown) => ({
+				content: [{ type: "text" as const, text: "ok" }],
+				details: {},
+			}));
+			const probeTool: AgentTool = {
+				name: "numeric_probe",
+				label: "numeric_probe",
+				description: "Probe numeric argument repair",
+				parameters: Type.Object({ value: Type.Number() }),
+				execute,
+			};
+			harness.setResponses([
+				fauxAssistantMessage(fauxToolCall("numeric_probe", { value: "7" }), { stopReason: "toolUse" }),
+				fauxAssistantMessage("done"),
+			]);
+
+			await harness.session.runIsolatedCompletion({
+				systemPrompt: "isolated",
+				messages: [{ role: "user", content: "inspect", timestamp: Date.now() }],
+				tools: [probeTool],
+				maxTurns: 2,
+			});
+
+			expect(execute).toHaveBeenCalledOnce();
+			expect(execute.mock.calls[0]?.[1]).toEqual({ value: 7 });
+			expect(events).toMatchObject([
+				{
+					outcome: "repaired",
+					tool: "numeric_probe",
+					repairsApplied: ["numberFromString"],
+					executionOutcome: "succeeded",
+				},
+			]);
+		} finally {
+			harness.cleanup();
+		}
+	});
 });

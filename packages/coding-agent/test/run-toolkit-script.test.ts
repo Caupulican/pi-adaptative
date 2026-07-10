@@ -2,6 +2,7 @@ import { existsSync, mkdirSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
+import { type ArtifactStore, createInMemoryArtifactStore } from "../src/core/context/context-artifacts.ts";
 import type { ToolkitScript } from "../src/core/toolkit/script-registry.ts";
 import { buildScriptArgv, executeToolkitScript, type ScriptExecution } from "../src/core/toolkit/script-runner.ts";
 import { createRunToolkitScriptToolDefinition } from "../src/core/tools/run-toolkit-script.ts";
@@ -22,8 +23,12 @@ function ok(stdout = "hello"): ScriptExecution {
 	return { exitCode: 0, stdout, stderr: "", durationMs: 12, timedOut: false };
 }
 
-async function runTool(input: Record<string, unknown>, execute = vi.fn(async () => ok())) {
-	const tool = createRunToolkitScriptToolDefinition({ getScripts: () => SCRIPTS, execute });
+async function runTool(
+	input: Record<string, unknown>,
+	execute = vi.fn(async () => ok()),
+	artifactStore?: ArtifactStore,
+) {
+	const tool = createRunToolkitScriptToolDefinition({ getScripts: () => SCRIPTS, execute, artifactStore });
 	const result = (await tool.execute(
 		"call-1",
 		input as never,
@@ -100,6 +105,23 @@ describe("run_toolkit_script tool", () => {
 		expect(execute).not.toHaveBeenCalled();
 		expect(result.details.outcome).toBe("not_found");
 		expect(result.isError).toBe(true);
+	});
+
+	it("stores exact oversized output and returns a bounded retrievable preview", async () => {
+		const store = createInMemoryArtifactStore();
+		const stdout = `${"large-output-line\n".repeat(1_000)}final-sentinel`;
+		const { result } = await runTool(
+			{ script: "prepare-db" },
+			vi.fn(async () => ok(stdout)),
+			store,
+		);
+
+		expect(result.content[0]?.text.length).toBeLessThan(stdout.length);
+		expect(result.content[0]?.text).toContain("Full output: artifact tool-output:");
+		const artifactId = (result.details as { artifactId?: string }).artifactId;
+		expect(artifactId).toBeDefined();
+		const artifact = store.read(artifactId!);
+		expect("content" in artifact ? artifact.content : "").toContain("final-sentinel");
 	});
 });
 

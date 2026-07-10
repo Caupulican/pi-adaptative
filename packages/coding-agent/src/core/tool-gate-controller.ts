@@ -9,11 +9,12 @@
  * runs extension `tool_result` handlers and structurally fences output from untrusted-content sources.
  */
 
-import type { Agent } from "@caupulican/pi-agent-core";
+import type { Agent, BeforeToolCallResult } from "@caupulican/pi-agent-core";
 import type { CapabilityEnvelope, GateOutcome } from "./autonomy/contracts.ts";
 import { evaluateToolGate } from "./autonomy/gates.ts";
 import type { ExtensionRunner } from "./extensions/index.ts";
 import { classifyToolTrust, wrapUntrustedText } from "./security/untrusted-boundary.ts";
+import type { ToolSelectionController } from "./tool-selection/tool-selection-controller.ts";
 
 type BeforeToolCall = NonNullable<Agent["beforeToolCall"]>;
 type AfterToolCall = NonNullable<Agent["afterToolCall"]>;
@@ -27,6 +28,8 @@ export interface ToolGateControllerDeps {
 	/** Record an autonomy gate outcome (only when a capability envelope is active). */
 	recordGateOutcome(outcome: GateOutcome): void;
 	getExtensionRunner(): ExtensionRunner;
+	/** Observe an execution only after all pre-execution gates and extension hooks allow it. */
+	getToolSelectionController?(): ToolSelectionController | undefined;
 }
 
 export class ToolGateController {
@@ -63,23 +66,25 @@ export class ToolGateController {
 		}
 
 		const runner = this.deps.getExtensionRunner();
-		if (!runner.hasHandlers("tool_call")) {
-			return undefined;
-		}
-
-		try {
-			return await runner.emitToolCall({
-				type: "tool_call",
-				toolName: toolCall.name,
-				toolCallId: toolCall.id,
-				input: args as Record<string, unknown>,
-			});
-		} catch (err) {
-			if (err instanceof Error) {
-				throw err;
+		let extensionResult: BeforeToolCallResult | undefined;
+		if (runner.hasHandlers("tool_call")) {
+			try {
+				extensionResult = await runner.emitToolCall({
+					type: "tool_call",
+					toolName: toolCall.name,
+					toolCallId: toolCall.id,
+					input: args as Record<string, unknown>,
+				});
+			} catch (err) {
+				if (err instanceof Error) {
+					throw err;
+				}
+				throw new Error(`Extension failed, blocking execution: ${String(err)}`);
 			}
-			throw new Error(`Extension failed, blocking execution: ${String(err)}`);
 		}
+		if (extensionResult) return extensionResult;
+		this.deps.getToolSelectionController?.()?.begin(toolCall.id, toolCall.name, args);
+		return undefined;
 	};
 
 	readonly afterToolCall: AfterToolCall = async ({ toolCall, args, result, isError }) => {
@@ -116,6 +121,7 @@ export class ToolGateController {
 			content = wrapped;
 		}
 
+		this.deps.getToolSelectionController?.()?.complete(toolCall.id, !resolvedIsError, content);
 		if (content === result.content && details === result.details && resolvedIsError === isError) {
 			return undefined;
 		}

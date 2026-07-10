@@ -35,6 +35,7 @@ function createPipeline(branch: SessionEntry[]): ContextPipeline {
 		getCwd: () => process.cwd(),
 		getAgentDir: () => process.cwd(),
 		getModelRegistry: () => ({}) as ReturnType<ContextPipelineDeps["getModelRegistry"]>,
+		getModel: () => undefined,
 		getMemoryManager: () => ({}) as ReturnType<ContextPipelineDeps["getMemoryManager"]>,
 		getActiveToolNames: () => [],
 		isDisposed: () => false,

@@ -150,6 +150,8 @@ Fitness applicability is intentionally split by autonomy level:
 
 Delegation is available by default when the active model and UAC tool surface support it. Ultra reinforces proactive use but does not own or unlock the capability. Each worker gets a fresh classified tool surface (`read`, `grep`, `find`, and `ls`); its shipped profile filters those names with the same glob semantics as foreground UAC. `delegate`, shell, memory/lifecycle tools, and opaque extension tools are never inherited into the child. Workers remain read-only unless the write toggle, a non-empty path scope, and the shipped profile all grant `write` or `edit`.
 
+Worker writes use **review-after-apply** semantics: a gate-authorized direct `write`/`edit` call or an envelope/path-validated structured action may mutate the scoped workspace before the parent reviews the result. The parent review is therefore a post-mutation acceptance step and receives changed files, blockers, the usage report id, and `parent_review_required` for an in-scope changed result. Denied or out-of-scope actions are refused before filesystem mutation; partial application is reported as `blocked`, never clean success.
+
 | Setting | Type | Default | Description |
 |---------|------|---------|-------------|
 | `workerDelegation.enabled` | boolean | `true` | Enable bounded delegation on capability-eligible models; explicit `false` is a hard off-switch |

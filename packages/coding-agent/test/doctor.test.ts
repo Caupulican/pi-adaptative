@@ -45,6 +45,7 @@ function baseDeps(overrides: Partial<DoctorDeps> = {}): DoctorDeps {
 				ownedStore: { kind: "pi-owned" as const, path: "/agent/models/ollama", modelCount: 2 },
 				userStore: { kind: "user" as const, path: "/home/u/.ollama/models", modelCount: 1 },
 				activeStore: { kind: "pi-owned" as const, path: "/agent/models/ollama", modelCount: 2 },
+				serverModels: [],
 			}),
 			installGuide: () => ["guide line 1", "guide line 2"],
 		},
@@ -203,6 +204,7 @@ describe("runDoctor: ollama (system tool, guide mode only)", () => {
 			ownedStore: { kind: "pi-owned" as const, path: "/agent/models/ollama", modelCount: 0 },
 			userStore: { kind: "user" as const, path: "/home/u/.ollama/models", modelCount: 0 },
 			activeStore: undefined,
+			serverModels: [],
 		}));
 		const installGuide = vi.fn(() => ["step 1", "step 2"]);
 		const deps = baseDeps({ ollamaRuntime: { detect, installGuide } });

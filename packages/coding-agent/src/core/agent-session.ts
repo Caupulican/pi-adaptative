@@ -84,6 +84,7 @@ import type {
 	WorkerResult,
 } from "./autonomy/contracts.ts";
 import { buildForegroundEnvelope, formatForegroundEnvelopeObservation } from "./autonomy/foreground-envelope.ts";
+import { evaluateToolGate } from "./autonomy/gates.ts";
 import type { LaneRecord } from "./autonomy/lane-tracker.ts";
 import type { AutonomyDiagnosticSnapshot, AutonomyStatusSnapshot, GateOutcomeHistoryEntry } from "./autonomy/status.ts";
 import type { AutonomyTelemetryEvent } from "./autonomy/telemetry-events.ts";
@@ -198,6 +199,8 @@ import { TOOL_RECOVERY_EVENT_LOG_FILE } from "./tool-recovery-log-records.ts";
 import { ToolRecoveryLogger } from "./tool-recovery-logger.ts";
 import { formatToolRepairHealthReport } from "./tool-repair-health.ts";
 import { resolveCurrentToolRepairSettings } from "./tool-repair-settings.ts";
+import { ToolPerformanceStore } from "./tool-selection/tool-performance-store.ts";
+import { ToolSelectionController } from "./tool-selection/tool-selection-controller.ts";
 import type { BashOperations } from "./tools/bash.ts";
 
 // ============================================================================
@@ -633,6 +636,7 @@ export class AgentSession {
 	private readonly _bash: BashExecutionController;
 	private readonly _profileFilter: ProfileFilterController;
 	private readonly _toolGate: ToolGateController;
+	private readonly _toolSelection: ToolSelectionController;
 
 	private _extensionRunner!: ExtensionRunner;
 	private _turnIndex = 0;
@@ -905,6 +909,7 @@ export class AgentSession {
 			getSessionManager: () => this.sessionManager,
 			getSettingsManager: () => this.settingsManager,
 			getModelRegistry: () => this._modelRegistry,
+			getModel: () => this.model,
 			getAgentDir: () => this._agentDir,
 			getCwd: () => this._cwd,
 			getActiveToolNames: () => this.getActiveToolNames(),
@@ -968,6 +973,7 @@ export class AgentSession {
 			getReflectionSignal: () => this._reflectionAbort.signal,
 			archivePromotedSkill: (name) => this.archivePromotedSkill(name),
 			emitAutonomyTelemetry: (event) => this._emitAutonomyTelemetry(event),
+			ensureModelReady: (model) => this._localRuntimeController.ensureIsolatedModelReady(model),
 			addSpawnedUsage: (usage, opts) => this.addSpawnedUsage(usage, opts),
 			saveLearningDecisionSnapshot: (decision) => this.saveLearningDecisionSnapshot(decision),
 		});
@@ -1073,6 +1079,9 @@ export class AgentSession {
 		const previousToolArgumentValidation = this.agent.onToolArgumentValidation;
 		this.agent.onToolArgumentValidation = (event) => {
 			const taggedEvent = this._tagModelAdaptationRuleTeaching(event);
+			if (taggedEvent.outcome === "repaired" || taggedEvent.outcome === "bounced") {
+				this._toolSelection.recordValidation(taggedEvent.tool, taggedEvent.outcome);
+			}
 			previousToolArgumentValidation?.(taggedEvent);
 			const logRecord = this._toolRecoveryLogger.recordToolArgumentValidation(taggedEvent);
 			if (!logRecord) return;
@@ -1131,12 +1140,42 @@ export class AgentSession {
 			isExplicitThinking: () => this._isExplicitThinking,
 			setThinkingLevel: (level) => this.setThinkingLevel(level, { persistSettings: false }),
 		});
+		this._toolSelection = new ToolSelectionController({
+			store: ToolPerformanceStore.forAgentDir(this._agentDir),
+			getModelRef: () => {
+				const model = this.model;
+				return model ? formatModelRouterModel(model) : "unknown";
+			},
+			getActiveTools: () => {
+				const activeNames = new Set(this.getActiveToolNames());
+				return this.getAllTools()
+					.filter((tool) => activeNames.has(tool.name))
+					.map((tool) => ({
+						name: tool.name,
+						description: tool.description,
+						parameters: tool.parameters,
+					}));
+			},
+			isCandidateAllowed: (toolName) => {
+				const envelope = this.capabilityEnvelope;
+				if (!envelope) return true;
+				return (
+					evaluateToolGate({
+						toolName,
+						args: {},
+						cwd: this._cwd,
+						envelope,
+					}).outcome === "allow"
+				);
+			},
+		});
 		this._toolGate = new ToolGateController({
 			maybeEscalateToolCall: (toolName, args) => this._modelRouter.maybeEscalateToolCall(toolName, args),
 			getCwd: () => this._cwd,
 			getCapabilityEnvelope: () => this.capabilityEnvelope,
 			recordGateOutcome: (outcome) => this._recordGateOutcome(outcome),
 			getExtensionRunner: () => this._extensionRunner,
+			getToolSelectionController: () => this._toolSelection,
 		});
 
 		// Always subscribe to agent events for internal handling
@@ -2418,6 +2457,7 @@ export class AgentSession {
 		} else if (event.type === "agent_end") {
 			await this._extensionRunner.emit({ type: "agent_end", messages: event.messages });
 		} else if (event.type === "turn_start") {
+			this._toolSelection.startTurn();
 			this._refreshForegroundEnvelope();
 			const extensionEvent: TurnStartEvent = {
 				type: "turn_start",
@@ -2697,8 +2737,9 @@ export class AgentSession {
 	 * Also rebuilds the system prompt to reflect the new tool set.
 	 * Changes take effect on the next agent turn.
 	 *
-	 * artifact_retrieve is auto-activated as a companion whenever grep or find ends up
-	 * in the resulting active set and artifact_retrieve is registered (i.e. not excluded/
+	 * artifact_retrieve is auto-activated as a companion whenever an artifact-producing tool
+	 * (grep, find, or run_toolkit_script) ends up in the resulting active set and artifact_retrieve
+	 * is registered (i.e. not excluded/
 	 * blocked/outside an allowlist -- the registry itself is built with that same filter,
 	 * so registry presence already tracks "allowed"). This is enforced here, not just in
 	 * the settings/profile refresh flow, because this method is a public, extension-
@@ -2729,7 +2770,11 @@ export class AgentSession {
 		for (const name of capabilityFiltered) {
 			addIfRegistered(name);
 		}
-		if (validToolNames.includes("grep") || validToolNames.includes("find")) {
+		if (
+			validToolNames.includes("grep") ||
+			validToolNames.includes("find") ||
+			validToolNames.includes("run_toolkit_script")
+		) {
 			addIfRegistered("artifact_retrieve");
 		}
 
@@ -3075,6 +3120,11 @@ export class AgentSession {
 			// Validate model
 			if (!requestModel) {
 				throw new Error(formatNoModelSelectedMessage());
+			}
+			// A manual/default local model has no RouteDecision, so the router readiness gate above is
+			// intentionally a no-op. It still needs the same managed-runtime boot/residency guarantee.
+			if (!resolvedRouteInfo) {
+				await this._localRuntimeController.ensureForegroundModelReady(requestModel);
 			}
 
 			if (!this._modelRegistry.hasConfiguredAuth(requestModel)) {

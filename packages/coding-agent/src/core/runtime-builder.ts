@@ -193,7 +193,7 @@ export interface RuntimeBuilderDeps {
 	/** Notify extensions-changed listeners after a single-extension live op. */
 	notifyExtensionsChanged(): void;
 
-	/** Session-scoped tool-output artifact store for grep/find/artifact_retrieve (gated on the profile). */
+	/** Session-scoped tool-output artifact store for artifact-producing tools and artifact_retrieve (gated on the profile). */
 	getToolArtifactStore(): ArtifactStore;
 
 	/** Live memory manager — its provider tools join the registry. */
@@ -593,11 +593,11 @@ export class RuntimeBuilder {
 		const shellCommandPrefix = settingsManager.getShellCommandPrefix();
 		const shellPath = settingsManager.getShellPath();
 		const baseToolsOverride = this.deps.getBaseToolsOverride();
-		// grep/find must not emit a "Full output: artifact tool-output:<id>" handle that
-		// nothing can resolve. If artifact_retrieve is explicitly excluded/blocked/outside
-		// an active allowlist, don't hand grep/find an artifact store at all: they fall
-		// back to their pre-existing bounded preview/truncation behavior, with no
-		// payload/meta files ever written and no retrieval promise made.
+		// Artifact-producing tools must not emit a "Full output: artifact tool-output:<id>" handle
+		// that nothing can resolve. If artifact_retrieve is explicitly excluded/blocked/outside
+		// an active allowlist, don't hand grep/find/run_toolkit_script an artifact store at all:
+		// they fall back to their bounded preview/truncation behavior, with no payload/meta files
+		// ever written and no retrieval promise made.
 		const toolArtifactStore = this.deps.isToolOrCommandAllowedByProfile("artifact_retrieve")
 			? this.deps.getToolArtifactStore()
 			: undefined;
@@ -651,6 +651,7 @@ export class RuntimeBuilder {
 			const runToolkitScriptToolDefinition = createRunToolkitScriptToolDefinition({
 				getScripts: () => this.deps.getSettingsManager().getToolkitScripts(),
 				execute: (script, scriptArgs) => executeToolkitScript({ script, scriptArgs, cwd: this.deps.getCwd() }),
+				artifactStore: toolArtifactStore,
 				// Reflex brain (fitness-gated local model): resolves ambiguous requests into a
 				// registry pick. Best-effort — absent/unfit brain keeps the shortlist behavior.
 				interpret: async (request, scripts) => {

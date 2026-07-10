@@ -64,6 +64,8 @@ export interface LocalRuntimeStatus {
 	ownedStore: OllamaStoreSummary;
 	userStore: OllamaStoreSummary;
 	activeStore?: OllamaStoreSummary;
+	/** Models reported by the configured live server; empty when it is down. */
+	serverModels: InstalledLocalModel[];
 }
 
 export interface InstalledLocalModel {
@@ -365,16 +367,23 @@ export class OllamaRuntime {
 		return (await this._serverModels()).up;
 	}
 
-	private async _serverModels(): Promise<{ up: boolean; modelCount: number }> {
+	private async _serverModels(): Promise<{ up: boolean; models: InstalledLocalModel[] }> {
 		try {
 			const response = await this._fetch(`${this._baseUrl}/api/tags`, {
 				signal: AbortSignal.timeout(HEALTH_TIMEOUT_MS),
 			});
-			if (!response.ok) return { up: false, modelCount: 0 };
-			const data = (await response.json().catch(() => ({}))) as { models?: unknown };
-			return { up: true, modelCount: Array.isArray(data.models) ? data.models.length : 0 };
+			if (!response.ok) return { up: false, models: [] };
+			const data = (await response.json().catch(() => ({}))) as {
+				models?: Array<{ name?: unknown; size?: unknown }>;
+			};
+			const models = Array.isArray(data.models)
+				? data.models
+						.filter((model): model is { name: string; size?: number } => typeof model.name === "string")
+						.map((model) => ({ name: model.name, sizeBytes: typeof model.size === "number" ? model.size : 0 }))
+				: [];
+			return { up: true, models };
 		} catch {
-			return { up: false, modelCount: 0 };
+			return { up: false, models: [] };
 		}
 	}
 
@@ -413,7 +422,7 @@ export class OllamaRuntime {
 		const ownedStore = this._storeSummary("pi-owned", this.ownedModelsDir());
 		const userStore = this._storeSummary("user", this.userModelsDir());
 		const activeStore = serverModels.up
-			? this._activeStoreSummary(serverModels.modelCount, ownedStore, userStore)
+			? this._activeStoreSummary(serverModels.models.length, ownedStore, userStore)
 			: undefined;
 		return {
 			binaryPath: binary?.path,
@@ -426,6 +435,7 @@ export class OllamaRuntime {
 			ownedStore,
 			userStore,
 			activeStore,
+			serverModels: serverModels.models,
 		};
 	}
 

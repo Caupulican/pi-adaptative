@@ -115,6 +115,7 @@ export const DEFAULT_CONTEXT_GC_SETTINGS: NormalizedContextGcSettings = {
 		"rg",
 		"grep",
 		"find",
+		"run_toolkit_script",
 		"ls",
 		"skill_open",
 		"automata_graph_status",

@@ -21,20 +21,31 @@ export interface RuntimeLoadRequest {
 	nowMs: number;
 	minDwellMs?: number;
 	pinActiveModel?: string;
+	/** Adapter identity for this request; set by RuntimeResidencyArbiter before planning. */
+	adapterId?: string;
+	/** When pinActiveModel is set, constrain that pin to this adapter when present. */
+	pinActiveAdapterId?: string;
 	reservations?: RuntimeReservation[];
 	recentEvictions?: RuntimeEvictionRecord[];
+	/** False performs admission/eviction only; the real model request owns cold loading. Default true. */
+	loadModel?: boolean;
 }
 
 export interface RuntimeReservation {
 	model: string;
 	bytes: number;
 	priority: number;
+	/** Optional runtime identity; omitted means any adapter serving this model. */
+	adapterId?: string;
 }
 
 export interface RuntimeEvictionRecord {
 	evicted: string;
 	loaded: string;
 	atMs: number;
+	/** Optional identities preserve anti-thrash separation across runtime adapters. */
+	evictedAdapterId?: string;
+	loadedAdapterId?: string;
 }
 
 export type RuntimeResidencyPlan =
@@ -70,12 +81,22 @@ export class RuntimeResidencyArbiter {
 				budgetBytes: this.budgetBytes,
 			};
 		}
-		const plan = planRuntimeResidency({ budgetBytes: this.budgetBytes, residents, request });
+		const requestForAdapter: RuntimeLoadRequest = {
+			...request,
+			adapterId,
+			...(request.pinActiveModel !== undefined && request.pinActiveAdapterId === undefined
+				? { pinActiveAdapterId: adapterId }
+				: {}),
+		};
+		const plan = planRuntimeResidency({ budgetBytes: this.budgetBytes, residents, request: requestForAdapter });
 		if (plan.status !== "fits") return plan;
 		for (const resident of plan.evict) {
 			await this.adapters.get(resident.adapterId)?.release(resident.model);
 		}
-		await adapter.ensureResident(request.model);
+		const alreadyResident = residents.some(
+			(resident) => resident.adapterId === adapterId && resident.model === request.model,
+		);
+		if (request.loadModel !== false && !alreadyResident) await adapter.ensureResident(request.model);
 		return plan;
 	}
 }
@@ -193,19 +214,30 @@ export function planRuntimeResidency(args: {
 	residents: readonly RuntimeResidentModel[];
 	request: RuntimeLoadRequest;
 }): RuntimeResidencyPlan {
-	const requestedModels = new Map<string, { bytes: number; priority: number }>();
-	requestedModels.set(args.request.model, { bytes: args.request.bytes, priority: args.request.priority });
+	const requestedModels = new Map<string, { model: string; adapterId?: string; bytes: number; priority: number }>();
+	const addRequestedModel = (entry: { model: string; adapterId?: string; bytes: number; priority: number }): void => {
+		const key = `${entry.adapterId ?? "*"}\0${entry.model}`;
+		const existing = requestedModels.get(key);
+		if (!existing || entry.bytes > existing.bytes) requestedModels.set(key, entry);
+	};
+	addRequestedModel(args.request);
 	for (const reservation of args.request.reservations ?? []) {
-		const existing = requestedModels.get(reservation.model);
-		if (!existing || reservation.bytes > existing.bytes) {
-			requestedModels.set(reservation.model, { bytes: reservation.bytes, priority: reservation.priority });
-		}
+		addRequestedModel({
+			...reservation,
+			adapterId:
+				reservation.adapterId ?? (reservation.model === args.request.model ? args.request.adapterId : undefined),
+		});
 	}
 
-	const residentByModel = new Map(args.residents.map((resident) => [resident.model, resident]));
+	const isResidentForRequest = (
+		resident: RuntimeResidentModel,
+		requested: { model: string; adapterId?: string },
+	): boolean =>
+		resident.model === requested.model &&
+		(requested.adapterId === undefined || resident.adapterId === requested.adapterId);
 	const residentBytes = args.residents.reduce((sum, resident) => sum + resident.bytes, 0);
-	const missingBytes = [...requestedModels].reduce((sum, [model, request]) => {
-		return residentByModel.has(model) ? sum : sum + request.bytes;
+	const missingBytes = [...requestedModels.values()].reduce((sum, requested) => {
+		return args.residents.some((resident) => isResidentForRequest(resident, requested)) ? sum : sum + requested.bytes;
 	}, 0);
 	const requiredBytes = residentBytes + missingBytes;
 	if (requiredBytes <= args.budgetBytes) {
@@ -219,8 +251,17 @@ export function planRuntimeResidency(args: {
 	let projectedBytes = requiredBytes;
 	const evict: RuntimeResidentModel[] = [];
 	const candidates = args.residents
-		.filter((resident) => !requestedModels.has(resident.model))
-		.filter((resident) => !resident.pinned && resident.model !== args.request.pinActiveModel)
+		.filter(
+			(resident) => ![...requestedModels.values()].some((requested) => isResidentForRequest(resident, requested)),
+		)
+		.filter(
+			(resident) =>
+				!resident.pinned &&
+				!(
+					resident.model === args.request.pinActiveModel &&
+					(args.request.pinActiveAdapterId === undefined || resident.adapterId === args.request.pinActiveAdapterId)
+				),
+		)
 		.filter((resident) => resident.residencyControl !== "advisory")
 		.filter(
 			(resident) =>
@@ -246,6 +287,11 @@ export function planRuntimeResidency(args: {
 
 function hasPingPongRisk(request: RuntimeLoadRequest): boolean {
 	return (request.recentEvictions ?? []).some(
-		(record) => record.evicted === request.model && request.nowMs - record.atMs <= (request.minDwellMs ?? 0),
+		(record) =>
+			record.evicted === request.model &&
+			(request.adapterId === undefined ||
+				record.evictedAdapterId === undefined ||
+				record.evictedAdapterId === request.adapterId) &&
+			request.nowMs - record.atMs <= (request.minDwellMs ?? 0),
 	);
 }
