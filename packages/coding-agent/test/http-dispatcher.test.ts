@@ -45,4 +45,21 @@ describe("HTTP-bound stream-idle policy", () => {
 
 		expect(constrainStreamIdleToHttpTimeout(options, 0)).toEqual({ options });
 	});
+
+	it("restores defaults for unset bounds carried through a partial settings spread", () => {
+		const options = {
+			connectMs: undefined,
+			activeIdleMs: undefined,
+			quietIdleMs: undefined,
+		} as unknown as StreamIdleOptions;
+
+		expect(constrainStreamIdleToHttpTimeout(options, 60_000)).toEqual({
+			options: {
+				connectMs: 54_000,
+				activeIdleMs: 54_000,
+				quietIdleMs: 54_000,
+			},
+			adaptiveCeilingMs: 54_000,
+		});
+	});
 });

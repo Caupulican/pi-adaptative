@@ -15,6 +15,8 @@
 
 ### Fixed
 
+- Fixed clean-checkout TypeScript resolution for the exported `@caupulican/pi-agent-core/paths` subpath before package builds exist.
+- Restored default stream-stall bounds after partial settings spreads so HTTP timeout clamping cannot create `NaN` watchdog delays.
 - Made `contextPolicy.memory.enabled: false` authoritative for both retrieval paths; fail-closed legacy/opaque memory query egress unless a provider is explicitly local or external egress is explicitly enabled; centrally source-fenced all legacy recall output; blocked common raw tokens, bearer credentials, and signed URLs; synchronized live-loaded/unloaded extension memory providers; and exposed the external-egress consent in `/settings`.
 - Synchronized profile UAC across SDK, startup, editing, and reload: SDK sessions retain the shared goal/delegation/toolkit defaults and accept complete one-shot situations; extension-provided profile models resolve on startup; reusable situations preserve soul and complete router settings; relative references and explicit empty selections apply consistently; and failed generations roll back settings, providers, memory, tools, model/thinking, discovery state, and diagnostics together.
 - Made profile edits, selection changes, deletion, and configuration restore transactional across runtime validation and persistent storage; backups now round-trip canonical multi-profile and explicit-none selections without restoring external-root trust.

@@ -1,4 +1,4 @@
-import type { StreamIdleOptions } from "@caupulican/pi-agent-core";
+import { DEFAULT_STREAM_IDLE, type StreamIdleOptions } from "@caupulican/pi-agent-core";
 import * as undici from "undici";
 
 // The default stays strictly greater than the stall watchdog's quiet bound (600s — see
@@ -60,12 +60,22 @@ export function constrainStreamIdleToHttpTimeout(
 	options: StreamIdleOptions,
 	httpIdleTimeoutMs: number,
 ): HttpBoundedStreamIdlePolicy {
+	// Settings intentionally expose an undefined field for each unset user override. A
+	// spread can carry those values over the defaults before this boundary, so restore
+	// the kernel defaults here instead of allowing Math.min(undefined, ...) to produce
+	// a zero-delay NaN watchdog timer.
+	const resolvedOptions: StreamIdleOptions = {
+		...options,
+		connectMs: options.connectMs ?? DEFAULT_STREAM_IDLE.connectMs,
+		activeIdleMs: options.activeIdleMs ?? DEFAULT_STREAM_IDLE.activeIdleMs,
+		quietIdleMs: options.quietIdleMs ?? DEFAULT_STREAM_IDLE.quietIdleMs,
+	};
 	const normalizedTimeoutMs = parseHttpIdleTimeoutMs(httpIdleTimeoutMs);
 	if (normalizedTimeoutMs === undefined) {
 		throw new Error(`Invalid HTTP idle timeout: ${String(httpIdleTimeoutMs)}`);
 	}
 	if (normalizedTimeoutMs === 0) {
-		return { options: { ...options } };
+		return { options: resolvedOptions };
 	}
 
 	const marginMs = Math.min(
@@ -75,10 +85,10 @@ export function constrainStreamIdleToHttpTimeout(
 	const adaptiveCeilingMs = Math.max(0, normalizedTimeoutMs - marginMs);
 	return {
 		options: {
-			...options,
-			connectMs: Math.min(options.connectMs, adaptiveCeilingMs),
-			activeIdleMs: Math.min(options.activeIdleMs, adaptiveCeilingMs),
-			quietIdleMs: Math.min(options.quietIdleMs, adaptiveCeilingMs),
+			...resolvedOptions,
+			connectMs: Math.min(resolvedOptions.connectMs, adaptiveCeilingMs),
+			activeIdleMs: Math.min(resolvedOptions.activeIdleMs, adaptiveCeilingMs),
+			quietIdleMs: Math.min(resolvedOptions.quietIdleMs, adaptiveCeilingMs),
 		},
 		adaptiveCeilingMs,
 	};

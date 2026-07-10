@@ -10,6 +10,7 @@
 			"@caupulican/pi-ai/dist/*": ["./packages/ai/src/*"],
 			"@caupulican/pi-agent-core": ["./packages/agent/src/index.ts"],
 			"@caupulican/pi-agent-core/node": ["./packages/agent/src/node.ts"],
+			"@caupulican/pi-agent-core/paths": ["./packages/agent/src/utils/paths.ts"],
 			"@caupulican/pi-agent-core/*": ["./packages/agent/src/*"],
 			"@caupulican/pi-adaptative": ["./packages/coding-agent/src/index.ts"],
 			"@caupulican/pi-adaptative/hooks": ["./packages/coding-agent/src/core/hooks/index.ts"],
