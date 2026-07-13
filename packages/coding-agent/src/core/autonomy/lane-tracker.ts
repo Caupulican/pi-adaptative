@@ -146,6 +146,16 @@ export class LaneTracker {
 		return count;
 	}
 
+	getRunningCount(type?: LaneType): number {
+		let count = 0;
+		for (const record of this._lanes.values()) {
+			if (record.status !== "running") continue;
+			if (type !== undefined && record.type !== type) continue;
+			count++;
+		}
+		return count;
+	}
+
 	getRecords(): LaneRecord[] {
 		return [...this._lanes.values()].map((record) => ({ ...record }));
 	}

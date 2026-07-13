@@ -380,7 +380,7 @@ export async function processResponsesStream<TApi extends Api>(
 			let inputTokens = Math.max(0, (response.usage.input_tokens || 0) - cachedTokens - cacheWriteTokens);
 			let outputTokens = response.usage.output_tokens || 0;
 			let cacheReadTokens = cachedTokens;
-			let totalTokens = response.usage.total_tokens || 0;
+			const totalTokens = response.usage.total_tokens || 0;
 			if (model.provider === "fugu") {
 				const orchestrationInputTokens = inputDetails?.orchestration_input_tokens || 0;
 				const orchestrationInputCachedTokens = inputDetails?.orchestration_input_cached_tokens || 0;
@@ -388,7 +388,6 @@ export async function processResponsesStream<TApi extends Api>(
 				inputTokens += orchestrationInputTokens;
 				cacheReadTokens += orchestrationInputCachedTokens;
 				outputTokens += orchestrationOutputTokens;
-				totalTokens += orchestrationInputTokens + orchestrationInputCachedTokens + orchestrationOutputTokens;
 			}
 			output.usage = {
 				// OpenAI includes cached tokens in input_tokens, so subtract to get non-cached input.

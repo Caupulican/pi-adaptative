@@ -233,6 +233,32 @@ describe("Autonomy Gates", () => {
 			}
 		});
 
+		it("distinguishes read-only memory queries from memory mutations", () => {
+			const readEnvelope: CapabilityEnvelope = { ...baseEnvelope, capabilities: ["memory_read"] };
+			const writeEnvelope: CapabilityEnvelope = { ...baseEnvelope, capabilities: ["memory_write"] };
+
+			expect(
+				evaluateToolGate({
+					toolName: "memory",
+					args: { query: "relevant fact" },
+					cwd: "/tmp",
+					envelope: readEnvelope,
+				}).outcome,
+			).toBe("allow");
+			expect(
+				evaluateToolGate({ toolName: "memory", args: { action: "add" }, cwd: "/tmp", envelope: readEnvelope })
+					.reasonCode,
+			).toBe("missing_capability");
+			expect(
+				evaluateToolGate({
+					toolName: "memory",
+					args: { query: "relevant fact" },
+					cwd: "/tmp",
+					envelope: writeEnvelope,
+				}).reasonCode,
+			).toBe("missing_capability");
+		});
+
 		it("envelope with read_files allows read path inside scope", () => {
 			const envelope: CapabilityEnvelope = {
 				...baseEnvelope,

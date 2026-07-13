@@ -1,9 +1,18 @@
-import { existsSync, mkdirSync, rmSync, writeFileSync } from "node:fs";
+import { existsSync, mkdirSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { SessionManager } from "@caupulican/pi-agent-core/node";
-import { getModel } from "@caupulican/pi-ai";
+import {
+	type Api,
+	fauxAssistantMessage,
+	fauxToolCall,
+	getModel,
+	type Model,
+	registerFauxProvider,
+} from "@caupulican/pi-ai";
 import { afterEach, beforeEach, describe, expect, it } from "vitest";
+import { AuthStorage } from "../src/core/auth-storage.ts";
+import { getWorkerRequestSnapshots } from "../src/core/delegation/session-worker-result.ts";
 import { DefaultResourceLoader } from "../src/core/resource-loader.ts";
 import { createAgentSession } from "../src/core/sdk.ts";
 import { SettingsManager } from "../src/core/settings-manager.ts";
@@ -17,8 +26,19 @@ describe("Memory subsystem integration (file-store)", () => {
 	let tempDir: string;
 	let agentDir: string;
 
-	const newSession = async (opts: { isChildSession?: boolean; extensionFactories?: unknown[] } = {}) => {
+	const newSession = async (
+		opts: {
+			isChildSession?: boolean;
+			extensionFactories?: unknown[];
+			model?: Model<Api>;
+			authStorage?: AuthStorage;
+			memoryEnabled?: boolean;
+		} = {},
+	) => {
 		const settingsManager = SettingsManager.create(tempDir, agentDir);
+		if (opts.memoryEnabled !== undefined) {
+			settingsManager.setMemoryRetrievalSettings({ enabled: opts.memoryEnabled });
+		}
 		const resourceLoader = new DefaultResourceLoader({
 			cwd: tempDir,
 			agentDir,
@@ -29,7 +49,8 @@ describe("Memory subsystem integration (file-store)", () => {
 		const { session } = await createAgentSession({
 			cwd: tempDir,
 			agentDir,
-			model: getModel("anthropic", "claude-sonnet-4-5")!,
+			model: opts.model ?? getModel("anthropic", "claude-sonnet-4-5")!,
+			authStorage: opts.authStorage,
 			settingsManager,
 			sessionManager: SessionManager.inMemory(),
 			resourceLoader,
@@ -60,6 +81,90 @@ describe("Memory subsystem integration (file-store)", () => {
 		expect(session.systemPrompt).toContain("The deploy command is `npm run release:patch`.");
 
 		session.dispose();
+	});
+
+	it("gives an orchestrator-authorized worker bounded read-only file-store memory", async () => {
+		writeFileSync(join(agentDir, "MEMORY.md"), "LANE_MEMORY_READ_OK is the standing marker.\n", "utf-8");
+		writeFileSync(join(agentDir, "USER.md"), "", "utf-8");
+		const faux = registerFauxProvider({ models: [{ id: "memory-worker", contextWindow: 128_000 }] });
+		const model = faux.getModel("memory-worker");
+		if (!model) throw new Error("Expected faux memory worker model");
+		const authStorage = AuthStorage.inMemory();
+		authStorage.setRuntimeApiKey(model.provider, "faux-key");
+		const session = await newSession({ model, authStorage });
+		let workerTools: string[] = [];
+		let memorySchema = "";
+		try {
+			faux.setResponses([
+				(context) => {
+					workerTools = context.tools?.map((tool) => tool.name) ?? [];
+					memorySchema = JSON.stringify(context.tools?.find((tool) => tool.name === "memory")?.parameters);
+					return fauxAssistantMessage([fauxToolCall("memory", { query: "standing marker" })], {
+						stopReason: "toolUse",
+					});
+				},
+				(context) => {
+					const recalled = JSON.stringify(context.messages).includes("LANE_MEMORY_READ_OK");
+					return fauxAssistantMessage(
+						recalled
+							? '{"summary":"read-only memory recall succeeded"}'
+							: '{"summary":"memory recall failed","status":"blocked","blockers":["marker absent"]}',
+					);
+				},
+			]);
+
+			const run = await session.runWorkerDelegationOnce({
+				instructions: "Recall the standing marker",
+				memoryRead: true,
+			});
+
+			expect(run.record?.status).toBe("succeeded");
+			expect(run.outcome?.result.summary).toBe("read-only memory recall succeeded");
+			expect(workerTools).toContain("memory");
+			expect(memorySchema).toContain("query");
+			expect(memorySchema).not.toContain("action");
+			const request = getWorkerRequestSnapshots(session.sessionManager.getEntries()).at(-1);
+			expect(request?.envelope.capabilities).toContain("memory_read");
+			expect(readFileSync(join(agentDir, "MEMORY.md"), "utf-8")).toBe(
+				"LANE_MEMORY_READ_OK is the standing marker.\n",
+			);
+		} finally {
+			session.dispose();
+			faux.unregister();
+		}
+	});
+
+	it("keeps delegated memory unavailable when memory retrieval is disabled globally", async () => {
+		writeFileSync(join(agentDir, "MEMORY.md"), "DISABLED_MEMORY_MARKER must not be returned.\n", "utf-8");
+		writeFileSync(join(agentDir, "USER.md"), "", "utf-8");
+		const faux = registerFauxProvider({ models: [{ id: "disabled-memory-worker", contextWindow: 128_000 }] });
+		const model = faux.getModel("disabled-memory-worker");
+		if (!model) throw new Error("Expected faux disabled-memory worker model");
+		const authStorage = AuthStorage.inMemory();
+		authStorage.setRuntimeApiKey(model.provider, "faux-key");
+		const session = await newSession({ model, authStorage, memoryEnabled: false });
+		try {
+			faux.setResponses([
+				fauxAssistantMessage([fauxToolCall("memory", { query: "disabled marker" })], { stopReason: "toolUse" }),
+				(context) =>
+					fauxAssistantMessage(
+						JSON.stringify(context.messages).includes("DISABLED_MEMORY_MARKER")
+							? '{"summary":"policy bypassed","status":"blocked","blockers":["memory leaked"]}'
+							: '{"summary":"memory remained disabled"}',
+					),
+			]);
+
+			const run = await session.runWorkerDelegationOnce({
+				instructions: "Check whether memory is enabled",
+				memoryRead: true,
+			});
+
+			expect(run.outcome?.result.summary).toBe("memory remained disabled");
+			expect(JSON.stringify(run.outcome?.result)).not.toContain("DISABLED_MEMORY_MARKER");
+		} finally {
+			session.dispose();
+			faux.unregister();
+		}
 	});
 
 	it("lets an extension register a memory provider via pi.registerMemoryProvider", async () => {

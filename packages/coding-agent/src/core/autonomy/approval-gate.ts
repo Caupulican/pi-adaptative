@@ -16,6 +16,7 @@ const TOOL_CAPABILITY_REQUIREMENTS = new Map<string, readonly CapabilityName[]>(
 	["skillify", ["skill_write"]],
 	["extensionify", ["source_write"]],
 	["goal", ["memory_write"]],
+	["memory", ["memory_write"]],
 	["delegate", ["delegate"]],
 	["model_fitness", ["research"]],
 	["run_toolkit_script", ["run_shell"]],
@@ -25,6 +26,9 @@ export function hasCapabilityPolicyForTool(toolName: string): boolean {
 	return TOOL_CAPABILITY_REQUIREMENTS.has(toolName);
 }
 
-export function requiredCapabilitiesForTool(toolName: string, _args?: unknown): readonly CapabilityName[] {
+export function requiredCapabilitiesForTool(toolName: string, args?: unknown): readonly CapabilityName[] {
+	if (toolName === "memory" && args && typeof args === "object" && "query" in args) {
+		return ["memory_read"];
+	}
 	return TOOL_CAPABILITY_REQUIREMENTS.get(toolName) ?? [];
 }

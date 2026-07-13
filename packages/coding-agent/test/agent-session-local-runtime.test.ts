@@ -77,11 +77,18 @@ function binaryMissingDeps(): LocalRuntimeDeps {
 }
 
 /** Deps where the server is down, a binary exists, and spawning it succeeds on the first health poll. */
-function bootableDeps(onSpawn?: (env: NodeJS.ProcessEnv) => void): LocalRuntimeDeps {
+function bootableDeps(
+	onSpawn?: (env: NodeJS.ProcessEnv) => void,
+	models: readonly string[] = ["qwen3:0.6b"],
+): LocalRuntimeDeps {
 	let up = false;
 	return {
-		fetchFn: (async () => {
+		fetchFn: (async (url: string) => {
 			if (!up) throw new Error("ECONNREFUSED");
+			if (String(url).endsWith("/api/tags")) {
+				return Response.json({ models: models.map((name) => ({ name, size: 1_000 })) });
+			}
+			if (String(url).endsWith("/api/ps")) return Response.json({ models: [] });
 			return new Response("{}", { status: 200 });
 		}) as unknown as typeof fetch,
 		existsFn: (path: string) => path.includes("ollama-dist"),
@@ -225,6 +232,17 @@ describe("AgentSession local (Ollama) runtime readiness", () => {
 			try {
 				const result = await ensureReady(harness, localModel());
 				expect(result.ready).toBe(true);
+			} finally {
+				harness.cleanup();
+			}
+		});
+
+		it("fails readiness when a newly started server does not contain the configured model", async () => {
+			const harness = await createHarness({ localRuntimeDeps: bootableDeps(undefined, []) });
+			try {
+				const result = await ensureReady(harness, localModel());
+				expect(result.ready).toBe(false);
+				expect(result.reason).toBe("model_missing_on_started_server:qwen3:0.6b");
 			} finally {
 				harness.cleanup();
 			}
@@ -578,9 +596,13 @@ describe("AgentSession local runtime readiness — confirmed-up cache", () => {
 		const harness = await createHarness({
 			localRuntimeDeps: {
 				existsFn: (path) => path.includes("ollama-dist"),
-				fetchFn: (async () => {
+				fetchFn: (async (url: string) => {
 					fetchCalls++;
 					if (!up) throw new Error("ECONNREFUSED");
+					if (String(url).endsWith("/api/tags")) {
+						return Response.json({ models: [{ name: "qwen3:0.6b", size: 1_000 }] });
+					}
+					if (String(url).endsWith("/api/ps")) return Response.json({ models: [] });
 					return new Response("{}", { status: 200 });
 				}) as unknown as typeof fetch,
 				spawnFn: () => {
@@ -708,6 +730,10 @@ describe("AgentSession local runtime readiness — #31 managed-install consent f
 					return new Response("fake-archive-bytes", { status: 200 });
 				}
 				if (!serverUp) throw new Error("ECONNREFUSED");
+				if (String(url).endsWith("/api/tags")) {
+					return Response.json({ models: [{ name: "qwen3:0.6b", size: 1_000 }] });
+				}
+				if (String(url).endsWith("/api/ps")) return Response.json({ models: [] });
 				return new Response("{}", { status: 200 });
 			}) as unknown as typeof fetch,
 			existsFn: (path: string) => installed && path.includes(join("runtimes", "ollama", "bin", "ollama")),

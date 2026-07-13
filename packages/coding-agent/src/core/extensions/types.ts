@@ -1522,6 +1522,8 @@ export interface ExtensionRuntimeState {
 	unregisterProvider: (name: string, extensionPath?: string) => void;
 	/** Map tracking which providers are owned by each extension (for clean unregister on unload). */
 	providersByExtension: Map<string, Set<string>>;
+	/** Bound provider registrations, retained so failed factory transactions can restore removals/overrides. */
+	providerRegistrations: Map<string, { config: ProviderConfig; extensionPath?: string }>;
 	/** Get the list of provider names owned by an extension. */
 	getProvidersForExtension: (extensionPath: string) => string[];
 	/** Memory-provider objects owned by each extension generation, for exact live unload. */

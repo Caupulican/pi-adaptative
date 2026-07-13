@@ -20,7 +20,7 @@ import {
 	type ThinkingLevel,
 } from "@caupulican/pi-agent-core";
 import type { SessionManager } from "@caupulican/pi-agent-core/node";
-import type { AssistantMessage, Context, Model, SimpleStreamOptions, TextContent, Usage } from "@caupulican/pi-ai";
+import type { Api, AssistantMessage, Context, Model, SimpleStreamOptions, TextContent, Usage } from "@caupulican/pi-ai";
 import type { IsolatedCompletionOptions, IsolatedCompletionResult } from "./agent-session.ts";
 import type { LearningDecision } from "./autonomy/contracts.ts";
 import { AUTONOMY_TELEMETRY_EVENT_TYPES, type AutonomyTelemetryEvent } from "./autonomy/telemetry-events.ts";
@@ -80,6 +80,8 @@ export interface ReflectionControllerDeps {
 	): string | undefined;
 	/** Persist a learning-gate decision snapshot to the session log. */
 	saveLearningDecisionSnapshot(decision: LearningDecision): string;
+	/** Resolve text-tool fallback for the selected isolated model, not the foreground model. */
+	resolveTextToolCallProtocol(model: Model<Api>): SimpleStreamOptions["textToolCallProtocol"];
 	/** Ensure a managed-local model is running/resident before any isolated lane calls it. */
 	ensureModelReady(model: Model<any>): Promise<void>;
 }
@@ -141,6 +143,9 @@ export class ReflectionController {
 
 		if (opts.tools && opts.tools.length > 0) {
 			const agent = this.deps.getAgent();
+			const foregroundModel = agent.state.model;
+			const usesForegroundModel = foregroundModel?.provider === model.provider && foregroundModel.id === model.id;
+			const textToolCallProtocol = this.deps.resolveTextToolCallProtocol(model);
 			const requestedMaxTurns =
 				typeof opts.maxTurns === "number" && Number.isFinite(opts.maxTurns) ? Math.floor(opts.maxTurns) : 6;
 			const maxTurns = Math.max(1, Math.min(12, requestedMaxTurns));
@@ -157,18 +162,18 @@ export class ReflectionController {
 				reasoning: thinkingLevel,
 				...(options.apiKey !== undefined ? { apiKey: options.apiKey } : {}),
 				...(options.headers !== undefined ? { headers: options.headers } : {}),
-				temperature: agent.textToolCallProtocol ? 0 : undefined,
-				textToolCallProtocol: agent.textToolCallProtocol,
-				onTextToolProtocolParse: agent.onTextToolProtocolParse,
+				temperature: textToolCallProtocol ? 0 : undefined,
+				textToolCallProtocol,
+				onTextToolProtocolParse: usesForegroundModel ? agent.onTextToolProtocolParse : undefined,
 				transport: agent.transport,
 				thinkingBudgets: agent.thinkingBudgets,
 				maxRetryDelayMs: agent.maxRetryDelayMs,
 				maxStallTurns: Math.max(2, Math.min(maxTurns, agent.maxStallTurns ?? maxTurns)),
 				toolExecution: "sequential",
 				toolArgumentTeachEnabled: agent.toolArgumentTeachEnabled,
-				onToolArgumentValidation: agent.onToolArgumentValidation,
+				onToolArgumentValidation: usesForegroundModel ? agent.onToolArgumentValidation : undefined,
 				toolValidationEscalationThreshold: agent.toolValidationEscalationThreshold,
-				onToolValidationEscalation: agent.onToolValidationEscalation,
+				onToolValidationEscalation: usesForegroundModel ? agent.onToolValidationEscalation : undefined,
 				beforeToolCall: opts.beforeToolCall,
 				afterToolCall: opts.afterToolCall,
 				shouldStopAfterTurn: () => {

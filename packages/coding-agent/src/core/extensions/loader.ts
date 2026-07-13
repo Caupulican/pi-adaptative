@@ -179,6 +179,7 @@ export function createExtensionRuntime(): ExtensionRuntime {
 	};
 
 	const providersByExtension = new Map<string, Set<string>>();
+	const providerRegistrations = new Map<string, { config: ProviderConfig; extensionPath?: string }>();
 	const memoryProvidersByExtension = new Map<string, Set<Parameters<ExtensionRuntime["registerMemoryProvider"]>[0]>>();
 	const contextMemoryProvidersByExtension = new Map<
 		string,
@@ -198,7 +199,7 @@ export function createExtensionRuntime(): ExtensionRuntime {
 		// registerTool() is valid during extension load; refresh is only needed post-bind.
 		refreshTools: () => {},
 		getCommands: notInitialized,
-		setModel: () => Promise.reject(new Error("Extension runtime not initialized")),
+		setModel: notInitialized,
 		getThinkingLevel: notInitialized,
 		setThinkingLevel: notInitialized,
 		getExternalResourceRoots: notInitialized,
@@ -222,6 +223,7 @@ export function createExtensionRuntime(): ExtensionRuntime {
 			runtime.pendingProviderRegistrations = runtime.pendingProviderRegistrations.filter((r) => r.name !== name);
 		},
 		providersByExtension,
+		providerRegistrations,
 		getProvidersForExtension: (extensionPath: string) => {
 			return [...(providersByExtension.get(extensionPath) ?? [])];
 		},
@@ -514,6 +516,48 @@ export async function disposeExtensionEventSubscriptions(extensions: Extension[]
 	}
 }
 
+interface ExtensionLoadRuntimeSnapshot {
+	pendingProviderRegistrations: ExtensionRuntime["pendingProviderRegistrations"];
+	flagValues: Map<string, boolean | string>;
+	providerRegistrations: ExtensionRuntime["providerRegistrations"];
+}
+
+function snapshotExtensionLoadRuntime(runtime: ExtensionRuntime): ExtensionLoadRuntimeSnapshot {
+	return {
+		pendingProviderRegistrations: [...runtime.pendingProviderRegistrations],
+		flagValues: new Map(runtime.flagValues),
+		providerRegistrations: new Map(runtime.providerRegistrations),
+	};
+}
+
+function restoreExtensionLoadRuntime(runtime: ExtensionRuntime, snapshot: ExtensionLoadRuntimeSnapshot): void {
+	for (const [name, current] of runtime.providerRegistrations) {
+		const previous = snapshot.providerRegistrations.get(name);
+		if (!previous || previous.config !== current.config || previous.extensionPath !== current.extensionPath) {
+			try {
+				runtime.unregisterProvider(name, current.extensionPath);
+			} catch {
+				// Preserve the original factory failure; reload rollback remains the outer safety net.
+			}
+		}
+	}
+	for (const [name, previous] of snapshot.providerRegistrations) {
+		const current = runtime.providerRegistrations.get(name);
+		if (current?.config === previous.config && current.extensionPath === previous.extensionPath) continue;
+		try {
+			runtime.registerProvider(name, previous.config, previous.extensionPath);
+		} catch {
+			// Preserve the original factory failure; reload rollback remains the outer safety net.
+		}
+	}
+
+	runtime.pendingProviderRegistrations = snapshot.pendingProviderRegistrations;
+	runtime.flagValues.clear();
+	for (const [name, value] of snapshot.flagValues) {
+		runtime.flagValues.set(name, value);
+	}
+}
+
 export async function loadExtension(
 	extensionPath: string,
 	cwd: string,
@@ -531,10 +575,12 @@ export async function loadExtension(
 
 		const extension = createExtension(extensionPath, resolvedPath);
 		const api = createExtensionAPI(extension, runtime, cwd, eventBus);
+		const runtimeSnapshot = snapshotExtensionLoadRuntime(runtime);
 		try {
 			await factory(api);
 		} catch (err) {
 			await disposeExtensionEventSubscriptions([extension]);
+			restoreExtensionLoadRuntime(runtime, runtimeSnapshot);
 			throw err;
 		}
 
@@ -600,7 +646,14 @@ function createLazyExtension(
 				throw new Error(`Extension does not export a valid factory function: ${extensionPath}`);
 			}
 			const api = createExtensionAPI(extension, runtime, cwd, eventBus);
-			await factory(api);
+			const runtimeSnapshot = snapshotExtensionLoadRuntime(runtime);
+			try {
+				await factory(api);
+			} catch (error) {
+				await disposeExtensionEventSubscriptions([extension]);
+				restoreExtensionLoadRuntime(runtime, runtimeSnapshot);
+				throw error;
+			}
 			if (extension.lazy) {
 				extension.lazy.loaded = true;
 				extension.lazy.loading = undefined;
@@ -651,10 +704,12 @@ export async function loadExtensionFromFactory(
 	const extension = createExtension(extensionPath, extensionPath);
 	const resolvedCwd = resolvePath(cwd);
 	const api = createExtensionAPI(extension, runtime, resolvedCwd, eventBus);
+	const runtimeSnapshot = snapshotExtensionLoadRuntime(runtime);
 	try {
 		await factory(api);
 	} catch (err) {
 		await disposeExtensionEventSubscriptions([extension]);
+		restoreExtensionLoadRuntime(runtime, runtimeSnapshot);
 		throw err;
 	}
 	return extension;

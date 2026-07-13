@@ -456,6 +456,26 @@ describe("extensions discovery", () => {
 		expect(result.extensions[0].flags.has("my-flag")).toBe(true);
 	});
 
+	it("keeps loading healthy explicit extensions after one factory fails", async () => {
+		const failingPath = path.join(tempDir, "failing.ts");
+		const healthyPath = path.join(tempDir, "healthy.ts");
+		fs.writeFileSync(
+			failingPath,
+			`export default function (pi) {
+	pi.sendMessage({ customType: "invalid-load-action", content: "not allowed during load", display: false });
+}`,
+		);
+		fs.writeFileSync(healthyPath, extensionCodeWithTool("healthy"));
+
+		const { loadExtensions } = await import("../src/core/extensions/loader.ts");
+		const result = await loadExtensions([failingPath, healthyPath], tempDir);
+
+		expect(result.errors).toHaveLength(1);
+		expect(result.errors[0]?.path).toBe(failingPath);
+		expect(result.extensions).toHaveLength(1);
+		expect(result.extensions[0]?.tools.has("healthy")).toBe(true);
+	});
+
 	it("loadExtensions only loads explicit paths without discovery", async () => {
 		// Create discoverable extensions (would be found by discoverAndLoadExtensions)
 		fs.writeFileSync(path.join(extensionsDir, "discovered.ts"), extensionCodeWithTool("discovered"));

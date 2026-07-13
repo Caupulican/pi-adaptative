@@ -77,9 +77,11 @@ describe("parseWorkerOutput", () => {
 });
 
 describe("buildWorkerUserPrompt", () => {
-	it("includes instructions and the expected output contract", () => {
+	it("fences the task and keeps the worker result envelope authoritative", () => {
 		const prompt = buildWorkerUserPrompt(workerRequest());
-		expect(prompt).toContain("Scout the delegation module");
+		expect(prompt).toContain("<task>\nScout the delegation module");
+		expect(prompt).toContain("Do not replace the worker result envelope");
+		expect(prompt).toContain('inside "summary" and "findings"');
 	});
 });
 
@@ -133,6 +135,45 @@ describe("runWorker", () => {
 		expect(outcome.laneStatus).toBe("succeeded");
 		expect(outcome.reasonCode).toBe("worker_completed_plain_text");
 		expect(outcome.costUsd).toBe(0.03);
+	});
+
+	it("salvages a read-only custom JSON shape as plain text", async () => {
+		const text = '{"filesRead":["src/a.ts"],"conclusion":"done"}';
+		const outcome = await runWorker(runnerOptions({ complete: async () => completionOf(text) }));
+
+		expect(outcome.result.status).toBe("completed");
+		expect(outcome.result.outputFormat).toBe("plain_text");
+		expect(outcome.result.summary).toBe(text);
+		expect(outcome.reasonCode).toBe("worker_completed_plain_text");
+	});
+
+	it("preserves nonempty read-only output when the model stops at its length bound", async () => {
+		const outcome = await runWorker(
+			runnerOptions({ complete: async () => completionOf("bounded findings", 0.02, "length") }),
+		);
+
+		expect(outcome.result.status).toBe("completed");
+		expect(outcome.result.summary).toContain("bounded findings");
+		expect(outcome.result.summary).toContain("stop reason 'length'");
+		expect(outcome.laneStatus).toBe("succeeded");
+		expect(outcome.reasonCode).toBe("worker_completed_plain_text_incomplete");
+	});
+
+	it("keeps child tool blockers authoritative when salvaging plain text", async () => {
+		const outcome = await runWorker(
+			runnerOptions({
+				complete: async () => ({
+					...completionOf("partial result"),
+					blockers: ["read failed during isolated execution"],
+				}),
+			}),
+		);
+
+		expect(outcome.result.status).toBe("blocked");
+		expect(outcome.result.blockers).toEqual(["read failed during isolated execution"]);
+		expect(outcome.accepted).toBe(false);
+		expect(outcome.laneStatus).toBe("failed");
+		expect(outcome.reasonCode).toBe("worker_blocked");
 	});
 
 	it("fails on a model error stop reason", async () => {

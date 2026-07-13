@@ -1,5 +1,10 @@
 ## [Unreleased]
 
+### Fixed
+
+- Recreated expired OpenAI Codex subscription WebSockets and replayed the rejected request once when the server enforces its connection lifetime limit.
+- Corrected Sakana Fugu usage accounting so orchestration tokens remain categorized without being double-counted in provider-reported totals.
+
 ## [0.81.29] - 2026-07-10
 
 ## [0.81.28] - 2026-07-10

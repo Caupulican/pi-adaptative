@@ -287,7 +287,8 @@ export class OllamaRuntime {
 		this._agentDir = args.agentDir;
 		this._baseUrl = (args.baseUrl ?? DEFAULT_BASE_URL).replace(/\/$/, "");
 		this._fetch = args.deps?.fetchFn ?? fetch;
-		this._spawn = args.deps?.spawnFn ?? ((command, argv, options) => spawn(command, argv, options));
+		this._spawn =
+			args.deps?.spawnFn ?? ((command, argv, options) => spawn(command, argv, { ...options, stdio: "ignore" }));
 		this._exists = args.deps?.existsFn ?? existsSync;
 		this._linkFile = args.deps?.linkFile ?? linkSync;
 		this._copyFile = args.deps?.copyFile ?? copyFileSync;
@@ -905,7 +906,9 @@ export class TransformersRuntime {
 		this._modelId = args.modelId;
 		this._baseUrl = args.baseUrl?.replace(/\/$/, "") ?? resolveTransformersBaseUrl(args.modelId);
 		this._fetch = args.deps?.fetchFn ?? fetch;
-		this._spawn = args.deps?.spawnFn ?? ((command, argv, options) => spawn(command, argv, { env: options.env }));
+		this._spawn =
+			args.deps?.spawnFn ??
+			((command, argv, options) => spawn(command, argv, { env: options.env, stdio: "ignore" }));
 		this._exists = args.deps?.existsFn ?? existsSync;
 		this._sleep = args.deps?.sleepFn ?? ((ms) => new Promise((resolve) => setTimeout(resolve, ms)));
 		this._platform = args.deps?.platform ?? osPlatform;

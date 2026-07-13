@@ -1,5 +1,18 @@
 ## [Unreleased]
 
+### Added
+
+- Added per-delegation, lane-profile-gated read-only memory retrieval for isolated workers while keeping private memory files and every memory mutation unavailable.
+- Added explicit queued/running worker status and lane-specific completion notifications without injecting late worker output into the active foreground transcript.
+
+### Fixed
+
+- Made managed local-model readiness verify the configured Ollama model after startup, exit cleanly when it is missing, and prevent prefix warming from silently falling back to another model.
+- Kept startup running when an extension fails to load, while reporting the failure, restoring prior provider and flag state, and discarding partial event registrations.
+- Preserved bounded read-only delegated worker output when a worker returns plain text, custom JSON, or reaches its output limit instead of failing it as unparseable.
+- Made worker delegation follow the selected lane model's provider and tool protocol, and prevented multiple queued local workers from deadlocking.
+- Restored OAuth rejection recovery for Codex subscription models by matching the provider ID instead of the Responses API ID.
+
 ## [0.81.29] - 2026-07-10
 
 ### Fixed

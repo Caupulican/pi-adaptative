@@ -30,7 +30,7 @@ import type {
 } from "./agent-session.ts";
 import type { CapabilityEnvelope, EvidenceBundle, WorkerRequest, WorkerResult } from "./autonomy/contracts.ts";
 import { createLaneToolSurface, type LaneToolSurface } from "./autonomy/lane-tool-surface.ts";
-import { type LaneRecord, type LaneStatus, LaneTracker } from "./autonomy/lane-tracker.ts";
+import { type LaneRecord, type LaneTerminalStatus, LaneTracker } from "./autonomy/lane-tracker.ts";
 import { safeRealpathSync } from "./autonomy/path-scope.ts";
 import { appendLaneRecordSnapshot, getLaneRecordSnapshots } from "./autonomy/session-lane-record.ts";
 import { composeSubagentSystemPrompt } from "./autonomy/subagent-prompt.ts";
@@ -55,6 +55,35 @@ import type { SettingsManager } from "./settings-manager.ts";
 
 export function clampLaneMaxUsd(settingsMaxUsd: number, foregroundMaxEstimatedUsd?: number): number {
 	return Math.min(settingsMaxUsd, foregroundMaxEstimatedUsd ?? Number.POSITIVE_INFINITY);
+}
+
+export function getPrivateLaneDeniedPaths(cwd: string, agentDir: string): string[] {
+	return [
+		"auth.json",
+		"MEMORY.md",
+		"USER.md",
+		"settings.json",
+		"models.json",
+		"trust.json",
+		"sessions",
+		"state",
+		"context-artifacts",
+		"context-gc",
+	]
+		.map((entry) => path.join(agentDir, entry))
+		.concat(path.join(cwd, ".pi", "settings.json"));
+}
+
+export function isLocalExecutionModel(model: Pick<Model<Api>, "provider" | "baseUrl">): boolean {
+	if (model.provider === "ollama" || model.provider === "transformers" || model.provider === "llama-cpp") {
+		return true;
+	}
+	try {
+		const hostname = new URL(model.baseUrl).hostname.toLowerCase();
+		return hostname === "localhost" || hostname === "127.0.0.1" || hostname === "::1" || hostname === "[::1]";
+	} catch {
+		return false;
+	}
 }
 
 export interface BackgroundLaneControllerDeps {
@@ -98,6 +127,8 @@ export interface BackgroundLaneControllerDeps {
 	saveEvidenceBundleSnapshot(bundle: EvidenceBundle): string;
 	/** Persist a worker delegation's result snapshot to the session log. */
 	saveWorkerResultSnapshot(result: WorkerResult, request?: WorkerRequest): string;
+	/** Bounded, source-labeled memory retrieval for an orchestrator-authorized worker. */
+	readMemoryForLane(query: string): Promise<string>;
 	/** Roll a lane's spawned usage into session accounting (idempotent per reportId). */
 	addSpawnedUsage(
 		usage: Usage,
@@ -132,10 +163,18 @@ export class BackgroundLaneController {
 	private readonly _warnedUnboundLaneToolGrants = new Set<string>();
 	/** Every background execution is retained until its terminal result is observed. */
 	private readonly _workerPromises = new Map<string, Promise<WorkerDelegationRunOutcome>>();
-	private readonly _queuedWorkers = new Map<string, { instructions: string; systemPrompt?: string }>();
+	private readonly _queuedWorkers = new Map<
+		string,
+		{ instructions: string; systemPrompt?: string; memoryRead?: boolean }
+	>();
 	private _workerNotificationTimer: ReturnType<typeof setTimeout> | undefined;
 	private _workersCompletedSinceFlush = 0;
 	private _workersFailedSinceFlush = 0;
+	private readonly _workerTerminalSinceFlush: Array<{
+		laneId: string;
+		status: LaneTerminalStatus;
+		reasonCode?: string;
+	}> = [];
 
 	private readonly deps: BackgroundLaneControllerDeps;
 
@@ -143,20 +182,35 @@ export class BackgroundLaneController {
 		if (this._workerNotificationTimer !== undefined) return;
 		this._workerNotificationTimer = setTimeout(() => {
 			this._workerNotificationTimer = undefined;
+			const queued = this._laneTracker
+				.getRecords()
+				.filter((record) => record.type === "worker" && record.status === "queued").length;
+			const running = this._laneTracker.getRunningCount("worker");
 			this.deps.emit({
 				type: "delegate_workers",
-				active: this._laneTracker.getActiveCount("worker"),
+				active: queued + running,
+				queued,
+				running,
 				completedSinceFlush: this._workersCompletedSinceFlush,
 				failedSinceFlush: this._workersFailedSinceFlush,
+				terminalSinceFlush: this._workerTerminalSinceFlush.splice(0),
 			});
 			this._workersCompletedSinceFlush = 0;
 			this._workersFailedSinceFlush = 0;
 		}, 75);
+		const timer = this._workerNotificationTimer;
+		if (typeof timer === "object" && timer && "unref" in timer) timer.unref();
 	}
 
-	private _recordWorkerTerminal(status: LaneStatus): void {
-		if (status === "succeeded") this._workersCompletedSinceFlush++;
+	private _recordWorkerTerminal(record: LaneRecord): void {
+		if (record.status === "queued" || record.status === "running") return;
+		if (record.status === "succeeded") this._workersCompletedSinceFlush++;
 		else this._workersFailedSinceFlush++;
+		this._workerTerminalSinceFlush.push({
+			laneId: record.laneId,
+			status: record.status,
+			...(record.reasonCode ? { reasonCode: record.reasonCode } : {}),
+		});
 		this._scheduleWorkerNotification();
 	}
 
@@ -183,6 +237,10 @@ export class BackgroundLaneController {
 	abortInFlightLanes(): void {
 		this._researchLaneAbort.abort();
 		this._workerDelegationAbort.abort();
+		if (this._workerNotificationTimer !== undefined) {
+			clearTimeout(this._workerNotificationTimer);
+			this._workerNotificationTimer = undefined;
+		}
 	}
 
 	clearGoalAutoContinueTimer(): void {
@@ -442,6 +500,7 @@ export class BackgroundLaneController {
 			allowedTools: [...surface.allowedTools],
 			deniedTools: [...surface.deniedTools],
 			allowedPaths: [this.deps.getCwd()],
+			deniedPaths: getPrivateLaneDeniedPaths(this.deps.getCwd(), this.deps.getAgentDir()),
 			maxEstimatedUsd: clampLaneMaxUsd(maxUsd, this.deps.getCapabilityEnvelope()?.maxEstimatedUsd),
 			createdAt: new Date().toISOString(),
 		};
@@ -500,7 +559,11 @@ export class BackgroundLaneController {
 				maxSources: settings.maxSources,
 			});
 			const maxUsd = clampLaneMaxUsd(settings.maxUsd, this.deps.getCapabilityEnvelope()?.maxEstimatedUsd);
-			const toolSurface = createLaneToolSurface({ cwd: this.deps.getCwd(), profile: laneProfile });
+			const toolSurface = createLaneToolSurface({
+				cwd: this.deps.getCwd(),
+				profile: laneProfile,
+				deniedPaths: getPrivateLaneDeniedPaths(this.deps.getCwd(), this.deps.getAgentDir()),
+			});
 			this._warnUnboundLaneToolGrants(laneProfile, toolSurface);
 			const result = await runResearch({
 				query: demand.query,
@@ -624,11 +687,24 @@ export class BackgroundLaneController {
 		instructions: string;
 		/** Model-provided replacement for the worker role prompt (the level-0 core always remains). */
 		systemPrompt?: string;
+		/** Orchestrator-requested read-only memory access; the lane profile may still deny it. */
+		memoryRead?: boolean;
 	}): { started: false; skipReason: string } | { started: true; record: LaneRecord } {
 		const settings = this.deps.getSettingsManager().getWorkerDelegationSettings();
+		if (this.deps.isDisposed()) return { started: false, skipReason: "session_disposed" };
+		if (request.instructions.trim().length === 0) return { started: false, skipReason: "missing_instructions" };
+		if (!this.deps.isDelegateToolActive()) return { started: false, skipReason: "delegate_tool_inactive" };
+		if (!settings.enabled) return { started: false, skipReason: "worker_delegation_disabled" };
+		const shipment = this._resolveLaneShipment(settings, "no_worker_model");
+		if (!shipment.ok) return { started: false, skipReason: shipment.skipReason };
+		if (!this._laneCapabilityProfile(shipment.model).backgroundLanesEnabled) {
+			return { started: false, skipReason: "model_delegation_unsupported" };
+		}
+
 		const foreground = this.deps.getModel();
-		const managedLocal = foreground?.provider === "ollama" || foreground?.provider === "transformers";
-		if (managedLocal) {
+		const contendsWithLocalForeground =
+			foreground !== undefined && isLocalExecutionModel(foreground) && isLocalExecutionModel(shipment.model);
+		if (contendsWithLocalForeground) {
 			if (
 				this._queuedWorkers.size >= 8 ||
 				this._laneTracker.getActiveCount("worker") >= settings.maxConcurrent + 8
@@ -639,6 +715,9 @@ export class BackgroundLaneController {
 			this._queuedWorkers.set(record.laneId, request);
 			this._scheduleWorkerNotification();
 			return { started: true, record };
+		}
+		if (this._laneTracker.getRunningCount("worker") >= settings.maxConcurrent) {
+			return { started: false, skipReason: "worker_delegation_already_running" };
 		}
 		let startedRecord: LaneRecord | undefined;
 		const promise = this.runWorkerDelegationOnce(request, (record) => {
@@ -663,13 +742,15 @@ export class BackgroundLaneController {
 			instructions: string;
 			/** Model-provided replacement for the worker role prompt (the level-0 core always remains). */
 			systemPrompt?: string;
+			/** Orchestrator-requested read-only memory access; the lane profile may still deny it. */
+			memoryRead?: boolean;
 		},
 		onStarted?: (record: LaneRecord) => void,
 		existingRecord?: LaneRecord,
 	): Promise<WorkerDelegationRunOutcome> {
 		const delegationSettings = this.deps.getSettingsManager().getWorkerDelegationSettings();
-		const activeWorkers = this._laneTracker.getActiveCount("worker") - (existingRecord ? 1 : 0);
-		if (activeWorkers >= delegationSettings.maxConcurrent) {
+		const runningWorkers = this._laneTracker.getRunningCount("worker");
+		if (runningWorkers >= delegationSettings.maxConcurrent) {
 			return { started: false, skipReason: "worker_delegation_already_running" };
 		}
 		if (this.deps.isDisposed()) {
@@ -712,6 +793,8 @@ export class BackgroundLaneController {
 		const toolSurface = createLaneToolSurface({
 			cwd: this.deps.getCwd(),
 			profile: laneProfile,
+			deniedPaths: getPrivateLaneDeniedPaths(this.deps.getCwd(), this.deps.getAgentDir()),
+			readMemory: request.memoryRead ? (query) => this.deps.readMemoryForLane(query) : undefined,
 			writeEnabled,
 			writePaths: settings.writePaths,
 		});
@@ -720,6 +803,7 @@ export class BackgroundLaneController {
 			toolSurface.allowedTools.filter((name): name is WorkerAction["op"] => name === "write" || name === "edit"),
 		);
 		const writeGranted = writeEnabled && allowedActionOps.size > 0;
+		const memoryReadGranted = request.memoryRead === true && toolSurface.allowedTools.includes("memory");
 		const workerRequest: WorkerRequest = {
 			id: startedRecord.laneId,
 			instructions,
@@ -735,8 +819,13 @@ export class BackgroundLaneController {
 				profileId: laneProfile?.name,
 				// write_files requires BOTH the opt-in AND an explicit non-empty path scope —
 				// an unscoped write grant is refused here, not discovered at validation time.
-				capabilities: writeGranted ? ["read_files", "write_files"] : ["read_files"],
+				capabilities: [
+					"read_files",
+					...(memoryReadGranted ? (["memory_read"] as const) : []),
+					...(writeGranted ? (["write_files"] as const) : []),
+				],
 				...(writeGranted ? { allowedPaths: [...settings.writePaths] } : {}),
+				deniedPaths: getPrivateLaneDeniedPaths(this.deps.getCwd(), this.deps.getAgentDir()),
 				allowedTools: [...toolSurface.allowedTools],
 				deniedTools: [...toolSurface.deniedTools],
 				maxEstimatedUsd: maxUsd,
@@ -865,7 +954,7 @@ export class BackgroundLaneController {
 					status: "canceled",
 					reasonCode: "session_disposed",
 				});
-				if (record) this._recordWorkerTerminal(record.status);
+				if (record) this._recordWorkerTerminal(record);
 				return { started: true, record, outcome };
 			}
 
@@ -880,7 +969,7 @@ export class BackgroundLaneController {
 				costUsd: outcome.costUsd,
 			});
 			if (record) {
-				this._recordWorkerTerminal(record.status);
+				this._recordWorkerTerminal(record);
 				appendLaneRecordSnapshot(this.deps.getSessionManager(), record);
 				// G3: worker lane terminal record -> worker_result event. Lane outcome only
 				// (status/reasonCode/cost) — never the worker's summary/changed-file text.
@@ -902,7 +991,7 @@ export class BackgroundLaneController {
 				status: "failed",
 				reasonCode: "worker_delegation_error",
 			});
-			if (record) this._recordWorkerTerminal(record.status);
+			if (record) this._recordWorkerTerminal(record);
 			if (record && !this.deps.isDisposed()) {
 				appendLaneRecordSnapshot(this.deps.getSessionManager(), record);
 				this.deps.emitAutonomyTelemetry({
@@ -1008,7 +1097,7 @@ export class BackgroundLaneController {
 	drainQueuedWorkerDelegations(): void {
 		for (const [laneId, request] of [...this._queuedWorkers]) {
 			if (
-				this._laneTracker.getActiveCount("worker") >
+				this._laneTracker.getRunningCount("worker") >=
 				this.deps.getSettingsManager().getWorkerDelegationSettings().maxConcurrent
 			)
 				break;
@@ -1027,17 +1116,19 @@ export class BackgroundLaneController {
 							status: "canceled",
 							reasonCode: outcome.skipReason,
 						});
-						if (terminal) this._recordWorkerTerminal(terminal.status);
+						if (terminal) this._recordWorkerTerminal(terminal);
 					}
 					this._workerPromises.delete(laneId);
+					if (!this.deps.isDisposed()) this.drainQueuedWorkerDelegations();
 				},
 				() => {
 					const terminal = this._laneTracker.complete(laneId, {
 						status: "failed",
 						reasonCode: "worker_background_error",
 					});
-					if (terminal) this._recordWorkerTerminal(terminal.status);
+					if (terminal) this._recordWorkerTerminal(terminal);
 					this._workerPromises.delete(laneId);
+					if (!this.deps.isDisposed()) this.drainQueuedWorkerDelegations();
 				},
 			);
 		}

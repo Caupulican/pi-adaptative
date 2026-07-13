@@ -34,12 +34,12 @@ describe("createAgentSession stream options", () => {
 		}
 	});
 
-	function createModel(api: Api): Model<Api> {
+	function createModel(api: Api, provider = "capture-provider"): Model<Api> {
 		return {
 			id: "capture-model",
 			name: "Capture Model",
 			api,
-			provider: "capture-provider",
+			provider,
 			baseUrl: "https://capture.invalid/v1",
 			reasoning: false,
 			input: ["text"],
@@ -76,8 +76,9 @@ describe("createAgentSession stream options", () => {
 		api: Api,
 		settings: { httpIdleTimeoutMs?: number; websocketConnectTimeoutMs?: number },
 		requestOptions: SimpleStreamOptions = {},
+		provider = "capture-provider",
 	): Promise<SimpleStreamOptions | undefined> {
-		const model = createModel(api);
+		const model = createModel(api, provider);
 		const settingsManager = SettingsManager.inMemory(settings);
 
 		const authStorage = AuthStorage.create(join(agentDir, "auth.json"));
@@ -155,5 +156,11 @@ describe("createAgentSession stream options", () => {
 		);
 
 		expect(options?.websocketConnectTimeoutMs).toBe(0);
+	});
+
+	it("wires OAuth rejection recovery by the Codex provider id rather than its API id", async () => {
+		const options = await captureStreamOptions("openai-codex-responses", {}, {}, "openai-codex");
+
+		expect(options?.onAuthRejection).toBeTypeOf("function");
 	});
 });

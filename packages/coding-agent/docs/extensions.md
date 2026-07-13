@@ -202,6 +202,8 @@ Extensions are loaded via [jiti](https://github.com/unjs/jiti), so TypeScript wo
 
 If the factory returns a `Promise`, pi awaits it before continuing startup. That means async initialization completes before `session_start`, before `resources_discover`, and before provider registrations queued via `pi.registerProvider()` are flushed.
 
+> **Confirmed lifecycle:** Use the factory for registrations and subscriptions. Methods that require a bound session runtime, such as `pi.sendMessage()`, `pi.sendUserMessage()`, `pi.appendEntry()`, and `pi.setActiveTools()`, must run from `session_start`, a command/tool handler, or another later event. If an eagerly loaded module or factory throws or rejects, pi reports the extension as a startup warning, discards its partial registrations and subscriptions, and continues with the remaining extensions. A failed `/reload` remains transactional and keeps the current working runtime.
+
 ### Async factory functions
 
 Use an async factory for one-time startup work such as fetching remote configuration or dynamically discovering available models.

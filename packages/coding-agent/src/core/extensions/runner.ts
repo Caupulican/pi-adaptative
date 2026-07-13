@@ -314,6 +314,25 @@ export class ExtensionRunner {
 		this.reloadHandler = contextActions.reload;
 		this.getSystemPromptFn = contextActions.getSystemPrompt;
 
+		const rememberProvider = (name: string, config: ProviderConfig, extensionPath?: string): void => {
+			const previous = this.runtime.providerRegistrations.get(name);
+			if (previous?.extensionPath && previous.extensionPath !== extensionPath) {
+				this.runtime.providersByExtension.get(previous.extensionPath)?.delete(name);
+			}
+			if (extensionPath) {
+				if (!this.runtime.providersByExtension.has(extensionPath)) {
+					this.runtime.providersByExtension.set(extensionPath, new Set());
+				}
+				this.runtime.providersByExtension.get(extensionPath)!.add(name);
+			}
+			this.runtime.providerRegistrations.set(name, { config, extensionPath });
+		};
+		const forgetProvider = (name: string, extensionPath?: string): void => {
+			const registered = this.runtime.providerRegistrations.get(name);
+			this.runtime.providersByExtension.get(registered?.extensionPath ?? extensionPath ?? "")?.delete(name);
+			this.runtime.providerRegistrations.delete(name);
+		};
+
 		// Flush provider registrations queued during extension loading
 		for (const { name, config, extensionPath } of this.runtime.pendingProviderRegistrations) {
 			try {
@@ -322,11 +341,7 @@ export class ExtensionRunner {
 				} else {
 					this.modelRegistry.registerProvider(name, config);
 				}
-				// Track which extension owns this provider for later cleanup
-				if (!this.runtime.providersByExtension.has(extensionPath)) {
-					this.runtime.providersByExtension.set(extensionPath, new Set());
-				}
-				this.runtime.providersByExtension.get(extensionPath)!.add(name);
+				rememberProvider(name, config, extensionPath);
 			} catch (err) {
 				this.emitError({
 					extensionPath,
@@ -346,13 +361,7 @@ export class ExtensionRunner {
 			} else {
 				this.modelRegistry.registerProvider(name, config);
 			}
-			// Track provider ownership when extensionPath is provided
-			if (extensionPath) {
-				if (!this.runtime.providersByExtension.has(extensionPath)) {
-					this.runtime.providersByExtension.set(extensionPath, new Set());
-				}
-				this.runtime.providersByExtension.get(extensionPath)!.add(name);
-			}
+			rememberProvider(name, config, extensionPath);
 		};
 		this.runtime.unregisterProvider = (name, extensionPath) => {
 			if (providerActions?.unregisterProvider) {
@@ -360,13 +369,7 @@ export class ExtensionRunner {
 			} else {
 				this.modelRegistry.unregisterProvider(name);
 			}
-			// Remove provider from the ownership map when extensionPath is provided
-			if (extensionPath) {
-				const providers = this.runtime.providersByExtension.get(extensionPath);
-				if (providers) {
-					providers.delete(name);
-				}
-			}
+			forgetProvider(name, extensionPath);
 		};
 	}
 

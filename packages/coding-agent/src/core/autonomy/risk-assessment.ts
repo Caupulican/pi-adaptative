@@ -117,7 +117,7 @@ export function assessOperationRisk(input: RiskAssessmentInput): RiskAssessment 
 	// or read-only if it's purely a non-mutating intent (but since it didn't match read-only above, we default to scoped-write)
 	if (
 		input.toolName &&
-		!["read_file", "search_web", "list_dir", "grep_search", "view_file"].includes(input.toolName)
+		!["read_file", "search_web", "list_dir", "grep_search", "view_file", "memory"].includes(input.toolName)
 	) {
 		return {
 			risk: "scoped-write",

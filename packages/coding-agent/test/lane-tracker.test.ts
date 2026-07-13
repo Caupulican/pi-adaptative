@@ -38,6 +38,19 @@ describe("LaneTracker", () => {
 		expect(tracker.getActiveCount("worker")).toBe(0);
 	});
 
+	it("distinguishes queued lanes from running concurrency", () => {
+		const { tracker } = createTracker();
+		tracker.enqueue({ type: "worker" });
+		const running = tracker.start({ type: "worker" });
+		tracker.start({ type: "research" });
+
+		expect(tracker.getActiveCount("worker")).toBe(2);
+		expect(tracker.getRunningCount("worker")).toBe(1);
+		expect(tracker.getRunningCount()).toBe(2);
+		tracker.complete(running.laneId, { status: "succeeded" });
+		expect(tracker.getRunningCount("worker")).toBe(0);
+	});
+
 	it("completes a lane with terminal details and stops counting it active", () => {
 		const { tracker } = createTracker();
 		const started = tracker.start({ type: "research" });

@@ -85,7 +85,7 @@ import type {
 } from "./autonomy/contracts.ts";
 import { buildForegroundEnvelope, formatForegroundEnvelopeObservation } from "./autonomy/foreground-envelope.ts";
 import { evaluateToolGate } from "./autonomy/gates.ts";
-import type { LaneRecord } from "./autonomy/lane-tracker.ts";
+import type { LaneRecord, LaneTerminalStatus } from "./autonomy/lane-tracker.ts";
 import type { AutonomyDiagnosticSnapshot, AutonomyStatusSnapshot, GateOutcomeHistoryEntry } from "./autonomy/status.ts";
 import type { AutonomyTelemetryEvent } from "./autonomy/telemetry-events.ts";
 import { AutonomyTelemetry } from "./autonomy-telemetry.ts";
@@ -331,8 +331,15 @@ export type AgentSessionEvent =
 	| {
 			type: "delegate_workers";
 			active: number;
+			queued: number;
+			running: number;
 			completedSinceFlush: number;
 			failedSinceFlush: number;
+			terminalSinceFlush: Array<{
+				laneId: string;
+				status: LaneTerminalStatus;
+				reasonCode?: string;
+			}>;
 	  };
 
 /** Listener function for agent session events */
@@ -881,6 +888,7 @@ export class AgentSession {
 			getEvidenceBundleSnapshot: () => this.getEvidenceBundleSnapshot(),
 			saveEvidenceBundleSnapshot: (bundle) => this.saveEvidenceBundleSnapshot(bundle),
 			saveWorkerResultSnapshot: (result, request) => this.saveWorkerResultSnapshot(result, request),
+			readMemoryForLane: (query) => this._memory.readMemoryForLane(query),
 			addSpawnedUsage: (usage, opts) => this.addSpawnedUsage(usage, opts),
 			runIsolatedCompletion: (opts) => this.runIsolatedCompletion(opts),
 			continueGoalLoop: (options) => this.continueGoalLoop(options),
@@ -977,6 +985,7 @@ export class AgentSession {
 			isChildSession: () => this._isChildSession,
 			isDisposed: () => this._disposed,
 			getReflectionSignal: () => this._reflectionAbort.signal,
+			resolveTextToolCallProtocol: (model) => this._textProtocolFlag(model),
 			archivePromotedSkill: (name) => this.archivePromotedSkill(name),
 			emitAutonomyTelemetry: (event) => this._emitAutonomyTelemetry(event),
 			ensureModelReady: (model) => this._localRuntimeController.ensureIsolatedModelReady(model),
@@ -1245,17 +1254,7 @@ export class AgentSession {
 			}
 			if (controller.signal.aborted) return;
 			if (model.provider === OLLAMA_PROVIDER || model.provider === HF_TRANSFORMERS_PROVIDER) {
-				await this._localRuntimeController.ensureRouteModelReady({
-					decision: {
-						tier: "cheap",
-						risk: "read-only",
-						confidence: 1,
-						reasonCode: "prefix_warmer",
-						reasons: ["prefix warmer residency"],
-						model: `${model.provider}/${model.id}`,
-					},
-					model,
-				});
+				await this._localRuntimeController.ensureIsolatedModelReady(model);
 			}
 			if (controller.signal.aborted) return;
 			const stream = await this.agent.streamFn(
@@ -4829,6 +4828,7 @@ export class AgentSession {
 	async runWorkerDelegationOnce(request: {
 		instructions: string;
 		systemPrompt?: string;
+		memoryRead?: boolean;
 	}): Promise<WorkerDelegationRunOutcome> {
 		return this._backgroundLanes.runWorkerDelegationOnce(request);
 	}

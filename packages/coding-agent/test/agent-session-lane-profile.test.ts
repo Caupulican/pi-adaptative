@@ -3,7 +3,12 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { Agent, convertToLlm } from "@caupulican/pi-agent-core";
 import { SessionManager } from "@caupulican/pi-agent-core/node";
-import { type FauxProviderRegistration, fauxAssistantMessage, registerFauxProvider } from "@caupulican/pi-ai";
+import {
+	type FauxProviderRegistration,
+	fauxAssistantMessage,
+	fauxToolCall,
+	registerFauxProvider,
+} from "@caupulican/pi-ai";
 import { afterEach, beforeEach, describe, expect, it } from "vitest";
 import { getProfilesDir } from "../src/config.ts";
 import { AgentSession } from "../src/core/agent-session.ts";
@@ -204,6 +209,45 @@ describe("profile-shipped lanes", () => {
 		await activeSession.runResearchLaneOnce({ query: "second" });
 
 		expect(warnings.filter((warning) => warning.includes("extension_mutator"))).toHaveLength(1);
+	});
+
+	it("composes worker profile UAC, shared argument repair, and workspace file scope", async () => {
+		const sessionModel = faux.getModel("session-model");
+		writeProfile("repair-reader", {
+			model: `${sessionModel?.provider}/scout-model`,
+			resources: { tools: { allow: ["read"] } },
+		});
+		writeFileSync(join(tempDir, "evidence.txt"), "PROFILE_REPAIR_FILE_OK\n", "utf-8");
+		const activeSession = await newSession({
+			workerDelegation: { enabled: true, profile: "repair-reader" },
+		});
+		let seenTools: string[] = [];
+		faux.setResponses([
+			(context, _options, _state, model) => {
+				seenTools = context.tools?.map((tool) => tool.name) ?? [];
+				expect(model.id).toBe("scout-model");
+				return fauxAssistantMessage([fauxToolCall("read", { Path: "evidence.txt" })], {
+					stopReason: "toolUse",
+				});
+			},
+			(context) => {
+				const readSucceeded = JSON.stringify(context.messages).includes("PROFILE_REPAIR_FILE_OK");
+				return fauxAssistantMessage(
+					readSucceeded
+						? '{"summary":"profile repair read succeeded"}'
+						: '{"summary":"profile repair read failed","status":"blocked","blockers":["read did not execute"]}',
+				);
+			},
+		]);
+
+		const run = await activeSession.runWorkerDelegationOnce({
+			instructions: "Read the evidence file",
+			memoryRead: true,
+		});
+
+		expect(run.record?.status).toBe("succeeded");
+		expect(run.outcome?.result.summary).toBe("profile repair read succeeded");
+		expect(seenTools).toEqual(["read"]);
 	});
 
 	it("lets a delegate-call system prompt replace the worker role prompt but never the core", async () => {

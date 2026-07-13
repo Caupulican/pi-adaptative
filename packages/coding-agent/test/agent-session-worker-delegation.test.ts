@@ -1,7 +1,7 @@
-import { existsSync, mkdirSync, readFileSync } from "node:fs";
+import { existsSync, mkdirSync, readFileSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
-import { fauxAssistantMessage, fauxToolCall } from "@caupulican/pi-ai";
-import { describe, expect, it } from "vitest";
+import { type AssistantMessage, type FauxResponseFactory, fauxAssistantMessage, fauxToolCall } from "@caupulican/pi-ai";
+import { describe, expect, it, vi } from "vitest";
 import { getLaneRecordSnapshots } from "../src/core/autonomy/session-lane-record.ts";
 import { getWorkerRequestSnapshots } from "../src/core/delegation/session-worker-result.ts";
 import { createHarness, type Harness } from "./suite/harness.ts";
@@ -62,6 +62,36 @@ describe("AgentSession worker delegation", () => {
 		}
 	});
 
+	it("uses the selected worker model's text-tool protocol instead of the foreground model's", async () => {
+		const harness = await createHarness({
+			models: [
+				{ id: "foreground", contextWindow: 128_000 },
+				{ id: "text-worker", contextWindow: 128_000 },
+			],
+			settings: { workerDelegation: { enabled: true, model: "faux/text-worker" } },
+		});
+		try {
+			const workerModel = harness.session.modelRegistry.find("faux", "text-worker");
+			if (!workerModel) throw new Error("Expected worker model");
+			workerModel.textToolCallProtocol = true;
+			let nativeTools: string[] | undefined;
+			harness.setResponses([
+				(context, _options, _state, model) => {
+					nativeTools = context.tools?.map((tool) => tool.name) ?? [];
+					expect(model.id).toBe("text-worker");
+					return fauxAssistantMessage(WORKER_JSON);
+				},
+			]);
+
+			const run = await harness.session.runWorkerDelegationOnce({ instructions: "Scout safely" });
+
+			expect(run.record?.status).toBe("succeeded");
+			expect(nativeTools).toEqual([]);
+		} finally {
+			harness.cleanup();
+		}
+	});
+
 	it("skips on empty instructions", async () => {
 		const harness = await createHarness({ settings: { workerDelegation: { enabled: true } } });
 		try {
@@ -101,6 +131,26 @@ describe("AgentSession worker delegation", () => {
 			const diagnostics = harness.session.getAutonomyDiagnosticSnapshot();
 			expect(diagnostics.delegation?.some((entry) => entry.title.startsWith("Lane worker-"))).toBe(true);
 			expect(diagnostics.delegation?.some((entry) => entry.title.startsWith("Worker worker-"))).toBe(true);
+		} finally {
+			harness.cleanup();
+		}
+	});
+
+	it("denies delegated file tools access to private file-store memory under the workspace", async () => {
+		const harness = await createHarness({ settings: { workerDelegation: { enabled: true } } });
+		try {
+			const memoryPath = join(harness.tempDir, "MEMORY.md");
+			writeFileSync(memoryPath, "PRIVATE_MEMORY_MARKER_SHOULD_NOT_LEAK\n", "utf-8");
+			harness.setResponses([
+				fauxAssistantMessage([fauxToolCall("read", { path: memoryPath })], { stopReason: "toolUse" }),
+				fauxAssistantMessage('{"summary":"private read attempt complete"}'),
+			]);
+
+			const run = await harness.session.runWorkerDelegationOnce({ instructions: "Read private memory" });
+
+			expect(run.outcome?.result.status).toBe("blocked");
+			expect(run.outcome?.result.blockers?.some((blocker) => blocker.includes("read blocked"))).toBe(true);
+			expect(JSON.stringify(run.outcome?.result)).not.toContain("PRIVATE_MEMORY_MARKER_SHOULD_NOT_LEAK");
 		} finally {
 			harness.cleanup();
 		}
@@ -202,6 +252,92 @@ describe("AgentSession worker delegation", () => {
 		}
 	});
 
+	it("drains multiple queued local workers up to the configured concurrency", async () => {
+		const harness = await createHarness({
+			settings: { workerDelegation: { enabled: true, maxConcurrent: 1 } },
+		});
+		try {
+			harness.setResponses([
+				fauxAssistantMessage(
+					[
+						fauxToolCall("delegate", { instructions: "Scout first" }),
+						fauxToolCall("delegate", { instructions: "Scout second" }),
+					],
+					{ stopReason: "toolUse" },
+				),
+				fauxAssistantMessage("Delegations started."),
+				fauxAssistantMessage('{"summary":"first worker done"}'),
+				fauxAssistantMessage('{"summary":"second worker done"}'),
+			]);
+
+			await harness.session.prompt("Delegate both scouts", { autoContinueGoal: false });
+			await vi.waitFor(() => expect(harness.session.getWorkerResultSnapshots()).toHaveLength(2));
+
+			expect(harness.session.getWorkerResultSnapshots().map((result) => result.summary)).toEqual([
+				"first worker done",
+				"second worker done",
+			]);
+			expect(workerLaneRecords(harness).map((record) => record.status)).toEqual(["succeeded", "succeeded"]);
+			expect(harness.getPendingResponseCount()).toBe(0);
+		} finally {
+			harness.cleanup();
+		}
+	});
+
+	it("returns from the foreground turn while the worker remains genuinely backgrounded", async () => {
+		const harness = await createHarness({ settings: { workerDelegation: { enabled: true } } });
+		let resolveWorker: (message: AssistantMessage) => void = () => {};
+		let workerResolved = false;
+		const workerResponse = new Promise<AssistantMessage>((resolve) => {
+			resolveWorker = (message) => {
+				workerResolved = true;
+				resolve(message);
+			};
+		});
+		const routeResponse: FauxResponseFactory = (context) =>
+			context.systemPrompt?.includes("You are a bounded subagent shipped by a coding-agent session")
+				? workerResponse
+				: fauxAssistantMessage("Foreground remained responsive.");
+		try {
+			harness.setResponses([
+				fauxAssistantMessage([fauxToolCall("delegate", { instructions: "Wait for the background result" })], {
+					stopReason: "toolUse",
+				}),
+				routeResponse,
+				routeResponse,
+			]);
+
+			await harness.session.prompt("Start one background worker", { autoContinueGoal: false });
+			await vi.waitFor(() =>
+				expect(
+					harness.session
+						.getLaneRecords()
+						.filter((record) => record.type === "worker")
+						.at(-1)?.status,
+				).toBe("running"),
+			);
+
+			expect(harness.session.getWorkerResultSnapshots()).toHaveLength(0);
+			expect(JSON.stringify(harness.session.messages)).toContain("Foreground remained responsive.");
+
+			resolveWorker(fauxAssistantMessage('{"summary":"background result arrived"}'));
+			await vi.waitFor(() => expect(harness.session.getWorkerResultSnapshots()).toHaveLength(1));
+			await vi.waitFor(() =>
+				expect(
+					harness
+						.eventsOfType("delegate_workers")
+						.flatMap((event) => event.terminalSinceFlush)
+						.map((terminal) => terminal.status),
+				).toContain("succeeded"),
+			);
+
+			expect(JSON.stringify(harness.session.messages)).not.toContain("background result arrived");
+		} finally {
+			if (!workerResolved) resolveWorker(fauxAssistantMessage('{"summary":"test cleanup"}'));
+			harness.cleanup();
+		}
+	});
+
 	it("lets the model delegate through the delegate tool in a full turn", async () => {
 		const harness = await createHarness({ settings: { workerDelegation: { enabled: true } } });
 		try {
@@ -214,6 +350,7 @@ describe("AgentSession worker delegation", () => {
 			]);
 
 			await harness.session.prompt("Please delegate a scout task", { autoContinueGoal: false });
+			await vi.waitFor(() => expect(harness.session.getWorkerResultSnapshots()).toHaveLength(1));
 
 			expect(harness.session.getWorkerResultSnapshots()).toHaveLength(1);
 			expect(workerLaneRecords(harness)[0]?.status).toBe("succeeded");

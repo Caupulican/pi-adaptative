@@ -3,7 +3,14 @@ import type { WorkerResult } from "../autonomy/contracts.ts";
 import type { LaneRecord } from "../autonomy/lane-tracker.ts";
 import type { ToolDefinition } from "../extensions/types.ts";
 
-const schema = Type.Object({ laneId: Type.Optional(Type.String()) }, { additionalProperties: false });
+const schema = Type.Object(
+	{
+		laneId: Type.Optional(
+			Type.String({ description: "Worker lane id to inspect. Omit it for a recent-session status overview." }),
+		),
+	},
+	{ additionalProperties: false },
+);
 type Input = Static<typeof schema>;
 
 export interface DelegateStatusDependencies {
@@ -26,8 +33,9 @@ export function createDelegateStatusToolDefinition(deps: DelegateStatusDependenc
 	return {
 		name: "delegate_status",
 		label: "delegate_status",
-		description: "Retrieve the status and bounded, explicitly untrusted result of a worker in this session.",
-		promptSnippet: "Poll a delegated worker without receiving a late transcript injection.",
+		description:
+			"Inspect queued, running, and terminal workers in this session, or retrieve one worker's bounded, explicitly untrusted result.",
+		promptSnippet: "Poll or inspect delegated workers without receiving a late transcript injection.",
 		parameters: schema,
 		async execute(_toolCallId, input: Input) {
 			const records = deps.getLaneRecords().filter((record) => record.type === "worker");
@@ -45,15 +53,23 @@ export function createDelegateStatusToolDefinition(deps: DelegateStatusDependenc
 					details: { laneId: record.laneId, status: record.status },
 				};
 			}
-			const recent = records.slice(-10).map((record) => formatRecord(record, results.get(record.laneId)));
+			const recentRecords = records.slice(-10);
+			const queued = records.filter((record) => record.status === "queued").length;
+			const running = records.filter((record) => record.status === "running").length;
+			const terminal = records.length - queued - running;
+			const recent = recentRecords.map((record) => formatRecord(record, results.get(record.laneId)));
+			const overview = `workers: ${running} running, ${queued} queued, ${terminal} terminal`;
 			return {
 				content: [
 					{
 						type: "text" as const,
-						text: recent.length > 0 ? recent.join("\n\n").slice(0, 16 * 1024) : "No worker lanes.",
+						text:
+							recent.length > 0
+								? `${overview}\n\n${recent.join("\n\n")}`.slice(0, 16 * 1024)
+								: "No worker lanes.",
 					},
 				],
-				details: { count: recent.length },
+				details: { count: recent.length, queued, running, terminal },
 			};
 		},
 	};

@@ -1,7 +1,9 @@
 import { mkdirSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
+import { SessionManager } from "@caupulican/pi-agent-core/node";
 import { afterEach, describe, expect, it } from "vitest";
+import { AuthStorage } from "../src/core/auth-storage.ts";
 import { createEventBus } from "../src/core/event-bus.ts";
 import {
 	createExtensionRuntime,
@@ -9,6 +11,8 @@ import {
 	loadExtensionFromFactory,
 	loadExtensions,
 } from "../src/core/extensions/loader.ts";
+import { ExtensionRunner } from "../src/core/extensions/runner.ts";
+import { ModelRegistry } from "../src/core/model-registry.ts";
 
 const tempDirs: string[] = [];
 
@@ -61,8 +65,16 @@ describe("extension event bus subscriptions across reloads", () => {
 		expect(oldReceived).toBe(0);
 	});
 
-	it("disposes event subscriptions when an eager factory throws", async () => {
+	it("disposes event subscriptions and restores shared runtime state when an eager factory throws", async () => {
 		const bus = createEventBus();
+		const runtime = createExtensionRuntime();
+		const baselineRegistration = {
+			name: "baseline-provider",
+			config: { baseUrl: "https://baseline.example.test" },
+			extensionPath: "baseline-extension",
+		};
+		runtime.pendingProviderRegistrations.push(baselineRegistration);
+		runtime.flagValues.set("baseline-flag", "kept");
 		let received = 0;
 
 		await expect(
@@ -71,17 +83,79 @@ describe("extension event bus subscriptions across reloads", () => {
 					pi.events.on("chan", () => {
 						received++;
 					});
+					pi.unregisterProvider("baseline-provider");
+					pi.registerProvider("leaked-provider", { baseUrl: "https://leaked.example.test" });
+					pi.registerFlag("leaked-flag", { type: "boolean", default: true });
 					throw new Error("boom");
 				},
 				process.cwd(),
 				bus,
-				createExtensionRuntime(),
+				runtime,
+				"failing-extension",
 			),
 		).rejects.toThrow("boom");
 
 		bus.emit("chan", {});
 		await new Promise((resolve) => setImmediate(resolve));
 		expect(received).toBe(0);
+		expect(runtime.pendingProviderRegistrations).toEqual([baselineRegistration]);
+		expect([...runtime.flagValues]).toEqual([["baseline-flag", "kept"]]);
+	});
+
+	it("restores removed and overridden providers when a bound-runtime factory throws", async () => {
+		const runtime = createExtensionRuntime();
+		const registered = new Map<string, object>();
+		const runner = new ExtensionRunner(
+			[],
+			runtime,
+			process.cwd(),
+			SessionManager.inMemory(),
+			ModelRegistry.inMemory(AuthStorage.inMemory()),
+		);
+		runner.bindCore({} as never, {} as never, {
+			registerProvider: (name, config) => registered.set(name, config),
+			unregisterProvider: (name) => registered.delete(name),
+		});
+		const baselineConfig = { baseUrl: "https://baseline.example.test" };
+		runtime.registerProvider("baseline-provider", baselineConfig, "baseline-extension");
+
+		await expect(
+			loadExtensionFromFactory(
+				(pi) => {
+					pi.unregisterProvider("baseline-provider");
+					pi.registerProvider("baseline-provider", { baseUrl: "https://replacement.example.test" });
+					pi.registerProvider("leaked-provider", { baseUrl: "https://leaked.example.test" });
+					throw new Error("bound boom");
+				},
+				process.cwd(),
+				createEventBus(),
+				runtime,
+				"failing-extension",
+			),
+		).rejects.toThrow("bound boom");
+
+		expect(registered.get("baseline-provider")).toBe(baselineConfig);
+		expect(registered.has("leaked-provider")).toBe(false);
+		expect(runtime.providerRegistrations.get("baseline-provider")).toEqual({
+			config: baselineConfig,
+			extensionPath: "baseline-extension",
+		});
+		expect(runtime.getProvidersForExtension("baseline-extension")).toEqual(["baseline-provider"]);
+		expect(runtime.getProvidersForExtension("failing-extension")).toEqual([]);
+	});
+
+	it("throws synchronously when a factory calls an async session action without awaiting it", async () => {
+		await expect(
+			loadExtensionFromFactory(
+				(pi) => {
+					void pi.setModel({} as Parameters<typeof pi.setModel>[0]);
+				},
+				process.cwd(),
+				createEventBus(),
+				createExtensionRuntime(),
+				"invalid-action-extension",
+			),
+		).rejects.toThrow("Action methods cannot be called during extension loading");
 	});
 
 	it("resets lazy-load event subscriptions after a throwing factory so retry does not double-fire", async () => {
@@ -94,6 +168,8 @@ describe("extension event bus subscriptions across reloads", () => {
 				"export default (pi) => {",
 				"  attempts++;",
 				"  pi.events.on('chan', () => { globalThis.__piLazyEvents = (globalThis.__piLazyEvents ?? 0) + 1; });",
+				"  pi.registerProvider('lazy-provider', { baseUrl: 'https://lazy.example.test' });",
+				"  pi.registerFlag('lazy-flag', { type: 'string', default: 'attempt-' + attempts });",
 				"  if (attempts === 1) throw new Error('lazy boom');",
 				"  pi.registerTool({ name: 'lazy_tool', description: 'lazy', parameters: { type: 'object', properties: {} }, execute: async () => ({ content: [{ type: 'text', text: 'ok' }] }) });",
 				"};",
@@ -117,6 +193,8 @@ describe("extension event bus subscriptions across reloads", () => {
 		await new Promise((resolve) => setImmediate(resolve));
 
 		expect(Reflect.get(globalThis, "__piLazyEvents")).toBe(1);
+		expect(result.runtime.pendingProviderRegistrations.map(({ name }) => name)).toEqual(["lazy-provider"]);
+		expect(result.runtime.flagValues.get("lazy-flag")).toBe("attempt-2");
 	});
 
 	it("keeps manual unsubscribe working and harmless under later disposal", async () => {

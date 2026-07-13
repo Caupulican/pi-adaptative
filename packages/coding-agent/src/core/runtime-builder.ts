@@ -219,6 +219,7 @@ export interface RuntimeBuilderDeps {
 	startWorkerDelegation(request: {
 		instructions: string;
 		systemPrompt?: string;
+		memoryRead?: boolean;
 	}): { started: false; skipReason: string } | { started: true; record: LaneRecord };
 	getWorkerLaneRecords(): LaneRecord[];
 	getWorkerResultSnapshots(): WorkerResult[];
@@ -226,6 +227,7 @@ export interface RuntimeBuilderDeps {
 	runWorkerDelegationOnce(request: {
 		instructions: string;
 		systemPrompt?: string;
+		memoryRead?: boolean;
 	}): Promise<WorkerDelegationRunOutcome>;
 	/** Model-fitness probe for the model_fitness tool. */
 	runModelFitness(args: {

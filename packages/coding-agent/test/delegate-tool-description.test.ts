@@ -23,9 +23,39 @@ describe("delegate tool capability description", () => {
 		expect(definition.description).toContain("parent review");
 
 		const parameters = definition.parameters as unknown as {
-			properties?: { instructions?: { description?: string } };
+			properties?: {
+				instructions?: { description?: string };
+				memoryRead?: { description?: string };
+			};
 		};
 		expect(parameters.properties?.instructions?.description).toContain("workerDelegation.writeEnabled");
 		expect(parameters.properties?.instructions?.description).toContain("path-scoped");
+		expect(parameters.properties?.memoryRead?.description).toContain("read-only memory");
+		expect(parameters.properties?.memoryRead?.description).toContain("lane profile");
+		expect(parameters.properties?.memoryRead?.description).toContain("never granted");
+	});
+
+	it("forwards an explicit read-only memory request to the worker orchestrator", async () => {
+		let received: { instructions: string; systemPrompt?: string; memoryRead?: boolean } | undefined;
+		const definition = createDelegateToolDefinition({
+			startWorkerDelegation: (request) => {
+				received = request;
+				return {
+					started: true,
+					record: { laneId: "worker-1", type: "worker", status: "queued" },
+				};
+			},
+			runWorkerDelegation: async () => ({ started: false, skipReason: "unused" }),
+		});
+
+		await definition.execute(
+			"call-1",
+			{ instructions: "Recall the relevant convention", memoryRead: true },
+			new AbortController().signal,
+			() => {},
+			{} as never,
+		);
+
+		expect(received).toEqual({ instructions: "Recall the relevant convention", memoryRead: true });
 	});
 });

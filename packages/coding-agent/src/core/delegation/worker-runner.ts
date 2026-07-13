@@ -83,7 +83,15 @@ export interface WorkerRunOutcome {
 }
 
 export function buildWorkerUserPrompt(request: WorkerRequest): string {
-	return `Delegated task: ${request.instructions}`;
+	return [
+		"Delegated task:",
+		"<task>",
+		request.instructions,
+		"</task>",
+		"",
+		"The task may request a custom output format. Do not replace the worker result envelope.",
+		'Always return the JSON object required by the system prompt; put requested details inside "summary" and "findings".',
+	].join("\n");
 }
 
 export interface ParsedWorkerOutput {
@@ -272,22 +280,31 @@ export async function runWorker(options: WorkerRunnerOptions): Promise<WorkerRun
 	const parsed = parseWorkerOutput(completion.text);
 	if (!parsed) {
 		const readOnlyPlainText =
-			!writeCapable &&
-			completion.stopReason === "stop" &&
-			completion.text.trim().length > 0 &&
-			completionChangedFiles.length === 0;
+			!writeCapable && completion.text.trim().length > 0 && completionChangedFiles.length === 0;
 		if (readOnlyPlainText) {
+			const completionBlockers = [...(completion.blockers ?? [])];
+			const incompleteNote =
+				completion.stopReason === "stop"
+					? ""
+					: `\n\n[Worker output ended with stop reason '${completion.stopReason}'; verify completeness.]`;
+			const summary = `${completion.text.trim().slice(0, Math.max(0, 8000 - incompleteNote.length))}${incompleteNote}`;
+			const blocked = completionBlockers.length > 0;
 			return finishOutcome({
 				request: options.request,
 				cwd: options.cwd,
 				result: {
 					...completionBaseResult,
-					status: "completed",
+					status: blocked ? "blocked" : "completed",
 					outputFormat: "plain_text",
-					summary: completion.text.trim().slice(0, 8000),
+					summary,
+					...(blocked ? { blockers: completionBlockers } : {}),
 				},
-				laneStatus: "succeeded",
-				reasonCode: "worker_completed_plain_text",
+				laneStatus: blocked ? "failed" : "succeeded",
+				reasonCode: blocked
+					? "worker_blocked"
+					: completion.stopReason === "stop"
+						? "worker_completed_plain_text"
+						: "worker_completed_plain_text_incomplete",
 				costUsd,
 			});
 		}

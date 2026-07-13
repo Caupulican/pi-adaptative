@@ -49,6 +49,7 @@ describe("delegate_status", () => {
 			.filter((content) => content.type === "text")
 			.map((content) => content.text)
 			.join("\n");
+		expect(text).toContain("workers: 1 running, 0 queued, 1 terminal");
 		expect(text).toContain("worker-1");
 		expect(text).toContain("worker-2");
 		expect(text).not.toContain("worker-foreign");

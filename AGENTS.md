@@ -168,6 +168,41 @@ If the user's instructions conflict with any rule in this document, ask for expl
 
 ## Findings
 
+### 2026-07-13 · packages/coding-agent · background delegation must notify by lane record, never by late transcript injection
+A delegated worker can outlive the foreground turn that started it. The safe composition is to return its lane id immediately, keep queued/running/terminal state session-owned, emit a bounded completion event carrying the terminal lane id and status, and require explicit `delegate_status` retrieval for untrusted output. Injecting a late worker message into an active transcript would race the foreground model and make context ordering nondeterministic.
+- evidence: packages/coding-agent/src/core/background-lane-controller.ts:190 · packages/coding-agent/src/core/background-lane-controller.ts:680 · packages/coding-agent/src/core/agent-session.ts:332 · packages/coding-agent/test/agent-session-worker-delegation.test.ts:287
+- tags: delegation, background-work, notification, transcript-safety, packages/coding-agent
+
+### 2026-07-13 · packages/coding-agent · delegated memory is a separate query capability, not delegated file access
+Worker memory retrieval is safe only when the foreground orchestrator requests it for that call and the lane profile independently grants the `memory` tool. The worker receives bounded, source-labeled untrusted query output through `memory_read`; raw memory/state/auth paths stay denied to generic read tools, and the foreground memory mutation tool is never exposed.
+- evidence: packages/coding-agent/src/core/memory-controller.ts:432 · packages/coding-agent/src/core/background-lane-controller.ts:791 · packages/coding-agent/src/core/background-lane-controller.ts:800 · packages/coding-agent/src/core/background-lane-controller.ts:818 · packages/coding-agent/test/memory-integration.test.ts:114
+- tags: delegation, memory, least-privilege, uac, packages/coding-agent
+
+### 2026-07-13 · packages/coding-agent · a reachable Ollama server is not proof that its configured model is ready
+Managed startup must verify `/api/tags` after the server comes up: the process can be healthy while the configured model is absent. On that failure path the owned runtime is stopped, and ignored child stdio is required alongside `unref()` so an unavailable-model CLI invocation exits instead of remaining alive on unused pipe handles.
+- evidence: packages/coding-agent/src/core/local-runtime-controller.ts:352 · packages/coding-agent/src/core/models/local-runtime.ts:291 · packages/coding-agent/test/agent-session-local-runtime.test.ts:245
+- tags: local-models, ollama, readiness, process-lifecycle, packages/coding-agent
+
+### 2026-07-13 · packages/coding-agent · delegated workers must bind execution policy to the lane model and preserve non-JSON results
+The reproduced `unparseable_output` failures were usable read-only worker reports rejected solely because they did not satisfy the strict result envelope, including custom JSON shapes and output-limit stops. Separate orchestration coupling made explicit worker models inherit the foreground model's text-tool protocol, while queued local lanes counted other queued lanes as running and could deadlock. Worker prompts now keep the result envelope authoritative, bounded plain text is retained with incomplete-output disclosure, isolated tool loops resolve protocol from the selected lane model, and queue admission/draining counts running workers only. Live source-tree runs completed through both `openai-codex/gpt-5.5` and `fugu/fugu`; a forced raw-plain-text Codex worker completed as `worker_completed_plain_text` with its marker intact.
+- evidence: packages/coding-agent/src/core/delegation/worker-runner.ts:85 · packages/coding-agent/src/core/delegation/worker-runner.ts:282 · packages/coding-agent/src/core/reflection-controller.ts:148 · packages/coding-agent/src/core/background-lane-controller.ts:652 · packages/coding-agent/src/core/background-lane-controller.ts:1037 · packages/coding-agent/test/worker-runner.test.ts:140 · packages/coding-agent/test/worker-runner.test.ts:150 · packages/coding-agent/test/agent-session-worker-delegation.test.ts:65 · packages/coding-agent/test/agent-session-worker-delegation.test.ts:235
+- tags: delegation, orchestration, worker-result, provider-agnostic, queue, codex, fugu, packages/coding-agent, root-cause
+
+### 2026-07-13 · packages/ai · Fugu orchestration detail fields are token categories, not additions to provider total usage
+Sakana's Responses-compatible usage reports include orchestration input, cached-input, and output detail fields while `total_tokens` already includes them. Pi must add those details to its normalized input/cache/output categories for cost allocation but must not add them again to `totalTokens`; doing both inflated displayed context usage and spawned-worker accounting. The terminal-event fixture now locks the provider-total invariant.
+- evidence: packages/ai/src/providers/openai-responses-shared.ts:385 · packages/ai/test/openai-responses-terminal-event.test.ts:274 · Sakana pricing documentation inspected 2026-07-13
+- tags: fugu, sakana, usage, orchestration-tokens, accounting, packages/ai, root-cause
+
+### 2026-07-13 · packages/ai · Codex subscription WebSockets require a fresh-connection replay at the server lifetime boundary
+The Codex Responses WebSocket reports its 60-minute connection lifetime as a nested `error.code: websocket_connection_limit_reached` event before response output. Pi already discarded the failed cached socket, but the top-level-only error parser lost that code and surfaced a terminal turn. The provider now extracts the nested code and replays the full request once on a fresh socket only before output starts, preventing duplicate text or tool execution; repeated expiry remains bounded.
+- evidence: packages/ai/src/providers/openai-codex-responses.ts:66 · packages/ai/src/providers/openai-codex-responses.ts:329 · packages/ai/src/providers/openai-codex-responses.ts:714 · packages/ai/test/openai-codex-stream.test.ts:312 · openai/codex@c10010928075 codex-rs/core/tests/suite/client_websockets.rs:1628
+- tags: openai-codex, websocket, reconnect, subscription, packages/ai, root-cause
+
+### 2026-07-13 · packages/coding-agent · caught extension load failures were reclassified as fatal after isolation
+The extension loader already caught each eager module/factory failure and continued loading healthy extensions, but CLI runtime assembly converted every collected extension issue into an error diagnostic and exited. Startup now reports those issues as warnings, while failed factories restore shared provider/flag state and dispose event subscriptions so partial registration cannot leak into the surviving runtime. Transactional `/reload` still rejects a failed generation and preserves the current runtime.
+- evidence: packages/coding-agent/src/main.ts:796 · packages/coding-agent/src/core/extensions/loader.ts:523 · packages/coding-agent/test/extension-startup-isolation.test.ts:56 · packages/coding-agent/test/extensions-discovery.test.ts:459
+- tags: extensions, startup, isolation, rollback, packages/coding-agent, root-cause
+
 ### 2026-07-09 · packages/ai · live GPT-5.5 reasoning summaries can include an empty HTML comment tail inside a valid summary — claude
 A live OpenAI Codex GPT-5.5 SSE capture showed `response.reasoning_summary_text.delta` framing where useful summary text was followed by `<!-- -->`, and `response.reasoning_summary_text.done`/`response.reasoning_summary_part.done` carried the combined `summary_text`. The prior delimiter-only filter did not cover this embedded tail. Shared Responses stream parsing now strips the empty comment tail before emitting thinking deltas and before storing reasoning signatures, while keeping real summary text.
 - evidence: packages/ai/test/data/openai-codex-gpt55-reasoning-summary-tail.ndjson:1 · packages/ai/src/providers/openai-responses-shared.ts:305 · packages/ai/test/openai-codex-stream.test.ts:205

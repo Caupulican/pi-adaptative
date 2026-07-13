@@ -63,6 +63,8 @@ const DEFAULT_MAX_RETRY_DELAY_MS = 60_000;
 const DEFAULT_WEBSOCKET_CONNECT_TIMEOUT_MS = 15_000;
 const CODEX_TOOL_CALL_PROVIDERS = new Set(["openai", "openai-codex", "opencode"]);
 const WEBSOCKET_MESSAGE_TOO_BIG_CLOSE_CODE = 1009;
+const WEBSOCKET_CONNECTION_LIMIT_ERROR_CODE = "websocket_connection_limit_reached";
+const WEBSOCKET_CONNECTION_LIMIT_RETRIES = 1;
 const OPENAI_INTERNAL_CODEX_RESPONSES_LITE_HEADER = "x-openai-internal-codex-responses-lite";
 const WS_RESPONSES_LITE_CLIENT_METADATA_KEY = "ws_request_header_x_openai_internal_codex_responses_lite";
 
@@ -324,21 +326,38 @@ export const streamOpenAICodexResponses: StreamFunction<"openai-codex-responses"
 
 			if (transport !== "sse" && !websocketDisabledForSession) {
 				let websocketStarted = false;
+				let websocketConnectionLimitRetries = 0;
 				try {
-					await processWebSocketStream(
-						resolveCodexWebSocketUrl(model.baseUrl),
-						body,
-						websocketHeaders,
-						output,
-						stream,
-						model,
-						() => {
-							websocketStarted = true;
-						},
-						idleTimeoutMs,
-						websocketConnectTimeoutMs,
-						options,
-					);
+					while (true) {
+						try {
+							await processWebSocketStream(
+								resolveCodexWebSocketUrl(model.baseUrl),
+								body,
+								websocketHeaders,
+								output,
+								stream,
+								model,
+								() => {
+									websocketStarted = true;
+								},
+								idleTimeoutMs,
+								websocketConnectTimeoutMs,
+								options,
+							);
+							break;
+						} catch (error) {
+							if (
+								!websocketStarted &&
+								!options?.signal?.aborted &&
+								websocketConnectionLimitRetries < WEBSOCKET_CONNECTION_LIMIT_RETRIES &&
+								isWebSocketConnectionLimitError(error)
+							) {
+								websocketConnectionLimitRetries++;
+								continue;
+							}
+							throw error;
+						}
+					}
 
 					if (options?.signal?.aborted) {
 						throw new Error("Request was aborted");
@@ -692,14 +711,24 @@ function isCodexNonTransportError(error: unknown): boolean {
 	return error instanceof CodexApiError || error instanceof CodexProtocolError;
 }
 
+function isWebSocketConnectionLimitError(error: unknown): boolean {
+	return error instanceof CodexApiError && error.code === WEBSOCKET_CONNECTION_LIMIT_ERROR_CODE;
+}
+
 async function* mapCodexEvents(events: AsyncIterable<Record<string, unknown>>): AsyncGenerator<ResponseStreamEvent> {
 	for await (const event of events) {
 		const type = typeof event.type === "string" ? event.type : undefined;
 		if (!type) continue;
 
 		if (type === "error") {
-			const code = (event as { code?: string }).code || "";
-			const message = (event as { message?: string }).message || "";
+			const nestedError =
+				event.error && typeof event.error === "object" && !Array.isArray(event.error)
+					? (event.error as Record<string, unknown>)
+					: undefined;
+			const rawCode = nestedError?.code ?? event.code;
+			const rawMessage = nestedError?.message ?? event.message;
+			const code = typeof rawCode === "string" ? rawCode : "";
+			const message = typeof rawMessage === "string" ? rawMessage : "";
 			throw new CodexApiError(`Codex error: ${message || code || JSON.stringify(event)}`, {
 				code: code || undefined,
 				payload: event,
@@ -1036,7 +1065,9 @@ function scheduleSessionWebSocketExpiry(sessionId: string, entry: CachedWebSocke
 	entry.idleTimer = setTimeout(() => {
 		if (entry.busy) return;
 		closeWebSocketSilently(entry.socket, 1000, "idle_timeout");
-		websocketSessionCache.delete(sessionId);
+		if (websocketSessionCache.get(sessionId) === entry) {
+			websocketSessionCache.delete(sessionId);
+		}
 	}, SESSION_WEBSOCKET_CACHE_TTL_MS);
 }
 
@@ -1159,7 +1190,9 @@ async function acquireWebSocket(
 				release: ({ keep } = {}) => {
 					if (!keep || !isWebSocketReusable(cached.socket)) {
 						closeWebSocketSilently(cached.socket);
-						websocketSessionCache.delete(sessionId);
+						if (websocketSessionCache.get(sessionId) === cached) {
+							websocketSessionCache.delete(sessionId);
+						}
 						return;
 					}
 					cached.busy = false;

@@ -84,7 +84,7 @@ async function* createCompletedEventsWithOrchestrationUsage(): AsyncIterable<Res
 			usage: {
 				input_tokens: 20,
 				output_tokens: 7,
-				total_tokens: 27,
+				total_tokens: 66,
 				input_tokens_details: {
 					cached_tokens: 2,
 					orchestration_input_tokens: 30,
@@ -271,7 +271,7 @@ describe("OpenAI Responses terminal events", () => {
 		expect(output.usage.output).toBe(7);
 	});
 
-	it("includes Sakana Fugu Ultra orchestration tokens in usage and cost", async () => {
+	it("categorizes Sakana Fugu Ultra orchestration tokens without double-counting the provider total", async () => {
 		const model = createFuguUltraModel();
 		const output = createOutput(model);
 

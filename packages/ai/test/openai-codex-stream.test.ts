@@ -27,9 +27,9 @@ afterEach(() => {
 	vi.restoreAllMocks();
 });
 
-function mockToken(): string {
+function mockToken(accountId = "acc_test"): string {
 	const payload = Buffer.from(
-		JSON.stringify({ "https://api.openai.com/auth": { chatgpt_account_id: "acc_test" } }),
+		JSON.stringify({ "https://api.openai.com/auth": { chatgpt_account_id: accountId } }),
 		"utf8",
 	).toString("base64");
 	return `aaa.${payload}.bbb`;
@@ -102,6 +102,131 @@ function buildSSEPayload({
 	}
 
 	return `${events.join("\n\n")}\n\n`;
+}
+
+const websocketConnectionLimitEvent: Record<string, unknown> = {
+	type: "error",
+	status: 400,
+	error: {
+		type: "invalid_request_error",
+		code: "websocket_connection_limit_reached",
+		message:
+			"Responses websocket connection limit reached (60 minutes). Create a new websocket connection to continue.",
+	},
+};
+
+function buildWebSocketSuccessEvents(text = "Hello"): Record<string, unknown>[] {
+	return [
+		{
+			type: "response.output_item.added",
+			item: { type: "message", id: "msg_1", role: "assistant", status: "in_progress", content: [] },
+		},
+		{ type: "response.content_part.added", part: { type: "output_text", text: "" } },
+		{ type: "response.output_text.delta", delta: text },
+		{
+			type: "response.output_item.done",
+			item: {
+				type: "message",
+				id: "msg_1",
+				role: "assistant",
+				status: "completed",
+				content: [{ type: "output_text", text }],
+			},
+		},
+		{
+			type: "response.completed",
+			response: {
+				id: "resp_1",
+				status: "completed",
+				usage: {
+					input_tokens: 5,
+					output_tokens: 3,
+					total_tokens: 8,
+					input_tokens_details: { cached_tokens: 0 },
+				},
+			},
+		},
+	];
+}
+
+interface ScriptedWebSocketSend {
+	connectionIndex: number;
+	sendIndex: number;
+	body: Record<string, unknown>;
+	emit: (events: readonly Record<string, unknown>[]) => void;
+}
+
+type WebSocketScript = readonly Record<string, unknown>[] | ((send: ScriptedWebSocketSend) => void);
+
+function installScriptedWebSocket(scripts: readonly WebSocketScript[]): {
+	connections: Array<{ readyState: number }>;
+	closedConnectionIndexes: Set<number>;
+	sentBodies: Array<{ connectionIndex: number; body: Record<string, unknown> }>;
+} {
+	const connections: Array<{ readyState: number }> = [];
+	const closedConnectionIndexes = new Set<number>();
+	const sentBodies: Array<{ connectionIndex: number; body: Record<string, unknown> }> = [];
+	const sendCounts: number[] = [];
+
+	class MockWebSocket {
+		static OPEN = 1;
+		readyState = MockWebSocket.OPEN;
+		private readonly connectionIndex: number;
+		private readonly listeners = new Map<string, Set<(event: unknown) => void>>();
+
+		constructor() {
+			this.connectionIndex = connections.length;
+			connections.push(this);
+			queueMicrotask(() => this.dispatch("open", {}));
+		}
+
+		addEventListener(type: string, listener: (event: unknown) => void): void {
+			let listeners = this.listeners.get(type);
+			if (!listeners) {
+				listeners = new Set();
+				this.listeners.set(type, listeners);
+			}
+			listeners.add(listener);
+		}
+
+		removeEventListener(type: string, listener: (event: unknown) => void): void {
+			this.listeners.get(type)?.delete(listener);
+		}
+
+		send(data: string): void {
+			const body = JSON.parse(data) as Record<string, unknown>;
+			sentBodies.push({ connectionIndex: this.connectionIndex, body });
+			const script = scripts[this.connectionIndex] ?? [];
+			const sendIndex = sendCounts[this.connectionIndex] ?? 0;
+			sendCounts[this.connectionIndex] = sendIndex + 1;
+			const emit = (events: readonly Record<string, unknown>[]) => {
+				for (const event of events) {
+					this.dispatch("message", { data: JSON.stringify(event) });
+				}
+			};
+			queueMicrotask(() => {
+				if (typeof script === "function") {
+					script({ connectionIndex: this.connectionIndex, sendIndex, body, emit });
+				} else {
+					emit(script);
+				}
+			});
+		}
+
+		close(): void {
+			this.readyState = 3;
+			closedConnectionIndexes.add(this.connectionIndex);
+		}
+
+		private dispatch(type: string, event: unknown): void {
+			for (const listener of this.listeners.get(type) ?? []) {
+				listener(event);
+			}
+		}
+	}
+
+	vi.stubGlobal("WebSocket", MockWebSocket);
+	return { connections, closedConnectionIndexes, sentBodies };
 }
 
 describe("openai-codex streaming", () => {
@@ -202,6 +327,141 @@ describe("openai-codex streaming", () => {
 
 		expect(events.at(-1)).toMatchObject({ type: "error", reason: "error" });
 		expect(events.some((event) => event.type === "done")).toBe(false);
+	});
+
+	it("recreates the websocket and replays the request after the Codex connection lifetime limit", async () => {
+		vi.stubGlobal(
+			"fetch",
+			vi.fn(async () => new Response("unexpected", { status: 500 })),
+		);
+		const harness = installScriptedWebSocket([[websocketConnectionLimitEvent], buildWebSocketSuccessEvents()]);
+		const sessionId = "ws-connection-limit";
+
+		const result = await streamOpenAICodexResponses(createCodexModel(), createCodexContext(), {
+			apiKey: mockToken(),
+			sessionId,
+			transport: "websocket",
+		}).result();
+
+		expect(result.stopReason).toBe("stop");
+		expect(result.content.find((content) => content.type === "text")?.text).toBe("Hello");
+		expect(harness.connections).toHaveLength(2);
+		expect(harness.closedConnectionIndexes.has(0)).toBe(true);
+		expect(harness.sentBodies.map(({ connectionIndex }) => connectionIndex)).toEqual([0, 1]);
+		expect(harness.sentBodies[1]?.body.previous_response_id).toBeUndefined();
+		expect(harness.sentBodies[1]?.body.input).toEqual(harness.sentBodies[0]?.body.input);
+		expect(getOpenAICodexWebSocketDebugStats(sessionId)).toMatchObject({
+			requests: 2,
+			connectionsCreated: 2,
+			fullContextRequests: 2,
+			deltaRequests: 0,
+		});
+		cleanupSessionResources(sessionId);
+	});
+
+	it("bounds Codex websocket connection lifetime recovery to one replay", async () => {
+		vi.stubGlobal(
+			"fetch",
+			vi.fn(async () => new Response("unexpected", { status: 500 })),
+		);
+		const harness = installScriptedWebSocket([
+			[websocketConnectionLimitEvent],
+			[websocketConnectionLimitEvent],
+			buildWebSocketSuccessEvents(),
+		]);
+		const sessionId = "ws-connection-limit-bounded";
+
+		const result = await streamOpenAICodexResponses(createCodexModel(), createCodexContext(), {
+			apiKey: mockToken(),
+			sessionId,
+			transport: "websocket",
+		}).result();
+
+		expect(result.stopReason).toBe("error");
+		expect(result.errorMessage).toContain("Responses websocket connection limit reached (60 minutes)");
+		expect(harness.connections).toHaveLength(2);
+		expect(harness.sentBodies).toHaveLength(2);
+		expect(harness.closedConnectionIndexes).toEqual(new Set([0, 1]));
+		cleanupSessionResources(sessionId);
+	});
+
+	it("does not replay a Codex websocket request after response output has started", async () => {
+		vi.stubGlobal(
+			"fetch",
+			vi.fn(async () => new Response("unexpected", { status: 500 })),
+		);
+		const responseStarted = {
+			type: "response.output_item.added",
+			item: { type: "message", id: "msg_1", role: "assistant", status: "in_progress", content: [] },
+		};
+		const harness = installScriptedWebSocket([[responseStarted, websocketConnectionLimitEvent]]);
+		const sessionId = "ws-connection-limit-after-output";
+
+		const result = await streamOpenAICodexResponses(createCodexModel(), createCodexContext(), {
+			apiKey: mockToken(),
+			sessionId,
+			transport: "websocket",
+		}).result();
+
+		expect(result.stopReason).toBe("error");
+		expect(harness.connections).toHaveLength(1);
+		expect(harness.sentBodies).toHaveLength(1);
+		expect(harness.closedConnectionIndexes).toEqual(new Set([0]));
+		cleanupSessionResources(sessionId);
+	});
+
+	it("keeps a replacement authenticated socket cached when an older in-flight request releases", async () => {
+		vi.stubGlobal(
+			"fetch",
+			vi.fn(async () => new Response("unexpected", { status: 500 })),
+		);
+		let releaseHeldResponse: (() => void) | undefined;
+		const harness = installScriptedWebSocket([
+			({ sendIndex, emit }) => {
+				if (sendIndex === 0) {
+					emit(buildWebSocketSuccessEvents("token-a-first"));
+					return;
+				}
+				releaseHeldResponse = () => emit(buildWebSocketSuccessEvents("token-a-held"));
+			},
+			buildWebSocketSuccessEvents("token-b"),
+		]);
+		const sessionId = "ws-auth-replacement-release-race";
+		const model = createCodexModel();
+		const context = createCodexContext();
+		const tokenA = mockToken("acc_a");
+		const tokenB = mockToken("acc_b");
+
+		await streamOpenAICodexResponses(model, context, {
+			apiKey: tokenA,
+			sessionId,
+			transport: "websocket",
+		}).result();
+		const heldTokenAResult = streamOpenAICodexResponses(model, context, {
+			apiKey: tokenA,
+			sessionId,
+			transport: "websocket",
+		}).result();
+		await vi.waitFor(() => expect(harness.sentBodies).toHaveLength(2));
+
+		await streamOpenAICodexResponses(model, context, {
+			apiKey: tokenB,
+			sessionId,
+			transport: "websocket",
+		}).result();
+		expect(releaseHeldResponse).toBeTypeOf("function");
+		releaseHeldResponse?.();
+		await heldTokenAResult;
+
+		await streamOpenAICodexResponses(model, context, {
+			apiKey: tokenB,
+			sessionId,
+			transport: "websocket",
+		}).result();
+
+		expect(harness.connections).toHaveLength(2);
+		expect(harness.sentBodies.map(({ connectionIndex }) => connectionIndex)).toEqual([0, 0, 1, 1]);
+		cleanupSessionResources(sessionId);
 	});
 
 	it("strips the live GPT-5.5 empty HTML comment tail from reasoning summaries", async () => {

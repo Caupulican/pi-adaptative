@@ -1972,14 +1972,20 @@ export class InteractiveMode {
 				break;
 
 			case "delegate_workers": {
-				const status =
-					event.active > 0
-						? `${event.active} running`
+				const activeParts = [
+					event.running > 0 ? `${event.running} running` : undefined,
+					event.queued > 0 ? `${event.queued} queued` : undefined,
+				].filter((part): part is string => part !== undefined);
+				const latestTerminal = event.terminalSinceFlush.at(-1);
+				const terminalStatus =
+					event.terminalSinceFlush.length === 1 && latestTerminal
+						? `${latestTerminal.laneId} ${latestTerminal.status}`
 						: event.failedSinceFlush > 0
 							? `${event.failedSinceFlush} failed`
 							: event.completedSinceFlush > 0
-								? "done"
+								? `${event.completedSinceFlush} completed`
 								: undefined;
+				const status = activeParts.length > 0 ? activeParts.join(", ") : terminalStatus;
 				this.footerDataProvider.setExtensionStatus("delegate", status ? `delegate: ${status}` : undefined);
 				this.footer.invalidate();
 				break;

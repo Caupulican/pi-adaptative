@@ -336,8 +336,26 @@ export class LocalRuntimeController {
 		}
 		const started = await runtime.start();
 		if (started.started) {
-			const resident = await this.ensureOllamaResident(model, runtime);
-			if (!resident.ok) return { ready: false, reason: resident.reason ?? "residency_refused" };
+			let installedEntry: { name: string; sizeBytes: number } | undefined;
+			try {
+				const installed = await runtime.list();
+				installedEntry = installed.find((entry) => matchesInstalledLocalModel(model.id, entry.name));
+			} catch (error) {
+				runtime.stop();
+				return {
+					ready: false,
+					reason: `model_list_failed_after_start:${error instanceof Error ? error.message : String(error)}`,
+				};
+			}
+			if (!installedEntry) {
+				runtime.stop();
+				return { ready: false, reason: `model_missing_on_started_server:${model.id}` };
+			}
+			const resident = await this.ensureOllamaResident(model, runtime, installedEntry.sizeBytes);
+			if (!resident.ok) {
+				runtime.stop();
+				return { ready: false, reason: resident.reason ?? "residency_refused" };
+			}
 			this._confirmedUp.add(confirmedKey);
 		}
 		return { ready: started.started, reason: started.reason };

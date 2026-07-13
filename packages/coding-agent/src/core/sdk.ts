@@ -427,7 +427,7 @@ export async function createAgentSession(options: CreateAgentSessionOptions = {}
 				...options,
 				apiKey: auth.apiKey,
 				onAuthRejection:
-					auth.apiKey && model.provider === "openai-codex-responses"
+					auth.apiKey && model.provider === "openai-codex"
 						? async () => modelRegistry.recoverRejectedOAuthApiKey(model.provider, auth.apiKey as string)
 						: options?.onAuthRejection,
 				timeoutMs,

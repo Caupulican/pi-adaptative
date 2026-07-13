@@ -428,6 +428,27 @@ export class MemoryController {
 		});
 	}
 
+	/** Bounded, read-only memory view for an explicitly authorized delegated worker. */
+	async readMemoryForLane(query: string): Promise<string> {
+		const settings = this.deps.getSettingsManager().getMemoryRetrievalSettings();
+		if (!settings.enabled) return "Memory retrieval is disabled by policy.";
+		const budget = this._memoryBudget(settings.maxResults);
+		const staticBlock = this._memoryManager
+			.buildSystemPromptBlockFresh(budget)
+			.replace(
+				"[System Note: Below is a snapshot of your persistent memory. You can update these using the 'memory' tool.]",
+				"[Read-only snapshot for a delegated worker.]",
+			);
+		const recalled = await this.prefetchRecall(query);
+		const combined = [staticBlock, recalled]
+			.filter((part) => part.trim().length > 0)
+			.join("\n\n")
+			.slice(0, 8000);
+		return combined.length > 0
+			? wrapUntrustedText(combined, "worker-memory")
+			: "No relevant standing memory was found.";
+	}
+
 	/** R4: score whether the agent actually used an injected recall page, so the recall gate can adapt. */
 	recordRecallOutcome(recallText: string, queryText: string, responseText: string): void {
 		this._effectivenessTracker.recordRecallOutcome(recallText, queryText, responseText);

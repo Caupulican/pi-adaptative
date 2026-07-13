@@ -15,6 +15,7 @@ import { afterEach, describe, expect, it } from "vitest";
 import { AgentSession } from "../../src/core/agent-session.ts";
 import { AuthStorage } from "../../src/core/auth-storage.ts";
 import { ModelRegistry } from "../../src/core/model-registry.ts";
+import type { LocalRuntimeDeps } from "../../src/core/models/local-runtime.ts";
 import { SettingsManager } from "../../src/core/settings-manager.ts";
 import { createTestResourceLoader } from "../utilities.ts";
 
@@ -34,6 +35,13 @@ const LOCAL_MODEL = {
 	cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 },
 	contextWindow: 8_192,
 	maxTokens: 1_024,
+} as Model<Api>;
+
+const MISSING_MANAGED_MODEL = {
+	...LOCAL_MODEL,
+	provider: "ollama",
+	id: "missing-local-model",
+	name: "Missing Managed Model",
 } as Model<Api>;
 
 const REMOTE_MODEL = {
@@ -99,7 +107,11 @@ function registerModel(modelRegistry: ModelRegistry, authStorage: AuthStorage, m
 	});
 }
 
-function createSession(model: Model<Api>, calls: StreamCall[]): { session: AgentSession; tempDir: string } {
+function createSession(
+	model: Model<Api>,
+	calls: StreamCall[],
+	localRuntimeDeps?: LocalRuntimeDeps,
+): { session: AgentSession; tempDir: string } {
 	const tempDir = mkdtempSync(join(tmpdir(), "pi-prefix-warmer-"));
 	const authStorage = AuthStorage.inMemory();
 	const modelRegistry = ModelRegistry.inMemory(authStorage);
@@ -120,6 +132,7 @@ function createSession(model: Model<Api>, calls: StreamCall[]): { session: Agent
 			modelRegistry,
 			resourceLoader: createTestResourceLoader(),
 			collectWorkspaceSources: async () => [],
+			localRuntimeDeps,
 		}),
 	};
 }
@@ -150,6 +163,21 @@ describe("agent session local prefix warmer", () => {
 		expect(calls[0]?.options?.maxTokens).toBe(1);
 		expect(calls[0]?.context.messages).toEqual([]);
 		expect(calls[0]?.context.systemPrompt?.length).toBeGreaterThan(0);
+	});
+
+	it("does not call an unavailable managed model after readiness rejects the warmer", async () => {
+		const calls: StreamCall[] = [];
+		const item = createSession(MISSING_MANAGED_MODEL, calls, {
+			fetchFn: (async () => {
+				throw new Error("ECONNREFUSED");
+			}) as unknown as typeof fetch,
+			existsFn: () => false,
+		});
+		sessions.push(item);
+
+		await waitForWarmTick();
+
+		expect(calls).toEqual([]);
 	});
 
 	it("does not preload non-loopback models", async () => {

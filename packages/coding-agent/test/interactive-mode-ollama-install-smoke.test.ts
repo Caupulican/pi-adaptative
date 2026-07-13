@@ -87,6 +87,9 @@ function installableThenBootableDeps(): { deps: LocalRuntimeDeps; extractCalls: 
 				return new Response("fake-archive-bytes", { status: 200 });
 			}
 			if (!serverUp) throw new Error("ECONNREFUSED");
+			if (String(url).endsWith("/api/tags")) {
+				return Response.json({ models: [{ name: "qwen3:0.6b" }] });
+			}
 			return new Response("{}", { status: 200 });
 		}) as unknown as typeof fetch,
 		existsFn: (path: string) => installed && path.includes("runtimes/ollama/bin/ollama"),
