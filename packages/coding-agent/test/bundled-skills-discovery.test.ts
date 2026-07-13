@@ -1,6 +1,6 @@
-import { mkdirSync, rmSync, writeFileSync } from "node:fs";
+import { existsSync, mkdirSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
-import { join } from "node:path";
+import { dirname, join } from "node:path";
 import { afterEach, beforeEach, describe, expect, it } from "vitest";
 import { DefaultResourceLoader } from "../src/core/resource-loader.ts";
 
@@ -30,9 +30,11 @@ describe("bundled skills discovery", () => {
 		// Verify bundled skills are discovered
 		const skillArchitect = skills.find((s) => s.name === "skill-architect");
 		const piHarnessLearning = skills.find((s) => s.name === "pi-harness-learning");
+		const harnessSelfAdaptation = skills.find((s) => s.name === "harness-self-adaptation");
 
 		expect(skillArchitect).toBeDefined();
 		expect(piHarnessLearning).toBeDefined();
+		expect(harnessSelfAdaptation).toBeDefined();
 
 		// Verify bundled skills have correct source info
 		if (skillArchitect) {
@@ -44,6 +46,51 @@ describe("bundled skills discovery", () => {
 			expect(piHarnessLearning.sourceInfo?.source).toBe("local");
 			expect(piHarnessLearning.sourceInfo?.scope).toBe("temporary");
 		}
+
+		if (harnessSelfAdaptation) {
+			expect(harnessSelfAdaptation.sourceInfo?.source).toBe("local");
+			expect(harnessSelfAdaptation.sourceInfo?.scope).toBe("temporary");
+		}
+	});
+
+	it("should ship the harness self-adaptation contract and layer reference", async () => {
+		const loader = new DefaultResourceLoader({ cwd, agentDir });
+		await loader.reload();
+
+		const skill = loader.getSkills().skills.find((candidate) => candidate.name === "harness-self-adaptation");
+		expect(skill).toBeDefined();
+		if (!skill) return;
+
+		const content = readFileSync(skill.filePath, "utf8");
+		const referencePath = join(dirname(skill.filePath), "references", "adaptation-layers.md");
+		expect(existsSync(referencePath)).toBe(true);
+		expect(content.split("\n").length).toBeLessThan(500);
+		expect(skill.description).toContain("ALWAYS use for work on the Pi/pi-adaptative harness");
+		expect(content).toContain("baseline unavailable");
+		expect(content).toContain("### 7. Apply the retention gate");
+		expect(content).toMatch(/five failed\s+attempts/);
+		expect(content).toContain("Human on the edge");
+
+		const requiredHeaders = [
+			"## How to use the skill",
+			"## North Star",
+			"## Core Sections",
+			"## Anti-Patterns",
+			"## Examples",
+			"## Self-Check",
+			"## Known Gaps",
+		];
+		let previousIndex = -1;
+		for (const header of requiredHeaders) {
+			const index = content.indexOf(header);
+			expect(index).toBeGreaterThan(previousIndex);
+			previousIndex = index;
+		}
+
+		const reference = readFileSync(referencePath, "utf8");
+		expect(reference).toContain("## Layer matrix");
+		expect(reference).toContain("| Core source |");
+		expect(reference).toContain("measure the whole system boundary");
 	});
 
 	it("should allow user skills to override bundled skills", async () => {

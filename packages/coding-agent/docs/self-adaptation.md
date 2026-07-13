@@ -11,6 +11,7 @@ This keeps a human on the edge of the loop: Pi proposes, you confirm, then it ac
 - [Skillify](#skillify)
 - [Extensionify](#extensionify)
 - [Learn](#learn)
+- [Harness self-adaptation](#harness-self-adaptation)
 - [Duplicate detection](#duplicate-detection)
 - [Going live](#going-live)
 
@@ -56,6 +57,12 @@ Before anything is offered for activation, the candidate is **smoke-tested in is
 `/learn` is the broader post-session pass. It summarizes the durable lesson and classifies it: is this a memory, a refinement to an existing skill, a brand-new skill, a prompt, an extension, or nothing worth keeping? It then routes the lesson to the matching proposal — `skillify` or `extensionify`, a targeted edit, or a note — and surfaces the result for you to activate.
 
 `/learn` orchestrates; it never writes or activates on its own. Long-term memory storage is handled outside Pi; `/learn` routes to it rather than implementing it.
+
+## Harness self-adaptation
+
+For work on Pi itself, the bundled `harness-self-adaptation` skill keeps the active task primary and wraps it in a bounded improvement loop: define an observable oracle, capture a baseline or correctness invariant, diagnose the owning mechanism, choose the smallest enforcing layer, validate a focused intervention, then retain or roll it back. A task with no reusable evidence ends with no durable adaptation rather than a speculative change.
+
+The skill treats tests, benchmarks, telemetry, and before/after measurements as retention evidence. It keeps code defects in their owning code, routes procedures to skills or prompts, and reserves extensions or core changes for behavior lower layers cannot enforce. It composes with `pi-harness-learning` for after-action capture and `skill-architect` for instruction authoring. Pi can load it when the task description matches, or you can force it with `/skill:harness-self-adaptation`.
 
 ## Duplicate detection
 

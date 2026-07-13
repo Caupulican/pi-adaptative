@@ -2,6 +2,7 @@
 
 ### Added
 
+- Added a bundled harness self-adaptation skill with evidence, layer-selection, measurement, retention, rollback, and authority gates for compounding Pi work without gratuitous self-modification.
 - Added per-delegation, lane-profile-gated read-only memory retrieval for isolated workers while keeping private memory files and every memory mutation unavailable.
 - Added explicit queued/running worker status and lane-specific completion notifications without injecting late worker output into the active foreground transcript.
 
