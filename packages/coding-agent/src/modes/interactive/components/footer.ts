@@ -120,6 +120,7 @@ export class FooterComponent implements Component {
 	private session: AgentSession;
 	private footerData: ReadonlyFooterDataProvider;
 	private usageSnapshot?: FooterUsageSnapshot;
+	private cumulativeUsage?: Omit<FooterUsageSnapshot, "messageCount" | "contextUsage">;
 
 	constructor(session: AgentSession, footerData: ReadonlyFooterDataProvider) {
 		this.session = session;
@@ -129,6 +130,7 @@ export class FooterComponent implements Component {
 	setSession(session: AgentSession): void {
 		this.session = session;
 		this.usageSnapshot = undefined;
+		this.cumulativeUsage = undefined;
 	}
 
 	setAutoCompactEnabled(enabled: boolean): void {
@@ -160,14 +162,22 @@ export class FooterComponent implements Component {
 			return cached;
 		}
 
-		// Calculate cumulative usage from ALL session entries in one batched pass.
-		// This avoids per-frame defensive array allocation when only the TUI redraws.
-		let totalInput = 0;
-		let totalOutput = 0;
-		let totalCacheRead = 0;
-		let totalCacheWrite = 0;
+		// Session entries are append ordered. Reuse accumulated totals and process only the delta;
+		// invalidating footer layout/context state must not force a full history scan.
+		const previous = this.cumulativeUsage;
+		const incrementalSessionManager = sessionManager as unknown as {
+			getEntriesSince?: (startIndex: number) => ReturnType<typeof sessionManager.getEntries>;
+		};
+		const canExtend = previous !== undefined && entryCount >= previous.entryCount;
+		let totalInput = canExtend ? previous.totalInput : 0;
+		let totalOutput = canExtend ? previous.totalOutput : 0;
+		let totalCacheRead = canExtend ? previous.totalCacheRead : 0;
+		let totalCacheWrite = canExtend ? previous.totalCacheWrite : 0;
 
-		const entries = this.session.sessionManager.getEntries();
+		const entries =
+			canExtend && incrementalSessionManager.getEntriesSince
+				? incrementalSessionManager.getEntriesSince(previous.entryCount)
+				: this.session.sessionManager.getEntries();
 		for (let i = 0; i < entries.length; i++) {
 			const entry = entries[i];
 			if (entry.type !== "message" || entry.message.role !== "assistant") continue;
@@ -179,13 +189,16 @@ export class FooterComponent implements Component {
 			totalCacheWrite += usage.cacheWrite;
 		}
 
-		const snapshot: FooterUsageSnapshot = {
+		this.cumulativeUsage = {
 			entryCount,
-			messageCount,
 			totalInput,
 			totalOutput,
 			totalCacheRead,
 			totalCacheWrite,
+		};
+		const snapshot: FooterUsageSnapshot = {
+			...this.cumulativeUsage,
+			messageCount,
 			// Calculate context usage from session (handles compaction correctly).
 			// After compaction, tokens are unknown until the next LLM response.
 			contextUsage: this.session.getContextUsage(),

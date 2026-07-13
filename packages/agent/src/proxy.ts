@@ -15,6 +15,7 @@ import {
 	type StopReason,
 	type ToolCall,
 } from "@caupulican/pi-ai";
+import { StreamingLineDecoder } from "./utils/streaming-lines.ts";
 
 // Create stream class matching ProxyMessageEventStream
 class ProxyMessageEventStream extends EventStream<AssistantMessageEvent, AssistantMessage> {
@@ -179,7 +180,7 @@ export function streamProxy(model: Model<any>, context: Context, options: ProxyS
 
 			reader = response.body!.getReader();
 			const decoder = new TextDecoder();
-			let buffer = "";
+			const lines = new StreamingLineDecoder(64 * 1024 * 1024);
 
 			while (true) {
 				const { done, value } = await reader.read();
@@ -189,11 +190,7 @@ export function streamProxy(model: Model<any>, context: Context, options: ProxyS
 					throw new Error("Request aborted by user");
 				}
 
-				buffer += decoder.decode(value, { stream: true });
-				const lines = buffer.split("\n");
-				buffer = lines.pop() || "";
-
-				for (const line of lines) {
+				for (const line of lines.push(decoder.decode(value, { stream: true }))) {
 					if (line.startsWith("data: ")) {
 						const data = line.slice(6).trim();
 						if (data) {
@@ -204,6 +201,30 @@ export function streamProxy(model: Model<any>, context: Context, options: ProxyS
 								stream.push(event);
 							}
 						}
+					}
+				}
+			}
+
+			for (const line of lines.push(decoder.decode())) {
+				if (!line.startsWith("data: ")) continue;
+				const data = line.slice(6).trim();
+				if (!data) continue;
+				const proxyEvent = JSON.parse(data) as ProxyAssistantMessageEvent;
+				const event = processProxyEvent(proxyEvent, partial);
+				if (event) {
+					if (event.type === "done" || event.type === "error") terminalPushed = true;
+					stream.push(event);
+				}
+			}
+			const finalLine = lines.finish();
+			if (finalLine?.startsWith("data: ")) {
+				const data = finalLine.slice(6).trim();
+				if (data) {
+					const proxyEvent = JSON.parse(data) as ProxyAssistantMessageEvent;
+					const event = processProxyEvent(proxyEvent, partial);
+					if (event) {
+						if (event.type === "done" || event.type === "error") terminalPushed = true;
+						stream.push(event);
 					}
 				}
 			}

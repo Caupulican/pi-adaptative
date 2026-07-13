@@ -16,6 +16,7 @@ import {
 	EventStream,
 	getModel,
 	type Model,
+	registerSessionResourceCleanup,
 } from "@caupulican/pi-ai";
 import { afterEach, beforeEach, describe, expect, it } from "vitest";
 import { AgentSession, type AgentSessionEvent } from "../src/core/agent-session.ts";
@@ -220,21 +221,30 @@ describe("auto-compaction applies the compacted context (offline pipeline)", () 
 		>;
 	}
 
-	it("cycle 1: threshold auto-compaction produces a result and replaces live messages", async () => {
+	it("cycle 1: threshold auto-compaction produces a result, replaces live messages, and releases provider context", async () => {
 		createSession();
+		const cleanedSessionIds: Array<string | undefined> = [];
+		const unregisterCleanup = registerSessionResourceCleanup((sessionId) => {
+			cleanedSessionIds.push(sessionId);
+		});
 
-		await session.prompt("hello one");
-		await session.agent.waitForIdle();
+		try {
+			await session.prompt("hello one");
+			await session.agent.waitForIdle();
 
-		const ends = compactionEnds();
-		expect(ends.length, `expected an auto compaction_end, events: ${events.map((e) => e.type).join(",")}`).toBe(1);
-		expect(ends[0].reason).toBe("threshold");
-		expect(ends[0].errorMessage).toBeUndefined();
-		expect(ends[0].aborted).toBe(false);
-		expect(ends[0].result, "auto-compaction ended WITHOUT a result (silent bail)").toBeDefined();
+			const ends = compactionEnds();
+			expect(ends.length, `expected an auto compaction_end, events: ${events.map((e) => e.type).join(",")}`).toBe(1);
+			expect(ends[0].reason).toBe("threshold");
+			expect(ends[0].errorMessage).toBeUndefined();
+			expect(ends[0].aborted).toBe(false);
+			expect(ends[0].result, "auto-compaction ended WITHOUT a result (silent bail)").toBeDefined();
 
-		const messages = session.messages;
-		expect(messages[0]?.role).toBe("compactionSummary");
+			const messages = session.messages;
+			expect(messages[0]?.role).toBe("compactionSummary");
+			expect(cleanedSessionIds).toContain(session.sessionId);
+		} finally {
+			unregisterCleanup();
+		}
 	}, 30_000);
 
 	it("cycle 2: a SECOND threshold auto-compaction also applies (repeat compaction)", async () => {

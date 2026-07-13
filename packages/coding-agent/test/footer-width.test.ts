@@ -1,11 +1,16 @@
 import { visibleWidth } from "@caupulican/pi-tui";
-import { beforeAll, describe, expect, it } from "vitest";
+import { beforeAll, describe, expect, it, vi } from "vitest";
 import type { AgentSession } from "../src/core/agent-session.ts";
 import type { SessionCostSummary } from "../src/core/cost/cost-summary.ts";
 import type { CostGuardDecision } from "../src/core/cost-guard.ts";
 import { FooterDataProvider, type ReadonlyFooterDataProvider } from "../src/core/footer-data-provider.ts";
 import { FooterComponent, formatCwdForFooter } from "../src/modes/interactive/components/footer.ts";
 import { initTheme } from "../src/modes/interactive/theme/theme.ts";
+
+type FooterUsageSnapshotForTest = {
+	totalInput: number;
+	totalOutput: number;
+};
 
 type AssistantUsage = {
 	input: number;
@@ -122,6 +127,49 @@ describe("formatCwdForFooter", () => {
 describe("FooterComponent width handling", () => {
 	beforeAll(() => {
 		initTheme(undefined, false);
+	});
+
+	it("accumulates only newly appended usage entries after footer invalidation", () => {
+		const entries = [
+			{
+				type: "message",
+				message: {
+					role: "assistant",
+					usage: { input: 10, output: 2, cacheRead: 1, cacheWrite: 0 },
+				},
+			},
+		];
+		const getEntries = vi.fn(() => entries.slice());
+		const getEntriesSince = vi.fn((startIndex: number) => entries.slice(startIndex));
+		const session = {
+			state: { messages: [], model: { contextWindow: 100 } },
+			sessionManager: {
+				getEntryCount: () => entries.length,
+				getEntries,
+				getEntriesSince,
+			},
+			getContextUsage: () => ({ tokens: 10, contextWindow: 100, percent: 10 }),
+		} as unknown as AgentSession;
+		const footer = new FooterComponent(session, createFooterData(1));
+		const getUsageSnapshot = (
+			footer as unknown as { getUsageSnapshot(messageCount: number): FooterUsageSnapshotForTest }
+		).getUsageSnapshot.bind(footer);
+
+		expect(getUsageSnapshot(0).totalInput).toBe(10);
+		footer.invalidate();
+		entries.push({
+			type: "message",
+			message: {
+				role: "assistant",
+				usage: { input: 5, output: 3, cacheRead: 2, cacheWrite: 1 },
+			},
+		});
+		const updated = getUsageSnapshot(1);
+
+		expect(updated.totalInput).toBe(15);
+		expect(updated.totalOutput).toBe(5);
+		expect(getEntries).toHaveBeenCalledTimes(1);
+		expect(getEntriesSince).toHaveBeenCalledWith(1);
 	});
 
 	it("keeps all lines within width for wide session names", () => {

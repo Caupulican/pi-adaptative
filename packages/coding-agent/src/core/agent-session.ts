@@ -2093,6 +2093,16 @@ export class AgentSession {
 		return this._pipeline.buildCompactionPreDigest();
 	}
 
+	/** Drop provider-owned request/continuation caches whose prefix was invalidated by compaction. */
+	private _refreshAfterCompaction(): void {
+		this.agent.state.messages = this.sessionManager.buildSessionContext().messages;
+		try {
+			cleanupSessionResources(this.sessionId);
+		} catch {
+			// Provider cache cleanup is best-effort and must not turn an applied compaction into a failure.
+		}
+	}
+
 	/**
 	 * Context composition dashboard data: decomposes the per-request payload (system prompt, tool
 	 * schemas, extension contributions, message classes incl. GC/policy stubs and recall pages)
@@ -3718,7 +3728,7 @@ export class AgentSession {
 					extensionCompaction.details,
 					true,
 				);
-				this.agent.state.messages = this.sessionManager.buildSessionContext().messages;
+				this._refreshAfterCompaction();
 				const savedCompactionEntry = this.sessionManager
 					.getEntries()
 					.find((entry) => entry.type === "compaction" && entry.summary === extensionCompaction.summary) as
@@ -3795,7 +3805,7 @@ export class AgentSession {
 						result.details,
 						fromExtension,
 					);
-					this.agent.state.messages = this.sessionManager.buildSessionContext().messages;
+					this._refreshAfterCompaction();
 					const savedCompactionEntry = this.sessionManager
 						.getEntries()
 						.find((entry) => entry.type === "compaction" && entry.summary === result.summary) as
@@ -4131,7 +4141,7 @@ export class AgentSession {
 						result.details,
 						fromExtension,
 					);
-					this.agent.state.messages = this.sessionManager.buildSessionContext().messages;
+					this._refreshAfterCompaction();
 					const newEntries = this.sessionManager.getEntries();
 					const savedCompactionEntry = newEntries.find(
 						(entry) => entry.type === "compaction" && entry.summary === result.summary,

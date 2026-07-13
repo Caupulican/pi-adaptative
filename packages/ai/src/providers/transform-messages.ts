@@ -12,6 +12,22 @@ import type {
 const NON_VISION_USER_IMAGE_PLACEHOLDER = "(image omitted: model does not support images)";
 const NON_VISION_TOOL_IMAGE_PLACEHOLDER = "(tool image omitted: model does not support images)";
 
+/** Reuse the original immutable string for the common single-text-block case. */
+export function joinTextContent(content: readonly (TextContent | ImageContent)[]): string {
+	let first: string | undefined;
+	let parts: string[] | undefined;
+	for (const block of content) {
+		if (block.type !== "text") continue;
+		if (first === undefined) {
+			first = block.text;
+		} else {
+			parts ??= [first];
+			parts.push(block.text);
+		}
+	}
+	return parts?.join("\n") ?? first ?? "";
+}
+
 function replaceUnsupportedImagesWithPlaceholder(
 	content: (TextContent | ImageContent)[],
 	placeholder: string,

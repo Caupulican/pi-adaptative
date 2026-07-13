@@ -10,6 +10,10 @@ export interface CurrentSessionCostTotals {
 	currentCost: number;
 }
 
+export interface CurrentSessionCostAccumulator extends CurrentSessionCostTotals {
+	seenSubagentReportIds: Set<string>;
+}
+
 export interface SessionCostSummary extends CurrentSessionCostTotals {
 	todayCost: number;
 	todayOwnCost: number;
@@ -27,16 +31,24 @@ function getUsageTotalCost(usage: Usage | undefined): number | undefined {
 	return isFiniteCost(total) ? total : undefined;
 }
 
-export function aggregateCurrentSessionCostsFromEntries(entries: readonly SessionEntry[]): CurrentSessionCostTotals {
-	let ownCost = 0;
-	let subagentCost = 0;
-	let subagentReports = 0;
-	const seenSubagentReportIds = new Set<string>();
+export function createCurrentSessionCostAccumulator(): CurrentSessionCostAccumulator {
+	return {
+		ownCost: 0,
+		subagentCost: 0,
+		subagentReports: 0,
+		currentCost: 0,
+		seenSubagentReportIds: new Set<string>(),
+	};
+}
 
+export function accumulateCurrentSessionCostsFromEntries(
+	accumulator: CurrentSessionCostAccumulator,
+	entries: readonly SessionEntry[],
+): CurrentSessionCostAccumulator {
 	for (const entry of entries) {
 		if (entry.type === "message" && entry.message.role === "assistant") {
 			const total = getUsageTotalCost((entry.message as AssistantMessage).usage);
-			if (total !== undefined) ownCost += total;
+			if (total !== undefined) accumulator.ownCost += total;
 			continue;
 		}
 
@@ -45,27 +57,37 @@ export function aggregateCurrentSessionCostsFromEntries(entries: readonly Sessio
 		const total = getUsageTotalCost(report?.usage);
 		if (total === undefined) continue;
 		if (report?.reportId) {
-			if (seenSubagentReportIds.has(report.reportId)) continue;
-			seenSubagentReportIds.add(report.reportId);
+			if (accumulator.seenSubagentReportIds.has(report.reportId)) continue;
+			accumulator.seenSubagentReportIds.add(report.reportId);
 		}
-		subagentCost += total;
-		subagentReports += 1;
+		accumulator.subagentCost += total;
+		accumulator.subagentReports += 1;
 	}
+	accumulator.currentCost = accumulator.ownCost + accumulator.subagentCost;
+	return accumulator;
+}
 
-	return {
-		ownCost,
-		subagentCost,
-		subagentReports,
-		currentCost: ownCost + subagentCost,
-	};
+export function aggregateCurrentSessionCostsFromEntries(entries: readonly SessionEntry[]): CurrentSessionCostTotals {
+	const { seenSubagentReportIds: _seenSubagentReportIds, ...totals } = accumulateCurrentSessionCostsFromEntries(
+		createCurrentSessionCostAccumulator(),
+		entries,
+	);
+	return totals;
 }
 
 export function createSessionCostSummary(args: {
-	entries: readonly SessionEntry[];
+	entries?: readonly SessionEntry[];
 	dailyTotals: DailyUsageTotals;
 	todayWindow: DailyUsageWindow;
+	currentTotals?: CurrentSessionCostTotals;
 }): SessionCostSummary {
-	const current = aggregateCurrentSessionCostsFromEntries(args.entries);
+	const currentSource = args.currentTotals ?? aggregateCurrentSessionCostsFromEntries(args.entries ?? []);
+	const current: CurrentSessionCostTotals = {
+		ownCost: currentSource.ownCost,
+		subagentCost: currentSource.subagentCost,
+		subagentReports: currentSource.subagentReports,
+		currentCost: currentSource.currentCost,
+	};
 	return {
 		...current,
 		todayCost: args.dailyTotals.totalCost,

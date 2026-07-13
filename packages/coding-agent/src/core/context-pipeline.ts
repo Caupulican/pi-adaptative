@@ -26,8 +26,10 @@
 import { join } from "node:path";
 import type { AgentMessage } from "@caupulican/pi-agent-core";
 import {
+	type CompactionEntry,
 	estimateContextTokens,
 	getLatestCompactionEntry,
+	type SessionEntry,
 	type SessionManager,
 	TokenBudget,
 } from "@caupulican/pi-agent-core/node";
@@ -52,16 +54,38 @@ import { FitnessStore } from "./models/fitness-store.ts";
 import { HF_TRANSFORMERS_PROVIDER, OLLAMA_PROVIDER } from "./models/local-registration.ts";
 import type { SettingsManager } from "./settings-manager.ts";
 
-/** Latest user prompt text in the provider-visible array (curation goal line; bounded by caller). */
-export function latestUserPromptText(messages: AgentMessage[]): string {
+function joinTextPrefix(content: readonly unknown[], maxChars = Number.POSITIVE_INFINITY): string {
+	let found = false;
+	let text = "";
+	for (const part of content) {
+		if (typeof part !== "object" || part === null || (part as { type?: unknown }).type !== "text") continue;
+		const blockText = (part as { text?: unknown }).text;
+		if (typeof blockText !== "string") continue;
+		if (!found) {
+			found = true;
+			if (blockText.length >= maxChars) return blockText.slice(0, maxChars);
+			text = blockText;
+			continue;
+		}
+		const available = maxChars - text.length;
+		if (available <= 0) return text;
+		if (available === 1) return `${text}\n`;
+		const remaining = available - 1;
+		text += `\n${blockText.slice(0, remaining)}`;
+		if (blockText.length >= remaining) return text;
+	}
+	return text;
+}
+
+/** Latest user prompt text in the provider-visible array. */
+export function latestUserPromptText(messages: AgentMessage[], maxChars = Number.POSITIVE_INFINITY): string {
 	for (let index = messages.length - 1; index >= 0; index--) {
 		const message = messages[index];
 		if (!message || message.role !== "user") continue;
-		if (typeof message.content === "string") return message.content;
-		const text = message.content
-			.filter((part): part is { type: "text"; text: string } => (part as { type?: string }).type === "text")
-			.map((part) => part.text)
-			.join("\n");
+		if (typeof message.content === "string") {
+			return message.content.length > maxChars ? message.content.slice(0, maxChars) : message.content;
+		}
+		const text = joinTextPrefix(message.content, maxChars);
 		if (text.length > 0) return text;
 	}
 	return "";
@@ -122,6 +146,10 @@ export class ContextPipeline {
 	private _hasTokenBudgetAnchor = false;
 	private _tokenBudgetAnchorCompactionId: string | undefined = undefined;
 	private _lastTokenBudgetAnchorKey: string | undefined = undefined;
+	/** Incremental current-branch lookup used by the per-turn audit. It retains only tool calls
+	 * still present in the provider-visible context, so compaction also bounds this cache. */
+	private _sessionEntryLookupCache: { leafId: string | null; byToolCallId: Map<string, string> } | undefined =
+		undefined;
 
 	private readonly deps: ContextPipelineDeps;
 
@@ -168,20 +196,91 @@ export class ContextPipeline {
 	}
 
 	/**
-	 * One pass over the current branch, mapping each toolResult's toolCallId to its
-	 * persisted session-entry id. Rebuilt every audit pass (O(branch) per turn), so this is
-	 * O(n^2) over a long session. Fine at current scale; after the artifact-read fix this is
-	 * the next per-turn audit cost to optimize if it ever matters (e.g. cache/incrementally
-	 * update instead of a full rebuild).
+	 * Map tool-result call ids to persisted session-entry ids. Linear branch growth is handled
+	 * incrementally by walking only entries appended since the cached leaf; a branch switch falls
+	 * back to one full rebuild so lookups never leak entries from the abandoned branch.
 	 */
-	private _buildSessionEntryIdLookup(): (toolCallId: string) => string | undefined {
-		const map = new Map<string, string>();
-		for (const entry of this.deps.getSessionManager().getBranch()) {
-			if (entry.type === "message" && entry.message.role === "toolResult") {
-				map.set(entry.message.toolCallId, entry.id);
+	private _getLatestCompactionEntry(): CompactionEntry | null {
+		const sessionManager = this.deps.getSessionManager();
+		const indexedSessionManager = sessionManager as unknown as {
+			getLeafId?: () => string | null;
+			getEntry?: (id: string) => SessionEntry | undefined;
+		};
+		const getLeafId = indexedSessionManager.getLeafId?.bind(sessionManager);
+		const getEntry = indexedSessionManager.getEntry?.bind(sessionManager);
+		const leafId = getLeafId?.();
+		if (getLeafId && getEntry && leafId !== undefined) {
+			let currentId = leafId;
+			while (currentId !== null) {
+				const entry = getEntry(currentId);
+				if (!entry) break;
+				if (entry.type === "compaction") return entry;
+				currentId = entry.parentId;
+			}
+			return null;
+		}
+		return getLatestCompactionEntry(sessionManager.getBranch());
+	}
+
+	private _buildSessionEntryIdLookup(
+		wantedToolCallIds: ReadonlySet<string>,
+	): (toolCallId: string) => string | undefined {
+		const sessionManager = this.deps.getSessionManager();
+		const indexedSessionManager = sessionManager as unknown as {
+			getLeafId?: () => string | null;
+			getEntry?: (id: string) => SessionEntry | undefined;
+		};
+		const getLeafId = indexedSessionManager.getLeafId?.bind(sessionManager);
+		const getEntry = indexedSessionManager.getEntry?.bind(sessionManager);
+		const leafId = getLeafId?.();
+		const cached = this._sessionEntryLookupCache;
+		if (cached) {
+			for (const toolCallId of cached.byToolCallId.keys()) {
+				if (!wantedToolCallIds.has(toolCallId)) cached.byToolCallId.delete(toolCallId);
 			}
 		}
-		return (toolCallId: string) => map.get(toolCallId);
+		if (getLeafId && getEntry && leafId !== undefined) {
+			if (cached?.leafId === leafId) {
+				return (toolCallId) => cached.byToolCallId.get(toolCallId);
+			}
+			if (cached) {
+				const appendedEntries: SessionEntry[] = [];
+				let cursor = leafId;
+				while (cursor !== null && cursor !== cached.leafId) {
+					const entry = getEntry(cursor);
+					if (!entry) break;
+					appendedEntries.push(entry);
+					cursor = entry.parentId;
+				}
+				if (cursor === cached.leafId) {
+					for (let index = appendedEntries.length - 1; index >= 0; index--) {
+						const entry = appendedEntries[index];
+						if (
+							entry.type === "message" &&
+							entry.message.role === "toolResult" &&
+							wantedToolCallIds.has(entry.message.toolCallId)
+						) {
+							cached.byToolCallId.set(entry.message.toolCallId, entry.id);
+						}
+					}
+					cached.leafId = leafId;
+					return (toolCallId) => cached.byToolCallId.get(toolCallId);
+				}
+			}
+		}
+
+		const byToolCallId = new Map<string, string>();
+		for (const entry of sessionManager.getBranch()) {
+			if (
+				entry.type === "message" &&
+				entry.message.role === "toolResult" &&
+				wantedToolCallIds.has(entry.message.toolCallId)
+			) {
+				byToolCallId.set(entry.message.toolCallId, entry.id);
+			}
+		}
+		if (leafId !== undefined) this._sessionEntryLookupCache = { leafId, byToolCallId };
+		return (toolCallId) => byToolCallId.get(toolCallId);
 	}
 
 	/**
@@ -195,10 +294,13 @@ export class ContextPipeline {
 	 */
 	runContextAudit(messages: AgentMessage[]): ContextAuditReport {
 		try {
+			const wantedToolCallIds = new Set(
+				messages.filter((message) => message.role === "toolResult").map((message) => message.toolCallId),
+			);
 			const report = runContextAudit(messages, {
 				turnIndex: this.deps.getTurnIndex(),
 				artifactStore: this._toolArtifactStore,
-				sessionEntryIdForToolCallId: this._buildSessionEntryIdLookup(),
+				sessionEntryIdForToolCallId: this._buildSessionEntryIdLookup(wantedToolCallIds),
 			});
 			this._latestContextAuditReport = report;
 			return report;
@@ -310,7 +412,7 @@ export class ContextPipeline {
 		try {
 			const settings = this.deps.getSettingsManager().getContextCurationSettings();
 			if (!settings.enabled) return;
-			const goal = latestUserPromptText(messages).slice(0, 400);
+			const goal = latestUserPromptText(messages, 400);
 			for (const item of shadowReport.items) {
 				if (!item.hasAvailableRetrievalPath) continue;
 				const message = messages[item.messageIndex];
@@ -320,12 +422,9 @@ export class ContextPipeline {
 					| { contextGc?: { packed?: unknown }; promptPolicy?: { enforced?: unknown } }
 					| undefined;
 				if (details?.contextGc?.packed === true || details?.promptPolicy?.enforced === true) continue;
-				const text = message.content
-					.filter((part): part is { type: "text"; text: string } => part.type === "text")
-					.map((part) => part.text)
-					.join("\n");
+				const text = joinTextPrefix(message.content, 4000);
 				if (text.length === 0) continue;
-				this._brainCurator.enqueue({ kind: "relevance", key: item.itemId, content: text.slice(0, 4000), goal });
+				this._brainCurator.enqueue({ kind: "relevance", key: item.itemId, content: text, goal });
 			}
 		} catch {
 			// curation is a sidecar; it must never disrupt a turn
@@ -669,7 +768,7 @@ export class ContextPipeline {
 			return;
 		}
 
-		const compactionEntry = getLatestCompactionEntry(this.deps.getSessionManager().getBranch());
+		const compactionEntry = this._getLatestCompactionEntry();
 		if (!compactionEntry) {
 			return;
 		}
@@ -702,7 +801,7 @@ export class ContextPipeline {
 		}
 
 		const usageMessage = messages[estimate.lastUsageIndex];
-		const compactionEntry = getLatestCompactionEntry(this.deps.getSessionManager().getBranch());
+		const compactionEntry = this._getLatestCompactionEntry();
 		if (usageMessage?.role !== "assistant" || !compactionEntry) {
 			return estimate.tokens;
 		}

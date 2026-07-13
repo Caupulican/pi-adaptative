@@ -1,5 +1,6 @@
 import type { Readable } from "node:stream";
 import { StringDecoder } from "node:string_decoder";
+import { StreamingLineDecoder } from "../../utils/streaming-lines.ts";
 
 /**
  * Serialize a single strict JSONL record.
@@ -24,47 +25,22 @@ const MAX_JSONL_LINE_CHARS = 64 * 1024 * 1024;
 
 export function attachJsonlLineReader(stream: Readable, onLine: (line: string) => void): () => void {
 	const decoder = new StringDecoder("utf8");
-	let buffer = "";
-	let discardingOversizedLine = false;
+	const lines = new StreamingLineDecoder(MAX_JSONL_LINE_CHARS, { overflow: "skip", lineEndings: "lf" });
 
 	const emitLine = (line: string) => {
 		onLine(line.endsWith("\r") ? line.slice(0, -1) : line);
 	};
 
 	const onData = (chunk: string | Buffer) => {
-		buffer += typeof chunk === "string" ? chunk : decoder.write(chunk);
-
-		if (discardingOversizedLine) {
-			const resumeIndex = buffer.indexOf("\n");
-			if (resumeIndex === -1) {
-				buffer = "";
-				return;
-			}
-			buffer = buffer.slice(resumeIndex + 1);
-			discardingOversizedLine = false;
-		}
-
-		while (true) {
-			const newlineIndex = buffer.indexOf("\n");
-			if (newlineIndex === -1) {
-				if (buffer.length > MAX_JSONL_LINE_CHARS) {
-					discardingOversizedLine = true;
-					buffer = "";
-				}
-				return;
-			}
-
-			emitLine(buffer.slice(0, newlineIndex));
-			buffer = buffer.slice(newlineIndex + 1);
+		for (const line of lines.push(typeof chunk === "string" ? chunk : decoder.write(chunk))) {
+			emitLine(line);
 		}
 	};
 
 	const onEnd = () => {
-		buffer += decoder.end();
-		if (buffer.length > 0) {
-			emitLine(buffer);
-			buffer = "";
-		}
+		for (const line of lines.push(decoder.end())) emitLine(line);
+		const finalLine = lines.finish();
+		if (finalLine !== undefined) emitLine(finalLine);
 	};
 
 	stream.on("data", onData);

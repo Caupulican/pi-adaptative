@@ -18,6 +18,9 @@ import { pipeline } from "node:stream/promises";
 import * as nodeZlib from "node:zlib";
 import { getBundledResourcesDir } from "../../config.ts";
 import { spawnProcess, spawnProcessSync, waitForChildProcess } from "../../utils/child-process.ts";
+import { StreamingLineDecoder } from "../../utils/streaming-lines.ts";
+
+const MAX_OLLAMA_PULL_LINE_CHARS = 64 * 1024 * 1024;
 
 /**
  * `spawnProcess(..., { stdio: ["pipe", "pipe", "pipe"] })` always yields a non-null `stdin` at
@@ -821,7 +824,7 @@ export class OllamaRuntime {
 			}
 			const reader = response.body.getReader();
 			const decoder = new TextDecoder();
-			let buffer = "";
+			const lines = new StreamingLineDecoder(MAX_OLLAMA_PULL_LINE_CHARS, { lineEndings: "lf" });
 			let lastStatus = "";
 			let errorMessage: string | undefined;
 			const handleLine = (line: string): void => {
@@ -840,14 +843,12 @@ export class OllamaRuntime {
 			for (;;) {
 				const { done, value } = await reader.read();
 				if (done) break;
-				buffer += decoder.decode(value, { stream: true });
-				const lines = buffer.split("\n");
-				buffer = lines.pop() ?? "";
-				for (const line of lines) handleLine(line);
+				for (const line of lines.push(decoder.decode(value, { stream: true }))) handleLine(line);
 			}
-			// The stream's FINAL line has no trailing newline — it stays in the buffer and holds
-			// the terminal "success"/error event; dropping it misreports every completed pull.
-			handleLine(buffer);
+			for (const line of lines.push(decoder.decode())) handleLine(line);
+			// The stream's final line may have no trailing newline and still carries the terminal event.
+			const finalLine = lines.finish();
+			if (finalLine !== undefined) handleLine(finalLine);
 			if (errorMessage) return { ok: false, error: errorMessage };
 			return lastStatus === "success"
 				? { ok: true }

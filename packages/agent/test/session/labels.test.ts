@@ -179,6 +179,18 @@ describe("SessionManager labels", () => {
 		expect(session.getLabel(msg3Id)).toBeUndefined();
 	});
 
+	it("clears label timestamp state when starting a new session", () => {
+		const session = SessionManager.inMemory();
+		const msgId = session.appendMessage({ role: "user", content: "hello", timestamp: 1 });
+		session.appendLabelChange(msgId, "checkpoint");
+		const labelTimestamps = (session as unknown as { labelTimestampsById: Map<string, string> }).labelTimestampsById;
+		expect(labelTimestamps.size).toBe(1);
+
+		session.newSession();
+
+		expect(labelTimestamps.size).toBe(0);
+	});
+
 	it("labels are not included in buildSessionContext", () => {
 		const session = SessionManager.inMemory();
 

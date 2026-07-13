@@ -30,11 +30,12 @@ import { AssistantMessageEventStream } from "../utils/event-stream.ts";
 import { headersToRecord } from "../utils/headers.ts";
 import { parseJsonWithRepair, parseStreamingJson } from "../utils/json-parse.ts";
 import { sanitizeSurrogates } from "../utils/sanitize-unicode.ts";
+import { StreamingLineDecoder } from "../utils/streaming-lines.ts";
 
 import { resolveCloudflareBaseUrl } from "./cloudflare.ts";
 import { buildCopilotDynamicHeaders, hasCopilotVisionInput } from "./github-copilot-headers.ts";
 import { adjustMaxTokensForThinking, buildBaseOptions } from "./simple-options.ts";
-import { transformMessages } from "./transform-messages.ts";
+import { joinTextContent, transformMessages } from "./transform-messages.ts";
 
 /**
  * Resolve cache retention preference.
@@ -123,7 +124,7 @@ function convertContentBlocks(content: (TextContent | ImageContent)[]):
 	// If only text blocks, return as concatenated string for simplicity
 	const hasImages = content.some((c) => c.type === "image");
 	if (!hasImages) {
-		return sanitizeSurrogates(content.map((c) => (c as TextContent).text).join("\n"));
+		return sanitizeSurrogates(joinTextContent(content));
 	}
 
 	// If we have images, convert to content block array
@@ -316,35 +317,6 @@ function decodeSseLine(line: string, state: SseDecoderState): ServerSentEvent | 
 	return null;
 }
 
-function nextLineBreakIndex(text: string): number {
-	const carriageReturnIndex = text.indexOf("\r");
-	const newlineIndex = text.indexOf("\n");
-	if (carriageReturnIndex === -1) {
-		return newlineIndex;
-	}
-	if (newlineIndex === -1) {
-		return carriageReturnIndex;
-	}
-	return Math.min(carriageReturnIndex, newlineIndex);
-}
-
-function consumeLine(text: string): { line: string; rest: string } | null {
-	const lineBreakIndex = nextLineBreakIndex(text);
-	if (lineBreakIndex === -1) {
-		return null;
-	}
-
-	let nextIndex = lineBreakIndex + 1;
-	if (text[lineBreakIndex] === "\r" && text[nextIndex] === "\n") {
-		nextIndex += 1;
-	}
-
-	return {
-		line: text.slice(0, lineBreakIndex),
-		rest: text.slice(nextIndex),
-	};
-}
-
 const MAX_SSE_LINE_CHARS = 64 * 1024 * 1024;
 
 async function* iterateSseMessages(
@@ -354,7 +326,7 @@ async function* iterateSseMessages(
 	const reader = body.getReader();
 	const decoder = new TextDecoder();
 	const state: SseDecoderState = { event: null, data: [], raw: [] };
-	let buffer = "";
+	const lines = new StreamingLineDecoder(MAX_SSE_LINE_CHARS);
 
 	try {
 		while (true) {
@@ -367,39 +339,20 @@ async function* iterateSseMessages(
 				break;
 			}
 
-			buffer += decoder.decode(value, { stream: true });
-			let consumed = consumeLine(buffer);
-			while (consumed) {
-				buffer = consumed.rest;
-				const event = decodeSseLine(consumed.line, state);
-				if (event) {
-					yield event;
-				}
-				consumed = consumeLine(buffer);
-			}
-			if (buffer.length > MAX_SSE_LINE_CHARS) {
-				// A delimiter-less stream (broken proxy/server) would otherwise grow
-				// this buffer without bound; fail the request cleanly instead.
-				throw new Error(`SSE stream exceeded the ${MAX_SSE_LINE_CHARS} character line limit`);
+			for (const line of lines.push(decoder.decode(value, { stream: true }))) {
+				const event = decodeSseLine(line, state);
+				if (event) yield event;
 			}
 		}
 
-		buffer += decoder.decode();
-		let consumed = consumeLine(buffer);
-		while (consumed) {
-			buffer = consumed.rest;
-			const event = decodeSseLine(consumed.line, state);
-			if (event) {
-				yield event;
-			}
-			consumed = consumeLine(buffer);
+		for (const line of lines.push(decoder.decode())) {
+			const event = decodeSseLine(line, state);
+			if (event) yield event;
 		}
-
-		if (buffer.length > 0) {
-			const event = decodeSseLine(buffer, state);
-			if (event) {
-				yield event;
-			}
+		const finalLine = lines.finish();
+		if (finalLine !== undefined) {
+			const event = decodeSseLine(finalLine, state);
+			if (event) yield event;
 		}
 
 		const trailingEvent = flushSseEvent(state);

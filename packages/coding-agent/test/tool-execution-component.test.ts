@@ -41,6 +41,37 @@ describe("ToolExecutionComponent parity", () => {
 		initTheme("dark");
 	});
 
+	test("bounds built-in tool definition caches across repeated cwd/session switches", () => {
+		const tui = createFakeTui();
+		const firstCwd = "/tmp/pi-tool-definition-cache-0";
+		const first = new ToolExecutionComponent("read", "call-first", { path: "a" }, {}, undefined, tui, firstCwd);
+		const firstDefinition = (first as unknown as { builtInToolDefinition?: unknown }).builtInToolDefinition;
+		for (let index = 1; index <= 32; index++) {
+			new ToolExecutionComponent(
+				"read",
+				`call-${index}`,
+				{ path: "a" },
+				{},
+				undefined,
+				tui,
+				`/tmp/pi-tool-definition-cache-${index}`,
+			);
+		}
+		const recreated = new ToolExecutionComponent(
+			"read",
+			"call-recreated",
+			{ path: "a" },
+			{},
+			undefined,
+			tui,
+			firstCwd,
+		);
+
+		expect((recreated as unknown as { builtInToolDefinition?: unknown }).builtInToolDefinition).not.toBe(
+			firstDefinition,
+		);
+	});
+
 	test("session-scoped tool panel keys isolate tenants", () => {
 		const first = getToolPanelActionKey({ sessionId: "a", sessionFile: "/tmp/a.jsonl", cwd: "/repo" }, "read", {
 			path: "README.md",

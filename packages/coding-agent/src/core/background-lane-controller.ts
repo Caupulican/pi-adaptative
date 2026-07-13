@@ -155,6 +155,8 @@ export class BackgroundLaneController {
 	private _lastResearchLaneSkipReason: string | undefined;
 	/** Live lane registry — the real source for AutonomyStatusSnapshot.activeLaneCount. */
 	private readonly _laneTracker = new LaneTracker();
+	private _laneHistorySeeded = false;
+	private _persistedResearchRunCount = 0;
 	/** Session-lifetime abort for in-flight research passes (same pattern as _reflectionAbort). */
 	private readonly _researchLaneAbort = new AbortController();
 	/** Session-lifetime abort for in-flight delegated workers. */
@@ -216,6 +218,14 @@ export class BackgroundLaneController {
 
 	constructor(deps: BackgroundLaneControllerDeps) {
 		this.deps = deps;
+	}
+
+	private _seedLaneHistory(): void {
+		if (this._laneHistorySeeded) return;
+		const records = getLaneRecordSnapshots(this.deps.getSessionManager().getEntries());
+		this._laneTracker.ensureCounterAtLeast(records.length + 1);
+		this._persistedResearchRunCount = records.filter((record) => record.type === "research").length;
+		this._laneHistorySeeded = true;
 	}
 
 	/** Live lane records tracked by this process (running and terminal). */
@@ -366,10 +376,8 @@ export class BackgroundLaneController {
 			this._lastResearchLaneSkipReason = "autonomy_mode_off";
 			return;
 		}
-		const priorRuns = getLaneRecordSnapshots(this.deps.getSessionManager().getEntries()).filter(
-			(record) => record.type === "research",
-		).length;
-		if (priorRuns >= research.maxRunsPerSession) {
+		this._seedLaneHistory();
+		if (this._persistedResearchRunCount >= research.maxRunsPerSession) {
 			this._lastResearchLaneSkipReason = "max_runs_reached";
 			return;
 		}
@@ -545,10 +553,9 @@ export class BackgroundLaneController {
 		}
 
 		this._isResearchLaneRunning = true;
-		this._laneTracker.ensureCounterAtLeast(
-			getLaneRecordSnapshots(this.deps.getSessionManager().getEntries()).length + 1,
-		);
+		this._seedLaneHistory();
 		const startedRecord = this._laneTracker.start({ type: "research", goalId: demand.goalId });
+		this._persistedResearchRunCount++;
 		try {
 			let spentUsage: Usage | undefined;
 			// Best-effort, pointer-first workspace evidence. Derives search terms from the goal/requirement
@@ -779,9 +786,7 @@ export class BackgroundLaneController {
 			return { started: false, skipReason: "model_delegation_unsupported" };
 		}
 
-		this._laneTracker.ensureCounterAtLeast(
-			getLaneRecordSnapshots(this.deps.getSessionManager().getEntries()).length + 1,
-		);
+		this._seedLaneHistory();
 		const startedRecord = existingRecord ?? this._laneTracker.start({ type: "worker" });
 		if (existingRecord) this._laneTracker.markRunning(existingRecord.laneId);
 		onStarted?.(startedRecord);

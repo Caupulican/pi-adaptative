@@ -1,7 +1,7 @@
 import { Agent } from "@caupulican/pi-agent-core";
 import { SessionManager } from "@caupulican/pi-agent-core/node";
 import { type AssistantMessage, getModel, type Usage } from "@caupulican/pi-ai";
-import { describe, expect, it } from "vitest";
+import { describe, expect, it, vi } from "vitest";
 import { AgentSession } from "../src/core/agent-session.ts";
 import { AuthStorage } from "../src/core/auth-storage.ts";
 import { ModelRegistry } from "../src/core/model-registry.ts";
@@ -209,6 +209,25 @@ describe("AgentSession.getSessionStats", () => {
 			expect(stats.contextUsage).toBeDefined();
 			expect(stats.contextUsage?.tokens).toBeNull();
 			expect(stats.contextUsage?.percent).toBeNull();
+		} finally {
+			session.dispose();
+		}
+	});
+
+	it("checks post-compaction usage without rebuilding the full session branch", () => {
+		const { session, sessionManager } = createSession();
+
+		try {
+			sessionManager.appendMessage(createUserMessage("first", 1));
+			const keptUserId = sessionManager.appendMessage(createUserMessage("second", 2));
+			sessionManager.appendCompaction("summary", keptUserId, 195_000);
+			sessionManager.appendMessage(createUserMessage("third", 3));
+			sessionManager.appendMessage(createAssistantMessage("response", 25_000, 4));
+			syncAgentMessages(session, sessionManager);
+			const getBranch = vi.spyOn(sessionManager, "getBranch");
+
+			expect(session.getContextUsage()?.tokens).toBe(25_000);
+			expect(getBranch).not.toHaveBeenCalled();
 		} finally {
 			session.dispose();
 		}

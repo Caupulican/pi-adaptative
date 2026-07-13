@@ -16,6 +16,7 @@ import {
 	calculateContextTokens,
 	estimateContextTokens,
 	getLatestCompactionEntry,
+	type SessionEntry,
 	type SessionHeader,
 	type SessionManager,
 } from "@caupulican/pi-agent-core/node";
@@ -37,7 +38,9 @@ import {
 	type SpawnedUsageTotals,
 } from "./agent-session.ts";
 import {
-	aggregateCurrentSessionCostsFromEntries,
+	accumulateCurrentSessionCostsFromEntries,
+	type CurrentSessionCostAccumulator,
+	createCurrentSessionCostAccumulator,
 	createSessionCostSummary,
 	type SessionCostSummary,
 } from "./cost/cost-summary.ts";
@@ -58,6 +61,7 @@ import {
 } from "./tool-recovery-log-records.ts";
 
 export const TOOL_ARGUMENT_VALIDATION_CUSTOM_TYPE = "tool_argument_validation";
+const MAX_LIVE_TOOL_ARGUMENT_VALIDATION_RECORDS = 1_000;
 
 export interface ToolArgumentValidationTeachEfficacy {
 	recurrenceBefore: number;
@@ -100,8 +104,11 @@ export interface SessionAnalyticsDeps {
 }
 
 export class SessionAnalytics {
-	/** Memoized spawned-usage totals, keyed by session entry count (Bug #22: O(1) between turns). */
-	private _spawnedUsageCache?: { entryCount: number; totals: SpawnedUsageTotals };
+	/** Incremental aggregate over append-ordered session entries. */
+	private _currentSessionCostCache?: {
+		entryCount: number;
+		accumulator: CurrentSessionCostAccumulator;
+	};
 	/** Memoized daily usage totals with a short TTL, keyed by the resolved scope dir and local-day window. */
 	private _dailyUsageCache?: {
 		sessionDir: string;
@@ -200,6 +207,11 @@ export class SessionAnalytics {
 
 	recordToolArgumentValidation(record: ToolArgumentValidationLogRecord): void {
 		this._toolArgumentValidationRecords.set(record.recordId, record);
+		while (this._toolArgumentValidationRecords.size > MAX_LIVE_TOOL_ARGUMENT_VALIDATION_RECORDS) {
+			const oldest = this._toolArgumentValidationRecords.keys().next().value;
+			if (oldest === undefined) break;
+			this._toolArgumentValidationRecords.delete(oldest);
+		}
 	}
 
 	private readToolArgumentValidationSidecarRecords(): ToolArgumentValidationLogRecord[] {
@@ -378,16 +390,8 @@ export class SessionAnalytics {
 		opts?: { label?: string; sourceSessionId?: string; reportId?: string },
 	): string | undefined {
 		const reportId = opts?.reportId;
-		if (reportId) {
-			for (const entry of this.deps.getSessionManager().getEntries()) {
-				if (
-					entry.type === "custom" &&
-					entry.customType === SPAWNED_USAGE_CUSTOM_TYPE &&
-					(entry.data as SpawnedUsageReport | undefined)?.reportId === reportId
-				) {
-					return undefined;
-				}
-			}
+		if (reportId && this.getCurrentSessionCostTotals().seenSubagentReportIds.has(reportId)) {
+			return undefined;
 		}
 		const report: SpawnedUsageReport = {
 			usage,
@@ -395,22 +399,39 @@ export class SessionAnalytics {
 			sourceSessionId: opts?.sourceSessionId,
 			reportId,
 		};
-		return this.deps.getSessionManager().appendCustomEntry(SPAWNED_USAGE_CUSTOM_TYPE, report);
+		const entryId = this.deps.getSessionManager().appendCustomEntry(SPAWNED_USAGE_CUSTOM_TYPE, report);
+		if (reportId) this.getCurrentSessionCostTotals();
+		return entryId;
+	}
+
+	private getCurrentSessionCostTotals(): CurrentSessionCostAccumulator {
+		const sessionManager = this.deps.getSessionManager();
+		const entryCount = sessionManager.getEntryCount?.() ?? sessionManager.getEntries().length;
+		let cache = this._currentSessionCostCache;
+		const getEntriesSince = sessionManager.getEntriesSince?.bind(sessionManager);
+		if (!cache || entryCount < cache.entryCount || !getEntriesSince) {
+			cache = {
+				entryCount,
+				accumulator: accumulateCurrentSessionCostsFromEntries(
+					createCurrentSessionCostAccumulator(),
+					sessionManager.getEntries(),
+				),
+			};
+			this._currentSessionCostCache = cache;
+		} else if (entryCount > cache.entryCount) {
+			accumulateCurrentSessionCostsFromEntries(cache.accumulator, getEntriesSince(cache.entryCount));
+			cache.entryCount = entryCount;
+		}
+		return cache.accumulator;
 	}
 
 	/**
-	 * Aggregate all recorded spawned-usage reports (see {@link addSpawnedUsage}). Cached by the session
-	 * entry count so the interactive footer (which calls this every render frame) is O(1) between turns
-	 * instead of an O(N) scan on every keystroke (Bug #22). Recomputes only when entries change.
+	 * Aggregate all recorded spawned-usage reports (see {@link addSpawnedUsage}). The append-ordered
+	 * accumulator processes only new entries, so repeated turns do not rescan the full session.
 	 */
 	getSpawnedUsage(): SpawnedUsageTotals {
-		const sessionManager = this.deps.getSessionManager();
-		const entryCount = sessionManager.getEntryCount?.() ?? sessionManager.getEntries().length;
-		if (this._spawnedUsageCache?.entryCount === entryCount) return this._spawnedUsageCache.totals;
-		const current = aggregateCurrentSessionCostsFromEntries(sessionManager.getEntries());
-		const totals: SpawnedUsageTotals = { cost: current.subagentCost, reports: current.subagentReports };
-		this._spawnedUsageCache = { entryCount, totals };
-		return totals;
+		const current = this.getCurrentSessionCostTotals();
+		return { cost: current.subagentCost, reports: current.subagentReports };
 	}
 
 	getCostSummary(now = new Date()): SessionCostSummary {
@@ -428,7 +449,7 @@ export class SessionAnalytics {
 			return cached.summary;
 		}
 		const summary = createSessionCostSummary({
-			entries: sessionManager.getEntries(),
+			currentTotals: this.getCurrentSessionCostTotals(),
 			dailyTotals,
 			todayWindow: window,
 		});
@@ -475,6 +496,54 @@ export class SessionAnalytics {
 		return formatDailyUsageBreakdown(this.getDailyUsageTotals(now), formatLabel);
 	}
 
+	private getPostCompactionUsageState(): { hasCompaction: boolean; hasPostCompactionUsage: boolean } {
+		const sessionManager = this.deps.getSessionManager();
+		const indexedSessionManager = sessionManager as unknown as {
+			getLeafId?: () => string | null;
+			getEntry?: (id: string) => SessionEntry | undefined;
+		};
+		const getLeafId = indexedSessionManager.getLeafId?.bind(sessionManager);
+		const getEntry = indexedSessionManager.getEntry?.bind(sessionManager);
+		const leafId = getLeafId?.();
+		if (getLeafId && getEntry && leafId !== undefined) {
+			let currentId = leafId;
+			let hasPostCompactionUsage = false;
+			let checkedLatestAssistant = false;
+			while (currentId !== null) {
+				const entry = getEntry(currentId);
+				if (!entry) break;
+				if (!checkedLatestAssistant && entry.type === "message" && entry.message.role === "assistant") {
+					const assistant = entry.message;
+					if (assistant.stopReason !== "aborted" && assistant.stopReason !== "error") {
+						checkedLatestAssistant = true;
+						hasPostCompactionUsage = calculateContextTokens(assistant.usage) > 0;
+					}
+				}
+				if (entry.type === "compaction") return { hasCompaction: true, hasPostCompactionUsage };
+				currentId = entry.parentId;
+			}
+			return { hasCompaction: false, hasPostCompactionUsage: false };
+		}
+
+		const branchEntries = sessionManager.getBranch();
+		const latestCompaction = getLatestCompactionEntry(branchEntries);
+		if (!latestCompaction) return { hasCompaction: false, hasPostCompactionUsage: false };
+		const compactionIndex = branchEntries.lastIndexOf(latestCompaction);
+		for (let index = branchEntries.length - 1; index > compactionIndex; index--) {
+			const entry = branchEntries[index];
+			if (entry.type !== "message" || entry.message.role !== "assistant") continue;
+			const assistant = entry.message;
+			return {
+				hasCompaction: true,
+				hasPostCompactionUsage:
+					assistant.stopReason !== "aborted" &&
+					assistant.stopReason !== "error" &&
+					calculateContextTokens(assistant.usage) > 0,
+			};
+		}
+		return { hasCompaction: true, hasPostCompactionUsage: false };
+	}
+
 	getContextUsage(): ContextUsage | undefined {
 		const model = this.deps.getModel();
 		if (!model) return undefined;
@@ -483,32 +552,11 @@ export class SessionAnalytics {
 		if (contextWindow <= 0) return undefined;
 
 		// After compaction, the last assistant usage reflects pre-compaction context size.
-		// We can only trust usage from an assistant that responded after the latest compaction.
-		// If no such assistant exists, context token count is unknown until the next LLM response.
-		const branchEntries = this.deps.getSessionManager().getBranch();
-		const latestCompaction = getLatestCompactionEntry(branchEntries);
-
-		if (latestCompaction) {
-			// Check if there's a valid assistant usage after the compaction boundary
-			const compactionIndex = branchEntries.lastIndexOf(latestCompaction);
-			let hasPostCompactionUsage = false;
-			for (let i = branchEntries.length - 1; i > compactionIndex; i--) {
-				const entry = branchEntries[i];
-				if (entry.type === "message" && entry.message.role === "assistant") {
-					const assistant = entry.message;
-					if (assistant.stopReason !== "aborted" && assistant.stopReason !== "error") {
-						const contextTokens = calculateContextTokens(assistant.usage);
-						if (contextTokens > 0) {
-							hasPostCompactionUsage = true;
-						}
-						break;
-					}
-				}
-			}
-
-			if (!hasPostCompactionUsage) {
-				return { tokens: null, contextWindow, percent: null };
-			}
+		// Walk backward only to the nearest compaction instead of rebuilding the whole branch on
+		// every footer invalidation; the distance is bounded by the live post-compaction context.
+		const compactionState = this.getPostCompactionUsageState();
+		if (compactionState.hasCompaction && !compactionState.hasPostCompactionUsage) {
+			return { tokens: null, contextWindow, percent: null };
 		}
 
 		const estimate = estimateContextTokens(this.deps.getMessages());

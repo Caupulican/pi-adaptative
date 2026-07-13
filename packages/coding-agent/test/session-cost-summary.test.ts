@@ -62,6 +62,7 @@ function createAnalytics(
 			return entries;
 		},
 		getEntryCount: () => entries.length,
+		getEntriesSince: (startIndex: number) => entries.slice(startIndex),
 		getSessionDir: () => sessionDir,
 		usesDefaultSessionDir: () => false,
 		getSessionFile: () => join(sessionDir, "session.jsonl"),
@@ -184,7 +185,34 @@ describe("session cost summary", () => {
 
 			entries.push(assistant("two", now, 0.6));
 			expect(analytics.getCostSummary(now).currentCost).toBeCloseTo(1, 10);
-			expect(entriesRead).toBe(readsAfterFirstSummary + 1);
+			expect(entriesRead).toBe(readsAfterFirstSummary);
+		} finally {
+			rmSync(tempDir, { recursive: true, force: true });
+		}
+	});
+
+	it("bounds live tool-recovery telemetry retained by a long session", () => {
+		const tempDir = mkdtempSync(join(tmpdir(), "pi-session-tool-recovery-cap-"));
+		try {
+			const analytics = createAnalytics(tempDir, []);
+			for (let index = 0; index < 1_001; index++) {
+				analytics.recordToolArgumentValidation({
+					kind: "tool_argument_validation",
+					version: 1,
+					recordId: `session-1:${index}`,
+					ts: new Date().toISOString(),
+					sessionId: "session-1",
+					outcome: "repaired",
+					tool: "edit",
+					source: "text-protocol",
+					failureModes: ["jsonStringParse"],
+					repairsApplied: ["jsonStringParse"],
+					taught: "none",
+					executionOutcome: "succeeded",
+				});
+			}
+
+			expect(analytics.getToolArgumentValidationStats().repaired).toBe(1_000);
 		} finally {
 			rmSync(tempDir, { recursive: true, force: true });
 		}

@@ -208,7 +208,8 @@ export function prepareBranchEntries(entries: SessionEntry[], tokenBudget: numbe
 		}
 	}
 
-	// Second pass: walk from newest to oldest, adding messages until token budget
+	// Second pass: walk from newest to oldest, adding messages until token budget.
+	// Append in reverse chronology and reverse once so large branches stay linear.
 	for (let i = entries.length - 1; i >= 0; i--) {
 		const entry = entries[i];
 		const message = getMessageFromEntry(entry);
@@ -224,7 +225,7 @@ export function prepareBranchEntries(entries: SessionEntry[], tokenBudget: numbe
 			// If this is a summary entry, try to fit it anyway as it's important context
 			if (entry.type === "compaction" || entry.type === "branch_summary") {
 				if (totalTokens < tokenBudget * 0.9) {
-					messages.unshift(message);
+					messages.push(message);
 					totalTokens += tokens;
 				}
 			}
@@ -232,10 +233,11 @@ export function prepareBranchEntries(entries: SessionEntry[], tokenBudget: numbe
 			break;
 		}
 
-		messages.unshift(message);
+		messages.push(message);
 		totalTokens += tokens;
 	}
 
+	messages.reverse();
 	return { messages, fileOps, totalTokens };
 }
 

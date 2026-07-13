@@ -2,6 +2,7 @@
  * Test that BashExecutionComponent's collapsed output respects the render-time width,
  * not a stale captured width. Regression test for #2569.
  */
+import { DEFAULT_MAX_BYTES, DEFAULT_MAX_LINES } from "@caupulican/pi-agent-core/node";
 import { visibleWidth } from "@caupulican/pi-tui";
 import { beforeAll, describe, expect, it } from "vitest";
 import { BashExecutionComponent } from "../src/modes/interactive/components/bash-execution.ts";
@@ -54,6 +55,20 @@ describe("BashExecutionComponent width handling (#2569)", () => {
 			const w = visibleWidth(lines[i]);
 			expect(w, `Line ${i} visibleWidth=${w} > ${narrowWidth}`).toBeLessThanOrEqual(narrowWidth);
 		}
+	});
+
+	it("retains only a bounded output tail while a long command is streaming", () => {
+		const { stub } = createTuiStub(120);
+		const component = new BashExecutionComponent("long-running-command", stub);
+		const output = Array.from({ length: DEFAULT_MAX_LINES + 100 }, (_, index) => `line-${index}`).join("\n");
+
+		component.appendOutput(output);
+
+		const retained = component.getOutput();
+		expect(retained.split("\n").length).toBeLessThanOrEqual(DEFAULT_MAX_LINES);
+		expect(Buffer.byteLength(retained, "utf-8")).toBeLessThanOrEqual(DEFAULT_MAX_BYTES);
+		expect(retained).not.toContain("line-0\n");
+		expect(retained).toContain(`line-${DEFAULT_MAX_LINES + 99}`);
 	});
 
 	it("re-computes lines when width changes between renders", () => {

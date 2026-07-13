@@ -61,21 +61,20 @@ export function generateArtifactId(
 		"kind" | "content" | "toolName" | "command" | "path" | "sessionEntryId" | "createdAtTurn" | "reproducible"
 	>,
 ): string {
-	return createHash("sha256")
-		.update(
-			[
-				request.kind,
-				request.toolName ?? "",
-				request.command ?? "",
-				request.path ?? "",
-				request.sessionEntryId ?? "",
-				String(request.createdAtTurn),
-				String(request.reproducible),
-				request.content,
-			].join("\0"),
-		)
-		.digest("hex")
-		.slice(0, 24);
+	const hash = createHash("sha256");
+	for (const field of [
+		request.kind,
+		request.toolName ?? "",
+		request.command ?? "",
+		request.path ?? "",
+		request.sessionEntryId ?? "",
+		String(request.createdAtTurn),
+		String(request.reproducible),
+	]) {
+		hash.update(field).update("\0");
+	}
+	hash.update(request.content);
+	return hash.digest("hex").slice(0, 24);
 }
 
 export interface ArtifactStore {

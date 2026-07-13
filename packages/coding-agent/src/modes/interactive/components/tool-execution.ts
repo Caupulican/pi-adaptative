@@ -20,13 +20,22 @@ export interface ToolExecutionOptions {
 
 // Components only use built-in definitions for display (renderers, grouping), so one
 // toolset per cwd is shared instead of allocating a full toolset per scrollback component.
+const MAX_BUILT_IN_DEFINITION_CWDS = 32;
 const builtInDefinitionsByCwd = new Map<string, ReturnType<typeof createAllToolDefinitions>>();
 
 function getBuiltInToolDefinitions(cwd: string): ReturnType<typeof createAllToolDefinitions> {
 	let definitions = builtInDefinitionsByCwd.get(cwd);
-	if (!definitions) {
-		definitions = createAllToolDefinitions(cwd);
+	if (definitions) {
+		builtInDefinitionsByCwd.delete(cwd);
 		builtInDefinitionsByCwd.set(cwd, definitions);
+		return definitions;
+	}
+	definitions = createAllToolDefinitions(cwd);
+	builtInDefinitionsByCwd.set(cwd, definitions);
+	while (builtInDefinitionsByCwd.size > MAX_BUILT_IN_DEFINITION_CWDS) {
+		const oldest = builtInDefinitionsByCwd.keys().next().value;
+		if (oldest === undefined) break;
+		builtInDefinitionsByCwd.delete(oldest);
 	}
 	return definitions;
 }

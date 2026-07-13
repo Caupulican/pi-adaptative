@@ -1,9 +1,13 @@
-import { existsSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
+import { existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, statSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { pathToFileURL } from "node:url";
 import type { ToolArgumentValidationTelemetryEvent } from "@caupulican/pi-ai";
 import { afterEach, describe, expect, it } from "vitest";
+import {
+	createToolArgumentValidationLogRecord,
+	writeToolRecoveryLogRecord,
+} from "../src/core/tool-recovery-log-records.ts";
 import { ToolRecoveryLogger } from "../src/core/tool-recovery-logger.ts";
 
 const tempDirs: string[] = [];
@@ -127,7 +131,55 @@ describe("ToolRecoveryLogger", () => {
 		await logger.flush(10);
 
 		expect(logger.getStats().dropped).toBeGreaterThan(0);
+		expect((logger as unknown as { flushWaiters: unknown[] }).flushWaiters).toHaveLength(0);
 		await logger.shutdown(10);
+	});
+
+	it("bounds telemetry record arrays and strings before retaining or persisting them", () => {
+		const oversized = createEvent("bounced");
+		oversized.failureModes = Array.from({ length: 60 }, () => "jsonStringParse" as const);
+		oversized.repairsApplied = Array.from({ length: 60 }, () => "jsonStringParse" as const);
+		oversized.errorKeywords = Array.from({ length: 60 }, (_, index) => `${index}-${"z".repeat(300)}`);
+		oversized.failureShape = Array.from({ length: 60 }, (_, index) => ({
+			path: `${index}-${"p".repeat(300)}`,
+			expectedType: "e".repeat(300),
+			receivedType: "r".repeat(300),
+		}));
+
+		const record = createToolArgumentValidationLogRecord({
+			event: oversized,
+			recordId: "session-1:0",
+			sessionId: "session-1",
+			ts: "2026-07-08T00:00:00Z",
+		});
+
+		expect(record.failureModes).toHaveLength(50);
+		expect(record.repairsApplied).toHaveLength(50);
+		expect(record.errorKeywords).toHaveLength(50);
+		expect(record.failureShape).toHaveLength(50);
+		expect(record.errorKeywords?.every((value) => value.length <= 256)).toBe(true);
+		expect(record.failureShape?.every((value) => value.path.length <= 256)).toBe(true);
+	});
+
+	it("rotates an oversized event log instead of allowing process-lifetime growth", () => {
+		const dir = makeTempDir();
+		const eventLogPath = join(dir, "state", "tool-recovery-events.jsonl");
+		const failureCorpusPath = join(dir, "state", "failure-corpus.jsonl");
+		mkdirSync(join(dir, "state"), { recursive: true });
+		writeFileSync(eventLogPath, `${"x".repeat(5 * 1024 * 1024)}\n`, "utf-8");
+		const record = createToolArgumentValidationLogRecord({
+			event: createEvent("repaired"),
+			recordId: "session-1:0",
+			sessionId: "session-1",
+			ts: "2026-07-08T00:00:00Z",
+		});
+
+		writeToolRecoveryLogRecord({ eventLogPath, failureCorpusPath, record });
+
+		expect(statSync(eventLogPath).size).toBeLessThan(4 * 1024 * 1024);
+		expect(JSON.parse(readFileSync(eventLogPath, "utf-8").trim()) as unknown).toMatchObject({
+			recordId: "session-1:0",
+		});
 	});
 
 	it("contains worker write failures without throwing into the caller", async () => {

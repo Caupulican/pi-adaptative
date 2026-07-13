@@ -10,10 +10,10 @@ import {
 	type Part,
 	type ThinkingConfig,
 } from "@google/genai";
-import type { Context, ImageContent, Model, StopReason, TextContent, ThinkingBudgets, Tool } from "../types.ts";
+import type { Context, ImageContent, Model, StopReason, ThinkingBudgets, Tool } from "../types.ts";
 import { sanitizeSurrogates } from "../utils/sanitize-unicode.ts";
 import { createToolNameMap, type ToolNameMap } from "../utils/tool-names.ts";
-import { transformMessages } from "./transform-messages.ts";
+import { joinTextContent, transformMessages } from "./transform-messages.ts";
 
 type GoogleApiType = "google-generative-ai" | "google-vertex";
 
@@ -337,8 +337,7 @@ export function convertMessages<T extends GoogleApiType>(
 			});
 		} else if (msg.role === "toolResult") {
 			// Extract text and image content
-			const textContent = msg.content.filter((c): c is TextContent => c.type === "text");
-			const textResult = textContent.map((c) => c.text).join("\n");
+			const textResult = joinTextContent(msg.content);
 			const imageContent = model.input.includes("image")
 				? msg.content.filter((c): c is ImageContent => c.type === "image")
 				: [];

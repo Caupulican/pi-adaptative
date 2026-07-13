@@ -129,16 +129,21 @@ export class ToolRecoveryLogger {
 		this.pump();
 		return new Promise((resolve) => {
 			let settled = false;
+			let timeout: NodeJS.Timeout;
 			const finish = (): void => {
 				if (settled) return;
 				settled = true;
 				resolve();
 			};
-			const timeout = setTimeout(finish, timeoutMs);
 			const waiter = (): void => {
 				clearTimeout(timeout);
 				finish();
 			};
+			timeout = setTimeout(() => {
+				const index = this.flushWaiters.indexOf(waiter);
+				if (index !== -1) this.flushWaiters.splice(index, 1);
+				finish();
+			}, timeoutMs);
 			this.flushWaiters.push(waiter);
 			this.resolveFlushWaitersIfIdle();
 		});

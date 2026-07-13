@@ -1850,8 +1850,18 @@ describe("openai-codex streaming", () => {
 		expect(fetchMock).not.toHaveBeenCalled();
 	});
 
-	it("sends only response input deltas in websocket-cached mode", async () => {
+	it("sends only response input deltas without reserializing the retained prefix", async () => {
 		const token = mockToken();
+		const historicalPrefix = "historical-prefix-marker";
+		const nativeStringify = JSON.stringify;
+		let historicalPrefixSerializations = 0;
+		vi.spyOn(JSON, "stringify").mockImplementation(((
+			...args: Parameters<typeof JSON.stringify>
+		): ReturnType<typeof JSON.stringify> => {
+			const encoded = Reflect.apply(nativeStringify, JSON, args) as ReturnType<typeof JSON.stringify>;
+			if (encoded?.includes(historicalPrefix)) historicalPrefixSerializations++;
+			return encoded;
+		}) as typeof JSON.stringify);
 		const sentBodies: unknown[] = [];
 		const responses = [
 			{ responseId: "resp_1", messageId: "msg_1", text: "Hello" },
@@ -1956,7 +1966,7 @@ describe("openai-codex streaming", () => {
 		};
 		const firstContext: Context = {
 			systemPrompt: "You are a helpful assistant.",
-			messages: [{ role: "user", content: "Say hello", timestamp: 1 }],
+			messages: [{ role: "user", content: historicalPrefix, timestamp: 1 }],
 		};
 
 		const first = await streamOpenAICodexResponses(model, firstContext, {
@@ -1980,7 +1990,8 @@ describe("openai-codex streaming", () => {
 		const secondBody = sentBodies[1] as { input: unknown[]; previous_response_id?: string; store?: boolean };
 		expect(firstBody.store).toBe(false);
 		expect(firstBody.previous_response_id).toBeUndefined();
-		expect(firstBody.input).toEqual([{ role: "user", content: [{ type: "input_text", text: "Say hello" }] }]);
+		expect(firstBody.input).toEqual([{ role: "user", content: [{ type: "input_text", text: historicalPrefix }] }]);
+		expect(historicalPrefixSerializations).toBe(1);
 		expect(secondBody.store).toBe(false);
 		expect(secondBody.previous_response_id).toBe("resp_1");
 		expect(secondBody.input).toEqual([{ role: "user", content: [{ type: "input_text", text: "Now finish" }] }]);

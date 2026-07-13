@@ -39,7 +39,7 @@ import { isCloudflareProvider, resolveCloudflareBaseUrl } from "./cloudflare.ts"
 import { buildCopilotDynamicHeaders, hasCopilotVisionInput } from "./github-copilot-headers.ts";
 import { clampOpenAIPromptCacheKey } from "./openai-prompt-cache.ts";
 import { buildBaseOptions } from "./simple-options.ts";
-import { transformMessages } from "./transform-messages.ts";
+import { joinTextContent, transformMessages } from "./transform-messages.ts";
 
 /**
  * Check if conversation messages contain tool calls or tool results.
@@ -1006,10 +1006,7 @@ export function convertMessages(
 				const toolMsg = transformedMessages[j] as ToolResultMessage;
 
 				// Extract text and image content
-				const textResult = toolMsg.content
-					.filter(isTextContentBlock)
-					.map((block) => block.text)
-					.join("\n");
+				const textResult = joinTextContent(toolMsg.content);
 				const hasImages = toolMsg.content.some((c) => c.type === "image");
 
 				// Always send tool result with text (or placeholder if only images)

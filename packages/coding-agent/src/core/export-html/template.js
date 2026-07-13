@@ -134,13 +134,14 @@
         const path = [];
         let current = byId.get(targetId);
         while (current) {
-          path.unshift(current);
+          path.push(current);
           // Stop if no parent or self-referencing (root)
           if (!current.parentId || current.parentId === current.id) {
             break;
           }
           current = byId.get(current.parentId);
         }
+        path.reverse();
         return path;
       }
 

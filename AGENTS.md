@@ -168,6 +168,16 @@ If the user's instructions conflict with any rule in this document, ask for expl
 
 ## Findings
 
+### 2026-07-13 · packages/agent,ai,coding-agent · accumulated-prefix operations caused quadratic long-context exchange — codex
+Session branch reconstruction inserted every ancestor at the front of an array; fragmented SSE/JSONL readers repeatedly concatenated and rescanned the complete pending line; cached Codex WebSocket turns serialized the full retained context before sending only a delta and serialized that prefix again to compare it. The shared fixes now append then reverse once, retain fragmented line parts and join once at the delimiter, lazily serialize only the transport actually used, and compare cached request structures without JSON string copies. Local source benchmarks measured a 40k-entry branch dropping from 172.05ms to 18.60ms, and a 10.24MB line split into 10k fragments dropping from 97,694.71ms to 52.93ms.
+- evidence: packages/agent/src/session/session-manager.ts:371 · packages/ai/src/utils/streaming-lines.ts:5 · packages/ai/src/providers/openai-codex-responses.ts:320 · packages/ai/src/providers/openai-codex-responses.ts:1420 · packages/ai/test/openai-codex-stream.test.ts:1857
+- tags: long-session, context, streaming, serialization, quadratic, packages/agent, packages/ai, packages/coding-agent, root-cause
+
+### 2026-07-13 · packages/agent,coding-agent · persisted session history kept compacted payloads live after provider context was replaced — codex
+Compaction rebuilt the provider-visible message array but the append-only SessionManager still strongly retained every old large message body, and provider continuation caches retained the invalid pre-compaction request until another turn. Persisted compacted-away `content`/`output` payloads of at least 16KiB now become exact disk-backed getters while metadata stays hot; branch rewrites preserve full content, in-memory sessions remain self-contained, and coding-agent invalidates provider session resources immediately after applying compaction. A forced-GC source benchmark over 400 unique 64KiB tool results released 24.40MiB of heap in 68.54ms.
+- evidence: packages/agent/src/session/session-manager.ts:1125 · packages/agent/src/session/session-manager.ts:1181 · packages/agent/test/session/compacted-payload-release.test.ts:46 · packages/coding-agent/src/core/agent-session.ts:2097
+- tags: compaction, memory, session-history, disk-backed, provider-cache, packages/agent, packages/coding-agent, root-cause
+
 ### 2026-07-13 · packages/coding-agent · background delegation must notify by lane record, never by late transcript injection
 A delegated worker can outlive the foreground turn that started it. The safe composition is to return its lane id immediately, keep queued/running/terminal state session-owned, emit a bounded completion event carrying the terminal lane id and status, and require explicit `delegate_status` retrieval for untrusted output. Injecting a late worker message into an active transcript would race the foreground model and make context ordering nondeterministic.
 - evidence: packages/coding-agent/src/core/background-lane-controller.ts:190 · packages/coding-agent/src/core/background-lane-controller.ts:680 · packages/coding-agent/src/core/agent-session.ts:332 · packages/coding-agent/test/agent-session-worker-delegation.test.ts:287

@@ -5,8 +5,15 @@
  * into a single entry. Supports yank (paste most recent) and yank-pop
  * (cycle through older entries).
  */
+const DEFAULT_MAX_KILL_RING_ENTRIES = 60;
+
 export class KillRing {
 	private ring: string[] = [];
+	private readonly maxEntries: number;
+
+	constructor(maxEntries: number = DEFAULT_MAX_KILL_RING_ENTRIES) {
+		this.maxEntries = Math.max(1, Math.floor(maxEntries));
+	}
 
 	/**
 	 * Add text to the kill ring.
@@ -24,6 +31,9 @@ export class KillRing {
 			this.ring.push(opts.prepend ? text + last : last + text);
 		} else {
 			this.ring.push(text);
+			if (this.ring.length > this.maxEntries) {
+				this.ring.splice(0, this.ring.length - this.maxEntries);
+			}
 		}
 	}
 

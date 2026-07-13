@@ -26,6 +26,7 @@ import {
 } from "../messages.ts";
 import type { AgentMessage } from "../types.ts";
 import { normalizePath, resolvePath } from "../utils/paths.ts";
+import { StreamingLineDecoder } from "../utils/streaming-lines.ts";
 import { uuidv7 } from "../uuid.ts";
 import { compactToolResultDetailsForRetention } from "./message-retention.ts";
 
@@ -360,13 +361,14 @@ export function buildSessionContext(
 		return { messages: [], thinkingLevel: "off", model: null };
 	}
 
-	// Walk from leaf to root, collecting path
+	// Walk from leaf to root, then reverse once. Repeated front insertion makes long branches quadratic.
 	const path: SessionEntry[] = [];
 	let current: SessionEntry | undefined = leaf;
 	while (current) {
-		path.unshift(current);
+		path.push(current);
 		current = current.parentId ? byId.get(current.parentId) : undefined;
 	}
+	path.reverse();
 
 	// Extract settings and find compaction
 	let thinkingLevel = "off";
@@ -500,45 +502,26 @@ export function loadEntriesFromFile(filePath: string, options?: { maxLineChars?:
 	const fd = openSync(resolvedFilePath, "r");
 	try {
 		const decoder = new StringDecoder("utf8");
+		const lines = new StreamingLineDecoder(maxLineChars, { overflow: "skip", lineEndings: "lf" });
 		const buffer = Buffer.allocUnsafe(SESSION_READ_BUFFER_SIZE);
-		let pending = "";
-		let skippingOversizedLine = false;
 
 		while (true) {
 			const bytesRead = readSync(fd, buffer, 0, buffer.length, null);
 			if (bytesRead === 0) break;
-
-			pending += decoder.write(buffer.subarray(0, bytesRead));
-			if (skippingOversizedLine) {
-				const resumeIndex = pending.indexOf("\n");
-				if (resumeIndex === -1) {
-					pending = "";
-					continue;
-				}
-				pending = pending.slice(resumeIndex + 1);
-				skippingOversizedLine = false;
-			}
-			let lineStart = 0;
-			let newlineIndex = pending.indexOf("\n", lineStart);
-			while (newlineIndex !== -1) {
-				if (newlineIndex - lineStart <= maxLineChars) {
-					const entry = parseSessionEntryLine(pending.slice(lineStart, newlineIndex));
-					if (entry) entries.push(entry);
-				}
-				lineStart = newlineIndex + 1;
-				newlineIndex = pending.indexOf("\n", lineStart);
-			}
-			pending = pending.slice(lineStart);
-			if (pending.length > maxLineChars) {
-				skippingOversizedLine = true;
-				pending = "";
+			for (const line of lines.push(decoder.write(buffer.subarray(0, bytesRead)))) {
+				const entry = parseSessionEntryLine(line);
+				if (entry) entries.push(entry);
 			}
 		}
 
-		pending += decoder.end();
-		if (!skippingOversizedLine && pending.length <= maxLineChars) {
-			const finalEntry = parseSessionEntryLine(pending);
-			if (finalEntry) entries.push(finalEntry);
+		for (const line of lines.push(decoder.end())) {
+			const entry = parseSessionEntryLine(line);
+			if (entry) entries.push(entry);
+		}
+		const finalLine = lines.finish();
+		if (finalLine !== undefined) {
+			const entry = parseSessionEntryLine(finalLine);
+			if (entry) entries.push(entry);
 		}
 	} finally {
 		closeSync(fd);
@@ -552,6 +535,95 @@ export function loadEntriesFromFile(filePath: string, options?: { maxLineChars?:
 	}
 
 	return entries;
+}
+
+interface SessionEntryFileLocation {
+	offset: number;
+	length: number;
+}
+
+const ENTRY_ID_PREFIX_BYTES = 64 * 1024;
+const COMPACTED_PAYLOAD_RELEASE_MIN_CHARS = 16 * 1024;
+
+function indexSessionEntryFileLocations(
+	filePath: string,
+	startOffset: number,
+	locations: Map<string, SessionEntryFileLocation>,
+	retainedIds: ReadonlySet<string>,
+): number {
+	const fd = openSync(filePath, "r");
+	const buffer = Buffer.allocUnsafe(SESSION_READ_BUFFER_SIZE);
+	let position = startOffset;
+	let lineOffset = startOffset;
+	let lineLength = 0;
+	let prefixLength = 0;
+	let prefixParts: Buffer[] = [];
+
+	const finishLine = (): void => {
+		if (prefixLength > 0) {
+			const prefix =
+				prefixParts.length === 1
+					? prefixParts[0].toString("utf8")
+					: Buffer.concat(prefixParts, prefixLength).toString("utf8");
+			const id = /"id"\s*:\s*"([A-Za-z0-9_-]+)"/.exec(prefix)?.[1];
+			if (id && retainedIds.has(id)) locations.set(id, { offset: lineOffset, length: lineLength });
+		}
+		lineLength = 0;
+		prefixLength = 0;
+		prefixParts = [];
+	};
+
+	try {
+		while (true) {
+			const bytesRead = readSync(fd, buffer, 0, buffer.length, position);
+			if (bytesRead === 0) break;
+			const chunkOffset = position;
+			position += bytesRead;
+			let segmentStart = 0;
+			while (segmentStart < bytesRead) {
+				const newlineIndex = buffer.indexOf(0x0a, segmentStart);
+				const segmentEnd = newlineIndex === -1 || newlineIndex >= bytesRead ? bytesRead : newlineIndex;
+				const segmentLength = segmentEnd - segmentStart;
+				lineLength += segmentLength;
+				const prefixRemaining = ENTRY_ID_PREFIX_BYTES - prefixLength;
+				if (prefixRemaining > 0 && segmentLength > 0) {
+					const retainedLength = Math.min(prefixRemaining, segmentLength);
+					prefixParts.push(Buffer.from(buffer.subarray(segmentStart, segmentStart + retainedLength)));
+					prefixLength += retainedLength;
+				}
+				if (newlineIndex === -1 || newlineIndex >= bytesRead) break;
+				finishLine();
+				lineOffset = chunkOffset + newlineIndex + 1;
+				segmentStart = newlineIndex + 1;
+			}
+		}
+		if (lineLength > 0) finishLine();
+		return position;
+	} finally {
+		closeSync(fd);
+	}
+}
+
+function retainedStringChars(value: unknown, stopAfter: number): number {
+	const pending: unknown[] = [value];
+	const seen = new WeakSet<object>();
+	let chars = 0;
+	while (pending.length > 0) {
+		const item = pending.pop();
+		if (typeof item === "string") {
+			chars += item.length;
+			if (chars >= stopAfter) return chars;
+			continue;
+		}
+		if (!item || typeof item !== "object" || seen.has(item)) continue;
+		seen.add(item);
+		if (Array.isArray(item)) {
+			pending.push(...item);
+		} else {
+			pending.push(...Object.values(item));
+		}
+	}
+	return chars;
 }
 
 function readSessionHeader(filePath: string): SessionHeader | null {
@@ -859,10 +931,14 @@ export class SessionManager {
 	private persist: boolean;
 	private flushed: boolean = false;
 	private fileEntries: FileEntry[] = [];
+	private entries: SessionEntry[] = [];
 	private byId: Map<string, SessionEntry> = new Map();
 	private labelsById: Map<string, string> = new Map();
 	private labelTimestampsById: Map<string, string> = new Map();
 	private leafId: string | null = null;
+	private readonly entryFileLocations = new Map<string, SessionEntryFileLocation>();
+	private readonly coldPayloadEntryIds = new Set<string>();
+	private indexedSessionFileBytes = 0;
 
 	private constructor(
 		cwd: string,
@@ -889,6 +965,7 @@ export class SessionManager {
 
 	/** Switch to a different session file (used for resume and branching) */
 	setSessionFile(sessionFile: string): void {
+		this._resetEntryFileIndex(true);
 		this.sessionFile = resolvePath(sessionFile);
 		if (existsSync(this.sessionFile)) {
 			this.fileEntries = loadEntriesFromFile(this.sessionFile);
@@ -941,10 +1018,13 @@ export class SessionManager {
 			parentSession: options?.parentSession,
 		};
 		this.fileEntries = [header];
+		this.entries = [];
 		this.byId.clear();
 		this.labelsById.clear();
+		this.labelTimestampsById.clear();
 		this.leafId = null;
 		this.flushed = false;
+		this._resetEntryFileIndex(true);
 
 		if (this.persist) {
 			const fileTimestamp = timestamp.replace(/[:.]/g, "-");
@@ -953,13 +1033,21 @@ export class SessionManager {
 		return this.sessionFile;
 	}
 
+	private _resetEntryFileIndex(clearColdPayloads = false): void {
+		this.entryFileLocations.clear();
+		this.indexedSessionFileBytes = 0;
+		if (clearColdPayloads) this.coldPayloadEntryIds.clear();
+	}
+
 	private _buildIndex(): void {
+		this.entries = [];
 		this.byId.clear();
 		this.labelsById.clear();
 		this.labelTimestampsById.clear();
 		this.leafId = null;
 		for (const entry of this.fileEntries) {
 			if (entry.type === "session") continue;
+			this.entries.push(entry);
 			this.byId.set(entry.id, entry);
 			this.leafId = entry.id;
 			if (entry.type === "label") {
@@ -972,14 +1060,17 @@ export class SessionManager {
 				}
 			}
 		}
+		for (const id of this.coldPayloadEntryIds) {
+			if (!this.byId.has(id)) this.coldPayloadEntryIds.delete(id);
+		}
 	}
 
-	private _rewriteFile(): void {
-		if (!this.persist || !this.sessionFile) return;
+	private _rewriteFile(targetFile = this.sessionFile): void {
+		if (!this.persist || !targetFile) return;
 		// Write-then-rename keeps the session file valid at every instant: truncating
 		// in place leaves a torn-file window for crashes or a concurrent process
 		// appending to the same session.
-		const tempFile = `${this.sessionFile}.${process.pid}.${randomUUID().slice(0, 8)}.tmp`;
+		const tempFile = `${targetFile}.${process.pid}.${randomUUID().slice(0, 8)}.tmp`;
 		const fd = openSync(tempFile, "wx");
 		try {
 			for (const entry of this.fileEntries) {
@@ -988,7 +1079,8 @@ export class SessionManager {
 		} finally {
 			closeSync(fd);
 		}
-		renameSync(tempFile, this.sessionFile);
+		renameSync(tempFile, targetFile);
+		if (targetFile === this.sessionFile) this._resetEntryFileIndex();
 	}
 
 	isPersisted(): boolean {
@@ -1013,6 +1105,119 @@ export class SessionManager {
 
 	getSessionFile(): string | undefined {
 		return this.sessionFile;
+	}
+
+	private _ensureEntryFileLocations(retainedIds: ReadonlySet<string>): void {
+		if (!this.sessionFile || !existsSync(this.sessionFile)) return;
+		const fileBytes = statSync(this.sessionFile).size;
+		if (fileBytes < this.indexedSessionFileBytes) this._resetEntryFileIndex();
+		if (fileBytes === this.indexedSessionFileBytes) return;
+		const idsToIndex = new Set(this.coldPayloadEntryIds);
+		for (const id of retainedIds) idsToIndex.add(id);
+		this.indexedSessionFileBytes = indexSessionEntryFileLocations(
+			this.sessionFile,
+			this.indexedSessionFileBytes,
+			this.entryFileLocations,
+			idsToIndex,
+		);
+	}
+
+	private _readCompactedMessageProperty(entryId: string, property: "content" | "output"): unknown {
+		if (!this.sessionFile) throw new Error(`Compacted session payload ${entryId} is unavailable`);
+		let location = this.entryFileLocations.get(entryId);
+		if (!location) {
+			this._resetEntryFileIndex();
+			this._ensureEntryFileLocations(new Set([entryId]));
+			location = this.entryFileLocations.get(entryId);
+		}
+		if (!location) throw new Error(`Compacted session payload ${entryId} is unavailable`);
+		const fd = openSync(this.sessionFile, "r");
+		const buffer = Buffer.allocUnsafe(location.length);
+		let bytesRead = 0;
+		try {
+			while (bytesRead < buffer.length) {
+				const count = readSync(fd, buffer, bytesRead, buffer.length - bytesRead, location.offset + bytesRead);
+				if (count === 0) break;
+				bytesRead += count;
+			}
+		} finally {
+			closeSync(fd);
+		}
+		const entry = parseSessionEntryLine(buffer.subarray(0, bytesRead).toString("utf8"));
+		if (!entry || entry.type !== "message" || entry.id !== entryId) {
+			throw new Error(`Compacted session payload ${entryId} could not be restored`);
+		}
+		return (entry.message as unknown as Record<string, unknown>)[property];
+	}
+
+	private _releaseMessageProperty(entry: SessionMessageEntry, property: "content" | "output"): void {
+		const message = entry.message as unknown as Record<string, unknown>;
+		const descriptor = Object.getOwnPropertyDescriptor(message, property);
+		if (!descriptor || descriptor.get || !("value" in descriptor)) return;
+		if (
+			retainedStringChars(descriptor.value, COMPACTED_PAYLOAD_RELEASE_MIN_CHARS) <
+			COMPACTED_PAYLOAD_RELEASE_MIN_CHARS
+		) {
+			return;
+		}
+		const entryId = entry.id;
+		const enumerable = descriptor.enumerable;
+		this.coldPayloadEntryIds.add(entryId);
+		Object.defineProperty(message, property, {
+			configurable: true,
+			enumerable,
+			get: () => this._readCompactedMessageProperty(entryId, property),
+			set: (value: unknown) => {
+				Object.defineProperty(message, property, {
+					configurable: true,
+					enumerable,
+					writable: true,
+					value,
+				});
+			},
+		});
+	}
+
+	private _releaseCompactedMessagePayloads(firstKeptEntryId: string, compactionParentId: string | null): void {
+		if (!this.persist || !this.flushed || !this.sessionFile) return;
+		const keptEntryIds = new Set<string>();
+		let currentId = compactionParentId;
+		let foundFirstKept = false;
+		while (currentId) {
+			keptEntryIds.add(currentId);
+			if (currentId === firstKeptEntryId) {
+				foundFirstKept = true;
+				break;
+			}
+			currentId = this.byId.get(currentId)?.parentId ?? null;
+		}
+		if (!foundFirstKept) return;
+		const retainedIds = new Set<string>();
+		const releases: Array<{ entry: SessionMessageEntry; properties: Array<"content" | "output"> }> = [];
+		for (const entry of this.entries) {
+			if (entry.type !== "message") continue;
+			const message = entry.message as unknown as Record<string, unknown>;
+			const properties: Array<"content" | "output"> = [];
+			for (const property of ["content", "output"] as const) {
+				const descriptor = Object.getOwnPropertyDescriptor(message, property);
+				if (
+					descriptor &&
+					!descriptor.get &&
+					"value" in descriptor &&
+					retainedStringChars(descriptor.value, COMPACTED_PAYLOAD_RELEASE_MIN_CHARS) >=
+						COMPACTED_PAYLOAD_RELEASE_MIN_CHARS
+				) {
+					retainedIds.add(entry.id);
+					if (!keptEntryIds.has(entry.id)) properties.push(property);
+				}
+			}
+			if (properties.length > 0) releases.push({ entry, properties });
+		}
+		this._ensureEntryFileLocations(retainedIds);
+		for (const release of releases) {
+			if (!this.entryFileLocations.has(release.entry.id)) continue;
+			for (const property of release.properties) this._releaseMessageProperty(release.entry, property);
+		}
 	}
 
 	_persist(entry: SessionEntry): void {
@@ -1046,6 +1251,7 @@ export class SessionManager {
 
 	private _appendEntry(entry: SessionEntry): void {
 		this.fileEntries.push(entry);
+		this.entries.push(entry);
 		this.byId.set(entry.id, entry);
 		this.leafId = entry.id;
 		this._persist(entry);
@@ -1104,10 +1310,11 @@ export class SessionManager {
 		details?: T,
 		fromHook?: boolean,
 	): string {
+		const compactionParentId = this.leafId;
 		const entry: CompactionEntry<T> = {
 			type: "compaction",
 			id: generateId(this.byId),
-			parentId: this.leafId,
+			parentId: compactionParentId,
 			timestamp: new Date().toISOString(),
 			summary,
 			firstKeptEntryId,
@@ -1116,6 +1323,7 @@ export class SessionManager {
 			fromHook,
 		};
 		this._appendEntry(entry);
+		this._releaseCompactedMessagePayloads(firstKeptEntryId, compactionParentId);
 		return entry.id;
 	}
 
@@ -1291,12 +1499,18 @@ export class SessionManager {
 	 * change the leaf pointer. Entries cannot be modified or deleted.
 	 */
 	getEntries(): SessionEntry[] {
-		return this.fileEntries.filter((e): e is SessionEntry => e.type !== "session");
+		return this.entries.slice();
+	}
+
+	/** Entries appended at or after `startIndex`, returned as a defensive shallow slice. */
+	getEntriesSince(startIndex: number): SessionEntry[] {
+		const normalizedStart = Number.isFinite(startIndex) ? Math.max(0, Math.floor(startIndex)) : 0;
+		return this.entries.slice(normalizedStart);
 	}
 
 	/** Return current session entry count without allocating a defensive entries array. */
 	getEntryCount(): number {
-		return this.byId.size;
+		return this.entries.length;
 	}
 
 	/**
@@ -1487,7 +1701,6 @@ export class SessionManager {
 
 			this.fileEntries = [header, ...pathWithoutLabels, ...labelEntries];
 			this.sessionId = newSessionId;
-			this.sessionFile = newSessionFile;
 			this._buildIndex();
 
 			// Only write the file now if it contains an assistant message.
@@ -1497,11 +1710,14 @@ export class SessionManager {
 			// no-assistant guard later resets flushed to false.
 			const hasAssistant = this.fileEntries.some((e) => e.type === "message" && e.message.role === "assistant");
 			if (hasAssistant) {
-				this._rewriteFile();
+				// Keep the source file active while cold compacted getters are serialized into the branch.
+				this._rewriteFile(newSessionFile);
 				this.flushed = true;
 			} else {
 				this.flushed = false;
 			}
+			this.sessionFile = newSessionFile;
+			this._resetEntryFileIndex();
 
 			return newSessionFile;
 		}

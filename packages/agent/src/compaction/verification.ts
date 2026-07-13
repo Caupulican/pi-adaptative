@@ -209,7 +209,7 @@ export function deterministicallyFillSummaryGaps(summary: string, facts: Compact
 	if (facts.activeTaskSource) {
 		const activeTask = sectionByName.get(SECTION_ACTIVE_TASK)!;
 		if (
-			containment(tokenSet(facts.activeTaskSource), tokenSet(activeTask.lines.join("\n"))) <
+			containment(tokenSet(facts.activeTaskSource), tokenSetFromLines(activeTask.lines)) <
 			ACTIVE_TASK_CONTAINMENT_THRESHOLD
 		) {
 			appendContentLine(activeTask.lines, `User: ${facts.activeTaskSource}`);
@@ -218,21 +218,21 @@ export function deterministicallyFillSummaryGaps(summary: string, facts: Compact
 
 	const mandatoryRules = sectionByName.get(SECTION_MANDATORY_RULES)!;
 	for (const rule of facts.prohibitions) {
-		if (containment(tokenSet(rule), tokenSet(mandatoryRules.lines.join("\n"))) < MANDATORY_RULES_RECALL_THRESHOLD) {
+		if (containment(tokenSet(rule), tokenSetFromLines(mandatoryRules.lines)) < MANDATORY_RULES_RECALL_THRESHOLD) {
 			appendContentLine(mandatoryRules.lines, `- ${rule}`);
 		}
 	}
 
 	const workingSet = sectionByName.get(SECTION_WORKING_SET)!;
 	for (const file of facts.workingSet) {
-		if (!workingSet.lines.join("\n").includes(file.path)) {
+		if (!sectionLinesContain(workingSet.lines, file.path)) {
 			appendContentLine(workingSet.lines, `- ${file.path} — ${file.note || file.kind}`);
 		}
 	}
 
 	const files = sectionByName.get(SECTION_FILES)!;
 	for (const file of facts.files) {
-		if (!files.lines.join("\n").includes(file.path)) {
+		if (!sectionLinesContain(files.lines, file.path)) {
 			appendContentLine(files.lines, `- ${file.path}`);
 		}
 	}
@@ -240,20 +240,19 @@ export function deterministicallyFillSummaryGaps(summary: string, facts: Compact
 	const openProblems = sectionByName.get(SECTION_OPEN_PROBLEMS)!;
 	for (const error of facts.errorFacts) {
 		const required = `${error.operation}: ${error.error}`;
-		if (containment(tokenSet(required), tokenSet(openProblems.lines.join("\n"))) < OPEN_ERRORS_RECALL_THRESHOLD) {
+		if (containment(tokenSet(required), tokenSetFromLines(openProblems.lines)) < OPEN_ERRORS_RECALL_THRESHOLD) {
 			appendContentLine(openProblems.lines, `- ${required}`);
 		}
 	}
 
 	const done = sectionByName.get(SECTION_DONE)!;
-	const doneText = done.lines.join("\n");
 	if (
 		facts.actions.length > 0 &&
-		containment(tokenSet(facts.actions.join("\n")), tokenSet(doneText)) < ACTIONS_RECALL_THRESHOLD
+		containment(tokenSet(facts.actions.join("\n")), tokenSetFromLines(done.lines)) < ACTIONS_RECALL_THRESHOLD
 	) {
 		let nextNumber = findNextDoneNumber(done.lines);
 		for (const action of facts.actions) {
-			if (done.lines.join("\n").includes(action)) {
+			if (sectionLinesContain(done.lines, action)) {
 				continue;
 			}
 			appendContentLine(done.lines, `${nextNumber}. ${action}`);
@@ -320,10 +319,24 @@ function renderSummarySections(
 }
 
 function normalizeSectionLines(lines: string[]): string[] {
-	const trimmed = lines.map((line) => line.trimEnd());
-	while (trimmed.length > 0 && trimmed[0].trim() === "") trimmed.shift();
-	while (trimmed.length > 0 && trimmed[trimmed.length - 1].trim() === "") trimmed.pop();
-	return trimmed.length > 0 ? trimmed : ["(none)"];
+	let start = 0;
+	let end = lines.length;
+	while (start < end && lines[start].trim() === "") start++;
+	while (end > start && lines[end - 1].trim() === "") end--;
+	if (start === end) return ["(none)"];
+	return lines.slice(start, end).map((line) => line.trimEnd());
+}
+
+function sectionLinesContain(lines: readonly string[], value: string): boolean {
+	return lines.some((line) => line.includes(value));
+}
+
+function tokenSetFromLines(lines: readonly string[]): Set<string> {
+	const tokens = new Set<string>();
+	for (const line of lines) {
+		for (const token of tokenSet(line)) tokens.add(token);
+	}
+	return tokens;
 }
 
 function appendContentLine(lines: string[], line: string): void {

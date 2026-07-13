@@ -108,7 +108,7 @@ function messageToText(message: AgentMessage): string {
 			parts.push((block as { text: string }).text);
 		}
 	}
-	return parts.join(" ").trim();
+	return (parts.length === 1 ? parts[0] : parts.join(" ")).trim();
 }
 
 function assistantToolCallTarget(name: string, rawArgs: unknown): string | undefined {
@@ -143,7 +143,15 @@ function isPlainRecord(value: unknown): value is Record<string, unknown> {
 }
 
 function normalizeDelegatedWorkerText(text: string, maxLen: number): string {
-	return clampText(text.replace(/\s+/g, " ").trim(), maxLen);
+	let normalized = "";
+	for (const match of text.matchAll(/\S+/g)) {
+		const separator = normalized.length > 0 ? " " : "";
+		const remaining = maxLen - normalized.length - separator.length;
+		if (remaining <= 0) break;
+		normalized += `${separator}${match[0].slice(0, remaining)}`;
+		if (match[0].length >= remaining) break;
+	}
+	return normalized;
 }
 
 function extractDelegatedWorkerFact(entry: SessionEntry): CompactionDelegatedWorkerFact | undefined {

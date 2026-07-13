@@ -42,6 +42,7 @@ import {
 import { formatProviderError, normalizeProviderError } from "../utils/error-body.ts";
 import { AssistantMessageEventStream } from "../utils/event-stream.ts";
 import { headersToRecord } from "../utils/headers.ts";
+import { StreamingLineDecoder } from "../utils/streaming-lines.ts";
 import { clampOpenAIPromptCacheKey } from "./openai-prompt-cache.ts";
 import {
 	buildResponsesInstructions,
@@ -315,7 +316,11 @@ export const streamOpenAICodexResponses: StreamFunction<"openai-codex-responses"
 				apiKey,
 				websocketRequestId,
 			);
-			const bodyJson = JSON.stringify(body);
+			let bodyJson: string | undefined;
+			const serializeBody = (): string => {
+				bodyJson ??= JSON.stringify(body);
+				return bodyJson;
+			};
 			const idleTimeoutMs = normalizeTimeoutMs(options?.timeoutMs);
 			const websocketConnectTimeoutMs = normalizeTimeoutMs(options?.websocketConnectTimeoutMs);
 			const transport = options?.transport || "auto";
@@ -382,7 +387,7 @@ export const streamOpenAICodexResponses: StreamFunction<"openai-codex-responses"
 							fallbackTransport: websocketStarted ? undefined : "sse",
 							eventsEmitted: websocketStarted,
 							phase: websocketStarted ? "after_message_stream_start" : "before_message_stream_start",
-							requestBytes: new TextEncoder().encode(bodyJson).byteLength,
+							requestBytes: new TextEncoder().encode(serializeBody()).byteLength,
 						}),
 					);
 					recordWebSocketFailure(options?.sessionId, error);
@@ -409,7 +414,7 @@ export const streamOpenAICodexResponses: StreamFunction<"openai-codex-responses"
 					response = await fetch(resolveCodexUrl(model.baseUrl), {
 						method: "POST",
 						headers: sseHeaders,
-						body: bodyJson,
+						body: serializeBody(),
 						signal: options?.signal,
 					});
 					await options?.onResponse?.(
@@ -771,7 +776,9 @@ async function* parseSSE(response: Response, signal?: AbortSignal): AsyncGenerat
 
 	const reader = response.body.getReader();
 	const decoder = new TextDecoder();
-	let buffer = "";
+	const lines = new StreamingLineDecoder(MAX_SSE_LINE_CHARS);
+	let frameLines: string[] = [];
+	let frameChars = 0;
 	const onAbort = () => {
 		void reader.cancel().catch(() => {});
 	};
@@ -786,27 +793,27 @@ async function* parseSSE(response: Response, signal?: AbortSignal): AsyncGenerat
 			if (signal?.aborted) {
 				throw new Error("Request was aborted");
 			}
-			if (done) {
-				buffer += decoder.decode();
-				if (buffer.trim().length > 0) {
-					const finalEvent = parseSSEFrame(buffer);
-					if (finalEvent !== undefined) yield finalEvent;
+			const decoded = done ? decoder.decode() : decoder.decode(value, { stream: true });
+			for (const line of lines.push(decoded)) {
+				if (line.length === 0) {
+					const event = parseSSELines(frameLines);
+					frameLines = [];
+					frameChars = 0;
+					if (event !== undefined) yield event;
+					continue;
 				}
+				frameChars += line.length;
+				if (frameChars > MAX_SSE_LINE_CHARS) {
+					throw new Error(`Codex SSE stream exceeded the ${MAX_SSE_LINE_CHARS} character buffer limit`);
+				}
+				frameLines.push(line);
+			}
+			if (done) {
+				const finalLine = lines.finish();
+				if (finalLine !== undefined) frameLines.push(finalLine);
+				const finalEvent = parseSSELines(frameLines);
+				if (finalEvent !== undefined) yield finalEvent;
 				break;
-			}
-			buffer += decoder.decode(value, { stream: true });
-
-			let separator = findSSESeparator(buffer);
-			while (separator) {
-				const [idx, length] = separator;
-				const event = parseSSEFrame(buffer.slice(0, idx));
-				buffer = buffer.slice(idx + length);
-				if (event !== undefined) yield event;
-				separator = findSSESeparator(buffer);
-			}
-			if (buffer.length > MAX_SSE_LINE_CHARS) {
-				// A delimiter-less stream would otherwise grow this buffer without bound.
-				throw new Error(`Codex SSE stream exceeded the ${MAX_SSE_LINE_CHARS} character buffer limit`);
 			}
 		}
 	} finally {
@@ -820,18 +827,10 @@ async function* parseSSE(response: Response, signal?: AbortSignal): AsyncGenerat
 	}
 }
 
-function findSSESeparator(buffer: string): [number, number] | undefined {
-	const match = /(?:\r\n\r\n|\n\n|\r\r)/.exec(buffer);
-	return match?.index === undefined ? undefined : [match.index, match[0].length];
-}
-
-function parseSSEFrame(chunk: string): Record<string, unknown> | undefined {
-	const dataLines = chunk
-		.split(/\r?\n|\r/)
-		.filter((line) => line.startsWith("data:"))
-		.map((line) => line.slice(5).trim());
+function parseSSELines(lines: readonly string[]): Record<string, unknown> | undefined {
+	const dataLines = lines.filter((line) => line.startsWith("data:")).map((line) => line.slice(5).trim());
 	if (dataLines.length === 0) return undefined;
-	const data = dataLines.join("\n").trim();
+	const data = (dataLines.length === 1 ? dataLines[0] : dataLines.join("\n")).trim();
 	if (!data || data === "[DONE]") return undefined;
 	try {
 		return JSON.parse(data) as Record<string, unknown>;
@@ -861,9 +860,9 @@ interface WebSocketLike {
 }
 
 interface CachedWebSocketContinuationState {
-	lastRequestBody: RequestBody;
+	requestShape: RequestBody;
 	lastResponseId: string;
-	lastResponseItems: ResponseInput;
+	baselineInput: ResponseInput;
 }
 
 interface CachedWebSocketConnection {
@@ -1418,31 +1417,51 @@ function requestBodyWithoutInput(body: RequestBody): RequestBody {
 	return rest;
 }
 
-function responseInputsEqual(a: ResponseInput | undefined, b: ResponseInput | undefined): boolean {
-	return JSON.stringify(a ?? []) === JSON.stringify(b ?? []);
+function jsonValuesEqual(left: unknown, right: unknown): boolean {
+	if (Object.is(left, right)) return true;
+	if (left === null || right === null || typeof left !== "object" || typeof right !== "object") return false;
+	if (Array.isArray(left) || Array.isArray(right)) {
+		if (!Array.isArray(left) || !Array.isArray(right) || left.length !== right.length) return false;
+		for (let index = 0; index < left.length; index++) {
+			if (!jsonValuesEqual(left[index], right[index])) return false;
+		}
+		return true;
+	}
+	const leftRecord = left as Record<string, unknown>;
+	const rightRecord = right as Record<string, unknown>;
+	let leftKeyCount = 0;
+	let rightKeyCount = 0;
+	for (const key in leftRecord) {
+		if (leftRecord[key] === undefined) continue;
+		leftKeyCount++;
+		if (!jsonValuesEqual(leftRecord[key], rightRecord[key])) return false;
+	}
+	for (const key in rightRecord) {
+		if (rightRecord[key] !== undefined) rightKeyCount++;
+	}
+	return leftKeyCount === rightKeyCount;
 }
 
-function requestBodiesMatchExceptInput(a: RequestBody, b: RequestBody): boolean {
-	return JSON.stringify(requestBodyWithoutInput(a)) === JSON.stringify(requestBodyWithoutInput(b));
+function requestBodiesMatchExceptInput(body: RequestBody, shape: RequestBody): boolean {
+	return jsonValuesEqual(requestBodyWithoutInput(body), shape);
 }
 
 function getCachedWebSocketInputDelta(
 	body: RequestBody,
 	continuation: CachedWebSocketContinuationState,
 ): ResponseInput | undefined {
-	if (!requestBodiesMatchExceptInput(body, continuation.lastRequestBody)) {
+	if (!requestBodiesMatchExceptInput(body, continuation.requestShape)) {
 		return undefined;
 	}
 
 	const currentInput = body.input ?? [];
-	const baseline = [...(continuation.lastRequestBody.input ?? []), ...continuation.lastResponseItems];
+	const baseline = continuation.baselineInput;
 	if (currentInput.length < baseline.length) {
 		return undefined;
 	}
 
-	const prefix = currentInput.slice(0, baseline.length);
-	if (!responseInputsEqual(prefix, baseline)) {
-		return undefined;
+	for (let index = 0; index < baseline.length; index++) {
+		if (!jsonValuesEqual(currentInput[index], baseline[index])) return undefined;
 	}
 
 	return currentInput.slice(baseline.length);
@@ -1564,9 +1583,9 @@ async function processWebSocketStream(
 				CODEX_TOOL_CALL_PROVIDERS,
 			).filter((item) => item.type !== "function_call_output");
 			entry.continuation = {
-				lastRequestBody: fullBody,
+				requestShape: requestBodyWithoutInput(fullBody),
 				lastResponseId: output.responseId,
-				lastResponseItems: responseItems,
+				baselineInput: [...(fullBody.input ?? []), ...responseItems],
 			};
 		}
 	} catch (error) {

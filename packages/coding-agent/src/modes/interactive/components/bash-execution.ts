@@ -92,6 +92,17 @@ export class BashExecutionComponent extends Container {
 			this.outputLines.push(...newLines);
 		}
 
+		// The command controller already preserves full truncated output out of band. The TUI
+		// component needs only the same bounded tail; retaining every streamed line here caused
+		// both process-memory growth and an ever-larger join/truncate pass on every chunk.
+		const retained = truncateTail(this.outputLines.join("\n"), {
+			maxLines: DEFAULT_MAX_LINES,
+			maxBytes: DEFAULT_MAX_BYTES,
+		});
+		if (retained.truncated) {
+			this.outputLines = retained.content ? retained.content.split("\n") : [];
+		}
+
 		this.updateDisplay();
 	}
 
@@ -203,7 +214,8 @@ export class BashExecutionComponent extends Container {
 	}
 
 	/**
-	 * Get the raw output for creating BashExecutionMessage.
+	 * Get the bounded output tail retained for display and BashExecutionMessage rendering.
+	 * The execution controller owns any full-output artifact path.
 	 */
 	getOutput(): string {
 		return this.outputLines.join("\n");

@@ -26,7 +26,7 @@ import { shortHash } from "../utils/hash.ts";
 import { parseStreamingJson } from "../utils/json-parse.ts";
 import { sanitizeSurrogates } from "../utils/sanitize-unicode.ts";
 import { buildBaseOptions } from "./simple-options.ts";
-import { transformMessages } from "./transform-messages.ts";
+import { joinTextContent, transformMessages } from "./transform-messages.ts";
 
 const MISTRAL_TOOL_CALL_ID_LENGTH = 9;
 const MAX_MISTRAL_ERROR_BODY_CHARS = 4000;
@@ -540,10 +540,7 @@ function toChatMessages(messages: Message[], supportsImages: boolean): ChatCompl
 		}
 
 		const toolContent: ContentChunk[] = [];
-		const textResult = msg.content
-			.filter((part) => part.type === "text")
-			.map((part) => (part.type === "text" ? sanitizeSurrogates(part.text) : ""))
-			.join("\n");
+		const textResult = sanitizeSurrogates(joinTextContent(msg.content));
 		const hasImages = msg.content.some((part) => part.type === "image");
 		const toolText = buildToolResultText(textResult, hasImages, supportsImages, msg.isError);
 		toolContent.push({ type: "text", text: toolText });

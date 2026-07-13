@@ -7,6 +7,8 @@
 
 ### Fixed
 
+- Bounded long-session telemetry, output, and process-lifetime UI caches; replaced repeated full-session footer, context, analytics, and background-lane scans with incremental or indexed reads; and invalidated provider request-prefix caches immediately after compaction.
+- Avoided full copies of large context strings during curation, artifact hashing, context GC, RPC framing, local-runtime progress parsing, and HTML branch reconstruction.
 - Made managed local-model readiness verify the configured Ollama model after startup, exit cleanly when it is missing, and prevent prefix warming from silently falling back to another model.
 - Kept startup running when an extension fails to load, while reporting the failure, restoring prior provider and flag state, and discarding partial event registrations.
 - Preserved bounded read-only delegated worker output when a worker returns plain text, custom JSON, or reaches its output limit instead of failing it as unparseable.

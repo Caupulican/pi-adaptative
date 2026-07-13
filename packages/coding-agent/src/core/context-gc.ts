@@ -198,9 +198,16 @@ function textContentParts(content: unknown): string[] | undefined {
 	return parts;
 }
 
+function joinTextParts(parts: readonly string[]): string {
+	if (parts.length === 0) return "";
+	if (parts.length === 1) return parts[0];
+	return parts.join("\n");
+}
+
 function contentText(content: unknown): string | undefined {
 	if (typeof content === "string") return content;
-	return textContentParts(content)?.join("\n");
+	const parts = textContentParts(content);
+	return parts ? joinTextParts(parts) : undefined;
 }
 
 function toolResultParts(message: ToolResultMessage): string[] {
@@ -213,7 +220,7 @@ function toolResultParts(message: ToolResultMessage): string[] {
 }
 
 function toolResultText(message: ToolResultMessage): string {
-	return toolResultParts(message).join("\n");
+	return joinTextParts(toolResultParts(message));
 }
 
 function smallStringSlice(value: string, start?: number, end?: number): string {
@@ -444,7 +451,10 @@ export function applyContextGc(
 			if (originalText && originalText.length >= options.semanticMemory.minChars) {
 				const originalTokens = estimateTokens(message);
 				const key = createHash("sha256")
-					.update(`semantic-memory\0${index}\0${originalText}`)
+					.update("semantic-memory\0")
+					.update(String(index))
+					.update("\0")
+					.update(originalText)
 					.digest("hex")
 					.slice(0, 24);
 				const storagePath = maybeStoreOriginal(options, key, originalText);
@@ -489,7 +499,11 @@ export function applyContextGc(
 
 		const originalTokens = estimateTokens(message);
 		const key = createHash("sha256")
-			.update(`${message.toolName}\0${message.toolCallId}\0${originalText}`)
+			.update(message.toolName)
+			.update("\0")
+			.update(message.toolCallId)
+			.update("\0")
+			.update(originalText)
 			.digest("hex")
 			.slice(0, 24);
 		const storagePath = maybeStoreOriginal(options, key, originalText);

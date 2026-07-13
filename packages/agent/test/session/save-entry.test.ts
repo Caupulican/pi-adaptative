@@ -54,6 +54,20 @@ describe("SessionManager.saveCustomEntry", () => {
 	});
 });
 
+describe("SessionManager.getEntriesSince", () => {
+	it("returns only append-ordered entries after the requested index", () => {
+		const session = SessionManager.inMemory();
+		const first = session.appendMessage({ role: "user", content: "first", timestamp: 1 });
+		const second = session.appendCustomEntry("metric", { value: 2 });
+		const third = session.appendMessage({ role: "user", content: "third", timestamp: 3 });
+
+		expect(session.getEntryCount()).toBe(3);
+		expect(session.getEntriesSince(1).map((entry) => entry.id)).toEqual([second, third]);
+		expect(session.getEntriesSince(3)).toEqual([]);
+		expect(session.getEntriesSince(-1).map((entry) => entry.id)).toEqual([first, second, third]);
+	});
+});
+
 describe("SessionManager.getRecentUserInputHistory", () => {
 	it("returns active-branch user prompts oldest first without assistant messages", () => {
 		const session = SessionManager.inMemory();
