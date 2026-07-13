@@ -3,6 +3,7 @@ import type { AssistantMessage, AssistantMessageEvent } from "../types.ts";
 // Generic event stream class for async iteration
 export class EventStream<T, R = T> implements AsyncIterable<T> {
 	private queue: T[] = [];
+	private queueHead = 0;
 	private waiting: ((value: IteratorResult<T>) => void)[] = [];
 	private done = false;
 	private finalResultPromise: Promise<R>;
@@ -49,8 +50,18 @@ export class EventStream<T, R = T> implements AsyncIterable<T> {
 
 	async *[Symbol.asyncIterator](): AsyncIterator<T> {
 		while (true) {
-			if (this.queue.length > 0) {
-				yield this.queue.shift()!;
+			if (this.queueHead < this.queue.length) {
+				const value = this.queue[this.queueHead++];
+				if (this.queueHead === this.queue.length) {
+					this.queue = [];
+					this.queueHead = 0;
+				} else if (this.queueHead >= 1024 && this.queueHead * 2 >= this.queue.length) {
+					// Array.shift() makes a burst of N provider deltas O(N²). Compact consumed
+					// slots occasionally while keeping the common one-at-a-time path allocation-free.
+					this.queue = this.queue.slice(this.queueHead);
+					this.queueHead = 0;
+				}
+				yield value;
 			} else if (this.done) {
 				return;
 			} else {

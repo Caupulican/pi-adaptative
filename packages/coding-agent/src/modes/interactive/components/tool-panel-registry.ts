@@ -73,6 +73,10 @@ export function shouldReuseToolPanelInPlace(toolName: string, args: unknown): bo
 	);
 }
 
+// Reusable panels retain rendered arguments/results. Keep this aligned with the bounded live TUI
+// scrollback rather than pinning one component for every unique file/status action in a long process.
+const MAX_REUSABLE_TOOL_PANEL_ACTIONS = 256;
+
 export class ToolPanelRegistry {
 	private readonly panelsByAction = new Map<string, ToolExecutionComponent>();
 	private readonly activeByCallId = new Map<string, ToolExecutionComponent>();
@@ -82,7 +86,20 @@ export class ToolPanelRegistry {
 		if (!actionKey) return undefined;
 		const panel = this.panelsByAction.get(actionKey);
 		if (!panel || (!options?.allowActive && this.isActive(panel))) return undefined;
+		// Refresh insertion order so eviction follows recent reuse rather than original creation.
+		this.panelsByAction.delete(actionKey);
+		this.panelsByAction.set(actionKey, panel);
 		return panel;
+	}
+
+	private rememberAction(actionKey: string, panel: ToolExecutionComponent): void {
+		this.panelsByAction.delete(actionKey);
+		this.panelsByAction.set(actionKey, panel);
+		while (this.panelsByAction.size > MAX_REUSABLE_TOOL_PANEL_ACTIONS) {
+			const oldest = this.panelsByAction.keys().next().value;
+			if (oldest === undefined) break;
+			this.panelsByAction.delete(oldest);
+		}
 	}
 
 	replaceActiveForAction(toolCallId: string, panel: ToolExecutionComponent, actionKey: string): void {
@@ -97,14 +114,14 @@ export class ToolPanelRegistry {
 	register(toolCallId: string, panel: ToolExecutionComponent, actionKey?: string): void {
 		this.activeByCallId.set(toolCallId, panel);
 		if (actionKey) {
-			this.panelsByAction.set(actionKey, panel);
+			this.rememberAction(actionKey, panel);
 			this.actionKeyByCallId.set(toolCallId, actionKey);
 		}
 	}
 
 	registerAliases(panel: ToolExecutionComponent, actionKeys: string[]): void {
 		for (const actionKey of actionKeys) {
-			this.panelsByAction.set(actionKey, panel);
+			this.rememberAction(actionKey, panel);
 		}
 	}
 

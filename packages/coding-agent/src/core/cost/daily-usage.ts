@@ -1,5 +1,5 @@
 import { existsSync, readdirSync, statSync } from "node:fs";
-import { join } from "node:path";
+import { join, resolve } from "node:path";
 import { loadEntriesFromFile, type SessionEntry } from "@caupulican/pi-agent-core/node";
 import type { AssistantMessage, Usage } from "@caupulican/pi-ai";
 import { SPAWNED_USAGE_CUSTOM_TYPE, type SpawnedUsageReport } from "../agent-session.ts";
@@ -54,7 +54,7 @@ function addUsage(
 
 function addDailyUsageFromEntries(
 	totals: DailyUsageTotals,
-	entries: SessionEntry[],
+	entries: readonly SessionEntry[],
 	window: DailyUsageWindow,
 	seenSpawnedReportIds: Set<string>,
 ): boolean {
@@ -98,14 +98,34 @@ function shouldReadSessionFile(filePath: string, window: DailyUsageWindow): bool
 	}
 }
 
-export function aggregateDailyUsageFromEntries(entries: SessionEntry[], window: DailyUsageWindow): DailyUsageTotals {
+export function aggregateDailyUsageFromEntries(
+	entries: readonly SessionEntry[],
+	window: DailyUsageWindow,
+): DailyUsageTotals {
 	const totals = createZeroTotals();
 	const hasUsage = addDailyUsageFromEntries(totals, entries, window, new Set());
 	totals.sessions = hasUsage ? 1 : 0;
 	return finishTotals(totals);
 }
 
-export function aggregateDailyUsageFromSessionFiles(sessionDir: string, window: DailyUsageWindow): DailyUsageTotals {
+export interface LiveSessionDailyUsageSource {
+	filePath: string;
+	entries: readonly SessionEntry[];
+}
+
+function getSessionEntries(
+	filePath: string,
+	liveSession: LiveSessionDailyUsageSource | undefined,
+): readonly SessionEntry[] {
+	if (liveSession && resolve(filePath) === resolve(liveSession.filePath)) return liveSession.entries;
+	return loadEntriesFromFile(filePath).filter((entry): entry is SessionEntry => entry.type !== "session");
+}
+
+export function aggregateDailyUsageFromSessionFiles(
+	sessionDir: string,
+	window: DailyUsageWindow,
+	liveSession?: LiveSessionDailyUsageSource,
+): DailyUsageTotals {
 	const totals = createZeroTotals();
 	if (!sessionDir || !existsSync(sessionDir)) return totals;
 	const seenSpawnedReportIds = new Set<string>();
@@ -113,7 +133,7 @@ export function aggregateDailyUsageFromSessionFiles(sessionDir: string, window: 
 		if (!name.endsWith(".jsonl")) continue;
 		const filePath = join(sessionDir, name);
 		if (!shouldReadSessionFile(filePath, window)) continue;
-		const entries = loadEntriesFromFile(filePath).filter((entry): entry is SessionEntry => entry.type !== "session");
+		const entries = getSessionEntries(filePath, liveSession);
 		if (addDailyUsageFromEntries(totals, entries, window, seenSpawnedReportIds)) {
 			totals.sessions += 1;
 		}
@@ -121,7 +141,11 @@ export function aggregateDailyUsageFromSessionFiles(sessionDir: string, window: 
 	return finishTotals(totals);
 }
 
-export function aggregateDailyUsageFromSessionRoot(sessionRoot: string, window: DailyUsageWindow): DailyUsageTotals {
+export function aggregateDailyUsageFromSessionRoot(
+	sessionRoot: string,
+	window: DailyUsageWindow,
+	liveSession?: LiveSessionDailyUsageSource,
+): DailyUsageTotals {
 	const totals = createZeroTotals();
 	if (!sessionRoot || !existsSync(sessionRoot)) return totals;
 	const seenSpawnedReportIds = new Set<string>();
@@ -132,9 +156,7 @@ export function aggregateDailyUsageFromSessionRoot(sessionRoot: string, window: 
 			if (!fileName.endsWith(".jsonl")) continue;
 			const filePath = join(dir, fileName);
 			if (!shouldReadSessionFile(filePath, window)) continue;
-			const entries = loadEntriesFromFile(filePath).filter(
-				(entry): entry is SessionEntry => entry.type !== "session",
-			);
+			const entries = getSessionEntries(filePath, liveSession);
 			if (addDailyUsageFromEntries(totals, entries, window, seenSpawnedReportIds)) {
 				totals.sessions += 1;
 			}

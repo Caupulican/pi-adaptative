@@ -110,6 +110,15 @@ export class SessionAnalytics {
 		expiresAt: number;
 		totals: DailyUsageTotals;
 	};
+	/** Memoized full cost summary. The footer renders on every streamed delta and keystroke, so
+	 * rescanning a long session log there turns redraw into O(entries) work per frame. */
+	private _costSummaryCache?: {
+		entryCount: number;
+		dailyTotals: DailyUsageTotals;
+		windowStartMs: number;
+		windowEndMs: number;
+		summary: SessionCostSummary;
+	};
 	/** Live recovery telemetry records already snapshotted for the worker; keyed to dedupe sidecar reads. */
 	private readonly _toolArgumentValidationRecords = new Map<string, ToolArgumentValidationLogRecord>();
 
@@ -405,12 +414,32 @@ export class SessionAnalytics {
 	}
 
 	getCostSummary(now = new Date()): SessionCostSummary {
+		const sessionManager = this.deps.getSessionManager();
+		const entryCount = sessionManager.getEntryCount?.() ?? sessionManager.getEntries().length;
 		const window = getLocalDayWindow(now);
-		return createSessionCostSummary({
-			entries: this.deps.getSessionManager().getEntries(),
-			dailyTotals: this.getDailyUsageTotals(now),
+		const dailyTotals = this.getDailyUsageTotals(now);
+		const cached = this._costSummaryCache;
+		if (
+			cached?.entryCount === entryCount &&
+			cached.dailyTotals === dailyTotals &&
+			cached.windowStartMs === window.startMs &&
+			cached.windowEndMs === window.endMs
+		) {
+			return cached.summary;
+		}
+		const summary = createSessionCostSummary({
+			entries: sessionManager.getEntries(),
+			dailyTotals,
 			todayWindow: window,
 		});
+		this._costSummaryCache = {
+			entryCount,
+			dailyTotals,
+			windowStartMs: window.startMs,
+			windowEndMs: window.endMs,
+			summary,
+		};
+		return summary;
 	}
 
 	getDailyUsageTotals(now = new Date()): DailyUsageTotals {
@@ -427,9 +456,11 @@ export class SessionAnalytics {
 		) {
 			return this._dailyUsageCache.totals;
 		}
+		const sessionFile = sessionManager.getSessionFile();
+		const liveSession = sessionFile ? { filePath: sessionFile, entries: sessionManager.getEntries() } : undefined;
 		const totals = sessionManager.usesDefaultSessionDir()
-			? aggregateDailyUsageFromSessionRoot(scope, window)
-			: aggregateDailyUsageFromSessionFiles(sessionDir, window);
+			? aggregateDailyUsageFromSessionRoot(scope, window, liveSession)
+			: aggregateDailyUsageFromSessionFiles(sessionDir, window, liveSession);
 		this._dailyUsageCache = {
 			sessionDir: scope,
 			windowStartMs: window.startMs,

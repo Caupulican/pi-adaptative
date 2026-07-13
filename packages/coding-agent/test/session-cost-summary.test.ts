@@ -51,9 +51,16 @@ function spawned(id: string, timestamp: Date, costTotal: number, reportId = id):
 	};
 }
 
-function createAnalytics(sessionDir: string, entries: SessionEntry[]): SessionAnalytics {
+function createAnalytics(
+	sessionDir: string,
+	entries: SessionEntry[],
+	onEntriesRead: () => void = () => {},
+): SessionAnalytics {
 	const sessionManager = {
-		getEntries: () => entries,
+		getEntries: () => {
+			onEntriesRead();
+			return entries;
+		},
 		getEntryCount: () => entries.length,
 		getSessionDir: () => sessionDir,
 		usesDefaultSessionDir: () => false,
@@ -152,6 +159,35 @@ describe("session cost summary", () => {
 		});
 
 		expect(formatFooterCostParts(summary, 3, { subscription: true })).toEqual(["CURRENT:$0.000 (sub)"]);
+	});
+
+	it("does not rescan the session log on unchanged footer redraws", () => {
+		const tempDir = mkdtempSync(join(tmpdir(), "pi-session-cost-cache-"));
+		try {
+			const now = new Date();
+			const entries = [assistant("one", now, 0.4)];
+			const header: FileEntry = { type: "session", id: "session-1", timestamp: now.toISOString(), cwd: tempDir };
+			writeFileSync(
+				join(tempDir, "session.jsonl"),
+				`${[header, ...entries].map((entry) => JSON.stringify(entry)).join("\n")}\n`,
+				"utf-8",
+			);
+			let entriesRead = 0;
+			const analytics = createAnalytics(tempDir, entries, () => entriesRead++);
+
+			const first = analytics.getCostSummary(now);
+			const readsAfterFirstSummary = entriesRead;
+			const second = analytics.getCostSummary(now);
+
+			expect(second).toBe(first);
+			expect(entriesRead).toBe(readsAfterFirstSummary);
+
+			entries.push(assistant("two", now, 0.6));
+			expect(analytics.getCostSummary(now).currentCost).toBeCloseTo(1, 10);
+			expect(entriesRead).toBe(readsAfterFirstSummary + 1);
+		} finally {
+			rmSync(tempDir, { recursive: true, force: true });
+		}
 	});
 
 	it("rolls TODAY at local midnight without changing CURRENT mid-session", () => {

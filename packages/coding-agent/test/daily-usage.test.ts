@@ -104,6 +104,22 @@ describe("daily usage aggregation", () => {
 		expect(total.sessions).toBe(2);
 	});
 
+	it("uses live entries for the active session instead of reparsing its growing JSONL", () => {
+		const dir = mkdtempSync(join(tmpdir(), "pi-daily-usage-live-"));
+		const filePath = join(dir, "active.jsonl");
+		writeFileSync(filePath, "deliberately not parseable\n");
+		const dayStart = Date.parse("2026-06-28T00:00:00.000Z");
+		const dayEnd = Date.parse("2026-06-29T00:00:00.000Z");
+		const total = aggregateDailyUsageFromSessionFiles(
+			dir,
+			{ startMs: dayStart, endMs: dayEnd },
+			{ filePath, entries: [assistant("live", dayStart + 1_000, 0.75)] },
+		);
+
+		expect(total.totalCost).toBeCloseTo(0.75, 10);
+		expect(total.sessions).toBe(1);
+	});
+
 	it("loads and sums session files across all project session directories", () => {
 		const root = mkdtempSync(join(tmpdir(), "pi-daily-usage-root-"));
 		const dirA = join(root, "project-a");
