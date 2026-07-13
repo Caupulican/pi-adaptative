@@ -129,9 +129,20 @@ function registryTarballUrl(packageName, version) {
 	return `https://registry.npmjs.org/${packageName}/-/${tarballName}-${version}.tgz`;
 }
 
-function toPublishedLockPath(lockPath) {
-	const packagePrefix = "packages/coding-agent/";
-	return lockPath.startsWith(packagePrefix) ? lockPath.slice(packagePrefix.length) : lockPath;
+function toPublishedLockPath(lockPath, internalWorkspaces) {
+	const codingAgentPrefix = "packages/coding-agent/";
+	if (lockPath.startsWith(codingAgentPrefix)) {
+		return lockPath.slice(codingAgentPrefix.length);
+	}
+
+	for (const [name, workspace] of internalWorkspaces) {
+		const workspaceDependencyPrefix = `${workspace.lockPath}/node_modules/`;
+		if (lockPath.startsWith(workspaceDependencyPrefix)) {
+			return `node_modules/${name}/node_modules/${lockPath.slice(workspaceDependencyPrefix.length)}`;
+		}
+	}
+
+	return lockPath;
 }
 
 function getInternalWorkspaces(lockPackages) {
@@ -207,13 +218,13 @@ function addInternalWorkspace(shrinkwrapPackages, addedPaths, queue, name, works
 	addedPaths.add(outputPath);
 
 	for (const [dependencyName, spec] of Object.entries(packageDependencies(packageJson))) {
-		queue.push({ name: dependencyName, spec: String(spec), from: outputPath });
+		queue.push({ name: dependencyName, spec: String(spec), from: workspace.lockPath });
 	}
 }
 
-function addExternalPackage(lockPackages, shrinkwrapPackages, addedPaths, queue, name, from) {
+function addExternalPackage(lockPackages, shrinkwrapPackages, addedPaths, queue, internalWorkspaces, name, from) {
 	const lockPath = resolveExternalDependency(lockPackages, name, from);
-	const outputPath = toPublishedLockPath(lockPath);
+	const outputPath = toPublishedLockPath(lockPath, internalWorkspaces);
 	if (addedPaths.has(outputPath)) {
 		return;
 	}
@@ -234,6 +245,9 @@ function validateShrinkwrap(shrinkwrap, internalNames) {
 	const seenAllowedInstallScriptPackages = new Set();
 
 	for (const [lockPath, entry] of Object.entries(shrinkwrap.packages)) {
+		if (lockPath && !lockPath.startsWith("node_modules/")) {
+			errors.push(`${lockPath} is not a published node_modules path`);
+		}
 		const packageName = packageNameFromLockPath(lockPath);
 		if (packageName) {
 			includedPackageNames.add(packageName);
@@ -329,7 +343,7 @@ function generateShrinkwrap() {
 			continue;
 		}
 
-		addExternalPackage(lockPackages, shrinkwrapPackages, addedPaths, queue, item.name, item.from);
+		addExternalPackage(lockPackages, shrinkwrapPackages, addedPaths, queue, internalWorkspaces, item.name, item.from);
 	}
 
 	const shrinkwrap = {

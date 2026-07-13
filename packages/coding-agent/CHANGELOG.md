@@ -1,5 +1,9 @@
 ## [Unreleased]
 
+### Fixed
+
+- Fixed published installs to include dependencies nested under internal workspace packages, including the OpenAI SDK required by Fugu Responses models.
+
 ## [0.81.31] - 2026-07-13
 
 ## [0.81.30] - 2026-07-13
