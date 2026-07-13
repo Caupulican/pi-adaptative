@@ -59,9 +59,14 @@ import {
 	isToolArgumentValidationLogRecord,
 	type ToolArgumentValidationLogRecord,
 } from "./tool-recovery-log-records.ts";
+import {
+	consumeToolArgumentValidationRecord,
+	createEmptyToolArgumentValidationStats,
+	getToolRecoveryRecordSequence,
+	readPersistedToolRecoveryStats,
+} from "./tool-recovery-stats.ts";
 
 export const TOOL_ARGUMENT_VALIDATION_CUSTOM_TYPE = "tool_argument_validation";
-const MAX_LIVE_TOOL_ARGUMENT_VALIDATION_RECORDS = 1_000;
 
 export interface ToolArgumentValidationTeachEfficacy {
 	recurrenceBefore: number;
@@ -126,8 +131,14 @@ export class SessionAnalytics {
 		windowEndMs: number;
 		summary: SessionCostSummary;
 	};
-	/** Live recovery telemetry records already snapshotted for the worker; keyed to dedupe sidecar reads. */
-	private readonly _toolArgumentValidationRecords = new Map<string, ToolArgumentValidationLogRecord>();
+	/** Cumulative stats initialized once from persisted telemetry, then updated without retaining record details. */
+	private _toolArgumentValidationStats: ToolArgumentValidationStats | undefined;
+	/** Incremental context-usage state keyed by the append-only branch leaf. */
+	private _postCompactionUsageCache?: {
+		leafId: string | null;
+		hasCompaction: boolean;
+		hasPostCompactionUsage: boolean;
+	};
 
 	private readonly deps: SessionAnalyticsDeps;
 
@@ -206,12 +217,9 @@ export class SessionAnalytics {
 	}
 
 	recordToolArgumentValidation(record: ToolArgumentValidationLogRecord): void {
-		this._toolArgumentValidationRecords.set(record.recordId, record);
-		while (this._toolArgumentValidationRecords.size > MAX_LIVE_TOOL_ARGUMENT_VALIDATION_RECORDS) {
-			const oldest = this._toolArgumentValidationRecords.keys().next().value;
-			if (oldest === undefined) break;
-			this._toolArgumentValidationRecords.delete(oldest);
-		}
+		const stats = this.getToolArgumentValidationStats();
+		consumeToolArgumentValidationRecord(stats, record);
+		this._toolArgumentValidationStats = stats;
 	}
 
 	private readToolArgumentValidationSidecarRecords(): ToolArgumentValidationLogRecord[] {
@@ -233,61 +241,16 @@ export class SessionAnalytics {
 	}
 
 	getToolArgumentValidationStats(): ToolArgumentValidationStats {
-		const stats: ToolArgumentValidationStats = {
-			clean: 0,
-			repaired: 0,
-			bounced: 0,
-			failureModes: {},
-			repairsApplied: {},
-			taught: { none: 0, note: 0, rule: 0 },
-			executionOutcome: { not_run: 0, succeeded: 0, failed: 0 },
-			teachEfficacy: {},
-		};
-
-		const getEfficacy = (record: ToolArgumentValidationRecord, mode: string): ToolArgumentValidationTeachEfficacy => {
-			const key = `${record.provider ?? "unknown"}/${record.model ?? "unknown"}:${mode}`;
-			stats.teachEfficacy[key] ??= {
-				recurrenceBefore: 0,
-				recurrenceAfter: 0,
-				repairedThenSucceeded: 0,
-				repairedThenFailed: 0,
-				repairedThenNotRun: 0,
-			};
-			return stats.teachEfficacy[key];
-		};
-
+		if (this._toolArgumentValidationStats) return structuredClone(this._toolArgumentValidationStats);
+		const eventLogPath = this.deps.getToolRecoveryEventLogPath();
+		const sessionId = this.deps.getSessionManager().getSessionId();
+		const persisted = readPersistedToolRecoveryStats(eventLogPath, sessionId);
+		const stats = persisted ? structuredClone(persisted.stats) : createEmptyToolArgumentValidationStats();
 		const seen = new Set<string>();
 		const consume = (record: ToolArgumentValidationRecord, key: string): void => {
 			if (seen.has(key)) return;
 			seen.add(key);
-			stats[record.outcome] += 1;
-			const taught = record.taught ?? "none";
-			const executionOutcome = record.executionOutcome ?? "not_run";
-			stats.taught[taught] += 1;
-			stats.executionOutcome[executionOutcome] += 1;
-			const modes = new Set([...record.failureModes, ...record.repairsApplied]);
-			for (const mode of record.failureModes) {
-				stats.failureModes[mode] = (stats.failureModes[mode] ?? 0) + 1;
-			}
-			for (const repair of record.repairsApplied) {
-				stats.repairsApplied[repair] = (stats.repairsApplied[repair] ?? 0) + 1;
-			}
-			for (const mode of modes) {
-				const efficacy = getEfficacy(record, mode);
-				if (taught === "none") {
-					efficacy.recurrenceBefore++;
-				} else {
-					efficacy.recurrenceAfter++;
-				}
-			}
-			if (record.outcome === "repaired") {
-				for (const repair of record.repairsApplied) {
-					const efficacy = getEfficacy(record, repair);
-					if (executionOutcome === "succeeded") efficacy.repairedThenSucceeded++;
-					if (executionOutcome === "failed") efficacy.repairedThenFailed++;
-					if (executionOutcome === "not_run") efficacy.repairedThenNotRun++;
-				}
-			}
+			consumeToolArgumentValidationRecord(stats, record);
 		};
 
 		for (const entry of this.deps.getSessionManager().getEntries()) {
@@ -297,13 +260,18 @@ export class SessionAnalytics {
 			consume(record, `legacy:${entry.id}`);
 		}
 		for (const record of this.readToolArgumentValidationSidecarRecords()) {
-			consume(record, record.recordId);
-		}
-		for (const record of this._toolArgumentValidationRecords.values()) {
+			if (
+				persisted &&
+				record.sessionId === sessionId &&
+				getToolRecoveryRecordSequence(record) <= persisted.lastRecordSequence
+			) {
+				continue;
+			}
 			consume(record, record.recordId);
 		}
 
-		return stats;
+		this._toolArgumentValidationStats = stats;
+		return structuredClone(stats);
 	}
 
 	/**
@@ -506,23 +474,48 @@ export class SessionAnalytics {
 		const getEntry = indexedSessionManager.getEntry?.bind(sessionManager);
 		const leafId = getLeafId?.();
 		if (getLeafId && getEntry && leafId !== undefined) {
+			if (this._postCompactionUsageCache?.leafId === leafId) {
+				return { ...this._postCompactionUsageCache };
+			}
+			const appended: SessionEntry[] = [];
+			const cachedLeafId = this._postCompactionUsageCache?.leafId;
 			let currentId = leafId;
-			let hasPostCompactionUsage = false;
-			let checkedLatestAssistant = false;
-			while (currentId !== null) {
+			const seen = new Set<string>();
+			while (currentId !== null && currentId !== cachedLeafId && !seen.has(currentId)) {
+				seen.add(currentId);
 				const entry = getEntry(currentId);
 				if (!entry) break;
-				if (!checkedLatestAssistant && entry.type === "message" && entry.message.role === "assistant") {
-					const assistant = entry.message;
-					if (assistant.stopReason !== "aborted" && assistant.stopReason !== "error") {
-						checkedLatestAssistant = true;
-						hasPostCompactionUsage = calculateContextTokens(assistant.usage) > 0;
-					}
-				}
-				if (entry.type === "compaction") return { hasCompaction: true, hasPostCompactionUsage };
+				appended.push(entry);
 				currentId = entry.parentId;
 			}
-			return { hasCompaction: false, hasPostCompactionUsage: false };
+			const extendsCachedBranch = this._postCompactionUsageCache !== undefined && currentId === cachedLeafId;
+			const state = extendsCachedBranch
+				? { ...this._postCompactionUsageCache! }
+				: { leafId: null, hasCompaction: false, hasPostCompactionUsage: false };
+			if (!extendsCachedBranch && currentId !== null) {
+				while (currentId !== null && !seen.has(currentId)) {
+					seen.add(currentId);
+					const entry = getEntry(currentId);
+					if (!entry) break;
+					appended.push(entry);
+					currentId = entry.parentId;
+				}
+			}
+			for (let index = appended.length - 1; index >= 0; index--) {
+				const entry = appended[index];
+				if (entry.type === "compaction") {
+					state.hasCompaction = true;
+					state.hasPostCompactionUsage = false;
+				} else if (entry.type === "message" && entry.message.role === "assistant") {
+					const assistant = entry.message;
+					if (assistant.stopReason !== "aborted" && assistant.stopReason !== "error" && state.hasCompaction) {
+						state.hasPostCompactionUsage = calculateContextTokens(assistant.usage) > 0;
+					}
+				}
+			}
+			state.leafId = leafId;
+			this._postCompactionUsageCache = state;
+			return { ...state };
 		}
 
 		const branchEntries = sessionManager.getBranch();
@@ -533,13 +526,8 @@ export class SessionAnalytics {
 			const entry = branchEntries[index];
 			if (entry.type !== "message" || entry.message.role !== "assistant") continue;
 			const assistant = entry.message;
-			return {
-				hasCompaction: true,
-				hasPostCompactionUsage:
-					assistant.stopReason !== "aborted" &&
-					assistant.stopReason !== "error" &&
-					calculateContextTokens(assistant.usage) > 0,
-			};
+			if (assistant.stopReason === "aborted" || assistant.stopReason === "error") continue;
+			return { hasCompaction: true, hasPostCompactionUsage: calculateContextTokens(assistant.usage) > 0 };
 		}
 		return { hasCompaction: true, hasPostCompactionUsage: false };
 	}

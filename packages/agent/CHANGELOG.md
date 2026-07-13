@@ -3,7 +3,7 @@
 ### Fixed
 
 - Made long session-path construction, proxy framing, and persisted JSONL loading linear instead of repeatedly copying accumulated prefixes.
-- Released large compacted-away persisted message payloads from the live heap through exact disk-backed getters, added append-ordered session-entry delta access, and cleared retained label timestamps when starting a new session.
+- Released large compacted-away persisted message payloads from the live heap through exact disk-backed getters, restored those getters when reopening a session without parsing the file twice, added append-ordered session-entry delta access, and cleared retained label timestamps when starting a new session.
 
 ## [0.81.29] - 2026-07-10
 

@@ -73,6 +73,8 @@ export class ToolRecoveryLogger {
 	private readonly flushWaiters: Array<() => void> = [];
 	private worker: Worker | undefined;
 	private inFlight: ToolRecoveryLogWorkerRecord[] = [];
+	private inFlightBatchId: number | undefined;
+	private inFlightWorker: Worker | undefined;
 	private batchId = 0;
 	private recordSequence = 0;
 	private dropped = 0;
@@ -178,14 +180,13 @@ export class ToolRecoveryLogger {
 		const records = this.queue.splice(0, this.batchSize);
 		this.inFlight = records;
 		const batchId = this.batchId++;
+		this.inFlightBatchId = batchId;
+		this.inFlightWorker = worker;
 		try {
 			worker.postMessage({ type: "records", batchId, records });
 		} catch (error) {
-			this.failures++;
-			this.dropped += records.length;
-			this.inFlight = [];
 			this.debug(`tool recovery logger post failed: ${error instanceof Error ? error.message : String(error)}`);
-			this.resolveFlushWaitersIfIdle();
+			this.handleWorkerFailure(worker, error instanceof Error ? error : new Error(String(error)));
 		}
 	}
 
@@ -196,11 +197,11 @@ export class ToolRecoveryLogger {
 			worker.unref();
 			this.worker = worker;
 			this.workerStarts++;
-			worker.on("message", (message: unknown) => this.handleWorkerMessage(message));
-			worker.on("error", (error) => this.handleWorkerFailure(error));
+			worker.on("message", (message: unknown) => this.handleWorkerMessage(worker, message));
+			worker.on("error", (error) => this.handleWorkerFailure(worker, error));
 			worker.on("exit", (code) => {
-				if (this.shuttingDown || code === 0) return;
-				this.handleWorkerFailure(new Error(`tool recovery logger worker exited with code ${code}`));
+				if (this.shuttingDown || this.worker !== worker) return;
+				this.handleWorkerFailure(worker, new Error(`tool recovery logger worker exited with code ${code}`));
 			});
 			return worker;
 		} catch (error) {
@@ -212,21 +213,32 @@ export class ToolRecoveryLogger {
 		}
 	}
 
-	private handleWorkerMessage(message: unknown): void {
+	private handleWorkerMessage(worker: Worker, message: unknown): void {
 		if (!isToolRecoveryLogAckMessage(message)) return;
+		if (this.worker !== worker || this.inFlightWorker !== worker || this.inFlightBatchId !== message.batchId) {
+			return;
+		}
 		if (message.failed > 0) {
 			this.failures += message.failed;
 		}
 		this.inFlight = [];
+		this.inFlightBatchId = undefined;
+		this.inFlightWorker = undefined;
+		this.respawnAttempted = false;
 		this.pump();
 		this.resolveFlushWaitersIfIdle();
 	}
 
-	private handleWorkerFailure(error: Error): void {
+	private handleWorkerFailure(worker: Worker, error: Error): void {
+		if (this.worker !== worker) return;
 		this.failures++;
 		this.workerCrashes++;
-		this.dropped += this.inFlight.length;
-		this.inFlight = [];
+		if (this.inFlightWorker === worker) {
+			this.dropped += this.inFlight.length;
+			this.inFlight = [];
+			this.inFlightBatchId = undefined;
+			this.inFlightWorker = undefined;
+		}
 		this.worker = undefined;
 		this.debug(`tool recovery logger worker failed: ${error.message}`);
 		if (!this.respawnAttempted && !this.shuttingDown) {

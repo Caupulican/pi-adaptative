@@ -233,6 +233,30 @@ describe("AgentSession.getSessionStats", () => {
 		}
 	});
 
+	it("updates context usage from only newly appended branch entries", () => {
+		const { session, sessionManager } = createSession();
+
+		try {
+			for (let index = 0; index < 100; index++) {
+				sessionManager.appendMessage(createUserMessage(`user-${index}`, index * 2 + 1));
+				sessionManager.appendMessage(createAssistantMessage(`assistant-${index}`, index + 1, index * 2 + 2));
+			}
+			syncAgentMessages(session, sessionManager);
+			session.getContextUsage();
+			const getEntry = vi.spyOn(sessionManager, "getEntry");
+			const userId = sessionManager.appendMessage(createUserMessage("latest", 1000));
+			sessionManager.appendMessage(createAssistantMessage("latest response", 500, 1001));
+			syncAgentMessages(session, sessionManager);
+			getEntry.mockClear();
+
+			expect(session.getContextUsage()?.tokens).toBe(500);
+			expect(getEntry.mock.calls.length).toBeLessThanOrEqual(2);
+			expect(sessionManager.getEntry(userId)).toBeDefined();
+		} finally {
+			session.dispose();
+		}
+	});
+
 	it("uses post-compaction usage for current context instead of stale kept usage", () => {
 		const { session, sessionManager } = createSession();
 

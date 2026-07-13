@@ -6,11 +6,13 @@ import {
 	type ToolValidationFailureShapeEntry,
 	writeFailureCorpusRecord,
 } from "./failure-corpus.ts";
+import { updatePersistedToolRecoveryStats } from "./tool-recovery-stats.ts";
 
 export const TOOL_RECOVERY_EVENT_LOG_FILE = "tool-recovery-events.jsonl";
 export const TOOL_ARGUMENT_VALIDATION_LOG_KIND = "tool_argument_validation";
 
 const MAX_EVENT_LOG_BYTES = 4 * 1024 * 1024;
+const ROTATED_EVENT_LOG_TARGET_BYTES = Math.floor(MAX_EVENT_LOG_BYTES * 0.75);
 const MAX_ROTATED_EVENT_LOG_RECORDS = 5_000;
 const MAX_TELEMETRY_LIST_ITEMS = 50;
 const MAX_TELEMETRY_TEXT_CHARS = 256;
@@ -105,9 +107,10 @@ function rotateToolRecoveryEventLogIfNeeded(filePath: string): void {
 		const line = lines[index];
 		const lineBytes = Buffer.byteLength(line, "utf-8") + 1;
 		if (lineBytes > MAX_EVENT_LOG_BYTES) continue;
-		if (retainedBytes + lineBytes > MAX_EVENT_LOG_BYTES) break;
+		if (retained.length > 0 && retainedBytes + lineBytes > ROTATED_EVENT_LOG_TARGET_BYTES) break;
 		retained.push(line);
 		retainedBytes += lineBytes;
+		if (retainedBytes >= ROTATED_EVENT_LOG_TARGET_BYTES) break;
 	}
 	retained.reverse();
 	writeFileSync(filePath, retained.length > 0 ? `${retained.join("\n")}\n` : "", "utf-8");
@@ -117,6 +120,11 @@ export function writeToolRecoveryLogRecord(entry: ToolRecoveryLogWorkerRecord): 
 	mkdirSync(dirname(entry.eventLogPath), { recursive: true });
 	appendFileSync(entry.eventLogPath, `${JSON.stringify(entry.record)}\n`, "utf-8");
 	rotateToolRecoveryEventLogIfNeeded(entry.eventLogPath);
+	try {
+		updatePersistedToolRecoveryStats(entry.eventLogPath, entry.record);
+	} catch {
+		// The bounded event log remains the recovery source if the cumulative summary cannot be updated.
+	}
 	if (entry.record.outcome !== "bounced") return;
 	writeFailureCorpusRecord(
 		entry.failureCorpusPath,

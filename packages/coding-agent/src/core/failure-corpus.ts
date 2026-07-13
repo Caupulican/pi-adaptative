@@ -48,7 +48,10 @@ export interface FailureCorpusFs {
 
 const DEFAULT_FS: FailureCorpusFs = { existsSync, mkdirSync, appendFileSync, readFileSync, writeFileSync, statSync };
 const MAX_MESSAGE_CHARS = 500;
+const MAX_DETAIL_ITEMS = 50;
+const MAX_DETAIL_CHARS = 256;
 const MAX_FILE_BYTES = 512 * 1024;
+const ROTATED_FILE_TARGET_BYTES = Math.floor(MAX_FILE_BYTES * 0.75);
 const MAX_ROTATED_RECORDS = 1000;
 
 export function createToolValidationFailureCorpusRecord(args: {
@@ -63,12 +66,18 @@ export function createToolValidationFailureCorpusRecord(args: {
 	return {
 		kind: "tool_validation",
 		ts: args.ts,
-		provider: args.provider,
-		modelId: args.modelId,
-		tool: args.tool,
-		failureModes: [...new Set(args.failureModes)].sort(),
+		provider: args.provider?.slice(0, MAX_DETAIL_CHARS),
+		modelId: args.modelId?.slice(0, MAX_DETAIL_CHARS),
+		tool: args.tool.slice(0, MAX_DETAIL_CHARS),
+		failureModes: [...new Set(args.failureModes)]
+			.sort()
+			.slice(0, MAX_DETAIL_ITEMS)
+			.map((value) => value.slice(0, MAX_DETAIL_CHARS)),
 		shape: sanitizeToolValidationShape(args.shape),
-		errorKeywords: [...new Set(args.errorKeywords ?? [])].sort(),
+		errorKeywords: [...new Set(args.errorKeywords ?? [])]
+			.sort()
+			.slice(0, MAX_DETAIL_ITEMS)
+			.map((value) => value.slice(0, MAX_DETAIL_CHARS)),
 	};
 }
 
@@ -87,9 +96,20 @@ function rotateFailureCorpusIfNeeded(filePath: string, fs: FailureCorpusFs): voi
 	const lines = fs
 		.readFileSync(filePath, "utf-8")
 		.split("\n")
-		.filter((line) => line.trim().length > 0)
-		.slice(-MAX_ROTATED_RECORDS);
-	fs.writeFileSync(filePath, `${lines.join("\n")}\n`, "utf-8");
+		.filter((line) => line.trim().length > 0);
+	const retained: string[] = [];
+	let retainedBytes = 0;
+	for (let index = lines.length - 1; index >= 0 && retained.length < MAX_ROTATED_RECORDS; index--) {
+		const line = lines[index];
+		const lineBytes = Buffer.byteLength(line, "utf-8") + 1;
+		if (lineBytes > MAX_FILE_BYTES) continue;
+		if (retained.length > 0 && retainedBytes + lineBytes > ROTATED_FILE_TARGET_BYTES) break;
+		retained.push(line);
+		retainedBytes += lineBytes;
+		if (retainedBytes >= ROTATED_FILE_TARGET_BYTES) break;
+	}
+	retained.reverse();
+	fs.writeFileSync(filePath, retained.length > 0 ? `${retained.join("\n")}\n` : "", "utf-8");
 }
 
 export class FailureCorpusRecorder {
@@ -147,11 +167,11 @@ export class FailureCorpusRecorder {
 function sanitizeToolValidationShape(
 	shape: readonly ToolValidationFailureShapeEntry[],
 ): ToolValidationFailureShapeEntry[] {
-	return shape.map((entry) => ({
-		path: entry.path,
-		expectedType: entry.expectedType,
-		receivedType: entry.receivedType,
-		...(entry.keyword ? { keyword: entry.keyword } : {}),
+	return shape.slice(0, MAX_DETAIL_ITEMS).map((entry) => ({
+		path: entry.path.slice(0, MAX_DETAIL_CHARS),
+		expectedType: entry.expectedType.slice(0, MAX_DETAIL_CHARS),
+		receivedType: entry.receivedType.slice(0, MAX_DETAIL_CHARS),
+		...(entry.keyword ? { keyword: entry.keyword.slice(0, MAX_DETAIL_CHARS) } : {}),
 	}));
 }
 

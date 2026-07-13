@@ -45,6 +45,7 @@ import {
 	type PromptPolicyShadowReport,
 	planPromptPolicy,
 } from "./context/context-prompt-policy.ts";
+import { acquireContextStoreRetention, type ContextStoreRetentionLease } from "./context/context-store-retention.ts";
 import { applyContextGc, type ContextGcReport } from "./context-gc.ts";
 import type { MemoryManager } from "./memory/memory-manager.ts";
 import type { ModelRegistry } from "./model-registry.ts";
@@ -138,6 +139,7 @@ export class ContextPipeline {
 	private _lastCurationSkipReason: string | undefined = undefined;
 	private _lastPreDigestSkipReason: string | undefined = undefined;
 	private _toolArtifactStore: ArtifactStore | undefined = undefined;
+	private _contextStoreRetentionLease: ContextStoreRetentionLease | undefined;
 	private _latestContextAuditReport: ContextAuditReport | undefined = undefined;
 	private _latestPromptPolicyReport: PromptPolicyShadowReport | undefined = undefined;
 	private _latestPromptPolicyGcCorrelation: PromptPolicyGcCorrelationReport | undefined = undefined;
@@ -157,11 +159,20 @@ export class ContextPipeline {
 		this.deps = deps;
 	}
 
+	private _ensureContextStoreRetention(): void {
+		this._contextStoreRetentionLease ??= acquireContextStoreRetention(
+			this.deps.getAgentDir(),
+			this.deps.getSessionManager().getSessionId(),
+		);
+	}
+
 	private _contextGcStorageDir(): string {
+		this._ensureContextStoreRetention();
 		return join(this.deps.getAgentDir(), "context-gc", this.deps.getSessionManager().getSessionId());
 	}
 
 	private _toolArtifactsDir(): string {
+		this._ensureContextStoreRetention();
 		return join(this.deps.getAgentDir(), "context-artifacts", this.deps.getSessionManager().getSessionId());
 	}
 
@@ -175,11 +186,8 @@ export class ContextPipeline {
 	 * `_releaseGcPackedArtifactReferences()` (called from `applyContextGc()`) releases
 	 * that reference once context-gc packs the result out of live context, and
 	 * opportunistically reclaims now-unreferenced artifacts via `cleanup()`.
-	 * Remaining carry-forward gap: cleanup() now also runs at dispose(), but only reclaims
-	 * already-released (zero-reference) artifacts. A session that ends before context-gc
-	 * ever evicts a result never releases that reference, so its artifact stays on disk by
-	 * design (resolvable on resume). Reclaiming those requires an explicit cross-session
-	 * expiry/liveness policy, not just a sweep.
+	 * Cross-session retention is enforced when either payload store is first used. Active
+	 * sessions hold PID-marked leases; inactive stores are pruned by age, count, and bytes.
 	 */
 	getToolArtifactStore(): ArtifactStore {
 		this._toolArtifactStore ??= createFileArtifactStore({ baseDir: this._toolArtifactsDir() });
@@ -193,6 +201,8 @@ export class ContextPipeline {
 	 */
 	cleanupToolArtifactStoreOnDispose(): void {
 		this._toolArtifactStore?.cleanup();
+		this._contextStoreRetentionLease?.release();
+		this._contextStoreRetentionLease = undefined;
 	}
 
 	/**

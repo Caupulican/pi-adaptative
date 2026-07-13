@@ -6,13 +6,37 @@
  * (cycle through older entries).
  */
 const DEFAULT_MAX_KILL_RING_ENTRIES = 60;
+const DEFAULT_MAX_KILL_RING_BYTES = 1024 * 1024;
+
+function positiveLimit(value: number, fallback: number): number {
+	return Number.isFinite(value) && value > 0 ? Math.max(1, Math.floor(value)) : fallback;
+}
+
+function clampUtf8(value: string, maxBytes: number, keepEnd: boolean): string {
+	if (Buffer.byteLength(value, "utf-8") <= maxBytes) return value;
+	let low = 0;
+	let high = value.length;
+	while (low < high) {
+		const middle = Math.ceil((low + high) / 2);
+		const candidate = keepEnd ? value.slice(value.length - middle) : value.slice(0, middle);
+		if (Buffer.byteLength(candidate, "utf-8") <= maxBytes) low = middle;
+		else high = middle - 1;
+	}
+	let result = keepEnd ? value.slice(value.length - low) : value.slice(0, low);
+	if (keepEnd && result.length > 0 && /[\uDC00-\uDFFF]/.test(result[0])) result = result.slice(1);
+	if (!keepEnd && result.length > 0 && /[\uD800-\uDBFF]/.test(result.at(-1) ?? "")) result = result.slice(0, -1);
+	return result;
+}
 
 export class KillRing {
 	private ring: string[] = [];
+	private totalBytes = 0;
 	private readonly maxEntries: number;
+	private readonly maxBytes: number;
 
-	constructor(maxEntries: number = DEFAULT_MAX_KILL_RING_ENTRIES) {
-		this.maxEntries = Math.max(1, Math.floor(maxEntries));
+	constructor(maxEntries: number = DEFAULT_MAX_KILL_RING_ENTRIES, maxBytes: number = DEFAULT_MAX_KILL_RING_BYTES) {
+		this.maxEntries = positiveLimit(maxEntries, DEFAULT_MAX_KILL_RING_ENTRIES);
+		this.maxBytes = positiveLimit(maxBytes, DEFAULT_MAX_KILL_RING_BYTES);
 	}
 
 	/**
@@ -28,12 +52,19 @@ export class KillRing {
 
 		if (opts.accumulate && this.ring.length > 0) {
 			const last = this.ring.pop()!;
-			this.ring.push(opts.prepend ? text + last : last + text);
+			this.totalBytes -= Buffer.byteLength(last, "utf-8");
+			const combined = opts.prepend ? text + last : last + text;
+			const bounded = clampUtf8(combined, this.maxBytes, !opts.prepend);
+			this.ring.push(bounded);
+			this.totalBytes += Buffer.byteLength(bounded, "utf-8");
 		} else {
-			this.ring.push(text);
-			if (this.ring.length > this.maxEntries) {
-				this.ring.splice(0, this.ring.length - this.maxEntries);
-			}
+			const bounded = clampUtf8(text, this.maxBytes, true);
+			this.ring.push(bounded);
+			this.totalBytes += Buffer.byteLength(bounded, "utf-8");
+		}
+		while (this.ring.length > this.maxEntries || this.totalBytes > this.maxBytes) {
+			const removed = this.ring.shift();
+			if (removed !== undefined) this.totalBytes -= Buffer.byteLength(removed, "utf-8");
 		}
 	}
 

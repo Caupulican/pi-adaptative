@@ -265,6 +265,23 @@ describe("Anthropic raw SSE parsing", () => {
 		expect(result.usage.cost.output).toBeGreaterThan(0);
 	});
 
+	it("rejects a multi-line SSE event whose total exceeds the event bound", async () => {
+		const model = getModel("anthropic", "claude-haiku-4-5");
+		const context: Context = { messages: [{ role: "user", content: "hello", timestamp: 1 }] };
+		const chunk = "x".repeat(1024 * 1024);
+		const response = new Response(Array.from({ length: 9 }, () => `data: ${chunk}`).join("\n"), {
+			status: 200,
+			headers: { "content-type": "text/event-stream" },
+		});
+
+		const result = await streamAnthropic(model, context, {
+			client: createFakeAnthropicClient(response),
+		}).result();
+
+		expect(result.stopReason).toBe("error");
+		expect(result.errorMessage).toContain("Anthropic SSE event exceeded");
+	});
+
 	it("preserves explicitly provider-supplied usage cost totals", () => {
 		const model = getModel("anthropic", "claude-haiku-4-5");
 		const usage = {

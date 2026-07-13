@@ -3,7 +3,7 @@
 ### Fixed
 
 - Made event-stream iteration drain queued events by index instead of repeated array shifts, avoiding quadratic work on very large streams.
-- Made fragmented SSE/JSONL line assembly linear, reused immutable single-block tool-result strings across provider conversion, and stopped cached Codex WebSocket turns from repeatedly serializing the retained request prefix.
+- Made fragmented SSE/JSONL line assembly linear, bounded complete Anthropic and Codex SSE frames, reused immutable single-block tool-result strings across provider conversion, and made stable cached Codex WebSocket turns convert only newly appended messages without copying retained input arrays.
 - Recreated expired OpenAI Codex subscription WebSockets and replayed the rejected request once when the server enforces its connection lifetime limit.
 - Corrected Sakana Fugu usage accounting so orchestration tokens remain categorized without being double-counted in provider-reported totals.
 

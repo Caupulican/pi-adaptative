@@ -295,11 +295,16 @@ export const streamOpenAICodexResponses: StreamFunction<"openai-codex-responses"
 			}
 
 			const accountId = extractAccountId(apiKey);
-			let body = buildRequestBody(model, context, options);
-			const nextBody = await options?.onPayload?.(body, model);
-			if (nextBody !== undefined) {
-				body = nextBody as RequestBody;
+			let body: RequestBody | undefined;
+			if (options?.onPayload) {
+				body = buildRequestBody(model, context, options);
+				const nextBody = await options.onPayload(body, model);
+				if (nextBody !== undefined) body = nextBody as RequestBody;
 			}
+			const getBody = (): RequestBody => {
+				if (!body) body = buildRequestBody(model, context, options);
+				return body;
+			};
 			const websocketRequestId = options?.sessionId || createCodexRequestId();
 			let sseHeaders = buildSSEHeaders(
 				model.headers,
@@ -318,7 +323,7 @@ export const streamOpenAICodexResponses: StreamFunction<"openai-codex-responses"
 			);
 			let bodyJson: string | undefined;
 			const serializeBody = (): string => {
-				bodyJson ??= JSON.stringify(body);
+				bodyJson ??= JSON.stringify(getBody());
 				return bodyJson;
 			};
 			const idleTimeoutMs = normalizeTimeoutMs(options?.timeoutMs);
@@ -337,7 +342,8 @@ export const streamOpenAICodexResponses: StreamFunction<"openai-codex-responses"
 						try {
 							await processWebSocketStream(
 								resolveCodexWebSocketUrl(model.baseUrl),
-								body,
+								getBody,
+								context,
 								websocketHeaders,
 								output,
 								stream,
@@ -770,6 +776,7 @@ function normalizeCodexStatus(status: unknown): CodexResponseStatus | undefined 
 // ============================================================================
 
 const MAX_SSE_LINE_CHARS = 64 * 1024 * 1024;
+const MAX_SSE_FRAME_CHARS = 8 * 1024 * 1024;
 
 async function* parseSSE(response: Response, signal?: AbortSignal): AsyncGenerator<Record<string, unknown>> {
 	if (!response.body) return;
@@ -803,14 +810,20 @@ async function* parseSSE(response: Response, signal?: AbortSignal): AsyncGenerat
 					continue;
 				}
 				frameChars += line.length;
-				if (frameChars > MAX_SSE_LINE_CHARS) {
-					throw new Error(`Codex SSE stream exceeded the ${MAX_SSE_LINE_CHARS} character buffer limit`);
+				if (frameChars > MAX_SSE_FRAME_CHARS) {
+					throw new Error(`Codex SSE frame exceeded the ${MAX_SSE_FRAME_CHARS} character limit`);
 				}
 				frameLines.push(line);
 			}
 			if (done) {
 				const finalLine = lines.finish();
-				if (finalLine !== undefined) frameLines.push(finalLine);
+				if (finalLine !== undefined) {
+					frameChars += finalLine.length;
+					if (frameChars > MAX_SSE_FRAME_CHARS) {
+						throw new Error(`Codex SSE frame exceeded the ${MAX_SSE_FRAME_CHARS} character limit`);
+					}
+					frameLines.push(finalLine);
+				}
 				const finalEvent = parseSSELines(frameLines);
 				if (finalEvent !== undefined) yield finalEvent;
 				break;
@@ -859,10 +872,24 @@ interface WebSocketLike {
 	removeEventListener(type: WebSocketEventType, listener: WebSocketListener): void;
 }
 
+interface CachedWebSocketInputPart {
+	previous?: CachedWebSocketInputPart;
+	input: ResponseInput;
+	totalItems: number;
+}
+
 interface CachedWebSocketContinuationState {
 	requestShape: RequestBody;
 	lastResponseId: string;
-	baselineInput: ResponseInput;
+	baselineInputTail?: CachedWebSocketInputPart;
+	sourceMessages: Context["messages"];
+	sourceMessageCount: number;
+	responseItems: ResponseInput;
+}
+
+interface PreparedWebSocketRequest {
+	requestBody: RequestBody;
+	currentInputTail?: CachedWebSocketInputPart;
 }
 
 interface CachedWebSocketConnection {
@@ -1446,43 +1473,87 @@ function requestBodiesMatchExceptInput(body: RequestBody, shape: RequestBody): b
 	return jsonValuesEqual(requestBodyWithoutInput(body), shape);
 }
 
+function appendCachedWebSocketInput(
+	previous: CachedWebSocketInputPart | undefined,
+	input: ResponseInput,
+): CachedWebSocketInputPart | undefined {
+	if (input.length === 0) return previous;
+	return { previous, input, totalItems: (previous?.totalItems ?? 0) + input.length };
+}
+
 function getCachedWebSocketInputDelta(
 	body: RequestBody,
 	continuation: CachedWebSocketContinuationState,
 ): ResponseInput | undefined {
-	if (!requestBodiesMatchExceptInput(body, continuation.requestShape)) {
-		return undefined;
-	}
-
+	if (!requestBodiesMatchExceptInput(body, continuation.requestShape)) return undefined;
 	const currentInput = body.input ?? [];
-	const baseline = continuation.baselineInput;
-	if (currentInput.length < baseline.length) {
-		return undefined;
+	const baselineLength = continuation.baselineInputTail?.totalItems ?? 0;
+	if (currentInput.length < baselineLength) return undefined;
+	const parts: ResponseInput[] = [];
+	let currentPart = continuation.baselineInputTail;
+	while (currentPart) {
+		parts.push(currentPart.input);
+		currentPart = currentPart.previous;
 	}
-
-	for (let index = 0; index < baseline.length; index++) {
-		if (!jsonValuesEqual(currentInput[index], baseline[index])) return undefined;
+	let currentIndex = 0;
+	for (let partIndex = parts.length - 1; partIndex >= 0; partIndex--) {
+		for (const item of parts[partIndex]) {
+			if (!jsonValuesEqual(currentInput[currentIndex], item)) return undefined;
+			currentIndex++;
+		}
 	}
-
-	return currentInput.slice(baseline.length);
+	return currentInput.slice(currentIndex);
 }
 
-function buildCachedWebSocketRequestBody(entry: CachedWebSocketConnection, body: RequestBody): RequestBody {
+function prepareFullWebSocketRequest(entry: CachedWebSocketConnection, body: RequestBody): PreparedWebSocketRequest {
 	const continuation = entry.continuation;
 	if (!continuation) {
-		return body;
+		return { requestBody: body, currentInputTail: appendCachedWebSocketInput(undefined, body.input ?? []) };
 	}
-
 	const delta = getCachedWebSocketInputDelta(body, continuation);
 	if (!delta || !continuation.lastResponseId) {
 		entry.continuation = undefined;
-		return body;
+		return { requestBody: body, currentInputTail: appendCachedWebSocketInput(undefined, body.input ?? []) };
 	}
-
 	return {
-		...body,
-		previous_response_id: continuation.lastResponseId,
-		input: delta,
+		requestBody: { ...body, previous_response_id: continuation.lastResponseId, input: delta },
+		currentInputTail: appendCachedWebSocketInput(continuation.baselineInputTail, delta),
+	};
+}
+
+function messagesPreserveCachedPrefix(context: Context, continuation: CachedWebSocketContinuationState): boolean {
+	if (context.messages.length < continuation.sourceMessageCount) return false;
+	for (let index = 0; index < continuation.sourceMessageCount; index++) {
+		if (context.messages[index] !== continuation.sourceMessages[index]) return false;
+	}
+	return true;
+}
+
+function prepareIncrementalWebSocketRequest(
+	entry: CachedWebSocketConnection,
+	model: Model<"openai-codex-responses">,
+	context: Context,
+	options: OpenAICodexResponsesOptions | undefined,
+): PreparedWebSocketRequest | undefined {
+	const continuation = entry.continuation;
+	if (!continuation?.lastResponseId || options?.onPayload || !messagesPreserveCachedPrefix(context, continuation)) {
+		return undefined;
+	}
+	const tailContext: Context = {
+		...context,
+		messages: context.messages.slice(continuation.sourceMessageCount),
+	};
+	const tailBody = buildRequestBody(model, tailContext, options);
+	if (!requestBodiesMatchExceptInput(tailBody, continuation.requestShape)) return undefined;
+	const tailInput = tailBody.input ?? [];
+	if (tailInput.length < continuation.responseItems.length) return undefined;
+	for (let index = 0; index < continuation.responseItems.length; index++) {
+		if (!jsonValuesEqual(tailInput[index], continuation.responseItems[index])) return undefined;
+	}
+	const delta = tailInput.slice(continuation.responseItems.length);
+	return {
+		requestBody: { ...tailBody, previous_response_id: continuation.lastResponseId, input: delta },
+		currentInputTail: appendCachedWebSocketInput(continuation.baselineInputTail, delta),
 	};
 }
 
@@ -1505,7 +1576,8 @@ async function* startWebSocketOutputOnFirstEvent(
 
 async function processWebSocketStream(
 	url: string,
-	body: RequestBody,
+	getBody: () => RequestBody,
+	context: Context,
 	headers: Headers,
 	output: AssistantMessage,
 	stream: AssistantMessageEventStream,
@@ -1527,8 +1599,15 @@ async function processWebSocketStream(
 	const useCachedContext = options?.transport === "websocket-cached" || options?.transport === "auto";
 	// ChatGPT Codex Responses rejects `store: true` ("Store must be set to false").
 	// WebSocket continuation still works via connection-scoped previous_response_id state.
-	const fullBody = body;
-	const requestBody = useCachedContext && entry ? buildCachedWebSocketRequestBody(entry, fullBody) : fullBody;
+	const prepared =
+		useCachedContext && entry
+			? (prepareIncrementalWebSocketRequest(entry, model, context, options) ??
+				prepareFullWebSocketRequest(entry, getBody()))
+			: {
+					requestBody: getBody(),
+					currentInputTail: appendCachedWebSocketInput(undefined, getBody().input ?? []),
+				};
+	const requestBody = prepared.requestBody;
 	const wireRequestBody = model.openaiResponsesLite
 		? {
 				...requestBody,
@@ -1583,9 +1662,12 @@ async function processWebSocketStream(
 				CODEX_TOOL_CALL_PROVIDERS,
 			).filter((item) => item.type !== "function_call_output");
 			entry.continuation = {
-				requestShape: requestBodyWithoutInput(fullBody),
+				requestShape: requestBodyWithoutInput(requestBody),
 				lastResponseId: output.responseId,
-				baselineInput: [...(fullBody.input ?? []), ...responseItems],
+				baselineInputTail: appendCachedWebSocketInput(prepared.currentInputTail, responseItems),
+				sourceMessages: context.messages,
+				sourceMessageCount: context.messages.length,
+				responseItems,
 			};
 		}
 	} catch (error) {

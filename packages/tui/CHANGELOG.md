@@ -2,7 +2,7 @@
 
 ### Fixed
 
-- Bounded editor undo snapshots and kill-ring history to prevent process-lifetime memory growth.
+- Bounded editor undo snapshots and kill-ring history by both entry count and retained bytes to prevent process-lifetime memory growth.
 
 ## [0.81.29] - 2026-07-10
 

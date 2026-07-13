@@ -212,7 +212,7 @@ describe("session cost summary", () => {
 				});
 			}
 
-			expect(analytics.getToolArgumentValidationStats().repaired).toBe(1_000);
+			expect(analytics.getToolArgumentValidationStats().repaired).toBe(1_001);
 		} finally {
 			rmSync(tempDir, { recursive: true, force: true });
 		}

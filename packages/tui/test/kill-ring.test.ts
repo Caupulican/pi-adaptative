@@ -19,6 +19,25 @@ describe("KillRing retention", () => {
 		assert.equal(ring.peek(), "four");
 	});
 
+	it("bounds total retained bytes and evicts older entries", () => {
+		const ring = new KillRing(10, 8);
+		ring.push("1234", { prepend: false });
+		ring.push("5678", { prepend: false });
+		ring.push("90", { prepend: false });
+
+		assert.equal(ring.length, 2);
+		assert.equal(ring.peek(), "90");
+	});
+
+	it("bounds one repeatedly accumulated entry", () => {
+		const ring = new KillRing(10, 6);
+		ring.push("1234", { prepend: false });
+		ring.push("5678", { prepend: false, accumulate: true });
+
+		assert.equal(ring.length, 1);
+		assert.equal(ring.peek(), "345678");
+	});
+
 	it("keeps consecutive kill accumulation in the current entry", () => {
 		const ring = new KillRing(2);
 		ring.push("world", { prepend: false });

@@ -495,6 +495,29 @@ describe("openai-codex streaming", () => {
 		expect(result.content.find((content) => content.type === "text")).toMatchObject({ type: "text", text: "OK" });
 	});
 
+	it("rejects an oversized unterminated SSE frame", async () => {
+		const token = mockToken();
+		const chunk = "x".repeat(1024 * 1024);
+		vi.stubGlobal(
+			"fetch",
+			vi.fn(
+				async () =>
+					new Response(Array.from({ length: 9 }, () => `data: ${chunk}`).join("\n"), {
+						status: 200,
+						headers: { "content-type": "text/event-stream" },
+					}),
+			),
+		);
+
+		const result = await streamOpenAICodexResponses(createCodexModel(), createCodexContext(), {
+			apiKey: token,
+			transport: "sse",
+		}).result();
+
+		expect(result.stopReason).toBe("error");
+		expect(result.errorMessage).toContain("Codex SSE frame exceeded");
+	});
+
 	it("attaches Codex subscription rate-limit reset diagnostics from response headers", async () => {
 		const token = mockToken();
 		const encoder = new TextEncoder();
@@ -1964,9 +1987,18 @@ describe("openai-codex streaming", () => {
 			contextWindow: 400000,
 			maxTokens: 128000,
 		};
+		let historicalContentReads = 0;
+		const historicalMessage = { role: "user" as const, content: historicalPrefix, timestamp: 1 };
+		Object.defineProperty(historicalMessage, "content", {
+			enumerable: true,
+			get: () => {
+				historicalContentReads++;
+				return historicalPrefix;
+			},
+		});
 		const firstContext: Context = {
 			systemPrompt: "You are a helpful assistant.",
-			messages: [{ role: "user", content: historicalPrefix, timestamp: 1 }],
+			messages: [historicalMessage],
 		};
 
 		const first = await streamOpenAICodexResponses(model, firstContext, {
@@ -1974,6 +2006,7 @@ describe("openai-codex streaming", () => {
 			sessionId: "session-1",
 			transport: "websocket-cached",
 		}).result();
+		const historicalContentReadsAfterFirstRequest = historicalContentReads;
 
 		const secondContext: Context = {
 			systemPrompt: "You are a helpful assistant.",
@@ -1992,6 +2025,8 @@ describe("openai-codex streaming", () => {
 		expect(firstBody.previous_response_id).toBeUndefined();
 		expect(firstBody.input).toEqual([{ role: "user", content: [{ type: "input_text", text: historicalPrefix }] }]);
 		expect(historicalPrefixSerializations).toBe(1);
+		expect(historicalContentReadsAfterFirstRequest).toBeGreaterThan(0);
+		expect(historicalContentReads).toBe(historicalContentReadsAfterFirstRequest);
 		expect(secondBody.store).toBe(false);
 		expect(secondBody.previous_response_id).toBe("resp_1");
 		expect(secondBody.input).toEqual([{ role: "user", content: [{ type: "input_text", text: "Now finish" }] }]);

@@ -996,6 +996,7 @@ export class SessionManager {
 
 			this._buildIndex();
 			this.flushed = true;
+			this._releaseExistingCompactedMessagePayloads();
 		} else {
 			const explicitPath = this.sessionFile;
 			this.newSession();
@@ -1176,6 +1177,17 @@ export class SessionManager {
 				});
 			},
 		});
+	}
+
+	private _releaseExistingCompactedMessagePayloads(): void {
+		let current = this.leafId ? this.byId.get(this.leafId) : undefined;
+		while (current) {
+			if (current.type === "compaction") {
+				this._releaseCompactedMessagePayloads(current.firstKeptEntryId, current.parentId);
+				return;
+			}
+			current = current.parentId ? this.byId.get(current.parentId) : undefined;
+		}
 	}
 
 	private _releaseCompactedMessagePayloads(firstKeptEntryId: string, compactionParentId: string | null): void {
@@ -1763,9 +1775,8 @@ export class SessionManager {
 	 */
 	static open(path: string, agentDir: string, sessionDir?: string, cwdOverride?: string): SessionManager {
 		const resolvedPath = resolvePath(path);
-		// Extract cwd from session header if possible, otherwise use process.cwd()
-		const entries = loadEntriesFromFile(resolvedPath);
-		const header = entries.find((e) => e.type === "session") as SessionHeader | undefined;
+		// Read only the header here; the constructor performs the one full session load.
+		const header = readSessionHeader(resolvedPath);
 		const cwd = cwdOverride ?? header?.cwd ?? process.cwd();
 		// If no sessionDir provided, derive from file's parent directory
 		const dir = sessionDir ? normalizePath(sessionDir) : resolve(resolvedPath, "..");

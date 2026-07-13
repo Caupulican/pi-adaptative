@@ -14,6 +14,21 @@ describe("UndoStack retention", () => {
 		assert.equal(stack.pop(), undefined);
 	});
 
+	it("evicts snapshots by retained byte size", () => {
+		const stack = new UndoStack<{ value: string }>(100, 80);
+		stack.push({ value: "a".repeat(40) });
+		stack.push({ value: "b".repeat(40) });
+
+		assert.equal(stack.length, 1);
+		assert.deepEqual(stack.pop(), { value: "b".repeat(40) });
+	});
+
+	it("drops a single snapshot larger than the byte budget", () => {
+		const stack = new UndoStack<{ value: string }>(100, 16);
+		stack.push({ value: "x".repeat(100) });
+		assert.equal(stack.length, 0);
+	});
+
 	it("keeps snapshots detached from later state mutation", () => {
 		const stack = new UndoStack<{ nested: { value: number } }>(2);
 		const state = { nested: { value: 1 } };

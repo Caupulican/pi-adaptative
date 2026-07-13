@@ -1,5 +1,10 @@
 import { describe, expect, it } from "vitest";
-import { type FailureCorpusFs, FailureCorpusRecorder, redactSecrets } from "../src/core/failure-corpus.ts";
+import {
+	createToolValidationFailureCorpusRecord,
+	type FailureCorpusFs,
+	FailureCorpusRecorder,
+	redactSecrets,
+} from "../src/core/failure-corpus.ts";
 
 type Files = Map<string, string>;
 
@@ -67,7 +72,7 @@ describe("FailureCorpusRecorder", () => {
 		);
 	});
 
-	it("rotates oversized files to the newest 1000 records", () => {
+	it("rotates oversized files below a byte low-water mark while retaining newest records", () => {
 		const files: Files = new Map();
 		const path = "/agent/state/failure-corpus.jsonl";
 		files.set(
@@ -80,10 +85,31 @@ describe("FailureCorpusRecorder", () => {
 			message: "latest",
 			classified: classified(),
 		});
-		const lines = files.get(path)!.trim().split("\n");
-		expect(lines).toHaveLength(1000);
-		expect(JSON.parse(lines[0]) as { ts: string }).toMatchObject({ ts: "101" });
+		const rotated = files.get(path)!;
+		const lines = rotated.trim().split("\n");
+		expect(Buffer.byteLength(rotated, "utf-8")).toBeLessThanOrEqual(Math.floor(512 * 1024 * 0.75));
+		expect(lines.length).toBeLessThan(1000);
 		expect(JSON.parse(lines.at(-1)!) as { message: string }).toMatchObject({ message: "latest" });
+	});
+
+	it("bounds direct tool-validation corpus details before persistence", () => {
+		const record = createToolValidationFailureCorpusRecord({
+			ts: "2026-07-13T00:00:00Z",
+			tool: "t".repeat(300),
+			failureModes: Array.from({ length: 60 }, (_, index) => `${index}-${"m".repeat(300)}`),
+			shape: Array.from({ length: 60 }, (_, index) => ({
+				path: `${index}-${"p".repeat(300)}`,
+				expectedType: "e".repeat(300),
+				receivedType: "r".repeat(300),
+			})),
+			errorKeywords: Array.from({ length: 60 }, (_, index) => `${index}-${"k".repeat(300)}`),
+		});
+
+		expect(record.tool.length).toBeLessThanOrEqual(256);
+		expect(record.failureModes).toHaveLength(50);
+		expect(record.shape).toHaveLength(50);
+		expect(record.errorKeywords).toHaveLength(50);
+		expect(record.shape.every((entry) => entry.path.length <= 256)).toBe(true);
 	});
 
 	it("counts unknown classifications and swallows recorder write failures with a debug note", () => {

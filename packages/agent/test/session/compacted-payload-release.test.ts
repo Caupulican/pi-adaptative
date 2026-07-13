@@ -73,6 +73,28 @@ describe("SessionManager compacted payload release", () => {
 		}
 	});
 
+	it("restores disk-backed payloads when reopening a compacted session", () => {
+		const dir = mkdtempSync(join(tmpdir(), "pi-compacted-payload-reopen-"));
+		tempDirs.push(dir);
+		const session = SessionManager.create(dir, dir, dir);
+		session.appendMessage({ role: "user", content: "start", timestamp: 1 });
+		session.appendMessage(assistantMessage());
+		const payload = `large-prefix-${"x".repeat(32 * 1024)}-large-tail`;
+		const toolResultId = session.appendMessage(toolResultMessage(payload));
+		const keptId = session.appendMessage({ role: "user", content: "keep", timestamp: 4 });
+		session.appendCompaction("summary", keptId, 10_000);
+		const sessionFile = session.getSessionFile();
+		expect(sessionFile).toBeTypeOf("string");
+		if (!sessionFile) return;
+
+		const reopened = SessionManager.open(sessionFile, dir, dir);
+		const entry = reopened.getEntry(toolResultId);
+		expect(entry?.type).toBe("message");
+		if (!entry || entry.type !== "message") return;
+		expect(Object.getOwnPropertyDescriptor(entry.message, "content")?.get).toBeTypeOf("function");
+		expect((entry.message as ToolResultMessage).content).toEqual([{ type: "text", text: payload }]);
+	});
+
 	it("keeps in-memory sessions self-contained", () => {
 		const session = SessionManager.inMemory();
 		session.appendMessage({ role: "user", content: "start", timestamp: 1 });

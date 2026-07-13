@@ -264,6 +264,7 @@ interface SseDecoderState {
 	event: string | null;
 	data: string[];
 	raw: string[];
+	chars: number;
 }
 
 const ANTHROPIC_MESSAGE_EVENTS: ReadonlySet<string> = new Set([
@@ -288,6 +289,7 @@ function flushSseEvent(state: SseDecoderState): ServerSentEvent | null {
 	state.event = null;
 	state.data = [];
 	state.raw = [];
+	state.chars = 0;
 	return event;
 }
 
@@ -296,6 +298,10 @@ function decodeSseLine(line: string, state: SseDecoderState): ServerSentEvent | 
 		return flushSseEvent(state);
 	}
 
+	state.chars += line.length + 1;
+	if (state.chars > MAX_SSE_EVENT_CHARS) {
+		throw new Error(`Anthropic SSE event exceeded the ${MAX_SSE_EVENT_CHARS} character limit`);
+	}
 	state.raw.push(line);
 	if (line.startsWith(":")) {
 		return null;
@@ -318,6 +324,7 @@ function decodeSseLine(line: string, state: SseDecoderState): ServerSentEvent | 
 }
 
 const MAX_SSE_LINE_CHARS = 64 * 1024 * 1024;
+const MAX_SSE_EVENT_CHARS = 8 * 1024 * 1024;
 
 async function* iterateSseMessages(
 	body: ReadableStream<Uint8Array>,
@@ -325,7 +332,7 @@ async function* iterateSseMessages(
 ): AsyncGenerator<ServerSentEvent> {
 	const reader = body.getReader();
 	const decoder = new TextDecoder();
-	const state: SseDecoderState = { event: null, data: [], raw: [] };
+	const state: SseDecoderState = { event: null, data: [], raw: [], chars: 0 };
 	const lines = new StreamingLineDecoder(MAX_SSE_LINE_CHARS);
 
 	try {

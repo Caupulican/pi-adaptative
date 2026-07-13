@@ -135,6 +135,45 @@ describe("ToolRecoveryLogger", () => {
 		await logger.shutdown(10);
 	});
 
+	it("ignores a crashed worker's later exit and protects the replacement batch", async () => {
+		const dir = makeTempDir();
+		const workerPath = join(dir, "crash-once-worker.mjs");
+		writeFileSync(
+			workerPath,
+			`import { existsSync, writeFileSync } from "node:fs";
+import { parentPort } from "node:worker_threads";
+const marker = ${JSON.stringify(join(dir, "worker-started"))};
+if (!existsSync(marker)) {
+  writeFileSync(marker, "1");
+  parentPort.on("message", (message) => {
+    if (message?.type === "records") setTimeout(() => { throw new Error("first worker crash"); }, 10);
+  });
+} else {
+  parentPort.on("message", (message) => {
+    if (message?.type === "records") setTimeout(() => parentPort.postMessage({ type: "ack", batchId: message.batchId, written: message.records.length, failed: 0 }), 100);
+  });
+}
+`,
+			"utf-8",
+		);
+		const logger = createLogger(dir, { workerSpecifier: pathToFileURL(workerPath) });
+		logger.recordToolArgumentValidation(createEvent("repaired"));
+		logger.recordToolArgumentValidation(createEvent("repaired"));
+		logger.recordToolArgumentValidation(createEvent("repaired"));
+
+		await logger.flush(2_000);
+
+		expect(logger.getStats()).toMatchObject({
+			queued: 0,
+			inFlight: 0,
+			dropped: 1,
+			workerStarts: 2,
+			workerCrashes: 1,
+			respawns: 1,
+		});
+		await logger.shutdown(100);
+	});
+
 	it("bounds telemetry record arrays and strings before retaining or persisting them", () => {
 		const oversized = createEvent("bounced");
 		oversized.failureModes = Array.from({ length: 60 }, () => "jsonStringParse" as const);
@@ -161,25 +200,35 @@ describe("ToolRecoveryLogger", () => {
 		expect(record.failureShape?.every((value) => value.path.length <= 256)).toBe(true);
 	});
 
-	it("rotates an oversized event log instead of allowing process-lifetime growth", () => {
+	it("rotates an oversized event log to a low-water mark instead of rewriting on every record", () => {
 		const dir = makeTempDir();
 		const eventLogPath = join(dir, "state", "tool-recovery-events.jsonl");
 		const failureCorpusPath = join(dir, "state", "failure-corpus.jsonl");
 		mkdirSync(join(dir, "state"), { recursive: true });
-		writeFileSync(eventLogPath, `${"x".repeat(5 * 1024 * 1024)}\n`, "utf-8");
+		const oversized = createEvent("repaired");
+		oversized.failureModes = Array.from({ length: 60 }, () => "jsonStringParse" as const);
+		oversized.repairsApplied = Array.from({ length: 60 }, () => "jsonStringParse" as const);
+		oversized.errorKeywords = Array.from({ length: 60 }, (_, index) => `${index}-${"z".repeat(300)}`);
+		oversized.failureShape = Array.from({ length: 60 }, (_, index) => ({
+			path: `${index}-${"p".repeat(300)}`,
+			expectedType: "e".repeat(300),
+			receivedType: "r".repeat(300),
+		}));
 		const record = createToolArgumentValidationLogRecord({
-			event: createEvent("repaired"),
+			event: oversized,
 			recordId: "session-1:0",
 			sessionId: "session-1",
 			ts: "2026-07-08T00:00:00Z",
 		});
+		const encoded = `${JSON.stringify(record)}\n`;
+		writeFileSync(eventLogPath, encoded.repeat(Math.ceil((5 * 1024 * 1024) / Buffer.byteLength(encoded))), "utf-8");
 
 		writeToolRecoveryLogRecord({ eventLogPath, failureCorpusPath, record });
+		const rotatedSize = statSync(eventLogPath).size;
+		writeToolRecoveryLogRecord({ eventLogPath, failureCorpusPath, record });
 
-		expect(statSync(eventLogPath).size).toBeLessThan(4 * 1024 * 1024);
-		expect(JSON.parse(readFileSync(eventLogPath, "utf-8").trim()) as unknown).toMatchObject({
-			recordId: "session-1:0",
-		});
+		expect(rotatedSize).toBeLessThanOrEqual(Math.floor(4 * 1024 * 1024 * 0.75));
+		expect(statSync(eventLogPath).size).toBe(rotatedSize + Buffer.byteLength(encoded));
 	});
 
 	it("contains worker write failures without throwing into the caller", async () => {
