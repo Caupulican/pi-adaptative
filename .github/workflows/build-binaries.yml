@@ -102,19 +102,53 @@ jobs:
           & $exe --list-models | Out-Null
           if ($LASTEXITCODE -ne 0) { throw "pi.exe --list-models failed with exit code $LASTEXITCODE" }
 
-          $requests = @(
-            '{"id":"state","type":"get_state"}'
-            '{"id":"shell","type":"bash","command":"printf windows-rpc-ok"}'
-          )
-          $responses = $requests | & $exe --mode rpc --no-session --no-extensions
-          if ($LASTEXITCODE -ne 0) { throw "pi.exe RPC smoke failed with exit code $LASTEXITCODE" }
-          $records = @($responses | ForEach-Object { $_ | ConvertFrom-Json })
-          $state = $records | Where-Object { $_.id -eq "state" -and $_.success -eq $true }
-          $shell = $records | Where-Object { $_.id -eq "shell" -and $_.success -eq $true }
-          if (-not $state) { throw "RPC get_state did not return a successful response" }
-          if (-not $shell -or $shell.data.exitCode -ne 0 -or $shell.data.output -notmatch "windows-rpc-ok") {
-            throw "RPC bash did not execute successfully through Git Bash"
+          $startInfo = [System.Diagnostics.ProcessStartInfo]::new()
+          $startInfo.FileName = $exe
+          $startInfo.UseShellExecute = $false
+          $startInfo.RedirectStandardInput = $true
+          $startInfo.RedirectStandardOutput = $true
+          $startInfo.RedirectStandardError = $true
+          foreach ($argument in @("--mode", "rpc", "--no-session", "--no-extensions")) {
+            [void]$startInfo.ArgumentList.Add($argument)
           }
+          $rpc = [System.Diagnostics.Process]::new()
+          $rpc.StartInfo = $startInfo
+          if (-not $rpc.Start()) { throw "Failed to start pi.exe RPC smoke" }
+
+          function Read-RpcResponse([string]$id) {
+            $deadline = [DateTime]::UtcNow.AddSeconds(30)
+            while ([DateTime]::UtcNow -lt $deadline) {
+              $remaining = [Math]::Max(1, [int]($deadline - [DateTime]::UtcNow).TotalMilliseconds)
+              $lineTask = $rpc.StandardOutput.ReadLineAsync()
+              if (-not $lineTask.Wait($remaining)) { throw "Timed out waiting for RPC response $id" }
+              $line = $lineTask.Result
+              if ($null -eq $line) {
+                throw "pi.exe RPC closed before response ${id}: $($rpc.StandardError.ReadToEnd())"
+              }
+              $record = $line | ConvertFrom-Json
+              if ($record.id -eq $id) { return $record }
+            }
+            throw "Timed out waiting for RPC response $id"
+          }
+
+          $rpc.StandardInput.WriteLine('{"id":"state","type":"get_state"}')
+          $rpc.StandardInput.Flush()
+          $state = Read-RpcResponse "state"
+          if (-not $state.success) { throw "RPC get_state did not return a successful response" }
+
+          $rpc.StandardInput.WriteLine('{"id":"shell","type":"bash","command":"printf windows-rpc-ok"}')
+          $rpc.StandardInput.Flush()
+          $shell = Read-RpcResponse "shell"
+          if (-not $shell.success -or $shell.data.exitCode -ne 0 -or $shell.data.output -notmatch "windows-rpc-ok") {
+            throw "RPC bash did not execute successfully through Git Bash: $($shell | ConvertTo-Json -Compress -Depth 8)"
+          }
+
+          $rpc.StandardInput.Close()
+          if (-not $rpc.WaitForExit(30000)) {
+            $rpc.Kill($true)
+            throw "pi.exe RPC did not exit after stdin closed"
+          }
+          if ($rpc.ExitCode -ne 0) { throw "pi.exe RPC smoke failed with exit code $($rpc.ExitCode)" }
 
   release:
     runs-on: ubuntu-latest
