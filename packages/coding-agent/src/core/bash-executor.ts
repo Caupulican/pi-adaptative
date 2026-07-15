@@ -29,6 +29,8 @@ export interface BashExecutorOptions {
 	signal?: AbortSignal;
 	/** Enable conservative pi-native git output filtering for local default execution paths */
 	enableGitFilter?: boolean;
+	/** Wall-clock timeout in seconds. Direct interactive/RPC callers provide the same bounded default as the agent tool. */
+	timeout?: number;
 }
 
 export interface BashResult {
@@ -70,7 +72,7 @@ export async function executeBashWithOperations(
 				classification.subcommand,
 				classification.globalOptions || [],
 				classification.subcommandArgs || [],
-				{ signal: options.signal },
+				{ signal: options.signal, timeout: options.timeout },
 			);
 			if (res.exitCode !== -100) {
 				const rawBytes = res.rawBytes ?? Buffer.from(res.rawOut, "utf-8");
@@ -164,6 +166,7 @@ export async function executeBashWithOperations(
 		const result = await operations.exec(command, cwd, {
 			onData,
 			signal: options?.signal,
+			timeout: options?.timeout,
 		});
 
 		const fullOutput = outputChunks.join("");
@@ -215,7 +218,7 @@ export async function executeBashWithOperations(
 		if (err instanceof Error && err.message.startsWith("silence:")) {
 			const secs = err.message.split(":")[1];
 			throw new Error(
-				`Command killed after ${secs}s of silence (no output). If the command is legitimately quiet for long stretches, re-run it with an explicit timeout, or run it in the background with '&'.`,
+				`Command killed after ${secs}s of silence (no output). If the command is legitimately quiet for long stretches, re-run it with an explicit timeout.`,
 			);
 		}
 

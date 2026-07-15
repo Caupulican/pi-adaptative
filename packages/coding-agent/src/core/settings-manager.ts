@@ -2580,6 +2580,8 @@ export class SettingsManager {
 			tools: this.settings.contextGc?.tools ?? [
 				"read",
 				"bash",
+				"python",
+				"powershell",
 				"rg",
 				"grep",
 				"find",

@@ -2,9 +2,8 @@ import { describe, expect, it } from "vitest";
 import { detectPython } from "../src/utils/tools-manager.ts";
 
 /**
- * python3/python detection for the environment doctor (src/core/doctor.ts).
- * A SYSTEM tool: the doctor only ever reports on it (guide mode when
- * missing), never installs it.
+ * Low-level system-Python detection remains available for diagnostics and
+ * compatibility. The native Python tool itself resolves through uv.
  */
 describe("detectPython", () => {
 	it("reports present with a version string when a real python command resolves", () => {

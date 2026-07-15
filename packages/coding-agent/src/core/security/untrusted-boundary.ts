@@ -21,8 +21,8 @@ const TRUSTED_BUILTINS = new Set(["read", "grep", "find", "ls", "edit", "write",
 
 /**
  * Classify a tool's output trust. Precedence: explicit declared trust → trusted built-in → untrusted
- * name heuristic → trusted default. `bash` is trusted by default (mostly first-party commands); a
- * deployment can opt it into wrapping by passing `bashUntrusted`.
+ * name heuristic → trusted default. Local execution tools (`bash` and `python`) are trusted by default;
+ * a deployment can opt them into wrapping by passing `bashUntrusted`.
  */
 export function classifyToolTrust(
 	toolName: string,
@@ -30,7 +30,9 @@ export function classifyToolTrust(
 ): ToolTrustLevel {
 	if (opts?.declaredTrust) return opts.declaredTrust;
 	const name = toolName.toLowerCase();
-	if (name === "bash") return opts?.bashUntrusted ? "untrusted" : "trusted";
+	if (name === "bash" || name === "python" || name === "powershell") {
+		return opts?.bashUntrusted ? "untrusted" : "trusted";
+	}
 	if (TRUSTED_BUILTINS.has(name)) return "trusted";
 	if (UNTRUSTED_NAME_RE.test(name)) return "untrusted";
 	return "trusted";

@@ -194,6 +194,8 @@ import { SessionTreeNavigator } from "./session-tree-navigator.ts";
 import type { ResourceProfileFilterSettings, SettingsManager } from "./settings-manager.ts";
 import type { SlashCommandInfo } from "./slash-commands.ts";
 import { SystemPromptBuilder } from "./system-prompt-builder.ts";
+import { appendTaskStepsStateSnapshot, getLatestTaskStepsStateSnapshot } from "./tasks/session-task-state.ts";
+import { formatTaskStepsContext, type TaskStepsState } from "./tasks/task-state.ts";
 import { ToolGateController } from "./tool-gate-controller.ts";
 import { TOOL_RECOVERY_EVENT_LOG_FILE } from "./tool-recovery-log-records.ts";
 import { ToolRecoveryLogger } from "./tool-recovery-logger.ts";
@@ -1074,6 +1076,8 @@ export class AgentSession {
 			initializeMemory: () => this._memory.initialize(),
 			getGoalStateSnapshot: () => this.getGoalStateSnapshot(),
 			saveGoalStateSnapshot: (state) => this.saveGoalStateSnapshot(state),
+			getTaskStepsStateSnapshot: () => this.getTaskStepsStateSnapshot(),
+			saveTaskStepsStateSnapshot: (state) => this.saveTaskStepsStateSnapshot(state),
 			getContextGcReport: (messages) => this.getContextGcReport(messages),
 			startWorkerDelegation: (request) => this._backgroundLanes.startWorkerDelegation(request),
 			getWorkerLaneRecords: () => this._backgroundLanes.getLaneRecords(),
@@ -3243,6 +3247,20 @@ export class AgentSession {
 			}
 			this._pendingNextTurnMessages = [];
 
+			const taskStepsState = this.getTaskStepsStateSnapshot();
+			const taskStepsContext = taskStepsState ? formatTaskStepsContext(taskStepsState) : undefined;
+			if (taskStepsState && taskStepsContext) {
+				messages.push(
+					createCustomMessage(
+						"task_steps_context",
+						taskStepsContext,
+						false,
+						{ revision: taskStepsState.revision },
+						new Date().toISOString(),
+					),
+				);
+			}
+
 			// Emit before_agent_start extension event
 			const result = await this._extensionRunner.emitBeforeAgentStart(
 				expandedText,
@@ -4779,6 +4797,16 @@ export class AgentSession {
 	 */
 	getGoalStateSnapshot(): GoalState | undefined {
 		return getLatestGoalStateSnapshot(this.sessionManager.getEntries());
+	}
+
+	/** Save native task-step state to the active session log. */
+	saveTaskStepsStateSnapshot(state: TaskStepsState): string {
+		return appendTaskStepsStateSnapshot(this.sessionManager, state);
+	}
+
+	/** Retrieve the latest valid native task-step state from the active session log. */
+	getTaskStepsStateSnapshot(): TaskStepsState | undefined {
+		return getLatestTaskStepsStateSnapshot(this.sessionManager.getEntries());
 	}
 
 	/**

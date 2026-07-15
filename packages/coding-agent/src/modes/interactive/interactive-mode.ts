@@ -1751,6 +1751,11 @@ export class InteractiveMode {
 				this.editor.setText("");
 				return;
 			}
+			if (text === "/task" || text.startsWith("/task ") || text === "/steps" || text.startsWith("/steps ")) {
+				this.handleTaskCommand(text);
+				this.editor.setText("");
+				return;
+			}
 			if (text === "/goal-continue" || text.startsWith("/goal-continue ")) {
 				await this.handleGoalContinueCommand(text);
 				this.editor.setText("");
@@ -3863,6 +3868,17 @@ export class InteractiveMode {
 				showStatus: (message) => this.showStatus(message),
 				showError: (message) => this.showError(message),
 				refreshAutonomyFooterStatus: () => this.refreshAutonomyFooterStatus(),
+			},
+			text,
+		);
+	}
+
+	private handleTaskCommand(text: string): void {
+		sessionFlows.handleTaskCommand(
+			{
+				session: this.session,
+				showStatus: (message) => this.showStatus(message),
+				showError: (message) => this.showError(message),
 			},
 			text,
 		);

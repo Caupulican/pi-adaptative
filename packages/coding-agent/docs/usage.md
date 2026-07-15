@@ -31,8 +31,8 @@ The editor can be replaced temporarily by built-in UI such as `/settings` or by 
 | Path completion | Press Tab to complete paths |
 | Multi-line input | Shift+Enter, or Ctrl+Enter on Windows Terminal |
 | Images | Paste with Ctrl+V, Alt+V on Windows, or drag into the terminal |
-| Shell command | `!command` runs and sends output to the model |
-| Hidden shell command | `!!command` runs without sending output to the model |
+| Platform shell command | `!command` runs in PowerShell on Windows or Bash elsewhere and sends output to the model |
+| Hidden platform shell command | `!!command` runs without sending output to the model |
 | External editor | Ctrl+G opens `$VISUAL` or `$EDITOR` |
 
 See [Keybindings](keybindings.md) for all shortcuts and customization.
@@ -64,6 +64,7 @@ Type `/` in the editor to open command completion. Extensions can register custo
 | `/toolhealth` | Show tool repair diagnostics and learned standing rules |
 | `/toolprobe [provider/model]` | Probe native/text tool-call support and persist a host-local verdict |
 | `/toolrule-remove <model> <mode>` | Remove one learned tool repair standing rule |
+| `/task`, `/steps` | Manage the native session checklist; see [Task steps](task-steps.md) |
 | `/quit` | Quit pi |
 
 ## Message Queue
@@ -201,7 +202,7 @@ cat README.md | pi -p "Summarize this text"
 | `--no-builtin-tools`, `-nbt` | Disable built-in tools but keep extension/custom tools enabled |
 | `--no-tools`, `-nt` | Disable all tools |
 
-Built-in tools: `read`, `bash`, `edit`, `write`, `grep`, `find`, `ls`.
+Built-in tools include `read`, `edit`, `write`, `grep`, `find`, `ls`, and the uv-managed `python` tool. The agent always sees one stable `bash` tool contract. On Windows, Pi parses its supported simple-command grammar and converts it deterministically to PowerShell; unsupported shell constructs fail closed. Agent, interactive, and RPC shell calls have a 120-second wall-clock default, and Python calls default to 30 seconds. Native goal, task-step, delegation, context, and toolkit tools are activated when their capability/profile gates allow them.
 
 ### Resource Options
 
@@ -292,8 +293,6 @@ pi --exclude-tools ask_question
 
 ## Design Principles
 
-Pi keeps the core small and pushes workflow-specific behavior into extensions, skills, prompt templates, and packages.
-
-It intentionally does not include built-in MCP, sub-agents, permission popups, plan mode, to-dos, or background bash. You can build or install those workflows as extensions or packages, or use external tools such as containers and tmux.
+Pi keeps the core focused and pushes project-specific workflows into extensions, skills, prompt templates, and packages. Core includes the cross-project lifecycle primitives it depends on itself: native goals, task steps, bounded worker delegation, and a platform-selected shell. Broader integrations such as MCP and external-provider teams remain extension/package territory.
 
 For the full rationale, read the [blog post](https://mariozechner.at/posts/2025-11-30-pi-coding-agent/).

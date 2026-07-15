@@ -1,16 +1,15 @@
 import chalk from "chalk";
 import { getAgentDir } from "../config.ts";
 import {
-	detectPython,
 	ensureFffNodePackage,
 	type FffInstallOutcome,
 	getLastFffInstallOutcome,
 	getToolPath,
 	loadAvailableFffNodePackage,
 	probeVersion,
-	type SystemToolStatus,
 } from "../utils/tools-manager.ts";
 import { OllamaRuntime } from "./models/local-runtime.ts";
+import { ensurePythonRuntime, type PythonRuntimeOutcome } from "./python-runtime.ts";
 
 /**
  * Environment doctor: verifies required tooling and installs what it safely
@@ -20,13 +19,10 @@ import { OllamaRuntime } from "./models/local-runtime.ts";
  * for the underlying lazy-install fix; this module is the proactive half).
  *
  * Two tool kinds, two different postures:
- * - "managed": pi already owns the install path (fff-node into
- *   ~/.pi/agent/bin via tools-manager.ts's ensureFffNodePackage). The doctor
- *   actually attempts the install when missing.
- * - "system": pi does not own the install (ripgrep, ollama, python). GUIDE
- *   MODE only -- exact manual steps are reported, never executed, never
- *   `curl | sh`, never `sudo`. This matches the harness's deliberate
- *   no-silent-installer stance for tooling outside its own managed bin dir.
+ * - "managed": pi owns provisioning and attempts it when absent (fff-node,
+ *   plus pinned uv and the Python interpreter resolved through it).
+ * - "system": pi does not own the install (ripgrep and ollama). GUIDE MODE
+ *   only -- exact manual steps are reported, never executed.
  */
 
 export type DoctorToolKind = "managed" | "system";
@@ -58,7 +54,7 @@ export interface DoctorDeps {
 	ensureFffNodePackage: (silent?: boolean) => Promise<unknown | undefined>;
 	getLastFffInstallOutcome: () => FffInstallOutcome | undefined;
 	getRgPath: () => string | null;
-	detectPython: () => SystemToolStatus;
+	ensurePythonRuntime: (options: { silent: boolean }) => Promise<PythonRuntimeOutcome>;
 	/** Best-effort `<command> --version` probe; undefined if it can't be run. Used only to enrich a status line, never for presence detection. */
 	probeVersion: (command: string, versionArgs?: readonly string[]) => string | undefined;
 	ollamaRuntime: DoctorOllamaRuntime;
@@ -79,7 +75,7 @@ const realDoctorDeps: DoctorDeps = {
 	ensureFffNodePackage,
 	getLastFffInstallOutcome,
 	getRgPath: () => getToolPath("rg"),
-	detectPython: () => detectPython(),
+	ensurePythonRuntime,
 	probeVersion,
 	ollamaRuntime: new OllamaRuntime({ agentDir: getAgentDir() }),
 };
@@ -90,14 +86,6 @@ const RIPGREP_GUIDE = [
 	"  - Debian/Ubuntu: apt install ripgrep",
 	"  - Arch: pacman -S ripgrep",
 	"  - Or download a release: https://github.com/BurntSushi/ripgrep/releases",
-];
-
-const PYTHON_GUIDE = [
-	"python3 was not found. Pi never runs installers itself -- manual steps (user-level, no sudo):",
-	"  - macOS (Homebrew): brew install python3",
-	"  - Debian/Ubuntu: apt install python3",
-	"  - Arch: pacman -S python",
-	"  - Or download from https://www.python.org/downloads/",
 ];
 
 function describeFffOutcome(outcome: FffInstallOutcome | undefined): string {
@@ -183,14 +171,26 @@ async function checkOllama(deps: DoctorDeps): Promise<DoctorCheck> {
 	};
 }
 
-/** SYSTEM tool: guide mode only, never installed by the doctor. */
-function checkPython(deps: DoctorDeps): DoctorCheck {
-	const status = deps.detectPython();
-	if (!status.present) {
-		return { id: "python", label: "Python (python3)", kind: "system", present: false, guide: PYTHON_GUIDE };
+/** MANAGED tool: uv and Python share one deduplicated runtime manager with bounded provisioning. */
+async function checkPython(deps: DoctorDeps, silent: boolean): Promise<DoctorCheck> {
+	const outcome = await deps.ensurePythonRuntime({ silent });
+	if (outcome.status !== "ready") {
+		return {
+			id: "python",
+			label: "Python (uv-managed)",
+			kind: "managed",
+			present: false,
+			detail: outcome.reason,
+		};
 	}
-	const detail = status.version ? `${status.command} (${status.version})` : status.command;
-	return { id: "python", label: "Python (python3)", kind: "system", present: true, detail };
+	return {
+		id: "python",
+		label: "Python (uv-managed)",
+		kind: "managed",
+		present: true,
+		installAttempted: outcome.pythonInstalled,
+		detail: `uv: ${outcome.uvPath}; python: ${outcome.pythonPath}${outcome.pythonInstalled ? " (installed just now)" : ""}`,
+	};
 }
 
 export async function runDoctor(
@@ -198,8 +198,12 @@ export async function runDoctor(
 	options: RunDoctorOptions = {},
 ): Promise<DoctorReport> {
 	const silent = options.silent ?? true;
-	const [fffNode, ollama] = await Promise.all([checkFffNode(deps, silent), checkOllama(deps)]);
-	return { checks: [fffNode, checkRipgrep(deps), ollama, checkPython(deps)] };
+	const [fffNode, ollama, python] = await Promise.all([
+		checkFffNode(deps, silent),
+		checkOllama(deps),
+		checkPython(deps, silent),
+	]);
+	return { checks: [fffNode, checkRipgrep(deps), ollama, python] };
 }
 
 export function formatDoctorReport(report: DoctorReport): string {
@@ -220,9 +224,9 @@ export function formatDoctorReport(report: DoctorReport): string {
  * succeeds. Must never fail the update itself: any error here is swallowed
  * and reported as a skipped check, not surfaced as an update failure.
  */
-export async function runUpdatePreflight(): Promise<void> {
+export async function runUpdatePreflight(deps: DoctorDeps = realDoctorDeps): Promise<void> {
 	try {
-		const report = await runDoctor();
+		const report = await runDoctor(deps);
 		console.log(`\n${formatDoctorReport(report)}\n`);
 	} catch (error) {
 		console.log(chalk.dim(`(environment check skipped: ${error instanceof Error ? error.message : String(error)})`));

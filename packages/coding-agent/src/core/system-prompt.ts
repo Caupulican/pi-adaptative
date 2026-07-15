@@ -88,7 +88,7 @@ export function buildSystemPrompt(options: BuildSystemPromptOptions): string {
 	const contextFiles = providedContextFiles ?? [];
 	const skills = providedSkills ?? [];
 
-	const activeTools = selectedTools || ["read", "bash", "edit", "write"];
+	const activeTools = selectedTools || ["read", "bash", "python", "edit", "write"];
 	const visibleTools = activeTools.filter((name) => !!toolSnippets?.[name]);
 
 	if (customPrompt) {
@@ -143,14 +143,28 @@ export function buildSystemPrompt(options: BuildSystemPromptOptions): string {
 	};
 
 	const hasBash = activeTools.includes("bash");
+	const hasPython = activeTools.includes("python");
+	const hasPowerShell = activeTools.includes("powershell");
 	const hasGrep = activeTools.includes("grep");
 	const hasFind = activeTools.includes("find");
 	const hasLs = activeTools.includes("ls");
 	const hasRead = activeTools.includes("read");
 
 	// File exploration guidelines
-	if (hasBash && !hasGrep && !hasFind && !hasLs) {
+	if (hasPowerShell && !hasGrep && !hasFind && !hasLs) {
+		addGuideline("Use powershell for shell commands on Windows; prefer rg for search and Get-ChildItem for listing");
+	} else if (hasBash && !hasGrep && !hasFind && !hasLs) {
 		addGuideline("Use bash for file operations like ls, rg, find");
+	}
+	if (hasBash || hasGrep || hasFind) {
+		addGuideline(
+			"Keep searches bounded and purposeful: discover paths first, pass an explicit root and filters, prefer rg over broad find, and raise command timeouts only for a justified scoped search",
+		);
+	}
+	if (hasPython) {
+		addGuideline(
+			"Prefer the python tool for bounded Python snippets and scripts when Python is clearer than shell pipelines; use read/edit/write for small exact source edits",
+		);
 	}
 
 	for (const guideline of promptGuidelines ?? []) {

@@ -223,7 +223,7 @@ function classifyModes(toolName: string, issue: Omit<ToolRepairIssue, "modes">):
 	const modes: ToolRepairModeName[] = [];
 	const expectedTypes = getSchemaTypes(issue.schema);
 
-	if (toolName === "bash" && issue.pathText === "command") {
+	if ((toolName === "bash" || toolName === "powershell") && issue.pathText === "command") {
 		if (Array.isArray(issue.value) && issue.value.every((item) => typeof item === "string")) {
 			modes.push("bashCommandArgvJoin");
 		}

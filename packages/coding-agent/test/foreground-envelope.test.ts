@@ -15,6 +15,7 @@ describe("buildForegroundEnvelope", () => {
 			["edit", "write_files"],
 			["write", "write_files"],
 			["bash", "run_shell"],
+			["python", "run_shell"],
 			["run_toolkit_script", "run_shell"],
 			["delegate", "delegate"],
 			["goal", "memory_write"],

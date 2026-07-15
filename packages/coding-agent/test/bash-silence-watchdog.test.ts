@@ -1,67 +1,50 @@
 import { describe, expect, it } from "vitest";
-import { createBashTool, setCommandSilenceMsForTests } from "../src/core/tools/bash.ts";
+import { createBashTool, setCommandTimeoutMsForTests } from "../src/core/tools/bash.ts";
 
-describe("bash silence watchdog", () => {
-	it("kills a silent foreground command and reports a structured silence error", async () => {
-		setCommandSilenceMsForTests(500);
+describe("bash execution deadlines", () => {
+	it("applies the default wall-clock timeout to silent commands", async () => {
+		setCommandTimeoutMsForTests(500);
 		try {
 			const tool = createBashTool(process.cwd());
-			await expect(tool.execute("t1", { command: "sleep 30" })).rejects.toThrow(
-				/silence|killed after .*of silence/i,
+			await expect(tool.execute("t1", { command: "sleep 30" })).rejects.toThrow(/timed out after 0.5 seconds/i);
+		} finally {
+			setCommandTimeoutMsForTests(undefined);
+		}
+	}, 15_000);
+
+	it("applies the default wall-clock timeout even while output continues", async () => {
+		setCommandTimeoutMsForTests(700);
+		try {
+			const tool = createBashTool(process.cwd());
+			await expect(tool.execute("t2", { command: "while true; do echo tick; sleep 0.1; done" })).rejects.toThrow(
+				/timed out after 0.7 seconds/i,
 			);
 		} finally {
-			setCommandSilenceMsForTests(undefined);
+			setCommandTimeoutMsForTests(undefined);
 		}
 	}, 15_000);
 
-	it("timeout: 0 is treated as unset: silence watchdog still governs", async () => {
-		setCommandSilenceMsForTests(500);
+	it("treats timeout zero as the bounded default rather than disabling the deadline", async () => {
+		setCommandTimeoutMsForTests(500);
 		try {
 			const tool = createBashTool(process.cwd());
-			await expect(tool.execute("t1b", { command: "sleep 30", timeout: 0 })).rejects.toThrow(
-				/silence|killed after .*of silence/i,
+			await expect(tool.execute("t3", { command: "sleep 30", timeout: 0 })).rejects.toThrow(
+				/timed out after 0.5 seconds/i,
 			);
 		} finally {
-			setCommandSilenceMsForTests(undefined);
+			setCommandTimeoutMsForTests(undefined);
 		}
 	}, 15_000);
 
-	it("does not kill a command that keeps producing output", async () => {
-		setCommandSilenceMsForTests(500);
+	it("lets a bounded explicit timeout replace the default", async () => {
+		setCommandTimeoutMsForTests(300);
 		try {
 			const tool = createBashTool(process.cwd());
-			const result = await tool.execute("t2", {
-				command: "for i in 1 2 3 4; do echo tick$i; sleep 0.3; done",
-			});
-			const text = result.content.map((c) => ("text" in c ? c.text : "")).join("");
-			expect(text).toContain("tick4");
-		} finally {
-			setCommandSilenceMsForTests(undefined);
-		}
-	}, 15_000);
-
-	it("explicit timeout disables the silence watchdog (wall-clock governs)", async () => {
-		setCommandSilenceMsForTests(300);
-		try {
-			const tool = createBashTool(process.cwd());
-			// Silent for 1s (>> 300ms silence) but within the 5s wall-clock timeout: must succeed.
-			const result = await tool.execute("t3", { command: "sleep 1 && echo done", timeout: 5 });
-			const text = result.content.map((c) => ("text" in c ? c.text : "")).join("");
+			const result = await tool.execute("t4", { command: "sleep 1 && echo done", timeout: 2 });
+			const text = result.content.map((item) => ("text" in item ? item.text : "")).join("");
 			expect(text).toContain("done");
 		} finally {
-			setCommandSilenceMsForTests(undefined);
-		}
-	}, 15_000);
-
-	it("backgrounded commands are exempt: shell exits immediately, no kill", async () => {
-		setCommandSilenceMsForTests(300);
-		try {
-			const tool = createBashTool(process.cwd());
-			const result = await tool.execute("t4", { command: "(sleep 2 &) ; echo started" });
-			const text = result.content.map((c) => ("text" in c ? c.text : "")).join("");
-			expect(text).toContain("started");
-		} finally {
-			setCommandSilenceMsForTests(undefined);
+			setCommandTimeoutMsForTests(undefined);
 		}
 	}, 15_000);
 });

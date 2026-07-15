@@ -37,6 +37,8 @@ export const MODEL_CAPABILITY_LEAN_BLOCKED_TOOLS: readonly string[] = ["delegate
 export const MODEL_CAPABILITY_MINIMAL_ALLOWED_TOOLS: readonly string[] = [
 	"read",
 	"bash",
+	"python",
+	"powershell",
 	"edit",
 	"write",
 	// The executor tool: minimal-class models ARE the daily-ops executors, and its schema is tiny.

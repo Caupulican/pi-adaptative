@@ -1,5 +1,14 @@
 ## [Unreleased]
 
+### Changed
+
+- Regenerated the model catalogue.
+
+### Fixed
+
+- Applied shared shell command argument repairs to legacy `powershell` tool calls as well as `bash`.
+- Pinned secure `protobufjs` and `ws` transitive versions in the published package graph.
+
 ## [0.81.35] - 2026-07-15
 
 ## [0.81.34] - 2026-07-15

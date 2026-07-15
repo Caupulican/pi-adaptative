@@ -1,7 +1,9 @@
+import { createHash } from "node:crypto";
 import chalk from "chalk";
 import { type SpawnSyncReturns, spawnSync } from "child_process";
 import {
 	chmodSync,
+	createReadStream,
 	createWriteStream,
 	existsSync,
 	mkdirSync,
@@ -26,6 +28,7 @@ const DOWNLOAD_TIMEOUT_MS = 120_000;
 const COMMAND_PROBE_TIMEOUT_MS = 5_000;
 const ARCHIVE_EXTRACTION_TIMEOUT_MS = 5 * 60_000;
 const FFF_NODE_VERSION = "0.9.6";
+export const UV_VERSION = "0.11.28";
 const FFF_MANAGED_DIR = join(TOOLS_DIR, "fff-node");
 const FFF_MANAGED_PACKAGE_JSON = join(FFF_MANAGED_DIR, "package.json");
 
@@ -47,9 +50,11 @@ interface ToolConfig {
 	systemBinaryNames?: string[]; // Alternative system command names to try before downloading
 	tagPrefix: string; // Prefix for tags (e.g., "v" for v1.0.0, "" for 1.0.0)
 	getAssetName: (version: string, plat: string, architecture: string) => string | null;
+	pinnedVersion?: string;
+	sha256ByAsset?: Readonly<Record<string, string>>;
 }
 
-const TOOLS: Record<string, ToolConfig> = {
+const TOOLS: Record<"fd" | "rg" | "uv", ToolConfig> = {
 	fd: {
 		name: "fd",
 		repo: "sharkdp/fd",
@@ -91,7 +96,52 @@ const TOOLS: Record<string, ToolConfig> = {
 			return null;
 		},
 	},
+	uv: {
+		name: "uv",
+		repo: "astral-sh/uv",
+		binaryName: "uv",
+		systemBinaryNames: ["uv"],
+		tagPrefix: "",
+		pinnedVersion: UV_VERSION,
+		getAssetName: (_version, plat, architecture) => {
+			if (architecture !== "arm64" && architecture !== "x64") return null;
+			const archStr = architecture === "arm64" ? "aarch64" : "x86_64";
+			if (plat === "darwin") return `uv-${archStr}-apple-darwin.tar.gz`;
+			if (plat === "linux") return `uv-${archStr}-unknown-linux-musl.tar.gz`;
+			if (plat === "win32") return `uv-${archStr}-pc-windows-msvc.zip`;
+			return null;
+		},
+		sha256ByAsset: {
+			"uv-aarch64-apple-darwin.tar.gz": "33540eb7c883ab857eff79bd5ac2aa31fe27b595abecb4a9c003a2c998447232",
+			"uv-aarch64-pc-windows-msvc.zip": "3248109afad3ec59baad299d324ff53de17e2d9a3b3e21580ffd26744b11e036",
+			"uv-aarch64-unknown-linux-musl.tar.gz": "da10cdfa7d92212b7acb62021a0fd61bcf8580c58c3632ec915d10c3a1a7906b",
+			"uv-x86_64-apple-darwin.tar.gz": "2ad79983127ffca7d77b77ce6a24278d7e4f7b817a1acf72fea5f8124b4aac5e",
+			"uv-x86_64-pc-windows-msvc.zip": "0a23463216d09c6a72ff80ef5dc5a795f07dc1575cb84d24596c2f124a441b7b",
+			"uv-x86_64-unknown-linux-musl.tar.gz": "f02146b371c35c287d860f003ece7345c86e358a3fd70a9b63700cd141ee7fb4",
+		},
+	},
 };
+
+export type ManagedToolName = keyof typeof TOOLS;
+
+export interface PinnedToolAsset {
+	version: string;
+	assetName: string;
+	expectedSha256: string;
+}
+
+export function getPinnedToolAsset(
+	tool: ManagedToolName,
+	targetPlatform: string = platform(),
+	targetArchitecture: string = arch(),
+): PinnedToolAsset | null {
+	const config: ToolConfig = TOOLS[tool];
+	if (!config.pinnedVersion || !config.sha256ByAsset) return null;
+	const assetName = config.getAssetName(config.pinnedVersion, targetPlatform, targetArchitecture);
+	if (!assetName) return null;
+	const expectedSha256 = config.sha256ByAsset[assetName];
+	return expectedSha256 ? { version: config.pinnedVersion, assetName, expectedSha256 } : null;
+}
 
 // Check if a command exists in PATH by trying to run it
 function commandExists(cmd: string): boolean {
@@ -105,7 +155,7 @@ function commandExists(cmd: string): boolean {
 }
 
 // Get the path to a tool (system-wide or in our tools dir)
-export function getToolPath(tool: "fd" | "rg"): string | null {
+export function getToolPath(tool: ManagedToolName): string | null {
 	const config = TOOLS[tool];
 	if (!config) return null;
 
@@ -210,6 +260,17 @@ async function downloadFile(url: string, dest: string): Promise<void> {
 	await pipeline(Readable.fromWeb(response.body as any), fileStream);
 }
 
+export async function verifyFileSha256(filePath: string, expectedSha256: string): Promise<boolean> {
+	const hash = createHash("sha256");
+	await new Promise<void>((resolve, reject) => {
+		const stream = createReadStream(filePath);
+		stream.on("data", (chunk) => hash.update(chunk));
+		stream.once("error", reject);
+		stream.once("end", resolve);
+	});
+	return hash.digest("hex") === expectedSha256.toLowerCase();
+}
+
 function findBinaryRecursively(rootDir: string, binaryFileName: string): string | null {
 	const stack: string[] = [rootDir];
 
@@ -312,10 +373,10 @@ function extractZipArchive(archivePath: string, extractDir: string, assetName: s
 }
 
 // Download and install a tool
-const toolDownloadPromises = new Map<"fd" | "rg", Promise<string | undefined>>();
+const toolDownloadPromises = new Map<ManagedToolName, Promise<string | undefined>>();
 
 export function runExclusiveToolDownload(
-	tool: "fd" | "rg",
+	tool: ManagedToolName,
 	installer: () => Promise<string | undefined>,
 ): Promise<string | undefined> {
 	const existing = toolDownloadPromises.get(tool);
@@ -329,15 +390,15 @@ export function runExclusiveToolDownload(
 	return promise;
 }
 
-async function downloadTool(tool: "fd" | "rg"): Promise<string> {
-	const config = TOOLS[tool];
+async function downloadTool(tool: ManagedToolName): Promise<string> {
+	const config: ToolConfig = TOOLS[tool];
 	if (!config) throw new Error(`Unknown tool: ${tool}`);
 
 	const plat = platform();
 	const architecture = arch();
 
-	// Get latest version
-	let version = await getLatestVersion(config.repo);
+	// Pinned tools are reproducible; legacy search tools retain their current latest-release behavior.
+	let version = config.pinnedVersion ?? (await getLatestVersion(config.repo));
 	if (tool === "fd" && plat === "darwin" && architecture === "x64") {
 		version = "10.3.0";
 	}
@@ -357,8 +418,15 @@ async function downloadTool(tool: "fd" | "rg"): Promise<string> {
 	const binaryExt = plat === "win32" ? ".exe" : "";
 	const binaryPath = join(TOOLS_DIR, config.binaryName + binaryExt);
 
-	// Download
+	// Download and verify pinned artifacts before extraction.
 	await downloadFile(downloadUrl, archivePath);
+	const expectedSha256 = config.sha256ByAsset?.[assetName];
+	if (config.sha256ByAsset && !expectedSha256) {
+		throw new Error(`No pinned SHA-256 is registered for ${assetName}`);
+	}
+	if (expectedSha256 && !(await verifyFileSha256(archivePath, expectedSha256))) {
+		throw new Error(`SHA-256 verification failed for ${assetName}`);
+	}
 
 	// Extract into a unique temp directory. fd and rg downloads can run concurrently
 	// during startup, so sharing a fixed directory causes races.
@@ -408,9 +476,10 @@ async function downloadTool(tool: "fd" | "rg"): Promise<string> {
 }
 
 // Termux package names for tools
-const TERMUX_PACKAGES: Record<string, string> = {
+const TERMUX_PACKAGES: Record<ManagedToolName, string> = {
 	fd: "fd",
 	rg: "ripgrep",
+	uv: "uv",
 };
 
 const FFF_PLATFORM_PACKAGES: Record<string, string> = {
@@ -704,9 +773,25 @@ export async function ensureFffNodePackage(
 	return fffNodeInstallPromise;
 }
 
+async function installTermuxManagedTool(tool: ManagedToolName, silent: boolean): Promise<string | undefined> {
+	const packageName = TERMUX_PACKAGES[tool];
+	if (!silent) console.log(chalk.dim(`${TOOLS[tool].name} not found. Installing with Termux pkg...`));
+	const child = spawnProcess("pkg", ["install", "-y", packageName], {
+		env: process.env,
+		stdio: silent ? "ignore" : "inherit",
+	});
+	const terminal = await waitForChildProcessWithTermination(child, { timeoutMs: 300_000, killGraceMs: 5_000 });
+	if (terminal.reason !== "exited" || terminal.code !== 0) {
+		throw new Error(
+			`pkg install ${packageName} ${terminal.reason === "timeout" ? "timed out" : `exited with code ${terminal.code ?? 1}`}`,
+		);
+	}
+	return getToolPath(tool) ?? undefined;
+}
+
 // Ensure a tool is available, downloading if necessary
-// Returns the path to the tool, or null if unavailable
-export async function ensureTool(tool: "fd" | "rg", silent: boolean = false): Promise<string | undefined> {
+// Returns the path to the tool, or undefined if unavailable
+export async function ensureTool(tool: ManagedToolName, silent: boolean = false): Promise<string | undefined> {
 	const existingPath = getToolPath(tool);
 	if (existingPath) {
 		return existingPath;
@@ -722,14 +807,25 @@ export async function ensureTool(tool: "fd" | "rg", silent: boolean = false): Pr
 		return undefined;
 	}
 
-	// On Android/Termux, Linux binaries don't work due to Bionic libc incompatibility.
-	// Users must install via pkg.
+	// On Android/Termux, upstream Linux archives target glibc/musl rather than Bionic.
+	// uv is a required managed runtime and the user explicitly authorized provisioning it;
+	// preserve guide-only behavior for optional search tools.
 	if (platform() === "android") {
-		const pkgName = TERMUX_PACKAGES[tool] ?? tool;
-		if (!silent) {
-			console.log(chalk.yellow(`${config.name} not found. Install with: pkg install ${pkgName}`));
+		if (tool !== "uv") {
+			const packageName = TERMUX_PACKAGES[tool];
+			if (!silent) console.log(chalk.yellow(`${config.name} not found. Install with: pkg install ${packageName}`));
+			return undefined;
 		}
-		return undefined;
+		try {
+			return await runExclusiveToolDownload(tool, () => installTermuxManagedTool(tool, silent));
+		} catch (error) {
+			if (!silent) {
+				console.log(
+					chalk.yellow(`Failed to install ${config.name}: ${error instanceof Error ? error.message : error}`),
+				);
+			}
+			return undefined;
+		}
 	}
 
 	// Tool not found - download it

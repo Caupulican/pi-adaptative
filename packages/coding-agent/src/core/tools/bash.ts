@@ -1,6 +1,5 @@
 import { constants } from "node:fs";
-import { access as fsAccess, readdir as fsReaddir, readFile as fsReadFile, stat as fsStat } from "node:fs/promises";
-import { relative as relativePath, resolve as resolvePath } from "node:path";
+import { access as fsAccess } from "node:fs/promises";
 import { type AgentTool, createSilenceWatchdog } from "@caupulican/pi-agent-core";
 import {
 	DEFAULT_MAX_BYTES,
@@ -15,29 +14,54 @@ import { keyHint } from "../../modes/interactive/components/keybinding-hints.ts"
 import { truncateToVisualLines } from "../../modes/interactive/components/visual-truncate.ts";
 import { theme } from "../../modes/interactive/theme/theme.ts";
 import { waitForChildProcessWithTermination } from "../../utils/child-process.ts";
-import { getShellConfig, getShellEnv, trackDetachedChildPid, untrackDetachedChildPid } from "../../utils/shell.ts";
+import {
+	getPlatformShellToolName,
+	getShellConfig,
+	getShellEnv,
+	type PlatformShellToolName,
+	prefixPowerShellCommand,
+	trackDetachedChildPid,
+	untrackDetachedChildPid,
+} from "../../utils/shell.ts";
 import type { ToolDefinition, ToolRenderResultOptions } from "../extensions/types.ts";
 import { withExclusiveMutationBarrier } from "./file-mutation-queue.ts";
 import { classifyGitCommand, executeFilteredGit } from "./git-filter.ts";
 import { OutputAccumulator } from "./output-accumulator.ts";
 import { getTextOutput, invalidArgText, str } from "./render-utils.ts";
+import { routeShellContract } from "./shell-contract-router.ts";
 import { wrapToolDefinition } from "./tool-definition-wrapper.ts";
 
-/** Default silence bound for foreground commands without an explicit timeout (spec §2: ~10 min). */
+/** Low-level silence bound retained for direct shell-operation consumers. Agent tool calls always pass a wall-clock bound. */
 const DEFAULT_COMMAND_SILENCE_MS = 600_000;
+/** Agent-facing wall-clock bound: continuously producing output must not make a command immortal. */
+export const DEFAULT_COMMAND_TIMEOUT_SECONDS = 120;
+export const MAX_COMMAND_TIMEOUT_SECONDS = 3600;
+const MIN_COMMAND_TIMEOUT_SECONDS = 0.1;
 let commandSilenceMsOverride: number | undefined;
+let commandTimeoutMsOverride: number | undefined;
 
-/** Test hook: override the silence threshold. Pass undefined to restore the default. */
+/** Test hook: override the low-level silence threshold. Pass undefined to restore the default. */
 export function setCommandSilenceMsForTests(ms: number | undefined): void {
 	commandSilenceMsOverride = ms;
 }
 
+/** Test hook: override the agent tool's default wall-clock bound. Pass undefined to restore it. */
+export function setCommandTimeoutMsForTests(ms: number | undefined): void {
+	commandTimeoutMsOverride = ms;
+}
+
+export function resolveCommandTimeoutSeconds(timeout: number | undefined): number {
+	if (typeof timeout !== "number" || !Number.isFinite(timeout) || timeout <= 0) {
+		return DEFAULT_COMMAND_TIMEOUT_SECONDS;
+	}
+	return Math.max(MIN_COMMAND_TIMEOUT_SECONDS, Math.min(timeout, MAX_COMMAND_TIMEOUT_SECONDS));
+}
+
 const bashSchema = Type.Object({
-	command: Type.String({ description: "Bash command to execute" }),
+	command: Type.String({ description: "Shell command to execute" }),
 	timeout: Type.Optional(
 		Type.Number({
-			description:
-				"Timeout in seconds (optional). When set to a positive value, this wall-clock limit replaces the default silence watchdog. Zero or negative values are treated as unset, so the silence watchdog still applies.",
+			description: `Wall-clock timeout in seconds. Defaults to ${DEFAULT_COMMAND_TIMEOUT_SECONDS}; positive overrides are capped at ${MAX_COMMAND_TIMEOUT_SECONDS}. Zero or negative values use the default.`,
 		}),
 	),
 });
@@ -78,24 +102,19 @@ export interface BashOperations {
 	) => Promise<{ exitCode: number | null }>;
 }
 
-/**
- * Create bash operations using pi's built-in local shell execution backend.
- *
- * This is useful for extensions that intercept user_bash and still want pi's
- * standard local shell behavior while wrapping or rewriting commands.
- */
-export function createLocalBashOperations(options?: { shellPath?: string }): BashOperations {
+function createLocalShellOperations(
+	shellName: PlatformShellToolName,
+	options?: { shellPath?: string },
+): BashOperations {
 	return {
 		exec: async (command, cwd, { onData, signal, timeout, env }) => {
-			const { shell, args } = getShellConfig(options?.shellPath);
+			const { shell, args } = getShellConfig(options?.shellPath, shellName);
 			try {
 				await fsAccess(cwd, constants.F_OK);
 			} catch {
-				throw new Error(`Working directory does not exist: ${cwd}\nCannot execute bash commands.`);
+				throw new Error(`Working directory does not exist: ${cwd}\nCannot execute ${shellName} commands.`);
 			}
-			if (signal?.aborted) {
-				throw new Error("aborted");
-			}
+			if (signal?.aborted) throw new Error("aborted");
 
 			const child = spawn(shell, [...args, command], {
 				cwd,
@@ -107,11 +126,6 @@ export function createLocalBashOperations(options?: { shellPath?: string }): Bas
 			if (child.pid) trackDetachedChildPid(child.pid);
 			const terminationController = new AbortController();
 			const onAbort = () => terminationController.abort();
-
-			// A command that keeps producing output must never be killed by this mechanism:
-			// silence bounds mute-ness, not duration. It arms when the caller left `timeout`
-			// unset or non-positive (treated as unset) — an explicit positive timeout means
-			// the model took responsibility for the wall clock.
 			let silenceKilled = false;
 			const silenceMs = commandSilenceMsOverride ?? DEFAULT_COMMAND_SILENCE_MS;
 			const silenceWatchdog =
@@ -130,10 +144,8 @@ export function createLocalBashOperations(options?: { shellPath?: string }): Bas
 			};
 
 			try {
-				// Stream stdout and stderr.
 				child.stdout?.on("data", onChunk);
 				child.stderr?.on("data", onChunk);
-				// Forward caller cancellation into the shared bounded termination path.
 				if (signal) {
 					if (signal.aborted) onAbort();
 					else signal.addEventListener("abort", onAbort, { once: true });
@@ -143,21 +155,53 @@ export function createLocalBashOperations(options?: { shellPath?: string }): Bas
 					timeoutMs: timeout !== undefined && timeout > 0 ? timeout * 1000 : undefined,
 					killGraceMs: 2_000,
 				});
-				if (signal?.aborted) {
-					throw new Error("aborted");
-				}
-				if (terminal.reason === "timeout") {
-					throw new Error(`timeout:${timeout}`);
-				}
-				if (silenceKilled) {
-					throw new Error(`silence:${silenceMs / 1000}`);
-				}
+				if (signal?.aborted) throw new Error("aborted");
+				if (terminal.reason === "timeout") throw new Error(`timeout:${timeout}`);
+				if (silenceKilled) throw new Error(`silence:${silenceMs / 1000}`);
 				return { exitCode: terminal.code };
 			} finally {
 				silenceWatchdog?.disarm();
 				if (child.pid) untrackDetachedChildPid(child.pid);
 				if (signal) signal.removeEventListener("abort", onAbort);
 			}
+		},
+	};
+}
+
+/**
+ * Create bash operations using pi's built-in local shell execution backend.
+ *
+ * This is useful for extensions that intercept user_bash and still want pi's
+ * standard local shell behavior while wrapping or rewriting commands.
+ */
+export function createLocalBashOperations(options?: { shellPath?: string }): BashOperations {
+	return createLocalShellOperations("bash", options);
+}
+
+/** Create PowerShell operations using pi's built-in local execution backend. */
+export function createLocalPowerShellOperations(options?: { shellPath?: string }): BashOperations {
+	return createLocalShellOperations("powershell", options);
+}
+
+/** Create the platform shell backend without requiring callers or the model to choose a shell. */
+export function createLocalPlatformShellOperations(
+	options: { shellPath?: string; commandPrefix?: string; operations?: BashOperations } = {},
+	platform: NodeJS.Platform = process.platform,
+): BashOperations {
+	const operations =
+		options.operations ??
+		createLocalShellOperations(getPlatformShellToolName(platform), { shellPath: options.shellPath });
+	return {
+		async exec(command, cwd, execOptions) {
+			let resolvedCommand = command;
+			if (platform === "win32") {
+				const route = routeShellContract(command, platform);
+				if (route.kind === "unsupported") throw new Error(route.error);
+				if (route.kind === "powershell") resolvedCommand = route.command;
+			}
+			if (options.commandPrefix) resolvedCommand = `${options.commandPrefix}\n${resolvedCommand}`;
+			if (platform === "win32") resolvedCommand = prefixPowerShellCommand(resolvedCommand);
+			return operations.exec(resolvedCommand, cwd, execOptions);
 		},
 	};
 }
@@ -176,7 +220,9 @@ function resolveSpawnContext(command: string, cwd: string, spawnHook?: BashSpawn
 }
 
 export interface BashToolOptions {
-	/** Custom operations for command execution. Default: local shell */
+	/** Platform used to choose the default backend and contract router. Defaults to process.platform. */
+	platform?: NodeJS.Platform;
+	/** Custom operations for command execution. Default: local platform shell */
 	operations?: BashOperations;
 	/** Command prefix prepended to every command (for example shell setup commands) */
 	commandPrefix?: string;
@@ -214,12 +260,16 @@ function formatDuration(ms: number): string {
 	return `${(ms / 1000).toFixed(1)}s`;
 }
 
-function formatBashCall(args: { command?: string; timeout?: number } | undefined): string {
+function formatBashCall(
+	args: { command?: string; timeout?: number } | undefined,
+	shellName: PlatformShellToolName,
+): string {
 	const command = str(args?.command);
 	const timeout = args?.timeout as number | undefined;
 	const timeoutSuffix = timeout ? theme.fg("muted", ` (timeout ${timeout}s)`) : "";
 	const commandDisplay = command === null ? invalidArgText(theme) : command ? command : theme.fg("toolOutput", "...");
-	return theme.fg("toolTitle", theme.bold(`$ ${commandDisplay}`)) + timeoutSuffix;
+	const prompt = shellName === "powershell" ? "PS>" : "$";
+	return theme.fg("toolTitle", theme.bold(`${prompt} ${commandDisplay}`)) + timeoutSuffix;
 }
 
 function rebuildBashResultRenderComponent(
@@ -307,155 +357,43 @@ function rebuildBashResultRenderComponent(
 	}
 }
 
-async function tryOptimizeCommand(
-	command: string,
+function createShellToolDefinition(
 	cwd: string,
-): Promise<{ optimized: boolean; output?: string; exitCode?: number }> {
-	if (process.env.PI_TOOL_OPTIMIZER_DISABLED === "1") {
-		return { optimized: false };
-	}
-
-	const trimmed = command.trim();
-	if (!trimmed) {
-		return { optimized: false };
-	}
-
-	// Reject if there are shell operators or pipes/redirects
-	const shellOperators = ["|", ">", "<", "&", ";", "\n", "\r", "$", "`", "(", ")", "*", "?", "[", "]"];
-	if (shellOperators.some((op) => trimmed.includes(op))) {
-		return { optimized: false };
-	}
-
-	// Simple tokenizer split by whitespace
-	const args = trimmed.split(/\s+/);
-	if (args.length === 0) {
-		return { optimized: false };
-	}
-
-	const cmd = args[0];
-	const unquote = (s: string) => {
-		if ((s.startsWith('"') && s.endsWith('"')) || (s.startsWith("'") && s.endsWith("'"))) {
-			return s.slice(1, -1);
-		}
-		return s;
-	};
-
-	const resolveToCwd = (p: string, base: string) => {
-		const clean = unquote(p);
-		if (clean.startsWith("/")) return clean;
-		return resolvePath(base, clean);
-	};
-
-	try {
-		if (cmd === "cat") {
-			if (args.length === 2 && !args[1].startsWith("-")) {
-				const filePath = resolveToCwd(args[1], cwd);
-				const content = await fsReadFile(filePath, "utf-8");
-				return { optimized: true, output: content, exitCode: 0 };
-			}
-		} else if (cmd === "head") {
-			if (args.length === 2 && !args[1].startsWith("-")) {
-				const filePath = resolveToCwd(args[1], cwd);
-				const content = await fsReadFile(filePath, "utf-8");
-				const lines = content.split("\n").slice(0, 10).join("\n");
-				return { optimized: true, output: lines, exitCode: 0 };
-			} else if (args.length === 4 && args[1] === "-n" && !args[3].startsWith("-")) {
-				const count = parseInt(args[2], 10);
-				if (!Number.isNaN(count) && count >= 0) {
-					const filePath = resolveToCwd(args[3], cwd);
-					const content = await fsReadFile(filePath, "utf-8");
-					const lines = content.split("\n").slice(0, count).join("\n");
-					return { optimized: true, output: lines, exitCode: 0 };
-				}
-			}
-		} else if (cmd === "tail") {
-			if (args.length === 2 && !args[1].startsWith("-")) {
-				const filePath = resolveToCwd(args[1], cwd);
-				const content = await fsReadFile(filePath, "utf-8");
-				const allLines = content.split("\n");
-				const lines = allLines.slice(Math.max(0, allLines.length - 10)).join("\n");
-				return { optimized: true, output: lines, exitCode: 0 };
-			} else if (args.length === 4 && args[1] === "-n" && !args[3].startsWith("-")) {
-				const count = parseInt(args[2], 10);
-				if (!Number.isNaN(count) && count >= 0) {
-					const filePath = resolveToCwd(args[3], cwd);
-					const content = await fsReadFile(filePath, "utf-8");
-					const allLines = content.split("\n");
-					const lines = allLines.slice(Math.max(0, allLines.length - count)).join("\n");
-					return { optimized: true, output: lines, exitCode: 0 };
-				}
-			}
-		} else if (cmd === "ls") {
-			if (args.length === 1 || (args.length === 2 && !args[1].startsWith("-"))) {
-				const targetDir = args.length === 2 ? resolveToCwd(args[1], cwd) : cwd;
-				const entries = await fsReaddir(targetDir);
-				entries.sort((a, b) => a.toLowerCase().localeCompare(b.toLowerCase()));
-				const results: string[] = [];
-				for (const entry of entries) {
-					let suffix = "";
-					try {
-						const entryStat = await fsStat(resolvePath(targetDir, entry));
-						if (entryStat.isDirectory()) suffix = "/";
-					} catch {}
-					results.push(entry + suffix);
-				}
-				return { optimized: true, output: results.join("\n"), exitCode: 0 };
-			}
-		} else if (cmd === "grep" || cmd === "rg") {
-			if (args.length === 3 && !args[1].startsWith("-") && !args[2].startsWith("-")) {
-				const patternStr = unquote(args[1]);
-				if (/[\\^$.|?*+()[\]{}]/.test(patternStr)) return { optimized: false };
-				const filePath = resolveToCwd(args[2], cwd);
-				const content = await fsReadFile(filePath, "utf-8");
-				const lines = content.split("\n");
-				const matches: string[] = [];
-				for (let i = 0; i < lines.length; i++) {
-					if (lines[i].includes(patternStr)) {
-						matches.push(lines[i]);
-					}
-				}
-				return { optimized: true, output: matches.join("\n"), exitCode: matches.length > 0 ? 0 : 1 };
-			}
-		} else if (cmd === "find") {
-			if (args.length === 1 || (args.length === 2 && !args[1].startsWith("-"))) {
-				const searchPath = args.length === 2 ? resolveToCwd(args[1], cwd) : cwd;
-				const walk = async (dir: string): Promise<string[]> => {
-					let results: string[] = [];
-					const entries = await fsReaddir(dir, { withFileTypes: true });
-					for (const entry of entries) {
-						const full = resolvePath(dir, entry.name);
-						results.push(full);
-						if (entry.isDirectory()) {
-							results = results.concat(await walk(full));
-						}
-					}
-					return results;
-				};
-				const all = (await walk(searchPath)).map((p) => relativePath(searchPath, p).replace(/\\/g, "/"));
-				return { optimized: true, output: all.join("\n"), exitCode: 0 };
-			}
-		}
-	} catch {
-		return { optimized: false };
-	}
-
-	return { optimized: false };
-}
-
-export function createBashToolDefinition(
-	cwd: string,
+	backendShell: PlatformShellToolName,
+	contractPlatform: NodeJS.Platform,
 	options?: BashToolOptions,
 ): ToolDefinition<typeof bashSchema, BashToolDetails | undefined, BashRenderState> {
-	const ops = options?.operations ?? createLocalBashOperations({ shellPath: options?.shellPath });
+	const toolName = "bash";
+	const ops =
+		options?.operations ??
+		(backendShell === "powershell"
+			? createLocalPowerShellOperations({ shellPath: options?.shellPath })
+			: createLocalBashOperations({ shellPath: options?.shellPath }));
 	const commandPrefix = options?.commandPrefix;
 	const spawnHook = options?.spawnHook;
-	const canOptimizeCommand = !options?.operations && !options?.shellPath && !commandPrefix && !spawnHook;
-	const canFilterCommand = canOptimizeCommand;
+	const hasExecutionOverrides = Boolean(options?.operations || options?.shellPath || commandPrefix || spawnHook);
+	const canFilterCommand = !hasExecutionOverrides;
+	const routesWindowsContract = contractPlatform === "win32";
+	const contractDescription = routesWindowsContract
+		? "Execute Pi's stable Bash-like command contract in the current working directory. On Windows, a finite deterministic router converts supported simple commands to PowerShell; unsupported Bash constructs fail closed instead of being guessed."
+		: "Execute a Bash command in the current working directory.";
 	return {
-		name: "bash",
-		label: "bash",
-		description: `Execute a bash command in the current working directory. Returns stdout and stderr. Output is truncated to last ${DEFAULT_MAX_LINES} lines or ${DEFAULT_MAX_BYTES / 1024}KB (whichever is hit first). If truncated, full output is saved to a temp file. Optionally provide a timeout in seconds. Without an explicit timeout, the command is killed after ${DEFAULT_COMMAND_SILENCE_MS / 1000}s of continuous silence (no stdout/stderr output) rather than being bounded by total runtime; commands that keep producing output are never killed by this. Provide an explicit timeout to replace the silence watchdog with a wall-clock limit, or background long, quiet work with '&'.`,
-		promptSnippet: "Execute bash commands (ls, grep, find, etc.)",
+		name: toolName,
+		label: toolName,
+		description: `${contractDescription} Returns stdout and stderr. Output is truncated to last ${DEFAULT_MAX_LINES} lines or ${DEFAULT_MAX_BYTES / 1024}KB (whichever is hit first). If truncated, full output is saved to a temp file. Commands have a ${DEFAULT_COMMAND_TIMEOUT_SECONDS}-second wall-clock default, including commands that keep producing output; use a positive timeout only when a scoped operation justifies a larger bound (maximum ${MAX_COMMAND_TIMEOUT_SECONDS} seconds).`,
+		promptSnippet: routesWindowsContract
+			? "Execute simple Bash-like commands; Pi routes supported forms deterministically to PowerShell on Windows"
+			: "Execute Bash commands (ls, grep, find, etc.)",
+		promptGuidelines: routesWindowsContract
+			? [
+					"Use the bash tool's portable simple-command contract on Windows; do not write PowerShell or ask the user to choose a shell.",
+					"Use one simple command per call. The deterministic router rejects pipelines, redirection, expansion, shell chaining, nested shells, and unsupported Bash forms; use dedicated read/edit/search tools or separate calls instead.",
+					"Supported Bash-like file commands are converted with literal-path PowerShell operations; verify targets before recursive rm, cp, or mv calls.",
+					"Keep searches scoped and purpose-driven: discover paths first, pass an explicit root and filters, prefer rg over broad find, and increase the timeout only for a justified bounded search.",
+				]
+			: [
+					"Keep searches scoped and purpose-driven: discover paths first, pass an explicit root and filters, prefer rg over broad find, and increase the timeout only for a justified bounded search.",
+				],
 		parameters: bashSchema,
 		async execute(
 			_toolCallId,
@@ -464,9 +402,7 @@ export function createBashToolDefinition(
 			onUpdate?,
 			_ctx?,
 		) {
-			const resolvedCommand = commandPrefix ? `${commandPrefix}\n${command}` : command;
-			const spawnContext = resolveSpawnContext(resolvedCommand, cwd, spawnHook);
-			const output = new OutputAccumulator({ tempFilePrefix: "pi-bash" });
+			const output = new OutputAccumulator({ tempFilePrefix: `pi-${toolName}` });
 			let updateTimer: NodeJS.Timeout | undefined;
 			let updateDirty = false;
 			let lastUpdateAt = 0;
@@ -573,17 +509,21 @@ export function createBashToolDefinition(
 			};
 
 			const appendStatus = (text: string, status: string) => `${text ? `${text}\n\n` : ""}${status}`;
+			const effectiveTimeoutSeconds =
+				typeof timeout === "number" && Number.isFinite(timeout) && timeout > 0
+					? resolveCommandTimeoutSeconds(timeout)
+					: (commandTimeoutMsOverride ?? DEFAULT_COMMAND_TIMEOUT_SECONDS * 1000) / 1000;
 
 			try {
 				if (canFilterCommand) {
-					const classification = classifyGitCommand(command, spawnContext.env);
+					const classification = classifyGitCommand(command, getShellEnv());
 					if (classification.eligible && classification.subcommand) {
 						const res = await executeFilteredGit(
 							cwd,
 							classification.subcommand,
 							classification.globalOptions || [],
 							classification.subcommandArgs || [],
-							{ signal, timeout },
+							{ signal, timeout: effectiveTimeoutSeconds },
 						);
 						if (res.exitCode !== -100) {
 							output.append(res.rawBytes ?? Buffer.from(res.rawOut, "utf-8"));
@@ -606,29 +546,27 @@ export function createBashToolDefinition(
 					}
 				}
 
-				if (canOptimizeCommand) {
-					const optResult = await tryOptimizeCommand(command, cwd);
-					if (optResult.optimized) {
-						output.append(Buffer.from(optResult.output ?? "", "utf-8"));
-						const snapshot = await finishOutput();
-						const { text: outputText, details } = formatOutput(snapshot);
-						if (optResult.exitCode !== 0 && optResult.exitCode !== undefined) {
-							throw new Error(appendStatus(outputText, `Command exited with code ${optResult.exitCode}`));
-						}
-						return { content: [{ type: "text", text: outputText }], details };
-					}
+				let backendCommand = command;
+				if (routesWindowsContract) {
+					const route = routeShellContract(command, contractPlatform);
+					if (route.kind === "unsupported") throw new Error(route.error);
+					backendCommand = route.command;
 				}
+				const commandWithPrefix = commandPrefix ? `${commandPrefix}\n${backendCommand}` : backendCommand;
+				const resolvedCommand =
+					backendShell === "powershell" ? prefixPowerShellCommand(commandWithPrefix) : commandWithPrefix;
+				const spawnContext = resolveSpawnContext(resolvedCommand, cwd, spawnHook);
 
 				let exitCode: number | null;
 				try {
-					// Bash cannot statically declare which files a command mutates, so the
-					// actual shell execution takes the coarse exclusive barrier: it waits for
+					// Shell commands cannot statically declare which files they mutate, so the
+					// actual execution takes the coarse exclusive barrier: it waits for
 					// in-flight edit/write mutations to drain and blocks new ones meanwhile.
 					const result = await withExclusiveMutationBarrier(() =>
 						ops.exec(spawnContext.command, spawnContext.cwd, {
 							onData: handleData,
 							signal,
-							timeout,
+							timeout: effectiveTimeoutSeconds,
 							env: spawnContext.env,
 						}),
 					);
@@ -645,10 +583,14 @@ export function createBashToolDefinition(
 					}
 					if (err instanceof Error && err.message.startsWith("silence:")) {
 						const secs = err.message.split(":")[1];
+						const recovery =
+							backendShell === "bash"
+								? "re-run it with an explicit timeout, or run it in the background with '&'."
+								: "re-run it with an explicit timeout.";
 						throw new Error(
 							appendStatus(
 								text,
-								`Command killed after ${secs}s of silence (no output). If the command is legitimately quiet for long stretches, re-run it with an explicit timeout, or run it in the background with '&'.`,
+								`Command killed after ${secs}s of silence (no output). If the command is legitimately quiet for long stretches, ${recovery}`,
 							),
 						);
 					}
@@ -673,7 +615,7 @@ export function createBashToolDefinition(
 				state.endedAt = undefined;
 			}
 			const text = (context.lastComponent as Text | undefined) ?? new Text("", 0, 0);
-			text.setText(formatBashCall(args));
+			text.setText(formatBashCall(args, toolName));
 			return text;
 		},
 		renderResult(result, options, _theme, context) {
@@ -702,6 +644,14 @@ export function createBashToolDefinition(
 			return component;
 		},
 	};
+}
+
+export function createBashToolDefinition(
+	cwd: string,
+	options?: BashToolOptions,
+): ToolDefinition<typeof bashSchema, BashToolDetails | undefined, BashRenderState> {
+	const platform = options?.platform ?? process.platform;
+	return createShellToolDefinition(cwd, getPlatformShellToolName(platform), platform, options);
 }
 
 export function createBashTool(cwd: string, options?: BashToolOptions): AgentTool<typeof bashSchema> {

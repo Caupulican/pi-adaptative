@@ -59,6 +59,7 @@
 		"!dist/docs/resource-management-design.md",
 		"!dist/docs/untrusted-content-boundary-design.md",
 		"examples",
+		"scripts/postinstall-python-runtime.mjs",
 		"CHANGELOG.md",
 		"npm-shrinkwrap.json"
 	],
@@ -70,13 +71,13 @@
 		"copy-binary-assets": "shx cp package.json dist/ && shx cp README.md dist/ && shx cp CHANGELOG.md dist/ && shx mkdir -p dist/theme && shx cp src/modes/interactive/theme/*.json dist/theme/ && shx mkdir -p dist/assets && shx cp src/modes/interactive/assets/*.png dist/assets/ && shx mkdir -p dist/export-html/vendor && shx cp src/core/export-html/template.html dist/export-html/ && shx cp src/core/export-html/vendor/*.js dist/export-html/vendor/ && shx mkdir -p dist/bundled-resources && shx cp -r src/bundled-resources/* dist/bundled-resources/ && shx cp -r docs dist/ && shx cp -r examples dist/ && shx cp ../../node_modules/@silvia-odwyer/photon-node/photon_rs_bg.wasm dist/",
 		"test": "vitest --run",
 		"shrinkwrap": "node ../../scripts/generate-coding-agent-shrinkwrap.mjs",
-		"prepublishOnly": "npm run clean && npm run build && npm run shrinkwrap"
+		"prepublishOnly": "npm run clean && npm run build && npm run shrinkwrap",
+		"postinstall": "node scripts/postinstall-python-runtime.mjs"
 	},
 	"dependencies": {
 		"@caupulican/pi-agent-core": "^0.81.35",
 		"@caupulican/pi-ai": "^0.81.35",
 		"@caupulican/pi-tui": "^0.81.35",
-		"@ff-labs/fff-node": "0.9.6",
 		"@silvia-odwyer/photon-node": "0.3.4",
 		"chalk": "5.6.2",
 		"cross-spawn": "7.0.6",
@@ -89,7 +90,7 @@
 		"minimatch": "10.2.5",
 		"proper-lockfile": "4.1.2",
 		"typebox": "1.1.38",
-		"undici": "8.3.0",
+		"undici": "8.5.0",
 		"yaml": "2.9.0"
 	},
 	"overrides": {
@@ -99,6 +100,7 @@
 		}
 	},
 	"optionalDependencies": {
+		"@ff-labs/fff-node": "0.9.6",
 		"@mariozechner/clipboard": "0.3.9"
 	},
 	"devDependencies": {

@@ -76,6 +76,8 @@ import type {
 	GrepToolInput,
 	LsToolDetails,
 	LsToolInput,
+	PythonToolDetails,
+	PythonToolInput,
 	ReadToolDetails,
 	ReadToolInput,
 	WriteToolInput,
@@ -803,6 +805,11 @@ export interface BashToolCallEvent extends ToolCallEventBase {
 	input: BashToolInput;
 }
 
+export interface PythonToolCallEvent extends ToolCallEventBase {
+	toolName: "python";
+	input: PythonToolInput;
+}
+
 export interface ReadToolCallEvent extends ToolCallEventBase {
 	toolName: "read";
 	input: ReadToolInput;
@@ -846,6 +853,7 @@ export interface CustomToolCallEvent extends ToolCallEventBase {
  */
 export type ToolCallEvent =
 	| BashToolCallEvent
+	| PythonToolCallEvent
 	| ReadToolCallEvent
 	| EditToolCallEvent
 	| WriteToolCallEvent
@@ -865,6 +873,11 @@ interface ToolResultEventBase {
 export interface BashToolResultEvent extends ToolResultEventBase {
 	toolName: "bash";
 	details: BashToolDetails | undefined;
+}
+
+export interface PythonToolResultEvent extends ToolResultEventBase {
+	toolName: "python";
+	details: PythonToolDetails | undefined;
 }
 
 export interface ReadToolResultEvent extends ToolResultEventBase {
@@ -905,6 +918,7 @@ export interface CustomToolResultEvent extends ToolResultEventBase {
 /** Fired after a tool executes. Can modify result. */
 export type ToolResultEvent =
 	| BashToolResultEvent
+	| PythonToolResultEvent
 	| ReadToolResultEvent
 	| EditToolResultEvent
 	| WriteToolResultEvent
@@ -916,6 +930,9 @@ export type ToolResultEvent =
 // Type guards for ToolResultEvent
 export function isBashToolResult(e: ToolResultEvent): e is BashToolResultEvent {
 	return e.toolName === "bash";
+}
+export function isPythonToolResult(e: ToolResultEvent): e is PythonToolResultEvent {
+	return e.toolName === "python";
 }
 export function isReadToolResult(e: ToolResultEvent): e is ReadToolResultEvent {
 	return e.toolName === "read";
@@ -957,6 +974,7 @@ export function isLsToolResult(e: ToolResultEvent): e is LsToolResultEvent {
  * CustomToolCallEvent.toolName is `string` which overlaps with all literals.
  */
 export function isToolCallEventType(toolName: "bash", event: ToolCallEvent): event is BashToolCallEvent;
+export function isToolCallEventType(toolName: "python", event: ToolCallEvent): event is PythonToolCallEvent;
 export function isToolCallEventType(toolName: "read", event: ToolCallEvent): event is ReadToolCallEvent;
 export function isToolCallEventType(toolName: "edit", event: ToolCallEvent): event is EditToolCallEvent;
 export function isToolCallEventType(toolName: "write", event: ToolCallEvent): event is WriteToolCallEvent;

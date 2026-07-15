@@ -21,6 +21,8 @@ export interface ExecOptions {
 	timeout?: number;
 	/** Working directory */
 	cwd?: string;
+	/** Environment for the child process. Defaults to process.env. */
+	env?: NodeJS.ProcessEnv;
 	/**
 	 * Maximum output retained per stream, in UTF-16 code units (~bytes for ASCII).
 	 * Output is kept as a rolling tail; when exceeded, the oldest output is dropped
@@ -94,6 +96,7 @@ export async function execCommand(
 	return new Promise((resolve) => {
 		const proc = spawn(command, args, {
 			cwd,
+			env: options?.env,
 			shell: false,
 			stdio: ["ignore", "pipe", "pipe"],
 			detached: process.platform !== "win32",

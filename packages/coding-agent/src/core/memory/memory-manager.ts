@@ -27,6 +27,7 @@ export class MemoryManager {
 		"find",
 		"ls",
 		"bash",
+		"python",
 		"ask_user",
 		"skillify",
 		"skill_audit",

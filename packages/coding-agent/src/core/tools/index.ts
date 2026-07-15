@@ -25,6 +25,8 @@ export {
 	createBashTool,
 	createBashToolDefinition,
 	createLocalBashOperations,
+	createLocalPlatformShellOperations,
+	createLocalPowerShellOperations,
 } from "./bash.ts";
 export {
 	CONTEXT_SCOUT_GUIDANCE,
@@ -76,6 +78,20 @@ export {
 	type LsToolOptions,
 } from "./ls.ts";
 export {
+	createPythonTool,
+	createPythonToolDefinition,
+	DEFAULT_PYTHON_TIMEOUT_SECONDS,
+	MAX_PYTHON_OUTPUT_BYTES,
+	MAX_PYTHON_TIMEOUT_SECONDS,
+	type PythonExecutionRequest,
+	type PythonExecutionResult,
+	type PythonOperations,
+	type PythonToolDetails,
+	type PythonToolInput,
+	type PythonToolOptions,
+	resolvePythonToolPath,
+} from "./python.ts";
+export {
 	createReadTool,
 	createReadToolDefinition,
 	type ReadOperations,
@@ -126,6 +142,7 @@ import {
 import { createFindTool, createFindToolDefinition, type FindToolOptions } from "./find.ts";
 import { createGrepTool, createGrepToolDefinition, type GrepToolOptions } from "./grep.ts";
 import { createLsTool, createLsToolDefinition, type LsToolOptions } from "./ls.ts";
+import { createPythonTool, createPythonToolDefinition, type PythonToolOptions } from "./python.ts";
 import { createReadTool, createReadToolDefinition, type ReadToolOptions } from "./read.ts";
 import { createSkillAuditTool, createSkillAuditToolDefinition, type SkillAuditToolOptions } from "./skill-audit.ts";
 import { createSkillifyTool, createSkillifyToolDefinition, type SkillifyToolOptions } from "./skillify.ts";
@@ -136,6 +153,7 @@ export type ToolDef = ToolDefinition<any, any>;
 export type ToolName =
 	| "read"
 	| "bash"
+	| "python"
 	| "edit"
 	| "write"
 	| "grep"
@@ -148,6 +166,7 @@ export type ToolName =
 export const allToolNames: Set<ToolName> = new Set([
 	"read",
 	"bash",
+	"python",
 	"edit",
 	"write",
 	"grep",
@@ -162,6 +181,7 @@ export const allToolNames: Set<ToolName> = new Set([
 export interface ToolsOptions {
 	read?: ReadToolOptions;
 	bash?: BashToolOptions;
+	python?: PythonToolOptions;
 	write?: WriteToolOptions;
 	edit?: EditToolOptions;
 	grep?: GrepToolOptions;
@@ -179,6 +199,8 @@ export function createToolDefinition(toolName: ToolName, cwd: string, options?: 
 			return createReadToolDefinition(cwd, options?.read);
 		case "bash":
 			return createBashToolDefinition(cwd, options?.bash);
+		case "python":
+			return createPythonToolDefinition(cwd, options?.python);
 		case "edit":
 			return createEditToolDefinition(cwd, options?.edit);
 		case "write":
@@ -208,6 +230,8 @@ export function createTool(toolName: ToolName, cwd: string, options?: ToolsOptio
 			return createReadTool(cwd, options?.read);
 		case "bash":
 			return createBashTool(cwd, options?.bash);
+		case "python":
+			return createPythonTool(cwd, options?.python);
 		case "edit":
 			return createEditTool(cwd, options?.edit);
 		case "write":
@@ -231,10 +255,16 @@ export function createTool(toolName: ToolName, cwd: string, options?: ToolsOptio
 	}
 }
 
-export function createCodingToolDefinitions(cwd: string, options?: ToolsOptions): ToolDef[] {
+export function createCodingToolDefinitions(
+	cwd: string,
+	options?: ToolsOptions,
+	platform: NodeJS.Platform = process.platform,
+): ToolDef[] {
+	const bashOptions: BashToolOptions = { ...options?.bash, platform };
 	return [
 		createReadToolDefinition(cwd, options?.read),
-		createBashToolDefinition(cwd, options?.bash),
+		createBashToolDefinition(cwd, bashOptions),
+		createPythonToolDefinition(cwd, options?.python),
 		createEditToolDefinition(cwd, options?.edit),
 		createWriteToolDefinition(cwd, options?.write),
 	];
@@ -249,10 +279,16 @@ export function createReadOnlyToolDefinitions(cwd: string, options?: ToolsOption
 	];
 }
 
-export function createAllToolDefinitions(cwd: string, options?: ToolsOptions): Record<ToolName, ToolDef> {
+export function createAllToolDefinitions(
+	cwd: string,
+	options?: ToolsOptions,
+	platform: NodeJS.Platform = process.platform,
+): Partial<Record<ToolName, ToolDef>> {
+	const bashOptions: BashToolOptions = { ...options?.bash, platform };
 	return {
 		read: createReadToolDefinition(cwd, options?.read),
-		bash: createBashToolDefinition(cwd, options?.bash),
+		bash: createBashToolDefinition(cwd, bashOptions),
+		python: createPythonToolDefinition(cwd, options?.python),
 		edit: createEditToolDefinition(cwd, options?.edit),
 		write: createWriteToolDefinition(cwd, options?.write),
 		grep: createGrepToolDefinition(cwd, options?.grep),
@@ -265,10 +301,16 @@ export function createAllToolDefinitions(cwd: string, options?: ToolsOptions): R
 	};
 }
 
-export function createCodingTools(cwd: string, options?: ToolsOptions): Tool[] {
+export function createCodingTools(
+	cwd: string,
+	options?: ToolsOptions,
+	platform: NodeJS.Platform = process.platform,
+): Tool[] {
+	const bashOptions: BashToolOptions = { ...options?.bash, platform };
 	return [
 		createReadTool(cwd, options?.read),
-		createBashTool(cwd, options?.bash),
+		createBashTool(cwd, bashOptions),
+		createPythonTool(cwd, options?.python),
 		createEditTool(cwd, options?.edit),
 		createWriteTool(cwd, options?.write),
 	];
@@ -283,10 +325,16 @@ export function createReadOnlyTools(cwd: string, options?: ToolsOptions): Tool[]
 	];
 }
 
-export function createAllTools(cwd: string, options?: ToolsOptions): Record<ToolName, Tool> {
+export function createAllTools(
+	cwd: string,
+	options?: ToolsOptions,
+	platform: NodeJS.Platform = process.platform,
+): Partial<Record<ToolName, Tool>> {
+	const bashOptions: BashToolOptions = { ...options?.bash, platform };
 	return {
 		read: createReadTool(cwd, options?.read),
-		bash: createBashTool(cwd, options?.bash),
+		bash: createBashTool(cwd, bashOptions),
+		python: createPythonTool(cwd, options?.python),
 		edit: createEditTool(cwd, options?.edit),
 		write: createWriteTool(cwd, options?.write),
 		grep: createGrepTool(cwd, options?.grep),

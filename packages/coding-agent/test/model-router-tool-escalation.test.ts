@@ -39,6 +39,23 @@ describe("model router tool escalation", () => {
 		).toBe(false);
 	});
 
+	it("classifies native PowerShell reads and mutations", () => {
+		expect(
+			shouldEscalateModelRouterTool({
+				tier: "cheap",
+				toolName: "powershell",
+				args: { command: "Get-ChildItem -Force | Select-String TODO" },
+			}),
+		).toBe(false);
+		expect(
+			shouldEscalateModelRouterTool({
+				tier: "cheap",
+				toolName: "powershell",
+				args: { command: "Remove-Item -LiteralPath out.txt" },
+			}),
+		).toBe(true);
+	});
+
 	it("escalates mutating shell commands from cheap turns", () => {
 		expect(
 			shouldEscalateModelRouterTool({

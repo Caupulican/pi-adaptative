@@ -3,110 +3,95 @@ import { delimiter } from "node:path";
 import { spawn, spawnSync } from "child_process";
 import { getBinDir } from "../config.ts";
 
+export type PlatformShellToolName = "bash" | "powershell";
+
 export interface ShellConfig {
 	shell: string;
 	args: string[];
 }
 
-/**
- * Find bash executable on PATH (cross-platform)
- */
-function findBashOnPath(): string | null {
-	if (process.platform === "win32") {
-		// Windows: Use 'where' and verify file exists (where can return non-existent paths)
-		try {
-			const result = spawnSync("where", ["bash.exe"], {
-				encoding: "utf-8",
-				timeout: 5000,
-				windowsHide: true,
-			});
-			if (result.status === 0 && result.stdout) {
-				const firstMatch = result.stdout.trim().split(/\r?\n/)[0];
-				if (firstMatch && existsSync(firstMatch)) {
-					return firstMatch;
-				}
-			}
-		} catch {
-			// Ignore errors
-		}
-		return null;
-	}
+export const POWERSHELL_UTF8_PREFIX = "try { [Console]::OutputEncoding=[System.Text.Encoding]::UTF8 } catch {}\n";
 
-	// Unix: Use 'which' and trust its output (handles Termux and special filesystems)
+const POWERSHELL_ARGS = ["-NoLogo", "-NoProfile", "-NonInteractive", "-Command"];
+
+export function getPlatformShellToolName(platform: NodeJS.Platform = process.platform): PlatformShellToolName {
+	return platform === "win32" ? "powershell" : "bash";
+}
+
+export function prefixPowerShellCommand(command: string): string {
+	return command.trimStart().startsWith(POWERSHELL_UTF8_PREFIX) ? command : `${POWERSHELL_UTF8_PREFIX}${command}`;
+}
+
+function findExecutableOnPath(executable: string): string | null {
+	const locator = process.platform === "win32" ? "where" : "which";
 	try {
-		const result = spawnSync("which", ["bash"], { encoding: "utf-8", timeout: 5000 });
+		const result = spawnSync(locator, [executable], {
+			encoding: "utf-8",
+			timeout: 5_000,
+			windowsHide: true,
+		});
 		if (result.status === 0 && result.stdout) {
 			const firstMatch = result.stdout.trim().split(/\r?\n/)[0];
-			if (firstMatch) {
-				return firstMatch;
-			}
+			if (firstMatch && (process.platform !== "win32" || existsSync(firstMatch))) return firstMatch;
 		}
 	} catch {
-		// Ignore errors
+		// Resolution falls through to known paths or the platform fallback.
 	}
 	return null;
 }
 
-/**
- * Resolve shell configuration based on platform and an optional explicit shell path.
- * Resolution order:
- * 1. User-specified shellPath
- * 2. On Windows: Git Bash in known locations, then bash on PATH
- * 3. On Unix: /bin/bash, then bash on PATH, then fallback to sh
- */
-export function getShellConfig(customShellPath?: string): ShellConfig {
-	// 1. Check user-specified shell path
-	if (customShellPath) {
-		if (existsSync(customShellPath)) {
-			return { shell: customShellPath, args: ["-c"] };
-		}
-		throw new Error(`Custom shell path not found: ${customShellPath}`);
+function getPowerShellConfig(): ShellConfig {
+	const pwshOnPath = findExecutableOnPath(process.platform === "win32" ? "pwsh.exe" : "pwsh");
+	if (pwshOnPath) return { shell: pwshOnPath, args: [...POWERSHELL_ARGS] };
+
+	const knownPaths: string[] = [];
+	const programFiles = process.env.ProgramFiles;
+	if (programFiles) knownPaths.push(`${programFiles}\\PowerShell\\7\\pwsh.exe`);
+	const systemRoot = process.env.SystemRoot;
+	if (systemRoot) knownPaths.push(`${systemRoot}\\System32\\WindowsPowerShell\\v1.0\\powershell.exe`);
+	for (const path of knownPaths) {
+		if (existsSync(path)) return { shell: path, args: [...POWERSHELL_ARGS] };
 	}
 
+	const windowsPowerShellOnPath = findExecutableOnPath("powershell.exe");
+	if (windowsPowerShellOnPath) return { shell: windowsPowerShellOnPath, args: [...POWERSHELL_ARGS] };
+	throw new Error(
+		"No PowerShell executable found. Install PowerShell 7 (pwsh), restore Windows PowerShell, or set shellPath in settings.json.",
+	);
+}
+
+function getBashConfig(): ShellConfig {
 	if (process.platform === "win32") {
-		// 2. Try Git Bash in known locations
-		const paths: string[] = [];
+		const knownPaths: string[] = [];
 		const programFiles = process.env.ProgramFiles;
-		if (programFiles) {
-			paths.push(`${programFiles}\\Git\\bin\\bash.exe`);
-		}
+		if (programFiles) knownPaths.push(`${programFiles}\\Git\\bin\\bash.exe`);
 		const programFilesX86 = process.env["ProgramFiles(x86)"];
-		if (programFilesX86) {
-			paths.push(`${programFilesX86}\\Git\\bin\\bash.exe`);
+		if (programFilesX86) knownPaths.push(`${programFilesX86}\\Git\\bin\\bash.exe`);
+		for (const path of knownPaths) {
+			if (existsSync(path)) return { shell: path, args: ["-c"] };
 		}
-
-		for (const path of paths) {
-			if (existsSync(path)) {
-				return { shell: path, args: ["-c"] };
-			}
-		}
-
-		// 3. Fallback: search bash.exe on PATH (Cygwin, MSYS2, WSL, etc.)
-		const bashOnPath = findBashOnPath();
-		if (bashOnPath) {
-			return { shell: bashOnPath, args: ["-c"] };
-		}
-
-		throw new Error(
-			`No bash shell found. Options:\n` +
-				`  1. Install Git for Windows: https://git-scm.com/download/win\n` +
-				`  2. Add your bash to PATH (Cygwin, MSYS2, etc.)\n` +
-				"  3. Set shellPath in settings.json\n\n" +
-				`Searched Git Bash in:\n${paths.map((p) => `  ${p}`).join("\n")}`,
-		);
+		const bashOnPath = findExecutableOnPath("bash.exe");
+		if (bashOnPath) return { shell: bashOnPath, args: ["-c"] };
+		throw new Error("No Bash executable found. Install Git Bash or set shellPath in settings.json.");
 	}
+	if (existsSync("/bin/bash")) return { shell: "/bin/bash", args: ["-c"] };
+	const bashOnPath = findExecutableOnPath("bash");
+	return bashOnPath ? { shell: bashOnPath, args: ["-c"] } : { shell: "sh", args: ["-c"] };
+}
 
-	// Unix: try /bin/bash, then bash on PATH, then fallback to sh
-	if (existsSync("/bin/bash")) {
-		return { shell: "/bin/bash", args: ["-c"] };
+/** Resolve the requested shell. Runtime callers omit shellName to select PowerShell on Windows and Bash elsewhere. */
+export function getShellConfig(
+	customShellPath?: string,
+	shellName: PlatformShellToolName = getPlatformShellToolName(),
+): ShellConfig {
+	if (customShellPath) {
+		if (!existsSync(customShellPath)) throw new Error(`Custom shell path not found: ${customShellPath}`);
+		return {
+			shell: customShellPath,
+			args: shellName === "powershell" ? [...POWERSHELL_ARGS] : ["-c"],
+		};
 	}
-
-	const bashOnPath = findBashOnPath();
-	if (bashOnPath) {
-		return { shell: bashOnPath, args: ["-c"] };
-	}
-
-	return { shell: "sh", args: ["-c"] };
+	return shellName === "powershell" ? getPowerShellConfig() : getBashConfig();
 }
 
 export function getShellEnv(): NodeJS.ProcessEnv {

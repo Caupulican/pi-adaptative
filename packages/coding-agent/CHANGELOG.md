@@ -1,5 +1,21 @@
 ## [Unreleased]
 
+### Added
+
+- Added native session-persisted task steps with the built-in `task_steps` tool and `/task`/`/steps` commands, replacing the machine-local checklist extension.
+- Added one stable `bash` tool contract on every platform, with deterministic finite-grammar conversion to UTF-8 PowerShell execution on Windows, fail-closed handling for unsupported shell constructs, and legacy `powershell` tool-name remapping.
+- Added a native uv-managed `python` tool with pinned/checksummed runtime provisioning, direct cross-platform execution, bounded process-tree deadlines, streamed output artifacts, doctor/update/postinstall integration, and native UAC/profile registration.
+
+### Changed
+
+- Agent, interactive, and RPC shell calls now have a 120-second wall-clock default, including continuously producing commands; agent-tool overrides cap at one hour. Removed the unbounded synchronous full-file/recursive optimizer path and added scoped paths-first search guidance.
+
+### Fixed
+
+- Made the platform-limited FFF native binding optional so clean Android/Termux installs use the supported fallback instead of failing with `EBADPLATFORM`.
+- Listed the native `python` and `task_steps` surfaces in CLI help for clean-install discovery.
+- Updated `undici` to 8.5.0 to resolve current TLS, WebSocket, header, cache, and connection-reuse advisories.
+
 ## [0.81.35] - 2026-07-15
 
 ## [0.81.34] - 2026-07-15

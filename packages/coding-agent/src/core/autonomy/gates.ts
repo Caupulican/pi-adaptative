@@ -196,10 +196,17 @@ export function evaluateToolGate(input: {
 		}
 	}
 	let command = "";
-	if (input.toolName === "bash" || input.toolName === "shell") {
+	if (
+		input.toolName === "bash" ||
+		input.toolName === "powershell" ||
+		input.toolName === "shell" ||
+		input.toolName === "python"
+	) {
 		const argsObj = input.args as Record<string, unknown>;
-		if (argsObj && typeof argsObj.command === "string") {
-			command = argsObj.command;
+		if (argsObj && typeof argsObj.command === "string") command = argsObj.command;
+		else if (input.toolName === "python" && argsObj && typeof argsObj.code === "string") command = argsObj.code;
+		else if (input.toolName === "python" && argsObj && typeof argsObj.scriptPath === "string") {
+			command = `python ${argsObj.scriptPath}`;
 		}
 	}
 

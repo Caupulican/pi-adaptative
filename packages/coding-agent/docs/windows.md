@@ -6,22 +6,25 @@ Pi supports native Windows on x64 and ARM64. The Node.js package runs under Wind
 
 - Windows 10 or newer
 - Node.js 22.19 or newer for the npm package
-- [Git for Windows](https://git-scm.com/download/win), including Git Bash
+- Windows PowerShell 5.1 or PowerShell 7
+- Git for Windows for native Git commands
 - Windows Terminal, WezTerm, or the VS Code terminal for the best keyboard support
 
-Pi keeps Bash as the command-tool contract on every platform so tool calls and project scripts have the same semantics. On Windows, Pi resolves Bash in this order:
+The model always sees one stable `bash` tool contract. On Windows, Pi parses one simple command, converts supported Bash-like builtins and external argv deterministically to PowerShell, and fails closed for unsupported syntax. The agent never selects a shell or emits native PowerShell. Pi resolves the Windows backend in this order:
 
 1. `shellPath` in `%USERPROFILE%\.pi\agent\settings.json`
-2. Git Bash under `Program Files`
-3. `bash.exe` on `PATH` from MSYS2, Cygwin, or WSL
+2. PowerShell 7 (`pwsh.exe`) on `PATH` or under `Program Files`
+3. Windows PowerShell (`powershell.exe`) under `System32` or on `PATH`
 
-Git for Windows is the recommended native setup. Using its Bash subprocess does not make Pi a WSL application.
+The backend runs with `-NoLogo -NoProfile -NonInteractive -Command` and a best-effort UTF-8 console-output prefix. Supported contract forms include quoted external commands and bounded forms of `pwd`, `echo`, `which`, `ls`, `cat`, `head`, `tail`, `grep`, `find`, `rm`, `cp`, `mv`, `mkdir`, and `touch`. Pipelines, redirection, variable or command expansion, shell chaining, nested shells, POSIX scripts, unclosed quotes, and unsupported builtin options return an actionable error instead of reaching PowerShell unchanged. Every agent, interactive, and RPC shell call has a 120-second wall-clock default, even while output continues.
 
-To configure another Bash:
+The native `python` tool uses the same contract on Windows and Unix-like systems. Pi provisions a pinned uv executable, resolves or installs Python 3.13 through uv, then spawns the interpreter directly with UTF-8 and bytecode-cache suppression. Python calls default to 30 seconds. See [Native Python](python.md).
+
+To select an explicit PowerShell executable:
 
 ```json
 {
-  "shellPath": "C:\\cygwin64\\bin\\bash.exe"
+  "shellPath": "C:\\Program Files\\PowerShell\\7\\pwsh.exe"
 }
 ```
 
@@ -44,7 +47,7 @@ A Windows release is expected to preserve the same Pi features as Linux and macO
 | --- | --- | --- |
 | CLI, print, JSON, and RPC modes | Native | Full package build and test suite on `windows-latest` |
 | Interactive TUI and configurable keybindings | Native | TUI tests on Windows; packaged `win32-console-mode.node`; Windows Terminal mappings below |
-| `read`, `write`, `edit`, `grep`, `find`, and `bash` tools | Native; Bash prerequisite | Coding-agent tests on Windows; release `pi.exe` executes Bash through RPC |
+| `read`, `write`, `edit`, `grep`, `find`, and stable `bash` contract tools | Native; Bash-like commands are routed deterministically to PowerShell | Router/platform-shell tests plus native Windows CI; release `pi.exe` executes the platform shell through RPC |
 | Provider APIs, OAuth, API-key auth, model routing, and retries | Native | AI, agent, and coding-agent tests on Windows; live credentials are not used in CI |
 | Extensions, skills, prompts, themes, and pi packages | Native | Discovery, loading, reload, package-manager, and isolation tests on Windows |
 | Sessions, branching, compaction, context storage, export, and sharing | Native | Agent and coding-agent session tests on Windows |
@@ -54,7 +57,7 @@ A Windows release is expected to preserve the same Pi features as Linux and macO
 | Toolkit scripts | Native | PowerShell, Bash, and `uv` runners use the same bounded process lifecycle |
 | External editor and browser launch | Native | Windows process-launch tests; `$EDITOR`/`$VISUAL` and the default browser remain user choices |
 | Self-update | npm and pnpm global installs | Windows native-dependency quarantine and update-path tests |
-| Release binary | Native x64 and ARM64 | Each archive runs `--version`, `--help`, `--list-models`, RPC state, and an RPC Bash command on its matching GitHub-hosted Windows architecture |
+| Release binary | Native x64 and ARM64 | Each archive runs `--version`, `--help`, `--list-models`, RPC state, and an RPC platform-shell command on its matching GitHub-hosted Windows architecture |
 | tmux agent manager | Available only when a real tmux is supplied by WSL, MSYS2, or Cygwin | Optional integration; core background delegation does not require tmux |
 | Suspend with `Ctrl+Z` | Not an applicable Windows process concept | Pi reports the platform limitation instead of hanging or pretending to suspend |
 
@@ -88,12 +91,12 @@ See [Terminal setup](terminal-setup.md) for VS Code, WezTerm, and other terminal
 
 ## Troubleshooting
 
-### No Bash shell found
+### No PowerShell executable found
 
-Install Git for Windows or set `shellPath` to an existing `bash.exe`. Confirm it from PowerShell:
+Restore Windows PowerShell, install PowerShell 7, or set `shellPath` to an existing `pwsh.exe`/`powershell.exe`. Confirm discovery from a terminal:
 
 ```powershell
-& "C:\Program Files\Git\bin\bash.exe" --version
+Get-Command pwsh, powershell -ErrorAction SilentlyContinue
 ```
 
 ### Modified Enter does not reach Pi

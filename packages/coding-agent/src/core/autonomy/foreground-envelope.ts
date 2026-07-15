@@ -18,6 +18,8 @@ const TOOL_CAPABILITY_MAP: Readonly<Record<string, CapabilityName>> = {
 	edit: "write_files",
 	write: "write_files",
 	bash: "run_shell",
+	python: "run_shell",
+	powershell: "run_shell",
 	run_toolkit_script: "run_shell",
 	delegate: "delegate",
 	goal: "memory_write",

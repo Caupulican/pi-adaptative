@@ -48,7 +48,7 @@ import type { LaneRecord } from "./autonomy/lane-tracker.ts";
 import type { ArtifactStore } from "./context/context-artifacts.ts";
 import type { MemoryPromptInclusionReport, MemoryRetrievalDiagnostics } from "./context/memory-diagnostics.ts";
 import type { ContextGcReport } from "./context-gc.ts";
-import { DEFAULT_ACTIVE_TOOL_NAMES } from "./default-tool-surface.ts";
+import { DEFAULT_ACTIVE_TOOL_NAMES, mapToolNamesForPlatform } from "./default-tool-surface.ts";
 import { createCoreDiagnosticsToolDefinitions } from "./extensions/builtin.ts";
 import {
 	type ContextUsage,
@@ -81,6 +81,7 @@ import {
 	type SettingsManager,
 } from "./settings-manager.ts";
 import { createSyntheticSourceInfo, type SourceInfo } from "./source-info.ts";
+import type { TaskStepsState } from "./tasks/task-state.ts";
 import {
 	buildReflexUserPrompt,
 	parseReflexPlan,
@@ -97,6 +98,7 @@ import { createAllToolDefinitions } from "./tools/index.ts";
 import { createModelFitnessToolDefinition } from "./tools/model-fitness.ts";
 import { createReadTool } from "./tools/read.ts";
 import { createRunToolkitScriptToolDefinition } from "./tools/run-toolkit-script.ts";
+import { createTaskStepsToolDefinition } from "./tools/task-steps.ts";
 import { createToolDefinitionFromAgentTool } from "./tools/tool-definition-wrapper.ts";
 
 interface ToolDefinitionEntry {
@@ -213,6 +215,9 @@ export interface RuntimeBuilderDeps {
 	/** Goal-tool state accessors. */
 	getGoalStateSnapshot(): GoalState | undefined;
 	saveGoalStateSnapshot(state: GoalState): string;
+	/** Native task-step state accessors. */
+	getTaskStepsStateSnapshot(): TaskStepsState | undefined;
+	saveTaskStepsStateSnapshot(state: TaskStepsState): string;
 	/** Context-gc report for the core diagnostics tool. */
 	getContextGcReport(messages: AgentMessage[]): ContextGcReport;
 	/** Non-blocking worker-delegation starter for the delegate tool. */
@@ -348,10 +353,24 @@ export class RuntimeBuilder {
 		// Re-derive from the pre-filter REQUEST, never from agent.state.tools: the active set is
 		// capability/profile-filtered, so feeding it back through setActiveToolsByName would
 		// permanently shrink what a later switch to a larger model (or permissive profile) restores.
-		const previousActiveToolNames = this.deps.getRequestedActiveToolNames() ?? this.deps.getActiveToolNames();
-		const allowedToolNames = this.deps.getAllowedToolNames();
-		const excludedToolNames = this.deps.getExcludedToolNames();
-		const toolProfileFilter = this.deps.getToolProfileFilter();
+		const previousActiveToolNames = mapToolNamesForPlatform(
+			this.deps.getRequestedActiveToolNames() ?? this.deps.getActiveToolNames(),
+		);
+		const configuredAllowedToolNames = this.deps.getAllowedToolNames();
+		const allowedToolNames = configuredAllowedToolNames
+			? new Set(mapToolNamesForPlatform([...configuredAllowedToolNames]))
+			: undefined;
+		const configuredExcludedToolNames = this.deps.getExcludedToolNames();
+		const excludedToolNames = configuredExcludedToolNames
+			? new Set(mapToolNamesForPlatform([...configuredExcludedToolNames]))
+			: undefined;
+		const configuredToolProfileFilter = this.deps.getToolProfileFilter();
+		const toolProfileFilter = configuredToolProfileFilter
+			? {
+					allow: mapToolNamesForPlatform(configuredToolProfileFilter.allow),
+					block: mapToolNamesForPlatform(configuredToolProfileFilter.block),
+				}
+			: undefined;
 		const isAllowedTool = (name: string): boolean => {
 			if (allowedToolNames && !allowedToolNames.has(name)) return false;
 			if (excludedToolNames?.has(name)) return false;
@@ -431,7 +450,9 @@ export class RuntimeBuilder {
 		}
 		this._toolRegistry = toolRegistry;
 
-		const requestedBase = options?.activeToolNames ? [...options.activeToolNames] : [...previousActiveToolNames];
+		const requestedBase = options?.activeToolNames
+			? mapToolNamesForPlatform(options.activeToolNames)
+			: [...previousActiveToolNames];
 		const nextActiveToolNames = requestedBase.filter((name) => isAllowedTool(name));
 
 		const persistentAutoActivated: string[] = [];
@@ -644,6 +665,13 @@ export class RuntimeBuilder {
 				},
 			});
 			this._baseToolDefinitions.set(goalToolDefinition.name, goalToolDefinition);
+			const taskStepsToolDefinition = createTaskStepsToolDefinition({
+				getTaskStepsState: () => this.deps.getTaskStepsStateSnapshot(),
+				saveTaskStepsState: (state) => {
+					this.deps.saveTaskStepsStateSnapshot(state);
+				},
+			});
+			this._baseToolDefinitions.set(taskStepsToolDefinition.name, taskStepsToolDefinition);
 			const delegateToolDefinition = createDelegateToolDefinition({
 				startWorkerDelegation: (args) => this.deps.startWorkerDelegation(args),
 				runWorkerDelegation: (args) => this.deps.runWorkerDelegationOnce(args),
@@ -728,10 +756,12 @@ export class RuntimeBuilder {
 		}
 		this.deps.applyExtensionBindings(runner);
 
-		const defaultActiveToolNames = baseToolsOverride
-			? Object.keys(baseToolsOverride)
-			: [...DEFAULT_ACTIVE_TOOL_NAMES, ...(settingsManager.getScoutSettings().enabled ? ["context_scout"] : [])];
-		const baseActiveToolNames = options.activeToolNames ?? defaultActiveToolNames;
+		const defaultActiveToolNames = mapToolNamesForPlatform(
+			baseToolsOverride
+				? Object.keys(baseToolsOverride)
+				: [...DEFAULT_ACTIVE_TOOL_NAMES, ...(settingsManager.getScoutSettings().enabled ? ["context_scout"] : [])],
+		);
+		const baseActiveToolNames = mapToolNamesForPlatform(options.activeToolNames ?? defaultActiveToolNames);
 		this.refreshToolRegistry({
 			activeToolNames: baseActiveToolNames,
 			includeAllExtensionTools: options.includeAllExtensionTools,

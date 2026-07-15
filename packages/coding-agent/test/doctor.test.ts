@@ -14,10 +14,9 @@ import {
  * - fff-node is a MANAGED tool (pi already owns its install into
  *   ~/.pi/agent/bin, see tools-manager.ts's ensureFffNodePackage): the doctor
  *   actually attempts the install when missing.
- * - ripgrep, ollama, and python are SYSTEM tools: the doctor only ever
- *   reports on them and prints exact manual steps when missing (GUIDE MODE --
- *   never executed, never curl|sh, never sudo), per the harness's
- *   deliberate no-silent-installer stance for tools it doesn't itself own.
+ * - python is now MANAGED through a pinned uv runtime; doctor/update preflight
+ *   ensure it proactively while retaining bounded, non-fatal failures.
+ * - ripgrep and ollama remain SYSTEM tools in guide mode.
  *
  * All dependencies are injected (mirroring loadFffModule's requires? and
  * DefaultFffSearchBackend's constructor-injected deps elsewhere in this
@@ -31,7 +30,12 @@ function baseDeps(overrides: Partial<DoctorDeps> = {}): DoctorDeps {
 		ensureFffNodePackage: vi.fn(async () => ({ FileFinder: {} }) as unknown),
 		getLastFffInstallOutcome: () => ({ status: "installed" }),
 		getRgPath: () => "/usr/bin/rg",
-		detectPython: () => ({ present: true, command: "python3", version: "Python 3.11.0" }),
+		ensurePythonRuntime: vi.fn(async () => ({
+			status: "ready" as const,
+			uvPath: "/agent/bin/uv",
+			pythonPath: "/agent/runtimes/python/bin/python",
+			pythonInstalled: false,
+		})),
 		probeVersion: () => "ripgrep 14.1.0\n-SIMD -AVX (compiled)",
 		ollamaRuntime: {
 			detect: async () => ({
@@ -218,31 +222,33 @@ describe("runDoctor: ollama (system tool, guide mode only)", () => {
 	});
 });
 
-describe("runDoctor: python (system tool, guide mode only)", () => {
-	it("reports present with the resolved command and version", async () => {
-		const deps = baseDeps({ detectPython: () => ({ present: true, command: "python3", version: "Python 3.11.0" }) });
-		const report = await runDoctor(deps);
-		const python = report.checks.find((c) => c.id === "python");
+describe("runDoctor: python (uv-managed tool)", () => {
+	it("provisions through the shared runtime manager and reports resolved paths", async () => {
+		const ensurePythonRuntime = vi.fn(async () => ({
+			status: "ready" as const,
+			uvPath: "/agent/bin/uv",
+			pythonPath: "/agent/runtimes/python/bin/python",
+			pythonInstalled: true,
+		}));
+		const report = await runDoctor(baseDeps({ ensurePythonRuntime }), { silent: false });
+		const python = report.checks.find((check) => check.id === "python");
 
-		expect(python?.present).toBe(true);
-		expect(python?.kind).toBe("system");
-		expect(python?.detail).toContain("python3");
-		expect(python?.detail).toContain("3.11.0");
+		expect(ensurePythonRuntime).toHaveBeenCalledWith({ silent: false });
+		expect(python).toMatchObject({ kind: "managed", present: true, installAttempted: true });
+		expect(python?.detail).toContain("/agent/bin/uv");
+		expect(python?.detail).toContain("/agent/runtimes/python/bin/python");
 	});
 
-	it("reports missing with guide-mode manual steps -- never an install attempt", async () => {
-		const deps = baseDeps({ detectPython: () => ({ present: false }) });
-		const report = await runDoctor(deps);
-		const python = report.checks.find((c) => c.id === "python");
-
-		expect(python?.present).toBe(false);
-		expect(python?.kind).toBe("system");
-		expect(python?.guide?.length).toBeGreaterThan(0);
-		const guideText = python?.guide?.join(" ") ?? "";
-		expect(guideText).not.toMatch(/curl[^|]*\|\s*(sh|bash)/);
-		// Never an ACTUAL sudo invocation ("sudo apt ...") -- merely reassuring
-		// the user that no sudo is required ("no sudo:") is fine and expected.
-		expect(guideText).not.toMatch(/\bsudo\s+\w/);
+	it("reports bounded managed-runtime failures without pretending success", async () => {
+		const report = await runDoctor(
+			baseDeps({
+				ensurePythonRuntime: async () => ({ status: "offline", reason: "offline mode prevents install" }),
+			}),
+		);
+		const python = report.checks.find((check) => check.id === "python");
+		expect(python).toMatchObject({ kind: "managed", present: false });
+		expect(python?.detail).toContain("offline mode prevents install");
+		expect(python?.guide).toBeUndefined();
 	});
 });
 
@@ -278,9 +284,10 @@ describe("formatDoctorReport", () => {
 });
 
 describe("runUpdatePreflight", () => {
-	it("never throws or rejects, even end-to-end against the real wiring", async () => {
-		// The preflight is called after `pi-adaptative update` succeeds; it must
-		// be non-fatal no matter what the real environment looks like.
-		await expect(runUpdatePreflight()).resolves.toBeUndefined();
+	it("never throws or rejects and uses injected provisioning dependencies", async () => {
+		const deps = baseDeps({
+			ensurePythonRuntime: async () => ({ status: "uv-unavailable", reason: "registry unavailable" }),
+		});
+		await expect(runUpdatePreflight(deps)).resolves.toBeUndefined();
 	});
 });

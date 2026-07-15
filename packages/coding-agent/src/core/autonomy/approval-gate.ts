@@ -9,6 +9,8 @@ const TOOL_CAPABILITY_REQUIREMENTS = new Map<string, readonly CapabilityName[]>(
 	["edit", ["write_files"]],
 	["edit-diff", ["write_files"]],
 	["bash", ["run_shell"]],
+	["python", ["run_shell"]],
+	["powershell", ["run_shell"]],
 	["shell", ["run_shell"]],
 	["fetch", ["network"]],
 	["web_search", ["network"]],

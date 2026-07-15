@@ -22,9 +22,16 @@ npm install -g --ignore-scripts @caupulican/pi-adaptative
 # Create config directory
 mkdir -p ~/.pi/agent
 
+# Provision required managed tools (installs uv with Termux pkg when absent)
+pi doctor
+
 # Run pi
 pi
 ```
+
+## Native Python and uv
+
+The built-in `python` tool requires `uv`. The documented npm command uses `--ignore-scripts`, so `pi doctor` performs the bounded provisioning step after installation. On Termux, Pi runs `pkg install -y uv`; it does not try to execute incompatible desktop Linux binaries. First Python-tool use retries the same provisioning path if doctor was skipped.
 
 ## Clipboard Support
 

@@ -29,6 +29,16 @@ import { findExactModelReferenceMatch, resolveModelScope } from "../../core/mode
 import { MissingSessionCwdError } from "../../core/session-cwd.ts";
 import { listAllSessions, listSessions, openSession } from "../../core/session-manager-factory.ts";
 import type { SettingsManager } from "../../core/settings-manager.ts";
+import { parseTaskCommand } from "../../core/tasks/task-command.ts";
+import {
+	addTaskStep,
+	clearTaskSteps,
+	compactTaskSteps,
+	createTaskStepsState,
+	formatTaskSteps,
+	type TaskStepsState,
+	updateTaskStep,
+} from "../../core/tasks/task-state.ts";
 import { ProjectTrustStore } from "../../core/trust-manager.ts";
 import type { CustomEditor } from "./components/custom-editor.ts";
 import type { FooterComponent } from "./components/footer.ts";
@@ -704,6 +714,64 @@ export async function handleGoalCommand(host: GoalCommandHost, text: string): Pr
 	const continuation = result.finalSnapshot.continuation;
 	host.showStatus(`Goal ${overriding ? "overridden" : "started"}: ${continuation.action}/${continuation.reasonCode}.`);
 	host.refreshAutonomyFooterStatus();
+}
+
+export interface TaskCommandHost {
+	readonly session: {
+		getTaskStepsStateSnapshot: () => TaskStepsState | undefined;
+		saveTaskStepsStateSnapshot: (state: TaskStepsState) => string;
+	};
+	showStatus(message: string): void;
+	showError(message: string): void;
+}
+
+export function handleTaskCommand(host: TaskCommandHost, text: string): void {
+	const parsed = parseTaskCommand(text);
+	if (!parsed.ok) {
+		host.showError(parsed.error);
+		return;
+	}
+	if (parsed.command.type === "retired_execution") {
+		host.showStatus(
+			`/task ${parsed.command.operation} was retired with the detached extension runner. Ask Pi to use native delegate/delegate_status; session-owned worker lanes notify on completion without polling.`,
+		);
+		return;
+	}
+
+	const now = new Date().toISOString();
+	let state = host.session.getTaskStepsStateSnapshot() ?? createTaskStepsState(now);
+	try {
+		switch (parsed.command.type) {
+			case "list":
+				host.showStatus(formatTaskSteps(state, { includeTerminal: parsed.command.includeTerminal }));
+				return;
+			case "add":
+				state = addTaskStep(state, { content: parsed.command.content }, now);
+				break;
+			case "update":
+				state = updateTaskStep(
+					state,
+					parsed.command.selector,
+					{
+						status: parsed.command.status,
+						note: parsed.command.note,
+						evidence: parsed.command.evidence ? [parsed.command.evidence] : undefined,
+					},
+					now,
+				);
+				break;
+			case "clear":
+				state = clearTaskSteps(state, now);
+				break;
+			case "compact":
+				state = compactTaskSteps(state, now);
+				break;
+		}
+		host.session.saveTaskStepsStateSnapshot(state);
+		host.showStatus(formatTaskSteps(state));
+	} catch (error) {
+		host.showError(error instanceof Error ? error.message : String(error));
+	}
 }
 
 export interface GoalContinueCommandHost {

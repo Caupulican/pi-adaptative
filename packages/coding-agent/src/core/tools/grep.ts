@@ -468,6 +468,9 @@ export function createGrepToolDefinition(
 		label: "grep",
 		description: `Search file contents for a pattern. Returns matching lines with file paths and line numbers. Respects .gitignore. Output is truncated to ${DEFAULT_LIMIT} matches or ${DEFAULT_MAX_BYTES / 1024}KB (whichever is hit first). Long lines are truncated to ${GREP_MAX_LINE_LENGTH} chars.`,
 		promptSnippet: "Search file contents for patterns (respects .gitignore)",
+		promptGuidelines: [
+			"Scope grep to the narrowest known root and glob; discover candidate paths first instead of repeatedly scanning an entire repository, home directory, or filesystem.",
+		],
 		parameters: grepSchema,
 		toolGroup: "explore",
 		async execute(

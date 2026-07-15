@@ -51,7 +51,7 @@ const INTENT_CLASSES: readonly ToolSelectionIntentClass[] = [
 const INTENT_WORDS: Record<ToolSelectionIntentClass, readonly string[]> = {
 	read: ["read", "cat", "ls", "list", "stat", "head", "tail"],
 	search: ["search", "grep", "find", "glob", "ripgrep", "query"],
-	execute: ["bash", "shell", "exec", "run", "process", "command", "script"],
+	execute: ["bash", "python", "powershell", "shell", "exec", "run", "process", "command", "script"],
 	write: ["write", "edit", "patch", "apply", "delete", "mkdir", "move", "rename"],
 	retrieve: ["retrieve", "artifact", "recall", "memory", "fetch", "download"],
 	explain: ["explain", "help", "describe", "inspect", "context"],

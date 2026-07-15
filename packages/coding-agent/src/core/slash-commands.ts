@@ -46,6 +46,14 @@ export const BUILTIN_SLASH_COMMANDS: ReadonlyArray<BuiltinSlashCommand> = [
 		name: "goal-continue",
 		description: "Continue the current goal loop explicitly (/goal-continue [turns] [stalls])",
 	},
+	{
+		name: "task",
+		description: "Manage native session task steps (/task to list; /task add <text>)",
+	},
+	{
+		name: "steps",
+		description: "Alias for /task",
+	},
 	{ name: "model", description: "Select model (opens selector UI)" },
 	{ name: "profiles", description: "Select a runtime profile for this session" },
 	{ name: "scoped-models", description: "Enable/disable models for Ctrl+P cycling" },

@@ -236,7 +236,7 @@ export function printHelp(extensionFlags?: ExtensionFlag[]): void {
 					})
 					.join("\n")}\n`
 			: "";
-	console.log(`${chalk.bold(APP_NAME)} - AI coding assistant with read, bash, edit, write, context_audit tools
+	console.log(`${chalk.bold(APP_NAME)} - AI coding assistant with native task, shell, Python, file, and context tools
 
 ${chalk.bold("Usage:")}
   ${APP_NAME} [options] [@files...] [messages...]
@@ -404,13 +404,15 @@ ${chalk.bold("Environment Variables:")}
   PI_SHARE_VIEWER_URL              - Base URL for /share command (default: https://pi.dev/session/)
 
 ${chalk.bold("Built-in Tool Names:")}
-  read   - Read file contents
-  bash   - Execute bash commands
-  edit   - Edit files with find/replace
-  write  - Write files (creates/overwrites)
+  read       - Read file contents
+  bash       - Execute the bounded cross-platform shell contract
+  python     - Execute bounded code through the uv-managed Python runtime
+  edit       - Edit files with find/replace
+  write      - Write files (creates/overwrites)
+  task_steps - Track the active session checklist
   context_audit - Inspect active context/tool/system prompt usage (read-only)
-  grep   - Search file contents (read-only, off by default)
-  find   - Find files by glob pattern (read-only, off by default)
-  ls     - List directory contents (read-only, off by default)
+  grep       - Search file contents (read-only, off by default)
+  find       - Find files by glob pattern (read-only, off by default)
+  ls         - List directory contents (read-only, off by default)
 `);
 }

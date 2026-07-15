@@ -11,7 +11,7 @@ import type { Agent, BashExecutionMessage } from "@caupulican/pi-agent-core";
 import type { SessionManager } from "@caupulican/pi-agent-core/node";
 import { type BashResult, executeBashWithOperations } from "./bash-executor.ts";
 import type { SettingsManager } from "./settings-manager.ts";
-import { type BashOperations, createLocalBashOperations } from "./tools/bash.ts";
+import { type BashOperations, createLocalPlatformShellOperations, resolveCommandTimeoutSeconds } from "./tools/bash.ts";
 
 export interface BashExecutionControllerDeps {
 	getAgent(): Agent;
@@ -19,6 +19,15 @@ export interface BashExecutionControllerDeps {
 	getSettingsManager(): SettingsManager;
 	/** Whether the agent is currently streaming — defers appending a bash result if so. */
 	isStreaming(): boolean;
+}
+
+export interface BashExecutionOptions {
+	excludeFromContext?: boolean;
+	operations?: BashOperations;
+	/** Injectable target platform for tests and embedded runtimes. */
+	platform?: NodeJS.Platform;
+	/** Wall-clock timeout in seconds; non-positive values use the bounded default. */
+	timeout?: number;
 }
 
 export class BashExecutionController {
@@ -34,28 +43,27 @@ export class BashExecutionController {
 	async executeBash(
 		command: string,
 		onChunk?: (chunk: string) => void,
-		options?: { excludeFromContext?: boolean; operations?: BashOperations },
+		options?: BashExecutionOptions,
 	): Promise<BashResult> {
 		const abortController = new AbortController();
 		this._bashAbortControllers.add(abortController);
 
-		// Apply command prefix if configured (e.g., "shopt -s expand_aliases" for alias support)
-		const prefix = this.deps.getSettingsManager().getShellCommandPrefix();
+		const commandPrefix = this.deps.getSettingsManager().getShellCommandPrefix();
 		const shellPath = this.deps.getSettingsManager().getShellPath();
-		const resolvedCommand = prefix ? `${prefix}\n${command}` : command;
-		const enableGitFilter = !options?.operations && !prefix && !shellPath;
+		const platform = options?.platform ?? process.platform;
+		const enableGitFilter = !options?.operations && !commandPrefix && !shellPath;
+		const operations = createLocalPlatformShellOperations(
+			{ shellPath, commandPrefix, operations: options?.operations },
+			platform,
+		);
 
 		try {
-			const result = await executeBashWithOperations(
-				resolvedCommand,
-				this.deps.getSessionManager().getCwd(),
-				options?.operations ?? createLocalBashOperations({ shellPath }),
-				{
-					onChunk,
-					signal: abortController.signal,
-					enableGitFilter,
-				},
-			);
+			const result = await executeBashWithOperations(command, this.deps.getSessionManager().getCwd(), operations, {
+				onChunk,
+				signal: abortController.signal,
+				enableGitFilter,
+				timeout: resolveCommandTimeoutSeconds(options?.timeout),
+			});
 
 			this.recordBashResult(command, result, options);
 			return result;

@@ -267,7 +267,7 @@ Context GC only rewrites the provider-bound context view. It does not delete or 
 | `contextGc.enabled` | boolean | `true` | Enable provider-context packing for stale bulky context |
 | `contextGc.preserveRecentMessages` | number | `12` | Recent messages kept verbatim |
 | `contextGc.minToolResultChars` | number | `2500` | Minimum stale tool-result size before packing |
-| `contextGc.tools` | string[] | `read`, `bash`, `rg`, `grep`, `context_headroom_retrieve`, `headroom_retrieve` | Tool results eligible for stale-output packing |
+| `contextGc.tools` | string[] | `read`, `bash`, `python`, `powershell`, `rg`, `grep`, `context_headroom_retrieve`, `headroom_retrieve` | Tool results eligible for stale-output packing |
 | `contextGc.semanticMemory.enabled` | boolean | `true` | Pack stale Automata/Mind semantic context pages from provider context |
 | `contextGc.semanticMemory.preserveRecentPages` | number | `2` | Newest semantic memory pages kept verbatim |
 | `contextGc.semanticMemory.minChars` | number | `1200` | Minimum semantic page size before packing |
@@ -373,9 +373,13 @@ Keep `retry.provider.maxRetries` at `0` unless provider-level retries are explic
 
 | Setting | Type | Default | Description |
 |---------|------|---------|-------------|
-| `shellPath` | string | - | Custom shell path (e.g., for Cygwin on Windows) |
-| `shellCommandPrefix` | string | - | Prefix for every bash command (e.g., `"shopt -s expand_aliases"`) |
+| `shellPath` | string | platform default | Custom platform-shell path (`pwsh.exe`/`powershell.exe` on Windows; Bash-compatible shell elsewhere) |
+| `shellCommandPrefix` | string | - | Platform-shell snippet prepended to every command (for example, `"shopt -s expand_aliases"` on Bash) |
 | `npmCommand` | string[] | - | Command argv used for npm package lookup/install operations (e.g., `["mise", "exec", "node@20", "--", "npm"]`) |
+
+Pi exposes one stable `bash` contract to the model on every platform. On Windows, the tool router parses a finite simple-command grammar, converts supported Bash-like forms to literal-path PowerShell, and rejects pipelines, redirection, expansion, chaining, nested shells, POSIX scripts, and unsupported builtin forms instead of guessing. Legacy `powershell` tool/profile references map to `bash`. The Windows backend prefers PowerShell 7 (`pwsh.exe`), falls back to Windows PowerShell, and runs with `-NoLogo -NoProfile -NonInteractive -Command` plus UTF-8 console output setup. `shellCommandPrefix` uses backend-native syntax because Pi applies it after routing. Agent, interactive, and RPC shell calls default to a 120-second wall-clock deadline; agent-tool overrides cap at one hour.
+
+The native `python` tool is active by default and resolves Python through pinned `uv`. Pi provisions missing uv/Python during package postinstall, `pi update`, `pi doctor`, or first tool use. Python calls default to 30 seconds and cap explicit overrides at 300 seconds. See [Native Python](python.md).
 
 ```json
 {

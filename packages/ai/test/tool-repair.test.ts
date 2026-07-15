@@ -337,6 +337,20 @@ describe("tool argument repair", () => {
 		});
 	});
 
+	it("applies the shared shell command repairs to PowerShell", () => {
+		const tool = makeTool(
+			"powershell",
+			Type.Object({ command: Type.String(), timeout: Type.Optional(Type.Number()) }),
+		);
+
+		expect(
+			validateToolArguments(tool, makeCall("powershell", { command: ["Get-ChildItem", "-Force"], timeout: "30" })),
+		).toEqual({ command: "Get-ChildItem -Force", timeout: 30 });
+		expect(validateToolArguments(tool, makeCall("powershell", { command: { command: "Get-Location" } }))).toEqual({
+			command: "Get-Location",
+		});
+	});
+
 	it("keeps the registry as the named repair source of truth", () => {
 		expect(TOOL_REPAIR_REGISTRY.map((entry) => entry.name)).toEqual([
 			"nullOptionalDrop",

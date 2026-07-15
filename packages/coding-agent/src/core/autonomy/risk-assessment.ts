@@ -20,6 +20,8 @@ const DESTRUCTIVE_CMD_RE =
 const GIT_MUTATE_CMD_RE = /\bgit\s+(commit|push|reset|clean|stash|rebase)\b/i;
 const PKG_MUTATE_CMD_RE = /\b(npm|pnpm|yarn|bun)\s+(install|i|update|up|publish|run|remove|rm|uninstall)\b/i;
 const RELEASE_DEPLOY_CMD_RE = /\b(release|deploy)\b/i;
+const PYTHON_HIGH_IMPACT_RE =
+	/\b(?:shutil\.(?:rmtree|move|copy|copy2|copytree)|os\.(?:remove|unlink|rmdir|removedirs|system)|subprocess\.(?:run|call|check_call|check_output|Popen)|Path\([^)]*\)\.(?:unlink|rmdir))\b/i;
 const REDIRECTION_RE = /[<>]/;
 
 function stripSingleQuotes(cmd: string): string {
@@ -102,6 +104,7 @@ export function assessOperationRisk(input: RiskAssessmentInput): RiskAssessment 
 			GIT_MUTATE_CMD_RE.test(cleanCmd) ||
 			PKG_MUTATE_CMD_RE.test(cleanCmd) ||
 			RELEASE_DEPLOY_CMD_RE.test(cleanCmd) ||
+			PYTHON_HIGH_IMPACT_RE.test(cleanCmd) ||
 			REDIRECTION_RE.test(cleanCmd)
 		) {
 			return {

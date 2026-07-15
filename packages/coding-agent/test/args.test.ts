@@ -43,6 +43,20 @@ describe("parseArgs", () => {
 				log.mockRestore();
 			}
 		});
+
+		test("lists the native task and Python tool surfaces", () => {
+			const log = vi.spyOn(console, "log").mockImplementation(() => {});
+			try {
+				printHelp();
+				const output = log.mock.calls.map((call) => call.join(" ")).join("\n");
+				expect(output).toContain("python");
+				expect(output).toContain("task_steps");
+				expect(output).not.toContain("task_goal");
+				expect(output).not.toContain("task_background");
+			} finally {
+				log.mockRestore();
+			}
+		});
 	});
 
 	describe("--print flag", () => {
