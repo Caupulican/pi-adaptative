@@ -1,12 +1,16 @@
 ## [Unreleased]
 
+### Fixed
+
+- Made absolute file-autocomplete regression coverage portable across operating systems.
+
 ## [0.81.34] - 2026-07-15
 
 ## [0.81.33] - 2026-07-15
 
 ### Fixed
 
-- Made cancellable loaders settle from terminal events without polling and prevented relative file autocomplete traversal from escaping its configured base while retaining absolute-path completion.
+- Made cancellable loaders settle from terminal events without polling and prevented file autocomplete from escaping its configured base directory.
 
 ## [0.81.32] - 2026-07-13
 
