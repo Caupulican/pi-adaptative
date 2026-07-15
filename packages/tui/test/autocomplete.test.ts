@@ -2,7 +2,7 @@ import assert from "node:assert";
 import { spawnSync } from "node:child_process";
 import { chmodSync, mkdirSync, mkdtempSync, rmSync, symlinkSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
-import { dirname, join } from "node:path";
+import { dirname, join, sep } from "node:path";
 import { afterEach, beforeEach, describe, it, test } from "node:test";
 import { CombinedAutocompleteProvider } from "../src/autocomplete.ts";
 
@@ -56,15 +56,22 @@ const getSuggestions = (
 
 describe("CombinedAutocompleteProvider", () => {
 	describe("extractPathPrefix", () => {
-		it("does not escape the autocomplete base for an absolute root path", async () => {
-			const provider = new CombinedAutocompleteProvider([], "/tmp");
-			const lines = ["hey /"];
-			const cursorLine = 0;
-			const cursorCol = 5; // After the "/"
+		it("returns suggestions for an absolute path when forced", async () => {
+			const absoluteDir = mkdtempSync(join(tmpdir(), "pi-autocomplete-absolute-"));
+			try {
+				writeFileSync(join(absoluteDir, "marker.txt"), "marker");
+				const provider = new CombinedAutocompleteProvider([], tmpdir());
+				const prefix = `${absoluteDir}${sep}`;
+				const lines = [`hey ${prefix}`];
 
-			const result = await getSuggestions(provider, lines, cursorLine, cursorCol, true);
+				const result = await getSuggestions(provider, lines, 0, lines[0]!.length, true);
 
-			assert.strictEqual(result, null, "Should reject paths outside the autocomplete base");
+				assert.notEqual(result, null, "Should return suggestions for an absolute directory");
+				assert.strictEqual(result?.prefix, prefix);
+				assert(result?.items.some((item) => item.label === "marker.txt"));
+			} finally {
+				rmSync(absoluteDir, { recursive: true, force: true });
+			}
 		});
 
 		it("extracts /A from '/A' when forced", async () => {
@@ -95,15 +102,22 @@ describe("CombinedAutocompleteProvider", () => {
 			assert.strictEqual(result, null, "Should not trigger for slash commands");
 		});
 
-		it("does not escape the autocomplete base after a slash-command argument", async () => {
-			const provider = new CombinedAutocompleteProvider([], "/tmp");
-			const lines = ["/command /"];
-			const cursorLine = 0;
-			const cursorCol = 10; // After the second "/"
+		it("returns suggestions for an absolute path after a slash-command argument", async () => {
+			const absoluteDir = mkdtempSync(join(tmpdir(), "pi-autocomplete-command-"));
+			try {
+				writeFileSync(join(absoluteDir, "marker.txt"), "marker");
+				const provider = new CombinedAutocompleteProvider([], tmpdir());
+				const prefix = `${absoluteDir}${sep}`;
+				const lines = [`/command ${prefix}`];
 
-			const result = await getSuggestions(provider, lines, cursorLine, cursorCol, true);
+				const result = await getSuggestions(provider, lines, 0, lines[0]!.length, true);
 
-			assert.strictEqual(result, null, "Should reject paths outside the autocomplete base");
+				assert.notEqual(result, null, "Should return suggestions for an absolute command argument");
+				assert.strictEqual(result?.prefix, prefix);
+				assert(result?.items.some((item) => item.label === "marker.txt"));
+			} finally {
+				rmSync(absoluteDir, { recursive: true, force: true });
+			}
 		});
 	});
 

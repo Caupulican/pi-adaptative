@@ -6,7 +6,7 @@
 
 ### Fixed
 
-- Made cancellable loaders settle from terminal events without polling and prevented file autocomplete from escaping its configured base directory.
+- Made cancellable loaders settle from terminal events without polling and prevented relative file autocomplete traversal from escaping its configured base while retaining absolute-path completion.
 
 ## [0.81.32] - 2026-07-13
 
