@@ -51,6 +51,7 @@ For the full first-run flow, see [Quickstart](quickstart.md).
 ## Customization
 
 - [Extensions](extensions.md) - TypeScript modules for tools, commands, events, and custom UI.
+- [tmux agent manager](tmux-agent-manager.md) - bundled event-driven external-provider teams with parent wake handoffs.
 - [Skills](skills.md) - Agent Skills for reusable on-demand capabilities.
 - [Resource profiles & library](resources.md) - curate extensions, skills, and agents per project or situation; share a catalog; install and back up.
 - [Self-adaptation](self-adaptation.md) - draft live skills/extensions and run evidence-backed Pi harness improvement loops.
@@ -74,6 +75,7 @@ For the full first-run flow, see [Quickstart](quickstart.md).
 ## Platform setup
 
 - [Windows](windows.md)
+- [Transient work directory](work-directory.md) - multi-tenant runtime output, leases, and retention.
 - [Termux on Android](termux.md)
 - [tmux](tmux.md)
 - [Terminal setup](terminal-setup.md)

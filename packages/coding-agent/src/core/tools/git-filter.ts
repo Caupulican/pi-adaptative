@@ -1,11 +1,12 @@
 import { spawn } from "node:child_process";
 import { randomBytes } from "node:crypto";
 import { existsSync, type WriteStream } from "node:fs";
-import { tmpdir } from "node:os";
 import { join, resolve } from "node:path";
-import { waitForChildProcess } from "../../utils/child-process.ts";
+import { getAgentDir } from "../../config.ts";
+import { waitForChildProcessWithTermination } from "../../utils/child-process.ts";
 import { createSafeWriteStream } from "../../utils/safe-write-stream.ts";
-import { killProcessTree, trackDetachedChildPid, untrackDetachedChildPid } from "../../utils/shell.ts";
+import { trackDetachedChildPid, untrackDetachedChildPid } from "../../utils/shell.ts";
+import { getProcessWorkRun } from "../../utils/work-directory.ts";
 
 /**
  * Retention budget for git output held in memory while filtering. Output beyond
@@ -14,6 +15,8 @@ import { killProcessTree, trackDetachedChildPid, untrackDetachedChildPid } from 
  */
 const DEFAULT_MAX_RETAINED_GIT_OUTPUT_BYTES = 48 * 1024 * 1024;
 const MAX_RETAINED_GIT_STDERR_BYTES = 8 * 1024 * 1024;
+const DEFAULT_GIT_FILTER_TIMEOUT_SECONDS = 10 * 60;
+const GIT_FILTER_KILL_GRACE_MS = 2_000;
 
 function maxRetainedGitOutputBytes(): number {
 	const raw = process.env.PI_GIT_FILTER_MAX_RETAINED_BYTES;
@@ -192,25 +195,10 @@ export async function runGitQuery(
 	let overflowStream: WriteStream | undefined;
 	let overflowStreamEnded = false;
 	let overflowWriteError: Error | undefined;
-	let timedOut = false;
-	const timeoutSeconds = options?.timeout;
-	let timeoutHandle: NodeJS.Timeout | undefined;
-	const killChild = () => {
-		if (child.pid) killProcessTree(child.pid);
-	};
+	const timeoutSeconds =
+		options?.timeout && options.timeout > 0 ? options.timeout : DEFAULT_GIT_FILTER_TIMEOUT_SECONDS;
 
 	try {
-		if (timeoutSeconds !== undefined && timeoutSeconds > 0) {
-			timeoutHandle = setTimeout(() => {
-				timedOut = true;
-				killChild();
-			}, timeoutSeconds * 1000);
-		}
-		if (options?.signal) {
-			if (options.signal.aborted) killChild();
-			else options.signal.addEventListener("abort", killChild, { once: true });
-		}
-
 		child.stdout?.on("data", (chunk: Buffer) => {
 			totalStdoutBytes += chunk.length;
 			if (overflowStream) {
@@ -220,7 +208,10 @@ export async function runGitQuery(
 			stdoutChunks.push(chunk);
 			retainedStdoutBytes += chunk.length;
 			if (retainedStdoutBytes > maxRetainedBytes) {
-				overflowPath = join(tmpdir(), `pi-git-${randomBytes(8).toString("hex")}.log`);
+				overflowPath = join(
+					getProcessWorkRun(getAgentDir(), "outputs", "git").path,
+					`pi-git-${randomBytes(8).toString("hex")}.log`,
+				);
 				overflowStream = createSafeWriteStream(overflowPath, (error) => {
 					overflowWriteError = error;
 				});
@@ -234,9 +225,14 @@ export async function runGitQuery(
 				retainedStderrBytes -= stderrChunks.shift()?.length ?? 0;
 			}
 		});
-		const status = await waitForChildProcess(child);
-		if (options?.signal?.aborted) throw new Error("aborted");
-		if (timedOut) throw new Error(`timeout:${timeoutSeconds}`);
+		const terminal = await waitForChildProcessWithTermination(child, {
+			signal: options?.signal,
+			timeoutMs: timeoutSeconds * 1000,
+			killGraceMs: GIT_FILTER_KILL_GRACE_MS,
+		});
+		if (terminal.reason === "aborted") throw new Error("aborted");
+		if (terminal.reason === "timeout") throw new Error(`timeout:${timeoutSeconds}`);
+		const status = terminal.code;
 		const stdoutBuffer = Buffer.concat(stdoutChunks);
 		const stderrBuffer = Buffer.concat(stderrChunks);
 		if (overflowStream !== undefined && overflowPath !== undefined) {
@@ -273,8 +269,6 @@ export async function runGitQuery(
 		};
 	} finally {
 		if (child.pid) untrackDetachedChildPid(child.pid);
-		if (timeoutHandle) clearTimeout(timeoutHandle);
-		if (options?.signal) options.signal.removeEventListener("abort", killChild);
 		if (overflowStream !== undefined && !overflowStreamEnded) overflowStream.end();
 	}
 }
@@ -396,8 +390,11 @@ async function handleStatus(
 	let branchLine = "";
 	const fileLines: string[] = [];
 	for (const line of lines) {
-		if (line.startsWith("##")) branchLine = line;
-		else fileLines.push(line);
+		if (line.startsWith("##")) {
+			branchLine = line;
+		} else {
+			fileLines.push(line);
+		}
 	}
 
 	let statePrefix = "";

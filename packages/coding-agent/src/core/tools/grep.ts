@@ -14,6 +14,7 @@ import path from "path";
 import { type Static, Type } from "typebox";
 import { keyHint } from "../../modes/interactive/components/keybinding-hints.ts";
 import type { Theme } from "../../modes/interactive/theme/theme.ts";
+import { waitForChildProcessWithTermination } from "../../utils/child-process.ts";
 import { ensureTool } from "../../utils/tools-manager.ts";
 import type { ArtifactStore } from "../context/context-artifacts.ts";
 import {
@@ -54,6 +55,8 @@ const grepSchema = Type.Object({
 
 export type GrepToolInput = Static<typeof grepSchema>;
 const DEFAULT_LIMIT = 100;
+const GREP_PROCESS_TIMEOUT_MS = 5 * 60_000;
+const GREP_PROCESS_KILL_GRACE_MS = 1_000;
 
 export interface GrepToolDetails {
 	truncation?: TruncationResult;
@@ -583,7 +586,10 @@ export function createGrepToolDefinition(
 						if (glob) args.push("--glob", glob);
 						args.push("--", pattern, searchPath);
 
-						const child = spawn(rgPath, args, { stdio: ["ignore", "pipe", "pipe"] });
+						const child = spawn(rgPath, args, {
+							detached: process.platform !== "win32",
+							stdio: ["ignore", "pipe", "pipe"],
+						});
 						const rl = createInterface({ input: child.stdout });
 						let stderr = "";
 						let matchCount = 0;
@@ -593,21 +599,21 @@ export function createGrepToolDefinition(
 						let killedDueToLimit = false;
 						const outputLines: string[] = [];
 
+						const terminationController = new AbortController();
 						const cleanup = () => {
 							rl.close();
 							signal?.removeEventListener("abort", onAbort);
 						};
 						const stopChild = (dueToLimit = false) => {
-							if (!child.killed) {
-								killedDueToLimit = dueToLimit;
-								child.kill();
-							}
+							if (dueToLimit) killedDueToLimit = true;
+							terminationController.abort();
 						};
 						const onAbort = () => {
 							aborted = true;
 							stopChild();
 						};
-						signal?.addEventListener("abort", onAbort, { once: true });
+						if (signal?.aborted) onAbort();
+						else signal?.addEventListener("abort", onAbort, { once: true });
 						child.stderr?.on("data", (chunk) => {
 							stderr += chunk.toString();
 						});
@@ -657,90 +663,90 @@ export function createGrepToolDefinition(
 							}
 						});
 
-						child.on("error", (error) => {
-							cleanup();
-							settle(() => reject(new Error(`Failed to run ripgrep: ${error.message}`)));
-						});
-						child.on("close", async (code) => {
-							cleanup();
-							if (aborted) {
-								settle(() => reject(new Error("Operation aborted")));
-								return;
-							}
-							if (!killedDueToLimit && code !== 0 && code !== 1) {
-								const errorMsg = stderr.trim() || `ripgrep exited with code ${code}`;
-								settle(() => reject(new Error(errorMsg)));
-								return;
-							}
-							if (matchCount === 0) {
-								settle(() =>
-									resolve({ content: [{ type: "text", text: "No matches found" }], details: undefined }),
-								);
-								return;
-							}
+						const terminal = await waitForChildProcessWithTermination(child, {
+							signal: terminationController.signal,
+							timeoutMs: GREP_PROCESS_TIMEOUT_MS,
+							killGraceMs: GREP_PROCESS_KILL_GRACE_MS,
+						}).finally(cleanup);
+						const code = terminal.code;
+						if (terminal.reason === "timeout") {
+							settle(() => reject(new Error(`ripgrep timed out after ${GREP_PROCESS_TIMEOUT_MS}ms`)));
+							return;
+						}
+						if (aborted) {
+							settle(() => reject(new Error("Operation aborted")));
+							return;
+						}
+						if (!killedDueToLimit && code !== 0 && code !== 1) {
+							const errorMsg = stderr.trim() || `ripgrep exited with code ${code}`;
+							settle(() => reject(new Error(errorMsg)));
+							return;
+						}
+						if (matchCount === 0) {
+							settle(() =>
+								resolve({ content: [{ type: "text", text: "No matches found" }], details: undefined }),
+							);
+							return;
+						}
 
-							// Format matches after streaming finishes so custom readFile() backends can be async.
-							const fileGroups = new Map<string, string[]>();
-							for (const match of matches) {
-								const relativePath = formatPath(match.filePath);
-								if (!fileGroups.has(relativePath)) {
-									fileGroups.set(relativePath, []);
-								}
-								const group = fileGroups.get(relativePath)!;
+						// Format matches after streaming finishes so custom readFile() backends can be async.
+						const fileGroups = new Map<string, string[]>();
+						for (const match of matches) {
+							const relativePath = formatPath(match.filePath);
+							if (!fileGroups.has(relativePath)) {
+								fileGroups.set(relativePath, []);
+							}
+							const group = fileGroups.get(relativePath)!;
 
-								if (contextValue === 0 && match.lineText !== undefined) {
-									const sanitized = match.lineText
-										.replace(/\r\n/g, "\n")
-										.replace(/\r/g, "")
-										.replace(/\n$/, "");
-									const { text: truncatedText, wasTruncated } = truncateLine(sanitized);
-									if (wasTruncated) linesTruncated = true;
-									group.push(`  ${match.lineNumber}: ${truncatedText}`);
-								} else {
-									const block = await formatBlock(match.filePath, match.lineNumber);
-									for (const line of block) {
-										if (line.startsWith(`${relativePath}:`)) {
-											group.push(`  ${line.slice(relativePath.length + 1)}`);
-										} else if (line.startsWith(`${relativePath}-`)) {
-											group.push(`  ${line.slice(relativePath.length + 1)}`);
-										} else {
-											group.push(`  ${line}`);
-										}
+							if (contextValue === 0 && match.lineText !== undefined) {
+								const sanitized = match.lineText.replace(/\r\n/g, "\n").replace(/\r/g, "").replace(/\n$/, "");
+								const { text: truncatedText, wasTruncated } = truncateLine(sanitized);
+								if (wasTruncated) linesTruncated = true;
+								group.push(`  ${match.lineNumber}: ${truncatedText}`);
+							} else {
+								const block = await formatBlock(match.filePath, match.lineNumber);
+								for (const line of block) {
+									if (line.startsWith(`${relativePath}:`)) {
+										group.push(`  ${line.slice(relativePath.length + 1)}`);
+									} else if (line.startsWith(`${relativePath}-`)) {
+										group.push(`  ${line.slice(relativePath.length + 1)}`);
+									} else {
+										group.push(`  ${line}`);
 									}
 								}
 							}
+						}
 
-							for (const [relativePath, lines] of fileGroups) {
-								outputLines.push(`${relativePath}:`);
-								let lastLine = "";
-								for (const line of lines) {
-									if (line === lastLine) continue;
-									outputLines.push(line);
-									lastLine = line;
-								}
+						for (const [relativePath, lines] of fileGroups) {
+							outputLines.push(`${relativePath}:`);
+							let lastLine = "";
+							for (const line of lines) {
+								if (line === lastLine) continue;
+								outputLines.push(line);
+								lastLine = line;
 							}
+						}
 
-							const rawOutput = outputLines.join("\n");
-							// Measure -> pack (artifact-backed if oversized and a store was provided) -> notices.
-							// There is no line limit here because the match limit already capped rows.
-							const { text: output, details } = packGrepOutput({
-								rawOutput,
-								toolCallId,
-								artifactStore,
-								broadQueryTracker,
-								pattern,
-								rawPath: searchDir,
-								glob,
-								matchLimitReached: matchLimitReached ? effectiveLimit : false,
-								linesTruncated,
-							});
-							settle(() =>
-								resolve({
-									content: [{ type: "text", text: output }],
-									details: Object.keys(details).length > 0 ? details : undefined,
-								}),
-							);
+						const rawOutput = outputLines.join("\n");
+						// Measure -> pack (artifact-backed if oversized and a store was provided) -> notices.
+						// There is no line limit here because the match limit already capped rows.
+						const { text: output, details } = packGrepOutput({
+							rawOutput,
+							toolCallId,
+							artifactStore,
+							broadQueryTracker,
+							pattern,
+							rawPath: searchDir,
+							glob,
+							matchLimitReached: matchLimitReached ? effectiveLimit : false,
+							linesTruncated,
 						});
+						settle(() =>
+							resolve({
+								content: [{ type: "text", text: output }],
+								details: Object.keys(details).length > 0 ? details : undefined,
+							}),
+						);
 					} catch (err) {
 						settle(() => reject(err as Error));
 					}

@@ -11,11 +11,13 @@ const goalSchema = Type.Object(
 				Type.Literal("add_requirement"),
 				Type.Literal("satisfy_requirement"),
 				Type.Literal("block_requirement"),
+				Type.Literal("reopen_requirement"),
 				Type.Literal("add_evidence"),
 				Type.Literal("progress"),
 				Type.Literal("no_progress"),
 				Type.Literal("complete"),
 				Type.Literal("block_goal"),
+				Type.Literal("resume_goal"),
 				Type.Literal("cancel"),
 			],
 			{ description: "Ledger action to record." },
@@ -24,7 +26,7 @@ const goalSchema = Type.Object(
 		userGoal: Type.Optional(Type.String({ description: "The goal statement. Required for action 'start'." })),
 		requirementId: Type.Optional(
 			Type.String({
-				description: "Requirement id for add_requirement/satisfy_requirement/block_requirement.",
+				description: "Requirement id for add_requirement/satisfy_requirement/block_requirement/reopen_requirement.",
 			}),
 		),
 		text: Type.Optional(Type.String({ description: "Requirement text. Required for add_requirement." })),
@@ -89,6 +91,8 @@ function toGoalAction(input: GoalToolInput): GoalAction | { error: string } {
 				requirementId: input.requirementId ?? "",
 				reason: input.reason ?? "",
 			};
+		case "reopen_requirement":
+			return { action: "reopen_requirement", requirementId: input.requirementId ?? "" };
 		case "add_evidence": {
 			if (input.kind === undefined) {
 				return { error: "add_evidence requires a kind." };
@@ -110,6 +114,8 @@ function toGoalAction(input: GoalToolInput): GoalAction | { error: string } {
 			return { action: "complete" };
 		case "block_goal":
 			return { action: "block_goal", reason: input.reason ?? "" };
+		case "resume_goal":
+			return { action: "resume_goal" };
 		case "cancel":
 			return { action: "cancel" };
 		default:
@@ -123,13 +129,14 @@ export function createGoalToolDefinition(deps: GoalToolDependencies): ToolDefini
 		name: "goal",
 		label: "goal",
 		description:
-			"Record and update the durable goal ledger for the current task. Maintains a structured goal with requirements, evidence, and progress so long tasks can be resumed and continued. Start a goal, add requirements, attach evidence, mark requirements satisfied or blocked, and mark progress. This is the producer that drives /goal-continue; without recorded goal state, continuation has nothing to act on.",
+			"Record and update the durable goal ledger for the current task. Maintains a structured goal with requirements, evidence, and progress so long tasks can be resumed and continued. Start a goal, add requirements, attach evidence, mark requirements satisfied or blocked, reopen resolved blockers, resume blocked goals, and mark progress. This is the producer that drives /goal-continue; without recorded goal state, continuation has nothing to act on.",
 		promptSnippet: "Record goal, requirements, evidence, and progress in the durable goal ledger.",
 		promptGuidelines: [
 			"At the start of a multi-step task, call goal with action 'start' to record the user goal, then add the concrete requirements with 'add_requirement'.",
 			"As you make progress, record evidence with 'add_evidence' and mark requirements satisfied with 'satisfy_requirement', citing the evidence ids.",
 			"Use 'progress' when you advance without satisfying a specific requirement, and 'no_progress' when a turn yields nothing, so stall detection works.",
-			"Mark the goal 'complete' only when every requirement is satisfied; use 'block_goal' or 'block_requirement' with a reason when you are stuck and need the user.",
+			"When the user resolves a blocker, use 'resume_goal' and 'reopen_requirement' as needed; do not strand the old ledger or start a duplicate goal.",
+			"Mark the goal 'complete' only when every requirement is satisfied; use 'block_goal' or 'block_requirement' with a reason when you are stuck and need the user. A blocked goal can still be resumed or cancelled.",
 		],
 		parameters: goalSchema,
 		async execute(

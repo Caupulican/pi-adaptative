@@ -58,6 +58,14 @@ export class BorderedLoader extends Container {
 		}
 	}
 
+	cancel(): void {
+		if (this.cancellable) {
+			(this.loader as CancellableLoader).abort();
+		} else {
+			this.signalController?.abort();
+		}
+	}
+
 	dispose(): void {
 		if ("dispose" in this.loader && typeof this.loader.dispose === "function") {
 			this.loader.dispose();

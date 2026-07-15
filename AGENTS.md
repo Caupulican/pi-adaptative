@@ -9,6 +9,11 @@
 - When the user asks a question, answer it first before making edits or running implementation commands.
 - When responding to user feedback or an analysis, explicitly say whether you agree or disagree before saying what you changed.
 
+## Portable Harness Integration
+
+- Final Pi Adaptative behavior, extensions, templates, tests, and documentation must live in this repository/package. User-level files may be temporary migration or validation sources only; restore or remove those runtime edits after the packaged implementation is validated.
+- Every managed background process must emit a terminal signal, persist a bounded handoff, and notify the owning parent session. Completion detection must be event-driven; never poll or peek into process output merely to discover whether work ended.
+
 ## Code Quality
 
 - Read files in full before wide-ranging changes, before editing files you have not fully inspected, and when asked to investigate or audit. Do not rely on search snippets for broad changes.

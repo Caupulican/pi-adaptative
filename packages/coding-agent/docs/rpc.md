@@ -456,7 +456,7 @@ If output was truncated, includes `fullOutputPath`:
     "exitCode": 0,
     "cancelled": false,
     "truncated": true,
-    "fullOutputPath": "/tmp/pi-bash-abc123.log"
+    "fullOutputPath": "~/.pi/agent/work/outputs/tool-streams/<run-id>/pi-bash-abc123.log"
   }
 }
 ```

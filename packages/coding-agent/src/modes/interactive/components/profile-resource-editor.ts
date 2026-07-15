@@ -17,18 +17,23 @@ import {
 	detectResourceFraming,
 	encodeResourceSelectionWithFraming,
 	type ResourceFraming,
+	remapResourceSelectionFilter,
 } from "../../../core/profile-resource-selection.ts";
-import type {
-	ResourceProfileFilterSettings,
-	ResourceProfileKind,
-	ResourceProfileSettings,
+import {
+	matchesResourceProfilePattern,
+	type ResourceProfileFilterSettings,
+	type ResourceProfileKind,
+	type ResourceProfileSettings,
 } from "../../../core/settings-manager.ts";
 import { theme } from "../theme/theme.ts";
 import { DynamicBorder } from "./dynamic-border.ts";
 import { keyText } from "./keybinding-hints.ts";
 
 export interface ProfileResourceItem {
+	/** Collision-safe value persisted into the profile filter. */
 	id: string;
+	/** Human-facing name; defaults to id. */
+	label?: string;
 	path?: string;
 	description?: string;
 }
@@ -55,6 +60,7 @@ export interface ProfileResourceEditorOptions {
 
 interface ResourceItem {
 	id: string;
+	label: string;
 	enabled: boolean;
 	path?: string;
 	description?: string;
@@ -228,44 +234,17 @@ export class ProfileResourceEditorComponent extends Container implements Focusab
 		// Initialize enabled, framing, and missing sets for each kind
 		for (const kind of this.kinds) {
 			const filter = options.initialResources[kind.kind];
+			const remapped = remapResourceSelectionFilter(filter, kind.items, (item, pattern) => {
+				if (item.id === pattern) return true;
+				return item.path ? matchesResourceProfilePattern(item.path, [pattern], this.cwd) : false;
+			});
+			this.missingIdsByKind.set(kind.kind, remapped.missingIds);
+
+			// Decode against concrete collision-safe ids plus genuinely missing profile entries. Legacy
+			// basename/parent/glob patterns are expanded to the resources they currently match, so saving
+			// migrates ambiguous patterns such as "index.ts" instead of retaining a multi-extension toggle.
 			const allIds = kind.items.map((item) => item.id);
-
-			// Compute missing items
-			const mentionedIds = new Set<string>();
-			if (filter) {
-				if (filter.allow) {
-					for (const id of filter.allow) {
-						// "*" is a grant-all framing marker, not a resource id — the block loop below
-						// already excludes it; the allow loop must too, or it leaks into missingSet as
-						// a fake "missing item" and rides along as a phantom enabled member through
-						// decode/encode.
-						if (id !== "*") {
-							mentionedIds.add(id);
-						}
-					}
-				}
-				if (filter.block) {
-					for (const id of filter.block) {
-						if (id !== "*") {
-							mentionedIds.add(id);
-						}
-					}
-				}
-			}
-			const availableIds = new Set(allIds);
-			const missingSet = new Set<string>();
-			for (const id of mentionedIds) {
-				if (!availableIds.has(id)) {
-					missingSet.add(id);
-				}
-			}
-			this.missingIdsByKind.set(kind.kind, missingSet);
-
-			// Decode against the DISCOVERABLE universe plus every id the profile itself mentions:
-			// decoding only against the discoverable set silently drops grants for anything the
-			// current environment cannot see (offline external root, or a collapsed universe),
-			// and the next save would then corrupt the profile.
-			const enabledSet = decodeResourceSelection(filter, [...allIds, ...missingSet]);
+			const enabledSet = decodeResourceSelection(remapped.filter, [...allIds, ...remapped.missingIds]);
 			this.enabledByKind.set(kind.kind, enabledSet);
 			this.framingByKind.set(kind.kind, detectResourceFraming(filter));
 			this.originalFilterByKind.set(kind.kind, filter);
@@ -360,6 +339,7 @@ export class ProfileResourceEditorComponent extends Container implements Focusab
 			}
 			items.push({
 				id: availableItem.id,
+				label: availableItem.label ?? availableItem.id,
 				enabled: isEnabled,
 				path: availableItem.path,
 				description: desc,
@@ -379,6 +359,7 @@ export class ProfileResourceEditorComponent extends Container implements Focusab
 			const isEnabled = enabledSet.has(missingId);
 			items.push({
 				id: missingId,
+				label: missingId,
 				enabled: isEnabled,
 				isMissing: true,
 				description: "Referenced in profile but missing from available resources.",
@@ -418,7 +399,9 @@ export class ProfileResourceEditorComponent extends Container implements Focusab
 	private refresh(): void {
 		const query = this.searchInput.getValue();
 		const items = this.buildItems();
-		this.filteredItems = query ? fuzzyFilter(items, query, (i) => `${i.id} ${i.description ?? ""}`) : items;
+		this.filteredItems = query
+			? fuzzyFilter(items, query, (item) => `${item.label} ${item.id} ${item.description ?? ""}`)
+			: items;
 		this.selectedIndex = Math.min(this.selectedIndex, Math.max(0, this.filteredItems.length - 1));
 		this.updateList();
 		this.footerText.setText(this.getFooterText());
@@ -455,10 +438,10 @@ export class ProfileResourceEditorComponent extends Container implements Focusab
 			const item = this.filteredItems[i]!;
 			const isSelected = i === this.selectedIndex;
 			const prefix = isSelected ? theme.fg("accent", "→ ") : "  ";
-			let resourceText = isSelected ? theme.fg("accent", item.id) : item.id;
+			let resourceText = isSelected ? theme.fg("accent", item.label) : item.label;
 
 			if (item.isMissing) {
-				resourceText = theme.fg("muted", `${item.id} [missing]`);
+				resourceText = theme.fg("muted", `${item.label} [missing]`);
 			} else if (item.sourceLabel) {
 				const labelColor =
 					item.sourceLabel === "catalog"
@@ -487,6 +470,8 @@ export class ProfileResourceEditorComponent extends Container implements Focusab
 		const selectedItem = this.filteredItems[this.selectedIndex];
 		if (selectedItem?.description) {
 			this.descriptionText.setText(theme.fg("muted", `  Description: ${selectedItem.description}`));
+		} else if (selectedItem && selectedItem.label !== selectedItem.id) {
+			this.descriptionText.setText(theme.fg("muted", `  Resource: ${selectedItem.id}`));
 		} else {
 			this.descriptionText.setText(theme.fg("muted", "  No description available"));
 		}

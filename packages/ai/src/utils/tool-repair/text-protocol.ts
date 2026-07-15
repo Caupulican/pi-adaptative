@@ -509,7 +509,7 @@ function protocolHeader(variant: TextToolProtocolVariant): string[] {
 		formatVariantEnvelope(variant, "TOOL", '{"arg":"value"}'),
 		"Arguments must be valid JSON objects. Use double quotes for JSON keys and string values. Arrays are JSON arrays [ ], never quoted strings. Omit optional args you do not need - do not send null.",
 		"User requests about files, directories, searches, edits, writes, or shell commands require a tool envelope first; do not describe results yourself.",
-		'If the user asks to read /tmp/example.txt, output exactly: <pi:call name="read">{"path":"/tmp/example.txt"}</pi:call>',
+		'If the user asks to read example.txt, output exactly: <pi:call name="read">{"path":"example.txt"}</pi:call>',
 		'For any request to read a file path, call read with {"path":"THE_PATH"}; never output {"file_path":..., "content":...} or invented file contents.',
 		"Never write raw shell commands such as read -t PATH, cat PATH, or ls PATH; use a tool-call envelope instead.",
 		"Never output markdown code blocks, raw shell commands, file paths, or invented tool results instead of a tool call; use the envelope and wait for the real result.",

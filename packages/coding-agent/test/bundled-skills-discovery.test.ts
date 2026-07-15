@@ -93,6 +93,20 @@ describe("bundled skills discovery", () => {
 		expect(reference).toContain("measure the whole system boundary");
 	});
 
+	it("treats direct harness-improvement requests as scoped source authority", async () => {
+		const loader = new DefaultResourceLoader({ cwd, agentDir });
+		await loader.reload();
+
+		const skill = loader.getSkills().skills.find((candidate) => candidate.name === "pi-harness-learning");
+		expect(skill).toBeDefined();
+		if (!skill) return;
+
+		const content = readFileSync(skill.filePath, "utf8");
+		expect(content).toMatch(/do\s+not ask for duplicate approval/);
+		expect(content).toContain("A direct request to");
+		expect(content).toMatch(/still require\s+specific approval/);
+	});
+
 	it("should allow user skills to override bundled skills", async () => {
 		// Create a user skill with the same name as a bundled skill
 		const userSkillDir = join(agentDir, "skills", "skill-architect");

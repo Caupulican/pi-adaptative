@@ -8,6 +8,7 @@ import { createEventBus } from "../src/core/event-bus.ts";
 import {
 	createExtensionRuntime,
 	disposeExtensionEventSubscriptions,
+	loadExtension,
 	loadExtensionFromFactory,
 	loadExtensions,
 } from "../src/core/extensions/loader.ts";
@@ -100,6 +101,54 @@ describe("extension event bus subscriptions across reloads", () => {
 		expect(received).toBe(0);
 		expect(runtime.pendingProviderRegistrations).toEqual([baselineRegistration]);
 		expect([...runtime.flagValues]).toEqual([["baseline-flag", "kept"]]);
+	});
+
+	it("times out an extension module whose top-level evaluation never settles", async () => {
+		const dir = createTempDir();
+		const extensionPath = join(dir, "hanging-extension.mjs");
+		writeFileSync(extensionPath, "await new Promise(() => {});\nexport default () => {};\n", "utf8");
+
+		const result = await loadExtension(extensionPath, dir, createEventBus(), createExtensionRuntime(), {
+			moduleTimeoutMs: 10,
+		});
+
+		expect(result.extension).toBeNull();
+		expect(result.error).toContain("Extension module import timed out after 10ms");
+	});
+
+	it("times out an unresolved factory and rejects its late API registrations", async () => {
+		let registerLate = () => {};
+		const loading = loadExtensionFromFactory(
+			async (pi) => {
+				registerLate = () => pi.registerFlag("late-flag", { type: "boolean", default: true });
+				await new Promise<void>(() => {});
+			},
+			process.cwd(),
+			createEventBus(),
+			createExtensionRuntime(),
+			"timed-out-extension",
+			{ factoryTimeoutMs: 10 },
+		);
+
+		await expect(loading).rejects.toThrow("Extension factory timed out after 10ms");
+		expect(registerLate).toThrow("Extension generation is no longer active");
+	});
+
+	it("bounds unresolved async disposers and invalidates the disposed API generation", async () => {
+		let registerLate = () => {};
+		const extension = await loadExtensionFromFactory(
+			(pi) => {
+				registerLate = () => pi.registerFlag("late-flag", { type: "boolean", default: true });
+				pi.onDispose(() => new Promise<void>(() => {}));
+			},
+			process.cwd(),
+			createEventBus(),
+			createExtensionRuntime(),
+			"disposed-extension",
+		);
+
+		await expect(disposeExtensionEventSubscriptions([extension], { timeoutMs: 10 })).resolves.toBeUndefined();
+		expect(registerLate).toThrow("Extension generation is no longer active");
 	});
 
 	it("restores removed and overridden providers when a bound-runtime factory throws", async () => {

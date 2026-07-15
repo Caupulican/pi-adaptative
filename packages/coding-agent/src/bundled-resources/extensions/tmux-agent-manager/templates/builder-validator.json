@@ -1,0 +1,14 @@
+{
+  "name": "builder-validator",
+  "description": "Interactive implementation loop: Agy builder, Claude reviewer, Agy validator, Pi coordinator. Good default for scoped code work.",
+  "deadlineSeconds": 1500,
+  "agents": [
+    { "provider": "agy", "name": "builder" },
+    { "provider": "claude", "name": "code-reviewer" },
+    { "provider": "agy", "name": "validator" },
+    { "provider": "pi", "name": "coordinator" }
+  ],
+  "notes": [
+    "Use for owner-approved implementation/QA batches; never claim complete until result files and validation evidence are inspected."
+  ]
+}

@@ -17,6 +17,8 @@ permissions:
 jobs:
   build:
     runs-on: ubuntu-latest
+    permissions:
+      contents: read
     env:
       RELEASE_TAG: ${{ github.event.inputs.tag || github.ref_name }}
     steps:
@@ -40,45 +42,134 @@ jobs:
       - name: Build binaries
         run: ./scripts/build-binaries.sh
 
-      - name: Extract changelog for this version
-        id: changelog
+      - name: Upload release binaries for platform verification
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
+        with:
+          name: release-binaries
+          path: packages/coding-agent/binaries/pi-*
+          if-no-files-found: error
+          retention-days: 7
+
+  verify-windows-binary:
+    name: Verify Windows binary (${{ matrix.arch }})
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - runner: windows-latest
+            arch: x64
+          - runner: windows-11-arm
+            arch: arm64
+    runs-on: ${{ matrix.runner }}
+    needs: build
+    permissions:
+      contents: read
+    steps:
+      - name: Download release binaries
+        uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4.3.0
+        with:
+          name: release-binaries
+          path: artifacts
+
+      - name: Smoke test native Windows binary
+        shell: pwsh
         run: |
-          VERSION="${RELEASE_TAG}"
-          VERSION="${VERSION#v}"  # Remove 'v' prefix
-          
-          # Extract changelog section for this version
-          cd packages/coding-agent
-          awk "/^## \[${VERSION}\]/{flag=1; next} /^## \[/{flag=0} flag" CHANGELOG.md > /tmp/release-notes.md
-          
-          # If empty, use a default message
-          if [ ! -s /tmp/release-notes.md ]; then
-            echo "Release ${VERSION}" > /tmp/release-notes.md
+          $ErrorActionPreference = "Stop"
+          $arch = "${{ matrix.arch }}"
+          $archive = Join-Path $PWD "artifacts\pi-windows-$arch.zip"
+          $extractDir = Join-Path $env:RUNNER_TEMP "pi-adaptative\windows-$arch"
+          $agentDir = Join-Path $env:RUNNER_TEMP "pi-adaptative\agent"
+          New-Item -ItemType Directory -Force -Path $extractDir, $agentDir | Out-Null
+          Expand-Archive -LiteralPath $archive -DestinationPath $extractDir -Force
+          $exe = Join-Path $extractDir "pi.exe"
+          $env:PI_ADAPTATIVE_CODING_AGENT_DIR = $agentDir
+
+          $required = @(
+            "pi.exe",
+            "native\win32\prebuilds\win32-$arch\win32-console-mode.node",
+            "node_modules\@mariozechner\clipboard-win32-$arch-msvc"
+          )
+          foreach ($relativePath in $required) {
+            if (-not (Test-Path (Join-Path $extractDir $relativePath))) {
+              throw "Windows $arch archive is missing $relativePath"
+            }
+          }
+
+          & $exe --version
+          if ($LASTEXITCODE -ne 0) { throw "pi.exe --version failed with exit code $LASTEXITCODE" }
+          & $exe --help | Out-Null
+          if ($LASTEXITCODE -ne 0) { throw "pi.exe --help failed with exit code $LASTEXITCODE" }
+          & $exe --list-models | Out-Null
+          if ($LASTEXITCODE -ne 0) { throw "pi.exe --list-models failed with exit code $LASTEXITCODE" }
+
+          $requests = @(
+            '{"id":"state","type":"get_state"}'
+            '{"id":"shell","type":"bash","command":"printf windows-rpc-ok"}'
+          )
+          $responses = $requests | & $exe --mode rpc --no-session --no-extensions
+          if ($LASTEXITCODE -ne 0) { throw "pi.exe RPC smoke failed with exit code $LASTEXITCODE" }
+          $records = @($responses | ForEach-Object { $_ | ConvertFrom-Json })
+          $state = $records | Where-Object { $_.id -eq "state" -and $_.success -eq $true }
+          $shell = $records | Where-Object { $_.id -eq "shell" -and $_.success -eq $true }
+          if (-not $state) { throw "RPC get_state did not return a successful response" }
+          if (-not $shell -or $shell.data.exitCode -ne 0 -or $shell.data.output -notmatch "windows-rpc-ok") {
+            throw "RPC bash did not execute successfully through Git Bash"
+          }
+
+  release:
+    runs-on: ubuntu-latest
+    needs: [build, verify-windows-binary]
+    permissions:
+      contents: write
+    env:
+      RELEASE_TAG: ${{ github.event.inputs.tag || github.ref_name }}
+    steps:
+      - name: Checkout
+        uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
+        with:
+          ref: ${{ env.RELEASE_TAG }}
+          persist-credentials: false
+
+      - name: Download verified release binaries
+        uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4.3.0
+        with:
+          name: release-binaries
+          path: packages/coding-agent/binaries
+
+      - name: Extract changelog for this version
+        run: |
+          VERSION="${RELEASE_TAG#v}"
+          WORK_DIR="${RUNNER_TEMP}/pi-adaptative/release"
+          NOTES_FILE="${WORK_DIR}/release-notes.md"
+          mkdir -p "${WORK_DIR}"
+          awk "/^## \[${VERSION}\]/{flag=1; next} /^## \[/{flag=0} flag" packages/coding-agent/CHANGELOG.md > "${NOTES_FILE}"
+          if [ ! -s "${NOTES_FILE}" ]; then
+            echo "Release ${VERSION}" > "${NOTES_FILE}"
           fi
 
-      - name: Create GitHub Release and upload binaries
+      - name: Create GitHub Release and upload verified binaries
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: |
-          cd packages/coding-agent/binaries
-          
-          # Create release with changelog notes (or update if exists)
+          BINARIES_DIR="packages/coding-agent/binaries"
+          NOTES_FILE="${RUNNER_TEMP}/pi-adaptative/release/release-notes.md"
           gh release create "${RELEASE_TAG}" \
             --title "${RELEASE_TAG}" \
-            --notes-file /tmp/release-notes.md \
-            pi-darwin-arm64.tar.gz \
-            pi-darwin-x64.tar.gz \
-            pi-linux-x64.tar.gz \
-            pi-linux-arm64.tar.gz \
-            pi-windows-x64.zip \
-            pi-windows-arm64.zip \
+            --notes-file "${NOTES_FILE}" \
+            "${BINARIES_DIR}/pi-darwin-arm64.tar.gz" \
+            "${BINARIES_DIR}/pi-darwin-x64.tar.gz" \
+            "${BINARIES_DIR}/pi-linux-x64.tar.gz" \
+            "${BINARIES_DIR}/pi-linux-arm64.tar.gz" \
+            "${BINARIES_DIR}/pi-windows-x64.zip" \
+            "${BINARIES_DIR}/pi-windows-arm64.zip" \
             2>/dev/null || \
           gh release upload "${RELEASE_TAG}" \
-            pi-darwin-arm64.tar.gz \
-            pi-darwin-x64.tar.gz \
-            pi-linux-x64.tar.gz \
-            pi-linux-arm64.tar.gz \
-            pi-windows-x64.zip \
-            pi-windows-arm64.zip \
+            "${BINARIES_DIR}/pi-darwin-arm64.tar.gz" \
+            "${BINARIES_DIR}/pi-darwin-x64.tar.gz" \
+            "${BINARIES_DIR}/pi-linux-x64.tar.gz" \
+            "${BINARIES_DIR}/pi-linux-arm64.tar.gz" \
+            "${BINARIES_DIR}/pi-windows-x64.zip" \
+            "${BINARIES_DIR}/pi-windows-arm64.zip" \
             --clobber
 
   publish-npm:
@@ -86,7 +177,7 @@ jobs:
     # The binary build is a mandatory release gate: packages publish to npm only
     # after the cross-platform binaries build successfully, so a broken build
     # never ships a release. This job also runs its own build/check/test below.
-    needs: build
+    needs: release
     # Override the top-level contents:write — this job only needs to read the
     # repo and mint an OIDC token for npm provenance attestations.
     permissions:

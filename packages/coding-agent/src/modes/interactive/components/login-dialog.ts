@@ -16,6 +16,7 @@ export class LoginDialogComponent extends Container implements Focusable {
 	private inputResolver?: (value: string) => void;
 	private inputRejecter?: (error: Error) => void;
 	private onComplete: (success: boolean, message?: string) => void;
+	private completed = false;
 
 	// Focusable implementation - propagate to input for IME cursor positioning
 	private _focused = false;
@@ -73,7 +74,23 @@ export class LoginDialogComponent extends Container implements Focusable {
 		return this.abortController.signal;
 	}
 
-	private cancel(): void {
+	private waitForInput(): Promise<string> {
+		if (this.completed) return Promise.reject(new Error("Login cancelled"));
+		if (this.inputRejecter) {
+			const rejectPrevious = this.inputRejecter;
+			this.inputResolver = undefined;
+			this.inputRejecter = undefined;
+			rejectPrevious(new Error("Login input superseded"));
+		}
+		return new Promise((resolve, reject) => {
+			this.inputResolver = resolve;
+			this.inputRejecter = reject;
+		});
+	}
+
+	cancel(): void {
+		if (this.completed) return;
+		this.completed = true;
 		this.abortController.abort();
 		if (this.inputRejecter) {
 			this.inputRejecter(new Error("Login cancelled"));
@@ -134,10 +151,7 @@ export class LoginDialogComponent extends Container implements Focusable {
 		this.contentContainer.addChild(new Text(`(${keyHint("tui.select.cancel", "to cancel")})`, 1, 0));
 		this.tui.requestRender();
 
-		return new Promise((resolve, reject) => {
-			this.inputResolver = resolve;
-			this.inputRejecter = reject;
-		});
+		return this.waitForInput();
 	}
 
 	/**
@@ -162,10 +176,7 @@ export class LoginDialogComponent extends Container implements Focusable {
 		this.input.setValue("");
 		this.tui.requestRender();
 
-		return new Promise((resolve, reject) => {
-			this.inputResolver = resolve;
-			this.inputRejecter = reject;
-		});
+		return this.waitForInput();
 	}
 
 	/**

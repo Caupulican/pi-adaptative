@@ -71,6 +71,10 @@ export interface AuthDialogsControllerDeps {
 
 export class AuthDialogsController {
 	private readonly deps: AuthDialogsControllerDeps;
+	private activeLoginDialog: LoginDialogComponent | undefined;
+	private activeLoginDialogOnUnmount: (() => void) | undefined;
+	private suppressActiveLoginDialogUnmount = false;
+	private activeOAuthSelectorCancel: (() => void) | undefined;
 
 	constructor(deps: AuthDialogsControllerDeps) {
 		this.deps = deps;
@@ -81,6 +85,56 @@ export class AuthDialogsController {
 	}
 	private get ui(): AuthDialogsControllerUi {
 		return this.deps.ui;
+	}
+
+	cancelActiveDialog(): void {
+		const cancelSelector = this.activeOAuthSelectorCancel;
+		this.activeOAuthSelectorCancel = undefined;
+		cancelSelector?.();
+		const dialog = this.activeLoginDialog;
+		if (!dialog || !this.clearActiveDialog(dialog)) return;
+		dialog.cancel();
+		this.ui.overlayHost.swap(this.ui.getEditor());
+	}
+
+	private clearActiveDialog(dialog: LoginDialogComponent): boolean {
+		if (this.activeLoginDialog !== dialog) return false;
+		this.activeLoginDialog = undefined;
+		this.activeLoginDialogOnUnmount = undefined;
+		this.suppressActiveLoginDialogUnmount = false;
+		return true;
+	}
+
+	private mountLoginDialog(dialog: LoginDialogComponent): void {
+		this.activeLoginDialog = dialog;
+		const onUnmount = () => {
+			if (this.suppressActiveLoginDialogUnmount && this.activeLoginDialog === dialog) {
+				this.suppressActiveLoginDialogUnmount = false;
+				return;
+			}
+			if (!this.clearActiveDialog(dialog)) return;
+			dialog.cancel();
+		};
+		this.activeLoginDialogOnUnmount = onUnmount;
+		this.ui.overlayHost.swap(dialog, { onUnmount });
+	}
+
+	private restoreEditorFromDialog(dialog: LoginDialogComponent): boolean {
+		if (!this.clearActiveDialog(dialog)) return false;
+		this.ui.overlayHost.swap(this.ui.getEditor());
+		return true;
+	}
+
+	private detachLoginDialogForSelector(dialog: LoginDialogComponent): void {
+		if (this.activeLoginDialog === dialog && this.activeLoginDialogOnUnmount) {
+			this.suppressActiveLoginDialogUnmount = true;
+		}
+	}
+
+	private remountLoginDialog(dialog: LoginDialogComponent): boolean {
+		if (this.activeLoginDialog !== dialog || !this.activeLoginDialogOnUnmount) return false;
+		this.ui.overlayHost.swap(dialog, { onUnmount: this.activeLoginDialogOnUnmount });
+		return true;
 	}
 
 	private getLoginProviderOptions(authType?: "oauth" | "api_key"): AuthSelectorProvider[] {
@@ -351,14 +405,13 @@ export class AuthDialogsController {
 	}
 
 	private showBedrockSetupDialog(providerId: string, providerName: string): void {
-		const restoreEditor = () => {
-			this.ui.overlayHost.swap(this.ui.getEditor());
-		};
-
+		this.cancelActiveDialog();
 		const dialog = new LoginDialogComponent(
 			this.ui.tui,
 			providerId,
-			() => restoreEditor(),
+			() => {
+				this.restoreEditorFromDialog(dialog);
+			},
 			providerName,
 			"Amazon Bedrock setup",
 		);
@@ -369,10 +422,11 @@ export class AuthDialogsController {
 			theme.fg("accent", `  ${path.join(getDocsPath(), "providers.md")}`),
 		]);
 
-		this.ui.overlayHost.swap(dialog);
+		this.mountLoginDialog(dialog);
 	}
 
 	private async showApiKeyLoginDialog(providerId: string, providerName: string): Promise<void> {
+		this.cancelActiveDialog();
 		const previousModel = this.session.model;
 
 		const dialog = new LoginDialogComponent(
@@ -384,11 +438,9 @@ export class AuthDialogsController {
 			providerName,
 		);
 
-		this.ui.overlayHost.swap(dialog);
+		this.mountLoginDialog(dialog);
 
-		const restoreEditor = () => {
-			this.ui.overlayHost.swap(this.ui.getEditor());
-		};
+		const restoreEditor = () => this.restoreEditorFromDialog(dialog);
 
 		try {
 			const apiKey = (await dialog.showPrompt("Enter API key:")).trim();
@@ -398,10 +450,10 @@ export class AuthDialogsController {
 
 			this.session.modelRegistry.authStorage.set(providerId, { type: "api_key", key: apiKey });
 
-			restoreEditor();
+			if (!restoreEditor()) return;
 			await this.completeProviderAuthentication(providerId, providerName, "api_key", previousModel);
 		} catch (error: unknown) {
-			restoreEditor();
+			if (!restoreEditor()) return;
 			const errorMsg = error instanceof Error ? error.message : String(error);
 			if (errorMsg !== "Login cancelled") {
 				this.ui.showError(`Failed to save API key for ${providerName}: ${errorMsg}`);
@@ -410,28 +462,38 @@ export class AuthDialogsController {
 	}
 
 	private showOAuthLoginSelect(dialog: LoginDialogComponent, prompt: OAuthSelectPrompt): Promise<string | undefined> {
+		this.activeOAuthSelectorCancel?.();
 		return new Promise((resolve) => {
-			const restoreDialog = () => {
-				this.ui.overlayHost.swap(dialog);
+			let settled = false;
+			let selector: ExtensionSelectorComponent;
+			const finish = (value: string | undefined, restoreDialog = true) => {
+				if (settled) return;
+				settled = true;
+				if (this.activeOAuthSelectorCancel === cancel) this.activeOAuthSelectorCancel = undefined;
+				selector.dispose();
+				if (restoreDialog) {
+					this.remountLoginDialog(dialog);
+				} else if (this.clearActiveDialog(dialog)) {
+					dialog.cancel();
+				}
+				resolve(value);
 			};
+			const cancel = () => finish(undefined);
+			this.activeOAuthSelectorCancel = cancel;
 			const labels = prompt.options.map((option) => option.label);
-			const selector = new ExtensionSelectorComponent(
+			selector = new ExtensionSelectorComponent(
 				prompt.message,
 				labels,
-				(optionLabel) => {
-					restoreDialog();
-					resolve(prompt.options.find((option) => option.label === optionLabel)?.id);
-				},
-				() => {
-					restoreDialog();
-					resolve(undefined);
-				},
+				(optionLabel) => finish(prompt.options.find((option) => option.label === optionLabel)?.id),
+				cancel,
 			);
-			this.ui.overlayHost.swap(selector);
+			this.detachLoginDialogForSelector(dialog);
+			this.ui.overlayHost.swap(selector, { onUnmount: () => finish(undefined, false) });
 		});
 	}
 
 	private async showLoginDialog(providerId: string, providerName: string): Promise<void> {
+		this.cancelActiveDialog();
 		const providerInfo = this.session.modelRegistry.authStorage
 			.getOAuthProviders()
 			.find((provider) => provider.id === providerId);
@@ -451,7 +513,7 @@ export class AuthDialogsController {
 		);
 
 		// Show dialog in editor container
-		this.ui.overlayHost.swap(dialog);
+		this.mountLoginDialog(dialog);
 
 		// Promise for manual code input (racing with callback server)
 		let manualCodeResolve: ((code: string) => void) | undefined;
@@ -462,9 +524,7 @@ export class AuthDialogsController {
 		});
 
 		// Restore editor helper
-		const restoreEditor = () => {
-			this.ui.overlayHost.swap(this.ui.getEditor());
-		};
+		const restoreEditor = () => this.restoreEditorFromDialog(dialog);
 
 		try {
 			await this.session.modelRegistry.authStorage.login(providerId as OAuthProviderId, {
@@ -512,10 +572,10 @@ export class AuthDialogsController {
 			});
 
 			// Success
-			restoreEditor();
+			if (!restoreEditor()) return;
 			await this.completeProviderAuthentication(providerId, providerName, "oauth", previousModel);
 		} catch (error: unknown) {
-			restoreEditor();
+			if (!restoreEditor()) return;
 			const errorMsg = error instanceof Error ? error.message : String(error);
 			if (errorMsg !== "Login cancelled") {
 				this.ui.showError(`Failed to login to ${providerName}: ${errorMsg}`);

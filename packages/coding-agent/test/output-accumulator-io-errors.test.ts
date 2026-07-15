@@ -21,7 +21,7 @@ describe("OutputAccumulator temp-file I/O errors", () => {
 			throw Object.assign(new Error("no space left on device"), { code: "ENOSPC" });
 		});
 
-		const output = new OutputAccumulator({ maxLines: 1, maxBytes: 4 });
+		const output = new OutputAccumulator({ maxLines: 1, maxBytes: 4, tempDirectory: "test-output" });
 
 		expect(() => output.append(Buffer.from("abcdef", "utf-8"))).not.toThrow();
 		expect(() => output.finish()).not.toThrow();
@@ -41,7 +41,7 @@ describe("OutputAccumulator temp-file I/O errors", () => {
 		fsMocks.openSync.mockReset().mockReturnValue(456);
 		fsMocks.writeSync.mockReset().mockReturnValue(0);
 
-		const output = new OutputAccumulator({ maxLines: 1, maxBytes: 4 });
+		const output = new OutputAccumulator({ maxLines: 1, maxBytes: 4, tempDirectory: "test-output" });
 		output.append(Buffer.from("abcdef", "utf-8"));
 
 		await expect(output.closeTempFile()).resolves.toBeUndefined();

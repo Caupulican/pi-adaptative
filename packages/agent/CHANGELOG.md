@@ -1,5 +1,9 @@
 ## [Unreleased]
 
+### Fixed
+
+- Made process-tree termination follow child exit events with a one-shot SIGKILL deadline instead of polling PID liveness, and made Windows `taskkill` execution tracked and bounded.
+
 ## [0.81.32] - 2026-07-13
 
 ## [0.81.31] - 2026-07-13

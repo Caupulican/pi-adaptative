@@ -1,9 +1,10 @@
 #!/usr/bin/env node
 
 import { existsSync, mkdirSync, readdirSync, readFileSync, writeFileSync } from "node:fs";
-import { homedir, tmpdir } from "node:os";
 import { join, resolve } from "node:path";
 import { spawn } from "node:child_process";
+import { getAgentDir } from "../packages/coding-agent/src/config.ts";
+import { getProcessWorkRun } from "../packages/coding-agent/src/utils/work-directory.ts";
 
 interface TextContent { type: "text"; text: string }
 interface ImageContent { type: "image"; data: string; mimeType?: string }
@@ -18,8 +19,8 @@ interface ToolCallInfo { toolName: string; bashCommand?: string }
 const BUCKETS = [0, 50, 100, 250, 500, 1000, 2000, 4000, 8000, 16000, 32000, Number.POSITIVE_INFINITY];
 
 function parseArgs(): { sessionsDir: string; output: string } {
-	let sessionsDir = join(homedir(), ".pi", "agent", "sessions");
-	let output = join(tmpdir(), "pi-tool-stats.html");
+	let sessionsDir = join(getAgentDir(), "sessions");
+	let output = join(getProcessWorkRun(getAgentDir(), "reports", "tool-stats").path, "tool-stats.html");
 	const args = process.argv.slice(2);
 	for (let i = 0; i < args.length; i++) {
 		const arg = args[i];

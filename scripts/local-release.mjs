@@ -1,9 +1,9 @@
 #!/usr/bin/env node
 
-import { cpSync, existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, symlinkSync, writeFileSync } from "node:fs";
-import { tmpdir } from "node:os";
+import { cpSync, existsSync, mkdirSync, readFileSync, rmSync, symlinkSync, writeFileSync } from "node:fs";
 import { isAbsolute, join, relative, resolve } from "node:path";
 import { spawnSync } from "node:child_process";
+import { acquireScriptWorkRun } from "./lib/work-directory.mjs";
 
 const packages = [
 	{ directory: "packages/ai", name: "@caupulican/pi-ai" },
@@ -19,7 +19,7 @@ Builds and packs the publishable packages, then installs the tarballs into an
 isolated directory outside the repository for local release testing.
 
 Options:
-  --out <dir>          Output directory. Defaults to a new directory under ${tmpdir()}
+  --out <dir>          Output directory. Defaults to a categorized run under ~/.pi/agent/work/release/local
   --force              Remove --out first if it already exists
   --skip-check         Do not run npm run check before building
   --skip-install       Only create tarballs; do not create isolated installs
@@ -99,7 +99,7 @@ function isInsidePath(child, parent) {
 
 function prepareOutputDirectory(options, repoRoot) {
 	if (!options.outDir) {
-		return mkdtempSync(join(tmpdir(), "pi-local-release-"));
+		return acquireScriptWorkRun("release", "local").path;
 	}
 
 	const outDir = resolve(options.outDir);

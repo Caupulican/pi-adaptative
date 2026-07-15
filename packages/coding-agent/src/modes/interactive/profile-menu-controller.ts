@@ -68,7 +68,13 @@ interface ProfileDefinitionRollbackTarget {
 }
 
 export interface ProfileMenuControllerUi {
-	showSelector(create: (done: () => void) => { component: Component; focus: Component }): void;
+	showSelector(
+		create: (done: () => void) => {
+			component: Component;
+			focus: Component;
+			onSuperseded?: () => void;
+		},
+	): void;
 	showStatus(message: string): void;
 	showError(message: string): void;
 	showWarning(message: string): void;
@@ -88,6 +94,19 @@ export interface ProfileMenuControllerUi {
 export interface ProfileMenuControllerDeps {
 	getSession(): AgentSession;
 	ui: ProfileMenuControllerUi;
+}
+
+function portableBasename(filePath: string): string {
+	return filePath.split(/[\\/]/).filter(Boolean).pop() ?? filePath;
+}
+
+export function getProfileExtensionDisplayLabel(filePath: string, description?: string): string {
+	const normalizedDescription = description?.trim();
+	if (normalizedDescription) return normalizedDescription;
+	const fileName = portableBasename(filePath);
+	if (!/^index\.(?:ts|js)$/i.test(fileName)) return fileName;
+	const parentPath = filePath.slice(0, Math.max(0, filePath.length - fileName.length)).replace(/[\\/]$/, "");
+	return portableBasename(parentPath) || fileName;
 }
 
 export class ProfileMenuController {
@@ -184,6 +203,14 @@ export class ProfileMenuController {
 			},
 		];
 
+		if (editableProfiles.length > 0) {
+			options.push({
+				value: "edit-model",
+				label: "Edit profile model...",
+				description: "Pin a model or inherit the session/default model.",
+			});
+		}
+
 		if (this.settingsManager.getActiveResourceProfileNames().length > 0) {
 			options.push({
 				value: "persist",
@@ -203,7 +230,7 @@ export class ProfileMenuController {
 		this.ui.showSelector((done) => {
 			const selector = new SelectSubmenu(
 				"Manage Profiles / Situations",
-				"Create, delete, or persist profile/situation definitions.",
+				"Create, edit, delete, or persist profile/situation definitions.",
 				options,
 				"",
 				(value) => {
@@ -212,6 +239,8 @@ export class ProfileMenuController {
 						void this.createProfileFlow().then(() => {
 							void this.ui.showSettingsSelector();
 						});
+					} else if (value === "edit-model") {
+						this.openEditProfileModelSelector();
 					} else if (value === "persist") {
 						void this.openPersistProfileSelector();
 					} else if (value === "delete") {
@@ -225,6 +254,73 @@ export class ProfileMenuController {
 			);
 			return { component: selector, focus: selector.getSelectList() };
 		});
+	}
+
+	private openEditProfileModelSelector(): void {
+		const profiles = this.settingsManager
+			.getProfileRegistry()
+			.listProfiles()
+			.filter((profile) => deletionScopeForProfile(profile) !== undefined);
+		if (profiles.length === 0) {
+			this.ui.showStatus("No writable profiles available. External and embedded profiles are read-only.");
+			return;
+		}
+		const activeNames = this.settingsManager.getActiveResourceProfileNames();
+		const initialValue = profiles.find((profile) => activeNames.includes(profile.name))?.name ?? profiles[0].name;
+		const items = profiles.map((profile) => ({
+			value: profile.name,
+			label: profile.name,
+			description: `${profile.model ? `Pinned: ${profile.model}` : "Inherits session/default model"} · ${profile.description || profile.source}`,
+		}));
+
+		this.ui.showSelector((done) => {
+			const selector = new SelectSubmenu(
+				"Edit Profile Model",
+				"Choose a writable profile, then pin or inherit its foreground model.",
+				items,
+				initialValue,
+				(profileName) => {
+					done();
+					void this.editProfileModel(profileName);
+				},
+				() => {
+					done();
+					void this.openManageProfilesFlow();
+				},
+			);
+			return { component: selector, focus: selector.getSelectList() };
+		});
+	}
+
+	private async editProfileModel(profileName: string): Promise<void> {
+		const profile = this.settingsManager.getProfileRegistry().getProfile(profileName);
+		if (!profile) {
+			this.ui.showError(`Profile "${profileName}" is no longer available.`);
+			return;
+		}
+		const scope = deletionScopeForProfile(profile);
+		if (!scope) {
+			this.ui.showError(`Profile "${profileName}" is read-only (${profile.source}).`);
+			return;
+		}
+		const selectedModel = await this.selectProfileModel(profile.model);
+		if (selectedModel === undefined) {
+			void this.openManageProfilesFlow();
+			return;
+		}
+		const model = selectedModel ?? undefined;
+		if (model === profile.model) {
+			this.ui.showStatus(`Profile "${profileName}" model unchanged.`);
+			return;
+		}
+		await this.saveProfileResources(
+			{ ...profile, model },
+			profile.resources,
+			profile.resources,
+			scope,
+			this.settingsManager.getActiveResourceProfileNames().includes(profile.name),
+			true,
+		);
 	}
 
 	private async openPersistProfileSelector(): Promise<void> {
@@ -403,7 +499,7 @@ export class ProfileMenuController {
 					},
 					{ tui: this.ui.tui },
 				);
-				return { component: input, focus: input };
+				return { component: input, focus: input, onSuperseded: () => resolve(undefined) };
 			});
 		});
 
@@ -420,7 +516,7 @@ export class ProfileMenuController {
 		}
 
 		try {
-			const profileModel = await this.selectProfileModelForCreate();
+			const profileModel = await this.selectProfileModel();
 			if (profileModel === undefined) {
 				void this.openLibraryManagerFlow();
 				return;
@@ -482,7 +578,7 @@ export class ProfileMenuController {
 
 	private async getProfileResourceKinds(): Promise<ProfileResourceEditorKind[]> {
 		const loader = this.session.resourceLoader;
-		const base = (p: string) => p.split(/[\\/]/).pop() ?? p;
+		const base = portableBasename;
 		const allDiscoverableExtensions = await loader.getDiscoverableExtensionPaths();
 		// Defined BEFORE the skills/prompts arrays below that call it (const = TDZ: defining it
 		// later crashes the whole app with a ReferenceError when the library editor opens).
@@ -591,11 +687,15 @@ export class ProfileMenuController {
 			{
 				kind: "extensions",
 				label: "Extensions",
-				items: allDiscoverableExtensions.map((e) => ({
-					id: base(e),
-					path: e,
-					description: getExtensionDescription(e),
-				})),
+				items: allDiscoverableExtensions.map((extensionPath) => {
+					const description = getExtensionDescription(extensionPath);
+					return {
+						id: path.resolve(extensionPath),
+						label: getProfileExtensionDisplayLabel(extensionPath, description),
+						path: extensionPath,
+						description,
+					};
+				}),
 			},
 			{
 				kind: "agents",
@@ -688,6 +788,7 @@ export class ProfileMenuController {
 		resources: NormalizedProfile["resources"],
 		scope: WritableProfileScope,
 		isActiveProfile: boolean,
+		runtimeMetadataChanged = false,
 	): Promise<void> {
 		const definition = {
 			name: profile.name,
@@ -699,7 +800,7 @@ export class ProfileMenuController {
 			resources,
 		};
 		const changedKinds = resourceProfileSettingsChangedKinds(originalResources, resources);
-		if (!isActiveProfile || changedKinds.size === 0) {
+		if (!isActiveProfile || (changedKinds.size === 0 && !runtimeMetadataChanged)) {
 			try {
 				this.settingsManager.setProfileDefinition(profile.name, definition, scope);
 				this.ui.showStatus(`Saved profile "${profile.name}" to ${scope}.`);
@@ -728,7 +829,7 @@ export class ProfileMenuController {
 				this.settingsManager.setProfileDefinition(profile.name, definition, scope);
 				await this.settingsManager.flush();
 				// Drop the validation-only inline winner, then refresh the registry from the now-validated
-				// persistent definition. The live runtime already represents these identical resources.
+				// persistent definition. The live runtime already represents the same profile definition.
 				this.settingsManager.restoreReloadSnapshot(settingsSnapshot);
 				await this.settingsManager.reload();
 			}
@@ -1014,7 +1115,7 @@ export class ProfileMenuController {
 					},
 					{ tui: this.ui.tui },
 				);
-				return { component: input, focus: input };
+				return { component: input, focus: input, onSuperseded: () => resolve(undefined) };
 			});
 		});
 
@@ -1043,7 +1144,7 @@ export class ProfileMenuController {
 			return this.createProfileFlow();
 		}
 
-		const profileModel = await this.selectProfileModelForCreate();
+		const profileModel = await this.selectProfileModel();
 		if (profileModel === undefined) {
 			this.ui.requestRender();
 			return;
@@ -1053,33 +1154,46 @@ export class ProfileMenuController {
 		void this.openNewProfileEditor(trimmed, profileModel ?? undefined);
 	}
 
-	private async selectProfileModelForCreate(): Promise<string | null | undefined> {
+	private async selectProfileModel(profileModel?: string): Promise<string | null | undefined> {
+		const inheritValue = "(inherit)";
+		const availableModelOptions = [...this.ui.getAutoLearnModelOptions()];
+		if (profileModel && !availableModelOptions.some((option) => option.value === profileModel)) {
+			availableModelOptions.unshift({
+				value: profileModel,
+				label: profileModel,
+				description: "Current profile model (not currently available)",
+			});
+		}
 		const modelOptions = [
 			{
-				value: "(none)",
-				label: "(none)",
-				description: "Do not pin a foreground profile model; use the session/default model",
+				value: inheritValue,
+				label: "Inherit session/default model",
+				description: "Remove the profile model pin and use the current session/default model",
 			},
-			...this.ui.getAutoLearnModelOptions(),
+			...availableModelOptions,
 		];
 
 		return await new Promise<string | null | undefined>((resolve) => {
 			this.ui.showSelector((done) => {
 				const selector = new SelectSubmenu(
 					"Profile Model",
-					"Pick the foreground model for this profile from authenticated/configured providers.",
+					"Pin a foreground model for this profile or inherit the session/default model.",
 					modelOptions,
-					"(none)",
+					profileModel ?? inheritValue,
 					(value) => {
 						done();
-						resolve(value === "(none)" ? null : value);
+						resolve(value === inheritValue ? null : value);
 					},
 					() => {
 						done();
 						resolve(undefined);
 					},
 				);
-				return { component: selector, focus: selector.getSelectList() };
+				return {
+					component: selector,
+					focus: selector.getSelectList(),
+					onSuperseded: () => resolve(undefined),
+				};
 			});
 		});
 	}
@@ -1249,7 +1363,7 @@ export class ProfileMenuController {
 					},
 					{ tui: this.ui.tui },
 				);
-				return { component: input, focus: input };
+				return { component: input, focus: input, onSuperseded: () => resolve(undefined) };
 			});
 		});
 
@@ -1290,7 +1404,11 @@ export class ProfileMenuController {
 						resolve(false);
 					},
 				);
-				return { component: submenu, focus: submenu.getSelectList() };
+				return {
+					component: submenu,
+					focus: submenu.getSelectList(),
+					onSuperseded: () => resolve(false),
+				};
 			});
 		});
 

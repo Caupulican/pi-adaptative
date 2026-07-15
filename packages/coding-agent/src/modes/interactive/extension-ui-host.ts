@@ -75,7 +75,6 @@ export interface ExtensionUiHostUi {
 	readonly footerDataProvider: FooterDataProvider;
 	readonly headerContainer: Container;
 	readonly chatContainer: Container;
-	readonly editorContainer: Container;
 	readonly defaultEditor: CustomEditor;
 	readonly widgetContainerAbove: Container;
 	readonly widgetContainerBelow: Container;
@@ -117,6 +116,8 @@ export class ExtensionUiHost {
 	private extensionSelector: ExtensionSelectorComponent | undefined = undefined;
 	private extensionInput: ExtensionInputComponent | undefined = undefined;
 	private extensionEditor: ExtensionEditorComponent | undefined = undefined;
+	/** Settles the mounted extension dialog before another dialog can replace its overlay. */
+	private activeExtensionDialogCancel: (() => void) | undefined;
 	private extensionTerminalInputUnsubscribers = new Set<() => void>();
 
 	// Extension widgets (components rendered above/below the editor)
@@ -276,6 +277,9 @@ export class ExtensionUiHost {
 	}
 
 	resetExtensionUI(): void {
+		// A reset/reload must settle the active dialog before disposing its component.
+		this.activeExtensionDialogCancel?.();
+		this.activeExtensionDialogCancel = undefined;
 		if (this.extensionSelector) {
 			this.hideExtensionSelector();
 		}
@@ -492,45 +496,45 @@ export class ExtensionUiHost {
 		options: string[],
 		opts?: ExtensionUIDialogOptions,
 	): Promise<string | undefined> {
+		if (opts?.signal?.aborted) return Promise.resolve(undefined);
+		// Replacing an overlay without settling its promise strands the extension handler forever.
+		this.activeExtensionDialogCancel?.();
 		return new Promise((resolve) => {
-			if (opts?.signal?.aborted) {
-				resolve(undefined);
-				return;
-			}
-
-			const onAbort = () => {
-				this.hideExtensionSelector();
-				resolve(undefined);
+			let settled = false;
+			let selector: ExtensionSelectorComponent;
+			const finish = (value: string | undefined, restoreEditor = true) => {
+				if (settled) return;
+				settled = true;
+				opts?.signal?.removeEventListener("abort", cancel);
+				if (this.activeExtensionDialogCancel === cancel) {
+					this.activeExtensionDialogCancel = undefined;
+				}
+				this.hideExtensionSelector(selector, restoreEditor);
+				resolve(value);
 			};
-			opts?.signal?.addEventListener("abort", onAbort, { once: true });
+			const cancel = () => finish(undefined);
 
-			this.extensionSelector = new ExtensionSelectorComponent(
-				title,
-				options,
-				(option) => {
-					opts?.signal?.removeEventListener("abort", onAbort);
-					this.hideExtensionSelector();
-					resolve(option);
-				},
-				() => {
-					opts?.signal?.removeEventListener("abort", onAbort);
-					this.hideExtensionSelector();
-					resolve(undefined);
-				},
-				{ tui: this.ui.tui, timeout: opts?.timeout, onToggleToolsExpanded: () => this.ui.toggleToolsExpanded() },
-			);
-
-			this.ui.overlayHost.swap(this.extensionSelector);
+			selector = new ExtensionSelectorComponent(title, options, (option) => finish(option), cancel, {
+				tui: this.ui.tui,
+				timeout: opts?.timeout,
+				onToggleToolsExpanded: () => this.ui.toggleToolsExpanded(),
+			});
+			this.extensionSelector = selector;
+			this.activeExtensionDialogCancel = cancel;
+			this.ui.overlayHost.swap(selector, { onUnmount: () => finish(undefined, false) });
+			opts?.signal?.addEventListener("abort", cancel, { once: true });
 		});
 	}
 
 	/**
 	 * Hide the extension selector.
 	 */
-	private hideExtensionSelector(): void {
-		this.extensionSelector?.dispose();
+	private hideExtensionSelector(selector = this.extensionSelector, restoreEditor = true): void {
+		if (!selector) return;
+		selector.dispose();
+		if (this.extensionSelector !== selector) return;
 		this.extensionSelector = undefined;
-		this.ui.overlayHost.swap(this.ui.getEditor());
+		if (restoreEditor) this.ui.overlayHost.swap(this.ui.getEditor());
 	}
 
 	/**
@@ -549,77 +553,85 @@ export class ExtensionUiHost {
 		placeholder?: string,
 		opts?: ExtensionUIDialogOptions,
 	): Promise<string | undefined> {
+		if (opts?.signal?.aborted) return Promise.resolve(undefined);
+		this.activeExtensionDialogCancel?.();
 		return new Promise((resolve) => {
-			if (opts?.signal?.aborted) {
-				resolve(undefined);
-				return;
-			}
-
-			const onAbort = () => {
-				this.hideExtensionInput();
-				resolve(undefined);
+			let settled = false;
+			let input: ExtensionInputComponent;
+			const finish = (value: string | undefined, restoreEditor = true) => {
+				if (settled) return;
+				settled = true;
+				opts?.signal?.removeEventListener("abort", cancel);
+				if (this.activeExtensionDialogCancel === cancel) {
+					this.activeExtensionDialogCancel = undefined;
+				}
+				this.hideExtensionInput(input, restoreEditor);
+				resolve(value);
 			};
-			opts?.signal?.addEventListener("abort", onAbort, { once: true });
+			const cancel = () => finish(undefined);
 
-			this.extensionInput = new ExtensionInputComponent(
-				title,
-				placeholder,
-				(value) => {
-					opts?.signal?.removeEventListener("abort", onAbort);
-					this.hideExtensionInput();
-					resolve(value);
-				},
-				() => {
-					opts?.signal?.removeEventListener("abort", onAbort);
-					this.hideExtensionInput();
-					resolve(undefined);
-				},
-				{ tui: this.ui.tui, timeout: opts?.timeout },
-			);
-
-			this.ui.overlayHost.swap(this.extensionInput);
+			input = new ExtensionInputComponent(title, placeholder, (value) => finish(value), cancel, {
+				tui: this.ui.tui,
+				timeout: opts?.timeout,
+			});
+			this.extensionInput = input;
+			this.activeExtensionDialogCancel = cancel;
+			this.ui.overlayHost.swap(input, { onUnmount: () => finish(undefined, false) });
+			opts?.signal?.addEventListener("abort", cancel, { once: true });
 		});
 	}
 
 	/**
 	 * Hide the extension input.
 	 */
-	private hideExtensionInput(): void {
-		this.extensionInput?.dispose();
+	private hideExtensionInput(input = this.extensionInput, restoreEditor = true): void {
+		if (!input) return;
+		input.dispose();
+		if (this.extensionInput !== input) return;
 		this.extensionInput = undefined;
-		this.ui.overlayHost.swap(this.ui.getEditor());
+		if (restoreEditor) this.ui.overlayHost.swap(this.ui.getEditor());
 	}
 
 	/**
 	 * Show a multi-line editor for extensions (with Ctrl+G support).
 	 */
 	showExtensionEditor(title: string, prefill?: string): Promise<string | undefined> {
+		this.activeExtensionDialogCancel?.();
 		return new Promise((resolve) => {
-			this.extensionEditor = new ExtensionEditorComponent(
+			let settled = false;
+			let editor: ExtensionEditorComponent;
+			const finish = (value: string | undefined, restoreEditor = true) => {
+				if (settled) return;
+				settled = true;
+				if (this.activeExtensionDialogCancel === cancel) {
+					this.activeExtensionDialogCancel = undefined;
+				}
+				this.hideExtensionEditor(editor, restoreEditor);
+				resolve(value);
+			};
+			const cancel = () => finish(undefined);
+
+			editor = new ExtensionEditorComponent(
 				this.ui.tui,
 				this.ui.keybindings,
 				title,
 				prefill,
-				(value) => {
-					this.hideExtensionEditor();
-					resolve(value);
-				},
-				() => {
-					this.hideExtensionEditor();
-					resolve(undefined);
-				},
+				(value) => finish(value),
+				cancel,
 			);
-
-			this.ui.overlayHost.swap(this.extensionEditor);
+			this.extensionEditor = editor;
+			this.activeExtensionDialogCancel = cancel;
+			this.ui.overlayHost.swap(editor, { onUnmount: () => finish(undefined, false) });
 		});
 	}
 
 	/**
 	 * Hide the extension editor.
 	 */
-	private hideExtensionEditor(): void {
+	private hideExtensionEditor(editor = this.extensionEditor, restoreEditor = true): void {
+		if (!editor || this.extensionEditor !== editor) return;
 		this.extensionEditor = undefined;
-		this.ui.overlayHost.swap(this.ui.getEditor());
+		if (restoreEditor) this.ui.overlayHost.swap(this.ui.getEditor());
 	}
 
 	/**
@@ -631,8 +643,6 @@ export class ExtensionUiHost {
 
 		// Save text from current editor before switching
 		const currentText = this.ui.getEditor().getText();
-
-		this.ui.editorContainer.clear();
 
 		if (factory) {
 			// Create the custom editor with tui, theme, and keybindings
@@ -688,9 +698,7 @@ export class ExtensionUiHost {
 			this.ui.setEditor(this.ui.defaultEditor);
 		}
 
-		this.ui.editorContainer.addChild(this.ui.getEditor() as Component);
-		this.ui.tui.setFocus(this.ui.getEditor() as Component);
-		this.ui.tui.requestRender();
+		this.ui.overlayHost.swap(this.ui.getEditor() as Component);
 	}
 
 	/**
@@ -720,62 +728,88 @@ export class ExtensionUiHost {
 			onHandle?: (handle: OverlayHandle) => void;
 		},
 	): Promise<T> {
+		this.activeExtensionDialogCancel?.();
 		const savedText = this.ui.getEditor().getText();
 		const isOverlay = options?.overlay ?? false;
 
-		const restoreEditor = () => {
-			this.ui.getEditor().setText(savedText);
-			this.ui.overlayHost.swap(this.ui.getEditor(), { focusMode: "restore" });
-		};
-
 		return new Promise((resolve, reject) => {
-			let component: Component & { dispose?(): void };
+			let component: (Component & { dispose?(): void }) | undefined;
+			let overlayHandle: OverlayHandle | undefined;
 			let closed = false;
-
-			const close = (result: T) => {
-				if (closed) return;
-				closed = true;
-				if (isOverlay) this.ui.tui.hideOverlay();
-				else restoreEditor();
-				// Note: both branches above already call requestRender
-				resolve(result);
+			let cancel: () => void;
+			const dispose = (candidate: (Component & { dispose?(): void }) | undefined) => {
 				try {
-					component?.dispose?.();
+					candidate?.dispose?.();
 				} catch {
 					/* ignore dispose errors */
 				}
 			};
+			const restore = (restoreEditor = true) => {
+				if (this.activeExtensionDialogCancel !== cancel) return;
+				this.activeExtensionDialogCancel = undefined;
+				if (isOverlay) {
+					overlayHandle?.hide();
+				} else if (restoreEditor) {
+					this.ui.getEditor().setText(savedText);
+					this.ui.overlayHost.swap(this.ui.getEditor(), { focusMode: "restore" });
+				}
+			};
+			const close = (result: T) => {
+				if (closed) return;
+				closed = true;
+				dispose(component);
+				restore();
+				resolve(result);
+			};
+			const fail = (error: unknown, restoreEditor = true) => {
+				if (closed) return;
+				closed = true;
+				dispose(component);
+				restore(restoreEditor);
+				reject(error);
+			};
+			cancel = () => fail(new Error("Extension UI request was superseded or reset"));
+			this.activeExtensionDialogCancel = cancel;
+			let mountingComponent = false;
+			const onUnmount = () => {
+				if (!mountingComponent) fail(new Error("Extension UI request was superseded or reset"), false);
+			};
+			if (!isOverlay) {
+				this.ui.overlayHost.swap(this.ui.getEditor(), {
+					focusMode: "restore",
+					render: "none",
+					onUnmount,
+				});
+			}
 
-			Promise.resolve(factory(this.ui.tui, theme, this.ui.keybindings, close))
-				.then((c) => {
-					if (closed) return;
-					component = c;
+			Promise.resolve()
+				.then(() => (closed ? undefined : factory(this.ui.tui, theme, this.ui.keybindings, close)))
+				.then((createdComponent) => {
+					if (!createdComponent) return;
+					component = createdComponent;
+					if (closed) {
+						dispose(component);
+						return;
+					}
 					if (isOverlay) {
-						// Resolve overlay options - can be static or dynamic function
-						const resolveOptions = (): OverlayOptions | undefined => {
-							if (options?.overlayOptions) {
-								const opts =
-									typeof options.overlayOptions === "function"
-										? options.overlayOptions()
-										: options.overlayOptions;
-								return opts;
-							}
-							// Fallback: use component's width property if available
-							const w = (component as { width?: number }).width;
-							return w ? { width: w } : undefined;
-						};
-						const handle = this.ui.tui.showOverlay(component, resolveOptions());
-						// Expose handle to caller for visibility control
-						options?.onHandle?.(handle);
+						const resolvedOptions =
+							typeof options?.overlayOptions === "function" ? options.overlayOptions() : options?.overlayOptions;
+						const width = (component as { width?: number }).width;
+						overlayHandle = this.ui.tui.showOverlay(
+							component,
+							resolvedOptions ?? (width ? { width } : undefined),
+						);
+						options?.onHandle?.(overlayHandle);
 					} else {
-						this.ui.overlayHost.swap(component);
+						mountingComponent = true;
+						try {
+							this.ui.overlayHost.swap(component, { onUnmount });
+						} finally {
+							mountingComponent = false;
+						}
 					}
 				})
-				.catch((err) => {
-					if (closed) return;
-					if (!isOverlay) restoreEditor();
-					reject(err);
-				});
+				.catch(fail);
 		});
 	}
 

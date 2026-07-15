@@ -4,11 +4,12 @@
 
 import { spawn } from "node:child_process";
 import { StringDecoder } from "node:string_decoder";
-import { killTree } from "@caupulican/pi-agent-core/node";
-import { waitForChildProcess } from "../utils/child-process.ts";
+import { waitForChildProcessWithTermination } from "../utils/child-process.ts";
 
 /** Default per-stream retention for command output, in UTF-16 code units (~bytes for ASCII). */
 const DEFAULT_EXEC_MAX_BUFFER = 16 * 1024 * 1024;
+const DEFAULT_EXEC_TIMEOUT_MS = 10 * 60_000;
+const EXEC_KILL_GRACE_MS = 5_000;
 
 /**
  * Options for executing shell commands.
@@ -109,31 +110,6 @@ export async function execCommand(
 		const stderr = createRollingOutputBuffer(maxBuffer);
 		const stdoutDecoder = new StringDecoder("utf8");
 		const stderrDecoder = new StringDecoder("utf8");
-		let killed = false;
-		let timeoutId: NodeJS.Timeout | undefined;
-
-		const killProcess = () => {
-			if (!killed && proc.pid) {
-				killed = true;
-				void killTree(proc.pid, { graceMs: 5000 });
-			}
-		};
-
-		// Handle abort signal
-		if (options?.signal) {
-			if (options.signal.aborted) {
-				killProcess();
-			} else {
-				options.signal.addEventListener("abort", killProcess, { once: true });
-			}
-		}
-
-		// Handle timeout
-		if (options?.timeout && options.timeout > 0) {
-			timeoutId = setTimeout(() => {
-				killProcess();
-			}, options.timeout);
-		}
 
 		proc.stdout?.on("data", (data: Buffer) => {
 			stdout.push(stdoutDecoder.write(data));
@@ -143,33 +119,41 @@ export async function execCommand(
 			stderr.push(stderrDecoder.write(data));
 		});
 
-		const settle = (code: number) => {
-			stdout.push(stdoutDecoder.end());
-			stderr.push(stderrDecoder.end());
-			if (timeoutId) clearTimeout(timeoutId);
-			if (options?.signal) {
-				options.signal.removeEventListener("abort", killProcess);
-			}
-			resolve({
-				stdout: stdout.text(),
-				stderr: stderr.text(),
-				code,
-				killed,
-				stdoutTruncated: stdout.truncated(),
-				stderrTruncated: stderr.truncated(),
-				...(spawnError !== undefined ? { errorMessage: spawnError } : {}),
-			});
-		};
-
-		// Wait for process termination without hanging on inherited stdio handles
-		// held open by detached descendants.
-		waitForChildProcess(proc)
-			.then((code) => settle(code ?? 0))
+		// Settle from the child's terminal event or a bounded abort/timeout escalation.
+		// This never waits for a second close event after termination has been acknowledged.
+		waitForChildProcessWithTermination(proc, {
+			signal: options?.signal,
+			timeoutMs: options?.timeout && options.timeout > 0 ? options.timeout : DEFAULT_EXEC_TIMEOUT_MS,
+			killGraceMs: EXEC_KILL_GRACE_MS,
+		})
+			.then((terminal) => {
+				stdout.push(stdoutDecoder.end());
+				stderr.push(stderrDecoder.end());
+				resolve({
+					stdout: stdout.text(),
+					stderr: stderr.text(),
+					code: terminal.code ?? 1,
+					killed: terminal.reason !== "exited",
+					stdoutTruncated: stdout.truncated(),
+					stderrTruncated: stderr.truncated(),
+					...(spawnError !== undefined ? { errorMessage: spawnError } : {}),
+				});
+			})
 			.catch((err) => {
+				stdout.push(stdoutDecoder.end());
+				stderr.push(stderrDecoder.end());
 				if (spawnError === undefined) {
 					spawnError = err instanceof Error ? err.message : String(err);
 				}
-				settle(1);
+				resolve({
+					stdout: stdout.text(),
+					stderr: stderr.text(),
+					code: 1,
+					killed: false,
+					stdoutTruncated: stdout.truncated(),
+					stderrTruncated: stderr.truncated(),
+					errorMessage: spawnError,
+				});
 			});
 	});
 }

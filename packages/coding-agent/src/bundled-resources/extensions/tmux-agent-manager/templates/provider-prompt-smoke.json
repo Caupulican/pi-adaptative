@@ -1,0 +1,14 @@
+{
+  "name": "provider-prompt-smoke",
+  "description": "Real minimal interactive prompt smoke for native Claude, Agy, and Pi. Consumes provider/model tokens.",
+  "deadlineSeconds": 600,
+  "agents": [
+    { "provider": "claude", "name": "claude-prompt-smoke" },
+    { "provider": "agy", "name": "agy-prompt-smoke" },
+    { "provider": "pi", "name": "pi-prompt-smoke" }
+  ],
+  "notes": [
+    "Use only when model-token/auth validation is intended.",
+    "The manager opens each CLI in tmux, injects the prompt, captures pane output, and watches DONE/BLOCKED markers."
+  ]
+}

@@ -3,9 +3,8 @@
  * Supports Ctrl+G for external editor.
  */
 
-import { spawn } from "node:child_process";
+import { randomUUID } from "node:crypto";
 import * as fs from "node:fs";
-import * as os from "node:os";
 import * as path from "node:path";
 import {
 	Container,
@@ -17,7 +16,10 @@ import {
 	Text,
 	type TUI,
 } from "@caupulican/pi-tui";
+import { getAgentDir } from "../../../config.ts";
 import type { KeybindingsManager } from "../../../core/keybindings.ts";
+import { runExternalEditor } from "../../../utils/external-editor-command.ts";
+import { getProcessWorkRun } from "../../../utils/work-directory.ts";
 import { getEditorTheme, theme } from "../theme/theme.ts";
 import { DynamicBorder } from "./dynamic-border.ts";
 import { keyHint } from "./keybinding-hints.ts";
@@ -117,26 +119,17 @@ export class ExtensionEditorComponent extends Container implements Focusable {
 		}
 
 		const currentText = this.editor.getText();
-		const tmpFile = path.join(os.tmpdir(), `pi-extension-editor-${Date.now()}.md`);
+		const tmpFile = path.join(
+			getProcessWorkRun(getAgentDir(), "editors", "extensions").path,
+			`pi-extension-editor-${randomUUID()}.md`,
+		);
 
 		try {
 			fs.writeFileSync(tmpFile, currentText, "utf-8");
 			this.tui.stop();
 
-			const [editor, ...editorArgs] = editorCmd.split(" ");
 			process.stdout.write(`Launching external editor: ${editorCmd}\nPi will resume when the editor exits.\n`);
-
-			// Do not use spawnSync here. On Windows, synchronous child_process calls can keep
-			// Node/libuv's console input read active after tui.stop() pauses stdin, racing
-			// vim/nvim for the console input buffer until Ctrl+C cancels the pending read.
-			const status = await new Promise<number | null>((resolve) => {
-				const child = spawn(editor, [...editorArgs, tmpFile], {
-					stdio: "inherit",
-					shell: process.platform === "win32",
-				});
-				child.on("error", () => resolve(null));
-				child.on("close", (code) => resolve(code));
-			});
+			const status = await runExternalEditor(editorCmd, tmpFile);
 
 			if (status === 0) {
 				const newContent = fs.readFileSync(tmpFile, "utf-8").replace(/\n$/, "");

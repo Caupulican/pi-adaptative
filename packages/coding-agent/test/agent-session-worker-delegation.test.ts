@@ -298,6 +298,40 @@ describe("AgentSession worker delegation", () => {
 			context.systemPrompt?.includes("You are a bounded subagent shipped by a coding-agent session")
 				? workerResponse
 				: fauxAssistantMessage("Foreground remained responsive.");
+		let resolveTerminal!: () => void;
+		let resolveHandoff!: () => void;
+		let resolveWakeReply!: () => void;
+		const terminal = new Promise<void>((resolve) => {
+			resolveTerminal = resolve;
+		});
+		const handoff = new Promise<void>((resolve) => {
+			resolveHandoff = resolve;
+		});
+		const wakeReply = new Promise<void>((resolve) => {
+			resolveWakeReply = resolve;
+		});
+		const unsubscribe = harness.session.subscribe((event) => {
+			if (
+				event.type === "delegate_workers" &&
+				event.terminalSinceFlush.some((record) => record.status === "succeeded")
+			) {
+				resolveTerminal();
+			}
+			if (
+				event.type === "message_end" &&
+				event.message.role === "custom" &&
+				event.message.customType === "background-worker-completion"
+			) {
+				resolveHandoff();
+			}
+			if (
+				event.type === "message_end" &&
+				event.message.role === "assistant" &&
+				JSON.stringify(event.message.content).includes("Background handoff acknowledged.")
+			) {
+				resolveWakeReply();
+			}
+		});
 		try {
 			harness.setResponses([
 				fauxAssistantMessage([fauxToolCall("delegate", { instructions: "Wait for the background result" })], {
@@ -305,34 +339,31 @@ describe("AgentSession worker delegation", () => {
 				}),
 				routeResponse,
 				routeResponse,
+				fauxAssistantMessage("Background handoff acknowledged."),
 			]);
 
 			await harness.session.prompt("Start one background worker", { autoContinueGoal: false });
-			await vi.waitFor(() =>
-				expect(
-					harness.session
-						.getLaneRecords()
-						.filter((record) => record.type === "worker")
-						.at(-1)?.status,
-				).toBe("running"),
-			);
-
+			expect(
+				harness.session
+					.getLaneRecords()
+					.filter((record) => record.type === "worker")
+					.at(-1)?.status,
+			).toBe("running");
 			expect(harness.session.getWorkerResultSnapshots()).toHaveLength(0);
 			expect(JSON.stringify(harness.session.messages)).toContain("Foreground remained responsive.");
 
 			resolveWorker(fauxAssistantMessage('{"summary":"background result arrived"}'));
-			await vi.waitFor(() => expect(harness.session.getWorkerResultSnapshots()).toHaveLength(1));
-			await vi.waitFor(() =>
-				expect(
-					harness
-						.eventsOfType("delegate_workers")
-						.flatMap((event) => event.terminalSinceFlush)
-						.map((terminal) => terminal.status),
-				).toContain("succeeded"),
-			);
+			await terminal;
+			await handoff;
+			await wakeReply;
 
-			expect(JSON.stringify(harness.session.messages)).not.toContain("background result arrived");
+			expect(harness.session.getWorkerResultSnapshots()).toHaveLength(1);
+			const serialized = JSON.stringify(harness.session.messages);
+			expect(serialized).toContain("Background worker terminal handoff:");
+			expect(serialized).toContain("Background handoff acknowledged.");
+			expect(serialized).not.toContain("background result arrived");
 		} finally {
+			unsubscribe();
 			if (!workerResolved) resolveWorker(fauxAssistantMessage('{"summary":"test cleanup"}'));
 			harness.cleanup();
 		}

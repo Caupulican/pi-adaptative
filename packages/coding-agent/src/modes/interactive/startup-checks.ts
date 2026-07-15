@@ -9,7 +9,6 @@
  * interactive-mode keeps thin delegating wrappers.
  */
 
-import { spawn } from "node:child_process";
 import type { SessionManager } from "@caupulican/pi-agent-core/node";
 import type { Container, MarkdownTheme, TUI } from "@caupulican/pi-tui";
 import { getCapabilities, hyperlink, Markdown, Spacer, Text } from "@caupulican/pi-tui";
@@ -20,6 +19,7 @@ import type { SettingsManager } from "../../core/settings-manager.ts";
 import { isInstallTelemetryEnabled } from "../../core/telemetry.ts";
 import { hasProjectTrustInputs } from "../../core/trust-manager.ts";
 import { getChangelogPath, getNewEntries, parseChangelog } from "../../utils/changelog.ts";
+import { spawnProcess, waitForChildProcessWithTermination } from "../../utils/child-process.ts";
 import { getPiUserAgent } from "../../utils/pi-user-agent.ts";
 import type { LatestPiRelease } from "../../utils/version-check.ts";
 import { DynamicBorder } from "./components/dynamic-border.ts";
@@ -58,29 +58,24 @@ export async function checkForPackageUpdates(host: StartupChecksHost): Promise<s
 export async function checkTmuxKeyboardSetup(): Promise<string | undefined> {
 	if (!process.env.TMUX) return undefined;
 
-	const runTmuxShow = (option: string): Promise<string | undefined> => {
-		return new Promise((resolve) => {
-			const proc = spawn("tmux", ["show", "-gv", option], {
+	const runTmuxShow = async (option: string): Promise<string | undefined> => {
+		try {
+			const proc = spawnProcess("tmux", ["show", "-gv", option], {
+				detached: process.platform !== "win32",
 				stdio: ["ignore", "pipe", "ignore"],
 			});
 			let stdout = "";
-			const timer = setTimeout(() => {
-				proc.kill();
-				resolve(undefined);
-			}, 2000);
-
 			proc.stdout?.on("data", (data) => {
-				stdout += data.toString();
+				stdout = `${stdout}${data.toString()}`.slice(-64 * 1024);
 			});
-			proc.on("error", () => {
-				clearTimeout(timer);
-				resolve(undefined);
+			const terminal = await waitForChildProcessWithTermination(proc, {
+				timeoutMs: 2_000,
+				killGraceMs: 1_000,
 			});
-			proc.on("close", (code) => {
-				clearTimeout(timer);
-				resolve(code === 0 ? stdout.trim() : undefined);
-			});
-		});
+			return terminal.reason === "exited" && terminal.code === 0 ? stdout.trim() : undefined;
+		} catch {
+			return undefined;
+		}
 	};
 
 	const [extendedKeys, extendedKeysFormat] = await Promise.all([

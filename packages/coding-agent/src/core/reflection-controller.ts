@@ -193,10 +193,35 @@ export class ReflectionController {
 			const assistantMessages = messages.filter(
 				(message): message is AssistantMessage => message.role === "assistant",
 			);
-			const finalAssistant = assistantMessages.at(-1);
+			let finalAssistant = assistantMessages.at(-1);
 			if (!finalAssistant) {
 				throw new Error("runIsolatedCompletion: child loop produced no assistant message");
 			}
+
+			const hasFinalText = finalAssistant.content.some(
+				(content) => content.type === "text" && content.text.trim().length > 0,
+			);
+			const endedOnToolCall = finalAssistant.content.some((content) => content.type === "toolCall");
+			if (opts.finalTextPrompt && !hasFinalText && endedOnToolCall && !opts.signal?.aborted) {
+				// A hard turn bound may stop immediately after successful tool execution. Preserve that bound,
+				// then allow exactly one tool-free synthesis call so the gathered work is not thrown away.
+				const finalizationMessages = await agent.convertToLlm(messages);
+				const finalizationStream = await agent.streamFn(
+					model,
+					{
+						systemPrompt: opts.systemPrompt,
+						messages: [
+							...finalizationMessages,
+							{ role: "user", content: opts.finalTextPrompt, timestamp: Date.now() },
+						],
+						tools: [],
+					},
+					options,
+				);
+				finalAssistant = await finalizationStream.result();
+				assistantMessages.push(finalAssistant);
+			}
+
 			const usage = assistantMessages.reduce<Usage>(
 				(total, message) => ({
 					input: total.input + message.usage.input,

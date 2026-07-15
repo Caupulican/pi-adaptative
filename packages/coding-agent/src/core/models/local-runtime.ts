@@ -1,4 +1,4 @@
-import { type ChildProcess, spawn } from "node:child_process";
+import { type ChildProcess, type SpawnOptions, spawn } from "node:child_process";
 import {
 	copyFileSync,
 	createWriteStream,
@@ -17,7 +17,12 @@ import type { Readable, Writable } from "node:stream";
 import { pipeline } from "node:stream/promises";
 import * as nodeZlib from "node:zlib";
 import { getBundledResourcesDir } from "../../config.ts";
-import { spawnProcess, spawnProcessSync, waitForChildProcess } from "../../utils/child-process.ts";
+import {
+	type ChildProcessTerminationResult,
+	spawnProcess,
+	spawnProcessSync,
+	waitForChildProcessWithTermination,
+} from "../../utils/child-process.ts";
 import { StreamingLineDecoder } from "../../utils/streaming-lines.ts";
 
 const MAX_OLLAMA_PULL_LINE_CHARS = 64 * 1024 * 1024;
@@ -146,12 +151,14 @@ export type RuntimeCommandRunner = (
 	options?: { env?: NodeJS.ProcessEnv; onOutput?: (chunk: string) => void },
 ) => Promise<RuntimeCommandResult>;
 
+type LocalRuntimeSpawnOptions = Pick<SpawnOptions, "detached" | "stdio"> & { env: NodeJS.ProcessEnv };
+
 export interface LocalRuntimeDeps {
 	fetchFn?: typeof fetch;
 	spawnFn?: (
 		command: string,
 		args: string[],
-		options: { env: NodeJS.ProcessEnv },
+		options: LocalRuntimeSpawnOptions,
 	) => Pick<ChildProcess, "pid" | "kill" | "unref" | "on">;
 	existsFn?: (path: string) => boolean;
 	linkFile?: (source: string, target: string) => void;
@@ -185,6 +192,9 @@ export interface LocalRuntimeDeps {
 
 const DEFAULT_BASE_URL = "http://127.0.0.1:11434";
 const HEALTH_TIMEOUT_MS = 2_000;
+const LOCAL_RUNTIME_COMMAND_TIMEOUT_MS = 15 * 60_000;
+const LOCAL_RUNTIME_EXTRACTION_TIMEOUT_MS = 10 * 60_000;
+const LOCAL_RUNTIME_KILL_GRACE_MS = 2_000;
 const START_POLL_ATTEMPTS = 20;
 const START_POLL_INTERVAL_MS = 500;
 const TRANSFORMERS_PORT_BASE = 18_100;
@@ -197,8 +207,22 @@ const TRANSFORMERS_PINNED_PACKAGES = ["transformers==5.13.0", "huggingface-hub==
 const TRANSFORMERS_REQUIRED_MODULES = ["torch", "transformers", "huggingface_hub", "safetensors"];
 const TORCH_PINNED_VERSION = "2.12.1";
 
-function isCrossDeviceLinkError(error: unknown): boolean {
-	return typeof error === "object" && error !== null && (error as { code?: unknown }).code === "EXDEV";
+function terminateManagedRuntimeProcess(child: ChildProcess): void {
+	const terminationController = new AbortController();
+	terminationController.abort();
+	void waitForChildProcessWithTermination(child, {
+		signal: terminationController.signal,
+		killGraceMs: LOCAL_RUNTIME_KILL_GRACE_MS,
+	}).catch(() => {
+		child.kill("SIGKILL");
+		child.unref();
+	});
+}
+
+function isHardlinkFallbackError(error: unknown): boolean {
+	if (typeof error !== "object" || error === null) return false;
+	const code = (error as { code?: unknown }).code;
+	return code === "EXDEV" || code === "EACCES" || code === "EPERM";
 }
 
 function fileSizeBytes(path: string): number {
@@ -216,6 +240,7 @@ async function runCommandDefault(
 ): Promise<RuntimeCommandResult> {
 	try {
 		const proc = spawnProcess(command, args, {
+			detached: process.platform !== "win32",
 			stdio: ["ignore", "pipe", "pipe"],
 			env: options.env ? { ...process.env, ...options.env } : process.env,
 		});
@@ -224,20 +249,30 @@ async function runCommandDefault(
 		proc.stdout.setEncoding("utf8");
 		proc.stderr.setEncoding("utf8");
 		proc.stdout.on("data", (chunk: string) => {
-			stdout += chunk;
+			stdout = `${stdout}${chunk}`.slice(-1024 * 1024);
 			options.onOutput?.(chunk);
 		});
 		proc.stderr.on("data", (chunk: string) => {
-			stderr += chunk;
+			stderr = `${stderr}${chunk}`.slice(-1024 * 1024);
 			options.onOutput?.(chunk);
 		});
-		const code = await waitForChildProcess(proc);
+		const terminal = await waitForChildProcessWithTermination(proc, {
+			timeoutMs: LOCAL_RUNTIME_COMMAND_TIMEOUT_MS,
+			killGraceMs: LOCAL_RUNTIME_KILL_GRACE_MS,
+		});
+		const timedOut = terminal.reason === "timeout";
 		return {
-			ok: code === 0,
+			ok: terminal.code === 0,
 			stdout,
 			stderr,
-			code,
-			...(code === 0 ? {} : { error: stderr.trim() || stdout.trim() || `exit code ${code ?? "unknown"}` }),
+			code: terminal.code,
+			...(terminal.code === 0
+				? {}
+				: {
+						error: timedOut
+							? `${command} timed out after ${LOCAL_RUNTIME_COMMAND_TIMEOUT_MS}ms`
+							: stderr.trim() || stdout.trim() || `exit code ${terminal.code ?? "unknown"}`,
+					}),
 		};
 	} catch (error) {
 		return {
@@ -313,7 +348,8 @@ export class OllamaRuntime {
 					: undefined;
 		this._hasCommand =
 			args.deps?.hasCommand ??
-			((command) => spawnProcessSync(command, ["--version"], { encoding: "utf8" }).error === undefined);
+			((command) =>
+				spawnProcessSync(command, ["--version"], { encoding: "utf8", timeout: 5_000 }).error === undefined);
 		this._extractArchiveOverride = args.deps?.extractArchive;
 	}
 
@@ -488,7 +524,7 @@ export class OllamaRuntime {
 				this._linkFile(source, target);
 				result.blobsHardlinked++;
 			} catch (error) {
-				if (!isCrossDeviceLinkError(error)) throw error;
+				if (!isHardlinkFallbackError(error)) throw error;
 				this._copyFile(source, target);
 				result.blobsCopied++;
 			}
@@ -587,8 +623,9 @@ export class OllamaRuntime {
 		destDir: string,
 		kind: "tar-gz" | "tar-zst",
 	): Promise<{ ok: boolean; error?: string }> {
-		let decompressed: Readable = input as unknown as Readable;
 		const tarArgs = ["-xf", "-", "-C", destDir];
+		let nativeZstd: (NodeJS.ReadWriteStream & Readable) | undefined;
+		let zstdProc: ChildProcess | undefined;
 		if (kind === "tar-zst") {
 			const strategy = this._chooseZstdStrategy();
 			if (strategy.kind === "unavailable") {
@@ -598,23 +635,54 @@ export class OllamaRuntime {
 				};
 			}
 			if (strategy.kind === "native") {
-				decompressed = decompressed.pipe(
-					this._createZstdDecompress?.() as unknown as NodeJS.ReadWriteStream & Readable,
-				);
+				nativeZstd = this._createZstdDecompress?.() as unknown as NodeJS.ReadWriteStream & Readable;
 			} else {
-				const zstdProc = spawnProcess("zstd", ["-d"], { stdio: ["pipe", "pipe", "pipe"] });
-				decompressed.pipe(requireStdin(zstdProc, "zstd"));
-				decompressed = zstdProc.stdout as unknown as Readable;
+				zstdProc = spawnProcess("zstd", ["-d"], {
+					detached: process.platform !== "win32",
+					stdio: ["pipe", "pipe", "ignore"],
+				});
 			}
 		} else {
 			// tar itself handles gzip via -z — no separate decompression step needed.
 			tarArgs[0] = "-xzf";
 		}
-		const tarProc = spawnProcess("tar", tarArgs, { stdio: ["pipe", "pipe", "pipe"] });
-		decompressed.pipe(requireStdin(tarProc, "tar"));
-		const code = await waitForChildProcess(tarProc);
-		if (code !== 0) {
-			return { ok: false, error: `extract-fail: tar exited with code ${code}` };
+		const tarProc = spawnProcess("tar", tarArgs, {
+			detached: process.platform !== "win32",
+			stdio: ["pipe", "ignore", "ignore"],
+		});
+		const terminationController = new AbortController();
+		const processWaits = [tarProc, ...(zstdProc ? [zstdProc] : [])].map((proc) =>
+			waitForChildProcessWithTermination(proc, {
+				signal: terminationController.signal,
+				timeoutMs: LOCAL_RUNTIME_EXTRACTION_TIMEOUT_MS,
+				killGraceMs: LOCAL_RUNTIME_KILL_GRACE_MS,
+			}),
+		);
+		const streamPipelines = nativeZstd
+			? [pipeline(input as unknown as Readable, nativeZstd, requireStdin(tarProc, "tar"))]
+			: zstdProc
+				? [
+						pipeline(input as unknown as Readable, requireStdin(zstdProc, "zstd")),
+						pipeline(zstdProc.stdout as unknown as Readable, requireStdin(tarProc, "tar")),
+					]
+				: [pipeline(input as unknown as Readable, requireStdin(tarProc, "tar"))];
+		let terminals: ChildProcessTerminationResult[];
+		try {
+			[, terminals] = await Promise.all([Promise.all(streamPipelines), Promise.all(processWaits)]);
+		} catch (error) {
+			terminationController.abort();
+			await Promise.allSettled(processWaits);
+			throw error;
+		}
+		const failedProcess = terminals.find((terminal) => terminal.reason === "timeout" || terminal.code !== 0);
+		if (failedProcess) {
+			return {
+				ok: false,
+				error:
+					failedProcess.reason === "timeout"
+						? `extract-fail: archive extraction timed out after ${LOCAL_RUNTIME_EXTRACTION_TIMEOUT_MS}ms`
+						: `extract-fail: archive extraction exited with code ${failedProcess.code ?? "unknown"}`,
+			};
 		}
 		return { ok: true };
 	}
@@ -626,10 +694,22 @@ export class OllamaRuntime {
 		try {
 			const extractCommand = this._platform() === "win32" && this._hasCommand("tar") ? "tar" : "unzip";
 			const args = extractCommand === "tar" ? ["-xf", zipPath, "-C", destDir] : ["-q", zipPath, "-d", destDir];
-			const proc = spawnProcess(extractCommand, args, { stdio: ["ignore", "pipe", "pipe"] });
-			const code = await waitForChildProcess(proc);
-			if (code !== 0) {
-				return { ok: false, error: `extract-fail: ${extractCommand} exited with code ${code}` };
+			const proc = spawnProcess(extractCommand, args, {
+				detached: process.platform !== "win32",
+				stdio: "ignore",
+			});
+			const terminal = await waitForChildProcessWithTermination(proc, {
+				timeoutMs: LOCAL_RUNTIME_EXTRACTION_TIMEOUT_MS,
+				killGraceMs: LOCAL_RUNTIME_KILL_GRACE_MS,
+			});
+			if (terminal.reason === "timeout" || terminal.code !== 0) {
+				return {
+					ok: false,
+					error:
+						terminal.reason === "timeout"
+							? `extract-fail: ${extractCommand} timed out after ${LOCAL_RUNTIME_EXTRACTION_TIMEOUT_MS}ms`
+							: `extract-fail: ${extractCommand} exited with code ${terminal.code ?? "unknown"}`,
+				};
 			}
 			return { ok: true };
 		} finally {
@@ -650,7 +730,11 @@ export class OllamaRuntime {
 		const host = this._baseUrl.replace(/^https?:\/\//, "");
 		const env: NodeJS.ProcessEnv = { ...process.env, OLLAMA_HOST: host, ...extraEnv };
 		this._childModelsDir = env.OLLAMA_MODELS ?? this.userModelsDir();
-		this._child = this._spawn(binary.path, ["serve"], { env });
+		this._child = this._spawn(binary.path, ["serve"], {
+			detached: process.platform !== "win32",
+			env,
+			stdio: "ignore",
+		});
 		this._child.unref?.();
 		for (let attempt = 0; attempt < START_POLL_ATTEMPTS; attempt++) {
 			if (await this._serverUp()) return { started: true, reason: "started" };
@@ -705,14 +789,11 @@ export class OllamaRuntime {
 
 	/** Resource hygiene only: stops the pi-managed serve process; never deletes anything. */
 	stop(): { stopped: boolean } {
-		if (!this._child) return { stopped: false };
-		try {
-			this._child.kill("SIGTERM");
-		} catch {
-			// already gone
-		}
+		const child = this._child;
+		if (!child) return { stopped: false };
 		this._child = undefined;
 		this._childModelsDir = undefined;
+		terminateManagedRuntimeProcess(child as ChildProcess);
 		return { stopped: true };
 	}
 
@@ -1208,7 +1289,7 @@ export class TransformersRuntime {
 				"--cache-dir",
 				this.cacheDir,
 			],
-			{ env },
+			{ detached: process.platform !== "win32", env, stdio: "ignore" },
 		);
 		this._proc.unref?.();
 		for (let attempt = 0; attempt < TRANSFORMERS_START_POLL_ATTEMPTS; attempt++) {
@@ -1220,9 +1301,10 @@ export class TransformersRuntime {
 	}
 
 	stop(): { stopped: boolean } {
-		if (!this._proc) return { stopped: false };
-		this._proc.kill();
+		const child = this._proc;
+		if (!child) return { stopped: false };
 		this._proc = undefined;
+		terminateManagedRuntimeProcess(child as ChildProcess);
 		return { stopped: true };
 	}
 

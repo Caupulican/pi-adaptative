@@ -8,12 +8,13 @@
 
 import { randomBytes } from "node:crypto";
 import type { WriteStream } from "node:fs";
-import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { sanitizeBinaryOutput } from "@caupulican/pi-agent-core";
 import { DEFAULT_MAX_BYTES, truncateTail } from "@caupulican/pi-agent-core/node";
+import { getAgentDir } from "../config.ts";
 import { stripAnsi } from "../utils/ansi.ts";
 import { createSafeWriteStream, endWriteStream } from "../utils/safe-write-stream.ts";
+import { getProcessWorkRun } from "../utils/work-directory.ts";
 import type { BashOperations } from "./tools/bash.ts";
 import { classifyGitCommand, executeFilteredGit } from "./tools/git-filter.ts";
 
@@ -47,6 +48,10 @@ export interface BashResult {
 // Implementation
 // ============================================================================
 
+function getBashOutputPath(id: string): string {
+	return join(getProcessWorkRun(getAgentDir(), "outputs", "bash").path, `pi-bash-${id}.log`);
+}
+
 /**
  * Execute a bash command using custom BashOperations.
  * Used for remote execution (SSH, containers, etc.).
@@ -74,7 +79,7 @@ export async function executeBashWithOperations(
 				let fullOutputPath = res.fullOutputPath;
 				if (fullOutputPath === undefined && rawBytes.length > DEFAULT_MAX_BYTES) {
 					const id = randomBytes(8).toString("hex");
-					const spillPath = join(tmpdir(), `pi-bash-${id}.log`);
+					const spillPath = getBashOutputPath(id);
 					fullOutputPath = spillPath;
 					// On stream failure (e.g. disk full), drop the advertised path instead of
 					// pointing at a partial/missing file.
@@ -110,7 +115,7 @@ export async function executeBashWithOperations(
 			return;
 		}
 		const id = randomBytes(8).toString("hex");
-		tempFilePath = join(tmpdir(), `pi-bash-${id}.log`);
+		tempFilePath = getBashOutputPath(id);
 		// On stream failure (e.g. disk full), drop the artifact instead of
 		// crashing the process; the rolling in-memory output is still returned.
 		tempFileStream = createSafeWriteStream(tempFilePath, () => {

@@ -63,6 +63,7 @@ import { runMigrations, showDeprecationWarnings } from "./migrations.ts";
 import { handleConfigCommand, handlePackageCommand } from "./package-manager-cli.ts";
 import { isLocalPath, normalizePath, resolvePath } from "./utils/paths.ts";
 import { cleanupWindowsSelfUpdateQuarantine } from "./utils/windows-self-update.ts";
+import { getProcessWorkRun, getWorkRoot, PI_WORK_ROOT_ENV } from "./utils/work-directory.ts";
 
 /**
  * Read all content from piped stdin.
@@ -199,16 +200,27 @@ async function resolveSessionPath(sessionArg: string, cwd: string, sessionDir?: 
 	return { type: "not_found", arg: sessionArg };
 }
 
-/** Prompt user for yes/no confirmation */
-async function promptConfirm(message: string): Promise<boolean> {
+/** Prompt user for yes/no confirmation. Non-interactive callers fail closed instead of waiting on stdin. */
+export async function promptConfirm(message: string): Promise<boolean> {
+	if (!process.stdin.isTTY || !process.stdout.isTTY) return false;
 	return new Promise((resolve) => {
 		const rl = createInterface({
 			input: process.stdin,
 			output: process.stdout,
 		});
-		rl.question(`${message} [y/N] `, (answer) => {
+		let settled = false;
+		const finish = (confirmed: boolean) => {
+			if (settled) return;
+			settled = true;
+			rl.removeListener("close", onClose);
 			rl.close();
-			resolve(answer.toLowerCase() === "y" || answer.toLowerCase() === "yes");
+			resolve(confirmed);
+		};
+		const onClose = () => finish(false);
+		rl.once("close", onClose);
+		rl.question(`${message} [y/N] `, (answer) => {
+			const normalized = answer.trim().toLowerCase();
+			finish(normalized === "y" || normalized === "yes");
 		});
 	});
 }
@@ -600,6 +612,11 @@ export interface MainOptions {
 
 export async function main(args: string[], options?: MainOptions) {
 	resetTimings();
+	const workAgentDir = getAgentDir();
+	process.env[PI_WORK_ROOT_ENV] = getWorkRoot(workAgentDir);
+	if (process.env.PI_TUI_DEBUG === "1") {
+		process.env.PI_TUI_WORK_DIR = getProcessWorkRun(workAgentDir, "debug", "tui").path;
+	}
 	const offlineMode = args.includes("--offline") || isTruthyEnvFlag(process.env.PI_OFFLINE);
 	if (offlineMode) {
 		process.env.PI_OFFLINE = "1";

@@ -1,6 +1,6 @@
 import { describe, expect, it } from "vitest";
 import type { GoalContinuationLoopOptions, GoalContinuationLoopResult } from "../src/core/agent-session.ts";
-import type { GoalState } from "../src/core/goals/goal-state.ts";
+import { applyGoalEvent, createGoalState, type GoalState } from "../src/core/goals/goal-state.ts";
 import { BUILTIN_SLASH_COMMANDS } from "../src/core/slash-commands.ts";
 import { InteractiveMode } from "../src/modes/interactive/interactive-mode.ts";
 
@@ -83,6 +83,70 @@ function createContext(result: GoalContinuationLoopResult = createLoopResult()) 
 	return { context, calls, statuses, errors, getRefreshCount: () => refreshCount };
 }
 
+function createGoalCommandContext(initialState?: GoalState) {
+	let state = initialState;
+	const saved: GoalState[] = [];
+	const statuses: string[] = [];
+	const errors: string[] = [];
+	const prompts: string[] = [];
+	let continuationCalls = 0;
+	let refreshCount = 0;
+	const context: GoalCommandContext = {
+		session: {
+			getGoalStateSnapshot: () => state,
+			saveGoalStateSnapshot: (next) => {
+				state = next;
+				saved.push(next);
+				return "entry";
+			},
+			sendUserMessage: async (content) => {
+				prompts.push(content);
+			},
+			continueGoalLoop: async () => {
+				continuationCalls++;
+				return createLoopResult();
+			},
+			getGoalRuntimeSnapshot: () => {
+				const snapshot = createLoopResult().finalSnapshot;
+				return {
+					...snapshot,
+					goalState: state,
+					continuation: {
+						...snapshot.continuation,
+						openRequirementIds:
+							state?.requirements
+								.filter((requirement) => requirement.status === "open")
+								.map((requirement) => requirement.id) ?? [],
+						blockedRequirementIds:
+							state?.requirements
+								.filter((requirement) => requirement.status === "blocked")
+								.map((requirement) => requirement.id) ?? [],
+						satisfiedRequirementIds:
+							state?.requirements
+								.filter((requirement) => requirement.status === "satisfied")
+								.map((requirement) => requirement.id) ?? [],
+					},
+				};
+			},
+		},
+		showStatus: (message) => statuses.push(message),
+		showError: (message) => errors.push(message),
+		refreshAutonomyFooterStatus: () => {
+			refreshCount++;
+		},
+	};
+	return {
+		context,
+		saved,
+		statuses,
+		errors,
+		prompts,
+		getState: () => state,
+		getContinuationCalls: () => continuationCalls,
+		getRefreshCount: () => refreshCount,
+	};
+}
+
 describe("InteractiveMode /goal-continue command", () => {
 	it("is listed as a built-in slash command", () => {
 		expect(BUILTIN_SLASH_COMMANDS.some((command) => command.name === "goal")).toBe(true);
@@ -125,41 +189,7 @@ describe("InteractiveMode /goal-continue command", () => {
 	});
 
 	it("starts a goal, deterministically seeds one requirement, then asks the model to decompose", async () => {
-		const statuses: string[] = [];
-		const saved: GoalState[] = [];
-		const prompts: string[] = [];
-		const context: GoalCommandContext = {
-			session: {
-				getGoalStateSnapshot: () => undefined,
-				saveGoalStateSnapshot: (state) => {
-					saved.push(state);
-					return "entry";
-				},
-				sendUserMessage: async (content) => {
-					prompts.push(content);
-				},
-				continueGoalLoop: async () =>
-					createLoopResult({
-						turnsSubmitted: 0,
-						finalSnapshot: {
-							workerResults: [],
-							learningDecisions: [],
-							continuation: {
-								action: "finalize",
-								reasonCode: "no_open_requirements",
-								message: "There are no open requirements left to satisfy.",
-								openRequirementIds: [],
-								blockedRequirementIds: [],
-								satisfiedRequirementIds: [],
-							},
-						},
-					}),
-				getGoalRuntimeSnapshot: () => createLoopResult().finalSnapshot,
-			},
-			showStatus: (message) => statuses.push(message),
-			showError: () => {},
-			refreshAutonomyFooterStatus: () => {},
-		};
+		const { context, saved, prompts, statuses } = createGoalCommandContext();
 
 		await interactiveModePrototype.handleGoalCommand.call(context, "/goal ship the thing");
 
@@ -172,6 +202,66 @@ describe("InteractiveMode /goal-continue command", () => {
 		expect(prompts[0]).toContain("Use the goal tool this turn to decompose this goal");
 		expect(prompts[0]).toContain("satisfy_requirement");
 		expect(statuses.at(-1)).toContain("Goal started");
+	});
+
+	it("shows lifecycle controls and requirement ids in goal status", async () => {
+		let state = createGoalState({ goalId: "g1", userGoal: "Ship", now: "T0" });
+		state = applyGoalEvent(state, { type: "add_requirement", id: "r1", text: "Get access", now: "T1" });
+		state = applyGoalEvent(state, { type: "block_requirement", id: "r1", blockedReason: "waiting", now: "T2" });
+		const { context, statuses } = createGoalCommandContext(state);
+
+		await interactiveModePrototype.handleGoalCommand.call(context, "/goal status");
+
+		expect(statuses[0]).toContain("r1: blocked — waiting");
+		expect(statuses[0]).toContain("/goal complete");
+		expect(statuses[0]).toContain("/goal override <text>");
+	});
+
+	it("reopens a blocked requirement and resumes its blocked goal in one command", async () => {
+		let state = createGoalState({ goalId: "g1", userGoal: "Ship", now: "T0" });
+		state = applyGoalEvent(state, { type: "add_requirement", id: "r1", text: "Get access", now: "T1" });
+		state = applyGoalEvent(state, { type: "block_requirement", id: "r1", blockedReason: "waiting", now: "T2" });
+		state = applyGoalEvent(state, { type: "block_goal", reason: "waiting", now: "T3" });
+		const { context, getState, saved, statuses } = createGoalCommandContext(state);
+
+		await interactiveModePrototype.handleGoalCommand.call(context, "/goal reopen r1");
+
+		expect(saved).toHaveLength(2);
+		expect(getState()?.status).toBe("active");
+		expect(getState()?.requirements[0].status).toBe("open");
+		expect(statuses[0]).toContain("goal resumed");
+	});
+
+	it("lets the user manually complete or close a goal without running the model", async () => {
+		let state = createGoalState({ goalId: "g1", userGoal: "Ship", now: "T0" });
+		state = applyGoalEvent(state, { type: "add_requirement", id: "r1", text: "Do work", now: "T1" });
+		const completion = createGoalCommandContext(state);
+
+		await interactiveModePrototype.handleGoalCommand.call(completion.context, "/goal complete");
+
+		expect(completion.getState()?.status).toBe("completed");
+		expect(completion.getState()?.requirements[0].status).toBe("open");
+		expect(completion.getContinuationCalls()).toBe(0);
+
+		state = applyGoalEvent(state, { type: "block_goal", reason: "waiting", now: "T2" });
+		const closure = createGoalCommandContext(state);
+		await interactiveModePrototype.handleGoalCommand.call(closure.context, "/goal close");
+		expect(closure.getState()?.status).toBe("cancelled");
+		expect(closure.getContinuationCalls()).toBe(0);
+	});
+
+	it("lets the user override an active goal explicitly", async () => {
+		const state = createGoalState({ goalId: "old", userGoal: "Old goal", now: "T0" });
+		const { context, saved, getState, prompts, statuses } = createGoalCommandContext(state);
+
+		await interactiveModePrototype.handleGoalCommand.call(context, "/goal override New goal");
+
+		expect(saved[0].status).toBe("cancelled");
+		expect(getState()?.status).toBe("active");
+		expect(getState()?.userGoal).toBe("New goal");
+		expect(getState()?.requirements).toHaveLength(1);
+		expect(prompts).toHaveLength(1);
+		expect(statuses.at(-1)).toContain("Goal overridden");
 	});
 
 	it("parses default and explicit bounded arguments", () => {

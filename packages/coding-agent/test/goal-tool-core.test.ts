@@ -1,6 +1,6 @@
 import { describe, expect, it } from "vitest";
 import { createGoalState } from "../src/core/goals/goal-state.ts";
-import { applyGoalAction, summarizeGoalState } from "../src/core/goals/goal-tool-core.ts";
+import { applyGoalAction, completeGoalManually, summarizeGoalState } from "../src/core/goals/goal-tool-core.ts";
 
 describe("applyGoalAction (goal producer core)", () => {
 	it("starts a new active goal", () => {
@@ -104,6 +104,26 @@ describe("applyGoalAction (goal producer core)", () => {
 		expect(state.blockedReason).toBe("stuck");
 	});
 
+	it("resumes blocked goals, reopens requirements, and can cancel from blocked", () => {
+		let state = createGoalState({ goalId: "g1", userGoal: "A", now: "T0" });
+		state = expectOk(applyGoalAction(state, { action: "add_requirement", requirementId: "r1", text: "Do X" }, "T1"));
+		state = expectOk(
+			applyGoalAction(state, { action: "block_requirement", requirementId: "r1", reason: "no access" }, "T2"),
+		);
+		state = expectOk(applyGoalAction(state, { action: "block_goal", reason: "stuck" }, "T3"));
+		state = expectOk(applyGoalAction(state, { action: "resume_goal" }, "T4"));
+		state = expectOk(applyGoalAction(state, { action: "reopen_requirement", requirementId: "r1" }, "T5"));
+
+		expect(state.status).toBe("active");
+		expect(state.blockedReason).toBeUndefined();
+		expect(state.requirements[0].status).toBe("open");
+		expect(state.requirements[0].blockedReason).toBeUndefined();
+
+		state = expectOk(applyGoalAction(state, { action: "block_goal", reason: "blocked again" }, "T6"));
+		state = expectOk(applyGoalAction(state, { action: "cancel" }, "T7"));
+		expect(state.status).toBe("cancelled");
+	});
+
 	it("rejects updates after the goal is no longer active", () => {
 		let state = createGoalState({ goalId: "g1", userGoal: "A", now: "T0" });
 		state = expectOk(applyGoalAction(state, { action: "cancel" }, "T1"));
@@ -112,15 +132,21 @@ describe("applyGoalAction (goal producer core)", () => {
 		expect(afterCancel.ok).toBe(false);
 	});
 
-	it("completes only when all requirements are satisfied", () => {
+	it("keeps agent completion evidence-gated but allows explicit manual completion", () => {
 		let state = createGoalState({ goalId: "g1", userGoal: "A", now: "T0" });
 		state = expectOk(applyGoalAction(state, { action: "add_requirement", requirementId: "r1", text: "Do X" }, "T1"));
 
 		const early = applyGoalAction(state, { action: "complete" }, "T2");
 		expect(early.ok).toBe(false);
 
-		state = expectOk(applyGoalAction(state, { action: "satisfy_requirement", requirementId: "r1" }, "T3"));
-		state = expectOk(applyGoalAction(state, { action: "complete" }, "T4"));
+		const manual = completeGoalManually(state, "T3");
+		expect(manual.ok).toBe(true);
+		if (!manual.ok) return;
+		expect(manual.state.status).toBe("completed");
+		expect(manual.state.requirements[0].status).toBe("open");
+
+		state = expectOk(applyGoalAction(state, { action: "satisfy_requirement", requirementId: "r1" }, "T4"));
+		state = expectOk(applyGoalAction(state, { action: "complete" }, "T5"));
 		expect(state.status).toBe("completed");
 	});
 

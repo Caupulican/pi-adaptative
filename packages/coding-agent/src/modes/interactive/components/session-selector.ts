@@ -633,7 +633,7 @@ async function deleteSessionFile(
 ): Promise<{ ok: boolean; method: "trash" | "unlink"; error?: string }> {
 	// Try `trash` first (if installed)
 	const trashArgs = sessionPath.startsWith("-") ? ["--", sessionPath] : [sessionPath];
-	const trashResult = spawnSync("trash", trashArgs, { encoding: "utf-8" });
+	const trashResult = spawnSync("trash", trashArgs, { encoding: "utf-8", timeout: 10_000 });
 
 	const getTrashErrorHint = (): string | null => {
 		const parts: string[] = [];

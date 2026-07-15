@@ -449,6 +449,39 @@ Content`,
 			expect(activePromptNames).toContain("allowed");
 		});
 
+		it("should expose bundled extensions without loading them when no resource profile is active", async () => {
+			const settingsManager = SettingsManager.inMemory({ activeResourceProfiles: [] });
+			const loader = new DefaultResourceLoader({ cwd, agentDir, settingsManager });
+			await loader.reload();
+
+			const discoverablePaths = await loader.getDiscoverableExtensionPaths();
+			expect(
+				discoverablePaths.some((candidate) => candidate.includes(join("extensions", "tmux-agent-manager"))),
+			).toBe(true);
+			const loadedPaths = loader.getExtensions().extensions.map((extension) => extension.path);
+			expect(loadedPaths.some((candidate) => candidate.includes(join("extensions", "tmux-agent-manager")))).toBe(
+				false,
+			);
+		});
+
+		it("should load the bundled tmux agent manager through an active resource profile", async () => {
+			const settingsManager = SettingsManager.inMemory({
+				activeResourceProfile: "portable-tmux",
+				resourceProfiles: {
+					"portable-tmux": { extensions: { allow: ["tmux-agent-manager"] } },
+				},
+			});
+			const loader = new DefaultResourceLoader({ cwd, agentDir, settingsManager });
+			await loader.reload();
+
+			const extension = loader
+				.getExtensions()
+				.extensions.find((candidate) => candidate.path.includes(join("extensions", "tmux-agent-manager")));
+			expect(extension, JSON.stringify(loader.getExtensions().errors)).toBeDefined();
+			expect(extension?.tools.has("tmux_agent_manager")).toBe(true);
+			expect(loader.getExtensions().errors).toEqual([]);
+		});
+
 		it("should suppress external root extensions at load time when no resource profile is active", async () => {
 			const root = join(tempDir, "catalog-no-profile");
 			mkdirSync(join(root, "extensions", "should-not-load"), { recursive: true });

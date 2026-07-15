@@ -1,9 +1,14 @@
 import { existsSync, readFileSync } from "node:fs";
 import { join } from "node:path";
 import { getAgentDir } from "../config.ts";
+import { getProcessWorkRun } from "../utils/work-directory.ts";
 
 export const ACTIVE_TURN_TTL_MS = 5 * 60_000;
 export const AUTO_RELOAD_COORDINATOR_TTL_MS = 10 * 60_000;
+
+export function getReloadCoordinationDir(agentDir: string = getAgentDir()): string {
+	return getProcessWorkRun(agentDir, "coordination", "reload", "state").path;
+}
 
 export interface ReloadSessionRecord {
 	key: string;
@@ -138,7 +143,7 @@ function activeTurnBlockers(options: ReloadBlockerOptions): ReloadSessionRecord[
 	const now = options.now ?? Date.now();
 	const ttl = options.activeTurnTtlMs ?? ACTIVE_TURN_TTL_MS;
 	const isAlive = options.isProcessAlive ?? isReloadSessionProcessAlive;
-	const registry = readJsonFile(join(agentDir, "pi-active-turns.json"));
+	const registry = readJsonFile(join(getReloadCoordinationDir(agentDir), "active-turns.json"));
 	if (!isRecord(registry) || !isRecord(registry.sessions)) return [];
 
 	const blockers: ReloadSessionRecord[] = [];
@@ -158,7 +163,7 @@ function coordinatorBlockers(options: ReloadBlockerOptions): { blockers: ReloadS
 	const now = options.now ?? Date.now();
 	const ttl = options.coordinatorTtlMs ?? AUTO_RELOAD_COORDINATOR_TTL_MS;
 	const isAlive = options.isProcessAlive ?? isReloadSessionProcessAlive;
-	const coordinator = readJsonFile(join(agentDir, "pi-auto-reload-state.json"));
+	const coordinator = readJsonFile(join(getReloadCoordinationDir(agentDir), "auto-reload-state.json"));
 	if (!isRecord(coordinator) || !isRecord(coordinator.changes)) return { blockers: [], reason: "" };
 
 	const blockers: ReloadSessionRecord[] = [];

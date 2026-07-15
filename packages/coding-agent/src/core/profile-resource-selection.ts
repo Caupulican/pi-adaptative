@@ -65,6 +65,59 @@ export function decodeResourceSelection(
 	return enabled;
 }
 
+export interface ResourceSelectionIdentity {
+	id: string;
+}
+
+export interface RemappedResourceSelectionFilter {
+	filter: ResourceProfileFilterSettings | undefined;
+	missingIds: Set<string>;
+}
+
+/**
+ * Resolve persisted profile patterns onto the editor's collision-safe resource ids.
+ *
+ * Runtime filters intentionally accept basenames, parent directory names, globs, and paths. The
+ * editor, however, must toggle one concrete resource at a time. This remap expands every matching
+ * pattern to the concrete ids it currently selects and preserves only genuinely missing patterns.
+ * Saving then migrates ambiguous legacy patterns (for example `index.ts`) to exact concrete ids.
+ */
+export function remapResourceSelectionFilter<T extends ResourceSelectionIdentity>(
+	filter: ResourceProfileFilterSettings | undefined,
+	items: readonly T[],
+	matchesPattern: (item: T, pattern: string) => boolean,
+): RemappedResourceSelectionFilter {
+	if (!filter) return { filter: undefined, missingIds: new Set() };
+
+	const missingIds = new Set<string>();
+	const remapPatterns = (patterns: string[] | undefined): string[] | undefined => {
+		if (patterns === undefined) return undefined;
+		const remapped: string[] = [];
+		const seen = new Set<string>();
+		for (const pattern of patterns) {
+			const ids =
+				pattern === "*" ? [pattern] : items.filter((item) => matchesPattern(item, pattern)).map((item) => item.id);
+			if (ids.length === 0) {
+				missingIds.add(pattern);
+				ids.push(pattern);
+			}
+			for (const id of ids) {
+				if (seen.has(id)) continue;
+				seen.add(id);
+				remapped.push(id);
+			}
+		}
+		return remapped;
+	};
+
+	const remapped: ResourceProfileFilterSettings = {};
+	const allow = remapPatterns(filter.allow);
+	const block = remapPatterns(filter.block);
+	if (allow !== undefined) remapped.allow = allow;
+	if (block !== undefined) remapped.block = block;
+	return { filter: remapped, missingIds };
+}
+
 /**
  * Options that let the encoder distinguish a genuine grant-all from an all-enabled snapshot of an
  * enumerated grant (e.g. a collapsed universe where every enumerated id happens to be visible).

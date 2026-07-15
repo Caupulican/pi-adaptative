@@ -1,9 +1,9 @@
-import { existsSync, mkdirSync, mkdtempSync, rmSync } from "node:fs";
+import { existsSync, mkdirSync } from "node:fs";
 import { spawn } from "node:child_process";
-import { tmpdir } from "node:os";
 import { dirname, join, relative, resolve } from "node:path";
 import { performance } from "node:perf_hooks";
 import { fileURLToPath } from "node:url";
+import { acquireScriptWorkRun, removeScriptWorkRun } from "./lib/work-directory.mjs";
 
 const __dirname = dirname(fileURLToPath(import.meta.url));
 const repoRoot = resolve(__dirname, "..");
@@ -378,7 +378,8 @@ async function runTuiBenchmarkRun({ runtime, runIndex, measuredIndex, options, p
 	const runNumber = runIndex + 1;
 	const suffix = String(runNumber).padStart(3, "0");
 	const profileName = `${options.label}-${suffix}.cpuprofile`;
-	const tempRoot = options.isolatedAgentDir ? mkdtempSync(join(tmpdir(), "pi-startup-benchmark-")) : undefined;
+	const workRun = options.isolatedAgentDir ? acquireScriptWorkRun("benchmarks", "startup") : undefined;
+	const tempRoot = workRun?.path;
 	const isolatedAgentDir = tempRoot ? join(tempRoot, "agent") : undefined;
 	if (isolatedAgentDir) {
 		mkdirSync(isolatedAgentDir, { recursive: true });
@@ -414,9 +415,7 @@ async function runTuiBenchmarkRun({ runtime, runIndex, measuredIndex, options, p
 
 		return { elapsedMs, profilePath, timings: parseStartupTimings(stderr) };
 	} finally {
-		if (tempRoot) {
-			rmSync(tempRoot, { recursive: true, force: true });
-		}
+		if (workRun) removeScriptWorkRun(workRun);
 	}
 }
 
@@ -437,7 +436,8 @@ async function runRpcBenchmarkRun({ runtime, runIndex, measuredIndex, options, p
 	const runNumber = runIndex + 1;
 	const suffix = String(runNumber).padStart(3, "0");
 	const profileName = `${options.label}-${suffix}.cpuprofile`;
-	const tempRoot = options.isolatedAgentDir ? mkdtempSync(join(tmpdir(), "pi-startup-benchmark-")) : undefined;
+	const workRun = options.isolatedAgentDir ? acquireScriptWorkRun("benchmarks", "startup") : undefined;
+	const tempRoot = workRun?.path;
 	const isolatedAgentDir = tempRoot ? join(tempRoot, "agent") : undefined;
 	if (isolatedAgentDir) {
 		mkdirSync(isolatedAgentDir, { recursive: true });
@@ -516,9 +516,7 @@ async function runRpcBenchmarkRun({ runtime, runIndex, measuredIndex, options, p
 
 		return { elapsedMs: readyElapsedMs, profilePath, timings: parseStartupTimings(stderr) };
 	} finally {
-		if (tempRoot) {
-			rmSync(tempRoot, { recursive: true, force: true });
-		}
+		if (workRun) removeScriptWorkRun(workRun);
 	}
 }
 

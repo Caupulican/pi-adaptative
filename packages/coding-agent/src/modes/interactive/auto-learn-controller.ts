@@ -23,6 +23,7 @@ import { readAutoLearnSessionIdFromFile, reportCompletedAutoLearnUsageHelper } f
 import { resolveCliModel } from "../../core/model-resolver.ts";
 import { getPendingReloadBlockers } from "../../core/reload-blockers.ts";
 import type { AutoLearnSettings, AutonomyMode } from "../../core/settings-manager.ts";
+import { getProcessWorkRun } from "../../utils/work-directory.ts";
 import { theme } from "./theme/theme.ts";
 
 const AUTO_LEARN_DEFAULTS = {
@@ -463,7 +464,7 @@ export class AutoLearnController {
 	}
 
 	getAutoLearnDataDir(): string {
-		return path.join(getAgentDir(), "auto-learn");
+		return getProcessWorkRun(getAgentDir(), "learning", "auto-learn", "state").path;
 	}
 
 	private getAutoLearnStatePath(): string {

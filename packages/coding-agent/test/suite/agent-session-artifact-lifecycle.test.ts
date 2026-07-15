@@ -12,6 +12,7 @@ import { type AgentMessage, compactToolResultDetailsForRetention } from "@caupul
 import { fauxAssistantMessage, fauxToolCall } from "@caupulican/pi-ai";
 import { afterEach, describe, expect, it } from "vitest";
 import { createFileArtifactStore, isMissingArtifactMarker } from "../../src/core/context/context-artifacts.ts";
+import { getContextStoreDir } from "../../src/core/context/context-store-retention.ts";
 import { createHarness, type Harness } from "./harness.ts";
 
 interface ToolDetailsLike {
@@ -29,7 +30,7 @@ function firstToolResultArtifactId(harness: Harness): string | undefined {
 }
 
 function sessionArtifactDir(harness: Harness): string {
-	return join(harness.tempDir, "context-artifacts", harness.sessionManager.getSessionId());
+	return getContextStoreDir(harness.tempDir, "artifacts", harness.sessionManager.getSessionId());
 }
 
 function bigGrepFile(harness: Harness): void {

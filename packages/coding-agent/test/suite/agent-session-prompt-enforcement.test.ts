@@ -13,6 +13,7 @@ import type { Context } from "@caupulican/pi-ai";
 import { fauxAssistantMessage, fauxToolCall } from "@caupulican/pi-ai";
 import { afterEach, describe, expect, it } from "vitest";
 import { createFileArtifactStore } from "../../src/core/context/context-artifacts.ts";
+import { getContextStoreDir } from "../../src/core/context/context-store-retention.ts";
 import { createHarness, type Harness } from "./harness.ts";
 
 function bigGrepFile(harness: Harness): void {
@@ -39,7 +40,7 @@ function firstToolResultToolCallId(harness: Harness): string | undefined {
 }
 
 function sessionArtifactDir(harness: Harness): string {
-	return join(harness.tempDir, "context-artifacts", harness.sessionManager.getSessionId());
+	return getContextStoreDir(harness.tempDir, "artifacts", harness.sessionManager.getSessionId());
 }
 
 describe("AgentSession live prompt-policy enforcement (opt-in, default disabled)", () => {

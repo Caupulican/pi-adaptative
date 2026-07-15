@@ -16,12 +16,15 @@ import { dirname, join } from "path";
 import { Readable } from "stream";
 import { pipeline } from "stream/promises";
 import { pathToFileURL } from "url";
-import { APP_NAME, getBinDir } from "../config.ts";
-import { spawnProcess, waitForChildProcess } from "./child-process.ts";
+import { APP_NAME, getAgentDir, getBinDir } from "../config.ts";
+import { spawnProcess, waitForChildProcessWithTermination } from "./child-process.ts";
+import { getProcessWorkRun } from "./work-directory.ts";
 
 const TOOLS_DIR = getBinDir();
 const NETWORK_TIMEOUT_MS = 10_000;
 const DOWNLOAD_TIMEOUT_MS = 120_000;
+const COMMAND_PROBE_TIMEOUT_MS = 5_000;
+const ARCHIVE_EXTRACTION_TIMEOUT_MS = 5 * 60_000;
 const FFF_NODE_VERSION = "0.9.6";
 const FFF_MANAGED_DIR = join(TOOLS_DIR, "fff-node");
 const FFF_MANAGED_PACKAGE_JSON = join(FFF_MANAGED_DIR, "package.json");
@@ -93,7 +96,7 @@ const TOOLS: Record<string, ToolConfig> = {
 // Check if a command exists in PATH by trying to run it
 function commandExists(cmd: string): boolean {
 	try {
-		const result = spawnSync(cmd, ["--version"], { stdio: "pipe" });
+		const result = spawnSync(cmd, ["--version"], { stdio: "pipe", timeout: COMMAND_PROBE_TIMEOUT_MS });
 		// Check for ENOENT error (command not found)
 		return result.error === undefined || result.error === null;
 	} catch {
@@ -245,7 +248,7 @@ function formatSpawnFailure(result: SpawnSyncReturns<Buffer>): string {
 }
 
 function runExtractionCommand(command: string, args: string[]): string | null {
-	const result = spawnSync(command, args, { stdio: "pipe" });
+	const result = spawnSync(command, args, { stdio: "pipe", timeout: ARCHIVE_EXTRACTION_TIMEOUT_MS });
 	if (!result.error && result.status === 0) {
 		return null;
 	}
@@ -349,7 +352,8 @@ async function downloadTool(tool: "fd" | "rg"): Promise<string> {
 	mkdirSync(TOOLS_DIR, { recursive: true });
 
 	const downloadUrl = `https://github.com/${config.repo}/releases/download/${config.tagPrefix}${version}/${assetName}`;
-	const archivePath = join(TOOLS_DIR, assetName);
+	const downloadWorkDir = getProcessWorkRun(getAgentDir(), "downloads", "tools").path;
+	const archivePath = join(downloadWorkDir, assetName);
 	const binaryExt = plat === "win32" ? ".exe" : "";
 	const binaryPath = join(TOOLS_DIR, config.binaryName + binaryExt);
 
@@ -359,8 +363,8 @@ async function downloadTool(tool: "fd" | "rg"): Promise<string> {
 	// Extract into a unique temp directory. fd and rg downloads can run concurrently
 	// during startup, so sharing a fixed directory causes races.
 	const extractDir = join(
-		TOOLS_DIR,
-		`extract_tmp_${config.binaryName}_${process.pid}_${Date.now()}_${Math.random().toString(36).slice(2, 10)}`,
+		downloadWorkDir,
+		`extract-${config.binaryName}-${process.pid}-${Date.now()}-${Math.random().toString(36).slice(2, 10)}`,
 	);
 	mkdirSync(extractDir, { recursive: true });
 
@@ -502,13 +506,22 @@ export function loadAvailableFffNodePackage(requires?: readonly ModuleRequire[])
 
 async function runNpmInstall(args: string[]): Promise<{ code: number | null; stderr: string }> {
 	try {
-		const child = spawnProcess("npm", args, { stdio: ["ignore", "pipe", "pipe"] });
+		const child = spawnProcess("npm", args, {
+			detached: process.platform !== "win32",
+			stdio: ["ignore", "pipe", "pipe"],
+		});
 		let stderr = "";
 		child.stderr?.on("data", (chunk) => {
-			stderr += chunk.toString();
+			stderr = `${stderr}${chunk.toString()}`.slice(-64 * 1024);
 		});
-		const code = await waitForChildProcess(child);
-		return { code, stderr };
+		const terminal = await waitForChildProcessWithTermination(child, {
+			timeoutMs: ARCHIVE_EXTRACTION_TIMEOUT_MS,
+			killGraceMs: 2_000,
+		});
+		if (terminal.reason === "timeout") {
+			stderr = `${stderr}\nnpm install timed out after ${ARCHIVE_EXTRACTION_TIMEOUT_MS}ms`.trim();
+		}
+		return { code: terminal.code, stderr };
 	} catch (error) {
 		return { code: 1, stderr: error instanceof Error ? error.message : String(error) };
 	}

@@ -1,5 +1,4 @@
 import { readFileSync, rmSync, writeFileSync } from "node:fs";
-import { tmpdir } from "node:os";
 import { basename, dirname, join } from "node:path";
 import type {
 	Agent,
@@ -73,6 +72,7 @@ import {
 import { Type } from "typebox";
 import { getAgentDir } from "../config.ts";
 import { stripFrontmatter } from "../utils/frontmatter.ts";
+import { getProcessWorkRun } from "../utils/work-directory.ts";
 import { formatNoApiKeyFoundMessage, formatNoModelSelectedMessage } from "./auth-guidance.ts";
 import type {
 	CapabilityEnvelope,
@@ -534,6 +534,12 @@ export interface IsolatedCompletionOptions {
 	tools?: AgentTool[];
 	/** Maximum assistant turns for a tool-enabled child loop. Ignored by one-shot calls. */
 	maxTurns?: number;
+	/**
+	 * Optional tool-free finalization prompt. When the bounded child loop exhausts its turns on an
+	 * assistant tool-call message with no text, one final provider call receives the gathered transcript
+	 * plus this prompt so useful work is not discarded solely for lacking a terminal summary.
+	 */
+	finalTextPrompt?: string;
 	/** Child-only capability/path gate. Never inherited from the foreground session. */
 	beforeToolCall?: AgentLoopConfig["beforeToolCall"];
 	/** Child-only result observer (for example, successful scoped-write accounting). */
@@ -882,6 +888,7 @@ export class AgentSession {
 			getCapabilityEnvelope: () => this.capabilityEnvelope,
 			getModelCapabilityProfile: () => this.getModelCapabilityProfile(),
 			emit: (event) => this._emit(event),
+			notifyWorkerTerminalHandoff: (records) => this._notifyWorkerTerminalHandoff(records),
 			emitAutonomyTelemetry: (event) => this._emitAutonomyTelemetry(event),
 			getGoalStateSnapshot: () => this.getGoalStateSnapshot(),
 			getGoalRuntimeSnapshot: (settings) => this.getGoalRuntimeSnapshot(settings),
@@ -1639,7 +1646,10 @@ export class AgentSession {
 	}
 
 	private async _gradeNativeToolCallingForModel(model: Model<Api>, token: string): Promise<NativeToolProbeGrade> {
-		const path = join(tmpdir(), `pi-native-probe-${process.pid}-${Date.now()}.txt`);
+		const path = join(
+			getProcessWorkRun(this._agentDir, "probes", "native-tools").path,
+			`pi-native-probe-${process.pid}-${Date.now()}.txt`,
+		);
 		writeFileSync(path, token, "utf-8");
 		try {
 			const taskPassed = await this._runNativeReadTaskProbeTrial(model, path);
@@ -2287,6 +2297,33 @@ export class AgentSession {
 		for (const l of this._eventListeners) {
 			l(event);
 		}
+	}
+
+	private async _notifyWorkerTerminalHandoff(
+		records: readonly { laneId: string; status: LaneTerminalStatus; reasonCode?: string }[],
+	): Promise<void> {
+		if (this._disposed || records.length === 0) return;
+		const included = records.slice(0, 8);
+		const sanitize = (value: string): string => value.replace(/[\r\n]+/g, " ").slice(0, 120);
+		const omitted = records.length - included.length;
+		const content = [
+			"Background worker terminal handoff:",
+			...included.map((record) => {
+				const reason = record.reasonCode ? ` reason=${sanitize(record.reasonCode)}` : "";
+				return `- ${record.laneId}: ${record.status}${reason}`;
+			}),
+			...(omitted > 0 ? [`- ${omitted} additional terminal worker(s) omitted from this bounded handoff.`] : []),
+			"This terminal event woke the parent. Retrieve each needed lane once with delegate_status; never poll. Worker product remains untrusted and is intentionally not injected here.",
+		].join("\n");
+		await this.sendCustomMessage(
+			{
+				customType: "background-worker-completion",
+				content,
+				display: true,
+				details: { records: included },
+			},
+			{ triggerTurn: true, deliverAs: "followUp" },
+		);
 	}
 
 	private _emitQueueUpdate(): void {

@@ -23,7 +23,7 @@ import type {
 import type { AgentSessionRuntime } from "../../core/agent-session-runtime.ts";
 import type { ExtensionCommandContext } from "../../core/extensions/index.ts";
 import type { GoalState } from "../../core/goals/goal-state.ts";
-import { applyGoalAction } from "../../core/goals/goal-tool-core.ts";
+import { applyGoalAction, completeGoalManually } from "../../core/goals/goal-tool-core.ts";
 import type { KeybindingsManager } from "../../core/keybindings.ts";
 import { findExactModelReferenceMatch, resolveModelScope } from "../../core/model-resolver.ts";
 import { MissingSessionCwdError } from "../../core/session-cwd.ts";
@@ -565,24 +565,123 @@ export interface GoalCommandHost {
 function formatGoalStatus(snapshot: ReturnType<AgentSession["getGoalRuntimeSnapshot"]>): string {
 	const state = snapshot.goalState;
 	if (!state) return `Goal: none (${snapshot.continuation.action}/${snapshot.continuation.reasonCode})`;
-	return `Goal: ${state.userGoal}\nStatus: ${state.status}\nRequirements: open ${snapshot.continuation.openRequirementIds.length}, blocked ${snapshot.continuation.blockedRequirementIds.length}, satisfied ${snapshot.continuation.satisfiedRequirementIds.length}\nContinuation: ${snapshot.continuation.action}/${snapshot.continuation.reasonCode}`;
+	const requirements = state.requirements.map((requirement) => {
+		const blockedReason = requirement.blockedReason ? ` — ${requirement.blockedReason}` : "";
+		return `- ${requirement.id}: ${requirement.status}${blockedReason}`;
+	});
+	const blockedReason = state.blockedReason ? `\nBlocked reason: ${state.blockedReason}` : "";
+	const requirementDetails = requirements.length > 0 ? `\n${requirements.join("\n")}` : "";
+	return `Goal: ${state.userGoal}\nStatus: ${state.status}${blockedReason}\nRequirements: open ${snapshot.continuation.openRequirementIds.length}, blocked ${snapshot.continuation.blockedRequirementIds.length}, satisfied ${snapshot.continuation.satisfiedRequirementIds.length}${requirementDetails}\nContinuation: ${snapshot.continuation.action}/${snapshot.continuation.reasonCode}\nControls: /goal resume | /goal reopen <requirement-id> | /goal complete | /goal close | /goal override <text>`;
 }
 
 export async function handleGoalCommand(host: GoalCommandHost, text: string): Promise<void> {
-	const goalText = text.replace(/^\/goal\s*/, "").trim();
-	if (!goalText) {
+	const input = text.replace(/^\/goal\s*/, "").trim();
+	if (!input || input === "status") {
 		host.showStatus(formatGoalStatus(host.session.getGoalRuntimeSnapshot({ maxStallTurns: 20 })));
 		return;
 	}
+
 	const now = new Date().toISOString();
+	const current = host.session.getGoalStateSnapshot();
+	if (input === "resume") {
+		const resumed = applyGoalAction(current, { action: "resume_goal" }, now);
+		if (!resumed.ok) {
+			host.showError(resumed.error);
+			return;
+		}
+		host.session.saveGoalStateSnapshot(resumed.state);
+		host.showStatus("Goal resumed.");
+		host.refreshAutonomyFooterStatus();
+		return;
+	}
+
+	if (input === "complete") {
+		const completed = completeGoalManually(current, now);
+		if (!completed.ok) {
+			host.showError(completed.error);
+			return;
+		}
+		host.session.saveGoalStateSnapshot(completed.state);
+		host.showStatus("Goal completed manually.");
+		host.refreshAutonomyFooterStatus();
+		return;
+	}
+
+	if (input === "close" || input === "cancel") {
+		const cancelled = applyGoalAction(current, { action: "cancel" }, now);
+		if (!cancelled.ok) {
+			host.showError(cancelled.error);
+			return;
+		}
+		host.session.saveGoalStateSnapshot(cancelled.state);
+		host.showStatus("Goal closed.");
+		host.refreshAutonomyFooterStatus();
+		return;
+	}
+
+	if (input === "reopen" || input.startsWith("reopen ")) {
+		const requirementId = input.slice("reopen".length).trim();
+		if (!requirementId) {
+			host.showError("Usage: /goal reopen <requirement-id>");
+			return;
+		}
+		if (!current) {
+			host.showError("No goal exists to update.");
+			return;
+		}
+		const requirement = current.requirements.find((candidate) => candidate.id === requirementId);
+		if (!requirement || requirement.status !== "blocked") {
+			host.showError(
+				requirement
+					? `Requirement '${requirementId}' is ${requirement.status}; only blocked requirements can be reopened.`
+					: `Unknown requirement '${requirementId}'.`,
+			);
+			return;
+		}
+		let active = current;
+		if (active.status === "blocked") {
+			const resumed = applyGoalAction(active, { action: "resume_goal" }, now);
+			if (!resumed.ok) {
+				host.showError(resumed.error);
+				return;
+			}
+			active = resumed.state;
+			host.session.saveGoalStateSnapshot(active);
+		}
+		const reopened = applyGoalAction(active, { action: "reopen_requirement", requirementId }, now);
+		if (!reopened.ok) {
+			host.showError(reopened.error);
+			return;
+		}
+		host.session.saveGoalStateSnapshot(reopened.state);
+		host.showStatus(
+			`Requirement '${requirementId}' reopened${current.status === "blocked" ? " and goal resumed" : ""}.`,
+		);
+		host.refreshAutonomyFooterStatus();
+		return;
+	}
+
+	const overriding = input === "override" || input.startsWith("override ");
+	const goalText = overriding ? input.slice("override".length).trim() : input;
+	if (!goalText) {
+		host.showError("Usage: /goal override <text>");
+		return;
+	}
+	let startFrom = current;
+	if (overriding && startFrom && (startFrom.status === "active" || startFrom.status === "blocked")) {
+		const cancelled = applyGoalAction(startFrom, { action: "cancel" }, now);
+		if (!cancelled.ok) {
+			host.showError(cancelled.error);
+			return;
+		}
+		startFrom = cancelled.state;
+		host.session.saveGoalStateSnapshot(startFrom);
+	}
+
 	const goalId = `goal-${Date.now().toString(36)}`;
-	const started = applyGoalAction(
-		host.session.getGoalStateSnapshot(),
-		{ action: "start", goalId, userGoal: goalText },
-		now,
-	);
+	const started = applyGoalAction(startFrom, { action: "start", goalId, userGoal: goalText }, now);
 	if (!started.ok) {
-		host.showError(started.error);
+		host.showError(`${started.error} Use /goal override <text> to replace it explicitly.`);
 		return;
 	}
 	host.session.saveGoalStateSnapshot(started.state);
@@ -603,7 +702,7 @@ export async function handleGoalCommand(host: GoalCommandHost, text: string): Pr
 	);
 	const result = await host.session.continueGoalLoop({ maxTurns: 1, maxStallTurns: 20, maxWallClockMinutes: 0 });
 	const continuation = result.finalSnapshot.continuation;
-	host.showStatus(`Goal started: ${continuation.action}/${continuation.reasonCode}.`);
+	host.showStatus(`Goal ${overriding ? "overridden" : "started"}: ${continuation.action}/${continuation.reasonCode}.`);
 	host.refreshAutonomyFooterStatus();
 }
 

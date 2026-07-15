@@ -28,15 +28,19 @@ import { globSync } from "glob";
 import ignore from "ignore";
 import { minimatch } from "minimatch";
 import { CONFIG_DIR_NAME } from "../config.ts";
-import { spawnProcess, spawnProcessSync } from "../utils/child-process.ts";
+import { spawnProcess, spawnProcessSync, waitForChildProcessWithTermination } from "../utils/child-process.ts";
 import { type GitSource, parseGitUrl } from "../utils/git.ts";
 import { canonicalizePath, isLocalPath, markPathIgnoredByCloudSync, resolvePath } from "../utils/paths.ts";
+import { getProcessWorkRun } from "../utils/work-directory.ts";
 import { createRollingOutputBuffer } from "./exec.ts";
 import { isStdoutTakenOver } from "./output-guard.ts";
 import { mergeResourceProfileMap, parseResourceProfileBlocks } from "./resource-profile-blocks.ts";
 import type { PackageSource, ResourceProfileSettings, Settings, SettingsManager } from "./settings-manager.ts";
 
 const NETWORK_TIMEOUT_MS = 10000;
+const PACKAGE_CAPTURE_TIMEOUT_MS = 30_000;
+const PACKAGE_OPERATION_TIMEOUT_MS = 10 * 60_000;
+const PACKAGE_COMMAND_KILL_GRACE_MS = 2_000;
 const UPDATE_CHECK_CONCURRENCY = 4;
 const GIT_UPDATE_CONCURRENCY = 4;
 const MAX_RESOURCE_PROFILE_SCAN_BYTES = 2 * 1024 * 1024;
@@ -210,8 +214,7 @@ function getHomeDir(): string {
 }
 
 export function getExtensionTempFolder(agentDir: string): string {
-	const tempFolder = join(agentDir, "tmp", "extensions");
-	mkdirSync(tempFolder, { recursive: true, mode: 0o700 });
+	const tempFolder = getProcessWorkRun(agentDir, "extensions", "packages").path;
 	chmodSync(tempFolder, 0o700);
 	return tempFolder;
 }
@@ -2549,6 +2552,7 @@ export class DefaultPackageManager implements PackageManager {
 		const env = getEnv();
 		return spawnProcess(command, args, {
 			cwd: options?.cwd,
+			detached: process.platform !== "win32",
 			stdio: isStdoutTakenOver() ? ["ignore", 2, 2] : "inherit",
 			env,
 		});
@@ -2563,78 +2567,55 @@ export class DefaultPackageManager implements PackageManager {
 		const env = options?.env ? { ...baseEnv, ...options.env } : baseEnv;
 		return spawnProcess(command, args, {
 			cwd: options?.cwd,
+			detached: process.platform !== "win32",
 			stdio: ["ignore", "pipe", "pipe"],
 			env,
 		});
 	}
 
-	private runCommandCapture(
+	private async runCommandCapture(
 		command: string,
 		args: string[],
 		options?: { cwd?: string; timeoutMs?: number; env?: Record<string, string> },
 	): Promise<string> {
-		return new Promise((resolvePromise, reject) => {
-			const child = this.spawnCaptureCommand(command, args, options);
-			// Callers parse stdout, so a silently truncated tail would corrupt results.
-			// Bound retention and fail loudly in the (pathological) overflow case.
-			const maxCapturedOutput = 16 * 1024 * 1024;
-			const stdout = createRollingOutputBuffer(maxCapturedOutput);
-			const stderr = createRollingOutputBuffer(maxCapturedOutput);
-			let timedOut = false;
-			const timeout =
-				typeof options?.timeoutMs === "number"
-					? setTimeout(() => {
-							timedOut = true;
-							child.kill();
-						}, options.timeoutMs)
-					: undefined;
-
-			child.stdout?.on("data", (data) => {
-				stdout.push(data.toString());
-			});
-			child.stderr?.on("data", (data) => {
-				stderr.push(data.toString());
-			});
-			child.once("error", (error) => {
-				if (timeout) clearTimeout(timeout);
-				reject(error);
-			});
-			child.once("close", (code, signal) => {
-				if (timeout) clearTimeout(timeout);
-				if (timedOut) {
-					reject(new Error(`${command} ${args.join(" ")} timed out after ${options?.timeoutMs}ms`));
-					return;
-				}
-				if (code === 0) {
-					if (stdout.truncated()) {
-						reject(
-							new Error(`${command} ${args.join(" ")} produced more than ${maxCapturedOutput} bytes of output`),
-						);
-						return;
-					}
-					resolvePromise(stdout.text().trim());
-					return;
-				}
-				const exitStatus = code === null ? `signal ${signal ?? "unknown"}` : `code ${code}`;
-				reject(
-					new Error(`${command} ${args.join(" ")} failed with ${exitStatus}: ${stderr.text() || stdout.text()}`),
-				);
-			});
+		const child = this.spawnCaptureCommand(command, args, options);
+		// Callers parse stdout, so a silently truncated tail would corrupt results.
+		// Bound retention and fail loudly in the (pathological) overflow case.
+		const maxCapturedOutput = 16 * 1024 * 1024;
+		const stdout = createRollingOutputBuffer(maxCapturedOutput);
+		const stderr = createRollingOutputBuffer(maxCapturedOutput);
+		child.stdout?.on("data", (data) => stdout.push(data.toString()));
+		child.stderr?.on("data", (data) => stderr.push(data.toString()));
+		const timeoutMs = options?.timeoutMs ?? PACKAGE_CAPTURE_TIMEOUT_MS;
+		const terminal = await waitForChildProcessWithTermination(child, {
+			timeoutMs,
+			killGraceMs: PACKAGE_COMMAND_KILL_GRACE_MS,
 		});
+		if (terminal.reason === "timeout") {
+			throw new Error(`${command} ${args.join(" ")} timed out after ${timeoutMs}ms`);
+		}
+		if (terminal.code === 0) {
+			if (stdout.truncated()) {
+				throw new Error(`${command} ${args.join(" ")} produced more than ${maxCapturedOutput} bytes of output`);
+			}
+			return stdout.text().trim();
+		}
+		const exitStatus = terminal.code === null ? `signal ${child.signalCode ?? "unknown"}` : `code ${terminal.code}`;
+		throw new Error(`${command} ${args.join(" ")} failed with ${exitStatus}: ${stderr.text() || stdout.text()}`);
 	}
 
-	private runCommand(command: string, args: string[], options?: { cwd?: string }): Promise<void> {
-		return new Promise((resolvePromise, reject) => {
-			const child = this.spawnCommand(command, args, options);
-			child.on("error", reject);
-			child.on("exit", (code) => {
-				if (code === 0) {
-					resolvePromise();
-				} else {
-					reject(new Error(`${command} ${args.join(" ")} failed with code ${code}`));
-				}
-			});
+	private async runCommand(command: string, args: string[], options?: { cwd?: string }): Promise<void> {
+		const child = this.spawnCommand(command, args, options);
+		const terminal = await waitForChildProcessWithTermination(child, {
+			timeoutMs: PACKAGE_OPERATION_TIMEOUT_MS,
+			killGraceMs: PACKAGE_COMMAND_KILL_GRACE_MS,
 		});
+		if (terminal.reason === "timeout") {
+			throw new Error(`${command} ${args.join(" ")} timed out after ${PACKAGE_OPERATION_TIMEOUT_MS}ms`);
+		}
+		if (terminal.code !== 0) {
+			throw new Error(`${command} ${args.join(" ")} failed with code ${terminal.code}`);
+		}
 	}
 
 	private runCommandSync(command: string, args: string[]): string {
@@ -2643,6 +2624,7 @@ export class DefaultPackageManager implements PackageManager {
 			stdio: ["ignore", "pipe", "pipe"],
 			encoding: "utf-8",
 			env,
+			timeout: 30_000,
 		});
 		if (result.error || result.status !== 0) {
 			throw new Error(

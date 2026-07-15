@@ -22,7 +22,7 @@ export interface HostFingerprint {
 export function currentHostFingerprint(): HostFingerprint {
 	const cpuList = cpus();
 	const cpu = (cpuList[0]?.model ?? "unknown-cpu").trim();
-	const cores = cpuList.length;
+	const cores = Math.max(1, cpuList.length);
 	const totalMemGb = Math.round(totalmem() / 1024 ** 3);
 	const id = `${cpu
 		.toLowerCase()

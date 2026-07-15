@@ -45,7 +45,7 @@ describe("Goal State (Phase 4)", () => {
 		expect(state.stallTurns).toBe(0);
 	});
 
-	it("block requirement", () => {
+	it("blocks and reopens a requirement", () => {
 		let state = createGoalState({ goalId: "g1", userGoal: "Fix bugs", now: "T0" });
 		state = applyGoalEvent(state, { type: "add_requirement", id: "req-1", text: "Fix typo", now: "T1" });
 		state = applyGoalEvent(state, { type: "block_requirement", id: "req-1", blockedReason: "no access", now: "T2" });
@@ -53,6 +53,11 @@ describe("Goal State (Phase 4)", () => {
 		expect(state.requirements[0].status).toBe("blocked");
 		expect(state.requirements[0].blockedReason).toBe("no access");
 		expect(state.requirements[0].updatedAt).toBe("T2");
+
+		state = applyGoalEvent(state, { type: "reopen_requirement", id: "req-1", now: "T3" });
+		expect(state.requirements[0].status).toBe("open");
+		expect(state.requirements[0].blockedReason).toBeUndefined();
+		expect(state.lastProgressAt).toBe("T3");
 	});
 
 	it("add evidence preserves provenance fields", () => {
@@ -133,6 +138,23 @@ describe("Goal State (Phase 4)", () => {
 		state = applyGoalEvent(state, { type: "satisfy_requirement", id: "req-1", evidenceIds: [], now: "T3" });
 		state = applyGoalEvent(state, { type: "complete_goal", now: "T4" });
 		expect(state.status).toBe("completed");
+	});
+
+	it("resumes a blocked goal and permits explicit manual completion", () => {
+		let state = createGoalState({ goalId: "g1", userGoal: "Fix bugs", now: "T0" });
+		state = applyGoalEvent(state, { type: "add_requirement", id: "req-1", text: "Fix typo", now: "T1" });
+		state = applyGoalEvent(state, { type: "no_progress", now: "T2" });
+		state = applyGoalEvent(state, { type: "block_goal", reason: "need user input", now: "T3" });
+		state = applyGoalEvent(state, { type: "resume_goal", now: "T4" });
+
+		expect(state.status).toBe("active");
+		expect(state.blockedReason).toBeUndefined();
+		expect(state.stallTurns).toBe(0);
+		expect(state.lastProgressAt).toBe("T4");
+
+		state = applyGoalEvent(state, { type: "complete_goal_manually", now: "T5" });
+		expect(state.status).toBe("completed");
+		expect(state.requirements[0].status).toBe("open");
 	});
 
 	it("serialization round-trips", () => {

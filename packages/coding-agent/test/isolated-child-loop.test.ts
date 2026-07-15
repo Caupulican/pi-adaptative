@@ -115,6 +115,63 @@ describe("isolated child tool loop", () => {
 		}
 	});
 
+	it("uses one tool-free finalization turn when the child bound ends on a tool call", async () => {
+		const harness = await createHarness();
+		try {
+			const execute = vi.fn(async () => ({
+				content: [{ type: "text" as const, text: "probe result" }],
+				details: {},
+			}));
+			const probeTool: AgentTool = {
+				name: "probe",
+				label: "probe",
+				description: "Read-only test probe",
+				parameters: Type.Object({}),
+				execute,
+			};
+			const replies = [
+				withUsage(fauxAssistantMessage(fauxToolCall("probe", {}), { stopReason: "toolUse" }), usage(10, 2, 0.01)),
+				withUsage(fauxAssistantMessage("bounded synthesis"), usage(3, 4, 0.02)),
+			];
+			const contexts: Context[] = [];
+			harness.session.agent.streamFn = (_model, context) => {
+				contexts.push(context);
+				const reply = replies.shift();
+				if (!reply) throw new Error("No deterministic isolated reply queued");
+				const stream = createAssistantMessageEventStream();
+				queueMicrotask(() => {
+					const reason = reply.stopReason === "toolUse" ? "toolUse" : "stop";
+					stream.push({ type: "done", reason, message: reply });
+					stream.end(reply);
+				});
+				return stream;
+			};
+
+			const result = await harness.session.runIsolatedCompletion({
+				systemPrompt: "isolated",
+				messages: [{ role: "user", content: "inspect", timestamp: Date.now() }],
+				tools: [probeTool],
+				maxTurns: 1,
+				finalTextPrompt: "Synthesize without tools.",
+			});
+
+			expect(execute).toHaveBeenCalledOnce();
+			expect(contexts).toHaveLength(2);
+			expect(contexts[1]?.tools).toEqual([]);
+			expect(contexts[1]?.messages.map((message) => message.role)).toEqual([
+				"user",
+				"assistant",
+				"toolResult",
+				"user",
+			]);
+			expect(result.text).toBe("bounded synthesis");
+			expect(result.usage).toMatchObject({ input: 13, output: 6, totalTokens: 19 });
+			expect(result.usage.cost.total).toBeCloseTo(0.03, 10);
+		} finally {
+			harness.cleanup();
+		}
+	});
+
 	it("forwards isolated tool-repair telemetry through the session hook", async () => {
 		const harness = await createHarness();
 		try {

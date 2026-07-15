@@ -10,19 +10,19 @@
  * exercising it unchanged.
  */
 
-import { spawn, spawnSync } from "node:child_process";
 import * as fs from "node:fs";
-import * as os from "node:os";
 import * as path from "node:path";
 import type { SessionManager } from "@caupulican/pi-agent-core/node";
 import type { EditorComponent, TUI } from "@caupulican/pi-tui";
 import { Spacer, Text } from "@caupulican/pi-tui";
-import { getShareViewerUrl } from "../../config.ts";
+import { getAgentDir, getShareViewerUrl } from "../../config.ts";
 import type { AgentSession } from "../../core/agent-session.ts";
 import type { AgentSessionRuntime } from "../../core/agent-session-runtime.ts";
 import { SessionImportFileNotFoundError } from "../../core/agent-session-runtime.ts";
 import { MissingSessionCwdError } from "../../core/session-cwd.ts";
+import { spawnProcess, spawnProcessSync, waitForChildProcessWithTermination } from "../../utils/child-process.ts";
 import { copyToClipboard } from "../../utils/clipboard.ts";
+import { acquireWorkRun } from "../../utils/work-directory.ts";
 import { BorderedLoader } from "./components/bordered-loader.ts";
 import type { EditorOverlayHost } from "./editor-overlay-host.ts";
 import type { ExtensionUiHost } from "./extension-ui-host.ts";
@@ -142,92 +142,117 @@ export async function handleImportCommand(host: ImportCommandHost, text: string)
 	}
 }
 
+const GH_AUTH_TIMEOUT_MS = 15_000;
+const GIST_CREATE_TIMEOUT_MS = 120_000;
+const GIST_KILL_GRACE_MS = 500;
+const MAX_GIST_COMMAND_OUTPUT = 16 * 1024;
+
 export async function handleShareCommand(host: ShareCommandHost): Promise<void> {
-	// Check if gh is available and logged in
-	try {
-		const authResult = spawnSync("gh", ["auth", "status"], { encoding: "utf-8" });
-		if (authResult.status !== 0) {
-			host.showError("GitHub CLI is not logged in. Run 'gh auth login' first.");
-			return;
-		}
-	} catch {
-		host.showError("GitHub CLI (gh) is not installed. Install it from https://cli.github.com/");
+	const authResult = spawnProcessSync("gh", ["auth", "status"], {
+		encoding: "utf8",
+		maxBuffer: 1024 * 1024,
+		timeout: GH_AUTH_TIMEOUT_MS,
+		windowsHide: true,
+	});
+	if (authResult.error) {
+		const code = (authResult.error as NodeJS.ErrnoException).code;
+		host.showError(
+			code === "ENOENT"
+				? "GitHub CLI (gh) is not installed. Install it from https://cli.github.com/"
+				: `Failed to check GitHub CLI authentication: ${authResult.error.message}`,
+		);
+		return;
+	}
+	if (authResult.status !== 0) {
+		host.showError("GitHub CLI is not logged in. Run 'gh auth login' first.");
 		return;
 	}
 
-	// Export to a temp file
-	const tmpFile = path.join(os.tmpdir(), "session.html");
+	const workRun = acquireWorkRun({ agentDir: getAgentDir(), category: "sharing", tenant: "gist" });
+	const tempDir = workRun.path;
+	const tempFile = path.join(tempDir, "session.html");
+	const cleanupWorkRun = () => {
+		workRun.release();
+		fs.rmSync(tempDir, { recursive: true, force: true });
+	};
 	try {
-		await host.session.exportToHtml(tmpFile);
+		await host.session.exportToHtml(tempFile);
 	} catch (error: unknown) {
+		cleanupWorkRun();
 		host.showError(`Failed to export session: ${error instanceof Error ? error.message : "Unknown error"}`);
 		return;
 	}
 
-	// Show cancellable loader, replacing the editor
 	const loader = new BorderedLoader(host.ui, theme, "Creating gist...");
-	host.overlayHost.swap(loader);
-
+	let restored = false;
+	let aborted = false;
+	let superseded = false;
 	const restoreEditor = () => {
+		if (restored) return;
+		restored = true;
 		loader.dispose();
-		host.overlayHost.swap(host.editor, { render: "none" });
-		try {
-			fs.unlinkSync(tmpFile);
-		} catch {
-			// Ignore cleanup errors
-		}
+		if (!superseded) host.overlayHost.swap(host.editor, { render: "none" });
 	};
-
-	// Create a secret gist asynchronously
-	let proc: ReturnType<typeof spawn> | null = null;
-
 	loader.onAbort = () => {
-		proc?.kill();
+		aborted = true;
 		restoreEditor();
-		host.showStatus("Share cancelled");
+		if (!superseded) host.showStatus("Share cancelled");
 	};
+	host.overlayHost.swap(loader, {
+		onUnmount: () => {
+			if (restored) return;
+			superseded = true;
+			loader.cancel();
+		},
+	});
 
 	try {
-		const result = await new Promise<{ stdout: string; stderr: string; code: number | null }>((resolve) => {
-			proc = spawn("gh", ["gist", "create", "--public=false", tmpFile]);
-			let stdout = "";
-			let stderr = "";
-			proc.stdout?.on("data", (data) => {
-				stdout += data.toString();
-			});
-			proc.stderr?.on("data", (data) => {
-				stderr += data.toString();
-			});
-			proc.on("close", (code) => resolve({ stdout, stderr, code }));
+		let stdout = "";
+		let stderr = "";
+		const child = spawnProcess("gh", ["gist", "create", "--public=false", tempFile], {
+			detached: process.platform !== "win32",
+			stdio: ["ignore", "pipe", "pipe"],
+			windowsHide: true,
+		});
+		child.stdout?.on("data", (data: Buffer) => {
+			stdout = (stdout + data.toString("utf8")).slice(-MAX_GIST_COMMAND_OUTPUT);
+		});
+		child.stderr?.on("data", (data: Buffer) => {
+			stderr = (stderr + data.toString("utf8")).slice(-MAX_GIST_COMMAND_OUTPUT);
+		});
+		const terminal = await waitForChildProcessWithTermination(child, {
+			signal: loader.signal,
+			timeoutMs: GIST_CREATE_TIMEOUT_MS,
+			killGraceMs: GIST_KILL_GRACE_MS,
 		});
 
-		if (loader.signal.aborted) return;
-
+		if (terminal.reason === "aborted" || aborted) return;
 		restoreEditor();
-
-		if (result.code !== 0) {
-			const errorMsg = result.stderr?.trim() || "Unknown error";
-			host.showError(`Failed to create gist: ${errorMsg}`);
+		if (terminal.reason === "timeout") {
+			host.showError("Timed out while creating gist");
+			return;
+		}
+		if (terminal.code !== 0) {
+			host.showError(`Failed to create gist${stderr.trim() ? `: ${stderr.trim()}` : ""}`);
 			return;
 		}
 
-		// Extract gist ID from the URL returned by gh
-		// gh returns something like: https://gist.github.com/username/GIST_ID
-		const gistUrl = result.stdout?.trim();
-		const gistId = gistUrl?.split("/").pop();
+		const gistUrl = stdout.trim();
+		const gistId = gistUrl.split("/").pop();
 		if (!gistId) {
 			host.showError("Failed to parse gist ID from gh output");
 			return;
 		}
 
-		// Create the preview URL
 		const previewUrl = getShareViewerUrl(gistId);
 		host.showStatus(`Share URL: ${previewUrl}\nGist: ${gistUrl}`);
 	} catch (error: unknown) {
-		if (!loader.signal.aborted) {
-			restoreEditor();
+		if (!aborted) {
 			host.showError(`Failed to create gist: ${error instanceof Error ? error.message : "Unknown error"}`);
 		}
+	} finally {
+		restoreEditor();
+		cleanupWorkRun();
 	}
 }
 

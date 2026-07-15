@@ -11,6 +11,7 @@ import {
 	type StdioPipe,
 } from "node:child_process";
 import type { Readable } from "node:stream";
+import { killTree } from "@caupulican/pi-agent-core/node";
 import crossSpawn from "cross-spawn";
 
 const EXIT_STDIO_GRACE_MS = 100;
@@ -35,6 +36,8 @@ export function spawnProcessSync(
 		: nodeSpawnSync(command, args, options);
 }
 
+type ForceChildProcessSettlement = (code?: number | null) => void;
+
 /**
  * Wait for a child process to terminate without hanging on inherited stdio handles.
  *
@@ -43,14 +46,17 @@ export function spawnProcessSync(
  * though the original process is already gone. We wait briefly for stdio to end,
  * then forcibly stop tracking the inherited handles.
  */
-export function waitForChildProcess(child: ChildProcess): Promise<number | null> {
+function waitForChildProcessInternal(
+	child: ChildProcess,
+	onForce?: (force: ForceChildProcessSettlement) => void,
+): Promise<number | null> {
 	return new Promise((resolve, reject) => {
 		let settled = false;
 		let exited = false;
 		let exitCode: number | null = null;
 		let postExitTimer: NodeJS.Timeout | undefined;
-		let stdoutEnded = child.stdout === null;
-		let stderrEnded = child.stderr === null;
+		let stdoutEnded = child.stdout === null || child.stdout.readableEnded || child.stdout.destroyed;
+		let stderrEnded = child.stderr === null || child.stderr.readableEnded || child.stderr.destroyed;
 
 		const cleanup = () => {
 			if (postExitTimer) {
@@ -72,6 +78,10 @@ export function waitForChildProcess(child: ChildProcess): Promise<number | null>
 			child.stderr?.destroy();
 			resolve(code);
 		};
+		onForce?.((code = child.exitCode) => {
+			child.unref();
+			finalize(code);
+		});
 
 		const maybeFinalizeAfterExit = () => {
 			if (!exited || settled) return;
@@ -98,6 +108,7 @@ export function waitForChildProcess(child: ChildProcess): Promise<number | null>
 		};
 
 		const onExit = (code: number | null) => {
+			if (settled || exited) return;
 			exited = true;
 			exitCode = code;
 			maybeFinalizeAfterExit();
@@ -115,5 +126,66 @@ export function waitForChildProcess(child: ChildProcess): Promise<number | null>
 		child.once("error", onError);
 		child.once("exit", onExit);
 		child.once("close", onClose);
+
+		// ChildProcess events are not replayed. Some callers legitimately attach after other async
+		// setup, so a fast child may already have emitted exit/close before this waiter is created.
+		if (child.exitCode !== null || child.signalCode !== null) {
+			onExit(child.exitCode);
+		}
 	});
+}
+
+export function waitForChildProcess(child: ChildProcess): Promise<number | null> {
+	return waitForChildProcessInternal(child);
+}
+
+export interface ChildProcessTerminationOptions {
+	signal?: AbortSignal;
+	timeoutMs?: number;
+	killGraceMs?: number;
+}
+
+export interface ChildProcessTerminationResult {
+	code: number | null;
+	reason: "exited" | "aborted" | "timeout";
+}
+
+/**
+ * Wait for a child terminal event while converting abort/deadline events into a
+ * tracked process-tree termination. No PID polling or detached killer process is used.
+ */
+export async function waitForChildProcessWithTermination(
+	child: ChildProcess,
+	options: ChildProcessTerminationOptions = {},
+): Promise<ChildProcessTerminationResult> {
+	let forceSettle: ForceChildProcessSettlement = () => {};
+	const terminal = waitForChildProcessInternal(child, (force) => {
+		forceSettle = force;
+	});
+	let reason: ChildProcessTerminationResult["reason"] | undefined;
+	let timeout: NodeJS.Timeout | undefined;
+	const requestTermination = (nextReason: "aborted" | "timeout") => {
+		if (reason !== undefined || child.exitCode !== null || child.signalCode !== null) return;
+		reason = nextReason;
+		void killTree(child, { graceMs: options.killGraceMs }).then(
+			() => forceSettle(),
+			() => forceSettle(),
+		);
+	};
+	const onAbort = () => requestTermination("aborted");
+	if (options.signal) {
+		if (options.signal.aborted) onAbort();
+		else options.signal.addEventListener("abort", onAbort, { once: true });
+	}
+	if (options.timeoutMs !== undefined) {
+		timeout = setTimeout(() => requestTermination("timeout"), Math.max(0, options.timeoutMs));
+		timeout.unref();
+	}
+	try {
+		const code = await terminal;
+		return { code, reason: reason ?? "exited" };
+	} finally {
+		if (timeout) clearTimeout(timeout);
+		options.signal?.removeEventListener("abort", onAbort);
+	}
 }

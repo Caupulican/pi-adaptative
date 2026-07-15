@@ -158,6 +158,8 @@ describe("tools-manager: install-failed cooldown gates the npm spawn, not evicti
 	});
 
 	it("real integration: does not re-spawn npm within the cooldown, but does after it elapses (real clock control, no injected retryability)", async () => {
+		vi.mocked(platform).mockReturnValue("linux");
+		vi.mocked(arch).mockReturnValue("x64");
 		await withFreshManagedDir(async () => {
 			delete process.env.PI_OFFLINE;
 			const originalPath = process.env.PATH;

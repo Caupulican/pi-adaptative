@@ -3,7 +3,10 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { beforeAll, describe, expect, it, vi } from "vitest";
 import { type ResourceProfileSettings, SettingsManager } from "../src/core/settings-manager.ts";
-import { ProfileMenuController } from "../src/modes/interactive/profile-menu-controller.ts";
+import {
+	getProfileExtensionDisplayLabel,
+	ProfileMenuController,
+} from "../src/modes/interactive/profile-menu-controller.ts";
 import { initTheme } from "../src/modes/interactive/theme/theme.ts";
 import { createTestResourceLoader } from "./utilities.ts";
 
@@ -25,7 +28,11 @@ const prototype = ProfileMenuController.prototype as unknown as {
 		resources: ResourceProfileSettings,
 		scope: "session" | "directory" | "project" | "global" | "reusable-file",
 		isActiveProfile: boolean,
+		runtimeMetadataChanged?: boolean,
 	): Promise<void>;
+	openManageProfilesFlow(this: unknown): Promise<void>;
+	isProfileSettingsEnabled(this: unknown): boolean;
+	selectProfileModel(this: unknown, profileModel?: string): Promise<string | null | undefined>;
 	rollbackValidatedProfileMutation(this: unknown, snapshot: unknown, definition?: unknown): Promise<unknown>;
 	applyProfile(this: unknown, profileName: string): Promise<void>;
 	deleteProfileFromSource(this: unknown, profileName: string): Promise<void>;
@@ -52,6 +59,42 @@ describe("getProfileResourceKinds", () => {
 		expect(byKind.has("agents")).toBe(true);
 		// registered (extension) tools are part of the grantable universe
 		expect((byKind.get("tools")!.items as Array<{ id: string }>).some((item) => item.id === "ext_tool")).toBe(true);
+	});
+
+	it("uses collision-safe paths while labeling descriptionless index extensions by folder", async () => {
+		const loader = createTestResourceLoader();
+		loader.getDiscoverableExtensionPaths = async () => [
+			"/home/test/.pi/agent/extensions/alpha/index.ts",
+			"/home/test/.pi/agent/extensions/beta/index.ts",
+		];
+		const kinds = await prototype.getProfileResourceKinds.call({
+			session: { resourceLoader: loader, getAllTools: () => [] },
+		});
+		const extensions = kinds.find((kind) => kind.kind === "extensions")?.items ?? [];
+		expect(extensions).toEqual([
+			{
+				id: "/home/test/.pi/agent/extensions/alpha/index.ts",
+				label: "alpha",
+				path: "/home/test/.pi/agent/extensions/alpha/index.ts",
+				description: undefined,
+			},
+			{
+				id: "/home/test/.pi/agent/extensions/beta/index.ts",
+				label: "beta",
+				path: "/home/test/.pi/agent/extensions/beta/index.ts",
+				description: undefined,
+			},
+		]);
+	});
+
+	it("prefers an extension description and falls back portably for index entry points", () => {
+		expect(getProfileExtensionDisplayLabel("C:\\Users\\me\\.pi\\extensions\\folder-name\\index.ts")).toBe(
+			"folder-name",
+		);
+		expect(getProfileExtensionDisplayLabel("/extensions/folder-name/index.js", "  Useful extension  ")).toBe(
+			"Useful extension",
+		);
+		expect(getProfileExtensionDisplayLabel("/extensions/direct-tool.ts")).toBe("direct-tool.ts");
 	});
 });
 
@@ -557,5 +600,173 @@ describe("active profile library edits", () => {
 		} finally {
 			rmSync(root, { recursive: true, force: true });
 		}
+	});
+});
+
+describe("profile model editing", () => {
+	it("exposes profile model editing from Manage Profiles", async () => {
+		const settingsManager = SettingsManager.inMemory({
+			resourceProfiles: {
+				"pi-fortes": {
+					model: "openai-codex/gpt-5.5",
+					resources: { tools: { allow: ["*"] } },
+				},
+			},
+		});
+		let renderedMenu: string[] | undefined;
+		const context = {
+			settingsManager,
+			isProfileSettingsEnabled: prototype.isProfileSettingsEnabled,
+			ui: {
+				showSelector: (
+					create: (done: () => void) => {
+						component: { render(width: number): string[] };
+						focus: unknown;
+					},
+				) => {
+					renderedMenu = create(vi.fn()).component.render(100);
+				},
+			},
+		};
+
+		await prototype.openManageProfilesFlow.call(context);
+
+		expect(renderedMenu?.join("\n")).toContain("Edit profile model");
+	});
+
+	it("offers inherited model behavior while showing an unavailable current pin", async () => {
+		let selector:
+			| {
+					render(width: number): string[];
+					getSelectList(): { handleInput(data: string): void };
+			  }
+			| undefined;
+		const selection = prototype.selectProfileModel.call(
+			{
+				ui: {
+					getAutoLearnModelOptions: () => [
+						{
+							value: "openai-codex/gpt-5.6-sol",
+							label: "openai-codex/gpt-5.6-sol",
+							description: "current",
+						},
+					],
+					showSelector: (
+						create: (done: () => void) => {
+							component: {
+								render(width: number): string[];
+								getSelectList(): { handleInput(data: string): void };
+							};
+							focus: unknown;
+						},
+					) => {
+						selector = create(vi.fn()).component;
+					},
+				},
+			},
+			"openai-codex/gpt-5.5",
+		);
+
+		expect(selector?.render(120).join("\n")).toContain("Inherit session/default model");
+		expect(selector?.render(120).join("\n")).toContain("openai-codex/gpt-5.5");
+		selector?.getSelectList().handleInput("\x1b[A");
+		selector?.getSelectList().handleInput("\r");
+		expect(await selection).toBeNull();
+	});
+
+	it("clears an active profile model and reloads immediately without losing metadata", async () => {
+		const settingsManager = SettingsManager.inMemory({
+			resourceProfiles: {
+				"pi-fortes": {
+					description: "Fortes development",
+					model: "openai-codex/gpt-5.5",
+					thinking: "high",
+					modelRouter: { enabled: false, mediumModel: "openai-codex/gpt-5.5" },
+					soul: "Work surgically.",
+					resources: { tools: { allow: ["*"] }, skills: { allow: ["forteslib-patterns"] } },
+				},
+			},
+			activeResourceProfiles: ["pi-fortes"],
+		});
+		const profile = settingsManager.getProfileRegistry().getProfile("pi-fortes");
+		expect(profile).toBeDefined();
+		const handleReloadCommand = vi.fn(async () => true);
+		const context = {
+			settingsManager,
+			refreshAfterProfileMutation: prototype.refreshAfterProfileMutation,
+			rollbackValidatedProfileMutation: prototype.rollbackValidatedProfileMutation,
+			ui: {
+				handleReloadCommand,
+				footerDataProvider: { setExtensionStatus: vi.fn() },
+				invalidateFooter: vi.fn(),
+				updateEditorBorderColor: vi.fn(),
+				showError: vi.fn(),
+				showStatus: vi.fn(),
+			},
+		};
+
+		await prototype.saveProfileResources.call(
+			context,
+			{ ...profile!, model: undefined },
+			profile!.resources,
+			profile!.resources,
+			"global",
+			true,
+			true,
+		);
+
+		const saved = settingsManager.getGlobalSettings().resourceProfiles?.["pi-fortes"];
+		expect(saved).not.toHaveProperty("model");
+		expect(saved).toMatchObject({
+			description: "Fortes development",
+			thinking: "high",
+			modelRouter: { enabled: false, mediumModel: "openai-codex/gpt-5.5" },
+			soul: "Work surgically.",
+			resources: { tools: { allow: ["*"] }, skills: { allow: ["forteslib-patterns"] } },
+		});
+		expect(handleReloadCommand).toHaveBeenCalledTimes(1);
+	});
+
+	it("updates an inactive profile model without reloading the current runtime", async () => {
+		const settingsManager = SettingsManager.inMemory({
+			resourceProfiles: {
+				"pi-fortes": {
+					model: "openai-codex/gpt-5.5",
+					resources: { tools: { allow: ["*"] } },
+				},
+			},
+		});
+		const profile = settingsManager.getProfileRegistry().getProfile("pi-fortes");
+		expect(profile).toBeDefined();
+		const handleReloadCommand = vi.fn(async () => true);
+		const context = {
+			settingsManager,
+			refreshAfterProfileMutation: prototype.refreshAfterProfileMutation,
+			rollbackValidatedProfileMutation: prototype.rollbackValidatedProfileMutation,
+			ui: {
+				handleReloadCommand,
+				footerDataProvider: { setExtensionStatus: vi.fn() },
+				invalidateFooter: vi.fn(),
+				updateEditorBorderColor: vi.fn(),
+				showError: vi.fn(),
+				showStatus: vi.fn(),
+			},
+		};
+
+		await prototype.saveProfileResources.call(
+			context,
+			{ ...profile!, model: "openai-codex/gpt-5.6-sol" },
+			profile!.resources,
+			profile!.resources,
+			"global",
+			false,
+			true,
+		);
+
+		expect(settingsManager.getGlobalSettings().resourceProfiles?.["pi-fortes"]).toMatchObject({
+			model: "openai-codex/gpt-5.6-sol",
+			resources: { tools: { allow: ["*"] } },
+		});
+		expect(handleReloadCommand).not.toHaveBeenCalled();
 	});
 });

@@ -7,6 +7,7 @@ import path from "path";
 import { type Static, Type } from "typebox";
 import { keyHint } from "../../modes/interactive/components/keybinding-hints.ts";
 import type { Theme } from "../../modes/interactive/theme/theme.ts";
+import { waitForChildProcessWithTermination } from "../../utils/child-process.ts";
 import { ensureTool } from "../../utils/tools-manager.ts";
 import type { ArtifactStore } from "../context/context-artifacts.ts";
 import {
@@ -47,6 +48,8 @@ const findSchema = Type.Object({
 export type FindToolInput = Static<typeof findSchema>;
 
 const DEFAULT_LIMIT = 1000;
+const FIND_PROCESS_TIMEOUT_MS = 5 * 60_000;
+const FIND_PROCESS_KILL_GRACE_MS = 1_000;
 
 export interface FindToolDetails {
 	truncation?: TruncationResult;
@@ -564,16 +567,16 @@ export function createFindToolDefinition(
 						}
 						args.push("--", finalPattern, searchPath);
 
-						const child = spawn(fdPath, args, { stdio: ["ignore", "pipe", "pipe"] });
+						const child = spawn(fdPath, args, {
+							detached: process.platform !== "win32",
+							stdio: ["ignore", "pipe", "pipe"],
+						});
 						const rl = createInterface({ input: child.stdout });
 						let stderr = "";
 						const lines: string[] = [];
+						const terminationController = new AbortController();
 
-						stopChild = () => {
-							if (!child.killed) {
-								child.kill();
-							}
-						};
+						stopChild = () => terminationController.abort();
 
 						const cleanup = () => {
 							rl.close();
@@ -587,55 +590,57 @@ export function createFindToolDefinition(
 							lines.push(line);
 						});
 
-						child.on("error", (error) => {
-							cleanup();
-							settle(() => reject(new Error(`Failed to run fd: ${error.message}`)));
-						});
-
-						child.on("close", (code) => {
-							cleanup();
-							if (signal?.aborted) {
-								settle(() => reject(new Error("Operation aborted")));
+						const terminal = await waitForChildProcessWithTermination(child, {
+							signal: terminationController.signal,
+							timeoutMs: FIND_PROCESS_TIMEOUT_MS,
+							killGraceMs: FIND_PROCESS_KILL_GRACE_MS,
+						}).finally(cleanup);
+						const code = terminal.code;
+						if (terminal.reason === "timeout") {
+							settle(() => reject(new Error(`fd timed out after ${FIND_PROCESS_TIMEOUT_MS}ms`)));
+							return;
+						}
+						if (signal?.aborted) {
+							settle(() => reject(new Error("Operation aborted")));
+							return;
+						}
+						const output = lines.join("\n");
+						if (code !== 0) {
+							const errorMsg = stderr.trim() || `fd exited with code ${code}`;
+							if (!output) {
+								settle(() => reject(new Error(errorMsg)));
 								return;
 							}
-							const output = lines.join("\n");
-							if (code !== 0) {
-								const errorMsg = stderr.trim() || `fd exited with code ${code}`;
-								if (!output) {
-									settle(() => reject(new Error(errorMsg)));
-									return;
-								}
-							}
+						}
 
-							const relativized: string[] = [];
-							for (const rawLine of lines) {
-								const line = rawLine.replace(/\r$/, "").trim();
-								if (!line) continue;
-								const hadTrailingSlash = line.endsWith("/") || line.endsWith("\\");
-								let relativePath = line;
-								if (line.startsWith(searchPath)) {
-									relativePath = line.slice(searchPath.length + 1);
-								} else {
-									relativePath = path.relative(searchPath, line);
-								}
-								if (hadTrailingSlash && !relativePath.endsWith("/")) relativePath += "/";
-								relativized.push(toPosixPath(relativePath));
+						const relativized: string[] = [];
+						for (const rawLine of lines) {
+							const line = rawLine.replace(/\r$/, "").trim();
+							if (!line) continue;
+							const hadTrailingSlash = line.endsWith("/") || line.endsWith("\\");
+							let relativePath = line;
+							if (line.startsWith(searchPath)) {
+								relativePath = line.slice(searchPath.length + 1);
+							} else {
+								relativePath = path.relative(searchPath, line);
 							}
+							if (hadTrailingSlash && !relativePath.endsWith("/")) relativePath += "/";
+							relativized.push(toPosixPath(relativePath));
+						}
 
-							const formatted = formatFindResults(relativized, effectiveLimit, {
-								toolCallId,
-								artifactStore,
-								broadQueryTracker,
-								pattern: effectivePattern,
-								rawPath: searchDir,
-							});
-							settle(() =>
-								resolve({
-									content: [{ type: "text", text: formatted.text }],
-									details: Object.keys(formatted.details).length > 0 ? formatted.details : undefined,
-								}),
-							);
+						const formatted = formatFindResults(relativized, effectiveLimit, {
+							toolCallId,
+							artifactStore,
+							broadQueryTracker,
+							pattern: effectivePattern,
+							rawPath: searchDir,
 						});
+						settle(() =>
+							resolve({
+								content: [{ type: "text", text: formatted.text }],
+								details: Object.keys(formatted.details).length > 0 ? formatted.details : undefined,
+							}),
+						);
 					} catch (e) {
 						if (signal?.aborted) {
 							settle(() => reject(new Error("Operation aborted")));

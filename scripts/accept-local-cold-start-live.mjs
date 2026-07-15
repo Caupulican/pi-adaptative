@@ -1,11 +1,12 @@
 #!/usr/bin/env node
 import { spawn } from "node:child_process";
 import { existsSync } from "node:fs";
-import { mkdir, mkdtemp, readFile, rm, unlink, writeFile } from "node:fs/promises";
+import { mkdir, readFile, writeFile } from "node:fs/promises";
 import { createServer } from "node:net";
-import { homedir, tmpdir } from "node:os";
+import { homedir } from "node:os";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
+import { acquireScriptWorkRun, removeScriptWorkRun } from "./lib/work-directory.mjs";
 
 const DEFAULT_MODEL = "ollama/qwen3:1.7b";
 const TIMEOUT_MS = Number(process.env.PI_ACCEPT_COLD_TIMEOUT_MS ?? 900_000);
@@ -304,7 +305,8 @@ async function main() {
 		new Promise((_, reject) => serve.once("error", reject)),
 	]);
 	await serveStart;
-	const scratch = await mkdtemp(path.join(tmpdir(), "pi-cold-local-"));
+	const workRun = acquireScriptWorkRun("acceptance", "local-cold-start");
+	const scratch = workRun.path;
 	const agentDir = path.join(scratch, "agent");
 	const sessionDir = path.join(scratch, "sessions");
 	const markerPath = path.join(scratch, "marker.txt");
@@ -320,10 +322,8 @@ async function main() {
 		console.log(`cold-start ok | ${args.modelRef} | store ${args.storeDir} | session ${args.keepSession ? sessionDir : "removed"}`);
 	} finally {
 		serve.kill("SIGTERM");
-		if (!args.keepSession) {
-			await rm(scratch, { recursive: true, force: true });
-			await unlink(markerPath).catch(() => undefined);
-		}
+		if (args.keepSession) workRun.release();
+		else removeScriptWorkRun(workRun);
 	}
 }
 

@@ -53,6 +53,8 @@ import { runResearch } from "./research/research-runner.ts";
 import type { collectWorkspaceSources } from "./research/workspace-collector.ts";
 import type { SettingsManager } from "./settings-manager.ts";
 
+const WORKER_HANDOFF_TIMEOUT_MS = 30_000;
+
 export function clampLaneMaxUsd(settingsMaxUsd: number, foregroundMaxEstimatedUsd?: number): number {
 	return Math.min(settingsMaxUsd, foregroundMaxEstimatedUsd ?? Number.POSITIVE_INFINITY);
 }
@@ -67,8 +69,7 @@ export function getPrivateLaneDeniedPaths(cwd: string, agentDir: string): string
 		"trust.json",
 		"sessions",
 		"state",
-		"context-artifacts",
-		"context-gc",
+		"work",
 	]
 		.map((entry) => path.join(agentDir, entry))
 		.concat(path.join(cwd, ".pi", "settings.json"));
@@ -113,8 +114,12 @@ export interface BackgroundLaneControllerDeps {
 	getCapabilityEnvelope(): CapabilityEnvelope | undefined;
 	/** Capability profile of the SESSION model (gates background lanes, scales continuation budgets). */
 	getModelCapabilityProfile(): ModelCapabilityProfile;
-	/** Emits a session event (only `warning` from this controller). */
+	/** Emits session events for diagnostics and UI state. */
 	emit(event: AgentSessionEvent): void;
+	/** Queue one bounded terminal handoff that wakes the parent without injecting worker product text. */
+	notifyWorkerTerminalHandoff(
+		records: readonly { laneId: string; status: LaneTerminalStatus; reasonCode?: string }[],
+	): Promise<void>;
 	/** G3/G8 telemetry sink (codes/ids only — never lane product text). */
 	emitAutonomyTelemetry(event: AutonomyTelemetryEvent): void;
 	/** Durable goal state, if a goal is active (the research lane's demand source). */
@@ -169,7 +174,9 @@ export class BackgroundLaneController {
 		string,
 		{ instructions: string; systemPrompt?: string; memoryRead?: boolean }
 	>();
-	private _workerNotificationTimer: ReturnType<typeof setTimeout> | undefined;
+	private _workerNotificationScheduled = false;
+	private _workerNotificationTail = Promise.resolve();
+	private _disposed = false;
 	private _workersCompletedSinceFlush = 0;
 	private _workersFailedSinceFlush = 0;
 	private readonly _workerTerminalSinceFlush: Array<{
@@ -181,27 +188,57 @@ export class BackgroundLaneController {
 	private readonly deps: BackgroundLaneControllerDeps;
 
 	private _scheduleWorkerNotification(): void {
-		if (this._workerNotificationTimer !== undefined) return;
-		this._workerNotificationTimer = setTimeout(() => {
-			this._workerNotificationTimer = undefined;
-			const queued = this._laneTracker
-				.getRecords()
-				.filter((record) => record.type === "worker" && record.status === "queued").length;
-			const running = this._laneTracker.getRunningCount("worker");
+		if (this._disposed || this._workerNotificationScheduled) return;
+		this._workerNotificationScheduled = true;
+		queueMicrotask(() => this._flushWorkerNotification());
+	}
+
+	private _flushWorkerNotification(): void {
+		this._workerNotificationScheduled = false;
+		if (this._disposed) return;
+		const queued = this._laneTracker
+			.getRecords()
+			.filter((record) => record.type === "worker" && record.status === "queued").length;
+		const running = this._laneTracker.getRunningCount("worker");
+		const terminalSinceFlush = this._workerTerminalSinceFlush.splice(0);
+		const completedSinceFlush = this._workersCompletedSinceFlush;
+		const failedSinceFlush = this._workersFailedSinceFlush;
+		this._workersCompletedSinceFlush = 0;
+		this._workersFailedSinceFlush = 0;
+		this.deps.emit({
+			type: "delegate_workers",
+			active: queued + running,
+			queued,
+			running,
+			completedSinceFlush,
+			failedSinceFlush,
+			terminalSinceFlush,
+		});
+		if (terminalSinceFlush.length === 0) return;
+		const delivery = this._workerNotificationTail.then(async () => {
+			if (this._disposed) return;
+			let timeout: ReturnType<typeof setTimeout> | undefined;
+			try {
+				await Promise.race([
+					this.deps.notifyWorkerTerminalHandoff(terminalSinceFlush),
+					new Promise<never>((_resolve, reject) => {
+						timeout = setTimeout(
+							() => reject(new Error(`worker terminal handoff timed out after ${WORKER_HANDOFF_TIMEOUT_MS}ms`)),
+							WORKER_HANDOFF_TIMEOUT_MS,
+						);
+						timeout.unref();
+					}),
+				]);
+			} finally {
+				if (timeout) clearTimeout(timeout);
+			}
+		});
+		this._workerNotificationTail = delivery.catch((error: unknown) => {
 			this.deps.emit({
-				type: "delegate_workers",
-				active: queued + running,
-				queued,
-				running,
-				completedSinceFlush: this._workersCompletedSinceFlush,
-				failedSinceFlush: this._workersFailedSinceFlush,
-				terminalSinceFlush: this._workerTerminalSinceFlush.splice(0),
+				type: "warning",
+				message: `Background worker handoff failed: ${error instanceof Error ? error.message : String(error)}`,
 			});
-			this._workersCompletedSinceFlush = 0;
-			this._workersFailedSinceFlush = 0;
-		}, 75);
-		const timer = this._workerNotificationTimer;
-		if (typeof timer === "object" && timer && "unref" in timer) timer.unref();
+		});
 	}
 
 	private _recordWorkerTerminal(record: LaneRecord): void {
@@ -245,12 +282,20 @@ export class BackgroundLaneController {
 
 	/** Abort any in-flight research pass or delegated worker (called on session dispose). */
 	abortInFlightLanes(): void {
+		this._disposed = true;
 		this._researchLaneAbort.abort();
 		this._workerDelegationAbort.abort();
-		if (this._workerNotificationTimer !== undefined) {
-			clearTimeout(this._workerNotificationTimer);
-			this._workerNotificationTimer = undefined;
+		this._queuedWorkers.clear();
+		for (const record of this._laneTracker.getRecords()) {
+			if (record.status === "queued" || record.status === "running") {
+				this._laneTracker.complete(record.laneId, {
+					status: "canceled",
+					reasonCode: "session_disposed",
+				});
+			}
 		}
+		this._workerNotificationScheduled = false;
+		this._workerTerminalSinceFlush.length = 0;
 	}
 
 	clearGoalAutoContinueTimer(): void {
@@ -903,6 +948,8 @@ export class BackgroundLaneController {
 						maxTokens: laneCapability.laneMaxOutputTokens,
 						tools: toolSurface.tools,
 						maxTurns: 6,
+						finalTextPrompt:
+							"The tool-turn budget is exhausted. Do not call more tools. Return the required worker-result JSON envelope now using only evidence already gathered. If the investigation is incomplete, say so in the summary or blockers instead of omitting the envelope.",
 						beforeToolCall: async (context, toolSignal) => {
 							const decision = await toolSurface.beforeToolCall(context, toolSignal);
 							if (decision?.block) {

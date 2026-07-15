@@ -1,5 +1,21 @@
 ## [Unreleased]
 
+### Added
+
+- Added a profile-selectable bundled tmux agent manager with portable team templates, event-driven terminal result signals, exactly-once parent wake handoffs, startup reconciliation, and packaged binary resources.
+- Added a leased multi-tenant transient workspace under `~/.pi/agent/work/<category>/<tenant>/<run-id>` with ownership manifests and bounded age, count, byte, scan, and depth retention.
+- Added native Windows x64 and ARM64 build, test, smoke, and release gates.
+
+### Fixed
+
+- Added in-settings profile model editing, including returning an existing profile to session/default-model inheritance and immediate transactional reload for active profiles.
+- Made profile extension choices use collision-safe path identities and description/folder labels, so separate folder-based `index.ts` extensions can be enabled independently.
+- Made goal ledgers user-recoverable with manual status, resume, reopen, complete, close, and override controls while retaining evidence-gated agent completion.
+- Removed redundant approval waits and unbounded repair loops from the bundled skill/extension authoring and harness-learning workflows.
+- Made delegated worker terminal events queue bounded, serialized parent wake handoffs without injecting untrusted worker output, status polling, or debounce-timer races.
+- Made child-process waits settle when attached after a fast child already emitted its terminal event, and routed exec cancellation through event-driven process-tree escalation.
+- Removed Unix-only temporary-path, shell, editor, clipboard, package, and runtime assumptions from Windows execution paths.
+
 ## [0.81.32] - 2026-07-13
 
 ### Fixed

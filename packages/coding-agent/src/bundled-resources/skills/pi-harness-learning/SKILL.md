@@ -107,9 +107,12 @@ history. This is not single-session summarization.
    before judging candidates and use it to polish proposals, avoid duplicates,
    and improve behavioral/tooling accuracy.
 8. Apply policy gates: memory may be auto-applied only after overlap checks;
-   skill/prompt changes are proposals unless clearly low-risk; extensions,
-   tools, core source, settings, publishing, tagging, and releases require
-   explicit approval.
+   safe low-risk user-level skill/prompt changes may be applied when the current
+   request or standing grant authorizes self-improvement. A direct request to
+   fix or improve the harness is authorization for scoped source changes; do
+   not ask for duplicate approval at each layer transition. Settings,
+   credentials, destructive actions, executable authority expansion,
+   publishing, pushing, tagging, and releases still require specific approval.
 9. Leave an audit artifact with evidence sources, recurrence count, chosen
    layer, action/approval need, expected benefit, risk, and validation.
 

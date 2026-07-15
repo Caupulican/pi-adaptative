@@ -14,14 +14,8 @@ import { type Static, Type } from "typebox";
 import { keyHint } from "../../modes/interactive/components/keybinding-hints.ts";
 import { truncateToVisualLines } from "../../modes/interactive/components/visual-truncate.ts";
 import { theme } from "../../modes/interactive/theme/theme.ts";
-import { waitForChildProcess } from "../../utils/child-process.ts";
-import {
-	getShellConfig,
-	getShellEnv,
-	killProcessTree,
-	trackDetachedChildPid,
-	untrackDetachedChildPid,
-} from "../../utils/shell.ts";
+import { waitForChildProcessWithTermination } from "../../utils/child-process.ts";
+import { getShellConfig, getShellEnv, trackDetachedChildPid, untrackDetachedChildPid } from "../../utils/shell.ts";
 import type { ToolDefinition, ToolRenderResultOptions } from "../extensions/types.ts";
 import { withExclusiveMutationBarrier } from "./file-mutation-queue.ts";
 import { classifyGitCommand, executeFilteredGit } from "./git-filter.ts";
@@ -111,11 +105,8 @@ export function createLocalBashOperations(options?: { shellPath?: string }): Bas
 				windowsHide: true,
 			});
 			if (child.pid) trackDetachedChildPid(child.pid);
-			let timedOut = false;
-			let timeoutHandle: NodeJS.Timeout | undefined;
-			const onAbort = () => {
-				if (child.pid) killProcessTree(child.pid);
-			};
+			const terminationController = new AbortController();
+			const onAbort = () => terminationController.abort();
 
 			// A command that keeps producing output must never be killed by this mechanism:
 			// silence bounds mute-ness, not duration. It arms when the caller left `timeout`
@@ -129,7 +120,7 @@ export function createLocalBashOperations(options?: { shellPath?: string }): Bas
 							silenceMs,
 							onSilence: () => {
 								silenceKilled = true;
-								if (child.pid) killProcessTree(child.pid);
+								terminationController.abort();
 							},
 						})
 					: undefined;
@@ -139,38 +130,32 @@ export function createLocalBashOperations(options?: { shellPath?: string }): Bas
 			};
 
 			try {
-				// Set timeout if provided.
-				if (timeout !== undefined && timeout > 0) {
-					timeoutHandle = setTimeout(() => {
-						timedOut = true;
-						if (child.pid) killProcessTree(child.pid);
-					}, timeout * 1000);
-				}
 				// Stream stdout and stderr.
 				child.stdout?.on("data", onChunk);
 				child.stderr?.on("data", onChunk);
-				// Handle abort signal by killing the entire process tree.
+				// Forward caller cancellation into the shared bounded termination path.
 				if (signal) {
 					if (signal.aborted) onAbort();
 					else signal.addEventListener("abort", onAbort, { once: true });
 				}
-				// Handle shell spawn errors and wait for the process to terminate without hanging
-				// on inherited stdio handles held by detached descendants.
-				const exitCode = await waitForChildProcess(child);
+				const terminal = await waitForChildProcessWithTermination(child, {
+					signal: terminationController.signal,
+					timeoutMs: timeout !== undefined && timeout > 0 ? timeout * 1000 : undefined,
+					killGraceMs: 2_000,
+				});
 				if (signal?.aborted) {
 					throw new Error("aborted");
 				}
-				if (timedOut) {
+				if (terminal.reason === "timeout") {
 					throw new Error(`timeout:${timeout}`);
 				}
 				if (silenceKilled) {
 					throw new Error(`silence:${silenceMs / 1000}`);
 				}
-				return { exitCode };
+				return { exitCode: terminal.code };
 			} finally {
 				silenceWatchdog?.disarm();
 				if (child.pid) untrackDetachedChildPid(child.pid);
-				if (timeoutHandle) clearTimeout(timeoutHandle);
 				if (signal) signal.removeEventListener("abort", onAbort);
 			}
 		},

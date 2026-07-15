@@ -1,18 +1,14 @@
 import { afterEach, describe, expect, it, vi } from "vitest";
 import type { ExternalEditorHost } from "../src/modes/interactive/external-editor.ts";
 import { openEditorForPath, openExternalEditor } from "../src/modes/interactive/external-editor.ts";
+import { parseExternalEditorCommand } from "../src/utils/external-editor-command.ts";
 
-const spawnMock = vi.hoisted(() =>
-	vi.fn(() => ({
-		on(event: string, handler: (code: number | null) => void) {
-			if (event === "close") queueMicrotask(() => handler(0));
-			return this;
-		},
-	})),
-);
+const spawnMock = vi.hoisted(() => vi.fn(() => ({})));
+const waitForChildProcessMock = vi.hoisted(() => vi.fn(async () => 0));
 
-vi.mock("node:child_process", () => ({
-	spawn: spawnMock,
+vi.mock("../src/utils/child-process.ts", () => ({
+	spawnProcess: spawnMock,
+	waitForChildProcess: waitForChildProcessMock,
 }));
 
 const originalVisual = process.env.VISUAL;
@@ -20,6 +16,7 @@ const originalEditor = process.env.EDITOR;
 
 afterEach(() => {
 	spawnMock.mockClear();
+	waitForChildProcessMock.mockClear();
 	if (originalVisual === undefined) {
 		delete process.env.VISUAL;
 	} else {
@@ -49,6 +46,17 @@ function createHost(): ExternalEditorHost {
 }
 
 describe("external editor resolution", () => {
+	it("preserves quoted Windows executable paths and backslashes", () => {
+		expect(parseExternalEditorCommand('"C:\\Program Files\\Microsoft VS Code\\Code.exe" --wait')).toEqual({
+			command: "C:\\Program Files\\Microsoft VS Code\\Code.exe",
+			args: ["--wait"],
+		});
+	});
+
+	it("rejects an unterminated quoted command", () => {
+		expect(parseExternalEditorCommand('"C:\\Program Files\\Code.exe --wait')).toBeUndefined();
+	});
+
 	it("uses VISUAL before EDITOR for the buffer editor", async () => {
 		process.env.VISUAL = "visual-editor --wait";
 		process.env.EDITOR = "editor-editor --wait";

@@ -1,5 +1,9 @@
 ## [Unreleased]
 
+### Fixed
+
+- Made cancellable loaders settle from terminal events without polling and prevented file autocomplete from escaping its configured base directory.
+
 ## [0.81.32] - 2026-07-13
 
 ## [0.81.31] - 2026-07-13

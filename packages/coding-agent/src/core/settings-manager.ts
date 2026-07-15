@@ -1572,7 +1572,7 @@ export class SettingsManager {
 			name,
 			resources,
 			description: definition.description ?? previous.description,
-			model: definition.model ?? previous.model,
+			model: Object.hasOwn(definition, "model") ? definition.model : previous.model,
 			thinking: definition.thinking ?? previous.thinking,
 			modelRouter: definition.modelRouter ?? previous.modelRouter,
 			soul: definition.soul ?? previous.soul,

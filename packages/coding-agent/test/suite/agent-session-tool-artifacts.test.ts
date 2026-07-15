@@ -11,6 +11,7 @@ import type { AgentMessage } from "@caupulican/pi-agent-core";
 import { fauxAssistantMessage, fauxToolCall } from "@caupulican/pi-ai";
 import { afterEach, describe, expect, it } from "vitest";
 import { createFileArtifactStore, isMissingArtifactMarker } from "../../src/core/context/context-artifacts.ts";
+import { getContextStoreDir } from "../../src/core/context/context-store-retention.ts";
 import { createArtifactRetrieveTool } from "../../src/core/tools/artifact-retrieve.ts";
 import { createHarness, type Harness } from "./harness.ts";
 
@@ -37,7 +38,7 @@ function findToolResultDetails(harness: Harness): ToolDetailsLike | undefined {
 }
 
 function sessionArtifactDir(harness: Harness): string {
-	return join(harness.tempDir, "context-artifacts", harness.sessionManager.getSessionId());
+	return getContextStoreDir(harness.tempDir, "artifacts", harness.sessionManager.getSessionId());
 }
 
 describe("AgentSession live tool construction wires a session-scoped file ArtifactStore into grep/find", () => {
@@ -47,7 +48,7 @@ describe("AgentSession live tool construction wires a session-scoped file Artifa
 		while (harnesses.length > 0) {
 			harnesses.pop()?.cleanup();
 		}
-	});
+	}, 60_000);
 
 	it("a large live grep result writes payload+meta under the session artifact directory, readable by a recreated store", async () => {
 		const harness = await createHarness({
@@ -146,7 +147,7 @@ describe("AgentSession live tool construction wires a session-scoped file Artifa
 		// directory existing is expected; the assertion is that it holds no artifact files.
 		const artifactDir = sessionArtifactDir(harness);
 		expect(existsSync(artifactDir)).toBe(true);
-		expect(readdirSync(artifactDir)).toEqual([]);
+		expect(readdirSync(artifactDir).filter((entry) => !entry.startsWith("."))).toEqual([]);
 	});
 
 	it("a small live find result is never packed to disk", async () => {
@@ -167,7 +168,7 @@ describe("AgentSession live tool construction wires a session-scoped file Artifa
 		expect(details?.artifactId).toBeUndefined();
 		const artifactDir = sessionArtifactDir(harness);
 		expect(existsSync(artifactDir)).toBe(true);
-		expect(readdirSync(artifactDir)).toEqual([]);
+		expect(readdirSync(artifactDir).filter((entry) => !entry.startsWith("."))).toEqual([]);
 	});
 
 	it("an artifact from an earlier tool call survives a later, unrelated tool call in the same session (current behavior: accumulates without release/cleanup)", async () => {

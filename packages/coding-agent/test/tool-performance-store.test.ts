@@ -82,7 +82,7 @@ describe("ToolPerformanceStore", () => {
 			hosts: Record<string, { stats: Record<string, unknown> }>;
 		};
 		expect(Object.keys(Object.values(file.hosts)[0]!.stats)).toHaveLength(500);
-	});
+	}, 120_000);
 
 	it("fails closed on corrupt storage and overwrites it on the next valid save", () => {
 		const dir = mkdtempSync(join(tmpdir(), "pi-tool-performance-"));

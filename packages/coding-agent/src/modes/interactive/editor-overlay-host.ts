@@ -16,6 +16,8 @@ export interface EditorOverlayUi {
 export interface EditorOverlaySwapOptions {
 	/** Component to focus after mounting. Defaults to the mounted component. */
 	focus?: Component;
+	/** Called exactly once when a later swap or explicit unmount replaces this component. */
+	onUnmount?: () => void;
 	/**
 	 * Whether to `setFocus` the target (default) or `restoreFocus` it. The latter
 	 * prefers the topmost visible overlay and is used when returning to the editor
@@ -43,10 +45,25 @@ export interface EditorOverlaySwapOptions {
 export class EditorOverlayHost {
 	private readonly container: Container;
 	private readonly ui: EditorOverlayUi;
+	private mountedOnUnmount: (() => void) | undefined;
 
 	constructor(container: Container, ui: EditorOverlayUi) {
 		this.container = container;
 		this.ui = ui;
+	}
+
+	private notifyMountedUnmount(): void {
+		// Unmount callbacks may synchronously mount another overlay. Drain those nested generations
+		// before the caller installs its replacement so no reentrant component is displaced silently.
+		while (this.mountedOnUnmount) {
+			const onUnmount = this.mountedOnUnmount;
+			this.mountedOnUnmount = undefined;
+			try {
+				onUnmount();
+			} catch {
+				// A defective overlay cleanup must not strand the UI on the displaced component.
+			}
+		}
 	}
 
 	/**
@@ -54,8 +71,10 @@ export class EditorOverlayHost {
 	 * focus a target, and (by default) request a render.
 	 */
 	swap(component: Component, options: EditorOverlaySwapOptions = {}): void {
+		this.notifyMountedUnmount();
 		this.container.clear();
 		this.container.addChild(component);
+		this.mountedOnUnmount = options.onUnmount;
 		const target = options.focus ?? component;
 		if (options.focusMode === "restore") {
 			this.ui.restoreFocus(target);
@@ -72,5 +91,49 @@ export class EditorOverlayHost {
 			case "none":
 				break;
 		}
+	}
+
+	/** Mount a callback-driven selector and settle it if another overlay supersedes it. */
+	showSelector(
+		getRestoreComponent: () => Component,
+		create: (done: () => void) => {
+			component: Component;
+			focus: Component;
+			onSuperseded?: () => void;
+		},
+	): void {
+		let settled = false;
+		const done = () => {
+			if (settled) return;
+			settled = true;
+			this.swap(getRestoreComponent(), { focusMode: "restore", render: "none" });
+		};
+		const mounted = create(done);
+		this.swap(mounted.component, {
+			focus: mounted.focus,
+			onUnmount: () => {
+				if (settled) {
+					try {
+						(mounted.component as Component & { dispose?: () => void }).dispose?.();
+					} catch {
+						// Disposal is best effort after normal completion.
+					}
+					return;
+				}
+				settled = true;
+				try {
+					(mounted.component as Component & { dispose?: () => void }).dispose?.();
+				} catch {
+					// Supersession still has to settle when component cleanup fails.
+				}
+				mounted.onSuperseded?.();
+			},
+		});
+	}
+
+	/** Settle and remove the currently mounted component without mounting a replacement. */
+	unmount(): void {
+		this.notifyMountedUnmount();
+		this.container.clear();
 	}
 }

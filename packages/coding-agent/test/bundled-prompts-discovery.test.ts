@@ -56,6 +56,21 @@ describe("bundled prompts discovery", () => {
 		}
 	});
 
+	it("treats explicit authoring commands as scoped write authority without unbounded retries", async () => {
+		const loader = new DefaultResourceLoader({ cwd, agentDir });
+		await loader.reload();
+
+		const { prompts } = loader.getPrompts();
+		for (const name of ["skillify", "extensionify"]) {
+			const prompt = prompts.find((candidate) => candidate.name === name);
+			expect(prompt).toBeDefined();
+			expect(prompt?.content).toContain("Do not ask for duplicate confirmation");
+			expect(prompt?.content).toContain("five failed repairs");
+			expect(prompt?.content).not.toContain("Only after the user confirms");
+			expect(prompt?.content).not.toContain("re-run until it passes");
+		}
+	});
+
 	it("should allow user prompts to override bundled prompts", async () => {
 		// Create a user prompt with the same name as a bundled prompt
 		const userPromptsDir = join(agentDir, "prompts");

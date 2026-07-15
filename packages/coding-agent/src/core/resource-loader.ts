@@ -1,7 +1,7 @@
 import { existsSync, readdirSync, readFileSync, statSync } from "node:fs";
 import { join, resolve, sep } from "node:path";
 import chalk from "chalk";
-import { CONFIG_DIR_NAME, getBundledPromptsDir, getBundledSkillsDir } from "../config.ts";
+import { CONFIG_DIR_NAME, getBundledExtensionsDir, getBundledPromptsDir, getBundledSkillsDir } from "../config.ts";
 import { loadThemeFromPath, type Theme } from "../modes/interactive/theme/theme.ts";
 import type { ResourceDiagnostic } from "./diagnostics.ts";
 
@@ -592,6 +592,9 @@ export class DefaultResourceLoader implements ResourceLoader {
 		for (const p of this.discoverExternalExtensionPaths()) {
 			allPaths.add(p);
 		}
+		for (const p of this.discoverBundledExtensionPaths()) {
+			allPaths.add(p);
+		}
 		return Array.from(allPaths);
 	}
 
@@ -601,35 +604,39 @@ export class DefaultResourceLoader implements ResourceLoader {
 	 * editor's universe so the two never diverge.
 	 */
 	private discoverExternalExtensionPaths(): string[] {
-		const out: string[] = [];
-		for (const root of this.settingsManager.getEffectiveExternalResourceRoots()) {
-			const extDir = join(root, "extensions");
-			if (!existsSync(extDir)) continue;
-			try {
-				for (const entry of readdirSync(extDir, { withFileTypes: true })) {
-					let isDir = entry.isDirectory();
-					if (entry.isSymbolicLink()) {
-						try {
-							isDir = statSync(join(extDir, entry.name)).isDirectory();
-						} catch {
-							continue;
-						}
-					}
-					if (!isDir) continue;
-					const entryPath = join(extDir, entry.name);
-					if (
-						existsSync(join(entryPath, "index.ts")) ||
-						existsSync(join(entryPath, "index.js")) ||
-						existsSync(join(entryPath, "package.json"))
-					) {
-						out.push(entryPath);
+		return this.settingsManager
+			.getEffectiveExternalResourceRoots()
+			.flatMap((root) => this.discoverExtensionPathsInDirectory(join(root, "extensions")));
+	}
+
+	private discoverBundledExtensionPaths(): string[] {
+		return this.discoverExtensionPathsInDirectory(getBundledExtensionsDir());
+	}
+
+	private discoverExtensionPathsInDirectory(extensionsDir: string): string[] {
+		if (!existsSync(extensionsDir)) return [];
+		try {
+			return readdirSync(extensionsDir, { withFileTypes: true }).flatMap((entry) => {
+				let isDir = entry.isDirectory();
+				if (entry.isSymbolicLink()) {
+					try {
+						isDir = statSync(join(extensionsDir, entry.name)).isDirectory();
+					} catch {
+						return [];
 					}
 				}
-			} catch {
-				// silent — a missing/unreadable root must not break discovery
-			}
+				if (!isDir) return [];
+				const entryPath = join(extensionsDir, entry.name);
+				return existsSync(join(entryPath, "index.ts")) ||
+					existsSync(join(entryPath, "index.js")) ||
+					existsSync(join(entryPath, "package.json"))
+					? [entryPath]
+					: [];
+			});
+		} catch {
+			// A missing or unreadable resource directory must not break startup.
+			return [];
 		}
-		return out;
 	}
 
 	/**
@@ -881,18 +888,35 @@ export class DefaultResourceLoader implements ResourceLoader {
 			const filterPathsByProfile = (paths: string[], kind: ResourceProfileKind): string[] =>
 				this.filterPathsByProfile(paths, kind);
 
+			// Bundled extensions ship with Pi but remain opt-in through an active resource profile.
+			const bundledExtensions = this.discoverBundledExtensionPaths();
+			for (const entryPath of bundledExtensions) {
+				metadataByPath.set(entryPath, {
+					source: "bundled",
+					scope: "user",
+					origin: "top-level",
+					baseDir: getBundledExtensionsDir(),
+				});
+			}
+
 			// Discover external extensions (same source the profile editor uses, so they stay in sync).
 			const externalExtensions = this.discoverExternalExtensionPaths();
 			for (const entryPath of externalExtensions) {
 				metadataByPath.set(entryPath, { source: "external", scope: "user", origin: "top-level" });
 			}
 			const activeProfilesForExt = this.settingsManager.getActiveResourceProfileNames();
+			const extensionProfileFilter = this.settingsManager.getResourceProfileFilter("extensions");
+			const profileFilteredBundledExtensions =
+				activeProfilesForExt.length === 0 || extensionProfileFilter.allow.length === 0
+					? []
+					: filterPathsByProfile(bundledExtensions, "extensions");
 			const profileFilteredExternalExtensions =
 				activeProfilesForExt.length === 0 ? [] : filterPathsByProfile(externalExtensions, "extensions");
 
 			const extensionPaths = this.noExtensions
 				? cliEnabledExtensions
 				: this.mergePaths(cliEnabledExtensions, [
+						...profileFilteredBundledExtensions,
 						...filterPathsByProfile(enabledExtensions, "extensions"),
 						...profileFilteredExternalExtensions,
 					]);

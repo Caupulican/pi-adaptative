@@ -1,9 +1,9 @@
 #!/usr/bin/env node
 
 import { spawnSync } from "node:child_process";
-import { cpSync, existsSync, mkdtempSync, readFileSync, rmSync } from "node:fs";
-import { tmpdir } from "node:os";
+import { cpSync, existsSync, readFileSync } from "node:fs";
 import { join } from "node:path";
+import { acquireScriptWorkRun, removeScriptWorkRun } from "./lib/work-directory.mjs";
 
 const packages = [
 	{ directory: "packages/ai", name: "@caupulican/pi-ai" },
@@ -51,10 +51,10 @@ function assertBuildOutputExists(directory) {
 }
 
 function preparePublishDirectory(pkg) {
-	const tempRoot = mkdtempSync(join(tmpdir(), "pi-publish-"));
-	const publishDirectory = join(tempRoot, pkg.name.split("/")[1]);
+	const workRun = acquireScriptWorkRun("release", "publish");
+	const publishDirectory = join(workRun.path, pkg.name.split("/")[1]);
 	cpSync(pkg.directory, publishDirectory, { recursive: true });
-	return { publishDirectory, tempRoot };
+	return { publishDirectory, workRun };
 }
 
 function validatePack(directory) {
@@ -101,7 +101,7 @@ for (const pkg of packages) {
 	const version = packageVersions.get(pkg.name);
 	assertBuildOutputExists(pkg.directory);
 	const published = isPublished(pkg.name, version);
-	const { publishDirectory, tempRoot } = preparePublishDirectory(pkg);
+	const { publishDirectory, workRun } = preparePublishDirectory(pkg);
 
 	try {
 		if (dryRun) {
@@ -127,6 +127,6 @@ for (const pkg of packages) {
 		run("npm", publishArgs, { cwd: publishDirectory });
 		console.log();
 	} finally {
-		rmSync(tempRoot, { force: true, recursive: true });
+		removeScriptWorkRun(workRun);
 	}
 }

@@ -1,9 +1,11 @@
 import { createHash } from "node:crypto";
+import { existsSync } from "node:fs";
 import { mkdir, readFile, writeFile } from "node:fs/promises";
 import { dirname, join } from "node:path";
 import { StringEnum } from "@caupulican/pi-ai";
 import { Type } from "typebox";
 import { getAgentDir } from "../config.ts";
+import { getProcessWorkRun, getWorkRoot, getWorkRunDir, getWorkTenantDir } from "../utils/work-directory.ts";
 import { defineTool, type ToolDefinition } from "./extensions/types.ts";
 
 export type MetricDirection = "lower" | "higher";
@@ -472,24 +474,39 @@ function normalizeLoopId(loopId: string | undefined): string {
 	return normalized || "default";
 }
 
+function workRunIdForLoop(loopId: string): string {
+	const portable = loopId.toLowerCase();
+	if (portable.length <= 64) return portable;
+	const suffix = createHash("sha256").update(portable).digest("hex").slice(0, 16);
+	return `${portable.slice(0, 47)}-${suffix}`;
+}
+
 function workspaceKeyFor(cwd: string): string {
 	return createHash("sha256").update(cwd).digest("hex").slice(0, 16);
 }
 
 export function improvementLoopPaths(input: ImprovementLoopStatusInput): ImprovementLoopPaths {
-	const rootDir = join(input.agentDir ?? getAgentDir(), "improvement-loop");
+	const agentDir = input.agentDir ?? getAgentDir();
 	const workspaceKey = workspaceKeyFor(input.cwd);
 	const loopId = normalizeLoopId(input.loopId);
-	const workspaceDir = join(rootDir, "workspaces", workspaceKey);
+	const rootDir = join(getWorkRoot(agentDir), "improvement");
+	const workspaceDir = getWorkTenantDir(agentDir, "improvement", workspaceKey);
+	const runDir = getWorkRunDir(agentDir, "improvement", workspaceKey, workRunIdForLoop(loopId));
 	return {
 		rootDir,
 		workspaceDir,
-		logPath: join(workspaceDir, `${loopId}.jsonl`),
-		sandboxDir: join(workspaceDir, "sandboxes", loopId),
-		artifactDir: join(workspaceDir, "artifacts", loopId),
+		logPath: join(runDir, "runs.jsonl"),
+		sandboxDir: join(runDir, "sandboxes"),
+		artifactDir: join(runDir, "artifacts"),
 		workspaceKey,
 		loopId,
 	};
+}
+
+function acquireImprovementLoopWork(input: ImprovementLoopStatusInput): void {
+	const agentDir = input.agentDir ?? getAgentDir();
+	const paths = improvementLoopPaths(input);
+	getProcessWorkRun(agentDir, "improvement", paths.workspaceKey, workRunIdForLoop(paths.loopId));
 }
 
 function finiteRunMetric(run: ImprovementRunRecord): number | null {
@@ -589,6 +606,7 @@ function reconstructImprovementLoopState(
 }
 
 export async function initImprovementLoop(input: ImprovementLoopInitInput): Promise<ImprovementLoopState> {
+	acquireImprovementLoopWork(input);
 	const paths = improvementLoopPaths(input);
 	const existing = await readLoopLogEntries(paths.logPath);
 	if (existing.length > 0 && !input.reset) {
@@ -608,6 +626,8 @@ export async function readImprovementLoopState(
 	input: ImprovementLoopStatusInput,
 ): Promise<ImprovementLoopState | null> {
 	const paths = improvementLoopPaths(input);
+	if (!existsSync(paths.logPath)) return null;
+	acquireImprovementLoopWork(input);
 	return reconstructImprovementLoopState(await readLoopLogEntries(paths.logPath), paths.logPath);
 }
 
@@ -621,6 +641,7 @@ async function appendSandboxRecord(
 	input: ImprovementLoopStatusInput,
 	sandbox: ImprovementSandboxRecord,
 ): Promise<ImprovementLoopState> {
+	acquireImprovementLoopWork(input);
 	const paths = improvementLoopPaths(input);
 	await mkdir(dirname(paths.logPath), { recursive: true });
 	await writeFile(paths.logPath, `${JSON.stringify({ type: "sandbox", ...sandbox })}\n`, { flag: "a" });

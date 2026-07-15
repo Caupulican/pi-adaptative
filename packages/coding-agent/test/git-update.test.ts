@@ -14,6 +14,7 @@ import { join } from "node:path";
 import { afterEach, beforeEach, describe, expect, it } from "vitest";
 import { DefaultPackageManager } from "../src/core/package-manager.ts";
 import { SettingsManager } from "../src/core/settings-manager.ts";
+import { getProcessWorkRun } from "../src/utils/work-directory.ts";
 
 // Helper to run git commands in a directory.
 // Global/system config is isolated so host settings (e.g. forced tag signing)
@@ -386,7 +387,12 @@ describe("DefaultPackageManager git update", () => {
 			const gitHost = "github.com";
 			const gitPath = "test/extension";
 			const hash = createHash("sha256").update(`git-${gitHost}-${gitPath}`).digest("hex").slice(0, 8);
-			const cachedDir = join(agentDir, "tmp", "extensions", `git-${gitHost}`, hash, gitPath);
+			const cachedDir = join(
+				getProcessWorkRun(agentDir, "extensions", "packages").path,
+				`git-${gitHost}`,
+				hash,
+				gitPath,
+			);
 			const extensionFile = join(cachedDir, "pi-extensions", "session-breakdown.ts");
 
 			rmSync(cachedDir, { recursive: true, force: true });
@@ -433,7 +439,12 @@ describe("DefaultPackageManager git update", () => {
 			const gitHost = "github.com";
 			const gitPath = "test/extension";
 			const hash = createHash("sha256").update(`git-${gitHost}-${gitPath}`).digest("hex").slice(0, 8);
-			const cachedDir = join(agentDir, "tmp", "extensions", `git-${gitHost}`, hash, gitPath);
+			const cachedDir = join(
+				getProcessWorkRun(agentDir, "extensions", "packages").path,
+				`git-${gitHost}`,
+				hash,
+				gitPath,
+			);
 			const extensionFile = join(cachedDir, "pi-extensions", "session-breakdown.ts");
 
 			rmSync(cachedDir, { recursive: true, force: true });

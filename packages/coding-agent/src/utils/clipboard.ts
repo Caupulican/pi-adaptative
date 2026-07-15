@@ -1,5 +1,6 @@
-import { execSync, spawn } from "child_process";
+import { execSync } from "child_process";
 import { platform } from "os";
+import { spawnProcess, waitForChildProcessWithTermination } from "./child-process.ts";
 import { isWaylandSession } from "./clipboard-image.ts";
 import { clipboard } from "./clipboard-native.ts";
 
@@ -88,16 +89,22 @@ export async function copyToClipboard(text: string): Promise<void> {
 					const isWayland = isWaylandSession();
 					if (isWayland && hasWaylandDisplay) {
 						try {
-							// Verify wl-copy exists (spawn errors are async and won't be caught)
-							execSync("which wl-copy", { stdio: "ignore" });
-							// wl-copy with execSync hangs due to fork behavior; use spawn instead
-							const proc = spawn("wl-copy", [], { stdio: ["pipe", "ignore", "ignore"] });
-							proc.stdin.on("error", () => {
-								// Ignore EPIPE errors if wl-copy exits early
+							const proc = spawnProcess("wl-copy", [], {
+								detached: process.platform !== "win32",
+								stdio: ["pipe", "ignore", "ignore"],
 							});
-							proc.stdin.write(text);
-							proc.stdin.end();
-							proc.unref();
+							const terminalPromise = waitForChildProcessWithTermination(proc, {
+								timeoutMs: options.timeout,
+								killGraceMs: 1_000,
+							});
+							proc.stdin?.on("error", () => {
+								// The terminal result below decides whether the copy succeeded.
+							});
+							proc.stdin?.end(text);
+							const terminal = await terminalPromise;
+							if (terminal.reason !== "exited" || terminal.code !== 0) {
+								throw new Error(`wl-copy failed with code ${terminal.code ?? "unknown"}`);
+							}
 							copied = true;
 						} catch {
 							if (hasX11Display) {

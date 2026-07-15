@@ -38,6 +38,7 @@ export type GoalEvent =
 	| { type: "add_requirement"; id: string; text: string; now: string }
 	| { type: "satisfy_requirement"; id: string; evidenceIds: readonly string[]; now: string }
 	| { type: "block_requirement"; id: string; blockedReason: string; now: string }
+	| { type: "reopen_requirement"; id: string; now: string }
 	| {
 			type: "add_evidence";
 			id: string;
@@ -49,7 +50,9 @@ export type GoalEvent =
 	| { type: "progress"; now: string }
 	| { type: "no_progress"; now: string }
 	| { type: "complete_goal"; now: string }
+	| { type: "complete_goal_manually"; now: string }
 	| { type: "block_goal"; reason: string; now: string }
+	| { type: "resume_goal"; now: string }
 	| { type: "cancel_goal"; now: string };
 
 function isRecord(value: unknown): value is Record<string, unknown> {
@@ -111,6 +114,8 @@ function isGoalEvent(value: unknown): value is GoalEvent {
 			return typeof value.id === "string" && isStringArray(value.evidenceIds);
 		case "block_requirement":
 			return typeof value.id === "string" && typeof value.blockedReason === "string";
+		case "reopen_requirement":
+			return typeof value.id === "string";
 		case "add_evidence":
 			return (
 				typeof value.id === "string" &&
@@ -121,6 +126,8 @@ function isGoalEvent(value: unknown): value is GoalEvent {
 		case "progress":
 		case "no_progress":
 		case "complete_goal":
+		case "complete_goal_manually":
+		case "resume_goal":
 		case "cancel_goal":
 			return true;
 		case "block_goal":
@@ -262,6 +269,24 @@ export function applyGoalEvent(state: GoalState, event: GoalEvent): GoalState {
 			break;
 		}
 
+		case "reopen_requirement": {
+			const existingIndex = newState.requirements.findIndex((requirement) => requirement.id === event.id);
+			if (existingIndex >= 0) {
+				const requirement = newState.requirements[existingIndex];
+				const updatedRequirements = [...newState.requirements];
+				updatedRequirements[existingIndex] = {
+					...requirement,
+					status: "open",
+					blockedReason: undefined,
+					updatedAt: event.now,
+				};
+				newState.requirements = updatedRequirements;
+			}
+			newState.lastProgressAt = event.now;
+			newState.stallTurns = 0;
+			break;
+		}
+
 		case "add_evidence": {
 			const existingIndex = newState.evidence.findIndex((evidence) => evidence.id === event.id);
 			const newEvidence: GoalEvidenceRef = {
@@ -296,7 +321,16 @@ export function applyGoalEvent(state: GoalState, event: GoalEvent): GoalState {
 			const hasUnsatisfied = newState.requirements.some((requirement) => requirement.status !== "satisfied");
 			if (!hasUnsatisfied) {
 				newState.status = "completed";
+				newState.blockedReason = undefined;
 			}
+			break;
+		}
+
+		case "complete_goal_manually": {
+			newState.status = "completed";
+			newState.blockedReason = undefined;
+			newState.lastProgressAt = event.now;
+			newState.stallTurns = 0;
 			break;
 		}
 
@@ -306,8 +340,17 @@ export function applyGoalEvent(state: GoalState, event: GoalEvent): GoalState {
 			break;
 		}
 
+		case "resume_goal": {
+			newState.status = "active";
+			newState.blockedReason = undefined;
+			newState.lastProgressAt = event.now;
+			newState.stallTurns = 0;
+			break;
+		}
+
 		case "cancel_goal": {
 			newState.status = "cancelled";
+			newState.blockedReason = undefined;
 			break;
 		}
 	}

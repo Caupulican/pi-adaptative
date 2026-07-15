@@ -84,4 +84,19 @@ describe("goal tool", () => {
 		await run({ action: "progress" });
 		expect(getState()?.stallTurns).toBe(0);
 	});
+
+	it("recovers a blocked ledger instead of requiring a replacement goal", async () => {
+		const { run, getState } = createHarness();
+		await run({ action: "start", goalId: "g1", userGoal: "Ship" });
+		await run({ action: "add_requirement", requirementId: "r1", text: "Get access" });
+		await run({ action: "block_requirement", requirementId: "r1", reason: "waiting for user" });
+		await run({ action: "block_goal", reason: "waiting for user" });
+
+		const resumed = await run({ action: "resume_goal" });
+		expect(resumed.details.applied).toBe(true);
+		const reopened = await run({ action: "reopen_requirement", requirementId: "r1" });
+		expect(reopened.details.applied).toBe(true);
+		expect(getState()?.status).toBe("active");
+		expect(getState()?.requirements[0].status).toBe("open");
+	});
 });

@@ -1,10 +1,11 @@
 import { writeFileSync } from "node:fs";
-import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { build } from "esbuild";
+import { acquireScriptWorkRun, removeScriptWorkRun } from "./lib/work-directory.mjs";
 
-const outputPath = join(tmpdir(), "pi-browser-smoke.js");
-const errorLogPath = join(tmpdir(), "pi-browser-smoke-errors.log");
+const workRun = acquireScriptWorkRun("validation", "browser-smoke");
+const outputPath = join(workRun.path, "browser-smoke.js");
+const errorLogPath = join(workRun.path, "errors.log");
 
 try {
 	await build({
@@ -15,6 +16,7 @@ try {
 		logLevel: "silent",
 		outfile: outputPath,
 	});
+	removeScriptWorkRun(workRun);
 	process.exit(0);
 } catch (error) {
 	let detailedErrors = "";
@@ -31,6 +33,7 @@ try {
 
 	const baseError = error instanceof Error ? (error.stack ?? error.message) : String(error);
 	writeFileSync(errorLogPath, [detailedErrors, baseError].filter(Boolean).join("\n\n"), "utf-8");
+	workRun.release();
 	console.error(`Browser smoke check failed. See ${errorLogPath}`);
 	process.exit(1);
 }

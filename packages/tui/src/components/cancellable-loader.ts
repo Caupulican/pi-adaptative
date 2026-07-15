@@ -26,12 +26,15 @@ export class CancellableLoader extends Loader {
 		return this.abortController.signal.aborted;
 	}
 
+	abort(): void {
+		if (this.abortController.signal.aborted) return;
+		this.abortController.abort();
+		this.onAbort?.();
+	}
+
 	handleInput(data: string): void {
 		const kb = getKeybindings();
-		if (kb.matches(data, "tui.select.cancel")) {
-			this.abortController.abort();
-			this.onAbort?.();
-		}
+		if (kb.matches(data, "tui.select.cancel")) this.abort();
 	}
 
 	dispose(): void {

@@ -1,11 +1,13 @@
 import { fileURLToPath } from "node:url";
 import { configDefaults, defineConfig } from "vitest/config";
 
+const codingAgentSrcIndex = fileURLToPath(new URL("./src/index.ts", import.meta.url));
 const aiSrcIndex = fileURLToPath(new URL("../ai/src/index.ts", import.meta.url));
 const aiSrcOAuth = fileURLToPath(new URL("../ai/src/oauth.ts", import.meta.url));
 const agentSrcIndex = fileURLToPath(new URL("../agent/src/index.ts", import.meta.url));
 const agentSrcNode = fileURLToPath(new URL("../agent/src/node.ts", import.meta.url));
 const agentSrcPaths = fileURLToPath(new URL("../agent/src/utils/paths.ts", import.meta.url));
+const tuiSrcIndex = fileURLToPath(new URL("../tui/src/index.ts", import.meta.url));
 
 export default defineConfig({
 	test: {
@@ -33,6 +35,9 @@ export default defineConfig({
 	},
 	resolve: {
 		alias: [
+			{ find: /^@caupulican\/pi-adaptative$/, replacement: codingAgentSrcIndex },
+			{ find: /^@earendil-works\/pi-coding-agent$/, replacement: codingAgentSrcIndex },
+			{ find: /^@mariozechner\/pi-coding-agent$/, replacement: codingAgentSrcIndex },
 			{ find: /^@caupulican\/pi-ai$/, replacement: aiSrcIndex },
 			{ find: /^@caupulican\/pi-ai\/oauth$/, replacement: aiSrcOAuth },
 			{ find: /^@caupulican\/pi-agent-core$/, replacement: agentSrcIndex },
@@ -48,6 +53,9 @@ export default defineConfig({
 			{ find: /^@mariozechner\/pi-agent-core$/, replacement: agentSrcIndex },
 			{ find: /^@mariozechner\/pi-agent-core\/node$/, replacement: agentSrcNode },
 			{ find: /^@mariozechner\/pi-agent-core\/paths$/, replacement: agentSrcPaths },
+			{ find: /^@caupulican\/pi-tui$/, replacement: tuiSrcIndex },
+			{ find: /^@earendil-works\/pi-tui$/, replacement: tuiSrcIndex },
+			{ find: /^@mariozechner\/pi-tui$/, replacement: tuiSrcIndex },
 		],
 	},
 });

@@ -425,16 +425,29 @@ export async function showDeprecationWarnings(warnings: string[]): Promise<void>
 	console.log(chalk.yellow(`\nMove your extensions to the extensions/ directory.`));
 	console.log(chalk.yellow(`Migration guide: ${MIGRATION_GUIDE_URL}`));
 	console.log(chalk.yellow(`Documentation: ${EXTENSIONS_DOC_URL}`));
+	if (!process.stdin.isTTY || !process.stdout.isTTY) {
+		console.log();
+		return;
+	}
 	console.log(chalk.dim(`\nPress any key to continue...`));
 
 	await new Promise<void>((resolve) => {
-		process.stdin.setRawMode?.(true);
-		process.stdin.resume();
-		process.stdin.once("data", () => {
+		let settled = false;
+		const finish = () => {
+			if (settled) return;
+			settled = true;
+			process.stdin.removeListener("data", finish);
+			process.stdin.removeListener("end", finish);
+			process.stdin.removeListener("error", finish);
 			process.stdin.setRawMode?.(false);
 			process.stdin.pause();
 			resolve();
-		});
+		};
+		process.stdin.setRawMode?.(true);
+		process.stdin.resume();
+		process.stdin.once("data", finish);
+		process.stdin.once("end", finish);
+		process.stdin.once("error", finish);
 	});
 	console.log();
 }

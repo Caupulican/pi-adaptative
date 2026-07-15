@@ -31,7 +31,9 @@ export interface ConfigBackupHost {
 }
 
 export interface ConfigRestoreHost extends ConfigBackupHost {
-	showSelector(create: (done: () => void) => { component: Component; focus: Component }): void;
+	showSelector(
+		create: (done: () => void) => { component: Component; focus: Component; onSuperseded?: () => void },
+	): void;
 	handleReloadCommand(): Promise<boolean>;
 }
 
@@ -278,6 +280,12 @@ export async function handleConfigRestoreCommand(host: ConfigRestoreHost, fileAr
 		// Confirm before clobbering
 		const confirm = await new Promise<boolean>((resolve) => {
 			host.showSelector((done) => {
+				let settled = false;
+				const settle = (value: boolean) => {
+					if (settled) return;
+					settled = true;
+					resolve(value);
+				};
 				const submenu = new SelectSubmenu(
 					"Restore configuration?",
 					"This will overwrite existing local profiles and settings with the backup values. Do you want to continue?",
@@ -288,14 +296,18 @@ export async function handleConfigRestoreCommand(host: ConfigRestoreHost, fileAr
 					"no",
 					(value) => {
 						done();
-						resolve(value === "yes");
+						settle(value === "yes");
 					},
 					() => {
 						done();
-						resolve(false);
+						settle(false);
 					},
 				);
-				return { component: submenu, focus: submenu.getSelectList() };
+				return {
+					component: submenu,
+					focus: submenu.getSelectList(),
+					onSuperseded: () => settle(false),
+				};
 			});
 		});
 

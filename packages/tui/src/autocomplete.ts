@@ -120,6 +120,9 @@ function buildCompletionValue(
 	return `${openQuote}${path}${closeQuote}`;
 }
 
+const FD_WALK_TIMEOUT_MS = 5_000;
+const ARGUMENT_COMPLETION_TIMEOUT_MS = 5_000;
+
 // Use fd to walk directory tree (fast, respects .gitignore)
 async function walkDirectoryWithFd(
 	baseDir: string,
@@ -166,21 +169,28 @@ async function walkDirectoryWithFd(
 		});
 		let stdout = "";
 		let resolved = false;
+		let timeout: ReturnType<typeof setTimeout> | undefined;
 
 		const finish = (results: Array<{ path: string; isDirectory: boolean }>) => {
 			if (resolved) return;
 			resolved = true;
+			if (timeout) clearTimeout(timeout);
 			signal.removeEventListener("abort", onAbort);
 			resolve(results);
 		};
 
 		const onAbort = () => {
 			if (child.exitCode === null) {
-				child.kill("SIGKILL");
+				child.kill(process.platform === "win32" ? undefined : "SIGKILL");
 			}
+			// A descendant can inherit stdio and postpone the child's `close` event. Cancellation must
+			// settle independently of that terminal event.
+			finish([]);
 		};
 
 		signal.addEventListener("abort", onAbort, { once: true });
+		timeout = setTimeout(onAbort, FD_WALK_TIMEOUT_MS);
+		timeout.unref();
 		child.stdout.setEncoding("utf-8");
 		child.stdout.on("data", (chunk: string) => {
 			stdout += chunk;
@@ -344,7 +354,26 @@ export class CombinedAutocompleteProvider implements AutocompleteProvider {
 				return null;
 			}
 
-			const argumentSuggestions = await command.getArgumentCompletions(argumentText);
+			if (options.signal.aborted) return null;
+			let timeout: ReturnType<typeof setTimeout> | undefined;
+			let removeAbortListener = () => {};
+			const cancelled = new Promise<null>((resolve) => {
+				const settle = () => resolve(null);
+				removeAbortListener = () => options.signal.removeEventListener("abort", settle);
+				options.signal.addEventListener("abort", settle, { once: true });
+				timeout = setTimeout(settle, ARGUMENT_COMPLETION_TIMEOUT_MS);
+				timeout.unref();
+			});
+			const completion = Promise.resolve()
+				.then(() => command.getArgumentCompletions?.(argumentText) ?? null)
+				.catch(() => null);
+			let argumentSuggestions: AutocompleteItem[] | null;
+			try {
+				argumentSuggestions = await Promise.race([completion, cancelled]);
+			} finally {
+				if (timeout) clearTimeout(timeout);
+				removeAbortListener();
+			}
 			if (!Array.isArray(argumentSuggestions) || argumentSuggestions.length === 0) {
 				return null;
 			}

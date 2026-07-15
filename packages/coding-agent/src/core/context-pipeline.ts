@@ -23,7 +23,6 @@
  * the pipeline — keeping the transform the one place the two subsystems meet.
  */
 
-import { join } from "node:path";
 import type { AgentMessage } from "@caupulican/pi-agent-core";
 import {
 	type CompactionEntry,
@@ -159,21 +158,22 @@ export class ContextPipeline {
 		this.deps = deps;
 	}
 
-	private _ensureContextStoreRetention(): void {
-		this._contextStoreRetentionLease ??= acquireContextStoreRetention(
-			this.deps.getAgentDir(),
-			this.deps.getSessionManager().getSessionId(),
-		);
+	private _ensureContextStoreRetention(): ContextStoreRetentionLease {
+		if (!this._contextStoreRetentionLease) {
+			this._contextStoreRetentionLease = acquireContextStoreRetention(
+				this.deps.getAgentDir(),
+				this.deps.getSessionManager().getSessionId(),
+			);
+		}
+		return this._contextStoreRetentionLease;
 	}
 
 	private _contextGcStorageDir(): string {
-		this._ensureContextStoreRetention();
-		return join(this.deps.getAgentDir(), "context-gc", this.deps.getSessionManager().getSessionId());
+		return this._ensureContextStoreRetention().gcDir;
 	}
 
 	private _toolArtifactsDir(): string {
-		this._ensureContextStoreRetention();
-		return join(this.deps.getAgentDir(), "context-artifacts", this.deps.getSessionManager().getSessionId());
+		return this._ensureContextStoreRetention().artifactsDir;
 	}
 
 	/**

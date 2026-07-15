@@ -423,7 +423,6 @@ export class InteractiveMode {
 				footerDataProvider: this.footerDataProvider,
 				headerContainer: this.headerContainer,
 				chatContainer: this.chatContainer,
-				editorContainer: this.editorContainer,
 				defaultEditor: this.defaultEditor,
 				widgetContainerAbove: this.widgetContainerAbove,
 				widgetContainerBelow: this.widgetContainerBelow,
@@ -3147,12 +3146,14 @@ export class InteractiveMode {
 	 * Shows a selector component in place of the editor.
 	 * @param create Factory that receives a `done` callback and returns the component and focus target
 	 */
-	private showSelector(create: (done: () => void) => { component: Component; focus: Component }): void {
-		const done = () => {
-			this.overlayHost.swap(this.editor, { focusMode: "restore", render: "none" });
-		};
-		const { component, focus } = create(done);
-		this.overlayHost.swap(component, { focus });
+	private showSelector(
+		create: (done: () => void) => {
+			component: Component;
+			focus: Component;
+			onSuperseded?: () => void;
+		},
+	): void {
+		this.overlayHost.showSelector(() => this.editor, create);
 	}
 
 	/** Narrow seam shared by the session-picker/tree/fork and model-selector flows. */
@@ -3604,13 +3605,21 @@ export class InteractiveMode {
 		reloadBox.addChild(new DynamicBorder(borderColor));
 
 		const previousEditor = this.editor;
-		this.overlayHost.swap(reloadBox, { render: "sync" });
+		let reloadBoxActive = true;
+		this.overlayHost.swap(reloadBox, {
+			render: "sync",
+			onUnmount: () => {
+				reloadBoxActive = false;
+			},
+		});
 		// Let the terminal paint the reload notice before CPU-heavy extension/theme
 		// work begins. process.nextTick runs before I/O and can still make reloads
 		// appear frozen.
 		await new Promise((resolve) => setImmediate(resolve));
 
 		const dismissReloadBox = (editor: Component) => {
+			if (!reloadBoxActive) return;
+			reloadBoxActive = false;
 			this.overlayHost.swap(editor);
 		};
 
@@ -4102,7 +4111,9 @@ export class InteractiveMode {
 			this.loadingAnimation.stop();
 			this.loadingAnimation = undefined;
 		}
-		this.extensionUiHost.clearExtensionTerminalInputListeners();
+		this.authDialogs.cancelActiveDialog();
+		this.extensionUiHost.resetExtensionUI();
+		this.overlayHost.unmount();
 		this.footer.dispose();
 		this.footerDataProvider.dispose();
 		if (this.unsubscribe) {

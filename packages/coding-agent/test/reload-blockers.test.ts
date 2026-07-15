@@ -2,7 +2,11 @@ import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { afterEach, describe, expect, it } from "vitest";
-import { describeReloadSession, getPendingReloadBlockers } from "../src/core/reload-blockers.ts";
+import {
+	describeReloadSession,
+	getPendingReloadBlockers,
+	getReloadCoordinationDir,
+} from "../src/core/reload-blockers.ts";
 
 let tempDir = "";
 
@@ -36,9 +40,10 @@ describe("describeReloadSession", () => {
 describe("getPendingReloadBlockers", () => {
 	it("reports live active/background reload blockers and excludes own, stale, reloaded, and dead sessions", () => {
 		const agentDir = createTempAgentDir();
+		const coordinationDir = getReloadCoordinationDir(agentDir);
 		const now = 1_700_000_000_000;
 		writeFileSync(
-			join(agentDir, "pi-active-turns.json"),
+			join(coordinationDir, "active-turns.json"),
 			JSON.stringify({
 				version: 1,
 				updatedAt: new Date(now).toISOString(),
@@ -91,7 +96,7 @@ describe("getPendingReloadBlockers", () => {
 			}),
 		);
 		writeFileSync(
-			join(agentDir, "pi-auto-reload-state.json"),
+			join(coordinationDir, "auto-reload-state.json"),
 			JSON.stringify({
 				version: 1,
 				updatedAt: new Date(now).toISOString(),

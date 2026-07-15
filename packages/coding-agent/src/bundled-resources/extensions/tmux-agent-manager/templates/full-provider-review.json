@@ -1,0 +1,15 @@
+{
+  "name": "full-provider-review",
+  "description": "Interactive native-provider review team: Pi lead, Claude reviewer, Agy validator, Agy reviewer. Consumes provider/model tokens.",
+  "deadlineSeconds": 1800,
+  "agents": [
+    { "provider": "pi", "name": "pi-lead" },
+    { "provider": "claude", "name": "claude-reviewer" },
+    { "provider": "agy", "name": "agy-validator" },
+    { "provider": "agy", "name": "agy-reviewer" }
+  ],
+  "notes": [
+    "Best for non-trivial review/QA where independent native CLIs help.",
+    "Keep the task objective bounded; inspect captured panes/result files before accepting PASS."
+  ]
+}

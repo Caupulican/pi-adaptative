@@ -8,11 +8,13 @@
  * interactive-mode keeps thin delegating wrappers.
  */
 
-import { spawn } from "node:child_process";
+import { randomUUID } from "node:crypto";
 import * as fs from "node:fs";
-import * as os from "node:os";
 import * as path from "node:path";
 import type { EditorComponent, TUI } from "@caupulican/pi-tui";
+import { getAgentDir } from "../../config.ts";
+import { runExternalEditor } from "../../utils/external-editor-command.ts";
+import { getProcessWorkRun } from "../../utils/work-directory.ts";
 
 export interface ExternalEditorHost {
 	readonly editor: EditorComponent;
@@ -32,7 +34,10 @@ export async function openExternalEditor(host: ExternalEditorHost): Promise<void
 	}
 
 	const currentText = host.editor.getExpandedText?.() ?? host.editor.getText();
-	const tmpFile = path.join(os.tmpdir(), `pi-editor-${Date.now()}.pi.md`);
+	const tmpFile = path.join(
+		getProcessWorkRun(getAgentDir(), "editors", "external").path,
+		`pi-editor-${randomUUID()}.pi.md`,
+	);
 
 	try {
 		// Write current content to temp file
@@ -41,22 +46,11 @@ export async function openExternalEditor(host: ExternalEditorHost): Promise<void
 		// Stop TUI to release terminal
 		host.ui.stop();
 
-		// Split by space to support editor arguments (e.g., "code --wait")
-		const [editor, ...editorArgs] = editorCmd.split(" ");
-
 		process.stdout.write(`Launching external editor: ${editorCmd}\nPi will resume when the editor exits.\n`);
 
-		// Do not use spawnSync here. On Windows, synchronous child_process calls can keep
-		// Node/libuv's console input read active after ui.stop() pauses stdin, racing
-		// vim/nvim for the console input buffer until Ctrl+C cancels the pending read.
-		const status = await new Promise<number | null>((resolve) => {
-			const child = spawn(editor, [...editorArgs, tmpFile], {
-				stdio: "inherit",
-				shell: process.platform === "win32",
-			});
-			child.on("error", () => resolve(null));
-			child.on("close", (code) => resolve(code));
-		});
+		// Cross-platform executable resolution preserves quoted Windows paths without
+		// asking a shell to reinterpret the temporary file path.
+		const status = await runExternalEditor(editorCmd, tmpFile);
 
 		// On successful exit (status 0), replace editor content
 		if (status === 0) {
@@ -91,21 +85,11 @@ export async function openEditorForPath(host: ExternalEditorHost, filePath: stri
 		// Stop TUI to release terminal
 		host.ui.stop();
 
-		// Split by space to support editor arguments (e.g., "code --wait")
-		const [editor, ...editorArgs] = editorCmd.split(" ");
-
 		process.stdout.write(
 			`Launching external editor: ${editorCmd} ${filePath}\nPi will resume when the editor exits.\n`,
 		);
 
-		const status = await new Promise<number | null>((resolve) => {
-			const child = spawn(editor, [...editorArgs, filePath], {
-				stdio: "inherit",
-				shell: process.platform === "win32",
-			});
-			child.on("error", () => resolve(null));
-			child.on("close", (code) => resolve(code));
-		});
+		const status = await runExternalEditor(editorCmd, filePath);
 
 		if (status === null) {
 			if (isFallback) {
@@ -115,9 +99,20 @@ export async function openEditorForPath(host: ExternalEditorHost, filePath: stri
 			}
 			process.stdout.write(`Please set the $EDITOR or $VISUAL environment variable to edit inline.\n`);
 			process.stdout.write(`Absolute file path: ${filePath}\n\nPress Enter to return to Pi...`);
-			// Wait for enter key
+			// Wait for enter, but do not remain pending if stdin closes during shutdown.
 			await new Promise<void>((resolve) => {
-				process.stdin.once("data", () => resolve());
+				let settled = false;
+				const finish = () => {
+					if (settled) return;
+					settled = true;
+					process.stdin.removeListener("data", finish);
+					process.stdin.removeListener("end", finish);
+					process.stdin.removeListener("error", finish);
+					resolve();
+				};
+				process.stdin.once("data", finish);
+				process.stdin.once("end", finish);
+				process.stdin.once("error", finish);
 			});
 		}
 

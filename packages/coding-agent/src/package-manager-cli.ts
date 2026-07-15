@@ -15,7 +15,7 @@ import {
 import { DefaultPackageManager } from "./core/package-manager.ts";
 import { SettingsManager } from "./core/settings-manager.ts";
 import { hasProjectTrustInputs, ProjectTrustStore } from "./core/trust-manager.ts";
-import { spawnProcess } from "./utils/child-process.ts";
+import { spawnProcess, waitForChildProcess } from "./utils/child-process.ts";
 import { getLatestPiRelease, isNewerPackageVersion } from "./utils/version-check.ts";
 import {
 	cleanupWindowsSelfUpdateQuarantine,
@@ -383,23 +383,15 @@ async function getSelfUpdatePlan(force: boolean): Promise<SelfUpdatePlan> {
 async function runSelfUpdate(command: SelfUpdateCommand): Promise<void> {
 	console.log(chalk.dim(`Updating ${APP_NAME} with ${command.display}...`));
 	for (const step of command.steps ?? [command]) {
-		await new Promise<void>((resolve, reject) => {
-			const child = spawnProcess(step.command, step.args, {
-				stdio: "inherit",
-			});
-			child.on("error", (error) => {
-				reject(error);
-			});
-			child.on("close", (code, signal) => {
-				if (code === 0) {
-					resolve();
-				} else if (signal) {
-					reject(new Error(`${step.display} terminated by signal ${signal}`));
-				} else {
-					reject(new Error(`${step.display} exited with code ${code ?? "unknown"}`));
-				}
-			});
+		const child = spawnProcess(step.command, step.args, {
+			stdio: "inherit",
 		});
+		const code = await waitForChildProcess(child);
+		if (code === 0) continue;
+		if (child.signalCode) {
+			throw new Error(`${step.display} terminated by signal ${child.signalCode}`);
+		}
+		throw new Error(`${step.display} exited with code ${code ?? "unknown"}`);
 	}
 }
 

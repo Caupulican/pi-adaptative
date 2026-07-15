@@ -27,7 +27,13 @@ export interface InstallResourcesHost {
 	>;
 	showError(message: string): void;
 	showStatus(message: string): void;
-	showSelector(create: (done: () => void) => { component: Component; focus: Component }): void;
+	showSelector(
+		create: (done: () => void) => {
+			component: Component;
+			focus: Component;
+			onSuperseded?: () => void;
+		},
+	): void;
 	handleReloadCommand(): Promise<void>;
 	copyResourcesRecursively(
 		src: string,
@@ -112,7 +118,11 @@ export async function handleInstallResourcesCommand(host: InstallResourcesHost, 
 							resolve(false);
 						},
 					);
-					return { component: submenu, focus: submenu.getSelectList() };
+					return {
+						component: submenu,
+						focus: submenu.getSelectList(),
+						onSuperseded: () => resolve(false),
+					};
 				});
 			});
 

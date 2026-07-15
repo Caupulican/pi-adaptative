@@ -40,7 +40,7 @@ export const BUILTIN_SLASH_COMMANDS: ReadonlyArray<BuiltinSlashCommand> = [
 	{ name: "auto-learn", description: "Show Auto Learn/reflection status or run now (/auto-learn run)" },
 	{
 		name: "goal",
-		description: "Start or show the goal ledger (/goal <text> to start, /goal to show status)",
+		description: "Goal lifecycle: status, resume, reopen, complete, close, or override (/goal to show controls)",
 	},
 	{
 		name: "goal-continue",

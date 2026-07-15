@@ -1,0 +1,32 @@
+{
+  "name": "claude-trio",
+  "description": "Three-model Bedrock team: Opus (architect/lead), Sonnet (builder), Haiku (fast tasks). Spawn full team or individual panes as needed.",
+  "deadlineSeconds": 1800,
+  "agents": [
+    {
+      "provider": "pi",
+      "name": "opus",
+      "command": "PI_WORKER=1 pi-opus",
+      "tools": ["read", "bash", "edit", "write", "rg", "subagent", "task_steps", "python", "web_fetch", "automata_graph_search", "automata_graph_query"]
+    },
+    {
+      "provider": "pi",
+      "name": "sonnet",
+      "command": "PI_WORKER=1 pi-sonnet",
+      "tools": ["read", "bash", "edit", "write", "rg", "task_steps", "python"]
+    },
+    {
+      "provider": "pi",
+      "name": "haiku",
+      "command": "PI_WORKER=1 pi-haiku",
+      "tools": ["read", "bash", "rg", "task_steps"]
+    }
+  ],
+  "notes": [
+    "Opus: complex reasoning, architecture, deep review. Full tool set.",
+    "Sonnet: implementation, code generation, standard tasks. Code tools only.",
+    "Haiku: fast/cheap tasks, quick lookups, formatting, summaries. Read-only + rg.",
+    "PI_WORKER=1 suppresses handoff injection on spawn.",
+    "tools list maps to pi --tools flag; adjust per task before spawning."
+  ]
+}

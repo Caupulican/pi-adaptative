@@ -238,6 +238,7 @@ export {
 	AUTO_RELOAD_COORDINATOR_TTL_MS,
 	describeReloadSession,
 	getPendingReloadBlockers,
+	getReloadCoordinationDir,
 	isReloadSessionProcessAlive,
 	type PendingReloadBlockers,
 	type ReloadBlockerOptions,
@@ -453,3 +454,16 @@ export { convertToPng } from "./utils/image-convert.ts";
 export { formatDimensionNote, type ResizedImage, resizeImage } from "./utils/image-resize.ts";
 // Shell utilities
 export { getShellConfig } from "./utils/shell.ts";
+export {
+	type AcquireWorkRunOptions,
+	acquireWorkRun,
+	createWorkRunId,
+	getProcessWorkRun,
+	getWorkRoot,
+	getWorkRunDir,
+	getWorkTenantDir,
+	PI_WORK_ROOT_ENV,
+	pruneWorkTenant,
+	type WorkRetentionOptions,
+	type WorkRunLease,
+} from "./utils/work-directory.ts";

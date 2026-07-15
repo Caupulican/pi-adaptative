@@ -31,7 +31,7 @@ In interactive mode, open `/settings` and choose **Resources** to reach the **Re
 |------|--------------|
 | **Profile / Situation** | Select the active profile. |
 | **Manage Library** | Browse everything available and toggle what the active profile allows. |
-| **Manage Profiles / Situations** | Create, persist, or delete profile definitions. |
+| **Manage Profiles / Situations** | Create, edit the pinned/inherited model, persist, or delete profile definitions. |
 | **Sources** | Register, trust, and remove external catalog directories. |
 
 When no source or profile exists yet, the hub surfaces a first-run nudge — **"Add your catalog directory →"** — pointing you at the setup step below.
@@ -45,7 +45,7 @@ A profile is a complete allow/block contract over six kinds: `extensions`, `skil
 
 Under strict UAC, an unmentioned kind is denied. Granting every resource of a kind must be explicit with `allow: ["*"]`; `block: ["*"]` means "none." This keeps a saved situation exact when new extensions, tools, or other resources are installed later.
 
-A profile may also bind a **model**, **thinking level**, **soul**, and **modelRouter** block that apply when the profile is active. Thinking is one of `off`, `minimal`, `low`, `medium`, `high`, `xhigh`, `max`, or `ultra`. Ultra uses the model's strongest mapped reasoning level and reinforces proactive delegation when the `delegate` tool is granted; delegation itself remains available independently on capable models. Explicit CLI flags still win over a profile's foreground model/thinking, which in turn win over the settings default. A profile's `modelRouter` block overrides matching global/project router fields while that situation is active.
+A profile may also bind a **model**, **thinking level**, **soul**, and **modelRouter** block that apply when the profile is active. When `model` is omitted, the profile inherits the session/settings model. Use `/settings` → **Resources** → **Manage Profiles / Situations** → **Edit profile model** to pin a model or return an existing profile to inherited behavior; editing the active profile applies immediately through transactional reload. Thinking is one of `off`, `minimal`, `low`, `medium`, `high`, `xhigh`, `max`, or `ultra`. Ultra uses the model's strongest mapped reasoning level and reinforces proactive delegation when the `delegate` tool is granted; delegation itself remains available independently on capable models. Explicit CLI flags still win over a profile's foreground model/thinking, which in turn win over the settings default. A profile's `modelRouter` block overrides matching global/project router fields while that situation is active.
 
 Pi activates the complete situation as one runtime generation: model/router, thinking, soul, extensions, skills, prompts, agents, themes, and tools are reloaded together. A failed reload restores the prior valid generation instead of persisting a partial selection.
 

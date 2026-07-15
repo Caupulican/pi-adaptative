@@ -40,6 +40,12 @@ import type {
 	ToolDefinition,
 } from "./types.ts";
 
+const EXTENSION_FACTORY_TIMEOUT_MS = 30_000;
+const EXTENSION_DISPOSAL_TIMEOUT_MS = 5_000;
+const inactiveExtensions = new WeakSet<Extension>();
+
+class ExtensionFactoryTimeoutError extends Error {}
+
 /** Modules available to extensions via virtualModules (for compiled Bun binary) */
 const VIRTUAL_MODULES: Record<string, unknown> = {
 	typebox: _bundledTypebox,
@@ -90,7 +96,11 @@ function getAliases(): Record<string, string> {
 	const realLoaderFile = safeRealpath(loaderFile);
 	const __dirname = path.dirname(loaderFile);
 	const realDirname = path.dirname(realLoaderFile);
-	const packageIndex = path.resolve(__dirname, "../..", "index.js");
+	const packageIndex = [
+		path.resolve(__dirname, "../..", "index.ts"),
+		path.resolve(__dirname, "../..", "index.js"),
+	].find((candidate) => fs.existsSync(candidate));
+	if (!packageIndex) throw new Error("Unable to resolve the coding-agent package entry");
 
 	const moduleRequires = uniquePaths([loaderFile, realLoaderFile]).map((file) => createRequire(file));
 	const resolveModule = (specifier: string): string => {
@@ -125,27 +135,38 @@ function getAliases(): Record<string, string> {
 	};
 
 	const piCodingAgentEntry = packageIndex;
-	const piAgentCoreEntry = resolveWorkspaceOrImport("agent/dist/index.js", "@caupulican/pi-agent-core");
-	const piTuiEntry = resolveWorkspaceOrImport("tui/dist/index.js", "@caupulican/pi-tui");
-	const piAiEntry = resolveWorkspaceOrImport("ai/dist/index.js", "@caupulican/pi-ai");
-	const piAiOauthEntry = resolveWorkspaceOrImport("ai/dist/oauth.js", "@caupulican/pi-ai/oauth");
+	const piAgentCoreEntry = resolveWorkspaceOrImport("agent/src/index.ts", "@caupulican/pi-agent-core");
+	const piAgentCoreNodeEntry = resolveWorkspaceOrImport("agent/src/node.ts", "@caupulican/pi-agent-core/node");
+	const piAgentCorePathsEntry = resolveWorkspaceOrImport(
+		"agent/src/utils/paths.ts",
+		"@caupulican/pi-agent-core/paths",
+	);
+	const piTuiEntry = resolveWorkspaceOrImport("tui/src/index.ts", "@caupulican/pi-tui");
+	const piAiEntry = resolveWorkspaceOrImport("ai/src/index.ts", "@caupulican/pi-ai");
+	const piAiOauthEntry = resolveWorkspaceOrImport("ai/src/oauth.ts", "@caupulican/pi-ai/oauth");
 
 	_aliases = {
+		"@caupulican/pi-agent-core/node": piAgentCoreNodeEntry,
+		"@caupulican/pi-agent-core/paths": piAgentCorePathsEntry,
+		"@caupulican/pi-ai/oauth": piAiOauthEntry,
 		"@caupulican/pi-adaptative": piCodingAgentEntry,
 		"@caupulican/pi-agent-core": piAgentCoreEntry,
 		"@caupulican/pi-tui": piTuiEntry,
 		"@caupulican/pi-ai": piAiEntry,
-		"@caupulican/pi-ai/oauth": piAiOauthEntry,
+		"@earendil-works/pi-agent-core/node": piAgentCoreNodeEntry,
+		"@earendil-works/pi-agent-core/paths": piAgentCorePathsEntry,
+		"@earendil-works/pi-ai/oauth": piAiOauthEntry,
 		"@earendil-works/pi-coding-agent": piCodingAgentEntry,
 		"@earendil-works/pi-agent-core": piAgentCoreEntry,
 		"@earendil-works/pi-tui": piTuiEntry,
 		"@earendil-works/pi-ai": piAiEntry,
-		"@earendil-works/pi-ai/oauth": piAiOauthEntry,
+		"@mariozechner/pi-agent-core/node": piAgentCoreNodeEntry,
+		"@mariozechner/pi-agent-core/paths": piAgentCorePathsEntry,
+		"@mariozechner/pi-ai/oauth": piAiOauthEntry,
 		"@mariozechner/pi-coding-agent": piCodingAgentEntry,
 		"@mariozechner/pi-agent-core": piAgentCoreEntry,
 		"@mariozechner/pi-tui": piTuiEntry,
 		"@mariozechner/pi-ai": piAiEntry,
-		"@mariozechner/pi-ai/oauth": piAiOauthEntry,
 		typebox: typeboxEntry,
 		"typebox/compile": typeboxCompileEntry,
 		"typebox/value": typeboxValueEntry,
@@ -245,6 +266,23 @@ function createExtensionAPI(
 	cwd: string,
 	eventBus: EventBus,
 ): ExtensionAPI {
+	// A factory can time out while its promise continues running. Route every later API call through
+	// an extension-generation guard so stale async work cannot register tools, handlers, or providers.
+	const sharedRuntime = runtime;
+	runtime = new Proxy(sharedRuntime, {
+		get(target, property, receiver) {
+			if (property === "assertActive") {
+				return () => {
+					target.assertActive();
+					if (inactiveExtensions.has(extension)) {
+						throw new Error(`Extension generation is no longer active: ${extension.path}`);
+					}
+				};
+			}
+			return Reflect.get(target, property, receiver);
+		},
+	});
+
 	const api = {
 		// Registration methods - write to extension
 		on(event: string, handler: HandlerFn): void {
@@ -437,7 +475,29 @@ function createExtensionAPI(
 	return api;
 }
 
-async function loadExtensionModule(extensionPath: string, opts?: { fresh?: boolean }) {
+async function runExtensionFactory(
+	factory: ExtensionFactory,
+	api: ExtensionAPI,
+	timeoutMs: number = EXTENSION_FACTORY_TIMEOUT_MS,
+): Promise<void> {
+	let timeout: ReturnType<typeof setTimeout> | undefined;
+	const completion = Promise.resolve().then(() => factory(api));
+	try {
+		await Promise.race([
+			completion,
+			new Promise<never>((_resolve, reject) => {
+				timeout = setTimeout(
+					() => reject(new ExtensionFactoryTimeoutError(`Extension factory timed out after ${timeoutMs}ms`)),
+					Math.max(0, timeoutMs),
+				);
+			}),
+		]);
+	} finally {
+		if (timeout) clearTimeout(timeout);
+	}
+}
+
+async function loadExtensionModule(extensionPath: string, opts?: { fresh?: boolean; moduleTimeoutMs?: number }) {
 	const jiti = createJiti(import.meta.url, {
 		moduleCache: false,
 		// In Bun binary: use virtualModules for bundled packages (no filesystem resolution)
@@ -453,9 +513,23 @@ async function loadExtensionModule(extensionPath: string, opts?: { fresh?: boole
 		resolvedPath = `${extensionPath}${separator}fresh=${Date.now()}`;
 	}
 
-	const module = await jiti.import(resolvedPath, { default: true });
-	const factory = module as ExtensionFactory;
-	return typeof factory !== "function" ? undefined : factory;
+	const timeoutMs = opts?.moduleTimeoutMs ?? EXTENSION_FACTORY_TIMEOUT_MS;
+	let timeout: ReturnType<typeof setTimeout> | undefined;
+	try {
+		const module = await Promise.race([
+			jiti.import(resolvedPath, { default: true }),
+			new Promise<never>((_resolve, reject) => {
+				timeout = setTimeout(
+					() => reject(new Error(`Extension module import timed out after ${timeoutMs}ms: ${extensionPath}`)),
+					Math.max(0, timeoutMs),
+				);
+			}),
+		]);
+		const factory = module as ExtensionFactory;
+		return typeof factory !== "function" ? undefined : factory;
+	} finally {
+		if (timeout) clearTimeout(timeout);
+	}
 }
 
 /**
@@ -489,8 +563,13 @@ function createExtension(extensionPath: string, resolvedPath: string): Extension
  * previous generation's handlers subscribed, pinning the old module graph in memory
  * and double-processing events.
  */
-export async function disposeExtensionEventSubscriptions(extensions: Extension[]): Promise<void> {
+export async function disposeExtensionEventSubscriptions(
+	extensions: Extension[],
+	options: { deactivate?: boolean; timeoutMs?: number } = {},
+): Promise<void> {
+	const deadline = Date.now() + (options.timeoutMs ?? EXTENSION_DISPOSAL_TIMEOUT_MS);
 	for (const extension of extensions) {
+		if (options.deactivate ?? true) inactiveExtensions.add(extension);
 		// Unsubscribe event listeners
 		for (const unsubscribe of extension.eventUnsubscribes) {
 			try {
@@ -501,12 +580,24 @@ export async function disposeExtensionEventSubscriptions(extensions: Extension[]
 		}
 		extension.eventUnsubscribes.length = 0;
 
-		// Invoke cleanup callbacks
+		// Invoke every cleanup callback, but never let one unresolved async disposer block reload or
+		// shutdown indefinitely. Late continuations retain rejection handlers and the inactive API guard.
 		for (const disposer of extension.disposers) {
 			try {
 				const result = disposer();
-				if (result instanceof Promise) {
-					await result;
+				if (result !== undefined) {
+					const completion = Promise.resolve(result).catch(() => undefined);
+					const remainingMs = Math.max(0, deadline - Date.now());
+					if (remainingMs > 0) {
+						let timeout: ReturnType<typeof setTimeout> | undefined;
+						await Promise.race([
+							completion,
+							new Promise<void>((resolve) => {
+								timeout = setTimeout(resolve, remainingMs);
+							}),
+						]);
+						if (timeout) clearTimeout(timeout);
+					}
 				}
 			} catch {
 				// Disposal must never break a reload.
@@ -563,7 +654,7 @@ export async function loadExtension(
 	cwd: string,
 	eventBus: EventBus,
 	runtime: ExtensionRuntime,
-	opts?: { fresh?: boolean },
+	opts?: { fresh?: boolean; factoryTimeoutMs?: number; moduleTimeoutMs?: number },
 ): Promise<{ extension: Extension | null; error: string | null }> {
 	const resolvedPath = resolvePath(extensionPath, cwd, { normalizeUnicodeSpaces: true });
 
@@ -577,7 +668,7 @@ export async function loadExtension(
 		const api = createExtensionAPI(extension, runtime, cwd, eventBus);
 		const runtimeSnapshot = snapshotExtensionLoadRuntime(runtime);
 		try {
-			await factory(api);
+			await runExtensionFactory(factory, api, opts?.factoryTimeoutMs);
 		} catch (err) {
 			await disposeExtensionEventSubscriptions([extension]);
 			restoreExtensionLoadRuntime(runtime, runtimeSnapshot);
@@ -637,6 +728,9 @@ function createLazyExtension(
 	const extension = createExtension(extensionPath, resolvedPath);
 	let restoreLazyToolPlaceholders = (): void => {};
 	const load = async (): Promise<void> => {
+		if (inactiveExtensions.has(extension)) {
+			throw new Error(`Lazy extension generation is no longer active: ${extension.path}`);
+		}
 		if (extension.lazy?.loaded) return;
 		if (extension.lazy?.loading) return extension.lazy.loading;
 
@@ -648,9 +742,9 @@ function createLazyExtension(
 			const api = createExtensionAPI(extension, runtime, cwd, eventBus);
 			const runtimeSnapshot = snapshotExtensionLoadRuntime(runtime);
 			try {
-				await factory(api);
+				await runExtensionFactory(factory, api);
 			} catch (error) {
-				await disposeExtensionEventSubscriptions([extension]);
+				await disposeExtensionEventSubscriptions([extension], { deactivate: false });
 				restoreExtensionLoadRuntime(runtime, runtimeSnapshot);
 				throw error;
 			}
@@ -664,7 +758,9 @@ function createLazyExtension(
 		try {
 			await loading;
 		} catch (err) {
-			await disposeExtensionEventSubscriptions([extension]);
+			await disposeExtensionEventSubscriptions([extension], {
+				deactivate: err instanceof ExtensionFactoryTimeoutError,
+			});
 			extension.handlers.clear();
 			extension.messageRenderers.clear();
 			extension.commands.clear();
@@ -700,13 +796,14 @@ export async function loadExtensionFromFactory(
 	eventBus: EventBus,
 	runtime: ExtensionRuntime,
 	extensionPath = "<inline>",
+	options: { factoryTimeoutMs?: number } = {},
 ): Promise<Extension> {
 	const extension = createExtension(extensionPath, extensionPath);
 	const resolvedCwd = resolvePath(cwd);
 	const api = createExtensionAPI(extension, runtime, resolvedCwd, eventBus);
 	const runtimeSnapshot = snapshotExtensionLoadRuntime(runtime);
 	try {
-		await factory(api);
+		await runExtensionFactory(factory, api, options.factoryTimeoutMs);
 	} catch (err) {
 		await disposeExtensionEventSubscriptions([extension]);
 		restoreExtensionLoadRuntime(runtime, runtimeSnapshot);

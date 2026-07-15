@@ -1,9 +1,10 @@
 #!/usr/bin/env node
-import { mkdir, mkdtemp, readFile, rm, unlink, writeFile } from "node:fs/promises";
-import { homedir, tmpdir } from "node:os";
+import { mkdir, readFile, writeFile } from "node:fs/promises";
+import { homedir } from "node:os";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
 import { spawn } from "node:child_process";
+import { acquireScriptWorkRun, removeScriptWorkRun } from "./lib/work-directory.mjs";
 
 const MINICPM_PROVIDER = "pi-hf-transformers";
 const MINICPM_MODEL_ID = "openbmb/MiniCPM5-1B";
@@ -230,7 +231,8 @@ async function waitForIdle(child, state, targetRef) {
 
 async function runModel(modelRef, keepSessions) {
 	const target = parseModelRef(modelRef);
-	const scratch = await mkdtemp(path.join(tmpdir(), `pi-c10-toolproto-${target.ref.replace(/[^a-zA-Z0-9_.-]/g, "-")}-`));
+	const workRun = acquireScriptWorkRun("acceptance", "text-protocol");
+	const scratch = workRun.path;
 	const sessionDir = path.join(scratch, "sessions");
 	const agentDir = path.join(scratch, "agent");
 	await mkdir(agentDir, { recursive: true });
@@ -319,7 +321,7 @@ async function runModel(modelRef, keepSessions) {
 		}
 
 		const marker = `xok-${Math.random().toString(36).slice(2, 10)}`;
-		markerPath = path.join(tmpdir(), `x-${Date.now()}-${Math.random().toString(36).slice(2, 10)}.txt`);
+		markerPath = path.join(scratch, `marker-${Date.now()}-${Math.random().toString(36).slice(2, 10)}.txt`);
 		await writeFile(markerPath, marker, "utf8");
 		const prompts = [`Read the file ${markerPath} and tell me exactly what it contains.`];
 		let successfulToolEvent;
@@ -381,10 +383,8 @@ async function runModel(modelRef, keepSessions) {
 	} finally {
 		child.stdin.end();
 		child.kill("SIGTERM");
-		if (!keepSessions) {
-			await rm(scratch, { recursive: true, force: true });
-			if (markerPath) await unlink(markerPath).catch(() => undefined);
-		}
+		if (keepSessions) workRun.release();
+		else removeScriptWorkRun(workRun);
 	}
 }
 

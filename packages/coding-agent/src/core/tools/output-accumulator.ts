@@ -1,13 +1,15 @@
 import { randomBytes } from "node:crypto";
 import { closeSync, openSync, writeSync } from "node:fs";
-import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { DEFAULT_MAX_BYTES, DEFAULT_MAX_LINES, type TruncationResult } from "@caupulican/pi-agent-core/node";
+import { getAgentDir } from "../../config.ts";
+import { getProcessWorkRun } from "../../utils/work-directory.ts";
 
 export interface OutputAccumulatorOptions {
 	maxLines?: number;
 	maxBytes?: number;
 	tempFilePrefix?: string;
+	tempDirectory?: string;
 }
 
 export interface OutputSnapshot {
@@ -22,9 +24,9 @@ export interface OutputPreview {
 	skippedLines: number;
 }
 
-function defaultTempFilePath(prefix: string): string {
+function defaultTempFilePath(directory: string, prefix: string): string {
 	const id = randomBytes(8).toString("hex");
-	return join(tmpdir(), `${prefix}-${id}.log`);
+	return join(directory, `${prefix}-${id}.log`);
 }
 
 const MAX_APPEND_CHUNK_BYTES = 64 * 1024;
@@ -72,6 +74,7 @@ export class OutputAccumulator {
 	private readonly maxLines: number;
 	private readonly maxBytes: number;
 	private readonly tempFilePrefix: string;
+	private readonly tempDirectory: string;
 	private readonly decoder = new TextDecoder();
 
 	private rawChunks: Buffer[] = [];
@@ -99,6 +102,7 @@ export class OutputAccumulator {
 		this.maxLines = options.maxLines ?? DEFAULT_MAX_LINES;
 		this.maxBytes = options.maxBytes ?? DEFAULT_MAX_BYTES;
 		this.tempFilePrefix = options.tempFilePrefix ?? "pi-output";
+		this.tempDirectory = options.tempDirectory ?? getProcessWorkRun(getAgentDir(), "outputs", "tool-streams").path;
 	}
 
 	append(data: Buffer): void {
@@ -371,7 +375,7 @@ export class OutputAccumulator {
 			return true;
 		}
 		try {
-			this.tempFilePath ??= defaultTempFilePath(this.tempFilePrefix);
+			this.tempFilePath ??= defaultTempFilePath(this.tempDirectory, this.tempFilePrefix);
 			this.tempFileFd = openSync(this.tempFilePath, "w");
 			for (const chunk of this.rawChunks) {
 				writeSync(this.tempFileFd, chunk);

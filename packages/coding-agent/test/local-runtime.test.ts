@@ -492,7 +492,7 @@ describe("OllamaRuntime", () => {
 		}
 	});
 
-	it("imports user Ollama models into the pi-owned store with idempotent blob hardlinks", () => {
+	it("imports user Ollama models into the pi-owned store with idempotent hardlink-or-copy transfer", () => {
 		const root = mkdtempSync(join(tmpdir(), "pi-ollama-import-"));
 		try {
 			const homeDir = join(root, "home");
@@ -507,7 +507,8 @@ describe("OllamaRuntime", () => {
 
 			const runtime = new OllamaRuntime({ agentDir, deps: { homeDir } });
 			const first = runtime.importUserModels();
-			expect(first).toMatchObject({ manifestsImported: 1, blobsHardlinked: 1, blobsCopied: 0, blobsSkipped: 0 });
+			expect(first).toMatchObject({ manifestsImported: 1, blobsSkipped: 0 });
+			expect(first.blobsHardlinked + first.blobsCopied).toBe(1);
 			expect(
 				readFileSync(
 					join(runtime.ownedModelsDir(), "manifests", "registry.ollama.ai", "library", "qwen3", "latest"),
@@ -516,7 +517,7 @@ describe("OllamaRuntime", () => {
 			).toBe("manifest");
 			const ownedBlob = join(runtime.ownedModelsDir(), "blobs", "sha256-abc");
 			expect(readFileSync(ownedBlob, "utf-8")).toBe("blob");
-			expect(statSync(ownedBlob).ino).toBe(statSync(blob).ino);
+			if (first.blobsHardlinked === 1) expect(statSync(ownedBlob).ino).toBe(statSync(blob).ino);
 			expect(readFileSync(blob, "utf-8")).toBe("blob");
 
 			const second = runtime.importUserModels();

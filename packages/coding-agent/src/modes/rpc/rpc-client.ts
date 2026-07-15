@@ -10,6 +10,7 @@ import type { CompactionResult } from "@caupulican/pi-agent-core/node";
 import type { ImageContent } from "@caupulican/pi-ai";
 import type { SessionStats } from "../../core/agent-session.ts";
 import type { BashResult } from "../../core/bash-executor.ts";
+import { waitForChildProcessWithTermination } from "../../utils/child-process.ts";
 import { attachJsonlLineReader, serializeJsonLine } from "./jsonl.ts";
 import type { RpcCommand, RpcResponse, RpcSessionState, RpcSlashCommand } from "./rpc-types.ts";
 
@@ -91,6 +92,7 @@ export class RpcClient {
 
 		const childProcess = spawn("node", [cliPath, ...args], {
 			cwd: this.options.cwd,
+			detached: process.platform !== "win32",
 			env: { ...process.env, ...this.options.env },
 			stdio: ["pipe", "pipe", "pipe"],
 		});
@@ -98,7 +100,7 @@ export class RpcClient {
 
 		// Collect stderr for debugging
 		childProcess.stderr?.on("data", (data) => {
-			this.stderr += data.toString();
+			this.stderr = `${this.stderr}${data.toString()}`.slice(-1024 * 1024);
 			process.stderr.write(data);
 		});
 
@@ -127,11 +129,12 @@ export class RpcClient {
 			this.handleLine(line);
 		});
 
-		// Wait a moment for process to initialize
-		await new Promise((resolve) => setTimeout(resolve, 100));
+		// Yield once so immediate spawn/exit errors are delivered before returning.
+		await new Promise<void>((resolve) => setImmediate(resolve));
 
-		if (this.process.exitCode !== null) {
-			const error = this.exitError ?? this.createProcessExitError(this.process.exitCode, this.process.signalCode);
+		if (this.exitError) throw this.exitError;
+		if (childProcess.exitCode !== null) {
+			const error = this.createProcessExitError(childProcess.exitCode, childProcess.signalCode);
 			this.exitError = error;
 			throw error;
 		}
@@ -141,27 +144,21 @@ export class RpcClient {
 	 * Stop the RPC agent process.
 	 */
 	async stop(): Promise<void> {
-		if (!this.process) return;
+		const childProcess = this.process;
+		if (!childProcess) return;
 
 		this.stopReadingStdout?.();
 		this.stopReadingStdout = null;
-		this.process.kill("SIGTERM");
-
-		// Wait for process to exit
-		await new Promise<void>((resolve) => {
-			const timeout = setTimeout(() => {
-				this.process?.kill("SIGKILL");
-				resolve();
-			}, 1000);
-
-			this.process?.on("exit", () => {
-				clearTimeout(timeout);
-				resolve();
-			});
+		this.rejectPendingRequests(new Error("RPC client stopped"));
+		const terminationController = new AbortController();
+		terminationController.abort();
+		await waitForChildProcessWithTermination(childProcess, {
+			signal: terminationController.signal,
+			killGraceMs: 1_000,
 		});
 
-		this.process = null;
-		this.pendingRequests.clear();
+		if (this.process === childProcess) this.process = null;
+		this.exitError = null;
 	}
 
 	/**

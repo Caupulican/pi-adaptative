@@ -21,11 +21,13 @@ export type GoalAction =
 	| { action: "add_requirement"; requirementId: string; text: string }
 	| { action: "satisfy_requirement"; requirementId: string; evidenceIds?: readonly string[] }
 	| { action: "block_requirement"; requirementId: string; reason: string }
+	| { action: "reopen_requirement"; requirementId: string }
 	| { action: "add_evidence"; evidenceId: string; kind: GoalEvidenceKind; summary: string; uri?: string }
 	| { action: "progress" }
 	| { action: "no_progress" }
 	| { action: "complete" }
 	| { action: "block_goal"; reason: string }
+	| { action: "resume_goal" }
 	| { action: "cancel" };
 
 export type GoalActionName = GoalAction["action"];
@@ -76,10 +78,27 @@ export function applyGoalAction(current: GoalState | undefined, action: GoalActi
 		return { ok: false, error: "No active goal. Use action 'start' before recording goal updates." };
 	}
 
+	if (action.action === "resume_goal") {
+		if (current.status !== "blocked") {
+			return {
+				ok: false,
+				error: `Goal '${current.goalId}' is ${current.status}; only blocked goals can be resumed.`,
+			};
+		}
+		return { ok: true, state: applyGoalEvent(current, { type: "resume_goal", now }) };
+	}
+
 	if (current.status !== "active") {
+		if (current.status === "blocked" && action.action === "cancel") {
+			return { ok: true, state: applyGoalEvent(current, { type: "cancel_goal", now }) };
+		}
+		const recovery =
+			current.status === "blocked"
+				? "Resume it with action 'resume_goal', cancel it, or start a replacement goal."
+				: "Start a new goal before recording updates.";
 		return {
 			ok: false,
-			error: `Goal '${current.goalId}' is ${current.status}; start a new goal before recording updates.`,
+			error: `Goal '${current.goalId}' is ${current.status}. ${recovery}`,
 		};
 	}
 
@@ -129,6 +148,21 @@ function toGoalEvent(state: GoalState, action: GoalAction, now: string): ToGoalE
 			}
 			return { ok: true, event: { type: "block_requirement", id, blockedReason: reason, now } };
 		}
+		case "reopen_requirement": {
+			const id = action.requirementId.trim();
+			if (!id) return { ok: false, error: "reopen_requirement requires a non-empty requirementId." };
+			const requirement = state.requirements.find((candidate) => candidate.id === id);
+			if (!requirement) {
+				return { ok: false, error: `Unknown requirement '${id}'.` };
+			}
+			if (requirement.status !== "blocked") {
+				return {
+					ok: false,
+					error: `Requirement '${id}' is ${requirement.status}; only blocked requirements can be reopened.`,
+				};
+			}
+			return { ok: true, event: { type: "reopen_requirement", id, now } };
+		}
 		case "add_evidence": {
 			const id = action.evidenceId.trim();
 			const summary = action.summary.trim();
@@ -163,11 +197,31 @@ function toGoalEvent(state: GoalState, action: GoalAction, now: string): ToGoalE
 			if (!reason) return { ok: false, error: "block_goal requires a non-empty reason." };
 			return { ok: true, event: { type: "block_goal", reason, now } };
 		}
+		case "resume_goal":
+			return { ok: true, event: { type: "resume_goal", now } };
 		case "cancel":
 			return { ok: true, event: { type: "cancel_goal", now } };
 		default:
 			return { ok: false, error: "Unknown goal action." };
 	}
+}
+
+/**
+ * Complete a goal on explicit user authority, even when requirements remain open or
+ * blocked. Agent-facing `complete` stays evidence-gated; this path is reserved for
+ * direct user lifecycle controls.
+ */
+export function completeGoalManually(current: GoalState | undefined, now: string): GoalActionResult {
+	if (!current) {
+		return { ok: false, error: "No goal exists to complete." };
+	}
+	if (current.status === "completed") {
+		return { ok: false, error: `Goal '${current.goalId}' is already completed.` };
+	}
+	if (current.status === "cancelled") {
+		return { ok: false, error: `Goal '${current.goalId}' is cancelled; start or override with a new goal.` };
+	}
+	return { ok: true, state: applyGoalEvent(current, { type: "complete_goal_manually", now }) };
 }
 
 /** Render a compact human-readable summary of the ledger after an action. */

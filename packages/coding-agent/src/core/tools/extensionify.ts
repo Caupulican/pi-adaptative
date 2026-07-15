@@ -1,8 +1,9 @@
-import { mkdtempSync, rmSync, writeFileSync } from "node:fs";
-import { homedir } from "node:os";
+import { rmSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 import type { AgentTool } from "@caupulican/pi-agent-core";
 import { type Static, Type } from "typebox";
+import { getAgentDir } from "../../config.ts";
+import { acquireWorkRun, type WorkRunLease } from "../../utils/work-directory.ts";
 import { createEventBus } from "../event-bus.ts";
 import { createExtensionRuntime, loadExtension } from "../extensions/loader.ts";
 import type { ToolDefinition } from "../extensions/types.ts";
@@ -36,11 +37,13 @@ export interface ExtensionifyToolDetails {
 	report?: ExtensionifyReport;
 }
 
-export interface ExtensionifyToolOptions {}
+export interface ExtensionifyToolOptions {
+	agentDir?: string;
+}
 
 export function createExtensionifyToolDefinition(
 	_cwd: string,
-	_options?: ExtensionifyToolOptions,
+	options?: ExtensionifyToolOptions,
 ): ToolDefinition<typeof extensionifySchema, ExtensionifyReport> {
 	return {
 		name: "extensionify",
@@ -69,13 +72,14 @@ export function createExtensionifyToolDefinition(
 			let smokeTestPassed = false;
 			const registeredTools: string[] = [];
 			const registeredCommands: string[] = [];
-			const proposedPath = join(homedir(), ".pi", "agent", "extensions", name);
+			const agentDir = options?.agentDir ?? getAgentDir();
+			const proposedPath = join(agentDir, "extensions", name);
 
-			// Create a temporary directory for the test extension
 			let tempDir: string | null = null;
+			let workRun: WorkRunLease | undefined;
 			try {
-				const tempRoot = require("node:os").tmpdir();
-				tempDir = mkdtempSync(join(tempRoot, `extensionify-${Date.now()}-`));
+				workRun = acquireWorkRun({ agentDir, category: "extensions", tenant: "smoke-test" });
+				tempDir = workRun.path;
 
 				// Write index.ts with the factory code
 				const indexPath = join(tempDir, "index.ts");
@@ -126,7 +130,8 @@ export function createExtensionifyToolDefinition(
 				diagnostics.push(`Test error: ${err instanceof Error ? err.message : String(err)}`);
 				smokeTestPassed = false;
 			} finally {
-				// Always clean up the temporary directory
+				// Always clean up the temporary directory.
+				workRun?.release();
 				if (tempDir) {
 					try {
 						rmSync(tempDir, { recursive: true, force: true });

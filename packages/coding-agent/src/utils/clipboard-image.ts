@@ -1,11 +1,12 @@
 import { spawnSync } from "child_process";
 import { randomUUID } from "crypto";
 import { readFileSync, unlinkSync } from "fs";
-import { tmpdir } from "os";
 import { join } from "path";
 
+import { getAgentDir } from "../config.ts";
 import { clipboard } from "./clipboard-native.ts";
 import { loadPhoton } from "./photon.ts";
+import { getProcessWorkRun } from "./work-directory.ts";
 
 export type ClipboardImage = {
 	bytes: Uint8Array;
@@ -159,7 +160,10 @@ function isWSL(env: NodeJS.ProcessEnv = process.env): boolean {
  * directly, so we use it as a fallback.
  */
 function readClipboardImageViaPowerShell(): ClipboardImage | null {
-	const tmpFile = join(tmpdir(), `pi-wsl-clip-${randomUUID()}.png`);
+	const tmpFile = join(
+		getProcessWorkRun(getAgentDir(), "clipboard", "wsl-images").path,
+		`pi-wsl-clip-${randomUUID()}.png`,
+	);
 
 	try {
 		const winPathResult = runCommand("wslpath", ["-w", tmpFile], { timeoutMs: DEFAULT_LIST_TIMEOUT_MS });

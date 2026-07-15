@@ -1,6 +1,6 @@
 import assert from "node:assert";
 import { spawnSync } from "node:child_process";
-import { mkdirSync, mkdtempSync, rmSync, symlinkSync, writeFileSync } from "node:fs";
+import { chmodSync, mkdirSync, mkdtempSync, rmSync, symlinkSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { dirname, join } from "node:path";
 import { afterEach, beforeEach, describe, it, test } from "node:test";
@@ -56,7 +56,7 @@ const getSuggestions = (
 
 describe("CombinedAutocompleteProvider", () => {
 	describe("extractPathPrefix", () => {
-		it("extracts / from 'hey /' when forced", async () => {
+		it("does not escape the autocomplete base for an absolute root path", async () => {
 			const provider = new CombinedAutocompleteProvider([], "/tmp");
 			const lines = ["hey /"];
 			const cursorLine = 0;
@@ -64,10 +64,7 @@ describe("CombinedAutocompleteProvider", () => {
 
 			const result = await getSuggestions(provider, lines, cursorLine, cursorCol, true);
 
-			assert.notEqual(result, null, "Should return suggestions for root directory");
-			if (result) {
-				assert.strictEqual(result.prefix, "/", "Prefix should be '/'");
-			}
+			assert.strictEqual(result, null, "Should reject paths outside the autocomplete base");
 		});
 
 		it("extracts /A from '/A' when forced", async () => {
@@ -98,7 +95,7 @@ describe("CombinedAutocompleteProvider", () => {
 			assert.strictEqual(result, null, "Should not trigger for slash commands");
 		});
 
-		it("triggers for absolute paths after slash command argument", async () => {
+		it("does not escape the autocomplete base after a slash-command argument", async () => {
 			const provider = new CombinedAutocompleteProvider([], "/tmp");
 			const lines = ["/command /"];
 			const cursorLine = 0;
@@ -106,13 +103,70 @@ describe("CombinedAutocompleteProvider", () => {
 
 			const result = await getSuggestions(provider, lines, cursorLine, cursorCol, true);
 
-			console.log("Result:", result);
-			assert.notEqual(result, null, "Should trigger for absolute paths in command arguments");
-			if (result) {
-				assert.strictEqual(result.prefix, "/", "Prefix should be '/'");
-			}
+			assert.strictEqual(result, null, "Should reject paths outside the autocomplete base");
 		});
 	});
+
+	test("settles a hanging slash-command completion when its request is aborted", async () => {
+		const provider = new CombinedAutocompleteProvider(
+			[
+				{
+					name: "hang",
+					getArgumentCompletions: () => new Promise<never>(() => {}),
+				},
+			],
+			process.cwd(),
+		);
+		const controller = new AbortController();
+		let guard: ReturnType<typeof setTimeout> | undefined;
+		try {
+			const pending = provider.getSuggestions(["/hang value"], 0, 11, { signal: controller.signal });
+			await new Promise((resolve) => setTimeout(resolve, 25));
+			controller.abort();
+			const result = await Promise.race([
+				pending,
+				new Promise<never>((_resolve, reject) => {
+					guard = setTimeout(() => reject(new Error("aborted command completion did not settle")), 1_000);
+				}),
+			]);
+			assert.strictEqual(result, null);
+		} finally {
+			if (guard) clearTimeout(guard);
+		}
+	});
+
+	test(
+		"settles an fd walk immediately when its request is aborted",
+		{ skip: process.platform === "win32" },
+		async () => {
+			const rootDir = mkdtempSync(join(tmpdir(), "pi-autocomplete-abort-"));
+			let guard: ReturnType<typeof setTimeout> | undefined;
+			try {
+				const hangingFd = join(rootDir, "hanging-fd");
+				writeFileSync(
+					hangingFd,
+					'#!/usr/bin/env node\nprocess.on("SIGTERM", () => {});\nsetInterval(() => {}, 1_000);\n',
+				);
+				chmodSync(hangingFd, 0o755);
+				const provider = new CombinedAutocompleteProvider([], rootDir, hangingFd);
+				const controller = new AbortController();
+				const pending = provider.getSuggestions(["@"], 0, 1, { signal: controller.signal });
+				await new Promise((resolve) => setTimeout(resolve, 25));
+				controller.abort();
+
+				const result = await Promise.race([
+					pending,
+					new Promise<never>((_resolve, reject) => {
+						guard = setTimeout(() => reject(new Error("aborted fd autocomplete did not settle")), 1_000);
+					}),
+				]);
+				assert.strictEqual(result, null);
+			} finally {
+				if (guard) clearTimeout(guard);
+				rmSync(rootDir, { recursive: true, force: true });
+			}
+		},
+	);
 
 	describe("fd @ file suggestions", { skip: !isFdInstalled }, () => {
 		let rootDir = "";

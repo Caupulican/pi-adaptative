@@ -4,6 +4,7 @@ import { basename, dirname, join, resolve, sep, win32 } from "path";
 import { fileURLToPath } from "url";
 import { spawnProcessSync } from "./utils/child-process.ts";
 import { normalizePath } from "./utils/paths.ts";
+import { getProcessWorkRun } from "./utils/work-directory.ts";
 
 // =============================================================================
 // Package Detection
@@ -174,6 +175,7 @@ function readCommandOutput(
 	const result = spawnProcessSync(command, args, {
 		encoding: "utf-8",
 		stdio: ["ignore", "pipe", "pipe"],
+		timeout: 5_000,
 	});
 	if (result.status === 0) return result.stdout.trim() || undefined;
 	if (options.requireSuccess) {
@@ -469,6 +471,13 @@ export function getBundledPromptsDir(): string {
 	return join(getBundledResourcesDir(), "prompts");
 }
 
+/**
+ * Get path to bundled extensions directory.
+ */
+export function getBundledExtensionsDir(): string {
+	return join(getBundledResourcesDir(), "extensions");
+}
+
 // =============================================================================
 // App Config (from package.json piConfig)
 // =============================================================================
@@ -586,7 +595,7 @@ export function getSessionsDir(): string {
 	return join(getAgentDir(), "sessions");
 }
 
-/** Get path to debug log file */
+/** Get the process-scoped debug log under the disposable work hierarchy. */
 export function getDebugLogPath(): string {
-	return join(getAgentDir(), `${APP_NAME}-debug.log`);
+	return join(getProcessWorkRun(getAgentDir(), "logs", "debug").path, `${APP_NAME}-debug.log`);
 }

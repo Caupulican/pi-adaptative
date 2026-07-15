@@ -1,4 +1,4 @@
-import { basename, dirname, isAbsolute, relative, resolve as resolvePath, sep } from "node:path";
+import { basename, dirname, isAbsolute, join, relative, resolve as resolvePath, sep } from "node:path";
 import { StringDecoder } from "node:string_decoder";
 import type { AgentTool } from "@caupulican/pi-agent-core";
 import {
@@ -13,12 +13,13 @@ import { Text } from "@caupulican/pi-tui";
 import { constants } from "fs";
 import { access as fsAccess, open as fsOpen, readFile as fsReadFile, stat as fsStat } from "fs/promises";
 import { type Static, Type } from "typebox";
-import { getReadmePath } from "../../config.ts";
+import { getAgentDir, getReadmePath } from "../../config.ts";
 import { keyHint, keyText } from "../../modes/interactive/components/keybinding-hints.ts";
 import { getLanguageFromPath, highlightCode, type Theme } from "../../modes/interactive/theme/theme.ts";
 import { formatDimensionNote, resizeImage } from "../../utils/image-resize.ts";
 import { detectSupportedImageMimeTypeFromFile } from "../../utils/mime.ts";
 import { formatPathRelativeToCwdOrAbsolute } from "../../utils/paths.ts";
+import { getProcessWorkRun } from "../../utils/work-directory.ts";
 import type { ToolDefinition, ToolRenderResultOptions } from "../extensions/types.ts";
 import { resolveReadPathAsync, resolveToCwd } from "./path-utils.ts";
 import { getTextOutput, renderToolPath, replaceTabs, str } from "./render-utils.ts";
@@ -398,7 +399,7 @@ export function createReadToolDefinition(
 										content: [
 											{
 												type: "text",
-												text: `Image file is ${formatSize(fileSize)} (${formatSize(maxImageReadBytes)} inline decode limit). Downscale it first, e.g. with bash (ImageMagick: magick "${path}" -resize 2000x2000 /tmp/preview.png) and read the result.`,
+												text: `Image file is ${formatSize(fileSize)} (${formatSize(maxImageReadBytes)} inline decode limit). Downscale it first, e.g. with bash (ImageMagick: magick "${path}" -resize 2000x2000 "${join(getProcessWorkRun(getAgentDir(), "images", "previews").path, "preview.png")}") and read the result.`,
 											},
 										],
 										details: undefined,

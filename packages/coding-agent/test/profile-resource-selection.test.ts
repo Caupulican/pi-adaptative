@@ -3,12 +3,47 @@ import {
 	decodeResourceSelection,
 	encodeResourceSelection,
 	encodeResourceSelectionWithFraming,
+	remapResourceSelectionFilter,
 } from "../src/core/profile-resource-selection.ts";
 
 describe("profile-resource-selection", () => {
 	// Test universes
 	const toolIds = ["read", "bash", "edit"];
 	const skillIds = ["a", "b", "c", "d"];
+
+	describe("remapResourceSelectionFilter", () => {
+		const extensions = [
+			{ id: "/agent/extensions/alpha/index.ts", fileName: "index.ts", folderName: "alpha" },
+			{ id: "/agent/extensions/beta/index.ts", fileName: "index.ts", folderName: "beta" },
+		];
+		const matches = (item: (typeof extensions)[number], pattern: string) =>
+			item.id === pattern || item.fileName === pattern || item.folderName === pattern;
+
+		it("expands an ambiguous legacy basename to collision-safe concrete ids", () => {
+			const result = remapResourceSelectionFilter({ allow: ["index.ts"] }, extensions, matches);
+			expect(result.filter).toEqual({
+				allow: ["/agent/extensions/alpha/index.ts", "/agent/extensions/beta/index.ts"],
+			});
+			expect(result.missingIds).toEqual(new Set());
+		});
+
+		it("selects one folder-backed extension without coupling the other index entry", () => {
+			const result = remapResourceSelectionFilter({ allow: ["alpha"] }, extensions, matches);
+			expect(result.filter).toEqual({ allow: ["/agent/extensions/alpha/index.ts"] });
+		});
+
+		it("preserves genuinely missing patterns while deduplicating concrete matches", () => {
+			const result = remapResourceSelectionFilter(
+				{ allow: ["index.ts", "alpha", "offline-extension"] },
+				extensions,
+				matches,
+			);
+			expect(result.filter).toEqual({
+				allow: ["/agent/extensions/alpha/index.ts", "/agent/extensions/beta/index.ts", "offline-extension"],
+			});
+			expect(result.missingIds).toEqual(new Set(["offline-extension"]));
+		});
+	});
 
 	describe("encodeResourceSelection", () => {
 		describe("with toolIds universe", () => {
