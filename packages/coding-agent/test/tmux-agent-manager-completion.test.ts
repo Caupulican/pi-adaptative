@@ -36,7 +36,7 @@ type SentMessage = {
 	options?: { triggerTurn?: boolean; deliverAs?: string };
 };
 
-describe("bundled tmux agent manager completion", () => {
+describe.skipIf(process.platform === "win32")("bundled tmux agent manager completion", () => {
 	let tempDir: string;
 	let previousAgentDir: string | undefined;
 	let previousPath: string | undefined;
