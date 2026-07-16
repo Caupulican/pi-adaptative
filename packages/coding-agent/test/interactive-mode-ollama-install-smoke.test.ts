@@ -92,7 +92,7 @@ function installableThenBootableDeps(): { deps: LocalRuntimeDeps; extractCalls: 
 			}
 			return new Response("{}", { status: 200 });
 		}) as unknown as typeof fetch,
-		existsFn: (path: string) => installed && path.includes("runtimes/ollama/bin/ollama"),
+		existsFn: (path: string) => installed && path.replaceAll("\\", "/").includes("runtimes/ollama/bin/ollama"),
 		extractArchive: async (_input, _destDir, kind) => {
 			extractCalls.push({ kind });
 			installed = true;
