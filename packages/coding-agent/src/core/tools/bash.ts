@@ -415,7 +415,7 @@ function createShellToolDefinition(
 					persistIfFullTruncated: true,
 				});
 				const preview = {
-					content: snapshot.content,
+					content: snapshot.content.replace(/\r/g, ""),
 					skippedLines: Math.max(0, snapshot.truncation.totalLines - snapshot.truncation.outputLines),
 				};
 				onUpdate({
@@ -469,7 +469,7 @@ function createShellToolDefinition(
 
 			const formatOutput = (snapshot: Awaited<ReturnType<typeof finishOutput>>, emptyText = "(no output)") => {
 				const truncation = snapshot.truncation;
-				let text = snapshot.content || emptyText;
+				let text = snapshot.content.replace(/\r/g, "") || emptyText;
 				let details: BashToolDetails | undefined;
 				const preview = output.preview(BASH_PREVIEW_LINES, BASH_PREVIEW_BYTES);
 				const fullOutputNotice = snapshot.fullOutputPath

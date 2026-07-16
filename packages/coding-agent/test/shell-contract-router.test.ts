@@ -49,6 +49,17 @@ describe("stable Bash-like shell contract router", () => {
 		expect(route.command).toContain("'console.log(''a b'')' '' 'c d'");
 	});
 
+	it("preserves quoted, unquoted, and UNC Windows paths", () => {
+		const cases: Array<[string, string[]]> = [
+			["cat C:\\Users\\runner\\file.txt", ["cat", "C:\\Users\\runner\\file.txt"]],
+			['cat "C:\\Users\\runner\\file with spaces.txt"', ["cat", "C:\\Users\\runner\\file with spaces.txt"]],
+			["find \\\\server\\share\\folder -type f", ["find", "\\\\server\\share\\folder", "-type", "f"]],
+		];
+		for (const [command, argv] of cases) {
+			expect(routeShellContract(command, "win32")).toMatchObject({ kind: "powershell", argv });
+		}
+	});
+
 	it("fails closed for shell operators, expansions, nested shells, and unsupported builtin forms", () => {
 		for (const command of [
 			"cat file | grep x",

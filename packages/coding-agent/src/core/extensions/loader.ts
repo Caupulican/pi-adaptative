@@ -506,18 +506,13 @@ async function loadExtensionModule(extensionPath: string, opts?: { fresh?: boole
 		...(isBunBinary ? { virtualModules: VIRTUAL_MODULES, tryNative: false } : { alias: getAliases() }),
 	});
 
-	// When fresh mode is enabled, append a cache-busting query string to force re-import
-	let resolvedPath = extensionPath;
-	if (opts?.fresh) {
-		const separator = extensionPath.includes("?") ? "&" : "?";
-		resolvedPath = `${extensionPath}${separator}fresh=${Date.now()}`;
-	}
-
+	// Every call gets a fresh jiti instance with moduleCache disabled. Do not append a query string:
+	// jiti's Windows path resolver treats it as part of the .ts filename.
 	const timeoutMs = opts?.moduleTimeoutMs ?? EXTENSION_FACTORY_TIMEOUT_MS;
 	let timeout: ReturnType<typeof setTimeout> | undefined;
 	try {
 		const module = await Promise.race([
-			jiti.import(resolvedPath, { default: true }),
+			jiti.import(extensionPath, { default: true }),
 			new Promise<never>((_resolve, reject) => {
 				timeout = setTimeout(
 					() => reject(new Error(`Extension module import timed out after ${timeoutMs}ms: ${extensionPath}`)),

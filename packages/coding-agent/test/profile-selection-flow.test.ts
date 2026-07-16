@@ -1,6 +1,6 @@
 import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
-import { join } from "node:path";
+import { join, resolve } from "node:path";
 import { beforeAll, describe, expect, it, vi } from "vitest";
 import { type ResourceProfileSettings, SettingsManager } from "../src/core/settings-manager.ts";
 import {
@@ -73,13 +73,13 @@ describe("getProfileResourceKinds", () => {
 		const extensions = kinds.find((kind) => kind.kind === "extensions")?.items ?? [];
 		expect(extensions).toEqual([
 			{
-				id: "/home/test/.pi/agent/extensions/alpha/index.ts",
+				id: resolve("/home/test/.pi/agent/extensions/alpha/index.ts"),
 				label: "alpha",
 				path: "/home/test/.pi/agent/extensions/alpha/index.ts",
 				description: undefined,
 			},
 			{
-				id: "/home/test/.pi/agent/extensions/beta/index.ts",
+				id: resolve("/home/test/.pi/agent/extensions/beta/index.ts"),
 				label: "beta",
 				path: "/home/test/.pi/agent/extensions/beta/index.ts",
 				description: undefined,

@@ -10,6 +10,11 @@ import {
 	TransformersRuntime,
 } from "../src/core/models/local-runtime.ts";
 
+vi.mock("node:os", async (importOriginal) => {
+	const actual = await importOriginal<typeof import("node:os")>();
+	return { ...actual, platform: () => "linux" };
+});
+
 function ndjsonResponse(lines: object[]): Response {
 	const body = lines.map((line) => JSON.stringify(line)).join("\n");
 	return new Response(body, { status: 200 });
@@ -44,6 +49,29 @@ describe("resolveOllamaAsset", () => {
 
 	it("returns undefined for an unsupported platform", () => {
 		expect(resolveOllamaAsset("sunos", "x64")).toBeUndefined();
+	});
+});
+
+describe("OllamaRuntime Windows binary discovery", () => {
+	it("finds the .exe installed in the pi-owned runtime", async () => {
+		const agentDir = "/agent";
+		const ownedBinary = join(agentDir, "runtimes", "ollama", "bin", "ollama.exe");
+		const checkedPaths: string[] = [];
+		const runtime = new OllamaRuntime({
+			agentDir,
+			deps: {
+				platform: () => "win32",
+				existsFn: (path) => {
+					checkedPaths.push(path);
+					return path === ownedBinary;
+				},
+				envPath: "",
+				fetchFn: async () => new Response(null, { status: 503 }),
+			},
+		});
+
+		expect((await runtime.detect()).binarySource).toBe("pi-owned");
+		expect(checkedPaths[0]).toBe(ownedBinary);
 	});
 });
 

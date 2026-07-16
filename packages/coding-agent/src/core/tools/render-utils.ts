@@ -31,7 +31,7 @@ export function shortenPath(path: unknown, cwd?: string): string {
 		addCandidate(candidates, `~${toDisplaySeparators(path.slice(home.length))}`);
 	}
 
-	if (cwd && !looksLikeWindowsAbsolutePath(path)) {
+	if (cwd && (process.platform === "win32" || !looksLikeWindowsAbsolutePath(path))) {
 		try {
 			const absolutePath = resolvePath(path, cwd);
 			const resolvedCwd = resolvePath(cwd);

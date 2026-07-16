@@ -38,8 +38,9 @@ function writeOkfFile(harness: Harness, filename: string, content: string): void
 }
 
 function normalizeContext(context: Context, tempDir: string): unknown {
+	const normalizedTempDir = tempDir.replaceAll("\\", "/");
 	return {
-		systemPrompt: context.systemPrompt?.split(tempDir).join("<tempdir>"),
+		systemPrompt: context.systemPrompt?.replaceAll("\\", "/").split(normalizedTempDir).join("<tempdir>"),
 		toolNames: context.tools?.map((tool) => (tool as unknown as { name: string }).name).sort(),
 		messages: context.messages.map((message) => {
 			const { timestamp: _timestamp, ...rest } = message as unknown as Record<string, unknown>;

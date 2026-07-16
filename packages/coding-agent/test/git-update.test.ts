@@ -25,8 +25,8 @@ function git(args: string[], cwd: string): string {
 		encoding: "utf-8",
 		env: {
 			...process.env,
-			GIT_CONFIG_GLOBAL: devNull,
-			GIT_CONFIG_SYSTEM: devNull,
+			GIT_CONFIG_GLOBAL: process.platform === "win32" ? "NUL" : devNull,
+			GIT_CONFIG_SYSTEM: process.platform === "win32" ? "NUL" : devNull,
 		},
 	});
 	if (result.status !== 0) {

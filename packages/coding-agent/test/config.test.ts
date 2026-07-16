@@ -212,7 +212,7 @@ describe("detectInstallMethod", () => {
 		});
 	});
 
-	test("self-update respects configured npmCommand", () => {
+	test.skipIf(process.platform === "win32")("self-update respects configured npmCommand", () => {
 		const { prefix } = createNpmPrefixInstall();
 
 		const command = getSelfUpdateCommand("@caupulican/pi-adaptative", ["npm", "--prefix", prefix]);
@@ -269,7 +269,7 @@ describe("detectInstallMethod", () => {
 		);
 	});
 
-	test("self-updates bun global installs from bun pm bin", () => {
+	test.skipIf(process.platform === "win32")("self-updates bun global installs from bun pm bin", () => {
 		createBunGlobalInstall();
 
 		const command = getSelfUpdateCommand("@caupulican/pi-adaptative");
@@ -282,33 +282,36 @@ describe("detectInstallMethod", () => {
 		});
 	});
 
-	test("self-updates renamed pnpm global installs by removing the old package first", () => {
-		createPnpmGlobalInstall();
+	test.skipIf(process.platform === "win32")(
+		"self-updates renamed pnpm global installs by removing the old package first",
+		() => {
+			createPnpmGlobalInstall();
 
-		const command = getSelfUpdateCommand("@mariozechner/pi-coding-agent", undefined, "@new-scope/pi");
+			const command = getSelfUpdateCommand("@mariozechner/pi-coding-agent", undefined, "@new-scope/pi");
 
-		expect(detectInstallMethod()).toBe("pnpm");
-		expect(command).toEqual({
-			command: "pnpm",
-			args: ["install", "-g", "--ignore-scripts", "--config.minimumReleaseAge=0", "@new-scope/pi"],
-			display:
-				"pnpm remove -g @mariozechner/pi-coding-agent && pnpm install -g --ignore-scripts --config.minimumReleaseAge=0 @new-scope/pi",
-			steps: [
-				{
-					command: "pnpm",
-					args: ["remove", "-g", "@mariozechner/pi-coding-agent"],
-					display: "pnpm remove -g @mariozechner/pi-coding-agent",
-				},
-				{
-					command: "pnpm",
-					args: ["install", "-g", "--ignore-scripts", "--config.minimumReleaseAge=0", "@new-scope/pi"],
-					display: "pnpm install -g --ignore-scripts --config.minimumReleaseAge=0 @new-scope/pi",
-				},
-			],
-		});
-	});
+			expect(detectInstallMethod()).toBe("pnpm");
+			expect(command).toEqual({
+				command: "pnpm",
+				args: ["install", "-g", "--ignore-scripts", "--config.minimumReleaseAge=0", "@new-scope/pi"],
+				display:
+					"pnpm remove -g @mariozechner/pi-coding-agent && pnpm install -g --ignore-scripts --config.minimumReleaseAge=0 @new-scope/pi",
+				steps: [
+					{
+						command: "pnpm",
+						args: ["remove", "-g", "@mariozechner/pi-coding-agent"],
+						display: "pnpm remove -g @mariozechner/pi-coding-agent",
+					},
+					{
+						command: "pnpm",
+						args: ["install", "-g", "--ignore-scripts", "--config.minimumReleaseAge=0", "@new-scope/pi"],
+						display: "pnpm install -g --ignore-scripts --config.minimumReleaseAge=0 @new-scope/pi",
+					},
+				],
+			});
+		},
+	);
 
-	test("self-updates pnpm v11 global installs resolved through the store", () => {
+	test.skipIf(process.platform === "win32")("self-updates pnpm v11 global installs resolved through the store", () => {
 		const temp = mkdtempSync(join(tmpdir(), "pi-pnpm11-"));
 		const binDir = join(temp, "bin");
 		const root = join(temp, "Library", "pnpm", "global", "v11");
@@ -351,58 +354,65 @@ describe("detectInstallMethod", () => {
 		});
 	});
 
-	test("self-updates renamed yarn global installs by removing the old package first", () => {
-		createYarnGlobalInstall();
+	test.skipIf(process.platform === "win32")(
+		"self-updates renamed yarn global installs by removing the old package first",
+		() => {
+			createYarnGlobalInstall();
 
-		const command = getSelfUpdateCommand("@mariozechner/pi-coding-agent", undefined, "@new-scope/pi");
+			const command = getSelfUpdateCommand("@mariozechner/pi-coding-agent", undefined, "@new-scope/pi");
 
-		expect(detectInstallMethod()).toBe("yarn");
-		expect(command).toEqual({
-			command: "yarn",
-			args: ["global", "add", "--ignore-scripts", "@new-scope/pi"],
-			display: "yarn global remove @mariozechner/pi-coding-agent && yarn global add --ignore-scripts @new-scope/pi",
-			steps: [
-				{
-					command: "yarn",
-					args: ["global", "remove", "@mariozechner/pi-coding-agent"],
-					display: "yarn global remove @mariozechner/pi-coding-agent",
-				},
-				{
-					command: "yarn",
-					args: ["global", "add", "--ignore-scripts", "@new-scope/pi"],
-					display: "yarn global add --ignore-scripts @new-scope/pi",
-				},
-			],
-		});
-	});
+			expect(detectInstallMethod()).toBe("yarn");
+			expect(command).toEqual({
+				command: "yarn",
+				args: ["global", "add", "--ignore-scripts", "@new-scope/pi"],
+				display:
+					"yarn global remove @mariozechner/pi-coding-agent && yarn global add --ignore-scripts @new-scope/pi",
+				steps: [
+					{
+						command: "yarn",
+						args: ["global", "remove", "@mariozechner/pi-coding-agent"],
+						display: "yarn global remove @mariozechner/pi-coding-agent",
+					},
+					{
+						command: "yarn",
+						args: ["global", "add", "--ignore-scripts", "@new-scope/pi"],
+						display: "yarn global add --ignore-scripts @new-scope/pi",
+					},
+				],
+			});
+		},
+	);
 
-	test("self-updates renamed bun global installs by removing the old package first", () => {
-		createBunGlobalInstall();
+	test.skipIf(process.platform === "win32")(
+		"self-updates renamed bun global installs by removing the old package first",
+		() => {
+			createBunGlobalInstall();
 
-		const command = getSelfUpdateCommand("@mariozechner/pi-coding-agent", undefined, "@new-scope/pi");
+			const command = getSelfUpdateCommand("@mariozechner/pi-coding-agent", undefined, "@new-scope/pi");
 
-		expect(detectInstallMethod()).toBe("bun");
-		expect(command).toEqual({
-			command: "bun",
-			args: ["install", "-g", "--ignore-scripts", "--minimum-release-age=0", "@new-scope/pi"],
-			display:
-				"bun uninstall -g @mariozechner/pi-coding-agent && bun install -g --ignore-scripts --minimum-release-age=0 @new-scope/pi",
-			steps: [
-				{
-					command: "bun",
-					args: ["uninstall", "-g", "@mariozechner/pi-coding-agent"],
-					display: "bun uninstall -g @mariozechner/pi-coding-agent",
-				},
-				{
-					command: "bun",
-					args: ["install", "-g", "--ignore-scripts", "--minimum-release-age=0", "@new-scope/pi"],
-					display: "bun install -g --ignore-scripts --minimum-release-age=0 @new-scope/pi",
-				},
-			],
-		});
-	});
+			expect(detectInstallMethod()).toBe("bun");
+			expect(command).toEqual({
+				command: "bun",
+				args: ["install", "-g", "--ignore-scripts", "--minimum-release-age=0", "@new-scope/pi"],
+				display:
+					"bun uninstall -g @mariozechner/pi-coding-agent && bun install -g --ignore-scripts --minimum-release-age=0 @new-scope/pi",
+				steps: [
+					{
+						command: "bun",
+						args: ["uninstall", "-g", "@mariozechner/pi-coding-agent"],
+						display: "bun uninstall -g @mariozechner/pi-coding-agent",
+					},
+					{
+						command: "bun",
+						args: ["install", "-g", "--ignore-scripts", "--minimum-release-age=0", "@new-scope/pi"],
+						display: "bun install -g --ignore-scripts --minimum-release-age=0 @new-scope/pi",
+					},
+				],
+			});
+		},
+	);
 
-	test("does not self-update when npm install path is not writable", () => {
+	test.skipIf(process.platform === "win32")("does not self-update when npm install path is not writable", () => {
 		const { packageDir } = createNpmPrefixInstall();
 		chmodSync(packageDir, 0o500);
 

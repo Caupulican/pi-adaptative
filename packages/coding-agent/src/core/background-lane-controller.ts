@@ -975,7 +975,9 @@ export class BackgroundLaneController {
 										} catch {
 											// Execution was attempted; preserve conservative accounting with the lexical path.
 										}
-										toolChangedFiles.add(path.relative(this.deps.getCwd(), canonicalPath));
+										toolChangedFiles.add(
+											path.relative(this.deps.getCwd(), canonicalPath).split(path.sep).join("/"),
+										);
 									}
 								}
 							}

@@ -40,7 +40,10 @@ function tokenizePortableCommand(command: string): TokenizeResult {
 		tokenStarted = false;
 	};
 
-	for (const character of command.trim()) {
+	const source = command.trim();
+	for (let index = 0; index < source.length; index++) {
+		const character = source[index];
+		const nextCharacter = source[index + 1];
 		if (escaping) {
 			token += character;
 			tokenStarted = true;
@@ -59,7 +62,14 @@ function tokenizePortableCommand(command: string): TokenizeResult {
 				continue;
 			}
 			if (character === "\\") {
-				escaping = true;
+				if (nextCharacter && '"$`\\'.includes(nextCharacter)) {
+					token += nextCharacter;
+					tokenStarted = true;
+					index++;
+				} else {
+					token += character;
+					tokenStarted = true;
+				}
 				continue;
 			}
 			if (character === "$" || character === "`") {
@@ -81,6 +91,17 @@ function tokenizePortableCommand(command: string): TokenizeResult {
 			continue;
 		}
 		if (character === "\\") {
+			if (/^[A-Za-z]:/u.test(token) || token.startsWith("\\\\")) {
+				token += character;
+				tokenStarted = true;
+				continue;
+			}
+			if (token === "" && nextCharacter === "\\") {
+				token = "\\\\";
+				tokenStarted = true;
+				index++;
+				continue;
+			}
 			escaping = true;
 			tokenStarted = true;
 			continue;

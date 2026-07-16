@@ -536,7 +536,7 @@ describe("AgentSession local runtime readiness — end to end through prompt()",
 			expect(serveEnv?.OLLAMA_NUM_PARALLEL).toBe("1");
 			expect(serveEnv?.OLLAMA_KEEP_ALIVE).toBe("30m");
 			// The router's boot path uses the same canonical pi-owned store as /models add.
-			expect(serveEnv?.OLLAMA_MODELS).toContain("models/ollama");
+			expect(serveEnv?.OLLAMA_MODELS?.replaceAll("\\", "/")).toContain("models/ollama");
 		} finally {
 			ollamaFaux.unregister();
 			harness.cleanup();

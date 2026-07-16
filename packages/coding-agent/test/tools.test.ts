@@ -443,7 +443,7 @@ describe("Coding Agent Tools", () => {
 			expect(readFileSync(testFile, "utf-8")).toBe(originalContent);
 		});
 
-		it("should include EACCES for read-only files", async () => {
+		it.skipIf(process.platform === "win32")("should include EACCES for read-only files", async () => {
 			const testFile = join(testDir, "edit-readonly.txt");
 			writeFileSync(testFile, "hello\n");
 			chmodSync(testFile, 0o444);
@@ -594,10 +594,12 @@ describe("Coding Agent Tools", () => {
 
 		it("should prepend command prefix when configured", async () => {
 			const bashWithPrefix = createBashTool(testDir, {
-				commandPrefix: "export TEST_VAR=hello",
+				commandPrefix: process.platform === "win32" ? "$env:TEST_VAR = 'hello'" : "export TEST_VAR=hello",
 			});
 
-			const result = await bashWithPrefix.execute("test-prefix-1", { command: "echo $TEST_VAR" });
+			const result = await bashWithPrefix.execute("test-prefix-1", {
+				command: "node -e \"process.stdout.write(process.env.TEST_VAR ?? '')\"",
+			});
 			expect(getTextOutput(result).trim()).toBe("hello");
 		});
 
@@ -762,7 +764,7 @@ describe("Coding Agent Tools", () => {
 			expect(fullOutput).toContain("2998\n2999\n3000");
 		});
 
-		it("should keep a bounded preview for piped command output", async () => {
+		it.skipIf(process.platform === "win32")("should keep a bounded preview for piped command output", async () => {
 			const bash = createBashTool(testDir);
 
 			const result = await bash.execute("test-call-piped-output-preview", { command: "seq 3000 | cat" });
@@ -862,7 +864,7 @@ describe("Coding Agent Tools", () => {
 			expect(execCalled).toBe(true);
 		});
 
-		it("should pass shell operators through outside Windows", async () => {
+		it.skipIf(process.platform === "win32")("should pass shell operators through outside Windows", async () => {
 			const testFile = join(testDir, "unsafe.txt");
 			writeFileSync(testFile, "unsafe");
 
@@ -964,7 +966,7 @@ describe("Coding Agent Tools", () => {
 			writeFileSync(testFile, "target\n");
 
 			const result = await grepTool.execute("test-call-grep-injection", {
-				pattern: `--pre=${payload}`,
+				pattern: `--pre=${payload.replaceAll("\\", "\\\\")}`,
 				path: testDir,
 			});
 

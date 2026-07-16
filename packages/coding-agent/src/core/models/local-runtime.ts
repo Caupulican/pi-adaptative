@@ -391,13 +391,14 @@ export class OllamaRuntime {
 	}
 
 	private _findBinary(): { path: string; source: "system" | "user" | "pi-owned" } | undefined {
-		const piOwned = join(this._agentDir, "runtimes", "ollama", "bin", "ollama");
+		const binaryName = this._platform() === "win32" ? "ollama.exe" : "ollama";
+		const piOwned = join(this._agentDir, "runtimes", "ollama", "bin", binaryName);
 		if (this._exists(piOwned)) return { path: piOwned, source: "pi-owned" };
-		const userLevel = join(this._homeDir, ".local", "share", "ollama-dist", "bin", "ollama");
+		const userLevel = join(this._homeDir, ".local", "share", "ollama-dist", "bin", binaryName);
 		if (this._exists(userLevel)) return { path: userLevel, source: "user" };
 		for (const dir of this._envPath.split(delimiter)) {
 			if (!dir) continue;
-			const candidate = join(dir, "ollama");
+			const candidate = join(dir, binaryName);
 			if (this._exists(candidate)) return { path: candidate, source: "system" };
 		}
 		return undefined;

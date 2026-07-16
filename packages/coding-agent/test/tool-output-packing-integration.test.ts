@@ -298,7 +298,9 @@ describe("Slice B: bash tool already preserves decision-bearing failure detail (
 		await expect(
 			bashTool.execute(
 				"tc-bash-fail",
-				{ command: "echo 'first error: something specific broke' && exit 7" },
+				{
+					command: `node -e "console.log('first error: something specific broke'); process.exit(7)"`,
+				},
 				undefined,
 				undefined,
 			),
@@ -312,8 +314,7 @@ describe("Slice B: bash tool already preserves decision-bearing failure detail (
 			bashTool.execute(
 				"tc-bash-fail-large",
 				{
-					command:
-						"for i in $(seq 1 3000); do echo \"line $i\"; done; echo 'first error: exact failure detail'; exit 3",
+					command: `node -e "for (let i = 1; i <= 3000; i++) console.log('line ' + i); console.log('first error: exact failure detail'); process.exit(3)"`,
 				},
 				undefined,
 				undefined,

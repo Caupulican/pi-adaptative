@@ -37,9 +37,25 @@ interface AutoLearnLaunchHarness {
 	) => string;
 }
 
-afterEach(() => {
+afterEach(async () => {
 	for (const dir of tempDirs.splice(0)) {
-		rmSync(dir, { recursive: true, force: true });
+		try {
+			const state = JSON.parse(readFileSync(join(dir, "state.json"), "utf-8")) as {
+				runs?: Record<string, { pid?: unknown }>;
+			};
+			for (const run of Object.values(state.runs ?? {})) {
+				if (typeof run.pid !== "number") continue;
+				try {
+					process.kill(run.pid);
+				} catch {
+					// The child already exited.
+				}
+			}
+		} catch {
+			// Tests that never launch a child have no state file.
+		}
+		await new Promise((resolve) => setTimeout(resolve, 50));
+		rmSync(dir, { recursive: true, force: true, maxRetries: 10, retryDelay: 50 });
 	}
 });
 

@@ -1,3 +1,4 @@
+import { sep } from "node:path";
 import { visibleWidth } from "@caupulican/pi-tui";
 import { beforeAll, describe, expect, it, vi } from "vitest";
 import type { AgentSession } from "../src/core/agent-session.ts";
@@ -120,7 +121,7 @@ describe("formatCwdForFooter", () => {
 
 	it("abbreviates the home directory and descendants", () => {
 		expect(formatCwdForFooter("/home/user", "/home/user")).toBe("~");
-		expect(formatCwdForFooter("/home/user/project", "/home/user")).toBe("~/project");
+		expect(formatCwdForFooter("/home/user/project", "/home/user")).toBe(`~${sep}project`);
 	});
 });
 

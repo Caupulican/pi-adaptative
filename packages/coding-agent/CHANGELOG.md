@@ -4,6 +4,10 @@
 
 - Updated repository development and CI to Node.js 24 and moved GitHub workflows to Node 24-based action releases while retaining Node.js 22.19 as the published runtime minimum.
 
+### Fixed
+
+- Fixed Windows shell routing for native drive and UNC paths, extension live reloads, managed Ollama executable discovery, and canonical delegated-worker path reports.
+
 ## [0.81.37] - 2026-07-16
 
 ### Fixed
