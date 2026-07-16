@@ -90,7 +90,7 @@ describe("createAgentSession session manager defaults", () => {
 			.map((item) => item.text)
 			.join("");
 
-		expect(realpathSync(output.trim())).toBe(realpathSync(sessionCwd));
+		expect(realpathSync.native(output.trim())).toBe(realpathSync.native(sessionCwd));
 
 		session.dispose();
 	});
