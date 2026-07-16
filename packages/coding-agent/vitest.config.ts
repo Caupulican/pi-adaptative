@@ -16,7 +16,7 @@ export default defineConfig({
 		testTimeout: 30000,
 		// Many files spawn additional Node processes. Unbounded CPU-based parallelism exhausts
 		// memory on development and CI hosts, making unrelated 30s tests fail nondeterministically.
-		maxWorkers: 4,
+		maxWorkers: process.platform === "win32" ? 1 : 4,
 		// Scratch/live-model tests (test/scratch-*.test.ts) are OPT-IN. They gate on a reachable
 		// local Ollama and, when it is reachable, run real model generations that time out under CI
 		// or parallel load — so a plain `vitest --run` was non-deterministic (runs flipped between
