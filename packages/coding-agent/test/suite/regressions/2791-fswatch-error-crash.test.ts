@@ -1,5 +1,5 @@
 import { execFileSync } from "node:child_process";
-import { mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
+import { mkdirSync, mkdtempSync, readFileSync, realpathSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { pathToFileURL } from "node:url";
@@ -24,7 +24,7 @@ describe("issue #2791 fs.watch error event crashes process", () => {
 	let tempRoot: string;
 
 	beforeEach(() => {
-		tempRoot = mkdtempSync(join(tmpdir(), "pi-2791-"));
+		tempRoot = mkdtempSync(join(realpathSync.native(tmpdir()), "pi-2791-"));
 		const agentDir = join(tempRoot, "agent");
 		const themesDir = join(agentDir, "themes");
 		mkdirSync(themesDir, { recursive: true });
