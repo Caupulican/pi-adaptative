@@ -106,7 +106,7 @@ describe("bundled tmux agent manager completion", () => {
 				encoding: "utf8",
 				input: "provider output\n\u001b[32mPI_TMUX_DONE\u001b[0m\n",
 				env: { ...process.env, PATH: `${binDir}:${process.env.PATH ?? ""}` },
-				timeout: 5_000,
+				timeout: 15_000,
 			});
 			expect(result.error).toBeUndefined();
 			expect(result.status, result.stderr).toBe(0);

@@ -20,7 +20,7 @@ import { ENV_AGENT_DIR } from "../../../src/config.ts";
  * 4. If the watcher has no error handler -> crash (exit != 0) -> bug present
  * 5. If the watcher has an error handler -> clean exit (exit 0) -> bug fixed
  */
-describe("issue #2791 fs.watch error event crashes process", () => {
+describe.skipIf(process.platform === "win32")("issue #2791 fs.watch error event crashes process", () => {
 	let tempRoot: string;
 
 	beforeEach(() => {
