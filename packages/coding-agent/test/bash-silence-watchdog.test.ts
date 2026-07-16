@@ -6,7 +6,9 @@ describe("bash execution deadlines", () => {
 		setCommandTimeoutMsForTests(500);
 		try {
 			const tool = createBashTool(process.cwd());
-			await expect(tool.execute("t1", { command: "sleep 30" })).rejects.toThrow(/timed out after 0.5 seconds/i);
+			await expect(tool.execute("t1", { command: 'node -e "setTimeout(function(){}, 30000)"' })).rejects.toThrow(
+				/timed out after 0.5 seconds/i,
+			);
 		} finally {
 			setCommandTimeoutMsForTests(undefined);
 		}
@@ -16,9 +18,9 @@ describe("bash execution deadlines", () => {
 		setCommandTimeoutMsForTests(700);
 		try {
 			const tool = createBashTool(process.cwd());
-			await expect(tool.execute("t2", { command: "while true; do echo tick; sleep 0.1; done" })).rejects.toThrow(
-				/timed out after 0.7 seconds/i,
-			);
+			await expect(
+				tool.execute("t2", { command: "node -e \"setInterval(function(){console.log('tick')}, 100)\"" }),
+			).rejects.toThrow(/timed out after 0.7 seconds/i);
 		} finally {
 			setCommandTimeoutMsForTests(undefined);
 		}
@@ -28,9 +30,9 @@ describe("bash execution deadlines", () => {
 		setCommandTimeoutMsForTests(500);
 		try {
 			const tool = createBashTool(process.cwd());
-			await expect(tool.execute("t3", { command: "sleep 30", timeout: 0 })).rejects.toThrow(
-				/timed out after 0.5 seconds/i,
-			);
+			await expect(
+				tool.execute("t3", { command: 'node -e "setTimeout(function(){}, 30000)"', timeout: 0 }),
+			).rejects.toThrow(/timed out after 0.5 seconds/i);
 		} finally {
 			setCommandTimeoutMsForTests(undefined);
 		}
@@ -40,7 +42,10 @@ describe("bash execution deadlines", () => {
 		setCommandTimeoutMsForTests(300);
 		try {
 			const tool = createBashTool(process.cwd());
-			const result = await tool.execute("t4", { command: "sleep 1 && echo done", timeout: 2 });
+			const result = await tool.execute("t4", {
+				command: "node -e \"setTimeout(function(){console.log('done')}, 1000)\"",
+				timeout: 2,
+			});
 			const text = result.content.map((item) => ("text" in item ? item.text : "")).join("");
 			expect(text).toContain("done");
 		} finally {

@@ -1,4 +1,4 @@
-import { execSync } from "node:child_process";
+import { execFileSync, execSync } from "node:child_process";
 import { mkdirSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
@@ -111,7 +111,7 @@ describe("Git Output Filter - Subcommands", () => {
 	it("should handle log compaction", async () => {
 		writeFileSync(join(testRepoDir, "file1.txt"), "hello");
 		execSync("git add file1.txt", { cwd: testRepoDir });
-		execSync('git commit -m "First commit\n\nSome body\nSigned-off-by: Me"', { cwd: testRepoDir });
+		execFileSync("git", ["commit", "-m", "First commit\n\nSome body\nSigned-off-by: Me"], { cwd: testRepoDir });
 
 		const res = await executeFilteredGit(testRepoDir, "log", [], []);
 		expect(res.exitCode).toBe(0);
@@ -208,15 +208,21 @@ describe("Git Output Filter - Subcommands", () => {
 		const compact = await bash.execute("git-status-compact", { command: "git status" });
 		expect(getTextOutput(compact)).toContain("## main");
 
-		const rawToolOptOut = await bash.execute("git-status-tool-optout", {
-			command: "PI_TOOL_FILTER_DISABLED=1 git status",
-		});
-		expect(getTextOutput(rawToolOptOut)).toContain("On branch main");
+		process.env.PI_TOOL_FILTER_DISABLED = "1";
+		try {
+			const rawToolOptOut = await bash.execute("git-status-tool-optout", { command: "git status" });
+			expect(getTextOutput(rawToolOptOut)).toContain("On branch main");
+		} finally {
+			delete process.env.PI_TOOL_FILTER_DISABLED;
+		}
 
-		const rawGitOptOut = await bash.execute("git-status-git-optout", {
-			command: "PI_GIT_FILTER_DISABLED=1 git status",
-		});
-		expect(getTextOutput(rawGitOptOut)).toContain("On branch main");
+		process.env.PI_GIT_FILTER_DISABLED = "1";
+		try {
+			const rawGitOptOut = await bash.execute("git-status-git-optout", { command: "git status" });
+			expect(getTextOutput(rawGitOptOut)).toContain("On branch main");
+		} finally {
+			delete process.env.PI_GIT_FILTER_DISABLED;
+		}
 	});
 
 	it("bash tool should preserve custom operations for eligible git commands", async () => {

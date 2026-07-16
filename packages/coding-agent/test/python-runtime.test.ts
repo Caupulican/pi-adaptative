@@ -1,3 +1,4 @@
+import { join } from "node:path";
 import { describe, expect, it } from "vitest";
 import {
 	createPythonRuntimeManager,
@@ -109,8 +110,8 @@ describe("uv-managed Python runtime", () => {
 		]);
 		expect(calls[1]?.timeout).toBe(300_000);
 		expect(calls[0]?.env).toMatchObject({
-			UV_CACHE_DIR: "/agent/cache/uv",
-			UV_PYTHON_INSTALL_DIR: "/agent/runtimes/python",
+			UV_CACHE_DIR: join("/agent", "cache", "uv"),
+			UV_PYTHON_INSTALL_DIR: join("/agent", "runtimes", "python"),
 			UV_NO_PROGRESS: "1",
 		});
 	});

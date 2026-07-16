@@ -3,6 +3,7 @@ import type { AgentTool } from "@caupulican/pi-agent-core";
 import { DEFAULT_MAX_BYTES, formatSize, type TruncationResult } from "@caupulican/pi-agent-core/node";
 import { Text } from "@caupulican/pi-tui";
 import { spawn } from "child_process";
+import { minimatch } from "minimatch";
 import path from "path";
 import { type Static, Type } from "typebox";
 import { keyHint } from "../../modes/interactive/components/keybinding-hints.ts";
@@ -32,7 +33,7 @@ import { defaultSearchRouter, type SearchRouter } from "./search-router.ts";
 import { wrapToolDefinition } from "./tool-definition-wrapper.ts";
 
 function toPosixPath(value: string): string {
-	return value.split(path.sep).join("/");
+	return value.replaceAll("\\", "/");
 }
 
 const findSchema = Type.Object({
@@ -189,7 +190,7 @@ function fffSearchOutput(
 	packing: FindPackingOptions,
 ) {
 	const relativized = result.items
-		.map((item) => toSearchRelative(item.relativePath, searchPathRelativeToCwd))
+		.map((item) => toSearchRelative(toPosixPath(item.relativePath), searchPathRelativeToCwd))
 		.filter((item): item is string => Boolean(item));
 	return formatFindResults(relativized, effectiveLimit, packing);
 }
@@ -304,15 +305,15 @@ function formatFindResults(
 	const extCounts = new Map<string, number>();
 
 	for (const p of displayedResults) {
-		const dir = path.dirname(p);
-		const base = path.basename(p);
+		const dir = path.posix.dirname(p);
+		const base = path.posix.basename(p);
 		const dirKey = dir === "." ? "./" : `${dir}/`;
 		if (!dirGroups.has(dirKey)) {
 			dirGroups.set(dirKey, []);
 		}
 		dirGroups.get(dirKey)!.push(base);
 
-		const ext = path.extname(p).toLowerCase() || "(no extension)";
+		const ext = path.posix.extname(p).toLowerCase() || "(no extension)";
 		extCounts.set(ext, (extCounts.get(ext) || 0) + 1);
 	}
 
@@ -542,23 +543,22 @@ export function createFindToolDefinition(
 						// Build fd arguments. --no-require-git makes fd apply hierarchical .gitignore
 						// semantics whether or not the search path is inside a git repository, without
 						// leaking sibling-directory rules the way --ignore-file (a global source) would.
-						const args: string[] = [
-							"--glob",
-							"--color=never",
-							"--hidden",
-							"--no-require-git",
-							"--max-results",
-							String(probeLimit),
-						];
+						const portablePathGlob = process.platform === "win32" && effectivePattern.includes("/");
+						const args: string[] = ["--color=never", "--hidden", "--no-require-git"];
+						if (!portablePathGlob) {
+							args.push("--glob", "--max-results", String(probeLimit));
+						}
 						if (ignoreCase) {
 							args.push("--ignore-case");
 						}
 
-						// fd --glob matches against the basename unless --full-path is set; in --full-path
-						// mode it matches against the absolute candidate path, so a path-containing
-						// pattern like 'src/**/*.spec.ts' needs a leading '**/' to match anything.
+						// fd's Windows full-path glob matcher compares slash-based glob regexes with
+						// native backslash paths, so path globs can return no matches. On Windows,
+						// retain fd's traversal and .gitignore semantics, then apply the portable glob
+						// to normalized relative paths while streaming. Other platforms keep fd's
+						// native bounded full-path matching.
 						let finalPattern = effectivePattern;
-						if (effectivePattern.includes("/")) {
+						if (!portablePathGlob && effectivePattern.includes("/")) {
 							args.push("--full-path");
 							if (
 								!effectivePattern.startsWith("/") &&
@@ -568,7 +568,7 @@ export function createFindToolDefinition(
 								finalPattern = `**/${effectivePattern}`;
 							}
 						}
-						args.push("--", finalPattern, searchPath);
+						args.push("--", portablePathGlob ? "" : finalPattern, searchPath);
 
 						const child = spawn(fdPath, args, {
 							detached: process.platform !== "win32",
@@ -576,7 +576,9 @@ export function createFindToolDefinition(
 						});
 						const rl = createInterface({ input: child.stdout });
 						let stderr = "";
-						const lines: string[] = [];
+						let sawOutput = false;
+						let portableLimitReached = false;
+						const relativized: string[] = [];
 						const terminationController = new AbortController();
 
 						stopChild = () => terminationController.abort();
@@ -589,8 +591,33 @@ export function createFindToolDefinition(
 							stderr += chunk.toString();
 						});
 
-						rl.on("line", (line) => {
-							lines.push(line);
+						rl.on("line", (rawLine) => {
+							sawOutput = true;
+							const line = rawLine.replace(/\r$/, "").trim();
+							if (!line) return;
+							const hadTrailingSlash = line.endsWith("/") || line.endsWith("\\");
+							let relativePath = line;
+							if (line.startsWith(searchPath)) {
+								relativePath = line.slice(searchPath.length + 1);
+							} else {
+								relativePath = path.relative(searchPath, line);
+							}
+							relativePath = toPosixPath(relativePath);
+							if (
+								portablePathGlob &&
+								!minimatch(relativePath.replace(/\/$/, ""), effectivePattern, {
+									dot: true,
+									nocase: ignoreCase,
+								})
+							) {
+								return;
+							}
+							if (hadTrailingSlash && !relativePath.endsWith("/")) relativePath += "/";
+							relativized.push(relativePath);
+							if (portablePathGlob && relativized.length >= probeLimit && !portableLimitReached) {
+								portableLimitReached = true;
+								stopChild?.();
+							}
 						});
 
 						const terminal = await waitForChildProcessWithTermination(child, {
@@ -607,28 +634,10 @@ export function createFindToolDefinition(
 							settle(() => reject(new Error("Operation aborted")));
 							return;
 						}
-						const output = lines.join("\n");
-						if (code !== 0) {
+						if (code !== 0 && !portableLimitReached && !sawOutput) {
 							const errorMsg = stderr.trim() || `fd exited with code ${code}`;
-							if (!output) {
-								settle(() => reject(new Error(errorMsg)));
-								return;
-							}
-						}
-
-						const relativized: string[] = [];
-						for (const rawLine of lines) {
-							const line = rawLine.replace(/\r$/, "").trim();
-							if (!line) continue;
-							const hadTrailingSlash = line.endsWith("/") || line.endsWith("\\");
-							let relativePath = line;
-							if (line.startsWith(searchPath)) {
-								relativePath = line.slice(searchPath.length + 1);
-							} else {
-								relativePath = path.relative(searchPath, line);
-							}
-							if (hadTrailingSlash && !relativePath.endsWith("/")) relativePath += "/";
-							relativized.push(toPosixPath(relativePath));
+							settle(() => reject(new Error(errorMsg)));
+							return;
 						}
 
 						const formatted = formatFindResults(relativized, effectiveLimit, {

@@ -182,13 +182,14 @@ function fffDisplayPath(
 	match: FffGrepMatch,
 	options: { isDirectory: boolean; searchPathRelativeToCwd: string },
 ): string | undefined {
-	if (!options.searchPathRelativeToCwd) return match.relativePath;
+	const relativePath = match.relativePath.replaceAll("\\", "/");
+	if (!options.searchPathRelativeToCwd) return relativePath;
 	if (!options.isDirectory) {
-		return match.relativePath === options.searchPathRelativeToCwd ? path.basename(match.relativePath) : undefined;
+		return relativePath === options.searchPathRelativeToCwd ? path.posix.basename(relativePath) : undefined;
 	}
 	const prefix = `${options.searchPathRelativeToCwd}/`;
-	if (!match.relativePath.startsWith(prefix)) return undefined;
-	return match.relativePath.slice(prefix.length);
+	if (!relativePath.startsWith(prefix)) return undefined;
+	return relativePath.slice(prefix.length);
 }
 
 function appendFffMatchLines(options: {

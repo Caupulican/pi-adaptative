@@ -54,8 +54,8 @@ describe("BashExecutionController", () => {
 			},
 		};
 
-		const first = controller.executeBash("first", undefined, { operations });
-		const second = controller.executeBash("second", undefined, { operations });
+		const first = controller.executeBash("first", undefined, { operations, platform: "linux" });
+		const second = controller.executeBash("second", undefined, { operations, platform: "linux" });
 		controller.abortBash();
 		await Promise.all([first, second]);
 

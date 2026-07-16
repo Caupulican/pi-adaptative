@@ -41,8 +41,9 @@ function writeOkfFile(harness: Harness, filename: string, content: string): void
  * are comparable.
  */
 function normalizeContext(context: Context, tempDir: string): unknown {
+	const portableTempDir = tempDir.replaceAll("\\", "/");
 	return {
-		systemPrompt: context.systemPrompt?.split(tempDir).join("<tempdir>"),
+		systemPrompt: context.systemPrompt?.split(tempDir).join("<tempdir>").split(portableTempDir).join("<tempdir>"),
 		// Tool `execute` closures are unique per-harness instances (never === across
 		// separate sessions even when functionally identical), so compare tool identity by
 		// name/description only, not the closure itself.

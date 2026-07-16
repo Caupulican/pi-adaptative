@@ -7,6 +7,7 @@
 ### Fixed
 
 - Fixed Windows shell routing for native drive and UNC paths, extension live reloads, managed Ollama executable discovery, and canonical delegated-worker path reports.
+- Fixed Windows full-path find/FFF search parity, cross-platform watcher/runtime test behavior, and SQLite handle cleanup when runtime-index schema validation fails.
 
 ## [0.81.37] - 2026-07-16
 

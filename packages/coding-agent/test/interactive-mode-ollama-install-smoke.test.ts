@@ -198,10 +198,10 @@ describe("#31 real interactive smoke — install-ollama confirm through Interact
 			expect(rendered).toContain("Install Ollama?");
 			expect(rendered).toContain("large one-time download");
 
+			ollamaFaux.setResponses([fauxAssistantMessage("answered locally after install")]);
 			// Real keypress: "\n" is ExtensionSelectorComponent's own confirm key, selecting "Yes" (index 0).
 			selector.handleInput("\n");
 
-			ollamaFaux.setResponses([fauxAssistantMessage("answered locally after install")]);
 			await promptPromise;
 
 			expect(extractCalls).toHaveLength(1);

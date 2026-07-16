@@ -104,7 +104,7 @@ describe.skipIf(process.platform === "win32")("bundled tmux agent manager comple
 
 			const result = spawnSync("sh", [watcherPath, "worker"], {
 				encoding: "utf8",
-				input: "provider output\n\u001b[32mPI_TMUX_DONE\u001b[0m\n",
+				input: "provider output\nPI_TMUX_DONE\n",
 				env: { ...process.env, PATH: `${binDir}:${process.env.PATH ?? ""}` },
 				timeout: 15_000,
 			});

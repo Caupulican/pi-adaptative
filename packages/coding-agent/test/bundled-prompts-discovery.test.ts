@@ -95,7 +95,7 @@ This is a user prompt that overrides the bundled skillify prompt.`,
 		expect(skillify).toBeDefined();
 		if (skillify) {
 			expect(skillify.sourceInfo?.scope).toBe("user");
-			expect(skillify.filePath).toContain("agent/prompts");
+			expect(skillify.filePath).toContain(userPromptsDir);
 			expect(skillify.description).toBe("User override of bundled skillify prompt");
 		}
 	});
@@ -124,7 +124,7 @@ This is a project prompt that overrides the bundled learn prompt.`,
 		expect(learn).toBeDefined();
 		if (learn) {
 			expect(learn.sourceInfo?.scope).toBe("project");
-			expect(learn.filePath).toContain(".pi/prompts");
+			expect(learn.filePath).toContain(projectPromptsDir);
 			expect(learn.description).toBe("Project override of bundled learn prompt");
 		}
 	});

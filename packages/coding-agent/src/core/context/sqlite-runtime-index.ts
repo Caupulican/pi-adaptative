@@ -41,13 +41,18 @@ function openDatabase(options: SqliteRuntimeIndexOptions): DatabaseSync {
 		enableForeignKeyConstraints: true,
 		timeout: options.busyTimeoutMs ?? 5_000,
 	});
-	database.exec(`
-		PRAGMA foreign_keys = ON;
-		PRAGMA busy_timeout = ${options.busyTimeoutMs ?? 5_000};
-		PRAGMA journal_mode = WAL;
-	`);
-	migrateSqliteRuntimeIndex(database);
-	return database;
+	try {
+		database.exec(`
+			PRAGMA foreign_keys = ON;
+			PRAGMA busy_timeout = ${options.busyTimeoutMs ?? 5_000};
+			PRAGMA journal_mode = WAL;
+		`);
+		migrateSqliteRuntimeIndex(database);
+		return database;
+	} catch (error) {
+		database[Symbol.dispose]();
+		throw error;
+	}
 }
 
 function currentSchemaVersion(database: DatabaseSync): number {

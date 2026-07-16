@@ -107,7 +107,7 @@ export function applyWorkerActions(args: {
 			continue;
 		}
 		const target = resolve(args.cwd, action.path);
-		const relativePath = relative(args.cwd, target);
+		const relativePath = relative(args.cwd, target).replaceAll("\\", "/");
 		try {
 			if (action.op === "write") {
 				mkdirSync(dirname(target), { recursive: true });

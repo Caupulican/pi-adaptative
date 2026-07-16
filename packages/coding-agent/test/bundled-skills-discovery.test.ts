@@ -130,7 +130,7 @@ This is a user skill that overrides the bundled one.`,
 		expect(skillArchitect).toBeDefined();
 		if (skillArchitect) {
 			expect(skillArchitect.sourceInfo?.scope).toBe("user");
-			expect(skillArchitect.filePath).toContain("agent/skills");
+			expect(skillArchitect.filePath).toContain(join(agentDir, "skills"));
 		}
 	});
 
@@ -157,7 +157,7 @@ This is a project skill that overrides the bundled one.`,
 		expect(piHarnessLearning).toBeDefined();
 		if (piHarnessLearning) {
 			expect(piHarnessLearning.sourceInfo?.scope).toBe("project");
-			expect(piHarnessLearning.filePath).toContain(".pi/skills");
+			expect(piHarnessLearning.filePath).toContain(join(cwd, ".pi", "skills"));
 		}
 	});
 });
