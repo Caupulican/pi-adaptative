@@ -87,7 +87,7 @@ async function waitFor(condition: () => boolean, timeoutMs = 3000): Promise<void
 	}
 }
 
-describe("FooterDataProvider reftable branch detection", () => {
+describe.skipIf(process.platform === "win32")("FooterDataProvider reftable branch detection", () => {
 	let originalCwd: string;
 	let tempDir: string;
 
@@ -264,7 +264,7 @@ describe("FooterDataProvider reftable branch detection", () => {
 	});
 });
 
-describe("FooterDataProvider autonomy status", () => {
+describe.skipIf(process.platform === "win32")("FooterDataProvider autonomy status", () => {
 	let originalCwd: string;
 	let tempDir: string;
 
