@@ -21,7 +21,7 @@ describe("stable Bash-like shell contract router", () => {
 		const cases: Array<[string, string]> = [
 			["pwd", "(Get-Location).Path"],
 			["ls -la .", "Get-ChildItem -LiteralPath '.' -Force"],
-			["cat 'a b.txt'", "Get-Content -LiteralPath @('a b.txt') -Raw"],
+			["cat 'a b.txt'", "[IO.File]::ReadAllText($path)"],
 			["head -n 4 file.txt", "-TotalCount 4"],
 			["tail -n 4 file.txt", "-Tail 4"],
 			["grep TODO file.txt", "Select-String -LiteralPath 'file.txt'"],

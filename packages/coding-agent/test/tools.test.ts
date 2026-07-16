@@ -1,5 +1,5 @@
 import { applyPatch } from "diff";
-import { chmodSync, existsSync, mkdirSync, readFileSync, rmSync, symlinkSync, writeFileSync } from "fs";
+import { chmodSync, existsSync, mkdirSync, readFileSync, realpathSync, rmSync, symlinkSync, writeFileSync } from "fs";
 import { tmpdir } from "os";
 import { join } from "path";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
@@ -482,15 +482,18 @@ describe("Coding Agent Tools", () => {
 			expect(result).toEqual({ error: `Could not edit file: ${missingFile}. Error code: ENOENT.` });
 		});
 
-		it("should include EACCES in diff preview for unreadable files", async () => {
-			const unreadableFile = join(testDir, "unreadable-preview.txt");
-			writeFileSync(unreadableFile, "hello\n");
-			chmodSync(unreadableFile, 0o222);
+		it.skipIf(process.platform === "win32")(
+			"should include EACCES in diff preview for unreadable files",
+			async () => {
+				const unreadableFile = join(testDir, "unreadable-preview.txt");
+				writeFileSync(unreadableFile, "hello\n");
+				chmodSync(unreadableFile, 0o222);
 
-			const result = await computeEditsDiff(unreadableFile, [{ oldText: "hello", newText: "world" }], testDir);
+				const result = await computeEditsDiff(unreadableFile, [{ oldText: "hello", newText: "world" }], testDir);
 
-			expect(result).toEqual({ error: `Could not edit file: ${unreadableFile}. Error code: EACCES.` });
-		});
+				expect(result).toEqual({ error: `Could not edit file: ${unreadableFile}. Error code: EACCES.` });
+			},
+		);
 	});
 
 	describe("bash tool", () => {
@@ -808,8 +811,8 @@ describe("Coding Agent Tools", () => {
 			const output = getTextOutput(result)
 				.trim()
 				.split("\n")
-				.map((path) => path.replaceAll("\\", "/"));
-			const linkPath = join(searchDir, "out-link").replaceAll("\\", "/");
+				.map((path) => path.replaceAll("\\", "/").toLowerCase());
+			const linkPath = join(realpathSync(searchDir), "out-link").replaceAll("\\", "/").toLowerCase();
 
 			expect(output).toContain(linkPath);
 			expect(output).not.toContain(`${linkPath}/escaped.txt`);
@@ -826,8 +829,8 @@ describe("Coding Agent Tools", () => {
 			const output = getTextOutput(result)
 				.trim()
 				.split("\n")
-				.map((path) => path.replaceAll("\\", "/"));
-			expect(output).toContain(childPath.replaceAll("\\", "/"));
+				.map((path) => path.replaceAll("\\", "/").toLowerCase());
+			expect(output).toContain(realpathSync(childPath).replaceAll("\\", "/").toLowerCase());
 		});
 
 		it("should truncate platform shell output", async () => {
@@ -898,7 +901,9 @@ describe("Coding Agent Tools", () => {
 			try {
 				const bash = createBashTool(testDir);
 				const result = await bash.execute("test-disabled", { command: `find ${searchDir}` });
-				expect(getTextOutput(result)).toContain(searchDir);
+				expect(getTextOutput(result).replaceAll("\\", "/").toLowerCase()).toContain(
+					realpathSync(searchDir).replaceAll("\\", "/").toLowerCase(),
+				);
 			} finally {
 				delete process.env.PI_TOOL_OPTIMIZER_DISABLED;
 			}

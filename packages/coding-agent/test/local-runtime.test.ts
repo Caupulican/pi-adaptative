@@ -3,17 +3,24 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import {
-	OllamaRuntime,
+	OllamaRuntime as ProductionOllamaRuntime,
+	TransformersRuntime as ProductionTransformersRuntime,
 	type RuntimeCommandRunner,
 	resolveOllamaAsset,
 	resolveTransformersBaseUrl,
-	TransformersRuntime,
 } from "../src/core/models/local-runtime.ts";
 
-vi.mock("node:os", async (importOriginal) => {
-	const actual = await importOriginal<typeof import("node:os")>();
-	return { ...actual, platform: () => "linux" };
-});
+class OllamaRuntime extends ProductionOllamaRuntime {
+	constructor(args: ConstructorParameters<typeof ProductionOllamaRuntime>[0]) {
+		super({ ...args, deps: { platform: () => "linux", ...args.deps } });
+	}
+}
+
+class TransformersRuntime extends ProductionTransformersRuntime {
+	constructor(args: ConstructorParameters<typeof ProductionTransformersRuntime>[0]) {
+		super({ ...args, deps: { platform: () => "linux", ...args.deps } });
+	}
+}
 
 function ndjsonResponse(lines: object[]): Response {
 	const body = lines.map((line) => JSON.stringify(line)).join("\n");

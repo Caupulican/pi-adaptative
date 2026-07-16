@@ -168,7 +168,7 @@ function routeLs(argv: readonly string[]): string | undefined {
 function routeCat(argv: readonly string[]): string | undefined {
 	const parsed = parseFlags(argv.slice(1), new Set(["--"]));
 	if (!parsed || parsed.operands.length === 0) return undefined;
-	return `Get-Content -LiteralPath ${powershellArray(parsed.operands)} -Raw -ErrorAction Stop`;
+	return `foreach ($path in ${powershellArray(parsed.operands)}) { [Console]::Out.Write([IO.File]::ReadAllText($path)) }`;
 }
 
 function routeHeadOrTail(argv: readonly string[], tail: boolean): string | undefined {
@@ -186,7 +186,7 @@ function routeHeadOrTail(argv: readonly string[], tail: boolean): string | undef
 
 function routeGrep(argv: readonly string[]): string | undefined {
 	if (argv.length !== 3 || argv[1].startsWith("-") || argv[2].startsWith("-")) return undefined;
-	return `Select-String -LiteralPath ${quotePowerShell(argv[2])} -SimpleMatch -Pattern ${quotePowerShell(argv[1])} -ErrorAction Stop | ForEach-Object { $_.Line }`;
+	return `Select-String -LiteralPath ${quotePowerShell(argv[2])} -Pattern ${quotePowerShell(argv[1])} -ErrorAction Stop | ForEach-Object { $_.Line }`;
 }
 
 function routeFind(argv: readonly string[]): string | undefined {
