@@ -196,12 +196,14 @@ describe("default session directory encoding", () => {
 	});
 
 	it("uses collision-resistant cwd encoding", () => {
-		const dashed = getDefaultSessionDir("/tmp/a-b", tempDir);
-		const nested = getDefaultSessionDir("/tmp/a/b", tempDir);
+		const dashedCwd = join(tempDir, "a-b");
+		const nestedCwd = join(tempDir, "a", "b");
+		const dashed = getDefaultSessionDir(dashedCwd, tempDir);
+		const nested = getDefaultSessionDir(nestedCwd, tempDir);
 
 		expect(dashed).not.toBe(nested);
-		expect(dashed).toContain(encodeURIComponent("/tmp/a-b"));
-		expect(nested).toContain(encodeURIComponent("/tmp/a/b"));
+		expect(dashed).toContain(encodeURIComponent(dashedCwd));
+		expect(nested).toContain(encodeURIComponent(nestedCwd));
 	});
 });
 
