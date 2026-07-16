@@ -110,7 +110,7 @@ function tokenizePortableCommand(command: string): TokenizeResult {
 			finishToken();
 			continue;
 		}
-		if ("|><&;\n\r$`()".includes(character) || character === "#") {
+		if ("|><&;\n\r$`(){}*?[]".includes(character) || character === "#" || (character === "~" && token === "")) {
 			return { ok: false, error: UNSUPPORTED_OPERATOR_MESSAGE };
 		}
 		token += character;
@@ -162,7 +162,9 @@ function routeLs(argv: readonly string[]): string | undefined {
 	const parsed = parseFlags(argv.slice(1), new Set(["-a", "-A", "-l", "-1", "-la", "-al"]));
 	if (!parsed || parsed.operands.length > 1) return undefined;
 	const target = parsed.operands[0] ?? ".";
-	return `[string[]]$items = @(Get-ChildItem -LiteralPath ${quotePowerShell(target)} -Force -ErrorAction Stop | ForEach-Object { if ($_.PSIsContainer) { $_.Name + '/' } else { $_.Name } }); [Array]::Sort($items, [StringComparer]::Ordinal); $items`;
+	const includeHidden = [...parsed.flags].some((flag) => flag.includes("a") || flag.includes("A"));
+	const hiddenFilter = includeHidden ? "" : " | Where-Object { -not $_.Name.StartsWith('.') }";
+	return `[string[]]$items = @(Get-ChildItem -LiteralPath ${quotePowerShell(target)}${includeHidden ? " -Force" : ""} -ErrorAction Stop${hiddenFilter} | ForEach-Object { if ($_.PSIsContainer) { $_.Name + '/' } else { $_.Name } }); [Array]::Sort($items, [StringComparer]::Ordinal); $items`;
 }
 
 function routeCat(argv: readonly string[]): string | undefined {
@@ -186,7 +188,7 @@ function routeHeadOrTail(argv: readonly string[], tail: boolean): string | undef
 
 function routeGrep(argv: readonly string[]): string | undefined {
 	if (argv.length !== 3 || argv[1].startsWith("-") || argv[2].startsWith("-")) return undefined;
-	return `Select-String -LiteralPath ${quotePowerShell(argv[2])} -Pattern ${quotePowerShell(argv[1])} -ErrorAction Stop | ForEach-Object { $_.Line }`;
+	return `[string[]]$matches = @(Select-String -LiteralPath ${quotePowerShell(argv[2])} -Pattern ${quotePowerShell(argv[1])} -CaseSensitive -ErrorAction Stop | ForEach-Object { $_.Line }); if ($matches.Count -eq 0) { exit 1 }; $matches`;
 }
 
 function routeFind(argv: readonly string[]): string | undefined {
@@ -216,7 +218,8 @@ function routeRemove(argv: readonly string[]): string | undefined {
 	const parsed = parseFlags(argv.slice(1), new Set(["-f", "-r", "-rf", "-fr"]));
 	if (!parsed || parsed.operands.length === 0) return undefined;
 	const recursive = [...parsed.flags].some((flag) => flag.includes("r"));
-	return `Remove-Item -LiteralPath ${powershellArray(parsed.operands)} -Force${recursive ? " -Recurse" : ""} -ErrorAction Stop`;
+	const force = [...parsed.flags].some((flag) => flag.includes("f"));
+	return `foreach ($path in ${powershellArray(parsed.operands)}) { if (Test-Path -LiteralPath $path) { Remove-Item -LiteralPath $path -Force${recursive ? " -Recurse" : ""} -ErrorAction Stop }${force ? "" : ' else { throw "rm: path not found: $path" }'} }`;
 }
 
 function routeCopyOrMove(argv: readonly string[], move: boolean): string | undefined {
@@ -224,13 +227,17 @@ function routeCopyOrMove(argv: readonly string[], move: boolean): string | undef
 	if (!parsed || parsed.operands.length !== 2) return undefined;
 	const [source, destination] = parsed.operands;
 	const recurse = !move && parsed.flags.size > 0 ? " -Recurse" : "";
-	return `${move ? "Move-Item" : "Copy-Item"} -LiteralPath ${quotePowerShell(source)} -Destination ${quotePowerShell(destination)}${recurse} -ErrorAction Stop`;
+	const rejectDirectoryWithoutRecursion =
+		!move && parsed.flags.size === 0
+			? `$sourceItem = Get-Item -LiteralPath ${quotePowerShell(source)} -Force -ErrorAction Stop; if ($sourceItem.PSIsContainer) { throw 'cp: source is a directory; use -r' }; `
+			: "";
+	return `${rejectDirectoryWithoutRecursion}${move ? "Move-Item" : "Copy-Item"} -LiteralPath ${quotePowerShell(source)} -Destination ${quotePowerShell(destination)}${recurse} -ErrorAction Stop`;
 }
 
 function routeMkdir(argv: readonly string[]): string | undefined {
 	const parsed = parseFlags(argv.slice(1), new Set(["-p"]));
 	if (!parsed || parsed.operands.length === 0) return undefined;
-	return `${powershellArray(parsed.operands)} | ForEach-Object { New-Item -ItemType Directory -Path $_ -Force -ErrorAction Stop | Out-Null }`;
+	return `${powershellArray(parsed.operands)} | ForEach-Object { New-Item -ItemType Directory -Path $_${parsed.flags.has("-p") ? " -Force" : ""} -ErrorAction Stop | Out-Null }`;
 }
 
 function routeTouch(argv: readonly string[]): string | undefined {
@@ -242,7 +249,13 @@ function routeTouch(argv: readonly string[]): string | undefined {
 function routeBuiltIn(argv: readonly string[]): string | undefined {
 	const command = argv[0].toLowerCase();
 	if (command === "pwd" && argv.length === 1) return "(Get-Location).Path";
-	if (command === "echo") return `[Console]::Out.WriteLine((${powershellArray(argv.slice(1))} -join ' '))`;
+	if (command === "echo") {
+		let valueIndex = 1;
+		while (/^-n+$/u.test(argv[valueIndex] ?? "")) valueIndex++;
+		if (/^-[neE]+$/u.test(argv[valueIndex] ?? "") && /[eE]/u.test(argv[valueIndex] ?? "")) return undefined;
+		const method = valueIndex > 1 ? "Write" : "WriteLine";
+		return `[Console]::Out.${method}((${powershellArray(argv.slice(valueIndex))} -join ' '))`;
+	}
 	if (command === "true" && argv.length === 1) return "exit 0";
 	if (command === "false" && argv.length === 1) return "exit 1";
 	if (command === "which" && argv.length === 2) {

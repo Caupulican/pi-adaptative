@@ -1,3 +1,7 @@
+import { spawnSync } from "node:child_process";
+import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
 import { describe, expect, it } from "vitest";
 import { requiredCapabilitiesForTool } from "../src/core/autonomy/approval-gate.ts";
 import { buildForegroundEnvelope } from "../src/core/autonomy/foreground-envelope.ts";
@@ -37,6 +41,16 @@ describe("automatic platform shell contract", () => {
 		expect(prefixPowerShellCommand(`${POWERSHELL_UTF8_PREFIX}Write-Output 'ok'`)).toBe(
 			`${POWERSHELL_UTF8_PREFIX}Write-Output 'ok'`,
 		);
+	});
+
+	it("prefers a usable PowerShell 7 executable", () => {
+		const executable = process.platform === "win32" ? "pwsh.exe" : "pwsh";
+		const probe = spawnSync(executable, ["-NoLogo", "-NoProfile", "-NonInteractive", "-Command", "Write-Output ok"], {
+			encoding: "utf-8",
+			windowsHide: true,
+		});
+		if (probe.status !== 0) return;
+		expect(getShellConfig(undefined, "powershell").shell.toLowerCase()).toMatch(/pwsh(?:\.exe)?$/u);
 	});
 
 	it("routes the Bash-like contract to PowerShell without exposing PowerShell syntax to the agent", async () => {
@@ -111,6 +125,43 @@ describe("automatic platform shell contract", () => {
 		const content = result.content[0];
 		if (content?.type !== "text") throw new Error("Expected routed shell text output");
 		expect(content.text).toContain("pi-shell-router-ok");
+	});
+
+	it("preserves routed builtin status and flag semantics through native PowerShell", async () => {
+		if (process.platform !== "win32") return;
+		const cwd = mkdtempSync(join(tmpdir(), "pi-powershell-contract-"));
+		try {
+			writeFileSync(join(cwd, "visible.txt"), "one\ntwo\n");
+			writeFileSync(join(cwd, ".hidden.txt"), "hidden\n");
+			mkdirSync(join(cwd, "existing"));
+			mkdirSync(join(cwd, "source-dir"));
+			writeFileSync(join(cwd, "source-dir", "inside.txt"), "inside\n");
+			const tool = createBashToolDefinition(cwd);
+			const execute = (command: string) =>
+				tool.execute("call-windows-semantics", { command }, undefined, undefined, undefined as never);
+
+			const echoResult = await execute("echo -nn hi");
+			const echoContent = echoResult.content[0];
+			if (echoContent?.type !== "text") throw new Error("Expected routed shell text output");
+			expect(echoContent.text).toBe("hi");
+			await expect(execute("grep missing visible.txt")).rejects.toThrow("Command exited with code 1");
+			await expect(execute("grep ONE visible.txt")).rejects.toThrow("Command exited with code 1");
+			const plainList = await execute("ls");
+			const plainListContent = plainList.content[0];
+			if (plainListContent?.type !== "text") throw new Error("Expected routed shell text output");
+			expect(plainListContent.text).not.toContain(".hidden.txt");
+			const hiddenList = await execute("ls -a");
+			const hiddenListContent = hiddenList.content[0];
+			if (hiddenListContent?.type !== "text") throw new Error("Expected routed shell text output");
+			expect(hiddenListContent.text).toContain(".hidden.txt");
+			await expect(execute("rm -f missing.txt")).resolves.toBeDefined();
+			await expect(execute("mkdir existing")).rejects.toThrow("Command exited with code 1");
+			await expect(execute("mkdir -p existing")).resolves.toBeDefined();
+			await expect(execute("cp source-dir copied-dir")).rejects.toThrow("Command exited with code 1");
+			await expect(execute("cp -r source-dir copied-dir")).resolves.toBeDefined();
+		} finally {
+			rmSync(cwd, { recursive: true, force: true });
+		}
 	});
 
 	it("keeps the stable contract at the existing capability and trust boundaries", () => {

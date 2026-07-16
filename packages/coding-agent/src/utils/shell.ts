@@ -40,9 +40,25 @@ function findExecutableOnPath(executable: string): string | null {
 	return null;
 }
 
+function isPowerShellExecutableAvailable(executable: string): boolean {
+	try {
+		return (
+			spawnSync(executable, [...POWERSHELL_ARGS, "Write-Output ok"], {
+				encoding: "utf-8",
+				timeout: 5_000,
+				windowsHide: true,
+			}).status === 0
+		);
+	} catch {
+		return false;
+	}
+}
+
 function getPowerShellConfig(): ShellConfig {
 	const pwshOnPath = findExecutableOnPath(process.platform === "win32" ? "pwsh.exe" : "pwsh");
-	if (pwshOnPath) return { shell: pwshOnPath, args: [...POWERSHELL_ARGS] };
+	if (pwshOnPath && isPowerShellExecutableAvailable(pwshOnPath)) {
+		return { shell: pwshOnPath, args: [...POWERSHELL_ARGS] };
+	}
 
 	const knownPaths: string[] = [];
 	const programFiles = process.env.ProgramFiles;
@@ -50,11 +66,15 @@ function getPowerShellConfig(): ShellConfig {
 	const systemRoot = process.env.SystemRoot;
 	if (systemRoot) knownPaths.push(`${systemRoot}\\System32\\WindowsPowerShell\\v1.0\\powershell.exe`);
 	for (const path of knownPaths) {
-		if (existsSync(path)) return { shell: path, args: [...POWERSHELL_ARGS] };
+		if (existsSync(path) && isPowerShellExecutableAvailable(path)) {
+			return { shell: path, args: [...POWERSHELL_ARGS] };
+		}
 	}
 
 	const windowsPowerShellOnPath = findExecutableOnPath("powershell.exe");
-	if (windowsPowerShellOnPath) return { shell: windowsPowerShellOnPath, args: [...POWERSHELL_ARGS] };
+	if (windowsPowerShellOnPath && isPowerShellExecutableAvailable(windowsPowerShellOnPath)) {
+		return { shell: windowsPowerShellOnPath, args: [...POWERSHELL_ARGS] };
+	}
 	throw new Error(
 		"No PowerShell executable found. Install PowerShell 7 (pwsh), restore Windows PowerShell, or set shellPath in settings.json.",
 	);

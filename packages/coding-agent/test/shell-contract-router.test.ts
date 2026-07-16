@@ -24,11 +24,11 @@ describe("stable Bash-like shell contract router", () => {
 			["cat 'a b.txt'", "[IO.File]::ReadAllText($path)"],
 			["head -n 4 file.txt", "-TotalCount 4"],
 			["tail -n 4 file.txt", "-Tail 4"],
-			["grep TODO file.txt", "Select-String -LiteralPath 'file.txt'"],
+			["grep TODO file.txt", "Select-String -LiteralPath 'file.txt' -Pattern 'TODO' -CaseSensitive"],
 			["find src -type f -name '*.ts'", "Get-ChildItem -LiteralPath 'src' -Recurse -Force -File -Filter '*.ts'"],
 			["mkdir -p 'a b'", "New-Item -ItemType Directory"],
 			["touch 'a b.txt'", "New-Item -ItemType File"],
-			["rm -rf build", "Remove-Item -LiteralPath @('build') -Force -Recurse"],
+			["rm -rf build", "Remove-Item -LiteralPath $path -Force -Recurse"],
 		];
 		for (const [command, expected] of cases) {
 			const route = routeShellContract(command, "win32");
@@ -40,6 +40,29 @@ describe("stable Bash-like shell contract router", () => {
 				expect(route.command).toContain("[StringComparer]::Ordinal");
 			}
 		}
+	});
+
+	it("preserves Bash-like flag and exit semantics for routed builtins", () => {
+		const powershellCommand = (command: string) => {
+			const route = routeShellContract(command, "win32");
+			expect(route).toMatchObject({ kind: "powershell" });
+			if (route.kind !== "powershell") throw new Error(`Expected PowerShell route for ${command}`);
+			return route.command;
+		};
+
+		expect(powershellCommand("echo -n hi")).toContain("[Console]::Out.Write((@('hi') -join ' '))");
+		expect(powershellCommand("echo -nn hi")).toContain("[Console]::Out.Write((@('hi') -join ' '))");
+		expect(powershellCommand("echo -value")).toContain("[Console]::Out.WriteLine((@('-value') -join ' '))");
+		expect(powershellCommand("grep missing file.txt")).toContain("if ($matches.Count -eq 0) { exit 1 }");
+		expect(powershellCommand("rm -f missing.txt")).not.toContain("else { throw");
+		expect(powershellCommand("rm missing.txt")).toContain("else { throw");
+		expect(powershellCommand("mkdir existing")).not.toContain("-Force");
+		expect(powershellCommand("mkdir -p existing")).toContain("-Force");
+		expect(powershellCommand("cp source-dir copied-dir")).toContain("source is a directory; use -r");
+		expect(powershellCommand("ls")).not.toContain("-Force");
+		expect(powershellCommand("ls")).toContain("Where-Object { -not $_.Name.StartsWith('.') }");
+		expect(powershellCommand("ls -a")).toContain("-Force");
+		expect(powershellCommand("ls -a")).not.toContain("Where-Object");
 	});
 
 	it("preserves empty and escaped arguments deterministically", () => {
@@ -66,6 +89,10 @@ describe("stable Bash-like shell contract router", () => {
 			"echo hi > out.txt",
 			"echo $HOME",
 			"echo $(whoami)",
+			"echo *.txt",
+			"cat ~/file.txt",
+			"echo {one,two}",
+			"echo -e 'one\\ttwo'",
 			"FOO=bar node script.js",
 			"bash -lc 'rm -rf build'",
 			"sh script.sh",
