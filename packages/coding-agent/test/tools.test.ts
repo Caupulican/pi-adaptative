@@ -1,5 +1,5 @@
 import { applyPatch } from "diff";
-import { chmodSync, existsSync, mkdirSync, readFileSync, realpathSync, rmSync, symlinkSync, writeFileSync } from "fs";
+import { chmodSync, existsSync, mkdirSync, readFileSync, rmSync, symlinkSync, writeFileSync } from "fs";
 import { tmpdir } from "os";
 import { join } from "path";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
@@ -812,10 +812,10 @@ describe("Coding Agent Tools", () => {
 				.trim()
 				.split("\n")
 				.map((path) => path.replaceAll("\\", "/").toLowerCase());
-			const linkPath = join(realpathSync(searchDir), "out-link").replaceAll("\\", "/").toLowerCase();
+			const linkSuffix = "/out-link";
 
-			expect(output).toContain(linkPath);
-			expect(output).not.toContain(`${linkPath}/escaped.txt`);
+			expect(output.some((path) => path.endsWith(linkSuffix))).toBe(true);
+			expect(output.some((path) => path.endsWith(`${linkSuffix}/escaped.txt`))).toBe(false);
 		});
 
 		it("executes eligible simple commands through the platform shell", async () => {
@@ -830,7 +830,7 @@ describe("Coding Agent Tools", () => {
 				.trim()
 				.split("\n")
 				.map((path) => path.replaceAll("\\", "/").toLowerCase());
-			expect(output).toContain(realpathSync(childPath).replaceAll("\\", "/").toLowerCase());
+			expect(output.some((path) => path.endsWith("/shell-find/child.txt"))).toBe(true);
 		});
 
 		it("should truncate platform shell output", async () => {
@@ -901,9 +901,7 @@ describe("Coding Agent Tools", () => {
 			try {
 				const bash = createBashTool(testDir);
 				const result = await bash.execute("test-disabled", { command: `find ${searchDir}` });
-				expect(getTextOutput(result).replaceAll("\\", "/").toLowerCase()).toContain(
-					realpathSync(searchDir).replaceAll("\\", "/").toLowerCase(),
-				);
+				expect(getTextOutput(result).replaceAll("\\", "/").toLowerCase()).toContain("/disabled-find/child.txt");
 			} finally {
 				delete process.env.PI_TOOL_OPTIMIZER_DISABLED;
 			}

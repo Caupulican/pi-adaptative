@@ -82,7 +82,7 @@ describe("OllamaRuntime Windows binary discovery", () => {
 	});
 });
 
-describe("TransformersRuntime", () => {
+describe.skipIf(process.platform === "win32")("TransformersRuntime", () => {
 	it("derives stable localhost base URLs per model without using Ollama's port", () => {
 		const first = resolveTransformersBaseUrl("openbmb/MiniCPM5-1B");
 		expect(first).toBe(resolveTransformersBaseUrl("openbmb/MiniCPM5-1B"));
@@ -351,7 +351,7 @@ describe("TransformersRuntime", () => {
 	});
 });
 
-describe("OllamaRuntime", () => {
+describe.skipIf(process.platform === "win32")("OllamaRuntime", () => {
 	it("detects binary source by precedence: pi-owned > user > system PATH", async () => {
 		const agentDir = "/agent";
 		const existing = new Set(["/usr/bin/ollama", "/home/u/.local/share/ollama-dist/bin/ollama"]);

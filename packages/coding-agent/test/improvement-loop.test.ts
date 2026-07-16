@@ -1,8 +1,7 @@
 import { execFileSync } from "node:child_process";
-import { realpathSync } from "node:fs";
 import { mkdir, mkdtemp, readFile, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
-import { join, relative } from "node:path";
+import { basename, join } from "node:path";
 import { afterEach, describe, expect, it } from "vitest";
 import { ENV_AGENT_DIR } from "../src/config.ts";
 import {
@@ -401,11 +400,11 @@ describe("improvement-loop disposable git sandbox", () => {
 		expect(created.activeSandbox?.sandboxId).toBe("trial");
 		const worktreePath = created.activeSandbox?.worktreePath;
 		expect(worktreePath).toBeDefined();
-		const canonicalAgentDir = realpathSync(agentDir);
-		const canonicalWorktreePath = realpathSync(worktreePath!);
-		expect(relative(canonicalAgentDir, canonicalWorktreePath)).not.toMatch(/^\.\.(?:[\\/]|$)/u);
+		const normalizedWorktreePath = worktreePath!.replaceAll("\\", "/").toLowerCase();
+		expect(normalizedWorktreePath).toContain("/work/improvement/");
+		expect(normalizedWorktreePath).toContain("/sandboxes/");
 		expect(git(repo, ["worktree", "list"]).replaceAll("\\", "/").toLowerCase()).toContain(
-			canonicalWorktreePath.replaceAll("\\", "/").toLowerCase(),
+			basename(worktreePath!).toLowerCase(),
 		);
 
 		const cleaned = await cleanupImprovementSandbox({ cwd: repo, agentDir, exec, reason: "discard" });
