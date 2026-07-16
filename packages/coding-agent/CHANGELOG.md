@@ -1,5 +1,9 @@
 ## [Unreleased]
 
+### Changed
+
+- Updated repository development and CI to Node.js 24 and moved GitHub workflows to Node 24-based action releases while retaining Node.js 22.19 as the published runtime minimum.
+
 ## [0.81.37] - 2026-07-16
 
 ### Fixed

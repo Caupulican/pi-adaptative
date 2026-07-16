@@ -375,7 +375,7 @@ Keep `retry.provider.maxRetries` at `0` unless provider-level retries are explic
 |---------|------|---------|-------------|
 | `shellPath` | string | platform default | Custom platform-shell path (`pwsh.exe`/`powershell.exe` on Windows; Bash-compatible shell elsewhere) |
 | `shellCommandPrefix` | string | - | Platform-shell snippet prepended to every command (for example, `"shopt -s expand_aliases"` on Bash) |
-| `npmCommand` | string[] | - | Command argv used for npm package lookup/install operations (e.g., `["mise", "exec", "node@20", "--", "npm"]`) |
+| `npmCommand` | string[] | - | Command argv used for npm package lookup/install operations (e.g., `["mise", "exec", "node@24", "--", "npm"]`) |
 
 Pi exposes one stable `bash` contract to the model on every platform. On Windows, the tool router parses a finite simple-command grammar, converts supported Bash-like forms to literal-path PowerShell, and rejects pipelines, redirection, expansion, chaining, nested shells, POSIX scripts, and unsupported builtin forms instead of guessing. Legacy `powershell` tool/profile references map to `bash`. The Windows backend prefers PowerShell 7 (`pwsh.exe`), falls back to Windows PowerShell, and runs with `-NoLogo -NoProfile -NonInteractive -Command` plus UTF-8 console output setup. `shellCommandPrefix` uses backend-native syntax because Pi applies it after routing. Agent, interactive, and RPC shell calls default to a 120-second wall-clock deadline; agent-tool overrides cap at one hour.
 
@@ -383,7 +383,7 @@ The native `python` tool is active by default and resolves Python through pinned
 
 ```json
 {
-  "npmCommand": ["mise", "exec", "node@20", "--", "npm"]
+  "npmCommand": ["mise", "exec", "node@24", "--", "npm"]
 }
 ```
 
