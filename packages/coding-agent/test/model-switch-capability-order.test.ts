@@ -23,7 +23,15 @@ describe("model switch capability ordering", () => {
 		try {
 			await harness.session.setModel(harness.getModel("small-model")!);
 
-			expect(observedTools).toEqual(["read", "bash", "edit", "write", "run_toolkit_script", "artifact_retrieve"]);
+			expect(observedTools).toEqual([
+				"read",
+				"bash",
+				"python",
+				"edit",
+				"write",
+				"run_toolkit_script",
+				"artifact_retrieve",
+			]);
 			expect(observedPrompt).not.toContain("Delegate a bounded read-only analysis subtask");
 		} finally {
 			harness.cleanup();

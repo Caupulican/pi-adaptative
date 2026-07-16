@@ -136,7 +136,7 @@ describe("package commands", () => {
 		}
 	});
 
-	it("uses global npmCommand and current package name for forced self updates without checking the api", async () => {
+	it("uses global npmCommand and current package name for forced self updates without checking the update API", async () => {
 		const globalPrefix = join(tempDir, "global-prefix");
 		const projectPrefix = join(tempDir, "project-prefix");
 		const selfPackageDir = join(globalPrefix, "lib", "node_modules", "@earendil-works", "pi-coding-agent");
@@ -175,7 +175,11 @@ else fs.writeFileSync(${JSON.stringify(recordPath)},JSON.stringify(args));
 
 			expect(process.exitCode).toBeUndefined();
 			expect(errorSpy).not.toHaveBeenCalled();
-			expect(fetchMock).not.toHaveBeenCalled();
+			expect(
+				fetchMock.mock.calls.some(
+					([url]) => String(url) === "https://registry.npmjs.org/@caupulican%2fpi-adaptative/latest",
+				),
+			).toBe(false);
 			const recordedArgs = JSON.parse(readFileSync(recordPath, "utf-8")) as string[];
 			expect(recordedArgs).toContain(globalPrefix);
 			expect(recordedArgs).toContain(PACKAGE_NAME);

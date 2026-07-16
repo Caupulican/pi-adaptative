@@ -19,10 +19,12 @@ describe("model capability auto-detection", () => {
 			expect(harness.session.getActiveToolNames()).toEqual([
 				"read",
 				"bash",
+				"python",
 				"edit",
 				"write",
 				"context_audit",
 				"goal",
+				"task_steps",
 				"delegate",
 				"run_toolkit_script",
 				"artifact_retrieve",
@@ -45,6 +47,7 @@ describe("model capability auto-detection", () => {
 			expect(harness.session.getActiveToolNames()).toEqual([
 				"read",
 				"bash",
+				"python",
 				"edit",
 				"write",
 				"run_toolkit_script",
@@ -105,6 +108,7 @@ describe("model capability auto-detection", () => {
 			expect(harness.session.getActiveToolNames()).toEqual([
 				"read",
 				"bash",
+				"python",
 				"edit",
 				"write",
 				"run_toolkit_script",
@@ -136,6 +140,7 @@ describe("model capability auto-detection", () => {
 			expect(harness.session.getActiveToolNames()).toEqual([
 				"read",
 				"bash",
+				"python",
 				"edit",
 				"write",
 				"run_toolkit_script",
@@ -167,6 +172,7 @@ describe("model capability auto-detection", () => {
 			expect(harness.session.getActiveToolNames()).toEqual([
 				"read",
 				"bash",
+				"python",
 				"edit",
 				"write",
 				"run_toolkit_script",

@@ -120,7 +120,7 @@ describe("AgentSession cost guard", () => {
 
 		const decision = harness.session.getLastCostGuardDecision();
 		expect(projectedInputTokens).toBeGreaterThan(299_000);
-		expect(projectedInputTokens).toBeLessThan(301_000);
+		expect(projectedInputTokens).toBeLessThan(305_000);
 		expect(decision?.estUsd).toBeCloseTo((projectedInputTokens * 6.25 * 2) / 1_000_000, 9);
 		expect(decision?.over).toBe(true);
 	});

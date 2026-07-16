@@ -93,10 +93,12 @@ describe("regression #3592: no-builtin-tools keeps extension tools enabled", () 
 			"ls",
 			"memory",
 			"model_fitness",
+			"python",
 			"read",
 			"run_toolkit_script",
 			"skill_audit",
 			"skillify",
+			"task_steps",
 			"write",
 		]);
 		// The bundled memory provider's `memory` tool is provider-contributed (like extension/SDK

@@ -278,10 +278,12 @@ describe("AgentSession prompt characterization", () => {
 		expect(harness.session.getActiveToolNames()).toEqual([
 			"read",
 			"bash",
+			"python",
 			"edit",
 			"write",
 			"context_audit",
 			"goal",
+			"task_steps",
 			"delegate",
 			"run_toolkit_script",
 			"artifact_retrieve",

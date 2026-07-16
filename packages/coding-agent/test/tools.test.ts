@@ -589,7 +589,7 @@ describe("Coding Agent Tools", () => {
 					onData: () => {},
 				}),
 			).rejects.toThrow("Custom shell path not found: /custom/bash");
-			expect(getShellConfigSpy).toHaveBeenCalledWith("/custom/bash");
+			expect(getShellConfigSpy).toHaveBeenCalledWith("/custom/bash", "bash");
 		});
 
 		it("should prepend command prefix when configured", async () => {
@@ -610,7 +610,7 @@ describe("Coding Agent Tools", () => {
 			expect(getTextOutput(result).trim()).toBe("prefix-output\ncommand-output");
 		});
 
-		it("should apply command prefix to optimizer-eligible commands", async () => {
+		it("should apply command prefix to simple shell commands", async () => {
 			const testFile = join(testDir, "prefix-cat.txt");
 			writeFileSync(testFile, "body");
 			const bashWithPrefix = createBashTool(testDir, {
@@ -621,7 +621,7 @@ describe("Coding Agent Tools", () => {
 			expect(getTextOutput(result).trim()).toBe("prefix-output\nbody");
 		});
 
-		it("should apply spawn hook to optimizer-eligible commands", async () => {
+		it("should apply spawn hook to simple shell commands", async () => {
 			const testFile = join(testDir, "hook-cat.txt");
 			writeFileSync(testFile, "body");
 			const bashWithHook = createBashTool(testDir, {
@@ -773,7 +773,7 @@ describe("Coding Agent Tools", () => {
 			expect(result.details?.fullOutputPath).toBeDefined();
 		});
 
-		it("does not native-optimize grep regex patterns as literal substrings", async () => {
+		it("preserves grep regex semantics through the platform shell", async () => {
 			const testFile = join(testDir, "grep-regex.py");
 			writeFileSync(testFile, "import os\nprint('x')\n");
 			const bash = createBashTool(testDir);
@@ -783,7 +783,7 @@ describe("Coding Agent Tools", () => {
 			expect(getTextOutput(result).trim()).toBe("import os");
 		});
 
-		it("still native-optimizes grep literal patterns", async () => {
+		it("executes grep literal patterns through the platform shell", async () => {
 			const testFile = join(testDir, "grep-literal.txt");
 			writeFileSync(testFile, "abc\nxyz\n");
 			const bash = createBashTool(testDir);
@@ -793,9 +793,9 @@ describe("Coding Agent Tools", () => {
 			expect(getTextOutput(result).trim()).toBe("abc");
 		});
 
-		it("native find does not recurse into symlinked directories", async () => {
-			const searchDir = join(testDir, "optimized-find-symlinks");
-			const outsideDir = join(testDir, "optimized-find-outside");
+		it("shell find does not recurse into symlinked directories", async () => {
+			const searchDir = join(testDir, "shell-find-symlinks");
+			const outsideDir = join(testDir, "shell-find-outside");
 			mkdirSync(searchDir);
 			mkdirSync(outsideDir);
 			writeFileSync(join(outsideDir, "escaped.txt"), "escape");
@@ -803,24 +803,33 @@ describe("Coding Agent Tools", () => {
 			const bash = createBashTool(testDir);
 
 			const result = await bash.execute("test-find-symlink", { command: `find ${searchDir}` });
-			const output = getTextOutput(result).trim().split("\n");
+			const output = getTextOutput(result)
+				.trim()
+				.split("\n")
+				.map((path) => path.replaceAll("\\", "/"));
+			const linkPath = join(searchDir, "out-link").replaceAll("\\", "/");
 
-			expect(output).toContain("out-link");
-			expect(output).not.toContain("out-link/escaped.txt");
+			expect(output).toContain(linkPath);
+			expect(output).not.toContain(`${linkPath}/escaped.txt`);
 		});
 
-		it("should optimize eligible simple commands natively", async () => {
-			const searchDir = join(testDir, "optimized-find");
+		it("executes eligible simple commands through the platform shell", async () => {
+			const searchDir = join(testDir, "shell-find");
 			mkdirSync(searchDir);
-			writeFileSync(join(searchDir, "child.txt"), "child");
+			const childPath = join(searchDir, "child.txt");
+			writeFileSync(childPath, "child");
 			const bash = createBashTool(testDir);
 
-			const result = await bash.execute("test-opt", { command: `find ${searchDir}` });
-			expect(getTextOutput(result).trim()).toBe("child.txt");
+			const result = await bash.execute("test-shell", { command: `find ${searchDir}` });
+			const output = getTextOutput(result)
+				.trim()
+				.split("\n")
+				.map((path) => path.replaceAll("\\", "/"));
+			expect(output).toContain(childPath.replaceAll("\\", "/"));
 		});
 
-		it("should truncate optimized command output like normal bash output", async () => {
-			const testFile = join(testDir, "optimized-large.txt");
+		it("should truncate platform shell output", async () => {
+			const testFile = join(testDir, "shell-large.txt");
 			const lines = Array.from({ length: 3000 }, (_, index) => `line-${String(index + 1).padStart(4, "0")}`);
 			writeFileSync(testFile, `${lines.join("\n")}\n`);
 			const bash = createBashTool(testDir);
@@ -853,7 +862,7 @@ describe("Coding Agent Tools", () => {
 			expect(execCalled).toBe(true);
 		});
 
-		it("should fall back to native execution on unsupported commands or unsafe operators", async () => {
+		it("should pass shell operators through outside Windows", async () => {
 			const testFile = join(testDir, "unsafe.txt");
 			writeFileSync(testFile, "unsafe");
 
@@ -878,7 +887,7 @@ describe("Coding Agent Tools", () => {
 			expect(execCalled).toBe(true);
 		});
 
-		it("should fall back to native execution when PI_TOOL_OPTIMIZER_DISABLED=1", async () => {
+		it("ignores the removed PI_TOOL_OPTIMIZER_DISABLED toggle", async () => {
 			const searchDir = join(testDir, "disabled-find");
 			mkdirSync(searchDir);
 			writeFileSync(join(searchDir, "child.txt"), "child");

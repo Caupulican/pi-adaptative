@@ -1,5 +1,9 @@
 ## [Unreleased]
 
+### Fixed
+
+- Updated release validation for the native Python/task-step surface, update preflight, platform-shell output, and prompt-cost growth, and made the Windows binary smoke test prove the stable Bash-like contract executes through PowerShell.
+
 ## [0.81.36] - 2026-07-16
 
 ### Added

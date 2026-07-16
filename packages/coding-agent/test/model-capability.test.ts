@@ -6,11 +6,21 @@ import {
 	MODEL_CAPABILITY_LEAN_BLOCKED_TOOLS,
 	MODEL_CAPABILITY_LEAN_MAX_CONTINUE_TURNS,
 	MODEL_CAPABILITY_LEAN_MAX_CONTINUE_WALL_CLOCK_MINUTES,
-	MODEL_CAPABILITY_MINIMAL_ALLOWED_TOOLS,
 	scaleContinuationBudgetsForCapability,
 } from "../src/core/model-capability.ts";
 
-const DEFAULT_ACTIVE = ["read", "bash", "edit", "write", "context_audit", "goal", "delegate", "run_toolkit_script"];
+const DEFAULT_ACTIVE = [
+	"read",
+	"bash",
+	"python",
+	"edit",
+	"write",
+	"context_audit",
+	"goal",
+	"task_steps",
+	"delegate",
+	"run_toolkit_script",
+];
 
 describe("deriveModelCapabilityProfile", () => {
 	it("classifies by context window with metadata-first derivation", () => {
@@ -145,7 +155,12 @@ describe("filterToolNamesForCapability", () => {
 	it("reduces minimal to the core coding set and chat to nothing", () => {
 		const minimal = deriveModelCapabilityProfile({ contextWindow: 8_192 });
 		expect(filterToolNamesForCapability(DEFAULT_ACTIVE, minimal)).toEqual([
-			...MODEL_CAPABILITY_MINIMAL_ALLOWED_TOOLS,
+			"read",
+			"bash",
+			"python",
+			"edit",
+			"write",
+			"run_toolkit_script",
 		]);
 
 		const chat = deriveModelCapabilityProfile({ contextWindow: 4_096 });

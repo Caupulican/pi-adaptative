@@ -136,11 +136,11 @@ jobs:
           $state = Read-RpcResponse "state"
           if (-not $state.success) { throw "RPC get_state did not return a successful response" }
 
-          $rpc.StandardInput.WriteLine('{"id":"shell","type":"bash","command":"printf windows-rpc-ok"}')
+          $rpc.StandardInput.WriteLine('{"id":"shell","type":"bash","command":"echo windows-rpc-ok"}')
           $rpc.StandardInput.Flush()
           $shell = Read-RpcResponse "shell"
           if (-not $shell.success -or $shell.data.exitCode -ne 0 -or $shell.data.output -notmatch "windows-rpc-ok") {
-            throw "RPC bash did not execute successfully through Git Bash: $($shell | ConvertTo-Json -Compress -Depth 8)"
+            throw "RPC bash contract did not execute successfully through PowerShell: $($shell | ConvertTo-Json -Compress -Depth 8)"
           }
 
           $rpc.StandardInput.Close()
