@@ -1,5 +1,9 @@
 ## [Unreleased]
 
+### Fixed
+
+- Fixed absolute path completion on Windows by recognizing drive-qualified paths and backslash separators.
+
 ## [0.81.37] - 2026-07-16
 
 ## [0.81.36] - 2026-07-16
