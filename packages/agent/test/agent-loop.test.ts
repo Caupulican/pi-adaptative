@@ -1822,6 +1822,50 @@ describe("agentLoopContinue with AgentMessage", () => {
 		expect((messageEndEvents[0] as any).message.role).toBe("assistant");
 	});
 
+	it("does not mutate the caller's context.messages array in place", async () => {
+		const userMessage: AgentMessage = createUserMessage("Hello");
+
+		const context: AgentContext = {
+			systemPrompt: "You are helpful.",
+			messages: [userMessage],
+			tools: [],
+		};
+		const callerMessagesArray = context.messages;
+		const callerMessagesSnapshot = [...context.messages];
+
+		const config: AgentLoopConfig = {
+			model: createModel(),
+			convertToLlm: identityConverter,
+		};
+
+		const streamFn = () => {
+			const stream = new MockAssistantStream();
+			queueMicrotask(() => {
+				const message = createAssistantMessage([{ type: "text", text: "Response" }]);
+				stream.push({ type: "done", reason: "stop", message });
+			});
+			return stream;
+		};
+
+		const stream = agentLoopContinue(context, config, undefined, streamFn);
+
+		for await (const _event of stream) {
+			// drain
+		}
+
+		const newMessages = await stream.result();
+
+		// The caller's array must remain the same reference with the same contents:
+		// runAgentLoopContinue must copy before appending, matching runAgentLoop's symmetry.
+		expect(context.messages).toBe(callerMessagesArray);
+		expect(context.messages).toEqual(callerMessagesSnapshot);
+		expect(context.messages.length).toBe(1);
+
+		// The returned newMessages array carries the appended assistant response.
+		expect(newMessages.length).toBe(1);
+		expect(newMessages[0].role).toBe("assistant");
+	});
+
 	it("should allow custom message types as last message (caller responsibility)", async () => {
 		// Custom message that will be converted to user message by convertToLlm
 		interface CustomMessage {

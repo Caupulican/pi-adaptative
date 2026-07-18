@@ -1,5 +1,4 @@
-import { appendFileSync, existsSync, mkdirSync, readFileSync, statSync, writeFileSync } from "node:fs";
-import { dirname } from "node:path";
+import { appendFileSync, existsSync, readFileSync, statSync } from "node:fs";
 import type { ToolArgumentValidationTelemetryEvent } from "@caupulican/pi-ai";
 import {
 	createToolValidationFailureCorpusRecord,
@@ -7,6 +6,7 @@ import {
 	writeFailureCorpusRecord,
 } from "./failure-corpus.ts";
 import { updatePersistedToolRecoveryStats } from "./tool-recovery-stats.ts";
+import { withFileLockSync, writeFileAtomicSync } from "./util/atomic-file.ts";
 
 export const TOOL_RECOVERY_EVENT_LOG_FILE = "tool-recovery-events.jsonl";
 export const TOOL_ARGUMENT_VALIDATION_LOG_KIND = "tool_argument_validation";
@@ -113,13 +113,21 @@ function rotateToolRecoveryEventLogIfNeeded(filePath: string): void {
 		if (retainedBytes >= ROTATED_EVENT_LOG_TARGET_BYTES) break;
 	}
 	retained.reverse();
-	writeFileSync(filePath, retained.length > 0 ? `${retained.join("\n")}\n` : "", "utf-8");
+	writeFileAtomicSync(filePath, retained.length > 0 ? `${retained.join("\n")}\n` : "");
 }
 
+/**
+ * Append + rotate under a single exclusive lock on `eventLogPath`. Without the lock, a concurrent
+ * writer (e.g. another session's tool-recovery worker) could append between this call's read and its
+ * rotated rewrite, and that append would be silently discarded when the rewrite lands; the atomic
+ * tmp+rename in {@link rotateToolRecoveryEventLogIfNeeded} additionally ensures a reader never observes
+ * a partially-rewritten (torn) log file.
+ */
 export function writeToolRecoveryLogRecord(entry: ToolRecoveryLogWorkerRecord): void {
-	mkdirSync(dirname(entry.eventLogPath), { recursive: true });
-	appendFileSync(entry.eventLogPath, `${JSON.stringify(entry.record)}\n`, "utf-8");
-	rotateToolRecoveryEventLogIfNeeded(entry.eventLogPath);
+	withFileLockSync(entry.eventLogPath, () => {
+		appendFileSync(entry.eventLogPath, `${JSON.stringify(entry.record)}\n`, "utf-8");
+		rotateToolRecoveryEventLogIfNeeded(entry.eventLogPath);
+	});
 	try {
 		updatePersistedToolRecoveryStats(entry.eventLogPath, entry.record);
 	} catch {

@@ -1,6 +1,8 @@
 import { type AssistantMessage, type AssistantMessageEvent, EventStream, getModel } from "@caupulican/pi-ai";
+import { Type } from "typebox";
 import { describe, expect, it } from "vitest";
 import { Agent } from "../src/index.ts";
+import type { AgentTool } from "../src/types.ts";
 
 // Mock stream that mimics AssistantMessageEventStream
 class MockAssistantStream extends EventStream<AssistantMessageEvent, AssistantMessage> {
@@ -514,5 +516,61 @@ describe("Agent", () => {
 
 		await agent.prompt("hello again");
 		expect(receivedSessionId).toBe("session-def");
+	});
+
+	it("forwards onRunawayStop into the loop config", async () => {
+		// AgentOptions.onRunawayStop previously had no effect: the Agent class never forwarded it into
+		// AgentLoopConfig, so the runaway-loop backstop (see runaway-loop.test.ts, which covers the
+		// loop's own trip logic) always stopped silently through the Agent class. This mirrors that
+		// same scenario through Agent#prompt to confirm the forwarding itself.
+		const echoParams = Type.Object({ value: Type.String() });
+		const echoTool: AgentTool<typeof echoParams, { value: string }> = {
+			name: "echo",
+			label: "Echo",
+			description: "Echo tool",
+			parameters: echoParams,
+			async execute(_id, params) {
+				return { content: [{ type: "text", text: `echoed: ${params.value}` }], details: { value: params.value } };
+			},
+		};
+		const stalls: Array<{ signature: string; repeats: number }> = [];
+		let toolCalls = 0;
+
+		const agent = new Agent({
+			initialState: { tools: [echoTool] },
+			maxStallTurns: 2,
+			onRunawayStop: (info) => stalls.push(info),
+			streamFn: () => {
+				const stream = new MockAssistantStream();
+				queueMicrotask(() => {
+					toolCalls++;
+					const message: AssistantMessage = {
+						role: "assistant",
+						content: [{ type: "toolCall", id: `t${toolCalls}`, name: "echo", arguments: { value: "stuck" } }],
+						api: "openai-responses",
+						provider: "openai",
+						model: "mock",
+						usage: {
+							input: 0,
+							output: 0,
+							cacheRead: 0,
+							cacheWrite: 0,
+							totalTokens: 0,
+							cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, total: 0 },
+						},
+						stopReason: "toolUse",
+						timestamp: Date.now(),
+					};
+					stream.push({ type: "done", reason: "toolUse", message });
+				});
+				return stream;
+			},
+		});
+
+		await agent.prompt("go");
+
+		expect(stalls).toHaveLength(1);
+		expect(stalls[0].repeats).toBe(2);
+		expect(toolCalls).toBe(2); // stopped at the limit, did not run beyond it
 	});
 });

@@ -8,10 +8,10 @@
  * archive (non-destructive), and consolidation is a flagged suggestion (never an auto-merge).
  */
 
-import { existsSync, mkdirSync, readdirSync, readFileSync, renameSync, statSync, writeFileSync } from "node:fs";
+import { existsSync, mkdirSync, readdirSync, readFileSync, renameSync, statSync } from "node:fs";
 import { join } from "node:path";
-import lockfile from "proper-lockfile";
 import { jaccard, tokenize } from "../tools/skill-audit.ts";
+import { withFileLock, withFileLockSync, writeFileAtomicSync } from "../util/atomic-file.ts";
 
 /** Per-promoted-skill signal the proposal logic reasons over. Pure data — no I/O. */
 export interface PromotedSkillInfo {
@@ -109,13 +109,19 @@ export class SkillCurator {
 		this.usageFile = join(skillsDir, ".usage.json");
 	}
 
-	/** Record that a promoted skill was loaded/used (bumps count + last-used). Best-effort. */
+	/**
+	 * Record that a promoted skill was loaded/used (bumps count + last-used). Best-effort.
+	 * Load-mutate-write runs under a single exclusive lock so two concurrent uses (e.g. two sessions
+	 * loading the same skill around the same time) can't both read the old usage map and drop a count.
+	 */
 	recordUse(name: string, now: number): void {
 		try {
-			const usage = this.loadUsage();
-			const prev = usage[name] ?? { lastUsedMs: 0, useCount: 0 };
-			usage[name] = { lastUsedMs: now, useCount: prev.useCount + 1 };
-			writeFileSync(this.usageFile, JSON.stringify(usage, null, 2), "utf-8");
+			withFileLockSync(this.usageFile, () => {
+				const usage = this.loadUsage();
+				const prev = usage[name] ?? { lastUsedMs: 0, useCount: 0 };
+				usage[name] = { lastUsedMs: now, useCount: prev.useCount + 1 };
+				writeFileAtomicSync(this.usageFile, JSON.stringify(usage, null, 2));
+			});
 		} catch {
 			// usage tracking must never disrupt a turn
 		}
@@ -139,18 +145,20 @@ export class SkillCurator {
 	 */
 	async autoArchiveStale(now: number, options: Partial<Omit<CuratorOptions, "now">> = {}): Promise<string[]> {
 		if (!existsSync(this.skillsDir)) return [];
-		let release: (() => Promise<void>) | undefined;
 		try {
-			release = await lockfile.lock(this.skillsDir, { realpath: false, retries: 2 });
-			const archived: string[] = [];
-			for (const a of this.proposeCuration(now, options).archive) {
-				if (this.archiveSkill(a.name)) archived.push(a.name);
-			}
-			return archived;
+			return await withFileLock(
+				this.skillsDir,
+				() => {
+					const archived: string[] = [];
+					for (const a of this.proposeCuration(now, options).archive) {
+						if (this.archiveSkill(a.name)) archived.push(a.name);
+					}
+					return archived;
+				},
+				{ retries: 2 },
+			);
 		} catch {
 			return []; // another session holds the lock, or fs error — skip this run
-		} finally {
-			if (release) await release().catch(() => {});
 		}
 	}
 

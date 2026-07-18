@@ -1,7 +1,8 @@
 import type { AgentTool } from "@caupulican/pi-agent-core";
 import type { Model } from "@caupulican/pi-ai";
 import { type AssistantMessage, type AssistantMessageEvent, EventStream } from "@caupulican/pi-ai";
-import { describe, expect, it } from "vitest";
+import { afterEach, describe, expect, it } from "vitest";
+import { getInFlightWorkUnits, resetInFlightWorkRegistryForTests } from "../src/core/reload-blockers.ts";
 import {
 	getScoutOutputTokenCount,
 	parseScoutAnswer,
@@ -198,5 +199,60 @@ src/ok.ts:1-2
 
 		expect(result.failure).toBe("aborted");
 		expect(result.truncated).toBe(true);
+	});
+});
+
+describe("ScoutController — reload-gate quiesce registry", () => {
+	afterEach(() => {
+		resetInFlightWorkRegistryForTests();
+	});
+
+	it("registers itself while its Agent is running, and deregisters once the run ends", async () => {
+		const agentDir = "/tmp/pi-test-quiesce-scout";
+		let sawRegisteredDuringRun = false;
+		const controller = makeController(["<final_answer>\nok\n</final_answer>"], {
+			getAgentDir: () => agentDir,
+			streamFn: () => {
+				sawRegisteredDuringRun = getInFlightWorkUnits(agentDir).some((unit) => unit.kind === "scout");
+				const stream = new MockAssistantStream();
+				queueMicrotask(() => {
+					stream.push({
+						type: "done",
+						reason: "stop",
+						message: assistantMessage("<final_answer>\nok\n</final_answer>"),
+					});
+				});
+				return stream;
+			},
+		});
+
+		expect(getInFlightWorkUnits(agentDir)).toEqual([]);
+		await controller.run("Find code", 8);
+
+		expect(sawRegisteredDuringRun).toBe(true);
+		expect(getInFlightWorkUnits(agentDir)).toEqual([]);
+	});
+
+	it("still deregisters when the scout's Agent run ends in an error", async () => {
+		const agentDir = "/tmp/pi-test-quiesce-scout-throw";
+		const controller = makeController([], {
+			getAgentDir: () => agentDir,
+			streamFn: () => {
+				const stream = new MockAssistantStream();
+				queueMicrotask(() => {
+					stream.push({ type: "error", reason: "error", error: assistantMessage("", "error") });
+				});
+				return stream;
+			},
+		});
+
+		await controller.run("Find code", 8);
+
+		expect(getInFlightWorkUnits(agentDir)).toEqual([]);
+	});
+
+	it("stays invisible to the reload gate when no agentDir is wired (optional dep)", async () => {
+		const controller = makeController(["partial"]);
+		await expect(controller.run("Find code", 8)).resolves.toBeDefined();
 	});
 });

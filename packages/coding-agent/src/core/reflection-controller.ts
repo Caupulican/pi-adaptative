@@ -21,7 +21,12 @@ import {
 } from "@caupulican/pi-agent-core";
 import type { SessionManager } from "@caupulican/pi-agent-core/node";
 import type { Api, AssistantMessage, Context, Model, SimpleStreamOptions, TextContent, Usage } from "@caupulican/pi-ai";
-import type { IsolatedCompletionOptions, IsolatedCompletionResult } from "./agent-session.ts";
+import {
+	computeLaneAffinityKey,
+	DEFAULT_ISOLATED_LANE_KIND,
+	type IsolatedCompletionOptions,
+	type IsolatedCompletionResult,
+} from "./agent-session.ts";
 import type { LearningDecision } from "./autonomy/contracts.ts";
 import { AUTONOMY_TELEMETRY_EVENT_TYPES, type AutonomyTelemetryEvent } from "./autonomy/telemetry-events.ts";
 import {
@@ -44,7 +49,9 @@ import {
 } from "./learning/reflection-engine.ts";
 import type { MemoryManager } from "./memory/memory-manager.ts";
 import type { ModelRegistry } from "./model-registry.ts";
+import { registerInFlightWork } from "./reload-blockers.ts";
 import type { SettingsManager } from "./settings-manager.ts";
+import { runSkillAudit } from "./tools/skill-audit.ts";
 
 export interface ReflectionControllerDeps {
 	/** Current session model (fallback for an isolated call that omits its own model). */
@@ -84,7 +91,21 @@ export interface ReflectionControllerDeps {
 	resolveTextToolCallProtocol(model: Model<Api>): SimpleStreamOptions["textToolCallProtocol"];
 	/** Ensure a managed-local model is running/resident before any isolated lane calls it. */
 	ensureModelReady(model: Model<any>): Promise<void>;
+	/**
+	 * Session working directory — feeds the skill-overlap audit's project-local skill discovery, the
+	 * same `cwd` the model-invoked `skillify`/`skill_audit` tools already receive (tools/index.ts).
+	 * Optional so a host that has not wired it yet still resolves (falls back to `process.cwd()`,
+	 * mirroring the existing profile-resolution fallback in settings-manager.ts).
+	 */
+	getCwd?(): string;
 }
+
+// reasonCode when an automatic skill promotion is blocked by an overlap with an existing skill
+// (skill_audit's similarity threshold) and routed to a consolidation proposal instead of a blind write.
+export const SKILL_OVERLAP_CONSOLIDATION_REASON_CODE = "skill_overlap_consolidation_proposed";
+// reasonCode when the overlap audit itself fails — the promotion is held (not written unaudited)
+// rather than silently skipping the check.
+export const SKILL_AUDIT_UNAVAILABLE_REASON_CODE = "skill_audit_unavailable";
 
 export class ReflectionController {
 	private readonly deps: ReflectionControllerDeps;
@@ -98,9 +119,11 @@ export class ReflectionController {
 	 * reflection and bounded child lanes (adaptive-agent design §6c/§7).
 	 *
 	 * Isolation invariants (audited by codex): builds fresh context (no main history), defaults to no
-	 * tools, and passes **no `sessionId`**. A tool-enabled call receives only caller-owned tools and
-	 * hooks, and is turn-bounded. It cannot mutate `agent.state.messages`, append session entries, or
-	 * touch the foreground tool registry. Mirrors `generateSummary()`'s one-shot mechanics otherwise.
+	 * tools, and passes **no real `sessionId`** — only a deterministic SYNTHETIC cache-affinity key
+	 * (see {@link computeLaneAffinityKey}) derived from `(laneKind, model, systemPrompt)`, which can never
+	 * equal or embed the real session id. A tool-enabled call receives only caller-owned tools and hooks,
+	 * and is turn-bounded. It cannot mutate `agent.state.messages`, append session entries, or touch the
+	 * foreground tool registry. Mirrors `generateSummary()`'s one-shot mechanics otherwise.
 	 *
 	 * Returns the result even on an error/aborted stop reason (callers — e.g. a background reflection
 	 * microtask — decide whether to act); it does not throw on a model-level error.
@@ -113,161 +136,188 @@ export class ReflectionController {
 		await this.deps.ensureModelReady(model);
 		const thinkingLevel = opts.thinkingLevel ?? "off";
 
-		// Fresh, isolated context: explicit messages, caller-owned tools only, nothing from the main session.
-		const context: Context = {
-			systemPrompt: opts.systemPrompt,
-			messages: opts.messages,
-			tools: opts.tools ?? [],
-		};
-
-		// Isolate the prompt cache and DELIBERATELY omit sessionId so no session-aware caching/routing
-		// can entangle this call with the main session.
-		const options: SimpleStreamOptions = {
-			maxTokens: opts.maxTokens,
-			signal: opts.signal,
-			cacheRetention: opts.cacheRetention ?? "none",
-			reasoning: thinkingLevel,
-		};
-
-		// When streamFn is the raw streamSimple (e.g. in tests), auth must be injected explicitly.
-		// Throw only when auth genuinely fails — providers that authenticate without an API key
-		// (OAuth, local no-key) legitimately return ok with an undefined apiKey.
-		if (this.deps.isRawStreamSimple()) {
-			const auth = await this.deps.getModelRegistry().getApiKeyAndHeaders(model);
-			if (!auth.ok) {
-				throw new Error(auth.error);
-			}
-			options.apiKey = auth.apiKey;
-			options.headers = auth.headers;
-		}
-
-		if (opts.tools && opts.tools.length > 0) {
-			const agent = this.deps.getAgent();
-			const foregroundModel = agent.state.model;
-			const usesForegroundModel = foregroundModel?.provider === model.provider && foregroundModel.id === model.id;
-			const textToolCallProtocol = this.deps.resolveTextToolCallProtocol(model);
-			const requestedMaxTurns =
-				typeof opts.maxTurns === "number" && Number.isFinite(opts.maxTurns) ? Math.floor(opts.maxTurns) : 6;
-			const maxTurns = Math.max(1, Math.min(12, requestedMaxTurns));
-			let completedTurns = 0;
-			const childContext: AgentContext = {
+		// Registered for the full isolated-completion call (one-shot or child-loop) so the
+		// reload gate waits it out — this is the SINGLE choke point every isolated completion in the
+		// codebase runs through (reflection, research/worker/fitness lanes, context-pipeline curation,
+		// model-router judge calls). registerInFlightWork is a pure sync map op (cannot throw), so
+		// placing it as the last statement before `try` still guarantees the matching finally always
+		// runs, on every return path below and on any thrown error.
+		const deregisterInFlight = registerInFlightWork(
+			this.deps.getAgentDir(),
+			"isolated-completion",
+			opts.laneKind ?? DEFAULT_ISOLATED_LANE_KIND,
+		);
+		try {
+			// Fresh, isolated context: explicit messages, caller-owned tools only, nothing from the main session.
+			const context: Context = {
 				systemPrompt: opts.systemPrompt,
-				messages: [],
-				tools: [...opts.tools],
+				messages: opts.messages,
+				tools: opts.tools ?? [],
 			};
-			const loopConfig: AgentLoopConfig = {
+
+			// Isolate the prompt cache from the main session by DELIBERATELY never sending the real
+			// sessionId. In its place, a deterministic SYNTHETIC affinity key lets providers with
+			// session-affinity headers / prompt_cache_key route repeat calls from the SAME lane (same
+			// laneKind+model+systemPrompt) to the same cache-warm backend, without entangling this call
+			// with — or leaking any identity of — the main session.
+			const affinityKey = computeLaneAffinityKey(
+				opts.laneKind ?? DEFAULT_ISOLATED_LANE_KIND,
 				model,
+				opts.systemPrompt,
+			);
+			const options: SimpleStreamOptions = {
 				maxTokens: opts.maxTokens,
-				cacheRetention: opts.cacheRetention ?? "none",
+				signal: opts.signal,
+				cacheRetention: opts.cacheRetention,
 				reasoning: thinkingLevel,
-				...(options.apiKey !== undefined ? { apiKey: options.apiKey } : {}),
-				...(options.headers !== undefined ? { headers: options.headers } : {}),
-				temperature: textToolCallProtocol ? 0 : undefined,
-				textToolCallProtocol,
-				onTextToolProtocolParse: usesForegroundModel ? agent.onTextToolProtocolParse : undefined,
-				transport: agent.transport,
-				thinkingBudgets: agent.thinkingBudgets,
-				maxRetryDelayMs: agent.maxRetryDelayMs,
-				maxStallTurns: Math.max(2, Math.min(maxTurns, agent.maxStallTurns ?? maxTurns)),
-				toolExecution: "sequential",
-				toolArgumentTeachEnabled: agent.toolArgumentTeachEnabled,
-				onToolArgumentValidation: usesForegroundModel ? agent.onToolArgumentValidation : undefined,
-				toolValidationEscalationThreshold: agent.toolValidationEscalationThreshold,
-				onToolValidationEscalation: usesForegroundModel ? agent.onToolValidationEscalation : undefined,
-				beforeToolCall: opts.beforeToolCall,
-				afterToolCall: opts.afterToolCall,
-				shouldStopAfterTurn: () => {
-					completedTurns += 1;
-					return completedTurns >= maxTurns;
-				},
-				convertToLlm: agent.convertToLlm,
+				sessionId: affinityKey,
 			};
-			const messages = await runAgentLoop(
-				opts.messages,
-				childContext,
-				loopConfig,
-				() => {},
-				opts.signal,
-				agent.streamFn,
-			);
-			const assistantMessages = messages.filter(
-				(message): message is AssistantMessage => message.role === "assistant",
-			);
-			let finalAssistant = assistantMessages.at(-1);
-			if (!finalAssistant) {
-				throw new Error("runIsolatedCompletion: child loop produced no assistant message");
+
+			// When streamFn is the raw streamSimple (e.g. in tests), auth must be injected explicitly.
+			// Throw only when auth genuinely fails — providers that authenticate without an API key
+			// (OAuth, local no-key) legitimately return ok with an undefined apiKey.
+			if (this.deps.isRawStreamSimple()) {
+				const auth = await this.deps.getModelRegistry().getApiKeyAndHeaders(model);
+				if (!auth.ok) {
+					throw new Error(auth.error);
+				}
+				options.apiKey = auth.apiKey;
+				options.headers = auth.headers;
 			}
 
-			const hasFinalText = finalAssistant.content.some(
-				(content) => content.type === "text" && content.text.trim().length > 0,
-			);
-			const endedOnToolCall = finalAssistant.content.some((content) => content.type === "toolCall");
-			if (opts.finalTextPrompt && !hasFinalText && endedOnToolCall && !opts.signal?.aborted) {
-				// A hard turn bound may stop immediately after successful tool execution. Preserve that bound,
-				// then allow exactly one tool-free synthesis call so the gathered work is not thrown away.
-				const finalizationMessages = await agent.convertToLlm(messages);
-				const finalizationStream = await agent.streamFn(
+			if (opts.tools && opts.tools.length > 0) {
+				const agent = this.deps.getAgent();
+				const foregroundModel = agent.state.model;
+				const usesForegroundModel = foregroundModel?.provider === model.provider && foregroundModel.id === model.id;
+				const textToolCallProtocol = this.deps.resolveTextToolCallProtocol(model);
+				const requestedMaxTurns =
+					typeof opts.maxTurns === "number" && Number.isFinite(opts.maxTurns) ? Math.floor(opts.maxTurns) : 6;
+				const maxTurns = Math.max(1, Math.min(12, requestedMaxTurns));
+				let completedTurns = 0;
+				const childContext: AgentContext = {
+					systemPrompt: opts.systemPrompt,
+					messages: [],
+					tools: [...opts.tools],
+				};
+				const loopConfig: AgentLoopConfig = {
 					model,
-					{
-						systemPrompt: opts.systemPrompt,
-						messages: [
-							...finalizationMessages,
-							{ role: "user", content: opts.finalTextPrompt, timestamp: Date.now() },
-						],
-						tools: [],
+					maxTokens: opts.maxTokens,
+					cacheRetention: opts.cacheRetention,
+					reasoning: thinkingLevel,
+					// Same synthetic per-lane affinity key as the one-shot path above — never the real sessionId.
+					sessionId: affinityKey,
+					...(options.apiKey !== undefined ? { apiKey: options.apiKey } : {}),
+					...(options.headers !== undefined ? { headers: options.headers } : {}),
+					temperature: textToolCallProtocol ? 0 : undefined,
+					textToolCallProtocol,
+					onTextToolProtocolParse: usesForegroundModel ? agent.onTextToolProtocolParse : undefined,
+					transport: agent.transport,
+					thinkingBudgets: agent.thinkingBudgets,
+					maxRetryDelayMs: agent.maxRetryDelayMs,
+					maxStallTurns: Math.max(2, Math.min(maxTurns, agent.maxStallTurns ?? maxTurns)),
+					onRunawayStop: usesForegroundModel ? agent.onRunawayStop : undefined,
+					toolExecution: "sequential",
+					toolArgumentTeachEnabled: agent.toolArgumentTeachEnabled,
+					onToolArgumentValidation: usesForegroundModel ? agent.onToolArgumentValidation : undefined,
+					toolValidationEscalationThreshold: agent.toolValidationEscalationThreshold,
+					onToolValidationEscalation: usesForegroundModel ? agent.onToolValidationEscalation : undefined,
+					beforeToolCall: opts.beforeToolCall,
+					afterToolCall: opts.afterToolCall,
+					shouldStopAfterTurn: () => {
+						completedTurns += 1;
+						return completedTurns >= maxTurns;
 					},
-					options,
+					convertToLlm: agent.convertToLlm,
+				};
+				const messages = await runAgentLoop(
+					opts.messages,
+					childContext,
+					loopConfig,
+					() => {},
+					opts.signal,
+					agent.streamFn,
 				);
-				finalAssistant = await finalizationStream.result();
-				assistantMessages.push(finalAssistant);
+				const assistantMessages = messages.filter(
+					(message): message is AssistantMessage => message.role === "assistant",
+				);
+				let finalAssistant = assistantMessages.at(-1);
+				if (!finalAssistant) {
+					throw new Error("runIsolatedCompletion: child loop produced no assistant message");
+				}
+
+				const hasFinalText = finalAssistant.content.some(
+					(content) => content.type === "text" && content.text.trim().length > 0,
+				);
+				const endedOnToolCall = finalAssistant.content.some((content) => content.type === "toolCall");
+				if (opts.finalTextPrompt && !hasFinalText && endedOnToolCall && !opts.signal?.aborted) {
+					// A hard turn bound may stop immediately after successful tool execution. Preserve that bound,
+					// then allow exactly one tool-free synthesis call so the gathered work is not thrown away.
+					const finalizationMessages = await agent.convertToLlm(messages);
+					const finalizationStream = await agent.streamFn(
+						model,
+						{
+							systemPrompt: opts.systemPrompt,
+							messages: [
+								...finalizationMessages,
+								{ role: "user", content: opts.finalTextPrompt, timestamp: Date.now() },
+							],
+							tools: [],
+						},
+						options,
+					);
+					finalAssistant = await finalizationStream.result();
+					assistantMessages.push(finalAssistant);
+				}
+
+				const usage = assistantMessages.reduce<Usage>(
+					(total, message) => ({
+						input: total.input + message.usage.input,
+						output: total.output + message.usage.output,
+						cacheRead: total.cacheRead + message.usage.cacheRead,
+						cacheWrite: total.cacheWrite + message.usage.cacheWrite,
+						totalTokens: total.totalTokens + message.usage.totalTokens,
+						cost: {
+							input: total.cost.input + message.usage.cost.input,
+							output: total.cost.output + message.usage.cost.output,
+							cacheRead: total.cost.cacheRead + message.usage.cost.cacheRead,
+							cacheWrite: total.cost.cacheWrite + message.usage.cost.cacheWrite,
+							total: total.cost.total + message.usage.cost.total,
+						},
+					}),
+					{
+						input: 0,
+						output: 0,
+						cacheRead: 0,
+						cacheWrite: 0,
+						totalTokens: 0,
+						cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, total: 0 },
+					},
+				);
+				const text = finalAssistant.content
+					.filter((content): content is TextContent => content.type === "text")
+					.map((content) => content.text)
+					.join("");
+				return { text, usage, stopReason: finalAssistant.stopReason };
 			}
 
-			const usage = assistantMessages.reduce<Usage>(
-				(total, message) => ({
-					input: total.input + message.usage.input,
-					output: total.output + message.usage.output,
-					cacheRead: total.cacheRead + message.usage.cacheRead,
-					cacheWrite: total.cacheWrite + message.usage.cacheWrite,
-					totalTokens: total.totalTokens + message.usage.totalTokens,
-					cost: {
-						input: total.cost.input + message.usage.cost.input,
-						output: total.cost.output + message.usage.cost.output,
-						cacheRead: total.cost.cacheRead + message.usage.cost.cacheRead,
-						cacheWrite: total.cost.cacheWrite + message.usage.cost.cacheWrite,
-						total: total.cost.total + message.usage.cost.total,
-					},
-				}),
-				{
-					input: 0,
-					output: 0,
-					cacheRead: 0,
-					cacheWrite: 0,
-					totalTokens: 0,
-					cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, total: 0 },
-				},
-			);
-			const text = finalAssistant.content
-				.filter((content): content is TextContent => content.type === "text")
-				.map((content) => content.text)
+			const stream = await this.deps.getAgent().streamFn(model, context, options);
+			const result = await stream.result();
+			const text = result.content
+				.filter((c): c is TextContent => c.type === "text")
+				.map((c) => c.text)
 				.join("");
-			return { text, usage, stopReason: finalAssistant.stopReason };
+			const usage: Usage = result.usage ?? {
+				input: 0,
+				output: 0,
+				cacheRead: 0,
+				cacheWrite: 0,
+				totalTokens: 0,
+				cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, total: 0 },
+			};
+			return { text, usage, stopReason: result.stopReason };
+		} finally {
+			deregisterInFlight();
 		}
-
-		const stream = await this.deps.getAgent().streamFn(model, context, options);
-		const result = await stream.result();
-		const text = result.content
-			.filter((c): c is TextContent => c.type === "text")
-			.map((c) => c.text)
-			.join("");
-		const usage: Usage = result.usage ?? {
-			input: 0,
-			output: 0,
-			cacheRead: 0,
-			cacheWrite: 0,
-			totalTokens: 0,
-			cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, total: 0 },
-		};
-		return { text, usage, stopReason: result.stopReason };
 	}
 
 	/**
@@ -309,6 +359,7 @@ export class ReflectionController {
 				// The reflection system prompt is static (#33) — let the provider cache the prefix so
 				// repeated passes only pay for the variable tail.
 				cacheRetention: "short",
+				laneKind: "reflection",
 			});
 
 		const result = await new ReflectionEngine().reflect({
@@ -405,25 +456,46 @@ export class ReflectionController {
 					},
 				});
 			}
+			// An automatic skill promotion the gate would otherwise apply must still clear the same
+			// skill_audit overlap check the model-invoked `skillify` tool enforces — otherwise reflection
+			// can silently write a near-duplicate SKILL.md. A non-overlapping skill is unaffected
+			// (skillPromotionBlock stays undefined) and promotes exactly as before.
+			const skillPromotionBlock =
+				write.kind === "promote_skill" && decision.kind === "apply"
+					? this._checkSkillPromotionOverlap(write)
+					: undefined;
+
 			// The gate's decision and the write's actual outcome are two different questions: the memory
 			// tool can refuse a write (budget exceeded, drift, threat) via details.success:false without
 			// throwing. Capture that outcome instead of assuming "decision.kind === apply" means it landed
 			// — otherwise a refused write leaves a phantom "apply" audit whose rollback later fails
 			// not-found (or, worse, misfires against whatever now occupies that text).
-			const applied = decision.kind === "apply" ? await this._applyReflectionWrite(write, signal) : false;
-			const writeFailed = decision.kind === "apply" && !applied;
+			const applied =
+				decision.kind === "apply" && !skillPromotionBlock ? await this._applyReflectionWrite(write, signal) : false;
+			const writeFailed = decision.kind === "apply" && !skillPromotionBlock && !applied;
 			if (decision.kind !== "no-op") {
 				auditSequence += 1;
 				appendLearningAuditSnapshot(this.deps.getSessionManager(), {
 					id: `audit-${auditSequence}`,
 					proposalId,
 					layer: proposal.layer,
-					action: writeFailed ? "apply_failed" : decision.kind === "apply" ? "apply" : "propose",
-					summary: proposal.summary,
-					reasonCode: writeFailed ? APPLY_WRITE_REFUSED_REASON_CODE : decision.reasonCode,
+					action: skillPromotionBlock
+						? "propose"
+						: writeFailed
+							? "apply_failed"
+							: decision.kind === "apply"
+								? "apply"
+								: "propose",
+					summary: skillPromotionBlock ? `${proposal.summary} — ${skillPromotionBlock.note}` : proposal.summary,
+					reasonCode: skillPromotionBlock
+						? skillPromotionBlock.reasonCode
+						: writeFailed
+							? APPLY_WRITE_REFUSED_REASON_CODE
+							: decision.reasonCode,
 					decision,
-					// No rollback plan on a failed apply — nothing durable landed, so there is nothing to undo.
-					rollback: writeFailed ? undefined : rollback,
+					// No rollback plan on a failed apply or a held/proposed promotion — nothing durable
+					// landed in either case, so there is nothing to undo.
+					rollback: skillPromotionBlock || writeFailed ? undefined : rollback,
 					createdAt: new Date().toISOString(),
 				});
 			}
@@ -583,8 +655,50 @@ export class ReflectionController {
 	}
 
 	/**
+	 * The same skill_audit overlap check the model-invoked `skillify` tool enforces
+	 * (tools/skillify.ts → tools/skill-audit.ts's `runSkillAudit`), run before an AUTOMATIC promotion
+	 * so the reflection engine can never silently write a near-duplicate SKILL.md. Reuses the audit
+	 * seam unchanged (never duplicated) against the same already-loaded skills universe skillify
+	 * compares a draft against. Returns a block reason when the draft overlaps an existing skill above
+	 * the audit's own similarity threshold, or when the audit itself fails (the promotion is held, not
+	 * written unaudited); undefined when clear to promote. Never throws — mirrors every other
+	 * best-effort check in this file.
+	 */
+	private _checkSkillPromotionOverlap(write: {
+		name: string;
+		description: string;
+		body: string;
+	}): { reasonCode: string; note: string } | undefined {
+		try {
+			const cwd = this.deps.getCwd?.() ?? process.cwd();
+			const audit = runSkillAudit(cwd, write);
+			const overlap = audit.nearDuplicates.find((d) => d.a === "[draft]" || d.b === "[draft]");
+			if (!overlap) return undefined;
+			const otherPath = overlap.a === "[draft]" ? overlap.b : overlap.a;
+			// Every skill file is named "SKILL.md" — unlike skillify's own display formatter (which takes
+			// the path's last segment and always shows that literal filename), look up the declared
+			// frontmatter name so the proposal actually names the skill it overlaps with.
+			const otherName = audit.skills.find((s) => s.path === otherPath)?.name ?? otherPath;
+			return {
+				reasonCode: SKILL_OVERLAP_CONSOLIDATION_REASON_CODE,
+				note: `overlaps existing skill "${otherName}" (${(overlap.similarity * 100).toFixed(0)}% similar) — consolidation proposed instead of a duplicate write`,
+			};
+		} catch {
+			// Bounded, observable degradation via the promote path's existing error-reporting shape: an
+			// audit failure must never throw into the reflection pass, but it also must not silently
+			// fall through to an unaudited write — hold the promotion and record why.
+			return {
+				reasonCode: SKILL_AUDIT_UNAVAILABLE_REASON_CODE,
+				note: "skill overlap audit failed; promotion held rather than written unaudited",
+			};
+		}
+	}
+
+	/**
 	 * R7: write a reflection-promoted skill as `<agentDir>/skills/<name>/SKILL.md` so it loads like any
-	 * user skill. Best-effort; never clobbers an existing (hand-authored) skill of the same name.
+	 * user skill. Best-effort; never clobbers an existing (hand-authored) skill of the same name. The
+	 * overlap audit runs at the call site in {@link runReflectionPass} — a write only reaches here
+	 * once the draft has already cleared it.
 	 */
 	private _promoteReflectionSkill(rawName: string, description: string, body: string): boolean {
 		const name = rawName

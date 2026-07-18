@@ -11,7 +11,7 @@ describe("learning policy settings", () => {
 	it("returns proposal-first defaults when nothing is configured", () => {
 		const resolved = SettingsManager.inMemory().getLearningPolicySettings();
 
-		expect(resolved.enabled).toBe(false);
+		expect(resolved.enabled).toBe(true);
 		expect(resolved.autoApplyEnabled).toBe(false);
 		expect(resolved.confidenceThreshold).toBe(DEFAULT_LEARNING_POLICY_CONFIDENCE_THRESHOLD);
 		expect(resolved.minObservations).toBe(DEFAULT_LEARNING_POLICY_MIN_OBSERVATIONS);

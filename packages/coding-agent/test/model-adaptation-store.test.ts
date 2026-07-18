@@ -1,6 +1,8 @@
 import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
+import { pathToFileURL } from "node:url";
+import { Worker } from "node:worker_threads";
 import { afterEach, describe, expect, it } from "vitest";
 import { type ModelAdaptationRule, ModelAdaptationStore } from "../src/core/models/adaptation-store.ts";
 import type { HostFingerprint } from "../src/core/models/fitness-store.ts";
@@ -165,5 +167,137 @@ describe("ModelAdaptationStore", () => {
 				.map((entry) => entry.model)
 				.sort(),
 		).toEqual(["model-a", "model-b"]);
+	});
+
+	/**
+	 * Two REAL OS threads (not just two same-process instances) hammering `store()` concurrently
+	 * for different models must not lose either side's write — this is the race the shared atomic-file
+	 * lock closes (`store()`'s load-mutate-write now runs under one exclusive lock spanning both the
+	 * read and the write).
+	 */
+	it("two OS threads writing different models concurrently never lose a write", async () => {
+		const agentDir = tempAgentDir();
+		dirs.push(agentDir);
+		const modulePath = new URL("../src/core/models/adaptation-store.ts", import.meta.url).pathname;
+		const workerPath = join(agentDir, "add-rule-worker.mjs");
+		writeFileSync(
+			workerPath,
+			`import { ModelAdaptationStore } from ${JSON.stringify(modulePath)};
+import { parentPort, workerData } from "node:worker_threads";
+const { agentDir, prefix, count } = workerData;
+const adaptationStore = ModelAdaptationStore.forAgentDir(agentDir);
+for (let i = 0; i < count; i++) {
+	adaptationStore.addRule(\`\${prefix}-\${i}\`, {
+		mode: "m",
+		text: "t",
+		addedAt: "2026-01-01T00:00:00.000Z",
+		lastFiredAt: "2026-01-01T00:00:00.000Z",
+	});
+}
+parentPort.postMessage({ done: true });
+`,
+			"utf-8",
+		);
+
+		const count = 40;
+		const prefixes = ["model-a", "model-b"];
+		const workers = prefixes.map(
+			(prefix) => new Worker(pathToFileURL(workerPath), { workerData: { agentDir, prefix, count } }),
+		);
+		await Promise.all(
+			workers.map(
+				(worker) =>
+					new Promise<void>((resolve, reject) => {
+						worker.on("message", () => resolve());
+						worker.on("error", reject);
+					}),
+			),
+		);
+		await Promise.all(workers.map((worker) => worker.terminate()));
+
+		const expected = prefixes.flatMap((prefix) => Array.from({ length: count }, (_, i) => `${prefix}-${i}`)).sort();
+		// Default fingerprint (no override) — both worker threads run on this same host, so they land
+		// under the same hosts[hostId] bucket, which is exactly where the race lived.
+		expect(
+			new ModelAdaptationStore(join(agentDir, "state", "model-adaptation.json"))
+				.getForHost()
+				.map((entry) => entry.model)
+				.sort(),
+		).toEqual(expected);
+	}, 20_000);
+});
+
+/**
+ * Efficacy-based standing-rule retirement. `teachStats.recurrenceAfter` was write-only before this
+ * change (agent-session.ts bumps it every time a taught failure mode recurs after its rule fired); it
+ * now feeds retirement — a rule whose post-rule recurrence has caught up to (or exceeded) its own
+ * pre-rule baseline retires EARLY (before the 30-day `RETIRE_AFTER_MS` outer bound), while a rule that
+ * keeps recurrence below that baseline persists until the outer bound still applies.
+ */
+describe("ModelAdaptationStore efficacy retirement", () => {
+	const dirs: string[] = [];
+
+	afterEach(() => {
+		for (const dir of dirs.splice(0)) rmSync(dir, { recursive: true, force: true });
+	});
+
+	it("retires an ineffective rule early: recurrenceAfter caught up to recurrenceBefore", () => {
+		const agentDir = tempAgentDir();
+		dirs.push(agentDir);
+		const adaptation = store(agentDir);
+		adaptation.save("model", {
+			rules: [rule(1, at(5))], // lastFiredAt well within the 30-day outer bound
+			teachStats: { "mode-1": { taught: 1, recurrenceBefore: 3, recurrenceAfter: 3 } },
+		});
+
+		expect(adaptation.get("model", new Date(at(6))).rules).toEqual([]);
+	});
+
+	it("keeps an effective rule: recurrenceAfter stays below recurrenceBefore", () => {
+		const agentDir = tempAgentDir();
+		dirs.push(agentDir);
+		const adaptation = store(agentDir);
+		adaptation.save("model", {
+			rules: [rule(1, at(5))],
+			teachStats: { "mode-1": { taught: 1, recurrenceBefore: 5, recurrenceAfter: 2 } },
+		});
+
+		expect(adaptation.get("model", new Date(at(6))).rules.map((r) => r.mode)).toEqual(["mode-1"]);
+	});
+
+	it("does not retire on a single post-rule relapse: insufficient evidence to judge efficacy", () => {
+		const agentDir = tempAgentDir();
+		dirs.push(agentDir);
+		const adaptation = store(agentDir);
+		adaptation.save("model", {
+			rules: [rule(1, at(5))],
+			// recurrenceAfter has caught up to recurrenceBefore by absolute count, but a single
+			// post-rule relapse (recurrenceAfter=1) is not enough evidence to call it ineffective.
+			teachStats: { "mode-1": { taught: 1, recurrenceBefore: 1, recurrenceAfter: 1 } },
+		});
+
+		expect(adaptation.get("model", new Date(at(6))).rules.map((r) => r.mode)).toEqual(["mode-1"]);
+	});
+
+	it("still retires an effective rule at the 30-day outer bound (efficacy never extends it)", () => {
+		const agentDir = tempAgentDir();
+		dirs.push(agentDir);
+		const adaptation = store(agentDir);
+		adaptation.save("model", {
+			rules: [rule(1, at(1))], // last fired day 1
+			teachStats: { "mode-1": { taught: 1, recurrenceBefore: 10, recurrenceAfter: 1 } }, // strongly effective
+		});
+
+		// > 30 days after day 1 — RETIRE_AFTER_MS is an outer bound regardless of efficacy.
+		expect(adaptation.get("model", new Date(Date.UTC(2026, 1, 5))).rules).toEqual([]);
+	});
+
+	it("a rule with no teachStats is judged by the time-based bound only", () => {
+		const agentDir = tempAgentDir();
+		dirs.push(agentDir);
+		const adaptation = store(agentDir);
+		adaptation.save("model", { rules: [rule(1, at(5))], teachStats: {} });
+
+		expect(adaptation.get("model", new Date(at(6))).rules.map((r) => r.mode)).toEqual(["mode-1"]);
 	});
 });

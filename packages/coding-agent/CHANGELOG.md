@@ -1,5 +1,41 @@
 ## [Unreleased]
 
+### Added
+
+- Closed the tool-selection observe/promote loop: durable per-(model, intent) agreement tracking, an evidence-gated compact prompt hint (activates only past utility/margin/min-evidence thresholds, deactivates when its tracked efficacy drops, never auto-executes), a `getReport()` surface joined into `/toolhealth`, and `PI_TOOL_SELECTION_OBSERVE` / `PI_TOOL_SELECTION_HINTS` kill switches.
+
+### Changed
+
+- Self-adaptation (native reflection + learning policy) is now on by default for a fresh session in every autonomy mode (off/safe/balanced/full) — evidence-gated (confidence threshold + `ObservationStore`). The preset lattice is monotonic: increasing autonomy no longer silently disables self-adaptation. All kill switches (`PI_NATIVE_REFLECTION=0`, `learningPolicy.enabled=false`, `AutoLearnSettings.enabled=false`) still disable it in every mode. The raw autonomy-prompt standing-grant authority block stays gated on `autonomy.mode` (`"off"` default unchanged).
+
+### Fixed
+
+- Runaway-loop stops and repeated tool-validation-failure escalations are no longer silent: both log a session entry; runaway stops surface a user-visible warning; validation escalation feeds the model router's existing cheap-route escalation gate. Isolated/reflection child loops inherit the runaway handler when on the foreground model.
+- Atomic, locked writes for model-adaptation, tool-recovery event-log rotation, the learning observation store, and skill-curator usage tracking (new shared `src/core/util/atomic-file.ts`); standing model-adaptation rules now also retire early once evidence shows they stopped reducing recurrence (in addition to the 30-day bound).
+- Reflection's automatic skill promotion runs the same `skill_audit` overlap check the `skillify` tool enforces; a near-duplicate draft is held as a consolidation proposal (learning-audit trail) instead of written.
+- Background/research/worker/reflection/fitness isolated-completion lanes carry a stable namespaced synthetic cache-affinity key (never the real session id), so provider session-affinity / `prompt_cache_key` caching actually hits on repeat lane calls.
+- The session cost guard folds this turn's background/spawned spend (per-turn baseline delta) into the same ceiling as the foreground projection (default action stays "warn"; per-lane caps untouched).
+- Spawned-usage accounting is idempotent: every `addSpawnedUsage` call site supplies a stable, content-derived `reportId`; the model-fitness probe threads its tool-call id as the idempotency token (separate deliberate runs count; retries dedupe).
+- `IsolatedCompletionOptions.cacheRetention` is required at the type level (silent "none" default removed).
+- Ollama/Transformers/prism readiness caching keyed per (server, model) instead of per-server — a second model on a confirmed server is never waved past the installed/residency checks. `LocalRuntimeController.reconcile()`/`dispose()` stops pi-spawned runtimes dropped from the live configuration on reload (detected-only servers never touched), wired into the reload path.
+- Compaction's summarizer honors managed-local readiness/residency for auto and manual `/compact`; also fixed a latent manual-`/compact` bug that dropped the resolved fallback model/failure and could pair a model with the wrong credentials.
+- Compaction pre-check accounts for this turn's own context-GC savings (read-only GC projection; suppression-only — near-full hard trigger unaffected).
+- Reload gate honors all in-flight work via a unified in-process quiesce registry (`reload-blockers.ts`): foreground streaming/compaction, research/worker/model-fitness lanes, context-scout runs, and isolated completions (registered at their single choke point).
+- Context-policy prompt-enforcement defaults now derive from the live context-GC settings (explicit values still win); corrected the stale GC-defaults doc comment (12/2500 → 8/1200).
+- Documented and test-pinned the system-prompt cache-stability invariant (one provider-cached block, rebuilt only on tool-surface change, day-granularity date).
+
+### Performance
+
+- Memoized per-message context-audit and token-estimate work within a session (object-identity keyed), byte-identical vs full recompute across compaction and branch-switch boundaries — the full-history rescan no longer reruns on every tool-call round trip.
+- Precompiled and cached minimatch patterns for resource-profile filtering (~8% of startup CPU; refired on every reload/profile switch before).
+- Extension TS transforms cached in a durable `agentDir/cache/jiti-transforms` directory (jiti's content-hash fsCache made explicit; hot-reload module isolation preserved).
+- Lazy highlight.js: `lib/core` + register-on-first-use (~190 eager grammar registrations removed from startup), identical output/alias resolution.
+- Cached resolved `fd`/`rg` system-PATH locations across runs (no `spawnSync` probe per launch; staleness re-probes).
+
+### Tests
+
+- Pinned the transform-before-cost-guard pipeline-order invariant (regression test fails under a simulated inverted order).
+
 ## [0.81.38] - 2026-07-16
 
 ### Changed

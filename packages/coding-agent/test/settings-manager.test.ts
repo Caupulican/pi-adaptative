@@ -608,6 +608,45 @@ describe("SettingsManager", () => {
 			});
 		});
 
+		it("mirrors an unconfigured default off the live contextGc window/threshold", () => {
+			const settingsPath = join(agentDir, "settings.json");
+			writeFileSync(
+				settingsPath,
+				JSON.stringify({ contextGc: { preserveRecentMessages: 20, minToolResultChars: 3000 } }),
+			);
+			const manager = SettingsManager.create(projectDir, agentDir);
+
+			// contextGc itself resolved the tuned values.
+			expect(manager.getContextGcSettings().preserveRecentMessages).toBe(20);
+			expect(manager.getContextGcSettings().minToolResultChars).toBe(3000);
+			// enforcement never configured its own preserveRecentMessages/minChars -- its default
+			// moves WITH the tuned contextGc values instead of staying pinned at the old 8/1200.
+			expect(manager.getContextPromptEnforcementSettings()).toEqual({
+				enabled: false,
+				preserveRecentMessages: 20,
+				minChars: 3000,
+			});
+		});
+
+		it("keeps an explicitly configured enforcement value even when contextGc is also tuned", () => {
+			const settingsPath = join(agentDir, "settings.json");
+			writeFileSync(
+				settingsPath,
+				JSON.stringify({
+					contextGc: { preserveRecentMessages: 20, minToolResultChars: 3000 },
+					contextPolicy: { enforcement: { enabled: true, preserveRecentMessages: 4, minChars: 600 } },
+				}),
+			);
+			const manager = SettingsManager.create(projectDir, agentDir);
+
+			// The explicit enforcement values win over the contextGc mirror.
+			expect(manager.getContextPromptEnforcementSettings()).toEqual({
+				enabled: true,
+				preserveRecentMessages: 4,
+				minChars: 600,
+			});
+		});
+
 		it("should save global contextPolicy enforcement settings and read them back", async () => {
 			const settingsPath = join(agentDir, "settings.json");
 			const manager = SettingsManager.create(projectDir, agentDir);

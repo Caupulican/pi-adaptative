@@ -503,6 +503,7 @@ describe("AgentSession local runtime readiness — end to end through prompt()",
 				systemPrompt: "isolated",
 				messages: [{ role: "user", content: "inspect", timestamp: Date.now() }],
 				model: ollamaFaux.models[0],
+				cacheRetention: "none",
 			});
 
 			expect(result.text).toBe("isolated local ready");

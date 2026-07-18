@@ -1,7 +1,6 @@
 import type { Transport } from "@caupulican/pi-ai";
 import { createHash } from "crypto";
 import { existsSync, mkdirSync, readFileSync, realpathSync, rmSync, statSync, writeFileSync } from "fs";
-import { minimatch } from "minimatch";
 import { homedir } from "os";
 import { basename, dirname, join, relative, resolve, sep } from "path";
 import lockfile from "proper-lockfile";
@@ -23,6 +22,7 @@ import { ProfileRegistry } from "./profile-registry.ts";
 import { mergeResourceProfileMap, mergeResourceProfileSettings } from "./resource-profile-blocks.ts";
 import { validateSkillName } from "./skills.ts";
 import type { ToolkitScript } from "./toolkit/script-registry.ts";
+import { matchesCompiledPattern } from "./util/minimatch-cache.ts";
 
 export interface CompactionSettings {
 	enabled?: boolean; // default: true
@@ -46,8 +46,8 @@ export interface SemanticMemoryGcSettings {
 
 export interface ContextGcSettings {
 	enabled?: boolean; // default: true
-	preserveRecentMessages?: number; // default: 12
-	minToolResultChars?: number; // default: 2500
+	preserveRecentMessages?: number; // default: 8
+	minToolResultChars?: number; // default: 1200
 	tools?: string[]; // default: read,bash,rg,grep,context_headroom_retrieve,headroom_retrieve
 	semanticMemory?: SemanticMemoryGcSettings;
 }
@@ -60,8 +60,12 @@ export interface ContextGcSettings {
  */
 export interface ContextPromptEnforcementSettings {
 	enabled?: boolean; // default: false -- no behavior change unless explicitly opted in
-	preserveRecentMessages?: number; // default: 8 (mirrors context-gc's own default recency window)
-	minChars?: number; // default: 1200 (mirrors context-gc's own minToolResultChars default)
+	// default: mirrors the live contextGc.preserveRecentMessages (getContextGcSettings()), so tuning
+	// GC's window moves this default with it; an explicit value here always wins over the mirror.
+	preserveRecentMessages?: number;
+	// default: mirrors the live contextGc.minToolResultChars (getContextGcSettings()); an explicit
+	// value here always wins over the mirror.
+	minChars?: number;
 }
 
 /**
@@ -279,7 +283,7 @@ export type LearningPolicyLayer =
 	| "settings"
 	| "source";
 
-export const DEFAULT_LEARNING_POLICY_ENABLED = false;
+export const DEFAULT_LEARNING_POLICY_ENABLED = true;
 export const DEFAULT_LEARNING_POLICY_AUTO_APPLY_ENABLED = false;
 export const DEFAULT_LEARNING_POLICY_CONFIDENCE_THRESHOLD = 90;
 export const DEFAULT_LEARNING_POLICY_MIN_OBSERVATIONS = 2;
@@ -510,12 +514,12 @@ export function matchesResourceProfilePattern(resourcePath: string, patterns: st
 	return patterns.some((pattern) => {
 		const normalizedPattern = toPosixPath(pattern);
 		return (
-			minimatch(rel, normalizedPattern) ||
-			minimatch(name, normalizedPattern) ||
-			minimatch(filePathPosix, normalizedPattern) ||
-			minimatch(parentRel, normalizedPattern) ||
-			minimatch(parentName, normalizedPattern) ||
-			minimatch(parentDirPosix, normalizedPattern)
+			matchesCompiledPattern(rel, normalizedPattern) ||
+			matchesCompiledPattern(name, normalizedPattern) ||
+			matchesCompiledPattern(filePathPosix, normalizedPattern) ||
+			matchesCompiledPattern(parentRel, normalizedPattern) ||
+			matchesCompiledPattern(parentName, normalizedPattern) ||
+			matchesCompiledPattern(parentDirPosix, normalizedPattern)
 		);
 	});
 }
@@ -2627,10 +2631,16 @@ export class SettingsManager {
 	}
 
 	getContextPromptEnforcementSettings(): { enabled: boolean; preserveRecentMessages: number; minChars: number } {
+		// Enforcement's own default MIRRORS the live context-gc settings (not a second hardcoded
+		// literal) so tuning contextGc.preserveRecentMessages/minToolResultChars moves this default
+		// with it instead of silently drifting. An explicitly configured enforcement value always
+		// wins over the mirror -- see the ContextPromptEnforcementSettings doc comment.
+		const gcSettings = this.getContextGcSettings();
 		return {
 			enabled: this.settings.contextPolicy?.enforcement?.enabled ?? false,
-			preserveRecentMessages: this.settings.contextPolicy?.enforcement?.preserveRecentMessages ?? 8,
-			minChars: this.settings.contextPolicy?.enforcement?.minChars ?? 1200,
+			preserveRecentMessages:
+				this.settings.contextPolicy?.enforcement?.preserveRecentMessages ?? gcSettings.preserveRecentMessages,
+			minChars: this.settings.contextPolicy?.enforcement?.minChars ?? gcSettings.minToolResultChars,
 		};
 	}
 

@@ -123,4 +123,99 @@ describe("ToolPerformanceStore", () => {
 			averageOutputTokenEstimate: 6,
 		});
 	});
+
+	describe("intent agreement", () => {
+		it("derives agreement from the ranking's top pick vs the actual tool, and buckets separately by hintActiveAtCallTime", () => {
+			const store = storeFor();
+			// Agrees (ranked[0] === actualTool "read"), hint not active yet.
+			store.recordExecution({
+				key,
+				success: true,
+				latencyMs: 10,
+				selection: { ...selection, ranked: [{ tool: "read", utility: 0.8, probability: 0.7 }] },
+			});
+			// Disagrees (ranked[0] is a different tool than the one actually called), hint active.
+			store.recordExecution({
+				key,
+				success: true,
+				latencyMs: 10,
+				hintActiveAtCallTime: true,
+				selection: { ...selection, ranked: [{ tool: "other_tool", utility: 0.9, probability: 0.6 }] },
+			});
+
+			const agreement = store.getIntentAgreement("faux/model", "read");
+			expect(agreement).toMatchObject({
+				sampleCount: 2,
+				agreementCount: 1,
+				hintActiveSampleCount: 1,
+				hintActiveAgreementCount: 0,
+			});
+			expect(store.getAllIntentAgreements("faux/model")).toHaveLength(1);
+			expect(store.getAllIntentAgreements("nonexistent-model")).toHaveLength(0);
+		});
+
+		it("returns an empty default for a (model,intent) bucket with no recorded executions", () => {
+			const store = storeFor();
+			expect(store.getIntentAgreement("faux/model", "read")).toMatchObject({
+				sampleCount: 0,
+				agreementCount: 0,
+				hintActiveSampleCount: 0,
+				hintActiveAgreementCount: 0,
+			});
+		});
+
+		it("getStatsForIntent scopes strictly to (modelRef,intentClass)", () => {
+			const store = storeFor();
+			store.recordExecution({
+				key: { modelRef: "faux/model", intentClass: "read", tool: "read" },
+				success: true,
+				latencyMs: 1,
+				selection,
+			});
+			store.recordExecution({
+				key: { modelRef: "faux/model", intentClass: "write", tool: "edit" },
+				success: true,
+				latencyMs: 1,
+				selection: { ...selection, ranked: [{ tool: "edit", utility: 0.5, probability: 0.5 }] },
+			});
+			store.recordExecution({
+				key: { modelRef: "other/model", intentClass: "read", tool: "read" },
+				success: true,
+				latencyMs: 1,
+				selection,
+			});
+
+			const readStats = store.getStatsForIntent("faux/model", "read");
+			expect(readStats.map((entry) => entry.tool)).toEqual(["read"]);
+			expect(store.getStatsForIntent("faux/model", "search")).toEqual([]);
+		});
+
+		it("tolerates a store file written before intentAgreement existed (backward-compatible schema)", () => {
+			const dir = mkdtempSync(join(tmpdir(), "pi-tool-performance-"));
+			dirs.push(dir);
+			const path = join(dir, "state/tool-performance.json");
+			mkdirSync(join(dir, "state"), { recursive: true });
+			writeFileSync(
+				path,
+				JSON.stringify({
+					version: 1,
+					hosts: {
+						[hosts[0].id]: {
+							host: hosts[0],
+							stats: {},
+							observations: [],
+							// intentAgreement intentionally omitted — simulates a store file that predates intent-agreement tracking.
+						},
+					},
+				}),
+				"utf8",
+			);
+			const store = ToolPerformanceStore.forAgentDir(dir, { fingerprint: () => hosts[0] });
+			expect(store.getAllIntentAgreements()).toEqual([]);
+			expect(store.getIntentAgreement("faux/model", "read").sampleCount).toBe(0);
+
+			store.recordExecution({ key, success: true, latencyMs: 1, selection });
+			expect(store.getIntentAgreement("faux/model", "read").sampleCount).toBe(1);
+		});
+	});
 });

@@ -1,4 +1,5 @@
-import hljs from "highlight.js/lib/index.js";
+import hljs from "highlight.js/lib/core.js";
+import { HIGHLIGHT_LANGUAGE_ALIASES, HIGHLIGHT_LANGUAGE_MODULES } from "./highlight-js-languages.ts";
 import { decodeHtmlEntityAt } from "./html.ts";
 
 export type HighlightFormatter = (text: string) => string;
@@ -131,16 +132,64 @@ export function renderHighlightedHtml(html: string, theme: HighlightTheme = {}):
 	return output;
 }
 
+let allLanguagesRegistered = false;
+
+// Register a language with highlight.js/lib/core on first use instead of eagerly
+// registering all ~190 bundled languages at import time. `HIGHLIGHT_LANGUAGE_MODULES`
+// and `HIGHLIGHT_LANGUAGE_ALIASES` are generated from the same registration data as
+// highlight.js/lib/index.js (see highlight-js-languages.ts), so resolution is
+// identical: an exact canonical name always wins over an alias (mirrors hljs's own
+// `languages[name] || languages[aliases[name]]` lookup), and when two languages
+// declare the same alias, the language registered last wins (mirrors hljs's
+// registration-order overwrite of its internal alias table).
+function ensureLanguageRegistered(name: string): void {
+	const lower = name.toLowerCase();
+	if (hljs.getLanguage(lower)) {
+		return;
+	}
+	const canonicalName = HIGHLIGHT_LANGUAGE_MODULES[lower] ? lower : HIGHLIGHT_LANGUAGE_ALIASES[lower];
+	const languageModule = canonicalName ? HIGHLIGHT_LANGUAGE_MODULES[canonicalName] : undefined;
+	if (canonicalName && languageModule) {
+		hljs.registerLanguage(canonicalName, languageModule);
+	}
+}
+
+function ensureAllLanguagesRegistered(): void {
+	if (allLanguagesRegistered) {
+		return;
+	}
+	for (const [canonicalName, languageModule] of Object.entries(HIGHLIGHT_LANGUAGE_MODULES)) {
+		if (!hljs.getLanguage(canonicalName)) {
+			hljs.registerLanguage(canonicalName, languageModule);
+		}
+	}
+	allLanguagesRegistered = true;
+}
+
 export function highlight(code: string, options: HighlightOptions = {}): string {
-	const html = options.language
-		? hljs.highlight(code, {
-				language: options.language,
-				ignoreIllegals: options.ignoreIllegals,
-			}).value
-		: hljs.highlightAuto(code, options.languageSubset).value;
+	let html: string;
+	if (options.language) {
+		ensureLanguageRegistered(options.language);
+		html = hljs.highlight(code, {
+			language: options.language,
+			ignoreIllegals: options.ignoreIllegals,
+		}).value;
+	} else if (options.languageSubset) {
+		for (const name of options.languageSubset) {
+			ensureLanguageRegistered(name);
+		}
+		html = hljs.highlightAuto(code, options.languageSubset).value;
+	} else {
+		// Full auto-detection with no subset scans every registered language, so there is
+		// no lazy subset to resolve first — register everything to preserve identical
+		// detection results to the eager bundle.
+		ensureAllLanguagesRegistered();
+		html = hljs.highlightAuto(code).value;
+	}
 	return renderHighlightedHtml(html, options.theme);
 }
 
 export function supportsLanguage(name: string): boolean {
+	ensureLanguageRegistered(name);
 	return hljs.getLanguage(name) !== undefined;
 }

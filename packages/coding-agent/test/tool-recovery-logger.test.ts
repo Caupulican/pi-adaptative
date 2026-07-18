@@ -2,6 +2,7 @@ import { existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, statSync, wri
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { pathToFileURL } from "node:url";
+import { Worker } from "node:worker_threads";
 import type { ToolArgumentValidationTelemetryEvent } from "@caupulican/pi-ai";
 import { afterEach, describe, expect, it } from "vitest";
 import {
@@ -229,7 +230,79 @@ if (!existsSync(marker)) {
 
 		expect(rotatedSize).toBeLessThanOrEqual(Math.floor(4 * 1024 * 1024 * 0.75));
 		expect(statSync(eventLogPath).size).toBe(rotatedSize + Buffer.byteLength(encoded));
+		// Rotation rewrites via tmp+rename — no leftover tmp file after a completed rotation.
+		expect(existsSync(`${eventLogPath}.tmp`)).toBe(false);
 	});
+
+	/**
+	 * Two REAL OS threads appending (and, for one of them, rotating) the SAME event log
+	 * concurrently must not tear a line or lose a record — `writeToolRecoveryLogRecord` now runs its
+	 * append+rotate under one exclusive lock on `eventLogPath` instead of racing unlocked appends
+	 * against an in-place (non-atomic) rotation rewrite.
+	 */
+	it("two OS threads writing the same event log concurrently never tear or lose a record", async () => {
+		const dir = makeTempDir();
+		const eventLogPath = join(dir, "state", "tool-recovery-events.jsonl");
+		const failureCorpusPath = join(dir, "state", "failure-corpus.jsonl");
+		mkdirSync(join(dir, "state"), { recursive: true });
+
+		const modulePath = new URL("../src/core/tool-recovery-log-records.ts", import.meta.url).pathname;
+		const workerPath = join(dir, "recovery-log-worker.mjs");
+		writeFileSync(
+			workerPath,
+			`import { createToolArgumentValidationLogRecord, writeToolRecoveryLogRecord } from ${JSON.stringify(modulePath)};
+import { parentPort, workerData } from "node:worker_threads";
+const { eventLogPath, failureCorpusPath, workerId, iterations } = workerData;
+for (let i = 0; i < iterations; i++) {
+	const record = createToolArgumentValidationLogRecord({
+		event: {
+			outcome: "repaired",
+			provider: "test-provider",
+			model: "test-model",
+			tool: "edit",
+			failureModes: ["jsonStringParse"],
+			repairsApplied: ["jsonStringParse"],
+			taught: "none",
+			executionOutcome: "succeeded",
+		},
+		recordId: \`w\${workerId}:\${i}\`,
+		sessionId: "session-1",
+		ts: "2026-07-08T00:00:00Z",
+	});
+	writeToolRecoveryLogRecord({ eventLogPath, failureCorpusPath, record });
+}
+parentPort.postMessage({ done: true });
+`,
+			"utf-8",
+		);
+
+		const iterationsPerWorker = 40;
+		const workers = [1, 2].map(
+			(workerId) =>
+				new Worker(pathToFileURL(workerPath), {
+					workerData: { eventLogPath, failureCorpusPath, workerId, iterations: iterationsPerWorker },
+				}),
+		);
+		await Promise.all(
+			workers.map(
+				(worker) =>
+					new Promise<void>((resolve, reject) => {
+						worker.on("message", () => resolve());
+						worker.on("error", reject);
+					}),
+			),
+		);
+		await Promise.all(workers.map((worker) => worker.terminate()));
+
+		const lines = readFileSync(eventLogPath, "utf-8")
+			.trim()
+			.split("\n")
+			.filter((line) => line.length > 0);
+		// Every line parses as JSON — a torn/interleaved write would produce a malformed line here.
+		const recordIds = lines.map((line) => (JSON.parse(line) as { recordId: string }).recordId);
+		expect(recordIds).toHaveLength(iterationsPerWorker * 2);
+		expect(new Set(recordIds).size).toBe(iterationsPerWorker * 2); // no duplicate/corrupted entries
+	}, 20_000);
 
 	it("contains worker write failures without throwing into the caller", async () => {
 		const dir = makeTempDir();

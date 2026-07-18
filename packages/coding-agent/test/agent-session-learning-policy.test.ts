@@ -88,7 +88,7 @@ describe("learning apply policy — audit and rollback", () => {
 	});
 
 	it("legacy path (policy disabled): applies the write but records decision + audit with rollback plan", async () => {
-		const session = await newSession();
+		const session = await newSession({ enabled: false });
 		scriptReflection(session, [{ kind: "memory_add", section: "MEMORY", text: "Always run npm run check" }]);
 
 		await runPass(session);
@@ -199,7 +199,7 @@ describe("learning apply policy — audit and rollback", () => {
 	});
 
 	it("legacy path (policy disabled): memory tool refusal also avoids a phantom apply audit", async () => {
-		const session = await newSession();
+		const session = await newSession({ enabled: false });
 
 		const fact = "Legacy fact that will not fit in the remaining budget";
 		const budgetMemory = 2200;
@@ -386,7 +386,7 @@ describe("learning apply policy — audit and rollback", () => {
 	});
 
 	it("rolls back an applied memory_add exactly once", async () => {
-		const session = await newSession();
+		const session = await newSession({ enabled: false });
 		scriptReflection(session, [{ kind: "memory_add", section: "MEMORY", text: "Fact to roll back" }]);
 		await runPass(session);
 		expect(readFileSync(join(agentDir, "MEMORY.md"), "utf-8")).toContain("Fact to roll back");
@@ -410,7 +410,7 @@ describe("learning apply policy — audit and rollback", () => {
 	});
 
 	it("a failed rollback inverse does not consume the once-only rollback (no self-lock)", async () => {
-		const session = await newSession();
+		const session = await newSession({ enabled: false });
 		scriptReflection(session, [{ kind: "memory_add", section: "MEMORY", text: "Fact to roll back" }]);
 		await runPass(session);
 		const audit = session.getLearningAuditRecords()[0];

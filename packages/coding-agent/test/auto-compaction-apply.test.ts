@@ -113,6 +113,7 @@ function compactionSupportFixture(options: {
 			// Small span: capacity never interferes with the behaviors under test here.
 			estimateSummarizationInputTokens: () => 1_000,
 			emitWarning: (message) => warnings.push(message),
+			ensureModelReady: async () => {},
 		}),
 		sessionModel,
 		cheapModel,
@@ -424,6 +425,7 @@ describe("auto-compaction never fails silently", () => {
 			getStoredFitnessReport: () => undefined,
 			estimateSummarizationInputTokens: () => 1_000,
 			emitWarning: () => {},
+			ensureModelReady: async () => {},
 		});
 
 		type ModelArg = Parameters<CompactionSupport["resolveModelAndAuth"]>[0];

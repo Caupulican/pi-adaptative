@@ -2,14 +2,18 @@ import { createHash } from "node:crypto";
 import chalk from "chalk";
 import { type SpawnSyncReturns, spawnSync } from "child_process";
 import {
+	accessSync,
 	chmodSync,
 	createReadStream,
 	createWriteStream,
 	existsSync,
+	constants as fsConstants,
 	mkdirSync,
 	readdirSync,
+	readFileSync,
 	renameSync,
 	rmSync,
+	statSync,
 	writeFileSync,
 } from "fs";
 import { createRequire } from "module";
@@ -154,6 +158,97 @@ function commandExists(cmd: string): boolean {
 	}
 }
 
+interface CachedToolPath {
+	path: string;
+	mtimeMs: number;
+}
+
+function isCachedToolPath(value: unknown): value is CachedToolPath {
+	if (typeof value !== "object" || value === null) return false;
+	const candidate = value as Record<string, unknown>;
+	return typeof candidate.path === "string" && typeof candidate.mtimeMs === "number";
+}
+
+function getToolPathCacheFile(): string {
+	return join(getAgentDir(), "cache", "tool-paths.json");
+}
+
+/** Read the persisted cross-run tool-path cache. Missing/corrupt/foreign entries are dropped silently -- a cold cache just means the next resolve re-probes and repopulates it. */
+function readToolPathCache(): Partial<Record<ManagedToolName, CachedToolPath>> {
+	try {
+		const raw = readFileSync(getToolPathCacheFile(), "utf-8");
+		const parsed = JSON.parse(raw) as Record<string, unknown>;
+		const cache: Partial<Record<ManagedToolName, CachedToolPath>> = {};
+		for (const tool of Object.keys(TOOLS) as ManagedToolName[]) {
+			const entry = parsed[tool];
+			if (isCachedToolPath(entry)) cache[tool] = entry;
+		}
+		return cache;
+	} catch {
+		return {};
+	}
+}
+
+function writeToolPathCacheEntry(tool: ManagedToolName, entry: CachedToolPath): void {
+	try {
+		const cacheDir = join(getAgentDir(), "cache");
+		mkdirSync(cacheDir, { recursive: true });
+		const cache = readToolPathCache();
+		cache[tool] = entry;
+		writeFileSync(join(cacheDir, "tool-paths.json"), JSON.stringify(cache));
+	} catch {
+		// Best-effort: a failed cache write only costs the next run its probe, same as a cold cache.
+	}
+}
+
+/** A cached entry is fresh only while its file still exists at the same path with the same mtime -- a deleted/moved/replaced binary invalidates it and forces a re-probe below. */
+function isCachedToolPathFresh(entry: CachedToolPath): boolean {
+	try {
+		return statSync(entry.path).mtimeMs === entry.mtimeMs;
+	} catch {
+		return false;
+	}
+}
+
+function getPathExtensionCandidates(): readonly string[] {
+	if (platform() !== "win32") return [""];
+	const pathExt = process.env.PATHEXT || ".COM;.EXE;.BAT;.CMD";
+	return ["", ...pathExt.split(";").filter(Boolean)];
+}
+
+/**
+ * Manually walk PATH to turn a bare command name that commandExists() already confirmed is
+ * runnable into an absolute, stat-checkable path. This never decides presence itself (that stays
+ * commandExists's job via spawnSync, unchanged) -- it only supplies the path the cross-run cache
+ * needs for its mtime staleness check, using stat calls instead of another spawn.
+ */
+function resolveOnSystemPath(binaryName: string): string | null {
+	const pathEnv = process.env.PATH ?? "";
+	const dirs = pathEnv.split(platform() === "win32" ? ";" : ":").filter(Boolean);
+	for (const dir of dirs) {
+		for (const ext of getPathExtensionCandidates()) {
+			const candidate = join(dir, binaryName + ext);
+			if (!existsSync(candidate)) continue;
+			try {
+				if (statSync(candidate).isDirectory()) continue;
+				if (platform() !== "win32") accessSync(candidate, fsConstants.X_OK);
+			} catch {
+				continue;
+			}
+			return candidate;
+		}
+	}
+	return null;
+}
+
+function cacheResolvedSystemPath(tool: ManagedToolName, resolvedPath: string): void {
+	try {
+		writeToolPathCacheEntry(tool, { path: resolvedPath, mtimeMs: statSync(resolvedPath).mtimeMs });
+	} catch {
+		// Stat raced with a delete between resolve and here: nothing to cache, still return the path below.
+	}
+}
+
 // Get the path to a tool (system-wide or in our tools dir)
 export function getToolPath(tool: ManagedToolName): string | null {
 	const config = TOOLS[tool];
@@ -167,8 +262,31 @@ export function getToolPath(tool: ManagedToolName): string | null {
 
 	// Check system PATH - if found, just return the command name (it's in PATH)
 	const systemBinaryNames = config.systemBinaryNames ?? [config.binaryName];
+
+	// A system-PATH resolution normally requires commandExists's synchronous
+	// spawnSync(`<name> --version`) probe below, which is expensive to pay on every process
+	// startup (this runs once per tool at interactive-mode init, plus again on the first
+	// find/grep tool call). Persist the resolved absolute path + mtime across runs
+	// (<agentDir>/cache/tool-paths.json) so a warm run can skip the probe entirely and just
+	// stat the cached path instead. KNOWN LIMITATION: if a *different* binary of the same name
+	// starts shadowing the cached one earlier on PATH (e.g. a new install) while the
+	// originally-cached file itself is untouched, this cache keeps returning the old path until
+	// that file is deleted/modified -- an intentional narrow staleness window (the returned tool
+	// still exists and runs; it just isn't the newly-shadowing one), not a correctness bug.
+	const cached = readToolPathCache()[tool];
+	if (cached && isCachedToolPathFresh(cached)) {
+		return cached.path;
+	}
+
 	for (const systemBinaryName of systemBinaryNames) {
 		if (commandExists(systemBinaryName)) {
+			const resolved = resolveOnSystemPath(systemBinaryName);
+			if (resolved) {
+				cacheResolvedSystemPath(tool, resolved);
+				return resolved;
+			}
+			// Could not resolve an absolute path to cache (e.g. PATH env raced between the two
+			// lookups); still return the bare name so the caller keeps working, uncached.
 			return systemBinaryName;
 		}
 	}

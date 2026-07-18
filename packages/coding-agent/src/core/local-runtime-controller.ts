@@ -125,7 +125,7 @@ export class LocalRuntimeController {
 
 	getTransformersRuntime(modelId: string, baseUrl?: string): TransformersRuntime {
 		const resolvedBaseUrl = baseUrl?.replace(/\/$/, "") ?? resolveTransformersBaseUrl(modelId);
-		const key = `${modelId}\0${resolvedBaseUrl}`;
+		const key = this._transformersRuntimeKey(modelId, resolvedBaseUrl);
 		let runtime = this._transformersRuntimes.get(key);
 		if (!runtime) {
 			runtime = new TransformersRuntime({
@@ -202,12 +202,17 @@ export class LocalRuntimeController {
 	}
 
 	/**
-	 * If the last assistant message in this session was an error from THIS exact local server, a
-	 * cached "confirmed up" flag would be stale (the server may have died mid-session) — drop it so
-	 * the next ensure-check is a real one instead of trusting stale state.
+	 * ALWAYS scoped to both the server AND the exact model — never bare `serverUrl`. A single Ollama
+	 * (or prism) server can host several models, and a serverUrl-only key let the FIRST model
+	 * confirmed on a server silently wave through every other model requested on that same server:
+	 * the cache hit at {@link ensureLocalModelReady}/{@link ensurePrismLlamaCppModelReady} short-
+	 * circuits BEFORE the installed-model check and the residency arbiter run, so a genuinely missing
+	 * model surfaced as a raw runtime error instead of `model_missing_on_server`, and residency
+	 * bookkeeping silently skipped a model it never actually admitted. Transformers already had this
+	 * right (one server per model, by construction); this makes every provider consistent.
 	 */
 	private confirmationKey(model: Model<Api>, serverUrl: string): string {
-		return model.provider === HF_TRANSFORMERS_PROVIDER ? `${serverUrl}\0${model.id}` : serverUrl;
+		return `${serverUrl}\0${model.id}`;
 	}
 
 	private invalidateIfLastCallFailed(model: Model<Api>, serverUrl: string): void {
@@ -688,5 +693,85 @@ export class LocalRuntimeController {
 			};
 		}
 		return current;
+	}
+
+	/**
+	 * Stop every pi-spawned local runtime (Ollama, Transformers, prism llama.cpp) that no longer
+	 * backs any model in `eligibleModels` — the caller's post-reload/profile-switch configuration
+	 * (typically: the foreground model plus whatever the model router's tiers still resolve to).
+	 * Called by the reload path so a local model dropped from the live configuration doesn't leave
+	 * its child process running untracked for the rest of the process lifetime.
+	 *
+	 * Never touches a server this session merely DETECTED (a user/system-run Ollama server, or any
+	 * server that was already up when first probed): {@link OllamaRuntime.stop}/
+	 * {@link TransformersRuntime.stop}/{@link PrismLlamaCppRuntime.stop} already no-op unless the
+	 * instance holds a live pi-spawned child-process handle (see each class's own `stop()`), so
+	 * calling `stop()` unconditionally on every cached instance below is safe by construction — it
+	 * can never kill a process pi didn't start.
+	 *
+	 * Never stops a runtime still backing an eligible model. Eligibility is checked at the SAME
+	 * granularity each map is keyed at: `_runtimes` is keyed by Ollama serverUrl (one server can host
+	 * several models), so it survives as long as ANY eligible model still points at that server;
+	 * `_transformersRuntimes` is keyed by (modelId, serverUrl) — one runtime per model, so eligibility
+	 * is exact; the prism runtime is a single pi-owned instance that survives while ANY eligible model
+	 * is pi-managed prism.
+	 *
+	 * The `_confirmedUp` cache is pruned separately, in ONE pass over every provider: since
+	 * `confirmationKey` is uniformly `${serverUrl}\0${model.id}` across every provider, a single
+	 * eligible-keys set built the same way covers all three providers. This also correctly drops a
+	 * model's stale confirmation even when its SERVER survives (e.g. two Ollama models on one server,
+	 * only one still eligible) — a case the coarser per-server runtime eviction above can't see on
+	 * its own.
+	 */
+	reconcile(eligibleModels: readonly Model<Api>[]): void {
+		const eligibleOllamaServers = new Set(
+			eligibleModels
+				.filter((model) => model.provider === OLLAMA_PROVIDER)
+				.map((model) => this.deriveOllamaServerUrl(model.baseUrl)),
+		);
+		for (const [serverUrl, runtime] of this._runtimes) {
+			if (eligibleOllamaServers.has(serverUrl)) continue;
+			runtime.stop();
+			this._runtimes.delete(serverUrl);
+		}
+
+		const eligibleTransformersRuntimeKeys = new Set(
+			eligibleModels
+				.filter((model) => model.provider === HF_TRANSFORMERS_PROVIDER)
+				.map((model) => this._transformersRuntimeKey(model.id, this.deriveOllamaServerUrl(model.baseUrl))),
+		);
+		for (const [runtimeKey, runtime] of this._transformersRuntimes) {
+			if (eligibleTransformersRuntimeKeys.has(runtimeKey)) continue;
+			runtime.stop();
+			this._transformersRuntimes.delete(runtimeKey);
+		}
+
+		if (this._prismLlamaCppRuntime && !eligibleModels.some((model) => isPiManagedPrismLlamaCppModel(model))) {
+			this._prismLlamaCppRuntime.stop();
+			this._prismLlamaCppRuntime = undefined;
+		}
+
+		// deriveOllamaServerUrl strips a trailing `/v1` regardless of provider (same body as the
+		// private deriveOpenAICompatServerUrl it mirrors), so it's safe to reuse here for every
+		// managed-local provider's baseUrl when building the confirmationKey-shaped eligible set.
+		const eligibleConfirmationKeys = new Set(
+			eligibleModels
+				.filter((model) => this.isManagedLocalModel(model))
+				.map((model) => this.confirmationKey(model, this.deriveOllamaServerUrl(model.baseUrl))),
+		);
+		for (const key of this._confirmedUp) {
+			if (!eligibleConfirmationKeys.has(key)) this._confirmedUp.delete(key);
+		}
+	}
+
+	/** Full teardown of every pi-spawned local runtime — reconcile against an empty eligible set. */
+	dispose(): void {
+		this.reconcile([]);
+	}
+
+	/** Shared cache-key shape for {@link _transformersRuntimes}, factored out so
+	 * {@link getTransformersRuntime} and {@link reconcile} can never drift apart. */
+	private _transformersRuntimeKey(modelId: string, resolvedBaseUrl: string): string {
+		return `${modelId}\0${resolvedBaseUrl}`;
 	}
 }

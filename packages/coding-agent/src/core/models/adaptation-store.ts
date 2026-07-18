@@ -1,5 +1,6 @@
-import { existsSync, mkdirSync, readFileSync, writeFileSync } from "node:fs";
-import { dirname, join } from "node:path";
+import { existsSync, readFileSync } from "node:fs";
+import { join } from "node:path";
+import { withFileLockSync, writeFileAtomicSync } from "../util/atomic-file.ts";
 import { currentHostFingerprint, type HostFingerprint } from "./fitness-store.ts";
 import {
 	hasUsableModelPerfSample,
@@ -154,9 +155,37 @@ function ruleRecency(rule: ModelAdaptationRule): number {
 	return Number.isFinite(added) ? added : 0;
 }
 
-function pruneRetiredRules(rules: readonly ModelAdaptationRule[], now: Date): ModelAdaptationRule[] {
+/**
+ * Minimum post-rule recurrences before efficacy can retire a rule early — a single relapse is
+ * noise, not proof the rule stopped working.
+ */
+const MIN_RECURRENCE_AFTER_FOR_EFFICACY = 2;
+
+/**
+ * Efficacy-based early retirement. `agent-session.ts`'s `_handleModelAdaptationTelemetry` bumps
+ * `recurrenceBefore` each time a failure mode recurs BEFORE a standing rule exists for it (the
+ * baseline that earned the rule), then switches to bumping `recurrenceAfter` each time the SAME mode
+ * recurs AFTER the rule fired. So a rule that is actually working keeps `recurrenceAfter` low relative
+ * to its own pre-rule baseline; a rule that has caught up to (or exceeded) that baseline has
+ * demonstrably stopped reducing recurrence and should retire before the time-based outer bound.
+ */
+function isRuleEffective(stats: ModelTeachStats | undefined): boolean {
+	if (!stats || stats.recurrenceAfter < MIN_RECURRENCE_AFTER_FOR_EFFICACY) return true; // not enough post-rule evidence yet
+	return stats.recurrenceAfter < stats.recurrenceBefore;
+}
+
+/**
+ * Prune rules past the time-based outer bound (`RETIRE_AFTER_MS`, always enforced) OR past efficacy
+ * (a rule that stopped reducing recurrence retires early; a rule that keeps helping persists until
+ * the outer bound).
+ */
+function pruneRetiredRules(
+	rules: readonly ModelAdaptationRule[],
+	teachStats: Record<string, ModelTeachStats>,
+	now: Date,
+): ModelAdaptationRule[] {
 	const cutoff = now.getTime() - RETIRE_AFTER_MS;
-	return rules.filter((rule) => ruleRecency(rule) >= cutoff);
+	return rules.filter((rule) => ruleRecency(rule) >= cutoff && isRuleEffective(teachStats[rule.mode]));
 }
 
 function enforceRuleCap(rules: readonly ModelAdaptationRule[]): ModelAdaptationRule[] {
@@ -196,16 +225,21 @@ export class ModelAdaptationStore {
 	}
 
 	private write(file: AdaptationStoreFile): void {
-		mkdirSync(dirname(this.filePath), { recursive: true });
-		writeFileSync(this.filePath, `${JSON.stringify(file, null, "\t")}\n`, "utf-8");
+		writeFileAtomicSync(this.filePath, `${JSON.stringify(file, null, "\t")}\n`);
 	}
 
+	/**
+	 * Load-mutate-write under a single exclusive lock so two concurrent stores (e.g. two sessions
+	 * sharing an agentDir) can't both read the old file and clobber each other's write.
+	 */
 	private store(model: string, profile: ModelAdaptationProfile, at: string): StoredModelAdaptation {
 		const host = this.fingerprint();
 		const entry: StoredModelAdaptation = { model, profile: normalizeProfile(profile), at, host };
-		const file = this.load();
-		file.hosts[host.id] = { ...(file.hosts[host.id] ?? {}), [model]: entry };
-		this.write(file);
+		withFileLockSync(this.filePath, () => {
+			const file = this.load();
+			file.hosts[host.id] = { ...(file.hosts[host.id] ?? {}), [model]: entry };
+			this.write(file);
+		});
 		return entry;
 	}
 
@@ -221,7 +255,7 @@ export class ModelAdaptationStore {
 		const entry = file.hosts[host.id]?.[model];
 		if (!entry) return emptyProfile();
 		const profile = normalizeProfile(entry.profile);
-		const prunedRules = pruneRetiredRules(profile.rules, now);
+		const prunedRules = pruneRetiredRules(profile.rules, profile.teachStats, now);
 		if (prunedRules.length !== profile.rules.length) {
 			return this.store(model, { ...profile, rules: prunedRules }, now.toISOString()).profile;
 		}

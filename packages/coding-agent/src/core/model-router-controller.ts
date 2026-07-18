@@ -25,6 +25,7 @@
  * ({@link isRetryInFlight}), and the public getModelRouterStatus / autonomy-telemetry reads.
  */
 
+import { createHash } from "node:crypto";
 import type { Agent, AgentMessage, ThinkingLevel } from "@caupulican/pi-agent-core";
 import type { SessionManager } from "@caupulican/pi-agent-core/node";
 import type { Api, Message, Model, Usage } from "@caupulican/pi-ai";
@@ -103,6 +104,17 @@ function persistModelRouterDecision(
 	sessionManager.appendCustomEntry(MODEL_ROUTER_DECISION_CUSTOM_TYPE, decision);
 }
 
+/**
+ * Deterministic `addSpawnedUsage` reportId: `kind` + session id + a content hash of `identity`
+ * (the text driving the call — never `Date.now`/random). Same identity on a retry of the same
+ * logical work unit yields the same id, so the ledger's `seenSubagentReportIds` dedupe catches a
+ * duplicate report instead of double-counting spend.
+ */
+function deriveSpawnedUsageReportId(kind: string, sessionId: string, identity: string): string {
+	const digest = createHash("sha256").update(identity).digest("hex").slice(0, 16);
+	return `${kind}:${sessionId}:${digest}`;
+}
+
 export interface ModelRouterControllerDeps {
 	/** Live agent — the controller reads/writes agent.state.{model,thinkingLevel,tools,systemPrompt,messages}
 	 * for the per-turn tier swap and aborts it on a mutating-tool escalation. */
@@ -117,7 +129,7 @@ export interface ModelRouterControllerDeps {
 	getModelRegistry(): ModelRegistry;
 	/** Session-scoped provider/model quota exhaustion guard. */
 	isModelExhausted(model: Model<Api>): boolean;
-	/** Status snapshot for B5 exhausted models and the last failover notice. */
+	/** Status snapshot for exhausted models and the last failover notice. */
 	getFailoverStatus(): ModelRouterFailoverStatus;
 	/** Root dir the host-keyed {@link FitnessStore} lives under (executor tool-call fitness gate). */
 	getAgentDir(): string;
@@ -133,10 +145,11 @@ export interface ModelRouterControllerDeps {
 	refreshCurrentModelFromRegistry(): void;
 	/** One-shot, tool-less LLM call — the routing judge and the executor reflex-brain warmup ride this. */
 	runIsolatedCompletion(opts: IsolatedCompletionOptions): Promise<IsolatedCompletionResult>;
-	/** Rolls judge/brain spend into spawned-usage accounting. */
+	/** Rolls judge/brain spend into spawned-usage accounting. `reportId` is REQUIRED: every
+	 * caller derives a stable id from the work unit's identity so a retry cannot double-count. */
 	addSpawnedUsage(
 		usage: Usage,
-		opts?: { label?: string; sourceSessionId?: string; reportId?: string },
+		opts: { label?: string; sourceSessionId?: string; reportId: string },
 	): string | undefined;
 	/** Session event stream (executor-miss warning). */
 	emit(event: AgentSessionEvent): void;
@@ -360,9 +373,18 @@ export class ModelRouterController {
 				thinkingLevel: "off",
 				maxTokens: 256,
 				cacheRetention: "short",
+				// Stable per-lane synthetic affinity key for repeat executor-brain warmups.
+				laneKind: "executor",
 			});
 			if (completion.usage.cost.total > 0 || completion.usage.totalTokens > 0) {
-				this.deps.addSpawnedUsage(completion.usage, { label: "executor-brain-warmup" });
+				// `reportId` keyed on the request text driving THIS refinement — stable across a
+				// retry of the same routed turn, distinct across genuinely different requests.
+				const reportId = deriveSpawnedUsageReportId(
+					"executor-brain",
+					this.deps.getSessionManager().getSessionId(),
+					request,
+				);
+				this.deps.addSpawnedUsage(completion.usage, { label: "executor-brain-warmup", reportId });
 			}
 			const plan = parseReflexPlan(completion.text);
 			if (!plan || plan.script === "none") return undefined;
@@ -553,6 +575,9 @@ export class ModelRouterController {
 					signal,
 					// The judge system prompt is static — the provider can cache the prefix.
 					cacheRetention: "short",
+					// Stable per-lane synthetic affinity key so repeat judge calls hit the same
+					// cache-warm backend.
+					laneKind: "route-judge",
 				});
 				spentUsage = completion.usage;
 				return {
@@ -563,7 +588,14 @@ export class ModelRouterController {
 			},
 		});
 		if (spentUsage && (spentUsage.cost.total > 0 || spentUsage.totalTokens > 0)) {
-			this.deps.addSpawnedUsage(spentUsage, { label: "router-judge" });
+			// `reportId` keyed on the routed prompt text — stable across a retry of the same
+			// judged turn, distinct across genuinely different prompts.
+			const reportId = deriveSpawnedUsageReportId(
+				"route-judge",
+				this.deps.getSessionManager().getSessionId(),
+				prompt,
+			);
+			this.deps.addSpawnedUsage(spentUsage, { label: "router-judge", reportId });
 		}
 
 		if (!judged.verdict || judged.decision.tier === baseline.decision.tier) {

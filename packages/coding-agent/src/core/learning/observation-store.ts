@@ -1,6 +1,7 @@
 import { createHash } from "node:crypto";
-import { existsSync, mkdirSync, readFileSync, writeFileSync } from "node:fs";
-import { dirname, join } from "node:path";
+import { existsSync, readFileSync } from "node:fs";
+import { join } from "node:path";
+import { withFileLockSync, writeFileAtomicSync } from "../util/atomic-file.ts";
 
 /**
  * Durable, BOUNDED evidence-strength store for the learning gate (G6). The gate auto-applies a
@@ -88,8 +89,7 @@ export class ObservationStore {
 	}
 
 	private save(file: ObservationStoreFile): void {
-		mkdirSync(dirname(this.filePath), { recursive: true });
-		writeFileSync(this.filePath, `${JSON.stringify(file, null, "\t")}\n`, "utf-8");
+		writeFileAtomicSync(this.filePath, `${JSON.stringify(file, null, "\t")}\n`);
 	}
 
 	/** Evict least-recently-incremented keys until the store is back within {@link MAX_KEYS}. */
@@ -106,15 +106,21 @@ export class ObservationStore {
 		}
 	}
 
-	/** Record one more observation of `key` and return the new (capped) count. */
+	/**
+	 * Record one more observation of `key` and return the new (capped) count. Load-mutate-save runs
+	 * under a single exclusive lock so two concurrent increments (e.g. two reflection passes across
+	 * sessions sharing an agentDir) can't both read the old count and drop one increment.
+	 */
 	increment(key: string, at?: string): number {
-		const file = this.load();
 		const now = at ?? new Date().toISOString();
-		const count = Math.min((file.observations[key]?.count ?? 0) + 1, MAX_COUNT);
-		file.observations[key] = { count, lastAt: now };
-		this.evict(file);
-		this.save(file);
-		return count;
+		return withFileLockSync(this.filePath, () => {
+			const file = this.load();
+			const count = Math.min((file.observations[key]?.count ?? 0) + 1, MAX_COUNT);
+			file.observations[key] = { count, lastAt: now };
+			this.evict(file);
+			this.save(file);
+			return count;
+		});
 	}
 
 	/** Current observation count for `key` (0 if never observed). */

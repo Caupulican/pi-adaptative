@@ -4,7 +4,7 @@ import { join } from "node:path";
 import type { AgentMessage } from "@caupulican/pi-agent-core";
 import { Agent } from "@caupulican/pi-agent-core";
 import { SessionManager } from "@caupulican/pi-agent-core/node";
-import type { AssistantMessage, Model } from "@caupulican/pi-ai";
+import type { AssistantMessage, Message, Model } from "@caupulican/pi-ai";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { AgentSession } from "../src/core/agent-session.ts";
 import { AuthStorage } from "../src/core/auth-storage.ts";
@@ -233,6 +233,118 @@ describe("AgentSession auto-compaction queue resume", () => {
 		const transformed = await session.agent.transformContext?.([user, assistant, toolResult], undefined);
 
 		expect(transformed).toEqual(session.agent.state.messages);
+		expect(sessionManager.getEntries().some((entry) => entry.type === "compaction")).toBe(true);
+	});
+
+	// The compaction pre-check now projects this turn's own context-gc savings before deciding
+	// to compact, instead of judging the raw pre-gc estimate alone (a one-turn lag that could compact
+	// needlessly on a turn context-gc, running moments later in the same pass, would have relieved).
+	it("should suppress threshold compaction when this turn's own context-gc savings drop tokens below threshold", async () => {
+		const baseModel = session.model!;
+		session.agent.state.model = { ...baseModel, contextWindow: 2000 };
+		const model = session.model!;
+		const at = Date.now();
+
+		const anchor: AssistantMessage = {
+			role: "assistant",
+			content: [{ type: "text", text: "ok" }],
+			api: model.api,
+			provider: model.provider,
+			model: model.id,
+			usage: {
+				input: 5,
+				output: 5,
+				cacheRead: 0,
+				cacheWrite: 0,
+				totalTokens: 10,
+				cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, total: 0 },
+			},
+			stopReason: "stop",
+			timestamp: at,
+		};
+		// Old, packable bash output (well past the default 8-message preserve-recent window) --
+		// context-gc packs this down to a small stub. Alone it is far larger than the 1500-token
+		// hard trigger (contextWindow 2000 - 25%-capped reserve 500).
+		const staleToolResult = {
+			role: "toolResult" as const,
+			toolCallId: "call-old",
+			toolName: "bash",
+			content: [{ type: "text" as const, text: "x".repeat(20_000) }],
+			isError: false,
+			timestamp: at + 1,
+		};
+		const filler: Message[] = Array.from({ length: 9 }, (_, i) => ({
+			role: "user" as const,
+			content: [{ type: "text" as const, text: `filler ${i}` }],
+			timestamp: at + 2 + i,
+		}));
+
+		const messages: Message[] = [anchor, staleToolResult, ...filler];
+		for (const message of messages) sessionManager.appendMessage(message);
+		session.agent.state.messages = messages;
+
+		const latestBefore = sessionManager.getEntries().length;
+		await session.agent.transformContext?.(messages, undefined);
+
+		expect(sessionManager.getEntries().some((entry) => entry.type === "compaction")).toBe(false);
+		expect(sessionManager.getEntries().length).toBe(latestBefore);
+	});
+
+	it("should still compact when the turn stays over threshold even after this turn's context-gc savings", async () => {
+		const baseModel = session.model!;
+		session.agent.state.model = { ...baseModel, contextWindow: 2000 };
+		const model = session.model!;
+		const at = Date.now();
+
+		const anchor: AssistantMessage = {
+			role: "assistant",
+			content: [{ type: "text", text: "ok" }],
+			api: model.api,
+			provider: model.provider,
+			model: model.id,
+			usage: {
+				input: 5,
+				output: 5,
+				cacheRead: 0,
+				cacheWrite: 0,
+				totalTokens: 10,
+				cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, total: 0 },
+			},
+			stopReason: "stop",
+			timestamp: at,
+		};
+		// Old, packable bash output (gets packed down to a small stub)...
+		const staleToolResult = {
+			role: "toolResult" as const,
+			toolCallId: "call-old",
+			toolName: "bash",
+			content: [{ type: "text" as const, text: "x".repeat(20_000) }],
+			isError: false,
+			timestamp: at + 1,
+		};
+		const filler: Message[] = Array.from({ length: 7 }, (_, i) => ({
+			role: "user" as const,
+			content: [{ type: "text" as const, text: `filler ${i}` }],
+			timestamp: at + 2 + i,
+		}));
+		// ...but a SECOND, equally large bash output sits inside the preserve-recent window (the last
+		// 8 messages), so context-gc protects it -- this turn's projected savings are real but not
+		// enough to fall back under the threshold, and compaction is still needed.
+		const recentToolResult = {
+			role: "toolResult" as const,
+			toolCallId: "call-recent",
+			toolName: "bash",
+			content: [{ type: "text" as const, text: "x".repeat(20_000) }],
+			isError: false,
+			timestamp: at + 100,
+		};
+
+		const messages: Message[] = [anchor, staleToolResult, ...filler, recentToolResult];
+		for (const message of messages) sessionManager.appendMessage(message);
+		session.agent.state.messages = messages;
+
+		await session.agent.transformContext?.(messages, undefined);
+
 		expect(sessionManager.getEntries().some((entry) => entry.type === "compaction")).toBe(true);
 	});
 

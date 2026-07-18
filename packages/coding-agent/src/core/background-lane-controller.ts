@@ -15,6 +15,7 @@
  * controller never touches `prompt()`, the last-assistant-message, retry, or streaming state.
  */
 
+import { createHash } from "node:crypto";
 import path from "node:path";
 import type { SessionManager } from "@caupulican/pi-agent-core/node";
 import type { Api, Model, Usage } from "@caupulican/pi-ai";
@@ -48,6 +49,7 @@ import type { ModelRegistry } from "./model-registry.ts";
 import { resolveCliModel } from "./model-resolver.ts";
 import { FitnessStore, type StoredFitnessReport } from "./models/fitness-store.ts";
 import type { NormalizedProfile } from "./profile-registry.ts";
+import { registerInFlightWork } from "./reload-blockers.ts";
 import { type ModelFitnessReport, runModelFitnessProbe } from "./research/model-fitness.ts";
 import { runResearch } from "./research/research-runner.ts";
 import type { collectWorkspaceSources } from "./research/workspace-collector.ts";
@@ -57,6 +59,17 @@ const WORKER_HANDOFF_TIMEOUT_MS = 30_000;
 
 export function clampLaneMaxUsd(settingsMaxUsd: number, foregroundMaxEstimatedUsd?: number): number {
 	return Math.min(settingsMaxUsd, foregroundMaxEstimatedUsd ?? Number.POSITIVE_INFINITY);
+}
+
+/**
+ * Deterministic `addSpawnedUsage` reportId: `kind` + session id + a content hash of `identity`
+ * (never `Date.now`/random). Same identity on a retry of the same logical work unit yields the same
+ * id, so the ledger's `seenSubagentReportIds` dedupe catches a duplicate report instead of
+ * double-counting spend.
+ */
+function deriveSpawnedUsageReportId(kind: string, sessionId: string, identity: string): string {
+	const digest = createHash("sha256").update(identity).digest("hex").slice(0, 16);
+	return `${kind}:${sessionId}:${digest}`;
 }
 
 export function getPrivateLaneDeniedPaths(cwd: string, agentDir: string): string[] {
@@ -134,10 +147,12 @@ export interface BackgroundLaneControllerDeps {
 	saveWorkerResultSnapshot(result: WorkerResult, request?: WorkerRequest): string;
 	/** Bounded, source-labeled memory retrieval for an orchestrator-authorized worker. */
 	readMemoryForLane(query: string): Promise<string>;
-	/** Roll a lane's spawned usage into session accounting (idempotent per reportId). */
+	/** Roll a lane's spawned usage into session accounting (idempotent per reportId). `reportId` is
+	 * REQUIRED: every caller derives a stable id from the work unit's identity so a retry
+	 * cannot double-count. */
 	addSpawnedUsage(
 		usage: Usage,
-		opts?: { label?: string; sourceSessionId?: string; reportId?: string },
+		opts: { label?: string; sourceSessionId?: string; reportId: string },
 	): string | undefined;
 	/** Bounded LLM call fully isolated from the main session; lanes may supply a child tool loop. */
 	runIsolatedCompletion(opts: IsolatedCompletionOptions): Promise<IsolatedCompletionResult>;
@@ -601,6 +616,13 @@ export class BackgroundLaneController {
 		this._seedLaneHistory();
 		const startedRecord = this._laneTracker.start({ type: "research", goalId: demand.goalId });
 		this._persistedResearchRunCount++;
+		// Registered for the lane's full run so the reload gate waits it out; deregistered in the
+		// finally below no matter how this lane terminates (success, disposal, or a thrown error).
+		const deregisterInFlight = registerInFlightWork(
+			this.deps.getAgentDir(),
+			"lane",
+			`research:${startedRecord.laneId}`,
+		);
 		try {
 			let spentUsage: Usage | undefined;
 			// Best-effort, pointer-first workspace evidence. Derives search terms from the goal/requirement
@@ -646,6 +668,9 @@ export class BackgroundLaneController {
 						signal,
 						// Core/soul/role are all static per configuration — the provider can cache the prefix.
 						cacheRetention: "short",
+						// Stable per-lane synthetic affinity key so repeat research calls route to the
+						// same cache-warm backend without carrying the real session id.
+						laneKind: "research",
 					});
 					spentUsage = completion.usage;
 					return {
@@ -726,6 +751,7 @@ export class BackgroundLaneController {
 			return { started: true, record };
 		} finally {
 			this._isResearchLaneRunning = false;
+			deregisterInFlight();
 		}
 	}
 
@@ -897,6 +923,15 @@ export class BackgroundLaneController {
 		});
 		const usageReportId = `worker:${this.deps.getSessionId()}:${startedRecord.laneId}`;
 
+		// Registered for the lane's full run so the reload gate waits it out; deregistered in the
+		// finally below no matter how this lane terminates (success, disposal, or a thrown error).
+		// registerInFlightWork is a pure sync map op (cannot throw), so placing it as the last
+		// statement before `try` still guarantees the matching finally always runs.
+		const deregisterInFlight = registerInFlightWork(
+			this.deps.getAgentDir(),
+			"lane",
+			`worker:${startedRecord.laneId}`,
+		);
 		try {
 			let spentUsage: Usage | undefined;
 			const toolChangedFiles = new Set<string>();
@@ -990,6 +1025,9 @@ export class BackgroundLaneController {
 						signal,
 						// Core/soul/role are all static per configuration — the provider can cache the prefix.
 						cacheRetention: "short",
+						// Stable per-lane synthetic affinity key so repeat worker-delegation calls route to
+						// the same cache-warm backend without carrying the real session id.
+						laneKind: "worker",
 					});
 					spentUsage = completion.usage;
 					return {
@@ -1064,6 +1102,7 @@ export class BackgroundLaneController {
 			this.deps.emit({ type: "warning", message: `Worker delegation failed: ${message}` });
 			return { started: true, record };
 		} finally {
+			deregisterInFlight();
 		}
 	}
 
@@ -1076,75 +1115,104 @@ export class BackgroundLaneController {
 	async runModelFitness(args: {
 		model: string;
 		trials?: number;
+		/** LLM tool-call id, present only via the model_fitness tool path — see model-fitness.ts. */
+		toolCallId?: string;
 	}): Promise<{ started: true; model: string; report: ModelFitnessReport } | { started: false; skipReason: string }> {
 		if (this.deps.isDisposed()) return { started: false, skipReason: "session_disposed" };
 		const resolved = this.resolveLaneModel(args.model.trim() || undefined);
 		if (!resolved) return { started: false, skipReason: "model_unresolved_or_unauthenticated" };
 		const capability = this._laneCapabilityProfile(resolved);
 
-		const spent: Usage = {
-			input: 0,
-			output: 0,
-			cacheRead: 0,
-			cacheWrite: 0,
-			totalTokens: 0,
-			cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, total: 0 },
-		};
-		const report = await runModelFitnessProbe({
-			trials: args.trials,
-			signal: this._researchLaneAbort.signal,
-			capacityProbe:
-				resolved.provider === "ollama" && resolved.contextWindow > 0
-					? { registeredContextWindow: resolved.contextWindow }
-					: undefined,
-			complete: async ({ systemPrompt, userPrompt, signal }) => {
-				const callStarted = Date.now();
-				const completion = await this.deps.runIsolatedCompletion({
-					systemPrompt,
-					messages: [{ role: "user", content: [{ type: "text", text: userPrompt }], timestamp: Date.now() }],
-					model: resolved,
-					thinkingLevel: "off",
-					maxTokens: capability.laneMaxOutputTokens,
-					signal,
-					cacheRetention: "short",
-				});
-				const callMs = Date.now() - callStarted;
-				spent.input += completion.usage.input;
-				spent.output += completion.usage.output;
-				spent.cacheRead += completion.usage.cacheRead;
-				spent.cacheWrite += completion.usage.cacheWrite;
-				spent.totalTokens += completion.usage.totalTokens;
-				spent.cost.input += completion.usage.cost.input;
-				spent.cost.output += completion.usage.cost.output;
-				spent.cost.cacheRead += completion.usage.cost.cacheRead;
-				spent.cost.cacheWrite += completion.usage.cost.cacheWrite;
-				spent.cost.total += completion.usage.cost.total;
-				return {
-					text: completion.text,
-					costUsd: completion.usage.cost.total,
-					stopReason: String(completion.stopReason),
-					// Wall-clock fallback for tok/s: providers don't expose pure eval time, so the
-					// measured call time stands in — slightly conservative (includes network/queue).
-					outputTokens: completion.usage.output,
-					evalMs: callMs,
-				};
-			},
-		});
-		if (!this.deps.isDisposed() && (spent.cost.total > 0 || spent.totalTokens > 0)) {
-			this.deps.addSpawnedUsage(spent, { label: "model-fitness" });
-		}
-		const modelRef = `${resolved.provider}/${resolved.id}`;
-		// Fitness is a property of a model ON a host — persist the report host-keyed so role
-		// assignments stay per-machine (a model can await better hardware without being forgotten).
-		// Best-effort: a disk problem must not fail the probe itself.
+		// Registered for the probe's full run (it can execute several isolated-completion trials)
+		// so the reload gate waits it out; deregistered in the finally below on any exit path. Unlike
+		// research/worker, a fitness probe is not tracked in `_laneTracker` (it has no persisted lane
+		// record), so this registry is its ONLY reload-gate visibility.
+		const deregisterInFlight = registerInFlightWork(
+			this.deps.getAgentDir(),
+			"lane",
+			`fitness:${resolved.provider}/${resolved.id}`,
+		);
 		try {
-			if (!this.deps.isDisposed()) {
-				FitnessStore.forAgentDir(this.deps.getAgentDir()).save(modelRef, report);
+			const spent: Usage = {
+				input: 0,
+				output: 0,
+				cacheRead: 0,
+				cacheWrite: 0,
+				totalTokens: 0,
+				cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, total: 0 },
+			};
+			const report = await runModelFitnessProbe({
+				trials: args.trials,
+				signal: this._researchLaneAbort.signal,
+				capacityProbe:
+					resolved.provider === "ollama" && resolved.contextWindow > 0
+						? { registeredContextWindow: resolved.contextWindow }
+						: undefined,
+				complete: async ({ systemPrompt, userPrompt, signal }) => {
+					const callStarted = Date.now();
+					const completion = await this.deps.runIsolatedCompletion({
+						systemPrompt,
+						messages: [{ role: "user", content: [{ type: "text", text: userPrompt }], timestamp: Date.now() }],
+						model: resolved,
+						thinkingLevel: "off",
+						maxTokens: capability.laneMaxOutputTokens,
+						signal,
+						cacheRetention: "short",
+						// Stable per-lane synthetic affinity key so repeat fitness-probe trials against the
+						// same candidate model route to the same cache-warm backend without carrying the real
+						// session id.
+						laneKind: "fitness",
+					});
+					const callMs = Date.now() - callStarted;
+					spent.input += completion.usage.input;
+					spent.output += completion.usage.output;
+					spent.cacheRead += completion.usage.cacheRead;
+					spent.cacheWrite += completion.usage.cacheWrite;
+					spent.totalTokens += completion.usage.totalTokens;
+					spent.cost.input += completion.usage.cost.input;
+					spent.cost.output += completion.usage.cost.output;
+					spent.cost.cacheRead += completion.usage.cost.cacheRead;
+					spent.cost.cacheWrite += completion.usage.cost.cacheWrite;
+					spent.cost.total += completion.usage.cost.total;
+					return {
+						text: completion.text,
+						costUsd: completion.usage.cost.total,
+						stopReason: String(completion.stopReason),
+						// Wall-clock fallback for tok/s: providers don't expose pure eval time, so the
+						// measured call time stands in — slightly conservative (includes network/queue).
+						outputTokens: completion.usage.output,
+						evalMs: callMs,
+					};
+				},
+			});
+			const modelRef = `${resolved.provider}/${resolved.id}`;
+			if (!this.deps.isDisposed() && (spent.cost.total > 0 || spent.totalTokens > 0)) {
+				// Prefer the LLM tool-call id as the idempotency token: it is assigned once per
+				// distinct model_fitness tool call, so two deliberately separate calls on the same
+				// (model, trials) get DISTINCT ids (both count) while a retry of the same tool call
+				// (same toolCallId) keeps the same id (deduped). Callers with no toolCallId (the manual
+				// /fitness command, the auto-probe-on-model-add flows in local-model-commands.ts) fall
+				// back to the (model, trials) identity, unchanged from before.
+				const identity = args.toolCallId
+					? `toolcall:${args.toolCallId}`
+					: `${modelRef} ${args.trials ?? "default"}`;
+				const reportId = deriveSpawnedUsageReportId("model-fitness", this.deps.getSessionId(), identity);
+				this.deps.addSpawnedUsage(spent, { label: "model-fitness", reportId });
 			}
-		} catch {
-			// best-effort persistence
+			// Fitness is a property of a model ON a host — persist the report host-keyed so role
+			// assignments stay per-machine (a model can await better hardware without being forgotten).
+			// Best-effort: a disk problem must not fail the probe itself.
+			try {
+				if (!this.deps.isDisposed()) {
+					FitnessStore.forAgentDir(this.deps.getAgentDir()).save(modelRef, report);
+				}
+			} catch {
+				// best-effort persistence
+			}
+			return { started: true, model: modelRef, report };
+		} finally {
+			deregisterInFlight();
 		}
-		return { started: true, model: modelRef, report };
 	}
 
 	/** Start queued local workers at the owner session's foreground-idle boundary. */

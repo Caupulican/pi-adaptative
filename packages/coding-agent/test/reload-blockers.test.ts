@@ -3,9 +3,13 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { afterEach, describe, expect, it } from "vitest";
 import {
+	describeInFlightWorkUnit,
 	describeReloadSession,
+	getInFlightWorkUnits,
 	getPendingReloadBlockers,
 	getReloadCoordinationDir,
+	registerInFlightWork,
+	resetInFlightWorkRegistryForTests,
 } from "../src/core/reload-blockers.ts";
 
 let tempDir = "";
@@ -172,5 +176,59 @@ describe("getPendingReloadBlockers", () => {
 		expect(includingAutoLearn.descriptions).toContain(
 			"autoLearnPeer:auto-learn-peer pid=107 cwd=/repo file=/sessions/auto-learn-peer.jsonl",
 		);
+	});
+});
+
+describe("in-process quiesce registry", () => {
+	afterEach(() => {
+		resetInFlightWorkRegistryForTests();
+	});
+
+	it("tracks a registered unit and clears it once deregistered", () => {
+		expect(getInFlightWorkUnits("/agent-a")).toEqual([]);
+
+		const deregister = registerInFlightWork("/agent-a", "lane", "research:lane-1");
+		const units = getInFlightWorkUnits("/agent-a");
+		expect(units).toHaveLength(1);
+		expect(describeInFlightWorkUnit(units[0]!)).toBe("lane:research:lane-1");
+
+		deregister();
+		expect(getInFlightWorkUnits("/agent-a")).toEqual([]);
+	});
+
+	it("is safe to deregister twice (a caller may deregister on more than one exit path)", () => {
+		const deregister = registerInFlightWork("/agent-a", "scout", "q");
+		deregister();
+		expect(() => deregister()).not.toThrow();
+		expect(getInFlightWorkUnits("/agent-a")).toEqual([]);
+	});
+
+	it("scopes units by agentDir so two sessions never see each other's in-flight work", () => {
+		const deregisterA = registerInFlightWork("/agent-a", "lane", "worker:1");
+		const deregisterB = registerInFlightWork("/agent-b", "scout", "q");
+
+		expect(getInFlightWorkUnits("/agent-a")).toHaveLength(1);
+		expect(getInFlightWorkUnits("/agent-b")).toHaveLength(1);
+
+		deregisterA();
+		expect(getInFlightWorkUnits("/agent-a")).toEqual([]);
+		expect(getInFlightWorkUnits("/agent-b")).toHaveLength(1);
+
+		deregisterB();
+		expect(getInFlightWorkUnits("/agent-b")).toEqual([]);
+	});
+
+	it("tracks multiple concurrent units for the same agentDir independently", () => {
+		const deregister1 = registerInFlightWork("/agent-a", "lane", "research:1");
+		const deregister2 = registerInFlightWork("/agent-a", "isolated-completion", "reflection");
+		expect(getInFlightWorkUnits("/agent-a")).toHaveLength(2);
+
+		deregister1();
+		const remaining = getInFlightWorkUnits("/agent-a");
+		expect(remaining).toHaveLength(1);
+		expect(remaining[0]?.label).toBe("reflection");
+
+		deregister2();
+		expect(getInFlightWorkUnits("/agent-a")).toEqual([]);
 	});
 });

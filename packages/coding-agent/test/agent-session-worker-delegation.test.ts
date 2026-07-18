@@ -28,6 +28,25 @@ describe("AgentSession worker delegation", () => {
 		}
 	});
 
+	it("gives worker delegation a stable synthetic cache-affinity key, never the real session id", async () => {
+		const harness = await createHarness();
+		try {
+			let seenSessionId: string | undefined;
+			harness.setResponses([
+				(_context, options) => {
+					seenSessionId = options?.sessionId;
+					return fauxAssistantMessage(WORKER_JSON);
+				},
+			]);
+			const run = await harness.session.runWorkerDelegationOnce({ instructions: "Scout something" });
+			expect(run.started).toBe(true);
+			expect(seenSessionId).toMatch(/^lane:worker:/);
+			expect(seenSessionId).not.toBe(harness.session.sessionId);
+		} finally {
+			harness.cleanup();
+		}
+	});
+
 	it("keeps an explicit delegation disable independent of Ultra", async () => {
 		const harness = await createHarness({
 			settings: { workerDelegation: { enabled: false } },

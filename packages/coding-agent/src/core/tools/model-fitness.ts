@@ -32,6 +32,13 @@ export interface ModelFitnessToolDependencies {
 	runProbe: (args: {
 		model: string;
 		trials?: number;
+		/**
+		 * The LLM tool-call id for THIS invocation: the idempotency token a retry of the same
+		 * tool call reuses, so the spawned-usage reportId stays stable on a retry instead of falling
+		 * back to a bare (model, trials) identity — which two deliberately separate tool calls on the
+		 * same model/trials would otherwise collide on and silently under-count.
+		 */
+		toolCallId?: string;
 	}) => Promise<{ started: true; model: string; report: ModelFitnessReport } | { started: false; skipReason: string }>;
 }
 
@@ -49,13 +56,13 @@ export function createModelFitnessToolDefinition(deps: ModelFitnessToolDependenc
 		],
 		parameters: modelFitnessSchema,
 		async execute(
-			_toolCallId,
+			toolCallId,
 			input: ModelFitnessToolInput,
 		): Promise<{
 			content: Array<{ type: "text"; text: string }>;
 			details: ModelFitnessToolDetails;
 		}> {
-			const run = await deps.runProbe({ model: input.model, trials: input.trials });
+			const run = await deps.runProbe({ model: input.model, trials: input.trials, toolCallId });
 			if (!run.started) {
 				return {
 					content: [{ type: "text" as const, text: `model_fitness skipped: ${run.skipReason}` }],

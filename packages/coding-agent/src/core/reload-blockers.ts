@@ -1,3 +1,10 @@
+/**
+ * Reload/live-op blocker sources for THIS process's reload gate (`RuntimeBuilder`, see
+ * runtime-builder.ts): cross-process peer/coordinator sessions (file-backed, below) AND the
+ * in-process quiesce registry (`registerInFlightWork`/`getInFlightWorkUnits`) that tracks background
+ * lanes, context-scout runs, and isolated completions running in THIS process. The gate reads both;
+ * `getPendingReloadBlockers` (cross-process) also backs the `/autonomy` status text.
+ */
 import { existsSync, readFileSync } from "node:fs";
 import { join } from "node:path";
 import { getAgentDir } from "../config.ts";
@@ -213,4 +220,72 @@ export function getPendingReloadBlockers(options: ReloadBlockerOptions = {}): Pe
 		blockers,
 		descriptions: blockers.map(describeReloadSession),
 	};
+}
+
+/**
+ * In-process quiesce registry: the reload gate's unified source of truth for background work
+ * running IN THIS PROCESS that must finish before a `/reload`, profile switch, or live extension
+ * load/unload/reconcile may proceed — background lanes (research/worker/model-fitness), the
+ * context-scout's own Agent, and isolated completions (through their single choke point,
+ * `ReflectionController.runIsolatedCompletion`) all register here. Foreground streaming/compaction
+ * are NOT registered here — the host already exposes those via `RuntimeBuilderDeps.isStreaming`/`isCompacting`,
+ * and the gate checks both alongside this registry instead of duplicating that state into a second tracker.
+ *
+ * Keyed by `agentDir`, matching every cross-process function above, so two sessions rooted at
+ * different agent dirs (as every test harness in this repo constructs them) never see each other's
+ * in-flight work.
+ *
+ * Registration is a plain in-memory counter, not file-backed — nothing here survives a process
+ * restart, and nothing needs to: a crashed process cannot hold its own reload gate hostage. The
+ * returned deregister function MUST be called from a `finally` block by every caller — an
+ * un-deregistered unit would wedge the gate forever — so deregistering twice is a safe no-op rather
+ * than a footgun for a caller that also deregisters on an early-return path.
+ */
+export type InFlightWorkKind = "lane" | "scout" | "isolated-completion";
+
+export interface InFlightWorkUnit {
+	id: number;
+	kind: InFlightWorkKind;
+	label: string;
+	registeredAt: number;
+}
+
+let _nextInFlightWorkId = 1;
+const _inFlightWorkByAgentDir = new Map<string, Map<number, InFlightWorkUnit>>();
+
+/** Registers one in-flight background work unit for `agentDir`. Returns its deregister function. */
+export function registerInFlightWork(agentDir: string, kind: InFlightWorkKind, label: string): () => void {
+	let units = _inFlightWorkByAgentDir.get(agentDir);
+	if (!units) {
+		units = new Map<number, InFlightWorkUnit>();
+		_inFlightWorkByAgentDir.set(agentDir, units);
+	}
+	const scopedUnits = units;
+	const id = _nextInFlightWorkId++;
+	scopedUnits.set(id, { id, kind, label, registeredAt: Date.now() });
+	let deregistered = false;
+	return () => {
+		if (deregistered) return;
+		deregistered = true;
+		scopedUnits.delete(id);
+		if (scopedUnits.size === 0) _inFlightWorkByAgentDir.delete(agentDir);
+	};
+}
+
+/** Live in-flight units for `agentDir`, oldest first. Empty when nothing is registered. */
+export function getInFlightWorkUnits(agentDir: string): InFlightWorkUnit[] {
+	const units = _inFlightWorkByAgentDir.get(agentDir);
+	return units ? [...units.values()].sort((a, b) => a.id - b.id) : [];
+}
+
+export function describeInFlightWorkUnit(unit: InFlightWorkUnit): string {
+	return `${unit.kind}:${unit.label}`;
+}
+
+/**
+ * Test-only escape hatch: clears every agentDir's registry so one test's leaked registration cannot
+ * block another's reload gate or status text.
+ */
+export function resetInFlightWorkRegistryForTests(): void {
+	_inFlightWorkByAgentDir.clear();
 }

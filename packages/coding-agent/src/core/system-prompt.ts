@@ -62,7 +62,20 @@ function escapeXml(str: string): string {
 		.replace(/'/g, "&apos;");
 }
 
-/** Build the system prompt with tools, guidelines, and context */
+/**
+ * Build the system prompt with tools, guidelines, and context.
+ *
+ * CACHE-STABILITY INVARIANT: providers treat the returned string as ONE prompt-cache block (a
+ * single cache breakpoint covering the whole system prompt). The caller (SystemPromptBuilder /
+ * AgentSession, see `_rebuildSystemPrompt` in agent-session.ts) rebuilds it only when the TOOL
+ * SURFACE changes — never per turn. For a fixed `options` (fixed tool surface, cwd, context
+ * files, skills, extensions), two calls on the SAME CALENDAR DAY must return byte-identical
+ * output, because `date` below is deliberately truncated to Y-M-D granularity. Do NOT widen it
+ * to a timestamp (HH:MM:SS) or otherwise fold in any per-turn-volatile field (turn counters,
+ * elapsed time, random ids, etc.) — that would cache-bust this entire block on EVERY turn instead
+ * of once per calendar day, defeating provider prompt caching (cost + latency regression on every
+ * request). Pinned by test/system-prompt-stability.test.ts.
+ */
 export function buildSystemPrompt(options: BuildSystemPromptOptions): string {
 	const {
 		customPrompt,
@@ -77,6 +90,8 @@ export function buildSystemPrompt(options: BuildSystemPromptOptions): string {
 	const resolvedCwd = cwd;
 	const promptCwd = resolvedCwd.replace(/\\/g, "/");
 
+	// Day-granularity only (see cache-stability invariant on buildSystemPrompt above): this must
+	// stay stable across every call within a calendar day, not just within a single turn.
 	const now = new Date();
 	const year = now.getFullYear();
 	const month = String(now.getMonth() + 1).padStart(2, "0");
@@ -114,7 +129,8 @@ export function buildSystemPrompt(options: BuildSystemPromptOptions): string {
 			prompt += formatExtensionsForPrompt(extensions, visibleTools);
 		}
 
-		// Add date and working directory last
+		// Add date and working directory last (day-granularity `date` only; see the
+		// cache-stability invariant on buildSystemPrompt above — do not add a per-turn timestamp).
 		prompt += `\nCurrent date: ${date}`;
 		prompt += `\nCurrent working directory: ${promptCwd}`;
 
@@ -216,7 +232,8 @@ Pi documentation (read only when the user asks about pi itself, its SDK, extensi
 		prompt += formatExtensionsForPrompt(activeExtensions, visibleTools);
 	}
 
-	// Add date and working directory last
+	// Add date and working directory last (day-granularity `date` only; see the
+	// cache-stability invariant on buildSystemPrompt above — do not add a per-turn timestamp).
 	prompt += `\nCurrent date: ${date}`;
 	prompt += `\nCurrent working directory: ${promptCwd}`;
 

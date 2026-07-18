@@ -23,10 +23,12 @@
  * the pipeline — keeping the transform the one place the two subsystems meet.
  */
 
+import { createHash } from "node:crypto";
 import type { AgentMessage } from "@caupulican/pi-agent-core";
 import {
 	type CompactionEntry,
-	estimateContextTokens,
+	calculateContextTokens,
+	estimateTokens,
 	getLatestCompactionEntry,
 	type SessionEntry,
 	type SessionManager,
@@ -36,7 +38,12 @@ import type { Api, AssistantMessage, Model, Usage } from "@caupulican/pi-ai";
 import type { IsolatedCompletionOptions, IsolatedCompletionResult } from "./agent-session.ts";
 import { BrainCurator, type CurationTelemetrySnapshot, preDigestConversationText } from "./context/brain-curator.ts";
 import { type ArtifactStore, createFileArtifactStore } from "./context/context-artifacts.ts";
-import { type ContextAuditReport, runContextAudit } from "./context/context-audit.ts";
+import {
+	type ContextAuditMemo,
+	type ContextAuditOptions,
+	type ContextAuditReport,
+	runContextAudit,
+} from "./context/context-audit.ts";
 import { enforcePromptPolicy, type PromptEnforcementReport } from "./context/context-prompt-enforcement.ts";
 import {
 	correlateWithContextGc,
@@ -53,6 +60,17 @@ import { evaluateSurfaceFitness } from "./model-router/fitness-gate.ts";
 import { FitnessStore } from "./models/fitness-store.ts";
 import { HF_TRANSFORMERS_PROVIDER, OLLAMA_PROVIDER } from "./models/local-registration.ts";
 import type { SettingsManager } from "./settings-manager.ts";
+
+/**
+ * Deterministic `addSpawnedUsage` reportId: `kind` + session id + a content hash of `identity`
+ * (never `Date.now`/random). Same identity on a retry of the same logical work unit yields the same
+ * id, so the ledger's `seenSubagentReportIds` dedupe catches a duplicate report instead of
+ * double-counting spend.
+ */
+function deriveSpawnedUsageReportId(kind: string, sessionId: string, identity: string): string {
+	const digest = createHash("sha256").update(identity).digest("hex").slice(0, 16);
+	return `${kind}:${sessionId}:${digest}`;
+}
 
 function joinTextPrefix(content: readonly unknown[], maxChars = Number.POSITIVE_INFINITY): string {
 	let found = false;
@@ -100,6 +118,82 @@ function extractArtifactId(message: AgentMessage | undefined): string | undefine
 	return typeof artifactId === "string" ? artifactId : undefined;
 }
 
+/** Per-message memo of `estimateTokens(message)`, keyed by message object identity --
+ * same contract as {@link ContextAuditMemo}. See `estimateContextTokensMemoized`. */
+type TokenMemo = Map<AgentMessage, number>;
+
+interface ContextTokenEstimate {
+	tokens: number;
+	usageTokens: number;
+	trailingTokens: number;
+	lastUsageIndex: number | null;
+}
+
+/** Mirrors compaction.ts's private `getAssistantUsage`: a non-aborted, non-error assistant
+ * message's usage, or undefined. */
+function assistantUsageForTokenEstimate(message: AgentMessage): Usage | undefined {
+	if (message.role !== "assistant") return undefined;
+	const assistant = message as AssistantMessage;
+	if (assistant.stopReason === "aborted" || assistant.stopReason === "error" || !assistant.usage) return undefined;
+	return assistant.usage;
+}
+
+/** Mirrors compaction.ts's private `getLastAssistantUsageInfo`: the most recent message with
+ * usable usage and its index, scanning from the end. */
+function findLastAssistantUsage(messages: AgentMessage[]): { usage: Usage; index: number } | undefined {
+	for (let index = messages.length - 1; index >= 0; index--) {
+		const message = messages[index];
+		if (!message) continue;
+		const usage = assistantUsageForTokenEstimate(message);
+		if (usage) return { usage, index };
+	}
+	return undefined;
+}
+
+/**
+ * Incremental-memo reimplementation of `estimateContextTokens` (compaction.ts), built
+ * from that module's exported per-message primitives (`estimateTokens`, `calculateContextTokens`)
+ * instead of adding a memo parameter to `estimateContextTokens` itself: compaction.ts is left
+ * unmodified, so the incremental design stays entirely inside context-pipeline.ts, matching a
+ * "zero agent-session.ts change" scope. The orchestration (finding the last-assistant-usage
+ * boundary, summing) is cheap and always reruns in full; only the expensive per-message
+ * `estimateTokens` text scan is memoized, keyed by message object identity exactly like
+ * `_auditMemo`. Produces byte-identical output to `estimateContextTokens(messages)` for the
+ * same input regardless of `memo` -- see the equivalence test.
+ */
+function estimateContextTokensMemoized(messages: AgentMessage[], memo?: TokenMemo): ContextTokenEstimate {
+	const freshMemo: TokenMemo | undefined = memo ? new Map() : undefined;
+	const tokensFor = (message: AgentMessage): number => {
+		const cached = memo?.get(message);
+		const tokens = cached ?? estimateTokens(message);
+		freshMemo?.set(message, tokens);
+		return tokens;
+	};
+
+	const usageInfo = findLastAssistantUsage(messages);
+	let result: ContextTokenEstimate;
+	if (!usageInfo) {
+		let estimated = 0;
+		for (const message of messages) {
+			estimated += tokensFor(message);
+		}
+		result = { tokens: estimated, usageTokens: 0, trailingTokens: estimated, lastUsageIndex: null };
+	} else {
+		const usageTokens = calculateContextTokens(usageInfo.usage);
+		let trailingTokens = 0;
+		for (let index = usageInfo.index + 1; index < messages.length; index++) {
+			trailingTokens += tokensFor(messages[index]);
+		}
+		result = { tokens: usageTokens + trailingTokens, usageTokens, trailingTokens, lastUsageIndex: usageInfo.index };
+	}
+
+	if (memo && freshMemo) {
+		memo.clear();
+		for (const [key, value] of freshMemo) memo.set(key, value);
+	}
+	return result;
+}
+
 export interface ContextPipelineDeps {
 	/** Current turn index, stamped into audit/policy/enforcement reports. */
 	getTurnIndex(): number;
@@ -121,10 +215,12 @@ export interface ContextPipelineDeps {
 	isDisposed(): boolean;
 	/** The live memory manager — the active providers' page markers feed the semantic-gc scan. */
 	getMemoryManager(): MemoryManager;
-	/** Roll a curation drain's spawned usage into session accounting (idempotent per reportId). */
+	/** Roll a curation drain's spawned usage into session accounting (idempotent per reportId).
+	 * `reportId` is REQUIRED: every caller derives a stable id from the work unit's identity
+	 * so a retry cannot double-count. */
 	addSpawnedUsage(
 		usage: Usage,
-		opts?: { label?: string; sourceSessionId?: string; reportId?: string },
+		opts: { label?: string; sourceSessionId?: string; reportId: string },
 	): string | undefined;
 	/** One-shot LLM call fully isolated from the main session — the curation/pre-digest execution primitive. */
 	runIsolatedCompletion(opts: IsolatedCompletionOptions): Promise<IsolatedCompletionResult>;
@@ -151,6 +247,14 @@ export class ContextPipeline {
 	 * still present in the provider-visible context, so compaction also bounds this cache. */
 	private _sessionEntryLookupCache: { leafId: string | null; byToolCallId: Map<string, string> } | undefined =
 		undefined;
+	/** Incremental memo for the hot-path audit's expensive per-message work, keyed by
+	 * message object identity -- see {@link ContextAuditMemo}'s doc for the invalidation
+	 * contract. Rebuilt fresh (stale entries dropped) by `runContextAudit` every pass. */
+	private readonly _auditMemo: ContextAuditMemo = new Map();
+	/** Incremental memo for the per-message token estimate `estimateContextTokensMemoized`
+	 * relies on -- same object-identity-keyed, fresh-rebuild-per-pass contract as `_auditMemo`,
+	 * just for a plain `estimateTokens(message)` number instead of a built ContextItem. */
+	private readonly _tokenMemo: TokenMemo = new Map();
 
 	private readonly deps: ContextPipelineDeps;
 
@@ -203,6 +307,10 @@ export class ContextPipeline {
 		this._toolArtifactStore?.cleanup();
 		this._contextStoreRetentionLease?.release();
 		this._contextStoreRetentionLease = undefined;
+		// Release memoized message references promptly so a disposed session's messages are
+		// GC-eligible even if this ContextPipeline instance itself briefly lingers.
+		this._auditMemo.clear();
+		this._tokenMemo.clear();
 	}
 
 	/**
@@ -293,6 +401,18 @@ export class ContextPipeline {
 		return (toolCallId) => byToolCallId.get(toolCallId);
 	}
 
+	/** Options shared by the memoized hot path and the no-memo full-scan path. */
+	private _buildContextAuditOptions(messages: AgentMessage[]): ContextAuditOptions {
+		const wantedToolCallIds = new Set(
+			messages.filter((message) => message.role === "toolResult").map((message) => message.toolCallId),
+		);
+		return {
+			turnIndex: this.deps.getTurnIndex(),
+			artifactStore: this._toolArtifactStore,
+			sessionEntryIdForToolCallId: this._buildSessionEntryIdLookup(wantedToolCallIds),
+		};
+	}
+
 	/**
 	 * Phase 1 observe-only audit pass (see context/context-audit.ts): converts live
 	 * toolResult messages into ContextItems and runs the existing retention/hard-constraint
@@ -301,17 +421,30 @@ export class ContextPipeline {
 	 * `_toolArtifactStore` (the field), not `getToolArtifactStore()` (the getter), so a
 	 * session that never packed anything doesn't force-create a store/dir just to audit.
 	 * Never throws into a live turn: any failure degrades to an empty report.
+	 *
+	 * This is the memoized hot path (the real per-turn context transform calls it every
+	 * round trip via agent-session.ts's one-line delegation) -- see `_auditMemo`'s doc for the
+	 * incremental design. `getContextAuditReport`/`getPromptPolicyReport`'s `messages`-arg
+	 * recompute variants deliberately do NOT go through this method (see
+	 * `_runContextAuditFullScan`), so a read-only debug/test peek at a hypothetical `messages`
+	 * array can never evict a live entry out of the hot-path memo.
 	 */
 	runContextAudit(messages: AgentMessage[]): ContextAuditReport {
 		try {
-			const wantedToolCallIds = new Set(
-				messages.filter((message) => message.role === "toolResult").map((message) => message.toolCallId),
-			);
-			const report = runContextAudit(messages, {
-				turnIndex: this.deps.getTurnIndex(),
-				artifactStore: this._toolArtifactStore,
-				sessionEntryIdForToolCallId: this._buildSessionEntryIdLookup(wantedToolCallIds),
-			});
+			const report = runContextAudit(messages, this._buildContextAuditOptions(messages), this._auditMemo);
+			this._latestContextAuditReport = report;
+			return report;
+		} catch {
+			const report: ContextAuditReport = { turnIndex: this.deps.getTurnIndex(), items: [] };
+			this._latestContextAuditReport = report;
+			return report;
+		}
+	}
+
+	/** No-memo full-scan variant of {@link runContextAudit}, for read-only recompute callers. */
+	private _runContextAuditFullScan(messages: AgentMessage[]): ContextAuditReport {
+		try {
+			const report = runContextAudit(messages, this._buildContextAuditOptions(messages));
 			this._latestContextAuditReport = report;
 			return report;
 		} catch {
@@ -323,11 +456,12 @@ export class ContextPipeline {
 
 	/**
 	 * Read-only inspection of the context audit. With `messages`, recomputes fresh against
-	 * the given array (still no mutation of messages/transcript/artifact refs); without,
+	 * the given array (still no mutation of messages/transcript/artifact refs) -- a pure
+	 * full scan, bypassing the hot-path memo (see `_runContextAuditFullScan`); without,
 	 * returns the last report computed during a real transform pass.
 	 */
 	getContextAuditReport(messages?: AgentMessage[]): ContextAuditReport {
-		if (messages) return this.runContextAudit(messages);
+		if (messages) return this._runContextAuditFullScan(messages);
 		return this._latestContextAuditReport ?? { turnIndex: this.deps.getTurnIndex(), items: [] };
 	}
 
@@ -355,7 +489,7 @@ export class ContextPipeline {
 	 * during a real transform pass. Never mutates messages/transcript/artifact refs.
 	 */
 	getPromptPolicyReport(messages?: AgentMessage[]): PromptPolicyShadowReport {
-		if (messages) return this.runPromptPolicyPlanning(this.runContextAudit(messages));
+		if (messages) return this.runPromptPolicyPlanning(this._runContextAuditFullScan(messages));
 		return this._latestPromptPolicyReport ?? { turnIndex: this.deps.getTurnIndex(), items: [] };
 	}
 
@@ -547,6 +681,9 @@ export class ContextPipeline {
 							maxTokens: 512,
 							signal: chunkSignal,
 							cacheRetention: "short",
+							// Stable per-lane synthetic affinity key so repeat pre-digest chunk
+							// calls hit the same cache-warm backend.
+							laneKind: "curation",
 						});
 						return {
 							text: completion.text,
@@ -589,6 +726,9 @@ export class ContextPipeline {
 						signal,
 						// Both curation system prompts are static — the provider can cache the prefix.
 						cacheRetention: "short",
+						// Stable per-lane synthetic affinity key so repeat curation jobs hit the
+						// same cache-warm backend.
+						laneKind: "curation",
 					});
 					const usage = completion.usage;
 					if (!spentUsage) {
@@ -614,7 +754,14 @@ export class ContextPipeline {
 			});
 			// Honest accounting even for free local models: token visibility is the contract.
 			if (spentUsage && (spentUsage.cost.total > 0 || spentUsage.totalTokens > 0)) {
-				this.deps.addSpawnedUsage(spentUsage, { label: "context-curator" });
+				// `reportId` keyed on the drained jobs' own idempotency keys — stable across a
+				// retry of the same drain batch, distinct across genuinely different batches.
+				const reportId = deriveSpawnedUsageReportId(
+					"context-curator",
+					this.deps.getSessionManager().getSessionId(),
+					results.map((result) => result.key).join(" "),
+				);
+				this.deps.addSpawnedUsage(spentUsage, { label: "context-curator", reportId });
 			}
 			if (this.deps.isDisposed() || results.length === 0) return;
 			this.deps.getSessionManager().appendCustomEntry("brain-curation", {
@@ -773,7 +920,7 @@ export class ContextPipeline {
 			return;
 		}
 
-		const estimate = estimateContextTokens(messages);
+		const estimate = estimateContextTokensMemoized(messages, this._tokenMemo);
 		if (estimate.lastUsageIndex === null || messages[estimate.lastUsageIndex] !== usageMessage) {
 			return;
 		}
@@ -805,7 +952,7 @@ export class ContextPipeline {
 	}
 
 	estimateCurrentContextTokens(messages: AgentMessage[]): number {
-		const estimate = estimateContextTokens(messages);
+		const estimate = estimateContextTokensMemoized(messages, this._tokenMemo);
 		if (estimate.lastUsageIndex === null) {
 			return this._tokenBudget.estimateDelta(estimateConversationChars(messages));
 		}

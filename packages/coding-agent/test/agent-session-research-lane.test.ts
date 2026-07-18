@@ -83,6 +83,53 @@ describe("AgentSession research lane (explicit runs)", () => {
 		}
 	});
 
+	it("gives the research lane a stable synthetic cache-affinity key across runs", async () => {
+		const harness = await createHarness();
+		try {
+			seedActiveGoal(harness);
+			const seenSessionIds: (string | undefined)[] = [];
+			harness.setResponses([
+				(_context, options) => {
+					seenSessionIds.push(options?.sessionId);
+					return fauxAssistantMessage(RESEARCH_JSON);
+				},
+			]);
+			const first = await harness.session.runResearchLaneOnce();
+			expect(first.record?.status).toBe("succeeded");
+			expect(seenSessionIds[0]).toMatch(/^lane:research:/);
+			// Never the real session id -- isolation invariant preserved.
+			expect(seenSessionIds[0]).not.toBe(harness.session.sessionId);
+
+			// Widen the open requirement set so the second run isn't skipped by evidence dedup, while
+			// the lane's (kind, model, systemPrompt) stays identical -- same synthetic affinity key.
+			const goal = harness.session.getGoalStateSnapshot();
+			if (!goal) throw new Error("Expected goal state");
+			const widened = applyGoalEvent(goal, {
+				type: "add_requirement",
+				id: "req-2",
+				text: "Gather more evidence",
+				now: "T1",
+			});
+			appendGoalStateSnapshot(harness.sessionManager, widened);
+
+			harness.appendResponses([
+				(_context, options) => {
+					seenSessionIds.push(options?.sessionId);
+					return fauxAssistantMessage(RESEARCH_JSON);
+				},
+			]);
+			const second = await harness.session.runResearchLaneOnce();
+			expect(second.record?.status).toBe("succeeded");
+
+			expect(seenSessionIds[1]).toBe(seenSessionIds[0]);
+
+			const records = researchLaneRecords(harness);
+			expect(records).toHaveLength(2);
+		} finally {
+			harness.cleanup();
+		}
+	});
+
 	it("deduplicates against recent evidence for the same requirement set", async () => {
 		const harness = await createHarness();
 		try {

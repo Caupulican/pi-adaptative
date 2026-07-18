@@ -84,6 +84,7 @@ function createSupport(opts: {
 					},
 		estimateSummarizationInputTokens: () => opts.estimatedInputTokens,
 		emitWarning: (message) => opts.warnings.push(message),
+		ensureModelReady: async () => {},
 	};
 	return { support: new CompactionSupport(deps), cheap, session };
 }

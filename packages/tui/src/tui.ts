@@ -220,11 +220,27 @@ type ActiveOverlayFocusRestoreState = EligibleOverlayFocusRestoreState | Blocked
 type OverlayFocusRestoreState = { status: "inactive" } | ActiveOverlayFocusRestoreState;
 type OverlayFocusRestorePolicy = "clear" | "preserve";
 
+type ContainerRenderCache = {
+	width: number;
+	childOutputs: string[][];
+	lines: string[];
+};
+
 /**
  * Container - a component that contains other components
  */
 export class Container implements Component {
 	children: Component[] = [];
+
+	// Cache of the last render's per-child output arrays and their concatenation. Every child's
+	// render(width) is still called each tick - Component exposes no external "did my content
+	// change" signal - but Text/Markdown/Box/Image already return the *same array reference* from
+	// render(width) when their own internal (content, width) cache hits (see components/text.ts,
+	// markdown.ts, box.ts, image.ts). Reusing that existing convention here means a subtree built
+	// entirely from self-memoizing components can skip rebuilding the concatenated `lines` array.
+	// Components with no internal cache always return a fresh array, so they never hit this cache
+	// (correct, just no faster than before) - see render() below for the per-child check.
+	private renderCache: ContainerRenderCache | undefined;
 
 	addChild(component: Component): void {
 		this.children.push(component);
@@ -242,22 +258,41 @@ export class Container implements Component {
 	}
 
 	invalidate(): void {
+		this.renderCache = undefined;
 		for (const child of this.children) {
 			child.invalidate?.();
 		}
 	}
 
 	render(width: number): string[] {
+		const cache = this.renderCache;
+		// The child-count check also covers addChild/removeChild/clear and any direct mutation of
+		// `children` (some callers reassign it directly) - no explicit cache reset needed there.
+		let reusable = cache !== undefined && cache.width === width && cache.childOutputs.length === this.children.length;
+		const childOutputs: string[][] = [];
+		for (let i = 0; i < this.children.length; i++) {
+			const output = this.children[i].render(width);
+			childOutputs.push(output);
+			if (reusable && cache && cache.childOutputs[i] !== output) {
+				reusable = false;
+			}
+		}
+		if (reusable && cache) {
+			return cache.lines;
+		}
 		const lines: string[] = [];
-		for (const child of this.children) {
-			const childLines = child.render(width);
-			for (const line of childLines) {
+		for (const output of childOutputs) {
+			for (const line of output) {
 				lines.push(line);
 			}
 		}
+		this.renderCache = { width, childOutputs, lines };
 		return lines;
 	}
 }
+
+/** Cursor marker location within rendered lines, plus its raw string index for stripping. */
+type CursorMarkerPosition = { row: number; col: number; markerIndex: number };
 
 /**
  * TUI - Main class for managing terminal UI with differential rendering
@@ -997,15 +1032,24 @@ export class TUI extends Container {
 
 	private static readonly SEGMENT_RESET = "\x1b[0m\x1b]8;;\x07";
 
-	private applyLineResets(lines: string[]): string[] {
+	/**
+	 * Applies the terminal reset sequence to every non-image line and strips the cursor marker
+	 * (if any) from its row. Always builds a new array rather than mutating `lines` in place:
+	 * `lines` may be a Container render cache reused across ticks (see Container.render), and
+	 * writing into it here would permanently bake the reset suffix into that cache.
+	 */
+	private applyLineResets(lines: string[], cursorMarker: CursorMarkerPosition | null): string[] {
 		const reset = TUI.SEGMENT_RESET;
+		const result = new Array<string>(lines.length);
 		for (let i = 0; i < lines.length; i++) {
 			const line = lines[i];
-			if (!isImageLine(line)) {
-				lines[i] = normalizeTerminalOutput(line) + reset;
-			}
+			const stripped =
+				i === cursorMarker?.row
+					? line.slice(0, cursorMarker.markerIndex) + line.slice(cursorMarker.markerIndex + CURSOR_MARKER.length)
+					: line;
+			result[i] = isImageLine(stripped) ? stripped : normalizeTerminalOutput(stripped) + reset;
 		}
-		return lines;
+		return result;
 	}
 
 	private collectKittyImageIds(lines: string[]): Set<number> {
@@ -1102,14 +1146,15 @@ export class TUI extends Container {
 	}
 
 	/**
-	 * Find and extract cursor position from rendered lines.
-	 * Searches for CURSOR_MARKER, calculates its position, and strips it from the output.
-	 * Only scans the bottom terminal height lines (visible viewport).
+	 * Find the cursor marker in rendered lines and calculate its position.
+	 * Only scans the bottom terminal height lines (visible viewport). Does not mutate `lines` -
+	 * the marker is stripped later by applyLineResets, since `lines` may be a Container render
+	 * cache reused across ticks (see Container.render).
 	 * @param lines - Rendered lines to search
 	 * @param height - Terminal height (visible viewport size)
-	 * @returns Cursor position { row, col } or null if no marker found
+	 * @returns Cursor position { row, col, markerIndex } or null if no marker found
 	 */
-	private extractCursorPosition(lines: string[], height: number): { row: number; col: number } | null {
+	private findCursorMarker(lines: string[], height: number): CursorMarkerPosition | null {
 		// Only scan the bottom `height` lines (visible viewport)
 		const viewportTop = Math.max(0, lines.length - height);
 		for (let row = lines.length - 1; row >= viewportTop; row--) {
@@ -1117,13 +1162,8 @@ export class TUI extends Container {
 			const markerIndex = line.indexOf(CURSOR_MARKER);
 			if (markerIndex !== -1) {
 				// Calculate visual column (width of text before marker)
-				const beforeMarker = line.slice(0, markerIndex);
-				const col = visibleWidth(beforeMarker);
-
-				// Strip marker from the line
-				lines[row] = line.slice(0, markerIndex) + line.slice(markerIndex + CURSOR_MARKER.length);
-
-				return { row, col };
+				const col = visibleWidth(line.slice(0, markerIndex));
+				return { row, col, markerIndex };
 			}
 		}
 		return null;
@@ -1166,10 +1206,12 @@ export class TUI extends Container {
 			newLines = this.compositeOverlays(newLines, width, height);
 		}
 
-		// Extract cursor position before applying line resets (marker must be found first)
-		const cursorPos = this.extractCursorPosition(newLines, height);
+		// Find the cursor marker before applying line resets (marker must be found first).
+		// `newLines` may be a Container render cache reused across ticks, so neither step
+		// mutates it in place - see findCursorMarker/applyLineResets.
+		const cursorPos = this.findCursorMarker(newLines, height);
 
-		newLines = this.applyLineResets(newLines);
+		newLines = this.applyLineResets(newLines, cursorPos);
 
 		// Helper to clear scrollback and viewport and render all new lines
 		const fullRender = (clear: boolean): void => {

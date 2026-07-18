@@ -27,6 +27,13 @@ export interface CompactionSupportDeps {
 	/** Estimated tokens of the summarization input (live context; over-estimates, which is safe). */
 	estimateSummarizationInputTokens(): number;
 	emitWarning(message: string): void;
+	/**
+	 * The same readiness/residency gate every other isolated consumer uses
+	 * (LocalRuntimeController.ensureIsolatedModelReady) before this model is used for an
+	 * out-of-band call. No-ops for a non-managed-local model (checked internally by the gate);
+	 * throws with a user-actionable reason when a managed-local model cannot be made ready.
+	 */
+	ensureModelReady(model: Model<any>): Promise<void>;
 }
 
 export class CompactionSupport {
@@ -76,11 +83,30 @@ export class CompactionSupport {
 	}
 
 	/**
+	 * Readiness/residency gate a candidate summarizer model right before it is handed back for
+	 * use. A no-op for a non-managed-local model (checked internally by
+	 * {@link CompactionSupportDeps.ensureModelReady}); a managed-local model that cannot be made
+	 * ready (server down, model missing, residency refused) returns its failure reason instead of
+	 * throwing, so callers can still try the next candidate in the existing auth-fallback ladder
+	 * rather than aborting resolution outright.
+	 */
+	private async readinessFailure(model: Model<any>): Promise<string | undefined> {
+		try {
+			await this.deps.ensureModelReady(model);
+			return undefined;
+		} catch (error) {
+			return error instanceof Error ? error.message : String(error);
+		}
+	}
+
+	/**
 	 * Resolve the summarizer model AND its request auth for auto-compaction. The cheap auxiliary
 	 * model (#30) can be nominally available yet fail key resolution at request time (expired
-	 * OAuth, revoked key). Falling back to the session model keeps auto-compaction working in
-	 * exactly the situations where manual /compact works; only when neither resolves do we fail —
-	 * and then with a concrete message instead of a silent no-op.
+	 * OAuth, revoked key) — or, for a managed-local model, fail the readiness/residency gate (
+	 * server down, model not installed, residency refused). Falling back to the session model keeps
+	 * auto-compaction working in exactly the situations where manual /compact works; only when
+	 * neither resolves do we fail — and then with a concrete message instead of a silent no-op or a
+	 * bypass of the readiness gate.
 	 */
 	async resolveModelAndAuth(
 		compactionModel: Model<any>,
@@ -89,25 +115,40 @@ export class CompactionSupport {
 		if (this.deps.isRawStream()) {
 			const registry = this.deps.getModelRegistry();
 			let auth = await registry.getApiKeyAndHeaders(compactionModel);
+			let readiness: string | undefined;
 			if (auth.ok && auth.apiKey) {
-				return { model: compactionModel, apiKey: auth.apiKey, headers: auth.headers };
+				readiness = await this.readinessFailure(compactionModel);
+				if (!readiness) return { model: compactionModel, apiKey: auth.apiKey, headers: auth.headers };
 			}
 			const isSameModel =
 				compactionModel.provider === sessionModel.provider && compactionModel.id === sessionModel.id;
 			if (!isSameModel) {
 				auth = await registry.getApiKeyAndHeaders(sessionModel);
 				if (auth.ok && auth.apiKey) {
-					return { model: sessionModel, apiKey: auth.apiKey, headers: auth.headers };
+					readiness = await this.readinessFailure(sessionModel);
+					if (!readiness) return { model: sessionModel, apiKey: auth.apiKey, headers: auth.headers };
 				}
 			}
 			return {
 				model: sessionModel,
-				failure: `no usable API key for the summarizer (tried ${compactionModel.id}${isSameModel ? "" : ` and ${sessionModel.id}`})`,
+				failure: readiness
+					? `summarizer ${isSameModel ? compactionModel.id : sessionModel.id} not ready: ${readiness}`
+					: `no usable API key for the summarizer (tried ${compactionModel.id}${isSameModel ? "" : ` and ${sessionModel.id}`})`,
 			};
 		}
 
-		// Custom streamFn owns auth injection (CLI path) — resolve best-effort, never fail here.
+		// Custom streamFn owns auth injection (CLI path) — resolve best-effort, never fail on auth
+		// here; a managed-local summarizer must still pass the readiness gate before compact() runs.
 		const { apiKey, headers } = await this.getRequestAuth(compactionModel);
+		const readiness = await this.readinessFailure(compactionModel);
+		if (readiness) {
+			return {
+				model: compactionModel,
+				apiKey,
+				headers,
+				failure: `summarizer ${compactionModel.id} not ready: ${readiness}`,
+			};
+		}
 		return { model: compactionModel, apiKey, headers };
 	}
 

@@ -70,12 +70,18 @@ describe("isolated child tool loop", () => {
 				messages: [{ role: "user", content: "inspect", timestamp: Date.now() }],
 				tools: [probeTool],
 				maxTurns: 4,
+				cacheRetention: "none",
 			});
 
 			expect(execute).toHaveBeenCalledOnce();
 			expect(contexts[1]?.messages.map((message) => message.role)).toEqual(["user", "assistant", "toolResult"]);
 			expect(contexts[1]?.tools?.map((tool) => tool.name)).toEqual(["probe"]);
-			expect(streamOptions[1]?.sessionId).toBeUndefined();
+			// The child loop never carries the real sessionId, but every turn of the SAME isolated
+			// call shares one stable synthetic cache-affinity key.
+			expect(streamOptions[1]?.sessionId).toBeDefined();
+			expect(streamOptions[1]?.sessionId).toMatch(/^lane:/);
+			expect(streamOptions[1]?.sessionId).not.toBe(harness.session.sessionId);
+			expect(streamOptions[0]?.sessionId).toBe(streamOptions[1]?.sessionId);
 			expect(result.text).toBe("final child answer");
 			expect(result.usage).toMatchObject({ input: 13, output: 6, totalTokens: 19 });
 			expect(result.usage.cost.total).toBeCloseTo(0.03, 10);
@@ -106,6 +112,7 @@ describe("isolated child tool loop", () => {
 				messages: [{ role: "user", content: "inspect", timestamp: Date.now() }],
 				tools: [probeTool],
 				maxTurns: 1,
+				cacheRetention: "none",
 			});
 
 			expect(result.stopReason).toBe("toolUse");
@@ -153,6 +160,7 @@ describe("isolated child tool loop", () => {
 				tools: [probeTool],
 				maxTurns: 1,
 				finalTextPrompt: "Synthesize without tools.",
+				cacheRetention: "none",
 			});
 
 			expect(execute).toHaveBeenCalledOnce();
@@ -202,6 +210,7 @@ describe("isolated child tool loop", () => {
 				messages: [{ role: "user", content: "inspect", timestamp: Date.now() }],
 				tools: [probeTool],
 				maxTurns: 2,
+				cacheRetention: "none",
 			});
 
 			expect(execute).toHaveBeenCalledOnce();

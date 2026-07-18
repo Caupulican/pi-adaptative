@@ -38,6 +38,8 @@ describe("native reflection pass — write application + accounting", () => {
 
 	const newSession = async () => {
 		const settingsManager = SettingsManager.create(tempDir, agentDir);
+		// Legacy direct-apply path under test — pin learningPolicy off explicitly now that it defaults on.
+		settingsManager.setLearningPolicySettings({ enabled: false });
 		const resourceLoader = new DefaultResourceLoader({ cwd: tempDir, agentDir, settingsManager });
 		await resourceLoader.reload();
 		const { session } = await createAgentSession({

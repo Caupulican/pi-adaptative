@@ -1,4 +1,4 @@
-import { randomUUID } from "node:crypto";
+import { createHash, randomUUID } from "node:crypto";
 import { readFileSync, rmSync, writeFileSync } from "node:fs";
 import { basename, dirname, join } from "node:path";
 import type {
@@ -13,6 +13,7 @@ import type {
 	StreamFn,
 	StreamIdleOptions,
 	ThinkingLevel,
+	ToolValidationEscalationEvent,
 } from "@caupulican/pi-agent-core";
 import {
 	type CustomMessage,
@@ -204,7 +205,7 @@ import { ToolRecoveryLogger } from "./tool-recovery-logger.ts";
 import { formatToolRepairHealthReport } from "./tool-repair-health.ts";
 import { resolveCurrentToolRepairSettings } from "./tool-repair-settings.ts";
 import { ToolPerformanceStore } from "./tool-selection/tool-performance-store.ts";
-import { ToolSelectionController } from "./tool-selection/tool-selection-controller.ts";
+import { formatToolSelectionReport, ToolSelectionController } from "./tool-selection/tool-selection-controller.ts";
 import type { BashOperations } from "./tools/bash.ts";
 import { disposePersistentShellSession } from "./tools/shell-session.ts";
 
@@ -493,6 +494,39 @@ export interface SessionStats {
 export const SPAWNED_USAGE_CUSTOM_TYPE = "spawned_usage";
 
 /**
+ * customType for a persisted runaway-loop-backstop entry: the agent loop stopped a turn stuck
+ * repeating one identical tool-call signature. This is the session-log/telemetry sink for
+ * {@link Agent.onRunawayStop} — see `_installAgentToolHooks`.
+ */
+export const RUNAWAY_STOP_CUSTOM_TYPE = "runaway_stop";
+
+/** Payload persisted for a {@link RUNAWAY_STOP_CUSTOM_TYPE} entry. */
+export interface RunawayStopRecord {
+	signature: string;
+	repeats: number;
+	model?: string;
+	provider?: string;
+	at: string;
+}
+
+/**
+ * customType for a persisted tool-validation-escalation entry: the agent loop bounced the same
+ * tool-call validation failure enough times to escalate. This is the session-log/telemetry sink for
+ * {@link Agent.onToolValidationEscalation} — see `_installAgentToolHooks`.
+ */
+export const TOOL_VALIDATION_ESCALATION_CUSTOM_TYPE = "tool_validation_escalation";
+
+/** Payload persisted for a {@link TOOL_VALIDATION_ESCALATION_CUSTOM_TYPE} entry. */
+export interface ToolValidationEscalationRecord {
+	tool: string;
+	signature: string;
+	repeats: number;
+	model: string;
+	provider: string;
+	at: string;
+}
+
+/**
  * A single spawned/subagent usage report, persisted as a `CustomEntry`
  * (`customType: "spawned_usage"`). Persistence-only — does NOT enter LLM context.
  *
@@ -552,11 +586,48 @@ export interface IsolatedCompletionOptions {
 	/** Abort signal. */
 	signal?: AbortSignal;
 	/**
-	 * Prompt-cache retention for this isolated call. Defaults to `"none"` (no caching — preserves full
-	 * isolation). Callers whose `systemPrompt` is STATIC across calls (e.g. reflection, #33) can pass
-	 * `"short"`/`"long"` so the provider reuses the cached prefix and bills only the variable tail.
+	 * Prompt-cache retention for this isolated call. REQUIRED — the provider-level default is
+	 * `"short"`, the opposite of this primitive's old implicit default, so a caller that forgot to
+	 * set it would silently pay full input price forever. Pass `"none"` explicitly to preserve full
+	 * isolation (no caching); callers whose `systemPrompt` is STATIC across calls (e.g. reflection,
+	 * #33) should pass `"short"`/`"long"` so the provider reuses the cached prefix and bills only the
+	 * variable tail.
 	 */
-	cacheRetention?: CacheRetention;
+	cacheRetention: CacheRetention;
+	/**
+	 * Lane/caller kind (e.g. `"reflection"`, `"research"`, `"worker"`, `"fitness"`) used to derive this
+	 * call's synthetic cache-affinity key (see {@link computeLaneAffinityKey}). Omitted callers fall
+	 * back to {@link DEFAULT_ISOLATED_LANE_KIND} — still a stable, namespaced key, just not
+	 * lane-differentiated. Never the real session id.
+	 */
+	laneKind?: string;
+}
+
+/** Fallback {@link IsolatedCompletionOptions.laneKind} for callers that do not tag their lane. */
+export const DEFAULT_ISOLATED_LANE_KIND = "isolated";
+
+/**
+ * Derive a STABLE synthetic cache-affinity key for an isolated completion lane. Isolated calls
+ * deliberately never carry the real session id (see reflection-controller.ts's isolation invariants —
+ * an isolated call must not entangle with the main session), which today also means every isolated
+ * call looks like a brand-new, uncorrelated session to providers with session-affinity headers /
+ * `prompt_cache_key` (anthropic.ts's `x-session-affinity`, openai-responses.ts /
+ * openai-completions.ts's `prompt_cache_key`), defeating their cache routing.
+ *
+ * This key is deterministic per `(laneKind, model, systemPrompt)` — the SAME lane calling the SAME
+ * model with the SAME (static) system prompt always gets the SAME key, so repeat calls route to the
+ * same cache-warm backend — while remaining fully synthetic: it is a salted hash, namespaced with a
+ * `lane:` prefix, and never derived from or equal to the real session id.
+ */
+export function computeLaneAffinityKey(laneKind: string, model: Model<any> | undefined, systemPrompt: string): string {
+	const modelKey = model ? `${model.provider}/${model.id}` : "unknown-model";
+	// NUL-separated fields: laneKind/modelKey are drawn from small caller-controlled vocabularies
+	// that never contain a raw NUL, so this cannot field-collide the way a plain colon/space join could.
+	const digest = createHash("sha256")
+		.update(["pi-lane-affinity-v1", laneKind, modelKey, systemPrompt].join("\u0000"))
+		.digest("hex")
+		.slice(0, 32);
+	return `lane:${laneKind}:${digest}`;
 }
 
 /** Result of an isolated completion: the text, the usage spent, and the stop reason. */
@@ -715,6 +786,13 @@ export class AgentSession {
 	private readonly _analytics: SessionAnalytics;
 	private readonly _treeNavigator: SessionTreeNavigator;
 	private _lastCostGuardDecision?: CostGuardDecision;
+	/**
+	 * `getSpawnedUsage().cost` snapshotted at the start of the CURRENT foreground prompt cycle (see
+	 * `_promptUnserialized`), so the cost guard can attribute only background/spawned spend since THIS
+	 * turn began, not the session's entire lifetime spend. Reset on every new user prompt; every
+	 * round-trip within the same turn (tool-call iterations) shares this one baseline.
+	 */
+	private _costGuardTurnBaselineUsd = 0;
 	/** Per-turn model-router subsystem (see model-router-controller.ts); owns the transient route/intent,
 	 * the cheap-turn session buffer, the escalation/retry flags, and the sticky last-decision/skip-reason
 	 * used by the status report. Its parallel routed drive path delegates every turn back to
@@ -866,6 +944,9 @@ export class AgentSession {
 			getActiveExtensions: () => this._extensionRunner.activeExtensions,
 			getContextWindow: () => this.model?.contextWindow,
 			getThinkingLevel: () => this.thinkingLevel,
+			// The evidence-gated tool-selection hint block — self-gated by kill switch/evidence
+			// thresholds inside getActiveHints() itself, so this is a plain always-on pass-through.
+			getToolSelectionHints: () => this._toolSelection.getActiveHints(),
 		});
 		this._autonomyTelemetry = new AutonomyTelemetry({
 			getSessionManager: () => this.sessionManager,
@@ -931,6 +1012,10 @@ export class AgentSession {
 			// conservative in the safe direction for the summarizer capacity check.
 			estimateSummarizationInputTokens: () => this._pipeline.estimateCurrentContextTokens(this.agent.state.messages),
 			emitWarning: (message) => this._emit({ type: "warning", message }),
+			// Route a managed-local summarizer through the same readiness/residency gate every
+			// other isolated consumer uses, so compact() never calls a local model that was never
+			// confirmed up, installed, or resident (no-op for cloud models).
+			ensureModelReady: (model) => this._localRuntimeController.ensureIsolatedModelReady(model),
 		});
 		this._pipeline = new ContextPipeline({
 			getTurnIndex: () => this._turnIndex,
@@ -1101,6 +1186,10 @@ export class AgentSession {
 			getExtensionCommandContextActions: () => this._extensionCommandContextActions,
 			getExtensionShutdownHandler: () => this._extensionShutdownHandler,
 			getExtensionErrorListener: () => this._extensionErrorListener,
+			// Stop any pi-spawned local runtime the just-committed reload no longer routes to.
+			reconcileLocalRuntimes: () => {
+				this._localRuntimeController.reconcile(this._collectEligibleLocalModelsForReconcile());
+			},
 		});
 		this._analytics = new SessionAnalytics({
 			getState: () => this.state,
@@ -1398,13 +1487,30 @@ export class AgentSession {
 				const settings = this._getAdaptedCompactionSettings();
 				const contextWindow = this.model?.contextWindow ?? 0;
 				if (settings.enabled && contextWindow > 0 && !this.isCompacting) {
+					const triggerTokens = this.model?.autoCompactionTriggerTokens;
 					const contextTokens = this._estimateCurrentContextTokens(authoritativeMessages);
-					if (shouldCompact(contextTokens, contextWindow, settings, this.model?.autoCompactionTriggerTokens)) {
-						const latestBefore = getLatestCompactionEntry(this.sessionManager.getBranch())?.id;
-						await this._runAutoCompaction("threshold", false);
-						const latestAfter = getLatestCompactionEntry(this.sessionManager.getBranch())?.id;
-						if (latestAfter && latestAfter !== latestBefore) {
-							currentMessages = this.agent.state.messages.slice();
+					if (shouldCompact(contextTokens, contextWindow, settings, triggerTokens)) {
+						// This pre-check runs BEFORE context-gc (below, same transform pass), so the
+						// raw estimate above can't see this turn's own GC packing. Since context-gc later
+						// packs the SAME messages before they're ever sent, a raw-over-threshold turn that
+						// GC alone would bring back under threshold doesn't actually need compaction.
+						// Project this turn's GC pass read-only (writePayloads=false -- no digest/curation
+						// enqueue, no disk write, no artifact-reference release; see
+						// ContextPipeline.applyContextGc) to get the same packed output the real pass would
+						// produce for these messages, then re-check against ITS estimate. Packing only ever
+						// shrinks (never grows) a message, so the projected estimate is never higher than
+						// the raw one: this can only SUPPRESS an unnecessary compaction, never skip a
+						// genuinely needed one -- the hard near-full trigger inside shouldCompact still
+						// fires whenever the projected estimate itself remains over threshold.
+						const gcProjection = this._applyContextGc(authoritativeMessages, false);
+						const projectedContextTokens = this._estimateCurrentContextTokens(gcProjection.messages);
+						if (shouldCompact(projectedContextTokens, contextWindow, settings, triggerTokens)) {
+							const latestBefore = getLatestCompactionEntry(this.sessionManager.getBranch())?.id;
+							await this._runAutoCompaction("threshold", false);
+							const latestAfter = getLatestCompactionEntry(this.sessionManager.getBranch())?.id;
+							if (latestAfter && latestAfter !== latestBefore) {
+								currentMessages = this.agent.state.messages.slice();
+							}
 						}
 					}
 				}
@@ -1440,6 +1546,15 @@ export class AgentSession {
 	 * model, full system prompt, converted messages, and tool schemas are known. The guard is a
 	 * projection threshold rather than a hard output cap: warning mode never reduces capability, while
 	 * opt-in downgrade changes only this request's reasoning effort. Best-effort: never throws.
+	 *
+	 * The ceiling is turn-cumulative: the next foreground call's projection is folded together with
+	 * background/research/worker/reflection spend recorded SINCE THIS TURN BEGAN — {@link getSpawnedUsage}'s
+	 * already-recorded rollup (the same read-side-deduped total the footer's SUBAGENTS line uses) minus the
+	 * baseline snapshotted at the top of `_promptUnserialized` ({@link _costGuardTurnBaselineUsd}) — so a
+	 * turn that is cheap in the foreground but has spent heavily via background lanes THIS turn still trips
+	 * the warning, while a prior turn's background spend does not keep every later turn's guard stuck
+	 * "over". A background lane that finishes mid-turn is attributed to whichever turn it completes in.
+	 * Per-lane dollar caps (research/worker `maxUsd`) are separate and untouched by this guard.
 	 */
 	private _resolveCostGuardRequestReasoning(
 		model: Model<Api>,
@@ -1467,7 +1582,14 @@ export class AgentSession {
 				cost: model.cost,
 				longContextPricing: model.longContextPricing,
 			});
-			const decision = evaluateCostGuard(estUsd, { maxTurnUsd: guard.maxTurnUsd, action: guard.action });
+			// Only spend recorded SINCE this turn's baseline counts -- never negative (a dedup/rollup
+			// correction could otherwise move the total backward transiently).
+			const cumulativeBackgroundUsd = Math.max(0, this.getSpawnedUsage().cost - this._costGuardTurnBaselineUsd);
+			const decision = evaluateCostGuard(
+				estUsd,
+				{ maxTurnUsd: guard.maxTurnUsd, action: guard.action },
+				cumulativeBackgroundUsd,
+			);
 			this._lastCostGuardDecision = decision;
 			if (!decision.over || guard.action !== "downgrade" || reasoning === undefined) return reasoning;
 			const next = downgradeReasoning(reasoning, getSupportedThinkingLevels(model), model.thinkingLevelMap);
@@ -2208,7 +2330,10 @@ export class AgentSession {
 	}
 
 	formatToolRepairHealthReport(): string {
-		return formatToolRepairHealthReport(this._modelAdaptationStore, new Date(), this._toolRecoveryLogger.getStats());
+		return [
+			formatToolRepairHealthReport(this._modelAdaptationStore, new Date(), this._toolRecoveryLogger.getStats()),
+			formatToolSelectionReport(this._toolSelection.getReport()),
+		].join("\n\n");
 	}
 
 	async flushToolRecoveryLogsForTests(timeoutMs = 1000): Promise<void> {
@@ -2297,6 +2422,52 @@ export class AgentSession {
 	private _installAgentToolHooks(): void {
 		this.agent.beforeToolCall = this._toolGate.beforeToolCall;
 		this.agent.afterToolCall = this._toolGate.afterToolCall;
+		this.agent.onRunawayStop = (info) => this._handleRunawayStop(info);
+		this.agent.onToolValidationEscalation = (event) => this._handleToolValidationEscalation(event);
+	}
+
+	/**
+	 * The runaway-loop backstop ({@link Agent.maxStallTurns}) stopped a turn stuck repeating one
+	 * identical tool-call signature. Previously silent — this is the first host handler. Records a
+	 * session-log/telemetry entry (see {@link RUNAWAY_STOP_CUSTOM_TYPE}) and surfaces a user-visible
+	 * warning through the same event the context-window/compaction backstops use.
+	 */
+	private _handleRunawayStop(info: { signature: string; repeats: number }): void {
+		const record: RunawayStopRecord = {
+			signature: info.signature,
+			repeats: info.repeats,
+			model: this.model?.id,
+			provider: this.model?.provider,
+			at: new Date().toISOString(),
+		};
+		this.sessionManager.appendCustomEntry(RUNAWAY_STOP_CUSTOM_TYPE, record);
+		this._emit({
+			type: "warning",
+			message: `Stopped: the model repeated the same tool call ${info.repeats} times in a row without making progress. Review the last tool result and steer or retry with a different approach.`,
+		});
+	}
+
+	/**
+	 * A repeated identical tool-argument-validation failure crossed the escalation threshold
+	 * ({@link Agent.toolValidationEscalationThreshold}). Previously silent — this is the first host
+	 * handler. Records a session-log/telemetry entry (see {@link TOOL_VALIDATION_ESCALATION_CUSTOM_TYPE})
+	 * and feeds the model router's existing cheap-route escalation gate ({@link
+	 * ModelRouterController.maybeEscalateToolCall}) so a cheap route stuck failing validation on a
+	 * mutating tool escalates to the expensive model, exactly as a beforeToolCall mutating-tool
+	 * escalation already does. Reuses that gate's `shouldEscalateModelRouterTool` thresholds verbatim —
+	 * no new escalation policy.
+	 */
+	private _handleToolValidationEscalation(event: ToolValidationEscalationEvent): void {
+		const record: ToolValidationEscalationRecord = {
+			tool: event.tool,
+			signature: event.signature,
+			repeats: event.repeats,
+			model: event.model,
+			provider: event.provider,
+			at: new Date().toISOString(),
+		};
+		this.sessionManager.appendCustomEntry(TOOL_VALIDATION_ESCALATION_CUSTOM_TYPE, record);
+		this._modelRouter.maybeEscalateToolCall(event.tool, undefined);
 	}
 
 	// =========================================================================
@@ -3002,6 +3173,26 @@ export class AgentSession {
 		return this._localRuntimeController.ensureRouteModelReady(resolved);
 	}
 
+	/**
+	 * Every local model the CURRENT (post-reload) configuration could still route a turn to —
+	 * the foreground model plus any router tier (cheap/medium/expensive) that still resolves to a
+	 * real, authed, non-exhausted model. Fed to {@link LocalRuntimeController.reconcile} via the
+	 * `reconcileLocalRuntimes` hook above, ONLY after a reload generation has fully committed, so a
+	 * local model dropped from the live configuration has its pi-spawned runtime stopped instead of
+	 * leaking a child process, while one still referenced here is left untouched. Read-only — never
+	 * used for routing itself.
+	 */
+	private _collectEligibleLocalModelsForReconcile(): Model<Api>[] {
+		const models: Model<Api>[] = [];
+		const foregroundModel = this.agent.state.model;
+		if (foregroundModel) models.push(foregroundModel);
+		for (const tier of ["cheap", "medium", "expensive"] as const) {
+			const resolved = this._modelRouter.resolveConfiguredTierModel(tier);
+			if (resolved) models.push(resolved);
+		}
+		return models;
+	}
+
 	getModelRouterStatus(formatLabel?: (label: string) => string): string {
 		return this._modelRouter.getStatus(formatLabel);
 	}
@@ -3072,6 +3263,10 @@ export class AgentSession {
 	}
 
 	private async _promptUnserialized(text: string, options?: PromptOptions): Promise<void> {
+		// Start of a new foreground prompt cycle -- rebaseline the cost guard's background-spend
+		// window so a PRIOR turn's background/spawned spend doesn't keep this turn's guard permanently
+		// tripped. Every round trip within this same turn (tool-call iterations) shares this baseline.
+		this._costGuardTurnBaselineUsd = this.getSpawnedUsage().cost;
 		this._applyToolRepairLayerSettings();
 		this._cancelPrefixWarm();
 		const expandPromptTemplates = options?.expandPromptTemplates ?? true;
@@ -3831,8 +4026,12 @@ export class AgentSession {
 				getBaseKeepRecentTokens: () => settings.keepRecentTokens,
 				resolveModelAndAuth: async (modelTier) => {
 					const model = modelTier === "cheap" ? selectedCompactionModel : sessionModel;
-					const { apiKey, headers } = await this._resolveCompactionModelAndAuth(model, sessionModel);
-					return { model, apiKey, headers };
+					// Return the resolution result AS-IS: it may have fallen back to a different model
+					// (e.g. session model, when the tier's model failed auth or the readiness gate),
+					// and `failure` must reach the retry loop's auth-failed escalation rather than be
+					// dropped — dropping it would pair the wrong model with the fallback's credentials
+					// and silently skip the loop's visible failure/escalation handling.
+					return this._resolveCompactionModelAndAuth(model, sessionModel);
 				},
 				summarizeAndVerify: async (params, model, apiKey, headers, branch) => {
 					const preparation = prepareCompaction(

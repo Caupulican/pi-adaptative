@@ -1,10 +1,11 @@
 import type { SessionManager } from "@caupulican/pi-agent-core/node";
-import { describe, expect, it, vi } from "vitest";
+import { afterEach, describe, expect, it, vi } from "vitest";
 import {
 	BackgroundLaneController,
 	clampLaneMaxUsd,
 	isLocalExecutionModel,
 } from "../src/core/background-lane-controller.ts";
+import { getInFlightWorkUnits, resetInFlightWorkRegistryForTests } from "../src/core/reload-blockers.ts";
 
 describe("background lane budgets", () => {
 	it("clamps research lane spend to the foreground envelope cap", () => {
@@ -157,5 +158,114 @@ describe("worker execution locality", () => {
 			false,
 		);
 		expect(isLocalExecutionModel({ provider: "fugu", baseUrl: "https://api.sakana.ai/v1" })).toBe(false);
+	});
+});
+
+describe("quiesce registry", () => {
+	afterEach(() => {
+		resetInFlightWorkRegistryForTests();
+	});
+
+	it("registers a research lane in the quiesce registry while running, deregisters on completion", async () => {
+		const agentDir = "/tmp/pi-test-quiesce-research";
+		let resolveCompletion!: (value: { text: string; usage: unknown; stopReason: string }) => void;
+		const completionPromise = new Promise((resolve) => {
+			resolveCompletion = resolve as never;
+		});
+		const model = { provider: "test", id: "test-model", contextWindow: 128_000 };
+		const controller = new BackgroundLaneController({
+			isDisposed: () => false,
+			getSessionId: () => "test-session",
+			getCwd: () => "/repo",
+			getAgentDir: () => agentDir,
+			getSessionManager: () =>
+				({ getEntries: () => [], appendCustomEntry: () => "entry-1" }) as unknown as SessionManager,
+			getSettingsManager: () =>
+				({
+					getResearchLaneSettings: () => ({
+						maxUsd: 1,
+						maxSources: 3,
+						maxFindings: 3,
+						maxWallClockMs: 0,
+					}),
+					getModelCapabilitySettings: () => ({ mode: "off" }),
+				}) as never,
+			getModel: () => model,
+			isModelExhausted: () => false,
+			getCapabilityEnvelope: () => undefined,
+			collectWorkspaceSources: async () => [],
+			runIsolatedCompletion: () => completionPromise as never,
+			saveEvidenceBundleSnapshot: () => "evidence-1",
+			addSpawnedUsage: () => undefined,
+			emitAutonomyTelemetry: () => {},
+			emit: () => {},
+		} as never);
+
+		const runPromise = controller.runResearchLaneOnce({ query: "q", context: "c" });
+		// Let the synchronous setup (through the awaited `runIsolatedCompletion` call) settle.
+		await Promise.resolve();
+		await Promise.resolve();
+		await Promise.resolve();
+
+		const inFlight = getInFlightWorkUnits(agentDir);
+		expect(inFlight).toHaveLength(1);
+		expect(inFlight[0]?.kind).toBe("lane");
+		expect(inFlight[0]?.label).toMatch(/^research:/);
+
+		resolveCompletion({
+			text: '{"findings":[{"summary":"test finding","confidence":0.8}]}',
+			usage: {
+				input: 1,
+				output: 1,
+				cacheRead: 0,
+				cacheWrite: 0,
+				totalTokens: 2,
+				cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, total: 0 },
+			},
+			stopReason: "stop",
+		});
+		const outcome = await runPromise;
+
+		expect(outcome.started).toBe(true);
+		expect(getInFlightWorkUnits(agentDir)).toEqual([]);
+	});
+
+	it("deregisters a worker lane from the quiesce registry even when it throws", async () => {
+		const agentDir = "/tmp/pi-test-quiesce-worker-throw";
+		const model = { provider: "test", id: "test-model", contextWindow: 128_000 };
+		const controller = new BackgroundLaneController({
+			isDisposed: () => false,
+			getSessionId: () => "test-session",
+			getCwd: () => "/repo",
+			getAgentDir: () => agentDir,
+			getSessionManager: () =>
+				({ getEntries: () => [], appendCustomEntry: () => "entry-1" }) as unknown as SessionManager,
+			getSettingsManager: () =>
+				({
+					getWorkerDelegationSettings: () => ({
+						enabled: true,
+						maxUsd: 1,
+						maxConcurrent: 4,
+						maxWallClockMs: 0,
+						writeEnabled: false,
+						writePaths: [],
+					}),
+					getModelCapabilitySettings: () => ({ mode: "off" }),
+				}) as never,
+			getModel: () => model,
+			isModelExhausted: () => false,
+			isDelegateToolActive: () => true,
+			getCapabilityEnvelope: () => undefined,
+			readMemoryForLane: async () => "",
+			// Throws inside the lane's try block, after registration — proves the finally still deregisters.
+			runIsolatedCompletion: () => Promise.reject(new Error("boom")),
+			emitAutonomyTelemetry: () => {},
+			emit: () => {},
+		} as never);
+
+		const outcome = await controller.runWorkerDelegationOnce({ instructions: "do something" });
+
+		expect(outcome.started).toBe(true);
+		expect(getInFlightWorkUnits(agentDir)).toEqual([]);
 	});
 });

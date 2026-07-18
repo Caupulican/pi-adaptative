@@ -60,19 +60,43 @@ export const DEFAULT_COST_GUARD_SETTINGS: CostGuardSettings = {
 };
 
 export interface CostGuardDecision {
-	/** True when the guard is enabled AND the projected cost exceeds the ceiling. */
+	/** True when the guard is enabled AND the projected TOTAL (estUsd + backgroundUsd) exceeds the ceiling. */
 	over: boolean;
+	/** Projected USD cost of the next foreground call alone (unchanged meaning — what the footer's "/turn" label shows). */
 	estUsd: number;
+	/** Background/spawned-lane USD spend (research/worker/reflection/fitness) folded into this decision — the caller decides the window (e.g. since the current turn began). */
+	backgroundUsd: number;
+	/** `estUsd + backgroundUsd` — the value actually compared against `thresholdUsd`. */
+	totalUsd: number;
 	thresholdUsd: number;
 	action: CostGuardAction;
 }
 
-/** Decide whether the projected turn cost trips the guard. Disabled (`maxTurnUsd<=0`) is never `over`. */
-export function evaluateCostGuard(estUsd: number, settings: CostGuardSettings): CostGuardDecision {
+/**
+ * Decide whether the projected turn cost trips the guard. Disabled (`maxTurnUsd<=0`) is never `over`.
+ *
+ * `cumulativeBackgroundUsd` (default 0) is spawned/background-lane spend (research, worker delegation,
+ * reflection, model-fitness probes — see {@link SpawnedUsageTotals}) folded into the same ceiling as the
+ * next foreground call. This function is window-agnostic — it just sums whatever the caller passes — but
+ * the intended caller convention (agent-session.ts) is spend attributed to the CURRENT turn only (a
+ * baseline snapshotted at the top of the turn, subtracted from the live cumulative total), not the
+ * session's entire lifetime, so a turn that is cheap in the foreground but has quietly spent a lot in
+ * background lanes THIS turn still trips the guard, without a prior turn's spend keeping it stuck over
+ * forever (still warn-only by default).
+ */
+export function evaluateCostGuard(
+	estUsd: number,
+	settings: CostGuardSettings,
+	cumulativeBackgroundUsd = 0,
+): CostGuardDecision {
 	const enabled = settings.maxTurnUsd > 0;
+	const backgroundUsd = Math.max(0, cumulativeBackgroundUsd);
+	const totalUsd = estUsd + backgroundUsd;
 	return {
-		over: enabled && estUsd > settings.maxTurnUsd,
+		over: enabled && totalUsd > settings.maxTurnUsd,
 		estUsd,
+		backgroundUsd,
+		totalUsd,
 		thresholdUsd: settings.maxTurnUsd,
 		action: settings.action,
 	};

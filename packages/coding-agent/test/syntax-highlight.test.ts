@@ -47,6 +47,40 @@ describe("syntax highlight renderer", () => {
 		expect(rendered).toContain("[keyword:const]");
 		expect(rendered).toContain("[number:1]");
 	});
+
+	it("registers a language lazily on first use and still highlights correctly", () => {
+		// "rust" is not exercised by any other test in this file, so this is genuinely
+		// the first call that touches the rust grammar under the lazy-registration path.
+		expect(supportsLanguage("rust")).toBe(true);
+		const rendered = highlight("fn main() {}", {
+			language: "rust",
+			ignoreIllegals: true,
+			theme: {
+				keyword: (text) => `[keyword:${text}]`,
+				title: (text) => `[title:${text}]`,
+			},
+		});
+		expect(rendered).toContain("[keyword:fn]");
+		expect(rendered).toContain("[title:main]");
+	});
+
+	it("resolves an alias to its canonical language module on first use", () => {
+		// "sh" is a highlight.js alias of "bash" and is registered only when "bash" (or one
+		// of its aliases) is registered; it is not touched by any earlier test in this file.
+		expect(supportsLanguage("sh")).toBe(true);
+		const rendered = highlight('if [ -z "$x" ]; then echo hi; fi', {
+			language: "sh",
+			ignoreIllegals: true,
+			theme: {
+				keyword: (text) => `[keyword:${text}]`,
+			},
+		});
+		expect(rendered).toContain("[keyword:if]");
+	});
+
+	it("keeps the unknown-language fallback unchanged", () => {
+		expect(supportsLanguage("not-a-real-language")).toBe(false);
+	});
 });
 
 describe("theme syntax highlighting", () => {

@@ -1,6 +1,8 @@
 import { existsSync, mkdirSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
+import { pathToFileURL } from "node:url";
+import { Worker } from "node:worker_threads";
 import { afterEach, beforeEach, describe, expect, it } from "vitest";
 import {
 	computeCurationProposals,
@@ -135,4 +137,48 @@ describe("SkillCurator (filesystem)", () => {
 		expect(existsSync(join(dir, "fresh", "SKILL.md"))).toBe(true); // fresh kept
 		expect(existsSync(join(dir, "hand", "SKILL.md"))).toBe(true); // hand-authored never touched
 	});
+
+	/**
+	 * Two REAL OS threads calling `recordUse` for the same skill concurrently must not lose a use —
+	 * `recordUse`'s load-mutate-write now runs under one exclusive lock (the shared atomic-file helper)
+	 * instead of racing an unlocked read + `writeFileSync`.
+	 */
+	it("two OS threads recording use of the same skill concurrently never lose a count", async () => {
+		writeSkill("promoted-one", true);
+		const modulePath = new URL("../src/core/learning/skill-curator.ts", import.meta.url).pathname;
+		const workerPath = join(dir, "record-use-worker.mjs");
+		writeFileSync(
+			workerPath,
+			`import { SkillCurator } from ${JSON.stringify(modulePath)};
+import { parentPort, workerData } from "node:worker_threads";
+const { skillsDir, name, iterations } = workerData;
+const curator = new SkillCurator(skillsDir);
+for (let i = 0; i < iterations; i++) curator.recordUse(name, Date.now());
+parentPort.postMessage({ done: true });
+`,
+			"utf-8",
+		);
+
+		const iterationsPerWorker = 40;
+		const workers = [1, 2].map(
+			() =>
+				new Worker(pathToFileURL(workerPath), {
+					workerData: { skillsDir: dir, name: "promoted-one", iterations: iterationsPerWorker },
+				}),
+		);
+		await Promise.all(
+			workers.map(
+				(worker) =>
+					new Promise<void>((resolve, reject) => {
+						worker.on("message", () => resolve());
+						worker.on("error", reject);
+					}),
+			),
+		);
+		await Promise.all(workers.map((worker) => worker.terminate()));
+
+		const curator = new SkillCurator(dir);
+		const promoted = curator.loadPromotedSkills().find((s) => s.name === "promoted-one");
+		expect(promoted?.useCount).toBe(iterationsPerWorker * 2);
+	}, 20_000);
 });

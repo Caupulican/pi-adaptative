@@ -33,6 +33,7 @@
  * `_refreshToolRegistry` delegation for its internal callers.
  */
 
+import { createHash } from "node:crypto";
 import { existsSync, readFileSync } from "node:fs";
 import { isAbsolute, join } from "node:path";
 import type { Agent, AgentContext, AgentMessage, AgentTool, ThinkingLevel } from "@caupulican/pi-agent-core";
@@ -72,6 +73,7 @@ import { resolveCliModel } from "./model-resolver.ts";
 import { evaluateSurfaceFitness } from "./model-router/fitness-gate.ts";
 import { FitnessStore } from "./models/fitness-store.ts";
 import type { ProfileFilterReloadSnapshot } from "./profile-filter-controller.ts";
+import { describeInFlightWorkUnit, getInFlightWorkUnits } from "./reload-blockers.ts";
 import type { ModelFitnessReport } from "./research/model-fitness.ts";
 import type { ResourceLoader } from "./resource-loader.ts";
 import { ScoutController } from "./scout-controller.ts";
@@ -104,6 +106,17 @@ import { createToolDefinitionFromAgentTool } from "./tools/tool-definition-wrapp
 interface ToolDefinitionEntry {
 	definition: ToolDefinition;
 	sourceInfo: SourceInfo;
+}
+
+/**
+ * Deterministic `addSpawnedUsage` reportId: `kind` + session id + a content hash of `identity`
+ * (never `Date.now`/random). Same identity on a retry of the same logical work unit yields the same
+ * id, so the ledger's `seenSubagentReportIds` dedupe catches a duplicate report instead of
+ * double-counting spend.
+ */
+function deriveSpawnedUsageReportId(kind: string, sessionId: string, identity: string): string {
+	const digest = createHash("sha256").update(identity).digest("hex").slice(0, 16);
+	return `${kind}:${sessionId}:${digest}`;
 }
 
 interface ReloadRuntimeSnapshot {
@@ -236,19 +249,22 @@ export interface RuntimeBuilderDeps {
 		systemPrompt?: string;
 		memoryRead?: boolean;
 	}): Promise<WorkerDelegationRunOutcome>;
-	/** Model-fitness probe for the model_fitness tool. */
+	/** Model-fitness probe for the model_fitness tool. `toolCallId` is the idempotency token
+	 * for spawned-usage reportId — present only for the LLM tool-call path (see model-fitness.ts). */
 	runModelFitness(args: {
 		model: string;
 		trials?: number;
+		toolCallId?: string;
 	}): Promise<{ started: true; model: string; report: ModelFitnessReport } | { started: false; skipReason: string }>;
 	/** Fitness-gated reflex-brain model resolver (run_toolkit_script interpretation). */
 	resolveCurationModelIfFit(): Model<Api> | undefined;
 	/** One-shot, tool-less LLM call — the reflex-brain interpreter rides this. */
 	runIsolatedCompletion(opts: IsolatedCompletionOptions): Promise<IsolatedCompletionResult>;
-	/** Roll reflex-brain spend into spawned-usage accounting. */
+	/** Roll reflex-brain spend into spawned-usage accounting. `reportId` is REQUIRED: every
+	 * caller derives a stable id from the work unit's identity so a retry cannot double-count. */
 	addSpawnedUsage(
 		usage: Usage,
-		opts?: { label?: string; sourceSessionId?: string; reportId?: string },
+		opts: { label?: string; sourceSessionId?: string; reportId: string },
 	): string | undefined;
 
 	/** Post-rebuild doctor helpers (validate the rebuilt runtime can render a context). */
@@ -264,6 +280,18 @@ export interface RuntimeBuilderDeps {
 	getExtensionCommandContextActions(): ExtensionCommandContextActions | undefined;
 	getExtensionShutdownHandler(): ShutdownHandler | undefined;
 	getExtensionErrorListener(): ExtensionErrorListener | undefined;
+
+	/**
+	 * Stop any pi-spawned local (Ollama/Transformers/prism llama.cpp) runtime the host's
+	 * LocalRuntimeController is holding open that no longer applies under the just-reloaded
+	 * configuration — e.g. `LocalRuntimeController.reconcile(eligibleModels)`, with `eligibleModels`
+	 * derived from whatever the host still routes to post-reload (foreground model + any configured
+	 * router tier). Called ONLY after `_reloadOnce()` commits successfully — never on a rolled-back
+	 * reload, since a rollback restores the PREVIOUS configuration and nothing became ineligible.
+	 * Optional: a host that hasn't wired a LocalRuntimeController through here yet sees no behavior
+	 * change — a local runtime this builder doesn't know about is simply left alone, never guessed at.
+	 */
+	reconcileLocalRuntimes?(): void;
 }
 
 /**
@@ -309,6 +337,9 @@ export class RuntimeBuilder {
 			streamFn: this.deps.getAgent().streamFn,
 			fileExists: (path) => existsSync(resolveCwdPath(cwd, path)),
 			countLines: (path) => countFileLines(resolveCwdPath(cwd, path)),
+			// Lets the scout register itself in the reload-gate quiesce registry (see
+			// reload-blockers.ts) for its own agentDir — the same key `_assertReloadQuiescent` reads.
+			getAgentDir: () => this.deps.getAgentDir(),
 		});
 		return controller.run(query, maxTurns);
 	}
@@ -718,9 +749,20 @@ export class RuntimeBuilder {
 						thinkingLevel: "off",
 						maxTokens: 256,
 						cacheRetention: "short",
+						// Stable per-lane synthetic affinity key so repeat ambiguous-request
+						// interpretations hit the same cache-warm backend.
+						laneKind: "toolkit-brain",
 					});
 					if (completion.usage.cost.total > 0 || completion.usage.totalTokens > 0) {
-						this.deps.addSpawnedUsage(completion.usage, { label: "toolkit-brain" });
+						// `reportId` keyed on the ambiguous request text driving THIS interpretation —
+						// stable across a retry of the same tool call, distinct across genuinely
+						// different requests.
+						const reportId = deriveSpawnedUsageReportId(
+							"toolkit-brain",
+							this.deps.getSessionManager().getSessionId(),
+							request,
+						);
+						this.deps.addSpawnedUsage(completion.usage, { label: "toolkit-brain", reportId });
 					}
 					return parseReflexPlan(completion.text);
 				},
@@ -803,13 +845,30 @@ export class RuntimeBuilder {
 		}
 	}
 
-	private async _reloadOnce(): Promise<void> {
+	/**
+	 * Unified reload-gate quiescence check: refuses the caller's action (message-prefixed by
+	 * `action`) while the agent is streaming, is compacting, or ANY background work unit is still
+	 * registered in the in-process quiesce registry — background lanes (research/worker/
+	 * model-fitness), a context-scout run, or an isolated completion (see reload-blockers.ts). Every
+	 * live-op entry point below calls this so they refuse identically; this is a synchronous refusal
+	 * (not a wait/poll) — callers retry via the same coalescing `reload()` already provides.
+	 */
+	private _assertReloadQuiescent(action: string): void {
 		if (this.deps.isStreaming()) {
-			throw new Error("Cannot reload while the agent is streaming or a tool call is active");
+			throw new Error(`Cannot ${action} while the agent is streaming or a tool call is active`);
 		}
 		if (this.deps.isCompacting()) {
-			throw new Error("Cannot reload while context compaction or branch summarization is active");
+			throw new Error(`Cannot ${action} while context compaction or branch summarization is active`);
 		}
+		const units = getInFlightWorkUnits(this.deps.getAgentDir());
+		if (units.length > 0) {
+			const summary = units.map(describeInFlightWorkUnit).join(", ");
+			throw new Error(`Cannot ${action} while background work is in flight: ${summary}`);
+		}
+	}
+
+	private async _reloadOnce(): Promise<void> {
+		this._assertReloadQuiescent("reload");
 		const previousRunner = this.deps.getExtensionRunner();
 		const snapshot = this._createReloadRuntimeSnapshot();
 		// Preserve the pre-filter tool REQUEST across the rebuild, not the capability/profile-filtered
@@ -878,6 +937,9 @@ export class RuntimeBuilder {
 			await this.deps.getResourceLoader().commitReload?.();
 			// Re-derive the memory subsystem from the reloaded settings/providers.
 			await this.deps.initializeMemory();
+			// This generation has fully committed (no rollback below this point), so any local
+			// runtime the host no longer routes to under the new configuration can be stopped now.
+			this.deps.reconcileLocalRuntimes?.();
 		} catch (error) {
 			offReloadErrors?.();
 			if (newRunner && newRunner !== previousRunner) {
@@ -898,12 +960,7 @@ export class RuntimeBuilder {
 	 * Falls back to full reload on error.
 	 */
 	async unloadExtensionLive(extensionPath: string): Promise<void> {
-		if (this.deps.isStreaming()) {
-			throw new Error("Cannot unload extension while the agent is streaming or a tool call is active");
-		}
-		if (this.deps.isCompacting()) {
-			throw new Error("Cannot unload extension while context compaction or branch summarization is active");
-		}
+		this._assertReloadQuiescent("unload extension");
 
 		const ext = this.deps.getResourceLoader().getLoadedExtension(extensionPath);
 		if (!ext) {
@@ -972,12 +1029,7 @@ export class RuntimeBuilder {
 	 * Falls back to full reload on error.
 	 */
 	async loadExtensionLive(extensionPath: string): Promise<void> {
-		if (this.deps.isStreaming()) {
-			throw new Error("Cannot load extension while the agent is streaming or a tool call is active");
-		}
-		if (this.deps.isCompacting()) {
-			throw new Error("Cannot load extension while context compaction or branch summarization is active");
-		}
+		this._assertReloadQuiescent("load extension");
 
 		const previousRunner = this.deps.getExtensionRunner();
 		try {
@@ -1021,12 +1073,7 @@ export class RuntimeBuilder {
 	 * Falls back to full reload if any individual load/unload fails.
 	 */
 	async reconcileLoadedExtensions(): Promise<void> {
-		if (this.deps.isStreaming()) {
-			throw new Error("Cannot reconcile extensions while the agent is streaming or a tool call is active");
-		}
-		if (this.deps.isCompacting()) {
-			throw new Error("Cannot reconcile extensions while context compaction or branch summarization is active");
-		}
+		this._assertReloadQuiescent("reconcile extensions");
 
 		try {
 			// Get all discoverable extension paths

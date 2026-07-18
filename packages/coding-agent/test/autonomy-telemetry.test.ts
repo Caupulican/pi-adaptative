@@ -155,7 +155,7 @@ describe("autonomy telemetry emission (G3)", () => {
 	});
 
 	it("a learning decision emits a learning_decision event with kind/reasonCode/layer", async () => {
-		const harness = await createHarness();
+		const harness = await createHarness({ settings: { learningPolicy: { enabled: false } } });
 		try {
 			const reflectionReply = JSON.stringify({
 				rationale: "learned something",

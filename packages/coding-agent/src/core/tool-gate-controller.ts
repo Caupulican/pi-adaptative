@@ -83,6 +83,11 @@ export class ToolGateController {
 			}
 		}
 		if (extensionResult) return extensionResult;
+		// begin()'s return value is intentionally unused here: it tracks the pending observation
+		// internally (keyed by toolCall.id) and afterToolCall's complete() call below retrieves it
+		// from there, records observe-mode agreement/hint-efficacy stats, and feeds the durable
+		// evidence-gated promotion surfaced in system-prompt-builder.ts and getReport(). This is
+		// a side-effecting call, not a discarded decision.
 		this.deps.getToolSelectionController?.()?.begin(toolCall.id, toolCall.name, args);
 		return undefined;
 	};

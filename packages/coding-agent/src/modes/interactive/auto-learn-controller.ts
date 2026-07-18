@@ -21,7 +21,11 @@ import { getAgentDir } from "../../config.ts";
 import type { AgentSession } from "../../core/agent-session.ts";
 import { readAutoLearnSessionIdFromFile, reportCompletedAutoLearnUsageHelper } from "../../core/cost/session-usage.ts";
 import { resolveCliModel } from "../../core/model-resolver.ts";
-import { getPendingReloadBlockers } from "../../core/reload-blockers.ts";
+import {
+	describeInFlightWorkUnit,
+	getInFlightWorkUnits,
+	getPendingReloadBlockers,
+} from "../../core/reload-blockers.ts";
 import type { AutoLearnSettings, AutonomyMode } from "../../core/settings-manager.ts";
 import { getProcessWorkRun } from "../../utils/work-directory.ts";
 import { theme } from "./theme/theme.ts";
@@ -43,31 +47,31 @@ const AUTO_LEARN_DEFAULTS = {
 } as const satisfies Required<AutoLearnSettings>;
 
 const AUTONOMY_AUTO_LEARN_PRESETS = {
-	off: { ...AUTO_LEARN_DEFAULTS, enabled: false, reflectionReview: false },
+	off: { ...AUTO_LEARN_DEFAULTS, enabled: true, reflectionReview: true },
 	safe: {
 		...AUTO_LEARN_DEFAULTS,
-		enabled: false,
+		enabled: true,
 		longSessionMessages: 64,
 		longSessionContextPercent: 85,
 		cooldownMinutes: 24 * 60,
 		leaseMinutes: 60,
 		maxConcurrentLearners: 1,
 		applyHighConfidence: false,
-		reflectionReview: false,
+		reflectionReview: true,
 		reflectionMinToolCalls: 12,
 		reflectionCooldownMinutes: 24 * 60,
 		complexTaskToolCalls: 12,
 	},
 	balanced: {
 		...AUTO_LEARN_DEFAULTS,
-		enabled: false,
+		enabled: true,
 		longSessionMessages: 64,
 		longSessionContextPercent: 85,
 		cooldownMinutes: 24 * 60,
 		leaseMinutes: 90,
 		maxConcurrentLearners: 1,
 		applyHighConfidence: false,
-		reflectionReview: false,
+		reflectionReview: true,
 		reflectionMinToolCalls: 12,
 		reflectionCooldownMinutes: 24 * 60,
 		complexTaskToolCalls: 12,
@@ -1473,6 +1477,12 @@ export class AutoLearnController {
 		const reloadBlockerLines = reloadBlockers.pending
 			? reloadBlockers.descriptions.map((description) => `- ${description}`).join("\n")
 			: "- none";
+		// In-process quiesce registry (background lanes, scout runs, isolated completions) — the
+		// reload gate's OTHER source of blockers, distinct from the cross-process ones above.
+		const inFlightWork = getInFlightWorkUnits(getAgentDir());
+		const inFlightWorkLines = inFlightWork.length
+			? inFlightWork.map((unit) => `- ${describeInFlightWorkUnit(unit)}`).join("\n")
+			: "- none";
 		const reflectionLast = state.lastReflectionByTenant?.[this.getAutoLearnTenantKey()] ?? 0;
 		const reflectionCooldownRemainingMs = Math.max(
 			0,
@@ -1480,6 +1490,6 @@ export class AutoLearnController {
 		);
 		const reflectionCooldownText =
 			reflectionCooldownRemainingMs > 0 ? `${Math.ceil(reflectionCooldownRemainingMs / 60000)}m remaining` : "ready";
-		return `Auto Learn status\nEnabled: ${settings.enabled}\nModel: ${settings.model}\nNext decision: ${decision.shouldRun ? "ready" : decision.reason}\nMessages: ${decision.messageCount}/${settings.longSessionMessages}\nContext: ${contextText}/${settings.longSessionContextPercent}%\nCooldown: ${cooldownText}\nReflection review: ${settings.reflectionReview ? "enabled" : "disabled"} (tool trigger ${settings.reflectionMinToolCalls}, cooldown ${reflectionCooldownText})\nHistory retention: 7 days for internal Auto Learn prompts/logs/sessions\nRunning tenant leases: ${runs.length}/${settings.maxConcurrentLearners}\nOther tenant leases: ${otherTenantRuns}\nTenant artifact dir: ${this.getAutoLearnTenantDataDir()}\nPi auto-reload blockers: ${reloadBlockers.pending ? reloadBlockers.reason : "none"}\n${reloadBlockerLines}\nRuns:\n${runLines}`;
+		return `Auto Learn status\nEnabled: ${settings.enabled}\nModel: ${settings.model}\nNext decision: ${decision.shouldRun ? "ready" : decision.reason}\nMessages: ${decision.messageCount}/${settings.longSessionMessages}\nContext: ${contextText}/${settings.longSessionContextPercent}%\nCooldown: ${cooldownText}\nReflection review: ${settings.reflectionReview ? "enabled" : "disabled"} (tool trigger ${settings.reflectionMinToolCalls}, cooldown ${reflectionCooldownText})\nHistory retention: 7 days for internal Auto Learn prompts/logs/sessions\nRunning tenant leases: ${runs.length}/${settings.maxConcurrentLearners}\nOther tenant leases: ${otherTenantRuns}\nTenant artifact dir: ${this.getAutoLearnTenantDataDir()}\nPi auto-reload blockers: ${reloadBlockers.pending ? reloadBlockers.reason : "none"}\n${reloadBlockerLines}\nIn-process reload-gate work: ${inFlightWork.length ? `${inFlightWork.length} unit(s)` : "none"}\n${inFlightWorkLines}\nRuns:\n${runLines}`;
 	}
 }

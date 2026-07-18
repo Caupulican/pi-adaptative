@@ -499,7 +499,21 @@ async function runExtensionFactory(
 
 async function loadExtensionModule(extensionPath: string, opts?: { fresh?: boolean; moduleTimeoutMs?: number }) {
 	const jiti = createJiti(import.meta.url, {
+		// A fresh jiti instance is created on every call and moduleCache is disabled so each load
+		// evaluates the module from scratch, producing a genuinely new instance with reset top-level
+		// state and closures. This is required for hot reload (/reload, /new, /resume, /fork, profile
+		// switch): a previous extension generation's module state must never leak into the next one.
+		//
+		// This is orthogonal to the Babel *transform* step. jiti has its own on-disk fsCache that
+		// caches transformed output keyed by a content hash of the source, independent of
+		// moduleCache. Pointing it at an explicit, durable directory under the agent dir (instead of
+		// jiti's default heuristic, which falls back to a shared OS tmp dir when no node_modules
+		// sibling exists next to the extension file) makes unchanged extensions skip Babel on repeat
+		// loads while still isolating module state, and edits are still detected automatically via
+		// the content hash. Do not hand-roll a second in-memory transform cache on top of this: it
+		// would duplicate jiti's own content-hash-validated cache for no benefit.
 		moduleCache: false,
+		fsCache: path.join(getAgentDir(), "cache", "jiti-transforms"),
 		// In Bun binary: use virtualModules for bundled packages (no filesystem resolution)
 		// Also disable tryNative so jiti handles ALL imports (not just the entry point)
 		// In Node.js/dev: use aliases to resolve to node_modules paths

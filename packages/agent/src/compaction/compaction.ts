@@ -554,7 +554,11 @@ function createSummarizationOptions(
 	signal: AbortSignal | undefined,
 	thinkingLevel: ThinkingLevel | undefined,
 ): SimpleStreamOptions {
-	const options: SimpleStreamOptions = { maxTokens, signal, apiKey, headers };
+	// SUMMARIZATION_SYSTEM_PROMPT is static and the compaction retry ladder can resend a
+	// near-identical prefix (same conversation/facts block) within one attempt — let the provider
+	// cache it so a retry only pays for the variable tail. Matches the repo's default ("short")
+	// exactly; set explicitly so the intent isn't silently dependent on the provider default.
+	const options: SimpleStreamOptions = { maxTokens, signal, apiKey, headers, cacheRetention: "short" };
 	if (model.reasoning && thinkingLevel && thinkingLevel !== "off") {
 		options.reasoning = thinkingLevel;
 	}
@@ -575,8 +579,40 @@ async function completeSummarization(
 }
 
 /**
+ * Serialize messages to conversation text and, if a `preDigest` callback is supplied, run it
+ * through that pass (a cheaper curation-model call that compresses older chunks — see
+ * brain-curator.ts's `preDigestConversationText`; it makes real model completions, it is not a
+ * local/mechanical transform). Split out of {@link generateSummary} so callers that summarize the
+ * SAME message span more than once within one compaction attempt (the structurally-broken-summary
+ * retry in `compact()`) can compute this ONCE and reuse the result via `generateSummary`'s
+ * `precomputedConversationText` parameter, instead of re-running the pre-digest LLM calls (and
+ * re-serializing) for an unchanged span on every retry.
+ */
+async function prepareSummarizationConversationText(
+	currentMessages: AgentMessage[],
+	preDigest?: (conversationText: string, signal?: AbortSignal) => Promise<string>,
+	signal?: AbortSignal,
+): Promise<string> {
+	const llmMessages = convertToLlm(currentMessages);
+	let conversationText = serializeConversation(llmMessages);
+	if (preDigest) {
+		try {
+			conversationText = await preDigest(conversationText, signal);
+		} catch {
+			// Keep the verbatim conversation when an optional pre-digest fails.
+		}
+	}
+	return conversationText;
+}
+
+/**
  * Generate a summary of the conversation using the LLM.
  * If previousSummary is provided, uses the update prompt to merge.
+ *
+ * @param precomputedConversationText - When provided, skips re-serializing `currentMessages` and
+ *   re-running `preDigest` on them, using this text directly instead. For a caller that summarizes
+ *   the same message span across multiple attempts (a verification-gate retry), compute this once
+ *   via {@link prepareSummarizationConversationText} and pass it to every attempt.
  */
 export async function generateSummary(
 	currentMessages: AgentMessage[],
@@ -592,6 +628,7 @@ export async function generateSummary(
 	preDigest?: (conversationText: string, signal?: AbortSignal) => Promise<string>,
 	factsBlock = "verification demands:\nfiles-modified-recall (must appear in ## Files):\nfiles-read-recall (must appear in ## Files, containment threshold applies):\nworking-set-recall (must appear in ## Working Set):\nopen-errors-recall (must appear in ## Open Problems):\nactions-recall (must appear in ## Done):\nmandatory-rules-recall (must appear in ### Mandatory Rules):\nactive-task-containment (must appear in ## Active Task):\ncancelled-work-dropped (must NOT appear outside ### Mandatory Rules):",
 	chunked = false,
+	precomputedConversationText?: string,
 ): Promise<string> {
 	const summaryBudget = getSummaryBudget(reserveTokens, model, factsBlock);
 	const maxTokens = summaryBudget;
@@ -605,15 +642,10 @@ export async function generateSummary(
 		promptSuffix = `${promptSuffix}\n\nAdditional focus: ${customInstructions}`;
 	}
 
-	const llmMessages = convertToLlm(currentMessages);
-	let conversationText = serializeConversation(llmMessages);
-	if (preDigest) {
-		try {
-			conversationText = await preDigest(conversationText, signal);
-		} catch {
-			// Keep the verbatim conversation when an optional pre-digest fails.
-		}
-	}
+	let conversationText =
+		precomputedConversationText !== undefined
+			? precomputedConversationText
+			: await prepareSummarizationConversationText(currentMessages, preDigest, signal);
 
 	const inputBound = getSummarizerInputBound(model, maxTokens);
 	const initialPromptText = buildSummarizationPrompt(conversationText, previousSummary, promptSuffix);
@@ -1057,6 +1089,15 @@ export async function compact(
 	if (isSplitTurn && messagesToSummarize.length > 0) {
 		let historySummary = "No prior history.";
 		let historyInstructions = customInstructions;
+		// Computed once and reused across retry attempts below: `messagesToSummarize` and `preDigest`
+		// are identical on every attempt (only the retry instructions change), and `preDigest` makes
+		// real model calls — re-running serialize+preDigest per attempt would resend/re-summarize the
+		// unchanged span for no benefit.
+		const precomputedConversationText = await prepareSummarizationConversationText(
+			messagesToSummarize,
+			preDigest,
+			signal,
+		);
 		for (let attempt = 0; attempt < 2; attempt++) {
 			historySummary = await generateSummary(
 				messagesToSummarize,
@@ -1072,6 +1113,7 @@ export async function compact(
 				preDigest,
 				factsBlock,
 				executionOptions?.chunked ?? false,
+				precomputedConversationText,
 			);
 
 			verification = verifySummary(historySummary, facts);
@@ -1112,6 +1154,12 @@ export async function compact(
 		summary = `${historySummary}\n\n---\n\n**Turn Context (split turn):**\n\n${turnPrefixSummary}`;
 	} else {
 		let customSummaryInstructions = customInstructions;
+		// See the isSplitTurn branch above: same span/preDigest across attempts, computed once.
+		const precomputedConversationText = await prepareSummarizationConversationText(
+			messagesToSummarize,
+			preDigest,
+			signal,
+		);
 		for (let attempt = 0; attempt < 2; attempt++) {
 			summary = await generateSummary(
 				messagesToSummarize,
@@ -1127,6 +1175,7 @@ export async function compact(
 				preDigest,
 				factsBlock,
 				executionOptions?.chunked ?? false,
+				precomputedConversationText,
 			);
 
 			verification = verifySummary(summary, facts);

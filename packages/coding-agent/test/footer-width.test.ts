@@ -289,7 +289,14 @@ describe("FooterComponent width handling", () => {
 				cost: { total: 2.1 },
 			},
 			dailyCost: 2.1,
-			costGuardDecision: { over: true, estUsd: 3.25, thresholdUsd: 2.5, action: "warn" },
+			costGuardDecision: {
+				over: true,
+				estUsd: 3.25,
+				backgroundUsd: 0,
+				totalUsd: 3.25,
+				thresholdUsd: 2.5,
+				action: "warn",
+			},
 		});
 		const rendered = stripAnsi(new FooterComponent(session, createFooterData(1)).render(200).join("\n"));
 

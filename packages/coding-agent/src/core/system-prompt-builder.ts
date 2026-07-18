@@ -23,6 +23,7 @@ import type { ResourceLoader } from "./resource-loader.ts";
 import { UNTRUSTED_BOUNDARY_SYSTEM_RULE } from "./security/untrusted-boundary.ts";
 import type { SettingsManager } from "./settings-manager.ts";
 import { type BuildSystemPromptOptions, buildSystemPrompt } from "./system-prompt.ts";
+import { formatToolSelectionHints, type ToolSelectionHint } from "./tool-selection/promotion.ts";
 
 export interface SystemPromptBuilderDeps {
 	/** The session's working directory (read fresh; base for self-modification source resolution). */
@@ -41,6 +42,15 @@ export interface SystemPromptBuilderDeps {
 	getToolPromptGuidelines(name: string): string[] | undefined;
 	/** The standing tool-shape rules learned for the session's current model. */
 	getModelAdaptationRules(): readonly ModelAdaptationRule[];
+	/**
+	 * The evidence-gated tool-selection hints active for the session's current model (see
+	 * `tool-selection/promotion.ts` and `ToolSelectionController.getActiveHints`). Optional: a
+	 * session that has not wired a `ToolSelectionController` into this builder simply renders no
+	 * hint block, same as an empty list. Changes RARELY (only when the underlying evidence flips
+	 * which tool is promoted for an intent) — never per turn — so it does not threaten the
+	 * single-cached-system-prompt-block invariant (see system-prompt.ts).
+	 */
+	getToolSelectionHints?(): readonly ToolSelectionHint[];
 	/** The session's currently active extensions. */
 	getActiveExtensions(): ReadonlyArray<Extension>;
 	/** Active model context window, used to compact-cap static memory prompt blocks. */
@@ -160,6 +170,11 @@ export class SystemPromptBuilder {
 		return `Per-model tool-call shape rules (learned for the current model):\n${lines.join("\n")}`;
 	}
 
+	/** The evidence-gated tool-selection hint block (see `getToolSelectionHints` on the deps). */
+	private _buildToolSelectionHintPrompt(): string | undefined {
+		return formatToolSelectionHints(this.deps.getToolSelectionHints?.() ?? []);
+	}
+
 	private _buildAutonomyPrompt(): string | undefined {
 		const autoLearn = this.deps.getSettingsManager().getAutoLearnSettings();
 		const autonomy = this.deps.getSettingsManager().getAutonomySettings();
@@ -229,6 +244,7 @@ export class SystemPromptBuilder {
 			this._buildAutonomyPrompt(),
 			this._buildUltraDelegationPrompt(validToolNames.includes("delegate")),
 			this._buildModelAdaptationPrompt(),
+			this._buildToolSelectionHintPrompt(),
 			// Memory subsystem: static, frozen-per-session block (e.g. file-store MEMORY.md/USER.md).
 			this._buildStaticMemoryPrompt(),
 			...loaderAppendSystemPrompt,

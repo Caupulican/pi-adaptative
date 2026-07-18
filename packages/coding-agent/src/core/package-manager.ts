@@ -26,7 +26,6 @@ import { basename, dirname, join, relative, resolve, sep } from "node:path";
 import type { Readable } from "node:stream";
 import { globSync } from "glob";
 import ignore from "ignore";
-import { minimatch } from "minimatch";
 import { CONFIG_DIR_NAME } from "../config.ts";
 import { spawnProcess, spawnProcessSync, waitForChildProcessWithTermination } from "../utils/child-process.ts";
 import { type GitSource, parseGitUrl } from "../utils/git.ts";
@@ -36,6 +35,7 @@ import { createRollingOutputBuffer } from "./exec.ts";
 import { isStdoutTakenOver } from "./output-guard.ts";
 import { mergeResourceProfileMap, parseResourceProfileBlocks } from "./resource-profile-blocks.ts";
 import type { PackageSource, ResourceProfileSettings, Settings, SettingsManager } from "./settings-manager.ts";
+import { matchesCompiledPattern } from "./util/minimatch-cache.ts";
 
 const NETWORK_TIMEOUT_MS = 10000;
 const PACKAGE_CAPTURE_TIMEOUT_MS = 30_000;
@@ -647,16 +647,16 @@ function matchesAnyPattern(filePath: string, patterns: string[], baseDir: string
 	return patterns.some((pattern) => {
 		const normalizedPattern = toPosixPath(pattern);
 		if (
-			minimatch(rel, normalizedPattern) ||
-			minimatch(name, normalizedPattern) ||
-			minimatch(filePathPosix, normalizedPattern)
+			matchesCompiledPattern(rel, normalizedPattern) ||
+			matchesCompiledPattern(name, normalizedPattern) ||
+			matchesCompiledPattern(filePathPosix, normalizedPattern)
 		) {
 			return true;
 		}
 		return (
-			minimatch(parentRel, normalizedPattern) ||
-			minimatch(parentName, normalizedPattern) ||
-			minimatch(parentDirPosix, normalizedPattern)
+			matchesCompiledPattern(parentRel, normalizedPattern) ||
+			matchesCompiledPattern(parentName, normalizedPattern) ||
+			matchesCompiledPattern(parentDirPosix, normalizedPattern)
 		);
 	});
 }

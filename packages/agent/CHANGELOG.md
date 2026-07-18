@@ -1,5 +1,11 @@
 ## [Unreleased]
 
+### Fixed
+
+- `runAgentLoopContinue` no longer mutates the caller's `context.messages` in place (copies first, matching `runAgentLoop`).
+- Compaction's structurally-broken-summary retry reuses the pre-digested conversation text from the first attempt (the pre-digest makes real curation-model LLM calls — previously re-run on an unchanged span); summarization requests set `cacheRetention` explicitly.
+- Agent forwards `onRunawayStop` into the loop config (was silently dropped), mirroring `onToolValidationEscalation`.
+
 ## [0.81.38] - 2026-07-16
 
 ## [0.81.37] - 2026-07-16

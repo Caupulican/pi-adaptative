@@ -79,11 +79,28 @@ function toolResultText(message: ToolResultMessage): string {
 	return parts.join("\n");
 }
 
-interface BuiltToolOutputItem {
+export interface BuiltToolOutputItem {
 	item: ContextItem;
 	/** True only if an artifact ref was found AND resolved against a live store. */
 	hasResolvedArtifact: boolean;
 }
+
+/**
+ * Per-message memo of the expensive part of {@link buildToolOutputItem} (text extraction +
+ * token/byte estimate + artifact `readRef` metadata), keyed by `AgentMessage` object identity
+ * -- a replaced/rewritten message object is a new key, so it misses and recomputes with no
+ * extra bookkeeping. Entries also carry the `messageIndex` they were built at: a message that
+ * kept its identity but shifted index (e.g. a compaction survivor) is treated as a miss too,
+ * since `messageIndex` feeds the transcript evidence ref.
+ *
+ * Ownership: the caller (`ContextPipeline`) owns a single long-lived instance across calls and
+ * passes it in every pass; `runContextAudit` treats it as the previous pass's cache on read and
+ * replaces its contents with exactly this pass's live entries before returning (a message no
+ * longer present in `messages` is dropped, not retained) -- so the map never grows unbounded
+ * across compaction rewrites or branch switches. Callers that must stay pure full-scans (tests,
+ * read-only recompute paths) simply omit this parameter.
+ */
+export type ContextAuditMemo = Map<AgentMessage, { messageIndex: number; built: BuiltToolOutputItem }>;
 
 function buildToolOutputItem(
 	message: ToolResultMessage,
@@ -210,24 +227,54 @@ export function buildToolResultContextItem(
  * the transcript, or artifact references -- deterministic given the same messages,
  * `turnIndex`, and artifact-store state (not a cross-turn stability guarantee: turnIndex
  * and artifact-backed createdAtTurn values are expected to change turn over turn).
+ *
+ * `memo`, if supplied, is an incremental-memo seam (see {@link ContextAuditMemo}): the
+ * expensive `buildToolOutputItem` work is skipped and reused for a message whose object
+ * identity AND index are unchanged from the previous pass. The turnIndex-dependent tail
+ * (`createdAtTurn` for non-artifact-backed items) is re-derived fresh on every call
+ * regardless of cache hit/miss, so output is byte-identical to a full recompute either way
+ * -- omitting `memo` (or passing a throwaway `new Map()`) makes this a pure full scan, exactly
+ * as before this parameter existed.
  */
-export function runContextAudit(messages: AgentMessage[], options: ContextAuditOptions): ContextAuditReport {
+export function runContextAudit(
+	messages: AgentMessage[],
+	options: ContextAuditOptions,
+	memo?: ContextAuditMemo,
+): ContextAuditReport {
+	const freshMemo: ContextAuditMemo | undefined = memo ? new Map() : undefined;
 	const items: ContextAuditItemReport[] = [];
 	messages.forEach((message, messageIndex) => {
 		if (message.role !== "toolResult") return;
-		const built = buildToolOutputItem(message, messageIndex, options);
-		const features = buildPolicyFeatures(built.item, built, options.turnIndex);
+		const cached = memo?.get(message);
+		const built =
+			cached && cached.messageIndex === messageIndex
+				? cached.built
+				: buildToolOutputItem(message, messageIndex, options);
+		freshMemo?.set(message, { messageIndex, built });
+		// Re-derive the turnIndex-dependent tail every call, cache hit or miss: a resolved
+		// artifact's real capture turn never changes (see buildToolOutputItem), while a
+		// non-artifact item's createdAtTurn is always the CURRENT audit turn -- exactly what a
+		// fresh buildToolOutputItem call would have produced, so this is a no-op on a cache
+		// miss and a correctness fix on a cache hit.
+		const item: ContextItem = built.hasResolvedArtifact
+			? built.item
+			: { ...built.item, createdAtTurn: options.turnIndex };
+		const features = buildPolicyFeatures(item, built, options.turnIndex);
 		const flags = buildHardConstraintFlags(built, options.artifactStore !== undefined);
 		items.push({
-			item: built.item,
+			item,
 			toolCallId: message.toolCallId,
 			messageIndex,
-			retention: evaluateRetentionEligibility(built.item),
+			retention: evaluateRetentionEligibility(item),
 			keepRawHardConstraints: evaluateHardConstraints("keep_raw", features, flags),
 			packToArtifactHardConstraints: evaluateHardConstraints("pack_to_artifact", features, flags),
 			dropFromPromptHardConstraints: evaluateHardConstraints("drop_from_prompt", features, flags),
 			summarizeHardConstraints: evaluateHardConstraints("summarize", features, flags),
 		});
 	});
+	if (memo && freshMemo) {
+		memo.clear();
+		for (const [key, entry] of freshMemo) memo.set(key, entry);
+	}
 	return { turnIndex: options.turnIndex, items };
 }

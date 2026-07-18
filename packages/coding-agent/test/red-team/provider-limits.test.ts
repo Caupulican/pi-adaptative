@@ -116,6 +116,7 @@ function compactionHarness(options: { agentDir: string; exhausted?: ExhaustedPro
 			// Small span: capacity never interferes with the failover behaviors under test here.
 			estimateSummarizationInputTokens: () => 1_000,
 			emitWarning: (message) => warnings.push(message),
+			ensureModelReady: async () => {},
 		}),
 		warnings,
 	};

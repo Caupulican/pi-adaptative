@@ -1,6 +1,8 @@
 import { existsSync, mkdirSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
+import { pathToFileURL } from "node:url";
+import { Worker } from "node:worker_threads";
 import { afterEach, beforeEach, describe, expect, it } from "vitest";
 import { ObservationStore, observationKey } from "../src/core/learning/observation-store.ts";
 
@@ -98,4 +100,44 @@ describe("ObservationStore", () => {
 		writeFileSync(filePath(), JSON.stringify({ version: 1, observations: [] }), "utf-8");
 		expect(ObservationStore.forAgentDir(agentDir).get(key)).toBe(0);
 	});
+
+	/**
+	 * Two REAL OS threads incrementing the SAME key concurrently must not lose an increment —
+	 * `increment()`'s load-mutate-save now runs under one exclusive lock (the shared atomic-file
+	 * helper) instead of racing unlocked reads/writes.
+	 */
+	it("two OS threads incrementing the same key concurrently never lose an increment", async () => {
+		const modulePath = new URL("../src/core/learning/observation-store.ts", import.meta.url).pathname;
+		const workerPath = join(agentDir, "increment-worker.mjs");
+		writeFileSync(
+			workerPath,
+			`import { ObservationStore } from ${JSON.stringify(modulePath)};
+import { parentPort, workerData } from "node:worker_threads";
+const { agentDir, key, iterations } = workerData;
+const observationStore = ObservationStore.forAgentDir(agentDir);
+for (let i = 0; i < iterations; i++) observationStore.increment(key);
+parentPort.postMessage({ done: true });
+`,
+			"utf-8",
+		);
+
+		const key = observationKey("memory", "hammered lesson");
+		const iterationsPerWorker = 40; // total stays under MAX_COUNT (100) so the cap never masks a loss
+		const workers = [1, 2].map(
+			() =>
+				new Worker(pathToFileURL(workerPath), { workerData: { agentDir, key, iterations: iterationsPerWorker } }),
+		);
+		await Promise.all(
+			workers.map(
+				(worker) =>
+					new Promise<void>((resolve, reject) => {
+						worker.on("message", () => resolve());
+						worker.on("error", reject);
+					}),
+			),
+		);
+		await Promise.all(workers.map((worker) => worker.terminate()));
+
+		expect(ObservationStore.forAgentDir(agentDir).get(key)).toBe(iterationsPerWorker * 2);
+	}, 20_000);
 });

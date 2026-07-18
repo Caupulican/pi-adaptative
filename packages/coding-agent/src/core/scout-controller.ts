@@ -1,5 +1,6 @@
 import { Agent, type AgentTool, type StreamFn } from "@caupulican/pi-agent-core";
 import type { Model } from "@caupulican/pi-ai";
+import { registerInFlightWork } from "./reload-blockers.ts";
 
 export const SCOUT_SYSTEM_PROMPT = `You are a repository scout. You explore a codebase with read-only tools and return compact evidence. You do NOT solve tasks, write code, or modify anything.
 
@@ -46,6 +47,12 @@ export interface ScoutControllerDeps {
 	countLines(path: string): number | undefined;
 	onEvent?(event: { type: "scout_turn" | "scout_end"; detail: string }): void;
 	signal?: AbortSignal;
+	/** Registers this scout's own Agent run in the reload-gate quiesce registry while it drives
+	 * turns, so `/reload`/profile-switch/live extension load-unload-reconcile wait it out. Optional —
+	 * a caller that hasn't wired an agent dir through (e.g. an existing test construction) sees no
+	 * behavior change; the scout simply stays invisible to the reload gate, matching its behavior
+	 * before this registration was added. */
+	getAgentDir?(): string;
 }
 
 const MAX_TURNS_DEFAULT = 8;
@@ -77,70 +84,82 @@ export class ScoutController {
 			return { ...unavailable, failure: modelResolution.failure };
 		}
 
-		let turnsUsed = 0;
-		let truncated = false;
-		let lastAssistantText = "";
-		let outputTokens = 0;
-		const agent = new Agent({
-			initialState: {
-				model: modelResolution.model,
-				systemPrompt: SCOUT_SYSTEM_PROMPT.replace("{MAX_TURNS}", String(turnLimit)),
-				tools: this.deps
-					.buildReadOnlyTools(this.deps.getCwd())
-					.filter((tool) => READ_ONLY_TOOL_NAMES.has(tool.name)),
-			},
-			streamFn: this.deps.streamFn,
-			getApiKey: () => modelResolution.apiKey,
-			maxStallTurns: turnLimit,
-		});
+		// Registered while this scout's own Agent drives turns, so the reload gate waits it out.
+		// registerInFlightWork is a pure sync map op (cannot throw), so wrapping everything from here
+		// through the end in try/finally guarantees deregistration on every exit path. Optional dep —
+		// a caller that hasn't wired an agent dir through stays invisible to the gate, matching the
+		// behavior before this registration was added.
+		const deregisterInFlight = this.deps.getAgentDir
+			? registerInFlightWork(this.deps.getAgentDir(), "scout", query.slice(0, 80))
+			: undefined;
+		try {
+			let turnsUsed = 0;
+			let truncated = false;
+			let lastAssistantText = "";
+			let outputTokens = 0;
+			const agent = new Agent({
+				initialState: {
+					model: modelResolution.model,
+					systemPrompt: SCOUT_SYSTEM_PROMPT.replace("{MAX_TURNS}", String(turnLimit)),
+					tools: this.deps
+						.buildReadOnlyTools(this.deps.getCwd())
+						.filter((tool) => READ_ONLY_TOOL_NAMES.has(tool.name)),
+				},
+				streamFn: this.deps.streamFn,
+				getApiKey: () => modelResolution.apiKey,
+				maxStallTurns: turnLimit,
+			});
 
-		const unsubscribe = agent.subscribe((event) => {
-			if (event.type !== "message_end" || event.message.role !== "assistant") {
-				return;
-			}
-			turnsUsed += 1;
-			lastAssistantText = assistantText(event.message);
-			outputTokens += getScoutOutputTokenCount(event.message);
-			this.deps.onEvent?.({ type: "scout_turn", detail: `turn ${turnsUsed}` });
-			if (hasFinalAnswer(lastAssistantText)) {
-				return;
-			}
-			if (turnsUsed >= turnLimit || outputTokens >= MAX_OUTPUT_TOKENS) {
+			const unsubscribe = agent.subscribe((event) => {
+				if (event.type !== "message_end" || event.message.role !== "assistant") {
+					return;
+				}
+				turnsUsed += 1;
+				lastAssistantText = assistantText(event.message);
+				outputTokens += getScoutOutputTokenCount(event.message);
+				this.deps.onEvent?.({ type: "scout_turn", detail: `turn ${turnsUsed}` });
+				if (hasFinalAnswer(lastAssistantText)) {
+					return;
+				}
+				if (turnsUsed >= turnLimit || outputTokens >= MAX_OUTPUT_TOKENS) {
+					truncated = true;
+					agent.abort();
+				}
+			});
+
+			const abortScout = (): void => {
 				truncated = true;
 				agent.abort();
+			};
+			this.deps.signal?.addEventListener("abort", abortScout, { once: true });
+			let runFailure: string | undefined;
+			try {
+				await agent.prompt(query);
+			} catch (error) {
+				if (!truncated && !this.deps.signal?.aborted) {
+					runFailure = error instanceof Error ? error.message : String(error);
+				}
+			} finally {
+				unsubscribe();
+				this.deps.signal?.removeEventListener("abort", abortScout);
 			}
-		});
 
-		const abortScout = (): void => {
-			truncated = true;
-			agent.abort();
-		};
-		this.deps.signal?.addEventListener("abort", abortScout, { once: true });
-		let runFailure: string | undefined;
-		try {
-			await agent.prompt(query);
-		} catch (error) {
-			if (!truncated && !this.deps.signal?.aborted) {
-				runFailure = error instanceof Error ? error.message : String(error);
-			}
+			const result = parseScoutAnswer(
+				lastAssistantText,
+				(path) => this.deps.fileExists(path),
+				(path) => this.deps.countLines(path),
+			);
+			const finalResult = {
+				...result,
+				truncated: truncated || !hasFinalAnswer(lastAssistantText),
+				turnsUsed,
+				failure: this.deps.signal?.aborted ? "aborted" : runFailure,
+			};
+			this.deps.onEvent?.({ type: "scout_end", detail: finalResult.failure ?? "ok" });
+			return finalResult;
 		} finally {
-			unsubscribe();
-			this.deps.signal?.removeEventListener("abort", abortScout);
+			deregisterInFlight?.();
 		}
-
-		const result = parseScoutAnswer(
-			lastAssistantText,
-			(path) => this.deps.fileExists(path),
-			(path) => this.deps.countLines(path),
-		);
-		const finalResult = {
-			...result,
-			truncated: truncated || !hasFinalAnswer(lastAssistantText),
-			turnsUsed,
-			failure: this.deps.signal?.aborted ? "aborted" : runFailure,
-		};
-		this.deps.onEvent?.({ type: "scout_end", detail: finalResult.failure ?? "ok" });
-		return finalResult;
 	}
 }
 
