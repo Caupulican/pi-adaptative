@@ -31,8 +31,9 @@
 ## Commands
 
 - After code changes (not docs): `npm run check` (full output, no tail). Fix all errors, warnings, and infos before committing. Does not run tests.
-- Never run `npm run build` or `npm test` unless requested by the user.
-- Never run the full vitest suite directly: it includes e2e tests that activate when endpoint/auth env vars are present. For all non-e2e tests, run `./test.sh` from the repo root. Otherwise run specific tests from the package root: `node ../../node_modules/vitest/dist/cli.js --run test/specific.test.ts`.
+- Never run `npm run build` or `npm test` unless requested by the user. The one standing exception is the mandatory pre-release full-suite run in the Releasing section.
+- While developing, run only the tests specific to the code you touched, from the package root: `node ../../node_modules/vitest/dist/cli.js --run test/specific.test.ts`. Do not run the full suite to iterate on a change.
+- Never run the full vitest suite directly: it includes e2e tests that activate when endpoint/auth env vars are present. The full non-e2e suite runs via `./test.sh` from the repo root — reserved for the pre-release gate or an explicit user request.
 - If you create or modify a test file, run it and iterate on test or implementation until it passes.
 - For `packages/coding-agent/test/suite/`, use `test/suite/harness.ts` + the faux provider. No real provider APIs, keys, or paid tokens.
 - Put issue-specific regressions under `packages/coding-agent/test/suite/regressions/` named `<issue-number>-<short-slug>.test.ts`.
@@ -127,7 +128,9 @@ Attribution:
 
 1. **Update CHANGELOGs**: audit the latest commit on `main` yourself before releasing. Do not ask the user to run `/cl`; use git diff/log and the changelog rules above to update each affected package's `[Unreleased]` section, then validate and commit the changelog update before running the release script.
 
-2. **Local smoke test**: build an unpublished release and smoke test from outside the repo (so it can't resolve workspace files):
+2. **Full test suite (mandatory)**: run `./test.sh` from the repo root and get it fully green. This is the only routine full-suite run; targeted tests during development do not substitute for it. Failures are release blockers unless the user explicitly accepts the risk.
+
+3. **Local smoke test**: build an unpublished release and smoke test from outside the repo (so it can't resolve workspace files):
    ```bash
    npm run release:local -- --out /tmp/pi-local-release --force
    cd /tmp
@@ -148,7 +151,7 @@ Attribution:
    ```
    Verify both Node and Bun startup, model/account listing, interactive startup, and at least one real prompt with the intended default provider. The bare commands `/tmp/pi-local-release/node/pi` and `/tmp/pi-local-release/bun/pi` start interactive mode; run each in tmux, submit a prompt, and wait for the model reply before considering the interactive smoke test passed. Failures are release blockers unless the user explicitly accepts the risk.
 
-3. **Run the release script**:
+4. **Run the release script**:
    ```bash
    PI_ALLOW_LOCKFILE_CHANGE=1 npm_config_min_release_age=0 npm run release:patch    # fixes + additions
    PI_ALLOW_LOCKFILE_CHANGE=1 npm_config_min_release_age=0 npm run release:minor    # breaking changes
@@ -157,9 +160,9 @@ Attribution:
 
    The release script bumps all package versions, updates changelogs, regenerates release artifacts, runs `npm run check`, commits `Release vX.Y.Z`, tags `vX.Y.Z`, adds fresh `## [Unreleased]` changelog sections, commits `Add [Unreleased] section for next cycle`, then pushes `main` and the tag. Do not rerun the release script after a tag was pushed.
 
-4. **CI publishes npm packages**: pushing the `vX.Y.Z` tag triggers `.github/workflows/build-binaries.yml`. The `publish-npm` job uses npm trusted publishing through GitHub Actions OIDC with environment `npm-publish`; no local `npm publish`, `npm whoami`, OTP, or WebAuthn flow is required.
+5. **CI publishes npm packages**: pushing the `vX.Y.Z` tag triggers `.github/workflows/build-binaries.yml`. The `publish-npm` job uses npm trusted publishing through GitHub Actions OIDC with environment `npm-publish`; no local `npm publish`, `npm whoami`, OTP, or WebAuthn flow is required.
 
-5. **If CI publish fails**: inspect the failed `publish-npm` job. The publish helper is idempotent and skips package versions already present on npm, so rerun the tag workflow after fixing CI or transient npm issues. Do not rerun `npm run release:patch` or `npm run release:minor` for the same version.
+6. **If CI publish fails**: inspect the failed `publish-npm` job. The publish helper is idempotent and skips package versions already present on npm, so rerun the tag workflow after fixing CI or transient npm issues. Do not rerun `npm run release:patch` or `npm run release:minor` for the same version.
 
 ## User Override
 
@@ -172,6 +175,21 @@ If the user's instructions conflict with any rule in this document, ask for expl
   - tags: compaction, verification-gate, calibration, open-thread
 
 ## Findings
+
+### 2026-07-18 · packages/coding-agent · bash executes in persistent per-agent shell sessions; kill = session reset — claude
+The bash backend is now a keyed registry of long-lived shell processes (`shell-session.ts`): the agent session passes a stable key (survives runtime reloads, shared with user `!` commands, disposed in `AgentSession.dispose()`), while independently created tool instances auto-key and stay isolated — a subagent building its own tool surface gets its own session for free. Invariants to preserve when touching this: commands are wired via eval-of-heredoc (bash) / base64 ReadLine REPL (PowerShell) with a nonce sentinel carrying the exit code; timeout/abort/silence kill the WHOLE session tree and the next exec respawns fresh (state loss is by design — a hung foreground command can't be killed individually without job control); an explicit `shellPath` or a changed per-command env falls back to per-command/respawn semantics. Windows now boots PowerShell once per agent instead of once per command.
+- evidence: packages/coding-agent/src/core/tools/shell-session.ts:1 · packages/coding-agent/src/core/tools/bash.ts:114 · packages/coding-agent/test/shell-session.test.ts:1
+- tags: bash-tool, shell-session, windows, performance, architecture, subagents
+
+### 2026-07-18 · packages/coding-agent · per-exec shell discovery made every Windows bash call pay ~1.3s of blocking probes — claude
+`createLocalShellOperations().exec` called `getShellConfig()` on every command, and on win32 that re-ran full PowerShell discovery each time: `spawnSync("where", ...)` (~0.3s) plus a synchronous throwaway PowerShell boot as an availability probe (~1s), both blocking the event loop (frozen TUI) before the real command's own shell boot. Shell resolution is a process-lifetime invariant; successful platform resolutions are now cached in `getShellConfig`, failures deliberately not (installing a shell mid-session must work without restart). Linux never felt it because `getBashConfig` is just `existsSync("/bin/bash")`.
+- evidence: packages/coding-agent/src/utils/shell.ts:108 · packages/coding-agent/src/core/tools/bash.ts:111 · probe timings measured 2026-07-18 (where.exe 0.28s, pwsh boot 1.03s)
+- tags: windows, performance, bash-tool, shell-resolution, root-cause
+
+### 2026-07-18 · packages/coding-agent · vitest win32 maxWorkers:1 was dead firefight triage, not a fix — serialization never turned a red run green — claude
+The Windows-only `maxWorkers: 1` (commit 763d8f4f4) made the 418-file suite ~3.5x slower (CI Test step 11m00s vs Linux 3m07s) while every CI run between it and the real fixes stayed red. The actual crashes were libuv `fs-event.c` path-canonicalization asserts (8.3 short temp paths), deterministic and load-independent, fixed at the root by `realpathSync.native(tmpdir())` fixtures and portability commits (c4c9acb94..6b86b18d4). Windows now runs the same 4 workers as Linux; don't re-serialize on flakiness without evidence the failure is load-dependent.
+- evidence: packages/coding-agent/vitest.config.ts:22 · commit 763d8f4f4 · CI runs 29471982814 (red before serialize) → 29475427702 (first green, after fixture fixes)
+- tags: windows, vitest, ci, parallelism, dead-end, root-cause
 
 ### 2026-07-13 · packages/agent,ai,coding-agent,tui · count-only bounds and one-pass optimizations left resumed and cumulative paths exposed — codex
 The first long-session pass removed several direct prefix copies but reopened sessions still rehydrated compacted payloads, cached Codex turns still converted the retained context, telemetry rotation could rewrite near-cap files on every record, worker error/exit events could race replacement batches, and count-only UI bounds still admitted large retained payloads. Reopened compactions now restore disk-backed getters after one full load; cached Codex continuations convert only identity-preserved tails and retain input as linked parts; telemetry rotates to byte low-water marks with cumulative bounded summaries; worker acknowledgements bind to worker and batch identity; context payload stores use active leases plus age/count/byte retention; SSE frames and TUI histories have byte bounds.
