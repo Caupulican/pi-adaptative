@@ -99,6 +99,11 @@ function getBashConfig(): ShellConfig {
 	return bashOnPath ? { shell: bashOnPath, args: ["-c"] } : { shell: "sh", args: ["-c"] };
 }
 
+// Platform shell resolution spawns probe processes (`where`/`which`, plus a full PowerShell
+// boot on Windows) and is a process-lifetime invariant, so successful resolutions are cached.
+// Failures are not cached: the user can install a shell and retry without restarting.
+const resolvedPlatformShellConfigs = new Map<PlatformShellToolName, ShellConfig>();
+
 /** Resolve the requested shell. Runtime callers omit shellName to select PowerShell on Windows and Bash elsewhere. */
 export function getShellConfig(
 	customShellPath?: string,
@@ -111,7 +116,12 @@ export function getShellConfig(
 			args: shellName === "powershell" ? [...POWERSHELL_ARGS] : ["-c"],
 		};
 	}
-	return shellName === "powershell" ? getPowerShellConfig() : getBashConfig();
+	let resolved = resolvedPlatformShellConfigs.get(shellName);
+	if (!resolved) {
+		resolved = shellName === "powershell" ? getPowerShellConfig() : getBashConfig();
+		resolvedPlatformShellConfigs.set(shellName, resolved);
+	}
+	return { shell: resolved.shell, args: [...resolved.args] };
 }
 
 export function getShellEnv(): NodeJS.ProcessEnv {
