@@ -11,6 +11,7 @@
  * wrappers unchanged.
  */
 
+import { existsSync, rmSync } from "node:fs";
 import { totalmem } from "node:os";
 import type { ThinkingLevel } from "@caupulican/pi-agent-core";
 import { getSupportedThinkingLevels } from "@caupulican/pi-ai";
@@ -49,6 +50,7 @@ import {
 } from "../../core/models/local-registration.ts";
 import type { OllamaRuntime, TransformersRuntime } from "../../core/models/local-runtime.ts";
 import { matchesInstalledLocalModel, normalizeModelSource } from "../../core/models/model-ref.ts";
+import { NeedleRuntime } from "../../core/models/needle-runtime.ts";
 import {
 	derivePrismLlamaCppNumCtx,
 	ensurePrismModelFilesThenServe,
@@ -138,6 +140,15 @@ export interface LocalModelHost {
 	 * below (a fresh, uncached instance) is a test convenience, never the production path.
 	 */
 	getPrismLlamaCppRuntime?(): PrismLlamaCppRuntime;
+	/**
+	 * Seam for the pi-managed needle runtime (see needle-runtime.ts) — optional so tests can inject a
+	 * fake, falling back to a fresh instance otherwise. Unlike `getPrismLlamaCppRuntime` above, needle
+	 * has no session-caching need: every invocation is a one-shot `runCommand` call with no persistent
+	 * child process to reattach to (needle-runtime.ts's `dispose()` is a documented no-op), so a fresh
+	 * instance per call is functionally identical to a cached one — `runtimeDir()`/`modelsDir()`/
+	 * `checkpointPath()` are pure path derivations from `agentDir`, not in-memory state.
+	 */
+	getNeedleRuntime?(): NeedleRuntime;
 	showStatus(message: string): void;
 	showError(message: string): void;
 	showSelector(create: SelectorFactory): void;
@@ -146,6 +157,24 @@ export interface LocalModelHost {
 function getPrismLlamaCppRuntime(host: LocalModelHost): PrismLlamaCppRuntime {
 	return host.getPrismLlamaCppRuntime?.() ?? new PrismLlamaCppRuntime({ agentDir: getAgentDir() });
 }
+
+function getNeedleRuntime(host: LocalModelHost): NeedleRuntime {
+	return host.getNeedleRuntime?.() ?? new NeedleRuntime({ agentDir: getAgentDir() });
+}
+
+/**
+ * Mirrors needle-runtime.ts's own (module-private, not exported) NEEDLE_SMOKE_TOOLS — the default
+ * tool set for `/models needle <query>` when no tools-json is supplied, so an ad-hoc probe has the
+ * same sensible starting point the install pipeline's own smoke test already exercises. Kept in
+ * sync manually since the source constant isn't exported from the frozen runtime module.
+ */
+const NEEDLE_DEFAULT_TOOLS = [
+	{
+		name: "get_weather",
+		description: "Get current weather for a city.",
+		parameters: { location: { type: "string", description: "City name.", required: true } },
+	},
+];
 
 class ModelRouterThinkingSelectorComponent extends Container {
 	private selectList: SelectList;
@@ -244,6 +273,18 @@ export async function handleModelsCommand(host: LocalModelHost, argsText: string
 			return;
 		}
 
+		if (action === "needle") {
+			if (rest.length === 0) {
+				host.showStatus("Usage: /models needle <query> [tools-json]");
+				host.showStatus(
+					`  tools-json defaults to the smoke-test tool set: ${JSON.stringify(NEEDLE_DEFAULT_TOOLS)}`,
+				);
+				return;
+			}
+			await runNeedleQuery(host, rest);
+			return;
+		}
+
 		if (action === "add") {
 			const rawRef = rest.join(" ");
 			if (!rawRef) {
@@ -277,6 +318,10 @@ export async function handleModelsCommand(host: LocalModelHost, argsText: string
 				await addPrismLlamaCppModel(host, descriptor);
 				return;
 			}
+			if (source.type === "needle") {
+				await addNeedleModel(host);
+				return;
+			}
 			await addLocalModel(host, source.pullRef);
 			return;
 		}
@@ -295,6 +340,10 @@ export async function handleModelsCommand(host: LocalModelHost, argsText: string
 			}
 			if (source.type === "prism-llamacpp") {
 				await removePrismLlamaCppModel(host, source.modelId, confirmed);
+				return;
+			}
+			if (source.type === "needle") {
+				await removeNeedleModel(host, confirmed);
 				return;
 			}
 			await removeLocalModel(host, ref, confirmed);
@@ -681,6 +730,145 @@ async function removePrismLlamaCppModel(host: LocalModelHost, modelId: string, c
 	);
 }
 
+/**
+ * Zero-setup pipeline for needle (see needle-runtime.ts): a standalone 26M-parameter function-call
+ * test bench, NOT a chat/executor/lane model — no OpenAI-compatible endpoint, no models.json
+ * registration, no /fitness probe. Install the pinned needle clone+venv (menu pick = consent, same
+ * doctrine as the Transformers/prism precedents), download and sha256-verify the pickle checkpoint
+ * (never called implicitly by installManaged — see the module's SECURITY note: the checkpoint is a
+ * pickle file, arbitrary code execution on load by construction, so this is deliberately a separate
+ * consent-adjacent step, not folded into install), then run its own smoke test as the honest
+ * post-install verification. Each stage checks its own `{ ok }` result and stops with a stage-tagged
+ * status on failure; nothing continues past a failed stage.
+ */
+export async function addNeedleModel(host: LocalModelHost): Promise<void> {
+	const runtime = getNeedleRuntime(host);
+
+	let status = await runtime.detect();
+	if (!status.installed) {
+		host.showStatus(`Installing needle (function-call test bench) at ${runtime.runtimeDir()}…`);
+		const installed = await runtime.installManaged((progress) => host.showStatus(`  needle: ${progress}`));
+		if (!installed.ok) {
+			host.showStatus(`needle install failed: ${installed.error}`);
+			return;
+		}
+		status = await runtime.detect();
+	}
+	if (!status.installed) {
+		host.showStatus(`needle is still unavailable at ${runtime.runtimeDir()}.`);
+		return;
+	}
+
+	const downloaded = await runtime.downloadWeights((progress) => host.showStatus(`  ${progress}`));
+	if (!downloaded.ok) {
+		host.showStatus(`needle weights download failed: ${downloaded.error}`);
+		return;
+	}
+
+	host.showStatus("Running needle smoke test (function-call probe)…");
+	const smoke = await runtime.smokeTest();
+	if (!smoke.ok || !smoke.call) {
+		host.showStatus(
+			`needle smoke test failed: ${smoke.error ?? "smoke test reported success but returned no parsed call"}`,
+		);
+		return;
+	}
+	host.showStatus(
+		`needle installed and verified: smoke test called ${smoke.call.name}(${JSON.stringify(smoke.call.arguments)}) ` +
+			`in ${smoke.latencyMs}ms. Use /models needle <query> [tools-json] to test it further — it is a standalone ` +
+			"bench, not a chat/executor lane.",
+	);
+}
+
+/**
+ * Wipe pi's needle runtime (clone+venv) and downloaded checkpoint. Unlike the other /models remove
+ * flows, there is no models.json entry or fitness report to drop (needle never registers as a model
+ * — see the roster entry's rationale) and no server process to stop (every needle invocation is a
+ * one-shot runCommand call — see needle-runtime.ts's `dispose()` doc comment); removal is purely
+ * deleting the two pi-owned directories. needle-runtime.ts exposes no delete method of its own (its
+ * public surface is detect/installManaged/downloadWeights/runFunctionCall/smokeTest/dispose), so
+ * this deletes directly via the runtime's own path-derivation methods.
+ */
+async function removeNeedleModel(host: LocalModelHost, confirmed: boolean): Promise<void> {
+	const runtime = getNeedleRuntime(host);
+	const runtimeDir = runtime.runtimeDir();
+	const modelsDir = runtime.modelsDir();
+	if (!confirmed) {
+		host.showStatus(
+			[
+				"Removing needle will delete:",
+				`  - the pi-managed needle runtime (clone + venv) at ${runtimeDir}`,
+				`  - the downloaded checkpoint at ${runtime.checkpointPath()}`,
+				"needle has no models.json entry or fitness report — it is a standalone function-call test bench, " +
+					"never registered as a chat/lane model.",
+				"Run: /models remove hf.co/Cactus-Compute/needle confirm",
+			].join("\n"),
+		);
+		return;
+	}
+	if (existsSync(runtimeDir)) rmSync(runtimeDir, { recursive: true, force: true });
+	if (existsSync(modelsDir)) rmSync(modelsDir, { recursive: true, force: true });
+	host.showStatus(`needle removed: deleted ${runtimeDir} and ${modelsDir}.`);
+}
+
+/**
+ * `/models needle <query> [tools-json]` — the actual test surface for needle (see the roster
+ * entry's rationale: there is no chat lane to probe it through). `tools-json`, when present, must be
+ * the LAST whitespace-split token and start with `[`/`{` (compact JSON, no embedded spaces) —
+ * anything else is treated as part of the query and the default smoke-test tool set is used. A fast
+ * `detect()`-based pre-check gives friendly install guidance without spawning a doomed process;
+ * `runFunctionCall`'s own not-installed/checkpoint-missing pre-flight is still the final honest
+ * backstop if state changes between the check and the call.
+ */
+async function runNeedleQuery(host: LocalModelHost, args: string[]): Promise<void> {
+	if (args.length === 0) {
+		host.showStatus("Usage: /models needle <query> [tools-json]");
+		return;
+	}
+
+	const runtime = getNeedleRuntime(host);
+	const status = await runtime.detect();
+	if (!status.installed) {
+		host.showStatus(
+			"needle is not installed. Run /models add hf.co/Cactus-Compute/needle first (or /models suggest).",
+		);
+		return;
+	}
+	if (!status.checkpointPresent) {
+		host.showStatus(
+			"needle is installed but its checkpoint hasn't been downloaded. Run /models add hf.co/Cactus-Compute/needle to fetch and verify it.",
+		);
+		return;
+	}
+
+	let tools: unknown = NEEDLE_DEFAULT_TOOLS;
+	let toolsJsonParsed = false;
+	const last = args[args.length - 1];
+	if (last && (last.startsWith("[") || last.startsWith("{"))) {
+		try {
+			tools = JSON.parse(last);
+			toolsJsonParsed = true;
+		} catch {
+			// Not valid JSON — treat the whole thing as the query, keep the default tools.
+		}
+	}
+	const query = (toolsJsonParsed ? args.slice(0, -1) : args).join(" ");
+	if (!query.trim()) {
+		host.showStatus("Usage: /models needle <query> [tools-json]");
+		return;
+	}
+
+	host.showStatus(`needle: running "${query}"…`);
+	const startedAt = Date.now();
+	const result = await runtime.runFunctionCall({ query, tools });
+	const latencyMs = Date.now() - startedAt;
+	if (!result.ok) {
+		host.showStatus(`needle call failed (${latencyMs}ms): ${result.error}\nraw output:\n${result.rawOutput}`);
+		return;
+	}
+	host.showStatus(`needle (${latencyMs}ms): ${result.call.name}(${JSON.stringify(result.call.arguments)})`);
+}
+
 /** /fitness with no args: pick a model from the configured registry, probe it, assign a role. */
 /** Pick a validated suggestion → install it → probe on this host → land its shaped role. */
 export function showModelSuggestionSelector(host: LocalModelHost): void {
@@ -705,6 +893,10 @@ export function showModelSuggestionSelector(host: LocalModelHost): void {
 						return;
 					}
 					await addPrismLlamaCppModel(host, descriptor, suggestion.assignRole);
+					return;
+				}
+				if (source.type === "needle") {
+					await addNeedleModel(host);
 					return;
 				}
 				if (source.type === "local") {

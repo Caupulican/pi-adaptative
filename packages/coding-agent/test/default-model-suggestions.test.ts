@@ -7,9 +7,10 @@ describe("default model suggestions", () => {
 	it("every suggested pullRef normalizes to an installable local source (/models add accepts it)", () => {
 		for (const suggestion of DEFAULT_MODEL_SUGGESTIONS) {
 			const source = normalizeModelSource(suggestion.pullRef);
-			expect(["local", "transformers", "prism-llamacpp"], `${suggestion.name}: ${suggestion.pullRef}`).toContain(
-				source.type,
-			);
+			expect(
+				["local", "transformers", "prism-llamacpp", "needle"],
+				`${suggestion.name}: ${suggestion.pullRef}`,
+			).toContain(source.type);
 		}
 	});
 
@@ -80,6 +81,20 @@ describe("default model suggestions", () => {
 		});
 	});
 
+	it("routes the needle suggestion to the curated needle source, never Ollama, and carries no fitness role", () => {
+		const suggestion = DEFAULT_MODEL_SUGGESTIONS.find((s) => s.name === "needle (function-call tester, 26M)");
+		expect(suggestion).toBeDefined();
+		expect(suggestion).toMatchObject({
+			pullRef: "hf.co/Cactus-Compute/needle",
+			toolCalling: false,
+		});
+		expect(suggestion?.assignRole).toBeUndefined(); // not a chat/lane model — no fitness role applies
+		expect(normalizeModelSource(suggestion?.pullRef ?? "")).toEqual({
+			type: "needle",
+			ref: "hf.co/Cactus-Compute/needle",
+		});
+	});
+
 	it("every shaped assignRole is a role the post-probe selector can actually pre-select (not dead data)", () => {
 		// The suggestion flow feeds assignRole into FitnessRoleSelectorComponent as the pre-selected
 		// role; a value the selector doesn't offer would silently fall back to the default, quietly
@@ -104,6 +119,8 @@ describe("default model suggestions", () => {
 		expect(text).toContain("/models add hf.co/prism-ml/Bonsai-27B-gguf:Q1_0");
 		expect(text).toContain("Bonsai-27B (1-bit + vision)");
 		expect(text).toContain("/models add hf.co/prism-ml/Ternary-Bonsai-4B-gguf");
+		expect(text).toContain("/models add hf.co/Cactus-Compute/needle");
+		expect(text).toContain("needle (function-call tester, 26M)");
 		expect(text).toContain("[no tool-calling]");
 		expect(text).toContain("probe on YOUR hardware with /fitness");
 	});

@@ -129,6 +129,15 @@ export const DEFAULT_MODEL_SUGGESTIONS: readonly ModelSuggestion[] = [
 			"A judge candidate for machines with more headroom — too slow on ~16GB-class hardware in this research, kept for a bigger box.",
 		note: "Heavy: confirm tok/s with /fitness before committing. Ternary quant may need prism-ml's patched llama.cpp.",
 	},
+	{
+		name: "needle (function-call tester, 26M)",
+		pullRef: "hf.co/Cactus-Compute/needle",
+		role: "Standalone function-call test bench (not a chat/lane model)",
+		toolCalling: false,
+		rationale:
+			"NOT a pi chat model, executor, or lane model — needle is a 26M-parameter single-shot function-call SPECIALIST invoked one query at a time through its own `needle run` CLI, useful only as a standalone bench for probing tool-call behavior in isolation. No OpenAI-compatible endpoint, no chat lanes, no models.json registration, and no /fitness probe: use /models needle <query> [tools-json] to test it directly instead.",
+		note: "Upstream weights (needle.pkl) are pickle-only — arbitrary code execution on load by construction, not something pi's pinned-sha256 verification makes safe in the abstract, only tamper-evident.",
+	},
 ];
 
 /** Bounded plain-text roster for `/models suggest` and the empty-store hint. */

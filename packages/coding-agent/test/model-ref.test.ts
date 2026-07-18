@@ -50,6 +50,24 @@ describe("normalizeModelSource", () => {
 		});
 	});
 
+	it("routes the curated needle ref to the needle source, bare/any-case/URL form", () => {
+		const expected = { type: "needle", ref: "hf.co/Cactus-Compute/needle" };
+		expect(normalizeModelSource("hf.co/Cactus-Compute/needle")).toEqual(expected);
+		expect(normalizeModelSource("hf.co/cactus-compute/NEEDLE")).toEqual(expected);
+		expect(normalizeModelSource("https://huggingface.co/Cactus-Compute/needle/tree/main")).toEqual(expected);
+	});
+
+	it("does not route a quant-suffixed or non-curated Cactus-Compute ref to needle — falls back to local", () => {
+		expect(normalizeModelSource("hf.co/Cactus-Compute/needle:Q8_0")).toEqual({
+			type: "local",
+			pullRef: "hf.co/Cactus-Compute/needle:Q8_0",
+		});
+		expect(normalizeModelSource("hf.co/Cactus-Compute/other-model")).toEqual({
+			type: "local",
+			pullRef: "hf.co/Cactus-Compute/other-model",
+		});
+	});
+
 	it("normalizes full HuggingFace URLs to the matching local runtime ref", () => {
 		expect(normalizeModelSource("https://huggingface.co/prism-ml/Ternary-Bonsai-1.7B-gguf/tree/main")).toEqual({
 			type: "local",

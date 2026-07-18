@@ -13,6 +13,7 @@ export type ModelSource =
 	| { type: "local"; pullRef: string }
 	| { type: "transformers"; modelId: string; ref: string }
 	| { type: "prism-llamacpp"; modelId: string; ref: string }
+	| { type: "needle"; ref: string }
 	| { type: "rejected"; reason: string };
 
 const OLLAMA_TAG = /^[a-z0-9][a-z0-9._-]*(?::[A-Za-z0-9._-]+)?$/;
@@ -29,12 +30,24 @@ const PI_MANAGED_TRANSFORMERS_MODEL_IDS = new Set(["openbmb/MiniCPM5-1B"]);
  * canonical-cased modelId, sourced from the descriptor itself so the two never drift apart.
  */
 const PRISM_LLAMACPP_MODEL_IDS = new Map<string, string>([[BONSAI_27B.repo.toLowerCase(), BONSAI_27B.repo]]);
+/**
+ * The single curated needle model id (see needle-runtime.ts) — a standalone function-call test
+ * bench with no GGUF/quant concept at all (a pip-installed Python package + one pinned pickle
+ * checkpoint), so unlike the prism route above, a quant suffix on the input is NOT accepted — it
+ * falls through to the ordinary local/Ollama route instead, mirroring the transformers route's
+ * `!quant` gate. Only this exact repo routes to "needle"; any other Cactus-Compute/* ref keeps the
+ * ordinary local route.
+ */
+const NEEDLE_MODEL_ID = "Cactus-Compute/needle";
 
 function normalizeHuggingFaceReference(org: string, repo: string, quant?: string): ModelSource {
 	const modelId = `${org}/${repo}`;
 	const prismModelId = PRISM_LLAMACPP_MODEL_IDS.get(modelId.toLowerCase());
 	if (prismModelId) {
 		return { type: "prism-llamacpp", modelId: prismModelId, ref: `hf.co/${prismModelId}` };
+	}
+	if (!quant && modelId.toLowerCase() === NEEDLE_MODEL_ID.toLowerCase()) {
+		return { type: "needle", ref: `hf.co/${NEEDLE_MODEL_ID}` };
 	}
 	if (!quant && PI_MANAGED_TRANSFORMERS_MODEL_IDS.has(modelId)) {
 		return { type: "transformers", modelId, ref: `hf.co/${modelId}` };
