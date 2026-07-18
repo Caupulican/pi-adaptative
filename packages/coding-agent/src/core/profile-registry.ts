@@ -55,6 +55,28 @@ export interface ProfileRegistryOptions {
 
 const RESOURCE_PROFILE_KINDS: ResourceProfileKind[] = ["extensions", "skills", "prompts", "themes", "agents", "tools"];
 
+/** Name of the built-in, always-available profile that enables every discovered resource. */
+export const ALL_ACTIVE_PROFILE_NAME = "all-active";
+
+function buildAllActiveResources(): ResourceProfileSettings {
+	const resources: ResourceProfileSettings = {};
+	for (const kind of RESOURCE_PROFILE_KINDS) {
+		resources[kind] = { allow: ["*"] };
+	}
+	return resources;
+}
+
+/**
+ * The built-in "all-active" profile. Registered as the weakest candidate in
+ * `collectCandidates()` so any user-defined profile of the same name overrides it.
+ */
+export const ALL_ACTIVE_BUILTIN_PROFILE: NormalizedProfile = {
+	name: ALL_ACTIVE_PROFILE_NAME,
+	description: "Everything on: all discovered extensions, skills, prompts, themes, agents, and tools",
+	resources: buildAllActiveResources(),
+	source: "embedded",
+};
+
 interface ProfileCandidate {
 	profile: NormalizedProfile;
 	precedence: number;
@@ -353,6 +375,7 @@ export class ProfileRegistry {
 		for (const profile of normalizeDefinitions(this.options.discoveredResourceProfileDefinitions, "embedded")) {
 			add(profile, 6);
 		}
+		add(ALL_ACTIVE_BUILTIN_PROFILE, 7);
 
 		return candidates;
 	}
