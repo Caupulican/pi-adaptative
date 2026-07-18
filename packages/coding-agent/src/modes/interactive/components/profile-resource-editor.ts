@@ -263,7 +263,7 @@ export class ProfileResourceEditorComponent extends Container implements Focusab
 			new Text(
 				theme.fg(
 					"muted",
-					`Navigate kinds: ${keyText("tui.input.tab")}. Toggle: ${keyText("tui.select.confirm")}. Mode: ${theme.fg("accent", "a")} allow / ${theme.fg("accent", "b")} block. Scope: ${theme.fg("accent", "s")} change. Edit: ${theme.fg("accent", "e")}.`,
+					`Navigate kinds: ${keyText("tui.input.tab")}. Toggle: ${keyText("tui.select.confirm")}. Mode: ${theme.fg("accent", "a")} allow / ${theme.fg("accent", "b")} block. Scope: ${theme.fg("accent", "s")} change. Edit: ${theme.fg("accent", "e")}. Bulk: ${keyText("app.profiles.enableAll")} enable all / ${keyText("app.profiles.clearAll")} clear all.`,
 				),
 				0,
 				0,
@@ -583,6 +583,29 @@ export class ProfileResourceEditorComponent extends Container implements Focusab
 			matchesKey(data, "ctrl+q")
 		) {
 			this.onCancel();
+			return;
+		}
+
+		// Bulk actions: enable/clear every currently-listed item (the filtered subset when a search
+		// query is active, otherwise the whole kind including missing entries).
+		if (kb.matches(data, "app.profiles.enableAll")) {
+			const enabledSet = this.getCurrentEnabledSet();
+			for (const item of this.filteredItems) {
+				enabledSet.add(item.id);
+			}
+			this.isDirty = true;
+			this.kindHeaderText.setText(this.getKindHeaderText());
+			this.refresh();
+			return;
+		}
+		if (kb.matches(data, "app.profiles.clearAll")) {
+			const enabledSet = this.getCurrentEnabledSet();
+			for (const item of this.filteredItems) {
+				enabledSet.delete(item.id);
+			}
+			this.isDirty = true;
+			this.kindHeaderText.setText(this.getKindHeaderText());
+			this.refresh();
 			return;
 		}
 

@@ -45,6 +45,8 @@ export interface AppKeybindings {
 	"app.models.toggleProvider": true;
 	"app.models.reorderUp": true;
 	"app.models.reorderDown": true;
+	"app.profiles.enableAll": true;
+	"app.profiles.clearAll": true;
 	"app.tree.filter.default": true;
 	"app.tree.filter.noTools": true;
 	"app.tree.filter.userOnly": true;
@@ -170,6 +172,14 @@ export const KEYBINDINGS = {
 	"app.models.reorderDown": {
 		defaultKeys: "alt+down",
 		description: "Move model down in order",
+	},
+	"app.profiles.enableAll": {
+		defaultKeys: "ctrl+t",
+		description: "Enable all listed resources",
+	},
+	"app.profiles.clearAll": {
+		defaultKeys: "ctrl+d",
+		description: "Disable all listed resources",
 	},
 	"app.tree.filter.default": {
 		defaultKeys: "ctrl+d",
