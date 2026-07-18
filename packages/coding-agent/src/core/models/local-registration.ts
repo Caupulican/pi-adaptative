@@ -54,6 +54,17 @@ export interface LocalRegistrationResult {
 export const OLLAMA_PROVIDER = "ollama";
 /** Provider name for pi-managed Hugging Face Transformers sidecar models. */
 export const HF_TRANSFORMERS_PROVIDER = "pi-hf-transformers";
+/**
+ * Provider name for pi-managed prism llama.cpp models (Bonsai-27B and future curated prism-ml
+ * models). This is the built-in `KnownProvider` "llama-cpp" (see packages/ai/src/types.ts and the
+ * static `llama-cpp/local` catalog entry in models.generated.ts for a user-run server on the
+ * conventional port 8080) — model-registry.ts already treats it as auth-exempt, so registration
+ * here never needs a synthetic apiKey the way registerTransformersModel does. Because it is a
+ * SHARED built-in namespace (not a pi-invented provider name like the two above), registration only
+ * ever touches this provider's `models` array — never the whole provider object — so a user's own
+ * hand-authored `llama-cpp` override (e.g. for their own server) is never destroyed.
+ */
+export const PRISM_LLAMACPP_PROVIDER = "llama-cpp";
 
 function localModelEntry(ref: string, contextWindow: number, servedContextWindow?: number): ModelsJsonModel {
 	return {
@@ -79,6 +90,27 @@ function transformersModelEntry(args: { modelId: string; baseUrl: string; contex
 		input: ["text"],
 		cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 },
 		compat: { supportsUsageInStreaming: false },
+	};
+}
+
+function prismLlamaCppModelEntry(args: {
+	modelId: string;
+	baseUrl: string;
+	contextWindow: number;
+	servedContextWindow: number;
+}): ModelsJsonModel {
+	return {
+		id: args.modelId,
+		name: args.modelId,
+		baseUrl: `${args.baseUrl.replace(/\/$/, "")}/v1`,
+		contextWindow: args.contextWindow,
+		servedContextWindow: args.servedContextWindow,
+		maxTokens: 2048,
+		reasoning: false,
+		// Vision rides along via the served mmproj file — unlike localModelEntry's Ollama entries,
+		// which are text-only until per-model vision plumbing exists there too.
+		input: ["text", "image"],
+		cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 },
 	};
 }
 
@@ -182,6 +214,52 @@ export function registerTransformersModel(args: {
 	return { ok: true, modelsJsonPath };
 }
 
+/**
+ * Register a pi-managed prism llama.cpp model (e.g. Bonsai-27B) under the shared built-in
+ * "llama-cpp" provider. Unlike registerLocalModel/registerTransformersModel, this never writes
+ * provider-level baseUrl/api/apiKey: "llama-cpp" is a built-in KnownProvider, so model-registry.ts
+ * inherits api/baseUrl defaults from the built-in `llama-cpp/local` catalog entry when a model
+ * definition omits them, and treats the whole provider as auth-exempt regardless. Each model
+ * definition still sets its OWN baseUrl explicitly (this server's actual host:port), which
+ * model-registry.ts's `modelDef.baseUrl ?? providerConfig.baseUrl ?? builtInDefaults?.baseUrl`
+ * precedence picks up ahead of the built-in default.
+ */
+export function registerPrismLlamaCppModel(args: {
+	agentDir: string;
+	modelId: string;
+	baseUrl: string;
+	contextWindow: number;
+	servedContextWindow?: number;
+}): LocalRegistrationResult {
+	const modelsJsonPath = join(args.agentDir, "models.json");
+	const entry = prismLlamaCppModelEntry({
+		modelId: args.modelId,
+		baseUrl: args.baseUrl,
+		contextWindow: args.contextWindow,
+		servedContextWindow: args.servedContextWindow ?? args.contextWindow,
+	});
+	const { json, reason } = loadStrict(modelsJsonPath);
+	if (!json) {
+		return {
+			ok: false,
+			modelsJsonPath,
+			reason,
+			manualSnippet: JSON.stringify({ providers: { [PRISM_LLAMACPP_PROVIDER]: { models: [entry] } } }, null, "\t"),
+		};
+	}
+	json.providers[PRISM_LLAMACPP_PROVIDER] ??= { models: [] };
+	const provider = json.providers[PRISM_LLAMACPP_PROVIDER];
+	provider.models ??= [];
+	const existing = provider.models.findIndex((model) => model.id === args.modelId);
+	if (existing >= 0) {
+		provider.models[existing] = { ...provider.models[existing], ...entry };
+	} else {
+		provider.models.push(entry);
+	}
+	writeFileSync(modelsJsonPath, `${JSON.stringify(json, null, "\t")}\n`, "utf-8");
+	return { ok: true, modelsJsonPath };
+}
+
 export function unregisterLocalModel(args: { agentDir: string; ref: string }): LocalRegistrationResult {
 	const modelsJsonPath = join(args.agentDir, "models.json");
 	const { json, reason } = loadStrict(modelsJsonPath);
@@ -212,6 +290,27 @@ export function unregisterTransformersModel(args: { agentDir: string; modelId: s
 	if (provider.models.length === 0) {
 		delete json.providers[HF_TRANSFORMERS_PROVIDER];
 	}
+	writeFileSync(modelsJsonPath, `${JSON.stringify(json, null, "\t")}\n`, "utf-8");
+	return { ok: true, modelsJsonPath };
+}
+
+/**
+ * Drop a pi-registered model entry from the shared "llama-cpp" provider. Deliberately never
+ * deletes the whole provider object even when its `models` array empties out — see
+ * {@link PRISM_LLAMACPP_PROVIDER}'s doc comment: unlike OLLAMA_PROVIDER/HF_TRANSFORMERS_PROVIDER
+ * (pi-invented namespaces pi fully owns), "llama-cpp" is a built-in provider a user may have
+ * independently configured (e.g. a baseUrl override for their own server); this must not remove
+ * fields it didn't write.
+ */
+export function unregisterPrismLlamaCppModel(args: { agentDir: string; modelId: string }): LocalRegistrationResult {
+	const modelsJsonPath = join(args.agentDir, "models.json");
+	const { json, reason } = loadStrict(modelsJsonPath);
+	if (!json) return { ok: false, modelsJsonPath, reason };
+	const provider = json.providers[PRISM_LLAMACPP_PROVIDER];
+	if (!provider?.models) return { ok: true, modelsJsonPath };
+	const before = provider.models.length;
+	provider.models = provider.models.filter((model) => model.id !== args.modelId);
+	if (provider.models.length === before) return { ok: true, modelsJsonPath };
 	writeFileSync(modelsJsonPath, `${JSON.stringify(json, null, "\t")}\n`, "utf-8");
 	return { ok: true, modelsJsonPath };
 }

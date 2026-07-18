@@ -91,6 +91,16 @@ export const DEFAULT_MODEL_SUGGESTIONS: readonly ModelSuggestion[] = [
 		note: "Recommended when Bonsai-8B is too heavy. Pi pulls this exact GGUF through managed Ollama, probes /fitness on the host, then offers the curator role.",
 	},
 	{
+		name: "Bonsai-27B (1-bit + vision)",
+		pullRef: "hf.co/prism-ml/Bonsai-27B-gguf:Q1_0",
+		role: "Context curator / reflex brain / vision-capable lane analyst",
+		toolCalling: false,
+		assignRole: "curator",
+		rationale:
+			"External 1-bit 27B, binary weights, 262K-class context, vision via mmproj; served by pi through prism-ml's llama.cpp build (stock llama.cpp/Ollama cannot serve these weights). /fitness on your hardware is the validator — never pre-claim tool-calling.",
+		note: "~3.8 GB weights + 629 MB vision projector + a one-time llama-server runtime download; CPU-served on GPU-less hosts. Pi installs the pinned prism llama.cpp runtime, downloads both files, starts llama-server, and registers the model in one step. Provider-recommended sampling is temp 0.7 / top-p 0.95 / top-k 20; models.json has no per-model default-sampling field yet, so pi cannot wire this — set it per-request/session if your workflow needs it.",
+	},
+	{
 		name: "Ternary-Bonsai-1.7B",
 		pullRef: "hf.co/prism-ml/Ternary-Bonsai-1.7B-gguf",
 		role: "Search scout (heavy-lifter)",

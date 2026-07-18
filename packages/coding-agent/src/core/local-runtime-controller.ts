@@ -14,6 +14,7 @@ import type { Api, AssistantMessage, Model } from "@caupulican/pi-ai";
 import type { AgentSessionEvent } from "./agent-session.ts";
 import type { RouteDecision } from "./autonomy/contracts.ts";
 import type { ExtensionUIContext } from "./extensions/index.ts";
+import { type PrismLlamaCppDeps, PrismLlamaCppRuntime } from "./models/llamacpp-runtime.ts";
 import { HF_TRANSFORMERS_PROVIDER, OLLAMA_PROVIDER } from "./models/local-registration.ts";
 import {
 	type LocalRuntimeDeps,
@@ -22,6 +23,13 @@ import {
 	TransformersRuntime,
 } from "./models/local-runtime.ts";
 import { matchesInstalledLocalModel } from "./models/model-ref.ts";
+import {
+	ensurePrismModelFilesThenServe,
+	isPiManagedPrismLlamaCppModel,
+	isPrismLlamaCppServerHealthy,
+	PRISM_LLAMACPP_DESCRIPTORS,
+	PRISM_LLAMACPP_SERVE_PORT,
+} from "./models/prism-llamacpp-lifecycle.ts";
 import {
 	OllamaRuntimeResidencyAdapter,
 	type RuntimeEvictionRecord,
@@ -58,6 +66,9 @@ export interface LocalRuntimeControllerDeps {
 	agentDir: string;
 	/** Test-injectable seams for OllamaRuntime's own fetch/spawn/exists calls; unset in production. */
 	localRuntimeDeps?: LocalRuntimeDeps;
+	/** Test-injectable seams for PrismLlamaCppRuntime's own fetch/spawn/exists calls; unset in
+	 * production (see {@link getPrismLlamaCppRuntime}). */
+	prismLlamaCppDeps?: PrismLlamaCppDeps;
 	/** The session's last assistant message, to detect a just-failed local call and drop a stale
 	 * "confirmed up" flag. */
 	getLastAssistantMessage(): AssistantMessage | undefined;
@@ -77,6 +88,12 @@ export class LocalRuntimeController {
 	private readonly _runtimes = new Map<string, OllamaRuntime>();
 	/** Lazy, cached by model+baseUrl so the router and `/models` share one sidecar handle per HF model. */
 	private readonly _transformersRuntimes = new Map<string, TransformersRuntime>();
+	/** Lazy, cached (not baseUrl-keyed like the two above — pi's prism install is a single managed
+	 * instance under agentDir, never an externally-configured server) so `/models add`, `/models
+	 * stop`, `/models remove`, and the readiness gate below all share the SAME instance and can
+	 * reliably reattach to a process this session started (`stop()`/`isRunning()` rely on in-memory
+	 * child-process state). */
+	private _prismLlamaCppRuntime: PrismLlamaCppRuntime | undefined;
 	/** Server URLs confirmed reachable THIS session — skips the health-check round trip on every
 	 * local-routed turn once warm. Keyed the same way as _runtimes. */
 	private readonly _confirmedUp = new Set<string>();
@@ -122,6 +139,21 @@ export class LocalRuntimeController {
 		return runtime;
 	}
 
+	/**
+	 * Shared {@link PrismLlamaCppRuntime} for pi's own managed prism install — lazily created, cached
+	 * for the controller's lifetime so `/models` (add/stop/remove) and the readiness gate below
+	 * always see and can stop the SAME pi-managed process.
+	 */
+	getPrismLlamaCppRuntime(): PrismLlamaCppRuntime {
+		if (!this._prismLlamaCppRuntime) {
+			this._prismLlamaCppRuntime = new PrismLlamaCppRuntime({
+				agentDir: this.deps.agentDir,
+				deps: this.deps.prismLlamaCppDeps,
+			});
+		}
+		return this._prismLlamaCppRuntime;
+	}
+
 	/** models.json registers a local model's baseUrl as `<server>/v1` (OpenAI-compat); the runtime's
 	 * own health/boot endpoints are on the Ollama-native server root. */
 	deriveOllamaServerUrl(modelBaseUrl: string): string {
@@ -134,6 +166,39 @@ export class LocalRuntimeController {
 
 	private isManagedLocalProvider(provider: string): boolean {
 		return provider === OLLAMA_PROVIDER || provider === HF_TRANSFORMERS_PROVIDER;
+	}
+
+	/** Ollama/Transformers (provider-scoped) OR a pi-registered prism llama.cpp model (id-scoped —
+	 * see {@link isPiManagedPrismLlamaCppModel}, which never matches a user's own hand-configured
+	 * `llama-cpp` entry such as the built-in `llama-cpp/local` catalog model). */
+	private isManagedLocalModel(model: Model<Api>): boolean {
+		return this.isManagedLocalProvider(model.provider) || isPiManagedPrismLlamaCppModel(model);
+	}
+
+	/** Three-way readiness dispatch shared by ensureIsolatedModelReady/ensureForegroundModelReady/
+	 * ensureRouteModelReady — one place to add a new managed-local kind instead of tripling a ternary. */
+	private async ensureManagedLocalReadiness(
+		model: Model<Api>,
+	): Promise<{ ready: boolean; reason: string; installGuide?: string[] }> {
+		if (model.provider === OLLAMA_PROVIDER) return this.ensureLocalModelReady(model);
+		if (model.provider === HF_TRANSFORMERS_PROVIDER) return this.ensureTransformersModelReady(model);
+		return this.ensurePrismLlamaCppModelReady(model);
+	}
+
+	/** Consent-gated install dispatch, paired with {@link ensureManagedLocalReadiness}. Prism
+	 * llama.cpp has no consent step here: unlike Ollama's #31 first-run "install the binary?" and
+	 * Transformers' "install the runtime?" prompts (which handle a runtime that was NEVER installed),
+	 * a prism model only reaches this gate after a prior `/models add` already installed the runtime
+	 * and the curated-menu pick already WAS the consent (same doctrine as the Transformers
+	 * precedent) — a later self-heal (re-download a missing file, restart a dead server) is
+	 * maintaining an install the user already approved, not a fresh one needing to be asked again. */
+	private async maybeInstallManagedLocalOnConsent(
+		model: Model<Api>,
+		readiness: { ready: boolean; reason: string; installGuide?: string[] },
+	): Promise<{ ready: boolean; reason: string; installGuide?: string[]; installAttemptError?: string }> {
+		if (model.provider === OLLAMA_PROVIDER) return this.maybeInstallOllamaOnConsent(model, readiness);
+		if (model.provider === HF_TRANSFORMERS_PROVIDER) return this.maybeInstallTransformersOnConsent(model, readiness);
+		return readiness;
 	}
 
 	/**
@@ -253,11 +318,8 @@ export class LocalRuntimeController {
 	 * never prompts or changes tiers: lanes either use the configured model or fail visibly.
 	 */
 	async ensureIsolatedModelReady(model: Model<Api>): Promise<void> {
-		if (!this.isManagedLocalProvider(model.provider)) return;
-		const readiness =
-			model.provider === OLLAMA_PROVIDER
-				? await this.ensureLocalModelReady(model)
-				: await this.ensureTransformersModelReady(model);
+		if (!this.isManagedLocalModel(model)) return;
+		const readiness = await this.ensureManagedLocalReadiness(model);
 		if (readiness.ready) return;
 		const guide = readiness.installGuide?.length ? `\n${readiness.installGuide.join("\n")}` : "";
 		throw new Error(
@@ -271,21 +333,15 @@ export class LocalRuntimeController {
 	 * selected model is never silently replaced.
 	 */
 	async ensureForegroundModelReady(model: Model<Api>): Promise<void> {
-		if (!this.isManagedLocalProvider(model.provider)) return;
+		if (!this.isManagedLocalModel(model)) return;
 		let readiness: {
 			ready: boolean;
 			reason: string;
 			installGuide?: string[];
 			installAttemptError?: string;
-		} =
-			model.provider === OLLAMA_PROVIDER
-				? await this.ensureLocalModelReady(model)
-				: await this.ensureTransformersModelReady(model);
+		} = await this.ensureManagedLocalReadiness(model);
 		if (!readiness.ready) {
-			readiness =
-				model.provider === OLLAMA_PROVIDER
-					? await this.maybeInstallOllamaOnConsent(model, readiness)
-					: await this.maybeInstallTransformersOnConsent(model, readiness);
+			readiness = await this.maybeInstallManagedLocalOnConsent(model, readiness);
 		}
 		if (readiness.ready) return;
 		const detail = readiness.installAttemptError ?? readiness.installGuide?.join("\n") ?? readiness.reason;
@@ -392,6 +448,55 @@ export class LocalRuntimeController {
 			return { ready: true, reason: started.reason };
 		}
 		return { ready: false, reason: started.reason };
+	}
+
+	/**
+	 * Readiness gate for a pi-registered prism llama.cpp model (Bonsai-27B) — "usable when needed",
+	 * not "served once at install time": healthy at its registered baseUrl -> proceed (no downloads,
+	 * no spawn); not healthy -> re-verify BOTH GGUF files exist on disk, re-downloading any missing
+	 * one, then serve with the vision projector ALWAYS attached (see
+	 * {@link ensurePrismModelFilesThenServe} — the sole path allowed to call `runtime.serve()` for
+	 * this model) -> proceed; any stage fails -> the turn fails with that stage's error and
+	 * llama-server is never spawned half-configured. No consent dialog here (contrast
+	 * maybeInstallOllamaOnConsent/maybeInstallTransformersOnConsent) — see
+	 * maybeInstallManagedLocalOnConsent's doc comment for why. Reuses the model's already-registered
+	 * `contextWindow` for a re-serve rather than re-deriving from current host RAM, so a restarted
+	 * server can never end up with a different served context than the rest of the session (e.g.
+	 * compaction) already assumes.
+	 */
+	private async ensurePrismLlamaCppModelReady(
+		model: Model<Api>,
+	): Promise<{ ready: boolean; reason: string; installGuide?: string[] }> {
+		if (!isPiManagedPrismLlamaCppModel(model)) {
+			return { ready: true, reason: "not_pi_managed_llama_cpp" };
+		}
+		const serverUrl = this.deriveOpenAICompatServerUrl(model.baseUrl);
+		const confirmedKey = this.confirmationKey(model, serverUrl);
+		this.invalidateIfLastCallFailed(model, serverUrl);
+		if (this._confirmedUp.has(confirmedKey)) {
+			return { ready: true, reason: "confirmed_up_cached" };
+		}
+		if (await isPrismLlamaCppServerHealthy(serverUrl, this.deps.prismLlamaCppDeps?.fetchFn)) {
+			this._confirmedUp.add(confirmedKey);
+			return { ready: true, reason: "already_running" };
+		}
+		const descriptor = PRISM_LLAMACPP_DESCRIPTORS[model.id];
+		if (!descriptor) {
+			// Unreachable given the isPiManagedPrismLlamaCppModel check above (same lookup table), but
+			// an honest failure beats a silent bad-cast if the two ever drift apart.
+			return { ready: false, reason: `no_curated_descriptor:${model.id}` };
+		}
+		const served = await ensurePrismModelFilesThenServe(
+			this.getPrismLlamaCppRuntime(),
+			descriptor,
+			{ port: PRISM_LLAMACPP_SERVE_PORT, numCtx: model.contextWindow },
+			() => {},
+		);
+		if (!served.ok) {
+			return { ready: false, reason: `${served.stage}:${served.error}` };
+		}
+		this._confirmedUp.add(confirmedKey);
+		return { ready: true, reason: "started" };
 	}
 
 	/**
@@ -514,16 +619,11 @@ export class LocalRuntimeController {
 		resolved: { decision: RouteDecision; model: Model<Api> } | undefined,
 	): Promise<{ decision: RouteDecision; model: Model<Api> } | undefined> {
 		let current = resolved;
-		while (current && this.isManagedLocalProvider(current.model.provider)) {
+		while (current && this.isManagedLocalModel(current.model)) {
 			let readiness: { ready: boolean; reason: string; installGuide?: string[]; installAttemptError?: string } =
-				current.model.provider === OLLAMA_PROVIDER
-					? await this.ensureLocalModelReady(current.model)
-					: await this.ensureTransformersModelReady(current.model);
+				await this.ensureManagedLocalReadiness(current.model);
 			if (!readiness.ready) {
-				readiness =
-					current.model.provider === OLLAMA_PROVIDER
-						? await this.maybeInstallOllamaOnConsent(current.model, readiness)
-						: await this.maybeInstallTransformersOnConsent(current.model, readiness);
+				readiness = await this.maybeInstallManagedLocalOnConsent(current.model, readiness);
 			}
 			if (readiness.ready) return current;
 
@@ -542,7 +642,12 @@ export class LocalRuntimeController {
 			}
 
 			const modelLabel = this.deps.formatModel(current.model);
-			const localRuntimeName = current.model.provider === OLLAMA_PROVIDER ? "ollama" : "Transformers";
+			const localRuntimeName =
+				current.model.provider === OLLAMA_PROVIDER
+					? "ollama"
+					: current.model.provider === HF_TRANSFORMERS_PROVIDER
+						? "Transformers"
+						: "prism llama.cpp";
 			const wrongStore = parseWrongOllamaStoreReason(readiness.reason);
 			const whyText = readiness.installAttemptError
 				? `pi tried to install it just now, but the install attempt failed: ${readiness.installAttemptError}`

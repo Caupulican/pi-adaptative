@@ -7,7 +7,9 @@ describe("default model suggestions", () => {
 	it("every suggested pullRef normalizes to an installable local source (/models add accepts it)", () => {
 		for (const suggestion of DEFAULT_MODEL_SUGGESTIONS) {
 			const source = normalizeModelSource(suggestion.pullRef);
-			expect(["local", "transformers"], `${suggestion.name}: ${suggestion.pullRef}`).toContain(source.type);
+			expect(["local", "transformers", "prism-llamacpp"], `${suggestion.name}: ${suggestion.pullRef}`).toContain(
+				source.type,
+			);
 		}
 	});
 
@@ -63,6 +65,21 @@ describe("default model suggestions", () => {
 		);
 	});
 
+	it("routes the Bonsai-27B suggestion to the curated prism-llamacpp source, never Ollama", () => {
+		const suggestion = DEFAULT_MODEL_SUGGESTIONS.find((s) => s.name === "Bonsai-27B (1-bit + vision)");
+		expect(suggestion).toBeDefined();
+		expect(suggestion).toMatchObject({
+			pullRef: "hf.co/prism-ml/Bonsai-27B-gguf:Q1_0",
+			assignRole: "curator",
+			toolCalling: false,
+		});
+		expect(normalizeModelSource(suggestion?.pullRef ?? "")).toEqual({
+			type: "prism-llamacpp",
+			modelId: "prism-ml/Bonsai-27B-gguf",
+			ref: "hf.co/prism-ml/Bonsai-27B-gguf",
+		});
+	});
+
 	it("every shaped assignRole is a role the post-probe selector can actually pre-select (not dead data)", () => {
 		// The suggestion flow feeds assignRole into FitnessRoleSelectorComponent as the pre-selected
 		// role; a value the selector doesn't offer would silently fall back to the default, quietly
@@ -84,6 +101,8 @@ describe("default model suggestions", () => {
 		expect(text).toContain("MiniCPM5-1B (full-base) → Full-base Transformers executor");
 		expect(text).toContain("/models add hf.co/openbmb/MiniCPM5-1B");
 		expect(text).toContain("/models add hf.co/prism-ml/Bonsai-4B-gguf:Q1_0");
+		expect(text).toContain("/models add hf.co/prism-ml/Bonsai-27B-gguf:Q1_0");
+		expect(text).toContain("Bonsai-27B (1-bit + vision)");
 		expect(text).toContain("/models add hf.co/prism-ml/Ternary-Bonsai-4B-gguf");
 		expect(text).toContain("[no tool-calling]");
 		expect(text).toContain("probe on YOUR hardware with /fitness");

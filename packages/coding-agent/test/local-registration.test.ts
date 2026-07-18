@@ -4,8 +4,10 @@ import { join } from "node:path";
 import { afterEach, beforeEach, describe, expect, it } from "vitest";
 import {
 	registerLocalModel,
+	registerPrismLlamaCppModel,
 	registerTransformersModel,
 	unregisterLocalModel,
+	unregisterPrismLlamaCppModel,
 	unregisterTransformersModel,
 } from "../src/core/models/local-registration.ts";
 
@@ -75,6 +77,72 @@ describe("local model registration in models.json", () => {
 		const afterRemove = JSON.parse(readFileSync(join(agentDir, "models.json"), "utf-8"));
 		expect(afterRemove.providers.ollama.models.map((model: { id: string }) => model.id)).toEqual(["qwen3:1.7b"]);
 		expect(afterRemove.providers["pi-hf-transformers"]).toBeUndefined();
+	});
+
+	it("registers a prism llama.cpp model under the shared built-in llama-cpp provider, text+image input, no provider-level auth", () => {
+		const result = registerPrismLlamaCppModel({
+			agentDir,
+			modelId: "prism-ml/Bonsai-27B-gguf",
+			baseUrl: "http://127.0.0.1:8090",
+			contextWindow: 16_384,
+			servedContextWindow: 16_384,
+		});
+		expect(result.ok).toBe(true);
+
+		const json = JSON.parse(readFileSync(join(agentDir, "models.json"), "utf-8"));
+		expect(json.providers["llama-cpp"].baseUrl).toBeUndefined();
+		expect(json.providers["llama-cpp"].api).toBeUndefined();
+		expect(json.providers["llama-cpp"].apiKey).toBeUndefined();
+		expect(json.providers["llama-cpp"].models).toEqual([
+			expect.objectContaining({
+				id: "prism-ml/Bonsai-27B-gguf",
+				baseUrl: "http://127.0.0.1:8090/v1",
+				contextWindow: 16_384,
+				servedContextWindow: 16_384,
+				input: ["text", "image"],
+			}),
+		]);
+	});
+
+	it("re-registration is idempotent (same id updates in place, does not duplicate)", () => {
+		registerPrismLlamaCppModel({
+			agentDir,
+			modelId: "prism-ml/Bonsai-27B-gguf",
+			baseUrl: "http://127.0.0.1:8090",
+			contextWindow: 8_192,
+		});
+		registerPrismLlamaCppModel({
+			agentDir,
+			modelId: "prism-ml/Bonsai-27B-gguf",
+			baseUrl: "http://127.0.0.1:8090",
+			contextWindow: 16_384,
+		});
+		const json = JSON.parse(readFileSync(join(agentDir, "models.json"), "utf-8"));
+		expect(json.providers["llama-cpp"].models).toHaveLength(1);
+		expect(json.providers["llama-cpp"].models[0].contextWindow).toBe(16_384);
+	});
+
+	it("removal drops only the pi-registered model entry, never the whole shared llama-cpp provider object", () => {
+		// A user's own hand-authored override for the built-in llama-cpp/local model (their own
+		// manually started server) must survive registering AND removing pi's Bonsai-27B entry.
+		writeFileSync(
+			join(agentDir, "models.json"),
+			JSON.stringify({ providers: { "llama-cpp": { baseUrl: "http://127.0.0.1:8080/v1" } } }),
+			"utf-8",
+		);
+		registerPrismLlamaCppModel({
+			agentDir,
+			modelId: "prism-ml/Bonsai-27B-gguf",
+			baseUrl: "http://127.0.0.1:8090",
+			contextWindow: 8_192,
+		});
+		const removed = unregisterPrismLlamaCppModel({ agentDir, modelId: "prism-ml/Bonsai-27B-gguf" });
+		expect(removed.ok).toBe(true);
+
+		const json = JSON.parse(readFileSync(join(agentDir, "models.json"), "utf-8"));
+		expect(json.providers["llama-cpp"]).toBeDefined();
+		expect(json.providers["llama-cpp"].baseUrl).toBe("http://127.0.0.1:8080/v1");
+		expect(json.providers["llama-cpp"].models ?? []).toEqual([]);
 	});
 
 	it("NEVER rewrites a hand-authored file with comments; hands back a manual snippet", () => {

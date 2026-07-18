@@ -168,6 +168,7 @@ import { formatModelRouterModel, ModelRouterController } from "./model-router-co
 import { ModelSelectionController } from "./model-selection-controller.ts";
 import { ModelAdaptationStore, type ModelToolProbe, type NativeToolProbeGrade } from "./models/adaptation-store.ts";
 import type { StoredFitnessReport } from "./models/fitness-store.ts";
+import type { PrismLlamaCppRuntime } from "./models/llamacpp-runtime.ts";
 import { HF_TRANSFORMERS_PROVIDER, OLLAMA_PROVIDER } from "./models/local-registration.ts";
 import type { LocalRuntimeDeps, OllamaRuntime, TransformersRuntime } from "./models/local-runtime.ts";
 import {
@@ -2974,6 +2975,13 @@ export class AgentSession {
 
 	getTransformersRuntime(modelId: string, baseUrl?: string): TransformersRuntime {
 		return this._localRuntimeController.getTransformersRuntime(modelId, baseUrl);
+	}
+
+	/** Shared {@link PrismLlamaCppRuntime} for pi's own managed prism install — see
+	 * {@link LocalRuntimeController.getPrismLlamaCppRuntime}. Delegates so `/models` and the
+	 * readiness gate share the SAME cached instance, same contract as getLocalRuntime above. */
+	getPrismLlamaCppRuntime(): PrismLlamaCppRuntime {
+		return this._localRuntimeController.getPrismLlamaCppRuntime();
 	}
 
 	/** models.json registers a local model's baseUrl as `<server>/v1` (OpenAI-compat); the runtime's

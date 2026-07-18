@@ -6,10 +6,13 @@
  * NEVER executed as shell; unknown forms are rejected with the reason.
  */
 
+import { BONSAI_27B } from "./llamacpp-runtime.ts";
+
 export type ModelSource =
 	| { type: "api"; ref: string }
 	| { type: "local"; pullRef: string }
 	| { type: "transformers"; modelId: string; ref: string }
+	| { type: "prism-llamacpp"; modelId: string; ref: string }
 	| { type: "rejected"; reason: string };
 
 const OLLAMA_TAG = /^[a-z0-9][a-z0-9._-]*(?::[A-Za-z0-9._-]+)?$/;
@@ -17,9 +20,22 @@ const HF_REF = /^hf\.co\/([\w.-]+)\/([\w.-]+)(?::([\w.-]+))?$/i;
 const HF_URL = /^https?:\/\/(?:www\.)?huggingface\.co\/([\w.-]+)\/([\w.-]+)(?:\/.*)?$/i;
 const SHELL_METACHARS = /[;&|`$<>(){}\\]/;
 const PI_MANAGED_TRANSFORMERS_MODEL_IDS = new Set(["openbmb/MiniCPM5-1B"]);
+/**
+ * Curated prism-ml models that require pi's managed prism llama.cpp fork (see llamacpp-runtime.ts's
+ * module docstring: stock llama.cpp/Ollama cannot serve these weights). These GGUF refs route to the
+ * "prism-llamacpp" source instead of Ollama's local pull path regardless of a supplied quant suffix
+ * — the curated descriptor already pins the exact quant file to fetch, so a quant on the input ref is
+ * accepted but not required. Keyed lowercase for case-insensitive matching; values are the
+ * canonical-cased modelId, sourced from the descriptor itself so the two never drift apart.
+ */
+const PRISM_LLAMACPP_MODEL_IDS = new Map<string, string>([[BONSAI_27B.repo.toLowerCase(), BONSAI_27B.repo]]);
 
 function normalizeHuggingFaceReference(org: string, repo: string, quant?: string): ModelSource {
 	const modelId = `${org}/${repo}`;
+	const prismModelId = PRISM_LLAMACPP_MODEL_IDS.get(modelId.toLowerCase());
+	if (prismModelId) {
+		return { type: "prism-llamacpp", modelId: prismModelId, ref: `hf.co/${prismModelId}` };
+	}
 	if (!quant && PI_MANAGED_TRANSFORMERS_MODEL_IDS.has(modelId)) {
 		return { type: "transformers", modelId, ref: `hf.co/${modelId}` };
 	}

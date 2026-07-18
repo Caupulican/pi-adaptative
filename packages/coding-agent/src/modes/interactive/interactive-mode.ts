@@ -41,6 +41,7 @@ import {
 } from "../../core/goals/goal-continuation-defaults.ts";
 import { configureHttpDispatcher } from "../../core/http-dispatcher.ts";
 import { type AppKeybinding, KeybindingsManager } from "../../core/keybindings.ts";
+import type { PrismLlamaCppRuntime } from "../../core/models/llamacpp-runtime.ts";
 import type { OllamaRuntime, TransformersRuntime } from "../../core/models/local-runtime.ts";
 import type { ResourceDiagnostic } from "../../core/resource-loader.ts";
 import { formatMissingSessionCwdPrompt, type MissingSessionCwdError } from "../../core/session-cwd.ts";
@@ -3349,6 +3350,10 @@ export class InteractiveMode {
 		return this.session.getTransformersRuntime(modelId, baseUrl);
 	}
 
+	private getPrismLlamaCppRuntime(): PrismLlamaCppRuntime {
+		return this.session.getPrismLlamaCppRuntime();
+	}
+
 	/** Narrow seam shared by the /models and /fitness flows. */
 	private localModelHost(): localModelCommands.LocalModelHost {
 		return {
@@ -3358,6 +3363,7 @@ export class InteractiveMode {
 			ui: this.ui,
 			chatContainer: this.chatContainer,
 			getTransformersRuntime: (modelId, baseUrl) => this.getTransformersRuntime(modelId, baseUrl),
+			getPrismLlamaCppRuntime: () => this.getPrismLlamaCppRuntime(),
 			showStatus: (message) => this.showStatus(message),
 			showError: (message) => this.showError(message),
 			showSelector: (create) => this.showSelector(create),

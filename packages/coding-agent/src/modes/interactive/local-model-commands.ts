@@ -36,15 +36,26 @@ import {
 } from "../../core/models/context-sizing.ts";
 import { DEFAULT_MODEL_SUGGESTIONS } from "../../core/models/default-model-suggestions.ts";
 import { FitnessStore } from "../../core/models/fitness-store.ts";
+import { PrismLlamaCppRuntime, type PrismModelDescriptor } from "../../core/models/llamacpp-runtime.ts";
 import {
 	HF_TRANSFORMERS_PROVIDER,
+	PRISM_LLAMACPP_PROVIDER,
 	registerLocalModel,
+	registerPrismLlamaCppModel,
 	registerTransformersModel,
 	unregisterLocalModel,
+	unregisterPrismLlamaCppModel,
 	unregisterTransformersModel,
 } from "../../core/models/local-registration.ts";
 import type { OllamaRuntime, TransformersRuntime } from "../../core/models/local-runtime.ts";
 import { matchesInstalledLocalModel, normalizeModelSource } from "../../core/models/model-ref.ts";
+import {
+	derivePrismLlamaCppNumCtx,
+	ensurePrismModelFilesThenServe,
+	isPiManagedPrismLlamaCppModel,
+	PRISM_LLAMACPP_DESCRIPTORS,
+	PRISM_LLAMACPP_SERVE_PORT,
+} from "../../core/models/prism-llamacpp-lifecycle.ts";
 import { formatModelFitnessReport, isProbeAllFailed } from "../../core/research/model-fitness.ts";
 import type { SettingsManager } from "../../core/settings-manager.ts";
 import { DynamicBorder } from "./components/dynamic-border.ts";
@@ -116,9 +127,24 @@ export interface LocalModelHost {
 	readonly ui: TUI;
 	readonly chatContainer: Container;
 	getTransformersRuntime(modelId: string, baseUrl?: string): TransformersRuntime;
+	/**
+	 * Seam for the pi-managed prism llama.cpp runtime (Bonsai-27B and future curated prism-ml
+	 * models). Production (interactive-mode.ts's `localModelHost()`) always supplies this, wired
+	 * through `AgentSession.getPrismLlamaCppRuntime()` -> `LocalRuntimeController`'s cached instance
+	 * — the SAME instance the readiness gate uses, mirroring `getTransformersRuntime` above (cached
+	 * for the session's lifetime, so `stop()`/`removePrismLlamaCppModel` reattach to the SAME
+	 * instance that holds the running child process instead of each tracking an untracked one).
+	 * Optional only so tests can inject a fake without needing the full session stack; the fallback
+	 * below (a fresh, uncached instance) is a test convenience, never the production path.
+	 */
+	getPrismLlamaCppRuntime?(): PrismLlamaCppRuntime;
 	showStatus(message: string): void;
 	showError(message: string): void;
 	showSelector(create: SelectorFactory): void;
+}
+
+function getPrismLlamaCppRuntime(host: LocalModelHost): PrismLlamaCppRuntime {
+	return host.getPrismLlamaCppRuntime?.() ?? new PrismLlamaCppRuntime({ agentDir: getAgentDir() });
 }
 
 class ModelRouterThinkingSelectorComponent extends Container {
@@ -191,10 +217,18 @@ export async function handleModelsCommand(host: LocalModelHost, argsText: string
 				const serverUrl = model.baseUrl.replace(/\/v1\/?$/, "");
 				if (host.getTransformersRuntime(model.id, serverUrl).stop().stopped) stoppedTransformers++;
 			}
-			const stoppedAny = stopped.stopped || stoppedTransformers > 0;
+			// Only touch the prism runtime when a pi-managed prism model is actually registered —
+			// never construct/stop it on a session that never used one. isPiManagedPrismLlamaCppModel
+			// is the SAME discriminator the readiness gate uses, so this never reaches for a user's own
+			// hand-configured llama-cpp entry (e.g. the built-in llama-cpp/local catalog model).
+			const hasPiManagedPrismModel = host.session.modelRegistry
+				.getAll()
+				.some((entry) => isPiManagedPrismLlamaCppModel(entry));
+			const stoppedPrism = hasPiManagedPrismModel && getPrismLlamaCppRuntime(host).stop().stopped;
+			const stoppedAny = stopped.stopped || stoppedTransformers > 0 || stoppedPrism;
 			host.showStatus(
 				stoppedAny
-					? `Pi-managed local model server stopped${stoppedTransformers > 0 ? ` (${stoppedTransformers} Transformers sidecar(s))` : ""}; models remain installed.`
+					? `Pi-managed local model server stopped${stoppedTransformers > 0 ? ` (${stoppedTransformers} Transformers sidecar(s))` : ""}${stoppedPrism ? " (prism llama.cpp server)" : ""}; models remain installed.`
 					: "No pi-managed server running (a system server, if any, is not pi's to stop).",
 			);
 			return;
@@ -234,6 +268,15 @@ export async function handleModelsCommand(host: LocalModelHost, argsText: string
 				await addTransformersModel(host, source.modelId);
 				return;
 			}
+			if (source.type === "prism-llamacpp") {
+				const descriptor = PRISM_LLAMACPP_DESCRIPTORS[source.modelId];
+				if (!descriptor) {
+					host.showStatus(`${source.modelId} has no curated prism llama.cpp descriptor — this is a wiring bug.`);
+					return;
+				}
+				await addPrismLlamaCppModel(host, descriptor);
+				return;
+			}
 			await addLocalModel(host, source.pullRef);
 			return;
 		}
@@ -248,6 +291,10 @@ export async function handleModelsCommand(host: LocalModelHost, argsText: string
 			const source = normalizeModelSource(ref);
 			if (source.type === "transformers") {
 				await removeTransformersModel(host, source.modelId, confirmed);
+				return;
+			}
+			if (source.type === "prism-llamacpp") {
+				await removePrismLlamaCppModel(host, source.modelId, confirmed);
 				return;
 			}
 			await removeLocalModel(host, ref, confirmed);
@@ -456,6 +503,76 @@ export async function addTransformersModel(
 	await runFitnessAndAssign(host, `${HF_TRANSFORMERS_PROVIDER}/${modelId}`, preselectRole);
 }
 
+/**
+ * Zero-setup pipeline for a curated prism llama.cpp model (Bonsai-27B): install the pinned prism
+ * llama.cpp runtime (prebuilt release download, no compiler needed), ensure both GGUF files and
+ * start llama-server (see `ensurePrismModelFilesThenServe`), register the model, then probe
+ * fitness. Mirrors addTransformersModel's shape — each stage checks its own `{ ok }`/
+ * `{ runtimeInstalled }` result and stops with an honest status message on failure; nothing
+ * continues past a failed stage.
+ */
+export async function addPrismLlamaCppModel(
+	host: LocalModelHost,
+	descriptor: PrismModelDescriptor,
+	preselectRole?: FitnessRole,
+): Promise<void> {
+	const runtime = getPrismLlamaCppRuntime(host);
+	const modelId = descriptor.repo;
+
+	let status = await runtime.detect();
+	if (!status.runtimeInstalled) {
+		host.showStatus(`Installing prism llama.cpp runtime for ${descriptor.displayName} at ${runtime.runtimeDir()}…`);
+		const installed = await runtime.installManaged((progress) => host.showStatus(`  prism-llamacpp: ${progress}`));
+		if (!installed.ok) {
+			host.showStatus(`Prism llama.cpp runtime install failed: ${installed.error}`);
+			return;
+		}
+		status = await runtime.detect();
+	}
+	if (!status.runtimeInstalled) {
+		host.showStatus(`Prism llama.cpp runtime is still unavailable at ${runtime.runtimeDir()}.`);
+		return;
+	}
+
+	const numCtx = derivePrismLlamaCppNumCtx(totalmem());
+	const served = await ensurePrismModelFilesThenServe(
+		runtime,
+		descriptor,
+		{ port: PRISM_LLAMACPP_SERVE_PORT, numCtx },
+		(message) => host.showStatus(message),
+	);
+	if (!served.ok) {
+		const label =
+			served.stage === "model-download"
+				? "Model download failed"
+				: served.stage === "mmproj-download"
+					? "Vision projector download failed"
+					: "Could not start llama-server";
+		host.showStatus(`${label}: ${served.error}`);
+		return;
+	}
+
+	const registration = registerPrismLlamaCppModel({
+		agentDir: getAgentDir(),
+		modelId,
+		baseUrl: served.baseUrl,
+		contextWindow: numCtx,
+		servedContextWindow: numCtx,
+	});
+	if (!registration.ok) {
+		host.showStatus(`Served, but not auto-registered: ${registration.reason}`);
+		if (registration.manualSnippet) {
+			host.showStatus(`Add this to ${registration.modelsJsonPath} yourself:\n${registration.manualSnippet}`);
+		}
+		return;
+	}
+	host.session.modelRegistry.refresh();
+	host.showStatus(
+		`${descriptor.displayName} installed and registered as ${PRISM_LLAMACPP_PROVIDER}/${modelId}. Probing fitness…`,
+	);
+	await runFitnessAndAssign(host, `${PRISM_LLAMACPP_PROVIDER}/${modelId}`, preselectRole);
+}
+
 export async function removeLocalModel(host: LocalModelHost, ref: string, confirmed: boolean): Promise<void> {
 	const status = await host.localRuntime.detect();
 	if (!status.serverUp) {
@@ -523,6 +640,47 @@ async function removeTransformersModel(host: LocalModelHost, modelId: string, co
 	);
 }
 
+/**
+ * Drop a pi-managed prism llama.cpp model's registration and fitness report. Production supplies a
+ * session-cached runtime (see `LocalModelHost.getPrismLlamaCppRuntime`'s doc comment), the SAME
+ * instance the readiness gate uses, so `stop()` here reliably reaches the tracked child whenever
+ * THIS session is the one that started it — including a server started earlier in the session by
+ * the readiness gate itself, not just by a prior `/models add`. Only a server started by a
+ * DIFFERENT process/session (pi restarted, a different terminal) is out of reach; the status text
+ * only carries that caveat, not a blanket "may not stop" disclaimer.
+ */
+async function removePrismLlamaCppModel(host: LocalModelHost, modelId: string, confirmed: boolean): Promise<void> {
+	const runtime = getPrismLlamaCppRuntime(host);
+	if (!confirmed) {
+		host.showStatus(
+			[
+				`Removing ${modelId} will delete:`,
+				`  - the ${PRISM_LLAMACPP_PROVIDER}/${modelId} entry in models.json`,
+				`  - its cached fitness report for this host`,
+				`Downloaded GGUF weights remain under ${runtime.modelsDir()}. Its llama-server will be stopped if ` +
+					`this session started it; if it was started by a different pi process or session, it will keep ` +
+					`serving on 127.0.0.1:${PRISM_LLAMACPP_SERVE_PORT} until stopped manually.`,
+				`Run: /models remove hf.co/${modelId} confirm`,
+			].join("\n"),
+		);
+		return;
+	}
+	const stopped = runtime.stop();
+	const registration = unregisterPrismLlamaCppModel({ agentDir: getAgentDir(), modelId });
+	if (!registration.ok) {
+		host.showStatus(`Remove failed: ${registration.reason}`);
+		return;
+	}
+	FitnessStore.forAgentDir(getAgentDir()).remove(`${PRISM_LLAMACPP_PROVIDER}/${modelId}`);
+	host.session.modelRegistry.refresh();
+	host.showStatus(
+		`${modelId} registration and fitness report dropped; downloaded weights remain under ${runtime.modelsDir()}.` +
+			(stopped.stopped
+				? " Its llama-server was stopped."
+				: ` No llama-server tracked by this session — if one is still running (started by a different pi process or session), stop it manually on port ${PRISM_LLAMACPP_SERVE_PORT}.`),
+	);
+}
+
 /** /fitness with no args: pick a model from the configured registry, probe it, assign a role. */
 /** Pick a validated suggestion → install it → probe on this host → land its shaped role. */
 export function showModelSuggestionSelector(host: LocalModelHost): void {
@@ -536,6 +694,17 @@ export function showModelSuggestionSelector(host: LocalModelHost): void {
 				const source = normalizeModelSource(suggestion.pullRef);
 				if (source.type === "transformers") {
 					await addTransformersModel(host, source.modelId, suggestion.assignRole);
+					return;
+				}
+				if (source.type === "prism-llamacpp") {
+					const descriptor = PRISM_LLAMACPP_DESCRIPTORS[source.modelId];
+					if (!descriptor) {
+						host.showStatus(
+							`Suggestion ${suggestion.name} maps to an unknown curated prism model "${source.modelId}" — wiring bug.`,
+						);
+						return;
+					}
+					await addPrismLlamaCppModel(host, descriptor, suggestion.assignRole);
 					return;
 				}
 				if (source.type === "local") {

@@ -27,6 +27,29 @@ describe("normalizeModelSource", () => {
 		});
 	});
 
+	it("routes the curated Bonsai-27B ref to the prism-llamacpp source, bare/any-case/quant/URL", () => {
+		const expected = {
+			type: "prism-llamacpp",
+			modelId: "prism-ml/Bonsai-27B-gguf",
+			ref: "hf.co/prism-ml/Bonsai-27B-gguf",
+		};
+		expect(normalizeModelSource("hf.co/prism-ml/Bonsai-27B-gguf")).toEqual(expected);
+		expect(normalizeModelSource("hf.co/PRISM-ML/bonsai-27b-GGUF")).toEqual(expected);
+		expect(normalizeModelSource("hf.co/prism-ml/Bonsai-27B-gguf:Q1_0")).toEqual(expected);
+		expect(normalizeModelSource("https://huggingface.co/prism-ml/Bonsai-27B-gguf/tree/main")).toEqual(expected);
+	});
+
+	it("does not route other prism-ml GGUF refs to prism-llamacpp — only the curated Bonsai-27B id", () => {
+		expect(normalizeModelSource("hf.co/prism-ml/Bonsai-4B-gguf:Q1_0")).toEqual({
+			type: "local",
+			pullRef: "hf.co/prism-ml/Bonsai-4B-gguf:Q1_0",
+		});
+		expect(normalizeModelSource("hf.co/prism-ml/Ternary-Bonsai-4B-gguf")).toEqual({
+			type: "local",
+			pullRef: "hf.co/prism-ml/Ternary-Bonsai-4B-gguf",
+		});
+	});
+
 	it("normalizes full HuggingFace URLs to the matching local runtime ref", () => {
 		expect(normalizeModelSource("https://huggingface.co/prism-ml/Ternary-Bonsai-1.7B-gguf/tree/main")).toEqual({
 			type: "local",
