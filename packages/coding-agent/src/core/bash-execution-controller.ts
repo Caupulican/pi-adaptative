@@ -19,6 +19,8 @@ export interface BashExecutionControllerDeps {
 	getSettingsManager(): SettingsManager;
 	/** Whether the agent is currently streaming — defers appending a bash result if so. */
 	isStreaming(): boolean;
+	/** Per-agent persistent shell session key — user `!` commands share the agent's shell state. */
+	getShellSessionKey?(): string;
 }
 
 export interface BashExecutionOptions {
@@ -53,7 +55,7 @@ export class BashExecutionController {
 		const platform = options?.platform ?? process.platform;
 		const enableGitFilter = !options?.operations && !commandPrefix && !shellPath;
 		const operations = createLocalPlatformShellOperations(
-			{ shellPath, commandPrefix, operations: options?.operations },
+			{ shellPath, commandPrefix, operations: options?.operations, sessionKey: this.deps.getShellSessionKey?.() },
 			platform,
 		);
 

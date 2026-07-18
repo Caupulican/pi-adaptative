@@ -133,6 +133,8 @@ export interface RuntimeBuilderDeps {
 	getAgent(): Agent;
 	/** Workspace root, passed to the tool-definition factory and the extension runner. */
 	getCwd(): string;
+	/** Per-agent persistent shell session key; stable across reloads so the shell survives them. */
+	getShellSessionKey(): string;
 	/** Agent state root, including the host-keyed fitness store. */
 	getAgentDir(): string;
 	/** Session log, passed to the extension runner. */
@@ -640,7 +642,7 @@ export class RuntimeBuilder {
 				)
 			: createAllToolDefinitions(this.deps.getCwd(), {
 					read: { autoResizeImages },
-					bash: { commandPrefix: shellCommandPrefix, shellPath },
+					bash: { commandPrefix: shellCommandPrefix, shellPath, sessionKey: this.deps.getShellSessionKey() },
 					grep: { artifactStore: toolArtifactStore },
 					find: { artifactStore: toolArtifactStore },
 					artifact_retrieve: { artifactStore: toolArtifactStore },

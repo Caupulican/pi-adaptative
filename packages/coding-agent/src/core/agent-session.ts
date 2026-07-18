@@ -1,3 +1,4 @@
+import { randomUUID } from "node:crypto";
 import { readFileSync, rmSync, writeFileSync } from "node:fs";
 import { basename, dirname, join } from "node:path";
 import type {
@@ -204,6 +205,7 @@ import { resolveCurrentToolRepairSettings } from "./tool-repair-settings.ts";
 import { ToolPerformanceStore } from "./tool-selection/tool-performance-store.ts";
 import { ToolSelectionController } from "./tool-selection/tool-selection-controller.ts";
 import type { BashOperations } from "./tools/bash.ts";
+import { disposePersistentShellSession } from "./tools/shell-session.ts";
 
 // ============================================================================
 // Stream-idle watchdog wiring
@@ -666,6 +668,8 @@ export class AgentSession {
 	private _resourceLoader: ResourceLoader;
 	private _customTools: ToolDefinition[];
 	private _cwd: string;
+	/** Per-agent persistent shell session identity: stable across runtime reloads, disposed with the session. */
+	private readonly _shellSessionKey = `agent:${randomUUID()}`;
 	private _agentDir: string;
 	private _collectWorkspaceSources: typeof collectWorkspaceSources;
 	private readonly _localRuntimeController: LocalRuntimeController;
@@ -1020,6 +1024,7 @@ export class AgentSession {
 		this._runtimeBuilder = new RuntimeBuilder({
 			getAgent: () => this.agent,
 			getCwd: () => this._cwd,
+			getShellSessionKey: () => this._shellSessionKey,
 			getAgentDir: () => this._agentDir,
 			getSessionManager: () => this.sessionManager,
 			getSettingsManager: () => this.settingsManager,
@@ -1154,6 +1159,7 @@ export class AgentSession {
 			getSessionManager: () => this.sessionManager,
 			getSettingsManager: () => this.settingsManager,
 			isStreaming: () => this.isStreaming,
+			getShellSessionKey: () => this._shellSessionKey,
 		});
 		this._profileFilter = new ProfileFilterController({
 			getSettingsManager: () => this.settingsManager,
@@ -2663,6 +2669,7 @@ export class AgentSession {
 			this.abortCompaction();
 			this.abortBranchSummary();
 			this.abortBash();
+			disposePersistentShellSession(this._shellSessionKey);
 			this._cancelPrefixWarm();
 			this.agent.abort();
 			// R8: stop any deployment-registered gateway channels / schedulers.

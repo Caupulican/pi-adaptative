@@ -1,3 +1,4 @@
+import { randomUUID } from "node:crypto";
 import { constants } from "node:fs";
 import { access as fsAccess } from "node:fs/promises";
 import { type AgentTool, createSilenceWatchdog } from "@caupulican/pi-agent-core";
@@ -29,6 +30,7 @@ import { classifyGitCommand, executeFilteredGit } from "./git-filter.ts";
 import { OutputAccumulator } from "./output-accumulator.ts";
 import { getTextOutput, invalidArgText, str } from "./render-utils.ts";
 import { routeShellContract } from "./shell-contract-router.ts";
+import { acquirePersistentShellSession } from "./shell-session.ts";
 import { wrapToolDefinition } from "./tool-definition-wrapper.ts";
 
 /** Low-level silence bound retained for direct shell-operation consumers. Agent tool calls always pass a wall-clock bound. */
@@ -104,8 +106,33 @@ export interface BashOperations {
 
 function createLocalShellOperations(
 	shellName: PlatformShellToolName,
-	options?: { shellPath?: string },
+	options?: { shellPath?: string; sessionKey?: string },
 ): BashOperations {
+	// A session key selects the persistent per-agent backend. An explicit custom shell path keeps
+	// per-command spawning: persistent sessions assume the resolved platform shell's flag set.
+	const sessionKey = options?.sessionKey;
+	if (sessionKey !== undefined && !options?.shellPath) {
+		return {
+			exec: async (command, cwd, { onData, signal, timeout, env }) => {
+				try {
+					await fsAccess(cwd, constants.F_OK);
+				} catch {
+					throw new Error(`Working directory does not exist: ${cwd}\nCannot execute ${shellName} commands.`);
+				}
+				if (signal?.aborted) throw new Error("aborted");
+				const session = acquirePersistentShellSession(sessionKey, shellName);
+				const silenceMs = commandSilenceMsOverride ?? DEFAULT_COMMAND_SILENCE_MS;
+				const hasWallClock = timeout !== undefined && timeout > 0;
+				return session.exec(command, cwd, {
+					onData,
+					signal,
+					env,
+					timeoutSeconds: hasWallClock ? timeout : undefined,
+					silenceMs: !hasWallClock && silenceMs > 0 ? silenceMs : undefined,
+				});
+			},
+		};
+	}
 	return {
 		exec: async (command, cwd, { onData, signal, timeout, env }) => {
 			const { shell, args } = getShellConfig(options?.shellPath, shellName);
@@ -174,23 +201,26 @@ function createLocalShellOperations(
  * This is useful for extensions that intercept user_bash and still want pi's
  * standard local shell behavior while wrapping or rewriting commands.
  */
-export function createLocalBashOperations(options?: { shellPath?: string }): BashOperations {
+export function createLocalBashOperations(options?: { shellPath?: string; sessionKey?: string }): BashOperations {
 	return createLocalShellOperations("bash", options);
 }
 
 /** Create PowerShell operations using pi's built-in local execution backend. */
-export function createLocalPowerShellOperations(options?: { shellPath?: string }): BashOperations {
+export function createLocalPowerShellOperations(options?: { shellPath?: string; sessionKey?: string }): BashOperations {
 	return createLocalShellOperations("powershell", options);
 }
 
 /** Create the platform shell backend without requiring callers or the model to choose a shell. */
 export function createLocalPlatformShellOperations(
-	options: { shellPath?: string; commandPrefix?: string; operations?: BashOperations } = {},
+	options: { shellPath?: string; commandPrefix?: string; operations?: BashOperations; sessionKey?: string } = {},
 	platform: NodeJS.Platform = process.platform,
 ): BashOperations {
 	const operations =
 		options.operations ??
-		createLocalShellOperations(getPlatformShellToolName(platform), { shellPath: options.shellPath });
+		createLocalShellOperations(getPlatformShellToolName(platform), {
+			shellPath: options.shellPath,
+			sessionKey: options.sessionKey,
+		});
 	return {
 		async exec(command, cwd, execOptions) {
 			let resolvedCommand = command;
@@ -230,6 +260,12 @@ export interface BashToolOptions {
 	shellPath?: string;
 	/** Hook to adjust command, cwd, or env before execution */
 	spawnHook?: BashSpawnHook;
+	/**
+	 * Stable key for this agent's persistent shell session. The host passes its per-agent key so
+	 * the session survives runtime reloads and user `!` commands share it; separately created
+	 * tool instances (subagents) auto-generate their own key and stay isolated.
+	 */
+	sessionKey?: string;
 }
 
 const BASH_PREVIEW_LINES = 5;
@@ -364,19 +400,20 @@ function createShellToolDefinition(
 	options?: BashToolOptions,
 ): ToolDefinition<typeof bashSchema, BashToolDetails | undefined, BashRenderState> {
 	const toolName = "bash";
+	const sessionKey = options?.sessionKey ?? `bash-tool:${randomUUID()}`;
 	const ops =
 		options?.operations ??
 		(backendShell === "powershell"
-			? createLocalPowerShellOperations({ shellPath: options?.shellPath })
-			: createLocalBashOperations({ shellPath: options?.shellPath }));
+			? createLocalPowerShellOperations({ shellPath: options?.shellPath, sessionKey })
+			: createLocalBashOperations({ shellPath: options?.shellPath, sessionKey }));
 	const commandPrefix = options?.commandPrefix;
 	const spawnHook = options?.spawnHook;
 	const hasExecutionOverrides = Boolean(options?.operations || options?.shellPath || commandPrefix || spawnHook);
 	const canFilterCommand = !hasExecutionOverrides;
 	const routesWindowsContract = contractPlatform === "win32";
 	const contractDescription = routesWindowsContract
-		? "Execute Pi's stable Bash-like command contract in the current working directory. On Windows, a finite deterministic router converts supported simple commands to PowerShell; unsupported Bash constructs fail closed instead of being guessed."
-		: "Execute a Bash command in the current working directory.";
+		? "Execute Pi's stable Bash-like command contract in a persistent per-agent shell session (current directory and environment variables persist across calls). On Windows, a finite deterministic router converts supported simple commands to PowerShell; unsupported Bash constructs fail closed instead of being guessed."
+		: "Execute a Bash command in a persistent per-agent shell session: the current directory and environment variables persist across calls, and a timed-out or aborted command resets the session.";
 	return {
 		name: toolName,
 		label: toolName,
