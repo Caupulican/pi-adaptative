@@ -1,5 +1,9 @@
 ## [Unreleased]
 
+### Added
+
+- `SessionManager.getLatestCustomEntryOnBranch(customType, fromId?)`: an efficient branch-scoped custom-entry lookup (walks leaf→root ancestry, stops at the first match) for consumers that need the most recent custom entry of a given type without leaking another branch's history.
+
 ### Fixed
 
 - `runAgentLoopContinue` no longer mutates the caller's `context.messages` in place (copies first, matching `runAgentLoop`).

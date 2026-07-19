@@ -197,6 +197,7 @@ export type ReadonlySessionManager = Pick<
 	| "getEntry"
 	| "getLabel"
 	| "getBranch"
+	| "getLatestCustomEntryOnBranch"
 	| "getHeader"
 	| "getEntries"
 	| "getTree"
@@ -1487,6 +1488,23 @@ export class SessionManager {
 		}
 		path.reverse();
 		return path;
+	}
+
+	/**
+	 * Most recent custom entry of `customType` on the active branch, walking leaf→root
+	 * ancestry (same traversal direction as getBranch(), but stops at the first match instead
+	 * of building the full path). `fromId` starts the walk at that entry instead of the current
+	 * leaf — callers use this to resume the search past an entry they've already rejected.
+	 * Payload-agnostic: returns the raw entry, callers own decoding/validating `data`.
+	 */
+	getLatestCustomEntryOnBranch(customType: string, fromId?: string): CustomEntry | undefined {
+		const startId = fromId ?? this.leafId;
+		let current = startId ? this.byId.get(startId) : undefined;
+		while (current) {
+			if (current.type === "custom" && current.customType === customType) return current;
+			current = current.parentId ? this.byId.get(current.parentId) : undefined;
+		}
+		return undefined;
 	}
 
 	/**
