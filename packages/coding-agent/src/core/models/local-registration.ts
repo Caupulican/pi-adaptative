@@ -1,5 +1,5 @@
 import { existsSync, readFileSync, writeFileSync } from "node:fs";
-import { join } from "node:path";
+import { configFile } from "../agent-paths.ts";
 
 /**
  * Persistent registration for pulled local models: merges an "ollama" provider entry into the
@@ -133,7 +133,7 @@ export function registerLocalModel(args: {
 	contextWindow?: number;
 	servedContextWindow?: number;
 }): LocalRegistrationResult {
-	const modelsJsonPath = join(args.agentDir, "models.json");
+	const modelsJsonPath = configFile(args.agentDir, "models.json");
 	const contextWindow = args.contextWindow ?? 8192;
 	const entry = localModelEntry(args.ref, contextWindow, args.servedContextWindow);
 	const providerBase = {
@@ -176,7 +176,7 @@ export function registerTransformersModel(args: {
 	baseUrl: string;
 	contextWindow?: number;
 }): LocalRegistrationResult {
-	const modelsJsonPath = join(args.agentDir, "models.json");
+	const modelsJsonPath = configFile(args.agentDir, "models.json");
 	const entry = transformersModelEntry(args);
 	const providerBase = {
 		name: "Hugging Face Transformers (pi-managed)",
@@ -231,7 +231,7 @@ export function registerPrismLlamaCppModel(args: {
 	contextWindow: number;
 	servedContextWindow?: number;
 }): LocalRegistrationResult {
-	const modelsJsonPath = join(args.agentDir, "models.json");
+	const modelsJsonPath = configFile(args.agentDir, "models.json");
 	const entry = prismLlamaCppModelEntry({
 		modelId: args.modelId,
 		baseUrl: args.baseUrl,
@@ -261,7 +261,7 @@ export function registerPrismLlamaCppModel(args: {
 }
 
 export function unregisterLocalModel(args: { agentDir: string; ref: string }): LocalRegistrationResult {
-	const modelsJsonPath = join(args.agentDir, "models.json");
+	const modelsJsonPath = configFile(args.agentDir, "models.json");
 	const { json, reason } = loadStrict(modelsJsonPath);
 	if (!json) return { ok: false, modelsJsonPath, reason };
 	const provider = json.providers[OLLAMA_PROVIDER];
@@ -279,7 +279,7 @@ export function unregisterLocalModel(args: { agentDir: string; ref: string }): L
 }
 
 export function unregisterTransformersModel(args: { agentDir: string; modelId: string }): LocalRegistrationResult {
-	const modelsJsonPath = join(args.agentDir, "models.json");
+	const modelsJsonPath = configFile(args.agentDir, "models.json");
 	const { json, reason } = loadStrict(modelsJsonPath);
 	if (!json) return { ok: false, modelsJsonPath, reason };
 	const provider = json.providers[HF_TRANSFORMERS_PROVIDER];
@@ -303,7 +303,7 @@ export function unregisterTransformersModel(args: { agentDir: string; modelId: s
  * fields it didn't write.
  */
 export function unregisterPrismLlamaCppModel(args: { agentDir: string; modelId: string }): LocalRegistrationResult {
-	const modelsJsonPath = join(args.agentDir, "models.json");
+	const modelsJsonPath = configFile(args.agentDir, "models.json");
 	const { json, reason } = loadStrict(modelsJsonPath);
 	if (!json) return { ok: false, modelsJsonPath, reason };
 	const provider = json.providers[PRISM_LLAMACPP_PROVIDER];

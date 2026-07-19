@@ -23,6 +23,7 @@ import { Readable } from "stream";
 import { pipeline } from "stream/promises";
 import { pathToFileURL } from "url";
 import { APP_NAME, getAgentDir, getBinDir } from "../config.ts";
+import { cacheDir as agentCacheDir, cacheFile } from "../core/agent-paths.ts";
 import { spawnProcess, waitForChildProcessWithTermination } from "./child-process.ts";
 import { getProcessWorkRun } from "./work-directory.ts";
 
@@ -170,7 +171,7 @@ function isCachedToolPath(value: unknown): value is CachedToolPath {
 }
 
 function getToolPathCacheFile(): string {
-	return join(getAgentDir(), "cache", "tool-paths.json");
+	return cacheFile(getAgentDir(), "tool-paths.json");
 }
 
 /** Read the persisted cross-run tool-path cache. Missing/corrupt/foreign entries are dropped silently -- a cold cache just means the next resolve re-probes and repopulates it. */
@@ -191,7 +192,7 @@ function readToolPathCache(): Partial<Record<ManagedToolName, CachedToolPath>> {
 
 function writeToolPathCacheEntry(tool: ManagedToolName, entry: CachedToolPath): void {
 	try {
-		const cacheDir = join(getAgentDir(), "cache");
+		const cacheDir = agentCacheDir(getAgentDir());
 		mkdirSync(cacheDir, { recursive: true });
 		const cache = readToolPathCache();
 		cache[tool] = entry;

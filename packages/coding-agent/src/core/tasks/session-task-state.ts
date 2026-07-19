@@ -1,4 +1,4 @@
-import type { SessionEntry, SessionManager } from "@caupulican/pi-agent-core/node";
+import type { SessionManager } from "@caupulican/pi-agent-core/node";
 import { cloneTaskStepsState, isTaskStepsState, type TaskStepsState } from "./task-state.ts";
 
 export const TASK_STEPS_STATE_CUSTOM_TYPE = "task_steps_state";
@@ -25,13 +25,30 @@ function isPlainRecord(value: unknown): value is Record<string, unknown> {
 	return prototype === Object.prototype || prototype === null;
 }
 
-export function getLatestTaskStepsStateSnapshot(entries: readonly SessionEntry[]): TaskStepsState | undefined {
-	for (let index = entries.length - 1; index >= 0; index--) {
-		const entry = entries[index];
-		if (entry.type !== "custom" || entry.customType !== TASK_STEPS_STATE_CUSTOM_TYPE) continue;
-		const payload = entry.data;
-		if (!isPlainRecord(payload) || payload.version !== 1 || !("state" in payload)) continue;
-		if (isTaskStepsState(payload.state)) return cloneTaskStepsState(payload.state);
-	}
+/** Pure payload decode: validates + clones a task-steps snapshot payload. No SessionManager access,
+ * so unit tests can exercise decoding directly against a constructed `data` value. */
+export function decodeTaskStepsStateSnapshotPayload(data: unknown): TaskStepsState | undefined {
+	if (!isPlainRecord(data) || data.version !== 1 || !("state" in data)) return undefined;
+	if (isTaskStepsState(data.state)) return cloneTaskStepsState(data.state);
 	return undefined;
+}
+
+/**
+ * Most recent VALID task-steps snapshot on the active branch. Walks leaf→root ancestry via
+ * `getLatestCustomEntryOnBranch`, skipping entries whose payload fails to decode and resuming
+ * the search from that entry's parent, so an older valid snapshot still wins over a newer
+ * malformed one (matches the pre-branch-scoping flat-list resolution semantics).
+ */
+export function getLatestTaskStepsStateSnapshot(
+	sessionManager: Pick<SessionManager, "getLatestCustomEntryOnBranch">,
+): TaskStepsState | undefined {
+	let fromId: string | undefined;
+	for (;;) {
+		const entry = sessionManager.getLatestCustomEntryOnBranch(TASK_STEPS_STATE_CUSTOM_TYPE, fromId);
+		if (!entry) return undefined;
+		const decoded = decodeTaskStepsStateSnapshotPayload(entry.data);
+		if (decoded !== undefined) return decoded;
+		if (entry.parentId === null) return undefined;
+		fromId = entry.parentId;
+	}
 }

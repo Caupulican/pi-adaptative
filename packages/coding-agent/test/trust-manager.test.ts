@@ -34,7 +34,10 @@ describe("ProjectTrustStore", () => {
 	});
 
 	it("leaves malformed trust stores untouched instead of crashing startup reads", () => {
-		const trustPath = join(agentDir, "trust.json");
+		// trust.json is machine-persisted state, so ProjectTrustStore resolves it under state/,
+		// not the agentDir root.
+		const trustPath = join(agentDir, "state", "trust.json");
+		mkdirSync(join(agentDir, "state"), { recursive: true });
 		writeFileSync(trustPath, "{not json", "utf-8");
 		const store = new ProjectTrustStore(agentDir);
 

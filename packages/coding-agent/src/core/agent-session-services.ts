@@ -1,9 +1,9 @@
-import { join } from "node:path";
 import type { ThinkingLevel } from "@caupulican/pi-agent-core";
 import type { SessionManager } from "@caupulican/pi-agent-core/node";
 import type { Model } from "@caupulican/pi-ai";
 import { getAgentDir } from "../config.ts";
 import { resolvePath } from "../utils/paths.ts";
+import { configFile } from "./agent-paths.ts";
 import { AuthStorage } from "./auth-storage.ts";
 import type { SessionStartEvent, ToolDefinition } from "./extensions/index.ts";
 import { ModelRegistry } from "./model-registry.ts";
@@ -142,9 +142,10 @@ export async function createAgentSessionServices(
 ): Promise<AgentSessionServices> {
 	const cwd = resolvePath(options.cwd);
 	const agentDir = options.agentDir ? resolvePath(options.agentDir) : getAgentDir();
-	const authStorage = options.authStorage ?? AuthStorage.create(join(agentDir, "auth.json"));
+	const authStorage = options.authStorage ?? AuthStorage.create(configFile(agentDir, "auth.json"));
 	const settingsManager = options.settingsManager ?? SettingsManager.create(cwd, agentDir);
-	const modelRegistry = options.modelRegistry ?? ModelRegistry.create(authStorage, join(agentDir, "models.json"));
+	const modelRegistry =
+		options.modelRegistry ?? ModelRegistry.create(authStorage, configFile(agentDir, "models.json"));
 	const resourceLoader = new DefaultResourceLoader({
 		...(options.resourceLoaderOptions ?? {}),
 		cwd,

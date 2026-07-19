@@ -14,6 +14,36 @@ export interface GoalState {
 	lastProgressAt: string;
 	stallTurns: number;
 	blockedReason?: string;
+	/**
+	 * Cumulative continuation turns submitted for this goal across EVERY `continueGoalLoop`
+	 * invocation for its lifetime (idle-driven auto-continues and manual continues alike) —
+	 * durable via goal-state persistence, so it survives process restarts and idle cycles.
+	 * Optional because snapshots persisted before this field existed carry no value; treat
+	 * `undefined` as `0` everywhere it is read (see `applyGoalEvent`'s `record_continuation_budget`
+	 * case and `goal-loop-controller.ts`'s budget check).
+	 */
+	continuationTurnsUsed?: number;
+	/**
+	 * Cumulative ACTIVE wall-clock milliseconds spent running continuation passes for this goal —
+	 * the sum of each individual pass's own await duration, NOT wall-clock time elapsed between
+	 * passes or during idle gaps. Same backward-compat/undefined-as-0 note as `continuationTurnsUsed`.
+	 */
+	continuationWallClockMs?: number;
+	/**
+	 * Cumulative USD attributed to this goal's own continuation passes, derived from the session's
+	 * own model spend (`getCostSummary().ownCost` at the persistence dep) — deliberately excludes
+	 * worker/subagent spend, which is tracked and budgeted separately. Same backward-compat note.
+	 */
+	continuationSpendUsd?: number;
+	/**
+	 * Bookkeeping only: the session's own cumulative cost reading as of the last recorded pass,
+	 * used to derive the NEXT pass's spend delta (`event.sessionCostUsd - continuationSpendCheckpointUsd`)
+	 * while keeping `applyGoalEvent` pure (it consumes one externally-observed absolute reading per
+	 * call rather than reaching for session state itself). Not meaningful read in isolation; `undefined`
+	 * means no pass has been recorded yet, so the first recorded pass establishes the checkpoint with a
+	 * zero delta rather than mis-attributing all pre-goal-loop session spend to that one pass.
+	 */
+	continuationSpendCheckpointUsd?: number;
 }
 
 export interface Requirement {
@@ -31,6 +61,13 @@ export interface GoalEvidenceRef {
 	kind: GoalEvidenceKind;
 	summary: string;
 	uri?: string;
+	/**
+	 * Whether `uri` was checked against session records ("tool" evidence, a toolCallId) or the
+	 * filesystem ("file" evidence, a path) at add_evidence time. `true`/`false` only when the
+	 * ref was checkable; `undefined` when the evidence kind carries no checkable ref (e.g.
+	 * "user"/"finding"/"test", or a "tool"/"file" entry with no `uri`).
+	 */
+	verified?: boolean;
 	createdAt: string;
 }
 
@@ -45,10 +82,26 @@ export type GoalEvent =
 			kind: GoalEvidenceKind;
 			summary: string;
 			uri?: string;
+			/** See {@link GoalEvidenceRef.verified}; computed by the tool layer before the event is applied. */
+			verified?: boolean;
 			now: string;
 	  }
 	| { type: "progress"; now: string }
 	| { type: "no_progress"; now: string }
+	| {
+			type: "record_continuation_budget";
+			/** Turns submitted in this pass (currently always 1 — the loop calls once per submitted pass). */
+			turns: number;
+			/** This pass's own active wall-clock duration, in milliseconds. */
+			wallClockMs: number;
+			/**
+			 * The session's own cumulative model spend (`getCostSummary().ownCost`) AT THE TIME this pass
+			 * was recorded — an absolute reading, not a pre-computed delta. See
+			 * `GoalState.continuationSpendCheckpointUsd` for how the reducer derives the delta.
+			 */
+			sessionCostUsd: number;
+			now: string;
+	  }
 	| { type: "complete_goal"; now: string }
 	| { type: "complete_goal_manually"; now: string }
 	| { type: "block_goal"; reason: string; now: string }
@@ -81,6 +134,14 @@ function hasOptionalString(record: Record<string, unknown>, key: string): boolea
 	return record[key] === undefined || typeof record[key] === "string";
 }
 
+function hasOptionalBoolean(record: Record<string, unknown>, key: string): boolean {
+	return record[key] === undefined || typeof record[key] === "boolean";
+}
+
+function hasOptionalFiniteNumber(record: Record<string, unknown>, key: string): boolean {
+	return record[key] === undefined || (typeof record[key] === "number" && Number.isFinite(record[key]));
+}
+
 function isRequirement(value: unknown): value is Requirement {
 	if (!isRecord(value)) return false;
 	return (
@@ -101,7 +162,8 @@ function isGoalEvidenceRef(value: unknown): value is GoalEvidenceRef {
 		isGoalEvidenceKind(value.kind) &&
 		typeof value.summary === "string" &&
 		typeof value.createdAt === "string" &&
-		hasOptionalString(value, "uri")
+		hasOptionalString(value, "uri") &&
+		hasOptionalBoolean(value, "verified")
 	);
 }
 
@@ -121,7 +183,8 @@ function isGoalEvent(value: unknown): value is GoalEvent {
 				typeof value.id === "string" &&
 				isGoalEvidenceKind(value.kind) &&
 				typeof value.summary === "string" &&
-				hasOptionalString(value, "uri")
+				hasOptionalString(value, "uri") &&
+				hasOptionalBoolean(value, "verified")
 			);
 		case "progress":
 		case "no_progress":
@@ -132,6 +195,15 @@ function isGoalEvent(value: unknown): value is GoalEvent {
 			return true;
 		case "block_goal":
 			return typeof value.reason === "string";
+		case "record_continuation_budget":
+			return (
+				typeof value.turns === "number" &&
+				Number.isFinite(value.turns) &&
+				typeof value.wallClockMs === "number" &&
+				Number.isFinite(value.wallClockMs) &&
+				typeof value.sessionCostUsd === "number" &&
+				Number.isFinite(value.sessionCostUsd)
+			);
 		default:
 			return false;
 	}
@@ -154,7 +226,11 @@ export function isGoalState(value: unknown): value is GoalState {
 		typeof value.lastProgressAt === "string" &&
 		typeof value.stallTurns === "number" &&
 		Number.isFinite(value.stallTurns) &&
-		hasOptionalString(value, "blockedReason")
+		hasOptionalString(value, "blockedReason") &&
+		hasOptionalFiniteNumber(value, "continuationTurnsUsed") &&
+		hasOptionalFiniteNumber(value, "continuationWallClockMs") &&
+		hasOptionalFiniteNumber(value, "continuationSpendUsd") &&
+		hasOptionalFiniteNumber(value, "continuationSpendCheckpointUsd")
 	);
 }
 
@@ -201,6 +277,9 @@ export function createGoalState(args: { goalId: string; userGoal: string; now: s
 		updatedAt: args.now,
 		lastProgressAt: args.now,
 		stallTurns: 0,
+		continuationTurnsUsed: 0,
+		continuationWallClockMs: 0,
+		continuationSpendUsd: 0,
 	};
 }
 
@@ -294,6 +373,7 @@ export function applyGoalEvent(state: GoalState, event: GoalEvent): GoalState {
 				kind: event.kind,
 				summary: event.summary,
 				uri: event.uri,
+				verified: event.verified,
 				createdAt: existingIndex >= 0 ? newState.evidence[existingIndex].createdAt : event.now,
 			};
 			if (existingIndex >= 0) {
@@ -314,6 +394,20 @@ export function applyGoalEvent(state: GoalState, event: GoalEvent): GoalState {
 
 		case "no_progress": {
 			newState.stallTurns = state.stallTurns + 1;
+			break;
+		}
+
+		case "record_continuation_budget": {
+			const previousCheckpoint = state.continuationSpendCheckpointUsd;
+			// No prior checkpoint (first pass ever recorded for this goal): there is no valid "before"
+			// reading to diff against, so attribute a zero delta for this one pass rather than mis-count
+			// all pre-goal-loop session spend into it. Every subsequent pass gets an accurate delta.
+			const spendDelta =
+				previousCheckpoint === undefined ? 0 : Math.max(0, event.sessionCostUsd - previousCheckpoint);
+			newState.continuationTurnsUsed = (state.continuationTurnsUsed ?? 0) + event.turns;
+			newState.continuationWallClockMs = (state.continuationWallClockMs ?? 0) + event.wallClockMs;
+			newState.continuationSpendUsd = (state.continuationSpendUsd ?? 0) + spendDelta;
+			newState.continuationSpendCheckpointUsd = event.sessionCostUsd;
 			break;
 		}
 

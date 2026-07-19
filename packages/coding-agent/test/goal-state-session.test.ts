@@ -39,7 +39,7 @@ describe("Phase 9A: Goal State Session Persistence", () => {
 		state2.stallTurns = 5;
 		appendGoalStateSnapshot(sessionManager, state2);
 
-		const latest = getLatestGoalStateSnapshot(sessionManager.getEntries());
+		const latest = getLatestGoalStateSnapshot(sessionManager);
 		expect(latest).toBeDefined();
 		expect(latest?.createdAt).toBe("T1");
 		expect(latest?.stallTurns).toBe(5);
@@ -57,7 +57,7 @@ describe("Phase 9A: Goal State Session Persistence", () => {
 
 		sessionManager.appendCustomEntry(GOAL_STATE_CUSTOM_TYPE, { version: 1, state: { invalid: true } }); // Invalid state
 
-		const latest = getLatestGoalStateSnapshot(sessionManager.getEntries());
+		const latest = getLatestGoalStateSnapshot(sessionManager);
 		expect(latest).toBeDefined();
 		expect(latest?.goalId).toBe("g1");
 	});
@@ -72,7 +72,7 @@ describe("Phase 9A: Goal State Session Persistence", () => {
 		const payload = Object.assign(new Date(0), { version: 1, state: newerValidState });
 		sessionManager.appendCustomEntry(GOAL_STATE_CUSTOM_TYPE, payload);
 
-		const latest = getLatestGoalStateSnapshot(sessionManager.getEntries());
+		const latest = getLatestGoalStateSnapshot(sessionManager);
 		expect(latest?.goalId).toBe("g1");
 	});
 
@@ -90,7 +90,7 @@ describe("Phase 9A: Goal State Session Persistence", () => {
 		newerValidState2.stallTurns = Infinity;
 		sessionManager.appendCustomEntry(GOAL_STATE_CUSTOM_TYPE, { version: 1, state: newerValidState2 });
 
-		const latest = getLatestGoalStateSnapshot(sessionManager.getEntries());
+		const latest = getLatestGoalStateSnapshot(sessionManager);
 		expect(latest?.goalId).toBe("g1");
 	});
 
@@ -107,7 +107,7 @@ describe("Phase 9A: Goal State Session Persistence", () => {
 
 		evidenceIds.push("ev-2");
 
-		const latest = getLatestGoalStateSnapshot(sessionManager.getEntries());
+		const latest = getLatestGoalStateSnapshot(sessionManager);
 		expect(latest?.requirements[0].evidenceIds).toEqual(["ev-1"]);
 		expect(latest?.requirements[0].evidenceIds).not.toBe(evidenceIds);
 	});

@@ -194,6 +194,10 @@ describe("Native reflection cost reports", () => {
 			getSession: () => ({
 				model: { provider: "test", id: "model" },
 				getContextUsage: () => undefined,
+				// The task_steps contract nudge runs at the top of every native-reflection pass; an
+				// absent task_steps state is never a contract violation, so this keeps the nudge inert.
+				getTaskStepsStateSnapshot: () => undefined,
+				sendCustomMessage: () => Promise.resolve(),
 				runReflectionPass: ({ reportId }: { reportId?: string }) => {
 					reportIds.push(reportId);
 					return Promise.resolve();

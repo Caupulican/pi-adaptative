@@ -145,8 +145,66 @@ describe("applyGoalAction (goal producer core)", () => {
 		expect(manual.state.status).toBe("completed");
 		expect(manual.state.requirements[0].status).toBe("open");
 
-		state = expectOk(applyGoalAction(state, { action: "satisfy_requirement", requirementId: "r1" }, "T4"));
-		state = expectOk(applyGoalAction(state, { action: "complete" }, "T5"));
+		state = expectOk(
+			applyGoalAction(
+				state,
+				{ action: "add_evidence", evidenceId: "e1", kind: "user", summary: "user confirmed" },
+				"T4",
+			),
+		);
+		state = expectOk(
+			applyGoalAction(state, { action: "satisfy_requirement", requirementId: "r1", evidenceIds: ["e1"] }, "T5"),
+		);
+		state = expectOk(applyGoalAction(state, { action: "complete" }, "T6"));
+		expect(state.status).toBe("completed");
+	});
+
+	it("blocks agent completion when satisfied requirements have no verified/user evidence backing (default-on gate)", () => {
+		let state = createGoalState({ goalId: "g1", userGoal: "A", now: "T0" });
+		state = expectOk(applyGoalAction(state, { action: "add_requirement", requirementId: "r1", text: "Do X" }, "T1"));
+		// satisfy with no cited evidence at all -- nothing unsatisfied, but nothing verified either
+		state = expectOk(applyGoalAction(state, { action: "satisfy_requirement", requirementId: "r1" }, "T2"));
+
+		const blocked = applyGoalAction(state, { action: "complete" }, "T3");
+		expect(blocked.ok).toBe(false);
+		if (blocked.ok) return;
+		expect(blocked.error).toContain("verified evidence");
+
+		// an unverified (kind 'file', verified: false) evidence ref still does not satisfy the gate
+		state = expectOk(
+			applyGoalAction(
+				state,
+				{ action: "add_evidence", evidenceId: "e-bogus", kind: "file", summary: "bogus ref", verified: false },
+				"T4",
+			),
+		);
+		state = expectOk(
+			applyGoalAction(state, { action: "satisfy_requirement", requirementId: "r1", evidenceIds: ["e-bogus"] }, "T5"),
+		);
+		const stillBlocked = applyGoalAction(state, { action: "complete" }, "T6");
+		expect(stillBlocked.ok).toBe(false);
+
+		// but the gate can be opted out of
+		const optedOut = applyGoalAction(state, { action: "complete" }, "T7", {
+			requireVerifiedEvidenceForCompletion: false,
+		});
+		expect(optedOut.ok).toBe(true);
+	});
+
+	it("allows agent completion when a satisfied requirement is backed by verified-ref evidence", () => {
+		let state = createGoalState({ goalId: "g1", userGoal: "A", now: "T0" });
+		state = expectOk(applyGoalAction(state, { action: "add_requirement", requirementId: "r1", text: "Do X" }, "T1"));
+		state = expectOk(
+			applyGoalAction(
+				state,
+				{ action: "add_evidence", evidenceId: "e1", kind: "tool", summary: "ran the tests", verified: true },
+				"T2",
+			),
+		);
+		state = expectOk(
+			applyGoalAction(state, { action: "satisfy_requirement", requirementId: "r1", evidenceIds: ["e1"] }, "T3"),
+		);
+		state = expectOk(applyGoalAction(state, { action: "complete" }, "T4"));
 		expect(state.status).toBe("completed");
 	});
 

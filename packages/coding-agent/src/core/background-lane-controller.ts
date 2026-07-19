@@ -19,6 +19,7 @@ import { createHash } from "node:crypto";
 import path from "node:path";
 import type { SessionManager } from "@caupulican/pi-agent-core/node";
 import type { Api, Model, Usage } from "@caupulican/pi-ai";
+import { configFile, getWorkRoot, sessionsDir, stateDir } from "./agent-paths.ts";
 import type {
 	AgentSessionEvent,
 	GoalContinuationLoopOptions,
@@ -74,18 +75,17 @@ function deriveSpawnedUsageReportId(kind: string, sessionId: string, identity: s
 
 export function getPrivateLaneDeniedPaths(cwd: string, agentDir: string): string[] {
 	return [
-		"auth.json",
-		"MEMORY.md",
-		"USER.md",
-		"settings.json",
-		"models.json",
-		"trust.json",
-		"sessions",
-		"state",
-		"work",
-	]
-		.map((entry) => path.join(agentDir, entry))
-		.concat(path.join(cwd, ".pi", "settings.json"));
+		configFile(agentDir, "auth.json"),
+		configFile(agentDir, "MEMORY.md"),
+		configFile(agentDir, "USER.md"),
+		configFile(agentDir, "settings.json"),
+		configFile(agentDir, "models.json"),
+		// trust.json now lives under state/ -- covered by the whole-state-dir
+		// denial below instead of its own root-level entry.
+		sessionsDir(agentDir),
+		stateDir(agentDir),
+		getWorkRoot(agentDir),
+	].concat(path.join(cwd, ".pi", "settings.json"));
 }
 
 export function isLocalExecutionModel(model: Pick<Model<Api>, "provider" | "baseUrl">): boolean {
@@ -133,7 +133,7 @@ export interface BackgroundLaneControllerDeps {
 	notifyWorkerTerminalHandoff(
 		records: readonly { laneId: string; status: LaneTerminalStatus; reasonCode?: string }[],
 	): Promise<void>;
-	/** G3/G8 telemetry sink (codes/ids only — never lane product text). */
+	/** Telemetry sink (codes/ids only — never lane product text). */
 	emitAutonomyTelemetry(event: AutonomyTelemetryEvent): void;
 	/** Durable goal state, if a goal is active (the research lane's demand source). */
 	getGoalStateSnapshot(): GoalState | undefined;
@@ -199,8 +199,34 @@ export class BackgroundLaneController {
 		status: LaneTerminalStatus;
 		reasonCode?: string;
 	}> = [];
+	/** Live per-lane mutation ledger for a RUNNING worker — the SAME `toolChangedFiles` Set its
+	 * `afterToolCall` hook mutates, plus a spend getter and the originating request. Read
+	 * synchronously by `abortInFlightLanes()`'s disposal cutoff, the only provably-safe write window
+	 * for a mid-flight cancellation (see that method); deleted there (consumed-ledger guard against
+	 * the post-await disposed branch re-persisting) or in the lane's own `finally` on a normal exit. */
+	private readonly _inFlightWorkerLedgers = new Map<
+		string,
+		{ changedFiles: Set<string>; getSpend: () => Usage | undefined; request: WorkerRequest }
+	>();
+	/** Reload-gate deregister function for a worker queued (not yet running) behind a
+	 * contending local-execution foreground model. Registered at enqueue so `/reload` waits for
+	 * queued work too, not just running work; deregistered exactly once, either on disposal
+	 * (`abortInFlightLanes`) or at the running handoff (`drainQueuedWorkerDelegations`). A laneId with
+	 * no entry here (e.g. seeded directly into `_queuedWorkers` by a test) is simply untracked —
+	 * deregistration is best-effort by design, never required. */
+	private readonly _queuedWorkerDeregisters = new Map<string, () => void>();
 
 	private readonly deps: BackgroundLaneControllerDeps;
+
+	/** Emit a warning without ever throwing — used from disposal-adjacent persistence where a
+	 * listener failure (or a bare test double missing `emit`) must never block or crash cleanup. */
+	private _safeWarn(message: string): void {
+		try {
+			this.deps.emit({ type: "warning", message });
+		} catch {
+			// Dispose must never throw.
+		}
+	}
 
 	private _scheduleWorkerNotification(): void {
 		if (this._disposed || this._workerNotificationScheduled) return;
@@ -295,20 +321,75 @@ export class BackgroundLaneController {
 		return this._lastResearchLaneSkipReason;
 	}
 
-	/** Abort any in-flight research pass or delegated worker (called on session dispose). */
+	/**
+	 * Abort any in-flight research pass or delegated worker (called on session dispose).
+	 *
+	 * This synchronous body is the LAST provably-safe write window for canceled/in-flight work.
+	 * `dispose()` (agent-session.ts) has already set the session's own disposed flag but has not yet
+	 * returned — no successor session (e.g. a `/reload` adoption) can exist yet, so an append here
+	 * cannot interleave with one; a post-await continuation resuming AFTER this method returns must
+	 * not append (see the disposed branch in `runWorkerDelegationOnce`). Persist FIRST, then
+	 * complete-in-memory, so a throw from one lane's persist cannot skip another's; each persist gets
+	 * its own try/catch — dispose must never throw.
+	 */
 	abortInFlightLanes(): void {
 		this._disposed = true;
 		this._researchLaneAbort.abort();
 		this._workerDelegationAbort.abort();
-		this._queuedWorkers.clear();
+
 		for (const record of this._laneTracker.getRecords()) {
-			if (record.status === "queued" || record.status === "running") {
-				this._laneTracker.complete(record.laneId, {
-					status: "canceled",
-					reasonCode: "session_disposed",
-				});
+			if (record.status !== "queued" && record.status !== "running") continue;
+			const canceled = this._laneTracker.complete(record.laneId, {
+				status: "canceled",
+				reasonCode: "session_disposed",
+			});
+			if (!canceled) continue;
+			try {
+				appendLaneRecordSnapshot(this.deps.getSessionManager(), canceled);
+			} catch (error) {
+				this._safeWarn(
+					`Failed to persist canceled lane record ${canceled.laneId}: ${error instanceof Error ? error.message : String(error)}`,
+				);
+			}
+			if (canceled.type !== "worker") continue;
+			// Only a RUNNING worker ever registers a ledger (a queued-never-started worker has none;
+			// its cancellation is already fully captured by the lane record above). Consumed
+			// (deleted) here so the post-await disposed branch never re-persists it.
+			const ledger = this._inFlightWorkerLedgers.get(record.laneId);
+			if (!ledger) continue;
+			this._inFlightWorkerLedgers.delete(record.laneId);
+			try {
+				const spend = ledger.getSpend();
+				const reportId = `worker:${this.deps.getSessionId()}:${record.laneId}`;
+				const result: WorkerResult = {
+					requestId: ledger.request.id,
+					status: "cancelled",
+					summary: "canceled on session dispose",
+					changedFiles: [...ledger.changedFiles],
+					usageReportId: reportId,
+					createdAt: new Date().toISOString(),
+				};
+				// Bounded honesty: spend may be incomplete (it lands only when the isolated completion
+				// returns, which a mid-flight abort preempts) — record what `getSpend()` knows. Same
+				// deterministic reportId scheme as the normal path, so a later duplicate report (there
+				// is none in practice here, since the lane is now terminal) stays idempotent.
+				this.deps.saveWorkerResultSnapshot(result, ledger.request);
+				if (spend && (spend.cost.total > 0 || spend.totalTokens > 0)) {
+					this.deps.addSpawnedUsage(spend, { label: "worker-delegation", reportId });
+				}
+			} catch (error) {
+				this._safeWarn(
+					`Failed to persist canceled worker result ${record.laneId}: ${error instanceof Error ? error.message : String(error)}`,
+				);
 			}
 		}
+
+		// A queued (never-started) worker's reload-gate registration ends here on cancellation;
+		// the other end is the running handoff in `drainQueuedWorkerDelegations`.
+		for (const deregister of this._queuedWorkerDeregisters.values()) deregister();
+		this._queuedWorkerDeregisters.clear();
+		this._queuedWorkers.clear();
+
 		this._workerNotificationScheduled = false;
 		this._workerTerminalSinceFlush.length = 0;
 	}
@@ -364,9 +445,8 @@ export class BackgroundLaneController {
 			maxWallClockMinutes: goalContinueMaxWallClockMinutes,
 		});
 
-		this._isGoalAutoContinuing = true;
 		try {
-			await this.deps.continueGoalLoop({
+			await this.continueGoalLoopExclusive({
 				maxTurns: scaled.maxTurns,
 				maxStallTurns,
 				maxWallClockMinutes: scaled.maxWallClockMinutes,
@@ -374,9 +454,44 @@ export class BackgroundLaneController {
 		} catch (error) {
 			const message = error instanceof Error ? error.message : String(error);
 			this.deps.emit({ type: "warning", message: `Goal auto-continuation failed: ${message}` });
+		}
+	}
+
+	/**
+	 * Single-flight entry point for EVERY goal-continuation loop invocation — idle autosteer
+	 * ({@link _runScheduledGoalAutoContinue}) AND the manual `/goal start` / `/goal-continue`
+	 * commands (reached through `AgentSession.continueGoalLoop`). Both paths ultimately submit
+	 * continuation prompts through the session's single `prompt()` path, so two loops racing throws
+	 * "Agent is already processing" from whichever submits second. `_isGoalAutoContinuing` is the
+	 * ONE owner of that mutex; `deps.continueGoalLoop` (the raw {@link GoalLoopController} loop)
+	 * must never be called directly outside this method, or the guard is bypassed.
+	 */
+	async continueGoalLoopExclusive(options: GoalContinuationLoopOptions): Promise<GoalContinuationLoopResult> {
+		if (this._isGoalAutoContinuing) return this._skippedGoalResult(options, "already_continuing");
+		if (this.deps.isDisposed()) return this._skippedGoalResult(options, "session_disposed");
+		this._isGoalAutoContinuing = true;
+		try {
+			return await this.deps.continueGoalLoop(options);
 		} finally {
 			this._isGoalAutoContinuing = false;
 		}
+	}
+
+	/**
+	 * A full {@link GoalContinuationLoopResult} for a continuation request that never ran a pass
+	 * (another loop already owns the mutex, or the session is disposed). Keeps the skip path
+	 * type-identical to a real pass — no separate skip union — so every caller keeps reading
+	 * `result.stopReason`/`result.finalSnapshot` unchanged.
+	 */
+	private _skippedGoalResult(
+		options: GoalContinuationLoopOptions,
+		stopReason: "already_continuing" | "session_disposed",
+	): GoalContinuationLoopResult {
+		return {
+			turnsSubmitted: 0,
+			stopReason,
+			finalSnapshot: this.deps.getGoalRuntimeSnapshot({ maxStallTurns: options.maxStallTurns }),
+		};
 	}
 
 	clearResearchLaneTimer(): void {
@@ -681,7 +796,7 @@ export class BackgroundLaneController {
 				},
 			});
 
-			// Bug #21 pattern: if the session was disposed while the completion was in flight, do NOT
+			// If the session was disposed while the completion was in flight, do NOT
 			// persist evidence/records/usage against the dead session.
 			if (this.deps.isDisposed()) {
 				const record = this._laneTracker.complete(startedRecord.laneId, {
@@ -710,7 +825,7 @@ export class BackgroundLaneController {
 			});
 			if (record) {
 				appendLaneRecordSnapshot(this.deps.getSessionManager(), record);
-				// G3: a research lane's product is an evidence bundle, so its terminal record maps to
+				// A research lane's product is an evidence bundle, so its terminal record maps to
 				// the evidence_bundle event. Lane outcome only (status/reasonCode/cost) — no findings text.
 				this.deps.emitAutonomyTelemetry({
 					type: AUTONOMY_TELEMETRY_EVENT_TYPES.evidenceBundle,
@@ -791,6 +906,12 @@ export class BackgroundLaneController {
 			}
 			const record = this._laneTracker.enqueue({ type: "worker" });
 			this._queuedWorkers.set(record.laneId, request);
+			// Register the reload-gate quiesce unit at ENQUEUE (not at the later running handoff)
+			// so `/reload` waits for queued-but-not-yet-started work too, matching running workers.
+			this._queuedWorkerDeregisters.set(
+				record.laneId,
+				registerInFlightWork(this.deps.getAgentDir(), "lane", `worker-queued:${record.laneId}`),
+			);
 			this._scheduleWorkerNotification();
 			return { started: true, record };
 		}
@@ -910,7 +1031,7 @@ export class BackgroundLaneController {
 			maxEstimatedUsd: maxUsd,
 			createdAt: new Date().toISOString(),
 		};
-		// G8: worker delegation START. Routing/scope codes + budget only — never the instructions text.
+		// Worker delegation START. Routing/scope codes + budget only — never the instructions text.
 		this.deps.emitAutonomyTelemetry({
 			type: AUTONOMY_TELEMETRY_EVENT_TYPES.workerRequest,
 			timestamp: new Date().toISOString(),
@@ -936,6 +1057,16 @@ export class BackgroundLaneController {
 			let spentUsage: Usage | undefined;
 			const toolChangedFiles = new Set<string>();
 			const toolIssues = new Set<string>();
+			// Register the live mutation ledger BEFORE the suspend point below so a synchronous
+			// disposal cutoff (`abortInFlightLanes`) can read a race-free snapshot of whatever this
+			// worker has already applied — the worker is suspended at the `await runWorker(...)` below
+			// whenever abort runs, and the abort signal stops further tool calls. Deleted in the
+			// `finally` on every exit path (normal completion, throw, or already consumed by abort).
+			this._inFlightWorkerLedgers.set(startedRecord.laneId, {
+				changedFiles: toolChangedFiles,
+				getSpend: () => spentUsage,
+				request: workerRequest,
+			});
 			const outcome = await runWorker({
 				request: workerRequest,
 				maxUsd,
@@ -945,7 +1076,7 @@ export class BackgroundLaneController {
 				signal: this._workerDelegationAbort.signal,
 				// Parent validation must use the same relative-path baseline the runner reports in.
 				cwd: this.deps.getCwd(),
-				// Write lane (G2): runner-side action application through the envelope path scope.
+				// Write lane: runner-side action application through the envelope path scope.
 				applyActions: workerRequest.envelope.capabilities.includes("write_files")
 					? (actions) => {
 							const permitted = actions.filter((action) => allowedActionOps.has(action.op));
@@ -1040,7 +1171,11 @@ export class BackgroundLaneController {
 				},
 			});
 
-			// Bug #21 pattern: never persist against a disposed session.
+			// Never persist against a disposed session. When disposal raced this
+			// await, `abortInFlightLanes()`'s synchronous cutoff already completed this lane, persisted
+			// its durable lane record + bounded WorkerResult, and consumed (deleted) the ledger —
+			// `.complete()` below is then a no-op (the lane is already terminal, so it returns
+			// undefined) and no double persistence or duplicate terminal notification can happen here.
 			if (this.deps.isDisposed()) {
 				const record = this._laneTracker.complete(startedRecord.laneId, {
 					status: "canceled",
@@ -1063,7 +1198,7 @@ export class BackgroundLaneController {
 			if (record) {
 				this._recordWorkerTerminal(record);
 				appendLaneRecordSnapshot(this.deps.getSessionManager(), record);
-				// G3: worker lane terminal record -> worker_result event. Lane outcome only
+				// Worker lane terminal record -> worker_result event. Lane outcome only
 				// (status/reasonCode/cost) — never the worker's summary/changed-file text.
 				this.deps.emitAutonomyTelemetry({
 					type: AUTONOMY_TELEMETRY_EVENT_TYPES.workerResult,
@@ -1102,6 +1237,7 @@ export class BackgroundLaneController {
 			this.deps.emit({ type: "warning", message: `Worker delegation failed: ${message}` });
 			return { started: true, record };
 		} finally {
+			this._inFlightWorkerLedgers.delete(startedRecord.laneId);
 			deregisterInFlight();
 		}
 	}
@@ -1224,11 +1360,19 @@ export class BackgroundLaneController {
 			)
 				break;
 			const record = this._laneTracker.getRecords().find((candidate) => candidate.laneId === laneId);
+			// The queued-phase reload-gate registration ends here, at the running handoff, no
+			// matter which branch below runs. `runWorkerDelegationOnce` registers its OWN "running"
+			// unit independently and synchronously (no `await` separates the two calls), so there is
+			// no window where this lane is invisible to the reload gate.
+			const deregisterQueued = this._queuedWorkerDeregisters.get(laneId);
+			this._queuedWorkerDeregisters.delete(laneId);
 			if (!record) {
 				this._queuedWorkers.delete(laneId);
+				deregisterQueued?.();
 				continue;
 			}
 			this._queuedWorkers.delete(laneId);
+			deregisterQueued?.();
 			const promise = this.runWorkerDelegationOnce(request, undefined, record);
 			this._workerPromises.set(laneId, promise);
 			void promise.then(

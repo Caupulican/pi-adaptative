@@ -221,6 +221,25 @@ function normalizeInputNotes(input: TaskStepInput): string[] {
 	return notes;
 }
 
+/**
+ * Find an OPEN (non-terminal) step whose content matches `content` case-insensitively.
+ * Terminal steps (completed/cancelled) are deliberately excluded so a legitimate re-add of
+ * previously finished work still creates a new step.
+ */
+export function findOpenDuplicateStep(steps: readonly TaskStep[], content: string): TaskStep | undefined {
+	const normalized = content.trim().toLocaleLowerCase();
+	if (!normalized) return undefined;
+	return steps.find(
+		(step) =>
+			step.status !== "completed" && step.status !== "cancelled" && step.content.toLocaleLowerCase() === normalized,
+	);
+}
+
+/** True when a completed step has no evidence attached (a verification nudge candidate). */
+export function hasUnverifiedCompletedStep(state: TaskStepsState): boolean {
+	return state.steps.some((step) => step.status === "completed" && step.evidence.length === 0);
+}
+
 function demoteOtherActiveSteps(steps: TaskStep[], activeIndex: number): void {
 	for (let index = 0; index < steps.length; index++) {
 		if (index !== activeIndex && steps[index].status === "in_progress") {
@@ -307,6 +326,10 @@ export function setTaskSteps(state: TaskStepsState, inputs: readonly TaskStepInp
 }
 
 export function addTaskStep(state: TaskStepsState, input: TaskStepInput, now: string): TaskStepsState {
+	// Dedupe against OPEN steps only, before the capacity check: a duplicate re-add of an
+	// already-open step is a no-op regardless of whether the list happens to be full. Terminal
+	// (completed/cancelled) matches are excluded so a legitimate re-add still creates a step.
+	if (findOpenDuplicateStep(state.steps, input.content)) return state;
 	if (state.steps.length >= MAX_TASK_STEPS) {
 		throw new TaskStepsError(`Task steps already has the maximum ${MAX_TASK_STEPS} steps.`);
 	}
@@ -460,7 +483,16 @@ export function formatTaskStepsContext(state: TaskStepsState, maxItems = 12): st
 			: `No step is in_progress. Start the first open step before unrelated work: ${open[0].activeForm || open[0].content}.`,
 		"Use task_steps to keep this checklist current and leave no stale in_progress step before the final response.",
 	);
-	return lines.join("\n");
+	if (hasUnverifiedCompletedStep(state)) {
+		lines.push(
+			"A completed step has no evidence attached; attach evidence via task_steps update before treating it as verified.",
+		);
+	}
+	// Wrapped in a marker (mirrors the <memory_context> precedent) so context-gc's
+	// semantic-memory packer can recognize this as a deterministic, re-derivable context page and
+	// pack stale copies down to the most recent one instead of letting a full page accumulate every
+	// turn. The revision (monotonic per mutation) lets a reader tell which page is current.
+	return `<task_steps_context revision=${state.revision}>\n${lines.join("\n")}\n</task_steps_context>`;
 }
 
 export function serializeTaskStepsState(state: TaskStepsState): string {

@@ -27,6 +27,11 @@ import {
 	getPendingReloadBlockers,
 } from "../../core/reload-blockers.ts";
 import type { AutoLearnSettings, AutonomyMode } from "../../core/settings-manager.ts";
+import {
+	checkTaskStepsContract,
+	INITIAL_TASK_CONTRACT_STREAK,
+	type TaskContractStreak,
+} from "../../core/tasks/task-contract-monitor.ts";
 import { getProcessWorkRun } from "../../utils/work-directory.ts";
 import { theme } from "./theme/theme.ts";
 
@@ -371,6 +376,13 @@ export class AutoLearnController {
 	private _pendingReflectionText: string[] = [];
 	private static readonly NATIVE_REFLECTION_MIN_INTERVAL_MS = 45_000;
 	private static readonly PENDING_REFLECTION_MAX_CHARS = 12_000;
+
+	// Cheap turn-boundary task_steps contract nudge. Tracks the consecutive-violation streak
+	// across turns so `checkTaskStepsContractNudge` (invoked from the existing per-turn `agent_end`
+	// pass below) can fire exactly one advisory harness note per sustained-violation streak. No model
+	// calls; best-effort coupling to whichever per-turn branch runs (native reflection or the
+	// auto-learn/autonomy-review pair) — see `checkTaskStepsContractNudge` for the rationale.
+	private _taskContractStreak: TaskContractStreak = INITIAL_TASK_CONTRACT_STREAK;
 
 	private readonly deps: AutoLearnControllerDeps;
 
@@ -1253,7 +1265,7 @@ export class AutoLearnController {
 	}
 
 	/**
-	 * Native reflection (R2) is the in-process replacement for the buggy `continuous-learning`
+	 * Native reflection is the in-process replacement for the buggy `continuous-learning`
 	 * subprocess. It runs when auto-learn is enabled and is not killed via `PI_NATIVE_REFLECTION=0`.
 	 */
 	isNativeReflectionEnabled(): boolean {
@@ -1312,7 +1324,36 @@ export class AutoLearnController {
 		return joined;
 	}
 
+	/**
+	 * Cheap turn-boundary task_steps contract check. Reads the current task_steps snapshot,
+	 * advances the pure `checkTaskStepsContract` streak, and — on the exact turn a sustained
+	 * violation first reaches the threshold — delivers a ONE-LINE advisory harness note through the
+	 * session's existing next-turn message surface (`sendCustomMessage(..., {deliverAs:"nextTurn"})`,
+	 * the same mechanism `_pendingNextTurnMessages` already injects `memory_context`/
+	 * `task_steps_context` pages through). Zero model calls; a delivery failure is swallowed so this
+	 * best-effort nudge can never disrupt the turn.
+	 *
+	 * Called from both `maybeRunNativeReflection` and `maybeStartAutoLearn` — the mutually exclusive
+	 * `agent_end` branches in interactive-mode.ts — so it runs on every turn regardless of whether
+	 * native reflection or legacy auto-learn is enabled, without adding a new turn-boundary hook.
+	 */
+	private checkTaskStepsContractNudge(): void {
+		const state = this.session.getTaskStepsStateSnapshot();
+		const outcome = checkTaskStepsContract(state, this._taskContractStreak);
+		this._taskContractStreak = outcome.streak;
+		if (!outcome.note) return;
+		void this.session
+			.sendCustomMessage(
+				{ customType: "task_contract_nudge", content: outcome.note, display: false },
+				{ deliverAs: "nextTurn" },
+			)
+			.catch(() => {
+				// Advisory-only harness note; delivery failure must never disrupt the session.
+			});
+	}
+
 	maybeRunNativeReflection(messages: AgentMessage[]): void {
+		this.checkTaskStepsContractNudge();
 		if (!this.isNativeReflectionEnabled()) return;
 
 		const settings = this.getEffectiveAutoLearnSettings();
@@ -1401,6 +1442,9 @@ export class AutoLearnController {
 	}
 
 	maybeStartAutoLearn(): boolean {
+		// The other mutually exclusive `agent_end` branch (see `checkTaskStepsContractNudge`) — runs
+		// unconditionally here so the contract nudge fires every turn regardless of auto-learn settings.
+		this.checkTaskStepsContractNudge();
 		if (process.env.PI_AUTO_LEARN_CHILD === "1") return false;
 		const decision = this.evaluateAutoLearn(false);
 		if (!decision.shouldRun) {

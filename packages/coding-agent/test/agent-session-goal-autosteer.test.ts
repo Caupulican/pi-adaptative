@@ -4,9 +4,18 @@ import { applyGoalEvent, createGoalState } from "../src/core/goals/goal-state.ts
 import { appendGoalStateSnapshot } from "../src/core/goals/session-goal-state.ts";
 import { createHarness, getUserTexts } from "./suite/harness.ts";
 
-function seedActiveGoal(harness: Awaited<ReturnType<typeof createHarness>>): void {
+/**
+ * Seeds `requirementCount` open requirements (req-1..req-N). Callers that drive multiple
+ * continuation turns satisfy one requirement per turn (genuine progress, so the goal-loop's
+ * progress signature — satisfied-requirement count — actually advances) and seed one extra
+ * requirement beyond the turn budget so at least one stays open and the continuation decision
+ * never flips to "finalize" mid-run.
+ */
+function seedActiveGoal(harness: Awaited<ReturnType<typeof createHarness>>, requirementCount = 1): void {
 	let state = createGoalState({ goalId: "g1", userGoal: "Ship large task", now: "T0" });
-	state = applyGoalEvent(state, { type: "add_requirement", id: "req-1", text: "Keep working", now: "T0" });
+	for (let i = 1; i <= requirementCount; i++) {
+		state = applyGoalEvent(state, { type: "add_requirement", id: `req-${i}`, text: `Requirement ${i}`, now: "T0" });
+	}
 	appendGoalStateSnapshot(harness.sessionManager, state);
 }
 
@@ -26,12 +35,14 @@ describe("AgentSession goal idle autosteer", () => {
 	it("injects the default 20 continuation prompts after an idle turn while the goal advances", async () => {
 		const harness = await createHarness();
 		try {
-			seedActiveGoal(harness);
+			// One extra requirement (21) beyond the 20-turn budget so a requirement stays open
+			// through every turn while the other 20 get genuinely satisfied, one per turn.
+			seedActiveGoal(harness, 21);
 			const responses = [fauxAssistantMessage("initial turn settled")];
 			for (let i = 1; i <= 20; i++) {
 				responses.push(
 					fauxAssistantMessage(
-						[fauxToolCall("goal", { action: "add_requirement", requirementId: `auto-${i}`, text: `Auto ${i}` })],
+						[fauxToolCall("goal", { action: "satisfy_requirement", requirementId: `req-${i}` })],
 						{ stopReason: "toolUse" },
 					),
 				);
@@ -53,7 +64,9 @@ describe("AgentSession goal idle autosteer", () => {
 		const harness = await createHarness({ models: [{ id: "lean-model", contextWindow: 16_384 }] });
 		try {
 			expect(harness.session.getModelCapabilityProfile().class).toBe("lean");
-			seedActiveGoal(harness);
+			// One extra requirement (5) beyond the 4 available turns so a requirement stays open
+			// throughout, and each supplied turn genuinely satisfies one requirement.
+			seedActiveGoal(harness, 5);
 
 			// Supply enough turns to run well past the lean cap: if the budget were the default 20,
 			// all four continuation turns would fire. The cap must stop it at 2.
@@ -61,7 +74,7 @@ describe("AgentSession goal idle autosteer", () => {
 			for (let i = 1; i <= 4; i++) {
 				responses.push(
 					fauxAssistantMessage(
-						[fauxToolCall("goal", { action: "add_requirement", requirementId: `auto-${i}`, text: `Auto ${i}` })],
+						[fauxToolCall("goal", { action: "satisfy_requirement", requirementId: `req-${i}` })],
 						{ stopReason: "toolUse" },
 					),
 				);

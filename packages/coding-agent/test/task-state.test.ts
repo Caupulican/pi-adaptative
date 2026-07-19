@@ -130,6 +130,36 @@ describe("task step state", () => {
 		expect(context).toContain("Continue the in_progress step");
 	});
 
+	it("dedupes a duplicate open add but still allows a terminal same-content re-add", () => {
+		const state = addTaskStep(createTaskStepsState("T0"), { content: "Inspect behavior" }, "T1");
+
+		const duplicate = addTaskStep(state, { content: "inspect behavior" }, "T2");
+		expect(duplicate).toBe(state);
+		expect(duplicate.revision).toBe(state.revision);
+		expect(duplicate.steps).toHaveLength(1);
+
+		const completed = updateTaskStep(state, "step-1", { status: "completed", evidence: ["done"] }, "T3");
+		const readded = addTaskStep(completed, { content: "Inspect behavior" }, "T4");
+		expect(readded.steps.map((step) => step.id)).toEqual(["step-1", "step-2"]);
+	});
+
+	it("surfaces a verification nudge in the injected context for a completed step with no evidence", () => {
+		let state = setTaskSteps(
+			createTaskStepsState("T0"),
+			[
+				{ content: "Completed without evidence", status: "completed" },
+				{ content: "Open work", status: "in_progress" },
+			],
+			"T1",
+		);
+		expect(formatTaskStepsContext(state)).toContain(
+			"A completed step has no evidence attached; attach evidence via task_steps update before treating it as verified.",
+		);
+
+		state = updateTaskStep(state, "step-1", { evidence: ["verified"] }, "T2");
+		expect(formatTaskStepsContext(state)).not.toContain("no evidence attached");
+	});
+
 	it("clears state while preserving the monotonic step number", () => {
 		let state = addTaskStep(createTaskStepsState("T0"), { content: "First" }, "T1");
 		state = clearTaskSteps(state, "T2");

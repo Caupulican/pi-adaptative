@@ -22,7 +22,19 @@ export type GoalAction =
 	| { action: "satisfy_requirement"; requirementId: string; evidenceIds?: readonly string[] }
 	| { action: "block_requirement"; requirementId: string; reason: string }
 	| { action: "reopen_requirement"; requirementId: string }
-	| { action: "add_evidence"; evidenceId: string; kind: GoalEvidenceKind; summary: string; uri?: string }
+	| {
+			action: "add_evidence";
+			evidenceId: string;
+			kind: GoalEvidenceKind;
+			summary: string;
+			uri?: string;
+			/**
+			 * Whether `uri` was checked against session records/the filesystem. Computed by the
+			 * tool layer (which has session/filesystem access); `applyGoalAction` stays pure and
+			 * only carries this value through into the recorded {@link GoalEvidenceRef}.
+			 */
+			verified?: boolean;
+	  }
 	| { action: "progress" }
 	| { action: "no_progress" }
 	| { action: "complete" }
@@ -44,12 +56,37 @@ export interface GoalActionFailure {
 
 export type GoalActionResult = GoalActionSuccess | GoalActionFailure;
 
+export interface ApplyGoalActionOptions {
+	/**
+	 * Gate agent-facing 'complete' on at least one satisfied requirement being backed by
+	 * verified-ref evidence (kind 'tool'/'file' with `verified === true`) or kind 'user'
+	 * evidence. Defaults to `true` (on) when omitted — the conservative default. Manual
+	 * completion ({@link completeGoalManually}) is never subject to this gate.
+	 */
+	requireVerifiedEvidenceForCompletion?: boolean;
+}
+
 function requirementExists(state: GoalState, requirementId: string): boolean {
 	return state.requirements.some((requirement) => requirement.id === requirementId);
 }
 
 function evidenceExists(state: GoalState, evidenceId: string): boolean {
 	return state.evidence.some((evidence) => evidence.id === evidenceId);
+}
+
+function isVerifiedOrUserEvidence(evidence: GoalState["evidence"][number]): boolean {
+	return evidence.kind === "user" || evidence.verified === true;
+}
+
+/** Does at least one SATISFIED requirement cite evidence that is verified-ref or kind:'user'? */
+function hasEvidenceBackedSatisfaction(state: GoalState): boolean {
+	return state.requirements.some((requirement) => {
+		if (requirement.status !== "satisfied") return false;
+		return requirement.evidenceIds.some((evidenceId) => {
+			const evidence = state.evidence.find((candidate) => candidate.id === evidenceId);
+			return evidence !== undefined && isVerifiedOrUserEvidence(evidence);
+		});
+	});
 }
 
 /**
@@ -59,7 +96,12 @@ function evidenceExists(state: GoalState, evidenceId: string): boolean {
  * action, and returns either the next state or a validation error. Performs no
  * I/O and never mutates its inputs.
  */
-export function applyGoalAction(current: GoalState | undefined, action: GoalAction, now: string): GoalActionResult {
+export function applyGoalAction(
+	current: GoalState | undefined,
+	action: GoalAction,
+	now: string,
+	options?: ApplyGoalActionOptions,
+): GoalActionResult {
 	if (action.action === "start") {
 		const goalId = action.goalId.trim();
 		const userGoal = action.userGoal.trim();
@@ -102,14 +144,19 @@ export function applyGoalAction(current: GoalState | undefined, action: GoalActi
 		};
 	}
 
-	const event = toGoalEvent(current, action, now);
+	const event = toGoalEvent(current, action, now, options);
 	if (!event.ok) return event;
 	return { ok: true, state: applyGoalEvent(current, event.event) };
 }
 
 type ToGoalEventResult = { ok: true; event: GoalEvent } | GoalActionFailure;
 
-function toGoalEvent(state: GoalState, action: GoalAction, now: string): ToGoalEventResult {
+function toGoalEvent(
+	state: GoalState,
+	action: GoalAction,
+	now: string,
+	options: ApplyGoalActionOptions | undefined,
+): ToGoalEventResult {
 	switch (action.action) {
 		case "add_requirement": {
 			const id = action.requirementId.trim();
@@ -173,7 +220,15 @@ function toGoalEvent(state: GoalState, action: GoalAction, now: string): ToGoalE
 			}
 			return {
 				ok: true,
-				event: { type: "add_evidence", id, kind: action.kind, summary, uri: action.uri?.trim() || undefined, now },
+				event: {
+					type: "add_evidence",
+					id,
+					kind: action.kind,
+					summary,
+					uri: action.uri?.trim() || undefined,
+					verified: action.verified,
+					now,
+				},
 			};
 		}
 		case "progress":
@@ -188,6 +243,13 @@ function toGoalEvent(state: GoalState, action: GoalAction, now: string): ToGoalE
 					error: `Cannot complete goal: ${unsatisfied.length} requirement(s) not satisfied (${unsatisfied
 						.map((requirement) => requirement.id)
 						.join(", ")}).`,
+				};
+			}
+			const requireVerifiedEvidence = options?.requireVerifiedEvidenceForCompletion ?? true;
+			if (requireVerifiedEvidence && !hasEvidenceBackedSatisfaction(state)) {
+				return {
+					ok: false,
+					error: "Cannot complete goal: no satisfied requirement is backed by verified evidence (kind 'tool'/'file' with a validated ref) or kind 'user' evidence. Record such evidence with 'add_evidence' and cite it in 'satisfy_requirement'.",
 				};
 			}
 			return { ok: true, event: { type: "complete_goal", now } };
@@ -225,7 +287,10 @@ export function completeGoalManually(current: GoalState | undefined, now: string
 }
 
 /** Render a compact human-readable summary of the ledger after an action. */
-export function summarizeGoalState(state: GoalState): string {
+export function summarizeGoalState(
+	state: GoalState,
+	options?: { action?: GoalAction; openTaskSteps?: readonly OpenTaskStepRef[] },
+): string {
 	const open = state.requirements.filter((requirement) => requirement.status === "open").length;
 	const satisfied = state.requirements.filter((requirement) => requirement.status === "satisfied").length;
 	const blocked = state.requirements.filter((requirement) => requirement.status === "blocked").length;
@@ -235,5 +300,92 @@ export function summarizeGoalState(state: GoalState): string {
 		`Evidence: ${state.evidence.length}. Stall turns: ${state.stallTurns}.`,
 	];
 	if (state.blockedReason) lines.push(`Blocked reason: ${state.blockedReason}`);
+	if (options?.action) {
+		lines.push(...buildGoalTaskCrossVisibilityNudges(options.action, state, options.openTaskSteps));
+	}
 	return lines.join("\n");
+}
+
+/**
+ * Read-only goal⇄task cross-visibility (bounded slice — no shared state machine).
+ *
+ * `goal-tool-core` never reads or mutates task state itself (it stays pure); callers that DO
+ * have access to the branch-scoped open task steps (e.g. via `buildGoalRuntimeSnapshot`) may
+ * pass them through here to surface a nudge in the tool response when an open task_steps step
+ * appears to reference a requirement the agent just satisfied or completed. Task state is never
+ * written from goal code — this only reads an already-resolved, caller-supplied summary.
+ */
+export interface OpenTaskStepRef {
+	id: string;
+	content: string;
+}
+
+function escapeRegExp(text: string): string {
+	return text.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
+}
+
+/**
+ * Cheap, conservative cross-reference: an open task step "references" a requirement when its
+ * content contains the requirement id as a whole token (not a substring of a longer token), or
+ * contains the requirement's full text verbatim (case-insensitive). Both conditions are chosen
+ * to avoid noisy partial-word matches -- a short common id or a coincidental few-word overlap
+ * does not qualify.
+ */
+function taskStepReferencesRequirement(step: OpenTaskStepRef, requirement: { id: string; text: string }): boolean {
+	const idToken = requirement.id.trim();
+	if (idToken.length >= 2) {
+		const idPattern = new RegExp(`(^|[^a-z0-9])${escapeRegExp(idToken.toLocaleLowerCase())}([^a-z0-9]|$)`, "i");
+		if (idPattern.test(step.content)) return true;
+	}
+	const text = requirement.text.trim();
+	if (text.length >= 8 && step.content.toLocaleLowerCase().includes(text.toLocaleLowerCase())) return true;
+	return false;
+}
+
+/**
+ * Nudge lines for open task steps that reference any of `requirementIds` (deduped per
+ * requirement, one line naming every referencing step). Empty when there is nothing to say.
+ */
+export function findRequirementCrossReferenceNudges(
+	state: GoalState,
+	requirementIds: readonly string[],
+	openTaskSteps: readonly OpenTaskStepRef[],
+): string[] {
+	if (openTaskSteps.length === 0 || requirementIds.length === 0) return [];
+	const nudges: string[] = [];
+	for (const requirementId of requirementIds) {
+		const requirement = state.requirements.find((candidate) => candidate.id === requirementId);
+		if (!requirement) continue;
+		const referencing = openTaskSteps.filter((step) => taskStepReferencesRequirement(step, requirement));
+		if (referencing.length === 0) continue;
+		const stepList = referencing.map((step) => step.id).join(", ");
+		nudges.push(
+			`Note: open task step(s) ${stepList} appear to reference satisfied requirement '${requirement.id}' -- consider updating them via task_steps once covered.`,
+		);
+	}
+	return nudges;
+}
+
+/**
+ * After 'satisfy_requirement' or 'complete', nudge lines for open task steps whose content
+ * references a just-satisfied requirement. Returns `[]` for every other action, or when
+ * `openTaskSteps` was not supplied (the default -- backward compatible, no behavior change for
+ * callers that do not pass task-step context).
+ */
+export function buildGoalTaskCrossVisibilityNudges(
+	action: GoalAction,
+	state: GoalState,
+	openTaskSteps: readonly OpenTaskStepRef[] | undefined,
+): string[] {
+	if (!openTaskSteps || openTaskSteps.length === 0) return [];
+	if (action.action === "satisfy_requirement") {
+		return findRequirementCrossReferenceNudges(state, [action.requirementId.trim()], openTaskSteps);
+	}
+	if (action.action === "complete") {
+		const satisfiedIds = state.requirements
+			.filter((requirement) => requirement.status === "satisfied")
+			.map((requirement) => requirement.id);
+		return findRequirementCrossReferenceNudges(state, satisfiedIds, openTaskSteps);
+	}
+	return [];
 }

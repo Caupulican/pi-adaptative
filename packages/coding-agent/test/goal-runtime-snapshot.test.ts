@@ -19,7 +19,7 @@ describe("Phase 10B: Goal Runtime Snapshot", () => {
 	it("empty entries produce missing-goal continuation ask-user and empty arrays", () => {
 		const sessionManager = SessionManager.inMemory();
 		const snapshot = buildGoalRuntimeSnapshot({
-			entries: sessionManager.getEntries(),
+			sessionManager,
 			settings: { maxStallTurns: 3 },
 		});
 
@@ -47,7 +47,7 @@ describe("Phase 10B: Goal Runtime Snapshot", () => {
 		);
 
 		const snapshot = buildGoalRuntimeSnapshot({
-			entries: sessionManager.getEntries(),
+			sessionManager,
 			settings: { maxStallTurns: 3 },
 		});
 
@@ -86,7 +86,7 @@ describe("Phase 10B: Goal Runtime Snapshot", () => {
 		});
 
 		const snapshot = buildGoalRuntimeSnapshot({
-			entries: sessionManager.getEntries(),
+			sessionManager,
 			settings: { maxStallTurns: 3 },
 		});
 
@@ -105,7 +105,7 @@ describe("Phase 10B: Goal Runtime Snapshot", () => {
 		appendGoalStateSnapshot(sessionManager, state);
 
 		const snapshot = buildGoalRuntimeSnapshot({
-			entries: sessionManager.getEntries(),
+			sessionManager,
 			settings: { maxStallTurns: 3 },
 		});
 
@@ -120,7 +120,7 @@ describe("Phase 10B: Goal Runtime Snapshot", () => {
 		appendGoalStateSnapshot(sessionManager, state);
 
 		const snapshot = buildGoalRuntimeSnapshot({
-			entries: sessionManager.getEntries(),
+			sessionManager,
 			settings: { maxStallTurns: 3 },
 		});
 
@@ -158,7 +158,7 @@ describe("Phase 10B: Goal Runtime Snapshot", () => {
 		sessionManager.appendCustomEntry("learning_decision", { version: 1, decision: { invalid: true } });
 
 		const snapshot = buildGoalRuntimeSnapshot({
-			entries: sessionManager.getEntries(),
+			sessionManager,
 			settings: { maxStallTurns: 3 },
 		});
 
@@ -193,7 +193,7 @@ describe("Phase 10B: Goal Runtime Snapshot", () => {
 		});
 
 		const snapshot1 = buildGoalRuntimeSnapshot({
-			entries: sessionManager.getEntries(),
+			sessionManager,
 			settings: { maxStallTurns: 3 },
 		});
 
@@ -204,7 +204,7 @@ describe("Phase 10B: Goal Runtime Snapshot", () => {
 		snapshot1.learningDecisions[0].summary = "Mutated";
 
 		const snapshot2 = buildGoalRuntimeSnapshot({
-			entries: sessionManager.getEntries(),
+			sessionManager,
 			settings: { maxStallTurns: 3 },
 		});
 

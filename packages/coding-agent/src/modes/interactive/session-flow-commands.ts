@@ -710,10 +710,26 @@ export async function handleGoalCommand(host: GoalCommandHost, text: string): Pr
 	await host.session.sendUserMessage(
 		`Start goal: ${goalText}\n\nUse the goal tool this turn to decompose this goal into concrete open requirements with add_requirement actions, and satisfy_requirement ${goalId}-r1 once the decomposed requirements cover it.`,
 	);
-	const result = await host.session.continueGoalLoop({ maxTurns: 1, maxStallTurns: 20, maxWallClockMinutes: 0 });
-	const continuation = result.finalSnapshot.continuation;
-	host.showStatus(`Goal ${overriding ? "overridden" : "started"}: ${continuation.action}/${continuation.reasonCode}.`);
-	host.refreshAutonomyFooterStatus();
+	const verb = overriding ? "overridden" : "started";
+	try {
+		const result = await host.session.continueGoalLoop({ maxTurns: 1, maxStallTurns: 20, maxWallClockMinutes: 0 });
+		if (result.stopReason === "already_continuing") {
+			// The idle autosteer timer armed by `sendUserMessage` above already won the single-flight
+			// guard (`BackgroundLaneController.continueGoalLoopExclusive`) — this request never ran a
+			// pass, so reporting `finalSnapshot.continuation` here would misleadingly imply a fresh
+			// decision was made.
+			host.showStatus(`Goal ${verb}: the autonomy loop is already continuing this goal.`);
+		} else if (result.stopReason === "session_disposed") {
+			host.showStatus(`Goal ${verb}, but the session was disposed before continuation could run.`);
+		} else {
+			const continuation = result.finalSnapshot.continuation;
+			host.showStatus(`Goal ${verb}: ${continuation.action}/${continuation.reasonCode}.`);
+		}
+	} catch (error) {
+		host.showError(`Goal continuation failed: ${error instanceof Error ? error.message : String(error)}`);
+	} finally {
+		host.refreshAutonomyFooterStatus();
+	}
 }
 
 export interface TaskCommandHost {

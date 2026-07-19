@@ -27,7 +27,7 @@ describe("session task step state", () => {
 		session.appendCustomEntry(TASK_STEPS_STATE_CUSTOM_TYPE, { version: 1, state: { broken: true } });
 		appendTaskStepsStateSnapshot(session, second);
 
-		expect(getLatestTaskStepsStateSnapshot(session.getEntries())).toEqual(second);
+		expect(getLatestTaskStepsStateSnapshot(session)).toEqual(second);
 	});
 
 	it("does not share state between sessions", () => {
@@ -36,8 +36,8 @@ describe("session task step state", () => {
 		const state = addTaskStep(createTaskStepsState("T0"), { content: "Only first" }, "T1");
 		appendTaskStepsStateSnapshot(firstSession, state);
 
-		expect(getLatestTaskStepsStateSnapshot(firstSession.getEntries())).toEqual(state);
-		expect(getLatestTaskStepsStateSnapshot(secondSession.getEntries())).toBeUndefined();
+		expect(getLatestTaskStepsStateSnapshot(firstSession)).toEqual(state);
+		expect(getLatestTaskStepsStateSnapshot(secondSession)).toBeUndefined();
 	});
 
 	it("does not retain caller-owned arrays", () => {
@@ -47,7 +47,7 @@ describe("session task step state", () => {
 		const mutableEvidence = state.steps[0].evidence as string[];
 		mutableEvidence.push("mutated");
 
-		expect(getLatestTaskStepsStateSnapshot(session.getEntries())?.steps[0].evidence).toEqual(["original"]);
+		expect(getLatestTaskStepsStateSnapshot(session)?.steps[0].evidence).toEqual(["original"]);
 	});
 
 	it("restores a snapshot after reopening a persisted session", () => {
@@ -77,6 +77,6 @@ describe("session task step state", () => {
 		if (!sessionFile) throw new Error("Expected persisted session file");
 
 		const reopened = SessionManager.open(sessionFile, directory, directory);
-		expect(getLatestTaskStepsStateSnapshot(reopened.getEntries())).toEqual(state);
+		expect(getLatestTaskStepsStateSnapshot(reopened)).toEqual(state);
 	});
 });

@@ -43,6 +43,8 @@ export function isWorkerResult(value: unknown): value is WorkerResult {
 
 	if (obj.usageReportId !== undefined && typeof obj.usageReportId !== "string") return false;
 	if (obj.createdAt !== undefined && typeof obj.createdAt !== "string") return false;
+	if (obj.parentReviewRequired !== undefined && typeof obj.parentReviewRequired !== "boolean") return false;
+	if (obj.parentReviewedAt !== undefined && typeof obj.parentReviewedAt !== "string") return false;
 
 	if (obj.evidence !== undefined && !isEvidenceBundle(obj.evidence)) return false;
 
@@ -60,6 +62,19 @@ export function requiresParentReview(result: WorkerResult): boolean {
 		return true;
 	}
 	return false;
+}
+
+/**
+ * True iff {@link validateWorkerResult}'s gate would flag this result "ask-user" /
+ * "parent_review_required" (the two branches at :110 and :178 below) — an otherwise-completed
+ * result the parent must explicitly look at because it reports blockers, or reports file mutations
+ * that passed path-scope validation. Reuses `validateWorkerResult` itself rather than a
+ * separately-maintained heuristic, so a persisted review marker can never drift from the
+ * gate's actual verdict.
+ */
+export function isParentReviewRequired(args: { request: WorkerRequest; result: WorkerResult; cwd?: string }): boolean {
+	const acceptance = validateWorkerResult(args);
+	return acceptance.outcome === "ask-user" && acceptance.reasonCode === "parent_review_required";
 }
 
 export function validateWorkerResult(args: {

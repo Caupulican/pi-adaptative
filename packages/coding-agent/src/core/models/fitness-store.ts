@@ -1,6 +1,7 @@
 import { existsSync, mkdirSync, readFileSync, writeFileSync } from "node:fs";
 import { cpus, totalmem } from "node:os";
-import { dirname, join } from "node:path";
+import { dirname } from "node:path";
+import { stateFile } from "../agent-paths.ts";
 import type { ModelFitnessReport } from "../research/model-fitness.ts";
 
 /**
@@ -55,7 +56,7 @@ export class FitnessStore {
 	}
 
 	static forAgentDir(agentDir: string, options?: { fingerprint?: () => HostFingerprint }): FitnessStore {
-		return new FitnessStore(join(agentDir, "state", "model-fitness.json"), options);
+		return new FitnessStore(stateFile(agentDir, "model-fitness.json"), options);
 	}
 
 	private load(): FitnessStoreFile {

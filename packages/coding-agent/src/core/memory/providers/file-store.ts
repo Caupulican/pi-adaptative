@@ -1,7 +1,7 @@
 import { existsSync, promises as fs, mkdirSync, writeFileSync } from "fs";
-import { join } from "path";
 import lockfile from "proper-lockfile";
 import { type Static, Type } from "typebox";
+import { configFile } from "../../agent-paths.ts";
 import type { MemoryPromptBudget } from "../../context/memory-prompt-budget.ts";
 import type { ToolDefinition } from "../../extensions/types.ts";
 import { hasInvisibleUnicode, scanContextFileThreats, stripInvisibleUnicode } from "../../resource-loader.ts";
@@ -9,7 +9,7 @@ import { jaccard, tokenize } from "../../tools/skill-audit.ts";
 import type { MemoryLifecycleContext, MemoryProvider } from "../memory-provider.ts";
 
 /**
- * R5 confront-before-write (anti append-rot): if `content` is a near-duplicate of an existing
+ * Confront-before-write (anti append-rot): if `content` is a near-duplicate of an existing
  * non-empty line (token Jaccard ≥ threshold — i.e. the same fact reworded), supersede that line in
  * place and return the rewritten file; otherwise return null (the caller appends normally).
  */
@@ -24,7 +24,7 @@ export function supersedeNearDuplicateLine(existing: string, content: string): s
 		const line = lines[i].trim();
 		if (!line) continue;
 		// Never supersede structural Markdown (headings, list markers as headings) — a fact must not
-		// silently overwrite section structure (Bug #15).
+		// silently overwrite section structure.
 		if (line.startsWith("#")) continue;
 		const score = jaccard(contentTokens, tokenize(line));
 		if (score >= bestScore) {
@@ -77,8 +77,8 @@ export class FileStoreProvider implements MemoryProvider {
 
 	public async initialize(_sessionId: string, ctx: MemoryLifecycleContext): Promise<void> {
 		this.ctx = ctx;
-		this.memoryFilePath = join(ctx.agentDir, "MEMORY.md");
-		this.userFilePath = join(ctx.agentDir, "USER.md");
+		this.memoryFilePath = configFile(ctx.agentDir, "MEMORY.md");
+		this.userFilePath = configFile(ctx.agentDir, "USER.md");
 
 		// Ensure agentDir exists
 		if (!existsSync(ctx.agentDir)) {
@@ -240,7 +240,7 @@ export class FileStoreProvider implements MemoryProvider {
 							if (content === undefined) {
 								throw new Error("Parameter 'content' is required for action 'add'.");
 							}
-							// R5: confront before write. If this fact is a near-duplicate of an existing line,
+							// Confront before write. If this fact is a near-duplicate of an existing line,
 							// supersede it in place instead of appending a redundant copy (prevents append-rot).
 							const superseded = supersedeNearDuplicateLine(currentOnDisk, content);
 							if (superseded !== null) {

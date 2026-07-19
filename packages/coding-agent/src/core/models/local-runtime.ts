@@ -24,6 +24,7 @@ import {
 	waitForChildProcessWithTermination,
 } from "../../utils/child-process.ts";
 import { StreamingLineDecoder } from "../../utils/streaming-lines.ts";
+import { modelsDir as agentModelsDir, runtimesDir as agentRuntimesDir } from "../agent-paths.ts";
 
 const MAX_OLLAMA_PULL_LINE_CHARS = 64 * 1024 * 1024;
 
@@ -358,7 +359,7 @@ export class OllamaRuntime {
 	}
 
 	ownedModelsDir(): string {
-		return join(this._agentDir, "models", "ollama");
+		return agentModelsDir("ollama", this._agentDir);
 	}
 
 	userModelsDir(): string {
@@ -392,7 +393,7 @@ export class OllamaRuntime {
 
 	private _findBinary(): { path: string; source: "system" | "user" | "pi-owned" } | undefined {
 		const binaryName = this._platform() === "win32" ? "ollama.exe" : "ollama";
-		const piOwned = join(this._agentDir, "runtimes", "ollama", "bin", binaryName);
+		const piOwned = join(agentRuntimesDir("ollama", this._agentDir), "bin", binaryName);
 		if (this._exists(piOwned)) return { path: piOwned, source: "pi-owned" };
 		const userLevel = join(this._homeDir, ".local", "share", "ollama-dist", "bin", binaryName);
 		if (this._exists(userLevel)) return { path: userLevel, source: "user" };
@@ -584,7 +585,7 @@ export class OllamaRuntime {
 			return { ok: false, error: `download-fail: HTTP ${response.status}` };
 		}
 
-		const destDir = join(this._agentDir, "runtimes", "ollama");
+		const destDir = agentRuntimesDir("ollama", this._agentDir);
 		mkdirSync(destDir, { recursive: true });
 
 		onProgress?.(`Extracting ${asset.name}…`);
@@ -1009,7 +1010,7 @@ export class TransformersRuntime {
 	}
 
 	get runtimeDir(): string {
-		return join(this._agentDir, "runtimes", TRANSFORMERS_RUNTIME_DIR_NAME);
+		return agentRuntimesDir(TRANSFORMERS_RUNTIME_DIR_NAME, this._agentDir);
 	}
 
 	get venvDir(): string {
@@ -1017,7 +1018,7 @@ export class TransformersRuntime {
 	}
 
 	get cacheDir(): string {
-		return join(this._agentDir, "models", "huggingface");
+		return agentModelsDir("huggingface", this._agentDir);
 	}
 
 	get pythonPath(): string {

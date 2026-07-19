@@ -154,6 +154,15 @@ export interface WorkerResult {
 	blockers?: readonly string[];
 	usageReportId?: string;
 	createdAt?: string;
+	/** Stamped at persistence time when validateWorkerResult's gate flagged this result
+	 * "ask-user"/"parent_review_required" (mutated files or blockers on an otherwise-completed run).
+	 * Undefined when not computable (no WorkerRequest was available to validate against, e.g.
+	 * entries recorded before this field existed) — distinct from `false`, which means the gate explicitly cleared it. */
+	parentReviewRequired?: boolean;
+	/** ISO 8601 timestamp set once the parent explicitly acknowledges an unreviewed mutation via
+	 * delegate_status's "review" action. Presence means reviewed; absence keeps the notice sticky.
+	 * The ack is durable — re-derived from the latest persisted snapshot, not session-local state. */
+	parentReviewedAt?: string;
 }
 
 export type LearningDecisionKind = "no-op" | "proposal" | "apply";

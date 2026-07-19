@@ -6,6 +6,8 @@ import { basename, dirname, join, relative, resolve, sep } from "path";
 import lockfile from "proper-lockfile";
 import { CONFIG_DIR_NAME, getAgentDir, getProfilesDir } from "../config.ts";
 import { normalizePath, resolvePath } from "../utils/paths.ts";
+import { configFile } from "./agent-paths.ts";
+import { DEFAULT_CONTEXT_GC_SETTINGS } from "./context-gc.ts";
 import {
 	DEFAULT_GOAL_AUTO_CONTINUE,
 	DEFAULT_GOAL_AUTO_CONTINUE_DELAY_MS,
@@ -39,9 +41,9 @@ export interface ScoutSettings {
 
 export interface SemanticMemoryGcSettings {
 	enabled?: boolean; // default: true
-	preserveRecentPages?: number; // default: 2
-	minChars?: number; // default: 1200
-	markers?: string[]; // default: Automata/Mind XML-ish response tags
+	preserveRecentPages?: number; // default: 1 -- see context-gc.ts DEFAULT_CONTEXT_GC_SETTINGS (canonical)
+	minChars?: number; // default: 900 -- see context-gc.ts DEFAULT_CONTEXT_GC_SETTINGS (canonical)
+	markers?: string[]; // default: memory/automata recall markers + the task_steps_context checklist marker
 }
 
 export interface ContextGcSettings {
@@ -209,7 +211,7 @@ export interface ModelRouterSettings {
 	fitnessGate?: boolean; // default: false — opt-in; blocks tier models whose probed relevant lane failed (Class B, subtractive)
 	judgeModel?: string; // model pattern for the routing-only judge; unset falls back to mediumModel
 	executorModel?: string; // model pattern for the local executor lane (direct toolkit commands); unset disables it
-	// Per-tier thinking (R1): overrides the inherited-and-clamped session thinking level for a routed
+	// Per-tier thinking: overrides the inherited-and-clamped session thinking level for a routed
 	// turn on that tier only (see agent-session.ts's routed-turn swap). Unset reproduces today's
 	// behavior exactly — inherit the session thinking level, clamped to the routed model. learningModel
 	// already has its own thinking via autoLearn.thinkingLevel, so there is deliberately no learningThinking.
@@ -493,10 +495,14 @@ export function getDirectoryResourceProfileInfo(
 ): DirectoryResourceProfileInfo {
 	const root = findDirectoryProfileRoot(cwd);
 	const hash = createHash("sha256").update(root).digest("hex").slice(0, 16);
+	// resource-profiles/ stays at the agentDir root (not state/): moving it needs the two user-visible
+	// scope descriptions in profile-menu-controller.ts updated in the same change, which has not
+	// happened yet. Still routed through the SSOT root accessor so the eventual move is a one-line
+	// change here.
 	return {
 		root,
 		hash,
-		path: join(resolvePath(agentDir), "resource-profiles", hash, "settings.json"),
+		path: join(configFile(resolvePath(agentDir), "resource-profiles"), hash, "settings.json"),
 	};
 }
 
@@ -631,7 +637,7 @@ export interface ProfileDefinitionInput {
 	thinking?: ThinkingLevel;
 	modelRouter?: ModelRouterSettings;
 	/**
-	 * Situational identity (R6): a system-prompt prefix injected while this profile is active, so a
+	 * Situational identity: a system-prompt prefix injected while this profile is active, so a
 	 * profile becomes a full "situation" = soul + capabilities + model/thinking, switched atomically.
 	 */
 	soul?: string;
@@ -1345,12 +1351,12 @@ export class SettingsManager {
 	}
 
 	/**
-	 * Situational soul(s) of the currently active profile(s) (R6): a system-prompt identity prefix
+	 * Situational soul(s) of the currently active profile(s): a system-prompt identity prefix
 	 * injected while the profile is active. Multiple active profiles' souls are concatenated.
 	 */
 	getActiveProfileSoul(): string | undefined {
 		// First-wins precedence (like profile model/thinking): the most-specific active profile's soul
-		// is the identity — concatenating multiple souls would inject contradictory identities (Bug #16).
+		// is the identity — concatenating multiple souls would inject contradictory identities.
 		const registry = this.getProfileRegistry();
 		const seen = new Set<string>();
 		for (const profileName of this.getActiveResourceProfileNames()) {
@@ -2577,55 +2583,33 @@ export class SettingsManager {
 			markers: string[];
 		};
 	} {
+		// Per-field fallback throughout (never a whole-object `??`) so an explicit partial override --
+		// e.g. only `contextGc.minToolResultChars`, or only `semanticMemory.enabled` -- still gets the
+		// canonical default for every field it didn't set. Every fallback DERIVES from context-gc.ts's
+		// exported DEFAULT_CONTEXT_GC_SETTINGS (the same object applyContextGc's own normalizer falls
+		// back to) instead of a hand-kept copy, so this method and context-gc.ts's defaults can never
+		// drift again -- hand-copied fallbacks here previously (a) missed the "<task_steps_context"
+		// marker context-gc.ts's own default carries, silently disabling GC packing
+		// for that page under default settings, and (b) diverged on the `tools` list (missing
+		// "run_toolkit_script", present only here) -- both classes of drift are now structurally
+		// impossible since there is exactly one place these defaults are written down.
 		return {
-			enabled: this.settings.contextGc?.enabled ?? true,
-			preserveRecentMessages: this.settings.contextGc?.preserveRecentMessages ?? 8,
-			minToolResultChars: this.settings.contextGc?.minToolResultChars ?? 1200,
-			tools: this.settings.contextGc?.tools ?? [
-				"read",
-				"bash",
-				"python",
-				"powershell",
-				"rg",
-				"grep",
-				"find",
-				"ls",
-				"skill_open",
-				"automata_graph_status",
-				"automata_graph_search",
-				"automata_graph_query",
-				"automata_graph_neighbors",
-				"automata_graph_path",
-				"automata_graph_pointer_pack",
-				"learning_query_memory",
-				"subagent",
-				"delegate",
-				"task_steps",
-				"task_background",
-				"task_goal",
-				"run_ledger",
-				"context_headroom_retrieve",
-				"headroom_retrieve",
-			],
+			enabled: this.settings.contextGc?.enabled ?? DEFAULT_CONTEXT_GC_SETTINGS.enabled,
+			preserveRecentMessages:
+				this.settings.contextGc?.preserveRecentMessages ?? DEFAULT_CONTEXT_GC_SETTINGS.preserveRecentMessages,
+			minToolResultChars:
+				this.settings.contextGc?.minToolResultChars ?? DEFAULT_CONTEXT_GC_SETTINGS.minToolResultChars,
+			tools: this.settings.contextGc?.tools ?? DEFAULT_CONTEXT_GC_SETTINGS.tools,
 			semanticMemory: {
-				enabled: this.settings.contextGc?.semanticMemory?.enabled ?? true,
-				preserveRecentPages: this.settings.contextGc?.semanticMemory?.preserveRecentPages ?? 1,
-				minChars: this.settings.contextGc?.semanticMemory?.minChars ?? 900,
-				markers: this.settings.contextGc?.semanticMemory?.markers ?? [
-					// Generic recall-page marker the bundled default provider (transcript-recall)
-					// emits; must be present here because a non-empty settings list fully replaces
-					// the context-gc code default that already includes it.
-					"<memory_context",
-					"<automata_context",
-					"<automata_response",
-					"<automata_query",
-					"<automata_fetch",
-					"<memory_lifecycle_audit",
-					"<memory_lifecycle_purge",
-					"<automata_doctor",
-					"<automata_optimizer",
-					"<automata_mesh",
-				],
+				enabled:
+					this.settings.contextGc?.semanticMemory?.enabled ?? DEFAULT_CONTEXT_GC_SETTINGS.semanticMemory.enabled,
+				preserveRecentPages:
+					this.settings.contextGc?.semanticMemory?.preserveRecentPages ??
+					DEFAULT_CONTEXT_GC_SETTINGS.semanticMemory.preserveRecentPages,
+				minChars:
+					this.settings.contextGc?.semanticMemory?.minChars ?? DEFAULT_CONTEXT_GC_SETTINGS.semanticMemory.minChars,
+				markers:
+					this.settings.contextGc?.semanticMemory?.markers ?? DEFAULT_CONTEXT_GC_SETTINGS.semanticMemory.markers,
 			},
 		};
 	}

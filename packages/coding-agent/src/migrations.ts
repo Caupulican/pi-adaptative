@@ -6,6 +6,7 @@ import chalk from "chalk";
 import { chmodSync, existsSync, mkdirSync, readdirSync, readFileSync, renameSync, rmSync, writeFileSync } from "fs";
 import { dirname, join } from "path";
 import { CONFIG_DIR_NAME, getAgentDir, getBinDir } from "./config.ts";
+import { stateDir } from "./core/agent-paths.ts";
 import { migrateKeybindingsConfig } from "./core/keybindings.ts";
 import { isLegacyEnvVarNameConfigValue } from "./core/resolve-config-value.ts";
 import { stripJsonComments } from "./utils/json.ts";
@@ -358,6 +359,41 @@ function migrateToolsToBin(): void {
 }
 
 /**
+ * Root-level machine-managed stragglers to relocate into their canonical `state/` location.
+ * Every other machine-managed file already writes through
+ * `state/`/`cache/`/`work/` via `core/agent-paths.ts` -- this is the one confirmed root straggler.
+ * Deliberately NOT included: `resource-profiles/` (moving it would also require updating the two
+ * user-visible scope descriptions in `profile-menu-controller.ts`, out of this migration's file
+ * scope -- kept at root, recorded OPEN) and reload-coordination (verified already `work/`-scoped via
+ * `getReloadCoordinationDir`, so it was never a root straggler to begin with).
+ */
+const AGENT_DIR_ROOT_TO_STATE_STRAGGLERS = ["trust.json"];
+
+/**
+ * Move confirmed root-level machine-managed stragglers into `state/`. Idempotent (a prior move
+ * leaves nothing at the old path, so a re-run is a no-op) and partial-run-tolerant (a target that
+ * already exists is left untouched -- never overwritten, so a half-completed earlier run converges
+ * instead of clobbering data). Each move is independently try/catch-guarded: startup migrations must
+ * never throw, and one straggler failing to move must not block the others or abort startup. Never
+ * touches user config/resources -- only the explicit allowlist above.
+ */
+export function migrateAgentDirLayout(agentDir: string): void {
+	const targetDir = stateDir(agentDir);
+	for (const name of AGENT_DIR_ROOT_TO_STATE_STRAGGLERS) {
+		try {
+			const oldPath = join(agentDir, name);
+			if (!existsSync(oldPath)) continue;
+			const newPath = join(targetDir, name);
+			if (existsSync(newPath)) continue; // Partial prior run: target already migrated, never overwrite.
+			mkdirSync(targetDir, { recursive: true });
+			renameSync(oldPath, newPath);
+		} catch {
+			// Best-effort: startup must not fail because one straggler could not be relocated.
+		}
+	}
+}
+
+/**
  * Check for deprecated hooks/ and tools/ directories.
  * Note: tools/ may contain fd/rg binaries extracted by pi, so only warn if it has other files.
  */
@@ -461,6 +497,7 @@ export function runMigrations(cwd: string): {
 	migratedAuthProviders: string[];
 	deprecationWarnings: string[];
 } {
+	migrateAgentDirLayout(getAgentDir());
 	const migratedAuthProviders = migrateAuthToAuthJson();
 	migrateExplicitEnvVarConfigValues();
 	migrateSessionsFromAgentRoot();

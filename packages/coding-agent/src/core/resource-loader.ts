@@ -8,6 +8,7 @@ import type { ResourceDiagnostic } from "./diagnostics.ts";
 export type { ResourceCollision, ResourceDiagnostic } from "./diagnostics.ts";
 
 import { canonicalizePath, isLocalPath, resolvePath } from "../utils/paths.ts";
+import { configFile, resourceDir } from "./agent-paths.ts";
 import { createEventBus, type EventBus } from "./event-bus.ts";
 import {
 	createExtensionRuntime,
@@ -1352,10 +1353,10 @@ export class DefaultResourceLoader implements ResourceLoader {
 
 		const normalizedPath = resolve(filePath);
 		const agentRoots = [
-			join(this.agentDir, "skills"),
-			join(this.agentDir, "prompts"),
-			join(this.agentDir, "themes"),
-			join(this.agentDir, "extensions"),
+			resourceDir("skills", this.agentDir),
+			resourceDir("prompts", this.agentDir),
+			resourceDir("themes", this.agentDir),
+			resourceDir("extensions", this.agentDir),
 		];
 		const projectRoots = [
 			join(this.cwd, CONFIG_DIR_NAME, "skills"),
@@ -1414,7 +1415,7 @@ export class DefaultResourceLoader implements ResourceLoader {
 		const themes: Theme[] = [];
 		const diagnostics: ResourceDiagnostic[] = [];
 		if (includeDefaults) {
-			const defaultDirs = [join(this.agentDir, "themes"), join(this.cwd, CONFIG_DIR_NAME, "themes")];
+			const defaultDirs = [resourceDir("themes", this.agentDir), join(this.cwd, CONFIG_DIR_NAME, "themes")];
 
 			for (const dir of defaultDirs) {
 				this.loadThemesFromDir(dir, themes, diagnostics);
@@ -1565,7 +1566,7 @@ export class DefaultResourceLoader implements ResourceLoader {
 			return projectPath;
 		}
 
-		const globalPath = join(this.agentDir, "SYSTEM.md");
+		const globalPath = configFile(this.agentDir, "SYSTEM.md");
 		if (existsSync(globalPath)) {
 			return globalPath;
 		}
@@ -1579,7 +1580,7 @@ export class DefaultResourceLoader implements ResourceLoader {
 			return projectPath;
 		}
 
-		const globalPath = join(this.agentDir, "APPEND_SYSTEM.md");
+		const globalPath = configFile(this.agentDir, "APPEND_SYSTEM.md");
 		if (existsSync(globalPath)) {
 			return globalPath;
 		}

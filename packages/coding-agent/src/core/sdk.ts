@@ -1,9 +1,9 @@
-import { join } from "node:path";
 import { Agent, type AgentMessage, convertToLlm, type ThinkingLevel } from "@caupulican/pi-agent-core";
 import { getDefaultSessionDir, SessionManager } from "@caupulican/pi-agent-core/node";
 import { clampThinkingLevel, type Message, type Model, streamSimple } from "@caupulican/pi-ai";
 import { getAgentDir } from "../config.ts";
 import { resolvePath } from "../utils/paths.ts";
+import { configFile } from "./agent-paths.ts";
 import { AgentSession } from "./agent-session.ts";
 import { formatNoModelsAvailableMessage } from "./auth-guidance.ts";
 import { AuthStorage } from "./auth-storage.ts";
@@ -231,8 +231,8 @@ export async function createAgentSession(options: CreateAgentSessionOptions = {}
 	let resourceLoader = options.resourceLoader;
 
 	// Use provided or create AuthStorage and ModelRegistry
-	const authPath = options.agentDir ? join(agentDir, "auth.json") : undefined;
-	const modelsPath = options.agentDir ? join(agentDir, "models.json") : undefined;
+	const authPath = options.agentDir ? configFile(agentDir, "auth.json") : undefined;
+	const modelsPath = options.agentDir ? configFile(agentDir, "models.json") : undefined;
 	const authStorage = options.authStorage ?? AuthStorage.create(authPath);
 	const modelRegistry = options.modelRegistry ?? ModelRegistry.create(authStorage, modelsPath);
 

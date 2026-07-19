@@ -1,7 +1,7 @@
 import { existsSync, mkdirSync } from "node:fs";
-import { join } from "node:path";
 import { getAgentDir } from "../config.ts";
 import { ensureTool } from "../utils/tools-manager.ts";
+import { cacheFile, runtimesDir } from "./agent-paths.ts";
 import { execCommand } from "./exec.ts";
 
 export const PYTHON_RUNTIME_REQUEST = ">=3.10";
@@ -84,8 +84,8 @@ export function createPythonRuntimeManager(deps: PythonRuntimeDependencies): Pyt
 			return { status: "uv-unavailable", reason: "uv is unavailable; run `pi doctor` or reconnect and retry." };
 		}
 
-		const runtimeRoot = join(deps.agentDir, "runtimes", "python");
-		const cacheRoot = join(deps.agentDir, "cache", "uv");
+		const runtimeRoot = runtimesDir("python", deps.agentDir);
+		const cacheRoot = cacheFile(deps.agentDir, "uv");
 		deps.makeDirectory(runtimeRoot);
 		deps.makeDirectory(cacheRoot);
 		const env: NodeJS.ProcessEnv = {

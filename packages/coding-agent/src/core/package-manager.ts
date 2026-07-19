@@ -31,6 +31,7 @@ import { spawnProcess, spawnProcessSync, waitForChildProcessWithTermination } fr
 import { type GitSource, parseGitUrl } from "../utils/git.ts";
 import { canonicalizePath, isLocalPath, markPathIgnoredByCloudSync, resolvePath } from "../utils/paths.ts";
 import { getProcessWorkRun } from "../utils/work-directory.ts";
+import { gitDir, npmDir } from "./agent-paths.ts";
 import { createRollingOutputBuffer } from "./exec.ts";
 import { isStdoutTakenOver } from "./output-guard.ts";
 import { mergeResourceProfileMap, parseResourceProfileBlocks } from "./resource-profile-blocks.ts";
@@ -1926,7 +1927,7 @@ export class DefaultPackageManager implements PackageManager {
 			this.assertProjectTrustedForScope(scope);
 			return join(this.cwd, CONFIG_DIR_NAME, "npm");
 		}
-		return join(this.agentDir, "npm");
+		return npmDir(this.agentDir);
 	}
 
 	private getGlobalNpmRoot(): string {
@@ -1967,7 +1968,7 @@ export class DefaultPackageManager implements PackageManager {
 			this.assertProjectTrustedForScope(scope);
 			return join(this.cwd, CONFIG_DIR_NAME, "npm", "node_modules", source.name);
 		}
-		return join(this.agentDir, "npm", "node_modules", source.name);
+		return join(npmDir(this.agentDir), "node_modules", source.name);
 	}
 
 	private getLegacyGlobalNpmInstallPath(source: NpmSource): string | undefined {
@@ -2006,7 +2007,7 @@ export class DefaultPackageManager implements PackageManager {
 			this.assertProjectTrustedForScope(scope);
 			return join(this.cwd, CONFIG_DIR_NAME, "git");
 		}
-		return join(this.agentDir, "git");
+		return gitDir(this.agentDir);
 	}
 
 	private getTemporaryDir(prefix: string, suffix?: string): string {

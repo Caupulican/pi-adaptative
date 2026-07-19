@@ -5,9 +5,13 @@ import {
 	clearTaskSteps,
 	compactTaskSteps,
 	createTaskStepsState,
+	findOpenDuplicateStep,
 	formatTaskSteps,
+	hasUnverifiedCompletedStep,
 	MAX_TASK_STEPS,
+	resolveTaskStepSelector,
 	setTaskSteps,
+	type TaskStep,
 	type TaskStepInput,
 	type TaskStepsState,
 	updateTaskStep,
@@ -91,6 +95,10 @@ export interface TaskStepsToolDetails {
 	openStepCount?: number;
 	verificationNudgeNeeded?: boolean;
 	showCompleted?: boolean;
+	/** Set when `add` was a no-op because an open step already carries this content. */
+	duplicateOfStepId?: string;
+	/** Step ids silently demoted to pending because another step became active in this call. */
+	demotedStepIds?: readonly string[];
 }
 
 export interface TaskStepsToolDependencies {
@@ -120,8 +128,35 @@ function counts(
 	return {
 		stepCount: state.steps.length,
 		openStepCount,
-		verificationNudgeNeeded: state.steps.some((step) => step.status === "completed" && step.evidence.length === 0),
+		verificationNudgeNeeded: hasUnverifiedCompletedStep(state),
 	};
+}
+
+/** Ids (from `resultSteps`, index-aligned with `inputs`) whose status was set explicitly by the caller. */
+function explicitStatusStepIds(inputs: readonly TaskStepInput[], resultSteps: readonly TaskStep[]): Set<string> {
+	const ids = new Set<string>();
+	inputs.forEach((stepInput, index) => {
+		if (stepInput.status !== undefined) {
+			const id = resultSteps[index]?.id;
+			if (id) ids.add(id);
+		}
+	});
+	return ids;
+}
+
+/**
+ * Steps that were in_progress before this call and are pending after, excluding any step whose
+ * new status was set explicitly by the caller (an explicit change is not a "silent" demotion).
+ */
+function computeDemotedStepIds(
+	before: TaskStepsState,
+	after: TaskStepsState,
+	excludeIds: ReadonlySet<string>,
+): string[] {
+	const beforeActiveIds = new Set(before.steps.filter((step) => step.status === "in_progress").map((step) => step.id));
+	return after.steps
+		.filter((step) => beforeActiveIds.has(step.id) && step.status === "pending" && !excludeIds.has(step.id))
+		.map((step) => step.id);
 }
 
 function errorResult(action: TaskStepsAction, error: string, state?: TaskStepsState) {
@@ -151,24 +186,43 @@ export function createTaskStepsToolDefinition(deps: TaskStepsToolDependencies): 
 		async execute(_toolCallId, input: TaskStepsToolInput) {
 			const timestamp = now();
 			const current = deps.getTaskStepsState();
-			let state = current ?? createTaskStepsState(timestamp);
+			const before = current ?? createTaskStepsState(timestamp);
+			let state = before;
+			let duplicateStepId: string | undefined;
+			let demotedStepIds: readonly string[] = [];
 			try {
 				switch (input.action) {
 					case "set":
 						if (!input.steps) return errorResult(input.action, "set requires steps[].", current);
 						state = setTaskSteps(state, input.steps, timestamp);
+						demotedStepIds = computeDemotedStepIds(
+							before,
+							state,
+							explicitStatusStepIds(input.steps, state.steps),
+						);
 						break;
 					case "intake":
 						if (!input.steps)
 							return errorResult(input.action, "intake requires a complete steps[] list.", current);
 						state = setTaskSteps(state, input.steps, timestamp);
+						demotedStepIds = computeDemotedStepIds(
+							before,
+							state,
+							explicitStatusStepIds(input.steps, state.steps),
+						);
 						break;
 					case "add":
 						state = addTaskStep(state, toTaskStepInput(input), timestamp);
+						if (state === before) {
+							// The reducer returned the unchanged state: an open step already carries this
+							// content, so nothing was created. Name the existing step in the response.
+							duplicateStepId = findOpenDuplicateStep(before.steps, input.content ?? "")?.id;
+						}
 						break;
-					case "update":
+					case "update": {
 						if (!input.id?.trim())
 							return errorResult(input.action, "update requires id or a unique selector.", current);
+						const selected = resolveTaskStepSelector(before.steps, input.id);
 						state = updateTaskStep(
 							state,
 							input.id,
@@ -183,7 +237,11 @@ export function createTaskStepsToolDefinition(deps: TaskStepsToolDependencies): 
 							},
 							timestamp,
 						);
+						// Exclude the explicitly targeted step: its own status change was requested by
+						// the caller, so it is never a "silent" demotion even if it moved to pending.
+						demotedStepIds = computeDemotedStepIds(before, state, new Set([selected.id]));
 						break;
+					}
 					case "clear":
 						state = clearTaskSteps(state, timestamp);
 						break;
@@ -195,27 +253,49 @@ export function createTaskStepsToolDefinition(deps: TaskStepsToolDependencies): 
 						break;
 				}
 
-				const mutated = input.action !== "list" || input.clearCompleted === true;
+				const isNoopDuplicateAdd = input.action === "add" && state === before;
+				const mutated = (input.action !== "list" || input.clearCompleted === true) && !isNoopDuplicateAdd;
 				if (mutated) deps.saveTaskStepsState(state);
+
+				const stateCounts = counts(state);
+				const noticeLines: string[] = [];
+				if (duplicateStepId) {
+					noticeLines.push(
+						`Duplicate open step ignored; existing ${duplicateStepId} already tracks this content.`,
+					);
+				}
+				if (demotedStepIds.length > 0) {
+					noticeLines.push(`Demoted to pending because another step became active: ${demotedStepIds.join(", ")}.`);
+				}
+				if (stateCounts.verificationNudgeNeeded) {
+					noticeLines.push(
+						"Reminder: a completed step has no evidence attached; attach evidence via update before treating it as verified.",
+					);
+				}
+				const notices = noticeLines.length > 0 ? `\n${noticeLines.join("\n")}` : "";
+
+				const headerAction =
+					input.action === "list"
+						? ""
+						: `task_steps ${input.action} ${duplicateStepId ? "ignored (duplicate)" : "recorded"}.\n`;
 				return {
 					content: [
 						{
 							type: "text" as const,
-							text: `${input.action === "list" ? "" : `task_steps ${input.action} recorded.\n`}${formatTaskSteps(
-								state,
-								{
-									includeTerminal: input.showCompleted,
-									maxItems: input.maxItems,
-								},
-							)}`,
+							text: `${headerAction}${formatTaskSteps(state, {
+								includeTerminal: input.showCompleted,
+								maxItems: input.maxItems,
+							})}${notices}`,
 						},
 					],
 					details: {
 						action: input.action,
 						applied: true,
 						state,
-						...counts(state),
+						...stateCounts,
 						showCompleted: input.showCompleted,
+						duplicateOfStepId: duplicateStepId,
+						demotedStepIds: demotedStepIds.length > 0 ? demotedStepIds : undefined,
 					} satisfies TaskStepsToolDetails,
 				};
 			} catch (error) {

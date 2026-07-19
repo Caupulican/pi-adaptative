@@ -50,6 +50,7 @@ import type { ArtifactStore } from "./context/context-artifacts.ts";
 import type { MemoryPromptInclusionReport, MemoryRetrievalDiagnostics } from "./context/memory-diagnostics.ts";
 import type { ContextGcReport } from "./context-gc.ts";
 import { DEFAULT_ACTIVE_TOOL_NAMES, mapToolNamesForPlatform } from "./default-tool-surface.ts";
+import { acknowledgeWorkerResultReview } from "./delegation/session-worker-result.ts";
 import { createCoreDiagnosticsToolDefinitions } from "./extensions/builtin.ts";
 import {
 	type ContextUsage,
@@ -66,6 +67,7 @@ import {
 import { disposeExtensionEventSubscriptions } from "./extensions/loader.ts";
 import { emitSessionShutdownEvent } from "./extensions/runner.ts";
 import type { GoalState } from "./goals/goal-state.ts";
+import type { OpenTaskStepRef } from "./goals/goal-tool-core.ts";
 import type { MemoryManager } from "./memory/memory-manager.ts";
 import type { MemoryControllerReloadSnapshot } from "./memory-controller.ts";
 import type { ModelRegistry } from "./model-registry.ts";
@@ -117,6 +119,36 @@ interface ToolDefinitionEntry {
 function deriveSpawnedUsageReportId(kind: string, sessionId: string, identity: string): string {
 	const digest = createHash("sha256").update(identity).digest("hex").slice(0, 16);
 	return `${kind}:${sessionId}:${digest}`;
+}
+
+/**
+ * Is `toolCallId` a real, answered tool call on `sessionManager`'s active branch? A
+ * toolCallId is "real" iff a toolResult message on that branch responded to it -- the same
+ * toolResult/toolCallId match `context-pipeline.ts`'s `_buildSessionEntryIdLookup` uses, and
+ * branch-scoped (via `getBranch()`) so a sibling branch's tool calls never count. Exported (pure,
+ * no `this`) so the goal tool's `hasToolCallId` wiring below is directly testable against a real
+ * `SessionManager` without constructing the whole `RuntimeBuilder`.
+ */
+export function hasAnsweredToolCallOnBranch(sessionManager: SessionManager, toolCallId: string): boolean {
+	return sessionManager
+		.getBranch()
+		.some(
+			(entry) =>
+				entry.type === "message" && entry.message.role === "toolResult" && entry.message.toolCallId === toolCallId,
+		);
+}
+
+/**
+ * Project a task-steps snapshot down to the OPEN (non-terminal) steps the goal tool's
+ * cross-visibility nudge needs. Mirrors `goal-runtime-snapshot.ts`'s `openTaskSteps` filter
+ * (status not "completed"/"cancelled", `activeForm || content`) so the two read the same
+ * "open" definition, narrowed to `OpenTaskStepRef`'s id+content shape. Exported (pure, no
+ * `this`) so the goal tool's `getOpenTaskSteps` wiring below is directly testable.
+ */
+export function deriveOpenTaskStepRefs(taskStepsState: TaskStepsState | undefined): OpenTaskStepRef[] {
+	return (taskStepsState?.steps ?? [])
+		.filter((step) => step.status !== "completed" && step.status !== "cancelled")
+		.map((step) => ({ id: step.id, content: step.activeForm || step.content }));
 }
 
 interface ReloadRuntimeSnapshot {
@@ -188,7 +220,7 @@ export interface RuntimeBuilderDeps {
 	isToolOrCommandAllowedByProfile(name: string): boolean;
 	/** Filter the loaded extensions through the active resource profile (records inert/denied warnings host-side). */
 	filterExtensionsForRuntime(extensions: Extension[]): Extension[];
-	/** Sink for the G13 unbound-profile-tool-grant warnings surfaced in /context. */
+	/** Sink for the unbound-profile-tool-grant warnings surfaced in /context. */
 	setUnboundToolGrantWarnings(warnings: string[]): void;
 	getUnboundToolGrantWarnings(): string[];
 	createProfileFilterReloadSnapshot(): ProfileFilterReloadSnapshot;
@@ -528,7 +560,7 @@ export class RuntimeBuilder {
 					nextActiveToolNames.push(toolName);
 				}
 			}
-			// G13: an explicit grant that binds to NO registered tool is a silent no-op — typo'd
+			// An explicit grant that binds to NO registered tool is a silent no-op — typo'd
 			// name, or the owning extension is not granted/loaded. Surface it.
 			this.deps.setUnboundToolGrantWarnings(
 				explicitAllowPatterns
@@ -696,6 +728,12 @@ export class RuntimeBuilder {
 				saveGoalState: (state) => {
 					this.deps.saveGoalStateSnapshot(state);
 				},
+				// kind:"tool" evidence refs verify against real session records.
+				hasToolCallId: (toolCallId) => hasAnsweredToolCallOnBranch(this.deps.getSessionManager(), toolCallId),
+				cwd: () => this.deps.getCwd(),
+				// Reuses the already branch-scoped getTaskStepsStateSnapshot dep -- no new
+				// SessionManager access needed for the cross-visibility nudge.
+				getOpenTaskSteps: () => deriveOpenTaskStepRefs(this.deps.getTaskStepsStateSnapshot()),
 			});
 			this._baseToolDefinitions.set(goalToolDefinition.name, goalToolDefinition);
 			const taskStepsToolDefinition = createTaskStepsToolDefinition({
@@ -712,6 +750,11 @@ export class RuntimeBuilder {
 			const delegateStatusToolDefinition = createDelegateStatusToolDefinition({
 				getLaneRecords: () => this.deps.getWorkerLaneRecords(),
 				getWorkerResultSnapshots: () => this.deps.getWorkerResultSnapshots(),
+				// Durable ack persists straight through the session log; routed here (rather than
+				// a new agent-session dep) because getSessionManager() is already a stable, generic
+				// passthrough dep, so no other package needs to change for this to work.
+				acknowledgeWorkerReview: (requestId) =>
+					acknowledgeWorkerResultReview(this.deps.getSessionManager(), requestId),
 			});
 			this._baseToolDefinitions.set(delegateToolDefinition.name, delegateToolDefinition);
 			this._baseToolDefinitions.set(delegateStatusToolDefinition.name, delegateStatusToolDefinition);

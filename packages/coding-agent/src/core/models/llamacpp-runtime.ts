@@ -16,6 +16,7 @@ import type { Readable, Writable } from "node:stream";
 import { pipeline } from "node:stream/promises";
 import { spawnProcess, spawnProcessSync, waitForChildProcessWithTermination } from "../../utils/child-process.ts";
 import { killProcessTree, trackDetachedChildPid, untrackDetachedChildPid } from "../../utils/shell.ts";
+import { modelsDir as agentModelsDir, runtimesDir as agentRuntimesDir } from "../agent-paths.ts";
 
 /**
  * Managed runtime for prism-ml 1-bit GGUF models (Bonsai-27B first). The provider requires their
@@ -227,11 +228,11 @@ export class PrismLlamaCppRuntime {
 	}
 
 	runtimeDir(): string {
-		return join(this._agentDir, "runtimes", "prism-llamacpp");
+		return agentRuntimesDir("prism-llamacpp", this._agentDir);
 	}
 
 	modelsDir(): string {
-		return join(this._agentDir, "models", "llamacpp");
+		return agentModelsDir("llamacpp", this._agentDir);
 	}
 
 	private _binaryName(): string {

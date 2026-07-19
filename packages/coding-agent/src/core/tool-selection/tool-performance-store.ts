@@ -1,5 +1,6 @@
 import { existsSync, mkdirSync, readFileSync, writeFileSync } from "node:fs";
-import { dirname, join } from "node:path";
+import { dirname } from "node:path";
+import { stateFile } from "../agent-paths.ts";
 import { currentHostFingerprint, type HostFingerprint } from "../models/fitness-store.ts";
 
 const STORE_VERSION = 1;
@@ -316,7 +317,7 @@ export class ToolPerformanceStore {
 	}
 
 	static forAgentDir(agentDir: string, options: { fingerprint?: () => HostFingerprint } = {}): ToolPerformanceStore {
-		return new ToolPerformanceStore(join(agentDir, "state", "tool-performance.json"), options);
+		return new ToolPerformanceStore(stateFile(agentDir, "tool-performance.json"), options);
 	}
 
 	private load(): ToolPerformanceStoreFile {

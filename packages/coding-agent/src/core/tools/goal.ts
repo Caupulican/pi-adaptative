@@ -1,7 +1,15 @@
+import { stat as fsStat } from "node:fs/promises";
 import { type Static, Type } from "typebox";
 import type { ToolDefinition } from "../extensions/types.ts";
 import type { GoalEvidenceKind, GoalState } from "../goals/goal-state.ts";
-import { applyGoalAction, type GoalAction, type GoalActionName, summarizeGoalState } from "../goals/goal-tool-core.ts";
+import {
+	applyGoalAction,
+	type GoalAction,
+	type GoalActionName,
+	type OpenTaskStepRef,
+	summarizeGoalState,
+} from "../goals/goal-tool-core.ts";
+import { resolveToCwd } from "./path-utils.ts";
 
 const goalSchema = Type.Object(
 	{
@@ -71,6 +79,53 @@ export interface GoalToolDependencies {
 	saveGoalState: (state: GoalState) => void;
 	/** Clock injection for deterministic tests. */
 	now?: () => string;
+	/**
+	 * Check whether `toolCallId` exists in this session's records, for validating kind:"tool"
+	 * evidence refs at add_evidence time. When not wired, a "tool" ref cannot be proven and is
+	 * recorded as `verified: false` rather than assumed true.
+	 */
+	hasToolCallId?: (toolCallId: string) => boolean;
+	/** Working directory for resolving kind:"file" evidence ref paths. Defaults to `process.cwd()`. */
+	cwd?: () => string;
+	/**
+	 * Gate agent-facing 'complete' on verified/user evidence backing. Defaults to `true` (on)
+	 * when omitted -- the conservative default; set to a function returning `false` to opt out.
+	 */
+	requireVerifiedEvidenceForCompletion?: () => boolean;
+	/**
+	 * Read-only open (non-terminal) task_steps steps on the active branch, for the goal⇄task
+	 * cross-visibility nudge in the tool response. When omitted, `summarizeGoalState` gets
+	 * no task-step context and simply emits no nudge -- goal-tool-core stays pure and never reads
+	 * task state itself; this is the only place that supplies it.
+	 */
+	getOpenTaskSteps?: () => readonly OpenTaskStepRef[];
+}
+
+/**
+ * Validate an evidence ref's `uri` against session records ("tool") or the filesystem ("file").
+ * Returns `undefined` for kinds/refs that carry nothing checkable (e.g. "user"/"finding"/"test",
+ * or a missing `uri`) -- absence of a ref is not the same as a ref that failed to verify.
+ */
+async function resolveEvidenceVerified(
+	kind: GoalEvidenceKind,
+	uri: string | undefined,
+	deps: GoalToolDependencies,
+): Promise<boolean | undefined> {
+	const trimmedUri = uri?.trim();
+	if (!trimmedUri) return undefined;
+	if (kind === "tool") {
+		return deps.hasToolCallId ? deps.hasToolCallId(trimmedUri) : false;
+	}
+	if (kind === "file") {
+		const cwd = deps.cwd?.() ?? process.cwd();
+		try {
+			const stats = await fsStat(resolveToCwd(trimmedUri, cwd));
+			return stats.isFile();
+		} catch {
+			return false;
+		}
+	}
+	return undefined;
 }
 
 function toGoalAction(input: GoalToolInput): GoalAction | { error: string } {
@@ -134,9 +189,10 @@ export function createGoalToolDefinition(deps: GoalToolDependencies): ToolDefini
 		promptGuidelines: [
 			"At the start of a multi-step task, call goal with action 'start' to record the user goal, then add the concrete requirements with 'add_requirement'.",
 			"As you make progress, record evidence with 'add_evidence' and mark requirements satisfied with 'satisfy_requirement', citing the evidence ids.",
+			"For 'add_evidence', kind 'tool' expects a real toolCallId in 'uri' and kind 'file' expects a real path; both are checked and recorded as verified or not. Kinds 'user'/'finding'/'test' carry no checkable ref.",
 			"Use 'progress' when you advance without satisfying a specific requirement, and 'no_progress' when a turn yields nothing, so stall detection works.",
 			"When the user resolves a blocker, use 'resume_goal' and 'reopen_requirement' as needed; do not strand the old ledger or start a duplicate goal.",
-			"Mark the goal 'complete' only when every requirement is satisfied; use 'block_goal' or 'block_requirement' with a reason when you are stuck and need the user. A blocked goal can still be resumed or cancelled.",
+			"Mark the goal 'complete' only when every requirement is satisfied; completion normally also requires at least one satisfied requirement backed by verified 'tool'/'file' evidence or kind 'user' evidence. Use 'block_goal' or 'block_requirement' with a reason when you are stuck and need the user. A blocked goal can still be resumed or cancelled.",
 		],
 		parameters: goalSchema,
 		async execute(
@@ -154,8 +210,16 @@ export function createGoalToolDefinition(deps: GoalToolDependencies): ToolDefini
 				};
 			}
 
+			let action: GoalAction = mapped;
+			if (action.action === "add_evidence") {
+				const verified = await resolveEvidenceVerified(action.kind, action.uri, deps);
+				action = { ...action, verified };
+			}
+
 			const current = deps.getGoalState();
-			const result = applyGoalAction(current, mapped, now());
+			const result = applyGoalAction(current, action, now(), {
+				requireVerifiedEvidenceForCompletion: deps.requireVerifiedEvidenceForCompletion?.() ?? true,
+			});
 			if (!result.ok) {
 				return {
 					content: [{ type: "text" as const, text: `goal ${input.action} failed: ${result.error}` }],
@@ -164,10 +228,9 @@ export function createGoalToolDefinition(deps: GoalToolDependencies): ToolDefini
 			}
 
 			deps.saveGoalState(result.state);
+			const summary = summarizeGoalState(result.state, { action, openTaskSteps: deps.getOpenTaskSteps?.() });
 			return {
-				content: [
-					{ type: "text" as const, text: `goal ${input.action} recorded.\n${summarizeGoalState(result.state)}` },
-				],
+				content: [{ type: "text" as const, text: `goal ${input.action} recorded.\n${summary}` }],
 				details: { action: input.action, applied: true, state: result.state },
 			};
 		},

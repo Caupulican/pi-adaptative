@@ -84,6 +84,79 @@ describe("task_steps tool", () => {
 		expect(harness.getState()).toBeUndefined();
 	});
 
+	it("dedupes a duplicate open add, names the existing step, and skips persistence", async () => {
+		let state: TaskStepsState | undefined;
+		let saveCount = 0;
+		const tool = createTaskStepsToolDefinition({
+			getTaskStepsState: () => state,
+			saveTaskStepsState: (next) => {
+				saveCount++;
+				state = next;
+			},
+			now: () => "T",
+		});
+
+		await execute(tool, { action: "add", content: "Inspect behavior" });
+		expect(saveCount).toBe(1);
+
+		const dupResult = await execute(tool, { action: "add", content: "inspect behavior" });
+		expect(saveCount).toBe(1);
+		expect(dupResult.details).toMatchObject({ action: "add", applied: true, duplicateOfStepId: "step-1" });
+		const dupContent = dupResult.content[0];
+		if (dupContent?.type !== "text") throw new Error("Expected text task_steps result");
+		expect(dupContent.text).toMatch(/duplicate open step ignored.*step-1/i);
+		expect(state?.steps).toHaveLength(1);
+	});
+
+	it("still creates a new step when re-adding terminal (completed) content", async () => {
+		const harness = createHarness();
+		await execute(harness.tool, {
+			action: "add",
+			content: "Ship release",
+			status: "completed",
+			evidence: ["shipped"],
+		});
+		const reAdd = await execute(harness.tool, { action: "add", content: "Ship release" });
+		expect(reAdd.details).toMatchObject({ action: "add", applied: true, duplicateOfStepId: undefined });
+		expect(harness.getState()?.steps).toHaveLength(2);
+	});
+
+	it("surfaces a verification nudge when a completed step has no evidence", async () => {
+		const harness = createHarness();
+		await execute(harness.tool, { action: "add", content: "Do work", status: "completed" });
+		const listResult = await execute(harness.tool, { action: "list" });
+		expect(listResult.details).toMatchObject({ verificationNudgeNeeded: true });
+		const content = listResult.content[0];
+		if (content?.type !== "text") throw new Error("Expected text task_steps result");
+		expect(content.text).toMatch(/no evidence attached/i);
+	});
+
+	it("names steps silently demoted to pending by a multi-in_progress set", async () => {
+		const harness = createHarness();
+		await execute(harness.tool, {
+			action: "set",
+			steps: [{ content: "First", status: "in_progress" }, { content: "Second" }],
+		});
+		const setResult = await execute(harness.tool, {
+			action: "set",
+			steps: [{ content: "First" }, { content: "Second", status: "in_progress" }],
+		});
+		expect(setResult.details).toMatchObject({ action: "set", demotedStepIds: ["step-1"] });
+		const content = setResult.content[0];
+		if (content?.type !== "text") throw new Error("Expected text task_steps result");
+		expect(content.text).toMatch(/demoted to pending because another step became active: step-1/i);
+	});
+
+	it("does not report an explicitly updated step as a silent demotion", async () => {
+		const harness = createHarness();
+		await execute(harness.tool, { action: "add", content: "Active work", status: "in_progress" });
+		const updateResult = await execute(harness.tool, { action: "update", id: "step-1", status: "pending" });
+		expect(updateResult.details).toMatchObject({ demotedStepIds: undefined });
+		const content = updateResult.content[0];
+		if (content?.type !== "text") throw new Error("Expected text task_steps result");
+		expect(content.text).not.toMatch(/demoted to pending/i);
+	});
+
 	it("declares native orchestration guidelines", () => {
 		expect(harnessGuidelines(createHarness().tool)).toContain("exactly one step in_progress");
 		expect(harnessGuidelines(createHarness().tool)).toContain("first open task step");

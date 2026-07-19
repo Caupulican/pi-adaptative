@@ -102,6 +102,10 @@ const DEFAULT_SEMANTIC_MEMORY_GC_SETTINGS: Required<SemanticMemoryGcSettings> = 
 		"<automata_doctor",
 		"<automata_optimizer",
 		"<automata_mesh",
+		// Injected task_steps checklist page (tasks/task-state.ts formatTaskStepsContext), re-derived
+		// fresh every turn from live TaskStepsState -- same GC treatment as a memory recall page (Bug
+		// #7 lineage): pack stale turn-copies down to the most recent one instead of accumulating.
+		"<task_steps_context",
 	],
 };
 
@@ -112,6 +116,8 @@ export const DEFAULT_CONTEXT_GC_SETTINGS: NormalizedContextGcSettings = {
 	tools: [
 		"read",
 		"bash",
+		"python",
+		"powershell",
 		"rg",
 		"grep",
 		"find",
@@ -248,10 +254,21 @@ function joinedPartsContainAnyMarker(parts: string[], markers: readonly string[]
 	return markers.some((marker) => joinedPartsContainMarker(parts, marker));
 }
 
+// Gates which custom-message types are eligible for the semantic-memory packer below. Despite the
+// name, this now also covers the injected task_steps checklist page (customType "task_steps_context",
+// see agent-session.ts) -- it is a deterministic, re-derivable-from-live-state context page exactly
+// like a memory recall page, so it gets the same GC treatment. A marker match alone
+// is not enough: semanticMessageHasMarker/agentMessageText only inspect a custom message's text at all
+// once it passes this gate, so a customType that doesn't match here never reaches the marker check.
 function isSemanticMemoryCustomMessage(message: AgentMessage): boolean {
 	if (message.role !== "custom") return false;
 	const customType = String((message as { customType?: unknown }).customType ?? "").toLowerCase();
-	return customType.includes("automata") || customType.includes("memory") || customType.includes("mind");
+	return (
+		customType.includes("automata") ||
+		customType.includes("memory") ||
+		customType.includes("mind") ||
+		customType.includes("task_steps")
+	);
 }
 
 function agentMessageText(message: AgentMessage): string | undefined {

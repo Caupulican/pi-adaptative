@@ -1,5 +1,5 @@
 import { existsSync, readFileSync } from "node:fs";
-import { join } from "node:path";
+import { stateFile } from "../agent-paths.ts";
 import { withFileLockSync, writeFileAtomicSync } from "../util/atomic-file.ts";
 import { currentHostFingerprint, type HostFingerprint } from "./fitness-store.ts";
 import {
@@ -208,7 +208,7 @@ export class ModelAdaptationStore {
 	}
 
 	static forAgentDir(agentDir: string, options?: { fingerprint?: () => HostFingerprint }): ModelAdaptationStore {
-		return new ModelAdaptationStore(join(agentDir, "state", "model-adaptation.json"), options);
+		return new ModelAdaptationStore(stateFile(agentDir, "model-adaptation.json"), options);
 	}
 
 	private load(): AdaptationStoreFile {

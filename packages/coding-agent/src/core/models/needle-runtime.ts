@@ -5,6 +5,7 @@ import { join } from "node:path";
 import { type Readable, Transform } from "node:stream";
 import { pipeline } from "node:stream/promises";
 import { spawnProcess, spawnProcessSync, waitForChildProcessWithTermination } from "../../utils/child-process.ts";
+import { modelsDir as agentModelsDir, runtimesDir as agentRuntimesDir } from "../agent-paths.ts";
 import type { RuntimeCommandResult, RuntimeCommandRunner } from "./local-runtime.ts";
 
 /**
@@ -286,11 +287,11 @@ export class NeedleRuntime {
 	}
 
 	runtimeDir(): string {
-		return join(this._agentDir, "runtimes", "needle");
+		return agentRuntimesDir("needle", this._agentDir);
 	}
 
 	modelsDir(): string {
-		return join(this._agentDir, "models", "needle");
+		return agentModelsDir("needle", this._agentDir);
 	}
 
 	checkpointPath(): string {

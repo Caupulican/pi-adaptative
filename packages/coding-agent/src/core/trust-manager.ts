@@ -3,6 +3,7 @@ import { dirname, join, resolve } from "node:path";
 import lockfile from "proper-lockfile";
 import { CONFIG_DIR_NAME } from "../config.ts";
 import { canonicalizePath, resolvePath } from "../utils/paths.ts";
+import { stateFile } from "./agent-paths.ts";
 
 export type ProjectTrustDecision = boolean | null;
 
@@ -126,7 +127,8 @@ export class ProjectTrustStore {
 	private trustPath: string;
 
 	constructor(agentDir: string) {
-		this.trustPath = join(resolvePath(agentDir), "trust.json");
+		// Machine-persisted trust decisions -- state/, not the agentDir root.
+		this.trustPath = stateFile(resolvePath(agentDir), "trust.json");
 	}
 
 	get(cwd: string): ProjectTrustDecision {

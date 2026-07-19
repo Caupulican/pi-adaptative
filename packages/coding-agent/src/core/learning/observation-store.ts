@@ -1,10 +1,10 @@
 import { createHash } from "node:crypto";
 import { existsSync, readFileSync } from "node:fs";
-import { join } from "node:path";
+import { stateFile } from "../agent-paths.ts";
 import { withFileLockSync, writeFileAtomicSync } from "../util/atomic-file.ts";
 
 /**
- * Durable, BOUNDED evidence-strength store for the learning gate (G6). The gate auto-applies a
+ * Durable, BOUNDED evidence-strength store for the learning gate. The gate auto-applies a
  * durable change only once it has been *observed* enough times; a single reflection pass sees a
  * lesson once, so without persistence every proposal would look brand-new and never accumulate the
  * repeated evidence the gate requires. This store counts how many times the SAME lesson (keyed by
@@ -49,7 +49,7 @@ export class ObservationStore {
 	}
 
 	static forAgentDir(agentDir: string): ObservationStore {
-		return new ObservationStore(join(agentDir, "state", "learning-observations.json"));
+		return new ObservationStore(stateFile(agentDir, "learning-observations.json"));
 	}
 
 	private load(): ObservationStoreFile {

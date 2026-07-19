@@ -24,6 +24,7 @@ import { CONFIG_DIR_NAME, getAgentDir, isBunBinary } from "../../config.ts";
 // avoiding a circular dependency. Extensions can import from @caupulican/pi-adaptative.
 import * as _bundledPiCodingAgent from "../../index.ts";
 import { resolvePath } from "../../utils/paths.ts";
+import { cacheFile } from "../agent-paths.ts";
 import { createEventBus, type EventBus } from "../event-bus.ts";
 import type { ExecOptions } from "../exec.ts";
 import { execCommand } from "../exec.ts";
@@ -513,7 +514,7 @@ async function loadExtensionModule(extensionPath: string, opts?: { fresh?: boole
 		// the content hash. Do not hand-roll a second in-memory transform cache on top of this: it
 		// would duplicate jiti's own content-hash-validated cache for no benefit.
 		moduleCache: false,
-		fsCache: path.join(getAgentDir(), "cache", "jiti-transforms"),
+		fsCache: cacheFile(getAgentDir(), "jiti-transforms"),
 		// In Bun binary: use virtualModules for bundled packages (no filesystem resolution)
 		// Also disable tryNative so jiti handles ALL imports (not just the entry point)
 		// In Node.js/dev: use aliases to resolve to node_modules paths

@@ -2,6 +2,7 @@ import { existsSync, mkdirSync, readFileSync, realpathSync, rmSync, writeFileSyn
 import { homedir } from "os";
 import { join } from "path";
 import { afterEach, beforeEach, describe, expect, it } from "vitest";
+import { DEFAULT_CONTEXT_GC_SETTINGS } from "../src/core/context-gc.ts";
 import { DEFAULT_HTTP_IDLE_TIMEOUT_MS } from "../src/core/http-dispatcher.ts";
 import { getDirectoryResourceProfileInfo, SettingsManager } from "../src/core/settings-manager.ts";
 import { validateSkillName } from "../src/core/skills.ts";
@@ -735,6 +736,79 @@ describe("SettingsManager", () => {
 				preserveRecentMessages: 16,
 				minChars: 2400,
 			});
+		});
+	});
+
+	describe("contextGc settings", () => {
+		it("resolves to context-gc.ts's canonical DEFAULT_CONTEXT_GC_SETTINGS byte-for-byte when unconfigured", () => {
+			const manager = SettingsManager.create(projectDir, agentDir);
+
+			// The whole hand-copy debt class (enabled/preserveRecentMessages/minToolResultChars/tools,
+			// and semanticMemory's own fields) is eliminated: every field now derives from the exact
+			// same object context-gc.ts's own normalizer falls back to, so this equals it exactly.
+			expect(manager.getContextGcSettings()).toEqual(DEFAULT_CONTEXT_GC_SETTINGS);
+		});
+
+		it("derives the semanticMemory default markers from context-gc.ts's canonical default (not a hand-kept copy)", () => {
+			const manager = SettingsManager.create(projectDir, agentDir);
+
+			const resolved = manager.getContextGcSettings();
+			expect(resolved.semanticMemory).toEqual(DEFAULT_CONTEXT_GC_SETTINGS.semanticMemory);
+			// The regression this guards: a hand-copied fallback array here previously missed
+			// "<task_steps_context" because nothing forced the two lists to stay in sync.
+			expect(resolved.semanticMemory.markers).toContain("<task_steps_context");
+			expect(resolved.semanticMemory.markers).toContain("<memory_context");
+		});
+
+		it("resolves the default tools list as the union of both previously-drifted copies", () => {
+			const manager = SettingsManager.create(projectDir, agentDir);
+
+			const tools = manager.getContextGcSettings().tools;
+			expect(tools).toEqual(DEFAULT_CONTEXT_GC_SETTINGS.tools);
+			// "python"/"powershell" were only in this file's old hand-copy; "run_toolkit_script" was
+			// only in context-gc.ts's canonical list. The union now carries all three.
+			expect(tools).toContain("python");
+			expect(tools).toContain("powershell");
+			expect(tools).toContain("run_toolkit_script");
+		});
+
+		it("still lets an explicit partial outer override win per field, defaulting the rest", () => {
+			const settingsPath = join(agentDir, "settings.json");
+			writeFileSync(settingsPath, JSON.stringify({ contextGc: { minToolResultChars: 3000 } }));
+			const manager = SettingsManager.create(projectDir, agentDir);
+
+			const resolved = manager.getContextGcSettings();
+			expect(resolved.minToolResultChars).toBe(3000);
+			// enabled/preserveRecentMessages/tools were never configured -- they still resolve to the
+			// canonical default, not `undefined`.
+			expect(resolved.enabled).toBe(true);
+			expect(resolved.preserveRecentMessages).toBe(8);
+			expect(resolved.tools).toEqual(DEFAULT_CONTEXT_GC_SETTINGS.tools);
+		});
+
+		it("still lets an explicit partial semanticMemory override win per field, defaulting the rest", () => {
+			const settingsPath = join(agentDir, "settings.json");
+			writeFileSync(settingsPath, JSON.stringify({ contextGc: { semanticMemory: { minChars: 42 } } }));
+			const manager = SettingsManager.create(projectDir, agentDir);
+
+			const resolved = manager.getContextGcSettings();
+			expect(resolved.semanticMemory.minChars).toBe(42);
+			// enabled/preserveRecentPages/markers were never configured -- they still resolve to the
+			// canonical default, not `undefined`.
+			expect(resolved.semanticMemory.enabled).toBe(true);
+			expect(resolved.semanticMemory.preserveRecentPages).toBe(1);
+			expect(resolved.semanticMemory.markers).toContain("<task_steps_context");
+		});
+
+		it("keeps an explicit user-configured markers list winning verbatim over the canonical default", () => {
+			const settingsPath = join(agentDir, "settings.json");
+			writeFileSync(
+				settingsPath,
+				JSON.stringify({ contextGc: { semanticMemory: { markers: ["<my_custom_page"] } } }),
+			);
+			const manager = SettingsManager.create(projectDir, agentDir);
+
+			expect(manager.getContextGcSettings().semanticMemory.markers).toEqual(["<my_custom_page"]);
 		});
 	});
 

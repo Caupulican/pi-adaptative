@@ -98,22 +98,27 @@ describe("Phase 10E: AgentSession Goal Continuation Loop", () => {
 		expect(promptCalls.length).toBe(1);
 	});
 
-	it("prompt that appends a progress snapshot with the requirement still open can run multiple turns until maxTurns is reached", async () => {
+	it("prompt that appends a progress snapshot with a requirement still open can run multiple turns until maxTurns is reached", async () => {
 		const { session, sessionManager, promptCalls } = createTestSession();
 
+		// Four open requirements so satisfying up to 3 of them (one per turn) still leaves one open,
+		// keeping the continuation decision "continue" through every turn.
 		let state = createGoalState({ goalId: "g1", userGoal: "User Goal Here", now: "T0" });
-		state = applyGoalEvent(state, { type: "add_requirement", id: "req-1", text: "Req 1 text", now: "T0" });
+		for (let i = 1; i <= 4; i++) {
+			state = applyGoalEvent(state, { type: "add_requirement", id: `req-${i}`, text: `Req ${i} text`, now: "T0" });
+		}
 		appendGoalStateSnapshot(sessionManager, state);
 
 		let callCount = 0;
 		session.prompt = async (text: string, options?: unknown) => {
 			promptCalls.push({ text, options });
 			callCount++;
-			// Simulate LLM doing work but leaving requirement open (e.g. adding a new requirement)
+			// Simulate the LLM making genuine progress each turn (satisfying a requirement), which
+			// advances the goal-loop progress signature and keeps the loop going until maxTurns.
 			state = applyGoalEvent(state, {
-				type: "add_requirement",
-				id: `req-new-${callCount}`,
-				text: `Req new ${callCount}`,
+				type: "satisfy_requirement",
+				id: `req-${callCount}`,
+				evidenceIds: [],
 				now: `T${callCount}`,
 			});
 			appendGoalStateSnapshot(sessionManager, state);
@@ -184,8 +189,12 @@ describe("Phase 10E: AgentSession Goal Continuation Loop", () => {
 	it("treats 0 as disabled for maxWallClockMinutes budget", async () => {
 		const { session, sessionManager, promptCalls } = createTestSession();
 
+		// Four open requirements so satisfying up to 3 of them (one per turn) still leaves one open,
+		// keeping the continuation decision "continue" through every turn.
 		let state = createGoalState({ goalId: "g1", userGoal: "User Goal Here", now: "T0" });
-		state = applyGoalEvent(state, { type: "add_requirement", id: "req-1", text: "Req 1 text", now: "T0" });
+		for (let i = 1; i <= 4; i++) {
+			state = applyGoalEvent(state, { type: "add_requirement", id: `req-${i}`, text: `Req ${i} text`, now: "T0" });
+		}
 		appendGoalStateSnapshot(sessionManager, state);
 
 		let callCount = 0;
@@ -194,10 +203,12 @@ describe("Phase 10E: AgentSession Goal Continuation Loop", () => {
 			promptCalls.push({ text, options });
 			callCount++;
 			mockNow += 100 * 60_000; // +100 minutes
+			// Simulate genuine per-turn progress (satisfying a requirement) so the goal-loop progress
+			// signature advances and the loop keeps going until maxTurns.
 			state = applyGoalEvent(state, {
-				type: "add_requirement",
-				id: `req-new-${callCount}`,
-				text: `Req new ${callCount}`,
+				type: "satisfy_requirement",
+				id: `req-${callCount}`,
+				evidenceIds: [],
 				now: `T${callCount}`,
 			});
 			appendGoalStateSnapshot(sessionManager, state);

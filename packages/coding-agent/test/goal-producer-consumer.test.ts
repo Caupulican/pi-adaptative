@@ -16,7 +16,7 @@ const ctx = undefined as unknown as ExtensionContext;
 function createProducer(sessionManager: SessionManager) {
 	let counter = 0;
 	const tool = createGoalToolDefinition({
-		getGoalState: () => getLatestGoalStateSnapshot(sessionManager.getEntries()),
+		getGoalState: () => getLatestGoalStateSnapshot(sessionManager),
 		saveGoalState: (state) => {
 			appendGoalStateSnapshot(sessionManager, state);
 		},
@@ -34,7 +34,7 @@ describe("goal producer feeds the continuation consumer", () => {
 		await run({ action: "add_requirement", requirementId: "r1", text: "Implement X" });
 
 		const snapshot = buildGoalRuntimeSnapshot({
-			entries: sessionManager.getEntries(),
+			sessionManager,
 			settings: { maxStallTurns: 20 },
 		});
 		expect(snapshot.goalState?.goalId).toBe("g1");
@@ -49,11 +49,14 @@ describe("goal producer feeds the continuation consumer", () => {
 
 		await run({ action: "start", goalId: "g1", userGoal: "Ship feature" });
 		await run({ action: "add_requirement", requirementId: "r1", text: "Implement X" });
-		await run({ action: "satisfy_requirement", requirementId: "r1" });
+		// Completion is evidence-gated: cite kind:"user" evidence (always counted as verified) so
+		// 'complete' actually succeeds instead of failing its evidence-backed-satisfaction check.
+		await run({ action: "add_evidence", evidenceId: "ev1", kind: "user", summary: "User confirmed X is done" });
+		await run({ action: "satisfy_requirement", requirementId: "r1", evidenceIds: ["ev1"] });
 		await run({ action: "complete" });
 
 		const snapshot = buildGoalRuntimeSnapshot({
-			entries: sessionManager.getEntries(),
+			sessionManager,
 			settings: { maxStallTurns: 20 },
 		});
 		expect(snapshot.continuation.action).toBe("finalize");
@@ -70,7 +73,7 @@ describe("goal producer feeds the continuation consumer", () => {
 		await run({ action: "no_progress" });
 
 		const snapshot = buildGoalRuntimeSnapshot({
-			entries: sessionManager.getEntries(),
+			sessionManager,
 			settings: { maxStallTurns: 2 },
 		});
 		expect(snapshot.continuation.action).toBe("ask-user");
@@ -80,7 +83,7 @@ describe("goal producer feeds the continuation consumer", () => {
 	it("with no producer activity the consumer reports missing_goal_state", () => {
 		const sessionManager = SessionManager.inMemory();
 		const snapshot = buildGoalRuntimeSnapshot({
-			entries: sessionManager.getEntries(),
+			sessionManager,
 			settings: { maxStallTurns: 20 },
 		});
 		expect(snapshot.continuation.action).toBe("ask-user");
