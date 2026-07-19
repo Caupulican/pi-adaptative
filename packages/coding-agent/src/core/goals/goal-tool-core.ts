@@ -23,6 +23,18 @@ export type GoalAction =
 	| { action: "block_requirement"; requirementId: string; reason: string }
 	| { action: "reopen_requirement"; requirementId: string }
 	| {
+			action: "dispatch_worker";
+			requirementId: string;
+			instructions: string;
+			/**
+			 * LaneId returned by the tool layer's dispatch side effect (calling the real worker/tmux
+			 * dispatch). Computed by the tool layer -- which has session/runtime access -- and merged
+			 * onto the action before it reaches this pure reducer, exactly like `add_evidence`'s
+			 * `verified` field. Undefined when the dispatch side effect is unwired/stubbed.
+			 */
+			laneId?: string;
+	  }
+	| {
 			action: "add_evidence";
 			evidenceId: string;
 			kind: GoalEvidenceKind;
@@ -209,6 +221,16 @@ function toGoalEvent(
 				};
 			}
 			return { ok: true, event: { type: "reopen_requirement", id, now } };
+		}
+		case "dispatch_worker": {
+			const id = action.requirementId.trim();
+			const instructions = action.instructions.trim();
+			if (!id) return { ok: false, error: "dispatch_worker requires a non-empty requirementId." };
+			if (!instructions) return { ok: false, error: "dispatch_worker requires non-empty instructions." };
+			if (!requirementExists(state, id)) {
+				return { ok: false, error: `Unknown requirement '${id}'.` };
+			}
+			return { ok: true, event: { type: "dispatch_worker", id, instructions, laneId: action.laneId, now } };
 		}
 		case "add_evidence": {
 			const id = action.evidenceId.trim();

@@ -4,6 +4,7 @@ import { getModel } from "@caupulican/pi-ai";
 import { describe, expect, it } from "vitest";
 import { AgentSession } from "../src/core/agent-session.ts";
 import { AuthStorage } from "../src/core/auth-storage.ts";
+import type { BackgroundLaneController } from "../src/core/background-lane-controller.ts";
 import { applyGoalEvent, createGoalState } from "../src/core/goals/goal-state.ts";
 import { appendGoalStateSnapshot } from "../src/core/goals/session-goal-state.ts";
 import { ModelRegistry } from "../src/core/model-registry.ts";
@@ -224,5 +225,48 @@ describe("Phase 10E: AgentSession Goal Continuation Loop", () => {
 		expect(result.turnsSubmitted).toBe(3);
 		expect(result.stopReason).toBe("max_turns_reached");
 		expect(promptCalls.length).toBe(3);
+	});
+
+	describe("the 'waiting' continuation state, wired through the real production seam", () => {
+		it("does not stall with goal_state_not_advanced while a bound in-flight worker runs, and resumes once it terminates", async () => {
+			const { session, sessionManager, promptCalls } = createTestSession();
+
+			// Reach the SAME BackgroundLaneController instance agent-session.ts wires into
+			// `getGoalRuntimeSnapshot` (the one new seam this fix adds) -- proves the production wiring,
+			// not just the isolated goal-continuation-controller/goal-runtime-snapshot units.
+			const backgroundLanes = (session as unknown as { _backgroundLanes: BackgroundLaneController })
+				._backgroundLanes;
+
+			backgroundLanes.recordManagedLane({ laneId: "tmux-job-e2e", phase: "dispatch", goalId: "g1" });
+			const dispatchedLaneId = backgroundLanes.getLaneRecords()[0]?.laneId as string;
+			expect(dispatchedLaneId).toBeDefined();
+
+			let state = createGoalState({ goalId: "g1", userGoal: "User Goal Here", now: "T0" });
+			state = applyGoalEvent(state, { type: "add_requirement", id: "req-1", text: "Req 1 text", now: "T0" });
+			state = applyGoalEvent(state, {
+				type: "dispatch_worker",
+				id: "req-1",
+				instructions: "do the thing",
+				laneId: dispatchedLaneId,
+				now: "T1",
+			});
+			appendGoalStateSnapshot(sessionManager, state);
+
+			// While the worker is in flight, the loop must pause with the benign worker_in_flight
+			// stopReason -- NOT goal_state_not_advanced -- and must submit zero passes.
+			const whileRunning = await session.continueGoalLoop({ maxStallTurns: 3, maxTurns: 5 });
+			expect(whileRunning.turnsSubmitted).toBe(0);
+			expect(whileRunning.stopReason).toBe("worker_in_flight");
+			expect(whileRunning.finalSnapshot.continuation.action).toBe("waiting");
+			expect(promptCalls.length).toBe(0);
+
+			// The worker terminates; the goal resumes on its own on the next invocation.
+			backgroundLanes.recordManagedLane({ laneId: "tmux-job-e2e", phase: "terminal", status: "succeeded" });
+
+			const afterResume = await session.continueGoalLoop({ maxStallTurns: 3, maxTurns: 5 });
+			expect(afterResume.turnsSubmitted).toBe(1);
+			expect(afterResume.stopReason).toBe("goal_state_not_advanced");
+			expect(promptCalls.length).toBe(1);
+		});
 	});
 });

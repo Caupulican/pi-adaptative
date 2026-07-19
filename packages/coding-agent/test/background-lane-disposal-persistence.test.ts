@@ -70,6 +70,7 @@ describe("background lane disposal persistence", () => {
 			isModelExhausted: () => false,
 			isDelegateToolActive: () => true,
 			getCapabilityEnvelope: () => undefined,
+			getGoalStateSnapshot: () => undefined,
 			readMemoryForLane: async () => "",
 			// Never resolves: the worker stays suspended at `await runWorker(...)` inside
 			// runWorkerDelegationOnce for the whole test, mirroring the real cutoff scenario where

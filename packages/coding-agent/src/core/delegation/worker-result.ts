@@ -1,5 +1,5 @@
 import path from "node:path";
-import type { GateOutcome, WorkerRequest, WorkerResult } from "../autonomy/contracts.ts";
+import type { CapabilityEnvelope, GateOutcome, WorkerRequest, WorkerResult } from "../autonomy/contracts.ts";
 import { checkPathScope } from "../autonomy/path-scope.ts";
 import { cloneEvidenceBundleForStorage, isEvidenceBundle } from "../research/evidence-bundle.ts";
 
@@ -201,4 +201,63 @@ export function validateWorkerResult(args: {
 		reasonCode: "allowed",
 		message: "Worker result is read-only and allowed.",
 	};
+}
+
+/**
+ * Path-scope-only re-review for a SELF-REPORTED (out-of-process) worker's claimed `changedFiles`
+ * -- e.g. a tmux worker's own completion report, which (unlike an in-process worker's) never
+ * passed through this process's `applyWorkerActions` envelope enforcement before the write
+ * happened; the tmux worker's tool loop runs in a separate process this session does not gate.
+ * Reuses {@link validateWorkerResult}'s exact symlink-safe scope check verbatim -- never
+ * reimplement path resolution: synthesizes a minimal, always-"completed" request/result pair
+ * carrying only the reported `changedFiles` and the scope's `allowedPaths`/`deniedPaths`, so the
+ * ONLY thing that can vary the verdict is the path-scope branch.
+ *
+ * Deliberately broader than {@link isParentReviewRequired}: that helper only flags the gate's
+ * "ask-user" branch, which is correct for an in-process worker (a write that would have been
+ * "block"-worthy was already refused before it could happen, by the SAME envelope, via
+ * `applyWorkerActions`). A self-reported claim has no such backstop -- an out-of-scope or denied
+ * path already happened on the real filesystem whether or not this gate would allow it, so here
+ * ANY non-"allow" verdict (in scope, out of scope, or no scope configured at all) means a human
+ * must look, not "the write didn't happen".
+ */
+export function reviewManagedLaneChangedFiles(args: {
+	changedFiles: readonly string[];
+	/** The scope to validate against -- e.g. the session's active `CapabilityEnvelope`, until a
+	 * per-launch tmux standing grant envelope lands in a later wave (documented follow-up). */
+	envelope: Pick<CapabilityEnvelope, "allowedPaths" | "deniedPaths">;
+	cwd?: string;
+}): { reviewRequired: boolean; reasonCode: string } {
+	if (args.changedFiles.length === 0) {
+		return { reviewRequired: false, reasonCode: "no_changed_files" };
+	}
+	const syntheticId = "managed-lane-review";
+	const acceptance = validateWorkerResult({
+		request: {
+			id: syntheticId,
+			instructions: "",
+			route: {
+				tier: "cheap",
+				risk: "scoped-write",
+				confidence: 1,
+				reasonCode: "managed_lane_review",
+				reasons: [],
+			},
+			envelope: {
+				id: syntheticId,
+				capabilities: ["write_files"],
+				allowedPaths: args.envelope.allowedPaths,
+				deniedPaths: args.envelope.deniedPaths,
+			},
+		},
+		result: {
+			requestId: syntheticId,
+			status: "completed",
+			summary: "",
+			changedFiles: [...args.changedFiles],
+			usageReportId: syntheticId,
+		},
+		cwd: args.cwd,
+	});
+	return { reviewRequired: acceptance.outcome !== "allow", reasonCode: acceptance.reasonCode };
 }

@@ -1,6 +1,6 @@
 export type GoalStatus = "active" | "completed" | "blocked" | "cancelled";
 export type RequirementStatus = "open" | "satisfied" | "blocked";
-export type GoalEvidenceKind = "file" | "test" | "tool" | "user" | "finding";
+export type GoalEvidenceKind = "file" | "test" | "tool" | "user" | "finding" | "worker";
 
 export interface GoalState {
 	goalId: string;
@@ -44,6 +44,16 @@ export interface GoalState {
 	 * zero delta rather than mis-attributing all pre-goal-loop session spend to that one pass.
 	 */
 	continuationSpendCheckpointUsd?: number;
+	/**
+	 * Cumulative USD attributed to WORKER/SUBAGENT spend for this goal's lanes (in-process worker
+	 * usage via `addSpawnedUsage`, out-of-process tmux-worker usage via the advisory
+	 * `reportSpawnedUsage` claim) — the counterpart this goal's OWN model spend excludes (see
+	 * {@link continuationSpendUsd}). Populated by the runtime that sums lane spend by goalId; this
+	 * field is only the durable slot. Same backward-compat/undefined-as-0 note as the other
+	 * continuation budget fields. Advisory for out-of-process (tmux) workers — never a hard cap
+	 * across the process boundary.
+	 */
+	continuationWorkerSpendUsd?: number;
 }
 
 export interface Requirement {
@@ -54,6 +64,12 @@ export interface Requirement {
 	blockedReason?: string;
 	createdAt: string;
 	updatedAt: string;
+	/**
+	 * LaneId of a worker dispatched against this requirement (set by the `dispatch_worker` event).
+	 * Recording a binding never satisfies the requirement by itself -- the worker's own completion
+	 * later populates `"worker"`-kind evidence and prompts an explicit `satisfy_requirement` pass.
+	 */
+	boundLaneId?: string;
 }
 
 export interface GoalEvidenceRef {
@@ -76,6 +92,19 @@ export type GoalEvent =
 	| { type: "satisfy_requirement"; id: string; evidenceIds: readonly string[]; now: string }
 	| { type: "block_requirement"; id: string; blockedReason: string; now: string }
 	| { type: "reopen_requirement"; id: string; now: string }
+	| {
+			type: "dispatch_worker";
+			/** Requirement id the worker is bound to. */
+			id: string;
+			/** Instructions the worker was (or will be) dispatched with. */
+			instructions: string;
+			/**
+			 * LaneId returned by the tool-layer dispatch side effect. Undefined when that side effect
+			 * is unwired/stubbed -- the binding is then recorded with no lane target yet.
+			 */
+			laneId?: string;
+			now: string;
+	  }
 	| {
 			type: "add_evidence";
 			id: string;
@@ -127,7 +156,14 @@ function isRequirementStatus(value: unknown): value is RequirementStatus {
 }
 
 function isGoalEvidenceKind(value: unknown): value is GoalEvidenceKind {
-	return value === "file" || value === "test" || value === "tool" || value === "user" || value === "finding";
+	return (
+		value === "file" ||
+		value === "test" ||
+		value === "tool" ||
+		value === "user" ||
+		value === "finding" ||
+		value === "worker"
+	);
 }
 
 function hasOptionalString(record: Record<string, unknown>, key: string): boolean {
@@ -151,7 +187,8 @@ function isRequirement(value: unknown): value is Requirement {
 		isStringArray(value.evidenceIds) &&
 		typeof value.createdAt === "string" &&
 		typeof value.updatedAt === "string" &&
-		hasOptionalString(value, "blockedReason")
+		hasOptionalString(value, "blockedReason") &&
+		hasOptionalString(value, "boundLaneId")
 	);
 }
 
@@ -178,6 +215,10 @@ function isGoalEvent(value: unknown): value is GoalEvent {
 			return typeof value.id === "string" && typeof value.blockedReason === "string";
 		case "reopen_requirement":
 			return typeof value.id === "string";
+		case "dispatch_worker":
+			return (
+				typeof value.id === "string" && typeof value.instructions === "string" && hasOptionalString(value, "laneId")
+			);
 		case "add_evidence":
 			return (
 				typeof value.id === "string" &&
@@ -230,7 +271,8 @@ export function isGoalState(value: unknown): value is GoalState {
 		hasOptionalFiniteNumber(value, "continuationTurnsUsed") &&
 		hasOptionalFiniteNumber(value, "continuationWallClockMs") &&
 		hasOptionalFiniteNumber(value, "continuationSpendUsd") &&
-		hasOptionalFiniteNumber(value, "continuationSpendCheckpointUsd")
+		hasOptionalFiniteNumber(value, "continuationSpendCheckpointUsd") &&
+		hasOptionalFiniteNumber(value, "continuationWorkerSpendUsd")
 	);
 }
 
@@ -280,6 +322,7 @@ export function createGoalState(args: { goalId: string; userGoal: string; now: s
 		continuationTurnsUsed: 0,
 		continuationWallClockMs: 0,
 		continuationSpendUsd: 0,
+		continuationWorkerSpendUsd: 0,
 	};
 }
 
@@ -363,6 +406,24 @@ export function applyGoalEvent(state: GoalState, event: GoalEvent): GoalState {
 			}
 			newState.lastProgressAt = event.now;
 			newState.stallTurns = 0;
+			break;
+		}
+
+		case "dispatch_worker": {
+			// Records the requirement<->lane binding ONLY -- never satisfies the requirement and never
+			// touches lastProgressAt/stallTurns. The worker's own completion later populates "worker"
+			// evidence and prompts an explicit satisfy_requirement pass through the existing gate.
+			const existingIndex = newState.requirements.findIndex((requirement) => requirement.id === event.id);
+			if (existingIndex >= 0) {
+				const requirement = newState.requirements[existingIndex];
+				const updatedRequirements = [...newState.requirements];
+				updatedRequirements[existingIndex] = {
+					...requirement,
+					boundLaneId: event.laneId,
+					updatedAt: event.now,
+				};
+				newState.requirements = updatedRequirements;
+			}
 			break;
 		}
 

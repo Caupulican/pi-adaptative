@@ -1,5 +1,7 @@
 import { stat as fsStat } from "node:fs/promises";
 import { type Static, Type } from "typebox";
+import type { WorkerResult } from "../autonomy/contracts.ts";
+import type { LaneRecord } from "../autonomy/lane-tracker.ts";
 import type { ToolDefinition } from "../extensions/types.ts";
 import type { GoalEvidenceKind, GoalState } from "../goals/goal-state.ts";
 import {
@@ -20,6 +22,7 @@ const goalSchema = Type.Object(
 				Type.Literal("satisfy_requirement"),
 				Type.Literal("block_requirement"),
 				Type.Literal("reopen_requirement"),
+				Type.Literal("dispatch_worker"),
 				Type.Literal("add_evidence"),
 				Type.Literal("progress"),
 				Type.Literal("no_progress"),
@@ -34,10 +37,12 @@ const goalSchema = Type.Object(
 		userGoal: Type.Optional(Type.String({ description: "The goal statement. Required for action 'start'." })),
 		requirementId: Type.Optional(
 			Type.String({
-				description: "Requirement id for add_requirement/satisfy_requirement/block_requirement/reopen_requirement.",
+				description:
+					"Requirement id for add_requirement/satisfy_requirement/block_requirement/reopen_requirement/dispatch_worker.",
 			}),
 		),
 		text: Type.Optional(Type.String({ description: "Requirement text. Required for add_requirement." })),
+		instructions: Type.Optional(Type.String({ description: "Worker instructions. Required for dispatch_worker." })),
 		evidenceId: Type.Optional(Type.String({ description: "Evidence id. Required for add_evidence." })),
 		evidenceIds: Type.Optional(
 			Type.Array(Type.String(), {
@@ -52,12 +57,18 @@ const goalSchema = Type.Object(
 					Type.Literal("tool"),
 					Type.Literal("user"),
 					Type.Literal("finding"),
+					Type.Literal("worker"),
 				],
 				{ description: "Evidence kind. Required for add_evidence." },
 			),
 		),
 		summary: Type.Optional(Type.String({ description: "Evidence summary. Required for add_evidence." })),
-		uri: Type.Optional(Type.String({ description: "Optional evidence locator (path/URL)." })),
+		uri: Type.Optional(
+			Type.String({
+				description:
+					"Optional evidence locator (path/URL for kind 'file', a toolCallId for kind 'tool', a laneId for kind 'worker').",
+			}),
+		),
 		reason: Type.Optional(Type.String({ description: "Reason for block_requirement or block_goal." })),
 	},
 	{ additionalProperties: false },
@@ -70,6 +81,13 @@ export interface GoalToolDetails {
 	applied: boolean;
 	error?: string;
 	state?: GoalState;
+	/** Set on 'dispatch_worker' when a worker lane actually started; mirrors the requirement's
+	 * new `boundLaneId`. Always the in-process route today -- see `startWorkerDelegation`'s
+	 * doc comment for the honest tmux-routing gap. */
+	dispatchedLaneId?: string;
+	/** Set on 'dispatch_worker' when the dispatch dependency declined to start a worker (e.g. worker
+	 * delegation disabled or already at capacity) -- the binding is still recorded, with no laneId. */
+	dispatchSkipReason?: string;
 }
 
 export interface GoalToolDependencies {
@@ -85,6 +103,39 @@ export interface GoalToolDependencies {
 	 * recorded as `verified: false` rather than assumed true.
 	 */
 	hasToolCallId?: (toolCallId: string) => boolean;
+	/**
+	 * Read the session's live worker lane records, for validating kind:"worker" evidence refs
+	 * (the `uri` is a laneId) at add_evidence time. Read-defensive: when not wired -- exactly like
+	 * `hasToolCallId` -- a "worker" ref cannot be proven and is recorded as `verified: false` rather
+	 * than assumed true. Live wiring lands in a later wave.
+	 */
+	getLaneRecords?: () => readonly LaneRecord[];
+	/**
+	 * Read persisted worker result snapshots (keyed by `WorkerResult.requestId`, which is the same
+	 * id as the dispatching lane's laneId), for validating kind:"worker" evidence refs. See
+	 * {@link getLaneRecords}. A matching result that is `parentReviewRequired && !parentReviewedAt`
+	 * verifies `false` -- an unreviewed worker completion must never ungate goal completion through
+	 * the existing verified/complete gate.
+	 */
+	getWorkerResultSnapshots?: () => readonly WorkerResult[];
+	/**
+	 * Tool-layer side effect for a 'dispatch_worker' action: dispatches a real in-process worker
+	 * lane for the given requirement and returns the resulting laneId to bind onto it. When the
+	 * dependency is present but the underlying delegation starter declines (disabled, already at
+	 * capacity, etc.), return `{ skipReason }` instead of a laneId -- a real, non-silent skip that
+	 * the tool response surfaces, distinct from this dependency being altogether unwired (`undefined`
+	 * dep, or the dep returning `undefined`), which records the binding attempt structurally with no
+	 * laneId (a no-op).
+	 *
+	 * HONEST scope note: this always dispatches the IN-PROCESS worker. There is no schema field on
+	 * this tool letting a caller select a tmux worker, and no in-process dependency that bridges to
+	 * the tmux extension from this construction site -- routing `dispatch_worker` to a tmux worker
+	 * is an OPEN follow-up, not silently faked here.
+	 */
+	startWorkerDelegation?: (args: {
+		requirementId: string;
+		instructions: string;
+	}) => { laneId?: string; skipReason?: string } | undefined;
 	/** Working directory for resolving kind:"file" evidence ref paths. Defaults to `process.cwd()`. */
 	cwd?: () => string;
 	/**
@@ -125,6 +176,19 @@ async function resolveEvidenceVerified(
 			return false;
 		}
 	}
+	if (kind === "worker") {
+		if (!deps.getLaneRecords || !deps.getWorkerResultSnapshots) return false;
+		const laneId = trimmedUri;
+		const record = deps.getLaneRecords().find((candidate) => candidate.laneId === laneId);
+		if (!record) return false;
+		const result = deps.getWorkerResultSnapshots().find((candidate) => candidate.requestId === laneId);
+		if (!result) return false;
+		// An unreviewed mutation (parentReviewRequired && no parentReviewedAt) can never verify true --
+		// this is what stops an unreviewed worker completion from ungating goal completion through
+		// the existing verified/complete gate (goal-tool-core's isVerifiedOrUserEvidence/complete).
+		if (result.parentReviewRequired === true && result.parentReviewedAt === undefined) return false;
+		return result.status === "completed";
+	}
 	return undefined;
 }
 
@@ -148,6 +212,12 @@ function toGoalAction(input: GoalToolInput): GoalAction | { error: string } {
 			};
 		case "reopen_requirement":
 			return { action: "reopen_requirement", requirementId: input.requirementId ?? "" };
+		case "dispatch_worker":
+			return {
+				action: "dispatch_worker",
+				requirementId: input.requirementId ?? "",
+				instructions: input.instructions ?? "",
+			};
 		case "add_evidence": {
 			if (input.kind === undefined) {
 				return { error: "add_evidence requires a kind." };
@@ -189,7 +259,8 @@ export function createGoalToolDefinition(deps: GoalToolDependencies): ToolDefini
 		promptGuidelines: [
 			"At the start of a multi-step task, call goal with action 'start' to record the user goal, then add the concrete requirements with 'add_requirement'.",
 			"As you make progress, record evidence with 'add_evidence' and mark requirements satisfied with 'satisfy_requirement', citing the evidence ids.",
-			"For 'add_evidence', kind 'tool' expects a real toolCallId in 'uri' and kind 'file' expects a real path; both are checked and recorded as verified or not. Kinds 'user'/'finding'/'test' carry no checkable ref.",
+			"For 'add_evidence', kind 'tool' expects a real toolCallId in 'uri' and kind 'file' expects a real path; both are checked and recorded as verified or not. Kind 'worker' expects a laneId in 'uri' and verifies true only for a reviewed, completed worker result. Kinds 'user'/'finding'/'test' carry no checkable ref.",
+			"Use 'dispatch_worker' to bind a requirement to a worker lane while it is being worked; this records the binding only -- it never satisfies the requirement. Record 'worker'-kind evidence citing that laneId once the worker completes, then call 'satisfy_requirement'.",
 			"Use 'progress' when you advance without satisfying a specific requirement, and 'no_progress' when a turn yields nothing, so stall detection works.",
 			"When the user resolves a blocker, use 'resume_goal' and 'reopen_requirement' as needed; do not strand the old ledger or start a duplicate goal.",
 			"Mark the goal 'complete' only when every requirement is satisfied; completion normally also requires at least one satisfied requirement backed by verified 'tool'/'file' evidence or kind 'user' evidence. Use 'block_goal' or 'block_requirement' with a reason when you are stuck and need the user. A blocked goal can still be resumed or cancelled.",
@@ -215,6 +286,26 @@ export function createGoalToolDefinition(deps: GoalToolDependencies): ToolDefini
 				const verified = await resolveEvidenceVerified(action.kind, action.uri, deps);
 				action = { ...action, verified };
 			}
+			// Honest dispatch reporting: distinguish "dispatched" (laneId), "declined" (skipReason --
+			// the dependency IS wired but the underlying delegation starter refused, e.g. disabled or
+			// already at capacity), and "unwired" (no dependency at all) -- never collapse a real
+			// decline into a silent no-laneId no-op indistinguishable from the dep being absent.
+			let dispatchNote: string | undefined;
+			let dispatchSkipReason: string | undefined;
+			if (action.action === "dispatch_worker") {
+				const dispatched = deps.startWorkerDelegation?.({
+					requirementId: action.requirementId,
+					instructions: action.instructions,
+				});
+				action = { ...action, laneId: dispatched?.laneId };
+				if (dispatched?.laneId) {
+					dispatchNote = `Dispatched in-process worker lane '${dispatched.laneId}' for requirement '${action.requirementId}' (tmux dispatch is not available from this tool yet).`;
+				} else {
+					dispatchSkipReason =
+						dispatched?.skipReason ?? (deps.startWorkerDelegation ? "declined" : "dependency_unwired");
+					dispatchNote = `No worker was dispatched (${dispatchSkipReason}); requirement '${action.requirementId}' is recorded but not bound to a lane.`;
+				}
+			}
 
 			const current = deps.getGoalState();
 			const result = applyGoalAction(current, action, now(), {
@@ -229,9 +320,18 @@ export function createGoalToolDefinition(deps: GoalToolDependencies): ToolDefini
 
 			deps.saveGoalState(result.state);
 			const summary = summarizeGoalState(result.state, { action, openTaskSteps: deps.getOpenTaskSteps?.() });
+			const text = dispatchNote
+				? `goal ${input.action} recorded.\n${summary}\n${dispatchNote}`
+				: `goal ${input.action} recorded.\n${summary}`;
 			return {
-				content: [{ type: "text" as const, text: `goal ${input.action} recorded.\n${summary}` }],
-				details: { action: input.action, applied: true, state: result.state },
+				content: [{ type: "text" as const, text }],
+				details: {
+					action: input.action,
+					applied: true,
+					state: result.state,
+					...(action.action === "dispatch_worker" && action.laneId ? { dispatchedLaneId: action.laneId } : {}),
+					...(action.action === "dispatch_worker" && !action.laneId ? { dispatchSkipReason } : {}),
+				},
 			};
 		},
 	};

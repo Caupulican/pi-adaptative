@@ -693,7 +693,12 @@ export type GoalContinuationLoopStopReason =
 	// the loop never ran a pass because another goal loop already owned the mutex, or the session was
 	// disposed before this request could start. `turnsSubmitted` is always 0 for both.
 	| "already_continuing"
-	| "session_disposed";
+	| "session_disposed"
+	// A worker is dispatched (queued/running) against an open requirement this goal owns — the
+	// loop paused WITHOUT submitting a pass (never reaches `goal_state_not_advanced`) and will resume
+	// on its own once the worker terminates. Distinct from `continuation_not_allowed` (which reads as
+	// a terminal refusal needing a human/new decision) — this is a benign, self-resolving wait.
+	| "worker_in_flight";
 
 export interface GoalContinuationLoopOptions extends GoalContinuationOnceOptions {
 	maxTurns: number;
@@ -4941,6 +4946,9 @@ export class AgentSession {
 				reportSpawnedUsage: (usage, opts) => {
 					this.addSpawnedUsage(usage, opts);
 				},
+				reportManagedLane: (event) => {
+					this._backgroundLanes.recordManagedLane(event);
+				},
 			},
 			{
 				getModel: () => this.model,
@@ -5321,10 +5329,18 @@ export class AgentSession {
 		return getLearningDecisionSnapshots(this.sessionManager.getEntries());
 	}
 
+	/**
+	 * The single injection point that makes the goal-continuation snapshot lane-aware:
+	 * `laneRecords` feeds BOTH `evaluateGoalContinuation`'s "waiting" branch (a worker dispatched
+	 * against an open requirement) and the per-goal worker-spend overlay — read fresh here so BOTH the
+	 * goal loop (`GoalLoopController`) and the idle scheduler (`BackgroundLaneController`) see the
+	 * same live lane state, since both reach this same method.
+	 */
 	getGoalRuntimeSnapshot(settings: GoalRuntimeSnapshotSettings): GoalRuntimeSnapshot {
 		return buildGoalRuntimeSnapshot({
 			sessionManager: this.sessionManager,
 			settings,
+			laneRecords: this._backgroundLanes.getLaneRecords(),
 		});
 	}
 

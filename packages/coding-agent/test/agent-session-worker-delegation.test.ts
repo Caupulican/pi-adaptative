@@ -4,6 +4,7 @@ import { type AssistantMessage, type FauxResponseFactory, fauxAssistantMessage, 
 import { describe, expect, it, vi } from "vitest";
 import { getLaneRecordSnapshots } from "../src/core/autonomy/session-lane-record.ts";
 import { getWorkerRequestSnapshots } from "../src/core/delegation/session-worker-result.ts";
+import { createGoalState } from "../src/core/goals/goal-state.ts";
 import { createHarness, type Harness } from "./suite/harness.ts";
 
 const WORKER_JSON =
@@ -23,6 +24,37 @@ describe("AgentSession worker delegation", () => {
 			expect(getWorkerRequestSnapshots(harness.sessionManager.getEntries())[0]?.envelope.capabilities).toEqual([
 				"read_files",
 			]);
+		} finally {
+			harness.cleanup();
+		}
+	});
+
+	it("tags a started worker lane with the active goal's goalId", async () => {
+		const harness = await createHarness();
+		try {
+			harness.session.saveGoalStateSnapshot(
+				createGoalState({ goalId: "goal-42", userGoal: "Ship the feature", now: new Date().toISOString() }),
+			);
+			harness.setResponses([fauxAssistantMessage(WORKER_JSON)]);
+			const run = await harness.session.runWorkerDelegationOnce({ instructions: "Scout something" });
+			expect(run.started).toBe(true);
+			expect(run.record?.goalId).toBe("goal-42");
+
+			const persisted = workerLaneRecords(harness);
+			expect(persisted).toHaveLength(1);
+			expect(persisted[0]?.goalId).toBe("goal-42");
+		} finally {
+			harness.cleanup();
+		}
+	});
+
+	it("leaves a worker lane without a goalId when no goal is active", async () => {
+		const harness = await createHarness();
+		try {
+			harness.setResponses([fauxAssistantMessage(WORKER_JSON)]);
+			const run = await harness.session.runWorkerDelegationOnce({ instructions: "Scout something" });
+			expect(run.started).toBe(true);
+			expect(run.record?.goalId).toBeUndefined();
 		} finally {
 			harness.cleanup();
 		}

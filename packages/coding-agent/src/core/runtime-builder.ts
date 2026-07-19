@@ -730,6 +730,20 @@ export class RuntimeBuilder {
 				},
 				// kind:"tool" evidence refs verify against real session records.
 				hasToolCallId: (toolCallId) => hasAnsweredToolCallOnBranch(this.deps.getSessionManager(), toolCallId),
+				// kind:"worker" evidence refs verify against the SAME live lane/result accessors the
+				// delegate_status tool already uses below -- live wiring (these were declared optional
+				// and read-defensive on the goal-tool deps type in a prior wave).
+				getLaneRecords: () => this.deps.getWorkerLaneRecords(),
+				getWorkerResultSnapshots: () => this.deps.getWorkerResultSnapshots(),
+				// dispatch_worker's tool-layer side effect: starts a real in-process worker lane through
+				// the SAME starter the delegate tool uses (below), adapted from its
+				// `{started:true;record}|{started:false;skipReason}` shape onto this tool's narrower
+				// `{laneId}|{skipReason}` shape. Tmux routing has no selection surface on this tool yet
+				// (see goal.ts's `startWorkerDelegation` doc comment) so this always dispatches in-process.
+				startWorkerDelegation: (args) => {
+					const outcome = this.deps.startWorkerDelegation({ instructions: args.instructions });
+					return outcome.started ? { laneId: outcome.record.laneId } : { skipReason: outcome.skipReason };
+				},
 				cwd: () => this.deps.getCwd(),
 				// Reuses the already branch-scoped getTaskStepsStateSnapshot dep -- no new
 				// SessionManager access needed for the cross-visibility nudge.

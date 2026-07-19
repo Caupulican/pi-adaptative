@@ -17,6 +17,7 @@
 import type {
 	GoalContinuationLoopOptions,
 	GoalContinuationLoopResult,
+	GoalContinuationLoopStopReason,
 	GoalContinuationOnceOptions,
 	GoalContinuationOnceResult,
 	PromptOptions,
@@ -24,6 +25,7 @@ import type {
 import {
 	DEFAULT_GOAL_CUMULATIVE_MAX_TURNS,
 	DEFAULT_GOAL_CUMULATIVE_MAX_WALL_CLOCK_MS,
+	DEFAULT_GOAL_CUMULATIVE_MAX_WORKER_SPEND_USD,
 } from "./goals/goal-continuation-defaults.ts";
 import { buildGoalContinuationPrompt } from "./goals/goal-continuation-prompt.ts";
 import type { GoalRuntimeSnapshot, GoalRuntimeSnapshotSettings } from "./goals/goal-runtime-snapshot.ts";
@@ -75,7 +77,20 @@ function isGoalContinuationBudgetExhausted(state: GoalState | undefined): boolea
 	if (!state) return false;
 	if ((state.continuationTurnsUsed ?? 0) >= DEFAULT_GOAL_CUMULATIVE_MAX_TURNS) return true;
 	if ((state.continuationWallClockMs ?? 0) >= DEFAULT_GOAL_CUMULATIVE_MAX_WALL_CLOCK_MS) return true;
+	if ((state.continuationWorkerSpendUsd ?? 0) >= DEFAULT_GOAL_CUMULATIVE_MAX_WORKER_SPEND_USD) return true;
 	return false;
+}
+
+/**
+ * Maps a non-"continue" continuation action onto the loop's own stopReason vocabulary.
+ * `"waiting"` (a worker is dispatched against an open requirement) gets its OWN benign stopReason so
+ * a wait is never misreported as `continuation_not_allowed` (which reads as a terminal refusal) —
+ * callers/telemetry can tell "paused, will resume on its own" apart from "stopped, needs a human or a
+ * new decision." Every other non-continue action (ask-user/finalize/stop) keeps the existing
+ * `continuation_not_allowed` stopReason unchanged.
+ */
+function nonContinueStopReason(snapshot: GoalRuntimeSnapshot): GoalContinuationLoopStopReason {
+	return snapshot.continuation.action === "waiting" ? "worker_in_flight" : "continuation_not_allowed";
 }
 
 export interface GoalLoopControllerDeps {
@@ -142,7 +157,7 @@ export class GoalLoopController {
 		while (turnsSubmitted < options.maxTurns) {
 			const beforeSnapshot = snapshot();
 			if (beforeSnapshot.continuation.action !== "continue") {
-				return { turnsSubmitted, stopReason: "continuation_not_allowed", finalSnapshot: beforeSnapshot };
+				return { turnsSubmitted, stopReason: nonContinueStopReason(beforeSnapshot), finalSnapshot: beforeSnapshot };
 			}
 
 			// Cumulative (durable, cross-invocation) budget — read fresh every pass, not just at the top
@@ -167,7 +182,7 @@ export class GoalLoopController {
 
 			const afterSnapshot = snapshot();
 			if (afterSnapshot.continuation.action !== "continue") {
-				return { turnsSubmitted, stopReason: "continuation_not_allowed", finalSnapshot: afterSnapshot };
+				return { turnsSubmitted, stopReason: nonContinueStopReason(afterSnapshot), finalSnapshot: afterSnapshot };
 			}
 
 			const afterKey = goalProgressSignature(afterSnapshot.goalState);

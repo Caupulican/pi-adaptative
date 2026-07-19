@@ -36,6 +36,7 @@ function buildQueuingDeps(agentDir: string): BackgroundLaneControllerDeps {
 		isModelExhausted: () => false,
 		isDelegateToolActive: () => true,
 		getCapabilityEnvelope: () => undefined,
+		getGoalStateSnapshot: () => undefined,
 		readMemoryForLane: async () => "",
 		// Never resolves: once drained, the running worker stays suspended for the whole test.
 		runIsolatedCompletion: () => new Promise(() => {}),

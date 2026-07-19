@@ -30,7 +30,13 @@ import type {
 	ResearchLaneRunOutcome,
 	WorkerDelegationRunOutcome,
 } from "./agent-session.ts";
-import type { CapabilityEnvelope, EvidenceBundle, WorkerRequest, WorkerResult } from "./autonomy/contracts.ts";
+import type {
+	CapabilityEnvelope,
+	EvidenceBundle,
+	WorkerRequest,
+	WorkerResult,
+	WorkerResultStatus,
+} from "./autonomy/contracts.ts";
 import { createLaneToolSurface, type LaneToolSurface } from "./autonomy/lane-tool-surface.ts";
 import { type LaneRecord, type LaneTerminalStatus, LaneTracker } from "./autonomy/lane-tracker.ts";
 import { safeRealpathSync } from "./autonomy/path-scope.ts";
@@ -38,7 +44,9 @@ import { appendLaneRecordSnapshot, getLaneRecordSnapshots } from "./autonomy/ses
 import { composeSubagentSystemPrompt } from "./autonomy/subagent-prompt.ts";
 import { AUTONOMY_TELEMETRY_EVENT_TYPES, type AutonomyTelemetryEvent } from "./autonomy/telemetry-events.ts";
 import { applyWorkerActions, type WorkerAction } from "./delegation/worker-actions.ts";
+import { reviewManagedLaneChangedFiles } from "./delegation/worker-result.ts";
 import { runWorker } from "./delegation/worker-runner.ts";
+import type { ManagedLaneEvent } from "./extensions/types.ts";
 import type { GoalRuntimeSnapshot, GoalRuntimeSnapshotSettings } from "./goals/goal-runtime-snapshot.ts";
 import type { GoalState } from "./goals/goal-state.ts";
 import {
@@ -86,6 +94,57 @@ export function getPrivateLaneDeniedPaths(cwd: string, agentDir: string): string
 		stateDir(agentDir),
 		getWorkRoot(agentDir),
 	].concat(path.join(cwd, ".pi", "settings.json"));
+}
+
+const KNOWN_LANE_TERMINAL_STATUSES: ReadonlySet<string> = new Set([
+	"succeeded",
+	"failed",
+	"canceled",
+	"timeout",
+	"budget_exhausted",
+]);
+
+/**
+ * Resolves a managed lane's caller-reported terminal `status` (a free-form CLAIM — e.g. a tmux job's
+ * own "done"/"blocked" completion marker, a lifecycle tag like "dismissed", or a raw
+ * {@link WorkerResultStatus} spelling) onto the LaneTracker's {@link LaneTerminalStatus} vocabulary.
+ * Mirrors the same success/blocked mapping direction `worker-runner.ts` already uses for in-process
+ * workers ("completed"/"done" -> succeeded, "blocked" -> failed). An unrecognized or missing status is
+ * conservatively reported as `"failed"` rather than silently assumed successful (claims-to-review).
+ */
+export function resolveManagedLaneTerminalStatus(status: string | undefined): LaneTerminalStatus {
+	if (status !== undefined && KNOWN_LANE_TERMINAL_STATUSES.has(status)) {
+		return status as LaneTerminalStatus;
+	}
+	switch (status) {
+		case "done":
+		case "completed":
+			return "succeeded";
+		case "blocked":
+			return "failed";
+		case "dismissed":
+		case "cancelled":
+			return "canceled";
+		default:
+			return "failed";
+	}
+}
+
+/** Maps a LaneTracker terminal status onto the WorkerResult status vocabulary a managed-lane claim
+ * snapshot is persisted under — the two enums use different spellings/values, never interchangeable
+ * (e.g. `"canceled"` vs `"cancelled"`); `timeout`/`budget_exhausted` have no dedicated WorkerResult
+ * counterpart and are conservatively reported as `"failed"`. */
+export function mapManagedLaneTerminalStatus(status: LaneTerminalStatus): WorkerResultStatus {
+	switch (status) {
+		case "succeeded":
+			return "completed";
+		case "canceled":
+			return "cancelled";
+		case "failed":
+		case "timeout":
+		case "budget_exhausted":
+			return "failed";
+	}
 }
 
 export function isLocalExecutionModel(model: Pick<Model<Api>, "provider" | "baseUrl">): boolean {
@@ -215,6 +274,11 @@ export class BackgroundLaneController {
 	 * no entry here (e.g. seeded directly into `_queuedWorkers` by a test) is simply untracked —
 	 * deregistration is best-effort by design, never required. */
 	private readonly _queuedWorkerDeregisters = new Map<string, () => void>();
+	/** Dispatch -> terminal correlation for out-of-process managed lanes (`pi.reportManagedLane`
+	 * host bridge), keyed by the CALLER's own `laneId` (e.g. a tmux job id) — distinct from the
+	 * internal `LaneTracker` id it maps to. Removed on the matching terminal report so a duplicate or
+	 * unmatched terminal call is a safe no-op instead of a double-deregister or an orphaned entry. */
+	private readonly _managedLaneDispatches = new Map<string, { laneId: string; deregister: () => void }>();
 
 	private readonly deps: BackgroundLaneControllerDeps;
 
@@ -316,6 +380,81 @@ export class BackgroundLaneController {
 		return this._laneTracker.getActiveCount();
 	}
 
+	/** Belt-and-braces guard: whether ANY queued/running lane is tagged with this goalId. */
+	private _hasInFlightLaneForGoal(goalId: string): boolean {
+		return this.getLaneRecords().some(
+			(record) => record.goalId === goalId && (record.status === "queued" || record.status === "running"),
+		);
+	}
+
+	/**
+	 * Host-side bridge for `pi.reportManagedLane`: makes an out-of-process managed lane (e.g. a tmux
+	 * worker) a first-class lane in THIS process's LaneTracker. HONEST cross-process seam — the
+	 * extension only ever REPORTS a claim; this controller stays the lane-tracking SSOT (no in-process
+	 * sandboxing is implied by accepting the report).
+	 *
+	 * `phase: "dispatch"` mints a `tmux-worker` lane record (goalId-tagged) and registers exactly one
+	 * reload-quiesce unit for it. `phase: "terminal"` resolves the caller's free-form `status` claim
+	 * onto {@link LaneTerminalStatus} (see {@link resolveManagedLaneTerminalStatus}), completes that
+	 * same record, deregisters the quiesce unit (inside a `finally` — never left stuck regardless of
+	 * what persistence below does), and persists a bounded worker-result CLAIM snapshot from the
+	 * reported `changedFiles`. Host re-review: the reported `changedFiles` are re-checked against
+	 * the session's active capability envelope ({@link reviewManagedLaneChangedFiles}, reusing
+	 * `validateWorkerResult`'s symlink-safe scope check verbatim) and `parentReviewRequired` is
+	 * stamped on the persisted claim whenever that check does not cleanly "allow" -- an out-of-scope
+	 * (or no-scope-configured) path is flagged exactly like an in-scope one, since a tmux worker's
+	 * write never passed through this process's enforcement in the first place. This is the SESSION
+	 * envelope, not a per-launch tmux standing grant (that is a narrower, launch-specific scope;
+	 * documented follow-up, not yet implemented). `event.request` stays an unvalidated
+	 * caller-supplied bag (per its own doc comment) and is deliberately never read for scoping. A
+	 * terminal report for an unknown `laneId` (no matching dispatch tracked) and a duplicate dispatch
+	 * for an already-tracked `laneId` are both safe no-ops — never a double registration, a double
+	 * persisted claim, or a crash.
+	 */
+	recordManagedLane(event: ManagedLaneEvent): void {
+		if (this.deps.isDisposed()) return;
+		if (event.phase === "dispatch") {
+			if (this._managedLaneDispatches.has(event.laneId)) return;
+			this._seedLaneHistory();
+			const record = this._laneTracker.start({ type: "tmux-worker", goalId: event.goalId });
+			const deregister = registerInFlightWork(this.deps.getAgentDir(), "lane", `tmux:${record.laneId}`);
+			this._managedLaneDispatches.set(event.laneId, { laneId: record.laneId, deregister });
+			return;
+		}
+
+		const dispatch = this._managedLaneDispatches.get(event.laneId);
+		if (!dispatch) return;
+		this._managedLaneDispatches.delete(event.laneId);
+		try {
+			const resolvedStatus = resolveManagedLaneTerminalStatus(event.status);
+			const record = this._laneTracker.complete(dispatch.laneId, {
+				status: resolvedStatus,
+				reasonCode: event.reasonCode,
+			});
+			if (!record) return;
+			appendLaneRecordSnapshot(this.deps.getSessionManager(), record);
+			const changedFiles = event.changedFiles ? [...event.changedFiles] : [];
+			const review = reviewManagedLaneChangedFiles({
+				changedFiles,
+				envelope: this.deps.getCapabilityEnvelope() ?? {},
+				cwd: this.deps.getCwd(),
+			});
+			const result: WorkerResult = {
+				requestId: dispatch.laneId,
+				status: mapManagedLaneTerminalStatus(resolvedStatus),
+				summary: `Managed tmux-worker lane ${dispatch.laneId} reported terminal status "${event.status ?? "unknown"}"${
+					event.reasonCode ? ` (${event.reasonCode})` : ""
+				}.${review.reviewRequired ? ` Changed files require parent review (${review.reasonCode}).` : ""}`,
+				changedFiles,
+				parentReviewRequired: review.reviewRequired,
+				createdAt: new Date().toISOString(),
+			};
+			this.deps.saveWorkerResultSnapshot(result);
+		} finally {
+			dispatch.deregister();
+		}
+	}
+
 	/** Why the last idle research-lane evaluation skipped, for /autonomy diagnostics. */
 	getLastResearchLaneSkipReason(): string | undefined {
 		return this._lastResearchLaneSkipReason;
@@ -414,6 +553,14 @@ export class BackgroundLaneController {
 
 		const snapshot = this.deps.getGoalRuntimeSnapshot({ maxStallTurns });
 		if (snapshot.continuation.action !== "continue") return;
+
+		// Belt-and-braces: the snapshot above is already lane-aware (a bound in-flight worker
+		// yields action:"waiting", already caught by the check above), so this direct lane check is
+		// redundant in the normal case. It stays as an explicit second gate so a future change that
+		// decouples the lane injection from THIS snapshot read can never silently reopen the idle
+		// re-dispatch race this guard closes.
+		const activeGoalId = snapshot.goalState?.goalId;
+		if (activeGoalId !== undefined && this._hasInFlightLaneForGoal(activeGoalId)) return;
 
 		this.clearGoalAutoContinueTimer();
 		this._goalAutoContinueTimer = setTimeout(() => {
@@ -904,7 +1051,7 @@ export class BackgroundLaneController {
 			) {
 				return { started: false, skipReason: "worker_delegation_queue_full" };
 			}
-			const record = this._laneTracker.enqueue({ type: "worker" });
+			const record = this._laneTracker.enqueue({ type: "worker", goalId: this.deps.getGoalStateSnapshot()?.goalId });
 			this._queuedWorkers.set(record.laneId, request);
 			// Register the reload-gate quiesce unit at ENQUEUE (not at the later running handoff)
 			// so `/reload` waits for queued-but-not-yet-started work too, matching running workers.
@@ -979,7 +1126,9 @@ export class BackgroundLaneController {
 		}
 
 		this._seedLaneHistory();
-		const startedRecord = existingRecord ?? this._laneTracker.start({ type: "worker" });
+		const startedRecord =
+			existingRecord ??
+			this._laneTracker.start({ type: "worker", goalId: this.deps.getGoalStateSnapshot()?.goalId });
 		if (existingRecord) this._laneTracker.markRunning(existingRecord.laneId);
 		onStarted?.(startedRecord);
 		const maxUsd = Math.min(

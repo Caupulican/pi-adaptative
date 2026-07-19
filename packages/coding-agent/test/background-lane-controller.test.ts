@@ -256,6 +256,7 @@ describe("quiesce registry", () => {
 			isModelExhausted: () => false,
 			isDelegateToolActive: () => true,
 			getCapabilityEnvelope: () => undefined,
+			getGoalStateSnapshot: () => undefined,
 			readMemoryForLane: async () => "",
 			// Throws inside the lane's try block, after registration — proves the finally still deregisters.
 			runIsolatedCompletion: () => Promise.reject(new Error("boom")),
