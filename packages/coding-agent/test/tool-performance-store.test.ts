@@ -1,6 +1,6 @@
-import { mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
+import { existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
-import { join } from "node:path";
+import { dirname, join } from "node:path";
 import { afterEach, describe, expect, it } from "vitest";
 import { type ToolPerformanceKey, ToolPerformanceStore } from "../src/core/tool-selection/tool-performance-store.ts";
 
@@ -64,6 +64,26 @@ describe("ToolPerformanceStore", () => {
 
 		const second = storeFor(1);
 		expect(second.get(key).sampleCount).toBe(0);
+	});
+
+	it("readOnly:true never creates the state dir/file, but still returns the normally-computed stats (D4)", () => {
+		const dir = mkdtempSync(join(tmpdir(), "pi-tool-performance-readonly-"));
+		dirs.push(dir);
+		const filePath = join(dir, "state", "tool-performance.json");
+		const store = ToolPerformanceStore.forAgentDir(dir, { fingerprint: () => hosts[0], readOnly: true });
+
+		const afterValidation = store.recordValidation(key, "repaired");
+		expect(afterValidation.repairCount).toBe(1);
+		const afterExecution = store.recordExecution({ key, success: true, latencyMs: 100, selection });
+		expect(afterExecution.sampleCount).toBe(1);
+
+		expect(existsSync(filePath)).toBe(false);
+		expect(existsSync(dirname(filePath))).toBe(false);
+
+		// readOnly:false (the default outside a worker session) is unaffected.
+		const writableStore = ToolPerformanceStore.forAgentDir(dir, { fingerprint: () => hosts[0] });
+		writableStore.recordValidation(key, "repaired");
+		expect(existsSync(filePath)).toBe(true);
 	});
 
 	it("bounds observations and statistics", () => {

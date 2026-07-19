@@ -396,6 +396,22 @@ export async function createLane(deps: WorktreeSyncEngineDeps, args: CreateLaneA
 	return { code: "ok", lane };
 }
 
+/**
+ * Does `lane` have a DIFFERENT, still-alive session owning it? Same same-host `isAlive` pattern
+ * used elsewhere (`deps.isPidAlive`, else {@link defaultIsPidAlive} against this host). A lane
+ * with no recorded owner, owned by THIS session, or whose owner is dead never conflicts --
+ * `reconcile` already clears dead owners, but a race can still observe one here, and a dead owner
+ * must never block land/release (D6, per R1: land/release ONLY -- sync/continue/abort_sync stay
+ * ungated at the engine; worker cross-lane containment for those lives at the tool layer, D3).
+ */
+function ownerConflicts(deps: WorktreeSyncEngineDeps, lane: LaneRegistration): boolean {
+	if (lane.ownerSessionId == null || lane.ownerSessionId === deps.sessionId) return false;
+	if (lane.ownerPid === undefined) return false;
+	const isAlive =
+		deps.isPidAlive ?? ((pid: number) => defaultIsPidAlive({ pid, hostname: osHostname(), acquiredAt: "" }));
+	return isAlive(lane.ownerPid);
+}
+
 export interface ReleaseLaneArgs {
 	laneKey: string;
 	/** Required as exactly "yes-discard-lane" to release a lane with unlanded commits or dirty files (G11). */
@@ -409,6 +425,12 @@ export async function releaseLane(deps: WorktreeSyncEngineDeps, args: ReleaseLan
 	const lane = await readLane(ctx.paths, args.laneKey);
 	if (!lane) return { code: "lane_not_found", message: `no registered lane '${args.laneKey}'` };
 	if (lane.status === "released") return { code: "released", laneKey: lane.laneKey };
+	if (ownerConflicts(deps, lane)) {
+		return {
+			code: "lane_owner_conflict",
+			message: `lane '${lane.laneKey}' is owned by another live session (pid ${lane.ownerPid}); only its owner may release it`,
+		};
+	}
 
 	const facts = await deriveLaneFacts(deps, ctx, lane);
 	let landed = true;
@@ -950,6 +972,12 @@ export async function landLane(deps: WorktreeSyncEngineDeps, args: LandLaneArgs)
 	const lane = await readLane(ctx.paths, args.laneKey);
 	if (!lane || lane.status === "released") {
 		return { code: "lane_not_found", message: `no active lane '${args.laneKey}'` };
+	}
+	if (ownerConflicts(deps, lane)) {
+		return {
+			code: "lane_owner_conflict",
+			message: `lane '${lane.laneKey}' is owned by another live session (pid ${lane.ownerPid}); only its owner may land it`,
+		};
 	}
 	if (args.gate === "on" && !args.gateCommand?.trim()) {
 		return {

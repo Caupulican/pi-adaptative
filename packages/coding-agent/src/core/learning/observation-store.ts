@@ -1,6 +1,7 @@
 import { createHash } from "node:crypto";
 import { existsSync, readFileSync } from "node:fs";
 import { stateFile } from "../agent-paths.ts";
+import { isWorkerSession } from "../session-role.ts";
 import { withFileLockSync, writeFileAtomicSync } from "../util/atomic-file.ts";
 
 /**
@@ -43,13 +44,15 @@ export function observationKey(layer: string, summary: string): string {
 
 export class ObservationStore {
 	private readonly filePath: string;
+	private readonly readOnly: boolean;
 
-	constructor(filePath: string) {
+	constructor(filePath: string, options?: { readOnly?: boolean }) {
 		this.filePath = filePath;
+		this.readOnly = options?.readOnly ?? isWorkerSession();
 	}
 
-	static forAgentDir(agentDir: string): ObservationStore {
-		return new ObservationStore(stateFile(agentDir, "learning-observations.json"));
+	static forAgentDir(agentDir: string, options?: { readOnly?: boolean }): ObservationStore {
+		return new ObservationStore(stateFile(agentDir, "learning-observations.json"), options);
 	}
 
 	private load(): ObservationStoreFile {
@@ -112,6 +115,12 @@ export class ObservationStore {
 	 * sessions sharing an agentDir) can't both read the old count and drop one increment.
 	 */
 	increment(key: string, at?: string): number {
+		if (this.readOnly) {
+			// Zero-footprint (worker session): no lock, no dir, no write -- just the pure-read
+			// equivalent of what a real increment would have returned.
+			const file = this.load();
+			return Math.min((file.observations[key]?.count ?? 0) + 1, MAX_COUNT);
+		}
 		const now = at ?? new Date().toISOString();
 		return withFileLockSync(this.filePath, () => {
 			const file = this.load();

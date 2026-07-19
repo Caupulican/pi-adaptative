@@ -2,6 +2,7 @@ import { existsSync, mkdirSync, readFileSync, writeFileSync } from "node:fs";
 import { dirname } from "node:path";
 import { stateFile } from "../agent-paths.ts";
 import { currentHostFingerprint, type HostFingerprint } from "../models/fitness-store.ts";
+import { isWorkerSession } from "../session-role.ts";
 
 const STORE_VERSION = 1;
 const MAX_STATS_PER_HOST = 500;
@@ -310,13 +311,18 @@ function trimIntentAgreement(
 export class ToolPerformanceStore {
 	private readonly filePath: string;
 	private readonly fingerprint: () => HostFingerprint;
+	private readonly readOnly: boolean;
 
-	constructor(filePath: string, options: { fingerprint?: () => HostFingerprint } = {}) {
+	constructor(filePath: string, options: { fingerprint?: () => HostFingerprint; readOnly?: boolean } = {}) {
 		this.filePath = filePath;
 		this.fingerprint = options.fingerprint ?? currentHostFingerprint;
+		this.readOnly = options.readOnly ?? isWorkerSession();
 	}
 
-	static forAgentDir(agentDir: string, options: { fingerprint?: () => HostFingerprint } = {}): ToolPerformanceStore {
+	static forAgentDir(
+		agentDir: string,
+		options: { fingerprint?: () => HostFingerprint; readOnly?: boolean } = {},
+	): ToolPerformanceStore {
 		return new ToolPerformanceStore(stateFile(agentDir, "tool-performance.json"), options);
 	}
 
@@ -330,6 +336,9 @@ export class ToolPerformanceStore {
 	}
 
 	private save(file: ToolPerformanceStoreFile): void {
+		// Zero-footprint (worker session): never create the state dir, lock, or file -- the caller
+		// still gets its normally-computed return value from the in-memory `file`.
+		if (this.readOnly) return;
 		mkdirSync(dirname(this.filePath), { recursive: true });
 		writeFileSync(this.filePath, `${JSON.stringify(file, null, "\t")}\n`, "utf8");
 	}

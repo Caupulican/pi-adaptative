@@ -39,6 +39,7 @@ behavior change once set. Settings live under `worktreeSync` in `settings.json`:
 | `gateTimeoutMs` | `900000` | Gate command timeout. |
 | `maxLanes` | `5` | Active-lane ceiling; `create_lane` refuses beyond it. |
 | `worktreesRoot` | agent-paths default | Overrides the lane-checkout root. |
+| `workerLand` | `"deny"` | `"allow"` lets a WORKER session (see "Identity, UAC, and zero footprint" below) run `land` on its own bound lane; still subject to normal freshness/ownership gating. |
 
 `syncPolicy` values:
 
@@ -111,6 +112,87 @@ A goal-bound tmux dispatch (`goal` tool's `dispatch_worker` with `dispatchTarget
 lane's worktree; integrate exclusively via `worktree_sync land`; never touch main directly). A
 lane-creation refusal (e.g. `maxLanes` reached) aborts the dispatch cleanly before any tmux
 session is ever launched (`dispatchSkipReason: "worktree_create_failed"`).
+
+## Identity, UAC, and zero footprint
+
+A session's **role** (`main` or `worker`) is derived structurally, never asserted by the session
+itself (`core/session-role.ts`): a session is a **worker** iff it is bound to a worktree-sync lane
+(`PI_WORKTREE_LANE`) OR launched with `PI_SESSION_ROLE=worker`. `PI_SESSION_ROLE=main` is
+deliberately **not** an escalation -- it can never override a bound lane, so there is no
+environment value a lane-bound process can set to shed the worker ceiling below.
+
+### Forbidden-tool ceiling
+
+A worker session can never activate: `goal`, `delegate`, `delegate_status`, `improvement_loop`,
+`extensionify`, `skillify`, `run_toolkit_script`, `model_fitness`, `tmux_agent_manager`,
+`context_scout`, `python`. This is enforced as the FIRST line of the tool registry's allow
+predicate (`RuntimeBuilder.refreshToolRegistry`'s `isAllowedTool`) -- it wins over an allow-list,
+an exclude-list, or an active resource profile that names the tool explicitly. `goal`/`delegate`/
+`delegate_status`/`tmux_agent_manager` are sub-orchestration (a worker dispatching its own workers
+defeats single-owner lane accountability); `improvement_loop`/`extensionify`/`skillify` are
+self-adaptation surface a worker should never mutate; `run_toolkit_script`/`model_fitness` spend
+budget a worker's dispatcher does not control. **`python`** is included because it is a bounded but
+still largely unrestricted execution contract -- excluding it is load-bearing for the zero-footprint
+guarantee below (an unbounded interpreter can write state anywhere it can reach on disk).
+**`context_scout`** is excluded because it is itself sub-orchestration: it spawns its own isolated
+agent loop.
+
+`bash` is deliberately **not** forbidden. It stays available as the same documented cooperative
+boundary the lane gate already applies to foreign (non-`pi`) CLIs it cannot structurally contain --
+a worker's bash access is bounded by the lane gate's G8/G10 rules and the path envelope below, not
+by removing the tool.
+
+### `worktree_sync` tool scoping for a worker
+
+A worker session's `worktree_sync` calls are narrowed at the tool layer (independent of the engine
+-- see the next section):
+
+- `status`, `sync`, `continue`, `abort_sync` stay available unconditionally.
+- `create_lane`, `release_lane`, `reconcile` are always refused (`role_forbidden`).
+- `land` is refused by default (`role_forbidden`); the new `worktreeSync.workerLand` setting
+  (`"deny"` default, `"allow"` opt-in) lets a worker land its own lane when set -- still subject to
+  the normal freshness/ownership gates below.
+- An explicit `laneKey` that differs from the session's own bound lane is always refused
+  (`role_forbidden`): a worker may only ever target its own lane.
+
+### Land/release ownership
+
+`land` and `release_lane` refuse `lane_owner_conflict` when the target lane is owned (its
+registration's `ownerSessionId`) by a **different, still-alive** session -- same-host pid liveness,
+the same pattern the integration lock and `reconcile` already use. A lane with no recorded owner,
+owned by the calling session itself, or whose recorded owner is dead never conflicts. This check is
+deliberately engine-level and applies to `land`/`release_lane` ONLY -- `sync`/`continue`/
+`abort_sync` are never owner-gated at the engine; a worker's cross-lane containment for those comes
+from the tool-layer `laneKey` check above. `release_lane`'s existing G11 discard-confirm requirement
+is unaffected: it still applies once ownership no longer conflicts.
+
+### Edit/write path envelope
+
+For a lane-bound session, `edit`/`write` targets are checked against the lane's own worktree root
+(`WorktreeLaneGate.checkMutation`'s `targetPath` parameter, resolved by `RuntimeBuilder`'s tool
+wrapper via the same `resolveToCwd` the tools themselves use). The check is symlink-safe: the
+lane's worktree root and the target are both resolved through `realpath` (walking up to the target's
+nearest EXISTING ancestor when the target itself does not exist yet, so a not-yet-created file
+cannot be smuggled through a symlink that escapes the lane). A target outside the resolved lane root
+is refused (`path_outside_lane`). No active lane record leaves the existing fail-open behavior
+unchanged. `bash` is untouched by this check -- its containment stays the G10 cooperative boundary
+described above.
+
+### Zero state/settings footprint
+
+A worker session leaves no footprint in `~/.pi/agent/state` or `settings.json`: every scattered
+on-disk store (`ToolPerformanceStore`, `ObservationStore`, `ModelAdaptationStore`, `FitnessStore`,
+`ProjectTrustStore`) takes a `readOnly` constructor option defaulting to `isWorkerSession()`, gated
+ABOVE any locking/directory-creation the store's write path performs -- never at the innermost
+`writeFileSync` alone, since the lock itself already creates a lockfile and parent directory before
+any write. A read-only store still returns the value a real write would have produced (e.g.
+`ObservationStore.increment` returns `base + 1`, `ModelAdaptationStore`'s internal `store()` returns
+the computed entry) so callers see normal in-memory behavior; nothing durable ever lands on disk.
+`SettingsManager`'s single write choke (`enqueueWrite`, used by every settings scope: global,
+project, and directory-profile) is gated the same way -- a worker session never writes
+`settings.json` in any scope; in-memory settings reads are unaffected since callers update the
+in-memory state before reaching the write queue. The one INTENTIONAL artifact a worker session still
+produces is its own session transcript -- that is the point of running it, not a footprint to avoid.
 
 ## Trust boundary (honest, not faked)
 

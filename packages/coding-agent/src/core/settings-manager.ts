@@ -22,6 +22,7 @@ import {
 import { DEFAULT_HTTP_IDLE_TIMEOUT_MS, parseHttpIdleTimeoutMs } from "./http-dispatcher.ts";
 import { ProfileRegistry } from "./profile-registry.ts";
 import { mergeResourceProfileMap, mergeResourceProfileSettings } from "./resource-profile-blocks.ts";
+import { isWorkerSession } from "./session-role.ts";
 import { validateSkillName } from "./skills.ts";
 import type { ToolkitScript } from "./toolkit/script-registry.ts";
 import { matchesCompiledPattern } from "./util/minimatch-cache.ts";
@@ -287,6 +288,7 @@ export interface WorktreeSyncSettings {
 	gateTimeoutMs?: number; // default: 900000
 	maxLanes?: number; // default: 5 -- active-lane ceiling, matches the <=5-coder orchestration shape
 	worktreesRoot?: string; // overrides the default lane-checkout root (agent-paths worktreesDir)
+	workerLand?: "deny" | "allow"; // default: "deny" -- whether a WORKER session (see session-role.ts) may run the "land" action at all; "allow" still subjects the land to normal ownership/freshness gating
 }
 
 export type ResolvedWorktreeSyncSettings = Required<
@@ -2174,6 +2176,11 @@ export class SettingsManager {
 	}
 
 	private enqueueWrite(scope: SettingsScope, task: () => void): void {
+		// Zero-footprint (worker session): this is the universal disk-write choke for every settings
+		// scope (save() -> "global", saveProjectSettings() -> "project", directoryProfile writes) --
+		// a worker session never writes settings.json (or any scoped variant) to disk. In-memory
+		// settings are already updated by the caller before reaching here, so reads are unaffected.
+		if (isWorkerSession()) return;
 		this.writeQueue = this.writeQueue
 			.then(() => {
 				if (scope === "project") {
@@ -3295,6 +3302,7 @@ export class SettingsManager {
 				3_600_000,
 			),
 			maxLanes: sanitizeIntegerSetting(configured.maxLanes, DEFAULT_WORKTREE_SYNC_MAX_LANES, 1, 32),
+			workerLand: configured.workerLand === "allow" ? "allow" : "deny",
 		};
 		if (typeof configured.mainBranch === "string" && configured.mainBranch.trim().length > 0) {
 			resolved.mainBranch = configured.mainBranch.trim();

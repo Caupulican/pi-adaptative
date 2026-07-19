@@ -1,4 +1,4 @@
-import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
+import { existsSync, mkdirSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { pathToFileURL } from "node:url";
@@ -49,6 +49,26 @@ describe("ModelAdaptationStore", () => {
 			protocol: { version: 1, variant: "pi-call", calibratedAt: at(2) },
 			teachStats: { mode: { taught: 2, recurrenceBefore: 3, recurrenceAfter: 1 } },
 		});
+	});
+
+	it("readOnly:true never creates the state file, but save() still returns the normally-computed entry (D4)", () => {
+		const agentDir = tempAgentDir();
+		dirs.push(agentDir);
+		const filePath = join(agentDir, "state", "model-adaptation.json");
+		const readOnlyStore = ModelAdaptationStore.forAgentDir(agentDir, { fingerprint: () => hostA, readOnly: true });
+
+		const saved = readOnlyStore.save("provider/model", { rules: [rule(1)], teachStats: {} });
+		expect(saved.profile.rules).toEqual([rule(1)]);
+		expect(existsSync(filePath)).toBe(false);
+
+		// Nothing was ever persisted, so a fresh read (even from the same readOnly store) sees the
+		// empty profile, not what save() just "returned".
+		expect(readOnlyStore.get("provider/model")).toEqual({ rules: [], teachStats: {} });
+
+		// readOnly:false (the default outside a worker session) is unaffected.
+		const writableStore = store(agentDir);
+		writableStore.save("provider/model", { rules: [rule(1)], teachStats: {} });
+		expect(existsSync(filePath)).toBe(true);
 	});
 
 	it("round-trips perf profiles as host-keyed model adaptation data", () => {

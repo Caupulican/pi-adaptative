@@ -11,10 +11,18 @@ import {
 	createLane,
 	landLane,
 	reconcile,
+	releaseLane,
+	resolveRepoContext,
 	syncLane,
 	type WorktreeSyncEngineDeps,
 } from "../src/core/worktree-sync/git-engine.ts";
-import { acquireIntegrationLock, releaseIntegrationLock, syncStorePaths } from "../src/core/worktree-sync/store.ts";
+import {
+	acquireIntegrationLock,
+	readLane,
+	releaseIntegrationLock,
+	syncStorePaths,
+	writeLane,
+} from "../src/core/worktree-sync/store.ts";
 
 /**
  * REAL-git integration suite: every scenario runs against actual repositories in temp dirs --
@@ -308,5 +316,70 @@ describe("worktree-sync against real git", () => {
 			staleLockReleased: false,
 		});
 		expect(existsSync(storeRoot)).toBe(true);
+	}, 60_000);
+});
+
+describe("landLane / releaseLane ownership (D6)", () => {
+	it("landLane refuses lane_owner_conflict for a different, alive-owned lane; a dead owner or the lane's own session proceeds", async () => {
+		const { deps } = await initRepo();
+		const laneA = await mustCreateLane(deps, "a");
+		await laneCommit(laneA.worktreePath, "README.md", "from-a\n", "a: land-refused");
+		const laneB = await mustCreateLane(deps, "b");
+		await laneCommit(laneB.worktreePath, "README.md", "from-b\n", "b: dead-owner-lands");
+		// A different file than lane B's, so lane C's later rebase onto B's landed tip is conflict-free.
+		const laneC = await mustCreateLane(deps, "c");
+		await laneCommit(laneC.worktreePath, "c.txt", "from-c\n", "c: same-session-lands");
+
+		const ctx = await resolveRepoContext(deps);
+		if ("code" in ctx) throw new Error("expected a resolved repo context");
+		const setOwner = async (laneKey: string, ownerSessionId: string, ownerPid: number) => {
+			const registered = await readLane(ctx.paths, laneKey);
+			if (!registered) throw new Error(`expected lane '${laneKey}' to be registered`);
+			await writeLane(ctx.paths, { ...registered, ownerSessionId, ownerPid });
+		};
+		// isPidAlive only ever reports pid 4242 alive -- 4242 is "alive", anything else is "dead".
+		const withOwnershipDeps: WorktreeSyncEngineDeps = { ...deps, isPidAlive: (pid) => pid === 4242 };
+
+		await setOwner("a", "foreign-session", 4242);
+		expect((await landLane(withOwnershipDeps, { laneKey: "a", gate: "off" })).code).toBe("lane_owner_conflict");
+
+		await setOwner("b", "foreign-session", 9999);
+		expect((await landLane(withOwnershipDeps, { laneKey: "b", gate: "off" })).code).toBe("ok");
+
+		// Lane B's land advanced main past lane C's base -- sync C onto it first (conflict-free: C
+		// touches a different file) so the ownership check, not staleness, is what "c" exercises.
+		expect((await syncLane(withOwnershipDeps, { laneKey: "c" })).code).toBe("sync_clean");
+
+		await setOwner("c", "it-session", 4242);
+		expect((await landLane(withOwnershipDeps, { laneKey: "c", gate: "off" })).code).toBe("ok");
+	}, 60_000);
+
+	it("releaseLane refuses lane_owner_conflict for a different, alive-owned lane; a dead owner proceeds; G11's discard-confirm requirement stays intact once ownership clears", async () => {
+		const { deps } = await initRepo();
+		await mustCreateLane(deps, "d"); // fully-landed clean, foreign+alive owner -> refused
+		await mustCreateLane(deps, "e"); // fully-landed clean, foreign+dead owner -> proceeds
+		const laneF = await mustCreateLane(deps, "f"); // unlanded work, foreign+dead owner -> G11 still applies
+		await laneCommit(laneF.worktreePath, "README.md", "from-f\n", "f: unlanded");
+
+		const ctx = await resolveRepoContext(deps);
+		if ("code" in ctx) throw new Error("expected a resolved repo context");
+		const setOwner = async (laneKey: string, ownerSessionId: string, ownerPid: number) => {
+			const registered = await readLane(ctx.paths, laneKey);
+			if (!registered) throw new Error(`expected lane '${laneKey}' to be registered`);
+			await writeLane(ctx.paths, { ...registered, ownerSessionId, ownerPid });
+		};
+		const withOwnershipDeps: WorktreeSyncEngineDeps = { ...deps, isPidAlive: (pid) => pid === 4242 };
+
+		await setOwner("d", "foreign-session", 4242);
+		expect((await releaseLane(withOwnershipDeps, { laneKey: "d" })).code).toBe("lane_owner_conflict");
+
+		await setOwner("e", "foreign-session", 9999);
+		expect((await releaseLane(withOwnershipDeps, { laneKey: "e" })).code).toBe("released");
+
+		await setOwner("f", "foreign-session", 9999);
+		const refused = await releaseLane(withOwnershipDeps, { laneKey: "f" });
+		expect(refused.code).toBe("lane_unlanded_work");
+		const discarded = await releaseLane(withOwnershipDeps, { laneKey: "f", confirm: "yes-discard-lane" });
+		expect(discarded.code).toBe("released");
 	}, 60_000);
 });

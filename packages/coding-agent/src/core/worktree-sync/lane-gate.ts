@@ -12,7 +12,8 @@
  * fence) or while blocked; verdicts in between are cached. No polling, no timers.
  */
 
-import { statSync } from "node:fs";
+import { existsSync, realpathSync, statSync } from "node:fs";
+import { basename, dirname, join, sep } from "node:path";
 import type { WorktreeSyncPolicy } from "./codes.ts";
 import { deriveLaneFacts, type RepoContext, resolveRepoContext, type WorktreeSyncEngineDeps } from "./git-engine.ts";
 import { readEpoch, readLane } from "./store.ts";
@@ -116,6 +117,46 @@ export function classifyLaneBashCommand(command: string, mainBranch: string): La
 	return { verdict: "allowed" };
 }
 
+/** Symlink-safe resolution of a path that may not exist yet: realpath the NEAREST EXISTING
+ * ancestor, then re-append the not-yet-existing tail literally (a not-yet-created file's own
+ * missing final component can never itself be a symlink escape). */
+function resolveSymlinkSafe(targetPath: string): string {
+	if (existsSync(targetPath)) {
+		try {
+			return realpathSync(targetPath);
+		} catch {
+			return targetPath;
+		}
+	}
+	const tail: string[] = [basename(targetPath)];
+	let ancestor = dirname(targetPath);
+	while (!existsSync(ancestor)) {
+		const parent = dirname(ancestor);
+		if (parent === ancestor) break; // reached the filesystem root without finding one
+		tail.unshift(basename(ancestor));
+		ancestor = parent;
+	}
+	let realAncestor: string;
+	try {
+		realAncestor = realpathSync(ancestor);
+	} catch {
+		realAncestor = ancestor;
+	}
+	return join(realAncestor, ...tail);
+}
+
+/** Symlink-safe containment check (G-path): does `targetPath` resolve inside `worktreePath`? */
+function isPathOutsideLane(targetPath: string, worktreePath: string): boolean {
+	let realRoot: string;
+	try {
+		realRoot = realpathSync(worktreePath);
+	} catch {
+		realRoot = worktreePath;
+	}
+	const resolvedTarget = resolveSymlinkSafe(targetPath);
+	return resolvedTarget !== realRoot && !resolvedTarget.startsWith(realRoot + sep);
+}
+
 export interface WorktreeLaneGateConfig {
 	laneKey: string;
 	engineDeps: () => WorktreeSyncEngineDeps;
@@ -159,7 +200,7 @@ export class WorktreeLaneGate {
 		return true;
 	}
 
-	async checkMutation(toolName: string, bashCommand?: string): Promise<LaneMutationCheck> {
+	async checkMutation(toolName: string, bashCommand?: string, targetPath?: string): Promise<LaneMutationCheck> {
 		const ctx = await this.resolveContext();
 		// No repo context (deleted repo, engine failure): fail OPEN for plain tools -- the land
 		// CAS still holds -- but the G10 bash rules below never depend on repo state.
@@ -173,6 +214,20 @@ export class WorktreeLaneGate {
 			if (verdict.verdict === "allowed_even_when_sync_required") return { allowed: true };
 		}
 		if (!ctx) return { allowed: true };
+
+		// G-path: an edit/write target must resolve INSIDE this lane's worktree (symlink-safe),
+		// checked BEFORE the staleness cache so a cached "allowed" verdict never short-circuits past
+		// it. No active lane record: existing fail-open stands (mirrors the readLane check below).
+		if ((toolName === "edit" || toolName === "write") && targetPath !== undefined) {
+			const laneForPath = await readLane(ctx.paths, this.config.laneKey);
+			if (laneForPath?.status === "active" && isPathOutsideLane(targetPath, laneForPath.worktreePath)) {
+				return {
+					allowed: false,
+					code: "path_outside_lane",
+					message: `worktree-sync: '${targetPath}' resolves outside lane '${this.config.laneKey}' worktree (${laneForPath.worktreePath}); edit/write only inside your lane checkout`,
+				};
+			}
+		}
 
 		// G8: sync_required fails mutations closed. Re-derive only when the epoch moved or while
 		// blocked (a successful sync clears the block on the very next check).

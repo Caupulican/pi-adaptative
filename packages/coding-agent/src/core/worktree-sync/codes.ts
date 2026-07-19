@@ -44,7 +44,10 @@ export type WorktreeSyncCode =
 	| "worktree_missing"
 	| "released"
 	| "reconciled"
-	| "git_error";
+	| "git_error"
+	| "role_forbidden"
+	| "path_outside_lane"
+	| "lane_owner_conflict";
 
 /**
  * A refusal/failure outcome. `message` is deterministic text assembled from facts (safe to show a
@@ -158,7 +161,12 @@ export type CreateLaneResult =
 export type ReleaseLaneResult =
 	| { code: "released"; laneKey: string }
 	| WorktreeSyncRefusal<
-			"not_a_git_repo" | "default_branch_unresolved" | "lane_not_found" | "lane_unlanded_work" | "git_error"
+			| "not_a_git_repo"
+			| "default_branch_unresolved"
+			| "lane_not_found"
+			| "lane_unlanded_work"
+			| "lane_owner_conflict"
+			| "git_error"
 	  >;
 
 export interface ReconcileSummary {
@@ -222,6 +230,7 @@ export type LandResult =
 			| "ff_failed"
 			| "lock_busy"
 			| "nothing_to_land"
+			| "lane_owner_conflict"
 			| "git_error"
 	  >;
 

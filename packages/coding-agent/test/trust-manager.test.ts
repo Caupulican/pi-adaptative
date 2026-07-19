@@ -1,4 +1,4 @@
-import { mkdirSync, readFileSync, rmSync, writeFileSync } from "node:fs";
+import { existsSync, mkdirSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { afterEach, beforeEach, describe, expect, it } from "vitest";
@@ -31,6 +31,28 @@ describe("ProjectTrustStore", () => {
 		expect(store.get(cwd)).toBe(false);
 		store.set(cwd, null);
 		expect(store.get(cwd)).toBeNull();
+	});
+
+	it("readOnly:true reads lock-free without ever creating the state dir/lockfile, and set() is a no-op (D4)", () => {
+		const trustPath = join(agentDir, "state", "trust.json");
+		const store = new ProjectTrustStore(agentDir, { readOnly: true });
+
+		expect(store.get(cwd)).toBeNull();
+		// A lock-free get() must never create the state dir just from reading -- the non-readOnly
+		// path's own lock acquisition creates it (mkdirSync on the trust dir), which is exactly the
+		// footprint a worker session must avoid.
+		expect(existsSync(join(agentDir, "state"))).toBe(false);
+		expect(existsSync(`${trustPath}.lock`)).toBe(false);
+
+		store.set(cwd, true);
+		expect(store.get(cwd)).toBeNull(); // set() was a no-op: still untrusted
+		expect(existsSync(trustPath)).toBe(false);
+
+		// readOnly:false (the default outside a worker session) is unaffected.
+		const writableStore = new ProjectTrustStore(agentDir);
+		writableStore.set(cwd, true);
+		expect(writableStore.get(cwd)).toBe(true);
+		expect(existsSync(trustPath)).toBe(true);
 	});
 
 	it("leaves malformed trust stores untouched instead of crashing startup reads", () => {

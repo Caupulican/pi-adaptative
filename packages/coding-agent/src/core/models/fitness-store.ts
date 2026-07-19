@@ -3,6 +3,7 @@ import { cpus, totalmem } from "node:os";
 import { dirname } from "node:path";
 import { stateFile } from "../agent-paths.ts";
 import type { ModelFitnessReport } from "../research/model-fitness.ts";
+import { isWorkerSession } from "../session-role.ts";
 
 /**
  * Durable, HOST-KEYED storage for model fitness reports. Fitness is a property of a model ON a
@@ -49,13 +50,18 @@ interface FitnessStoreFile {
 export class FitnessStore {
 	private readonly filePath: string;
 	private readonly fingerprint: () => HostFingerprint;
+	private readonly readOnly: boolean;
 
-	constructor(filePath: string, options?: { fingerprint?: () => HostFingerprint }) {
+	constructor(filePath: string, options?: { fingerprint?: () => HostFingerprint; readOnly?: boolean }) {
 		this.filePath = filePath;
 		this.fingerprint = options?.fingerprint ?? currentHostFingerprint;
+		this.readOnly = options?.readOnly ?? isWorkerSession();
 	}
 
-	static forAgentDir(agentDir: string, options?: { fingerprint?: () => HostFingerprint }): FitnessStore {
+	static forAgentDir(
+		agentDir: string,
+		options?: { fingerprint?: () => HostFingerprint; readOnly?: boolean },
+	): FitnessStore {
 		return new FitnessStore(stateFile(agentDir, "model-fitness.json"), options);
 	}
 
@@ -76,6 +82,8 @@ export class FitnessStore {
 	save(model: string, report: ModelFitnessReport, at?: string): StoredFitnessReport {
 		const host = this.fingerprint();
 		const entry: StoredFitnessReport = { model, report, at: at ?? new Date().toISOString(), host };
+		// Zero-footprint (worker session): no dir, no write -- still returns the computed entry.
+		if (this.readOnly) return entry;
 		const file = this.load();
 		file.hosts[host.id] = { ...(file.hosts[host.id] ?? {}), [model]: entry };
 		mkdirSync(dirname(this.filePath), { recursive: true });
@@ -85,6 +93,7 @@ export class FitnessStore {
 
 	/** Drop a model's report for the CURRENT host (uninstall cleanup). No-op when absent. */
 	remove(model: string): void {
+		if (this.readOnly) return;
 		const host = this.fingerprint();
 		const file = this.load();
 		if (!file.hosts[host.id]?.[model]) return;

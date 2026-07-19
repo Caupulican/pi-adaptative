@@ -69,7 +69,20 @@ export interface WorktreeSyncToolDeps {
 	engineDeps: () => WorktreeSyncEngineDeps;
 	settings: () => ResolvedWorktreeSyncSettings;
 	boundLaneKey: () => string | undefined;
+	/** True iff this is a worker session (see session-role.ts) -- narrows the action surface below. */
+	isWorker: () => boolean;
 }
+
+/** Actions a worker session may run unconditionally -- read-only status plus the sync/conflict
+ * cycle on its own bound lane. Everything else is refused as `role_forbidden`, EXCEPT `land`,
+ * which is instead gated by the `worktreeSync.workerLand` setting (still subject to normal
+ * ownership/freshness gating downstream when allowed). */
+const WORKER_ALLOWED_ACTIONS: ReadonlySet<WorktreeSyncToolInput["action"]> = new Set([
+	"status",
+	"sync",
+	"continue",
+	"abort_sync",
+]);
 
 function formatWorklist(worklist: ConflictWorklist): string[] {
 	const lines = [
@@ -140,6 +153,22 @@ export function createWorktreeSyncToolDefinition(deps: WorktreeSyncToolDeps): To
 				if (laneKey) return undefined;
 				return "laneKey required: pass laneKey, or run inside a lane-bound session (PI_WORKTREE_LANE).";
 			};
+
+			if (deps.isWorker()) {
+				const bound = deps.boundLaneKey();
+				if (input.laneKey !== undefined && input.laneKey !== bound) {
+					const message = "workers may only target their bound lane";
+					return respond([message], { code: "role_forbidden", message });
+				}
+				const landAllowed = input.action === "land" && settings.workerLand === "allow";
+				if (!WORKER_ALLOWED_ACTIONS.has(input.action) && !landAllowed) {
+					const message =
+						input.action === "land"
+							? 'workers may not land (worktreeSync.workerLand is "deny")'
+							: `workers may not run action "${input.action}"`;
+					return respond([message], { code: "role_forbidden", message });
+				}
+			}
 
 			switch (input.action) {
 				case "status": {

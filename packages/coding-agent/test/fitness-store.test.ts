@@ -86,6 +86,23 @@ describe("FitnessStore", () => {
 		expect(store.getForHost()).toHaveLength(1);
 	});
 
+	it("readOnly:true never creates the state file for save(), and remove() is a silent no-op (D4)", () => {
+		const path = join(tempDir, "state", "model-fitness.json");
+		const readOnlyStore = new FitnessStore(path, { fingerprint: fingerprint("host-a"), readOnly: true });
+
+		const saved = readOnlyStore.save("m", report(), "T1");
+		expect(saved.report.trials).toBe(3);
+		expect(existsSync(path)).toBe(false);
+
+		expect(() => readOnlyStore.remove("m")).not.toThrow();
+		expect(existsSync(path)).toBe(false);
+
+		// readOnly:false (the default outside a worker session) is unaffected.
+		const writableStore = new FitnessStore(path, { fingerprint: fingerprint("host-a") });
+		writableStore.save("m", report(), "T1");
+		expect(existsSync(path)).toBe(true);
+	});
+
 	it("derives a stable, readable fingerprint for the current host", () => {
 		const first = currentHostFingerprint();
 		const second = currentHostFingerprint();

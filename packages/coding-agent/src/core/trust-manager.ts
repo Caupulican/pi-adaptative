@@ -4,6 +4,7 @@ import lockfile from "proper-lockfile";
 import { CONFIG_DIR_NAME } from "../config.ts";
 import { canonicalizePath, resolvePath } from "../utils/paths.ts";
 import { stateFile } from "./agent-paths.ts";
+import { isWorkerSession } from "./session-role.ts";
 
 export type ProjectTrustDecision = boolean | null;
 
@@ -125,13 +126,25 @@ export function hasProjectTrustInputs(cwd: string): boolean {
 
 export class ProjectTrustStore {
 	private trustPath: string;
+	private readonly readOnly: boolean;
 
-	constructor(agentDir: string) {
+	constructor(agentDir: string, options?: { readOnly?: boolean }) {
 		// Machine-persisted trust decisions -- state/, not the agentDir root.
 		this.trustPath = stateFile(resolvePath(agentDir), "trust.json");
+		this.readOnly = options?.readOnly ?? isWorkerSession();
 	}
 
 	get(cwd: string): ProjectTrustDecision {
+		if (this.readOnly) {
+			// Zero-footprint (worker session): a lock-free read -- no lockfile, no state dir ever
+			// created just from reading trust. A torn read (concurrent writer mid-rewrite) reads as
+			// invalid JSON, which `readTrustFile` reports as `undefined`, and fails safe to untrusted
+			// (null) below, never a crash.
+			const data = readTrustFile(this.trustPath);
+			if (!data) return null;
+			const value = data[normalizeCwd(cwd)];
+			return value === true || value === false ? value : null;
+		}
 		return withTrustFileLock(this.trustPath, () => {
 			const data = readTrustFile(this.trustPath);
 			if (!data) return null;
@@ -141,6 +154,7 @@ export class ProjectTrustStore {
 	}
 
 	set(cwd: string, decision: ProjectTrustDecision): void {
+		if (this.readOnly) return;
 		withTrustFileLock(this.trustPath, () => {
 			const data = readTrustFile(this.trustPath);
 			if (!data) return;

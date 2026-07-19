@@ -1,5 +1,6 @@
 import { existsSync, readFileSync } from "node:fs";
 import { stateFile } from "../agent-paths.ts";
+import { isWorkerSession } from "../session-role.ts";
 import { withFileLockSync, writeFileAtomicSync } from "../util/atomic-file.ts";
 import { currentHostFingerprint, type HostFingerprint } from "./fitness-store.ts";
 import {
@@ -201,13 +202,18 @@ function mergeRule(rules: readonly ModelAdaptationRule[], rule: ModelAdaptationR
 export class ModelAdaptationStore {
 	private readonly filePath: string;
 	private readonly fingerprint: () => HostFingerprint;
+	private readonly readOnly: boolean;
 
-	constructor(filePath: string, options?: { fingerprint?: () => HostFingerprint }) {
+	constructor(filePath: string, options?: { fingerprint?: () => HostFingerprint; readOnly?: boolean }) {
 		this.filePath = filePath;
 		this.fingerprint = options?.fingerprint ?? currentHostFingerprint;
+		this.readOnly = options?.readOnly ?? isWorkerSession();
 	}
 
-	static forAgentDir(agentDir: string, options?: { fingerprint?: () => HostFingerprint }): ModelAdaptationStore {
+	static forAgentDir(
+		agentDir: string,
+		options?: { fingerprint?: () => HostFingerprint; readOnly?: boolean },
+	): ModelAdaptationStore {
 		return new ModelAdaptationStore(stateFile(agentDir, "model-adaptation.json"), options);
 	}
 
@@ -235,6 +241,9 @@ export class ModelAdaptationStore {
 	private store(model: string, profile: ModelAdaptationProfile, at: string): StoredModelAdaptation {
 		const host = this.fingerprint();
 		const entry: StoredModelAdaptation = { model, profile: normalizeProfile(profile), at, host };
+		// Zero-footprint (worker session): no lock, no dir, no write -- `save()`/`get()`'s
+		// prune-write path both funnel through here and get the normally-computed entry back.
+		if (this.readOnly) return entry;
 		withFileLockSync(this.filePath, () => {
 			const file = this.load();
 			file.hosts[host.id] = { ...(file.hosts[host.id] ?? {}), [model]: entry };

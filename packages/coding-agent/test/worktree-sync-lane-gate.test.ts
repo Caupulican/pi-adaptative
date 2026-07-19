@@ -1,6 +1,6 @@
-import { mkdtempSync, rmSync, writeFileSync } from "node:fs";
+import { mkdirSync, mkdtempSync, rmSync, symlinkSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
-import { join } from "node:path";
+import { dirname, join } from "node:path";
 import { afterEach, describe, expect, it } from "vitest";
 import { execCommand } from "../src/core/exec.ts";
 import {
@@ -138,5 +138,40 @@ describe("WorktreeLaneGate (G8, real git)", () => {
 
 		const gate = new WorktreeLaneGate({ laneKey: "b", engineDeps: () => deps, policy: () => "land_time_only" });
 		expect(await gate.checkMutation("edit")).toEqual({ allowed: true });
+	}, 60_000);
+});
+
+describe("WorktreeLaneGate path envelope (D5, real git)", () => {
+	it("allows an edit/write target inside the lane, refuses one outside, and refuses a not-yet-existing path reached through a symlink that escapes the lane", async () => {
+		const { deps } = await initRepo();
+		const createdA = await createLane(deps, { laneKey: "a" });
+		expect(createdA.code).toBe("ok");
+		if (createdA.code !== "ok") return;
+
+		const gate = new WorktreeLaneGate({ laneKey: "a", engineDeps: () => deps, policy: () => "on_land_mandatory" });
+
+		const insidePath = join(createdA.lane.worktreePath, "README.md");
+		expect(await gate.checkMutation("edit", undefined, insidePath)).toEqual({ allowed: true });
+
+		const outsidePath = join(dirname(createdA.lane.worktreePath), "outside.txt");
+		const outsideResult = await gate.checkMutation("write", undefined, outsidePath);
+		expect(outsideResult.allowed).toBe(false);
+		if (!outsideResult.allowed) expect(outsideResult.code).toBe("path_outside_lane");
+
+		// A symlink INSIDE the lane pointing to a directory OUTSIDE it: a not-yet-existing file
+		// reached through that symlink must still resolve (symlink-safely, via its nearest existing
+		// ancestor) to outside the lane and be refused -- not silently allowed just because the
+		// final path component doesn't exist yet.
+		const outsideDir = join(dirname(createdA.lane.worktreePath), "outside-dir");
+		mkdirSync(outsideDir, { recursive: true });
+		const escapeLink = join(createdA.lane.worktreePath, "escape-link");
+		symlinkSync(outsideDir, escapeLink);
+		const notYetExisting = join(escapeLink, "new-file.txt");
+		const escapeResult = await gate.checkMutation("edit", undefined, notYetExisting);
+		expect(escapeResult.allowed).toBe(false);
+		if (!escapeResult.allowed) expect(escapeResult.code).toBe("path_outside_lane");
+
+		// bash keeps its existing (targetPath-less) behavior unchanged.
+		expect(await gate.checkMutation("bash", "git status")).toEqual({ allowed: true });
 	}, 60_000);
 });

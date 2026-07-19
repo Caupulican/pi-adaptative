@@ -72,13 +72,19 @@ const SETTINGS: ResolvedWorktreeSyncSettings = {
 	gate: "off",
 	gateTimeoutMs: 900_000,
 	maxLanes: 8,
+	workerLand: "deny",
 };
 
-function makeDeps(engineDeps: WorktreeSyncEngineDeps, boundLaneKey: () => string | undefined): WorktreeSyncToolDeps {
+function makeDeps(
+	engineDeps: WorktreeSyncEngineDeps,
+	boundLaneKey: () => string | undefined,
+	options: { isWorker?: () => boolean; settings?: ResolvedWorktreeSyncSettings } = {},
+): WorktreeSyncToolDeps {
 	return {
 		engineDeps: () => engineDeps,
-		settings: () => SETTINGS,
+		settings: () => options.settings ?? SETTINGS,
 		boundLaneKey,
+		isWorker: options.isWorker ?? (() => false),
 	};
 }
 
@@ -137,5 +143,95 @@ describe("worktree_sync tool", () => {
 			undefined as never,
 		);
 		expect(released.details).toMatchObject({ code: "released" });
+	}, 60_000);
+});
+
+describe("worktree_sync tool -- worker scoping (D3)", () => {
+	it("refuses create_lane/land/release_lane/reconcile as role_forbidden, but allows status/sync/continue/abort_sync", async () => {
+		const { deps } = await initRepo();
+		const laneKey = "a";
+		const toolDeps = makeDeps(deps, () => laneKey, { isWorker: () => true });
+		const def = createWorktreeSyncToolDefinition(toolDeps);
+
+		for (const action of ["create_lane", "land", "release_lane", "reconcile"] as const) {
+			const result = await def.execute(
+				`refuse-${action}`,
+				{ action, laneKey },
+				undefined,
+				undefined,
+				undefined as never,
+			);
+			expect(result.details).toMatchObject({ code: "role_forbidden" });
+		}
+
+		// These stay allowed for a worker without touching role_forbidden -- their own preconditions
+		// (e.g. "no lane" for a not-yet-created lane) still apply, just never role_forbidden.
+		for (const action of ["status", "sync", "continue", "abort_sync"] as const) {
+			const result = await def.execute(
+				`allow-${action}`,
+				{ action, laneKey },
+				undefined,
+				undefined,
+				undefined as never,
+			);
+			expect((result.details as { code?: string } | undefined)?.code).not.toBe("role_forbidden");
+		}
+	}, 60_000);
+
+	it("refuses an explicit laneKey that differs from the worker's bound lane", async () => {
+		const { deps } = await initRepo();
+		const toolDeps = makeDeps(deps, () => "bound-lane", { isWorker: () => true });
+		const def = createWorktreeSyncToolDefinition(toolDeps);
+
+		const result = await def.execute(
+			"cross-lane",
+			{ action: "status", laneKey: "other-lane" },
+			undefined,
+			undefined,
+			undefined as never,
+		);
+		expect(result.details).toMatchObject({ code: "role_forbidden" });
+	}, 60_000);
+
+	it("refuses land by default (workerLand: deny) but reaches the engine when workerLand: allow", async () => {
+		const { deps } = await initRepo();
+		const laneKey = "a";
+		// Lanes are created through a MAIN-role tool instance sharing the same repo/engine deps --
+		// workers cannot create_lane either (covered by the first test above).
+		const mainDef = createWorktreeSyncToolDefinition(makeDeps(deps, () => laneKey));
+		const created = await mainDef.execute(
+			"create",
+			{ action: "create_lane", laneKey },
+			undefined,
+			undefined,
+			undefined as never,
+		);
+		expect(created.details).toMatchObject({ code: "ok" });
+
+		const denyDef = createWorktreeSyncToolDefinition(makeDeps(deps, () => laneKey, { isWorker: () => true }));
+		const denied = await denyDef.execute(
+			"land-deny",
+			{ action: "land", laneKey },
+			undefined,
+			undefined,
+			undefined as never,
+		);
+		expect(denied.details).toMatchObject({ code: "role_forbidden" });
+
+		const allowSettings: ResolvedWorktreeSyncSettings = { ...SETTINGS, workerLand: "allow" };
+		const allowDef = createWorktreeSyncToolDefinition(
+			makeDeps(deps, () => laneKey, { isWorker: () => true, settings: allowSettings }),
+		);
+		// The action now reaches the ENGINE (never role_forbidden): the freshly-created lane has no
+		// commits beyond main yet, so the engine itself refuses nothing_to_land -- proof the worker
+		// scoping layer stepped aside rather than short-circuiting.
+		const allowed = await allowDef.execute(
+			"land-allow",
+			{ action: "land", laneKey },
+			undefined,
+			undefined,
+			undefined as never,
+		);
+		expect(allowed.details).toMatchObject({ code: "nothing_to_land" });
 	}, 60_000);
 });

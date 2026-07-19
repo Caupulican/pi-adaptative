@@ -37,6 +37,23 @@ describe("ObservationStore", () => {
 		expect(reopened.increment(key)).toBe(3);
 	});
 
+	it("readOnly:true increments the pure-read equivalent without ever creating the state file (D4)", () => {
+		const key = observationKey("memory", "readonly lesson");
+		const readOnlyStore = ObservationStore.forAgentDir(agentDir, { readOnly: true });
+
+		expect(readOnlyStore.get(key)).toBe(0);
+		expect(readOnlyStore.increment(key)).toBe(1);
+		// Nothing was ever persisted, so a repeat increment sees the same base+1, not an accumulating count.
+		expect(readOnlyStore.increment(key)).toBe(1);
+		expect(existsSync(filePath())).toBe(false);
+
+		// readOnly:false (the default outside a worker session) is unaffected.
+		const writableStore = ObservationStore.forAgentDir(agentDir);
+		expect(writableStore.increment(key)).toBe(1);
+		expect(writableStore.increment(key)).toBe(2);
+		expect(existsSync(filePath())).toBe(true);
+	});
+
 	it("normalization collapses whitespace and case so reworded variants share a key", () => {
 		const canonical = observationKey("memory", "Add MEMORY memory: Always Run Checks");
 		const spaced = observationKey("memory", "add   memory    memory:\tALWAYS run   checks");

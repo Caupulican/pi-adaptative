@@ -79,6 +79,7 @@ import { describeInFlightWorkUnit, getInFlightWorkUnits } from "./reload-blocker
 import type { ModelFitnessReport } from "./research/model-fitness.ts";
 import type { ResourceLoader } from "./resource-loader.ts";
 import { ScoutController } from "./scout-controller.ts";
+import { getSessionRole, isWorkerSession, WORKER_FORBIDDEN_TOOLS } from "./session-role.ts";
 import {
 	matchesResourceProfilePattern,
 	type ResourceProfileFilterSettings,
@@ -100,6 +101,7 @@ import { createGoalToolDefinition } from "./tools/goal.ts";
 import { createGrepTool } from "./tools/grep.ts";
 import { createAllToolDefinitions } from "./tools/index.ts";
 import { createModelFitnessToolDefinition } from "./tools/model-fitness.ts";
+import { resolveToCwd } from "./tools/path-utils.ts";
 import { createReadTool } from "./tools/read.ts";
 import { createRunToolkitScriptToolDefinition } from "./tools/run-toolkit-script.ts";
 import { createTaskStepsToolDefinition } from "./tools/task-steps.ts";
@@ -423,6 +425,7 @@ export class RuntimeBuilder {
 	}
 
 	refreshToolRegistry(options?: { activeToolNames?: string[]; includeAllExtensionTools?: boolean }): void {
+		const role = getSessionRole();
 		const previousRegistryNames = new Set(this._toolRegistry.keys());
 		// Re-derive from the pre-filter REQUEST, never from agent.state.tools: the active set is
 		// capability/profile-filtered, so feeding it back through setActiveToolsByName would
@@ -446,6 +449,10 @@ export class RuntimeBuilder {
 				}
 			: undefined;
 		const isAllowedTool = (name: string): boolean => {
+			// Strict worker UAC ceiling: wins over allow-list/exclude/profile -- a worker session
+			// (lane-bound or dispatched) can never activate this tool no matter how permissively the
+			// active profile or an explicit request names it. See session-role.ts.
+			if (role === "worker" && WORKER_FORBIDDEN_TOOLS.has(name)) return false;
 			if (allowedToolNames && !allowedToolNames.has(name)) return false;
 			if (excludedToolNames?.has(name)) return false;
 			if (!toolProfileFilter) return true;
@@ -885,6 +892,7 @@ export class RuntimeBuilder {
 					engineDeps: worktreeSyncEngineDeps,
 					settings: () => this.deps.getSettingsManager().getWorktreeSyncSettings(),
 					boundLaneKey: () => getBoundWorktreeLaneKey(),
+					isWorker: () => isWorkerSession(),
 				});
 				this._baseToolDefinitions.set(worktreeSyncToolDefinition.name, worktreeSyncToolDefinition);
 
@@ -903,7 +911,13 @@ export class RuntimeBuilder {
 							execute: async (toolCallId, params, signal, onUpdate, ctx) => {
 								const bashCommand =
 									gatedToolName === "bash" ? (params as { command?: string } | undefined)?.command : undefined;
-								const check = await laneGate.checkMutation(gatedToolName, bashCommand);
+								const rawPath =
+									gatedToolName === "edit" || gatedToolName === "write"
+										? (params as { path?: string } | undefined)?.path
+										: undefined;
+								const targetPath =
+									rawPath !== undefined ? resolveToCwd(rawPath, this.deps.getCwd()) : undefined;
+								const check = await laneGate.checkMutation(gatedToolName, bashCommand, targetPath);
 								if (!check.allowed) {
 									return {
 										content: [{ type: "text" as const, text: check.message }],
