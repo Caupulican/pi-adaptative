@@ -10,7 +10,8 @@ export type GoalContinuationReasonCode =
 	| "no_open_requirements"
 	| "blocked_requirements_present"
 	| "missing_goal_state"
-	| "worker_in_flight";
+	| "worker_in_flight"
+	| "worker_wait_timeout";
 
 export interface GoalContinuationDecision {
 	action: GoalContinuationAction;
@@ -40,6 +41,22 @@ export function evaluateGoalContinuation(args: {
 	 * so every pre-existing (in-flight-unaware) caller keeps compiling and behaving unchanged.
 	 */
 	inFlightGoalLaneIds?: ReadonlySet<string>;
+	/**
+	 * Current time as an ISO string, paired with `maxWorkerWaitMs` to detect a bound in-flight
+	 * requirement that has hung past its deadline (see below). Optional so every pre-existing
+	 * caller that omits it keeps behaving byte-identically -- the goal waits indefinitely, exactly
+	 * as before this field existed.
+	 */
+	now?: string;
+	/**
+	 * Maximum milliseconds a bound in-flight requirement (`Requirement.boundAt`) may wait before
+	 * this escalates to `action:"ask-user"`/`reasonCode:"worker_wait_timeout"` instead of
+	 * `"waiting"` -- a worker that is alive-but-hung past its deadline must not wait forever. Only
+	 * takes effect when BOTH `now` and this are supplied; escalation fires only once EVERY
+	 * bound-in-flight open requirement has individually passed `boundAt + maxWorkerWaitMs`, so a
+	 * goal with a mix of fresh and stale bindings keeps waiting on the fresh one.
+	 */
+	maxWorkerWaitMs?: number;
 }): GoalContinuationDecision {
 	if (!args.state) {
 		return {
@@ -123,15 +140,40 @@ export function evaluateGoalContinuation(args: {
 	// Checked BEFORE the stall check so an in-flight worker always wins over an accumulated stall
 	// count: the goal isn't stalled, it's actively being worked by something other than this loop.
 	const inFlightGoalLaneIds = args.inFlightGoalLaneIds;
-	if (
-		inFlightGoalLaneIds &&
-		state.requirements.some(
-			(requirement) =>
-				requirement.status === "open" &&
-				requirement.boundLaneId !== undefined &&
-				inFlightGoalLaneIds.has(requirement.boundLaneId),
-		)
-	) {
+	const boundInFlightRequirements = inFlightGoalLaneIds
+		? state.requirements.filter(
+				(requirement) =>
+					requirement.status === "open" &&
+					requirement.boundLaneId !== undefined &&
+					inFlightGoalLaneIds.has(requirement.boundLaneId),
+			)
+		: [];
+
+	if (boundInFlightRequirements.length > 0) {
+		// Never-hang backstop: a worker alive-but-hung past its deadline must escalate to the owner
+		// instead of waiting forever. Only evaluated when the caller supplies BOTH a clock reading and
+		// a deadline; escalates only once EVERY bound-in-flight requirement has individually timed out,
+		// so one fresh binding keeps the goal legitimately waiting.
+		if (args.now !== undefined && args.maxWorkerWaitMs !== undefined) {
+			const nowMs = Date.parse(args.now);
+			const maxWorkerWaitMs = args.maxWorkerWaitMs;
+			const allTimedOut =
+				Number.isFinite(nowMs) &&
+				boundInFlightRequirements.every((requirement) => {
+					if (requirement.boundAt === undefined) return false;
+					const boundAtMs = Date.parse(requirement.boundAt);
+					return Number.isFinite(boundAtMs) && boundAtMs + maxWorkerWaitMs <= nowMs;
+				});
+			if (allTimedOut) {
+				return {
+					...baseDecision,
+					action: "ask-user",
+					reasonCode: "worker_wait_timeout",
+					message: `A dispatched worker has not completed within the maximum wait of ${maxWorkerWaitMs}ms; escalating to the owner instead of waiting indefinitely.`,
+				};
+			}
+		}
+
 		return {
 			...baseDecision,
 			action: "waiting",

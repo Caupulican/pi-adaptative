@@ -166,6 +166,77 @@ describe("Goal State (Phase 4)", () => {
 		expect(parsed).toEqual(state);
 	});
 
+	describe("dispatch_worker stamps boundAt only when a real lane binds (Phase: never-hang wait-timeout)", () => {
+		it("a granted dispatch (laneId present) stamps both boundLaneId and boundAt with the event's now", () => {
+			let state = createGoalState({ goalId: "g1", userGoal: "Fix bugs", now: "T0" });
+			state = applyGoalEvent(state, { type: "add_requirement", id: "req-1", text: "Fix typo", now: "T1" });
+			state = applyGoalEvent(state, {
+				type: "dispatch_worker",
+				id: "req-1",
+				instructions: "do the thing",
+				laneId: "lane-1",
+				now: "T2",
+			});
+
+			expect(state.requirements[0].boundLaneId).toBe("lane-1");
+			expect(state.requirements[0].boundAt).toBe("T2");
+		});
+
+		it("a declined dispatch (no laneId) stamps no boundAt", () => {
+			let state = createGoalState({ goalId: "g1", userGoal: "Fix bugs", now: "T0" });
+			state = applyGoalEvent(state, { type: "add_requirement", id: "req-1", text: "Fix typo", now: "T1" });
+			state = applyGoalEvent(state, {
+				type: "dispatch_worker",
+				id: "req-1",
+				instructions: "do the thing",
+				now: "T2",
+			});
+
+			expect(state.requirements[0].boundLaneId).toBeUndefined();
+			expect(state.requirements[0].boundAt).toBeUndefined();
+		});
+
+		it("a later declined re-dispatch preserves the prior boundAt instead of clearing the clock", () => {
+			let state = createGoalState({ goalId: "g1", userGoal: "Fix bugs", now: "T0" });
+			state = applyGoalEvent(state, { type: "add_requirement", id: "req-1", text: "Fix typo", now: "T1" });
+			state = applyGoalEvent(state, {
+				type: "dispatch_worker",
+				id: "req-1",
+				instructions: "do the thing",
+				laneId: "lane-1",
+				now: "T2",
+			});
+			expect(state.requirements[0].boundAt).toBe("T2");
+
+			state = applyGoalEvent(state, {
+				type: "dispatch_worker",
+				id: "req-1",
+				instructions: "retry, but declined this time",
+				now: "T3",
+			});
+
+			expect(state.requirements[0].boundLaneId).toBeUndefined();
+			expect(state.requirements[0].boundAt).toBe("T2");
+		});
+
+		it("boundAt round-trips through serialize/parse (isRequirement validator)", () => {
+			let state = createGoalState({ goalId: "g1", userGoal: "Fix bugs", now: "T0" });
+			state = applyGoalEvent(state, { type: "add_requirement", id: "req-1", text: "Fix typo", now: "T1" });
+			state = applyGoalEvent(state, {
+				type: "dispatch_worker",
+				id: "req-1",
+				instructions: "do the thing",
+				laneId: "lane-1",
+				now: "T2",
+			});
+
+			const json = serializeGoalState(state);
+			const parsed = parseGoalState(json);
+			expect(parsed).toEqual(state);
+			expect(parsed?.requirements[0].boundAt).toBe("T2");
+		});
+	});
+
 	it("malformed parse returns undefined", () => {
 		expect(parseGoalState("invalid json")).toBeUndefined();
 		expect(parseGoalState('{"goalId":"g1"}')).toBeUndefined(); // missing fields

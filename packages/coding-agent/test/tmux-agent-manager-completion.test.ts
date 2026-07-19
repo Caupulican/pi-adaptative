@@ -364,6 +364,118 @@ describe.skipIf(process.platform === "win32")("bundled tmux agent manager comple
 		for (const handler of handlers.get("session_shutdown") ?? []) await handler({}, context);
 	});
 
+	it("threads the worker's usage claim onto the terminal reportManagedLane event", async () => {
+		const jobId = "usage-claim-job";
+		const jobDir = path.join(getTmuxAgentManagerDataRoot(), "jobs", jobId);
+		const resultPath = path.join(jobDir, "worker.result.json");
+		const logPath = path.join(jobDir, "worker.log");
+		const jobPath = path.join(jobDir, "job.json");
+		fs.mkdirSync(jobDir, { recursive: true });
+		fs.writeFileSync(logPath, "usage-claim-marker\n");
+		// The worker's own terminal result, written the same way the pane watcher writes it.
+		fs.writeFileSync(resultPath, JSON.stringify({ status: "done" }));
+		// A cooperative, OPTIONAL usage claim the worker wrote alongside its result — advisory only,
+		// per readWorkerUsageClaim's own contract (never fabricated by the host).
+		fs.writeFileSync(
+			`${resultPath}.usage.json`,
+			JSON.stringify({
+				input: 100,
+				output: 50,
+				cacheRead: 0,
+				cacheWrite: 0,
+				totalTokens: 150,
+				cost: { input: 0.001, output: 0.002, cacheRead: 0, cacheWrite: 0, total: 0.003 },
+			}),
+		);
+		fs.writeFileSync(
+			jobPath,
+			JSON.stringify(
+				{
+					id: jobId,
+					createdAt: new Date().toISOString(),
+					workspaceName: "usage-workspace",
+					sessionName: "usage-session",
+					cwd: tempDir,
+					task: "test",
+					deadlineSeconds: 60,
+					jobDir,
+					jobPath,
+					varsPath: path.join(jobDir, "variables.json"),
+					watcherPath: path.join(jobDir, "pane-watcher.mjs"),
+					launchCommands: [],
+					agents: [
+						{
+							id: "worker",
+							provider: "pi",
+							name: "worker",
+							command: "pi",
+							promptPath: path.join(jobDir, "worker.prompt.txt"),
+							logPath,
+							resultPath,
+							doneMarker: "DONE",
+							blockedMarker: "BLOCKED",
+						},
+					],
+				},
+				null,
+				2,
+			),
+		);
+
+		const handlers = new Map<string, Handler[]>();
+		const managedLaneEvents: Array<{ laneId: string; phase: string; status?: string; usage?: unknown }> = [];
+		const spawnedUsageReports: Array<{ usage: unknown; opts: unknown }> = [];
+		const customEntries = makeCustomEntryStore();
+		const pi = {
+			on(event: string, handler: Handler) {
+				const current = handlers.get(event) ?? [];
+				current.push(handler);
+				handlers.set(event, current);
+			},
+			registerTool() {},
+			registerCommand() {},
+			registerFlag() {},
+			getFlag() {
+				return undefined;
+			},
+			appendEntry: customEntries.appendEntry,
+			reportManagedLane(event: { laneId: string; phase: string; status?: string; usage?: unknown }) {
+				managedLaneEvents.push(event);
+			},
+			reportSpawnedUsage(usage: unknown, opts: unknown) {
+				spawnedUsageReports.push({ usage, opts });
+			},
+			sendMessage() {},
+		};
+		const context: TestContext = {
+			cwd: tempDir,
+			hasUI: false,
+			sessionManager: {
+				getSessionFile: () => path.join(tempDir, "usage-claim-session.jsonl"),
+				getLatestCustomEntryOnBranch: customEntries.getLatestCustomEntryOnBranch,
+				getBranch: customEntries.getBranch,
+			},
+			ui: { notify() {}, confirm: async () => true },
+		};
+		tmuxAgentManagerExtension(pi as never);
+
+		for (const handler of handlers.get("session_start") ?? []) await handler({}, context);
+
+		expect(managedLaneEvents).toContainEqual(
+			expect.objectContaining({
+				laneId: `tmux:${jobId}:worker`,
+				phase: "terminal",
+				status: "done",
+				usage: expect.objectContaining({ cost: expect.objectContaining({ total: 0.003 }) }),
+			}),
+		);
+		// The SAME claim already reaches reportSpawnedUsage (pre-existing behavior) — the bridge threads
+		// it onto reportManagedLane too, it does not replace the existing spend report.
+		expect(spawnedUsageReports).toHaveLength(1);
+
+		for (const handler of handlers.get("session_shutdown") ?? []) await handler({}, context);
+	});
+
 	it("fire_task refuses a real launch with NO standing grant and NO interactive approval (doctrine-regression)", async () => {
 		const tmuxBinDir = path.join(tempDir, "doctrine-bin");
 		fs.mkdirSync(tmuxBinDir, { recursive: true });

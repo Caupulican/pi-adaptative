@@ -181,6 +181,7 @@ type ManagedLaneBridgeEvent = {
 	reasonCode?: string;
 	changedFiles?: string[];
 	request?: unknown;
+	usage?: Usage;
 };
 /** The subset of `ExtensionAPI` this file calls through a narrow local type instead of the full
  * `ExtensionAPI`, so a lightweight test double only needs to implement what a given test path actually
@@ -1718,6 +1719,19 @@ function reconcileTmuxSessions(ctx: ExtensionContext, bridge: HostBridge): void 
 						`tmux job ${job.id} is orphaned: session '${job.sessionName}' is gone and the job never reached a terminal state. Nothing was killed; this is informational only.`,
 						"warning",
 					);
+				// Nothing is killed here — only the LANE record is released. A dead session means the
+				// worker itself can no longer report its own terminal state, so a goal bound to it would
+				// wait forever without this: release the managed lane per non-terminal agent so the goal's
+				// continuation stops waiting on a worker that will never report back.
+				for (const agent of job.agents) {
+					if (agent.result !== undefined) continue;
+					bridge.reportManagedLane?.({
+						laneId: agentLaneId(job.id, agent.id),
+						phase: "terminal",
+						status: "orphaned",
+						reasonCode: "tmux_session_orphaned",
+					});
+				}
 			}
 			continue;
 		}
@@ -1784,14 +1798,15 @@ export default function tmuxAgentManagerExtension(pi: ExtensionAPI) {
 				return current;
 			});
 			for (const agent of pendingAgents) {
+				// Advisory-only, and only ever reported when the worker itself chose to write the
+				// claim file — never fabricated, never a hard cross-process cap.
+				const usage = readWorkerUsageClaim(job, agent);
 				bridge.reportManagedLane?.({
 					laneId: agentLaneId(job.id, agent.id),
 					phase: "terminal",
 					status: agent.result?.status,
+					usage,
 				});
-				// Advisory-only, and only ever reported when the worker itself chose to write the
-				// claim file — never fabricated, never a hard cross-process cap.
-				const usage = readWorkerUsageClaim(job, agent);
 				if (usage) {
 					bridge.reportSpawnedUsage?.(usage, {
 						label: "tmux-worker",

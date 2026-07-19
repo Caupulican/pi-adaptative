@@ -70,6 +70,14 @@ export interface Requirement {
 	 * later populates `"worker"`-kind evidence and prompts an explicit `satisfy_requirement` pass.
 	 */
 	boundLaneId?: string;
+	/**
+	 * ISO timestamp of the moment `boundLaneId` was most recently bound to a REAL lane -- the clock
+	 * the never-hang wait-timeout (`evaluateGoalContinuation`'s `worker_wait_timeout` reasonCode)
+	 * reads to detect a worker that has hung past `maxWorkerWaitMs`. Stamped ONLY when a
+	 * `dispatch_worker` event carries a lane id; a declined dispatch (no lane) leaves this field
+	 * untouched, so no clock starts for a worker that never actually launched.
+	 */
+	boundAt?: string;
 }
 
 export interface GoalEvidenceRef {
@@ -188,7 +196,8 @@ function isRequirement(value: unknown): value is Requirement {
 		typeof value.createdAt === "string" &&
 		typeof value.updatedAt === "string" &&
 		hasOptionalString(value, "blockedReason") &&
-		hasOptionalString(value, "boundLaneId")
+		hasOptionalString(value, "boundLaneId") &&
+		hasOptionalString(value, "boundAt")
 	);
 }
 
@@ -420,6 +429,9 @@ export function applyGoalEvent(state: GoalState, event: GoalEvent): GoalState {
 				updatedRequirements[existingIndex] = {
 					...requirement,
 					boundLaneId: event.laneId,
+					// Start (or keep) the wait-timeout clock ONLY when this dispatch actually bound a real
+					// lane -- a declined dispatch (no laneId) preserves whatever boundAt was already there.
+					boundAt: event.laneId ? event.now : requirement.boundAt,
 					updatedAt: event.now,
 				};
 				newState.requirements = updatedRequirements;

@@ -159,6 +159,68 @@ describe("the 'waiting' continuation state (goal-runtime-snapshot + BackgroundLa
 	});
 });
 
+describe("the never-hang wait-timeout escalates a hung worker instead of waiting forever (real BackgroundLaneController)", () => {
+	function seedGoalBoundAt(sessionManager: SessionManager, boundAt: string) {
+		let state = createGoalState({ goalId: "g1", userGoal: "Ship the thing", now: "T0" });
+		state = applyGoalEvent(state, { type: "add_requirement", id: "req-1", text: "Req 1", now: "T0" });
+		state = applyGoalEvent(state, {
+			type: "dispatch_worker",
+			id: "req-1",
+			instructions: "do the thing",
+			laneId: "tmux-worker-1",
+			now: boundAt,
+		});
+		appendGoalStateSnapshot(sessionManager, state);
+		return state;
+	}
+
+	it("a bound-in-flight requirement whose boundAt is within maxWorkerWaitMs stays 'waiting'", () => {
+		const sessionManager = InMemorySessionManager.inMemory();
+		const controller = new BackgroundLaneController(
+			buildLaneControllerDeps({ getSessionManager: () => sessionManager }),
+		);
+		controller.recordManagedLane({ laneId: "tmux-worker-1", phase: "dispatch", goalId: "g1" });
+		seedGoalBoundAt(sessionManager, "2026-01-01T00:00:00.000Z");
+
+		const snapshot = buildGoalRuntimeSnapshot({
+			sessionManager,
+			settings: { maxStallTurns: 20 },
+			laneRecords: controller.getLaneRecords(),
+			now: () => "2026-01-01T00:30:00.000Z",
+			maxWorkerWaitMs: 60 * 60_000,
+		});
+
+		expect(snapshot.continuation.action).toBe("waiting");
+		expect(snapshot.continuation.reasonCode).toBe("worker_in_flight");
+	});
+
+	it("a bound-in-flight requirement past maxWorkerWaitMs escalates to action:'ask-user'/reasonCode:'worker_wait_timeout' instead of waiting forever", () => {
+		const sessionManager = InMemorySessionManager.inMemory();
+		const controller = new BackgroundLaneController(
+			buildLaneControllerDeps({ getSessionManager: () => sessionManager }),
+		);
+		controller.recordManagedLane({ laneId: "tmux-worker-1", phase: "dispatch", goalId: "g1" });
+		seedGoalBoundAt(sessionManager, "2026-01-01T00:00:00.000Z");
+
+		// The lane is STILL queued/running (a hang, not a completion) -- without the wait-timeout this
+		// would report "waiting" forever.
+		expect(controller.getLaneRecords().find((record) => record.laneId === "tmux-worker-1")?.status).not.toBe(
+			"succeeded",
+		);
+
+		const snapshot = buildGoalRuntimeSnapshot({
+			sessionManager,
+			settings: { maxStallTurns: 20 },
+			laneRecords: controller.getLaneRecords(),
+			now: () => "2026-01-01T02:00:00.000Z",
+			maxWorkerWaitMs: 60 * 60_000,
+		});
+
+		expect(snapshot.continuation.action).toBe("ask-user");
+		expect(snapshot.continuation.reasonCode).toBe("worker_wait_timeout");
+	});
+});
+
 describe("GoalLoopController neither stalls nor races while a bound worker is in flight", () => {
 	function makeSnapshot(action: "continue" | "waiting", reasonCode: string) {
 		return {
