@@ -103,6 +103,7 @@ import { createModelFitnessToolDefinition } from "./tools/model-fitness.ts";
 import { createReadTool } from "./tools/read.ts";
 import { createRunToolkitScriptToolDefinition } from "./tools/run-toolkit-script.ts";
 import { createTaskStepsToolDefinition } from "./tools/task-steps.ts";
+import { dispatchTmuxWorker } from "./tools/tmux-dispatch.ts";
 import { createToolDefinitionFromAgentTool } from "./tools/tool-definition-wrapper.ts";
 
 interface ToolDefinitionEntry {
@@ -275,6 +276,10 @@ export interface RuntimeBuilderDeps {
 	}): { started: false; skipReason: string } | { started: true; record: LaneRecord };
 	getWorkerLaneRecords(): LaneRecord[];
 	getWorkerResultSnapshots(): WorkerResult[];
+	/** Resolve a managed (e.g. tmux) lane dispatch's internal LaneTracker id from the extension's own
+	 * caller-chosen laneId (`BackgroundLaneController.resolveManagedLaneId`) -- the goal->tmux dispatch
+	 * adapter's correlation read (see `tools/tmux-dispatch.ts`). */
+	resolveManagedLaneId(callerLaneId: string): string | undefined;
 	/** Worker-delegation runner for SDK/test through-completion calls. */
 	runWorkerDelegationOnce(request: {
 		instructions: string;
@@ -732,18 +737,30 @@ export class RuntimeBuilder {
 				hasToolCallId: (toolCallId) => hasAnsweredToolCallOnBranch(this.deps.getSessionManager(), toolCallId),
 				// kind:"worker" evidence refs verify against the SAME live lane/result accessors the
 				// delegate_status tool already uses below -- live wiring (these were declared optional
-				// and read-defensive on the goal-tool deps type in a prior wave).
+				// and read-defensive on the goal-tool deps type).
 				getLaneRecords: () => this.deps.getWorkerLaneRecords(),
 				getWorkerResultSnapshots: () => this.deps.getWorkerResultSnapshots(),
-				// dispatch_worker's tool-layer side effect: starts a real in-process worker lane through
-				// the SAME starter the delegate tool uses (below), adapted from its
-				// `{started:true;record}|{started:false;skipReason}` shape onto this tool's narrower
-				// `{laneId}|{skipReason}` shape. Tmux routing has no selection surface on this tool yet
-				// (see goal.ts's `startWorkerDelegation` doc comment) so this always dispatches in-process.
+				// dispatch_worker's tool-layer side effect for the default (in_process) route: starts a
+				// real in-process worker lane through the SAME starter the delegate tool uses (below),
+				// adapted from its `{started:true;record}|{started:false;skipReason}` shape onto this
+				// tool's narrower `{laneId}|{skipReason}` shape.
 				startWorkerDelegation: (args) => {
 					const outcome = this.deps.startWorkerDelegation({ instructions: args.instructions });
 					return outcome.started ? { laneId: outcome.record.laneId } : { skipReason: outcome.skipReason };
 				},
+				// dispatch_worker's tool-layer side effect for `dispatchTarget:"tmux"`: core structurally
+				// invokes the SAME tmux_agent_manager fire_task call the model itself would make (no
+				// extension change, no faked launch/laneId) -- see tmux-dispatch.ts's doc comment.
+				dispatchTmuxWorker: (args) =>
+					dispatchTmuxWorker(
+						{
+							getToolDefinition: (name) => this.getToolDefinition(name),
+							createExtensionContext: () => this.deps.getExtensionRunner().createContext(),
+							resolveManagedLaneId: (id) => this.deps.resolveManagedLaneId(id),
+							getGoalId: () => this.deps.getGoalStateSnapshot()?.goalId,
+						},
+						args,
+					),
 				cwd: () => this.deps.getCwd(),
 				// Reuses the already branch-scoped getTaskStepsStateSnapshot dep -- no new
 				// SessionManager access needed for the cross-visibility nudge.

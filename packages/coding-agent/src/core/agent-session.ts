@@ -1217,6 +1217,7 @@ export class AgentSession {
 			startWorkerDelegation: (request) => this._backgroundLanes.startWorkerDelegation(request),
 			getWorkerLaneRecords: () => this._backgroundLanes.getLaneRecords(),
 			getWorkerResultSnapshots: () => this.getWorkerResultSnapshots(),
+			resolveManagedLaneId: (id) => this._backgroundLanes.resolveManagedLaneId(id),
 			runWorkerDelegationOnce: (request) => this.runWorkerDelegationOnce(request),
 			runModelFitness: (args) => this.runModelFitness(args),
 			resolveCurationModelIfFit: () => this._resolveCurationModelIfFit(),

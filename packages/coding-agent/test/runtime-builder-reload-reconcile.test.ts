@@ -125,6 +125,7 @@ function makeDeps(cwd: string, resourceLoader: ResourceLoader): TestDeps {
 		startWorkerDelegation: () => unreachable("startWorkerDelegation"),
 		getWorkerLaneRecords: () => unreachable("getWorkerLaneRecords"),
 		getWorkerResultSnapshots: () => unreachable("getWorkerResultSnapshots"),
+		resolveManagedLaneId: () => unreachable("resolveManagedLaneId"),
 		runWorkerDelegationOnce: () => unreachable("runWorkerDelegationOnce"),
 		runModelFitness: () => unreachable("runModelFitness"),
 		resolveCurationModelIfFit: () => unreachable("resolveCurationModelIfFit"),

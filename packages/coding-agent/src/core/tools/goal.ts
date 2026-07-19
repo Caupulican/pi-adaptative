@@ -70,6 +70,12 @@ const goalSchema = Type.Object(
 			}),
 		),
 		reason: Type.Optional(Type.String({ description: "Reason for block_requirement or block_goal." })),
+		dispatchTarget: Type.Optional(
+			Type.Union([Type.Literal("in_process"), Type.Literal("tmux")], {
+				description:
+					"Worker runtime for dispatch_worker. Defaults to 'in_process'. 'tmux' dispatches a persistent tmux worker via the tmux_agent_manager extension -- only takes effect when that dependency is wired AND an owner-granted standing dispatch grant covers it; otherwise the dispatch is honestly skipped with a dispatchSkipReason (never a silent fallback or a fake launch).",
+			}),
+		),
 	},
 	{ additionalProperties: false },
 );
@@ -82,11 +88,14 @@ export interface GoalToolDetails {
 	error?: string;
 	state?: GoalState;
 	/** Set on 'dispatch_worker' when a worker lane actually started; mirrors the requirement's
-	 * new `boundLaneId`. Always the in-process route today -- see `startWorkerDelegation`'s
-	 * doc comment for the honest tmux-routing gap. */
+	 * new `boundLaneId`. The in-process route by default, or a real persistent tmux lane when
+	 * `dispatchTarget:"tmux"` was selected and routed -- see {@link GoalToolDependencies.dispatchTmuxWorker}. */
 	dispatchedLaneId?: string;
-	/** Set on 'dispatch_worker' when the dispatch dependency declined to start a worker (e.g. worker
-	 * delegation disabled or already at capacity) -- the binding is still recorded, with no laneId. */
+	/** Set on 'dispatch_worker' when no worker was dispatched: a wired dependency declined (e.g. worker
+	 * delegation disabled, already at capacity, or an honest tmux skip reason -- see
+	 * {@link GoalToolDependencies.dispatchTmuxWorker}), or the reload-vanish dedupe guard refused a
+	 * re-dispatch against an already-bound requirement (`requirement_already_bound`/`bound_lane_indeterminate`).
+	 * The binding is recorded (or, for a guard refusal, left exactly as it was) with no NEW laneId. */
 	dispatchSkipReason?: string;
 }
 
@@ -107,7 +116,7 @@ export interface GoalToolDependencies {
 	 * Read the session's live worker lane records, for validating kind:"worker" evidence refs
 	 * (the `uri` is a laneId) at add_evidence time. Read-defensive: when not wired -- exactly like
 	 * `hasToolCallId` -- a "worker" ref cannot be proven and is recorded as `verified: false` rather
-	 * than assumed true. Live wiring lands in a later wave.
+	 * than assumed true. Live wiring is added separately.
 	 */
 	getLaneRecords?: () => readonly LaneRecord[];
 	/**
@@ -119,23 +128,34 @@ export interface GoalToolDependencies {
 	 */
 	getWorkerResultSnapshots?: () => readonly WorkerResult[];
 	/**
-	 * Tool-layer side effect for a 'dispatch_worker' action: dispatches a real in-process worker
-	 * lane for the given requirement and returns the resulting laneId to bind onto it. When the
-	 * dependency is present but the underlying delegation starter declines (disabled, already at
+	 * Tool-layer side effect for a 'dispatch_worker' action when `dispatchTarget` is 'in_process'
+	 * (the default) or when {@link dispatchTmuxWorker} is not wired: dispatches a real in-process
+	 * worker lane for the given requirement and returns the resulting laneId to bind onto it. When
+	 * the dependency is present but the underlying delegation starter declines (disabled, already at
 	 * capacity, etc.), return `{ skipReason }` instead of a laneId -- a real, non-silent skip that
 	 * the tool response surfaces, distinct from this dependency being altogether unwired (`undefined`
 	 * dep, or the dep returning `undefined`), which records the binding attempt structurally with no
 	 * laneId (a no-op).
-	 *
-	 * HONEST scope note: this always dispatches the IN-PROCESS worker. There is no schema field on
-	 * this tool letting a caller select a tmux worker, and no in-process dependency that bridges to
-	 * the tmux extension from this construction site -- routing `dispatch_worker` to a tmux worker
-	 * is an OPEN follow-up, not silently faked here.
 	 */
 	startWorkerDelegation?: (args: {
 		requirementId: string;
 		instructions: string;
 	}) => { laneId?: string; skipReason?: string } | undefined;
+	/**
+	 * Tool-layer side effect for a 'dispatch_worker' action when `input.dispatchTarget === "tmux"`:
+	 * dispatches a REAL persistent tmux worker via the tmux_agent_manager extension's `fire_task`
+	 * action (core structurally invokes the same tool call the model would make; no extension change,
+	 * no faked launch or laneId -- see `tmux-dispatch.ts`'s `dispatchTmuxWorker`). Selected ONLY when
+	 * BOTH `input.dispatchTarget === "tmux"` AND this dependency is present; otherwise the EXISTING
+	 * {@link startWorkerDelegation} in-process path runs, byte-identical to before this field existed.
+	 * The honest skip-reason vocabulary this can return: `tmux_extension_not_loaded`,
+	 * `no_standing_grant` (the owner has not authorized unattended tmux dispatch),
+	 * `tmux_dispatch_failed`, `tmux_dispatch_incomplete`, `lane_correlation_failed`.
+	 */
+	dispatchTmuxWorker?: (args: {
+		requirementId: string;
+		instructions: string;
+	}) => Promise<{ laneId?: string; skipReason?: string }>;
 	/** Working directory for resolving kind:"file" evidence ref paths. Defaults to `process.cwd()`. */
 	cwd?: () => string;
 	/**
@@ -292,34 +312,88 @@ export function createGoalToolDefinition(deps: GoalToolDependencies): ToolDefini
 			// decline into a silent no-laneId no-op indistinguishable from the dep being absent.
 			let dispatchNote: string | undefined;
 			let dispatchSkipReason: string | undefined;
+			// Reload-vanish dedupe guard: checked BEFORE any dispatch side effect, for BOTH
+			// routes. A requirement already bound to a lane that is either still live (a plain
+			// duplicate) or whose liveness/outcome cannot be determined at all (the reload-vanish
+			// case -- the lane record and any worker-result snapshot are both gone) must never be
+			// re-dispatched silently; only a CONFIRMED terminal outcome allows a legitimate retry.
+			let dispatchGuardRefused = false;
 			if (action.action === "dispatch_worker") {
-				const dispatched = deps.startWorkerDelegation?.({
-					requirementId: action.requirementId,
-					instructions: action.instructions,
-				});
+				// Captured into a `const` so the "dispatch_worker" narrowing survives into the closures
+				// below -- TS does not narrow a `let`-bound outer variable across a callback boundary.
+				const dispatchAction = action;
+				const boundRequirement = deps
+					.getGoalState()
+					?.requirements.find((r) => r.id === dispatchAction.requirementId);
+				const bound = boundRequirement?.boundLaneId;
+				if (bound !== undefined) {
+					const boundLaneRecord = deps.getLaneRecords?.().find((record) => record.laneId === bound);
+					const isLiveInFlight =
+						boundLaneRecord !== undefined &&
+						(boundLaneRecord.status === "queued" || boundLaneRecord.status === "running");
+					if (isLiveInFlight) {
+						dispatchSkipReason = "requirement_already_bound";
+					} else {
+						// `boundLaneRecord` present here is necessarily terminal (isLiveInFlight was false).
+						const hasTerminalOutcome =
+							boundLaneRecord !== undefined ||
+							(deps.getWorkerResultSnapshots?.().some((result) => result.requestId === bound) ?? false);
+						if (!hasTerminalOutcome) dispatchSkipReason = "bound_lane_indeterminate";
+					}
+					if (dispatchSkipReason) {
+						dispatchGuardRefused = true;
+						dispatchNote = `No worker was dispatched (${dispatchSkipReason}); requirement '${dispatchAction.requirementId}' remains bound to lane '${bound}'.`;
+					}
+				}
+			}
+			if (action.action === "dispatch_worker" && !dispatchGuardRefused) {
+				const useTmux = input.dispatchTarget === "tmux" && deps.dispatchTmuxWorker !== undefined;
+				const dispatched = useTmux
+					? await deps.dispatchTmuxWorker?.({
+							requirementId: action.requirementId,
+							instructions: action.instructions,
+						})
+					: deps.startWorkerDelegation?.({
+							requirementId: action.requirementId,
+							instructions: action.instructions,
+						});
 				action = { ...action, laneId: dispatched?.laneId };
 				if (dispatched?.laneId) {
-					dispatchNote = `Dispatched in-process worker lane '${dispatched.laneId}' for requirement '${action.requirementId}' (tmux dispatch is not available from this tool yet).`;
+					dispatchNote = useTmux
+						? `Dispatched tmux worker lane '${dispatched.laneId}' for requirement '${action.requirementId}'.`
+						: `Dispatched in-process worker lane '${dispatched.laneId}' for requirement '${action.requirementId}' (tmux dispatch is not available from this tool yet).`;
 				} else {
-					dispatchSkipReason =
-						dispatched?.skipReason ?? (deps.startWorkerDelegation ? "declined" : "dependency_unwired");
+					const wired = useTmux ? deps.dispatchTmuxWorker : deps.startWorkerDelegation;
+					dispatchSkipReason = dispatched?.skipReason ?? (wired ? "declined" : "dependency_unwired");
 					dispatchNote = `No worker was dispatched (${dispatchSkipReason}); requirement '${action.requirementId}' is recorded but not bound to a lane.`;
 				}
 			}
 
 			const current = deps.getGoalState();
-			const result = applyGoalAction(current, action, now(), {
-				requireVerifiedEvidenceForCompletion: deps.requireVerifiedEvidenceForCompletion?.() ?? true,
-			});
-			if (!result.ok) {
-				return {
-					content: [{ type: "text" as const, text: `goal ${input.action} failed: ${result.error}` }],
-					details: { action: input.action, applied: false, error: result.error, state: current },
-				};
+			let nextState: GoalState;
+			if (action.action === "dispatch_worker" && dispatchGuardRefused) {
+				// Short-circuit: the guard refused before any dispatch attempt -- never call
+				// applyGoalAction for this turn, so the requirement's existing `boundLaneId` is
+				// preserved exactly as-is rather than clobbered to `undefined` by the reducer's
+				// unconditional `boundLaneId: event.laneId` write (goal-state.ts's dispatch_worker case).
+				// `current` is guaranteed defined here: the guard only refuses when a requirement with
+				// a `boundLaneId` was found on it.
+				nextState = current as GoalState;
+			} else {
+				const result = applyGoalAction(current, action, now(), {
+					requireVerifiedEvidenceForCompletion: deps.requireVerifiedEvidenceForCompletion?.() ?? true,
+				});
+				if (!result.ok) {
+					return {
+						content: [{ type: "text" as const, text: `goal ${input.action} failed: ${result.error}` }],
+						details: { action: input.action, applied: false, error: result.error, state: current },
+					};
+				}
+				deps.saveGoalState(result.state);
+				nextState = result.state;
 			}
 
-			deps.saveGoalState(result.state);
-			const summary = summarizeGoalState(result.state, { action, openTaskSteps: deps.getOpenTaskSteps?.() });
+			const summary = summarizeGoalState(nextState, { action, openTaskSteps: deps.getOpenTaskSteps?.() });
 			const text = dispatchNote
 				? `goal ${input.action} recorded.\n${summary}\n${dispatchNote}`
 				: `goal ${input.action} recorded.\n${summary}`;
@@ -328,7 +402,7 @@ export function createGoalToolDefinition(deps: GoalToolDependencies): ToolDefini
 				details: {
 					action: input.action,
 					applied: true,
-					state: result.state,
+					state: nextState,
 					...(action.action === "dispatch_worker" && action.laneId ? { dispatchedLaneId: action.laneId } : {}),
 					...(action.action === "dispatch_worker" && !action.laneId ? { dispatchSkipReason } : {}),
 				},

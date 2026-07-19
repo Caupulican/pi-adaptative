@@ -140,3 +140,122 @@ describe("goal action 'dispatch_worker' (live adapter)", () => {
 		expect(getState()?.status).toBe("completed");
 	});
 });
+
+/**
+ * `dispatchTarget:"tmux"` routing: an explicit, grant-gated opt-in that
+ * defaults OFF. Selected ONLY when both `input.dispatchTarget === "tmux"` AND `dispatchTmuxWorker`
+ * is wired; every other combination falls back to the EXISTING `startWorkerDelegation` in-process
+ * path, byte-identical to before this field existed.
+ */
+describe("goal action 'dispatch_worker' (dispatchTarget routing)", () => {
+	it("dispatchTarget:'tmux' with the dep wired routes to dispatchTmuxWorker, never startWorkerDelegation", async () => {
+		let tmuxCalls = 0;
+		let inProcessCalls = 0;
+		const { run, getState } = createProducer({
+			dispatchTmuxWorker: async ({ requirementId }) => {
+				tmuxCalls++;
+				return { laneId: `tmux-worker-for-${requirementId}` };
+			},
+			startWorkerDelegation: () => {
+				inProcessCalls++;
+				return { laneId: "should-not-be-used" };
+			},
+		});
+
+		await run({ action: "start", goalId: "g1", userGoal: "Ship it" });
+		await run({ action: "add_requirement", requirementId: "r1", text: "Do the thing" });
+		const result = await run({
+			action: "dispatch_worker",
+			requirementId: "r1",
+			instructions: "go do it",
+			dispatchTarget: "tmux",
+		});
+
+		expect(tmuxCalls).toBe(1);
+		expect(inProcessCalls).toBe(0);
+		expect(result.details.dispatchedLaneId).toBe("tmux-worker-for-r1");
+		expect(getState()?.requirements.find((r) => r.id === "r1")?.boundLaneId).toBe("tmux-worker-for-r1");
+		expect(firstText(result.content)).toContain("Dispatched tmux worker lane 'tmux-worker-for-r1'");
+	});
+
+	it("dispatchTarget omitted stays on the in-process path, byte-identical, even when dispatchTmuxWorker is wired", async () => {
+		let tmuxCalls = 0;
+		const { run, getState } = createProducer({
+			dispatchTmuxWorker: async () => {
+				tmuxCalls++;
+				return { laneId: "should-not-be-used" };
+			},
+			startWorkerDelegation: ({ requirementId }) => ({ laneId: `lane-for-${requirementId}` }),
+		});
+
+		await run({ action: "start", goalId: "g1", userGoal: "Ship it" });
+		await run({ action: "add_requirement", requirementId: "r1", text: "Do the thing" });
+		const result = await run({ action: "dispatch_worker", requirementId: "r1", instructions: "go do it" });
+
+		expect(tmuxCalls).toBe(0);
+		expect(result.details.dispatchedLaneId).toBe("lane-for-r1");
+		expect(getState()?.requirements.find((r) => r.id === "r1")?.boundLaneId).toBe("lane-for-r1");
+		expect(firstText(result.content)).toContain("Dispatched in-process worker lane 'lane-for-r1'");
+		expect(firstText(result.content)).toContain("tmux dispatch is not available from this tool yet");
+	});
+
+	it("dispatchTarget:'tmux' with the dep UNWIRED falls back to the in-process path (honest, not a silent tmux fake)", async () => {
+		let inProcessCalls = 0;
+		const { run } = createProducer({
+			startWorkerDelegation: ({ requirementId }) => {
+				inProcessCalls++;
+				return { laneId: `lane-for-${requirementId}` };
+			},
+		});
+
+		await run({ action: "start", goalId: "g1", userGoal: "Ship it" });
+		await run({ action: "add_requirement", requirementId: "r1", text: "Do the thing" });
+		const result = await run({
+			action: "dispatch_worker",
+			requirementId: "r1",
+			instructions: "go do it",
+			dispatchTarget: "tmux",
+		});
+
+		expect(inProcessCalls).toBe(1);
+		expect(result.details.dispatchedLaneId).toBe("lane-for-r1");
+	});
+
+	it("surfaces the tmux adapter's honest skip reasons (e.g. no_standing_grant) through the existing dispatchSkipReason contract, with no laneId bound", async () => {
+		const { run, getState } = createProducer({
+			dispatchTmuxWorker: async () => ({ skipReason: "no_standing_grant" }),
+		});
+
+		await run({ action: "start", goalId: "g1", userGoal: "Ship it" });
+		await run({ action: "add_requirement", requirementId: "r1", text: "Do the thing" });
+		const result = await run({
+			action: "dispatch_worker",
+			requirementId: "r1",
+			instructions: "go do it",
+			dispatchTarget: "tmux",
+		});
+
+		expect(result.details.applied).toBe(true);
+		expect(result.details.dispatchedLaneId).toBeUndefined();
+		expect(result.details.dispatchSkipReason).toBe("no_standing_grant");
+		expect(getState()?.requirements.find((r) => r.id === "r1")?.boundLaneId).toBeUndefined();
+		expect(firstText(result.content)).toContain("no_standing_grant");
+	});
+
+	it("surfaces 'tmux_extension_not_loaded' the same honest way", async () => {
+		const { run } = createProducer({
+			dispatchTmuxWorker: async () => ({ skipReason: "tmux_extension_not_loaded" }),
+		});
+
+		await run({ action: "start", goalId: "g1", userGoal: "Ship it" });
+		await run({ action: "add_requirement", requirementId: "r1", text: "Do the thing" });
+		const result = await run({
+			action: "dispatch_worker",
+			requirementId: "r1",
+			instructions: "go do it",
+			dispatchTarget: "tmux",
+		});
+
+		expect(result.details.dispatchSkipReason).toBe("tmux_extension_not_loaded");
+	});
+});
