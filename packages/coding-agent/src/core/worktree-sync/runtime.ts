@@ -94,7 +94,10 @@ export async function startWorktreeSyncRuntime(config: WorktreeSyncRuntimeConfig
 			}
 			if (reconciled.staleLockReleased) findings.push("released a stale integration lock");
 			if (findings.length > 0) config.onDiagnostic?.(`worktree-sync reconcile: ${findings.join("; ")}`);
-		} else {
+		} else if (reconciled.code !== "not_a_git_repo" && reconciled.code !== "default_branch_unresolved") {
+			// Now that the runtime starts in every session, these two codes are benign absence, not a
+			// problem to surface: a non-repo cwd, or a repo whose default branch isn't named main/master.
+			// Every other refusal still gets a diagnostic.
 			config.onDiagnostic?.(`worktree-sync reconcile skipped: [${reconciled.code}] ${reconciled.message}`);
 		}
 	} catch (error) {

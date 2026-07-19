@@ -449,6 +449,27 @@ export async function releaseLane(deps: WorktreeSyncEngineDeps, args: ReleaseLan
 	return { code: "released", laneKey: lane.laneKey };
 }
 
+/** Lane worktrees git knows about that the registry does not (yet) track: a valid `pi/wt/<key>`
+ * branch, key not already registered, checkout still present. One derivation shared by the
+ * write-free no-op guard below and the re-registration pass, rather than two copies of the same
+ * filter. */
+function findUnregisteredLaneWorktrees(
+	deps: WorktreeSyncEngineDeps,
+	worktrees: WorktreeListEntry[],
+	registered: Set<string>,
+): Array<{ laneKey: string; path: string }> {
+	const found: Array<{ laneKey: string; path: string }> = [];
+	for (const entry of worktrees) {
+		const ref = entry.branchRef;
+		if (!ref?.startsWith(`refs/heads/${LANE_BRANCH_PREFIX}`)) continue;
+		const laneKey = ref.slice(`refs/heads/${LANE_BRANCH_PREFIX}`.length);
+		if (registered.has(laneKey) || !LANE_KEY_RE.test(laneKey)) continue;
+		if (!fileExists(deps, entry.path)) continue;
+		found.push({ laneKey, path: entry.path });
+	}
+	return found;
+}
+
 /**
  * Startup/repair pass (mirrors the tmux session reconcile): diff the registry against git
  * reality, mark orphans (never delete -- G11), re-register lane worktrees git still knows that
@@ -464,6 +485,25 @@ export async function reconcile(deps: WorktreeSyncEngineDeps): Promise<Reconcile
 	const worktrees = parseWorktreeList(worktreesResult.stdout);
 
 	const lanes = await listLanes(ctx.paths);
+	const registered = new Set(lanes.map((lane) => lane.laneKey));
+	const unregisteredWorktrees = findUnregisteredLaneWorktrees(deps, worktrees, registered);
+
+	// Write-free fast path: worktree-sync now starts in every session, so a mere session open in a
+	// git repo must never create `<git-common-dir>/pi-worktree-sync/`. When the store does not exist
+	// yet and git shows nothing to recover, there is genuinely nothing to reconcile -- one early
+	// determination, then skip every write below (writeLane/appendAuditEvent/releaseIntegrationLock)
+	// rather than guarding each call individually. Once the store exists, or findings occur, behavior
+	// is unchanged below (including the reconcile_summary audit append).
+	if (!fileExists(deps, ctx.paths.root) && unregisteredWorktrees.length === 0) {
+		return {
+			code: "reconciled",
+			orphanedLaneKeys: [],
+			reRegisteredLaneKeys: [],
+			ownerClearedLaneKeys: [],
+			staleLockReleased: false,
+		};
+	}
+
 	const isAlive =
 		deps.isPidAlive ?? ((pid: number) => defaultIsPidAlive({ pid, hostname: osHostname(), acquiredAt: "" }));
 	const at = nowIso(deps);
@@ -499,17 +539,11 @@ export async function reconcile(deps: WorktreeSyncEngineDeps): Promise<Reconcile
 	}
 
 	// Lane worktrees git knows but the registry does not: rebuild identity from git facts.
-	const registered = new Set(lanes.map((lane) => lane.laneKey));
-	for (const entry of worktrees) {
-		const ref = entry.branchRef;
-		if (!ref?.startsWith(`refs/heads/${LANE_BRANCH_PREFIX}`)) continue;
-		const laneKey = ref.slice(`refs/heads/${LANE_BRANCH_PREFIX}`.length);
-		if (registered.has(laneKey) || !LANE_KEY_RE.test(laneKey)) continue;
-		if (!fileExists(deps, entry.path)) continue;
+	for (const { laneKey, path } of unregisteredWorktrees) {
 		await writeLane(ctx.paths, {
 			laneKey,
 			branch: `${LANE_BRANCH_PREFIX}${laneKey}`,
-			worktreePath: entry.path,
+			worktreePath: path,
 			status: "active",
 			createdAt: at,
 			updatedAt: at,

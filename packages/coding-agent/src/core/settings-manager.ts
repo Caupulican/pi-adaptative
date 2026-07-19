@@ -279,7 +279,7 @@ export type ResolvedWorkerDelegationSettings = Required<
 export type WorktreeSyncPolicySetting = "on_land_mandatory" | "overlap_mandatory" | "land_time_only";
 
 export interface WorktreeSyncSettings {
-	enabled?: boolean; // default: false -- master switch; off means zero behavior change (tool hidden, no gating)
+	enabled?: boolean; // default: true -- master switch; explicit false is the hard off-switch (zero behavior change when off)
 	mainBranch?: string; // overrides default-branch resolution (main, then master; never guessed further)
 	syncPolicy?: WorktreeSyncPolicySetting; // default: "on_land_mandatory" -- every land marks every other active lane sync_required
 	gateCommand?: string; // land gate command run in the lane worktree at the exact tip that becomes main (e.g. "npm run check")
@@ -3282,7 +3282,7 @@ export class SettingsManager {
 	getWorktreeSyncSettings(): ResolvedWorktreeSyncSettings {
 		const configured = this.settings.worktreeSync ?? {};
 		const resolved: ResolvedWorktreeSyncSettings = {
-			enabled: configured.enabled === true,
+			enabled: configured.enabled !== false,
 			syncPolicy:
 				configured.syncPolicy === "overlap_mandatory" || configured.syncPolicy === "land_time_only"
 					? configured.syncPolicy

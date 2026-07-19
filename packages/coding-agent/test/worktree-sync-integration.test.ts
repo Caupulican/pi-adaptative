@@ -1,4 +1,4 @@
-import { mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
+import { existsSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { hostname, tmpdir } from "node:os";
 import { join } from "node:path";
 import { afterEach, describe, expect, it } from "vitest";
@@ -10,6 +10,7 @@ import {
 	createDefaultWorktreeSyncExec,
 	createLane,
 	landLane,
+	reconcile,
 	syncLane,
 	type WorktreeSyncEngineDeps,
 } from "../src/core/worktree-sync/git-engine.ts";
@@ -280,5 +281,32 @@ describe("worktree-sync against real git", () => {
 		expect((await landLane(deps, { laneKey: loserKey, gate: "off" })).code).toBe("ok");
 		expect(await git(repo, "rev-list", "--count", "main")).toBe("3");
 		expect(await git(repo, "rev-list", "--merges", "--count", "main")).toBe("0");
+	}, 60_000);
+
+	it("write-free no-op reconcile: opening a session in a git repo creates no store; the store appears only once there is a lane to track", async () => {
+		const { repo, deps } = await initRepo();
+		const commonDir = await git(repo, "rev-parse", "--path-format=absolute", "--git-common-dir");
+		const storeRoot = syncStorePaths(commonDir).root;
+
+		const noop = await reconcile(deps);
+		expect(noop).toEqual({
+			code: "reconciled",
+			orphanedLaneKeys: [],
+			reRegisteredLaneKeys: [],
+			ownerClearedLaneKeys: [],
+			staleLockReleased: false,
+		});
+		expect(existsSync(storeRoot)).toBe(false);
+
+		await mustCreateLane(deps, "a");
+		const afterLane = await reconcile(deps);
+		expect(afterLane).toEqual({
+			code: "reconciled",
+			orphanedLaneKeys: [],
+			reRegisteredLaneKeys: [],
+			ownerClearedLaneKeys: [],
+			staleLockReleased: false,
+		});
+		expect(existsSync(storeRoot)).toBe(true);
 	}, 60_000);
 });

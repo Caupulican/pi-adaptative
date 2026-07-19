@@ -26,12 +26,12 @@ lanes aware *promptly*.
 
 ## Enabling
 
-Off by default — zero behavior change until turned on. Settings live under `worktreeSync` in
-`settings.json`:
+Enabled by default; `"worktreeSync": { "enabled": false }` is the explicit off-switch — zero
+behavior change once set. Settings live under `worktreeSync` in `settings.json`:
 
 | Key | Default | Meaning |
 |---|---|---|
-| `enabled` | `false` | Master switch. Off = the tool is hidden and no gating runs. |
+| `enabled` | `true` | Master switch. Explicit `false` is the hard off-switch: the tool is hidden and no gating runs. |
 | `mainBranch` | unset (auto) | Overrides default-branch resolution (`main`, then `master`; never guessed further). |
 | `syncPolicy` | `"on_land_mandatory"` | Staleness-propagation policy — see below. |
 | `gateCommand` | unset | Land gate command (G4), e.g. `"npm run check"`, run in the lane worktree at the exact tip that becomes main. |
