@@ -1,4 +1,30 @@
+import type { Api, Model } from "@caupulican/pi-ai";
 import type { ModelTier } from "../autonomy/contracts.ts";
+import { isLocalExecutionModel } from "../background-lane-controller.ts";
+import { HF_TRANSFORMERS_PROVIDER, OLLAMA_PROVIDER } from "../models/local-registration.ts";
+import { isPiManagedPrismLlamaCppModel } from "../models/prism-llamacpp-lifecycle.ts";
+
+/**
+ * True for a model the capability-gate spine treats as LOCAL/MANAGED — never cloud.
+ * Shared by agent-session.ts's validation-escalation branch and model-router-controller.ts's
+ * tier-resolution verdict consultation so there is exactly one place composing this
+ * predicate, instead of two divergent copies. Reuses {@link isLocalExecutionModel} (any
+ * ollama/transformers/llama-cpp provider, or a localhost-family baseUrl) OR'd with the same
+ * provider/managed-prism check `LocalRuntimeController.isManagedLocalModel` uses internally — built
+ * from the identical exported provider constants ({@link OLLAMA_PROVIDER}, {@link
+ * HF_TRANSFORMERS_PROVIDER}) and {@link isPiManagedPrismLlamaCppModel}, so there is no second,
+ * drifting definition of "is this ollama/transformers/pi-managed-prism" (that method itself is
+ * private to LocalRuntimeController, which this module does not own/import). A cloud model (a
+ * known-capable provider on a non-local baseUrl) always returns false.
+ */
+export function isLocalOrManagedRouterModel(model: Model<Api>): boolean {
+	return (
+		isLocalExecutionModel(model) ||
+		model.provider === OLLAMA_PROVIDER ||
+		model.provider === HF_TRANSFORMERS_PROVIDER ||
+		isPiManagedPrismLlamaCppModel(model)
+	);
+}
 
 const READ_ONLY_TOOL_NAMES = new Set([
 	"read",
@@ -114,7 +140,7 @@ export function shouldEscalateModelRouterTool(options: {
 }): boolean {
 	if (options.tier !== "cheap") return false;
 	const toolName = options.toolName.trim().toLowerCase();
-	// Executor-lane turns (G16) exist to run exactly one tool: run_toolkit_script, which enforces
+	// Executor-lane turns exist to run exactly one tool: run_toolkit_script, which enforces
 	// its own safety (danger confirmation, structural exit-code contract). Escalating on it would
 	// abort every executor turn at the moment it does its job. Any OTHER mutating tool still
 	// escalates to the expensive model as usual.

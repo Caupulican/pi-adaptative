@@ -46,6 +46,7 @@ import {
 import type {
 	Api,
 	AssistantMessage,
+	AssistantMessageEventStream,
 	CacheRetention,
 	Context,
 	ImageContent,
@@ -64,6 +65,7 @@ import type {
 import {
 	cleanupSessionResources,
 	formatToolRepairStandingRule,
+	formatVariantEnvelope,
 	generateTextToolProtocolPrimer,
 	getSupportedThinkingLevels,
 	isContextOverflow,
@@ -75,6 +77,7 @@ import { Type } from "typebox";
 import { getAgentDir } from "../config.ts";
 import { stripFrontmatter } from "../utils/frontmatter.ts";
 import { getProcessWorkRun } from "../utils/work-directory.ts";
+import { resourceDir, stateFile } from "./agent-paths.ts";
 import { formatNoApiKeyFoundMessage, formatNoModelSelectedMessage } from "./auth-guidance.ts";
 import type {
 	CapabilityEnvelope,
@@ -149,7 +152,7 @@ import {
 	type GoalRuntimeSnapshot,
 	type GoalRuntimeSnapshotSettings,
 } from "./goals/goal-runtime-snapshot.ts";
-import type { GoalState } from "./goals/goal-state.ts";
+import { applyGoalEvent, type GoalState } from "./goals/goal-state.ts";
 import { appendGoalStateSnapshot, getLatestGoalStateSnapshot } from "./goals/session-goal-state.ts";
 import { constrainStreamIdleToHttpTimeout } from "./http-dispatcher.ts";
 import type { LearningAuditRecord } from "./learning/learning-audit.ts";
@@ -165,6 +168,7 @@ import {
 	type ModelCapabilityProfile,
 } from "./model-capability.ts";
 import type { ModelRegistry } from "./model-registry.ts";
+import { isLocalOrManagedRouterModel } from "./model-router/tool-escalation.ts";
 import { formatModelRouterModel, ModelRouterController } from "./model-router-controller.ts";
 import { ModelSelectionController } from "./model-selection-controller.ts";
 import { ModelAdaptationStore, type ModelToolProbe, type NativeToolProbeGrade } from "./models/adaptation-store.ts";
@@ -227,6 +231,19 @@ const MODEL_ADAPTATION_REPAIR_THRESHOLD = 3;
 const TEXT_TOOL_PROTOCOL_VERSION = 1;
 const TEXT_TOOL_PROTOCOL_TRIALS_PER_VARIANT = 2;
 const TEXT_TOOL_PROTOCOL_PARSE_FAILURE_THRESHOLD = 3;
+/** How often the one-line envelope-format corrective steer (see
+ * {@link AgentSession._maybeInjectTextProtocolCorrectiveSteer}) re-fires after the first parse
+ * failure this session — every Nth failure thereafter, not every single one, so a model that keeps
+ * missing the envelope doesn't get the reminder spliced into every turn (the breaker's same-signature
+ * counter is what actually demotes it, at {@link TEXT_TOOL_PROTOCOL_PARSE_FAILURE_THRESHOLD}). */
+const TEXT_TOOL_PROTOCOL_STEER_INTERVAL = 5;
+/** Anti-loop cooldown: the evidence-gated auto-probe (see {@link
+ * AgentSession._maybeAutoProbeOnValidationEscalation}) skips a model whose persisted `toolProbe`
+ * verdict was written within this window, so a burst of validation-escalation events for a still-
+ * failing model — or a very recent explicit `/toolprobe` run, or a future circuit-breaker demote — does
+ * not re-fire the (multi-completion) probe every time. Independent of, and complementary to, the
+ * per-session `_autoProbedModels` latch. */
+const AUTO_TOOL_PROBE_FRESHNESS_MS = 15 * 60 * 1000;
 const TEXT_TOOL_PROTOCOL_VARIANTS: readonly TextToolProtocolVariant[] = [
 	"tool-tag",
 	"tool-call",
@@ -670,7 +687,13 @@ export type GoalContinuationLoopStopReason =
 	| "continuation_not_allowed"
 	| "max_turns_reached"
 	| "wall_clock_budget_reached"
-	| "goal_state_not_advanced";
+	| "goal_state_not_advanced"
+	| "goal_budget_exhausted"
+	// Skip outcomes from the BackgroundLaneController single-flight guard (`continueGoalLoopExclusive`):
+	// the loop never ran a pass because another goal loop already owned the mutex, or the session was
+	// disposed before this request could start. `turnsSubmitted` is always 0 for both.
+	| "already_continuing"
+	| "session_disposed";
 
 export interface GoalContinuationLoopOptions extends GoalContinuationOnceOptions {
 	maxTurns: number;
@@ -753,11 +776,22 @@ export class AgentSession {
 	private readonly _repairModeSessionCounts = new Map<string, number>();
 	private readonly _textProtocolParseFailures = new Map<string, { signature: string; repeats: number }>();
 	private _textProtocolParseObservedThisTurn = false;
+	/** Total text-protocol parse-failure events observed this session, backing the
+	 * {@link TEXT_TOOL_PROTOCOL_STEER_INTERVAL} throttle on {@link _maybeInjectTextProtocolCorrectiveSteer}. */
+	private _textProtocolCorrectiveSteerCount = 0;
+	/** Monotonic counter backing tool-probe/text-protocol-calibration spawned-usage reportIds
+	 * (see {@link _nextProbeUsageReportId}); guarantees each probe/calibration completion in the
+	 * session lands in the cost ledger exactly once, even across repeated /toolprobe invocations. */
+	private _toolProbeUsageReportSeq = 0;
+	/** Anti-loop: modelKeys the evidence-gated auto-probe has already fired for THIS session (see
+	 * {@link _maybeAutoProbeOnValidationEscalation}), so a burst of validation-escalation events for
+	 * the same still-failing model never re-fires the probe more than once per session. */
+	private readonly _autoProbedModels = new Set<string>();
 	private _textProtocolValidationOutcomeThisTurn: TextToolProtocolParseEvent | undefined;
 	/** Assembles the session's base system prompt from live session state (see
 	 * system-prompt-builder.ts); owns the paired _baseSystemPromptOptions. */
 	private readonly _systemPromptBuilder: SystemPromptBuilder;
-	/** G3/G8 autonomy telemetry sink + status/diagnostic snapshots (see autonomy-telemetry.ts); owns
+	/** Autonomy telemetry sink + status/diagnostic snapshots (see autonomy-telemetry.ts); owns
 	 * the latest gate outcome and the bounded gate-outcome history. */
 	private readonly _autonomyTelemetry: AutonomyTelemetry;
 	/** Goal auto-continue + research lane + scout-worker delegation + model-fitness probe (see
@@ -986,7 +1020,10 @@ export class AgentSession {
 			readMemoryForLane: (query) => this._memory.readMemoryForLane(query),
 			addSpawnedUsage: (usage, opts) => this.addSpawnedUsage(usage, opts),
 			runIsolatedCompletion: (opts) => this.runIsolatedCompletion(opts),
-			continueGoalLoop: (options) => this.continueGoalLoop(options),
+			// RAW loop, deliberately bypassing the public `continueGoalLoop` — that method now delegates
+			// to this controller's own `continueGoalLoopExclusive` guard, so routing through it here would
+			// recurse into the guard from inside itself instead of driving the actual continuation pass.
+			continueGoalLoop: (options) => this._goalContinuation.continueGoalLoop(options),
 			collectWorkspaceSources: (args) => this._collectWorkspaceSources(args),
 		});
 		this._memory = new MemoryController({
@@ -1031,8 +1068,8 @@ export class AgentSession {
 			addSpawnedUsage: (usage, opts) => this.addSpawnedUsage(usage, opts),
 			runIsolatedCompletion: (opts) => this.runIsolatedCompletion(opts),
 		});
-		const failureCorpusPath = join(this._agentDir, "state", "failure-corpus.jsonl");
-		this._toolRecoveryEventLogPath = join(this._agentDir, "state", TOOL_RECOVERY_EVENT_LOG_FILE);
+		const failureCorpusPath = stateFile(this._agentDir, "failure-corpus.jsonl");
+		this._toolRecoveryEventLogPath = stateFile(this._agentDir, TOOL_RECOVERY_EVENT_LOG_FILE);
 		const toolRepairSettings = this._toolRepairSettings();
 		this._failureCorpus = new FailureCorpusRecorder({
 			filePath: failureCorpusPath,
@@ -1071,6 +1108,7 @@ export class AgentSession {
 			emitAutonomyTelemetry: (event) => this._emitAutonomyTelemetry(event),
 			resolveLaneModel: (pattern) => this._backgroundLanes.resolveLaneModel(pattern),
 			resolveCurationModelIfFit: () => this._resolveCurationModelIfFit(),
+			getToolProbeVerdict: (model) => this._modelAdaptationStore.get(this._modelRef(model)).toolProbe?.status,
 		});
 		this._reflection = new ReflectionController({
 			getModel: () => this.model,
@@ -1094,6 +1132,7 @@ export class AgentSession {
 		this._goalContinuation = new GoalLoopController({
 			getGoalRuntimeSnapshot: (settings) => this.getGoalRuntimeSnapshot(settings),
 			prompt: (text, options) => this.prompt(text, options),
+			recordGoalContinuationPass: (pass) => this.recordGoalContinuationPass(pass),
 		});
 		this._extensionRunnerRef = config.extensionRunnerRef;
 		this._initialActiveToolNames = config.initialActiveToolNames;
@@ -1607,7 +1646,7 @@ export class AgentSession {
 
 	private get _skillCurator(): SkillCurator {
 		if (!this._skillCuratorInstance) {
-			this._skillCuratorInstance = new SkillCurator(join(this._agentDir, "skills"));
+			this._skillCuratorInstance = new SkillCurator(resourceDir("skills", this._agentDir));
 		}
 		return this._skillCuratorInstance;
 	}
@@ -1714,6 +1753,34 @@ export class AgentSession {
 		return this.agent.streamFn(model, context, requestOptions);
 	}
 
+	/** Builds a reportId that uniquely identifies one probe/calibration completion within the
+	 * session: the model, a caller-supplied `kind` (e.g. "read-task", "echo", or
+	 * "text-protocol:<variant>"), and a monotonic sequence number. The sequence number (not
+	 * wall-clock time or randomness) is what guarantees no collision even when the same model+kind
+	 * is probed again later in the session (e.g. a repeated /toolprobe run), so genuine repeat spend
+	 * is never silently deduped away. */
+	private _nextProbeUsageReportId(model: Model<Api>, kind: string): string {
+		return `tool-probe:${this._modelRef(model)}:${kind}:${this._toolProbeUsageReportSeq++}`;
+	}
+
+	/** Awaits a tool-probe/text-protocol-calibration stream's result and, if the resolved message
+	 * carries reportable usage, rolls it into spawned usage under `reportId` so the turn-scoped cost
+	 * guard and daily usage see it. These trial completions previously spent tokens with no
+	 * addSpawnedUsage call, making them invisible to both. `addSpawnedUsage` dedups on `reportId`, so
+	 * a re-report of the same id is a no-op. */
+	private async _resolveProbeStreamCountingUsage(
+		stream: AssistantMessageEventStream,
+		label: string,
+		reportId: string,
+	): Promise<AssistantMessage> {
+		const message = await stream.result();
+		const usage = message.usage;
+		if (usage && (usage.cost.total > 0 || usage.totalTokens > 0)) {
+			this.addSpawnedUsage(usage, { label, reportId });
+		}
+		return message;
+	}
+
 	private _textProtocolCalibrationContext(variant: TextToolProtocolVariant, token: string): Context {
 		const primer = generateTextToolProtocolPrimer([TEXT_TOOL_PROTOCOL_ECHO_TOOL], { variant });
 		const instruction = `Text tool protocol calibration trial. Using the protocol above, call echo with data exactly "${token}". Output only the tool-call envelope.`;
@@ -1759,7 +1826,12 @@ export class AgentSession {
 			},
 			{ textToolCallProtocol: false, maxRetries: 0, temperature: 0, maxTokens: 768 },
 		);
-		return this._messageHasToolCallWithStringArgument(await stream.result(), "read", "path", path);
+		const message = await this._resolveProbeStreamCountingUsage(
+			stream,
+			"tool-probe",
+			this._nextProbeUsageReportId(model, "read-task"),
+		);
+		return this._messageHasToolCallWithStringArgument(message, "read", "path", path);
 	}
 
 	private async _runNativeEchoToolProbeTrial(model: Model<Api>, token: string): Promise<boolean> {
@@ -1775,7 +1847,12 @@ export class AgentSession {
 			},
 			{ textToolCallProtocol: false, maxRetries: 0, temperature: 0, maxTokens: 256 },
 		);
-		return this._messageHasToolCallWithStringArgument(await stream.result(), "echo", "data", token);
+		const message = await this._resolveProbeStreamCountingUsage(
+			stream,
+			"tool-probe",
+			this._nextProbeUsageReportId(model, "echo"),
+		);
+		return this._messageHasToolCallWithStringArgument(message, "echo", "data", token);
 	}
 
 	private async _gradeNativeToolCallingForModel(model: Model<Api>, token: string): Promise<NativeToolProbeGrade> {
@@ -1806,7 +1883,11 @@ export class AgentSession {
 			temperature: 0,
 			maxTokens: 256,
 		});
-		const message = await stream.result();
+		const message = await this._resolveProbeStreamCountingUsage(
+			stream,
+			"text-protocol-calibration",
+			this._nextProbeUsageReportId(model, `text-protocol:${variant}`),
+		);
 		const text = message.content
 			.filter((block): block is TextContent => block.type === "text")
 			.map((block) => block.text)
@@ -1860,6 +1941,14 @@ export class AgentSession {
 		return { status: "failed", attemptedAt, variantsTried };
 	}
 
+	/**
+	 * A PURE READER of the persisted calibration — never calibrates inline and
+	 * never throws out of the prompt path. A model whose flag is on but has no valid current-version
+	 * protocol on record falls back to native for this turn (with a warning pointing at /toolprobe)
+	 * instead of blocking the user's message behind up to 8 inline calibration completions or
+	 * aborting the turn entirely. Calibration now only ever happens off the hot path: explicit
+	 * /toolprobe, or the capability-gate spine's evidence-gated auto-probe.
+	 */
 	private async _ensureTextToolProtocolForActiveModel(): Promise<void> {
 		const model = this.agent.state.model;
 		if (!this._textProtocolFlag(model)) {
@@ -1867,37 +1956,32 @@ export class AgentSession {
 			return;
 		}
 
+		// Force-enable (a global settings override or Model.textToolCallProtocol) wins regardless of
+		// whether this model has ever been graded-probed — that is the point of an explicit override.
+		// Preserve it exactly as before: default to the tool-tag variant, no inline calibration. Only
+		// the graded-evidence path below (flag on solely because of a persisted toolProbe verdict)
+		// needs a valid persisted protocol to proceed.
+		const forceEnabled = this._toolRepairSettings().textProtocol === true || model?.textToolCallProtocol === true;
 		const modelKey = this._modelAdaptationKeyFor(model);
-		if (!modelKey) {
+		if (!modelKey || forceEnabled) {
 			this.agent.textToolCallProtocol = true;
 			return;
 		}
 
 		const profile = this._modelAdaptationStore.get(modelKey);
-		if (profile.protocol?.version === TEXT_TOOL_PROTOCOL_VERSION) {
-			if (profile.protocol.status === "failed") {
-				this.agent.textToolCallProtocol = undefined;
-				throw new Error(
-					`Previous text tool protocol calibration failed for ${modelKey} at ${profile.protocol.attemptedAt}. ` +
-						`Variants tried: ${profile.protocol.variantsTried.join(", ")}. ` +
-						`Run /toolhealth for details or /toolprotocol-reset ${modelKey} to retry calibration.`,
-				);
-			}
+		if (profile.protocol?.version === TEXT_TOOL_PROTOCOL_VERSION && profile.protocol.status !== "failed") {
 			this.agent.textToolCallProtocol = { variant: profile.protocol.variant as TextToolProtocolVariant };
 			return;
 		}
 
-		const result = await this._calibrateTextToolProtocolForModel(model, modelKey, { persistFailure: true });
-		if (result.status === "calibrated") {
-			this.agent.textToolCallProtocol = { variant: result.variant };
-			return;
-		}
-
 		this.agent.textToolCallProtocol = undefined;
-		throw new Error(
-			`Model ${modelKey} cannot follow the text tool protocol after calibration. ` +
-				`Run /toolhealth for details or /toolprotocol-reset ${modelKey} to retry calibration.`,
-		);
+		this._emit({
+			type: "warning",
+			message:
+				profile.protocol?.status === "failed"
+					? `Text tool protocol calibration for ${modelKey} previously failed (variants tried: ${profile.protocol.variantsTried.join(", ")}); falling back to native tool calls this turn. Run /toolprobe ${modelKey} to recalibrate.`
+					: `Text tool protocol for ${modelKey} has no valid calibration on record; falling back to native tool calls this turn. Run /toolprobe ${modelKey} to calibrate.`,
+		});
 	}
 
 	private _modelRef(model: Model<Api>): string {
@@ -2003,10 +2087,23 @@ export class AgentSession {
 		return { results, table: this._formatToolProbeReport(results) };
 	}
 
+	/**
+	 * The text-protocol circuit breaker. Every parse failure (from either the
+	 * live per-completion {@link Agent.onTextToolProtocolParse} callback or the post-hoc detection in
+	 * {@link _recordTextToolProtocolParseOutcomeFromLastAssistant}) gets a throttled one-line
+	 * corrective steer for the next turn. On the 3rd consecutive SAME-SIGNATURE failure — graded
+	 * evidence a model genuinely cannot speak this dialect, not a single bad turn — the breaker also
+	 * demotes the persisted tool-probe verdict to "none" so {@link _textProtocolFlag} reads false next
+	 * turn and native is attempted instead of thrashing on a protocol this model has proven it can't
+	 * follow.
+	 */
 	private _handleTextToolProtocolParse(event: TextToolProtocolParseEvent): void {
 		this._textProtocolParseObservedThisTurn = true;
 		const modelKey = `${event.provider}/${event.model}`;
 		if (event.status === "parsed") return;
+
+		this._maybeInjectTextProtocolCorrectiveSteer(event.variant);
+
 		const signature = `${event.variant}:${event.reason ?? "failed"}`;
 		const previous = this._textProtocolParseFailures.get(modelKey);
 		const repeats = previous?.signature === signature ? previous.repeats + 1 : 1;
@@ -2019,6 +2116,54 @@ export class AgentSession {
 			this.agent.textToolCallProtocol = undefined;
 		}
 		this._textProtocolParseFailures.delete(modelKey);
+
+		// Demote on graded evidence -- TEXT_TOOL_PROTOCOL_PARSE_FAILURE_THRESHOLD identical-signature
+		// parse failures in a row -- rather than thrashing every turn. The fresh probedAt doubles as
+		// the capability-gate spine's auto-probe freshness gate, so this demotion doesn't immediately
+		// trigger a re-probe/re-phone loop.
+		const probedAt = new Date().toISOString();
+		this._modelAdaptationStore.setToolProbe(
+			modelKey,
+			{
+				version: TEXT_TOOL_PROTOCOL_VERSION,
+				status: "none",
+				probedAt,
+				nativeGrade: profile.toolProbe?.nativeGrade,
+				diagnostic: `Text protocol parsing failed ${TEXT_TOOL_PROTOCOL_PARSE_FAILURE_THRESHOLD}x in a row with signature "${signature}".`,
+			},
+			probedAt,
+		);
+		this._emit({
+			type: "warning",
+			message: `Text tool protocol for ${modelKey} stopped parsing after ${TEXT_TOOL_PROTOCOL_PARSE_FAILURE_THRESHOLD} attempts; demoted to native fallback. Run /toolprobe ${modelKey} to recalibrate.`,
+		});
+	}
+
+	/**
+	 * A phone model whose envelope fails to parse gets no corrective guidance today —
+	 * the runaway-loop backstop only trips on repeated PARSED tool-call signatures (agent-loop.ts), so
+	 * an every-turn unparseable-prose model never trips it. Inject a one-line reminder of the envelope
+	 * shape as a nextTurn message, reusing {@link formatVariantEnvelope} so the reminder can never
+	 * drift from the grammar the primer actually teaches. Throttled to the first failure this session
+	 * and then every {@link TEXT_TOOL_PROTOCOL_STEER_INTERVAL}th after — the breaker above is what
+	 * actually demotes a genuinely-failing model at the 3rd same-signature failure; this is guidance,
+	 * not a second counter.
+	 */
+	private _maybeInjectTextProtocolCorrectiveSteer(variant: TextToolProtocolVariant): void {
+		this._textProtocolCorrectiveSteerCount++;
+		if (
+			this._textProtocolCorrectiveSteerCount !== 1 &&
+			this._textProtocolCorrectiveSteerCount % TEXT_TOOL_PROTOCOL_STEER_INTERVAL !== 0
+		) {
+			return;
+		}
+		const reminder = `Reminder: to call a tool, emit exactly this envelope shape: ${formatVariantEnvelope(variant, "TOOL", '{"arg":"value"}')} — no other format is recognized. Reasoning may appear as prose before the envelope, never inside it.`;
+		this.sendCustomMessage(
+			{ customType: "text-protocol-corrective-steer", content: reminder, display: false },
+			{ deliverAs: "nextTurn" },
+		).catch(() => {
+			// Best-effort steer; a failure to queue it must not break parse-failure handling.
+		});
 	}
 
 	private _handleTextToolProtocolValidationOutcome(event: ToolArgumentValidationTelemetryEvent): void {
@@ -2306,12 +2451,12 @@ export class AgentSession {
 				...this._profileFilter.profileDeniedResourceObservations(),
 				...this._profileFilter.getInertExtensionWarnings(),
 				...this._unboundToolGrantWarnings,
-				// G7: auto-built per-turn foreground envelope (observe-only; not enforced). Falls back to a
+				// Auto-built per-turn foreground envelope (observe-only; not enforced). Falls back to a
 				// live preview when no turn has run yet so /context always shows the current scope.
 				formatForegroundEnvelopeObservation(
 					this._currentForegroundEnvelope ?? this._buildForegroundEnvelopeFromState(),
 				),
-				// G14 (ratified): a user disable always beats a profile grant — surface the conflict.
+				// A user disable always beats a profile grant — surface the conflict.
 				...(["tools", "skills", "prompts", "extensions"] as const).flatMap((kind) =>
 					this.settingsManager
 						.getProfileGrantsOverriddenByUserDisable(kind)
@@ -2447,15 +2592,80 @@ export class AgentSession {
 		});
 	}
 
+	/** Anti-loop: true when this model's persisted tool-probe verdict was written within the
+	 * auto-probe freshness window ({@link AUTO_TOOL_PROBE_FRESHNESS_MS}) — covers a very recent
+	 * explicit `/toolprobe` run or a fresh circuit-breaker demote from an EARLIER session, complementing
+	 * the in-session {@link _autoProbedModels} latch. */
+	private _hasFreshToolProbeVerdict(modelKey: string): boolean {
+		const probedAt = this._modelAdaptationStore.get(modelKey).toolProbe?.probedAt;
+		if (!probedAt) return false;
+		const age = Date.now() - new Date(probedAt).getTime();
+		return Number.isFinite(age) && age >= 0 && age < AUTO_TOOL_PROBE_FRESHNESS_MS;
+	}
+
+	/**
+	 * Evidence-gated native→phone auto-probe for a LOCAL/MANAGED model (never cloud — see
+	 * {@link isLocalOrManagedRouterModel}) that just crossed the tool-argument-validation escalation
+	 * threshold — repeated identical validation failures with no successful native call in between,
+	 * which is exactly the graded evidence {@link Agent.onToolValidationEscalation} already requires
+	 * before firing. Runs the SAME probe `/toolprobe` uses ({@link _probeToolCallingForModel}: native
+	 * trials first, so a model that can actually tool-call natively still resolves to verdict
+	 * "native" and is never phoned) entirely OFF the hot path — fired here but never awaited by the
+	 * caller, so a slow or failing probe can never block or throw the user's in-flight turn.
+	 * Anti-loop: skipped when this session already auto-probed this model, or a fresh persisted
+	 * verdict already exists ({@link _hasFreshToolProbeVerdict}) — otherwise a model that keeps
+	 * failing validation every turn would re-fire the (multi-completion) probe every single turn.
+	 */
+	private _maybeAutoProbeOnValidationEscalation(model: Model<Api>): void {
+		const modelKey = this._modelRef(model);
+		if (this._autoProbedModels.has(modelKey) || this._hasFreshToolProbeVerdict(modelKey)) return;
+		this._autoProbedModels.add(modelKey);
+		void this._probeToolCallingForModel(model)
+			.then((result) => {
+				if (this._disposed) return;
+				const detail =
+					result.verdict === "text-protocol"
+						? ` (variant ${result.variant}); it will use the text tool protocol starting next turn`
+						: result.verdict === "none"
+							? " — no working tool-call path was found; run /toolprobe for details"
+							: "; native tool calls stay in use";
+				this._emit({
+					type: "warning",
+					message: `Auto-probed ${modelKey} after repeated native tool-call validation failures: verdict "${result.verdict}"${detail}.`,
+				});
+			})
+			.catch((error) => {
+				if (this._disposed) return;
+				this._emit({
+					type: "warning",
+					message: `Auto-probe for ${modelKey} (triggered by repeated tool-call validation failures) did not complete: ${
+						error instanceof Error ? error.message : String(error)
+					}.`,
+				});
+			});
+	}
+
 	/**
 	 * A repeated identical tool-argument-validation failure crossed the escalation threshold
-	 * ({@link Agent.toolValidationEscalationThreshold}). Previously silent — this is the first host
-	 * handler. Records a session-log/telemetry entry (see {@link TOOL_VALIDATION_ESCALATION_CUSTOM_TYPE})
-	 * and feeds the model router's existing cheap-route escalation gate ({@link
-	 * ModelRouterController.maybeEscalateToolCall}) so a cheap route stuck failing validation on a
-	 * mutating tool escalates to the expensive model, exactly as a beforeToolCall mutating-tool
-	 * escalation already does. Reuses that gate's `shouldEscalateModelRouterTool` thresholds verbatim —
-	 * no new escalation policy.
+	 * ({@link Agent.toolValidationEscalationThreshold}) — the graded evidence the capability-gate
+	 * spine acts on. Always records a session-log/telemetry entry (see {@link
+	 * TOOL_VALIDATION_ESCALATION_CUSTOM_TYPE}), then branches on the failing model's class:
+	 * - LOCAL/MANAGED ({@link isLocalOrManagedRouterModel}, never cloud): the failure is evidence the
+	 *   model may lack native tool-calling, so it fires the evidence-gated native→phone auto-probe
+	 *   off the hot path ({@link _maybeAutoProbeOnValidationEscalation}). Escalating a local model's
+	 *   ROUTER TIER on a tool-call failure would not fix a capability problem, so this branch never
+	 *   touches the model router.
+	 * - CLOUD (known tool-capable): the failure is evidence the routed tier is too weak for this
+	 *   request, so it escalates via {@link ModelRouterController.requestValidationFailureEscalation}
+	 *   — de-conflated from the beforeToolCall mutation gate ({@link
+	 *   ModelRouterController.maybeEscalateToolCall}/`shouldEscalateModelRouterTool`): repeated
+	 *   validation failure is grounds to escalate REGARDLESS of the failing tool's mutation status,
+	 *   so a read-only tool's repeated failure now escalates too (previously a no-op, since the old
+	 *   code reused the mutation gate verbatim for this unrelated signal). Cloud models are never
+	 *   probe-gated or phoned by this handler.
+	 * If the registry can no longer resolve `event.model`/`event.provider` (e.g. the model was
+	 * unregistered mid-session), falls back to the cloud/tier-escalation path — the previously
+	 * existing behavior — rather than silently dropping the signal.
 	 */
 	private _handleToolValidationEscalation(event: ToolValidationEscalationEvent): void {
 		const record: ToolValidationEscalationRecord = {
@@ -2467,7 +2677,13 @@ export class AgentSession {
 			at: new Date().toISOString(),
 		};
 		this.sessionManager.appendCustomEntry(TOOL_VALIDATION_ESCALATION_CUSTOM_TYPE, record);
-		this._modelRouter.maybeEscalateToolCall(event.tool, undefined);
+
+		const model = this._modelRegistry.find(event.provider, event.model);
+		if (model && isLocalOrManagedRouterModel(model)) {
+			this._maybeAutoProbeOnValidationEscalation(model);
+			return;
+		}
+		this._modelRouter.requestValidationFailureEscalation();
 	}
 
 	// =========================================================================
@@ -2844,16 +3060,16 @@ export class AgentSession {
 			disposePersistentShellSession(this._shellSessionKey);
 			this._cancelPrefixWarm();
 			this.agent.abort();
-			// R8: stop any deployment-registered gateway channels / schedulers.
+			// Stop any deployment-registered gateway channels / schedulers.
 			void this._gatewayRegistry.stop().catch(() => {});
-			// Bug #21: abort any in-flight background reflection so it cannot keep spending tokens or
+			// Abort any in-flight background reflection so it cannot keep spending tokens or
 			// write memory/skills against this now-disposed session.
 			this._disposed = true;
 			this._reflectionAbort.abort();
 			// Abort any in-flight research pass or delegated worker for the same reason: a disposed
 			// session must not keep spending tokens or persist evidence against dead state.
 			this._backgroundLanes.abortInFlightLanes();
-			// Bug #20: clear the hooks this session installed on the shared agent so their closures stop
+			// Clear the hooks this session installed on the shared agent so their closures stop
 			// pinning this (deactivated) session — and all its history/maps — in memory if the agent
 			// instance outlives the session.
 			this.agent.afterToolCall = undefined;
@@ -2868,7 +3084,7 @@ export class AgentSession {
 		this._disconnectFromAgent();
 		this._eventListeners = [];
 		// Best-effort memory cleanup (release locks/handles). Write-side onSessionEnd is wired on a
-		// true session-end hook (P3); file-store shutdown is a no-op.
+		// true session-end hook; file-store shutdown is a no-op.
 		void this._memory
 			.getMemoryManager()
 			.shutdownAll()
@@ -2931,7 +3147,7 @@ export class AgentSession {
 		return this.agent.state.tools.map((t) => t.name);
 	}
 
-	/** G7: build a foreground {@link CapabilityEnvelope} from the live session state (active tools, cwd, cost ceiling). */
+	/** Build a foreground {@link CapabilityEnvelope} from the live session state (active tools, cwd, cost ceiling). */
 	private _buildForegroundEnvelopeFromState(): CapabilityEnvelope {
 		return buildForegroundEnvelope({
 			turnIndex: this._turnIndex,
@@ -2942,7 +3158,7 @@ export class AgentSession {
 	}
 
 	/**
-	 * G7: (re)build the foreground envelope for the current turn. Visibility only -- the foreground
+	 * (Re)build the foreground envelope for the current turn. Visibility only -- the foreground
 	 * envelope is NOT enforced this round. Best-effort: never throws into the turn.
 	 */
 	private _refreshForegroundEnvelope(): void {
@@ -2953,7 +3169,7 @@ export class AgentSession {
 		}
 	}
 
-	/** G7: the auto-constructed foreground envelope for the current/most-recent turn (visibility only). */
+	/** The auto-constructed foreground envelope for the current/most-recent turn (visibility only). */
 	getForegroundEnvelope(): CapabilityEnvelope | undefined {
 		return this._currentForegroundEnvelope;
 	}
@@ -3107,7 +3323,7 @@ export class AgentSession {
 
 	/**
 	 * Build a system prompt for a specific tool surface WITHOUT touching the session's base prompt
-	 * state (G4 router-swap; see {@link SystemPromptBuilder.buildSystemPromptForToolNames}).
+	 * state (used by the router's model swap; see {@link SystemPromptBuilder.buildSystemPromptForToolNames}).
 	 */
 	private _buildSystemPromptForToolNames(toolNames: string[]): string {
 		return this._systemPromptBuilder.buildSystemPromptForToolNames(toolNames);
@@ -3279,7 +3495,7 @@ export class AgentSession {
 		// selected/authenticated — can un-register it from _earlyDisplayedUserMessages instead of
 		// leaking the reference forever.
 		let userMessage: AgentMessage | undefined;
-		// R4 effectiveness feedback: remember the recall page + the query so we can score, after the
+		// Effectiveness feedback: remember the recall page + the query so we can score, after the
 		// response, whether the agent actually used the recalled context.
 		let injectedRecall = "";
 		let recallQuery = "";
@@ -3424,7 +3640,7 @@ export class AgentSession {
 			// Build messages array (recall page, then custom message if any, then user message)
 			messages = [];
 
-			// R3: cross-session similarity recall. For a substantive turn, ask the memory providers to
+			// Cross-session similarity recall. For a substantive turn, ask the memory providers to
 			// prefetch a relevant <memory_context> page from past sessions and prepend it as data ahead of
 			// the user message. Best-effort and gated: trivial turns are skipped, and providers return ""
 			// (no page) when nothing is relevant — so it stays net-negative and the GC packs stale pages.
@@ -3436,8 +3652,8 @@ export class AgentSession {
 						recallQuery = expandedText;
 						// Inject as a GC-managed custom context message (role "custom", customType
 						// "memory_context"), NOT a persisted user message: the semantic-memory context-GC packs
-						// stale recall pages so they don't accumulate forever (Bug #7), and the transcript index
-						// only re-reads user/assistant text so recalled snippets can't recirculate (Bug #10).
+						// stale recall pages so they don't accumulate forever, and the transcript index
+						// only re-reads user/assistant text so recalled snippets can't recirculate.
 						messages.push(
 							createCustomMessage("memory_context", recall, false, undefined, new Date().toISOString()),
 						);
@@ -3527,7 +3743,7 @@ export class AgentSession {
 		await this._modelRouter.runRoutedTurn(messages, routedTurnModel, routedTurnRouteDecision);
 		this._recordTextToolProtocolParseOutcomeFromLastAssistant();
 
-		// R4: score whether the agent actually used the recalled context, so the recall gate can adapt.
+		// Score whether the agent actually used the recalled context, so the recall gate can adapt.
 		if (injectedRecall) {
 			const response = this._findLastAssistantMessage();
 			const responseText = response
@@ -4798,17 +5014,17 @@ export class AgentSession {
 		this._memory.registerContextMemoryProvider(provider);
 	}
 
-	/** R8: the gateway/scheduler registry. A deployment runner registers providers and drives start/stop. */
+	/** The gateway/scheduler registry. A deployment runner registers providers and drives start/stop. */
 	get gateways(): GatewayRegistry {
 		return this._gatewayRegistry;
 	}
 
-	/** R8: register a deployment-supplied transport channel (gateway). */
+	/** Register a deployment-supplied transport channel (gateway). */
 	registerChannelProvider(provider: ChannelProvider): void {
 		this._gatewayRegistry.registerChannel(provider);
 	}
 
-	/** R8: register a deployment-supplied job scheduler (cron). */
+	/** Register a deployment-supplied job scheduler (cron). */
 	registerJobScheduler(provider: JobSchedulerProvider): void {
 		this._gatewayRegistry.registerScheduler(provider);
 	}
@@ -5010,7 +5226,32 @@ export class AgentSession {
 	 * Retrieve the latest valid goal state snapshot from the session log.
 	 */
 	getGoalStateSnapshot(): GoalState | undefined {
-		return getLatestGoalStateSnapshot(this.sessionManager.getEntries());
+		return getLatestGoalStateSnapshot(this.sessionManager);
+	}
+
+	/**
+	 * Persist one submitted continuation pass's turn/wall-clock/spend contribution onto the active
+	 * goal's durable cumulative budget (see `GoalState.continuationTurnsUsed` et al.). This is the
+	 * "persistence dep" `GoalLoopController` calls once per pass actually submitted — it, not the
+	 * loop controller, is where USD gets attributed: it reads the session's OWN cumulative model
+	 * spend (`getCostSummary().ownCost` — deliberately excludes worker/subagent spend, which is
+	 * tracked and budgeted separately) and threads that single absolute reading into a
+	 * `record_continuation_budget` event; the pure reducer in `goal-state.ts` derives the delta.
+	 * A no-op when no goal state exists (defensive — in practice this is only ever called right
+	 * after a pass the loop already confirmed was submitted against an active goal).
+	 */
+	recordGoalContinuationPass(pass: { turns: number; wallClockMs: number }): void {
+		const state = this.getGoalStateSnapshot();
+		if (!state) return;
+		const sessionCostUsd = this.getCostSummary().ownCost;
+		const updated = applyGoalEvent(state, {
+			type: "record_continuation_budget",
+			turns: pass.turns,
+			wallClockMs: pass.wallClockMs,
+			sessionCostUsd,
+			now: new Date().toISOString(),
+		});
+		this.saveGoalStateSnapshot(updated);
 	}
 
 	/** Save native task-step state to the active session log. */
@@ -5020,7 +5261,7 @@ export class AgentSession {
 
 	/** Retrieve the latest valid native task-step state from the active session log. */
 	getTaskStepsStateSnapshot(): TaskStepsState | undefined {
-		return getLatestTaskStepsStateSnapshot(this.sessionManager.getEntries());
+		return getLatestTaskStepsStateSnapshot(this.sessionManager);
 	}
 
 	/**
@@ -5048,7 +5289,7 @@ export class AgentSession {
 		return this._backgroundLanes.getLaneRecords();
 	}
 
-	// G3/G8 autonomy telemetry + gate-outcome history live in AutonomyTelemetry (see
+	// Autonomy telemetry + gate-outcome history live in AutonomyTelemetry (see
 	// autonomy-telemetry.ts). These stubs keep the god file's internal call surface stable while the
 	// sink logic and the owned gate-outcome fields live there.
 	private _emitAutonomyTelemetry(event: AutonomyTelemetryEvent): void {
@@ -5059,7 +5300,7 @@ export class AgentSession {
 		this._autonomyTelemetry.recordGateOutcome(outcome);
 	}
 
-	/** G8: copies of the bounded gate-outcome history, oldest first, latest last. */
+	/** Copies of the bounded gate-outcome history, oldest first, latest last. */
 	getGateOutcomeHistory(): GateOutcomeHistoryEntry[] {
 		return this._autonomyTelemetry.getGateOutcomeHistory();
 	}
@@ -5082,7 +5323,7 @@ export class AgentSession {
 
 	getGoalRuntimeSnapshot(settings: GoalRuntimeSnapshotSettings): GoalRuntimeSnapshot {
 		return buildGoalRuntimeSnapshot({
-			entries: this.sessionManager.getEntries(),
+			sessionManager: this.sessionManager,
 			settings,
 		});
 	}
@@ -5142,8 +5383,15 @@ export class AgentSession {
 		return this._goalContinuation.continueGoalOnce(options);
 	}
 
+	/**
+	 * Public entry point for BOTH idle autosteer and manual (`/goal start`, `/goal-continue`)
+	 * continuation. Delegates to {@link BackgroundLaneController.continueGoalLoopExclusive}, the
+	 * single-flight guard that prevents two goal loops from racing to submit prompts through the
+	 * same session (which throws "Agent is already processing" from the second submission). Do not
+	 * call `this._goalContinuation.continueGoalLoop` directly from here — that bypasses the guard.
+	 */
 	async continueGoalLoop(options: GoalContinuationLoopOptions): Promise<GoalContinuationLoopResult> {
-		return this._goalContinuation.continueGoalLoop(options);
+		return this._backgroundLanes.continueGoalLoopExclusive(options);
 	}
 
 	/**
@@ -5155,7 +5403,7 @@ export class AgentSession {
 	}
 
 	/**
-	 * Native end-of-loop reflection pass (R2). Delegates to {@link ReflectionController}; returns null
+	 * Native end-of-loop reflection pass. Delegates to {@link ReflectionController}; returns null
 	 * when the demand gate skips or in a child session.
 	 */
 	async runReflectionPass(input: {

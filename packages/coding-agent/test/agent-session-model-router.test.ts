@@ -761,9 +761,88 @@ describe("AgentSession model router turn selection", () => {
 		expect(decisionData.outcome).toBe("escalated");
 		expect(decisionData.retryModel).toBe("anthropic/claude-sonnet-4-5");
 	});
+
+	it("splices buffered cheap-turn messages back out when the routed run throws", async () => {
+		const persisted: Message[] = [];
+		const persistedDecisions: Array<{ customType: string; data?: unknown }> = [];
+		const priorMessage: AssistantMessage = {
+			role: "assistant",
+			content: [{ type: "text", text: "already-persisted" }],
+			api: expensiveModel.api,
+			provider: expensiveModel.provider,
+			model: expensiveModel.id,
+			stopReason: "stop",
+			timestamp: 0,
+			usage: createUsage(),
+		};
+		const context: RoutedRunContext = {
+			agent: { state: { model: expensiveModel, thinkingLevel: "high", messages: [priorMessage], tools: [] } },
+			deps: {
+				getModel: () => expensiveModel,
+				getAgent: () => context.agent,
+				getSettingsManager: () => ({ getModelCapabilitySettings: () => ({}), getModelRouterSettings: () => ({}) }),
+				getSessionManager: () => ({
+					appendMessage: (message) => {
+						persisted.push(message);
+						return "entry";
+					},
+					appendCustomEntry: (customType, data) => {
+						persistedDecisions.push({ customType, data });
+						return "custom";
+					},
+					appendCustomMessageEntry: () => "custom",
+				}),
+				getBaseSystemPrompt: () => "BASE_PROMPT",
+				buildSystemPromptForToolNames: (names) => `PROMPT_FOR:${names.join(",")}`,
+				runAgentPrompt: async () => {
+					// Simulate the buffered turn writing to LIVE agent.state.messages (as a real routed
+					// turn does) before the provider call throws after retries are exhausted.
+					const buffered: AssistantMessage = {
+						role: "assistant",
+						content: [{ type: "text", text: "never-persisted" }],
+						api: cheapModel.api,
+						provider: cheapModel.provider,
+						model: cheapModel.id,
+						stopReason: "stop",
+						timestamp: 1,
+						usage: createUsage(),
+					};
+					context.agent.state.messages.push(buffered);
+					throw new Error("provider exhausted retries");
+				},
+				refreshCurrentModelFromRegistry: () => {},
+				emitAutonomyTelemetry: () => {},
+			},
+			_resolveModelRouterModelForIntent: () => expensiveModel,
+			runRoutedTurn: routerPrototype.runRoutedTurn,
+		};
+
+		const route: RouteDecision = {
+			tier: "cheap",
+			risk: "read-only",
+			confidence: 0.9,
+			reasonCode: "explain",
+			reasons: [],
+		};
+
+		await expect(routerPrototype.runRoutedTurn.call(context, [], cheapModel, route)).rejects.toThrow(
+			"provider exhausted retries",
+		);
+
+		// Live messages must be rolled back to the pre-turn length: the buffered assistant message was
+		// never flushed to the session, so it must not survive the throw either.
+		expect(context.agent.state.messages).toEqual([priorMessage]);
+		expect(persisted).toHaveLength(0);
+
+		expect(persistedDecisions).toHaveLength(1);
+		expect(persistedDecisions[0].customType).toBe(MODEL_ROUTER_DECISION_CUSTOM_TYPE);
+		const decisionData = persistedDecisions[0].data as ModelRouterDecisionStatus;
+		expect(decisionData.route.tier).toBe("cheap");
+		expect(decisionData.outcome).toBe("failed");
+	});
 });
 
-describe("G4: routed-turn capability tool filtering", () => {
+describe("routed-turn capability tool filtering", () => {
 	it("reduces the tool surface for a small routed model and restores it afterwards", async () => {
 		const sessionTools = [
 			{ name: "read" },
@@ -821,7 +900,7 @@ describe("G4: routed-turn capability tool filtering", () => {
 		expect(toolsDuringRun).not.toContain("goal");
 		expect(toolsDuringRun).not.toContain("delegate");
 		expect(toolsDuringRun).toContain("read");
-		// G4: the system prompt was rebuilt for the FILTERED surface (guidelines for goal/delegate shed)
+		// The system prompt was rebuilt for the FILTERED surface (guidelines for goal/delegate shed)
 		expect(promptDuringRun).toBe(`PROMPT_FOR:${toolsDuringRun.join(",")}`);
 		expect(promptDuringRun).not.toContain("goal");
 		expect(promptDuringRun).not.toContain("delegate");
@@ -885,11 +964,11 @@ describe("G4: routed-turn capability tool filtering", () => {
 		expect(context.agent.state.systemPrompt).toBe("BASE_PROMPT");
 	});
 
-	it("Bug G: does not clobber a mid-turn extension tool/prompt change (setActiveToolsByName) when restoring", async () => {
+	it("does not clobber a mid-turn extension tool/prompt change (setActiveToolsByName) when restoring", async () => {
 		const sessionTools = [{ name: "read" }, { name: "bash" }, { name: "goal" }, { name: "delegate" }];
 		const smallCheap = { ...cheapModel, contextWindow: 8_192 };
 		// What an extension's mid-turn setActiveToolsByName call assigns — brand-new references,
-		// distinct from both the pre-turn session tools AND whatever the G4 swap itself assigned.
+		// distinct from both the pre-turn session tools AND whatever the router's own swap assigned.
 		const extensionTools = [{ name: "read" }, { name: "extension-tool" }];
 		const extensionPrompt = "EXTENSION_OWNED_PROMPT";
 		const context: RoutedRunContext = {
@@ -945,7 +1024,7 @@ describe("G4: routed-turn capability tool filtering", () => {
 	});
 });
 
-describe("speculative executor retry (G16 refinement)", () => {
+describe("speculative executor retry", () => {
 	it("retries once with a brain-refined instruction when the executor turn ran no script", async () => {
 		let retried = false;
 		let runCount = 0;

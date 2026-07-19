@@ -20,9 +20,15 @@
  * owns only the route decision/escalation/tier bookkeeping and delegates every agent turn back through
  * {@link ModelRouterControllerDeps.runAgentPrompt}, so the drive-loop logic is never duplicated. The
  * host keeps a one-line delegation at each call-in: the routing prep + routed-turn entry in
- * _promptUnserialized, the beforeToolCall escalation branch ({@link maybeEscalateToolCall}), the
- * message_end cheap-turn buffering ({@link captureSessionMessage}), the retry-event suppression
- * ({@link isRetryInFlight}), and the public getModelRouterStatus / autonomy-telemetry reads.
+ * _promptUnserialized, the beforeToolCall MUTATION escalation branch ({@link
+ * maybeEscalateToolCall}), the tool-name-agnostic VALIDATION-FAILURE escalation branch for cloud
+ * models ({@link requestValidationFailureEscalation} — de-conflated from the mutation gate; see the
+ * capability-gate spine doctrine, which routes local/managed models to an evidence-gated
+ * native→phone auto-probe on AgentSession instead), the message_end cheap-turn buffering ({@link
+ * captureSessionMessage}), the retry-event suppression ({@link isRetryInFlight}), the public
+ * getModelRouterStatus / autonomy-telemetry reads, and the tier resolution's consultation of the
+ * persisted `/toolprobe` verdict for local/managed tier models ({@link
+ * ModelRouterControllerDeps.getToolProbeVerdict}).
  */
 
 import { createHash } from "node:crypto";
@@ -61,7 +67,8 @@ import {
 	type ModelRouterFailoverStatus,
 	type ModelRouterFitnessStatuses,
 } from "./model-router/status.ts";
-import { shouldEscalateModelRouterTool } from "./model-router/tool-escalation.ts";
+import { isLocalOrManagedRouterModel, shouldEscalateModelRouterTool } from "./model-router/tool-escalation.ts";
+import type { ModelToolProbeVerdict } from "./models/adaptation-store.ts";
 import { FitnessStore } from "./models/fitness-store.ts";
 import type { SettingsManager } from "./settings-manager.ts";
 import {
@@ -159,6 +166,10 @@ export interface ModelRouterControllerDeps {
 	resolveLaneModel(pattern: string): Model<Api> | undefined;
 	/** Fitness-gated reflex-brain model via {@link ContextPipeline} (executor speculative refinement). */
 	resolveCurationModelIfFit(): Model<Api> | undefined;
+	/** Persisted `/toolprobe` verdict for this model (native / text-protocol / none), or undefined
+	 * when never probed. Tier-resolution's consultation reads this ONLY for local/managed models
+	 * ({@link isLocalOrManagedRouterModel}); cloud models never call it. */
+	getToolProbeVerdict(model: Model<Api>): ModelToolProbeVerdict | undefined;
 }
 
 /**
@@ -216,6 +227,26 @@ export class ModelRouterController {
 			};
 		}
 		return undefined;
+	}
+
+	/**
+	 * Tool-name-agnostic validation-failure escalation gate, called from
+	 * AgentSession's onToolValidationEscalation handler for a CLOUD model only — see the
+	 * capability-gate-spine doctrine (local/managed models never reach this method; they trigger
+	 * the evidence-gated native→phone auto-probe instead). Unlike {@link maybeEscalateToolCall} (the
+	 * beforeToolCall MUTATION gate, still governed by `shouldEscalateModelRouterTool`/
+	 * READ_ONLY_TOOL_NAMES — a legitimate, unrelated mutation-blast-radius policy), "the model
+	 * repeatedly cannot construct valid arguments for this tool" is evidence about the MODEL's
+	 * capability, not about the tool's mutation status, so a read-only tool's repeated validation
+	 * failure now escalates a cheap routed turn exactly like a mutating tool's would — takes no
+	 * tool-name/args input at all (unlike maybeEscalateToolCall), because every repeated validation
+	 * failure escalates regardless of which tool or model triggered it. No-op outside an active
+	 * cheap-tier routed turn, same scoping as maybeEscalateToolCall.
+	 */
+	requestValidationFailureEscalation(): void {
+		if (this._activeModelRouterRoute?.tier !== "cheap") return;
+		this._modelRouterEscalationRequested = true;
+		this.deps.getAgent().abort();
 	}
 
 	/**
@@ -402,7 +433,7 @@ export class ModelRouterController {
 			return undefined;
 		}
 
-		// G16 executor lane: a Level-0 DIRECT toolkit hit on a command-shaped prompt routes the
+		// Executor lane: a Level-0 DIRECT toolkit hit on a command-shaped prompt routes the
 		// whole turn to the configured local executor (tool-call-fitness-gated) instead of
 		// spending the frontier model on a one-tool reflex. Ambiguity never routes here — it
 		// stays with the big model and the reflex brain. Deterministic, so the judge is skipped.
@@ -466,6 +497,26 @@ export class ModelRouterController {
 			return undefined;
 		}
 
+		// For a LOCAL/MANAGED tier model (never cloud — isLocalOrManagedRouterModel), honor a
+		// persisted "no working tool-call path" probe verdict. This is an ALWAYS-ON doctrine gate,
+		// deliberately not behind the opt-in `fitnessGate` setting below (cloud fitness gating stays
+		// opt-in; this local/managed check is unconditional, matching the auto-probe that writes
+		// the verdict). "native"/"text-protocol"/unprobed all fall through unchanged: native wins
+		// when it works, the phone lane engages downstream via _textProtocolFlag, and an unprobed
+		// model routes native-first (the evidence loop, not a speculative pre-block).
+		if (isLocalOrManagedRouterModel(resolved.model) && this.deps.getToolProbeVerdict(resolved.model) === "none") {
+			if (decision.tier === "medium") {
+				const fallback = this._resolveExpensiveFallbackRoute(
+					decision,
+					"medium_no_tool_path_fallback_expensive",
+					"Medium model has no working tool-call path (native and text-protocol probe both failed); falling back to expensive model",
+				);
+				if (fallback) return fallback;
+			}
+			this._lastModelRouterSkipReason = `${decision.tier} model has no working tool-call path (native and text-protocol probe both failed)`;
+			return undefined;
+		}
+
 		if (settings.fitnessGate) {
 			const verdict = this._evaluateModelFitness(this._routerSurfaceForTier(decision.tier), resolved.model);
 			if (!verdict.fit) {
@@ -506,7 +557,13 @@ export class ModelRouterController {
 		const resolved = resolveCliModel({ cliModel: pattern, modelRegistry: this.deps.getModelRegistry() });
 		if (!resolved.model) return undefined;
 		if (!this.deps.getModelRegistry().hasConfiguredAuth(resolved.model)) return undefined;
-		return this.deps.isModelExhausted(resolved.model) ? undefined : resolved.model;
+		if (this.deps.isModelExhausted(resolved.model)) return undefined;
+		// (Same doctrine as _resolveModelRouterTurnRoute above): never resolve a local/managed
+		// model the probe has already graded as having no working tool-call path.
+		if (isLocalOrManagedRouterModel(resolved.model) && this.deps.getToolProbeVerdict(resolved.model) === "none") {
+			return undefined;
+		}
+		return resolved.model;
 	}
 
 	/**
@@ -568,7 +625,7 @@ export class ModelRouterController {
 					systemPrompt,
 					messages: [{ role: "user", content: [{ type: "text", text: userPrompt }], timestamp: Date.now() }],
 					model: judgeModel,
-					// Per-tier thinking (R1): judgeThinking overrides the judge's own completion; unset
+					// Per-tier thinking: judgeThinking overrides the judge's own completion; unset
 					// keeps today's "off" (the judge is a cheap classification call by default).
 					thinkingLevel: settings.judgeThinking ?? "off",
 					maxTokens: ROUTE_JUDGE_MAX_OUTPUT_TOKENS,
@@ -676,7 +733,7 @@ export class ModelRouterController {
 		const previousThinkingLevel = agent.state.thinkingLevel;
 		const previousTurnTools = agent.state.tools;
 		const previousSystemPrompt = agent.state.systemPrompt;
-		// G4 swap bookkeeping (Bug G): the exact references the swap below assigns, so the finally can
+		// Swap bookkeeping: the exact references the swap below assigns, so the finally can
 		// restore ONLY what IT put there — never assigned when no swap happens (e.g. a full-class
 		// routed profile).
 		let swappedTools: typeof previousTurnTools | undefined;
@@ -730,13 +787,13 @@ export class ModelRouterController {
 		const thinkingChanged = routedThinkingLevel !== previousThinkingLevel;
 		if (modelChanged || thinkingChanged) {
 			agent.state.model = routedModel;
-			// Per-tier thinking (R1): a configured tier/executor thinking level overrides the inherited
+			// Per-tier thinking: a configured tier/executor thinking level overrides the inherited
 			// session thinking for THIS routed turn only; unset falls back to exactly today's
 			// inherit-and-clamp behavior. Executor routes carry tier "cheap" too, so reasonCode is
 			// checked first — otherwise an executor turn would silently pick up cheapThinking instead.
 			// The judge's own completion has a separate knob (judgeThinking) applied at its call site.
 			agent.state.thinkingLevel = routedThinkingLevel;
-			// G4: capability tool-filtering follows the ROUTED model for the turn. Without this a
+			// Capability tool-filtering follows the ROUTED model for the turn. Without this a
 			// cheap/local routed model inherits the session model's full tool surface — schemas it
 			// pays for on every request and may not be able to drive at all.
 			if (modelChanged) {
@@ -765,7 +822,7 @@ export class ModelRouterController {
 		}
 		try {
 			await this.deps.runAgentPrompt(messages);
-			// Speculative muscle-retry (G16 refinement): an executor-routed turn is a bet that the
+			// Speculative muscle-retry: an executor-routed turn is a bet that the
 			// small model can run the toolkit command directly. If it ends WITHOUT a successful
 			// run_toolkit_script execution, retry ONCE on the same executor with the brain's
 			// refined instruction injected — the brain warms while the muscle tries, so the retry
@@ -832,6 +889,14 @@ export class ModelRouterController {
 			}
 		} catch (error) {
 			thrownError = error;
+			// Mirror the escalation splice above (~:812): a buffered cheap-tier turn never flushes its
+			// live messages to the session on a genuine throw, so agent.state.messages must be rolled
+			// back to the pre-turn length here too — otherwise the never-persisted buffered messages
+			// permanently diverge from the persisted session (same shape as the W1.3 ghost-turn bug,
+			// but on the error path instead of the success/escalation paths).
+			if (bufferRoutedTurn) {
+				agent.state.messages.splice(originalHistoryLength);
+			}
 			if (completedDecision) {
 				completedDecision = { ...completedDecision, outcome: "failed" };
 				this._lastModelRouterDecision = completedDecision;
@@ -843,8 +908,8 @@ export class ModelRouterController {
 			if (modelsAreEqual(agent.state.model, routedModel)) {
 				agent.state.model = previousModel;
 				agent.state.thinkingLevel = previousThinkingLevel;
-				// Symmetric restore (Bug G): undo tools/systemPrompt only if each is STILL the exact
-				// reference/string the G4 swap above assigned (never assigned at all when the routed
+				// Symmetric restore: undo tools/systemPrompt only if each is STILL the exact
+				// reference/string the swap above assigned (never assigned at all when the routed
 				// profile was full-class — then there is nothing to restore either). An extension calling
 				// setActiveToolsByName mid-turn reassigns both to its own values without touching the
 				// model — the model guard above still passes, but that live change is legitimate and must
@@ -893,7 +958,7 @@ export class ModelRouterController {
 
 		if (persistDecision && completedDecision) {
 			persistModelRouterDecision(this.deps.getSessionManager(), completedDecision);
-			// G3: one route event per user-facing routed turn (the escalation retry runs with
+			// One route event per user-facing routed turn (the escalation retry runs with
 			// persistDecision=false, so it does not double-emit). Codes/numbers only — no prompt text.
 			this.deps.emitAutonomyTelemetry({
 				type: AUTONOMY_TELEMETRY_EVENT_TYPES.routeDecision,

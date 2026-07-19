@@ -9,7 +9,6 @@ import {
 	TOOL_VALIDATION_ESCALATION_CUSTOM_TYPE,
 	type ToolValidationEscalationRecord,
 } from "../src/core/agent-session.ts";
-import type { RouteDecision } from "../src/core/autonomy/contracts.ts";
 import { createHarness } from "./suite/harness.ts";
 
 /**
@@ -69,15 +68,22 @@ describe("AgentSession runaway-stop and tool-validation-escalation handlers", ()
 		}
 	});
 
-	it("records a session-log entry and feeds the model router's existing escalation gate", async () => {
+	// The faux harness's default model resolves as local/managed (its baseUrl is a localhost-family
+	// URL — see isLocalOrManagedRouterModel in model-router/tool-escalation.ts), so under the
+	// capability-gate spine (see capability-gate-spine.test.ts for the full doctrine
+	// coverage, including a genuinely cloud-shaped fixture) it routes a validation-escalation event
+	// to the evidence-gated native→phone auto-probe, never to the model router.
+	it("records a session-log entry and, for the local/managed harness model, fires the evidence-gated auto-probe instead of the model router", async () => {
 		const harness = await createHarness();
 		try {
-			const modelRouter = (harness.session as unknown as { _modelRouter: { maybeEscalateToolCall: unknown } })
-				._modelRouter;
-			const escalateSpy = vi.spyOn(
-				modelRouter as { maybeEscalateToolCall: (toolName: string, args: unknown) => unknown },
-				"maybeEscalateToolCall",
-			);
+			const session = harness.session as unknown as {
+				_probeToolCallingForModel: (model: unknown) => Promise<unknown>;
+			};
+			const probeSpy = vi.spyOn(session, "_probeToolCallingForModel").mockResolvedValue({
+				model: `${harness.getModel().provider}/${harness.getModel().id}`,
+				verdict: "none",
+				nativeGrade: "absent",
+			});
 
 			const event: ToolValidationEscalationEvent = {
 				tool: "write",
@@ -88,7 +94,8 @@ describe("AgentSession runaway-stop and tool-validation-escalation handlers", ()
 			};
 			harness.session.agent.onToolValidationEscalation?.(event);
 
-			expect(escalateSpy).toHaveBeenCalledWith("write", undefined);
+			expect(probeSpy).toHaveBeenCalledTimes(1);
+			await probeSpy.mock.results[0]?.value;
 
 			const entries = harness.sessionManager.getEntries();
 			const escalationEntry = entries.find(
@@ -106,24 +113,22 @@ describe("AgentSession runaway-stop and tool-validation-escalation handlers", ()
 		}
 	});
 
-	it("reuses the model router's existing cheap-route escalation policy verbatim (no new policy)", async () => {
+	it("never aborts the turn for a local/managed model's validation failure, regardless of tool mutation status", async () => {
 		const harness = await createHarness();
 		try {
 			const session = harness.session as unknown as {
-				_modelRouter: { _activeModelRouterRoute?: RouteDecision };
+				_probeToolCallingForModel: (model: unknown) => Promise<unknown>;
 			};
-			const cheapRoute: RouteDecision = {
-				tier: "cheap",
-				risk: "read-only",
-				confidence: 1,
-				reasonCode: "test_cheap_route",
-				reasons: [],
-			};
-
-			// A mutating tool ("write") on an active cheap route: shouldEscalateModelRouterTool (already
-			// covered by test/model-router-tool-escalation.test.ts) says escalate, which aborts the run.
-			session._modelRouter._activeModelRouterRoute = cheapRoute;
+			vi.spyOn(session, "_probeToolCallingForModel").mockResolvedValue({
+				model: `${harness.getModel().provider}/${harness.getModel().id}`,
+				verdict: "none",
+				nativeGrade: "absent",
+			});
 			const abortSpy = vi.spyOn(harness.session.agent, "abort");
+
+			// A mutating tool: previously, this reused the beforeToolCall mutation gate and could abort
+			// a cheap-route session. A local/managed model now never touches the model router at all —
+			// it auto-probes instead, so abort is never called from this path.
 			harness.session.agent.onToolValidationEscalation?.({
 				tool: "write",
 				signature: "write::sig-mutating",
@@ -131,11 +136,9 @@ describe("AgentSession runaway-stop and tool-validation-escalation handlers", ()
 				model: harness.getModel().id,
 				provider: harness.getModel().provider,
 			});
-			expect(abortSpy).toHaveBeenCalledTimes(1);
+			expect(abortSpy).not.toHaveBeenCalled();
 
-			// A read-only tool on the same active cheap route: the existing policy does not escalate it,
-			// so this handler must not invent an escalation either.
-			abortSpy.mockClear();
+			// A read-only tool: same outcome — the branch is decided by model class, not tool name.
 			harness.session.agent.onToolValidationEscalation?.({
 				tool: "read",
 				signature: "read::sig-readonly",

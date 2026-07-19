@@ -28,7 +28,13 @@ ws          = { " " | "\t" | "\n" | "\r" } ;
   (which owns JSON tolerance), not a grammar concern.
 - One `<pi:call>...</pi:call>` per tool invocation. Multiple calls in one
   turn = multiple envelopes; the parser extracts each independently in
-  document order.
+  document order. Parallel-call PARITY with native tool calling:
+  if envelopes in a batch overlap (one nested inside a malformed wrapper,
+  most often), the parser salvages the MAXIMUM non-overlapping set of
+  successfully-parsed calls instead of discarding the whole batch — a
+  deterministic interval-scheduling selection, not a heuristic guess. A
+  discarded envelope's byte range is never consumed, so its text survives as
+  prose.
 - Text outside envelopes is prose (reasoning, explanation) and is preserved
   as the assistant's text content — never discarded, never parsed as a call.
 - The tag prefix `pi:` is deliberate: it is vanishingly unlikely to collide
@@ -84,15 +90,30 @@ a tool updates the dictionary for free. Projection rules per tool:
   one call with an array arg (the shape open models most often break),
   chosen from the actual tool set.
 
-The primer header (fixed text):
+The primer header (fixed text, tightened for parity→superiority):
 
 ```
-To use a tool, reply with EXACTLY this and nothing else around it:
-<pi:call name="TOOL">{ "arg": value }</pi:call>
-Rules: arguments is ONE JSON object. Arrays are JSON arrays [ ], never
-quoted strings. Omit optional args you do not need - do not send null.
-Put any reasoning BEFORE the tag, not inside it.
+Text tool-call protocol is enabled. To call a tool, emit an envelope in exactly this shape:
+<pi:call name="TOOL">{"arg":"value"}</pi:call>
+Arguments are one JSON object: double-quoted keys/strings, arrays as [ ] (never
+a quoted string), optional args omitted rather than null.
+Reasoning may appear as prose before an envelope, never inside one.
+Emit several envelopes in one reply to call multiple tools in parallel; each is
+executed and answered on its own.
+Files, directories, searches, edits, writes, and shell commands always go
+through a tool envelope - never type out shell commands, file paths, or
+invented results yourself.
 ```
+
+Two rules were ADDED versus the prior header while the primer got net SHORTER
+(the redundant repeated "never invent/never type out X" negatives collapsed
+into the one line above): reasoning-before-envelope replaces the old absolute
+"no prose" rule (unlocking the call+inline-rationale superset — see the
+parity matrix below), and an explicit parallel-call line teaches the model it
+may emit several envelopes per reply. Richness moved into the GRAMMAR (the
+parser already extracted every envelope in document order); the PRIMER stays
+concise on purpose — see the size-budget test in
+`text-protocol-parity.test.ts`.
 
 ## 4. The dictionary for pi's core tools (generated 2026-07-06)
 

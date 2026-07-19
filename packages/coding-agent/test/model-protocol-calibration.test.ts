@@ -141,50 +141,63 @@ describe("text tool protocol calibration", () => {
 		return { ...created, modelRegistry };
 	}
 
-	it("persists a passing first variant and skips trials in later sessions", async () => {
-		const model = createModel();
-		const requests: CapturedRequest[] = [];
-		const first = await createSession(model, requests, (context) => {
-			if (!isCalibration(context)) return "done";
-			return `<pi:call name="echo">{"data":"${calibrationToken(context)}"}</pi:call>`;
-		});
-		try {
-			await first.session.prompt("real work");
-		} finally {
-			first.session.dispose();
-			first.modelRegistry.unregisterProvider(model.provider);
-		}
+	// Calibration is now off the hot path -- _ensureTextToolProtocolForActiveModel
+	// is a pure reader of the persisted verdict and never calls _calibrateTextToolProtocolForModel
+	// inline. So the ladder that used to run on a model's first `.prompt()` now only runs through the
+	// explicit `/toolprobe` entry point (probeToolCalling), which is what these tests drive. Turn-safety
+	// (no throw, no inline recalibration, the demote-on-evidence breaker, the force-enable default, the
+	// corrective steer) is covered by text-protocol-breaker.test.ts.
 
-		const protocol = ModelAdaptationStore.forAgentDir(agentDir).get(`${model.provider}/${model.id}`).protocol;
-		expect(protocol).toMatchObject({ version: 1, variant: "tool-tag" });
-		const calibrationRequests = requests.filter((request) => isCalibration(request.context));
-		expect(calibrationRequests).toHaveLength(2);
-		expect(calibrationRequests.every((request) => !("tools" in request.context))).toBe(true);
-		const realRequest = requests.at(-1);
-		expect(realRequest?.options?.textToolCallProtocol).toMatchObject({ variant: "tool-tag" });
-		expect(JSON.stringify(realRequest?.context)).not.toContain("pi-calibration-");
-
-		const secondRequests: CapturedRequest[] = [];
-		const second = await createSession(model, secondRequests, (context) => {
-			if (isCalibration(context)) return "unexpected calibration";
-			return "done again";
-		});
-		try {
-			await second.session.prompt("second real work");
-		} finally {
-			second.session.dispose();
-			second.modelRegistry.unregisterProvider(model.provider);
-		}
-
-		expect(secondRequests.filter((request) => isCalibration(request.context))).toHaveLength(0);
-		expect(secondRequests).toHaveLength(1);
-		expect(secondRequests[0]?.options?.textToolCallProtocol).toMatchObject({ variant: "tool-tag" });
-	});
-
-	it("records the simplified variant that first round-trips and uses it for real prompts", async () => {
-		const model = createModel("simplified-model");
+	it("probeToolCalling persists a passing first variant, and real prompts reuse it without recalibrating", async () => {
+		const model = createModel("graded-model", { textProtocol: false });
 		const requests: CapturedRequest[] = [];
 		const created = await createSession(model, requests, (context) => {
+			if (isNativeReadTaskProbe(context)) return "no tools";
+			if (isNativeEchoProbe(context)) return "no tools";
+			if (isCalibration(context)) return `<pi:call name="echo">{"data":"${calibrationToken(context)}"}</pi:call>`;
+			return "done";
+		});
+		try {
+			const report = await created.session.probeToolCalling(`${model.provider}/${model.id}`);
+			expect(report.results).toMatchObject([{ verdict: "text-protocol", variant: "tool-tag" }]);
+
+			const protocol = ModelAdaptationStore.forAgentDir(agentDir).get(`${model.provider}/${model.id}`).protocol;
+			expect(protocol).toMatchObject({ version: 1, variant: "tool-tag" });
+
+			requests.length = 0;
+			await created.session.prompt("real work");
+			expect(requests).toHaveLength(1);
+			expect(requests[0]?.options?.textToolCallProtocol).toMatchObject({ variant: "tool-tag" });
+			expect(requests[0]?.context.systemPrompt ?? "").not.toContain("pi-calibration-");
+
+			// A second, fresh session for the same model reuses the persisted variant too -- no re-probe,
+			// no calibration requests.
+			const secondRequests: CapturedRequest[] = [];
+			const second = await createSession(model, secondRequests, (context) => {
+				if (isCalibration(context)) return "unexpected calibration";
+				return "done again";
+			});
+			try {
+				await second.session.prompt("second real work");
+			} finally {
+				second.session.dispose();
+				second.modelRegistry.unregisterProvider(model.provider);
+			}
+			expect(secondRequests.filter((request) => isCalibration(request.context))).toHaveLength(0);
+			expect(secondRequests).toHaveLength(1);
+			expect(secondRequests[0]?.options?.textToolCallProtocol).toMatchObject({ variant: "tool-tag" });
+		} finally {
+			created.session.dispose();
+			created.modelRegistry.unregisterProvider(model.provider);
+		}
+	});
+
+	it("probeToolCalling records the simplified variant that first round-trips and real prompts use it", async () => {
+		const model = createModel("simplified-model", { textProtocol: false });
+		const requests: CapturedRequest[] = [];
+		const created = await createSession(model, requests, (context) => {
+			if (isNativeReadTaskProbe(context)) return "no tools";
+			if (isNativeEchoProbe(context)) return "no tools";
 			if (!isCalibration(context)) return "done";
 			if ((context.systemPrompt ?? "").includes("<tool_call>")) {
 				return `<tool_call>{"name":"echo","arguments":{"data":"${calibrationToken(context)}"}}</tool_call>`;
@@ -192,81 +205,65 @@ describe("text tool protocol calibration", () => {
 			return "I will call echo with prose instead.";
 		});
 		try {
+			const report = await created.session.probeToolCalling(`${model.provider}/${model.id}`);
+			expect(report.results).toMatchObject([{ verdict: "text-protocol", variant: "tool-call" }]);
+
+			const protocol = ModelAdaptationStore.forAgentDir(agentDir).get(`${model.provider}/${model.id}`).protocol;
+			expect(protocol).toMatchObject({ version: 1, variant: "tool-call" });
+
+			requests.length = 0;
 			await created.session.prompt("real work");
+			expect(requests).toHaveLength(1);
+			expect(requests[0]?.options?.textToolCallProtocol).toMatchObject({ variant: "tool-call" });
+			expect(requests[0]?.context.systemPrompt ?? "").not.toContain("pi-calibration-");
 		} finally {
 			created.session.dispose();
 			created.modelRegistry.unregisterProvider(model.provider);
 		}
-
-		const protocol = ModelAdaptationStore.forAgentDir(agentDir).get(`${model.provider}/${model.id}`).protocol;
-		expect(protocol).toMatchObject({ version: 1, variant: "tool-call" });
-		const realRequest = requests.at(-1);
-		expect(realRequest?.options?.textToolCallProtocol).toMatchObject({ variant: "tool-call" });
-		expect(realRequest?.context.systemPrompt).not.toContain("pi-calibration-");
 	});
 
-	it("persists failed calibration, fast-fails until explicit reset, then reruns the ladder", async () => {
-		const model = createModel("failing-model");
-		const requests: CapturedRequest[] = [];
-		const created = await createSession(model, requests, () => "I cannot emit that envelope.");
-		try {
-			await expect(created.session.prompt("real work")).rejects.toThrow(/cannot follow the text tool protocol/i);
-		} finally {
-			created.session.dispose();
-			created.modelRegistry.unregisterProvider(model.provider);
-		}
-
-		expect(requests.length).toBe(4);
-		expect(requests.every((request) => isCalibration(request.context))).toBe(true);
-		expect(ModelAdaptationStore.forAgentDir(agentDir).get(`${model.provider}/${model.id}`).protocol).toMatchObject({
-			version: 1,
-			status: "failed",
-			variantsTried: ["tool-tag", "tool-call", "fenced-json", "function-xml"],
-		});
-
-		const fastFailRequests: CapturedRequest[] = [];
-		const fastFail = await createSession(model, fastFailRequests, () => "unexpected request");
-		try {
-			await expect(fastFail.session.prompt("real work again")).rejects.toThrow(
-				/previous text tool protocol calibration failed/i,
-			);
-		} finally {
-			fastFail.session.dispose();
-			fastFail.modelRegistry.unregisterProvider(model.provider);
-		}
-		expect(fastFailRequests).toHaveLength(0);
-
-		const resetSession = await createSession(model, [], () => "unused");
-		try {
-			expect(resetSession.session.resetToolProtocolCalibration(`${model.provider}/${model.id}`)).toBe(true);
-		} finally {
-			resetSession.session.dispose();
-			resetSession.modelRegistry.unregisterProvider(model.provider);
-		}
-
-		const resetRequests: CapturedRequest[] = [];
-		const afterReset = await createSession(model, resetRequests, (context) => {
-			if (!isCalibration(context)) return "done";
-			return `<pi:call name="echo">{"data":"${calibrationToken(context)}"}</pi:call>`;
-		});
-		try {
-			await expect(afterReset.session.prompt("real work after reset")).resolves.toBeUndefined();
-		} finally {
-			afterReset.session.dispose();
-			afterReset.modelRegistry.unregisterProvider(model.provider);
-		}
-		expect(resetRequests.filter((request) => isCalibration(request.context))).toHaveLength(2);
-		expect(ModelAdaptationStore.forAgentDir(agentDir).get(`${model.provider}/${model.id}`).protocol).toMatchObject({
-			version: 1,
-			status: "calibrated",
-			variant: "tool-tag",
-		});
-	});
-
-	it("rejects native tool-call content during text-pure calibration trials", async () => {
-		const model = createModel("native-during-text-calibration-model");
+	it("probeToolCalling persists a 'none' verdict (not a stuck 'failed' protocol) when no variant round-trips, and /toolprotocol-reset clears a stale one", async () => {
+		const model = createModel("failing-model", { textProtocol: false });
+		const modelKey = `${model.provider}/${model.id}`;
 		const requests: CapturedRequest[] = [];
 		const created = await createSession(model, requests, (context) => {
+			if (isNativeReadTaskProbe(context)) return "no tools";
+			if (isNativeEchoProbe(context)) return "no tools";
+			return "I cannot emit that envelope.";
+		});
+		try {
+			const report = await created.session.probeToolCalling(`${model.provider}/${model.id}`);
+			expect(report.results).toMatchObject([{ verdict: "none", nativeGrade: "absent" }]);
+			// persistFailure:false on the /toolprobe path (agent-session.ts _probeToolCallingForModel):
+			// a failed calibration ladder never gets stuck as a persisted "failed" protocol -- only the
+			// honest "none" tool-probe verdict is recorded, so a later graded-evidence re-probe is free
+			// to try again rather than fast-failing forever.
+			const store = ModelAdaptationStore.forAgentDir(agentDir);
+			expect(store.get(modelKey).protocol).toBeUndefined();
+			expect(store.get(modelKey).toolProbe).toMatchObject({ status: "none", nativeGrade: "absent" });
+
+			// A stale "failed" protocol record from before this fix (or from direct store manipulation)
+			// is still readable/removable through the existing reset command.
+			store.setProtocol(modelKey, {
+				version: 1,
+				status: "failed",
+				attemptedAt: "2026-07-18T00:00:00.000Z",
+				variantsTried: ["tool-tag", "tool-call", "fenced-json", "function-xml"],
+			});
+			expect(created.session.resetToolProtocolCalibration(modelKey)).toBe(true);
+			expect(store.get(modelKey).protocol).toBeUndefined();
+		} finally {
+			created.session.dispose();
+			created.modelRegistry.unregisterProvider(model.provider);
+		}
+	});
+
+	it("rejects native tool-call content during text-pure calibration trials (via /toolprobe)", async () => {
+		const model = createModel("native-during-text-calibration-model", { textProtocol: false });
+		const requests: CapturedRequest[] = [];
+		const created = await createSession(model, requests, (context) => {
+			if (isNativeReadTaskProbe(context)) return "no tools";
+			if (isNativeEchoProbe(context)) return "no tools";
 			if (!isCalibration(context)) return "done";
 			return [
 				{
@@ -278,20 +275,28 @@ describe("text tool protocol calibration", () => {
 			];
 		});
 		try {
-			await expect(created.session.prompt("real work")).rejects.toThrow(/cannot follow the text tool protocol/i);
+			const report = await created.session.probeToolCalling(`${model.provider}/${model.id}`);
+			expect(report.results).toMatchObject([{ verdict: "none", nativeGrade: "absent" }]);
+
+			const calibrationRequests = requests.filter((request) => isCalibration(request.context));
+			expect(calibrationRequests.length).toBeGreaterThan(0);
+			expect(calibrationRequests.every((request) => !("tools" in request.context))).toBe(true);
 		} finally {
 			created.session.dispose();
 			created.modelRegistry.unregisterProvider(model.provider);
 		}
-
-		expect(requests).toHaveLength(4);
-		expect(requests.every((request) => isCalibration(request.context))).toBe(true);
-		expect(requests.every((request) => !("tools" in request.context))).toBe(true);
 	});
 
-	it("invalidates a calibrated variant after repeated live parse failures and recalibrates once", async () => {
-		const model = createModel("stale-protocol-model");
-		ModelAdaptationStore.forAgentDir(agentDir).setProtocol(`${model.provider}/${model.id}`, {
+	it("demotes a calibrated variant to native after repeated live parse failures, and does not recalibrate inline afterward", async () => {
+		const model = createModel("stale-protocol-model", { textProtocol: false });
+		const modelKey = `${model.provider}/${model.id}`;
+		ModelAdaptationStore.forAgentDir(agentDir).setToolProbe(modelKey, {
+			version: 1,
+			status: "text-protocol",
+			variant: "tool-tag",
+			probedAt: "2026-07-07T00:00:00.000Z",
+		});
+		ModelAdaptationStore.forAgentDir(agentDir).setProtocol(modelKey, {
 			version: 1,
 			status: "calibrated",
 			variant: "tool-tag",
@@ -306,22 +311,23 @@ describe("text tool protocol calibration", () => {
 			await created.session.prompt("first malformed live turn");
 			await created.session.prompt("second malformed live turn");
 			await created.session.prompt("third malformed live turn");
-			expect(
-				ModelAdaptationStore.forAgentDir(agentDir).get(`${model.provider}/${model.id}`).protocol,
-			).toBeUndefined();
 
-			await created.session.prompt("recalibrate before this turn");
+			// The 3rd same-signature failure demotes both records -- the calibrated
+			// protocol is removed AND the tool-probe verdict is downgraded to "none" -- so the model
+			// stays on native instead of the old behavior of recalibrating inline on the very next turn.
+			const store = ModelAdaptationStore.forAgentDir(agentDir);
+			expect(store.get(modelKey).protocol).toBeUndefined();
+			expect(store.get(modelKey).toolProbe).toMatchObject({ status: "none" });
+
+			requests.length = 0;
+			await created.session.prompt("fourth turn stays native");
+			expect(requests).toHaveLength(1);
+			expect(requests.filter((request) => isCalibration(request.context))).toHaveLength(0);
+			expect(requests[0]?.options?.textToolCallProtocol).toBeFalsy();
 		} finally {
 			created.session.dispose();
 			created.modelRegistry.unregisterProvider(model.provider);
 		}
-
-		expect(requests.filter((request) => isCalibration(request.context))).toHaveLength(2);
-		expect(ModelAdaptationStore.forAgentDir(agentDir).get(`${model.provider}/${model.id}`).protocol).toMatchObject({
-			version: 1,
-			status: "calibrated",
-			variant: "tool-tag",
-		});
 	});
 
 	it("does not inject the text primer for the gpt-5.5 native path without an explicit flag", async () => {

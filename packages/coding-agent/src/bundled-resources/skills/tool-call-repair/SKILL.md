@@ -43,20 +43,30 @@ compounding saving is the feature.
    `Check`. Repairs are O(validation-errors), not O(schema): a static
    `(expect, got)` dispatch Map, precompiled matchers, no RegExp/schema
    compilation/JSON parse per call except the one a mode explicitly needs.
-   Bounded work: ≤1 clone, ≤1 transform per failing path, ≤1 sub-Check per
-   transform, exactly 1 whole-args re-Check, no transform loops. A microbench
-   fixture GATES this (clean-path cost within noise of a bare Check). Adding
+   Bounded work: ≤1 clone, ≤1 transform per failing path per pass, ≤1
+   sub-Check per transform, up to `MAX_REPAIR_PASSES` (3, `repairer.ts`)
+   whole-args re-Checks — a BOUNDED multi-pass, not an unconditional loop: one
+   pass's transform can expose an error a fresh validator walk must see (an
+   outer json-string-parse turning a stringified object into a real object
+   whose own property-case/scalar drift was invisible to the first pass's
+   error list). The bound is the deepest TESTED cascade (2 passes) plus one
+   margin layer, not an arbitrary ceiling — test-enforced in
+   `tool-repair.test.ts`. A microbench fixture GATES this (clean-path cost
+   within noise of a bare Check; repaired-path under a fixed budget). Adding
    the 20th failure mode must cost the hot path nothing.
 3. **Shape repairs only.** A repair may reshape what the model clearly meant
    (parse a stringified array, wrap a bare item, drop a null optional). It may
    never invent a value. Required-but-null, cross-field constraints, and
-   semantic errors are relational: bounce those to the model. The current
-   `coercePrimitiveByType` null-to-zero-value behavior violates this rule and
-   is scheduled to be replaced by the catalogue's null rule.
+   semantic errors are relational: bounce those to the model. The catalogue's
+   null rule is what's live (`nullOptionalDrop`/`nullRequiredBounce`): an
+   optional `null` is dropped; a required `null` bounces with feedback.
+   Nothing invents a zero-value substitute.
 4. **Uniform across schema kinds.** TypeBox tools (built-ins) and plain
-   JSON-schema tools (MCP, extensions) get the same repair set. Today
-   built-ins get FEWER repairs (the `hasTypeBoxMetadata` guard skips the
-   coercion pass); that asymmetry is a defect, not a design.
+   JSON-schema tools (MCP, extensions) get the same repair set: every schema
+   compiles through the one TypeBox validator (`validation.ts`'s
+   `getValidator`, shared with `repairer.ts` per decision D3) regardless of
+   its origin, so there is no separate coercion pass that only some tools
+   reach.
 5. **Every repair is check-guarded and ordered.** Apply on a cloned candidate,
    keep only if the sub-check passes. Within string-where-array-expected, try
    JSON.parse FIRST and wrap second, or `'["a","b"]'` becomes `['["a","b"]']`.

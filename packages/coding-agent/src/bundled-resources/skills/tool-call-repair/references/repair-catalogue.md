@@ -41,7 +41,9 @@ Registry mode names currently in force:
 - Repair: delete key P from its parent object.
 - If P IS required: no repair. Bounce. Inventing `0`/`""`/`false` corrupts
   intent (`limit: null` becoming `limit: 0` changes the program). This
-  replaces the current `coercePrimitiveByType` null branches.
+  replaced the old `coercePrimitiveByType` null-to-zero-value branches, which
+  are gone from the code (verified: zero references in `validation.ts` /
+  `tool-repair/`).
 
 ### 2. json-string-encoded array or object (`jsonStringParse`)
 - Error signature: expected array (or object) at P, received string.
@@ -102,11 +104,9 @@ touching the live path.
 |---|---|---|
 | Streaming args assembly | each provider, `parseStreamingJson(partialJson)`; e.g. `openai-completions.ts` ~:382, `anthropic.ts` ~:623 | tolerant partial parse; no repair here (correct; keep providers dumb) |
 | Blind pre-repair hook | `Tool.prepareArguments`, only user: `edit.ts` `prepareEditArguments` ~:95 | legacy special case of repair 2 for `edits` only (comment names GLM-5.1); delete once general repair lands |
-| Scalar conversion | `validation.ts` ~:294 `Value.Convert` | fine (string "5" to 5 etc.) |
-| Custom coercion | `validation.ts` `coerceWithJsonSchema` ~:205 | runs ONLY for non-TypeBox schemas (`hasTypeBoxMetadata` guard ~:297): built-ins get fewer repairs, backwards. null-to-zero-value branches ~:80-145 violate the relational rule |
-| Check + error | `validation.ts` ~:311-323 | per-path errors + received args; does NOT echo expected schema fragment |
+| Check + error | `validation.ts` `validateToolArguments` ~:409-467, `getValidator` ~:97 | ONE TypeBox-compiled validator per schema regardless of origin (D5: the old ad-hoc `coerceWithJsonSchema`/`coerceWithUnionSchema`/`Value.Convert` coercion layer and its `hasTypeBoxMetadata` non-TypeBox-only guard are gone from the code — grep confirms zero references); per-path errors + received args feed `analyzer.ts`; does NOT itself echo the expected schema fragment (see gap 3 below) |
 | Failure feedback | `agent-loop.ts` ~:700-704 | validation error becomes error tool result; model-side retry is the only recovery today |
-| Check-guarded pattern precedent | `validation.ts` `coerceWithUnionSchema` ~:193 | clone, coerce, Check; reuse this shape for all repairs |
+| Check-guarded pattern precedent | `repairer.ts` `repairToolArguments` ~:376-420 | clone, transform, sub-Check, keep-iff-passes; every named repair in the registry follows this shape (decision 5) |
 
 ## Adjacent gap backlog (separate items, code-anchored)
 

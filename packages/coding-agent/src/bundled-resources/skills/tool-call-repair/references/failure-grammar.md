@@ -41,8 +41,23 @@ Rules that keep this deterministic and safe:
   stringified array becomes an array, not a wrapped string. Across paths:
   instance-path order. Root property-key casing repair runs before these per-path
   transforms because required-property validator errors do not carry the misspelled key path.
-- **One re-Check.** After all per-path transforms, Check the whole args once.
-  Pass → return repaired; fail → bounce. Never loop transforms.
+- **Bounded multi-pass.** After all per-path transforms, Check the whole args
+  once. Pass → return repaired. Fail → repeat the walk-transform-Check cycle,
+  up to `MAX_REPAIR_PASSES` (3, `repairer.ts`) whole-args re-Checks total;
+  still failing after the bound → bounce. This is a sanctioned BOUNDED loop
+  (decision D1), not the unconditional retry banned elsewhere in this file: a
+  real cascade needs it because one pass's transform can expose an error a
+  fresh validator walk must see — e.g. an outer `jsonStringParse` (mode 2)
+  turns a stringified object into a real object whose OWN properties
+  (`propertyCaseNormalize`, `numberFromString`, ...) were invisible to the
+  first pass's error list, since those errors only exist once the outer
+  string is a real object. Each pass is still O(validation-errors) via the
+  same static dispatch, so total cost across the bound stays small and
+  linear; a microbench (D2) gates the repaired-path budget. The bound is the
+  deepest TESTED cascade (2 passes, the json-string-parse-then-nested-fixture
+  case) plus one margin layer — not an arbitrary ceiling; a test
+  (`tool-repair.test.ts`, "repair multi-pass bound (D1)") fails if any tested
+  cascade needs more passes than the bound allows.
 - Modes 2b and 6–11 are the increment past the original four; each is guard-gated so
   it can only ever turn an invalid call into a valid one, never change a
   valid call (the hot path never reaches them — see Performance).
@@ -119,9 +134,11 @@ The failure grammar only ever runs on ALREADY-FAILED calls. The hot path
    at module load. Nothing in the repair path constructs a RegExp, compiles a
    schema, or parses JSON except the one `JSON.parse` a mode explicitly needs.
 4. **Bounded work.** At most: one clone of args, one transform per failing
-   path, one sub-Check per attempted transform, one whole-args re-Check. No
-   loops over transforms, no backtracking search. Worst case is linear in the
-   number of validation errors, which is itself tiny.
+   path PER PASS, one sub-Check per attempted transform, up to
+   `MAX_REPAIR_PASSES` (3) whole-args re-Checks (decision D1's sanctioned
+   bounded multi-pass — see above; not an unbounded loop, no backtracking
+   search). Worst case is linear in the number of validation errors times the
+   pass bound, both of which are themselves tiny.
 5. **Text protocol only for flagged models.** The parser (R38) runs only when
    a model is configured for text mode; native-tool-call models never invoke
    it. The primer is generated once per session, not per turn.
