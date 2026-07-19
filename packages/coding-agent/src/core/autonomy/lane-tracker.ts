@@ -6,7 +6,7 @@
  * snapshots. Terminal lane records are persisted separately via `session-lane-record.ts`.
  */
 
-export type LaneType = "research" | "worker" | "learning";
+export type LaneType = "research" | "worker" | "learning" | "tmux-worker";
 
 export type LaneTerminalStatus = "succeeded" | "failed" | "canceled" | "timeout" | "budget_exhausted";
 
@@ -24,7 +24,7 @@ export interface LaneRecord {
 	evidenceEntryId?: string;
 }
 
-const LANE_TYPES: readonly string[] = ["research", "worker", "learning"];
+const LANE_TYPES: readonly string[] = ["research", "worker", "learning", "tmux-worker"];
 const TERMINAL_STATUSES: readonly string[] = ["succeeded", "failed", "canceled", "timeout", "budget_exhausted"];
 const LANE_STATUSES: readonly string[] = ["queued", "running", ...TERMINAL_STATUSES];
 

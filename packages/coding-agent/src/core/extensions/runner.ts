@@ -301,6 +301,7 @@ export class ExtensionRunner {
 		this.runtime.registerMemoryProvider = actions.registerMemoryProvider;
 		this.runtime.registerContextMemoryProvider = actions.registerContextMemoryProvider;
 		this.runtime.reportSpawnedUsage = actions.reportSpawnedUsage;
+		this.runtime.reportManagedLane = actions.reportManagedLane;
 
 		// Context actions (required)
 		this.getModel = contextActions.getModel;

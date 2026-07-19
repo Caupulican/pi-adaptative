@@ -1123,6 +1123,31 @@ export interface ResolvedCommand extends RegisteredCommand {
 export type ExtensionHandler<E, R = undefined> = (event: E, ctx: ExtensionContext) => Promise<R | void> | R | void;
 
 /**
+ * Report for an out-of-process managed lane (e.g. a tmux worker) at dispatch or terminal. `laneId` is
+ * a stable identifier the CALLER chooses (e.g. a tmux job id or slug) and reuses unchanged across both
+ * reports of the same lane so the host can correlate dispatch -> terminal; it is distinct from the
+ * internal lane id the host's LaneTracker mints for the tracked record.
+ *
+ * Every field beyond `laneId`/`phase` is a CALLER CLAIM, not independently verified by this report:
+ * `status` is a free-form label (e.g. a tmux job's own "done"/"blocked" marker, or a lifecycle tag like
+ * "dismissed"/"resumed") — the host maps it defensively onto its own terminal-status vocabulary rather
+ * than assuming the caller already speaks it; `changedFiles` and `request` are likewise unverified
+ * (claims-to-review).
+ */
+export interface ManagedLaneEvent {
+	laneId: string;
+	phase: "dispatch" | "terminal";
+	/** Goal this managed lane's work is bound to, if any — tags the tracked lane for goal orchestration. */
+	goalId?: string;
+	status?: string;
+	reasonCode?: string;
+	changedFiles?: readonly string[];
+	/** Caller-supplied context for this report (e.g. `{ turn }` on a follow-up dispatch). Free-form —
+	 * never assume a particular shape host-side. */
+	request?: unknown;
+}
+
+/**
  * ExtensionAPI passed to extension factory functions.
  */
 export interface ExtensionAPI {
@@ -1283,6 +1308,18 @@ export interface ExtensionAPI {
 	 * (retries, duplicate completion events) idempotent.
 	 */
 	reportSpawnedUsage(usage: Usage, opts?: { label?: string; sourceSessionId?: string; reportId?: string }): void;
+
+	/**
+	 * Report an out-of-process managed lane's dispatch or terminal outcome (e.g. a tmux worker) so the
+	 * host's LaneTracker treats it as a first-class lane — visible in `/autonomy` + `delegate_status`,
+	 * holding a reload-quiesce unit while dispatched, and leaving a bounded claim snapshot on terminal.
+	 *
+	 * HONEST TRUST BOUNDARY: this is a report, not a grant of in-process sandboxing — the host is the
+	 * lane-tracking SSOT and only ever records what the extension claims. Call once with
+	 * `phase: "dispatch"` when the out-of-process work starts, and exactly once more with
+	 * `phase: "terminal"` using the SAME `laneId` when it ends.
+	 */
+	reportManagedLane(event: ManagedLaneEvent): void;
 
 	// =========================================================================
 	// Model and Thinking Level
@@ -1572,6 +1609,7 @@ export interface ExtensionActions {
 	registerMemoryProvider: (provider: MemoryProvider) => void;
 	registerContextMemoryProvider: (provider: ContextMemoryProvider) => void;
 	reportSpawnedUsage: (usage: Usage, opts?: { label?: string; sourceSessionId?: string; reportId?: string }) => void;
+	reportManagedLane: (event: ManagedLaneEvent) => void;
 }
 
 /**

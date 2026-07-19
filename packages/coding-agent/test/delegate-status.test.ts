@@ -8,6 +8,7 @@ const tool = createDelegateStatusToolDefinition({
 	getLaneRecords: () => [
 		{ laneId: "worker-1", type: "worker", status: "succeeded", reasonCode: "worker_completed" },
 		{ laneId: "worker-2", type: "worker", status: "running" },
+		{ laneId: "tmux-worker-1", type: "tmux-worker", status: "succeeded", reasonCode: "worker_completed" },
 	],
 	getWorkerResultSnapshots: () => [
 		{
@@ -43,15 +44,25 @@ describe("delegate_status", () => {
 		).toBe("unknown_worker_lane");
 	});
 
-	it("lists only the session's worker lanes", async () => {
+	it("lists in-process worker lanes and out-of-process tmux-worker lanes together", async () => {
 		const result = await tool.execute("call", {}, undefined, undefined, context);
 		const text = result.content
 			.filter((content) => content.type === "text")
 			.map((content) => content.text)
 			.join("\n");
-		expect(text).toContain("workers: 1 running, 0 queued, 1 terminal");
+		expect(text).toContain("workers: 1 running, 0 queued, 2 terminal");
 		expect(text).toContain("worker-1");
 		expect(text).toContain("worker-2");
+		expect(text).toContain("tmux-worker-1");
 		expect(text).not.toContain("worker-foreign");
+	});
+
+	it("inspects a tmux-worker lane by laneId the same as an in-process worker lane", async () => {
+		const result = await tool.execute("call", { laneId: "tmux-worker-1" }, undefined, undefined, context);
+		const text = result.content
+			.filter((content) => content.type === "text")
+			.map((content) => content.text)
+			.join("\n");
+		expect(text).toContain("tmux-worker-1: succeeded (worker_completed)");
 	});
 });

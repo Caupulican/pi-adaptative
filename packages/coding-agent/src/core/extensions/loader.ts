@@ -228,6 +228,7 @@ export function createExtensionRuntime(): ExtensionRuntime {
 		registerMemoryProvider: notInitialized,
 		registerContextMemoryProvider: notInitialized,
 		reportSpawnedUsage: notInitialized,
+		reportManagedLane: notInitialized,
 		flagValues: new Map(),
 		pendingProviderRegistrations: [],
 		assertActive,
@@ -425,6 +426,11 @@ function createExtensionAPI(
 		reportSpawnedUsage(usage, opts) {
 			runtime.assertActive();
 			runtime.reportSpawnedUsage(usage, opts);
+		},
+
+		reportManagedLane(event) {
+			runtime.assertActive();
+			runtime.reportManagedLane(event);
 		},
 
 		setModel(model) {

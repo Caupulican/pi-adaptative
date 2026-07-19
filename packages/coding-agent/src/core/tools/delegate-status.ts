@@ -39,6 +39,12 @@ function isUnreviewed(result: WorkerResult | undefined): boolean {
 	return result?.parentReviewRequired === true && result.parentReviewedAt === undefined;
 }
 
+/** In-process `worker` lanes and out-of-process `tmux-worker` lanes are both delegated work whose
+ * result is an untrusted claim under the same review machinery — surfaced together here. */
+function isDelegatedWorkerLane(record: LaneRecord): boolean {
+	return record.type === "worker" || record.type === "tmux-worker";
+}
+
 function formatRecord(record: LaneRecord, result: WorkerResult | undefined): string {
 	const lines = [`${record.laneId}: ${record.status}${record.reasonCode ? ` (${record.reasonCode})` : ""}`];
 	if (!result) return lines.join("\n");
@@ -100,7 +106,7 @@ export function createDelegateStatusToolDefinition(deps: DelegateStatusDependenc
 				};
 			}
 
-			const records = deps.getLaneRecords().filter((record) => record.type === "worker");
+			const records = deps.getLaneRecords().filter(isDelegatedWorkerLane);
 			const results = new Map(deps.getWorkerResultSnapshots().map((result) => [result.requestId, result]));
 			// Sticky: computed over ALL worker records, not just the recent window below — an
 			// unreviewed mutation must stay visible no matter how much later lane churn buries it.

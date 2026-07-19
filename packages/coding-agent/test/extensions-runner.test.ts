@@ -70,6 +70,7 @@ describe("ExtensionRunner", () => {
 		registerMemoryProvider: () => {},
 		registerContextMemoryProvider: () => {},
 		reportSpawnedUsage: () => {},
+		reportManagedLane: () => {},
 	};
 
 	const extensionContextActions: ExtensionContextActions = {
