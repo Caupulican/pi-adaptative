@@ -978,6 +978,13 @@ export async function landLane(deps: WorktreeSyncEngineDeps, args: LandLaneArgs)
 		}
 		const tipSha = await revParseBranch(deps, ctx.topLevel, lane.branch);
 		if (!tipSha) return { code: "git_error", message: `lane branch '${lane.branch}' has no commits/ref` };
+		if (tipSha === mainShaNow) {
+			// A no-op land would bump the epoch for nothing (notification churn for every lane).
+			return {
+				code: "nothing_to_land",
+				message: `lane '${lane.laneKey}' has no commits beyond main; nothing to land`,
+			};
+		}
 		const ancestry = await runGit(deps, ctx.topLevel, ["merge-base", "--is-ancestor", mainShaNow, tipSha]);
 		if (ancestry.code !== 0) {
 			return {

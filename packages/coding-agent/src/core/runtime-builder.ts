@@ -105,6 +105,9 @@ import { createRunToolkitScriptToolDefinition } from "./tools/run-toolkit-script
 import { createTaskStepsToolDefinition } from "./tools/task-steps.ts";
 import { dispatchTmuxWorker } from "./tools/tmux-dispatch.ts";
 import { createToolDefinitionFromAgentTool } from "./tools/tool-definition-wrapper.ts";
+import { createWorktreeSyncToolDefinition } from "./tools/worktree-sync.ts";
+import { WorktreeLaneGate } from "./worktree-sync/lane-gate.ts";
+import { buildWorktreeSyncEngineDeps, getBoundWorktreeLaneKey } from "./worktree-sync/runtime.ts";
 
 interface ToolDefinitionEntry {
 	definition: ToolDefinition;
@@ -842,6 +845,55 @@ export class RuntimeBuilder {
 				},
 			});
 			this._baseToolDefinitions.set(runToolkitScriptToolDefinition.name, runToolkitScriptToolDefinition);
+
+			// Worktree-sync (opt-in): the closed-action lane workflow tool, plus -- for a session
+			// launched lane-bound (PI_WORKTREE_LANE) -- the G8/G10 lane gate wrapped UNDER the
+			// file-mutation tools (edit/write/bash), so a sync_required lane fails closed with the
+			// exact recovery step rather than relying on prompt compliance.
+			const worktreeSyncSettings = settingsManager.getWorktreeSyncSettings();
+			if (worktreeSyncSettings.enabled) {
+				const worktreeSyncEngineDeps = () =>
+					buildWorktreeSyncEngineDeps({
+						cwd: this.deps.getCwd(),
+						agentDir: this.deps.getAgentDir(),
+						settingsManager: this.deps.getSettingsManager(),
+						sessionId: this.deps.getSessionManager().getSessionId(),
+					});
+				const worktreeSyncToolDefinition = createWorktreeSyncToolDefinition({
+					engineDeps: worktreeSyncEngineDeps,
+					settings: () => this.deps.getSettingsManager().getWorktreeSyncSettings(),
+					boundLaneKey: () => getBoundWorktreeLaneKey(),
+				});
+				this._baseToolDefinitions.set(worktreeSyncToolDefinition.name, worktreeSyncToolDefinition);
+
+				const boundLaneKey = getBoundWorktreeLaneKey();
+				if (boundLaneKey) {
+					const laneGate = new WorktreeLaneGate({
+						laneKey: boundLaneKey,
+						engineDeps: worktreeSyncEngineDeps,
+						policy: () => this.deps.getSettingsManager().getWorktreeSyncSettings().syncPolicy,
+					});
+					for (const gatedToolName of ["edit", "write", "bash"]) {
+						const original = this._baseToolDefinitions.get(gatedToolName);
+						if (!original) continue;
+						this._baseToolDefinitions.set(gatedToolName, {
+							...original,
+							execute: async (toolCallId, params, signal, onUpdate, ctx) => {
+								const bashCommand =
+									gatedToolName === "bash" ? (params as { command?: string } | undefined)?.command : undefined;
+								const check = await laneGate.checkMutation(gatedToolName, bashCommand);
+								if (!check.allowed) {
+									return {
+										content: [{ type: "text" as const, text: check.message }],
+										details: { code: check.code } as never,
+									};
+								}
+								return original.execute(toolCallId, params, signal, onUpdate, ctx);
+							},
+						});
+					}
+				}
+			}
 		}
 
 		const extensionsResult = this.deps.getResourceLoader().getExtensions();

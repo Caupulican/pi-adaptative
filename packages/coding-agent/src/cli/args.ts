@@ -15,6 +15,7 @@ export interface Args {
 	apiKey?: string;
 	systemPrompt?: string;
 	appendSystemPrompt?: string[];
+	worktreeLane?: string;
 	thinking?: ThinkingLevel;
 	continue?: boolean;
 	resume?: boolean;
@@ -99,6 +100,8 @@ export function parseArgs(args: string[]): Args {
 		} else if (arg === "--append-system-prompt" && i + 1 < args.length) {
 			result.appendSystemPrompt = result.appendSystemPrompt ?? [];
 			result.appendSystemPrompt.push(args[++i]);
+		} else if (arg === "--worktree-lane" && i + 1 < args.length) {
+			result.worktreeLane = args[++i];
 		} else if (arg === "--name" || arg === "-n") {
 			if (i + 1 < args.length) {
 				result.name = args[++i];
@@ -260,6 +263,7 @@ ${chalk.bold("Options:")}
   --api-key <key>                API key (defaults to env vars)
   --system-prompt <text>         System prompt (default: coding assistant prompt)
   --append-system-prompt <text>  Append text or file contents to the system prompt (can be used multiple times)
+  --worktree-lane <laneKey>      Bind this session to a worktree-sync lane (sets PI_WORKTREE_LANE; enables the lane gate + epoch watcher)
   --mode <mode>                  Output mode: text (default), json, or rpc
   --print, -p                    Non-interactive mode: process prompt and exit
   --print-usage                  With -p: emit cumulative session usage (one JSON line,

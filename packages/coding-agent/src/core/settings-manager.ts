@@ -275,6 +275,29 @@ export type ResolvedWorkerDelegationSettings = Required<
 > &
 	Pick<WorkerDelegationSettings, "model" | "profile" | "systemPrompt">;
 
+/** Staleness-propagation policy for worktree-sync; see `core/worktree-sync/codes.ts`. */
+export type WorktreeSyncPolicySetting = "on_land_mandatory" | "overlap_mandatory" | "land_time_only";
+
+export interface WorktreeSyncSettings {
+	enabled?: boolean; // default: false -- master switch; off means zero behavior change (tool hidden, no gating)
+	mainBranch?: string; // overrides default-branch resolution (main, then master; never guessed further)
+	syncPolicy?: WorktreeSyncPolicySetting; // default: "on_land_mandatory" -- every land marks every other active lane sync_required
+	gateCommand?: string; // land gate command run in the lane worktree at the exact tip that becomes main (e.g. "npm run check")
+	gate?: "on" | "off"; // default: "on" -- "off" is the owner-level G4 opt-out, recorded per land event
+	gateTimeoutMs?: number; // default: 900000
+	maxLanes?: number; // default: 5 -- active-lane ceiling, matches the <=5-coder orchestration shape
+	worktreesRoot?: string; // overrides the default lane-checkout root (agent-paths worktreesDir)
+}
+
+export type ResolvedWorktreeSyncSettings = Required<
+	Omit<WorktreeSyncSettings, "mainBranch" | "gateCommand" | "worktreesRoot">
+> &
+	Pick<WorktreeSyncSettings, "mainBranch" | "gateCommand" | "worktreesRoot">;
+
+export const DEFAULT_WORKTREE_SYNC_POLICY: WorktreeSyncPolicySetting = "on_land_mandatory";
+export const DEFAULT_WORKTREE_SYNC_GATE_TIMEOUT_MS = 900_000;
+export const DEFAULT_WORKTREE_SYNC_MAX_LANES = 5;
+
 export type LearningPolicyLayer =
 	| "memory"
 	| "skill"
@@ -421,6 +444,7 @@ export interface Settings {
 	autonomy?: AutonomySettings; // Low-config autonomy preset controlling background learning/reflection defaults
 	researchLane?: ResearchLaneSettings; // Opt-in autonomous read-only research lane producing evidence bundles
 	workerDelegation?: WorkerDelegationSettings; // Bounded scout-worker delegation; enabled by default on capable models
+	worktreeSync?: WorktreeSyncSettings; // Opt-in hard-gated worktree-per-lane parallel-work workflow (core/worktree-sync)
 	learningPolicy?: LearningPolicySettings; // Opt-in learning apply policy: proposal-first durable writes with audit/rollback
 	modelCapability?: ModelCapabilitySettings; // Auto-detected small-model tool/lane surface (default: auto)
 	toolkit?: ToolkitSettings; // User's blessed daily-ops script registry for run_toolkit_script
@@ -3253,6 +3277,35 @@ export class SettingsManager {
 		this.globalSettings.researchLane = { ...settings };
 		this.markModified("researchLane");
 		this.save();
+	}
+
+	getWorktreeSyncSettings(): ResolvedWorktreeSyncSettings {
+		const configured = this.settings.worktreeSync ?? {};
+		const resolved: ResolvedWorktreeSyncSettings = {
+			enabled: configured.enabled === true,
+			syncPolicy:
+				configured.syncPolicy === "overlap_mandatory" || configured.syncPolicy === "land_time_only"
+					? configured.syncPolicy
+					: DEFAULT_WORKTREE_SYNC_POLICY,
+			gate: configured.gate === "off" ? "off" : "on",
+			gateTimeoutMs: sanitizeIntegerSetting(
+				configured.gateTimeoutMs,
+				DEFAULT_WORKTREE_SYNC_GATE_TIMEOUT_MS,
+				1000,
+				3_600_000,
+			),
+			maxLanes: sanitizeIntegerSetting(configured.maxLanes, DEFAULT_WORKTREE_SYNC_MAX_LANES, 1, 32),
+		};
+		if (typeof configured.mainBranch === "string" && configured.mainBranch.trim().length > 0) {
+			resolved.mainBranch = configured.mainBranch.trim();
+		}
+		if (typeof configured.gateCommand === "string" && configured.gateCommand.trim().length > 0) {
+			resolved.gateCommand = configured.gateCommand.trim();
+		}
+		if (typeof configured.worktreesRoot === "string" && configured.worktreesRoot.trim().length > 0) {
+			resolved.worktreesRoot = configured.worktreesRoot.trim();
+		}
+		return resolved;
 	}
 
 	getWorkerDelegationSettings(): ResolvedWorkerDelegationSettings {

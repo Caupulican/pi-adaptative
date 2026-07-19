@@ -38,6 +38,7 @@ export type WorktreeSyncCode =
 	| "ff_failed"
 	| "lock_busy"
 	| "lock_takeover"
+	| "nothing_to_land"
 	| "main_mutation_refused"
 	| "lane_unlanded_work"
 	| "worktree_missing"
@@ -220,6 +221,7 @@ export type LandResult =
 			| "gate_failed"
 			| "ff_failed"
 			| "lock_busy"
+			| "nothing_to_land"
 			| "git_error"
 	  >;
 

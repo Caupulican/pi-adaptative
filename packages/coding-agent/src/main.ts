@@ -58,6 +58,7 @@ import {
 import { SettingsManager } from "./core/settings-manager.ts";
 import { printTimings, resetTimings, time } from "./core/timings.ts";
 import { hasProjectTrustInputs, ProjectTrustStore } from "./core/trust-manager.ts";
+import { PI_WORKTREE_LANE_ENV, startWorktreeSyncRuntime } from "./core/worktree-sync/runtime.ts";
 import { runMigrations, showDeprecationWarnings } from "./migrations.ts";
 
 import { handleConfigCommand, handlePackageCommand } from "./package-manager-cli.ts";
@@ -663,6 +664,12 @@ export async function main(args: string[], options?: MainOptions) {
 		}
 	}
 	time("parseArgs");
+	// --worktree-lane is sugar over the cross-process env contract: setting the env here (before
+	// any session/tool construction) makes the flag and a launcher-provided env byte-identical
+	// downstream (RuntimeBuilder's lane gate, the epoch watcher, child processes).
+	if (parsed.worktreeLane) {
+		process.env[PI_WORKTREE_LANE_ENV] = parsed.worktreeLane;
+	}
 	let appMode = resolveAppMode(parsed, process.stdin.isTTY);
 	const shouldTakeOverStdout = appMode !== "interactive";
 	if (shouldTakeOverStdout) {
@@ -888,6 +895,26 @@ export async function main(args: string[], options?: MainOptions) {
 	const { services, session, modelFallbackMessage } = runtime;
 	const { settingsManager, modelRegistry, resourceLoader } = services;
 	configureHttpDispatcher(settingsManager.getHttpIdleTimeoutMs());
+
+	// Worktree-sync session runtime (no-op unless enabled): one startup reconcile pass, plus --
+	// for a lane-bound session -- the epoch watcher that injects a deterministic staleness notice
+	// the moment another lane lands (steer mid-turn, its own turn when idle). Fire-and-forget:
+	// a broken repo state must never block session startup.
+	void startWorktreeSyncRuntime({
+		cwd: sessionManager.getCwd(),
+		agentDir,
+		settingsManager,
+		sessionId: sessionManager.getSessionId(),
+		notify: (text) => {
+			void session.sendCustomMessage(
+				{ customType: "worktree-sync-notice", content: text, display: true },
+				{ triggerTurn: true, deliverAs: "steer" },
+			);
+		},
+		onDiagnostic: (message) => {
+			console.error(chalk.yellow(`Warning: ${message}`));
+		},
+	});
 
 	if (parsed.help) {
 		const extensionFlags = resourceLoader
