@@ -99,6 +99,7 @@ describe("regression #3592: no-builtin-tools keeps extension tools enabled", () 
 			"skill_audit",
 			"skillify",
 			"task_steps",
+			"worktree_sync",
 			"write",
 		]);
 		// The bundled memory provider's `memory` tool is provider-contributed (like extension/SDK
