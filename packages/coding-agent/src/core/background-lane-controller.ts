@@ -375,6 +375,19 @@ export class BackgroundLaneController {
 		return this._laneTracker.getRecords();
 	}
 
+	/**
+	 * Resolve a tracked managed-lane dispatch's internal `LaneTracker` id from the CALLER's own
+	 * `laneId` (the id passed to `recordManagedLane`'s `phase: "dispatch"`, e.g. a reconstructed
+	 * `tmux:jobId:agentId`). A deterministic, non-racy keyed lookup against `_managedLaneDispatches` —
+	 * NOT a `getLaneRecords()` diff — for a caller (e.g. the goal-to-tmux dispatch adapter) that just
+	 * minted the dispatch and needs the internal id `Requirement.boundLaneId`/`inFlightGoalLaneIds`
+	 * actually match. `undefined` once the dispatch has gone terminal (removed from the map) or was
+	 * never tracked.
+	 */
+	resolveManagedLaneId(callerLaneId: string): string | undefined {
+		return this._managedLaneDispatches.get(callerLaneId)?.laneId;
+	}
+
 	/** Live count of active lanes — the real source for AutonomyStatusSnapshot.activeLaneCount. */
 	getActiveLaneCount(): number {
 		return this._laneTracker.getActiveCount();
@@ -410,28 +423,36 @@ export class BackgroundLaneController {
 	 * terminal report for an unknown `laneId` (no matching dispatch tracked) and a duplicate dispatch
 	 * for an already-tracked `laneId` are both safe no-ops — never a double registration, a double
 	 * persisted claim, or a crash.
+	 *
+	 * Returns the minted (`phase: "dispatch"`) or completed (`phase: "terminal"`) LaneRecord for an
+	 * in-process caller that wants the record without a second `getLaneRecords()` read (e.g. a
+	 * faux-bridge test, or the goal-to-tmux dispatch adapter via `resolveManagedLaneId`); `undefined`
+	 * on every no-op path (disposed controller, duplicate dispatch, unknown-laneId terminal). The
+	 * extension-facing `ExtensionActions.reportManagedLane` TYPE stays `=> void` -- that call site is a
+	 * fire-and-forget statement and is unaffected by this return.
 	 */
-	recordManagedLane(event: ManagedLaneEvent): void {
-		if (this.deps.isDisposed()) return;
+	recordManagedLane(event: ManagedLaneEvent): LaneRecord | undefined {
+		if (this.deps.isDisposed()) return undefined;
 		if (event.phase === "dispatch") {
-			if (this._managedLaneDispatches.has(event.laneId)) return;
+			if (this._managedLaneDispatches.has(event.laneId)) return undefined;
 			this._seedLaneHistory();
 			const record = this._laneTracker.start({ type: "tmux-worker", goalId: event.goalId });
 			const deregister = registerInFlightWork(this.deps.getAgentDir(), "lane", `tmux:${record.laneId}`);
 			this._managedLaneDispatches.set(event.laneId, { laneId: record.laneId, deregister });
-			return;
+			return record;
 		}
 
 		const dispatch = this._managedLaneDispatches.get(event.laneId);
-		if (!dispatch) return;
+		if (!dispatch) return undefined;
 		this._managedLaneDispatches.delete(event.laneId);
 		try {
 			const resolvedStatus = resolveManagedLaneTerminalStatus(event.status);
 			const record = this._laneTracker.complete(dispatch.laneId, {
 				status: resolvedStatus,
 				reasonCode: event.reasonCode,
+				costUsd: event.usage?.cost.total,
 			});
-			if (!record) return;
+			if (!record) return undefined;
 			appendLaneRecordSnapshot(this.deps.getSessionManager(), record);
 			const changedFiles = event.changedFiles ? [...event.changedFiles] : [];
 			const review = reviewManagedLaneChangedFiles({
@@ -450,6 +471,7 @@ export class BackgroundLaneController {
 				createdAt: new Date().toISOString(),
 			};
 			this.deps.saveWorkerResultSnapshot(result);
+			return record;
 		} finally {
 			dispatch.deregister();
 		}

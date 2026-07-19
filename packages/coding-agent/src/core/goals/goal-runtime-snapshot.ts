@@ -7,6 +7,7 @@ import { getLatestEvidenceBundleSnapshot } from "../research/session-evidence-bu
 import { getLatestTaskStepsStateSnapshot } from "../tasks/session-task-state.ts";
 import type { TaskStepStatus } from "../tasks/task-state.ts";
 import { evaluateGoalContinuation, type GoalContinuationDecision } from "./goal-continuation-controller.ts";
+import { DEFAULT_GOAL_WORKER_WAIT_MS } from "./goal-continuation-defaults.ts";
 import type { GoalState } from "./goal-state.ts";
 import { getLatestGoalStateSnapshot } from "./session-goal-state.ts";
 
@@ -59,6 +60,19 @@ export function buildGoalRuntimeSnapshot(args: {
 	 * worker-spend overlay, and never changes any OTHER continuation outcome.
 	 */
 	laneRecords?: readonly LaneRecord[];
+	/**
+	 * Current time as an ISO-string factory, threaded into `evaluateGoalContinuation`'s never-hang
+	 * wait-timeout check (`now`/`maxWorkerWaitMs` — see there) alongside `maxWorkerWaitMs` below.
+	 * Defaults to the real wall clock. A factory (not a plain string) so a caller/test can inject a
+	 * fixed clock without freezing global `Date`.
+	 */
+	now?: () => string;
+	/**
+	 * Maximum milliseconds a bound in-flight requirement may wait before the continuation escalates
+	 * to `worker_wait_timeout` instead of `"waiting"` forever (see `evaluateGoalContinuation`).
+	 * Defaults to `DEFAULT_GOAL_WORKER_WAIT_MS`.
+	 */
+	maxWorkerWaitMs?: number;
 }): GoalRuntimeSnapshot {
 	const branchEntries = args.sessionManager.getBranch();
 	let goalState = getLatestGoalStateSnapshot(args.sessionManager);
@@ -95,10 +109,14 @@ export function buildGoalRuntimeSnapshot(args: {
 		goalState = { ...goalState, continuationWorkerSpendUsd: workerSpendUsd };
 	}
 
+	const now = (args.now ?? (() => new Date().toISOString()))();
+	const maxWorkerWaitMs = args.maxWorkerWaitMs ?? DEFAULT_GOAL_WORKER_WAIT_MS;
 	const continuation = evaluateGoalContinuation({
 		state: goalState,
 		settings: { maxStallTurns: args.settings.maxStallTurns },
 		inFlightGoalLaneIds,
+		now,
+		maxWorkerWaitMs,
 	});
 
 	return {

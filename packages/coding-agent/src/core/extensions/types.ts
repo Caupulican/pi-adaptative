@@ -1145,6 +1145,14 @@ export interface ManagedLaneEvent {
 	/** Caller-supplied context for this report (e.g. `{ turn }` on a follow-up dispatch). Free-form —
 	 * never assume a particular shape host-side. */
 	request?: unknown;
+	/**
+	 * Terminal-only usage claim for this managed lane's out-of-process work (e.g. a tmux worker's own
+	 * usage report). ADVISORY, same trust level as every other field on this event — the host attributes
+	 * `usage.cost.total` onto the completed lane's `costUsd` verbatim, with NO re-pricing (the caller's
+	 * model is unknown to the host, so re-pricing is both impossible and unnecessary). Ignored on
+	 * `phase: "dispatch"`.
+	 */
+	usage?: Usage;
 }
 
 /**

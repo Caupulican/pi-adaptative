@@ -4,7 +4,9 @@ import { getModel } from "@caupulican/pi-ai";
 import { describe, expect, it } from "vitest";
 import { AgentSession } from "../src/core/agent-session.ts";
 import { AuthStorage } from "../src/core/auth-storage.ts";
+import type { LaneRecord } from "../src/core/autonomy/lane-tracker.ts";
 import { appendWorkerResultSnapshot } from "../src/core/delegation/session-worker-result.ts";
+import { DEFAULT_GOAL_WORKER_WAIT_MS } from "../src/core/goals/goal-continuation-defaults.ts";
 import { buildGoalRuntimeSnapshot } from "../src/core/goals/goal-runtime-snapshot.ts";
 import { applyGoalEvent, createGoalState } from "../src/core/goals/goal-state.ts";
 import { appendGoalStateSnapshot } from "../src/core/goals/session-goal-state.ts";
@@ -212,6 +214,85 @@ describe("Phase 10B: Goal Runtime Snapshot", () => {
 		expect(snapshot2.latestEvidenceBundle?.query).toBe("q");
 		expect(snapshot2.workerResults[0].summary).toBe("W1");
 		expect(snapshot2.learningDecisions[0].summary).toBe("L1");
+	});
+
+	describe("never-hang wait-timeout wired through buildGoalRuntimeSnapshot", () => {
+		function seedBoundInFlight(sessionManager: SessionManager, boundAt: string) {
+			let state = createGoalState({ goalId: "g1", userGoal: "Task", now: "T0" });
+			state = applyGoalEvent(state, { type: "add_requirement", id: "req-1", text: "Req", now: "T0" });
+			state = applyGoalEvent(state, {
+				type: "dispatch_worker",
+				id: "req-1",
+				instructions: "do it",
+				laneId: "lane-1",
+				now: boundAt,
+			});
+			appendGoalStateSnapshot(sessionManager, state);
+			const laneRecords: LaneRecord[] = [{ laneId: "lane-1", type: "worker", status: "running", goalId: "g1" }];
+			return laneRecords;
+		}
+
+		it("an injected 'now' within the injected maxWorkerWaitMs of boundAt stays 'waiting'", () => {
+			const sessionManager = SessionManager.inMemory();
+			const laneRecords = seedBoundInFlight(sessionManager, "2026-01-01T00:00:00.000Z");
+
+			const snapshot = buildGoalRuntimeSnapshot({
+				sessionManager,
+				settings: { maxStallTurns: 3 },
+				laneRecords,
+				now: () => "2026-01-01T00:30:00.000Z",
+				maxWorkerWaitMs: 60 * 60_000,
+			});
+
+			expect(snapshot.continuation.action).toBe("waiting");
+			expect(snapshot.continuation.reasonCode).toBe("worker_in_flight");
+		});
+
+		it("an injected 'now' past boundAt + maxWorkerWaitMs escalates to action:'ask-user'/reasonCode:'worker_wait_timeout'", () => {
+			const sessionManager = SessionManager.inMemory();
+			const laneRecords = seedBoundInFlight(sessionManager, "2026-01-01T00:00:00.000Z");
+
+			const snapshot = buildGoalRuntimeSnapshot({
+				sessionManager,
+				settings: { maxStallTurns: 3 },
+				laneRecords,
+				now: () => "2026-01-01T02:00:00.000Z",
+				maxWorkerWaitMs: 60 * 60_000,
+			});
+
+			expect(snapshot.continuation.action).toBe("ask-user");
+			expect(snapshot.continuation.reasonCode).toBe("worker_wait_timeout");
+		});
+
+		it("with now/maxWorkerWaitMs omitted, a freshly bound worker waits under the real default (DEFAULT_GOAL_WORKER_WAIT_MS)", () => {
+			const sessionManager = SessionManager.inMemory();
+			const laneRecords = seedBoundInFlight(sessionManager, new Date().toISOString());
+
+			const snapshot = buildGoalRuntimeSnapshot({
+				sessionManager,
+				settings: { maxStallTurns: 3 },
+				laneRecords,
+			});
+
+			expect(snapshot.continuation.action).toBe("waiting");
+			expect(snapshot.continuation.reasonCode).toBe("worker_in_flight");
+			expect(DEFAULT_GOAL_WORKER_WAIT_MS).toBeGreaterThan(0);
+		});
+
+		it("with now/maxWorkerWaitMs omitted, a worker bound well past the real default has already escalated", () => {
+			const sessionManager = SessionManager.inMemory();
+			const staleBoundAt = new Date(Date.now() - DEFAULT_GOAL_WORKER_WAIT_MS - 60_000).toISOString();
+			const laneRecords = seedBoundInFlight(sessionManager, staleBoundAt);
+
+			const snapshot = buildGoalRuntimeSnapshot({
+				sessionManager,
+				settings: { maxStallTurns: 3 },
+				laneRecords,
+			});
+
+			expect(snapshot.continuation.action).toBe("ask-user");
+			expect(snapshot.continuation.reasonCode).toBe("worker_wait_timeout");
+		});
 	});
 
 	it("AgentSession getGoalRuntimeSnapshot returns aggregate using in-memory SessionManager", () => {

@@ -1,4 +1,5 @@
 import type { SessionManager } from "@caupulican/pi-agent-core/node";
+import { SessionManager as InMemorySessionManager } from "@caupulican/pi-agent-core/node";
 import { afterEach, describe, expect, it } from "vitest";
 import type { WorkerResult } from "../src/core/autonomy/contracts.ts";
 import {
@@ -6,6 +7,9 @@ import {
 	type BackgroundLaneControllerDeps,
 	mapManagedLaneTerminalStatus,
 } from "../src/core/background-lane-controller.ts";
+import { buildGoalRuntimeSnapshot } from "../src/core/goals/goal-runtime-snapshot.ts";
+import { applyGoalEvent, createGoalState } from "../src/core/goals/goal-state.ts";
+import { appendGoalStateSnapshot } from "../src/core/goals/session-goal-state.ts";
 import { getInFlightWorkUnits, resetInFlightWorkRegistryForTests } from "../src/core/reload-blockers.ts";
 
 /**
@@ -52,13 +56,15 @@ describe("managed lane host bridge (recordManagedLane)", () => {
 		const agentDir = "/tmp/pi-test-managed-lane-dispatch";
 		const controller = new BackgroundLaneController(buildDeps(agentDir, { goalId: "goal-1" }));
 
-		controller.recordManagedLane({ laneId: "tmux-job-1", phase: "dispatch", goalId: "goal-1" });
+		const returned = controller.recordManagedLane({ laneId: "tmux-job-1", phase: "dispatch", goalId: "goal-1" });
 
 		const records = controller.getLaneRecords();
 		expect(records).toHaveLength(1);
 		expect(records[0]).toMatchObject({ type: "tmux-worker", status: "running", goalId: "goal-1" });
 		// The internal LaneTracker id is distinct from the caller's own laneId.
 		expect(records[0]?.laneId).not.toBe("tmux-job-1");
+		// The minted record is returned to the in-process caller, not just left in getLaneRecords().
+		expect(returned).toEqual(records[0]);
 
 		const units = getInFlightWorkUnits(agentDir);
 		expect(units).toHaveLength(1);
@@ -82,7 +88,7 @@ describe("managed lane host bridge (recordManagedLane)", () => {
 		controller.recordManagedLane({ laneId: "tmux-job-2", phase: "dispatch", goalId: "goal-2" });
 		expect(getInFlightWorkUnits(agentDir)).toHaveLength(1);
 
-		controller.recordManagedLane({
+		const returned = controller.recordManagedLane({
 			laneId: "tmux-job-2",
 			phase: "terminal",
 			status: "succeeded",
@@ -93,6 +99,8 @@ describe("managed lane host bridge (recordManagedLane)", () => {
 		const records = controller.getLaneRecords();
 		expect(records).toHaveLength(1);
 		expect(records[0]).toMatchObject({ status: "succeeded", reasonCode: "worker_completed" });
+		// The completed record is returned to the in-process caller.
+		expect(returned).toEqual(records[0]);
 
 		// Quiesce unit is gone -- no stuck registration across dispatch -> terminal.
 		expect(getInFlightWorkUnits(agentDir)).toEqual([]);
@@ -109,11 +117,14 @@ describe("managed lane host bridge (recordManagedLane)", () => {
 		const agentDir = "/tmp/pi-test-managed-lane-duplicate-dispatch";
 		const controller = new BackgroundLaneController(buildDeps(agentDir));
 
-		controller.recordManagedLane({ laneId: "tmux-job-3", phase: "dispatch" });
-		controller.recordManagedLane({ laneId: "tmux-job-3", phase: "dispatch" });
+		const first = controller.recordManagedLane({ laneId: "tmux-job-3", phase: "dispatch" });
+		const second = controller.recordManagedLane({ laneId: "tmux-job-3", phase: "dispatch" });
 
 		expect(controller.getLaneRecords()).toHaveLength(1);
 		expect(getInFlightWorkUnits(agentDir)).toHaveLength(1);
+		// The minted record is returned once; the duplicate dispatch no-op returns undefined.
+		expect(first).toBeDefined();
+		expect(second).toBeUndefined();
 	});
 
 	it("treats a terminal report for an unknown laneId as a safe no-op", () => {
@@ -128,10 +139,12 @@ describe("managed lane host bridge (recordManagedLane)", () => {
 			}),
 		);
 
-		expect(() =>
-			controller.recordManagedLane({ laneId: "never-dispatched", phase: "terminal", status: "failed" }),
-		).not.toThrow();
+		let returned: unknown;
+		expect(() => {
+			returned = controller.recordManagedLane({ laneId: "never-dispatched", phase: "terminal", status: "failed" });
+		}).not.toThrow();
 
+		expect(returned).toBeUndefined();
 		expect(controller.getLaneRecords()).toEqual([]);
 		expect(getInFlightWorkUnits(agentDir)).toEqual([]);
 		expect(saveCalled).toBe(false);
@@ -164,6 +177,103 @@ describe("managed lane host bridge (recordManagedLane)", () => {
 		expect(controller.getActiveLaneCount()).toBe(0);
 		controller.recordManagedLane({ laneId: "tmux-job-5", phase: "dispatch" });
 		expect(controller.getActiveLaneCount()).toBe(1);
+	});
+
+	it("a terminal event carrying usage attributes usage.cost.total onto the lane's costUsd, advisory and un-repriced", () => {
+		const agentDir = "/tmp/pi-test-managed-lane-usage-cost";
+		const controller = new BackgroundLaneController(buildDeps(agentDir, { goalId: "goal-6" }));
+
+		controller.recordManagedLane({ laneId: "tmux-job-6", phase: "dispatch", goalId: "goal-6" });
+		const returned = controller.recordManagedLane({
+			laneId: "tmux-job-6",
+			phase: "terminal",
+			status: "succeeded",
+			usage: {
+				input: 100,
+				output: 50,
+				cacheRead: 0,
+				cacheWrite: 0,
+				totalTokens: 150,
+				cost: { input: 0.01, output: 0.02, cacheRead: 0, cacheWrite: 0, total: 0.03 },
+			},
+		});
+
+		expect(returned?.costUsd).toBe(0.03);
+		expect(controller.getLaneRecords()[0]?.costUsd).toBe(0.03);
+	});
+
+	it("a terminal event with no usage leaves costUsd unset (advisory, never fabricated)", () => {
+		const agentDir = "/tmp/pi-test-managed-lane-no-usage-cost";
+		const controller = new BackgroundLaneController(buildDeps(agentDir));
+
+		controller.recordManagedLane({ laneId: "tmux-job-7", phase: "dispatch" });
+		const returned = controller.recordManagedLane({ laneId: "tmux-job-7", phase: "terminal", status: "succeeded" });
+
+		expect(returned?.costUsd).toBeUndefined();
+	});
+
+	it("a duplicate terminal report for an already-completed (deregistered) laneId is an idempotent undefined no-op", () => {
+		const agentDir = "/tmp/pi-test-managed-lane-duplicate-terminal";
+		const controller = new BackgroundLaneController(buildDeps(agentDir));
+
+		controller.recordManagedLane({ laneId: "tmux-job-8", phase: "dispatch" });
+		const first = controller.recordManagedLane({ laneId: "tmux-job-8", phase: "terminal", status: "succeeded" });
+		expect(first).toBeDefined();
+
+		const second = controller.recordManagedLane({ laneId: "tmux-job-8", phase: "terminal", status: "succeeded" });
+		expect(second).toBeUndefined();
+		// Idempotent: the lane record itself is unchanged by the redundant terminal report.
+		expect(controller.getLaneRecords()).toHaveLength(1);
+	});
+
+	it("full chain: tmux terminal usage flows through costUsd into buildGoalRuntimeSnapshot's continuationWorkerSpendUsd", () => {
+		const sessionManager = InMemorySessionManager.inMemory();
+		const controller = new BackgroundLaneController({
+			isDisposed: () => false,
+			getSessionId: () => "test-session",
+			getCwd: () => "/repo",
+			getAgentDir: () => "/tmp/pi-test-managed-lane-spend-sum",
+			getSessionManager: () => sessionManager,
+			getGoalStateSnapshot: () => ({ goalId: "goal-9" }) as never,
+			getCapabilityEnvelope: () => undefined,
+			saveWorkerResultSnapshot: () => "worker-result-entry",
+		} as never);
+
+		controller.recordManagedLane({ laneId: "tmux-job-9", phase: "dispatch", goalId: "goal-9" });
+		const dispatchedLaneId = controller.getLaneRecords()[0]?.laneId as string;
+
+		let goalState = createGoalState({ goalId: "goal-9", userGoal: "Ship the thing", now: "T0" });
+		goalState = applyGoalEvent(goalState, { type: "add_requirement", id: "req-1", text: "Req 1", now: "T0" });
+		goalState = applyGoalEvent(goalState, {
+			type: "dispatch_worker",
+			id: "req-1",
+			instructions: "do the thing",
+			laneId: dispatchedLaneId,
+			now: "T1",
+		});
+		appendGoalStateSnapshot(sessionManager, goalState);
+
+		controller.recordManagedLane({
+			laneId: "tmux-job-9",
+			phase: "terminal",
+			status: "succeeded",
+			usage: {
+				input: 100,
+				output: 50,
+				cacheRead: 0,
+				cacheWrite: 0,
+				totalTokens: 150,
+				cost: { input: 0.1, output: 0.2, cacheRead: 0, cacheWrite: 0, total: 0.3 },
+			},
+		});
+
+		const snapshot = buildGoalRuntimeSnapshot({
+			sessionManager,
+			settings: { maxStallTurns: 20 },
+			laneRecords: controller.getLaneRecords(),
+		});
+
+		expect(snapshot.goalState?.continuationWorkerSpendUsd).toBe(0.3);
 	});
 });
 
