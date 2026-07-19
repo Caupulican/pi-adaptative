@@ -48,14 +48,21 @@ export type WorktreeSyncCode =
 /**
  * A refusal/failure outcome. `message` is deterministic text assembled from facts (safe to show a
  * model verbatim); `gitStderr` is bounded raw evidence; `paths` names offending files where the
- * refusal is about specific files (dirty files, conflict markers).
+ * refusal is about specific files (dirty files, conflict markers); `holder` identifies the
+ * integration-lock holder on `lock_busy`.
  */
 export interface WorktreeSyncRefusal<C extends WorktreeSyncCode = WorktreeSyncCode> {
 	code: C;
 	message: string;
 	gitStderr?: string;
 	paths?: string[];
+	holder?: IntegrationLockOwner;
 }
+
+/** Staleness-propagation policy (D9). `on_land_mandatory` is the default: every land marks every
+ * other active lane sync_required. `overlap_mandatory` requires it only on changed-file overlap.
+ * `land_time_only` keeps staleness advisory until the land gate (G3 always enforces). */
+export type WorktreeSyncPolicy = "on_land_mandatory" | "overlap_mandatory" | "land_time_only";
 
 /** One lane registration record (`lanes/<laneKey>.json`). Identity/binding fields ONLY -- git
  * truths (freshness, dirtiness, ahead/behind) are always re-derived live, never stored here. */
@@ -163,4 +170,87 @@ export interface ReconcileSummary {
 
 export type ReconcileResult =
 	| ReconcileSummary
+	| WorktreeSyncRefusal<"not_a_git_repo" | "default_branch_unresolved" | "git_error">;
+
+export type SyncLaneResult =
+	| { code: "sync_clean"; laneKey: string; alreadyFresh: boolean; autoContinued: number }
+	| { code: "sync_conflicts"; laneKey: string; worklist: ConflictWorklist }
+	| WorktreeSyncRefusal<
+			| "not_a_git_repo"
+			| "default_branch_unresolved"
+			| "lane_not_found"
+			| "worktree_missing"
+			| "lane_dirty"
+			| "rebase_in_progress"
+			| "git_error"
+	  >;
+
+export type ContinueSyncResult =
+	| { code: "sync_clean"; laneKey: string; autoContinued: number }
+	| { code: "sync_conflicts"; laneKey: string; worklist: ConflictWorklist }
+	| WorktreeSyncRefusal<
+			| "not_a_git_repo"
+			| "default_branch_unresolved"
+			| "lane_not_found"
+			| "worktree_missing"
+			| "no_rebase_in_progress"
+			| "conflict_markers_present"
+			| "git_error"
+	  >;
+
+export type AbortSyncResult =
+	| { code: "ok"; laneKey: string }
+	| WorktreeSyncRefusal<
+			"not_a_git_repo" | "default_branch_unresolved" | "lane_not_found" | "no_rebase_in_progress" | "git_error"
+	  >;
+
+export type LandResult =
+	| { code: "ok"; laneKey: string; epoch: number; mainSha: string; gate: "passed" | "off" }
+	| WorktreeSyncRefusal<
+			| "not_a_git_repo"
+			| "default_branch_unresolved"
+			| "lane_not_found"
+			| "worktree_missing"
+			| "rebase_in_progress"
+			| "lane_dirty"
+			| "stale_lane"
+			| "hub_missing"
+			| "hub_dirty"
+			| "gate_command_unset"
+			| "gate_failed"
+			| "ff_failed"
+			| "lock_busy"
+			| "git_error"
+	  >;
+
+/** One lane's full status entry: live git facts plus registry identity plus policy derivation. */
+export interface LaneStatusEntry extends LaneFacts {
+	goalId?: string;
+	requirementId?: string;
+	boundLaneId?: string;
+	/** Not fresh: main moved past this lane's base. Derived, never stored. */
+	stale: boolean;
+	/** Stale AND the active policy makes syncing mandatory NOW (G8 gates on this). */
+	syncRequired: boolean;
+	/** Lane-changed files intersecting the last land's changed files (conservatively the whole
+	 * lane-changed list when the epoch's changedPaths were truncated). */
+	overlapWithLastLand: string[];
+}
+
+/** The deterministic full picture (`status` action): everything an agent would otherwise infer
+ * probabilistically from porcelain output, computed mechanically. */
+export interface SyncStatus {
+	code: "ok";
+	mainBranch: string;
+	mainSha: string;
+	epoch: number;
+	hub?: { path: string; clean: boolean };
+	lock: { held: boolean; holder?: IntegrationLockOwner; holderAlive?: boolean };
+	lanes: LaneStatusEntry[];
+	/** One deterministic advisory sentence assembled from the codes above; never model-generated. */
+	advice?: string;
+}
+
+export type SyncStatusResult =
+	| SyncStatus
 	| WorktreeSyncRefusal<"not_a_git_repo" | "default_branch_unresolved" | "git_error">;

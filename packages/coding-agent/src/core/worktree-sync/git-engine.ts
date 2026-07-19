@@ -13,36 +13,49 @@
  *   files requires the explicit discard confirmation, and reconcile only marks orphans.
  */
 
-import { existsSync } from "node:fs";
+import { existsSync, readFileSync } from "node:fs";
 import { hostname as osHostname } from "node:os";
 import { join } from "node:path";
 import { type ExecResult, execCommand } from "../exec.ts";
 import {
+	type AbortSyncResult,
+	type ConflictWorklist,
+	type ConflictWorklistFile,
+	type ContinueSyncResult,
 	type CreateLaneResult,
+	EPOCH_CHANGED_PATHS_CAP,
 	LANE_BRANCH_PREFIX,
+	type LandResult,
 	type LaneFacts,
 	type LaneRegistration,
+	type LaneStatusEntry,
 	type ReconcileResult,
 	type ReleaseLaneResult,
+	type SyncLaneResult,
+	type SyncStatusResult,
+	type WorktreeSyncPolicy,
 	type WorktreeSyncRefusal,
 } from "./codes.ts";
 import {
+	acquireIntegrationLock,
 	appendAuditEvent,
 	defaultIsPidAlive,
 	listLanes,
+	readEpoch,
 	readLane,
 	readLockHolder,
 	releaseIntegrationLock,
 	repoSlug,
 	type SyncStorePaths,
 	syncStorePaths,
+	writeEpoch,
 	writeLane,
 } from "./store.ts";
 
 export type WorktreeSyncExec = (
 	command: string,
 	args: string[],
-	options: { cwd: string; timeout?: number; signal?: AbortSignal; maxBuffer?: number },
+	options: { cwd: string; timeout?: number; signal?: AbortSignal; maxBuffer?: number; env?: NodeJS.ProcessEnv },
 ) => Promise<ExecResult>;
 
 export interface WorktreeSyncEngineOptions {
@@ -65,6 +78,9 @@ export interface WorktreeSyncEngineDeps {
 	sessionId?: string;
 	/** Injectable fs probe for deterministic tests. Default: `existsSync`. */
 	fileExists?: (path: string) => boolean;
+	/** Injectable file reader (conflict-marker scan, rebase progress). Default: `readFileSync`,
+	 * returning undefined on any read error. */
+	readFile?: (path: string) => string | undefined;
 	/** Injectable same-host pid liveness for deterministic tests. */
 	isPidAlive?: (pid: number) => boolean;
 }
@@ -91,6 +107,7 @@ export function createDefaultWorktreeSyncExec(): WorktreeSyncExec {
 			timeout: options.timeout,
 			signal: options.signal,
 			maxBuffer: options.maxBuffer,
+			env: options.env,
 		});
 }
 
@@ -247,21 +264,7 @@ export async function deriveLaneFacts(
 		const status = await runGit(deps, lane.worktreePath, ["status", "--porcelain"]);
 		if (status.code === 0) {
 			dirty = status.stdout.trim().length > 0;
-			const gitPaths = await runGit(deps, lane.worktreePath, [
-				"rev-parse",
-				"--path-format=absolute",
-				"--git-path",
-				"rebase-merge",
-				"--git-path",
-				"rebase-apply",
-			]);
-			if (gitPaths.code === 0) {
-				rebaseInProgress = gitPaths.stdout
-					.split(/\r?\n/)
-					.map((line) => line.trim())
-					.filter(Boolean)
-					.some((path) => fileExists(deps, path));
-			}
+			rebaseInProgress = await isRebaseActive(deps, lane.worktreePath);
 		} else {
 			// The directory exists but is not a usable worktree (e.g. pruned metadata): not present.
 			worktreePresent = false;
@@ -535,4 +538,629 @@ export async function reconcile(deps: WorktreeSyncEngineDeps): Promise<Reconcile
 		at,
 	);
 	return { code: "reconciled", orphanedLaneKeys, reRegisteredLaneKeys, ownerClearedLaneKeys, staleLockReleased };
+}
+
+/** Rebase env for every rebase-driving call: never let git open an editor mid-automation. */
+function rebaseEnv(): NodeJS.ProcessEnv {
+	return { ...process.env, GIT_EDITOR: "true", GIT_SEQUENCE_EDITOR: "true" };
+}
+
+function runGitEnv(deps: WorktreeSyncEngineDeps, cwd: string, args: string[]): Promise<ExecResult> {
+	return deps.exec("git", args, {
+		cwd,
+		timeout: GIT_TIMEOUT_MS,
+		signal: deps.signal,
+		maxBuffer: GIT_MAX_BUFFER,
+		env: rebaseEnv(),
+	});
+}
+
+function readFileMaybe(deps: WorktreeSyncEngineDeps, path: string): string | undefined {
+	if (deps.readFile) return deps.readFile(path);
+	try {
+		return readFileSync(path, "utf-8");
+	} catch {
+		return undefined;
+	}
+}
+
+/** A rebase is in progress iff the worktree's rebase-merge or rebase-apply state dir exists. */
+async function isRebaseActive(deps: WorktreeSyncEngineDeps, worktreePath: string): Promise<boolean> {
+	const gitPaths = await runGit(deps, worktreePath, [
+		"rev-parse",
+		"--path-format=absolute",
+		"--git-path",
+		"rebase-merge",
+		"--git-path",
+		"rebase-apply",
+	]);
+	if (gitPaths.code !== 0) return false;
+	return gitPaths.stdout
+		.split(/\r?\n/)
+		.map((line) => line.trim())
+		.filter(Boolean)
+		.some((path) => fileExists(deps, path));
+}
+
+/** Paths with local modifications (`status --porcelain`), rename targets included. Capped. */
+async function dirtyPaths(deps: WorktreeSyncEngineDeps, worktreePath: string): Promise<string[]> {
+	const status = await runGit(deps, worktreePath, ["status", "--porcelain"]);
+	if (status.code !== 0) return [];
+	return status.stdout
+		.split(/\r?\n/)
+		.filter((line) => line.length > 3)
+		.map((line) => {
+			const path = line.slice(3);
+			const renameArrow = path.indexOf(" -> ");
+			return renameArrow >= 0 ? path.slice(renameArrow + 4) : path;
+		})
+		.slice(0, 100);
+}
+
+async function unmergedFiles(deps: WorktreeSyncEngineDeps, worktreePath: string): Promise<string[]> {
+	const diff = await runGit(deps, worktreePath, ["diff", "--name-only", "--diff-filter=U"]);
+	if (diff.code !== 0) return [];
+	return diff.stdout
+		.split(/\r?\n/)
+		.map((line) => line.trim())
+		.filter(Boolean);
+}
+
+/** Conflict kind per path from `git ls-files -u` index stages (1=base, 2=ours, 3=theirs). */
+async function unmergedKinds(
+	deps: WorktreeSyncEngineDeps,
+	worktreePath: string,
+): Promise<Map<string, ConflictWorklistFile["kind"]>> {
+	const lsFiles = await runGit(deps, worktreePath, ["ls-files", "-u"]);
+	const stagesByPath = new Map<string, Set<string>>();
+	if (lsFiles.code === 0) {
+		for (const line of lsFiles.stdout.split(/\r?\n/)) {
+			const match = line.match(/^\d+ [0-9a-f]+ ([123])\t(.+)$/);
+			if (!match?.[1] || !match[2]) continue;
+			const stages = stagesByPath.get(match[2]) ?? new Set<string>();
+			stages.add(match[1]);
+			stagesByPath.set(match[2], stages);
+		}
+	}
+	const kinds = new Map<string, ConflictWorklistFile["kind"]>();
+	for (const [path, stages] of stagesByPath) {
+		const has = (stage: string) => stages.has(stage);
+		if (has("1") && has("2") && has("3")) kinds.set(path, "both_modified");
+		else if (!has("1") && has("2") && has("3")) kinds.set(path, "both_added");
+		else if (has("1") && !has("2") && has("3")) kinds.set(path, "deleted_by_us");
+		else if (has("1") && has("2") && !has("3")) kinds.set(path, "deleted_by_them");
+		else kinds.set(path, "unknown");
+	}
+	return kinds;
+}
+
+/** Rebase progress ("<done>/<total>") plus the commit the rebase stopped at, from the rebase
+ * state files (merge backend: msgnum/end/stopped-sha; apply backend: next/last). */
+async function rebaseProgress(
+	deps: WorktreeSyncEngineDeps,
+	worktreePath: string,
+): Promise<{ step: string; stoppedAtCommit?: { sha: string; subject: string } }> {
+	const gitPaths = await runGit(deps, worktreePath, [
+		"rev-parse",
+		"--path-format=absolute",
+		"--git-path",
+		"rebase-merge",
+		"--git-path",
+		"rebase-apply",
+	]);
+	let step = "?";
+	let stoppedSha: string | undefined;
+	if (gitPaths.code === 0) {
+		const [mergeDir, applyDir] = gitPaths.stdout
+			.split(/\r?\n/)
+			.map((line) => line.trim())
+			.filter(Boolean);
+		const readCounter = (dir: string | undefined, doneName: string, totalName: string): string | undefined => {
+			if (!dir) return undefined;
+			const done = readFileMaybe(deps, join(dir, doneName))?.trim();
+			const total = readFileMaybe(deps, join(dir, totalName))?.trim();
+			return done && total ? `${done}/${total}` : undefined;
+		};
+		step = readCounter(mergeDir, "msgnum", "end") ?? readCounter(applyDir, "next", "last") ?? "?";
+		stoppedSha = mergeDir ? readFileMaybe(deps, join(mergeDir, "stopped-sha"))?.trim() : undefined;
+	}
+	if (!stoppedSha) return { step };
+	const subject = await runGit(deps, worktreePath, ["log", "-1", "--format=%s", stoppedSha]);
+	return {
+		step,
+		stoppedAtCommit: { sha: stoppedSha, subject: subject.code === 0 ? subject.stdout.trim() : "" },
+	};
+}
+
+/**
+ * Build the structured conflict worklist (G9's input): the agent edits exactly these files, then
+ * calls `continue` -- staging, marker verification, and rebase continuation are harness work.
+ * Files rerere auto-resolved never appear here (they are staged, not unmerged) -- the mechanical
+ * drive loop below continues past fully-replayed stops without involving the agent at all, so
+ * `resolvedByRerere` marks nothing today and is reserved for partial-replay surfacing.
+ */
+async function buildWorklist(
+	deps: WorktreeSyncEngineDeps,
+	worktreePath: string,
+	unmerged: string[],
+): Promise<ConflictWorklist> {
+	const kinds = await unmergedKinds(deps, worktreePath);
+	const progress = await rebaseProgress(deps, worktreePath);
+	return {
+		step: progress.step,
+		...(progress.stoppedAtCommit ? { stoppedAtCommit: progress.stoppedAtCommit } : {}),
+		files: unmerged.map((path) => ({
+			path,
+			kind: kinds.get(path) ?? "unknown",
+			resolvedByRerere: false,
+		})),
+	};
+}
+
+const CONFLICT_MARKER_RE = /^(?:<{7}|={7}|>{7}|\|{7})/m;
+
+/**
+ * Mechanically drive an in-progress rebase forward: finish it, stop at the next REAL conflict
+ * (returning its worklist), auto-continue stops that rerere fully replayed, and skip steps that
+ * provably reduced to nothing (their changes already landed). Bounded; never guesses -- an
+ * unrecognized stop state surfaces as git_error with the evidence.
+ */
+async function driveRebase(
+	deps: WorktreeSyncEngineDeps,
+	ctx: RepoContext,
+	lane: LaneRegistration,
+): Promise<
+	| { code: "sync_clean"; laneKey: string; autoContinued: number }
+	| { code: "sync_conflicts"; laneKey: string; worklist: ConflictWorklist }
+	| WorktreeSyncRefusal<"git_error">
+> {
+	const worktreePath = lane.worktreePath;
+	let autoContinued = 0;
+	for (let iteration = 0; iteration <= 1000; iteration++) {
+		if (!(await isRebaseActive(deps, worktreePath))) {
+			await appendAuditEvent(
+				ctx.paths,
+				{ event: "sync_completed", laneKey: lane.laneKey, autoContinued },
+				nowIso(deps),
+			);
+			return { code: "sync_clean", laneKey: lane.laneKey, autoContinued };
+		}
+		const unmerged = await unmergedFiles(deps, worktreePath);
+		if (unmerged.length > 0) {
+			const worklist = await buildWorklist(deps, worktreePath, unmerged);
+			await appendAuditEvent(
+				ctx.paths,
+				{ event: "sync_conflicts", laneKey: lane.laneKey, step: worklist.step, files: worklist.files.length },
+				nowIso(deps),
+			);
+			return { code: "sync_conflicts", laneKey: lane.laneKey, worklist };
+		}
+		// Stopped with nothing unmerged: rerere fully replayed the resolution (auto-staged via
+		// rerere.autoUpdate) or the step reduced to nothing. Continue mechanically.
+		const cont = await runGitEnv(deps, worktreePath, ["rebase", "--continue"]);
+		autoContinued++;
+		if (cont.code === 0) continue;
+		if ((await unmergedFiles(deps, worktreePath)).length > 0) continue;
+		if (!(await isRebaseActive(deps, worktreePath))) continue;
+		const staged = await runGit(deps, worktreePath, ["diff", "--cached", "--quiet"]);
+		const unstaged = await runGit(deps, worktreePath, ["diff", "--quiet"]);
+		if (staged.code === 0 && unstaged.code === 0) {
+			// Provably-empty step: its changes are already on main. Skipping is the one correct move.
+			const skip = await runGitEnv(deps, worktreePath, ["rebase", "--skip"]);
+			if (skip.code !== 0 && (await isRebaseActive(deps, worktreePath))) {
+				return gitError("git rebase --skip failed on a provably-empty step", skip);
+			}
+			continue;
+		}
+		return gitError("git rebase --continue failed in an unrecognized state", cont);
+	}
+	return {
+		code: "git_error",
+		message: "rebase drive exceeded 1000 mechanical steps; aborting the drive (rebase left in progress)",
+	};
+}
+
+export interface SyncLaneArgs {
+	laneKey: string;
+}
+
+/**
+ * Rebase current main into the lane branch, locally (the awareness half of "perfect sync"; the
+ * land gate is the enforcement half). Pins the main sha it derived so a concurrent land cannot
+ * change this sync's meaning mid-flight (D-pinned-sha). Conflicts leave the rebase in progress
+ * and return a structured worklist; `continueSync` verifies and drives on.
+ */
+export async function syncLane(deps: WorktreeSyncEngineDeps, args: SyncLaneArgs): Promise<SyncLaneResult> {
+	const ctx = await resolveRepoContext(deps);
+	if ("code" in ctx) return ctx;
+	const lane = await readLane(ctx.paths, args.laneKey);
+	if (!lane || lane.status === "released") {
+		return { code: "lane_not_found", message: `no active lane '${args.laneKey}'` };
+	}
+	const facts = await deriveLaneFacts(deps, ctx, lane);
+	if (!facts.worktreePresent) {
+		return { code: "worktree_missing", message: `lane '${lane.laneKey}' checkout missing at ${lane.worktreePath}` };
+	}
+	if (facts.rebaseInProgress) {
+		return {
+			code: "rebase_in_progress",
+			message: `lane '${lane.laneKey}' has a rebase in progress; resolve and call continue, or abort_sync`,
+		};
+	}
+	if (facts.fresh) {
+		return { code: "sync_clean", laneKey: lane.laneKey, alreadyFresh: true, autoContinued: 0 };
+	}
+	if (facts.dirty) {
+		return {
+			code: "lane_dirty",
+			message: `lane '${lane.laneKey}' has uncommitted changes; commit them on the lane branch, then sync`,
+			paths: await dirtyPaths(deps, lane.worktreePath),
+		};
+	}
+
+	await appendAuditEvent(
+		ctx.paths,
+		{ event: "sync_started", laneKey: lane.laneKey, ontoSha: ctx.mainSha },
+		nowIso(deps),
+	);
+	const rebase = await runGitEnv(deps, lane.worktreePath, ["rebase", ctx.mainSha]);
+	if (rebase.code === 0) {
+		await appendAuditEvent(
+			ctx.paths,
+			{ event: "sync_completed", laneKey: lane.laneKey, autoContinued: 0 },
+			nowIso(deps),
+		);
+		return { code: "sync_clean", laneKey: lane.laneKey, alreadyFresh: false, autoContinued: 0 };
+	}
+	if (!(await isRebaseActive(deps, lane.worktreePath))) {
+		return gitError(`git rebase failed to start for lane '${lane.laneKey}'`, rebase);
+	}
+	const driven = await driveRebase(deps, ctx, lane);
+	if (driven.code === "sync_clean") return { ...driven, alreadyFresh: false };
+	return driven;
+}
+
+export interface ContinueSyncArgs {
+	laneKey: string;
+}
+
+/**
+ * G9: verify the agent's conflict resolution mechanically (zero conflict markers by byte-scan --
+ * the agent never self-certifies), stage it, and drive the rebase on. More conflicts return the
+ * next worklist; completion returns sync_clean.
+ */
+export async function continueSync(deps: WorktreeSyncEngineDeps, args: ContinueSyncArgs): Promise<ContinueSyncResult> {
+	const ctx = await resolveRepoContext(deps);
+	if ("code" in ctx) return ctx;
+	const lane = await readLane(ctx.paths, args.laneKey);
+	if (!lane || lane.status === "released") {
+		return { code: "lane_not_found", message: `no active lane '${args.laneKey}'` };
+	}
+	if (!fileExists(deps, lane.worktreePath)) {
+		return { code: "worktree_missing", message: `lane '${lane.laneKey}' checkout missing at ${lane.worktreePath}` };
+	}
+	if (!(await isRebaseActive(deps, lane.worktreePath))) {
+		return { code: "no_rebase_in_progress", message: `lane '${lane.laneKey}' has no rebase in progress; use sync` };
+	}
+
+	const unmerged = await unmergedFiles(deps, lane.worktreePath);
+	const withMarkers = unmerged.filter((path) => {
+		const content = readFileMaybe(deps, join(lane.worktreePath, path));
+		return content !== undefined && CONFLICT_MARKER_RE.test(content);
+	});
+	if (withMarkers.length > 0) {
+		return {
+			code: "conflict_markers_present",
+			message: `${withMarkers.length} file(s) still contain conflict markers; resolve them fully, then continue`,
+			paths: withMarkers,
+		};
+	}
+	if (unmerged.length > 0) {
+		const add = await runGit(deps, lane.worktreePath, ["add", "-A"]);
+		if (add.code !== 0) return gitError("git add -A failed while staging conflict resolutions", add);
+	}
+	const cont = await runGitEnv(deps, lane.worktreePath, ["rebase", "--continue"]);
+	if (cont.code === 0 && !(await isRebaseActive(deps, lane.worktreePath))) {
+		await appendAuditEvent(
+			ctx.paths,
+			{ event: "sync_completed", laneKey: lane.laneKey, autoContinued: 0 },
+			nowIso(deps),
+		);
+		return { code: "sync_clean", laneKey: lane.laneKey, autoContinued: 0 };
+	}
+	return driveRebase(deps, ctx, lane);
+}
+
+export interface AbortSyncArgs {
+	laneKey: string;
+}
+
+/** Abort an in-progress sync rebase: the lane returns to its pre-sync tip -- still stale, and
+ * honestly reported as such by status. */
+export async function abortSync(deps: WorktreeSyncEngineDeps, args: AbortSyncArgs): Promise<AbortSyncResult> {
+	const ctx = await resolveRepoContext(deps);
+	if ("code" in ctx) return ctx;
+	const lane = await readLane(ctx.paths, args.laneKey);
+	if (!lane || lane.status === "released") {
+		return { code: "lane_not_found", message: `no active lane '${args.laneKey}'` };
+	}
+	if (!(await isRebaseActive(deps, lane.worktreePath))) {
+		return { code: "no_rebase_in_progress", message: `lane '${lane.laneKey}' has no rebase in progress` };
+	}
+	const abort = await runGitEnv(deps, lane.worktreePath, ["rebase", "--abort"]);
+	if (abort.code !== 0) return gitError("git rebase --abort failed", abort);
+	await appendAuditEvent(ctx.paths, { event: "sync_aborted", laneKey: lane.laneKey }, nowIso(deps));
+	return { code: "ok", laneKey: lane.laneKey };
+}
+
+export interface LandLaneArgs {
+	laneKey: string;
+	/** "on" runs gateCommand (G4); "off" is the owner-level opt-out, recorded per land event. */
+	gate: "on" | "off";
+	gateCommand?: string;
+	gateTimeoutMs?: number;
+}
+
+const DEFAULT_GATE_TIMEOUT_MS = 900_000;
+
+/**
+ * The land gate -- the ONLY door to main (G1-G7). Serialized under the integration lock; every
+ * precondition is re-derived INSIDE the lock (the compare-and-swap that makes the whole system
+ * race-free: even if every notification failed, a stale lane cannot land). Main only ever moves
+ * by ff-only merge of an already-rebased lane branch; a successful land bumps the epoch and
+ * broadcasts in the same critical section.
+ */
+export async function landLane(deps: WorktreeSyncEngineDeps, args: LandLaneArgs): Promise<LandResult> {
+	const ctx = await resolveRepoContext(deps);
+	if ("code" in ctx) return ctx;
+	const lane = await readLane(ctx.paths, args.laneKey);
+	if (!lane || lane.status === "released") {
+		return { code: "lane_not_found", message: `no active lane '${args.laneKey}'` };
+	}
+	if (args.gate === "on" && !args.gateCommand?.trim()) {
+		return {
+			code: "gate_command_unset",
+			message:
+				'no gate command configured; set worktreeSync.gateCommand (or worktreeSync.gate: "off" as an owner-level opt-out)',
+		};
+	}
+
+	const acquisition = await acquireIntegrationLock(
+		ctx.paths,
+		{
+			pid: deps.pid ?? process.pid,
+			hostname: osHostname(),
+			...(deps.sessionId !== undefined ? { sessionId: deps.sessionId } : {}),
+			laneKey: lane.laneKey,
+		},
+		{
+			now: deps.now,
+			...(deps.isPidAlive
+				? { isPidAlive: (owner) => (deps.isPidAlive as (pid: number) => boolean)(owner.pid) }
+				: {}),
+		},
+	);
+	if (!acquisition.acquired) {
+		return {
+			code: "lock_busy",
+			message: acquisition.holder
+				? `integration lock held by pid ${acquisition.holder.pid}${acquisition.holder.laneKey ? ` (lane '${acquisition.holder.laneKey}')` : ""}; retry after it lands`
+				: "integration lock held; retry shortly",
+			...(acquisition.holder ? { holder: acquisition.holder } : {}),
+		};
+	}
+
+	try {
+		// Everything below happens INSIDE the lock: re-derive, never trust pre-lock derivations.
+		const mainShaNow = await revParseBranch(deps, ctx.topLevel, ctx.mainBranch);
+		if (!mainShaNow) {
+			return { code: "default_branch_unresolved", message: `main branch '${ctx.mainBranch}' vanished mid-land` };
+		}
+		if (!fileExists(deps, lane.worktreePath)) {
+			return {
+				code: "worktree_missing",
+				message: `lane '${lane.laneKey}' checkout missing at ${lane.worktreePath}`,
+			};
+		}
+		if (await isRebaseActive(deps, lane.worktreePath)) {
+			return {
+				code: "rebase_in_progress",
+				message: `lane '${lane.laneKey}' has a rebase in progress; finish (continue) or abort_sync before landing`,
+			};
+		}
+		const laneDirty = await dirtyPaths(deps, lane.worktreePath);
+		if (laneDirty.length > 0) {
+			return {
+				code: "lane_dirty",
+				message: `lane '${lane.laneKey}' has uncommitted changes; commit everything on the lane branch first (G2)`,
+				paths: laneDirty,
+			};
+		}
+		const tipSha = await revParseBranch(deps, ctx.topLevel, lane.branch);
+		if (!tipSha) return { code: "git_error", message: `lane branch '${lane.branch}' has no commits/ref` };
+		const ancestry = await runGit(deps, ctx.topLevel, ["merge-base", "--is-ancestor", mainShaNow, tipSha]);
+		if (ancestry.code !== 0) {
+			return {
+				code: "stale_lane",
+				message: `lane '${lane.laneKey}' does not contain current main (${mainShaNow.slice(0, 12)}); sync first (G3)`,
+			};
+		}
+		if (!ctx.hubPath) {
+			return {
+				code: "hub_missing",
+				message: `main branch '${ctx.mainBranch}' is not checked out in any worktree; landing needs the hub checkout (G5)`,
+			};
+		}
+
+		const changedResult = await runGit(deps, ctx.topLevel, ["diff", "--name-only", `${mainShaNow}..${tipSha}`]);
+		if (changedResult.code !== 0)
+			return gitError("git diff --name-only failed while computing the land set", changedResult);
+		const changed = changedResult.stdout
+			.split(/\r?\n/)
+			.map((line) => line.trim())
+			.filter(Boolean);
+
+		// G6, overlap-based: an ff merge only touches the land's changed files, and git itself
+		// refuses to clobber local modifications -- so the deterministic pre-check refuses exactly
+		// when hub-dirty paths intersect the incoming change set (not on unrelated hub dirt).
+		const hubDirty = await dirtyPaths(deps, ctx.hubPath);
+		const changedSet = new Set(changed);
+		const endangered = hubDirty.filter((path) => changedSet.has(path));
+		if (endangered.length > 0) {
+			return {
+				code: "hub_dirty",
+				message: `hub checkout has local modifications to ${endangered.length} file(s) this land would update; commit/stash them first (G6)`,
+				paths: endangered.slice(0, 50),
+			};
+		}
+
+		if (args.gate === "on") {
+			const gateCommand = (args.gateCommand ?? "").trim();
+			const shell = process.platform === "win32" ? "cmd" : "sh";
+			const shellFlag = process.platform === "win32" ? "/c" : "-c";
+			const gateRun = await deps.exec(shell, [shellFlag, gateCommand], {
+				cwd: lane.worktreePath,
+				timeout: args.gateTimeoutMs ?? DEFAULT_GATE_TIMEOUT_MS,
+				signal: deps.signal,
+				maxBuffer: GIT_MAX_BUFFER,
+			});
+			if (gateRun.code !== 0) {
+				const tail = `${gateRun.stdout}\n${gateRun.stderr}`.trim().slice(-4000);
+				return {
+					code: "gate_failed",
+					message: `gate command failed (exit ${gateRun.code}) at lane tip ${tipSha.slice(0, 12)} (G4)`,
+					gitStderr: tail,
+				};
+			}
+		}
+
+		const ff = await runGit(deps, ctx.hubPath, ["merge", "--ff-only", lane.branch]);
+		if (ff.code !== 0) {
+			// Unreachable by construction (G3 guarantees ff-ability) but checked, never assumed.
+			return gitError(`git merge --ff-only refused for lane '${lane.laneKey}' (G5)`, ff);
+		}
+
+		const previous = await readEpoch(ctx.paths);
+		const epochNumber = (previous?.epoch ?? 0) + 1;
+		const at = nowIso(deps);
+		await writeEpoch(ctx.paths, {
+			epoch: epochNumber,
+			mainSha: tipSha,
+			previousMainSha: mainShaNow,
+			landedLaneKey: lane.laneKey,
+			landedAt: at,
+			changedPaths: changed.slice(0, EPOCH_CHANGED_PATHS_CAP),
+			changedPathsTruncated: changed.length > EPOCH_CHANGED_PATHS_CAP,
+		});
+		await appendAuditEvent(
+			ctx.paths,
+			{
+				event: "epoch_advanced",
+				epoch: epochNumber,
+				laneKey: lane.laneKey,
+				mainSha: tipSha,
+				previousMainSha: mainShaNow,
+				changedFiles: changed.length,
+				gate: args.gate === "on" ? "passed" : "off",
+			},
+			at,
+		);
+		return {
+			code: "ok",
+			laneKey: lane.laneKey,
+			epoch: epochNumber,
+			mainSha: tipSha,
+			gate: args.gate === "on" ? "passed" : "off",
+		};
+	} finally {
+		await releaseIntegrationLock(ctx.paths, { now: deps.now });
+	}
+}
+
+export interface SyncStatusArgs {
+	policy: WorktreeSyncPolicy;
+}
+
+/**
+ * The deterministic full picture (the tool's `status` action): epoch, hub, lock, and per-lane
+ * live facts with the policy derivation (stale / syncRequired / overlap). The `advice` line is
+ * assembled from codes -- never model-generated -- so every agent reads the same situation the
+ * same way.
+ */
+export async function buildSyncStatus(deps: WorktreeSyncEngineDeps, args: SyncStatusArgs): Promise<SyncStatusResult> {
+	const ctx = await resolveRepoContext(deps);
+	if ("code" in ctx) return ctx;
+
+	const epochRecord = await readEpoch(ctx.paths);
+	const epochNumber = epochRecord?.epoch ?? 0;
+	const changedSet = new Set(epochRecord?.changedPaths ?? []);
+	const changedTruncated = epochRecord?.changedPathsTruncated === true;
+
+	const holder = await readLockHolder(ctx.paths);
+	const isAlive =
+		deps.isPidAlive ?? ((pid: number) => defaultIsPidAlive({ pid, hostname: osHostname(), acquiredAt: "" }));
+
+	let hub: { path: string; clean: boolean } | undefined;
+	if (ctx.hubPath) {
+		hub = { path: ctx.hubPath, clean: (await dirtyPaths(deps, ctx.hubPath)).length === 0 };
+	}
+
+	const lanes: LaneStatusEntry[] = [];
+	for (const lane of await listLanes(ctx.paths)) {
+		if (lane.status === "released") continue;
+		const facts = await deriveLaneFacts(deps, ctx, lane);
+		let laneChanged: string[] = [];
+		if (facts.branchSha) {
+			const diff = await runGit(deps, ctx.topLevel, ["diff", "--name-only", `${ctx.mainBranch}...${lane.branch}`]);
+			if (diff.code === 0) {
+				laneChanged = diff.stdout
+					.split(/\r?\n/)
+					.map((line) => line.trim())
+					.filter(Boolean)
+					.slice(0, EPOCH_CHANGED_PATHS_CAP);
+			}
+		}
+		const overlap = changedTruncated ? laneChanged : laneChanged.filter((path) => changedSet.has(path));
+		const stale = !facts.fresh;
+		const syncRequired =
+			stale &&
+			facts.registrationStatus === "active" &&
+			(args.policy === "on_land_mandatory" || (args.policy === "overlap_mandatory" && overlap.length > 0));
+		lanes.push({
+			...facts,
+			...(lane.goalId !== undefined ? { goalId: lane.goalId } : {}),
+			...(lane.requirementId !== undefined ? { requirementId: lane.requirementId } : {}),
+			...(lane.boundLaneId !== undefined ? { boundLaneId: lane.boundLaneId } : {}),
+			stale,
+			syncRequired,
+			overlapWithLastLand: overlap.slice(0, 50),
+		});
+	}
+
+	const inRebase = lanes.filter((lane) => lane.rebaseInProgress).map((lane) => lane.laneKey);
+	const mustSync = lanes.filter((lane) => lane.syncRequired && !lane.rebaseInProgress).map((lane) => lane.laneKey);
+	let advice: string | undefined;
+	if (inRebase.length > 0) {
+		advice = `lane(s) ${inRebase.join(", ")} have a rebase in progress: resolve conflicts and call continue (or abort_sync)`;
+	} else if (mustSync.length > 0) {
+		advice = `lane(s) ${mustSync.join(", ")} must rebase main (epoch ${epochNumber}${epochRecord?.landedLaneKey ? ` landed by ${epochRecord.landedLaneKey}` : ""}): call sync`;
+	} else if (holder) {
+		advice = `integration lock held by pid ${holder.pid}${holder.laneKey ? ` (lane '${holder.laneKey}')` : ""}`;
+	} else if (lanes.length > 0) {
+		advice = "all lanes fresh";
+	}
+
+	return {
+		code: "ok",
+		mainBranch: ctx.mainBranch,
+		mainSha: ctx.mainSha,
+		epoch: epochNumber,
+		...(hub ? { hub } : {}),
+		lock: {
+			held: holder !== undefined,
+			...(holder ? { holder, holderAlive: isAlive(holder.pid) } : {}),
+		},
+		lanes,
+		...(advice ? { advice } : {}),
+	};
 }
