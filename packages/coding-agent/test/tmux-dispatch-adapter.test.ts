@@ -275,6 +275,62 @@ describe("dispatchTmuxWorker (faux tmux tool end-to-end, real BackgroundLaneCont
 		expect(params.agents[0]).toEqual({ provider: "pi", name: "goal-worker" });
 	});
 
+	it("worker_capability_insufficient: an eligibility refusal skips BEFORE createLaneWorktree -- zero lane/pane/tool side effect", async () => {
+		let toolExecuted = false;
+		let createLaneWorktreeCalled = false;
+		const toolDef = fauxTmuxTool(async () => {
+			toolExecuted = true;
+			return { content: [], details: {} };
+		});
+
+		const deps: TmuxDispatchDeps = {
+			getToolDefinition: (name) => (name === "tmux_agent_manager" ? toolDef : undefined),
+			createExtensionContext: () => fauxCtx,
+			resolveManagedLaneId: () => undefined,
+			getGoalId: () => "g1",
+			createLaneWorktree: async () => {
+				createLaneWorktreeCalled = true;
+				return { laneKey: "g1-1", worktreePath: "/repo/.worktrees/g1-1" };
+			},
+			evaluateWorkerLaneRefusal: () => ({
+				reason: "capability_class_below_full",
+				capabilityClass: "lean",
+				contextWindow: 16_384,
+			}),
+		};
+
+		const outcome = await dispatchTmuxWorker(deps, { requirementId: "req-1", instructions: "do it" });
+		expect(outcome.laneId).toBeUndefined();
+		expect(outcome.skipReason).toBe("worker_capability_insufficient");
+		expect(createLaneWorktreeCalled).toBe(false);
+		expect(toolExecuted).toBe(false);
+	});
+
+	it("evaluateWorkerLaneRefusal returning undefined (eligible) proceeds exactly as today", async () => {
+		let capturedParams: unknown;
+		const toolDef = fauxTmuxTool(async (_toolCallId, params) => {
+			capturedParams = params;
+			return {
+				content: [{ type: "text" as const, text: "launched" }],
+				details: { job: { id: "job1", agents: [{ id: "goal-worker-1" }] } },
+			};
+		});
+
+		const deps: TmuxDispatchDeps = {
+			getToolDefinition: (name) => (name === "tmux_agent_manager" ? toolDef : undefined),
+			createExtensionContext: () => fauxCtx,
+			resolveManagedLaneId: () => "tmux-worker-1",
+			getGoalId: () => "g1",
+			evaluateWorkerLaneRefusal: () => undefined,
+		};
+
+		const outcome = await dispatchTmuxWorker(deps, { requirementId: "req-1", instructions: "do it" });
+		expect(outcome.skipReason).toBeUndefined();
+		expect(outcome.laneId).toBe("tmux-worker-1");
+		const params = capturedParams as { agents: Array<Record<string, unknown>> };
+		expect(params.agents[0]).toEqual({ provider: "pi", name: "goal-worker" });
+	});
+
 	it("classifyDispatchError maps the stable no-standing-grant substring; every other failure is tmux_dispatch_failed", () => {
 		expect(classifyDispatchError(new Error("no standing grant for tmux dispatch; run grant_dispatch first"))).toBe(
 			"no_standing_grant",

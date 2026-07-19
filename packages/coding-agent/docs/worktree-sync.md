@@ -113,6 +113,47 @@ lane's worktree; integrate exclusively via `worktree_sync land`; never touch mai
 lane-creation refusal (e.g. `maxLanes` reached) aborts the dispatch cleanly before any tmux
 session is ever launched (`dispatchSkipReason: "worktree_create_failed"`).
 
+## Capability adaptation
+
+The lane-worker surface adapts to the model actually driving it, riding the existing model-capability
+system (`core/model-capability.ts`) rather than a parallel mechanism. A model is eligible to drive a
+worktree-sync lane worker only if it is BOTH capability class `full` AND has a working native
+tool-call path:
+
+- **Class `full`** with a DECLARED context window: the classifier reads the model's own REGISTRY
+  metadata (`Model.contextWindow` -- the source of truth), never the live serving context a local
+  runtime happens to be configured with; an unknown/undeclared window is treated as ineligible for
+  lane-worker duty even though it defaults to class `full` for the general tool surface.
+- **Advertised native tool calling**: `Model.textToolCallProtocol` unset or `false`. A model with
+  `textToolCallProtocol: true` is phone-only by declaration and never eligible.
+- **Not graded-demoted**: a persisted `/toolprobe` verdict of `"text-protocol"` or `"none"` makes the
+  model ineligible. An UNPROBED model (no verdict on record yet) is eligible on its advertised
+  support alone -- unprobed is never treated as demoted.
+
+Additionally, the lean capability class (16k-32k context window) sheds the orchestration surface
+entirely: `goal`, `worktree_sync`, `improvement_loop`, `extensionify`, `skillify`, `model_fitness`,
+`context_scout`, and `tmux_agent_manager` are blocked for a lean-class session regardless of lane
+binding (`MODEL_CAPABILITY_LEAN_BLOCKED_TOOLS`) -- `run_toolkit_script` and `task_steps` stay
+available by design.
+
+Two refusal points, one authority:
+
+- A goal→tmux dispatch (`tools/tmux-dispatch.ts`'s `dispatchTmuxWorker`) checks the DISPATCHING
+  session's own eligibility FIRST, before `createLaneWorktree` or any `fire_task` call --
+  `dispatchSkipReason: "worker_capability_insufficient"`, zero lane/pane side effect on refusal. This
+  is the parent's best-effort expectation only; it can race a model swap between dispatch and child
+  startup.
+- The DISPATCHED child session refuses AUTHORITATIVELY at its own startup (main.ts), regardless of
+  how it became lane-bound (`--worktree-lane`, `PI_WORKTREE_LANE`, or a launcher-set env): an
+  ineligible model prints a deterministic, greppable refusal line (`formatLaneWorkerRefusal`, prefix
+  `worktree-sync lane-worker refusal:`) and exits with a non-zero status before the lane gate or the
+  epoch watcher ever start. There is no silent unbinding -- a session that cannot drive the surface
+  never gets a reduced version of it, it never starts.
+
+Enforcement is orthogonal to prompt complexity: the lane gate (G8/G10) and the epoch watcher stay
+wired for every OTHER session exactly as before this system existed. An ineligible session simply
+never reaches them, because it never reaches session startup's live phase at all.
+
 ## Identity, UAC, and zero footprint
 
 A session's **role** (`main` or `worker`) is derived structurally, never asserted by the session

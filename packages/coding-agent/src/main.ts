@@ -29,6 +29,7 @@ import { exportFromFile } from "./core/export-html/index.ts";
 import type { ExtensionFactory } from "./core/extensions/types.ts";
 import { configureHttpDispatcher } from "./core/http-dispatcher.ts";
 import { KeybindingsManager } from "./core/keybindings.ts";
+import { formatLaneWorkerRefusal } from "./core/model-capability.ts";
 import type { ModelRegistry } from "./core/model-registry.ts";
 import {
 	resolveCliModel,
@@ -58,7 +59,11 @@ import {
 import { SettingsManager } from "./core/settings-manager.ts";
 import { printTimings, resetTimings, time } from "./core/timings.ts";
 import { hasProjectTrustInputs, ProjectTrustStore } from "./core/trust-manager.ts";
-import { PI_WORKTREE_LANE_ENV, startWorktreeSyncRuntime } from "./core/worktree-sync/runtime.ts";
+import {
+	getBoundWorktreeLaneKey,
+	PI_WORKTREE_LANE_ENV,
+	startWorktreeSyncRuntime,
+} from "./core/worktree-sync/runtime.ts";
 import { runMigrations, showDeprecationWarnings } from "./migrations.ts";
 
 import { handleConfigCommand, handlePackageCommand } from "./package-manager-cli.ts";
@@ -895,6 +900,23 @@ export async function main(args: string[], options?: MainOptions) {
 	const { services, session, modelFallbackMessage } = runtime;
 	const { settingsManager, modelRegistry, resourceLoader } = services;
 	configureHttpDispatcher(settingsManager.getHttpIdleTimeoutMs());
+
+	// A lane-bound session refuses AUTHORITATIVELY at its own startup when its model cannot reliably
+	// drive the lane-gate/recovery surface unattended (full capability class, a declared context
+	// window, an advertised native tool-call path, no graded /toolprobe demotion -- see
+	// model-capability.ts's evaluateLaneWorkerRefusal). This is the authoritative check regardless of
+	// how the lane binding arrived (--worktree-lane, PI_WORKTREE_LANE, or a launcher-set env): the
+	// goal->tmux dispatch's own pre-check (tools/tmux-dispatch.ts) is the parent's best-effort guess
+	// only and can race a model swap between dispatch and child startup. No silent unbinding -- an
+	// ineligible model exits before the lane gate or epoch watcher ever start.
+	const boundWorktreeLaneKey = getBoundWorktreeLaneKey();
+	if (boundWorktreeLaneKey) {
+		const laneWorkerRefusal = session.getLaneWorkerRefusal();
+		if (laneWorkerRefusal) {
+			console.error(chalk.red(formatLaneWorkerRefusal(laneWorkerRefusal, boundWorktreeLaneKey)));
+			process.exit(1);
+		}
+	}
 
 	// Worktree-sync session runtime (no-op unless enabled): one startup reconcile pass, plus --
 	// for a lane-bound session -- the epoch watcher that injects a deterministic staleness notice

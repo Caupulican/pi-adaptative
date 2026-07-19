@@ -82,6 +82,7 @@ function makeDeps(cwd: string): RuntimeBuilderDeps {
 		getCwd: () => cwd,
 		getShellSessionKey: () => "test-shell-session",
 		getAgentDir: () => cwd,
+		getLaneWorkerRefusal: () => undefined,
 		getSessionManager: () => sessionManager,
 		getSettingsManager: () => settingsManager,
 		getModelRegistry: () => modelRegistry,

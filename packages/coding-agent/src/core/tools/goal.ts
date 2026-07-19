@@ -152,7 +152,12 @@ export interface GoalToolDependencies {
 	 * `no_standing_grant` (the owner has not authorized unattended tmux dispatch),
 	 * `tmux_dispatch_failed`, `tmux_dispatch_incomplete`, `lane_correlation_failed`,
 	 * `worktree_create_failed` (worktree-sync is enabled but the lane-first `create_lane` call was
-	 * refused -- e.g. max lanes reached -- so no fire_task call was ever attempted).
+	 * refused -- e.g. max lanes reached -- so no fire_task call was ever attempted),
+	 * `worker_capability_insufficient` (the model is sub-full class, has an unknown context window,
+	 * does not advertise a native tool-call path, or is graded-demoted to text-protocol/none -- see
+	 * `model-capability.ts`'s `evaluateLaneWorkerRefusal`; this is the parent's best-effort check
+	 * only, refused before any lane/pane side effect -- the dispatched child still refuses
+	 * authoritatively at its own startup regardless).
 	 */
 	dispatchTmuxWorker?: (args: {
 		requirementId: string;

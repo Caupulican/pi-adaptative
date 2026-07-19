@@ -164,14 +164,21 @@ import type { MemoryProvider } from "./memory/memory-provider.ts";
 import { MemoryController } from "./memory-controller.ts";
 import {
 	deriveModelCapabilityProfile,
+	evaluateLaneWorkerRefusal,
 	filterToolNamesForCapability,
+	type LaneWorkerRefusal,
 	type ModelCapabilityProfile,
 } from "./model-capability.ts";
 import type { ModelRegistry } from "./model-registry.ts";
 import { isLocalOrManagedRouterModel } from "./model-router/tool-escalation.ts";
 import { formatModelRouterModel, ModelRouterController } from "./model-router-controller.ts";
 import { ModelSelectionController } from "./model-selection-controller.ts";
-import { ModelAdaptationStore, type ModelToolProbe, type NativeToolProbeGrade } from "./models/adaptation-store.ts";
+import {
+	ModelAdaptationStore,
+	type ModelToolProbe,
+	type ModelToolProbeVerdict,
+	type NativeToolProbeGrade,
+} from "./models/adaptation-store.ts";
 import type { StoredFitnessReport } from "./models/fitness-store.ts";
 import type { PrismLlamaCppRuntime } from "./models/llamacpp-runtime.ts";
 import { HF_TRANSFORMERS_PROVIDER, OLLAMA_PROVIDER } from "./models/local-registration.ts";
@@ -1113,7 +1120,7 @@ export class AgentSession {
 			emitAutonomyTelemetry: (event) => this._emitAutonomyTelemetry(event),
 			resolveLaneModel: (pattern) => this._backgroundLanes.resolveLaneModel(pattern),
 			resolveCurationModelIfFit: () => this._resolveCurationModelIfFit(),
-			getToolProbeVerdict: (model) => this._modelAdaptationStore.get(this._modelRef(model)).toolProbe?.status,
+			getToolProbeVerdict: (model) => this._toolProbeVerdict(model),
 		});
 		this._reflection = new ReflectionController({
 			getModel: () => this.model,
@@ -1223,6 +1230,7 @@ export class AgentSession {
 			resolveCurationModelIfFit: () => this._resolveCurationModelIfFit(),
 			runIsolatedCompletion: (opts) => this.runIsolatedCompletion(opts),
 			addSpawnedUsage: (usage, opts) => this.addSpawnedUsage(usage, opts),
+			getLaneWorkerRefusal: () => this.getLaneWorkerRefusal(),
 			createAgentContextSnapshot: () => this._createAgentContextSnapshot(),
 			getContextUsage: () => this.getContextUsage(),
 			isStreaming: () => this.isStreaming,
@@ -1992,6 +2000,11 @@ export class AgentSession {
 
 	private _modelRef(model: Model<Api>): string {
 		return `${model.provider}/${model.id}`;
+	}
+
+	/** The persisted `/toolprobe` verdict on record for this model, if any (undefined = unprobed). */
+	private _toolProbeVerdict(model: Model<Api>): ModelToolProbeVerdict | undefined {
+		return this._modelAdaptationStore.get(this._modelRef(model)).toolProbe?.status;
 	}
 
 	private _formatToolProbeReport(results: readonly ToolProbeResult[]): string {
@@ -5353,6 +5366,26 @@ export class AgentSession {
 		return deriveModelCapabilityProfile({
 			contextWindow: this.model?.contextWindow,
 			mode: this.settingsManager.getModelCapabilitySettings().mode,
+		});
+	}
+
+	/**
+	 * Whether the CURRENT session model may drive a worktree-sync lane worker (see
+	 * `evaluateLaneWorkerRefusal` in model-capability.ts): full capability class, a DECLARED
+	 * (registry) context window, an ADVERTISED native tool-call path (`Model.textToolCallProtocol`
+	 * unset/false -- `true` means phone-only), and no graded `/toolprobe` demotion to
+	 * "text-protocol"/"none" on record. An unprobed model (no verdict on record yet) is eligible on
+	 * its advertised support alone. `undefined` means eligible.
+	 */
+	getLaneWorkerRefusal(): LaneWorkerRefusal | undefined {
+		const profile = this.getModelCapabilityProfile();
+		const model = this.model;
+		const verdict = model ? this._toolProbeVerdict(model) : undefined;
+		return evaluateLaneWorkerRefusal({
+			capabilityClass: profile.class,
+			contextWindow: profile.contextWindow,
+			toolCallingAdvertised: model?.textToolCallProtocol !== true,
+			toolCallingDemoted: verdict === "text-protocol" || verdict === "none",
 		});
 	}
 

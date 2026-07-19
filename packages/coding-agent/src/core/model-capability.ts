@@ -33,7 +33,18 @@ export const MODEL_CAPABILITY_LEAN_MIN_CONTEXT = 16_384;
 /** Windows at or above this get the minimal coding set; below is chat-only. */
 export const MODEL_CAPABILITY_MINIMAL_MIN_CONTEXT = 8_192;
 
-export const MODEL_CAPABILITY_LEAN_BLOCKED_TOOLS: readonly string[] = ["delegate", "context_audit"];
+export const MODEL_CAPABILITY_LEAN_BLOCKED_TOOLS: readonly string[] = [
+	"delegate",
+	"context_audit",
+	"goal",
+	"worktree_sync",
+	"improvement_loop",
+	"extensionify",
+	"skillify",
+	"model_fitness",
+	"context_scout",
+	"tmux_agent_manager",
+];
 export const MODEL_CAPABILITY_MINIMAL_ALLOWED_TOOLS: readonly string[] = [
 	"read",
 	"bash",
@@ -163,4 +174,58 @@ export function filterToolNamesForCapability(toolNames: readonly string[], profi
 		filtered = filtered.filter((name) => !blocked.has(name));
 	}
 	return filtered;
+}
+
+/**
+ * Lane-worker eligibility: a session bound to a worktree-sync lane (`--worktree-lane` /
+ * `PI_WORKTREE_LANE`, see worktree-sync/runtime.ts) is expected to drive the FULL multi-step
+ * lane-gate/recovery surface -- sync, conflict recovery, land -- unattended. A sub-full capability
+ * class or a model with no working native tool-call path cannot reliably drive that surface. This
+ * rides the SAME capability system every other adaptation in this file rides (class + context
+ * window + the `/toolprobe` verdict) -- no parallel mechanism, no new env var, no new registry field.
+ */
+export type LaneWorkerRefusalReason =
+	| "capability_class_below_full"
+	| "context_window_unknown"
+	| "tool_calling_unadvertised"
+	| "tool_calling_demoted";
+
+export interface LaneWorkerRefusal {
+	reason: LaneWorkerRefusalReason;
+	capabilityClass: ModelCapabilityClass;
+	contextWindow?: number;
+}
+
+/**
+ * Decide whether the model described by `args` may drive a worktree-sync lane worker. First
+ * failure wins, in order: capability class below full; an unknown/undeclared context window (the
+ * classifier's own registry-derived SSOT -- see `deriveModelCapabilityProfile`; a full class can
+ * still carry an undefined window via the `unknown_context_window_defaults` fallback); no
+ * ADVERTISED native tool-call path (`Model.textToolCallProtocol` unset/false -- set true means
+ * phone-only); or a GRADED `/toolprobe` demotion to "text-protocol"/"none". An UNPROBED model (no
+ * verdict on record yet) is eligible on its advertised support alone -- unprobed is never treated
+ * as demoted. `undefined` means eligible.
+ */
+export function evaluateLaneWorkerRefusal(args: {
+	capabilityClass: ModelCapabilityClass;
+	contextWindow: number | undefined;
+	toolCallingAdvertised: boolean;
+	toolCallingDemoted: boolean;
+}): LaneWorkerRefusal | undefined {
+	const { capabilityClass, contextWindow, toolCallingAdvertised, toolCallingDemoted } = args;
+	if (capabilityClass !== "full") return { reason: "capability_class_below_full", capabilityClass, contextWindow };
+	if (contextWindow === undefined) return { reason: "context_window_unknown", capabilityClass, contextWindow };
+	if (!toolCallingAdvertised) return { reason: "tool_calling_unadvertised", capabilityClass, contextWindow };
+	if (toolCallingDemoted) return { reason: "tool_calling_demoted", capabilityClass, contextWindow };
+	return undefined;
+}
+
+/** Stable, greppable prefix for {@link formatLaneWorkerRefusal}'s output. */
+export const LANE_WORKER_REFUSAL_PREFIX = "worktree-sync lane-worker refusal:";
+
+/** Format a refusal into one deterministic, greppable line naming the lane, class, window, and reason. */
+export function formatLaneWorkerRefusal(refusal: LaneWorkerRefusal, laneKey?: string): string {
+	const laneSuffix = laneKey !== undefined ? ` lane=${laneKey}` : "";
+	const windowText = refusal.contextWindow !== undefined ? String(refusal.contextWindow) : "unknown";
+	return `${LANE_WORKER_REFUSAL_PREFIX}${laneSuffix} class=${refusal.capabilityClass} contextWindow=${windowText} reason=${refusal.reason}`;
 }

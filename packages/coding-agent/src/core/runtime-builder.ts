@@ -70,6 +70,7 @@ import type { GoalState } from "./goals/goal-state.ts";
 import type { OpenTaskStepRef } from "./goals/goal-tool-core.ts";
 import type { MemoryManager } from "./memory/memory-manager.ts";
 import type { MemoryControllerReloadSnapshot } from "./memory-controller.ts";
+import type { LaneWorkerRefusal } from "./model-capability.ts";
 import type { ModelRegistry } from "./model-registry.ts";
 import { resolveCliModel } from "./model-resolver.ts";
 import { evaluateSurfaceFitness } from "./model-router/fitness-gate.ts";
@@ -309,6 +310,11 @@ export interface RuntimeBuilderDeps {
 		usage: Usage,
 		opts: { label?: string; sourceSessionId?: string; reportId: string },
 	): string | undefined;
+	/** Whether the CURRENT session model may drive a worktree-sync lane worker (`AgentSession.
+	 * getLaneWorkerRefusal`) -- consulted BEFORE a goal→tmux dispatch so an ineligible model's
+	 * dispatch is refused before any lane/pane side effect (`tools/tmux-dispatch.ts`'s
+	 * `evaluateWorkerLaneRefusal`). `undefined` means eligible. */
+	getLaneWorkerRefusal(): LaneWorkerRefusal | undefined;
 
 	/** Post-rebuild doctor helpers (validate the rebuilt runtime can render a context). */
 	createAgentContextSnapshot(): AgentContext;
@@ -781,6 +787,7 @@ export class RuntimeBuilder {
 							createExtensionContext: () => this.deps.getExtensionRunner().createContext(),
 							resolveManagedLaneId: (id) => this.deps.resolveManagedLaneId(id),
 							getGoalId: () => this.deps.getGoalStateSnapshot()?.goalId,
+							evaluateWorkerLaneRefusal: () => this.deps.getLaneWorkerRefusal(),
 							// Lane-first dispatch, wired ONLY when worktree-sync is enabled -- absent otherwise,
 							// so a disabled/default session gets the existing byte-identical fire_task params.
 							createLaneWorktree: worktreeSyncSettings.enabled

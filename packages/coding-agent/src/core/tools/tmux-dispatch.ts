@@ -1,4 +1,5 @@
 import type { ExtensionContext, ToolDefinition } from "../extensions/types.ts";
+import type { LaneWorkerRefusal } from "../model-capability.ts";
 
 /**
  * Dependencies for {@link dispatchTmuxWorker}, injected from the construction site
@@ -41,6 +42,15 @@ export interface TmuxDispatchDeps {
 		goalId?: string;
 		requirementId: string;
 	}) => Promise<{ laneKey: string; worktreePath: string } | { skipReason: string }>;
+	/**
+	 * Lane-worker capability eligibility (opt-in -- wired only from `runtime-builder.ts`, backed by
+	 * `AgentSession.getLaneWorkerRefusal`): checked FIRST, before `createLaneWorktree`, so an
+	 * ineligible model's dispatch is refused before any lane/pane side effect ever runs. This is the
+	 * parent's best-effort check only -- the dispatched child session refuses authoritatively at its
+	 * own startup (main.ts) regardless of what the parent decides here. Absent dep -> no capability
+	 * check runs, byte-identical to before this field existed.
+	 */
+	evaluateWorkerLaneRefusal?: () => LaneWorkerRefusal | undefined;
 }
 
 /**
@@ -78,6 +88,15 @@ export async function dispatchTmuxWorker(
 	deps: TmuxDispatchDeps,
 	args: { requirementId: string; instructions: string },
 ): Promise<{ laneId?: string; skipReason?: string }> {
+	// Capability check FIRST -- before the tool-definition lookup and before createLaneWorktree --
+	// so an ineligible model's dispatch is refused with zero lane/pane/tool side effect. The coarse
+	// "worker_capability_insufficient" skip reason is the stable contract code on the goal tool's
+	// response; the granular reason (class/window/tool-calling) lives only in the refusal object
+	// itself, surfaced by the caller for logging (see model-capability.ts's formatLaneWorkerRefusal).
+	if (deps.evaluateWorkerLaneRefusal?.() !== undefined) {
+		return { skipReason: "worker_capability_insufficient" };
+	}
+
 	const toolDef = deps.getToolDefinition("tmux_agent_manager");
 	if (!toolDef) return { skipReason: "tmux_extension_not_loaded" };
 

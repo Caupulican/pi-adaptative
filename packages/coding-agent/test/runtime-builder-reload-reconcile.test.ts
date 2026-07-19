@@ -63,6 +63,7 @@ function makeDeps(cwd: string, resourceLoader: ResourceLoader): TestDeps {
 		getCwd: () => cwd,
 		getShellSessionKey: () => "test-shell-session",
 		getAgentDir: () => cwd,
+		getLaneWorkerRefusal: () => undefined,
 		getSessionManager: () => sessionManager,
 		getSettingsManager: () => settingsManager,
 		getModelRegistry: () => modelRegistry,

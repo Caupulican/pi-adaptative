@@ -1,7 +1,10 @@
 import { describe, expect, it } from "vitest";
 import {
 	deriveModelCapabilityProfile,
+	evaluateLaneWorkerRefusal,
 	filterToolNamesForCapability,
+	formatLaneWorkerRefusal,
+	LANE_WORKER_REFUSAL_PREFIX,
 	MODEL_CAPABILITY_CHAT_ALLOWED_TOOLS,
 	MODEL_CAPABILITY_LEAN_BLOCKED_TOOLS,
 	MODEL_CAPABILITY_LEAN_MAX_CONTINUE_TURNS,
@@ -20,6 +23,13 @@ const DEFAULT_ACTIVE = [
 	"task_steps",
 	"delegate",
 	"run_toolkit_script",
+	"worktree_sync",
+	"improvement_loop",
+	"extensionify",
+	"skillify",
+	"model_fitness",
+	"context_scout",
+	"tmux_agent_manager",
 ];
 
 describe("deriveModelCapabilityProfile", () => {
@@ -142,7 +152,7 @@ describe("filterToolNamesForCapability", () => {
 		expect(filterToolNamesForCapability(DEFAULT_ACTIVE, profile)).toEqual(DEFAULT_ACTIVE);
 	});
 
-	it("blocks background-autonomy tools for lean", () => {
+	it("blocks background-autonomy and orchestration-surface tools for lean", () => {
 		const profile = deriveModelCapabilityProfile({ contextWindow: 16_384 });
 		const filtered = filterToolNamesForCapability(DEFAULT_ACTIVE, profile);
 		for (const blocked of MODEL_CAPABILITY_LEAN_BLOCKED_TOOLS) {
@@ -150,6 +160,13 @@ describe("filterToolNamesForCapability", () => {
 		}
 		expect(filtered).toContain("read");
 		expect(filtered).toContain("edit");
+	});
+
+	it("monotonicity guard: run_toolkit_script and task_steps are NOT blocked for lean", () => {
+		const profile = deriveModelCapabilityProfile({ contextWindow: 16_384 });
+		const filtered = filterToolNamesForCapability(DEFAULT_ACTIVE, profile);
+		expect(filtered).toContain("run_toolkit_script");
+		expect(filtered).toContain("task_steps");
 	});
 
 	it("reduces minimal to the core coding set and chat to nothing", () => {
@@ -172,5 +189,92 @@ describe("filterToolNamesForCapability", () => {
 		const minimal = deriveModelCapabilityProfile({ contextWindow: 8_192 });
 		expect(filterToolNamesForCapability(["write", "goal", "read"], minimal)).toEqual(["write", "read"]);
 		expect(filterToolNamesForCapability([], minimal)).toEqual([]);
+	});
+});
+
+describe("evaluateLaneWorkerRefusal", () => {
+	const eligible = {
+		capabilityClass: "full" as const,
+		contextWindow: 200_000,
+		toolCallingAdvertised: true,
+		toolCallingDemoted: false,
+	};
+
+	it("is eligible (undefined) for full class, a known window, advertised tool calling, not demoted", () => {
+		expect(evaluateLaneWorkerRefusal(eligible)).toBeUndefined();
+	});
+
+	it("refuses capability_class_below_full for lean, minimal, and chat", () => {
+		for (const capabilityClass of ["lean", "minimal", "chat"] as const) {
+			expect(evaluateLaneWorkerRefusal({ ...eligible, capabilityClass })).toEqual({
+				reason: "capability_class_below_full",
+				capabilityClass,
+				contextWindow: 200_000,
+			});
+		}
+	});
+
+	it("refuses context_window_unknown for a full class with no declared window", () => {
+		expect(evaluateLaneWorkerRefusal({ ...eligible, contextWindow: undefined })).toEqual({
+			reason: "context_window_unknown",
+			capabilityClass: "full",
+			contextWindow: undefined,
+		});
+	});
+
+	it("refuses tool_calling_unadvertised when native tool calling is not advertised (textToolCallProtocol: true)", () => {
+		expect(evaluateLaneWorkerRefusal({ ...eligible, toolCallingAdvertised: false })).toEqual({
+			reason: "tool_calling_unadvertised",
+			capabilityClass: "full",
+			contextWindow: 200_000,
+		});
+	});
+
+	it("refuses tool_calling_demoted for a graded /toolprobe demotion to text-protocol or none", () => {
+		expect(evaluateLaneWorkerRefusal({ ...eligible, toolCallingDemoted: true })).toEqual({
+			reason: "tool_calling_demoted",
+			capabilityClass: "full",
+			contextWindow: 200_000,
+		});
+	});
+
+	it("is eligible for an UNPROBED model: unprobed is not treated as demoted", () => {
+		// toolCallingDemoted is derived by the caller from the verdict; an unprobed model (verdict
+		// undefined) yields toolCallingDemoted: false, same as this eligible fixture.
+		expect(evaluateLaneWorkerRefusal({ ...eligible, toolCallingDemoted: false })).toBeUndefined();
+	});
+
+	it("first failure wins: capability class below full takes precedence over every other failure", () => {
+		const refusal = evaluateLaneWorkerRefusal({
+			capabilityClass: "lean",
+			contextWindow: undefined,
+			toolCallingAdvertised: false,
+			toolCallingDemoted: true,
+		});
+		expect(refusal?.reason).toBe("capability_class_below_full");
+	});
+});
+
+describe("formatLaneWorkerRefusal", () => {
+	it("names the class, window, and reason in one deterministic, greppable line", () => {
+		const line = formatLaneWorkerRefusal(
+			{ reason: "tool_calling_demoted", capabilityClass: "full", contextWindow: 16_384 },
+			"lane-a",
+		);
+		expect(line.startsWith(LANE_WORKER_REFUSAL_PREFIX)).toBe(true);
+		expect(line).toContain("full");
+		expect(line).toContain("16384");
+		expect(line).toContain("tool_calling_demoted");
+		expect(line).toContain("lane-a");
+	});
+
+	it("renders an unknown window as 'unknown' and omits the lane when no laneKey is given", () => {
+		const line = formatLaneWorkerRefusal({
+			reason: "context_window_unknown",
+			capabilityClass: "full",
+			contextWindow: undefined,
+		});
+		expect(line).toContain("unknown");
+		expect(line).not.toContain("lane=");
 	});
 });
