@@ -134,6 +134,7 @@ type LaneEvent = {
 	status?: string;
 	goalId?: string;
 	request?: unknown;
+	worktreeLaneKey?: string;
 };
 type UsageReport = { usage: unknown; opts?: { label?: string; sourceSessionId?: string; reportId?: string } };
 type StoredEntry = { id: string; parentId: string | null; type: "custom"; customType: string; data: unknown };
@@ -583,6 +584,38 @@ describe.skipIf(process.platform === "win32")("tmux dispatch grant — approval-
 				context,
 			),
 		).rejects.toThrow(/no standing grant for tmux dispatch/);
+	});
+
+	it("a lane-first dispatch (agent carrying worktreeLane) appends --worktree-lane plus a lane-doctrine system-prompt clause, and reports the lane key on the managed-lane dispatch event", async () => {
+		const { registeredTool, context, laneEvents, seedCustomEntry } = installExtension(tempDir, { hasUI: false });
+		const grant = buildGrant({ agent: "pi", maxLaunches: 1 });
+		seedCustomEntry(GRANT_CUSTOM_TYPE, grant);
+
+		const launched = await registeredTool.execute(
+			"fire-lane",
+			{
+				action: "fire_task",
+				task: "work the lane",
+				jobId: "lane-job-1",
+				agents: [{ provider: "pi", cwd: tempDir, worktreeLane: "adhoc-1" }],
+				dryRun: false,
+			},
+			new AbortController().signal,
+			() => {},
+			context,
+		);
+		const details = launched.details as { job: { agents: Array<{ command?: string }> } };
+		const command = details.job.agents[0]?.command ?? "";
+		expect(command).toContain("--worktree-lane 'adhoc-1'");
+		// The whole --append-system-prompt VALUE is shell-quoted (quoteShell), so the doctrine
+		// sentence's own inner quotes around the lane key come through escaped (`'\''adhoc-1'\'''`)
+		// rather than as a bare `'adhoc-1'` substring -- assert on the surrounding text instead.
+		expect(command).toContain("bound to worktree-sync lane");
+		expect(command).toContain("adhoc-1");
+		expect(command).toContain("never touch main directly");
+		expect(laneEvents).toContainEqual(
+			expect.objectContaining({ phase: "dispatch", status: "launched", worktreeLaneKey: "adhoc-1" }),
+		);
 	});
 
 	it("a one-shot interactively-approved launch (no grant) still applies the conservative default profile and never persists a grant", async () => {

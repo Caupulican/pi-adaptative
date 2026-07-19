@@ -27,6 +27,40 @@ export interface GoalRuntimeOpenTaskStep {
 	content: string;
 }
 
+/**
+ * Live, per-worktree-sync-lane status for one lane bound to a dispatched worker, as the caller
+ * (runtime-builder / whatever host process has live git-engine access) derives it. `boundLaneId` is
+ * the host `LaneRecord.laneId` the lane's registration was correlated to
+ * (`LaneRegistration.boundLaneId`, same id-space as `Requirement.boundLaneId`) -- `undefined` for a
+ * lane never bound to a dispatch. `fresh`/`stale` mirror `LaneFacts`; `syncRequired` is the
+ * staleness-propagation verdict (`WorktreeSyncPolicy`-derived); `rebaseInProgress` marks a sync that
+ * stopped on conflicts (a rebase left in progress) -- see `core/worktree-sync/git-engine.ts`.
+ */
+export interface GoalRuntimeWorktreeLaneStatus {
+	laneKey: string;
+	boundLaneId?: string;
+	fresh: boolean;
+	stale: boolean;
+	syncRequired: boolean;
+	rebaseInProgress: boolean;
+}
+
+/**
+ * Per-requirement projection of {@link GoalRuntimeWorktreeLaneStatus}, joined via
+ * `requirement.boundLaneId === status.boundLaneId` -- read-only cross-visibility for snapshot
+ * consumers (e.g. a future continuation-prompt render), mirroring `openTaskSteps`'s role. This is
+ * NOT what feeds `evaluateGoalContinuation` (that reads the raw `boundLaneId`-keyed sets directly);
+ * it exists purely so a requirement's worktree state is visible without re-deriving the join.
+ */
+export interface GoalRuntimeRequirementWorktreeState {
+	requirementId: string;
+	laneKey: string;
+	fresh: boolean;
+	stale: boolean;
+	syncRequired: boolean;
+	rebaseInProgress: boolean;
+}
+
 export interface GoalRuntimeSnapshot {
 	goalState?: GoalState;
 	latestEvidenceBundle?: EvidenceBundle;
@@ -40,6 +74,14 @@ export interface GoalRuntimeSnapshot {
 	 * itself always populates a concrete array (possibly empty).
 	 */
 	openTaskSteps?: readonly GoalRuntimeOpenTaskStep[];
+	/**
+	 * Per-requirement worktree-sync state, present only for requirements whose `boundLaneId` matches
+	 * a `worktreeLaneStatus` entry supplied to the builder. Optional (like `openTaskSteps`) so every
+	 * pre-existing caller/test keeps compiling unchanged; omitted entirely (not an empty array) when
+	 * the builder was never given `worktreeLaneStatus`, since "no data supplied" and "data supplied,
+	 * nothing bound" are genuinely different states worth distinguishing.
+	 */
+	requirementWorktreeStates?: readonly GoalRuntimeRequirementWorktreeState[];
 }
 
 /**
@@ -73,6 +115,17 @@ export function buildGoalRuntimeSnapshot(args: {
 	 * Defaults to `DEFAULT_GOAL_WORKER_WAIT_MS`.
 	 */
 	maxWorkerWaitMs?: number;
+	/**
+	 * Live per-lane worktree-sync status, independent of branch scoping -- exactly like `laneRecords`,
+	 * this builder performs NO I/O of its own; the caller derives this array (e.g. from
+	 * `core/worktree-sync/git-engine.ts`'s live status) and supplies it ready-made. Used to (a) build
+	 * `requirementWorktreeStates` (per-requirement projection, matched via `boundLaneId`) and (b)
+	 * derive the `laneSyncConflictLaneKeys`/`syncRequiredLaneKeys` sets threaded into
+	 * `evaluateGoalContinuation`. Optional so every pre-existing caller (predating worktree-sync
+	 * awareness) keeps compiling and behaving byte-identically: omitting it disables both, and never
+	 * changes any OTHER continuation outcome.
+	 */
+	worktreeLaneStatus?: readonly GoalRuntimeWorktreeLaneStatus[];
 }): GoalRuntimeSnapshot {
 	const branchEntries = args.sessionManager.getBranch();
 	let goalState = getLatestGoalStateSnapshot(args.sessionManager);
@@ -109,6 +162,41 @@ export function buildGoalRuntimeSnapshot(args: {
 		goalState = { ...goalState, continuationWorkerSpendUsd: workerSpendUsd };
 	}
 
+	// Worktree-sync surfacing: (a) a per-requirement projection (matched via `boundLaneId`, purely for
+	// snapshot consumers -- never read by `evaluateGoalContinuation` itself), and (b) the
+	// `boundLaneId`-keyed sets `evaluateGoalContinuation` actually matches against
+	// `Requirement.boundLaneId`, same id-space and matching pattern as `inFlightGoalLaneIds` above.
+	// Disjoint by construction: a lane with `rebaseInProgress` feeds the conflict set only, never both.
+	let requirementWorktreeStates: GoalRuntimeRequirementWorktreeState[] | undefined;
+	const laneSyncConflictLaneKeys = new Set<string>();
+	const syncRequiredLaneKeys = new Set<string>();
+	if (args.worktreeLaneStatus) {
+		for (const status of args.worktreeLaneStatus) {
+			if (status.boundLaneId === undefined) continue;
+			if (status.rebaseInProgress) laneSyncConflictLaneKeys.add(status.boundLaneId);
+			else if (status.syncRequired) syncRequiredLaneKeys.add(status.boundLaneId);
+		}
+		if (goalState) {
+			const states: GoalRuntimeRequirementWorktreeState[] = [];
+			for (const requirement of goalState.requirements) {
+				if (requirement.boundLaneId === undefined) continue;
+				const status = args.worktreeLaneStatus.find(
+					(candidate) => candidate.boundLaneId === requirement.boundLaneId,
+				);
+				if (!status) continue;
+				states.push({
+					requirementId: requirement.id,
+					laneKey: status.laneKey,
+					fresh: status.fresh,
+					stale: status.stale,
+					syncRequired: status.syncRequired,
+					rebaseInProgress: status.rebaseInProgress,
+				});
+			}
+			requirementWorktreeStates = states;
+		}
+	}
+
 	const now = (args.now ?? (() => new Date().toISOString()))();
 	const maxWorkerWaitMs = args.maxWorkerWaitMs ?? DEFAULT_GOAL_WORKER_WAIT_MS;
 	const continuation = evaluateGoalContinuation({
@@ -117,6 +205,8 @@ export function buildGoalRuntimeSnapshot(args: {
 		inFlightGoalLaneIds,
 		now,
 		maxWorkerWaitMs,
+		laneSyncConflictLaneKeys: laneSyncConflictLaneKeys.size > 0 ? laneSyncConflictLaneKeys : undefined,
+		syncRequiredLaneKeys: syncRequiredLaneKeys.size > 0 ? syncRequiredLaneKeys : undefined,
 	});
 
 	return {
@@ -126,5 +216,6 @@ export function buildGoalRuntimeSnapshot(args: {
 		learningDecisions,
 		continuation,
 		openTaskSteps,
+		...(requirementWorktreeStates !== undefined ? { requirementWorktreeStates } : {}),
 	};
 }

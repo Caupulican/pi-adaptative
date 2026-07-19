@@ -207,6 +207,14 @@ export interface LaunchProfileSource {
 	allowedTools?: string[];
 	resourceProfile?: string;
 	writePaths?: string[];
+	/**
+	 * Worktree-sync lane key this launch is bound to (per-agent -- see `applyLaunchProfile`'s caller,
+	 * which builds a per-agent `LaunchProfileSource` only when that agent carries `worktreeLane`).
+	 * When present, `buildLaunchProfileFlags` appends `--worktree-lane <key>` (the same CLI flag
+	 * `src/cli/args.ts` already exposes, sugar over the `PI_WORKTREE_LANE` env contract) and
+	 * `buildScopedSystemPrompt` appends one lane-doctrine sentence.
+	 */
+	worktreeLane?: string;
 }
 
 /** A grant-covered launch derives its profile from the grant's envelope. */
@@ -239,17 +247,24 @@ export function buildLaunchProfileFlags(source: LaunchProfileSource): LaunchProf
 	const flags: LaunchProfileFlag[] = [{ flag: "--tools", value: tools.join(",") }];
 	if (source.resourceProfile) flags.push({ flag: "--resource-profile", value: source.resourceProfile });
 	else flags.push({ flag: "--no-extensions" }, { flag: "--no-skills" });
+	if (source.worktreeLane) flags.push({ flag: "--worktree-lane", value: source.worktreeLane });
 	flags.push({ flag: "--append-system-prompt", value: buildScopedSystemPrompt(source) });
 	return flags;
 }
 
 export function buildScopedSystemPrompt(source: LaunchProfileSource): string {
 	const paths = source.writePaths?.length ? source.writePaths.join(", ") : "no additional paths granted";
-	return [
+	const sentences = [
 		`You are a tmux worker dispatched under ${source.identity}.`,
 		`Stay within these write paths: ${paths}.`,
 		"Hard stops — publishing/npm, git push, tagging a release, changing credentials/auth, or destructive deletion — require returning BLOCKED for owner approval. Never self-approve a hard stop.",
-	].join(" ");
+	];
+	if (source.worktreeLane) {
+		sentences.push(
+			`You are bound to worktree-sync lane '${source.worktreeLane}': work only inside this lane's own worktree, integrate exclusively via worktree_sync land, and never touch main directly.`,
+		);
+	}
+	return sentences.join(" ");
 }
 
 // ---------------------------------------------------------------------------

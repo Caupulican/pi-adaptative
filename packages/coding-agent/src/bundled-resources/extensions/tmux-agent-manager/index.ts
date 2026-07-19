@@ -56,7 +56,21 @@ type Action =
 	| "grant_dispatch"
 	| "revoke_grant";
 
-type AgentSpec = { provider?: Provider; name?: string; command?: string; cwd?: string; tools?: string[] };
+type AgentSpec = {
+	provider?: Provider;
+	name?: string;
+	command?: string;
+	cwd?: string;
+	tools?: string[];
+	/**
+	 * Worktree-sync lane key this agent is bound to (core-internal only -- set by the goal->tmux
+	 * lane-first dispatch adapter, `tmux-dispatch.ts`'s `dispatchTmuxWorker`, never by the model's own
+	 * `fire_task` params). A `provider:"pi"` agent carrying this launches with `--worktree-lane <key>`
+	 * appended and one extra lane-doctrine sentence in its scoped `--append-system-prompt` -- see
+	 * `applyLaunchProfile`/`dispatch-grant.ts`'s `buildLaunchProfileFlags`.
+	 */
+	worktreeLane?: string;
+};
 type TeamTemplate = {
 	name: string;
 	description: string;
@@ -143,6 +157,9 @@ type FireAgentPlan = {
 	currentTurn?: number;
 	/** Last turn whose terminal handoff was delivered to the parent. Absent means 0 (never notified). */
 	notifiedTurn?: number;
+	/** Mirrors `AgentSpec.worktreeLane` -- carried onto the plan so `applyLaunchProfile` (per-agent
+	 * flags) and the dispatch-phase `reportManagedLane` call can both read it after `buildFireTaskPlan`. */
+	worktreeLane?: string;
 };
 type FireTaskPlan = {
 	id: string;
@@ -180,6 +197,7 @@ type ManagedLaneBridgeEvent = {
 	status?: string;
 	reasonCode?: string;
 	changedFiles?: string[];
+	worktreeLaneKey?: string;
 	request?: unknown;
 	usage?: Usage;
 };
@@ -524,7 +542,7 @@ function normalizeAgents(params: Params): AgentSpec[] {
 		if (!baseCommand) throw new Error(`agent ${name} needs command when provider=custom`);
 		const tools = Array.isArray(agent.tools) && agent.tools.length > 0 ? agent.tools : undefined;
 		const command = tools ? `${baseCommand} --tools ${tools.join(",")}` : baseCommand;
-		return { provider, name, command, cwd: agent.cwd, tools };
+		return { provider, name, command, cwd: agent.cwd, tools, worktreeLane: agent.worktreeLane };
 	});
 }
 function defaultProviderInvocation(provider: Provider): string {
@@ -732,6 +750,7 @@ function buildFireTaskPlan(ctx: ExtensionContext, params: Params): FireTaskPlan 
 			promptPath: path.join(jobDir, `${slug}.prompt.md`),
 			logPath: path.join(jobDir, `${slug}.log`),
 			resultPath: path.join(jobDir, `${slug}.result.json`),
+			worktreeLane: agent.worktreeLane,
 		};
 	});
 	const job: FireTaskPlan = {
@@ -1259,9 +1278,14 @@ function appendLaunchProfileFlags(command: string, flags: LaunchProfileFlag[]): 
  * bounded by the grant only at the launch layer (agent/budget/count); their internal tool-loop
  * enforcement is the target CLI's own responsibility (documented limitation, not a hidden gap). */
 function applyLaunchProfile(job: FireTaskPlan, source: LaunchProfileSource): void {
-	const flags = buildLaunchProfileFlags(source);
 	for (const agent of job.agents) {
 		if (agent.provider !== "pi") continue;
+		// Per-agent flags: `worktreeLane` is a per-agent property (only a lane-first goal->tmux
+		// dispatch sets it), so the shared `source` envelope is extended with it just for this agent's
+		// flag build -- every other agent in a multi-agent team keeps the plain grant-derived profile.
+		const flags = buildLaunchProfileFlags(
+			agent.worktreeLane ? { ...source, worktreeLane: agent.worktreeLane } : source,
+		);
 		agent.command = appendLaunchProfileFlags(agent.command || defaultProviderInvocation(agent.provider), flags);
 	}
 }
@@ -1490,6 +1514,7 @@ async function executeTool(
 				phase: "dispatch",
 				status: "launched",
 				goalId: params.goalId,
+				worktreeLaneKey: agent.worktreeLane,
 			});
 		}
 		return {
@@ -1574,6 +1599,7 @@ async function executeTool(
 			status: "follow-up",
 			goalId: params.goalId,
 			request: { turn },
+			worktreeLaneKey: targetAgent.worktreeLane,
 		});
 		return {
 			content: [
@@ -1741,7 +1767,12 @@ function reconcileTmuxSessions(ctx: ExtensionContext, bridge: HostBridge): void 
 			if (!agent.paneId || !tmuxPaneExists(job.sessionName, agent.paneId)) continue;
 			if (tmuxPaneHasPipe(agent.paneId)) continue;
 			rearmAgentWatcher(job, agent);
-			bridge.reportManagedLane?.({ laneId: agentLaneId(job.id, agent.id), phase: "dispatch", status: "resumed" });
+			bridge.reportManagedLane?.({
+				laneId: agentLaneId(job.id, agent.id),
+				phase: "dispatch",
+				status: "resumed",
+				worktreeLaneKey: agent.worktreeLane,
+			});
 		}
 	}
 }

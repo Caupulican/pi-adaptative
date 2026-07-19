@@ -436,7 +436,11 @@ export class BackgroundLaneController {
 		if (event.phase === "dispatch") {
 			if (this._managedLaneDispatches.has(event.laneId)) return undefined;
 			this._seedLaneHistory();
-			const record = this._laneTracker.start({ type: "tmux-worker", goalId: event.goalId });
+			const record = this._laneTracker.start({
+				type: "tmux-worker",
+				goalId: event.goalId,
+				worktreeLaneKey: event.worktreeLaneKey,
+			});
 			const deregister = registerInFlightWork(this.deps.getAgentDir(), "lane", `tmux:${record.laneId}`);
 			this._managedLaneDispatches.set(event.laneId, { laneId: record.laneId, deregister });
 			return record;

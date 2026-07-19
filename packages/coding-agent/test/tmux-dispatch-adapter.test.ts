@@ -188,6 +188,93 @@ describe("dispatchTmuxWorker (faux tmux tool end-to-end, real BackgroundLaneCont
 		expect(outcome.skipReason).toBe("lane_correlation_failed");
 	});
 
+	it("lane-first dispatch: createLaneWorktree runs BEFORE fire_task, and the new lane's cwd/worktreeLane are threaded into the fire_task agents param", async () => {
+		const callOrder: string[] = [];
+		let capturedParams: unknown;
+		const toolDef = fauxTmuxTool(async (_toolCallId, params) => {
+			callOrder.push("fire_task");
+			capturedParams = params;
+			return {
+				content: [{ type: "text" as const, text: "launched" }],
+				details: { job: { id: "job1", agents: [{ id: "goal-worker-1" }] } },
+			};
+		});
+
+		const deps: TmuxDispatchDeps = {
+			getToolDefinition: (name) => (name === "tmux_agent_manager" ? toolDef : undefined),
+			createExtensionContext: () => fauxCtx,
+			resolveManagedLaneId: () => "tmux-worker-1",
+			getGoalId: () => "g1",
+			createLaneWorktree: async (args) => {
+				callOrder.push("createLaneWorktree");
+				expect(args).toEqual({ goalId: "g1", requirementId: "req-1" });
+				return { laneKey: "g1-1", worktreePath: "/repo/.worktrees/g1-1" };
+			},
+		};
+
+		const outcome = await dispatchTmuxWorker(deps, { requirementId: "req-1", instructions: "do it" });
+		expect(outcome.skipReason).toBeUndefined();
+		expect(outcome.laneId).toBe("tmux-worker-1");
+
+		// Lane creation strictly precedes the fire_task call -- never the other way around.
+		expect(callOrder).toEqual(["createLaneWorktree", "fire_task"]);
+
+		const params = capturedParams as {
+			agents: Array<{ provider: string; name: string; cwd?: string; worktreeLane?: string }>;
+		};
+		expect(params.agents).toHaveLength(1);
+		expect(params.agents[0]).toEqual({
+			provider: "pi",
+			name: "goal-worker",
+			cwd: "/repo/.worktrees/g1-1",
+			worktreeLane: "g1-1",
+		});
+	});
+
+	it("worktree_create_failed: a lane-creation refusal aborts BEFORE any fire_task call -- never a half-made launch", async () => {
+		let toolExecuted = false;
+		const toolDef = fauxTmuxTool(async () => {
+			toolExecuted = true;
+			return { content: [], details: {} };
+		});
+
+		const deps: TmuxDispatchDeps = {
+			getToolDefinition: (name) => (name === "tmux_agent_manager" ? toolDef : undefined),
+			createExtensionContext: () => fauxCtx,
+			resolveManagedLaneId: () => undefined,
+			getGoalId: () => "g1",
+			createLaneWorktree: async () => ({ skipReason: "max_lanes_reached" }),
+		};
+
+		const outcome = await dispatchTmuxWorker(deps, { requirementId: "req-1", instructions: "do it" });
+		expect(outcome.laneId).toBeUndefined();
+		expect(outcome.skipReason).toBe("worktree_create_failed");
+		expect(toolExecuted).toBe(false);
+	});
+
+	it("without a createLaneWorktree dep, fire_task params stay byte-identical (no cwd/worktreeLane)", async () => {
+		let capturedParams: unknown;
+		const toolDef = fauxTmuxTool(async (_toolCallId, params) => {
+			capturedParams = params;
+			return {
+				content: [{ type: "text" as const, text: "launched" }],
+				details: { job: { id: "job1", agents: [{ id: "goal-worker-1" }] } },
+			};
+		});
+
+		const deps: TmuxDispatchDeps = {
+			getToolDefinition: (name) => (name === "tmux_agent_manager" ? toolDef : undefined),
+			createExtensionContext: () => fauxCtx,
+			resolveManagedLaneId: () => "tmux-worker-1",
+			getGoalId: () => "g1",
+		};
+
+		const outcome = await dispatchTmuxWorker(deps, { requirementId: "req-1", instructions: "do it" });
+		expect(outcome.laneId).toBe("tmux-worker-1");
+		const params = capturedParams as { agents: Array<Record<string, unknown>> };
+		expect(params.agents[0]).toEqual({ provider: "pi", name: "goal-worker" });
+	});
+
 	it("classifyDispatchError maps the stable no-standing-grant substring; every other failure is tmux_dispatch_failed", () => {
 		expect(classifyDispatchError(new Error("no standing grant for tmux dispatch; run grant_dispatch first"))).toBe(
 			"no_standing_grant",

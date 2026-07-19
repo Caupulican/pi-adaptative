@@ -285,6 +285,126 @@ describe("Phase 10A: Goal Continuation Controller", () => {
 		});
 	});
 
+	describe("worktree-sync continuation directives (lane_sync_conflict / lane_sync_required)", () => {
+		function seedBoundRequirement(laneId: string) {
+			let state = createGoalState({ goalId: "g1", userGoal: "Test", now: "T0" });
+			state = applyGoalEvent(state, { type: "add_requirement", id: "req-1", text: "Req 1", now: "T0" });
+			state = applyGoalEvent(state, {
+				type: "dispatch_worker",
+				id: "req-1",
+				instructions: "do it",
+				laneId,
+				now: "T1",
+			});
+			return state;
+		}
+
+		it("with laneSyncConflictLaneKeys/syncRequiredLaneKeys omitted, behavior is byte-identical to before these inputs existed", () => {
+			const state = seedBoundRequirement("lane-1");
+			const decision = evaluateGoalContinuation({
+				state,
+				settings: { maxStallTurns: 3 },
+				inFlightGoalLaneIds: new Set(["lane-1"]),
+			});
+			expect(decision.action).toBe("waiting");
+			expect(decision.reasonCode).toBe("worker_in_flight");
+		});
+
+		it("with the sets present but empty, behavior is unchanged", () => {
+			const state = seedBoundRequirement("lane-1");
+			const decision = evaluateGoalContinuation({
+				state,
+				settings: { maxStallTurns: 3 },
+				inFlightGoalLaneIds: new Set(["lane-1"]),
+				laneSyncConflictLaneKeys: new Set(),
+				syncRequiredLaneKeys: new Set(),
+			});
+			expect(decision.action).toBe("waiting");
+			expect(decision.reasonCode).toBe("worker_in_flight");
+		});
+
+		it("a bound requirement's lane in laneSyncConflictLaneKeys drives 'continue'/'lane_sync_conflict', naming the requirement", () => {
+			const state = seedBoundRequirement("lane-1");
+			const decision = evaluateGoalContinuation({
+				state,
+				settings: { maxStallTurns: 3 },
+				laneSyncConflictLaneKeys: new Set(["lane-1"]),
+			});
+			expect(decision.action).toBe("continue");
+			expect(decision.reasonCode).toBe("lane_sync_conflict");
+			expect(decision.message).toContain("req-1");
+		});
+
+		it("a bound requirement's lane in syncRequiredLaneKeys drives 'continue'/'lane_sync_required', naming the requirement", () => {
+			const state = seedBoundRequirement("lane-1");
+			const decision = evaluateGoalContinuation({
+				state,
+				settings: { maxStallTurns: 3 },
+				syncRequiredLaneKeys: new Set(["lane-1"]),
+			});
+			expect(decision.action).toBe("continue");
+			expect(decision.reasonCode).toBe("lane_sync_required");
+			expect(decision.message).toContain("req-1");
+		});
+
+		it("conflict takes precedence over sync-required when the same bound lane appears in both sets", () => {
+			const state = seedBoundRequirement("lane-1");
+			const decision = evaluateGoalContinuation({
+				state,
+				settings: { maxStallTurns: 3 },
+				laneSyncConflictLaneKeys: new Set(["lane-1"]),
+				syncRequiredLaneKeys: new Set(["lane-1"]),
+			});
+			expect(decision.reasonCode).toBe("lane_sync_conflict");
+		});
+
+		it("lane_sync_required is evaluated BEFORE the waiting branch: an in-flight bound lane that is also stale gets the sync directive, not 'waiting'", () => {
+			const state = seedBoundRequirement("lane-1");
+			const decision = evaluateGoalContinuation({
+				state,
+				settings: { maxStallTurns: 3 },
+				inFlightGoalLaneIds: new Set(["lane-1"]),
+				syncRequiredLaneKeys: new Set(["lane-1"]),
+			});
+			expect(decision.action).toBe("continue");
+			expect(decision.reasonCode).toBe("lane_sync_required");
+		});
+
+		it("a lane key that does not match any open requirement's boundLaneId has no effect", () => {
+			const state = seedBoundRequirement("lane-1");
+			const decision = evaluateGoalContinuation({
+				state,
+				settings: { maxStallTurns: 3 },
+				syncRequiredLaneKeys: new Set(["some-other-lane"]),
+			});
+			expect(decision.action).toBe("continue");
+			expect(decision.reasonCode).toBe("goal_active");
+		});
+
+		it("a requirement that is no longer open never triggers the directive even if its stale boundLaneId still matches", () => {
+			let state = createGoalState({ goalId: "g1", userGoal: "Test", now: "T0" });
+			state = applyGoalEvent(state, { type: "add_requirement", id: "req-1", text: "Req 1", now: "T0" });
+			state = applyGoalEvent(state, { type: "add_requirement", id: "req-2", text: "Req 2", now: "T0" });
+			state = applyGoalEvent(state, {
+				type: "dispatch_worker",
+				id: "req-1",
+				instructions: "do it",
+				laneId: "lane-1",
+				now: "T1",
+			});
+			state = applyGoalEvent(state, { type: "satisfy_requirement", id: "req-1", evidenceIds: [], now: "T2" });
+
+			const decision = evaluateGoalContinuation({
+				state,
+				settings: { maxStallTurns: 3 },
+				syncRequiredLaneKeys: new Set(["lane-1"]),
+			});
+			expect(decision.action).toBe("continue");
+			expect(decision.reasonCode).toBe("goal_active");
+			expect(decision.openRequirementIds).toEqual(["req-2"]);
+		});
+	});
+
 	it("helper does not mutate state or requirements", () => {
 		let state = createGoalState({ goalId: "g1", userGoal: "Test", now: "T0" });
 		state = applyGoalEvent(state, { type: "add_requirement", id: "req-1", text: "Req 1", now: "T0" });

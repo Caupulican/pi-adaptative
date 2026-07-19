@@ -295,6 +295,115 @@ describe("Phase 10B: Goal Runtime Snapshot", () => {
 		});
 	});
 
+	describe("worktree-sync lane status wired through buildGoalRuntimeSnapshot", () => {
+		function seedBoundRequirement(sessionManager: SessionManager, laneId: string) {
+			let state = createGoalState({ goalId: "g1", userGoal: "Task", now: "T0" });
+			state = applyGoalEvent(state, { type: "add_requirement", id: "req-1", text: "Req", now: "T0" });
+			state = applyGoalEvent(state, {
+				type: "dispatch_worker",
+				id: "req-1",
+				instructions: "do it",
+				laneId,
+				now: "T1",
+			});
+			appendGoalStateSnapshot(sessionManager, state);
+		}
+
+		it("omitted worktreeLaneStatus: requirementWorktreeStates is undefined and continuation is unaffected", () => {
+			const sessionManager = SessionManager.inMemory();
+			seedBoundRequirement(sessionManager, "lane-1");
+
+			const snapshot = buildGoalRuntimeSnapshot({
+				sessionManager,
+				settings: { maxStallTurns: 3 },
+			});
+
+			expect(snapshot.requirementWorktreeStates).toBeUndefined();
+			expect(snapshot.continuation.action).toBe("continue");
+			expect(snapshot.continuation.reasonCode).toBe("goal_active");
+		});
+
+		it("a syncRequired lane status entry surfaces requirementWorktreeStates and drives reasonCode lane_sync_required", () => {
+			const sessionManager = SessionManager.inMemory();
+			seedBoundRequirement(sessionManager, "lane-1");
+
+			const snapshot = buildGoalRuntimeSnapshot({
+				sessionManager,
+				settings: { maxStallTurns: 3 },
+				worktreeLaneStatus: [
+					{
+						laneKey: "g1-1",
+						boundLaneId: "lane-1",
+						fresh: false,
+						stale: true,
+						syncRequired: true,
+						rebaseInProgress: false,
+					},
+				],
+			});
+
+			expect(snapshot.requirementWorktreeStates).toEqual([
+				{
+					requirementId: "req-1",
+					laneKey: "g1-1",
+					fresh: false,
+					stale: true,
+					syncRequired: true,
+					rebaseInProgress: false,
+				},
+			]);
+			expect(snapshot.continuation.action).toBe("continue");
+			expect(snapshot.continuation.reasonCode).toBe("lane_sync_required");
+		});
+
+		it("a rebaseInProgress lane status entry drives reasonCode lane_sync_conflict (takes precedence over sync_required)", () => {
+			const sessionManager = SessionManager.inMemory();
+			seedBoundRequirement(sessionManager, "lane-1");
+
+			const snapshot = buildGoalRuntimeSnapshot({
+				sessionManager,
+				settings: { maxStallTurns: 3 },
+				worktreeLaneStatus: [
+					{
+						laneKey: "g1-1",
+						boundLaneId: "lane-1",
+						fresh: false,
+						stale: true,
+						syncRequired: true,
+						rebaseInProgress: true,
+					},
+				],
+			});
+
+			expect(snapshot.continuation.action).toBe("continue");
+			expect(snapshot.continuation.reasonCode).toBe("lane_sync_conflict");
+		});
+
+		it("a worktreeLaneStatus entry whose boundLaneId matches nothing leaves requirementWorktreeStates empty and does not affect continuation", () => {
+			const sessionManager = SessionManager.inMemory();
+			seedBoundRequirement(sessionManager, "lane-1");
+
+			const snapshot = buildGoalRuntimeSnapshot({
+				sessionManager,
+				settings: { maxStallTurns: 3 },
+				worktreeLaneStatus: [
+					{
+						laneKey: "other-1",
+						boundLaneId: "some-other-lane",
+						fresh: true,
+						stale: false,
+						syncRequired: false,
+						rebaseInProgress: false,
+					},
+				],
+			});
+
+			expect(snapshot.requirementWorktreeStates).toEqual([]);
+			expect(snapshot.continuation.action).toBe("continue");
+			expect(snapshot.continuation.reasonCode).toBe("goal_active");
+		});
+	});
+
 	it("AgentSession getGoalRuntimeSnapshot returns aggregate using in-memory SessionManager", () => {
 		const sessionManager = SessionManager.inMemory();
 		const settingsManager = SettingsManager.inMemory();

@@ -1142,6 +1142,13 @@ export interface ManagedLaneEvent {
 	status?: string;
 	reasonCode?: string;
 	changedFiles?: readonly string[];
+	/**
+	 * Worktree-sync lane key this managed lane was dispatched into, present only on `phase:"dispatch"`
+	 * when the launched agent carried a `worktreeLane` (a lane-first tmux dispatch -- see
+	 * `tmux-dispatch.ts`'s `createLaneWorktree`). A CALLER CLAIM like every other field here; the host
+	 * stamps it verbatim onto the minted `LaneRecord.worktreeLaneKey` with no independent verification.
+	 */
+	worktreeLaneKey?: string;
 	/** Caller-supplied context for this report (e.g. `{ turn }` on a follow-up dispatch). Free-form —
 	 * never assume a particular shape host-side. */
 	request?: unknown;

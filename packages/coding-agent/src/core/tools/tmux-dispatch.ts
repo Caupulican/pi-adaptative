@@ -27,6 +27,20 @@ export interface TmuxDispatchDeps {
 	 * (`ManagedLaneEvent.goalId`) -- `undefined` when no goal is active (dispatch still proceeds;
 	 * the resulting lane is simply untagged). */
 	getGoalId: () => string | undefined;
+	/**
+	 * Worktree-sync lane-first dispatch (opt-in -- wired ONLY inside `runtime-builder.ts`'s
+	 * `worktreeSync.enabled` block, via the engine's `createLane`): when present, `dispatchTmuxWorker`
+	 * creates a fresh worktree-sync lane for this requirement BEFORE issuing any `fire_task` call, so
+	 * a creation refusal aborts cleanly before any tmux/pane side effect ever runs -- never a
+	 * half-made lane, never a fabricated worktree. On success the dispatched agent's `cwd` is the new
+	 * lane worktree and it carries `worktreeLane` (threaded to the tmux extension's launch profile --
+	 * see `dispatch-grant.ts`'s `buildLaunchProfileFlags`). Absent dep -> existing byte-identical
+	 * `params.agents` (no `cwd`/`worktreeLane`), exactly as before this field existed.
+	 */
+	createLaneWorktree?: (args: {
+		goalId?: string;
+		requirementId: string;
+	}) => Promise<{ laneKey: string; worktreePath: string } | { skipReason: string }>;
 }
 
 /**
@@ -69,6 +83,20 @@ export async function dispatchTmuxWorker(
 
 	const goalId = deps.getGoalId();
 	const ctx = deps.createExtensionContext();
+
+	// Lane-first: when worktree-sync is wired, create the lane BEFORE any fire_task call so a
+	// creation refusal (max lanes, invalid key, git error, ...) aborts cleanly with no tmux/pane side
+	// effect ever having run. The specific engine refusal code is deliberately collapsed onto the one
+	// stable `worktree_create_failed` skip reason -- same narrow `{laneId?, skipReason?}` contract
+	// every other skip path here already uses; the engine's own detail lives in its audit log, not in
+	// this narrow return.
+	let laneWorktree: { laneKey: string; worktreePath: string } | undefined;
+	if (deps.createLaneWorktree) {
+		const created = await deps.createLaneWorktree({ goalId, requirementId: args.requirementId });
+		if ("skipReason" in created) return { skipReason: "worktree_create_failed" };
+		laneWorktree = created;
+	}
+
 	// Single-agent 1:1 mapping: a bare fire_task with no `agents` defaults to a THREE-agent
 	// team (pi/agy/codex -- `DEFAULT_AGENT_PROVIDERS`), which would mint three lanes for one
 	// requirement. A goal-bound dispatch must map to exactly one lane, so `agents` is always
@@ -77,7 +105,16 @@ export async function dispatchTmuxWorker(
 		action: "fire_task",
 		task: args.instructions,
 		goalId,
-		agents: [{ provider: "pi", name: "goal-worker" }],
+		agents: [
+			laneWorktree
+				? {
+						provider: "pi",
+						name: "goal-worker",
+						cwd: laneWorktree.worktreePath,
+						worktreeLane: laneWorktree.laneKey,
+					}
+				: { provider: "pi", name: "goal-worker" },
+		],
 	};
 	const toolCallId = `goal-dispatch:${goalId ?? "?"}:${args.requirementId}`;
 

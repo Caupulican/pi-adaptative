@@ -22,6 +22,13 @@ export interface LaneRecord {
 	costUsd?: number;
 	goalId?: string;
 	evidenceEntryId?: string;
+	/**
+	 * Worktree-sync lane key this lane record was correlated to at dispatch (set only for a
+	 * tmux-worker lane whose fire_task carried a `worktreeLane` -- see `tmux-dispatch.ts`'s
+	 * `createLaneWorktree`). Optional so every pre-existing record/caller keeps compiling and
+	 * behaving unchanged; `undefined` for a lane never bound to a worktree-sync lane.
+	 */
+	worktreeLaneKey?: string;
 }
 
 const LANE_TYPES: readonly string[] = ["research", "worker", "learning", "tmux-worker"];
@@ -50,6 +57,7 @@ export function isLaneRecord(value: unknown): value is LaneRecord {
 	}
 	if (!isOptionalString(record.goalId)) return false;
 	if (!isOptionalString(record.evidenceEntryId)) return false;
+	if (!isOptionalString(record.worktreeLaneKey)) return false;
 	return true;
 }
 
@@ -92,7 +100,7 @@ export class LaneTracker {
 		}
 	}
 
-	enqueue(args: { type: LaneType; goalId?: string }): LaneRecord {
+	enqueue(args: { type: LaneType; goalId?: string; worktreeLaneKey?: string }): LaneRecord {
 		const laneId = `${args.type}-${this._nextLaneNumber++}`;
 		const record: LaneRecord = {
 			laneId,
@@ -100,6 +108,7 @@ export class LaneTracker {
 			status: "queued",
 		};
 		if (args.goalId !== undefined) record.goalId = args.goalId;
+		if (args.worktreeLaneKey !== undefined) record.worktreeLaneKey = args.worktreeLaneKey;
 		this._lanes.set(laneId, record);
 		return { ...record };
 	}
@@ -112,7 +121,7 @@ export class LaneTracker {
 		return { ...next };
 	}
 
-	start(args: { type: LaneType; goalId?: string }): LaneRecord {
+	start(args: { type: LaneType; goalId?: string; worktreeLaneKey?: string }): LaneRecord {
 		const record = this.enqueue(args);
 		return this.markRunning(record.laneId) as LaneRecord;
 	}

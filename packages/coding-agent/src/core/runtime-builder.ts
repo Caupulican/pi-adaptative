@@ -106,6 +106,7 @@ import { createTaskStepsToolDefinition } from "./tools/task-steps.ts";
 import { dispatchTmuxWorker } from "./tools/tmux-dispatch.ts";
 import { createToolDefinitionFromAgentTool } from "./tools/tool-definition-wrapper.ts";
 import { createWorktreeSyncToolDefinition } from "./tools/worktree-sync.ts";
+import { createLane } from "./worktree-sync/git-engine.ts";
 import { WorktreeLaneGate } from "./worktree-sync/lane-gate.ts";
 import { buildWorktreeSyncEngineDeps, getBoundWorktreeLaneKey } from "./worktree-sync/runtime.ts";
 
@@ -731,6 +732,18 @@ export class RuntimeBuilder {
 			)) {
 				this._baseToolDefinitions.set(definition.name, definition);
 			}
+			// Hoisted above the goal-tool registration (rather than declared only inside the
+			// worktreeSync-enabled block further below) so the SAME settings/deps factory backs both
+			// the goal->tmux lane-first dispatch dep (`createLaneWorktree`, immediately below) and the
+			// `worktree_sync` tool registration later in this method -- one source of truth, no drift.
+			const worktreeSyncSettings = settingsManager.getWorktreeSyncSettings();
+			const worktreeSyncEngineDeps = () =>
+				buildWorktreeSyncEngineDeps({
+					cwd: this.deps.getCwd(),
+					agentDir: this.deps.getAgentDir(),
+					settingsManager: this.deps.getSettingsManager(),
+					sessionId: this.deps.getSessionManager().getSessionId(),
+				});
 			const goalToolDefinition = createGoalToolDefinition({
 				getGoalState: () => this.deps.getGoalStateSnapshot(),
 				saveGoalState: (state) => {
@@ -761,6 +774,21 @@ export class RuntimeBuilder {
 							createExtensionContext: () => this.deps.getExtensionRunner().createContext(),
 							resolveManagedLaneId: (id) => this.deps.resolveManagedLaneId(id),
 							getGoalId: () => this.deps.getGoalStateSnapshot()?.goalId,
+							// Lane-first dispatch, wired ONLY when worktree-sync is enabled -- absent otherwise,
+							// so a disabled/default session gets the existing byte-identical fire_task params.
+							createLaneWorktree: worktreeSyncSettings.enabled
+								? async (laneArgs) => {
+										const created = await createLane(worktreeSyncEngineDeps(), {
+											...(laneArgs.goalId !== undefined ? { goalId: laneArgs.goalId } : {}),
+											requirementId: laneArgs.requirementId,
+										});
+										// Never fake a lane: any non-"ok" engine code (max lanes, invalid key, git
+										// error, ...) is refused, mapped by the caller onto the stable
+										// "worktree_create_failed" skip reason before any fire_task call runs.
+										if (created.code !== "ok") return { skipReason: created.code };
+										return { laneKey: created.lane.laneKey, worktreePath: created.lane.worktreePath };
+									}
+								: undefined,
 						},
 						args,
 					),
@@ -849,16 +877,10 @@ export class RuntimeBuilder {
 			// Worktree-sync (opt-in): the closed-action lane workflow tool, plus -- for a session
 			// launched lane-bound (PI_WORKTREE_LANE) -- the G8/G10 lane gate wrapped UNDER the
 			// file-mutation tools (edit/write/bash), so a sync_required lane fails closed with the
-			// exact recovery step rather than relying on prompt compliance.
-			const worktreeSyncSettings = settingsManager.getWorktreeSyncSettings();
+			// exact recovery step rather than relying on prompt compliance. `worktreeSyncSettings` /
+			// `worktreeSyncEngineDeps` are hoisted above (declared before the goal-tool registration)
+			// so the goal->tmux lane-first dispatch dep and this tool share one settings/deps source.
 			if (worktreeSyncSettings.enabled) {
-				const worktreeSyncEngineDeps = () =>
-					buildWorktreeSyncEngineDeps({
-						cwd: this.deps.getCwd(),
-						agentDir: this.deps.getAgentDir(),
-						settingsManager: this.deps.getSettingsManager(),
-						sessionId: this.deps.getSessionManager().getSessionId(),
-					});
 				const worktreeSyncToolDefinition = createWorktreeSyncToolDefinition({
 					engineDeps: worktreeSyncEngineDeps,
 					settings: () => this.deps.getSettingsManager().getWorktreeSyncSettings(),

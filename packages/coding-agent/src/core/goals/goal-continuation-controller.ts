@@ -11,7 +11,9 @@ export type GoalContinuationReasonCode =
 	| "blocked_requirements_present"
 	| "missing_goal_state"
 	| "worker_in_flight"
-	| "worker_wait_timeout";
+	| "worker_wait_timeout"
+	| "lane_sync_conflict"
+	| "lane_sync_required";
 
 export interface GoalContinuationDecision {
 	action: GoalContinuationAction;
@@ -57,6 +59,27 @@ export function evaluateGoalContinuation(args: {
 	 * goal with a mix of fresh and stale bindings keeps waiting on the fresh one.
 	 */
 	maxWorkerWaitMs?: number;
+	/**
+	 * Bound lanes (`Requirement.boundLaneId` -- SAME id-space as `inFlightGoalLaneIds`, not the raw
+	 * worktree-sync `laneKey`) whose worktree-sync lane has a rebase stopped on conflicts
+	 * (`LaneFacts.rebaseInProgress`). The caller (`goal-runtime-snapshot.ts`) is responsible for
+	 * translating live per-worktree-lane status into this id-space by matching each status entry's
+	 * own `boundLaneId` against the requirement -- this function stays pure and never resolves a
+	 * worktree laneKey itself, exactly like `inFlightGoalLaneIds` never resolves a tmux job id.
+	 * Checked BEFORE the waiting branch (see `lane_sync_conflict` below): a stalled-but-conflicted
+	 * worker must get the resolve directive, not silently wait forever. Optional so every
+	 * pre-existing caller keeps compiling and behaving byte-identically when omitted or empty.
+	 */
+	laneSyncConflictLaneKeys?: ReadonlySet<string>;
+	/**
+	 * Bound lanes (`Requirement.boundLaneId`, same id-space note as {@link laneSyncConflictLaneKeys})
+	 * whose worktree-sync lane is stale and must sync with current main before further work
+	 * (`sync_required`, i.e. NOT already covered by `laneSyncConflictLaneKeys` -- a lane with a
+	 * rebase in progress is reported as a conflict, never double-counted here). Checked BEFORE the
+	 * waiting branch, same precedence rationale as above. Optional so every pre-existing caller keeps
+	 * compiling and behaving byte-identically when omitted or empty.
+	 */
+	syncRequiredLaneKeys?: ReadonlySet<string>;
 }): GoalContinuationDecision {
 	if (!args.state) {
 		return {
@@ -132,6 +155,50 @@ export function evaluateGoalContinuation(args: {
 			action: "finalize",
 			reasonCode: "no_open_requirements",
 			message: "There are no open requirements left to satisfy.",
+		};
+	}
+
+	// Worktree-sync directives take precedence over the "waiting" branch below: a worker whose bound
+	// lane is conflicted or stale is NOT merely in-flight-and-quiet -- it needs an explicit directive
+	// (resolve conflicts, or sync) delivered through the continuation prompt, and a stalled-but-stale
+	// worker must never be left waiting indefinitely for a sync it was never told to run. Conflict is
+	// checked first: a lane with a rebase already stopped on conflicts cannot usefully be told to
+	// "sync" again (that lane's `sync_required` flag is never set while `rebaseInProgress` is true --
+	// see `goal-runtime-snapshot.ts` -- so the two sets below are disjoint by construction, not by a
+	// priority check here).
+	const laneSyncConflictLaneKeys = args.laneSyncConflictLaneKeys;
+	const conflictedRequirements = laneSyncConflictLaneKeys
+		? state.requirements.filter(
+				(requirement) =>
+					requirement.status === "open" &&
+					requirement.boundLaneId !== undefined &&
+					laneSyncConflictLaneKeys.has(requirement.boundLaneId),
+			)
+		: [];
+	if (conflictedRequirements.length > 0) {
+		return {
+			...baseDecision,
+			action: "continue",
+			reasonCode: "lane_sync_conflict",
+			message: `Requirement(s) ${conflictedRequirements.map((requirement) => requirement.id).join(", ")} are bound to a worktree-sync lane with a rebase stopped on conflicts; resolve via worktree_sync action:"continue" (or "abort_sync") before this goal can progress further.`,
+		};
+	}
+
+	const syncRequiredLaneKeys = args.syncRequiredLaneKeys;
+	const syncRequiredRequirements = syncRequiredLaneKeys
+		? state.requirements.filter(
+				(requirement) =>
+					requirement.status === "open" &&
+					requirement.boundLaneId !== undefined &&
+					syncRequiredLaneKeys.has(requirement.boundLaneId),
+			)
+		: [];
+	if (syncRequiredRequirements.length > 0) {
+		return {
+			...baseDecision,
+			action: "continue",
+			reasonCode: "lane_sync_required",
+			message: `Requirement(s) ${syncRequiredRequirements.map((requirement) => requirement.id).join(", ")} are bound to a worktree-sync lane that must rebase current main before further work; deliver worktree_sync action:"sync" to the bound worker, or run it directly for an idle lane.`,
 		};
 	}
 

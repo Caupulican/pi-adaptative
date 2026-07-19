@@ -150,7 +150,9 @@ export interface GoalToolDependencies {
 	 * {@link startWorkerDelegation} in-process path runs, byte-identical to before this field existed.
 	 * The honest skip-reason vocabulary this can return: `tmux_extension_not_loaded`,
 	 * `no_standing_grant` (the owner has not authorized unattended tmux dispatch),
-	 * `tmux_dispatch_failed`, `tmux_dispatch_incomplete`, `lane_correlation_failed`.
+	 * `tmux_dispatch_failed`, `tmux_dispatch_incomplete`, `lane_correlation_failed`,
+	 * `worktree_create_failed` (worktree-sync is enabled but the lane-first `create_lane` call was
+	 * refused -- e.g. max lanes reached -- so no fire_task call was ever attempted).
 	 */
 	dispatchTmuxWorker?: (args: {
 		requirementId: string;
