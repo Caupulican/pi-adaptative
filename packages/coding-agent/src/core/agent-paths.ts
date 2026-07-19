@@ -16,6 +16,7 @@
  *   work/      transient/scratch, delegated to work-directory.ts (tenant/run/lease)        -- re-exported below
  *   runtimes/<kind>  models/<kind>                                                         -- runtimesDir/modelsDir
  *   npm/ git/ sessions/                                                                    -- npmDir/gitDir/sessionsDir
+ *   worktrees/<repo-slug>/<laneKey>   durable lane checkouts (core/worktree-sync)           -- worktreesDir
  * ```
  *
  * Every accessor takes `agentDir` as an explicit, required first argument -- deliberately mirroring
@@ -85,6 +86,16 @@ export function sessionsDir(agentDir: string): string {
 /** `<agentDir>/npm` -- managed npm package installs. */
 export function npmDir(agentDir: string): string {
 	return join(agentDir, "npm");
+}
+
+/**
+ * `<agentDir>/worktrees` -- lane worktree checkouts for the worktree-sync subsystem
+ * (`core/worktree-sync/`), grouped as `worktrees/<repo-slug>/<laneKey>`. These hold REAL
+ * uncommitted agent work, so they are durable like `state/` -- never under transient `work/`,
+ * whose retention would silently eat in-progress code.
+ */
+export function worktreesDir(agentDir: string): string {
+	return join(agentDir, "worktrees");
 }
 
 /** `<agentDir>/git` -- managed git-sourced package installs. */
