@@ -1,11 +1,6 @@
 import type { Tool, ToolCall } from "../../types.ts";
 
-export type TextToolProtocolParseFailure =
-	| "overlap"
-	| "mixed-prose"
-	| "unrecognized"
-	| "unknown-tool"
-	| "validation-failed";
+export type TextToolProtocolParseFailure = "overlap" | "unrecognized" | "unknown-tool" | "validation-failed";
 
 export interface ParsedTextToolCalls {
 	calls: ToolCall[];
@@ -172,6 +167,32 @@ function hasOverlap(matches: readonly EnvelopeMatch[]): boolean {
 		previousEnd = match.end;
 	}
 	return false;
+}
+
+interface ParsedMatch {
+	match: EnvelopeMatch;
+	call: ToolCall;
+}
+
+/**
+ * Parallel-call parity: a batch is never discarded wholesale over one overlap. Selects the
+ * MAXIMUM-cardinality set of non-overlapping, successfully-parsed envelopes - the classic
+ * interval-scheduling-maximization greedy (sort by end, keep whatever doesn't conflict with what's
+ * already kept). This is deterministic and optimal, not a heuristic guess: when two envelopes
+ * genuinely overlap (one nested in a malformed wrapper, most often), the one that ends first is
+ * the one that leaves room for the most other calls, so it wins; the loser's byte range is simply
+ * never consumed and its text survives as prose via {@link remainingText}.
+ */
+function selectNonOverlappingParsedMatches(entries: readonly ParsedMatch[]): ParsedMatch[] {
+	const byEndThenStart = [...entries].sort((a, b) => a.match.end - b.match.end || a.match.start - b.match.start);
+	const kept: ParsedMatch[] = [];
+	let previousEnd = -1;
+	for (const entry of byEndThenStart) {
+		if (entry.match.start < previousEnd) continue;
+		kept.push(entry);
+		previousEnd = entry.match.end;
+	}
+	return kept.sort((a, b) => a.match.start - b.match.start);
 }
 
 function remainingText(text: string, matches: readonly EnvelopeMatch[]): string {
@@ -366,7 +387,12 @@ function formatFunctionXmlEnvelope(toolName: string, argsJson: string): string {
 	return `<function name="${escapeAttribute(toolName)}">${params}</function>`;
 }
 
-function formatVariantEnvelope(variant: TextToolProtocolVariant, toolName: string, argsJson: string): string {
+/**
+ * Renders one call as the wire text for `variant`. Exported read-only for the history round-trip
+ * render: it reuses this so a prior text-protocol call is echoed back to the model in the
+ * exact dialect the primer taught it, instead of a second parallel formatting path.
+ */
+export function formatVariantEnvelope(variant: TextToolProtocolVariant, toolName: string, argsJson: string): string {
 	if (variant === "tool-call") return `<tool_call>{"name":"${toolName}","arguments":${argsJson}}</tool_call>`;
 	if (variant === "fenced-json") return `\`\`\`tool_call\n{"name":"${toolName}","arguments":${argsJson}}\n\`\`\``;
 	if (variant === "function-xml") return formatFunctionXmlEnvelope(toolName, argsJson);
@@ -504,15 +530,12 @@ function exampleTools(tools: readonly Tool[]): Tool[] {
 
 function protocolHeader(variant: TextToolProtocolVariant): string[] {
 	return [
-		"Text tool-call protocol is enabled.",
-		"When calling tools, output only one or more envelopes and no prose:",
+		"Text tool-call protocol is enabled. To call a tool, emit an envelope in exactly this shape:",
 		formatVariantEnvelope(variant, "TOOL", '{"arg":"value"}'),
-		"Arguments must be valid JSON objects. Use double quotes for JSON keys and string values. Arrays are JSON arrays [ ], never quoted strings. Omit optional args you do not need - do not send null.",
-		"User requests about files, directories, searches, edits, writes, or shell commands require a tool envelope first; do not describe results yourself.",
-		'If the user asks to read example.txt, output exactly: <pi:call name="read">{"path":"example.txt"}</pi:call>',
-		'For any request to read a file path, call read with {"path":"THE_PATH"}; never output {"file_path":..., "content":...} or invented file contents.',
-		"Never write raw shell commands such as read -t PATH, cat PATH, or ls PATH; use a tool-call envelope instead.",
-		"Never output markdown code blocks, raw shell commands, file paths, or invented tool results instead of a tool call; use the envelope and wait for the real result.",
+		"Arguments are one JSON object: double-quoted keys/strings, arrays as [ ] (never a quoted string), optional args omitted rather than null.",
+		"Reasoning may appear as prose before an envelope, never inside one.",
+		"Emit several envelopes in one reply to call multiple tools in parallel; each is executed and answered on its own.",
+		"Files, directories, searches, edits, writes, and shell commands always go through a tool envelope - never type out shell commands, file paths, or invented results yourself.",
 	];
 }
 
@@ -536,13 +559,19 @@ export function parseTextToolCalls(text: string, knownTools: readonly Tool[]): P
 	if (knownTools.length === 0) return { calls: [], text, attempted: false };
 	const matches = findToolEnvelopes(text);
 	if (matches.length === 0) return { calls: [], text, attempted: false };
-	if (hasOverlap(matches)) return { calls: [], text, attempted: true, failure: "overlap" };
-	const remainder = remainingText(text, matches);
 	const names = [...knownToolNames(knownTools)];
-	const calls = matches
-		.map((match, index) => parseEnvelope(match, names, index + 1))
-		.filter((call): call is ToolCall => call !== undefined);
-	return calls.length > 0
-		? { calls, text: remainder.trim(), attempted: true }
-		: { calls: [], text, attempted: true, failure: "unrecognized" };
+	const parsed: ParsedMatch[] = [];
+	for (const [index, match] of matches.entries()) {
+		const call = parseEnvelope(match, names, index + 1);
+		if (call) parsed.push({ match, call });
+	}
+	const selected = selectNonOverlappingParsedMatches(parsed);
+	if (selected.length === 0) {
+		return { calls: [], text, attempted: true, failure: hasOverlap(matches) ? "overlap" : "unrecognized" };
+	}
+	const remainder = remainingText(
+		text,
+		selected.map((entry) => entry.match),
+	);
+	return { calls: selected.map((entry) => entry.call), text: remainder.trim(), attempted: true };
 }

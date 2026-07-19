@@ -87,7 +87,14 @@ function uniqueFailureModes(modes: Iterable<ToolRepairModeName>): ToolRepairFail
 	return uniqueModes.length > 0 ? uniqueModes : ["other"];
 }
 
-function getValidator(schema: Tool["parameters"]): ReturnType<typeof Compile> {
+/**
+ * Compiles (and caches) the TypeBox validator for a tool's parameter schema.
+ *
+ * This is the ONE validator compile-cache for the repair layer (decision D3, tool-call-repair
+ * doctrine): `repairer.ts` imports this instead of keeping a second cache over the same schema
+ * objects, so a schema is compiled once and both the validate and repair paths share the result.
+ */
+export function getValidator(schema: Tool["parameters"]): ReturnType<typeof Compile> {
 	const key = schema as object;
 	const cached = validatorCache.get(key);
 	if (cached) {

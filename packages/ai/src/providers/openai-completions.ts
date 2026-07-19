@@ -35,6 +35,11 @@ import { headersToRecord } from "../utils/headers.ts";
 import { parseStreamingJsonState } from "../utils/json-parse.ts";
 import { sanitizeSurrogates } from "../utils/sanitize-unicode.ts";
 import { createToolNameMap, type ToolNameMap } from "../utils/tool-names.ts";
+import { normalizeTextToolProtocolOptions } from "../utils/tool-repair/text-protocol.ts";
+import {
+	renderTextProtocolAssistantCall,
+	renderTextProtocolToolResult,
+} from "../utils/tool-repair/text-protocol-history.ts";
 import { isCloudflareProvider, resolveCloudflareBaseUrl } from "./cloudflare.ts";
 import { buildCopilotDynamicHeaders, hasCopilotVisionInput } from "./github-copilot-headers.ts";
 import { clampOpenAIPromptCacheKey } from "./openai-prompt-cache.ts";
@@ -581,7 +586,7 @@ function buildParams(
 	cacheRetention: CacheRetention = resolveCacheRetention(options?.cacheRetention),
 ) {
 	const toolNameMap = createToolNameMap(context.tools ?? []);
-	const messages = convertMessages(model, context, compat, toolNameMap);
+	const messages = convertMessages(model, context, compat, toolNameMap, options);
 	const cacheControl = getCompatCacheControl(compat, cacheRetention);
 
 	const params: OpenAI.Chat.Completions.ChatCompletionCreateParamsStreaming = {
@@ -830,8 +835,21 @@ export function convertMessages(
 	context: Context,
 	compat: ResolvedOpenAICompletionsCompat,
 	toolNameMap: ToolNameMap = createToolNameMap(context.tools ?? []),
+	options?: OpenAICompletionsOptions,
 ): ChatCompletionMessageParam[] {
 	const params: ChatCompletionMessageParam[] = [];
+
+	// Source-aware render: once a turn runs on the text tool-call protocol, a phone model
+	// never sees native tool_calls[]/role:"tool" - it only reads text turns. `textProtocolActive`
+	// covers the whole request (options.textToolCallProtocol, the normal case); a lone toolCall
+	// block tagged source:"text-protocol" (produced only by the LISTEN parser, never a real
+	// provider-issued call) is rendered as text regardless, since its synthetic id was never a
+	// valid tool_call_id in the first place. Native (non-text-protocol) requests take neither
+	// branch, so their serialization is byte-unchanged.
+	const textProtocolVariant = normalizeTextToolProtocolOptions(options?.textToolCallProtocol)?.variant ?? "tool-tag";
+	const textProtocolActive = normalizeTextToolProtocolOptions(options?.textToolCallProtocol) !== undefined;
+	const isTextProtocolCall = (toolCall: ToolCall): boolean =>
+		textProtocolActive || toolCall.source === "text-protocol";
 
 	const normalizeToolCallId = (id: string): string => {
 		// Handle pipe-separated IDs from OpenAI Responses API
@@ -849,6 +867,19 @@ export function convertMessages(
 	};
 
 	const transformedMessages = transformMessages(context.messages, model, (id) => normalizeToolCallId(id));
+
+	// Links a toolResult message to the call it answers by id (text-protocol has no wire
+	// tool_call_id of its own - the internal ToolCall.id / ToolResultMessage.toolCallId pairing
+	// is still exact, it just never reaches the wire once rendered as text).
+	const textProtocolCallIds = new Set<string>();
+	for (const historyMsg of transformedMessages) {
+		if (historyMsg.role !== "assistant") continue;
+		for (const block of historyMsg.content) {
+			if (block.type === "toolCall" && isTextProtocolCall(block)) {
+				textProtocolCallIds.add(block.id);
+			}
+		}
+	}
 
 	if (context.systemPrompt) {
 		const useDeveloperRole = model.reasoning && compat.supportsDeveloperRole;
@@ -954,7 +985,19 @@ export function convertMessages(
 				assistantMsg.content = assistantText;
 			}
 
-			const toolCalls = msg.content.filter(isToolCallBlock);
+			const toolCallBlocks = msg.content.filter(isToolCallBlock);
+			// A text-protocol call never becomes assistantMsg.tool_calls - a phone model that
+			// ignores native tool_calls would never see it. It is echoed into the text content
+			// instead, in the exact dialect the primer taught (formatVariantEnvelope), so the
+			// model reads its own prior call back the way it was taught to speak it.
+			const textProtocolCalls = toolCallBlocks.filter(isTextProtocolCall);
+			const toolCalls = toolCallBlocks.filter((tc) => !isTextProtocolCall(tc));
+			if (textProtocolCalls.length > 0) {
+				const renderedCalls = textProtocolCalls
+					.map((tc) => renderTextProtocolAssistantCall(tc, textProtocolVariant))
+					.join("\n");
+				assistantMsg.content = assistantText.length > 0 ? `${assistantText}\n${renderedCalls}` : renderedCalls;
+			}
 			if (toolCalls.length > 0) {
 				assistantMsg.tool_calls = toolCalls.map((tc) => ({
 					id: tc.id,
@@ -1000,29 +1043,40 @@ export function convertMessages(
 			params.push(assistantMsg);
 		} else if (msg.role === "toolResult") {
 			const imageBlocks: Array<{ type: "image_url"; image_url: { url: string } }> = [];
+			let pushedNativeToolResult = false;
 			let j = i;
 
 			for (; j < transformedMessages.length && transformedMessages[j].role === "toolResult"; j++) {
 				const toolMsg = transformedMessages[j] as ToolResultMessage;
 
-				// Extract text and image content
-				const textResult = joinTextContent(toolMsg.content);
-				const hasImages = toolMsg.content.some((c) => c.type === "image");
+				// The result for a call that was echoed as text (never a native tool_calls[]
+				// entry) is delivered the same way - as plain text, following the call it answers
+				// in conversation order, instead of role:"tool"/tool_call_id a phone model can't read.
+				if (textProtocolCallIds.has(toolMsg.toolCallId)) {
+					params.push({
+						role: "user",
+						content: sanitizeSurrogates(renderTextProtocolToolResult(toolMsg)),
+					});
+				} else {
+					// Extract text and image content
+					const textResult = joinTextContent(toolMsg.content);
 
-				// Always send tool result with text (or placeholder if only images)
-				const hasText = textResult.length > 0;
-				// Some providers require the 'name' field in tool results
-				const toolResultMsg: ChatCompletionToolMessageParam = {
-					role: "tool",
-					content: sanitizeSurrogates(hasText ? textResult : "(see attached image)"),
-					tool_call_id: toolMsg.toolCallId,
-				};
-				if (compat.requiresToolResultName && toolMsg.toolName) {
-					(toolResultMsg as any).name = toolMsg.toolName;
+					// Always send tool result with text (or placeholder if only images)
+					const hasText = textResult.length > 0;
+					// Some providers require the 'name' field in tool results
+					const toolResultMsg: ChatCompletionToolMessageParam = {
+						role: "tool",
+						content: sanitizeSurrogates(hasText ? textResult : "(see attached image)"),
+						tool_call_id: toolMsg.toolCallId,
+					};
+					if (compat.requiresToolResultName && toolMsg.toolName) {
+						(toolResultMsg as any).name = toolMsg.toolName;
+					}
+					params.push(toolResultMsg);
+					pushedNativeToolResult = true;
 				}
-				params.push(toolResultMsg);
 
-				if (hasImages && model.input.includes("image")) {
+				if (toolMsg.content.some((c) => c.type === "image") && model.input.includes("image")) {
 					for (const block of toolMsg.content) {
 						if (isImageContentBlock(block)) {
 							imageBlocks.push({
@@ -1058,7 +1112,7 @@ export function convertMessages(
 				});
 				lastRole = "user";
 			} else {
-				lastRole = "toolResult";
+				lastRole = pushedNativeToolResult ? "toolResult" : "user";
 			}
 			continue;
 		}

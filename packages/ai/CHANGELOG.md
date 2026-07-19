@@ -1,5 +1,18 @@
 ## [Unreleased]
 
+### Fixed
+
+- Fixed multi-turn tool use for local/managed models served over the text tool-call protocol ("phone"): a prior tool call and its result are now rendered as legible text in conversation history (echoed in the exact dialect the primer taught, with the result immediately after in call order) instead of native `tool_calls`/`role:"tool"` blocks a phone model never reads.
+- The text tool-call protocol primer is now injected exactly once, embedded in the system prompt (cache-stable across turns); the synthetic per-turn reminder message no longer duplicates the full primer text.
+- Live streaming no longer leaks raw text tool-call envelope markup (`<pi:call>`, `<tool_call>`, fenced `tool`/`json` blocks, `<function>`) before a call is confirmed complete; prose is forwarded as soon as it is provably outside an envelope, and the terminal `done` event remains authoritative for final content.
+- A text tool-call batch with overlapping envelopes now salvages the maximum non-overlapping set of successfully parsed calls instead of discarding the whole batch.
+- Tightened the text tool-call protocol primer header (collapsed redundant repeated negatives) while teaching two additional rules — parallel tool calls in one reply, and reasoning allowed before an envelope (replacing an absolute "no prose" rule) — net shorter despite teaching more; removed the dead `"mixed-prose"` parse-failure reason, which the parser never produced.
+- Bounded the tool-argument repair loop to a fixed pass count (`MAX_REPAIR_PASSES = 3`; was effectively unbounded at 8, while the deepest tested repair cascade converges in 2 passes), unified the two separate validator compile-caches into one shared cache, and precompiled the per-schema property-salvage regex matchers instead of rebuilding them on every attempt.
+
+### Performance
+
+- Added a microbench gate for tool-argument repair: the clean (already-valid) path stays within noise of a bare schema check, and the repaired path stays under a fixed budget.
+
 ## [0.81.38] - 2026-07-16
 
 ## [0.81.37] - 2026-07-16

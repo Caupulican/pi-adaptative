@@ -3,8 +3,24 @@ import { afterEach, describe, expect, it } from "vitest";
 import { complete, fauxAssistantMessage, fauxThinking, registerFauxProvider } from "../src/index.ts";
 import type { Context, Tool } from "../src/types.ts";
 import { TOOL_REPAIR_MODE_NAMES } from "../src/utils/tool-repair/registry.ts";
-import { generateTextToolProtocolPrimer, parseTextToolCalls } from "../src/utils/tool-repair/text-protocol.ts";
+import {
+	generateTextToolProtocolPrimer,
+	normalizeTextToolProtocolOptions,
+	parseTextToolCalls,
+} from "../src/utils/tool-repair/text-protocol.ts";
 import { validateToolArguments } from "../src/utils/validation.ts";
+
+function countOccurrences(haystack: string, needle: string): number {
+	if (!needle) return 0;
+	let count = 0;
+	let index = 0;
+	while (true) {
+		index = haystack.indexOf(needle, index);
+		if (index === -1) return count;
+		count++;
+		index += needle.length;
+	}
+}
 
 function makeTool(name = "echo"): Tool {
 	return {
@@ -237,7 +253,7 @@ describe("text tool-call protocol", () => {
 		expect(events).toContainEqual({ outcome: "repaired", repairsApplied: ["jsonStringParse"] });
 	});
 
-	it("leaves plain prose as text and rejects overlapping envelopes", () => {
+	it("leaves plain prose as text and salvages the non-overlapping call from an ambiguous nested envelope", () => {
 		const tools = [makeTool()];
 
 		expect(parseTextToolCalls("please call echo", tools)).toEqual({
@@ -245,14 +261,24 @@ describe("text tool-call protocol", () => {
 			text: "please call echo",
 			attempted: false,
 		});
+		// A <tool_call> envelope nested inside a malformed <pi:call> wrapper overlaps it, but the
+		// batch is no longer discarded wholesale (parallel-call parity) - the inner, well-formed call
+		// is salvaged and the ambiguous outer wrapper's un-consumed bytes survive as prose.
 		expect(
 			parseTextToolCalls(
 				'<pi:call name="echo"><tool_call>{"name":"echo","arguments":{"value":"hi"}}</tool_call></pi:call>',
 				tools,
 			),
-		).toEqual({
+		).toMatchObject({
+			calls: [{ type: "toolCall", name: "echo", arguments: { value: "hi" }, source: "text-protocol" }],
+			text: '<pi:call name="echo"></pi:call>',
+			attempted: true,
+		});
+		// When NOTHING in an overlapping batch can be parsed at all, the batch still reports "overlap"
+		// (distinct from "unrecognized", which means no envelope-shaped text was even found).
+		expect(parseTextToolCalls("```tool\n<tool_call>no name here</tool_call>\n```", tools)).toEqual({
 			calls: [],
-			text: '<pi:call name="echo"><tool_call>{"name":"echo","arguments":{"value":"hi"}}</tool_call></pi:call>',
+			text: "```tool\n<tool_call>no name here</tool_call>\n```",
 			attempted: true,
 			failure: "overlap",
 		});
@@ -299,6 +325,55 @@ describe("text tool-call protocol", () => {
 		]);
 	});
 
+	it("injects the tool-call primer exactly once in the outgoing provider payload", async () => {
+		const registration = registerFauxProvider();
+		registrations.push(registration);
+		const tools = [makeTool()];
+		const context: Context = {
+			systemPrompt: "base",
+			messages: [{ role: "user", content: "go", timestamp: 1 }],
+			tools,
+		};
+		let activeRequest: Context | undefined;
+
+		registration.setResponses([
+			(requestContext) => {
+				activeRequest = requestContext;
+				return fauxAssistantMessage('<pi:call name="echo">{"value":"hi"}</pi:call>');
+			},
+		]);
+
+		await complete(registration.getModel(), context, { textToolCallProtocol: true });
+		const protocolOptions = normalizeTextToolProtocolOptions(true);
+		const primer = generateTextToolProtocolPrimer(tools, protocolOptions);
+
+		expect(activeRequest?.systemPrompt).toContain(primer);
+		// The synthetic per-turn instruction message must carry only a one-line steer back to
+		// the system prompt, never a second copy of the (potentially large) primer body.
+		const synthetic = activeRequest?.messages[0];
+		const syntheticContent = synthetic?.role === "user" ? synthetic.content : undefined;
+		const syntheticText =
+			typeof syntheticContent === "string"
+				? syntheticContent
+				: (syntheticContent ?? []).map((block) => (block.type === "text" ? block.text : "")).join("");
+		expect(syntheticText).not.toContain(primer);
+		expect(syntheticText.length).toBeLessThan(400);
+
+		// Count occurrences across the whole plain-text outgoing payload (system prompt + every
+		// message's text content, unescaped) - JSON.stringify would double-escape newlines inside
+		// the primer and silently defeat a substring search, so build the haystack from raw text.
+		const payloadText = [
+			activeRequest?.systemPrompt ?? "",
+			...(activeRequest?.messages ?? []).map((message) => {
+				if (message.role !== "user") return "";
+				return typeof message.content === "string"
+					? message.content
+					: message.content.map((block) => (block.type === "text" ? block.text : "")).join("");
+			}),
+		].join("\n");
+		expect(countOccurrences(payloadText, primer)).toBe(1);
+	});
+
 	it("keeps transformed historical user turns stable for prompt-cache reuse", async () => {
 		const registration = registerFauxProvider();
 		registrations.push(registration);
@@ -333,6 +408,9 @@ describe("text tool-call protocol", () => {
 
 		expect(captured).toHaveLength(2);
 		expect(captured[0]?.messages[1]).toEqual(captured[1]?.messages[1]);
+		// Cache-stability: the systemPrompt prefix (base + the once-injected primer) must be
+		// byte-identical across turns, or a provider prompt cache keyed on that prefix would miss.
+		expect(captured[0]?.systemPrompt).toBe(captured[1]?.systemPrompt);
 	});
 
 	it("parses text envelopes from thinking plus text done messages", async () => {

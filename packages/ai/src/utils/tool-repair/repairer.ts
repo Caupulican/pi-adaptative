@@ -1,5 +1,5 @@
-import { Compile } from "typebox/compile";
 import type { Tool } from "../../types.ts";
+import { getValidator } from "../validation.ts";
 import {
 	analyzeToolArgumentErrors,
 	formatRepairPath,
@@ -19,7 +19,15 @@ export interface AppliedToolRepair {
 	path: string;
 }
 
-const schemaValidatorCache = new WeakMap<object, ReturnType<typeof Compile>>();
+/**
+ * Bound on the repairer's transform passes (decision D1, tool-call-repair doctrine). Each pass
+ * re-checks the whole args once, so this is also the max number of extra `Check` calls a failed
+ * call can cost. Measured deepest tested cascade (outer json-string-parse revealing a nested
+ * property-case + scalar-coercion pass) converges in 2 passes; this bound is that plus one
+ * margin layer, not an arbitrary ceiling.
+ */
+export const MAX_REPAIR_PASSES = 3;
+
 const bashCommandWrapperKeys = new Set(["cmd", "command", "script"]);
 
 export interface ToolRepairResult {
@@ -28,17 +36,9 @@ export interface ToolRepairResult {
 	repairs: AppliedToolRepair[];
 }
 
-function getSchemaValidator(schema: JsonSchemaObject): ReturnType<typeof Compile> | undefined {
-	try {
-		const key = schema as object;
-		const cached = schemaValidatorCache.get(key);
-		if (cached) return cached;
-		const validator = Compile(schema as Tool["parameters"]);
-		schemaValidatorCache.set(key, validator);
-		return validator;
-	} catch {
-		return undefined;
-	}
+export interface RepairToolArgumentsOptions {
+	/** Test-only instrumentation: called once per attempted pass with its zero-based index. */
+	onPass?: (pass: number) => void;
 }
 
 function setValueAtPath(target: Record<string, unknown>, path: readonly string[], value: unknown): boolean {
@@ -136,18 +136,45 @@ function parseJsonLiteralToken(token: string): unknown | undefined {
 	}
 }
 
+/**
+ * Per-schema cache of the declared-property salvage matchers (decision D4, tool-call-repair
+ * doctrine): one `RegExp` per declared property, compiled once per schema object and reused
+ * across every salvage attempt against that schema instead of rebuilding it per attempt. Each
+ * regex keeps its global flag but is only ever driven via `matchAll`, which iterates over a
+ * spec-cloned copy of the regex and never mutates the cached instance's `lastIndex` - safe to share.
+ */
+const salvageMatcherCache = new WeakMap<object, Map<string, RegExp>>();
+
+function getSalvageMatchers(
+	schema: JsonSchemaObject,
+	properties: Record<string, JsonSchemaObject>,
+): Map<string, RegExp> {
+	const key = schema as object;
+	const cached = salvageMatcherCache.get(key);
+	if (cached) return cached;
+	const matchers = new Map<string, RegExp>();
+	for (const propertyKey of Object.keys(properties)) {
+		matchers.set(
+			propertyKey,
+			new RegExp(
+				`"${escapeRegExp(propertyKey)}"\\s*:\\s*("(?:\\\\.|[^"\\\\])*"|-?\\d+(?:\\.\\d+)?(?:[eE][+-]?\\d+)?|true|false|null)`,
+				"g",
+			),
+		);
+	}
+	salvageMatcherCache.set(key, matchers);
+	return matchers;
+}
+
 function salvageDeclaredObjectProperties(value: string, schema: JsonSchemaObject): Record<string, unknown> | undefined {
 	const properties = schema.properties;
 	if (!properties) return undefined;
 	const trimmed = value.trim();
 	if (!trimmed.startsWith("{") || !trimmed.endsWith("}")) return undefined;
 	const normalized = normalizeJsonQuoteDrift(trimmed) ?? trimmed;
+	const matchers = getSalvageMatchers(schema, properties);
 	const salvaged: Record<string, unknown> = {};
-	for (const key of Object.keys(properties)) {
-		const pattern = new RegExp(
-			`"${escapeRegExp(key)}"\\s*:\\s*("(?:\\\\.|[^"\\\\])*"|-?\\d+(?:\\.\\d+)?(?:[eE][+-]?\\d+)?|true|false|null)`,
-			"g",
-		);
+	for (const [key, pattern] of matchers) {
 		const matches = [...normalized.matchAll(pattern)];
 		if (matches.length > 1) return undefined;
 		const token = matches[0]?.[1];
@@ -331,13 +358,16 @@ function validationErrorsForCandidate(
 	schema: Tool["parameters"],
 	candidate: Record<string, unknown>,
 ): ValidationErrorLike[] | undefined {
-	const validator = getSchemaValidator(schema as JsonSchemaObject);
-	if (!validator) return undefined;
-	return [...validator.Errors(candidate)].map((error) => ({
-		instancePath: error.instancePath,
-		keyword: error.keyword,
-		message: error.message,
-	}));
+	try {
+		const validator = getValidator(schema);
+		return [...validator.Errors(candidate)].map((error) => ({
+			instancePath: error.instancePath,
+			keyword: error.keyword,
+			message: error.message,
+		}));
+	} catch {
+		return undefined;
+	}
 }
 
 export function repairToolArguments(
@@ -346,14 +376,15 @@ export function repairToolArguments(
 	args: Record<string, unknown>,
 	errors: readonly ValidationErrorLike[],
 	checkWholeArgs: (candidate: Record<string, unknown>) => boolean,
+	options?: RepairToolArgumentsOptions,
 ): ToolRepairResult | undefined {
 	let candidate = structuredClone(args);
 	const repairsApplied: ToolRepairModeName[] = [];
 	const repairs: AppliedToolRepair[] = [];
 	let currentErrors: readonly ValidationErrorLike[] = errors;
-	const maxPasses = 8;
 
-	for (let pass = 0; pass < maxPasses; pass++) {
+	for (let pass = 0; pass < MAX_REPAIR_PASSES; pass++) {
+		options?.onPass?.(pass);
 		const caseRepairs = normalizePropertyCase(candidate, schema);
 		if (caseRepairs.length > 0) {
 			repairsApplied.push(...caseRepairs.map((repair) => repair.name));
