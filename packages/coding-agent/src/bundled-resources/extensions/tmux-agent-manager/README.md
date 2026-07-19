@@ -20,9 +20,16 @@ Important actions:
 - `workspace_plan` — dry-run a tmux session/pane layout.
 - `launch_workspace` — launch panes immediately; pass `dryRun:true` only when a preview is useful.
 - `fire_task` — open provider CLIs in tmux panes, inject prompts, stream pane output through event-driven DONE/BLOCKED watchers, write result files, and wake the parent with a bounded terminal handoff.
+- `send_followup` — re-inject a fresh prompt into an already-live job's pane (default: primary agent; `agentId` targets another) without relaunching. Re-arms the completion watcher for a new turn with a unique per-turn marker pair and reuses the same event-driven handoff.
+- `dismiss` — stop tracking a job (no more re-arming/handoffs) without killing its tmux session; the pane keeps running.
 - `job_status`, `list_jobs`, `set_variable`, `list_variables` — inspect and steer managed jobs.
 - `stop_job`, `stop_session` — dry-run/confirmed tmux cleanup.
 - `notify`, `set_status`, `clear_status` — tmux UI/status metadata.
+- `grant_dispatch`, `revoke_grant` — create/end a standing approval grant that lets `fire_task`/`send_followup` dispatch unattended within its bounds (agent, budget, optional goal/tool/path scope). See Safety below.
+
+At session start, live tmux sessions are reconciled against this session's own job records: a session
+that vanished while its job was not yet terminal is marked orphaned (informational only, nothing is
+killed); a session that is still alive with a pending turn has its watcher re-armed.
 
 ## Built-in team templates
 
@@ -60,7 +67,17 @@ tmux_agent_manager({
 
 ## Safety
 
-Launch actions type commands into tmux panes and execute provider CLIs without an extra approval dialog. Use `dryRun:true` when the task or provider choice is still ambiguous. Stop actions are destructive to running pane work, so they remain previews by default and require `confirm:"yes-tmux-stop"` for real cleanup.
+A real (non-`dryRun`) `fire_task`/`send_followup` launch is approval-gated: it requires either a
+standing grant (`grant_dispatch` — interactively confirmed, or authorized via the `--allow-tmux-dispatch`
+flag when no UI is attached) or a one-shot interactive approval. With neither available, the launch is
+refused, never silent. A grant-covered `pi` child launches with a restricted profile (`--tools`/
+`--resource-profile` or `--no-extensions --no-skills`, plus a scoped `--append-system-prompt` naming the
+grant and its hard stops) pushed into the child's own launch configuration — this is not an in-process
+sandbox, and non-`pi` agents are bounded only at the launch layer; their internal tool-loop behavior is
+that CLI's own responsibility. Grant budget (`maxLaunches`, expiry) is enforced; any advisory USD figure
+or self-reported worker usage is a claim to review, never a hard cross-process cap.
+
+Use `dryRun:true` when the task or provider choice is still ambiguous. Stop actions are destructive to running pane work, so they remain previews by default and require `confirm:"yes-tmux-stop"` for real cleanup.
 
 The tool refuses existing tmux sessions. Existing job directories are refused unless `force:true`, which archives the old job directory under `~/.pi/agent/work/background/tmux-agent-manager/state/archives` before launching.
 
