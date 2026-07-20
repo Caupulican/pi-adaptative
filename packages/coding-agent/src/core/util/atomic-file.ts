@@ -62,7 +62,18 @@ async function ensureLockDir(filePath: string): Promise<void> {
 }
 
 function isLockedError(err: unknown): boolean {
-	return typeof err === "object" && err !== null && (err as { code?: string }).code === "ELOCKED";
+	if (typeof err !== "object" || err === null) return false;
+	const code = (err as { code?: string }).code;
+	if (code === "ELOCKED") return true;
+	// On win32, mkdir-ing the lock directory can transiently surface EPERM (rather than the
+	// expected EEXIST) when a previous incarnation of that directory is concurrently being
+	// rmdir'd by the racing releaser — the mkdir lands mid-teardown and the OS reports "operation
+	// not permitted" instead of "already exists". This is contention, not a real permissions
+	// failure, so treat it identically to ELOCKED: retry with the existing backoff rather than
+	// letting it escape as fatal. POSIX platforms don't exhibit this transient and keep surfacing
+	// real EPERM (e.g. an actually unwritable directory) as fatal.
+	if (code === "EPERM" && process.platform === "win32") return true;
+	return false;
 }
 
 /** Block the calling thread for `ms` without spinning the CPU (Atomics.wait on a private buffer). */

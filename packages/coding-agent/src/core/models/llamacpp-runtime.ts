@@ -448,6 +448,21 @@ export class PrismLlamaCppRuntime {
 	}
 
 	/**
+	 * Wait until a write stream's underlying fd is actually closed. `pipeline()` destroys the
+	 * stream on error but its promise can settle before the fd close completes (Windows in
+	 * particular keeps the file handle open a tick longer) — unlinking before that races with the
+	 * OS and can leave the "partial" file behind or fail the delete outright. Resolves immediately
+	 * if the stream already reports `closed`.
+	 */
+	private _waitForStreamClosed(stream: Writable & { closed?: boolean }): Promise<void> {
+		if (stream.closed) return Promise.resolve();
+		return new Promise((resolve) => {
+			stream.once("close", () => resolve());
+			stream.destroy();
+		});
+	}
+
+	/**
 	 * Stream a GGUF (or mmproj) file from Hugging Face into pi's owned models dir. Skips a re-download
 	 * when the local file already matches the remote size; verifies size when the response reports
 	 * `content-length` and deletes the partial file on any failure or mismatch — never leaves a
@@ -481,9 +496,11 @@ export class PrismLlamaCppRuntime {
 		}
 
 		const expectedBytes = parseContentLength(response.headers.get("content-length"));
+		const writeStream = createWriteStream(destPath);
 		try {
-			await pipeline(response.body as unknown as Readable, createWriteStream(destPath));
+			await pipeline(response.body as unknown as Readable, writeStream);
 		} catch (error) {
+			await this._waitForStreamClosed(writeStream);
 			this._cleanupPartial(destPath);
 			return { ok: false, error: `download-fail: ${error instanceof Error ? error.message : String(error)}` };
 		}
