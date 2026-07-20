@@ -376,4 +376,48 @@ print("tilde-user" in UNSUPPORTED_CONSTRUCTS)
 			expect(simple.redirects).toHaveLength(1);
 		});
 	});
+
+	describe("Windows absolute-path backslashes (CI lane fix)", () => {
+		it("drive-letter path in a command word keeps its backslashes literal", () => {
+			const ast = parseToDict(python, "cat C:\\Users\\me\\file.txt") as any;
+			const word = ast.entries[0].pipelines[0].elements[0].words[1];
+			expect(word.segments).toEqual([{ _: "Raw", text: "C:\\Users\\me\\file.txt" }]);
+		});
+
+		it("drive-letter path as a redirect target keeps its backslashes literal", () => {
+			const ast = parseToDict(python, "cat > C:\\tmp\\out.txt") as any;
+			const redirect = ast.entries[0].pipelines[0].elements[0].redirects[0];
+			expect(redirect.op).toBe(">");
+			expect(redirect.target.segments).toEqual([{ _: "Raw", text: "C:\\tmp\\out.txt" }]);
+		});
+
+		it("UNC path round-trips its backslashes intact", () => {
+			const ast = parseToDict(python, "cat \\\\server\\share\\f.txt") as any;
+			const word = ast.entries[0].pipelines[0].elements[0].words[1];
+			expect(word.segments).toEqual([{ _: "Raw", text: "\\\\server\\share\\f.txt" }]);
+		});
+
+		it("plain backslash escape still escapes a space: a\\ b stays one word", () => {
+			const ast = parseToDict(python, "echo a\\ b") as any;
+			const simple = ast.entries[0].pipelines[0].elements[0];
+			expect(simple.words).toHaveLength(2);
+			const word = simple.words[1];
+			const joined = word.segments.map((s: any) => s.text).join("");
+			expect(joined).toBe("a b");
+		});
+
+		it("plain backslash escape still escapes $: \\$HOME stays a literal, not a Param", () => {
+			const ast = parseToDict(python, "echo \\$HOME") as any;
+			const word = ast.entries[0].pipelines[0].elements[0].words[1];
+			expect(word.segments.some((s: any) => s._ === "Param")).toBe(false);
+			const joined = word.segments.map((s: any) => s.text).join("");
+			expect(joined).toBe("$HOME");
+		});
+
+		it("drive-letter path with a glob keeps the prefix and the glob char in a Raw segment", () => {
+			const ast = parseToDict(python, "cat C:\\tmp\\*.txt") as any;
+			const word = ast.entries[0].pipelines[0].elements[0].words[1];
+			expect(word.segments).toEqual([{ _: "Raw", text: "C:\\tmp\\*.txt" }]);
+		});
+	});
 });

@@ -361,6 +361,7 @@ def _scan_dq_segments(src: str, pos: int) -> tuple[list[Segment], int]:
 
 _WORD_BOUNDARY_CHARS = set("|&;()<> \t\n")
 _EXTGLOB_PREFIX_CHARS = set("@!?*+")
+_DRIVE_PREFIX_RE = re.compile(r"^[A-Za-z]:")
 
 
 def _scan_word(src: str, pos: int) -> tuple[Word, int]:
@@ -418,6 +419,19 @@ def _scan_word(src: str, pos: int) -> tuple[Word, int]:
             i = j + 1
             continue
         if c == "\\":
+            # Windows absolute paths: a backslash inside a word already recognized as a
+            # drive-letter path ('C:\...') or a UNC path ('\\server\...') is preserved
+            # literally rather than treated as a POSIX escape of the next character.
+            # Mirrors the TS router's identical heuristic (shell-contract-router.ts).
+            buf_text = "".join(buf)
+            if _DRIVE_PREFIX_RE.match(buf_text) or buf_text.startswith("\\\\"):
+                buf.append(c)
+                i += 1
+                continue
+            if not buf and not segments and src[i + 1 : i + 2] == "\\":
+                buf.append("\\\\")
+                i += 2
+                continue
             if i + 1 < n:
                 flush()
                 segments.append(Lit(text=src[i + 1]))
