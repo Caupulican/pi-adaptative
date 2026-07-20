@@ -173,16 +173,22 @@ parentPort.postMessage({ done: true });
 		const workers = [1, 2].map(
 			() => new Worker(pathToFileURL(workerPath), { workerData: { filePath, iterations: iterationsPerWorker } }),
 		);
-		await Promise.all(
-			workers.map(
-				(worker) =>
-					new Promise<void>((resolve, reject) => {
-						worker.on("message", () => resolve());
-						worker.on("error", reject);
-					}),
-			),
-		);
-		await Promise.all(workers.map((worker) => worker.terminate()));
+		try {
+			await Promise.all(
+				workers.map(
+					(worker) =>
+						new Promise<void>((resolve, reject) => {
+							worker.on("message", () => resolve());
+							worker.on("error", reject);
+						}),
+				),
+			);
+		} finally {
+			// Always terminate, including on a worker error: leaving a worker running past this test
+			// keeps its file handles open into `dir`, which afterEach removes next — a live handle
+			// makes that rmSync fail with ENOTEMPTY/EPERM on Windows.
+			await Promise.all(workers.map((worker) => worker.terminate()));
+		}
 
 		// Every increment landed — a torn or lost write would leave the count short of the total.
 		const final = JSON.parse(readFileSync(filePath, "utf-8")) as { count: number };

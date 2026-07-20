@@ -135,7 +135,7 @@ describe("detect", () => {
 	});
 
 	it("reports checkpointPresent: true only when needle.pkl actually exists at the expected path, false otherwise", async () => {
-		const checkpointPath = "/agent/models/needle/needle.pkl";
+		const checkpointPath = join("/agent", "models", "needle", "needle.pkl");
 		const missing = new NeedleRuntime({ agentDir: "/agent", deps: { existsFn: () => false } });
 		expect((await missing.detect()).checkpointPresent).toBe(false);
 

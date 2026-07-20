@@ -1,11 +1,18 @@
+import { randomUUID } from "crypto";
 import { applyPatch } from "diff";
 import { chmodSync, existsSync, mkdirSync, readFileSync, rmSync, symlinkSync, writeFileSync } from "fs";
 import { tmpdir } from "os";
 import { join } from "path";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { executeBashWithOperations } from "../src/core/bash-executor.ts";
-import { type BashOperations, createBashTool, createLocalBashOperations } from "../src/core/tools/bash.ts";
+import {
+	type BashOperations,
+	type BashToolOptions,
+	createBashTool,
+	createLocalBashOperations,
+} from "../src/core/tools/bash.ts";
 import { computeEditsDiff } from "../src/core/tools/edit-diff.ts";
+import { disposePersistentShellSession } from "../src/core/tools/shell-session.ts";
 import {
 	createEditTool,
 	createFindTool,
@@ -37,6 +44,19 @@ function getTextOutput(result: any): string {
 describe("Coding Agent Tools", () => {
 	let testDir: string;
 
+	// Every `createBashTool` call below whose cwd is `testDir` spawns a real persistent shell
+	// session process rooted at that directory (see src/core/tools/bash.ts): the default sessionKey
+	// is a fresh random UUID per call, so nothing disposes that process on its own. On Windows the
+	// live process keeps `testDir` locked, and `rmSync` in `afterEach` below would otherwise race
+	// it. `bashToolFor` assigns and tracks an explicit sessionKey so this file's `afterEach` can
+	// dispose the session (killing its process) before removing the directory it lived in.
+	const activeShellSessionKeys: string[] = [];
+	function bashToolFor(cwd: string, options?: BashToolOptions) {
+		const sessionKey = options?.sessionKey ?? `tools-test:${randomUUID()}`;
+		activeShellSessionKeys.push(sessionKey);
+		return createBashTool(cwd, { ...options, sessionKey });
+	}
+
 	beforeEach(() => {
 		// Create a unique temporary directory for each test
 		testDir = join(tmpdir(), `coding-agent-test-${Date.now()}`);
@@ -44,6 +64,9 @@ describe("Coding Agent Tools", () => {
 	});
 
 	afterEach(() => {
+		// Dispose any persistent shell sessions this test spawned before removing the directory
+		// they were rooted in (see `bashToolFor` above for why this ordering matters on Windows).
+		for (const key of activeShellSessionKeys.splice(0)) disposePersistentShellSession(key);
 		// Clean up test directory
 		rmSync(testDir, { recursive: true, force: true });
 	});
@@ -529,7 +552,7 @@ describe("Coding Agent Tools", () => {
 						throw new Error(testCase.error);
 					},
 				};
-				const bash = createBashTool(testDir, { operations });
+				const bash = bashToolFor(testDir, { operations });
 
 				let error: unknown;
 				try {
@@ -555,7 +578,7 @@ describe("Coding Agent Tools", () => {
 		it("should throw error when cwd does not exist", async () => {
 			const nonexistentCwd = "/this/directory/definitely/does/not/exist/12345";
 
-			const bashToolWithBadCwd = createBashTool(nonexistentCwd);
+			const bashToolWithBadCwd = bashToolFor(nonexistentCwd);
 
 			await expect(bashToolWithBadCwd.execute("test-call-11", { command: "echo test" })).rejects.toThrow(
 				/Working directory does not exist/,
@@ -568,14 +591,14 @@ describe("Coding Agent Tools", () => {
 				args: ["-c"],
 			});
 
-			const bashWithBadShell = createBashTool(testDir);
+			const bashWithBadShell = bashToolFor(testDir);
 
 			await expect(bashWithBadShell.execute("test-call-12", { command: "echo test" })).rejects.toThrow(/ENOENT/);
 		});
 
 		it("should pass shellPath through to shell resolution", async () => {
 			const getShellConfigSpy = vi.spyOn(shellModule, "getShellConfig");
-			const bashWithCustomShell = createBashTool(testDir, {
+			const bashWithCustomShell = bashToolFor(testDir, {
 				shellPath: "/custom/bash",
 				operations: {
 					exec: async () => ({ exitCode: 0 }),
@@ -596,7 +619,7 @@ describe("Coding Agent Tools", () => {
 		});
 
 		it("should prepend command prefix when configured", async () => {
-			const bashWithPrefix = createBashTool(testDir, {
+			const bashWithPrefix = bashToolFor(testDir, {
 				commandPrefix: process.platform === "win32" ? "$env:TEST_VAR = 'hello'" : "export TEST_VAR=hello",
 			});
 
@@ -607,7 +630,7 @@ describe("Coding Agent Tools", () => {
 		});
 
 		it("should include output from both prefix and command", async () => {
-			const bashWithPrefix = createBashTool(testDir, {
+			const bashWithPrefix = bashToolFor(testDir, {
 				commandPrefix: "echo prefix-output",
 			});
 
@@ -618,7 +641,7 @@ describe("Coding Agent Tools", () => {
 		it("should apply command prefix to simple shell commands", async () => {
 			const testFile = join(testDir, "prefix-cat.txt");
 			writeFileSync(testFile, "body");
-			const bashWithPrefix = createBashTool(testDir, {
+			const bashWithPrefix = bashToolFor(testDir, {
 				commandPrefix: "echo prefix-output",
 			});
 
@@ -629,7 +652,7 @@ describe("Coding Agent Tools", () => {
 		it("should apply spawn hook to simple shell commands", async () => {
 			const testFile = join(testDir, "hook-cat.txt");
 			writeFileSync(testFile, "body");
-			const bashWithHook = createBashTool(testDir, {
+			const bashWithHook = bashToolFor(testDir, {
 				spawnHook: (context) => ({ ...context, command: `echo hook-output\n${context.command}` }),
 			});
 
@@ -638,7 +661,7 @@ describe("Coding Agent Tools", () => {
 		});
 
 		it("should work without command prefix", async () => {
-			const bashWithoutPrefix = createBashTool(testDir, {});
+			const bashWithoutPrefix = bashToolFor(testDir, {});
 
 			const result = await bashWithoutPrefix.execute("test-prefix-3", { command: "echo no-prefix" });
 			expect(getTextOutput(result).trim()).toBe("no-prefix");
@@ -657,7 +680,7 @@ describe("Coding Agent Tools", () => {
 				content: Array<{ type: string; text?: string }>;
 				details?: { preview?: { content: string; skippedLines: number } };
 			}> = [];
-			const bash = createBashTool(testDir, { operations });
+			const bash = bashToolFor(testDir, { operations });
 
 			const result = await bash.execute("test-call-chatty-updates", { command: "chatty" }, undefined, (update) =>
 				updates.push(update),
@@ -679,7 +702,7 @@ describe("Coding Agent Tools", () => {
 					return { exitCode: 0 };
 				},
 			};
-			const bash = createBashTool(testDir, { operations });
+			const bash = bashToolFor(testDir, { operations });
 
 			const result = await bash.execute("test-call-trailing-newline-line-count", { command: "many-lines" });
 			const output = getTextOutput(result);
@@ -701,7 +724,7 @@ describe("Coding Agent Tools", () => {
 					return { exitCode: 0 };
 				},
 			};
-			const bash = createBashTool(testDir, { operations });
+			const bash = bashToolFor(testDir, { operations });
 
 			const result = await bash.execute("test-call-split-utf8", { command: "split-utf8" });
 
@@ -733,7 +756,7 @@ describe("Coding Agent Tools", () => {
 		});
 
 		it("should persist full output when truncation happens by line count only", async () => {
-			const bash = createBashTool(testDir);
+			const bash = bashToolFor(testDir);
 			const result = await bash.execute("test-call-line-truncation", { command: "seq 3000" });
 			const output = getTextOutput(result);
 			const fullOutputPath = result.details?.fullOutputPath;
@@ -768,7 +791,7 @@ describe("Coding Agent Tools", () => {
 		});
 
 		it.skipIf(process.platform === "win32")("should keep a bounded preview for piped command output", async () => {
-			const bash = createBashTool(testDir);
+			const bash = bashToolFor(testDir);
 
 			const result = await bash.execute("test-call-piped-output-preview", { command: "seq 3000 | cat" });
 
@@ -781,7 +804,7 @@ describe("Coding Agent Tools", () => {
 		it("preserves grep regex semantics through the platform shell", async () => {
 			const testFile = join(testDir, "grep-regex.py");
 			writeFileSync(testFile, "import os\nprint('x')\n");
-			const bash = createBashTool(testDir);
+			const bash = bashToolFor(testDir);
 
 			const result = await bash.execute("test-grep-regex", { command: `grep '^import' ${testFile}` });
 
@@ -791,7 +814,7 @@ describe("Coding Agent Tools", () => {
 		it("executes grep literal patterns through the platform shell", async () => {
 			const testFile = join(testDir, "grep-literal.txt");
 			writeFileSync(testFile, "abc\nxyz\n");
-			const bash = createBashTool(testDir);
+			const bash = bashToolFor(testDir);
 
 			const result = await bash.execute("test-grep-literal", { command: `grep abc ${testFile}` });
 
@@ -805,7 +828,7 @@ describe("Coding Agent Tools", () => {
 			mkdirSync(outsideDir);
 			writeFileSync(join(outsideDir, "escaped.txt"), "escape");
 			symlinkSync(outsideDir, join(searchDir, "out-link"));
-			const bash = createBashTool(testDir);
+			const bash = bashToolFor(testDir);
 
 			const result = await bash.execute("test-find-symlink", { command: `find ${searchDir}` });
 			const output = getTextOutput(result)
@@ -823,7 +846,7 @@ describe("Coding Agent Tools", () => {
 			mkdirSync(searchDir);
 			const childPath = join(searchDir, "child.txt");
 			writeFileSync(childPath, "child");
-			const bash = createBashTool(testDir);
+			const bash = bashToolFor(testDir);
 
 			const result = await bash.execute("test-shell", { command: `find ${searchDir}` });
 			const output = getTextOutput(result)
@@ -837,7 +860,7 @@ describe("Coding Agent Tools", () => {
 			const testFile = join(testDir, "shell-large.txt");
 			const lines = Array.from({ length: 3000 }, (_, index) => `line-${String(index + 1).padStart(4, "0")}`);
 			writeFileSync(testFile, `${lines.join("\n")}\n`);
-			const bash = createBashTool(testDir);
+			const bash = bashToolFor(testDir);
 
 			const result = await bash.execute("test-opt-trunc", { command: `cat ${testFile}` });
 			const output = getTextOutput(result);
@@ -852,7 +875,7 @@ describe("Coding Agent Tools", () => {
 			const testFile = join(testDir, "custom-ops.txt");
 			writeFileSync(testFile, "file content");
 			let execCalled = false;
-			const customBash = createBashTool(testDir, {
+			const customBash = bashToolFor(testDir, {
 				operations: {
 					exec: async (_cmd, _cwd, { onData }) => {
 						execCalled = true;
@@ -873,7 +896,7 @@ describe("Coding Agent Tools", () => {
 
 			let execCalled = false;
 			let execCommand = "";
-			const customBash = createBashTool(testDir, {
+			const customBash = bashToolFor(testDir, {
 				operations: {
 					exec: async (cmd) => {
 						execCalled = true;
@@ -899,7 +922,7 @@ describe("Coding Agent Tools", () => {
 			process.env.PI_TOOL_OPTIMIZER_DISABLED = "1";
 
 			try {
-				const bash = createBashTool(testDir);
+				const bash = bashToolFor(testDir);
 				const result = await bash.execute("test-disabled", { command: `find ${searchDir}` });
 				expect(getTextOutput(result).replaceAll("\\", "/").toLowerCase()).toContain("/disabled-find/child.txt");
 			} finally {

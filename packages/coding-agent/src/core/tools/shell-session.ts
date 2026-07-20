@@ -22,7 +22,7 @@
 import { randomBytes } from "node:crypto";
 import { basename } from "node:path";
 import { createSilenceWatchdog } from "@caupulican/pi-agent-core";
-import { type ChildProcess, spawn, spawnSync } from "child_process";
+import { type ChildProcess, spawn } from "child_process";
 import {
 	getShellConfig,
 	getShellEnv,
@@ -157,29 +157,15 @@ export class PersistentShellSession {
 		this.killChild();
 	}
 
-	/** Synchronous best-effort kill for process-exit hooks (async spawn never runs during exit). */
+	/** Synchronous best-effort kill for process-exit hooks (async spawn never runs during exit).
+	 * `killProcessTree` is itself synchronous (blocking `spawnSync` on Windows, `process.kill` on
+	 * POSIX), so it is safe to call directly from a `process.on("exit", ...)` handler. */
 	killForProcessExit(): void {
 		const pid = this.child?.pid;
 		this.child = null;
 		if (!pid) return;
 		untrackDetachedChildPid(pid);
-		if (process.platform === "win32") {
-			try {
-				spawnSync("taskkill", ["/F", "/T", "/PID", String(pid)], { stdio: "ignore", windowsHide: true });
-			} catch {
-				// Best effort only.
-			}
-			return;
-		}
-		try {
-			process.kill(-pid, "SIGKILL");
-		} catch {
-			try {
-				process.kill(pid, "SIGKILL");
-			} catch {
-				// Already dead.
-			}
-		}
+		killProcessTree(pid);
 	}
 
 	private async execNow(

@@ -1,6 +1,6 @@
 import { existsSync } from "node:fs";
 import { delimiter } from "node:path";
-import { spawn, spawnSync } from "child_process";
+import { spawnSync } from "child_process";
 import { getBinDir } from "../config.ts";
 
 export type PlatformShellToolName = "bash" | "powershell";
@@ -160,15 +160,21 @@ export function killTrackedDetachedChildren(): void {
 }
 
 /**
- * Kill a process and all its children (cross-platform)
+ * Kill a process and all its children (cross-platform).
+ *
+ * Windows uses `spawnSync` (not `spawn`) deliberately: callers rely on this function returning
+ * only once the tree is actually gone (e.g. before removing a directory that was the killed
+ * process's cwd — a directory Windows keeps locked until every handle into it, including a
+ * live process's cwd handle, is released). A fire-and-forget async `taskkill` would return before
+ * termination completed, leaving a race where the directory is still locked.
  */
 export function killProcessTree(pid: number): void {
 	if (process.platform === "win32") {
-		// Use taskkill on Windows to kill process tree
+		// Use taskkill on Windows to kill process tree; spawnSync blocks until taskkill itself
+		// (and therefore the termination it requested) has finished.
 		try {
-			spawn("taskkill", ["/F", "/T", "/PID", String(pid)], {
+			spawnSync("taskkill", ["/F", "/T", "/PID", String(pid)], {
 				stdio: "ignore",
-				detached: true,
 				windowsHide: true,
 			});
 		} catch {

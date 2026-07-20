@@ -10,6 +10,7 @@ import { getDefaultActiveToolNames, mapToolNamesForPlatform } from "../src/core/
 import { classifyToolTrust } from "../src/core/security/untrusted-boundary.ts";
 import { buildSystemPrompt } from "../src/core/system-prompt.ts";
 import { type BashToolOptions, createAllToolDefinitions, createBashToolDefinition } from "../src/core/tools/index.ts";
+import { disposePersistentShellSession } from "../src/core/tools/shell-session.ts";
 import {
 	getPlatformShellToolName,
 	getShellConfig,
@@ -130,13 +131,17 @@ describe("automatic platform shell contract", () => {
 	it("preserves routed builtin status and flag semantics through native PowerShell", async () => {
 		if (process.platform !== "win32") return;
 		const cwd = mkdtempSync(join(tmpdir(), "pi-powershell-contract-"));
+		// An explicit sessionKey lets `finally` dispose the persistent shell session (killing its
+		// process) before removing `cwd` below — the process's own cwd. Without this the live
+		// process keeps the directory locked and `rmSync` races it (EPERM on Windows).
+		const sessionKey = "platform-shell-contract-test";
 		try {
 			writeFileSync(join(cwd, "visible.txt"), "one\ntwo\n");
 			writeFileSync(join(cwd, ".hidden.txt"), "hidden\n");
 			mkdirSync(join(cwd, "existing"));
 			mkdirSync(join(cwd, "source-dir"));
 			writeFileSync(join(cwd, "source-dir", "inside.txt"), "inside\n");
-			const tool = createBashToolDefinition(cwd);
+			const tool = createBashToolDefinition(cwd, { sessionKey });
 			const execute = (command: string) =>
 				tool.execute("call-windows-semantics", { command }, undefined, undefined, undefined as never);
 
@@ -160,6 +165,7 @@ describe("automatic platform shell contract", () => {
 			await expect(execute("cp source-dir copied-dir")).rejects.toThrow("Command exited with code 1");
 			await expect(execute("cp -r source-dir copied-dir")).resolves.toBeDefined();
 		} finally {
+			disposePersistentShellSession(sessionKey);
 			rmSync(cwd, { recursive: true, force: true });
 		}
 	});

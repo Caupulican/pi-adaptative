@@ -53,9 +53,6 @@ const DEFAULT_REALPATH = false;
 /** Short capped backoff shared by both variants — see {@link AtomicFileLockOptions.retries}. */
 const RETRY_MIN_TIMEOUT_MS = 20;
 const RETRY_MAX_TIMEOUT_MS = 200;
-/** Sync retry delay between attempts (Atomics.wait); mirrors {@link RETRY_MIN_TIMEOUT_MS}. */
-const DEFAULT_SYNC_RETRY_DELAY_MS = RETRY_MIN_TIMEOUT_MS;
-
 function ensureLockDirSync(filePath: string): void {
 	mkdirSync(dirname(filePath), { recursive: true });
 }
@@ -76,6 +73,13 @@ function blockingSleepMs(ms: number): void {
 /**
  * Acquire a proper-lockfile sync lock with bounded retry on `ELOCKED` (proper-lockfile's sync API
  * itself forbids `retries > 0`; see {@link AtomicFileLockOptions.retries}).
+ *
+ * Backoff doubles each attempt (mirroring the `retry` module's own `factor: 2` default that the
+ * async path gets for free from proper-lockfile), starting at {@link RETRY_MIN_TIMEOUT_MS} and
+ * capped at {@link RETRY_MAX_TIMEOUT_MS} — a flat `RETRY_MIN_TIMEOUT_MS`-per-attempt wait (the
+ * previous behavior) gave the sync path a far smaller total contention budget than its async
+ * counterpart, which was too tight under real filesystem latency (e.g. mkdir/rmdir lock-directory
+ * churn on Windows CI runners under load) and surfaced as spurious ELOCKED failures.
  */
 function lockSyncWithRetry(filePath: string, options: AtomicFileLockOptions): () => void {
 	const attempts = Math.max(1, options.retries ?? DEFAULT_RETRIES);
@@ -85,7 +89,8 @@ function lockSyncWithRetry(filePath: string, options: AtomicFileLockOptions): ()
 			return lockfile.lockSync(filePath, lockOptions);
 		} catch (err) {
 			if (!isLockedError(err) || attempt === attempts) throw err;
-			blockingSleepMs(DEFAULT_SYNC_RETRY_DELAY_MS);
+			const backoffMs = Math.min(RETRY_MIN_TIMEOUT_MS * 2 ** (attempt - 1), RETRY_MAX_TIMEOUT_MS);
+			blockingSleepMs(backoffMs);
 		}
 	}
 	// Unreachable (the loop always returns or throws), but keeps the function's return type honest.

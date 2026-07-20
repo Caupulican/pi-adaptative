@@ -5,6 +5,7 @@ import { join } from "node:path";
 import { afterEach, beforeEach, describe, expect, it } from "vitest";
 import { executeBashWithOperations } from "../src/core/bash-executor.ts";
 import { createBashTool, createLocalBashOperations } from "../src/core/tools/bash.ts";
+import { disposePersistentShellSession } from "../src/core/tools/shell-session.ts";
 
 function toBashSingleQuotedArg(value: string): string {
 	return `'${value.replace(/\\/g, "/").replace(/'/g, `'"'"'`)}'`;
@@ -110,7 +111,11 @@ describe.skipIf(process.platform !== "win32")("Windows child-process close handl
 		const pidFile = join(testDir, "tool-grandchild.pid");
 		const command = createInheritedStdioCommand(pidFile);
 		const controller = new AbortController();
-		const bashTool = createBashTool(testDir);
+		// An explicit sessionKey lets `finally` dispose the persistent shell session (killing its
+		// process) before removing `testDir` below — the process's own cwd. Without this the live
+		// process keeps the directory locked and `rmSync` in `afterEach` races it (EPERM on Windows).
+		const sessionKey = "bash-close-hang-windows-test";
+		const bashTool = createBashTool(testDir, { sessionKey });
 
 		try {
 			const result = await withTimeout(bashTool.execute("test-call", { command }, controller.signal), 3000, () => {
@@ -120,6 +125,7 @@ describe.skipIf(process.platform !== "win32")("Windows child-process close handl
 			expect(getTextOutput(result)).toContain("child-exiting");
 		} finally {
 			controller.abort();
+			disposePersistentShellSession(sessionKey);
 			cleanupDetachedChild(pidFile);
 		}
 	});
