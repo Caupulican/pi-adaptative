@@ -364,6 +364,33 @@ export class PersistentShellSession {
 			this.clearChild(child);
 			this.activeExec?.fail(error instanceof Error ? error : new Error(String(error)));
 		});
+		// Settle the shell-died path on "exit" (process death), not "close" (stdio streams ended):
+		// a live detached grandchild that inherited these pipes (e.g. `sleep 30 &` before `exit 3`)
+		// keeps them open indefinitely even though the shell itself is already gone, and Node only
+		// fires "close" once every stdio stream has ended. Waiting for "close" here would hang for
+		// as long as the grandchild lives. The per-command backend
+		// (waitForChildProcessWithTermination in ../../utils/child-process.ts) faces the identical
+		// hazard and settles on "exit" for the same reason.
+		//
+		// "exit" can fire before Node has delivered already-buffered stdout/stderr "data" events for
+		// bytes the kernel handed over just before the process died (e.g. the sentinel line itself).
+		// Defer the settlement by one setImmediate turn: Node drains the poll phase (which is where
+		// pending stream "data" events run) before the check phase (where setImmediate callbacks
+		// run), so by the time this callback executes, every "data" event for bytes already received
+		// has already reached onStdout/onStderr, and thus onData, before we resolve/reject. This is
+		// not a hang-fix timer — it never waits on anything and does not run if the grandchild is
+		// gone and "close" (or a replacement child) got there first.
+		child.on("exit", (code) => {
+			if (this.child !== child) return;
+			setImmediate(() => {
+				if (this.child !== child) return;
+				this.clearChild(child);
+				this.activeExec?.onChildClose(code);
+			});
+		});
+		// Kept alongside "exit" for the genuine fast-close case (no lingering grandchild): whichever
+		// event reaches its guard first wins and nulls out this.child, making the other a no-op, so
+		// settlement stays idempotent regardless of which fires first or whether both fire.
 		child.on("close", (code) => {
 			if (this.child !== child) return;
 			this.clearChild(child);

@@ -29,6 +29,16 @@ function pwshAvailable(): boolean {
 
 const HAS_POWERSHELL = IS_WINDOWS || pwshAvailable();
 
+function bashAvailable(): boolean {
+	try {
+		return spawnSync("bash", ["-c", "true"], { encoding: "utf-8", timeout: 15_000 }).status === 0;
+	} catch {
+		return false;
+	}
+}
+
+const HAS_BASH = bashAvailable();
+
 interface RunResult {
 	exitCode: number | null;
 	output: string;
@@ -204,5 +214,27 @@ describe.skipIf(!HAS_POWERSHELL)("PersistentShellSession (powershell)", () => {
 		const session = makeSession("powershell");
 		expect((await run(session, "exit 5", cwd)).exitCode).toBe(5);
 		expect((await run(session, "Write-Output back", cwd)).output.trim()).toBe("back");
+	});
+});
+
+// This is Node event-loop semantics, not Windows-specific behavior: Node only fires a child
+// process's "close" event once every inherited stdio stream has ended. A detached grandchild that
+// inherits the shell's stdout/stderr pipes (e.g. a backgrounded job started right before the shell
+// exits) keeps those pipes open long after the shell itself is dead, so "close" never fires while
+// the grandchild lives — even on Linux. Gated on tool availability, not platform, so the class is
+// enforced on every CI lane.
+describe.skipIf(!HAS_BASH)("PersistentShellSession (shell dies under a live grandchild)", () => {
+	const cwd = process.cwd();
+
+	it("resolves promptly when the shell exits while a backgrounded grandchild still holds the inherited stdio pipes", async () => {
+		const session = makeSession("bash");
+		const start = Date.now();
+		// `sleep 30 &` backgrounds a grandchild that inherits this bash process's stdout/stderr pipe
+		// before `exit 3` kills the shell itself. If settlement waited on "close" instead of "exit",
+		// this would hang for the full 30s sleep instead of resolving as soon as the shell dies.
+		const result = await run(session, "sleep 30 & exit 3", cwd);
+		const elapsedMs = Date.now() - start;
+		expect(result.exitCode).toBe(3);
+		expect(elapsedMs).toBeLessThan(5_000);
 	});
 });
