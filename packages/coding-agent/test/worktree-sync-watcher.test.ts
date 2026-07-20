@@ -1,4 +1,4 @@
-import { mkdirSync, mkdtempSync, rmSync } from "node:fs";
+import { mkdirSync, mkdtempSync, rmSync, symlinkSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { afterEach, describe, expect, it } from "vitest";
@@ -79,4 +79,41 @@ describe("epoch watcher", () => {
 		await waitUntil(() => notices.length === 2);
 		expect(notices[1]).toContain("epoch 4");
 	}, 20_000);
+
+	// Linux analogue of Windows' 8.3-short-path fs-event hazard: the configured epochFile path
+	// goes through a symlinked directory, so the path handed to fs.watch differs from its realpath.
+	// The watcher must still canonicalize and detect events -- proving it never watches the
+	// non-canonical alias.
+	it.skipIf(process.platform === "win32")(
+		"detects an epoch replacement when epochFile resolves through a symlinked directory",
+		async () => {
+			const dir = mkdtempSync(join(tmpdir(), "pi-wt-sync-watch-real-"));
+			cleanups.push(() => rmSync(dir, { recursive: true, force: true }));
+			const realDir = join(dir, "real-store");
+			mkdirSync(realDir, { recursive: true });
+			const linkDir = join(dir, "alias-store");
+			symlinkSync(realDir, linkDir);
+
+			const paths = syncStorePaths(linkDir);
+			mkdirSync(paths.root, { recursive: true });
+			await writeEpoch(paths, epoch({ epoch: 1, landedLaneKey: "other" }));
+
+			const notices: string[] = [];
+			const watcher = startEpochWatcher({
+				epochFile: paths.epochFile,
+				laneKey: "mine",
+				notify: (text) => notices.push(text),
+				debounceMs: 10,
+			});
+			cleanups.push(() => watcher.stop());
+
+			await new Promise((resolve) => setTimeout(resolve, 100));
+			expect(notices).toHaveLength(0);
+
+			await writeEpoch(paths, epoch({ epoch: 2, landedLaneKey: "other", changedPaths: ["x.ts"] }));
+			await waitUntil(() => notices.length === 1);
+			expect(notices[0]).toContain("epoch 2");
+		},
+		20_000,
+	);
 });

@@ -7,9 +7,9 @@
  * next tool call.
  */
 
-import { watch } from "node:fs";
 import { readFile } from "node:fs/promises";
 import { basename, dirname } from "node:path";
+import { watchWithErrorHandler } from "../../utils/fs-watch.ts";
 import type { WorktreeSyncEpoch } from "./codes.ts";
 
 export interface EpochWatcherConfig {
@@ -76,10 +76,14 @@ export function startEpochWatcher(config: EpochWatcherConfig): EpochWatcherHandl
 	// Baseline read; any event after this compares against it.
 	void evaluate();
 
-	let watcher: ReturnType<typeof watch> | undefined;
-	try {
-		const fileName = basename(config.epochFile);
-		watcher = watch(dirname(config.epochFile), (_eventType, changedName) => {
+	const fileName = basename(config.epochFile);
+	// watchWithErrorHandler canonicalizes the watched dir (realpathSync.native) before calling
+	// fs.watch -- on Windows, a non-canonical (e.g. 8.3 short-form) path here hard-aborts the
+	// process via libuv's fs-event assertion. It also attaches an 'error' listener so an async
+	// watcher failure (EMFILE, dir removed, etc.) can never surface as an unhandled exception.
+	const watcher = watchWithErrorHandler(
+		dirname(config.epochFile),
+		(_eventType, changedName) => {
 			if (stopped) return;
 			if (changedName !== null && changedName !== fileName && changedName !== `${fileName}.tmp`) return;
 			if (debounceTimer) clearTimeout(debounceTimer);
@@ -87,11 +91,14 @@ export function startEpochWatcher(config: EpochWatcherConfig): EpochWatcherHandl
 				void evaluate();
 			}, debounceMs);
 			debounceTimer.unref?.();
-		});
-	} catch {
-		// The store dir may not exist yet (no lane created a store). The lane gate still fails
-		// closed at the next tool call; the watcher is a promptness optimization only.
-	}
+		},
+		() => {
+			// The store dir may not exist yet, or the watcher died after creation (EMFILE, dir
+			// removed, etc). The lane gate (G8) and land CAS (G3) still fail closed at the next
+			// tool call regardless -- this watcher is a promptness optimization only, so on error
+			// we simply stop watching rather than retry; correctness never depended on it.
+		},
+	);
 
 	return {
 		stop() {
