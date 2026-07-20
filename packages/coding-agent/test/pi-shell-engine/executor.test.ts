@@ -123,6 +123,18 @@ result = run(
 print(json.dumps(result))
 `;
 
+// On Windows, any child process reading a file (or emitting to stdout) through Python's
+// default text-mode I/O re-translates trailing "\n" bytes to "\r\n" — this is Windows Python
+// child behavior, not the engine's: the TS bash-tool layer already strips "\r" before an agent
+// ever sees output, so byte-for-byte engine assertions must normalize CRLF -> LF here to match
+// what a real caller observes. This is NEVER applied to output produced directly by an engine
+// builtin (echo/cd/export/etc. always emit bare "\n" on every platform) — only to output that
+// passed through an external python -c child process (e.g. the verification helper that
+// re-prints a redirect target's file contents).
+function normalizeChildOutput(text: string): string {
+	return text.replace(/\r\n/g, "\n");
+}
+
 interface RunResult {
 	stdout: string;
 	exitCode: number;
@@ -217,7 +229,7 @@ describe("pi-shell-engine executor (exec.py)", () => {
 			const content = spawnSync(python, ["-c", `print(open(${JSON.stringify(target)}).read(), end="")`], {
 				encoding: "utf-8",
 			});
-			expect(content.stdout).toBe("hello\n");
+			expect(normalizeChildOutput(content.stdout)).toBe("hello\n");
 		});
 
 		it(">> appends to a file", () => {
@@ -228,7 +240,7 @@ describe("pi-shell-engine executor (exec.py)", () => {
 			const content = spawnSync(python, ["-c", `print(open(${JSON.stringify(target)}).read(), end="")`], {
 				encoding: "utf-8",
 			});
-			expect(content.stdout).toBe("one\ntwo\n");
+			expect(normalizeChildOutput(content.stdout)).toBe("one\ntwo\n");
 		});
 
 		it("< reads a file as stdin for an external command", () => {
@@ -249,7 +261,7 @@ describe("pi-shell-engine executor (exec.py)", () => {
 			const content = spawnSync(python, ["-c", `print(open(${JSON.stringify(errFile)}).read(), end="")`], {
 				encoding: "utf-8",
 			});
-			expect(content.stdout).toBe("boom\n");
+			expect(normalizeChildOutput(content.stdout)).toBe("boom\n");
 		});
 
 		it("2>&1 merges stderr into stdout", () => {
@@ -261,7 +273,7 @@ describe("pi-shell-engine executor (exec.py)", () => {
 				["-c", `print(open(${JSON.stringify(join(dir, "combined.txt"))}).read(), end="")`],
 				{ encoding: "utf-8" },
 			);
-			expect(content.stdout).toBe("err-line\n");
+			expect(normalizeChildOutput(content.stdout)).toBe("err-line\n");
 		});
 	});
 
@@ -354,7 +366,7 @@ describe("pi-shell-engine executor (exec.py)", () => {
 			const content = spawnSync(python, ["-c", `print(open(${JSON.stringify(errFile)}).read(), end="")`], {
 				encoding: "utf-8",
 			});
-			expect(content.stdout).toBe("boom\n");
+			expect(normalizeChildOutput(content.stdout)).toBe("boom\n");
 		});
 
 		it("routes an un-redirected pipeline stage's stderr to ctx.stderr when set (group-level 2>)", () => {
@@ -366,7 +378,7 @@ describe("pi-shell-engine executor (exec.py)", () => {
 			const content = spawnSync(python, ["-c", `print(open(${JSON.stringify(sessionErrPath)}).read(), end="")`], {
 				encoding: "utf-8",
 			});
-			expect(content.stdout).toBe("group-err\n");
+			expect(normalizeChildOutput(content.stdout)).toBe("group-err\n");
 		});
 
 		it("a command-not-found pipeline stage reports 127, closes its write end, and never crashes the engine", () => {
@@ -387,7 +399,7 @@ describe("pi-shell-engine executor (exec.py)", () => {
 			const content = spawnSync(python, ["-c", `print(open(${JSON.stringify(errFile)}).read(), end="")`], {
 				encoding: "utf-8",
 			});
-			expect(content.stdout).toBe("inner-err\n");
+			expect(normalizeChildOutput(content.stdout)).toBe("inner-err\n");
 		});
 
 		it("{ ...; } 2>file captures the inner external command's un-redirected stderr", () => {
@@ -398,7 +410,7 @@ describe("pi-shell-engine executor (exec.py)", () => {
 			const content = spawnSync(python, ["-c", `print(open(${JSON.stringify(errFile)}).read(), end="")`], {
 				encoding: "utf-8",
 			});
-			expect(content.stdout).toBe("brace-err\n");
+			expect(normalizeChildOutput(content.stdout)).toBe("brace-err\n");
 		});
 	});
 

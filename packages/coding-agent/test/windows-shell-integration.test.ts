@@ -1,4 +1,4 @@
-import { mkdtempSync } from "node:fs";
+import { mkdtempSync, realpathSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { describe, expect, it } from "vitest";
@@ -36,7 +36,9 @@ describe("windows shell cross-tier integration (bash tool + python engine on win
 			);
 			const content = result.content[0];
 			if (content?.type !== "text") throw new Error("expected text output");
-			expect(content.text).toBe("two\nthree");
+			// Assert the exact tool output including its real trailing newline — the tool's
+			// output is not expected to be pre-trimmed.
+			expect(content.text).toBe("two\nthree\n");
 		} finally {
 			disposeWindowsShellState(sessionKey);
 		}
@@ -52,7 +54,11 @@ describe("windows shell cross-tier integration (bash tool + python engine on win
 			const result = await tool.execute("call-b2", { command: "pwd" }, undefined, undefined, undefined as never);
 			const content = result.content[0];
 			if (content?.type !== "text") throw new Error("expected text output");
-			expect(content.text.trim().toLowerCase()).toBe(sub.toLowerCase());
+			// Canonicalize both sides through the native realpath resolver: `mkdtempSync`
+			// returns a long-form path, but the PS floor's `pwd` may echo back an 8.3 short
+			// name (e.g. "runner~1") for the SAME directory — same identity, different
+			// spelling. `realpathSync.native` resolves both to one canonical form.
+			expect(realpathSync.native(content.text.trim()).toLowerCase()).toBe(realpathSync.native(sub).toLowerCase());
 		} finally {
 			disposeWindowsShellState(sessionKey);
 		}

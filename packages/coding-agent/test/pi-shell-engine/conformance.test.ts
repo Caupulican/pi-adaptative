@@ -18,6 +18,16 @@ function resolvePython(): string | null {
 	return null;
 }
 
+// On Windows, the verification helper below re-prints a redirect target's file contents through
+// Python's default text-mode stdout, which re-translates "\n" to "\r\n" on write — that is
+// Windows Python child behavior, not the engine's (the TS bash-tool layer already strips "\r"
+// before an agent ever sees output). Only assertions on output that passed through such an
+// external python -c child normalize CRLF -> LF; engine-builtin output (echo/cat/etc., asserted
+// directly off runEngine's own stdout field) always emits bare "\n" and stays byte-exact.
+function normalizeChildOutput(text: string): string {
+	return text.replace(/\r\n/g, "\n");
+}
+
 interface EngineFrame {
 	exitCode: number;
 	cwd: string;
@@ -112,8 +122,16 @@ describe("pi-shell-engine conformance (main.py end-to-end)", () => {
 
 		it("brace group: cd/export DO persist", () => {
 			withTmpDir((dir) => {
-				const { frame } = runEngine(python, "{ cd /tmp ; export FOO=bar ; }", dir);
-				expect(frame.cwd).toBe("/tmp");
+				// The corpus target must be a directory guaranteed to exist on both POSIX and
+				// win32 — hardcoding "/tmp" only holds on POSIX. Use a per-test tmp subdirectory
+				// created by the harness and pass it into the command, quoted.
+				const target = mkdtempSync(join(tmpdir(), "pi-conformance-brace-"));
+				const { frame } = runEngine(python, `{ cd "${target}" ; export FOO=bar ; }`, dir);
+				if (process.platform === "win32") {
+					expect(frame.cwd.replace(/\//g, "\\").toLowerCase()).toBe(target.replace(/\//g, "\\").toLowerCase());
+				} else {
+					expect(frame.cwd).toBe(target);
+				}
 				expect(frame.envDelta.FOO).toBe("bar");
 			});
 		});
@@ -131,7 +149,7 @@ describe("pi-shell-engine conformance (main.py end-to-end)", () => {
 				const content = spawnSync(python, ["-c", `print(open(${JSON.stringify(target)}).read(), end="")`], {
 					encoding: "utf-8",
 				});
-				expect(content.stdout).toBe("hi\n");
+				expect(normalizeChildOutput(content.stdout)).toBe("hi\n");
 			});
 		});
 
@@ -154,7 +172,7 @@ describe("pi-shell-engine conformance (main.py end-to-end)", () => {
 				const content = spawnSync(python, ["-c", `print(open(${JSON.stringify(errFile)}).read(), end="")`], {
 					encoding: "utf-8",
 				});
-				expect(content.stdout).toBe("boom\n");
+				expect(normalizeChildOutput(content.stdout)).toBe("boom\n");
 			});
 		});
 
@@ -167,7 +185,7 @@ describe("pi-shell-engine conformance (main.py end-to-end)", () => {
 				const content = spawnSync(python, ["-c", `print(open(${JSON.stringify(combined)}).read(), end="")`], {
 					encoding: "utf-8",
 				});
-				expect(content.stdout).toBe("err\n");
+				expect(normalizeChildOutput(content.stdout)).toBe("err\n");
 			});
 		});
 
@@ -342,10 +360,22 @@ describe("pi-shell-engine conformance (main.py end-to-end)", () => {
 		it("which resolves in PATH, not-found -> exit 1", () => {
 			withTmpDir((dir) => {
 				const bin = mkdtempSync(join(tmpdir(), "pi-bin-"));
-				const target = join(bin, "mytool");
-				writeFileSync(target, "#!/bin/sh\necho hi\n", { mode: 0o755 });
+				// PATHEXT gates executable resolution on win32: an extension-less file is
+				// correctly rejected there (engine behavior, not a bug), so the fixture must
+				// create a PATHEXT-valid executable on that platform and keep the
+				// extension-less form (valid via the POSIX execute bit) on POSIX.
+				const target = process.platform === "win32" ? join(bin, "mytool.bat") : join(bin, "mytool");
+				if (process.platform === "win32") {
+					writeFileSync(target, "@echo hi\r\n");
+				} else {
+					writeFileSync(target, "#!/bin/sh\necho hi\n", { mode: 0o755 });
+				}
 				const found = runEngine(python, "which mytool", dir, { PATH: bin });
-				expect(found.stdout.trim()).toBe(target);
+				if (process.platform === "win32") {
+					expect(found.stdout.trim().toLowerCase()).toBe(target.toLowerCase());
+				} else {
+					expect(found.stdout.trim()).toBe(target);
+				}
 				const notFound = runEngine(python, "which doesnotexist123", dir, { PATH: bin });
 				expect(notFound.frame.exitCode).toBe(1);
 				expect(notFound.stdout).toBe("");
