@@ -4,6 +4,7 @@ import { tmpdir } from "node:os";
 import { join, resolve } from "node:path";
 import { afterEach, describe, expect, it } from "vitest";
 import { ENV_AGENT_DIR } from "../src/config.ts";
+import { waitForChildProcessWithTermination } from "../src/utils/child-process.ts";
 
 const cliPath = resolve(__dirname, "../src/cli.ts");
 const tempDirs: string[] = [];
@@ -60,23 +61,26 @@ async function runCli(
 	const resolvedArgs = typeof args === "function" ? args(dirs) : args;
 
 	let stderr = "";
-	const code = await new Promise<number | null>((resolvePromise, reject) => {
-		const child = spawn(process.execPath, [cliPath, ...resolvedArgs], {
-			cwd: dirs.projectDir,
-			env: {
-				...process.env,
-				[ENV_AGENT_DIR]: dirs.agentDir,
-				PI_OFFLINE: "1",
-				TSX_TSCONFIG_PATH: resolve(__dirname, "../../../tsconfig.json"),
-			},
-			stdio: ["ignore", "ignore", "pipe"],
-		});
-		child.stderr.on("data", (chunk) => {
-			stderr += chunk.toString();
-		});
-		child.on("error", reject);
-		child.on("close", resolvePromise);
+	const child = spawn(process.execPath, [cliPath, ...resolvedArgs], {
+		cwd: dirs.projectDir,
+		env: {
+			...process.env,
+			[ENV_AGENT_DIR]: dirs.agentDir,
+			PI_OFFLINE: "1",
+			TSX_TSCONFIG_PATH: resolve(__dirname, "../../../tsconfig.json"),
+		},
+		stdio: ["ignore", "ignore", "pipe"],
 	});
+	child.stderr.on("data", (chunk) => {
+		stderr += chunk.toString();
+	});
+	// Await the child's FULL termination (exit code + stdio settlement, see
+	// waitForChildProcessWithTermination), not just Node's "close" event: on win32 "close" can fire
+	// before the OS has actually released the process's handle on `dirs.projectDir`/`dirs.agentDir`,
+	// so a `rmSync` of `tempRoot` right after "close" can race a not-yet-dead process and surface as
+	// EPERM. Waiting on the same helper the rest of the repo uses for reliable cross-platform exit
+	// tracking closes that race without a sleep or an rmSync retry loop.
+	const { code } = await waitForChildProcessWithTermination(child);
 
 	return { code, agentDir: dirs.agentDir, stderr };
 }
