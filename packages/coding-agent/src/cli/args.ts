@@ -16,6 +16,8 @@ export interface Args {
 	systemPrompt?: string;
 	appendSystemPrompt?: string[];
 	worktreeLane?: string;
+	parentPid?: number;
+	parentSession?: string;
 	thinking?: ThinkingLevel;
 	continue?: boolean;
 	resume?: boolean;
@@ -102,6 +104,13 @@ export function parseArgs(args: string[]): Args {
 			result.appendSystemPrompt.push(args[++i]);
 		} else if (arg === "--worktree-lane" && i + 1 < args.length) {
 			result.worktreeLane = args[++i];
+		} else if (arg === "--parent-pid" && i + 1 < args.length) {
+			const parsed = Number.parseInt(args[++i], 10);
+			if (Number.isFinite(parsed) && parsed > 0) {
+				result.parentPid = parsed;
+			}
+		} else if (arg === "--parent-session" && i + 1 < args.length) {
+			result.parentSession = args[++i];
 		} else if (arg === "--name" || arg === "-n") {
 			if (i + 1 < args.length) {
 				result.name = args[++i];
@@ -264,6 +273,8 @@ ${chalk.bold("Options:")}
   --system-prompt <text>         System prompt (default: coding assistant prompt)
   --append-system-prompt <text>  Append text or file contents to the system prompt (can be used multiple times)
   --worktree-lane <laneKey>      Bind this session to a worktree-sync lane (sets PI_WORKTREE_LANE; enables the lane gate + epoch watcher)
+  --parent-pid <pid>             Declare this session as a process-matrix worker of parent pid (sets PI_PARENT_PID)
+  --parent-session <id>          Declare the parent session id for a process-matrix worker (sets PI_PARENT_SESSION)
   --mode <mode>                  Output mode: text (default), json, or rpc
   --print, -p                    Non-interactive mode: process prompt and exit
   --print-usage                  With -p: emit cumulative session usage (one JSON line,

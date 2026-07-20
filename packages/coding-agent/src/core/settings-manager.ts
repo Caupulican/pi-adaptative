@@ -300,6 +300,20 @@ export const DEFAULT_WORKTREE_SYNC_POLICY: WorktreeSyncPolicySetting = "on_land_
 export const DEFAULT_WORKTREE_SYNC_GATE_TIMEOUT_MS = 900_000;
 export const DEFAULT_WORKTREE_SYNC_MAX_LANES = 5;
 
+/** Durable master/worker process-matrix supervision; see `core/process-matrix/`. */
+export interface ProcessMatrixSettings {
+	enabled?: boolean; // default: true -- master switch; explicit false is the hard off-switch (zero behavior change when off)
+	heartbeatMs?: number; // default: 30000 -- master heartbeat interval
+	adoptionGraceMs?: number; // default: 300000 -- how long an orphaned worker waits (polling for an adopt/cleanup directive) before self-exiting
+	watcherPollMs?: number; // default: 25000 -- poll cadence for parent-liveness / directive checks
+}
+
+export type ResolvedProcessMatrixSettings = Required<ProcessMatrixSettings>;
+
+export const DEFAULT_PROCESS_MATRIX_HEARTBEAT_MS = 30_000;
+export const DEFAULT_PROCESS_MATRIX_ADOPTION_GRACE_MS = 300_000;
+export const DEFAULT_PROCESS_MATRIX_WATCHER_POLL_MS = 25_000;
+
 export type LearningPolicyLayer =
 	| "memory"
 	| "skill"
@@ -447,6 +461,7 @@ export interface Settings {
 	researchLane?: ResearchLaneSettings; // Opt-in autonomous read-only research lane producing evidence bundles
 	workerDelegation?: WorkerDelegationSettings; // Bounded scout-worker delegation; enabled by default on capable models
 	worktreeSync?: WorktreeSyncSettings; // Opt-in hard-gated worktree-per-lane parallel-work workflow (core/worktree-sync)
+	processMatrix?: ProcessMatrixSettings; // Durable master/worker process-matrix supervision (core/process-matrix); on by default
 	learningPolicy?: LearningPolicySettings; // Opt-in learning apply policy: proposal-first durable writes with audit/rollback
 	modelCapability?: ModelCapabilitySettings; // Auto-detected small-model tool/lane surface (default: auto)
 	toolkit?: ToolkitSettings; // User's blessed daily-ops script registry for run_toolkit_script
@@ -3314,6 +3329,31 @@ export class SettingsManager {
 			resolved.worktreesRoot = configured.worktreesRoot.trim();
 		}
 		return resolved;
+	}
+
+	getProcessMatrixSettings(): ResolvedProcessMatrixSettings {
+		const configured = this.settings.processMatrix ?? {};
+		return {
+			enabled: configured.enabled !== false,
+			heartbeatMs: sanitizeIntegerSetting(
+				configured.heartbeatMs,
+				DEFAULT_PROCESS_MATRIX_HEARTBEAT_MS,
+				1000,
+				600_000,
+			),
+			adoptionGraceMs: sanitizeIntegerSetting(
+				configured.adoptionGraceMs,
+				DEFAULT_PROCESS_MATRIX_ADOPTION_GRACE_MS,
+				5000,
+				3_600_000,
+			),
+			watcherPollMs: sanitizeIntegerSetting(
+				configured.watcherPollMs,
+				DEFAULT_PROCESS_MATRIX_WATCHER_POLL_MS,
+				1000,
+				600_000,
+			),
+		};
 	}
 
 	getWorkerDelegationSettings(): ResolvedWorkerDelegationSettings {

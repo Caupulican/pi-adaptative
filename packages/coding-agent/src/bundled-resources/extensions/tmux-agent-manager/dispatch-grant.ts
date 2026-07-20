@@ -215,6 +215,14 @@ export interface LaunchProfileSource {
 	 * `buildScopedSystemPrompt` appends one lane-doctrine sentence.
 	 */
 	worktreeLane?: string;
+	/**
+	 * Process-matrix parent identity for this launch (see `core/process-matrix/runtime.ts`): the
+	 * dispatching process's own pid/sessionId. When present, `buildLaunchProfileFlags` appends
+	 * `--parent-pid`/`--parent-session` (sugar over `PI_PARENT_PID`/`PI_PARENT_SESSION`) so the
+	 * child self-registers as a worker of this session and winds down gracefully if it disappears.
+	 */
+	parentPid?: number;
+	parentSession?: string;
 }
 
 /** A grant-covered launch derives its profile from the grant's envelope. */
@@ -248,6 +256,8 @@ export function buildLaunchProfileFlags(source: LaunchProfileSource): LaunchProf
 	if (source.resourceProfile) flags.push({ flag: "--resource-profile", value: source.resourceProfile });
 	else flags.push({ flag: "--no-extensions" }, { flag: "--no-skills" });
 	if (source.worktreeLane) flags.push({ flag: "--worktree-lane", value: source.worktreeLane });
+	if (source.parentPid !== undefined) flags.push({ flag: "--parent-pid", value: String(source.parentPid) });
+	if (source.parentSession) flags.push({ flag: "--parent-session", value: source.parentSession });
 	flags.push({ flag: "--append-system-prompt", value: buildScopedSystemPrompt(source) });
 	return flags;
 }

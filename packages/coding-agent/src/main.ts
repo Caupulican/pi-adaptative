@@ -40,6 +40,8 @@ import {
 } from "./core/model-resolver.ts";
 import { collectModelRouterConfigDiagnostics } from "./core/model-router/config-diagnostics.ts";
 import { restoreStdout, takeOverStdout } from "./core/output-guard.ts";
+import { PI_PARENT_PID_ENV, PI_PARENT_SESSION_ENV, startProcessMatrixRuntime } from "./core/process-matrix/runtime.ts";
+import { isReloadSessionProcessAlive } from "./core/reload-blockers.ts";
 import { parseResourceProfileInput } from "./core/resource-profile-blocks.ts";
 import type { CreateAgentSessionOptions } from "./core/sdk.ts";
 import {
@@ -675,6 +677,15 @@ export async function main(args: string[], options?: MainOptions) {
 	if (parsed.worktreeLane) {
 		process.env[PI_WORKTREE_LANE_ENV] = parsed.worktreeLane;
 	}
+	// --parent-pid/--parent-session are the same CLI-sugar-over-env pattern as --worktree-lane:
+	// setting the env here (before any session/tool construction) makes the flag and a
+	// launcher-provided env byte-identical downstream (the process-matrix runtime's worker branch).
+	if (parsed.parentPid !== undefined) {
+		process.env[PI_PARENT_PID_ENV] = String(parsed.parentPid);
+	}
+	if (parsed.parentSession) {
+		process.env[PI_PARENT_SESSION_ENV] = parsed.parentSession;
+	}
 	let appMode = resolveAppMode(parsed, process.stdin.isTTY);
 	const shouldTakeOverStdout = appMode !== "interactive";
 	if (shouldTakeOverStdout) {
@@ -935,6 +946,36 @@ export async function main(args: string[], options?: MainOptions) {
 		},
 		onDiagnostic: (message) => {
 			console.error(chalk.yellow(`Warning: ${message}`));
+		},
+	});
+
+	// Process-matrix runtime (no-op unless enabled): durable master/worker supervision surviving
+	// restarts -- a master asks before touching any orphaned worker it finds on resume; a worker
+	// winds down gracefully (never silently) when its parent disappears. Fire-and-forget, same as
+	// worktree-sync above: a broken store must never block session startup.
+	void startProcessMatrixRuntime({
+		agentDir,
+		sessionId: sessionManager.getSessionId(),
+		hasUI: appMode === "interactive",
+		settings: settingsManager.getProcessMatrixSettings(),
+		isProcessAlive: isReloadSessionProcessAlive,
+		promptConfirm,
+		notify: (text) => {
+			void session.sendCustomMessage(
+				{ customType: "process-matrix-notice", content: text, display: true },
+				{ triggerTurn: true, deliverAs: "steer" },
+			);
+		},
+		onDiagnostic: (message) => {
+			console.error(chalk.yellow(`Warning: ${message}`));
+		},
+		requestExit: () => {
+			try {
+				session.dispose();
+			} catch {
+				// Best-effort: exit must proceed even if dispose() itself throws.
+			}
+			process.exit(0);
 		},
 	});
 

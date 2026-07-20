@@ -99,6 +99,20 @@ describe("dispatch-grant pure logic", () => {
 		expect(withoutProfile).toContainEqual({ flag: "--no-skills" });
 	});
 
+	it("buildLaunchProfileFlags appends --parent-pid/--parent-session only when present on the source", () => {
+		const withParent = buildLaunchProfileFlags({
+			...ONE_SHOT_LAUNCH_PROFILE_SOURCE,
+			parentPid: 4242,
+			parentSession: "master-session-1",
+		});
+		expect(withParent).toContainEqual({ flag: "--parent-pid", value: "4242" });
+		expect(withParent).toContainEqual({ flag: "--parent-session", value: "master-session-1" });
+
+		const withoutParent = buildLaunchProfileFlags(ONE_SHOT_LAUNCH_PROFILE_SOURCE);
+		expect(withoutParent.some((flag) => flag.flag === "--parent-pid")).toBe(false);
+		expect(withoutParent.some((flag) => flag.flag === "--parent-session")).toBe(false);
+	});
+
 	it("decodeTmuxWorkerUsageClaim permissively decodes a partial claim and rejects non-objects", () => {
 		expect(decodeTmuxWorkerUsageClaim(null)).toBeUndefined();
 		expect(decodeTmuxWorkerUsageClaim("nope")).toBeUndefined();
@@ -563,6 +577,10 @@ describe.skipIf(process.platform === "win32")("tmux dispatch grant — approval-
 		expect(command).toContain("--resource-profile 'backend'");
 		expect(command).toContain("--append-system-prompt");
 		expect(command).toContain(grant.grantId);
+		// Process-matrix parent identity is threaded onto every pi-provider child, independent of the
+		// grant envelope (fire_task always spreads its own pid/sessionId onto the launch profile).
+		expect(command).toContain(`--parent-pid '${process.pid}'`);
+		expect(command).toContain(`--parent-session '${context.sessionManager.getSessionFile()}'`);
 		expect(command).not.toContain("--no-approve");
 		expect(laneEvents).toContainEqual(expect.objectContaining({ phase: "dispatch", status: "launched" }));
 

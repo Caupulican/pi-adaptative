@@ -1490,10 +1490,14 @@ async function executeTool(
 			jobId: job.id,
 			description: `fire_task launch of job ${job.id} (primary agent ${primaryAgent.name})`,
 		});
-		applyLaunchProfile(
-			job,
-			authorization.grant ? launchProfileSourceFromGrant(authorization.grant) : ONE_SHOT_LAUNCH_PROFILE_SOURCE,
-		);
+		applyLaunchProfile(job, {
+			...(authorization.grant ? launchProfileSourceFromGrant(authorization.grant) : ONE_SHOT_LAUNCH_PROFILE_SOURCE),
+			// Process-matrix parent identity: the dispatched child self-registers as a worker of THIS
+			// session and winds down gracefully if this session disappears (see dispatch-grant.ts's
+			// `LaunchProfileSource.parentPid`/`parentSession` doc).
+			parentPid: process.pid,
+			parentSession: ctx.sessionManager.getSessionId?.() ?? ctx.sessionManager.getSessionFile(),
+		});
 		const archivedJobDir = prepareJobDirForLaunch(job, params.force);
 		const panes = job.agents.map((agent) => ({
 			title: agent.name,
