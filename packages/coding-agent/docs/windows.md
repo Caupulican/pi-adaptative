@@ -10,13 +10,62 @@ Pi supports native Windows on x64 and ARM64. The Node.js package runs under Wind
 - Git for Windows for native Git commands
 - Windows Terminal, WezTerm, or the VS Code terminal for the best keyboard support
 
-The model always sees one stable `bash` tool contract. On Windows, Pi parses one simple command, converts supported Bash-like builtins and external argv deterministically to PowerShell, and fails closed for unsupported syntax. The agent never selects a shell or emits native PowerShell. Pi resolves the Windows backend in this order:
+The model always sees one stable `bash` tool contract. On Windows, a deterministic router classifies every command into one of three tiers instead of parsing the full Bash grammar in one place:
+
+1. **PowerShell floor** (always available): one simple command — a bounded set of builtin translations or a quoted external argv — converted deterministically to PowerShell, exactly as before this tier existed.
+2. **Bundled Python engine** (uv-provisioned Python 3.13, on by default): pipelines, redirection, chaining, quoting, expansion, globs, and the coreutils vocabulary below, plus every state-mutating command (`cd`, `export`, `unset`), which the engine always owns so there is a single mutator.
+3. **Named fail-closed refusal**: constructs outside the supported grammar (see below) return an actionable error naming the construct instead of guessing or downgrading silently.
+
+The agent never selects a shell or emits native PowerShell or Python. Pi resolves the PowerShell executable in this order:
 
 1. `shellPath` in `%USERPROFILE%\.pi\agent\settings.json`
 2. PowerShell 7 (`pwsh.exe`) on `PATH` or under `Program Files`
 3. Windows PowerShell (`powershell.exe`) under `System32` or on `PATH`
 
-The backend runs with `-NoLogo -NoProfile -NonInteractive -Command` and a best-effort UTF-8 console-output prefix. Supported contract forms include quoted external commands and bounded forms of `pwd`, `echo`, `which`, `ls`, `cat`, `head`, `tail`, `grep`, `find`, `rm`, `cp`, `mv`, `mkdir`, and `touch`. Pipelines, redirection, variable or command expansion, shell chaining, nested shells, POSIX scripts, unclosed quotes, and unsupported builtin options return an actionable error instead of reaching PowerShell unchanged. Every agent, interactive, and RPC shell call has a 120-second wall-clock default, even while output continues.
+The PowerShell tier runs with `-NoLogo -NoProfile -NonInteractive -Command` and a best-effort UTF-8 console-output prefix. Every agent, interactive, and RPC shell call has a 120-second wall-clock default, even while output continues.
+
+### Supported forms
+
+| Grammar | Forms | Notes |
+| --- | --- | --- |
+| Pipeline | `a \| b \| c` | Real OS pipes, binary-safe; exit code is the last element's (after `!`). |
+| Sequencing | `a ; b`, newline-separated, `a && b`, `a \|\| b`, `! pipeline` | Left-to-right / short-circuit / negation, bash-standard. |
+| Subshell | `( … )` | Isolated cwd/env copy — inner `cd`/`export` do not leak out. |
+| Brace group | `{ …; }` | Shares state — inner `cd`/`export` persist. |
+| Redirection | `>`, `>>`, `1>`, `1>>`, `<`, `2>`, `2>>`, `2>&1`, `&>`, `>&` | `/dev/null` maps to `os.devnull`. A builtin's stderr is merged into its own stdout (one sink) — an explicit `2>file` on a builtin does not capture its error text; external commands capture normally. |
+| Quoting | `'…'`, `"…"`, `\x`, `$'…'` | Standard single/double/backslash/ANSI-C semantics. |
+| Tilde | `~`, `~/x` | Word-start, unquoted, expands to `$HOME`. `~user` is unsupported (refusal). |
+| Parameter expansion | `$VAR`, `${VAR}`, `${V:-w}`, `${V:=w}`, `${V:+w}`, `${V:?w}`, `${#VAR}` | POSIX `:`-prefixed (empty-or-unset) semantics only; other `${…}` operators refuse. |
+| Command substitution | `$(…)`, `` `…` `` | Runs through the same executor; trailing newlines stripped; nesting bounded to depth 8. |
+| Glob | `*`, `?`, `[…]` | Case-sensitive, `/`-normalized, ordinal (`LC_ALL=C`) sort; final path segment only; no match falls back to the literal word. |
+| Assignment | `NAME=value` (standalone or prefixed to a command) | Standalone sets engine env for the session; prefixed applies only to that command. No shell-var/exported-env split — every assignment sets env. |
+
+Builtins: `cd`, `pwd`, `echo [-n -e -E]`, `printf`, `export`, `unset`, `true`, `false`, `which`, `test`/`[`, `ls [-a -A -1 -r]`, `cat`, `head [-n N]`, `tail [-n N]`, `grep [-i -v -n -c -l -w -F -E]`, `find [-type f|d] [-name GLOB]`, `rm [-f -r -rf]`, `cp [-r|-R]`, `mv`, `mkdir [-p]`, `touch`, `wc [-l -w -c -m]`, `sort [-r -n -u -f]`, `uniq [-c -d -u -i]`, `cut -d/-f` or `-c`, `tr [-d -s -c]`, `basename`, `dirname`, `sed 's/RE/REPL/[g][i]'` (substitute only), `xargs [-0 -n -I]`. An unknown flag on a listed builtin, or any builtin/form not listed, returns a named `unsupported-flag`/`unsupported-builtin` refusal rather than a guess.
+
+### Divergences from bash (intentional, documented)
+
+- `grep`/`sed` regex is Python `re`, not POSIX BRE/ERE.
+- `ls`/`find` output always uses a trailing `/` on directories, `/`-normalized paths, and ordinal sort — matching the PowerShell floor so output is identical regardless of which tier ran.
+- `wc`/`uniq -c` column widths reproduce GNU's dynamic field width only for the single-count stdin case; multi-count/file-arg forms use fixed deterministic padding.
+- No shell-variable vs. exported-environment distinction: every `NAME=value` sets engine env.
+- Sorting is always ordinal (`LC_ALL=C`): globs, `ls`, `find`, and default `sort`.
+- A builtin's stderr is merged into its own stdout; only external commands honor an explicit `2>`.
+- Globs expand only the final path segment (`dir/*.py` works; `*/x.py` matches the directory part literally).
+- `wc -m` counts UTF-8 characters (bash under `LC_ALL=C` counts bytes).
+
+### Named unsupported constructs
+
+Each of these fails closed with a named, actionable error instead of an approximation: `job-control` (trailing `&`, `fg`/`bg`/`jobs`/`wait`/`disown`), `process-substitution` (`<(…)`/`>(…)`), `arithmetic-expansion` (`$((…))`, `((…))`, `let`), `brace-expansion` (`{a,b,c}`), `nested-shell` (`bash`/`sh`/`cmd`/`powershell`/`pwsh`/`wsl`/… as a command word), `exec-builtin`, `heredoc`/`here-string` (`<<`, `<<-`, `<<<`), `function-definition`, `control-flow` (`if`/`for`/`while`/`until`/`case`/`select`), `extended-glob` (`@(…)`, `!(…)`, etc.), `unsupported-builtin` (`eval`, `source`/`.`, `alias`, `trap`, `set`, `shopt`, `read`, `declare`, `local`), `unsupported-flag`, `posix-script` (`*.sh`, `/bin/…`), `cwd-missing`, `tilde-user`, `malformed-syntax` (unbalanced quote/paren/brace, empty pipeline element, missing redirect target), `parameter-expansion` (a `${…}` form outside the supported op set).
+
+### State and session semantics
+
+`cd`, `export`, and `unset` always route to the Python engine, the sole mutator of session state (working directory and environment). That state is held once per agent session and read by both tiers: the next call — whether it routes to the PowerShell floor or back to the engine — sees the updated cwd/env. A subshell `( … )` runs against an isolated copy and never leaks its `cd`/`export` back out; a brace group `{ …; }` shares and persists state like the top level.
+
+### The `windowsShell.pythonEngine` setting and degradation
+
+`windowsShell.pythonEngine` (default `true`) is the kill switch. Set it to `false` to restore the PowerShell-only contract verbatim: only the simple-command floor is used, and every pipeline/redirection/expansion/chaining form that would have routed to the engine instead returns the same fail-closed error it did before the engine existed.
+
+When the setting is left on but the bundled Python runtime cannot be resolved (uv missing, network failure provisioning Python 3.13, or similar), the engine tier is simply unavailable: simple commands still run on the PowerShell floor exactly as always, and any command that needs the engine returns a named error stating the Python runtime is unavailable, that the simple-command floor still works, and to fix `uv`/network to restore pipelines, redirection, expansion, and chaining. There is no silent approximation — a complex command is never downgraded to a plausible-but-wrong simple execution.
 
 The native `python` tool uses the same contract on Windows and Unix-like systems. Pi provisions a pinned uv executable, resolves or installs Python 3.13 through uv, then spawns the interpreter directly with UTF-8 and bytecode-cache suppression. Python calls default to 30 seconds. See [Native Python](python.md).
 
@@ -47,7 +96,7 @@ A Windows release is expected to preserve the same Pi features as Linux and macO
 | --- | --- | --- |
 | CLI, print, JSON, and RPC modes | Native | Full package build and test suite on `windows-latest` |
 | Interactive TUI and configurable keybindings | Native | TUI tests on Windows; packaged `win32-console-mode.node`; Windows Terminal mappings below |
-| `read`, `write`, `edit`, `grep`, `find`, and stable `bash` contract tools | Native; Bash-like commands are routed deterministically to PowerShell | Router/platform-shell tests plus native Windows CI; release `pi.exe` executes the platform shell through RPC |
+| `read`, `write`, `edit`, `grep`, `find`, and stable `bash` contract tools | Native; Bash-like commands are routed deterministically across a PowerShell floor and a bundled Python shell engine (pipelines, redirection, chaining, expansion, coreutils), with named refusals outside that grammar | Router/platform-shell tests, engine conformance suite, Linux differential bash-oracle suite, and Windows cross-tier integration tests, plus native Windows CI; release `pi.exe` executes the platform shell through RPC |
 | Provider APIs, OAuth, API-key auth, model routing, and retries | Native | AI, agent, and coding-agent tests on Windows; live credentials are not used in CI |
 | Extensions, skills, prompts, themes, and pi packages | Native | Discovery, loading, reload, package-manager, and isolation tests on Windows |
 | Sessions, branching, compaction, context storage, export, and sharing | Native | Agent and coding-agent session tests on Windows |
