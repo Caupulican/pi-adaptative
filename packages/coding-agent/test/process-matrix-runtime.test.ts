@@ -1,16 +1,20 @@
-import { describe, expect, it } from "vitest";
+import { mkdtempSync, rmSync } from "node:fs";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
+import { afterEach, describe, expect, it, vi } from "vitest";
+import type { ProcessMatrixEntry } from "../src/core/process-matrix/codes.ts";
 import {
 	getParentPid,
 	getParentSessionId,
 	PI_PARENT_PID_ENV,
 	PI_PARENT_SESSION_ENV,
+	type ProcessMatrixRuntimeConfig,
+	startProcessMatrixRuntime,
 } from "../src/core/process-matrix/runtime.ts";
+import { buildEntryId, listEntries, readEntry, writeEntry } from "../src/core/process-matrix/store.ts";
+import { applyAdoption, beginWindDown } from "../src/core/process-matrix/supervisor.ts";
+import { PI_WORKTREE_LANE_ENV } from "../src/core/worktree-sync/runtime.ts";
 
-/**
- * Env-accessor tables only -- `startProcessMatrixRuntime` itself runs real (unref'd) timers and is
- * exercised through its pure building blocks (`process-matrix-supervisor.test.ts`) instead, never
- * with real timers in a test.
- */
 describe("getParentPid", () => {
 	it("parses a valid positive integer", () => {
 		expect(getParentPid({ [PI_PARENT_PID_ENV]: "12345" })).toBe(12345);
@@ -46,5 +50,395 @@ describe("getParentSessionId", () => {
 	it("is undefined when set to an empty/whitespace-only string", () => {
 		expect(getParentSessionId({ [PI_PARENT_SESSION_ENV]: "" })).toBeUndefined();
 		expect(getParentSessionId({ [PI_PARENT_SESSION_ENV]: "   " })).toBeUndefined();
+	});
+});
+
+// ---------------------------------------------------------------------------
+// startProcessMatrixRuntime -- behavioral coverage of the timer/watcher
+// composition, with only setInterval/clearInterval faked (fs I/O and the
+// settle() yields below run on real macrotasks) and every other dep injected:
+// the clock via `now`, liveness via `isProcessAlive`, the ask/notify/exit
+// seams via the config. Advancing the fake interval fires a tick; settle()
+// then lets the tick's real store I/O finish before asserting.
+// ---------------------------------------------------------------------------
+
+const POLL_MS = 1_000;
+const HEARTBEAT_MS = 5_000;
+const GRACE_MS = 60_000;
+
+const PARENT_PID = 424_242;
+const NEW_PARENT_PID = 515_151;
+const T0 = Date.parse("2026-07-19T12:00:00.000Z");
+
+interface Harness {
+	agentDir: string;
+	clock: { ms: number };
+	livePids: Set<number>;
+	notices: string[];
+	diagnostics: string[];
+	confirmAsks: string[];
+	confirmAnswers: boolean[];
+	exitRequests: number;
+	config: ProcessMatrixRuntimeConfig;
+}
+
+const cleanups: string[] = [];
+
+function makeHarness(overrides: Partial<ProcessMatrixRuntimeConfig> = {}): Harness {
+	const agentDir = mkdtempSync(join(tmpdir(), "pi-process-matrix-runtime-"));
+	cleanups.push(agentDir);
+	const harness: Harness = {
+		agentDir,
+		clock: { ms: T0 },
+		livePids: new Set([PARENT_PID]),
+		notices: [],
+		diagnostics: [],
+		confirmAsks: [],
+		confirmAnswers: [],
+		exitRequests: 0,
+		config: undefined as unknown as ProcessMatrixRuntimeConfig,
+	};
+	harness.config = {
+		agentDir,
+		sessionId: "runtime-test-session",
+		hasUI: false,
+		settings: { enabled: true, heartbeatMs: HEARTBEAT_MS, adoptionGraceMs: GRACE_MS, watcherPollMs: POLL_MS },
+		isProcessAlive: (pid) => harness.livePids.has(pid),
+		now: () => harness.clock.ms,
+		notify: (text) => harness.notices.push(text),
+		onDiagnostic: (message) => harness.diagnostics.push(message),
+		promptConfirm: async (message) => {
+			harness.confirmAsks.push(message);
+			return harness.confirmAnswers.shift() ?? false;
+		},
+		requestExit: () => {
+			harness.exitRequests += 1;
+		},
+		...overrides,
+	};
+	return harness;
+}
+
+/** Real-macrotask yields so a fired tick's fs reads/writes complete before assertions. */
+async function settle(): Promise<void> {
+	for (let i = 0; i < 8; i++) {
+		await new Promise((resolve) => setTimeout(resolve, 0));
+	}
+}
+
+async function tick(ms: number): Promise<void> {
+	await vi.advanceTimersByTimeAsync(ms);
+	await settle();
+}
+
+function workerEntryId(harness: Harness): string {
+	return buildEntryId("worker", harness.config.sessionId);
+}
+
+async function readWorkerEntry(harness: Harness): Promise<ProcessMatrixEntry | undefined> {
+	return readEntry(harness.agentDir, workerEntryId(harness));
+}
+
+function useWorkerEnv(parentSessionId?: string, laneKey?: string): void {
+	vi.stubEnv(PI_PARENT_PID_ENV, String(PARENT_PID));
+	vi.stubEnv(PI_PARENT_SESSION_ENV, parentSessionId ?? "");
+	vi.stubEnv(PI_WORKTREE_LANE_ENV, laneKey ?? "");
+}
+
+function useMasterEnv(): void {
+	vi.stubEnv(PI_PARENT_PID_ENV, "");
+	vi.stubEnv(PI_PARENT_SESSION_ENV, "");
+	vi.stubEnv(PI_WORKTREE_LANE_ENV, "");
+}
+
+afterEach(() => {
+	vi.useRealTimers();
+	vi.unstubAllEnvs();
+	while (cleanups.length > 0) {
+		const dir = cleanups.pop();
+		if (dir) rmSync(dir, { recursive: true, force: true });
+	}
+});
+
+describe("startProcessMatrixRuntime (worker branch)", () => {
+	it("is a no-op when disabled: nothing written, nothing ticks", async () => {
+		vi.useFakeTimers({ toFake: ["setInterval", "clearInterval"] });
+		useWorkerEnv();
+		const harness = makeHarness({
+			settings: { enabled: false, heartbeatMs: HEARTBEAT_MS, adoptionGraceMs: GRACE_MS, watcherPollMs: POLL_MS },
+		});
+
+		const handle = await startProcessMatrixRuntime(harness.config);
+		await tick(POLL_MS * 3);
+
+		expect(await listEntries(harness.agentDir)).toEqual([]);
+		expect(harness.notices).toEqual([]);
+		expect(harness.exitRequests).toBe(0);
+		handle.stop();
+	});
+
+	it("self-registers a running entry bound to its parent and stays healthy while the parent lives", async () => {
+		vi.useFakeTimers({ toFake: ["setInterval", "clearInterval"] });
+		useWorkerEnv("parent-session-1");
+		const harness = makeHarness();
+
+		const handle = await startProcessMatrixRuntime(harness.config);
+		await settle();
+
+		const registered = await readWorkerEntry(harness);
+		expect(registered).toMatchObject({
+			role: "worker",
+			status: "running",
+			pid: process.pid,
+			parentPid: PARENT_PID,
+			parentSessionId: "parent-session-1",
+			sessionId: harness.config.sessionId,
+		});
+
+		await tick(POLL_MS * 3);
+		expect((await readWorkerEntry(harness))?.status).toBe("running");
+		expect(harness.notices).toEqual([]);
+		expect(harness.exitRequests).toBe(0);
+		handle.stop();
+	});
+
+	it("parent death winds down gracefully -- never silently -- leaving a lane-tagged resumable payload", async () => {
+		vi.useFakeTimers({ toFake: ["setInterval", "clearInterval"] });
+		useWorkerEnv("parent-session-1", "lane-alpha");
+		const harness = makeHarness();
+		const handle = await startProcessMatrixRuntime(harness.config);
+		await settle();
+
+		harness.livePids.delete(PARENT_PID);
+		await tick(POLL_MS);
+
+		const entry = await readWorkerEntry(harness);
+		expect(entry).toMatchObject({
+			status: "resumable",
+			windDownReason: "parent_lost",
+			resumable: { lastCode: "resumable", laneKey: "lane-alpha" },
+		});
+		expect(harness.notices).toHaveLength(1);
+		expect(harness.notices[0]).toContain(`pid ${PARENT_PID}`);
+		expect(harness.notices[0]).toContain("resumable");
+		// Grace window: wound down but NOT exited yet.
+		expect(harness.exitRequests).toBe(0);
+		handle.stop();
+	});
+
+	it("applies a master-written adoption during grace, keeps the adopter's sessionId, and re-arms the watch on the new parent", async () => {
+		vi.useFakeTimers({ toFake: ["setInterval", "clearInterval"] });
+		useWorkerEnv("parent-session-1");
+		const harness = makeHarness();
+		const handle = await startProcessMatrixRuntime(harness.config);
+		await settle();
+
+		harness.livePids.delete(PARENT_PID);
+		await tick(POLL_MS);
+		expect((await readWorkerEntry(harness))?.status).toBe("resumable");
+
+		// The adopting master's ask-gated write into the orphan's own entry.
+		harness.livePids.add(NEW_PARENT_PID);
+		const orphaned = (await readWorkerEntry(harness)) as ProcessMatrixEntry;
+		await writeEntry(
+			harness.agentDir,
+			applyAdoption(orphaned, { parentPid: NEW_PARENT_PID, parentSessionId: "adopter-session" }),
+		);
+
+		await tick(POLL_MS);
+		const adopted = await readWorkerEntry(harness);
+		expect(adopted).toMatchObject({ status: "running", parentPid: NEW_PARENT_PID });
+		// The worker's local re-apply must NOT clobber the adopter's sessionId back to the old parent's.
+		expect(adopted?.parentSessionId).toBe("adopter-session");
+		expect(adopted?.windDownReason).toBeUndefined();
+		expect(harness.notices.some((text) => text.includes(`pid ${NEW_PARENT_PID}`))).toBe(true);
+		expect(harness.exitRequests).toBe(0);
+
+		// The healthy watch now tracks the NEW parent: its death triggers a second wind-down.
+		harness.livePids.delete(NEW_PARENT_PID);
+		await tick(POLL_MS);
+		expect(await readWorkerEntry(harness)).toMatchObject({ status: "resumable", windDownReason: "parent_lost" });
+		expect(harness.notices.some((text) => text.includes(`pid ${NEW_PARENT_PID}`) && text.includes("gone"))).toBe(
+			true,
+		);
+		handle.stop();
+	});
+
+	it("self-exits cooperatively once the adoption grace window expires unclaimed, and only once", async () => {
+		vi.useFakeTimers({ toFake: ["setInterval", "clearInterval"] });
+		useWorkerEnv();
+		const harness = makeHarness();
+		const handle = await startProcessMatrixRuntime(harness.config);
+		await settle();
+
+		harness.livePids.delete(PARENT_PID);
+		await tick(POLL_MS);
+		expect((await readWorkerEntry(harness))?.status).toBe("resumable");
+
+		// Still inside the grace window: no exit.
+		harness.clock.ms = T0 + GRACE_MS - 1;
+		await tick(POLL_MS);
+		expect(harness.exitRequests).toBe(0);
+
+		harness.clock.ms = T0 + GRACE_MS;
+		await tick(POLL_MS);
+		expect(harness.exitRequests).toBe(1);
+
+		// The watcher stopped itself: more polls never double-fire the exit.
+		await tick(POLL_MS * 3);
+		expect(harness.exitRequests).toBe(1);
+		// The resumable payload survives for a future session to pick up.
+		expect((await readWorkerEntry(harness))?.status).toBe("resumable");
+		handle.stop();
+	});
+
+	it("honors a master-requested cooperative cleanup while healthy: persists the wind-down, notifies, exits", async () => {
+		vi.useFakeTimers({ toFake: ["setInterval", "clearInterval"] });
+		useWorkerEnv("parent-session-1");
+		const harness = makeHarness();
+		const handle = await startProcessMatrixRuntime(harness.config);
+		await settle();
+
+		const fresh = (await readWorkerEntry(harness)) as ProcessMatrixEntry;
+		await writeEntry(
+			harness.agentDir,
+			beginWindDown(fresh, "user_cleanup", new Date(harness.clock.ms).toISOString()),
+		);
+
+		await tick(POLL_MS);
+		expect(await readWorkerEntry(harness)).toMatchObject({ status: "winding_down", windDownReason: "user_cleanup" });
+		expect(harness.notices.some((text) => text.includes("cooperative cleanup"))).toBe(true);
+		expect(harness.exitRequests).toBe(1);
+
+		await tick(POLL_MS * 3);
+		expect(harness.exitRequests).toBe(1);
+		handle.stop();
+	});
+
+	it("stop() halts the watch: a later parent death is no longer observed", async () => {
+		vi.useFakeTimers({ toFake: ["setInterval", "clearInterval"] });
+		useWorkerEnv();
+		const harness = makeHarness();
+		const handle = await startProcessMatrixRuntime(harness.config);
+		await settle();
+
+		handle.stop();
+		harness.livePids.delete(PARENT_PID);
+		await tick(POLL_MS * 3);
+
+		expect((await readWorkerEntry(harness))?.status).toBe("running");
+		expect(harness.notices).toEqual([]);
+		expect(harness.exitRequests).toBe(0);
+	});
+});
+
+describe("startProcessMatrixRuntime (master branch)", () => {
+	function orphanEntry(): ProcessMatrixEntry {
+		return {
+			entryId: buildEntryId("worker", "orphan-session"),
+			role: "worker",
+			pid: 616_161,
+			sessionId: "orphan-session",
+			hostname: "host-a",
+			startedAt: new Date(T0).toISOString(),
+			heartbeatAt: new Date(T0).toISOString(),
+			status: "running",
+			parentPid: 717_171, // never in livePids -> provably dead
+			parentSessionId: "dead-parent-session",
+			laneKey: "lane-omega",
+		};
+	}
+
+	it("registers a master entry and heartbeats it on the configured cadence", async () => {
+		vi.useFakeTimers({ toFake: ["setInterval", "clearInterval"] });
+		useMasterEnv();
+		const harness = makeHarness();
+		const handle = await startProcessMatrixRuntime(harness.config);
+		await settle();
+
+		const entryId = buildEntryId("master", harness.config.sessionId);
+		const registered = await readEntry(harness.agentDir, entryId);
+		expect(registered).toMatchObject({ role: "master", status: "running", pid: process.pid });
+		expect(registered?.heartbeatAt).toBe(new Date(T0).toISOString());
+
+		harness.clock.ms = T0 + HEARTBEAT_MS;
+		await tick(HEARTBEAT_MS);
+		expect((await readEntry(harness.agentDir, entryId))?.heartbeatAt).toBe(new Date(T0 + HEARTBEAT_MS).toISOString());
+		handle.stop();
+	});
+
+	it("orphan scan without a UI is report-only: a diagnostic names the orphan, nothing is written, nobody is asked", async () => {
+		vi.useFakeTimers({ toFake: ["setInterval", "clearInterval"] });
+		useMasterEnv();
+		const harness = makeHarness({ hasUI: false });
+		const orphan = orphanEntry();
+		await writeEntry(harness.agentDir, orphan);
+
+		const handle = await startProcessMatrixRuntime(harness.config);
+		await settle();
+
+		expect(harness.confirmAsks).toEqual([]);
+		expect(harness.diagnostics.some((text) => text.includes(orphan.entryId) && text.includes("report-only"))).toBe(
+			true,
+		);
+		expect(await readEntry(harness.agentDir, orphan.entryId)).toEqual(orphan);
+		handle.stop();
+	});
+
+	it("orphan scan with an owner-confirmed adoption writes this master in as the orphan's new parent", async () => {
+		vi.useFakeTimers({ toFake: ["setInterval", "clearInterval"] });
+		useMasterEnv();
+		const harness = makeHarness({ hasUI: true });
+		harness.confirmAnswers.push(true); // adopt?
+		const orphan = orphanEntry();
+		await writeEntry(harness.agentDir, orphan);
+
+		const handle = await startProcessMatrixRuntime(harness.config);
+		await settle();
+
+		expect(harness.confirmAsks).toHaveLength(1);
+		expect(harness.confirmAsks[0]).toContain(orphan.entryId);
+		expect(harness.confirmAsks[0]).toContain("lane-omega");
+		expect(await readEntry(harness.agentDir, orphan.entryId)).toMatchObject({
+			status: "running",
+			parentPid: process.pid,
+			parentSessionId: harness.config.sessionId,
+		});
+		handle.stop();
+	});
+
+	it("orphan scan with adoption declined but cleanup confirmed writes a user_cleanup wind-down request", async () => {
+		vi.useFakeTimers({ toFake: ["setInterval", "clearInterval"] });
+		useMasterEnv();
+		const harness = makeHarness({ hasUI: true });
+		harness.confirmAnswers.push(false, true); // adopt? no -- clean up? yes
+		const orphan = orphanEntry();
+		await writeEntry(harness.agentDir, orphan);
+
+		const handle = await startProcessMatrixRuntime(harness.config);
+		await settle();
+
+		expect(harness.confirmAsks).toHaveLength(2);
+		expect(await readEntry(harness.agentDir, orphan.entryId)).toMatchObject({
+			status: "winding_down",
+			windDownReason: "user_cleanup",
+		});
+		handle.stop();
+	});
+
+	it("orphan scan with both asks declined leaves the orphan entry untouched", async () => {
+		vi.useFakeTimers({ toFake: ["setInterval", "clearInterval"] });
+		useMasterEnv();
+		const harness = makeHarness({ hasUI: true });
+		harness.confirmAnswers.push(false, false);
+		const orphan = orphanEntry();
+		await writeEntry(harness.agentDir, orphan);
+
+		const handle = await startProcessMatrixRuntime(harness.config);
+		await settle();
+
+		expect(harness.confirmAsks).toHaveLength(2);
+		expect(await readEntry(harness.agentDir, orphan.entryId)).toEqual(orphan);
+		handle.stop();
 	});
 });
