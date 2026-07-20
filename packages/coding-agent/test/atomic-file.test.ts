@@ -1,11 +1,22 @@
+import * as fs from "node:fs";
 import { existsSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { pathToFileURL } from "node:url";
 import { Worker } from "node:worker_threads";
 import lockfile from "proper-lockfile";
-import { afterEach, describe, expect, it } from "vitest";
+import { afterEach, describe, expect, it, vi } from "vitest";
 import { withFileLock, withFileLockSync, writeFileAtomic, writeFileAtomicSync } from "../src/core/util/atomic-file.ts";
+
+// `renameSync` is a named export consumed directly by atomic-file.ts (`import { renameSync } from
+// "node:fs"`), and Node's ESM module namespace is not configurable — `vi.spyOn` can't redefine it
+// in place (see https://vitest.dev/guide/browser/#limitations). Mocking the whole module lets the
+// test override just that one export (defaulting to the real implementation) without touching the
+// other `node:fs` exports atomic-file.ts and this test file both rely on.
+vi.mock("node:fs", async (importOriginal) => {
+	const actual = await importOriginal<typeof fs>();
+	return { ...actual, renameSync: vi.fn(actual.renameSync) };
+});
 
 /**
  * Shared lock+tmp+rename primitive: every on-disk store that does a read-modify-write now
@@ -46,6 +57,111 @@ describe("writeFileAtomicSync / writeFileAtomic", () => {
 		writeFileAtomicSync(filePath, "x".repeat(10_000));
 		writeFileAtomicSync(filePath, "y".repeat(5));
 		expect(readFileSync(filePath, "utf-8")).toBe("y".repeat(5));
+	});
+});
+
+describe("rename retry (win32 Defender/indexer transient EPERM/EACCES/EBUSY)", () => {
+	function makeEpermError(): NodeJS.ErrnoException {
+		const err = new Error("EPERM: operation not permitted, rename") as NodeJS.ErrnoException;
+		err.code = "EPERM";
+		return err;
+	}
+
+	function withPlatform<T>(platform: NodeJS.Platform, fn: () => T): T {
+		const spy = vi.spyOn(process, "platform", "get").mockReturnValue(platform);
+		try {
+			return fn();
+		} finally {
+			spy.mockRestore();
+		}
+	}
+
+	/** Async counterpart of {@link withPlatform} — keeps the platform stub live until `fn`'s promise settles. */
+	async function withPlatformAsync<T>(platform: NodeJS.Platform, fn: () => Promise<T>): Promise<T> {
+		const spy = vi.spyOn(process, "platform", "get").mockReturnValue(platform);
+		try {
+			return await fn();
+		} finally {
+			spy.mockRestore();
+		}
+	}
+
+	it("async: retries a transient EPERM on win32 and completes with the final content intact", async () => {
+		const dir = tempDir();
+		const filePath = join(dir, "data.json");
+		const realRename = fs.promises.rename.bind(fs.promises);
+		let calls = 0;
+		const renameSpy = vi.spyOn(fs.promises, "rename").mockImplementation(async (...args) => {
+			calls++;
+			if (calls <= 2) throw makeEpermError();
+			return realRename(...(args as Parameters<typeof fs.promises.rename>));
+		});
+		try {
+			await withPlatformAsync("win32", () => writeFileAtomic(filePath, '{"a":1}'));
+			expect(calls).toBe(3);
+			expect(readFileSync(filePath, "utf-8")).toBe('{"a":1}');
+			expect(existsSync(`${filePath}.tmp`)).toBe(false);
+		} finally {
+			renameSpy.mockRestore();
+		}
+	});
+
+	it("sync: retries a transient EPERM on win32 and completes with the final content intact", () => {
+		const dir = tempDir();
+		const filePath = join(dir, "data.json");
+		const renameSyncMock = vi.mocked(fs.renameSync);
+		const realRenameSync = renameSyncMock.getMockImplementation() as typeof fs.renameSync;
+		let calls = 0;
+		renameSyncMock.mockImplementation((...args) => {
+			calls++;
+			if (calls <= 2) throw makeEpermError();
+			return realRenameSync(...(args as Parameters<typeof fs.renameSync>));
+		});
+		try {
+			withPlatform("win32", () => writeFileAtomicSync(filePath, '{"a":2}'));
+			expect(calls).toBe(3);
+			expect(readFileSync(filePath, "utf-8")).toBe('{"a":2}');
+			expect(existsSync(`${filePath}.tmp`)).toBe(false);
+		} finally {
+			renameSyncMock.mockImplementation(realRenameSync);
+		}
+	});
+
+	it("POSIX: a single transient EPERM is NOT retried — it propagates immediately", async () => {
+		const dir = tempDir();
+		const filePath = join(dir, "data.json");
+		let calls = 0;
+		const renameSpy = vi.spyOn(fs.promises, "rename").mockImplementation(async () => {
+			calls++;
+			throw makeEpermError();
+		});
+		try {
+			await expect(withPlatformAsync("linux", () => writeFileAtomic(filePath, '{"a":1}'))).rejects.toMatchObject({
+				code: "EPERM",
+			});
+			expect(calls).toBe(1);
+		} finally {
+			renameSpy.mockRestore();
+		}
+	});
+
+	it("win32: exhausting the retry budget propagates the original EPERM", async () => {
+		const dir = tempDir();
+		const filePath = join(dir, "data.json");
+		let calls = 0;
+		const renameSpy = vi.spyOn(fs.promises, "rename").mockImplementation(async () => {
+			calls++;
+			throw makeEpermError();
+		});
+		try {
+			await expect(withPlatformAsync("win32", () => writeFileAtomic(filePath, '{"a":1}'))).rejects.toMatchObject({
+				code: "EPERM",
+			});
+			// 1 initial attempt + 9 retries = 10 total calls, all exhausted before the error propagates.
+			expect(calls).toBe(10);
+		} finally {
+			renameSpy.mockRestore();
+		}
 	});
 });
 

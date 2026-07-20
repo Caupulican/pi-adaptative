@@ -22,6 +22,64 @@ import { promises as fsPromises, mkdirSync, renameSync, writeFileSync } from "no
 import { dirname } from "node:path";
 import lockfile from "proper-lockfile";
 
+/**
+ * Bounded rename retry budget for the win32-only transient-rename handling below (see
+ * {@link isTransientRenameErrorOnWin32}). Backoff doubles each attempt starting at
+ * {@link RENAME_RETRY_MIN_TIMEOUT_MS} and capped at {@link RENAME_RETRY_MAX_TIMEOUT_MS}, mirroring
+ * the doubling-backoff shape used for lock acquisition above. With {@link RENAME_RETRY_ATTEMPTS}
+ * extra attempts (10, 20, 40, 80, ... capped at 200) the worst-case total wait is ~1.03s
+ * (10+20+40+80+160+200+200+200+200 ~= 1110ms across 9 gaps), which comfortably covers the
+ * millisecond-scale window Defender/the Windows Search indexer hold a freshly-written file open
+ * without FILE_SHARE_DELETE before releasing it.
+ */
+const RENAME_RETRY_ATTEMPTS = 9;
+const RENAME_RETRY_MIN_TIMEOUT_MS = 10;
+const RENAME_RETRY_MAX_TIMEOUT_MS = 200;
+
+/**
+ * On win32, antivirus (e.g. Windows Defender's real-time scanner) and the Windows Search indexer
+ * routinely open a freshly-written file for a brief scan without `FILE_SHARE_DELETE`, which makes a
+ * rename over/of that file fail transiently with EPERM/EACCES/EBUSY for a few milliseconds. This is
+ * a well-documented platform semantic, not a bug in our write path — it's exactly why the
+ * `graceful-fs` package ships its own win32 rename-retry wrapper. POSIX platforms never exhibit this
+ * transient (a POSIX rename either succeeds or fails for a real, non-transient reason), so retry is
+ * gated strictly to win32 to keep POSIX behavior byte-identical to a bare rename.
+ */
+function isTransientRenameErrorOnWin32(err: unknown): boolean {
+	if (process.platform !== "win32") return false;
+	if (typeof err !== "object" || err === null) return false;
+	const code = (err as { code?: string }).code;
+	return code === "EPERM" || code === "EACCES" || code === "EBUSY";
+}
+
+/** Sync counterpart of the rename-retry policy; see {@link isTransientRenameErrorOnWin32}. */
+function renameSyncWithRetry(tmpPath: string, filePath: string): void {
+	for (let attempt = 0; attempt <= RENAME_RETRY_ATTEMPTS; attempt++) {
+		try {
+			renameSync(tmpPath, filePath);
+			return;
+		} catch (err) {
+			if (!isTransientRenameErrorOnWin32(err) || attempt === RENAME_RETRY_ATTEMPTS) throw err;
+			const backoffMs = Math.min(RENAME_RETRY_MIN_TIMEOUT_MS * 2 ** attempt, RENAME_RETRY_MAX_TIMEOUT_MS);
+			blockingSleepMs(backoffMs);
+		}
+	}
+}
+
+/** Async counterpart of the rename-retry policy; see {@link isTransientRenameErrorOnWin32}. */
+async function renameWithRetry(tmpPath: string, filePath: string): Promise<void> {
+	for (let attempt = 0; attempt <= RENAME_RETRY_ATTEMPTS; attempt++) {
+		try {
+			await fsPromises.rename(tmpPath, filePath);
+			return;
+		} catch (err) {
+			if (!isTransientRenameErrorOnWin32(err) || attempt === RENAME_RETRY_ATTEMPTS) throw err;
+			const backoffMs = Math.min(RENAME_RETRY_MIN_TIMEOUT_MS * 2 ** attempt, RENAME_RETRY_MAX_TIMEOUT_MS);
+			await new Promise((resolve) => setTimeout(resolve, backoffMs));
+		}
+	}
+}
+
 export interface AtomicFileLockOptions {
 	/**
 	 * Bounded retry attempts while waiting for a lock already held elsewhere. Both variants use a
@@ -175,7 +233,7 @@ export function writeFileAtomicSync(filePath: string, content: string): void {
 	mkdirSync(dirname(filePath), { recursive: true });
 	const tmpPath = `${filePath}.tmp`;
 	writeFileSync(tmpPath, content, "utf-8");
-	renameSync(tmpPath, filePath);
+	renameSyncWithRetry(tmpPath, filePath);
 }
 
 /** Async counterpart of {@link writeFileAtomicSync}. */
@@ -183,5 +241,5 @@ export async function writeFileAtomic(filePath: string, content: string): Promis
 	await fsPromises.mkdir(dirname(filePath), { recursive: true });
 	const tmpPath = `${filePath}.tmp`;
 	await fsPromises.writeFile(tmpPath, content, "utf-8");
-	await fsPromises.rename(tmpPath, filePath);
+	await renameWithRetry(tmpPath, filePath);
 }
