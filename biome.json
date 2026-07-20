@@ -16,6 +16,18 @@
 			}
 		}
 	},
+	"overrides": [
+		{
+			"includes": ["packages/coding-agent/test/pi-shell-engine/**"],
+			"linter": {
+				"rules": {
+					"suspicious": {
+						"noTemplateCurlyInString": "off"
+					}
+				}
+			}
+		}
+	],
 	"formatter": {
 		"enabled": true,
 		"formatWithErrors": false,
