@@ -30,7 +30,7 @@ import { hostname as osHostname } from "node:os";
 import type { ResolvedProcessMatrixSettings } from "../settings-manager.ts";
 import { getBoundWorktreeLaneKey } from "../worktree-sync/runtime.ts";
 import type { ProcessMatrixEntry, ResumablePayload } from "./codes.ts";
-import { listEntries, readEntry, writeEntry, writeEntrySync } from "./store.ts";
+import { buildEntryId, listEntries, readEntry, writeEntry, writeEntrySync } from "./store.ts";
 import {
 	applyAdoption,
 	applyHeartbeat,
@@ -244,6 +244,7 @@ async function startWorkerBranch(
 	}
 
 	let currentParentPid = initialParentPid;
+	let currentParentSessionId = parentSessionId;
 	let stopped = false;
 	let timer: NodeJS.Timeout | undefined;
 	let ticking = false;
@@ -274,9 +275,22 @@ async function startWorkerBranch(
 		timer.unref?.();
 	};
 
+	const declaredParentIsAlive = async (): Promise<boolean> => {
+		// PID liveness alone is not process identity: a reused PID could otherwise keep a worker
+		// attached to an unrelated process forever. The parent session's own fresh master entry binds
+		// PID to a durable identity and proves that that exact session is still heartbeating.
+		if (!currentParentSessionId || !config.isProcessAlive(currentParentPid)) return false;
+		const parent = await readEntry(config.agentDir, buildEntryId("master", currentParentSessionId));
+		if (!parent || parent.role !== "master" || parent.sessionId !== currentParentSessionId) return false;
+		if (parent.pid !== currentParentPid || parent.status !== "running") return false;
+		const heartbeatAt = Date.parse(parent.heartbeatAt);
+		const maxAge = config.settings.heartbeatMs * 2 + config.settings.watcherPollMs;
+		return Number.isFinite(heartbeatAt) && now() - heartbeatAt <= maxAge;
+	};
+
 	const healthyTick = async (): Promise<void> => {
 		if (stopped) return;
-		if (!config.isProcessAlive(currentParentPid)) {
+		if (!(await declaredParentIsAlive())) {
 			await enterWindDown();
 			return;
 		}
@@ -329,14 +343,16 @@ async function startWorkerBranch(
 		const fresh = await readEntry(config.agentDir, entry.entryId);
 		if (fresh) {
 			const directive = pollWorkerDirective(fresh, currentParentPid, { isPidAlive: config.isProcessAlive });
-			if (directive.code === "adopt") {
-				// `fresh.parentSessionId` was already set by the adopting master's own write (see
-				// `runOrphanScan`) -- re-applying adoption locally must not clobber it back to this
-				// worker's OLD (now-dead) parent's sessionId, so `parentSessionId` is deliberately not
-				// passed here: `applyAdoption` leaves an already-set field untouched when omitted.
-				await persist(applyAdoption(fresh, { parentPid: directive.parentPid }), "failed to write worker adoption");
+			if (directive.code === "adopt" && fresh.parentSessionId) {
+				// The adopting master persists its session id with the pid. Require both on the next
+				// healthy tick; accepting a pid-only adoption would reintroduce the PID-reuse bug.
+				await persist(
+					applyAdoption(fresh, { parentPid: directive.parentPid, parentSessionId: fresh.parentSessionId }),
+					"failed to write worker adoption",
+				);
 				config.notify(`process-matrix: adopted by a new parent (pid ${directive.parentPid}). Resuming.`);
 				currentParentPid = directive.parentPid;
+				currentParentSessionId = fresh.parentSessionId;
 				if (timer) {
 					clearInterval(timer);
 					timer = undefined;

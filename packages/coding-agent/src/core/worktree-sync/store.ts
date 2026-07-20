@@ -118,7 +118,10 @@ export async function readLandingTransaction(paths: SyncStorePaths): Promise<Lan
 		typeof record.changedPathsTruncated !== "boolean" ||
 		typeof record.lockToken !== "string" ||
 		(record.gate !== "passed" && record.gate !== "off") ||
-		(record.stage !== "ready_to_merge" && record.stage !== "main_moved")
+		(record.stage !== "ready_to_merge" &&
+			record.stage !== "main_moved" &&
+			record.stage !== "epoch_written" &&
+			record.stage !== "audit_logged")
 	) {
 		return undefined;
 	}

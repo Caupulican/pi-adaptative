@@ -604,6 +604,27 @@ describe.skipIf(process.platform === "win32")("tmux dispatch grant — approval-
 		).rejects.toThrow(/no standing grant for tmux dispatch/);
 	});
 
+	it("does not let a primary-agent grant authorize a mixed provider team", async () => {
+		const { registeredTool, context, seedCustomEntry } = installExtension(tempDir, { hasUI: false });
+		seedCustomEntry(GRANT_CUSTOM_TYPE, buildGrant({ agent: "pi", maxLaunches: 3 }));
+
+		await expect(
+			registeredTool.execute(
+				"mixed-team",
+				{
+					action: "fire_task",
+					task: "do not launch",
+					jobId: "mixed-team-job",
+					agents: [{ provider: "pi" }, { provider: "claude" }],
+					dryRun: false,
+				},
+				new AbortController().signal,
+				() => {},
+				context,
+			),
+		).rejects.toThrow(/no standing grant for tmux dispatch/);
+	});
+
 	it("a lane-first dispatch (agent carrying worktreeLane) appends --worktree-lane plus a lane-doctrine system-prompt clause, and reports the lane key on the managed-lane dispatch event", async () => {
 		const { registeredTool, context, laneEvents, seedCustomEntry } = installExtension(tempDir, { hasUI: false });
 		const grant = buildGrant({ agent: "pi", maxLaunches: 1 });

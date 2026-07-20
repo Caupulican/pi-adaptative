@@ -20,7 +20,6 @@ import {
 	GRANT_USAGE_CUSTOM_TYPE,
 	type GrantDispatchParams,
 	grantCovers,
-	isGrantBudgetExhausted,
 	isTmuxDispatchGrant,
 	isTmuxDispatchGrantTombstone,
 	type LaunchProfileFlag,
@@ -157,6 +156,9 @@ type FireAgentPlan = {
 	currentTurn?: number;
 	/** Last turn whose terminal handoff was delivered to the parent. Absent means 0 (never notified). */
 	notifiedTurn?: number;
+	/** A follow-up turn durably reserved before its prompt is injected. Reconciliation may re-arm its
+	 * watcher, but never re-injects it: a retry must not duplicate an uncertain external side effect. */
+	pendingTurn?: number;
 	/** Mirrors `AgentSpec.worktreeLane` -- carried onto the plan so `applyLaunchProfile` (per-agent
 	 * flags) and the dispatch-phase `reportManagedLane` call can both read it after `buildFireTaskPlan`. */
 	worktreeLane?: string;
@@ -1237,15 +1239,23 @@ function collectCustomEntryData(ctx: ExtensionContext, customType: string): unkn
 async function authorizeLaunch(
 	bridge: HostBridge,
 	ctx: ExtensionContext,
-	request: { agent: Provider; goalId?: string; jobId: string; description: string },
+	request: { agents: readonly Provider[]; goalId?: string; jobId: string; description: string },
 ): Promise<{ grant?: TmuxDispatchGrant }> {
+	if (request.agents.length === 0) throw new Error("tmux dispatch refused: launch has no agents");
 	const grant = resolveLatestGrantEntry(ctx);
-	if (grant && grantCovers(grant, { agent: request.agent, goalId: request.goalId })) {
+	// A standing grant names one provider. It must cover every child and spend one unit for every
+	// child process; a matching first pane must never authorize an unrestricted mixed team.
+	if (grant && request.agents.every((agent) => grantCovers(grant, { agent, goalId: request.goalId }))) {
 		const used = countGrantUsages(grant.grantId, collectCustomEntryData(ctx, GRANT_USAGE_CUSTOM_TYPE));
-		if (!isGrantBudgetExhausted(grant, used)) {
+		if (grant.budget.maxLaunches - used >= request.agents.length) {
 			if (!bridge.appendEntry)
 				throw new Error("this host does not support session custom entries; cannot spend the tmux dispatch grant.");
-			bridge.appendEntry(GRANT_USAGE_CUSTOM_TYPE, buildGrantUsageEntry(grant.grantId, request.jobId));
+			for (let index = 0; index < request.agents.length; index++) {
+				bridge.appendEntry(
+					GRANT_USAGE_CUSTOM_TYPE,
+					buildGrantUsageEntry(grant.grantId, `${request.jobId}:${index}`),
+				);
+			}
 			return { grant };
 		}
 	}
@@ -1253,8 +1263,8 @@ async function authorizeLaunch(
 		const approved = await ctx.ui.confirm(
 			"tmux dispatch approval",
 			[
-				`No standing grant currently authorizes: ${request.description}.`,
-				`Agent: ${request.agent}${request.goalId ? `, goal: ${request.goalId}` : ""}.`,
+				`No standing grant currently authorizes every child of: ${request.description}.`,
+				`Agents: ${request.agents.join(", ")}${request.goalId ? `, goal: ${request.goalId}` : ""}.`,
 				"Approve this ONE-SHOT launch? Run tmux_agent_manager action=grant_dispatch to authorize future launches without this prompt.",
 			].join("\n"),
 		);
@@ -1262,7 +1272,7 @@ async function authorizeLaunch(
 		return {};
 	}
 	throw new Error(
-		`no standing grant for tmux dispatch; run grant_dispatch first: ${request.description}. Refusing to launch without a grant or interactive approval.`,
+		`no standing grant for tmux dispatch; run grant_dispatch first: every child must be covered. ${request.description}. Refusing to launch without a grant or interactive approval.`,
 	);
 }
 /** Render grant/one-shot-derived launch-profile flags into a pi child's start command. Values
@@ -1480,15 +1490,13 @@ async function executeTool(
 			throw new Error(
 				`tmux session already exists: ${job.sessionName}. Use stop_job/stop_session first or choose a different workspaceName.`,
 			);
-		// APPROVAL-GATED LAUNCH (doctrine-regression mandatory): resolved BEFORE any tmux/FS side
-		// effect. A multi-agent team is gated on its PRIMARY (first) agent — matches send_followup's own
-		// single-primary-agent model; multi-agent-per-turn grant scoping is deferred (documented follow-up).
-		const primaryAgent = job.agents[0];
+		// APPROVAL-GATED LAUNCH: resolved before any tmux/FS side effect. A standing grant must
+		// authorize every child provider and spend its budget per child process.
 		const authorization = await authorizeLaunch(bridge, ctx, {
-			agent: primaryAgent.provider,
+			agents: job.agents.map((agent) => agent.provider),
 			goalId: params.goalId,
 			jobId: job.id,
-			description: `fire_task launch of job ${job.id} (primary agent ${primaryAgent.name})`,
+			description: `fire_task launch of job ${job.id} (${job.agents.length} child process${job.agents.length === 1 ? "" : "es"}: ${job.agents.map((agent) => `${agent.name}/${agent.provider}`).join(", ")})`,
 		});
 		applyLaunchProfile(job, {
 			...(authorization.grant ? launchProfileSourceFromGrant(authorization.grant) : ONE_SHOT_LAUNCH_PROFILE_SOURCE),
@@ -1552,6 +1560,10 @@ async function executeTool(
 		if (!targetAgent) throw new Error(`tmux job ${job.id} has no agent ${params.agentId}`);
 		if (!targetAgent.paneId)
 			throw new Error(`tmux agent ${targetAgent.name} has no recorded pane id; cannot send a follow-up`);
+		if (targetAgent.pendingTurn !== undefined)
+			throw new Error(
+				`send_followup refused: turn ${targetAgent.pendingTurn} for ${targetAgent.id} is pending reconciliation; refusing to risk a duplicate prompt`,
+			);
 		const turn = (targetAgent.currentTurn ?? 1) + 1;
 		const markers = turnMarkers(job, targetAgent, turn);
 		const promptText = managedPrompt(
@@ -1584,17 +1596,31 @@ async function executeTool(
 		// turn into an already-running child, so there is no new child command to profile — only the
 		// grant/one-shot authorization is resolved here (no applyLaunchProfile call).
 		await authorizeLaunch(bridge, ctx, {
-			agent: targetAgent.provider,
+			agents: [targetAgent.provider],
 			goalId: params.goalId,
-			jobId: job.id,
+			jobId: `${job.id}:turn:${turn}`,
 			description: `send_followup turn ${turn} to ${targetAgent.name} in job ${job.id}`,
 		});
-		const written = dispatchAgentTurn(job, targetAgent, turn, promptText);
-		injectPromptToPane(targetAgent.paneId, promptText, targetAgent.provider);
-		persistJobPatch(job.id, (current) => {
+		// Reserve before watcher/prompt side effects. Reconcile re-arms a reserved turn but never
+		// re-injects it, so crash recovery cannot duplicate a provider prompt.
+		const reserved = persistJobPatch(job.id, (current) => {
 			const agent = current.agents.find((entry) => entry.id === targetAgent.id);
-			if (agent) agent.currentTurn = turn;
+			if (!agent || agent.pendingTurn !== undefined) return undefined;
+			agent.currentTurn = turn;
+			agent.pendingTurn = turn;
+			agent.result = undefined;
 			current.currentTurn = turn;
+			return current;
+		});
+		const reservedAgent = reserved.agents.find((agent) => agent.id === targetAgent.id);
+		if (!reservedAgent || reservedAgent.pendingTurn !== turn)
+			throw new Error(`send_followup refused: failed to reserve turn ${turn} for ${targetAgent.id}`);
+		const written = dispatchAgentTurn(reserved, reservedAgent, turn, promptText);
+		injectPromptToPane(reservedAgent.paneId as string, promptText, reservedAgent.provider);
+		persistJobPatch(job.id, (current) => {
+			const agent = current.agents.find((entry) => entry.id === reservedAgent.id);
+			if (!agent || agent.pendingTurn !== turn) return undefined;
+			delete agent.pendingTurn;
 			return current;
 		});
 		bridge.reportManagedLane?.({

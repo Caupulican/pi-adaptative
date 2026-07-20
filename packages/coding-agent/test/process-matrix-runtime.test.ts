@@ -168,6 +168,20 @@ async function readWorkerEntry(harness: Harness): Promise<ProcessMatrixEntry | u
 	return readEntry(harness.agentDir, workerEntryId(harness));
 }
 
+async function registerLiveParent(harness: Harness, sessionId: string, pid = PARENT_PID): Promise<void> {
+	const at = new Date(harness.clock.ms).toISOString();
+	await writeEntry(harness.agentDir, {
+		entryId: buildEntryId("master", sessionId),
+		role: "master",
+		pid,
+		sessionId,
+		hostname: "CauDev",
+		startedAt: at,
+		heartbeatAt: at,
+		status: "running",
+	});
+}
+
 function useWorkerEnv(parentSessionId?: string, laneKey?: string): void {
 	vi.stubEnv(PI_PARENT_PID_ENV, String(PARENT_PID));
 	vi.stubEnv(PI_PARENT_SESSION_ENV, parentSessionId ?? "");
@@ -210,6 +224,7 @@ describe("startProcessMatrixRuntime (worker branch)", () => {
 		vi.useFakeTimers({ toFake: ["setInterval", "clearInterval"] });
 		useWorkerEnv("parent-session-1");
 		const harness = makeHarness();
+		await registerLiveParent(harness, "parent-session-1");
 
 		const handle = await startProcessMatrixRuntime(harness.config);
 		const registered = await awaitState(
@@ -233,6 +248,29 @@ describe("startProcessMatrixRuntime (worker branch)", () => {
 		expect(stillRunning?.status).toBe("running");
 		expect(harness.notices).toEqual([]);
 		expect(harness.exitRequests).toBe(0);
+		handle.stop();
+	});
+
+	it("winds down when a reused live PID has no fresh matching parent-session heartbeat", async () => {
+		vi.useFakeTimers({ toFake: ["setInterval", "clearInterval"] });
+		useWorkerEnv("parent-session-1");
+		const harness = makeHarness();
+		await registerLiveParent(harness, "parent-session-1");
+		const parent = await readEntry(harness.agentDir, buildEntryId("master", "parent-session-1"));
+		expect(parent).toBeDefined();
+		await writeEntry(harness.agentDir, {
+			...(parent as ProcessMatrixEntry),
+			heartbeatAt: new Date(T0 - HEARTBEAT_MS * 3).toISOString(),
+		});
+
+		const handle = await startProcessMatrixRuntime(harness.config);
+		await tick(POLL_MS * 2);
+		const woundDown = await awaitState(
+			() => readWorkerEntry(harness),
+			(entry) => entry?.status === "resumable",
+		);
+		expect(woundDown?.windDownReason).toBe("parent_lost");
+		expect(harness.notices[0]).toContain("parent process");
 		handle.stop();
 	});
 
@@ -352,6 +390,7 @@ describe("startProcessMatrixRuntime (worker branch)", () => {
 		vi.useFakeTimers({ toFake: ["setInterval", "clearInterval"] });
 		useWorkerEnv("parent-session-1");
 		const harness = makeHarness();
+		await registerLiveParent(harness, "parent-session-1");
 		const handle = await startProcessMatrixRuntime(harness.config);
 		const fresh = (await awaitState(
 			() => readWorkerEntry(harness),

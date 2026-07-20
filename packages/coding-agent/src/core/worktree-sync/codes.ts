@@ -188,7 +188,7 @@ export interface LandingTransaction {
 	changedPathsTruncated: boolean;
 	lockToken: string;
 	gate: "passed" | "off";
-	stage: "ready_to_merge" | "main_moved";
+	stage: "ready_to_merge" | "main_moved" | "epoch_written" | "audit_logged";
 }
 
 export interface ReconcileSummary {

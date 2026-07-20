@@ -24,6 +24,7 @@ import {
 	readLane,
 	releaseIntegrationLock,
 	syncStorePaths,
+	writeEpoch,
 	writeLandingTransaction,
 	writeLane,
 } from "../src/core/worktree-sync/store.ts";
@@ -142,6 +143,38 @@ describe("worktree-sync against real git", () => {
 			landedLaneKey: lane.laneKey,
 		});
 	}, 60_000);
+
+	it("reconcile writes the missing audit after an epoch-only landing crash", async () => {
+		const { repo, deps } = await initRepo();
+		const lane = await mustCreateLane(deps, "audit-recovery");
+		const testedTip = await laneCommit(lane.worktreePath, "audit.txt", "audit\n", "audit recovery tip");
+		const priorMainSha = await git(repo, "rev-parse", "main");
+		const paths = syncStorePaths(await git(repo, "rev-parse", "--path-format=absolute", "--git-common-dir"));
+		await git(repo, "merge", "--ff-only", testedTip);
+		await writeEpoch(paths, {
+			epoch: 1,
+			mainSha: testedTip,
+			previousMainSha: priorMainSha,
+			landedLaneKey: lane.laneKey,
+			landedAt: new Date().toISOString(),
+			changedPaths: ["audit.txt"],
+			changedPathsTruncated: false,
+		});
+		await writeLandingTransaction(paths, {
+			laneKey: lane.laneKey,
+			priorMainSha,
+			testedTipSha: testedTip,
+			changedPaths: ["audit.txt"],
+			changedPathsTruncated: false,
+			lockToken: "audit-crash-token",
+			gate: "off",
+			stage: "epoch_written",
+		});
+
+		expect((await reconcile(deps)).code).toBe("reconciled");
+		expect(await readLandingTransaction(paths)).toBeUndefined();
+		expect(readFileSync(paths.eventsFile, "utf8")).toContain('"event":"epoch_reconciled"');
+	});
 
 	it("reconcile refuses an unexpected main SHA without mutating the transaction", async () => {
 		const { repo, deps } = await initRepo();

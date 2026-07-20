@@ -563,9 +563,10 @@ async function reconcileLandingTransaction(
 	}
 
 	const previous = await readEpoch(ctx.paths);
+	let epoch = previous?.epoch ?? 0;
+	const at = nowIso(deps);
 	if (previous?.mainSha !== transaction.testedTipSha) {
-		const epoch = (previous?.epoch ?? 0) + 1;
-		const at = nowIso(deps);
+		epoch++;
 		await writeEpoch(ctx.paths, {
 			epoch,
 			mainSha: transaction.testedTipSha,
@@ -575,6 +576,10 @@ async function reconcileLandingTransaction(
 			changedPaths: transaction.changedPaths,
 			changedPathsTruncated: transaction.changedPathsTruncated,
 		});
+		transaction = { ...transaction, stage: "epoch_written" };
+		await writeLandingTransaction(ctx.paths, transaction);
+	}
+	if (transaction.stage !== "audit_logged") {
 		await appendAuditEvent(
 			ctx.paths,
 			{
@@ -586,6 +591,7 @@ async function reconcileLandingTransaction(
 			},
 			at,
 		);
+		await writeLandingTransaction(ctx.paths, { ...transaction, stage: "audit_logged" });
 	}
 	await clearLandingTransaction(ctx.paths);
 	return undefined;
@@ -1258,18 +1264,37 @@ export async function landLane(deps: WorktreeSyncEngineDeps, args: LandLaneArgs)
 				stage: "ready_to_merge",
 			};
 			await writeLandingTransaction(ctx.paths, landingTransaction);
-			const ff = await runGit(deps, ctx.hubPath, ["merge", "--ff-only", tipSha]);
-			if (ff.code !== 0) {
-				// Unreachable by construction (G3 guarantees ff-ability) but checked, never assumed.
-				return gitError(`git merge --ff-only refused for lane '${lane.laneKey}' (G5)`, ff);
+			// Move the named main ref with a compare-and-swap instead of `git merge` in whichever
+			// branch happens to be checked out in the hub. A concurrent branch switch cannot redirect
+			// this land to another branch, and a changed main ref makes update-ref fail without mutation.
+			const update = await runGit(deps, ctx.topLevel, [
+				"update-ref",
+				`refs/heads/${ctx.mainBranch}`,
+				tipSha,
+				mainShaNow,
+			]);
+			if (update.code !== 0) {
+				return gitError(`main ref changed or could not advance for lane '${lane.laneKey}' (G5)`, update);
 			}
-			const landedSha = await revParseBranch(deps, ctx.hubPath, ctx.mainBranch);
+			const landedSha = await revParseBranch(deps, ctx.topLevel, ctx.mainBranch);
 			if (landedSha !== tipSha) {
 				return {
 					code: "git_error",
-					message: `main resolved to ${landedSha?.slice(0, 12) ?? "missing"} after the fast-forward; expected gated tip ${tipSha.slice(0, 12)}`,
+					message: `main resolved to ${landedSha?.slice(0, 12) ?? "missing"} after the guarded ref update; expected gated tip ${tipSha.slice(0, 12)}`,
 				};
 			}
+			// `update-ref` deliberately leaves a checked-out worktree untouched. Refresh only when
+			// the hub is still on main, preserving unrelated local changes with reset --merge.
+			const checkedOut = await runGit(deps, ctx.hubPath, ["symbolic-ref", "--short", "HEAD"]);
+			if (checkedOut.code !== 0 || checkedOut.stdout.trim() !== ctx.mainBranch) {
+				return {
+					code: "git_error",
+					message: `main advanced safely, but hub checkout is no longer '${ctx.mainBranch}'; refusing to refresh another branch`,
+				};
+			}
+			const refresh = await runGit(deps, ctx.hubPath, ["reset", "--merge", tipSha]);
+			if (refresh.code !== 0)
+				return gitError(`could not refresh hub checkout after landing '${lane.laneKey}'`, refresh);
 
 			await writeLandingTransaction(ctx.paths, { ...landingTransaction, stage: "main_moved" });
 			const previous = await readEpoch(ctx.paths);
@@ -1284,6 +1309,7 @@ export async function landLane(deps: WorktreeSyncEngineDeps, args: LandLaneArgs)
 				changedPaths: changed.slice(0, EPOCH_CHANGED_PATHS_CAP),
 				changedPathsTruncated: changed.length > EPOCH_CHANGED_PATHS_CAP,
 			});
+			await writeLandingTransaction(ctx.paths, { ...landingTransaction, stage: "epoch_written" });
 			await appendAuditEvent(
 				ctx.paths,
 				{
@@ -1297,6 +1323,7 @@ export async function landLane(deps: WorktreeSyncEngineDeps, args: LandLaneArgs)
 				},
 				at,
 			);
+			await writeLandingTransaction(ctx.paths, { ...landingTransaction, stage: "audit_logged" });
 			await clearLandingTransaction(ctx.paths);
 			return {
 				code: "ok",

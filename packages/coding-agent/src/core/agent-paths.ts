@@ -68,6 +68,11 @@ export function cacheFile(agentDir: string, ...segments: string[]): string {
 	return join(cacheDir(agentDir), ...segments);
 }
 
+/** `<agentDir>/bin` -- managed executable helpers (fd, rg). */
+export function binDir(agentDir: string): string {
+	return join(agentDir, "bin");
+}
+
 /** `<agentDir>/runtimes/<kind>` -- a managed runtime install (ollama, python, prism-llamacpp, needle, …). */
 export function runtimesDir(kind: string, agentDir: string): string {
 	return join(agentDir, "runtimes", kind);
