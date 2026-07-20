@@ -29,6 +29,7 @@
 
 ### Fixed
 
+- Bundled Python shell-engine source now keeps `BuiltinContext.stderr` optional for direct builtin callers, and its conformance/oracle tests parse the terminal control frame from stderr, matching the runtime transport.
 - Tmux dispatch grants now authorize and charge every launched child process; persistent follow-ups reserve their turn before pane injection to prevent duplicate external prompts after a crash. Process-matrix workers verify a fresh parent-session heartbeat alongside PID liveness, and worktree landing advances the named main ref with compare-and-swap recovery stages rather than merging whichever branch is checked out.
 - `/goal start` no longer double-fires its continuation loop: a single mutex now serializes the idle-driven and manual goal-continuation paths, eliminating both the "Agent is already processing" warning and an unhandled rejection that previously fired on effectively every `/goal start` (the idle auto-continue timer's default 0ms delay meant the manual and idle paths raced on nearly every invocation); the command layer gained try/catch parity and status-line handling for the new skip outcomes.
 - Task/goal state resolution (and the whole goal runtime snapshot: goal state, evidence, worker results, learning decisions) now walks the active session branch's own ancestry instead of scanning every branch's flat entry list — fork/branch-switch no longer leaks another branch's goal or task-steps state.

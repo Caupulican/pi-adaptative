@@ -69,14 +69,14 @@ function runEngine(python: string, command: string, cwd: string, env: Record<str
 	if (result.status !== 0) {
 		throw new Error(`engine crashed for ${JSON.stringify(command)}: status=${result.status} stderr=${result.stderr}`);
 	}
-	const raw = result.stdout;
-	const first = raw.indexOf(RECORD_SEPARATOR);
-	const second = raw.indexOf(RECORD_SEPARATOR, first + 1);
+	const control = result.stderr;
+	const first = control.indexOf(RECORD_SEPARATOR);
+	const second = control.indexOf(RECORD_SEPARATOR, first + 1);
 	if (first === -1 || second === -1) {
-		throw new Error(`no parseable control frame for ${JSON.stringify(command)}: ${JSON.stringify(raw)}`);
+		throw new Error(`no parseable stderr control frame for ${JSON.stringify(command)}: ${JSON.stringify(control)}`);
 	}
-	const frame = JSON.parse(raw.slice(first + 1, second)) as { exitCode: number };
-	return { output: raw.slice(0, first), exitCode: frame.exitCode };
+	const frame = JSON.parse(control.slice(first + 1, second)) as { exitCode: number };
+	return { output: result.stdout, exitCode: frame.exitCode };
 }
 
 // Plain data array, one row per §2.1/§2.2 D-marked matrix row, kept greppable. `label` documents

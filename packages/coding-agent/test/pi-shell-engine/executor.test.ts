@@ -471,12 +471,14 @@ describe("pi-shell-engine main.py ParamExpansionError handling (architect fix #1
 				`main.py crashed for ${JSON.stringify(command)}: status=${result.status} stderr=${result.stderr}`,
 			);
 		}
-		const raw: string = result.stdout;
-		const first = raw.indexOf(RECORD_SEPARATOR);
-		const second = raw.indexOf(RECORD_SEPARATOR, first + 1);
-		const stdoutPart = raw.slice(0, first);
-		const frame = JSON.parse(raw.slice(first + 1, second));
-		return { stdout: stdoutPart, stderr: result.stderr, frame };
+		const control: string = result.stderr;
+		const first = control.indexOf(RECORD_SEPARATOR);
+		const second = control.indexOf(RECORD_SEPARATOR, first + 1);
+		if (first === -1 || second === -1) {
+			throw new Error(`main.py emitted no parseable stderr control frame: ${JSON.stringify(control)}`);
+		}
+		const frame = JSON.parse(control.slice(first + 1, second));
+		return { stdout: result.stdout, stderr: `${control.slice(0, first)}${control.slice(second + 1)}`, frame };
 	}
 
 	it("$" + "{V:?word} against an unset parameter aborts the command without crashing the engine", () => {

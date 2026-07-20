@@ -58,15 +58,19 @@ function runEngine(
 	if (result.status !== 0) {
 		throw new Error(`engine crashed for ${JSON.stringify(command)}: status=${result.status} stderr=${result.stderr}`);
 	}
-	const raw = result.stdout;
-	const first = raw.indexOf(RECORD_SEPARATOR);
-	const second = raw.indexOf(RECORD_SEPARATOR, first + 1);
+	const control = result.stderr;
+	const first = control.indexOf(RECORD_SEPARATOR);
+	const second = control.indexOf(RECORD_SEPARATOR, first + 1);
 	if (first === -1 || second === -1) {
-		throw new Error(`no parseable control frame for ${JSON.stringify(command)}: ${JSON.stringify(raw)}`);
+		throw new Error(`no parseable stderr control frame for ${JSON.stringify(command)}: ${JSON.stringify(control)}`);
 	}
-	const stdout = raw.slice(0, first);
-	const frame = JSON.parse(raw.slice(first + 1, second)) as EngineFrame;
-	return { stdout, frame, status: result.status, stderr: result.stderr };
+	const frame = JSON.parse(control.slice(first + 1, second)) as EngineFrame;
+	return {
+		stdout: result.stdout,
+		frame,
+		status: result.status,
+		stderr: `${control.slice(0, first)}${control.slice(second + 1)}`,
+	};
 }
 
 describe("pi-shell-engine conformance (main.py end-to-end)", () => {

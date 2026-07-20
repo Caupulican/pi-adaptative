@@ -27,7 +27,9 @@ class BuiltinContext:
     env: Mapping[str, str]
     stdin: BinaryIO
     stdout: BinaryIO
-    stderr: BinaryIO
+    # Builtins historically receive only stdin/stdout; stderr is optional so existing direct
+    # callers retain the merged-stream behavior while exec.py can pass a redirected sink.
+    stderr: BinaryIO | None = None
 
 
 @dataclass
