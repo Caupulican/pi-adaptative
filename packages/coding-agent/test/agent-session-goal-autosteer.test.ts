@@ -60,16 +60,17 @@ describe("AgentSession goal idle autosteer", () => {
 		}
 	});
 
-	it("caps a lean-window model (16-32k) at 2 continuation turns even when more would advance the goal", async () => {
+	it("a lean-window model (16-32k) gets NO autosteer continuation: its surface lacks the goal tool, so the loop skips goal_tool_unavailable", async () => {
 		const harness = await createHarness({ models: [{ id: "lean-model", contextWindow: 16_384 }] });
 		try {
 			expect(harness.session.getModelCapabilityProfile().class).toBe("lean");
-			// One extra requirement (5) beyond the 4 available turns so a requirement stays open
-			// throughout, and each supplied turn genuinely satisfies one requirement.
+			// The lean capability blocklist removes the goal tool from the active surface entirely
+			// ("adaptative must prevail": sub-full models are not driven through complex agentic
+			// loops they cannot execute) -- so autosteer must not submit ANY continuation prompt,
+			// not merely fewer. The pre-blocklist behavior (a reduced 2-turn budget) is retired.
+			expect(harness.session.getActiveToolNames()).not.toContain("goal");
 			seedActiveGoal(harness, 5);
 
-			// Supply enough turns to run well past the lean cap: if the budget were the default 20,
-			// all four continuation turns would fire. The cap must stop it at 2.
 			const responses = [fauxAssistantMessage("initial turn settled")];
 			for (let i = 1; i <= 4; i++) {
 				responses.push(
@@ -85,8 +86,8 @@ describe("AgentSession goal idle autosteer", () => {
 			await harness.session.prompt("start the task");
 			await vi.runAllTimersAsync();
 
-			expect(countContinuationPrompts(harness)).toBe(2);
-			// Responses for the untaken turns remain unconsumed: the loop stopped on the budget, not exhaustion.
+			expect(countContinuationPrompts(harness)).toBe(0);
+			// Every continuation response remains unconsumed: the loop never started.
 			expect(harness.getPendingResponseCount()).toBeGreaterThan(0);
 		} finally {
 			harness.cleanup();

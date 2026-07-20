@@ -56,6 +56,7 @@ describe("BackgroundLaneController.continueGoalLoopExclusive (guard mechanics)",
 
 		const controller = new BackgroundLaneController({
 			isDisposed: () => false,
+			isGoalToolActive: () => true,
 			getGoalRuntimeSnapshot: () => makeSnapshot("g1"),
 			continueGoalLoop: () => {
 				rawLoopCalls++;
@@ -90,6 +91,7 @@ describe("BackgroundLaneController.continueGoalLoopExclusive (guard mechanics)",
 
 		const controller = new BackgroundLaneController({
 			isDisposed: () => disposed,
+			isGoalToolActive: () => true,
 			getGoalRuntimeSnapshot: () => makeSnapshot("g1"),
 			continueGoalLoop: () => firstCallResult,
 		} as never);

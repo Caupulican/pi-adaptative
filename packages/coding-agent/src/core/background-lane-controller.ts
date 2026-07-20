@@ -182,6 +182,11 @@ export interface BackgroundLaneControllerDeps {
 	getModel(): Model<Api> | undefined;
 	/** Tool/profile gate: delegation is unavailable when the active surface removes `delegate`. */
 	isDelegateToolActive(): boolean;
+	/** True iff the `goal` tool is in the session's ACTIVE surface -- the capability-adaptive gate
+	 * for every goal-continuation loop (see `continueGoalLoopExclusive`): a surface without the
+	 * goal tool (lean capability blocklist, worker role ceiling, --tools/profile exclusion) must
+	 * never be driven with continuation prompts it cannot execute. */
+	isGoalToolActive(): boolean;
 	/** Foreground cost ceiling — a lane budget is clamped to it, never exceeds it. */
 	getCapabilityEnvelope(): CapabilityEnvelope | undefined;
 	/** Capability profile of the SESSION model (gates background lanes, scales continuation budgets). */
@@ -612,7 +617,10 @@ export class BackgroundLaneController {
 		const snapshot = this.deps.getGoalRuntimeSnapshot({ maxStallTurns });
 		if (snapshot.continuation.action !== "continue") return;
 
-		// Lean-window models (16-32k) keep autosteer but at a reduced budget; full passes through.
+		// Budget scaling by capability class; note that since the lean class stopped exposing the
+		// goal tool at all, sub-full sessions are skipped outright by the goal_tool_unavailable
+		// guard in continueGoalLoopExclusive -- the lean budget branch below only matters if that
+		// blocklist is ever relaxed. Full passes through unchanged.
 		const scaled = scaleContinuationBudgetsForCapability(this.deps.getModelCapabilityProfile(), {
 			maxTurns: goalContinueTurns,
 			maxWallClockMinutes: goalContinueMaxWallClockMinutes,
@@ -642,6 +650,11 @@ export class BackgroundLaneController {
 	async continueGoalLoopExclusive(options: GoalContinuationLoopOptions): Promise<GoalContinuationLoopResult> {
 		if (this._isGoalAutoContinuing) return this._skippedGoalResult(options, "already_continuing");
 		if (this.deps.isDisposed()) return this._skippedGoalResult(options, "session_disposed");
+		// Adaptative prevails: a session whose active surface lacks the goal tool cannot execute
+		// continuation prompts -- driving the loop anyway would ENFORCE complex agentic work on a
+		// model/role that cannot perform it. One gate here covers idle autosteer AND manual /goal
+		// paths (both funnel through this single-flight guard).
+		if (!this.deps.isGoalToolActive()) return this._skippedGoalResult(options, "goal_tool_unavailable");
 		this._isGoalAutoContinuing = true;
 		try {
 			return await this.deps.continueGoalLoop(options);
@@ -658,7 +671,7 @@ export class BackgroundLaneController {
 	 */
 	private _skippedGoalResult(
 		options: GoalContinuationLoopOptions,
-		stopReason: "already_continuing" | "session_disposed",
+		stopReason: "already_continuing" | "session_disposed" | "goal_tool_unavailable",
 	): GoalContinuationLoopResult {
 		return {
 			turnsSubmitted: 0,

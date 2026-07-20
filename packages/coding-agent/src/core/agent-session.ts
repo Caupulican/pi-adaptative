@@ -701,6 +701,12 @@ export type GoalContinuationLoopStopReason =
 	// disposed before this request could start. `turnsSubmitted` is always 0 for both.
 	| "already_continuing"
 	| "session_disposed"
+	// Capability-adaptive skip: the session's ACTIVE tool surface lacks the `goal` tool (lean
+	// capability blocklist, worker role ceiling, --tools/profile exclusion), so continuation
+	// prompts cannot be executed by this session -- driving them anyway would enforce complex
+	// agentic work on a surface that cannot perform it. Covers idle autosteer AND manual
+	// /goal continuation (both funnel through the same single-flight guard). `turnsSubmitted` 0.
+	| "goal_tool_unavailable"
 	// A worker is dispatched (queued/running) against an open requirement this goal owns — the
 	// loop paused WITHOUT submitting a pass (never reaches `goal_state_not_advanced`) and will resume
 	// on its own once the worker terminates. Distinct from `continuation_not_allowed` (which reads as
@@ -1019,6 +1025,7 @@ export class AgentSession {
 			isModelExhausted: (model) => this._billingFailover.isExhausted(`${model.provider}/${model.id}`),
 			getModel: () => this.model ?? undefined,
 			isDelegateToolActive: () => this.getActiveToolNames().includes("delegate"),
+			isGoalToolActive: () => this.getActiveToolNames().includes("goal"),
 			getCapabilityEnvelope: () => this.capabilityEnvelope,
 			getModelCapabilityProfile: () => this.getModelCapabilityProfile(),
 			emit: (event) => this._emit(event),
