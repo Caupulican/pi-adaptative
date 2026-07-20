@@ -9,9 +9,23 @@
  * Protocol: commands stream to the session over stdin and are terminated by a per-command
  * sentinel carrying a random nonce and the exit code. Bash wraps commands in an eval of a quoted
  * heredoc (arbitrary content stays data; syntax errors stay contained in eval); PowerShell runs a
- * ReadLine loop decoding base64 lines (no external binaries involved). Command stderr is merged
- * into stdout at the shell so sentinel ordering is guaranteed on one pipe — the per-command
- * backend already delivered both streams to a single merged accumulator.
+ * ReadLine loop decoding base64 lines (no external binaries involved). On bash, command stderr is
+ * merged into stdout at the shell so sentinel ordering is guaranteed on one pipe.
+ *
+ * PowerShell runs each command as a bare `Invoke-Expression`, NOT piped into `Out-Default`: piping
+ * a native command's output into another pipeline stage forces PowerShell's NativeCommandProcessor
+ * to capture that child's stdout/stderr into an internal pipe and read it to EOF before the
+ * pipeline completes. A detached grandchild that inherited those handles (e.g. `start /b` holding
+ * stdio open) then keeps that internal pipe's write end open, so the sentinel — written after the
+ * pipeline "completes" — waits for the grandchild to die instead of the direct child. The bare
+ * invocation lets a native command's stdout/stderr handles be inherited directly by the child
+ * process; the direct child's own exit is what unblocks the sentinel line, exactly like the
+ * per-command backend and like bash's stdio inheritance above. The bounded consequence: a native
+ * command's stderr no longer merges into the session's stdout pipe (there is no capturing pipeline
+ * stage to merge it) — it arrives on the session's own stderr pipe instead, forwarded via
+ * `onStderr` -> `onData` same as the shell's own diagnostics. PowerShell 5.1's habit of wrapping
+ * redirected stderr text in a `NativeCommandError` record also disappears, which is an accuracy
+ * improvement (the raw stderr bytes are reported, not a wrapped/duplicated rendering of them).
  *
  * Kill semantics: timeout/abort/silence kill the WHOLE session process tree (a hung foreground
  * command cannot be killed individually without job control) and the next exec respawns a fresh
@@ -84,6 +98,11 @@ export function buildPowerShellWire(command: string, nonce: string, cdTo: string
  * PowerShell 5.1-compatible REPL bootstrap. Exit code mirrors `-Command` semantics as closely as
  * a loop can: a native command's $LASTEXITCODE wins, a terminating error forces 1, otherwise 0.
  * Passed via -EncodedCommand so quoting and newlines never touch the process command line.
+ *
+ * The command runs as a bare `Invoke-Expression` (no `2>&1 | Out-Default` capture pipeline) — see
+ * the module doc header for why: a native command's stdio handles are inherited directly by its
+ * child process instead of being captured through a PowerShell-internal pipe, so the sentinel is
+ * unblocked by the direct child's own exit rather than by any grandchild holding those handles.
  */
 const POWERSHELL_BOOTSTRAP = [
 	"$ProgressPreference = 'SilentlyContinue'",
@@ -98,7 +117,7 @@ const POWERSHELL_BOOTSTRAP = [
 	"\t$__pi_cmd = [System.Text.Encoding]::UTF8.GetString([System.Convert]::FromBase64String($__pi_line.Substring($__pi_sp + 1)))",
 	"\t$global:LASTEXITCODE = 0",
 	"\t$__pi_thrown = $false",
-	"\ttry { Invoke-Expression $__pi_cmd 2>&1 | Out-Default } catch { $__pi_thrown = $true; $__pi_msg = ($_ | Out-String).TrimEnd(); if ($__pi_msg) { [Console]::Out.WriteLine($__pi_msg) } }",
+	"\ttry { Invoke-Expression $__pi_cmd } catch { $__pi_thrown = $true; $__pi_msg = ($_ | Out-String).TrimEnd(); if ($__pi_msg) { [Console]::Out.WriteLine($__pi_msg) } }",
 	"\t$__pi_code = $global:LASTEXITCODE",
 	"\tif ($null -eq $__pi_code) { $__pi_code = 0 }",
 	"\tif ($__pi_thrown -and ($__pi_code -eq 0)) { $__pi_code = 1 }",
@@ -256,7 +275,16 @@ export class PersistentShellSession {
 									.toString("latin1");
 								emitPending(prefixIndex);
 								const parsed = Number.parseInt(codeText, 10);
-								settle(() => resolve({ exitCode: Number.isNaN(parsed) ? null : parsed }));
+								// Defer the settle by one microtask turn: with the bare Invoke-Expression
+								// form a native command's stderr now arrives on the session's OWN stderr
+								// pipe (see module doc header) instead of being pre-merged into the same
+								// stdout bytes the sentinel rides on. Node fires already-queued stream
+								// 'data' events in event-loop order; queueing the resolution behind a
+								// microtask guarantees any stderr chunk the kernel delivered alongside (or
+								// just before) this stdout chunk has already run its 'data' handler — and
+								// thus reached `onData` — before the promise settles, so callers never see a
+								// truncated stderr tail immediately after resolution.
+								queueMicrotask(() => settle(() => resolve({ exitCode: Number.isNaN(parsed) ? null : parsed })));
 								return;
 							}
 						}
