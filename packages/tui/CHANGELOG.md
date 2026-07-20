@@ -2,7 +2,7 @@
 
 ### Performance
 
-- Container caches its concatenated render output and reuses it when every child's rendered lines are reference-unchanged and width is unchanged (compounds through nested containers of self-memoizing Text/Markdown/Box/Image). Also fixed a latent mutation-aliasing bug in `doRender`'s cursor-marker/line-reset pass that in-place-mutated (and would have corrupted/grown) a cached line array.
+- Container caching now uses an explicit `renderRevision` contract: components without the opt-in are rebuilt for correctness, while built-in Text/Markdown/Box/Image components retain their internal cache work. Container callers receive independent line arrays, preventing caller mutation from poisoning cached output.
 
 ## [0.81.38] - 2026-07-16
 

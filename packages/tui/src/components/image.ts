@@ -23,6 +23,10 @@ export interface ImageOptions {
 
 export class Image implements Component {
 	private base64Data: string;
+	private _renderRevision = 0;
+	get renderRevision(): number {
+		return this._renderRevision;
+	}
 	private mimeType: string;
 	private dimensions: ImageDimensions;
 	private theme: ImageTheme;
@@ -55,12 +59,14 @@ export class Image implements Component {
 	invalidate(): void {
 		this.cachedLines = undefined;
 		this.cachedWidth = undefined;
+		this._renderRevision++;
 	}
 
 	render(width: number): string[] {
 		if (this.cachedLines && this.cachedWidth === width) {
-			return this.cachedLines;
+			return this.cachedLines.slice();
 		}
+		this._renderRevision++;
 
 		const maxWidth = Math.max(1, Math.min(width - 2, this.options.maxWidthCells ?? 60));
 		const cellDimensions = getCellDimensions();
@@ -124,6 +130,6 @@ export class Image implements Component {
 		this.cachedLines = lines;
 		this.cachedWidth = width;
 
-		return lines;
+		return lines.slice();
 	}
 }

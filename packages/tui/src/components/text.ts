@@ -6,6 +6,10 @@ import { applyBackgroundToLine, visibleWidth, wrapTextWithAnsi } from "../utils.
  */
 export class Text implements Component {
 	private text: string;
+	private _renderRevision = 0;
+	get renderRevision(): number {
+		return this._renderRevision;
+	}
 	private paddingX: number; // Left/right padding
 	private paddingY: number; // Top/bottom padding
 	private customBgFn?: (text: string) => string;
@@ -27,6 +31,7 @@ export class Text implements Component {
 		this.cachedText = undefined;
 		this.cachedWidth = undefined;
 		this.cachedLines = undefined;
+		this._renderRevision++;
 	}
 
 	setCustomBgFn(customBgFn?: (text: string) => string): void {
@@ -34,19 +39,22 @@ export class Text implements Component {
 		this.cachedText = undefined;
 		this.cachedWidth = undefined;
 		this.cachedLines = undefined;
+		this._renderRevision++;
 	}
 
 	invalidate(): void {
 		this.cachedText = undefined;
 		this.cachedWidth = undefined;
 		this.cachedLines = undefined;
+		this._renderRevision++;
 	}
 
 	render(width: number): string[] {
 		// Check cache
 		if (this.cachedLines && this.cachedText === this.text && this.cachedWidth === width) {
-			return this.cachedLines;
+			return this.cachedLines.slice();
 		}
+		this._renderRevision++;
 
 		// Don't render anything if there's no actual text
 		if (!this.text || this.text.trim() === "") {
@@ -54,7 +62,7 @@ export class Text implements Component {
 			this.cachedText = this.text;
 			this.cachedWidth = width;
 			this.cachedLines = result;
-			return result;
+			return result.slice();
 		}
 
 		// Replace tabs with 3 spaces
@@ -101,6 +109,6 @@ export class Text implements Component {
 		this.cachedWidth = width;
 		this.cachedLines = result;
 
-		return result.length > 0 ? result : [""];
+		return result.length > 0 ? result.slice() : [""];
 	}
 }

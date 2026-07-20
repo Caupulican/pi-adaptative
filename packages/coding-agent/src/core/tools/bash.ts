@@ -255,7 +255,10 @@ export function createLocalPlatformShellOperations(
 				resolvedCwd = resolveEffectiveCwd(state, cwd);
 				resolvedExecOptions = { ...execOptions, env: mergeEffectiveEnv(state, execOptions.env ?? getShellEnv()) };
 				if (route.kind === "python-engine") {
-					return engineOperations.exec(route.command, resolvedCwd, resolvedExecOptions);
+					// The engine owns the state transition and resolves the original host cwd
+					// exactly once. Passing the already state-adjusted cwd here would make the
+					// engine mistake its own `cd` result for a host cwd change on the next call.
+					return engineOperations.exec(route.command, cwd, execOptions);
 				}
 				if (route.kind === "powershell") resolvedCommand = route.command;
 			}

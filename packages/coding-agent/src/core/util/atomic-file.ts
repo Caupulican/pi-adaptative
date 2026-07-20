@@ -18,7 +18,8 @@
  * call sites that are already async.
  */
 
-import { promises as fsPromises, mkdirSync, renameSync, writeFileSync } from "node:fs";
+import { randomUUID } from "node:crypto";
+import { promises as fsPromises, mkdirSync, renameSync, unlinkSync, writeFileSync } from "node:fs";
 import { dirname } from "node:path";
 import lockfile from "proper-lockfile";
 
@@ -229,17 +230,52 @@ export async function withFileLock<T>(
  * call from inside {@link withFileLockSync} when the write follows a read that must not race another
  * writer's read+write; call standalone for an unconditional overwrite with no read step.
  */
+function temporaryPath(filePath: string): string {
+	return `${filePath}.${process.pid}.${randomUUID()}.tmp`;
+}
+
+/** Remove one invocation's temporary path without masking the original write/rename failure. */
+function removeTemporaryPathSync(tmpPath: string): void {
+	try {
+		unlinkSync(tmpPath);
+	} catch {
+		// The rename may have consumed the path, or another failure may have prevented its creation.
+	}
+}
+
+async function removeTemporaryPath(tmpPath: string): Promise<void> {
+	try {
+		await fsPromises.unlink(tmpPath);
+	} catch {
+		// The rename may have consumed the path, or another failure may have prevented its creation.
+	}
+}
+
 export function writeFileAtomicSync(filePath: string, content: string): void {
 	mkdirSync(dirname(filePath), { recursive: true });
-	const tmpPath = `${filePath}.tmp`;
-	writeFileSync(tmpPath, content, "utf-8");
-	renameSyncWithRetry(tmpPath, filePath);
+	const tmpPath = temporaryPath(filePath);
+	let renamed = false;
+	try {
+		// `wx` makes a nonce collision harmless: never truncate another writer's temporary file.
+		writeFileSync(tmpPath, content, { encoding: "utf-8", flag: "wx" });
+		renameSyncWithRetry(tmpPath, filePath);
+		renamed = true;
+	} finally {
+		if (!renamed) removeTemporaryPathSync(tmpPath);
+	}
 }
 
 /** Async counterpart of {@link writeFileAtomicSync}. */
 export async function writeFileAtomic(filePath: string, content: string): Promise<void> {
 	await fsPromises.mkdir(dirname(filePath), { recursive: true });
-	const tmpPath = `${filePath}.tmp`;
-	await fsPromises.writeFile(tmpPath, content, "utf-8");
-	await renameWithRetry(tmpPath, filePath);
+	const tmpPath = temporaryPath(filePath);
+	let renamed = false;
+	try {
+		// `wx` makes a nonce collision harmless: never truncate another writer's temporary file.
+		await fsPromises.writeFile(tmpPath, content, { encoding: "utf-8", flag: "wx" });
+		await renameWithRetry(tmpPath, filePath);
+		renamed = true;
+	} finally {
+		if (!renamed) await removeTemporaryPath(tmpPath);
+	}
 }

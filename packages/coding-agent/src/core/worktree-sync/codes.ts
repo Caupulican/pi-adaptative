@@ -35,6 +35,7 @@ export type WorktreeSyncCode =
 	| "conflict_markers_present"
 	| "gate_command_unset"
 	| "gate_failed"
+	| "lane_changed_during_gate"
 	| "ff_failed"
 	| "lock_busy"
 	| "lock_takeover"
@@ -121,13 +122,15 @@ export interface LaneFacts {
 export interface IntegrationLockOwner {
 	pid: number;
 	hostname: string;
+	/** Random acquisition identity; PID/session are diagnostic only and never authorize release. */
+	token: string;
 	sessionId?: string;
 	laneKey?: string;
 	acquiredAt: string;
 }
 
 export type IntegrationLockAcquisition =
-	| { acquired: true; takeover: boolean }
+	| { acquired: true; takeover: boolean; token: string }
 	| { acquired: false; holder?: IntegrationLockOwner; holderAlive: boolean };
 
 /** One conflicted file in a sync stopped on conflicts. */
@@ -146,6 +149,14 @@ export interface ConflictWorklist {
 	stoppedAtCommit?: { sha: string; subject: string };
 	files: ConflictWorklistFile[];
 }
+
+export type BindLaneWorkerResult =
+	| { code: "bound"; laneKey: string; laneId: string }
+	| { code: "already_bound"; laneKey: string; laneId: string }
+	| { code: "binding_conflict"; laneKey: string; boundLaneId: string }
+	| { code: "lane_not_found"; message: string }
+	| { code: "lane_not_active"; message: string }
+	| { code: "store_error"; message: string };
 
 export type CreateLaneResult =
 	| { code: "ok"; lane: LaneRegistration }
@@ -168,6 +179,17 @@ export type ReleaseLaneResult =
 			| "lane_owner_conflict"
 			| "git_error"
 	  >;
+
+export interface LandingTransaction {
+	laneKey: string;
+	priorMainSha: string;
+	testedTipSha: string;
+	changedPaths: string[];
+	changedPathsTruncated: boolean;
+	lockToken: string;
+	gate: "passed" | "off";
+	stage: "ready_to_merge" | "main_moved";
+}
 
 export interface ReconcileSummary {
 	code: "reconciled";
@@ -227,6 +249,7 @@ export type LandResult =
 			| "hub_dirty"
 			| "gate_command_unset"
 			| "gate_failed"
+			| "lane_changed_during_gate"
 			| "ff_failed"
 			| "lock_busy"
 			| "nothing_to_land"

@@ -13,10 +13,10 @@
  */
 
 import { existsSync, realpathSync, statSync } from "node:fs";
-import { basename, dirname, join, sep } from "node:path";
+import { basename, dirname, join, resolve, sep } from "node:path";
 import type { WorktreeSyncPolicy } from "./codes.ts";
 import { deriveLaneFacts, type RepoContext, resolveRepoContext, type WorktreeSyncEngineDeps } from "./git-engine.ts";
-import { readEpoch, readLane } from "./store.ts";
+import { readLane } from "./store.ts";
 
 export type LaneBashVerdict =
 	| { verdict: "allowed" }
@@ -54,7 +54,23 @@ const MAIN_MUTATING_GIT_SUBCOMMANDS = new Set(["merge", "rebase", "reset", "comm
  *   while the lane is sync_required (committing WIP is the prescribed step BEFORE syncing).
  */
 export function classifyLaneBashCommand(command: string, mainBranch: string): LaneBashVerdict {
-	const segments = command.split(/&&|\|\||;|\|/);
+	// This classifier is defense-in-depth, not a shell parser. Refuse compound
+	// syntax before any segment can return an allow verdict; otherwise `git
+	// status; git push` is approved by the first safe segment.
+	if (/[|;&<>$`(){}\n\r]/u.test(command)) {
+		return {
+			verdict: "main_mutation_refused",
+			reason: "compound shell syntax is refused in a lane; use typed worktree_sync actions",
+		};
+	}
+	if (/^\s*["']git["']\s/u.test(command)) {
+		return {
+			verdict: "main_mutation_refused",
+			reason: "quoted command names are refused in a lane; use the typed Git actions",
+		};
+	}
+	const segments = [command];
+	let allowedWhenSyncRequired = false;
 	for (const segment of segments) {
 		const tokens = segment.trim().split(/\s+/).filter(Boolean);
 		if (tokens[0] !== "git") continue;
@@ -66,6 +82,11 @@ export function classifyLaneBashCommand(command: string, mainBranch: string): La
 			if (token === "-C" || token === "--git-dir" || token === "--work-tree") {
 				escapesWorktree = true;
 				j += 2;
+				continue;
+			}
+			if (token.startsWith("-C") && token !== "-C") {
+				escapesWorktree = true;
+				j += 1;
 				continue;
 			}
 			if (token.startsWith("--git-dir=") || token.startsWith("--work-tree=")) {
@@ -96,7 +117,7 @@ export function classifyLaneBashCommand(command: string, mainBranch: string): La
 		}
 		if (
 			subcommand === "branch" &&
-			rest.some((token) => /^-(f|force|M|D|d|m)/.test(token)) &&
+			rest.some((token) => /^(?:-f|--force|-M|-m|-D|-d)$/.test(token)) &&
 			rest.includes(mainBranch)
 		) {
 			return {
@@ -110,11 +131,9 @@ export function classifyLaneBashCommand(command: string, mainBranch: string): La
 				reason: `git update-ref may not touch refs/heads/${mainBranch} from a lane (G10)`,
 			};
 		}
-		if (SYNC_SAFE_GIT_SUBCOMMANDS.has(subcommand)) {
-			return { verdict: "allowed_even_when_sync_required" };
-		}
+		if (SYNC_SAFE_GIT_SUBCOMMANDS.has(subcommand)) allowedWhenSyncRequired = true;
 	}
-	return { verdict: "allowed" };
+	return allowedWhenSyncRequired ? { verdict: "allowed_even_when_sync_required" } : { verdict: "allowed" };
 }
 
 /** Symlink-safe resolution of a path that may not exist yet: realpath the NEAREST EXISTING
@@ -146,7 +165,7 @@ function resolveSymlinkSafe(targetPath: string): string {
 }
 
 /** Symlink-safe containment check (G-path): does `targetPath` resolve inside `worktreePath`? */
-function isPathOutsideLane(targetPath: string, worktreePath: string): boolean {
+export function isPathOutsideLane(targetPath: string, worktreePath: string): boolean {
 	let realRoot: string;
 	try {
 		realRoot = realpathSync(worktreePath);
@@ -157,13 +176,59 @@ function isPathOutsideLane(targetPath: string, worktreePath: string): boolean {
 	return resolvedTarget !== realRoot && !resolvedTarget.startsWith(realRoot + sep);
 }
 
+/** Resolve a user-supplied relative lane path and reject symlink/parent escapes. */
+export function resolveLaneMutationPath(worktreePath: string, candidate: string): string | undefined {
+	const target = resolve(worktreePath, candidate);
+	return isPathOutsideLane(target, worktreePath) ? undefined : target;
+}
+
 export interface WorktreeLaneGateConfig {
 	laneKey: string;
 	engineDeps: () => WorktreeSyncEngineDeps;
 	policy: () => WorktreeSyncPolicy;
+	/** Worker launches use a hard shell envelope: only lane-safe Git/WIP commands and the owner-configured
+	 * exact gate command may pass through bash. Interactive lane sessions retain the legacy cooperative
+	 * command surface while the typed worktree_sync actions are used for hard worker mutations. */
+	hardShell?: boolean;
+	trustedGateCommand?: () => string | undefined;
 }
 
 export type LaneMutationCheck = { allowed: true } | { allowed: false; code: string; message: string };
+
+async function changedPaths(
+	deps: WorktreeSyncEngineDeps,
+	cwd: string,
+	base: string,
+	ref: string,
+): Promise<Set<string> | undefined> {
+	const result = await deps.exec("git", ["diff", "--name-only", `${base}..${ref}`, "--"], {
+		cwd,
+		timeout: 60_000,
+		maxBuffer: 1024 * 1024,
+	});
+	if (result.code !== 0) return undefined;
+	return new Set(
+		result.stdout
+			.split(/\r?\n/u)
+			.map((path) => path.trim())
+			.filter(Boolean),
+	);
+}
+
+function hardShellCommandAllowed(command: string, mainBranch: string, trustedGateCommand?: string): boolean {
+	const trimmed = command.trim();
+	if (trustedGateCommand && trimmed === trustedGateCommand.trim()) return true;
+	if (!/^git(?:\s|$)/u.test(trimmed)) return false;
+	const verdict = classifyLaneBashCommand(trimmed, mainBranch);
+	if (verdict.verdict === "main_mutation_refused") return false;
+	const tokens = trimmed.split(/\s+/u);
+	const subcommand = tokens[1] ?? "";
+	if (!SYNC_SAFE_GIT_SUBCOMMANDS.has(subcommand) && subcommand !== "commit") return false;
+	// Git path operands must not escape the lane checkout. The typed worktree
+	// actions are the authoritative route for path-sensitive add/diff operations;
+	// this final check prevents the common absolute/parent escape in the shell floor.
+	return !tokens.slice(2).some((token) => token.startsWith("/") || token.startsWith("..") || token.includes("/../"));
+}
 
 /**
  * The G8 gate object RuntimeBuilder holds per lane-bound session. `checkMutation` is called by
@@ -205,8 +270,26 @@ export class WorktreeLaneGate {
 		// No repo context (deleted repo, engine failure): fail OPEN for plain tools -- the land
 		// CAS still holds -- but the G10 bash rules below never depend on repo state.
 		const mainBranch = ctx?.mainBranch ?? "main";
+		if (this.config.hardShell && !ctx) {
+			return {
+				allowed: false,
+				code: "lane_state_unavailable",
+				message: "worktree-sync: lane state is unavailable; hard worker mutations fail closed",
+			};
+		}
 
 		if (toolName === "bash" && bashCommand !== undefined) {
+			if (
+				this.config.hardShell &&
+				!hardShellCommandAllowed(bashCommand, mainBranch, this.config.trustedGateCommand?.())
+			) {
+				return {
+					allowed: false,
+					code: "main_mutation_refused",
+					message:
+						"worktree-sync: unrestricted bash is unavailable in a hard worker lane; use typed worktree_sync actions",
+				};
+			}
 			const verdict = classifyLaneBashCommand(bashCommand, mainBranch);
 			if (verdict.verdict === "main_mutation_refused") {
 				return { allowed: false, code: "main_mutation_refused", message: `worktree-sync: ${verdict.reason}` };
@@ -236,12 +319,27 @@ export class WorktreeLaneGate {
 		const deps = this.config.engineDeps();
 		const lane = await readLane(ctx.paths, this.config.laneKey);
 		if (!lane || lane.status !== "active") {
+			if (this.config.hardShell) {
+				return {
+					allowed: false,
+					code: "lane_state_unavailable",
+					message:
+						"worktree-sync: hard worker lane registration is missing or inactive; reconcile before mutating",
+				};
+			}
 			this._cachedAllowed = true;
 			return { allowed: true };
 		}
 		// Re-derive main tip: the cached ctx pins the sha from session start.
 		const fresh = await resolveRepoContext(deps);
 		if ("code" in fresh) {
+			if (this.config.hardShell) {
+				return {
+					allowed: false,
+					code: "lane_state_unavailable",
+					message: "worktree-sync: Git context is unavailable; hard worker mutation refused",
+				};
+			}
 			this._cachedAllowed = true;
 			return { allowed: true };
 		}
@@ -255,25 +353,24 @@ export class WorktreeLaneGate {
 		const policy = this.config.policy();
 		let syncRequired = policy === "on_land_mandatory";
 		if (policy === "overlap_mandatory") {
-			const epoch = await readEpoch(fresh.paths);
-			if (epoch?.changedPathsTruncated) {
+			// Epoch files are notification/diagnostic state only. Derive both sides from the
+			// current merge base so an overlap from land N remains enforced after unrelated land N+1.
+			const mergeBase = await deps.exec("git", ["merge-base", fresh.mainBranch, lane.branch], {
+				cwd: fresh.topLevel,
+				timeout: 60_000,
+				maxBuffer: 1024 * 1024,
+			});
+			if (mergeBase.code !== 0 || !mergeBase.stdout.trim()) {
 				syncRequired = true;
-			} else if (epoch) {
-				const changedSet = new Set(epoch.changedPaths);
-				const laneDiff = await deps.exec("git", ["diff", "--name-only", `${fresh.mainBranch}...${lane.branch}`], {
-					cwd: fresh.topLevel,
-					timeout: 60_000,
-					maxBuffer: 1024 * 1024,
-				});
-				syncRequired =
-					laneDiff.code === 0 &&
-					laneDiff.stdout
-						.split(/\r?\n/)
-						.map((line) => line.trim())
-						.filter(Boolean)
-						.some((path) => changedSet.has(path));
 			} else {
-				syncRequired = false;
+				const base = mergeBase.stdout.trim().split(/\s+/u)[0];
+				const lanePaths = await changedPaths(deps, fresh.topLevel, base, lane.branch);
+				const mainPaths = await changedPaths(deps, fresh.topLevel, base, fresh.mainBranch);
+				if (!lanePaths || !mainPaths) {
+					syncRequired = true;
+				} else {
+					syncRequired = [...lanePaths].some((path) => mainPaths.has(path));
+				}
 			}
 		}
 		if (policy === "land_time_only") syncRequired = false;

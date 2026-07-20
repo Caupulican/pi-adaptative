@@ -4,12 +4,16 @@ import { type Component, Container, CURSOR_MARKER, TUI } from "../src/tui.ts";
 import { VirtualTerminal } from "./virtual-terminal.ts";
 
 /**
- * A leaf that mirrors the real caching convention already used by Text/Markdown/Box/Image
- * (components/text.ts etc.): it returns the *same* array reference from render(width) when its
- * own content and the requested width are unchanged, and only redoes "expensive" work otherwise.
+ * A leaf that opts into the explicit revision contract used by Text/Markdown/Box/Image. Its
+ * internal array cache avoids repeating expensive work, while Container owns the public result
+ * array returned to callers.
  */
 class CachingLeaf implements Component {
 	private content: string;
+	private _renderRevision = 0;
+	get renderRevision(): number {
+		return this._renderRevision;
+	}
 	private cachedContent?: string;
 	private cachedWidth?: number;
 	private cachedLines?: string[];
@@ -21,6 +25,7 @@ class CachingLeaf implements Component {
 
 	setContent(content: string): void {
 		this.content = content;
+		this._renderRevision++;
 	}
 
 	render(width: number): string[] {
@@ -39,6 +44,7 @@ class CachingLeaf implements Component {
 		this.cachedContent = undefined;
 		this.cachedWidth = undefined;
 		this.cachedLines = undefined;
+		this._renderRevision++;
 	}
 }
 
@@ -81,7 +87,7 @@ class LoggingVirtualTerminal extends VirtualTerminal {
 }
 
 describe("Container render cache", () => {
-	it("reuses the cached lines array when content and width are unchanged", () => {
+	it("reuses an opted-in child's cached render work when content and width are unchanged", () => {
 		const container = new Container();
 		const leaf = new CachingLeaf("hello");
 		container.addChild(leaf);
@@ -89,8 +95,36 @@ describe("Container render cache", () => {
 		const first = container.render(20);
 		const second = container.render(20);
 
-		assert.strictEqual(second, first, "unchanged content/width should reuse the same array");
+		assert.notStrictEqual(second, first, "Container does not expose its cache-owned array");
 		assert.strictEqual(leaf.expensiveCalls, 1, "leaf's expensive render work should run once");
+	});
+
+	it("does not let callers poison the cache-owned container lines", () => {
+		const container = new Container();
+		const leaf = new CachingLeaf("A");
+		container.addChild(leaf);
+		const first = container.render(20);
+		first[0] = "poison";
+		const second = container.render(20);
+		assert.deepStrictEqual(
+			second.map((line) => line.trimEnd()),
+			["A"],
+		);
+		assert.strictEqual(leaf.expensiveCalls, 1);
+	});
+
+	it("invalidates when an arbitrary child mutates and reuses its output array", () => {
+		const container = new Container();
+		const leaf = new TestComponent();
+		leaf.lines = ["A"];
+		container.addChild(leaf);
+
+		const first = container.render(20);
+		leaf.lines[0] = "B";
+		const second = container.render(20);
+
+		assert.notStrictEqual(second, first);
+		assert.deepStrictEqual(second, ["B"]);
 	});
 
 	it("invalidates and recomputes when a child's content changes", () => {
@@ -214,7 +248,7 @@ describe("Container render cache", () => {
 		const first = outer.render(10);
 		const second = outer.render(10);
 
-		assert.strictEqual(second, first, "fully unchanged nested tree should reuse the outer array");
+		assert.notStrictEqual(second, first, "Container returns a caller-owned copy");
 		assert.strictEqual(leafA.expensiveCalls, 1);
 		assert.strictEqual(leafB.expensiveCalls, 1);
 

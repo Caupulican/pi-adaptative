@@ -225,9 +225,9 @@ def cmd_printf(ctx: BuiltinContext) -> int:
             had_error = had_error or err
             _write(ctx, text)
             first = False
-            if len(remaining) == before and not remaining:
-                break
-            if not remaining:
+            # A format with no conversions cannot consume another argument. Bash
+            # prints it once; continuing would spin forever with the same argv.
+            if len(remaining) == before or not remaining:
                 break
     return 1 if had_error else 0
 

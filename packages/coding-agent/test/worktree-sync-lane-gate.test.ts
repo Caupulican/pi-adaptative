@@ -73,6 +73,18 @@ describe("classifyLaneBashCommand (G10)", () => {
 		expect(classifyLaneBashCommand("npm test", "main").verdict).toBe("allowed");
 		expect(classifyLaneBashCommand("git branch --list", "main").verdict).toBe("allowed");
 		expect(classifyLaneBashCommand("echo git push is a string", "main").verdict).toBe("allowed");
+
+		// Compound/quoted/attached-option forms must not be approved by a safe
+		// first segment or by the whitespace tokenizer's optimistic fallback.
+		for (const command of [
+			"git status; git push",
+			"git branch --force main",
+			"'git' push",
+			'git -C"/repo" reset --hard main',
+			"printf hacked > /repo/main/file",
+		]) {
+			expect(classifyLaneBashCommand(command, "main").verdict, command).toBe("main_mutation_refused");
+		}
 	});
 });
 
@@ -124,6 +136,40 @@ describe("WorktreeLaneGate (G8, real git)", () => {
 		expect(await gate.checkMutation("bash", "rm -rf build")).toEqual({ allowed: true });
 	}, 60_000);
 
+	it("overlap policy keeps cumulative overlap blocked after an unrelated later land", async () => {
+		const { deps } = await initRepo();
+		const laneA = await createLane(deps, { laneKey: "a" });
+		const laneB = await createLane(deps, { laneKey: "b" });
+		expect(laneA.code).toBe("ok");
+		expect(laneB.code).toBe("ok");
+		if (laneA.code !== "ok" || laneB.code !== "ok") return;
+
+		writeFileSync(join(laneA.lane.worktreePath, "shared.txt"), "a\n", "utf-8");
+		await git(laneA.lane.worktreePath, "add", "-A");
+		await git(laneA.lane.worktreePath, "commit", "-m", "land shared file");
+		expect((await landLane(deps, { laneKey: "a", gate: "off" })).code).toBe("ok");
+
+		const laneC = await createLane(deps, { laneKey: "c" });
+		expect(laneC.code).toBe("ok");
+		if (laneC.code !== "ok") return;
+		writeFileSync(join(laneC.lane.worktreePath, "unrelated.txt"), "c\n", "utf-8");
+		await git(laneC.lane.worktreePath, "add", "-A");
+		await git(laneC.lane.worktreePath, "commit", "-m", "land unrelated file");
+		expect((await landLane(deps, { laneKey: "c", gate: "off" })).code).toBe("ok");
+
+		writeFileSync(join(laneB.lane.worktreePath, "shared.txt"), "b\n", "utf-8");
+		await git(laneB.lane.worktreePath, "add", "-A");
+		await git(laneB.lane.worktreePath, "commit", "-m", "touch shared file");
+		const gate = new WorktreeLaneGate({
+			laneKey: "b",
+			engineDeps: () => deps,
+			policy: () => "overlap_mandatory",
+		});
+		const result = await gate.checkMutation("edit");
+		expect(result.allowed).toBe(false);
+		if (!result.allowed) expect(result.code).toBe("sync_required");
+	}, 60_000);
+
 	it("land_time_only keeps staleness advisory: mutations stay allowed", async () => {
 		const { deps } = await initRepo();
 		const createdA = await createLane(deps, { laneKey: "a" });
@@ -171,7 +217,26 @@ describe("WorktreeLaneGate path envelope (D5, real git)", () => {
 		expect(escapeResult.allowed).toBe(false);
 		if (!escapeResult.allowed) expect(escapeResult.code).toBe("path_outside_lane");
 
-		// bash keeps its existing (targetPath-less) behavior unchanged.
+		// bash keeps its existing (targetPath-less) behavior unchanged for an
+		// interactive lane, while the worker profile is hard-restricted.
 		expect(await gate.checkMutation("bash", "git status")).toEqual({ allowed: true });
+		const hardGate = new WorktreeLaneGate({
+			laneKey: "a",
+			engineDeps: () => deps,
+			policy: () => "on_land_mandatory",
+			hardShell: true,
+		});
+		expect((await hardGate.checkMutation("bash", "git status")).allowed).toBe(true);
+		expect((await hardGate.checkMutation("bash", "rm -rf build")).allowed).toBe(false);
+		expect((await hardGate.checkMutation("bash", "git branch --force main")).allowed).toBe(false);
+		const missingHardGate = new WorktreeLaneGate({
+			laneKey: "missing",
+			engineDeps: () => deps,
+			policy: () => "on_land_mandatory",
+			hardShell: true,
+		});
+		const missingResult = await missingHardGate.checkMutation("edit");
+		expect(missingResult.allowed).toBe(false);
+		if (!missingResult.allowed) expect(missingResult.code).toBe("lane_state_unavailable");
 	}, 60_000);
 });

@@ -9,7 +9,9 @@
 
 export interface WindowsShellState {
 	cwd: string;
-	envDelta: Record<string, string>;
+	/** Host-requested cwd used to detect an intentional caller cwd change. */
+	hostCwd?: string;
+	envDelta: Record<string, string | null>;
 }
 
 /** The engine control-frame shape this module consumes (subset of the full §1.3 frame). */
@@ -42,8 +44,7 @@ export function disposeWindowsShellState(sessionKey: string): void {
 export function applyEngineFrame(state: WindowsShellState, frame: EngineFrameState): void {
 	state.cwd = frame.cwd;
 	for (const [key, value] of Object.entries(frame.envDelta)) {
-		if (value === null) delete state.envDelta[key];
-		else state.envDelta[key] = value;
+		state.envDelta[key] = value;
 	}
 }
 
@@ -53,7 +54,11 @@ export function applyEngineFrame(state: WindowsShellState, frame: EngineFrameSta
  * state so a `cd` in the engine is observed by the very next PS-tier call.
  */
 export function resolveEffectiveCwd(state: WindowsShellState, requestedCwd: string): string {
-	return state.cwd || requestedCwd;
+	if (state.hostCwd !== requestedCwd) {
+		state.hostCwd = requestedCwd;
+		state.cwd = requestedCwd;
+	}
+	return state.cwd;
 }
 
 /**
@@ -61,5 +66,10 @@ export function resolveEffectiveCwd(state: WindowsShellState, requestedCwd: stri
  * engine has applied so far.
  */
 export function mergeEffectiveEnv(state: WindowsShellState, baseEnv: NodeJS.ProcessEnv): NodeJS.ProcessEnv {
-	return { ...baseEnv, ...state.envDelta };
+	const merged: NodeJS.ProcessEnv = { ...baseEnv };
+	for (const [key, value] of Object.entries(state.envDelta)) {
+		if (value === null) delete merged[key];
+		else merged[key] = value;
+	}
+	return merged;
 }

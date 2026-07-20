@@ -114,6 +114,10 @@ interface InlineStyleContext {
 
 export class Markdown implements Component {
 	private text: string;
+	private _renderRevision = 0;
+	get renderRevision(): number {
+		return this._renderRevision;
+	}
 	private paddingX: number; // Left/right padding
 	private paddingY: number; // Top/bottom padding
 	private defaultTextStyle?: DefaultTextStyle;
@@ -151,13 +155,15 @@ export class Markdown implements Component {
 		this.cachedText = undefined;
 		this.cachedWidth = undefined;
 		this.cachedLines = undefined;
+		this._renderRevision++;
 	}
 
 	render(width: number): string[] {
 		// Check cache
 		if (this.cachedLines && this.cachedText === this.text && this.cachedWidth === width) {
-			return this.cachedLines;
+			return this.cachedLines.slice();
 		}
+		this._renderRevision++;
 
 		// Calculate available width for content (subtract horizontal padding)
 		const contentWidth = Math.max(1, width - this.paddingX * 2);
@@ -169,7 +175,7 @@ export class Markdown implements Component {
 			this.cachedText = this.text;
 			this.cachedWidth = width;
 			this.cachedLines = result;
-			return result;
+			return result.slice();
 		}
 
 		// Replace tabs with 3 spaces for consistent rendering
@@ -243,7 +249,7 @@ export class Markdown implements Component {
 		this.cachedWidth = width;
 		this.cachedLines = result;
 
-		return result.length > 0 ? result : [""];
+		return result.length > 0 ? result.slice() : [""];
 	}
 
 	/**

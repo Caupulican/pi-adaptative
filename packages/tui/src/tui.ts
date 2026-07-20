@@ -45,6 +45,12 @@ export interface Component {
 	render(width: number): string[];
 
 	/**
+	 * Explicit opt-in cache contract. Increment whenever rendered output can change; components
+	 * without this property are always rebuilt by a parent Container.
+	 */
+	readonly renderRevision?: number;
+
+	/**
 	 * Optional handler for keyboard input when component has focus
 	 */
 	handleInput?(data: string): void;
@@ -222,7 +228,8 @@ type OverlayFocusRestorePolicy = "clear" | "preserve";
 
 type ContainerRenderCache = {
 	width: number;
-	childOutputs: string[][];
+	children: Component[];
+	childRevisions: number[];
 	lines: string[];
 };
 
@@ -231,34 +238,37 @@ type ContainerRenderCache = {
  */
 export class Container implements Component {
 	children: Component[] = [];
+	private _renderRevision = 0;
 
-	// Cache of the last render's per-child output arrays and their concatenation. Every child's
-	// render(width) is still called each tick - Component exposes no external "did my content
-	// change" signal - but Text/Markdown/Box/Image already return the *same array reference* from
-	// render(width) when their own internal (content, width) cache hits (see components/text.ts,
-	// markdown.ts, box.ts, image.ts). Reusing that existing convention here means a subtree built
-	// entirely from self-memoizing components can skip rebuilding the concatenated `lines` array.
-	// Components with no internal cache always return a fresh array, so they never hit this cache
-	// (correct, just no faster than before) - see render() below for the per-child check.
+	get renderRevision(): number {
+		return this._renderRevision;
+	}
+
+	// Cache only the explicit revision contract. Arbitrary public Components are still rendered on
+	// every call; array identity is deliberately never treated as an immutability signal.
 	private renderCache: ContainerRenderCache | undefined;
 
 	addChild(component: Component): void {
 		this.children.push(component);
+		this._renderRevision++;
 	}
 
 	removeChild(component: Component): void {
 		const index = this.children.indexOf(component);
 		if (index !== -1) {
 			this.children.splice(index, 1);
+			this._renderRevision++;
 		}
 	}
 
 	clear(): void {
 		this.children = [];
+		this._renderRevision++;
 	}
 
 	invalidate(): void {
 		this.renderCache = undefined;
+		this._renderRevision++;
 		for (const child of this.children) {
 			child.invalidate?.();
 		}
@@ -266,28 +276,38 @@ export class Container implements Component {
 
 	render(width: number): string[] {
 		const cache = this.renderCache;
-		// The child-count check also covers addChild/removeChild/clear and any direct mutation of
-		// `children` (some callers reassign it directly) - no explicit cache reset needed there.
-		let reusable = cache !== undefined && cache.width === width && cache.childOutputs.length === this.children.length;
 		const childOutputs: string[][] = [];
+		const childRevisions: number[] = [];
+		let reusable =
+			cache !== undefined &&
+			cache.width === width &&
+			cache.children.length === this.children.length &&
+			cache.children.every((child, index) => child === this.children[index]);
 		for (let i = 0; i < this.children.length; i++) {
-			const output = this.children[i].render(width);
+			const child = this.children[i];
+			const output = child.render(width);
 			childOutputs.push(output);
-			if (reusable && cache && cache.childOutputs[i] !== output) {
+			const revision = child.renderRevision;
+			if (revision === undefined) {
 				reusable = false;
+				continue;
 			}
+			childRevisions.push(revision);
+			if (reusable && cache && cache.childRevisions[i] !== revision) reusable = false;
 		}
-		if (reusable && cache) {
-			return cache.lines;
-		}
+		if (reusable && cache) return cache.lines.slice();
+
 		const lines: string[] = [];
 		for (const output of childOutputs) {
-			for (const line of output) {
-				lines.push(line);
-			}
+			for (const line of output) lines.push(line);
 		}
-		this.renderCache = { width, childOutputs, lines };
-		return lines;
+		this._renderRevision++;
+		this.renderCache =
+			childRevisions.length === this.children.length
+				? { width, children: this.children.slice(), childRevisions, lines }
+				: undefined;
+		// Never expose the cache-owned array: callers are allowed to mutate the public string[] result.
+		return lines.slice();
 	}
 }
 

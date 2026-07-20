@@ -45,30 +45,34 @@ function resolveEngineScriptPath(): string {
 	return join(getBundledResourcesDir(), "runtimes", "pi-shell-engine", "main.py");
 }
 
-/**
- * Split the fully-accumulated stdout stream into command output and the parsed control frame.
- *
- * Command output is arbitrary bytes and may legitimately contain raw 0x1e (e.g. `cat` of a binary
- * file) — locating the frame from the FIRST occurrence would truncate such output and misfire a
- * spurious failure. The §1.3 guarantee (the frame JSON itself contains no raw 0x1e) only makes the
- * frame unambiguous when located from the END: the frame is always the FINAL bytes of the stream,
- * so the stream's last byte must be the closing 0x1e, and the matching opening 0x1e is the nearest
- * preceding one. Everything before that opening byte is command output.
- *
- * This requires the full stream before splitting, which is fine today because the engine (see
- * `pi-shell-engine/main.py`) writes output and the frame together only once, at process end — a
- * buffered v1 behavior. Live incremental chunk-splitting would buy nothing until the engine starts
- * streaming output before its final frame.
- */
-function splitFinishedStream(buffer: Buffer): { output: Buffer; frame: WindowsShellEngineFrame } | undefined {
+const MAX_CONTROL_FRAME_BYTES = 64 * 1024;
+
+function isRecord(value: unknown): value is Record<string, unknown> {
+	return typeof value === "object" && value !== null && !Array.isArray(value);
+}
+
+/** Parse the terminal frame from the dedicated control stream. Command output is never retained here. */
+function parseControlFrame(buffer: Buffer): WindowsShellEngineFrame | undefined {
 	if (buffer.length < 2 || buffer[buffer.length - 1] !== ENGINE_FRAME_SENTINEL) return undefined;
 	const openIndex = buffer.lastIndexOf(ENGINE_FRAME_SENTINEL, buffer.length - 2);
 	if (openIndex === -1) return undefined;
 	try {
-		const frame = JSON.parse(
-			buffer.subarray(openIndex + 1, buffer.length - 1).toString("utf8"),
-		) as WindowsShellEngineFrame;
-		return { output: buffer.subarray(0, openIndex), frame };
+		const raw: unknown = JSON.parse(buffer.subarray(openIndex + 1, buffer.length - 1).toString("utf8"));
+		if (!isRecord(raw)) return undefined;
+		if (typeof raw.exitCode !== "number" || !Number.isInteger(raw.exitCode)) return undefined;
+		if (typeof raw.cwd !== "string" || !isRecord(raw.envDelta)) return undefined;
+		if (raw.unsupported !== null && !isRecord(raw.unsupported)) return undefined;
+		if (
+			raw.unsupported !== null &&
+			(raw.unsupported.code !== "unsupported" ||
+				typeof raw.unsupported.construct !== "string" ||
+				typeof raw.unsupported.message !== "string")
+		)
+			return undefined;
+		for (const value of Object.values(raw.envDelta)) {
+			if (value !== null && typeof value !== "string") return undefined;
+		}
+		return raw as unknown as WindowsShellEngineFrame;
 	} catch {
 		return undefined;
 	}
@@ -141,14 +145,23 @@ export function createWindowsShellEngineOperations(
 			});
 			if (child.pid) trackDetachedChildPid(child.pid);
 
-			let stdoutBuffer: Buffer<ArrayBufferLike> = Buffer.alloc(0);
-			let stderrText = "";
+			let controlBuffer: Buffer<ArrayBufferLike> = Buffer.alloc(0);
+			let controlOverflow = false;
 
+			// Command output is the data stream: forward it immediately and never retain a
+			// second full copy merely to find the terminal frame.
 			child.stdout?.on("data", (chunk: Buffer) => {
-				stdoutBuffer = Buffer.concat([stdoutBuffer, chunk]);
+				onData(chunk);
 			});
+			// stderr is the bounded control stream. The Python engine routes command stderr
+			// into stdout, so this channel contains only the terminal frame/diagnostics.
 			child.stderr?.on("data", (chunk: Buffer) => {
-				stderrText += chunk.toString("utf8");
+				if (controlOverflow) return;
+				if (controlBuffer.length + chunk.length > MAX_CONTROL_FRAME_BYTES) {
+					controlOverflow = true;
+					return;
+				}
+				controlBuffer = Buffer.concat([controlBuffer, chunk]);
 			});
 
 			try {
@@ -160,16 +173,16 @@ export function createWindowsShellEngineOperations(
 				});
 				if (signal?.aborted) throw new Error("aborted");
 
-				const split = splitFinishedStream(stdoutBuffer);
-				if (!split) {
-					const capturedOutput = `${stdoutBuffer.toString("utf8")}${stderrText}`;
+				const frame = controlOverflow ? undefined : parseControlFrame(controlBuffer);
+				if (!frame) {
+					const capturedOutput = controlOverflow
+						? `control frame exceeded ${MAX_CONTROL_FRAME_BYTES} bytes`
+						: controlBuffer.toString("utf8");
 					throw new WindowsShellEngineFailure(
 						`Windows shell engine failed (process exit ${terminal.code ?? "null"}) without a parseable control frame.\n${capturedOutput}`,
 						capturedOutput,
 					);
 				}
-				const { output, frame } = split;
-				if (output.length > 0) onData(output);
 
 				applyEngineFrame(state, frame);
 				if (frame.unsupported) throw new Error(frame.unsupported.message);

@@ -17,14 +17,17 @@ import { existsSync, readFileSync } from "node:fs";
 import { hostname as osHostname } from "node:os";
 import { join } from "node:path";
 import { type ExecResult, execCommand } from "../exec.ts";
+import { withFileLock } from "../util/atomic-file.ts";
 import {
 	type AbortSyncResult,
+	type BindLaneWorkerResult,
 	type ConflictWorklist,
 	type ConflictWorklistFile,
 	type ContinueSyncResult,
 	type CreateLaneResult,
 	EPOCH_CHANGED_PATHS_CAP,
 	LANE_BRANCH_PREFIX,
+	type LandingTransaction,
 	type LandResult,
 	type LaneFacts,
 	type LaneRegistration,
@@ -39,9 +42,11 @@ import {
 import {
 	acquireIntegrationLock,
 	appendAuditEvent,
+	clearLandingTransaction,
 	defaultIsPidAlive,
 	listLanes,
 	readEpoch,
+	readLandingTransaction,
 	readLane,
 	readLockHolder,
 	releaseIntegrationLock,
@@ -49,6 +54,7 @@ import {
 	type SyncStorePaths,
 	syncStorePaths,
 	writeEpoch,
+	writeLandingTransaction,
 	writeLane,
 } from "./store.ts";
 
@@ -272,7 +278,8 @@ export async function deriveLaneFacts(
 	}
 
 	const isAlive =
-		deps.isPidAlive ?? ((pid: number) => defaultIsPidAlive({ pid, hostname: osHostname(), acquiredAt: "" }));
+		deps.isPidAlive ??
+		((pid: number) => defaultIsPidAlive({ pid, hostname: osHostname(), token: "status", acquiredAt: "" }));
 
 	return {
 		laneKey: lane.laneKey,
@@ -330,70 +337,72 @@ export async function createLane(deps: WorktreeSyncEngineDeps, args: CreateLaneA
 	const ctx = await resolveRepoContext(deps);
 	if ("code" in ctx) return ctx;
 
-	if (args.laneKey !== undefined && !LANE_KEY_RE.test(args.laneKey)) {
-		return {
-			code: "invalid_lane_key",
-			message: `laneKey '${args.laneKey}' is invalid: lowercase alphanumerics and inner dashes, max 63 chars`,
-		};
-	}
-
-	const lanes = await listLanes(ctx.paths);
-	const activeCount = lanes.filter((lane) => lane.status === "active").length;
-	if (activeCount >= deps.options.maxLanes) {
-		return {
-			code: "max_lanes_reached",
-			message: `active lane limit reached (${activeCount}/${deps.options.maxLanes}); release a lane first`,
-		};
-	}
-
-	const taken = new Set(lanes.filter((lane) => lane.status !== "released").map((lane) => lane.laneKey));
-	const isFree = async (candidate: string): Promise<boolean> => {
-		if (taken.has(candidate)) return false;
-		if (await revParseBranch(deps, ctx.topLevel, laneBranch(candidate))) return false;
-		if (fileExists(deps, join(deps.worktreesBaseDir, ctx.slug, candidate))) return false;
-		return true;
-	};
-
-	let laneKey: string;
-	if (args.laneKey !== undefined) {
-		if (!(await isFree(args.laneKey))) {
+	return withFileLock(ctx.paths.lifecycleLockFile, async () => {
+		if (args.laneKey !== undefined && !LANE_KEY_RE.test(args.laneKey)) {
 			return {
-				code: "lane_exists",
-				message: `lane '${args.laneKey}' already exists (registration, branch, or checkout)`,
+				code: "invalid_lane_key",
+				message: `laneKey '${args.laneKey}' is invalid: lowercase alphanumerics and inner dashes, max 63 chars`,
 			};
 		}
-		laneKey = args.laneKey;
-	} else {
-		// Deterministic allocation: lowest free `<scope>-<n>` (scope = goalId or "adhoc").
-		const scope = sanitizeScope(args.goalId ?? "adhoc");
-		let n = 1;
-		while (!(await isFree(`${scope}-${n}`))) n++;
-		laneKey = `${scope}-${n}`;
-	}
 
-	await ensureRepoGitConfig(deps, ctx);
+		const lanes = await listLanes(ctx.paths);
+		const activeCount = lanes.filter((lane) => lane.status === "active").length;
+		if (activeCount >= deps.options.maxLanes) {
+			return {
+				code: "max_lanes_reached",
+				message: `active lane limit reached (${activeCount}/${deps.options.maxLanes}); release a lane first`,
+			};
+		}
 
-	const branch = laneBranch(laneKey);
-	const worktreePath = join(deps.worktreesBaseDir, ctx.slug, laneKey);
-	const add = await runGit(deps, ctx.topLevel, ["worktree", "add", "-b", branch, worktreePath, ctx.mainBranch]);
-	if (add.code !== 0) return gitError(`git worktree add failed for lane '${laneKey}'`, add);
+		const taken = new Set(lanes.filter((lane) => lane.status !== "released").map((lane) => lane.laneKey));
+		const isFree = async (candidate: string): Promise<boolean> => {
+			if (taken.has(candidate)) return false;
+			if (await revParseBranch(deps, ctx.topLevel, laneBranch(candidate))) return false;
+			if (fileExists(deps, join(deps.worktreesBaseDir, ctx.slug, candidate))) return false;
+			return true;
+		};
 
-	const at = nowIso(deps);
-	const lane: LaneRegistration = {
-		laneKey,
-		branch,
-		worktreePath,
-		status: "active",
-		createdAt: at,
-		updatedAt: at,
-		...(args.goalId !== undefined ? { goalId: args.goalId } : {}),
-		...(args.requirementId !== undefined ? { requirementId: args.requirementId } : {}),
-		ownerPid: deps.pid ?? process.pid,
-		...(deps.sessionId !== undefined ? { ownerSessionId: deps.sessionId } : {}),
-	};
-	await writeLane(ctx.paths, lane);
-	await appendAuditEvent(ctx.paths, { event: "lane_created", laneKey, branch, baseSha: ctx.mainSha }, at);
-	return { code: "ok", lane };
+		let laneKey: string;
+		if (args.laneKey !== undefined) {
+			if (!(await isFree(args.laneKey))) {
+				return {
+					code: "lane_exists",
+					message: `lane '${args.laneKey}' already exists (registration, branch, or checkout)`,
+				};
+			}
+			laneKey = args.laneKey;
+		} else {
+			// Deterministic allocation: lowest free `<scope>-<n>` (scope = goalId or "adhoc").
+			const scope = sanitizeScope(args.goalId ?? "adhoc");
+			let n = 1;
+			while (!(await isFree(`${scope}-${n}`))) n++;
+			laneKey = `${scope}-${n}`;
+		}
+
+		await ensureRepoGitConfig(deps, ctx);
+
+		const branch = laneBranch(laneKey);
+		const worktreePath = join(deps.worktreesBaseDir, ctx.slug, laneKey);
+		const add = await runGit(deps, ctx.topLevel, ["worktree", "add", "-b", branch, worktreePath, ctx.mainBranch]);
+		if (add.code !== 0) return gitError(`git worktree add failed for lane '${laneKey}'`, add);
+
+		const at = nowIso(deps);
+		const lane: LaneRegistration = {
+			laneKey,
+			branch,
+			worktreePath,
+			status: "active",
+			createdAt: at,
+			updatedAt: at,
+			...(args.goalId !== undefined ? { goalId: args.goalId } : {}),
+			...(args.requirementId !== undefined ? { requirementId: args.requirementId } : {}),
+			ownerPid: deps.pid ?? process.pid,
+			...(deps.sessionId !== undefined ? { ownerSessionId: deps.sessionId } : {}),
+		};
+		await writeLane(ctx.paths, lane);
+		await appendAuditEvent(ctx.paths, { event: "lane_created", laneKey, branch, baseSha: ctx.mainSha }, at);
+		return { code: "ok", lane };
+	});
 }
 
 /**
@@ -408,8 +417,45 @@ function ownerConflicts(deps: WorktreeSyncEngineDeps, lane: LaneRegistration): b
 	if (lane.ownerSessionId == null || lane.ownerSessionId === deps.sessionId) return false;
 	if (lane.ownerPid === undefined) return false;
 	const isAlive =
-		deps.isPidAlive ?? ((pid: number) => defaultIsPidAlive({ pid, hostname: osHostname(), acquiredAt: "" }));
+		deps.isPidAlive ??
+		((pid: number) => defaultIsPidAlive({ pid, hostname: osHostname(), token: "status", acquiredAt: "" }));
 	return isAlive(lane.ownerPid);
+}
+
+export interface BindLaneWorkerArgs {
+	laneKey: string;
+	laneId: string;
+}
+
+export async function bindLaneWorker(
+	deps: WorktreeSyncEngineDeps,
+	args: BindLaneWorkerArgs,
+): Promise<BindLaneWorkerResult> {
+	const ctx = await resolveRepoContext(deps);
+	if ("code" in ctx) return { code: "store_error", message: ctx.message };
+	return withFileLock(ctx.paths.lifecycleLockFile, async () => {
+		const lane = await readLane(ctx.paths, args.laneKey);
+		if (!lane) return { code: "lane_not_found", message: `lane '${args.laneKey}' is not registered` };
+		if (lane.status !== "active")
+			return { code: "lane_not_active", message: `lane '${args.laneKey}' is ${lane.status}` };
+		if (lane.boundLaneId === args.laneId)
+			return { code: "already_bound", laneKey: args.laneKey, laneId: args.laneId };
+		if (lane.boundLaneId) {
+			return { code: "binding_conflict", laneKey: args.laneKey, boundLaneId: lane.boundLaneId };
+		}
+		const updated = { ...lane, boundLaneId: args.laneId, updatedAt: nowIso(deps) };
+		try {
+			await writeLane(ctx.paths, updated);
+			await appendAuditEvent(
+				ctx.paths,
+				{ event: "lane_worker_bound", laneKey: args.laneKey, laneId: args.laneId },
+				nowIso(deps),
+			);
+		} catch (error) {
+			return { code: "store_error", message: `lane binding persistence failed: ${String(error)}` };
+		}
+		return { code: "bound", laneKey: args.laneKey, laneId: args.laneId };
+	});
 }
 
 export interface ReleaseLaneArgs {
@@ -422,53 +468,60 @@ export async function releaseLane(deps: WorktreeSyncEngineDeps, args: ReleaseLan
 	const ctx = await resolveRepoContext(deps);
 	if ("code" in ctx) return ctx;
 
-	const lane = await readLane(ctx.paths, args.laneKey);
-	if (!lane) return { code: "lane_not_found", message: `no registered lane '${args.laneKey}'` };
-	if (lane.status === "released") return { code: "released", laneKey: lane.laneKey };
-	if (ownerConflicts(deps, lane)) {
-		return {
-			code: "lane_owner_conflict",
-			message: `lane '${lane.laneKey}' is owned by another live session (pid ${lane.ownerPid}); only its owner may release it`,
-		};
-	}
+	return withFileLock(ctx.paths.lifecycleLockFile, async () => {
+		const lane = await readLane(ctx.paths, args.laneKey);
+		if (!lane) return { code: "lane_not_found", message: `no registered lane '${args.laneKey}'` };
+		if (lane.status === "released") return { code: "released", laneKey: lane.laneKey };
+		if (ownerConflicts(deps, lane)) {
+			return {
+				code: "lane_owner_conflict",
+				message: `lane '${lane.laneKey}' is owned by another live session (pid ${lane.ownerPid}); only its owner may release it`,
+			};
+		}
 
-	const facts = await deriveLaneFacts(deps, ctx, lane);
-	let landed = true;
-	if (facts.branchSha) {
-		const ancestry = await runGit(deps, ctx.topLevel, ["merge-base", "--is-ancestor", facts.branchSha, ctx.mainSha]);
-		landed = ancestry.code === 0;
-	}
-	const unlandedWork = (facts.branchSha !== undefined && !landed) || facts.dirty;
-	const discardConfirmed = args.confirm === "yes-discard-lane";
-	if (unlandedWork && !discardConfirmed) {
-		return {
-			code: "lane_unlanded_work",
-			message:
-				`lane '${lane.laneKey}' has ${facts.dirty ? "uncommitted changes" : ""}` +
-				`${facts.dirty && !landed ? " and " : ""}${!landed ? `${facts.aheadOfMain} unlanded commit(s)` : ""}; ` +
-				`land it first, or pass confirm:"yes-discard-lane" to discard`,
-		};
-	}
+		const facts = await deriveLaneFacts(deps, ctx, lane);
+		let landed = true;
+		if (facts.branchSha) {
+			const ancestry = await runGit(deps, ctx.topLevel, [
+				"merge-base",
+				"--is-ancestor",
+				facts.branchSha,
+				ctx.mainSha,
+			]);
+			landed = ancestry.code === 0;
+		}
+		const unlandedWork = (facts.branchSha !== undefined && !landed) || facts.dirty;
+		const discardConfirmed = args.confirm === "yes-discard-lane";
+		if (unlandedWork && !discardConfirmed) {
+			return {
+				code: "lane_unlanded_work",
+				message:
+					`lane '${lane.laneKey}' has ${facts.dirty ? "uncommitted changes" : ""}` +
+					`${facts.dirty && !landed ? " and " : ""}${!landed ? `${facts.aheadOfMain} unlanded commit(s)` : ""}; ` +
+					`land it first, or pass confirm:"yes-discard-lane" to discard`,
+			};
+		}
 
-	if (facts.worktreePresent) {
-		const removeArgs = ["worktree", "remove", ...(unlandedWork ? ["--force"] : []), lane.worktreePath];
-		const remove = await runGit(deps, ctx.topLevel, removeArgs);
-		if (remove.code !== 0) return gitError(`git worktree remove failed for lane '${lane.laneKey}'`, remove);
-	}
-	if (facts.branchSha) {
-		const del = await runGit(deps, ctx.topLevel, ["branch", unlandedWork ? "-D" : "-d", lane.branch]);
-		if (del.code !== 0) return gitError(`git branch delete failed for lane '${lane.laneKey}'`, del);
-	}
-	await runGit(deps, ctx.topLevel, ["worktree", "prune"]);
+		if (facts.worktreePresent) {
+			const removeArgs = ["worktree", "remove", ...(unlandedWork ? ["--force"] : []), lane.worktreePath];
+			const remove = await runGit(deps, ctx.topLevel, removeArgs);
+			if (remove.code !== 0) return gitError(`git worktree remove failed for lane '${lane.laneKey}'`, remove);
+		}
+		if (facts.branchSha) {
+			const del = await runGit(deps, ctx.topLevel, ["branch", unlandedWork ? "-D" : "-d", lane.branch]);
+			if (del.code !== 0) return gitError(`git branch delete failed for lane '${lane.laneKey}'`, del);
+		}
+		await runGit(deps, ctx.topLevel, ["worktree", "prune"]);
 
-	const at = nowIso(deps);
-	await writeLane(ctx.paths, { ...lane, status: "released", updatedAt: at });
-	await appendAuditEvent(
-		ctx.paths,
-		{ event: "lane_released", laneKey: lane.laneKey, ...(unlandedWork ? { discarded: true } : {}) },
-		at,
-	);
-	return { code: "released", laneKey: lane.laneKey };
+		const at = nowIso(deps);
+		await writeLane(ctx.paths, { ...lane, status: "released", updatedAt: at });
+		await appendAuditEvent(
+			ctx.paths,
+			{ event: "lane_released", laneKey: lane.laneKey, ...(unlandedWork ? { discarded: true } : {}) },
+			at,
+		);
+		return { code: "released", laneKey: lane.laneKey };
+	});
 }
 
 /** Lane worktrees git knows about that the registry does not (yet) track: a valid `pi/wt/<key>`
@@ -492,6 +545,52 @@ function findUnregisteredLaneWorktrees(
 	return found;
 }
 
+async function reconcileLandingTransaction(
+	deps: WorktreeSyncEngineDeps,
+	ctx: RepoContext,
+	transaction: LandingTransaction,
+): Promise<WorktreeSyncRefusal<"git_error"> | undefined> {
+	const currentMainSha = await revParseBranch(deps, ctx.topLevel, ctx.mainBranch);
+	if (currentMainSha === transaction.priorMainSha) {
+		await clearLandingTransaction(ctx.paths);
+		return undefined;
+	}
+	if (currentMainSha !== transaction.testedTipSha) {
+		return {
+			code: "git_error",
+			message: `landing transaction is ambiguous: main is ${currentMainSha?.slice(0, 12) ?? "missing"}, expected prior ${transaction.priorMainSha.slice(0, 12)} or tested ${transaction.testedTipSha.slice(0, 12)}`,
+		};
+	}
+
+	const previous = await readEpoch(ctx.paths);
+	if (previous?.mainSha !== transaction.testedTipSha) {
+		const epoch = (previous?.epoch ?? 0) + 1;
+		const at = nowIso(deps);
+		await writeEpoch(ctx.paths, {
+			epoch,
+			mainSha: transaction.testedTipSha,
+			previousMainSha: transaction.priorMainSha,
+			landedLaneKey: transaction.laneKey,
+			landedAt: at,
+			changedPaths: transaction.changedPaths,
+			changedPathsTruncated: transaction.changedPathsTruncated,
+		});
+		await appendAuditEvent(
+			ctx.paths,
+			{
+				event: "epoch_reconciled",
+				epoch,
+				laneKey: transaction.laneKey,
+				mainSha: transaction.testedTipSha,
+				gate: transaction.gate,
+			},
+			at,
+		);
+	}
+	await clearLandingTransaction(ctx.paths);
+	return undefined;
+}
+
 /**
  * Startup/repair pass (mirrors the tmux session reconcile): diff the registry against git
  * reality, mark orphans (never delete -- G11), re-register lane worktrees git still knows that
@@ -501,6 +600,24 @@ function findUnregisteredLaneWorktrees(
 export async function reconcile(deps: WorktreeSyncEngineDeps): Promise<ReconcileResult> {
 	const ctx = await resolveRepoContext(deps);
 	if ("code" in ctx) return ctx;
+
+	const landingTransaction = await readLandingTransaction(ctx.paths);
+	if (landingTransaction) {
+		const recoveryLock = await acquireIntegrationLock(
+			ctx.paths,
+			{ pid: deps.pid ?? process.pid, hostname: osHostname(), sessionId: deps.sessionId, laneKey: "reconcile" },
+			{ now: deps.now },
+		);
+		if (!recoveryLock.acquired) {
+			return { code: "git_error", message: "landing transaction recovery is blocked by an active integration lock" };
+		}
+		try {
+			const recovery = await reconcileLandingTransaction(deps, ctx, landingTransaction);
+			if (recovery) return recovery;
+		} finally {
+			await releaseIntegrationLock(ctx.paths, recoveryLock.token, { now: deps.now });
+		}
+	}
 
 	const worktreesResult = await runGit(deps, ctx.topLevel, ["worktree", "list", "--porcelain"]);
 	if (worktreesResult.code !== 0) return gitError("git worktree list failed", worktreesResult);
@@ -527,7 +644,8 @@ export async function reconcile(deps: WorktreeSyncEngineDeps): Promise<Reconcile
 	}
 
 	const isAlive =
-		deps.isPidAlive ?? ((pid: number) => defaultIsPidAlive({ pid, hostname: osHostname(), acquiredAt: "" }));
+		deps.isPidAlive ??
+		((pid: number) => defaultIsPidAlive({ pid, hostname: osHostname(), token: "status", acquiredAt: "" }));
 	const at = nowIso(deps);
 
 	const orphanedLaneKeys: string[] = [];
@@ -577,9 +695,8 @@ export async function reconcile(deps: WorktreeSyncEngineDeps): Promise<Reconcile
 	// Provably-stale integration lock: dead same-host owner (never a foreign or live one).
 	let staleLockReleased = false;
 	const holder = await readLockHolder(ctx.paths);
-	if (holder && holder.hostname === osHostname() && !isAlive(holder.pid)) {
-		await releaseIntegrationLock(ctx.paths, { now: deps.now });
-		staleLockReleased = true;
+	if (holder && holder.hostname === osHostname() && !isAlive(holder.pid) && holder.token) {
+		staleLockReleased = await releaseIntegrationLock(ctx.paths, holder.token, { now: deps.now });
 	}
 
 	await appendAuditEvent(
@@ -829,51 +946,56 @@ export interface SyncLaneArgs {
 export async function syncLane(deps: WorktreeSyncEngineDeps, args: SyncLaneArgs): Promise<SyncLaneResult> {
 	const ctx = await resolveRepoContext(deps);
 	if ("code" in ctx) return ctx;
-	const lane = await readLane(ctx.paths, args.laneKey);
-	if (!lane || lane.status === "released") {
-		return { code: "lane_not_found", message: `no active lane '${args.laneKey}'` };
-	}
-	const facts = await deriveLaneFacts(deps, ctx, lane);
-	if (!facts.worktreePresent) {
-		return { code: "worktree_missing", message: `lane '${lane.laneKey}' checkout missing at ${lane.worktreePath}` };
-	}
-	if (facts.rebaseInProgress) {
-		return {
-			code: "rebase_in_progress",
-			message: `lane '${lane.laneKey}' has a rebase in progress; resolve and call continue, or abort_sync`,
-		};
-	}
-	if (facts.fresh) {
-		return { code: "sync_clean", laneKey: lane.laneKey, alreadyFresh: true, autoContinued: 0 };
-	}
-	if (facts.dirty) {
-		return {
-			code: "lane_dirty",
-			message: `lane '${lane.laneKey}' has uncommitted changes; commit them on the lane branch, then sync`,
-			paths: await dirtyPaths(deps, lane.worktreePath),
-		};
-	}
+	return withFileLock(ctx.paths.lifecycleLockFile, async () => {
+		const lane = await readLane(ctx.paths, args.laneKey);
+		if (!lane || lane.status === "released") {
+			return { code: "lane_not_found", message: `no active lane '${args.laneKey}'` };
+		}
+		const facts = await deriveLaneFacts(deps, ctx, lane);
+		if (!facts.worktreePresent) {
+			return {
+				code: "worktree_missing",
+				message: `lane '${lane.laneKey}' checkout missing at ${lane.worktreePath}`,
+			};
+		}
+		if (facts.rebaseInProgress) {
+			return {
+				code: "rebase_in_progress",
+				message: `lane '${lane.laneKey}' has a rebase in progress; resolve and call continue, or abort_sync`,
+			};
+		}
+		if (facts.fresh) {
+			return { code: "sync_clean", laneKey: lane.laneKey, alreadyFresh: true, autoContinued: 0 };
+		}
+		if (facts.dirty) {
+			return {
+				code: "lane_dirty",
+				message: `lane '${lane.laneKey}' has uncommitted changes; commit them on the lane branch, then sync`,
+				paths: await dirtyPaths(deps, lane.worktreePath),
+			};
+		}
 
-	await appendAuditEvent(
-		ctx.paths,
-		{ event: "sync_started", laneKey: lane.laneKey, ontoSha: ctx.mainSha },
-		nowIso(deps),
-	);
-	const rebase = await runGitEnv(deps, lane.worktreePath, ["rebase", ctx.mainSha]);
-	if (rebase.code === 0) {
 		await appendAuditEvent(
 			ctx.paths,
-			{ event: "sync_completed", laneKey: lane.laneKey, autoContinued: 0 },
+			{ event: "sync_started", laneKey: lane.laneKey, ontoSha: ctx.mainSha },
 			nowIso(deps),
 		);
-		return { code: "sync_clean", laneKey: lane.laneKey, alreadyFresh: false, autoContinued: 0 };
-	}
-	if (!(await isRebaseActive(deps, lane.worktreePath))) {
-		return gitError(`git rebase failed to start for lane '${lane.laneKey}'`, rebase);
-	}
-	const driven = await driveRebase(deps, ctx, lane);
-	if (driven.code === "sync_clean") return { ...driven, alreadyFresh: false };
-	return driven;
+		const rebase = await runGitEnv(deps, lane.worktreePath, ["rebase", ctx.mainSha]);
+		if (rebase.code === 0) {
+			await appendAuditEvent(
+				ctx.paths,
+				{ event: "sync_completed", laneKey: lane.laneKey, autoContinued: 0 },
+				nowIso(deps),
+			);
+			return { code: "sync_clean", laneKey: lane.laneKey, alreadyFresh: false, autoContinued: 0 };
+		}
+		if (!(await isRebaseActive(deps, lane.worktreePath))) {
+			return gitError(`git rebase failed to start for lane '${lane.laneKey}'`, rebase);
+		}
+		const driven = await driveRebase(deps, ctx, lane);
+		if (driven.code === "sync_clean") return { ...driven, alreadyFresh: false };
+		return driven;
+	});
 }
 
 export interface ContinueSyncArgs {
@@ -888,43 +1010,52 @@ export interface ContinueSyncArgs {
 export async function continueSync(deps: WorktreeSyncEngineDeps, args: ContinueSyncArgs): Promise<ContinueSyncResult> {
 	const ctx = await resolveRepoContext(deps);
 	if ("code" in ctx) return ctx;
-	const lane = await readLane(ctx.paths, args.laneKey);
-	if (!lane || lane.status === "released") {
-		return { code: "lane_not_found", message: `no active lane '${args.laneKey}'` };
-	}
-	if (!fileExists(deps, lane.worktreePath)) {
-		return { code: "worktree_missing", message: `lane '${lane.laneKey}' checkout missing at ${lane.worktreePath}` };
-	}
-	if (!(await isRebaseActive(deps, lane.worktreePath))) {
-		return { code: "no_rebase_in_progress", message: `lane '${lane.laneKey}' has no rebase in progress; use sync` };
-	}
+	return withFileLock(ctx.paths.lifecycleLockFile, async () => {
+		const lane = await readLane(ctx.paths, args.laneKey);
+		if (!lane || lane.status === "released") {
+			return { code: "lane_not_found", message: `no active lane '${args.laneKey}'` };
+		}
+		if (!fileExists(deps, lane.worktreePath)) {
+			return {
+				code: "worktree_missing",
+				message: `lane '${lane.laneKey}' checkout missing at ${lane.worktreePath}`,
+			};
+		}
+		if (!(await isRebaseActive(deps, lane.worktreePath))) {
+			return {
+				code: "no_rebase_in_progress",
+				message: `lane '${lane.laneKey}' has no rebase in progress; use sync`,
+			};
+		}
 
-	const unmerged = await unmergedFiles(deps, lane.worktreePath);
-	const withMarkers = unmerged.filter((path) => {
-		const content = readFileMaybe(deps, join(lane.worktreePath, path));
-		return content !== undefined && CONFLICT_MARKER_RE.test(content);
+		const unmerged = await unmergedFiles(deps, lane.worktreePath);
+		const withMarkers = unmerged.filter((path) => {
+			const content = readFileMaybe(deps, join(lane.worktreePath, path));
+			return content !== undefined && CONFLICT_MARKER_RE.test(content);
+		});
+		if (withMarkers.length > 0) {
+			return {
+				code: "conflict_markers_present",
+				message: `${withMarkers.length} file(s) still contain conflict markers; resolve them fully, then continue`,
+				paths: withMarkers,
+			};
+		}
+		if (unmerged.length > 0) {
+			const add = await runGit(deps, lane.worktreePath, ["add", "-A"]);
+			if (add.code !== 0) return gitError("git add -A failed while staging conflict resolutions", add);
+		}
+		const cont = await runGitEnv(deps, lane.worktreePath, ["rebase", "--continue"]);
+		if (cont.code === 0 && !(await isRebaseActive(deps, lane.worktreePath))) {
+			await appendAuditEvent(
+				ctx.paths,
+				{ event: "sync_completed", laneKey: lane.laneKey, autoContinued: 0 },
+				nowIso(deps),
+			);
+			return { code: "sync_clean", laneKey: lane.laneKey, autoContinued: 0 };
+		}
+		const result = await driveRebase(deps, ctx, lane);
+		return result;
 	});
-	if (withMarkers.length > 0) {
-		return {
-			code: "conflict_markers_present",
-			message: `${withMarkers.length} file(s) still contain conflict markers; resolve them fully, then continue`,
-			paths: withMarkers,
-		};
-	}
-	if (unmerged.length > 0) {
-		const add = await runGit(deps, lane.worktreePath, ["add", "-A"]);
-		if (add.code !== 0) return gitError("git add -A failed while staging conflict resolutions", add);
-	}
-	const cont = await runGitEnv(deps, lane.worktreePath, ["rebase", "--continue"]);
-	if (cont.code === 0 && !(await isRebaseActive(deps, lane.worktreePath))) {
-		await appendAuditEvent(
-			ctx.paths,
-			{ event: "sync_completed", laneKey: lane.laneKey, autoContinued: 0 },
-			nowIso(deps),
-		);
-		return { code: "sync_clean", laneKey: lane.laneKey, autoContinued: 0 };
-	}
-	return driveRebase(deps, ctx, lane);
 }
 
 export interface AbortSyncArgs {
@@ -936,17 +1067,19 @@ export interface AbortSyncArgs {
 export async function abortSync(deps: WorktreeSyncEngineDeps, args: AbortSyncArgs): Promise<AbortSyncResult> {
 	const ctx = await resolveRepoContext(deps);
 	if ("code" in ctx) return ctx;
-	const lane = await readLane(ctx.paths, args.laneKey);
-	if (!lane || lane.status === "released") {
-		return { code: "lane_not_found", message: `no active lane '${args.laneKey}'` };
-	}
-	if (!(await isRebaseActive(deps, lane.worktreePath))) {
-		return { code: "no_rebase_in_progress", message: `lane '${lane.laneKey}' has no rebase in progress` };
-	}
-	const abort = await runGitEnv(deps, lane.worktreePath, ["rebase", "--abort"]);
-	if (abort.code !== 0) return gitError("git rebase --abort failed", abort);
-	await appendAuditEvent(ctx.paths, { event: "sync_aborted", laneKey: lane.laneKey }, nowIso(deps));
-	return { code: "ok", laneKey: lane.laneKey };
+	return withFileLock(ctx.paths.lifecycleLockFile, async () => {
+		const lane = await readLane(ctx.paths, args.laneKey);
+		if (!lane || lane.status === "released") {
+			return { code: "lane_not_found", message: `no active lane '${args.laneKey}'` };
+		}
+		if (!(await isRebaseActive(deps, lane.worktreePath))) {
+			return { code: "no_rebase_in_progress", message: `lane '${lane.laneKey}' has no rebase in progress` };
+		}
+		const abort = await runGitEnv(deps, lane.worktreePath, ["rebase", "--abort"]);
+		if (abort.code !== 0) return gitError("git rebase --abort failed", abort);
+		await appendAuditEvent(ctx.paths, { event: "sync_aborted", laneKey: lane.laneKey }, nowIso(deps));
+		return { code: "ok", laneKey: lane.laneKey };
+	});
 }
 
 export interface LandLaneArgs {
@@ -969,181 +1102,213 @@ const DEFAULT_GATE_TIMEOUT_MS = 900_000;
 export async function landLane(deps: WorktreeSyncEngineDeps, args: LandLaneArgs): Promise<LandResult> {
 	const ctx = await resolveRepoContext(deps);
 	if ("code" in ctx) return ctx;
-	const lane = await readLane(ctx.paths, args.laneKey);
-	if (!lane || lane.status === "released") {
-		return { code: "lane_not_found", message: `no active lane '${args.laneKey}'` };
-	}
-	if (ownerConflicts(deps, lane)) {
-		return {
-			code: "lane_owner_conflict",
-			message: `lane '${lane.laneKey}' is owned by another live session (pid ${lane.ownerPid}); only its owner may land it`,
-		};
-	}
-	if (args.gate === "on" && !args.gateCommand?.trim()) {
-		return {
-			code: "gate_command_unset",
-			message:
-				'no gate command configured; set worktreeSync.gateCommand (or worktreeSync.gate: "off" as an owner-level opt-out)',
-		};
-	}
-
-	const acquisition = await acquireIntegrationLock(
-		ctx.paths,
-		{
-			pid: deps.pid ?? process.pid,
-			hostname: osHostname(),
-			...(deps.sessionId !== undefined ? { sessionId: deps.sessionId } : {}),
-			laneKey: lane.laneKey,
-		},
-		{
-			now: deps.now,
-			...(deps.isPidAlive
-				? { isPidAlive: (owner) => (deps.isPidAlive as (pid: number) => boolean)(owner.pid) }
-				: {}),
-		},
-	);
-	if (!acquisition.acquired) {
-		return {
-			code: "lock_busy",
-			message: acquisition.holder
-				? `integration lock held by pid ${acquisition.holder.pid}${acquisition.holder.laneKey ? ` (lane '${acquisition.holder.laneKey}')` : ""}; retry after it lands`
-				: "integration lock held; retry shortly",
-			...(acquisition.holder ? { holder: acquisition.holder } : {}),
-		};
-	}
-
-	try {
-		// Everything below happens INSIDE the lock: re-derive, never trust pre-lock derivations.
-		const mainShaNow = await revParseBranch(deps, ctx.topLevel, ctx.mainBranch);
-		if (!mainShaNow) {
-			return { code: "default_branch_unresolved", message: `main branch '${ctx.mainBranch}' vanished mid-land` };
+	return withFileLock(ctx.paths.lifecycleLockFile, async () => {
+		const lane = await readLane(ctx.paths, args.laneKey);
+		if (!lane || lane.status === "released") {
+			return { code: "lane_not_found", message: `no active lane '${args.laneKey}'` };
 		}
-		if (!fileExists(deps, lane.worktreePath)) {
+		if (ownerConflicts(deps, lane)) {
 			return {
-				code: "worktree_missing",
-				message: `lane '${lane.laneKey}' checkout missing at ${lane.worktreePath}`,
+				code: "lane_owner_conflict",
+				message: `lane '${lane.laneKey}' is owned by another live session (pid ${lane.ownerPid}); only its owner may land it`,
 			};
 		}
-		if (await isRebaseActive(deps, lane.worktreePath)) {
+		if (args.gate === "on" && !args.gateCommand?.trim()) {
 			return {
-				code: "rebase_in_progress",
-				message: `lane '${lane.laneKey}' has a rebase in progress; finish (continue) or abort_sync before landing`,
-			};
-		}
-		const laneDirty = await dirtyPaths(deps, lane.worktreePath);
-		if (laneDirty.length > 0) {
-			return {
-				code: "lane_dirty",
-				message: `lane '${lane.laneKey}' has uncommitted changes; commit everything on the lane branch first (G2)`,
-				paths: laneDirty,
-			};
-		}
-		const tipSha = await revParseBranch(deps, ctx.topLevel, lane.branch);
-		if (!tipSha) return { code: "git_error", message: `lane branch '${lane.branch}' has no commits/ref` };
-		if (tipSha === mainShaNow) {
-			// A no-op land would bump the epoch for nothing (notification churn for every lane).
-			return {
-				code: "nothing_to_land",
-				message: `lane '${lane.laneKey}' has no commits beyond main; nothing to land`,
-			};
-		}
-		const ancestry = await runGit(deps, ctx.topLevel, ["merge-base", "--is-ancestor", mainShaNow, tipSha]);
-		if (ancestry.code !== 0) {
-			return {
-				code: "stale_lane",
-				message: `lane '${lane.laneKey}' does not contain current main (${mainShaNow.slice(0, 12)}); sync first (G3)`,
-			};
-		}
-		if (!ctx.hubPath) {
-			return {
-				code: "hub_missing",
-				message: `main branch '${ctx.mainBranch}' is not checked out in any worktree; landing needs the hub checkout (G5)`,
+				code: "gate_command_unset",
+				message:
+					'no gate command configured; set worktreeSync.gateCommand (or worktreeSync.gate: "off" as an owner-level opt-out)',
 			};
 		}
 
-		const changedResult = await runGit(deps, ctx.topLevel, ["diff", "--name-only", `${mainShaNow}..${tipSha}`]);
-		if (changedResult.code !== 0)
-			return gitError("git diff --name-only failed while computing the land set", changedResult);
-		const changed = changedResult.stdout
-			.split(/\r?\n/)
-			.map((line) => line.trim())
-			.filter(Boolean);
-
-		// G6, overlap-based: an ff merge only touches the land's changed files, and git itself
-		// refuses to clobber local modifications -- so the deterministic pre-check refuses exactly
-		// when hub-dirty paths intersect the incoming change set (not on unrelated hub dirt).
-		const hubDirty = await dirtyPaths(deps, ctx.hubPath);
-		const changedSet = new Set(changed);
-		const endangered = hubDirty.filter((path) => changedSet.has(path));
-		if (endangered.length > 0) {
-			return {
-				code: "hub_dirty",
-				message: `hub checkout has local modifications to ${endangered.length} file(s) this land would update; commit/stash them first (G6)`,
-				paths: endangered.slice(0, 50),
-			};
-		}
-
-		if (args.gate === "on") {
-			const gateCommand = (args.gateCommand ?? "").trim();
-			const shell = process.platform === "win32" ? "cmd" : "sh";
-			const shellFlag = process.platform === "win32" ? "/c" : "-c";
-			const gateRun = await deps.exec(shell, [shellFlag, gateCommand], {
-				cwd: lane.worktreePath,
-				timeout: args.gateTimeoutMs ?? DEFAULT_GATE_TIMEOUT_MS,
-				signal: deps.signal,
-				maxBuffer: GIT_MAX_BUFFER,
-			});
-			if (gateRun.code !== 0) {
-				const tail = `${gateRun.stdout}\n${gateRun.stderr}`.trim().slice(-4000);
-				return {
-					code: "gate_failed",
-					message: `gate command failed (exit ${gateRun.code}) at lane tip ${tipSha.slice(0, 12)} (G4)`,
-					gitStderr: tail,
-				};
-			}
-		}
-
-		const ff = await runGit(deps, ctx.hubPath, ["merge", "--ff-only", lane.branch]);
-		if (ff.code !== 0) {
-			// Unreachable by construction (G3 guarantees ff-ability) but checked, never assumed.
-			return gitError(`git merge --ff-only refused for lane '${lane.laneKey}' (G5)`, ff);
-		}
-
-		const previous = await readEpoch(ctx.paths);
-		const epochNumber = (previous?.epoch ?? 0) + 1;
-		const at = nowIso(deps);
-		await writeEpoch(ctx.paths, {
-			epoch: epochNumber,
-			mainSha: tipSha,
-			previousMainSha: mainShaNow,
-			landedLaneKey: lane.laneKey,
-			landedAt: at,
-			changedPaths: changed.slice(0, EPOCH_CHANGED_PATHS_CAP),
-			changedPathsTruncated: changed.length > EPOCH_CHANGED_PATHS_CAP,
-		});
-		await appendAuditEvent(
+		const acquisition = await acquireIntegrationLock(
 			ctx.paths,
 			{
-				event: "epoch_advanced",
-				epoch: epochNumber,
+				pid: deps.pid ?? process.pid,
+				hostname: osHostname(),
+				...(deps.sessionId !== undefined ? { sessionId: deps.sessionId } : {}),
 				laneKey: lane.laneKey,
+			},
+			{
+				now: deps.now,
+				...(deps.isPidAlive
+					? { isPidAlive: (owner) => (deps.isPidAlive as (pid: number) => boolean)(owner.pid) }
+					: {}),
+			},
+		);
+		if (!acquisition.acquired) {
+			return {
+				code: "lock_busy",
+				message: acquisition.holder
+					? `integration lock held by pid ${acquisition.holder.pid}${acquisition.holder.laneKey ? ` (lane '${acquisition.holder.laneKey}')` : ""}; retry after it lands`
+					: "integration lock held; retry shortly",
+				...(acquisition.holder ? { holder: acquisition.holder } : {}),
+			};
+		}
+
+		try {
+			// Everything below happens INSIDE the lock: re-derive, never trust pre-lock derivations.
+			const mainShaNow = await revParseBranch(deps, ctx.topLevel, ctx.mainBranch);
+			if (!mainShaNow) {
+				return { code: "default_branch_unresolved", message: `main branch '${ctx.mainBranch}' vanished mid-land` };
+			}
+			if (!fileExists(deps, lane.worktreePath)) {
+				return {
+					code: "worktree_missing",
+					message: `lane '${lane.laneKey}' checkout missing at ${lane.worktreePath}`,
+				};
+			}
+			if (await isRebaseActive(deps, lane.worktreePath)) {
+				return {
+					code: "rebase_in_progress",
+					message: `lane '${lane.laneKey}' has a rebase in progress; finish (continue) or abort_sync before landing`,
+				};
+			}
+			const laneDirty = await dirtyPaths(deps, lane.worktreePath);
+			if (laneDirty.length > 0) {
+				return {
+					code: "lane_dirty",
+					message: `lane '${lane.laneKey}' has uncommitted changes; commit everything on the lane branch first (G2)`,
+					paths: laneDirty,
+				};
+			}
+			const tipSha = await revParseBranch(deps, ctx.topLevel, lane.branch);
+			if (!tipSha) return { code: "git_error", message: `lane branch '${lane.branch}' has no commits/ref` };
+			if (tipSha === mainShaNow) {
+				// A no-op land would bump the epoch for nothing (notification churn for every lane).
+				return {
+					code: "nothing_to_land",
+					message: `lane '${lane.laneKey}' has no commits beyond main; nothing to land`,
+				};
+			}
+			const ancestry = await runGit(deps, ctx.topLevel, ["merge-base", "--is-ancestor", mainShaNow, tipSha]);
+			if (ancestry.code !== 0) {
+				return {
+					code: "stale_lane",
+					message: `lane '${lane.laneKey}' does not contain current main (${mainShaNow.slice(0, 12)}); sync first (G3)`,
+				};
+			}
+			if (!ctx.hubPath) {
+				return {
+					code: "hub_missing",
+					message: `main branch '${ctx.mainBranch}' is not checked out in any worktree; landing needs the hub checkout (G5)`,
+				};
+			}
+
+			const changedResult = await runGit(deps, ctx.topLevel, ["diff", "--name-only", `${mainShaNow}..${tipSha}`]);
+			if (changedResult.code !== 0)
+				return gitError("git diff --name-only failed while computing the land set", changedResult);
+			const changed = changedResult.stdout
+				.split(/\r?\n/)
+				.map((line) => line.trim())
+				.filter(Boolean);
+
+			// G6, overlap-based: an ff merge only touches the land's changed files, and git itself
+			// refuses to clobber local modifications -- so the deterministic pre-check refuses exactly
+			// when hub-dirty paths intersect the incoming change set (not on unrelated hub dirt).
+			const hubDirty = await dirtyPaths(deps, ctx.hubPath);
+			const changedSet = new Set(changed);
+			const endangered = hubDirty.filter((path) => changedSet.has(path));
+			if (endangered.length > 0) {
+				return {
+					code: "hub_dirty",
+					message: `hub checkout has local modifications to ${endangered.length} file(s) this land would update; commit/stash them first (G6)`,
+					paths: endangered.slice(0, 50),
+				};
+			}
+
+			if (args.gate === "on") {
+				const gateCommand = (args.gateCommand ?? "").trim();
+				const shell = process.platform === "win32" ? "cmd" : "sh";
+				const shellFlag = process.platform === "win32" ? "/c" : "-c";
+				const gateRun = await deps.exec(shell, [shellFlag, gateCommand], {
+					cwd: lane.worktreePath,
+					timeout: args.gateTimeoutMs ?? DEFAULT_GATE_TIMEOUT_MS,
+					signal: deps.signal,
+					maxBuffer: GIT_MAX_BUFFER,
+				});
+				if (gateRun.code !== 0) {
+					const tail = `${gateRun.stdout}\n${gateRun.stderr}`.trim().slice(-4000);
+					return {
+						code: "gate_failed",
+						message: `gate command failed (exit ${gateRun.code}) at lane tip ${tipSha.slice(0, 12)} (G4)`,
+						gitStderr: tail,
+					};
+				}
+				// The gate is an external process. Re-read the ref after it exits: a worker
+				// may have committed while the gate was running, and the branch name is
+				// mutable. Never merge a tip that was not the one actually tested.
+				const postGateTip = await revParseBranch(deps, ctx.topLevel, lane.branch);
+				if (postGateTip !== tipSha) {
+					return {
+						code: "lane_changed_during_gate",
+						message: `lane '${lane.laneKey}' changed during the gate (tested ${tipSha.slice(0, 12)}, current ${postGateTip?.slice(0, 12) ?? "missing"}); rerun land`,
+					};
+				}
+			}
+
+			const landingTransaction: LandingTransaction = {
+				laneKey: lane.laneKey,
+				priorMainSha: mainShaNow,
+				testedTipSha: tipSha,
+				changedPaths: changed.slice(0, EPOCH_CHANGED_PATHS_CAP),
+				changedPathsTruncated: changed.length > EPOCH_CHANGED_PATHS_CAP,
+				lockToken: acquisition.token,
+				gate: args.gate === "on" ? "passed" : "off",
+				stage: "ready_to_merge",
+			};
+			await writeLandingTransaction(ctx.paths, landingTransaction);
+			const ff = await runGit(deps, ctx.hubPath, ["merge", "--ff-only", tipSha]);
+			if (ff.code !== 0) {
+				// Unreachable by construction (G3 guarantees ff-ability) but checked, never assumed.
+				return gitError(`git merge --ff-only refused for lane '${lane.laneKey}' (G5)`, ff);
+			}
+			const landedSha = await revParseBranch(deps, ctx.hubPath, ctx.mainBranch);
+			if (landedSha !== tipSha) {
+				return {
+					code: "git_error",
+					message: `main resolved to ${landedSha?.slice(0, 12) ?? "missing"} after the fast-forward; expected gated tip ${tipSha.slice(0, 12)}`,
+				};
+			}
+
+			await writeLandingTransaction(ctx.paths, { ...landingTransaction, stage: "main_moved" });
+			const previous = await readEpoch(ctx.paths);
+			const epochNumber = (previous?.epoch ?? 0) + 1;
+			const at = nowIso(deps);
+			await writeEpoch(ctx.paths, {
+				epoch: epochNumber,
 				mainSha: tipSha,
 				previousMainSha: mainShaNow,
-				changedFiles: changed.length,
+				landedLaneKey: lane.laneKey,
+				landedAt: at,
+				changedPaths: changed.slice(0, EPOCH_CHANGED_PATHS_CAP),
+				changedPathsTruncated: changed.length > EPOCH_CHANGED_PATHS_CAP,
+			});
+			await appendAuditEvent(
+				ctx.paths,
+				{
+					event: "epoch_advanced",
+					epoch: epochNumber,
+					laneKey: lane.laneKey,
+					mainSha: tipSha,
+					previousMainSha: mainShaNow,
+					changedFiles: changed.length,
+					gate: args.gate === "on" ? "passed" : "off",
+				},
+				at,
+			);
+			await clearLandingTransaction(ctx.paths);
+			return {
+				code: "ok",
+				laneKey: lane.laneKey,
+				epoch: epochNumber,
+				mainSha: tipSha,
 				gate: args.gate === "on" ? "passed" : "off",
-			},
-			at,
-		);
-		return {
-			code: "ok",
-			laneKey: lane.laneKey,
-			epoch: epochNumber,
-			mainSha: tipSha,
-			gate: args.gate === "on" ? "passed" : "off",
-		};
-	} finally {
-		await releaseIntegrationLock(ctx.paths, { now: deps.now });
-	}
+			};
+		} finally {
+			await releaseIntegrationLock(ctx.paths, acquisition.token, { now: deps.now });
+		}
+	});
 }
 
 export interface SyncStatusArgs {
@@ -1167,7 +1332,8 @@ export async function buildSyncStatus(deps: WorktreeSyncEngineDeps, args: SyncSt
 
 	const holder = await readLockHolder(ctx.paths);
 	const isAlive =
-		deps.isPidAlive ?? ((pid: number) => defaultIsPidAlive({ pid, hostname: osHostname(), acquiredAt: "" }));
+		deps.isPidAlive ??
+		((pid: number) => defaultIsPidAlive({ pid, hostname: osHostname(), token: "status", acquiredAt: "" }));
 
 	let hub: { path: string; clean: boolean } | undefined;
 	if (ctx.hubPath) {

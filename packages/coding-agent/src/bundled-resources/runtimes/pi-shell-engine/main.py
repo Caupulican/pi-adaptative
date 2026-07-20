@@ -8,7 +8,6 @@ windows-shell-workpackages-2026-07-19.md §1.2/§1.3/§3.
 
 from __future__ import annotations
 
-import io
 import json
 import os
 import sys
@@ -30,6 +29,18 @@ def _read_request() -> dict:
     return json.loads(raw.decode("utf-8"))
 
 
+class _OutputSink:
+    """Binary sink that streams command output without retaining the whole result."""
+
+    def write(self, data: bytes) -> int:
+        written = sys.stdout.buffer.write(data)
+        sys.stdout.buffer.flush()
+        return written
+
+    def flush(self) -> None:
+        sys.stdout.buffer.flush()
+
+
 def _write_frame(exit_code: int, cwd: str, env_delta: dict, unsupported: dict | None) -> None:
     frame = {
         "exitCode": exit_code,
@@ -37,10 +48,13 @@ def _write_frame(exit_code: int, cwd: str, env_delta: dict, unsupported: dict | 
         "envDelta": env_delta,
         "unsupported": unsupported,
     }
-    sys.stdout.buffer.write(RECORD_SEPARATOR)
-    sys.stdout.buffer.write(json.dumps(frame, separators=(",", ":")).encode("utf-8"))
-    sys.stdout.buffer.write(RECORD_SEPARATOR)
-    sys.stdout.buffer.flush()
+    # stderr is the control channel. Command stderr is explicitly merged into
+    # the command-output sink by ExecContext, so this frame cannot collide with
+    # arbitrary command bytes (including RECORD_SEPARATOR).
+    sys.stderr.buffer.write(RECORD_SEPARATOR)
+    sys.stderr.buffer.write(json.dumps(frame, separators=(",", ":")).encode("utf-8"))
+    sys.stderr.buffer.write(RECORD_SEPARATOR)
+    sys.stderr.buffer.flush()
 
 
 def main() -> int:
@@ -59,7 +73,7 @@ def main() -> int:
         return 0
 
     state = ShellState(cwd=cwd, env=env)
-    merged = io.BytesIO()
+    output = _OutputSink()
 
     deadline = None
     if isinstance(timeout_ms, (int, float)) and timeout_ms > 0:
@@ -71,11 +85,12 @@ def main() -> int:
     ctx = ExecContext(
         state=state,
         stdin=sys.stdin.buffer,
-        stdout=merged,
+        stdout=output,
         expand_word=expand_word,
         run_command_substitution=exec_module.run_command_substitution,
         builtins=REGISTRY,
         deadline=deadline,
+        stderr=output,
     )
 
     try:
@@ -83,8 +98,7 @@ def main() -> int:
         ast = parser_module.parse(tokens)
         exit_code = exec_module.execute(ast, ctx)
     except UnsupportedConstruct as exc:
-        merged.write(exc.message.encode("utf-8", errors="replace"))
-        sys.stdout.buffer.write(merged.getvalue())
+        output.write(exc.message.encode("utf-8", errors="replace"))
         _write_frame(
             2,
             state.cwd,
@@ -93,12 +107,23 @@ def main() -> int:
         )
         return 0
     except ParamExpansionError as exc:
-        merged.write(f"bash: {exc.name}: {exc.message}\n".encode("utf-8", errors="replace"))
-        sys.stdout.buffer.write(merged.getvalue())
+        output.write(f"bash: {exc.name}: {exc.message}\n".encode("utf-8", errors="replace"))
+        _write_frame(1, state.cwd, state.delta(original_env), None)
+        return 0
+    except (OSError, ValueError, UnicodeError) as exc:
+        # Expected command/builtin failures must remain framed and must never
+        # leak a Python traceback into the host shell protocol.
+        output.write(f"shell: {exc}\n".encode("utf-8", errors="replace"))
+        _write_frame(1, state.cwd, state.delta(original_env), None)
+        return 0
+    except Exception as exc:
+        # Last-resort protocol boundary: preserve a bounded, actionable error
+        # while keeping the control frame parseable.
+        output.write(f"shell engine internal error: {type(exc).__name__}: {exc}\n".encode("utf-8", errors="replace"))
         _write_frame(1, state.cwd, state.delta(original_env), None)
         return 0
 
-    sys.stdout.buffer.write(merged.getvalue())
+    output.flush()
     _write_frame(exit_code, state.cwd, state.delta(original_env), None)
     return 0
 

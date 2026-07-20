@@ -98,8 +98,10 @@ describe("worktree-sync store", () => {
 		const paths = tempStore();
 		const owner = { pid: 1234, hostname: "host-a", sessionId: "s1", laneKey: "adhoc-1" };
 		const first = await acquireIntegrationLock(paths, owner, { isPidAlive: () => true });
-		expect(first).toEqual({ acquired: true, takeover: false });
-		expect(await readLockHolder(paths)).toMatchObject({ pid: 1234, laneKey: "adhoc-1" });
+		expect(first.acquired).toBe(true);
+		if (!first.acquired) throw new Error("first lock acquisition failed");
+		expect(first.token).toMatch(/^[0-9a-f-]{36}$/);
+		expect(await readLockHolder(paths)).toMatchObject({ pid: 1234, laneKey: "adhoc-1", token: first.token });
 
 		const second = await acquireIntegrationLock(paths, { ...owner, pid: 99 }, { isPidAlive: () => true });
 		expect(second.acquired).toBe(false);
@@ -108,22 +110,39 @@ describe("worktree-sync store", () => {
 			expect(second.holder?.pid).toBe(1234);
 		}
 
-		await releaseIntegrationLock(paths);
+		expect(await releaseIntegrationLock(paths, first.token)).toBe(true);
 		const third = await acquireIntegrationLock(paths, { ...owner, pid: 99 }, { isPidAlive: () => true });
-		expect(third).toEqual({ acquired: true, takeover: false });
+		expect(third.acquired).toBe(true);
 	});
 
 	it("lock: a provably-dead owner is taken over, audited", async () => {
 		const paths = tempStore();
 		await acquireIntegrationLock(paths, { pid: 1, hostname: "host-a" }, { isPidAlive: () => true });
 		const takeover = await acquireIntegrationLock(paths, { pid: 2, hostname: "host-a" }, { isPidAlive: () => false });
-		expect(takeover).toEqual({ acquired: true, takeover: true });
+		expect(takeover.acquired).toBe(true);
+		if (!takeover.acquired) throw new Error("takeover failed");
 		const events = readFileSync(paths.eventsFile, "utf-8")
 			.trim()
 			.split("\n")
 			.map((line) => JSON.parse(line) as { event: string });
 		expect(events.some((event) => event.event === "lock_takeover")).toBe(true);
 		expect(await readLockHolder(paths)).toMatchObject({ pid: 2 });
+	});
+
+	it("lock: a stale release token cannot delete a successor lock", async () => {
+		const paths = tempStore();
+		const first = await acquireIntegrationLock(paths, { pid: 1, hostname: "host-a" }, { isPidAlive: () => true });
+		expect(first.acquired).toBe(true);
+		if (!first.acquired) throw new Error("first lock acquisition failed");
+		const successor = await acquireIntegrationLock(
+			paths,
+			{ pid: 2, hostname: "host-a" },
+			{ isPidAlive: (owner) => owner.pid !== 1 },
+		);
+		expect(successor.acquired).toBe(true);
+		if (!successor.acquired) throw new Error("successor lock acquisition failed");
+		expect(await releaseIntegrationLock(paths, first.token)).toBe(false);
+		expect(await readLockHolder(paths)).toMatchObject({ pid: 2, token: successor.token });
 	});
 
 	it("lock: an ownerless dir is held while fresh and taken over once stale", async () => {
@@ -136,7 +155,8 @@ describe("worktree-sync store", () => {
 		const past = new Date(Date.now() - OWNERLESS_LOCK_STALE_MS - 1000);
 		utimesSync(paths.lockDir, past, past);
 		const stale = await acquireIntegrationLock(paths, { pid: 2, hostname: "host-a" }, { isPidAlive: () => true });
-		expect(stale).toEqual({ acquired: true, takeover: true });
+		expect(stale.acquired).toBe(true);
+		if (!stale.acquired) throw new Error("stale lock takeover failed");
 		expect(existsSync(paths.lockOwnerFile)).toBe(true);
 	});
 });

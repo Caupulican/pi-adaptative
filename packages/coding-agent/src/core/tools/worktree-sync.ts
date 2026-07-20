@@ -1,3 +1,4 @@
+import { isAbsolute, relative } from "node:path";
 import { type Static, Type } from "typebox";
 import type { ToolDefinition } from "../extensions/types.ts";
 import type { ResolvedWorktreeSyncSettings } from "../settings-manager.ts";
@@ -10,9 +11,12 @@ import {
 	landLane,
 	reconcile,
 	releaseLane,
+	resolveRepoContext,
 	syncLane,
 	type WorktreeSyncEngineDeps,
 } from "../worktree-sync/git-engine.ts";
+import { resolveLaneMutationPath } from "../worktree-sync/lane-gate.ts";
+import { readLane } from "../worktree-sync/store.ts";
 
 /**
  * `worktree_sync` -- the ENTIRE agent-facing surface of the worktree-per-lane workflow: a closed
@@ -27,6 +31,11 @@ function createWorktreeSyncSchema() {
 			action: Type.Union(
 				[
 					Type.Literal("status"),
+					Type.Literal("git_status"),
+					Type.Literal("git_diff"),
+					Type.Literal("git_add"),
+					Type.Literal("git_commit"),
+					Type.Literal("check"),
 					Type.Literal("create_lane"),
 					Type.Literal("sync"),
 					Type.Literal("continue"),
@@ -37,7 +46,7 @@ function createWorktreeSyncSchema() {
 				],
 				{
 					description:
-						"status: the deterministic full picture (epoch, hub, lock, per-lane freshness/staleness, advice). create_lane: new worktree+branch off main. sync: rebase current main into a lane (conflicts return a worklist and leave the rebase in progress). continue: verify resolved conflicts (zero markers, mechanically checked), stage, drive on. abort_sync: abort the in-progress rebase. land: the ONLY door to main -- serialized, freshness-checked, gate-command-verified, ff-only. release_lane: remove a fully-landed lane (discarding unlanded work needs confirm). reconcile: re-sync the registry with git reality.",
+						"status: the deterministic full picture (epoch, hub, lock, per-lane freshness/staleness, advice). git_status/git_diff: read the bound lane with fixed argv. git_add: stage only explicitly validated paths inside the lane. git_commit: commit with a literal message. check: run only the owner-configured trusted check command. create_lane: new worktree+branch off main. sync: rebase current main into a lane (conflicts return a worklist and leave the rebase in progress). continue: verify resolved conflicts (zero markers, mechanically checked), stage, drive on. abort_sync: abort the in-progress rebase. land: the ONLY door to main -- serialized, freshness-checked, gate-command-verified, ff-only. release_lane: remove a fully-landed lane (discarding unlanded work needs confirm). reconcile: re-sync the registry with git reality.",
 				},
 			),
 			laneKey: Type.Optional(
@@ -50,6 +59,12 @@ function createWorktreeSyncSchema() {
 				Type.String({ description: "create_lane: goal to scope the auto-allocated lane key by." }),
 			),
 			requirementId: Type.Optional(Type.String({ description: "create_lane: requirement this lane will work." })),
+			paths: Type.Optional(
+				Type.Array(Type.String(), {
+					description: "git_diff/git_add: explicit relative paths inside the bound lane.",
+				}),
+			),
+			message: Type.Optional(Type.String({ description: "git_commit: literal commit message." })),
 			confirm: Type.Optional(
 				Type.String({
 					description:
@@ -79,6 +94,11 @@ export interface WorktreeSyncToolDeps {
  * ownership/freshness gating downstream when allowed). */
 const WORKER_ALLOWED_ACTIONS: ReadonlySet<WorktreeSyncToolInput["action"]> = new Set([
 	"status",
+	"git_status",
+	"git_diff",
+	"git_add",
+	"git_commit",
+	"check",
 	"sync",
 	"continue",
 	"abort_sync",
@@ -154,6 +174,103 @@ export function createWorktreeSyncToolDefinition(deps: WorktreeSyncToolDeps): To
 				return "laneKey required: pass laneKey, or run inside a lane-bound session (PI_WORKTREE_LANE).";
 			};
 
+			const runTypedLaneAction = async (): Promise<ReturnType<typeof respond>> => {
+				const missingLane = needLane();
+				if (missingLane) return respond([missingLane], { code: "lane_not_found", message: missingLane });
+				const context = await resolveRepoContext(engineDeps);
+				if ("code" in context) return respond([`[${context.code}] ${context.message}`], context);
+				const lane = await readLane(context.paths, laneKey!);
+				if (!lane || lane.status !== "active") {
+					const message = `active lane '${laneKey}' is not available`;
+					return respond([`[lane_not_found] ${message}`], { code: "lane_not_found", message });
+				}
+
+				const requestedPaths = input.paths ?? [];
+				const gitPaths: string[] = [];
+				for (const requestedPath of requestedPaths) {
+					if (!requestedPath || isAbsolute(requestedPath) || requestedPath.includes("\0")) {
+						const message = "git path must be a non-empty relative path without NUL";
+						return respond([`[path_outside_lane] ${message}`], { code: "path_outside_lane", message });
+					}
+					const resolved = resolveLaneMutationPath(lane.worktreePath, requestedPath);
+					if (!resolved) {
+						const message = `path '${requestedPath}' escapes the lane worktree`;
+						return respond([`[path_outside_lane] ${message}`], { code: "path_outside_lane", message });
+					}
+					gitPaths.push(relative(lane.worktreePath, resolved) || ".");
+				}
+
+				let command: string;
+				let args: string[];
+				switch (input.action) {
+					case "git_status":
+						command = "git";
+						args = ["status", "--short", "--branch"];
+						break;
+					case "git_diff":
+						command = "git";
+						args = ["diff", "--", ...gitPaths];
+						break;
+					case "git_add":
+						if (gitPaths.length === 0) {
+							const message = "git_add requires one or more explicit in-lane paths";
+							return respond([`[path_outside_lane] ${message}`], { code: "path_outside_lane", message });
+						}
+						command = "git";
+						args = ["add", "--", ...gitPaths];
+						break;
+					case "git_commit":
+						if (!input.message?.trim() || input.message.includes("\0")) {
+							const message = "git_commit requires a non-empty literal message";
+							return respond([`[git_failed] ${message}`], { code: "git_failed", message });
+						}
+						command = "git";
+						args = ["commit", "-m", input.message];
+						break;
+					case "check": {
+						const trustedCommand = settings.gateCommand?.trim();
+						if (!trustedCommand) {
+							const message = "no trusted worktree check is configured";
+							return respond([`[gate_command_unset] ${message}`], { code: "gate_command_unset", message });
+						}
+						const shell = process.platform === "win32" ? "cmd" : "sh";
+						const shellFlag = process.platform === "win32" ? "/c" : "-c";
+						const result = await engineDeps.exec(shell, [shellFlag, trustedCommand], {
+							cwd: lane.worktreePath,
+							timeout: 900_000,
+							signal: engineDeps.signal,
+							maxBuffer: 1024 * 1024,
+						});
+						const output = `${result.stdout}\n${result.stderr}`.trim().slice(-8000);
+						if (result.code !== 0) {
+							return respond([`[gate_failed] ${output || `trusted check exited ${result.code}`}`], {
+								code: "gate_failed",
+								exitCode: result.code,
+							});
+						}
+						return respond([output || "trusted check passed"], { code: "ok", action: input.action });
+					}
+					default:
+						return respond(["typed lane action is unavailable for this request"], { code: "role_forbidden" });
+				}
+
+				const result = await engineDeps.exec(command, args, {
+					cwd: lane.worktreePath,
+					timeout: 60_000,
+					signal: engineDeps.signal,
+					maxBuffer: 1024 * 1024,
+				});
+				const output = `${result.stdout}\n${result.stderr}`.trim().slice(-8000);
+				if (result.code !== 0) {
+					return respond([`[git_failed] ${output || `${command} exited ${result.code}`}`], {
+						code: "git_failed",
+						action: input.action,
+						exitCode: result.code,
+					});
+				}
+				return respond([output || `${input.action} completed`], { code: "ok", action: input.action });
+			};
+
 			if (deps.isWorker()) {
 				const bound = deps.boundLaneKey();
 				if (input.laneKey !== undefined && input.laneKey !== bound) {
@@ -171,6 +288,12 @@ export function createWorktreeSyncToolDefinition(deps: WorktreeSyncToolDeps): To
 			}
 
 			switch (input.action) {
+				case "git_status":
+				case "git_diff":
+				case "git_add":
+				case "git_commit":
+				case "check":
+					return runTypedLaneAction();
 				case "status": {
 					const status = await buildSyncStatus(engineDeps, { policy: settings.syncPolicy });
 					if (status.code !== "ok") return respond([`[${status.code}] ${status.message}`], status);

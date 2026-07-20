@@ -58,6 +58,17 @@ describe("writeFileAtomicSync / writeFileAtomic", () => {
 		writeFileAtomicSync(filePath, "y".repeat(5));
 		expect(readFileSync(filePath, "utf-8")).toBe("y".repeat(5));
 	});
+
+	it("concurrent standalone writes use isolated temporary paths", async () => {
+		const dir = tempDir();
+		const filePath = join(dir, "data.json");
+		const payloads = Array.from({ length: 100 }, (_, index) => `${index}:${"x".repeat(2000)}`);
+		await expect(Promise.all(payloads.map((payload) => writeFileAtomic(filePath, payload)))).resolves.toHaveLength(
+			100,
+		);
+		expect(payloads).toContain(readFileSync(filePath, "utf-8"));
+		expect(fs.readdirSync(dir).filter((name) => name.includes(".tmp"))).toEqual([]);
+	});
 });
 
 describe("rename retry (win32 Defender/indexer transient EPERM/EACCES/EBUSY)", () => {

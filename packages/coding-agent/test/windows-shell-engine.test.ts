@@ -70,9 +70,9 @@ async function collectOutput(exec: (onData: (data: Buffer) => void) => Promise<{
 
 describe("windows shell engine operations", () => {
 	it("strips the control frame, streams merged output, and applies state on success", async () => {
-		const spawn = fakeSpawn(({ child, stdout }) => {
+		const spawn = fakeSpawn(({ child, stdout, stderr }) => {
 			stdout.emit("data", Buffer.from("hello\n"));
-			stdout.emit(
+			stderr.emit(
 				"data",
 				frameBytes({ exitCode: 0, cwd: "/new/dir", envDelta: { FOO: "bar", REMOVED: null }, unsupported: null }),
 			);
@@ -93,9 +93,9 @@ describe("windows shell engine operations", () => {
 	});
 
 	it("throws the refusal message and still applies the frame's state", async () => {
-		const spawn = fakeSpawn(({ child, stdout }) => {
+		const spawn = fakeSpawn(({ child, stdout, stderr }) => {
 			stdout.emit("data", Buffer.from("heredocs are not supported\n"));
-			stdout.emit(
+			stderr.emit(
 				"data",
 				frameBytes({
 					exitCode: 2,
@@ -161,9 +161,9 @@ describe("windows shell engine operations", () => {
 			Buffer.from([ENGINE_FRAME_SENTINEL_BYTE]),
 			Buffer.from("after"),
 		]);
-		const spawn = fakeSpawn(({ child, stdout }) => {
+		const spawn = fakeSpawn(({ child, stdout, stderr }) => {
 			stdout.emit("data", binaryWithSentinel);
-			stdout.emit("data", frameBytes({ exitCode: 0, cwd: "/old/dir", envDelta: {}, unsupported: null }));
+			stderr.emit("data", frameBytes({ exitCode: 0, cwd: "/old/dir", envDelta: {}, unsupported: null }));
 			child.emit("close", 0);
 		});
 		const ops = createWindowsShellEngineOperations("engine-binary-output-session", {
@@ -181,12 +181,12 @@ describe("windows shell engine operations", () => {
 
 	it("reassembles a large multi-chunk output with the frame arriving in the final chunk", async () => {
 		const largeOutput = Buffer.from("x".repeat(50_000));
-		const spawn = fakeSpawn(({ child, stdout }) => {
+		const spawn = fakeSpawn(({ child, stdout, stderr }) => {
 			const chunkSize = 4096;
 			for (let offset = 0; offset < largeOutput.length; offset += chunkSize) {
 				stdout.emit("data", largeOutput.subarray(offset, offset + chunkSize));
 			}
-			stdout.emit("data", frameBytes({ exitCode: 0, cwd: "/old/dir", envDelta: {}, unsupported: null }));
+			stderr.emit("data", frameBytes({ exitCode: 0, cwd: "/old/dir", envDelta: {}, unsupported: null }));
 			child.emit("close", 0);
 		});
 		const ops = createWindowsShellEngineOperations("engine-large-output-session", {
@@ -203,9 +203,9 @@ describe("windows shell engine operations", () => {
 
 	it("sets the request's timeoutMs to exactly 500ms less than the hard exec timeout, and omits it when unset", async () => {
 		let capturedRequestWithTimeout: { timeoutMs?: number } | undefined;
-		const spawnWithTimeout = fakeSpawn(({ child, stdout, request }) => {
+		const spawnWithTimeout = fakeSpawn(({ child, stderr, request }) => {
 			capturedRequestWithTimeout = request as { timeoutMs?: number };
-			stdout.emit("data", frameBytes({ exitCode: 0, cwd: "/old/dir", envDelta: {}, unsupported: null }));
+			stderr.emit("data", frameBytes({ exitCode: 0, cwd: "/old/dir", envDelta: {}, unsupported: null }));
 			child.emit("close", 0);
 		});
 		const opsWithTimeout = createWindowsShellEngineOperations("engine-timeout-session", {
@@ -217,9 +217,9 @@ describe("windows shell engine operations", () => {
 		expect(capturedRequestWithTimeout?.timeoutMs).toBe(30 * 1000 - 500);
 
 		let capturedRequestNoTimeout: { timeoutMs?: number } | undefined;
-		const spawnNoTimeout = fakeSpawn(({ child, stdout, request }) => {
+		const spawnNoTimeout = fakeSpawn(({ child, stderr, request }) => {
 			capturedRequestNoTimeout = request as { timeoutMs?: number };
-			stdout.emit("data", frameBytes({ exitCode: 0, cwd: "/old/dir", envDelta: {}, unsupported: null }));
+			stderr.emit("data", frameBytes({ exitCode: 0, cwd: "/old/dir", envDelta: {}, unsupported: null }));
 			child.emit("close", 0);
 		});
 		const opsNoTimeout = createWindowsShellEngineOperations("engine-no-timeout-session", {
@@ -240,13 +240,13 @@ describe("windows shell engine operations", () => {
 				return { exitCode: 0 };
 			},
 		};
-		const spawn = fakeSpawn(({ child, stdout, request }) => {
+		const spawn = fakeSpawn(({ child, stderr, request }) => {
 			const parsed = request as { command: string };
 			const frame: WindowsShellEngineFrame =
 				parsed.command === "cd /new/dir"
 					? { exitCode: 0, cwd: "/new/dir", envDelta: {}, unsupported: null }
 					: { exitCode: 0, cwd: "/new/dir", envDelta: { FOO: "bar" }, unsupported: null };
-			stdout.emit("data", frameBytes(frame));
+			stderr.emit("data", frameBytes(frame));
 			child.emit("close", 0);
 		});
 		const operations = createLocalPlatformShellOperations(

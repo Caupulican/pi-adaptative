@@ -890,7 +890,7 @@ export class RuntimeBuilder {
 
 			// Worktree-sync (opt-in): the closed-action lane workflow tool, plus -- for a session
 			// launched lane-bound (PI_WORKTREE_LANE) -- the G8/G10 lane gate wrapped UNDER the
-			// file-mutation tools (edit/write/bash), so a sync_required lane fails closed with the
+			// file-mutation tools (edit/write, plus cooperative bash only for interactive lanes), so a sync_required lane fails closed with the
 			// exact recovery step rather than relying on prompt compliance. `worktreeSyncSettings` /
 			// `worktreeSyncEngineDeps` are hoisted above (declared before the goal-tool registration)
 			// so the goal->tmux lane-first dispatch dep and this tool share one settings/deps source.
@@ -909,6 +909,8 @@ export class RuntimeBuilder {
 						laneKey: boundLaneKey,
 						engineDeps: worktreeSyncEngineDeps,
 						policy: () => this.deps.getSettingsManager().getWorktreeSyncSettings().syncPolicy,
+						hardShell: isWorkerSession(),
+						trustedGateCommand: () => this.deps.getSettingsManager().getWorktreeSyncSettings().gateCommand,
 					});
 					for (const gatedToolName of ["edit", "write", "bash"]) {
 						const original = this._baseToolDefinitions.get(gatedToolName);
@@ -969,12 +971,28 @@ export class RuntimeBuilder {
 		}
 		this.deps.applyExtensionBindings(runner);
 
+		const boundLaneKey = getBoundWorktreeLaneKey();
+		const hardLaneWorker = boundLaneKey !== undefined && isWorkerSession();
+		const explicitlyRequestedTools =
+			options.activeToolNames ?? (baseToolsOverride ? Object.keys(baseToolsOverride) : undefined);
+		if (hardLaneWorker && explicitlyRequestedTools?.includes("bash")) {
+			throw new Error("hard lane workers cannot request unrestricted bash; use typed worktree_sync actions");
+		}
 		const defaultActiveToolNames = mapToolNamesForPlatform(
 			baseToolsOverride
 				? Object.keys(baseToolsOverride)
 				: [...DEFAULT_ACTIVE_TOOL_NAMES, ...(settingsManager.getScoutSettings().enabled ? ["context_scout"] : [])],
 		);
-		const baseActiveToolNames = mapToolNamesForPlatform(options.activeToolNames ?? defaultActiveToolNames);
+		const baseActiveToolNames = mapToolNamesForPlatform(options.activeToolNames ?? defaultActiveToolNames).filter(
+			(name) => !hardLaneWorker || name !== "bash",
+		);
+		if (
+			hardLaneWorker &&
+			settingsManager.getWorktreeSyncSettings().enabled &&
+			!baseActiveToolNames.includes("worktree_sync")
+		) {
+			baseActiveToolNames.push("worktree_sync");
+		}
 		this.refreshToolRegistry({
 			activeToolNames: baseActiveToolNames,
 			includeAllExtensionTools: options.includeAllExtensionTools,

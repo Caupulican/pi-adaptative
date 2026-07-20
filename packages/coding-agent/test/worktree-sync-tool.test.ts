@@ -144,6 +144,59 @@ describe("worktree_sync tool", () => {
 		);
 		expect(released.details).toMatchObject({ code: "released" });
 	}, 60_000);
+
+	it("typed lane Git actions stage/commit only in-lane paths and run the fixed trusted check", async () => {
+		const { deps } = await initRepo();
+		const laneKey = "typed";
+		const created = await createWorktreeSyncToolDefinition(makeDeps(deps, () => laneKey)).execute(
+			"typed-create",
+			{ action: "create_lane", laneKey },
+			undefined,
+			undefined,
+			undefined as never,
+		);
+		expect(created.details).toMatchObject({ code: "ok" });
+		const worktreePath = (created.details as { lane: { worktreePath: string } }).lane.worktreePath;
+		writeFileSync(join(worktreePath, "typed.txt"), "typed\n", "utf-8");
+		const def = createWorktreeSyncToolDefinition(
+			makeDeps(deps, () => laneKey, { settings: { ...SETTINGS, gateCommand: "git diff --check" } }),
+		);
+		expect(
+			(
+				await def.execute(
+					"typed-add",
+					{ action: "git_add", paths: ["typed.txt"] },
+					undefined,
+					undefined,
+					undefined as never,
+				)
+			).details,
+		).toMatchObject({
+			code: "ok",
+		});
+		expect(
+			(
+				await def.execute(
+					"typed-commit",
+					{ action: "git_commit", message: "typed lane commit" },
+					undefined,
+					undefined,
+					undefined as never,
+				)
+			).details,
+		).toMatchObject({ code: "ok" });
+		expect(
+			(await def.execute("typed-check", { action: "check" }, undefined, undefined, undefined as never)).details,
+		).toMatchObject({ code: "ok", action: "check" });
+		const outside = await def.execute(
+			"typed-outside",
+			{ action: "git_add", paths: ["../outside.txt"] },
+			undefined,
+			undefined,
+			undefined as never,
+		);
+		expect(outside.details).toMatchObject({ code: "path_outside_lane" });
+	}, 60_000);
 });
 
 describe("worktree_sync tool -- worker scoping (D3)", () => {

@@ -5,6 +5,7 @@ import { afterEach, describe, expect, it } from "vitest";
 import { execCommand } from "../src/core/exec.ts";
 import {
 	abortSync,
+	bindLaneWorker,
 	buildSyncStatus,
 	continueSync,
 	createDefaultWorktreeSyncExec,
@@ -18,9 +19,12 @@ import {
 } from "../src/core/worktree-sync/git-engine.ts";
 import {
 	acquireIntegrationLock,
+	readEpoch,
+	readLandingTransaction,
 	readLane,
 	releaseIntegrationLock,
 	syncStorePaths,
+	writeLandingTransaction,
 	writeLane,
 } from "../src/core/worktree-sync/store.ts";
 
@@ -92,6 +96,79 @@ async function mustCreateLane(deps: WorktreeSyncEngineDeps, laneKey: string) {
 }
 
 describe("worktree-sync against real git", () => {
+	it("bindLaneWorker is idempotent and refuses a different worker", async () => {
+		const { deps } = await initRepo();
+		await mustCreateLane(deps, "bound");
+		expect(await bindLaneWorker(deps, { laneKey: "bound", laneId: "worker-1" })).toEqual({
+			code: "bound",
+			laneKey: "bound",
+			laneId: "worker-1",
+		});
+		expect(await bindLaneWorker(deps, { laneKey: "bound", laneId: "worker-1" })).toEqual({
+			code: "already_bound",
+			laneKey: "bound",
+			laneId: "worker-1",
+		});
+		expect(await bindLaneWorker(deps, { laneKey: "bound", laneId: "worker-2" })).toEqual({
+			code: "binding_conflict",
+			laneKey: "bound",
+			boundLaneId: "worker-1",
+		});
+	}, 60_000);
+
+	it("reconcile finalizes a main move left between exact merge and epoch write", async () => {
+		const { repo, deps } = await initRepo();
+		const lane = await mustCreateLane(deps, "crash-recovery");
+		const testedTip = await laneCommit(lane.worktreePath, "recovered.txt", "recovered\n", "recovery tip");
+		const priorMainSha = await git(repo, "rev-parse", "main");
+		const paths = syncStorePaths(await git(repo, "rev-parse", "--path-format=absolute", "--git-common-dir"));
+		await writeLandingTransaction(paths, {
+			laneKey: lane.laneKey,
+			priorMainSha,
+			testedTipSha: testedTip,
+			changedPaths: ["recovered.txt"],
+			changedPathsTruncated: false,
+			lockToken: "crash-token",
+			gate: "off",
+			stage: "ready_to_merge",
+		});
+		await git(repo, "merge", "--ff-only", testedTip);
+
+		expect((await reconcile(deps)).code).toBe("reconciled");
+		expect(await readLandingTransaction(paths)).toBeUndefined();
+		expect(await readEpoch(paths)).toMatchObject({
+			mainSha: testedTip,
+			previousMainSha: priorMainSha,
+			landedLaneKey: lane.laneKey,
+		});
+	}, 60_000);
+
+	it("reconcile refuses an unexpected main SHA without mutating the transaction", async () => {
+		const { repo, deps } = await initRepo();
+		const lane = await mustCreateLane(deps, "ambiguous-recovery");
+		const testedTip = await laneCommit(lane.worktreePath, "tested.txt", "tested\n", "tested tip");
+		const priorMainSha = await git(repo, "rev-parse", "main");
+		const paths = syncStorePaths(await git(repo, "rev-parse", "--path-format=absolute", "--git-common-dir"));
+		await writeLandingTransaction(paths, {
+			laneKey: lane.laneKey,
+			priorMainSha,
+			testedTipSha: testedTip,
+			changedPaths: ["tested.txt"],
+			changedPathsTruncated: false,
+			lockToken: "ambiguous-token",
+			gate: "off",
+			stage: "ready_to_merge",
+		});
+		writeFileSync(join(repo, "unexpected.txt"), "unexpected\n", "utf-8");
+		await git(repo, "add", "unexpected.txt");
+		await git(repo, "commit", "-m", "unexpected main move");
+
+		const result = await reconcile(deps);
+		expect(result.code).toBe("git_error");
+		expect(await readLandingTransaction(paths)).toMatchObject({ testedTipSha: testedTip });
+		expect(await readEpoch(paths)).toBeUndefined();
+	}, 60_000);
+
 	it("two lanes: A lands, B is refused stale (G3), syncs through a real conflict, continues, lands; main stays linear", async () => {
 		const { repo, deps } = await initRepo();
 		const laneA = await mustCreateLane(deps, "a");
@@ -227,13 +304,30 @@ describe("worktree-sync against real git", () => {
 		writeFileSync(join(repo, "unrelated.txt"), "scratch\n", "utf-8");
 
 		const paths = syncStorePaths(await git(repo, "rev-parse", "--path-format=absolute", "--git-common-dir"));
-		await acquireIntegrationLock(paths, { pid: process.pid, hostname: hostname() });
+		const heldLock = await acquireIntegrationLock(paths, { pid: process.pid, hostname: hostname() });
+		expect(heldLock.acquired).toBe(true);
+		if (!heldLock.acquired) throw new Error("test lock acquisition failed");
 		const busy = await landLane(deps, { laneKey: "a", gate: "off" });
 		expect(busy.code).toBe("lock_busy");
 		expect(busy.code === "lock_busy" && busy.holder?.pid).toBe(process.pid);
-		await releaseIntegrationLock(paths);
+		expect(await releaseIntegrationLock(paths, heldLock.token)).toBe(true);
 
 		expect((await landLane(deps, { laneKey: "a", gate: "off" })).code).toBe("ok");
+	}, 60_000);
+
+	it("refuses a lane tip that changes while the gate is running", async () => {
+		const { repo, deps } = await initRepo();
+		const lane = await mustCreateLane(deps, "gate-drift");
+		await laneCommit(lane.worktreePath, "gate.txt", "tested\n", "gate drift base");
+		const mainBefore = await git(repo, "rev-parse", "main");
+
+		const result = await landLane(deps, {
+			laneKey: "gate-drift",
+			gate: "on",
+			gateCommand: "git commit --allow-empty -m 'gate mutated lane'",
+		});
+		expect(result.code).toBe("lane_changed_during_gate");
+		expect(await git(repo, "rev-parse", "main")).toBe(mainBefore);
 	}, 60_000);
 
 	it("abort_sync returns the lane to its pre-sync tip, honestly still stale; rerere mechanically replays an identical conflict on the next sync", async () => {

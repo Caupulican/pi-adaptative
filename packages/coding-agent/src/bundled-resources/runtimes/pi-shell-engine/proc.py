@@ -16,7 +16,7 @@ from state import ShellState
 TIMEOUT_EXIT_CODE = 124
 
 
-def resolve_external(name: str, env: dict[str, str]) -> str | None:
+def resolve_external(name: str, env: dict[str, str], cwd: str | None = None) -> str | None:
     """Resolve `name` to an absolute path over `env["PATH"]`, honoring PATHEXT on win32.
 
     Direct `.exe` (or extension-less on POSIX) targets resolve as-is; `.bat`/`.cmd`
@@ -28,8 +28,9 @@ def resolve_external(name: str, env: dict[str, str]) -> str | None:
     """
     path_value = env.get("PATH", "")
     if os.path.isabs(name) or os.sep in name or (os.altsep and os.altsep in name):
-        if os.path.isfile(name):
-            return os.path.abspath(name)
+        candidate = name if os.path.isabs(name) else os.path.join(cwd or os.getcwd(), name)
+        if os.path.isfile(candidate):
+            return os.path.abspath(candidate)
         return None
 
     path_dirs = [d for d in path_value.split(os.pathsep) if d]
@@ -47,7 +48,8 @@ def resolve_external(name: str, env: dict[str, str]) -> str | None:
         return None
 
     for directory in path_dirs:
-        full = os.path.join(directory, name)
+        base_dir = directory if os.path.isabs(directory) else os.path.join(cwd or os.getcwd(), directory)
+        full = os.path.join(base_dir, name)
         if os.path.isfile(full) and os.access(full, os.X_OK):
             return full
     return None
@@ -73,7 +75,7 @@ def spawn_external(
 
     Raises FileNotFoundError if argv[0] does not resolve.
     """
-    resolved = resolve_external(argv[0], state.env)
+    resolved = resolve_external(argv[0], state.env, state.cwd)
     if resolved is None:
         raise FileNotFoundError(argv[0])
     full_argv = build_argv(resolved, argv)

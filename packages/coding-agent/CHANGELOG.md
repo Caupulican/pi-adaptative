@@ -59,6 +59,8 @@
 - A goal waiting on a dispatched worker now escalates to the owner (`action: "ask-user"`, reason `worker_wait_timeout`) after a bounded max-wait (default 60 minutes) instead of waiting indefinitely, when the worker is alive but hung past its deadline; every pre-existing caller that omits the new optional wait-clock arguments behaves byte-identically (waits indefinitely, as before).
 - A managed (tmux) worker's terminal usage claim now attributes to its lane's advisory `costUsd`, closing the previously-documented undercount in a goal's `continuationWorkerSpendUsd` for tmux-worker spend.
 - A goal requirement bound to a worker lane that vanished after `/reload` (a genuinely-running managed lane is never snapshotted at dispatch time) is no longer at risk of a duplicate re-dispatch: `dispatch_worker` now refuses re-dispatch when the bound lane's liveness/outcome cannot be determined (`bound_lane_indeterminate`) or is still live (`requirement_already_bound`), preserving the existing binding unchanged; a bound lane with a confirmed terminal outcome still allows a legitimate retry.
+- Hardened worktree synchronization with token-bound lock ownership, lifecycle serialization, exact gated-tip landing, crash-recovery reconciliation, cumulative overlap checks, and typed lane Git/check actions; hard lane workers no longer expose unrestricted `bash`.
+- Fixed concurrent atomic writes by giving each invocation an exclusive same-directory temporary file and cleaning up only its own temporary path.
 
 ### Performance
 

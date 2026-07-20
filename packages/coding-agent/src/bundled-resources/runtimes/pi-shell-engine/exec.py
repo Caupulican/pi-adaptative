@@ -48,6 +48,8 @@ def _redirect_target_path(redirect: nodes.Redirect, ctx: ExecContext) -> str:
     parts = ctx.expand_word(redirect.target, ctx)
     if not parts:
         raise UnsupportedConstruct("malformed-syntax", "redirect target expanded to nothing")
+    if len(parts) != 1:
+        raise UnsupportedConstruct("malformed-syntax", "redirect target expanded to multiple words (ambiguous redirect)")
     path = parts[0]
     if path == "/dev/null":
         path = DEVNULL
@@ -296,7 +298,10 @@ def _run_pipeline_elements(elements: list, ctx: ExecContext) -> int:
 
             def run_inline(idx=index, sin=stdin_stream, sout=stdout_stream, owns_write=is_write_end_owned_here) -> None:
                 try:
-                    results[idx] = _dispatch_element(elements[idx], ctx, sin, sout, stderr_base, is_pipeline=True)
+                    # Pipeline stages are subshell-like: state mutations belong to the stage,
+                    # never to the parent command context or a sibling stage.
+                    stage_ctx = _sub_ctx(ctx, ctx.state.copy(), sin, sout, stderr_base)
+                    results[idx] = _dispatch_element(elements[idx], stage_ctx, sin, sout, stderr_base, is_pipeline=True)
                 except UnsupportedConstruct as exc:
                     # A structured refusal from an inline stage means the WHOLE command
                     # is outside the frozen grammar/behavior contract — captured here and
@@ -421,7 +426,7 @@ def _expand_argv(command: nodes.SimpleCommand, ctx: ExecContext) -> list[str]:
 
 
 def _apply_transient_assignments(command: nodes.SimpleCommand, ctx: ExecContext) -> dict[str, str]:
-    env = dict(ctx.state.env)
+    env = ctx.state.env.copy()
     for name, word in command.assignments:
         values = ctx.expand_word(word, ctx)
         env[name] = "".join(values) if values else ""
@@ -525,7 +530,12 @@ def _dispatch_simple_command(
         if name in ctx.builtins:
             env = _apply_transient_assignments(command, ctx)
             builtin_ctx = BuiltinContext(
-                argv=argv, cwd=ctx.state.cwd, env=env, stdin=_as_stream(r_in, "rb"), stdout=_as_stream(r_out, "wb")
+                argv=argv,
+                cwd=ctx.state.cwd,
+                env=env,
+                stdin=_as_stream(r_in, "rb"),
+                stdout=_as_stream(r_out, "wb"),
+                stderr=_as_stream(r_err, "wb"),
             )
             return ctx.builtins[name](builtin_ctx)
 
@@ -665,12 +675,17 @@ def _run_xargs_batch(argv: list[str], ctx: ExecContext, out_stream: BinaryIO | i
     name = argv[0]
     if name in ctx.builtins:
         builtin_ctx = BuiltinContext(
-            argv=argv, cwd=ctx.state.cwd, env=dict(ctx.state.env), stdin=_empty_stream(), stdout=_as_stream(out_stream, "wb")
+            argv=argv,
+            cwd=ctx.state.cwd,
+            env=ctx.state.env.copy(),
+            stdin=_empty_stream(),
+            stdout=_as_stream(out_stream, "wb"),
+            stderr=_as_stream(out_stream, "wb"),
         )
         return ctx.builtins[name](builtin_ctx)
     if name in STATE_BUILTINS:
         return _run_state_builtin(name, argv, ctx, out_stream)
-    scratch_state = ShellState(cwd=ctx.state.cwd, env=dict(ctx.state.env))
+    scratch_state = ShellState(cwd=ctx.state.cwd, env=ctx.state.env.copy())
     try:
         child, in_prep, out_prep, err_prep = _spawn_with_bridges(
             argv, scratch_state, subprocess.DEVNULL, out_stream, out_stream, ctx.deadline
@@ -705,7 +720,7 @@ def run_command_substitution(src: str, ctx: ExecContext) -> tuple[str, int]:
     ast = parser_module.parse(tokens)
     buffer = io.BytesIO()
     sub_ctx = ExecContext(
-        state=ctx.state,
+        state=ctx.state.copy(),
         stdin=ctx.stdin,
         stdout=buffer,
         expand_word=ctx.expand_word,

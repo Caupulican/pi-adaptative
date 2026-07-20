@@ -31,20 +31,27 @@ def _glob_sort_key(path: str) -> tuple[str, ...]:
     return tuple(path)
 
 
-def _expand_glob(pattern: str, cwd: str) -> list[str]:
+def _escape_glob_literals(text: str) -> str:
+    """Quote glob metacharacters contributed by a quoted/literal word segment."""
+    return text.replace("[", "[[]").replace("*", "[*]").replace("?", "[?]")
+
+
+def _expand_glob(pattern: str, cwd: str, literal_fallback: str) -> list[str]:
     import os
 
     if not any(ch in pattern for ch in "*?["):
-        return [pattern]
+        return [literal_fallback]
 
     # Support a single path separator component: match directory portion literally,
     # glob only the final segment (sufficient for the frozen matrix: *, ?, [...]).
     normalized = pattern.replace("\\", "/")
+    display = literal_fallback.replace("\\", "/")
     if "/" in normalized:
         dir_part, _, name_part = normalized.rpartition("/")
+        display_dir_part, _, _ = display.rpartition("/")
         search_dir = dir_part if dir_part else "/"
         base_dir = search_dir if os.path.isabs(search_dir) else os.path.join(cwd, search_dir)
-        prefix = dir_part + "/"
+        prefix = display_dir_part + "/"
     else:
         name_part = normalized
         base_dir = cwd
@@ -53,11 +60,18 @@ def _expand_glob(pattern: str, cwd: str) -> list[str]:
     try:
         entries = os.listdir(base_dir)
     except OSError:
-        return [pattern]
+        return [literal_fallback]
 
-    matches = [name for name in entries if fnmatch.fnmatchcase(name, name_part)]
+    # Bash does not let * / ? match a leading dot unless the pattern component
+    # itself starts with a dot.
+    matches = [
+        name
+        for name in entries
+        if not (name.startswith(".") and not name_part.startswith("."))
+        and fnmatch.fnmatchcase(name, name_part)
+    ]
     if not matches:
-        return [pattern]
+        return [literal_fallback]
 
     matches.sort(key=_glob_sort_key)
     return [(prefix + name).replace("\\", "/") for name in matches]
@@ -149,30 +163,29 @@ def _expand_segment_as_field(segment, ctx: "ExecContext") -> str:
 def expand_word(word: Word, ctx: "ExecContext") -> list[str]:
     """Expand one Word into 0..N argv strings, honoring quoting/splitting/globbing.
 
-    A field only exists in the output if something "opened" it: a non-splittable
-    (quoted/literal) contribution always opens a field, even if empty (so a fully
-    quoted empty word yields one empty field). A splittable (unquoted) contribution
-    only opens a field once it has non-whitespace text (so an unquoted expansion
-    that resolves to empty/whitespace-only splits to ZERO fields, per §1.5).
+    Glob eligibility is tracked per segment. Quoted wildcards stay literal even when
+    an adjacent unquoted segment contributes a real wildcard.
     """
-    fields: list[tuple[str, bool]] = []
-    current = ""
+    fields: list[tuple[str, str | None]] = []
+    current_parts: list[tuple[str, bool]] = []
     current_active = False
-    current_raw = False
 
     def flush() -> None:
-        nonlocal current, current_active, current_raw
+        nonlocal current_parts, current_active
         if current_active:
-            fields.append((current, current_raw))
-        current, current_active, current_raw = "", False, False
+            text = "".join(part for part, _raw in current_parts)
+            has_glob = any(raw and any(ch in part for ch in "*?[") for part, raw in current_parts)
+            pattern = "".join(part if raw else _escape_glob_literals(part) for part, raw in current_parts)
+            fields.append((text, pattern if has_glob else None))
+        current_parts, current_active = [], False
 
     def append_literal(text: str) -> None:
-        nonlocal current, current_active
-        current += text
+        nonlocal current_active
+        current_parts.append((text, False))
         current_active = True
 
     def append_splittable(text: str, raw: bool) -> None:
-        nonlocal current, current_active, current_raw
+        nonlocal current_active
         if text == "":
             return
         leading_ws = text[0] in _IFS_WHITESPACE
@@ -187,10 +200,8 @@ def expand_word(word: Word, ctx: "ExecContext") -> list[str]:
         for i, part in enumerate(parts):
             if i > 0:
                 flush()
-            current += part
+            current_parts.append((part, raw))
             current_active = True
-            if raw:
-                current_raw = True
         if trailing_ws:
             flush()
 
@@ -219,9 +230,9 @@ def expand_word(word: Word, ctx: "ExecContext") -> list[str]:
     flush()
 
     result: list[str] = []
-    for text, is_raw in fields:
-        if is_raw and any(ch in text for ch in "*?["):
-            result.extend(_expand_glob(text, ctx.state.cwd))
+    for text, pattern in fields:
+        if pattern is not None:
+            result.extend(_expand_glob(pattern, ctx.state.cwd, text))
         else:
             result.append(text)
     return result

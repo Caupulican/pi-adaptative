@@ -546,6 +546,12 @@ def tokenize(src: str) -> list[Token]:
         if c == "\\" and src[pos + 1 : pos + 2] == "\n":
             pos += 2
             continue
+        # An unquoted # starts a comment only at a token boundary. A # inside a
+        # word (for example a#b) and a quoted # are ordinary data.
+        if c == "#" and (pos == 0 or src[pos - 1] in " \t\n;|&()"):
+            newline = src.find("\n", pos)
+            pos = n if newline == -1 else newline
+            continue
         if src[pos : pos + 2] == "((":
             raise UnsupportedConstruct("arithmetic-expansion", "Arithmetic command '((...))' is not supported.")
         if c.isdigit():

@@ -27,6 +27,7 @@ class BuiltinContext:
     env: Mapping[str, str]
     stdin: BinaryIO
     stdout: BinaryIO
+    stderr: BinaryIO
 
 
 @dataclass
