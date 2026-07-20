@@ -929,55 +929,72 @@ export async function main(args: string[], options?: MainOptions) {
 		}
 	}
 
+	// A read-only command (--help, --list-models) prints and exits without ever reserving a
+	// session (see the createSessionManager in-memory-session gate above) -- for the same reason,
+	// it must not fire either of the runtimes below. Both are launched with `void` (fire-and-
+	// forget) and race the imminent `process.exit()` a few lines down in the --help/--list-models
+	// branches: their first write (worktree-sync's reconcile pass, process-matrix's master-entry
+	// writeEntry -- core/process-matrix/runtime.ts's startMasterBranch) can still be in flight on
+	// the libuv threadpool when process.exit() forcibly tears the process down, which on Windows
+	// can leave the just-written file's handle held by the OS a beat longer than the process
+	// itself survives -- long enough for an immediately-following rmSync of the temp agent dir
+	// (see test/session-id-readonly.test.ts) to observe EPERM. A read-only command has no session
+	// and nothing to supervise, so the correct fix is not starting either runtime for it at all.
+	const isReadOnlyCommand = parsed.help || parsed.listModels !== undefined;
+
 	// Worktree-sync session runtime (no-op unless enabled): one startup reconcile pass, plus --
 	// for a lane-bound session -- the epoch watcher that injects a deterministic staleness notice
 	// the moment another lane lands (steer mid-turn, its own turn when idle). Fire-and-forget:
 	// a broken repo state must never block session startup.
-	void startWorktreeSyncRuntime({
-		cwd: sessionManager.getCwd(),
-		agentDir,
-		settingsManager,
-		sessionId: sessionManager.getSessionId(),
-		notify: (text) => {
-			void session.sendCustomMessage(
-				{ customType: "worktree-sync-notice", content: text, display: true },
-				{ triggerTurn: true, deliverAs: "steer" },
-			);
-		},
-		onDiagnostic: (message) => {
-			console.error(chalk.yellow(`Warning: ${message}`));
-		},
-	});
+	if (!isReadOnlyCommand) {
+		void startWorktreeSyncRuntime({
+			cwd: sessionManager.getCwd(),
+			agentDir,
+			settingsManager,
+			sessionId: sessionManager.getSessionId(),
+			notify: (text) => {
+				void session.sendCustomMessage(
+					{ customType: "worktree-sync-notice", content: text, display: true },
+					{ triggerTurn: true, deliverAs: "steer" },
+				);
+			},
+			onDiagnostic: (message) => {
+				console.error(chalk.yellow(`Warning: ${message}`));
+			},
+		});
+	}
 
 	// Process-matrix runtime (no-op unless enabled): durable master/worker supervision surviving
 	// restarts -- a master asks before touching any orphaned worker it finds on resume; a worker
 	// winds down gracefully (never silently) when its parent disappears. Fire-and-forget, same as
 	// worktree-sync above: a broken store must never block session startup.
-	void startProcessMatrixRuntime({
-		agentDir,
-		sessionId: sessionManager.getSessionId(),
-		hasUI: appMode === "interactive",
-		settings: settingsManager.getProcessMatrixSettings(),
-		isProcessAlive: isReloadSessionProcessAlive,
-		promptConfirm,
-		notify: (text) => {
-			void session.sendCustomMessage(
-				{ customType: "process-matrix-notice", content: text, display: true },
-				{ triggerTurn: true, deliverAs: "steer" },
-			);
-		},
-		onDiagnostic: (message) => {
-			console.error(chalk.yellow(`Warning: ${message}`));
-		},
-		requestExit: () => {
-			try {
-				session.dispose();
-			} catch {
-				// Best-effort: exit must proceed even if dispose() itself throws.
-			}
-			process.exit(0);
-		},
-	});
+	if (!isReadOnlyCommand) {
+		void startProcessMatrixRuntime({
+			agentDir,
+			sessionId: sessionManager.getSessionId(),
+			hasUI: appMode === "interactive",
+			settings: settingsManager.getProcessMatrixSettings(),
+			isProcessAlive: isReloadSessionProcessAlive,
+			promptConfirm,
+			notify: (text) => {
+				void session.sendCustomMessage(
+					{ customType: "process-matrix-notice", content: text, display: true },
+					{ triggerTurn: true, deliverAs: "steer" },
+				);
+			},
+			onDiagnostic: (message) => {
+				console.error(chalk.yellow(`Warning: ${message}`));
+			},
+			requestExit: () => {
+				try {
+					session.dispose();
+				} catch {
+					// Best-effort: exit must proceed even if dispose() itself throws.
+				}
+				process.exit(0);
+			},
+		});
+	}
 
 	if (parsed.help) {
 		const extensionFlags = resourceLoader

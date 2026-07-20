@@ -131,6 +131,35 @@ async function tick(ms: number): Promise<void> {
 	await settle();
 }
 
+/**
+ * Bounded await-until: polls `read()` on a real interval until `predicate` is satisfied or
+ * `timeoutMs` elapses, then returns the satisfying value. Replaces a fixed macrotask-yield count
+ * (settle()) for assertions that depend on an async state transition (the orphan-scan's
+ * promptConfirm -> writeEntry chain, a worker's self-registration write, a heartbeat write): on a
+ * slow/loaded runner (observed on windows-latest) a fixed yield count can be outrun, and this
+ * polls the actual expected state instead of guessing an event-loop count. Throws with the
+ * last-seen value on timeout so a genuine regression still fails loudly and diagnosably.
+ */
+async function awaitState<T>(
+	read: () => Promise<T>,
+	predicate: (value: T) => boolean,
+	options: { timeoutMs?: number; intervalMs?: number } = {},
+): Promise<T> {
+	const { timeoutMs = 5_000, intervalMs = 25 } = options;
+	const deadline = Date.now() + timeoutMs;
+	let last: T;
+	for (;;) {
+		last = await read();
+		if (predicate(last)) return last;
+		if (Date.now() >= deadline) {
+			throw new Error(
+				`awaitState: timed out after ${timeoutMs}ms waiting for the expected state. Last seen: ${JSON.stringify(last)}`,
+			);
+		}
+		await new Promise((resolve) => setTimeout(resolve, intervalMs));
+	}
+}
+
 function workerEntryId(harness: Harness): string {
 	return buildEntryId("worker", harness.config.sessionId);
 }
@@ -183,9 +212,10 @@ describe("startProcessMatrixRuntime (worker branch)", () => {
 		const harness = makeHarness();
 
 		const handle = await startProcessMatrixRuntime(harness.config);
-		await settle();
-
-		const registered = await readWorkerEntry(harness);
+		const registered = await awaitState(
+			() => readWorkerEntry(harness),
+			(entry) => entry !== undefined,
+		);
 		expect(registered).toMatchObject({
 			role: "worker",
 			status: "running",
@@ -196,7 +226,11 @@ describe("startProcessMatrixRuntime (worker branch)", () => {
 		});
 
 		await tick(POLL_MS * 3);
-		expect((await readWorkerEntry(harness))?.status).toBe("running");
+		const stillRunning = await awaitState(
+			() => readWorkerEntry(harness),
+			(entry) => entry?.status === "running",
+		);
+		expect(stillRunning?.status).toBe("running");
 		expect(harness.notices).toEqual([]);
 		expect(harness.exitRequests).toBe(0);
 		handle.stop();
@@ -212,7 +246,10 @@ describe("startProcessMatrixRuntime (worker branch)", () => {
 		harness.livePids.delete(PARENT_PID);
 		await tick(POLL_MS);
 
-		const entry = await readWorkerEntry(harness);
+		const entry = await awaitState(
+			() => readWorkerEntry(harness),
+			(value) => value?.status === "resumable",
+		);
 		expect(entry).toMatchObject({
 			status: "resumable",
 			windDownReason: "parent_lost",
@@ -235,18 +272,25 @@ describe("startProcessMatrixRuntime (worker branch)", () => {
 
 		harness.livePids.delete(PARENT_PID);
 		await tick(POLL_MS);
-		expect((await readWorkerEntry(harness))?.status).toBe("resumable");
+		const resumable = await awaitState(
+			() => readWorkerEntry(harness),
+			(entry) => entry?.status === "resumable",
+		);
+		expect(resumable?.status).toBe("resumable");
 
 		// The adopting master's ask-gated write into the orphan's own entry.
 		harness.livePids.add(NEW_PARENT_PID);
-		const orphaned = (await readWorkerEntry(harness)) as ProcessMatrixEntry;
+		const orphaned = resumable as ProcessMatrixEntry;
 		await writeEntry(
 			harness.agentDir,
 			applyAdoption(orphaned, { parentPid: NEW_PARENT_PID, parentSessionId: "adopter-session" }),
 		);
 
 		await tick(POLL_MS);
-		const adopted = await readWorkerEntry(harness);
+		const adopted = await awaitState(
+			() => readWorkerEntry(harness),
+			(entry) => entry?.status === "running" && entry?.parentPid === NEW_PARENT_PID,
+		);
 		expect(adopted).toMatchObject({ status: "running", parentPid: NEW_PARENT_PID });
 		// The worker's local re-apply must NOT clobber the adopter's sessionId back to the old parent's.
 		expect(adopted?.parentSessionId).toBe("adopter-session");
@@ -257,7 +301,11 @@ describe("startProcessMatrixRuntime (worker branch)", () => {
 		// The healthy watch now tracks the NEW parent: its death triggers a second wind-down.
 		harness.livePids.delete(NEW_PARENT_PID);
 		await tick(POLL_MS);
-		expect(await readWorkerEntry(harness)).toMatchObject({ status: "resumable", windDownReason: "parent_lost" });
+		const rewoundDown = await awaitState(
+			() => readWorkerEntry(harness),
+			(entry) => entry?.status === "resumable" && entry?.windDownReason === "parent_lost",
+		);
+		expect(rewoundDown).toMatchObject({ status: "resumable", windDownReason: "parent_lost" });
 		expect(harness.notices.some((text) => text.includes(`pid ${NEW_PARENT_PID}`) && text.includes("gone"))).toBe(
 			true,
 		);
@@ -273,7 +321,11 @@ describe("startProcessMatrixRuntime (worker branch)", () => {
 
 		harness.livePids.delete(PARENT_PID);
 		await tick(POLL_MS);
-		expect((await readWorkerEntry(harness))?.status).toBe("resumable");
+		const resumable = await awaitState(
+			() => readWorkerEntry(harness),
+			(entry) => entry?.status === "resumable",
+		);
+		expect(resumable?.status).toBe("resumable");
 
 		// Still inside the grace window: no exit.
 		harness.clock.ms = T0 + GRACE_MS - 1;
@@ -282,6 +334,10 @@ describe("startProcessMatrixRuntime (worker branch)", () => {
 
 		harness.clock.ms = T0 + GRACE_MS;
 		await tick(POLL_MS);
+		await awaitState(
+			async () => harness.exitRequests,
+			(count) => count === 1,
+		);
 		expect(harness.exitRequests).toBe(1);
 
 		// The watcher stopped itself: more polls never double-fire the exit.
@@ -297,17 +353,26 @@ describe("startProcessMatrixRuntime (worker branch)", () => {
 		useWorkerEnv("parent-session-1");
 		const harness = makeHarness();
 		const handle = await startProcessMatrixRuntime(harness.config);
-		await settle();
-
-		const fresh = (await readWorkerEntry(harness)) as ProcessMatrixEntry;
+		const fresh = (await awaitState(
+			() => readWorkerEntry(harness),
+			(entry) => entry !== undefined,
+		)) as ProcessMatrixEntry;
 		await writeEntry(
 			harness.agentDir,
 			beginWindDown(fresh, "user_cleanup", new Date(harness.clock.ms).toISOString()),
 		);
 
 		await tick(POLL_MS);
-		expect(await readWorkerEntry(harness)).toMatchObject({ status: "winding_down", windDownReason: "user_cleanup" });
+		const woundDown = await awaitState(
+			() => readWorkerEntry(harness),
+			(entry) => entry?.status === "winding_down",
+		);
+		expect(woundDown).toMatchObject({ status: "winding_down", windDownReason: "user_cleanup" });
 		expect(harness.notices.some((text) => text.includes("cooperative cleanup"))).toBe(true);
+		await awaitState(
+			async () => harness.exitRequests,
+			(count) => count === 1,
+		);
 		expect(harness.exitRequests).toBe(1);
 
 		await tick(POLL_MS * 3);
@@ -354,16 +419,21 @@ describe("startProcessMatrixRuntime (master branch)", () => {
 		useMasterEnv();
 		const harness = makeHarness();
 		const handle = await startProcessMatrixRuntime(harness.config);
-		await settle();
-
 		const entryId = buildEntryId("master", harness.config.sessionId);
-		const registered = await readEntry(harness.agentDir, entryId);
+		const registered = await awaitState(
+			() => readEntry(harness.agentDir, entryId),
+			(entry) => entry !== undefined,
+		);
 		expect(registered).toMatchObject({ role: "master", status: "running", pid: process.pid });
 		expect(registered?.heartbeatAt).toBe(new Date(T0).toISOString());
 
 		harness.clock.ms = T0 + HEARTBEAT_MS;
 		await tick(HEARTBEAT_MS);
-		expect((await readEntry(harness.agentDir, entryId))?.heartbeatAt).toBe(new Date(T0 + HEARTBEAT_MS).toISOString());
+		const heartbeated = await awaitState(
+			() => readEntry(harness.agentDir, entryId),
+			(entry) => entry?.heartbeatAt === new Date(T0 + HEARTBEAT_MS).toISOString(),
+		);
+		expect(heartbeated?.heartbeatAt).toBe(new Date(T0 + HEARTBEAT_MS).toISOString());
 		handle.stop();
 	});
 
@@ -375,7 +445,10 @@ describe("startProcessMatrixRuntime (master branch)", () => {
 		await writeEntry(harness.agentDir, orphan);
 
 		const handle = await startProcessMatrixRuntime(harness.config);
-		await settle();
+		await awaitState(
+			async () => harness.diagnostics,
+			(diagnostics) => diagnostics.some((text) => text.includes(orphan.entryId)),
+		);
 
 		expect(harness.confirmAsks).toEqual([]);
 		expect(harness.diagnostics.some((text) => text.includes(orphan.entryId) && text.includes("report-only"))).toBe(
@@ -394,12 +467,15 @@ describe("startProcessMatrixRuntime (master branch)", () => {
 		await writeEntry(harness.agentDir, orphan);
 
 		const handle = await startProcessMatrixRuntime(harness.config);
-		await settle();
+		const adopted = await awaitState(
+			() => readEntry(harness.agentDir, orphan.entryId),
+			(entry) => entry?.status === "running" && entry?.parentPid === process.pid,
+		);
 
 		expect(harness.confirmAsks).toHaveLength(1);
 		expect(harness.confirmAsks[0]).toContain(orphan.entryId);
 		expect(harness.confirmAsks[0]).toContain("lane-omega");
-		expect(await readEntry(harness.agentDir, orphan.entryId)).toMatchObject({
+		expect(adopted).toMatchObject({
 			status: "running",
 			parentPid: process.pid,
 			parentSessionId: harness.config.sessionId,
@@ -416,10 +492,13 @@ describe("startProcessMatrixRuntime (master branch)", () => {
 		await writeEntry(harness.agentDir, orphan);
 
 		const handle = await startProcessMatrixRuntime(harness.config);
-		await settle();
+		const cleaned = await awaitState(
+			() => readEntry(harness.agentDir, orphan.entryId),
+			(entry) => entry?.status === "winding_down",
+		);
 
 		expect(harness.confirmAsks).toHaveLength(2);
-		expect(await readEntry(harness.agentDir, orphan.entryId)).toMatchObject({
+		expect(cleaned).toMatchObject({
 			status: "winding_down",
 			windDownReason: "user_cleanup",
 		});
@@ -435,7 +514,10 @@ describe("startProcessMatrixRuntime (master branch)", () => {
 		await writeEntry(harness.agentDir, orphan);
 
 		const handle = await startProcessMatrixRuntime(harness.config);
-		await settle();
+		await awaitState(
+			async () => harness.confirmAsks,
+			(asks) => asks.length >= 2,
+		);
 
 		expect(harness.confirmAsks).toHaveLength(2);
 		expect(await readEntry(harness.agentDir, orphan.entryId)).toEqual(orphan);
