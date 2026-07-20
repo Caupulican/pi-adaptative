@@ -32,6 +32,13 @@ import { getTextOutput, invalidArgText, str } from "./render-utils.ts";
 import { routeShellContract } from "./shell-contract-router.ts";
 import { acquirePersistentShellSession } from "./shell-session.ts";
 import { wrapToolDefinition } from "./tool-definition-wrapper.ts";
+import { createWindowsShellEngineOperations, type WindowsShellEngineOptions } from "./windows-shell-engine.ts";
+import { getOrCreateWindowsShellState, mergeEffectiveEnv, resolveEffectiveCwd } from "./windows-shell-state.ts";
+
+/** Default per-session key for the engine tier when a caller does not pass an explicit sessionKey
+ * (e.g. the RPC `createLocalPlatformShellOperations` path); a stable key keeps `cd`/`export` state
+ * persisting across calls even without an agent-scoped session key. */
+const DEFAULT_WINDOWS_SHELL_ENGINE_SESSION_KEY = "platform-shell-operations";
 
 /** Low-level silence bound retained for direct shell-operation consumers. Agent tool calls always pass a wall-clock bound. */
 const DEFAULT_COMMAND_SILENCE_MS = 600_000;
@@ -212,7 +219,16 @@ export function createLocalPowerShellOperations(options?: { shellPath?: string; 
 
 /** Create the platform shell backend without requiring callers or the model to choose a shell. */
 export function createLocalPlatformShellOperations(
-	options: { shellPath?: string; commandPrefix?: string; operations?: BashOperations; sessionKey?: string } = {},
+	options: {
+		shellPath?: string;
+		commandPrefix?: string;
+		operations?: BashOperations;
+		sessionKey?: string;
+		/** Route complex/state-mutating Bash constructs to the Python engine on Windows. Default: true. */
+		pythonEngine?: boolean;
+		/** Test/embedding hook: overrides the engine tier's runtime/spawn/state resolution. */
+		engineOptions?: WindowsShellEngineOptions;
+	} = {},
 	platform: NodeJS.Platform = process.platform,
 ): BashOperations {
 	const operations =
@@ -221,17 +237,31 @@ export function createLocalPlatformShellOperations(
 			shellPath: options.shellPath,
 			sessionKey: options.sessionKey,
 		});
+	const pythonEngineEnabled = options.pythonEngine !== false;
+	const engineSessionKey = options.sessionKey ?? DEFAULT_WINDOWS_SHELL_ENGINE_SESSION_KEY;
+	const engineOperations = createWindowsShellEngineOperations(engineSessionKey, options.engineOptions);
 	return {
 		async exec(command, cwd, execOptions) {
 			let resolvedCommand = command;
+			let resolvedCwd = cwd;
+			let resolvedExecOptions = execOptions;
 			if (platform === "win32") {
-				const route = routeShellContract(command, platform);
+				const route = routeShellContract(command, platform, { pythonEngine: pythonEngineEnabled });
 				if (route.kind === "unsupported") throw new Error(route.error);
+				// The engine is the sole state mutator (D4); every Windows call — engine or PS
+				// tier — reads the SAME session state so a `cd`/`export` in one call is observed
+				// by the very next call regardless of which tier runs it.
+				const state = getOrCreateWindowsShellState(engineSessionKey);
+				resolvedCwd = resolveEffectiveCwd(state, cwd);
+				resolvedExecOptions = { ...execOptions, env: mergeEffectiveEnv(state, execOptions.env ?? getShellEnv()) };
+				if (route.kind === "python-engine") {
+					return engineOperations.exec(route.command, resolvedCwd, resolvedExecOptions);
+				}
 				if (route.kind === "powershell") resolvedCommand = route.command;
 			}
 			if (options.commandPrefix) resolvedCommand = `${options.commandPrefix}\n${resolvedCommand}`;
 			if (platform === "win32") resolvedCommand = prefixPowerShellCommand(resolvedCommand);
-			return operations.exec(resolvedCommand, cwd, execOptions);
+			return operations.exec(resolvedCommand, resolvedCwd, resolvedExecOptions);
 		},
 	};
 }
@@ -266,6 +296,10 @@ export interface BashToolOptions {
 	 * tool instances (subagents) auto-generate their own key and stay isolated.
 	 */
 	sessionKey?: string;
+	/** Route complex/state-mutating Bash constructs to the Python engine on Windows. Default: true. */
+	windowsShellPythonEngine?: boolean;
+	/** Test/embedding hook: overrides the engine tier's runtime/spawn/state resolution. */
+	windowsShellEngineOptions?: WindowsShellEngineOptions;
 }
 
 const BASH_PREVIEW_LINES = 5;
@@ -411,21 +445,26 @@ function createShellToolDefinition(
 	const hasExecutionOverrides = Boolean(options?.operations || options?.shellPath || commandPrefix || spawnHook);
 	const canFilterCommand = !hasExecutionOverrides;
 	const routesWindowsContract = contractPlatform === "win32";
+	const pythonEngineEnabled = options?.windowsShellPythonEngine !== false;
+	const engineOperations = routesWindowsContract
+		? createWindowsShellEngineOperations(sessionKey, options?.windowsShellEngineOptions)
+		: undefined;
 	const contractDescription = routesWindowsContract
-		? "Execute Pi's stable Bash-like command contract in a persistent per-agent shell session (current directory and environment variables persist across calls). On Windows, a finite deterministic router converts supported simple commands to PowerShell; unsupported Bash constructs fail closed instead of being guessed."
+		? "Execute Pi's stable Bash-like command contract in a persistent per-agent shell session (current directory and environment variables persist across calls, including across the PowerShell and Python engine tiers). On Windows, a deterministic router converts simple commands directly to PowerShell and routes pipelines, redirection, expansion, chaining, and state-mutating commands (cd/export/unset) through a bundled Python engine that implements the supported Bash grammar; named unsupported constructs (job control, process substitution, heredocs, nested shells, and similar) fail closed instead of being guessed."
 		: "Execute a Bash command in a persistent per-agent shell session: the current directory and environment variables persist across calls, and a timed-out or aborted command resets the session.";
 	return {
 		name: toolName,
 		label: toolName,
 		description: `${contractDescription} Returns stdout and stderr. Output is truncated to last ${DEFAULT_MAX_LINES} lines or ${DEFAULT_MAX_BYTES / 1024}KB (whichever is hit first). If truncated, full output is saved to a temp file. Commands have a ${DEFAULT_COMMAND_TIMEOUT_SECONDS}-second wall-clock default, including commands that keep producing output; use a positive timeout only when a scoped operation justifies a larger bound (maximum ${MAX_COMMAND_TIMEOUT_SECONDS} seconds).`,
 		promptSnippet: routesWindowsContract
-			? "Execute simple Bash-like commands; Pi routes supported forms deterministically to PowerShell on Windows"
+			? "Execute Bash-like commands; Pi routes them deterministically to PowerShell or a bundled Python engine on Windows"
 			: "Execute Bash commands (ls, grep, find, etc.)",
 		promptGuidelines: routesWindowsContract
 			? [
-					"Use the bash tool's portable simple-command contract on Windows; do not write PowerShell or ask the user to choose a shell.",
-					"Use one simple command per call. The deterministic router rejects pipelines, redirection, expansion, shell chaining, nested shells, and unsupported Bash forms; use dedicated read/edit/search tools or separate calls instead.",
-					"Supported Bash-like file commands are converted with literal-path PowerShell operations; verify targets before recursive rm, cp, or mv calls.",
+					"Use ordinary Bash-like commands on Windows; do not write PowerShell or ask the user to choose a shell.",
+					"Pipelines, redirection, expansion (variables, command substitution, globs), chaining (&&/||/;), and cd/export/unset are supported and routed to a bundled Python engine; a fixed set of named constructs (job control, process substitution, heredocs, arithmetic expansion, nested shells, and similar) fail closed with an actionable message instead of being guessed.",
+					"Working directory and environment changes from cd/export/unset persist across subsequent bash calls, including calls that route to the PowerShell tier.",
+					"Supported Bash-like file commands are converted with literal-path operations; verify targets before recursive rm, cp, or mv calls.",
 					"Keep searches scoped and purpose-driven: discover paths first, pass an explicit root and filters, prefer rg over broad find, and increase the timeout only for a justified bounded search.",
 				]
 			: [
@@ -584,15 +623,31 @@ function createShellToolDefinition(
 				}
 
 				let backendCommand = command;
+				let engineRoute = false;
+				let effectiveCwd = cwd;
 				if (routesWindowsContract) {
-					const route = routeShellContract(command, contractPlatform);
+					const route = routeShellContract(command, contractPlatform, { pythonEngine: pythonEngineEnabled });
 					if (route.kind === "unsupported") throw new Error(route.error);
+					if (route.kind === "python-engine") engineRoute = true;
 					backendCommand = route.command;
+					// The engine is the sole state mutator (D4); every Windows call — engine or PS
+					// tier — reads the SAME session state so a `cd`/`export` in one call is observed
+					// by the very next call regardless of which tier runs it.
+					effectiveCwd = resolveEffectiveCwd(getOrCreateWindowsShellState(sessionKey), cwd);
 				}
-				const commandWithPrefix = commandPrefix ? `${commandPrefix}\n${backendCommand}` : backendCommand;
-				const resolvedCommand =
-					backendShell === "powershell" ? prefixPowerShellCommand(commandWithPrefix) : commandWithPrefix;
-				const spawnContext = resolveSpawnContext(resolvedCommand, cwd, spawnHook);
+				// The engine executes the RAW Bash source unchanged: no commandPrefix (arbitrary
+				// PowerShell setup would not parse as Bash grammar) and no PowerShell UTF-8 prefix.
+				const resolvedCommand = engineRoute
+					? backendCommand
+					: backendShell === "powershell"
+						? prefixPowerShellCommand(commandPrefix ? `${commandPrefix}\n${backendCommand}` : backendCommand)
+						: commandPrefix
+							? `${commandPrefix}\n${backendCommand}`
+							: backendCommand;
+				const spawnContext = resolveSpawnContext(resolvedCommand, effectiveCwd, spawnHook);
+				if (routesWindowsContract) {
+					spawnContext.env = mergeEffectiveEnv(getOrCreateWindowsShellState(sessionKey), spawnContext.env);
+				}
 
 				let exitCode: number | null;
 				try {
@@ -600,12 +655,16 @@ function createShellToolDefinition(
 					// actual execution takes the coarse exclusive barrier: it waits for
 					// in-flight edit/write mutations to drain and blocks new ones meanwhile.
 					const result = await withExclusiveMutationBarrier(() =>
-						ops.exec(spawnContext.command, spawnContext.cwd, {
-							onData: handleData,
-							signal,
-							timeout: effectiveTimeoutSeconds,
-							env: spawnContext.env,
-						}),
+						(engineRoute && engineOperations ? engineOperations : ops).exec(
+							spawnContext.command,
+							spawnContext.cwd,
+							{
+								onData: handleData,
+								signal,
+								timeout: effectiveTimeoutSeconds,
+								env: spawnContext.env,
+							},
+						),
 					);
 					exitCode = result.exitCode;
 				} catch (err) {

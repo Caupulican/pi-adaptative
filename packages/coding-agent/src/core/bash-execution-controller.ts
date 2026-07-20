@@ -30,6 +30,8 @@ export interface BashExecutionOptions {
 	platform?: NodeJS.Platform;
 	/** Wall-clock timeout in seconds; non-positive values use the bounded default. */
 	timeout?: number;
+	/** Route complex/state-mutating Bash constructs to the Python engine on Windows. Default: true. */
+	pythonEngine?: boolean;
 }
 
 export class BashExecutionController {
@@ -55,7 +57,13 @@ export class BashExecutionController {
 		const platform = options?.platform ?? process.platform;
 		const enableGitFilter = !options?.operations && !commandPrefix && !shellPath;
 		const operations = createLocalPlatformShellOperations(
-			{ shellPath, commandPrefix, operations: options?.operations, sessionKey: this.deps.getShellSessionKey?.() },
+			{
+				shellPath,
+				commandPrefix,
+				operations: options?.operations,
+				sessionKey: this.deps.getShellSessionKey?.(),
+				pythonEngine: options?.pythonEngine,
+			},
 			platform,
 		);
 

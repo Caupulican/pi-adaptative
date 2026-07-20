@@ -1,7 +1,10 @@
 export type ShellContractRoute =
 	| { kind: "passthrough"; command: string }
 	| { kind: "powershell"; command: string; argv: readonly string[] }
+	| { kind: "python-engine"; command: string }
 	| { kind: "unsupported"; error: string };
+
+const STATE_MUTATOR_BUILTINS = new Set(["cd", "export", "unset"]);
 
 interface TokenizeResult {
 	ok: boolean;
@@ -294,19 +297,42 @@ const ROUTED_BUILTIN_NAMES = new Set([
 	"touch",
 ]);
 
-export function routeShellContract(command: string, platform: NodeJS.Platform = process.platform): ShellContractRoute {
+export function routeShellContract(
+	command: string,
+	platform: NodeJS.Platform = process.platform,
+	options?: { pythonEngine?: boolean },
+): ShellContractRoute {
 	if (platform !== "win32") return { kind: "passthrough", command };
+	const pythonEngine = options?.pythonEngine === true;
 	const tokenized = tokenizePortableCommand(command);
-	if (!tokenized.ok || !tokenized.argv)
+
+	// Complex constructs (pipelines, redirection, expansion, quoting the tokenizer refuses, …) are
+	// exactly the grammar the Python engine owns; with the engine off this is the original
+	// fail-closed floor verbatim.
+	if (!tokenized.ok || !tokenized.argv) {
+		if (pythonEngine) return { kind: "python-engine", command };
 		return { kind: "unsupported", error: tokenized.error ?? UNSUPPORTED_OPERATOR_MESSAGE };
+	}
+
 	const argv = tokenized.argv;
 	const commandName = argv[0].toLowerCase();
+
+	// Inline env assignments (`NAME=value [cmd]`) are a state-mutating/expansion form the engine
+	// supports (§2.1); with the engine off this is the original fail-closed floor verbatim.
 	if (/^[A-Za-z_][A-Za-z0-9_]*=/u.test(argv[0])) {
+		if (pythonEngine) return { kind: "python-engine", command };
 		return {
 			kind: "unsupported",
 			error: "Inline environment assignments are not supported. Configure the environment outside the shell command.",
 		};
 	}
+
+	// State mutators route to the engine unconditionally when it is enabled: the engine is the
+	// sole state owner (D4), so `cd`/`export`/`unset` never execute against the PS floor.
+	if (pythonEngine && STATE_MUTATOR_BUILTINS.has(commandName)) {
+		return { kind: "python-engine", command };
+	}
+
 	if (BLOCKED_NESTED_SHELLS.has(commandName)) {
 		return {
 			kind: "unsupported",
@@ -316,6 +342,9 @@ export function routeShellContract(command: string, platform: NodeJS.Platform = 
 	const builtIn = routeBuiltIn(argv);
 	if (builtIn) return { kind: "powershell", command: builtIn, argv };
 	if (ROUTED_BUILTIN_NAMES.has(commandName)) {
+		// The PS floor rejected the FORM (flags/argument shape); the engine supports the fuller
+		// flag set for the same builtin (§2.2).
+		if (pythonEngine) return { kind: "python-engine", command };
 		return {
 			kind: "unsupported",
 			error: `Unsupported ${argv[0]} form on Windows. Use a simpler Bash-like form or Pi's dedicated read/search/edit tools.`,

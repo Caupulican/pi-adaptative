@@ -314,6 +314,13 @@ export const DEFAULT_PROCESS_MATRIX_HEARTBEAT_MS = 30_000;
 export const DEFAULT_PROCESS_MATRIX_ADOPTION_GRACE_MS = 300_000;
 export const DEFAULT_PROCESS_MATRIX_WATCHER_POLL_MS = 25_000;
 
+/** Windows shell contract engine tier (`src/core/tools/windows-shell-engine.ts`). */
+export interface WindowsShellSettings {
+	pythonEngine?: boolean; // default: true -- routes complex/state-mutating Bash constructs to the bundled Python engine on Windows; explicit false restores the PowerShell-only floor verbatim
+}
+
+export type ResolvedWindowsShellSettings = Required<WindowsShellSettings>;
+
 export type LearningPolicyLayer =
 	| "memory"
 	| "skill"
@@ -462,6 +469,7 @@ export interface Settings {
 	workerDelegation?: WorkerDelegationSettings; // Bounded scout-worker delegation; enabled by default on capable models
 	worktreeSync?: WorktreeSyncSettings; // Opt-in hard-gated worktree-per-lane parallel-work workflow (core/worktree-sync)
 	processMatrix?: ProcessMatrixSettings; // Durable master/worker process-matrix supervision (core/process-matrix); on by default
+	windowsShell?: WindowsShellSettings; // Windows shell contract engine tier (core/tools/windows-shell-engine); on by default
 	learningPolicy?: LearningPolicySettings; // Opt-in learning apply policy: proposal-first durable writes with audit/rollback
 	modelCapability?: ModelCapabilitySettings; // Auto-detected small-model tool/lane surface (default: auto)
 	toolkit?: ToolkitSettings; // User's blessed daily-ops script registry for run_toolkit_script
@@ -3353,6 +3361,13 @@ export class SettingsManager {
 				1000,
 				600_000,
 			),
+		};
+	}
+
+	getWindowsShellSettings(): ResolvedWindowsShellSettings {
+		const configured = this.settings.windowsShell ?? {};
+		return {
+			pythonEngine: configured.pythonEngine !== false,
 		};
 	}
 

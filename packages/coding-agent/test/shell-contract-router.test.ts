@@ -103,4 +103,68 @@ describe("stable Bash-like shell contract router", () => {
 			expect(routeShellContract(command, "win32")).toMatchObject({ kind: "unsupported" });
 		}
 	});
+
+	describe("engine tier (options.pythonEngine)", () => {
+		it("keeps the existing PowerShell floor for simple commands with the engine enabled", () => {
+			for (const command of ["pwd", "ls -la .", "git commit -m 'msg'", "node --version"]) {
+				const route = routeShellContract(command, "win32", { pythonEngine: true });
+				expect(route).toMatchObject({ kind: "powershell" });
+			}
+		});
+
+		it("routes complex Bash constructs and expansion to the engine", () => {
+			for (const command of [
+				"cat file | grep x",
+				"echo hi > out.txt",
+				"echo $HOME",
+				"echo $(whoami)",
+				"echo *.txt",
+				"cat ~/file.txt",
+				"echo one; echo two",
+				"echo a && echo b",
+			]) {
+				expect(routeShellContract(command, "win32", { pythonEngine: true })).toMatchObject({
+					kind: "python-engine",
+					command,
+				});
+			}
+		});
+
+		it("routes state mutators to the engine", () => {
+			for (const command of ["cd ..", "export FOO=bar", "unset FOO"]) {
+				expect(routeShellContract(command, "win32", { pythonEngine: true })).toMatchObject({
+					kind: "python-engine",
+					command,
+				});
+			}
+		});
+
+		it("routes inline env assignments to the engine", () => {
+			expect(routeShellContract("FOO=bar node script.js", "win32", { pythonEngine: true })).toMatchObject({
+				kind: "python-engine",
+				command: "FOO=bar node script.js",
+			});
+		});
+
+		it("routes a PS-floor-rejected builtin form to the engine instead of failing closed", () => {
+			expect(routeShellContract("ls --color=always", "win32", { pythonEngine: true })).toMatchObject({
+				kind: "python-engine",
+				command: "ls --color=always",
+			});
+		});
+
+		it("keeps nested shells and POSIX scripts unsupported even with the engine enabled", () => {
+			for (const command of ["bash -lc 'rm -rf build'", "sh script.sh", "./script.sh"]) {
+				expect(routeShellContract(command, "win32", { pythonEngine: true })).toMatchObject({ kind: "unsupported" });
+			}
+		});
+
+		it("does not change classification when pythonEngine is explicitly false", () => {
+			for (const command of ["cat file | grep x", "FOO=bar node script.js", "ls --color=always"]) {
+				expect(routeShellContract(command, "win32", { pythonEngine: false })).toMatchObject({
+					kind: "unsupported",
+				});
+			}
+		});
+	});
 });
