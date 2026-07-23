@@ -30,6 +30,13 @@ On startup, a master's orphan scan finds worker entries whose parent is dead. It
 those workers are also dead -- a worker can outlive a crashed parent -- so it never kills or
 silently repurposes anything. Instead, for each orphan, **interactively**:
 
+If the worker's own process is dead and its resumable payload contains a Pi session context, the
+first prompt offers to resume that same logical agent. Acceptance launches the exact persisted
+session with its agent ID, cwd, worktree, orchestration profile, resource pointers, and bounded wake
+task. The resumed process overwrites the same `<role>-<sessionId>` matrix entry and reports its
+terminal process state through an event-driven parent notification. A still-live orphan follows the
+adopt/cleanup flow below.
+
 1. Ask: *"adopt worker `<entryId>` (lane `<laneKey>`)?"* Yes → this session becomes the worker's
    new parent (an adoption grant is written into the worker's own entry).
 2. If declined: ask *"clean up worker `<entryId>` gracefully?"* Yes → a cooperative wind-down
@@ -46,7 +53,8 @@ touches another session's entry, and only with explicit owner confirmation each 
 A worker polls its parent's pid on `watcherPollMs`. The moment that pid is no longer alive, it:
 
 1. Marks its own entry `winding_down` (reason `parent_lost`), then `resumable` with a payload
-   (its worktree-sync lane key, if bound) describing how the task could be picked back up.
+   containing its stable logical-agent ID, exact Pi session/cwd/profile context, bounded task
+   summary, and worktree-sync lane key (if bound).
 2. Emits one steer notice into its own session.
 3. Starts a bounded grace window (`adoptionGraceMs`), polling its own entry every
    `watcherPollMs` for a directive a new master may have written (see above):
@@ -110,8 +118,9 @@ cooperative boundary this system cannot structurally enforce across an arbitrary
 
 - It never kills a process. Every termination is either the process's own cooperative self-exit or
   an owner-confirmed grant the process itself later notices and applies.
-- It does not re-attach a tmux pane or re-dispatch a lane on adoption -- adoption changes who a
-  worker considers its parent, nothing about its tmux session or worktree-sync lane state.
+- It does not re-attach a tmux pane or re-dispatch a lane when adopting a still-live worker --
+  adoption changes who that worker considers its parent. Relaunch is reserved for a dead worker
+  with a complete persisted Pi resume context and still requires owner confirmation.
 - Correctness never depends on a heartbeat or a watcher tick arriving -- a crashed process just
   leaves a stale entry behind. `supervisor.ts`'s `reconcileMatrix` (prune `closed` and any
   `running`/`winding_down` entry whose own pid is dead; keep `resumable`/`adopted` until they age

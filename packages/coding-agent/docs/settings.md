@@ -148,9 +148,73 @@ Fitness applicability is intentionally split by autonomy level:
 
 ### Worker Delegation
 
-Delegation is available by default when the active model and UAC tool surface support it. Ultra reinforces proactive use but does not own or unlock the capability. Each worker gets a fresh classified tool surface (`read`, `grep`, `find`, and `ls`); its shipped profile filters those names with the same glob semantics as foreground UAC. `delegate`, shell, foreground memory/lifecycle tools, and opaque extension tools are never inherited into the child. The orchestrator may set `memoryRead: true` for a relevant task; if global memory retrieval remains enabled and the lane profile also grants `memory`, the worker receives a separate bounded query-only memory tool. Generic file tools cannot bypass that decision by reading private memory/auth/settings files. Memory writes remain unavailable. Workers are otherwise read-only unless the write toggle, a non-empty path scope, and the shipped profile all grant `write` or `edit`.
+Delegation requires an owner-authored orchestration profile. Global profiles live at `~/.pi/agent/profiles/orchestration/<id>.json`; project profiles live at `.pi/profiles/orchestration/<id>.json` and override a global profile with the same ID. Select the foreground architect with `--orchestration-profile <id>` or `activeOrchestrationProfile`. Select a default worker with `workerDelegation.orchestrationProfile`.
 
-The worker model is provider-independent: when `workerDelegation.model` is unset it inherits the active model; an explicit pattern may select any authenticated, capability-eligible model, including subscription, API-key, or local providers. The isolated worker resolves auth and text-tool fallback from that selected model rather than inheriting the foreground model's protocol. Local workers that contend with a local foreground are queued and drained at the configured running concurrency. `delegate_status` preserves bounded non-JSON read-only results and labels output that ended at a provider limit as incomplete instead of discarding it as unparseable.
+The profile fixes the role, provider/model, exact thinking level, tools, resource profiles, semantic capabilities, budgets, concurrency, lease duration, and independent-verification requirement. Fixed profiles contain one model. Ordered fallback profiles contain an owner-ordered candidate list; runtime health may advance through that list but cannot invent another model or reasoning level. An architect uses role `orchestrator`, grants only `workflow.delegate`, and lists the exact worker profile IDs it may select in `dispatchProfileIds`. A dispatch outside that list is rejected before creating a model call.
+
+```json
+{
+  "schemaVersion": 1,
+  "profileId": "architect",
+  "description": "Routing-only architect",
+  "role": "orchestrator",
+  "modelPolicy": {
+    "mode": "fixed",
+    "candidates": [
+      { "provider": "openai-codex", "modelId": "gpt-5.5", "thinkingLevel": "high" }
+    ]
+  },
+  "capabilityCeiling": ["workflow.delegate"],
+  "toolNames": ["delegate", "delegate_status"],
+  "resourceProfileNames": ["architect-minimal"],
+  "dispatchProfileIds": ["worker-fast", "verifier"],
+  "budget": { "maxTokens": 16000, "maxWallClockMs": 600000, "maxCostUsd": 2, "maxToolCalls": 20 },
+  "maxConcurrent": 1,
+  "leaseTtlMs": 660000,
+  "requireIndependentVerification": false,
+  "createdAt": "2026-07-23T00:00:00.000Z",
+  "updatedAt": "2026-07-23T00:00:00.000Z"
+}
+```
+
+```json
+{
+  "schemaVersion": 1,
+  "profileId": "worker-fast",
+  "description": "Pinned implementation worker",
+  "role": "implementer",
+  "modelPolicy": {
+    "mode": "fixed",
+    "candidates": [
+      { "provider": "openai", "modelId": "gpt-5-mini", "thinkingLevel": "minimal" }
+    ]
+  },
+  "capabilityCeiling": ["filesystem.read", "filesystem.write", "worktree.read", "worktree.mutate"],
+  "toolNames": ["read", "grep", "find", "ls", "write", "edit"],
+  "resourceProfileNames": ["worker-minimal"],
+  "dispatchProfileIds": [],
+  "budget": { "maxTokens": 8000, "maxWallClockMs": 180000, "maxCostUsd": 0.25, "maxAttempts": 2, "maxToolCalls": 12 },
+  "maxConcurrent": 3,
+  "leaseTtlMs": 240000,
+  "requireIndependentVerification": true,
+  "createdAt": "2026-07-23T00:00:00.000Z",
+  "updatedAt": "2026-07-23T00:00:00.000Z"
+}
+```
+
+Operator and verifier profiles that grant `process.exec` or `tests.execute` must also declare `executionPolicy`. `run_process` accepts only those exact executables, passes arguments directly without a shell, exposes only baseline plus owner-listed environment variables, terminates on timeout/output overflow, and always waits for a terminal process event.
+
+```json
+"executionPolicy": {
+  "allowedExecutables": ["node", "npm", "git"],
+  "allowedEnvironmentVariables": ["CI"],
+  "maxOutputBytes": 65536
+}
+```
+
+Each isolated worker gets a fresh classified surface. `delegate`, unrestricted shell, foreground memory/lifecycle tools, and opaque extension tools are not inherited. The orchestrator may request read-only memory only when the selected profile grants `memory.query` and exposes `memory`. Workers are otherwise read-only unless the global write switch, non-empty path scope, profile capabilities, and profile tool list all grant `write` or `edit`.
+
+Profiles are provider-independent: every candidate resolves through the model registry, exact model authentication, capability metadata, and the selected model's native or calibrated text-tool protocol. Worker concurrency is counted per profile under the global worker ceiling; local workers that contend with a local foreground are queued and drained under both limits. The old `workerDelegation.model` and `workerDelegation.profile` fields remain readable migration inputs but do not override an orchestration profile's model, reasoning, resources, or tools.
 
 **Confirmed behavior:** `delegate` returns a lane id immediately instead of waiting for the worker. `delegate_status` shows queued, running, and terminal workers and retrieves bounded terminal output by lane id. Completion emits a session notification with the completed lane id and status; the interactive footer shows running/queued counts or the latest terminal lane. Late worker output is stored separately and is never injected into an active foreground transcript.
 
@@ -159,11 +223,12 @@ Worker writes use **review-after-apply** semantics: a gate-authorized direct `wr
 | Setting | Type | Default | Description |
 |---------|------|---------|-------------|
 | `workerDelegation.enabled` | boolean | `true` | Enable bounded delegation on capability-eligible models; explicit `false` is a hard off-switch |
-| `workerDelegation.model` | string | active model | Optional worker model pattern |
-| `workerDelegation.profile` | string | - | Complete situation profile shipped with the worker; named and workspace-relative (`./`/`../`) references are supported |
-| `workerDelegation.maxUsd` | number | `0.5` | Maximum estimated USD per worker, clamped to 0-5 and to the parent envelope |
-| `workerDelegation.maxWallClockMs` | number | `120000` | Per-worker wall-clock budget; `0` disables this bound |
-| `workerDelegation.maxConcurrent` | number | `1` | Concurrent worker limit, clamped to 1-3 |
+| `workerDelegation.orchestrationProfile` | string | - | Owner-selected default worker profile; an active architect may use only IDs in its `dispatchProfileIds` |
+| `workerDelegation.model` | string | - | Legacy migration field; cannot override orchestration profile model policy |
+| `workerDelegation.profile` | string | - | Legacy resource-profile field; cannot override orchestration profile resources/tools |
+| `workerDelegation.maxUsd` | number | `0.5` | Global safety ceiling combined with the profile cost and approval thresholds |
+| `workerDelegation.maxWallClockMs` | number | `120000` | Global safety ceiling used when the profile omits a wall-clock budget |
+| `workerDelegation.maxConcurrent` | number | `1` | Global concurrency ceiling combined with profile `maxConcurrent` |
 | `workerDelegation.writeEnabled` | boolean | `false` | Make `write`/`edit` eligible only when `writePaths` is non-empty and the lane profile grants them |
 | `workerDelegation.writePaths` | string[] | `[]` | Relative or absolute path roots enforced for direct child tools and structured-action fallback writes |
 

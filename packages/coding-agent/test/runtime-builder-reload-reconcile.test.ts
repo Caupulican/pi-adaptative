@@ -124,6 +124,7 @@ function makeDeps(cwd: string, resourceLoader: ResourceLoader): TestDeps {
 		saveTaskStepsStateSnapshot: () => unreachable("saveTaskStepsStateSnapshot"),
 		getContextGcReport: () => unreachable("getContextGcReport"),
 		startWorkerDelegation: () => unreachable("startWorkerDelegation"),
+		getOrchestrationProfileCatalog: () => [],
 		getWorkerLaneRecords: () => unreachable("getWorkerLaneRecords"),
 		getWorkerResultSnapshots: () => unreachable("getWorkerResultSnapshots"),
 		resolveManagedLaneId: () => unreachable("resolveManagedLaneId"),

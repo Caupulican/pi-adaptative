@@ -1,6 +1,7 @@
 import path from "node:path";
 import type { AgentLoopConfig, AgentTool } from "@caupulican/pi-agent-core";
 import { type Static, Type } from "typebox";
+import type { OrchestrationExecutionPolicy } from "../orchestration/contracts.ts";
 import type { NormalizedProfile } from "../profile-registry.ts";
 import { matchesResourceProfilePattern } from "../settings-manager.ts";
 import { createEditTool } from "../tools/edit.ts";
@@ -8,6 +9,7 @@ import { createFindTool } from "../tools/find.ts";
 import { createGrepTool } from "../tools/grep.ts";
 import { createLsTool } from "../tools/ls.ts";
 import { createReadTool } from "../tools/read.ts";
+import { createRunProcessTool } from "../tools/run-process.ts";
 import { createWriteTool } from "../tools/write.ts";
 import type { CapabilityEnvelope } from "./contracts.ts";
 import { evaluateToolGate } from "./gates.ts";
@@ -15,6 +17,7 @@ import { evaluateToolGate } from "./gates.ts";
 const READ_ONLY_LANE_TOOL_NAMES = ["read", "grep", "find", "ls"] as const;
 const MEMORY_LANE_TOOL_NAME = "memory" as const;
 const WRITE_LANE_TOOL_NAMES = ["write", "edit"] as const;
+const PROCESS_LANE_TOOL_NAME = "run_process" as const;
 const laneMemorySchema = Type.Object({
 	query: Type.String({ description: "What relevant standing memory or prior evidence to retrieve" }),
 });
@@ -44,6 +47,9 @@ export interface LaneToolSurfaceOptions {
 	/** Research never sets this. Workers require both this flag and at least one write path. */
 	writeEnabled?: boolean;
 	writePaths?: readonly string[];
+	/** Present only for process-capable owner profiles; absent means no process tool is materialized. */
+	executionPolicy?: OrchestrationExecutionPolicy;
+	processMaxWallClockMs?: number;
 }
 
 function strictLaneProfilePatterns(profile: NormalizedProfile | undefined): {
@@ -67,6 +73,8 @@ function createLaneTools(
 	cwd: string,
 	names: readonly string[],
 	readMemory?: (query: string) => Promise<string>,
+	executionPolicy?: OrchestrationExecutionPolicy,
+	processMaxWallClockMs = 0,
 ): AgentTool[] {
 	const factories = new Map<string, () => AgentTool>([
 		["read", () => createReadTool(cwd)],
@@ -76,6 +84,11 @@ function createLaneTools(
 		["write", () => createWriteTool(cwd)],
 		["edit", () => createEditTool(cwd)],
 	]);
+	if (executionPolicy) {
+		factories.set(PROCESS_LANE_TOOL_NAME, () =>
+			createRunProcessTool(cwd, { policy: executionPolicy, maxWallClockMs: processMaxWallClockMs }),
+		);
+	}
 	if (readMemory) {
 		factories.set(MEMORY_LANE_TOOL_NAME, () => ({
 			name: MEMORY_LANE_TOOL_NAME,
@@ -112,6 +125,7 @@ export function createLaneToolSurface(options: LaneToolSurfaceOptions): LaneTool
 		...READ_ONLY_LANE_TOOL_NAMES,
 		...(options.readMemory ? [MEMORY_LANE_TOOL_NAME] : []),
 		...(writeCapable ? WRITE_LANE_TOOL_NAMES : []),
+		...(options.executionPolicy ? [PROCESS_LANE_TOOL_NAME] : []),
 	];
 	const patterns = strictLaneProfilePatterns(options.profile);
 	const deniedTools = candidateNames.filter((name) => matchesResourceProfilePattern(name, patterns.block));
@@ -127,7 +141,11 @@ export function createLaneToolSurface(options: LaneToolSurfaceOptions): LaneTool
 	const deniedPaths = options.deniedPaths?.map((entry) => path.resolve(entry));
 	const readEnvelope: CapabilityEnvelope = {
 		id: "isolated-lane-read-tools",
-		capabilities: ["read_files", ...(allowedToolSet.has(MEMORY_LANE_TOOL_NAME) ? (["memory_read"] as const) : [])],
+		capabilities: [
+			"read_files",
+			...(allowedToolSet.has(MEMORY_LANE_TOOL_NAME) ? (["memory_read"] as const) : []),
+			...(allowedToolSet.has(PROCESS_LANE_TOOL_NAME) ? (["run_shell"] as const) : []),
+		],
 		allowedTools,
 		deniedTools,
 		allowedPaths: [path.resolve(options.cwd)],
@@ -143,7 +161,13 @@ export function createLaneToolSurface(options: LaneToolSurfaceOptions): LaneTool
 	};
 
 	return {
-		tools: createLaneTools(options.cwd, allowedTools, options.readMemory),
+		tools: createLaneTools(
+			options.cwd,
+			allowedTools,
+			options.readMemory,
+			options.executionPolicy,
+			options.processMaxWallClockMs,
+		),
 		allowedTools,
 		deniedTools,
 		unboundAllowPatterns,

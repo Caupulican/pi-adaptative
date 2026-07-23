@@ -5,6 +5,7 @@
  * createAgentSession() options. The SDK does the heavy lifting.
  */
 
+import { spawn } from "node:child_process";
 import { createInterface } from "node:readline";
 import { assertValidSessionId, SessionManager } from "@caupulican/pi-agent-core/node";
 import { type ImageContent, modelsAreEqual } from "@caupulican/pi-ai";
@@ -24,6 +25,7 @@ import {
 } from "./core/agent-session-services.ts";
 import { formatNoModelsAvailableMessage } from "./core/auth-guidance.ts";
 import { AuthStorage } from "./core/auth-storage.ts";
+import type { CapabilityName } from "./core/autonomy/contracts.ts";
 import { formatDoctorReport, runDoctor, runUpdatePreflight } from "./core/doctor.ts";
 import { exportFromFile } from "./core/export-html/index.ts";
 import type { ExtensionFactory } from "./core/extensions/types.ts";
@@ -39,8 +41,18 @@ import {
 	type ScopedModel,
 } from "./core/model-resolver.ts";
 import { collectModelRouterConfigDiagnostics } from "./core/model-router/config-diagnostics.ts";
+import { buildPiResumeLaunchSpecFromContext } from "./core/orchestration/agent-resume.ts";
+import type { OrchestrationProfile } from "./core/orchestration/contracts.ts";
+import { resolveConfiguredOrchestrationModel } from "./core/orchestration/model-binding.ts";
+import { OrchestrationProfileStore } from "./core/orchestration/profile-store.ts";
 import { restoreStdout, takeOverStdout } from "./core/output-guard.ts";
-import { PI_PARENT_PID_ENV, PI_PARENT_SESSION_ENV, startProcessMatrixRuntime } from "./core/process-matrix/runtime.ts";
+import type { ResumablePayload } from "./core/process-matrix/codes.ts";
+import {
+	PI_PARENT_PID_ENV,
+	PI_PARENT_SESSION_ENV,
+	type ResumeWorkerLaunchOutcome,
+	startProcessMatrixRuntime,
+} from "./core/process-matrix/runtime.ts";
 import { isReloadSessionProcessAlive } from "./core/reload-blockers.ts";
 import { parseResourceProfileInput } from "./core/resource-profile-blocks.ts";
 import type { CreateAgentSessionOptions } from "./core/sdk.ts";
@@ -72,6 +84,73 @@ import { handleConfigCommand, handlePackageCommand } from "./package-manager-cli
 import { isLocalPath, normalizePath, resolvePath } from "./utils/paths.ts";
 import { cleanupWindowsSelfUpdateQuarantine } from "./utils/windows-self-update.ts";
 import { getProcessWorkRun, getWorkRoot, PI_WORK_ROOT_ENV } from "./utils/work-directory.ts";
+
+function getSelfLaunchTarget(): { executable: string; argsPrefix: string[] } | undefined {
+	const executableName = process.execPath.split(/[\\/]/).at(-1)?.toLowerCase();
+	const isScriptRuntime = ["node", "node.exe", "bun", "bun.exe"].includes(executableName ?? "");
+	if (!isScriptRuntime) return { executable: process.execPath, argsPrefix: [] };
+	const cliPath = process.argv[1];
+	return cliPath && !cliPath.startsWith("-") ? { executable: process.execPath, argsPrefix: [cliPath] } : undefined;
+}
+
+async function launchResumableWorker(
+	payload: ResumablePayload,
+	parentSessionId: string,
+): Promise<ResumeWorkerLaunchOutcome> {
+	const context = payload.resumeContext;
+	if (!context || context.provider !== "pi") return { started: false, reason: "Pi resume context is unavailable." };
+	const target = getSelfLaunchTarget();
+	if (!target) return { started: false, reason: "The current Pi executable cannot be resolved." };
+	const taskSummary = payload.taskSummary?.trim().slice(0, 2_000);
+	const wakePrompt = [
+		"Resume this interrupted delegated task using the persisted session context and the same logical agent identity.",
+		...(taskSummary ? [`Task: ${taskSummary}`] : []),
+		"Continue from the persisted transcript and any referenced checkpoints or artifacts, then finish with a persisted terminal result.",
+	].join("\n");
+	const spec = buildPiResumeLaunchSpecFromContext(
+		context,
+		{
+			executable: target.executable,
+			argsPrefix: target.argsPrefix,
+			parentPid: process.pid,
+			parentSessionId,
+			wakePrompt,
+		},
+		payload.agentId,
+	);
+	if ([spec.executable, spec.cwd, ...spec.args].some((value) => value.includes("\0"))) {
+		return { started: false, reason: "Resume launch data contains a null byte." };
+	}
+	try {
+		const child = spawn(spec.executable, spec.args, {
+			cwd: spec.cwd,
+			detached: true,
+			stdio: "ignore",
+			env: {
+				...process.env,
+				...spec.env,
+				...(payload.agentId ? { PI_ORCHESTRATION_AGENT_ID: payload.agentId } : {}),
+			},
+		});
+		return await new Promise<ResumeWorkerLaunchOutcome>((resolve) => {
+			child.once("error", (error) => {
+				resolve({ started: false, reason: error.message });
+			});
+			child.once("spawn", () => {
+				const completion = new Promise<{ code: number | null; signal: NodeJS.Signals | null }>(
+					(resolveCompletion, rejectCompletion) => {
+						child.once("exit", (code, signal) => resolveCompletion({ code, signal }));
+						child.once("error", rejectCompletion);
+					},
+				);
+				child.unref();
+				resolve({ started: true, completion });
+			});
+		});
+	} catch (error) {
+		return { started: false, reason: error instanceof Error ? error.message : String(error) };
+	}
+}
 
 /**
  * Read all content from piped stdin.
@@ -790,6 +869,43 @@ export async function main(args: string[], options?: MainOptions) {
 				? projectTrustedForSession
 				: (parsed.projectTrustOverride ?? (!hasProjectTrustInputs(cwd) || trustStore.get(cwd) === true));
 		const runtimeSettingsManager = SettingsManager.create(cwd, agentDir, { projectTrusted });
+		const orchestrationDiagnostics: AgentSessionRuntimeDiagnostic[] = [];
+		const orchestrationProfileId =
+			parsed.orchestrationProfile?.trim() || runtimeSettingsManager.getActiveOrchestrationProfile();
+		let orchestrationProfile: OrchestrationProfile | undefined;
+		if (orchestrationProfileId) {
+			const loaded = new OrchestrationProfileStore({ agentDir, cwd }).load();
+			orchestrationDiagnostics.push(
+				...loaded.diagnostics.map((diagnostic) => ({
+					type: "warning" as const,
+					message: `Orchestration profile ignored (${diagnostic.path}): ${diagnostic.message}`,
+				})),
+			);
+			orchestrationProfile = loaded.registry.get(orchestrationProfileId);
+			if (!orchestrationProfile) {
+				orchestrationDiagnostics.push({
+					type: "error",
+					message: `Orchestration profile '${orchestrationProfileId}' was not found.`,
+				});
+			} else {
+				runtimeSettingsManager.setRuntimeResourceProfiles([...orchestrationProfile.resourceProfileNames]);
+				const conflictingFlags = [
+					...(parsed.model || parsed.provider ? ["--model/--provider"] : []),
+					...(parsed.models ? ["--models"] : []),
+					...(parsed.thinking ? ["--thinking"] : []),
+					...(parsed.tools || parsed.excludeTools || parsed.noTools || parsed.noBuiltinTools
+						? ["--tools/--exclude-tools/--no-tools"]
+						: []),
+					...(parsed.resourceProfiles ? ["--resource-profile"] : []),
+				];
+				if (conflictingFlags.length > 0) {
+					orchestrationDiagnostics.push({
+						type: "error",
+						message: `Orchestration profile '${orchestrationProfile.profileId}' owns model, thinking, tools, and resources; remove conflicting ${conflictingFlags.join(", ")}.`,
+					});
+				}
+			}
+		}
 		if (parsed.resourceProfileJson) {
 			for (const profileInput of parsed.resourceProfileJson) {
 				const { profiles, errors } = parseResourceProfileInput(profileInput);
@@ -804,7 +920,7 @@ export async function main(args: string[], options?: MainOptions) {
 				runtimeSettingsManager.addInlineResourceProfileDefinitions(profiles);
 			}
 		}
-		if (parsed.resourceProfiles && parsed.resourceProfiles.length > 0) {
+		if (!orchestrationProfile && parsed.resourceProfiles && parsed.resourceProfiles.length > 0) {
 			runtimeSettingsManager.setRuntimeResourceProfiles(parsed.resourceProfiles);
 		}
 		const services = await createAgentSessionServices({
@@ -831,6 +947,7 @@ export async function main(args: string[], options?: MainOptions) {
 		const { settingsManager, modelRegistry, resourceLoader } = services;
 		const diagnostics: AgentSessionRuntimeDiagnostic[] = [
 			...services.diagnostics,
+			...orchestrationDiagnostics,
 			...collectSettingsDiagnostics(settingsManager, "runtime creation"),
 			...resourceLoader.getExtensions().errors.map(({ path, error }) => ({
 				type: "warning" as const,
@@ -863,6 +980,28 @@ export async function main(args: string[], options?: MainOptions) {
 			cwd,
 		);
 		diagnostics.push(...sessionOptionDiagnostics);
+		let orchestrationModel: ReturnType<typeof resolveConfiguredOrchestrationModel>;
+		if (orchestrationProfile) {
+			orchestrationModel = resolveConfiguredOrchestrationModel(orchestrationProfile, modelRegistry);
+			if (!orchestrationModel) {
+				diagnostics.push({
+					type: "error",
+					message: `Orchestration profile '${orchestrationProfile.profileId}' has no configured, authenticated model that supports its exact thinking level.`,
+				});
+			} else {
+				sessionOptions.model = orchestrationModel.model;
+				sessionOptions.thinkingLevel = orchestrationModel.binding.thinkingLevel;
+				sessionOptions.isExplicitModel = true;
+				sessionOptions.isExplicitThinking = true;
+				sessionOptions.scopedModels = [
+					{ model: orchestrationModel.model, thinkingLevel: orchestrationModel.binding.thinkingLevel },
+				];
+				sessionOptions.tools = [...orchestrationProfile.toolNames];
+				sessionOptions.excludeTools = undefined;
+				sessionOptions.noTools = undefined;
+				sessionOptions.orchestrationProfile = orchestrationProfile;
+			}
+		}
 
 		if (parsed.apiKey) {
 			if (!sessionOptions.model) {
@@ -889,10 +1028,37 @@ export async function main(args: string[], options?: MainOptions) {
 			noTools: sessionOptions.noTools,
 			toolProfileFilter: settingsManager.getResourceProfileFilter("tools"),
 			customTools: sessionOptions.customTools,
+			orchestrationProfile: sessionOptions.orchestrationProfile,
 		});
 		const cliThinkingOverride = parsed.thinking !== undefined || cliThinkingFromModel;
 		if (created.session.model && cliThinkingOverride) {
 			created.session.setThinkingLevel(created.session.thinkingLevel);
+		}
+		if (orchestrationProfile && orchestrationModel) {
+			const capabilities: CapabilityName[] = [];
+			const ceiling = orchestrationProfile.capabilityCeiling;
+			if (ceiling.includes("filesystem.read") || ceiling.includes("worktree.read")) capabilities.push("read_files");
+			if (ceiling.includes("filesystem.write") || ceiling.includes("worktree.mutate")) {
+				capabilities.push("write_files");
+			}
+			if (ceiling.includes("process.exec") || ceiling.includes("tests.execute")) capabilities.push("run_shell");
+			if (ceiling.includes("network.http") || ceiling.includes("service.mcp")) capabilities.push("network");
+			if (ceiling.includes("memory.query")) capabilities.push("memory_read");
+			if (ceiling.includes("memory.mutate")) capabilities.push("memory_write");
+			if (ceiling.includes("workflow.delegate")) capabilities.push("delegate");
+			created.session.capabilityEnvelope = {
+				id: `orchestration-profile:${orchestrationProfile.profileId}`,
+				profileId: orchestrationProfile.profileId,
+				capabilities,
+				allowedTools: [...orchestrationProfile.toolNames],
+				...(capabilities.includes("read_files") || capabilities.includes("write_files")
+					? { allowedPaths: [cwd] }
+					: {}),
+				...(orchestrationProfile.budget.maxCostUsd !== undefined
+					? { maxEstimatedUsd: orchestrationProfile.budget.maxCostUsd }
+					: {}),
+				createdAt: new Date().toISOString(),
+			};
 		}
 
 		return {
@@ -969,9 +1135,28 @@ export async function main(args: string[], options?: MainOptions) {
 	// winds down gracefully (never silently) when its parent disappears. Fire-and-forget, same as
 	// worktree-sync above: a broken store must never block session startup.
 	if (!isReadOnlyCommand) {
+		const activeOrchestrationProfileId =
+			parsed.orchestrationProfile?.trim() || settingsManager.getActiveOrchestrationProfile();
+		const sessionFile = sessionManager.getSessionFile();
+		const resumeContext = {
+			provider: "pi" as const,
+			sessionId: sessionManager.getSessionId(),
+			sessionDir: sessionManager.getSessionDir(),
+			...(sessionFile ? { sessionFile } : {}),
+			cwd: sessionManager.getCwd(),
+			...(boundWorktreeLaneKey ? { worktreeLaneKey: boundWorktreeLaneKey } : {}),
+			...(activeOrchestrationProfileId ? { orchestrationProfileId: activeOrchestrationProfileId } : {}),
+			resourceProfileNames: settingsManager.getActiveResourceProfileNames(),
+			...(session.model ? { modelRef: `${session.model.provider}/${session.model.id}` } : {}),
+			contextPointers: [],
+		};
 		void startProcessMatrixRuntime({
 			agentDir,
 			sessionId: sessionManager.getSessionId(),
+			agentId: process.env.PI_ORCHESTRATION_AGENT_ID?.trim() || sessionManager.getSessionId(),
+			resumeContext,
+			taskSummary: session.getGoalStateSnapshot()?.userGoal,
+			resumeWorker: (payload) => launchResumableWorker(payload, sessionManager.getSessionId()),
 			hasUI: appMode === "interactive",
 			settings: settingsManager.getProcessMatrixSettings(),
 			isProcessAlive: isReloadSessionProcessAlive,

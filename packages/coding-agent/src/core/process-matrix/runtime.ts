@@ -27,6 +27,7 @@
  */
 
 import { hostname as osHostname } from "node:os";
+import type { AgentResumeContext } from "../orchestration/contracts.ts";
 import { getParentPid, getParentSessionId } from "../process-identity.ts";
 import type { ResolvedProcessMatrixSettings } from "../settings-manager.ts";
 import { getBoundWorktreeLaneKey } from "../worktree-sync/runtime.ts";
@@ -63,7 +64,21 @@ export interface ProcessMatrixRuntimeConfig {
 	/** Cooperative self-exit -- called by a worker once wound down (grace expiry or a
 	 * master-granted cleanup directive). Never called for the master's own lifecycle. */
 	requestExit: () => void;
+	/** Durable logical-agent identity and exact Pi session context for crash/restart continuation. */
+	agentId?: string;
+	resumeContext?: AgentResumeContext;
+	taskSummary?: string;
+	/** Starts a replacement OS process for a dead resumable worker. Completion is an event-driven
+	 * terminal signal; worker product remains in its persisted session/artifacts. */
+	resumeWorker?: (payload: ResumablePayload) => Promise<ResumeWorkerLaunchOutcome>;
 }
+
+export type ResumeWorkerLaunchOutcome =
+	| {
+			started: true;
+			completion: Promise<{ code: number | null; signal: NodeJS.Signals | null }>;
+	  }
+	| { started: false; reason: string };
 
 export interface ProcessMatrixRuntimeHandle {
 	stop(): void;
@@ -176,6 +191,49 @@ async function runOrphanScan(config: ProcessMatrixRuntimeConfig, now: () => numb
 	}
 
 	for (const orphan of orphans) {
+		if (!config.isProcessAlive(orphan.pid)) {
+			const payload = orphan.resumable;
+			if (!payload?.resumeContext || !config.resumeWorker) {
+				config.onDiagnostic?.(
+					`process-matrix: dead worker ${orphan.entryId} is not automatically resumable because its launch context or resume launcher is unavailable`,
+				);
+				continue;
+			}
+			const resume = await config.promptConfirm(
+				`resume agent ${payload.agentId ?? orphan.agentId ?? orphan.sessionId} from its persisted session?`,
+			);
+			if (!resume) continue;
+			const claimed = applyAdoption(orphan, { parentPid: process.pid, parentSessionId: config.sessionId });
+			try {
+				await writeEntry(config.agentDir, claimed);
+				const launched = await config.resumeWorker(payload);
+				if (!launched.started) {
+					await writeEntry(config.agentDir, orphan);
+					config.onDiagnostic?.(`process-matrix: failed to resume ${orphan.entryId}: ${launched.reason}`);
+					continue;
+				}
+				void launched.completion.then(
+					({ code, signal }) => {
+						config.notify(
+							`process-matrix: resumed agent ${payload.agentId ?? orphan.sessionId} reached a terminal process state (code ${code ?? "none"}, signal ${signal ?? "none"}). Inspect its persisted result before continuing.`,
+						);
+					},
+					(error: unknown) => {
+						config.onDiagnostic?.(
+							`process-matrix: resumed agent ${payload.agentId ?? orphan.sessionId} terminal signal failed: ${describeError(error)}`,
+						);
+					},
+				);
+			} catch (error) {
+				try {
+					await writeEntry(config.agentDir, orphan);
+				} catch {
+					// The original resumable record remains the intended recovery state.
+				}
+				config.onDiagnostic?.(`process-matrix: failed to resume ${orphan.entryId}: ${describeError(error)}`);
+			}
+			continue;
+		}
 		const adopt = await config.promptConfirm(`adopt worker ${orphan.entryId} (lane ${orphan.laneKey ?? "none"})?`);
 		if (adopt) {
 			const adopted = applyAdoption(orphan, { parentPid: process.pid, parentSessionId: config.sessionId });
@@ -221,6 +279,8 @@ async function startWorkerBranch(
 		parentPid: initialParentPid,
 		...(parentSessionId !== undefined ? { parentSessionId } : {}),
 		...(laneKey !== undefined ? { laneKey } : {}),
+		...(config.agentId !== undefined ? { agentId: config.agentId } : {}),
+		...(config.resumeContext !== undefined ? { resumeContext: config.resumeContext } : {}),
 	});
 	try {
 		await writeEntry(config.agentDir, entry);
@@ -233,11 +293,23 @@ async function startWorkerBranch(
 	let stopped = false;
 	let timer: NodeJS.Timeout | undefined;
 	let ticking = false;
+	let preserveResumableOnExit = false;
+	const closeOnExit = (): void => {
+		if (preserveResumableOnExit) return;
+		try {
+			writeEntrySync(config.agentDir, markClosed(entry, nowIso(now)));
+		} catch {
+			// Best-effort. Dead-pid reconciliation remains authoritative.
+		}
+	};
+	process.once("exit", closeOnExit);
 
 	const stop = (): void => {
 		stopped = true;
 		if (timer) clearInterval(timer);
 		timer = undefined;
+		if (!preserveResumableOnExit) closeOnExit();
+		process.off("exit", closeOnExit);
 	};
 
 	const persist = async (next: ProcessMatrixEntry, failureContext: string): Promise<void> => {
@@ -299,8 +371,12 @@ async function startWorkerBranch(
 			timer = undefined;
 		}
 		const windDownAt = nowIso(now);
+		preserveResumableOnExit = true;
 		const resumable: ResumablePayload = { lastCode: "resumable" };
+		if (config.agentId !== undefined) resumable.agentId = config.agentId;
 		if (laneKey !== undefined) resumable.laneKey = laneKey;
+		if (config.taskSummary !== undefined) resumable.taskSummary = config.taskSummary;
+		if (config.resumeContext !== undefined) resumable.resumeContext = structuredClone(config.resumeContext);
 		await persist(
 			markResumable(beginWindDown(entry, "parent_lost", windDownAt), resumable, windDownAt),
 			"failed to write worker wind-down",
@@ -338,6 +414,7 @@ async function startWorkerBranch(
 				config.notify(`process-matrix: adopted by a new parent (pid ${directive.parentPid}). Resuming.`);
 				currentParentPid = directive.parentPid;
 				currentParentSessionId = fresh.parentSessionId;
+				preserveResumableOnExit = false;
 				if (timer) {
 					clearInterval(timer);
 					timer = undefined;

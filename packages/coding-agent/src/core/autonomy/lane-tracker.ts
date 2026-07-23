@@ -113,6 +113,19 @@ export class LaneTracker {
 		return { ...record };
 	}
 
+	/** Restore a durable queued lane without minting a replacement logical id. */
+	restoreQueued(args: { laneId: string; type: LaneType; goalId?: string; worktreeLaneKey?: string }): LaneRecord {
+		const existing = this._lanes.get(args.laneId);
+		if (existing) return { ...existing };
+		const record: LaneRecord = { laneId: args.laneId, type: args.type, status: "queued" };
+		if (args.goalId !== undefined) record.goalId = args.goalId;
+		if (args.worktreeLaneKey !== undefined) record.worktreeLaneKey = args.worktreeLaneKey;
+		this._lanes.set(args.laneId, record);
+		const suffix = /-(\d+)$/.exec(args.laneId)?.[1];
+		if (suffix) this.ensureCounterAtLeast(Number(suffix) + 1);
+		return { ...record };
+	}
+
 	markRunning(laneId: string): LaneRecord | undefined {
 		const record = this._lanes.get(laneId);
 		if (!record || record.status !== "queued") return undefined;

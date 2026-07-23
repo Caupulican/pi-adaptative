@@ -6,6 +6,7 @@
  * real processes. `runtime.ts` is the only caller that supplies real deps and real I/O.
  */
 
+import type { AgentResumeContext } from "../orchestration/contracts.ts";
 import type {
 	ProcessMatrixEntry,
 	ReconcileMatrixResult,
@@ -46,6 +47,8 @@ export interface BuildWorkerEntryFacts {
 	tmuxSession?: string;
 	tmuxPanePid?: number;
 	taskRef?: string;
+	agentId?: string;
+	resumeContext?: AgentResumeContext;
 }
 
 export function buildWorkerEntry(facts: BuildWorkerEntryFacts): ProcessMatrixEntry {
@@ -65,6 +68,8 @@ export function buildWorkerEntry(facts: BuildWorkerEntryFacts): ProcessMatrixEnt
 	if (facts.tmuxSession !== undefined) entry.tmuxSession = facts.tmuxSession;
 	if (facts.tmuxPanePid !== undefined) entry.tmuxPanePid = facts.tmuxPanePid;
 	if (facts.taskRef !== undefined) entry.taskRef = facts.taskRef;
+	if (facts.agentId !== undefined) entry.agentId = facts.agentId;
+	if (facts.resumeContext !== undefined) entry.resumeContext = structuredClone(facts.resumeContext);
 	return entry;
 }
 

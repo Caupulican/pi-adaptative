@@ -1,0 +1,1015 @@
+import { randomUUID } from "node:crypto";
+import type { JsonObject } from "../autonomy/contracts.ts";
+import {
+	type AcceptanceCriterion,
+	type AgentBindingContract,
+	type AgentResumeContext,
+	type AppendOrchestrationEventInput,
+	type AttemptCheckpoint,
+	type AttemptLease,
+	type AttemptStatus,
+	type ObjectiveContract,
+	type ObjectiveStatus,
+	ORCHESTRATION_SCHEMA_VERSION,
+	type OrchestrationDispatchRequest,
+	type OrchestrationEvent,
+	type OrchestrationTaskStatus,
+	type RiskBudget,
+	type TaskContract,
+	toJsonObject,
+	type WorkerResultContract,
+} from "./contracts.ts";
+import type { OrchestrationEventStore } from "./event-store.ts";
+
+export interface ObjectiveRuntimeState {
+	objective: ObjectiveContract;
+	taskIds: readonly string[];
+}
+
+export interface TaskRuntimeState {
+	task: TaskContract;
+	attemptIds: readonly string[];
+}
+
+export interface AttemptRuntimeState {
+	attemptId: string;
+	taskId: string;
+	dispatch: OrchestrationDispatchRequest;
+	status: AttemptStatus;
+	grantId?: string;
+	agentId?: string;
+	lease?: AttemptLease;
+	checkpointIds: readonly string[];
+	result?: WorkerResultContract;
+	createdAt: string;
+	updatedAt: string;
+}
+
+export interface NotificationRuntimeState {
+	notificationId: string;
+	objectiveId: string;
+	attemptId?: string;
+	status: "pending" | "delivered";
+	message: string;
+	createdAt: string;
+	deliveredAt?: string;
+}
+
+export interface TaskRuntimeProjection {
+	lastOrdinal: number;
+	agents: Readonly<Record<string, AgentBindingContract>>;
+	objectives: Readonly<Record<string, ObjectiveRuntimeState>>;
+	tasks: Readonly<Record<string, TaskRuntimeState>>;
+	attempts: Readonly<Record<string, AttemptRuntimeState>>;
+	checkpoints: Readonly<Record<string, AttemptCheckpoint>>;
+	notifications: Readonly<Record<string, NotificationRuntimeState>>;
+}
+
+export interface CreateObjectiveInput {
+	objectiveId?: string;
+	title: string;
+	description: string;
+	constraints?: readonly string[];
+	acceptanceCriteria?: readonly AcceptanceCriterion[];
+	riskBudget?: RiskBudget;
+}
+
+export interface CreateTaskInput {
+	taskId?: string;
+	objectiveId: string;
+	title: string;
+	description: string;
+	role: TaskContract["role"];
+	dependsOn?: readonly string[];
+	requiredCapabilities?: TaskContract["requiredCapabilities"];
+	acceptanceCriterionIds?: readonly string[];
+	riskBudget?: RiskBudget;
+}
+
+export interface DurableTaskRuntimeOptions {
+	store: OrchestrationEventStore;
+	now?: () => number;
+	createId?: () => string;
+}
+
+export interface RegisterAgentInput {
+	agentId?: string;
+	role: AgentBindingContract["role"];
+	resumeContext: AgentResumeContext;
+}
+
+export class DurableTaskRuntimeError extends Error {
+	constructor(message: string) {
+		super(message);
+		this.name = "DurableTaskRuntimeError";
+	}
+}
+
+function emptyProjection(): TaskRuntimeProjection {
+	return { lastOrdinal: 0, agents: {}, objectives: {}, tasks: {}, attempts: {}, checkpoints: {}, notifications: {} };
+}
+
+function cloneProjection(state: TaskRuntimeProjection): TaskRuntimeProjection {
+	return structuredClone(state);
+}
+
+function record(value: unknown, label: string): Record<string, unknown> {
+	if (!value || typeof value !== "object" || Array.isArray(value)) {
+		throw new DurableTaskRuntimeError(`${label} is not an object.`);
+	}
+	return value as Record<string, unknown>;
+}
+
+function string(value: unknown, label: string): string {
+	if (typeof value !== "string" || value.length === 0) throw new DurableTaskRuntimeError(`${label} is required.`);
+	return value;
+}
+
+function number(value: unknown, label: string): number {
+	if (typeof value !== "number" || !Number.isFinite(value)) throw new DurableTaskRuntimeError(`${label} is invalid.`);
+	return value;
+}
+
+function stringArray(value: unknown, label: string): string[] {
+	if (!Array.isArray(value) || !value.every((entry) => typeof entry === "string")) {
+		throw new DurableTaskRuntimeError(`${label} must be a string array.`);
+	}
+	return [...value];
+}
+
+function objectiveFromPayload(payload: JsonObject): ObjectiveContract {
+	return structuredClone(record(payload.objective, "objective")) as unknown as ObjectiveContract;
+}
+
+function taskFromPayload(payload: JsonObject): TaskContract {
+	return structuredClone(record(payload.task, "task")) as unknown as TaskContract;
+}
+
+function leaseFromPayload(payload: JsonObject): AttemptLease {
+	const lease = record(payload.lease, "lease");
+	return {
+		leaseId: string(lease.leaseId, "lease.leaseId"),
+		attemptId: string(lease.attemptId, "lease.attemptId"),
+		ownerId: string(lease.ownerId, "lease.ownerId"),
+		fencingToken: number(lease.fencingToken, "lease.fencingToken"),
+		issuedAt: string(lease.issuedAt, "lease.issuedAt"),
+		expiresAt: string(lease.expiresAt, "lease.expiresAt"),
+	};
+}
+
+function checkpointFromPayload(payload: JsonObject): AttemptCheckpoint {
+	const checkpoint = record(payload.checkpoint, "checkpoint");
+	return {
+		checkpointId: string(checkpoint.checkpointId, "checkpoint.checkpointId"),
+		attemptId: string(checkpoint.attemptId, "checkpoint.attemptId"),
+		fencingToken: number(checkpoint.fencingToken, "checkpoint.fencingToken"),
+		summary: string(checkpoint.summary, "checkpoint.summary"),
+		artifactIds: stringArray(checkpoint.artifactIds, "checkpoint.artifactIds"),
+		evidenceIds: stringArray(checkpoint.evidenceIds, "checkpoint.evidenceIds"),
+		createdAt: string(checkpoint.createdAt, "checkpoint.createdAt"),
+	};
+}
+
+function resultFromPayload(payload: JsonObject): WorkerResultContract {
+	return structuredClone(record(payload.result, "result")) as unknown as WorkerResultContract;
+}
+
+function agentFromPayload(payload: JsonObject): AgentBindingContract {
+	return structuredClone(record(payload.agent, "agent")) as unknown as AgentBindingContract;
+}
+
+function updateObjectiveStatus(
+	state: TaskRuntimeProjection,
+	objectiveId: string,
+	status: ObjectiveStatus,
+	at: string,
+): void {
+	const current = state.objectives[objectiveId];
+	if (!current) throw new DurableTaskRuntimeError(`Unknown objective '${objectiveId}'.`);
+	(state.objectives as Record<string, ObjectiveRuntimeState>)[objectiveId] = {
+		...current,
+		objective: { ...current.objective, status, updatedAt: at },
+	};
+}
+
+function terminalAttemptStatus(status: AttemptStatus): boolean {
+	return ["completed", "partial", "blocked", "failed", "cancelled", "expired"].includes(status);
+}
+
+function taskStatusForResult(status: WorkerResultContract["status"]): OrchestrationTaskStatus {
+	if (status === "completed") return "completed";
+	if (status === "failed") return "failed";
+	if (status === "cancelled") return "cancelled";
+	return "blocked";
+}
+
+function refreshReadyTasks(state: TaskRuntimeProjection, objectiveId: string, at: string): void {
+	const objective = state.objectives[objectiveId];
+	if (!objective || objective.objective.status !== "active") return;
+	const mutableTasks = state.tasks as Record<string, TaskRuntimeState>;
+	for (const taskId of objective.taskIds) {
+		const current = mutableTasks[taskId];
+		if (!current || current.task.status !== "pending") continue;
+		if (current.task.dependsOn.every((dependencyId) => mutableTasks[dependencyId]?.task.status === "completed")) {
+			mutableTasks[taskId] = { ...current, task: { ...current.task, status: "ready", updatedAt: at } };
+		}
+	}
+}
+
+export function reduceOrchestrationEvent(
+	projection: TaskRuntimeProjection,
+	event: OrchestrationEvent,
+): TaskRuntimeProjection {
+	if (event.ordinal <= projection.lastOrdinal) return projection;
+	const state = cloneProjection(projection);
+	const agents = state.agents as Record<string, AgentBindingContract>;
+	const objectives = state.objectives as Record<string, ObjectiveRuntimeState>;
+	const tasks = state.tasks as Record<string, TaskRuntimeState>;
+	const attempts = state.attempts as Record<string, AttemptRuntimeState>;
+	const checkpoints = state.checkpoints as Record<string, AttemptCheckpoint>;
+	const notifications = state.notifications as Record<string, NotificationRuntimeState>;
+
+	switch (event.type) {
+		case "objective.created": {
+			const objective = objectiveFromPayload(event.payload);
+			if (objectives[objective.objectiveId]) {
+				throw new DurableTaskRuntimeError(`Objective '${objective.objectiveId}' was created more than once.`);
+			}
+			objectives[objective.objectiveId] = { objective, taskIds: [] };
+			break;
+		}
+		case "objective.paused":
+			updateObjectiveStatus(state, event.aggregateId, "paused", event.occurredAt);
+			break;
+		case "objective.resumed":
+			updateObjectiveStatus(state, event.aggregateId, "active", event.occurredAt);
+			refreshReadyTasks(state, event.aggregateId, event.occurredAt);
+			break;
+		case "objective.completed":
+			updateObjectiveStatus(state, event.aggregateId, "completed", event.occurredAt);
+			break;
+		case "objective.cancelled": {
+			updateObjectiveStatus(state, event.aggregateId, "cancelled", event.occurredAt);
+			const objective = objectives[event.aggregateId];
+			for (const taskId of objective?.taskIds ?? []) {
+				const taskState = tasks[taskId];
+				if (taskState && !["completed", "failed", "cancelled"].includes(taskState.task.status)) {
+					tasks[taskId] = {
+						...taskState,
+						task: { ...taskState.task, status: "cancelled", updatedAt: event.occurredAt },
+					};
+				}
+				for (const attemptId of taskState?.attemptIds ?? []) {
+					const attempt = attempts[attemptId];
+					if (attempt && !terminalAttemptStatus(attempt.status)) {
+						attempts[attemptId] = { ...attempt, status: "cancelled", updatedAt: event.occurredAt };
+					}
+				}
+			}
+			break;
+		}
+		case "task.created": {
+			const task = taskFromPayload(event.payload);
+			const objective = objectives[task.objectiveId];
+			if (!objective) throw new DurableTaskRuntimeError(`Task '${task.taskId}' references an unknown objective.`);
+			if (tasks[task.taskId]) throw new DurableTaskRuntimeError(`Task '${task.taskId}' was created more than once.`);
+			tasks[task.taskId] = { task, attemptIds: [] };
+			objectives[task.objectiveId] = { ...objective, taskIds: [...objective.taskIds, task.taskId] };
+			refreshReadyTasks(state, task.objectiveId, event.occurredAt);
+			break;
+		}
+		case "task.ready": {
+			const taskId = string(event.payload.taskId, "task.ready.taskId");
+			const current = tasks[taskId];
+			if (!current) throw new DurableTaskRuntimeError(`Unknown task '${taskId}'.`);
+			tasks[taskId] = { ...current, task: { ...current.task, status: "ready", updatedAt: event.occurredAt } };
+			break;
+		}
+		case "task.failed": {
+			const taskId = string(event.payload.taskId, "task.failed.taskId");
+			const current = tasks[taskId];
+			if (!current) throw new DurableTaskRuntimeError(`Unknown task '${taskId}'.`);
+			tasks[taskId] = { ...current, task: { ...current.task, status: "failed", updatedAt: event.occurredAt } };
+			break;
+		}
+		case "agent.registered": {
+			const agent = agentFromPayload(event.payload);
+			if (agents[agent.agentId])
+				throw new DurableTaskRuntimeError(`Agent '${agent.agentId}' was registered more than once.`);
+			agents[agent.agentId] = agent;
+			break;
+		}
+		case "agent.suspended": {
+			const agentId = string(event.payload.agentId, "agent.suspended.agentId");
+			const agent = agents[agentId];
+			if (!agent) throw new DurableTaskRuntimeError(`Unknown agent '${agentId}'.`);
+			agents[agentId] = { ...agent, status: "suspended", updatedAt: event.occurredAt };
+			break;
+		}
+		case "agent.resume_requested": {
+			const agentId = string(event.payload.agentId, "agent.resume_requested.agentId");
+			const agent = agents[agentId];
+			if (!agent) throw new DurableTaskRuntimeError(`Unknown agent '${agentId}'.`);
+			agents[agentId] = { ...agent, status: "resuming", updatedAt: event.occurredAt };
+			break;
+		}
+		case "agent.resumed": {
+			const agentId = string(event.payload.agentId, "agent.resumed.agentId");
+			const attemptId = string(event.payload.attemptId, "agent.resumed.attemptId");
+			const agent = agents[agentId];
+			if (!agent) throw new DurableTaskRuntimeError(`Unknown agent '${agentId}'.`);
+			agents[agentId] = { ...agent, status: "active", activeAttemptId: attemptId, updatedAt: event.occurredAt };
+			break;
+		}
+		case "attempt.queued": {
+			const attemptId = string(event.payload.attemptId, "attempt.queued.attemptId");
+			const taskId = string(event.payload.taskId, "attempt.queued.taskId");
+			const task = tasks[taskId];
+			if (!task) throw new DurableTaskRuntimeError(`Attempt '${attemptId}' references an unknown task.`);
+			if (attempts[attemptId])
+				throw new DurableTaskRuntimeError(`Attempt '${attemptId}' was queued more than once.`);
+			attempts[attemptId] = {
+				attemptId,
+				taskId,
+				dispatch: structuredClone(
+					record(event.payload.dispatch, "attempt.queued.dispatch"),
+				) as unknown as OrchestrationDispatchRequest,
+				status: "queued",
+				...(typeof event.payload.grantId === "string" ? { grantId: event.payload.grantId } : {}),
+				checkpointIds: [],
+				createdAt: event.occurredAt,
+				updatedAt: event.occurredAt,
+			};
+			tasks[taskId] = {
+				...task,
+				task: { ...task.task, status: "running", updatedAt: event.occurredAt },
+				attemptIds: [...task.attemptIds, attemptId],
+			};
+			break;
+		}
+		case "attempt.leased": {
+			const lease = leaseFromPayload(event.payload);
+			const attempt = attempts[lease.attemptId];
+			if (!attempt) throw new DurableTaskRuntimeError(`Unknown attempt '${lease.attemptId}'.`);
+			const agentId = typeof event.payload.agentId === "string" ? event.payload.agentId : undefined;
+			if (agentId) {
+				const agent = agents[agentId];
+				if (!agent) throw new DurableTaskRuntimeError(`Unknown agent '${agentId}'.`);
+				agents[agentId] = {
+					...agent,
+					status: "active",
+					activeAttemptId: lease.attemptId,
+					updatedAt: event.occurredAt,
+				};
+			}
+			attempts[lease.attemptId] = {
+				...attempt,
+				status: "leased",
+				lease,
+				...(agentId ? { agentId } : {}),
+				updatedAt: event.occurredAt,
+			};
+			break;
+		}
+		case "attempt.started": {
+			const attemptId = string(event.payload.attemptId, "attempt.started.attemptId");
+			const attempt = attempts[attemptId];
+			if (!attempt) throw new DurableTaskRuntimeError(`Unknown attempt '${attemptId}'.`);
+			attempts[attemptId] = { ...attempt, status: "running", updatedAt: event.occurredAt };
+			break;
+		}
+		case "attempt.checkpointed": {
+			const checkpoint = checkpointFromPayload(event.payload);
+			const attempt = attempts[checkpoint.attemptId];
+			if (!attempt) throw new DurableTaskRuntimeError(`Unknown attempt '${checkpoint.attemptId}'.`);
+			checkpoints[checkpoint.checkpointId] = checkpoint;
+			attempts[checkpoint.attemptId] = {
+				...attempt,
+				checkpointIds: [...attempt.checkpointIds, checkpoint.checkpointId],
+				updatedAt: event.occurredAt,
+			};
+			if (attempt.agentId) {
+				const agent = agents[attempt.agentId];
+				if (agent) {
+					agents[attempt.agentId] = {
+						...agent,
+						resumeContext: { ...agent.resumeContext, latestCheckpointId: checkpoint.checkpointId },
+						updatedAt: event.occurredAt,
+					};
+				}
+			}
+			break;
+		}
+		case "attempt.suspended": {
+			const attemptId = string(event.payload.attemptId, "attempt.suspended.attemptId");
+			const attempt = attempts[attemptId];
+			if (!attempt) throw new DurableTaskRuntimeError(`Unknown attempt '${attemptId}'.`);
+			attempts[attemptId] = { ...attempt, status: "suspended", updatedAt: event.occurredAt };
+			if (attempt.agentId) {
+				const agent = agents[attempt.agentId];
+				if (agent) agents[attempt.agentId] = { ...agent, status: "suspended", updatedAt: event.occurredAt };
+			}
+			break;
+		}
+		case "attempt.resumed": {
+			const lease = leaseFromPayload(event.payload);
+			const agentId = string(event.payload.agentId, "attempt.resumed.agentId");
+			const attempt = attempts[lease.attemptId];
+			const agent = agents[agentId];
+			if (!attempt) throw new DurableTaskRuntimeError(`Unknown attempt '${lease.attemptId}'.`);
+			if (!agent) throw new DurableTaskRuntimeError(`Unknown agent '${agentId}'.`);
+			attempts[lease.attemptId] = {
+				...attempt,
+				status: "leased",
+				agentId,
+				lease,
+				updatedAt: event.occurredAt,
+			};
+			agents[agentId] = {
+				...agent,
+				status: "active",
+				activeAttemptId: lease.attemptId,
+				updatedAt: event.occurredAt,
+			};
+			break;
+		}
+		case "attempt.cancelled": {
+			const attemptId = string(event.payload.attemptId, "attempt.cancelled.attemptId");
+			const attempt = attempts[attemptId];
+			if (!attempt) throw new DurableTaskRuntimeError(`Unknown attempt '${attemptId}'.`);
+			attempts[attemptId] = { ...attempt, status: "cancelled", updatedAt: event.occurredAt };
+			const task = tasks[attempt.taskId];
+			if (task) {
+				tasks[attempt.taskId] = {
+					...task,
+					task: { ...task.task, status: "cancelled", updatedAt: event.occurredAt },
+				};
+			}
+			if (attempt.agentId) {
+				const agent = agents[attempt.agentId];
+				if (agent) {
+					const next = { ...agent, status: "registered" as const, updatedAt: event.occurredAt };
+					delete next.activeAttemptId;
+					agents[attempt.agentId] = next;
+				}
+			}
+			break;
+		}
+		case "attempt.finished": {
+			const result = resultFromPayload(event.payload);
+			const attempt = attempts[result.attemptId];
+			if (!attempt) throw new DurableTaskRuntimeError(`Unknown attempt '${result.attemptId}'.`);
+			attempts[result.attemptId] = { ...attempt, status: result.status, result, updatedAt: event.occurredAt };
+			const task = tasks[result.taskId];
+			if (!task) throw new DurableTaskRuntimeError(`Unknown task '${result.taskId}'.`);
+			tasks[result.taskId] = {
+				...task,
+				task: { ...task.task, status: taskStatusForResult(result.status), updatedAt: event.occurredAt },
+			};
+			if (attempt.agentId) {
+				const agent = agents[attempt.agentId];
+				if (agent) {
+					const next = { ...agent, status: "registered" as const, updatedAt: event.occurredAt };
+					delete next.activeAttemptId;
+					agents[attempt.agentId] = next;
+				}
+			}
+			refreshReadyTasks(state, task.task.objectiveId, event.occurredAt);
+			break;
+		}
+		case "attempt.lease_expired": {
+			const attemptId = string(event.payload.attemptId, "attempt.lease_expired.attemptId");
+			const attempt = attempts[attemptId];
+			if (!attempt) throw new DurableTaskRuntimeError(`Unknown attempt '${attemptId}'.`);
+			attempts[attemptId] = { ...attempt, status: "expired", updatedAt: event.occurredAt };
+			const task = tasks[attempt.taskId];
+			if (task)
+				tasks[attempt.taskId] = { ...task, task: { ...task.task, status: "ready", updatedAt: event.occurredAt } };
+			break;
+		}
+		case "approval.requested":
+		case "approval.resolved":
+			break;
+		case "notification.enqueued": {
+			const notificationId = string(event.payload.notificationId, "notification.enqueued.notificationId");
+			notifications[notificationId] = {
+				notificationId,
+				objectiveId: string(event.payload.objectiveId, "notification.enqueued.objectiveId"),
+				...(typeof event.payload.attemptId === "string" ? { attemptId: event.payload.attemptId } : {}),
+				status: "pending",
+				message: string(event.payload.message, "notification.enqueued.message"),
+				createdAt: event.occurredAt,
+			};
+			break;
+		}
+		case "notification.delivered": {
+			const notificationId = string(event.payload.notificationId, "notification.delivered.notificationId");
+			const notification = notifications[notificationId];
+			if (!notification) throw new DurableTaskRuntimeError(`Unknown notification '${notificationId}'.`);
+			notifications[notificationId] = { ...notification, status: "delivered", deliveredAt: event.occurredAt };
+			break;
+		}
+	}
+
+	return { ...state, lastOrdinal: event.ordinal };
+}
+
+export function projectOrchestrationEvents(events: readonly OrchestrationEvent[]): TaskRuntimeProjection {
+	return events.reduce(reduceOrchestrationEvent, emptyProjection());
+}
+
+export class DurableTaskRuntime {
+	private readonly store: OrchestrationEventStore;
+	private readonly now: () => number;
+	private readonly createId: () => string;
+	private state: TaskRuntimeProjection;
+
+	constructor(options: DurableTaskRuntimeOptions) {
+		this.store = options.store;
+		this.now = options.now ?? Date.now;
+		this.createId = options.createId ?? randomUUID;
+		this.state = projectOrchestrationEvents(this.store.readAll());
+	}
+
+	getSnapshot(): TaskRuntimeProjection {
+		this.refresh();
+		return cloneProjection(this.state);
+	}
+
+	registerAgent(input: RegisterAgentInput): AgentBindingContract {
+		this.refresh();
+		const now = this.nowIso();
+		const agent: AgentBindingContract = {
+			schemaVersion: ORCHESTRATION_SCHEMA_VERSION,
+			agentId: input.agentId ?? `agent-${this.createId()}`,
+			role: input.role,
+			status: "registered",
+			resumeContext: structuredClone(input.resumeContext),
+			createdAt: now,
+			updatedAt: now,
+		};
+		if (!agent.resumeContext.sessionId || !agent.resumeContext.cwd) {
+			throw new DurableTaskRuntimeError("Agent resume context requires sessionId and cwd.");
+		}
+		if (this.state.agents[agent.agentId])
+			throw new DurableTaskRuntimeError(`Agent '${agent.agentId}' already exists.`);
+		this.commit({
+			type: "agent.registered",
+			aggregateId: agent.agentId,
+			actor: "runtime",
+			idempotencyKey: `agent-registered:${agent.agentId}`,
+			payload: toJsonObject({ agent }),
+		});
+		return structuredClone(agent);
+	}
+
+	createObjective(input: CreateObjectiveInput): ObjectiveContract {
+		this.refresh();
+		const now = this.nowIso();
+		const objective: ObjectiveContract = {
+			schemaVersion: ORCHESTRATION_SCHEMA_VERSION,
+			objectiveId: input.objectiveId ?? `objective-${this.createId()}`,
+			title: input.title.trim(),
+			description: input.description.trim(),
+			status: "active",
+			constraints: [...(input.constraints ?? [])],
+			acceptanceCriteria: structuredClone(input.acceptanceCriteria ?? []),
+			riskBudget: { ...(input.riskBudget ?? {}) },
+			createdAt: now,
+			updatedAt: now,
+		};
+		if (!objective.title || !objective.description)
+			throw new DurableTaskRuntimeError("Objective title and description are required.");
+		if (this.state.objectives[objective.objectiveId]) {
+			throw new DurableTaskRuntimeError(`Objective '${objective.objectiveId}' already exists.`);
+		}
+		this.commit({
+			type: "objective.created",
+			aggregateId: objective.objectiveId,
+			actor: "kernel",
+			idempotencyKey: `objective-created:${objective.objectiveId}`,
+			payload: toJsonObject({ objective }),
+		});
+		return structuredClone(objective);
+	}
+
+	createTask(input: CreateTaskInput): TaskContract {
+		this.refresh();
+		const objectiveState = this.state.objectives[input.objectiveId];
+		if (!objectiveState) throw new DurableTaskRuntimeError(`Unknown objective '${input.objectiveId}'.`);
+		if (objectiveState.objective.status !== "active") {
+			throw new DurableTaskRuntimeError(`Objective '${input.objectiveId}' is not active.`);
+		}
+		const dependsOn = [...new Set(input.dependsOn ?? [])];
+		for (const dependencyId of dependsOn) {
+			const dependency = this.state.tasks[dependencyId];
+			if (!dependency || dependency.task.objectiveId !== input.objectiveId) {
+				throw new DurableTaskRuntimeError(
+					`Task dependency '${dependencyId}' is not in objective '${input.objectiveId}'.`,
+				);
+			}
+		}
+		const now = this.nowIso();
+		const task: TaskContract = {
+			schemaVersion: ORCHESTRATION_SCHEMA_VERSION,
+			taskId: input.taskId ?? `task-${this.createId()}`,
+			objectiveId: input.objectiveId,
+			title: input.title.trim(),
+			description: input.description.trim(),
+			role: input.role,
+			status: dependsOn.length === 0 ? "ready" : "pending",
+			dependsOn,
+			requiredCapabilities: [...new Set(input.requiredCapabilities ?? [])],
+			acceptanceCriterionIds: [...new Set(input.acceptanceCriterionIds ?? [])],
+			riskBudget: { ...(input.riskBudget ?? {}) },
+			createdAt: now,
+			updatedAt: now,
+		};
+		if (!task.title || !task.description)
+			throw new DurableTaskRuntimeError("Task title and description are required.");
+		if (this.state.tasks[task.taskId]) throw new DurableTaskRuntimeError(`Task '${task.taskId}' already exists.`);
+		this.commit({
+			type: "task.created",
+			aggregateId: task.objectiveId,
+			actor: "runtime",
+			idempotencyKey: `task-created:${task.taskId}`,
+			payload: toJsonObject({ task }),
+		});
+		return structuredClone(this.state.tasks[task.taskId]!.task);
+	}
+
+	queueAttempt(taskId: string, dispatch: OrchestrationDispatchRequest, grantId?: string): AttemptRuntimeState {
+		this.refresh();
+		const task = this.requireDispatchableTask(taskId);
+		if (dispatch.taskId !== taskId) {
+			throw new DurableTaskRuntimeError("Dispatch taskId does not match the queued task.");
+		}
+		if (!dispatch.profileId.trim() || !dispatch.instructions.trim()) {
+			throw new DurableTaskRuntimeError("Dispatch profileId and instructions are required.");
+		}
+		const objective = this.state.objectives[task.task.objectiveId]!.objective;
+		const attemptCeilings = [task.task.riskBudget.maxAttempts, objective.riskBudget.maxAttempts].filter(
+			(value): value is number => value !== undefined,
+		);
+		const maxAttempts = attemptCeilings.length > 0 ? Math.min(...attemptCeilings) : undefined;
+		if (maxAttempts !== undefined && task.attemptIds.length >= maxAttempts) {
+			throw new DurableTaskRuntimeError(`Task '${taskId}' exhausted its ${maxAttempts} attempt budget.`);
+		}
+		const attemptId = `attempt-${this.createId()}`;
+		this.commit({
+			type: "attempt.queued",
+			aggregateId: taskId,
+			actor: "runtime",
+			idempotencyKey: `attempt-queued:${attemptId}`,
+			payload: toJsonObject({ attemptId, taskId, dispatch, ...(grantId ? { grantId } : {}) }),
+		});
+		return structuredClone(this.state.attempts[attemptId]!);
+	}
+
+	leaseAttempt(attemptId: string, ownerId: string, ttlMs: number, agentId?: string): AttemptLease {
+		this.refresh();
+		const attempt = this.requireAttempt(attemptId);
+		if (attempt.status !== "queued") throw new DurableTaskRuntimeError(`Attempt '${attemptId}' is not queued.`);
+		if (agentId) {
+			const agent = this.state.agents[agentId];
+			if (!agent) throw new DurableTaskRuntimeError(`Unknown agent '${agentId}'.`);
+			if (agent.status !== "registered") throw new DurableTaskRuntimeError(`Agent '${agentId}' is not idle.`);
+			const task = this.state.tasks[attempt.taskId];
+			if (!task || task.task.role !== agent.role)
+				throw new DurableTaskRuntimeError(`Agent '${agentId}' role does not match task.`);
+		}
+		if (!Number.isFinite(ttlMs) || ttlMs <= 0) throw new DurableTaskRuntimeError("Lease TTL must be positive.");
+		const issuedAtMs = this.now();
+		const lease: AttemptLease = {
+			leaseId: `lease-${this.createId()}`,
+			attemptId,
+			ownerId,
+			fencingToken: (attempt.lease?.fencingToken ?? 0) + 1,
+			issuedAt: new Date(issuedAtMs).toISOString(),
+			expiresAt: new Date(issuedAtMs + ttlMs).toISOString(),
+		};
+		this.commit({
+			type: "attempt.leased",
+			aggregateId: attemptId,
+			actor: "runtime",
+			idempotencyKey: `attempt-leased:${lease.leaseId}`,
+			payload: toJsonObject({ lease, ...(agentId ? { agentId } : {}) }),
+		});
+		return structuredClone(lease);
+	}
+
+	startAttempt(attemptId: string, leaseId: string, fencingToken: number): AttemptRuntimeState {
+		this.refresh();
+		const attempt = this.requireLiveLease(attemptId, leaseId, fencingToken);
+		if (attempt.status !== "leased") throw new DurableTaskRuntimeError(`Attempt '${attemptId}' is not leased.`);
+		this.commit({
+			type: "attempt.started",
+			aggregateId: attemptId,
+			actor: "worker",
+			idempotencyKey: `attempt-started:${attemptId}:${fencingToken}`,
+			payload: toJsonObject({ attemptId, leaseId, fencingToken }),
+		});
+		return structuredClone(this.state.attempts[attemptId]!);
+	}
+
+	checkpointAttempt(args: {
+		attemptId: string;
+		leaseId: string;
+		fencingToken: number;
+		summary: string;
+		artifactIds?: readonly string[];
+		evidenceIds?: readonly string[];
+	}): AttemptCheckpoint {
+		this.refresh();
+		const attempt = this.requireLiveLease(args.attemptId, args.leaseId, args.fencingToken);
+		if (attempt.status !== "running")
+			throw new DurableTaskRuntimeError(`Attempt '${args.attemptId}' is not running.`);
+		const checkpoint: AttemptCheckpoint = {
+			checkpointId: `checkpoint-${this.createId()}`,
+			attemptId: args.attemptId,
+			fencingToken: args.fencingToken,
+			summary: args.summary.trim(),
+			artifactIds: [...(args.artifactIds ?? [])],
+			evidenceIds: [...(args.evidenceIds ?? [])],
+			createdAt: this.nowIso(),
+		};
+		if (!checkpoint.summary) throw new DurableTaskRuntimeError("Checkpoint summary is required.");
+		this.commit({
+			type: "attempt.checkpointed",
+			aggregateId: args.attemptId,
+			actor: "worker",
+			idempotencyKey: `attempt-checkpointed:${checkpoint.checkpointId}`,
+			payload: toJsonObject({ checkpoint, leaseId: args.leaseId }),
+		});
+		return structuredClone(checkpoint);
+	}
+
+	finishAttempt(result: WorkerResultContract): AttemptRuntimeState {
+		this.refresh();
+		const attempt = this.requireLiveLease(result.attemptId, result.leaseId, result.fencingToken);
+		if (attempt.status !== "running" && attempt.status !== "leased") {
+			throw new DurableTaskRuntimeError(`Attempt '${result.attemptId}' cannot finish from '${attempt.status}'.`);
+		}
+		if (attempt.taskId !== result.taskId)
+			throw new DurableTaskRuntimeError("Worker result taskId does not match attempt.");
+		const task = this.state.tasks[attempt.taskId];
+		if (!task || task.task.objectiveId !== result.objectiveId) {
+			throw new DurableTaskRuntimeError("Worker result objectiveId does not match attempt.");
+		}
+		this.commit({
+			type: "attempt.finished",
+			aggregateId: result.attemptId,
+			actor: "worker",
+			idempotencyKey: `attempt-finished:${result.resultId}`,
+			payload: toJsonObject({ result }),
+		});
+		return structuredClone(this.state.attempts[result.attemptId]!);
+	}
+
+	cancelAttempt(attemptId: string, reasonCode: string): AttemptRuntimeState {
+		this.refresh();
+		const attempt = this.requireAttempt(attemptId);
+		if (terminalAttemptStatus(attempt.status)) return structuredClone(attempt);
+		if (!reasonCode.trim()) throw new DurableTaskRuntimeError("Cancellation reason is required.");
+		this.commit({
+			type: "attempt.cancelled",
+			aggregateId: attemptId,
+			actor: "runtime",
+			idempotencyKey: `attempt-cancelled:${attemptId}`,
+			payload: toJsonObject({ attemptId, reasonCode: reasonCode.trim() }),
+		});
+		return structuredClone(this.state.attempts[attemptId]!);
+	}
+
+	failTask(taskId: string, reasonCode: string): TaskContract {
+		this.refresh();
+		const task = this.state.tasks[taskId];
+		if (!task) throw new DurableTaskRuntimeError(`Unknown task '${taskId}'.`);
+		if (["completed", "failed", "cancelled"].includes(task.task.status)) return structuredClone(task.task);
+		if (!reasonCode.trim()) throw new DurableTaskRuntimeError("Task failure reason is required.");
+		this.commit({
+			type: "task.failed",
+			aggregateId: taskId,
+			actor: "runtime",
+			idempotencyKey: `task-failed:${taskId}:${reasonCode.trim()}`,
+			payload: toJsonObject({ taskId, reasonCode: reasonCode.trim() }),
+		});
+		return structuredClone(this.state.tasks[taskId]!.task);
+	}
+
+	/**
+	 * Recover unbound in-process work after a process restart. A completion has no resumable model
+	 * transcript, so its old lease is fenced and the task becomes dispatchable for a fresh attempt.
+	 * Agent-bound attempts are intentionally excluded: those must wake the same logical agent.
+	 */
+	recoverInterruptedUnboundAttempts(): string[] {
+		this.refresh();
+		const recovered: string[] = [];
+		for (const attempt of Object.values(this.state.attempts)) {
+			if ((attempt.status !== "leased" && attempt.status !== "running") || attempt.agentId) continue;
+			this.commit({
+				type: "attempt.lease_expired",
+				aggregateId: attempt.attemptId,
+				actor: "runtime",
+				idempotencyKey: `attempt-process-interrupted:${attempt.attemptId}:${attempt.lease?.leaseId ?? "none"}`,
+				payload: toJsonObject({
+					attemptId: attempt.attemptId,
+					...(attempt.lease ? { leaseId: attempt.lease.leaseId, fencingToken: attempt.lease.fencingToken } : {}),
+					reasonCode: "worker_process_interrupted",
+				}),
+			});
+			recovered.push(attempt.attemptId);
+		}
+		return recovered;
+	}
+
+	expireLeases(at = this.now()): string[] {
+		this.refresh();
+		const expired: string[] = [];
+		for (const attempt of Object.values(this.state.attempts)) {
+			if ((attempt.status !== "leased" && attempt.status !== "running") || !attempt.lease) continue;
+			if (Date.parse(attempt.lease.expiresAt) > at) continue;
+			this.commit({
+				type: attempt.agentId ? "attempt.suspended" : "attempt.lease_expired",
+				aggregateId: attempt.attemptId,
+				actor: "runtime",
+				idempotencyKey: `attempt-lease-expired:${attempt.lease.leaseId}`,
+				payload: toJsonObject({
+					attemptId: attempt.attemptId,
+					leaseId: attempt.lease.leaseId,
+					fencingToken: attempt.lease.fencingToken,
+				}),
+			});
+			expired.push(attempt.attemptId);
+		}
+		return expired;
+	}
+
+	requestAgentResume(agentId: string): AgentBindingContract {
+		this.refresh();
+		const agent = this.state.agents[agentId];
+		if (!agent) throw new DurableTaskRuntimeError(`Unknown agent '${agentId}'.`);
+		if (agent.status !== "suspended") throw new DurableTaskRuntimeError(`Agent '${agentId}' is not suspended.`);
+		this.commit({
+			type: "agent.resume_requested",
+			aggregateId: agentId,
+			actor: "runtime",
+			idempotencyKey: `agent-resume-requested:${agentId}:${this.state.lastOrdinal}`,
+			payload: toJsonObject({ agentId }),
+		});
+		return structuredClone(this.state.agents[agentId]!);
+	}
+
+	resumeAttempt(attemptId: string, agentId: string, ttlMs: number): AttemptLease {
+		this.refresh();
+		const attempt = this.requireAttempt(attemptId);
+		const agent = this.state.agents[agentId];
+		if (attempt.status !== "suspended" || attempt.agentId !== agentId) {
+			throw new DurableTaskRuntimeError(`Attempt '${attemptId}' is not suspended for agent '${agentId}'.`);
+		}
+		if (!agent || agent.status !== "resuming")
+			throw new DurableTaskRuntimeError(`Agent '${agentId}' is not resuming.`);
+		if (!Number.isFinite(ttlMs) || ttlMs <= 0) throw new DurableTaskRuntimeError("Lease TTL must be positive.");
+		const issuedAtMs = this.now();
+		const lease: AttemptLease = {
+			leaseId: `lease-${this.createId()}`,
+			attemptId,
+			ownerId: agentId,
+			fencingToken: (attempt.lease?.fencingToken ?? 0) + 1,
+			issuedAt: new Date(issuedAtMs).toISOString(),
+			expiresAt: new Date(issuedAtMs + ttlMs).toISOString(),
+		};
+		this.commit({
+			type: "attempt.resumed",
+			aggregateId: attemptId,
+			actor: "runtime",
+			idempotencyKey: `attempt-resumed:${lease.leaseId}`,
+			payload: toJsonObject({ agentId, lease }),
+		});
+		return structuredClone(lease);
+	}
+
+	pauseObjective(objectiveId: string): void {
+		this.transitionObjective(objectiveId, "objective.paused", "paused");
+	}
+
+	resumeObjective(objectiveId: string): void {
+		this.transitionObjective(objectiveId, "objective.resumed", "active");
+	}
+
+	cancelObjective(objectiveId: string): void {
+		this.transitionObjective(objectiveId, "objective.cancelled", "cancelled");
+	}
+
+	completeObjective(objectiveId: string): void {
+		this.refresh();
+		const objective = this.requireObjective(objectiveId);
+		const incomplete = objective.taskIds.filter((taskId) => this.state.tasks[taskId]?.task.status !== "completed");
+		if (incomplete.length > 0) {
+			throw new DurableTaskRuntimeError(
+				`Objective '${objectiveId}' has incomplete tasks: ${incomplete.join(", ")}.`,
+			);
+		}
+		this.transitionObjective(objectiveId, "objective.completed", "completed");
+	}
+
+	enqueueNotification(args: { objectiveId: string; attemptId?: string; message: string }): NotificationRuntimeState {
+		this.refresh();
+		this.requireObjective(args.objectiveId);
+		const notificationId = `notification-${this.createId()}`;
+		this.commit({
+			type: "notification.enqueued",
+			aggregateId: args.objectiveId,
+			actor: "runtime",
+			idempotencyKey: `notification-enqueued:${notificationId}`,
+			payload: toJsonObject({ notificationId, ...args }),
+		});
+		return structuredClone(this.state.notifications[notificationId]!);
+	}
+
+	markNotificationDelivered(notificationId: string): NotificationRuntimeState {
+		this.refresh();
+		const notification = this.state.notifications[notificationId];
+		if (!notification) throw new DurableTaskRuntimeError(`Unknown notification '${notificationId}'.`);
+		if (notification.status === "delivered") return structuredClone(notification);
+		this.commit({
+			type: "notification.delivered",
+			aggregateId: notification.objectiveId,
+			actor: "runtime",
+			idempotencyKey: `notification-delivered:${notificationId}`,
+			payload: toJsonObject({ notificationId }),
+		});
+		return structuredClone(this.state.notifications[notificationId]!);
+	}
+
+	private transitionObjective(
+		objectiveId: string,
+		type: "objective.paused" | "objective.resumed" | "objective.cancelled" | "objective.completed",
+		target: ObjectiveStatus,
+	): void {
+		this.refresh();
+		const objective = this.requireObjective(objectiveId);
+		if (objective.objective.status === target) return;
+		if (["completed", "cancelled"].includes(objective.objective.status)) {
+			throw new DurableTaskRuntimeError(`Objective '${objectiveId}' is terminal.`);
+		}
+		this.commit({
+			type,
+			aggregateId: objectiveId,
+			actor: "human",
+			idempotencyKey: `${type}:${objectiveId}:${this.state.lastOrdinal}`,
+			payload: {},
+		});
+	}
+
+	private requireObjective(objectiveId: string): ObjectiveRuntimeState {
+		const objective = this.state.objectives[objectiveId];
+		if (!objective) throw new DurableTaskRuntimeError(`Unknown objective '${objectiveId}'.`);
+		return objective;
+	}
+
+	private requireDispatchableTask(taskId: string): TaskRuntimeState {
+		const task = this.state.tasks[taskId];
+		if (!task) throw new DurableTaskRuntimeError(`Unknown task '${taskId}'.`);
+		const objective = this.requireObjective(task.task.objectiveId);
+		if (objective.objective.status !== "active") {
+			throw new DurableTaskRuntimeError(`Objective '${objective.objective.objectiveId}' is not active.`);
+		}
+		if (!["ready", "blocked", "failed"].includes(task.task.status)) {
+			throw new DurableTaskRuntimeError(`Task '${taskId}' is not dispatchable from '${task.task.status}'.`);
+		}
+		return task;
+	}
+
+	private requireAttempt(attemptId: string): AttemptRuntimeState {
+		const attempt = this.state.attempts[attemptId];
+		if (!attempt) throw new DurableTaskRuntimeError(`Unknown attempt '${attemptId}'.`);
+		return attempt;
+	}
+
+	private requireLiveLease(attemptId: string, leaseId: string, fencingToken: number): AttemptRuntimeState {
+		const attempt = this.requireAttempt(attemptId);
+		if (!attempt.lease || attempt.lease.leaseId !== leaseId || attempt.lease.fencingToken !== fencingToken) {
+			throw new DurableTaskRuntimeError(`Attempt '${attemptId}' lease or fencing token is stale.`);
+		}
+		if (Date.parse(attempt.lease.expiresAt) <= this.now()) {
+			throw new DurableTaskRuntimeError(`Attempt '${attemptId}' lease expired.`);
+		}
+		return attempt;
+	}
+
+	private refresh(): void {
+		for (const event of this.store.readAfter(this.state.lastOrdinal)) {
+			this.state = reduceOrchestrationEvent(this.state, event);
+		}
+	}
+
+	private commit(input: AppendOrchestrationEventInput): void {
+		const event = this.store.append(input, { expectedLastOrdinal: this.state.lastOrdinal });
+		if (event.ordinal > this.state.lastOrdinal) this.state = reduceOrchestrationEvent(this.state, event);
+	}
+
+	private nowIso(): string {
+		return new Date(this.now()).toISOString();
+	}
+}

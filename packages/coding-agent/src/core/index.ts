@@ -74,4 +74,12 @@ export {
 	type TurnStartEvent,
 	type WorkingIndicatorOptions,
 } from "./extensions/index.ts";
+export * from "./orchestration/capability-gateway.ts";
+export * from "./orchestration/contracts.ts";
+export * from "./orchestration/event-store.ts";
+export * from "./orchestration/model-binding.ts";
+export * from "./orchestration/policy-compiler.ts";
+export * from "./orchestration/profile-registry.ts";
+export * from "./orchestration/profile-store.ts";
+export * from "./orchestration/task-runtime.ts";
 export { createSyntheticSourceInfo } from "./source-info.ts";

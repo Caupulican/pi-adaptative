@@ -1,5 +1,9 @@
 ## [Unreleased]
 
+### Added
+
+- Added owner-authored orchestration profiles with pinned model/thinking/tool/resource/budget policy, architect-owned worker allowlists, durable DAG attempts and fenced typed results, exact-session process-worker resume, and a direct-argv `run_process` sandbox for execution profiles.
+
 ### Fixed
 
 - Made out-of-process managed workers emit the same bounded event-driven terminal handoff as in-process delegates, taught models to retrieve results once after that handoff instead of polling, and let unprofiled background lanes use the selected model's declared or provider-agnostic reasoning default.

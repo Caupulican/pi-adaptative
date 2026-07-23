@@ -12,6 +12,8 @@
  *   silently -- when that parent disappears.
  */
 
+import type { AgentResumeContext } from "../orchestration/contracts.ts";
+
 export type ProcessRole = "master" | "worker";
 
 /**
@@ -29,8 +31,10 @@ export type WindDownReason = "parent_lost" | "parent_shutdown" | "user_cleanup";
 
 /** What a wound-down worker leaves behind so its task can be picked back up. */
 export interface ResumablePayload {
+	agentId?: string;
 	laneKey?: string;
 	taskSummary?: string;
+	resumeContext?: AgentResumeContext;
 	lastCode: ProcessStatus;
 }
 
@@ -51,6 +55,8 @@ export interface ProcessMatrixEntry {
 	tmuxSession?: string;
 	tmuxPanePid?: number;
 	taskRef?: string;
+	agentId?: string;
+	resumeContext?: AgentResumeContext;
 	windDownReason?: WindDownReason;
 	resumable?: ResumablePayload;
 }

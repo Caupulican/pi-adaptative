@@ -261,6 +261,7 @@ export const MAX_WORKER_DELEGATION_MAX_WALL_CLOCK_MS = 3_600_000;
 
 export interface WorkerDelegationSettings {
 	enabled?: boolean; // default: true for capable models; explicit false is a hard off-switch
+	orchestrationProfile?: string; // owner-selected default; an active architect may select only profiles in its dispatchProfileIds allowlist
 	model?: string; // model pattern; unset inherits the session model the lane was shipped from
 	profile?: string; // shipped profile; tool grants filter classified lane tools (opaque extension tools stay unavailable)
 	systemPrompt?: string; // replaces the worker role prompt (the level-0 subagent core always remains)
@@ -272,9 +273,9 @@ export interface WorkerDelegationSettings {
 }
 
 export type ResolvedWorkerDelegationSettings = Required<
-	Omit<WorkerDelegationSettings, "model" | "profile" | "systemPrompt">
+	Omit<WorkerDelegationSettings, "orchestrationProfile" | "model" | "profile" | "systemPrompt">
 > &
-	Pick<WorkerDelegationSettings, "model" | "profile" | "systemPrompt">;
+	Pick<WorkerDelegationSettings, "orchestrationProfile" | "model" | "profile" | "systemPrompt">;
 
 /** Staleness-propagation policy for worktree-sync; see `core/worktree-sync/codes.ts`. */
 export type WorktreeSyncPolicySetting = "on_land_mandatory" | "overlap_mandatory" | "land_time_only";
@@ -451,6 +452,7 @@ export interface Settings {
 	resourceProfiles?: Record<string, ResourceProfileSettings | ProfileDefinitionInput>; // Named resource filters, optionally with full situation metadata
 	activeResourceProfile?: string | string[]; // Active profile name(s), applied after global/project/directory settings merge
 	activeResourceProfiles?: string[]; // Active profile names, equivalent to activeResourceProfile array
+	activeOrchestrationProfile?: string; // owner-authored role/model/thinking/tools/resources/budget profile for the foreground session
 	enableSkillCommands?: boolean; // default: true - register skills as /skill:name commands
 	terminal?: TerminalSettings;
 	images?: ImageSettings;
@@ -3397,6 +3399,9 @@ export class SettingsManager {
 		if (typeof configured.model === "string" && configured.model.trim().length > 0) {
 			resolved.model = configured.model;
 		}
+		if (typeof configured.orchestrationProfile === "string" && configured.orchestrationProfile.trim().length > 0) {
+			resolved.orchestrationProfile = configured.orchestrationProfile.trim();
+		}
 		if (typeof configured.profile === "string" && configured.profile.trim().length > 0) {
 			resolved.profile = configured.profile;
 		}
@@ -3404,6 +3409,11 @@ export class SettingsManager {
 			resolved.systemPrompt = configured.systemPrompt;
 		}
 		return resolved;
+	}
+
+	getActiveOrchestrationProfile(): string | undefined {
+		const profileId = this.settings.activeOrchestrationProfile;
+		return typeof profileId === "string" && profileId.trim().length > 0 ? profileId.trim() : undefined;
 	}
 
 	setWorkerDelegationSettings(settings: WorkerDelegationSettings, scope: SettingsScope = "global"): void {

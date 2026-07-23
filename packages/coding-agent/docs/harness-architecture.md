@@ -62,10 +62,28 @@ footprint must omit that extension at the resource layer, not merely block one o
 
 ## Child work contracts
 
-In-process workers are bounded child loops with fresh context, a synthetic cache-affinity key, an
-explicit model, clamped reasoning, a construction-filtered tool surface, turn/time/cost bounds, and
-parent validation of the result. Worker output is untrusted; the parent retrieves it through
-`delegate_status` after a terminal lane event.
+Owner-authored orchestration profiles are the routing authority. A profile fixes role, ordered model
+policy, exact thinking level, tool names, resource profiles, semantic capability ceiling, budgets,
+concurrency, lease duration, and verification policy. An architect profile additionally declares the
+only worker profile IDs it may dispatch. The model-facing dispatch request contains a task, profile
+ID, instructions, and resource pointers; it has no model, thinking, tool, budget, or concurrency
+override fields.
+
+The durable control plane is an append-only session event store projected into objectives, DAG
+tasks, attempts, leases, checkpoints, logical agent bindings, typed results, and a notification
+outbox. Every result carries its attempt lease and fencing token. A stale worker therefore cannot
+win a race after retry or resume. In-process isolated completions have no resumable transcript: an
+interrupted lease is fenced and its persisted dispatch is re-queued as a new attempt. A process-backed
+Pi worker instead retains its logical agent ID and resume context and is woken with `/resume` against
+the same session, worktree, orchestration profile, and checkpoint pointers when present.
+
+In-process workers are bounded child loops with fresh context, a synthetic cache-affinity key, a
+profile-pinned model and exact reasoning level, a construction-filtered tool surface,
+turn/time/token/tool/cost bounds, and parent validation of the result. Process-capable profiles may
+expose `run_process`, which uses an exact executable allowlist, direct argv, a scoped environment,
+bounded output, and process-tree termination; unrestricted shell is not inherited. Worker output is
+untrusted; the parent retrieves it through `delegate_status` after a terminal lane event. A profile
+that requires independent verification produces a partial typed result until a verifier accepts it.
 
 Out-of-process managed workers use the same lifecycle shape:
 

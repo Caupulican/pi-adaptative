@@ -15,6 +15,8 @@ import { AuthStorage } from "../../src/core/auth-storage.ts";
 import type { ExtensionRunner } from "../../src/core/extensions/index.ts";
 import { ModelRegistry } from "../../src/core/model-registry.ts";
 import type { LocalRuntimeDeps } from "../../src/core/models/local-runtime.ts";
+import { ORCHESTRATION_SCHEMA_VERSION, type OrchestrationProfile } from "../../src/core/orchestration/contracts.ts";
+import { OrchestrationProfileStore } from "../../src/core/orchestration/profile-store.ts";
 import type { collectWorkspaceSources } from "../../src/core/research/workspace-collector.ts";
 import type { Settings } from "../../src/core/settings-manager.ts";
 import { SettingsManager } from "../../src/core/settings-manager.ts";
@@ -74,6 +76,7 @@ export interface HarnessOptions {
 	collectWorkspaceSources?: typeof collectWorkspaceSources;
 	/** Fake fetch/spawn/exists for the local (Ollama) runtime; see test/agent-session-local-runtime.test.ts. */
 	localRuntimeDeps?: LocalRuntimeDeps;
+	orchestrationProfile?: OrchestrationProfile;
 }
 
 export interface Harness {
@@ -112,7 +115,48 @@ export async function createHarness(options: HarnessOptions = {}): Promise<Harne
 	const extensionRunnerRef: { current?: ExtensionRunner } = {};
 
 	const sessionManager = SessionManager.inMemory();
-	const settingsManager = SettingsManager.inMemory(options.settings);
+	const configuredWorkerModel = options.settings?.workerDelegation?.model;
+	const workerModel = configuredWorkerModel
+		? (fauxProvider.models.find(
+				(candidate) =>
+					`${candidate.provider}/${candidate.id}` === configuredWorkerModel ||
+					candidate.id === configuredWorkerModel,
+			) ?? model)
+		: model;
+	const defaultOrchestrationProfileId = "test-worker";
+	const effectiveSettings: Partial<Settings> = {
+		...options.settings,
+		workerDelegation: {
+			orchestrationProfile: defaultOrchestrationProfileId,
+			...options.settings?.workerDelegation,
+		},
+	};
+	const settingsManager = SettingsManager.inMemory(effectiveSettings);
+	const createdAt = new Date().toISOString();
+	const defaultOrchestrationProfile: OrchestrationProfile = {
+		schemaVersion: ORCHESTRATION_SCHEMA_VERSION,
+		profileId: defaultOrchestrationProfileId,
+		description: "Faux-provider test worker",
+		role: "implementer",
+		modelPolicy: {
+			mode: "fixed",
+			candidates: [{ provider: workerModel.provider, modelId: workerModel.id, thinkingLevel: "off" }],
+		},
+		capabilityCeiling: ["filesystem.read", "filesystem.write", "worktree.read", "worktree.mutate", "memory.query"],
+		toolNames: ["read", "grep", "find", "ls", "memory", "write", "edit"],
+		resourceProfileNames: [],
+		dispatchProfileIds: [],
+		budget: { maxCostUsd: 5, maxWallClockMs: 3_600_000, maxTokens: workerModel.maxTokens, maxToolCalls: 20 },
+		maxConcurrent: 3,
+		leaseTtlMs: 3_660_000,
+		requireIndependentVerification: false,
+		createdAt,
+		updatedAt: createdAt,
+	};
+	new OrchestrationProfileStore({ agentDir: tempDir, cwd: tempDir }).save(defaultOrchestrationProfile, "global");
+	if (options.orchestrationProfile) {
+		new OrchestrationProfileStore({ agentDir: tempDir, cwd: tempDir }).save(options.orchestrationProfile, "global");
+	}
 
 	const authStorage = AuthStorage.inMemory();
 	if (withConfiguredAuth) {
@@ -193,6 +237,7 @@ export async function createHarness(options: HarnessOptions = {}): Promise<Harne
 		extensionRunnerRef,
 		collectWorkspaceSources: options.collectWorkspaceSources ?? (async () => []),
 		localRuntimeDeps: options.localRuntimeDeps,
+		orchestrationProfile: options.orchestrationProfile,
 	});
 
 	const events: AgentSessionEvent[] = [];

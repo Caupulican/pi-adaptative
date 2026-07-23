@@ -1,11 +1,18 @@
 import { type Static, Type } from "typebox";
 import type { LaneRecord } from "../autonomy/lane-tracker.ts";
+import type { WorkerDelegationRequest } from "../delegation/worker-delegation-request.ts";
 import type { WorkerRunOutcome } from "../delegation/worker-runner.ts";
 import type { ToolDefinition } from "../extensions/types.ts";
 
 function createDelegateSchema() {
 	return Type.Object(
 		{
+			profileId: Type.Optional(
+				Type.String({
+					description:
+						"Owner-authored orchestration profile to use. The profile fixes role, model, thinking, tools, resources, budget, and concurrency. Omit only when the owner configured a default workerDelegation.orchestrationProfile.",
+				}),
+			),
 			instructions: Type.String({
 				description:
 					"The self-contained task for a bounded worker with classified workspace tools. It is read-only unless workerDelegation.writeEnabled, non-empty writePaths, and its lane profile all grant write/edit; any write is path-scoped and parent-reviewed. Include all context it needs; it cannot see this conversation.",
@@ -48,20 +55,15 @@ export interface DelegateToolDetails {
 }
 
 export interface DelegateToolDependencies {
-	startWorkerDelegation?: (args: {
-		instructions: string;
-		systemPrompt?: string;
-		memoryRead?: boolean;
-	}) => { started: false; skipReason: string } | { started: true; record: LaneRecord };
-	runWorkerDelegation: (args: {
-		instructions: string;
-		systemPrompt?: string;
-		memoryRead?: boolean;
-	}) => Promise<DelegateRunOutcome>;
+	startWorkerDelegation?: (
+		args: WorkerDelegationRequest,
+	) => { started: false; skipReason: string } | { started: true; record: LaneRecord };
+	runWorkerDelegation: (args: WorkerDelegationRequest) => Promise<DelegateRunOutcome>;
+	orchestrationProfiles?: readonly { profileId: string; role: string; description: string }[];
 }
 
 const DELEGATE_DESCRIPTION_CORE =
-	"Delegate one bounded, self-contained task to an isolated worker lane with classified workspace tools. It is read-only by default; the orchestrator may request policy-gated read-only memory, while writes require workerDelegation.writeEnabled, non-empty writePaths, and a lane profile grant write/edit, with every successful path reported for parent review. Shell, recursive delegation, and opaque extension tools remain unavailable.";
+	"Delegate one bounded, self-contained task to an isolated worker lane with classified workspace tools. It is read-only by default; the orchestrator may request policy-gated read-only memory, while writes require workerDelegation.writeEnabled, non-empty writePaths, and a lane profile grant write/edit, with every successful path reported for parent review. A process-capable profile may expose direct-argv run_process; unrestricted shell, recursive delegation, and opaque extension tools remain unavailable.";
 
 // Synchronous wiring: no `deps.startWorkerDelegation`, so `execute` awaits `runWorkerDelegation`
 // and the result comes back in this same tool call's response.
@@ -91,12 +93,21 @@ const ASYNC_DELEGATE_PROMPT_GUIDELINES = [
 
 export function createDelegateToolDefinition(deps: DelegateToolDependencies): ToolDefinition {
 	const isAsyncWiring = deps.startWorkerDelegation !== undefined;
+	const profileGuideline =
+		deps.orchestrationProfiles && deps.orchestrationProfiles.length > 0
+			? `Available owner-authored orchestration profiles: ${deps.orchestrationProfiles
+					.map((profile) => `${profile.profileId} (${profile.role}: ${profile.description})`)
+					.join("; ")}. Select by profileId; never infer or request a model/thinking override.`
+			: "Delegation requires an owner-authored orchestration profile. Select its profileId, or rely on the owner's configured default; model and thinking overrides do not exist.";
 	return {
 		name: "delegate",
 		label: "delegate",
 		description: isAsyncWiring ? ASYNC_DELEGATE_DESCRIPTION : SYNCHRONOUS_DELEGATE_DESCRIPTION,
 		promptSnippet: "Delegate a bounded task to an isolated, least-privilege worker lane.",
-		promptGuidelines: isAsyncWiring ? ASYNC_DELEGATE_PROMPT_GUIDELINES : SYNCHRONOUS_DELEGATE_PROMPT_GUIDELINES,
+		promptGuidelines: [
+			profileGuideline,
+			...(isAsyncWiring ? ASYNC_DELEGATE_PROMPT_GUIDELINES : SYNCHRONOUS_DELEGATE_PROMPT_GUIDELINES),
+		],
 		parameters: delegateSchema,
 		async execute(
 			_toolCallId,
@@ -107,6 +118,7 @@ export function createDelegateToolDefinition(deps: DelegateToolDependencies): To
 		}> {
 			const request = {
 				instructions: input.instructions,
+				...(input.profileId ? { profileId: input.profileId } : {}),
 				...(input.systemPrompt ? { systemPrompt: input.systemPrompt } : {}),
 				...(input.memoryRead !== undefined ? { memoryRead: input.memoryRead } : {}),
 			};

@@ -5,6 +5,8 @@ import { describe, expect, it, vi } from "vitest";
 import { getLaneRecordSnapshots } from "../src/core/autonomy/session-lane-record.ts";
 import { getWorkerRequestSnapshots } from "../src/core/delegation/session-worker-result.ts";
 import { createGoalState } from "../src/core/goals/goal-state.ts";
+import { ORCHESTRATION_SCHEMA_VERSION, type OrchestrationProfile } from "../src/core/orchestration/contracts.ts";
+import { OrchestrationProfileStore } from "../src/core/orchestration/profile-store.ts";
 import { createHarness, type Harness } from "./suite/harness.ts";
 
 const WORKER_JSON =
@@ -15,6 +17,191 @@ function workerLaneRecords(harness: Harness) {
 }
 
 describe("AgentSession worker delegation", () => {
+	it("constructs only the model and tool surface owned by the active orchestration profile", async () => {
+		const now = new Date().toISOString();
+		const operator: OrchestrationProfile = {
+			schemaVersion: ORCHESTRATION_SCHEMA_VERSION,
+			profileId: "test-operator",
+			description: "Pinned direct-process operator",
+			role: "operator",
+			modelPolicy: {
+				mode: "fixed",
+				candidates: [{ provider: "faux", modelId: "operator-worker", thinkingLevel: "off" }],
+			},
+			capabilityCeiling: ["filesystem.read", "process.exec"],
+			toolNames: ["read", "run_process"],
+			resourceProfileNames: [],
+			dispatchProfileIds: [],
+			executionPolicy: {
+				allowedExecutables: [process.execPath],
+				allowedEnvironmentVariables: [],
+				maxOutputBytes: 16_384,
+			},
+			budget: { maxCostUsd: 1, maxTokens: 8_192, maxToolCalls: 4, maxWallClockMs: 5_000 },
+			maxConcurrent: 1,
+			leaseTtlMs: 10_000,
+			requireIndependentVerification: false,
+			createdAt: now,
+			updatedAt: now,
+		};
+		const harness = await createHarness({
+			models: [
+				{ id: "foreground", contextWindow: 128_000 },
+				{ id: "operator-worker", contextWindow: 128_000 },
+			],
+			orchestrationProfile: operator,
+		});
+		try {
+			expect(harness.session.model?.id).toBe("operator-worker");
+			expect(harness.session.thinkingLevel).toBe("off");
+			expect(harness.session.getActiveToolNames()).toEqual(["read", "run_process"]);
+			expect(harness.session.getToolDefinition("run_process")).toBeDefined();
+			expect(harness.session.getToolDefinition("bash")).toBeUndefined();
+			expect(harness.session.getToolDefinition("delegate")).toBeUndefined();
+		} finally {
+			harness.cleanup();
+		}
+	});
+
+	it("does not construct the profile-only process tool without an active owner profile", async () => {
+		const harness = await createHarness();
+		try {
+			expect(harness.session.getToolDefinition("run_process")).toBeUndefined();
+		} finally {
+			harness.cleanup();
+		}
+	});
+
+	it("enforces the architect profile's immutable worker-profile allowlist", async () => {
+		const now = new Date().toISOString();
+		const architect: OrchestrationProfile = {
+			schemaVersion: ORCHESTRATION_SCHEMA_VERSION,
+			profileId: "test-architect",
+			description: "Routing-only architect",
+			role: "orchestrator",
+			modelPolicy: {
+				mode: "fixed",
+				candidates: [{ provider: "faux", modelId: "faux-model", thinkingLevel: "off" }],
+			},
+			capabilityCeiling: ["workflow.delegate"],
+			toolNames: ["delegate", "delegate_status"],
+			resourceProfileNames: [],
+			dispatchProfileIds: ["test-worker"],
+			budget: { maxCostUsd: 1, maxTokens: 8_192, maxToolCalls: 4, maxWallClockMs: 60_000 },
+			maxConcurrent: 1,
+			leaseTtlMs: 90_000,
+			requireIndependentVerification: false,
+			createdAt: now,
+			updatedAt: now,
+		};
+		const harness = await createHarness({
+			models: [{ id: "faux-model", contextWindow: 128_000 }],
+			settings: { workerDelegation: { maxConcurrent: 2 } },
+			orchestrationProfile: architect,
+		});
+		try {
+			harness.setResponses([fauxAssistantMessage(WORKER_JSON)]);
+			const allowed = await harness.session.runWorkerDelegationOnce({
+				instructions: "Use the owner-pinned worker",
+				profileId: "test-worker",
+			});
+			expect(allowed.started).toBe(true);
+			const denied = await harness.session.runWorkerDelegationOnce({
+				instructions: "Try an unlisted worker",
+				profileId: "unlisted-expensive-worker",
+			});
+			expect(denied).toMatchObject({
+				started: false,
+				skipReason: "orchestration_profile_not_authorized_for_orchestrator",
+			});
+		} finally {
+			harness.cleanup();
+		}
+	});
+
+	it("enforces concurrency per worker profile under the global worker ceiling", async () => {
+		const now = new Date().toISOString();
+		const architect: OrchestrationProfile = {
+			schemaVersion: ORCHESTRATION_SCHEMA_VERSION,
+			profileId: "concurrency-architect",
+			description: "Routes independent worker profiles",
+			role: "orchestrator",
+			modelPolicy: {
+				mode: "fixed",
+				candidates: [{ provider: "faux", modelId: "faux-model", thinkingLevel: "off" }],
+			},
+			capabilityCeiling: ["workflow.delegate"],
+			toolNames: ["delegate", "delegate_status"],
+			resourceProfileNames: [],
+			dispatchProfileIds: ["worker-a", "worker-b"],
+			budget: { maxCostUsd: 1, maxTokens: 8_192, maxToolCalls: 4, maxWallClockMs: 60_000 },
+			maxConcurrent: 1,
+			leaseTtlMs: 90_000,
+			requireIndependentVerification: false,
+			createdAt: now,
+			updatedAt: now,
+		};
+		const harness = await createHarness({
+			models: [{ id: "faux-model", contextWindow: 128_000 }],
+			settings: { workerDelegation: { maxConcurrent: 2 } },
+			orchestrationProfile: architect,
+		});
+		let resolveFirst!: (message: AssistantMessage) => void;
+		let resolveSecond!: (message: AssistantMessage) => void;
+		const first = new Promise<AssistantMessage>((resolve) => {
+			resolveFirst = resolve;
+		});
+		const second = new Promise<AssistantMessage>((resolve) => {
+			resolveSecond = resolve;
+		});
+		try {
+			const store = new OrchestrationProfileStore({ agentDir: harness.tempDir, cwd: harness.tempDir });
+			for (const profileId of ["worker-a", "worker-b"]) {
+				store.save(
+					{
+						schemaVersion: ORCHESTRATION_SCHEMA_VERSION,
+						profileId,
+						description: `Independent ${profileId}`,
+						role: "implementer",
+						modelPolicy: {
+							mode: "fixed",
+							candidates: [{ provider: "faux", modelId: "faux-model", thinkingLevel: "off" }],
+						},
+						capabilityCeiling: ["filesystem.read"],
+						toolNames: ["read"],
+						resourceProfileNames: [],
+						dispatchProfileIds: [],
+						budget: { maxCostUsd: 1, maxTokens: 8_192, maxToolCalls: 4, maxWallClockMs: 60_000 },
+						maxConcurrent: 1,
+						leaseTtlMs: 90_000,
+						requireIndependentVerification: false,
+						createdAt: now,
+						updatedAt: now,
+					},
+					"global",
+				);
+			}
+			harness.setResponses([() => first, () => second]);
+
+			const firstRun = harness.session.runWorkerDelegationOnce({ instructions: "First", profileId: "worker-a" });
+			const secondRun = harness.session.runWorkerDelegationOnce({ instructions: "Second", profileId: "worker-b" });
+			expect(
+				harness.session
+					.getLaneRecords()
+					.filter((record) => record.type === "worker" && record.status === "running"),
+			).toHaveLength(2);
+
+			resolveFirst(fauxAssistantMessage('{"summary":"first complete"}'));
+			resolveSecond(fauxAssistantMessage('{"summary":"second complete"}'));
+			const outcomes = await Promise.all([firstRun, secondRun]);
+			expect(outcomes.every((outcome) => outcome.record?.status === "succeeded")).toBe(true);
+		} finally {
+			resolveFirst(fauxAssistantMessage('{"summary":"cleanup"}'));
+			resolveSecond(fauxAssistantMessage('{"summary":"cleanup"}'));
+			harness.cleanup();
+		}
+	});
+
 	it("runs bounded read-only delegation by default on a capable model", async () => {
 		const harness = await createHarness();
 		try {
@@ -143,7 +330,7 @@ describe("AgentSession worker delegation", () => {
 		}
 	});
 
-	it("uses the provider-agnostic reasoning default when no lane profile or model default overrides it", async () => {
+	it("uses the exact reasoning level pinned by the owner-authored orchestration profile", async () => {
 		const harness = await createHarness({
 			models: [
 				{ id: "foreground", contextWindow: 128_000 },
@@ -167,7 +354,7 @@ describe("AgentSession worker delegation", () => {
 			const run = await harness.session.runWorkerDelegationOnce({ instructions: "Scout safely" });
 
 			expect(run.record?.status).toBe("succeeded");
-			expect(seenReasoning).toBe("medium");
+			expect(seenReasoning).toBe("off");
 		} finally {
 			harness.cleanup();
 		}

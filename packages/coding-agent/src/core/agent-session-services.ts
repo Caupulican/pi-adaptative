@@ -65,6 +65,7 @@ export interface CreateAgentSessionFromServicesOptions {
 	resourceProfileDefinitions?: CreateAgentSessionOptions["resourceProfileDefinitions"];
 	resourceProfileJson?: CreateAgentSessionOptions["resourceProfileJson"];
 	resourceProfiles?: CreateAgentSessionOptions["resourceProfiles"];
+	orchestrationProfile?: CreateAgentSessionOptions["orchestrationProfile"];
 	customTools?: ToolDefinition[];
 }
 
@@ -253,6 +254,7 @@ export async function createAgentSessionFromServices(
 		toolProfileFilter:
 			options.toolProfileFilter ?? options.services.settingsManager.getResourceProfileFilter("tools"),
 		customTools: options.customTools,
+		orchestrationProfile: options.orchestrationProfile,
 		sessionStartEvent: options.sessionStartEvent,
 	});
 }

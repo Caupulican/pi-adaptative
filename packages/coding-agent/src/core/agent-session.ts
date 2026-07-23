@@ -120,6 +120,7 @@ import type { SessionCostSummary } from "./cost/cost-summary.ts";
 import type { DailyUsageTotals } from "./cost/daily-usage.ts";
 import { type CostGuardDecision, downgradeReasoning, estimateTurnCostUsd, evaluateCostGuard } from "./cost-guard.ts";
 import { appendWorkerResultSnapshot, getWorkerResultSnapshots } from "./delegation/session-worker-result.ts";
+import type { WorkerDelegationRequest } from "./delegation/worker-delegation-request.ts";
 import type { WorkerRunOutcome } from "./delegation/worker-runner.ts";
 import type {
 	ContextUsage,
@@ -195,6 +196,9 @@ import {
 	resolveAdaptiveStreamIdleOptions,
 	withModelPerfProfile,
 } from "./models/perf-profile.ts";
+import type { OrchestrationProfile } from "./orchestration/contracts.ts";
+import { resolveConfiguredOrchestrationModel } from "./orchestration/model-binding.ts";
+import { validateOrchestrationProfile } from "./orchestration/profile-registry.ts";
 import { ProfileFilterController } from "./profile-filter-controller.ts";
 import { expandPromptTemplate, type PromptTemplate } from "./prompt-templates.ts";
 import { ReflectionController } from "./reflection-controller.ts";
@@ -427,6 +431,8 @@ export interface AgentSessionConfig {
 	 * defaults to the real, best-effort collector.
 	 */
 	collectWorkspaceSources?: typeof collectWorkspaceSources;
+	/** Immutable owner-authored orchestration policy; dispatch cannot mutate it. */
+	orchestrationProfile?: OrchestrationProfile;
 	/**
 	 * Injected fetch/spawn/exists for the local (Ollama) runtime health-check + boot used by the
 	 * model router before a turn routed to a local model (see LocalRuntimeController.ensureLocalModelReady).
@@ -943,6 +949,24 @@ export class AgentSession {
 		);
 		this.sessionManager = config.sessionManager;
 		this.settingsManager = config.settingsManager;
+		if (config.orchestrationProfile) {
+			validateOrchestrationProfile(config.orchestrationProfile);
+			const resolved = resolveConfiguredOrchestrationModel(config.orchestrationProfile, config.modelRegistry);
+			if (!resolved) {
+				throw new TypeError(
+					`Orchestration profile '${config.orchestrationProfile.profileId}' has no configured, authenticated model that supports its exact thinking level.`,
+				);
+			}
+			if (!this.agent.state.model || !modelsAreEqual(this.agent.state.model, resolved.model)) {
+				this.sessionManager.appendModelChange(resolved.model.provider, resolved.model.id);
+			}
+			if (this.agent.state.thinkingLevel !== resolved.binding.thinkingLevel) {
+				this.sessionManager.appendThinkingLevelChange(resolved.binding.thinkingLevel as ThinkingLevel);
+			}
+			this.agent.state.model = resolved.model;
+			this.agent.state.thinkingLevel = resolved.binding.thinkingLevel as ThinkingLevel;
+			this.settingsManager.setRuntimeResourceProfiles([...config.orchestrationProfile.resourceProfileNames]);
+		}
 		// Auto-retry rides the reliability kernel: the controller owns the attempt counter and the
 		// abortable backoff. This session maps its retry settings onto a RetryPolicy, bridges the
 		// controller's events onto the session event stream, and supplies the live context window so
@@ -965,7 +989,9 @@ export class AgentSession {
 			},
 			() => this.model?.contextWindow ?? 0,
 		);
-		this._scopedModels = config.scopedModels ?? [];
+		this._scopedModels = config.orchestrationProfile
+			? [{ model: this.agent.state.model, thinkingLevel: this.agent.state.thinkingLevel }]
+			: (config.scopedModels ?? []);
 		this._resourceLoader = config.resourceLoader;
 		this._customTools = config.customTools ?? [];
 		this._cwd = config.cwd;
@@ -1020,6 +1046,7 @@ export class AgentSession {
 			getAgentDir: () => this._agentDir,
 			getSessionManager: () => this.sessionManager,
 			getSettingsManager: () => this.settingsManager,
+			getActiveOrchestrationProfile: () => config.orchestrationProfile,
 			getModelRegistry: () => this._modelRegistry,
 			isModelExhausted: (model) => this._billingFailover.isExhausted(`${model.provider}/${model.id}`),
 			getModel: () => this.model ?? undefined,
@@ -1153,9 +1180,19 @@ export class AgentSession {
 			recordGoalContinuationPass: (pass) => this.recordGoalContinuationPass(pass),
 		});
 		this._extensionRunnerRef = config.extensionRunnerRef;
-		this._initialActiveToolNames = config.initialActiveToolNames;
-		this._allowedToolNames = config.allowedToolNames ? new Set(config.allowedToolNames) : undefined;
-		this._excludedToolNames = config.excludedToolNames ? new Set(config.excludedToolNames) : undefined;
+		this._initialActiveToolNames = config.orchestrationProfile
+			? [...config.orchestrationProfile.toolNames]
+			: config.initialActiveToolNames;
+		this._allowedToolNames = config.orchestrationProfile
+			? new Set(config.orchestrationProfile.toolNames)
+			: config.allowedToolNames
+				? new Set(config.allowedToolNames)
+				: undefined;
+		this._excludedToolNames = config.orchestrationProfile
+			? undefined
+			: config.excludedToolNames
+				? new Set(config.excludedToolNames)
+				: undefined;
 		this._toolProfileFilter = config.toolProfileFilter
 			? { allow: config.toolProfileFilter.allow ?? [], block: config.toolProfileFilter.block ?? [] }
 			: undefined;
@@ -1196,6 +1233,7 @@ export class AgentSession {
 				this._toolProfileFilter = filter;
 			},
 			getAllowedToolNames: () => this._allowedToolNames,
+			getOrchestrationProfile: () => config.orchestrationProfile,
 			getExcludedToolNames: () => this._excludedToolNames,
 			deriveToolProfileFilter: () => this._profileFilter.deriveToolProfileFilter(),
 			isToolOrCommandAllowedByProfile: (name) => this._profileFilter.isToolOrCommandAllowedByProfile(name),
@@ -1228,6 +1266,7 @@ export class AgentSession {
 			saveTaskStepsStateSnapshot: (state) => this.saveTaskStepsStateSnapshot(state),
 			getContextGcReport: (messages) => this.getContextGcReport(messages),
 			startWorkerDelegation: (request) => this._backgroundLanes.startWorkerDelegation(request),
+			getOrchestrationProfileCatalog: () => this._backgroundLanes.getOrchestrationProfileCatalog(),
 			getWorkerLaneRecords: () => this._backgroundLanes.getLaneRecords(),
 			getWorkerResultSnapshots: () => this.getWorkerResultSnapshots(),
 			resolveManagedLaneId: (id) => this._backgroundLanes.resolveManagedLaneId(id),
@@ -5392,11 +5431,7 @@ export class AgentSession {
 	 * Run one bounded scout-worker delegation. Delegates to {@link BackgroundLaneController};
 	 * consumed by the `delegate` tool.
 	 */
-	async runWorkerDelegationOnce(request: {
-		instructions: string;
-		systemPrompt?: string;
-		memoryRead?: boolean;
-	}): Promise<WorkerDelegationRunOutcome> {
+	async runWorkerDelegationOnce(request: WorkerDelegationRequest): Promise<WorkerDelegationRunOutcome> {
 		return this._backgroundLanes.runWorkerDelegationOnce(request);
 	}
 

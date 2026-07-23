@@ -37,6 +37,16 @@ export const WORKER_WRITE_LANE_SYSTEM_PROMPT = [
 	"Never invent file paths, APIs, or facts.",
 ].join("\n");
 
+export const WORKER_OPERATOR_LANE_SYSTEM_PROMPT = [
+	"You are a bounded execution worker delegated one task by a coding agent.",
+	"Use only the provided read tools and direct-argv run_process sandbox. No shell interpretation, delegation, or unlisted executable is available.",
+	"Respond with STRICT JSON only - no prose, no markdown fences:",
+	'{"summary":"<what you executed and observed>","status":"completed"|"blocked","blockers":["<failure or missing authority>"],"findings":[{"summary":"<result>","confidence":<0..1>}]}',
+	"A non-zero exit, timeout, abort, or output-limit result is not success; include it in blockers.",
+	'Use status "blocked" when the task cannot be completed under the provided process policy.',
+	"Never invent command output, file paths, APIs, or facts.",
+].join("\n");
+
 export interface WorkerCompletion {
 	text: string;
 	costUsd: number;
@@ -67,6 +77,8 @@ export interface WorkerRunnerOptions {
 	 * runner applies the worker's structured actions through the envelope path scope; refusals
 	 * and failures become blockers, never silent drops. */
 	applyActions?: (actions: readonly WorkerAction[]) => AppliedActionsReport;
+	/** Enables the direct-argv operator role prompt. The host remains responsible for its process sandbox. */
+	processCapable?: boolean;
 	/** Session cwd — the baseline for relative changed-file and envelope paths in parent
 	 * validation. Defaults to process.cwd(). */
 	cwd?: string;
@@ -238,7 +250,11 @@ export async function runWorker(options: WorkerRunnerOptions): Promise<WorkerRun
 		signal: options.signal,
 		execute: (signal) =>
 			options.complete({
-				systemPrompt: writeCapable ? WORKER_WRITE_LANE_SYSTEM_PROMPT : WORKER_LANE_SYSTEM_PROMPT,
+				systemPrompt: options.processCapable
+					? WORKER_OPERATOR_LANE_SYSTEM_PROMPT
+					: writeCapable
+						? WORKER_WRITE_LANE_SYSTEM_PROMPT
+						: WORKER_LANE_SYSTEM_PROMPT,
 				userPrompt: buildWorkerUserPrompt(options.request),
 				signal,
 			}),

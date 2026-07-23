@@ -37,6 +37,7 @@ export interface Args {
 	noBuiltinTools?: boolean;
 	resourceProfiles?: string[];
 	resourceProfileJson?: string[];
+	orchestrationProfile?: string;
 	extensions?: string[];
 	noExtensions?: boolean;
 	print?: boolean;
@@ -153,6 +154,8 @@ export function parseArgs(args: string[]): Args {
 			];
 		} else if (arg === "--resource-profile-json" && i + 1 < args.length) {
 			result.resourceProfileJson = [...(result.resourceProfileJson ?? []), args[++i]];
+		} else if (arg === "--orchestration-profile" && i + 1 < args.length) {
+			result.orchestrationProfile = args[++i];
 		} else if (arg === "--thinking" && i + 1 < args.length) {
 			const level = args[++i];
 			if (isValidThinkingLevel(level)) {
@@ -297,6 +300,7 @@ ${chalk.bold("Options:")}
                                  Applies to built-in, extension, and custom tools
   --resource-profile <names>     Comma-separated resource profile names for this session
   --resource-profile-json <json>  One-shot profile definitions as JSON or <resource-profile> tag text
+  --orchestration-profile <id>   Pin this session to an owner-authored orchestration profile
   --thinking <level>             Set thinking level: off, minimal, low, medium, high, xhigh, max, ultra
                                  Ultra uses max model effort and reinforces available delegation
   --extension, -e <path>         Load an extension file (can be used multiple times)

@@ -51,6 +51,7 @@ import type { MemoryPromptInclusionReport, MemoryRetrievalDiagnostics } from "./
 import type { ContextGcReport } from "./context-gc.ts";
 import { DEFAULT_ACTIVE_TOOL_NAMES, mapToolNamesForPlatform } from "./default-tool-surface.ts";
 import { acknowledgeWorkerResultReview } from "./delegation/session-worker-result.ts";
+import type { WorkerDelegationRequest } from "./delegation/worker-delegation-request.ts";
 import { createCoreDiagnosticsToolDefinitions } from "./extensions/builtin.ts";
 import {
 	type ContextUsage,
@@ -75,6 +76,7 @@ import type { ModelRegistry } from "./model-registry.ts";
 import { resolveCliModel } from "./model-resolver.ts";
 import { evaluateSurfaceFitness } from "./model-router/fitness-gate.ts";
 import { FitnessStore } from "./models/fitness-store.ts";
+import type { OrchestrationProfile } from "./orchestration/contracts.ts";
 import type { ProfileFilterReloadSnapshot } from "./profile-filter-controller.ts";
 import { describeInFlightWorkUnit, getInFlightWorkUnits } from "./reload-blockers.ts";
 import type { ModelFitnessReport } from "./research/model-fitness.ts";
@@ -104,6 +106,7 @@ import { allToolNames, createToolDefinition, type ToolsOptions } from "./tools/i
 import { createModelFitnessToolDefinition } from "./tools/model-fitness.ts";
 import { resolveToCwd } from "./tools/path-utils.ts";
 import { createReadTool } from "./tools/read.ts";
+import { createRunProcessToolDefinition } from "./tools/run-process.ts";
 import { createRunToolkitScriptToolDefinition } from "./tools/run-toolkit-script.ts";
 import { createTaskStepsToolDefinition } from "./tools/task-steps.ts";
 import { dispatchTmuxWorker } from "./tools/tmux-dispatch.ts";
@@ -221,6 +224,8 @@ export interface RuntimeBuilderDeps {
 	getToolProfileFilter(): Required<ResourceProfileFilterSettings> | undefined;
 	setToolProfileFilter(filter: Required<ResourceProfileFilterSettings> | undefined): void;
 	getAllowedToolNames(): Set<string> | undefined;
+	/** Immutable active orchestration profile; absent sessions never construct run_process. */
+	getOrchestrationProfile?(): OrchestrationProfile | undefined;
 	getExcludedToolNames(): Set<string> | undefined;
 	/** Re-derive the profile tool filter from freshly reloaded settings (reload only). */
 	deriveToolProfileFilter(): Required<ResourceProfileFilterSettings>;
@@ -276,11 +281,10 @@ export interface RuntimeBuilderDeps {
 	/** Context-gc report for the core diagnostics tool. */
 	getContextGcReport(messages: AgentMessage[]): ContextGcReport;
 	/** Non-blocking worker-delegation starter for the delegate tool. */
-	startWorkerDelegation(request: {
-		instructions: string;
-		systemPrompt?: string;
-		memoryRead?: boolean;
-	}): { started: false; skipReason: string } | { started: true; record: LaneRecord };
+	startWorkerDelegation(
+		request: WorkerDelegationRequest,
+	): { started: false; skipReason: string } | { started: true; record: LaneRecord };
+	getOrchestrationProfileCatalog(): Array<{ profileId: string; role: string; description: string }>;
 	getWorkerLaneRecords(): LaneRecord[];
 	getWorkerResultSnapshots(): WorkerResult[];
 	/** Resolve a managed (e.g. tmux) lane dispatch's internal LaneTracker id from the extension's own
@@ -288,11 +292,7 @@ export interface RuntimeBuilderDeps {
 	 * adapter's correlation read (see `tools/tmux-dispatch.ts`). */
 	resolveManagedLaneId(callerLaneId: string): string | undefined;
 	/** Worker-delegation runner for SDK/test through-completion calls. */
-	runWorkerDelegationOnce(request: {
-		instructions: string;
-		systemPrompt?: string;
-		memoryRead?: boolean;
-	}): Promise<WorkerDelegationRunOutcome>;
+	runWorkerDelegationOnce(request: WorkerDelegationRequest): Promise<WorkerDelegationRunOutcome>;
 	/** Model-fitness probe for the model_fitness tool. `toolCallId` is the idempotency token
 	 * for spawned-usage reportId — present only for the LLM tool-call path (see model-fitness.ts). */
 	runModelFitness(args: {
@@ -738,7 +738,8 @@ export class RuntimeBuilder {
 		// an active allowlist, don't hand grep/find/run_toolkit_script an artifact store at all:
 		// they fall back to their bounded preview/truncation behavior, with no payload/meta files
 		// ever written and no retrieval promise made.
-		const toolArtifactStore = toolAccess.allows("artifact_retrieve") ? this.deps.getToolArtifactStore() : undefined;
+		const toolArtifactStore =
+			!baseToolsOverride && toolAccess.allows("artifact_retrieve") ? this.deps.getToolArtifactStore() : undefined;
 		const toolOptions: ToolsOptions = {
 			read: { autoResizeImages },
 			bash: {
@@ -763,6 +764,18 @@ export class RuntimeBuilder {
 						.map((name) => [name, createToolDefinition(name, this.deps.getCwd(), toolOptions)]),
 				);
 		if (!baseToolsOverride) {
+			if (toolAccess.allows("run_process")) {
+				const orchestrationProfile = this.deps.getOrchestrationProfile?.();
+				if (orchestrationProfile?.executionPolicy) {
+					this._baseToolDefinitions.set(
+						"run_process",
+						createRunProcessToolDefinition(this.deps.getCwd(), {
+							policy: orchestrationProfile.executionPolicy,
+							maxWallClockMs: orchestrationProfile.budget.maxWallClockMs ?? 0,
+						}),
+					);
+				}
+			}
 			if (toolAccess.allows("context_audit")) {
 				for (const definition of createCoreDiagnosticsToolDefinitions(
 					() => this.deps.getActiveToolNames(),
@@ -858,6 +871,7 @@ export class RuntimeBuilder {
 				const delegateToolDefinition = createDelegateToolDefinition({
 					startWorkerDelegation: (args) => this.deps.startWorkerDelegation(args),
 					runWorkerDelegation: (args) => this.deps.runWorkerDelegationOnce(args),
+					orchestrationProfiles: this.deps.getOrchestrationProfileCatalog(),
 				});
 				this._baseToolDefinitions.set(delegateToolDefinition.name, delegateToolDefinition);
 			}

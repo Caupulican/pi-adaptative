@@ -11,6 +11,9 @@ import { DEFAULT_ACTIVE_TOOL_NAMES } from "./default-tool-surface.ts";
 import type { ExtensionRunner, LoadExtensionsResult, SessionStartEvent, ToolDefinition } from "./extensions/index.ts";
 import { ModelRegistry } from "./model-registry.ts";
 import { findInitialModel, resolveProfileModelSettings } from "./model-resolver.ts";
+import type { OrchestrationProfile } from "./orchestration/contracts.ts";
+import { resolveConfiguredOrchestrationModel } from "./orchestration/model-binding.ts";
+import { validateOrchestrationProfile } from "./orchestration/profile-registry.ts";
 import type { ResourceLoader } from "./resource-loader.ts";
 import { DefaultResourceLoader } from "./resource-loader.ts";
 import { parseResourceProfileInput } from "./resource-profile-blocks.ts";
@@ -90,6 +93,8 @@ export interface CreateAgentSessionOptions {
 	resourceProfileJson?: string | string[];
 	/** Optional runtime profile selection. Never persisted to disk. */
 	resourceProfiles?: string[];
+	/** Immutable owner-authored orchestration policy for this session. */
+	orchestrationProfile?: OrchestrationProfile;
 	/** Custom tools to register (in addition to built-in tools). */
 	customTools?: ToolDefinition[];
 
@@ -236,10 +241,31 @@ export async function createAgentSession(options: CreateAgentSessionOptions = {}
 	const modelRegistry = options.modelRegistry ?? ModelRegistry.create(authStorage, modelsPath);
 
 	const settingsManager = options.settingsManager ?? SettingsManager.create(cwd, agentDir);
+	const orchestrationProfile = options.orchestrationProfile;
+	if (orchestrationProfile) {
+		validateOrchestrationProfile(orchestrationProfile);
+		const conflictingOptions = [
+			...(options.model ? ["model"] : []),
+			...(options.thinkingLevel !== undefined ? ["thinkingLevel"] : []),
+			...(options.scopedModels !== undefined ? ["scopedModels"] : []),
+			...(options.tools !== undefined ? ["tools"] : []),
+			...(options.noTools !== undefined ? ["noTools"] : []),
+			...(options.excludeTools !== undefined ? ["excludeTools"] : []),
+			...(options.toolProfileFilter !== undefined ? ["toolProfileFilter"] : []),
+			...(options.resourceProfiles !== undefined ? ["resourceProfiles"] : []),
+		];
+		if (conflictingOptions.length > 0) {
+			throw new TypeError(
+				`Orchestration profile '${orchestrationProfile.profileId}' owns model, thinking, tools, and resources; remove conflicting SDK options: ${conflictingOptions.join(", ")}.`,
+			);
+		}
+		settingsManager.setRuntimeResourceProfiles([...orchestrationProfile.resourceProfileNames]);
+	}
 	const needsProfileReload =
 		options.resourceProfileDefinitions !== undefined ||
 		options.resourceProfileJson !== undefined ||
-		options.resourceProfiles !== undefined;
+		options.resourceProfiles !== undefined ||
+		orchestrationProfile !== undefined;
 	if (options.resourceProfileDefinitions) {
 		settingsManager.addInlineResourceProfileDefinitions(options.resourceProfileDefinitions);
 	}
@@ -251,7 +277,7 @@ export async function createAgentSession(options: CreateAgentSessionOptions = {}
 			settingsManager.addInlineResourceProfileDefinitions(parseResourceProfileInput(input).profiles);
 		}
 	}
-	if (options.resourceProfiles !== undefined) {
+	if (!orchestrationProfile && options.resourceProfiles !== undefined) {
 		settingsManager.setRuntimeResourceProfiles(options.resourceProfiles);
 	}
 	const sessionManager =
@@ -271,13 +297,21 @@ export async function createAgentSession(options: CreateAgentSessionOptions = {}
 	const hasExistingSession = existingSession.messages.length > 0;
 	const hasThinkingEntry = sessionManager.getBranch().some((entry) => entry.type === "thinking_level_change");
 
-	let model = options.model;
+	const orchestrationModel = orchestrationProfile
+		? resolveConfiguredOrchestrationModel(orchestrationProfile, modelRegistry)
+		: undefined;
+	if (orchestrationProfile && !orchestrationModel) {
+		throw new TypeError(
+			`Orchestration profile '${orchestrationProfile.profileId}' has no configured, authenticated model that supports its exact thinking level.`,
+		);
+	}
+	let model = orchestrationModel?.model ?? options.model;
 	let modelFallbackMessage: string | undefined;
 
-	let thinkingLevel = options.thinkingLevel;
+	let thinkingLevel = orchestrationModel?.binding.thinkingLevel ?? options.thinkingLevel;
 
 	const activeProfileNames = settingsManager.getActiveResourceProfileNames();
-	if (activeProfileNames.length > 0) {
+	if (!orchestrationProfile && activeProfileNames.length > 0) {
 		const profileSettings = resolveProfileModelSettings({
 			activeProfileNames,
 			registry: settingsManager.getProfileRegistry(),
@@ -349,12 +383,22 @@ export async function createAgentSession(options: CreateAgentSessionOptions = {}
 		...DEFAULT_ACTIVE_TOOL_NAMES,
 		...(settingsManager.getScoutSettings().enabled ? ["context_scout"] : []),
 	];
-	const toolProfileFilter = options.toolProfileFilter ?? settingsManager.getResourceProfileFilter("tools");
-	const allowedToolNames = options.tools ?? (options.noTools === "all" ? [] : undefined);
-	const excludedToolNames = options.excludeTools;
+	const toolProfileFilter = orchestrationProfile
+		? settingsManager.getResourceProfileFilter("tools")
+		: (options.toolProfileFilter ?? settingsManager.getResourceProfileFilter("tools"));
+	const allowedToolNames = orchestrationProfile
+		? [...orchestrationProfile.toolNames]
+		: (options.tools ?? (options.noTools === "all" ? [] : undefined));
+	const excludedToolNames = orchestrationProfile ? undefined : options.excludeTools;
 	const excludedToolNameSet = excludedToolNames ? new Set(excludedToolNames) : undefined;
 	const initialActiveToolNames: string[] = (
-		options.tools ? [...options.tools] : options.noTools ? [] : defaultActiveToolNames
+		orchestrationProfile
+			? [...orchestrationProfile.toolNames]
+			: options.tools
+				? [...options.tools]
+				: options.noTools
+					? []
+					: defaultActiveToolNames
 	).filter((name) => !excludedToolNameSet?.has(name));
 
 	let agent: Agent;
@@ -489,7 +533,9 @@ export async function createAgentSession(options: CreateAgentSessionOptions = {}
 		settingsManager,
 		cwd,
 		agentDir,
-		scopedModels: options.scopedModels,
+		scopedModels: orchestrationModel
+			? [{ model: orchestrationModel.model, thinkingLevel: orchestrationModel.binding.thinkingLevel }]
+			: options.scopedModels,
 		resourceLoader,
 		customTools: options.customTools,
 		modelRegistry,
@@ -498,9 +544,12 @@ export async function createAgentSession(options: CreateAgentSessionOptions = {}
 		excludedToolNames,
 		extensionRunnerRef,
 		toolProfileFilter,
-		isExplicitModel: options.isExplicitModel ?? options.model != null,
-		isExplicitThinking: options.isExplicitThinking ?? options.thinkingLevel !== undefined,
+		isExplicitModel: orchestrationProfile ? true : (options.isExplicitModel ?? options.model != null),
+		isExplicitThinking: orchestrationProfile
+			? true
+			: (options.isExplicitThinking ?? options.thinkingLevel !== undefined),
 		isChildSession: options.isChildSession ?? process.env.PI_CHILD_SESSION === "1",
+		orchestrationProfile,
 		sessionStartEvent: options.sessionStartEvent,
 	});
 	try {
