@@ -10,7 +10,7 @@ const tool = createDelegateStatusToolDefinition({
 		{ laneId: "worker-2", type: "worker", status: "running" },
 		{ laneId: "tmux-worker-1", type: "tmux-worker", status: "succeeded", reasonCode: "worker_completed" },
 	],
-	getWorkerResultSnapshots: () => [
+	getWorkerClaimSnapshots: () => [
 		{
 			requestId: "worker-1",
 			status: "completed",

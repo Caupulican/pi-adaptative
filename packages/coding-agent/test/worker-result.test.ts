@@ -2,8 +2,8 @@ import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
 import { afterAll, beforeAll, describe, expect, it } from "vitest";
-import type { CapabilityEnvelope, WorkerRequest, WorkerResult } from "../src/core/autonomy/contracts.ts";
-import { requiresParentReview, validateWorkerResult } from "../src/core/delegation/worker-result.ts";
+import type { CapabilityEnvelope, WorkerClaim, WorkerRequest } from "../src/core/autonomy/contracts.ts";
+import { requiresParentReview, validateWorkerClaim } from "../src/core/delegation/worker-result.ts";
 
 describe("Worker Result Validator (Phase 6)", () => {
 	const mockEnvelope: CapabilityEnvelope = {
@@ -20,7 +20,7 @@ describe("Worker Result Validator (Phase 6)", () => {
 		envelope: mockEnvelope,
 	};
 
-	const baseResult: WorkerResult = {
+	const baseClaim: WorkerClaim = {
 		requestId: "req-1",
 		status: "completed",
 		summary: "done",
@@ -28,30 +28,30 @@ describe("Worker Result Validator (Phase 6)", () => {
 		usageReportId: "usage-1",
 	};
 
-	describe("validateWorkerResult", () => {
+	describe("validateWorkerClaim", () => {
 		it("request id mismatch blocks", () => {
-			const outcome = validateWorkerResult({
+			const outcome = validateWorkerClaim({
 				request: mockRequest,
-				result: { ...baseResult, requestId: "req-other" },
+				claim: { ...baseClaim, requestId: "req-other" },
 			});
 			expect(outcome.outcome).toBe("block");
 			expect(outcome.reasonCode).toBe("request_id_mismatch");
 		});
 
 		it("missing usageReportId blocks completed result", () => {
-			const outcome = validateWorkerResult({
+			const outcome = validateWorkerClaim({
 				request: mockRequest,
-				result: { ...baseResult, usageReportId: undefined },
+				claim: { ...baseClaim, usageReportId: undefined },
 			});
 			expect(outcome.outcome).toBe("block");
 			expect(outcome.reasonCode).toBe("missing_usage_report");
 		});
 
 		it("blocked worker returns structured blockers in details", () => {
-			const outcome = validateWorkerResult({
+			const outcome = validateWorkerClaim({
 				request: mockRequest,
-				result: {
-					...baseResult,
+				claim: {
+					...baseClaim,
 					status: "blocked",
 					blockers: ["missing permission"],
 				},
@@ -62,32 +62,32 @@ describe("Worker Result Validator (Phase 6)", () => {
 		});
 
 		it("failed/cancelled result requires parent review or blocks", () => {
-			const outcomeFailed = validateWorkerResult({
+			const outcomeFailed = validateWorkerClaim({
 				request: mockRequest,
-				result: { ...baseResult, status: "failed" },
+				claim: { ...baseClaim, status: "failed" },
 			});
 			expect(outcomeFailed.outcome).toBe("block");
 
-			const outcomeCancelled = validateWorkerResult({
+			const outcomeCancelled = validateWorkerClaim({
 				request: mockRequest,
-				result: { ...baseResult, status: "cancelled" },
+				claim: { ...baseClaim, status: "cancelled" },
 			});
 			expect(outcomeCancelled.outcome).toBe("block");
 		});
 
 		it("successful read-only worker with evidence and no changes can be allowed", () => {
-			const outcome = validateWorkerResult({
+			const outcome = validateWorkerClaim({
 				request: mockRequest,
-				result: { ...baseResult, evidence: { query: "q", sources: [], findings: [] } },
+				claim: { ...baseClaim, evidence: { query: "q", sources: [], findings: [] } },
 			});
 			expect(outcome.outcome).toBe("allow");
 			expect(outcome.reasonCode).toBe("allowed");
 		});
 
 		it("completed worker with blockers requires parent review", () => {
-			const outcome = validateWorkerResult({
+			const outcome = validateWorkerClaim({
 				request: mockRequest,
-				result: { ...baseResult, blockers: ["needs manual verification"] },
+				claim: { ...baseClaim, blockers: ["needs manual verification"] },
 			});
 			expect(outcome.outcome).toBe("ask-user");
 			expect(outcome.reasonCode).toBe("parent_review_required");
@@ -121,9 +121,9 @@ describe("Worker Result Validator (Phase 6)", () => {
 
 			it("changed file outside envelope path invalidates result", () => {
 				const changedFile = path.join(outsidePath, "file.txt");
-				const outcome = validateWorkerResult({
+				const outcome = validateWorkerClaim({
 					request: testReq,
-					result: { ...baseResult, changedFiles: [changedFile] },
+					claim: { ...baseClaim, changedFiles: [changedFile] },
 				});
 				expect(outcome.outcome).toBe("block");
 				expect(outcome.reasonCode).toBe("changed_file_outside_scope");
@@ -131,9 +131,9 @@ describe("Worker Result Validator (Phase 6)", () => {
 
 			it("changed file under denied path invalidates result", () => {
 				const changedFile = path.join(deniedPath, "file.txt");
-				const outcome = validateWorkerResult({
+				const outcome = validateWorkerClaim({
 					request: testReq,
-					result: { ...baseResult, changedFiles: [changedFile] },
+					claim: { ...baseClaim, changedFiles: [changedFile] },
 				});
 				expect(outcome.outcome).toBe("block");
 				expect(outcome.reasonCode).toBe("changed_file_denied");
@@ -141,9 +141,9 @@ describe("Worker Result Validator (Phase 6)", () => {
 
 			it("changed files inside allowed scope require parent review", () => {
 				const changedFile = path.join(allowedRoot, "file.txt");
-				const outcome = validateWorkerResult({
+				const outcome = validateWorkerClaim({
 					request: testReq,
-					result: { ...baseResult, changedFiles: [changedFile] },
+					claim: { ...baseClaim, changedFiles: [changedFile] },
 				});
 				expect(outcome.outcome).toBe("ask-user");
 				expect(outcome.reasonCode).toBe("parent_review_required");
@@ -152,9 +152,9 @@ describe("Worker Result Validator (Phase 6)", () => {
 			it("relative changed files resolve against the session cwd (the runner's reporting baseline)", () => {
 				// applyWorkerActions reports changed files relative to the session cwd — the
 				// validator must use the SAME baseline, not the allowed root.
-				const outcome = validateWorkerResult({
+				const outcome = validateWorkerClaim({
 					request: testReq,
-					result: { ...baseResult, changedFiles: ["allowed/src/file.txt"] },
+					claim: { ...baseClaim, changedFiles: ["allowed/src/file.txt"] },
 					cwd: tempDir,
 				});
 				expect(outcome.outcome).toBe("ask-user");
@@ -164,9 +164,9 @@ describe("Worker Result Validator (Phase 6)", () => {
 			it("cwd-relative changed file under a denied path is blocked (no double-prefix dodge)", () => {
 				// Under the old per-root resolution, "allowed/denied/file.txt" double-prefixed to
 				// <root>/allowed/denied/file.txt, sailing past the deny rule.
-				const outcome = validateWorkerResult({
+				const outcome = validateWorkerClaim({
 					request: testReq,
-					result: { ...baseResult, changedFiles: ["allowed/denied/file.txt"] },
+					claim: { ...baseClaim, changedFiles: ["allowed/denied/file.txt"] },
 					cwd: tempDir,
 				});
 				expect(outcome.outcome).toBe("block");
@@ -174,9 +174,9 @@ describe("Worker Result Validator (Phase 6)", () => {
 			});
 
 			it("relative changed files cannot escape the allowed root", () => {
-				const outcome = validateWorkerResult({
+				const outcome = validateWorkerClaim({
 					request: testReq,
-					result: { ...baseResult, changedFiles: ["../outside/file.txt"] },
+					claim: { ...baseClaim, changedFiles: ["../outside/file.txt"] },
 					cwd: allowedRoot,
 				});
 				expect(outcome.outcome).toBe("block");
@@ -185,9 +185,9 @@ describe("Worker Result Validator (Phase 6)", () => {
 
 			it("missing allowedPaths in request envelope blocks changed files", () => {
 				const changedFile = path.join(allowedRoot, "file.txt");
-				const outcome = validateWorkerResult({
+				const outcome = validateWorkerClaim({
 					request: { ...testReq, envelope: { ...testEnv, allowedPaths: [] } },
-					result: { ...baseResult, changedFiles: [changedFile] },
+					claim: { ...baseClaim, changedFiles: [changedFile] },
 				});
 				expect(outcome.outcome).toBe("block");
 				expect(outcome.reasonCode).toBe("missing_path_scope");
@@ -197,36 +197,36 @@ describe("Worker Result Validator (Phase 6)", () => {
 		it("validator does not mutate request/result changedFiles/blockers arrays", () => {
 			const blockers = ["b1"];
 			const changedFiles = ["f1"];
-			const result: WorkerResult = {
-				...baseResult,
+			const claim: WorkerClaim = {
+				...baseClaim,
 				status: "blocked",
 				blockers,
 				changedFiles,
 			};
-			validateWorkerResult({ request: mockRequest, result });
+			validateWorkerClaim({ request: mockRequest, claim });
 
-			expect(result.blockers).toBe(blockers);
-			expect(result.changedFiles).toBe(changedFiles);
+			expect(claim.blockers).toBe(blockers);
+			expect(claim.changedFiles).toBe(changedFiles);
 		});
 	});
 
 	describe("requiresParentReview", () => {
 		it("true for changed files", () => {
-			expect(requiresParentReview({ ...baseResult, changedFiles: ["file.txt"] })).toBe(true);
+			expect(requiresParentReview({ ...baseClaim, changedFiles: ["file.txt"] })).toBe(true);
 		});
 
 		it("true for failed/blocked/cancelled status", () => {
-			expect(requiresParentReview({ ...baseResult, status: "failed" })).toBe(true);
-			expect(requiresParentReview({ ...baseResult, status: "blocked" })).toBe(true);
-			expect(requiresParentReview({ ...baseResult, status: "cancelled" })).toBe(true);
+			expect(requiresParentReview({ ...baseClaim, status: "failed" })).toBe(true);
+			expect(requiresParentReview({ ...baseClaim, status: "blocked" })).toBe(true);
+			expect(requiresParentReview({ ...baseClaim, status: "cancelled" })).toBe(true);
 		});
 
 		it("true for blockers present", () => {
-			expect(requiresParentReview({ ...baseResult, status: "completed", blockers: ["b"] })).toBe(true);
+			expect(requiresParentReview({ ...baseClaim, status: "completed", blockers: ["b"] })).toBe(true);
 		});
 
 		it("false for completed no-change/no-blocker result", () => {
-			expect(requiresParentReview({ ...baseResult })).toBe(false);
+			expect(requiresParentReview({ ...baseClaim })).toBe(false);
 		});
 	});
 });

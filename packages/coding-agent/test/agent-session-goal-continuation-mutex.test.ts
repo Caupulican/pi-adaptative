@@ -33,7 +33,7 @@ import { createHarness, getUserTexts } from "./suite/harness.ts";
 function makeSnapshot(goalId: string): GoalRuntimeSnapshot {
 	return {
 		goalState: createGoalState({ goalId, userGoal: "Ship the mutex fix", now: "T0" }),
-		workerResults: [],
+		workerClaims: [],
 		learningDecisions: [],
 		continuation: {
 			action: "continue",

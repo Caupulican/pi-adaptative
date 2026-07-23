@@ -432,9 +432,9 @@ describe("AgentSession worker delegation", () => {
 			expect(run.record?.status).toBe("succeeded");
 			expect(run.record?.reasonCode).toBe("worker_completed");
 			expect(run.outcome?.accepted).toBe(true);
-			expect(run.outcome?.result.usageReportId).toBe(`worker:${harness.session.sessionId}:${run.record?.laneId}`);
+			expect(run.outcome?.claim.usageReportId).toBe(`worker:${harness.session.sessionId}:${run.record?.laneId}`);
 
-			const results = harness.session.getWorkerResultSnapshots();
+			const results = harness.session.getWorkerClaimSnapshots();
 			expect(results).toHaveLength(1);
 			expect(results[0]?.status).toBe("completed");
 			expect(results[0]?.summary).toBe("The validator blocks out-of-scope changes.");
@@ -464,9 +464,9 @@ describe("AgentSession worker delegation", () => {
 
 			const run = await harness.session.runWorkerDelegationOnce({ instructions: "Read private memory" });
 
-			expect(run.outcome?.result.status).toBe("blocked");
-			expect(run.outcome?.result.blockers?.some((blocker) => blocker.includes("read blocked"))).toBe(true);
-			expect(JSON.stringify(run.outcome?.result)).not.toContain("PRIVATE_MEMORY_MARKER_SHOULD_NOT_LEAK");
+			expect(run.outcome?.claim.status).toBe("blocked");
+			expect(run.outcome?.claim.blockers?.some((blocker) => blocker.includes("read blocked"))).toBe(true);
+			expect(JSON.stringify(run.outcome?.claim)).not.toContain("PRIVATE_MEMORY_MARKER_SHOULD_NOT_LEAK");
 		} finally {
 			harness.cleanup();
 		}
@@ -485,7 +485,7 @@ describe("AgentSession worker delegation", () => {
 			expect(run.record?.reasonCode).toBe("worker_blocked");
 			expect(run.outcome?.accepted).toBe(false);
 			expect(run.outcome?.acceptance.outcome).toBe("block");
-			expect(harness.session.getWorkerResultSnapshots()[0]?.status).toBe("blocked");
+			expect(harness.session.getWorkerClaimSnapshots()[0]?.status).toBe("blocked");
 		} finally {
 			harness.cleanup();
 		}
@@ -508,7 +508,7 @@ describe("AgentSession worker delegation", () => {
 			const run = await harness.session.runWorkerDelegationOnce({ instructions: "Write the direct helper" });
 
 			expect(readFileSync(join(harness.tempDir, "src/direct.ts"), "utf-8")).toBe("export const direct = true;\n");
-			expect(run.outcome?.result.changedFiles).toEqual(["src/direct.ts"]);
+			expect(run.outcome?.claim.changedFiles).toEqual(["src/direct.ts"]);
 			expect(run.outcome?.acceptance).toMatchObject({
 				outcome: "ask-user",
 				reasonCode: "parent_review_required",
@@ -537,9 +537,9 @@ describe("AgentSession worker delegation", () => {
 			const run = await harness.session.runWorkerDelegationOnce({ instructions: "Try the scoped write" });
 
 			expect(existsSync(join(harness.tempDir, "outside.ts"))).toBe(false);
-			expect(run.outcome?.result.changedFiles).toEqual([]);
-			expect(run.outcome?.result.status).toBe("blocked");
-			expect(run.outcome?.result.blockers?.some((blocker) => blocker.includes("write blocked"))).toBe(true);
+			expect(run.outcome?.claim.changedFiles).toEqual([]);
+			expect(run.outcome?.claim.status).toBe("blocked");
+			expect(run.outcome?.claim.blockers?.some((blocker) => blocker.includes("write blocked"))).toBe(true);
 		} finally {
 			harness.cleanup();
 		}
@@ -560,9 +560,9 @@ describe("AgentSession worker delegation", () => {
 
 			const run = await harness.session.runWorkerDelegationOnce({ instructions: "Edit the missing helper" });
 
-			expect(run.outcome?.result.changedFiles).toEqual(["src/missing.ts"]);
-			expect(run.outcome?.result.status).toBe("blocked");
-			expect(run.outcome?.result.blockers).toContain("edit failed during isolated execution");
+			expect(run.outcome?.claim.changedFiles).toEqual(["src/missing.ts"]);
+			expect(run.outcome?.claim.status).toBe("blocked");
+			expect(run.outcome?.claim.blockers).toContain("edit failed during isolated execution");
 		} finally {
 			harness.cleanup();
 		}
@@ -587,9 +587,9 @@ describe("AgentSession worker delegation", () => {
 			]);
 
 			await harness.session.prompt("Delegate both scouts", { autoContinueGoal: false });
-			await vi.waitFor(() => expect(harness.session.getWorkerResultSnapshots()).toHaveLength(2));
+			await vi.waitFor(() => expect(harness.session.getWorkerClaimSnapshots()).toHaveLength(2));
 
-			expect(harness.session.getWorkerResultSnapshots().map((result) => result.summary)).toEqual([
+			expect(harness.session.getWorkerClaimSnapshots().map((claim) => claim.summary)).toEqual([
 				"first worker done",
 				"second worker done",
 			]);
@@ -665,7 +665,7 @@ describe("AgentSession worker delegation", () => {
 					.filter((record) => record.type === "worker")
 					.at(-1)?.status,
 			).toBe("running");
-			expect(harness.session.getWorkerResultSnapshots()).toHaveLength(0);
+			expect(harness.session.getWorkerClaimSnapshots()).toHaveLength(0);
 			expect(JSON.stringify(harness.session.messages)).toContain("Foreground remained responsive.");
 
 			resolveWorker(fauxAssistantMessage('{"summary":"background result arrived"}'));
@@ -673,7 +673,7 @@ describe("AgentSession worker delegation", () => {
 			await handoff;
 			await wakeReply;
 
-			expect(harness.session.getWorkerResultSnapshots()).toHaveLength(1);
+			expect(harness.session.getWorkerClaimSnapshots()).toHaveLength(1);
 			const serialized = JSON.stringify(harness.session.messages);
 			expect(serialized).toContain("Background worker terminal handoff:");
 			expect(serialized).toContain("Background handoff acknowledged.");
@@ -697,9 +697,9 @@ describe("AgentSession worker delegation", () => {
 			]);
 
 			await harness.session.prompt("Please delegate a scout task", { autoContinueGoal: false });
-			await vi.waitFor(() => expect(harness.session.getWorkerResultSnapshots()).toHaveLength(1));
+			await vi.waitFor(() => expect(harness.session.getWorkerClaimSnapshots()).toHaveLength(1));
 
-			expect(harness.session.getWorkerResultSnapshots()).toHaveLength(1);
+			expect(harness.session.getWorkerClaimSnapshots()).toHaveLength(1);
 			expect(workerLaneRecords(harness)[0]?.status).toBe("succeeded");
 
 			const serialized = JSON.stringify(harness.session.messages);
@@ -729,7 +729,7 @@ describe("AgentSession worker delegation", () => {
 			const run = await harness.session.runWorkerDelegationOnce({ instructions: "Implement and verify" });
 			if (!run.started || !run.record) throw new Error("Expected implementation worker to start");
 			const subjectLaneId = run.record.laneId;
-			expect(harness.session.getWorkerResultSnapshots()).toHaveLength(1);
+			expect(harness.session.getWorkerClaimSnapshots()).toHaveLength(1);
 			expect(harness.session.getLaneRecords().find((record) => record.laneId === subjectLaneId)).toMatchObject({
 				status: "running",
 				reasonCode: "independent_verification_required",
@@ -748,7 +748,7 @@ describe("AgentSession worker delegation", () => {
 				),
 			);
 			await vi.waitFor(() => {
-				expect(harness.session.getWorkerResultSnapshots()).toHaveLength(2);
+				expect(harness.session.getWorkerClaimSnapshots()).toHaveLength(2);
 				expect(harness.session.getLaneRecords().find((record) => record.laneId === subjectLaneId)).toMatchObject({
 					status: "succeeded",
 					reasonCode: "independent_verification_accepted",
@@ -756,8 +756,8 @@ describe("AgentSession worker delegation", () => {
 			});
 
 			const verifierResult = harness.session
-				.getWorkerResultSnapshots()
-				.find((result) => result.verification !== undefined);
+				.getWorkerClaimSnapshots()
+				.find((claim) => claim.verification !== undefined);
 			expect(verifierResult?.verification).toEqual({
 				subjectTaskId: subjectLaneId,
 				verdict: "accepted",
@@ -797,7 +797,7 @@ describe("AgentSession worker delegation", () => {
 			if (!run.started || !run.record) throw new Error("Expected implementation worker to start");
 			const subjectLaneId = run.record.laneId;
 			await vi.waitFor(() => {
-				expect(harness.session.getWorkerResultSnapshots()).toHaveLength(2);
+				expect(harness.session.getWorkerClaimSnapshots()).toHaveLength(2);
 				expect(harness.session.getLaneRecords().find((record) => record.laneId === subjectLaneId)).toMatchObject({
 					status: "failed",
 					reasonCode: "independent_verification_rejected:focused_checks_failed",
@@ -805,8 +805,7 @@ describe("AgentSession worker delegation", () => {
 			});
 
 			expect(
-				harness.session.getWorkerResultSnapshots().find((result) => result.verification !== undefined)
-					?.verification,
+				harness.session.getWorkerClaimSnapshots().find((claim) => claim.verification !== undefined)?.verification,
 			).toEqual({
 				subjectTaskId: subjectLaneId,
 				verdict: "rejected",

@@ -28,9 +28,9 @@ import type {
 import type {
 	CapabilityEnvelope,
 	EvidenceBundle,
+	WorkerClaim,
+	WorkerClaimStatus,
 	WorkerRequest,
-	WorkerResult,
-	WorkerResultStatus,
 } from "./autonomy/contracts.ts";
 import { type LaneRecord, type LaneTerminalStatus, LaneTracker } from "./autonomy/lane-tracker.ts";
 import { ManagedLaneRegistry } from "./autonomy/managed-lane-registry.ts";
@@ -95,11 +95,11 @@ export function resolveManagedLaneTerminalStatus(status: string | undefined): La
 	}
 }
 
-/** Maps a LaneTracker terminal status onto the WorkerResult status vocabulary a managed-lane claim
+/** Maps a LaneTracker terminal status onto the WorkerClaim status vocabulary a managed-lane claim
  * snapshot is persisted under — the two enums use different spellings/values, never interchangeable
- * (e.g. `"canceled"` vs `"cancelled"`); `timeout`/`budget_exhausted` have no dedicated WorkerResult
+ * (e.g. `"canceled"` vs `"cancelled"`); `timeout`/`budget_exhausted` have no dedicated WorkerClaim
  * counterpart and are conservatively reported as `"failed"`. */
-export function mapManagedLaneTerminalStatus(status: LaneTerminalStatus): WorkerResultStatus {
+export function mapManagedLaneTerminalStatus(status: LaneTerminalStatus): WorkerClaimStatus {
 	switch (status) {
 		case "succeeded":
 			return "completed";
@@ -162,8 +162,8 @@ export interface BackgroundLaneControllerDeps extends WorkerDelegationController
 	getEvidenceBundleSnapshot(): EvidenceBundle | undefined;
 	/** Persist a research lane's evidence bundle to the session log. */
 	saveEvidenceBundleSnapshot(bundle: EvidenceBundle): string;
-	/** Persist a worker delegation's result snapshot to the session log. */
-	saveWorkerResultSnapshot(result: WorkerResult, request?: WorkerRequest): string;
+	/** Persist a worker delegation's untrusted claim to the session log. */
+	saveWorkerClaimSnapshot(claim: WorkerClaim, request?: WorkerRequest): string;
 	/** Bounded, source-labeled memory retrieval for an orchestrator-authorized worker. */
 	readMemoryForLane(query: string): Promise<string>;
 	/** Roll a lane's spawned usage into session accounting (idempotent per reportId). `reportId` is
@@ -297,10 +297,10 @@ export class BackgroundLaneController {
 	 * registers exactly one reload-quiesce unit for it. A replacement controller restores that exact
 	 * running record before extension reconciliation. `phase: "terminal"` resolves the caller's free-form `status` claim
 	 * onto {@link LaneTerminalStatus} (see {@link resolveManagedLaneTerminalStatus}), completes that
-	 * same durable record, deregisters the quiesce unit, and persists a bounded worker-result CLAIM snapshot from the
+	 * same durable record, deregisters the quiesce unit, and persists a bounded worker claim from the
 	 * reported `changedFiles`. Host re-review: the reported `changedFiles` are re-checked against
 	 * the session's active capability envelope ({@link reviewManagedLaneChangedFiles}, reusing
-	 * `validateWorkerResult`'s symlink-safe scope check verbatim) and `parentReviewRequired` is
+	 * `validateWorkerClaim`'s symlink-safe scope check verbatim) and `parentReviewRequired` is
 	 * stamped on the persisted claim whenever that check does not cleanly "allow" -- an out-of-scope
 	 * (or no-scope-configured) path is flagged exactly like an in-scope one, since a tmux worker's
 	 * write never passed through this process's enforcement in the first place. This is the SESSION
@@ -341,7 +341,7 @@ export class BackgroundLaneController {
 			envelope: this.deps.getCapabilityEnvelope() ?? {},
 			cwd: this.deps.getCwd(),
 		});
-		const result: WorkerResult = {
+		const claim: WorkerClaim = {
 			requestId: record.laneId,
 			status: mapManagedLaneTerminalStatus(resolvedStatus),
 			summary: `Managed tmux-worker lane ${record.laneId} reported terminal status "${event.status ?? "unknown"}"${
@@ -352,11 +352,11 @@ export class BackgroundLaneController {
 			createdAt: new Date().toISOString(),
 		};
 		try {
-			this.deps.saveWorkerResultSnapshot(result);
+			this.deps.saveWorkerClaimSnapshot(claim);
 		} finally {
 			// Managed workers must wake their owning parent through the same bounded, event-driven
 			// terminal handoff as in-process workers. The lane record is already durable above, so
-			// notification still happens if the richer result snapshot fails to persist.
+			// notification still happens if the richer claim snapshot fails to persist.
 			this._recordWorkerTerminal(record);
 		}
 		return record;

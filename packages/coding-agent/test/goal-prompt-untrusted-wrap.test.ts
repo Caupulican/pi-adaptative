@@ -7,7 +7,7 @@ import { applyGoalEvent, createGoalState } from "../src/core/goals/goal-state.ts
  * Goal-state free text (userGoal, requirement text, blockedReason, the goal ledger's
  * evidence summary/uri, and the open-task-steps summary) is model/tool-set-controllable
  * (e.g. via add_requirement/add_evidence/block_goal) and must be fenced with the same
- * untrusted-content boundary already used for worker results -- not rendered raw into the
+ * untrusted-content boundary already used for worker claims -- not rendered raw into the
  * continuation prompt.
  */
 describe("goal-continuation-prompt wraps goal-state free text as untrusted", () => {
@@ -37,7 +37,7 @@ describe("goal-continuation-prompt wraps goal-state free text as untrusted", () 
 
 		const snapshot: GoalRuntimeSnapshot = {
 			goalState: state,
-			workerResults: [],
+			workerClaims: [],
 			learningDecisions: [],
 			openTaskSteps: [{ id: "step-1", status: "in_progress", content: "Verify req-1 is covered" }],
 			continuation: baseContinuation(),
@@ -72,7 +72,7 @@ describe("goal-continuation-prompt wraps goal-state free text as untrusted", () 
 
 		const snapshot: GoalRuntimeSnapshot = {
 			goalState: state,
-			workerResults: [],
+			workerClaims: [],
 			learningDecisions: [],
 			continuation: baseContinuation(),
 		};
@@ -85,7 +85,7 @@ describe("goal-continuation-prompt wraps goal-state free text as untrusted", () 
 		const activeState = createGoalState({ goalId: "g2", userGoal: "Ship it", now: "T0" });
 		const activeSnapshot: GoalRuntimeSnapshot = {
 			goalState: activeState,
-			workerResults: [],
+			workerClaims: [],
 			learningDecisions: [],
 			continuation: baseContinuation(),
 		};
@@ -103,7 +103,7 @@ describe("goal-continuation-prompt wraps goal-state free text as untrusted", () 
 
 		const snapshot: GoalRuntimeSnapshot = {
 			goalState: state,
-			workerResults: [],
+			workerClaims: [],
 			learningDecisions: [],
 			continuation: baseContinuation(),
 		};
@@ -123,17 +123,17 @@ describe("goal-continuation-prompt wraps goal-state free text as untrusted", () 
 		expect(closes).toBe(2);
 	});
 
-	it("worker-result wrapping is unchanged by the goal-state wrapping", () => {
+	it("worker-claim wrapping is unchanged by the goal-state wrapping", () => {
 		const snapshot: GoalRuntimeSnapshot = {
 			goalState: createGoalState({ goalId: "g1", userGoal: "Ship it", now: "T0" }),
-			workerResults: [{ requestId: "w1", status: "completed", summary: "Worker did the thing", changedFiles: [] }],
+			workerClaims: [{ requestId: "w1", status: "completed", summary: "Worker did the thing", changedFiles: [] }],
 			learningDecisions: [],
 			continuation: baseContinuation(),
 		};
 
 		const prompt = buildGoalContinuationPrompt({ snapshot });
 		expect(prompt.text).toMatch(
-			/<untrusted_content id="[a-f0-9]{32}" source="goal-continuation-worker-result">\n- w1 \[completed\]: Worker did the thing\n<\/untrusted_content>/,
+			/<untrusted_content id="[a-f0-9]{32}" source="goal-continuation-worker-claim">\n- w1 \[completed\]: Worker did the thing\n<\/untrusted_content>/,
 		);
 	});
 
@@ -151,7 +151,7 @@ describe("goal-continuation-prompt wraps goal-state free text as untrusted", () 
 
 		const snapshot: GoalRuntimeSnapshot = {
 			goalState: state,
-			workerResults: [],
+			workerClaims: [],
 			learningDecisions: [],
 			openTaskSteps: [{ id: "step-1", status: "pending", content: "Follow up" }],
 			continuation: baseContinuation(),

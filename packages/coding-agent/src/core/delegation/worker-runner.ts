@@ -1,16 +1,16 @@
 import { runBoundedCompletion } from "../autonomy/bounded-completion.ts";
-import type { EvidenceRef, Finding, GateOutcome, WorkerRequest, WorkerResult } from "../autonomy/contracts.ts";
+import type { EvidenceRef, Finding, GateOutcome, WorkerClaim, WorkerRequest } from "../autonomy/contracts.ts";
 import type { LaneTerminalStatus } from "../autonomy/lane-tracker.ts";
 import { createEvidenceBundle } from "../research/evidence-bundle.ts";
 import { type AppliedActionsReport, parseWorkerActions, type WorkerAction } from "./worker-actions.ts";
-import { validateWorkerResult } from "./worker-result.ts";
+import { validateWorkerClaim } from "./worker-result.ts";
 
 /**
  * Pure execution for one bounded specialist delegation: bounded isolated completion ->
- * parse -> `WorkerResult` -> parent validation via {@link validateWorkerResult}.
+ * parse -> untrusted `WorkerClaim` -> parent validation via {@link validateWorkerClaim}.
  *
  * The injected completion may be a bounded child tool loop. Its tool surface is built and gated by
- * the host; this module keeps the structured-output contract and treats every result as untrusted
+ * the host; this module keeps the structured-output contract and treats every claim as untrusted
  * until parent validation succeeds.
  */
 
@@ -79,8 +79,8 @@ export interface WorkerRunnerOptions {
 	/** Wall-clock budget in milliseconds; 0 disables. */
 	maxWallClockMs: number;
 	/**
-	 * Pre-allocated spawned-usage report id. Always stamped on the result so parent validation can
-	 * enforce the cost-visibility invariant (a completed result without a usage report is blocked).
+	 * Pre-allocated spawned-usage report id. Always stamped on the claim so parent validation can
+	 * enforce the cost-visibility invariant (a completed claim without a usage report is blocked).
 	 */
 	usageReportId: string;
 	complete: (args: { systemPrompt: string; userPrompt: string; signal?: AbortSignal }) => Promise<WorkerCompletion>;
@@ -102,8 +102,8 @@ export interface WorkerRunnerOptions {
 }
 
 export interface WorkerRunOutcome {
-	result: WorkerResult;
-	/** Parent-review verdict from {@link validateWorkerResult}; worker output stays untrusted. */
+	claim: WorkerClaim;
+	/** Parent-review verdict from {@link validateWorkerClaim}; worker output stays untrusted. */
 	acceptance: GateOutcome;
 	accepted: boolean;
 	laneStatus: LaneTerminalStatus;
@@ -118,7 +118,7 @@ export function buildWorkerUserPrompt(request: WorkerRequest): string {
 		request.instructions,
 		"</task>",
 		"",
-		"The task may request a custom output format. Do not replace the worker result envelope.",
+		"The task may request a custom output format. Do not replace the worker claim envelope.",
 		'Always return the JSON object required by the system prompt; put requested details inside "summary" and "findings".',
 	].join("\n");
 }
@@ -247,15 +247,15 @@ function buildWorkerEvidence(request: WorkerRequest, findings: ParsedWorkerOutpu
 
 function finishOutcome(args: {
 	request: WorkerRequest;
-	result: WorkerResult;
+	claim: WorkerClaim;
 	laneStatus: LaneTerminalStatus;
 	reasonCode: string;
 	costUsd: number;
 	cwd?: string;
 }): WorkerRunOutcome {
-	const acceptance = validateWorkerResult({ request: args.request, result: args.result, cwd: args.cwd });
+	const acceptance = validateWorkerClaim({ request: args.request, claim: args.claim, cwd: args.cwd });
 	return {
-		result: args.result,
+		claim: args.claim,
 		acceptance,
 		accepted: acceptance.outcome === "allow",
 		laneStatus: args.laneStatus,
@@ -266,7 +266,7 @@ function finishOutcome(args: {
 
 export async function runWorker(options: WorkerRunnerOptions): Promise<WorkerRunOutcome> {
 	const now = options.now ?? (() => new Date().toISOString());
-	const baseResult = {
+	const baseClaim = {
 		requestId: options.request.id,
 		changedFiles: [] as string[],
 		usageReportId: options.usageReportId,
@@ -297,8 +297,8 @@ export async function runWorker(options: WorkerRunnerOptions): Promise<WorkerRun
 		return finishOutcome({
 			request: options.request,
 			cwd: options.cwd,
-			result: {
-				...baseResult,
+			claim: {
+				...baseClaim,
 				changedFiles: liveChangedFiles,
 				status: cancelled ? "cancelled" : "failed",
 				summary: `Worker did not complete: ${bounded.failure.reasonCode}`,
@@ -311,12 +311,12 @@ export async function runWorker(options: WorkerRunnerOptions): Promise<WorkerRun
 
 	const completion = bounded.completion as WorkerCompletion | undefined;
 	const completionChangedFiles = [...new Set([...liveChangedFiles, ...(completion?.changedFiles ?? [])])];
-	const completionBaseResult = { ...baseResult, changedFiles: completionChangedFiles };
+	const completionBaseClaim = { ...baseClaim, changedFiles: completionChangedFiles };
 	if (!completion || completion.stopReason === "error" || completion.stopReason === "aborted") {
 		return finishOutcome({
 			request: options.request,
 			cwd: options.cwd,
-			result: { ...completionBaseResult, status: "failed", summary: "Worker model call failed." },
+			claim: { ...completionBaseClaim, status: "failed", summary: "Worker model call failed." },
 			laneStatus: "failed",
 			reasonCode: "model_error",
 			costUsd,
@@ -341,8 +341,8 @@ export async function runWorker(options: WorkerRunnerOptions): Promise<WorkerRun
 			return finishOutcome({
 				request: options.request,
 				cwd: options.cwd,
-				result: {
-					...completionBaseResult,
+				claim: {
+					...completionBaseClaim,
 					status: blocked ? "blocked" : "completed",
 					outputFormat: "plain_text",
 					summary,
@@ -360,8 +360,8 @@ export async function runWorker(options: WorkerRunnerOptions): Promise<WorkerRun
 		return finishOutcome({
 			request: options.request,
 			cwd: options.cwd,
-			result: {
-				...completionBaseResult,
+			claim: {
+				...completionBaseClaim,
 				status: "failed",
 				summary: "Worker output was not valid structured JSON.",
 			},
@@ -376,8 +376,8 @@ export async function runWorker(options: WorkerRunnerOptions): Promise<WorkerRun
 		return finishOutcome({
 			request: options.request,
 			cwd: options.cwd,
-			result: {
-				...completionBaseResult,
+			claim: {
+				...completionBaseClaim,
 				status: "failed",
 				summary: "Verifier output omitted its typed verdict or reasonCodes.",
 			},
@@ -406,8 +406,8 @@ export async function runWorker(options: WorkerRunnerOptions): Promise<WorkerRun
 		actionBlockers.push("worker emitted file actions without a filesystem.write envelope grant; nothing was applied");
 	}
 	const allBlockers = [...parsed.blockers, ...actionBlockers];
-	const result: WorkerResult = {
-		...baseResult,
+	const claim: WorkerClaim = {
+		...baseClaim,
 		changedFiles,
 		status: parsed.status === "blocked" || allBlockers.length > 0 ? "blocked" : "completed",
 		summary: parsed.summary,
@@ -424,11 +424,11 @@ export async function runWorker(options: WorkerRunnerOptions): Promise<WorkerRun
 			: {}),
 	};
 
-	if (result.status === "blocked") {
+	if (claim.status === "blocked") {
 		return finishOutcome({
 			request: options.request,
 			cwd: options.cwd,
-			result,
+			claim,
 			laneStatus: "failed",
 			reasonCode: "worker_blocked",
 			costUsd,
@@ -439,12 +439,12 @@ export async function runWorker(options: WorkerRunnerOptions): Promise<WorkerRun
 	return finishOutcome({
 		request: options.request,
 		cwd: options.cwd,
-		result,
+		claim,
 		laneStatus: overBudget ? "budget_exhausted" : "succeeded",
 		reasonCode: overBudget
 			? "cost_budget_exceeded"
-			: result.verification
-				? result.verification.verdict === "accepted"
+			: claim.verification
+				? claim.verification.verdict === "accepted"
 					? "verification_accepted"
 					: "verification_rejected"
 				: "worker_completed",

@@ -42,7 +42,7 @@ function buildLaneControllerDeps(overrides: Partial<BackgroundLaneControllerDeps
 		getSessionManager: () => sessionManager,
 		getGoalStateSnapshot: () => undefined,
 		getCapabilityEnvelope: () => undefined,
-		saveWorkerResultSnapshot: () => "worker-result-entry",
+		saveWorkerClaimSnapshot: () => "worker-claim-entry",
 		...overrides,
 	} as unknown as BackgroundLaneControllerDeps;
 }
@@ -225,7 +225,7 @@ describe("GoalLoopController neither stalls nor races while a bound worker is in
 	function makeSnapshot(action: "continue" | "waiting", reasonCode: string) {
 		return {
 			goalState: createGoalState({ goalId: "g1", userGoal: "Ship it", now: "T0" }),
-			workerResults: [],
+			workerClaims: [],
 			learningDecisions: [],
 			continuation: {
 				action,
@@ -292,7 +292,7 @@ describe("worker-spend cumulative budget ceiling (goal-loop-controller)", () => 
 		const controller = new GoalLoopController({
 			getGoalRuntimeSnapshot: () => ({
 				goalState: state,
-				workerResults: [],
+				workerClaims: [],
 				learningDecisions: [],
 				continuation: {
 					action: "continue",
@@ -322,7 +322,7 @@ describe("worker-spend cumulative budget ceiling (goal-loop-controller)", () => 
 		const controller = new GoalLoopController({
 			getGoalRuntimeSnapshot: () => ({
 				goalState: state,
-				workerResults: [],
+				workerClaims: [],
 				learningDecisions: [],
 				continuation: {
 					action: "continue",
@@ -383,7 +383,7 @@ describe("idle scheduler does not arm while a bound worker is in flight (belt-an
 			getGoalRuntimeSnapshot: () =>
 				({
 					goalState: createGoalState({ goalId: "g1", userGoal: "Ship it", now: "T0" }),
-					workerResults: [],
+					workerClaims: [],
 					learningDecisions: [],
 					continuation: {
 						action: "continue",

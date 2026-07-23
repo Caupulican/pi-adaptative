@@ -1,23 +1,23 @@
 import path from "node:path";
-import type { CapabilityEnvelope, GateOutcome, WorkerRequest, WorkerResult } from "../autonomy/contracts.ts";
+import type { CapabilityEnvelope, GateOutcome, WorkerClaim, WorkerRequest } from "../autonomy/contracts.ts";
 import { checkPathScope } from "../autonomy/path-scope.ts";
 import { cloneEvidenceBundleForStorage, isEvidenceBundle } from "../research/evidence-bundle.ts";
 import { isPlainRecord } from "../util/value-guards.ts";
 
-export function cloneWorkerResultForStorage(result: WorkerResult): WorkerResult {
+export function cloneWorkerClaimForStorage(claim: WorkerClaim): WorkerClaim {
 	return {
-		...result,
-		...(result.outputFormat ? { outputFormat: result.outputFormat } : {}),
-		changedFiles: [...result.changedFiles],
-		blockers: result.blockers ? [...result.blockers] : undefined,
-		evidence: result.evidence ? cloneEvidenceBundleForStorage(result.evidence) : undefined,
-		verification: result.verification
-			? { ...result.verification, reasonCodes: [...result.verification.reasonCodes] }
+		...claim,
+		...(claim.outputFormat ? { outputFormat: claim.outputFormat } : {}),
+		changedFiles: [...claim.changedFiles],
+		blockers: claim.blockers ? [...claim.blockers] : undefined,
+		evidence: claim.evidence ? cloneEvidenceBundleForStorage(claim.evidence) : undefined,
+		verification: claim.verification
+			? { ...claim.verification, reasonCodes: [...claim.verification.reasonCodes] }
 			: undefined,
 	};
 }
 
-export function isWorkerResult(value: unknown): value is WorkerResult {
+export function isWorkerClaim(value: unknown): value is WorkerClaim {
 	if (!isPlainRecord(value)) return false;
 	const obj = value as Record<string, unknown>;
 
@@ -60,35 +60,35 @@ export function isWorkerResult(value: unknown): value is WorkerResult {
 	return true;
 }
 
-export function requiresParentReview(result: WorkerResult): boolean {
-	if (result.status !== "completed") {
+export function requiresParentReview(claim: WorkerClaim): boolean {
+	if (claim.status !== "completed") {
 		return true;
 	}
-	if (result.blockers && result.blockers.length > 0) {
+	if (claim.blockers && claim.blockers.length > 0) {
 		return true;
 	}
-	if (result.changedFiles.length > 0) {
+	if (claim.changedFiles.length > 0) {
 		return true;
 	}
 	return false;
 }
 
 /**
- * True iff {@link validateWorkerResult}'s gate would flag this result "ask-user" /
+ * True iff {@link validateWorkerClaim}'s gate would flag this claim "ask-user" /
  * "parent_review_required" (the two branches at :110 and :178 below) — an otherwise-completed
- * result the parent must explicitly look at because it reports blockers, or reports file mutations
- * that passed path-scope validation. Reuses `validateWorkerResult` itself rather than a
+ * claim the parent must explicitly look at because it reports blockers, or reports file mutations
+ * that passed path-scope validation. Reuses `validateWorkerClaim` itself rather than a
  * separately-maintained heuristic, so a persisted review marker can never drift from the
  * gate's actual verdict.
  */
-export function isParentReviewRequired(args: { request: WorkerRequest; result: WorkerResult; cwd?: string }): boolean {
-	const acceptance = validateWorkerResult(args);
+export function isParentReviewRequired(args: { request: WorkerRequest; claim: WorkerClaim; cwd?: string }): boolean {
+	const acceptance = validateWorkerClaim(args);
 	return acceptance.outcome === "ask-user" && acceptance.reasonCode === "parent_review_required";
 }
 
-export function validateWorkerResult(args: {
+export function validateWorkerClaim(args: {
 	request: WorkerRequest;
-	result: WorkerResult;
+	claim: WorkerClaim;
 	/**
 	 * Baseline for relative paths — BOTH the runner's cwd-relative `changedFiles` and the
 	 * envelope's possibly-relative path scopes resolve against this. Defaults to process.cwd()
@@ -96,52 +96,52 @@ export function validateWorkerResult(args: {
 	 */
 	cwd?: string;
 }): GateOutcome {
-	const { request, result } = args;
+	const { request, claim } = args;
 	const baseDir = args.cwd ?? process.cwd();
 
-	if (result.requestId !== request.id) {
+	if (claim.requestId !== request.id) {
 		return {
 			outcome: "block",
-			gate: "worker_result",
+			gate: "worker_claim",
 			reasonCode: "request_id_mismatch",
-			message: `Result requestId '${result.requestId}' does not match request id '${request.id}'.`,
+			message: `Claim requestId '${claim.requestId}' does not match request id '${request.id}'.`,
 		};
 	}
 
-	if (result.status !== "completed") {
+	if (claim.status !== "completed") {
 		return {
 			outcome: "block",
-			gate: "worker_result",
+			gate: "worker_claim",
 			reasonCode: "worker_not_completed",
-			message: `Worker finished with status '${result.status}'.`,
-			details: result.blockers && result.blockers.length > 0 ? { blockers: [...result.blockers] } : undefined,
+			message: `Worker finished with status '${claim.status}'.`,
+			details: claim.blockers && claim.blockers.length > 0 ? { blockers: [...claim.blockers] } : undefined,
 		};
 	}
 
-	if (!result.usageReportId) {
+	if (!claim.usageReportId) {
 		return {
 			outcome: "block",
-			gate: "worker_result",
+			gate: "worker_claim",
 			reasonCode: "missing_usage_report",
-			message: "Completed worker result is missing usageReportId.",
+			message: "Completed worker claim is missing usageReportId.",
 		};
 	}
 
-	if (result.blockers && result.blockers.length > 0) {
+	if (claim.blockers && claim.blockers.length > 0) {
 		return {
 			outcome: "ask-user",
-			gate: "worker_result",
+			gate: "worker_claim",
 			reasonCode: "parent_review_required",
-			message: "Completed worker result includes blockers and requires parent review.",
-			details: { blockers: [...result.blockers] },
+			message: "Completed worker claim includes blockers and requires parent review.",
+			details: { blockers: [...claim.blockers] },
 		};
 	}
 
-	if (result.changedFiles.length > 0) {
+	if (claim.changedFiles.length > 0) {
 		if (!request.envelope.allowedPaths || request.envelope.allowedPaths.length === 0) {
 			return {
 				outcome: "block",
-				gate: "worker_result",
+				gate: "worker_claim",
 				reasonCode: "missing_path_scope",
 				message: "Worker changed files but no allowedPaths are configured in the envelope.",
 			};
@@ -152,7 +152,7 @@ export function validateWorkerResult(args: {
 		// let a denied subtree slip past the deny rule.
 		const resolvedAllowed = request.envelope.allowedPaths.map((p) => path.resolve(baseDir, p));
 		const resolvedDenied = request.envelope.deniedPaths?.map((p) => path.resolve(baseDir, p));
-		for (const changedFile of result.changedFiles) {
+		for (const changedFile of claim.changedFiles) {
 			let isInsideAny = false;
 			let isDenied = false;
 
@@ -179,7 +179,7 @@ export function validateWorkerResult(args: {
 			if (isDenied) {
 				return {
 					outcome: "block",
-					gate: "worker_result",
+					gate: "worker_claim",
 					reasonCode: "changed_file_denied",
 					message: `Worker changed file '${changedFile}' which matches a denied path.`,
 				};
@@ -188,7 +188,7 @@ export function validateWorkerResult(args: {
 			if (!isInsideAny) {
 				return {
 					outcome: "block",
-					gate: "worker_result",
+					gate: "worker_claim",
 					reasonCode: "changed_file_outside_scope",
 					message: `Worker changed file '${changedFile}' outside allowed scope.`,
 				};
@@ -198,7 +198,7 @@ export function validateWorkerResult(args: {
 		// Files are inside scope, but worker output is untrusted
 		return {
 			outcome: "ask-user",
-			gate: "worker_result",
+			gate: "worker_claim",
 			reasonCode: "parent_review_required",
 			message: "Worker changed files require parent review.",
 		};
@@ -206,9 +206,9 @@ export function validateWorkerResult(args: {
 
 	return {
 		outcome: "allow",
-		gate: "worker_result",
+		gate: "worker_claim",
 		reasonCode: "allowed",
-		message: "Worker result is read-only and allowed.",
+		message: "Worker claim is read-only and allowed.",
 	};
 }
 
@@ -217,8 +217,8 @@ export function validateWorkerResult(args: {
  * -- e.g. a tmux worker's own completion report, which (unlike an in-process worker's) never
  * passed through this process's `applyWorkerActions` envelope enforcement before the write
  * happened; the tmux worker's tool loop runs in a separate process this session does not gate.
- * Reuses {@link validateWorkerResult}'s exact symlink-safe scope check verbatim -- never
- * reimplement path resolution: synthesizes a minimal, always-"completed" request/result pair
+ * Reuses {@link validateWorkerClaim}'s exact symlink-safe scope check verbatim -- never
+ * reimplement path resolution: synthesizes a minimal, always-"completed" request/claim pair
  * carrying only the reported `changedFiles` and the scope's `allowedPaths`/`deniedPaths`, so the
  * ONLY thing that can vary the verdict is the path-scope branch.
  *
@@ -241,7 +241,7 @@ export function reviewManagedLaneChangedFiles(args: {
 		return { reviewRequired: false, reasonCode: "no_changed_files" };
 	}
 	const syntheticId = "managed-lane-review";
-	const acceptance = validateWorkerResult({
+	const acceptance = validateWorkerClaim({
 		request: {
 			id: syntheticId,
 			instructions: "",
@@ -259,7 +259,7 @@ export function reviewManagedLaneChangedFiles(args: {
 				deniedPaths: args.envelope.deniedPaths,
 			},
 		},
-		result: {
+		claim: {
 			requestId: syntheticId,
 			status: "completed",
 			summary: "",

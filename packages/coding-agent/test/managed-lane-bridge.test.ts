@@ -1,7 +1,7 @@
 import type { SessionManager } from "@caupulican/pi-agent-core/node";
 import { SessionManager as InMemorySessionManager } from "@caupulican/pi-agent-core/node";
 import { afterEach, describe, expect, it, vi } from "vitest";
-import type { WorkerResult } from "../src/core/autonomy/contracts.ts";
+import type { WorkerClaim } from "../src/core/autonomy/contracts.ts";
 import {
 	BackgroundLaneController,
 	type BackgroundLaneControllerDeps,
@@ -21,7 +21,7 @@ function buildDeps(
 	agentDir: string,
 	overrides?: Partial<{
 		goalId: string | undefined;
-		saveWorkerResultSnapshot: (result: WorkerResult, request?: unknown) => string;
+		saveWorkerClaimSnapshot: (claim: WorkerClaim, request?: unknown) => string;
 		notifyWorkerTerminalHandoff: BackgroundLaneControllerDeps["notifyWorkerTerminalHandoff"];
 	}>,
 ): BackgroundLaneControllerDeps {
@@ -44,7 +44,7 @@ function buildDeps(
 		// against this envelope. Undefined here (no scope configured) matches this file's existing
 		// intent -- these tests assert dispatch/terminal/quiesce bookkeeping, not the review verdict.
 		getCapabilityEnvelope: () => undefined,
-		saveWorkerResultSnapshot: overrides?.saveWorkerResultSnapshot ?? (() => "worker-result-entry"),
+		saveWorkerClaimSnapshot: overrides?.saveWorkerClaimSnapshot ?? (() => "worker-claim-entry"),
 		emit: () => {},
 		notifyWorkerTerminalHandoff: overrides?.notifyWorkerTerminalHandoff ?? (async () => {}),
 	} as never;
@@ -77,13 +77,13 @@ describe("managed lane host bridge (recordManagedLane)", () => {
 
 	it("completes the lane on terminal, deregisters the quiesce unit, and persists a bounded claim snapshot", () => {
 		const agentDir = "/tmp/pi-test-managed-lane-terminal";
-		const savedResults: Array<{ result: WorkerResult; request?: unknown }> = [];
+		const savedClaims: Array<{ claim: WorkerClaim; request?: unknown }> = [];
 		const controller = new BackgroundLaneController(
 			buildDeps(agentDir, {
 				goalId: "goal-2",
-				saveWorkerResultSnapshot: (result, request) => {
-					savedResults.push({ result, request });
-					return "worker-result-entry";
+				saveWorkerClaimSnapshot: (claim, request) => {
+					savedClaims.push({ claim, request });
+					return "worker-claim-entry";
 				},
 			}),
 		);
@@ -108,8 +108,8 @@ describe("managed lane host bridge (recordManagedLane)", () => {
 		// Quiesce unit is gone -- no stuck registration across dispatch -> terminal.
 		expect(getInFlightWorkUnits(agentDir)).toEqual([]);
 
-		expect(savedResults).toHaveLength(1);
-		expect(savedResults[0]?.result).toMatchObject({
+		expect(savedClaims).toHaveLength(1);
+		expect(savedClaims[0]?.claim).toMatchObject({
 			requestId: records[0]?.laneId,
 			status: "completed",
 			changedFiles: ["src/a.ts"],
@@ -155,7 +155,7 @@ describe("managed lane host bridge (recordManagedLane)", () => {
 		let saveCalled = false;
 		const controller = new BackgroundLaneController(
 			buildDeps(agentDir, {
-				saveWorkerResultSnapshot: () => {
+				saveWorkerClaimSnapshot: () => {
 					saveCalled = true;
 					return "unexpected";
 				},
@@ -177,7 +177,7 @@ describe("managed lane host bridge (recordManagedLane)", () => {
 		const agentDir = "/tmp/pi-test-managed-lane-terminal-throws";
 		const controller = new BackgroundLaneController(
 			buildDeps(agentDir, {
-				saveWorkerResultSnapshot: () => {
+				saveWorkerClaimSnapshot: () => {
 					throw new Error("persistence boom");
 				},
 			}),
@@ -259,7 +259,7 @@ describe("managed lane host bridge (recordManagedLane)", () => {
 			getSessionManager: () => sessionManager,
 			getGoalStateSnapshot: () => ({ goalId: "goal-9" }) as never,
 			getCapabilityEnvelope: () => undefined,
-			saveWorkerResultSnapshot: () => "worker-result-entry",
+			saveWorkerClaimSnapshot: () => "worker-claim-entry",
 		} as never);
 
 		controller.recordManagedLane({ laneId: "tmux-job-9", phase: "dispatch", goalId: "goal-9" });
@@ -301,7 +301,7 @@ describe("managed lane host bridge (recordManagedLane)", () => {
 });
 
 describe("mapManagedLaneTerminalStatus", () => {
-	it("maps LaneTracker terminal statuses onto the WorkerResult status vocabulary", () => {
+	it("maps LaneTracker terminal statuses onto the WorkerClaim status vocabulary", () => {
 		expect(mapManagedLaneTerminalStatus("succeeded")).toBe("completed");
 		expect(mapManagedLaneTerminalStatus("canceled")).toBe("cancelled");
 		expect(mapManagedLaneTerminalStatus("failed")).toBe("failed");

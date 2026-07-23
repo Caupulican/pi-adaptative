@@ -34,7 +34,7 @@ function buildDeps(
 		getSessionManager: () => sessionManager,
 		getGoalStateSnapshot: () => (overrides?.goalId ? ({ goalId: overrides.goalId } as never) : undefined),
 		getCapabilityEnvelope: () => undefined,
-		saveWorkerResultSnapshot: () => "worker-result-entry",
+		saveWorkerClaimSnapshot: () => "worker-claim-entry",
 	} as never;
 }
 

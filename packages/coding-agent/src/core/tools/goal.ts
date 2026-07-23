@@ -1,6 +1,6 @@
 import { stat as fsStat } from "node:fs/promises";
 import { type Static, Type } from "typebox";
-import type { WorkerResult } from "../autonomy/contracts.ts";
+import type { WorkerClaim } from "../autonomy/contracts.ts";
 import type { LaneRecord } from "../autonomy/lane-tracker.ts";
 import type { ToolDefinition } from "../extensions/types.ts";
 import type { GoalEvidenceKind, GoalState } from "../goals/goal-state.ts";
@@ -120,13 +120,13 @@ export interface GoalToolDependencies {
 	 */
 	getLaneRecords?: () => readonly LaneRecord[];
 	/**
-	 * Read persisted worker result snapshots (keyed by `WorkerResult.requestId`, which is the same
+	 * Read persisted worker claim snapshots (keyed by `WorkerClaim.requestId`, which is the same
 	 * id as the dispatching lane's laneId), for validating kind:"worker" evidence refs. See
-	 * {@link getLaneRecords}. A matching result that is `parentReviewRequired && !parentReviewedAt`
+	 * {@link getLaneRecords}. A matching claim that is `parentReviewRequired && !parentReviewedAt`
 	 * verifies `false` -- an unreviewed worker completion must never ungate goal completion through
 	 * the existing verified/complete gate.
 	 */
-	getWorkerResultSnapshots?: () => readonly WorkerResult[];
+	getWorkerClaimSnapshots?: () => readonly WorkerClaim[];
 	/**
 	 * Tool-layer side effect for a 'dispatch_worker' action when `dispatchTarget` is 'in_process'
 	 * (the default) or when {@link dispatchTmuxWorker} is not wired: dispatches a real in-process
@@ -204,17 +204,17 @@ async function resolveEvidenceVerified(
 		}
 	}
 	if (kind === "worker") {
-		if (!deps.getLaneRecords || !deps.getWorkerResultSnapshots) return false;
+		if (!deps.getLaneRecords || !deps.getWorkerClaimSnapshots) return false;
 		const laneId = trimmedUri;
 		const record = deps.getLaneRecords().find((candidate) => candidate.laneId === laneId);
 		if (!record) return false;
-		const result = deps.getWorkerResultSnapshots().find((candidate) => candidate.requestId === laneId);
-		if (!result) return false;
+		const claim = deps.getWorkerClaimSnapshots().find((candidate) => candidate.requestId === laneId);
+		if (!claim) return false;
 		// An unreviewed mutation (parentReviewRequired && no parentReviewedAt) can never verify true --
 		// this is what stops an unreviewed worker completion from ungating goal completion through
 		// the existing verified/complete gate (goal-tool-core's isVerifiedOrUserEvidence/complete).
-		if (result.parentReviewRequired === true && result.parentReviewedAt === undefined) return false;
-		return result.status === "completed";
+		if (claim.parentReviewRequired === true && claim.parentReviewedAt === undefined) return false;
+		return claim.status === "completed";
 	}
 	return undefined;
 }
@@ -344,7 +344,7 @@ export function createGoalToolDefinition(deps: GoalToolDependencies): ToolDefini
 						// `boundLaneRecord` present here is necessarily terminal (isLiveInFlight was false).
 						const hasTerminalOutcome =
 							boundLaneRecord !== undefined ||
-							(deps.getWorkerResultSnapshots?.().some((result) => result.requestId === bound) ?? false);
+							(deps.getWorkerClaimSnapshots?.().some((claim) => claim.requestId === bound) ?? false);
 						if (!hasTerminalOutcome) dispatchSkipReason = "bound_lane_indeterminate";
 					}
 					if (dispatchSkipReason) {

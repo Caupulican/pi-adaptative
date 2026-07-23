@@ -314,7 +314,7 @@ describe("goal-continuation-prompt renders per-evidence verified status", () => 
 
 		const snapshot: GoalRuntimeSnapshot = {
 			goalState: state,
-			workerResults: [],
+			workerClaims: [],
 			learningDecisions: [],
 			continuation: {
 				action: "continue",

@@ -5,7 +5,7 @@ import { describe, expect, it } from "vitest";
 import { AgentSession } from "../src/core/agent-session.ts";
 import { AuthStorage } from "../src/core/auth-storage.ts";
 import type { LaneRecord } from "../src/core/autonomy/lane-tracker.ts";
-import { appendWorkerResultSnapshot } from "../src/core/delegation/session-worker-result.ts";
+import { appendWorkerClaimSnapshot } from "../src/core/delegation/session-worker-result.ts";
 import { DEFAULT_GOAL_WORKER_WAIT_MS } from "../src/core/goals/goal-continuation-defaults.ts";
 import { buildGoalRuntimeSnapshot } from "../src/core/goals/goal-runtime-snapshot.ts";
 import { applyGoalEvent, createGoalState } from "../src/core/goals/goal-state.ts";
@@ -27,7 +27,7 @@ describe("Phase 10B: Goal Runtime Snapshot", () => {
 
 		expect(snapshot.goalState).toBeUndefined();
 		expect(snapshot.latestEvidenceBundle).toBeUndefined();
-		expect(snapshot.workerResults).toEqual([]);
+		expect(snapshot.workerClaims).toEqual([]);
 		expect(snapshot.learningDecisions).toEqual([]);
 		expect(snapshot.continuation.action).toBe("ask-user");
 		expect(snapshot.continuation.reasonCode).toBe("missing_goal_state");
@@ -60,7 +60,7 @@ describe("Phase 10B: Goal Runtime Snapshot", () => {
 	it("aggregate includes all worker results and learning decisions in chronological order", () => {
 		const sessionManager = SessionManager.inMemory();
 
-		appendWorkerResultSnapshot(sessionManager, {
+		appendWorkerClaimSnapshot(sessionManager, {
 			requestId: "w1",
 			status: "completed",
 			summary: "W1",
@@ -73,7 +73,7 @@ describe("Phase 10B: Goal Runtime Snapshot", () => {
 			summary: "L1",
 			requiresApproval: false,
 		});
-		appendWorkerResultSnapshot(sessionManager, {
+		appendWorkerClaimSnapshot(sessionManager, {
 			requestId: "w2",
 			status: "completed",
 			summary: "W2",
@@ -92,9 +92,9 @@ describe("Phase 10B: Goal Runtime Snapshot", () => {
 			settings: { maxStallTurns: 3 },
 		});
 
-		expect(snapshot.workerResults.length).toBe(2);
-		expect(snapshot.workerResults[0].requestId).toBe("w1");
-		expect(snapshot.workerResults[1].requestId).toBe("w2");
+		expect(snapshot.workerClaims.length).toBe(2);
+		expect(snapshot.workerClaims[0].requestId).toBe("w1");
+		expect(snapshot.workerClaims[1].requestId).toBe("w2");
 
 		expect(snapshot.learningDecisions.length).toBe(2);
 		expect(snapshot.learningDecisions[0].reasonCode).toBe("l1");
@@ -142,7 +142,7 @@ describe("Phase 10B: Goal Runtime Snapshot", () => {
 		);
 		sessionManager.appendCustomEntry("evidence_bundle", { version: 1, bundle: { invalid: true } });
 
-		appendWorkerResultSnapshot(sessionManager, {
+		appendWorkerClaimSnapshot(sessionManager, {
 			requestId: "valid-worker",
 			status: "completed",
 			summary: "Task",
@@ -166,8 +166,8 @@ describe("Phase 10B: Goal Runtime Snapshot", () => {
 
 		expect(snapshot.goalState?.goalId).toBe("valid-goal");
 		expect(snapshot.latestEvidenceBundle?.query).toBe("valid-evidence");
-		expect(snapshot.workerResults.length).toBe(1);
-		expect(snapshot.workerResults[0].requestId).toBe("valid-worker");
+		expect(snapshot.workerClaims.length).toBe(1);
+		expect(snapshot.workerClaims[0].requestId).toBe("valid-worker");
 		expect(snapshot.learningDecisions.length).toBe(1);
 		expect(snapshot.learningDecisions[0].reasonCode).toBe("valid-learning");
 	});
@@ -180,7 +180,7 @@ describe("Phase 10B: Goal Runtime Snapshot", () => {
 			sessionManager,
 			createEvidenceBundle({ query: "q", sources: [], findings: [], now: "T0" }),
 		);
-		appendWorkerResultSnapshot(sessionManager, {
+		appendWorkerClaimSnapshot(sessionManager, {
 			requestId: "w1",
 			status: "completed",
 			summary: "W1",
@@ -202,7 +202,7 @@ describe("Phase 10B: Goal Runtime Snapshot", () => {
 		// Mutate everything returned
 		if (snapshot1.goalState) snapshot1.goalState.userGoal = "Mutated";
 		if (snapshot1.latestEvidenceBundle) snapshot1.latestEvidenceBundle.query = "Mutated";
-		snapshot1.workerResults[0].summary = "Mutated";
+		snapshot1.workerClaims[0].summary = "Mutated";
 		snapshot1.learningDecisions[0].summary = "Mutated";
 
 		const snapshot2 = buildGoalRuntimeSnapshot({
@@ -212,7 +212,7 @@ describe("Phase 10B: Goal Runtime Snapshot", () => {
 
 		expect(snapshot2.goalState?.userGoal).toBe("Task");
 		expect(snapshot2.latestEvidenceBundle?.query).toBe("q");
-		expect(snapshot2.workerResults[0].summary).toBe("W1");
+		expect(snapshot2.workerClaims[0].summary).toBe("W1");
 		expect(snapshot2.learningDecisions[0].summary).toBe("L1");
 	});
 

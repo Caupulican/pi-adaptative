@@ -94,7 +94,7 @@ describe("goal<->task cross-visibility", () => {
 	describe("buildGoalContinuationPrompt: open task-steps summary rendering", () => {
 		function baseSnapshot(overrides: Partial<GoalRuntimeSnapshot> = {}): GoalRuntimeSnapshot {
 			return {
-				workerResults: [],
+				workerClaims: [],
 				learningDecisions: [],
 				continuation: {
 					action: "continue",

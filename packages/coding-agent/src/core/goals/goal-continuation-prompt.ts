@@ -7,7 +7,7 @@ export interface GoalContinuationPromptLimits {
 	maxGoalEvidence?: number;
 	maxEvidenceFindings?: number;
 	maxEvidenceSources?: number;
-	maxWorkerResults?: number;
+	maxWorkerClaims?: number;
 	maxLearningDecisions?: number;
 	/** Cap on rendered entries from `snapshot.openTaskSteps` (read-only goal⇄task cross-visibility). */
 	maxOpenTaskSteps?: number;
@@ -24,7 +24,7 @@ const DEFAULT_LIMITS = {
 	maxGoalEvidence: 20,
 	maxEvidenceFindings: 10,
 	maxEvidenceSources: 10,
-	maxWorkerResults: 10,
+	maxWorkerClaims: 10,
 	maxLearningDecisions: 10,
 	maxOpenTaskSteps: 20,
 	maxTextLength: 8000,
@@ -64,7 +64,7 @@ export function buildGoalContinuationPrompt(args: {
 	// single source of truth for its own steps -- this is a rendered summary, not a coupling).
 	const openTaskSteps = args.snapshot.openTaskSteps ?? [];
 	const evidence = args.snapshot.latestEvidenceBundle;
-	const workers = args.snapshot.workerResults;
+	const workers = args.snapshot.workerClaims;
 	const learning = args.snapshot.learningDecisions;
 
 	// Rendered before any wrapped free text (goal state, task steps, evidence, worker, learning)
@@ -190,19 +190,19 @@ export function buildGoalContinuationPrompt(args: {
 	}
 
 	if (workers.length > 0) {
-		out.push("Worker Results:");
-		const limit = Math.max(0, Math.floor(limits.maxWorkerResults));
+		out.push("Worker Claims:");
+		const limit = Math.max(0, Math.floor(limits.maxWorkerClaims));
 		const toShow = limit > 0 ? workers.slice(-limit) : [];
 		for (const w of toShow) {
 			out.push(
 				wrapUntrustedText(
 					`- ${truncateField(w.requestId)} [${w.status}]: ${truncateField(w.summary)}`,
-					"goal-continuation-worker-result",
+					"goal-continuation-worker-claim",
 				),
 			);
 		}
 		if (workers.length > limit) {
-			out.push(`... ${workers.length - limit} more worker results omitted`);
+			out.push(`... ${workers.length - limit} more worker claims omitted`);
 			isTruncated = true;
 		}
 		out.push("");

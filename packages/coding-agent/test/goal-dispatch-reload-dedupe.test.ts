@@ -1,7 +1,7 @@
 import type { SessionManager } from "@caupulican/pi-agent-core/node";
 import { SessionManager as InMemorySessionManager } from "@caupulican/pi-agent-core/node";
 import { describe, expect, it } from "vitest";
-import type { WorkerResult } from "../src/core/autonomy/contracts.ts";
+import type { WorkerClaim } from "../src/core/autonomy/contracts.ts";
 import type { LaneRecord } from "../src/core/autonomy/lane-tracker.ts";
 import { BackgroundLaneController, type BackgroundLaneControllerDeps } from "../src/core/background-lane-controller.ts";
 import type { ExtensionContext } from "../src/core/extensions/types.ts";
@@ -29,7 +29,7 @@ function buildLaneControllerDeps(overrides: Partial<BackgroundLaneControllerDeps
 		getSessionManager: () => sessionManager,
 		getGoalStateSnapshot: () => undefined,
 		getCapabilityEnvelope: () => undefined,
-		saveWorkerResultSnapshot: () => "worker-result-entry",
+		saveWorkerClaimSnapshot: () => "worker-claim-entry",
 		...overrides,
 	} as unknown as BackgroundLaneControllerDeps;
 }
@@ -98,7 +98,7 @@ describe("goal.ts dispatch_worker indeterminate-binding guard (applies to both t
 				return { laneId: `lane-${dispatchedRequirementIds.length}` };
 			},
 			getLaneRecords: () => laneRecords,
-			getWorkerResultSnapshots: () => [],
+			getWorkerClaimSnapshots: () => [],
 		});
 
 		await run({ action: "start", goalId: "g1", userGoal: "Ship it" });
@@ -124,7 +124,7 @@ describe("goal.ts dispatch_worker indeterminate-binding guard (applies to both t
 
 	it("legacy bound state with no lane record or terminal result refuses 'bound_lane_indeterminate'", async () => {
 		let laneRecords: LaneRecord[] = [];
-		let workerResults: WorkerResult[] = [];
+		let workerClaims: WorkerClaim[] = [];
 		const dispatchedRequirementIds: string[] = [];
 		const { run, getState } = createProducer({
 			startWorkerDelegation: ({ requirementId }) => {
@@ -132,7 +132,7 @@ describe("goal.ts dispatch_worker indeterminate-binding guard (applies to both t
 				return { laneId: `lane-${dispatchedRequirementIds.length}` };
 			},
 			getLaneRecords: () => laneRecords,
-			getWorkerResultSnapshots: () => workerResults,
+			getWorkerClaimSnapshots: () => workerClaims,
 		});
 
 		await run({ action: "start", goalId: "g1", userGoal: "Ship it" });
@@ -148,7 +148,7 @@ describe("goal.ts dispatch_worker indeterminate-binding guard (applies to both t
 
 		// Simulate a legacy/malformed snapshot with neither durable liveness nor a terminal result.
 		laneRecords = [];
-		workerResults = [];
+		workerClaims = [];
 		const stateBeforeRefusal = getState();
 
 		const second = await run({ action: "dispatch_worker", requirementId: "r1", instructions: "go again" });
@@ -169,7 +169,7 @@ describe("goal.ts dispatch_worker indeterminate-binding guard (applies to both t
 				return { laneId: `lane-${dispatchedRequirementIds.length}` };
 			},
 			getLaneRecords: () => laneRecords,
-			getWorkerResultSnapshots: () => [],
+			getWorkerClaimSnapshots: () => [],
 		});
 
 		await run({ action: "start", goalId: "g1", userGoal: "Ship it" });
@@ -188,8 +188,8 @@ describe("goal.ts dispatch_worker indeterminate-binding guard (applies to both t
 		expect(getState()?.requirements.find((r) => r.id === "r1")?.boundLaneId).toBe("lane-2");
 	});
 
-	it("bound + a terminal WorkerResult snapshot (no lane record at all) -> ALLOWS re-dispatch", async () => {
-		let workerResults: WorkerResult[] = [];
+	it("bound + a terminal WorkerClaim snapshot (no lane record at all) -> ALLOWS re-dispatch", async () => {
+		let workerClaims: WorkerClaim[] = [];
 		const dispatchedRequirementIds: string[] = [];
 		const { run, getState } = createProducer({
 			startWorkerDelegation: ({ requirementId }) => {
@@ -197,7 +197,7 @@ describe("goal.ts dispatch_worker indeterminate-binding guard (applies to both t
 				return { laneId: `lane-${dispatchedRequirementIds.length}` };
 			},
 			getLaneRecords: () => [],
-			getWorkerResultSnapshots: () => workerResults,
+			getWorkerClaimSnapshots: () => workerClaims,
 		});
 
 		await run({ action: "start", goalId: "g1", userGoal: "Ship it" });
@@ -206,7 +206,7 @@ describe("goal.ts dispatch_worker indeterminate-binding guard (applies to both t
 		expect(first.details.dispatchedLaneId).toBe("lane-1");
 
 		// No live lane record survives, but a durable worker-result snapshot proves completion.
-		workerResults = [
+		workerClaims = [
 			{ requestId: "lane-1", status: "completed", summary: "done", changedFiles: [], parentReviewRequired: false },
 		];
 
@@ -222,7 +222,7 @@ describe("goal.ts dispatch_worker indeterminate-binding guard (applies to both t
 		const { run, getState } = createProducer({
 			startWorkerDelegation: () => ({ laneId: "lane-1" }),
 			getLaneRecords: () => [],
-			getWorkerResultSnapshots: () => [],
+			getWorkerClaimSnapshots: () => [],
 		});
 
 		await run({ action: "start", goalId: "g1", userGoal: "Ship it" });

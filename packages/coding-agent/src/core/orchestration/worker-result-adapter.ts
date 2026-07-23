@@ -1,8 +1,7 @@
 import { existsSync, statSync } from "node:fs";
 import path from "node:path";
 import { pathToFileURL } from "node:url";
-import type { WorkerResult } from "../autonomy/contracts.ts";
-import type { WorkerRunOutcome } from "../delegation/worker-runner.ts";
+import type { WorkerClaim } from "../autonomy/contracts.ts";
 import {
 	type ArtifactContract,
 	type EvidenceContract,
@@ -28,8 +27,8 @@ function artifactForChangedFile(cwd: string, changedPath: string, index: number,
 	};
 }
 
-function evidenceForLegacyResult(result: WorkerResult, createdAt: string): EvidenceContract[] {
-	const findings = result.evidence?.findings ?? [];
+function evidenceForClaim(claim: WorkerClaim, createdAt: string): EvidenceContract[] {
+	const findings = claim.evidence?.findings ?? [];
 	return findings.map((finding, index) => ({
 		evidenceId: `worker-finding-${index + 1}`,
 		kind: "observation",
@@ -42,25 +41,25 @@ function evidenceForLegacyResult(result: WorkerResult, createdAt: string): Evide
 }
 
 function verificationEvidence(
-	result: WorkerResult,
+	claim: WorkerClaim,
 	accepted: boolean,
 	criterionIds: readonly string[],
 	createdAt: string,
 ): EvidenceContract[] {
-	if (!result.verification) return [];
+	if (!claim.verification) return [];
 	const trustedReview = accepted;
 	return [
 		{
 			evidenceId: "independent-review",
 			kind: "review",
-			summary: result.summary,
+			summary: claim.summary,
 			artifactIds: [],
 			trusted: trustedReview,
 			createdAt,
 			metadata: {
-				subjectTaskId: result.verification.subjectTaskId,
-				verdict: result.verification.verdict,
-				reasonCodes: [...result.verification.reasonCodes],
+				subjectTaskId: claim.verification.subjectTaskId,
+				verdict: claim.verification.verdict,
+				reasonCodes: [...claim.verification.reasonCodes],
 			},
 		},
 		...criterionIds.map(
@@ -68,41 +67,20 @@ function verificationEvidence(
 				evidenceId: `independent-review-criterion-${index + 1}`,
 				criterionId,
 				kind: "review",
-				summary: result.summary,
+				summary: claim.summary,
 				artifactIds: [],
-				trusted: trustedReview && result.verification?.verdict === "accepted",
+				trusted: trustedReview && claim.verification?.verdict === "accepted",
 				createdAt,
-				metadata: { subjectTaskId: result.verification?.subjectTaskId ?? "" },
+				metadata: { subjectTaskId: claim.verification?.subjectTaskId ?? "" },
 			}),
 		),
 	];
 }
 
-export function adaptWorkerRunOutcome(args: {
+/** Sole host-owned conversion from an untrusted claim to a fenced durable result. */
+export function createWorkerResultContract(args: {
 	handle: StartedDelegationAttempt;
-	outcome: WorkerRunOutcome;
-	cwd: string;
-	inputTokens?: number;
-	outputTokens?: number;
-	totalTokens?: number;
-	wallClockMs: number;
-	toolCalls: number;
-	verificationRequired?: boolean;
-	verificationCriterionIds?: readonly string[];
-	createdAt?: string;
-}): WorkerResultContract {
-	return adaptWorkerResult({
-		...args,
-		result: args.outcome.result,
-		accepted: args.outcome.accepted,
-		costUsd: args.outcome.costUsd,
-		reasonCode: args.outcome.reasonCode,
-	});
-}
-
-export function adaptWorkerResult(args: {
-	handle: StartedDelegationAttempt;
-	result: WorkerResult;
+	claim: WorkerClaim;
 	accepted: boolean;
 	costUsd: number;
 	cwd: string;
@@ -117,17 +95,17 @@ export function adaptWorkerResult(args: {
 	createdAt?: string;
 }): WorkerResultContract {
 	const createdAt = args.createdAt ?? new Date().toISOString();
-	const legacy = args.result;
+	const claim = args.claim;
 	const status: WorkerResultContract["status"] =
-		legacy.status === "completed"
+		claim.status === "completed"
 			? args.accepted && !args.verificationRequired
 				? "completed"
 				: "partial"
-			: legacy.status;
-	const artifacts = legacy.changedFiles.map((changedPath, index) =>
+			: claim.status;
+	const artifacts = claim.changedFiles.map((changedPath, index) =>
 		artifactForChangedFile(args.cwd, changedPath, index, createdAt),
 	);
-	const blockers = legacy.blockers ?? [];
+	const blockers = claim.blockers ?? [];
 	return {
 		schemaVersion: ORCHESTRATION_SCHEMA_VERSION,
 		resultId: `result-${args.handle.attemptId}-${args.handle.fencingToken}`,
@@ -137,17 +115,17 @@ export function adaptWorkerResult(args: {
 		leaseId: args.handle.leaseId,
 		fencingToken: args.handle.fencingToken,
 		status,
-		reasonCode: args.reasonCode ?? `worker_${legacy.status}`,
-		summary: legacy.summary,
+		reasonCode: args.reasonCode ?? `worker_${claim.status}`,
+		summary: claim.summary,
 		artifacts,
 		evidence: [
-			...evidenceForLegacyResult(legacy, createdAt),
-			...verificationEvidence(legacy, args.accepted, args.verificationCriterionIds ?? [], createdAt),
+			...evidenceForClaim(claim, createdAt),
+			...verificationEvidence(claim, args.accepted, args.verificationCriterionIds ?? [], createdAt),
 		],
 		errors: blockers.map((message) => ({ code: "worker_blocker", message, retryable: false })),
 		...(args.verificationRequired
 			? { nextAction: "independent_verification_required" }
-			: !args.accepted || legacy.parentReviewRequired
+			: !args.accepted || claim.parentReviewRequired
 				? { nextAction: "parent_review" }
 				: {}),
 		usage: {

@@ -6,7 +6,7 @@ import { applyGoalEvent, createGoalState } from "../src/core/goals/goal-state.ts
 describe("Phase 10C: Goal Continuation Prompt", () => {
 	it("empty/missing-goal snapshot still produces a prompt with continuation action/reason", () => {
 		const snapshot: GoalRuntimeSnapshot = {
-			workerResults: [],
+			workerClaims: [],
 			learningDecisions: [],
 			continuation: {
 				action: "ask-user",
@@ -31,7 +31,7 @@ describe("Phase 10C: Goal Continuation Prompt", () => {
 
 		const snapshot: GoalRuntimeSnapshot = {
 			goalState: state,
-			workerResults: [],
+			workerClaims: [],
 			learningDecisions: [],
 			continuation: {
 				action: "continue",
@@ -53,7 +53,7 @@ describe("Phase 10C: Goal Continuation Prompt", () => {
 	it("prompt includes evidence findings/sources but not source metadata", () => {
 		const snapshot: GoalRuntimeSnapshot = {
 			goalState: createGoalState({ goalId: "g1", userGoal: "User Goal Here", now: "T0" }),
-			workerResults: [],
+			workerClaims: [],
 			learningDecisions: [],
 			latestEvidenceBundle: {
 				query: "test query",
@@ -81,10 +81,10 @@ describe("Phase 10C: Goal Continuation Prompt", () => {
 		expect(prompt.text).not.toContain("do not leak");
 	});
 
-	it("prompt includes worker result and learning decision summaries", () => {
+	it("prompt includes worker claim and learning decision summaries", () => {
 		const snapshot: GoalRuntimeSnapshot = {
 			goalState: createGoalState({ goalId: "g1", userGoal: "User Goal Here", now: "T0" }),
-			workerResults: [{ requestId: "w1", status: "completed", summary: "Worker result here", changedFiles: [] }],
+			workerClaims: [{ requestId: "w1", status: "completed", summary: "Worker claim here", changedFiles: [] }],
 			learningDecisions: [
 				{ kind: "proposal", reasonCode: "l1", confidence: 80, summary: "Learning here", requiresApproval: false },
 			],
@@ -99,7 +99,7 @@ describe("Phase 10C: Goal Continuation Prompt", () => {
 		};
 
 		const prompt = buildGoalContinuationPrompt({ snapshot });
-		expect(prompt.text).toContain("Worker result here");
+		expect(prompt.text).toContain("Worker claim here");
 		expect(prompt.text).toContain("w1");
 		expect(prompt.text).toContain("Learning here");
 		expect(prompt.text).toContain("l1");
@@ -107,7 +107,7 @@ describe("Phase 10C: Goal Continuation Prompt", () => {
 
 	it("evidence/worker/learning safety warning is present", () => {
 		const snapshot: GoalRuntimeSnapshot = {
-			workerResults: [{ requestId: "w1", status: "completed", summary: "w", changedFiles: [] }],
+			workerClaims: [{ requestId: "w1", status: "completed", summary: "w", changedFiles: [] }],
 			learningDecisions: [],
 			continuation: {
 				action: "continue",
@@ -131,7 +131,7 @@ describe("Phase 10C: Goal Continuation Prompt", () => {
 		}
 
 		const snapshot: GoalRuntimeSnapshot = {
-			workerResults: workers,
+			workerClaims: workers,
 			learningDecisions: [],
 			continuation: {
 				action: "continue",
@@ -143,9 +143,9 @@ describe("Phase 10C: Goal Continuation Prompt", () => {
 			},
 		};
 
-		const prompt = buildGoalContinuationPrompt({ snapshot, limits: { maxWorkerResults: 2 } });
+		const prompt = buildGoalContinuationPrompt({ snapshot, limits: { maxWorkerClaims: 2 } });
 		expect(prompt.truncated).toBe(true);
-		expect(prompt.text).toContain("... 3 more worker results omitted");
+		expect(prompt.text).toContain("... 3 more worker claims omitted");
 		expect(prompt.text).toContain("w3");
 		expect(prompt.text).toContain("w4");
 		expect(prompt.text).not.toContain("w0");
@@ -154,7 +154,7 @@ describe("Phase 10C: Goal Continuation Prompt", () => {
 
 	it("structurally fences worker snapshots and neutralizes boundary spoofing", () => {
 		const snapshot: GoalRuntimeSnapshot = {
-			workerResults: [
+			workerClaims: [
 				{
 					requestId: "w1",
 					status: "completed",
@@ -174,7 +174,7 @@ describe("Phase 10C: Goal Continuation Prompt", () => {
 		};
 
 		const prompt = buildGoalContinuationPrompt({ snapshot });
-		expect(prompt.text).toMatch(/<untrusted_content id="[a-f0-9]{32}" source="goal-continuation-worker-result">/);
+		expect(prompt.text).toMatch(/<untrusted_content id="[a-f0-9]{32}" source="goal-continuation-worker-claim">/);
 		expect(prompt.text).toContain("&lt;/untrusted_content>");
 		expect(prompt.text).toContain("token=[REDACTED]");
 		expect(prompt.text).not.toContain("worker-secret");
@@ -182,7 +182,7 @@ describe("Phase 10C: Goal Continuation Prompt", () => {
 
 	it("maxTextLength truncates and sets truncated true", () => {
 		const snapshot: GoalRuntimeSnapshot = {
-			workerResults: [],
+			workerClaims: [],
 			learningDecisions: [],
 			continuation: {
 				action: "continue",
@@ -202,7 +202,7 @@ describe("Phase 10C: Goal Continuation Prompt", () => {
 
 	it("secret-like inline values are redacted", () => {
 		const snapshot: GoalRuntimeSnapshot = {
-			workerResults: [],
+			workerClaims: [],
 			learningDecisions: [],
 			latestEvidenceBundle: {
 				query: "q",
@@ -237,7 +237,7 @@ describe("Phase 10C: Goal Continuation Prompt", () => {
 	it("prompt builder does not mutate snapshot objects", () => {
 		const workers = [{ requestId: "w1", status: "completed" as const, summary: "w", changedFiles: [] }];
 		const snapshot: GoalRuntimeSnapshot = {
-			workerResults: workers,
+			workerClaims: workers,
 			learningDecisions: [],
 			continuation: {
 				action: "continue",
@@ -250,8 +250,8 @@ describe("Phase 10C: Goal Continuation Prompt", () => {
 		};
 
 		const workersOriginal = [...workers];
-		buildGoalContinuationPrompt({ snapshot, limits: { maxWorkerResults: 0 } });
+		buildGoalContinuationPrompt({ snapshot, limits: { maxWorkerClaims: 0 } });
 
-		expect(snapshot.workerResults).toEqual(workersOriginal);
+		expect(snapshot.workerClaims).toEqual(workersOriginal);
 	});
 });

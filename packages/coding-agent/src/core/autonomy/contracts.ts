@@ -124,37 +124,38 @@ export interface WorkerRequest {
 	createdAt?: string;
 }
 
-export type WorkerResultStatus = "completed" | "blocked" | "failed" | "cancelled";
+export type WorkerClaimStatus = "completed" | "blocked" | "failed" | "cancelled";
 
-export type WorkerOutputFormat = "structured" | "plain_text";
+export type WorkerClaimOutputFormat = "structured" | "plain_text";
 
-export interface WorkerVerificationDecision {
+export interface WorkerClaimVerificationDecision {
 	subjectTaskId: string;
 	verdict: "accepted" | "rejected";
 	reasonCodes: readonly string[];
 }
 
-export interface WorkerResult {
+/** Untrusted worker-authored report. Only host adjudication can turn this into a durable result. */
+export interface WorkerClaim {
 	requestId: string;
-	status: WorkerResultStatus;
+	status: WorkerClaimStatus;
 	summary: string;
-	outputFormat?: WorkerOutputFormat;
+	outputFormat?: WorkerClaimOutputFormat;
 	evidence?: EvidenceBundle;
 	changedFiles: readonly string[];
 	blockers?: readonly string[];
 	usageReportId?: string;
 	createdAt?: string;
-	/** Stamped at persistence time when validateWorkerResult's gate flagged this result
+	/** Stamped at persistence time when validateWorkerClaim's gate flagged this claim
 	 * "ask-user"/"parent_review_required" (mutated files or blockers on an otherwise-completed run).
-	 * Undefined when not computable (no WorkerRequest was available to validate against, e.g.
-	 * entries recorded before this field existed) — distinct from `false`, which means the gate explicitly cleared it. */
+	 * Undefined when not computable because an externally managed lane had no WorkerRequest —
+	 * distinct from `false`, which means the gate explicitly cleared it. */
 	parentReviewRequired?: boolean;
 	/** ISO 8601 timestamp set once the parent explicitly acknowledges an unreviewed mutation via
 	 * delegate_status's "review" action. Presence means reviewed; absence keeps the notice sticky.
 	 * The ack is durable — re-derived from the latest persisted snapshot, not session-local state. */
 	parentReviewedAt?: string;
 	/** Typed semantic verdict emitted only by a verifier-profile worker. */
-	verification?: WorkerVerificationDecision;
+	verification?: WorkerClaimVerificationDecision;
 }
 
 export type LearningDecisionKind = "no-op" | "proposal" | "apply";

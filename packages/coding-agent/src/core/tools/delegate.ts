@@ -143,12 +143,12 @@ export function createDelegateToolDefinition(deps: DelegateToolDependencies): To
 				lines.push(
 					`accepted: ${outcome.accepted} [${outcome.acceptance.outcome}/${outcome.acceptance.reasonCode}]`,
 					"Worker output (UNTRUSTED - verify before acting on it):",
-					outcome.result.summary,
+					outcome.claim.summary,
 				);
-				if (outcome.result.blockers && outcome.result.blockers.length > 0) {
-					lines.push(`Blockers: ${outcome.result.blockers.join("; ")}`);
+				if (outcome.claim.blockers && outcome.claim.blockers.length > 0) {
+					lines.push(`Blockers: ${outcome.claim.blockers.join("; ")}`);
 				}
-				for (const finding of outcome.result.evidence?.findings ?? []) {
+				for (const finding of outcome.claim.evidence?.findings ?? []) {
 					lines.push(`- Finding: ${finding.summary}`);
 				}
 			}

@@ -1,5 +1,11 @@
+import { SessionManager } from "@caupulican/pi-agent-core/node";
 import { describe, expect, it, vi } from "vitest";
 import type { WorkerRequest } from "../src/core/autonomy/contracts.ts";
+import {
+	appendWorkerClaimSnapshot,
+	getWorkerClaimSnapshots,
+	getWorkerRequestSnapshots,
+} from "../src/core/delegation/session-worker-result.ts";
 import {
 	buildWorkerSystemPrompt,
 	buildWorkerUserPrompt,
@@ -85,10 +91,10 @@ describe("parseWorkerOutput", () => {
 });
 
 describe("buildWorkerUserPrompt", () => {
-	it("fences the task and keeps the worker result envelope authoritative", () => {
+	it("fences the task and keeps the worker claim envelope authoritative", () => {
 		const prompt = buildWorkerUserPrompt(workerRequest());
 		expect(prompt).toContain("<task>\nScout the delegation module");
-		expect(prompt).toContain("Do not replace the worker result envelope");
+		expect(prompt).toContain("Do not replace the worker claim envelope");
 		expect(prompt).toContain('inside "summary" and "findings"');
 	});
 });
@@ -106,12 +112,12 @@ describe("runWorker", () => {
 	it("completes a delegated worker and passes parent validation", async () => {
 		const outcome = await runWorker(runnerOptions());
 
-		expect(outcome.result.requestId).toBe("worker-1");
-		expect(outcome.result.status).toBe("completed");
-		expect(outcome.result.summary).toBe("Validation blocks out-of-scope file changes.");
-		expect(outcome.result.changedFiles).toEqual([]);
-		expect(outcome.result.usageReportId).toBe("worker:session-1:worker-1");
-		expect(outcome.result.createdAt).toBe("2026-07-01T00:00:01.000Z");
+		expect(outcome.claim.requestId).toBe("worker-1");
+		expect(outcome.claim.status).toBe("completed");
+		expect(outcome.claim.summary).toBe("Validation blocks out-of-scope file changes.");
+		expect(outcome.claim.changedFiles).toEqual([]);
+		expect(outcome.claim.usageReportId).toBe("worker:session-1:worker-1");
+		expect(outcome.claim.createdAt).toBe("2026-07-01T00:00:01.000Z");
 		expect(outcome.acceptance.outcome).toBe("allow");
 		expect(outcome.accepted).toBe(true);
 		expect(outcome.laneStatus).toBe("succeeded");
@@ -123,11 +129,11 @@ describe("runWorker", () => {
 		const outcome = await runWorker(
 			runnerOptions({
 				complete: async () =>
-					completionOf('{"summary":"Done","findings":[{"summary":"validateWorkerResult blocks scope escapes"}]}'),
+					completionOf('{"summary":"Done","findings":[{"summary":"validateWorkerClaim blocks scope escapes"}]}'),
 			}),
 		);
-		expect(outcome.result.evidence?.findings).toHaveLength(1);
-		expect(outcome.result.evidence?.sources.some((source) => source.kind === "tool" && !source.trusted)).toBe(true);
+		expect(outcome.claim.evidence?.findings).toHaveLength(1);
+		expect(outcome.claim.evidence?.sources.some((source) => source.kind === "tool" && !source.trusted)).toBe(true);
 	});
 
 	it("returns a blocked result that requires parent review", async () => {
@@ -137,7 +143,7 @@ describe("runWorker", () => {
 					completionOf('{"summary":"Stuck","status":"blocked","blockers":["Needs credentials"]}'),
 			}),
 		);
-		expect(outcome.result.status).toBe("blocked");
+		expect(outcome.claim.status).toBe("blocked");
 		expect(outcome.accepted).toBe(false);
 		expect(outcome.acceptance.outcome).toBe("block");
 		expect(outcome.laneStatus).toBe("failed");
@@ -146,9 +152,9 @@ describe("runWorker", () => {
 
 	it("salvages read-only plain text as bounded untrusted output while preserving spend", async () => {
 		const outcome = await runWorker(runnerOptions({ complete: async () => completionOf("plain prose", 0.03) }));
-		expect(outcome.result.status).toBe("completed");
-		expect(outcome.result.outputFormat).toBe("plain_text");
-		expect(outcome.result.summary).toBe("plain prose");
+		expect(outcome.claim.status).toBe("completed");
+		expect(outcome.claim.outputFormat).toBe("plain_text");
+		expect(outcome.claim.summary).toBe("plain prose");
 		expect(outcome.laneStatus).toBe("succeeded");
 		expect(outcome.reasonCode).toBe("worker_completed_plain_text");
 		expect(outcome.costUsd).toBe(0.03);
@@ -158,9 +164,9 @@ describe("runWorker", () => {
 		const text = '{"filesRead":["src/a.ts"],"conclusion":"done"}';
 		const outcome = await runWorker(runnerOptions({ complete: async () => completionOf(text) }));
 
-		expect(outcome.result.status).toBe("completed");
-		expect(outcome.result.outputFormat).toBe("plain_text");
-		expect(outcome.result.summary).toBe(text);
+		expect(outcome.claim.status).toBe("completed");
+		expect(outcome.claim.outputFormat).toBe("plain_text");
+		expect(outcome.claim.summary).toBe(text);
 		expect(outcome.reasonCode).toBe("worker_completed_plain_text");
 	});
 
@@ -169,9 +175,9 @@ describe("runWorker", () => {
 			runnerOptions({ complete: async () => completionOf("bounded findings", 0.02, "length") }),
 		);
 
-		expect(outcome.result.status).toBe("completed");
-		expect(outcome.result.summary).toContain("bounded findings");
-		expect(outcome.result.summary).toContain("stop reason 'length'");
+		expect(outcome.claim.status).toBe("completed");
+		expect(outcome.claim.summary).toContain("bounded findings");
+		expect(outcome.claim.summary).toContain("stop reason 'length'");
 		expect(outcome.laneStatus).toBe("succeeded");
 		expect(outcome.reasonCode).toBe("worker_completed_plain_text_incomplete");
 	});
@@ -186,8 +192,8 @@ describe("runWorker", () => {
 			}),
 		);
 
-		expect(outcome.result.status).toBe("blocked");
-		expect(outcome.result.blockers).toEqual(["read failed during isolated execution"]);
+		expect(outcome.claim.status).toBe("blocked");
+		expect(outcome.claim.blockers).toEqual(["read failed during isolated execution"]);
 		expect(outcome.accepted).toBe(false);
 		expect(outcome.laneStatus).toBe("failed");
 		expect(outcome.reasonCode).toBe("worker_blocked");
@@ -197,7 +203,7 @@ describe("runWorker", () => {
 		const outcome = await runWorker(
 			runnerOptions({ complete: async () => completionOf("irrelevant", 0.002, "error") }),
 		);
-		expect(outcome.result.status).toBe("failed");
+		expect(outcome.claim.status).toBe("failed");
 		expect(outcome.laneStatus).toBe("failed");
 		expect(outcome.reasonCode).toBe("model_error");
 	});
@@ -206,7 +212,7 @@ describe("runWorker", () => {
 		const outcome = await runWorker(
 			runnerOptions({ complete: async () => completionOf('{"summary":"pricey"}', 1.5) }),
 		);
-		expect(outcome.result.status).toBe("completed");
+		expect(outcome.claim.status).toBe("completed");
 		expect(outcome.laneStatus).toBe("budget_exhausted");
 		expect(outcome.reasonCode).toBe("cost_budget_exceeded");
 	});
@@ -232,7 +238,7 @@ describe("runWorker", () => {
 		);
 		controller.abort();
 		const canceled = await pendingCancel;
-		expect(canceled.result.status).toBe("cancelled");
+		expect(canceled.claim.status).toBe("cancelled");
 		expect(canceled.laneStatus).toBe("canceled");
 
 		const timedOut = await runWorker(
@@ -245,10 +251,10 @@ describe("runWorker", () => {
 					}),
 			}),
 		);
-		expect(timedOut.result.status).toBe("cancelled");
+		expect(timedOut.claim.status).toBe("cancelled");
 		expect(timedOut.laneStatus).toBe("timeout");
 		expect(timedOut.reasonCode).toBe("wall_clock_exceeded");
-		expect(timedOut.result.changedFiles).toEqual(["src/already-written.ts"]);
+		expect(timedOut.claim.changedFiles).toEqual(["src/already-written.ts"]);
 	});
 
 	it("keeps the worker system prompt static for provider prompt caching", async () => {
@@ -273,7 +279,7 @@ describe("runWorker", () => {
 		expect(accepted).toMatchObject({
 			accepted: true,
 			reasonCode: "verification_accepted",
-			result: {
+			claim: {
 				verification: {
 					subjectTaskId: "worker-subject",
 					verdict: "accepted",
@@ -288,16 +294,12 @@ describe("runWorker", () => {
 				complete: async () => completionOf("looks good"),
 			}),
 		);
-		expect(invalid).toMatchObject({ reasonCode: "unparseable_output", result: { status: "failed" } });
+		expect(invalid).toMatchObject({ reasonCode: "unparseable_output", claim: { status: "failed" } });
 	});
 });
 
-describe("worker request persistence (G2)", () => {
-	it("round-trips the originating request alongside the result", async () => {
-		const { appendWorkerResultSnapshot, getWorkerRequestSnapshots, getWorkerResultSnapshots } = await import(
-			"../src/core/delegation/session-worker-result.ts"
-		);
-		const { SessionManager } = await import("@caupulican/pi-agent-core/node");
+describe("worker claim persistence (G2)", () => {
+	it("round-trips the originating request alongside the claim", () => {
 		const sessionManager = SessionManager.inMemory();
 		const request = {
 			id: "wr-1",
@@ -306,7 +308,7 @@ describe("worker request persistence (G2)", () => {
 			envelope: { id: "env-1", capabilities: ["filesystem.read"], allowedPaths: ["src"] },
 			maxEstimatedUsd: 1,
 		};
-		const result = {
+		const claim = {
 			requestId: "wr-1",
 			status: "completed",
 			reasonCode: "ok",
@@ -315,11 +317,11 @@ describe("worker request persistence (G2)", () => {
 			changedFiles: [],
 			costUsd: 0,
 		};
-		appendWorkerResultSnapshot(sessionManager, result as never, request as never);
+		appendWorkerClaimSnapshot(sessionManager, claim as never, request as never);
 		const entries = sessionManager.getEntries();
 		expect(getWorkerRequestSnapshots(entries).map((r) => r.id)).toEqual(["wr-1"]);
 		expect(getWorkerRequestSnapshots(entries)[0]).toMatchObject({ envelope: { allowedPaths: ["src"] } });
-		expect(getWorkerResultSnapshots(entries)).toHaveLength(1);
+		expect(getWorkerClaimSnapshots(entries)).toHaveLength(1);
 	});
 });
 
@@ -367,10 +369,10 @@ describe("worker write lane (G2)", () => {
 			},
 		});
 		expect(applied).toEqual(["src/helper.ts", "docs/leak.md"]);
-		expect(outcome.result.changedFiles).toEqual(["src/helper.ts"]);
+		expect(outcome.claim.changedFiles).toEqual(["src/helper.ts"]);
 		// A refusal downgrades the result to blocked — a partial change can never look like clean success.
-		expect(outcome.result.status).toBe("blocked");
-		expect(outcome.result.blockers?.some((b) => b.includes("docs/leak.md"))).toBe(true);
+		expect(outcome.claim.status).toBe("blocked");
+		expect(outcome.claim.blockers?.some((b) => b.includes("docs/leak.md"))).toBe(true);
 	});
 
 	it("without a filesystem.write grant, emitted actions are ignored and flagged", async () => {
@@ -399,8 +401,8 @@ describe("worker write lane (G2)", () => {
 				stopReason: "stop",
 			}),
 		});
-		expect(outcome.result.changedFiles).toEqual([]);
-		expect(outcome.result.status).toBe("blocked");
-		expect(outcome.result.blockers?.some((b) => b.includes("without a filesystem.write"))).toBe(true);
+		expect(outcome.claim.changedFiles).toEqual([]);
+		expect(outcome.claim.status).toBe("blocked");
+		expect(outcome.claim.blockers?.some((b) => b.includes("without a filesystem.write"))).toBe(true);
 	});
 });

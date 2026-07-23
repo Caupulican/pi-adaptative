@@ -336,7 +336,7 @@ describe("AgentSession - Autonomy Diagnostic Snapshot", () => {
 	it("delegation family reflects saved worker results, capped at the configured max, with counts only", async () => {
 		const harness = await createHarness({ tools: [bashTool] });
 		for (let i = 0; i < 15; i++) {
-			harness.session.saveWorkerResultSnapshot({
+			harness.session.saveWorkerClaimSnapshot({
 				requestId: `req-${i}`,
 				status: "completed",
 				summary: `Did work ${i}`,

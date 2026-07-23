@@ -27,7 +27,7 @@ function buildLaneControllerDeps(overrides: Partial<BackgroundLaneControllerDeps
 		getSessionManager: () => sessionManager,
 		getGoalStateSnapshot: () => undefined,
 		getCapabilityEnvelope: () => undefined,
-		saveWorkerResultSnapshot: () => "worker-result-entry",
+		saveWorkerClaimSnapshot: () => "worker-claim-entry",
 		...overrides,
 	} as unknown as BackgroundLaneControllerDeps;
 }

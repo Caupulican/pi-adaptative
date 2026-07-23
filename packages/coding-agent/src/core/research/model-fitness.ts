@@ -387,8 +387,8 @@ export async function runModelFitnessProbe(options: ModelFitnessOptions): Promis
 		});
 		worker.meanMs += now() - started;
 		totalCostUsd += outcome.costUsd;
-		if (outcome.result.status === "completed" && outcome.accepted) worker.succeeded++;
-		worker.outcomes.push(`${outcome.result.status}/${outcome.reasonCode}`);
+		if (outcome.claim.status === "completed" && outcome.accepted) worker.succeeded++;
+		worker.outcomes.push(`${outcome.claim.status}/${outcome.reasonCode}`);
 	}
 	worker.meanMs = Math.round(worker.meanMs / trials);
 	worker.tokensPerSecond = takeSurfaceSpeed();

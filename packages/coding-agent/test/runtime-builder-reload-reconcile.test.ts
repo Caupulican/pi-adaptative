@@ -126,7 +126,7 @@ function makeDeps(cwd: string, resourceLoader: ResourceLoader): TestDeps {
 		startWorkerDelegation: () => unreachable("startWorkerDelegation"),
 		getOrchestrationProfileCatalog: () => [],
 		getWorkerLaneRecords: () => unreachable("getWorkerLaneRecords"),
-		getWorkerResultSnapshots: () => unreachable("getWorkerResultSnapshots"),
+		getWorkerClaimSnapshots: () => unreachable("getWorkerClaimSnapshots"),
 		resolveManagedLaneId: () => unreachable("resolveManagedLaneId"),
 		runWorkerDelegationOnce: () => unreachable("runWorkerDelegationOnce"),
 		runModelFitness: () => unreachable("runModelFitness"),

@@ -51,8 +51,8 @@ import type {
 	GateOutcome,
 	LearningDecision,
 	RouteDecision,
+	WorkerClaim,
 	WorkerRequest,
-	WorkerResult,
 } from "./autonomy/contracts.ts";
 import { buildForegroundEnvelope, formatForegroundEnvelopeObservation } from "./autonomy/foreground-envelope.ts";
 import { evaluateToolGate } from "./autonomy/gates.ts";
@@ -84,7 +84,7 @@ import { ContextPipeline } from "./context-pipeline.ts";
 import type { SessionCostSummary } from "./cost/cost-summary.ts";
 import type { DailyUsageTotals } from "./cost/daily-usage.ts";
 import { type CostGuardDecision, downgradeReasoning, estimateTurnCostUsd, evaluateCostGuard } from "./cost-guard.ts";
-import { appendWorkerResultSnapshot, getWorkerResultSnapshots } from "./delegation/session-worker-result.ts";
+import { appendWorkerClaimSnapshot, getWorkerClaimSnapshots } from "./delegation/session-worker-result.ts";
 import type { WorkerDelegationRequest } from "./delegation/worker-delegation-request.ts";
 import type { WorkerRunOutcome } from "./delegation/worker-runner.ts";
 import type {
@@ -935,7 +935,7 @@ export class AgentSession {
 			getGoalStateSnapshot: () => this.getGoalStateSnapshot(),
 			getActiveLaneCount: () => this._backgroundLanes.getActiveLaneCount(),
 			getSessionEvidenceBundleHistory: () => getEvidenceBundleSnapshots(this.sessionManager.getEntries()),
-			getSessionWorkerResultHistory: () => getWorkerResultSnapshots(this.sessionManager.getEntries()),
+			getSessionWorkerClaimHistory: () => getWorkerClaimSnapshots(this.sessionManager.getEntries()),
 			getSessionLearningDecisionHistory: () => getLearningDecisionSnapshots(this.sessionManager.getEntries()),
 			getLearningAuditRecords: () => this.getLearningAuditRecords(),
 		});
@@ -963,7 +963,7 @@ export class AgentSession {
 			getGoalRuntimeSnapshot: (settings) => this.getGoalRuntimeSnapshot(settings),
 			getEvidenceBundleSnapshot: () => this.getEvidenceBundleSnapshot(),
 			saveEvidenceBundleSnapshot: (bundle) => this.saveEvidenceBundleSnapshot(bundle),
-			saveWorkerResultSnapshot: (result, request) => this.saveWorkerResultSnapshot(result, request),
+			saveWorkerClaimSnapshot: (claim, request) => this.saveWorkerClaimSnapshot(claim, request),
 			readMemoryForLane: (query) => this._memory.readMemoryForLane(query),
 			addSpawnedUsage: (usage, opts) => this.addSpawnedUsage(usage, opts),
 			runIsolatedCompletion: (opts) => this.runIsolatedCompletion(opts),
@@ -1203,7 +1203,7 @@ export class AgentSession {
 			startWorkerDelegation: (request) => this._backgroundLanes.startWorkerDelegation(request),
 			getOrchestrationProfileCatalog: () => this._backgroundLanes.getOrchestrationProfileCatalog(),
 			getWorkerLaneRecords: () => this._backgroundLanes.getLaneRecords(),
-			getWorkerResultSnapshots: () => this.getWorkerResultSnapshots(),
+			getWorkerClaimSnapshots: () => this.getWorkerClaimSnapshots(),
 			resolveManagedLaneId: (id) => this._backgroundLanes.resolveManagedLaneId(id),
 			runWorkerDelegationOnce: (request) => this.runWorkerDelegationOnce(request),
 			runModelFitness: (args) => this.runModelFitness(args),
@@ -4058,12 +4058,12 @@ export class AgentSession {
 		return this._autonomyTelemetry.getGateOutcomeHistory();
 	}
 
-	saveWorkerResultSnapshot(result: WorkerResult, request?: WorkerRequest): string {
-		return appendWorkerResultSnapshot(this.sessionManager, result, request);
+	saveWorkerClaimSnapshot(claim: WorkerClaim, request?: WorkerRequest): string {
+		return appendWorkerClaimSnapshot(this.sessionManager, claim, request);
 	}
 
-	getWorkerResultSnapshots(): WorkerResult[] {
-		return getWorkerResultSnapshots(getActiveSessionBranchEntries(this.sessionManager));
+	getWorkerClaimSnapshots(): WorkerClaim[] {
+		return getWorkerClaimSnapshots(getActiveSessionBranchEntries(this.sessionManager));
 	}
 
 	saveLearningDecisionSnapshot(decision: LearningDecision): string {

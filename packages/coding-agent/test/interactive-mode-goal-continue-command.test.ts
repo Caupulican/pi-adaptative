@@ -42,7 +42,7 @@ function createLoopResult(overrides?: Partial<GoalContinuationLoopResult>): Goal
 		turnsSubmitted: 1,
 		stopReason: "max_turns_reached",
 		finalSnapshot: {
-			workerResults: [],
+			workerClaims: [],
 			learningDecisions: [],
 			continuation: {
 				action: "continue",
@@ -165,7 +165,7 @@ describe("InteractiveMode /goal-continue command", () => {
 					createLoopResult({
 						turnsSubmitted: 0,
 						finalSnapshot: {
-							workerResults: [],
+							workerClaims: [],
 							learningDecisions: [],
 							continuation: {
 								action: "ask-user",

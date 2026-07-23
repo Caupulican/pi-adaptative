@@ -6,7 +6,7 @@ import { applyGoalEvent, createGoalState, type GoalState } from "../src/core/goa
 import { ORCHESTRATION_SCHEMA_VERSION, type OrchestrationProfile } from "../src/core/orchestration/contracts.ts";
 import { DelegationOrchestrationLedger } from "../src/core/orchestration/delegation-ledger.ts";
 import { projectGoalObjective } from "../src/core/orchestration/work-state-projection.ts";
-import { adaptWorkerResult } from "../src/core/orchestration/worker-result-adapter.ts";
+import { createWorkerResultContract } from "../src/core/orchestration/worker-result-adapter.ts";
 
 const roots: string[] = [];
 
@@ -85,9 +85,9 @@ describe("DelegationOrchestrationLedger", () => {
 		expect(recovered[0]?.attemptId).not.toBe(handle.attemptId);
 		expect(() =>
 			first.runtime.finishAttempt(
-				adaptWorkerResult({
+				createWorkerResultContract({
 					handle,
-					result: {
+					claim: {
 						requestId: "worker-1",
 						status: "completed",
 						summary: "stale completion",
@@ -147,9 +147,9 @@ describe("DelegationOrchestrationLedger", () => {
 		});
 		ledger.runtime.bindAttemptGrant(queued.attemptId, "grant-session-3");
 		const handle = ledger.start(queued.attemptId, 60_000);
-		const result = adaptWorkerResult({
+		const result = createWorkerResultContract({
 			handle,
-			result: {
+			claim: {
 				requestId: "worker-1",
 				status: "completed",
 				summary: "implemented",

@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import type { WorkerResult } from "../src/core/autonomy/contracts.ts";
+import type { WorkerClaim } from "../src/core/autonomy/contracts.ts";
 import type { LaneRecord } from "../src/core/autonomy/lane-tracker.ts";
 import type { ExtensionContext } from "../src/core/extensions/types.ts";
 import {
@@ -46,7 +46,7 @@ function firstText(content: Array<{ type: string; text?: string }>): string {
  * underlying delegation starter that IS wired (skipReason), and the dependency being altogether
  * absent -- three distinct, never-conflated outcomes. `goal-worker-evidence.test.ts` already
  * covers the pure "worker" evidence-kind verification against injected
- * getLaneRecords/getWorkerResultSnapshots; the last test here closes the loop end-to-end through
+ * getLaneRecords/getWorkerClaimSnapshots; the last test here closes the loop end-to-end through
  * the SAME tool instance to prove the live dep wiring composes with that existing verification.
  */
 describe("goal action 'dispatch_worker' (live adapter)", () => {
@@ -97,7 +97,7 @@ describe("goal action 'dispatch_worker' (live adapter)", () => {
 
 	it("end-to-end: a dispatched lane's worker result later verifies 'worker' evidence true through the SAME tool", async () => {
 		let laneRecords: LaneRecord[] = [];
-		let workerResults: WorkerResult[] = [];
+		let workerClaims: WorkerClaim[] = [];
 		const { run, getState } = createProducer({
 			startWorkerDelegation: ({ requirementId }) => {
 				const laneId = `lane-for-${requirementId}`;
@@ -105,7 +105,7 @@ describe("goal action 'dispatch_worker' (live adapter)", () => {
 				return { laneId };
 			},
 			getLaneRecords: () => laneRecords,
-			getWorkerResultSnapshots: () => workerResults,
+			getWorkerClaimSnapshots: () => workerClaims,
 		});
 
 		await run({ action: "start", goalId: "g1", userGoal: "Ship it" });
@@ -115,7 +115,7 @@ describe("goal action 'dispatch_worker' (live adapter)", () => {
 		expect(laneId).toBe("lane-for-r1");
 
 		// The worker "completes" -- a result snapshot lands keyed by that same laneId.
-		workerResults = [
+		workerClaims = [
 			{
 				requestId: laneId as string,
 				status: "completed",

@@ -1,7 +1,7 @@
 import type { SessionManager } from "@caupulican/pi-agent-core/node";
-import type { EvidenceBundle, LearningDecision, WorkerResult } from "../autonomy/contracts.ts";
+import type { EvidenceBundle, LearningDecision, WorkerClaim } from "../autonomy/contracts.ts";
 import type { LaneRecord } from "../autonomy/lane-tracker.ts";
-import { getWorkerResultSnapshots } from "../delegation/session-worker-result.ts";
+import { getWorkerClaimSnapshots } from "../delegation/session-worker-result.ts";
 import { getLearningDecisionSnapshots } from "../learning/session-learning-decision.ts";
 import type { TaskRuntimeProjection } from "../orchestration/task-runtime.ts";
 import { projectSessionWorkState, type SessionWorkStateProjection } from "../orchestration/work-state-projection.ts";
@@ -63,7 +63,7 @@ export interface GoalRuntimeRequirementWorktreeState {
 export interface GoalRuntimeSnapshot {
 	goalState?: GoalState;
 	latestEvidenceBundle?: EvidenceBundle;
-	workerResults: readonly WorkerResult[];
+	workerClaims: readonly WorkerClaim[];
 	learningDecisions: readonly LearningDecision[];
 	continuation: GoalContinuationDecision;
 	/**
@@ -87,7 +87,7 @@ export interface GoalRuntimeSnapshot {
 
 /**
  * Branch-scoped: every resolver here reads from ONE source (the active branch), so the goal
- * state, evidence bundle, worker results, learning decisions, and open task steps in the
+ * state, evidence bundle, worker claims, learning decisions, and open task steps in the
  * returned snapshot are never a mix of the current branch and a sibling branch's history.
  */
 export function buildGoalRuntimeSnapshot(args: {
@@ -133,7 +133,7 @@ export function buildGoalRuntimeSnapshot(args: {
 	const branchEntries = getActiveSessionBranchEntries(args.sessionManager);
 	let goalState = getLatestGoalStateSnapshot(args.sessionManager);
 	const latestEvidenceBundle = getLatestEvidenceBundleSnapshot(branchEntries);
-	const workerResults = getWorkerResultSnapshots(branchEntries);
+	const workerClaims = getWorkerClaimSnapshots(branchEntries);
 	const learningDecisions = getLearningDecisionSnapshots(branchEntries);
 
 	// Reuses the SAME branch-scoped primitive as goal-state resolution (getLatestCustomEntryOnBranch),
@@ -214,7 +214,7 @@ export function buildGoalRuntimeSnapshot(args: {
 	return {
 		goalState,
 		latestEvidenceBundle,
-		workerResults,
+		workerClaims,
 		learningDecisions,
 		continuation,
 		openTaskSteps,

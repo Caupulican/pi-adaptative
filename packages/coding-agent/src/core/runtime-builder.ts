@@ -44,13 +44,13 @@ import type {
 	IsolatedCompletionResult,
 	WorkerDelegationRunOutcome,
 } from "./agent-session.ts";
-import type { WorkerResult } from "./autonomy/contracts.ts";
+import type { WorkerClaim } from "./autonomy/contracts.ts";
 import type { LaneRecord } from "./autonomy/lane-tracker.ts";
 import type { ArtifactStore } from "./context/context-artifacts.ts";
 import type { MemoryPromptInclusionReport, MemoryRetrievalDiagnostics } from "./context/memory-diagnostics.ts";
 import type { ContextGcReport } from "./context-gc.ts";
 import { DEFAULT_ACTIVE_TOOL_NAMES, mapToolNamesForPlatform } from "./default-tool-surface.ts";
-import { acknowledgeWorkerResultReview } from "./delegation/session-worker-result.ts";
+import { acknowledgeWorkerClaimReview } from "./delegation/session-worker-result.ts";
 import type { WorkerDelegationRequest } from "./delegation/worker-delegation-request.ts";
 import { createCoreDiagnosticsToolDefinitions } from "./extensions/builtin.ts";
 import {
@@ -286,7 +286,7 @@ export interface RuntimeBuilderDeps {
 	): { started: false; skipReason: string } | { started: true; record: LaneRecord };
 	getOrchestrationProfileCatalog(): Array<{ profileId: string; role: string; description: string }>;
 	getWorkerLaneRecords(): LaneRecord[];
-	getWorkerResultSnapshots(): WorkerResult[];
+	getWorkerClaimSnapshots(): WorkerClaim[];
 	/** Confirm a managed dispatch's caller-stable canonical lane id was registered durably before the
 	 * goal binds it (`BackgroundLaneController.resolveManagedLaneId`). */
 	resolveManagedLaneId(callerLaneId: string): string | undefined;
@@ -808,11 +808,11 @@ export class RuntimeBuilder {
 					},
 					// kind:"tool" evidence refs verify against real session records.
 					hasToolCallId: (toolCallId) => hasAnsweredToolCallOnBranch(this.deps.getSessionManager(), toolCallId),
-					// kind:"worker" evidence refs verify against the SAME live lane/result accessors the
+					// kind:"worker" evidence refs verify against the SAME live lane/claim accessors the
 					// delegate_status tool already uses below -- live wiring (these were declared optional
 					// and read-defensive on the goal-tool deps type).
 					getLaneRecords: () => this.deps.getWorkerLaneRecords(),
-					getWorkerResultSnapshots: () => this.deps.getWorkerResultSnapshots(),
+					getWorkerClaimSnapshots: () => this.deps.getWorkerClaimSnapshots(),
 					// dispatch_worker's tool-layer side effect for the default (in_process) route: starts a
 					// real in-process worker lane through the SAME starter the delegate tool uses (below),
 					// adapted from its `{started:true;record}|{started:false;skipReason}` shape onto this
@@ -877,12 +877,12 @@ export class RuntimeBuilder {
 			if (toolAccess.allows("delegate_status")) {
 				const delegateStatusToolDefinition = createDelegateStatusToolDefinition({
 					getLaneRecords: () => this.deps.getWorkerLaneRecords(),
-					getWorkerResultSnapshots: () => this.deps.getWorkerResultSnapshots(),
+					getWorkerClaimSnapshots: () => this.deps.getWorkerClaimSnapshots(),
 					// Durable ack persists straight through the session log; routed here (rather than
 					// a new agent-session dep) because getSessionManager() is already a stable, generic
 					// passthrough dep, so no other package needs to change for this to work.
 					acknowledgeWorkerReview: (requestId) =>
-						acknowledgeWorkerResultReview(this.deps.getSessionManager(), requestId),
+						acknowledgeWorkerClaimReview(this.deps.getSessionManager(), requestId),
 				});
 				this._baseToolDefinitions.set(delegateStatusToolDefinition.name, delegateStatusToolDefinition);
 			}

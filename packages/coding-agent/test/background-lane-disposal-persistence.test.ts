@@ -3,10 +3,10 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import type { SessionManager } from "@caupulican/pi-agent-core/node";
 import { afterEach, describe, expect, it } from "vitest";
-import type { WorkerRequest, WorkerResult } from "../src/core/autonomy/contracts.ts";
+import type { WorkerClaim, WorkerRequest } from "../src/core/autonomy/contracts.ts";
 import { getLaneRecordSnapshots } from "../src/core/autonomy/session-lane-record.ts";
 import { BackgroundLaneController } from "../src/core/background-lane-controller.ts";
-import { appendWorkerResultSnapshot, getWorkerResultSnapshots } from "../src/core/delegation/session-worker-result.ts";
+import { appendWorkerClaimSnapshot, getWorkerClaimSnapshots } from "../src/core/delegation/session-worker-result.ts";
 import { resetInFlightWorkRegistryForTests } from "../src/core/reload-blockers.ts";
 import { SettingsManager } from "../src/core/settings-manager.ts";
 import {
@@ -85,8 +85,8 @@ describe("background lane disposal persistence", () => {
 				capturedAfterToolCall = opts.afterToolCall;
 				return new Promise(() => {});
 			},
-			saveWorkerResultSnapshot: (result: WorkerResult, request?: WorkerRequest) =>
-				appendWorkerResultSnapshot(sessionManager, result, request),
+			saveWorkerClaimSnapshot: (claim: WorkerClaim, request?: WorkerRequest) =>
+				appendWorkerClaimSnapshot(sessionManager, claim, request),
 			addSpawnedUsage: () => undefined,
 			emitAutonomyTelemetry: () => {},
 			emit: () => {},
@@ -116,8 +116,8 @@ describe("background lane disposal persistence", () => {
 		expect(laneRecords).toEqual([
 			expect.objectContaining({ type: "worker", status: "canceled", reasonCode: "session_disposed" }),
 		]);
-		const workerResults = getWorkerResultSnapshots(entries as never);
-		expect(workerResults).toEqual([
+		const workerClaims = getWorkerClaimSnapshots(entries as never);
+		expect(workerClaims).toEqual([
 			expect.objectContaining({
 				status: "cancelled",
 				changedFiles: ["notes/output.md"],
@@ -167,7 +167,7 @@ describe("background lane disposal persistence", () => {
 			isDelegateToolActive: () => true,
 			getCapabilityEnvelope: () => undefined,
 			getGoalStateSnapshot: () => undefined,
-			saveWorkerResultSnapshot: () => "unused",
+			saveWorkerClaimSnapshot: () => "unused",
 			addSpawnedUsage: () => undefined,
 			emitAutonomyTelemetry: () => {},
 			emit: () => {},
@@ -177,7 +177,7 @@ describe("background lane disposal persistence", () => {
 
 		controller.abortInFlightLanes();
 
-		expect(getAppendCount()).toBe(1); // only the lane record -- no ledger means no WorkerResult
+		expect(getAppendCount()).toBe(1); // Only the lane record; no running worker means no claim.
 		const laneRecords = getLaneRecordSnapshots(entries as never);
 		expect(laneRecords).toEqual([
 			expect.objectContaining({
@@ -186,12 +186,12 @@ describe("background lane disposal persistence", () => {
 				reasonCode: "session_disposed",
 			}),
 		]);
-		expect(getWorkerResultSnapshots(entries as never)).toEqual([]);
+		expect(getWorkerClaimSnapshots(entries as never)).toEqual([]);
 		rmSync(agentDir, { recursive: true, force: true });
 	});
 
 	it("dispose never throws even when persistence deps are entirely missing (defensive try/catch per lane)", () => {
-		// No getSessionManager/emit/saveWorkerResultSnapshot at all -- every persist attempt must
+		// No getSessionManager/emit/saveWorkerClaimSnapshot at all -- every persist attempt must
 		// fail silently (warn-and-continue), never propagate.
 		const controller = new BackgroundLaneController({} as never);
 		const internals = controller as unknown as {

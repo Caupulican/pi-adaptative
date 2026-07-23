@@ -7,7 +7,7 @@ import { getModel } from "@caupulican/pi-ai";
 import { describe, expect, it } from "vitest";
 import { AgentSession } from "../src/core/agent-session.ts";
 import { AuthStorage } from "../src/core/auth-storage.ts";
-import { appendWorkerResultSnapshot } from "../src/core/delegation/session-worker-result.ts";
+import { appendWorkerClaimSnapshot } from "../src/core/delegation/session-worker-result.ts";
 import { buildGoalRuntimeSnapshot } from "../src/core/goals/goal-runtime-snapshot.ts";
 import { createGoalState } from "../src/core/goals/goal-state.ts";
 import { appendGoalStateSnapshot, getLatestGoalStateSnapshot } from "../src/core/goals/session-goal-state.ts";
@@ -53,7 +53,7 @@ describe("branch-scoped goal/task state resolution", () => {
 			session.saveEvidenceBundleSnapshot(
 				createEvidenceBundle({ query: "branch-a-query", sources: [], findings: [], now: "T0" }),
 			);
-			session.saveWorkerResultSnapshot({
+			session.saveWorkerClaimSnapshot({
 				requestId: "worker-a",
 				status: "completed",
 				summary: "Branch A worker",
@@ -73,7 +73,7 @@ describe("branch-scoped goal/task state resolution", () => {
 			session.saveEvidenceBundleSnapshot(
 				createEvidenceBundle({ query: "branch-b-query", sources: [], findings: [], now: "T1" }),
 			);
-			session.saveWorkerResultSnapshot({
+			session.saveWorkerClaimSnapshot({
 				requestId: "worker-b",
 				status: "completed",
 				summary: "Branch B worker",
@@ -88,7 +88,7 @@ describe("branch-scoped goal/task state resolution", () => {
 			});
 
 			expect(session.getEvidenceBundleSnapshots().map((bundle) => bundle.query)).toEqual(["branch-b-query"]);
-			expect(session.getWorkerResultSnapshots().map((result) => result.requestId)).toEqual(["worker-b"]);
+			expect(session.getWorkerClaimSnapshots().map((claim) => claim.requestId)).toEqual(["worker-b"]);
 			expect(session.getLearningDecisionSnapshots().map((decision) => decision.reasonCode)).toEqual([
 				"branch-b-learning",
 			]);
@@ -109,7 +109,7 @@ describe("branch-scoped goal/task state resolution", () => {
 
 			sessionManager.branch(branchALeaf);
 			expect(session.getEvidenceBundleSnapshot()?.query).toBe("branch-a-query");
-			expect(session.getWorkerResultSnapshots().map((result) => result.requestId)).toEqual(["worker-a"]);
+			expect(session.getWorkerClaimSnapshots().map((claim) => claim.requestId)).toEqual(["worker-a"]);
 			expect(session.getLearningDecisionSnapshots().map((decision) => decision.reasonCode)).toEqual([
 				"branch-a-learning",
 			]);
@@ -164,7 +164,7 @@ describe("branch-scoped goal/task state resolution", () => {
 			session,
 			createEvidenceBundle({ query: "branch-a-query", sources: [], findings: [], now: "T0" }),
 		);
-		appendWorkerResultSnapshot(session, {
+		appendWorkerClaimSnapshot(session, {
 			requestId: "worker-a",
 			status: "completed",
 			summary: "Branch A worker",
@@ -187,7 +187,7 @@ describe("branch-scoped goal/task state resolution", () => {
 			session,
 			createEvidenceBundle({ query: "branch-b-query", sources: [], findings: [], now: "T1" }),
 		);
-		appendWorkerResultSnapshot(session, {
+		appendWorkerClaimSnapshot(session, {
 			requestId: "worker-b",
 			status: "completed",
 			summary: "Branch B worker",
@@ -204,14 +204,14 @@ describe("branch-scoped goal/task state resolution", () => {
 		const snapshotB = buildGoalRuntimeSnapshot({ sessionManager: session, settings: { maxStallTurns: 5 } });
 		expect(snapshotB.goalState?.goalId).toBe("goal-b");
 		expect(snapshotB.latestEvidenceBundle?.query).toBe("branch-b-query");
-		expect(snapshotB.workerResults.map((r) => r.requestId)).toEqual(["worker-b"]);
+		expect(snapshotB.workerClaims.map((claim) => claim.requestId)).toEqual(["worker-b"]);
 		expect(snapshotB.learningDecisions.map((d) => d.reasonCode)).toEqual(["branch-b-learning"]);
 
 		session.branch(branchALeaf);
 		const snapshotA = buildGoalRuntimeSnapshot({ sessionManager: session, settings: { maxStallTurns: 5 } });
 		expect(snapshotA.goalState?.goalId).toBe("goal-a");
 		expect(snapshotA.latestEvidenceBundle?.query).toBe("branch-a-query");
-		expect(snapshotA.workerResults.map((r) => r.requestId)).toEqual(["worker-a"]);
+		expect(snapshotA.workerClaims.map((claim) => claim.requestId)).toEqual(["worker-a"]);
 		expect(snapshotA.learningDecisions.map((d) => d.reasonCode)).toEqual(["branch-a-learning"]);
 	});
 

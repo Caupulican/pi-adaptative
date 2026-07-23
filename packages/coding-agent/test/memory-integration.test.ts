@@ -161,7 +161,7 @@ describe("Memory subsystem integration (file-store)", () => {
 			});
 
 			expect(run.record?.status).toBe("succeeded");
-			expect(run.outcome?.result.summary).toBe("read-only memory recall succeeded");
+			expect(run.outcome?.claim.summary).toBe("read-only memory recall succeeded");
 			expect(workerTools).toContain("memory");
 			expect(memorySchema).toContain("query");
 			expect(memorySchema).not.toContain("action");
@@ -200,8 +200,8 @@ describe("Memory subsystem integration (file-store)", () => {
 				instructions: "Check whether memory is enabled",
 			});
 
-			expect(run.outcome?.result.summary).toBe("memory remained disabled");
-			expect(JSON.stringify(run.outcome?.result)).not.toContain("DISABLED_MEMORY_MARKER");
+			expect(run.outcome?.claim.summary).toBe("memory remained disabled");
+			expect(JSON.stringify(run.outcome?.claim)).not.toContain("DISABLED_MEMORY_MARKER");
 		} finally {
 			session.dispose();
 			faux.unregister();

@@ -69,7 +69,7 @@ function buildQueuingDeps(
 		readMemoryForLane: async () => "",
 		// Never resolves: once drained, the running worker stays suspended for the whole test.
 		runIsolatedCompletion: () => new Promise(() => {}),
-		saveWorkerResultSnapshot: () => "entry-2",
+		saveWorkerClaimSnapshot: () => "entry-2",
 		addSpawnedUsage: () => undefined,
 		emitAutonomyTelemetry: () => {},
 		emit: () => {},

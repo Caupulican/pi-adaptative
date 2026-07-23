@@ -273,7 +273,7 @@ describe("profile-shipped lanes", () => {
 		});
 
 		expect(run.record?.status).toBe("succeeded");
-		expect(run.outcome?.result.summary).toBe("profile repair read succeeded");
+		expect(run.outcome?.claim.summary).toBe("profile repair read succeeded");
 		expect(seenTools).toEqual(["read"]);
 	});
 

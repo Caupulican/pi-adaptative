@@ -7,7 +7,7 @@ import type {
 	IsolatedCompletionResult,
 	WorkerDelegationRunOutcome,
 } from "../agent-session.ts";
-import type { CapabilityEnvelope, WorkerRequest, WorkerResult } from "../autonomy/contracts.ts";
+import type { CapabilityEnvelope, WorkerClaim, WorkerRequest } from "../autonomy/contracts.ts";
 import { getPrivateLaneDeniedPaths } from "../autonomy/lane-private-paths.ts";
 import { createLaneToolSurface } from "../autonomy/lane-tool-surface.ts";
 import type { LaneRecord, LaneTerminalStatus } from "../autonomy/lane-tracker.ts";
@@ -21,7 +21,7 @@ import type { ModelRegistry } from "../model-registry.ts";
 import type { OrchestrationProfile } from "../orchestration/contracts.ts";
 import type { StartedDelegationAttempt } from "../orchestration/delegation-ledger.ts";
 import type { AttemptRuntimeState, TaskRuntimeProjection } from "../orchestration/task-runtime.ts";
-import { adaptWorkerResult, adaptWorkerRunOutcome } from "../orchestration/worker-result-adapter.ts";
+import { createWorkerResultContract } from "../orchestration/worker-result-adapter.ts";
 import { registerInFlightWork } from "../reload-blockers.ts";
 import type { ResolvedWorkerDelegationSettings, SettingsManager } from "../settings-manager.ts";
 import { applyWorkerActions } from "./worker-actions.ts";
@@ -68,7 +68,7 @@ export interface WorkerDelegationControllerDeps {
 	): Promise<void>;
 	emitAutonomyTelemetry(event: AutonomyTelemetryEvent): void;
 	getGoalStateSnapshot(): GoalState | undefined;
-	saveWorkerResultSnapshot(result: WorkerResult, request?: WorkerRequest): string;
+	saveWorkerClaimSnapshot(claim: WorkerClaim, request?: WorkerRequest): string;
 	readMemoryForLane(query: string): Promise<string>;
 	addSpawnedUsage(
 		usage: Usage,
@@ -206,7 +206,7 @@ export class WorkerDelegationController {
 			try {
 				const spend = ledger.getSpend();
 				const reportId = `worker:${this.deps.getSessionId()}:${record.laneId}`;
-				const result: WorkerResult = {
+				const claim: WorkerClaim = {
 					requestId: ledger.request.id,
 					status: "cancelled",
 					summary: "canceled on session dispose",
@@ -215,9 +215,9 @@ export class WorkerDelegationController {
 					createdAt: new Date().toISOString(),
 				};
 				const canceled = this.getWorkerLifecycle().finish(
-					adaptWorkerResult({
+					createWorkerResultContract({
 						handle: ledger.handle,
-						result,
+						claim,
 						accepted: false,
 						costUsd: spend?.cost.total ?? 0,
 						cwd: this.deps.getCwd(),
@@ -238,13 +238,13 @@ export class WorkerDelegationController {
 				// returns, which a mid-flight abort preempts) — record what `getSpend()` knows. Same
 				// deterministic reportId scheme as the normal path, so a later duplicate report (there
 				// is none in practice here, since the lane is now terminal) stays idempotent.
-				this.deps.saveWorkerResultSnapshot(result, ledger.request);
+				this.deps.saveWorkerClaimSnapshot(claim, ledger.request);
 				if (spend && (spend.cost.total > 0 || spend.totalTokens > 0)) {
 					this.deps.addSpawnedUsage(spend, { label: "worker-delegation", reportId });
 				}
 			} catch (error) {
 				this.safeWarn(
-					`Failed to persist canceled worker result ${record.laneId}: ${error instanceof Error ? error.message : String(error)}`,
+					`Failed to persist canceled worker claim ${record.laneId}: ${error instanceof Error ? error.message : String(error)}`,
 				);
 			}
 		}
@@ -717,7 +717,7 @@ export class WorkerDelegationController {
 						tools: toolSurface.tools,
 						maxTurns: Math.max(1, Math.min(6, maxToolCalls + 1)),
 						finalTextPrompt:
-							"The tool-turn budget is exhausted. Do not call more tools. Return the required worker-result JSON envelope now using only evidence already gathered. If the investigation is incomplete, say so in the summary or blockers instead of omitting the envelope.",
+							"The tool-turn budget is exhausted. Do not call more tools. Return the required worker-claim JSON envelope now using only evidence already gathered. If the investigation is incomplete, say so in the summary or blockers instead of omitting the envelope.",
 						beforeToolCall: async (context, toolSignal) => {
 							const decision = await toolSurface.beforeToolCall(context, toolSignal);
 							if (decision?.block) {
@@ -780,7 +780,7 @@ export class WorkerDelegationController {
 			const verificationRequired =
 				orchestrationProfile.requireIndependentVerification &&
 				orchestrationProfile.role !== "verifier" &&
-				rawOutcome.result.status === "completed";
+				rawOutcome.claim.status === "completed";
 			const outcome = verificationRequired
 				? {
 						...rawOutcome,
@@ -792,11 +792,11 @@ export class WorkerDelegationController {
 							reasonCode: "independent_verification_required",
 							message: "The owner-authored profile requires an independent verifier before acceptance.",
 						},
-						result: {
-							...rawOutcome.result,
+						claim: {
+							...rawOutcome.claim,
 							parentReviewRequired: true,
 							blockers: [
-								...(rawOutcome.result.blockers ?? []),
+								...(rawOutcome.claim.blockers ?? []),
 								"independent verification is required before acceptance",
 							],
 						},
@@ -805,7 +805,7 @@ export class WorkerDelegationController {
 
 			// Never persist against a disposed session. When disposal raced this
 			// await, `abortInFlightLanes()`'s synchronous cutoff already completed this lane, persisted
-			// its durable lane record + bounded WorkerResult, and consumed (deleted) the ledger —
+			// its durable lane record + bounded WorkerClaim, and consumed (deleted) the ledger —
 			// `.complete()` below is then a no-op (the lane is already terminal, so it returns
 			// undefined) and no double persistence or duplicate terminal notification can happen here.
 			if (this.deps.isDisposed()) {
@@ -817,9 +817,12 @@ export class WorkerDelegationController {
 				? lifecycle.getTask(request.verificationOfTaskId)
 				: undefined;
 			let record = lifecycle.finish(
-				adaptWorkerRunOutcome({
+				createWorkerResultContract({
 					handle: durableHandle,
-					outcome,
+					claim: outcome.claim,
+					accepted: outcome.accepted,
+					costUsd: outcome.costUsd,
+					reasonCode: outcome.reasonCode,
 					cwd: this.deps.getCwd(),
 					...(spentUsage
 						? {
@@ -836,10 +839,10 @@ export class WorkerDelegationController {
 				{ notify: !verificationRequired },
 			);
 			try {
-				this.deps.saveWorkerResultSnapshot(outcome.result, workerRequest);
+				this.deps.saveWorkerClaimSnapshot(outcome.claim, workerRequest);
 			} catch (error) {
 				this.safeWarn(
-					`Failed to persist compatibility worker snapshot ${startedRecord.laneId}: ${error instanceof Error ? error.message : String(error)}`,
+					`Failed to persist worker claim ${startedRecord.laneId}: ${error instanceof Error ? error.message : String(error)}`,
 				);
 			}
 			if (spentUsage && (spentUsage.cost.total > 0 || spentUsage.totalTokens > 0)) {
@@ -848,7 +851,7 @@ export class WorkerDelegationController {
 
 			const terminalRecords: LaneRecord[] = [record];
 			if (request.verificationOfTaskId) {
-				const decision = outcome.accepted ? outcome.result.verification : undefined;
+				const decision = outcome.accepted ? outcome.claim.verification : undefined;
 				const subject = lifecycle.reconcileVerification({
 					subjectTaskId: request.verificationOfTaskId,
 					verifierTaskId: startedRecord.laneId,
@@ -867,8 +870,8 @@ export class WorkerDelegationController {
 							this.buildVerifierRequest({
 								subjectTaskId: startedRecord.laneId,
 								verifierProfileId: verifierShipment.profile.profileId,
-								summary: rawOutcome.result.summary,
-								artifactUris: rawOutcome.result.changedFiles,
+								summary: rawOutcome.claim.summary,
+								artifactUris: rawOutcome.claim.changedFiles,
 							}),
 						)
 					: { started: false as const, skipReason: "independent_verifier_unavailable" };
@@ -896,7 +899,7 @@ export class WorkerDelegationController {
 				return { started: true, record: lifecycle.getRecord(startedRecord.laneId) };
 			}
 			if (durableState?.status === "running" || durableState?.status === "leased") {
-				const failureResult: WorkerResult = {
+				const failureClaim: WorkerClaim = {
 					requestId: startedRecord.laneId,
 					status: "failed",
 					summary: `Worker delegation failed: ${error instanceof Error ? error.message : String(error)}`,
@@ -905,9 +908,9 @@ export class WorkerDelegationController {
 				};
 				try {
 					lifecycle.finish(
-						adaptWorkerResult({
+						createWorkerResultContract({
 							handle: durableHandle,
-							result: failureResult,
+							claim: failureClaim,
 							accepted: false,
 							costUsd: 0,
 							cwd: this.deps.getCwd(),

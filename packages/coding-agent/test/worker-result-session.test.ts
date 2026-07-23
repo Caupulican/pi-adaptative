@@ -5,26 +5,26 @@ import { describe, expect, it } from "vitest";
 import { AgentSession } from "../src/core/agent-session.ts";
 import { AuthStorage } from "../src/core/auth-storage.ts";
 import {
-	appendWorkerResultSnapshot,
-	getWorkerResultSnapshots,
-	WORKER_RESULT_CUSTOM_TYPE,
+	appendWorkerClaimSnapshot,
+	getWorkerClaimSnapshots,
+	WORKER_CLAIM_CUSTOM_TYPE,
 } from "../src/core/delegation/session-worker-result.ts";
 import { ModelRegistry } from "../src/core/model-registry.ts";
 import { createEvidenceBundle } from "../src/core/research/evidence-bundle.ts";
 import { SettingsManager } from "../src/core/settings-manager.ts";
 import { createTestResourceLoader } from "./utilities.ts";
 
-describe("Phase 9C: Worker Result Session Persistence", () => {
-	it("appendWorkerResultSnapshot stores a custom entry with WORKER_RESULT_CUSTOM_TYPE", () => {
+describe("worker claim session persistence", () => {
+	it("appendWorkerClaimSnapshot stores a custom entry with WORKER_CLAIM_CUSTOM_TYPE", () => {
 		const sessionManager = SessionManager.inMemory();
-		const result = {
+		const claim = {
 			requestId: "req-1",
 			status: "completed" as const,
 			summary: "Done",
 			changedFiles: [],
 		};
 
-		const entryId = appendWorkerResultSnapshot(sessionManager, result);
+		const entryId = appendWorkerClaimSnapshot(sessionManager, claim);
 		expect(typeof entryId).toBe("string");
 
 		const entries = sessionManager.getEntries();
@@ -32,68 +32,68 @@ describe("Phase 9C: Worker Result Session Persistence", () => {
 		const entry = entries[0];
 		expect(entry?.type).toBe("custom");
 		if (entry?.type !== "custom") throw new Error("Expected custom entry");
-		expect(entry.customType).toBe(WORKER_RESULT_CUSTOM_TYPE);
+		expect(entry.customType).toBe(WORKER_CLAIM_CUSTOM_TYPE);
 	});
 
-	it("getWorkerResultSnapshots returns all valid snapshots in chronological order", () => {
+	it("getWorkerClaimSnapshots returns all valid snapshots in chronological order", () => {
 		const sessionManager = SessionManager.inMemory();
-		const result1 = { requestId: "req-1", status: "completed" as const, summary: "R1", changedFiles: [] };
-		appendWorkerResultSnapshot(sessionManager, result1);
+		const claim1 = { requestId: "req-1", status: "completed" as const, summary: "R1", changedFiles: [] };
+		appendWorkerClaimSnapshot(sessionManager, claim1);
 
-		const result2 = { requestId: "req-2", status: "blocked" as const, summary: "R2", changedFiles: [] };
-		appendWorkerResultSnapshot(sessionManager, result2);
+		const claim2 = { requestId: "req-2", status: "blocked" as const, summary: "R2", changedFiles: [] };
+		appendWorkerClaimSnapshot(sessionManager, claim2);
 
-		const snapshots = getWorkerResultSnapshots(sessionManager.getEntries());
+		const snapshots = getWorkerClaimSnapshots(sessionManager.getEntries());
 		expect(snapshots.length).toBe(2);
 		expect(snapshots[0].requestId).toBe("req-1");
 		expect(snapshots[1].requestId).toBe("req-2");
 	});
 
-	it("malformed worker_result entries are ignored and do not throw", () => {
+	it("malformed worker_claim entries are ignored and do not throw", () => {
 		const sessionManager = SessionManager.inMemory();
 
-		sessionManager.appendCustomEntry(WORKER_RESULT_CUSTOM_TYPE, null); // Null payload
-		sessionManager.appendCustomEntry(WORKER_RESULT_CUSTOM_TYPE, []); // Array payload
-		sessionManager.appendCustomEntry(WORKER_RESULT_CUSTOM_TYPE, { version: 1 }); // Missing result
-		sessionManager.appendCustomEntry(WORKER_RESULT_CUSTOM_TYPE, { version: 2, result: {} }); // Wrong version
-		sessionManager.appendCustomEntry(WORKER_RESULT_CUSTOM_TYPE, "malformed"); // Not an object
+		sessionManager.appendCustomEntry(WORKER_CLAIM_CUSTOM_TYPE, null); // Null payload
+		sessionManager.appendCustomEntry(WORKER_CLAIM_CUSTOM_TYPE, []); // Array payload
+		sessionManager.appendCustomEntry(WORKER_CLAIM_CUSTOM_TYPE, { version: 1 }); // Missing claim
+		sessionManager.appendCustomEntry(WORKER_CLAIM_CUSTOM_TYPE, { version: 2, claim: {} }); // Wrong version
+		sessionManager.appendCustomEntry(WORKER_CLAIM_CUSTOM_TYPE, "malformed"); // Not an object
 
-		const validResult = { requestId: "req-valid", status: "completed" as const, summary: "Valid", changedFiles: [] };
-		appendWorkerResultSnapshot(sessionManager, validResult);
+		const validClaim = { requestId: "req-valid", status: "completed" as const, summary: "Valid", changedFiles: [] };
+		appendWorkerClaimSnapshot(sessionManager, validClaim);
 
-		sessionManager.appendCustomEntry(WORKER_RESULT_CUSTOM_TYPE, { version: 1, result: { invalid: true } }); // Invalid result
+		sessionManager.appendCustomEntry(WORKER_CLAIM_CUSTOM_TYPE, { version: 1, claim: { invalid: true } }); // Invalid claim
 
-		const nonPlainResult = Object.assign(new Date(0), {
+		const nonPlainClaim = Object.assign(new Date(0), {
 			requestId: "req-non-plain",
 			status: "completed",
 			summary: "Invalid non-plain",
 			changedFiles: [],
 		});
-		sessionManager.appendCustomEntry(WORKER_RESULT_CUSTOM_TYPE, { version: 1, result: nonPlainResult });
+		sessionManager.appendCustomEntry(WORKER_CLAIM_CUSTOM_TYPE, { version: 1, claim: nonPlainClaim });
 
-		const validResult2 = {
+		const validClaim2 = {
 			requestId: "req-valid-2",
 			status: "completed" as const,
 			summary: "Valid 2",
 			changedFiles: [],
 		};
-		const payload = Object.assign(new Date(0), { version: 1, result: validResult2 });
-		sessionManager.appendCustomEntry(WORKER_RESULT_CUSTOM_TYPE, payload);
+		const payload = Object.assign(new Date(0), { version: 1, claim: validClaim2 });
+		sessionManager.appendCustomEntry(WORKER_CLAIM_CUSTOM_TYPE, payload);
 
-		const snapshots = getWorkerResultSnapshots(sessionManager.getEntries());
+		const snapshots = getWorkerClaimSnapshots(sessionManager.getEntries());
 		expect(snapshots.length).toBe(1);
 		expect(snapshots[0].requestId).toBe("req-valid");
 	});
 
-	it("invalid nested evidence causes that worker_result snapshot to be ignored", () => {
+	it("invalid nested evidence causes that worker_claim snapshot to be ignored", () => {
 		const sessionManager = SessionManager.inMemory();
 
-		const validResult = { requestId: "req-valid", status: "completed" as const, summary: "Valid", changedFiles: [] };
-		appendWorkerResultSnapshot(sessionManager, validResult);
+		const validClaim = { requestId: "req-valid", status: "completed" as const, summary: "Valid", changedFiles: [] };
+		appendWorkerClaimSnapshot(sessionManager, validClaim);
 
-		sessionManager.appendCustomEntry(WORKER_RESULT_CUSTOM_TYPE, {
+		sessionManager.appendCustomEntry(WORKER_CLAIM_CUSTOM_TYPE, {
 			version: 1,
-			result: {
+			claim: {
 				requestId: "req-invalid",
 				status: "completed",
 				summary: "Invalid",
@@ -106,7 +106,7 @@ describe("Phase 9C: Worker Result Session Persistence", () => {
 			},
 		});
 
-		const snapshots = getWorkerResultSnapshots(sessionManager.getEntries());
+		const snapshots = getWorkerClaimSnapshots(sessionManager.getEntries());
 		expect(snapshots.length).toBe(1);
 		expect(snapshots[0].requestId).toBe("req-valid");
 	});
@@ -118,7 +118,7 @@ describe("Phase 9C: Worker Result Session Persistence", () => {
 		const metadata = { test: 1 };
 		const evidenceIds = ["ev-1"];
 
-		const result = {
+		const claim = {
 			requestId: "req-1",
 			status: "blocked" as const,
 			summary: "Test",
@@ -131,14 +131,14 @@ describe("Phase 9C: Worker Result Session Persistence", () => {
 			}),
 		};
 
-		appendWorkerResultSnapshot(sessionManager, result);
+		appendWorkerClaimSnapshot(sessionManager, claim);
 
 		changedFiles.push("other.ts");
 		blockers.push("other");
 		metadata.test = 2;
 		evidenceIds.push("ev-2");
 
-		const snapshots = getWorkerResultSnapshots(sessionManager.getEntries());
+		const snapshots = getWorkerClaimSnapshots(sessionManager.getEntries());
 		const snapshot = snapshots[0];
 
 		expect(snapshot.changedFiles).toEqual(["file.ts"]);
@@ -178,14 +178,14 @@ describe("Phase 9C: Worker Result Session Persistence", () => {
 			modelRegistry: ModelRegistry.inMemory(AuthStorage.inMemory()),
 		});
 
-		session.saveWorkerResultSnapshot({
+		session.saveWorkerClaimSnapshot({
 			requestId: "req-1",
 			status: "completed",
 			summary: "Test Accessors",
 			changedFiles: [],
 		});
 
-		const snapshots = session.getWorkerResultSnapshots();
+		const snapshots = session.getWorkerClaimSnapshots();
 		expect(snapshots.length).toBe(1);
 		expect(snapshots[0].summary).toBe("Test Accessors");
 	});

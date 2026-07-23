@@ -10,7 +10,7 @@
 
 import type { SessionManager } from "@caupulican/pi-agent-core/node";
 import { getProcessMemoryMb } from "../utils/process-memory.ts";
-import type { EvidenceBundle, GateOutcome, LearningDecision, WorkerResult } from "./autonomy/contracts.ts";
+import type { EvidenceBundle, GateOutcome, LearningDecision, WorkerClaim } from "./autonomy/contracts.ts";
 import { getLaneRecordSnapshots } from "./autonomy/session-lane-record.ts";
 import type {
 	AutonomyDiagnosticSnapshot,
@@ -50,8 +50,8 @@ export interface AutonomyTelemetryDeps {
 	getActiveLaneCount(): number;
 	/** Research evidence bundles across the complete session tree, including sibling branches. */
 	getSessionEvidenceBundleHistory(): EvidenceBundle[];
-	/** Worker-delegation results across the complete session tree, including sibling branches. */
-	getSessionWorkerResultHistory(): WorkerResult[];
+	/** Worker-delegation claims across the complete session tree, including sibling branches. */
+	getSessionWorkerClaimHistory(): WorkerClaim[];
 	/** Learning decisions across the complete session tree, including sibling branches. */
 	getSessionLearningDecisionHistory(): LearningDecision[];
 	/** Learning audit records recorded this session. */
@@ -260,15 +260,15 @@ export class AutonomyTelemetry {
 				metadata: { costUsd: record.costUsd, startedAt: record.startedAt, completedAt: record.completedAt },
 			});
 		}
-		const workerResults = this.deps.getSessionWorkerResultHistory();
-		for (const result of workerResults.slice(-maxEntriesPerFamily)) {
+		const workerClaims = this.deps.getSessionWorkerClaimHistory();
+		for (const claim of workerClaims.slice(-maxEntriesPerFamily)) {
 			delegationEntries.push({
-				title: `Worker ${result.requestId} (${result.status})`,
-				summary: result.summary,
+				title: `Worker ${claim.requestId} (${claim.status})`,
+				summary: claim.summary,
 				metadata: {
-					changedFileCount: result.changedFiles.length,
-					blockerCount: result.blockers?.length ?? 0,
-					usageReportId: result.usageReportId,
+					changedFileCount: claim.changedFiles.length,
+					blockerCount: claim.blockers?.length ?? 0,
+					usageReportId: claim.usageReportId,
 				},
 			});
 		}

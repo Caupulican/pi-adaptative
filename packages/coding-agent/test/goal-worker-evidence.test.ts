@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import type { WorkerResult } from "../src/core/autonomy/contracts.ts";
+import type { WorkerClaim } from "../src/core/autonomy/contracts.ts";
 import type { LaneRecord } from "../src/core/autonomy/lane-tracker.ts";
 import type { ExtensionContext } from "../src/core/extensions/types.ts";
 import {
@@ -36,7 +36,7 @@ function laneRecord(overrides: Partial<LaneRecord> = {}): LaneRecord {
 	return { laneId: "lane-1", type: "worker", status: "succeeded", ...overrides };
 }
 
-function workerResult(overrides: Partial<WorkerResult> = {}): WorkerResult {
+function workerClaim(overrides: Partial<WorkerClaim> = {}): WorkerClaim {
 	return { requestId: "lane-1", status: "completed", summary: "done", changedFiles: [], ...overrides };
 }
 
@@ -51,7 +51,7 @@ describe("goal evidence kind 'worker' verification", () => {
 	it("verifies true for a laneId mapping to a reviewed, completed worker result", async () => {
 		const { run, getState } = createProducer({
 			getLaneRecords: () => [laneRecord()],
-			getWorkerResultSnapshots: () => [workerResult({ parentReviewRequired: false })],
+			getWorkerClaimSnapshots: () => [workerClaim({ parentReviewRequired: false })],
 		});
 
 		await run({ action: "start", goalId: "g1", userGoal: "Ship it" });
@@ -69,8 +69,8 @@ describe("goal evidence kind 'worker' verification", () => {
 	it("verifies true when parentReviewRequired is true but the mutation has been reviewed", async () => {
 		const { run, getState } = createProducer({
 			getLaneRecords: () => [laneRecord()],
-			getWorkerResultSnapshots: () => [
-				workerResult({ parentReviewRequired: true, parentReviewedAt: "2026-01-01T00:00:00.000Z" }),
+			getWorkerClaimSnapshots: () => [
+				workerClaim({ parentReviewRequired: true, parentReviewedAt: "2026-01-01T00:00:00.000Z" }),
 			],
 		});
 
@@ -83,7 +83,7 @@ describe("goal evidence kind 'worker' verification", () => {
 	it("verifies false for an UNREVIEWED worker mutation (parentReviewRequired && no parentReviewedAt)", async () => {
 		const { run, getState } = createProducer({
 			getLaneRecords: () => [laneRecord()],
-			getWorkerResultSnapshots: () => [workerResult({ parentReviewRequired: true })],
+			getWorkerClaimSnapshots: () => [workerClaim({ parentReviewRequired: true })],
 		});
 
 		await run({ action: "start", goalId: "g1", userGoal: "Ship it" });
@@ -101,7 +101,7 @@ describe("goal evidence kind 'worker' verification", () => {
 	it("an unreviewed worker completion cannot ungate 'complete' through the existing gate", async () => {
 		const { run, getState } = createProducer({
 			getLaneRecords: () => [laneRecord()],
-			getWorkerResultSnapshots: () => [workerResult({ parentReviewRequired: true })],
+			getWorkerClaimSnapshots: () => [workerClaim({ parentReviewRequired: true })],
 		});
 
 		await run({ action: "start", goalId: "g1", userGoal: "Ship it" });
@@ -123,7 +123,7 @@ describe("goal evidence kind 'worker' verification", () => {
 	it("a reviewed, passing worker completion DOES satisfy the existing 'complete' gate", async () => {
 		const { run, getState } = createProducer({
 			getLaneRecords: () => [laneRecord()],
-			getWorkerResultSnapshots: () => [workerResult({ parentReviewRequired: false })],
+			getWorkerClaimSnapshots: () => [workerClaim({ parentReviewRequired: false })],
 		});
 
 		await run({ action: "start", goalId: "g1", userGoal: "Ship it" });
@@ -145,7 +145,7 @@ describe("goal evidence kind 'worker' verification", () => {
 	it("verifies false when the laneId has no matching lane record", async () => {
 		const { run, getState } = createProducer({
 			getLaneRecords: () => [],
-			getWorkerResultSnapshots: () => [workerResult()],
+			getWorkerClaimSnapshots: () => [workerClaim()],
 		});
 
 		await run({ action: "start", goalId: "g1", userGoal: "Ship it" });
@@ -157,7 +157,7 @@ describe("goal evidence kind 'worker' verification", () => {
 	it("verifies false when the lane exists but has no persisted worker result yet", async () => {
 		const { run, getState } = createProducer({
 			getLaneRecords: () => [laneRecord({ status: "running" })],
-			getWorkerResultSnapshots: () => [],
+			getWorkerClaimSnapshots: () => [],
 		});
 
 		await run({ action: "start", goalId: "g1", userGoal: "Ship it" });
@@ -169,7 +169,7 @@ describe("goal evidence kind 'worker' verification", () => {
 	it("verifies false when the worker result is not a passing completion (e.g. failed)", async () => {
 		const { run, getState } = createProducer({
 			getLaneRecords: () => [laneRecord({ status: "failed" })],
-			getWorkerResultSnapshots: () => [workerResult({ status: "failed", parentReviewRequired: false })],
+			getWorkerClaimSnapshots: () => [workerClaim({ status: "failed", parentReviewRequired: false })],
 		});
 
 		await run({ action: "start", goalId: "g1", userGoal: "Ship it" });
@@ -178,7 +178,7 @@ describe("goal evidence kind 'worker' verification", () => {
 		expect(getState()?.evidence.find((e) => e.id === "e1")?.verified).toBe(false);
 	});
 
-	it("verifies false (not undefined) when getLaneRecords/getWorkerResultSnapshots are not wired at all", async () => {
+	it("verifies false when lane and worker-claim accessors are not wired", async () => {
 		const { run, getState } = createProducer();
 
 		await run({ action: "start", goalId: "g1", userGoal: "Ship it" });
