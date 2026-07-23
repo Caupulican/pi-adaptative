@@ -6,6 +6,7 @@ import { buildPiResumeLaunchSpec } from "../src/core/orchestration/agent-resume.
 import { ORCHESTRATION_SCHEMA_VERSION, type WorkerResultContract } from "../src/core/orchestration/contracts.ts";
 import { OrchestrationEventStore } from "../src/core/orchestration/event-store.ts";
 import { DurableTaskRuntime, DurableTaskRuntimeError } from "../src/core/orchestration/task-runtime.ts";
+import { buildResumablePiAgentWakePrompt } from "../src/core/process-matrix/resume-launcher.ts";
 
 interface Harness {
 	agentDir: string;
@@ -220,6 +221,90 @@ describe("DurableTaskRuntime", () => {
 		expect(runtime.getSnapshot().objectives[objective.objectiveId]?.objective.status).toBe("completed");
 	});
 
+	it("reconciles an implementation only after a separate verifier attempt records trusted review evidence", () => {
+		const { runtime } = createHarness();
+		const objective = runtime.createObjective({
+			objectiveId: "objective-verification",
+			title: "Verify independently",
+			description: "Keep implementation blocked until a verifier accepts it",
+			acceptanceCriteria: [{ id: "criterion-1", description: "Implementation is proven", required: true }],
+		});
+		const implementation = runtime.createTask({
+			taskId: "task-implementation",
+			objectiveId: objective.objectiveId,
+			title: "Implement",
+			description: "Implement the change",
+			role: "implementer",
+			acceptanceCriterionIds: ["criterion-1"],
+		});
+		const implementationAttempt = runtime.queueAttempt(implementation.taskId, dispatch(implementation.taskId));
+		const implementationLease = runtime.leaseAttempt(implementationAttempt.attemptId, "implementer", 60_000);
+		runtime.startAttempt(
+			implementationAttempt.attemptId,
+			implementationLease.leaseId,
+			implementationLease.fencingToken,
+		);
+		runtime.finishAttempt(
+			completedResult({
+				objectiveId: objective.objectiveId,
+				taskId: implementation.taskId,
+				attemptId: implementationAttempt.attemptId,
+				leaseId: implementationLease.leaseId,
+				fencingToken: implementationLease.fencingToken,
+				status: "partial",
+			}),
+		);
+		const verifier = runtime.createTask({
+			taskId: "task-verifier",
+			objectiveId: objective.objectiveId,
+			title: "Verify",
+			description: "Independently verify the implementation",
+			role: "verifier",
+			verificationOfTaskId: implementation.taskId,
+			acceptanceCriterionIds: ["criterion-1"],
+		});
+		const verifierAttempt = runtime.queueAttempt(verifier.taskId, dispatch(verifier.taskId, "verifier"));
+		const verifierLease = runtime.leaseAttempt(verifierAttempt.attemptId, "verifier", 60_000);
+		runtime.startAttempt(verifierAttempt.attemptId, verifierLease.leaseId, verifierLease.fencingToken);
+		runtime.finishAttempt(
+			completedResult({
+				objectiveId: objective.objectiveId,
+				taskId: verifier.taskId,
+				attemptId: verifierAttempt.attemptId,
+				leaseId: verifierLease.leaseId,
+				fencingToken: verifierLease.fencingToken,
+				evidence: [
+					{
+						evidenceId: "review-1",
+						criterionId: "criterion-1",
+						kind: "review",
+						summary: "Focused verification passed",
+						artifactIds: [],
+						trusted: true,
+						createdAt: new Date(T0).toISOString(),
+						metadata: { subjectTaskId: implementation.taskId },
+					},
+				],
+			}),
+		);
+
+		runtime.finishVerification({
+			taskId: implementation.taskId,
+			verifierTaskId: verifier.taskId,
+			verifierAttemptId: verifierAttempt.attemptId,
+			verdict: "accepted",
+			reasonCode: "independent_verification_accepted",
+		});
+		runtime.completeObjective(objective.objectiveId);
+
+		const snapshot = runtime.getSnapshot();
+		expect(snapshot.tasks[implementation.taskId]).toMatchObject({
+			task: { status: "completed" },
+			verification: { verifierTaskId: verifier.taskId, verdict: "accepted" },
+		});
+		expect(snapshot.objectives[objective.objectiveId]?.objective.status).toBe("completed");
+	});
+
 	it("recovers from restart, expires a lease, and fences the stale worker", () => {
 		const harness = createHarness();
 		const objective = harness.runtime.createObjective({
@@ -344,8 +429,19 @@ describe("DurableTaskRuntime", () => {
 				"explorer-fast",
 			],
 			cwd: "/repo/worktrees/explorer-1",
-			env: { PI_SESSION_ROLE: "worker" },
+			env: { PI_SESSION_ROLE: "worker", PI_ORCHESTRATION_AGENT_ID: "agent-explorer-1" },
 		});
+		expect(
+			buildResumablePiAgentWakePrompt({
+				lastCode: "resumable",
+				agentId: agent.agentId,
+				taskSummary: "Inspect repository",
+				resumeContext: {
+					...resuming.resumeContext,
+					contextPointers: [{ id: "artifact-1", kind: "artifact", uri: "artifact://inspection", readOnly: true }],
+				},
+			}),
+		).toContain(`Latest checkpoint: ${checkpoint.checkpointId}`);
 
 		const resumedLease = harness.runtime.resumeAttempt(attempt.attemptId, agent.agentId, 60_000);
 		expect(resumedLease.fencingToken).toBe(firstLease.fencingToken + 1);

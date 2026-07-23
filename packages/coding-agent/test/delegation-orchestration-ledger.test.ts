@@ -33,6 +33,7 @@ function profile(): OrchestrationProfile {
 		maxConcurrent: 1,
 		leaseTtlMs: 60_000,
 		requireIndependentVerification: true,
+		verificationProfileId: "verifier-fast",
 		createdAt: now,
 		updatedAt: now,
 	};

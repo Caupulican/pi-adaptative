@@ -150,6 +150,8 @@ export interface TaskContract {
 	dependsOn: readonly string[];
 	requiredCapabilities: readonly HarnessCapability[];
 	acceptanceCriterionIds: readonly string[];
+	/** Implementer task this verifier task must independently reconcile. */
+	verificationOfTaskId?: string;
 	riskBudget: RiskBudget;
 	createdAt: string;
 	updatedAt: string;
@@ -200,6 +202,8 @@ export interface OrchestrationProfile {
 	maxConcurrent: number;
 	leaseTtlMs: number;
 	requireIndependentVerification: boolean;
+	/** Owner-pinned verifier profile. Required when independent verification is enabled. */
+	verificationProfileId?: string;
 	/** Resolved origin retained for controlled improvements; omitted from authored JSON. */
 	sourcePath?: string;
 	createdAt: string;
@@ -347,6 +351,7 @@ export const ORCHESTRATION_EVENT_TYPES = [
 	"task.created",
 	"task.ready",
 	"task.failed",
+	"task.verification_finished",
 	"agent.registered",
 	"agent.suspended",
 	"agent.resume_requested",

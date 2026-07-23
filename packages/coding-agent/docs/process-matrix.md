@@ -33,9 +33,11 @@ silently repurposes anything. Instead, for each orphan, **interactively**:
 If the worker's own process is dead and its resumable payload contains a Pi session context, the
 first prompt offers to resume that same logical agent. Acceptance launches the exact persisted
 session with its agent ID, cwd, worktree, orchestration profile, resource pointers, and bounded wake
-task. The resumed process overwrites the same `<role>-<sessionId>` matrix entry and reports its
-terminal process state through an event-driven parent notification. A still-live orphan follows the
-adopt/cleanup flow below.
+task. The direct-argv launch reopens the same Pi session, carries the stable logical-agent ID in
+`PI_ORCHESTRATION_AGENT_ID`, and names the latest checkpoint plus bounded context pointers in the wake
+prompt instead of copying a second transcript. The resumed process overwrites the same
+`<role>-<sessionId>` matrix entry and reports its terminal process state through an event-driven
+parent notification. A still-live orphan follows the adopt/cleanup flow below.
 
 1. Ask: *"adopt worker `<entryId>` (lane `<laneKey>`)?"* Yes → this session becomes the worker's
    new parent (an adoption grant is written into the worker's own entry).

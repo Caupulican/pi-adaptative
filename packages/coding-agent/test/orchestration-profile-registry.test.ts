@@ -39,7 +39,7 @@ function profile(overrides: Partial<OrchestrationProfile> = {}): OrchestrationPr
 		budget: { maxCostUsd: 0.25, maxToolCalls: 20, maxWallClockMs: 120_000 },
 		maxConcurrent: 4,
 		leaseTtlMs: 180_000,
-		requireIndependentVerification: true,
+		requireIndependentVerification: false,
 		createdAt: now,
 		updatedAt: now,
 		...overrides,
@@ -153,6 +153,38 @@ describe("OrchestrationProfileRegistry", () => {
 		expect(
 			() => new OrchestrationProfileRegistry([{ ...architect, dispatchProfileIds: ["missing"] }, worker]),
 		).toThrow("dispatches missing profile");
+	});
+
+	it("requires an owner-pinned verifier and requires architects to authorize the complete chain", () => {
+		const worker = profile({
+			profileId: "checked-worker",
+			requireIndependentVerification: true,
+			verificationProfileId: "verifier-fast",
+		});
+		const verifier = profile({ profileId: "verifier-fast", role: "verifier" });
+		expect(() => new OrchestrationProfileRegistry([worker])).toThrow("requires missing verifier profile");
+		expect(new OrchestrationProfileRegistry([worker, verifier]).get(worker.profileId)).toMatchObject({
+			verificationProfileId: verifier.profileId,
+		});
+
+		const { executionPolicy: _executionPolicy, ...base } = profile();
+		const architect: OrchestrationProfile = {
+			...base,
+			profileId: "architect-verification",
+			role: "orchestrator",
+			capabilityCeiling: ["workflow.delegate"],
+			toolNames: ["delegate", "delegate_status"],
+			resourceProfileNames: [],
+			dispatchProfileIds: [worker.profileId],
+		};
+		expect(() => new OrchestrationProfileRegistry([architect, worker, verifier])).toThrow("but not its verifier");
+		expect(
+			new OrchestrationProfileRegistry([
+				{ ...architect, dispatchProfileIds: [worker.profileId, verifier.profileId] },
+				worker,
+				verifier,
+			]).get(architect.profileId)?.dispatchProfileIds,
+		).toEqual([worker.profileId, verifier.profileId]);
 	});
 
 	it("builds dispatch solely from the selected profile", () => {

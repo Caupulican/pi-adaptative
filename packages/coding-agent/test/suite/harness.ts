@@ -79,6 +79,7 @@ export interface HarnessOptions {
 	orchestrationProfile?: OrchestrationProfile;
 	/** Owner-authored profile used by delegate calls; independent from the foreground profile. */
 	workerOrchestrationProfile?: OrchestrationProfile;
+	additionalOrchestrationProfiles?: readonly OrchestrationProfile[];
 }
 
 export interface Harness {
@@ -152,6 +153,9 @@ export async function createHarness(options: HarnessOptions = {}): Promise<Harne
 		options.workerOrchestrationProfile ?? defaultOrchestrationProfile,
 		"global",
 	);
+	for (const profile of options.additionalOrchestrationProfiles ?? []) {
+		new OrchestrationProfileStore({ agentDir: tempDir, cwd: tempDir, projectTrusted: true }).save(profile, "global");
+	}
 	if (options.orchestrationProfile) {
 		new OrchestrationProfileStore({ agentDir: tempDir, cwd: tempDir, projectTrusted: true }).save(
 			options.orchestrationProfile,

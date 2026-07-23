@@ -1,4 +1,4 @@
-import type { LaneRecord, LaneTerminalStatus } from "../autonomy/lane-tracker.ts";
+import type { LaneRecord } from "../autonomy/lane-tracker.ts";
 import type { WorkerResultContract } from "../orchestration/contracts.ts";
 import {
 	DelegationOrchestrationLedger,
@@ -6,54 +6,28 @@ import {
 	type StartedDelegationAttempt,
 } from "../orchestration/delegation-ledger.ts";
 import type { AttemptRuntimeState, TaskRuntimeProjection } from "../orchestration/task-runtime.ts";
+import {
+	ACTIVE_WORKER_ATTEMPT_STATUSES,
+	projectWorkerLaneRecord,
+	selectedWorkerAttempt,
+} from "./worker-lane-projection.ts";
 
-const ACTIVE_ATTEMPT_STATUSES = new Set(["queued", "leased", "running"]);
-
-function terminalStatus(attempt: AttemptRuntimeState): LaneTerminalStatus {
-	if (attempt.status === "completed") return "succeeded";
-	if (attempt.status === "cancelled") return "canceled";
-	const reasonCode = attempt.result?.reasonCode ?? attempt.reasonCode ?? "";
-	if (reasonCode.includes("budget")) return "budget_exhausted";
-	if (reasonCode.includes("timeout")) return "timeout";
-	return "failed";
-}
-
-function selectedAttempt(snapshot: TaskRuntimeProjection, taskId: string): AttemptRuntimeState | undefined {
-	const task = snapshot.tasks[taskId];
-	if (!task) return undefined;
-	const attempts = task.attemptIds.map((attemptId) => snapshot.attempts[attemptId]).filter(Boolean);
-	return (
-		[...attempts].reverse().find((attempt) => attempt && ACTIVE_ATTEMPT_STATUSES.has(attempt.status)) ??
-		attempts.at(-1)
-	);
-}
-
-function projectWorkerRecord(snapshot: TaskRuntimeProjection, taskId: string): LaneRecord | undefined {
-	const task = snapshot.tasks[taskId];
-	const attempt = selectedAttempt(snapshot, taskId);
-	if (!task || !attempt) return undefined;
-	const objective = snapshot.objectives[task.task.objectiveId];
-	const status =
-		attempt.status === "queued"
-			? "queued"
-			: attempt.status === "leased" || attempt.status === "running"
-				? "running"
-				: terminalStatus(attempt);
-	const reasonCode = attempt.result?.reasonCode ?? attempt.reasonCode;
-	const goalId = objective?.objective.objectiveId.startsWith("goal:")
-		? objective.objective.objectiveId.slice("goal:".length)
-		: undefined;
-	return {
-		laneId: taskId,
-		type: "worker",
-		status,
-		...(reasonCode ? { reasonCode } : {}),
-		...(attempt.status !== "queued" ? { startedAt: attempt.createdAt } : {}),
-		...(ACTIVE_ATTEMPT_STATUSES.has(attempt.status) ? {} : { completedAt: attempt.updatedAt }),
-		...(attempt.result?.usage.costUsd !== undefined ? { costUsd: attempt.result.usage.costUsd } : {}),
-		...(goalId ? { goalId } : {}),
-	};
-}
+export type PendingVerificationRecovery =
+	| {
+			action: "dispatch";
+			subjectTaskId: string;
+			implementationProfileId: string;
+			summary: string;
+			artifactUris: readonly string[];
+	  }
+	| {
+			action: "reconcile";
+			subjectTaskId: string;
+			verifierTaskId: string;
+			verifierAttemptId: string;
+			verdict: "accepted" | "rejected" | "inconclusive";
+			reasonCode: string;
+	  };
 
 /**
  * Sole owner of in-process worker lifecycle state. LaneRecord is a compatibility/UI projection;
@@ -95,12 +69,32 @@ export class WorkerLifecycle {
 		this.ledger.runtime.bindAttemptGrant(attemptId, grantId);
 	}
 
-	finish(result: WorkerResultContract): LaneRecord {
+	finish(result: WorkerResultContract, options: { notify?: boolean } = {}): LaneRecord {
 		this.ledger.runtime.finishAttempt(result);
 		const record = this.getRecord(result.taskId);
 		if (!record) throw new Error(`Durable worker '${result.taskId}' was not projected after completion.`);
-		this.enqueueTerminalNotification(record);
+		if (options.notify !== false) this.enqueueTerminalNotification(record);
 		return record;
+	}
+
+	reconcileVerification(args: {
+		subjectTaskId: string;
+		verifierTaskId: string;
+		verifierAttemptId: string;
+		verdict: "accepted" | "rejected" | "inconclusive";
+		reasonCode: string;
+	}): LaneRecord {
+		this.ledger.runtime.finishVerification({
+			taskId: args.subjectTaskId,
+			verifierTaskId: args.verifierTaskId,
+			verifierAttemptId: args.verifierAttemptId,
+			verdict: args.verdict,
+			reasonCode: args.reasonCode,
+		});
+		const subject = this.getRecord(args.subjectTaskId);
+		if (!subject) throw new Error(`Verified worker '${args.subjectTaskId}' was not projected.`);
+		this.enqueueTerminalNotification(subject);
+		return subject;
 	}
 
 	cancel(laneId: string, reasonCode: string): LaneRecord | undefined {
@@ -112,33 +106,104 @@ export class WorkerLifecycle {
 		return record;
 	}
 
-	recoverQueued(): Array<{ record: LaneRecord; attempt: AttemptRuntimeState }> {
+	recoverQueued(): Array<{
+		record: LaneRecord;
+		attempt: AttemptRuntimeState;
+		verificationOfTaskId?: string;
+	}> {
 		return this.ledger.recoverQueuedDispatches().flatMap((attempt) => {
 			const record = this.getRecord(attempt.taskId);
-			return record ? [{ record, attempt }] : [];
+			const task = this.ledger.runtime.getSnapshot().tasks[attempt.taskId]?.task;
+			return record
+				? [
+						{
+							record,
+							attempt,
+							...(task?.verificationOfTaskId ? { verificationOfTaskId: task.verificationOfTaskId } : {}),
+						},
+					]
+				: [];
 		});
+	}
+
+	/** Close crash windows between implementation completion, verifier dispatch, and reconciliation. */
+	getPendingVerificationRecoveries(): PendingVerificationRecovery[] {
+		const snapshot = this.ledger.runtime.getSnapshot();
+		return Object.values(snapshot.tasks).flatMap<PendingVerificationRecovery>((subject) => {
+			if (subject.verification) return [];
+			const implementationAttempt = selectedWorkerAttempt(snapshot, subject.task.taskId);
+			if (implementationAttempt?.result?.nextAction !== "independent_verification_required") return [];
+			const verifier = Object.values(snapshot.tasks)
+				.filter((candidate) => candidate.task.verificationOfTaskId === subject.task.taskId)
+				.sort((left, right) => left.task.createdAt.localeCompare(right.task.createdAt))
+				.at(-1);
+			if (!verifier) {
+				return [
+					{
+						action: "dispatch" as const,
+						subjectTaskId: subject.task.taskId,
+						implementationProfileId: implementationAttempt.dispatch.profileId,
+						summary: implementationAttempt.result.summary,
+						artifactUris: implementationAttempt.result.artifacts.map((artifact) => artifact.uri),
+					},
+				];
+			}
+			const verifierAttempt = selectedWorkerAttempt(snapshot, verifier.task.taskId);
+			if (!verifierAttempt || ACTIVE_WORKER_ATTEMPT_STATUSES.has(verifierAttempt.status)) return [];
+			const review = verifierAttempt.result?.evidence.find(
+				(evidence) => evidence.kind === "review" && evidence.metadata?.subjectTaskId === subject.task.taskId,
+			);
+			const verdictValue = review?.metadata?.verdict;
+			const verdict =
+				review?.trusted && (verdictValue === "accepted" || verdictValue === "rejected")
+					? verdictValue
+					: "inconclusive";
+			const reasonCodesValue = review?.metadata?.reasonCodes;
+			const reasonCodes = Array.isArray(reasonCodesValue)
+				? reasonCodesValue.filter((reasonCode): reasonCode is string => typeof reasonCode === "string")
+				: [];
+			return [
+				{
+					action: "reconcile" as const,
+					subjectTaskId: subject.task.taskId,
+					verifierTaskId: verifier.task.taskId,
+					verifierAttemptId: verifierAttempt.attemptId,
+					verdict,
+					reasonCode:
+						verdict === "accepted"
+							? "independent_verification_accepted"
+							: verdict === "rejected"
+								? `independent_verification_rejected:${reasonCodes.join(",") || "unspecified"}`
+								: `independent_verification_inconclusive:${verifierAttempt.reasonCode ?? verifierAttempt.result?.reasonCode ?? "interrupted"}`,
+				},
+			];
+		});
+	}
+
+	getTask(taskId: string): TaskRuntimeProjection["tasks"][string] | undefined {
+		return this.ledger.runtime.getSnapshot().tasks[taskId];
 	}
 
 	getRecords(): LaneRecord[] {
 		const snapshot = this.ledger.runtime.getSnapshot();
 		return Object.keys(snapshot.tasks).flatMap((taskId) => {
-			const record = projectWorkerRecord(snapshot, taskId);
+			const record = projectWorkerLaneRecord(snapshot, taskId);
 			return record ? [record] : [];
 		});
 	}
 
 	getRecord(laneId: string): LaneRecord | undefined {
-		return projectWorkerRecord(this.ledger.runtime.getSnapshot(), laneId);
+		return projectWorkerLaneRecord(this.ledger.runtime.getSnapshot(), laneId);
 	}
 
 	getActiveAttempt(laneId: string): AttemptRuntimeState | undefined {
-		return selectedAttempt(this.ledger.runtime.getSnapshot(), laneId);
+		return selectedWorkerAttempt(this.ledger.runtime.getSnapshot(), laneId);
 	}
 
 	getRunningCount(profileId?: string): number {
 		const snapshot = this.ledger.runtime.getSnapshot();
 		return Object.keys(snapshot.tasks).filter((taskId) => {
-			const attempt = selectedAttempt(snapshot, taskId);
+			const attempt = selectedWorkerAttempt(snapshot, taskId);
 			return attempt?.status === "running" && (!profileId || attempt.dispatch.profileId === profileId);
 		}).length;
 	}
@@ -150,7 +215,7 @@ export class WorkerLifecycle {
 			if (notification.status !== "pending" || !notification.attemptId) return [];
 			const attempt = snapshot.attempts[notification.attemptId];
 			if (!attempt) return [];
-			const record = projectWorkerRecord(snapshot, attempt.taskId);
+			const record = projectWorkerLaneRecord(snapshot, attempt.taskId);
 			if (!record || record.status === "queued" || record.status === "running") return [];
 			return [{ notificationId: notification.notificationId, record }];
 		});
@@ -176,7 +241,7 @@ export class WorkerLifecycle {
 	private ensureTerminalNotifications(): void {
 		const snapshot = this.ledger.runtime.getSnapshot();
 		for (const taskId of Object.keys(snapshot.tasks)) {
-			const record = projectWorkerRecord(snapshot, taskId);
+			const record = projectWorkerLaneRecord(snapshot, taskId);
 			if (record && record.status !== "queued" && record.status !== "running") {
 				this.enqueueTerminalNotification(record);
 			}
@@ -185,10 +250,11 @@ export class WorkerLifecycle {
 
 	private enqueueTerminalNotification(record: LaneRecord): void {
 		const attempt = this.getActiveAttempt(record.laneId);
-		if (!attempt || ACTIVE_ATTEMPT_STATUSES.has(attempt.status)) return;
+		if (!attempt || ACTIVE_WORKER_ATTEMPT_STATUSES.has(attempt.status)) return;
 		const snapshot = this.ledger.runtime.getSnapshot();
 		const task = snapshot.tasks[attempt.taskId];
 		if (!task) return;
+		if (attempt.result?.nextAction === "independent_verification_required" && !task.verification) return;
 		this.ledger.runtime.enqueueNotification({
 			notificationId: `worker-terminal:${attempt.attemptId}`,
 			objectiveId: task.task.objectiveId,
@@ -199,7 +265,7 @@ export class WorkerLifecycle {
 
 	private requireActiveAttempt(laneId: string): AttemptRuntimeState {
 		const attempt = this.getActiveAttempt(laneId);
-		if (!attempt || !ACTIVE_ATTEMPT_STATUSES.has(attempt.status)) {
+		if (!attempt || !ACTIVE_WORKER_ATTEMPT_STATUSES.has(attempt.status)) {
 			throw new Error(`Durable worker '${laneId}' has no active attempt.`);
 		}
 		return attempt;

@@ -85,12 +85,32 @@ export class OrchestrationProfileStore {
 					const target = available.get(profileId);
 					return !target || target.role === "orchestrator";
 				});
-				if (!invalidTarget) return true;
+				const verifier = profile.verificationProfileId ? available.get(profile.verificationProfileId) : undefined;
+				const invalidVerifier =
+					profile.verificationProfileId && verifier?.role !== "verifier"
+						? profile.verificationProfileId
+						: undefined;
+				const unauthorizedVerifier =
+					profile.role === "orchestrator"
+						? profile.dispatchProfileIds
+								.map((profileId) => available.get(profileId))
+								.find(
+									(target) =>
+										target?.verificationProfileId &&
+										!profile.dispatchProfileIds.includes(target.verificationProfileId),
+								)
+						: undefined;
+				if (!invalidTarget && !invalidVerifier && !unauthorizedVerifier) return true;
 				removed = true;
+				const message = invalidTarget
+					? `Dispatch target '${invalidTarget}' is missing or is another orchestrator.`
+					: invalidVerifier
+						? `Verifier target '${invalidVerifier}' is missing or is not a verifier.`
+						: `Dispatched profile '${unauthorizedVerifier?.profileId}' requires verifier '${unauthorizedVerifier?.verificationProfileId}', which this orchestrator does not authorize.`;
 				diagnostics.push({
 					scope: profile.sourcePath?.startsWith(this.directory("project")) ? "project" : "global",
 					path: profile.sourcePath ?? profile.profileId,
-					message: `Dispatch target '${invalidTarget}' is missing or is another orchestrator.`,
+					message,
 				});
 				return false;
 			});

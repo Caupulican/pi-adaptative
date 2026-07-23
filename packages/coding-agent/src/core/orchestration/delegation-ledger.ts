@@ -14,6 +14,7 @@ export interface PrepareDelegationInput {
 	profile: OrchestrationProfile;
 	requiredCapabilities: readonly HarnessCapability[];
 	goal?: { goalId: string; description: string };
+	verificationOfTaskId?: string;
 }
 
 export interface StartedDelegationAttempt {
@@ -48,7 +49,15 @@ export class DelegationOrchestrationLedger {
 
 	prepare(input: PrepareDelegationInput): AttemptRuntimeState {
 		let snapshot = this.runtime.getSnapshot();
-		const objectiveId = input.goal ? `goal:${input.goal.goalId}` : `session:${this.sessionId}`;
+		const existingVerificationSubject = input.verificationOfTaskId
+			? snapshot.tasks[input.verificationOfTaskId]
+			: undefined;
+		if (input.verificationOfTaskId && !existingVerificationSubject) {
+			throw new DurableTaskRuntimeError(`Unknown verification subject '${input.verificationOfTaskId}'.`);
+		}
+		const objectiveId =
+			existingVerificationSubject?.task.objectiveId ??
+			(input.goal ? `goal:${input.goal.goalId}` : `session:${this.sessionId}`);
 		if (!snapshot.objectives[objectiveId]) {
 			this.runtime.createObjective({
 				objectiveId,
@@ -59,6 +68,9 @@ export class DelegationOrchestrationLedger {
 		}
 
 		if (!snapshot.tasks[input.laneId]) {
+			const verificationSubject = input.verificationOfTaskId
+				? snapshot.tasks[input.verificationOfTaskId]
+				: undefined;
 			this.runtime.createTask({
 				taskId: input.laneId,
 				objectiveId,
@@ -67,6 +79,12 @@ export class DelegationOrchestrationLedger {
 				role: input.profile.role,
 				requiredCapabilities: input.requiredCapabilities,
 				riskBudget: input.profile.budget,
+				...(input.verificationOfTaskId
+					? {
+							verificationOfTaskId: input.verificationOfTaskId,
+							acceptanceCriterionIds: verificationSubject?.task.acceptanceCriterionIds ?? [],
+						}
+					: {}),
 			});
 			snapshot = this.runtime.getSnapshot();
 		}

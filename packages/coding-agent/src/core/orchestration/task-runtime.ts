@@ -30,6 +30,13 @@ export interface ObjectiveRuntimeState {
 export interface TaskRuntimeState {
 	task: TaskContract;
 	attemptIds: readonly string[];
+	verification?: {
+		verifierTaskId: string;
+		verifierAttemptId: string;
+		verdict: "accepted" | "rejected" | "inconclusive";
+		reasonCode: string;
+		completedAt: string;
+	};
 }
 
 export interface AttemptRuntimeState {
@@ -85,6 +92,7 @@ export interface CreateTaskInput {
 	dependsOn?: readonly string[];
 	requiredCapabilities?: TaskContract["requiredCapabilities"];
 	acceptanceCriterionIds?: readonly string[];
+	verificationOfTaskId?: string;
 	riskBudget?: RiskBudget;
 }
 
@@ -307,6 +315,38 @@ export function reduceOrchestrationEvent(
 			const current = tasks[taskId];
 			if (!current) throw new DurableTaskRuntimeError(`Unknown task '${taskId}'.`);
 			tasks[taskId] = { ...current, task: { ...current.task, status: "failed", updatedAt: event.occurredAt } };
+			break;
+		}
+		case "task.verification_finished": {
+			const taskId = string(event.payload.taskId, "task.verification_finished.taskId");
+			const verifierTaskId = string(event.payload.verifierTaskId, "task.verification_finished.verifierTaskId");
+			const verifierAttemptId = string(
+				event.payload.verifierAttemptId,
+				"task.verification_finished.verifierAttemptId",
+			);
+			const verdict = string(event.payload.verdict, "task.verification_finished.verdict");
+			if (verdict !== "accepted" && verdict !== "rejected" && verdict !== "inconclusive") {
+				throw new DurableTaskRuntimeError(`Unknown verification verdict '${verdict}'.`);
+			}
+			const current = tasks[taskId];
+			if (!current) throw new DurableTaskRuntimeError(`Unknown task '${taskId}'.`);
+			const reasonCode = string(event.payload.reasonCode, "task.verification_finished.reasonCode");
+			tasks[taskId] = {
+				...current,
+				task: {
+					...current.task,
+					status: verdict === "accepted" ? "completed" : "blocked",
+					updatedAt: event.occurredAt,
+				},
+				verification: {
+					verifierTaskId,
+					verifierAttemptId,
+					verdict,
+					reasonCode,
+					completedAt: event.occurredAt,
+				},
+			};
+			refreshReadyTasks(state, current.task.objectiveId, event.occurredAt);
 			break;
 		}
 		case "agent.registered": {
@@ -674,6 +714,20 @@ export class DurableTaskRuntime {
 				);
 			}
 		}
+		if (input.verificationOfTaskId) {
+			const subject = this.state.tasks[input.verificationOfTaskId];
+			if (!subject || subject.task.objectiveId !== input.objectiveId) {
+				throw new DurableTaskRuntimeError(
+					`Verification subject '${input.verificationOfTaskId}' is not in objective '${input.objectiveId}'.`,
+				);
+			}
+			if (input.role !== "verifier") {
+				throw new DurableTaskRuntimeError("Only verifier tasks may declare verificationOfTaskId.");
+			}
+			if (subject.task.role === "verifier") {
+				throw new DurableTaskRuntimeError("A verifier task cannot independently verify another verifier task.");
+			}
+		}
 		const now = this.nowIso();
 		const task: TaskContract = {
 			schemaVersion: ORCHESTRATION_SCHEMA_VERSION,
@@ -686,6 +740,7 @@ export class DurableTaskRuntime {
 			dependsOn,
 			requiredCapabilities: [...new Set(input.requiredCapabilities ?? [])],
 			acceptanceCriterionIds,
+			...(input.verificationOfTaskId ? { verificationOfTaskId: input.verificationOfTaskId } : {}),
 			riskBudget: { ...(input.riskBudget ?? {}) },
 			createdAt: now,
 			updatedAt: now,
@@ -856,6 +911,62 @@ export class DurableTaskRuntime {
 			payload: toJsonObject({ result }),
 		});
 		return structuredClone(this.state.attempts[result.attemptId]!);
+	}
+
+	finishVerification(args: {
+		taskId: string;
+		verifierTaskId: string;
+		verifierAttemptId: string;
+		verdict: "accepted" | "rejected" | "inconclusive";
+		reasonCode: string;
+	}): TaskRuntimeState {
+		this.refresh();
+		const subject = this.state.tasks[args.taskId];
+		const verifierTask = this.state.tasks[args.verifierTaskId];
+		const verifierAttempt = this.state.attempts[args.verifierAttemptId];
+		if (!subject) throw new DurableTaskRuntimeError(`Unknown verification subject '${args.taskId}'.`);
+		if (!verifierTask || verifierTask.task.verificationOfTaskId !== args.taskId) {
+			throw new DurableTaskRuntimeError(`Task '${args.verifierTaskId}' is not the verifier for '${args.taskId}'.`);
+		}
+		if (!verifierAttempt || verifierAttempt.taskId !== args.verifierTaskId) {
+			throw new DurableTaskRuntimeError(`Unknown verifier attempt '${args.verifierAttemptId}'.`);
+		}
+		if (args.verdict === "inconclusive") {
+			if (
+				verifierAttempt.status === "queued" ||
+				verifierAttempt.status === "leased" ||
+				verifierAttempt.status === "running"
+			) {
+				throw new DurableTaskRuntimeError(`Verifier attempt '${args.verifierAttemptId}' is not terminal.`);
+			}
+		} else if (verifierAttempt.status !== "completed" || !verifierAttempt.result) {
+			throw new DurableTaskRuntimeError(`Verifier attempt '${args.verifierAttemptId}' is not completed.`);
+		}
+		if (subject.task.status !== "blocked") {
+			throw new DurableTaskRuntimeError(
+				`Verification subject '${args.taskId}' cannot reconcile from '${subject.task.status}'.`,
+			);
+		}
+		if (!args.reasonCode.trim()) throw new DurableTaskRuntimeError("Verification reason code is required.");
+		if (
+			args.verdict === "accepted" &&
+			!verifierAttempt.result?.evidence.some(
+				(evidence) =>
+					evidence.trusted && evidence.kind === "review" && evidence.metadata?.subjectTaskId === args.taskId,
+			)
+		) {
+			throw new DurableTaskRuntimeError(
+				"Accepted verification requires trusted review evidence for the subject task.",
+			);
+		}
+		this.commit({
+			type: "task.verification_finished",
+			aggregateId: args.taskId,
+			actor: "runtime",
+			idempotencyKey: `task-verification-finished:${args.taskId}:${args.verifierAttemptId}`,
+			payload: toJsonObject({ ...args, reasonCode: args.reasonCode.trim() }),
+		});
+		return structuredClone(this.state.tasks[args.taskId]!);
 	}
 
 	cancelAttempt(attemptId: string, reasonCode: string): AttemptRuntimeState {

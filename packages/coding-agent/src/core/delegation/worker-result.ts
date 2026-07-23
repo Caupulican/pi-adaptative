@@ -10,6 +10,9 @@ export function cloneWorkerResultForStorage(result: WorkerResult): WorkerResult 
 		changedFiles: [...result.changedFiles],
 		blockers: result.blockers ? [...result.blockers] : undefined,
 		evidence: result.evidence ? cloneEvidenceBundleForStorage(result.evidence) : undefined,
+		verification: result.verification
+			? { ...result.verification, reasonCodes: [...result.verification.reasonCodes] }
+			: undefined,
 	};
 }
 
@@ -45,6 +48,17 @@ export function isWorkerResult(value: unknown): value is WorkerResult {
 	if (obj.createdAt !== undefined && typeof obj.createdAt !== "string") return false;
 	if (obj.parentReviewRequired !== undefined && typeof obj.parentReviewRequired !== "boolean") return false;
 	if (obj.parentReviewedAt !== undefined && typeof obj.parentReviewedAt !== "string") return false;
+	if (obj.verification !== undefined) {
+		if (!isPlainRecord(obj.verification)) return false;
+		if (typeof obj.verification.subjectTaskId !== "string" || !obj.verification.subjectTaskId) return false;
+		if (obj.verification.verdict !== "accepted" && obj.verification.verdict !== "rejected") return false;
+		if (
+			!Array.isArray(obj.verification.reasonCodes) ||
+			!obj.verification.reasonCodes.every((reasonCode) => typeof reasonCode === "string" && reasonCode.length > 0)
+		) {
+			return false;
+		}
+	}
 
 	if (obj.evidence !== undefined && !isEvidenceBundle(obj.evidence)) return false;
 

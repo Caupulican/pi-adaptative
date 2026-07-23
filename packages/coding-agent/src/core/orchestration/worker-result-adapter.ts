@@ -41,6 +41,43 @@ function evidenceForLegacyResult(result: WorkerResult, createdAt: string): Evide
 	}));
 }
 
+function verificationEvidence(
+	result: WorkerResult,
+	accepted: boolean,
+	criterionIds: readonly string[],
+	createdAt: string,
+): EvidenceContract[] {
+	if (!result.verification) return [];
+	const trustedReview = accepted;
+	return [
+		{
+			evidenceId: "independent-review",
+			kind: "review",
+			summary: result.summary,
+			artifactIds: [],
+			trusted: trustedReview,
+			createdAt,
+			metadata: {
+				subjectTaskId: result.verification.subjectTaskId,
+				verdict: result.verification.verdict,
+				reasonCodes: [...result.verification.reasonCodes],
+			},
+		},
+		...criterionIds.map(
+			(criterionId, index): EvidenceContract => ({
+				evidenceId: `independent-review-criterion-${index + 1}`,
+				criterionId,
+				kind: "review",
+				summary: result.summary,
+				artifactIds: [],
+				trusted: trustedReview && result.verification?.verdict === "accepted",
+				createdAt,
+				metadata: { subjectTaskId: result.verification?.subjectTaskId ?? "" },
+			}),
+		),
+	];
+}
+
 export function adaptWorkerRunOutcome(args: {
 	handle: StartedDelegationAttempt;
 	outcome: WorkerRunOutcome;
@@ -51,6 +88,7 @@ export function adaptWorkerRunOutcome(args: {
 	wallClockMs: number;
 	toolCalls: number;
 	verificationRequired?: boolean;
+	verificationCriterionIds?: readonly string[];
 	createdAt?: string;
 }): WorkerResultContract {
 	return adaptWorkerResult({
@@ -74,6 +112,7 @@ export function adaptWorkerResult(args: {
 	wallClockMs: number;
 	toolCalls: number;
 	verificationRequired?: boolean;
+	verificationCriterionIds?: readonly string[];
 	reasonCode?: string;
 	createdAt?: string;
 }): WorkerResultContract {
@@ -101,7 +140,10 @@ export function adaptWorkerResult(args: {
 		reasonCode: args.reasonCode ?? `worker_${legacy.status}`,
 		summary: legacy.summary,
 		artifacts,
-		evidence: evidenceForLegacyResult(legacy, createdAt),
+		evidence: [
+			...evidenceForLegacyResult(legacy, createdAt),
+			...verificationEvidence(legacy, args.accepted, args.verificationCriterionIds ?? [], createdAt),
+		],
 		errors: blockers.map((message) => ({ code: "worker_blocker", message, retryable: false })),
 		...(args.verificationRequired
 			? { nextAction: "independent_verification_required" }

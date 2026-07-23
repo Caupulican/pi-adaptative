@@ -4,6 +4,7 @@ import {
 	ORCHESTRATION_SCHEMA_VERSION,
 	type OrchestrationProfile,
 	type OrchestrationThinkingLevel,
+	type WorkerRole,
 } from "../src/core/orchestration/contracts.ts";
 import { OrchestrationProfileStore } from "../src/core/orchestration/profile-store.ts";
 
@@ -15,13 +16,16 @@ export function createTestWorkerOrchestrationProfile(args: {
 	toolNames?: readonly string[];
 	resourceProfileNames?: readonly string[];
 	maxConcurrent?: number;
+	role?: WorkerRole;
+	requireIndependentVerification?: boolean;
+	verificationProfileId?: string;
 }): OrchestrationProfile {
 	const now = new Date().toISOString();
 	return {
 		schemaVersion: ORCHESTRATION_SCHEMA_VERSION,
 		profileId: args.profileId,
 		description: `Pinned ${args.model.id} test worker`,
-		role: "implementer",
+		role: args.role ?? "implementer",
 		modelPolicy: {
 			mode: "fixed",
 			candidates: [
@@ -44,7 +48,8 @@ export function createTestWorkerOrchestrationProfile(args: {
 		},
 		maxConcurrent: args.maxConcurrent ?? 1,
 		leaseTtlMs: 90_000,
-		requireIndependentVerification: false,
+		requireIndependentVerification: args.requireIndependentVerification ?? false,
+		...(args.verificationProfileId ? { verificationProfileId: args.verificationProfileId } : {}),
 		createdAt: now,
 		updatedAt: now,
 	};

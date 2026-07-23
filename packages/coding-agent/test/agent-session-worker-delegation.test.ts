@@ -37,6 +37,26 @@ function workerProfile(modelId: string, thinkingLevel: "off" | "low" = "off"): O
 	};
 }
 
+function verifiedWorkerProfiles(): {
+	implementationProfile: OrchestrationProfile;
+	verifierProfile: OrchestrationProfile;
+} {
+	return {
+		implementationProfile: {
+			...workerProfile("faux-1"),
+			profileId: "verified-worker",
+			requireIndependentVerification: true,
+			verificationProfileId: "verified-worker-review",
+		},
+		verifierProfile: {
+			...workerProfile("faux-1"),
+			profileId: "verified-worker-review",
+			role: "verifier",
+			description: "Pinned independent verifier",
+		},
+	};
+}
+
 describe("AgentSession worker delegation", () => {
 	it("constructs only the model and tool surface owned by the active orchestration profile", async () => {
 		const now = new Date().toISOString();
@@ -685,6 +705,113 @@ describe("AgentSession worker delegation", () => {
 			const serialized = JSON.stringify(harness.session.messages);
 			expect(serialized).not.toContain("UNTRUSTED");
 			expect(harness.getPendingResponseCount()).toBe(0);
+		} finally {
+			harness.cleanup();
+		}
+	});
+
+	it("automatically dispatches the owner-pinned verifier and reconciles the implementation", async () => {
+		const { implementationProfile, verifierProfile } = verifiedWorkerProfiles();
+		const harness = await createHarness({
+			workerOrchestrationProfile: implementationProfile,
+			additionalOrchestrationProfiles: [verifierProfile],
+		});
+		let resolveVerifier!: (message: AssistantMessage) => void;
+		const verifierCompletion = new Promise<AssistantMessage>((resolve) => {
+			resolveVerifier = resolve;
+		});
+		try {
+			harness.setResponses([
+				fauxAssistantMessage('{"summary":"implementation complete","findings":[]}'),
+				() => verifierCompletion,
+			]);
+
+			const run = await harness.session.runWorkerDelegationOnce({ instructions: "Implement and verify" });
+			if (!run.started || !run.record) throw new Error("Expected implementation worker to start");
+			const subjectLaneId = run.record.laneId;
+			expect(harness.session.getWorkerResultSnapshots()).toHaveLength(1);
+			expect(harness.session.getLaneRecords().find((record) => record.laneId === subjectLaneId)).toMatchObject({
+				status: "running",
+				reasonCode: "independent_verification_required",
+			});
+			expect(
+				harness.events.some(
+					(event) =>
+						event.type === "delegate_workers" &&
+						event.terminalSinceFlush.some((record) => record.laneId === subjectLaneId),
+				),
+			).toBe(false);
+
+			resolveVerifier(
+				fauxAssistantMessage(
+					'{"summary":"focused verification passed","status":"completed","verdict":"accepted","reasonCodes":["focused_checks_passed"],"findings":[]}',
+				),
+			);
+			await vi.waitFor(() => {
+				expect(harness.session.getWorkerResultSnapshots()).toHaveLength(2);
+				expect(harness.session.getLaneRecords().find((record) => record.laneId === subjectLaneId)).toMatchObject({
+					status: "succeeded",
+					reasonCode: "independent_verification_accepted",
+				});
+			});
+
+			const verifierResult = harness.session
+				.getWorkerResultSnapshots()
+				.find((result) => result.verification !== undefined);
+			expect(verifierResult?.verification).toEqual({
+				subjectTaskId: subjectLaneId,
+				verdict: "accepted",
+				reasonCodes: ["focused_checks_passed"],
+			});
+			expect(workerLaneRecords(harness)).toEqual(
+				expect.arrayContaining([
+					expect.objectContaining({ laneId: subjectLaneId, status: "succeeded" }),
+					expect.objectContaining({ type: "worker", status: "succeeded" }),
+				]),
+			);
+		} finally {
+			resolveVerifier(
+				fauxAssistantMessage(
+					'{"summary":"cleanup","status":"completed","verdict":"rejected","reasonCodes":["cleanup"],"findings":[]}',
+				),
+			);
+			harness.cleanup();
+		}
+	});
+
+	it("keeps the implementation blocked when the owner-pinned verifier rejects it", async () => {
+		const { implementationProfile, verifierProfile } = verifiedWorkerProfiles();
+		const harness = await createHarness({
+			workerOrchestrationProfile: implementationProfile,
+			additionalOrchestrationProfiles: [verifierProfile],
+		});
+		try {
+			harness.setResponses([
+				fauxAssistantMessage('{"summary":"implementation complete","findings":[]}'),
+				fauxAssistantMessage(
+					'{"summary":"focused verification failed","status":"completed","verdict":"rejected","reasonCodes":["focused_checks_failed"],"findings":[]}',
+				),
+			]);
+
+			const run = await harness.session.runWorkerDelegationOnce({ instructions: "Implement and verify" });
+			if (!run.started || !run.record) throw new Error("Expected implementation worker to start");
+			const subjectLaneId = run.record.laneId;
+			await vi.waitFor(() => {
+				expect(harness.session.getWorkerResultSnapshots()).toHaveLength(2);
+				expect(harness.session.getLaneRecords().find((record) => record.laneId === subjectLaneId)).toMatchObject({
+					status: "failed",
+					reasonCode: "independent_verification_rejected:focused_checks_failed",
+				});
+			});
+
+			expect(
+				harness.session.getWorkerResultSnapshots().find((result) => result.verification !== undefined)
+					?.verification,
+			).toEqual({
+				subjectTaskId: subjectLaneId,
+				verdict: "rejected",
+				reasonCodes: ["focused_checks_failed"],
+			});
 		} finally {
 			harness.cleanup();
 		}

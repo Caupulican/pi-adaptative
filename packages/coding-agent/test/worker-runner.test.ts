@@ -57,6 +57,7 @@ describe("parseWorkerOutput", () => {
 			blockers: [],
 			findings: [],
 			actions: [],
+			reasonCodes: [],
 		});
 
 		const blocked = parseWorkerOutput('{"summary":"Cannot proceed","status":"blocked","blockers":["Missing spec"]}');
@@ -74,6 +75,12 @@ describe("parseWorkerOutput", () => {
 		expect(parseWorkerOutput("no JSON here")).toBeUndefined();
 		expect(parseWorkerOutput('{"status":"completed"}')).toBeUndefined();
 		expect(parseWorkerOutput('{"summary":""}')).toBeUndefined();
+	});
+
+	it("parses the typed independent-verifier verdict", () => {
+		expect(
+			parseWorkerOutput('{"summary":"checks passed","verdict":"accepted","reasonCodes":["focused_checks_passed"]}'),
+		).toMatchObject({ verdict: "accepted", reasonCodes: ["focused_checks_passed"] });
 	});
 });
 
@@ -251,6 +258,37 @@ describe("runWorker", () => {
 		});
 		await runWorker(runnerOptions({ complete }));
 		expect(complete).toHaveBeenCalledOnce();
+	});
+
+	it("requires and returns a typed verifier decision without plain-text salvage", async () => {
+		const accepted = await runWorker(
+			runnerOptions({
+				verificationSubjectTaskId: "worker-subject",
+				complete: async () =>
+					completionOf(
+						'{"summary":"focused checks passed","verdict":"accepted","reasonCodes":["focused_checks_passed"]}',
+					),
+			}),
+		);
+		expect(accepted).toMatchObject({
+			accepted: true,
+			reasonCode: "verification_accepted",
+			result: {
+				verification: {
+					subjectTaskId: "worker-subject",
+					verdict: "accepted",
+					reasonCodes: ["focused_checks_passed"],
+				},
+			},
+		});
+
+		const invalid = await runWorker(
+			runnerOptions({
+				verificationSubjectTaskId: "worker-subject",
+				complete: async () => completionOf("looks good"),
+			}),
+		);
+		expect(invalid).toMatchObject({ reasonCode: "unparseable_output", result: { status: "failed" } });
 	});
 });
 

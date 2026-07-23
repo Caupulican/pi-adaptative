@@ -125,23 +125,20 @@ describe("worker terminal handoffs", () => {
 });
 
 describe("background lane disposal", () => {
-	it("terminalizes queued and running lanes instead of leaving orphaned active records", () => {
+	it("terminalizes queued and running research lanes instead of leaving orphaned active records", () => {
 		const controller = new BackgroundLaneController({} as never);
 		const internals = controller as unknown as {
 			_laneTracker: {
-				enqueue(args: { type: "worker" }): { laneId: string };
+				enqueue(args: { type: "research" }): { laneId: string };
 				start(args: { type: "research" }): { laneId: string };
 			};
-			_queuedWorkers: Map<string, { instructions: string }>;
 		};
-		const queued = internals._laneTracker.enqueue({ type: "worker" });
-		internals._queuedWorkers.set(queued.laneId, { instructions: "queued work" });
+		const queued = internals._laneTracker.enqueue({ type: "research" });
 		internals._laneTracker.start({ type: "research" });
 
 		controller.abortInFlightLanes();
 
 		expect(controller.getActiveLaneCount()).toBe(0);
-		expect(internals._queuedWorkers.size).toBe(0);
 		expect(controller.getLaneRecords()).toEqual([
 			expect.objectContaining({
 				laneId: queued.laneId,
@@ -154,6 +151,18 @@ describe("background lane disposal", () => {
 				reasonCode: "session_disposed",
 			}),
 		]);
+	});
+});
+
+describe("worker runtime construction", () => {
+	it("does not materialize worker orchestration when UAC withholds delegate", () => {
+		const controller = new BackgroundLaneController({ isDelegateToolActive: () => false } as never);
+		const internals = controller as unknown as { _workers?: unknown };
+
+		expect(controller.getLaneRecords()).toEqual([]);
+		controller.drainQueuedWorkerDelegations();
+		controller.abortInFlightLanes();
+		expect(internals._workers).toBeUndefined();
 	});
 });
 

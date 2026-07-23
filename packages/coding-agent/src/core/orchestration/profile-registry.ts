@@ -102,6 +102,25 @@ export function validateOrchestrationProfile(profile: OrchestrationProfile): voi
 	if (profile.dispatchProfileIds.includes(profile.profileId)) {
 		throw new OrchestrationProfileError(`Profile '${profile.profileId}' cannot dispatch itself.`);
 	}
+	if (profile.requireIndependentVerification) {
+		if (profile.role === "verifier") {
+			throw new OrchestrationProfileError(
+				`Verifier profile '${profile.profileId}' cannot require another verifier.`,
+			);
+		}
+		if (!profile.verificationProfileId?.trim()) {
+			throw new OrchestrationProfileError(
+				`Profile '${profile.profileId}' requires independent verification but has no verificationProfileId.`,
+			);
+		}
+	} else if (profile.verificationProfileId !== undefined) {
+		throw new OrchestrationProfileError(
+			`Profile '${profile.profileId}' cannot declare verificationProfileId without requiring verification.`,
+		);
+	}
+	if (profile.verificationProfileId === profile.profileId) {
+		throw new OrchestrationProfileError(`Profile '${profile.profileId}' cannot verify itself.`);
+	}
 	for (const [label, values] of [
 		["capabilityCeiling", profile.capabilityCeiling],
 		["toolNames", profile.toolNames],
@@ -275,6 +294,7 @@ export function parseOrchestrationProfile(value: unknown, sourcePath?: string): 
 			"maxConcurrent",
 			"leaseTtlMs",
 			"requireIndependentVerification",
+			"verificationProfileId",
 			"createdAt",
 			"updatedAt",
 		])
@@ -339,6 +359,7 @@ export function parseOrchestrationProfile(value: unknown, sourcePath?: string): 
 		!Number.isSafeInteger(value.maxConcurrent) ||
 		!Number.isSafeInteger(value.leaseTtlMs) ||
 		typeof value.requireIndependentVerification !== "boolean" ||
+		(value.verificationProfileId !== undefined && typeof value.verificationProfileId !== "string") ||
 		typeof value.createdAt !== "string" ||
 		typeof value.updatedAt !== "string"
 	) {
@@ -377,6 +398,9 @@ export function parseOrchestrationProfile(value: unknown, sourcePath?: string): 
 		maxConcurrent: Number(value.maxConcurrent),
 		leaseTtlMs: Number(value.leaseTtlMs),
 		requireIndependentVerification: value.requireIndependentVerification,
+		...(typeof value.verificationProfileId === "string"
+			? { verificationProfileId: value.verificationProfileId }
+			: {}),
 		...(sourcePath ? { sourcePath } : {}),
 		createdAt: value.createdAt,
 		updatedAt: value.updatedAt,
@@ -420,6 +444,32 @@ export class OrchestrationProfileRegistry {
 					throw new OrchestrationProfileError(
 						`Profile '${profile.profileId}' cannot recursively dispatch orchestrator '${dispatchedProfileId}'.`,
 					);
+				}
+			}
+			if (profile.verificationProfileId) {
+				const verifier = this.profiles.get(profile.verificationProfileId);
+				if (!verifier) {
+					throw new OrchestrationProfileError(
+						`Profile '${profile.profileId}' requires missing verifier profile '${profile.verificationProfileId}'.`,
+					);
+				}
+				if (verifier.role !== "verifier") {
+					throw new OrchestrationProfileError(
+						`Profile '${profile.profileId}' verificationProfileId '${profile.verificationProfileId}' is not a verifier.`,
+					);
+				}
+			}
+			if (profile.role === "orchestrator") {
+				for (const dispatchedProfileId of profile.dispatchProfileIds) {
+					const worker = this.profiles.get(dispatchedProfileId);
+					if (
+						worker?.verificationProfileId &&
+						!profile.dispatchProfileIds.includes(worker.verificationProfileId)
+					) {
+						throw new OrchestrationProfileError(
+							`Orchestrator '${profile.profileId}' dispatches '${worker.profileId}' but not its verifier '${worker.verificationProfileId}'.`,
+						);
+					}
 				}
 			}
 		}

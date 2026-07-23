@@ -29,7 +29,7 @@ function profile(profileId: string, modelId: string): OrchestrationProfile {
 		budget: { maxCostUsd: 0.25, maxToolCalls: 20, maxWallClockMs: 120_000 },
 		maxConcurrent: 2,
 		leaseTtlMs: 180_000,
-		requireIndependentVerification: true,
+		requireIndependentVerification: false,
 		createdAt: now,
 		updatedAt: now,
 	};
@@ -110,6 +110,28 @@ describe("OrchestrationProfileStore", () => {
 		expect(loaded.registry.get("healthy")?.modelPolicy.candidates[0]?.modelId).toBe("small");
 		expect(loaded.diagnostics.map((entry) => entry.path)).toEqual([malformedPath, duplicatePath]);
 		expect(loaded.diagnostics[1]?.message).toContain("Duplicate orchestration profile 'healthy'");
+	});
+
+	it("isolates a profile with a missing verifier without losing unrelated healthy profiles", () => {
+		store.save(profile("healthy", "small"), "global");
+		store.save(
+			{
+				...profile("unavailable-verifier", "worker-model"),
+				requireIndependentVerification: true,
+				verificationProfileId: "missing-verifier",
+			},
+			"global",
+		);
+
+		const loaded = store.load();
+
+		expect(loaded.profiles.map((entry) => entry.profileId)).toEqual(["healthy"]);
+		expect(loaded.diagnostics).toEqual([
+			expect.objectContaining({
+				path: store.filePath("unavailable-verifier", "global"),
+				message: "Verifier target 'missing-verifier' is missing or is not a verifier.",
+			}),
+		]);
 	});
 
 	it("rejects unsafe profile IDs before resolving a file path", () => {

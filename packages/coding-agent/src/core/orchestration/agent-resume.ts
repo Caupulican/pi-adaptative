@@ -52,6 +52,6 @@ export function buildPiResumeLaunchSpecFromContext(
 		executable: options.executable ?? "pi",
 		args,
 		cwd: context.cwd,
-		env: { PI_SESSION_ROLE: "worker" },
+		env: { PI_SESSION_ROLE: "worker", PI_ORCHESTRATION_AGENT_ID: agentId },
 	};
 }

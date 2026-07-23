@@ -144,6 +144,12 @@ export type WorkerResultStatus = "completed" | "blocked" | "failed" | "cancelled
 
 export type WorkerOutputFormat = "structured" | "plain_text";
 
+export interface WorkerVerificationDecision {
+	subjectTaskId: string;
+	verdict: "accepted" | "rejected";
+	reasonCodes: readonly string[];
+}
+
 export interface WorkerResult {
 	requestId: string;
 	status: WorkerResultStatus;
@@ -163,6 +169,8 @@ export interface WorkerResult {
 	 * delegate_status's "review" action. Presence means reviewed; absence keeps the notice sticky.
 	 * The ack is durable — re-derived from the latest persisted snapshot, not session-local state. */
 	parentReviewedAt?: string;
+	/** Typed semantic verdict emitted only by a verifier-profile worker. */
+	verification?: WorkerVerificationDecision;
 }
 
 export type LearningDecisionKind = "no-op" | "proposal" | "apply";

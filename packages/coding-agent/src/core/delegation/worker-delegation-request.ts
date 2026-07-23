@@ -5,4 +5,6 @@
 export interface WorkerDelegationRequest {
 	instructions: string;
 	profileId?: string;
+	/** Runtime-owned correlation for an automatically dispatched verifier; never model-settable. */
+	verificationOfTaskId?: string;
 }

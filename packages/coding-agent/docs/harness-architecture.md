@@ -11,7 +11,7 @@ coding-agent/AgentSession
   ├─ runtime + resource policy       RuntimeBuilder, ResourceLoader, ProfileFilterController
   ├─ model execution policy         ModelSelection, ModelRouter, LocalRuntime, protocol resolver
   ├─ foreground turn coordination   ContextPipeline, retry/failover, compaction, persistence
-  └─ child work coordination        BackgroundLane, Reflection, managed-lane bridge
+  └─ child work coordination        WorkerDelegation, BackgroundLane, Reflection, managed-lane bridge
                  │
                  ▼
 agent                         ai
@@ -50,6 +50,9 @@ second line of defense, not the main implementation.
   import.
 - Isolated research and worker lanes create fresh tools only for their expanded lane grant. They do
   not copy the foreground registry, extensions, skills, shell, or mutable memory surface.
+- Worker orchestration state is lazily materialized only when the active surface grants `delegate`
+  (or a managed-lane terminal report requires the shared notifier); worker-role sessions allocate no
+  worker scheduler, lifecycle store, or notification coordinator.
 - Managed children carry parent identity. A valid parent PID classifies the process as a worker before
   settings, stores, resources, or tools are built, so the hard worker ceiling cannot be re-granted by
   a permissive profile.
@@ -87,8 +90,11 @@ turn/time/token/tool/cost bounds, and parent validation of the result. Process-c
 expose `run_process`, which uses an exact executable allowlist, direct argv, a scoped environment,
 bounded output, and process-tree termination; unrestricted shell is not inherited. Worker output is
 untrusted; the parent retrieves it through `delegate_status` after a terminal lane event. A profile
-that requires independent verification produces a partial typed result and an explicit verifier
-next action; it cannot be treated as accepted without a separate verifier workflow.
+that requires independent verification names a separate owner-pinned verifier profile. The runtime
+automatically dispatches that verifier as a durable task, withholds the implementation's terminal
+handoff, and reconciles the typed verdict before the implementation can become accepted. Restart
+recovery closes both persistence gaps: an implementation awaiting a not-yet-created verifier is
+re-dispatched, while a persisted verifier result awaiting reconciliation is applied exactly once.
 
 Out-of-process managed workers use the same lifecycle shape:
 
@@ -124,6 +130,9 @@ races an active execution unit.
 - New harness behavior requires a focused faux-provider regression. Provider APIs and paid tokens are
   not used by the coding-agent suite.
 
-The next structural extraction targets are foreground turn coordination still resident in
-`AgentSession` and the remaining research/worker scheduling facade in `BackgroundLaneController`.
-Each should move as one state machine without changing the public facade or duplicating session state.
+Worker lifecycle, scheduling, execution, verification, recovery, and notification are owned by
+`WorkerDelegationController`; `BackgroundLaneController` is only its public composition facade plus
+the separate research and fitness lanes. The next structural extraction targets are foreground turn
+coordination still resident in `AgentSession` and research/fitness coordination still resident in
+`BackgroundLaneController`. Each should move as one state machine without changing the public facade
+or duplicating session state.

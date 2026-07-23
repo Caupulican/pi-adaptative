@@ -197,6 +197,44 @@ The profile fixes the role, provider/model, exact thinking level, tools, resourc
   "maxConcurrent": 3,
   "leaseTtlMs": 240000,
   "requireIndependentVerification": true,
+  "verificationProfileId": "verifier",
+  "createdAt": "2026-07-23T00:00:00.000Z",
+  "updatedAt": "2026-07-23T00:00:00.000Z"
+}
+```
+
+A profile with `requireIndependentVerification: true` must name an owner-authored
+`verificationProfileId`. That target must have role `verifier`, cannot require another verifier, and
+must also appear in the active architect's `dispatchProfileIds`. After a successful implementation,
+the runtime automatically creates a separate durable verifier task. The implementation remains
+blocked and sends no terminal parent handoff until the verifier returns a typed accepted or rejected
+decision; only an accepted decision backed by trusted criterion-linked review evidence completes it.
+
+```json
+{
+  "schemaVersion": 1,
+  "profileId": "verifier",
+  "description": "Pinned independent test verifier",
+  "role": "verifier",
+  "modelPolicy": {
+    "mode": "fixed",
+    "candidates": [
+      { "provider": "openai", "modelId": "gpt-5-mini", "thinkingLevel": "low" }
+    ]
+  },
+  "capabilityCeiling": ["filesystem.read", "process.exec", "tests.execute"],
+  "toolNames": ["read", "grep", "find", "ls", "run_process"],
+  "resourceProfileNames": ["verifier-minimal"],
+  "dispatchProfileIds": [],
+  "executionPolicy": {
+    "allowedExecutables": ["node", "npm", "git"],
+    "allowedEnvironmentVariables": ["CI"],
+    "maxOutputBytes": 65536
+  },
+  "budget": { "maxTokens": 8000, "maxWallClockMs": 180000, "maxCostUsd": 0.25, "maxToolCalls": 12 },
+  "maxConcurrent": 2,
+  "leaseTtlMs": 240000,
+  "requireIndependentVerification": false,
   "createdAt": "2026-07-23T00:00:00.000Z",
   "updatedAt": "2026-07-23T00:00:00.000Z"
 }
@@ -214,7 +252,7 @@ Operator and verifier profiles that grant `process.exec` or `tests.execute` must
 
 Each isolated worker gets a fresh classified surface. `delegate`, unrestricted shell, foreground memory/lifecycle tools, and opaque extension tools are not inherited. Read-only memory exists only when the selected profile grants `memory.query`, exposes `memory`, and global memory retrieval is enabled; a delegate call cannot add it. Workers are otherwise read-only unless the global write switch, non-empty path scope, profile capabilities, and profile tool list all grant `write` or `edit`.
 
-Profiles are provider-independent: every candidate resolves through the model registry, exact model authentication, capability metadata, and the selected model's native or calibrated text-tool protocol. Worker concurrency is counted per profile under the global worker ceiling; local workers that contend with a local foreground are queued and drained under both limits. Worker model, thinking, resource, prompt, memory, and tool authority exist only in the selected orchestration profile; delegate calls and worker settings have no parallel override fields.
+Profiles are provider-independent: every candidate resolves through the model registry, exact model authentication, capability metadata, and the selected model's native or calibrated text-tool protocol. Worker concurrency is counted per profile under the global worker ceiling; every capacity-bound worker is durably queued and drained under both limits, while local workers also queue when they contend with a local foreground. Worker model, thinking, resource, prompt, memory, and tool authority exist only in the selected orchestration profile; delegate calls and worker settings have no parallel override fields.
 
 **Confirmed behavior:** `delegate` returns a lane id immediately instead of waiting for the worker. `delegate_status` shows queued, running, and terminal workers and retrieves bounded terminal output by lane id. Completion records a durable terminal notification before waking the parent; undelivered in-process notifications replay after session resume. The interactive footer shows running/queued counts or the latest terminal lane. Late worker output is stored separately and is never injected into an active foreground transcript.
 

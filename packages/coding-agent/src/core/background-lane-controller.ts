@@ -2,9 +2,10 @@
  * Background-lane controller: goal auto-continue, the research lane, profile-bound worker delegation, and
  * the model-fitness probe.
  *
- * Extracted verbatim from agent-session.ts (god-file decomposition). Owns the lane timers, the
- * single-flight guards, the last research-lane skip reason, the live {@link LaneTracker}, and the
- * session-lifetime abort controllers for in-flight research/worker passes. Everything else it needs
+ * Extracted from agent-session.ts (god-file decomposition). Owns research/fitness lane timers,
+ * single-flight guards, the last research-lane skip reason, and the research/managed-lane
+ * {@link LaneTracker}. Worker lifecycle and dispatch are delegated to one
+ * {@link WorkerDelegationController}. Everything else it needs
  * — the session manager, settings, model registry, live model, capability envelope, the goal
  * continuation LOOP, the isolated-completion primitive, spawned-usage accounting, and the telemetry
  * sink — is reached through narrow deps accessors rather than the whole AgentSession.
@@ -16,10 +17,8 @@
  */
 
 import { createHash } from "node:crypto";
-import path from "node:path";
 import type { SessionManager } from "@caupulican/pi-agent-core/node";
 import { type Api, type Model, resolveModelThinkingLevel, type Usage } from "@caupulican/pi-ai";
-import { configFile, getWorkRoot, sessionsDir, stateDir } from "./agent-paths.ts";
 import type {
 	AgentSessionEvent,
 	GoalContinuationLoopOptions,
@@ -37,24 +36,18 @@ import type {
 	WorkerResult,
 	WorkerResultStatus,
 } from "./autonomy/contracts.ts";
+import { getPrivateLaneDeniedPaths } from "./autonomy/lane-private-paths.ts";
 import { createLaneToolSurface, type LaneToolSurface } from "./autonomy/lane-tool-surface.ts";
 import { type LaneRecord, type LaneTerminalStatus, LaneTracker } from "./autonomy/lane-tracker.ts";
-import { safeRealpathSync } from "./autonomy/path-scope.ts";
 import { appendLaneRecordSnapshot, getLaneRecordSnapshots } from "./autonomy/session-lane-record.ts";
 import { composeSubagentSystemPrompt } from "./autonomy/subagent-prompt.ts";
 import { AUTONOMY_TELEMETRY_EVENT_TYPES, type AutonomyTelemetryEvent } from "./autonomy/telemetry-events.ts";
-import { applyWorkerActions } from "./delegation/worker-actions.ts";
-import type { WorkerDelegationRequest } from "./delegation/worker-delegation-request.ts";
 import {
-	buildWorkerExecutionPlan,
-	compileWorkerExecutionGrant,
-	type WorkerExecutionPlan,
-} from "./delegation/worker-execution-policy.ts";
-import { WorkerLifecycle } from "./delegation/worker-lifecycle.ts";
-import { WorkerNotificationCoordinator } from "./delegation/worker-notification-coordinator.ts";
-import { type ResolvedWorkerProfile, WorkerProfileResolver } from "./delegation/worker-profile-resolver.ts";
+	WorkerDelegationController,
+	type WorkerDelegationControllerDeps,
+} from "./delegation/worker-delegation-controller.ts";
+import type { WorkerDelegationRequest } from "./delegation/worker-delegation-request.ts";
 import { reviewManagedLaneChangedFiles } from "./delegation/worker-result.ts";
-import { runWorker } from "./delegation/worker-runner.ts";
 import type { ManagedLaneEvent } from "./extensions/types.ts";
 import type { GoalRuntimeSnapshot, GoalRuntimeSnapshotSettings } from "./goals/goal-runtime-snapshot.ts";
 import type { GoalState } from "./goals/goal-state.ts";
@@ -67,14 +60,14 @@ import type { ModelRegistry } from "./model-registry.ts";
 import { resolveCliModel } from "./model-resolver.ts";
 import { FitnessStore, type StoredFitnessReport } from "./models/fitness-store.ts";
 import type { OrchestrationProfile } from "./orchestration/contracts.ts";
-import type { StartedDelegationAttempt } from "./orchestration/delegation-ledger.ts";
-import { adaptWorkerResult, adaptWorkerRunOutcome } from "./orchestration/worker-result-adapter.ts";
 import type { NormalizedProfile } from "./profile-registry.ts";
 import { registerInFlightWork } from "./reload-blockers.ts";
 import { type ModelFitnessReport, runModelFitnessProbe } from "./research/model-fitness.ts";
 import { runResearch } from "./research/research-runner.ts";
 import type { collectWorkspaceSources } from "./research/workspace-collector.ts";
-import type { ResolvedWorkerDelegationSettings, SettingsManager } from "./settings-manager.ts";
+import type { SettingsManager } from "./settings-manager.ts";
+
+export { isLocalExecutionModel } from "./delegation/worker-delegation-controller.ts";
 
 export function clampLaneMaxUsd(settingsMaxUsd: number, foregroundMaxEstimatedUsd?: number): number {
 	return Math.min(settingsMaxUsd, foregroundMaxEstimatedUsd ?? Number.POSITIVE_INFINITY);
@@ -89,21 +82,6 @@ export function clampLaneMaxUsd(settingsMaxUsd: number, foregroundMaxEstimatedUs
 function deriveSpawnedUsageReportId(kind: string, sessionId: string, identity: string): string {
 	const digest = createHash("sha256").update(identity).digest("hex").slice(0, 16);
 	return `${kind}:${sessionId}:${digest}`;
-}
-
-export function getPrivateLaneDeniedPaths(cwd: string, agentDir: string): string[] {
-	return [
-		configFile(agentDir, "auth.json"),
-		configFile(agentDir, "MEMORY.md"),
-		configFile(agentDir, "USER.md"),
-		configFile(agentDir, "settings.json"),
-		configFile(agentDir, "models.json"),
-		// trust.json now lives under state/ -- covered by the whole-state-dir
-		// denial below instead of its own root-level entry.
-		sessionsDir(agentDir),
-		stateDir(agentDir),
-		getWorkRoot(agentDir),
-	].concat(path.join(cwd, ".pi", "settings.json"));
 }
 
 const KNOWN_LANE_TERMINAL_STATUSES: ReadonlySet<string> = new Set([
@@ -157,19 +135,7 @@ export function mapManagedLaneTerminalStatus(status: LaneTerminalStatus): Worker
 	}
 }
 
-export function isLocalExecutionModel(model: Pick<Model<Api>, "provider" | "baseUrl">): boolean {
-	if (model.provider === "ollama" || model.provider === "transformers" || model.provider === "llama-cpp") {
-		return true;
-	}
-	try {
-		const hostname = new URL(model.baseUrl).hostname.toLowerCase();
-		return hostname === "localhost" || hostname === "127.0.0.1" || hostname === "::1" || hostname === "[::1]";
-	} catch {
-		return false;
-	}
-}
-
-export interface BackgroundLaneControllerDeps {
+export interface BackgroundLaneControllerDeps extends WorkerDelegationControllerDeps {
 	/** A disposed session must never schedule/persist a lane or continuation. */
 	isDisposed(): boolean;
 	/** Child sessions never run the idle research lane (only the top-level session drives autonomy). */
@@ -255,40 +221,10 @@ export class BackgroundLaneController {
 	private _persistedResearchRunCount = 0;
 	/** Session-lifetime abort for in-flight research passes (same pattern as _reflectionAbort). */
 	private readonly _researchLaneAbort = new AbortController();
-	/** Session-lifetime abort for in-flight delegated workers. */
-	private readonly _workerDelegationAbort = new AbortController();
 	/** Session-local de-duplication for fail-closed profile grants that cannot bind to lane tools. */
 	private readonly _warnedUnboundLaneToolGrants = new Set<string>();
-	/** Every background execution is retained until its terminal result is observed. */
-	private readonly _workerPromises = new Map<string, Promise<WorkerDelegationRunOutcome>>();
-	private readonly _queuedWorkers = new Map<string, WorkerDelegationRequest>();
-	private _workerLifecycle: WorkerLifecycle | undefined;
-	private _workerProfileResolver: WorkerProfileResolver | undefined;
-	private _workerQueueRecovered = false;
-	private readonly _workerNotifications: WorkerNotificationCoordinator;
-	/** Live per-lane mutation ledger for a RUNNING worker — the SAME `toolChangedFiles` Set its
-	 * `afterToolCall` hook mutates, plus a spend getter and the originating request. Read
-	 * synchronously by `abortInFlightLanes()`'s disposal cutoff, the only provably-safe write window
-	 * for a mid-flight cancellation (see that method); deleted there (consumed-ledger guard against
-	 * the post-await disposed branch re-persisting) or in the lane's own `finally` on a normal exit. */
-	private readonly _inFlightWorkerLedgers = new Map<
-		string,
-		{
-			changedFiles: Set<string>;
-			getSpend: () => Usage | undefined;
-			getToolCalls: () => number;
-			request: WorkerRequest;
-			handle: StartedDelegationAttempt;
-			startedAt: number;
-		}
-	>();
-	/** Reload-gate deregister function for a worker queued (not yet running) behind a
-	 * contending local-execution foreground model. Registered at enqueue so `/reload` waits for
-	 * queued work too, not just running work; deregistered exactly once, either on disposal
-	 * (`abortInFlightLanes`) or at the running handoff (`drainQueuedWorkerDelegations`). A laneId with
-	 * no entry here (e.g. seeded directly into `_queuedWorkers` by a test) is simply untracked —
-	 * deregistration is best-effort by design, never required. */
-	private readonly _queuedWorkerDeregisters = new Map<string, () => void>();
+	/** Lazily materialized so a UAC surface without `delegate` allocates no worker runtime state. */
+	private _workers: WorkerDelegationController | undefined;
 	/** Dispatch -> terminal correlation for out-of-process managed lanes (`pi.reportManagedLane`
 	 * host bridge), keyed by the CALLER's own `laneId` (e.g. a tmux job id) — distinct from the
 	 * internal `LaneTracker` id it maps to. Removed on the matching terminal report so a duplicate or
@@ -308,92 +244,16 @@ export class BackgroundLaneController {
 	}
 
 	private _recordWorkerTerminal(record: LaneRecord): void {
-		if (record.status === "queued" || record.status === "running") return;
-		if (record.type === "worker" && this._workerLifecycle) {
-			const notification = this._workerLifecycle.getTerminalNotification(record.laneId);
-			if (notification?.status === "delivered") return;
-			if (notification) {
-				this._workerNotifications.recordTerminal(record, notification.notificationId);
-				return;
-			}
-		}
-		this._workerNotifications.recordTerminal(record);
+		this._getWorkerController().recordTerminal(record);
 	}
 
 	constructor(deps: BackgroundLaneControllerDeps) {
 		this.deps = deps;
-		this._workerNotifications = new WorkerNotificationCoordinator({
-			getWorkerRecords: () => this._workerLifecycle?.getRecords() ?? [],
-			emitStatus: (status) => {
-				if (typeof this.deps.emit === "function") {
-					this.deps.emit({
-						type: "delegate_workers",
-						...status,
-						terminalSinceFlush: [...status.terminalSinceFlush],
-					});
-				}
-			},
-			notify: (records) => {
-				if (typeof this.deps.notifyWorkerTerminalHandoff !== "function") {
-					return Promise.reject(new Error("worker terminal handoff bridge is unavailable"));
-				}
-				return this.deps.notifyWorkerTerminalHandoff(records);
-			},
-			warn: (message) => this._safeWarn(message),
-			markDurableDelivered: (notificationIds) => this._workerLifecycle?.markNotificationsDelivered(notificationIds),
-		});
 	}
 
-	private _getWorkerLifecycle(): WorkerLifecycle {
-		if (this._workerLifecycle) return this._workerLifecycle;
-		let minimumNextLaneNumber = 1;
-		try {
-			for (const record of getLaneRecordSnapshots(this.deps.getSessionManager().getEntries())) {
-				const suffix = /^worker-(\d+)$/.exec(record.laneId)?.[1];
-				if (suffix) minimumNextLaneNumber = Math.max(minimumNextLaneNumber, Number(suffix) + 1);
-			}
-		} catch {
-			// Durable runtime IDs remain authoritative when compatibility history is unavailable.
-		}
-		this._workerLifecycle = new WorkerLifecycle({
-			agentDir: this.deps.getAgentDir(),
-			sessionId: this.deps.getSessionId(),
-			minimumNextLaneNumber,
-		});
-		return this._workerLifecycle;
-	}
-
-	private _getWorkerProfileResolver(): WorkerProfileResolver {
-		if (this._workerProfileResolver) return this._workerProfileResolver;
-		this._workerProfileResolver = new WorkerProfileResolver({
-			agentDir: this.deps.getAgentDir(),
-			cwd: this.deps.getCwd(),
-			getSettingsManager: () => this.deps.getSettingsManager(),
-			getModelRegistry: () => this.deps.getModelRegistry(),
-			isModelExhausted: (model) => this.deps.isModelExhausted(model),
-			getActiveOrchestrationProfile: () => this.deps.getActiveOrchestrationProfile?.(),
-			onDiagnostic: (message) => this._safeWarn(message),
-		});
-		return this._workerProfileResolver;
-	}
-
-	private _recoverDurableWorkerQueue(): void {
-		if (this._workerQueueRecovered) return;
-		this._workerQueueRecovered = true;
-		for (const { attempt, record } of this._getWorkerLifecycle().recoverQueued()) {
-			const laneId = record.laneId;
-			this._queuedWorkers.set(laneId, {
-				instructions: attempt.dispatch.instructions,
-				profileId: attempt.dispatch.profileId,
-			});
-			this._queuedWorkerDeregisters.set(
-				laneId,
-				registerInFlightWork(this.deps.getAgentDir(), "lane", `worker-recovered:${laneId}`),
-			);
-		}
-		for (const notification of this._getWorkerLifecycle().getPendingTerminalNotifications()) {
-			this._workerNotifications.recordTerminal(notification.record, notification.notificationId);
-		}
+	private _getWorkerController(): WorkerDelegationController {
+		this._workers ??= new WorkerDelegationController(this.deps);
+		return this._workers;
 	}
 
 	private _seedLaneHistory(): void {
@@ -406,8 +266,10 @@ export class BackgroundLaneController {
 
 	/** Live lane records tracked by this process (running and terminal). */
 	getLaneRecords(): LaneRecord[] {
-		if (!this._workerLifecycle && this.deps.isDelegateToolActive?.()) this._recoverDurableWorkerQueue();
-		return [...this._laneTracker.getRecords(), ...(this._workerLifecycle?.getRecords() ?? [])];
+		const workerRecords =
+			this._workers?.getRecords() ??
+			(this.deps.isDelegateToolActive?.() ? this._getWorkerController().getRecords() : []);
+		return [...this._laneTracker.getRecords(), ...workerRecords];
 	}
 
 	/**
@@ -529,7 +391,7 @@ export class BackgroundLaneController {
 	}
 
 	/**
-	 * Abort any in-flight research pass or delegated worker (called on session dispose).
+	 * Abort in-flight research and delegate worker disposal to its single owning controller.
 	 *
 	 * This synchronous body is the LAST provably-safe write window for canceled/in-flight work.
 	 * `dispose()` (agent-session.ts) has already set the session's own disposed flag but has not yet
@@ -541,7 +403,6 @@ export class BackgroundLaneController {
 	 */
 	abortInFlightLanes(): void {
 		this._researchLaneAbort.abort();
-		this._workerDelegationAbort.abort();
 
 		for (const record of this._laneTracker.getRecords()) {
 			if (record.status !== "queued" && record.status !== "running") continue;
@@ -559,78 +420,7 @@ export class BackgroundLaneController {
 			}
 		}
 
-		for (const record of this._workerLifecycle?.getRecords() ?? []) {
-			if (record.status !== "queued" && record.status !== "running") continue;
-			const ledger = this._inFlightWorkerLedgers.get(record.laneId);
-			if (!ledger) {
-				try {
-					const canceled = this._workerLifecycle?.cancel(record.laneId, "session_disposed");
-					if (canceled) {
-						appendLaneRecordSnapshot(this.deps.getSessionManager(), canceled);
-						this._recordWorkerTerminal(canceled);
-					}
-				} catch (error) {
-					this._safeWarn(
-						`Failed to cancel durable queued worker ${record.laneId}: ${error instanceof Error ? error.message : String(error)}`,
-					);
-				}
-				continue;
-			}
-			this._inFlightWorkerLedgers.delete(record.laneId);
-			try {
-				const spend = ledger.getSpend();
-				const reportId = `worker:${this.deps.getSessionId()}:${record.laneId}`;
-				const result: WorkerResult = {
-					requestId: ledger.request.id,
-					status: "cancelled",
-					summary: "canceled on session dispose",
-					changedFiles: [...ledger.changedFiles],
-					usageReportId: reportId,
-					createdAt: new Date().toISOString(),
-				};
-				const canceled = this._getWorkerLifecycle().finish(
-					adaptWorkerResult({
-						handle: ledger.handle,
-						result,
-						accepted: false,
-						costUsd: spend?.cost.total ?? 0,
-						cwd: this.deps.getCwd(),
-						...(spend
-							? {
-									inputTokens: spend.input,
-									outputTokens: spend.output,
-									totalTokens: spend.totalTokens,
-								}
-							: {}),
-						wallClockMs: Date.now() - ledger.startedAt,
-						toolCalls: ledger.getToolCalls(),
-						reasonCode: "session_disposed",
-					}),
-				);
-				appendLaneRecordSnapshot(this.deps.getSessionManager(), canceled);
-				this._recordWorkerTerminal(canceled);
-				// Bounded honesty: spend may be incomplete (it lands only when the isolated completion
-				// returns, which a mid-flight abort preempts) — record what `getSpend()` knows. Same
-				// deterministic reportId scheme as the normal path, so a later duplicate report (there
-				// is none in practice here, since the lane is now terminal) stays idempotent.
-				this.deps.saveWorkerResultSnapshot(result, ledger.request);
-				if (spend && (spend.cost.total > 0 || spend.totalTokens > 0)) {
-					this.deps.addSpawnedUsage(spend, { label: "worker-delegation", reportId });
-				}
-			} catch (error) {
-				this._safeWarn(
-					`Failed to persist canceled worker result ${record.laneId}: ${error instanceof Error ? error.message : String(error)}`,
-				);
-			}
-		}
-
-		// A queued (never-started) worker's reload-gate registration ends here on cancellation;
-		// the other end is the running handoff in `drainQueuedWorkerDelegations`.
-		for (const deregister of this._queuedWorkerDeregisters.values()) deregister();
-		this._queuedWorkerDeregisters.clear();
-		this._queuedWorkers.clear();
-
-		this._workerNotifications.dispose();
+		this._workers?.abort();
 	}
 
 	clearGoalAutoContinueTimer(): void {
@@ -915,39 +705,7 @@ export class BackgroundLaneController {
 	}
 
 	getOrchestrationProfileCatalog(): Array<{ profileId: string; role: string; description: string }> {
-		return this._getWorkerProfileResolver().catalog();
-	}
-
-	private _resolveWorkerShipment(
-		request: WorkerDelegationRequest,
-		settings: ResolvedWorkerDelegationSettings,
-	): { ok: true; shipment: ResolvedWorkerProfile } | { ok: false; skipReason: string } {
-		const resolved = this._getWorkerProfileResolver().resolve(request, settings.orchestrationProfile);
-		return resolved.ok ? { ok: true, shipment: resolved.resolved } : { ok: false, skipReason: resolved.reason };
-	}
-
-	private _hasWorkerCapacity(settings: ResolvedWorkerDelegationSettings, profile: OrchestrationProfile): boolean {
-		const lifecycle = this._getWorkerLifecycle();
-		if (lifecycle.getRunningCount() >= settings.maxConcurrent) return false;
-		return lifecycle.getRunningCount(profile.profileId) < profile.maxConcurrent;
-	}
-
-	private _buildWorkerExecutionPlan(
-		profile: OrchestrationProfile,
-		settings: ResolvedWorkerDelegationSettings,
-	): WorkerExecutionPlan {
-		return buildWorkerExecutionPlan({
-			profile,
-			settings,
-			cwd: this.deps.getCwd(),
-			deniedPaths: getPrivateLaneDeniedPaths(this.deps.getCwd(), this.deps.getAgentDir()),
-			foregroundMaxCostUsd: this.deps.getCapabilityEnvelope()?.maxEstimatedUsd,
-			memoryEnabled: this.deps.getSettingsManager().getMemoryRetrievalSettings().enabled,
-		});
-	}
-
-	private _cancelDurableWorkerAttempt(laneId: string, reasonCode: string): void {
-		this._workerLifecycle?.cancel(laneId, reasonCode);
+		return this._getWorkerController().getProfileCatalog();
 	}
 
 	private _warnUnboundLaneToolGrants(laneProfile: NormalizedProfile | undefined, surface: LaneToolSurface): void {
@@ -1160,484 +918,21 @@ export class BackgroundLaneController {
 			deregisterInFlight();
 		}
 	}
-
-	/**
-	 * Run one bounded profile-bound worker delegation: compile its grant, execute an isolated
-	 * completion, validate the result via
-	 * {@link validateWorkerResult} before acceptance, and persist result + lane record + spawned
-	 * usage (idempotent per-lane reportId). Consumed by the `delegate` tool.
-	 */
+	/** Start a durable, profile-bound worker delegation. */
 	startWorkerDelegation(
 		request: WorkerDelegationRequest,
 	): { started: false; skipReason: string } | { started: true; record: LaneRecord } {
-		const settings = this.deps.getSettingsManager().getWorkerDelegationSettings();
-		if (this.deps.isDisposed()) return { started: false, skipReason: "session_disposed" };
-		if (request.instructions.trim().length === 0) return { started: false, skipReason: "missing_instructions" };
-		if (!this.deps.isDelegateToolActive()) return { started: false, skipReason: "delegate_tool_inactive" };
-		if (!settings.enabled) return { started: false, skipReason: "worker_delegation_disabled" };
-		this._recoverDurableWorkerQueue();
-		const resolved = this._resolveWorkerShipment(request, settings);
-		if (!resolved.ok) return { started: false, skipReason: resolved.skipReason };
-		const shipment = resolved.shipment;
-		if (!this._laneCapabilityProfile(shipment.model).backgroundLanesEnabled) {
-			return { started: false, skipReason: "model_delegation_unsupported" };
-		}
-
-		const foreground = this.deps.getModel();
-		const contendsWithLocalForeground =
-			foreground !== undefined && isLocalExecutionModel(foreground) && isLocalExecutionModel(shipment.model);
-		if (contendsWithLocalForeground) {
-			if (this._queuedWorkers.size >= 8) {
-				return { started: false, skipReason: "worker_delegation_queue_full" };
-			}
-			const plan = this._buildWorkerExecutionPlan(shipment.profile, settings);
-			let record: LaneRecord;
-			try {
-				const goal = this.deps.getGoalStateSnapshot();
-				record = this._getWorkerLifecycle().prepare({
-					instructions: request.instructions.trim(),
-					profile: shipment.profile,
-					requiredCapabilities: plan.requiredCapabilities,
-					...(goal ? { goal: { goalId: goal.goalId, description: goal.userGoal } } : {}),
-				}).record;
-			} catch (error) {
-				this._safeWarn(
-					`Worker dispatch was not persisted: ${error instanceof Error ? error.message : String(error)}`,
-				);
-				return { started: false, skipReason: "orchestration_ledger_error" };
-			}
-			this._queuedWorkers.set(record.laneId, request);
-			// Register the reload-gate quiesce unit at ENQUEUE (not at the later running handoff)
-			// so `/reload` waits for queued-but-not-yet-started work too, matching running workers.
-			this._queuedWorkerDeregisters.set(
-				record.laneId,
-				registerInFlightWork(this.deps.getAgentDir(), "lane", `worker-queued:${record.laneId}`),
-			);
-			this._workerNotifications.statusChanged();
-			return { started: true, record };
-		}
-		if (!this._hasWorkerCapacity(settings, shipment.profile)) {
-			return { started: false, skipReason: "worker_delegation_already_running" };
-		}
-		let startedRecord: LaneRecord | undefined;
-		const promise = this.runWorkerDelegationOnce(request, (record) => {
-			startedRecord = record;
-		});
-		if (!startedRecord) {
-			// Preparation is synchronous up to the first isolated completion await. A promise that
-			// rejected before producing a lane is still observed below, so it cannot become unhandled.
-			void promise.catch(() => undefined);
-			return { started: false, skipReason: "worker_not_started" };
-		}
-		this._workerPromises.set(startedRecord.laneId, promise);
-		void promise.then(
-			() => this._workerPromises.delete(startedRecord?.laneId ?? ""),
-			(error) => {
-				const laneId = startedRecord?.laneId;
-				if (laneId) {
-					try {
-						this._cancelDurableWorkerAttempt(laneId, "worker_background_error");
-					} catch (cancelError) {
-						this._safeWarn(
-							`Failed to cancel rejected durable worker ${laneId}: ${cancelError instanceof Error ? cancelError.message : String(cancelError)}`,
-						);
-					}
-					const terminal = this._workerLifecycle?.cancel(laneId, "worker_background_error");
-					if (terminal) this._recordWorkerTerminal(terminal);
-				}
-				this._safeWarn(`Worker start failed: ${error instanceof Error ? error.message : String(error)}`);
-				this._workerPromises.delete(laneId ?? "");
-			},
-		);
-		return { started: true, record: startedRecord };
+		return this._getWorkerController().start(request);
 	}
 
+	/** Run one worker immediately; used by focused integrations and tests. */
 	async runWorkerDelegationOnce(
 		request: WorkerDelegationRequest,
 		onStarted?: (record: LaneRecord) => void,
 		existingRecord?: LaneRecord,
 	): Promise<WorkerDelegationRunOutcome> {
-		const delegationSettings = this.deps.getSettingsManager().getWorkerDelegationSettings();
-		if (this.deps.isDisposed()) {
-			return { started: false, skipReason: "session_disposed" };
-		}
-		const instructions = request.instructions.trim();
-		if (instructions.length === 0) {
-			return { started: false, skipReason: "missing_instructions" };
-		}
-
-		const settings = delegationSettings;
-		if (!this.deps.isDelegateToolActive()) {
-			return { started: false, skipReason: "delegate_tool_inactive" };
-		}
-		if (!settings.enabled) {
-			return { started: false, skipReason: "worker_delegation_disabled" };
-		}
-		this._recoverDurableWorkerQueue();
-
-		const resolved = this._resolveWorkerShipment(request, settings);
-		if (!resolved.ok) {
-			return { started: false, skipReason: resolved.skipReason };
-		}
-		const { model, modelBinding, profile: orchestrationProfile, soul } = resolved.shipment;
-		if (!this._hasWorkerCapacity(settings, orchestrationProfile)) {
-			return { started: false, skipReason: "worker_delegation_already_running" };
-		}
-		const laneCapability = this._laneCapabilityProfile(model);
-		if (!laneCapability.backgroundLanesEnabled) {
-			return { started: false, skipReason: "model_delegation_unsupported" };
-		}
-
-		const executionPlan = this._buildWorkerExecutionPlan(orchestrationProfile, settings);
-		const goal = this.deps.getGoalStateSnapshot();
-		const lifecycle = this._getWorkerLifecycle();
-		const prepared = existingRecord
-			? { record: existingRecord, attempt: lifecycle.getActiveAttempt(existingRecord.laneId) }
-			: lifecycle.prepare({
-					instructions,
-					profile: orchestrationProfile,
-					requiredCapabilities: executionPlan.requiredCapabilities,
-					...(goal ? { goal: { goalId: goal.goalId, description: goal.userGoal } } : {}),
-				});
-		if (!prepared.attempt) return { started: false, skipReason: "orchestration_attempt_missing" };
-		const durableHandle = lifecycle.start(prepared.record.laneId, orchestrationProfile.leaseTtlMs);
-		const compiled = compileWorkerExecutionGrant({
-			handle: durableHandle,
-			profile: orchestrationProfile,
-			plan: executionPlan,
-		});
-		if (!compiled.ok) {
-			lifecycle.cancel(prepared.record.laneId, compiled.reasonCodes.join(","));
-			return { started: false, skipReason: `execution_policy_denied:${compiled.reasonCodes.join(",")}` };
-		}
-		lifecycle.bindGrant(durableHandle.attemptId, compiled.grant.grantId);
-		const startedRecord = lifecycle.getRecord(prepared.record.laneId);
-		if (!startedRecord) return { started: false, skipReason: "orchestration_projection_missing" };
-		onStarted?.(startedRecord);
-		const maxUsd = compiled.grant.budget.maxCostUsd;
-		const executionPolicy = orchestrationProfile.executionPolicy;
-		const toolSurface = createLaneToolSurface({
-			cwd: this.deps.getCwd(),
-			readMemory: executionPlan.readMemory ? (query) => this.deps.readMemoryForLane(query) : undefined,
-			writeEnabled: executionPlan.writeEnabled,
-			writePaths: executionPlan.writePaths,
-			...(executionPlan.processEnabled && executionPolicy ? { executionPolicy } : {}),
-			processMaxWallClockMs: compiled.grant.budget.maxWallClockMs ?? 0,
-			grant: compiled.grant,
-			toolManifests: executionPlan.toolManifests,
-		});
-		const writeGranted =
-			executionPlan.writeEnabled &&
-			toolSurface.gateway !== undefined &&
-			toolSurface.allowedTools.some((name) => name === "write" || name === "edit");
-		const memoryReadGranted = executionPlan.readMemory && toolSurface.allowedTools.includes("memory");
-		const workerRequest: WorkerRequest = {
-			id: startedRecord.laneId,
-			instructions,
-			route: {
-				tier: "cheap",
-				risk: writeGranted ? "scoped-write" : "read-only",
-				confidence: 1,
-				reasonCode: "profile_worker",
-				reasons: [writeGranted ? "Path-scoped worker delegation" : "Read-only worker delegation"],
-			},
-			envelope: {
-				id: `worker-${this.deps.getSessionId()}-${startedRecord.laneId}`,
-				profileId: orchestrationProfile.profileId,
-				// write_files requires BOTH the opt-in AND an explicit non-empty path scope —
-				// an unscoped write grant is refused here, not discovered at validation time.
-				capabilities: [
-					...(compiled.grant.readPaths.length > 0 ? (["read_files"] as const) : []),
-					...(memoryReadGranted ? (["memory_read"] as const) : []),
-					...(writeGranted ? (["write_files"] as const) : []),
-					...(executionPlan.processEnabled ? (["run_shell"] as const) : []),
-				],
-				...(writeGranted ? { allowedPaths: [...compiled.grant.writePaths] } : {}),
-				deniedPaths: [...compiled.grant.deniedPaths],
-				allowedTools: [...toolSurface.allowedTools],
-				deniedTools: [...toolSurface.deniedTools],
-				...(maxUsd !== undefined ? { maxEstimatedUsd: maxUsd } : {}),
-				createdAt: new Date().toISOString(),
-			},
-			...(maxUsd !== undefined ? { maxEstimatedUsd: maxUsd } : {}),
-			createdAt: new Date().toISOString(),
-		};
-		// Worker delegation START. Routing/scope codes + budget only — never the instructions text.
-		this.deps.emitAutonomyTelemetry({
-			type: AUTONOMY_TELEMETRY_EVENT_TYPES.workerRequest,
-			timestamp: new Date().toISOString(),
-			payload: {
-				id: workerRequest.id,
-				tier: workerRequest.route.tier,
-				capabilities: [...workerRequest.envelope.capabilities],
-				maxEstimatedUsd: workerRequest.maxEstimatedUsd ?? null,
-			},
-		});
-		const usageReportId = `worker:${this.deps.getSessionId()}:${startedRecord.laneId}`;
-
-		// Registered for the lane's full run so the reload gate waits it out; deregistered in the
-		// finally below no matter how this lane terminates (success, disposal, or a thrown error).
-		// registerInFlightWork is a pure sync map op (cannot throw), so placing it as the last
-		// statement before `try` still guarantees the matching finally always runs.
-		const deregisterInFlight = registerInFlightWork(
-			this.deps.getAgentDir(),
-			"lane",
-			`worker:${startedRecord.laneId}`,
-		);
-		const durableStartedAt = Date.now();
-		try {
-			let spentUsage: Usage | undefined;
-			const toolChangedFiles = new Set<string>();
-			const toolIssues = new Set<string>();
-			// Register the live mutation ledger BEFORE the suspend point below so a synchronous
-			// disposal cutoff (`abortInFlightLanes`) can read a race-free snapshot of whatever this
-			// worker has already applied — the worker is suspended at the `await runWorker(...)` below
-			// whenever abort runs, and the abort signal stops further tool calls. Deleted in the
-			// `finally` on every exit path (normal completion, throw, or already consumed by abort).
-			this._inFlightWorkerLedgers.set(startedRecord.laneId, {
-				changedFiles: toolChangedFiles,
-				getSpend: () => spentUsage,
-				getToolCalls: () => toolSurface.gateway?.getUsage().toolCalls ?? 0,
-				request: workerRequest,
-				handle: durableHandle,
-				startedAt: durableStartedAt,
-			});
-			const maxToolCalls = compiled.grant.budget.maxToolCalls ?? 0;
-			const rawOutcome = await runWorker({
-				request: workerRequest,
-				maxUsd,
-				maxWallClockMs: compiled.grant.budget.maxWallClockMs ?? 0,
-				usageReportId,
-				getChangedFiles: () => [...toolChangedFiles],
-				signal: this._workerDelegationAbort.signal,
-				// Parent validation must use the same relative-path baseline the runner reports in.
-				cwd: this.deps.getCwd(),
-				processCapable: executionPlan.processEnabled,
-				// Write lane: runner-side action application through the envelope path scope.
-				applyActions: workerRequest.envelope.capabilities.includes("write_files")
-					? (actions) => {
-							return applyWorkerActions({
-								actions,
-								gateway: toolSurface.gateway!,
-								toolManifests: executionPlan.toolManifests,
-								cwd: this.deps.getCwd(),
-							});
-						}
-					: undefined,
-				complete: async ({ systemPrompt, userPrompt, signal }) => {
-					const completion = await this.deps.runIsolatedCompletion({
-						// Level-0 core and owner-authored profile remain authoritative. The delegating
-						// model supplies task instructions only; it cannot replace the worker role prompt.
-						systemPrompt: composeSubagentSystemPrompt({
-							soul,
-							rolePrompt: systemPrompt,
-						}),
-						messages: [{ role: "user", content: [{ type: "text", text: userPrompt }], timestamp: Date.now() }],
-						model,
-						thinkingLevel: modelBinding.thinkingLevel,
-						maxTokens: Math.min(
-							laneCapability.laneMaxOutputTokens,
-							compiled.grant.budget.maxTokens ?? Number.POSITIVE_INFINITY,
-						),
-						tools: toolSurface.tools,
-						maxTurns: Math.max(1, Math.min(6, maxToolCalls + 1)),
-						finalTextPrompt:
-							"The tool-turn budget is exhausted. Do not call more tools. Return the required worker-result JSON envelope now using only evidence already gathered. If the investigation is incomplete, say so in the summary or blockers instead of omitting the envelope.",
-						beforeToolCall: async (context, toolSignal) => {
-							const decision = await toolSurface.beforeToolCall(context, toolSignal);
-							if (decision?.block) {
-								toolIssues.add(`${context.toolCall.name} blocked: ${decision.reason ?? "capability denied"}`);
-							}
-							return decision;
-						},
-						afterToolCall: async ({ toolCall, args, isError }) => {
-							// This hook runs only for a validated, gate-approved tool that actually entered
-							// execution. Record a direct mutation target before inspecting `isError`: write/edit
-							// may have changed disk and then observed cancellation, timeout, or a late I/O error.
-							// Pre-gate/profile/path refusals never reach afterToolCall, so they remain unreported.
-							if (toolCall.name === "write" || toolCall.name === "edit") {
-								if (args && typeof args === "object" && !Array.isArray(args)) {
-									const rawPath = (args as Record<string, unknown>).path;
-									if (typeof rawPath === "string" && rawPath.length > 0) {
-										const absolutePath = path.isAbsolute(rawPath)
-											? path.resolve(rawPath)
-											: path.resolve(this.deps.getCwd(), rawPath);
-										let canonicalPath = absolutePath;
-										try {
-											canonicalPath = safeRealpathSync(absolutePath);
-										} catch {
-											// Execution was attempted; preserve conservative accounting with the lexical path.
-										}
-										toolChangedFiles.add(
-											path.relative(this.deps.getCwd(), canonicalPath).split(path.sep).join("/"),
-										);
-									}
-								}
-							}
-							if (isError) {
-								toolIssues.add(`${toolCall.name} failed during isolated execution`);
-								return undefined;
-							}
-							return undefined;
-						},
-						signal,
-						// Core/soul/role are all static per configuration — the provider can cache the prefix.
-						cacheRetention: "short",
-						// Stable per-lane synthetic affinity key so repeat worker-delegation calls route to
-						// the same cache-warm backend without carrying the real session id.
-						laneKind: "worker",
-					});
-					spentUsage = completion.usage;
-					toolSurface.gateway?.recordUsage({
-						inputTokens: completion.usage.input,
-						outputTokens: completion.usage.output,
-						costUsd: completion.usage.cost.total,
-					});
-					return {
-						text: completion.text,
-						costUsd: completion.usage.cost.total,
-						stopReason: String(completion.stopReason),
-						changedFiles: [...toolChangedFiles],
-						blockers: [...toolIssues],
-					};
-				},
-			});
-			const verificationRequired =
-				orchestrationProfile.requireIndependentVerification &&
-				orchestrationProfile.role !== "verifier" &&
-				rawOutcome.result.status === "completed";
-			const outcome = verificationRequired
-				? {
-						...rawOutcome,
-						accepted: false,
-						acceptance: {
-							outcome: "ask-user" as const,
-							gate: "independent_verification",
-							reasonCode: "independent_verification_required",
-							message: "The owner-authored profile requires an independent verifier before acceptance.",
-						},
-						result: {
-							...rawOutcome.result,
-							parentReviewRequired: true,
-							blockers: [
-								...(rawOutcome.result.blockers ?? []),
-								"independent verification is required before acceptance",
-							],
-						},
-					}
-				: rawOutcome;
-
-			// Never persist against a disposed session. When disposal raced this
-			// await, `abortInFlightLanes()`'s synchronous cutoff already completed this lane, persisted
-			// its durable lane record + bounded WorkerResult, and consumed (deleted) the ledger —
-			// `.complete()` below is then a no-op (the lane is already terminal, so it returns
-			// undefined) and no double persistence or duplicate terminal notification can happen here.
-			if (this.deps.isDisposed()) {
-				const record = lifecycle.getRecord(startedRecord.laneId);
-				return { started: true, record, outcome };
-			}
-
-			const record = lifecycle.finish(
-				adaptWorkerRunOutcome({
-					handle: durableHandle,
-					outcome,
-					cwd: this.deps.getCwd(),
-					...(spentUsage
-						? {
-								inputTokens: spentUsage.input,
-								outputTokens: spentUsage.output,
-								totalTokens: spentUsage.totalTokens,
-							}
-						: {}),
-					wallClockMs: Date.now() - durableStartedAt,
-					toolCalls: toolSurface.gateway?.getUsage().toolCalls ?? 0,
-					verificationRequired,
-				}),
-			);
-			try {
-				this.deps.saveWorkerResultSnapshot(outcome.result, workerRequest);
-			} catch (error) {
-				this._safeWarn(
-					`Failed to persist compatibility worker snapshot ${startedRecord.laneId}: ${error instanceof Error ? error.message : String(error)}`,
-				);
-			}
-			if (spentUsage && (spentUsage.cost.total > 0 || spentUsage.totalTokens > 0)) {
-				this.deps.addSpawnedUsage(spentUsage, { label: "worker-delegation", reportId: usageReportId });
-			}
-
-			this._recordWorkerTerminal(record);
-			appendLaneRecordSnapshot(this.deps.getSessionManager(), record);
-			// Worker lane terminal record -> worker_result event. Lane outcome only
-			// (status/reasonCode/cost) — never the worker's summary/changed-file text.
-			this.deps.emitAutonomyTelemetry({
-				type: AUTONOMY_TELEMETRY_EVENT_TYPES.workerResult,
-				timestamp: new Date().toISOString(),
-				payload: {
-					laneId: record.laneId,
-					laneType: record.type,
-					status: record.status,
-					reasonCode: record.reasonCode ?? null,
-					costUsd: record.costUsd ?? null,
-				},
-			});
-			return { started: true, record, outcome };
-		} catch (error) {
-			const durableState = lifecycle.ledger.runtime.getSnapshot().attempts[durableHandle.attemptId];
-			if (durableState?.status === "running" || durableState?.status === "leased") {
-				const failureResult: WorkerResult = {
-					requestId: startedRecord.laneId,
-					status: "failed",
-					summary: `Worker delegation failed: ${error instanceof Error ? error.message : String(error)}`,
-					changedFiles: [],
-					createdAt: new Date().toISOString(),
-				};
-				try {
-					lifecycle.finish(
-						adaptWorkerResult({
-							handle: durableHandle,
-							result: failureResult,
-							accepted: false,
-							costUsd: 0,
-							cwd: this.deps.getCwd(),
-							wallClockMs: Date.now() - durableStartedAt,
-							toolCalls: toolSurface.gateway?.getUsage().toolCalls ?? 0,
-							reasonCode: "worker_delegation_error",
-						}),
-					);
-				} catch (persistError) {
-					this._safeWarn(
-						`Failed to persist durable worker failure ${startedRecord.laneId}: ${persistError instanceof Error ? persistError.message : String(persistError)}`,
-					);
-				}
-			}
-			let record = lifecycle.getRecord(startedRecord.laneId);
-			if (record?.status === "queued" || record?.status === "running") {
-				record = lifecycle.cancel(startedRecord.laneId, "worker_delegation_error");
-			}
-			if (record) this._recordWorkerTerminal(record);
-			if (record && !this.deps.isDisposed()) {
-				appendLaneRecordSnapshot(this.deps.getSessionManager(), record);
-				this.deps.emitAutonomyTelemetry({
-					type: AUTONOMY_TELEMETRY_EVENT_TYPES.workerResult,
-					timestamp: new Date().toISOString(),
-					payload: {
-						laneId: record.laneId,
-						laneType: record.type,
-						status: record.status,
-						reasonCode: record.reasonCode ?? null,
-						costUsd: record.costUsd ?? null,
-					},
-				});
-			}
-			const message = error instanceof Error ? error.message : String(error);
-			this.deps.emit({ type: "warning", message: `Worker delegation failed: ${message}` });
-			return { started: true, record };
-		} finally {
-			this._inFlightWorkerLedgers.delete(startedRecord.laneId);
-			deregisterInFlight();
-		}
+		return this._getWorkerController().runOnce(request, onStarted, existingRecord);
 	}
-
 	/**
 	 * Probe a candidate model against the subagent contracts (research/worker/judge/search/
 	 * tool-call surfaces) via {@link runModelFitnessProbe}. The model must resolve and
@@ -1747,66 +1042,9 @@ export class BackgroundLaneController {
 		}
 	}
 
-	/** Start queued local workers at the owner session's foreground-idle boundary. */
+	/** Start every capacity-eligible queued worker at the owner session's foreground-idle boundary. */
 	drainQueuedWorkerDelegations(): void {
-		this._recoverDurableWorkerQueue();
-		const lifecycle = this._getWorkerLifecycle();
-		for (const [laneId, request] of [...this._queuedWorkers]) {
-			const settings = this.deps.getSettingsManager().getWorkerDelegationSettings();
-			const resolved = this._resolveWorkerShipment(request, settings);
-			if (lifecycle.getRunningCount() >= settings.maxConcurrent) break;
-			if (resolved.ok && !this._hasWorkerCapacity(settings, resolved.shipment.profile)) continue;
-			const record = lifecycle.getRecord(laneId);
-			// The queued-phase reload-gate registration ends here, at the running handoff, no
-			// matter which branch below runs. `runWorkerDelegationOnce` registers its OWN "running"
-			// unit independently and synchronously (no `await` separates the two calls), so there is
-			// no window where this lane is invisible to the reload gate.
-			const deregisterQueued = this._queuedWorkerDeregisters.get(laneId);
-			this._queuedWorkerDeregisters.delete(laneId);
-			if (!record) {
-				this._queuedWorkers.delete(laneId);
-				deregisterQueued?.();
-				continue;
-			}
-			this._queuedWorkers.delete(laneId);
-			deregisterQueued?.();
-			const promise = this.runWorkerDelegationOnce(request, undefined, record);
-			this._workerPromises.set(laneId, promise);
-			void promise.then(
-				(outcome) => {
-					if (!outcome.started) {
-						const skipReason = outcome.skipReason ?? "worker_not_started";
-						try {
-							this._cancelDurableWorkerAttempt(laneId, skipReason);
-						} catch (error) {
-							this._safeWarn(
-								`Failed to cancel skipped durable worker ${laneId}: ${error instanceof Error ? error.message : String(error)}`,
-							);
-						}
-						const terminal = lifecycle.cancel(laneId, skipReason);
-						if (terminal) this._recordWorkerTerminal(terminal);
-					}
-					this._workerPromises.delete(laneId);
-					if (!this.deps.isDisposed()) this.drainQueuedWorkerDelegations();
-				},
-				(error) => {
-					try {
-						this._cancelDurableWorkerAttempt(laneId, "worker_background_error");
-					} catch (cancelError) {
-						this._safeWarn(
-							`Failed to cancel rejected durable worker ${laneId}: ${cancelError instanceof Error ? cancelError.message : String(cancelError)}`,
-						);
-					}
-					const terminal = lifecycle.cancel(laneId, "worker_background_error");
-					if (terminal) this._recordWorkerTerminal(terminal);
-					this._safeWarn(
-						`Queued worker ${laneId} rejected: ${error instanceof Error ? error.message : String(error)}`,
-					);
-					this._workerPromises.delete(laneId);
-					if (!this.deps.isDisposed()) this.drainQueuedWorkerDelegations();
-				},
-			);
-		}
+		if (this.deps.isDelegateToolActive?.()) this._getWorkerController().drain();
 	}
 
 	/** Fitness reports persisted for THIS host (measured evidence for architect/profile decisions). */

@@ -137,27 +137,57 @@ describe("background lane disposal persistence", () => {
 	});
 
 	it("persists a durable canceled lane record for a queued (never-started) worker, with no fabricated worker-result (no ledger exists for a lane that never ran)", () => {
+		const agentDir = mkdtempSync(join(tmpdir(), "pi-test-disposal-queued-"));
+		const model = {
+			provider: "ollama",
+			id: "local-model",
+			contextWindow: 32_000,
+			baseUrl: "http://localhost:11434",
+		};
+		const settingsManager = SettingsManager.inMemory({
+			workerDelegation: { enabled: true, orchestrationProfile: "queued-worker", maxConcurrent: 1 },
+		});
+		saveTestWorkerOrchestrationProfile({
+			agentDir,
+			cwd: "/repo",
+			profile: createTestWorkerOrchestrationProfile({ profileId: "queued-worker", model }),
+		});
 		const { sessionManager, entries, getAppendCount } = makeTrackedSessionManager();
 
 		const controller = new BackgroundLaneController({
+			isDisposed: () => false,
+			getSessionId: () => "test-session",
+			getCwd: () => "/repo",
+			getAgentDir: () => agentDir,
 			getSessionManager: () => sessionManager,
+			getSettingsManager: () => settingsManager,
+			getModelRegistry: () => ({ find: () => model, hasConfiguredAuth: () => true }) as never,
+			getModel: () => model,
+			isModelExhausted: () => false,
+			isDelegateToolActive: () => true,
+			getCapabilityEnvelope: () => undefined,
+			getGoalStateSnapshot: () => undefined,
 			saveWorkerResultSnapshot: () => "unused",
 			addSpawnedUsage: () => undefined,
+			emitAutonomyTelemetry: () => {},
 			emit: () => {},
 		} as never);
-		const internals = controller as unknown as {
-			_laneTracker: { enqueue(args: { type: "worker" }): { laneId: string } };
-		};
-		const queued = internals._laneTracker.enqueue({ type: "worker" });
+		const started = controller.startWorkerDelegation({ instructions: "queued work" });
+		expect(started).toMatchObject({ started: true, record: { status: "queued" } });
 
 		controller.abortInFlightLanes();
 
 		expect(getAppendCount()).toBe(1); // only the lane record -- no ledger means no WorkerResult
 		const laneRecords = getLaneRecordSnapshots(entries as never);
 		expect(laneRecords).toEqual([
-			expect.objectContaining({ laneId: queued.laneId, status: "canceled", reasonCode: "session_disposed" }),
+			expect.objectContaining({
+				laneId: started.started ? started.record.laneId : "unreachable",
+				status: "canceled",
+				reasonCode: "session_disposed",
+			}),
 		]);
 		expect(getWorkerResultSnapshots(entries as never)).toEqual([]);
+		rmSync(agentDir, { recursive: true, force: true });
 	});
 
 	it("dispose never throws even when persistence deps are entirely missing (defensive try/catch per lane)", () => {
@@ -166,11 +196,11 @@ describe("background lane disposal persistence", () => {
 		const controller = new BackgroundLaneController({} as never);
 		const internals = controller as unknown as {
 			_laneTracker: {
-				enqueue(args: { type: "worker" }): { laneId: string };
+				enqueue(args: { type: "research" }): { laneId: string };
 				start(args: { type: "research" }): { laneId: string };
 			};
 		};
-		internals._laneTracker.enqueue({ type: "worker" });
+		internals._laneTracker.enqueue({ type: "research" });
 		internals._laneTracker.start({ type: "research" });
 
 		expect(() => controller.abortInFlightLanes()).not.toThrow();

@@ -53,6 +53,35 @@ export class WorkerProfileResolver {
 	): { ok: true; resolved: ResolvedWorkerProfile } | { ok: false; reason: string } {
 		const profileId = request.profileId?.trim() || defaultProfileId;
 		if (!profileId) return { ok: false, reason: "orchestration_profile_required" };
+		const selected = this.resolveProfileId(profileId);
+		if (!selected.ok) return selected;
+		const profile = selected.resolved.profile;
+		if (request.verificationOfTaskId && profile.role !== "verifier") {
+			return { ok: false, reason: "verification_profile_role_mismatch" };
+		}
+		if (!request.verificationOfTaskId && profile.role === "verifier") {
+			return { ok: false, reason: "verifier_profile_requires_runtime_dispatch" };
+		}
+		return selected;
+	}
+
+	resolveVerifier(
+		workerProfile: OrchestrationProfile,
+	): { ok: true; resolved: ResolvedWorkerProfile } | { ok: false; reason: string } {
+		if (!workerProfile.requireIndependentVerification || !workerProfile.verificationProfileId) {
+			return { ok: false, reason: "independent_verifier_not_configured" };
+		}
+		const selected = this.resolveProfileId(workerProfile.verificationProfileId);
+		if (!selected.ok) return selected;
+		if (selected.resolved.profile.role !== "verifier") {
+			return { ok: false, reason: "verification_profile_role_mismatch" };
+		}
+		return selected;
+	}
+
+	private resolveProfileId(
+		profileId: string,
+	): { ok: true; resolved: ResolvedWorkerProfile } | { ok: false; reason: string } {
 		const activeProfile = this.options.getActiveOrchestrationProfile();
 		if (
 			activeProfile &&

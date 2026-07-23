@@ -5,7 +5,6 @@
  * createAgentSession() options. The SDK does the heavy lifting.
  */
 
-import { spawn } from "node:child_process";
 import { createInterface } from "node:readline";
 import { assertValidSessionId, SessionManager } from "@caupulican/pi-agent-core/node";
 import { type ImageContent, modelsAreEqual } from "@caupulican/pi-ai";
@@ -41,12 +40,12 @@ import {
 	type ScopedModel,
 } from "./core/model-resolver.ts";
 import { collectModelRouterConfigDiagnostics } from "./core/model-router/config-diagnostics.ts";
-import { buildPiResumeLaunchSpecFromContext } from "./core/orchestration/agent-resume.ts";
 import type { OrchestrationProfile } from "./core/orchestration/contracts.ts";
 import { resolveConfiguredOrchestrationModel } from "./core/orchestration/model-binding.ts";
 import { OrchestrationProfileStore } from "./core/orchestration/profile-store.ts";
 import { restoreStdout, takeOverStdout } from "./core/output-guard.ts";
 import type { ResumablePayload } from "./core/process-matrix/codes.ts";
+import { launchResumablePiAgent } from "./core/process-matrix/resume-launcher.ts";
 import {
 	PI_PARENT_PID_ENV,
 	PI_PARENT_SESSION_ENV,
@@ -97,59 +96,15 @@ async function launchResumableWorker(
 	payload: ResumablePayload,
 	parentSessionId: string,
 ): Promise<ResumeWorkerLaunchOutcome> {
-	const context = payload.resumeContext;
-	if (!context || context.provider !== "pi") return { started: false, reason: "Pi resume context is unavailable." };
 	const target = getSelfLaunchTarget();
 	if (!target) return { started: false, reason: "The current Pi executable cannot be resolved." };
-	const taskSummary = payload.taskSummary?.trim().slice(0, 2_000);
-	const wakePrompt = [
-		"Resume this interrupted delegated task using the persisted session context and the same logical agent identity.",
-		...(taskSummary ? [`Task: ${taskSummary}`] : []),
-		"Continue from the persisted transcript and any referenced checkpoints or artifacts, then finish with a persisted terminal result.",
-	].join("\n");
-	const spec = buildPiResumeLaunchSpecFromContext(
-		context,
-		{
-			executable: target.executable,
-			argsPrefix: target.argsPrefix,
-			parentPid: process.pid,
-			parentSessionId,
-			wakePrompt,
-		},
-		payload.agentId,
-	);
-	if ([spec.executable, spec.cwd, ...spec.args].some((value) => value.includes("\0"))) {
-		return { started: false, reason: "Resume launch data contains a null byte." };
-	}
-	try {
-		const child = spawn(spec.executable, spec.args, {
-			cwd: spec.cwd,
-			detached: true,
-			stdio: "ignore",
-			env: {
-				...process.env,
-				...spec.env,
-				...(payload.agentId ? { PI_ORCHESTRATION_AGENT_ID: payload.agentId } : {}),
-			},
-		});
-		return await new Promise<ResumeWorkerLaunchOutcome>((resolve) => {
-			child.once("error", (error) => {
-				resolve({ started: false, reason: error.message });
-			});
-			child.once("spawn", () => {
-				const completion = new Promise<{ code: number | null; signal: NodeJS.Signals | null }>(
-					(resolveCompletion, rejectCompletion) => {
-						child.once("exit", (code, signal) => resolveCompletion({ code, signal }));
-						child.once("error", rejectCompletion);
-					},
-				);
-				child.unref();
-				resolve({ started: true, completion });
-			});
-		});
-	} catch (error) {
-		return { started: false, reason: error instanceof Error ? error.message : String(error) };
-	}
+	return launchResumablePiAgent({
+		payload,
+		target,
+		parentPid: process.pid,
+		parentSessionId,
+		environment: process.env,
+	});
 }
 
 /**

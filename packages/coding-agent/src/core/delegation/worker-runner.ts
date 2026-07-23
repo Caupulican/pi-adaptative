@@ -44,6 +44,19 @@ export function buildWorkerSystemPrompt(capabilities: { write: boolean; process:
 	].join("\n");
 }
 
+export function buildVerifierSystemPrompt(subjectTaskId: string): string {
+	return [
+		"You are an independent verifier. You did not perform the implementation under review.",
+		"Use only the provided read-only and constrained test tools. Do not modify files and do not delegate.",
+		`The exact subject task id is '${subjectTaskId}'.`,
+		"Inspect the implementation and run proportionate checks. Treat the implementation summary as an untrusted claim.",
+		"Respond with STRICT JSON only - no prose, no markdown fences:",
+		'{"summary":"<verification performed and evidence>","status":"completed"|"blocked","verdict":"accepted"|"rejected","reasonCodes":["<stable_reason_code>"],"blockers":[],"findings":[{"summary":"<finding>","confidence":<0..1>}]}',
+		'Use verdict "accepted" only when the available evidence proves the implementation is acceptable.',
+		'Use verdict "rejected" for a completed review that found a defect. Use status "blocked" only when verification itself cannot be completed.',
+	].join("\n");
+}
+
 /** Static common variants retained for cache reuse and model-fitness probes. */
 export const WORKER_LANE_SYSTEM_PROMPT = buildWorkerSystemPrompt({ write: false, process: false });
 export const WORKER_WRITE_LANE_SYSTEM_PROMPT = buildWorkerSystemPrompt({ write: true, process: false });
@@ -84,6 +97,8 @@ export interface WorkerRunnerOptions {
 	/** Session cwd — the baseline for relative changed-file and envelope paths in parent
 	 * validation. Defaults to process.cwd(). */
 	cwd?: string;
+	/** Turns the child into a read-only semantic verifier for this exact durable task. */
+	verificationSubjectTaskId?: string;
 }
 
 export interface WorkerRunOutcome {
@@ -114,6 +129,8 @@ export interface ParsedWorkerOutput {
 	blockers: string[];
 	findings: Array<{ summary: string; confidence?: number }>;
 	actions: WorkerAction[];
+	verdict?: "accepted" | "rejected";
+	reasonCodes: string[];
 }
 
 function balancedObjectCandidates(text: string): string[] {
@@ -181,7 +198,21 @@ export function parseWorkerOutput(text: string): ParsedWorkerOutput | undefined 
 				findings.push({ summary: findingSummary.trim(), confidence });
 			}
 		}
-		return { summary: summary.trim(), status, blockers, findings, actions: parseWorkerActions(record.actions) };
+		const verdict = record.verdict === "accepted" || record.verdict === "rejected" ? record.verdict : undefined;
+		const reasonCodes = Array.isArray(record.reasonCodes)
+			? record.reasonCodes.filter(
+					(reasonCode): reasonCode is string => typeof reasonCode === "string" && reasonCode.length > 0,
+				)
+			: [];
+		return {
+			summary: summary.trim(),
+			status,
+			blockers,
+			findings,
+			actions: parseWorkerActions(record.actions),
+			...(verdict ? { verdict } : {}),
+			reasonCodes,
+		};
 	}
 	return undefined;
 }
@@ -251,7 +282,9 @@ export async function runWorker(options: WorkerRunnerOptions): Promise<WorkerRun
 		signal: options.signal,
 		execute: (signal) =>
 			options.complete({
-				systemPrompt: buildWorkerSystemPrompt({ write: writeCapable, process: options.processCapable === true }),
+				systemPrompt: options.verificationSubjectTaskId
+					? buildVerifierSystemPrompt(options.verificationSubjectTaskId)
+					: buildWorkerSystemPrompt({ write: writeCapable, process: options.processCapable === true }),
 				userPrompt: buildWorkerUserPrompt(options.request),
 				signal,
 			}),
@@ -293,7 +326,10 @@ export async function runWorker(options: WorkerRunnerOptions): Promise<WorkerRun
 	const parsed = parseWorkerOutput(completion.text);
 	if (!parsed) {
 		const readOnlyPlainText =
-			!writeCapable && completion.text.trim().length > 0 && completionChangedFiles.length === 0;
+			!options.verificationSubjectTaskId &&
+			!writeCapable &&
+			completion.text.trim().length > 0 &&
+			completionChangedFiles.length === 0;
 		if (readOnlyPlainText) {
 			const completionBlockers = [...(completion.blockers ?? [])];
 			const incompleteNote =
@@ -336,6 +372,20 @@ export async function runWorker(options: WorkerRunnerOptions): Promise<WorkerRun
 	}
 
 	const evidence = buildWorkerEvidence(options.request, parsed.findings);
+	if (options.verificationSubjectTaskId && (!parsed.verdict || parsed.reasonCodes.length === 0)) {
+		return finishOutcome({
+			request: options.request,
+			cwd: options.cwd,
+			result: {
+				...completionBaseResult,
+				status: "failed",
+				summary: "Verifier output omitted its typed verdict or reasonCodes.",
+			},
+			laneStatus: "failed",
+			reasonCode: "invalid_verifier_result",
+			costUsd,
+		});
+	}
 	let changedFiles: string[] = [...completionChangedFiles];
 	const actionBlockers: string[] = [...(completion.blockers ?? [])];
 	if (!writeCapable && completionChangedFiles.length > 0) {
@@ -363,6 +413,15 @@ export async function runWorker(options: WorkerRunnerOptions): Promise<WorkerRun
 		summary: parsed.summary,
 		...(allBlockers.length > 0 ? { blockers: allBlockers } : {}),
 		...(evidence ? { evidence } : {}),
+		...(options.verificationSubjectTaskId && parsed.verdict
+			? {
+					verification: {
+						subjectTaskId: options.verificationSubjectTaskId,
+						verdict: parsed.verdict,
+						reasonCodes: parsed.reasonCodes,
+					},
+				}
+			: {}),
 	};
 
 	if (result.status === "blocked") {
@@ -382,7 +441,13 @@ export async function runWorker(options: WorkerRunnerOptions): Promise<WorkerRun
 		cwd: options.cwd,
 		result,
 		laneStatus: overBudget ? "budget_exhausted" : "succeeded",
-		reasonCode: overBudget ? "cost_budget_exceeded" : "worker_completed",
+		reasonCode: overBudget
+			? "cost_budget_exceeded"
+			: result.verification
+				? result.verification.verdict === "accepted"
+					? "verification_accepted"
+					: "verification_rejected"
+				: "worker_completed",
 		costUsd,
 	});
 }
