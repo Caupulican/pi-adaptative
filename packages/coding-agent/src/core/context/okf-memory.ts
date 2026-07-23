@@ -1,6 +1,7 @@
 import { createHash } from "node:crypto";
 import { stringify } from "yaml";
 import { parseFrontmatter } from "../../utils/frontmatter.ts";
+import { isRecordObject } from "../util/value-guards.ts";
 import type { MemoryScope } from "./context-item.ts";
 import type {
 	MemoryEvidenceRef,
@@ -96,10 +97,6 @@ const OKF_TYPE_TO_MEMORY_KIND = new Map<PiOkfType, MemoryItemKind>([
 
 const VALID_SCOPES: readonly MemoryScope[] = ["session", "project", "user", "global"];
 
-function isRecord(value: unknown): value is Record<string, unknown> {
-	return typeof value === "object" && value !== null && !Array.isArray(value);
-}
-
 function stringField(record: Record<string, unknown>, key: string): string | undefined {
 	const value = record[key];
 	return typeof value === "string" && value.trim().length > 0 ? value : undefined;
@@ -160,7 +157,7 @@ export function parseOkfMemoryDocument(content: string, options: ParseOkfMemoryO
 	}
 
 	const diagnostics: OkfMemoryDiagnostic[] = [];
-	if (!isRecord(frontmatter) || Object.keys(frontmatter).length === 0) {
+	if (!isRecordObject(frontmatter) || Object.keys(frontmatter).length === 0) {
 		return { body, diagnostics: [{ code: "missing_frontmatter", message: "OKF memory requires YAML frontmatter." }] };
 	}
 
@@ -177,16 +174,16 @@ export function parseOkfMemoryDocument(content: string, options: ParseOkfMemoryO
 		diagnostics.push({ code: "missing_description", message: "OKF memory requires a description." });
 
 	const pi = frontmatter.pi;
-	if (!isRecord(pi)) diagnostics.push({ code: "missing_pi", message: "OKF memory requires a pi block." });
-	const scope = isRecord(pi) ? validScope(stringField(pi, "scope")) : undefined;
-	if (isRecord(pi) && scope === undefined)
+	if (!isRecordObject(pi)) diagnostics.push({ code: "missing_pi", message: "OKF memory requires a pi block." });
+	const scope = isRecordObject(pi) ? validScope(stringField(pi, "scope")) : undefined;
+	if (isRecordObject(pi) && scope === undefined)
 		diagnostics.push({ code: "invalid_scope", message: "pi.scope must be session, project, user, or global." });
-	const authority = isRecord(pi) ? stringField(pi, "authority") : undefined;
-	if (isRecord(pi) && authority !== PI_OKF_AUTHORITY) {
+	const authority = isRecordObject(pi) ? stringField(pi, "authority") : undefined;
+	if (isRecordObject(pi) && authority !== PI_OKF_AUTHORITY) {
 		diagnostics.push({ code: "invalid_authority", message: `pi.authority must be ${PI_OKF_AUTHORITY}.` });
 	}
-	const evidenceRefs = isRecord(pi) ? stringArrayField(pi, "evidence_refs") : undefined;
-	if (isRecord(pi) && pi.evidence_refs !== undefined && evidenceRefs === undefined) {
+	const evidenceRefs = isRecordObject(pi) ? stringArrayField(pi, "evidence_refs") : undefined;
+	if (isRecordObject(pi) && pi.evidence_refs !== undefined && evidenceRefs === undefined) {
 		diagnostics.push({ code: "invalid_evidence_refs", message: "pi.evidence_refs must be a string array." });
 	}
 

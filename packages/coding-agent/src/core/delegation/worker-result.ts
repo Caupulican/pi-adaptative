@@ -2,6 +2,7 @@ import path from "node:path";
 import type { CapabilityEnvelope, GateOutcome, WorkerRequest, WorkerResult } from "../autonomy/contracts.ts";
 import { checkPathScope } from "../autonomy/path-scope.ts";
 import { cloneEvidenceBundleForStorage, isEvidenceBundle } from "../research/evidence-bundle.ts";
+import { isPlainRecord } from "../util/value-guards.ts";
 
 export function cloneWorkerResultForStorage(result: WorkerResult): WorkerResult {
 	return {
@@ -14,12 +15,6 @@ export function cloneWorkerResultForStorage(result: WorkerResult): WorkerResult 
 			? { ...result.verification, reasonCodes: [...result.verification.reasonCodes] }
 			: undefined,
 	};
-}
-
-function isPlainRecord(value: unknown): value is Record<string, unknown> {
-	if (!value || typeof value !== "object" || Array.isArray(value)) return false;
-	const prototype = Object.getPrototypeOf(value);
-	return prototype === Object.prototype || prototype === null;
 }
 
 export function isWorkerResult(value: unknown): value is WorkerResult {

@@ -1,3 +1,4 @@
+import { isPlainRecord } from "../util/value-guards.ts";
 import type {
 	ExecutionGrant,
 	OrchestrationDispatchRequest,
@@ -40,12 +41,6 @@ export class OrchestrationProfileError extends Error {
 	}
 }
 
-function isRecord(value: unknown): value is Record<string, unknown> {
-	if (!value || typeof value !== "object" || Array.isArray(value)) return false;
-	const prototype = Object.getPrototypeOf(value);
-	return prototype === Object.prototype || prototype === null;
-}
-
 function exactKeys(record: Record<string, unknown>, allowed: readonly string[]): boolean {
 	const allowedSet = new Set(allowed);
 	return Object.keys(record).every((key) => allowedSet.has(key));
@@ -62,7 +57,7 @@ function duplicateStrings(values: readonly string[]): string[] {
 }
 
 export function parseOrchestrationDispatchRequest(value: unknown): OrchestrationDispatchRequest {
-	if (!isRecord(value)) throw new OrchestrationProfileError("Dispatch request must be an object.");
+	if (!isPlainRecord(value)) throw new OrchestrationProfileError("Dispatch request must be an object.");
 	if (!exactKeys(value, ["taskId", "profileId", "instructions", "resourcePointerIds"])) {
 		throw new OrchestrationProfileError(
 			"Dispatch request contains an unsupported field. Model and thinking overrides are forbidden; select a profileId.",
@@ -277,7 +272,7 @@ function isStringArray(value: unknown): value is string[] {
 }
 
 export function parseOrchestrationProfile(value: unknown, sourcePath?: string): OrchestrationProfile {
-	if (!isRecord(value)) throw new OrchestrationProfileError("Orchestration profile must be an object.");
+	if (!isPlainRecord(value)) throw new OrchestrationProfileError("Orchestration profile must be an object.");
 	if (
 		!exactKeys(value, [
 			"schemaVersion",
@@ -305,16 +300,16 @@ export function parseOrchestrationProfile(value: unknown, sourcePath?: string): 
 	const budget = value.budget;
 	const executionPolicy = value.executionPolicy;
 	if (
-		!isRecord(modelPolicy) ||
+		!isPlainRecord(modelPolicy) ||
 		!exactKeys(modelPolicy, ["mode", "candidates"]) ||
 		!Array.isArray(modelPolicy.candidates)
 	) {
 		throw new OrchestrationProfileError("Orchestration profile modelPolicy is invalid.");
 	}
-	if (!isRecord(budget)) throw new OrchestrationProfileError("Orchestration profile budget is invalid.");
+	if (!isPlainRecord(budget)) throw new OrchestrationProfileError("Orchestration profile budget is invalid.");
 	if (
 		executionPolicy !== undefined &&
-		(!isRecord(executionPolicy) ||
+		(!isPlainRecord(executionPolicy) ||
 			!exactKeys(executionPolicy, ["allowedExecutables", "allowedEnvironmentVariables", "maxOutputBytes"]) ||
 			!isStringArray(executionPolicy.allowedExecutables) ||
 			!isStringArray(executionPolicy.allowedEnvironmentVariables) ||
@@ -323,7 +318,7 @@ export function parseOrchestrationProfile(value: unknown, sourcePath?: string): 
 		throw new OrchestrationProfileError("Orchestration profile executionPolicy is invalid.");
 	}
 	const candidates = modelPolicy.candidates.map((candidate) => {
-		if (!isRecord(candidate) || !exactKeys(candidate, ["provider", "modelId", "thinkingLevel"])) {
+		if (!isPlainRecord(candidate) || !exactKeys(candidate, ["provider", "modelId", "thinkingLevel"])) {
 			throw new OrchestrationProfileError("Orchestration profile model candidate is invalid.");
 		}
 		if (

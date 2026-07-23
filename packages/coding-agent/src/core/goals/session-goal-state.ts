@@ -1,39 +1,35 @@
 import type { SessionManager } from "@caupulican/pi-agent-core/node";
+import {
+	appendSessionSnapshot,
+	decodeSessionSnapshotPayload,
+	getLatestSessionSnapshotOnBranch,
+	type SessionSnapshotCodec,
+	type SessionSnapshotPayload,
+} from "../session-snapshot.ts";
 import { cloneGoalStateForStorage, type GoalState, isGoalState } from "./goal-state.ts";
 
 export const GOAL_STATE_CUSTOM_TYPE = "goal_state";
 
-export interface GoalStateSnapshotPayload {
-	version: 1;
-	state: GoalState;
-}
+export type GoalStateSnapshotPayload = SessionSnapshotPayload<"state", GoalState>;
+
+const GOAL_STATE_SNAPSHOT_CODEC: SessionSnapshotCodec<GoalState, "state"> = {
+	customType: GOAL_STATE_CUSTOM_TYPE,
+	valueKey: "state",
+	isValue: isGoalState,
+	clone: cloneGoalStateForStorage,
+};
 
 export function appendGoalStateSnapshot(
 	sessionManager: Pick<SessionManager, "appendCustomEntry">,
 	state: GoalState,
 ): string {
-	const payload: GoalStateSnapshotPayload = {
-		version: 1,
-		state: cloneGoalStateForStorage(state),
-	};
-	return sessionManager.appendCustomEntry(GOAL_STATE_CUSTOM_TYPE, payload);
-}
-
-function isPlainRecord(value: unknown): value is Record<string, unknown> {
-	if (!value || typeof value !== "object" || Array.isArray(value)) return false;
-	const prototype = Object.getPrototypeOf(value);
-	return prototype === Object.prototype || prototype === null;
+	return appendSessionSnapshot(sessionManager, GOAL_STATE_SNAPSHOT_CODEC, state);
 }
 
 /** Pure payload decode: validates + clones a goal-state snapshot payload. No SessionManager access,
  * so unit tests can exercise decoding directly against a constructed `data` value. */
 export function decodeGoalStateSnapshotPayload(data: unknown): GoalState | undefined {
-	if (!isPlainRecord(data)) return undefined;
-	if (data.version !== 1) return undefined;
-	if (!("state" in data)) return undefined;
-	const state = data.state;
-	if (isGoalState(state)) return cloneGoalStateForStorage(state);
-	return undefined;
+	return decodeSessionSnapshotPayload(data, GOAL_STATE_SNAPSHOT_CODEC);
 }
 
 /**
@@ -45,13 +41,5 @@ export function decodeGoalStateSnapshotPayload(data: unknown): GoalState | undef
 export function getLatestGoalStateSnapshot(
 	sessionManager: Pick<SessionManager, "getLatestCustomEntryOnBranch">,
 ): GoalState | undefined {
-	let fromId: string | undefined;
-	for (;;) {
-		const entry = sessionManager.getLatestCustomEntryOnBranch(GOAL_STATE_CUSTOM_TYPE, fromId);
-		if (!entry) return undefined;
-		const decoded = decodeGoalStateSnapshotPayload(entry.data);
-		if (decoded !== undefined) return decoded;
-		if (entry.parentId === null) return undefined;
-		fromId = entry.parentId;
-	}
+	return getLatestSessionSnapshotOnBranch(sessionManager, GOAL_STATE_SNAPSHOT_CODEC);
 }

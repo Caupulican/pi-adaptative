@@ -1,4 +1,5 @@
 import type { LearningDecision } from "../autonomy/contracts.ts";
+import { isPlainRecord } from "../util/value-guards.ts";
 
 export type DurableChangeLayer =
 	| "memory"
@@ -179,12 +180,6 @@ export function evaluateLearningDecision(args: {
 		requiresApproval: false,
 		createdAt: now,
 	});
-}
-
-function isPlainRecord(value: unknown): value is Record<string, unknown> {
-	if (!value || typeof value !== "object" || Array.isArray(value)) return false;
-	const prototype = Object.getPrototypeOf(value);
-	return prototype === Object.prototype || prototype === null;
 }
 
 export function isLearningDecision(value: unknown): value is LearningDecision {

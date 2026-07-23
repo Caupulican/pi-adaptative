@@ -9,6 +9,7 @@ import {
 import { existsSync, readFileSync } from "fs";
 import { getAgentDir } from "../config.ts";
 import { configFile } from "./agent-paths.ts";
+import { isRecordObject } from "./util/value-guards.ts";
 
 export interface AppKeybindings {
 	"app.interrupt": true;
@@ -273,16 +274,12 @@ const KEYBINDING_NAME_MIGRATIONS = {
 	deleteSessionNoninvasive: "app.session.deleteNoninvasive",
 } as const satisfies Record<string, Keybinding>;
 
-function isRecord(value: unknown): value is Record<string, unknown> {
-	return typeof value === "object" && value !== null && !Array.isArray(value);
-}
-
 function isLegacyKeybindingName(key: string): key is keyof typeof KEYBINDING_NAME_MIGRATIONS {
 	return key in KEYBINDING_NAME_MIGRATIONS;
 }
 
 function toKeybindingsConfig(value: unknown): KeybindingsConfig {
-	if (!isRecord(value)) return {};
+	if (!isRecordObject(value)) return {};
 
 	const config: KeybindingsConfig = {};
 	for (const [key, binding] of Object.entries(value)) {
@@ -341,7 +338,7 @@ function loadRawConfig(path: string): Record<string, unknown> | undefined {
 	if (!existsSync(path)) return undefined;
 	try {
 		const parsed = JSON.parse(readFileSync(path, "utf-8")) as unknown;
-		return isRecord(parsed) ? parsed : undefined;
+		return isRecordObject(parsed) ? parsed : undefined;
 	} catch {
 		return undefined;
 	}

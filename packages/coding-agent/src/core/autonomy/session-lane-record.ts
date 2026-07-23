@@ -1,49 +1,32 @@
 import type { SessionEntry, SessionManager } from "@caupulican/pi-agent-core/node";
+import {
+	appendSessionSnapshot,
+	getSessionSnapshots,
+	type SessionSnapshotCodec,
+	type SessionSnapshotPayload,
+} from "../session-snapshot.ts";
 import { cloneLaneRecordForStorage, isLaneRecord, type LaneRecord } from "./lane-tracker.ts";
 
 export const LANE_RECORD_CUSTOM_TYPE = "lane_record";
 
-export interface LaneRecordSnapshotPayload {
-	version: 1;
-	record: LaneRecord;
-}
+export type LaneRecordSnapshotPayload = SessionSnapshotPayload<"record", LaneRecord>;
+
+const LANE_RECORD_SNAPSHOT_CODEC: SessionSnapshotCodec<LaneRecord, "record"> = {
+	customType: LANE_RECORD_CUSTOM_TYPE,
+	valueKey: "record",
+	isValue: isLaneRecord,
+	clone: cloneLaneRecordForStorage,
+};
 
 export function appendLaneRecordSnapshot(
 	sessionManager: Pick<SessionManager, "appendCustomEntry">,
 	record: LaneRecord,
 ): string {
-	const payload: LaneRecordSnapshotPayload = {
-		version: 1,
-		record: cloneLaneRecordForStorage(record),
-	};
-	return sessionManager.appendCustomEntry(LANE_RECORD_CUSTOM_TYPE, payload);
-}
-
-function isPlainRecord(value: unknown): value is Record<string, unknown> {
-	if (!value || typeof value !== "object" || Array.isArray(value)) return false;
-	const prototype = Object.getPrototypeOf(value);
-	return prototype === Object.prototype || prototype === null;
+	return appendSessionSnapshot(sessionManager, LANE_RECORD_SNAPSHOT_CODEC, record);
 }
 
 export function getLaneRecordSnapshots(entries: readonly SessionEntry[]): LaneRecord[] {
-	const records: LaneRecord[] = [];
-
-	for (const entry of entries) {
-		if (entry.type !== "custom" || entry.customType !== LANE_RECORD_CUSTOM_TYPE) {
-			continue;
-		}
-
-		const payload = entry.data;
-		if (!isPlainRecord(payload)) continue;
-		if (payload.version !== 1) continue;
-		if (!("record" in payload)) continue;
-		const record = payload.record;
-		if (isLaneRecord(record)) {
-			records.push(cloneLaneRecordForStorage(record));
-		}
-	}
-
-	return records;
+	return getSessionSnapshots(entries, LANE_RECORD_SNAPSHOT_CODEC);
 }
 
 /** Latest durable projection per logical lane id, preserving first-seen lane order. */

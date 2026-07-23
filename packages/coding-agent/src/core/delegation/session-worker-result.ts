@@ -1,17 +1,32 @@
 import type { SessionEntry, SessionManager } from "@caupulican/pi-agent-core/node";
 import type { WorkerRequest, WorkerResult } from "../autonomy/contracts.ts";
+import {
+	decodeSessionSnapshotPayload,
+	getActiveSessionBranchEntries,
+	getSessionSnapshots,
+	isVersionOneSessionSnapshotPayload,
+	type SessionBranchEntrySource,
+	type SessionSnapshotCodec,
+	type SessionSnapshotPayload,
+} from "../session-snapshot.ts";
+import { isPlainRecord } from "../util/value-guards.ts";
 import { cloneWorkerResultForStorage, isParentReviewRequired, isWorkerResult } from "./worker-result.ts";
 
 export const WORKER_RESULT_CUSTOM_TYPE = "worker_result";
 
-export interface WorkerResultSnapshotPayload {
-	version: 1;
-	result: WorkerResult;
+export type WorkerResultSnapshotPayload = SessionSnapshotPayload<"result", WorkerResult> & {
 	/** The originating request: persisted so a result is auditable against exactly what was
 	 * asked — instructions, route, and the capability envelope that bounded it. Optional for
 	 * backward compatibility with entries recorded before this field existed. */
 	request?: WorkerRequest;
-}
+};
+
+const WORKER_RESULT_SNAPSHOT_CODEC: SessionSnapshotCodec<WorkerResult, "result"> = {
+	customType: WORKER_RESULT_CUSTOM_TYPE,
+	valueKey: "result",
+	isValue: isWorkerResult,
+	clone: cloneWorkerResultForStorage,
+};
 
 export function appendWorkerResultSnapshot(
 	sessionManager: Pick<SessionManager, "appendCustomEntry">,
@@ -45,7 +60,7 @@ export function getWorkerRequestSnapshots(entries: readonly SessionEntry[]): Wor
 	for (const entry of entries) {
 		if (entry.type !== "custom" || entry.customType !== WORKER_RESULT_CUSTOM_TYPE) continue;
 		const payload = entry.data;
-		if (!isPlainRecord(payload) || payload.version !== 1) continue;
+		if (!isVersionOneSessionSnapshotPayload(payload)) continue;
 		const request = payload.request;
 		if (isPlainRecord(request) && typeof request.id === "string") {
 			requests.push(structuredClone(request) as unknown as WorkerRequest);
@@ -54,31 +69,8 @@ export function getWorkerRequestSnapshots(entries: readonly SessionEntry[]): Wor
 	return requests;
 }
 
-function isPlainRecord(value: unknown): value is Record<string, unknown> {
-	if (!value || typeof value !== "object" || Array.isArray(value)) return false;
-	const prototype = Object.getPrototypeOf(value);
-	return prototype === Object.prototype || prototype === null;
-}
-
 export function getWorkerResultSnapshots(entries: readonly SessionEntry[]): WorkerResult[] {
-	const results: WorkerResult[] = [];
-
-	for (const entry of entries) {
-		if (entry.type !== "custom" || entry.customType !== WORKER_RESULT_CUSTOM_TYPE) {
-			continue;
-		}
-
-		const payload = entry.data;
-		if (!isPlainRecord(payload)) continue;
-		if (payload.version !== 1) continue;
-		if (!("result" in payload)) continue;
-		const result = payload.result;
-		if (isWorkerResult(result)) {
-			results.push(cloneWorkerResultForStorage(result));
-		}
-	}
-
-	return results;
+	return getSessionSnapshots(entries, WORKER_RESULT_SNAPSHOT_CODEC);
 }
 
 /**
@@ -95,13 +87,13 @@ export function getLatestWorkerResultSnapshot(
 	for (const entry of entries) {
 		if (entry.type !== "custom" || entry.customType !== WORKER_RESULT_CUSTOM_TYPE) continue;
 		const payload = entry.data;
-		if (!isPlainRecord(payload) || payload.version !== 1 || !("result" in payload)) continue;
-		const result = payload.result;
-		if (!isWorkerResult(result) || result.requestId !== requestId) continue;
+		if (!isVersionOneSessionSnapshotPayload(payload)) continue;
+		const result = decodeSessionSnapshotPayload(payload, WORKER_RESULT_SNAPSHOT_CODEC);
+		if (!result || result.requestId !== requestId) continue;
 		const request = payload.request;
 		latest = {
 			version: 1,
-			result: cloneWorkerResultForStorage(result),
+			result,
 			...(isPlainRecord(request) && typeof request.id === "string"
 				? { request: structuredClone(request) as unknown as WorkerRequest }
 				: {}),
@@ -124,11 +116,11 @@ export type AcknowledgeWorkerReviewResult =
  * write-blocking: this only marks the mutation reviewed, it does not touch the worker's files.
  */
 export function acknowledgeWorkerResultReview(
-	sessionManager: Pick<SessionManager, "appendCustomEntry" | "getEntries">,
+	sessionManager: Pick<SessionManager, "appendCustomEntry"> & SessionBranchEntrySource,
 	requestId: string,
 	now: () => string = () => new Date().toISOString(),
 ): AcknowledgeWorkerReviewResult {
-	const latest = getLatestWorkerResultSnapshot(sessionManager.getEntries(), requestId);
+	const latest = getLatestWorkerResultSnapshot(getActiveSessionBranchEntries(sessionManager), requestId);
 	if (!latest) return { ok: false, reason: "unknown_worker_result" };
 	if (!latest.result.parentReviewRequired) return { ok: false, reason: "not_flagged" };
 	if (latest.result.parentReviewedAt) return { ok: false, reason: "already_reviewed" };

@@ -48,12 +48,12 @@ export interface AutonomyTelemetryDeps {
 	getGoalStateSnapshot(): GoalState | undefined;
 	/** Live count of active lanes from the lane tracker — never inferred from historical snapshots. */
 	getActiveLaneCount(): number;
-	/** Research evidence bundles recorded this session. */
-	getEvidenceBundleSnapshots(): EvidenceBundle[];
-	/** Worker-delegation result snapshots recorded this session. */
-	getWorkerResultSnapshots(): WorkerResult[];
-	/** Learning decision snapshots recorded this session. */
-	getLearningDecisionSnapshots(): LearningDecision[];
+	/** Research evidence bundles across the complete session tree, including sibling branches. */
+	getSessionEvidenceBundleHistory(): EvidenceBundle[];
+	/** Worker-delegation results across the complete session tree, including sibling branches. */
+	getSessionWorkerResultHistory(): WorkerResult[];
+	/** Learning decisions across the complete session tree, including sibling branches. */
+	getSessionLearningDecisionHistory(): LearningDecision[];
 	/** Learning audit records recorded this session. */
 	getLearningAuditRecords(): LearningAuditRecord[];
 }
@@ -236,7 +236,7 @@ export class AutonomyTelemetry {
 				},
 			});
 		}
-		for (const bundle of this.deps.getEvidenceBundleSnapshots().slice(-maxEntriesPerFamily)) {
+		for (const bundle of this.deps.getSessionEvidenceBundleHistory().slice(-maxEntriesPerFamily)) {
 			researchEntries.push({
 				title: `Research: ${bundle.query}`,
 				metadata: { sourceCount: bundle.sources.length, findingCount: bundle.findings.length },
@@ -260,7 +260,7 @@ export class AutonomyTelemetry {
 				metadata: { costUsd: record.costUsd, startedAt: record.startedAt, completedAt: record.completedAt },
 			});
 		}
-		const workerResults = this.deps.getWorkerResultSnapshots();
+		const workerResults = this.deps.getSessionWorkerResultHistory();
 		for (const result of workerResults.slice(-maxEntriesPerFamily)) {
 			delegationEntries.push({
 				title: `Worker ${result.requestId} (${result.status})`,
@@ -277,7 +277,7 @@ export class AutonomyTelemetry {
 		}
 
 		const learningEntries: DiagnosticEntry[] = [];
-		const learningDecisions = this.deps.getLearningDecisionSnapshots();
+		const learningDecisions = this.deps.getSessionLearningDecisionHistory();
 		for (const decision of learningDecisions.slice(-maxEntriesPerFamily)) {
 			learningEntries.push({
 				title: `Learning (${decision.kind})`,

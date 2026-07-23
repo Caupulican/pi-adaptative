@@ -1,4 +1,5 @@
 import type { JsonObject, JsonValue } from "../autonomy/contracts.ts";
+import { isPlainRecord } from "../util/value-guards.ts";
 
 /**
  * Versioned control-plane contracts. These records are the durable truth exchanged between the
@@ -409,12 +410,6 @@ export interface AppendOrchestrationEventInput {
 	causationId?: string;
 	idempotencyKey?: string;
 	payload: JsonObject;
-}
-
-function isPlainRecord(value: unknown): value is Record<string, unknown> {
-	if (!value || typeof value !== "object" || Array.isArray(value)) return false;
-	const prototype = Object.getPrototypeOf(value);
-	return prototype === Object.prototype || prototype === null;
 }
 
 function isNonEmptyString(value: unknown): value is string {

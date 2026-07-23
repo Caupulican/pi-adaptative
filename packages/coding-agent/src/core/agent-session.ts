@@ -169,6 +169,7 @@ import type { ResourceExtensionPaths, ResourceLoader } from "./resource-loader.t
 import { stripResourceProfileBlocks } from "./resource-profile-blocks.ts";
 import { RuntimeBuilder } from "./runtime-builder.ts";
 import { SessionAnalytics, type ToolArgumentValidationStats } from "./session-analytics.ts";
+import { getActiveSessionBranchEntries } from "./session-snapshot.ts";
 import { SessionTreeNavigator } from "./session-tree-navigator.ts";
 import type { ResourceProfileFilterSettings, SettingsManager } from "./settings-manager.ts";
 import type { SlashCommandInfo } from "./slash-commands.ts";
@@ -933,9 +934,9 @@ export class AgentSession {
 			getCostSummary: () => this.getCostSummary(),
 			getGoalStateSnapshot: () => this.getGoalStateSnapshot(),
 			getActiveLaneCount: () => this._backgroundLanes.getActiveLaneCount(),
-			getEvidenceBundleSnapshots: () => this.getEvidenceBundleSnapshots(),
-			getWorkerResultSnapshots: () => this.getWorkerResultSnapshots(),
-			getLearningDecisionSnapshots: () => this.getLearningDecisionSnapshots(),
+			getSessionEvidenceBundleHistory: () => getEvidenceBundleSnapshots(this.sessionManager.getEntries()),
+			getSessionWorkerResultHistory: () => getWorkerResultSnapshots(this.sessionManager.getEntries()),
+			getSessionLearningDecisionHistory: () => getLearningDecisionSnapshots(this.sessionManager.getEntries()),
 			getLearningAuditRecords: () => this.getLearningAuditRecords(),
 		});
 		this._modelRegistry = config.modelRegistry;
@@ -4016,14 +4017,15 @@ export class AgentSession {
 	}
 
 	/**
-	 * Retrieve the latest valid evidence bundle snapshot from the session log.
+	 * Retrieve the latest valid evidence bundle snapshot from the active branch.
 	 */
 	getEvidenceBundleSnapshot(): EvidenceBundle | undefined {
-		return getLatestEvidenceBundleSnapshot(this.sessionManager.getEntries());
+		return getLatestEvidenceBundleSnapshot(getActiveSessionBranchEntries(this.sessionManager));
 	}
 
+	/** Retrieve all valid evidence bundle snapshots from the active branch. */
 	getEvidenceBundleSnapshots(): EvidenceBundle[] {
-		return getEvidenceBundleSnapshots(this.sessionManager.getEntries());
+		return getEvidenceBundleSnapshots(getActiveSessionBranchEntries(this.sessionManager));
 	}
 
 	/** Live lane records tracked by this process (running and terminal). */
@@ -4052,7 +4054,7 @@ export class AgentSession {
 	}
 
 	getWorkerResultSnapshots(): WorkerResult[] {
-		return getWorkerResultSnapshots(this.sessionManager.getEntries());
+		return getWorkerResultSnapshots(getActiveSessionBranchEntries(this.sessionManager));
 	}
 
 	saveLearningDecisionSnapshot(decision: LearningDecision): string {
@@ -4060,7 +4062,7 @@ export class AgentSession {
 	}
 
 	getLearningDecisionSnapshots(): LearningDecision[] {
-		return getLearningDecisionSnapshots(this.sessionManager.getEntries());
+		return getLearningDecisionSnapshots(getActiveSessionBranchEntries(this.sessionManager));
 	}
 
 	/**

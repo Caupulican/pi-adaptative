@@ -1,14 +1,24 @@
+import { mkdtempSync, rmSync } from "node:fs";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
+import { Agent } from "@caupulican/pi-agent-core";
 import { SessionManager } from "@caupulican/pi-agent-core/node";
+import { getModel } from "@caupulican/pi-ai";
 import { describe, expect, it } from "vitest";
+import { AgentSession } from "../src/core/agent-session.ts";
+import { AuthStorage } from "../src/core/auth-storage.ts";
 import { appendWorkerResultSnapshot } from "../src/core/delegation/session-worker-result.ts";
 import { buildGoalRuntimeSnapshot } from "../src/core/goals/goal-runtime-snapshot.ts";
 import { createGoalState } from "../src/core/goals/goal-state.ts";
 import { appendGoalStateSnapshot, getLatestGoalStateSnapshot } from "../src/core/goals/session-goal-state.ts";
 import { appendLearningDecisionSnapshot } from "../src/core/learning/session-learning-decision.ts";
+import { ModelRegistry } from "../src/core/model-registry.ts";
 import { createEvidenceBundle } from "../src/core/research/evidence-bundle.ts";
 import { appendEvidenceBundleSnapshot } from "../src/core/research/session-evidence-bundle.ts";
+import { SettingsManager } from "../src/core/settings-manager.ts";
 import { appendTaskStepsStateSnapshot, getLatestTaskStepsStateSnapshot } from "../src/core/tasks/session-task-state.ts";
 import { addTaskStep, createTaskStepsState } from "../src/core/tasks/task-state.ts";
+import { createTestResourceLoader } from "./utilities.ts";
 
 function userMsg(text: string) {
 	return { role: "user" as const, content: text, timestamp: Date.now() };
@@ -20,6 +30,95 @@ function userMsg(text: string) {
  * must resolve state from the ACTIVE branch's own ancestry, never a sibling branch's history.
  */
 describe("branch-scoped goal/task state resolution", () => {
+	it("AgentSession operational snapshots stay branch-scoped while diagnostics retain session history", () => {
+		const agentDir = mkdtempSync(join(tmpdir(), "pi-branch-snapshots-"));
+		const sessionManager = SessionManager.inMemory();
+		const model = getModel("anthropic", "claude-sonnet-4-5");
+		if (!model) throw new Error("Missing test model");
+		const session = new AgentSession({
+			agent: new Agent({
+				getApiKey: () => "test",
+				initialState: { model, systemPrompt: "test", tools: [], thinkingLevel: "off" },
+			}),
+			sessionManager,
+			settingsManager: SettingsManager.inMemory(),
+			resourceLoader: createTestResourceLoader(),
+			cwd: agentDir,
+			agentDir,
+			modelRegistry: ModelRegistry.inMemory(AuthStorage.inMemory()),
+		});
+
+		try {
+			const branchPoint = sessionManager.appendMessage(userMsg("start"));
+			session.saveEvidenceBundleSnapshot(
+				createEvidenceBundle({ query: "branch-a-query", sources: [], findings: [], now: "T0" }),
+			);
+			session.saveWorkerResultSnapshot({
+				requestId: "worker-a",
+				status: "completed",
+				summary: "Branch A worker",
+				changedFiles: [],
+			});
+			session.saveLearningDecisionSnapshot({
+				kind: "apply",
+				reasonCode: "branch-a-learning",
+				confidence: 90,
+				summary: "Branch A learning",
+				requiresApproval: false,
+			});
+			const branchALeaf = sessionManager.getLeafId();
+			if (!branchALeaf) throw new Error("Expected branch A leaf id");
+
+			sessionManager.branch(branchPoint);
+			session.saveEvidenceBundleSnapshot(
+				createEvidenceBundle({ query: "branch-b-query", sources: [], findings: [], now: "T1" }),
+			);
+			session.saveWorkerResultSnapshot({
+				requestId: "worker-b",
+				status: "completed",
+				summary: "Branch B worker",
+				changedFiles: [],
+			});
+			session.saveLearningDecisionSnapshot({
+				kind: "apply",
+				reasonCode: "branch-b-learning",
+				confidence: 90,
+				summary: "Branch B learning",
+				requiresApproval: false,
+			});
+
+			expect(session.getEvidenceBundleSnapshots().map((bundle) => bundle.query)).toEqual(["branch-b-query"]);
+			expect(session.getWorkerResultSnapshots().map((result) => result.requestId)).toEqual(["worker-b"]);
+			expect(session.getLearningDecisionSnapshots().map((decision) => decision.reasonCode)).toEqual([
+				"branch-b-learning",
+			]);
+
+			const diagnostics = session.getAutonomyDiagnosticSnapshot();
+			expect(diagnostics.research?.map((entry) => entry.title)).toEqual([
+				"Research: branch-a-query",
+				"Research: branch-b-query",
+			]);
+			expect(diagnostics.delegation?.map((entry) => entry.title)).toEqual([
+				"Worker worker-a (completed)",
+				"Worker worker-b (completed)",
+			]);
+			expect(diagnostics.learning?.map((entry) => entry.reasonCode)).toEqual([
+				"branch-a-learning",
+				"branch-b-learning",
+			]);
+
+			sessionManager.branch(branchALeaf);
+			expect(session.getEvidenceBundleSnapshot()?.query).toBe("branch-a-query");
+			expect(session.getWorkerResultSnapshots().map((result) => result.requestId)).toEqual(["worker-a"]);
+			expect(session.getLearningDecisionSnapshots().map((decision) => decision.reasonCode)).toEqual([
+				"branch-a-learning",
+			]);
+		} finally {
+			session.dispose();
+			rmSync(agentDir, { recursive: true, force: true });
+		}
+	});
+
 	it("each branch resolves its own latest goal state and task-steps state after a fork", () => {
 		const session = SessionManager.inMemory();
 		const branchPoint = session.appendMessage(userMsg("start"));

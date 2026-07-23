@@ -4,6 +4,7 @@ import type { LaneRecord } from "../autonomy/lane-tracker.ts";
 import { getWorkerResultSnapshots } from "../delegation/session-worker-result.ts";
 import { getLearningDecisionSnapshots } from "../learning/session-learning-decision.ts";
 import { getLatestEvidenceBundleSnapshot } from "../research/session-evidence-bundle.ts";
+import { getActiveSessionBranchEntries } from "../session-snapshot.ts";
 import { getLatestTaskStepsStateSnapshot } from "../tasks/session-task-state.ts";
 import type { TaskStepStatus } from "../tasks/task-state.ts";
 import { evaluateGoalContinuation, type GoalContinuationDecision } from "./goal-continuation-controller.ts";
@@ -127,7 +128,7 @@ export function buildGoalRuntimeSnapshot(args: {
 	 */
 	worktreeLaneStatus?: readonly GoalRuntimeWorktreeLaneStatus[];
 }): GoalRuntimeSnapshot {
-	const branchEntries = args.sessionManager.getBranch();
+	const branchEntries = getActiveSessionBranchEntries(args.sessionManager);
 	let goalState = getLatestGoalStateSnapshot(args.sessionManager);
 	const latestEvidenceBundle = getLatestEvidenceBundleSnapshot(branchEntries);
 	const workerResults = getWorkerResultSnapshots(branchEntries);

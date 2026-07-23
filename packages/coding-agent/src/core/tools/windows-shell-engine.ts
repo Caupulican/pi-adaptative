@@ -12,6 +12,7 @@ import { getBundledResourcesDir } from "../../config.ts";
 import { spawnProcess, waitForChildProcessWithTermination } from "../../utils/child-process.ts";
 import { getShellEnv, trackDetachedChildPid, untrackDetachedChildPid } from "../../utils/shell.ts";
 import { ensurePythonRuntime, type PythonRuntimeOutcome } from "../python-runtime.ts";
+import { isRecordObject } from "../util/value-guards.ts";
 import type { BashOperations } from "./bash.ts";
 import {
 	applyEngineFrame,
@@ -47,10 +48,6 @@ function resolveEngineScriptPath(): string {
 
 const MAX_CONTROL_FRAME_BYTES = 64 * 1024;
 
-function isRecord(value: unknown): value is Record<string, unknown> {
-	return typeof value === "object" && value !== null && !Array.isArray(value);
-}
-
 /** Parse the terminal frame from the dedicated control stream. Command output is never retained here. */
 function parseControlFrame(buffer: Buffer): WindowsShellEngineFrame | undefined {
 	if (buffer.length < 2 || buffer[buffer.length - 1] !== ENGINE_FRAME_SENTINEL) return undefined;
@@ -58,10 +55,10 @@ function parseControlFrame(buffer: Buffer): WindowsShellEngineFrame | undefined 
 	if (openIndex === -1) return undefined;
 	try {
 		const raw: unknown = JSON.parse(buffer.subarray(openIndex + 1, buffer.length - 1).toString("utf8"));
-		if (!isRecord(raw)) return undefined;
+		if (!isRecordObject(raw)) return undefined;
 		if (typeof raw.exitCode !== "number" || !Number.isInteger(raw.exitCode)) return undefined;
-		if (typeof raw.cwd !== "string" || !isRecord(raw.envDelta)) return undefined;
-		if (raw.unsupported !== null && !isRecord(raw.unsupported)) return undefined;
+		if (typeof raw.cwd !== "string" || !isRecordObject(raw.envDelta)) return undefined;
+		if (raw.unsupported !== null && !isRecordObject(raw.unsupported)) return undefined;
 		if (
 			raw.unsupported !== null &&
 			(raw.unsupported.code !== "unsupported" ||

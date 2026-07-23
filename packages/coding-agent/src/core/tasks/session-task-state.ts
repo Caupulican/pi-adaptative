@@ -1,36 +1,35 @@
 import type { SessionManager } from "@caupulican/pi-agent-core/node";
+import {
+	appendSessionSnapshot,
+	decodeSessionSnapshotPayload,
+	getLatestSessionSnapshotOnBranch,
+	type SessionSnapshotCodec,
+	type SessionSnapshotPayload,
+} from "../session-snapshot.ts";
 import { cloneTaskStepsState, isTaskStepsState, type TaskStepsState } from "./task-state.ts";
 
 export const TASK_STEPS_STATE_CUSTOM_TYPE = "task_steps_state";
 
-export interface TaskStepsStateSnapshotPayload {
-	version: 1;
-	state: TaskStepsState;
-}
+export type TaskStepsStateSnapshotPayload = SessionSnapshotPayload<"state", TaskStepsState>;
+
+const TASK_STEPS_STATE_SNAPSHOT_CODEC: SessionSnapshotCodec<TaskStepsState, "state"> = {
+	customType: TASK_STEPS_STATE_CUSTOM_TYPE,
+	valueKey: "state",
+	isValue: isTaskStepsState,
+	clone: cloneTaskStepsState,
+};
 
 export function appendTaskStepsStateSnapshot(
 	sessionManager: Pick<SessionManager, "appendCustomEntry">,
 	state: TaskStepsState,
 ): string {
-	const payload: TaskStepsStateSnapshotPayload = {
-		version: 1,
-		state: cloneTaskStepsState(state),
-	};
-	return sessionManager.appendCustomEntry(TASK_STEPS_STATE_CUSTOM_TYPE, payload);
-}
-
-function isPlainRecord(value: unknown): value is Record<string, unknown> {
-	if (!value || typeof value !== "object" || Array.isArray(value)) return false;
-	const prototype = Object.getPrototypeOf(value);
-	return prototype === Object.prototype || prototype === null;
+	return appendSessionSnapshot(sessionManager, TASK_STEPS_STATE_SNAPSHOT_CODEC, state);
 }
 
 /** Pure payload decode: validates + clones a task-steps snapshot payload. No SessionManager access,
  * so unit tests can exercise decoding directly against a constructed `data` value. */
 export function decodeTaskStepsStateSnapshotPayload(data: unknown): TaskStepsState | undefined {
-	if (!isPlainRecord(data) || data.version !== 1 || !("state" in data)) return undefined;
-	if (isTaskStepsState(data.state)) return cloneTaskStepsState(data.state);
-	return undefined;
+	return decodeSessionSnapshotPayload(data, TASK_STEPS_STATE_SNAPSHOT_CODEC);
 }
 
 /**
@@ -42,13 +41,5 @@ export function decodeTaskStepsStateSnapshotPayload(data: unknown): TaskStepsSta
 export function getLatestTaskStepsStateSnapshot(
 	sessionManager: Pick<SessionManager, "getLatestCustomEntryOnBranch">,
 ): TaskStepsState | undefined {
-	let fromId: string | undefined;
-	for (;;) {
-		const entry = sessionManager.getLatestCustomEntryOnBranch(TASK_STEPS_STATE_CUSTOM_TYPE, fromId);
-		if (!entry) return undefined;
-		const decoded = decodeTaskStepsStateSnapshotPayload(entry.data);
-		if (decoded !== undefined) return decoded;
-		if (entry.parentId === null) return undefined;
-		fromId = entry.parentId;
-	}
+	return getLatestSessionSnapshotOnBranch(sessionManager, TASK_STEPS_STATE_SNAPSHOT_CODEC);
 }

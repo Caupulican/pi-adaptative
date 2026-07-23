@@ -1,5 +1,6 @@
-import type { SessionEntry, SessionManager } from "@caupulican/pi-agent-core/node";
+import type { SessionManager } from "@caupulican/pi-agent-core/node";
 import { registerInFlightWork } from "../reload-blockers.ts";
+import { getActiveSessionBranchEntries } from "../session-snapshot.ts";
 import type { LaneRecord, LaneTerminalStatus, LaneTracker } from "./lane-tracker.ts";
 import { appendLaneRecordSnapshot, getLatestLaneRecordSnapshots } from "./session-lane-record.ts";
 
@@ -12,10 +13,6 @@ export interface ManagedLaneRegistryOptions {
 	agentDir: string;
 	lanes: LaneTracker;
 	sessionManager: SessionManager;
-}
-
-function activeBranchEntries(sessionManager: SessionManager): readonly SessionEntry[] {
-	return typeof sessionManager.getBranch === "function" ? sessionManager.getBranch() : sessionManager.getEntries();
 }
 
 /**
@@ -39,7 +36,7 @@ export class ManagedLaneRegistry {
 	ensureHydrated(): void {
 		if (this.hydrated) return;
 		this.hydrated = true;
-		for (const record of getLatestLaneRecordSnapshots(activeBranchEntries(this.sessionManager))) {
+		for (const record of getLatestLaneRecordSnapshots(getActiveSessionBranchEntries(this.sessionManager))) {
 			if (record.type !== "tmux-worker" || (record.status !== "queued" && record.status !== "running")) continue;
 			this.lanes.restore(record);
 			this.correlations.set(record.laneId, { persisted: true });

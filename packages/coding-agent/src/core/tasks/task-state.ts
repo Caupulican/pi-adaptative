@@ -1,3 +1,5 @@
+import { isPlainRecord } from "../util/value-guards.ts";
+
 export const TASK_STEP_STATUSES = ["pending", "in_progress", "completed", "blocked", "cancelled"] as const;
 export type TaskStepStatus = (typeof TASK_STEP_STATUSES)[number];
 
@@ -68,12 +70,6 @@ export class TaskStepsError extends Error {
 	}
 }
 
-function isRecord(value: unknown): value is Record<string, unknown> {
-	if (!value || typeof value !== "object" || Array.isArray(value)) return false;
-	const prototype = Object.getPrototypeOf(value);
-	return prototype === Object.prototype || prototype === null;
-}
-
 function isTaskStepStatus(value: unknown): value is TaskStepStatus {
 	return TASK_STEP_STATUSES.some((status) => status === value);
 }
@@ -96,7 +92,7 @@ function isBoundedStringArray(value: unknown, maxItems: number, maxLength: numbe
 }
 
 function isTaskStep(value: unknown): value is TaskStep {
-	if (!isRecord(value)) return false;
+	if (!isPlainRecord(value)) return false;
 	return (
 		typeof value.id === "string" &&
 		/^step-[1-9]\d*$/.test(value.id) &&
@@ -115,7 +111,7 @@ function isTaskStep(value: unknown): value is TaskStep {
 }
 
 function isTaskStepsArchive(value: unknown): value is TaskStepsArchive {
-	if (!isRecord(value)) return false;
+	if (!isPlainRecord(value)) return false;
 	return (
 		Number.isInteger(value.completed) &&
 		Number(value.completed) >= 0 &&
@@ -126,7 +122,7 @@ function isTaskStepsArchive(value: unknown): value is TaskStepsArchive {
 }
 
 export function isTaskStepsState(value: unknown): value is TaskStepsState {
-	if (!isRecord(value)) return false;
+	if (!isPlainRecord(value)) return false;
 	if (
 		value.version !== 1 ||
 		!Number.isInteger(value.revision) ||

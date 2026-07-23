@@ -1,48 +1,31 @@
 import type { SessionEntry, SessionManager } from "@caupulican/pi-agent-core/node";
 import type { LearningDecision } from "../autonomy/contracts.ts";
+import {
+	appendSessionSnapshot,
+	getSessionSnapshots,
+	type SessionSnapshotCodec,
+	type SessionSnapshotPayload,
+} from "../session-snapshot.ts";
 import { cloneLearningDecisionForStorage, isLearningDecision } from "./learning-gate.ts";
 
 export const LEARNING_DECISION_CUSTOM_TYPE = "learning_decision";
 
-export interface LearningDecisionSnapshotPayload {
-	version: 1;
-	decision: LearningDecision;
-}
+export type LearningDecisionSnapshotPayload = SessionSnapshotPayload<"decision", LearningDecision>;
+
+const LEARNING_DECISION_SNAPSHOT_CODEC: SessionSnapshotCodec<LearningDecision, "decision"> = {
+	customType: LEARNING_DECISION_CUSTOM_TYPE,
+	valueKey: "decision",
+	isValue: isLearningDecision,
+	clone: cloneLearningDecisionForStorage,
+};
 
 export function appendLearningDecisionSnapshot(
 	sessionManager: Pick<SessionManager, "appendCustomEntry">,
 	decision: LearningDecision,
 ): string {
-	const payload: LearningDecisionSnapshotPayload = {
-		version: 1,
-		decision: cloneLearningDecisionForStorage(decision),
-	};
-	return sessionManager.appendCustomEntry(LEARNING_DECISION_CUSTOM_TYPE, payload);
-}
-
-function isPlainRecord(value: unknown): value is Record<string, unknown> {
-	if (!value || typeof value !== "object" || Array.isArray(value)) return false;
-	const prototype = Object.getPrototypeOf(value);
-	return prototype === Object.prototype || prototype === null;
+	return appendSessionSnapshot(sessionManager, LEARNING_DECISION_SNAPSHOT_CODEC, decision);
 }
 
 export function getLearningDecisionSnapshots(entries: readonly SessionEntry[]): LearningDecision[] {
-	const results: LearningDecision[] = [];
-
-	for (const entry of entries) {
-		if (entry.type !== "custom" || entry.customType !== LEARNING_DECISION_CUSTOM_TYPE) {
-			continue;
-		}
-
-		const payload = entry.data;
-		if (!isPlainRecord(payload)) continue;
-		if (payload.version !== 1) continue;
-		if (!("decision" in payload)) continue;
-		const decision = payload.decision;
-		if (isLearningDecision(decision)) {
-			results.push(cloneLearningDecisionForStorage(decision));
-		}
-	}
-
-	return results;
+	return getSessionSnapshots(entries, LEARNING_DECISION_SNAPSHOT_CODEC);
 }

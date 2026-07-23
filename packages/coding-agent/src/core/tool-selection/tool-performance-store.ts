@@ -3,6 +3,7 @@ import { dirname } from "node:path";
 import { stateFile } from "../agent-paths.ts";
 import { currentHostFingerprint, type HostFingerprint } from "../models/fitness-store.ts";
 import { isWorkerSession } from "../session-role.ts";
+import { isRecordObject } from "../util/value-guards.ts";
 
 const STORE_VERSION = 1;
 const MAX_STATS_PER_HOST = 500;
@@ -123,10 +124,6 @@ function intentAgreementKey(modelRef: string, intentClass: ToolSelectionIntentCl
 	return `${modelRef}\0${intentClass}`;
 }
 
-function isRecord(value: unknown): value is Record<string, unknown> {
-	return typeof value === "object" && value !== null && !Array.isArray(value);
-}
-
 function isIntentClass(value: unknown): value is ToolSelectionIntentClass {
 	return (
 		value === "read" ||
@@ -141,7 +138,7 @@ function isIntentClass(value: unknown): value is ToolSelectionIntentClass {
 
 function isStats(value: unknown): value is ToolPerformanceStats {
 	return (
-		isRecord(value) &&
+		isRecordObject(value) &&
 		typeof value.modelRef === "string" &&
 		isIntentClass(value.intentClass) &&
 		typeof value.tool === "string" &&
@@ -157,7 +154,7 @@ function isStats(value: unknown): value is ToolPerformanceStats {
 
 function isObservation(value: unknown): value is ToolSelectionObservation {
 	return (
-		isRecord(value) &&
+		isRecordObject(value) &&
 		typeof value.at === "string" &&
 		typeof value.modelRef === "string" &&
 		isIntentClass(value.intentClass) &&
@@ -172,7 +169,7 @@ function isObservation(value: unknown): value is ToolSelectionObservation {
 		Array.isArray(value.ranked) &&
 		value.ranked.every(
 			(entry) =>
-				isRecord(entry) &&
+				isRecordObject(entry) &&
 				typeof entry.tool === "string" &&
 				typeof entry.utility === "number" &&
 				typeof entry.probability === "number",
@@ -185,7 +182,7 @@ function isObservation(value: unknown): value is ToolSelectionObservation {
 
 function isIntentAgreement(value: unknown): value is ToolSelectionIntentAgreement {
 	return (
-		isRecord(value) &&
+		isRecordObject(value) &&
 		typeof value.modelRef === "string" &&
 		isIntentClass(value.intentClass) &&
 		typeof value.sampleCount === "number" &&
@@ -245,7 +242,12 @@ function updateDeviation(
 }
 
 function parseHost(value: unknown): HostToolPerformanceData | undefined {
-	if (!isRecord(value) || !isRecord(value.host) || !isRecord(value.stats) || !Array.isArray(value.observations))
+	if (
+		!isRecordObject(value) ||
+		!isRecordObject(value.host) ||
+		!isRecordObject(value.stats) ||
+		!Array.isArray(value.observations)
+	)
 		return undefined;
 	const host = value.host;
 	if (
@@ -257,7 +259,7 @@ function parseHost(value: unknown): HostToolPerformanceData | undefined {
 		return undefined;
 	// intentAgreement is a purely additive field (older store files predate it) — tolerate absence
 	// rather than bumping STORE_VERSION, same as any other backward-compatible default-empty field.
-	const intentAgreementRaw = isRecord(value.intentAgreement) ? value.intentAgreement : {};
+	const intentAgreementRaw = isRecordObject(value.intentAgreement) ? value.intentAgreement : {};
 	return {
 		host: { id: host.id, cpu: host.cpu, cores: host.cores, totalMemGb: host.totalMemGb },
 		stats: Object.fromEntries(
@@ -273,7 +275,7 @@ function parseHost(value: unknown): HostToolPerformanceData | undefined {
 }
 
 function parseFile(value: unknown): ToolPerformanceStoreFile {
-	if (!isRecord(value) || value.version !== STORE_VERSION || !isRecord(value.hosts)) {
+	if (!isRecordObject(value) || value.version !== STORE_VERSION || !isRecordObject(value.hosts)) {
 		return { version: STORE_VERSION, hosts: {} };
 	}
 	return {

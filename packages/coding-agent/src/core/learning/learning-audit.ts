@@ -1,5 +1,11 @@
 import type { SessionEntry, SessionManager } from "@caupulican/pi-agent-core/node";
 import type { LearningDecision } from "../autonomy/contracts.ts";
+import {
+	appendSessionSnapshot,
+	getSessionSnapshots,
+	type SessionSnapshotCodec,
+	type SessionSnapshotPayload,
+} from "../session-snapshot.ts";
 import type { DurableChangeLayer, DurableChangeProposal } from "./learning-gate.ts";
 import type { ReflectionWrite } from "./reflection-engine.ts";
 
@@ -167,45 +173,22 @@ export function cloneLearningAuditRecordForStorage(record: LearningAuditRecord):
 
 export const LEARNING_AUDIT_CUSTOM_TYPE = "learning_audit";
 
-export interface LearningAuditSnapshotPayload {
-	version: 1;
-	record: LearningAuditRecord;
-}
+export type LearningAuditSnapshotPayload = SessionSnapshotPayload<"record", LearningAuditRecord>;
+
+const LEARNING_AUDIT_SNAPSHOT_CODEC: SessionSnapshotCodec<LearningAuditRecord, "record"> = {
+	customType: LEARNING_AUDIT_CUSTOM_TYPE,
+	valueKey: "record",
+	isValue: isLearningAuditRecord,
+	clone: cloneLearningAuditRecordForStorage,
+};
 
 export function appendLearningAuditSnapshot(
 	sessionManager: Pick<SessionManager, "appendCustomEntry">,
 	record: LearningAuditRecord,
 ): string {
-	const payload: LearningAuditSnapshotPayload = {
-		version: 1,
-		record: cloneLearningAuditRecordForStorage(record),
-	};
-	return sessionManager.appendCustomEntry(LEARNING_AUDIT_CUSTOM_TYPE, payload);
-}
-
-function isPlainRecord(value: unknown): value is Record<string, unknown> {
-	if (!value || typeof value !== "object" || Array.isArray(value)) return false;
-	const prototype = Object.getPrototypeOf(value);
-	return prototype === Object.prototype || prototype === null;
+	return appendSessionSnapshot(sessionManager, LEARNING_AUDIT_SNAPSHOT_CODEC, record);
 }
 
 export function getLearningAuditSnapshots(entries: readonly SessionEntry[]): LearningAuditRecord[] {
-	const records: LearningAuditRecord[] = [];
-
-	for (const entry of entries) {
-		if (entry.type !== "custom" || entry.customType !== LEARNING_AUDIT_CUSTOM_TYPE) {
-			continue;
-		}
-
-		const payload = entry.data;
-		if (!isPlainRecord(payload)) continue;
-		if (payload.version !== 1) continue;
-		if (!("record" in payload)) continue;
-		const record = payload.record;
-		if (isLearningAuditRecord(record)) {
-			records.push(cloneLearningAuditRecordForStorage(record));
-		}
-	}
-
-	return records;
+	return getSessionSnapshots(entries, LEARNING_AUDIT_SNAPSHOT_CODEC);
 }

@@ -139,6 +139,26 @@ describe("persistence of the review marker (session-worker-result.ts)", () => {
 		});
 	});
 
+	it("acknowledgeWorkerResultReview cannot acknowledge a sibling-branch result", () => {
+		const sessionManager = SessionManager.inMemory();
+		const branchPoint = sessionManager.appendMessage({ role: "user", content: "start", timestamp: Date.now() });
+		appendWorkerResultSnapshot(sessionManager, { ...baseResult, blockers: ["sibling"] }, mockRequest);
+
+		sessionManager.branch(branchPoint);
+		expect(acknowledgeWorkerResultReview(sessionManager, "req-1")).toEqual({
+			ok: false,
+			reason: "unknown_worker_result",
+		});
+
+		const currentRequest = { ...mockRequest, id: "req-2" };
+		appendWorkerResultSnapshot(
+			sessionManager,
+			{ ...baseResult, requestId: "req-2", blockers: ["current"] },
+			currentRequest,
+		);
+		expect(acknowledgeWorkerResultReview(sessionManager, "req-2").ok).toBe(true);
+	});
+
 	it("acknowledgeWorkerResultReview: a non-flagged result reports not_flagged and writes nothing", () => {
 		const sessionManager = SessionManager.inMemory();
 		appendWorkerResultSnapshot(sessionManager, baseResult, mockRequest);

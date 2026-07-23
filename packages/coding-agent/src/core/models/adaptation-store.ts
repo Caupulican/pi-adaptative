@@ -2,6 +2,7 @@ import { existsSync, readFileSync } from "node:fs";
 import { stateFile } from "../agent-paths.ts";
 import { isWorkerSession } from "../session-role.ts";
 import { withFileLockSync, writeFileAtomicSync } from "../util/atomic-file.ts";
+import { isRecordObject } from "../util/value-guards.ts";
 import { currentHostFingerprint, type HostFingerprint } from "./fitness-store.ts";
 import {
 	hasUsableModelPerfSample,
@@ -85,17 +86,13 @@ function normalizeProfile(profile: Partial<ModelAdaptationProfile> | undefined):
 		...(isProtocol(profile?.protocol) && { protocol: profile.protocol }),
 		...(isToolProbe(profile?.toolProbe) && { toolProbe: profile.toolProbe }),
 		...(isModelPerfProfile(profile?.perf) && { perf: profile.perf }),
-		teachStats: isRecord(profile?.teachStats) ? filterTeachStats(profile.teachStats) : {},
+		teachStats: isRecordObject(profile?.teachStats) ? filterTeachStats(profile.teachStats) : {},
 	};
-}
-
-function isRecord(value: unknown): value is Record<string, unknown> {
-	return typeof value === "object" && value !== null && !Array.isArray(value);
 }
 
 function isRule(value: unknown): value is ModelAdaptationRule {
 	return (
-		isRecord(value) &&
+		isRecordObject(value) &&
 		typeof value.mode === "string" &&
 		typeof value.text === "string" &&
 		typeof value.addedAt === "string" &&
@@ -104,7 +101,7 @@ function isRule(value: unknown): value is ModelAdaptationRule {
 }
 
 function isProtocol(value: unknown): value is ModelProtocolCalibration {
-	if (!isRecord(value) || typeof value.version !== "number") return false;
+	if (!isRecordObject(value) || typeof value.version !== "number") return false;
 	if (value.status === "failed") {
 		return (
 			typeof value.attemptedAt === "string" &&
@@ -121,7 +118,7 @@ function isProtocol(value: unknown): value is ModelProtocolCalibration {
 
 function isToolProbe(value: unknown): value is ModelToolProbe {
 	return (
-		isRecord(value) &&
+		isRecordObject(value) &&
 		typeof value.version === "number" &&
 		(value.status === "native" || value.status === "text-protocol" || value.status === "none") &&
 		typeof value.probedAt === "string" &&
@@ -136,7 +133,7 @@ function isToolProbe(value: unknown): value is ModelToolProbe {
 
 function isTeachStats(value: unknown): value is ModelTeachStats {
 	return (
-		isRecord(value) &&
+		isRecordObject(value) &&
 		typeof value.taught === "number" &&
 		typeof value.recurrenceBefore === "number" &&
 		typeof value.recurrenceAfter === "number"

@@ -9,6 +9,7 @@ import { existsSync, readFileSync } from "node:fs";
 import { join } from "node:path";
 import { getAgentDir } from "../config.ts";
 import { getProcessWorkRun } from "../utils/work-directory.ts";
+import { isRecordObject } from "./util/value-guards.ts";
 
 export const ACTIVE_TURN_TTL_MS = 5 * 60_000;
 export const AUTO_RELOAD_COORDINATOR_TTL_MS = 10 * 60_000;
@@ -63,10 +64,6 @@ interface ParsedSession {
 	reloadedAt?: number;
 }
 
-function isRecord(value: unknown): value is Record<string, unknown> {
-	return value !== null && typeof value === "object" && !Array.isArray(value);
-}
-
 function readJsonFile(file: string): unknown {
 	try {
 		if (!existsSync(file)) return undefined;
@@ -90,7 +87,7 @@ function booleanValue(value: unknown): boolean | undefined {
 }
 
 function parseSession(value: unknown): ParsedSession | undefined {
-	if (!isRecord(value)) return undefined;
+	if (!isRecordObject(value)) return undefined;
 	return {
 		pid: numberValue(value.pid),
 		sessionId: stringValue(value.sessionId),
@@ -151,7 +148,7 @@ function activeTurnBlockers(options: ReloadBlockerOptions): ReloadSessionRecord[
 	const ttl = options.activeTurnTtlMs ?? ACTIVE_TURN_TTL_MS;
 	const isAlive = options.isProcessAlive ?? isReloadSessionProcessAlive;
 	const registry = readJsonFile(join(getReloadCoordinationDir(agentDir), "active-turns.json"));
-	if (!isRecord(registry) || !isRecord(registry.sessions)) return [];
+	if (!isRecordObject(registry) || !isRecordObject(registry.sessions)) return [];
 
 	const blockers: ReloadSessionRecord[] = [];
 	for (const [key, rawSession] of Object.entries(registry.sessions)) {
@@ -171,16 +168,16 @@ function coordinatorBlockers(options: ReloadBlockerOptions): { blockers: ReloadS
 	const ttl = options.coordinatorTtlMs ?? AUTO_RELOAD_COORDINATOR_TTL_MS;
 	const isAlive = options.isProcessAlive ?? isReloadSessionProcessAlive;
 	const coordinator = readJsonFile(join(getReloadCoordinationDir(agentDir), "auto-reload-state.json"));
-	if (!isRecord(coordinator) || !isRecord(coordinator.changes)) return { blockers: [], reason: "" };
+	if (!isRecordObject(coordinator) || !isRecordObject(coordinator.changes)) return { blockers: [], reason: "" };
 
 	const blockers: ReloadSessionRecord[] = [];
 	let reason = "";
 	for (const rawChange of Object.values(coordinator.changes)) {
-		if (!isRecord(rawChange)) continue;
+		if (!isRecordObject(rawChange)) continue;
 		const firstSeenAt = numberValue(rawChange.firstSeenAt);
 		if (firstSeenAt === undefined || now - firstSeenAt > ttl) continue;
 		reason ||= stringValue(rawChange.reason) ?? "";
-		if (!isRecord(rawChange.sessions)) continue;
+		if (!isRecordObject(rawChange.sessions)) continue;
 		for (const [key, rawSession] of Object.entries(rawChange.sessions)) {
 			const session = parseSession(rawSession);
 			if (!session) continue;

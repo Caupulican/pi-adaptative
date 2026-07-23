@@ -1,3 +1,5 @@
+import { isPlainRecord } from "../util/value-guards.ts";
+
 export type GoalStatus = "active" | "completed" | "blocked" | "cancelled";
 export type RequirementStatus = "open" | "satisfied" | "blocked";
 export type GoalEvidenceKind = "file" | "test" | "tool" | "user" | "finding" | "worker";
@@ -145,12 +147,6 @@ export type GoalEvent =
 	| { type: "resume_goal"; now: string }
 	| { type: "cancel_goal"; now: string };
 
-function isRecord(value: unknown): value is Record<string, unknown> {
-	if (!value || typeof value !== "object" || Array.isArray(value)) return false;
-	const prototype = Object.getPrototypeOf(value);
-	return prototype === Object.prototype || prototype === null;
-}
-
 function isStringArray(value: unknown): value is readonly string[] {
 	return Array.isArray(value) && value.every((item) => typeof item === "string");
 }
@@ -187,7 +183,7 @@ function hasOptionalFiniteNumber(record: Record<string, unknown>, key: string): 
 }
 
 function isRequirement(value: unknown): value is Requirement {
-	if (!isRecord(value)) return false;
+	if (!isPlainRecord(value)) return false;
 	return (
 		typeof value.id === "string" &&
 		typeof value.text === "string" &&
@@ -202,7 +198,7 @@ function isRequirement(value: unknown): value is Requirement {
 }
 
 function isGoalEvidenceRef(value: unknown): value is GoalEvidenceRef {
-	if (!isRecord(value)) return false;
+	if (!isPlainRecord(value)) return false;
 	return (
 		typeof value.id === "string" &&
 		isGoalEvidenceKind(value.kind) &&
@@ -214,7 +210,7 @@ function isGoalEvidenceRef(value: unknown): value is GoalEvidenceRef {
 }
 
 function isGoalEvent(value: unknown): value is GoalEvent {
-	if (!isRecord(value) || typeof value.type !== "string" || typeof value.now !== "string") return false;
+	if (!isPlainRecord(value) || typeof value.type !== "string" || typeof value.now !== "string") return false;
 	switch (value.type) {
 		case "add_requirement":
 			return typeof value.id === "string" && typeof value.text === "string";
@@ -260,7 +256,7 @@ function isGoalEvent(value: unknown): value is GoalEvent {
 }
 
 export function isGoalState(value: unknown): value is GoalState {
-	if (!isRecord(value)) return false;
+	if (!isPlainRecord(value)) return false;
 	return (
 		typeof value.goalId === "string" &&
 		typeof value.userGoal === "string" &&

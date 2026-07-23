@@ -1,4 +1,5 @@
 import type { EvidenceBundle, EvidenceRef, Finding, JsonObject, JsonValue } from "../autonomy/contracts.ts";
+import { isPlainRecord } from "../util/value-guards.ts";
 
 function cloneJsonValue(value: JsonValue): JsonValue {
 	if (Array.isArray(value)) {
@@ -12,12 +13,6 @@ function cloneJsonValue(value: JsonValue): JsonValue {
 
 function cloneJsonObject(value: JsonObject): JsonObject {
 	return Object.fromEntries(Object.entries(value).map(([key, nested]) => [key, cloneJsonValue(nested)]));
-}
-
-function isPlainRecord(value: unknown): value is Record<string, unknown> {
-	if (!value || typeof value !== "object" || Array.isArray(value)) return false;
-	const prototype = Object.getPrototypeOf(value);
-	return prototype === Object.prototype || prototype === null;
 }
 
 function isJsonValue(value: unknown): value is JsonValue {

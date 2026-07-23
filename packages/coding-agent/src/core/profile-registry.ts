@@ -12,6 +12,7 @@ import type {
 	Settings,
 } from "./settings-manager.ts";
 import { validateSkillName } from "./skills.ts";
+import { isRecordObject } from "./util/value-guards.ts";
 
 export type ProfileSource =
 	| "global-settings"
@@ -83,10 +84,6 @@ interface ProfileCandidate {
 	order: number;
 }
 
-function isRecord(value: unknown): value is Record<string, unknown> {
-	return Boolean(value) && typeof value === "object" && !Array.isArray(value);
-}
-
 function asNonEmptyString(value: unknown): string | undefined {
 	return typeof value === "string" && value.trim().length > 0 ? value.trim() : undefined;
 }
@@ -114,14 +111,14 @@ function normalizeStringArray(value: unknown, baseDir: string | undefined): stri
 }
 
 function normalizeResourceProfileSettings(value: unknown, baseDir: string | undefined): ResourceProfileSettings {
-	if (!isRecord(value)) {
+	if (!isRecordObject(value)) {
 		throw new Error("resources must be an object");
 	}
 	const result: ResourceProfileSettings = {};
 	for (const kind of RESOURCE_PROFILE_KINDS) {
 		const filterValue = value[kind];
 		if (filterValue === undefined) continue;
-		if (!isRecord(filterValue)) {
+		if (!isRecordObject(filterValue)) {
 			throw new Error(`${kind} filter must be an object`);
 		}
 		const allow = normalizeStringArray(filterValue.allow, baseDir);
@@ -145,7 +142,7 @@ function normalizeThinking(value: unknown): ThinkingLevel | undefined {
 }
 
 function normalizeModelRouterSettings(value: unknown): ModelRouterSettings | undefined {
-	if (!isRecord(value)) return undefined;
+	if (!isRecordObject(value)) return undefined;
 	const settings: ModelRouterSettings = {};
 	for (const key of ["enabled", "judgeEnabled", "fitnessGate"] as const) {
 		const candidate = value[key];
@@ -186,7 +183,7 @@ function normalizeWrapperProfile(options: {
 	baseDir?: string;
 	fallbackName?: string;
 }): NormalizedProfile {
-	if (!isRecord(options.value)) {
+	if (!isRecordObject(options.value)) {
 		throw new Error("profile JSON must be an object");
 	}
 	const name = asNonEmptyString(options.value.name) ?? options.fallbackName;
@@ -227,7 +224,7 @@ function normalizeSettingsProfiles(
 	for (const [name, definition] of Object.entries(settings.resourceProfiles ?? {})) {
 		const nameErrors = validateProfileName(name);
 		if (nameErrors.length > 0) continue;
-		if (isRecord(definition) && Object.hasOwn(definition, "resources")) {
+		if (isRecordObject(definition) && Object.hasOwn(definition, "resources")) {
 			profiles.push(
 				normalizeWrapperProfile({
 					value: { ...definition, name },

@@ -1,6 +1,7 @@
 import { mkdirSync } from "node:fs";
 import { dirname } from "node:path";
 import { DatabaseSync } from "node:sqlite";
+import { isRecordObject } from "../util/value-guards.ts";
 import type { ContextItem } from "./context-item.ts";
 import type { ContextStore, PolicyDecisionRecord, RetrievalRecord } from "./context-store.ts";
 import type { MemoryIndexRecord, MemoryIndexStore } from "./memory-index-store.ts";
@@ -158,10 +159,6 @@ export function migrateSqliteRuntimeIndex(database: DatabaseSync): void {
 	}
 }
 
-function isRecord(value: unknown): value is Record<string, unknown> {
-	return typeof value === "object" && value !== null && !Array.isArray(value);
-}
-
 function parseJsonRecord<T>(json: string, isValid: (value: unknown) => value is T): T | undefined {
 	try {
 		const parsed: unknown = JSON.parse(json);
@@ -177,7 +174,7 @@ function textColumn(row: Record<string, unknown> | undefined, column: string): s
 }
 
 function isContextItem(value: unknown): value is ContextItem {
-	if (!isRecord(value)) return false;
+	if (!isRecordObject(value)) return false;
 	return (
 		typeof value.id === "string" &&
 		typeof value.kind === "string" &&
@@ -190,7 +187,7 @@ function isContextItem(value: unknown): value is ContextItem {
 }
 
 function isPolicyDecision(value: unknown): value is PolicyDecision {
-	if (!isRecord(value)) return false;
+	if (!isRecordObject(value)) return false;
 	return (
 		typeof value.kind === "string" &&
 		typeof value.selectedAction === "string" &&
@@ -210,7 +207,7 @@ function isPolicyDecision(value: unknown): value is PolicyDecision {
 }
 
 function isPolicyDecisionRecord(value: unknown): value is PolicyDecisionRecord {
-	if (!isRecord(value)) return false;
+	if (!isRecordObject(value)) return false;
 	return (
 		typeof value.id === "string" &&
 		(value.contextItemId === undefined || typeof value.contextItemId === "string") &&
@@ -220,7 +217,7 @@ function isPolicyDecisionRecord(value: unknown): value is PolicyDecisionRecord {
 }
 
 function isRetrievalRecord(value: unknown): value is RetrievalRecord {
-	if (!isRecord(value)) return false;
+	if (!isRecordObject(value)) return false;
 	return (
 		typeof value.id === "string" &&
 		typeof value.contextItemId === "string" &&
@@ -231,7 +228,7 @@ function isRetrievalRecord(value: unknown): value is RetrievalRecord {
 }
 
 function isMemoryIndexRecord(value: unknown): value is MemoryIndexRecord {
-	if (!isRecord(value) || !isRecord(value.ref)) return false;
+	if (!isRecordObject(value) || !isRecordObject(value.ref)) return false;
 	return (
 		typeof value.ref.providerId === "string" &&
 		typeof value.ref.itemId === "string" &&
