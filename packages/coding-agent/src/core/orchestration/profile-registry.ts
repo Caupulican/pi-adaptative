@@ -1,3 +1,4 @@
+import { describeToolCapabilityAuthority, resolveProfileToolCapability } from "../tool-capability-policy.ts";
 import { isPlainRecord } from "../util/value-guards.ts";
 import type {
 	ExecutionGrant,
@@ -219,46 +220,9 @@ export function validateOrchestrationProfile(profile: OrchestrationProfile): voi
 		);
 	}
 	for (const toolName of profile.toolNames) {
-		if (
-			["read", "grep", "find", "ls"].includes(toolName) &&
-			!profile.capabilityCeiling.includes("filesystem.read") &&
-			!profile.capabilityCeiling.includes("worktree.read")
-		) {
-			throw new OrchestrationProfileError(`Profile '${profile.profileId}' tool '${toolName}' lacks read authority.`);
-		}
-		if (
-			["write", "edit"].includes(toolName) &&
-			!profile.capabilityCeiling.includes("filesystem.write") &&
-			!profile.capabilityCeiling.includes("worktree.mutate")
-		) {
+		if (!resolveProfileToolCapability(profile, toolName)) {
 			throw new OrchestrationProfileError(
-				`Profile '${profile.profileId}' tool '${toolName}' lacks write authority.`,
-			);
-		}
-		if (
-			toolName === "run_process" &&
-			!profile.capabilityCeiling.includes("process.exec") &&
-			!profile.capabilityCeiling.includes("tests.execute")
-		) {
-			throw new OrchestrationProfileError(
-				`Profile '${profile.profileId}' tool '${toolName}' lacks process authority.`,
-			);
-		}
-		if (
-			toolName === "memory" &&
-			!profile.capabilityCeiling.includes("memory.query") &&
-			!profile.capabilityCeiling.includes("memory.mutate")
-		) {
-			throw new OrchestrationProfileError(
-				`Profile '${profile.profileId}' tool '${toolName}' lacks memory authority.`,
-			);
-		}
-		if (
-			(toolName === "delegate" || toolName === "delegate_status") &&
-			!profile.capabilityCeiling.includes("workflow.delegate")
-		) {
-			throw new OrchestrationProfileError(
-				`Profile '${profile.profileId}' tool '${toolName}' lacks delegation authority.`,
+				`Profile '${profile.profileId}' tool '${toolName}' lacks ${describeToolCapabilityAuthority(toolName)} authority.`,
 			);
 		}
 	}

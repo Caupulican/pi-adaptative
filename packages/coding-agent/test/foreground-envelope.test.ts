@@ -16,10 +16,19 @@ describe("buildForegroundEnvelope", () => {
 			["write", "write_files"],
 			["bash", "run_shell"],
 			["python", "run_shell"],
+			["powershell", "run_shell"],
 			["run_toolkit_script", "run_shell"],
+			["run_process", "run_shell"],
+			["fetch", "network"],
+			["web_search", "network"],
+			["skill_audit", "skill_read"],
+			["skillify", "skill_write"],
+			["extensionify", "source_write"],
 			["delegate", "delegate"],
+			["delegate_status", "delegate"],
 			["goal", "memory_write"],
 			["memory", "memory_write"],
+			["model_fitness", "research"],
 		];
 		for (const [toolName, capability] of cases) {
 			const envelope = buildForegroundEnvelope({ turnIndex: 0, activeToolNames: [toolName], cwd: "/w" });

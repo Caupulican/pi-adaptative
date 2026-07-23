@@ -6,6 +6,7 @@
 
 ### Fixed
 
+- Consolidated foreground envelopes, runtime gates, orchestration profile validation, and lane manifests behind one tool-capability policy catalog; active network, skill, source, verifier, and status tools no longer disappear from capability visibility while separate authorization tables drift.
 - Unified goal and durable-objective acceptance/lifecycle transitions: every satisfied requirement now needs its own trusted proof, goal pause/resume/cancel/complete reconciles already-loaded worker execution without defeating lazy UAC, terminal objectives cancel residual attempts with explicit reasons, and worker terminal publication has one idempotent path.
 - Consolidated goal requirements, foreground task steps, and delegated DAG work behind one identity-based read model; task steps now persist explicit requirement links, legacy text inference has one conservative fallback, and worker dispatch synchronizes durable objective acceptance criteria without treating worker self-report as proof.
 - Consolidated versioned session snapshot persistence, validation, defensive cloning, list reads, latest reads, and branch-ancestry fallback behind one typed codec shared by goal, task, evidence, learning/audit, lane, and worker state; live accessors and review acknowledgements now read one active branch while diagnostics retain explicit whole-session history, and domain validators share explicit plain-record and general record-object guards.

@@ -1,38 +1,10 @@
+import { hasToolCapabilityPolicy, requiredEnvelopeCapabilities } from "../tool-capability-policy.ts";
 import type { CapabilityName } from "./contracts.ts";
 
-const TOOL_CAPABILITY_REQUIREMENTS = new Map<string, readonly CapabilityName[]>([
-	["read", ["read_files"]],
-	["ls", ["read_files"]],
-	["grep", ["read_files"]],
-	["find", ["read_files"]],
-	["write", ["write_files"]],
-	["edit", ["write_files"]],
-	["edit-diff", ["write_files"]],
-	["bash", ["run_shell"]],
-	["python", ["run_shell"]],
-	["powershell", ["run_shell"]],
-	["shell", ["run_shell"]],
-	["fetch", ["network"]],
-	["web_search", ["network"]],
-	["skill_audit", ["skill_read"]],
-	["skillify", ["skill_write"]],
-	["extensionify", ["source_write"]],
-	["goal", ["memory_write"]],
-	["memory", ["memory_write"]],
-	["delegate", ["delegate"]],
-	["delegate_status", ["delegate"]],
-	["model_fitness", ["research"]],
-	["run_toolkit_script", ["run_shell"]],
-	["run_process", ["run_shell"]],
-]);
-
 export function hasCapabilityPolicyForTool(toolName: string): boolean {
-	return TOOL_CAPABILITY_REQUIREMENTS.has(toolName);
+	return hasToolCapabilityPolicy(toolName);
 }
 
 export function requiredCapabilitiesForTool(toolName: string, args?: unknown): readonly CapabilityName[] {
-	if (toolName === "memory" && args && typeof args === "object" && "query" in args) {
-		return ["memory_read"];
-	}
-	return TOOL_CAPABILITY_REQUIREMENTS.get(toolName) ?? [];
+	return requiredEnvelopeCapabilities(toolName, args);
 }
