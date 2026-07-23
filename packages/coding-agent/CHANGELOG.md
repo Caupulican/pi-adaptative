@@ -6,6 +6,8 @@
 
 ### Fixed
 
+- Made execution policy a mandatory durable pre-lease gate: approvals and owner notifications now replay, approval never grants authority without a newly compiled grant, paused objectives cannot start or resume work, and workers bind their grant before entering leased/running state.
+- Split goal auto-continuation, autonomous research, model-fitness probing, and shared lane-model resolution into single-owner controllers, leaving the background facade responsible only for composition and the separate managed-lane bridge.
 - Moved durable worker scheduling, execution, recovery, verification, and terminal notification behind one controller; capacity-bound workers now queue consistently across providers, owner-pinned verifier profiles run automatically before acceptance and recover across dispatch/reconciliation crash windows, and dead Pi workers resume the exact persisted session and logical-agent identity with checkpoint/resource handoff.
 - Consolidated worker profile resolution, risk classification, capability grants, execution budgets, lifecycle state, structured-action enforcement, and terminal notifications behind single-owner contracts; removed delegate/settings authority overrides, made undelivered in-process terminal handoffs resume-safe, and enforced trusted acceptance evidence before task/objective completion.
 - Made out-of-process managed workers emit the same bounded event-driven terminal handoff as in-process delegates, taught models to retrieve results once after that handoff instead of polling, and let unprofiled background lanes use the selected model's declared or provider-agnostic reasoning default.

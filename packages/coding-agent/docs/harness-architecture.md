@@ -80,6 +80,13 @@ interrupted lease is fenced and its persisted dispatch is re-queued as a new att
 Pi worker instead retains its logical agent ID and resume context and is woken with `/resume` against
 the same session, worktree, orchestration profile, and checkpoint pointers when present.
 
+Policy is a mandatory pre-lease gate. An attempt cannot lease without a compiled execution grant.
+When compilation crosses owner authority or budget, the gate persists a typed approval request and
+an owner notification; approval and rejection replay as durable human decisions. Approval alone is
+never authority: an approved attempt remains unleaseable until policy compiles and binds a new grant
+under the expanded owner authorization. Pausing an objective blocks lease, start, and agent resume;
+cancellation remains a replayable terminal transition across its open tasks and attempts.
+
 Acceptance is a runtime invariant, not a worker claim. Task criterion IDs must refer to their
 objective, a completed criterion-bound result must carry trusted evidence for every linked criterion,
 and an objective cannot close until all required criteria have trusted evidence in its task results.
@@ -131,8 +138,10 @@ races an active execution unit.
   not used by the coding-agent suite.
 
 Worker lifecycle, scheduling, execution, verification, recovery, and notification are owned by
-`WorkerDelegationController`; `BackgroundLaneController` is only its public composition facade plus
-the separate research and fitness lanes. The next structural extraction targets are foreground turn
-coordination still resident in `AgentSession` and research/fitness coordination still resident in
-`BackgroundLaneController`. Each should move as one state machine without changing the public facade
-or duplicating session state.
+`WorkerDelegationController`. `ResearchLaneController`, `ModelFitnessController`, and
+`GoalAutoContinueController` own their respective timers, guards, cancellation, accounting, and
+persistence; research and fitness share only the provider-neutral `LaneModelResolver`.
+`BackgroundLaneController` is now a compatibility facade plus the distinct out-of-process
+managed-lane bridge. The next structural extraction target is foreground turn coordination still
+resident in `AgentSession`; it must move as one state machine without changing the public facade or
+duplicating session state.

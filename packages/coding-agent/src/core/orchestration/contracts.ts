@@ -342,6 +342,18 @@ export interface ApprovalRequestContract {
 	createdAt: string;
 }
 
+export const APPROVAL_OUTCOMES = ["approved", "rejected"] as const;
+export type ApprovalOutcome = (typeof APPROVAL_OUTCOMES)[number];
+
+/** Human decision only. Approval is not an execution grant; policy must compile a new grant afterward. */
+export interface ApprovalResolutionContract {
+	schemaVersion: typeof ORCHESTRATION_SCHEMA_VERSION;
+	approvalId: string;
+	outcome: ApprovalOutcome;
+	reasonCode: string;
+	resolvedAt: string;
+}
+
 export const ORCHESTRATION_EVENT_TYPES = [
 	"objective.created",
 	"objective.paused",

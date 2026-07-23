@@ -1,13 +1,18 @@
 import { randomUUID } from "node:crypto";
+import { isDeepStrictEqual } from "node:util";
 import type { JsonObject } from "../autonomy/contracts.ts";
 import {
 	type AcceptanceCriterion,
 	type AgentBindingContract,
 	type AgentResumeContext,
 	type AppendOrchestrationEventInput,
+	type ApprovalOutcome,
+	type ApprovalRequestContract,
+	type ApprovalResolutionContract,
 	type AttemptCheckpoint,
 	type AttemptLease,
 	type AttemptStatus,
+	isHarnessCapability,
 	type ObjectiveContract,
 	type ObjectiveStatus,
 	ORCHESTRATION_SCHEMA_VERSION,
@@ -64,6 +69,12 @@ export interface NotificationRuntimeState {
 	deliveredAt?: string;
 }
 
+export interface ApprovalRuntimeState {
+	request: ApprovalRequestContract;
+	status: "pending" | ApprovalOutcome;
+	resolution?: ApprovalResolutionContract;
+}
+
 export interface TaskRuntimeProjection {
 	lastOrdinal: number;
 	agents: Readonly<Record<string, AgentBindingContract>>;
@@ -71,6 +82,7 @@ export interface TaskRuntimeProjection {
 	tasks: Readonly<Record<string, TaskRuntimeState>>;
 	attempts: Readonly<Record<string, AttemptRuntimeState>>;
 	checkpoints: Readonly<Record<string, AttemptCheckpoint>>;
+	approvals: Readonly<Record<string, ApprovalRuntimeState>>;
 	notifications: Readonly<Record<string, NotificationRuntimeState>>;
 }
 
@@ -116,7 +128,16 @@ export class DurableTaskRuntimeError extends Error {
 }
 
 function emptyProjection(): TaskRuntimeProjection {
-	return { lastOrdinal: 0, agents: {}, objectives: {}, tasks: {}, attempts: {}, checkpoints: {}, notifications: {} };
+	return {
+		lastOrdinal: 0,
+		agents: {},
+		objectives: {},
+		tasks: {},
+		attempts: {},
+		checkpoints: {},
+		approvals: {},
+		notifications: {},
+	};
 }
 
 function cloneProjection(state: TaskRuntimeProjection): TaskRuntimeProjection {
@@ -137,6 +158,11 @@ function string(value: unknown, label: string): string {
 
 function number(value: unknown, label: string): number {
 	if (typeof value !== "number" || !Number.isFinite(value)) throw new DurableTaskRuntimeError(`${label} is invalid.`);
+	return value;
+}
+
+function boolean(value: unknown, label: string): boolean {
+	if (typeof value !== "boolean") throw new DurableTaskRuntimeError(`${label} is invalid.`);
 	return value;
 }
 
@@ -196,6 +222,57 @@ function agentFromPayload(payload: JsonObject): AgentBindingContract {
 	return structuredClone(record(payload.agent, "agent")) as unknown as AgentBindingContract;
 }
 
+function approvalFromPayload(payload: JsonObject): ApprovalRequestContract {
+	const approval = record(payload.approval, "approval");
+	const capabilities = stringArray(approval.requestedCapabilities, "approval.requestedCapabilities");
+	if (!capabilities.every(isHarnessCapability)) {
+		throw new DurableTaskRuntimeError("Approval contains an unknown capability.");
+	}
+	const requestedBudget = approval.requestedBudget
+		? (structuredClone(record(approval.requestedBudget, "approval.requestedBudget")) as RiskBudget)
+		: undefined;
+	assertRiskBudget(requestedBudget, "approval.requestedBudget");
+	if (capabilities.length === 0 && !requestedBudget) {
+		throw new DurableTaskRuntimeError("Approval must request capabilities or budget.");
+	}
+	if (approval.schemaVersion !== ORCHESTRATION_SCHEMA_VERSION) {
+		throw new DurableTaskRuntimeError("Approval schema version is invalid.");
+	}
+	return {
+		schemaVersion: ORCHESTRATION_SCHEMA_VERSION,
+		approvalId: string(approval.approvalId, "approval.approvalId"),
+		objectiveId: string(approval.objectiveId, "approval.objectiveId"),
+		...(typeof approval.taskId === "string" ? { taskId: string(approval.taskId, "approval.taskId") } : {}),
+		...(typeof approval.attemptId === "string"
+			? { attemptId: string(approval.attemptId, "approval.attemptId") }
+			: {}),
+		reasonCode: string(approval.reasonCode, "approval.reasonCode"),
+		summary: string(approval.summary, "approval.summary"),
+		requestedCapabilities: capabilities,
+		...(requestedBudget ? { requestedBudget } : {}),
+		reversible: boolean(approval.reversible, "approval.reversible"),
+		createdAt: string(approval.createdAt, "approval.createdAt"),
+	};
+}
+
+function approvalResolutionFromPayload(payload: JsonObject): ApprovalResolutionContract {
+	const resolution = record(payload.resolution, "resolution");
+	if (resolution.schemaVersion !== ORCHESTRATION_SCHEMA_VERSION) {
+		throw new DurableTaskRuntimeError("Approval resolution schema version is invalid.");
+	}
+	const outcome = string(resolution.outcome, "resolution.outcome");
+	if (outcome !== "approved" && outcome !== "rejected") {
+		throw new DurableTaskRuntimeError(`Unknown approval outcome '${outcome}'.`);
+	}
+	return {
+		schemaVersion: ORCHESTRATION_SCHEMA_VERSION,
+		approvalId: string(resolution.approvalId, "resolution.approvalId"),
+		outcome,
+		reasonCode: string(resolution.reasonCode, "resolution.reasonCode"),
+		resolvedAt: string(resolution.resolvedAt, "resolution.resolvedAt"),
+	};
+}
+
 function updateObjectiveStatus(
 	state: TaskRuntimeProjection,
 	objectiveId: string,
@@ -252,6 +329,7 @@ export function reduceOrchestrationEvent(
 	const tasks = state.tasks as Record<string, TaskRuntimeState>;
 	const attempts = state.attempts as Record<string, AttemptRuntimeState>;
 	const checkpoints = state.checkpoints as Record<string, AttemptCheckpoint>;
+	const approvals = state.approvals as Record<string, ApprovalRuntimeState>;
 	const notifications = state.notifications as Record<string, NotificationRuntimeState>;
 
 	switch (event.type) {
@@ -570,9 +648,63 @@ export function reduceOrchestrationEvent(
 				tasks[attempt.taskId] = { ...task, task: { ...task.task, status: "ready", updatedAt: event.occurredAt } };
 			break;
 		}
-		case "approval.requested":
-		case "approval.resolved":
+		case "approval.requested": {
+			const approval = approvalFromPayload(event.payload);
+			if (approvals[approval.approvalId]) {
+				throw new DurableTaskRuntimeError(`Approval '${approval.approvalId}' was requested more than once.`);
+			}
+			approvals[approval.approvalId] = { request: approval, status: "pending" };
+			const notificationId = `approval-requested:${approval.approvalId}`;
+			if (notifications[notificationId]) {
+				throw new DurableTaskRuntimeError(`Notification '${notificationId}' already exists.`);
+			}
+			notifications[notificationId] = {
+				notificationId,
+				objectiveId: approval.objectiveId,
+				...(approval.attemptId ? { attemptId: approval.attemptId } : {}),
+				status: "pending",
+				message: approval.summary,
+				createdAt: event.occurredAt,
+			};
 			break;
+		}
+		case "approval.resolved": {
+			const resolution = approvalResolutionFromPayload(event.payload);
+			const approval = approvals[resolution.approvalId];
+			if (!approval) throw new DurableTaskRuntimeError(`Unknown approval '${resolution.approvalId}'.`);
+			approvals[resolution.approvalId] = {
+				...approval,
+				status: resolution.outcome,
+				resolution,
+			};
+			const approvalNotification = notifications[`approval-requested:${resolution.approvalId}`];
+			if (approvalNotification?.status === "pending") {
+				notifications[approvalNotification.notificationId] = {
+					...approvalNotification,
+					status: "delivered",
+					deliveredAt: event.occurredAt,
+				};
+			}
+			if (resolution.outcome === "rejected" && approval.request.attemptId) {
+				const attempt = attempts[approval.request.attemptId];
+				if (attempt && !terminalAttemptStatus(attempt.status)) {
+					attempts[attempt.attemptId] = {
+						...attempt,
+						status: "blocked",
+						reasonCode: "approval_rejected",
+						updatedAt: event.occurredAt,
+					};
+					const task = tasks[attempt.taskId];
+					if (task) {
+						tasks[attempt.taskId] = {
+							...task,
+							task: { ...task.task, status: "blocked", updatedAt: event.occurredAt },
+						};
+					}
+				}
+			}
+			break;
+		}
 		case "notification.enqueued": {
 			const notificationId = string(event.payload.notificationId, "notification.enqueued.notificationId");
 			notifications[notificationId] = {
@@ -761,6 +893,12 @@ export class DurableTaskRuntime {
 	queueAttempt(taskId: string, dispatch: OrchestrationDispatchRequest, grantId?: string): AttemptRuntimeState {
 		this.refresh();
 		const task = this.requireDispatchableTask(taskId);
+		const pendingApproval = this.pendingApprovalForTask(taskId);
+		if (pendingApproval) {
+			throw new DurableTaskRuntimeError(
+				`Task '${taskId}' is awaiting approval '${pendingApproval.request.approvalId}'.`,
+			);
+		}
 		if (dispatch.taskId !== taskId) {
 			throw new DurableTaskRuntimeError("Dispatch taskId does not match the queued task.");
 		}
@@ -793,6 +931,15 @@ export class DurableTaskRuntime {
 			throw new DurableTaskRuntimeError(`Attempt '${attemptId}' cannot bind a grant from '${attempt.status}'.`);
 		}
 		if (!grantId.trim()) throw new DurableTaskRuntimeError("Grant id is required.");
+		const approval = this.approvalForAttempt(attemptId);
+		if (approval?.status === "pending") {
+			throw new DurableTaskRuntimeError(
+				`Attempt '${attemptId}' is awaiting approval '${approval.request.approvalId}'.`,
+			);
+		}
+		if (approval?.status === "rejected") {
+			throw new DurableTaskRuntimeError(`Approval '${approval.request.approvalId}' was rejected.`);
+		}
 		if (attempt.grantId === grantId) return structuredClone(attempt);
 		if (attempt.grantId) throw new DurableTaskRuntimeError(`Attempt '${attemptId}' already has a different grant.`);
 		this.commit({
@@ -809,6 +956,16 @@ export class DurableTaskRuntime {
 		this.refresh();
 		const attempt = this.requireAttempt(attemptId);
 		if (attempt.status !== "queued") throw new DurableTaskRuntimeError(`Attempt '${attemptId}' is not queued.`);
+		this.requireActiveObjectiveForAttempt(attempt);
+		const approval = this.approvalForAttempt(attemptId);
+		if (approval?.status === "pending") {
+			throw new DurableTaskRuntimeError(
+				`Attempt '${attemptId}' is awaiting approval '${approval.request.approvalId}'.`,
+			);
+		}
+		if (!attempt.grantId) {
+			throw new DurableTaskRuntimeError(`Attempt '${attemptId}' requires an execution grant before leasing.`);
+		}
 		if (agentId) {
 			const agent = this.state.agents[agentId];
 			if (!agent) throw new DurableTaskRuntimeError(`Unknown agent '${agentId}'.`);
@@ -840,6 +997,7 @@ export class DurableTaskRuntime {
 	startAttempt(attemptId: string, leaseId: string, fencingToken: number): AttemptRuntimeState {
 		this.refresh();
 		const attempt = this.requireLiveLease(attemptId, leaseId, fencingToken);
+		this.requireActiveObjectiveForAttempt(attempt);
 		if (attempt.status !== "leased") throw new DurableTaskRuntimeError(`Attempt '${attemptId}' is not leased.`);
 		this.commit({
 			type: "attempt.started",
@@ -1072,6 +1230,7 @@ export class DurableTaskRuntime {
 		}
 		if (!agent || agent.status !== "resuming")
 			throw new DurableTaskRuntimeError(`Agent '${agentId}' is not resuming.`);
+		this.requireActiveObjectiveForAttempt(attempt);
 		if (!Number.isFinite(ttlMs) || ttlMs <= 0) throw new DurableTaskRuntimeError("Lease TTL must be positive.");
 		const issuedAtMs = this.now();
 		const lease: AttemptLease = {
@@ -1130,6 +1289,66 @@ export class DurableTaskRuntime {
 			);
 		}
 		this.transitionObjective(objectiveId, "objective.completed", "completed");
+	}
+
+	requestApproval(approval: ApprovalRequestContract): ApprovalRuntimeState {
+		this.refresh();
+		const normalized = approvalFromPayload(toJsonObject({ approval }));
+		const existing = this.state.approvals[normalized.approvalId];
+		if (existing) {
+			if (!isDeepStrictEqual(existing.request, normalized)) {
+				throw new DurableTaskRuntimeError(`Approval id '${normalized.approvalId}' has conflicting content.`);
+			}
+			return structuredClone(existing);
+		}
+		this.validateApprovalRequest(normalized);
+		const pendingForTarget = Object.values(this.state.approvals).find(
+			(candidate) =>
+				candidate.status === "pending" &&
+				candidate.request.objectiveId === normalized.objectiveId &&
+				candidate.request.taskId === normalized.taskId &&
+				candidate.request.attemptId === normalized.attemptId,
+		);
+		if (pendingForTarget) {
+			throw new DurableTaskRuntimeError(`Target already awaits approval '${pendingForTarget.request.approvalId}'.`);
+		}
+		this.commit({
+			type: "approval.requested",
+			aggregateId: normalized.attemptId ?? normalized.taskId ?? normalized.objectiveId,
+			actor: "policy",
+			idempotencyKey: `approval-requested:${normalized.approvalId}`,
+			payload: toJsonObject({ approval: normalized }),
+		});
+		return structuredClone(this.state.approvals[normalized.approvalId]!);
+	}
+
+	resolveApproval(approvalId: string, outcome: ApprovalOutcome, reasonCode: string): ApprovalRuntimeState {
+		this.refresh();
+		const approval = this.state.approvals[approvalId];
+		if (!approval) throw new DurableTaskRuntimeError(`Unknown approval '${approvalId}'.`);
+		if (approval.status !== "pending") {
+			if (approval.status === outcome) return structuredClone(approval);
+			throw new DurableTaskRuntimeError(`Approval '${approvalId}' was already ${approval.status}.`);
+		}
+		if (outcome !== "approved" && outcome !== "rejected") {
+			throw new DurableTaskRuntimeError(`Unknown approval outcome '${String(outcome)}'.`);
+		}
+		if (!reasonCode.trim()) throw new DurableTaskRuntimeError("Approval resolution reason is required.");
+		const resolution: ApprovalResolutionContract = {
+			schemaVersion: ORCHESTRATION_SCHEMA_VERSION,
+			approvalId,
+			outcome,
+			reasonCode: reasonCode.trim(),
+			resolvedAt: this.nowIso(),
+		};
+		this.commit({
+			type: "approval.resolved",
+			aggregateId: approval.request.attemptId ?? approval.request.taskId ?? approval.request.objectiveId,
+			actor: "human",
+			idempotencyKey: `approval-resolved:${approvalId}`,
+			payload: toJsonObject({ resolution }),
+		});
+		return structuredClone(this.state.approvals[approvalId]!);
 	}
 
 	enqueueNotification(args: {
@@ -1211,6 +1430,56 @@ export class DurableTaskRuntime {
 		const attempt = this.state.attempts[attemptId];
 		if (!attempt) throw new DurableTaskRuntimeError(`Unknown attempt '${attemptId}'.`);
 		return attempt;
+	}
+
+	private approvalForAttempt(attemptId: string): ApprovalRuntimeState | undefined {
+		return Object.values(this.state.approvals).find((approval) => approval.request.attemptId === attemptId);
+	}
+
+	private pendingApprovalForTask(taskId: string): ApprovalRuntimeState | undefined {
+		const task = this.state.tasks[taskId];
+		if (!task) return undefined;
+		return Object.values(this.state.approvals).find(
+			(approval) =>
+				approval.status === "pending" &&
+				approval.request.attemptId === undefined &&
+				approval.request.objectiveId === task.task.objectiveId &&
+				(approval.request.taskId === undefined || approval.request.taskId === taskId),
+		);
+	}
+
+	private requireActiveObjectiveForAttempt(attempt: AttemptRuntimeState): void {
+		const task = this.state.tasks[attempt.taskId];
+		if (!task) throw new DurableTaskRuntimeError(`Unknown task '${attempt.taskId}'.`);
+		const objective = this.requireObjective(task.task.objectiveId).objective;
+		if (objective.status !== "active") {
+			throw new DurableTaskRuntimeError(`Objective '${objective.objectiveId}' is not active.`);
+		}
+	}
+
+	private validateApprovalRequest(approval: ApprovalRequestContract): void {
+		const objective = this.requireObjective(approval.objectiveId).objective;
+		if (objective.status !== "active") {
+			throw new DurableTaskRuntimeError(`Objective '${approval.objectiveId}' is not active.`);
+		}
+		if (approval.attemptId && !approval.taskId) {
+			throw new DurableTaskRuntimeError("Attempt-scoped approval requires a taskId.");
+		}
+		if (approval.taskId) {
+			const task = this.state.tasks[approval.taskId];
+			if (!task || task.task.objectiveId !== approval.objectiveId) {
+				throw new DurableTaskRuntimeError(`Approval task '${approval.taskId}' does not belong to its objective.`);
+			}
+		}
+		if (approval.attemptId) {
+			const attempt = this.state.attempts[approval.attemptId];
+			if (!attempt || attempt.taskId !== approval.taskId) {
+				throw new DurableTaskRuntimeError(`Approval attempt '${approval.attemptId}' does not belong to its task.`);
+			}
+			if (attempt.status !== "queued" || attempt.grantId) {
+				throw new DurableTaskRuntimeError(`Approval attempt '${approval.attemptId}' is not awaiting policy.`);
+			}
+		}
 	}
 
 	private requireLiveLease(attemptId: string, leaseId: string, fencingToken: number): AttemptRuntimeState {

@@ -6,7 +6,6 @@ import type {
 	RiskBudget,
 	ToolCapabilityManifest,
 } from "../orchestration/contracts.ts";
-import type { StartedDelegationAttempt } from "../orchestration/delegation-ledger.ts";
 import { buildLaneToolManifests } from "../orchestration/lane-tool-manifests.ts";
 import { ExecutionPolicyCompiler } from "../orchestration/policy-compiler.ts";
 import { intersectRiskBudgets } from "../orchestration/risk-budget.ts";
@@ -89,15 +88,15 @@ export function buildWorkerExecutionPlan(args: {
 }
 
 export function compileWorkerExecutionGrant(args: {
-	handle: StartedDelegationAttempt;
+	target: { objectiveId: string; taskId: string; attemptId: string };
 	profile: OrchestrationProfile;
 	plan: WorkerExecutionPlan;
 }): { ok: true; grant: ExecutionGrant } | { ok: false; reasonCodes: readonly string[] } {
 	const compiled = new ExecutionPolicyCompiler().compile({
-		objectiveId: args.handle.objectiveId,
-		taskId: args.handle.taskId,
-		attemptId: args.handle.attemptId,
-		subjectId: `in-process:${args.handle.attemptId}`,
+		objectiveId: args.target.objectiveId,
+		taskId: args.target.taskId,
+		attemptId: args.target.attemptId,
+		subjectId: `in-process:${args.target.attemptId}`,
 		role: args.profile.role,
 		requiredCapabilities: args.plan.requiredCapabilities,
 		requestedCapabilities: args.plan.requiredCapabilities,
@@ -110,7 +109,6 @@ export function compileWorkerExecutionGrant(args: {
 		requestedBudget: args.plan.budget,
 		authorityBudget: args.plan.budget,
 		policyVersion: "worker-profile-v1",
-		expiresAt: args.handle.expiresAt,
 	});
 	if (compiled.outcome !== "allow") return { ok: false, reasonCodes: compiled.reasonCodes };
 	return { ok: true, grant: compiled.grant };

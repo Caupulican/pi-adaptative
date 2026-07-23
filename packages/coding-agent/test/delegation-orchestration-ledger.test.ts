@@ -53,6 +53,7 @@ describe("DelegationOrchestrationLedger", () => {
 			profile: profile(),
 			requiredCapabilities: ["filesystem.read", "filesystem.write"],
 		});
+		first.runtime.bindAttemptGrant(queued.attemptId, "grant-session-1");
 		const handle = first.start(queued.attemptId, 60_000);
 
 		const reopened = new DelegationOrchestrationLedger({ agentDir, sessionId: "session-1" });
@@ -112,6 +113,7 @@ describe("DelegationOrchestrationLedger", () => {
 			profile: limitedProfile,
 			requiredCapabilities: ["filesystem.read"],
 		});
+		first.runtime.bindAttemptGrant(queued.attemptId, "grant-limited");
 		first.start(queued.attemptId, 60_000);
 
 		const reopened = new DelegationOrchestrationLedger({ agentDir, sessionId: "session-limited" });
@@ -128,6 +130,7 @@ describe("DelegationOrchestrationLedger", () => {
 			profile: profile(),
 			requiredCapabilities: ["filesystem.read", "filesystem.write"],
 		});
+		ledger.runtime.bindAttemptGrant(queued.attemptId, "grant-session-3");
 		const handle = ledger.start(queued.attemptId, 60_000);
 		const result = adaptWorkerResult({
 			handle,

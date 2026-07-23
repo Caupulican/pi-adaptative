@@ -534,9 +534,14 @@ export class WorkerDelegationController {
 					...(goal ? { goal: { goalId: goal.goalId, description: goal.userGoal } } : {}),
 				});
 		if (!prepared.attempt) return { started: false, skipReason: "orchestration_attempt_missing" };
-		const durableHandle = lifecycle.start(prepared.record.laneId, orchestrationProfile.leaseTtlMs);
+		const durableTask = lifecycle.getTask(prepared.record.laneId);
+		if (!durableTask) return { started: false, skipReason: "orchestration_task_missing" };
 		const compiled = compileWorkerExecutionGrant({
-			handle: durableHandle,
+			target: {
+				objectiveId: durableTask.task.objectiveId,
+				taskId: prepared.attempt.taskId,
+				attemptId: prepared.attempt.attemptId,
+			},
 			profile: orchestrationProfile,
 			plan: executionPlan,
 		});
@@ -544,7 +549,8 @@ export class WorkerDelegationController {
 			lifecycle.cancel(prepared.record.laneId, compiled.reasonCodes.join(","));
 			return { started: false, skipReason: `execution_policy_denied:${compiled.reasonCodes.join(",")}` };
 		}
-		lifecycle.bindGrant(durableHandle.attemptId, compiled.grant.grantId);
+		lifecycle.bindGrant(prepared.attempt.attemptId, compiled.grant.grantId);
+		const durableHandle = lifecycle.start(prepared.record.laneId, orchestrationProfile.leaseTtlMs);
 		const startedRecord = lifecycle.getRecord(prepared.record.laneId);
 		if (!startedRecord) return { started: false, skipReason: "orchestration_projection_missing" };
 		onStarted?.(startedRecord);

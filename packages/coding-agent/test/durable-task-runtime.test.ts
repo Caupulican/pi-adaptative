@@ -3,7 +3,11 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { afterEach, describe, expect, it } from "vitest";
 import { buildPiResumeLaunchSpec } from "../src/core/orchestration/agent-resume.ts";
-import { ORCHESTRATION_SCHEMA_VERSION, type WorkerResultContract } from "../src/core/orchestration/contracts.ts";
+import {
+	type ApprovalRequestContract,
+	ORCHESTRATION_SCHEMA_VERSION,
+	type WorkerResultContract,
+} from "../src/core/orchestration/contracts.ts";
 import { OrchestrationEventStore } from "../src/core/orchestration/event-store.ts";
 import { DurableTaskRuntime, DurableTaskRuntimeError } from "../src/core/orchestration/task-runtime.ts";
 import { buildResumablePiAgentWakePrompt } from "../src/core/process-matrix/resume-launcher.ts";
@@ -188,7 +192,7 @@ describe("DurableTaskRuntime", () => {
 			role: "verifier",
 			acceptanceCriterionIds: ["criterion-1"],
 		});
-		const attempt = runtime.queueAttempt(task.taskId, dispatch(task.taskId));
+		const attempt = runtime.queueAttempt(task.taskId, dispatch(task.taskId), "grant-proof");
 		const lease = runtime.leaseAttempt(attempt.attemptId, "verifier-1", 60_000);
 		runtime.startAttempt(attempt.attemptId, lease.leaseId, lease.fencingToken);
 		const resultBase = {
@@ -237,7 +241,11 @@ describe("DurableTaskRuntime", () => {
 			role: "implementer",
 			acceptanceCriterionIds: ["criterion-1"],
 		});
-		const implementationAttempt = runtime.queueAttempt(implementation.taskId, dispatch(implementation.taskId));
+		const implementationAttempt = runtime.queueAttempt(
+			implementation.taskId,
+			dispatch(implementation.taskId),
+			"grant-implementation",
+		);
 		const implementationLease = runtime.leaseAttempt(implementationAttempt.attemptId, "implementer", 60_000);
 		runtime.startAttempt(
 			implementationAttempt.attemptId,
@@ -263,7 +271,11 @@ describe("DurableTaskRuntime", () => {
 			verificationOfTaskId: implementation.taskId,
 			acceptanceCriterionIds: ["criterion-1"],
 		});
-		const verifierAttempt = runtime.queueAttempt(verifier.taskId, dispatch(verifier.taskId, "verifier"));
+		const verifierAttempt = runtime.queueAttempt(
+			verifier.taskId,
+			dispatch(verifier.taskId, "verifier"),
+			"grant-verifier",
+		);
 		const verifierLease = runtime.leaseAttempt(verifierAttempt.attemptId, "verifier", 60_000);
 		runtime.startAttempt(verifierAttempt.attemptId, verifierLease.leaseId, verifierLease.fencingToken);
 		runtime.finishAttempt(
@@ -320,7 +332,7 @@ describe("DurableTaskRuntime", () => {
 			description: "Run a worker",
 			role: "operator",
 		});
-		const attempt = harness.runtime.queueAttempt(task.taskId, dispatch(task.taskId));
+		const attempt = harness.runtime.queueAttempt(task.taskId, dispatch(task.taskId), "grant-recovery");
 		const lease = harness.runtime.leaseAttempt(attempt.attemptId, "worker-1", 1_000);
 		harness.runtime.startAttempt(attempt.attemptId, lease.leaseId, lease.fencingToken);
 		harness.clock.ms += 2_000;
@@ -360,6 +372,115 @@ describe("DurableTaskRuntime", () => {
 		expect(reopened.getSnapshot().notifications[notification.notificationId]?.status).toBe("delivered");
 	});
 
+	it("persists approval decisions, notifies the owner, and requires a new grant after approval", () => {
+		const harness = createHarness();
+		const objective = harness.runtime.createObjective({
+			objectiveId: "objective-approval",
+			title: "Approve authority",
+			description: "Require an explicit owner decision",
+		});
+		const task = harness.runtime.createTask({
+			taskId: "task-approval",
+			objectiveId: objective.objectiveId,
+			title: "Execute",
+			description: "Execute an approved process",
+			role: "operator",
+			requiredCapabilities: ["process.exec"],
+		});
+		const attempt = harness.runtime.queueAttempt(task.taskId, dispatch(task.taskId));
+		const approval: ApprovalRequestContract = {
+			schemaVersion: ORCHESTRATION_SCHEMA_VERSION,
+			approvalId: "approval-1",
+			objectiveId: objective.objectiveId,
+			taskId: task.taskId,
+			attemptId: attempt.attemptId,
+			reasonCode: "required_capability_needs_authority",
+			summary: "Owner approval is required for process execution.",
+			requestedCapabilities: ["process.exec"],
+			reversible: true,
+			createdAt: new Date(T0).toISOString(),
+		};
+
+		harness.runtime.requestApproval(approval);
+		expect(() => harness.runtime.leaseAttempt(attempt.attemptId, "worker-1", 60_000)).toThrow("awaiting approval");
+		expect(() => harness.runtime.bindAttemptGrant(attempt.attemptId, "grant-before-owner")).toThrow(
+			"awaiting approval",
+		);
+
+		const reopened = new DurableTaskRuntime({ store: harness.store, now: () => harness.clock.ms });
+		expect(reopened.getSnapshot()).toMatchObject({
+			approvals: { "approval-1": { status: "pending", request: { attemptId: attempt.attemptId } } },
+			notifications: {
+				"approval-requested:approval-1": {
+					status: "pending",
+					message: approval.summary,
+				},
+			},
+		});
+
+		reopened.resolveApproval(approval.approvalId, "approved", "owner_approved_process_execution");
+		expect(() => reopened.leaseAttempt(attempt.attemptId, "worker-1", 60_000)).toThrow("requires an execution grant");
+		reopened.bindAttemptGrant(attempt.attemptId, "grant-after-owner");
+		expect(reopened.leaseAttempt(attempt.attemptId, "worker-1", 60_000).attemptId).toBe(attempt.attemptId);
+	});
+
+	it("blocks a rejected approval attempt and replays the human decision", () => {
+		const harness = createHarness();
+		const objective = harness.runtime.createObjective({ title: "Reject", description: "Reject elevated work" });
+		const task = harness.runtime.createTask({
+			objectiveId: objective.objectiveId,
+			title: "Mutate",
+			description: "Mutate policy",
+			role: "orchestrator",
+		});
+		const attempt = harness.runtime.queueAttempt(task.taskId, dispatch(task.taskId));
+		harness.runtime.requestApproval({
+			schemaVersion: ORCHESTRATION_SCHEMA_VERSION,
+			approvalId: "approval-rejected",
+			objectiveId: objective.objectiveId,
+			taskId: task.taskId,
+			attemptId: attempt.attemptId,
+			reasonCode: "owner_authority_required",
+			summary: "Policy mutation requires owner authority.",
+			requestedCapabilities: ["policy.modify"],
+			reversible: false,
+			createdAt: new Date(T0).toISOString(),
+		});
+		harness.runtime.resolveApproval("approval-rejected", "rejected", "owner_rejected_policy_change");
+
+		const reopened = new DurableTaskRuntime({ store: harness.store, now: () => harness.clock.ms });
+		expect(reopened.getSnapshot()).toMatchObject({
+			approvals: {
+				"approval-rejected": {
+					status: "rejected",
+					resolution: { reasonCode: "owner_rejected_policy_change" },
+				},
+			},
+			attempts: { [attempt.attemptId]: { status: "blocked", reasonCode: "approval_rejected" } },
+			tasks: { [task.taskId]: { task: { status: "blocked" } } },
+		});
+	});
+
+	it("enforces objective pause at lease, start, and agent-resume boundaries", () => {
+		const { runtime } = createHarness();
+		const objective = runtime.createObjective({ title: "Pause", description: "Pause all new execution" });
+		const task = runtime.createTask({
+			objectiveId: objective.objectiveId,
+			title: "Work",
+			description: "Work after resume",
+			role: "operator",
+		});
+		const attempt = runtime.queueAttempt(task.taskId, dispatch(task.taskId), "grant-pause");
+		runtime.pauseObjective(objective.objectiveId);
+		expect(() => runtime.leaseAttempt(attempt.attemptId, "worker", 60_000)).toThrow("is not active");
+		runtime.resumeObjective(objective.objectiveId);
+		const lease = runtime.leaseAttempt(attempt.attemptId, "worker", 60_000);
+		runtime.pauseObjective(objective.objectiveId);
+		expect(() => runtime.startAttempt(attempt.attemptId, lease.leaseId, lease.fencingToken)).toThrow("is not active");
+		runtime.resumeObjective(objective.objectiveId);
+		expect(runtime.startAttempt(attempt.attemptId, lease.leaseId, lease.fencingToken).status).toBe("running");
+	});
+
 	it("resumes the same logical Pi agent, session context, attempt, and checkpoint after interruption", () => {
 		const harness = createHarness();
 		const agent = harness.runtime.registerAgent({
@@ -390,7 +511,7 @@ describe("DurableTaskRuntime", () => {
 			description: "Inspect repository",
 			role: "explorer",
 		});
-		const attempt = harness.runtime.queueAttempt(task.taskId, dispatch(task.taskId));
+		const attempt = harness.runtime.queueAttempt(task.taskId, dispatch(task.taskId), "grant-resume");
 		const firstLease = harness.runtime.leaseAttempt(attempt.attemptId, agent.agentId, 1_000, agent.agentId);
 		harness.runtime.startAttempt(attempt.attemptId, firstLease.leaseId, firstLease.fencingToken);
 		const checkpoint = harness.runtime.checkpointAttempt({
