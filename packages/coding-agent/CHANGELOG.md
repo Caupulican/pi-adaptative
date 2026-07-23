@@ -6,6 +6,7 @@
 
 ### Fixed
 
+- Consolidated foreground model tool-protocol selection, probing, calibration, circuit breaking, repair teaching, and turn-local telemetry into one controller shared by session call sites.
 - Made execution policy a mandatory durable pre-lease gate: approvals and owner notifications now replay, approval never grants authority without a newly compiled grant, paused objectives cannot start or resume work, and workers bind their grant before entering leased/running state.
 - Split goal auto-continuation, autonomous research, model-fitness probing, and shared lane-model resolution into single-owner controllers, leaving the background facade responsible only for composition and the separate managed-lane bridge.
 - Moved durable worker scheduling, execution, recovery, verification, and terminal notification behind one controller; capacity-bound workers now queue consistently across providers, owner-pinned verifier profiles run automatically before acceptance and recover across dispatch/reconciliation crash windows, and dead Pi workers resume the exact persisted session and logical-agent identity with checkpoint/resource handoff.

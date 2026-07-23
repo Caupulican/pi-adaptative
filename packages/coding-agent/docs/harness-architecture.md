@@ -9,7 +9,7 @@ the low-level agent loop and provider transports remain separate packages. The d
 ```text
 coding-agent/AgentSession
   ├─ runtime + resource policy       RuntimeBuilder, ResourceLoader, ProfileFilterController
-  ├─ model execution policy         ModelSelection, ModelRouter, LocalRuntime, protocol resolver
+  ├─ model execution policy         ModelSelection, ModelRouter, LocalRuntime, ToolProtocolController
   ├─ foreground turn coordination   ContextPipeline, retry/failover, compaction, persistence
   └─ child work coordination        WorkerDelegation, BackgroundLane, Reflection, managed-lane bridge
                  │
@@ -142,6 +142,7 @@ Worker lifecycle, scheduling, execution, verification, recovery, and notificatio
 `GoalAutoContinueController` own their respective timers, guards, cancellation, accounting, and
 persistence; research and fitness share only the provider-neutral `LaneModelResolver`.
 `BackgroundLaneController` is now a compatibility facade plus the distinct out-of-process
-managed-lane bridge. The next structural extraction target is foreground turn coordination still
-resident in `AgentSession`; it must move as one state machine without changing the public facade or
-duplicating session state.
+managed-lane bridge. `ToolProtocolController` owns model protocol selection, probing, calibration,
+circuit breaking, repair teaching, and its per-turn state. The next structural extraction target is
+the remaining foreground retry, failover, compaction, and prompt coordination in `AgentSession`; it
+must move through cohesive owners without changing the public facade or duplicating session state.

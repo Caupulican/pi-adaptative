@@ -1,6 +1,6 @@
 import { createHash, randomUUID } from "node:crypto";
-import { readFileSync, rmSync, writeFileSync } from "node:fs";
-import { basename, dirname, join } from "node:path";
+import { readFileSync } from "node:fs";
+import { basename, dirname } from "node:path";
 import type {
 	Agent,
 	AgentContext,
@@ -46,7 +46,6 @@ import {
 import type {
 	Api,
 	AssistantMessage,
-	AssistantMessageEventStream,
 	CacheRetention,
 	Context,
 	ImageContent,
@@ -55,29 +54,17 @@ import type {
 	SimpleStreamOptions,
 	StopReason,
 	TextContent,
-	TextToolProtocolParseEvent,
-	TextToolProtocolVariant,
-	Tool,
-	ToolArgumentValidationTelemetryEvent,
-	ToolRepairModeName,
 	Usage,
 } from "@caupulican/pi-ai";
 import {
 	cleanupSessionResources,
-	formatToolRepairStandingRule,
-	formatVariantEnvelope,
-	generateTextToolProtocolPrimer,
 	getSupportedThinkingLevels,
 	isContextOverflow,
 	modelsAreEqual,
-	parseTextToolCalls,
 	streamSimple,
-	TEXT_TOOL_PROTOCOL_VARIANTS,
 } from "@caupulican/pi-ai";
-import { Type } from "typebox";
 import { getAgentDir } from "../config.ts";
 import { stripFrontmatter } from "../utils/frontmatter.ts";
-import { getProcessWorkRun } from "../utils/work-directory.ts";
 import { resourceDir, stateFile } from "./agent-paths.ts";
 import { formatNoApiKeyFoundMessage, formatNoModelSelectedMessage } from "./auth-guidance.ts";
 import type {
@@ -175,17 +162,7 @@ import type { ModelRegistry } from "./model-registry.ts";
 import { isLocalOrManagedRouterModel } from "./model-router/tool-escalation.ts";
 import { formatModelRouterModel, ModelRouterController } from "./model-router-controller.ts";
 import { ModelSelectionController } from "./model-selection-controller.ts";
-import {
-	MODEL_TOOL_PROTOCOL_VERSION,
-	type ModelToolProtocolResolution,
-	resolveModelToolProtocol,
-} from "./model-tool-protocol.ts";
-import {
-	ModelAdaptationStore,
-	type ModelToolProbe,
-	type ModelToolProbeVerdict,
-	type NativeToolProbeGrade,
-} from "./models/adaptation-store.ts";
+import { ModelAdaptationStore } from "./models/adaptation-store.ts";
 import type { StoredFitnessReport } from "./models/fitness-store.ts";
 import type { PrismLlamaCppRuntime } from "./models/llamacpp-runtime.ts";
 import { HF_TRANSFORMERS_PROVIDER, OLLAMA_PROVIDER } from "./models/local-registration.ts";
@@ -221,10 +198,9 @@ import { SystemPromptBuilder } from "./system-prompt-builder.ts";
 import { appendTaskStepsStateSnapshot, getLatestTaskStepsStateSnapshot } from "./tasks/session-task-state.ts";
 import { formatTaskStepsContext, type TaskStepsState } from "./tasks/task-state.ts";
 import { ToolGateController } from "./tool-gate-controller.ts";
+import { type ToolProbeReport, type ToolProbeResult, ToolProtocolController } from "./tool-protocol-controller.ts";
 import { TOOL_RECOVERY_EVENT_LOG_FILE } from "./tool-recovery-log-records.ts";
 import { ToolRecoveryLogger } from "./tool-recovery-logger.ts";
-import { formatToolRepairHealthReport } from "./tool-repair-health.ts";
-import { resolveCurrentToolRepairSettings } from "./tool-repair-settings.ts";
 import { ToolPerformanceStore } from "./tool-selection/tool-performance-store.ts";
 import { formatToolSelectionReport, ToolSelectionController } from "./tool-selection/tool-selection-controller.ts";
 import type { BashOperations } from "./tools/bash.ts";
@@ -244,32 +220,6 @@ import { disposePersistentShellSession } from "./tools/shell-session.ts";
  * key stable regardless of how many times this module is evaluated.
  */
 const RAW_STREAM_MARKER = Symbol.for("pi.rawStreamSimple");
-const MODEL_ADAPTATION_REPAIR_THRESHOLD = 3;
-const TEXT_TOOL_PROTOCOL_TRIALS_PER_VARIANT = 2;
-const TEXT_TOOL_PROTOCOL_PARSE_FAILURE_THRESHOLD = 3;
-/** How often the one-line envelope-format corrective steer (see
- * {@link AgentSession._maybeInjectTextProtocolCorrectiveSteer}) re-fires after the first parse
- * failure this session — every Nth failure thereafter, not every single one, so a model that keeps
- * missing the envelope doesn't get the reminder spliced into every turn (the breaker's same-signature
- * counter is what actually demotes it, at {@link TEXT_TOOL_PROTOCOL_PARSE_FAILURE_THRESHOLD}). */
-const TEXT_TOOL_PROTOCOL_STEER_INTERVAL = 5;
-/** Anti-loop cooldown: the evidence-gated auto-probe (see {@link
- * AgentSession._maybeAutoProbeOnValidationEscalation}) skips a model whose persisted `toolProbe`
- * verdict was written within this window, so a burst of validation-escalation events for a still-
- * failing model — or a very recent explicit `/toolprobe` run, or a future circuit-breaker demote — does
- * not re-fire the (multi-completion) probe every time. Independent of, and complementary to, the
- * per-session `_autoProbedModels` latch. */
-const AUTO_TOOL_PROBE_FRESHNESS_MS = 15 * 60 * 1000;
-const TEXT_TOOL_PROTOCOL_ECHO_TOOL = {
-	name: "echo",
-	description: "Echo calibration data",
-	parameters: Type.Object({ data: Type.String() }),
-} satisfies Tool;
-const NATIVE_TOOL_PROBE_READ_TOOL = {
-	name: "read",
-	description: "Read file contents",
-	parameters: Type.Object({ path: Type.String() }),
-} satisfies Tool;
 
 /** Test-only override of the stream-idle bounds. Read per-request by the wiring's resolver. */
 let streamIdleOptionsOverride: Partial<StreamIdleOptions> | undefined;
@@ -468,20 +418,7 @@ export interface PromptOptions {
 	autoContinueGoal?: boolean;
 }
 
-export type ToolProbeVerdict = "native" | "text-protocol" | "none";
-
-export interface ToolProbeResult {
-	model: string;
-	verdict: ToolProbeVerdict;
-	variant?: TextToolProtocolVariant;
-	nativeGrade?: NativeToolProbeGrade;
-	diagnostic?: string;
-}
-
-export interface ToolProbeReport {
-	results: ToolProbeResult[];
-	table: string;
-}
+export type { ToolProbeReport, ToolProbeResult, ToolProbeVerdict } from "./tool-protocol-controller.ts";
 
 /** Result from cycleModel() */
 export interface ModelCycleResult {
@@ -791,26 +728,11 @@ export class AgentSession {
 	private _agentDir: string;
 	private _collectWorkspaceSources: typeof collectWorkspaceSources;
 	private readonly _localRuntimeController: LocalRuntimeController;
-	private readonly _modelAdaptationStore: ModelAdaptationStore;
+	private readonly _toolProtocol: ToolProtocolController;
 	private _prefixWarmer:
 		| { modelKey: string; controller: AbortController; timer: NodeJS.Timeout | undefined }
 		| undefined;
 	private readonly _completedPrefixWarms = new Set<string>();
-	private readonly _repairModeSessionCounts = new Map<string, number>();
-	private readonly _textProtocolParseFailures = new Map<string, { signature: string; repeats: number }>();
-	private _textProtocolParseObservedThisTurn = false;
-	/** Total text-protocol parse-failure events observed this session, backing the
-	 * {@link TEXT_TOOL_PROTOCOL_STEER_INTERVAL} throttle on {@link _maybeInjectTextProtocolCorrectiveSteer}. */
-	private _textProtocolCorrectiveSteerCount = 0;
-	/** Monotonic counter backing tool-probe/text-protocol-calibration spawned-usage reportIds
-	 * (see {@link _nextProbeUsageReportId}); guarantees each probe/calibration completion in the
-	 * session lands in the cost ledger exactly once, even across repeated /toolprobe invocations. */
-	private _toolProbeUsageReportSeq = 0;
-	/** Anti-loop: modelKeys the evidence-gated auto-probe has already fired for THIS session (see
-	 * {@link _maybeAutoProbeOnValidationEscalation}), so a burst of validation-escalation events for
-	 * the same still-failing model never re-fires the probe more than once per session. */
-	private readonly _autoProbedModels = new Set<string>();
-	private _textProtocolValidationOutcomeThisTurn: TextToolProtocolParseEvent | undefined;
 	/** Assembles the session's base system prompt from live session state (see
 	 * system-prompt-builder.ts); owns the paired _baseSystemPromptOptions. */
 	private readonly _systemPromptBuilder: SystemPromptBuilder;
@@ -996,9 +918,27 @@ export class AgentSession {
 		this._customTools = config.customTools ?? [];
 		this._cwd = config.cwd;
 		this._agentDir = agentDir;
-		this._modelAdaptationStore = modelAdaptationStore;
-		this.agent.onTextToolProtocolParse = (event) => this._handleTextToolProtocolParse(event);
-		this._applyToolRepairLayerSettings();
+		this._toolProtocol = new ToolProtocolController({
+			agent: this.agent,
+			agentDir: this._agentDir,
+			settingsManager: this.settingsManager,
+			getModelRegistry: () => this._modelRegistry,
+			adaptationStore: modelAdaptationStore,
+			isRawStreamSimple: (fn) => this._isRawStreamSimple(fn),
+			getRequiredRequestAuth: (model) => this._getRequiredRequestAuth(model),
+			addSpawnedUsage: (usage, opts) => this.addSpawnedUsage(usage, opts),
+			emitWarning: (message) => this._emit({ type: "warning", message }),
+			sendCorrectiveSteer: (message) =>
+				this.sendCustomMessage(
+					{ customType: "text-protocol-corrective-steer", content: message, display: false },
+					{ deliverAs: "nextTurn" },
+				),
+			findLastAssistantMessage: () => this._findLastAssistantMessage(),
+			isDisposed: () => this._disposed,
+			probeForAuto: (model) => this._probeToolCallingForModel(model),
+		});
+		this.agent.onTextToolProtocolParse = (event) => this._toolProtocol.handleTextProtocolParse(event);
+		this._toolProtocol.applyRepairLayerSettings();
 		this._collectWorkspaceSources = config.collectWorkspaceSources ?? collectWorkspaceSources;
 		this._localRuntimeController = new LocalRuntimeController({
 			agentDir: this._agentDir,
@@ -1017,7 +957,7 @@ export class AgentSession {
 			hasTool: (name) => this._runtimeBuilder.hasTool(name),
 			getToolPromptSnippet: (name) => this._runtimeBuilder.getToolPromptSnippet(name),
 			getToolPromptGuidelines: (name) => this._runtimeBuilder.getToolPromptGuidelines(name),
-			getModelAdaptationRules: () => this._getModelAdaptationRulesForPrompt(),
+			getModelAdaptationRules: () => this._toolProtocol.getAdaptationRulesForPrompt(),
 			getActiveExtensions: () => this._extensionRunner.activeExtensions,
 			getContextWindow: () => this.model?.contextWindow,
 			getThinkingLevel: () => this.thinkingLevel,
@@ -1115,7 +1055,7 @@ export class AgentSession {
 		});
 		const failureCorpusPath = stateFile(this._agentDir, "failure-corpus.jsonl");
 		this._toolRecoveryEventLogPath = stateFile(this._agentDir, TOOL_RECOVERY_EVENT_LOG_FILE);
-		const toolRepairSettings = this._toolRepairSettings();
+		const toolRepairSettings = this._toolProtocol.getRepairSettings();
 		this._failureCorpus = new FailureCorpusRecorder({
 			filePath: failureCorpusPath,
 		});
@@ -1153,7 +1093,7 @@ export class AgentSession {
 			emitAutonomyTelemetry: (event) => this._emitAutonomyTelemetry(event),
 			resolveLaneModel: (pattern) => this._backgroundLanes.resolveLaneModel(pattern),
 			resolveCurationModelIfFit: () => this._resolveCurationModelIfFit(),
-			getToolProbeVerdict: (model) => this._toolProbeVerdict(model),
+			getToolProbeVerdict: (model) => this._toolProtocol.getToolProbeVerdict(model),
 		});
 		this._reflection = new ReflectionController({
 			getModel: () => this.model,
@@ -1300,7 +1240,7 @@ export class AgentSession {
 		});
 		const previousToolArgumentValidation = this.agent.onToolArgumentValidation;
 		this.agent.onToolArgumentValidation = (event) => {
-			const taggedEvent = this._tagModelAdaptationRuleTeaching(event);
+			const taggedEvent = this._toolProtocol.tagAdaptationRuleTeaching(event);
 			if (taggedEvent.outcome === "repaired" || taggedEvent.outcome === "bounced") {
 				this._toolSelection.recordValidation(taggedEvent.tool, taggedEvent.outcome);
 			}
@@ -1308,8 +1248,8 @@ export class AgentSession {
 			const logRecord = this._toolRecoveryLogger.recordToolArgumentValidation(taggedEvent);
 			if (!logRecord) return;
 			this._analytics.recordToolArgumentValidation(logRecord);
-			this._handleTextToolProtocolValidationOutcome(taggedEvent);
-			this._handleModelAdaptationTelemetry(taggedEvent);
+			this._toolProtocol.handleValidationOutcome(taggedEvent);
+			this._toolProtocol.handleAdaptationTelemetry(taggedEvent);
 		};
 		this._treeNavigator = new SessionTreeNavigator({
 			getSessionManager: () => this.sessionManager,
@@ -1766,583 +1706,18 @@ export class AgentSession {
 		};
 	}
 
-	private _modelAdaptationKeyFor(model: Model<Api> | undefined): string | undefined {
-		return model ? formatModelRouterModel(model) : undefined;
+	/** Compatibility seam retained for focused auto-probe regressions. */
+	private _probeToolCallingForModel(model: Model<Api>): Promise<ToolProbeResult> {
+		return this._toolProtocol.probeToolCallingForModel(model);
 	}
 
-	private _toolRepairSettings() {
-		return resolveCurrentToolRepairSettings(this.settingsManager.settings);
-	}
-
-	private _applyToolRepairLayerSettings(): void {
-		const settings = this._toolRepairSettings();
-		this.agent.toolArgumentTeachEnabled = settings.teach;
-	}
-
-	private _getModelAdaptationRulesForPrompt() {
-		if (!this._toolRepairSettings().teach) return [];
-		const modelKey = this._modelAdaptationKeyFor(this.agent.state.model);
-		return modelKey ? this._modelAdaptationStore.get(modelKey).rules : [];
-	}
-
-	private _resolveModelToolProtocol(model: Model<Api>): ModelToolProtocolResolution {
-		return resolveModelToolProtocol({
-			model,
-			settingsOverride: this._toolRepairSettings().textProtocol,
-			adaptation: this._modelAdaptationStore.get(this._modelRef(model)),
-		});
-	}
-
-	private async _streamForToolProbe(model: Model<Api>, context: Context, options: SimpleStreamOptions) {
-		let requestOptions = options;
-		if (this._isRawStreamSimple(this.agent.streamFn)) {
-			const auth = await this._getRequiredRequestAuth(model);
-			requestOptions = {
-				...options,
-				apiKey: auth.apiKey,
-				headers: auth.headers || options.headers ? { ...auth.headers, ...options.headers } : undefined,
-			};
-		}
-		return this.agent.streamFn(model, context, requestOptions);
-	}
-
-	/** Builds a reportId that uniquely identifies one probe/calibration completion within the
-	 * session: the model, a caller-supplied `kind` (e.g. "read-task", "echo", or
-	 * "text-protocol:<variant>"), and a monotonic sequence number. The sequence number (not
-	 * wall-clock time or randomness) is what guarantees no collision even when the same model+kind
-	 * is probed again later in the session (e.g. a repeated /toolprobe run), so genuine repeat spend
-	 * is never silently deduped away. */
-	private _nextProbeUsageReportId(model: Model<Api>, kind: string): string {
-		return `tool-probe:${this._modelRef(model)}:${kind}:${this._toolProbeUsageReportSeq++}`;
-	}
-
-	/** Awaits a tool-probe/text-protocol-calibration stream's result and, if the resolved message
-	 * carries reportable usage, rolls it into spawned usage under `reportId` so the turn-scoped cost
-	 * guard and daily usage see it. These trial completions previously spent tokens with no
-	 * addSpawnedUsage call, making them invisible to both. `addSpawnedUsage` dedups on `reportId`, so
-	 * a re-report of the same id is a no-op. */
-	private async _resolveProbeStreamCountingUsage(
-		stream: AssistantMessageEventStream,
-		label: string,
-		reportId: string,
-	): Promise<AssistantMessage> {
-		const message = await stream.result();
-		const usage = message.usage;
-		if (usage && (usage.cost.total > 0 || usage.totalTokens > 0)) {
-			this.addSpawnedUsage(usage, { label, reportId });
-		}
-		return message;
-	}
-
-	private _textProtocolCalibrationContext(variant: TextToolProtocolVariant, token: string): Context {
-		const primer = generateTextToolProtocolPrimer([TEXT_TOOL_PROTOCOL_ECHO_TOOL], { variant });
-		const instruction = `Text tool protocol calibration trial. Using the protocol above, call echo with data exactly "${token}". Output only the tool-call envelope.`;
-		return {
-			systemPrompt: `${primer}\n\n${instruction}`,
-			messages: [{ role: "user", content: [{ type: "text", text: instruction }], timestamp: Date.now() }],
-		};
-	}
-
-	private _messageHasToolCallWithStringArgument(
-		message: AssistantMessage,
-		toolName: string,
-		argName: string,
-		argValue: string,
-	): boolean {
-		return message.content.some((block) => {
-			if (block.type !== "toolCall" || block.name !== toolName) return false;
-			const args = block.arguments as unknown;
-			return (
-				typeof args === "object" &&
-				args !== null &&
-				!Array.isArray(args) &&
-				(args as Record<string, unknown>)[argName] === argValue
-			);
-		});
-	}
-
-	private _nativeToolProbeSystemPrompt(instruction: string): string {
-		const base = (this.agent.state.systemPrompt ?? "").trim();
-		return base ? `${base}\n\n${instruction}` : instruction;
-	}
-
-	private async _runNativeReadTaskProbeTrial(model: Model<Api>, path: string): Promise<boolean> {
-		const instruction =
-			`Native tool-call capability probe: task-scale read. Use provider-native tool calling, not prose. ` +
-			`Call read exactly once with path exactly "${path}".`;
-		const stream = await this._streamForToolProbe(
-			model,
-			{
-				systemPrompt: this._nativeToolProbeSystemPrompt(instruction),
-				messages: [{ role: "user", content: [{ type: "text", text: instruction }], timestamp: Date.now() }],
-				tools: [NATIVE_TOOL_PROBE_READ_TOOL],
-			},
-			{ textToolCallProtocol: false, maxRetries: 0, temperature: 0, maxTokens: 768 },
-		);
-		const message = await this._resolveProbeStreamCountingUsage(
-			stream,
-			"tool-probe",
-			this._nextProbeUsageReportId(model, "read-task"),
-		);
-		return this._messageHasToolCallWithStringArgument(message, "read", "path", path);
-	}
-
-	private async _runNativeEchoToolProbeTrial(model: Model<Api>, token: string): Promise<boolean> {
-		const instruction =
-			`Native tool-call capability probe: echo-only. Use provider-native tool calling, not prose. ` +
-			`Call echo with data exactly "${token}".`;
-		const stream = await this._streamForToolProbe(
-			model,
-			{
-				systemPrompt: this._nativeToolProbeSystemPrompt(instruction),
-				messages: [{ role: "user", content: [{ type: "text", text: instruction }], timestamp: Date.now() }],
-				tools: [TEXT_TOOL_PROTOCOL_ECHO_TOOL],
-			},
-			{ textToolCallProtocol: false, maxRetries: 0, temperature: 0, maxTokens: 256 },
-		);
-		const message = await this._resolveProbeStreamCountingUsage(
-			stream,
-			"tool-probe",
-			this._nextProbeUsageReportId(model, "echo"),
-		);
-		return this._messageHasToolCallWithStringArgument(message, "echo", "data", token);
-	}
-
-	private async _gradeNativeToolCallingForModel(model: Model<Api>, token: string): Promise<NativeToolProbeGrade> {
-		const path = join(
-			getProcessWorkRun(this._agentDir, "probes", "native-tools").path,
-			`pi-native-probe-${process.pid}-${Date.now()}.txt`,
-		);
-		writeFileSync(path, token, "utf-8");
-		try {
-			const taskPassed = await this._runNativeReadTaskProbeTrial(model, path);
-			if (taskPassed) return "task";
-			const echoPassed = await this._runNativeEchoToolProbeTrial(model, token);
-			if (echoPassed) return "echo-only";
-			return "absent";
-		} finally {
-			rmSync(path, { force: true });
-		}
-	}
-
-	private async _runTextProtocolTrial(
-		model: Model<Api>,
-		variant: TextToolProtocolVariant,
-		token: string,
-	): Promise<boolean> {
-		const stream = await this._streamForToolProbe(model, this._textProtocolCalibrationContext(variant, token), {
-			textToolCallProtocol: false,
-			maxRetries: 0,
-			temperature: 0,
-			maxTokens: 256,
-		});
-		const message = await this._resolveProbeStreamCountingUsage(
-			stream,
-			"text-protocol-calibration",
-			this._nextProbeUsageReportId(model, `text-protocol:${variant}`),
-		);
-		const text = message.content
-			.filter((block): block is TextContent => block.type === "text")
-			.map((block) => block.text)
-			.join("\n")
-			.trim();
-		if (!text) return false;
-		const parsed = parseTextToolCalls(text, [TEXT_TOOL_PROTOCOL_ECHO_TOOL]);
-		return parsed.calls.some((call) => call.name === "echo" && call.arguments.data === token);
-	}
-
-	private async _calibrateTextToolProtocolForModel(
-		model: Model<Api>,
-		modelKey: string | undefined,
-		options: { persistFailure: boolean },
-	): Promise<
-		| { status: "calibrated"; variant: TextToolProtocolVariant; calibratedAt: string }
-		| { status: "failed"; attemptedAt: string; variantsTried: string[] }
-	> {
-		const variantsTried: string[] = [];
-		for (const variant of TEXT_TOOL_PROTOCOL_VARIANTS) {
-			variantsTried.push(variant);
-			let passed = true;
-			for (let trial = 0; trial < TEXT_TOOL_PROTOCOL_TRIALS_PER_VARIANT; trial++) {
-				const ok = await this._runTextProtocolTrial(model, variant, `pi-calibration-${trial + 1}`);
-				if (!ok) {
-					passed = false;
-					break;
-				}
-			}
-			if (passed) {
-				const calibratedAt = new Date().toISOString();
-				if (modelKey) {
-					this._modelAdaptationStore.setProtocol(
-						modelKey,
-						{ version: MODEL_TOOL_PROTOCOL_VERSION, status: "calibrated", variant, calibratedAt },
-						calibratedAt,
-					);
-				}
-				return { status: "calibrated", variant, calibratedAt };
-			}
-		}
-
-		const attemptedAt = new Date().toISOString();
-		if (modelKey && options.persistFailure) {
-			this._modelAdaptationStore.setProtocol(
-				modelKey,
-				{ version: MODEL_TOOL_PROTOCOL_VERSION, status: "failed", attemptedAt, variantsTried },
-				attemptedAt,
-			);
-		}
-		return { status: "failed", attemptedAt, variantsTried };
-	}
-
-	/**
-	 * A PURE READER of the persisted calibration — never calibrates inline and
-	 * never throws out of the prompt path. A model whose flag is on but has no valid current-version
-	 * protocol on record falls back to native for this turn (with a warning pointing at /toolprobe)
-	 * instead of blocking the user's message behind up to 8 inline calibration completions or
-	 * aborting the turn entirely. Calibration now only ever happens off the hot path: explicit
-	 * /toolprobe, or the capability-gate spine's evidence-gated auto-probe.
-	 */
-	private async _ensureTextToolProtocolForActiveModel(): Promise<void> {
-		const model = this.agent.state.model;
-		const resolution = this._resolveModelToolProtocol(model);
-		this.agent.textToolCallProtocol = resolution.protocol;
-		if (
-			resolution.reasonCode !== "probe_calibration_missing" &&
-			resolution.reasonCode !== "probe_calibration_failed" &&
-			resolution.reasonCode !== "probe_calibration_invalid"
-		) {
-			return;
-		}
-
-		const modelKey = this._modelRef(model);
-		this._emit({
-			type: "warning",
-			message:
-				resolution.reasonCode === "probe_calibration_failed"
-					? `Text tool protocol calibration for ${modelKey} previously failed (variants tried: ${(resolution.variantsTried ?? []).join(", ")}); falling back to native tool calls this turn. Run /toolprobe ${modelKey} to recalibrate.`
-					: `Text tool protocol for ${modelKey} has no valid calibration on record; falling back to native tool calls this turn. Run /toolprobe ${modelKey} to calibrate.`,
-		});
-	}
-
-	private _modelRef(model: Model<Api>): string {
-		return `${model.provider}/${model.id}`;
-	}
-
-	/** The persisted `/toolprobe` verdict on record for this model, if any (undefined = unprobed). */
-	private _toolProbeVerdict(model: Model<Api>): ModelToolProbeVerdict | undefined {
-		return this._modelAdaptationStore.get(this._modelRef(model)).toolProbe?.status;
-	}
-
-	private _formatToolProbeReport(results: readonly ToolProbeResult[]): string {
-		const lines = [
-			"Tool probe results:",
-			"Model | Verdict | Variant | Native grade | Diagnostic",
-			"--- | --- | --- | --- | ---",
-		];
-		for (const result of results) {
-			lines.push(
-				[
-					result.model,
-					result.verdict,
-					result.variant ?? "-",
-					result.nativeGrade ?? "-",
-					result.diagnostic ? result.diagnostic.replace(/\s+/g, " ").slice(0, 160) : "-",
-				].join(" | "),
-			);
-		}
-		return lines.join("\n");
-	}
-
-	private _storeToolProbe(modelKey: string, probe: ModelToolProbe): void {
-		this._modelAdaptationStore.setToolProbe(modelKey, probe, probe.probedAt);
-	}
-
-	private async _probeToolCallingForModel(model: Model<Api>): Promise<ToolProbeResult> {
-		const modelKey = this._modelRef(model);
-		const probedAt = new Date().toISOString();
-		let nativeGrade: NativeToolProbeGrade = "absent";
-		let diagnostic: string | undefined;
-		try {
-			nativeGrade = await this._gradeNativeToolCallingForModel(model, "pi-native-probe");
-			if (nativeGrade === "task") {
-				this._storeToolProbe(modelKey, {
-					version: MODEL_TOOL_PROTOCOL_VERSION,
-					status: "native",
-					probedAt,
-					nativeGrade,
-				});
-				return { model: modelKey, verdict: "native", nativeGrade };
-			}
-			diagnostic =
-				nativeGrade === "echo-only"
-					? "Native echo probe passed but task-scale read probe failed."
-					: "Native task-scale read and echo probes did not produce provider-native tool calls.";
-		} catch (error) {
-			diagnostic = error instanceof Error ? error.message : String(error);
-		}
-
-		try {
-			const calibrated = await this._calibrateTextToolProtocolForModel(model, modelKey, { persistFailure: false });
-			if (calibrated.status === "calibrated") {
-				this._storeToolProbe(modelKey, {
-					version: MODEL_TOOL_PROTOCOL_VERSION,
-					status: "text-protocol",
-					probedAt: calibrated.calibratedAt,
-					variant: calibrated.variant,
-					nativeGrade,
-					diagnostic,
-				});
-				return { model: modelKey, verdict: "text-protocol", variant: calibrated.variant, nativeGrade, diagnostic };
-			}
-			diagnostic = `${diagnostic ? `${diagnostic} ` : ""}Text protocol variants failed: ${calibrated.variantsTried.join(", ")}`;
-		} catch (error) {
-			diagnostic = error instanceof Error ? error.message : String(error);
-		}
-
-		this._storeToolProbe(modelKey, {
-			version: MODEL_TOOL_PROTOCOL_VERSION,
-			status: "none",
-			probedAt,
-			nativeGrade,
-			diagnostic,
-		});
-		return { model: modelKey, verdict: "none", nativeGrade, diagnostic };
-	}
-
-	private async _resolveToolProbeModels(target?: string): Promise<Model<Api>[]> {
-		const trimmed = target?.trim();
-		if (!trimmed) return this._modelRegistry.getAvailable();
-		const [provider, ...modelParts] = trimmed.split("/");
-		const modelId = modelParts.join("/");
-		if (!provider || !modelId) throw new Error("Usage: /toolprobe [provider/model]");
-		const exact = this._modelRegistry.find(provider, modelId);
-		if (exact) return [exact];
-		const current = this.agent.state.model;
-		if (current?.provider === provider && current.id === modelId) return [current];
-		throw new Error(`Model not found: ${trimmed}`);
+	/** Compatibility seam retained for focused protocol-selection doctrine regressions. */
+	private _resolveModelToolProtocol(model: Model<Api>) {
+		return this._toolProtocol.resolveModelToolProtocol(model);
 	}
 
 	async probeToolCalling(target?: string): Promise<ToolProbeReport> {
-		const models = await this._resolveToolProbeModels(target);
-		if (models.length === 0) throw new Error("No available models to probe.");
-		const results: ToolProbeResult[] = [];
-		for (const model of models) {
-			results.push(await this._probeToolCallingForModel(model));
-		}
-		return { results, table: this._formatToolProbeReport(results) };
-	}
-
-	/**
-	 * The text-protocol circuit breaker. Every parse failure (from either the
-	 * live per-completion {@link Agent.onTextToolProtocolParse} callback or the post-hoc detection in
-	 * {@link _recordTextToolProtocolParseOutcomeFromLastAssistant}) gets a throttled one-line
-	 * corrective steer for the next turn. On the 3rd consecutive SAME-SIGNATURE failure — graded
-	 * evidence a model genuinely cannot speak this dialect, not a single bad turn — the breaker also
-	 * demotes the persisted tool-probe verdict to "none" so {@link _resolveModelToolProtocol} selects native next
-	 * turn and native is attempted instead of thrashing on a protocol this model has proven it can't
-	 * follow.
-	 */
-	private _handleTextToolProtocolParse(event: TextToolProtocolParseEvent): void {
-		this._textProtocolParseObservedThisTurn = true;
-		const modelKey = `${event.provider}/${event.model}`;
-		if (event.status === "parsed") return;
-
-		this._maybeInjectTextProtocolCorrectiveSteer(event.variant);
-
-		const signature = `${event.variant}:${event.reason ?? "failed"}`;
-		const previous = this._textProtocolParseFailures.get(modelKey);
-		const repeats = previous?.signature === signature ? previous.repeats + 1 : 1;
-		this._textProtocolParseFailures.set(modelKey, { signature, repeats });
-		if (repeats < TEXT_TOOL_PROTOCOL_PARSE_FAILURE_THRESHOLD) return;
-
-		const profile = this._modelAdaptationStore.get(modelKey);
-		if (profile.protocol?.version === MODEL_TOOL_PROTOCOL_VERSION && profile.protocol.status !== "failed") {
-			this._modelAdaptationStore.removeProtocol(modelKey);
-			this.agent.textToolCallProtocol = undefined;
-		}
-		this._textProtocolParseFailures.delete(modelKey);
-
-		// Demote on graded evidence -- TEXT_TOOL_PROTOCOL_PARSE_FAILURE_THRESHOLD identical-signature
-		// parse failures in a row -- rather than thrashing every turn. The fresh probedAt doubles as
-		// the capability-gate spine's auto-probe freshness gate, so this demotion doesn't immediately
-		// trigger a re-probe/re-phone loop.
-		const probedAt = new Date().toISOString();
-		this._modelAdaptationStore.setToolProbe(
-			modelKey,
-			{
-				version: MODEL_TOOL_PROTOCOL_VERSION,
-				status: "none",
-				probedAt,
-				nativeGrade: profile.toolProbe?.nativeGrade,
-				diagnostic: `Text protocol parsing failed ${TEXT_TOOL_PROTOCOL_PARSE_FAILURE_THRESHOLD}x in a row with signature "${signature}".`,
-			},
-			probedAt,
-		);
-		this._emit({
-			type: "warning",
-			message: `Text tool protocol for ${modelKey} stopped parsing after ${TEXT_TOOL_PROTOCOL_PARSE_FAILURE_THRESHOLD} attempts; demoted to native fallback. Run /toolprobe ${modelKey} to recalibrate.`,
-		});
-	}
-
-	/**
-	 * A phone model whose envelope fails to parse gets no corrective guidance today —
-	 * the runaway-loop backstop only trips on repeated PARSED tool-call signatures (agent-loop.ts), so
-	 * an every-turn unparseable-prose model never trips it. Inject a one-line reminder of the envelope
-	 * shape as a nextTurn message, reusing {@link formatVariantEnvelope} so the reminder can never
-	 * drift from the grammar the primer actually teaches. Throttled to the first failure this session
-	 * and then every {@link TEXT_TOOL_PROTOCOL_STEER_INTERVAL}th after — the breaker above is what
-	 * actually demotes a genuinely-failing model at the 3rd same-signature failure; this is guidance,
-	 * not a second counter.
-	 */
-	private _maybeInjectTextProtocolCorrectiveSteer(variant: TextToolProtocolVariant): void {
-		this._textProtocolCorrectiveSteerCount++;
-		if (
-			this._textProtocolCorrectiveSteerCount !== 1 &&
-			this._textProtocolCorrectiveSteerCount % TEXT_TOOL_PROTOCOL_STEER_INTERVAL !== 0
-		) {
-			return;
-		}
-		const reminder = `Reminder: to call a tool, emit exactly this envelope shape: ${formatVariantEnvelope(variant, "TOOL", '{"arg":"value"}')} — no other format is recognized. Reasoning may appear as prose before the envelope, never inside it.`;
-		this.sendCustomMessage(
-			{ customType: "text-protocol-corrective-steer", content: reminder, display: false },
-			{ deliverAs: "nextTurn" },
-		).catch(() => {
-			// Best-effort steer; a failure to queue it must not break parse-failure handling.
-		});
-	}
-
-	private _handleTextToolProtocolValidationOutcome(event: ToolArgumentValidationTelemetryEvent): void {
-		if (event.source !== "text-protocol") return;
-		const protocol = this.agent.textToolCallProtocol;
-		const variant = protocol === true ? "tool-tag" : protocol ? protocol.variant : undefined;
-		if (!variant) return;
-		const status = event.outcome === "bounced" ? "failed" : "parsed";
-		if (this._textProtocolValidationOutcomeThisTurn?.status === "parsed" && status === "failed") return;
-		this._textProtocolValidationOutcomeThisTurn = {
-			provider: event.provider ?? this.agent.state.model.provider,
-			model: event.model ?? this.agent.state.model.id,
-			variant,
-			status,
-			callCount: 1,
-			textLength: 0,
-			...(status === "failed" && {
-				reason: event.errorKeywords?.includes("unknown_tool") ? "unknown-tool" : "validation-failed",
-			}),
-		};
-	}
-
-	private _recordTextToolProtocolParseOutcomeFromLastAssistant(): void {
-		const validationOutcome = this._textProtocolValidationOutcomeThisTurn;
-		this._textProtocolValidationOutcomeThisTurn = undefined;
-		if (validationOutcome?.status === "parsed") {
-			this._textProtocolParseObservedThisTurn = true;
-			this._textProtocolParseFailures.delete(`${validationOutcome.provider}/${validationOutcome.model}`);
-			return;
-		}
-		if (validationOutcome) {
-			this._handleTextToolProtocolParse(validationOutcome);
-			return;
-		}
-		if (this._textProtocolParseObservedThisTurn) return;
-		const protocol = this.agent.textToolCallProtocol;
-		if (protocol === false || protocol === true || !protocol?.variant) return;
-		const response = this._findLastAssistantMessage();
-		if (!response) return;
-		const responseText = response.content
-			.filter((content): content is TextContent => content.type === "text")
-			.map((content) => content.text)
-			.join("\n");
-		if (!responseText) return;
-
-		const parsed = parseTextToolCalls(responseText, this.agent.state.tools);
-		const attempted = parsed.attempted || this._looksLikeTextToolProtocolAttempt(responseText);
-		if (!attempted) return;
-		this._handleTextToolProtocolParse({
-			provider: this.agent.state.model.provider,
-			model: this.agent.state.model.id,
-			variant: protocol.variant,
-			status: parsed.calls.length > 0 ? "parsed" : "failed",
-			reason: parsed.failure,
-			callCount: parsed.calls.length,
-			textLength: responseText.length,
-		});
-	}
-
-	private _looksLikeTextToolProtocolAttempt(text: string): boolean {
-		return /<pi:call\b|<tool_call\b|```(?:tool|tool_call)[\s\S]*"name"\s*:/i.test(text);
-	}
-
-	private _tagModelAdaptationRuleTeaching(
-		event: ToolArgumentValidationTelemetryEvent,
-	): ToolArgumentValidationTelemetryEvent {
-		if (!this._toolRepairSettings().teach || event.taught !== "none") return event;
-		const modelKey =
-			event.provider && event.model
-				? `${event.provider}/${event.model}`
-				: this._modelAdaptationKeyFor(this.agent.state.model);
-		if (!modelKey) return event;
-		try {
-			const rules = this._modelAdaptationStore.get(modelKey).rules;
-			const modes = new Set([...event.failureModes, ...event.repairsApplied]);
-			if (rules.some((rule) => modes.has(rule.mode as ToolRepairModeName))) {
-				return { ...event, taught: "rule" };
-			}
-		} catch {
-			// Adaptation telemetry tagging is best-effort; leave the original event unchanged.
-		}
-		return event;
-	}
-
-	private _repairSessionCount(modelKey: string, mode: ToolRepairModeName): number {
-		const key = `${modelKey}\0${mode}`;
-		const count = (this._repairModeSessionCounts.get(key) ?? 0) + 1;
-		this._repairModeSessionCounts.set(key, count);
-		return count;
-	}
-
-	private _handleModelAdaptationTelemetry(event: ToolArgumentValidationTelemetryEvent): void {
-		if (!this._toolRepairSettings().teach || event.outcome !== "repaired" || event.repairsApplied.length === 0)
-			return;
-		const modelKey =
-			event.provider && event.model
-				? `${event.provider}/${event.model}`
-				: this._modelAdaptationKeyFor(this.agent.state.model);
-		if (!modelKey) return;
-
-		try {
-			for (const mode of [...new Set(event.repairsApplied)]) {
-				const profile = this._modelAdaptationStore.get(modelKey);
-				const stats = profile.teachStats[mode] ?? { taught: 0, recurrenceBefore: 0, recurrenceAfter: 0 };
-				if (profile.rules.some((rule) => rule.mode === mode)) {
-					this._modelAdaptationStore.markRuleFired(modelKey, mode);
-					this._modelAdaptationStore.setTeachStats(modelKey, mode, {
-						...stats,
-						recurrenceAfter: stats.recurrenceAfter + 1,
-					});
-					continue;
-				}
-
-				const recurrenceBefore = stats.recurrenceBefore + 1;
-				this._modelAdaptationStore.setTeachStats(modelKey, mode, { ...stats, recurrenceBefore });
-				const sessionCount = this._repairSessionCount(modelKey, mode);
-				if (
-					sessionCount >= MODEL_ADAPTATION_REPAIR_THRESHOLD ||
-					recurrenceBefore >= MODEL_ADAPTATION_REPAIR_THRESHOLD
-				) {
-					this._modelAdaptationStore.addRule(modelKey, {
-						mode,
-						text: formatToolRepairStandingRule(mode),
-					});
-					this._modelAdaptationStore.setTeachStats(modelKey, mode, {
-						...stats,
-						taught: stats.taught + 1,
-						recurrenceBefore,
-					});
-				}
-			}
-		} catch {
-			// Model adaptation is best-effort; failed telemetry persistence must not affect the turn.
-		}
+		return this._toolProtocol.probeToolCalling(target);
 	}
 
 	/** Tool-build call-site delegation to {@link ContextPipeline.getToolArtifactStore}. */
@@ -2521,7 +1896,7 @@ export class AgentSession {
 
 	formatToolRepairHealthReport(): string {
 		return [
-			formatToolRepairHealthReport(this._modelAdaptationStore, new Date(), this._toolRecoveryLogger.getStats()),
+			this._toolProtocol.formatRepairHealth(this._toolRecoveryLogger.getStats()),
 			formatToolSelectionReport(this._toolSelection.getReport()),
 		].join("\n\n");
 	}
@@ -2531,13 +1906,11 @@ export class AgentSession {
 	}
 
 	removeToolRepairRule(model: string, mode: string): boolean {
-		return this._modelAdaptationStore.removeRule(model, mode);
+		return this._toolProtocol.removeRepairRule(model, mode);
 	}
 
 	resetToolProtocolCalibration(model: string): boolean {
-		const removed = this._modelAdaptationStore.removeProtocol(model);
-		this._textProtocolParseFailures.delete(model);
-		return removed;
+		return this._toolProtocol.resetProtocolCalibration(model);
 	}
 
 	/** Curation status for diagnostics/dashboard: settings, live telemetry, last refusal reason. */
@@ -2637,17 +2010,6 @@ export class AgentSession {
 		});
 	}
 
-	/** Anti-loop: true when this model's persisted tool-probe verdict was written within the
-	 * auto-probe freshness window ({@link AUTO_TOOL_PROBE_FRESHNESS_MS}) — covers a very recent
-	 * explicit `/toolprobe` run or a fresh circuit-breaker demote from an EARLIER session, complementing
-	 * the in-session {@link _autoProbedModels} latch. */
-	private _hasFreshToolProbeVerdict(modelKey: string): boolean {
-		const probedAt = this._modelAdaptationStore.get(modelKey).toolProbe?.probedAt;
-		if (!probedAt) return false;
-		const age = Date.now() - new Date(probedAt).getTime();
-		return Number.isFinite(age) && age >= 0 && age < AUTO_TOOL_PROBE_FRESHNESS_MS;
-	}
-
 	/**
 	 * Evidence-gated native→phone auto-probe for a LOCAL/MANAGED model (never cloud — see
 	 * {@link isLocalOrManagedRouterModel}) that just crossed the tool-argument-validation escalation
@@ -2658,36 +2020,11 @@ export class AgentSession {
 	 * "native" and is never phoned) entirely OFF the hot path — fired here but never awaited by the
 	 * caller, so a slow or failing probe can never block or throw the user's in-flight turn.
 	 * Anti-loop: skipped when this session already auto-probed this model, or a fresh persisted
-	 * verdict already exists ({@link _hasFreshToolProbeVerdict}) — otherwise a model that keeps
+	 * verdict already exists (enforced by {@link ToolProtocolController}) — otherwise a model that keeps
 	 * failing validation every turn would re-fire the (multi-completion) probe every single turn.
 	 */
 	private _maybeAutoProbeOnValidationEscalation(model: Model<Api>): void {
-		const modelKey = this._modelRef(model);
-		if (this._autoProbedModels.has(modelKey) || this._hasFreshToolProbeVerdict(modelKey)) return;
-		this._autoProbedModels.add(modelKey);
-		void this._probeToolCallingForModel(model)
-			.then((result) => {
-				if (this._disposed) return;
-				const detail =
-					result.verdict === "text-protocol"
-						? ` (variant ${result.variant}); it will use the text tool protocol starting next turn`
-						: result.verdict === "none"
-							? " — no working tool-call path was found; run /toolprobe for details"
-							: "; native tool calls stay in use";
-				this._emit({
-					type: "warning",
-					message: `Auto-probed ${modelKey} after repeated native tool-call validation failures: verdict "${result.verdict}"${detail}.`,
-				});
-			})
-			.catch((error) => {
-				if (this._disposed) return;
-				this._emit({
-					type: "warning",
-					message: `Auto-probe for ${modelKey} (triggered by repeated tool-call validation failures) did not complete: ${
-						error instanceof Error ? error.message : String(error)
-					}.`,
-				});
-			});
+		this._toolProtocol.maybeAutoProbe(model);
 	}
 
 	/**
@@ -3382,7 +2719,7 @@ export class AgentSession {
 		try {
 			const maxGoalLoopRounds = this.settingsManager.getAutonomySettings().maxStallTurns;
 			this.agent.maxStallTurns = maxGoalLoopRounds;
-			await this._ensureTextToolProtocolForActiveModel();
+			await this._toolProtocol.ensureActiveModelProtocol();
 			let goalLoopRounds = 1;
 			await this.agent.prompt(messages);
 			while ((maxGoalLoopRounds === 0 || goalLoopRounds < maxGoalLoopRounds) && (await this._handlePostAgentRun())) {
@@ -3528,7 +2865,7 @@ export class AgentSession {
 		// window so a PRIOR turn's background/spawned spend doesn't keep this turn's guard permanently
 		// tripped. Every round trip within this same turn (tool-call iterations) shares this baseline.
 		this._costGuardTurnBaselineUsd = this.getSpawnedUsage().cost;
-		this._applyToolRepairLayerSettings();
+		this._toolProtocol.applyRepairLayerSettings();
 		this._cancelPrefixWarm();
 		const expandPromptTemplates = options?.expandPromptTemplates ?? true;
 		const processSlashCommands = options?.processSlashCommands ?? expandPromptTemplates;
@@ -3783,10 +3120,9 @@ export class AgentSession {
 		}
 
 		preflightResult?.(true);
-		this._textProtocolParseObservedThisTurn = false;
-		this._textProtocolValidationOutcomeThisTurn = undefined;
+		this._toolProtocol.resetTurnState();
 		await this._modelRouter.runRoutedTurn(messages, routedTurnModel, routedTurnRouteDecision);
-		this._recordTextToolProtocolParseOutcomeFromLastAssistant();
+		this._toolProtocol.recordParseOutcomeFromLastAssistant();
 
 		// Score whether the agent actually used the recalled context, so the recall gate can adapt.
 		if (injectedRecall) {
@@ -5406,7 +4742,7 @@ export class AgentSession {
 	getLaneWorkerRefusal(): LaneWorkerRefusal | undefined {
 		const profile = this.getModelCapabilityProfile();
 		const model = this.model;
-		const verdict = model ? this._toolProbeVerdict(model) : undefined;
+		const verdict = model ? this._toolProtocol.getToolProbeVerdict(model) : undefined;
 		return evaluateLaneWorkerRefusal({
 			capabilityClass: profile.class,
 			contextWindow: profile.contextWindow,
