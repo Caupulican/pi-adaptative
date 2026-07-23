@@ -5,7 +5,7 @@ import { describe, expect, it } from "vitest";
 import { AgentSession } from "../src/core/agent-session.ts";
 import { AuthStorage } from "../src/core/auth-storage.ts";
 import type { LaneRecord } from "../src/core/autonomy/lane-tracker.ts";
-import { appendWorkerClaimSnapshot } from "../src/core/delegation/session-worker-result.ts";
+import { appendWorkerClaimSnapshot } from "../src/core/delegation/session-worker-claim.ts";
 import { DEFAULT_GOAL_WORKER_WAIT_MS } from "../src/core/goals/goal-continuation-defaults.ts";
 import { buildGoalRuntimeSnapshot } from "../src/core/goals/goal-runtime-snapshot.ts";
 import { applyGoalEvent, createGoalState } from "../src/core/goals/goal-state.ts";

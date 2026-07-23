@@ -12,7 +12,7 @@ import {
 } from "@caupulican/pi-ai";
 import { afterEach, beforeEach, describe, expect, it } from "vitest";
 import { AuthStorage } from "../src/core/auth-storage.ts";
-import { getWorkerRequestSnapshots } from "../src/core/delegation/session-worker-result.ts";
+import { getWorkerRequestSnapshots } from "../src/core/delegation/session-worker-claim.ts";
 import { ModelRegistry } from "../src/core/model-registry.ts";
 import { DefaultResourceLoader } from "../src/core/resource-loader.ts";
 import { createAgentSession } from "../src/core/sdk.ts";

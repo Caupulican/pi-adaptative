@@ -7,7 +7,7 @@ import { getModel } from "@caupulican/pi-ai";
 import { describe, expect, it } from "vitest";
 import { AgentSession } from "../src/core/agent-session.ts";
 import { AuthStorage } from "../src/core/auth-storage.ts";
-import { appendWorkerClaimSnapshot } from "../src/core/delegation/session-worker-result.ts";
+import { appendWorkerClaimSnapshot } from "../src/core/delegation/session-worker-claim.ts";
 import { buildGoalRuntimeSnapshot } from "../src/core/goals/goal-runtime-snapshot.ts";
 import { createGoalState } from "../src/core/goals/goal-state.ts";
 import { appendGoalStateSnapshot, getLatestGoalStateSnapshot } from "../src/core/goals/session-goal-state.ts";

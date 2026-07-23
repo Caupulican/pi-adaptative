@@ -3,12 +3,14 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import type { SessionManager } from "@caupulican/pi-agent-core/node";
 import { afterEach, describe, expect, it, vi } from "vitest";
+import { LaneTracker } from "../src/core/autonomy/lane-tracker.ts";
 import {
 	BackgroundLaneController,
 	clampLaneMaxUsd,
 	isLocalExecutionModel,
 } from "../src/core/background-lane-controller.ts";
 import { getInFlightWorkUnits, resetInFlightWorkRegistryForTests } from "../src/core/reload-blockers.ts";
+import { ResearchLaneController } from "../src/core/research/research-lane-controller.ts";
 import { SettingsManager } from "../src/core/settings-manager.ts";
 import {
 	createTestWorkerOrchestrationProfile,
@@ -26,13 +28,16 @@ describe("background lane budgets", () => {
 describe("background lane history", () => {
 	it("seeds persisted lane counters once instead of rescanning the session per lane", () => {
 		const getEntries = vi.fn(() => []);
-		const controller = new BackgroundLaneController({
-			getSessionManager: () => ({ getEntries }) as unknown as SessionManager,
-		} as never);
-		const seedLaneHistory = (controller as unknown as { _seedLaneHistory(): void })._seedLaneHistory.bind(controller);
+		const controller = new ResearchLaneController(
+			{
+				getSessionManager: () => ({ getEntries }) as unknown as SessionManager,
+			} as never,
+			new LaneTracker(),
+			{} as never,
+		);
 
-		seedLaneHistory();
-		seedLaneHistory();
+		controller.seedHistory();
+		controller.seedHistory();
 
 		expect(getEntries).toHaveBeenCalledTimes(1);
 	});
@@ -126,7 +131,11 @@ describe("worker terminal handoffs", () => {
 
 describe("background lane disposal", () => {
 	it("terminalizes queued and running research lanes instead of leaving orphaned active records", () => {
-		const controller = new BackgroundLaneController({} as never);
+		const controller = new BackgroundLaneController({
+			getAgentDir: () => "/tmp/pi-background-lane-disposal",
+			getSessionManager: () =>
+				({ getEntries: () => [], appendCustomEntry: () => "entry-1" }) as unknown as SessionManager,
+		} as never);
 		const internals = controller as unknown as {
 			_laneTracker: {
 				enqueue(args: { type: "research" }): { laneId: string };
@@ -156,7 +165,11 @@ describe("background lane disposal", () => {
 
 describe("worker runtime construction", () => {
 	it("does not materialize worker orchestration when UAC withholds delegate", () => {
-		const controller = new BackgroundLaneController({ isDelegateToolActive: () => false } as never);
+		const controller = new BackgroundLaneController({
+			isDelegateToolActive: () => false,
+			getAgentDir: () => "/tmp/pi-background-lane-uac",
+			getSessionManager: () => ({ getEntries: () => [] }) as unknown as SessionManager,
+		} as never);
 		const internals = controller as unknown as { _workers?: unknown };
 
 		expect(controller.getLaneRecords()).toEqual([]);

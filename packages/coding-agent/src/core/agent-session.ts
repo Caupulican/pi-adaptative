@@ -84,7 +84,7 @@ import { ContextPipeline } from "./context-pipeline.ts";
 import type { SessionCostSummary } from "./cost/cost-summary.ts";
 import type { DailyUsageTotals } from "./cost/daily-usage.ts";
 import { type CostGuardDecision, downgradeReasoning, estimateTurnCostUsd, evaluateCostGuard } from "./cost-guard.ts";
-import { appendWorkerClaimSnapshot, getWorkerClaimSnapshots } from "./delegation/session-worker-result.ts";
+import { appendWorkerClaimSnapshot, getWorkerClaimSnapshots } from "./delegation/session-worker-claim.ts";
 import type { WorkerDelegationRequest } from "./delegation/worker-delegation-request.ts";
 import type { WorkerRunOutcome } from "./delegation/worker-runner.ts";
 import type {

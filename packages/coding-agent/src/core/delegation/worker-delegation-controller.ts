@@ -33,7 +33,7 @@ import {
 	type WorkerExecutionPlan,
 } from "./worker-execution-policy.ts";
 import { WorkerLifecycle } from "./worker-lifecycle.ts";
-import { WorkerNotificationCoordinator } from "./worker-notification-coordinator.ts";
+import type { WorkerNotificationCoordinator } from "./worker-notification-coordinator.ts";
 import { type ResolvedWorkerProfile, WorkerProfileResolver } from "./worker-profile-resolver.ts";
 import { runWorker } from "./worker-runner.ts";
 
@@ -116,28 +116,9 @@ export class WorkerDelegationController {
 		}
 	>();
 
-	constructor(deps: WorkerDelegationControllerDeps) {
+	constructor(deps: WorkerDelegationControllerDeps, notifications: WorkerNotificationCoordinator) {
 		this.deps = deps;
-		this.notifications = new WorkerNotificationCoordinator({
-			getWorkerRecords: () => this.lifecycle?.getRecords() ?? [],
-			emitStatus: (status) => {
-				if (typeof this.deps.emit === "function") {
-					this.deps.emit({
-						type: "delegate_workers",
-						...status,
-						terminalSinceFlush: [...status.terminalSinceFlush],
-					});
-				}
-			},
-			notify: (records) => {
-				if (typeof this.deps.notifyWorkerTerminalHandoff !== "function") {
-					return Promise.reject(new Error("worker terminal handoff bridge is unavailable"));
-				}
-				return this.deps.notifyWorkerTerminalHandoff(records);
-			},
-			warn: (message) => this.safeWarn(message),
-			markDurableDelivered: (notificationIds) => this.lifecycle?.markNotificationsDelivered(notificationIds),
-		});
+		this.notifications = notifications;
 		this.scheduler = new WorkerDispatchScheduler({
 			agentDir: this.deps.getAgentDir?.() ?? "",
 			isDisposed: () => this.deps.isDisposed(),
@@ -182,6 +163,15 @@ export class WorkerDelegationController {
 	getRecords(): LaneRecord[] {
 		if (!this.lifecycle && this.deps.isDelegateToolActive?.()) this.recoverDurableQueue();
 		return this.lifecycle?.getRecords() ?? [];
+	}
+
+	/** Process-local worker records for the shared terminal notifier; never triggers durable recovery. */
+	getLoadedRecords(): LaneRecord[] {
+		return this.lifecycle?.getRecords() ?? [];
+	}
+
+	markNotificationsDelivered(notificationIds: readonly string[]): void {
+		this.lifecycle?.markNotificationsDelivered(notificationIds);
 	}
 
 	abort(): void {
@@ -250,7 +240,6 @@ export class WorkerDelegationController {
 		}
 
 		this.scheduler.cancelQueued();
-		this.notifications.dispose();
 	}
 
 	private getWorkerLifecycle(): WorkerLifecycle {

@@ -141,8 +141,8 @@ Worker lifecycle, scheduling, execution, verification, recovery, and notificatio
 `WorkerDelegationController`. `ResearchLaneController`, `ModelFitnessController`, and
 `GoalAutoContinueController` own their respective timers, guards, cancellation, accounting, and
 persistence; research and fitness share only the provider-neutral `LaneModelResolver`.
-`BackgroundLaneController` is now a compatibility facade plus the distinct out-of-process
-managed-lane bridge. `ToolProtocolController` owns model protocol selection, probing, calibration,
+`BackgroundLaneController` only coordinates these owners and their shared lane read model;
+`ManagedLaneController` owns the distinct out-of-process managed-lane bridge. `ToolProtocolController` owns model protocol selection, probing, calibration,
 circuit breaking, repair teaching, and its per-turn state. `CompactionController` owns manual and
 automatic detection, execution, retries, cancellation, persistence, and extension notification;
 `CompactionSupport` is its provider-neutral model/auth/settings policy.

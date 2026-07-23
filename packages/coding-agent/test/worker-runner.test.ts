@@ -5,7 +5,7 @@ import {
 	appendWorkerClaimSnapshot,
 	getWorkerClaimSnapshots,
 	getWorkerRequestSnapshots,
-} from "../src/core/delegation/session-worker-result.ts";
+} from "../src/core/delegation/session-worker-claim.ts";
 import {
 	buildWorkerSystemPrompt,
 	buildWorkerUserPrompt,

@@ -10,7 +10,7 @@ import {
 	type SessionSnapshotPayload,
 } from "../session-snapshot.ts";
 import { isPlainRecord } from "../util/value-guards.ts";
-import { cloneWorkerClaimForStorage, isParentReviewRequired, isWorkerClaim } from "./worker-result.ts";
+import { cloneWorkerClaimForStorage, isParentReviewRequired, isWorkerClaim } from "./worker-claim.ts";
 
 export const WORKER_CLAIM_CUSTOM_TYPE = "worker_claim";
 

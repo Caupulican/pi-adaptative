@@ -6,7 +6,7 @@ import { afterEach, describe, expect, it } from "vitest";
 import type { WorkerClaim, WorkerRequest } from "../src/core/autonomy/contracts.ts";
 import { getLaneRecordSnapshots } from "../src/core/autonomy/session-lane-record.ts";
 import { BackgroundLaneController } from "../src/core/background-lane-controller.ts";
-import { appendWorkerClaimSnapshot, getWorkerClaimSnapshots } from "../src/core/delegation/session-worker-result.ts";
+import { appendWorkerClaimSnapshot, getWorkerClaimSnapshots } from "../src/core/delegation/session-worker-claim.ts";
 import { resetInFlightWorkRegistryForTests } from "../src/core/reload-blockers.ts";
 import { SettingsManager } from "../src/core/settings-manager.ts";
 import {
@@ -198,12 +198,13 @@ describe("background lane disposal persistence", () => {
 			_laneTracker: {
 				enqueue(args: { type: "research" }): { laneId: string };
 				start(args: { type: "research" }): { laneId: string };
+				getRecords(): Array<{ status: string }>;
 			};
 		};
 		internals._laneTracker.enqueue({ type: "research" });
 		internals._laneTracker.start({ type: "research" });
 
 		expect(() => controller.abortInFlightLanes()).not.toThrow();
-		expect(controller.getActiveLaneCount()).toBe(0);
+		expect(internals._laneTracker.getRecords().every((record) => record.status === "canceled")).toBe(true);
 	});
 });

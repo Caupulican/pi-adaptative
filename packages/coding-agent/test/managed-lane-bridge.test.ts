@@ -2,11 +2,8 @@ import type { SessionManager } from "@caupulican/pi-agent-core/node";
 import { SessionManager as InMemorySessionManager } from "@caupulican/pi-agent-core/node";
 import { afterEach, describe, expect, it, vi } from "vitest";
 import type { WorkerClaim } from "../src/core/autonomy/contracts.ts";
-import {
-	BackgroundLaneController,
-	type BackgroundLaneControllerDeps,
-	mapManagedLaneTerminalStatus,
-} from "../src/core/background-lane-controller.ts";
+import { BackgroundLaneController, type BackgroundLaneControllerDeps } from "../src/core/background-lane-controller.ts";
+import { mapManagedLaneTerminalStatus } from "../src/core/delegation/managed-lane-controller.ts";
 import { buildGoalRuntimeSnapshot } from "../src/core/goals/goal-runtime-snapshot.ts";
 import { applyGoalEvent, createGoalState } from "../src/core/goals/goal-state.ts";
 import { appendGoalStateSnapshot } from "../src/core/goals/session-goal-state.ts";
@@ -136,6 +133,19 @@ describe("managed lane host bridge (recordManagedLane)", () => {
 		]);
 	});
 
+	it("does not materialize the in-process worker runtime to notify a managed worker terminal", async () => {
+		const notifyWorkerTerminalHandoff = vi.fn(async () => {});
+		const controller = new BackgroundLaneController(
+			buildDeps("/tmp/pi-test-managed-lane-uac-notify", { notifyWorkerTerminalHandoff }),
+		);
+
+		controller.recordManagedLane({ laneId: "tmux-job-uac", phase: "dispatch" });
+		controller.recordManagedLane({ laneId: "tmux-job-uac", phase: "terminal", status: "succeeded" });
+		await vi.waitFor(() => expect(notifyWorkerTerminalHandoff).toHaveBeenCalledTimes(1));
+
+		expect((controller as unknown as { _workers?: unknown })._workers).toBeUndefined();
+	});
+
 	it("ignores a duplicate dispatch for an already-tracked laneId (no double quiesce registration)", () => {
 		const agentDir = "/tmp/pi-test-managed-lane-duplicate-dispatch";
 		const controller = new BackgroundLaneController(buildDeps(agentDir));
@@ -260,6 +270,8 @@ describe("managed lane host bridge (recordManagedLane)", () => {
 			getGoalStateSnapshot: () => ({ goalId: "goal-9" }) as never,
 			getCapabilityEnvelope: () => undefined,
 			saveWorkerClaimSnapshot: () => "worker-claim-entry",
+			emit: () => {},
+			notifyWorkerTerminalHandoff: async () => {},
 		} as never);
 
 		controller.recordManagedLane({ laneId: "tmux-job-9", phase: "dispatch", goalId: "goal-9" });

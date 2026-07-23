@@ -3,7 +3,7 @@ import os from "node:os";
 import path from "node:path";
 import { afterAll, beforeAll, describe, expect, it } from "vitest";
 import type { CapabilityEnvelope, WorkerClaim, WorkerRequest } from "../src/core/autonomy/contracts.ts";
-import { requiresParentReview, validateWorkerClaim } from "../src/core/delegation/worker-result.ts";
+import { requiresParentReview, validateWorkerClaim } from "../src/core/delegation/worker-claim.ts";
 
 describe("Worker Result Validator (Phase 6)", () => {
 	const mockEnvelope: CapabilityEnvelope = {

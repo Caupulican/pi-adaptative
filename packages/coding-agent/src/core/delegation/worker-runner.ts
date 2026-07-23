@@ -3,7 +3,7 @@ import type { EvidenceRef, Finding, GateOutcome, WorkerClaim, WorkerRequest } fr
 import type { LaneTerminalStatus } from "../autonomy/lane-tracker.ts";
 import { createEvidenceBundle } from "../research/evidence-bundle.ts";
 import { type AppliedActionsReport, parseWorkerActions, type WorkerAction } from "./worker-actions.ts";
-import { validateWorkerClaim } from "./worker-result.ts";
+import { validateWorkerClaim } from "./worker-claim.ts";
 
 /**
  * Pure execution for one bounded specialist delegation: bounded isolated completion ->

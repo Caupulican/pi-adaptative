@@ -1,37 +1,47 @@
+import type { SessionManager } from "@caupulican/pi-agent-core/node";
 import { resolveModelThinkingLevel, type Usage } from "@caupulican/pi-ai";
-import type { ResearchLaneRunOutcome } from "../agent-session.ts";
-import type { CapabilityEnvelope } from "../autonomy/contracts.ts";
+import type {
+	AgentSessionEvent,
+	IsolatedCompletionOptions,
+	IsolatedCompletionResult,
+	ResearchLaneRunOutcome,
+} from "../agent-session.ts";
+import type { CapabilityEnvelope, EvidenceBundle } from "../autonomy/contracts.ts";
 import { getPrivateLaneDeniedPaths } from "../autonomy/lane-private-paths.ts";
 import { createLaneToolSurface, type LaneToolSurface } from "../autonomy/lane-tool-surface.ts";
 import type { LaneTracker } from "../autonomy/lane-tracker.ts";
 import { appendLaneRecordSnapshot, getLaneRecordSnapshots } from "../autonomy/session-lane-record.ts";
 import { composeSubagentSystemPrompt } from "../autonomy/subagent-prompt.ts";
-import { AUTONOMY_TELEMETRY_EVENT_TYPES } from "../autonomy/telemetry-events.ts";
-import type { BackgroundLaneControllerDeps } from "../background-lane-controller.ts";
+import { AUTONOMY_TELEMETRY_EVENT_TYPES, type AutonomyTelemetryEvent } from "../autonomy/telemetry-events.ts";
+import type { GoalState } from "../goals/goal-state.ts";
 import type { NormalizedProfile } from "../profile-registry.ts";
 import { registerInFlightWork } from "../reload-blockers.ts";
+import type { SettingsManager } from "../settings-manager.ts";
 import { clampLaneMaxUsd, type LaneModelResolver } from "./lane-model-resolver.ts";
 import { runResearch } from "./research-runner.ts";
+import type { collectWorkspaceSources } from "./workspace-collector.ts";
 
-type ResearchLaneControllerDeps = Pick<
-	BackgroundLaneControllerDeps,
-	| "isDisposed"
-	| "isChildSession"
-	| "getSessionId"
-	| "getCwd"
-	| "getAgentDir"
-	| "getSessionManager"
-	| "getSettingsManager"
-	| "getCapabilityEnvelope"
-	| "emit"
-	| "emitAutonomyTelemetry"
-	| "getGoalStateSnapshot"
-	| "getEvidenceBundleSnapshot"
-	| "saveEvidenceBundleSnapshot"
-	| "addSpawnedUsage"
-	| "runIsolatedCompletion"
-	| "collectWorkspaceSources"
->;
+export interface ResearchLaneControllerDeps {
+	isDisposed(): boolean;
+	isChildSession(): boolean;
+	getSessionId(): string;
+	getCwd(): string;
+	getAgentDir(): string;
+	getSessionManager(): SessionManager;
+	getSettingsManager(): SettingsManager;
+	getCapabilityEnvelope(): CapabilityEnvelope | undefined;
+	emit(event: AgentSessionEvent): void;
+	emitAutonomyTelemetry(event: AutonomyTelemetryEvent): void;
+	getGoalStateSnapshot(): GoalState | undefined;
+	getEvidenceBundleSnapshot(): EvidenceBundle | undefined;
+	saveEvidenceBundleSnapshot(bundle: EvidenceBundle): string;
+	addSpawnedUsage(
+		usage: Usage,
+		opts: { label?: string; sourceSessionId?: string; reportId: string },
+	): string | undefined;
+	runIsolatedCompletion(opts: IsolatedCompletionOptions): Promise<IsolatedCompletionResult>;
+	collectWorkspaceSources: typeof collectWorkspaceSources;
+}
 
 /** Owns autonomous research demand, scheduling, execution, persistence, and cancellation. */
 export class ResearchLaneController {

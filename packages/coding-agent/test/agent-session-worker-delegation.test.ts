@@ -3,7 +3,7 @@ import { join } from "node:path";
 import { type AssistantMessage, type FauxResponseFactory, fauxAssistantMessage, fauxToolCall } from "@caupulican/pi-ai";
 import { describe, expect, it, vi } from "vitest";
 import { getLaneRecordSnapshots } from "../src/core/autonomy/session-lane-record.ts";
-import { getWorkerRequestSnapshots } from "../src/core/delegation/session-worker-result.ts";
+import { getWorkerRequestSnapshots } from "../src/core/delegation/session-worker-claim.ts";
 import { createGoalState } from "../src/core/goals/goal-state.ts";
 import { ORCHESTRATION_SCHEMA_VERSION, type OrchestrationProfile } from "../src/core/orchestration/contracts.ts";
 import { OrchestrationProfileStore } from "../src/core/orchestration/profile-store.ts";

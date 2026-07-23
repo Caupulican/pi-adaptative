@@ -1,8 +1,9 @@
 /**
- * Compatibility facade for goal continuation, research, managed lanes, worker delegation, and fitness.
+ * Execution-plane coordinator for goal continuation, research, managed lanes, worker delegation,
+ * and model fitness.
  *
- * Coordination state is owned by focused controllers. This facade retains the public AgentSession
- * seam and the managed-lane bridge. Everything else it needs
+ * Coordination state is owned by focused controllers. This coordinator retains one AgentSession
+ * composition seam and a shared lane read model. Everything it needs
  * — the session manager, settings, model registry, live model, capability envelope, the goal
  * continuation LOOP, the isolated-completion primitive, spawned-usage accounting, and the telemetry
  * sink — is reached through narrow deps accessors rather than the whole AgentSession.
@@ -13,172 +14,54 @@
  * controller never touches `prompt()`, the last-assistant-message, retry, or streaming state.
  */
 
-import type { SessionManager } from "@caupulican/pi-agent-core/node";
-import type { Api, Model, Usage } from "@caupulican/pi-ai";
+import type { Api, Model } from "@caupulican/pi-ai";
 import type {
-	AgentSessionEvent,
 	GoalContinuationLoopOptions,
 	GoalContinuationLoopResult,
-	IsolatedCompletionOptions,
-	IsolatedCompletionResult,
 	PromptOptions,
 	ResearchLaneRunOutcome,
 	WorkerDelegationRunOutcome,
 } from "./agent-session.ts";
-import type {
-	CapabilityEnvelope,
-	EvidenceBundle,
-	WorkerClaim,
-	WorkerClaimStatus,
-	WorkerRequest,
-} from "./autonomy/contracts.ts";
-import { type LaneRecord, type LaneTerminalStatus, LaneTracker } from "./autonomy/lane-tracker.ts";
-import { ManagedLaneRegistry } from "./autonomy/managed-lane-registry.ts";
+import { type LaneRecord, LaneTracker } from "./autonomy/lane-tracker.ts";
 import { appendLaneRecordSnapshot } from "./autonomy/session-lane-record.ts";
-import type { AutonomyTelemetryEvent } from "./autonomy/telemetry-events.ts";
+import { ManagedLaneController } from "./delegation/managed-lane-controller.ts";
 import {
 	WorkerDelegationController,
 	type WorkerDelegationControllerDeps,
 } from "./delegation/worker-delegation-controller.ts";
 import type { WorkerDelegationRequest } from "./delegation/worker-delegation-request.ts";
-import { reviewManagedLaneChangedFiles } from "./delegation/worker-result.ts";
+import { WorkerNotificationCoordinator } from "./delegation/worker-notification-coordinator.ts";
 import type { ManagedLaneEvent } from "./extensions/types.ts";
 import { GoalAutoContinueController } from "./goals/goal-auto-continue-controller.ts";
 import type { GoalRuntimeSnapshot, GoalRuntimeSnapshotSettings } from "./goals/goal-runtime-snapshot.ts";
 import type { GoalState } from "./goals/goal-state.ts";
 import type { ModelCapabilityProfile } from "./model-capability.ts";
-import type { ModelRegistry } from "./model-registry.ts";
 import type { StoredFitnessReport } from "./models/fitness-store.ts";
-import type { OrchestrationProfile } from "./orchestration/contracts.ts";
 import type { TaskRuntimeProjection } from "./orchestration/task-runtime.ts";
-import { LaneModelResolver } from "./research/lane-model-resolver.ts";
+import { LaneModelResolver, type LaneModelResolverDeps } from "./research/lane-model-resolver.ts";
 import type { ModelFitnessReport } from "./research/model-fitness.ts";
-import { ModelFitnessController } from "./research/model-fitness-controller.ts";
-import { ResearchLaneController } from "./research/research-lane-controller.ts";
-import type { collectWorkspaceSources } from "./research/workspace-collector.ts";
-import type { SettingsManager } from "./settings-manager.ts";
+import { ModelFitnessController, type ModelFitnessControllerDeps } from "./research/model-fitness-controller.ts";
+import { ResearchLaneController, type ResearchLaneControllerDeps } from "./research/research-lane-controller.ts";
 
 export { isLocalExecutionModel } from "./delegation/worker-delegation-controller.ts";
 export { clampLaneMaxUsd } from "./research/lane-model-resolver.ts";
 
-const KNOWN_LANE_TERMINAL_STATUSES: ReadonlySet<string> = new Set([
-	"succeeded",
-	"failed",
-	"canceled",
-	"timeout",
-	"budget_exhausted",
-]);
-
-/**
- * Resolves a managed lane's caller-reported terminal `status` (a free-form CLAIM — e.g. a tmux job's
- * own "done"/"blocked" completion marker, a lifecycle tag like "dismissed", or a raw
- * {@link WorkerResultStatus} spelling) onto the LaneTracker's {@link LaneTerminalStatus} vocabulary.
- * Mirrors the same success/blocked mapping direction `worker-runner.ts` already uses for in-process
- * workers ("completed"/"done" -> succeeded, "blocked" -> failed). An unrecognized or missing status is
- * conservatively reported as `"failed"` rather than silently assumed successful (claims-to-review).
- */
-export function resolveManagedLaneTerminalStatus(status: string | undefined): LaneTerminalStatus {
-	if (status !== undefined && KNOWN_LANE_TERMINAL_STATUSES.has(status)) {
-		return status as LaneTerminalStatus;
-	}
-	switch (status) {
-		case "done":
-		case "completed":
-			return "succeeded";
-		case "blocked":
-			return "failed";
-		case "dismissed":
-		case "cancelled":
-			return "canceled";
-		default:
-			return "failed";
-	}
-}
-
-/** Maps a LaneTracker terminal status onto the WorkerClaim status vocabulary a managed-lane claim
- * snapshot is persisted under — the two enums use different spellings/values, never interchangeable
- * (e.g. `"canceled"` vs `"cancelled"`); `timeout`/`budget_exhausted` have no dedicated WorkerClaim
- * counterpart and are conservatively reported as `"failed"`. */
-export function mapManagedLaneTerminalStatus(status: LaneTerminalStatus): WorkerClaimStatus {
-	switch (status) {
-		case "succeeded":
-			return "completed";
-		case "canceled":
-			return "cancelled";
-		case "failed":
-		case "timeout":
-		case "budget_exhausted":
-			return "failed";
-	}
-}
-
-export interface BackgroundLaneControllerDeps extends WorkerDelegationControllerDeps {
-	/** A disposed session must never schedule/persist a lane or continuation. */
-	isDisposed(): boolean;
-	/** Child sessions never run the idle research lane (only the top-level session drives autonomy). */
-	isChildSession(): boolean;
-	/** This session's id, for lane envelope ids and spawned-usage report ids. */
-	getSessionId(): string;
-	/** The workspace root a lane runs relative to (worker path scope + research source collection). */
-	getCwd(): string;
-	/** Root dir the host-keyed {@link FitnessStore} persists under. */
-	getAgentDir(): string;
-	/** Session log: lane records read/append here and feed lane-history dedupe. */
-	getSessionManager(): SessionManager;
-	/** Autonomy / research-lane / worker-delegation / model-capability settings + the profile registry. */
-	getSettingsManager(): SettingsManager;
-	/** Immutable owner-authored profile of the foreground session, when active. */
-	getActiveOrchestrationProfile?(): OrchestrationProfile | undefined;
-	/** Resolves a configured lane model pattern against configured auth. */
-	getModelRegistry(): ModelRegistry;
-	/** Session-scoped provider/model quota exhaustion guard. */
-	isModelExhausted(model: Model<Api>): boolean;
-	/** The session's current model — lanes inherit it unless a lane model is explicitly configured. */
-	getModel(): Model<Api> | undefined;
-	/** Tool/profile gate: delegation is unavailable when the active surface removes `delegate`. */
-	isDelegateToolActive(): boolean;
+export interface BackgroundLaneControllerDeps
+	extends WorkerDelegationControllerDeps,
+		ResearchLaneControllerDeps,
+		ModelFitnessControllerDeps,
+		LaneModelResolverDeps {
 	/** True iff the `goal` tool is in the session's ACTIVE surface -- the capability-adaptive gate
 	 * for every goal-continuation loop (see `continueGoalLoopExclusive`): a surface without the
 	 * goal tool (lean capability blocklist, worker role ceiling, --tools/profile exclusion) must
 	 * never be driven with continuation prompts it cannot execute. */
 	isGoalToolActive(): boolean;
-	/** Foreground cost ceiling — a lane budget is clamped to it, never exceeds it. */
-	getCapabilityEnvelope(): CapabilityEnvelope | undefined;
 	/** Capability profile of the SESSION model (gates background lanes, scales continuation budgets). */
 	getModelCapabilityProfile(): ModelCapabilityProfile;
-	/** Emits session events for diagnostics and UI state. */
-	emit(event: AgentSessionEvent): void;
-	/** Queue one bounded terminal handoff that wakes the parent without injecting worker product text. */
-	notifyWorkerTerminalHandoff(
-		records: readonly { laneId: string; status: LaneTerminalStatus; reasonCode?: string }[],
-	): Promise<void>;
-	/** Telemetry sink (codes/ids only — never lane product text). */
-	emitAutonomyTelemetry(event: AutonomyTelemetryEvent): void;
-	/** Durable goal state, if a goal is active (the research lane's demand source). */
-	getGoalStateSnapshot(): GoalState | undefined;
 	/** Continuation gate + goal state for the idle autosteer scheduler. */
 	getGoalRuntimeSnapshot(settings: GoalRuntimeSnapshotSettings): GoalRuntimeSnapshot;
-	/** Latest persisted evidence bundle, for research-lane dedupe. */
-	getEvidenceBundleSnapshot(): EvidenceBundle | undefined;
-	/** Persist a research lane's evidence bundle to the session log. */
-	saveEvidenceBundleSnapshot(bundle: EvidenceBundle): string;
-	/** Persist a worker delegation's untrusted claim to the session log. */
-	saveWorkerClaimSnapshot(claim: WorkerClaim, request?: WorkerRequest): string;
-	/** Bounded, source-labeled memory retrieval for an orchestrator-authorized worker. */
-	readMemoryForLane(query: string): Promise<string>;
-	/** Roll a lane's spawned usage into session accounting (idempotent per reportId). `reportId` is
-	 * REQUIRED: every caller derives a stable id from the work unit's identity so a retry
-	 * cannot double-count. */
-	addSpawnedUsage(
-		usage: Usage,
-		opts: { label?: string; sourceSessionId?: string; reportId: string },
-	): string | undefined;
-	/** Bounded LLM call fully isolated from the main session; lanes may supply a child tool loop. */
-	runIsolatedCompletion(opts: IsolatedCompletionOptions): Promise<IsolatedCompletionResult>;
 	/** Drive-loop boundary: the session's bounded goal-continuation loop (owns `prompt()`, not us). */
 	continueGoalLoop(options: GoalContinuationLoopOptions): Promise<GoalContinuationLoopResult>;
-	/** Best-effort workspace evidence collection (silent-on-failure; [] preserves prior behavior). */
-	collectWorkspaceSources: typeof collectWorkspaceSources;
 }
 
 export class BackgroundLaneController {
@@ -189,9 +72,11 @@ export class BackgroundLaneController {
 	private readonly _research: ResearchLaneController;
 	private readonly _fitness: ModelFitnessController;
 	/** Lazily materialized only when managed-lane state is queried or reported. */
-	private _managedLanes: ManagedLaneRegistry | undefined;
+	private _managedLanes: ManagedLaneController | undefined;
 	/** Lazily materialized so a UAC surface without `delegate` allocates no worker runtime state. */
 	private _workers: WorkerDelegationController | undefined;
+	/** Shared terminal outbox for managed and in-process workers; lazy under UAC omission. */
+	private _workerNotifications: WorkerNotificationCoordinator | undefined;
 	private readonly deps: BackgroundLaneControllerDeps;
 
 	/** Emit a warning without ever throwing — used from disposal-adjacent persistence where a
@@ -205,7 +90,7 @@ export class BackgroundLaneController {
 	}
 
 	private _recordWorkerTerminal(record: LaneRecord): void {
-		this._getWorkerController().recordTerminal(record);
+		this._getWorkerNotificationCoordinator().recordTerminal(record);
 	}
 
 	constructor(deps: BackgroundLaneControllerDeps) {
@@ -226,31 +111,41 @@ export class BackgroundLaneController {
 	}
 
 	private _getWorkerController(): WorkerDelegationController {
-		this._workers ??= new WorkerDelegationController(this.deps);
+		this._workers ??= new WorkerDelegationController(this.deps, this._getWorkerNotificationCoordinator());
 		return this._workers;
 	}
 
-	private _getManagedLaneRegistry(): ManagedLaneRegistry {
-		this._managedLanes ??= new ManagedLaneRegistry({
-			agentDir: this.deps.getAgentDir(),
-			lanes: this._laneTracker,
-			sessionManager: this.deps.getSessionManager(),
+	private _getWorkerNotificationCoordinator(): WorkerNotificationCoordinator {
+		this._workerNotifications ??= new WorkerNotificationCoordinator({
+			getWorkerRecords: () => this._workers?.getLoadedRecords() ?? [],
+			emitStatus: (status) => {
+				this.deps.emit({
+					type: "delegate_workers",
+					...status,
+					terminalSinceFlush: [...status.terminalSinceFlush],
+				});
+			},
+			notify: (records) => this.deps.notifyWorkerTerminalHandoff(records),
+			warn: (message) => this._safeWarn(message),
+			markDurableDelivered: (notificationIds) => this._workers?.markNotificationsDelivered(notificationIds),
 		});
+		return this._workerNotifications;
+	}
+
+	private _getManagedLaneController(): ManagedLaneController {
+		this._managedLanes ??= new ManagedLaneController(this.deps, this._laneTracker, (record) =>
+			this._recordWorkerTerminal(record),
+		);
 		return this._managedLanes;
 	}
 
-	private _hydrateManagedLanesIfAvailable(): void {
-		if (this._managedLanes) {
-			this._managedLanes.ensureHydrated();
-			return;
-		}
-		if (typeof this.deps.getAgentDir !== "function" || typeof this.deps.getSessionManager !== "function") return;
-		this._getManagedLaneRegistry().ensureHydrated();
+	private _hydrateManagedLanes(): void {
+		this._getManagedLaneController().ensureHydrated();
 	}
 
 	/** Live lane records tracked by this process (running and terminal). */
 	getLaneRecords(): LaneRecord[] {
-		this._hydrateManagedLanesIfAvailable();
+		this._hydrateManagedLanes();
 		const workerRecords =
 			this._workers?.getRecords() ??
 			(this.deps.isDelegateToolActive?.() ? this._getWorkerController().getRecords() : []);
@@ -272,7 +167,7 @@ export class BackgroundLaneController {
 	 * lane id, so this is an existence check rather than an id translation.
 	 */
 	resolveManagedLaneId(callerLaneId: string): string | undefined {
-		return this._getManagedLaneRegistry().resolve(callerLaneId);
+		return this._getManagedLaneController().resolve(callerLaneId);
 	}
 
 	/** Live count of active lanes — the real source for AutonomyStatusSnapshot.activeLaneCount. */
@@ -287,79 +182,9 @@ export class BackgroundLaneController {
 		);
 	}
 
-	/**
-	 * Host-side bridge for `pi.reportManagedLane`: makes an out-of-process managed lane (e.g. a tmux
-	 * worker) a first-class lane in THIS process's LaneTracker. HONEST cross-process seam — the
-	 * extension only ever REPORTS a claim; this controller stays the lane-tracking SSOT (no in-process
-	 * sandboxing is implied by accepting the report).
-	 *
-	 * `phase: "dispatch"` persists a `tmux-worker` lane record under the caller's stable id and
-	 * registers exactly one reload-quiesce unit for it. A replacement controller restores that exact
-	 * running record before extension reconciliation. `phase: "terminal"` resolves the caller's free-form `status` claim
-	 * onto {@link LaneTerminalStatus} (see {@link resolveManagedLaneTerminalStatus}), completes that
-	 * same durable record, deregisters the quiesce unit, and persists a bounded worker claim from the
-	 * reported `changedFiles`. Host re-review: the reported `changedFiles` are re-checked against
-	 * the session's active capability envelope ({@link reviewManagedLaneChangedFiles}, reusing
-	 * `validateWorkerClaim`'s symlink-safe scope check verbatim) and `parentReviewRequired` is
-	 * stamped on the persisted claim whenever that check does not cleanly "allow" -- an out-of-scope
-	 * (or no-scope-configured) path is flagged exactly like an in-scope one, since a tmux worker's
-	 * write never passed through this process's enforcement in the first place. This is the SESSION
-	 * envelope, not a per-launch tmux standing grant (that is a narrower, launch-specific scope;
-	 * documented follow-up, not yet implemented). `event.request` stays an unvalidated
-	 * caller-supplied bag (per its own doc comment) and is deliberately never read for scoping. A
-	 * terminal report for an unknown `laneId` (no matching dispatch tracked) and a duplicate dispatch
-	 * for an already-tracked `laneId` are both safe no-ops — never a double registration, a double
-	 * persisted claim, or a crash.
-	 *
-	 * Returns the started (`phase: "dispatch"`) or completed (`phase: "terminal"`) LaneRecord for an
-	 * in-process caller that wants the record without a second `getLaneRecords()` read (e.g. a
-	 * faux-bridge test, or the goal-to-tmux dispatch adapter via `resolveManagedLaneId`); `undefined`
-	 * on every no-op path (disposed controller, duplicate dispatch, unknown-laneId terminal). The
-	 * extension-facing `ExtensionActions.reportManagedLane` TYPE stays `=> void` -- that call site is a
-	 * fire-and-forget statement and is unaffected by this return.
-	 */
+	/** Delegate the out-of-process dispatch/terminal claim to its single lifecycle owner. */
 	recordManagedLane(event: ManagedLaneEvent): LaneRecord | undefined {
-		if (this.deps.isDisposed()) return undefined;
-		if (event.phase === "dispatch") {
-			return this._getManagedLaneRegistry().start({
-				laneId: event.laneId,
-				goalId: event.goalId,
-				worktreeLaneKey: event.worktreeLaneKey,
-			});
-		}
-
-		const resolvedStatus = resolveManagedLaneTerminalStatus(event.status);
-		const record = this._getManagedLaneRegistry().finish(event.laneId, {
-			status: resolvedStatus,
-			reasonCode: event.reasonCode,
-			costUsd: event.usage?.cost.total,
-		});
-		if (!record) return undefined;
-		const changedFiles = event.changedFiles ? [...event.changedFiles] : [];
-		const review = reviewManagedLaneChangedFiles({
-			changedFiles,
-			envelope: this.deps.getCapabilityEnvelope() ?? {},
-			cwd: this.deps.getCwd(),
-		});
-		const claim: WorkerClaim = {
-			requestId: record.laneId,
-			status: mapManagedLaneTerminalStatus(resolvedStatus),
-			summary: `Managed tmux-worker lane ${record.laneId} reported terminal status "${event.status ?? "unknown"}"${
-				event.reasonCode ? ` (${event.reasonCode})` : ""
-			}.${review.reviewRequired ? ` Changed files require parent review (${review.reasonCode}).` : ""}`,
-			changedFiles,
-			parentReviewRequired: review.reviewRequired,
-			createdAt: new Date().toISOString(),
-		};
-		try {
-			this.deps.saveWorkerClaimSnapshot(claim);
-		} finally {
-			// Managed workers must wake their owning parent through the same bounded, event-driven
-			// terminal handoff as in-process workers. The lane record is already durable above, so
-			// notification still happens if the richer claim snapshot fails to persist.
-			this._recordWorkerTerminal(record);
-		}
-		return record;
+		return this._getManagedLaneController().record(event);
 	}
 
 	/** Why the last idle research-lane evaluation skipped, for /autonomy diagnostics. */
@@ -401,6 +226,7 @@ export class BackgroundLaneController {
 		this._managedLanes?.release();
 
 		this._workers?.abort();
+		this._workerNotifications?.dispose();
 	}
 
 	clearGoalAutoContinueTimer(): void {

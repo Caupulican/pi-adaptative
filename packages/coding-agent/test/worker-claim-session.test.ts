@@ -8,7 +8,7 @@ import {
 	appendWorkerClaimSnapshot,
 	getWorkerClaimSnapshots,
 	WORKER_CLAIM_CUSTOM_TYPE,
-} from "../src/core/delegation/session-worker-result.ts";
+} from "../src/core/delegation/session-worker-claim.ts";
 import { ModelRegistry } from "../src/core/model-registry.ts";
 import { createEvidenceBundle } from "../src/core/research/evidence-bundle.ts";
 import { SettingsManager } from "../src/core/settings-manager.ts";

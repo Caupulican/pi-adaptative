@@ -50,7 +50,7 @@ import type { ArtifactStore } from "./context/context-artifacts.ts";
 import type { MemoryPromptInclusionReport, MemoryRetrievalDiagnostics } from "./context/memory-diagnostics.ts";
 import type { ContextGcReport } from "./context-gc.ts";
 import { DEFAULT_ACTIVE_TOOL_NAMES, mapToolNamesForPlatform } from "./default-tool-surface.ts";
-import { acknowledgeWorkerClaimReview } from "./delegation/session-worker-result.ts";
+import { acknowledgeWorkerClaimReview } from "./delegation/session-worker-claim.ts";
 import type { WorkerDelegationRequest } from "./delegation/worker-delegation-request.ts";
 import { createCoreDiagnosticsToolDefinitions } from "./extensions/builtin.ts";
 import {

@@ -9,8 +9,8 @@ import {
 	appendWorkerClaimSnapshot,
 	getLatestWorkerClaimSnapshot,
 	getWorkerClaimSnapshots,
-} from "../src/core/delegation/session-worker-result.ts";
-import { isParentReviewRequired } from "../src/core/delegation/worker-result.ts";
+} from "../src/core/delegation/session-worker-claim.ts";
+import { isParentReviewRequired } from "../src/core/delegation/worker-claim.ts";
 import type { ExtensionContext } from "../src/core/extensions/types.ts";
 import { createDelegateStatusToolDefinition } from "../src/core/tools/delegate-status.ts";
 
@@ -38,8 +38,8 @@ const baseClaim: WorkerClaim = {
 	usageReportId: "usage-1",
 };
 
-describe("isParentReviewRequired (worker-result.ts)", () => {
-	it("true when a completed result carries blockers (worker-result.ts:110)", () => {
+describe("isParentReviewRequired (worker-claim.ts)", () => {
+	it("true when a completed claim carries blockers", () => {
 		expect(
 			isParentReviewRequired({ request: mockRequest, claim: { ...baseClaim, blockers: ["needs a look"] } }),
 		).toBe(true);
@@ -74,7 +74,7 @@ describe("isParentReviewRequired (worker-result.ts)", () => {
 			fs.rmSync(tempDir, { recursive: true, force: true });
 		});
 
-		it("true when changed files pass path-scope validation (worker-result.ts:178)", () => {
+		it("true when changed files pass path-scope validation", () => {
 			const changedFile = path.join(allowedRoot, "file.txt");
 			expect(
 				isParentReviewRequired({ request: testRequest, claim: { ...baseClaim, changedFiles: [changedFile] } }),
@@ -90,7 +90,7 @@ describe("isParentReviewRequired (worker-result.ts)", () => {
 	});
 });
 
-describe("persistence of the review marker (session-worker-result.ts)", () => {
+describe("persistence of the review marker (session-worker-claim.ts)", () => {
 	it("stamps parentReviewRequired at append time when request is present", () => {
 		const sessionManager = SessionManager.inMemory();
 		appendWorkerClaimSnapshot(sessionManager, { ...baseClaim, blockers: ["please check"] }, mockRequest);

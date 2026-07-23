@@ -1,7 +1,7 @@
 import type { SessionManager } from "@caupulican/pi-agent-core/node";
 import type { EvidenceBundle, LearningDecision, WorkerClaim } from "../autonomy/contracts.ts";
 import type { LaneRecord } from "../autonomy/lane-tracker.ts";
-import { getWorkerClaimSnapshots } from "../delegation/session-worker-result.ts";
+import { getWorkerClaimSnapshots } from "../delegation/session-worker-claim.ts";
 import { getLearningDecisionSnapshots } from "../learning/session-learning-decision.ts";
 import type { TaskRuntimeProjection } from "../orchestration/task-runtime.ts";
 import { projectSessionWorkState, type SessionWorkStateProjection } from "../orchestration/work-state-projection.ts";

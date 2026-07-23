@@ -11,7 +11,7 @@ const ctx = undefined as unknown as ExtensionContext;
 /**
  * Host re-review: a managed (tmux) lane's SELF-REPORTED `changedFiles` are re-checked
  * against the session's active capability envelope on terminal, reusing `validateWorkerClaim`'s
- * symlink-safe scope check (`reviewManagedLaneChangedFiles` in delegation/worker-result.ts) --
+ * symlink-safe scope check (`reviewManagedLaneChangedFiles` in delegation/worker-claim.ts) --
  * never a parallel path-scope implementation. Unlike an in-process worker (whose writes are
  * already envelope-enforced before the fact by `applyWorkerActions`), a tmux worker's write already
  * happened out-of-process with no backstop, so this re-check is the ONLY gate standing between an
