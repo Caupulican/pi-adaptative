@@ -70,7 +70,7 @@ export function createDelegateStatusToolDefinition(deps: DelegateStatusDependenc
 		description:
 			'Inspect queued, running, and terminal workers in this session, retrieve one worker\'s bounded, explicitly untrusted result, or acknowledge (action: "review") an unreviewed worker mutation.',
 		promptSnippet:
-			"Poll or inspect delegated workers without receiving a late transcript injection; acknowledge unreviewed mutations.",
+			"Inspect delegated workers after a terminal handoff without receiving a late transcript injection; acknowledge unreviewed mutations.",
 		parameters: schema,
 		async execute(_toolCallId, input: Input) {
 			if (input.action === "review") {

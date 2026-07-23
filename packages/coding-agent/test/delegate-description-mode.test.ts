@@ -21,7 +21,7 @@ describe("delegate tool description varies by wiring mode", () => {
 		expect(guidelines.some((line) => line.includes("If the worker reports blockers"))).toBe(true);
 	});
 
-	it("teaches the async start/poll contract when startWorkerDelegation is wired", () => {
+	it("teaches the async event-driven retrieval contract when startWorkerDelegation is wired", () => {
 		const definition = createDelegateToolDefinition({
 			startWorkerDelegation: () => ({
 				started: true,
@@ -36,10 +36,12 @@ describe("delegate tool description varies by wiring mode", () => {
 		expect(definition.description).toContain("returns immediately");
 		expect(definition.description).toContain("delegate_status");
 		expect(definition.description).toContain("does not wait for the worker to finish");
-		expect(definition.description).toMatch(/blockers.*arrive there too|arrive.*delegate_status/i);
+		expect(definition.description).toContain("terminal handoff");
+		expect(definition.description).toContain("Do not poll");
 
 		const guidelines = definition.promptGuidelines ?? [];
 		expect(guidelines.some((line) => line.includes("delegate_status") && line.includes("laneId"))).toBe(true);
+		expect(guidelines.some((line) => line.includes("terminal handoff") && line.includes("Do not poll"))).toBe(true);
 		expect(guidelines.some((line) => line.includes("delegate_status reports blockers"))).toBe(true);
 	});
 
@@ -116,7 +118,9 @@ describe("delegate tool description varies by wiring mode", () => {
 			.filter((content) => content.type === "text")
 			.map((content) => content.text)
 			.join("\n");
-		expect(text).toBe("delegate started (queued) — retrieve with delegate_status");
+		expect(text).toBe(
+			"delegate started (queued) — wait for its terminal handoff, then retrieve once with delegate_status",
+		);
 		expect(result.details).toEqual({ started: true, laneId: "worker-1", status: "queued" });
 	});
 });

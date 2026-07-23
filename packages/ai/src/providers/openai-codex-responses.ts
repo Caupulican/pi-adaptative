@@ -48,6 +48,7 @@ import {
 	buildResponsesInstructions,
 	convertResponsesMessages,
 	convertResponsesTools,
+	createOpenAIResponsesToolNameMap,
 	processResponsesStream,
 } from "./openai-responses-shared.ts";
 import { buildBaseOptions } from "./simple-options.ts";
@@ -500,7 +501,7 @@ export const streamOpenAICodexResponses: StreamFunction<"openai-codex-responses"
 
 			appendCodexSubscriptionRateLimitDiagnostics(output, response.headers);
 			stream.push({ type: "start", partial: output });
-			await processStream(response, output, stream, model, options);
+			await processStream(response, output, stream, model, context, options);
 			markSseSuccess(options?.sessionId);
 
 			if (options?.signal?.aborted) {
@@ -555,12 +556,16 @@ function buildRequestBody(
 	options?: OpenAICodexResponsesOptions,
 ): RequestBody {
 	const lite = model.openaiResponsesLite === true;
+	const toolNameMap = createOpenAIResponsesToolNameMap(context.tools ?? []);
 	const messages = convertResponsesMessages(model, context, CODEX_TOOL_CALL_PROVIDERS, {
 		imageDetail: lite ? null : "auto",
+		toolNameMap,
 	});
 	const instructions = buildResponsesInstructions(context) || "You are a helpful assistant.";
 	const tools =
-		context.tools && context.tools.length > 0 ? convertResponsesTools(context.tools, { strict: null }) : [];
+		context.tools && context.tools.length > 0
+			? convertResponsesTools(context.tools, { strict: null, toolNameMap })
+			: [];
 	const input: ResponseInput = lite
 		? [
 				{
@@ -685,9 +690,11 @@ async function processStream(
 	output: AssistantMessage,
 	stream: AssistantMessageEventStream,
 	model: Model<"openai-codex-responses">,
+	context: Context,
 	options?: OpenAICodexResponsesOptions,
 ): Promise<void> {
 	await processResponsesStream(mapCodexEvents(parseSSE(response, options?.signal)), output, stream, model, {
+		toolNameMap: createOpenAIResponsesToolNameMap(context.tools ?? []),
 		serviceTier: options?.serviceTier,
 		resolveServiceTier: resolveCodexServiceTier,
 		applyServiceTierPricing: (usage, serviceTier) => applyServiceTierPricing(usage, serviceTier, model),
@@ -1587,6 +1594,7 @@ async function processWebSocketStream(
 	websocketConnectTimeoutMs: number | undefined,
 	options?: OpenAICodexResponsesOptions,
 ): Promise<void> {
+	const toolNameMap = createOpenAIResponsesToolNameMap(context.tools ?? []);
 	const { socket, entry, reused, release } = await acquireWebSocket(
 		url,
 		headers,
@@ -1648,6 +1656,7 @@ async function processWebSocketStream(
 			stream,
 			model,
 			{
+				toolNameMap,
 				serviceTier: options?.serviceTier,
 				resolveServiceTier: resolveCodexServiceTier,
 				applyServiceTierPricing: (usage, serviceTier) => applyServiceTierPricing(usage, serviceTier, model),
@@ -1656,11 +1665,9 @@ async function processWebSocketStream(
 		if (options?.signal?.aborted) {
 			keepConnection = false;
 		} else if (useCachedContext && entry && output.responseId) {
-			const responseItems = convertResponsesMessages(
-				model,
-				{ messages: [output] },
-				CODEX_TOOL_CALL_PROVIDERS,
-			).filter((item) => item.type !== "function_call_output");
+			const responseItems = convertResponsesMessages(model, { messages: [output] }, CODEX_TOOL_CALL_PROVIDERS, {
+				toolNameMap,
+			}).filter((item) => item.type !== "function_call_output");
 			entry.continuation = {
 				requestShape: requestBodyWithoutInput(requestBody),
 				lastResponseId: output.responseId,

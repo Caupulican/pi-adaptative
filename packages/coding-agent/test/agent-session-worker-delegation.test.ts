@@ -143,6 +143,36 @@ describe("AgentSession worker delegation", () => {
 		}
 	});
 
+	it("uses the provider-agnostic reasoning default when no lane profile or model default overrides it", async () => {
+		const harness = await createHarness({
+			models: [
+				{ id: "foreground", contextWindow: 128_000 },
+				{
+					id: "reasoning-worker",
+					contextWindow: 128_000,
+					reasoning: true,
+				},
+			],
+			settings: { workerDelegation: { enabled: true, model: "faux/reasoning-worker" } },
+		});
+		try {
+			let seenReasoning: unknown;
+			harness.setResponses([
+				(_context, options) => {
+					seenReasoning = options?.reasoning;
+					return fauxAssistantMessage(WORKER_JSON);
+				},
+			]);
+
+			const run = await harness.session.runWorkerDelegationOnce({ instructions: "Scout safely" });
+
+			expect(run.record?.status).toBe("succeeded");
+			expect(seenReasoning).toBe("medium");
+		} finally {
+			harness.cleanup();
+		}
+	});
+
 	it("skips on empty instructions", async () => {
 		const harness = await createHarness({ settings: { workerDelegation: { enabled: true } } });
 		try {

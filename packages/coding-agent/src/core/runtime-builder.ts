@@ -100,7 +100,7 @@ import { createDelegateStatusToolDefinition } from "./tools/delegate-status.ts";
 import { createFindTool } from "./tools/find.ts";
 import { createGoalToolDefinition } from "./tools/goal.ts";
 import { createGrepTool } from "./tools/grep.ts";
-import { createAllToolDefinitions } from "./tools/index.ts";
+import { allToolNames, createToolDefinition, type ToolsOptions } from "./tools/index.ts";
 import { createModelFitnessToolDefinition } from "./tools/model-fitness.ts";
 import { resolveToCwd } from "./tools/path-utils.ts";
 import { createReadTool } from "./tools/read.ts";
@@ -343,6 +343,12 @@ export interface RuntimeBuilderDeps {
 	reconcileLocalRuntimes?(): void;
 }
 
+interface RuntimeToolAccessPolicy {
+	allowedToolNames: ReadonlySet<string> | undefined;
+	toolProfileFilter: Required<ResourceProfileFilterSettings> | undefined;
+	allows(name: string): boolean;
+}
+
 /**
  * Owns the tool-registry build and the self-modification-safe extension reload extracted from
  * {@link AgentSession}. See the module header for the snapshot-ownership and host-binding boundaries.
@@ -361,6 +367,46 @@ export class RuntimeBuilder {
 
 	constructor(deps: RuntimeBuilderDeps) {
 		this.deps = deps;
+	}
+
+	/**
+	 * Resolve the construction and activation policy once for a runtime generation. This is the
+	 * UAC choke point: callers must consult it before invoking a tool factory, not merely before
+	 * placing an already-created definition in the live registry.
+	 */
+	private _createToolAccessPolicy(): RuntimeToolAccessPolicy {
+		const role = getSessionRole();
+		const configuredAllowedToolNames = this.deps.getAllowedToolNames();
+		const allowedToolNames = configuredAllowedToolNames
+			? new Set(mapToolNamesForPlatform([...configuredAllowedToolNames]))
+			: undefined;
+		const configuredExcludedToolNames = this.deps.getExcludedToolNames();
+		const excludedToolNames = configuredExcludedToolNames
+			? new Set(mapToolNamesForPlatform([...configuredExcludedToolNames]))
+			: undefined;
+		const configuredToolProfileFilter = this.deps.getToolProfileFilter();
+		const toolProfileFilter = configuredToolProfileFilter
+			? {
+					allow: mapToolNamesForPlatform(configuredToolProfileFilter.allow),
+					block: mapToolNamesForPlatform(configuredToolProfileFilter.block),
+				}
+			: undefined;
+		return {
+			allowedToolNames,
+			toolProfileFilter,
+			allows: (name) => {
+				// Strict worker UAC ceiling wins over every explicit grant.
+				if (role === "worker" && WORKER_FORBIDDEN_TOOLS.has(name)) return false;
+				if (allowedToolNames && !allowedToolNames.has(name)) return false;
+				if (excludedToolNames?.has(name)) return false;
+				if (!toolProfileFilter) return true;
+				if (toolProfileFilter.allow.length > 0 && !matchesResourceProfilePattern(name, toolProfileFilter.allow)) {
+					return false;
+				}
+				if (matchesResourceProfilePattern(name, toolProfileFilter.block)) return false;
+				return true;
+			},
+		};
 	}
 
 	private async _runContextScout(
@@ -431,7 +477,6 @@ export class RuntimeBuilder {
 	}
 
 	refreshToolRegistry(options?: { activeToolNames?: string[]; includeAllExtensionTools?: boolean }): void {
-		const role = getSessionRole();
 		const previousRegistryNames = new Set(this._toolRegistry.keys());
 		// Re-derive from the pre-filter REQUEST, never from agent.state.tools: the active set is
 		// capability/profile-filtered, so feeding it back through setActiveToolsByName would
@@ -439,35 +484,9 @@ export class RuntimeBuilder {
 		const previousActiveToolNames = mapToolNamesForPlatform(
 			this.deps.getRequestedActiveToolNames() ?? this.deps.getActiveToolNames(),
 		);
-		const configuredAllowedToolNames = this.deps.getAllowedToolNames();
-		const allowedToolNames = configuredAllowedToolNames
-			? new Set(mapToolNamesForPlatform([...configuredAllowedToolNames]))
-			: undefined;
-		const configuredExcludedToolNames = this.deps.getExcludedToolNames();
-		const excludedToolNames = configuredExcludedToolNames
-			? new Set(mapToolNamesForPlatform([...configuredExcludedToolNames]))
-			: undefined;
-		const configuredToolProfileFilter = this.deps.getToolProfileFilter();
-		const toolProfileFilter = configuredToolProfileFilter
-			? {
-					allow: mapToolNamesForPlatform(configuredToolProfileFilter.allow),
-					block: mapToolNamesForPlatform(configuredToolProfileFilter.block),
-				}
-			: undefined;
-		const isAllowedTool = (name: string): boolean => {
-			// Strict worker UAC ceiling: wins over allow-list/exclude/profile -- a worker session
-			// (lane-bound or dispatched) can never activate this tool no matter how permissively the
-			// active profile or an explicit request names it. See session-role.ts.
-			if (role === "worker" && WORKER_FORBIDDEN_TOOLS.has(name)) return false;
-			if (allowedToolNames && !allowedToolNames.has(name)) return false;
-			if (excludedToolNames?.has(name)) return false;
-			if (!toolProfileFilter) return true;
-			if (toolProfileFilter.allow.length > 0 && !matchesResourceProfilePattern(name, toolProfileFilter.allow)) {
-				return false;
-			}
-			if (matchesResourceProfilePattern(name, toolProfileFilter.block)) return false;
-			return true;
-		};
+		const toolAccess = this._createToolAccessPolicy();
+		const { allowedToolNames, toolProfileFilter } = toolAccess;
+		const isAllowedTool = toolAccess.allows;
 
 		const registeredTools = this.deps.getExtensionRunner().getAllRegisteredTools();
 		const allCustomTools = [
@@ -713,43 +732,55 @@ export class RuntimeBuilder {
 		const shellCommandPrefix = settingsManager.getShellCommandPrefix();
 		const shellPath = settingsManager.getShellPath();
 		const baseToolsOverride = this.deps.getBaseToolsOverride();
+		const toolAccess = this._createToolAccessPolicy();
 		// Artifact-producing tools must not emit a "Full output: artifact tool-output:<id>" handle
 		// that nothing can resolve. If artifact_retrieve is explicitly excluded/blocked/outside
 		// an active allowlist, don't hand grep/find/run_toolkit_script an artifact store at all:
 		// they fall back to their bounded preview/truncation behavior, with no payload/meta files
 		// ever written and no retrieval promise made.
-		const toolArtifactStore = this.deps.isToolOrCommandAllowedByProfile("artifact_retrieve")
-			? this.deps.getToolArtifactStore()
-			: undefined;
-		const baseToolDefinitions = baseToolsOverride
-			? Object.fromEntries(
-					Object.entries(baseToolsOverride).map(([name, tool]) => [name, createToolDefinitionFromAgentTool(tool)]),
+		const toolArtifactStore = toolAccess.allows("artifact_retrieve") ? this.deps.getToolArtifactStore() : undefined;
+		const toolOptions: ToolsOptions = {
+			read: { autoResizeImages },
+			bash: {
+				commandPrefix: shellCommandPrefix,
+				shellPath,
+				sessionKey: this.deps.getShellSessionKey(),
+				platform: process.platform,
+			},
+			grep: { artifactStore: toolArtifactStore },
+			find: { artifactStore: toolArtifactStore },
+			artifact_retrieve: { artifactStore: toolArtifactStore },
+		};
+		this._baseToolDefinitions = baseToolsOverride
+			? new Map(
+					Object.entries(baseToolsOverride)
+						.filter(([name]) => toolAccess.allows(name))
+						.map(([name, tool]) => [name, createToolDefinitionFromAgentTool(tool)]),
 				)
-			: createAllToolDefinitions(this.deps.getCwd(), {
-					read: { autoResizeImages },
-					bash: { commandPrefix: shellCommandPrefix, shellPath, sessionKey: this.deps.getShellSessionKey() },
-					grep: { artifactStore: toolArtifactStore },
-					find: { artifactStore: toolArtifactStore },
-					artifact_retrieve: { artifactStore: toolArtifactStore },
-				});
-
-		this._baseToolDefinitions = new Map(
-			Object.entries(baseToolDefinitions).map(([name, tool]) => [name, tool as ToolDefinition]),
-		);
+			: new Map(
+					[...allToolNames]
+						.filter((name) => toolAccess.allows(name))
+						.map((name) => [name, createToolDefinition(name, this.deps.getCwd(), toolOptions)]),
+				);
 		if (!baseToolsOverride) {
-			for (const definition of createCoreDiagnosticsToolDefinitions(
-				() => this.deps.getActiveToolNames(),
-				() => this.getAllTools(),
-				(messages) => this.deps.getContextGcReport(messages),
-				() => this.deps.getMemoryAuditDiagnostics(),
-			)) {
-				this._baseToolDefinitions.set(definition.name, definition);
+			if (toolAccess.allows("context_audit")) {
+				for (const definition of createCoreDiagnosticsToolDefinitions(
+					() => this.deps.getActiveToolNames(),
+					() => this.getAllTools(),
+					(messages) => this.deps.getContextGcReport(messages),
+					() => this.deps.getMemoryAuditDiagnostics(),
+				)) {
+					this._baseToolDefinitions.set(definition.name, definition);
+				}
 			}
 			// Hoisted above the goal-tool registration (rather than declared only inside the
 			// worktreeSync-enabled block further below) so the SAME settings/deps factory backs both
 			// the goal->tmux lane-first dispatch dep (`createLaneWorktree`, immediately below) and the
 			// `worktree_sync` tool registration later in this method -- one source of truth, no drift.
-			const worktreeSyncSettings = settingsManager.getWorktreeSyncSettings();
+			const worktreeSyncSettings =
+				toolAccess.allows("goal") || toolAccess.allows("worktree_sync")
+					? settingsManager.getWorktreeSyncSettings()
+					: undefined;
 			const worktreeSyncEngineDeps = () =>
 				buildWorktreeSyncEngineDeps({
 					cwd: this.deps.getCwd(),
@@ -757,136 +788,148 @@ export class RuntimeBuilder {
 					settingsManager: this.deps.getSettingsManager(),
 					sessionId: this.deps.getSessionManager().getSessionId(),
 				});
-			const goalToolDefinition = createGoalToolDefinition({
-				getGoalState: () => this.deps.getGoalStateSnapshot(),
-				saveGoalState: (state) => {
-					this.deps.saveGoalStateSnapshot(state);
-				},
-				// kind:"tool" evidence refs verify against real session records.
-				hasToolCallId: (toolCallId) => hasAnsweredToolCallOnBranch(this.deps.getSessionManager(), toolCallId),
-				// kind:"worker" evidence refs verify against the SAME live lane/result accessors the
-				// delegate_status tool already uses below -- live wiring (these were declared optional
-				// and read-defensive on the goal-tool deps type).
-				getLaneRecords: () => this.deps.getWorkerLaneRecords(),
-				getWorkerResultSnapshots: () => this.deps.getWorkerResultSnapshots(),
-				// dispatch_worker's tool-layer side effect for the default (in_process) route: starts a
-				// real in-process worker lane through the SAME starter the delegate tool uses (below),
-				// adapted from its `{started:true;record}|{started:false;skipReason}` shape onto this
-				// tool's narrower `{laneId}|{skipReason}` shape.
-				startWorkerDelegation: (args) => {
-					const outcome = this.deps.startWorkerDelegation({ instructions: args.instructions });
-					return outcome.started ? { laneId: outcome.record.laneId } : { skipReason: outcome.skipReason };
-				},
-				// dispatch_worker's tool-layer side effect for `dispatchTarget:"tmux"`: core structurally
-				// invokes the SAME tmux_agent_manager fire_task call the model itself would make (no
-				// extension change, no faked launch/laneId) -- see tmux-dispatch.ts's doc comment.
-				dispatchTmuxWorker: (args) =>
-					dispatchTmuxWorker(
-						{
-							getToolDefinition: (name) => this.getToolDefinition(name),
-							createExtensionContext: () => this.deps.getExtensionRunner().createContext(),
-							resolveManagedLaneId: (id) => this.deps.resolveManagedLaneId(id),
-							getGoalId: () => this.deps.getGoalStateSnapshot()?.goalId,
-							evaluateWorkerLaneRefusal: () => this.deps.getLaneWorkerRefusal(),
-							// Lane-first dispatch, wired ONLY when worktree-sync is enabled -- absent otherwise,
-							// so a disabled/default session gets the existing byte-identical fire_task params.
-							createLaneWorktree: worktreeSyncSettings.enabled
-								? async (laneArgs) => {
-										const created = await createLane(worktreeSyncEngineDeps(), {
-											...(laneArgs.goalId !== undefined ? { goalId: laneArgs.goalId } : {}),
-											requirementId: laneArgs.requirementId,
-										});
-										// Never fake a lane: any non-"ok" engine code (max lanes, invalid key, git
-										// error, ...) is refused, mapped by the caller onto the stable
-										// "worktree_create_failed" skip reason before any fire_task call runs.
-										if (created.code !== "ok") return { skipReason: created.code };
-										return { laneKey: created.lane.laneKey, worktreePath: created.lane.worktreePath };
-									}
-								: undefined,
-						},
-						args,
-					),
-				cwd: () => this.deps.getCwd(),
-				// Reuses the already branch-scoped getTaskStepsStateSnapshot dep -- no new
-				// SessionManager access needed for the cross-visibility nudge.
-				getOpenTaskSteps: () => deriveOpenTaskStepRefs(this.deps.getTaskStepsStateSnapshot()),
-			});
-			this._baseToolDefinitions.set(goalToolDefinition.name, goalToolDefinition);
-			const taskStepsToolDefinition = createTaskStepsToolDefinition({
-				getTaskStepsState: () => this.deps.getTaskStepsStateSnapshot(),
-				saveTaskStepsState: (state) => {
-					this.deps.saveTaskStepsStateSnapshot(state);
-				},
-			});
-			this._baseToolDefinitions.set(taskStepsToolDefinition.name, taskStepsToolDefinition);
-			const delegateToolDefinition = createDelegateToolDefinition({
-				startWorkerDelegation: (args) => this.deps.startWorkerDelegation(args),
-				runWorkerDelegation: (args) => this.deps.runWorkerDelegationOnce(args),
-			});
-			const delegateStatusToolDefinition = createDelegateStatusToolDefinition({
-				getLaneRecords: () => this.deps.getWorkerLaneRecords(),
-				getWorkerResultSnapshots: () => this.deps.getWorkerResultSnapshots(),
-				// Durable ack persists straight through the session log; routed here (rather than
-				// a new agent-session dep) because getSessionManager() is already a stable, generic
-				// passthrough dep, so no other package needs to change for this to work.
-				acknowledgeWorkerReview: (requestId) =>
-					acknowledgeWorkerResultReview(this.deps.getSessionManager(), requestId),
-			});
-			this._baseToolDefinitions.set(delegateToolDefinition.name, delegateToolDefinition);
-			this._baseToolDefinitions.set(delegateStatusToolDefinition.name, delegateStatusToolDefinition);
+			if (toolAccess.allows("goal")) {
+				const goalToolDefinition = createGoalToolDefinition({
+					getGoalState: () => this.deps.getGoalStateSnapshot(),
+					saveGoalState: (state) => {
+						this.deps.saveGoalStateSnapshot(state);
+					},
+					// kind:"tool" evidence refs verify against real session records.
+					hasToolCallId: (toolCallId) => hasAnsweredToolCallOnBranch(this.deps.getSessionManager(), toolCallId),
+					// kind:"worker" evidence refs verify against the SAME live lane/result accessors the
+					// delegate_status tool already uses below -- live wiring (these were declared optional
+					// and read-defensive on the goal-tool deps type).
+					getLaneRecords: () => this.deps.getWorkerLaneRecords(),
+					getWorkerResultSnapshots: () => this.deps.getWorkerResultSnapshots(),
+					// dispatch_worker's tool-layer side effect for the default (in_process) route: starts a
+					// real in-process worker lane through the SAME starter the delegate tool uses (below),
+					// adapted from its `{started:true;record}|{started:false;skipReason}` shape onto this
+					// tool's narrower `{laneId}|{skipReason}` shape.
+					startWorkerDelegation: (args) => {
+						const outcome = this.deps.startWorkerDelegation({ instructions: args.instructions });
+						return outcome.started ? { laneId: outcome.record.laneId } : { skipReason: outcome.skipReason };
+					},
+					// dispatch_worker's tool-layer side effect for `dispatchTarget:"tmux"`: core structurally
+					// invokes the SAME tmux_agent_manager fire_task call the model itself would make (no
+					// extension change, no faked launch/laneId) -- see tmux-dispatch.ts's doc comment.
+					dispatchTmuxWorker: (args) =>
+						dispatchTmuxWorker(
+							{
+								getToolDefinition: (name) => this.getToolDefinition(name),
+								createExtensionContext: () => this.deps.getExtensionRunner().createContext(),
+								resolveManagedLaneId: (id) => this.deps.resolveManagedLaneId(id),
+								getGoalId: () => this.deps.getGoalStateSnapshot()?.goalId,
+								evaluateWorkerLaneRefusal: () => this.deps.getLaneWorkerRefusal(),
+								// Lane-first dispatch, wired ONLY when worktree-sync is enabled -- absent otherwise,
+								// so a disabled/default session gets the existing byte-identical fire_task params.
+								createLaneWorktree: worktreeSyncSettings?.enabled
+									? async (laneArgs) => {
+											const created = await createLane(worktreeSyncEngineDeps(), {
+												...(laneArgs.goalId !== undefined ? { goalId: laneArgs.goalId } : {}),
+												requirementId: laneArgs.requirementId,
+											});
+											// Never fake a lane: any non-"ok" engine code (max lanes, invalid key, git
+											// error, ...) is refused, mapped by the caller onto the stable
+											// "worktree_create_failed" skip reason before any fire_task call runs.
+											if (created.code !== "ok") return { skipReason: created.code };
+											return { laneKey: created.lane.laneKey, worktreePath: created.lane.worktreePath };
+										}
+									: undefined,
+							},
+							args,
+						),
+					cwd: () => this.deps.getCwd(),
+					// Reuses the already branch-scoped getTaskStepsStateSnapshot dep -- no new
+					// SessionManager access needed for the cross-visibility nudge.
+					getOpenTaskSteps: () => deriveOpenTaskStepRefs(this.deps.getTaskStepsStateSnapshot()),
+				});
+				this._baseToolDefinitions.set(goalToolDefinition.name, goalToolDefinition);
+			}
+			if (toolAccess.allows("task_steps")) {
+				const taskStepsToolDefinition = createTaskStepsToolDefinition({
+					getTaskStepsState: () => this.deps.getTaskStepsStateSnapshot(),
+					saveTaskStepsState: (state) => {
+						this.deps.saveTaskStepsStateSnapshot(state);
+					},
+				});
+				this._baseToolDefinitions.set(taskStepsToolDefinition.name, taskStepsToolDefinition);
+			}
+			if (toolAccess.allows("delegate")) {
+				const delegateToolDefinition = createDelegateToolDefinition({
+					startWorkerDelegation: (args) => this.deps.startWorkerDelegation(args),
+					runWorkerDelegation: (args) => this.deps.runWorkerDelegationOnce(args),
+				});
+				this._baseToolDefinitions.set(delegateToolDefinition.name, delegateToolDefinition);
+			}
+			if (toolAccess.allows("delegate_status")) {
+				const delegateStatusToolDefinition = createDelegateStatusToolDefinition({
+					getLaneRecords: () => this.deps.getWorkerLaneRecords(),
+					getWorkerResultSnapshots: () => this.deps.getWorkerResultSnapshots(),
+					// Durable ack persists straight through the session log; routed here (rather than
+					// a new agent-session dep) because getSessionManager() is already a stable, generic
+					// passthrough dep, so no other package needs to change for this to work.
+					acknowledgeWorkerReview: (requestId) =>
+						acknowledgeWorkerResultReview(this.deps.getSessionManager(), requestId),
+				});
+				this._baseToolDefinitions.set(delegateStatusToolDefinition.name, delegateStatusToolDefinition);
+			}
 			// Registered but not default-active: probes spend tokens on the probed model, so
 			// activation is an explicit choice (settings/profile/setActiveTools or /autonomy fitness).
-			const modelFitnessToolDefinition = createModelFitnessToolDefinition({
-				runProbe: (args) => this.deps.runModelFitness(args),
-			});
-			this._baseToolDefinitions.set(modelFitnessToolDefinition.name, modelFitnessToolDefinition);
-			if (settingsManager.getScoutSettings().enabled) {
+			if (toolAccess.allows("model_fitness")) {
+				const modelFitnessToolDefinition = createModelFitnessToolDefinition({
+					runProbe: (args) => this.deps.runModelFitness(args),
+				});
+				this._baseToolDefinitions.set(modelFitnessToolDefinition.name, modelFitnessToolDefinition);
+			}
+			if (toolAccess.allows("context_scout") && settingsManager.getScoutSettings().enabled) {
 				const contextScoutToolDefinition = createContextScoutToolDefinition({
 					runScout: (input) => this._runContextScout(input.query, input.maxTurns, toolArtifactStore),
 				});
 				this._baseToolDefinitions.set(contextScoutToolDefinition.name, contextScoutToolDefinition);
 			}
-			const runToolkitScriptToolDefinition = createRunToolkitScriptToolDefinition({
-				getScripts: () => this.deps.getSettingsManager().getToolkitScripts(),
-				execute: (script, scriptArgs) => executeToolkitScript({ script, scriptArgs, cwd: this.deps.getCwd() }),
-				artifactStore: toolArtifactStore,
-				// Reflex brain (fitness-gated local model): resolves ambiguous requests into a
-				// registry pick. Best-effort — absent/unfit brain keeps the shortlist behavior.
-				interpret: async (request, scripts) => {
-					const model = this.deps.resolveCurationModelIfFit();
-					if (!model) return undefined;
-					const completion = await this.deps.runIsolatedCompletion({
-						systemPrompt: REFLEX_INTERPRETER_SYSTEM_PROMPT,
-						messages: [
-							{
-								role: "user",
-								content: [{ type: "text", text: buildReflexUserPrompt(request, scripts) }],
-								timestamp: Date.now(),
-							},
-						],
-						model,
-						thinkingLevel: "off",
-						maxTokens: 256,
-						cacheRetention: "short",
-						// Stable per-lane synthetic affinity key so repeat ambiguous-request
-						// interpretations hit the same cache-warm backend.
-						laneKind: "toolkit-brain",
-					});
-					if (completion.usage.cost.total > 0 || completion.usage.totalTokens > 0) {
-						// `reportId` keyed on the ambiguous request text driving THIS interpretation —
-						// stable across a retry of the same tool call, distinct across genuinely
-						// different requests.
-						const reportId = deriveSpawnedUsageReportId(
-							"toolkit-brain",
-							this.deps.getSessionManager().getSessionId(),
-							request,
-						);
-						this.deps.addSpawnedUsage(completion.usage, { label: "toolkit-brain", reportId });
-					}
-					return parseReflexPlan(completion.text);
-				},
-			});
-			this._baseToolDefinitions.set(runToolkitScriptToolDefinition.name, runToolkitScriptToolDefinition);
+			if (toolAccess.allows("run_toolkit_script")) {
+				const runToolkitScriptToolDefinition = createRunToolkitScriptToolDefinition({
+					getScripts: () => this.deps.getSettingsManager().getToolkitScripts(),
+					execute: (script, scriptArgs) => executeToolkitScript({ script, scriptArgs, cwd: this.deps.getCwd() }),
+					artifactStore: toolArtifactStore,
+					// Reflex brain (fitness-gated local model): resolves ambiguous requests into a
+					// registry pick. Best-effort — absent/unfit brain keeps the shortlist behavior.
+					interpret: async (request, scripts) => {
+						const model = this.deps.resolveCurationModelIfFit();
+						if (!model) return undefined;
+						const completion = await this.deps.runIsolatedCompletion({
+							systemPrompt: REFLEX_INTERPRETER_SYSTEM_PROMPT,
+							messages: [
+								{
+									role: "user",
+									content: [{ type: "text", text: buildReflexUserPrompt(request, scripts) }],
+									timestamp: Date.now(),
+								},
+							],
+							model,
+							thinkingLevel: "off",
+							maxTokens: 256,
+							cacheRetention: "short",
+							// Stable per-lane synthetic affinity key so repeat ambiguous-request
+							// interpretations hit the same cache-warm backend.
+							laneKind: "toolkit-brain",
+						});
+						if (completion.usage.cost.total > 0 || completion.usage.totalTokens > 0) {
+							// `reportId` keyed on the ambiguous request text driving THIS interpretation —
+							// stable across a retry of the same tool call, distinct across genuinely
+							// different requests.
+							const reportId = deriveSpawnedUsageReportId(
+								"toolkit-brain",
+								this.deps.getSessionManager().getSessionId(),
+								request,
+							);
+							this.deps.addSpawnedUsage(completion.usage, { label: "toolkit-brain", reportId });
+						}
+						return parseReflexPlan(completion.text);
+					},
+				});
+				this._baseToolDefinitions.set(runToolkitScriptToolDefinition.name, runToolkitScriptToolDefinition);
+			}
 
 			// Worktree-sync (opt-in): the closed-action lane workflow tool, plus -- for a session
 			// launched lane-bound (PI_WORKTREE_LANE) -- the G8/G10 lane gate wrapped UNDER the
@@ -894,7 +937,7 @@ export class RuntimeBuilder {
 			// exact recovery step rather than relying on prompt compliance. `worktreeSyncSettings` /
 			// `worktreeSyncEngineDeps` are hoisted above (declared before the goal-tool registration)
 			// so the goal->tmux lane-first dispatch dep and this tool share one settings/deps source.
-			if (worktreeSyncSettings.enabled) {
+			if (toolAccess.allows("worktree_sync") && worktreeSyncSettings?.enabled) {
 				const worktreeSyncToolDefinition = createWorktreeSyncToolDefinition({
 					engineDeps: worktreeSyncEngineDeps,
 					settings: () => this.deps.getSettingsManager().getWorktreeSyncSettings(),
@@ -1217,6 +1260,9 @@ export class RuntimeBuilder {
 	 */
 	async loadExtensionLive(extensionPath: string): Promise<void> {
 		this._assertReloadQuiescent("load extension");
+		if (!this.deps.getSettingsManager().isResourceAllowedByProfile("extensions", extensionPath)) {
+			throw new Error(`Cannot load extension outside the active resource profile: ${extensionPath}`);
+		}
 
 		const previousRunner = this.deps.getExtensionRunner();
 		try {

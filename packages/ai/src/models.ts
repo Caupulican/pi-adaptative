@@ -102,6 +102,20 @@ export function clampThinkingLevel<TApi extends Api>(
 }
 
 /**
+ * Resolve the effective thinking level for a model through one provider-neutral contract.
+ * Explicit caller intent wins, then model metadata, then the caller's harness fallback. The
+ * selected level is always clamped to the model's advertised capabilities before it leaves this
+ * function, so non-reasoning models cannot carry a transient reasoning level.
+ */
+export function resolveModelThinkingLevel<TApi extends Api>(
+	model: Model<TApi>,
+	requestedLevel: ModelThinkingLevel | undefined,
+	fallbackLevel: ModelThinkingLevel = "medium",
+): ModelThinkingLevel {
+	return clampThinkingLevel(model, requestedLevel ?? model.defaultThinkingLevel ?? fallbackLevel);
+}
+
+/**
  * Check if two models are equal by comparing both their id and provider.
  * Returns false if either model is null or undefined.
  */

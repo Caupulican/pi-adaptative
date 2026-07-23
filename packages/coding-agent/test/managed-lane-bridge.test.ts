@@ -1,6 +1,6 @@
 import type { SessionManager } from "@caupulican/pi-agent-core/node";
 import { SessionManager as InMemorySessionManager } from "@caupulican/pi-agent-core/node";
-import { afterEach, describe, expect, it } from "vitest";
+import { afterEach, describe, expect, it, vi } from "vitest";
 import type { WorkerResult } from "../src/core/autonomy/contracts.ts";
 import {
 	BackgroundLaneController,
@@ -22,6 +22,7 @@ function buildDeps(
 	overrides?: Partial<{
 		goalId: string | undefined;
 		saveWorkerResultSnapshot: (result: WorkerResult, request?: unknown) => string;
+		notifyWorkerTerminalHandoff: BackgroundLaneControllerDeps["notifyWorkerTerminalHandoff"];
 	}>,
 ): BackgroundLaneControllerDeps {
 	const appendedEntries: Array<{ customType: string; data: unknown }> = [];
@@ -44,6 +45,8 @@ function buildDeps(
 		// intent -- these tests assert dispatch/terminal/quiesce bookkeeping, not the review verdict.
 		getCapabilityEnvelope: () => undefined,
 		saveWorkerResultSnapshot: overrides?.saveWorkerResultSnapshot ?? (() => "worker-result-entry"),
+		emit: () => {},
+		notifyWorkerTerminalHandoff: overrides?.notifyWorkerTerminalHandoff ?? (async () => {}),
 	} as never;
 }
 
@@ -111,6 +114,26 @@ describe("managed lane host bridge (recordManagedLane)", () => {
 			status: "completed",
 			changedFiles: ["src/a.ts"],
 		});
+	});
+
+	it("wakes the owning parent when a managed worker reports terminal", async () => {
+		const notifyWorkerTerminalHandoff = vi.fn(async () => {});
+		const controller = new BackgroundLaneController(
+			buildDeps("/tmp/pi-test-managed-lane-handoff", { notifyWorkerTerminalHandoff }),
+		);
+
+		controller.recordManagedLane({ laneId: "tmux-job-handoff", phase: "dispatch" });
+		const terminal = controller.recordManagedLane({
+			laneId: "tmux-job-handoff",
+			phase: "terminal",
+			status: "succeeded",
+			reasonCode: "worker_completed",
+		});
+		await vi.waitFor(() => expect(notifyWorkerTerminalHandoff).toHaveBeenCalledTimes(1));
+
+		expect(notifyWorkerTerminalHandoff).toHaveBeenCalledWith([
+			{ laneId: terminal?.laneId, status: "succeeded", reasonCode: "worker_completed" },
+		]);
 	});
 
 	it("ignores a duplicate dispatch for an already-tracked laneId (no double quiesce registration)", () => {

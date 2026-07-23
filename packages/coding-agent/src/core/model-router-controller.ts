@@ -502,8 +502,8 @@ export class ModelRouterController {
 		// deliberately not behind the opt-in `fitnessGate` setting below (cloud fitness gating stays
 		// opt-in; this local/managed check is unconditional, matching the auto-probe that writes
 		// the verdict). "native"/"text-protocol"/unprobed all fall through unchanged: native wins
-		// when it works, the phone lane engages downstream via _textProtocolFlag, and an unprobed
-		// model routes native-first (the evidence loop, not a speculative pre-block).
+		// when it works, the shared model-tool-protocol resolver engages the calibrated text dialect,
+		// and an unprobed model routes native-first (the evidence loop, not a speculative pre-block).
 		if (isLocalOrManagedRouterModel(resolved.model) && this.deps.getToolProbeVerdict(resolved.model) === "none") {
 			if (decision.tier === "medium") {
 				const fallback = this._resolveExpensiveFallbackRoute(

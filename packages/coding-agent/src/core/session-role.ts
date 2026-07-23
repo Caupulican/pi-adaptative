@@ -5,7 +5,8 @@
  * tool's worker scoping, and the read-only store options threaded through the persistence layer).
  *
  * A session is a worker iff EITHER:
- * - `PI_SESSION_ROLE=worker` is set (an explicit launcher declaration), or
+ * - `PI_SESSION_ROLE=worker` is set (an explicit launcher declaration),
+ * - a valid `PI_PARENT_PID` declares this process as a managed child, or
  * - it is bound to a worktree-sync lane (`PI_WORKTREE_LANE`; see worktree-sync/runtime.ts) — a
  *   lane-bound session is a worker by construction, regardless of how it was launched.
  *
@@ -14,6 +15,7 @@
  * var is additive evidence for "worker", never a downgrade signal.
  */
 
+import { getParentPid } from "./process-identity.ts";
 import { getBoundWorktreeLaneKey } from "./worktree-sync/runtime.ts";
 
 export type SessionRole = "main" | "worker";
@@ -23,6 +25,7 @@ const PI_SESSION_ROLE_ENV = "PI_SESSION_ROLE";
 /** Derive this process's session role from the environment (env-injectable for tests). */
 export function getSessionRole(env: NodeJS.ProcessEnv = process.env): SessionRole {
 	if (env[PI_SESSION_ROLE_ENV] === "worker") return "worker";
+	if (getParentPid(env) !== undefined) return "worker";
 	if (getBoundWorktreeLaneKey(env) !== undefined) return "worker";
 	return "main";
 }

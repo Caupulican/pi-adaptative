@@ -3,7 +3,7 @@
  */
 
 import type { ThinkingLevel } from "@caupulican/pi-agent-core";
-import { type Api, type KnownProvider, type Model, modelsAreEqual } from "@caupulican/pi-ai";
+import { type Api, type KnownProvider, type Model, modelsAreEqual, resolveModelThinkingLevel } from "@caupulican/pi-ai";
 import chalk from "chalk";
 import { minimatch } from "minimatch";
 import { isValidThinkingLevel } from "../cli/args.ts";
@@ -582,10 +582,6 @@ export interface InitialModelResult {
 	fallbackMessage: string | undefined;
 }
 
-function resolveInitialThinkingLevel(model: Model<Api>, explicitThinkingLevel?: ThinkingLevel): ThinkingLevel {
-	return explicitThinkingLevel ?? model.defaultThinkingLevel ?? DEFAULT_THINKING_LEVEL;
-}
-
 /**
  * Find the initial model to use based on priority:
  * 1. CLI args (provider + optional model)
@@ -633,7 +629,11 @@ export async function findInitialModel(options: {
 		if (resolved.model) {
 			return {
 				model: resolved.model,
-				thinkingLevel: resolveInitialThinkingLevel(resolved.model, resolved.thinkingLevel ?? defaultThinkingLevel),
+				thinkingLevel: resolveModelThinkingLevel(
+					resolved.model,
+					resolved.thinkingLevel ?? defaultThinkingLevel,
+					DEFAULT_THINKING_LEVEL,
+				),
 				fallbackMessage: undefined,
 			};
 		}
@@ -643,9 +643,10 @@ export async function findInitialModel(options: {
 	if (scopedModels.length > 0 && !isContinuing) {
 		return {
 			model: scopedModels[0].model,
-			thinkingLevel: resolveInitialThinkingLevel(
+			thinkingLevel: resolveModelThinkingLevel(
 				scopedModels[0].model,
 				scopedModels[0].thinkingLevel ?? defaultThinkingLevel,
+				DEFAULT_THINKING_LEVEL,
 			),
 			fallbackMessage: undefined,
 		};
@@ -658,7 +659,7 @@ export async function findInitialModel(options: {
 			model = found;
 			return {
 				model,
-				thinkingLevel: resolveInitialThinkingLevel(model, defaultThinkingLevel),
+				thinkingLevel: resolveModelThinkingLevel(model, defaultThinkingLevel, DEFAULT_THINKING_LEVEL),
 				fallbackMessage: undefined,
 			};
 		}
@@ -675,7 +676,7 @@ export async function findInitialModel(options: {
 			if (match) {
 				return {
 					model: match,
-					thinkingLevel: resolveInitialThinkingLevel(match, defaultThinkingLevel),
+					thinkingLevel: resolveModelThinkingLevel(match, defaultThinkingLevel, DEFAULT_THINKING_LEVEL),
 					fallbackMessage: undefined,
 				};
 			}
@@ -684,7 +685,7 @@ export async function findInitialModel(options: {
 		// If no default found, use first available
 		return {
 			model: availableModels[0],
-			thinkingLevel: resolveInitialThinkingLevel(availableModels[0], defaultThinkingLevel),
+			thinkingLevel: resolveModelThinkingLevel(availableModels[0], defaultThinkingLevel, DEFAULT_THINKING_LEVEL),
 			fallbackMessage: undefined,
 		};
 	}
@@ -772,7 +773,7 @@ export async function restoreModelFromSession(
 }
 
 export interface ResolvedProfileModelSettings {
-	model?: Model<any>;
+	model?: Model<Api>;
 	thinkingLevel?: ThinkingLevel;
 	warning?: string;
 	error?: string;

@@ -27,6 +27,7 @@
  */
 
 import { hostname as osHostname } from "node:os";
+import { getParentPid, getParentSessionId } from "../process-identity.ts";
 import type { ResolvedProcessMatrixSettings } from "../settings-manager.ts";
 import { getBoundWorktreeLaneKey } from "../worktree-sync/runtime.ts";
 import type { ProcessMatrixEntry, ResumablePayload } from "./codes.ts";
@@ -43,23 +44,7 @@ import {
 	pollWorkerDirective,
 } from "./supervisor.ts";
 
-export const PI_PARENT_PID_ENV = "PI_PARENT_PID";
-export const PI_PARENT_SESSION_ENV = "PI_PARENT_SESSION";
-
-/** This process's declared parent pid, from the cross-process env contract. A malformed or
- * non-positive value is ignored (never a crash on bad env). */
-export function getParentPid(env: NodeJS.ProcessEnv = process.env): number | undefined {
-	const raw = env[PI_PARENT_PID_ENV];
-	if (raw === undefined) return undefined;
-	const value = Number.parseInt(raw, 10);
-	return Number.isFinite(value) && value > 0 ? value : undefined;
-}
-
-/** This process's declared parent sessionId, from the cross-process env contract. */
-export function getParentSessionId(env: NodeJS.ProcessEnv = process.env): string | undefined {
-	const value = env[PI_PARENT_SESSION_ENV]?.trim();
-	return value && value.length > 0 ? value : undefined;
-}
+export { getParentPid, getParentSessionId, PI_PARENT_PID_ENV, PI_PARENT_SESSION_ENV } from "../process-identity.ts";
 
 export interface ProcessMatrixRuntimeConfig {
 	agentDir: string;

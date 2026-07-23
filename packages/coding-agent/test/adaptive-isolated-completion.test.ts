@@ -173,6 +173,49 @@ describe("runIsolatedCompletion isolation invariants", () => {
 
 		session.dispose();
 	});
+
+	it("clamps an isolated lane's requested thinking to the selected model's capabilities", async () => {
+		const session = await newSession();
+		const model = getModel("anthropic", "claude-sonnet-4-5")!;
+		const fakeReply: AssistantMessage = {
+			role: "assistant",
+			content: [{ type: "text", text: "ok" }],
+			api: model.api,
+			provider: model.provider,
+			model: model.id,
+			usage: {
+				input: 1,
+				output: 1,
+				cacheRead: 0,
+				cacheWrite: 0,
+				totalTokens: 2,
+				cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, total: 0 },
+			},
+			stopReason: "stop",
+			timestamp: Date.now(),
+		};
+		let capturedOptions: SimpleStreamOptions | undefined;
+		(session.agent as unknown as { streamFn: unknown }).streamFn = async (
+			_model: unknown,
+			_context: Context,
+			options: SimpleStreamOptions,
+		) => {
+			capturedOptions = options;
+			return { result: async () => fakeReply };
+		};
+
+		await session.runIsolatedCompletion({
+			systemPrompt: "system",
+			messages: [{ role: "user", content: [{ type: "text", text: "hi" }], timestamp: Date.now() }],
+			model,
+			thinkingLevel: "ultra",
+			maxTokens: 8,
+			cacheRetention: "none",
+		});
+
+		expect(capturedOptions?.reasoning).toBe("high");
+		session.dispose();
+	});
 });
 
 /**

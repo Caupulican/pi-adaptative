@@ -224,6 +224,7 @@ export default (pi) => {
 		let session: AgentSession;
 		let sessionManager: SessionManager;
 		let resourceLoader: DefaultResourceLoader;
+		let settingsManager: SettingsManager;
 
 		beforeEach(() => {
 			const model = getModel("anthropic", "claude-sonnet-4-5")!;
@@ -237,7 +238,7 @@ export default (pi) => {
 			});
 
 			sessionManager = SessionManager.inMemory();
-			const settingsManager = SettingsManager.create(tempDir, tempDir);
+			settingsManager = SettingsManager.create(tempDir, tempDir);
 			const authStorage = AuthStorage.create(join(tempDir, "auth.json"));
 			const modelRegistry = ModelRegistry.create(authStorage, tempDir);
 
@@ -346,6 +347,31 @@ export default (pi) => {
 			);
 
 			Object.defineProperty(session, "isCompacting", { get: () => false, configurable: true });
+		});
+
+		it("rejects a profile-denied extension before importing its module", async () => {
+			const extDir = join(tempDir, "profile-denied-live-load");
+			const importMarker = join(tempDir, "profile-denied-imported");
+			mkdirSync(extDir, { recursive: true });
+			const extFile = join(extDir, "index.ts");
+			writeFileSync(
+				extFile,
+				`
+import { writeFileSync } from "node:fs";
+writeFileSync(${JSON.stringify(importMarker)}, "imported", "utf8");
+export default () => {};
+			`,
+			);
+			settingsManager.addInlineResourceProfileDefinitions({
+				lean: { extensions: { allow: ["different-extension"] } },
+			});
+			settingsManager.setRuntimeResourceProfiles(["lean"]);
+
+			await expect(session.loadExtensionLive(extFile)).rejects.toThrow(
+				"Cannot load extension outside the active resource profile",
+			);
+			expect(existsSync(importMarker)).toBe(false);
+			expect(resourceLoader.getLoadedExtension(extFile)).toBeUndefined();
 		});
 	});
 

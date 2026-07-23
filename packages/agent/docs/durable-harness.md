@@ -1,5 +1,9 @@
 # Durable AgentHarness and session design
 
+> Historical design record for the removed duplicate `AgentHarness`. Durable lifecycle work for the
+> production harness belongs under the current [harness architecture](../../coding-agent/docs/harness-architecture.md)
+> and must preserve `AgentSession` as the single facade/composition root.
+
 <!-- Synced from jot zmnps2zu. Edit this file in-repo going forward. -->
 
 Durable AgentHarness / session design notes.

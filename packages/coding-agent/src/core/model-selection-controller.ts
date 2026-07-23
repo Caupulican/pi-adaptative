@@ -31,7 +31,7 @@ const THINKING_LEVELS: ThinkingLevel[] = ["off", "minimal", "low", "medium", "hi
 
 export interface ModelSelectionControllerDeps {
 	getAgent(): Agent;
-	getModel(): Model<any> | undefined;
+	getModel(): Model<Api> | undefined;
 	getThinkingLevel(): ThinkingLevel;
 	getModelRegistry(): ModelRegistry;
 	getSessionManager(): SessionManager;
@@ -39,7 +39,7 @@ export interface ModelSelectionControllerDeps {
 	getExtensionRunner(): ExtensionRunner;
 	getAgentDir(): string;
 	/** Scoped models (--models flag), used by the cycle path. */
-	getScopedModels(): Array<{ model: Model<any>; thinkingLevel?: ThinkingLevel }>;
+	getScopedModels(): Array<{ model: Model<Api>; thinkingLevel?: ThinkingLevel }>;
 	/** The user-requested active tool set, re-applied when the model's capability class changes. */
 	getRequestedActiveToolNames(): string[] | undefined;
 	getActiveToolNames(): string[];
@@ -65,8 +65,8 @@ export class ModelSelectionController {
 	}
 
 	private async _emitModelSelect(
-		nextModel: Model<any>,
-		previousModel: Model<any> | undefined,
+		nextModel: Model<Api>,
+		previousModel: Model<Api> | undefined,
 		source: "set" | "cycle" | "restore",
 	): Promise<void> {
 		if (modelsAreEqual(previousModel, nextModel)) return;
@@ -83,7 +83,7 @@ export class ModelSelectionController {
 	 * Validates that auth is configured, saves to session and settings.
 	 * @throws Error if no auth is configured for the model
 	 */
-	async setModel(model: Model<any>, options: { persistSettings?: boolean } = {}): Promise<void> {
+	async setModel(model: Model<Api>, options: { persistSettings?: boolean } = {}): Promise<void> {
 		if (!this.deps.getModelRegistry().hasConfiguredAuth(model)) {
 			throw new Error(`No API key for ${model.provider}/${model.id}`);
 		}

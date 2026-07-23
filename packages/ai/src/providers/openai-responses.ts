@@ -23,6 +23,7 @@ import {
 	buildResponsesInstructions,
 	convertResponsesMessages,
 	convertResponsesTools,
+	createOpenAIResponsesToolNameMap,
 	processResponsesStream,
 } from "./openai-responses-shared.ts";
 import { buildBaseOptions } from "./simple-options.ts";
@@ -109,6 +110,7 @@ export const streamOpenAIResponses: StreamFunction<"openai-responses", OpenAIRes
 			const cacheRetention = resolveCacheRetention(options?.cacheRetention);
 			const cacheSessionId = cacheRetention === "none" ? undefined : options?.sessionId;
 			const client = createClient(model, context, apiKey, options?.headers, cacheSessionId);
+			const toolNameMap = createOpenAIResponsesToolNameMap(context.tools ?? []);
 			let params = buildParams(model, context, options);
 			const nextParams = await options?.onPayload?.(params, model);
 			if (nextParams !== undefined) {
@@ -128,6 +130,7 @@ export const streamOpenAIResponses: StreamFunction<"openai-responses", OpenAIRes
 			stream.push({ type: "start", partial: output });
 
 			await processResponsesStream(openaiStream, output, stream, model, {
+				toolNameMap,
 				serviceTier: options?.serviceTier,
 				applyServiceTierPricing:
 					model.provider === "fugu"
@@ -244,7 +247,8 @@ function createClient(
 }
 
 function buildParams(model: Model<"openai-responses">, context: Context, options?: OpenAIResponsesOptions) {
-	const messages = convertResponsesMessages(model, context, OPENAI_TOOL_CALL_PROVIDERS);
+	const toolNameMap = createOpenAIResponsesToolNameMap(context.tools ?? []);
+	const messages = convertResponsesMessages(model, context, OPENAI_TOOL_CALL_PROVIDERS, { toolNameMap });
 
 	const cacheRetention = resolveCacheRetention(options?.cacheRetention);
 	const compat = getCompat(model);
@@ -279,7 +283,7 @@ function buildParams(model: Model<"openai-responses">, context: Context, options
 	}
 
 	if (context.tools && context.tools.length > 0) {
-		params.tools = convertResponsesTools(context.tools);
+		params.tools = convertResponsesTools(context.tools, { toolNameMap });
 	}
 
 	if (model.reasoning) {

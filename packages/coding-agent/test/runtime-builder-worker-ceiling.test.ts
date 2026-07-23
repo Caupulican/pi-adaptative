@@ -1,6 +1,6 @@
 import type { Agent, AgentContext, AgentTool } from "@caupulican/pi-agent-core";
 import { SessionManager } from "@caupulican/pi-agent-core/node";
-import type { Model } from "@caupulican/pi-ai";
+import type { Api, Model } from "@caupulican/pi-ai";
 import { afterEach, describe, expect, it } from "vitest";
 import { AuthStorage } from "../src/core/auth-storage.ts";
 import { ExtensionRunner } from "../src/core/extensions/index.ts";
@@ -12,10 +12,10 @@ import { SettingsManager } from "../src/core/settings-manager.ts";
 import type { LoadExtensionsResult, ResourceLoader } from "../src/index.ts";
 
 /**
- * D2: the strict worker UAC ceiling (WORKER_FORBIDDEN_TOOLS, session-role.ts) is the FIRST line of
- * `refreshToolRegistry`'s `isAllowedTool` predicate -- it must win even when an allow-list
- * EXPLICITLY grants a forbidden tool by name (the "Strict UAC" auto-activation further down would
- * otherwise activate any explicitly-granted tool from the registry).
+ * D2: the strict worker UAC ceiling (WORKER_FORBIDDEN_TOOLS, session-role.ts) must win even when an
+ * allow-list EXPLICITLY grants a forbidden tool by name. The same policy gates construction and
+ * activation: a forbidden override tool must never be inspected/wrapped, not merely omitted from
+ * the final registry.
  *
  * Constructs RuntimeBuilder DIRECTLY (same rationale as
  * runtime-builder-reload-reconcile.test.ts: this repo bans cast-wired private access) and drives
@@ -39,12 +39,20 @@ function unreachable(name: string): never {
 	throw new Error(`${name} should not be called by a buildRuntime() with getBaseToolsOverride set`);
 }
 
-function makeDeps(cwd: string): RuntimeBuilderDeps {
+function makeDeps(
+	cwd: string,
+	getBaseToolsOverride: () => Record<string, AgentTool> = () => ({
+		goal: fakeTool("goal"),
+		python: fakeTool("python"),
+		read: fakeTool("read"),
+		edit: fakeTool("edit"),
+	}),
+): RuntimeBuilderDeps {
 	const authStorage = AuthStorage.inMemory();
 	const modelRegistry = ModelRegistry.inMemory(authStorage);
 	const sessionManager = SessionManager.inMemory();
 	const settingsManager = SettingsManager.inMemory();
-	const model = { provider: "faux", id: "faux-model", contextWindow: 100_000 } as unknown as Model<any>;
+	const model = { provider: "faux", id: "faux-model", contextWindow: 100_000 } as unknown as Model<Api>;
 	const agent = {
 		state: { model, thinkingLevel: "medium", tools: [], systemPrompt: "" },
 	} as unknown as Agent;
@@ -101,12 +109,7 @@ function makeDeps(cwd: string): RuntimeBuilderDeps {
 		// fitness/scout/toolkit-script/worktree-sync tool creation block -- irrelevant to a ceiling
 		// that gates purely on tool NAME. Four fake tools stand in for two forbidden (goal, python)
 		// and two never-forbidden (read, edit) names.
-		getBaseToolsOverride: () => ({
-			goal: fakeTool("goal"),
-			python: fakeTool("python"),
-			read: fakeTool("read"),
-			edit: fakeTool("edit"),
-		}),
+		getBaseToolsOverride,
 		getRequestedActiveToolNames: () => requestedActiveToolNames,
 		setRequestedActiveToolNames: (names) => {
 			requestedActiveToolNames = names;
@@ -180,8 +183,24 @@ describe("RuntimeBuilder worker UAC ceiling (D2)", () => {
 	it("removes worker-forbidden tools even when an allow-list explicitly grants them, keeping non-forbidden tools", () => {
 		process.env[PI_SESSION_ROLE_ENV] = "worker";
 		try {
-			const runtimeBuilder = new RuntimeBuilder(makeDeps("/tmp/pi-worker-ceiling-test"));
+			let forbiddenToolReads = 0;
+			const observeReads = (tool: AgentTool): AgentTool =>
+				new Proxy(tool, {
+					get(target, property, receiver) {
+						forbiddenToolReads += 1;
+						return Reflect.get(target, property, receiver);
+					},
+				});
+			const runtimeBuilder = new RuntimeBuilder(
+				makeDeps("/tmp/pi-worker-ceiling-test", () => ({
+					goal: observeReads(fakeTool("goal")),
+					python: observeReads(fakeTool("python")),
+					read: fakeTool("read"),
+					edit: fakeTool("edit"),
+				})),
+			);
 			runtimeBuilder.buildRuntime({ activeToolNames: ["goal", "python", "read", "edit"] });
+			expect(forbiddenToolReads).toBe(0);
 
 			expect(runtimeBuilder.getToolDefinition("goal")).toBeUndefined();
 			expect(runtimeBuilder.getToolDefinition("python")).toBeUndefined();

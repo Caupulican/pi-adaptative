@@ -1,5 +1,12 @@
 ## [Unreleased]
 
+### Fixed
+
+- Made out-of-process managed workers emit the same bounded event-driven terminal handoff as in-process delegates, taught models to retrieve results once after that handoff instead of polling, and let unprofiled background lanes use the selected model's declared or provider-agnostic reasoning default.
+- Unified foreground startup, background-lane defaults, and isolated-completion clamping through the shared provider-neutral model capability resolver.
+- Made foreground and isolated worker tool routing share the same calibrated text-protocol variant instead of silently forcing subagents onto the default dialect.
+- Classified process-matrix/tmux children as workers from their parent identity, and applied worker/resource-profile UAC before built-in/override tool construction and live extension import, so withheld tools invoke no runtime factory and denied extensions load no module code.
+
 ## [0.81.39] - 2026-07-20
 
 ### Added

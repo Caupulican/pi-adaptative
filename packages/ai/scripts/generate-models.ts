@@ -1744,7 +1744,7 @@ async function generateModels() {
 	// Context windows follow the ChatGPT Codex catalogue, not public API limits.
 	const CODEX_BASE_URL = "https://chatgpt.com/backend-api";
 	const CODEX_CONTEXT = 272000;
-	const CODEX_GPT_5_6_CONTEXT = 372000;
+	const CODEX_GPT_5_6_CONTEXT = 272000;
 	const CODEX_SPARK_CONTEXT = 128000;
 	const CODEX_MAX_TOKENS = 128000;
 	const codexModels: Model<"openai-codex-responses">[] = [

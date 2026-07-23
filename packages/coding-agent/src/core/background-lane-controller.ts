@@ -18,7 +18,7 @@
 import { createHash } from "node:crypto";
 import path from "node:path";
 import type { SessionManager } from "@caupulican/pi-agent-core/node";
-import type { Api, Model, Usage } from "@caupulican/pi-ai";
+import { type Api, type Model, resolveModelThinkingLevel, type Usage } from "@caupulican/pi-ai";
 import { configFile, getWorkRoot, sessionsDir, stateDir } from "./agent-paths.ts";
 import type {
 	AgentSessionEvent,
@@ -299,6 +299,10 @@ export class BackgroundLaneController {
 
 	private _scheduleWorkerNotification(): void {
 		if (this._disposed || this._workerNotificationScheduled) return;
+		// The interface makes both callbacks mandatory for production sessions. Keep the controller
+		// safe for narrow embedders/test doubles that use only managed-lane persistence: terminal
+		// bookkeeping must not schedule an unhandled microtask when no parent-notification bridge exists.
+		if (typeof this.deps.emit !== "function" || typeof this.deps.notifyWorkerTerminalHandoff !== "function") return;
 		this._workerNotificationScheduled = true;
 		queueMicrotask(() => this._flushWorkerNotification());
 	}
@@ -479,7 +483,14 @@ export class BackgroundLaneController {
 				parentReviewRequired: review.reviewRequired,
 				createdAt: new Date().toISOString(),
 			};
-			this.deps.saveWorkerResultSnapshot(result);
+			try {
+				this.deps.saveWorkerResultSnapshot(result);
+			} finally {
+				// Managed workers must wake their owning parent through the same bounded, event-driven
+				// terminal handoff as in-process workers. The lane record is already durable above, so
+				// notification still happens if the richer result snapshot fails to persist.
+				this._recordWorkerTerminal(record);
+			}
 			return record;
 		} finally {
 			dispatch.deregister();
@@ -961,7 +972,7 @@ export class BackgroundLaneController {
 						}),
 						messages: [{ role: "user", content: [{ type: "text", text: userPrompt }], timestamp: Date.now() }],
 						model,
-						thinkingLevel: laneProfile?.thinking ?? "off",
+						thinkingLevel: resolveModelThinkingLevel(model, laneProfile?.thinking),
 						maxTokens: laneCapability.laneMaxOutputTokens,
 						tools: toolSurface.tools,
 						maxTurns: 6,
@@ -1298,7 +1309,7 @@ export class BackgroundLaneController {
 						}),
 						messages: [{ role: "user", content: [{ type: "text", text: userPrompt }], timestamp: Date.now() }],
 						model,
-						thinkingLevel: laneProfile?.thinking ?? "off",
+						thinkingLevel: resolveModelThinkingLevel(model, laneProfile?.thinking),
 						maxTokens: laneCapability.laneMaxOutputTokens,
 						tools: toolSurface.tools,
 						maxTurns: 6,

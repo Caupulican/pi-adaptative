@@ -1,6 +1,6 @@
 import { Agent, type AgentMessage, convertToLlm, type ThinkingLevel } from "@caupulican/pi-agent-core";
 import { getDefaultSessionDir, SessionManager } from "@caupulican/pi-agent-core/node";
-import { clampThinkingLevel, type Message, type Model, streamSimple } from "@caupulican/pi-ai";
+import { type Api, type Message, type Model, resolveModelThinkingLevel, streamSimple } from "@caupulican/pi-ai";
 import { getAgentDir } from "../config.ts";
 import { resolvePath } from "../utils/paths.ts";
 import { configFile } from "./agent-paths.ts";
@@ -8,7 +8,6 @@ import { AgentSession } from "./agent-session.ts";
 import { formatNoModelsAvailableMessage } from "./auth-guidance.ts";
 import { AuthStorage } from "./auth-storage.ts";
 import { DEFAULT_ACTIVE_TOOL_NAMES } from "./default-tool-surface.ts";
-import { DEFAULT_THINKING_LEVEL } from "./defaults.ts";
 import type { ExtensionRunner, LoadExtensionsResult, SessionStartEvent, ToolDefinition } from "./extensions/index.ts";
 import { ModelRegistry } from "./model-registry.ts";
 import { findInitialModel, resolveProfileModelSettings } from "./model-resolver.ts";
@@ -48,7 +47,7 @@ export interface CreateAgentSessionOptions {
 	modelRegistry?: ModelRegistry;
 
 	/** Model to use. Default: from settings, else first available */
-	model?: Model<any>;
+	model?: Model<Api>;
 	/** Thinking level. Default: from settings, then the model's declared default, else 'medium'. */
 	thinkingLevel?: ThinkingLevel;
 	/**
@@ -62,7 +61,7 @@ export interface CreateAgentSessionOptions {
 	/** True when this session is a spawned subagent/child — gates durable memory writes. */
 	isChildSession?: boolean;
 	/** Models available for cycling (Ctrl+P in interactive mode) */
-	scopedModels?: Array<{ model: Model<any>; thinkingLevel?: ThinkingLevel }>;
+	scopedModels?: Array<{ model: Model<Api>; thinkingLevel?: ThinkingLevel }>;
 
 	/**
 	 * Optional default tool suppression mode when no explicit allowlist is provided.
@@ -153,7 +152,7 @@ function getDefaultAgentDir(): string {
 }
 
 function getAttributionHeaders(
-	model: Model<any>,
+	model: Model<Api>,
 	settingsManager: SettingsManager,
 	sessionId?: string,
 ): Record<string, string> | undefined {
@@ -332,20 +331,18 @@ export async function createAgentSession(options: CreateAgentSessionOptions = {}
 	if (thinkingLevel === undefined && hasExistingSession) {
 		thinkingLevel = hasThinkingEntry
 			? (existingSession.thinkingLevel as ThinkingLevel)
-			: (settingsManager.getDefaultThinkingLevel() ?? model?.defaultThinkingLevel ?? DEFAULT_THINKING_LEVEL);
+			: settingsManager.getDefaultThinkingLevel();
 	}
 
-	// Fall back to the user's default, then the selected model's own default.
-	if (thinkingLevel === undefined) {
-		thinkingLevel =
-			settingsManager.getDefaultThinkingLevel() ?? model?.defaultThinkingLevel ?? DEFAULT_THINKING_LEVEL;
-	}
-
-	// Clamp to model capabilities
+	// Resolve preference, model metadata, harness fallback, and capability clamping through the
+	// same contract used by CLI startup and isolated lanes.
 	if (!model) {
 		thinkingLevel = "off";
 	} else {
-		thinkingLevel = clampThinkingLevel(model, thinkingLevel) as ThinkingLevel;
+		thinkingLevel = resolveModelThinkingLevel(
+			model,
+			thinkingLevel ?? settingsManager.getDefaultThinkingLevel(),
+		) as ThinkingLevel;
 	}
 
 	const defaultActiveToolNames = [

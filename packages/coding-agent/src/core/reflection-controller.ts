@@ -20,7 +20,16 @@ import {
 	type ThinkingLevel,
 } from "@caupulican/pi-agent-core";
 import type { SessionManager } from "@caupulican/pi-agent-core/node";
-import type { Api, AssistantMessage, Context, Model, SimpleStreamOptions, TextContent, Usage } from "@caupulican/pi-ai";
+import {
+	type Api,
+	type AssistantMessage,
+	type Context,
+	type Model,
+	resolveModelThinkingLevel,
+	type SimpleStreamOptions,
+	type TextContent,
+	type Usage,
+} from "@caupulican/pi-ai";
 import {
 	computeLaneAffinityKey,
 	DEFAULT_ISOLATED_LANE_KIND,
@@ -55,7 +64,7 @@ import { runSkillAudit } from "./tools/skill-audit.ts";
 
 export interface ReflectionControllerDeps {
 	/** Current session model (fallback for an isolated call that omits its own model). */
-	getModel(): Model<any> | undefined;
+	getModel(): Model<Api> | undefined;
 	/** The underlying agent — its `streamFn` runs the isolated completion. */
 	getAgent(): Agent;
 	/** True when the session's stream fn is the raw `streamSimple` provider (auth must be injected). */
@@ -90,7 +99,7 @@ export interface ReflectionControllerDeps {
 	/** Resolve text-tool fallback for the selected isolated model, not the foreground model. */
 	resolveTextToolCallProtocol(model: Model<Api>): SimpleStreamOptions["textToolCallProtocol"];
 	/** Ensure a managed-local model is running/resident before any isolated lane calls it. */
-	ensureModelReady(model: Model<any>): Promise<void>;
+	ensureModelReady(model: Model<Api>): Promise<void>;
 	/**
 	 * Session working directory — feeds the skill-overlap audit's project-local skill discovery, the
 	 * same `cwd` the model-invoked `skillify`/`skill_audit` tools already receive (tools/index.ts).
@@ -134,7 +143,7 @@ export class ReflectionController {
 			throw new Error("runIsolatedCompletion: no model available");
 		}
 		await this.deps.ensureModelReady(model);
-		const thinkingLevel = opts.thinkingLevel ?? "off";
+		const thinkingLevel = resolveModelThinkingLevel(model, opts.thinkingLevel, "off");
 
 		// Registered for the full isolated-completion call (one-shot or child-loop) so the
 		// reload gate waits it out — this is the SINGLE choke point every isolated completion in the
@@ -332,7 +341,7 @@ export class ReflectionController {
 	async runReflectionPass(input: {
 		signals: DemandSignals;
 		recentTurnText: string;
-		model?: Model<any>;
+		model?: Model<Api>;
 		thinkingLevel?: ThinkingLevel;
 		signal?: AbortSignal;
 		/** Stable id so a duplicate scheduling/retry of the same pass can't double-count its cost. */

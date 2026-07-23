@@ -1,5 +1,10 @@
 # AgentHarness lifecycle
 
+> Historical design record. The duplicate `AgentHarness` implementation was removed in
+> `4b3f4f5d1`; it is not the live Pi Adaptative harness. The production composition root is
+> `packages/coding-agent/src/core/agent-session.ts`. See
+> [Harness architecture](../../coding-agent/docs/harness-architecture.md) for current contracts.
+
 `AgentHarness` is the orchestration layer above the low-level agent loop. It owns session persistence, runtime configuration, resource resolution, operation locking, and extension-facing mutation semantics.
 
 This document describes the current direction and implemented behavior. Some extension/session-facade details are planned and called out explicitly.

@@ -11,6 +11,18 @@ export interface ParsedTextToolCalls {
 
 export type TextToolProtocolVariant = "tool-tag" | "tool-call" | "fenced-json" | "function-xml";
 
+/** Ordered dialects used by protocol calibration, from most compact/native-like to broadest fallback. */
+export const TEXT_TOOL_PROTOCOL_VARIANTS: readonly TextToolProtocolVariant[] = [
+	"tool-tag",
+	"tool-call",
+	"fenced-json",
+	"function-xml",
+];
+
+export function isTextToolProtocolVariant(value: unknown): value is TextToolProtocolVariant {
+	return typeof value === "string" && TEXT_TOOL_PROTOCOL_VARIANTS.includes(value as TextToolProtocolVariant);
+}
+
 export interface TextToolProtocolOptions {
 	variant?: TextToolProtocolVariant;
 }

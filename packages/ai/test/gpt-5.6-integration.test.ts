@@ -123,7 +123,7 @@ describe("GPT-5.6 integration", () => {
 		expect(getSupportedThinkingLevels(directSol)).toEqual(["off", "low", "medium", "high", "xhigh", "max", "ultra"]);
 		expect(getSupportedThinkingLevels(directLuna)).toEqual(["off", "low", "medium", "high", "xhigh", "max"]);
 		expect(codexSol).toMatchObject({
-			contextWindow: 372_000,
+			contextWindow: 272_000,
 			maxTokens: 128_000,
 			defaultThinkingLevel: "low",
 			openaiResponsesLite: true,

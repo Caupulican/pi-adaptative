@@ -1,4 +1,5 @@
 import { describe, expect, it } from "vitest";
+import { PI_PARENT_PID_ENV } from "../src/core/process-identity.ts";
 import { getSessionRole, isWorkerSession } from "../src/core/session-role.ts";
 import { PI_WORKTREE_LANE_ENV } from "../src/core/worktree-sync/runtime.ts";
 
@@ -20,6 +21,12 @@ describe("getSessionRole / isWorkerSession", () => {
 		expect(isWorkerSession(env)).toBe(true);
 	});
 
+	it("a managed child parent identity yields worker without requiring a worktree lane", () => {
+		const env = { [PI_PARENT_PID_ENV]: "4242" };
+		expect(getSessionRole(env)).toBe("worker");
+		expect(isWorkerSession(env)).toBe(true);
+	});
+
 	it("a bound lane PLUS PI_SESSION_ROLE=main still yields worker -- main is never an escalation", () => {
 		const env = { [PI_WORKTREE_LANE_ENV]: "adhoc-1", PI_SESSION_ROLE: "main" };
 		expect(getSessionRole(env)).toBe("worker");
@@ -34,6 +41,12 @@ describe("getSessionRole / isWorkerSession", () => {
 
 	it("an invalid lane key is ignored (never a crash, never worker on malformed env)", () => {
 		const env = { [PI_WORKTREE_LANE_ENV]: "Not_Valid! key" };
+		expect(getSessionRole(env)).toBe("main");
+		expect(isWorkerSession(env)).toBe(false);
+	});
+
+	it("an invalid parent pid is ignored", () => {
+		const env = { [PI_PARENT_PID_ENV]: "not-a-pid" };
 		expect(getSessionRole(env)).toBe("main");
 		expect(isWorkerSession(env)).toBe(false);
 	});

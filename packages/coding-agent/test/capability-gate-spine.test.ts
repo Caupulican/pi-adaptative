@@ -236,8 +236,10 @@ describe("capability-gate spine", () => {
 				nativeGrade: "absent",
 			});
 
-			const textProtocolFlag = created.session as unknown as { _textProtocolFlag: (m: TestModel) => boolean };
-			expect(textProtocolFlag._textProtocolFlag(phone)).toBe(true);
+			const protocolResolver = created.session as unknown as {
+				_resolveModelToolProtocol: (model: TestModel) => { protocol?: true | { variant: string } };
+			};
+			expect(protocolResolver._resolveModelToolProtocol(phone).protocol).toEqual({ variant: "tool-tag" });
 		} finally {
 			created.session.dispose();
 		}
@@ -261,8 +263,10 @@ describe("capability-gate spine", () => {
 				status: "native",
 				nativeGrade: "task",
 			});
-			const textProtocolFlag = created.session as unknown as { _textProtocolFlag: (m: TestModel) => boolean };
-			expect(textProtocolFlag._textProtocolFlag(native)).toBe(false);
+			const protocolResolver = created.session as unknown as {
+				_resolveModelToolProtocol: (model: TestModel) => { protocol?: true | { variant: string } };
+			};
+			expect(protocolResolver._resolveModelToolProtocol(native).protocol).toBeUndefined();
 		} finally {
 			created.session.dispose();
 		}

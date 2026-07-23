@@ -72,6 +72,7 @@ import {
 	modelsAreEqual,
 	parseTextToolCalls,
 	streamSimple,
+	TEXT_TOOL_PROTOCOL_VARIANTS,
 } from "@caupulican/pi-ai";
 import { Type } from "typebox";
 import { getAgentDir } from "../config.ts";
@@ -174,6 +175,11 @@ import { isLocalOrManagedRouterModel } from "./model-router/tool-escalation.ts";
 import { formatModelRouterModel, ModelRouterController } from "./model-router-controller.ts";
 import { ModelSelectionController } from "./model-selection-controller.ts";
 import {
+	MODEL_TOOL_PROTOCOL_VERSION,
+	type ModelToolProtocolResolution,
+	resolveModelToolProtocol,
+} from "./model-tool-protocol.ts";
+import {
 	ModelAdaptationStore,
 	type ModelToolProbe,
 	type ModelToolProbeVerdict,
@@ -235,7 +241,6 @@ import { disposePersistentShellSession } from "./tools/shell-session.ts";
  */
 const RAW_STREAM_MARKER = Symbol.for("pi.rawStreamSimple");
 const MODEL_ADAPTATION_REPAIR_THRESHOLD = 3;
-const TEXT_TOOL_PROTOCOL_VERSION = 1;
 const TEXT_TOOL_PROTOCOL_TRIALS_PER_VARIANT = 2;
 const TEXT_TOOL_PROTOCOL_PARSE_FAILURE_THRESHOLD = 3;
 /** How often the one-line envelope-format corrective steer (see
@@ -251,12 +256,6 @@ const TEXT_TOOL_PROTOCOL_STEER_INTERVAL = 5;
  * not re-fire the (multi-completion) probe every time. Independent of, and complementary to, the
  * per-session `_autoProbedModels` latch. */
 const AUTO_TOOL_PROBE_FRESHNESS_MS = 15 * 60 * 1000;
-const TEXT_TOOL_PROTOCOL_VARIANTS: readonly TextToolProtocolVariant[] = [
-	"tool-tag",
-	"tool-call",
-	"fenced-json",
-	"function-xml",
-];
 const TEXT_TOOL_PROTOCOL_ECHO_TOOL = {
 	name: "echo",
 	description: "Echo calibration data",
@@ -387,7 +386,7 @@ export interface AgentSessionConfig {
 	/** User-level agent state directory for generated runtime artifacts. */
 	agentDir?: string;
 	/** Models to cycle through with Ctrl+P (from --models flag) */
-	scopedModels?: Array<{ model: Model<any>; thinkingLevel?: ThinkingLevel }>;
+	scopedModels?: Array<{ model: Model<Api>; thinkingLevel?: ThinkingLevel }>;
 	/** Resource loader for skills, prompts, themes, context files, system prompt */
 	resourceLoader: ResourceLoader;
 	/** SDK custom tools registered outside extensions */
@@ -480,7 +479,7 @@ export interface ToolProbeReport {
 
 /** Result from cycleModel() */
 export interface ModelCycleResult {
-	model: Model<any>;
+	model: Model<Api>;
 	thinkingLevel: ThinkingLevel;
 	/** Whether cycling through scoped models (--models flag) or all available */
 	isScoped: boolean;
@@ -588,7 +587,7 @@ export interface IsolatedCompletionOptions {
 	/** The isolated conversation (e.g. the reflection prompt). NOT the main session history. */
 	messages: Message[];
 	/** Model to use. Defaults to the session model; callers should pass a cheap model. */
-	model?: Model<any>;
+	model?: Model<Api>;
 	/** Thinking level. Defaults to "off" to keep the call cheap. */
 	thinkingLevel?: ThinkingLevel;
 	/** Output token cap. */
@@ -643,7 +642,7 @@ export const DEFAULT_ISOLATED_LANE_KIND = "isolated";
  * same cache-warm backend — while remaining fully synthetic: it is a salted hash, namespaced with a
  * `lane:` prefix, and never derived from or equal to the real session id.
  */
-export function computeLaneAffinityKey(laneKind: string, model: Model<any> | undefined, systemPrompt: string): string {
+export function computeLaneAffinityKey(laneKind: string, model: Model<Api> | undefined, systemPrompt: string): string {
 	const modelKey = model ? `${model.provider}/${model.id}` : "unknown-model";
 	// NUL-separated fields: laneKind/modelKey are drawn from small caller-controlled vocabularies
 	// that never contain a raw NUL, so this cannot field-collide the way a plain colon/space join could.
@@ -741,7 +740,7 @@ export class AgentSession {
 	readonly settingsManager: SettingsManager;
 	public capabilityEnvelope?: CapabilityEnvelope;
 
-	private _scopedModels: Array<{ model: Model<any>; thinkingLevel?: ThinkingLevel }>;
+	private _scopedModels: Array<{ model: Model<Api>; thinkingLevel?: ThinkingLevel }>;
 
 	// Event subscription state
 	private _unsubscribeAgent?: () => void;
@@ -1141,7 +1140,7 @@ export class AgentSession {
 			isChildSession: () => this._isChildSession,
 			isDisposed: () => this._disposed,
 			getReflectionSignal: () => this._reflectionAbort.signal,
-			resolveTextToolCallProtocol: (model) => this._textProtocolFlag(model),
+			resolveTextToolCallProtocol: (model) => this._resolveModelToolProtocol(model).protocol,
 			archivePromotedSkill: (name) => this.archivePromotedSkill(name),
 			emitAutonomyTelemetry: (event) => this._emitAutonomyTelemetry(event),
 			ensureModelReady: (model) => this._localRuntimeController.ensureIsolatedModelReady(model),
@@ -1382,7 +1381,7 @@ export class AgentSession {
 		return this._modelRegistry;
 	}
 
-	private _scheduleLocalPrefixWarm(model: Model<any> | undefined, _reason: "session-start" | "selection"): void {
+	private _scheduleLocalPrefixWarm(model: Model<Api> | undefined, _reason: "session-start" | "selection"): void {
 		if (!model || !this._isWarmableLocalModel(model)) return;
 		const modelKey = formatModelRouterModel(model);
 		if (this._completedPrefixWarms.has(modelKey) || this._prefixWarmer?.modelKey === modelKey) return;
@@ -1406,7 +1405,7 @@ export class AgentSession {
 		this._prefixWarmer = undefined;
 	}
 
-	private async _runLocalPrefixWarm(model: Model<any>, modelKey: string, controller: AbortController): Promise<void> {
+	private async _runLocalPrefixWarm(model: Model<Api>, modelKey: string, controller: AbortController): Promise<void> {
 		try {
 			const options: SimpleStreamOptions = {
 				maxTokens: 1,
@@ -1442,7 +1441,7 @@ export class AgentSession {
 		}
 	}
 
-	private _isWarmableLocalModel(model: Model<any>): boolean {
+	private _isWarmableLocalModel(model: Model<Api>): boolean {
 		if (model.api !== "openai-completions") return false;
 		try {
 			const hostname = new URL(model.baseUrl).hostname.toLowerCase();
@@ -1461,7 +1460,7 @@ export class AgentSession {
 		return fn === streamSimple || (fn as { [RAW_STREAM_MARKER]?: boolean })[RAW_STREAM_MARKER] === true;
 	}
 
-	private async _getRequiredRequestAuth(model: Model<any>): Promise<{
+	private async _getRequiredRequestAuth(model: Model<Api>): Promise<{
 		apiKey: string;
 		headers?: Record<string, string>;
 	}> {
@@ -1489,7 +1488,7 @@ export class AgentSession {
 
 	// Summarizer model/thinking selection, request auth (with session-model fallback), and
 	// window-adapted settings live in CompactionSupport (see compaction-support.ts).
-	private _getCompactionRequestAuth(model: Model<any>): Promise<{
+	private _getCompactionRequestAuth(model: Model<Api>): Promise<{
 		apiKey?: string;
 		headers?: Record<string, string>;
 	}> {
@@ -1497,13 +1496,13 @@ export class AgentSession {
 	}
 
 	private _resolveCompactionModelAndAuth(
-		compactionModel: Model<any>,
-		sessionModel: Model<any>,
-	): Promise<{ model: Model<any>; apiKey?: string; headers?: Record<string, string>; failure?: string }> {
+		compactionModel: Model<Api>,
+		sessionModel: Model<Api>,
+	): Promise<{ model: Model<Api>; apiKey?: string; headers?: Record<string, string>; failure?: string }> {
 		return this._compactionSupport.resolveModelAndAuth(compactionModel, sessionModel);
 	}
 
-	private _resolveCompactionModel(sessionModel: Model<any>): Model<any> {
+	private _resolveCompactionModel(sessionModel: Model<Api>): Model<Api> {
 		return this._compactionSupport.resolveModel(sessionModel);
 	}
 
@@ -1523,8 +1522,8 @@ export class AgentSession {
 	}
 
 	private _resolveCompactionThinkingLevel(
-		compactionModel: Model<any>,
-		sessionModel: Model<any>,
+		compactionModel: Model<Api>,
+		sessionModel: Model<Api>,
 	): ThinkingLevel | undefined {
 		return this._compactionSupport.resolveThinkingLevel(this.thinkingLevel, compactionModel, sessionModel);
 	}
@@ -1747,18 +1746,12 @@ export class AgentSession {
 		return modelKey ? this._modelAdaptationStore.get(modelKey).rules : [];
 	}
 
-	private _textProtocolFlag(model: Model<Api> | undefined): boolean {
-		// Phase 7 gating hierarchy: PI_TEXT_TOOL_CALL_PROTOCOL_DISABLED is resolved
-		// in _toolRepairSettings() as the env kill switch, then settings.toolRepair.textProtocol
-		// force-enables/disables globally, then Model.textToolCallProtocol opts in per model,
-		// then a persisted /toolprobe text-protocol verdict opts in that exact model. The
-		// calibration store is consulted after this flag; native provider tool calls still
-		// win when emitted, and this only enables the text-protocol fallback lane.
-		const override = this._toolRepairSettings().textProtocol;
-		if (override !== undefined) return override;
-		if (model?.textToolCallProtocol === true) return true;
-		const modelKey = this._modelAdaptationKeyFor(model);
-		return !!modelKey && this._modelAdaptationStore.get(modelKey).toolProbe?.status === "text-protocol";
+	private _resolveModelToolProtocol(model: Model<Api>): ModelToolProtocolResolution {
+		return resolveModelToolProtocol({
+			model,
+			settingsOverride: this._toolRepairSettings().textProtocol,
+			adaptation: this._modelAdaptationStore.get(this._modelRef(model)),
+		});
 	}
 
 	private async _streamForToolProbe(model: Model<Api>, context: Context, options: SimpleStreamOptions) {
@@ -1943,7 +1936,7 @@ export class AgentSession {
 				if (modelKey) {
 					this._modelAdaptationStore.setProtocol(
 						modelKey,
-						{ version: TEXT_TOOL_PROTOCOL_VERSION, status: "calibrated", variant, calibratedAt },
+						{ version: MODEL_TOOL_PROTOCOL_VERSION, status: "calibrated", variant, calibratedAt },
 						calibratedAt,
 					);
 				}
@@ -1955,7 +1948,7 @@ export class AgentSession {
 		if (modelKey && options.persistFailure) {
 			this._modelAdaptationStore.setProtocol(
 				modelKey,
-				{ version: TEXT_TOOL_PROTOCOL_VERSION, status: "failed", attemptedAt, variantsTried },
+				{ version: MODEL_TOOL_PROTOCOL_VERSION, status: "failed", attemptedAt, variantsTried },
 				attemptedAt,
 			);
 		}
@@ -1972,35 +1965,22 @@ export class AgentSession {
 	 */
 	private async _ensureTextToolProtocolForActiveModel(): Promise<void> {
 		const model = this.agent.state.model;
-		if (!this._textProtocolFlag(model)) {
-			this.agent.textToolCallProtocol = undefined;
+		const resolution = this._resolveModelToolProtocol(model);
+		this.agent.textToolCallProtocol = resolution.protocol;
+		if (
+			resolution.reasonCode !== "probe_calibration_missing" &&
+			resolution.reasonCode !== "probe_calibration_failed" &&
+			resolution.reasonCode !== "probe_calibration_invalid"
+		) {
 			return;
 		}
 
-		// Force-enable (a global settings override or Model.textToolCallProtocol) wins regardless of
-		// whether this model has ever been graded-probed — that is the point of an explicit override.
-		// Preserve it exactly as before: default to the tool-tag variant, no inline calibration. Only
-		// the graded-evidence path below (flag on solely because of a persisted toolProbe verdict)
-		// needs a valid persisted protocol to proceed.
-		const forceEnabled = this._toolRepairSettings().textProtocol === true || model?.textToolCallProtocol === true;
-		const modelKey = this._modelAdaptationKeyFor(model);
-		if (!modelKey || forceEnabled) {
-			this.agent.textToolCallProtocol = true;
-			return;
-		}
-
-		const profile = this._modelAdaptationStore.get(modelKey);
-		if (profile.protocol?.version === TEXT_TOOL_PROTOCOL_VERSION && profile.protocol.status !== "failed") {
-			this.agent.textToolCallProtocol = { variant: profile.protocol.variant as TextToolProtocolVariant };
-			return;
-		}
-
-		this.agent.textToolCallProtocol = undefined;
+		const modelKey = this._modelRef(model);
 		this._emit({
 			type: "warning",
 			message:
-				profile.protocol?.status === "failed"
-					? `Text tool protocol calibration for ${modelKey} previously failed (variants tried: ${profile.protocol.variantsTried.join(", ")}); falling back to native tool calls this turn. Run /toolprobe ${modelKey} to recalibrate.`
+				resolution.reasonCode === "probe_calibration_failed"
+					? `Text tool protocol calibration for ${modelKey} previously failed (variants tried: ${(resolution.variantsTried ?? []).join(", ")}); falling back to native tool calls this turn. Run /toolprobe ${modelKey} to recalibrate.`
 					: `Text tool protocol for ${modelKey} has no valid calibration on record; falling back to native tool calls this turn. Run /toolprobe ${modelKey} to calibrate.`,
 		});
 	}
@@ -2047,7 +2027,7 @@ export class AgentSession {
 			nativeGrade = await this._gradeNativeToolCallingForModel(model, "pi-native-probe");
 			if (nativeGrade === "task") {
 				this._storeToolProbe(modelKey, {
-					version: TEXT_TOOL_PROTOCOL_VERSION,
+					version: MODEL_TOOL_PROTOCOL_VERSION,
 					status: "native",
 					probedAt,
 					nativeGrade,
@@ -2066,7 +2046,7 @@ export class AgentSession {
 			const calibrated = await this._calibrateTextToolProtocolForModel(model, modelKey, { persistFailure: false });
 			if (calibrated.status === "calibrated") {
 				this._storeToolProbe(modelKey, {
-					version: TEXT_TOOL_PROTOCOL_VERSION,
+					version: MODEL_TOOL_PROTOCOL_VERSION,
 					status: "text-protocol",
 					probedAt: calibrated.calibratedAt,
 					variant: calibrated.variant,
@@ -2081,7 +2061,7 @@ export class AgentSession {
 		}
 
 		this._storeToolProbe(modelKey, {
-			version: TEXT_TOOL_PROTOCOL_VERSION,
+			version: MODEL_TOOL_PROTOCOL_VERSION,
 			status: "none",
 			probedAt,
 			nativeGrade,
@@ -2119,7 +2099,7 @@ export class AgentSession {
 	 * {@link _recordTextToolProtocolParseOutcomeFromLastAssistant}) gets a throttled one-line
 	 * corrective steer for the next turn. On the 3rd consecutive SAME-SIGNATURE failure — graded
 	 * evidence a model genuinely cannot speak this dialect, not a single bad turn — the breaker also
-	 * demotes the persisted tool-probe verdict to "none" so {@link _textProtocolFlag} reads false next
+	 * demotes the persisted tool-probe verdict to "none" so {@link _resolveModelToolProtocol} selects native next
 	 * turn and native is attempted instead of thrashing on a protocol this model has proven it can't
 	 * follow.
 	 */
@@ -2137,7 +2117,7 @@ export class AgentSession {
 		if (repeats < TEXT_TOOL_PROTOCOL_PARSE_FAILURE_THRESHOLD) return;
 
 		const profile = this._modelAdaptationStore.get(modelKey);
-		if (profile.protocol?.version === TEXT_TOOL_PROTOCOL_VERSION && profile.protocol.status !== "failed") {
+		if (profile.protocol?.version === MODEL_TOOL_PROTOCOL_VERSION && profile.protocol.status !== "failed") {
 			this._modelAdaptationStore.removeProtocol(modelKey);
 			this.agent.textToolCallProtocol = undefined;
 		}
@@ -2151,7 +2131,7 @@ export class AgentSession {
 		this._modelAdaptationStore.setToolProbe(
 			modelKey,
 			{
-				version: TEXT_TOOL_PROTOCOL_VERSION,
+				version: MODEL_TOOL_PROTOCOL_VERSION,
 				status: "none",
 				probedAt,
 				nativeGrade: profile.toolProbe?.nativeGrade,
@@ -3141,7 +3121,7 @@ export class AgentSession {
 	}
 
 	/** Current model (may be undefined if not yet selected) */
-	get model(): Model<any> | undefined {
+	get model(): Model<Api> | undefined {
 		return this.agent.state.model;
 	}
 
@@ -3310,12 +3290,12 @@ export class AgentSession {
 	}
 
 	/** Scoped models for cycling (from --models flag) */
-	get scopedModels(): ReadonlyArray<{ model: Model<any>; thinkingLevel?: ThinkingLevel }> {
+	get scopedModels(): ReadonlyArray<{ model: Model<Api>; thinkingLevel?: ThinkingLevel }> {
 		return this._scopedModels;
 	}
 
 	/** Update scoped models for cycling */
-	setScopedModels(scopedModels: Array<{ model: Model<any>; thinkingLevel?: ThinkingLevel }>): void {
+	setScopedModels(scopedModels: Array<{ model: Model<Api>; thinkingLevel?: ThinkingLevel }>): void {
 		this._scopedModels = scopedModels;
 	}
 
@@ -4110,7 +4090,7 @@ export class AgentSession {
 	// Model Management
 	// =========================================================================
 
-	async setModel(model: Model<any>, options: { persistSettings?: boolean } = {}): Promise<void> {
+	async setModel(model: Model<Api>, options: { persistSettings?: boolean } = {}): Promise<void> {
 		await this._modelSelection.setModel(model, options);
 		this._scheduleLocalPrefixWarm(this.agent.state.model, "selection");
 	}
@@ -5466,7 +5446,7 @@ export class AgentSession {
 	async runReflectionPass(input: {
 		signals: DemandSignals;
 		recentTurnText: string;
-		model?: Model<any>;
+		model?: Model<Api>;
 		thinkingLevel?: ThinkingLevel;
 		signal?: AbortSignal;
 		/** Stable id so a duplicate scheduling/retry of the same pass can't double-count its cost. */

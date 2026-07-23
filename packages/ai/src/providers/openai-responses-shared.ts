@@ -33,11 +33,33 @@ import type { AssistantMessageEventStream } from "../utils/event-stream.ts";
 import { shortHash } from "../utils/hash.ts";
 import { parseStreamingJson } from "../utils/json-parse.ts";
 import { sanitizeSurrogates } from "../utils/sanitize-unicode.ts";
+import { createToolNameMap, type ToolNameMap } from "../utils/tool-names.ts";
 import { joinTextContent, transformMessages } from "./transform-messages.ts";
 
 // =============================================================================
 // Utilities
 // =============================================================================
+
+const RESERVED_RESPONSES_TOOL_NAMES = new Set([
+	"api_tool",
+	"browser",
+	"computer",
+	"container",
+	"file_search",
+	"functions",
+	"image_gen",
+	"multi_tool_use",
+	"python",
+	"python_user_visible",
+	"submodel_delegator",
+	"terminal",
+	"tool_search",
+	"web",
+]);
+
+export function createOpenAIResponsesToolNameMap(tools: readonly Tool[]): ToolNameMap {
+	return createToolNameMap(tools, { reservedNames: RESERVED_RESPONSES_TOOL_NAMES });
+}
 
 function encodeTextSignatureV1(id: string, phase?: TextSignatureV1["phase"]): string {
 	const payload: TextSignatureV1 = { v: 1, id };
@@ -66,6 +88,7 @@ function parseTextSignature(
 }
 
 export interface OpenAIResponsesStreamOptions {
+	toolNameMap?: ToolNameMap;
 	serviceTier?: ResponseCreateParamsStreaming["service_tier"];
 	resolveServiceTier?: (
 		responseServiceTier: ResponseCreateParamsStreaming["service_tier"] | undefined,
@@ -79,11 +102,13 @@ export interface OpenAIResponsesStreamOptions {
 
 export interface ConvertResponsesToolsOptions {
 	strict?: boolean | null;
+	toolNameMap?: ToolNameMap;
 }
 
 export interface ConvertResponsesMessagesOptions {
 	/** null omits image detail for transports such as ChatGPT Responses Lite. */
 	imageDetail?: "auto" | null;
+	toolNameMap?: ToolNameMap;
 }
 
 interface InputTokenDetailsWithOrchestration {
@@ -246,7 +271,7 @@ export function convertResponsesMessages<TApi extends Api>(
 						type: "function_call",
 						id: itemId,
 						call_id: callId,
-						name: toolCall.name,
+						name: options?.toolNameMap?.toProviderName(toolCall.name) ?? toolCall.name,
 						arguments: JSON.stringify(toolCall.arguments),
 					});
 				}
@@ -303,7 +328,7 @@ export function convertResponsesTools(tools: Tool[], options?: ConvertResponsesT
 	const strict = options?.strict === undefined ? false : options.strict;
 	return tools.map((tool) => ({
 		type: "function",
-		name: tool.name,
+		name: options?.toolNameMap?.toProviderName(tool.name) ?? tool.name,
 		description: tool.description,
 		parameters: tool.parameters as any, // TypeBox already generates JSON Schema
 		strict,
@@ -437,7 +462,7 @@ export async function processResponsesStream<TApi extends Api>(
 				currentBlock = {
 					type: "toolCall",
 					id: `${item.call_id}|${item.id}`,
-					name: item.name,
+					name: options?.toolNameMap?.toOriginalName(item.name) ?? item.name,
 					arguments: {},
 					partialJson: item.arguments || "",
 				};
@@ -601,7 +626,7 @@ export async function processResponsesStream<TApi extends Api>(
 					toolCall = {
 						type: "toolCall",
 						id: `${item.call_id}|${item.id}`,
-						name: item.name,
+						name: options?.toolNameMap?.toOriginalName(item.name) ?? item.name,
 						arguments: args,
 					};
 				}

@@ -137,6 +137,10 @@
       "title": "Development",
       "items": [
         {
+          "title": "Harness Architecture",
+          "path": "harness-architecture.md"
+        },
+        {
           "title": "Development",
           "path": "development.md"
         }

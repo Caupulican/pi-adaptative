@@ -8,6 +8,11 @@ export interface ToolNameMap {
 	toOriginalName(name: string): string;
 }
 
+export interface ToolNameMapOptions {
+	reservedNames?: ReadonlySet<string>;
+	reservedSuffix?: string;
+}
+
 function baseSanitizedToolName(name: string): string {
 	const sanitized = name
 		.replace(/[^a-zA-Z0-9_-]/g, "_")
@@ -16,8 +21,8 @@ function baseSanitizedToolName(name: string): string {
 	return sanitized.length > 0 ? sanitized : "tool";
 }
 
-function uniqueToolName(base: string, usedNames: Set<string>): string {
-	if (!usedNames.has(base)) {
+function uniqueToolName(base: string, usedNames: Set<string>, reservedNames?: ReadonlySet<string>): string {
+	if (!usedNames.has(base) && !reservedNames?.has(base)) {
 		usedNames.add(base);
 		return base;
 	}
@@ -27,7 +32,7 @@ function uniqueToolName(base: string, usedNames: Set<string>): string {
 		const suffix = `_${index}`;
 		const prefix = base.slice(0, MAX_TOOL_NAME_LENGTH - suffix.length);
 		const candidate = `${prefix}${suffix}`;
-		if (!usedNames.has(candidate)) {
+		if (!usedNames.has(candidate) && !reservedNames?.has(candidate)) {
 			usedNames.add(candidate);
 			return candidate;
 		}
@@ -35,14 +40,17 @@ function uniqueToolName(base: string, usedNames: Set<string>): string {
 	}
 }
 
-export function createToolNameMap(tools: readonly Tool[]): ToolNameMap {
+export function createToolNameMap(tools: readonly Tool[], options?: ToolNameMapOptions): ToolNameMap {
 	const originalToProvider = new Map<string, string>();
 	const providerToOriginal = new Map<string, string>();
 	const usedProviderNames = new Set<string>();
 
 	for (const tool of tools) {
-		const base = VALID_TOOL_NAME.test(tool.name) ? tool.name : baseSanitizedToolName(tool.name);
-		const providerName = uniqueToolName(base, usedProviderNames);
+		const sanitizedBase = VALID_TOOL_NAME.test(tool.name) ? tool.name : baseSanitizedToolName(tool.name);
+		const base = options?.reservedNames?.has(sanitizedBase)
+			? baseSanitizedToolName(`${sanitizedBase}${options.reservedSuffix ?? "_tool"}`)
+			: sanitizedBase;
+		const providerName = uniqueToolName(base, usedProviderNames, options?.reservedNames);
 		originalToProvider.set(tool.name, providerName);
 		providerToOriginal.set(providerName, tool.name);
 	}

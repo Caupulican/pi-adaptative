@@ -18,6 +18,7 @@ import {
 	buildResponsesInstructions,
 	convertResponsesMessages,
 	convertResponsesTools,
+	createOpenAIResponsesToolNameMap,
 	processResponsesStream,
 } from "./openai-responses-shared.ts";
 import { buildBaseOptions } from "./simple-options.ts";
@@ -99,6 +100,7 @@ export const streamAzureOpenAIResponses: StreamFunction<"azure-openai-responses"
 				throw new Error(`No API key for provider: ${model.provider}`);
 			}
 			const client = createClient(model, apiKey, options);
+			const toolNameMap = createOpenAIResponsesToolNameMap(context.tools ?? []);
 			let params = buildParams(model, context, options, deploymentName);
 			const nextParams = await options?.onPayload?.(params, model);
 			if (nextParams !== undefined) {
@@ -113,7 +115,7 @@ export const streamAzureOpenAIResponses: StreamFunction<"azure-openai-responses"
 			await options?.onResponse?.({ status: response.status, headers: headersToRecord(response.headers) }, model);
 			stream.push({ type: "start", partial: output });
 
-			await processResponsesStream(openaiStream, output, stream, model);
+			await processResponsesStream(openaiStream, output, stream, model, { toolNameMap });
 
 			if (options?.signal?.aborted) {
 				throw new Error("Request was aborted");
@@ -244,7 +246,8 @@ function buildParams(
 	options: AzureOpenAIResponsesOptions | undefined,
 	deploymentName: string,
 ) {
-	const messages = convertResponsesMessages(model, context, AZURE_TOOL_CALL_PROVIDERS);
+	const toolNameMap = createOpenAIResponsesToolNameMap(context.tools ?? []);
+	const messages = convertResponsesMessages(model, context, AZURE_TOOL_CALL_PROVIDERS, { toolNameMap });
 
 	const params: ResponseCreateParamsStreaming = {
 		model: deploymentName,
@@ -263,7 +266,7 @@ function buildParams(
 	}
 
 	if (context.tools && context.tools.length > 0) {
-		params.tools = convertResponsesTools(context.tools);
+		params.tools = convertResponsesTools(context.tools, { toolNameMap });
 	}
 
 	if (model.reasoning) {
