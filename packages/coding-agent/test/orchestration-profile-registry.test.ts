@@ -59,7 +59,7 @@ const manifests: ToolCapabilityManifest[] = [
 		moduleSpecifier: "./tools/run-process.ts",
 		capabilities: ["process.exec"],
 		roles: ["operator"],
-		enforcements: ["process-sandbox"],
+		enforcements: ["process-launcher"],
 	},
 ];
 
@@ -97,6 +97,23 @@ describe("OrchestrationProfileRegistry", () => {
 		expect(() => validateOrchestrationProfile(profile({ toolNames: ["read", "bash"] }))).toThrow(
 			"cannot expose unrestricted process tools",
 		);
+	});
+
+	it("rejects unknown, duplicated, and capability-unbound profile tools", () => {
+		expect(() => validateOrchestrationProfile(profile({ toolNames: ["read", "opaque_extension"] }))).toThrow(
+			"unclassified orchestration tools",
+		);
+		expect(() => validateOrchestrationProfile(profile({ toolNames: ["read", "read"] }))).toThrow(
+			"duplicate toolNames",
+		);
+		const { executionPolicy: _executionPolicy, ...withoutProcessPolicy } = profile();
+		expect(() =>
+			validateOrchestrationProfile({
+				...withoutProcessPolicy,
+				toolNames: ["memory"],
+				capabilityCeiling: ["filesystem.read"],
+			}),
+		).toThrow("lacks memory authority");
 	});
 
 	it("pins a fixed model and exact reasoning level", () => {
@@ -156,7 +173,7 @@ describe("OrchestrationProfileRegistry", () => {
 			policyCompiler: new ExecutionPolicyCompiler({ now: () => now, createId: () => "1" }),
 			toolManifests: manifests,
 			resources: [],
-			allowedPaths: ["."],
+			readPaths: ["."],
 			policyVersion: "policy-1",
 		});
 

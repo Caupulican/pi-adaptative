@@ -16,27 +16,24 @@ describe("delegate tool capability description", () => {
 
 		expect(settings.getWorkerDelegationSettings()).toMatchObject({ writeEnabled: true, writePaths: ["src"] });
 		expect(definition.description).toBe(descriptionBefore);
-		expect(definition.description).toContain("read-only by default");
+		expect(definition.description).toContain("owner-authored profile fixes memory");
 		expect(definition.description).toContain("workerDelegation.writeEnabled");
 		expect(definition.description).toContain("non-empty writePaths");
-		expect(definition.description).toContain("lane profile grant write/edit");
+		expect(definition.description).toContain("writes additionally require");
 		expect(definition.description).toContain("parent review");
 
 		const parameters = definition.parameters as unknown as {
 			properties?: {
 				instructions?: { description?: string };
-				memoryRead?: { description?: string };
 			};
 		};
 		expect(parameters.properties?.instructions?.description).toContain("workerDelegation.writeEnabled");
 		expect(parameters.properties?.instructions?.description).toContain("path-scoped");
-		expect(parameters.properties?.memoryRead?.description).toContain("read-only memory");
-		expect(parameters.properties?.memoryRead?.description).toContain("lane profile");
-		expect(parameters.properties?.memoryRead?.description).toContain("never granted");
+		expect(parameters.properties).not.toHaveProperty("memoryRead");
 	});
 
-	it("forwards an explicit read-only memory request to the worker orchestrator", async () => {
-		let received: { instructions: string; systemPrompt?: string; memoryRead?: boolean } | undefined;
+	it("does not forward a delegate-call memory override to the worker orchestrator", async () => {
+		let received: { instructions: string; profileId?: string } | undefined;
 		const definition = createDelegateToolDefinition({
 			startWorkerDelegation: (request) => {
 				received = request;
@@ -56,6 +53,6 @@ describe("delegate tool capability description", () => {
 			{} as never,
 		);
 
-		expect(received).toEqual({ instructions: "Recall the relevant convention", memoryRead: true });
+		expect(received).toEqual({ instructions: "Recall the relevant convention" });
 	});
 });

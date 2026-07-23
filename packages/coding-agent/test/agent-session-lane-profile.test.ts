@@ -17,6 +17,8 @@ import { SUBAGENT_CORE_SYSTEM_PROMPT } from "../src/core/autonomy/subagent-promp
 import { applyGoalEvent, createGoalState } from "../src/core/goals/goal-state.ts";
 import { appendGoalStateSnapshot } from "../src/core/goals/session-goal-state.ts";
 import { ModelRegistry } from "../src/core/model-registry.ts";
+import { ORCHESTRATION_SCHEMA_VERSION, type OrchestrationProfile } from "../src/core/orchestration/contracts.ts";
+import { OrchestrationProfileStore } from "../src/core/orchestration/profile-store.ts";
 import { type Settings, SettingsManager } from "../src/core/settings-manager.ts";
 import { createTestResourceLoader } from "./utilities.ts";
 
@@ -35,7 +37,7 @@ describe("profile-shipped lanes", () => {
 		faux = registerFauxProvider({
 			models: [
 				{ id: "session-model", contextWindow: 200_000 },
-				{ id: "scout-model", contextWindow: 200_000 },
+				{ id: "scout-model", contextWindow: 200_000, reasoning: true },
 			],
 		});
 		faux.setResponses([]);
@@ -52,6 +54,36 @@ describe("profile-shipped lanes", () => {
 		const profilesDir = getProfilesDir(agentDir);
 		mkdirSync(profilesDir, { recursive: true });
 		writeFileSync(join(profilesDir, `${name}.json`), JSON.stringify(definition));
+	}
+
+	function writeWorkerProfile(
+		profileId: string,
+		options: { modelId?: string; resourceProfileNames?: string[] } = {},
+	): void {
+		const now = new Date().toISOString();
+		const profile: OrchestrationProfile = {
+			schemaVersion: ORCHESTRATION_SCHEMA_VERSION,
+			profileId,
+			description: "Pinned read-only test worker",
+			role: "implementer",
+			modelPolicy: {
+				mode: "fixed",
+				candidates: [
+					{ provider: faux.getModel().provider, modelId: options.modelId ?? "scout-model", thinkingLevel: "off" },
+				],
+			},
+			capabilityCeiling: ["filesystem.read"],
+			toolNames: ["read"],
+			resourceProfileNames: options.resourceProfileNames ?? [],
+			dispatchProfileIds: [],
+			budget: { maxCostUsd: 1, maxTokens: 8_192, maxToolCalls: 4, maxWallClockMs: 60_000 },
+			maxConcurrent: 1,
+			leaseTtlMs: 90_000,
+			requireIndependentVerification: false,
+			createdAt: now,
+			updatedAt: now,
+		};
+		new OrchestrationProfileStore({ agentDir, cwd: tempDir, projectTrusted: true }).save(profile, "global");
 	}
 
 	async function newSession(settings: Partial<Settings>): Promise<AgentSession> {
@@ -212,14 +244,10 @@ describe("profile-shipped lanes", () => {
 	});
 
 	it("composes worker profile UAC, shared argument repair, and workspace file scope", async () => {
-		const sessionModel = faux.getModel("session-model");
-		writeProfile("repair-reader", {
-			model: `${sessionModel?.provider}/scout-model`,
-			resources: { tools: { allow: ["read"] } },
-		});
+		writeWorkerProfile("repair-reader");
 		writeFileSync(join(tempDir, "evidence.txt"), "PROFILE_REPAIR_FILE_OK\n", "utf-8");
 		const activeSession = await newSession({
-			workerDelegation: { enabled: true, profile: "repair-reader" },
+			workerDelegation: { enabled: true, orchestrationProfile: "repair-reader" },
 		});
 		let seenTools: string[] = [];
 		faux.setResponses([
@@ -242,7 +270,6 @@ describe("profile-shipped lanes", () => {
 
 		const run = await activeSession.runWorkerDelegationOnce({
 			instructions: "Read the evidence file",
-			memoryRead: true,
 		});
 
 		expect(run.record?.status).toBe("succeeded");
@@ -250,8 +277,12 @@ describe("profile-shipped lanes", () => {
 		expect(seenTools).toEqual(["read"]);
 	});
 
-	it("lets a delegate-call system prompt replace the worker role prompt but never the core", async () => {
-		const activeSession = await newSession({ workerDelegation: { enabled: true } });
+	it("composes owner-authored worker soul with the immutable core and role prompt", async () => {
+		writeProfile("worker-soul", { soul: "Answer with a single JSON summary field." });
+		writeWorkerProfile("prompt-worker", { resourceProfileNames: ["worker-soul"] });
+		const activeSession = await newSession({
+			workerDelegation: { enabled: true, orchestrationProfile: "prompt-worker" },
+		});
 
 		let seenSystemPrompt: string | undefined;
 		faux.setResponses([
@@ -261,14 +292,12 @@ describe("profile-shipped lanes", () => {
 			},
 		]);
 
-		const run = await activeSession.runWorkerDelegationOnce({
-			instructions: "Summarize X",
-			systemPrompt: "Answer with a single JSON summary field.",
-		});
+		const run = await activeSession.runWorkerDelegationOnce({ instructions: "Summarize X" });
 
 		expect(run.record?.status).toBe("succeeded");
 		expect(seenSystemPrompt?.startsWith(SUBAGENT_CORE_SYSTEM_PROMPT)).toBe(true);
 		expect(seenSystemPrompt).toContain("Answer with a single JSON summary field.");
-		expect(seenSystemPrompt).not.toContain("bounded read-only scout worker");
+		expect(seenSystemPrompt).toContain("bounded specialist worker");
+		expect(seenSystemPrompt).toContain("workspace tools are read-only");
 	});
 });

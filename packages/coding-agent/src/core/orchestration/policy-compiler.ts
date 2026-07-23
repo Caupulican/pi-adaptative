@@ -10,6 +10,7 @@ import {
 	type ToolCapabilityManifest,
 	type WorkerRole,
 } from "./contracts.ts";
+import { exceededRiskBudgetFields, intersectRiskBudgets, validateRiskBudget } from "./risk-budget.ts";
 
 export const DEFAULT_ROLE_CAPABILITY_CEILINGS: Readonly<Record<WorkerRole, readonly HarnessCapability[]>> = {
 	orchestrator: ["workflow.delegate"],
@@ -33,7 +34,8 @@ export interface CompileExecutionGrantInput {
 	requestedTools: readonly string[];
 	toolManifests: readonly ToolCapabilityManifest[];
 	resources?: readonly ResourcePointer[];
-	allowedPaths?: readonly string[];
+	readPaths?: readonly string[];
+	writePaths?: readonly string[];
 	deniedPaths?: readonly string[];
 	requestedBudget?: RiskBudget;
 	authorityBudget?: RiskBudget;
@@ -57,42 +59,8 @@ export interface PolicyCompilerOptions {
 	roleCapabilityCeilings?: Readonly<Record<WorkerRole, readonly HarnessCapability[]>>;
 }
 
-const BUDGET_FIELDS = ["maxTokens", "maxWallClockMs", "maxCostUsd", "maxAttempts", "maxToolCalls"] as const;
-type ComparableBudgetField = (typeof BUDGET_FIELDS)[number];
-
 function unique<T>(values: readonly T[]): T[] {
 	return [...new Set(values)];
-}
-
-function isPositiveBudgetValue(value: number | undefined): boolean {
-	return value === undefined || (Number.isFinite(value) && value >= 0);
-}
-
-function validateBudget(budget: RiskBudget, label: string): void {
-	for (const field of [...BUDGET_FIELDS, "requireApprovalAboveCostUsd"] as const) {
-		if (!isPositiveBudgetValue(budget[field])) throw new TypeError(`${label}.${field} must be non-negative.`);
-	}
-}
-
-function exceedsBudget(requested: RiskBudget, authority: RiskBudget): ComparableBudgetField[] {
-	return BUDGET_FIELDS.filter((field) => {
-		const request = requested[field];
-		const ceiling = authority[field];
-		return request !== undefined && ceiling !== undefined && request > ceiling;
-	});
-}
-
-function effectiveBudget(requested: RiskBudget, authority: RiskBudget): RiskBudget {
-	const budget: RiskBudget = {};
-	for (const field of BUDGET_FIELDS) {
-		const request = requested[field];
-		const ceiling = authority[field];
-		const value = request === undefined ? ceiling : ceiling === undefined ? request : Math.min(request, ceiling);
-		if (value !== undefined) budget[field] = value;
-	}
-	const approvalThreshold = authority.requireApprovalAboveCostUsd ?? requested.requireApprovalAboveCostUsd;
-	if (approvalThreshold !== undefined) budget.requireApprovalAboveCostUsd = approvalThreshold;
-	return budget;
 }
 
 function freezeGrant(grant: ExecutionGrant): ExecutionGrant {
@@ -104,7 +72,8 @@ function freezeGrant(grant: ExecutionGrant): ExecutionGrant {
 	Object.freeze(grant.capabilities);
 	Object.freeze(grant.allowedTools);
 	Object.freeze(grant.resources);
-	Object.freeze(grant.allowedPaths);
+	Object.freeze(grant.readPaths);
+	Object.freeze(grant.writePaths);
 	Object.freeze(grant.deniedPaths);
 	Object.freeze(grant.budget);
 	Object.freeze(grant.decisionTrace);
@@ -116,8 +85,8 @@ const CAPABILITY_ENFORCEMENT = new Map<HarnessCapability, ToolCapabilityManifest
 	["filesystem.write", "path-scope"],
 	["worktree.read", "path-scope"],
 	["worktree.mutate", "path-scope"],
-	["process.exec", "process-sandbox"],
-	["tests.execute", "process-sandbox"],
+	["process.exec", "process-launcher"],
+	["tests.execute", "process-launcher"],
 	["network.http", "service-proxy"],
 	["service.mcp", "service-proxy"],
 	["credentials.use", "service-proxy"],
@@ -176,9 +145,9 @@ export class ExecutionPolicyCompiler {
 
 		const requestedBudget = { ...(input.requestedBudget ?? {}) };
 		const authorityBudget = { ...(input.authorityBudget ?? {}) };
-		validateBudget(requestedBudget, "requestedBudget");
-		validateBudget(authorityBudget, "authorityBudget");
-		const exceededBudgetFields = exceedsBudget(requestedBudget, authorityBudget);
+		validateRiskBudget(requestedBudget, "requestedBudget");
+		validateRiskBudget(authorityBudget, "authorityBudget");
+		const exceededBudgetFields = exceededRiskBudgetFields(requestedBudget, authorityBudget);
 		if (approvalCapabilities.some((capability) => required.includes(capability)) || exceededBudgetFields.length > 0) {
 			const approval: ApprovalRequestContract = {
 				schemaVersion: ORCHESTRATION_SCHEMA_VERSION,
@@ -240,16 +209,14 @@ export class ExecutionPolicyCompiler {
 			return { outcome: "deny", decisions, reasonCodes: toolReasonCodes };
 		}
 
-		const allowedPaths = unique(input.allowedPaths ?? []);
+		const readPaths = unique(input.readPaths ?? []);
+		const writePaths = unique(input.writePaths ?? []);
 		const deniedPaths = unique(input.deniedPaths ?? []);
-		if (
-			(granted.includes("filesystem.read") ||
-				granted.includes("filesystem.write") ||
-				granted.includes("worktree.read") ||
-				granted.includes("worktree.mutate")) &&
-			allowedPaths.length === 0
-		) {
-			return { outcome: "deny", decisions, reasonCodes: ["filesystem_capability_missing_positive_path_scope"] };
+		if ((granted.includes("filesystem.read") || granted.includes("worktree.read")) && readPaths.length === 0) {
+			return { outcome: "deny", decisions, reasonCodes: ["read_capability_missing_positive_path_scope"] };
+		}
+		if ((granted.includes("filesystem.write") || granted.includes("worktree.mutate")) && writePaths.length === 0) {
+			return { outcome: "deny", decisions, reasonCodes: ["write_capability_missing_positive_path_scope"] };
 		}
 
 		const grant = freezeGrant({
@@ -263,9 +230,10 @@ export class ExecutionPolicyCompiler {
 			capabilities: granted,
 			allowedTools: allowedManifests.map((manifest) => manifest.toolName),
 			resources: structuredClone(input.resources ?? []),
-			allowedPaths,
+			readPaths,
+			writePaths,
 			deniedPaths,
-			budget: effectiveBudget(requestedBudget, authorityBudget),
+			budget: intersectRiskBudgets(requestedBudget, authorityBudget),
 			policyVersion: input.policyVersion,
 			decisionTrace: decisions,
 			issuedAt: this.now(),

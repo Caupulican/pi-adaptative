@@ -25,6 +25,7 @@ import { AssistantMessageEventStream } from "../utils/event-stream.ts";
 import { shortHash } from "../utils/hash.ts";
 import { parseStreamingJson } from "../utils/json-parse.ts";
 import { sanitizeSurrogates } from "../utils/sanitize-unicode.ts";
+import { createToolNameMap, type ToolNameMap } from "../utils/tool-names.ts";
 import { buildBaseOptions } from "./simple-options.ts";
 import { joinTextContent, transformMessages } from "./transform-messages.ts";
 
@@ -54,6 +55,7 @@ export const streamMistral: StreamFunction<"mistral-conversations", MistralOptio
 
 	(async () => {
 		const output = createOutput(model);
+		const toolNameMap = createToolNameMap(context.tools ?? []);
 
 		try {
 			const apiKey = options?.apiKey;
@@ -70,14 +72,14 @@ export const streamMistral: StreamFunction<"mistral-conversations", MistralOptio
 			const normalizeMistralToolCallId = createMistralToolCallIdNormalizer();
 			const transformedMessages = transformMessages(context.messages, model, (id) => normalizeMistralToolCallId(id));
 
-			let payload = buildChatPayload(model, context, transformedMessages, options);
+			let payload = buildChatPayload(model, context, transformedMessages, toolNameMap, options);
 			const nextPayload = await options?.onPayload?.(payload, model);
 			if (nextPayload !== undefined) {
 				payload = nextPayload as ChatCompletionStreamRequest;
 			}
 			const mistralStream = await mistral.chat.stream(payload, buildRequestOptions(model, options));
 			stream.push({ type: "start", partial: output });
-			await consumeChatStream(model, output, stream, mistralStream);
+			await consumeChatStream(model, output, stream, mistralStream, toolNameMap);
 
 			if (options?.signal?.aborted) {
 				throw new Error("Request was aborted");
@@ -241,18 +243,19 @@ function buildChatPayload(
 	model: Model<"mistral-conversations">,
 	context: Context,
 	messages: Message[],
+	toolNameMap: ToolNameMap,
 	options?: MistralOptions,
 ): ChatCompletionStreamRequest {
 	const payload: ChatCompletionStreamRequest = {
 		model: model.id,
 		stream: true,
-		messages: toChatMessages(messages, model.input.includes("image")),
+		messages: toChatMessages(messages, model.input.includes("image"), toolNameMap),
 	};
 
-	if (context.tools?.length) payload.tools = toFunctionTools(context.tools);
+	if (context.tools?.length) payload.tools = toFunctionTools(context.tools, toolNameMap);
 	if (options?.temperature !== undefined) payload.temperature = options.temperature;
 	if (options?.maxTokens !== undefined) payload.maxTokens = options.maxTokens;
-	if (options?.toolChoice) payload.toolChoice = mapToolChoice(options.toolChoice);
+	if (options?.toolChoice) payload.toolChoice = mapToolChoice(options.toolChoice, toolNameMap);
 	if (options?.promptMode) payload.promptMode = options.promptMode;
 	if (options?.reasoningEffort) payload.reasoningEffort = options.reasoningEffort;
 
@@ -271,6 +274,7 @@ async function consumeChatStream(
 	output: AssistantMessage,
 	stream: AssistantMessageEventStream,
 	mistralStream: AsyncIterable<CompletionEvent>,
+	toolNameMap: ToolNameMap,
 ): Promise<void> {
 	let currentBlock: TextContent | ThinkingContent | null = null;
 	const blocks = output.content;
@@ -409,7 +413,7 @@ async function consumeChatStream(
 				block = {
 					type: "toolCall",
 					id: callId,
-					name: toolCall.function.name,
+					name: toolNameMap.toOriginalName(toolCall.function.name),
 					arguments: {},
 					partialArgs: "",
 				};
@@ -451,11 +455,11 @@ async function consumeChatStream(
 	}
 }
 
-function toFunctionTools(tools: Tool[]): Array<FunctionTool & { type: "function" }> {
+function toFunctionTools(tools: Tool[], toolNameMap: ToolNameMap): Array<FunctionTool & { type: "function" }> {
 	return tools.map((tool) => ({
 		type: "function",
 		function: {
-			name: tool.name,
+			name: toolNameMap.toProviderName(tool.name),
 			description: tool.description,
 			parameters: stripSymbolKeys(tool.parameters) as Record<string, unknown>,
 			strict: false,
@@ -479,7 +483,11 @@ function stripSymbolKeys(value: unknown): unknown {
 	return value;
 }
 
-function toChatMessages(messages: Message[], supportsImages: boolean): ChatCompletionStreamRequestMessage[] {
+function toChatMessages(
+	messages: Message[],
+	supportsImages: boolean,
+	toolNameMap: ToolNameMap,
+): ChatCompletionStreamRequestMessage[] {
 	const result: ChatCompletionStreamRequestMessage[] = [];
 
 	for (const msg of messages) {
@@ -528,7 +536,10 @@ function toChatMessages(messages: Message[], supportsImages: boolean): ChatCompl
 				toolCalls.push({
 					id: block.id,
 					type: "function",
-					function: { name: block.name, arguments: JSON.stringify(block.arguments || {}) },
+					function: {
+						name: toolNameMap.toProviderName(block.name),
+						arguments: JSON.stringify(block.arguments || {}),
+					},
 				});
 			}
 
@@ -555,7 +566,7 @@ function toChatMessages(messages: Message[], supportsImages: boolean): ChatCompl
 		result.push({
 			role: "tool",
 			toolCallId: msg.toolCallId,
-			name: msg.toolName,
+			name: toolNameMap.toProviderName(msg.toolName),
 			content: toolContent,
 		});
 	}
@@ -601,6 +612,7 @@ function mapReasoningEffort(
 
 function mapToolChoice(
 	choice: MistralOptions["toolChoice"],
+	toolNameMap: ToolNameMap,
 ): "auto" | "none" | "any" | "required" | { type: "function"; function: { name: string } } | undefined {
 	if (!choice) return undefined;
 	if (choice === "auto" || choice === "none" || choice === "any" || choice === "required") {
@@ -608,7 +620,7 @@ function mapToolChoice(
 	}
 	return {
 		type: "function",
-		function: { name: choice.function.name },
+		function: { name: toolNameMap.toProviderName(choice.function.name) },
 	};
 }
 

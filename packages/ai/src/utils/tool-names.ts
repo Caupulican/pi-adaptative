@@ -11,6 +11,7 @@ export interface ToolNameMap {
 export interface ToolNameMapOptions {
 	reservedNames?: ReadonlySet<string>;
 	reservedSuffix?: string;
+	normalizeName?: (sanitizedName: string) => string;
 }
 
 function baseSanitizedToolName(name: string): string {
@@ -45,19 +46,28 @@ export function createToolNameMap(tools: readonly Tool[], options?: ToolNameMapO
 	const providerToOriginal = new Map<string, string>();
 	const usedProviderNames = new Set<string>();
 
-	for (const tool of tools) {
-		const sanitizedBase = VALID_TOOL_NAME.test(tool.name) ? tool.name : baseSanitizedToolName(tool.name);
-		const base = options?.reservedNames?.has(sanitizedBase)
-			? baseSanitizedToolName(`${sanitizedBase}${options.reservedSuffix ?? "_tool"}`)
-			: sanitizedBase;
+	const allocate = (originalName: string): string => {
+		const existing = originalToProvider.get(originalName);
+		if (existing) return existing;
+		const sanitizedBase = VALID_TOOL_NAME.test(originalName) ? originalName : baseSanitizedToolName(originalName);
+		const normalizedBase = baseSanitizedToolName(options?.normalizeName?.(sanitizedBase) ?? sanitizedBase);
+		const base = options?.reservedNames?.has(normalizedBase)
+			? baseSanitizedToolName(`${normalizedBase}${options.reservedSuffix ?? "_tool"}`)
+			: normalizedBase;
 		const providerName = uniqueToolName(base, usedProviderNames, options?.reservedNames);
-		originalToProvider.set(tool.name, providerName);
-		providerToOriginal.set(providerName, tool.name);
+		originalToProvider.set(originalName, providerName);
+		providerToOriginal.set(providerName, originalName);
+		return providerName;
+	};
+
+	for (const tool of tools) {
+		if (originalToProvider.has(tool.name)) throw new TypeError(`Duplicate tool name '${tool.name}'.`);
+		allocate(tool.name);
 	}
 
 	return {
 		toProviderName(name: string): string {
-			return originalToProvider.get(name) ?? name;
+			return allocate(name);
 		},
 		toOriginalName(name: string): string {
 			return providerToOriginal.get(name) ?? name;

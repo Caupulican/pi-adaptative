@@ -1,3 +1,6 @@
+import { mkdtempSync, rmSync } from "node:fs";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
 import type { SessionManager } from "@caupulican/pi-agent-core/node";
 import { afterEach, describe, expect, it } from "vitest";
 import type { WorkerRequest, WorkerResult } from "../src/core/autonomy/contracts.ts";
@@ -5,6 +8,11 @@ import { getLaneRecordSnapshots } from "../src/core/autonomy/session-lane-record
 import { BackgroundLaneController } from "../src/core/background-lane-controller.ts";
 import { appendWorkerResultSnapshot, getWorkerResultSnapshots } from "../src/core/delegation/session-worker-result.ts";
 import { resetInFlightWorkRegistryForTests } from "../src/core/reload-blockers.ts";
+import { SettingsManager } from "../src/core/settings-manager.ts";
+import {
+	createTestWorkerOrchestrationProfile,
+	saveTestWorkerOrchestrationProfile,
+} from "./orchestration-profile-fixture.ts";
 
 interface FakeAfterToolCallArgs {
 	toolCall: { name: string };
@@ -41,8 +49,16 @@ describe("background lane disposal persistence", () => {
 	});
 
 	it("persists a durable canceled lane record + a bounded worker-result (with changedFiles) synchronously at the disposal cutoff, and appends nothing after dispose returns", async () => {
-		const agentDir = "/tmp/pi-test-disposal-persistence";
+		const agentDir = mkdtempSync(join(tmpdir(), "pi-test-disposal-persistence-"));
 		const model = { provider: "test", id: "test-model", contextWindow: 128_000 };
+		const settingsManager = SettingsManager.inMemory({
+			workerDelegation: { enabled: true, orchestrationProfile: "disposal-worker", maxConcurrent: 3 },
+		});
+		saveTestWorkerOrchestrationProfile({
+			agentDir,
+			cwd: "/repo",
+			profile: createTestWorkerOrchestrationProfile({ profileId: "disposal-worker", model }),
+		});
 		const { sessionManager, entries, getAppendCount } = makeTrackedSessionManager();
 
 		let disposed = false;
@@ -54,18 +70,8 @@ describe("background lane disposal persistence", () => {
 			getCwd: () => "/repo",
 			getAgentDir: () => agentDir,
 			getSessionManager: () => sessionManager,
-			getSettingsManager: () =>
-				({
-					getWorkerDelegationSettings: () => ({
-						enabled: true,
-						maxUsd: 1,
-						maxConcurrent: 4,
-						maxWallClockMs: 0,
-						writeEnabled: false,
-						writePaths: [],
-					}),
-					getModelCapabilitySettings: () => ({ mode: "off" }),
-				}) as never,
+			getSettingsManager: () => settingsManager,
+			getModelRegistry: () => ({ find: () => model, hasConfiguredAuth: () => true }) as never,
 			getModel: () => model,
 			isModelExhausted: () => false,
 			isDelegateToolActive: () => true,
@@ -127,6 +133,7 @@ describe("background lane disposal persistence", () => {
 
 		// No append happened after dispose returned -- the consumed-ledger guard held.
 		expect(getAppendCount()).toBe(appendCountAtCutoff);
+		rmSync(agentDir, { recursive: true, force: true });
 	});
 
 	it("persists a durable canceled lane record for a queued (never-started) worker, with no fabricated worker-result (no ledger exists for a lane that never ran)", () => {

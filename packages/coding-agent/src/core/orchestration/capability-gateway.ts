@@ -64,6 +64,8 @@ const PATH_CAPABILITIES: ReadonlySet<HarnessCapability> = new Set([
 	"worktree.mutate",
 ]);
 
+const WRITE_CAPABILITIES: ReadonlySet<HarnessCapability> = new Set(["filesystem.write", "worktree.mutate"]);
+
 function isWithinRoot(target: string, root: string): boolean {
 	const relativePath = relative(root, target);
 	return (
@@ -110,10 +112,15 @@ export class CapabilityGateway {
 		params: unknown,
 		invoke: () => Promise<T> | T,
 	): Promise<T> {
+		this.authorizeToolCall(manifest, toolName, params);
+		return await invoke();
+	}
+
+	/** Immediate pre-execution authorization for runtimes that expose a before-tool-call hook. */
+	authorizeToolCall(manifest: ToolCapabilityManifest, toolName: string, params: unknown): void {
 		this.authorize(manifest, toolName, params);
 		this.toolCalls++;
 		this.audit(toolName, "allow", "allowed");
-		return await invoke();
 	}
 
 	recordUsage(delta: GatewayUsageDelta): void {
@@ -149,12 +156,15 @@ export class CapabilityGateway {
 		this.enforceBudget(toolName);
 
 		if (manifest.capabilities.some((capability) => PATH_CAPABILITIES.has(capability))) {
+			const allowedPaths = manifest.capabilities.some((capability) => WRITE_CAPABILITIES.has(capability))
+				? this.grant.writePaths
+				: this.grant.readPaths;
 			const paths = extractPathArguments(params);
 			if (paths.length === 0) {
 				this.deny(toolName, "path_argument_required", `Tool '${toolName}' requires an explicit path argument.`);
 			}
 			for (const rawPath of paths) {
-				if (!this.pathAllowed(rawPath)) {
+				if (!this.pathAllowed(rawPath, allowedPaths)) {
 					this.deny(toolName, "path_outside_scope", `Path '${rawPath}' is outside grant '${this.grant.grantId}'.`);
 				}
 			}
@@ -177,14 +187,14 @@ export class CapabilityGateway {
 		}
 	}
 
-	private pathAllowed(rawPath: string): boolean {
+	private pathAllowed(rawPath: string, allowedPaths: readonly string[]): boolean {
 		const target = resolveRealPath(this.cwd, rawPath);
-		if (!target || this.grant.allowedPaths.length === 0) return false;
+		if (!target || allowedPaths.length === 0) return false;
 		for (const denied of this.grant.deniedPaths) {
 			const root = resolveRealPath(this.cwd, denied);
 			if (root && isWithinRoot(target, root)) return false;
 		}
-		return this.grant.allowedPaths.some((allowed) => {
+		return allowedPaths.some((allowed) => {
 			const root = resolveRealPath(this.cwd, allowed);
 			return root !== undefined && isWithinRoot(target, root);
 		});

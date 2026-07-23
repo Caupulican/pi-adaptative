@@ -16,6 +16,27 @@ function workerLaneRecords(harness: Harness) {
 	return getLaneRecordSnapshots(harness.sessionManager.getEntries()).filter((record) => record.type === "worker");
 }
 
+function workerProfile(modelId: string, thinkingLevel: "off" | "low" = "off"): OrchestrationProfile {
+	const now = new Date().toISOString();
+	return {
+		schemaVersion: ORCHESTRATION_SCHEMA_VERSION,
+		profileId: `worker-${modelId}`,
+		description: `Pinned ${modelId} test worker`,
+		role: "implementer",
+		modelPolicy: { mode: "fixed", candidates: [{ provider: "faux", modelId, thinkingLevel }] },
+		capabilityCeiling: ["filesystem.read"],
+		toolNames: ["read"],
+		resourceProfileNames: [],
+		dispatchProfileIds: [],
+		budget: { maxCostUsd: 1, maxTokens: 8_192, maxToolCalls: 4, maxWallClockMs: 60_000 },
+		maxConcurrent: 1,
+		leaseTtlMs: 90_000,
+		requireIndependentVerification: false,
+		createdAt: now,
+		updatedAt: now,
+	};
+}
+
 describe("AgentSession worker delegation", () => {
 	it("constructs only the model and tool surface owned by the active orchestration profile", async () => {
 		const now = new Date().toISOString();
@@ -155,7 +176,11 @@ describe("AgentSession worker delegation", () => {
 			resolveSecond = resolve;
 		});
 		try {
-			const store = new OrchestrationProfileStore({ agentDir: harness.tempDir, cwd: harness.tempDir });
+			const store = new OrchestrationProfileStore({
+				agentDir: harness.tempDir,
+				cwd: harness.tempDir,
+				projectTrusted: true,
+			});
 			for (const profileId of ["worker-a", "worker-b"]) {
 				store.save(
 					{
@@ -288,7 +313,8 @@ describe("AgentSession worker delegation", () => {
 				{ id: "foreground", contextWindow: 128_000 },
 				{ id: "tiny-worker", contextWindow: 4_096 },
 			],
-			settings: { workerDelegation: { enabled: true, model: "faux/tiny-worker" } },
+			settings: { workerDelegation: { enabled: true } },
+			workerOrchestrationProfile: workerProfile("tiny-worker"),
 		});
 		try {
 			const run = await harness.session.runWorkerDelegationOnce({ instructions: "Scout safely" });
@@ -306,7 +332,8 @@ describe("AgentSession worker delegation", () => {
 				{ id: "foreground", contextWindow: 128_000 },
 				{ id: "text-worker", contextWindow: 128_000 },
 			],
-			settings: { workerDelegation: { enabled: true, model: "faux/text-worker" } },
+			settings: { workerDelegation: { enabled: true } },
+			workerOrchestrationProfile: workerProfile("text-worker"),
 		});
 		try {
 			const workerModel = harness.session.modelRegistry.find("faux", "text-worker");
@@ -340,7 +367,8 @@ describe("AgentSession worker delegation", () => {
 					reasoning: true,
 				},
 			],
-			settings: { workerDelegation: { enabled: true, model: "faux/reasoning-worker" } },
+			settings: { workerDelegation: { enabled: true } },
+			workerOrchestrationProfile: workerProfile("reasoning-worker"),
 		});
 		try {
 			let seenReasoning: unknown;
@@ -371,7 +399,7 @@ describe("AgentSession worker delegation", () => {
 		}
 	});
 
-	it("runs a scout worker end to end: result, lane record, acceptance", async () => {
+	it("runs a delegated worker end to end: result, lane record, acceptance", async () => {
 		const harness = await createHarness({ settings: { workerDelegation: { enabled: true } } });
 		try {
 			harness.setResponses([fauxAssistantMessage(WORKER_JSON)]);

@@ -1179,7 +1179,7 @@ class WorkerDelegationSettingsSubmenu extends Container {
 				id: "worker-delegation-enabled",
 				label: "Enabled",
 				description:
-					"Allow capable models to run bounded scout workers; enabled by default, and explicit false is a hard off-switch",
+					"Allow capable models to run bounded profile-bound workers; enabled by default, and explicit false is a hard off-switch",
 				currentValue: String(this.state.enabled),
 				values: ["true", "false"],
 			},
@@ -2352,7 +2352,7 @@ export class SettingsSelectorComponent extends Container {
 				id: "worker-delegation",
 				label: "Worker Delegation",
 				description:
-					"Default-on for capable models: bounded scout workers remain available at every thinking level; Ultra reinforces proactive use",
+					"Default-on for capable models: bounded profile-bound workers remain available at every thinking level; Ultra reinforces proactive use",
 				currentValue: workerDelegationSummary(currentWorkerDelegation),
 				submenu: (_currentValue, done) =>
 					new WorkerDelegationSettingsSubmenu(

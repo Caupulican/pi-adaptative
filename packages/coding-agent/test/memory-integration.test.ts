@@ -13,9 +13,14 @@ import {
 import { afterEach, beforeEach, describe, expect, it } from "vitest";
 import { AuthStorage } from "../src/core/auth-storage.ts";
 import { getWorkerRequestSnapshots } from "../src/core/delegation/session-worker-result.ts";
+import { ModelRegistry } from "../src/core/model-registry.ts";
 import { DefaultResourceLoader } from "../src/core/resource-loader.ts";
 import { createAgentSession } from "../src/core/sdk.ts";
 import { SettingsManager } from "../src/core/settings-manager.ts";
+import {
+	createTestWorkerOrchestrationProfile,
+	saveTestWorkerOrchestrationProfile,
+} from "./orchestration-profile-fixture.ts";
 
 /**
  * Side M + Side H integration: the bundled file-store provider must surface the `memory` tool
@@ -36,6 +41,21 @@ describe("Memory subsystem integration (file-store)", () => {
 		} = {},
 	) => {
 		const settingsManager = SettingsManager.create(tempDir, agentDir);
+		const selectedModel = opts.model ?? getModel("anthropic", "claude-sonnet-4-5")!;
+		settingsManager.setWorkerDelegationSettings({
+			enabled: true,
+			orchestrationProfile: "memory-worker-profile",
+		});
+		saveTestWorkerOrchestrationProfile({
+			agentDir,
+			cwd: tempDir,
+			profile: createTestWorkerOrchestrationProfile({
+				profileId: "memory-worker-profile",
+				model: selectedModel,
+				capabilityCeiling: ["filesystem.read", "memory.query"],
+				toolNames: ["read", "memory"],
+			}),
+		});
 		if (opts.memoryEnabled !== undefined) {
 			settingsManager.setMemoryRetrievalSettings({ enabled: opts.memoryEnabled });
 		}
@@ -46,11 +66,34 @@ describe("Memory subsystem integration (file-store)", () => {
 			extensionFactories: opts.extensionFactories as any,
 		});
 		await resourceLoader.reload();
+		const authStorage = opts.authStorage ?? AuthStorage.inMemory();
+		const modelRegistry = ModelRegistry.inMemory(authStorage);
+		if (opts.model) {
+			modelRegistry.registerProvider(selectedModel.provider, {
+				baseUrl: selectedModel.baseUrl,
+				apiKey: "faux-key",
+				api: selectedModel.api,
+				models: [
+					{
+						id: selectedModel.id,
+						name: selectedModel.name,
+						api: selectedModel.api,
+						reasoning: selectedModel.reasoning,
+						input: selectedModel.input,
+						cost: selectedModel.cost,
+						contextWindow: selectedModel.contextWindow,
+						maxTokens: selectedModel.maxTokens,
+						baseUrl: selectedModel.baseUrl,
+					},
+				],
+			});
+		}
 		const { session } = await createAgentSession({
 			cwd: tempDir,
 			agentDir,
-			model: opts.model ?? getModel("anthropic", "claude-sonnet-4-5")!,
-			authStorage: opts.authStorage,
+			model: selectedModel,
+			authStorage,
+			modelRegistry,
 			settingsManager,
 			sessionManager: SessionManager.inMemory(),
 			resourceLoader,
@@ -115,7 +158,6 @@ describe("Memory subsystem integration (file-store)", () => {
 
 			const run = await session.runWorkerDelegationOnce({
 				instructions: "Recall the standing marker",
-				memoryRead: true,
 			});
 
 			expect(run.record?.status).toBe("succeeded");
@@ -156,7 +198,6 @@ describe("Memory subsystem integration (file-store)", () => {
 
 			const run = await session.runWorkerDelegationOnce({
 				instructions: "Check whether memory is enabled",
-				memoryRead: true,
 			});
 
 			expect(run.outcome?.result.summary).toBe("memory remained disabled");

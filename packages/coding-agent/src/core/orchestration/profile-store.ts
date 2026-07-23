@@ -39,10 +39,12 @@ function messageFrom(error: unknown): string {
 export class OrchestrationProfileStore {
 	private readonly agentDir: string;
 	private readonly cwd: string;
+	private readonly projectTrusted: boolean;
 
-	constructor(options: { agentDir: string; cwd: string }) {
+	constructor(options: { agentDir: string; cwd: string; projectTrusted: boolean }) {
 		this.agentDir = resolve(options.agentDir);
 		this.cwd = resolve(options.cwd);
+		this.projectTrusted = options.projectTrusted;
 	}
 
 	directory(scope: OrchestrationProfileScope): string {
@@ -63,7 +65,14 @@ export class OrchestrationProfileStore {
 	load(): OrchestrationProfileLoadResult {
 		const diagnostics: OrchestrationProfileDiagnostic[] = [];
 		const globalProfiles = this.loadScope("global", diagnostics);
-		const projectProfiles = this.loadScope("project", diagnostics);
+		const projectProfiles = this.projectTrusted ? this.loadScope("project", diagnostics) : [];
+		if (!this.projectTrusted && existsSync(this.directory("project"))) {
+			diagnostics.push({
+				scope: "project",
+				path: this.directory("project"),
+				message: "Project orchestration profiles were not loaded because the project is untrusted.",
+			});
+		}
 		const profilesById = new Map(globalProfiles.map((profile) => [profile.profileId, profile]));
 		for (const profile of projectProfiles) profilesById.set(profile.profileId, profile);
 		let profiles = [...profilesById.values()].sort((left, right) => left.profileId.localeCompare(right.profileId));
@@ -98,6 +107,11 @@ export class OrchestrationProfileStore {
 		scope: OrchestrationProfileScope,
 		options: { overwrite?: boolean } = {},
 	): string {
+		if (scope === "project" && !this.projectTrusted) {
+			throw new OrchestrationProfileError(
+				"Project is not trusted; refusing to write project orchestration profiles.",
+			);
+		}
 		validateOrchestrationProfile(profile);
 		const filePath = this.filePath(profile.profileId, scope);
 		withFileLockSync(filePath, () => {

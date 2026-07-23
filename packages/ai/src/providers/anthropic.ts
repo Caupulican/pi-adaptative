@@ -31,6 +31,7 @@ import { headersToRecord } from "../utils/headers.ts";
 import { parseJsonWithRepair, parseStreamingJson } from "../utils/json-parse.ts";
 import { sanitizeSurrogates } from "../utils/sanitize-unicode.ts";
 import { StreamingLineDecoder } from "../utils/streaming-lines.ts";
+import { createToolNameMap, type ToolNameMap } from "../utils/tool-names.ts";
 
 import { resolveCloudflareBaseUrl } from "./cloudflare.ts";
 import { buildCopilotDynamicHeaders, hasCopilotVisionInput } from "./github-copilot-headers.ts";
@@ -96,14 +97,6 @@ const ccToolLookup = new Map(claudeCodeTools.map((t) => [t.toLowerCase(), t]));
 
 // Convert tool name to CC canonical casing if it matches (case-insensitive)
 const toClaudeCodeName = (name: string) => ccToolLookup.get(name.toLowerCase()) ?? name;
-const fromClaudeCodeName = (name: string, tools?: Tool[]) => {
-	if (tools && tools.length > 0) {
-		const lowerName = name.toLowerCase();
-		const matchedTool = tools.find((tool) => tool.name.toLowerCase() === lowerName);
-		if (matchedTool) return matchedTool.name;
-	}
-	return name;
-};
 
 /**
  * Convert content blocks to Anthropic API format
@@ -475,7 +468,11 @@ export const streamAnthropic: StreamFunction<"anthropic-messages", AnthropicOpti
 				client = created.client;
 				isOAuth = created.isOAuthToken;
 			}
-			let params = buildParams(model, context, isOAuth, options);
+			const toolNameMap = createToolNameMap(
+				context.tools ?? [],
+				isOAuth ? { normalizeName: toClaudeCodeName } : undefined,
+			);
+			let params = buildParams(model, context, isOAuth, toolNameMap, options);
 			const nextParams = await options?.onPayload?.(params, model);
 			if (nextParams !== undefined) {
 				params = nextParams as MessageCreateParamsStreaming;
@@ -540,9 +537,7 @@ export const streamAnthropic: StreamFunction<"anthropic-messages", AnthropicOpti
 						const block: Block = {
 							type: "toolCall",
 							id: event.content_block.id,
-							name: isOAuth
-								? fromClaudeCodeName(event.content_block.name, context.tools)
-								: event.content_block.name,
+							name: toolNameMap.toOriginalName(event.content_block.name),
 							arguments: (event.content_block.input as Record<string, any>) ?? {},
 							partialJson: "",
 							index: event.index,
@@ -869,13 +864,14 @@ function buildParams(
 	model: Model<"anthropic-messages">,
 	context: Context,
 	isOAuthToken: boolean,
+	toolNameMap: ToolNameMap,
 	options?: AnthropicOptions,
 ): MessageCreateParamsStreaming {
 	const { cacheControl } = getCacheControl(model, options?.cacheRetention);
 	const compat = getAnthropicCompat(model);
 	const params: MessageCreateParamsStreaming = {
 		model: model.id,
-		messages: convertMessages(context.messages, model, isOAuthToken, cacheControl, compat.allowEmptySignature),
+		messages: convertMessages(context.messages, model, toolNameMap, cacheControl, compat.allowEmptySignature),
 		max_tokens: options?.maxTokens ?? model.maxTokens,
 		stream: true,
 	};
@@ -916,7 +912,7 @@ function buildParams(
 	if (context.tools && context.tools.length > 0) {
 		params.tools = convertTools(
 			context.tools,
-			isOAuthToken,
+			toolNameMap,
 			compat.supportsEagerToolInputStreaming,
 			compat.supportsCacheControlOnTools ? cacheControl : undefined,
 		);
@@ -964,7 +960,8 @@ function buildParams(
 		if (typeof options.toolChoice === "string") {
 			params.tool_choice = { type: options.toolChoice };
 		} else {
-			params.tool_choice = options.toolChoice;
+			const providerName = toolNameMap.toProviderName(options.toolChoice.name);
+			params.tool_choice = { type: "tool", name: providerName };
 		}
 	}
 
@@ -979,7 +976,7 @@ function normalizeToolCallId(id: string): string {
 function convertMessages(
 	messages: Message[],
 	model: Model<"anthropic-messages">,
-	isOAuthToken: boolean,
+	toolNameMap: ToolNameMap,
 	cacheControl?: CacheControlEphemeral,
 	allowEmptySignature = false,
 ): MessageParam[] {
@@ -1100,7 +1097,7 @@ function convertMessages(
 					blocks.push({
 						type: "tool_use",
 						id: block.id,
-						name: isOAuthToken ? toClaudeCodeName(block.name) : block.name,
+						name: toolNameMap.toProviderName(block.name),
 						input: block.arguments ?? {},
 					});
 				}
@@ -1179,7 +1176,7 @@ function shouldUseFineGrainedToolStreamingBeta(model: Model<"anthropic-messages"
 
 function convertTools(
 	tools: Tool[],
-	isOAuthToken: boolean,
+	toolNameMap: ToolNameMap,
 	supportsEagerToolInputStreaming: boolean,
 	cacheControl?: CacheControlEphemeral,
 ): Anthropic.Messages.Tool[] {
@@ -1189,7 +1186,7 @@ function convertTools(
 		const schema = tool.parameters as { properties?: unknown; required?: string[] };
 
 		return {
-			name: isOAuthToken ? toClaudeCodeName(tool.name) : tool.name,
+			name: toolNameMap.toProviderName(tool.name),
 			description: tool.description,
 			...(supportsEagerToolInputStreaming ? { eager_input_streaming: true } : {}),
 			input_schema: {

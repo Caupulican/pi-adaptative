@@ -8,12 +8,14 @@ import type {
 	ToolCapabilityManifest,
 } from "./contracts.ts";
 import { HARNESS_CAPABILITIES, ORCHESTRATION_SCHEMA_VERSION, toJsonObject, WORKER_ROLES } from "./contracts.ts";
+import { ORCHESTRATION_PROFILE_TOOL_NAMES } from "./lane-tool-manifests.ts";
 import {
 	type CompileExecutionGrantInput,
 	DEFAULT_ROLE_CAPABILITY_CEILINGS,
 	type ExecutionPolicyCompiler,
 	type PolicyCompilationResult,
 } from "./policy-compiler.ts";
+import { RISK_BUDGET_FIELDS, validateRiskBudget } from "./risk-budget.ts";
 
 export interface ModelHealthView {
 	isHealthy(binding: OrchestrationModelBinding): boolean;
@@ -47,6 +49,16 @@ function isRecord(value: unknown): value is Record<string, unknown> {
 function exactKeys(record: Record<string, unknown>, allowed: readonly string[]): boolean {
 	const allowedSet = new Set(allowed);
 	return Object.keys(record).every((key) => allowedSet.has(key));
+}
+
+function duplicateStrings(values: readonly string[]): string[] {
+	const seen = new Set<string>();
+	const duplicates = new Set<string>();
+	for (const value of values) {
+		if (seen.has(value)) duplicates.add(value);
+		seen.add(value);
+	}
+	return [...duplicates];
 }
 
 export function parseOrchestrationDispatchRequest(value: unknown): OrchestrationDispatchRequest {
@@ -90,6 +102,27 @@ export function validateOrchestrationProfile(profile: OrchestrationProfile): voi
 	if (profile.dispatchProfileIds.includes(profile.profileId)) {
 		throw new OrchestrationProfileError(`Profile '${profile.profileId}' cannot dispatch itself.`);
 	}
+	for (const [label, values] of [
+		["capabilityCeiling", profile.capabilityCeiling],
+		["toolNames", profile.toolNames],
+		["resourceProfileNames", profile.resourceProfileNames],
+		["dispatchProfileIds", profile.dispatchProfileIds],
+	] as const) {
+		const duplicates = duplicateStrings(values);
+		if (duplicates.length > 0) {
+			throw new OrchestrationProfileError(
+				`Profile '${profile.profileId}' contains duplicate ${label}: ${duplicates.join(", ")}.`,
+			);
+		}
+	}
+	const duplicateModels = duplicateStrings(
+		profile.modelPolicy.candidates.map((candidate) => `${candidate.provider}/${candidate.modelId}`),
+	);
+	if (duplicateModels.length > 0) {
+		throw new OrchestrationProfileError(
+			`Profile '${profile.profileId}' contains duplicate model candidates: ${duplicateModels.join(", ")}.`,
+		);
+	}
 	const roleCeiling = new Set(DEFAULT_ROLE_CAPABILITY_CEILINGS[profile.role]);
 	const outOfRoleCapabilities = profile.capabilityCeiling.filter((capability) => !roleCeiling.has(capability));
 	if (outOfRoleCapabilities.length > 0) {
@@ -115,6 +148,16 @@ export function validateOrchestrationProfile(profile: OrchestrationProfile): voi
 	}
 	if (!Number.isSafeInteger(profile.leaseTtlMs) || profile.leaseTtlMs <= 0) {
 		throw new OrchestrationProfileError(`Profile '${profile.profileId}' leaseTtlMs must be positive.`);
+	}
+	try {
+		validateRiskBudget(profile.budget, `Profile '${profile.profileId}' budget`);
+	} catch (error) {
+		throw new OrchestrationProfileError(error instanceof Error ? error.message : String(error));
+	}
+	if (profile.budget.maxWallClockMs !== undefined && profile.budget.maxWallClockMs <= 0) {
+		throw new OrchestrationProfileError(
+			`Profile '${profile.profileId}' maxWallClockMs budget must be positive when specified.`,
+		);
 	}
 	if (profile.budget.maxWallClockMs !== undefined && profile.leaseTtlMs < profile.budget.maxWallClockMs) {
 		throw new OrchestrationProfileError(
@@ -153,6 +196,14 @@ export function validateOrchestrationProfile(profile: OrchestrationProfile): voi
 			`Profile '${profile.profileId}' cannot expose unrestricted process tools (${unrestrictedProcessTools.join(", ")}); use run_process with executionPolicy.`,
 		);
 	}
+	const unknownTools = profile.toolNames.filter(
+		(toolName) => !(ORCHESTRATION_PROFILE_TOOL_NAMES as readonly string[]).includes(toolName),
+	);
+	if (unknownTools.length > 0) {
+		throw new OrchestrationProfileError(
+			`Profile '${profile.profileId}' contains unclassified orchestration tools: ${unknownTools.join(", ")}.`,
+		);
+	}
 	for (const toolName of profile.toolNames) {
 		if (
 			["read", "grep", "find", "ls"].includes(toolName) &&
@@ -177,6 +228,15 @@ export function validateOrchestrationProfile(profile: OrchestrationProfile): voi
 		) {
 			throw new OrchestrationProfileError(
 				`Profile '${profile.profileId}' tool '${toolName}' lacks process authority.`,
+			);
+		}
+		if (
+			toolName === "memory" &&
+			!profile.capabilityCeiling.includes("memory.query") &&
+			!profile.capabilityCeiling.includes("memory.mutate")
+		) {
+			throw new OrchestrationProfileError(
+				`Profile '${profile.profileId}' tool '${toolName}' lacks memory authority.`,
 			);
 		}
 		if (
@@ -286,14 +346,7 @@ export function parseOrchestrationProfile(value: unknown, sourcePath?: string): 
 	}
 	for (const [key, candidate] of Object.entries(budget)) {
 		if (
-			![
-				"maxTokens",
-				"maxWallClockMs",
-				"maxCostUsd",
-				"maxAttempts",
-				"maxToolCalls",
-				"requireApprovalAboveCostUsd",
-			].includes(key) ||
+			!RISK_BUDGET_FIELDS.includes(key as (typeof RISK_BUDGET_FIELDS)[number]) ||
 			typeof candidate !== "number" ||
 			!Number.isFinite(candidate) ||
 			candidate < 0
@@ -412,7 +465,8 @@ export function planProfileDispatch(args: {
 	policyCompiler: ExecutionPolicyCompiler;
 	toolManifests: readonly ToolCapabilityManifest[];
 	resources: readonly ResourcePointer[];
-	allowedPaths: readonly string[];
+	readPaths: readonly string[];
+	writePaths?: readonly string[];
 	deniedPaths?: readonly string[];
 	policyVersion: string;
 }): ProfileDispatchPlanResult {
@@ -441,7 +495,8 @@ export function planProfileDispatch(args: {
 		requestedTools,
 		toolManifests: args.toolManifests,
 		resources: selectedResources,
-		allowedPaths: args.allowedPaths,
+		readPaths: args.readPaths,
+		writePaths: args.writePaths,
 		deniedPaths: args.deniedPaths,
 		requestedBudget: profile.budget,
 		authorityBudget: profile.budget,

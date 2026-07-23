@@ -262,20 +262,15 @@ export const MAX_WORKER_DELEGATION_MAX_WALL_CLOCK_MS = 3_600_000;
 export interface WorkerDelegationSettings {
 	enabled?: boolean; // default: true for capable models; explicit false is a hard off-switch
 	orchestrationProfile?: string; // owner-selected default; an active architect may select only profiles in its dispatchProfileIds allowlist
-	model?: string; // model pattern; unset inherits the session model the lane was shipped from
-	profile?: string; // shipped profile; tool grants filter classified lane tools (opaque extension tools stay unavailable)
-	systemPrompt?: string; // replaces the worker role prompt (the level-0 subagent core always remains)
-	maxUsd?: number; // default: 0.50 per delegated worker; post-hoc breaches mark the lane budget_exhausted
+	maxUsd?: number; // default: 0.50 per delegated worker; 0 disables this settings-level ceiling
 	maxWallClockMs?: number; // default: 120000; 0 disables the wall-clock budget
 	writeEnabled?: boolean; // default: false — grants write_files so workers may emit file actions
 	writePaths?: string[]; // envelope path scope for write workers (REQUIRED for writes; empty = writes refused)
 	maxConcurrent?: number; // default: 1, clamped [1,3] — concurrent delegated workers
 }
 
-export type ResolvedWorkerDelegationSettings = Required<
-	Omit<WorkerDelegationSettings, "orchestrationProfile" | "model" | "profile" | "systemPrompt">
-> &
-	Pick<WorkerDelegationSettings, "orchestrationProfile" | "model" | "profile" | "systemPrompt">;
+export type ResolvedWorkerDelegationSettings = Required<Omit<WorkerDelegationSettings, "orchestrationProfile">> &
+	Pick<WorkerDelegationSettings, "orchestrationProfile">;
 
 /** Staleness-propagation policy for worktree-sync; see `core/worktree-sync/codes.ts`. */
 export type WorktreeSyncPolicySetting = "on_land_mandatory" | "overlap_mandatory" | "land_time_only";
@@ -468,7 +463,7 @@ export interface Settings {
 	selfModification?: SelfModificationSettings; // Local guardrails for modifying the pi-adaptative source/harness
 	autonomy?: AutonomySettings; // Low-config autonomy preset controlling background learning/reflection defaults
 	researchLane?: ResearchLaneSettings; // Opt-in autonomous read-only research lane producing evidence bundles
-	workerDelegation?: WorkerDelegationSettings; // Bounded scout-worker delegation; enabled by default on capable models
+	workerDelegation?: WorkerDelegationSettings; // Bounded profile-bound worker delegation; enabled by default on capable models
 	worktreeSync?: WorktreeSyncSettings; // Opt-in hard-gated worktree-per-lane parallel-work workflow (core/worktree-sync)
 	processMatrix?: ProcessMatrixSettings; // Durable master/worker process-matrix supervision (core/process-matrix); on by default
 	windowsShell?: WindowsShellSettings; // Windows shell contract engine tier (core/tools/windows-shell-engine); on by default
@@ -3396,17 +3391,8 @@ export class SettingsManager {
 				: [],
 			maxConcurrent: sanitizeIntegerSetting(configured.maxConcurrent, 1, 1, 3),
 		};
-		if (typeof configured.model === "string" && configured.model.trim().length > 0) {
-			resolved.model = configured.model;
-		}
 		if (typeof configured.orchestrationProfile === "string" && configured.orchestrationProfile.trim().length > 0) {
 			resolved.orchestrationProfile = configured.orchestrationProfile.trim();
-		}
-		if (typeof configured.profile === "string" && configured.profile.trim().length > 0) {
-			resolved.profile = configured.profile;
-		}
-		if (typeof configured.systemPrompt === "string" && configured.systemPrompt.trim().length > 0) {
-			resolved.systemPrompt = configured.systemPrompt;
 		}
 		return resolved;
 	}

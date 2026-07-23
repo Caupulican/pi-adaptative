@@ -2,10 +2,11 @@
 
 ### Added
 
-- Added owner-authored orchestration profiles with pinned model/thinking/tool/resource/budget policy, architect-owned worker allowlists, durable DAG attempts and fenced typed results, exact-session process-worker resume, and a direct-argv `run_process` sandbox for execution profiles.
+- Added owner-authored orchestration profiles with pinned model/thinking/tool/resource/budget policy, architect-owned worker allowlists, durable DAG attempts and fenced typed results, exact-session process-worker resume, and a constrained direct-argv `run_process` launcher for execution profiles.
 
 ### Fixed
 
+- Consolidated worker profile resolution, risk classification, capability grants, execution budgets, lifecycle state, structured-action enforcement, and terminal notifications behind single-owner contracts; removed delegate/settings authority overrides, made undelivered in-process terminal handoffs resume-safe, and enforced trusted acceptance evidence before task/objective completion.
 - Made out-of-process managed workers emit the same bounded event-driven terminal handoff as in-process delegates, taught models to retrieve results once after that handoff instead of polling, and let unprofiled background lanes use the selected model's declared or provider-agnostic reasoning default.
 - Unified foreground startup, background-lane defaults, and isolated-completion clamping through the shared provider-neutral model capability resolver.
 - Made foreground and isolated worker tool routing share the same calibrated text-protocol variant instead of silently forcing subagents onto the default dialect.

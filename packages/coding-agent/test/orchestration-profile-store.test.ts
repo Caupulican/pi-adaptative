@@ -41,7 +41,11 @@ describe("OrchestrationProfileStore", () => {
 
 	beforeEach(() => {
 		root = mkdtempSync(join(tmpdir(), "pi-orchestration-profiles-"));
-		store = new OrchestrationProfileStore({ agentDir: join(root, "agent"), cwd: join(root, "project") });
+		store = new OrchestrationProfileStore({
+			agentDir: join(root, "agent"),
+			cwd: join(root, "project"),
+			projectTrusted: true,
+		});
 	});
 
 	afterEach(() => {
@@ -68,6 +72,24 @@ describe("OrchestrationProfileStore", () => {
 
 		expect(loaded.registry.get("worker")?.modelPolicy.candidates[0]?.modelId).toBe("project-model");
 		expect(loaded.registry.get("worker")?.sourcePath).toBe(projectPath);
+	});
+
+	it("does not load or write project profiles while the project is untrusted", () => {
+		store.save(profile("worker", "global-model"), "global");
+		store.save(profile("worker", "project-model"), "project");
+		const untrusted = new OrchestrationProfileStore({
+			agentDir: join(root, "agent"),
+			cwd: join(root, "project"),
+			projectTrusted: false,
+		});
+
+		const loaded = untrusted.load();
+
+		expect(loaded.registry.get("worker")?.modelPolicy.candidates[0]?.modelId).toBe("global-model");
+		expect(loaded.diagnostics).toEqual([
+			expect.objectContaining({ scope: "project", message: expect.stringContaining("untrusted") }),
+		]);
+		expect(() => untrusted.save(profile("blocked", "model"), "project")).toThrow("not trusted");
 	});
 
 	it("does not silently replace a profile unless the owner requests overwrite", () => {

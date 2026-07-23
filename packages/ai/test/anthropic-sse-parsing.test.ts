@@ -68,17 +68,73 @@ const minimalAnthropicEvents = [
 	},
 ];
 
-function createFakeAnthropicClient(response: Response): Anthropic {
+function createFakeAnthropicClient(response: Response, onCreate?: (params: unknown) => void): Anthropic {
 	return {
 		messages: {
-			create: () => ({
-				asResponse: async () => response,
-			}),
+			create: (params: unknown) => {
+				onCreate?.(params);
+				return {
+					asResponse: async () => response,
+				};
+			},
 		},
 	} as unknown as Anthropic;
 }
 
 describe("Anthropic raw SSE parsing", () => {
+	it("maps custom tool names reversibly across declarations, forced choice, and returned calls", async () => {
+		const model = getModel("anthropic", "claude-haiku-4-5");
+		const localName = "mcp.server:do_thing";
+		const providerName = "mcp_server_do_thing";
+		const context: Context = {
+			messages: [{ role: "user", content: "Use the MCP tool.", timestamp: 1 }],
+			tools: [
+				{ name: localName, description: "MCP tool", parameters: Type.Object({}) },
+				{ name: providerName, description: "Collision sentinel", parameters: Type.Object({}) },
+			],
+		};
+		let payload: unknown;
+		const response = createSseResponse([
+			{
+				event: "message_start",
+				data: JSON.stringify({
+					type: "message_start",
+					message: { id: "msg_tools", usage: { input_tokens: 1, output_tokens: 0 } },
+				}),
+			},
+			{
+				event: "content_block_start",
+				data: JSON.stringify({
+					type: "content_block_start",
+					index: 0,
+					content_block: { type: "tool_use", id: "toolu_1", name: providerName, input: {} },
+				}),
+			},
+			{ event: "content_block_stop", data: JSON.stringify({ type: "content_block_stop", index: 0 }) },
+			{
+				event: "message_delta",
+				data: JSON.stringify({
+					type: "message_delta",
+					delta: { stop_reason: "tool_use" },
+					usage: { output_tokens: 1 },
+				}),
+			},
+			{ event: "message_stop", data: JSON.stringify({ type: "message_stop" }) },
+		]);
+
+		const result = await streamAnthropic(model, context, {
+			client: createFakeAnthropicClient(response, (value) => {
+				payload = value;
+			}),
+			toolChoice: { type: "tool", name: localName },
+		}).result();
+
+		const request = payload as { tools: Array<{ name: string }>; tool_choice: { name: string } };
+		expect(request.tools.map((tool) => tool.name)).toEqual([providerName, `${providerName}_2`]);
+		expect(request.tool_choice.name).toBe(providerName);
+		expect((result.content[0] as ToolCall).name).toBe(localName);
+	});
+
 	it("keeps content_block_start tool input when no deltas arrive", async () => {
 		const model = getModel("anthropic", "claude-haiku-4-5");
 		const context: Context = {

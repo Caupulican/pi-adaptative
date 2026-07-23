@@ -1,6 +1,7 @@
 import { describe, expect, it, vi } from "vitest";
 import type { WorkerRequest } from "../src/core/autonomy/contracts.ts";
 import {
+	buildWorkerSystemPrompt,
 	buildWorkerUserPrompt,
 	parseWorkerOutput,
 	runWorker,
@@ -17,8 +18,8 @@ function workerRequest(overrides: Partial<WorkerRequest> = {}): WorkerRequest {
 			tier: "cheap",
 			risk: "read-only",
 			confidence: 1,
-			reasonCode: "scout_worker",
-			reasons: ["Read-only scout delegation"],
+			reasonCode: "profile_worker",
+			reasons: ["Read-only worker delegation"],
 		},
 		envelope: {
 			id: "worker-env-1",
@@ -85,8 +86,17 @@ describe("buildWorkerUserPrompt", () => {
 	});
 });
 
+describe("buildWorkerSystemPrompt", () => {
+	it("describes combined write and process grants without denying either capability", () => {
+		const prompt = buildWorkerSystemPrompt({ write: true, process: true });
+		expect(prompt).toContain("Write/edit tools");
+		expect(prompt).toContain("run_process");
+		expect(prompt).not.toContain("workspace tools are read-only");
+	});
+});
+
 describe("runWorker", () => {
-	it("completes a scout worker and passes parent validation", async () => {
+	it("completes a delegated worker and passes parent validation", async () => {
 		const outcome = await runWorker(runnerOptions());
 
 		expect(outcome.result.requestId).toBe("worker-1");
@@ -190,6 +200,14 @@ describe("runWorker", () => {
 			runnerOptions({ complete: async () => completionOf('{"summary":"pricey"}', 1.5) }),
 		);
 		expect(outcome.result.status).toBe("completed");
+		expect(outcome.laneStatus).toBe("budget_exhausted");
+		expect(outcome.reasonCode).toBe("cost_budget_exceeded");
+	});
+
+	it("treats an explicit zero-dollar budget as a hard ceiling", async () => {
+		const outcome = await runWorker(
+			runnerOptions({ maxUsd: 0, complete: async () => completionOf('{"summary":"not free"}', 0.01) }),
+		);
 		expect(outcome.laneStatus).toBe("budget_exhausted");
 		expect(outcome.reasonCode).toBe("cost_budget_exceeded");
 	});

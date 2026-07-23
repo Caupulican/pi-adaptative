@@ -1,0 +1,85 @@
+import { describe, expect, it } from "vitest";
+import { buildWorkerExecutionPlan } from "../src/core/delegation/worker-execution-policy.ts";
+import type { ResolvedWorkerDelegationSettings } from "../src/core/settings-manager.ts";
+import { createTestWorkerOrchestrationProfile } from "./orchestration-profile-fixture.ts";
+
+function settings(overrides: Partial<ResolvedWorkerDelegationSettings> = {}): ResolvedWorkerDelegationSettings {
+	return {
+		enabled: true,
+		maxUsd: 1,
+		maxWallClockMs: 120_000,
+		writeEnabled: false,
+		writePaths: [],
+		maxConcurrent: 1,
+		...overrides,
+	};
+}
+
+describe("buildWorkerExecutionPlan", () => {
+	it("derives effective capabilities from materialized profile tools, not the broader ceiling", () => {
+		const profile = createTestWorkerOrchestrationProfile({
+			profileId: "read-only",
+			model: { provider: "test", id: "model" },
+			capabilityCeiling: ["filesystem.read", "filesystem.write", "memory.query"],
+			toolNames: ["read"],
+		});
+
+		const plan = buildWorkerExecutionPlan({
+			profile,
+			settings: settings({ writeEnabled: true, writePaths: ["src"] }),
+			cwd: "/repo",
+			deniedPaths: [],
+			memoryEnabled: true,
+		});
+
+		expect(plan.toolManifests.map((manifest) => manifest.toolName)).toEqual(["read"]);
+		expect(plan.requiredCapabilities).toEqual(["filesystem.read"]);
+		expect(plan.writeEnabled).toBe(false);
+		expect(plan.writePaths).toEqual([]);
+		expect(plan.readMemory).toBe(false);
+	});
+
+	it("treats the global zero wall-clock setting as disabled without creating an infinite budget value", () => {
+		const profile = createTestWorkerOrchestrationProfile({
+			profileId: "no-wall-clock",
+			model: { provider: "test", id: "model" },
+		});
+		const withoutProfileWallClock = { ...profile, budget: { maxCostUsd: 1, maxToolCalls: 4 } };
+
+		const plan = buildWorkerExecutionPlan({
+			profile: withoutProfileWallClock,
+			settings: settings({ maxWallClockMs: 0 }),
+			cwd: "/repo",
+			deniedPaths: [],
+			memoryEnabled: false,
+		});
+
+		expect(plan.budget.maxWallClockMs).toBeUndefined();
+		expect(Object.values(plan.budget).every(Number.isFinite)).toBe(true);
+	});
+
+	it("treats a zero global cost setting as disabled but preserves an explicit zero-cost profile", () => {
+		const profile = createTestWorkerOrchestrationProfile({
+			profileId: "cost-sentinel",
+			model: { provider: "test", id: "model" },
+		});
+		const withoutProfileCost = { ...profile, budget: { maxToolCalls: 4 } };
+		const globalDisabled = buildWorkerExecutionPlan({
+			profile: withoutProfileCost,
+			settings: settings({ maxUsd: 0 }),
+			cwd: "/repo",
+			deniedPaths: [],
+			memoryEnabled: false,
+		});
+		const profileZero = buildWorkerExecutionPlan({
+			profile: { ...profile, budget: { maxCostUsd: 0, maxToolCalls: 4 } },
+			settings: settings({ maxUsd: 0 }),
+			cwd: "/repo",
+			deniedPaths: [],
+			memoryEnabled: false,
+		});
+
+		expect(globalDisabled.budget.maxCostUsd).toBeUndefined();
+		expect(profileZero.budget.maxCostUsd).toBe(0);
+	});
+});

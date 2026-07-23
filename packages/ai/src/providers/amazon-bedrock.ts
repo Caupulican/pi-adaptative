@@ -48,6 +48,7 @@ import { AssistantMessageEventStream } from "../utils/event-stream.ts";
 import { parseStreamingJson } from "../utils/json-parse.ts";
 import { createHttpProxyAgentsForTarget } from "../utils/node-http-proxy.ts";
 import { sanitizeSurrogates } from "../utils/sanitize-unicode.ts";
+import { createToolNameMap, type ToolNameMap } from "../utils/tool-names.ts";
 import { adjustMaxTokensForThinking, buildBaseOptions, clampReasoning } from "./simple-options.ts";
 import { transformMessages } from "./transform-messages.ts";
 
@@ -99,6 +100,7 @@ export const streamBedrock: StreamFunction<"bedrock-converse-stream", BedrockOpt
 	const stream = new AssistantMessageEventStream();
 
 	(async () => {
+		const toolNameMap = createToolNameMap(context.tools ?? []);
 		const output: AssistantMessage = {
 			role: "assistant",
 			content: [],
@@ -194,13 +196,13 @@ export const streamBedrock: StreamFunction<"bedrock-converse-stream", BedrockOpt
 			const inferenceMaxTokens = options.maxTokens ?? (isAnthropicClaudeModel(model) ? model.maxTokens : undefined);
 			let commandInput = {
 				modelId: model.id,
-				messages: convertMessages(context, model, cacheRetention),
+				messages: convertMessages(context, model, cacheRetention, toolNameMap),
 				system: buildSystemPrompt(context.systemPrompt, model, cacheRetention),
 				inferenceConfig: {
 					...(inferenceMaxTokens !== undefined && { maxTokens: inferenceMaxTokens }),
 					...(options.temperature !== undefined && { temperature: options.temperature }),
 				},
-				toolConfig: convertToolConfig(context.tools, options.toolChoice),
+				toolConfig: convertToolConfig(context.tools, options.toolChoice, toolNameMap),
 				additionalModelRequestFields: buildAdditionalModelRequestFields(model, options),
 				...(options.requestMetadata !== undefined && { requestMetadata: options.requestMetadata }),
 			};
@@ -229,7 +231,7 @@ export const streamBedrock: StreamFunction<"bedrock-converse-stream", BedrockOpt
 					}
 					stream.push({ type: "start", partial: output });
 				} else if (item.contentBlockStart) {
-					handleContentBlockStart(item.contentBlockStart, blocks, output, stream);
+					handleContentBlockStart(item.contentBlockStart, blocks, output, stream, toolNameMap);
 				} else if (item.contentBlockDelta) {
 					handleContentBlockDelta(item.contentBlockDelta, blocks, output, stream);
 				} else if (item.contentBlockStop) {
@@ -398,6 +400,7 @@ function handleContentBlockStart(
 	blocks: Block[],
 	output: AssistantMessage,
 	stream: AssistantMessageEventStream,
+	toolNameMap: ToolNameMap,
 ): void {
 	const index = event.contentBlockIndex!;
 	const start = event.start;
@@ -406,7 +409,7 @@ function handleContentBlockStart(
 		const block: Block = {
 			type: "toolCall",
 			id: start.toolUse.toolUseId || "",
-			name: start.toolUse.name || "",
+			name: toolNameMap.toOriginalName(start.toolUse.name || ""),
 			arguments: {},
 			partialJson: "",
 			index,
@@ -696,6 +699,7 @@ function convertMessages(
 	context: Context,
 	model: Model<"bedrock-converse-stream">,
 	cacheRetention: CacheRetention,
+	toolNameMap: ToolNameMap,
 ): Message[] {
 	const result: Message[] = [];
 	const transformedMessages = transformMessages(context.messages, model, normalizeToolCallId);
@@ -749,7 +753,11 @@ function convertMessages(
 						}
 						case "toolCall":
 							contentBlocks.push({
-								toolUse: { toolUseId: c.id, name: c.name, input: c.arguments },
+								toolUse: {
+									toolUseId: c.id,
+									name: toolNameMap.toProviderName(c.name),
+									input: c.arguments,
+								},
 							});
 							break;
 						case "thinking": {
@@ -870,12 +878,13 @@ function convertMessages(
 function convertToolConfig(
 	tools: Tool[] | undefined,
 	toolChoice: BedrockOptions["toolChoice"],
+	toolNameMap: ToolNameMap,
 ): ToolConfiguration | undefined {
 	if (!tools?.length || toolChoice === "none") return undefined;
 
 	const bedrockTools: BedrockTool[] = tools.map((tool) => ({
 		toolSpec: {
-			name: tool.name,
+			name: toolNameMap.toProviderName(tool.name),
 			description: tool.description,
 			inputSchema: { json: tool.parameters as unknown as DocumentType },
 		},
@@ -891,7 +900,7 @@ function convertToolConfig(
 			break;
 		default:
 			if (toolChoice?.type === "tool") {
-				bedrockToolChoice = { tool: { name: toolChoice.name } };
+				bedrockToolChoice = { tool: { name: toolNameMap.toProviderName(toolChoice.name) } };
 			}
 	}
 

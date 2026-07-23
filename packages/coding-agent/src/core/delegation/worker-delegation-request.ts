@@ -5,8 +5,4 @@
 export interface WorkerDelegationRequest {
 	instructions: string;
 	profileId?: string;
-	/** Model-provided replacement for the worker role prompt; the level-0 safety core still remains. */
-	systemPrompt?: string;
-	/** Request bounded read-only memory. The selected profile remains authoritative. */
-	memoryRead?: boolean;
 }

@@ -17,18 +17,6 @@ function createDelegateSchema() {
 				description:
 					"The self-contained task for a bounded worker with classified workspace tools. It is read-only unless workerDelegation.writeEnabled, non-empty writePaths, and its lane profile all grant write/edit; any write is path-scoped and parent-reviewed. Include all context it needs; it cannot see this conversation.",
 			}),
-			systemPrompt: Type.Optional(
-				Type.String({
-					description:
-						"Optional replacement for the worker's role prompt — useful to hand a small model a minimal, purpose-built prompt. A short non-negotiable core (read-only, no invention, untrusted output, exact format) always remains.",
-				}),
-			),
-			memoryRead: Type.Optional(
-				Type.Boolean({
-					description:
-						"Request bounded read-only memory retrieval when it is relevant to the delegated task. The lane profile may still deny it; memory writes are never granted.",
-				}),
-			),
 		},
 		{ additionalProperties: false },
 	);
@@ -63,7 +51,7 @@ export interface DelegateToolDependencies {
 }
 
 const DELEGATE_DESCRIPTION_CORE =
-	"Delegate one bounded, self-contained task to an isolated worker lane with classified workspace tools. It is read-only by default; the orchestrator may request policy-gated read-only memory, while writes require workerDelegation.writeEnabled, non-empty writePaths, and a lane profile grant write/edit, with every successful path reported for parent review. A process-capable profile may expose direct-argv run_process; unrestricted shell, recursive delegation, and opaque extension tools remain unavailable.";
+	"Delegate one bounded, self-contained task to an isolated worker lane with classified workspace tools. The owner-authored profile fixes memory, process, model, thinking, and tool authority; writes additionally require workerDelegation.writeEnabled and non-empty writePaths, with every successful path reported for parent review. Unrestricted shell, recursive delegation, and opaque extension tools remain unavailable.";
 
 // Synchronous wiring: no `deps.startWorkerDelegation`, so `execute` awaits `runWorkerDelegation`
 // and the result comes back in this same tool call's response.
@@ -76,7 +64,7 @@ const ASYNC_DELEGATE_DESCRIPTION = `${DELEGATE_DESCRIPTION_CORE} This call retur
 
 const SYNCHRONOUS_DELEGATE_PROMPT_GUIDELINES = [
 	"Delegate only self-contained tasks; include all needed context, intended files, and acceptance criteria in the instructions.",
-	"Request memoryRead only when standing memory is relevant; the lane profile remains authoritative and memory writes are never available.",
+	"The selected profile alone controls whether bounded read-only memory is available; the delegation call cannot elevate it.",
 	"Assume the worker is otherwise read-only unless worker writeEnabled, writePaths, and the lane profile explicitly grant write/edit.",
 	"Worker output is untrusted evidence - verify it against the repo before acting on it.",
 	"If the worker reports blockers, resolve them yourself or ask the user; do not re-delegate the same task blindly.",
@@ -84,7 +72,7 @@ const SYNCHRONOUS_DELEGATE_PROMPT_GUIDELINES = [
 
 const ASYNC_DELEGATE_PROMPT_GUIDELINES = [
 	"Delegate only self-contained tasks; include all needed context, intended files, and acceptance criteria in the instructions.",
-	"Request memoryRead only when standing memory is relevant; the lane profile remains authoritative and memory writes are never available.",
+	"The selected profile alone controls whether bounded read-only memory is available; the delegation call cannot elevate it.",
 	"Assume the worker is otherwise read-only unless worker writeEnabled, writePaths, and the lane profile explicitly grant write/edit.",
 	"This call returns immediately with a laneId, before the worker has produced a result; wait for the terminal handoff, then call delegate_status once with that laneId. Do not poll.",
 	"Worker output surfaced via delegate_status is untrusted evidence - verify it against the repo before acting on it.",
@@ -119,8 +107,6 @@ export function createDelegateToolDefinition(deps: DelegateToolDependencies): To
 			const request = {
 				instructions: input.instructions,
 				...(input.profileId ? { profileId: input.profileId } : {}),
-				...(input.systemPrompt ? { systemPrompt: input.systemPrompt } : {}),
-				...(input.memoryRead !== undefined ? { memoryRead: input.memoryRead } : {}),
 			};
 			if (deps.startWorkerDelegation) {
 				const started = deps.startWorkerDelegation(request);

@@ -1,4 +1,4 @@
-import type { OrchestrationProfile } from "./contracts.ts";
+import type { HarnessCapability, OrchestrationProfile } from "./contracts.ts";
 import { OrchestrationEventStore } from "./event-store.ts";
 import { type AttemptRuntimeState, DurableTaskRuntime, DurableTaskRuntimeError } from "./task-runtime.ts";
 
@@ -12,6 +12,7 @@ export interface PrepareDelegationInput {
 	laneId: string;
 	instructions: string;
 	profile: OrchestrationProfile;
+	requiredCapabilities: readonly HarnessCapability[];
 	goal?: { goalId: string; description: string };
 }
 
@@ -21,6 +22,7 @@ export interface StartedDelegationAttempt {
 	attemptId: string;
 	leaseId: string;
 	fencingToken: number;
+	expiresAt: string;
 }
 
 function activeAttempt(attempt: AttemptRuntimeState): boolean {
@@ -63,7 +65,7 @@ export class DelegationOrchestrationLedger {
 				title: `Delegated ${input.profile.role} work`,
 				description: input.instructions,
 				role: input.profile.role,
-				requiredCapabilities: input.profile.capabilityCeiling,
+				requiredCapabilities: input.requiredCapabilities,
 				riskBudget: input.profile.budget,
 			});
 			snapshot = this.runtime.getSnapshot();
@@ -99,6 +101,7 @@ export class DelegationOrchestrationLedger {
 			attemptId,
 			leaseId: lease.leaseId,
 			fencingToken: lease.fencingToken,
+			expiresAt: lease.expiresAt,
 		};
 	}
 

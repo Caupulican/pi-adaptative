@@ -15,7 +15,7 @@ const manifests: ToolCapabilityManifest[] = [
 		moduleSpecifier: "./tools/bash.ts",
 		capabilities: ["process.exec"],
 		roles: ["operator", "verifier"],
-		enforcements: ["process-sandbox"],
+		enforcements: ["process-launcher"],
 	},
 	{
 		toolName: "write",
@@ -46,7 +46,8 @@ describe("ExecutionPolicyCompiler", () => {
 			authorityCapabilities: ["filesystem.read", "filesystem.write", "process.exec"],
 			requestedTools: ["read", "write"],
 			toolManifests: manifests,
-			allowedPaths: ["packages/coding-agent"],
+			readPaths: ["packages/coding-agent"],
+			writePaths: ["packages/coding-agent"],
 			requestedBudget: { maxTokens: 10_000, maxCostUsd: 1 },
 			authorityBudget: { maxTokens: 20_000, maxCostUsd: 2 },
 			policyVersion: "policy-1",
@@ -81,10 +82,10 @@ describe("ExecutionPolicyCompiler", () => {
 					moduleSpecifier: "extension:runner",
 					capabilities: ["process.exec"],
 					roles: ["explorer"],
-					enforcements: ["process-sandbox"],
+					enforcements: ["process-launcher"],
 				},
 			],
-			allowedPaths: ["."],
+			readPaths: ["."],
 			policyVersion: "policy-1",
 		});
 
@@ -144,7 +145,6 @@ describe("ExecutionPolicyCompiler", () => {
 			authorityCapabilities: ["filesystem.read"],
 			requestedTools: ["bash"],
 			toolManifests: manifests,
-			allowedPaths: ["."],
 			requestedBudget: { maxCostUsd: 5 },
 			authorityBudget: { maxCostUsd: 1 },
 			policyVersion: "policy-1",
@@ -172,7 +172,28 @@ describe("ExecutionPolicyCompiler", () => {
 
 		expect(result).toMatchObject({
 			outcome: "deny",
-			reasonCodes: ["filesystem_capability_missing_positive_path_scope"],
+			reasonCodes: ["read_capability_missing_positive_path_scope"],
 		});
+	});
+
+	it("intersects approval thresholds with cost ceilings in the canonical budget", () => {
+		const result = compiler().compile({
+			objectiveId: "objective-1",
+			taskId: "task-1",
+			attemptId: "attempt-1",
+			subjectId: "worker-1",
+			role: "planner",
+			requiredCapabilities: ["workflow.plan"],
+			authorityCapabilities: ["workflow.plan"],
+			requestedTools: [],
+			toolManifests: [],
+			requestedBudget: { maxCostUsd: 2, requireApprovalAboveCostUsd: 1.5 },
+			authorityBudget: { maxCostUsd: 3, requireApprovalAboveCostUsd: 1 },
+			policyVersion: "policy-1",
+		});
+
+		expect(result.outcome).toBe("allow");
+		if (result.outcome !== "allow") return;
+		expect(result.grant.budget).toMatchObject({ maxCostUsd: 1, requireApprovalAboveCostUsd: 1 });
 	});
 });

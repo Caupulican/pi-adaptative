@@ -52,7 +52,7 @@ export interface OrchestrationModelPolicy {
 	candidates: readonly OrchestrationModelBinding[];
 }
 
-/** Direct-argv process sandbox owned by an orchestration profile. No command is evaluated by a shell. */
+/** Constrained direct-argv launcher policy. This is allowlisting, not OS/container isolation. */
 export interface OrchestrationExecutionPolicy {
 	allowedExecutables: readonly string[];
 	allowedEnvironmentVariables: readonly string[];
@@ -216,7 +216,7 @@ export interface OrchestrationDispatchRequest {
 
 export type CapabilityEnforcementKind =
 	| "path-scope"
-	| "process-sandbox"
+	| "process-launcher"
 	| "service-proxy"
 	| "memory-broker"
 	| "control-plane";
@@ -239,7 +239,8 @@ export interface ExecutionGrant {
 	capabilities: readonly HarnessCapability[];
 	allowedTools: readonly string[];
 	resources: readonly ResourcePointer[];
-	allowedPaths: readonly string[];
+	readPaths: readonly string[];
+	writePaths: readonly string[];
 	deniedPaths: readonly string[];
 	budget: RiskBudget;
 	policyVersion: string;
@@ -313,6 +314,7 @@ export interface WorkerResultContract {
 	leaseId: string;
 	fencingToken: number;
 	status: WorkerResultContractStatus;
+	reasonCode: string;
 	summary: string;
 	artifacts: readonly ArtifactContract[];
 	evidence: readonly EvidenceContract[];
@@ -350,6 +352,7 @@ export const ORCHESTRATION_EVENT_TYPES = [
 	"agent.resume_requested",
 	"agent.resumed",
 	"attempt.queued",
+	"attempt.grant_bound",
 	"attempt.leased",
 	"attempt.started",
 	"attempt.checkpointed",

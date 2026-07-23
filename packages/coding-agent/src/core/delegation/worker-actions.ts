@@ -3,13 +3,14 @@ import { dirname, relative, resolve } from "node:path";
 import type { Tool, ToolArgumentValidationOptions } from "@caupulican/pi-ai";
 import { validateToolArguments } from "@caupulican/pi-ai";
 import { Type } from "typebox";
-import type { CapabilityEnvelope } from "../autonomy/contracts.ts";
-import { isPathWithinEnvelope } from "../autonomy/envelope-enforcement.ts";
+import { safeRealpathSync } from "../autonomy/path-scope.ts";
+import { type CapabilityGateway, CapabilityGatewayDeniedError } from "../orchestration/capability-gateway.ts";
+import type { ToolCapabilityManifest } from "../orchestration/contracts.ts";
 
 /**
  * Code-writing workers (G2): the worker MODEL never touches the filesystem — it emits strict-JSON
- * actions, and this RUNNER-side module applies them deterministically through the capability
- * envelope's path scope. That keeps the structural-contract philosophy (a local model without
+ * actions, and this RUNNER-side module applies them deterministically through the compiled
+ * execution grant. That keeps the structural-contract philosophy (a local model without
  * tool-calling templates can still write code) and makes enforcement execution-time, not
  * validation-only: an out-of-scope action is REFUSED with a reason, never silently dropped, and
  * refusals surface as blockers on the result.
@@ -89,7 +90,7 @@ export function parseWorkerActions(raw: unknown, validation?: ToolArgumentValida
 export interface AppliedActionsReport {
 	/** Repo-relative paths actually changed. */
 	changedFiles: string[];
-	/** Envelope-scope refusals (execution-time enforcement) — surfaced, never silent. */
+	/** Grant refusals (execution-time enforcement) — surfaced, never silent. */
 	refused: Array<{ path: string; reason: string }>;
 	/** Actions that were in scope but could not be applied (missing file, old-text not found). */
 	failed: Array<{ path: string; reason: string }>;
@@ -97,16 +98,31 @@ export interface AppliedActionsReport {
 
 export function applyWorkerActions(args: {
 	actions: readonly WorkerAction[];
-	envelope: CapabilityEnvelope;
+	gateway: CapabilityGateway;
+	toolManifests: readonly ToolCapabilityManifest[];
 	cwd: string;
 }): AppliedActionsReport {
 	const report: AppliedActionsReport = { changedFiles: [], refused: [], failed: [] };
+	const manifests = new Map(args.toolManifests.map((manifest) => [manifest.toolName, manifest]));
 	for (const action of args.actions) {
-		if (!isPathWithinEnvelope(args.envelope, action.path, args.cwd)) {
-			report.refused.push({ path: action.path, reason: `outside envelope ${args.envelope.id} path scope` });
+		const manifest = manifests.get(action.op);
+		if (!manifest) {
+			report.refused.push({
+				path: action.path,
+				reason: `${action.op} is not present in the compiled tool manifest`,
+			});
 			continue;
 		}
-		const target = resolve(args.cwd, action.path);
+		try {
+			args.gateway.authorizeToolCall(manifest, action.op, { path: action.path });
+		} catch (error) {
+			if (error instanceof CapabilityGatewayDeniedError) {
+				report.refused.push({ path: action.path, reason: `${error.reasonCode}: ${error.message}` });
+				continue;
+			}
+			throw error;
+		}
+		const target = safeRealpathSync(resolve(args.cwd, action.path));
 		const relativePath = relative(args.cwd, target).replaceAll("\\", "/");
 		try {
 			if (action.op === "write") {

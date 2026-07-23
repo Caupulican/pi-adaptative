@@ -89,7 +89,7 @@ export function createRunProcessToolDefinition(cwd: string, options: RunProcessT
 		name: "run_process",
 		label: "Run Process",
 		description: `Run one owner-allowed executable using direct argv without a shell. Allowed: ${options.policy.allowedExecutables.join(", ")}.`,
-		promptSnippet: "Run an owner-allowed executable through a direct-argv process sandbox.",
+		promptSnippet: "Run an owner-allowed executable through a constrained direct-argv launcher (not OS isolation).",
 		promptGuidelines: [
 			"Use only an executable listed by the profile. Arguments are passed literally; shell operators and interpolation are unavailable.",
 			"Treat a non-zero exit code, timeout, abort, or output-limit termination as failure.",

@@ -133,6 +133,32 @@ describe("bedrock redacted thinking", () => {
 	});
 });
 
+describe("bedrock tool-name routing", () => {
+	it("restores the local name on streamed tool calls", async () => {
+		bedrockMock.streamEvents = [
+			{ messageStart: { role: "assistant" } },
+			{
+				contentBlockStart: {
+					contentBlockIndex: 0,
+					start: { toolUse: { toolUseId: "tool-1", name: "mcp_server_do_thing" } },
+				},
+			},
+			{ contentBlockDelta: { contentBlockIndex: 0, delta: { toolUse: { input: "{}" } } } },
+			{ contentBlockStop: { contentBlockIndex: 0 } },
+			{ messageStop: { stopReason: "tool_use" } },
+		];
+		const result = await streamBedrock(baseModel, {
+			messages: [{ role: "user", content: "Use the MCP tool", timestamp: 1 }],
+			tools: [
+				{ name: "mcp.server:do_thing", description: "MCP tool", parameters: { type: "object" } },
+				{ name: "mcp_server_do_thing", description: "Collision", parameters: { type: "object" } },
+			],
+		}).result();
+
+		expect(result.content[0]).toMatchObject({ type: "toolCall", name: "mcp.server:do_thing", arguments: {} });
+	});
+});
+
 describe("bedrock image format downgrade", () => {
 	it("downgrades unsupported image formats without dropping supported content", async () => {
 		const payload = await capturePayload({
@@ -165,6 +191,45 @@ describe("bedrock image format downgrade", () => {
 });
 
 describe("bedrock convertMessages skips unknown content types", () => {
+	it("maps custom tool names in declarations and assistant history", async () => {
+		const localName = "mcp.server:do_thing";
+		const messages: Message[] = [
+			{
+				role: "assistant",
+				content: [{ type: "toolCall", id: "tool-1", name: localName, arguments: {} }],
+				api: "bedrock-converse-stream",
+				provider: "amazon-bedrock",
+				model: baseModel.id,
+				usage: {
+					input: 0,
+					output: 0,
+					cacheRead: 0,
+					cacheWrite: 0,
+					totalTokens: 0,
+					cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, total: 0 },
+				},
+				stopReason: "toolUse",
+				timestamp: 1,
+			},
+		];
+		const payload = await capturePayload({
+			messages,
+			tools: [
+				{ name: localName, description: "MCP tool", parameters: { type: "object" } },
+				{ name: "mcp_server_do_thing", description: "Collision", parameters: { type: "object" } },
+			],
+		});
+		const request = payload as {
+			messages: Array<{ content: Array<{ toolUse: { name: string } }> }>;
+			toolConfig: { tools: Array<{ toolSpec: { name: string } }> };
+		};
+		expect(request.toolConfig.tools.map((tool) => tool.toolSpec.name)).toEqual([
+			"mcp_server_do_thing",
+			"mcp_server_do_thing_2",
+		]);
+		expect(request.messages[0].content[0].toolUse.name).toBe("mcp_server_do_thing");
+	});
+
 	it("skips unknown user content blocks instead of throwing", async () => {
 		const messages: Message[] = [
 			{

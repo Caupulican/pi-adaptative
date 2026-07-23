@@ -20,6 +20,7 @@ import {
 	type WorkerResultContract,
 } from "./contracts.ts";
 import type { OrchestrationEventStore } from "./event-store.ts";
+import { validateRiskBudget } from "./risk-budget.ts";
 
 export interface ObjectiveRuntimeState {
 	objective: ObjectiveContract;
@@ -36,6 +37,7 @@ export interface AttemptRuntimeState {
 	taskId: string;
 	dispatch: OrchestrationDispatchRequest;
 	status: AttemptStatus;
+	reasonCode?: string;
 	grantId?: string;
 	agentId?: string;
 	lease?: AttemptLease;
@@ -130,6 +132,14 @@ function number(value: unknown, label: string): number {
 	return value;
 }
 
+function assertRiskBudget(budget: RiskBudget | undefined, label: string): void {
+	try {
+		validateRiskBudget(budget ?? {}, label);
+	} catch (error) {
+		throw new DurableTaskRuntimeError(error instanceof Error ? error.message : String(error));
+	}
+}
+
 function stringArray(value: unknown, label: string): string[] {
 	if (!Array.isArray(value) || !value.every((entry) => typeof entry === "string")) {
 		throw new DurableTaskRuntimeError(`${label} must be a string array.`);
@@ -201,6 +211,13 @@ function taskStatusForResult(status: WorkerResultContract["status"]): Orchestrat
 	if (status === "failed") return "failed";
 	if (status === "cancelled") return "cancelled";
 	return "blocked";
+}
+
+function missingTrustedCriteria(result: WorkerResultContract, criterionIds: readonly string[]): string[] {
+	const proven = new Set(
+		result.evidence.flatMap((evidence) => (evidence.trusted && evidence.criterionId ? [evidence.criterionId] : [])),
+	);
+	return criterionIds.filter((criterionId) => !proven.has(criterionId));
 }
 
 function refreshReadyTasks(state: TaskRuntimeProjection, objectiveId: string, at: string): void {
@@ -347,6 +364,17 @@ export function reduceOrchestrationEvent(
 			};
 			break;
 		}
+		case "attempt.grant_bound": {
+			const attemptId = string(event.payload.attemptId, "attempt.grant_bound.attemptId");
+			const attempt = attempts[attemptId];
+			if (!attempt) throw new DurableTaskRuntimeError(`Unknown attempt '${attemptId}'.`);
+			attempts[attemptId] = {
+				...attempt,
+				grantId: string(event.payload.grantId, "attempt.grant_bound.grantId"),
+				updatedAt: event.occurredAt,
+			};
+			break;
+		}
 		case "attempt.leased": {
 			const lease = leaseFromPayload(event.payload);
 			const attempt = attempts[lease.attemptId];
@@ -404,7 +432,12 @@ export function reduceOrchestrationEvent(
 			const attemptId = string(event.payload.attemptId, "attempt.suspended.attemptId");
 			const attempt = attempts[attemptId];
 			if (!attempt) throw new DurableTaskRuntimeError(`Unknown attempt '${attemptId}'.`);
-			attempts[attemptId] = { ...attempt, status: "suspended", updatedAt: event.occurredAt };
+			attempts[attemptId] = {
+				...attempt,
+				status: "suspended",
+				...(typeof event.payload.reasonCode === "string" ? { reasonCode: event.payload.reasonCode } : {}),
+				updatedAt: event.occurredAt,
+			};
 			if (attempt.agentId) {
 				const agent = agents[attempt.agentId];
 				if (agent) agents[attempt.agentId] = { ...agent, status: "suspended", updatedAt: event.occurredAt };
@@ -437,7 +470,12 @@ export function reduceOrchestrationEvent(
 			const attemptId = string(event.payload.attemptId, "attempt.cancelled.attemptId");
 			const attempt = attempts[attemptId];
 			if (!attempt) throw new DurableTaskRuntimeError(`Unknown attempt '${attemptId}'.`);
-			attempts[attemptId] = { ...attempt, status: "cancelled", updatedAt: event.occurredAt };
+			attempts[attemptId] = {
+				...attempt,
+				status: "cancelled",
+				reasonCode: string(event.payload.reasonCode, "attempt.cancelled.reasonCode"),
+				updatedAt: event.occurredAt,
+			};
 			const task = tasks[attempt.taskId];
 			if (task) {
 				tasks[attempt.taskId] = {
@@ -481,7 +519,12 @@ export function reduceOrchestrationEvent(
 			const attemptId = string(event.payload.attemptId, "attempt.lease_expired.attemptId");
 			const attempt = attempts[attemptId];
 			if (!attempt) throw new DurableTaskRuntimeError(`Unknown attempt '${attemptId}'.`);
-			attempts[attemptId] = { ...attempt, status: "expired", updatedAt: event.occurredAt };
+			attempts[attemptId] = {
+				...attempt,
+				status: "expired",
+				...(typeof event.payload.reasonCode === "string" ? { reasonCode: event.payload.reasonCode } : {}),
+				updatedAt: event.occurredAt,
+			};
 			const task = tasks[attempt.taskId];
 			if (task)
 				tasks[attempt.taskId] = { ...task, task: { ...task.task, status: "ready", updatedAt: event.occurredAt } };
@@ -565,6 +608,7 @@ export class DurableTaskRuntime {
 
 	createObjective(input: CreateObjectiveInput): ObjectiveContract {
 		this.refresh();
+		assertRiskBudget(input.riskBudget, "objective.riskBudget");
 		const now = this.nowIso();
 		const objective: ObjectiveContract = {
 			schemaVersion: ORCHESTRATION_SCHEMA_VERSION,
@@ -580,6 +624,14 @@ export class DurableTaskRuntime {
 		};
 		if (!objective.title || !objective.description)
 			throw new DurableTaskRuntimeError("Objective title and description are required.");
+		const criterionIds = objective.acceptanceCriteria.map((criterion) => criterion.id);
+		if (
+			criterionIds.some((id) => !id.trim()) ||
+			new Set(criterionIds).size !== criterionIds.length ||
+			objective.acceptanceCriteria.some((criterion) => !criterion.description.trim())
+		) {
+			throw new DurableTaskRuntimeError("Objective acceptance criteria require unique ids and descriptions.");
+		}
 		if (this.state.objectives[objective.objectiveId]) {
 			throw new DurableTaskRuntimeError(`Objective '${objective.objectiveId}' already exists.`);
 		}
@@ -595,12 +647,25 @@ export class DurableTaskRuntime {
 
 	createTask(input: CreateTaskInput): TaskContract {
 		this.refresh();
+		assertRiskBudget(input.riskBudget, "task.riskBudget");
 		const objectiveState = this.state.objectives[input.objectiveId];
 		if (!objectiveState) throw new DurableTaskRuntimeError(`Unknown objective '${input.objectiveId}'.`);
 		if (objectiveState.objective.status !== "active") {
 			throw new DurableTaskRuntimeError(`Objective '${input.objectiveId}' is not active.`);
 		}
 		const dependsOn = [...new Set(input.dependsOn ?? [])];
+		const acceptanceCriterionIds = [...new Set(input.acceptanceCriterionIds ?? [])];
+		const objectiveCriterionIds = new Set(
+			objectiveState.objective.acceptanceCriteria.map((criterion) => criterion.id),
+		);
+		const unknownCriterionIds = acceptanceCriterionIds.filter(
+			(criterionId) => !objectiveCriterionIds.has(criterionId),
+		);
+		if (unknownCriterionIds.length > 0) {
+			throw new DurableTaskRuntimeError(
+				`Task references unknown acceptance criteria: ${unknownCriterionIds.join(", ")}.`,
+			);
+		}
 		for (const dependencyId of dependsOn) {
 			const dependency = this.state.tasks[dependencyId];
 			if (!dependency || dependency.task.objectiveId !== input.objectiveId) {
@@ -620,7 +685,7 @@ export class DurableTaskRuntime {
 			status: dependsOn.length === 0 ? "ready" : "pending",
 			dependsOn,
 			requiredCapabilities: [...new Set(input.requiredCapabilities ?? [])],
-			acceptanceCriterionIds: [...new Set(input.acceptanceCriterionIds ?? [])],
+			acceptanceCriterionIds,
 			riskBudget: { ...(input.riskBudget ?? {}) },
 			createdAt: now,
 			updatedAt: now,
@@ -662,6 +727,25 @@ export class DurableTaskRuntime {
 			actor: "runtime",
 			idempotencyKey: `attempt-queued:${attemptId}`,
 			payload: toJsonObject({ attemptId, taskId, dispatch, ...(grantId ? { grantId } : {}) }),
+		});
+		return structuredClone(this.state.attempts[attemptId]!);
+	}
+
+	bindAttemptGrant(attemptId: string, grantId: string): AttemptRuntimeState {
+		this.refresh();
+		const attempt = this.requireAttempt(attemptId);
+		if (!["queued", "leased", "running"].includes(attempt.status)) {
+			throw new DurableTaskRuntimeError(`Attempt '${attemptId}' cannot bind a grant from '${attempt.status}'.`);
+		}
+		if (!grantId.trim()) throw new DurableTaskRuntimeError("Grant id is required.");
+		if (attempt.grantId === grantId) return structuredClone(attempt);
+		if (attempt.grantId) throw new DurableTaskRuntimeError(`Attempt '${attemptId}' already has a different grant.`);
+		this.commit({
+			type: "attempt.grant_bound",
+			aggregateId: attemptId,
+			actor: "policy",
+			idempotencyKey: `attempt-grant-bound:${attemptId}:${grantId}`,
+			payload: toJsonObject({ attemptId, grantId }),
 		});
 		return structuredClone(this.state.attempts[attemptId]!);
 	}
@@ -755,6 +839,14 @@ export class DurableTaskRuntime {
 		const task = this.state.tasks[attempt.taskId];
 		if (!task || task.task.objectiveId !== result.objectiveId) {
 			throw new DurableTaskRuntimeError("Worker result objectiveId does not match attempt.");
+		}
+		if (result.status === "completed") {
+			const missingCriteria = missingTrustedCriteria(result, task.task.acceptanceCriterionIds);
+			if (missingCriteria.length > 0) {
+				throw new DurableTaskRuntimeError(
+					`Completed result lacks trusted evidence for acceptance criteria: ${missingCriteria.join(", ")}.`,
+				);
+			}
 		}
 		this.commit({
 			type: "attempt.finished",
@@ -910,19 +1002,42 @@ export class DurableTaskRuntime {
 				`Objective '${objectiveId}' has incomplete tasks: ${incomplete.join(", ")}.`,
 			);
 		}
+		const requiredCriterionIds = objective.objective.acceptanceCriteria
+			.filter((criterion) => criterion.required)
+			.map((criterion) => criterion.id);
+		const evidence = objective.taskIds.flatMap((taskId) => {
+			const task = this.state.tasks[taskId];
+			return task?.attemptIds.flatMap((attemptId) => this.state.attempts[attemptId]?.result?.evidence ?? []) ?? [];
+		});
+		const provenCriterionIds = new Set(
+			evidence.flatMap((item) => (item.trusted && item.criterionId ? [item.criterionId] : [])),
+		);
+		const unproven = requiredCriterionIds.filter((criterionId) => !provenCriterionIds.has(criterionId));
+		if (unproven.length > 0) {
+			throw new DurableTaskRuntimeError(
+				`Objective '${objectiveId}' lacks trusted evidence for required criteria: ${unproven.join(", ")}.`,
+			);
+		}
 		this.transitionObjective(objectiveId, "objective.completed", "completed");
 	}
 
-	enqueueNotification(args: { objectiveId: string; attemptId?: string; message: string }): NotificationRuntimeState {
+	enqueueNotification(args: {
+		notificationId?: string;
+		objectiveId: string;
+		attemptId?: string;
+		message: string;
+	}): NotificationRuntimeState {
 		this.refresh();
 		this.requireObjective(args.objectiveId);
-		const notificationId = `notification-${this.createId()}`;
+		const notificationId = args.notificationId ?? `notification-${this.createId()}`;
+		const existing = this.state.notifications[notificationId];
+		if (existing) return structuredClone(existing);
 		this.commit({
 			type: "notification.enqueued",
 			aggregateId: args.objectiveId,
 			actor: "runtime",
 			idempotencyKey: `notification-enqueued:${notificationId}`,
-			payload: toJsonObject({ notificationId, ...args }),
+			payload: toJsonObject({ ...args, notificationId }),
 		});
 		return structuredClone(this.state.notifications[notificationId]!);
 	}

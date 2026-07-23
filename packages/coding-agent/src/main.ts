@@ -874,7 +874,7 @@ export async function main(args: string[], options?: MainOptions) {
 			parsed.orchestrationProfile?.trim() || runtimeSettingsManager.getActiveOrchestrationProfile();
 		let orchestrationProfile: OrchestrationProfile | undefined;
 		if (orchestrationProfileId) {
-			const loaded = new OrchestrationProfileStore({ agentDir, cwd }).load();
+			const loaded = new OrchestrationProfileStore({ agentDir, cwd, projectTrusted }).load();
 			orchestrationDiagnostics.push(
 				...loaded.diagnostics.map((diagnostic) => ({
 					type: "warning" as const,

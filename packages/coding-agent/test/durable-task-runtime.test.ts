@@ -48,6 +48,7 @@ function completedResult(args: {
 	leaseId: string;
 	fencingToken: number;
 	status?: WorkerResultContract["status"];
+	evidence?: WorkerResultContract["evidence"];
 }): WorkerResultContract {
 	return {
 		schemaVersion: ORCHESTRATION_SCHEMA_VERSION,
@@ -58,9 +59,10 @@ function completedResult(args: {
 		leaseId: args.leaseId,
 		fencingToken: args.fencingToken,
 		status: args.status ?? "completed",
+		reasonCode: `worker_${args.status ?? "completed"}`,
 		summary: "worker finished",
 		artifacts: [],
-		evidence: [],
+		evidence: args.evidence ?? [],
 		errors: [],
 		usage: { wallClockMs: 10, toolCalls: 1 },
 		createdAt: new Date(T0).toISOString(),
@@ -75,6 +77,37 @@ afterEach(() => {
 });
 
 describe("DurableTaskRuntime", () => {
+	it("rejects invalid objective and task budgets through the shared contract", () => {
+		const { runtime } = createHarness();
+		expect(() =>
+			runtime.createObjective({
+				title: "Invalid",
+				description: "Invalid objective budget",
+				riskBudget: { maxCostUsd: -1 },
+			}),
+		).toThrow("objective.riskBudget.maxCostUsd must be non-negative");
+
+		const objective = runtime.createObjective({ title: "Valid", description: "Valid objective" });
+		expect(() =>
+			runtime.createTask({
+				objectiveId: objective.objectiveId,
+				title: "Invalid task",
+				description: "Invalid task budget",
+				role: "operator",
+				riskBudget: { maxWallClockMs: Number.NaN },
+			}),
+		).toThrow("task.riskBudget.maxWallClockMs must be non-negative");
+		expect(() =>
+			runtime.createTask({
+				objectiveId: objective.objectiveId,
+				title: "Fractional attempts",
+				description: "Invalid discrete budget",
+				role: "operator",
+				riskBudget: { maxAttempts: 1.5 },
+			}),
+		).toThrow("task.riskBudget.maxAttempts must be a non-negative safe integer");
+	});
+
 	it("runs a dependency DAG through leased attempts and unlocks dependents", () => {
 		const { runtime } = createHarness();
 		const objective = runtime.createObjective({
@@ -127,6 +160,64 @@ describe("DurableTaskRuntime", () => {
 		expect(snapshot.tasks[explore.taskId]?.task.status).toBe("completed");
 		expect(snapshot.tasks[build.taskId]?.task.status).toBe("ready");
 		expect(snapshot.attempts[attempt.attemptId]?.checkpointIds).toEqual([checkpoint.checkpointId]);
+	});
+
+	it("requires trusted evidence before completing criterion-bound tasks and objectives", () => {
+		const { runtime } = createHarness();
+		const objective = runtime.createObjective({
+			objectiveId: "objective-proof",
+			title: "Prove acceptance",
+			description: "Require deterministic evidence",
+			acceptanceCriteria: [{ id: "criterion-1", description: "Focused test passes", required: true }],
+		});
+		expect(() =>
+			runtime.createTask({
+				objectiveId: objective.objectiveId,
+				title: "Unknown criterion",
+				description: "Invalid reference",
+				role: "verifier",
+				acceptanceCriterionIds: ["missing"],
+			}),
+		).toThrow("unknown acceptance criteria");
+		const task = runtime.createTask({
+			taskId: "task-proof",
+			objectiveId: objective.objectiveId,
+			title: "Verify",
+			description: "Run focused proof",
+			role: "verifier",
+			acceptanceCriterionIds: ["criterion-1"],
+		});
+		const attempt = runtime.queueAttempt(task.taskId, dispatch(task.taskId));
+		const lease = runtime.leaseAttempt(attempt.attemptId, "verifier-1", 60_000);
+		runtime.startAttempt(attempt.attemptId, lease.leaseId, lease.fencingToken);
+		const resultBase = {
+			objectiveId: objective.objectiveId,
+			taskId: task.taskId,
+			attemptId: attempt.attemptId,
+			leaseId: lease.leaseId,
+			fencingToken: lease.fencingToken,
+		};
+		expect(() => runtime.finishAttempt(completedResult(resultBase))).toThrow(
+			"lacks trusted evidence for acceptance criteria",
+		);
+		runtime.finishAttempt(
+			completedResult({
+				...resultBase,
+				evidence: [
+					{
+						evidenceId: "evidence-1",
+						criterionId: "criterion-1",
+						kind: "test",
+						summary: "Focused test passed",
+						artifactIds: [],
+						trusted: true,
+						createdAt: new Date(T0).toISOString(),
+					},
+				],
+			}),
+		);
+		runtime.completeObjective(objective.objectiveId);
+		expect(runtime.getSnapshot().objectives[objective.objectiveId]?.objective.status).toBe("completed");
 	});
 
 	it("recovers from restart, expires a lease, and fences the stale worker", () => {

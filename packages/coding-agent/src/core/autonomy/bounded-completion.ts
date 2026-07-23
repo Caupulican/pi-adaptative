@@ -1,5 +1,5 @@
 /**
- * Shared wall-clock/cancellation envelope for one-shot lane completions (research, scout workers).
+ * Shared wall-clock/cancellation envelope for one-shot lane completions (research and delegated workers).
  * Composes an optional external abort signal with an internal wall-clock timeout, executes the
  * injected completion, and maps every failure to a stable status/reasonCode pair. Never throws.
  */

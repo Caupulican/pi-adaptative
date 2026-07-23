@@ -6,7 +6,7 @@ import { type AppliedActionsReport, parseWorkerActions, type WorkerAction } from
 import { validateWorkerResult } from "./worker-result.ts";
 
 /**
- * Pure orchestration for one bounded scout-worker delegation: bounded isolated completion ->
+ * Pure execution for one bounded specialist delegation: bounded isolated completion ->
  * parse -> `WorkerResult` -> parent validation via {@link validateWorkerResult}.
  *
  * The injected completion may be a bounded child tool loop. Its tool surface is built and gated by
@@ -14,38 +14,40 @@ import { validateWorkerResult } from "./worker-result.ts";
  * until parent validation succeeds.
  */
 
-/** Static across calls so callers can use `cacheRetention: "short"`. */
-export const WORKER_LANE_SYSTEM_PROMPT = [
-	"You are a bounded read-only scout worker delegated one task by a coding agent.",
-	"Use only the read-only tools provided to inspect the workspace. You cannot change files or delegate more workers.",
-	"Respond with STRICT JSON only - no prose, no markdown fences:",
-	'{"summary":"<what you concluded>","status":"completed"|"blocked","blockers":["<why you are stuck>"],"findings":[{"summary":"<one concrete finding>","confidence":<0..1>}]}',
-	'Use status "blocked" with blockers only when the task cannot be answered from the provided context.',
-	"Never invent file paths, APIs, or facts.",
-].join("\n");
+/** Builds one capability-exact prompt; no role text may deny a tool already granted by policy. */
+export function buildWorkerSystemPrompt(capabilities: { write: boolean; process: boolean }): string {
+	const resultShape = capabilities.write
+		? '{"summary":"<what you did>","status":"completed"|"blocked","blockers":[],"findings":[{"summary":"<finding>","confidence":<0..1>}],"actions":[{"op":"write","path":"<relative path>","content":"<full file content>"},{"op":"edit","path":"<relative path>","old":"<exact text>","new":"<replacement>"}]}'
+		: '{"summary":"<what you concluded>","status":"completed"|"blocked","blockers":["<failure or missing authority>"],"findings":[{"summary":"<one concrete finding>","confidence":<0..1>}]}';
+	return [
+		"You are a bounded specialist worker delegated one task by a coding agent.",
+		"Use only the tools provided for this delegation. You cannot delegate more workers.",
+		...(capabilities.write
+			? ["Write/edit tools and structured write actions are path-scoped. Only touch paths inside that scope."]
+			: ["The workspace tools are read-only; do not claim file changes."]),
+		...(capabilities.process
+			? [
+					"run_process is a constrained direct-argv launcher: no shell interpretation or unlisted executable is available. It is not an OS/container sandbox.",
+					"A non-zero exit, timeout, abort, or output-limit result is not success; include it in blockers.",
+				]
+			: []),
+		"Respond with STRICT JSON only - no prose, no markdown fences:",
+		resultShape,
+		...(capabilities.write
+			? [
+					"Keep edits minimal and exact.",
+					"If you changed a file with a provided tool, do not repeat that change in actions; actions are only a fallback.",
+				]
+			: []),
+		'Use status "blocked" with blockers when the task cannot be completed under the granted capabilities.',
+		"Never invent command output, file paths, APIs, or facts.",
+	].join("\n");
+}
 
-/** Write-capable variant (G2): direct tools are execution-gated and reported; structured actions
- * remain as a fallback for models without a native tool channel and use the same path scope. */
-export const WORKER_WRITE_LANE_SYSTEM_PROMPT = [
-	"You are a bounded code-writing worker delegated one task by a coding agent.",
-	"Use only the provided read tools and path-scoped write/edit tools. You cannot run shell commands or delegate workers.",
-	"Respond with STRICT JSON only - no prose, no markdown fences:",
-	'{"summary":"<what you did>","status":"completed"|"blocked","blockers":[],"findings":[{"summary":"<finding>","confidence":<0..1>}],"actions":[{"op":"write","path":"<relative path>","content":"<full file content>"},{"op":"edit","path":"<relative path>","old":"<exact text>","new":"<replacement>"}]}',
-	"Only touch paths inside your delegated scope. Keep edits minimal and exact.",
-	"If you changed a file with a provided tool, do not repeat that change in actions; actions are for changes not already applied.",
-	'Use status "blocked" with blockers when the task cannot be done from the provided context.',
-	"Never invent file paths, APIs, or facts.",
-].join("\n");
-
-export const WORKER_OPERATOR_LANE_SYSTEM_PROMPT = [
-	"You are a bounded execution worker delegated one task by a coding agent.",
-	"Use only the provided read tools and direct-argv run_process sandbox. No shell interpretation, delegation, or unlisted executable is available.",
-	"Respond with STRICT JSON only - no prose, no markdown fences:",
-	'{"summary":"<what you executed and observed>","status":"completed"|"blocked","blockers":["<failure or missing authority>"],"findings":[{"summary":"<result>","confidence":<0..1>}]}',
-	"A non-zero exit, timeout, abort, or output-limit result is not success; include it in blockers.",
-	'Use status "blocked" when the task cannot be completed under the provided process policy.',
-	"Never invent command output, file paths, APIs, or facts.",
-].join("\n");
+/** Static common variants retained for cache reuse and model-fitness probes. */
+export const WORKER_LANE_SYSTEM_PROMPT = buildWorkerSystemPrompt({ write: false, process: false });
+export const WORKER_WRITE_LANE_SYSTEM_PROMPT = buildWorkerSystemPrompt({ write: true, process: false });
+export const WORKER_OPERATOR_LANE_SYSTEM_PROMPT = buildWorkerSystemPrompt({ write: false, process: true });
 
 export interface WorkerCompletion {
 	text: string;
@@ -59,8 +61,8 @@ export interface WorkerCompletion {
 
 export interface WorkerRunnerOptions {
 	request: WorkerRequest;
-	/** Budget for this delegation; a post-hoc breach marks the lane budget_exhausted. */
-	maxUsd: number;
+	/** Budget for this delegation; undefined disables this bound, while zero permits only free work. */
+	maxUsd?: number;
 	/** Wall-clock budget in milliseconds; 0 disables. */
 	maxWallClockMs: number;
 	/**
@@ -77,7 +79,7 @@ export interface WorkerRunnerOptions {
 	 * runner applies the worker's structured actions through the envelope path scope; refusals
 	 * and failures become blockers, never silent drops. */
 	applyActions?: (actions: readonly WorkerAction[]) => AppliedActionsReport;
-	/** Enables the direct-argv operator role prompt. The host remains responsible for its process sandbox. */
+	/** Enables the constrained direct-argv operator role prompt. */
 	processCapable?: boolean;
 	/** Session cwd — the baseline for relative changed-file and envelope paths in parent
 	 * validation. Defaults to process.cwd(). */
@@ -196,7 +198,7 @@ function buildWorkerEvidence(request: WorkerRequest, findings: ParsedWorkerOutpu
 	const synthesisRef: EvidenceRef = {
 		id: "src-worker",
 		kind: "tool",
-		title: "Scout-worker synthesis",
+		title: "Delegated worker synthesis",
 		trusted: false,
 	};
 	const bundleFindings: Finding[] = findings.map((finding, index) => ({
@@ -240,8 +242,7 @@ export async function runWorker(options: WorkerRunnerOptions): Promise<WorkerRun
 		createdAt: now(),
 	};
 
-	// The WRITE lane requires BOTH the envelope grant and a caller-supplied applier — either
-	// alone keeps the read-only scout contract byte-for-byte.
+	// The write prompt requires BOTH the envelope grant and a caller-supplied applier.
 	const writeCapable =
 		options.request.envelope.capabilities.includes("write_files") && options.applyActions !== undefined;
 
@@ -250,11 +251,7 @@ export async function runWorker(options: WorkerRunnerOptions): Promise<WorkerRun
 		signal: options.signal,
 		execute: (signal) =>
 			options.complete({
-				systemPrompt: options.processCapable
-					? WORKER_OPERATOR_LANE_SYSTEM_PROMPT
-					: writeCapable
-						? WORKER_WRITE_LANE_SYSTEM_PROMPT
-						: WORKER_LANE_SYSTEM_PROMPT,
+				systemPrompt: buildWorkerSystemPrompt({ write: writeCapable, process: options.processCapable === true }),
 				userPrompt: buildWorkerUserPrompt(options.request),
 				signal,
 			}),
@@ -379,7 +376,7 @@ export async function runWorker(options: WorkerRunnerOptions): Promise<WorkerRun
 		});
 	}
 
-	const overBudget = options.maxUsd > 0 && costUsd > options.maxUsd;
+	const overBudget = options.maxUsd !== undefined && costUsd > options.maxUsd;
 	return finishOutcome({
 		request: options.request,
 		cwd: options.cwd,

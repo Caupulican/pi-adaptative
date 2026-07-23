@@ -77,6 +77,8 @@ export interface HarnessOptions {
 	/** Fake fetch/spawn/exists for the local (Ollama) runtime; see test/agent-session-local-runtime.test.ts. */
 	localRuntimeDeps?: LocalRuntimeDeps;
 	orchestrationProfile?: OrchestrationProfile;
+	/** Owner-authored profile used by delegate calls; independent from the foreground profile. */
+	workerOrchestrationProfile?: OrchestrationProfile;
 }
 
 export interface Harness {
@@ -115,15 +117,8 @@ export async function createHarness(options: HarnessOptions = {}): Promise<Harne
 	const extensionRunnerRef: { current?: ExtensionRunner } = {};
 
 	const sessionManager = SessionManager.inMemory();
-	const configuredWorkerModel = options.settings?.workerDelegation?.model;
-	const workerModel = configuredWorkerModel
-		? (fauxProvider.models.find(
-				(candidate) =>
-					`${candidate.provider}/${candidate.id}` === configuredWorkerModel ||
-					candidate.id === configuredWorkerModel,
-			) ?? model)
-		: model;
-	const defaultOrchestrationProfileId = "test-worker";
+	const workerModel = model;
+	const defaultOrchestrationProfileId = options.workerOrchestrationProfile?.profileId ?? "test-worker";
 	const effectiveSettings: Partial<Settings> = {
 		...options.settings,
 		workerDelegation: {
@@ -142,8 +137,8 @@ export async function createHarness(options: HarnessOptions = {}): Promise<Harne
 			mode: "fixed",
 			candidates: [{ provider: workerModel.provider, modelId: workerModel.id, thinkingLevel: "off" }],
 		},
-		capabilityCeiling: ["filesystem.read", "filesystem.write", "worktree.read", "worktree.mutate", "memory.query"],
-		toolNames: ["read", "grep", "find", "ls", "memory", "write", "edit"],
+		capabilityCeiling: ["filesystem.read", "filesystem.write", "worktree.read", "worktree.mutate"],
+		toolNames: ["read", "grep", "find", "ls", "write", "edit"],
 		resourceProfileNames: [],
 		dispatchProfileIds: [],
 		budget: { maxCostUsd: 5, maxWallClockMs: 3_600_000, maxTokens: workerModel.maxTokens, maxToolCalls: 20 },
@@ -153,9 +148,15 @@ export async function createHarness(options: HarnessOptions = {}): Promise<Harne
 		createdAt,
 		updatedAt: createdAt,
 	};
-	new OrchestrationProfileStore({ agentDir: tempDir, cwd: tempDir }).save(defaultOrchestrationProfile, "global");
+	new OrchestrationProfileStore({ agentDir: tempDir, cwd: tempDir, projectTrusted: true }).save(
+		options.workerOrchestrationProfile ?? defaultOrchestrationProfile,
+		"global",
+	);
 	if (options.orchestrationProfile) {
-		new OrchestrationProfileStore({ agentDir: tempDir, cwd: tempDir }).save(options.orchestrationProfile, "global");
+		new OrchestrationProfileStore({ agentDir: tempDir, cwd: tempDir, projectTrusted: true }).save(
+			options.orchestrationProfile,
+			"global",
+		);
 	}
 
 	const authStorage = AuthStorage.inMemory();

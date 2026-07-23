@@ -58,6 +58,7 @@ export function adaptWorkerRunOutcome(args: {
 		result: args.outcome.result,
 		accepted: args.outcome.accepted,
 		costUsd: args.outcome.costUsd,
+		reasonCode: args.outcome.reasonCode,
 	});
 }
 
@@ -73,6 +74,7 @@ export function adaptWorkerResult(args: {
 	wallClockMs: number;
 	toolCalls: number;
 	verificationRequired?: boolean;
+	reasonCode?: string;
 	createdAt?: string;
 }): WorkerResultContract {
 	const createdAt = args.createdAt ?? new Date().toISOString();
@@ -96,6 +98,7 @@ export function adaptWorkerResult(args: {
 		leaseId: args.handle.leaseId,
 		fencingToken: args.handle.fencingToken,
 		status,
+		reasonCode: args.reasonCode ?? `worker_${legacy.status}`,
 		summary: legacy.summary,
 		artifacts,
 		evidence: evidenceForLegacyResult(legacy, createdAt),

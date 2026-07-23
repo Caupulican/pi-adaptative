@@ -50,6 +50,7 @@ describe("DelegationOrchestrationLedger", () => {
 			laneId: "worker-1",
 			instructions: "Implement the bounded change",
 			profile: profile(),
+			requiredCapabilities: ["filesystem.read", "filesystem.write"],
 		});
 		const handle = first.start(queued.attemptId, 60_000);
 
@@ -92,6 +93,7 @@ describe("DelegationOrchestrationLedger", () => {
 			laneId: "worker-1",
 			instructions: "Inspect",
 			profile: profile(),
+			requiredCapabilities: ["filesystem.read"],
 		});
 		const reopened = new DelegationOrchestrationLedger({ agentDir, sessionId: "session-2" });
 		const recovered = reopened.recoverQueuedDispatches();
@@ -107,6 +109,7 @@ describe("DelegationOrchestrationLedger", () => {
 			laneId: "worker-1",
 			instructions: "One attempt only",
 			profile: limitedProfile,
+			requiredCapabilities: ["filesystem.read"],
 		});
 		first.start(queued.attemptId, 60_000);
 
@@ -118,7 +121,12 @@ describe("DelegationOrchestrationLedger", () => {
 	it("keeps an independently verified profile result non-terminal until verification", () => {
 		const agentDir = root();
 		const ledger = new DelegationOrchestrationLedger({ agentDir, sessionId: "session-3" });
-		const queued = ledger.prepare({ laneId: "worker-1", instructions: "Change one file", profile: profile() });
+		const queued = ledger.prepare({
+			laneId: "worker-1",
+			instructions: "Change one file",
+			profile: profile(),
+			requiredCapabilities: ["filesystem.read", "filesystem.write"],
+		});
 		const handle = ledger.start(queued.attemptId, 60_000);
 		const result = adaptWorkerResult({
 			handle,

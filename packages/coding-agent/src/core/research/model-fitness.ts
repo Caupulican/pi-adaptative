@@ -7,7 +7,7 @@ import { runResearch } from "./research-runner.ts";
 
 /**
  * Model fitness probe: measures whether a candidate model can actually drive the harness's
- * subagent contracts — the research lane, the scout-worker lane, and the routing judge — by
+ * subagent contracts — the research lane, the delegated-worker lane, and the routing judge — by
  * running each real runner against the model and scoring parse/success rates plus judge
  * discrimination. Provider-free: the completion executor is injected, so this works against any
  * registered model (local Ollama models included) and against faux providers in tests.

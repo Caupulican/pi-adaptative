@@ -1,7 +1,23 @@
+import { mkdtempSync, rmSync } from "node:fs";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
 import type { SessionManager } from "@caupulican/pi-agent-core/node";
 import { afterEach, describe, expect, it } from "vitest";
 import { BackgroundLaneController, type BackgroundLaneControllerDeps } from "../src/core/background-lane-controller.ts";
 import { getInFlightWorkUnits, resetInFlightWorkRegistryForTests } from "../src/core/reload-blockers.ts";
+import { SettingsManager } from "../src/core/settings-manager.ts";
+import {
+	createTestWorkerOrchestrationProfile,
+	saveTestWorkerOrchestrationProfile,
+} from "./orchestration-profile-fixture.ts";
+
+const tempDirs: string[] = [];
+
+function createAgentDir(label: string): string {
+	const dir = mkdtempSync(join(tmpdir(), `pi-${label}-`));
+	tempDirs.push(dir);
+	return dir;
+}
 
 /**
  * A local-execution model (ollama) used as BOTH the foreground and the worker-lane model, so
@@ -10,6 +26,14 @@ import { getInFlightWorkUnits, resetInFlightWorkRegistryForTests } from "../src/
  */
 function buildQueuingDeps(agentDir: string): BackgroundLaneControllerDeps {
 	const model = { provider: "ollama", id: "local-model", contextWindow: 32_000, baseUrl: "http://localhost:11434" };
+	const settingsManager = SettingsManager.inMemory({
+		workerDelegation: { enabled: true, orchestrationProfile: "local-worker" },
+	});
+	saveTestWorkerOrchestrationProfile({
+		agentDir,
+		cwd: "/repo",
+		profile: createTestWorkerOrchestrationProfile({ profileId: "local-worker", model }),
+	});
 	const sessionManager = {
 		getEntries: () => [],
 		appendCustomEntry: () => "entry-1",
@@ -20,18 +44,8 @@ function buildQueuingDeps(agentDir: string): BackgroundLaneControllerDeps {
 		getCwd: () => "/repo",
 		getAgentDir: () => agentDir,
 		getSessionManager: () => sessionManager,
-		getSettingsManager: () =>
-			({
-				getWorkerDelegationSettings: () => ({
-					enabled: true,
-					maxUsd: 1,
-					maxConcurrent: 1,
-					maxWallClockMs: 0,
-					writeEnabled: false,
-					writePaths: [],
-				}),
-				getModelCapabilitySettings: () => ({ mode: "off" }),
-			}) as never,
+		getSettingsManager: () => settingsManager,
+		getModelRegistry: () => ({ find: () => model, hasConfiguredAuth: () => true }) as never,
 		getModel: () => model,
 		isModelExhausted: () => false,
 		isDelegateToolActive: () => true,
@@ -50,10 +64,14 @@ function buildQueuingDeps(agentDir: string): BackgroundLaneControllerDeps {
 describe("queued-worker quiesce visibility", () => {
 	afterEach(() => {
 		resetInFlightWorkRegistryForTests();
+		while (tempDirs.length > 0) {
+			const dir = tempDirs.pop();
+			if (dir) rmSync(dir, { recursive: true, force: true });
+		}
 	});
 
 	it("registers a queued worker in the reload-gate quiesce registry at ENQUEUE, before it ever runs", () => {
-		const agentDir = "/tmp/pi-test-quiesce-queued-enqueue";
+		const agentDir = createAgentDir("quiesce-queued-enqueue");
 		const controller = new BackgroundLaneController(buildQueuingDeps(agentDir));
 
 		const started = controller.startWorkerDelegation({ instructions: "queued work" });
@@ -66,7 +84,7 @@ describe("queued-worker quiesce visibility", () => {
 	});
 
 	it("deregisters the queued registration exactly once at the running handoff, with no gap and no double count", () => {
-		const agentDir = "/tmp/pi-test-quiesce-queued-handoff";
+		const agentDir = createAgentDir("quiesce-queued-handoff");
 		const controller = new BackgroundLaneController(buildQueuingDeps(agentDir));
 
 		const started = controller.startWorkerDelegation({ instructions: "queued work" });
@@ -85,7 +103,7 @@ describe("queued-worker quiesce visibility", () => {
 	});
 
 	it("deregisters the queued registration exactly once on disposal cancellation (never started)", () => {
-		const agentDir = "/tmp/pi-test-quiesce-queued-cancel";
+		const agentDir = createAgentDir("quiesce-queued-cancel");
 		const controller = new BackgroundLaneController(buildQueuingDeps(agentDir));
 
 		const started = controller.startWorkerDelegation({ instructions: "queued work" });
@@ -98,7 +116,7 @@ describe("queued-worker quiesce visibility", () => {
 	});
 
 	it("never double-deregisters: draining an already-canceled queue is a no-op on the registry", () => {
-		const agentDir = "/tmp/pi-test-quiesce-queued-cancel-then-drain";
+		const agentDir = createAgentDir("quiesce-queued-cancel-then-drain");
 		const controller = new BackgroundLaneController(buildQueuingDeps(agentDir));
 
 		controller.startWorkerDelegation({ instructions: "queued work" });

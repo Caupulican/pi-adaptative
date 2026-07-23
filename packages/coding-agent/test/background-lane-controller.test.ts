@@ -1,3 +1,6 @@
+import { mkdtempSync, rmSync } from "node:fs";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
 import type { SessionManager } from "@caupulican/pi-agent-core/node";
 import { afterEach, describe, expect, it, vi } from "vitest";
 import {
@@ -6,6 +9,11 @@ import {
 	isLocalExecutionModel,
 } from "../src/core/background-lane-controller.ts";
 import { getInFlightWorkUnits, resetInFlightWorkRegistryForTests } from "../src/core/reload-blockers.ts";
+import { SettingsManager } from "../src/core/settings-manager.ts";
+import {
+	createTestWorkerOrchestrationProfile,
+	saveTestWorkerOrchestrationProfile,
+} from "./orchestration-profile-fixture.ts";
 
 describe("background lane budgets", () => {
 	it("clamps research lane spend to the foreground envelope cap", () => {
@@ -231,8 +239,16 @@ describe("quiesce registry", () => {
 	});
 
 	it("deregisters a worker lane from the quiesce registry even when it throws", async () => {
-		const agentDir = "/tmp/pi-test-quiesce-worker-throw";
+		const agentDir = mkdtempSync(join(tmpdir(), "pi-test-quiesce-worker-throw-"));
 		const model = { provider: "test", id: "test-model", contextWindow: 128_000 };
+		const settingsManager = SettingsManager.inMemory({
+			workerDelegation: { enabled: true, orchestrationProfile: "throw-worker", maxConcurrent: 3 },
+		});
+		saveTestWorkerOrchestrationProfile({
+			agentDir,
+			cwd: "/repo",
+			profile: createTestWorkerOrchestrationProfile({ profileId: "throw-worker", model }),
+		});
 		const controller = new BackgroundLaneController({
 			isDisposed: () => false,
 			getSessionId: () => "test-session",
@@ -240,18 +256,8 @@ describe("quiesce registry", () => {
 			getAgentDir: () => agentDir,
 			getSessionManager: () =>
 				({ getEntries: () => [], appendCustomEntry: () => "entry-1" }) as unknown as SessionManager,
-			getSettingsManager: () =>
-				({
-					getWorkerDelegationSettings: () => ({
-						enabled: true,
-						maxUsd: 1,
-						maxConcurrent: 4,
-						maxWallClockMs: 0,
-						writeEnabled: false,
-						writePaths: [],
-					}),
-					getModelCapabilitySettings: () => ({ mode: "off" }),
-				}) as never,
+			getSettingsManager: () => settingsManager,
+			getModelRegistry: () => ({ find: () => model, hasConfiguredAuth: () => true }) as never,
 			getModel: () => model,
 			isModelExhausted: () => false,
 			isDelegateToolActive: () => true,
@@ -268,5 +274,6 @@ describe("quiesce registry", () => {
 
 		expect(outcome.started).toBe(true);
 		expect(getInFlightWorkUnits(agentDir)).toEqual([]);
+		rmSync(agentDir, { recursive: true, force: true });
 	});
 });

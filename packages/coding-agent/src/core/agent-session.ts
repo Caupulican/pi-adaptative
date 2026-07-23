@@ -817,7 +817,7 @@ export class AgentSession {
 	/** Autonomy telemetry sink + status/diagnostic snapshots (see autonomy-telemetry.ts); owns
 	 * the latest gate outcome and the bounded gate-outcome history. */
 	private readonly _autonomyTelemetry: AutonomyTelemetry;
-	/** Goal auto-continue + research lane + scout-worker delegation + model-fitness probe (see
+	/** Goal auto-continue + research lane + profile-bound worker delegation + model-fitness probe (see
 	 * background-lane-controller.ts); owns the lane timers/guards, the last research-lane skip
 	 * reason, the live LaneTracker, and the in-flight research/worker abort controllers. */
 	private readonly _backgroundLanes: BackgroundLaneController;
@@ -5428,7 +5428,7 @@ export class AgentSession {
 	}
 
 	/**
-	 * Run one bounded scout-worker delegation. Delegates to {@link BackgroundLaneController};
+	 * Run one bounded profile-bound worker delegation. Delegates to {@link BackgroundLaneController};
 	 * consumed by the `delegate` tool.
 	 */
 	async runWorkerDelegationOnce(request: WorkerDelegationRequest): Promise<WorkerDelegationRunOutcome> {

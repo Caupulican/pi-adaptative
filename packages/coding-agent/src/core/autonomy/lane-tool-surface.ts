@@ -1,7 +1,12 @@
 import path from "node:path";
 import type { AgentLoopConfig, AgentTool } from "@caupulican/pi-agent-core";
 import { type Static, Type } from "typebox";
-import type { OrchestrationExecutionPolicy } from "../orchestration/contracts.ts";
+import { CapabilityGateway, CapabilityGatewayDeniedError } from "../orchestration/capability-gateway.ts";
+import type {
+	ExecutionGrant,
+	OrchestrationExecutionPolicy,
+	ToolCapabilityManifest,
+} from "../orchestration/contracts.ts";
 import type { NormalizedProfile } from "../profile-registry.ts";
 import { matchesResourceProfilePattern } from "../settings-manager.ts";
 import { createEditTool } from "../tools/edit.ts";
@@ -35,6 +40,8 @@ export interface LaneToolSurface {
 	unboundAllowPatterns: string[];
 	/** Per-call path and capability gate for the isolated child loop. */
 	beforeToolCall: NonNullable<AgentLoopConfig["beforeToolCall"]>;
+	/** Canonical cumulative authority/budget meter for a compiled worker grant. */
+	gateway?: CapabilityGateway;
 }
 
 export interface LaneToolSurfaceOptions {
@@ -50,6 +57,9 @@ export interface LaneToolSurfaceOptions {
 	/** Present only for process-capable owner profiles; absent means no process tool is materialized. */
 	executionPolicy?: OrchestrationExecutionPolicy;
 	processMaxWallClockMs?: number;
+	/** Compiled policy path. When present, it is the only authorization source for this surface. */
+	grant?: ExecutionGrant;
+	toolManifests?: readonly ToolCapabilityManifest[];
 }
 
 function strictLaneProfilePatterns(profile: NormalizedProfile | undefined): {
@@ -128,16 +138,28 @@ export function createLaneToolSurface(options: LaneToolSurfaceOptions): LaneTool
 		...(options.executionPolicy ? [PROCESS_LANE_TOOL_NAME] : []),
 	];
 	const patterns = strictLaneProfilePatterns(options.profile);
-	const deniedTools = candidateNames.filter((name) => matchesResourceProfilePattern(name, patterns.block));
-	const unboundAllowPatterns = patterns.allow.filter(
-		(pattern) => !candidateNames.some((name) => matchesResourceProfilePattern(name, [pattern])),
+	const compiledToolNames = new Set(options.grant?.allowedTools ?? []);
+	const deniedTools = candidateNames.filter((name) =>
+		options.grant ? !compiledToolNames.has(name) : matchesResourceProfilePattern(name, patterns.block),
 	);
-	const allowedTools = candidateNames.filter(
-		(name) =>
-			(patterns.allow.length === 0 || matchesResourceProfilePattern(name, patterns.allow)) &&
-			!matchesResourceProfilePattern(name, patterns.block),
-	);
+	const unboundAllowPatterns = options.grant
+		? []
+		: patterns.allow.filter(
+				(pattern) => !candidateNames.some((name) => matchesResourceProfilePattern(name, [pattern])),
+			);
+	const allowedTools = options.grant
+		? candidateNames.filter((name) => compiledToolNames.has(name))
+		: candidateNames.filter(
+				(name) =>
+					(patterns.allow.length === 0 || matchesResourceProfilePattern(name, patterns.allow)) &&
+					!matchesResourceProfilePattern(name, patterns.block),
+			);
 	const allowedToolSet = new Set<string>(allowedTools);
+	const manifestsByName = new Map(options.toolManifests?.map((manifest) => [manifest.toolName, manifest]) ?? []);
+	if (options.grant?.allowedTools.some((name) => !manifestsByName.has(name))) {
+		throw new Error("Compiled lane grant references a tool without a capability manifest.");
+	}
+	const gateway = options.grant ? new CapabilityGateway({ grant: options.grant, cwd: options.cwd }) : undefined;
 	const deniedPaths = options.deniedPaths?.map((entry) => path.resolve(entry));
 	const readEnvelope: CapabilityEnvelope = {
 		id: "isolated-lane-read-tools",
@@ -175,6 +197,21 @@ export function createLaneToolSurface(options: LaneToolSurfaceOptions): LaneTool
 			if (!allowedToolSet.has(toolCall.name)) {
 				return { block: true, reason: `Lane tool '${toolCall.name}' is outside the materialized UAC surface.` };
 			}
+			if (gateway) {
+				const manifest = manifestsByName.get(toolCall.name);
+				if (!manifest) {
+					return { block: true, reason: `Lane tool '${toolCall.name}' has no compiled capability manifest.` };
+				}
+				try {
+					gateway.authorizeToolCall(manifest, toolCall.name, args);
+					return undefined;
+				} catch (error) {
+					if (error instanceof CapabilityGatewayDeniedError) {
+						return { block: true, reason: `Lane tool blocked (${error.reasonCode}): ${error.message}` };
+					}
+					throw error;
+				}
+			}
 			const outcome = evaluateToolGate({
 				toolName: toolCall.name,
 				args,
@@ -187,5 +224,6 @@ export function createLaneToolSurface(options: LaneToolSurfaceOptions): LaneTool
 				reason: `Lane tool blocked (${outcome.reasonCode}): ${outcome.message ?? "capability gate denied it"}`,
 			};
 		},
+		...(gateway ? { gateway } : {}),
 	};
 }

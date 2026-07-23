@@ -77,13 +77,18 @@ interrupted lease is fenced and its persisted dispatch is re-queued as a new att
 Pi worker instead retains its logical agent ID and resume context and is woken with `/resume` against
 the same session, worktree, orchestration profile, and checkpoint pointers when present.
 
+Acceptance is a runtime invariant, not a worker claim. Task criterion IDs must refer to their
+objective, a completed criterion-bound result must carry trusted evidence for every linked criterion,
+and an objective cannot close until all required criteria have trusted evidence in its task results.
+
 In-process workers are bounded child loops with fresh context, a synthetic cache-affinity key, a
 profile-pinned model and exact reasoning level, a construction-filtered tool surface,
 turn/time/token/tool/cost bounds, and parent validation of the result. Process-capable profiles may
 expose `run_process`, which uses an exact executable allowlist, direct argv, a scoped environment,
 bounded output, and process-tree termination; unrestricted shell is not inherited. Worker output is
 untrusted; the parent retrieves it through `delegate_status` after a terminal lane event. A profile
-that requires independent verification produces a partial typed result until a verifier accepts it.
+that requires independent verification produces a partial typed result and an explicit verifier
+next action; it cannot be treated as accepted without a separate verifier workflow.
 
 Out-of-process managed workers use the same lifecycle shape:
 
@@ -119,6 +124,6 @@ races an active execution unit.
 - New harness behavior requires a focused faux-provider regression. Provider APIs and paid tokens are
   not used by the coding-agent suite.
 
-The next structural extraction target is foreground turn coordination still resident in
-`AgentSession`: prompt admission, retry/failover, save points, and terminal settlement should become
-one controller without changing the public facade or duplicating session state.
+The next structural extraction targets are foreground turn coordination still resident in
+`AgentSession` and the remaining research/worker scheduling facade in `BackgroundLaneController`.
+Each should move as one state machine without changing the public facade or duplicating session state.

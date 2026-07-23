@@ -2,8 +2,13 @@ import { existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, symlinkSync, 
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { afterEach, beforeEach, describe, expect, it } from "vitest";
-import type { CapabilityEnvelope } from "../src/core/autonomy/contracts.ts";
 import { applyWorkerActions, parseWorkerActions } from "../src/core/delegation/worker-actions.ts";
+import { CapabilityGateway } from "../src/core/orchestration/capability-gateway.ts";
+import {
+	type ExecutionGrant,
+	ORCHESTRATION_SCHEMA_VERSION,
+	type ToolCapabilityManifest,
+} from "../src/core/orchestration/contracts.ts";
 
 describe("parseWorkerActions", () => {
 	it("keeps only well-formed write/edit actions and caps the count", () => {
@@ -50,24 +55,45 @@ describe("parseWorkerActions", () => {
 	});
 });
 
-describe("applyWorkerActions (execution-time envelope enforcement)", () => {
+describe("applyWorkerActions (execution-time grant enforcement)", () => {
 	// Real temp directories, real fs: the scope check (isPathWithinEnvelope -> safeRealpathSync)
 	// always resolves against node:fs, so exercising it against anything else (an in-memory
 	// fake) risks the scope decision and the actual write silently disagreeing about what a
 	// path resolves to. One filesystem of record for both halves keeps the two in lockstep.
 	let cwd: string;
-	let envelope: CapabilityEnvelope;
+	let gateway: CapabilityGateway;
+	const toolManifests: ToolCapabilityManifest[] = ["write", "edit"].map((toolName) => ({
+		toolName,
+		moduleSpecifier: `../tools/${toolName}.ts`,
+		capabilities: ["filesystem.write"],
+		roles: ["implementer"],
+		enforcements: ["path-scope"],
+	}));
 
 	beforeEach(() => {
 		cwd = mkdtempSync(join(tmpdir(), "worker-actions-test-"));
 		mkdirSync(join(cwd, "src", "secret"), { recursive: true });
 		writeFileSync(join(cwd, "src", "b.ts"), "the foo value", "utf-8");
-		envelope = {
-			id: "env-write",
-			capabilities: ["read_files", "write_files"],
-			allowedPaths: ["src"],
-			deniedPaths: ["src/secret"],
+		const grant: ExecutionGrant = {
+			schemaVersion: ORCHESTRATION_SCHEMA_VERSION,
+			grantId: "worker-actions-grant",
+			objectiveId: "objective-1",
+			taskId: "task-1",
+			attemptId: "attempt-1",
+			subjectId: "worker-1",
+			role: "implementer",
+			capabilities: ["filesystem.write"],
+			allowedTools: ["write", "edit"],
+			resources: [],
+			readPaths: [],
+			writePaths: [join(cwd, "src")],
+			deniedPaths: [join(cwd, "src", "secret")],
+			budget: { maxToolCalls: 20 },
+			policyVersion: "test",
+			decisionTrace: [],
+			issuedAt: new Date().toISOString(),
 		};
+		gateway = new CapabilityGateway({ grant, cwd });
 	});
 
 	afterEach(() => {
@@ -80,7 +106,8 @@ describe("applyWorkerActions (execution-time envelope enforcement)", () => {
 				{ op: "write", path: "src/a.ts", content: "new file" },
 				{ op: "edit", path: "src/b.ts", old: "foo", new: "bar" },
 			],
-			envelope,
+			gateway,
+			toolManifests,
 			cwd,
 		});
 		expect(report.changedFiles.sort()).toEqual(["src/a.ts", "src/b.ts"]);
@@ -95,7 +122,8 @@ describe("applyWorkerActions (execution-time envelope enforcement)", () => {
 
 		const report = applyWorkerActions({
 			actions: [{ op: "edit", path: "src/b.ts", old: "TOKEN", new: replacement }],
-			envelope,
+			gateway,
+			toolManifests,
 			cwd,
 		});
 
@@ -110,7 +138,8 @@ describe("applyWorkerActions (execution-time envelope enforcement)", () => {
 				{ op: "write", path: "src/secret/key.pem", content: "x" },
 				{ op: "write", path: "/etc/passwd", content: "x" },
 			],
-			envelope,
+			gateway,
+			toolManifests,
 			cwd,
 		});
 		expect(report.changedFiles).toEqual([]);
@@ -125,7 +154,8 @@ describe("applyWorkerActions (execution-time envelope enforcement)", () => {
 				{ op: "edit", path: "src/missing.ts", old: "x", new: "y" },
 				{ op: "write", path: "src/ok.ts", content: "ok" },
 			],
-			envelope,
+			gateway,
+			toolManifests,
 			cwd,
 		});
 		expect(report.failed.map((f) => f.path)).toEqual(["src/missing.ts"]);
@@ -139,7 +169,8 @@ describe("applyWorkerActions (execution-time envelope enforcement)", () => {
 
 		const report = applyWorkerActions({
 			actions: [{ op: "write", path: "src/alias/f.txt", content: "hi" }],
-			envelope,
+			gateway,
+			toolManifests,
 			cwd,
 		});
 
