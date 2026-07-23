@@ -6,6 +6,7 @@
 
 ### Fixed
 
+- Persisted per-check compaction verification score ranges across retry fallback and surfaced them in session analytics and `/usage` diagnostics.
 - Made foreground prompt preparation transactional: routing events stay balanced, failed extension preflight retains pending `nextTurn` context, queued messages cannot reset active-turn cost accounting, and pre-start execution failures release early-painted message identities.
 - Consolidated terminal foreground response handling behind one recovery coordinator with deterministic transient retry, quota failover, retry closeout, compaction, and queued-continuation ordering.
 - Consolidated manual and automatic compaction detection, execution, retry, cancellation, persistence, and extension notification behind one controller with a shared result-application path and provider-neutral policy types.

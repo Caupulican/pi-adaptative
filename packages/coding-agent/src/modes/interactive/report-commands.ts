@@ -100,8 +100,33 @@ export function handleUsageCommand(host: UsageReportHost): void {
 		gateFailures: 0,
 		deterministicGapFills: 0,
 		compactionsWithGateFailures: 0,
+		checks: {},
 	};
 	info += `${theme.fg("dim", "Compaction gate failures:")} ${compactionGates.gateFailures} (${compactionGates.deterministicGapFills} deterministic gap-fill)\n`;
+	const failingChecks = Object.entries(compactionGates.checks).sort(
+		([leftName, left], [rightName, right]) => right.failures - left.failures || leftName.localeCompare(rightName),
+	);
+	if (failingChecks.length > 0) {
+		const visibleChecks = failingChecks.slice(0, 3).map(([check, checkStats]) => {
+			let score = "";
+			if (checkStats.minScore !== undefined && checkStats.maxScore !== undefined) {
+				const range =
+					checkStats.minScore === checkStats.maxScore
+						? checkStats.minScore.toFixed(2)
+						: `${checkStats.minScore.toFixed(2)}-${checkStats.maxScore.toFixed(2)}`;
+				const threshold =
+					checkStats.threshold === undefined
+						? ""
+						: ` ${checkStats.comparator === "maximum" ? ">" : "<"} ${checkStats.threshold.toFixed(2)}`;
+				score = ` (${range}${threshold})`;
+			}
+			return `${check} x${checkStats.failures}${score}`;
+		});
+		if (failingChecks.length > visibleChecks.length) {
+			visibleChecks.push(`+${failingChecks.length - visibleChecks.length} more`);
+		}
+		info += `${theme.fg("dim", "Failing compaction checks:")} ${visibleChecks.join("; ")}\n`;
+	}
 	if (isChatGptSubscription) {
 		info += `${theme.fg("dim", "Cost guard:")} not applicable to ChatGPT subscription usage\n`;
 	} else if (costGuard) {

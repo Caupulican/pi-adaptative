@@ -163,6 +163,20 @@ describe("InteractiveMode.handleUsageCommand", () => {
 				getSessionStats: () => ({
 					tokens: { input: 1_000, output: 500, cacheRead: 250, cacheWrite: 125, total: 1_875 },
 					cost: 0.1234,
+					compactionGates: {
+						gateFailures: 4,
+						deterministicGapFills: 1,
+						compactionsWithGateFailures: 1,
+						checks: {
+							"open-errors-recall": {
+								failures: 4,
+								minScore: 0.09,
+								maxScore: 0.43,
+								threshold: 0.7,
+								comparator: "minimum",
+							},
+						},
+					},
 				}),
 				getCostSummary: () => ({
 					ownCost: 0.1234,
@@ -203,6 +217,8 @@ describe("InteractiveMode.handleUsageCommand", () => {
 		expect(output).toContain("Today rollover: local midnight");
 		expect(output).toContain("Context: 66.6% (66,600/100,000)");
 		expect(output).toContain("Auto-compaction: enabled");
+		expect(output).toContain("Compaction gate failures: 4 (1 deterministic gap-fill)");
+		expect(output).toContain("Failing compaction checks: open-errors-recall x4 (0.09-0.43 < 0.70)");
 		expect(output).toContain("Cost guard: over $1.2300/$1.0000 (warn)");
 		expect(output).toContain("Auto Learn: enabled");
 		expect(output).toContain("Scavenger model: anthropic/claude-haiku-4-5");

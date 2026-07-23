@@ -155,6 +155,15 @@ describe("AgentSession.getSessionStats", () => {
 				modifiedFiles: [],
 				verificationGateFailures: 2,
 				deterministicGapFills: 1,
+				verificationGateChecks: {
+					"open-errors-recall": {
+						failures: 2,
+						minScore: 0.09,
+						maxScore: 0.43,
+						threshold: 0.7,
+						comparator: "minimum",
+					},
+				},
 			});
 			sessionManager.appendCompaction("summary 2", keptUserId, 800, {
 				readFiles: [],
@@ -168,6 +177,15 @@ describe("AgentSession.getSessionStats", () => {
 				gateFailures: 2,
 				deterministicGapFills: 1,
 				compactionsWithGateFailures: 1,
+				checks: {
+					"open-errors-recall": {
+						failures: 2,
+						minScore: 0.09,
+						maxScore: 0.43,
+						threshold: 0.7,
+						comparator: "minimum",
+					},
+				},
 			});
 		} finally {
 			session.dispose();

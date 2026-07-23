@@ -614,7 +614,7 @@ export function renderFactsBlock(facts: CompactionFacts): string {
 	for (const file of facts.files.filter((file) => file.kind !== "read")) {
 		lines.push(file.path);
 	}
-	lines.push("files-read-recall (must appear in ## Files, containment threshold applies):");
+	lines.push("files-read-recall (must appear as exact paths in ## Files, path recall threshold applies):");
 	for (const file of facts.files.filter((file) => file.kind === "read")) {
 		lines.push(file.path);
 	}

@@ -3,6 +3,7 @@ import { beforeEach, describe, expect, it, vi } from "vitest";
 import {
 	type CompactionCycleParams,
 	type CompactionResult,
+	CompactionVerificationError,
 	prepareCompaction,
 	runCompactionLoop,
 } from "../../src/compaction/index.ts";
@@ -199,6 +200,55 @@ describe("runCompactionLoop", () => {
 		expect(transitions[0]).toContain("actions-recall failed");
 		expect(outcome.cycles).toBe(4);
 		expect(outcome.result.summary).toBe("deterministic");
+	});
+
+	it("persists verification check scores across retry cycles and deterministic fallback", async () => {
+		let attempts = 0;
+		const apply = vi.fn(async () => {});
+		const outcome = expectSuccess(
+			await runCompactionLoop({
+				getBranch: () => branch,
+				measureLiveTokens: () => 1500,
+				shouldCompact: (tokens) => tokens > 1000,
+				getPostApplyMargin: () => 10,
+				resolveModelAndAuth: async () => ({ model: createModel() }),
+				summarizeAndVerify: async () => {
+					attempts++;
+					throw new CompactionVerificationError([
+						{
+							ok: false,
+							failures: [
+								{
+									check: "open-errors-recall",
+									detail: `attempt ${attempts}`,
+									score: attempts / 10,
+									threshold: 0.7,
+									comparator: "minimum",
+								},
+							],
+						},
+					]);
+				},
+				buildDeterministicCheckpoint: async () => ({ result: createResult("deterministic") }),
+				apply,
+				onTransition: () => {},
+			}),
+		);
+
+		expect(outcome.result.verificationGateFailures).toHaveLength(3);
+		expect(outcome.result.details).toMatchObject({
+			verificationGateFailures: 3,
+			verificationGateChecks: {
+				"open-errors-recall": {
+					failures: 3,
+					minScore: 0.1,
+					maxScore: 0.3,
+					threshold: 0.7,
+					comparator: "minimum",
+				},
+			},
+		});
+		expect(apply).toHaveBeenCalledTimes(1);
 	});
 
 	it("does not skip within threshold after a paid gate failure", async () => {

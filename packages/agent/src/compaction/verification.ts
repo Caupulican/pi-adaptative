@@ -3,11 +3,30 @@ import { ACTIVE_TASK_SOURCE_MAX_CHARS, type CompactionFacts } from "./extraction
 export interface VerificationFailure {
 	check: string;
 	detail: string;
+	score?: number;
+	threshold?: number;
+	comparator?: "minimum" | "maximum";
+	matched?: number;
+	demanded?: number;
 }
 
 export interface VerificationReport {
 	ok: boolean;
 	failures: VerificationFailure[];
+}
+
+/** A failed verification attempt with its structured reports preserved for the retry ladder. */
+export class CompactionVerificationError extends Error {
+	readonly reports: VerificationReport[];
+
+	constructor(reports: readonly VerificationReport[]) {
+		super(`gate-failed: ${formatVerificationReports(reports)}`);
+		this.name = "CompactionVerificationError";
+		this.reports = reports.map((report) => ({
+			ok: report.ok,
+			failures: report.failures.map((failure) => ({ ...failure })),
+		}));
+	}
 }
 
 export interface DeterministicGapFillResult {
@@ -67,30 +86,53 @@ export function verifySummary(summary: string, facts: CompactionFacts): Verifica
 	const mandatoryRulesSection = sections[SECTION_MANDATORY_RULES] ?? "";
 
 	const modifiedFiles = facts.files.filter((file) => file.kind !== "read");
-	const missingModifiedFiles = modifiedFiles.map((file) => file.path).filter((path) => !filesSection.includes(path));
+	const missingModifiedFiles = modifiedFiles
+		.map((file) => file.path)
+		.filter((path) => !sectionContainsExactPath(filesSection, path));
 	if (missingModifiedFiles.length > 0) {
+		const matched = modifiedFiles.length - missingModifiedFiles.length;
 		failures.push({
 			check: "files-modified-recall",
-			detail: `Missing modified/created files in ## Files: ${missingModifiedFiles.join(", ")}`,
+			detail: `Modified/created file recall ${formatScore(matched / modifiedFiles.length)} (${matched}/${modifiedFiles.length} exact paths); missing: ${formatMissingValues(missingModifiedFiles)}`,
+			score: matched / modifiedFiles.length,
+			threshold: 1,
+			comparator: "minimum",
+			matched,
+			demanded: modifiedFiles.length,
 		});
 	}
 
 	const workingSetPaths = facts.workingSet.map((file) => file.path);
-	const missingWorkingSetPaths = workingSetPaths.filter((path) => !workingSetSection.includes(path));
+	const missingWorkingSetPaths = workingSetPaths.filter((path) => !sectionContainsExactPath(workingSetSection, path));
 	if (missingWorkingSetPaths.length > 0) {
+		const matched = workingSetPaths.length - missingWorkingSetPaths.length;
 		failures.push({
 			check: "working-set-recall",
-			detail: `Missing working-set files in ## Working Set: ${missingWorkingSetPaths.join(", ")}`,
+			detail: `Working-set recall ${formatScore(matched / workingSetPaths.length)} (${matched}/${workingSetPaths.length} exact paths); missing: ${formatMissingValues(missingWorkingSetPaths)}`,
+			score: matched / workingSetPaths.length,
+			threshold: 1,
+			comparator: "minimum",
+			matched,
+			demanded: workingSetPaths.length,
 		});
 	}
 
 	const readPaths = facts.files.filter((file) => file.kind === "read").map((file) => file.path);
 	if (readPaths.length > 0) {
-		const score = containment(tokenSet(readPaths.join("\n")), tokenSet(filesSection));
+		// Paths are atomic identities. A global token bag over-credits shared directory prefixes and
+		// makes the score impossible to interpret as "how many files survived".
+		const missingReadPaths = readPaths.filter((path) => !sectionContainsExactPath(filesSection, path));
+		const matched = readPaths.length - missingReadPaths.length;
+		const score = matched / readPaths.length;
 		if (score < FILES_READ_RECALL_THRESHOLD) {
 			failures.push({
 				check: "files-read-recall",
-				detail: `Read file recall ${formatScore(score)} below ${FILES_READ_RECALL_THRESHOLD}`,
+				detail: `Read file recall ${formatScore(score)} (${matched}/${readPaths.length} exact paths) below ${FILES_READ_RECALL_THRESHOLD}; missing: ${formatMissingValues(missingReadPaths)}`,
+				score,
+				threshold: FILES_READ_RECALL_THRESHOLD,
+				comparator: "minimum",
+				matched,
+				demanded: readPaths.length,
 			});
 		}
 	}
@@ -104,6 +146,9 @@ export function verifySummary(summary: string, facts: CompactionFacts): Verifica
 			failures.push({
 				check: "active-task-containment",
 				detail: `Active task containment ${formatScore(score)} below ${ACTIVE_TASK_CONTAINMENT_THRESHOLD}`,
+				score,
+				threshold: ACTIVE_TASK_CONTAINMENT_THRESHOLD,
+				comparator: "minimum",
 			});
 		}
 	}
@@ -113,7 +158,10 @@ export function verifySummary(summary: string, facts: CompactionFacts): Verifica
 		if (score < MANDATORY_RULES_RECALL_THRESHOLD) {
 			failures.push({
 				check: "mandatory-rules-recall",
-				detail: `Missing mandatory rule: ${prohibition}`,
+				detail: `Mandatory rule recall ${formatScore(score)} below ${MANDATORY_RULES_RECALL_THRESHOLD}: ${prohibition}`,
+				score,
+				threshold: MANDATORY_RULES_RECALL_THRESHOLD,
+				comparator: "minimum",
 			});
 		}
 	}
@@ -130,16 +178,28 @@ export function verifySummary(summary: string, facts: CompactionFacts): Verifica
 			failures.push({
 				check: "cancelled-work-dropped",
 				detail: `Cancelled work leakage ${formatScore(score)} above ${CANCELLED_WORK_DROPPED_THRESHOLD}`,
+				score,
+				threshold: CANCELLED_WORK_DROPPED_THRESHOLD,
+				comparator: "maximum",
 			});
 		}
 	}
 
 	for (const error of facts.errorFacts) {
-		const score = containment(tokenSet(`${error.operation}: ${error.error}`), tokenSet(openProblemsSection));
+		// Command strings can be much longer than their failure signal. Weight the operation and the
+		// error identity equally so command flags cannot drown out a faithfully preserved failure (or
+		// let a generic error phrase hide a missing operation).
+		const openProblemTokens = tokenSet(openProblemsSection);
+		const operationScore = containment(tokenSet(error.operation), openProblemTokens);
+		const errorScore = containment(tokenSet(error.error), openProblemTokens);
+		const score = (operationScore + errorScore) / 2;
 		if (score < OPEN_ERRORS_RECALL_THRESHOLD) {
 			failures.push({
 				check: "open-errors-recall",
-				detail: `Open error recall ${formatScore(score)} below ${OPEN_ERRORS_RECALL_THRESHOLD}: ${error.operation}`,
+				detail: `Open error recall ${formatScore(score)} (operation ${formatScore(operationScore)}, error ${formatScore(errorScore)}) below ${OPEN_ERRORS_RECALL_THRESHOLD}: ${error.operation}`,
+				score,
+				threshold: OPEN_ERRORS_RECALL_THRESHOLD,
+				comparator: "minimum",
 			});
 		}
 	}
@@ -153,6 +213,9 @@ export function verifySummary(summary: string, facts: CompactionFacts): Verifica
 			failures.push({
 				check: "actions-recall",
 				detail: `New-action recall in ## Done ${formatScore(score)} below ${ACTIONS_RECALL_THRESHOLD}`,
+				score,
+				threshold: ACTIONS_RECALL_THRESHOLD,
+				comparator: "minimum",
 			});
 		}
 	}
@@ -225,14 +288,14 @@ export function deterministicallyFillSummaryGaps(summary: string, facts: Compact
 
 	const workingSet = sectionByName.get(SECTION_WORKING_SET)!;
 	for (const file of facts.workingSet) {
-		if (!sectionLinesContain(workingSet.lines, file.path)) {
+		if (!sectionContainsExactPath(workingSet.lines.join("\n"), file.path)) {
 			appendContentLine(workingSet.lines, `- ${file.path} — ${file.note || file.kind}`);
 		}
 	}
 
 	const files = sectionByName.get(SECTION_FILES)!;
 	for (const file of facts.files) {
-		if (!sectionLinesContain(files.lines, file.path)) {
+		if (!sectionContainsExactPath(files.lines.join("\n"), file.path)) {
 			appendContentLine(files.lines, `- ${file.path}`);
 		}
 	}
@@ -272,6 +335,13 @@ export function buildRetryPrompt(report: VerificationReport, previousAttempt?: s
 	const failures = report.failures.map((failure) => `${failure.check}: ${failure.detail}`).join("; ");
 	const previous = previousAttempt ? `\n\n<previous-attempt>\n${previousAttempt}\n</previous-attempt>` : "";
 	return `Your previous checkpoint failed verification: ${failures}. Fix ONLY these omissions.${previous}`;
+}
+
+export function formatVerificationReports(reports: readonly VerificationReport[]): string {
+	return reports
+		.flatMap((report) => report.failures)
+		.map((failure) => `${failure.check}: ${failure.detail}`)
+		.join(", ");
 }
 
 function parseSummarySections(summary: string): ParsedSummarySection[] {
@@ -329,6 +399,22 @@ function normalizeSectionLines(lines: string[]): string[] {
 
 function sectionLinesContain(lines: readonly string[], value: string): boolean {
 	return lines.some((line) => line.includes(value));
+}
+
+function sectionContainsExactPath(section: string, path: string): boolean {
+	let fromIndex = 0;
+	while (fromIndex <= section.length - path.length) {
+		const index = section.indexOf(path, fromIndex);
+		if (index < 0) return false;
+		const before = index > 0 ? section[index - 1] : undefined;
+		const afterIndex = index + path.length;
+		const after = afterIndex < section.length ? section[afterIndex] : undefined;
+		const boundary = (character: string | undefined): boolean =>
+			character === undefined || /[\s`'"()[\]{}<>,:;|—]/.test(character);
+		if (boundary(before) && boundary(after)) return true;
+		fromIndex = index + 1;
+	}
+	return false;
 }
 
 function tokenSetFromLines(lines: readonly string[]): Set<string> {
@@ -479,4 +565,9 @@ function normalizeHeading(heading: string): string {
 
 function formatScore(score: number): string {
 	return score.toFixed(2);
+}
+
+function formatMissingValues(values: readonly string[]): string {
+	const visible = values.slice(0, 5).join(", ");
+	return values.length > 5 ? `${visible} (+${values.length - 5} more)` : visible;
 }

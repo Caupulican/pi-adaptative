@@ -1,5 +1,9 @@
 ## [Unreleased]
 
+### Fixed
+
+- Calibrated compaction verification around exact path identities and independently weighted operation/error recall, consolidated the duplicated summary-verification path, and preserved structured failed-attempt telemetry through deterministic retry fallback.
+
 ## [0.81.39] - 2026-07-20
 
 ### Added

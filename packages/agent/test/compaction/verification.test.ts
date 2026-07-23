@@ -136,6 +136,33 @@ describe("verifySummary", () => {
 		expect(jaccard(tokenSet("docs/design.md"), tokenSet(summary))).toBeLessThan(0.5);
 	});
 
+	it("scores read-file recall by exact path identities", () => {
+		const facts: CompactionFacts = {
+			...baseFacts,
+			files: [
+				{ path: "docs/shared alpha.md", kind: "read", note: "READ" },
+				{ path: "docs/shared beta.md", kind: "read", note: "READ" },
+			],
+			workingSet: [],
+			actions: [],
+			errorFacts: [],
+			prohibitions: [],
+			cancelledText: "",
+			activeTaskSource: "",
+		};
+		const report = verifySummary("## Files\n- docs/shared alpha.md.backup\n- docs/shared", facts);
+		const failure = report.failures.find((candidate) => candidate.check === "files-read-recall");
+
+		expect(failure).toMatchObject({
+			score: 0,
+			threshold: FILES_READ_RECALL_THRESHOLD,
+			comparator: "minimum",
+			matched: 0,
+			demanded: 2,
+		});
+		expect(failure?.detail).toContain("0/2 exact paths");
+	});
+
 	it("passes when a checkpoint transcribes the facts block", () => {
 		const factsText = [
 			"## Active Task",
@@ -163,6 +190,38 @@ describe("verifySummary", () => {
 		const report = verifySummary(goodSummary.replace("Fix the two failing tests", "Continue"), baseFacts);
 		expect(report.ok).toBe(false);
 		expect(report.failures.some((failure) => failure.check === "active-task-containment")).toBe(true);
+	});
+
+	it("weights open-error operation and failure identity independently", () => {
+		const facts: CompactionFacts = {
+			...baseFacts,
+			files: [],
+			workingSet: [],
+			actions: [],
+			errorFacts: [
+				{
+					operation:
+						"RUN npm run check -- --workspace packages/agent --reporter verbose --coverage --changed origin/main",
+					error: "FAIL TypeScript contract regression",
+				},
+			],
+			prohibitions: [],
+			cancelledText: "",
+			activeTaskSource: "",
+		};
+		const partialOperation = `## Open Problems
+- RUN npm run check -- workspace packages/agent coverage
+- FAIL TypeScript contract regression`;
+		expect(verifySummary(partialOperation, facts)).toEqual({ ok: true, failures: [] });
+
+		const missingOperation = verifySummary("## Open Problems\n- FAIL TypeScript contract regression", facts);
+		const failure = missingOperation.failures.find((candidate) => candidate.check === "open-errors-recall");
+		expect(failure).toMatchObject({
+			score: 0.5,
+			threshold: OPEN_ERRORS_RECALL_THRESHOLD,
+			comparator: "minimum",
+		});
+		expect(failure?.detail).toContain("operation 0.00, error 1.00");
 	});
 
 	it("checks mandatory-rule recall", () => {

@@ -589,7 +589,7 @@ Continue
 		expect(prompts).toHaveLength(1);
 		expect(prompts[0]).toContain("files-modified-recall (must appear in ## Files):\nsrc/fetcher.ts");
 		expect(prompts[0]).toContain(
-			"files-read-recall (must appear in ## Files, containment threshold applies):\ntest/fetcher.test.ts",
+			"files-read-recall (must appear as exact paths in ## Files, path recall threshold applies):\ntest/fetcher.test.ts",
 		);
 		expect(prompts[0]).toContain("working-set-recall (must appear in ## Working Set):\nsrc/fetcher.ts — EDIT");
 		expect(prompts[0]).toContain(
@@ -608,7 +608,18 @@ Continue
 		expect(result.verification).toEqual({ ok: true, failures: [] });
 		expect(result.verificationGateFailures).toHaveLength(1);
 		expect(result.deterministicGapFills).toBe(1);
-		expect((result.details as { verificationGateFailures?: number } | undefined)?.verificationGateFailures).toBe(1);
+		expect(result.details).toMatchObject({
+			verificationGateFailures: 1,
+			verificationGateChecks: {
+				"active-task-containment": {
+					failures: 1,
+					minScore: 0,
+					maxScore: 0,
+					threshold: 0.9,
+					comparator: "minimum",
+				},
+			},
+		});
 		expect(result.summary).toContain("- src/fetcher.ts");
 		expect(result.summary).toContain("- RUN npm test: 2 failed: fetcher.test.ts");
 		expect(result.summary).toContain("1. EDIT src/fetcher.ts");
@@ -678,7 +689,9 @@ Fix the two failing tests now
 		);
 
 		expect(calls).toBe(2);
-		expect(result.verificationGateFailures).toEqual([]);
+		expect(result.verificationGateFailures).toHaveLength(1);
+		expect(result.verificationGateFailures?.[0]?.failures.length).toBeGreaterThan(0);
+		expect(result.details).toMatchObject({ verificationGateFailures: 1 });
 		expect(result.deterministicGapFills).toBe(0);
 		expect(result.verification).toEqual({ ok: true, failures: [] });
 	});

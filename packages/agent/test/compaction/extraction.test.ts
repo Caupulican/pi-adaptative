@@ -731,7 +731,7 @@ describe("extractCompactionFacts", () => {
 			"verification demands:\n" +
 				"files-modified-recall (must appear in ## Files):\n" +
 				"src/b.ts\n" +
-				"files-read-recall (must appear in ## Files, containment threshold applies):\n" +
+				"files-read-recall (must appear as exact paths in ## Files, path recall threshold applies):\n" +
 				"src/a.ts\n" +
 				"working-set-recall (must appear in ## Working Set):\n" +
 				"src/b.ts — edited\n" +

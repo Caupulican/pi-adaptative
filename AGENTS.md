@@ -170,11 +170,14 @@ If the user's instructions conflict with any rule in this document, ask for expl
 
 ## Open threads
 
-- 2026-07-08 · packages/agent · Compaction gate calibration remains a follow-up: a sanitized no-extensions replay reached the deterministic auto-compaction fallback, but the LLM-summary attempts still produced very low verification scores on a normal high-token session. Sample: four `open-errors-recall` failures scored 0.09/0.11/0.06/0.43 against the 0.70 threshold; a later retry showed `files-read-recall` 0.38 against 0.80 and `open-errors-recall` 0.00 against 0.70. This is not a retry-ladder blocker after the deterministic fallback fix, but it needs separate calibration/observability work.
-  - evidence: packages/agent/src/compaction/verification.ts:13-18 · sanitized field replay, 2026-07-08
-  - tags: compaction, verification-gate, calibration, open-thread
+(none)
 
 ## Findings
+
+### 2026-07-23 · packages/agent,coding-agent · compaction verification scores now represent field identities and survive retry fallback — codex
+The low-score replay exposed two separate defects: read-file recall was reported as an opaque token ratio instead of exact path coverage, and open-error scoring let long command text dominate the actual failure identity. Read paths are now scored as exact recalled items, while open errors weight operation and error identity independently without lowering either acceptance threshold. Every failed verification report now crosses the retry-loop boundary into the eventually-applied checkpoint as bounded per-check counts and score ranges; session analytics and `/usage` expose that breakdown even when all LLM attempts end in deterministic fallback. The split/non-split verification loops were consolidated behind one implementation so their retry and telemetry contracts cannot drift.
+- evidence: packages/agent/src/compaction/verification.ts:86 · packages/agent/src/compaction/compaction.ts:130 · packages/agent/src/compaction/loop.ts:55 · packages/coding-agent/src/core/session-analytics.ts:199
+- tags: compaction, verification-gate, calibration, observability, retry, packages/agent, packages/coding-agent, root-cause
 
 ### 2026-07-18 · packages/coding-agent · bash executes in persistent per-agent shell sessions; kill = session reset — claude
 The bash backend is now a keyed registry of long-lived shell processes (`shell-session.ts`): the agent session passes a stable key (survives runtime reloads, shared with user `!` commands, disposed in `AgentSession.dispose()`), while independently created tool instances auto-key and stay isolated — a subagent building its own tool surface gets its own session for free. Invariants to preserve when touching this: commands are wired via eval-of-heredoc (bash) / base64 ReadLine REPL (PowerShell) with a nonce sentinel carrying the exit code; timeout/abort/silence kill the WHOLE session tree and the next exec respawns fresh (state loss is by design — a hung foreground command can't be killed individually without job control); an explicit `shellPath` or a changed per-command env falls back to per-command/respawn semantics. Windows now boots PowerShell once per agent instead of once per command.

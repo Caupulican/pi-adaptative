@@ -32,6 +32,7 @@ import { getSessionsDir } from "../config.ts";
 import { theme } from "../modes/interactive/theme/theme.ts";
 import { resolvePath } from "../utils/paths.ts";
 import {
+	type CompactionGateCheckStats,
 	type SessionStats,
 	SPAWNED_USAGE_CUSTOM_TYPE,
 	type SpawnedUsageReport,
@@ -200,20 +201,45 @@ export class SessionAnalytics {
 		let gateFailures = 0;
 		let deterministicGapFills = 0;
 		let compactionsWithGateFailures = 0;
+		const checks = new Map<string, CompactionGateCheckStats>();
 		for (const entry of this.deps.getSessionManager().getEntries()) {
 			if (entry.type !== "compaction") continue;
 			const details = entry.details;
 			if (!details || typeof details !== "object") continue;
 			const rawGateFailures = (details as { verificationGateFailures?: unknown }).verificationGateFailures;
 			const rawGapFills = (details as { deterministicGapFills?: unknown }).deterministicGapFills;
+			const rawChecks = (details as { verificationGateChecks?: unknown }).verificationGateChecks;
 			const entryGateFailures =
 				typeof rawGateFailures === "number" && Number.isFinite(rawGateFailures) ? rawGateFailures : 0;
 			const entryGapFills = typeof rawGapFills === "number" && Number.isFinite(rawGapFills) ? rawGapFills : 0;
 			gateFailures += entryGateFailures;
 			deterministicGapFills += entryGapFills;
 			if (entryGateFailures > 0) compactionsWithGateFailures++;
+			if (rawChecks && typeof rawChecks === "object" && !Array.isArray(rawChecks)) {
+				for (const [check, rawStats] of Object.entries(rawChecks)) {
+					if (!rawStats || typeof rawStats !== "object" || Array.isArray(rawStats)) continue;
+					const stats = rawStats as Record<string, unknown>;
+					const failures = stats.failures;
+					if (typeof failures !== "number" || !Number.isFinite(failures) || failures <= 0) continue;
+					const current = checks.get(check) ?? { failures: 0 };
+					current.failures += failures;
+					if (typeof stats.minScore === "number" && Number.isFinite(stats.minScore)) {
+						current.minScore = Math.min(current.minScore ?? stats.minScore, stats.minScore);
+					}
+					if (typeof stats.maxScore === "number" && Number.isFinite(stats.maxScore)) {
+						current.maxScore = Math.max(current.maxScore ?? stats.maxScore, stats.maxScore);
+					}
+					if (typeof stats.threshold === "number" && Number.isFinite(stats.threshold)) {
+						current.threshold = stats.threshold;
+					}
+					if (stats.comparator === "minimum" || stats.comparator === "maximum") {
+						current.comparator = stats.comparator;
+					}
+					checks.set(check, current);
+				}
+			}
 		}
-		return { gateFailures, deterministicGapFills, compactionsWithGateFailures };
+		return { gateFailures, deterministicGapFills, compactionsWithGateFailures, checks: Object.fromEntries(checks) };
 	}
 
 	recordToolArgumentValidation(record: ToolArgumentValidationLogRecord): void {

@@ -11,7 +11,6 @@ type SessionWithCompactionInternals = {
 	_checkCompaction: (assistantMessage: AssistantMessage, skipAbortedCheck?: boolean) => Promise<boolean>;
 	_runAutoCompaction: (reason: "overflow" | "threshold", willRetry: boolean) => Promise<boolean>;
 	_resolveCompactionModel: (sessionModel: Model<string>) => Model<string>;
-	_compactWithRetry: () => Promise<never>;
 };
 
 function createUsage(totalTokens: number) {
@@ -174,19 +173,26 @@ describe("AgentSession compaction characterization", () => {
 		const harness = await createHarness({ withConfiguredAuth: true });
 		harnesses.push(harness);
 		seedCompactableSession(harness);
-		const sessionInternals = harness.session as unknown as SessionWithCompactionInternals;
-		let callCount = 0;
-		sessionInternals._compactWithRetry = async () => {
-			callCount++;
-			throw new Error("gate-failed: missing ## Files");
-		};
+		const getStreamCallCount = useSummaryStreamFn(harness, "not a checkpoint");
 
 		const result = await harness.session.compact();
 
 		expect(result.summary).toContain("Deterministic checkpoint");
-		expect(callCount).toBeGreaterThan(1);
+		expect(getStreamCallCount()).toBe(6);
 		const compactionEntries = harness.sessionManager.getEntries().filter((entry) => entry.type === "compaction");
 		expect(compactionEntries).toHaveLength(1);
+		expect(compactionEntries[0]?.details).toMatchObject({
+			verificationGateFailures: 6,
+			verificationGateChecks: {
+				"active-task-containment": {
+					failures: 6,
+					minScore: 0,
+					maxScore: 0,
+					threshold: 0.9,
+					comparator: "minimum",
+				},
+			},
+		});
 	});
 
 	it("auto-compacts with a custom streamFn when registry auth is absent", async () => {

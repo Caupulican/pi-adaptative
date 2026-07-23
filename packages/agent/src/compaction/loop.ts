@@ -1,6 +1,7 @@
 import type { Model } from "@caupulican/pi-ai";
 import type { SessionEntry } from "../session/session-manager.ts";
-import type { CompactionResult } from "./compaction.ts";
+import { type CompactionResult, mergeCompactionVerificationReports } from "./compaction.ts";
+import { CompactionVerificationError, type VerificationReport } from "./verification.ts";
 
 export interface CompactionCycleParams {
 	modelTier: "cheap" | "session";
@@ -54,6 +55,7 @@ export async function runCompactionLoop(deps: CompactionLoopDeps): Promise<Compa
 	let lastModelKey: string | undefined;
 	let ownTrailingCompactionId: string | undefined;
 	let ownTrailingCompactionNeedsRetry = false;
+	const pendingVerificationReports: VerificationReport[] = [];
 	let baseKeepRecent = deps.getBaseKeepRecentTokens ? deps.getBaseKeepRecentTokens() : DEFAULT_KEEP_RECENT;
 	if (!Number.isFinite(baseKeepRecent) || baseKeepRecent <= 0) {
 		baseKeepRecent = DEFAULT_KEEP_RECENT;
@@ -94,7 +96,9 @@ export async function runCompactionLoop(deps: CompactionLoopDeps): Promise<Compa
 				return { kind: "failed", reason: "aborted", cycles: cycle - 1 };
 			}
 			try {
-				const { result } = await Promise.resolve(deps.buildDeterministicCheckpoint());
+				const built = await Promise.resolve(deps.buildDeterministicCheckpoint());
+				const result = mergeCompactionVerificationReports(built.result, pendingVerificationReports);
+				pendingVerificationReports.length = 0;
 				await deps.apply(result);
 				return { kind: "success", result, cycles: cycle };
 			} catch (error) {
@@ -140,6 +144,9 @@ export async function runCompactionLoop(deps: CompactionLoopDeps): Promise<Compa
 			if (deps.signal?.aborted) {
 				return { kind: "failed", reason: "aborted", cycles: cycle };
 			}
+			if (error instanceof CompactionVerificationError) {
+				pendingVerificationReports.push(...error.reports);
+			}
 			const failure = mapFailureCause(error);
 			lastCause = failure.cause;
 			if (lastCause === "aborted") {
@@ -150,7 +157,9 @@ export async function runCompactionLoop(deps: CompactionLoopDeps): Promise<Compa
 			}
 			if (lastCause === "deterministic-required") {
 				try {
-					const { result: deterministicResult } = await Promise.resolve(deps.buildDeterministicCheckpoint());
+					const built = await Promise.resolve(deps.buildDeterministicCheckpoint());
+					const deterministicResult = mergeCompactionVerificationReports(built.result, pendingVerificationReports);
+					pendingVerificationReports.length = 0;
 					await deps.apply(deterministicResult);
 					return { kind: "success", result: deterministicResult, cycles: cycle };
 				} catch (deterministicError) {
@@ -164,6 +173,8 @@ export async function runCompactionLoop(deps: CompactionLoopDeps): Promise<Compa
 		if (deps.signal?.aborted) {
 			return { kind: "failed", reason: "aborted", cycles: cycle };
 		}
+		mergeCompactionVerificationReports(result, pendingVerificationReports);
+		pendingVerificationReports.length = 0;
 		await deps.apply(result);
 		appliedResult = result;
 		const branchAfterApply = deps.getBranch();

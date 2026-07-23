@@ -407,10 +407,19 @@ export interface ModelCycleResult {
 }
 
 /** Session statistics for /session command */
+export interface CompactionGateCheckStats {
+	failures: number;
+	minScore?: number;
+	maxScore?: number;
+	threshold?: number;
+	comparator?: "minimum" | "maximum";
+}
+
 export interface CompactionGateStats {
 	gateFailures: number;
 	deterministicGapFills: number;
 	compactionsWithGateFailures: number;
+	checks: Record<string, CompactionGateCheckStats>;
 }
 
 export interface SessionStats {

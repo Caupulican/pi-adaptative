@@ -26,6 +26,7 @@ import {
 } from "./utils.ts";
 import {
 	buildRetryPrompt,
+	CompactionVerificationError,
 	deterministicallyFillSummaryGaps,
 	isCompactionSummaryStructurallyUsable,
 	type VerificationReport,
@@ -37,10 +38,19 @@ import {
 // ============================================================================
 
 /** Details stored in CompactionEntry.details for file tracking */
+export interface CompactionVerificationCheckStats {
+	failures: number;
+	minScore?: number;
+	maxScore?: number;
+	threshold?: number;
+	comparator?: "minimum" | "maximum";
+}
+
 export interface CompactionDetails {
 	readFiles: string[];
 	modifiedFiles: string[];
 	verificationGateFailures?: number;
+	verificationGateChecks?: Record<string, CompactionVerificationCheckStats>;
 	deterministicGapFills?: number;
 }
 
@@ -118,6 +128,69 @@ export interface CompactionResult<T = unknown> {
 	verification?: VerificationReport;
 	verificationGateFailures?: VerificationReport[];
 	deterministicGapFills?: number;
+}
+
+/**
+ * Carry failed LLM verification attempts into the result that the retry ladder eventually applies.
+ * Only bounded numeric/check identifiers are persisted in details; raw facts stay in the in-memory reports.
+ */
+export function mergeCompactionVerificationReports(
+	result: CompactionResult,
+	reports: readonly VerificationReport[],
+): CompactionResult {
+	if (reports.length === 0) return result;
+
+	const combinedReports = [
+		...reports.map(cloneVerificationReport),
+		...(result.verificationGateFailures ?? []).map(cloneVerificationReport),
+	];
+	result.verificationGateFailures = combinedReports;
+
+	if (result.details === undefined || isPlainRecord(result.details)) {
+		const details = result.details ?? {};
+		result.details = {
+			...details,
+			verificationGateFailures: combinedReports.length,
+			verificationGateChecks: aggregateVerificationChecks(combinedReports),
+		};
+	}
+
+	return result;
+}
+
+function cloneVerificationReport(report: VerificationReport): VerificationReport {
+	return {
+		ok: report.ok,
+		failures: report.failures.map((failure) => ({ ...failure })),
+	};
+}
+
+function isPlainRecord(value: unknown): value is Record<string, unknown> {
+	if (!value || typeof value !== "object" || Array.isArray(value)) return false;
+	const prototype = Object.getPrototypeOf(value);
+	return prototype === Object.prototype || prototype === null;
+}
+
+function aggregateVerificationChecks(
+	reports: readonly VerificationReport[],
+): Record<string, CompactionVerificationCheckStats> {
+	const checks = new Map<string, CompactionVerificationCheckStats>();
+	for (const report of reports) {
+		for (const failure of report.failures) {
+			const current = checks.get(failure.check) ?? { failures: 0 };
+			current.failures++;
+			if (failure.score !== undefined && Number.isFinite(failure.score)) {
+				current.minScore = Math.min(current.minScore ?? failure.score, failure.score);
+				current.maxScore = Math.max(current.maxScore ?? failure.score, failure.score);
+			}
+			if (failure.threshold !== undefined && Number.isFinite(failure.threshold)) {
+				current.threshold = failure.threshold;
+			}
+			if (failure.comparator) current.comparator = failure.comparator;
+			checks.set(failure.check, current);
+		}
+	}
+	return Object.fromEntries(checks);
 }
 
 // ============================================================================
@@ -626,7 +699,7 @@ export async function generateSummary(
 	thinkingLevel?: ThinkingLevel,
 	streamFn?: StreamFn,
 	preDigest?: (conversationText: string, signal?: AbortSignal) => Promise<string>,
-	factsBlock = "verification demands:\nfiles-modified-recall (must appear in ## Files):\nfiles-read-recall (must appear in ## Files, containment threshold applies):\nworking-set-recall (must appear in ## Working Set):\nopen-errors-recall (must appear in ## Open Problems):\nactions-recall (must appear in ## Done):\nmandatory-rules-recall (must appear in ### Mandatory Rules):\nactive-task-containment (must appear in ## Active Task):\ncancelled-work-dropped (must NOT appear outside ### Mandatory Rules):",
+	factsBlock = "verification demands:\nfiles-modified-recall (must appear in ## Files):\nfiles-read-recall (must appear as exact paths in ## Files, path recall threshold applies):\nworking-set-recall (must appear in ## Working Set):\nopen-errors-recall (must appear in ## Open Problems):\nactions-recall (must appear in ## Done):\nmandatory-rules-recall (must appear in ### Mandatory Rules):\nactive-task-containment (must appear in ## Active Task):\ncancelled-work-dropped (must NOT appear outside ### Mandatory Rules):",
 	chunked = false,
 	precomputedConversationText?: string,
 ): Promise<string> {
@@ -1039,6 +1112,82 @@ Summarize the prefix to provide context for the retained suffix:
 
 Be concise. Focus on what's needed to understand the kept suffix.`;
 
+interface VerifiedSummaryResult {
+	summary: string;
+	verification: VerificationReport;
+	verificationGateFailures: VerificationReport[];
+	deterministicGapFills: number;
+}
+
+async function generateVerifiedSummary(options: {
+	messages: AgentMessage[];
+	model: Model<any>;
+	reserveTokens: number;
+	apiKey: string | undefined;
+	headers: Record<string, string> | undefined;
+	signal: AbortSignal | undefined;
+	customInstructions: string | undefined;
+	previousSummary: string | undefined;
+	thinkingLevel: ThinkingLevel | undefined;
+	streamFn: StreamFn | undefined;
+	preDigest: ((conversationText: string, signal?: AbortSignal) => Promise<string>) | undefined;
+	facts: CompactionFacts;
+	factsBlock: string;
+	chunked: boolean;
+}): Promise<VerifiedSummaryResult> {
+	let retryInstructions = options.customInstructions;
+	const verificationGateFailures: VerificationReport[] = [];
+	const precomputedConversationText = await prepareSummarizationConversationText(
+		options.messages,
+		options.preDigest,
+		options.signal,
+	);
+
+	for (let attempt = 0; attempt < 2; attempt++) {
+		const summary = await generateSummary(
+			options.messages,
+			options.model,
+			options.reserveTokens,
+			options.apiKey,
+			options.headers,
+			options.signal,
+			retryInstructions,
+			options.previousSummary,
+			options.thinkingLevel,
+			options.streamFn,
+			options.preDigest,
+			options.factsBlock,
+			options.chunked,
+			precomputedConversationText,
+		);
+		const verification = verifySummary(summary, options.facts);
+		if (verification.ok) {
+			return { summary, verification, verificationGateFailures, deterministicGapFills: 0 };
+		}
+
+		verificationGateFailures.push(verification);
+		if (!isCompactionSummaryStructurallyUsable(summary)) {
+			if (attempt >= 1) throw new CompactionVerificationError(verificationGateFailures);
+			retryInstructions = buildRetryPrompt(verification, summary);
+			continue;
+		}
+
+		const filled = deterministicallyFillSummaryGaps(summary, options.facts);
+		if (filled.verification.ok) {
+			return {
+				summary: filled.summary,
+				verification: filled.verification,
+				verificationGateFailures,
+				deterministicGapFills: filled.changed ? 1 : 0,
+			};
+		}
+
+		throw new CompactionVerificationError(verificationGateFailures);
+	}
+
+	throw new CompactionVerificationError(verificationGateFailures);
+}
+
 /**
  * Generate summaries for compaction using prepared data.
  * Returns CompactionResult - SessionManager adds uuid/parentUuid when saving.
@@ -1081,66 +1230,28 @@ export async function compact(
 		delegatedWorkerFacts: [],
 	};
 	const factsBlock = renderFactsBlock(facts);
-	let verification: VerificationReport | undefined;
-	const verificationGateFailures: VerificationReport[] = [];
-	let deterministicGapFills = 0;
-	let summary = "";
+	const verified =
+		isSplitTurn && messagesToSummarize.length === 0
+			? undefined
+			: await generateVerifiedSummary({
+					messages: messagesToSummarize,
+					model,
+					reserveTokens: settings.reserveTokens,
+					apiKey,
+					headers,
+					signal,
+					customInstructions,
+					previousSummary,
+					thinkingLevel,
+					streamFn,
+					preDigest,
+					facts,
+					factsBlock,
+					chunked: executionOptions?.chunked ?? false,
+				});
 
-	if (isSplitTurn && messagesToSummarize.length > 0) {
-		let historySummary = "No prior history.";
-		let historyInstructions = customInstructions;
-		// Computed once and reused across retry attempts below: `messagesToSummarize` and `preDigest`
-		// are identical on every attempt (only the retry instructions change), and `preDigest` makes
-		// real model calls — re-running serialize+preDigest per attempt would resend/re-summarize the
-		// unchanged span for no benefit.
-		const precomputedConversationText = await prepareSummarizationConversationText(
-			messagesToSummarize,
-			preDigest,
-			signal,
-		);
-		for (let attempt = 0; attempt < 2; attempt++) {
-			historySummary = await generateSummary(
-				messagesToSummarize,
-				model,
-				settings.reserveTokens,
-				apiKey,
-				headers,
-				signal,
-				historyInstructions,
-				previousSummary,
-				thinkingLevel,
-				streamFn,
-				preDigest,
-				factsBlock,
-				executionOptions?.chunked ?? false,
-				precomputedConversationText,
-			);
-
-			verification = verifySummary(historySummary, facts);
-			if (verification.ok) {
-				break;
-			}
-
-			if (!isCompactionSummaryStructurallyUsable(historySummary)) {
-				if (attempt >= 1) {
-					throw new Error(`gate-failed: ${formatVerificationFailures(verification)}`);
-				}
-				historyInstructions = buildRetryPrompt(verification, historySummary);
-				continue;
-			}
-
-			verificationGateFailures.push(verification);
-			const filled = deterministicallyFillSummaryGaps(historySummary, facts);
-			if (filled.verification.ok) {
-				historySummary = filled.summary;
-				verification = filled.verification;
-				if (filled.changed) deterministicGapFills++;
-				break;
-			}
-
-			throw new Error(`gate-failed: ${formatVerificationFailures(filled.verification)}`);
-		}
-
+	let summary = verified?.summary ?? "No prior history.";
+	if (isSplitTurn) {
 		const turnPrefixSummary = await generateTurnPrefixSummary(
 			turnPrefixMessages,
 			model,
@@ -1151,57 +1262,7 @@ export async function compact(
 			thinkingLevel,
 			streamFn,
 		);
-		summary = `${historySummary}\n\n---\n\n**Turn Context (split turn):**\n\n${turnPrefixSummary}`;
-	} else {
-		let customSummaryInstructions = customInstructions;
-		// See the isSplitTurn branch above: same span/preDigest across attempts, computed once.
-		const precomputedConversationText = await prepareSummarizationConversationText(
-			messagesToSummarize,
-			preDigest,
-			signal,
-		);
-		for (let attempt = 0; attempt < 2; attempt++) {
-			summary = await generateSummary(
-				messagesToSummarize,
-				model,
-				settings.reserveTokens,
-				apiKey,
-				headers,
-				signal,
-				customSummaryInstructions,
-				previousSummary,
-				thinkingLevel,
-				streamFn,
-				preDigest,
-				factsBlock,
-				executionOptions?.chunked ?? false,
-				precomputedConversationText,
-			);
-
-			verification = verifySummary(summary, facts);
-			if (verification.ok) {
-				break;
-			}
-
-			if (!isCompactionSummaryStructurallyUsable(summary)) {
-				if (attempt >= 1) {
-					throw new Error(`gate-failed: ${formatVerificationFailures(verification)}`);
-				}
-				customSummaryInstructions = buildRetryPrompt(verification, summary);
-				continue;
-			}
-
-			verificationGateFailures.push(verification);
-			const filled = deterministicallyFillSummaryGaps(summary, facts);
-			if (filled.verification.ok) {
-				summary = filled.summary;
-				verification = filled.verification;
-				if (filled.changed) deterministicGapFills++;
-				break;
-			}
-
-			throw new Error(`gate-failed: ${formatVerificationFailures(filled.verification)}`);
-		}
+		summary = `${summary}\n\n---\n\n**Turn Context (split turn):**\n\n${turnPrefixSummary}`;
 	}
 
 	const { readFiles, modifiedFiles } = computeFileLists(fileOps);
@@ -1210,24 +1271,23 @@ export async function compact(
 		throw new Error("First kept entry has no UUID - session may need migration");
 	}
 
-	return {
-		summary,
-		firstKeptEntryId,
-		tokensBefore,
-		details: {
-			readFiles,
-			modifiedFiles,
-			verificationGateFailures: verificationGateFailures.length,
-			deterministicGapFills,
-		} as CompactionDetails,
-		verification,
-		verificationGateFailures,
-		deterministicGapFills,
-	};
-}
-
-function formatVerificationFailures(verification: VerificationReport): string {
-	return verification.failures.map((failure) => `${failure.check}: ${failure.detail}`).join(", ");
+	return mergeCompactionVerificationReports(
+		{
+			summary,
+			firstKeptEntryId,
+			tokensBefore,
+			details: {
+				readFiles,
+				modifiedFiles,
+				verificationGateFailures: 0,
+				deterministicGapFills: verified?.deterministicGapFills ?? 0,
+			} as CompactionDetails,
+			verification: verified?.verification,
+			verificationGateFailures: [],
+			deterministicGapFills: verified?.deterministicGapFills ?? 0,
+		},
+		verified?.verificationGateFailures ?? [],
+	);
 }
 
 export function createDeterministicCompaction(preparation: CompactionPreparation): CompactionResult {
