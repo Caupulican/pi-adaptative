@@ -2,7 +2,7 @@ import type { ExtensionAPI } from "@caupulican/pi-adaptative";
 import type { AgentTool } from "@caupulican/pi-agent-core";
 import { fauxAssistantMessage, fauxToolCall } from "@caupulican/pi-ai";
 import { Type } from "typebox";
-import { afterEach, describe, expect, it } from "vitest";
+import { afterEach, describe, expect, it, vi } from "vitest";
 import { createHarness, getAssistantTexts, getMessageText, getUserTexts, type Harness } from "./harness.ts";
 
 async function createWaitingHarness(
@@ -355,6 +355,89 @@ describe("AgentSession queue characterization", () => {
 
 		expect(sawCustomMessage).toBe(true);
 		expect(harness.session.messages.map((message) => message.role)).toEqual(["user", "custom", "assistant"]);
+	});
+
+	it("retains nextTurn messages when extension preflight fails", async () => {
+		const harness = await createHarness();
+		harnesses.push(harness);
+		await harness.session.sendCustomMessage(
+			{ customType: "next-turn", content: "retain this", display: false, details: {} },
+			{ deliverAs: "nextTurn" },
+		);
+		const preflight = vi
+			.spyOn(harness.session.extensionRunner, "emitBeforeAgentStart")
+			.mockRejectedValueOnce(new Error("preflight failed"));
+
+		await expect(harness.session.prompt("first attempt")).rejects.toThrow("preflight failed");
+		expect(
+			(harness.session as unknown as { _pendingNextTurnMessages: readonly unknown[] })._pendingNextTurnMessages,
+		).toHaveLength(1);
+
+		preflight.mockRestore();
+		let sawRetainedMessage = false;
+		harness.setResponses([
+			(context) => {
+				sawRetainedMessage = context.messages.some(
+					(message) => message.role === "user" && getMessageText(message) === "retain this",
+				);
+				return fauxAssistantMessage("done");
+			},
+		]);
+		await harness.session.prompt("second attempt");
+
+		expect(sawRetainedMessage).toBe(true);
+		expect(
+			(harness.session as unknown as { _pendingNextTurnMessages: readonly unknown[] })._pendingNextTurnMessages,
+		).toHaveLength(0);
+	});
+
+	it("does not emit routing_end when input preflight fails before routing_start", async () => {
+		const harness = await createHarness({
+			extensionFactories: [
+				(pi) => {
+					pi.on("input", async () => ({ action: "continue" }));
+				},
+			],
+		});
+		harnesses.push(harness);
+		vi.spyOn(harness.session.extensionRunner, "emitInput").mockRejectedValueOnce(new Error("input failed"));
+
+		await expect(harness.session.prompt("hello")).rejects.toThrow("input failed");
+
+		expect(harness.eventsOfType("routing_start")).toHaveLength(0);
+		expect(harness.eventsOfType("routing_end")).toHaveLength(0);
+	});
+
+	it("releases an early-painted user identity when execution fails before message_start", async () => {
+		const harness = await createHarness();
+		harnesses.push(harness);
+		vi.spyOn(harness.session.agent, "prompt").mockRejectedValueOnce(new Error("execution failed early"));
+
+		await expect(harness.session.prompt("hello")).rejects.toThrow("execution failed early");
+
+		expect(
+			(harness.session as unknown as { _earlyDisplayedUserMessages: ReadonlySet<unknown> })
+				._earlyDisplayedUserMessages.size,
+		).toBe(0);
+	});
+
+	it("does not rebaseline the active turn when prompt queues a steer", async () => {
+		const waiting = await createWaitingHarness();
+		const { harness, waitForToolStart, promptPromise, releaseToolExecution } = waiting;
+		harnesses.push(harness);
+		harness.setResponses([
+			fauxAssistantMessage(fauxToolCall("wait", {}), { stopReason: "toolUse" }),
+			fauxAssistantMessage("done"),
+		]);
+
+		await waitForToolStart;
+		const internals = harness.session as unknown as { _costGuardTurnBaselineUsd: number };
+		internals._costGuardTurnBaselineUsd = 42;
+		await harness.session.prompt("queued", { streamingBehavior: "steer" });
+
+		expect(internals._costGuardTurnBaselineUsd).toBe(42);
+		releaseToolExecution();
+		await promptPromise;
 	});
 
 	it("updates pendingMessageCount and removes queued text before message_start is emitted", async () => {

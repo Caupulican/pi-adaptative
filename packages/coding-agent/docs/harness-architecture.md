@@ -147,6 +147,8 @@ circuit breaking, repair teaching, and its per-turn state. `CompactionController
 automatic detection, execution, retries, cancellation, persistence, and extension notification;
 `CompactionSupport` is its provider-neutral model/auth/settings policy.
 `ForegroundRecoveryController` owns the terminal-response latch and ordered retry, quota failover,
-retry closeout, compaction, and queued-continuation decisions. The next structural extraction target
-is the remaining foreground prompt preparation and submission flow in `AgentSession`; it must move
-through cohesive owners without changing the public facade or duplicating session state.
+retry closeout, compaction, and queued-continuation decisions. Foreground prompt submission remains
+an `AgentSession` transaction because it composes those independent owners and the public event
+surface; extracting it today would create a callback-heavy proxy rather than a new state owner. Its
+contract is balanced routing events, commit-on-success `nextTurn` consumption, stable per-turn cost
+accounting, and bounded early-message identity cleanup.

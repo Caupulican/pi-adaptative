@@ -209,7 +209,7 @@ describe("AgentSession route judge", () => {
 
 	it("applies a configured judgeThinking to the judge's own completion", async () => {
 		const harness = await createHarness({
-			models: [{ id: "cheap" }, { id: "medium" }],
+			models: [{ id: "cheap" }, { id: "medium", reasoning: true }],
 			settings: {
 				modelRouter: {
 					enabled: true,

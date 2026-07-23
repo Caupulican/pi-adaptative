@@ -1552,7 +1552,8 @@ export class AgentSession {
 	 * The ceiling is turn-cumulative: the next foreground call's projection is folded together with
 	 * background/research/worker/reflection spend recorded SINCE THIS TURN BEGAN — {@link getSpawnedUsage}'s
 	 * already-recorded rollup (the same read-side-deduped total the footer's SUBAGENTS line uses) minus the
-	 * baseline snapshotted at the top of `_promptUnserialized` ({@link _costGuardTurnBaselineUsd}) — so a
+	 * baseline snapshotted before a new turn enters routing in `_promptUnserialized`
+	 * ({@link _costGuardTurnBaselineUsd}) — so a
 	 * turn that is cheap in the foreground but has spent heavily via background lanes THIS turn still trips
 	 * the warning, while a prior turn's background spend does not keep every later turn's guard stuck
 	 * "over". A background lane that finishes mid-turn is attributed to whichever turn it completes in.
@@ -2747,10 +2748,6 @@ export class AgentSession {
 	}
 
 	private async _promptUnserialized(text: string, options?: PromptOptions): Promise<void> {
-		// Start of a new foreground prompt cycle -- rebaseline the cost guard's background-spend
-		// window so a PRIOR turn's background/spawned spend doesn't keep this turn's guard permanently
-		// tripped. Every round trip within this same turn (tool-call iterations) shares this baseline.
-		this._costGuardTurnBaselineUsd = this.getSpawnedUsage().cost;
 		this._toolProtocol.applyRepairLayerSettings();
 		this._cancelPrefixWarm();
 		const expandPromptTemplates = options?.expandPromptTemplates ?? true;
@@ -2763,6 +2760,8 @@ export class AgentSession {
 		// selected/authenticated — can un-register it from _earlyDisplayedUserMessages instead of
 		// leaking the reference forever.
 		let userMessage: AgentMessage | undefined;
+		let routingStarted = false;
+		let pendingNextTurnCount = 0;
 		// Effectiveness feedback: remember the recall page + the query so we can score, after the
 		// response, whether the agent actually used the recalled context.
 		let injectedRecall = "";
@@ -2834,6 +2833,10 @@ export class AgentSession {
 				return;
 			}
 
+			// This submission is starting a new foreground turn. Queued steer/follow-up messages above
+			// remain part of the already-active turn and must not erase its spawned-cost baseline.
+			this._costGuardTurnBaselineUsd = this.getSpawnedUsage().cost;
+
 			// Flush any pending bash messages before the new prompt
 			this._flushPendingBashMessages();
 
@@ -2859,6 +2862,7 @@ export class AgentSession {
 			// prompt with nothing happening for however long the judge takes. routing_end is emitted
 			// exactly once below: either in the catch block (this phase failed) or right after the try
 			// block (this phase succeeded, whether or not it produced a turn to run).
+			routingStarted = true;
 			this._emit({ type: "routing_start" });
 
 			const resolvedRouteInfo = await this._modelRouter.resolveTurnRouteJudged(expandedText, {
@@ -2936,10 +2940,10 @@ export class AgentSession {
 			messages.push(userMessage);
 
 			// Inject any pending "nextTurn" messages as context alongside the user message
-			for (const msg of this._pendingNextTurnMessages) {
+			pendingNextTurnCount = this._pendingNextTurnMessages.length;
+			for (const msg of this._pendingNextTurnMessages.slice(0, pendingNextTurnCount)) {
 				messages.push(msg);
 			}
-			this._pendingNextTurnMessages = [];
 
 			const taskStepsState = this.getTaskStepsStateSnapshot();
 			const taskStepsContext = taskStepsState ? formatTaskStepsContext(taskStepsState) : undefined;
@@ -2982,6 +2986,9 @@ export class AgentSession {
 				// Ensure we're using the base prompt (in case previous turn had modifications)
 				this.agent.state.systemPrompt = this._baseSystemPrompt;
 			}
+			// Commit consumption only after all fallible preflight hooks have succeeded. Messages added
+			// while the hook was running remain queued for the following turn.
+			this._pendingNextTurnMessages.splice(0, pendingNextTurnCount);
 		} catch (error) {
 			// The turn never reached _runAgentPrompt, so the authoritative message_start that would
 			// normally consume this entry (see _handleAgentEvent) never fires — un-register it here
@@ -2991,7 +2998,7 @@ export class AgentSession {
 			}
 			// The routing/prep phase (routing_start above) failed before ever reaching the turn — end
 			// it here, or the UI's "working" indicator for it spins forever with nothing behind it.
-			this._emit({ type: "routing_end" });
+			if (routingStarted) this._emit({ type: "routing_end" });
 			preflightResult?.(false);
 			throw error;
 		}
@@ -2999,16 +3006,22 @@ export class AgentSession {
 		// The routing/prep phase is over — either we're about to hand off into the turn (which emits
 		// its own agent_start/streaming events right after), or messages is unexpectedly unset and we
 		// bail below. Either way nothing is left "routing" past this point.
-		this._emit({ type: "routing_end" });
+		if (routingStarted) this._emit({ type: "routing_end" });
 
 		if (!messages) {
 			return;
 		}
 
 		preflightResult?.(true);
-		this._toolProtocol.resetTurnState();
-		await this._modelRouter.runRoutedTurn(messages, routedTurnModel, routedTurnRouteDecision);
-		this._toolProtocol.recordParseOutcomeFromLastAssistant();
+		try {
+			this._toolProtocol.resetTurnState();
+			await this._modelRouter.runRoutedTurn(messages, routedTurnModel, routedTurnRouteDecision);
+			this._toolProtocol.recordParseOutcomeFromLastAssistant();
+		} finally {
+			// Normally consumed by the authoritative message_start. If execution failed before that
+			// event, do not retain the early-painted message identity indefinitely.
+			if (userMessage) this._earlyDisplayedUserMessages.delete(userMessage);
+		}
 
 		// Score whether the agent actually used the recalled context, so the recall gate can adapt.
 		if (injectedRecall) {
