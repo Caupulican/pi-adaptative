@@ -2,12 +2,13 @@
  * Compaction support: summarizer model selection (#30 cost guard), request-auth resolution
  * with session-model fallback, and window-adapted compaction settings.
  *
- * Extracted verbatim from AgentSession (agent-session.ts) as a narrow-deps collaborator; the
- * session keeps same-signature private delegations at every call-in point.
+ * This is the policy half of compaction. CompactionController owns detection, execution, retry,
+ * persistence, notification, and cancellation; AgentSession keeps compatibility delegations at
+ * established regression seams.
  */
 import type { ThinkingLevel } from "@caupulican/pi-agent-core";
 import { type CompactionSettings, summarizerCanIngest } from "@caupulican/pi-agent-core/node";
-import type { Model } from "@caupulican/pi-ai";
+import type { Api, Model } from "@caupulican/pi-ai";
 import type { ModelRegistry } from "./model-registry.ts";
 import { resolveCliModel } from "./model-resolver.ts";
 import { evaluateSurfaceFitness } from "./model-router/fitness-gate.ts";
@@ -15,13 +16,13 @@ import type { ModelFitnessReport } from "./research/model-fitness.ts";
 import type { SettingsManager } from "./settings-manager.ts";
 
 export interface CompactionSupportDeps {
-	getModel(): Model<any> | undefined;
+	getModel(): Model<Api> | undefined;
 	getSettingsManager(): SettingsManager;
 	getModelRegistry(): ModelRegistry;
 	/** True when the agent's streamFn is (or wraps) the raw streamSimple — auth must be explicit then. */
 	isRawStream(): boolean;
 	/** Host auth resolution that THROWS with a user-actionable message when no key exists. */
-	getRequiredRequestAuth(model: Model<any>): Promise<{ apiKey?: string; headers?: Record<string, string> }>;
+	getRequiredRequestAuth(model: Model<Api>): Promise<{ apiKey?: string; headers?: Record<string, string> }>;
 	isModelExhausted(ref: string): boolean;
 	getStoredFitnessReport(ref: string): ModelFitnessReport | undefined;
 	/** Estimated tokens of the summarization input (live context; over-estimates, which is safe). */
@@ -33,7 +34,7 @@ export interface CompactionSupportDeps {
 	 * out-of-band call. No-ops for a non-managed-local model (checked internally by the gate);
 	 * throws with a user-actionable reason when a managed-local model cannot be made ready.
 	 */
-	ensureModelReady(model: Model<any>): Promise<void>;
+	ensureModelReady(model: Model<Api>): Promise<void>;
 }
 
 export class CompactionSupport {
@@ -70,7 +71,7 @@ export class CompactionSupport {
 		};
 	}
 
-	async getRequestAuth(model: Model<any>): Promise<{
+	async getRequestAuth(model: Model<Api>): Promise<{
 		apiKey?: string;
 		headers?: Record<string, string>;
 	}> {
@@ -90,7 +91,7 @@ export class CompactionSupport {
 	 * throwing, so callers can still try the next candidate in the existing auth-fallback ladder
 	 * rather than aborting resolution outright.
 	 */
-	private async readinessFailure(model: Model<any>): Promise<string | undefined> {
+	private async readinessFailure(model: Model<Api>): Promise<string | undefined> {
 		try {
 			await this.deps.ensureModelReady(model);
 			return undefined;
@@ -109,9 +110,9 @@ export class CompactionSupport {
 	 * bypass of the readiness gate.
 	 */
 	async resolveModelAndAuth(
-		compactionModel: Model<any>,
-		sessionModel: Model<any>,
-	): Promise<{ model: Model<any>; apiKey?: string; headers?: Record<string, string>; failure?: string }> {
+		compactionModel: Model<Api>,
+		sessionModel: Model<Api>,
+	): Promise<{ model: Model<Api>; apiKey?: string; headers?: Record<string, string>; failure?: string }> {
 		if (this.deps.isRawStream()) {
 			const registry = this.deps.getModelRegistry();
 			let auth = await registry.getApiKeyAndHeaders(compactionModel);
@@ -157,11 +158,11 @@ export class CompactionSupport {
 		return setting && setting !== "auto" ? setting : undefined;
 	}
 
-	private modelRef(model: Model<any>): string {
+	private modelRef(model: Model<Api>): string {
 		return `${model.provider}/${model.id}`;
 	}
 
-	private resolveConfiguredModel(pattern: string): { model?: Model<any>; cause?: "unresolved" | "unauthed" } {
+	private resolveConfiguredModel(pattern: string): { model?: Model<Api>; cause?: "unresolved" | "unauthed" } {
 		const registry = this.deps.getModelRegistry();
 		const resolved = resolveCliModel({ cliModel: pattern, modelRegistry: registry });
 		if (!resolved.model) return { cause: "unresolved" };
@@ -169,25 +170,25 @@ export class CompactionSupport {
 		return { model: resolved.model };
 	}
 
-	private selectConfiguredModel(pattern: string): { model?: Model<any>; cause?: string } {
+	private selectConfiguredModel(pattern: string): { model?: Model<Api>; cause?: string } {
 		const resolved = this.resolveConfiguredModel(pattern);
 		if (!resolved.model) return { cause: resolved.cause };
 		if (this.deps.isModelExhausted(this.modelRef(resolved.model))) return { cause: "exhausted" };
 		return { model: resolved.model };
 	}
 
-	private effectiveContextWindow(model: Model<any>): number {
+	private effectiveContextWindow(model: Model<Api>): number {
 		const registered = model.contextWindow > 0 ? model.contextWindow : Number.POSITIVE_INFINITY;
 		const served = this.deps.getStoredFitnessReport(this.modelRef(model))?.capacity?.servedContextWindow;
 		return served && served > 0 ? Math.min(registered, served) : registered;
 	}
 
-	private modelWithEffectiveWindow(model: Model<any>): Model<any> {
+	private modelWithEffectiveWindow(model: Model<Api>): Model<Api> {
 		const contextWindow = this.effectiveContextWindow(model);
 		return contextWindow === model.contextWindow ? model : { ...model, contextWindow };
 	}
 
-	private resolveDefaultModel(sessionModel: Model<any>): Model<any> {
+	private resolveDefaultModel(sessionModel: Model<Api>): Model<Api> {
 		const router = this.deps.getSettingsManager().getModelRouterSettings();
 		if (!router.enabled || !router.cheapModel) {
 			this.lastSelectionReason = "session_default";
@@ -221,7 +222,7 @@ export class CompactionSupport {
 		return selected.model;
 	}
 
-	private modelsAreEqual(left: Model<any>, right: Model<any>): boolean {
+	private modelsAreEqual(left: Model<Api>, right: Model<Api>): boolean {
 		return left.provider === right.provider && left.id === right.id;
 	}
 
@@ -231,7 +232,7 @@ export class CompactionSupport {
 	 *   - `"auto"`/unset follows the model router's configured cheap model when the router is enabled;
 	 *   - otherwise the session model is used (safe default).
 	 */
-	resolveModel(sessionModel: Model<any>): Model<any> {
+	resolveModel(sessionModel: Model<Api>): Model<Api> {
 		const explicitSetting = this.getExplicitCompactionModelSetting();
 		if (explicitSetting) {
 			const selected = this.selectConfiguredModel(explicitSetting);
@@ -260,8 +261,8 @@ export class CompactionSupport {
 	/** Default compaction should never inherit expensive session thinking. */
 	resolveThinkingLevel(
 		sessionThinkingLevel: ThinkingLevel | undefined,
-		compactionModel: Model<any>,
-		sessionModel: Model<any>,
+		compactionModel: Model<Api>,
+		sessionModel: Model<Api>,
 	): ThinkingLevel | undefined {
 		if (this.getExplicitCompactionModelSetting()) return sessionThinkingLevel;
 

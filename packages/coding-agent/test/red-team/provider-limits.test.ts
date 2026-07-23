@@ -5,9 +5,9 @@ import type { Agent } from "@caupulican/pi-agent-core";
 import { classifyFailure, DEFAULT_RETRY_POLICY } from "@caupulican/pi-agent-core";
 import type { Api, AssistantMessage, Model } from "@caupulican/pi-ai";
 import { describe, expect, it } from "vitest";
-import { AgentSession } from "../../src/core/agent-session.ts";
 import type { RouteDecision } from "../../src/core/autonomy/contracts.ts";
 import { BillingFailoverController, ExhaustedProviderRegistry } from "../../src/core/billing-failover-controller.ts";
+import { runCompactionWithRetry } from "../../src/core/compaction-controller.ts";
 import { CompactionSupport } from "../../src/core/compaction-support.ts";
 import type { ModelRegistry } from "../../src/core/model-registry.ts";
 import { ModelRouterController } from "../../src/core/model-router-controller.ts";
@@ -156,21 +156,6 @@ const routerPrototype = ModelRouterController.prototype as unknown as {
 	): { decision: RouteDecision; model: Model<Api> } | undefined;
 };
 
-type CompactWithRetryHarness = {
-	settingsManager: { getRetrySettings: () => { enabled: boolean; maxRetries: number; baseDelayMs: number } };
-	/** _compactWithRetry records every caught provider failure to the corpus before deciding on retry. */
-	_failureCorpus: { record: (args: unknown) => void };
-};
-
-const agentSessionPrototype = AgentSession.prototype as unknown as {
-	_compactWithRetry(
-		this: CompactWithRetryHarness,
-		run: () => Promise<unknown>,
-		signal: AbortSignal,
-		provider?: string,
-	): Promise<unknown>;
-};
-
 function controller(startModel: Model<Api>, subscription: boolean, exhausted = new ExhaustedProviderRegistry()) {
 	const warnings: string[] = [];
 	const agent = { state: { model: startModel } } as unknown as Agent;
@@ -259,20 +244,17 @@ describe("provider limit red-team matrix", () => {
 	});
 
 	it("Quota mid-compaction (summarizer model)", async () => {
-		const harness: CompactWithRetryHarness = {
-			settingsManager: { getRetrySettings: () => ({ enabled: true, maxRetries: 2, baseDelayMs: 1 }) },
-			_failureCorpus: { record: () => {} },
-		};
 		let surfaced = "";
 		try {
-			await agentSessionPrototype._compactWithRetry.call(
-				harness,
-				async () => {
+			await runCompactionWithRetry({
+				run: async () => {
 					throw new Error(codexLiteral);
 				},
-				new AbortController().signal,
-				"openai-codex",
-			);
+				signal: new AbortController().signal,
+				provider: "openai-codex",
+				getRetrySettings: () => ({ enabled: true, maxRetries: 2, baseDelayMs: 1 }),
+				recordFailure: () => {},
+			});
 		} catch (error) {
 			surfaced = error instanceof Error ? error.message : String(error);
 		}
