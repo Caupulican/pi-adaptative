@@ -357,6 +357,7 @@ export interface ApprovalResolutionContract {
 
 export const ORCHESTRATION_EVENT_TYPES = [
 	"objective.created",
+	"objective.updated",
 	"objective.paused",
 	"objective.resumed",
 	"objective.completed",

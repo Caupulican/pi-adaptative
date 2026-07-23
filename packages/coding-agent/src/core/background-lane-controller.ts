@@ -50,6 +50,7 @@ import type { ModelCapabilityProfile } from "./model-capability.ts";
 import type { ModelRegistry } from "./model-registry.ts";
 import type { StoredFitnessReport } from "./models/fitness-store.ts";
 import type { OrchestrationProfile } from "./orchestration/contracts.ts";
+import type { TaskRuntimeProjection } from "./orchestration/task-runtime.ts";
 import { LaneModelResolver } from "./research/lane-model-resolver.ts";
 import type { ModelFitnessReport } from "./research/model-fitness.ts";
 import { ModelFitnessController } from "./research/model-fitness-controller.ts";
@@ -254,6 +255,11 @@ export class BackgroundLaneController {
 			this._workers?.getRecords() ??
 			(this.deps.isDelegateToolActive?.() ? this._getWorkerController().getRecords() : []);
 		return [...this._laneTracker.getRecords(), ...workerRecords];
+	}
+
+	/** Does not materialize the worker controller when UAC omitted delegation. */
+	getTaskRuntimeSnapshot(): TaskRuntimeProjection | undefined {
+		return this._workers?.getTaskRuntimeSnapshot();
 	}
 
 	/**

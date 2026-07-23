@@ -185,6 +185,17 @@ function objectiveFromPayload(payload: JsonObject): ObjectiveContract {
 	return structuredClone(record(payload.objective, "objective")) as unknown as ObjectiveContract;
 }
 
+function assertAcceptanceCriteria(criteria: readonly AcceptanceCriterion[]): void {
+	const criterionIds = criteria.map((criterion) => criterion.id);
+	if (
+		criterionIds.some((id) => !id.trim()) ||
+		new Set(criterionIds).size !== criterionIds.length ||
+		criteria.some((criterion) => !criterion.description.trim())
+	) {
+		throw new DurableTaskRuntimeError("Objective acceptance criteria require unique ids and descriptions.");
+	}
+}
+
 function taskFromPayload(payload: JsonObject): TaskContract {
 	return structuredClone(record(payload.task, "task")) as unknown as TaskContract;
 }
@@ -339,6 +350,18 @@ export function reduceOrchestrationEvent(
 				throw new DurableTaskRuntimeError(`Objective '${objective.objectiveId}' was created more than once.`);
 			}
 			objectives[objective.objectiveId] = { objective, taskIds: [] };
+			break;
+		}
+		case "objective.updated": {
+			const objective = objectiveFromPayload(event.payload);
+			const current = objectives[event.aggregateId];
+			if (!current) throw new DurableTaskRuntimeError(`Unknown objective '${event.aggregateId}'.`);
+			if (objective.objectiveId !== event.aggregateId) {
+				throw new DurableTaskRuntimeError(
+					`Updated objective id '${objective.objectiveId}' does not match aggregate.`,
+				);
+			}
+			objectives[event.aggregateId] = { ...current, objective };
 			break;
 		}
 		case "objective.paused":
@@ -796,14 +819,7 @@ export class DurableTaskRuntime {
 		};
 		if (!objective.title || !objective.description)
 			throw new DurableTaskRuntimeError("Objective title and description are required.");
-		const criterionIds = objective.acceptanceCriteria.map((criterion) => criterion.id);
-		if (
-			criterionIds.some((id) => !id.trim()) ||
-			new Set(criterionIds).size !== criterionIds.length ||
-			objective.acceptanceCriteria.some((criterion) => !criterion.description.trim())
-		) {
-			throw new DurableTaskRuntimeError("Objective acceptance criteria require unique ids and descriptions.");
-		}
+		assertAcceptanceCriteria(objective.acceptanceCriteria);
 		if (this.state.objectives[objective.objectiveId]) {
 			throw new DurableTaskRuntimeError(`Objective '${objective.objectiveId}' already exists.`);
 		}
@@ -812,6 +828,58 @@ export class DurableTaskRuntime {
 			aggregateId: objective.objectiveId,
 			actor: "kernel",
 			idempotencyKey: `objective-created:${objective.objectiveId}`,
+			payload: toJsonObject({ objective }),
+		});
+		return structuredClone(objective);
+	}
+
+	/** Create or synchronize owner-authored objective metadata without disturbing lifecycle or task state. */
+	ensureObjective(input: CreateObjectiveInput & { objectiveId: string }): ObjectiveContract {
+		this.refresh();
+		const current = this.state.objectives[input.objectiveId];
+		if (!current) return this.createObjective(input);
+		assertRiskBudget(input.riskBudget, "objective.riskBudget");
+		const acceptanceCriteria = structuredClone(input.acceptanceCriteria ?? []);
+		assertAcceptanceCriteria(acceptanceCriteria);
+		const nextFields = {
+			title: input.title.trim(),
+			description: input.description.trim(),
+			constraints: [...(input.constraints ?? [])],
+			acceptanceCriteria,
+			riskBudget: { ...(input.riskBudget ?? {}) },
+		};
+		if (!nextFields.title || !nextFields.description) {
+			throw new DurableTaskRuntimeError("Objective title and description are required.");
+		}
+		const currentFields = {
+			title: current.objective.title,
+			description: current.objective.description,
+			constraints: current.objective.constraints,
+			acceptanceCriteria: current.objective.acceptanceCriteria,
+			riskBudget: current.objective.riskBudget,
+		};
+		if (isDeepStrictEqual(currentFields, nextFields)) return structuredClone(current.objective);
+
+		const retainedCriterionIds = new Set(acceptanceCriteria.map((criterion) => criterion.id));
+		const referencedRemovedIds = current.taskIds.flatMap((taskId) =>
+			(this.state.tasks[taskId]?.task.acceptanceCriterionIds ?? []).filter(
+				(criterionId) => !retainedCriterionIds.has(criterionId),
+			),
+		);
+		if (referencedRemovedIds.length > 0) {
+			throw new DurableTaskRuntimeError(
+				`Cannot remove acceptance criteria referenced by tasks: ${[...new Set(referencedRemovedIds)].join(", ")}.`,
+			);
+		}
+		const objective: ObjectiveContract = {
+			...current.objective,
+			...nextFields,
+			updatedAt: this.nowIso(),
+		};
+		this.commit({
+			type: "objective.updated",
+			aggregateId: objective.objectiveId,
+			actor: "kernel",
 			payload: toJsonObject({ objective }),
 		});
 		return structuredClone(objective);

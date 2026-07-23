@@ -20,7 +20,8 @@ import { deriveModelCapabilityProfile, type ModelCapabilityProfile } from "../mo
 import type { ModelRegistry } from "../model-registry.ts";
 import type { OrchestrationProfile } from "../orchestration/contracts.ts";
 import type { StartedDelegationAttempt } from "../orchestration/delegation-ledger.ts";
-import type { AttemptRuntimeState } from "../orchestration/task-runtime.ts";
+import type { AttemptRuntimeState, TaskRuntimeProjection } from "../orchestration/task-runtime.ts";
+import { projectGoalObjective } from "../orchestration/work-state-projection.ts";
 import { adaptWorkerResult, adaptWorkerRunOutcome } from "../orchestration/worker-result-adapter.ts";
 import { registerInFlightWork } from "../reload-blockers.ts";
 import type { ResolvedWorkerDelegationSettings, SettingsManager } from "../settings-manager.ts";
@@ -276,6 +277,11 @@ export class WorkerDelegationController {
 		return this.profileResolver;
 	}
 
+	/** Read-only durable worker projection. Undefined means the delegate capability never loaded. */
+	getTaskRuntimeSnapshot(): TaskRuntimeProjection | undefined {
+		return this.lifecycle?.getTaskRuntimeSnapshot();
+	}
+
 	private recoverDurableQueue(): void {
 		if (this.queueRecovered) return;
 		this.queueRecovered = true;
@@ -465,7 +471,7 @@ export class WorkerDelegationController {
 			profile: admission.shipment.profile,
 			requiredCapabilities: executionPlan.requiredCapabilities,
 			...(request.verificationOfTaskId ? { verificationOfTaskId: request.verificationOfTaskId } : {}),
-			...(goal ? { goal: { goalId: goal.goalId, description: goal.userGoal } } : {}),
+			...(goal ? { goal: projectGoalObjective(goal) } : {}),
 		});
 		return { executionPlan, lifecycle, ...prepared };
 	}

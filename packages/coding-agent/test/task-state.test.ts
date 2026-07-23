@@ -175,10 +175,26 @@ describe("task step state", () => {
 	});
 
 	it("round-trips valid state and rejects malformed or future versions", () => {
-		const state = addTaskStep(createTaskStepsState("T0"), { content: "Persist" }, "T1");
+		const state = addTaskStep(
+			createTaskStepsState("T0"),
+			{ content: "Persist", requirementIds: ["req-1", "req-1", " req-2 "] },
+			"T1",
+		);
+		expect(state.steps[0].requirementIds).toEqual(["req-1", "req-2"]);
 		expect(parseTaskStepsState(JSON.stringify(state))).toEqual(state);
+		const legacy = JSON.parse(JSON.stringify(state)) as { steps: Array<{ requirementIds?: string[] }> };
+		delete legacy.steps[0].requirementIds;
+		expect(parseTaskStepsState(JSON.stringify(legacy))?.steps[0].requirementIds).toEqual([]);
 		expect(parseTaskStepsState("not json")).toBeUndefined();
 		expect(parseTaskStepsState(JSON.stringify({ ...state, version: 2 }))).toBeUndefined();
 		expect(parseTaskStepsState(JSON.stringify({ ...state, steps: [{ id: 3 }] }))).toBeUndefined();
+	});
+
+	it("replaces and clears explicit goal requirement links", () => {
+		let state = addTaskStep(createTaskStepsState("T0"), { content: "Implement", requirementIds: ["req-1"] }, "T1");
+		state = updateTaskStep(state, "step-1", { requirementIds: ["req-2"] }, "T2");
+		expect(state.steps[0].requirementIds).toEqual(["req-2"]);
+		state = updateTaskStep(state, "step-1", { requirementIds: [] }, "T3");
+		expect(state.steps[0].requirementIds).toEqual([]);
 	});
 });

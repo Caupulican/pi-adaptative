@@ -1,3 +1,4 @@
+import { taskStepReferencesRequirement } from "../tasks/task-projection.ts";
 import {
 	applyGoalEvent,
 	createGoalState,
@@ -333,35 +334,15 @@ export function summarizeGoalState(
  *
  * `goal-tool-core` never reads or mutates task state itself (it stays pure); callers that DO
  * have access to the branch-scoped open task steps (e.g. via `buildGoalRuntimeSnapshot`) may
- * pass them through here to surface a nudge in the tool response when an open task_steps step
- * appears to reference a requirement the agent just satisfied or completed. Task state is never
- * written from goal code — this only reads an already-resolved, caller-supplied summary.
+ * pass them through here to surface a nudge in the tool response when an open task_steps step is
+ * explicitly linked to, or conservatively appears to reference, a requirement the agent just
+ * satisfied or completed. Task state is never written from goal code — this only reads an
+ * already-resolved, caller-supplied summary.
  */
 export interface OpenTaskStepRef {
 	id: string;
 	content: string;
-}
-
-function escapeRegExp(text: string): string {
-	return text.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
-}
-
-/**
- * Cheap, conservative cross-reference: an open task step "references" a requirement when its
- * content contains the requirement id as a whole token (not a substring of a longer token), or
- * contains the requirement's full text verbatim (case-insensitive). Both conditions are chosen
- * to avoid noisy partial-word matches -- a short common id or a coincidental few-word overlap
- * does not qualify.
- */
-function taskStepReferencesRequirement(step: OpenTaskStepRef, requirement: { id: string; text: string }): boolean {
-	const idToken = requirement.id.trim();
-	if (idToken.length >= 2) {
-		const idPattern = new RegExp(`(^|[^a-z0-9])${escapeRegExp(idToken.toLocaleLowerCase())}([^a-z0-9]|$)`, "i");
-		if (idPattern.test(step.content)) return true;
-	}
-	const text = requirement.text.trim();
-	if (text.length >= 8 && step.content.toLocaleLowerCase().includes(text.toLocaleLowerCase())) return true;
-	return false;
+	requirementIds?: readonly string[];
 }
 
 /**
@@ -389,8 +370,8 @@ export function findRequirementCrossReferenceNudges(
 }
 
 /**
- * After 'satisfy_requirement' or 'complete', nudge lines for open task steps whose content
- * references a just-satisfied requirement. Returns `[]` for every other action, or when
+ * After 'satisfy_requirement' or 'complete', nudge lines for linked open task steps. Returns `[]`
+ * for every other action, or when
  * `openTaskSteps` was not supplied (the default -- backward compatible, no behavior change for
  * callers that do not pass task-step context).
  */

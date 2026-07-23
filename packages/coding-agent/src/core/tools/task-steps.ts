@@ -36,6 +36,12 @@ const stepInputSchema = Type.Object(
 		status: Type.Optional(statusSchema),
 		priority: Type.Optional(prioritySchema),
 		owner: Type.Optional(Type.String({ maxLength: 200 })),
+		requirementIds: Type.Optional(
+			Type.Array(Type.String({ minLength: 1, maxLength: 200 }), {
+				maxItems: 32,
+				description: "Goal requirement ids this foreground step advances.",
+			}),
+		),
 		note: Type.Optional(Type.String({ maxLength: 4_000 })),
 		evidence: Type.Optional(Type.Array(Type.String({ minLength: 1, maxLength: 2_000 }), { maxItems: 32 })),
 	},
@@ -72,6 +78,12 @@ const taskStepsSchema = Type.Object(
 		status: Type.Optional(statusSchema),
 		priority: Type.Optional(prioritySchema),
 		owner: Type.Optional(Type.String({ maxLength: 200 })),
+		requirementIds: Type.Optional(
+			Type.Array(Type.String({ minLength: 1, maxLength: 200 }), {
+				maxItems: 32,
+				description: "Goal requirement ids this foreground step advances; [] clears existing links.",
+			}),
+		),
 		note: Type.Optional(Type.String({ maxLength: 4_000 })),
 		evidence: Type.Optional(Type.Array(Type.String({ minLength: 1, maxLength: 2_000 }), { maxItems: 32 })),
 		clearCompleted: Type.Optional(
@@ -114,6 +126,7 @@ function toTaskStepInput(input: TaskStepsToolInput): TaskStepInput {
 		status: input.status,
 		priority: input.priority,
 		owner: input.owner,
+		requirementIds: input.requirementIds,
 		note: input.note,
 		evidence: input.evidence,
 	};
@@ -179,6 +192,7 @@ export function createTaskStepsToolDefinition(deps: TaskStepsToolDependencies): 
 			"Always address the first open task step before unrelated work: start it, complete/block/cancel it with evidence, ask one clarifying question, or explicitly defer or reorder it.",
 			"Mark steps completed as soon as evidence is gathered, and attach concise evidence or a blocker reason through update.",
 			"Use action=intake with a complete steps array when preserving a raw multi-item dump; retain every item and do not silently drop entries.",
+			"When a goal is active, set requirementIds on each step that advances a goal requirement; do not rely on repeating requirement text.",
 			"Drain task_steps before final responses: leave no stale in_progress step, and explicitly discuss or defer remaining pending or blocked work.",
 			"Use goal for the durable goal ledger and delegate/delegate_status for worker lanes; do not emulate background execution inside task_steps.",
 		],
@@ -232,6 +246,7 @@ export function createTaskStepsToolDefinition(deps: TaskStepsToolDependencies): 
 								status: input.status,
 								priority: input.priority,
 								owner: input.owner,
+								requirementIds: input.requirementIds,
 								note: input.note,
 								evidence: input.evidence,
 							},

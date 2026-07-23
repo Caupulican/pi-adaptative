@@ -12,6 +12,8 @@ const MAX_TASK_STEP_NOTE_LENGTH = 4_000;
 const MAX_TASK_STEP_OWNER_LENGTH = 200;
 const MAX_TASK_STEP_EVIDENCE = 32;
 const MAX_TASK_STEP_EVIDENCE_LENGTH = 2_000;
+const MAX_TASK_STEP_REQUIREMENTS = 32;
+const MAX_TASK_STEP_REQUIREMENT_ID_LENGTH = 200;
 
 export interface TaskStepInput {
 	content: string;
@@ -19,6 +21,7 @@ export interface TaskStepInput {
 	status?: TaskStepStatus;
 	priority?: TaskStepPriority;
 	owner?: string;
+	requirementIds?: readonly string[];
 	note?: string;
 	notes?: readonly string[];
 	evidence?: readonly string[];
@@ -31,6 +34,8 @@ export interface TaskStep {
 	status: TaskStepStatus;
 	priority?: TaskStepPriority;
 	owner?: string;
+	/** Goal requirements this foreground step advances. Optional only for snapshots from older sessions. */
+	requirementIds?: readonly string[];
 	notes: readonly string[];
 	evidence: readonly string[];
 	createdAt: string;
@@ -59,6 +64,7 @@ export interface TaskStepUpdate {
 	status?: TaskStepStatus;
 	priority?: TaskStepPriority;
 	owner?: string;
+	requirementIds?: readonly string[];
 	note?: string;
 	evidence?: readonly string[];
 }
@@ -103,6 +109,8 @@ function isTaskStep(value: unknown): value is TaskStep {
 		isTaskStepStatus(value.status) &&
 		(value.priority === undefined || isTaskStepPriority(value.priority)) &&
 		hasOptionalString(value, "owner", MAX_TASK_STEP_OWNER_LENGTH) &&
+		(value.requirementIds === undefined ||
+			isBoundedStringArray(value.requirementIds, MAX_TASK_STEP_REQUIREMENTS, MAX_TASK_STEP_REQUIREMENT_ID_LENGTH)) &&
 		isBoundedStringArray(value.notes, MAX_TASK_STEP_EVIDENCE, MAX_TASK_STEP_NOTE_LENGTH) &&
 		isBoundedStringArray(value.evidence, MAX_TASK_STEP_EVIDENCE, MAX_TASK_STEP_EVIDENCE_LENGTH) &&
 		typeof value.createdAt === "string" &&
@@ -143,7 +151,12 @@ export function isTaskStepsState(value: unknown): value is TaskStepsState {
 }
 
 function cloneTaskStep(step: TaskStep): TaskStep {
-	return { ...step, notes: [...step.notes], evidence: [...step.evidence] };
+	return {
+		...step,
+		requirementIds: [...(step.requirementIds ?? [])],
+		notes: [...step.notes],
+		evidence: [...step.evidence],
+	};
 }
 
 export function cloneTaskStepsState(state: TaskStepsState): TaskStepsState {
@@ -270,6 +283,10 @@ function createStep(args: {
 		args.input.evidence === undefined
 			? [...(existing?.evidence ?? [])]
 			: normalizeStrings(args.input.evidence, "Task step evidence", MAX_TASK_STEP_EVIDENCE_LENGTH);
+	const requirementIds =
+		args.input.requirementIds === undefined
+			? [...(existing?.requirementIds ?? [])]
+			: normalizeStrings(args.input.requirementIds, "Task step requirement id", MAX_TASK_STEP_REQUIREMENT_ID_LENGTH);
 	return {
 		id: args.id,
 		content: requireBoundedText(args.input.content, "Task step content", MAX_TASK_STEP_CONTENT_LENGTH),
@@ -283,6 +300,7 @@ function createStep(args: {
 			args.input.owner === undefined
 				? existing?.owner
 				: optionalBoundedText(args.input.owner, "Task step owner", MAX_TASK_STEP_OWNER_LENGTH),
+		requirementIds,
 		notes,
 		evidence,
 		createdAt: args.createdAt,
@@ -399,6 +417,10 @@ export function updateTaskStep(
 			update.owner === undefined
 				? current.owner
 				: optionalBoundedText(update.owner, "Task step owner", MAX_TASK_STEP_OWNER_LENGTH),
+		requirementIds:
+			update.requirementIds === undefined
+				? [...(current.requirementIds ?? [])]
+				: normalizeStrings(update.requirementIds, "Task step requirement id", MAX_TASK_STEP_REQUIREMENT_ID_LENGTH),
 		notes,
 		evidence,
 		updatedAt: now,
@@ -445,7 +467,13 @@ export function formatTaskSteps(
 	};
 	const lines = [`Task steps (${visible.length} visible, ${state.steps.length} tracked):`];
 	for (const step of visible.slice(0, maxItems)) {
-		const details = [step.priority, step.owner].filter(Boolean).join(", ");
+		const details = [
+			step.priority,
+			step.owner,
+			step.requirementIds?.length ? `requirements: ${step.requirementIds.join(", ")}` : undefined,
+		]
+			.filter(Boolean)
+			.join(", ");
 		lines.push(
 			`- [${statusMarker[step.status]}] ${step.id} ${step.activeForm || step.content}${details ? ` (${details})` : ""}`,
 		);

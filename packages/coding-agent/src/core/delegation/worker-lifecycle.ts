@@ -184,6 +184,10 @@ export class WorkerLifecycle {
 		return this.ledger.runtime.getSnapshot().tasks[taskId];
 	}
 
+	getTaskRuntimeSnapshot(): TaskRuntimeProjection {
+		return this.ledger.runtime.getSnapshot();
+	}
+
 	getRecords(): LaneRecord[] {
 		const snapshot = this.ledger.runtime.getSnapshot();
 		return Object.keys(snapshot.tasks).flatMap((taskId) => {

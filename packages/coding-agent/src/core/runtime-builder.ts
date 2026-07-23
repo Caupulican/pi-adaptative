@@ -89,6 +89,7 @@ import {
 	type SettingsManager,
 } from "./settings-manager.ts";
 import { createSyntheticSourceInfo, type SourceInfo } from "./source-info.ts";
+import { projectOpenTaskSteps } from "./tasks/task-projection.ts";
 import type { TaskStepsState } from "./tasks/task-state.ts";
 import {
 	buildReflexUserPrompt,
@@ -150,16 +151,11 @@ export function hasAnsweredToolCallOnBranch(sessionManager: SessionManager, tool
 }
 
 /**
- * Project a task-steps snapshot down to the OPEN (non-terminal) steps the goal tool's
- * cross-visibility nudge needs. Mirrors `goal-runtime-snapshot.ts`'s `openTaskSteps` filter
- * (status not "completed"/"cancelled", `activeForm || content`) so the two read the same
- * "open" definition, narrowed to `OpenTaskStepRef`'s id+content shape. Exported (pure, no
- * `this`) so the goal tool's `getOpenTaskSteps` wiring below is directly testable.
+ * Goal-tool adapter over the canonical open-task projection. Exported (pure, no `this`) so the
+ * production `getOpenTaskSteps` wiring below remains directly testable without another filter.
  */
 export function deriveOpenTaskStepRefs(taskStepsState: TaskStepsState | undefined): OpenTaskStepRef[] {
-	return (taskStepsState?.steps ?? [])
-		.filter((step) => step.status !== "completed" && step.status !== "cancelled")
-		.map((step) => ({ id: step.id, content: step.activeForm || step.content }));
+	return projectOpenTaskSteps(taskStepsState);
 }
 
 interface ReloadRuntimeSnapshot {

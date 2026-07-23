@@ -24,7 +24,7 @@ describe("task_steps tool", () => {
 		const harness = createHarness();
 		const setResult = await execute(harness.tool, {
 			action: "set",
-			steps: [{ content: "Inspect", status: "in_progress" }, { content: "Implement" }],
+			steps: [{ content: "Inspect", status: "in_progress", requirementIds: ["req-1"] }, { content: "Implement" }],
 		});
 		expect(setResult.details).toMatchObject({ action: "set", applied: true, stepCount: 2, openStepCount: 2 });
 
@@ -35,7 +35,11 @@ describe("task_steps tool", () => {
 			evidence: ["focused test passed"],
 		});
 		expect(updateResult.details).toMatchObject({ action: "update", applied: true });
-		expect(harness.getState()?.steps[0]).toMatchObject({ status: "completed", evidence: ["focused test passed"] });
+		expect(harness.getState()?.steps[0]).toMatchObject({
+			status: "completed",
+			requirementIds: ["req-1"],
+			evidence: ["focused test passed"],
+		});
 
 		const listResult = await execute(harness.tool, { action: "list" });
 		const listContent = listResult.content[0];
@@ -161,6 +165,7 @@ describe("task_steps tool", () => {
 		expect(harnessGuidelines(createHarness().tool)).toContain("exactly one step in_progress");
 		expect(harnessGuidelines(createHarness().tool)).toContain("first open task step");
 		expect(harnessGuidelines(createHarness().tool)).toContain("Drain task_steps");
+		expect(harnessGuidelines(createHarness().tool)).toContain("requirementIds");
 	});
 });
 

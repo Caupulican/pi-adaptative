@@ -4,6 +4,7 @@ import { join } from "node:path";
 import { afterEach, describe, expect, it } from "vitest";
 import { ORCHESTRATION_SCHEMA_VERSION, type OrchestrationProfile } from "../src/core/orchestration/contracts.ts";
 import { DelegationOrchestrationLedger } from "../src/core/orchestration/delegation-ledger.ts";
+import type { GoalObjectiveProjection } from "../src/core/orchestration/work-state-projection.ts";
 import { adaptWorkerResult } from "../src/core/orchestration/worker-result-adapter.ts";
 
 const roots: string[] = [];
@@ -36,6 +37,17 @@ function profile(): OrchestrationProfile {
 		verificationProfileId: "verifier-fast",
 		createdAt: now,
 		updatedAt: now,
+	};
+}
+
+function goal(acceptanceCriteria: GoalObjectiveProjection["acceptanceCriteria"]): GoalObjectiveProjection {
+	return {
+		objectiveId: "goal:g1",
+		title: "Goal g1",
+		description: "Ship safely",
+		constraints: [],
+		acceptanceCriteria,
+		riskBudget: {},
 	};
 }
 
@@ -151,5 +163,55 @@ describe("DelegationOrchestrationLedger", () => {
 
 		expect(result).toMatchObject({ status: "partial", nextAction: "independent_verification_required" });
 		expect(ledger.runtime.getSnapshot().tasks["worker-1"]?.task.status).toBe("blocked");
+	});
+
+	it("synchronizes goal acceptance criteria before dispatch and preserves them across reopen", () => {
+		const agentDir = root();
+		const ledger = new DelegationOrchestrationLedger({ agentDir, sessionId: "session-goal" });
+		const firstGoal = goal([{ id: "req-1", description: "Pass focused tests", required: true }]);
+		ledger.prepare({
+			laneId: "worker-1",
+			instructions: "Implement",
+			profile: profile(),
+			requiredCapabilities: ["filesystem.read"],
+			goal: firstGoal,
+		});
+		const firstOrdinal = ledger.runtime.getSnapshot().lastOrdinal;
+		ledger.runtime.ensureObjective(firstGoal);
+		expect(ledger.runtime.getSnapshot().lastOrdinal).toBe(firstOrdinal);
+
+		const expandedGoal = goal([
+			{ id: "req-1", description: "Pass focused tests", required: true },
+			{ id: "req-2", description: "Record evidence", required: true },
+		]);
+		ledger.prepare({
+			laneId: "worker-2",
+			instructions: "Verify metadata",
+			profile: profile(),
+			requiredCapabilities: ["filesystem.read"],
+			goal: expandedGoal,
+		});
+
+		const reopened = new DelegationOrchestrationLedger({ agentDir, sessionId: "session-goal" });
+		expect(reopened.runtime.getSnapshot().objectives["goal:g1"]?.objective.acceptanceCriteria).toEqual(
+			expandedGoal.acceptanceCriteria,
+		);
+		expect(reopened.runtime.getSnapshot().tasks["worker-1"]?.task.acceptanceCriterionIds).toEqual([]);
+	});
+
+	it("refuses to remove an acceptance criterion already referenced by a task", () => {
+		const ledger = new DelegationOrchestrationLedger({ agentDir: root(), sessionId: "session-criteria" });
+		ledger.runtime.createObjective(goal([{ id: "req-1", description: "Required proof", required: true }]));
+		ledger.runtime.createTask({
+			taskId: "proof-task",
+			objectiveId: "goal:g1",
+			title: "Prove criterion",
+			description: "Run the trusted evaluator",
+			role: "verifier",
+			acceptanceCriterionIds: ["req-1"],
+		});
+		expect(() => ledger.runtime.ensureObjective(goal([]))).toThrow(
+			"Cannot remove acceptance criteria referenced by tasks: req-1",
+		);
 	});
 });

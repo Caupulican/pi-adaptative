@@ -1,6 +1,7 @@
 import type { HarnessCapability, OrchestrationProfile } from "./contracts.ts";
 import { OrchestrationEventStore } from "./event-store.ts";
 import { type AttemptRuntimeState, DurableTaskRuntime, DurableTaskRuntimeError } from "./task-runtime.ts";
+import type { GoalObjectiveProjection } from "./work-state-projection.ts";
 
 export interface DelegationLedgerOptions {
 	agentDir: string;
@@ -13,7 +14,7 @@ export interface PrepareDelegationInput {
 	instructions: string;
 	profile: OrchestrationProfile;
 	requiredCapabilities: readonly HarnessCapability[];
-	goal?: { goalId: string; description: string };
+	goal?: GoalObjectiveProjection;
 	verificationOfTaskId?: string;
 }
 
@@ -56,13 +57,15 @@ export class DelegationOrchestrationLedger {
 			throw new DurableTaskRuntimeError(`Unknown verification subject '${input.verificationOfTaskId}'.`);
 		}
 		const objectiveId =
-			existingVerificationSubject?.task.objectiveId ??
-			(input.goal ? `goal:${input.goal.goalId}` : `session:${this.sessionId}`);
-		if (!snapshot.objectives[objectiveId]) {
+			existingVerificationSubject?.task.objectiveId ?? input.goal?.objectiveId ?? `session:${this.sessionId}`;
+		if (input.goal && objectiveId === input.goal.objectiveId) {
+			this.runtime.ensureObjective(input.goal);
+			snapshot = this.runtime.getSnapshot();
+		} else if (!snapshot.objectives[objectiveId]) {
 			this.runtime.createObjective({
 				objectiveId,
-				title: input.goal ? `Goal ${input.goal.goalId}` : `Session ${this.sessionId}`,
-				description: input.goal?.description ?? "Session-scoped delegated work",
+				title: `Session ${this.sessionId}`,
+				description: "Session-scoped delegated work",
 			});
 			snapshot = this.runtime.getSnapshot();
 		}

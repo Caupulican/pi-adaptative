@@ -4077,6 +4077,7 @@ export class AgentSession {
 			sessionManager: this.sessionManager,
 			settings,
 			laneRecords: this._backgroundLanes.getLaneRecords(),
+			taskRuntime: this._backgroundLanes.getTaskRuntimeSnapshot(),
 		});
 	}
 

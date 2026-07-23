@@ -3,10 +3,12 @@ import type { EvidenceBundle, LearningDecision, WorkerResult } from "../autonomy
 import type { LaneRecord } from "../autonomy/lane-tracker.ts";
 import { getWorkerResultSnapshots } from "../delegation/session-worker-result.ts";
 import { getLearningDecisionSnapshots } from "../learning/session-learning-decision.ts";
+import type { TaskRuntimeProjection } from "../orchestration/task-runtime.ts";
+import { projectSessionWorkState, type SessionWorkStateProjection } from "../orchestration/work-state-projection.ts";
 import { getLatestEvidenceBundleSnapshot } from "../research/session-evidence-bundle.ts";
 import { getActiveSessionBranchEntries } from "../session-snapshot.ts";
 import { getLatestTaskStepsStateSnapshot } from "../tasks/session-task-state.ts";
-import type { TaskStepStatus } from "../tasks/task-state.ts";
+import type { OpenTaskStepProjection } from "../tasks/task-projection.ts";
 import { evaluateGoalContinuation, type GoalContinuationDecision } from "./goal-continuation-controller.ts";
 import { DEFAULT_GOAL_WORKER_WAIT_MS } from "./goal-continuation-defaults.ts";
 import type { GoalState } from "./goal-state.ts";
@@ -22,11 +24,7 @@ export interface GoalRuntimeSnapshotSettings {
  * loop never writes back to task state through this snapshot, and the task store stays the
  * single source of truth for its own steps.
  */
-export interface GoalRuntimeOpenTaskStep {
-	id: string;
-	status: TaskStepStatus;
-	content: string;
-}
+export type GoalRuntimeOpenTaskStep = OpenTaskStepProjection;
 
 /**
  * Live, per-worktree-sync-lane status for one lane bound to a dispatched worker, as the caller
@@ -75,6 +73,8 @@ export interface GoalRuntimeSnapshot {
 	 * itself always populates a concrete array (possibly empty).
 	 */
 	openTaskSteps?: readonly GoalRuntimeOpenTaskStep[];
+	/** Canonical read model joining requirements, foreground steps, and delegated DAG tasks. */
+	workState?: SessionWorkStateProjection;
 	/**
 	 * Per-requirement worktree-sync state, present only for requirements whose `boundLaneId` matches
 	 * a `worktreeLaneStatus` entry supplied to the builder. Optional (like `openTaskSteps`) so every
@@ -127,6 +127,8 @@ export function buildGoalRuntimeSnapshot(args: {
 	 * changes any OTHER continuation outcome.
 	 */
 	worktreeLaneStatus?: readonly GoalRuntimeWorktreeLaneStatus[];
+	/** Durable worker DAG projection, supplied only when the delegate capability has been loaded. */
+	taskRuntime?: TaskRuntimeProjection;
 }): GoalRuntimeSnapshot {
 	const branchEntries = getActiveSessionBranchEntries(args.sessionManager);
 	let goalState = getLatestGoalStateSnapshot(args.sessionManager);
@@ -137,9 +139,8 @@ export function buildGoalRuntimeSnapshot(args: {
 	// Reuses the SAME branch-scoped primitive as goal-state resolution (getLatestCustomEntryOnBranch),
 	// so the task-steps summary below can never leak a sibling branch's checklist either.
 	const taskStepsState = getLatestTaskStepsStateSnapshot(args.sessionManager);
-	const openTaskSteps: GoalRuntimeOpenTaskStep[] = (taskStepsState?.steps ?? [])
-		.filter((step) => step.status !== "completed" && step.status !== "cancelled")
-		.map((step) => ({ id: step.id, status: step.status, content: step.activeForm || step.content }));
+	const workState = projectSessionWorkState({ goalState, taskStepsState, taskRuntime: args.taskRuntime });
+	const openTaskSteps = workState.openTaskSteps;
 
 	let inFlightGoalLaneIds: ReadonlySet<string> | undefined;
 	if (goalState && args.laneRecords) {
@@ -217,6 +218,7 @@ export function buildGoalRuntimeSnapshot(args: {
 		learningDecisions,
 		continuation,
 		openTaskSteps,
+		workState,
 		...(requirementWorktreeStates !== undefined ? { requirementWorktreeStates } : {}),
 	};
 }
