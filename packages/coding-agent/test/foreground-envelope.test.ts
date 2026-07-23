@@ -1,39 +1,40 @@
 import { describe, expect, it } from "vitest";
-import type { CapabilityName } from "../src/core/autonomy/contracts.ts";
 import {
 	buildForegroundEnvelope,
 	formatForegroundEnvelopeObservation,
 } from "../src/core/autonomy/foreground-envelope.ts";
+import { HARNESS_CAPABILITIES, type HarnessCapability } from "../src/core/capability-contract.ts";
 
 describe("buildForegroundEnvelope", () => {
 	it("maps every known tool to its capability", () => {
-		const cases: Array<[string, CapabilityName]> = [
-			["read", "read_files"],
-			["grep", "read_files"],
-			["find", "read_files"],
-			["ls", "read_files"],
-			["edit", "write_files"],
-			["write", "write_files"],
-			["bash", "run_shell"],
-			["python", "run_shell"],
-			["powershell", "run_shell"],
-			["run_toolkit_script", "run_shell"],
-			["run_process", "run_shell"],
-			["fetch", "network"],
-			["web_search", "network"],
-			["skill_audit", "skill_read"],
-			["skillify", "skill_write"],
-			["extensionify", "source_write"],
-			["delegate", "delegate"],
-			["delegate_status", "delegate"],
-			["goal", "memory_write"],
-			["memory", "memory_write"],
-			["model_fitness", "research"],
+		const cases: Array<[string, HarnessCapability]> = [
+			["read", "filesystem.read"],
+			["grep", "filesystem.read"],
+			["find", "filesystem.read"],
+			["ls", "filesystem.read"],
+			["edit", "filesystem.write"],
+			["write", "filesystem.write"],
+			["bash", "process.exec"],
+			["python", "process.exec"],
+			["powershell", "process.exec"],
+			["run_toolkit_script", "process.exec"],
+			["run_process", "process.exec"],
+			["fetch", "network.http"],
+			["web_search", "network.http"],
+			["skill_audit", "skill.read"],
+			["skillify", "skill.write"],
+			["extensionify", "source.write"],
+			["delegate", "workflow.delegate"],
+			["delegate_status", "workflow.delegate"],
+			["goal", "memory.mutate"],
+			["memory", "memory.mutate"],
+			["model_fitness", "research.execute"],
 		];
 		for (const [toolName, capability] of cases) {
 			const envelope = buildForegroundEnvelope({ turnIndex: 0, activeToolNames: [toolName], cwd: "/w" });
 			expect(envelope.capabilities).toEqual([capability]);
 		}
+		expect(cases.every(([, capability]) => HARNESS_CAPABILITIES.includes(capability))).toBe(true);
 	});
 
 	it("deduplicates capabilities in first-seen order when several tools share one", () => {
@@ -42,7 +43,7 @@ describe("buildForegroundEnvelope", () => {
 			activeToolNames: ["read", "grep", "edit", "write", "bash", "run_toolkit_script"],
 			cwd: "/w",
 		});
-		expect(envelope.capabilities).toEqual(["read_files", "write_files", "run_shell"]);
+		expect(envelope.capabilities).toEqual(["filesystem.read", "filesystem.write", "process.exec"]);
 	});
 
 	it("omits unknown tools rather than guessing a capability", () => {
@@ -52,7 +53,7 @@ describe("buildForegroundEnvelope", () => {
 			cwd: "/w",
 		});
 		// only `read` maps; the three unknown tools contribute nothing
-		expect(envelope.capabilities).toEqual(["read_files"]);
+		expect(envelope.capabilities).toEqual(["filesystem.read"]);
 		// but they are still surfaced as allowed tools for visibility
 		expect(envelope.allowedTools).toEqual(["read", "context_audit", "artifact_retrieve", "mystery_tool"]);
 	});
@@ -94,7 +95,7 @@ describe("buildForegroundEnvelope", () => {
 
 	it("matches tool names case-insensitively", () => {
 		const envelope = buildForegroundEnvelope({ turnIndex: 0, activeToolNames: ["READ", "Edit"], cwd: "/w" });
-		expect(envelope.capabilities).toEqual(["read_files", "write_files"]);
+		expect(envelope.capabilities).toEqual(["filesystem.read", "filesystem.write"]);
 	});
 });
 
@@ -106,7 +107,7 @@ describe("formatForegroundEnvelopeObservation", () => {
 			cwd: "/home/project",
 		});
 		expect(formatForegroundEnvelopeObservation(envelope)).toBe(
-			"foreground envelope: 3 capability(ies) [read_files, write_files, run_shell], 3 tool(s), path scope /home/project",
+			"foreground envelope: 3 capability(ies) [filesystem.read, filesystem.write, process.exec], 3 tool(s), path scope /home/project",
 		);
 	});
 

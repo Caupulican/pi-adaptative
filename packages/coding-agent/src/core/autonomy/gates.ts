@@ -1,5 +1,9 @@
 import path from "node:path";
-import { hasCapabilityPolicyForTool, requiredCapabilitiesForTool } from "./approval-gate.ts";
+import {
+	hasCapabilityPolicyForTool,
+	hasRequiredCapabilityForTool,
+	requiredCapabilitiesForTool,
+} from "./approval-gate.ts";
 import type { CapabilityEnvelope, GateOutcome, GateOutcomeKind } from "./contracts.ts";
 import { checkPathScope } from "./path-scope.ts";
 import { assessOperationRisk } from "./risk-assessment.ts";
@@ -185,15 +189,13 @@ export function evaluateToolGate(input: {
 	}
 
 	const requiredCaps = requiredCapabilitiesForTool(input.toolName, input.args);
-	for (const reqCap of requiredCaps) {
-		if (!envelope.capabilities.includes(reqCap)) {
-			return {
-				outcome: "block",
-				gate: "tool_gate",
-				reasonCode: "missing_capability",
-				message: `Tool '${input.toolName}' requires capability '${reqCap}', which is missing from the active envelope.`,
-			};
-		}
+	if (!hasRequiredCapabilityForTool(envelope.capabilities, input.toolName, input.args)) {
+		return {
+			outcome: "block",
+			gate: "tool_gate",
+			reasonCode: "missing_capability",
+			message: `Tool '${input.toolName}' requires capability '${requiredCaps.join(" or ")}', which is missing from the active envelope.`,
+		};
 	}
 	let command = "";
 	if (

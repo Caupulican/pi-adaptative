@@ -12,7 +12,7 @@ import {
 function researchEnvelope(overrides: Partial<CapabilityEnvelope> = {}): CapabilityEnvelope {
 	return {
 		id: "research-env-1",
-		capabilities: ["research", "read_files", "memory_read"],
+		capabilities: ["research.execute", "filesystem.read", "memory.query"],
 		maxEstimatedUsd: 0.25,
 		createdAt: "2026-07-01T00:00:00.000Z",
 		...overrides,
@@ -131,7 +131,7 @@ describe("runResearch", () => {
 	it("blocks on a missing capability without calling the model", async () => {
 		const complete = vi.fn(async () => completionOf("{}"));
 		const result = await runResearch(
-			runnerOptions({ envelope: researchEnvelope({ capabilities: ["memory_read"] }), complete }),
+			runnerOptions({ envelope: researchEnvelope({ capabilities: ["memory.query"] }), complete }),
 		);
 		expect(result.status).toBe("failed");
 		expect(result.reasonCode).toBe("missing_capability");

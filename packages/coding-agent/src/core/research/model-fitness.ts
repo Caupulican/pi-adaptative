@@ -243,7 +243,7 @@ function extractJsonObject(text: string): unknown | undefined {
 function fitnessEnvelope(): CapabilityEnvelope {
 	return {
 		id: "model-fitness-probe",
-		capabilities: ["research", "read_files", "memory_read"],
+		capabilities: ["research.execute", "filesystem.read", "memory.query"],
 		maxEstimatedUsd: 1,
 		createdAt: new Date().toISOString(),
 	};
@@ -376,7 +376,7 @@ export async function runModelFitnessProbe(options: ModelFitnessOptions): Promis
 				instructions:
 					"Summarize in two sentences what a capability envelope is: a declared set of allowed tools, paths, and capability names that bounds what a delegated worker may do.",
 				route: { tier: "cheap", risk: "read-only", confidence: 1, reasonCode: "fitness_probe", reasons: [] },
-				envelope: { id: `fitness-env-${i}`, capabilities: ["read_files"], maxEstimatedUsd: 1 },
+				envelope: { id: `fitness-env-${i}`, capabilities: ["filesystem.read"], maxEstimatedUsd: 1 },
 				maxEstimatedUsd: 1,
 			},
 			maxUsd: 1,

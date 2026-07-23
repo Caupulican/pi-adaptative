@@ -164,9 +164,9 @@ export function createLaneToolSurface(options: LaneToolSurfaceOptions): LaneTool
 	const readEnvelope: CapabilityEnvelope = {
 		id: "isolated-lane-read-tools",
 		capabilities: [
-			"read_files",
-			...(allowedToolSet.has(MEMORY_LANE_TOOL_NAME) ? (["memory_read"] as const) : []),
-			...(allowedToolSet.has(PROCESS_LANE_TOOL_NAME) ? (["run_shell"] as const) : []),
+			"filesystem.read",
+			...(allowedToolSet.has(MEMORY_LANE_TOOL_NAME) ? (["memory.query"] as const) : []),
+			...(allowedToolSet.has(PROCESS_LANE_TOOL_NAME) ? (["process.exec"] as const) : []),
 		],
 		allowedTools,
 		deniedTools,
@@ -175,7 +175,7 @@ export function createLaneToolSurface(options: LaneToolSurfaceOptions): LaneTool
 	};
 	const writeEnvelope: CapabilityEnvelope = {
 		id: "isolated-lane-write-tools",
-		capabilities: ["write_files"],
+		capabilities: ["filesystem.write"],
 		allowedTools,
 		deniedTools,
 		allowedPaths: resolveWriteRoots(options.cwd, options.writePaths ?? []),

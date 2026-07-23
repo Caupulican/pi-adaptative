@@ -607,7 +607,6 @@ export class WorkerDelegationController {
 			executionPlan.writeEnabled &&
 			toolSurface.gateway !== undefined &&
 			toolSurface.allowedTools.some((name) => name === "write" || name === "edit");
-		const memoryReadGranted = executionPlan.readMemory && toolSurface.allowedTools.includes("memory");
 		const workerRequest: WorkerRequest = {
 			id: startedRecord.laneId,
 			instructions,
@@ -621,14 +620,9 @@ export class WorkerDelegationController {
 			envelope: {
 				id: `worker-${this.deps.getSessionId()}-${startedRecord.laneId}`,
 				profileId: orchestrationProfile.profileId,
-				// write_files requires BOTH the opt-in AND an explicit non-empty path scope —
+				// filesystem.write requires BOTH the opt-in AND an explicit non-empty path scope —
 				// an unscoped write grant is refused here, not discovered at validation time.
-				capabilities: [
-					...(compiled.grant.readPaths.length > 0 ? (["read_files"] as const) : []),
-					...(memoryReadGranted ? (["memory_read"] as const) : []),
-					...(writeGranted ? (["write_files"] as const) : []),
-					...(executionPlan.processEnabled ? (["run_shell"] as const) : []),
-				],
+				capabilities: [...compiled.grant.capabilities],
 				...(writeGranted ? { allowedPaths: [...compiled.grant.writePaths] } : {}),
 				deniedPaths: [...compiled.grant.deniedPaths],
 				allowedTools: [...toolSurface.allowedTools],
@@ -695,7 +689,7 @@ export class WorkerDelegationController {
 				processCapable: executionPlan.processEnabled,
 				...(request.verificationOfTaskId ? { verificationSubjectTaskId: request.verificationOfTaskId } : {}),
 				// Write lane: runner-side action application through the envelope path scope.
-				applyActions: workerRequest.envelope.capabilities.includes("write_files")
+				applyActions: workerRequest.envelope.capabilities.includes("filesystem.write")
 					? (actions) => {
 							return applyWorkerActions({
 								actions,

@@ -6,6 +6,7 @@
 
 ### Fixed
 
+- Unified capability envelopes, profile grants, lane construction, runtime gates, research policy, and worker execution on one canonical capability vocabulary; equivalent grants such as `worktree.read` and `tests.execute` now survive through execution instead of failing a second translated gate.
 - Consolidated foreground envelopes, runtime gates, orchestration profile validation, and lane manifests behind one tool-capability policy catalog; active network, skill, source, verifier, and status tools no longer disappear from capability visibility while separate authorization tables drift.
 - Unified goal and durable-objective acceptance/lifecycle transitions: every satisfied requirement now needs its own trusted proof, goal pause/resume/cancel/complete reconciles already-loaded worker execution without defeating lazy UAC, terminal objectives cancel residual attempts with explicit reasons, and worker terminal publication has one idempotent path.
 - Consolidated goal requirements, foreground task steps, and delegated DAG work behind one identity-based read model; task steps now persist explicit requirement links, legacy text inference has one conservative fallback, and worker dispatch synchronizes durable objective acceptance criteria without treating worker self-report as proof.

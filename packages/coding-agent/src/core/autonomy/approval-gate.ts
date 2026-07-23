@@ -1,10 +1,22 @@
-import { hasToolCapabilityPolicy, requiredEnvelopeCapabilities } from "../tool-capability-policy.ts";
-import type { CapabilityName } from "./contracts.ts";
+import type { HarnessCapability } from "../capability-contract.ts";
+import {
+	envelopeHasToolCapability,
+	hasToolCapabilityPolicy,
+	requiredEnvelopeCapabilities,
+} from "../tool-capability-policy.ts";
 
 export function hasCapabilityPolicyForTool(toolName: string): boolean {
 	return hasToolCapabilityPolicy(toolName);
 }
 
-export function requiredCapabilitiesForTool(toolName: string, args?: unknown): readonly CapabilityName[] {
+export function requiredCapabilitiesForTool(toolName: string, args?: unknown): readonly HarnessCapability[] {
 	return requiredEnvelopeCapabilities(toolName, args);
+}
+
+export function hasRequiredCapabilityForTool(
+	capabilities: readonly HarnessCapability[],
+	toolName: string,
+	args?: unknown,
+): boolean {
+	return envelopeHasToolCapability(capabilities, toolName, args);
 }

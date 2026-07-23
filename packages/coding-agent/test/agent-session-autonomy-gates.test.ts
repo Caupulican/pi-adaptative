@@ -61,7 +61,7 @@ describe("AgentSession - Autonomy Gates Harness", () => {
 
 		harness.session.capabilityEnvelope = {
 			id: "env-1",
-			capabilities: ["read_files", "write_files", "run_shell", "network"],
+			capabilities: ["filesystem.read", "filesystem.write", "process.exec", "network.http"],
 			deniedTools: ["bash"],
 		};
 
@@ -106,7 +106,7 @@ describe("AgentSession - Autonomy Gates Harness", () => {
 
 		harness.session.capabilityEnvelope = {
 			id: "env-1",
-			capabilities: ["read_files", "write_files", "run_shell", "network"],
+			capabilities: ["filesystem.read", "filesystem.write", "process.exec", "network.http"],
 			allowedPaths: [allowedRoot],
 		};
 
@@ -147,7 +147,7 @@ describe("AgentSession - Autonomy Gates Harness", () => {
 
 		harness.session.capabilityEnvelope = {
 			id: "env-1",
-			capabilities: ["read_files", "write_files", "run_shell", "network"],
+			capabilities: ["filesystem.read", "filesystem.write", "process.exec", "network.http"],
 		};
 
 		harness.setResponses([
@@ -186,7 +186,7 @@ describe("AgentSession - Autonomy Gates Harness", () => {
 
 		harness.session.capabilityEnvelope = {
 			id: "env-missing",
-			capabilities: [], // NO read_files
+			capabilities: [], // No filesystem.read authority.
 		};
 
 		harness.setResponses([

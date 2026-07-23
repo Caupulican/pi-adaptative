@@ -1,4 +1,5 @@
-import type { CapabilityEnvelope, CapabilityName, EvidenceSourceKind, GateOutcome } from "../autonomy/contracts.ts";
+import type { CapabilityEnvelope, EvidenceSourceKind, GateOutcome } from "../autonomy/contracts.ts";
+import type { HarnessCapability } from "../capability-contract.ts";
 
 interface ResearchRequestArgs {
 	envelope?: CapabilityEnvelope | null;
@@ -8,7 +9,7 @@ interface ResearchRequestArgs {
 	privateHistoryAllowed?: boolean;
 }
 
-function missingCapabilityOutcome(sourceKind: string, capabilities: readonly CapabilityName[]): GateOutcome {
+function missingCapabilityOutcome(sourceKind: string, capabilities: readonly HarnessCapability[]): GateOutcome {
 	return {
 		outcome: "block",
 		gate: "research_gate",
@@ -17,7 +18,7 @@ function missingCapabilityOutcome(sourceKind: string, capabilities: readonly Cap
 	};
 }
 
-function hasAnyCapability(envelope: CapabilityEnvelope, capabilities: readonly CapabilityName[]): boolean {
+function hasAnyCapability(envelope: CapabilityEnvelope, capabilities: readonly HarnessCapability[]): boolean {
 	return capabilities.some((capability) => envelope.capabilities.includes(capability));
 }
 
@@ -50,7 +51,7 @@ export function evaluateResearchRequest(args: ResearchRequestArgs): GateOutcome 
 		case "workspace":
 		case "tool":
 		case "user": {
-			const requiredCapabilities: readonly CapabilityName[] = ["read_files", "research"];
+			const requiredCapabilities: readonly HarnessCapability[] = ["filesystem.read", "research.execute"];
 			if (!hasAnyCapability(envelope, requiredCapabilities)) {
 				return missingCapabilityOutcome(sourceKind, requiredCapabilities);
 			}
@@ -58,14 +59,14 @@ export function evaluateResearchRequest(args: ResearchRequestArgs): GateOutcome 
 		}
 
 		case "transcript":
-			if (!hasAnyCapability(envelope, ["memory_read"])) {
-				return missingCapabilityOutcome(sourceKind, ["memory_read"]);
+			if (!hasAnyCapability(envelope, ["memory.query"])) {
+				return missingCapabilityOutcome(sourceKind, ["memory.query"]);
 			}
 			break;
 
 		case "automata":
-			if (!hasAnyCapability(envelope, ["memory_read"])) {
-				return missingCapabilityOutcome(sourceKind, ["memory_read"]);
+			if (!hasAnyCapability(envelope, ["memory.query"])) {
+				return missingCapabilityOutcome(sourceKind, ["memory.query"]);
 			}
 			if (!privateHistoryAllowed) {
 				return {
@@ -78,8 +79,8 @@ export function evaluateResearchRequest(args: ResearchRequestArgs): GateOutcome 
 			break;
 
 		case "web":
-			if (!hasAnyCapability(envelope, ["network"])) {
-				return missingCapabilityOutcome(sourceKind, ["network"]);
+			if (!hasAnyCapability(envelope, ["network.http"])) {
+				return missingCapabilityOutcome(sourceKind, ["network.http"]);
 			}
 			break;
 

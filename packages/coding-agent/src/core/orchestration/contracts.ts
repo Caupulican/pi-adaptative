@@ -1,5 +1,8 @@
 import type { JsonObject, JsonValue } from "../autonomy/contracts.ts";
+import { HARNESS_CAPABILITIES, type HarnessCapability } from "../capability-contract.ts";
 import { isPlainRecord } from "../util/value-guards.ts";
+
+export { HARNESS_CAPABILITIES, type HarnessCapability } from "../capability-contract.ts";
 
 /**
  * Versioned control-plane contracts. These records are the durable truth exchanged between the
@@ -8,26 +11,6 @@ import { isPlainRecord } from "../util/value-guards.ts";
  */
 
 export const ORCHESTRATION_SCHEMA_VERSION = 1 as const;
-
-export const HARNESS_CAPABILITIES = [
-	"filesystem.read",
-	"filesystem.write",
-	"process.exec",
-	"network.http",
-	"service.mcp",
-	"credentials.use",
-	"tests.execute",
-	"worktree.read",
-	"worktree.mutate",
-	"memory.query",
-	"memory.mutate",
-	"workflow.plan",
-	"workflow.delegate",
-	"policy.modify",
-	"learning.propose",
-] as const;
-
-export type HarnessCapability = (typeof HARNESS_CAPABILITIES)[number];
 
 export const WORKER_ROLES = [
 	"orchestrator",

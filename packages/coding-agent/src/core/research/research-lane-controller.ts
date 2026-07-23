@@ -292,7 +292,7 @@ export class ResearchLaneController {
 		return {
 			id: `research-${this.deps.getSessionId()}-${Date.now()}`,
 			profileId: laneProfile?.name,
-			capabilities: ["research", "read_files", "memory_read"],
+			capabilities: ["research.execute", "filesystem.read", "memory.query"],
 			allowedTools: [...surface.allowedTools],
 			deniedTools: [...surface.deniedTools],
 			allowedPaths: [this.deps.getCwd()],

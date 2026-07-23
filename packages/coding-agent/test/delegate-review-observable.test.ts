@@ -18,7 +18,7 @@ const context = {} as ExtensionContext;
 
 const mockEnvelope: CapabilityEnvelope = {
 	id: "env-1",
-	capabilities: ["read_files", "write_files"],
+	capabilities: ["filesystem.read", "filesystem.write"],
 	allowedPaths: ["/tmp/allowed"],
 	deniedPaths: ["/tmp/allowed/denied"],
 };
@@ -60,7 +60,7 @@ describe("isParentReviewRequired (worker-result.ts)", () => {
 
 		const testEnv: CapabilityEnvelope = {
 			id: "env-test",
-			capabilities: ["write_files"],
+			capabilities: ["filesystem.write"],
 			allowedPaths: [allowedRoot],
 			deniedPaths: [deniedPath],
 		};

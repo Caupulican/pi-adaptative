@@ -171,10 +171,10 @@ describe("automatic platform shell contract", () => {
 	});
 
 	it("keeps the stable contract at the existing capability and trust boundaries", () => {
-		expect(requiredCapabilitiesForTool("bash")).toEqual(["run_shell"]);
+		expect(requiredCapabilitiesForTool("bash")).toEqual(["process.exec"]);
 		expect(classifyToolTrust("bash")).toBe("trusted");
 		const envelope = buildForegroundEnvelope({ turnIndex: 1, activeToolNames: ["bash"], cwd: process.cwd() });
-		expect(envelope.capabilities).toEqual(["run_shell"]);
+		expect(envelope.capabilities).toEqual(["process.exec"]);
 		expect(
 			evaluateToolGate({
 				toolName: "bash",

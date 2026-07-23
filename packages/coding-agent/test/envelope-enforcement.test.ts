@@ -11,7 +11,7 @@ import {
 
 const envelope = (overrides: Partial<CapabilityEnvelope>): CapabilityEnvelope => ({
 	id: "env-1",
-	capabilities: ["read_files"],
+	capabilities: ["filesystem.read"],
 	...overrides,
 });
 

@@ -1,5 +1,6 @@
+import type { HarnessCapability } from "../capability-contract.ts";
 import { requiredEnvelopeCapabilities } from "../tool-capability-policy.ts";
-import type { CapabilityEnvelope, CapabilityName } from "./contracts.ts";
+import type { CapabilityEnvelope } from "./contracts.ts";
 
 /**
  * Background lanes carry hand-authored {@link CapabilityEnvelope}s; foreground turns have none, so
@@ -23,8 +24,8 @@ export function buildForegroundEnvelope(args: {
 }): CapabilityEnvelope {
 	const { turnIndex, activeToolNames, cwd, maxTurnUsd } = args;
 
-	const capabilities: CapabilityName[] = [];
-	const seen = new Set<CapabilityName>();
+	const capabilities: HarnessCapability[] = [];
+	const seen = new Set<HarnessCapability>();
 	for (const toolName of activeToolNames) {
 		for (const capability of requiredEnvelopeCapabilities(toolName)) {
 			if (seen.has(capability)) continue;
@@ -47,7 +48,7 @@ export function buildForegroundEnvelope(args: {
 
 /**
  * One bounded plain-text line describing a foreground envelope, for the /context dashboard.
- * Lists capability names (bounded by the small {@link CapabilityName} union) and the tool COUNT
+ * Lists capability names (bounded by the canonical harness capability union) and the tool COUNT
  * (never the full tool list) so the line stays short regardless of how many tools are active.
  */
 export function formatForegroundEnvelopeObservation(envelope: CapabilityEnvelope): string {

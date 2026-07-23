@@ -124,7 +124,7 @@ describe("Autonomy Gates", () => {
 	describe("evaluateToolGate", () => {
 		const emptyEnvelope: CapabilityEnvelope = {
 			id: "env-1",
-			capabilities: ["read_files", "write_files", "run_shell", "network"],
+			capabilities: ["filesystem.read", "filesystem.write", "process.exec", "network.http"],
 		};
 
 		it("returns allow when no envelope is provided", () => {
@@ -225,7 +225,7 @@ describe("Autonomy Gates", () => {
 	describe("Capability checks (Phase 3C)", () => {
 		const baseEnvelope: CapabilityEnvelope = { id: "env-1", capabilities: [] };
 
-		it("envelope missing read_files blocks read/grep/find/ls", () => {
+		it("envelope missing filesystem.read blocks read/grep/find/ls", () => {
 			for (const toolName of ["read", "grep", "find", "ls"]) {
 				const outcome = evaluateToolGate({ toolName, cwd: "/tmp", envelope: baseEnvelope });
 				expect(outcome.outcome).toBe("block");
@@ -234,8 +234,8 @@ describe("Autonomy Gates", () => {
 		});
 
 		it("distinguishes read-only memory queries from memory mutations", () => {
-			const readEnvelope: CapabilityEnvelope = { ...baseEnvelope, capabilities: ["memory_read"] };
-			const writeEnvelope: CapabilityEnvelope = { ...baseEnvelope, capabilities: ["memory_write"] };
+			const readEnvelope: CapabilityEnvelope = { ...baseEnvelope, capabilities: ["memory.query"] };
+			const writeEnvelope: CapabilityEnvelope = { ...baseEnvelope, capabilities: ["memory.mutate"] };
 
 			expect(
 				evaluateToolGate({
@@ -259,10 +259,10 @@ describe("Autonomy Gates", () => {
 			).toBe("missing_capability");
 		});
 
-		it("envelope with read_files allows read path inside scope", () => {
+		it("envelope with filesystem.read allows read path inside scope", () => {
 			const envelope: CapabilityEnvelope = {
 				...baseEnvelope,
-				capabilities: ["read_files"],
+				capabilities: ["filesystem.read"],
 				allowedPaths: ["/tmp/foo"],
 			};
 			const outcome = evaluateToolGate({
@@ -274,10 +274,20 @@ describe("Autonomy Gates", () => {
 			expect(outcome.outcome).toBe("allow");
 		});
 
-		it("envelope missing write_files blocks write/edit even if path is inside allowed root", () => {
+		it("accepts an equivalent worktree.read grant through the shared tool policy", () => {
+			const outcome = evaluateToolGate({
+				toolName: "read",
+				args: { path: "/tmp/foo/file.txt" },
+				cwd: "/tmp",
+				envelope: { ...baseEnvelope, capabilities: ["worktree.read"], allowedPaths: ["/tmp/foo"] },
+			});
+			expect(outcome.outcome).toBe("allow");
+		});
+
+		it("envelope missing filesystem.write blocks write/edit even if path is inside allowed root", () => {
 			const envelope: CapabilityEnvelope = {
 				...baseEnvelope,
-				capabilities: ["read_files"],
+				capabilities: ["filesystem.read"],
 				allowedPaths: ["/tmp/foo"],
 			};
 			const outcome = evaluateToolGate({
@@ -290,10 +300,10 @@ describe("Autonomy Gates", () => {
 			expect(outcome.reasonCode).toBe("missing_capability");
 		});
 
-		it("envelope with write_files allows scoped write/edit path inside scope", () => {
+		it("envelope with filesystem.write allows scoped write/edit path inside scope", () => {
 			const envelope: CapabilityEnvelope = {
 				...baseEnvelope,
-				capabilities: ["write_files"],
+				capabilities: ["filesystem.write"],
 				allowedPaths: ["/tmp/foo"],
 			};
 			const outcome = evaluateToolGate({
@@ -305,7 +315,7 @@ describe("Autonomy Gates", () => {
 			expect(outcome.outcome).toBe("allow");
 		});
 
-		it("envelope missing run_shell blocks bash, including read-only bash commands", () => {
+		it("envelope missing process.exec blocks bash, including read-only bash commands", () => {
 			const outcome = evaluateToolGate({
 				toolName: "bash",
 				args: { command: "ls" },
@@ -319,28 +329,38 @@ describe("Autonomy Gates", () => {
 		it("active envelope blocks tools without a capability policy", () => {
 			const envelope: CapabilityEnvelope = {
 				...baseEnvelope,
-				capabilities: ["read_files", "write_files", "run_shell"],
+				capabilities: ["filesystem.read", "filesystem.write", "process.exec"],
 			};
 			const outcome = evaluateToolGate({ toolName: "custom_tool", cwd: "/tmp", envelope });
 			expect(outcome.outcome).toBe("block");
 			expect(outcome.reasonCode).toBe("unknown_tool_capability");
 		});
 
-		it("envelope with run_shell allows read-only bash command", () => {
-			const envelope: CapabilityEnvelope = { ...baseEnvelope, capabilities: ["run_shell"] };
+		it("envelope with process.exec allows read-only bash command", () => {
+			const envelope: CapabilityEnvelope = { ...baseEnvelope, capabilities: ["process.exec"] };
 			const outcome = evaluateToolGate({ toolName: "bash", args: { command: "ls" }, cwd: "/tmp", envelope });
 			expect(outcome.outcome).toBe("allow");
 		});
 
-		it("envelope with run_shell still ask-user/blocks destructive bash command", () => {
-			const envelope: CapabilityEnvelope = { ...baseEnvelope, capabilities: ["run_shell"] };
+		it("accepts an equivalent tests.execute grant through the shared tool policy", () => {
+			const envelope: CapabilityEnvelope = { ...baseEnvelope, capabilities: ["tests.execute"] };
+			const outcome = evaluateToolGate({ toolName: "bash", args: { command: "ls" }, cwd: "/tmp", envelope });
+			expect(outcome.outcome).toBe("allow");
+		});
+
+		it("envelope with process.exec still asks before a destructive bash command", () => {
+			const envelope: CapabilityEnvelope = { ...baseEnvelope, capabilities: ["process.exec"] };
 			const outcome = evaluateToolGate({ toolName: "bash", args: { command: "rm -rf /" }, cwd: "/tmp", envelope });
 			expect(["ask-user", "block"]).toContain(outcome.outcome);
 			expect(outcome.gate).toBe("risk_assessment");
 		});
 
 		it("denied tool overrides present capability", () => {
-			const envelope: CapabilityEnvelope = { ...baseEnvelope, capabilities: ["run_shell"], deniedTools: ["bash"] };
+			const envelope: CapabilityEnvelope = {
+				...baseEnvelope,
+				capabilities: ["process.exec"],
+				deniedTools: ["bash"],
+			};
 			const outcome = evaluateToolGate({ toolName: "bash", args: { command: "ls" }, cwd: "/tmp", envelope });
 			expect(outcome.outcome).toBe("block");
 			expect(outcome.reasonCode).toBe("tool_denied");
@@ -349,7 +369,7 @@ describe("Autonomy Gates", () => {
 		it("denied path overrides present capability", () => {
 			const envelope: CapabilityEnvelope = {
 				...baseEnvelope,
-				capabilities: ["read_files"],
+				capabilities: ["filesystem.read"],
 				allowedPaths: ["/tmp/foo"],
 				deniedPaths: ["/tmp/foo/secret"],
 			};

@@ -44,7 +44,7 @@ describe("Research Gate (Phase 5)", () => {
 	describe("evaluateResearchRequest", () => {
 		const baseEnvelope: CapabilityEnvelope = { id: "e1", capabilities: [] };
 
-		it("workspace research without read_files/research blocks", () => {
+		it("workspace research without filesystem.read/research.execute blocks", () => {
 			const outcome = evaluateResearchRequest({
 				envelope: baseEnvelope,
 				sourceKind: "workspace",
@@ -54,16 +54,16 @@ describe("Research Gate (Phase 5)", () => {
 			expect(outcome.reasonCode).toBe("missing_capability");
 		});
 
-		it("workspace research with read_files allows", () => {
+		it("workspace research with filesystem.read allows", () => {
 			const outcome = evaluateResearchRequest({
-				envelope: { ...baseEnvelope, capabilities: ["read_files"] },
+				envelope: { ...baseEnvelope, capabilities: ["filesystem.read"] },
 				sourceKind: "workspace",
 				estimatedUsd: 0,
 			});
 			expect(outcome.outcome).toBe("allow");
 		});
 
-		it("transcript research without memory_read blocks", () => {
+		it("transcript research without memory.query blocks", () => {
 			const outcome = evaluateResearchRequest({
 				envelope: baseEnvelope,
 				sourceKind: "transcript",
@@ -75,7 +75,7 @@ describe("Research Gate (Phase 5)", () => {
 
 		it("automata/private history without privateHistoryAllowed returns ask-user/block", () => {
 			const outcome = evaluateResearchRequest({
-				envelope: { ...baseEnvelope, capabilities: ["memory_read"] },
+				envelope: { ...baseEnvelope, capabilities: ["memory.query"] },
 				sourceKind: "automata",
 				estimatedUsd: 0,
 				privateHistoryAllowed: false,
@@ -84,9 +84,9 @@ describe("Research Gate (Phase 5)", () => {
 			expect(outcome.reasonCode).toBe("private_history_denied");
 		});
 
-		it("automata research with memory_read and privateHistoryAllowed allows", () => {
+		it("automata research with memory.query and privateHistoryAllowed allows", () => {
 			const outcome = evaluateResearchRequest({
-				envelope: { ...baseEnvelope, capabilities: ["memory_read"] },
+				envelope: { ...baseEnvelope, capabilities: ["memory.query"] },
 				sourceKind: "automata",
 				estimatedUsd: 0,
 				privateHistoryAllowed: true,
@@ -106,7 +106,7 @@ describe("Research Gate (Phase 5)", () => {
 
 		it("over-budget request returns ask-user/block with over_budget", () => {
 			const outcome = evaluateResearchRequest({
-				envelope: { ...baseEnvelope, maxEstimatedUsd: 1.0, capabilities: ["network"] },
+				envelope: { ...baseEnvelope, maxEstimatedUsd: 1.0, capabilities: ["network.http"] },
 				sourceKind: "web",
 				estimatedUsd: 2.0,
 			});
@@ -126,7 +126,7 @@ describe("Research Gate (Phase 5)", () => {
 
 		it("unknown source kind blocks", () => {
 			const outcome = evaluateResearchRequest({
-				envelope: { ...baseEnvelope, capabilities: ["research"] },
+				envelope: { ...baseEnvelope, capabilities: ["research.execute"] },
 				sourceKind: "unknown",
 				estimatedUsd: 0,
 			});

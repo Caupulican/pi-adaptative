@@ -18,7 +18,7 @@ describe("native python tool registration", () => {
 	});
 
 	it("uses the shell-execution capability and existing trusted local boundary", () => {
-		expect(requiredCapabilitiesForTool("python")).toEqual(["run_shell"]);
+		expect(requiredCapabilitiesForTool("python")).toEqual(["process.exec"]);
 		expect(classifyToolTrust("python")).toBe("trusted");
 	});
 

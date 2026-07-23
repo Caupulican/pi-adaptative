@@ -166,7 +166,7 @@ describe("Memory subsystem integration (file-store)", () => {
 			expect(memorySchema).toContain("query");
 			expect(memorySchema).not.toContain("action");
 			const request = getWorkerRequestSnapshots(session.sessionManager.getEntries()).at(-1);
-			expect(request?.envelope.capabilities).toContain("memory_read");
+			expect(request?.envelope.capabilities).toContain("memory.query");
 			expect(readFileSync(join(agentDir, "MEMORY.md"), "utf-8")).toBe(
 				"LANE_MEMORY_READ_OK is the standing marker.\n",
 			);

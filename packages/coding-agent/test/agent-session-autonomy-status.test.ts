@@ -58,7 +58,7 @@ describe("AgentSession - Autonomy Status Snapshot", () => {
 
 		harness.session.capabilityEnvelope = {
 			id: "env-1",
-			capabilities: ["read_files"],
+			capabilities: ["filesystem.read"],
 			deniedTools: ["bash"],
 		};
 
@@ -89,7 +89,7 @@ describe("AgentSession - Autonomy Status Snapshot", () => {
 
 		harness.session.capabilityEnvelope = {
 			id: "env-1",
-			capabilities: ["run_shell"],
+			capabilities: ["process.exec"],
 			allowedTools: ["bash"],
 		};
 
@@ -267,7 +267,11 @@ describe("AgentSession - Autonomy Diagnostic Snapshot", () => {
 			},
 		};
 		const harness = await createHarness({ tools: [blockingTool] });
-		harness.session.capabilityEnvelope = { id: "env-1", capabilities: ["read_files"], deniedTools: ["bash"] };
+		harness.session.capabilityEnvelope = {
+			id: "env-1",
+			capabilities: ["filesystem.read"],
+			deniedTools: ["bash"],
+		};
 
 		harness.setResponses([
 			fauxAssistantMessage([fauxToolCall("bash", { command: "ls" })], { stopReason: "toolUse" }),

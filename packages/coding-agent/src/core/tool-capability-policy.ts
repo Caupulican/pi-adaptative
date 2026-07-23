@@ -1,29 +1,26 @@
-import type { CapabilityName } from "./autonomy/contracts.ts";
-import type { CapabilityEnforcementKind, HarnessCapability, OrchestrationProfile } from "./orchestration/contracts.ts";
+import type { HarnessCapability } from "./capability-contract.ts";
+import type { CapabilityEnforcementKind, OrchestrationProfile } from "./orchestration/contracts.ts";
 
 export interface ToolCapabilityPolicy {
-	envelopeCapability: CapabilityName;
-	harnessCapabilityCandidates: readonly HarnessCapability[];
+	capabilityCandidates: readonly HarnessCapability[];
 	enforcement: CapabilityEnforcementKind;
 }
 
 function policy(
-	envelopeCapability: CapabilityName,
-	harnessCapabilityCandidates: readonly HarnessCapability[],
+	capabilityCandidates: readonly HarnessCapability[],
 	enforcement: CapabilityEnforcementKind,
 ): ToolCapabilityPolicy {
 	return Object.freeze({
-		envelopeCapability,
-		harnessCapabilityCandidates: Object.freeze([...harnessCapabilityCandidates]),
+		capabilityCandidates: Object.freeze([...capabilityCandidates]),
 		enforcement,
 	});
 }
 
-const READ_POLICY = policy("read_files", ["filesystem.read", "worktree.read"], "path-scope");
-const WRITE_POLICY = policy("write_files", ["filesystem.write", "worktree.mutate"], "path-scope");
-const PROCESS_POLICY = policy("run_shell", ["process.exec", "tests.execute"], "process-launcher");
-const NETWORK_POLICY = policy("network", ["network.http", "service.mcp"], "service-proxy");
-const DELEGATE_POLICY = policy("delegate", ["workflow.delegate"], "control-plane");
+const READ_POLICY = policy(["filesystem.read", "worktree.read"], "path-scope");
+const WRITE_POLICY = policy(["filesystem.write", "worktree.mutate"], "path-scope");
+const PROCESS_POLICY = policy(["process.exec", "tests.execute"], "process-launcher");
+const NETWORK_POLICY = policy(["network.http", "service.mcp"], "service-proxy");
+const DELEGATE_POLICY = policy(["workflow.delegate"], "control-plane");
 
 const TOOL_CAPABILITY_POLICIES = new Map<string, ToolCapabilityPolicy>([
 	...["read", "ls", "grep", "find"].map((toolName) => [toolName, READ_POLICY] as const),
@@ -32,13 +29,13 @@ const TOOL_CAPABILITY_POLICIES = new Map<string, ToolCapabilityPolicy>([
 		(toolName) => [toolName, PROCESS_POLICY] as const,
 	),
 	...["fetch", "web_search"].map((toolName) => [toolName, NETWORK_POLICY] as const),
-	["skill_audit", policy("skill_read", ["filesystem.read"], "path-scope")],
-	["skillify", policy("skill_write", ["filesystem.write"], "path-scope")],
-	["extensionify", policy("source_write", ["filesystem.write"], "path-scope")],
-	["goal", policy("memory_write", ["memory.mutate"], "memory-broker")],
-	["memory", policy("memory_write", ["memory.mutate", "memory.query"], "memory-broker")],
+	["skill_audit", policy(["skill.read"], "path-scope")],
+	["skillify", policy(["skill.write"], "path-scope")],
+	["extensionify", policy(["source.write"], "path-scope")],
+	["goal", policy(["memory.mutate"], "memory-broker")],
+	["memory", policy(["memory.mutate", "memory.query"], "memory-broker")],
 	...["delegate", "delegate_status"].map((toolName) => [toolName, DELEGATE_POLICY] as const),
-	["model_fitness", policy("research", ["workflow.plan"], "control-plane")],
+	["model_fitness", policy(["research.execute"], "control-plane")],
 ]);
 
 export function getToolCapabilityPolicy(toolName: string): ToolCapabilityPolicy | undefined {
@@ -49,54 +46,70 @@ export function hasToolCapabilityPolicy(toolName: string): boolean {
 	return getToolCapabilityPolicy(toolName) !== undefined;
 }
 
-export function requiredEnvelopeCapabilities(toolName: string, args?: unknown): readonly CapabilityName[] {
-	if (toolName.toLowerCase() === "memory" && args && typeof args === "object" && "query" in args) {
-		return ["memory_read"];
-	}
-	const policy = getToolCapabilityPolicy(toolName);
-	return policy ? [policy.envelopeCapability] : [];
+export function requiredEnvelopeCapabilities(toolName: string, args?: unknown): readonly HarnessCapability[] {
+	return toolCapabilityCandidates(toolName, args).slice(0, 1);
+}
+
+export function envelopeHasToolCapability(
+	capabilities: readonly HarnessCapability[],
+	toolName: string,
+	args?: unknown,
+): boolean {
+	const candidates = toolCapabilityCandidates(toolName, args);
+	return candidates.length > 0 && candidates.some((capability) => capabilities.includes(capability));
 }
 
 export function resolveProfileToolCapability(
 	profile: Pick<OrchestrationProfile, "capabilityCeiling">,
 	toolName: string,
 ): HarnessCapability | undefined {
-	return getToolCapabilityPolicy(toolName)?.harnessCapabilityCandidates.find((capability) =>
+	return getToolCapabilityPolicy(toolName)?.capabilityCandidates.find((capability) =>
 		profile.capabilityCeiling.includes(capability),
 	);
 }
 
 export function describeToolCapabilityAuthority(toolName: string): string {
-	switch (getToolCapabilityPolicy(toolName)?.envelopeCapability) {
-		case "read_files":
+	switch (getToolCapabilityPolicy(toolName)?.capabilityCandidates[0]) {
+		case "filesystem.read":
+		case "worktree.read":
 			return "read";
-		case "write_files":
+		case "filesystem.write":
+		case "worktree.mutate":
 			return "write";
-		case "run_shell":
+		case "process.exec":
+		case "tests.execute":
 			return "process";
-		case "network":
+		case "network.http":
+		case "service.mcp":
 			return "network";
-		case "memory_read":
-		case "memory_write":
+		case "memory.query":
+		case "memory.mutate":
 			return "memory";
-		case "delegate":
+		case "workflow.delegate":
 			return "delegation";
-		case "skill_read":
-		case "skill_write":
+		case "skill.read":
+		case "skill.write":
 			return "skill";
-		case "source_read":
-		case "source_write":
+		case "source.read":
+		case "source.write":
 			return "source";
-		case "research":
+		case "research.execute":
 			return "research";
-		case "settings_read":
-		case "settings_write":
+		case "settings.read":
+		case "settings.write":
 			return "settings";
-		case "publish":
+		case "publish.execute":
 			return "publish";
-		case "auth_change":
+		case "credentials.modify":
 			return "authentication";
 		default:
 			return "capability";
 	}
+}
+
+function toolCapabilityCandidates(toolName: string, args?: unknown): readonly HarnessCapability[] {
+	if (toolName.toLowerCase() === "memory") {
+		return args && typeof args === "object" && "query" in args ? ["memory.query"] : ["memory.mutate"];
+	}
+	return getToolCapabilityPolicy(toolName)?.capabilityCandidates ?? [];
 }

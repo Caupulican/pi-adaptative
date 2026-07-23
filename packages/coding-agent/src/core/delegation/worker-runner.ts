@@ -88,7 +88,7 @@ export interface WorkerRunnerOptions {
 	getChangedFiles?: () => readonly string[];
 	signal?: AbortSignal;
 	now?: () => string;
-	/** Enables the WRITE lane: only honored when the request envelope grants "write_files". The
+	/** Enables the WRITE lane: only honored when the request envelope grants "filesystem.write". The
 	 * runner applies the worker's structured actions through the envelope path scope; refusals
 	 * and failures become blockers, never silent drops. */
 	applyActions?: (actions: readonly WorkerAction[]) => AppliedActionsReport;
@@ -275,7 +275,7 @@ export async function runWorker(options: WorkerRunnerOptions): Promise<WorkerRun
 
 	// The write prompt requires BOTH the envelope grant and a caller-supplied applier.
 	const writeCapable =
-		options.request.envelope.capabilities.includes("write_files") && options.applyActions !== undefined;
+		options.request.envelope.capabilities.includes("filesystem.write") && options.applyActions !== undefined;
 
 	const bounded = await runBoundedCompletion({
 		maxWallClockMs: options.maxWallClockMs,
@@ -389,7 +389,7 @@ export async function runWorker(options: WorkerRunnerOptions): Promise<WorkerRun
 	let changedFiles: string[] = [...completionChangedFiles];
 	const actionBlockers: string[] = [...(completion.blockers ?? [])];
 	if (!writeCapable && completionChangedFiles.length > 0) {
-		actionBlockers.push("worker reported file changes without a write_files envelope grant");
+		actionBlockers.push("worker reported file changes without a filesystem.write envelope grant");
 	}
 	if (writeCapable && parsed.status !== "blocked" && parsed.actions.length > 0 && options.applyActions) {
 		// Runner-side application through the envelope path scope: refusals and failures are
@@ -403,7 +403,7 @@ export async function runWorker(options: WorkerRunnerOptions): Promise<WorkerRun
 			actionBlockers.push(`action failed (${failure.path}): ${failure.reason}`);
 		}
 	} else if (!writeCapable && parsed.actions.length > 0) {
-		actionBlockers.push("worker emitted file actions without a write_files envelope grant; nothing was applied");
+		actionBlockers.push("worker emitted file actions without a filesystem.write envelope grant; nothing was applied");
 	}
 	const allBlockers = [...parsed.blockers, ...actionBlockers];
 	const result: WorkerResult = {

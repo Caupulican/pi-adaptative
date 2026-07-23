@@ -23,7 +23,7 @@ function workerRequest(overrides: Partial<WorkerRequest> = {}): WorkerRequest {
 		},
 		envelope: {
 			id: "worker-env-1",
-			capabilities: ["read_files"],
+			capabilities: ["filesystem.read"],
 			maxEstimatedUsd: 0.5,
 			createdAt: "2026-07-01T00:00:00.000Z",
 		},
@@ -303,7 +303,7 @@ describe("worker request persistence (G2)", () => {
 			id: "wr-1",
 			instructions: "scout the retry helpers",
 			route: { tier: "cheap", risk: "read-only", confidence: 1, reasonCode: "test", reasons: [] },
-			envelope: { id: "env-1", capabilities: ["read_files"], allowedPaths: ["src"] },
+			envelope: { id: "env-1", capabilities: ["filesystem.read"], allowedPaths: ["src"] },
 			maxEstimatedUsd: 1,
 		};
 		const result = {
@@ -324,14 +324,18 @@ describe("worker request persistence (G2)", () => {
 });
 
 describe("worker write lane (G2)", () => {
-	it("applies actions through the envelope when write_files is granted; refusals become blockers", async () => {
+	it("applies actions through the envelope when filesystem.write is granted; refusals become blockers", async () => {
 		const { runWorker } = await import("../src/core/delegation/worker-runner.ts");
 		const applied: string[] = [];
 		const request = {
 			id: "wr-write",
 			instructions: "add a helper",
 			route: { tier: "cheap", risk: "scoped-write", confidence: 1, reasonCode: "t", reasons: [] },
-			envelope: { id: "env-w", capabilities: ["read_files", "write_files"], allowedPaths: ["src"] },
+			envelope: {
+				id: "env-w",
+				capabilities: ["filesystem.read", "filesystem.write"],
+				allowedPaths: ["src"],
+			},
 			maxEstimatedUsd: 1,
 		};
 		const outcome = await runWorker({
@@ -369,13 +373,13 @@ describe("worker write lane (G2)", () => {
 		expect(outcome.result.blockers?.some((b) => b.includes("docs/leak.md"))).toBe(true);
 	});
 
-	it("without a write_files grant, emitted actions are ignored and flagged (read-only contract intact)", async () => {
+	it("without a filesystem.write grant, emitted actions are ignored and flagged", async () => {
 		const { runWorker } = await import("../src/core/delegation/worker-runner.ts");
 		const request = {
 			id: "wr-ro",
 			instructions: "scout",
 			route: { tier: "cheap", risk: "read-only", confidence: 1, reasonCode: "t", reasons: [] },
-			envelope: { id: "env-ro", capabilities: ["read_files"] },
+			envelope: { id: "env-ro", capabilities: ["filesystem.read"] },
 			maxEstimatedUsd: 1,
 		};
 		const outcome = await runWorker({
@@ -397,6 +401,6 @@ describe("worker write lane (G2)", () => {
 		});
 		expect(outcome.result.changedFiles).toEqual([]);
 		expect(outcome.result.status).toBe("blocked");
-		expect(outcome.result.blockers?.some((b) => b.includes("without a write_files"))).toBe(true);
+		expect(outcome.result.blockers?.some((b) => b.includes("without a filesystem.write"))).toBe(true);
 	});
 });

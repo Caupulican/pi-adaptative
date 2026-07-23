@@ -8,7 +8,7 @@ import { requiresParentReview, validateWorkerResult } from "../src/core/delegati
 describe("Worker Result Validator (Phase 6)", () => {
 	const mockEnvelope: CapabilityEnvelope = {
 		id: "env-1",
-		capabilities: ["read_files", "write_files"],
+		capabilities: ["filesystem.read", "filesystem.write"],
 		allowedPaths: ["/tmp/allowed"],
 		deniedPaths: ["/tmp/allowed/denied"],
 	};
@@ -102,7 +102,7 @@ describe("Worker Result Validator (Phase 6)", () => {
 
 			const testEnv: CapabilityEnvelope = {
 				id: "env-test",
-				capabilities: ["write_files"],
+				capabilities: ["filesystem.write"],
 				allowedPaths: [allowedRoot],
 				deniedPaths: [deniedPath],
 			};

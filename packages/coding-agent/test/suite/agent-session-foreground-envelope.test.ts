@@ -38,14 +38,13 @@ describe("AgentSession foreground envelope (G7, observe-only)", () => {
 		expect(envelope.allowedTools).toEqual(harness.session.getActiveToolNames());
 		// path scope is the working directory
 		expect(envelope.allowedPaths).toEqual([harness.tempDir]);
-		// capabilities are derived from the active tools (read/grep -> read_files, edit -> write_files,
-		// bash -> run_shell, goal -> memory_write), deduplicated
-		expect(envelope.capabilities).toContain("read_files");
-		expect(envelope.capabilities).toContain("write_files");
-		expect(envelope.capabilities).toContain("run_shell");
-		expect(envelope.capabilities).toContain("memory_write");
-		// read_files appears once despite both read and grep being active
-		expect(envelope.capabilities.filter((cap) => cap === "read_files")).toHaveLength(1);
+		// Capabilities are derived from active tools and deduplicated.
+		expect(envelope.capabilities).toContain("filesystem.read");
+		expect(envelope.capabilities).toContain("filesystem.write");
+		expect(envelope.capabilities).toContain("process.exec");
+		expect(envelope.capabilities).toContain("memory.mutate");
+		// filesystem.read appears once despite both read and grep being active.
+		expect(envelope.capabilities.filter((cap) => cap === "filesystem.read")).toHaveLength(1);
 		// the per-turn cost ceiling flows through from the cost-guard setting (default 2.5)
 		expect(envelope.maxEstimatedUsd).toBe(harness.settingsManager.getCostGuardSettings().maxTurnUsd);
 	});

@@ -1,3 +1,5 @@
+import type { HarnessCapability } from "../capability-contract.ts";
+
 export type JsonPrimitive = string | number | boolean | null;
 export type JsonValue = JsonPrimitive | JsonValue[] | { [key: string]: JsonValue };
 export interface JsonObject {
@@ -15,7 +17,7 @@ export interface RiskAssessmentInput {
 	toolName?: string;
 	command?: string;
 	paths?: readonly string[];
-	capabilities?: readonly CapabilityName[];
+	capabilities?: readonly HarnessCapability[];
 }
 
 export interface RiskAssessment {
@@ -53,28 +55,10 @@ export interface RouteDecision {
 	createdAt?: string;
 }
 
-export type CapabilityName =
-	| "read_files"
-	| "write_files"
-	| "run_shell"
-	| "network"
-	| "memory_read"
-	| "memory_write"
-	| "settings_read"
-	| "settings_write"
-	| "skill_read"
-	| "skill_write"
-	| "source_read"
-	| "source_write"
-	| "research"
-	| "delegate"
-	| "publish"
-	| "auth_change";
-
 export interface CapabilityEnvelope {
 	id: string;
 	profileId?: string;
-	capabilities: readonly CapabilityName[];
+	capabilities: readonly HarnessCapability[];
 	allowedTools?: readonly string[];
 	deniedTools?: readonly string[];
 	allowedPaths?: readonly string[];
@@ -99,7 +83,7 @@ export interface ApprovalRequest {
 	operation: string;
 	target: string;
 	reversible: boolean;
-	capabilities: readonly CapabilityName[];
+	capabilities: readonly HarnessCapability[];
 	reasonCode: string;
 	createdAt?: string;
 }

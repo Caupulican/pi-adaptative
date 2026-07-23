@@ -254,7 +254,7 @@ describe("AgentSession worker delegation", () => {
 			const run = await harness.session.runWorkerDelegationOnce({ instructions: "Scout something" });
 			expect(run.started).toBe(true);
 			expect(getWorkerRequestSnapshots(harness.sessionManager.getEntries())[0]?.envelope.capabilities).toEqual([
-				"read_files",
+				"filesystem.read",
 			]);
 		} finally {
 			harness.cleanup();

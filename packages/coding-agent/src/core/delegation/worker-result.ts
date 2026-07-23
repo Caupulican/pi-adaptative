@@ -254,7 +254,7 @@ export function reviewManagedLaneChangedFiles(args: {
 			},
 			envelope: {
 				id: syntheticId,
-				capabilities: ["write_files"],
+				capabilities: ["filesystem.write"],
 				allowedPaths: args.envelope.allowedPaths,
 				deniedPaths: args.envelope.deniedPaths,
 			},

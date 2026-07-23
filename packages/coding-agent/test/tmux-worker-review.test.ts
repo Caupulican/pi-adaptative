@@ -53,7 +53,7 @@ describe("host re-review of a managed (tmux) lane's changed files", () => {
 	it("flags parentReviewRequired when a changed file is OUTSIDE the envelope's allowedPaths", () => {
 		const agentDir = "/tmp/pi-test-tmux-review-out-of-scope";
 		const { deps, savedResults } = buildDeps(agentDir, {
-			envelope: { id: "env-1", capabilities: ["write_files"], allowedPaths: ["/repo/src"] },
+			envelope: { id: "env-1", capabilities: ["filesystem.write"], allowedPaths: ["/repo/src"] },
 		});
 		const controller = new BackgroundLaneController(deps);
 
@@ -73,7 +73,7 @@ describe("host re-review of a managed (tmux) lane's changed files", () => {
 	it("STILL flags parentReviewRequired for an IN-scope changed file (worker output is always untrusted)", () => {
 		const agentDir = "/tmp/pi-test-tmux-review-in-scope";
 		const { deps, savedResults } = buildDeps(agentDir, {
-			envelope: { id: "env-1", capabilities: ["write_files"], allowedPaths: ["/repo/src"] },
+			envelope: { id: "env-1", capabilities: ["filesystem.write"], allowedPaths: ["/repo/src"] },
 		});
 		const controller = new BackgroundLaneController(deps);
 
@@ -108,7 +108,7 @@ describe("host re-review of a managed (tmux) lane's changed files", () => {
 	it("does not require review for a read-only completion (no changed files)", () => {
 		const agentDir = "/tmp/pi-test-tmux-review-read-only";
 		const { deps, savedResults } = buildDeps(agentDir, {
-			envelope: { id: "env-1", capabilities: ["write_files"], allowedPaths: ["/repo/src"] },
+			envelope: { id: "env-1", capabilities: ["filesystem.write"], allowedPaths: ["/repo/src"] },
 		});
 		const controller = new BackgroundLaneController(deps);
 
@@ -121,7 +121,7 @@ describe("host re-review of a managed (tmux) lane's changed files", () => {
 	it("a duplicate terminal report for the same laneId does not double-record the claim", () => {
 		const agentDir = "/tmp/pi-test-tmux-review-duplicate-terminal";
 		const { deps, savedResults } = buildDeps(agentDir, {
-			envelope: { id: "env-1", capabilities: ["write_files"], allowedPaths: ["/repo/src"] },
+			envelope: { id: "env-1", capabilities: ["filesystem.write"], allowedPaths: ["/repo/src"] },
 		});
 		const controller = new BackgroundLaneController(deps);
 
@@ -148,7 +148,7 @@ describe("host re-review of a managed (tmux) lane's changed files", () => {
 	it("surfaces an out-of-scope tmux-worker mutation as UNREVIEWED through the existing delegate_status tool", async () => {
 		const agentDir = "/tmp/pi-test-tmux-review-delegate-status";
 		const { deps, savedResults } = buildDeps(agentDir, {
-			envelope: { id: "env-1", capabilities: ["write_files"], allowedPaths: ["/repo/src"] },
+			envelope: { id: "env-1", capabilities: ["filesystem.write"], allowedPaths: ["/repo/src"] },
 		});
 		const controller = new BackgroundLaneController(deps);
 

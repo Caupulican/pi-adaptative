@@ -24,7 +24,6 @@ import {
 } from "./core/agent-session-services.ts";
 import { formatNoModelsAvailableMessage } from "./core/auth-guidance.ts";
 import { AuthStorage } from "./core/auth-storage.ts";
-import type { CapabilityName } from "./core/autonomy/contracts.ts";
 import { formatDoctorReport, runDoctor, runUpdatePreflight } from "./core/doctor.ts";
 import { exportFromFile } from "./core/export-html/index.ts";
 import type { ExtensionFactory } from "./core/extensions/types.ts";
@@ -990,23 +989,19 @@ export async function main(args: string[], options?: MainOptions) {
 			created.session.setThinkingLevel(created.session.thinkingLevel);
 		}
 		if (orchestrationProfile && orchestrationModel) {
-			const capabilities: CapabilityName[] = [];
-			const ceiling = orchestrationProfile.capabilityCeiling;
-			if (ceiling.includes("filesystem.read") || ceiling.includes("worktree.read")) capabilities.push("read_files");
-			if (ceiling.includes("filesystem.write") || ceiling.includes("worktree.mutate")) {
-				capabilities.push("write_files");
-			}
-			if (ceiling.includes("process.exec") || ceiling.includes("tests.execute")) capabilities.push("run_shell");
-			if (ceiling.includes("network.http") || ceiling.includes("service.mcp")) capabilities.push("network");
-			if (ceiling.includes("memory.query")) capabilities.push("memory_read");
-			if (ceiling.includes("memory.mutate")) capabilities.push("memory_write");
-			if (ceiling.includes("workflow.delegate")) capabilities.push("delegate");
+			const capabilities = [...orchestrationProfile.capabilityCeiling];
 			created.session.capabilityEnvelope = {
 				id: `orchestration-profile:${orchestrationProfile.profileId}`,
 				profileId: orchestrationProfile.profileId,
 				capabilities,
 				allowedTools: [...orchestrationProfile.toolNames],
-				...(capabilities.includes("read_files") || capabilities.includes("write_files")
+				...(capabilities.some(
+					(capability) =>
+						capability === "filesystem.read" ||
+						capability === "filesystem.write" ||
+						capability === "worktree.read" ||
+						capability === "worktree.mutate",
+				)
 					? { allowedPaths: [cwd] }
 					: {}),
 				...(orchestrationProfile.budget.maxCostUsd !== undefined

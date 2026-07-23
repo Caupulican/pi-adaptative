@@ -90,12 +90,21 @@ const CAPABILITY_ENFORCEMENT = new Map<HarnessCapability, ToolCapabilityManifest
 	["network.http", "service-proxy"],
 	["service.mcp", "service-proxy"],
 	["credentials.use", "service-proxy"],
+	["credentials.modify", "control-plane"],
 	["memory.query", "memory-broker"],
 	["memory.mutate", "memory-broker"],
+	["settings.read", "control-plane"],
+	["settings.write", "control-plane"],
+	["skill.read", "path-scope"],
+	["skill.write", "path-scope"],
+	["source.read", "path-scope"],
+	["source.write", "path-scope"],
+	["research.execute", "control-plane"],
 	["workflow.plan", "control-plane"],
 	["workflow.delegate", "control-plane"],
 	["policy.modify", "control-plane"],
 	["learning.propose", "control-plane"],
+	["publish.execute", "control-plane"],
 ]);
 
 export class ExecutionPolicyCompiler {

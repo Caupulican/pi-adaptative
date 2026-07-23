@@ -201,7 +201,7 @@ describe("autonomy telemetry emission (G3)", () => {
 		};
 		const harness = await createHarness({ tools: [readTool] });
 		try {
-			harness.session.capabilityEnvelope = { id: "env-1", capabilities: ["read_files"] };
+			harness.session.capabilityEnvelope = { id: "env-1", capabilities: ["filesystem.read"] };
 			harness.setResponses([
 				fauxAssistantMessage([fauxToolCall("read", { path: "/tmp/foo.txt" })], { stopReason: "toolUse" }),
 				fauxAssistantMessage("Done"),
@@ -285,7 +285,7 @@ describe("autonomy telemetry emission (G3)", () => {
 			expect(event.version).toBe(1);
 			expect(typeof event.payload.id).toBe("string");
 			expect(event.payload.tier).toBe("cheap");
-			expect(event.payload.capabilities).toEqual(["read_files"]);
+			expect(event.payload.capabilities).toEqual(["filesystem.read"]);
 			expect(typeof event.payload.maxEstimatedUsd).toBe("number");
 			// The worker's instructions text must never ride along in telemetry.
 			expect(JSON.stringify(event.payload)).not.toContain("validation rules");
