@@ -20,6 +20,7 @@ import { deriveModelCapabilityProfile, type ModelCapabilityProfile } from "../mo
 import type { ModelRegistry } from "../model-registry.ts";
 import type { OrchestrationProfile } from "../orchestration/contracts.ts";
 import type { StartedDelegationAttempt } from "../orchestration/delegation-ledger.ts";
+import type { AttemptRuntimeState } from "../orchestration/task-runtime.ts";
 import { adaptWorkerResult, adaptWorkerRunOutcome } from "../orchestration/worker-result-adapter.ts";
 import { registerInFlightWork } from "../reload-blockers.ts";
 import type { ResolvedWorkerDelegationSettings, SettingsManager } from "../settings-manager.ts";
@@ -74,6 +75,23 @@ export interface WorkerDelegationControllerDeps {
 		opts: { label?: string; sourceSessionId?: string; reportId: string },
 	): string | undefined;
 	runIsolatedCompletion(opts: IsolatedCompletionOptions): Promise<IsolatedCompletionResult>;
+}
+
+type WorkerAdmission =
+	| {
+			ok: true;
+			instructions: string;
+			settings: ResolvedWorkerDelegationSettings;
+			shipment: ResolvedWorkerProfile;
+			verifierShipment?: ResolvedWorkerProfile;
+	  }
+	| { ok: false; skipReason: string };
+
+interface PreparedWorkerAttempt {
+	executionPlan: WorkerExecutionPlan;
+	lifecycle: WorkerLifecycle;
+	record: LaneRecord;
+	attempt?: AttemptRuntimeState;
 }
 
 export class WorkerDelegationController {
@@ -291,18 +309,16 @@ export class WorkerDelegationController {
 				}
 				continue;
 			}
-			const settings = this.deps.getSettingsManager().getWorkerDelegationSettings();
-			const implementation = this.resolveWorkerShipment(
-				{ instructions: recovery.summary, profileId: recovery.implementationProfileId },
-				settings,
-			);
-			const verifier = implementation.ok ? this.resolveRequiredVerifier(implementation.shipment.profile) : undefined;
+			const implementation = this.resolveWorkerAdmission({
+				instructions: recovery.summary,
+				profileId: recovery.implementationProfileId,
+			});
 			const started =
-				verifier?.ok && verifier.shipment
+				implementation.ok && implementation.verifierShipment
 					? this.start(
 							this.buildVerifierRequest({
 								subjectTaskId: recovery.subjectTaskId,
-								verifierProfileId: verifier.shipment.profile.profileId,
+								verifierProfileId: implementation.verifierShipment.profile.profileId,
 								summary: recovery.summary,
 								artifactUris: recovery.artifactUris,
 							}),
@@ -344,6 +360,30 @@ export class WorkerDelegationController {
 		return resolved.ok
 			? { ok: true, shipment: resolved.resolved }
 			: { ok: false, skipReason: `independent_verifier_unavailable:${resolved.reason}` };
+	}
+
+	/** Single admission contract shared by enqueue, scheduler revalidation, and execution. */
+	private resolveWorkerAdmission(request: WorkerDelegationRequest): WorkerAdmission {
+		if (this.deps.isDisposed()) return { ok: false, skipReason: "session_disposed" };
+		const instructions = request.instructions.trim();
+		if (!instructions) return { ok: false, skipReason: "missing_instructions" };
+		if (!this.deps.isDelegateToolActive()) return { ok: false, skipReason: "delegate_tool_inactive" };
+		const settings = this.deps.getSettingsManager().getWorkerDelegationSettings();
+		if (!settings.enabled) return { ok: false, skipReason: "worker_delegation_disabled" };
+		const resolved = this.resolveWorkerShipment(request, settings);
+		if (!resolved.ok) return resolved;
+		const verifier = this.resolveRequiredVerifier(resolved.shipment.profile);
+		if (!verifier.ok) return verifier;
+		if (!this.laneCapabilityProfile(resolved.shipment.model).backgroundLanesEnabled) {
+			return { ok: false, skipReason: "model_delegation_unsupported" };
+		}
+		return {
+			ok: true,
+			instructions,
+			settings,
+			shipment: resolved.shipment,
+			...(verifier.shipment ? { verifierShipment: verifier.shipment } : {}),
+		};
 	}
 
 	private buildVerifierRequest(args: {
@@ -392,16 +432,11 @@ export class WorkerDelegationController {
 	}
 
 	private workerDispatchAdmission(request: WorkerDelegationRequest): WorkerDispatchAdmission {
-		if (this.deps.isDisposed()) return { action: "cancel", reasonCode: "session_disposed" };
-		if (!this.deps.isDelegateToolActive()) return { action: "cancel", reasonCode: "delegate_tool_inactive" };
-		const settings = this.deps.getSettingsManager().getWorkerDelegationSettings();
-		if (!settings.enabled) return { action: "cancel", reasonCode: "worker_delegation_disabled" };
-		const resolved = this.resolveWorkerShipment(request, settings);
-		if (!resolved.ok) return { action: "cancel", reasonCode: resolved.skipReason };
-		if (!this.laneCapabilityProfile(resolved.shipment.model).backgroundLanesEnabled) {
-			return { action: "cancel", reasonCode: "model_delegation_unsupported" };
-		}
-		return this.hasWorkerCapacity(settings, resolved.shipment.profile) ? { action: "start" } : { action: "wait" };
+		const admission = this.resolveWorkerAdmission(request);
+		if (!admission.ok) return { action: "cancel", reasonCode: admission.skipReason };
+		return this.hasWorkerCapacity(admission.settings, admission.shipment.profile)
+			? { action: "start" }
+			: { action: "wait" };
 	}
 
 	private buildWorkerExecutionPlan(
@@ -418,23 +453,40 @@ export class WorkerDelegationController {
 		});
 	}
 
+	/** One durable preparation path for queued, immediate, and recovered execution. */
+	private prepareWorkerAttempt(
+		request: WorkerDelegationRequest,
+		admission: Extract<WorkerAdmission, { ok: true }>,
+		existingRecord?: LaneRecord,
+	): PreparedWorkerAttempt {
+		const executionPlan = this.buildWorkerExecutionPlan(admission.shipment.profile, admission.settings);
+		const lifecycle = this.getWorkerLifecycle();
+		if (existingRecord) {
+			return {
+				executionPlan,
+				lifecycle,
+				record: existingRecord,
+				attempt: lifecycle.getActiveAttempt(existingRecord.laneId),
+			};
+		}
+		const goal = this.deps.getGoalStateSnapshot();
+		const prepared = lifecycle.prepare({
+			instructions: admission.instructions,
+			profile: admission.shipment.profile,
+			requiredCapabilities: executionPlan.requiredCapabilities,
+			...(request.verificationOfTaskId ? { verificationOfTaskId: request.verificationOfTaskId } : {}),
+			...(goal ? { goal: { goalId: goal.goalId, description: goal.userGoal } } : {}),
+		});
+		return { executionPlan, lifecycle, ...prepared };
+	}
+
 	start(
 		request: WorkerDelegationRequest,
 	): { started: false; skipReason: string } | { started: true; record: LaneRecord } {
-		const settings = this.deps.getSettingsManager().getWorkerDelegationSettings();
-		if (this.deps.isDisposed()) return { started: false, skipReason: "session_disposed" };
-		if (request.instructions.trim().length === 0) return { started: false, skipReason: "missing_instructions" };
-		if (!this.deps.isDelegateToolActive()) return { started: false, skipReason: "delegate_tool_inactive" };
-		if (!settings.enabled) return { started: false, skipReason: "worker_delegation_disabled" };
+		const admission = this.resolveWorkerAdmission(request);
+		if (!admission.ok) return { started: false, skipReason: admission.skipReason };
 		this.recoverDurableQueue();
-		const resolved = this.resolveWorkerShipment(request, settings);
-		if (!resolved.ok) return { started: false, skipReason: resolved.skipReason };
-		const shipment = resolved.shipment;
-		const verifier = this.resolveRequiredVerifier(shipment.profile);
-		if (!verifier.ok) return { started: false, skipReason: verifier.skipReason };
-		if (!this.laneCapabilityProfile(shipment.model).backgroundLanesEnabled) {
-			return { started: false, skipReason: "model_delegation_unsupported" };
-		}
+		const { settings, shipment } = admission;
 
 		const foreground = this.deps.getModel();
 		const contendsWithLocalForeground =
@@ -446,17 +498,9 @@ export class WorkerDelegationController {
 			if (this.scheduler.queuedCount >= 8 && !request.verificationOfTaskId) {
 				return { started: false, skipReason: "worker_delegation_queue_full" };
 			}
-			const plan = this.buildWorkerExecutionPlan(shipment.profile, settings);
 			let record: LaneRecord;
 			try {
-				const goal = this.deps.getGoalStateSnapshot();
-				record = this.getWorkerLifecycle().prepare({
-					instructions: request.instructions.trim(),
-					profile: shipment.profile,
-					requiredCapabilities: plan.requiredCapabilities,
-					...(request.verificationOfTaskId ? { verificationOfTaskId: request.verificationOfTaskId } : {}),
-					...(goal ? { goal: { goalId: goal.goalId, description: goal.userGoal } } : {}),
-				}).record;
+				record = this.prepareWorkerAttempt(request, admission).record;
 			} catch (error) {
 				this.safeWarn(
 					`Worker dispatch was not persisted: ${error instanceof Error ? error.message : String(error)}`,
@@ -468,9 +512,14 @@ export class WorkerDelegationController {
 			return { started: true, record };
 		}
 		let startedRecord: LaneRecord | undefined;
-		const promise = this.runOnce(request, (record) => {
-			startedRecord = record;
-		});
+		const promise = this.runOnceWithAdmission(
+			request,
+			(record) => {
+				startedRecord = record;
+			},
+			undefined,
+			admission,
+		);
 		if (!startedRecord) {
 			// Preparation is synchronous up to the first isolated completion await. A promise that
 			// rejected before producing a lane is still observed below, so it cannot become unhandled.
@@ -486,53 +535,26 @@ export class WorkerDelegationController {
 		onStarted?: (record: LaneRecord) => void,
 		existingRecord?: LaneRecord,
 	): Promise<WorkerDelegationRunOutcome> {
-		const delegationSettings = this.deps.getSettingsManager().getWorkerDelegationSettings();
-		if (this.deps.isDisposed()) {
-			return { started: false, skipReason: "session_disposed" };
-		}
-		const instructions = request.instructions.trim();
-		if (instructions.length === 0) {
-			return { started: false, skipReason: "missing_instructions" };
-		}
+		return this.runOnceWithAdmission(request, onStarted, existingRecord);
+	}
 
-		const settings = delegationSettings;
-		if (!this.deps.isDelegateToolActive()) {
-			return { started: false, skipReason: "delegate_tool_inactive" };
-		}
-		if (!settings.enabled) {
-			return { started: false, skipReason: "worker_delegation_disabled" };
-		}
+	private async runOnceWithAdmission(
+		request: WorkerDelegationRequest,
+		onStarted?: (record: LaneRecord) => void,
+		existingRecord?: LaneRecord,
+		preparedAdmission?: Extract<WorkerAdmission, { ok: true }>,
+	): Promise<WorkerDelegationRunOutcome> {
+		const admission = preparedAdmission ?? this.resolveWorkerAdmission(request);
+		if (!admission.ok) return { started: false, skipReason: admission.skipReason };
 		this.recoverDurableQueue();
-
-		const resolved = this.resolveWorkerShipment(request, settings);
-		if (!resolved.ok) {
-			return { started: false, skipReason: resolved.skipReason };
-		}
-		const { model, modelBinding, profile: orchestrationProfile, soul } = resolved.shipment;
-		const requiredVerifier = this.resolveRequiredVerifier(orchestrationProfile);
-		if (!requiredVerifier.ok) {
-			return { started: false, skipReason: requiredVerifier.skipReason };
-		}
+		const { instructions, settings, verifierShipment } = admission;
+		const { model, modelBinding, profile: orchestrationProfile, soul } = admission.shipment;
 		if (!this.hasWorkerCapacity(settings, orchestrationProfile)) {
 			return { started: false, skipReason: "worker_delegation_already_running" };
 		}
 		const laneCapability = this.laneCapabilityProfile(model);
-		if (!laneCapability.backgroundLanesEnabled) {
-			return { started: false, skipReason: "model_delegation_unsupported" };
-		}
-
-		const executionPlan = this.buildWorkerExecutionPlan(orchestrationProfile, settings);
-		const goal = this.deps.getGoalStateSnapshot();
-		const lifecycle = this.getWorkerLifecycle();
-		const prepared = existingRecord
-			? { record: existingRecord, attempt: lifecycle.getActiveAttempt(existingRecord.laneId) }
-			: lifecycle.prepare({
-					instructions,
-					profile: orchestrationProfile,
-					requiredCapabilities: executionPlan.requiredCapabilities,
-					...(request.verificationOfTaskId ? { verificationOfTaskId: request.verificationOfTaskId } : {}),
-					...(goal ? { goal: { goalId: goal.goalId, description: goal.userGoal } } : {}),
-				});
+		const prepared = this.prepareWorkerAttempt(request, admission, existingRecord);
+		const { executionPlan, lifecycle } = prepared;
 		if (!prepared.attempt) return { started: false, skipReason: "orchestration_attempt_missing" };
 		const durableTask = lifecycle.getTask(prepared.record.laneId);
 		if (!durableTask) return { started: false, skipReason: "orchestration_task_missing" };
@@ -828,7 +850,6 @@ export class WorkerDelegationController {
 				});
 				terminalRecords.push(subject);
 			} else if (verificationRequired) {
-				const verifierShipment = requiredVerifier.ok ? requiredVerifier.shipment : undefined;
 				const verifierStart = verifierShipment
 					? this.start(
 							this.buildVerifierRequest({

@@ -48,6 +48,13 @@ function resultFor(
 	};
 }
 
+function startWithGrant(lifecycle: WorkerLifecycle, laneId: string, leaseTtlMs: number): StartedDelegationAttempt {
+	const attempt = lifecycle.getActiveAttempt(laneId);
+	if (!attempt) throw new Error(`Expected active attempt for ${laneId}`);
+	lifecycle.bindGrant(attempt.attemptId, `grant-${attempt.attemptId}`);
+	return lifecycle.start(laneId, leaseTtlMs);
+}
+
 function finishAwaitingVerification(
 	lifecycle: WorkerLifecycle,
 	overrides: Partial<Pick<WorkerResultContract, "reasonCode" | "summary" | "artifacts" | "evidence">> = {},
@@ -59,7 +66,7 @@ function finishAwaitingVerification(
 		verificationProfileId: "verifier",
 	});
 	const prepared = lifecycle.prepare({ instructions: "implement", profile, requiredCapabilities: [] });
-	const handle = lifecycle.start(prepared.record.laneId, profile.leaseTtlMs);
+	const handle = startWithGrant(lifecycle, prepared.record.laneId, profile.leaseTtlMs);
 	lifecycle.finish(
 		resultFor(handle, {
 			status: "partial",
@@ -85,8 +92,7 @@ describe("WorkerLifecycle", () => {
 			profile,
 			requiredCapabilities: ["filesystem.read"],
 		});
-		const handle = lifecycle.start(prepared.record.laneId, profile.leaseTtlMs);
-		lifecycle.bindGrant(handle.attemptId, "grant-1");
+		const handle = startWithGrant(lifecycle, prepared.record.laneId, profile.leaseTtlMs);
 		expect(lifecycle.finish(resultFor(handle))).toMatchObject({
 			status: "succeeded",
 			reasonCode: "worker_completed",
@@ -155,7 +161,7 @@ describe("WorkerLifecycle", () => {
 			requiredCapabilities: [],
 			verificationOfTaskId: implementation.laneId,
 		});
-		const verifierHandle = lifecycle.start(verifier.record.laneId, verifierProfile.leaseTtlMs);
+		const verifierHandle = startWithGrant(lifecycle, verifier.record.laneId, verifierProfile.leaseTtlMs);
 		lifecycle.finish(
 			resultFor(verifierHandle, {
 				reasonCode: "verification_rejected",
