@@ -101,6 +101,12 @@ export class WorkerDispatchScheduler {
 		this.queued.clear();
 	}
 
+	dropQueued(laneId: string): boolean {
+		if (!this.queued.has(laneId)) return false;
+		this.removeQueued(laneId);
+		return true;
+	}
+
 	private removeQueued(laneId: string): void {
 		this.queued.delete(laneId);
 		this.queuedDeregisters.get(laneId)?.();

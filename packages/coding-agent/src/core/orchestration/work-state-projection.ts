@@ -1,3 +1,4 @@
+import { getTrustedRequirementEvidence } from "../goals/goal-acceptance.ts";
 import type { GoalState } from "../goals/goal-state.ts";
 import {
 	type OpenTaskStepProjection,
@@ -5,7 +6,7 @@ import {
 	resolveTaskStepRequirementIds,
 } from "../tasks/task-projection.ts";
 import type { TaskStepsState } from "../tasks/task-state.ts";
-import type { AcceptanceCriterion } from "./contracts.ts";
+import type { AcceptanceCriterion, EvidenceContract } from "./contracts.ts";
 import type { CreateObjectiveInput, TaskRuntimeProjection } from "./task-runtime.ts";
 
 export interface GoalObjectiveProjection extends CreateObjectiveInput {
@@ -45,6 +46,41 @@ export function projectGoalObjective(goal: GoalState): GoalObjectiveProjection {
 		})),
 		riskBudget: {},
 	};
+}
+
+function orchestrationEvidenceKind(kind: GoalState["evidence"][number]["kind"]): EvidenceContract["kind"] {
+	switch (kind) {
+		case "test":
+			return "test";
+		case "tool":
+			return "command";
+		case "worker":
+			return "review";
+		case "user":
+			return "external";
+		case "file":
+		case "finding":
+			return "observation";
+	}
+}
+
+export function projectGoalAcceptanceEvidence(goal: GoalState): EvidenceContract[] {
+	return goal.requirements.flatMap((requirement) =>
+		getTrustedRequirementEvidence(goal, requirement).map((evidence) => ({
+			evidenceId: `goal-evidence:${goal.goalId}:${requirement.id}:${evidence.id}`,
+			criterionId: requirement.id,
+			kind: orchestrationEvidenceKind(evidence.kind),
+			summary: evidence.summary,
+			artifactIds: [],
+			trusted: true,
+			createdAt: evidence.createdAt,
+			metadata: {
+				sourceGoalEvidenceId: evidence.id,
+				sourceKind: evidence.kind,
+				...(evidence.uri ? { uri: evidence.uri } : {}),
+			},
+		})),
+	);
 }
 
 function collectRelatedDelegatedTaskIds(

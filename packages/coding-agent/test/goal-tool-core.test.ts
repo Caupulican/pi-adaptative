@@ -206,6 +206,36 @@ describe("applyGoalAction (goal producer core)", () => {
 		);
 		state = expectOk(applyGoalAction(state, { action: "complete" }, "T4"));
 		expect(state.status).toBe("completed");
+		expect(state.events.at(-1)).toMatchObject({ type: "complete_goal", acceptanceOverride: false });
+	});
+
+	it("requires trusted evidence for every satisfied requirement", () => {
+		let state = createGoalState({ goalId: "g1", userGoal: "A", now: "T0" });
+		state = expectOk(applyGoalAction(state, { action: "add_requirement", requirementId: "r1", text: "Do X" }, "T1"));
+		state = expectOk(applyGoalAction(state, { action: "add_requirement", requirementId: "r2", text: "Do Y" }, "T2"));
+		state = expectOk(
+			applyGoalAction(
+				state,
+				{ action: "add_evidence", evidenceId: "e1", kind: "tool", summary: "proved X", verified: true },
+				"T3",
+			),
+		);
+		state = expectOk(
+			applyGoalAction(state, { action: "satisfy_requirement", requirementId: "r1", evidenceIds: ["e1"] }, "T4"),
+		);
+		state = expectOk(applyGoalAction(state, { action: "satisfy_requirement", requirementId: "r2" }, "T5"));
+
+		const blocked = applyGoalAction(state, { action: "complete" }, "T6");
+		expect(blocked.ok).toBe(false);
+		if (blocked.ok) return;
+		expect(blocked.error).toContain("r2");
+
+		const overridden = applyGoalAction(state, { action: "complete" }, "T7", {
+			requireVerifiedEvidenceForCompletion: false,
+		});
+		expect(overridden.ok).toBe(true);
+		if (!overridden.ok) return;
+		expect(overridden.state.events.at(-1)).toMatchObject({ type: "complete_goal", acceptanceOverride: true });
 	});
 
 	it("tracks progress and stall via progress/no_progress", () => {

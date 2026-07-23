@@ -2,9 +2,10 @@ import { mkdtempSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { afterEach, describe, expect, it } from "vitest";
+import { applyGoalEvent, createGoalState, type GoalState } from "../src/core/goals/goal-state.ts";
 import { ORCHESTRATION_SCHEMA_VERSION, type OrchestrationProfile } from "../src/core/orchestration/contracts.ts";
 import { DelegationOrchestrationLedger } from "../src/core/orchestration/delegation-ledger.ts";
-import type { GoalObjectiveProjection } from "../src/core/orchestration/work-state-projection.ts";
+import { projectGoalObjective } from "../src/core/orchestration/work-state-projection.ts";
 import { adaptWorkerResult } from "../src/core/orchestration/worker-result-adapter.ts";
 
 const roots: string[] = [];
@@ -40,15 +41,17 @@ function profile(): OrchestrationProfile {
 	};
 }
 
-function goal(acceptanceCriteria: GoalObjectiveProjection["acceptanceCriteria"]): GoalObjectiveProjection {
-	return {
-		objectiveId: "goal:g1",
-		title: "Goal g1",
-		description: "Ship safely",
-		constraints: [],
-		acceptanceCriteria,
-		riskBudget: {},
-	};
+function goal(acceptanceCriteria: readonly { id: string; description: string; required: boolean }[]): GoalState {
+	let state = createGoalState({ goalId: "g1", userGoal: "Ship safely", now: "2026-07-23T00:00:00.000Z" });
+	for (const [index, criterion] of acceptanceCriteria.entries()) {
+		state = applyGoalEvent(state, {
+			type: "add_requirement",
+			id: criterion.id,
+			text: criterion.description,
+			now: `2026-07-23T00:00:0${index + 1}.000Z`,
+		});
+	}
+	return state;
 }
 
 afterEach(() => {
@@ -177,7 +180,7 @@ describe("DelegationOrchestrationLedger", () => {
 			goal: firstGoal,
 		});
 		const firstOrdinal = ledger.runtime.getSnapshot().lastOrdinal;
-		ledger.runtime.ensureObjective(firstGoal);
+		ledger.runtime.ensureObjective(projectGoalObjective(firstGoal));
 		expect(ledger.runtime.getSnapshot().lastOrdinal).toBe(firstOrdinal);
 
 		const expandedGoal = goal([
@@ -194,14 +197,16 @@ describe("DelegationOrchestrationLedger", () => {
 
 		const reopened = new DelegationOrchestrationLedger({ agentDir, sessionId: "session-goal" });
 		expect(reopened.runtime.getSnapshot().objectives["goal:g1"]?.objective.acceptanceCriteria).toEqual(
-			expandedGoal.acceptanceCriteria,
+			projectGoalObjective(expandedGoal).acceptanceCriteria,
 		);
 		expect(reopened.runtime.getSnapshot().tasks["worker-1"]?.task.acceptanceCriterionIds).toEqual([]);
 	});
 
 	it("refuses to remove an acceptance criterion already referenced by a task", () => {
 		const ledger = new DelegationOrchestrationLedger({ agentDir: root(), sessionId: "session-criteria" });
-		ledger.runtime.createObjective(goal([{ id: "req-1", description: "Required proof", required: true }]));
+		ledger.runtime.createObjective(
+			projectGoalObjective(goal([{ id: "req-1", description: "Required proof", required: true }])),
+		);
 		ledger.runtime.createTask({
 			taskId: "proof-task",
 			objectiveId: "goal:g1",
@@ -210,7 +215,7 @@ describe("DelegationOrchestrationLedger", () => {
 			role: "verifier",
 			acceptanceCriterionIds: ["req-1"],
 		});
-		expect(() => ledger.runtime.ensureObjective(goal([]))).toThrow(
+		expect(() => ledger.runtime.ensureObjective(projectGoalObjective(goal([])))).toThrow(
 			"Cannot remove acceptance criteria referenced by tasks: req-1",
 		);
 	});

@@ -225,6 +225,72 @@ describe("DurableTaskRuntime", () => {
 		expect(runtime.getSnapshot().objectives[objective.objectiveId]?.objective.status).toBe("completed");
 	});
 
+	it("persists owner evidence per criterion and completes by cancelling remaining execution", () => {
+		const harness = createHarness();
+		const objective = harness.runtime.createObjective({
+			objectiveId: "objective-owner-proof",
+			title: "Owner acceptance",
+			description: "Use the canonical goal evidence",
+			acceptanceCriteria: [
+				{ id: "criterion-1", description: "First proof", required: true },
+				{ id: "criterion-2", description: "Second proof", required: true },
+			],
+		});
+		const task = harness.runtime.createTask({
+			taskId: "task-still-running",
+			objectiveId: objective.objectiveId,
+			title: "Residual work",
+			description: "Must stop after owner acceptance",
+			role: "operator",
+		});
+		const attempt = harness.runtime.queueAttempt(task.taskId, dispatch(task.taskId));
+		for (const criterionId of ["criterion-1", "criterion-2"] as const) {
+			harness.runtime.recordObjectiveEvidence(objective.objectiveId, {
+				evidenceId: `evidence-${criterionId}`,
+				criterionId,
+				kind: "external",
+				summary: `Owner proved ${criterionId}`,
+				artifactIds: [],
+				trusted: true,
+				createdAt: new Date(T0).toISOString(),
+			});
+		}
+
+		const reopened = new DurableTaskRuntime({ store: harness.store, now: () => harness.clock.ms });
+		reopened.completeObjectiveFromOwner(objective.objectiveId, false);
+
+		const snapshot = reopened.getSnapshot();
+		expect(snapshot.objectives[objective.objectiveId]).toMatchObject({
+			objective: { status: "completed" },
+			evidence: [{ criterionId: "criterion-1" }, { criterionId: "criterion-2" }],
+		});
+		expect(snapshot.tasks[task.taskId]?.task.status).toBe("cancelled");
+		expect(snapshot.attempts[attempt.attemptId]?.status).toBe("cancelled");
+	});
+
+	it("rejects owner completion when any required criterion lacks trusted evidence", () => {
+		const { runtime } = createHarness();
+		const objective = runtime.createObjective({
+			title: "Incomplete owner acceptance",
+			description: "Reject partial proof",
+			acceptanceCriteria: [
+				{ id: "criterion-1", description: "First proof", required: true },
+				{ id: "criterion-2", description: "Second proof", required: true },
+			],
+		});
+		runtime.recordObjectiveEvidence(objective.objectiveId, {
+			evidenceId: "evidence-1",
+			criterionId: "criterion-1",
+			kind: "external",
+			summary: "Only the first criterion is proven",
+			artifactIds: [],
+			trusted: true,
+			createdAt: new Date(T0).toISOString(),
+		});
+
+		expect(() => runtime.completeObjectiveFromOwner(objective.objectiveId, false)).toThrow("criterion-2");
+	});
+
 	it("reconciles an implementation only after a separate verifier attempt records trusted review evidence", () => {
 		const { runtime } = createHarness();
 		const objective = runtime.createObjective({

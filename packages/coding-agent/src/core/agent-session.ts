@@ -3962,7 +3962,16 @@ export class AgentSession {
 	 * @returns the id of the appended custom entry
 	 */
 	saveGoalStateSnapshot(state: GoalState): string {
-		return appendGoalStateSnapshot(this.sessionManager, state);
+		const entryId = appendGoalStateSnapshot(this.sessionManager, state);
+		try {
+			this._backgroundLanes.synchronizeGoalState(state);
+		} catch (error) {
+			this._emit({
+				type: "warning",
+				message: `Goal state persisted but durable worker reconciliation failed: ${error instanceof Error ? error.message : String(error)}`,
+			});
+		}
+		return entryId;
 	}
 
 	/**

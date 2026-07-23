@@ -290,7 +290,7 @@ export function createGoalToolDefinition(deps: GoalToolDependencies): ToolDefini
 			"Use 'dispatch_worker' to bind a requirement to a worker lane while it is being worked; this records the binding only -- it never satisfies the requirement. Record 'worker'-kind evidence citing that laneId once the worker completes, then call 'satisfy_requirement'.",
 			"Use 'progress' when you advance without satisfying a specific requirement, and 'no_progress' when a turn yields nothing, so stall detection works.",
 			"When the user resolves a blocker, use 'resume_goal' and 'reopen_requirement' as needed; do not strand the old ledger or start a duplicate goal.",
-			"Mark the goal 'complete' only when every requirement is satisfied; completion normally also requires at least one satisfied requirement backed by verified 'tool'/'file' evidence or kind 'user' evidence. Use 'block_goal' or 'block_requirement' with a reason when you are stuck and need the user. A blocked goal can still be resumed or cancelled.",
+			"Mark the goal 'complete' only when every requirement is satisfied and each requirement cites verified or user-confirmed evidence. Use 'block_goal' or 'block_requirement' with a reason when you are stuck and need the user. A blocked goal can still be resumed or cancelled.",
 		],
 		parameters: goalSchema,
 		async execute(

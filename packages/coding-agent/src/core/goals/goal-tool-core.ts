@@ -1,4 +1,5 @@
 import { taskStepReferencesRequirement } from "../tasks/task-projection.ts";
+import { getUnprovenGoalRequirementIds } from "./goal-acceptance.ts";
 import {
 	applyGoalEvent,
 	createGoalState,
@@ -71,7 +72,7 @@ export type GoalActionResult = GoalActionSuccess | GoalActionFailure;
 
 export interface ApplyGoalActionOptions {
 	/**
-	 * Gate agent-facing 'complete' on at least one satisfied requirement being backed by
+	 * Gate agent-facing 'complete' on every satisfied requirement being backed by
 	 * verified-ref evidence (kind 'tool'/'file' with `verified === true`) or kind 'user'
 	 * evidence. Defaults to `true` (on) when omitted — the conservative default. Manual
 	 * completion ({@link completeGoalManually}) is never subject to this gate.
@@ -85,21 +86,6 @@ function requirementExists(state: GoalState, requirementId: string): boolean {
 
 function evidenceExists(state: GoalState, evidenceId: string): boolean {
 	return state.evidence.some((evidence) => evidence.id === evidenceId);
-}
-
-function isVerifiedOrUserEvidence(evidence: GoalState["evidence"][number]): boolean {
-	return evidence.kind === "user" || evidence.verified === true;
-}
-
-/** Does at least one SATISFIED requirement cite evidence that is verified-ref or kind:'user'? */
-function hasEvidenceBackedSatisfaction(state: GoalState): boolean {
-	return state.requirements.some((requirement) => {
-		if (requirement.status !== "satisfied") return false;
-		return requirement.evidenceIds.some((evidenceId) => {
-			const evidence = state.evidence.find((candidate) => candidate.id === evidenceId);
-			return evidence !== undefined && isVerifiedOrUserEvidence(evidence);
-		});
-	});
 }
 
 /**
@@ -269,13 +255,17 @@ function toGoalEvent(
 				};
 			}
 			const requireVerifiedEvidence = options?.requireVerifiedEvidenceForCompletion ?? true;
-			if (requireVerifiedEvidence && !hasEvidenceBackedSatisfaction(state)) {
+			const unprovenRequirementIds = getUnprovenGoalRequirementIds(state);
+			if (requireVerifiedEvidence && unprovenRequirementIds.length > 0) {
 				return {
 					ok: false,
-					error: "Cannot complete goal: no satisfied requirement is backed by verified evidence (kind 'tool'/'file' with a validated ref) or kind 'user' evidence. Record such evidence with 'add_evidence' and cite it in 'satisfy_requirement'.",
+					error: `Cannot complete goal: requirement(s) lack verified evidence (${unprovenRequirementIds.join(", ")}). Record verified or user-confirmed evidence and cite it in satisfy_requirement.`,
 				};
 			}
-			return { ok: true, event: { type: "complete_goal", now } };
+			return {
+				ok: true,
+				event: { type: "complete_goal", acceptanceOverride: !requireVerifiedEvidence, now },
+			};
 		}
 		case "block_goal": {
 			const reason = action.reason.trim();

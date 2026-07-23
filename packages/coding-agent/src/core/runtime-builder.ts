@@ -155,7 +155,11 @@ export function hasAnsweredToolCallOnBranch(sessionManager: SessionManager, tool
  * production `getOpenTaskSteps` wiring below remains directly testable without another filter.
  */
 export function deriveOpenTaskStepRefs(taskStepsState: TaskStepsState | undefined): OpenTaskStepRef[] {
-	return projectOpenTaskSteps(taskStepsState);
+	return projectOpenTaskSteps(taskStepsState).map((step) => ({
+		id: step.id,
+		content: step.content,
+		...(step.requirementIds?.length ? { requirementIds: step.requirementIds } : {}),
+	}));
 }
 
 interface ReloadRuntimeSnapshot {

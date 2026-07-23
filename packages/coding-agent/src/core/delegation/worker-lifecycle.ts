@@ -1,4 +1,5 @@
 import type { LaneRecord } from "../autonomy/lane-tracker.ts";
+import type { GoalState } from "../goals/goal-state.ts";
 import type { WorkerResultContract } from "../orchestration/contracts.ts";
 import {
 	DelegationOrchestrationLedger,
@@ -58,6 +59,19 @@ export class WorkerLifecycle {
 		const record = this.getRecord(laneId);
 		if (!record) throw new Error(`Durable worker '${laneId}' was not projected after enqueue.`);
 		return { record, attempt };
+	}
+
+	synchronizeGoalState(goal: GoalState): LaneRecord[] {
+		const before = new Map(this.getRecords().map((record) => [record.laneId, record.status]));
+		this.ledger.synchronizeGoalState(goal);
+		return this.getRecords().filter((record) => {
+			const previous = before.get(record.laneId);
+			return (
+				(previous === "queued" || previous === "running") &&
+				record.status !== "queued" &&
+				record.status !== "running"
+			);
+		});
 	}
 
 	start(laneId: string, leaseTtlMs: number): StartedDelegationAttempt {

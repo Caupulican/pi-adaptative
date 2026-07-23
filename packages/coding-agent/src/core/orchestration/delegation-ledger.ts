@@ -1,7 +1,9 @@
+import { hasGoalAcceptanceOverride } from "../goals/goal-acceptance.ts";
+import type { GoalState } from "../goals/goal-state.ts";
 import type { HarnessCapability, OrchestrationProfile } from "./contracts.ts";
 import { OrchestrationEventStore } from "./event-store.ts";
 import { type AttemptRuntimeState, DurableTaskRuntime, DurableTaskRuntimeError } from "./task-runtime.ts";
-import type { GoalObjectiveProjection } from "./work-state-projection.ts";
+import { goalObjectiveId, projectGoalAcceptanceEvidence, projectGoalObjective } from "./work-state-projection.ts";
 
 export interface DelegationLedgerOptions {
 	agentDir: string;
@@ -14,7 +16,7 @@ export interface PrepareDelegationInput {
 	instructions: string;
 	profile: OrchestrationProfile;
 	requiredCapabilities: readonly HarnessCapability[];
-	goal?: GoalObjectiveProjection;
+	goal?: GoalState;
 	verificationOfTaskId?: string;
 }
 
@@ -56,10 +58,11 @@ export class DelegationOrchestrationLedger {
 		if (input.verificationOfTaskId && !existingVerificationSubject) {
 			throw new DurableTaskRuntimeError(`Unknown verification subject '${input.verificationOfTaskId}'.`);
 		}
+		const projectedGoal = input.goal ? projectGoalObjective(input.goal) : undefined;
 		const objectiveId =
-			existingVerificationSubject?.task.objectiveId ?? input.goal?.objectiveId ?? `session:${this.sessionId}`;
-		if (input.goal && objectiveId === input.goal.objectiveId) {
-			this.runtime.ensureObjective(input.goal);
+			existingVerificationSubject?.task.objectiveId ?? projectedGoal?.objectiveId ?? `session:${this.sessionId}`;
+		if (input.goal && objectiveId === projectedGoal?.objectiveId) {
+			this.synchronizeGoalState(input.goal);
 			snapshot = this.runtime.getSnapshot();
 		} else if (!snapshot.objectives[objectiveId]) {
 			this.runtime.createObjective({
@@ -106,6 +109,31 @@ export class DelegationOrchestrationLedger {
 			instructions: input.instructions,
 			resourcePointerIds: [],
 		});
+	}
+
+	synchronizeGoalState(goal: GoalState): void {
+		const objective = projectGoalObjective(goal);
+		this.runtime.ensureObjective(objective);
+		for (const evidence of projectGoalAcceptanceEvidence(goal)) {
+			this.runtime.recordObjectiveEvidence(objective.objectiveId, evidence);
+		}
+		const status = this.runtime.getSnapshot().objectives[goalObjectiveId(goal.goalId)]?.objective.status;
+		switch (goal.status) {
+			case "active":
+				if (status === "paused") this.runtime.resumeObjective(objective.objectiveId);
+				break;
+			case "blocked":
+				if (status === "active") this.runtime.pauseObjective(objective.objectiveId);
+				break;
+			case "cancelled":
+				if (status !== "cancelled") this.runtime.cancelObjective(objective.objectiveId);
+				break;
+			case "completed":
+				if (status !== "completed") {
+					this.runtime.completeObjectiveFromOwner(objective.objectiveId, hasGoalAcceptanceOverride(goal));
+				}
+				break;
+		}
 	}
 
 	start(attemptId: string, leaseTtlMs: number): StartedDelegationAttempt {

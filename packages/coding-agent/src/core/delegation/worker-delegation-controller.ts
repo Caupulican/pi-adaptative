@@ -21,7 +21,6 @@ import type { ModelRegistry } from "../model-registry.ts";
 import type { OrchestrationProfile } from "../orchestration/contracts.ts";
 import type { StartedDelegationAttempt } from "../orchestration/delegation-ledger.ts";
 import type { AttemptRuntimeState, TaskRuntimeProjection } from "../orchestration/task-runtime.ts";
-import { projectGoalObjective } from "../orchestration/work-state-projection.ts";
 import { adaptWorkerResult, adaptWorkerRunOutcome } from "../orchestration/worker-result-adapter.ts";
 import { registerInFlightWork } from "../reload-blockers.ts";
 import type { ResolvedWorkerDelegationSettings, SettingsManager } from "../settings-manager.ts";
@@ -103,6 +102,8 @@ export class WorkerDelegationController {
 	private queueRecovered = false;
 	private readonly notifications: WorkerNotificationCoordinator;
 	private readonly scheduler: WorkerDispatchScheduler;
+	private readonly laneAbortControllers = new Map<string, AbortController>();
+	private readonly publishedTerminalAttemptIds = new Set<string>();
 	private readonly inFlightLedgers = new Map<
 		string,
 		{
@@ -146,7 +147,7 @@ export class WorkerDelegationController {
 			cancel: (laneId, reasonCode) => {
 				try {
 					const terminal = this.getWorkerLifecycle().cancel(laneId, reasonCode);
-					if (terminal) this.recordTerminal(terminal);
+					if (terminal) this.publishTerminalRecord(terminal);
 				} catch (error) {
 					this.safeWarn(
 						`Failed to cancel durable worker ${laneId}: ${error instanceof Error ? error.message : String(error)}`,
@@ -192,8 +193,7 @@ export class WorkerDelegationController {
 				try {
 					const canceled = this.lifecycle?.cancel(record.laneId, "session_disposed");
 					if (canceled) {
-						appendLaneRecordSnapshot(this.deps.getSessionManager(), canceled);
-						this.recordTerminal(canceled);
+						this.publishTerminalRecord(canceled);
 					}
 				} catch (error) {
 					this.safeWarn(
@@ -233,8 +233,7 @@ export class WorkerDelegationController {
 						reasonCode: "session_disposed",
 					}),
 				);
-				appendLaneRecordSnapshot(this.deps.getSessionManager(), canceled);
-				this.recordTerminal(canceled);
+				this.publishTerminalRecord(canceled);
 				// Bounded honesty: spend may be incomplete (it lands only when the isolated completion
 				// returns, which a mid-flight abort preempts) — record what `getSpend()` knows. Same
 				// deterministic reportId scheme as the normal path, so a later duplicate report (there
@@ -256,11 +255,14 @@ export class WorkerDelegationController {
 
 	private getWorkerLifecycle(): WorkerLifecycle {
 		if (this.lifecycle) return this.lifecycle;
-		this.lifecycle = new WorkerLifecycle({
+		const lifecycle = new WorkerLifecycle({
 			agentDir: this.deps.getAgentDir(),
 			sessionId: this.deps.getSessionId(),
 		});
-		return this.lifecycle;
+		this.lifecycle = lifecycle;
+		const goal = this.deps.getGoalStateSnapshot();
+		if (goal) this.publishGoalTerminalRecords(lifecycle.synchronizeGoalState(goal));
+		return lifecycle;
 	}
 
 	private getWorkerProfileResolver(): WorkerProfileResolver {
@@ -280,6 +282,20 @@ export class WorkerDelegationController {
 	/** Read-only durable worker projection. Undefined means the delegate capability never loaded. */
 	getTaskRuntimeSnapshot(): TaskRuntimeProjection | undefined {
 		return this.lifecycle?.getTaskRuntimeSnapshot();
+	}
+
+	/** Reconcile the session goal into an already-loaded worker runtime without defeating lazy UAC. */
+	synchronizeGoalState(goal: GoalState): void {
+		if (!this.lifecycle) return;
+		this.publishGoalTerminalRecords(this.lifecycle.synchronizeGoalState(goal));
+	}
+
+	private publishGoalTerminalRecords(records: readonly LaneRecord[]): void {
+		for (const record of records) {
+			this.scheduler.dropQueued(record.laneId);
+			this.laneAbortControllers.get(record.laneId)?.abort("goal_terminal");
+			this.publishTerminalRecord(record);
+		}
 	}
 
 	private recoverDurableQueue(): void {
@@ -406,6 +422,8 @@ export class WorkerDelegationController {
 	}
 
 	private publishTerminalRecord(record: LaneRecord): void {
+		const attemptId = this.lifecycle?.getActiveAttempt(record.laneId)?.attemptId;
+		if (attemptId && this.publishedTerminalAttemptIds.has(attemptId)) return;
 		this.recordTerminal(record);
 		appendLaneRecordSnapshot(this.deps.getSessionManager(), record);
 		this.deps.emitAutonomyTelemetry({
@@ -419,6 +437,7 @@ export class WorkerDelegationController {
 				costUsd: record.costUsd ?? null,
 			},
 		});
+		if (attemptId) this.publishedTerminalAttemptIds.add(attemptId);
 	}
 
 	private hasWorkerCapacity(settings: ResolvedWorkerDelegationSettings, profile: OrchestrationProfile): boolean {
@@ -471,7 +490,7 @@ export class WorkerDelegationController {
 			profile: admission.shipment.profile,
 			requiredCapabilities: executionPlan.requiredCapabilities,
 			...(request.verificationOfTaskId ? { verificationOfTaskId: request.verificationOfTaskId } : {}),
-			...(goal ? { goal: projectGoalObjective(goal) } : {}),
+			...(goal ? { goal } : {}),
 		});
 		return { executionPlan, lifecycle, ...prepared };
 	}
@@ -632,6 +651,9 @@ export class WorkerDelegationController {
 			},
 		});
 		const usageReportId = `worker:${this.deps.getSessionId()}:${startedRecord.laneId}`;
+		const laneAbortController = new AbortController();
+		this.laneAbortControllers.set(startedRecord.laneId, laneAbortController);
+		const workerSignal = AbortSignal.any([this.workerAbort.signal, laneAbortController.signal]);
 
 		// Registered for the lane's full run so the reload gate waits it out; deregistered in the
 		// finally below no matter how this lane terminates (success, disposal, or a thrown error).
@@ -667,7 +689,7 @@ export class WorkerDelegationController {
 				maxWallClockMs: compiled.grant.budget.maxWallClockMs ?? 0,
 				usageReportId,
 				getChangedFiles: () => [...toolChangedFiles],
-				signal: this.workerAbort.signal,
+				signal: workerSignal,
 				// Parent validation must use the same relative-path baseline the runner reports in.
 				cwd: this.deps.getCwd(),
 				processCapable: executionPlan.processEnabled,
@@ -876,6 +898,9 @@ export class WorkerDelegationController {
 			return { started: true, record, outcome };
 		} catch (error) {
 			const durableState = lifecycle.ledger.runtime.getSnapshot().attempts[durableHandle.attemptId];
+			if (durableState?.status === "cancelled" && (laneAbortController.signal.aborted || this.deps.isDisposed())) {
+				return { started: true, record: lifecycle.getRecord(startedRecord.laneId) };
+			}
 			if (durableState?.status === "running" || durableState?.status === "leased") {
 				const failureResult: WorkerResult = {
 					requestId: startedRecord.laneId,
@@ -907,26 +932,13 @@ export class WorkerDelegationController {
 			if (record?.status === "queued" || record?.status === "running") {
 				record = lifecycle.cancel(startedRecord.laneId, "worker_delegation_error");
 			}
-			if (record) this.recordTerminal(record);
-			if (record && !this.deps.isDisposed()) {
-				appendLaneRecordSnapshot(this.deps.getSessionManager(), record);
-				this.deps.emitAutonomyTelemetry({
-					type: AUTONOMY_TELEMETRY_EVENT_TYPES.workerResult,
-					timestamp: new Date().toISOString(),
-					payload: {
-						laneId: record.laneId,
-						laneType: record.type,
-						status: record.status,
-						reasonCode: record.reasonCode ?? null,
-						costUsd: record.costUsd ?? null,
-					},
-				});
-			}
+			if (record && !this.deps.isDisposed()) this.publishTerminalRecord(record);
 			const message = error instanceof Error ? error.message : String(error);
 			this.deps.emit({ type: "warning", message: `Worker delegation failed: ${message}` });
 			return { started: true, record };
 		} finally {
 			this.inFlightLedgers.delete(startedRecord.laneId);
+			this.laneAbortControllers.delete(startedRecord.laneId);
 			deregisterInFlight();
 		}
 	}

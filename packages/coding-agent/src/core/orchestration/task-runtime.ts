@@ -12,6 +12,7 @@ import {
 	type AttemptCheckpoint,
 	type AttemptLease,
 	type AttemptStatus,
+	type EvidenceContract,
 	isHarnessCapability,
 	type ObjectiveContract,
 	type ObjectiveStatus,
@@ -30,6 +31,7 @@ import { validateRiskBudget } from "./risk-budget.ts";
 export interface ObjectiveRuntimeState {
 	objective: ObjectiveContract;
 	taskIds: readonly string[];
+	evidence: readonly EvidenceContract[];
 }
 
 export interface TaskRuntimeState {
@@ -185,6 +187,10 @@ function objectiveFromPayload(payload: JsonObject): ObjectiveContract {
 	return structuredClone(record(payload.objective, "objective")) as unknown as ObjectiveContract;
 }
 
+function evidenceFromPayload(payload: JsonObject): EvidenceContract {
+	return structuredClone(record(payload.evidence, "evidence")) as unknown as EvidenceContract;
+}
+
 function assertAcceptanceCriteria(criteria: readonly AcceptanceCriterion[]): void {
 	const criterionIds = criteria.map((criterion) => criterion.id);
 	if (
@@ -302,6 +308,32 @@ function terminalAttemptStatus(status: AttemptStatus): boolean {
 	return ["completed", "partial", "blocked", "failed", "cancelled", "expired"].includes(status);
 }
 
+function cancelOpenObjectiveWork(
+	state: TaskRuntimeProjection,
+	objectiveId: string,
+	at: string,
+	reasonCode: string,
+): void {
+	const objective = state.objectives[objectiveId];
+	const tasks = state.tasks as Record<string, TaskRuntimeState>;
+	const attempts = state.attempts as Record<string, AttemptRuntimeState>;
+	for (const taskId of objective?.taskIds ?? []) {
+		const taskState = tasks[taskId];
+		if (taskState && !["completed", "failed", "cancelled"].includes(taskState.task.status)) {
+			tasks[taskId] = {
+				...taskState,
+				task: { ...taskState.task, status: "cancelled", updatedAt: at },
+			};
+		}
+		for (const attemptId of taskState?.attemptIds ?? []) {
+			const attempt = attempts[attemptId];
+			if (attempt && !terminalAttemptStatus(attempt.status)) {
+				attempts[attemptId] = { ...attempt, status: "cancelled", reasonCode, updatedAt: at };
+			}
+		}
+	}
+}
+
 function taskStatusForResult(status: WorkerResultContract["status"]): OrchestrationTaskStatus {
 	if (status === "completed") return "completed";
 	if (status === "failed") return "failed";
@@ -349,7 +381,7 @@ export function reduceOrchestrationEvent(
 			if (objectives[objective.objectiveId]) {
 				throw new DurableTaskRuntimeError(`Objective '${objective.objectiveId}' was created more than once.`);
 			}
-			objectives[objective.objectiveId] = { objective, taskIds: [] };
+			objectives[objective.objectiveId] = { objective, taskIds: [], evidence: [] };
 			break;
 		}
 		case "objective.updated": {
@@ -364,6 +396,17 @@ export function reduceOrchestrationEvent(
 			objectives[event.aggregateId] = { ...current, objective };
 			break;
 		}
+		case "objective.evidence_recorded": {
+			const evidence = evidenceFromPayload(event.payload);
+			const current = objectives[event.aggregateId];
+			if (!current) throw new DurableTaskRuntimeError(`Unknown objective '${event.aggregateId}'.`);
+			const existing = current.evidence.find((candidate) => candidate.evidenceId === evidence.evidenceId);
+			if (existing && !isDeepStrictEqual(existing, evidence)) {
+				throw new DurableTaskRuntimeError(`Objective evidence '${evidence.evidenceId}' has conflicting content.`);
+			}
+			if (!existing) objectives[event.aggregateId] = { ...current, evidence: [...current.evidence, evidence] };
+			break;
+		}
 		case "objective.paused":
 			updateObjectiveStatus(state, event.aggregateId, "paused", event.occurredAt);
 			break;
@@ -373,25 +416,11 @@ export function reduceOrchestrationEvent(
 			break;
 		case "objective.completed":
 			updateObjectiveStatus(state, event.aggregateId, "completed", event.occurredAt);
+			cancelOpenObjectiveWork(state, event.aggregateId, event.occurredAt, "objective_completed");
 			break;
 		case "objective.cancelled": {
 			updateObjectiveStatus(state, event.aggregateId, "cancelled", event.occurredAt);
-			const objective = objectives[event.aggregateId];
-			for (const taskId of objective?.taskIds ?? []) {
-				const taskState = tasks[taskId];
-				if (taskState && !["completed", "failed", "cancelled"].includes(taskState.task.status)) {
-					tasks[taskId] = {
-						...taskState,
-						task: { ...taskState.task, status: "cancelled", updatedAt: event.occurredAt },
-					};
-				}
-				for (const attemptId of taskState?.attemptIds ?? []) {
-					const attempt = attempts[attemptId];
-					if (attempt && !terminalAttemptStatus(attempt.status)) {
-						attempts[attemptId] = { ...attempt, status: "cancelled", updatedAt: event.occurredAt };
-					}
-				}
-			}
+			cancelOpenObjectiveWork(state, event.aggregateId, event.occurredAt, "objective_cancelled");
 			break;
 		}
 		case "task.created": {
@@ -885,6 +914,37 @@ export class DurableTaskRuntime {
 		return structuredClone(objective);
 	}
 
+	recordObjectiveEvidence(objectiveId: string, evidence: EvidenceContract): EvidenceContract {
+		this.refresh();
+		const objective = this.requireObjective(objectiveId);
+		const existing = objective.evidence.find((candidate) => candidate.evidenceId === evidence.evidenceId);
+		if (existing) {
+			if (!isDeepStrictEqual(existing, evidence)) {
+				throw new DurableTaskRuntimeError(`Objective evidence '${evidence.evidenceId}' has conflicting content.`);
+			}
+			return structuredClone(existing);
+		}
+		if (!evidence.evidenceId.trim() || !evidence.summary.trim() || !evidence.createdAt.trim()) {
+			throw new DurableTaskRuntimeError("Objective evidence requires an id, summary, and creation time.");
+		}
+		if (
+			evidence.criterionId &&
+			!objective.objective.acceptanceCriteria.some((criterion) => criterion.id === evidence.criterionId)
+		) {
+			throw new DurableTaskRuntimeError(
+				`Objective evidence references unknown acceptance criterion '${evidence.criterionId}'.`,
+			);
+		}
+		this.commit({
+			type: "objective.evidence_recorded",
+			aggregateId: objectiveId,
+			actor: "kernel",
+			idempotencyKey: `objective-evidence-recorded:${objectiveId}:${evidence.evidenceId}`,
+			payload: toJsonObject({ evidence }),
+		});
+		return structuredClone(evidence);
+	}
+
 	createTask(input: CreateTaskInput): TaskContract {
 		this.refresh();
 		assertRiskBudget(input.riskBudget, "task.riskBudget");
@@ -1343,10 +1403,15 @@ export class DurableTaskRuntime {
 		const requiredCriterionIds = objective.objective.acceptanceCriteria
 			.filter((criterion) => criterion.required)
 			.map((criterion) => criterion.id);
-		const evidence = objective.taskIds.flatMap((taskId) => {
-			const task = this.state.tasks[taskId];
-			return task?.attemptIds.flatMap((attemptId) => this.state.attempts[attemptId]?.result?.evidence ?? []) ?? [];
-		});
+		const evidence = [
+			...objective.evidence,
+			...objective.taskIds.flatMap((taskId) => {
+				const task = this.state.tasks[taskId];
+				return (
+					task?.attemptIds.flatMap((attemptId) => this.state.attempts[attemptId]?.result?.evidence ?? []) ?? []
+				);
+			}),
+		];
 		const provenCriterionIds = new Set(
 			evidence.flatMap((item) => (item.trusted && item.criterionId ? [item.criterionId] : [])),
 		);
@@ -1355,6 +1420,31 @@ export class DurableTaskRuntime {
 			throw new DurableTaskRuntimeError(
 				`Objective '${objectiveId}' lacks trusted evidence for required criteria: ${unproven.join(", ")}.`,
 			);
+		}
+		this.transitionObjective(objectiveId, "objective.completed", "completed");
+	}
+
+	completeObjectiveFromOwner(objectiveId: string, acceptanceOverride: boolean): void {
+		this.refresh();
+		const objective = this.requireObjective(objectiveId);
+		if (objective.objective.status === "completed") return;
+		if (objective.objective.status === "cancelled") {
+			throw new DurableTaskRuntimeError(`Objective '${objectiveId}' is terminal.`);
+		}
+		if (!acceptanceOverride) {
+			const provenCriterionIds = new Set(
+				objective.evidence.flatMap((evidence) =>
+					evidence.trusted && evidence.criterionId ? [evidence.criterionId] : [],
+				),
+			);
+			const unproven = objective.objective.acceptanceCriteria
+				.filter((criterion) => criterion.required && !provenCriterionIds.has(criterion.id))
+				.map((criterion) => criterion.id);
+			if (unproven.length > 0) {
+				throw new DurableTaskRuntimeError(
+					`Objective '${objectiveId}' lacks trusted owner evidence for required criteria: ${unproven.join(", ")}.`,
+				);
+			}
 		}
 		this.transitionObjective(objectiveId, "objective.completed", "completed");
 	}

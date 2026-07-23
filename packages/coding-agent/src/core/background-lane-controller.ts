@@ -262,6 +262,11 @@ export class BackgroundLaneController {
 		return this._workers?.getTaskRuntimeSnapshot();
 	}
 
+	/** Reconcile only when delegation has already been materialized; UAC omission stays zero-load. */
+	synchronizeGoalState(goal: GoalState): void {
+		this._workers?.synchronizeGoalState(goal);
+	}
+
 	/**
 	 * Resolve a tracked managed-lane dispatch. The caller's stable id is also the canonical durable
 	 * lane id, so this is an existence check rather than an id translation.

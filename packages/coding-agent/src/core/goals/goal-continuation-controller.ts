@@ -1,3 +1,4 @@
+import { getUnprovenGoalRequirementIds } from "./goal-acceptance.ts";
 import type { GoalState } from "./goal-state.ts";
 
 export type GoalContinuationAction = "continue" | "ask-user" | "finalize" | "stop" | "waiting";
@@ -8,6 +9,7 @@ export type GoalContinuationReasonCode =
 	| "goal_cancelled"
 	| "stall_limit_reached"
 	| "no_open_requirements"
+	| "acceptance_evidence_required"
 	| "blocked_requirements_present"
 	| "missing_goal_state"
 	| "worker_in_flight"
@@ -150,6 +152,15 @@ export function evaluateGoalContinuation(args: {
 	}
 
 	if (openRequirementIds.length === 0) {
+		const unprovenRequirementIds = getUnprovenGoalRequirementIds(state);
+		if (unprovenRequirementIds.length > 0) {
+			return {
+				...baseDecision,
+				action: "continue",
+				reasonCode: "acceptance_evidence_required",
+				message: `Requirement(s) ${unprovenRequirementIds.join(", ")} still need trusted acceptance evidence.`,
+			};
+		}
 		return {
 			...baseDecision,
 			action: "finalize",

@@ -141,7 +141,7 @@ export type GoalEvent =
 			sessionCostUsd: number;
 			now: string;
 	  }
-	| { type: "complete_goal"; now: string }
+	| { type: "complete_goal"; acceptanceOverride?: boolean; now: string }
 	| { type: "complete_goal_manually"; now: string }
 	| { type: "block_goal"; reason: string; now: string }
 	| { type: "resume_goal"; now: string }
@@ -234,7 +234,9 @@ function isGoalEvent(value: unknown): value is GoalEvent {
 			);
 		case "progress":
 		case "no_progress":
+			return true;
 		case "complete_goal":
+			return hasOptionalBoolean(value, "acceptanceOverride");
 		case "complete_goal_manually":
 		case "resume_goal":
 		case "cancel_goal":

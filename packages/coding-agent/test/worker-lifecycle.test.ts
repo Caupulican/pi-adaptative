@@ -3,6 +3,7 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { afterEach, describe, expect, it } from "vitest";
 import { WorkerLifecycle } from "../src/core/delegation/worker-lifecycle.ts";
+import { applyGoalEvent, createGoalState } from "../src/core/goals/goal-state.ts";
 import { ORCHESTRATION_SCHEMA_VERSION, type WorkerResultContract } from "../src/core/orchestration/contracts.ts";
 import type { StartedDelegationAttempt } from "../src/core/orchestration/delegation-ledger.ts";
 import { createTestWorkerOrchestrationProfile } from "./orchestration-profile-fixture.ts";
@@ -119,6 +120,37 @@ describe("WorkerLifecycle", () => {
 		expect(lifecycle.cancel(prepared.record.laneId, "session_disposed")).toMatchObject({
 			status: "canceled",
 			reasonCode: "session_disposed",
+		});
+	});
+
+	it("synchronizes goal pause, resume, and cancellation into durable worker state", () => {
+		const agentDir = root();
+		const profile = createTestWorkerOrchestrationProfile({
+			profileId: "worker",
+			model: { provider: "test", id: "model" },
+		});
+		const lifecycle = new WorkerLifecycle({ agentDir, sessionId: "session-goal-state" });
+		let goal = createGoalState({ goalId: "g1", userGoal: "Ship", now: "T0" });
+		goal = applyGoalEvent(goal, { type: "add_requirement", id: "req-1", text: "Finish", now: "T1" });
+		const prepared = lifecycle.prepare({ instructions: "work", profile, requiredCapabilities: [], goal });
+
+		goal = applyGoalEvent(goal, { type: "block_goal", reason: "owner pause", now: "T2" });
+		expect(lifecycle.synchronizeGoalState(goal)).toEqual([]);
+		expect(lifecycle.getTaskRuntimeSnapshot().objectives["goal:g1"]?.objective.status).toBe("paused");
+
+		goal = applyGoalEvent(goal, { type: "resume_goal", now: "T3" });
+		lifecycle.synchronizeGoalState(goal);
+		expect(lifecycle.getTaskRuntimeSnapshot().objectives["goal:g1"]?.objective.status).toBe("active");
+
+		goal = applyGoalEvent(goal, { type: "cancel_goal", now: "T4" });
+		expect(lifecycle.synchronizeGoalState(goal)).toMatchObject([
+			{ laneId: prepared.record.laneId, status: "canceled", reasonCode: "objective_cancelled" },
+		]);
+
+		const reopened = new WorkerLifecycle({ agentDir, sessionId: "session-goal-state" });
+		expect(reopened.getRecord(prepared.record.laneId)).toMatchObject({
+			status: "canceled",
+			reasonCode: "objective_cancelled",
 		});
 	});
 

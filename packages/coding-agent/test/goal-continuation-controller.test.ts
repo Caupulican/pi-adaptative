@@ -83,6 +83,18 @@ describe("Phase 10A: Goal Continuation Controller", () => {
 		expect(decision.openRequirementIds).toEqual([]);
 	});
 
+	it("continues when satisfied requirements still lack trusted acceptance evidence", () => {
+		let state = createGoalState({ goalId: "g1", userGoal: "Test", now: "T0" });
+		state = applyGoalEvent(state, { type: "add_requirement", id: "req-1", text: "Req 1", now: "T1" });
+		state = applyGoalEvent(state, { type: "satisfy_requirement", id: "req-1", evidenceIds: [], now: "T2" });
+
+		const decision = evaluateGoalContinuation({ state, settings: { maxStallTurns: 3 } });
+
+		expect(decision.action).toBe("continue");
+		expect(decision.reasonCode).toBe("acceptance_evidence_required");
+		expect(decision.message).toContain("req-1");
+	});
+
 	it("active goal at stall limit asks user", () => {
 		let state = createGoalState({ goalId: "g1", userGoal: "Test", now: "T0" });
 		state = applyGoalEvent(state, { type: "add_requirement", id: "req-1", text: "Req 1", now: "T0" });
