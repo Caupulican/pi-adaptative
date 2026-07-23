@@ -11,9 +11,22 @@
 
 import { promises as fsPromises } from "node:fs";
 import { join } from "node:path";
+import { isDeepStrictEqual } from "node:util";
 import { stateFile } from "../agent-paths.ts";
+import { isAgentIdentity } from "../orchestration/agent-resume.ts";
 import { writeFileAtomic, writeFileAtomicSync } from "../util/atomic-file.ts";
-import type { ProcessMatrixEntry, ProcessRole } from "./codes.ts";
+import { isPlainRecord } from "../util/value-guards.ts";
+import type { ProcessMatrixEntry, ProcessRole, ProcessStatus } from "./codes.ts";
+
+function isProcessStatus(value: unknown): value is ProcessStatus {
+	return (
+		value === "running" ||
+		value === "winding_down" ||
+		value === "resumable" ||
+		value === "adopted" ||
+		value === "closed"
+	);
+}
 
 export function processMatrixDir(agentDir: string): string {
 	return stateFile(agentDir, "process-matrix");
@@ -28,7 +41,7 @@ export function buildEntryId(role: ProcessRole, sessionId: string): string {
 	return `${role}-${sessionId}`;
 }
 
-async function readJsonFile<T>(filePath: string): Promise<T | undefined> {
+async function readJsonFile(filePath: string): Promise<unknown> {
 	let raw: string;
 	try {
 		raw = await fsPromises.readFile(filePath, "utf-8");
@@ -36,15 +49,38 @@ async function readJsonFile<T>(filePath: string): Promise<T | undefined> {
 		return undefined;
 	}
 	try {
-		return JSON.parse(raw) as T;
+		return JSON.parse(raw) as unknown;
 	} catch {
 		// Corrupt entry files are treated as absent -- reconcile/re-registration rebuilds them.
 		return undefined;
 	}
 }
 
+function isProcessMatrixEntry(value: unknown): value is ProcessMatrixEntry {
+	if (!isPlainRecord(value) || !isAgentIdentity(value.agent) || (value.role !== "master" && value.role !== "worker"))
+		return false;
+	const sessionId = value.agent.resumeContext.sessionId;
+	if (
+		value.resumable !== undefined &&
+		(!isPlainRecord(value.resumable) ||
+			!isAgentIdentity(value.resumable.agent) ||
+			!isDeepStrictEqual(value.resumable.agent, value.agent) ||
+			!isProcessStatus(value.resumable.lastCode))
+	)
+		return false;
+	return (
+		value.entryId === buildEntryId(value.role, sessionId) &&
+		Number.isSafeInteger(value.pid) &&
+		typeof value.hostname === "string" &&
+		typeof value.startedAt === "string" &&
+		typeof value.heartbeatAt === "string" &&
+		isProcessStatus(value.status)
+	);
+}
+
 export async function readEntry(agentDir: string, entryId: string): Promise<ProcessMatrixEntry | undefined> {
-	return readJsonFile<ProcessMatrixEntry>(entryPath(agentDir, entryId));
+	const value = await readJsonFile(entryPath(agentDir, entryId));
+	return isProcessMatrixEntry(value) ? value : undefined;
 }
 
 export async function listEntries(agentDir: string): Promise<ProcessMatrixEntry[]> {
@@ -57,8 +93,8 @@ export async function listEntries(agentDir: string): Promise<ProcessMatrixEntry[
 	const entries: ProcessMatrixEntry[] = [];
 	for (const name of names.sort()) {
 		if (!name.endsWith(".json")) continue;
-		const entry = await readJsonFile<ProcessMatrixEntry>(join(processMatrixDir(agentDir), name));
-		if (entry?.entryId) entries.push(entry);
+		const entry = await readJsonFile(join(processMatrixDir(agentDir), name));
+		if (isProcessMatrixEntry(entry)) entries.push(entry);
 	}
 	return entries;
 }

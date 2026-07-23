@@ -15,7 +15,8 @@ process breaks.
 
 Every `pi` process registers exactly one entry in the matrix, keyed by `<role>-<sessionId>`, under
 `state/process-matrix/` (see `agent-paths.ts` -- durable, survives `/reload` and crashes, not the
-transient `work/` tree).
+transient `work/` tree). The session ID is derived from the entry's single `AgentIdentityContract`;
+process entries and resumable payloads do not carry parallel agent/session/lane context fields.
 
 - **Master** (no declared parent): writes its own entry once at startup, heartbeats it on an
   interval, and -- once, at startup -- scans the matrix for **orphaned workers**: worker entries
@@ -32,10 +33,10 @@ silently repurposes anything. Instead, for each orphan, **interactively**:
 
 If the worker's own process is dead and its resumable payload contains a Pi session context, the
 first prompt offers to resume that same logical agent. Acceptance launches the exact persisted
-session with its agent ID, cwd, worktree, orchestration profile, resource pointers, and bounded wake
-task. The direct-argv launch reopens the same Pi session, carries the stable logical-agent ID in
-`PI_ORCHESTRATION_AGENT_ID`, and names the latest checkpoint plus bounded context pointers in the wake
-prompt instead of copying a second transcript. The resumed process overwrites the same
+session file with its agent ID, cwd, worktree, orchestration profile, resource pointers, and bounded
+wake task. The direct-argv launch prefers the exact persisted `sessionFile` over an ID lookup,
+carries the stable logical-agent ID in `PI_ORCHESTRATION_AGENT_ID`, and names the latest checkpoint
+plus bounded context pointers in the wake prompt instead of copying a second transcript. The resumed process overwrites the same
 `<role>-<sessionId>` matrix entry and reports its terminal process state through an event-driven
 parent notification. A still-live orphan follows the adopt/cleanup flow below.
 
@@ -55,8 +56,8 @@ touches another session's entry, and only with explicit owner confirmation each 
 A worker polls its parent's pid on `watcherPollMs`. The moment that pid is no longer alive, it:
 
 1. Marks its own entry `winding_down` (reason `parent_lost`), then `resumable` with a payload
-   containing its stable logical-agent ID, exact Pi session/cwd/profile context, bounded task
-   summary, and worktree-sync lane key (if bound).
+   containing one clone of its logical-agent identity (exact Pi session/cwd/profile/lane context)
+   and a bounded task summary.
 2. Emits one steer notice into its own session.
 3. Starts a bounded grace window (`adoptionGraceMs`), polling its own entry every
    `watcherPollMs` for a directive a new master may have written (see above):
@@ -77,10 +78,12 @@ Cross-process, like `PI_WORKTREE_LANE`/`--worktree-lane`:
 |---|---|---|
 | `PI_PARENT_PID` | `--parent-pid <pid>` | Declares this process as a worker of `<pid>`. A malformed or non-positive value is ignored (never a crash on bad env) -- the process falls back to acting as a master. |
 | `PI_PARENT_SESSION` | `--parent-session <id>` | The parent's sessionId, recorded alongside the pid for diagnostics/adoption. |
+| `PI_ORCHESTRATION_AGENT_ID` | launch-only | Pins the logical agent identity across the initial process and exact-session resumes. |
 
-`tmux_agent_manager`'s `fire_task` sets both automatically on every `pi`-provider child it
-launches (its own pid/sessionId), the same way it threads `--worktree-lane` for a lane-first
-dispatch -- see `dispatch-grant.ts`'s `LaunchProfileSource.parentPid`/`parentSession`.
+`tmux_agent_manager`'s `fire_task` sets all three automatically on every `pi`-provider child it
+launches (its own pid/sessionId and the managed lane ID as logical agent ID), the same way it
+threads `--worktree-lane` for a lane-first dispatch -- see `dispatch-grant.ts`'s
+`LaunchProfileSource.parentPid`/`parentSession`.
 
 ## Settings
 

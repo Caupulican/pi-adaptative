@@ -6,6 +6,7 @@
 
 ### Fixed
 
+- Unified process supervision and durable orchestration on one logical-agent identity, pinned initial tmux workers and exact-session resumes to the same managed lane, and made resume prefer the persisted session file while rejecting divergent lane context.
 - Separated untrusted worker claims from host-fenced durable worker results, removed parallel result adapters, and made session, goal, status, telemetry, and review projections use the claim contract without implying worker self-report is accepted task truth.
 - Unified capability envelopes, profile grants, lane construction, runtime gates, research policy, and worker execution on one canonical capability vocabulary; equivalent grants such as `worktree.read` and `tests.execute` now survive through execution instead of failing a second translated gate.
 - Consolidated foreground envelopes, runtime gates, orchestration profile validation, and lane manifests behind one tool-capability policy catalog; active network, skill, source, verifier, and status tools no longer disappear from capability visibility while separate authorization tables drift.

@@ -605,7 +605,7 @@ describe("DurableTaskRuntime", () => {
 				"--session-dir",
 				"/agent/sessions",
 				"--session",
-				"pi-session-123",
+				"/agent/sessions/pi-session-123.jsonl",
 				"--parent-pid",
 				"1234",
 				"--parent-session",
@@ -621,12 +621,16 @@ describe("DurableTaskRuntime", () => {
 		expect(
 			buildResumablePiAgentWakePrompt({
 				lastCode: "resumable",
-				agentId: agent.agentId,
-				taskSummary: "Inspect repository",
-				resumeContext: {
-					...resuming.resumeContext,
-					contextPointers: [{ id: "artifact-1", kind: "artifact", uri: "artifact://inspection", readOnly: true }],
+				agent: {
+					agentId: agent.agentId,
+					resumeContext: {
+						...resuming.resumeContext,
+						contextPointers: [
+							{ id: "artifact-1", kind: "artifact", uri: "artifact://inspection", readOnly: true },
+						],
+					},
 				},
+				taskSummary: "Inspect repository",
 			}),
 		).toContain(`Latest checkpoint: ${checkpoint.checkpointId}`);
 

@@ -39,6 +39,7 @@ import {
 	type ScopedModel,
 } from "./core/model-resolver.ts";
 import { collectModelRouterConfigDiagnostics } from "./core/model-router/config-diagnostics.ts";
+import { createAgentIdentity } from "./core/orchestration/agent-resume.ts";
 import type { OrchestrationProfile } from "./core/orchestration/contracts.ts";
 import { resolveConfiguredOrchestrationModel } from "./core/orchestration/model-binding.ts";
 import { OrchestrationProfileStore } from "./core/orchestration/profile-store.ts";
@@ -46,6 +47,7 @@ import { restoreStdout, takeOverStdout } from "./core/output-guard.ts";
 import type { ResumablePayload } from "./core/process-matrix/codes.ts";
 import { launchResumablePiAgent } from "./core/process-matrix/resume-launcher.ts";
 import {
+	getOrchestrationAgentId,
 	PI_PARENT_PID_ENV,
 	PI_PARENT_SESSION_ENV,
 	type ResumeWorkerLaunchOutcome,
@@ -1088,7 +1090,7 @@ export async function main(args: string[], options?: MainOptions) {
 		const activeOrchestrationProfileId =
 			parsed.orchestrationProfile?.trim() || settingsManager.getActiveOrchestrationProfile();
 		const sessionFile = sessionManager.getSessionFile();
-		const resumeContext = {
+		const agent = createAgentIdentity(getOrchestrationAgentId() ?? sessionManager.getSessionId(), {
 			provider: "pi" as const,
 			sessionId: sessionManager.getSessionId(),
 			sessionDir: sessionManager.getSessionDir(),
@@ -1099,12 +1101,10 @@ export async function main(args: string[], options?: MainOptions) {
 			resourceProfileNames: settingsManager.getActiveResourceProfileNames(),
 			...(session.model ? { modelRef: `${session.model.provider}/${session.model.id}` } : {}),
 			contextPointers: [],
-		};
+		});
 		void startProcessMatrixRuntime({
 			agentDir,
-			sessionId: sessionManager.getSessionId(),
-			agentId: process.env.PI_ORCHESTRATION_AGENT_ID?.trim() || sessionManager.getSessionId(),
-			resumeContext,
+			agent,
 			taskSummary: session.getGoalStateSnapshot()?.userGoal,
 			resumeWorker: (payload) => launchResumableWorker(payload, sessionManager.getSessionId()),
 			hasUI: appMode === "interactive",

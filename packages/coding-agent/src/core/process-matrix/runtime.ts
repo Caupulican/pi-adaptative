@@ -27,7 +27,8 @@
  */
 
 import { hostname as osHostname } from "node:os";
-import type { AgentResumeContext } from "../orchestration/contracts.ts";
+import { isAgentIdentity } from "../orchestration/agent-resume.ts";
+import type { AgentIdentityContract } from "../orchestration/contracts.ts";
 import { getParentPid, getParentSessionId } from "../process-identity.ts";
 import type { ResolvedProcessMatrixSettings } from "../settings-manager.ts";
 import { getBoundWorktreeLaneKey } from "../worktree-sync/runtime.ts";
@@ -45,11 +46,19 @@ import {
 	pollWorkerDirective,
 } from "./supervisor.ts";
 
-export { getParentPid, getParentSessionId, PI_PARENT_PID_ENV, PI_PARENT_SESSION_ENV } from "../process-identity.ts";
+export {
+	getOrchestrationAgentId,
+	getParentPid,
+	getParentSessionId,
+	PI_ORCHESTRATION_AGENT_ID_ENV,
+	PI_PARENT_PID_ENV,
+	PI_PARENT_SESSION_ENV,
+} from "../process-identity.ts";
 
 export interface ProcessMatrixRuntimeConfig {
 	agentDir: string;
-	sessionId: string;
+	/** Canonical logical identity for this process and any exact-session resume. */
+	agent: AgentIdentityContract;
 	/** Whether an interactive UI is available to ask the owner (see `promptConfirm`). */
 	hasUI: boolean;
 	settings: ResolvedProcessMatrixSettings;
@@ -64,9 +73,6 @@ export interface ProcessMatrixRuntimeConfig {
 	/** Cooperative self-exit -- called by a worker once wound down (grace expiry or a
 	 * master-granted cleanup directive). Never called for the master's own lifecycle. */
 	requestExit: () => void;
-	/** Durable logical-agent identity and exact Pi session context for crash/restart continuation. */
-	agentId?: string;
-	resumeContext?: AgentResumeContext;
 	taskSummary?: string;
 	/** Starts a replacement OS process for a dead resumable worker. Completion is an event-driven
 	 * terminal signal; worker product remains in its persisted session/artifacts. */
@@ -107,6 +113,7 @@ export async function startProcessMatrixRuntime(
 	const parentPid = getParentPid();
 
 	try {
+		if (!isAgentIdentity(config.agent)) throw new TypeError("Process-matrix agent identity is invalid.");
 		if (parentPid !== undefined) {
 			return await startWorkerBranch(config, parentPid, now);
 		}
@@ -126,7 +133,7 @@ async function startMasterBranch(
 	now: () => number,
 ): Promise<ProcessMatrixRuntimeHandle> {
 	let entry = buildMasterEntry({
-		sessionId: config.sessionId,
+		agent: config.agent,
 		pid: process.pid,
 		hostname: osHostname(),
 		now: nowIso(now),
@@ -149,20 +156,24 @@ async function startMasterBranch(
 
 	// Best-effort close on process exit. A SIGKILLed master leaving "running" is fine -- reconcile's
 	// own dead-pid detection covers it; this only makes the common clean-exit case tidy.
-	process.on("exit", () => {
+	const closeOnExit = (): void => {
 		try {
 			writeEntrySync(config.agentDir, markClosed(entry, nowIso(now)));
 		} catch {
 			// Best-effort only -- see module doc.
 		}
-	});
+	};
+	process.once("exit", closeOnExit);
 
 	void runOrphanScan(config, now);
 
 	return {
 		stop() {
+			if (stopped) return;
 			stopped = true;
 			clearInterval(heartbeatTimer);
+			closeOnExit();
+			process.off("exit", closeOnExit);
 		},
 	};
 }
@@ -177,7 +188,7 @@ async function runOrphanScan(config: ProcessMatrixRuntimeConfig, now: () => numb
 	}
 	const orphans = detectOrphanedWorkers(entries, {
 		isPidAlive: config.isProcessAlive,
-		ownSessionId: config.sessionId,
+		ownSessionId: config.agent.resumeContext.sessionId,
 	});
 	if (orphans.length === 0) return;
 
@@ -193,17 +204,18 @@ async function runOrphanScan(config: ProcessMatrixRuntimeConfig, now: () => numb
 	for (const orphan of orphans) {
 		if (!config.isProcessAlive(orphan.pid)) {
 			const payload = orphan.resumable;
-			if (!payload?.resumeContext || !config.resumeWorker) {
+			if (!payload || !config.resumeWorker) {
 				config.onDiagnostic?.(
 					`process-matrix: dead worker ${orphan.entryId} is not automatically resumable because its launch context or resume launcher is unavailable`,
 				);
 				continue;
 			}
-			const resume = await config.promptConfirm(
-				`resume agent ${payload.agentId ?? orphan.agentId ?? orphan.sessionId} from its persisted session?`,
-			);
+			const resume = await config.promptConfirm(`resume agent ${payload.agent.agentId} from its persisted session?`);
 			if (!resume) continue;
-			const claimed = applyAdoption(orphan, { parentPid: process.pid, parentSessionId: config.sessionId });
+			const claimed = applyAdoption(orphan, {
+				parentPid: process.pid,
+				parentSessionId: config.agent.resumeContext.sessionId,
+			});
 			try {
 				await writeEntry(config.agentDir, claimed);
 				const launched = await config.resumeWorker(payload);
@@ -215,12 +227,12 @@ async function runOrphanScan(config: ProcessMatrixRuntimeConfig, now: () => numb
 				void launched.completion.then(
 					({ code, signal }) => {
 						config.notify(
-							`process-matrix: resumed agent ${payload.agentId ?? orphan.sessionId} reached a terminal process state (code ${code ?? "none"}, signal ${signal ?? "none"}). Inspect its persisted result before continuing.`,
+							`process-matrix: resumed agent ${payload.agent.agentId} reached a terminal process state (code ${code ?? "none"}, signal ${signal ?? "none"}). Inspect its persisted result before continuing.`,
 						);
 					},
 					(error: unknown) => {
 						config.onDiagnostic?.(
-							`process-matrix: resumed agent ${payload.agentId ?? orphan.sessionId} terminal signal failed: ${describeError(error)}`,
+							`process-matrix: resumed agent ${payload.agent.agentId} terminal signal failed: ${describeError(error)}`,
 						);
 					},
 				);
@@ -234,9 +246,14 @@ async function runOrphanScan(config: ProcessMatrixRuntimeConfig, now: () => numb
 			}
 			continue;
 		}
-		const adopt = await config.promptConfirm(`adopt worker ${orphan.entryId} (lane ${orphan.laneKey ?? "none"})?`);
+		const adopt = await config.promptConfirm(
+			`adopt worker ${orphan.entryId} (lane ${orphan.agent.resumeContext.worktreeLaneKey ?? "none"})?`,
+		);
 		if (adopt) {
-			const adopted = applyAdoption(orphan, { parentPid: process.pid, parentSessionId: config.sessionId });
+			const adopted = applyAdoption(orphan, {
+				parentPid: process.pid,
+				parentSessionId: config.agent.resumeContext.sessionId,
+			});
 			try {
 				await writeEntry(config.agentDir, adopted);
 			} catch (error) {
@@ -270,17 +287,20 @@ async function startWorkerBranch(
 ): Promise<ProcessMatrixRuntimeHandle> {
 	const parentSessionId = getParentSessionId();
 	const laneKey = getBoundWorktreeLaneKey();
+	const contextLaneKey = config.agent.resumeContext.worktreeLaneKey;
+	if (laneKey !== contextLaneKey) {
+		throw new TypeError(
+			`Process-matrix agent lane '${contextLaneKey ?? "none"}' does not match active lane '${laneKey ?? "none"}'.`,
+		);
+	}
 
 	let entry = buildWorkerEntry({
-		sessionId: config.sessionId,
+		agent: config.agent,
 		pid: process.pid,
 		hostname: osHostname(),
 		now: nowIso(now),
 		parentPid: initialParentPid,
 		...(parentSessionId !== undefined ? { parentSessionId } : {}),
-		...(laneKey !== undefined ? { laneKey } : {}),
-		...(config.agentId !== undefined ? { agentId: config.agentId } : {}),
-		...(config.resumeContext !== undefined ? { resumeContext: config.resumeContext } : {}),
 	});
 	try {
 		await writeEntry(config.agentDir, entry);
@@ -305,6 +325,7 @@ async function startWorkerBranch(
 	process.once("exit", closeOnExit);
 
 	const stop = (): void => {
+		if (stopped) return;
 		stopped = true;
 		if (timer) clearInterval(timer);
 		timer = undefined;
@@ -338,7 +359,8 @@ async function startWorkerBranch(
 		// PID to a durable identity and proves that that exact session is still heartbeating.
 		if (!currentParentSessionId || !config.isProcessAlive(currentParentPid)) return false;
 		const parent = await readEntry(config.agentDir, buildEntryId("master", currentParentSessionId));
-		if (!parent || parent.role !== "master" || parent.sessionId !== currentParentSessionId) return false;
+		if (!parent || parent.role !== "master" || parent.agent.resumeContext.sessionId !== currentParentSessionId)
+			return false;
 		if (parent.pid !== currentParentPid || parent.status !== "running") return false;
 		const heartbeatAt = Date.parse(parent.heartbeatAt);
 		const maxAge = config.settings.heartbeatMs * 2 + config.settings.watcherPollMs;
@@ -372,11 +394,8 @@ async function startWorkerBranch(
 		}
 		const windDownAt = nowIso(now);
 		preserveResumableOnExit = true;
-		const resumable: ResumablePayload = { lastCode: "resumable" };
-		if (config.agentId !== undefined) resumable.agentId = config.agentId;
-		if (laneKey !== undefined) resumable.laneKey = laneKey;
+		const resumable: ResumablePayload = { lastCode: "resumable", agent: structuredClone(config.agent) };
 		if (config.taskSummary !== undefined) resumable.taskSummary = config.taskSummary;
-		if (config.resumeContext !== undefined) resumable.resumeContext = structuredClone(config.resumeContext);
 		await persist(
 			markResumable(beginWindDown(entry, "parent_lost", windDownAt), resumable, windDownAt),
 			"failed to write worker wind-down",

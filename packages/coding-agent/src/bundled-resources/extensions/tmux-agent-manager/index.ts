@@ -4,7 +4,12 @@ import * as fs from "node:fs";
 import { homedir } from "node:os";
 import * as path from "node:path";
 import { fileURLToPath } from "node:url";
-import { type ExtensionAPI, type ExtensionContext, getProcessWorkRun } from "@caupulican/pi-adaptative";
+import {
+	type ExtensionAPI,
+	type ExtensionContext,
+	getProcessWorkRun,
+	PI_ORCHESTRATION_AGENT_ID_ENV,
+} from "@caupulican/pi-adaptative";
 import type { AgentToolResult } from "@caupulican/pi-agent-core";
 import type { Usage } from "@caupulican/pi-ai";
 import { Type } from "typebox";
@@ -1296,7 +1301,11 @@ function applyLaunchProfile(job: FireTaskPlan, source: LaunchProfileSource): voi
 		const flags = buildLaunchProfileFlags(
 			agent.worktreeLane ? { ...source, worktreeLane: agent.worktreeLane } : source,
 		);
-		agent.command = appendLaunchProfileFlags(agent.command || defaultProviderInvocation(agent.provider), flags);
+		const profiledCommand = appendLaunchProfileFlags(
+			agent.command || defaultProviderInvocation(agent.provider),
+			flags,
+		);
+		agent.command = `env ${PI_ORCHESTRATION_AGENT_ID_ENV}=${quoteShell(agentLaneId(job.id, agent.id))} ${profiledCommand}`;
 	}
 }
 /** Read an OPTIONAL, cooperative worker-reported usage claim for the turn that just went terminal (a

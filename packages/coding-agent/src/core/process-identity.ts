@@ -2,6 +2,7 @@
 
 export const PI_PARENT_PID_ENV = "PI_PARENT_PID";
 export const PI_PARENT_SESSION_ENV = "PI_PARENT_SESSION";
+export const PI_ORCHESTRATION_AGENT_ID_ENV = "PI_ORCHESTRATION_AGENT_ID";
 
 /** A malformed or non-positive parent pid is ignored. */
 export function getParentPid(env: NodeJS.ProcessEnv = process.env): number | undefined {
@@ -13,5 +14,10 @@ export function getParentPid(env: NodeJS.ProcessEnv = process.env): number | und
 
 export function getParentSessionId(env: NodeJS.ProcessEnv = process.env): string | undefined {
 	const value = env[PI_PARENT_SESSION_ENV]?.trim();
+	return value && value.length > 0 ? value : undefined;
+}
+
+export function getOrchestrationAgentId(env: NodeJS.ProcessEnv = process.env): string | undefined {
+	const value = env[PI_ORCHESTRATION_AGENT_ID_ENV]?.trim();
 	return value && value.length > 0 ? value : undefined;
 }

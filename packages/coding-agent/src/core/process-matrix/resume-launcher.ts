@@ -1,5 +1,5 @@
 import { spawn } from "node:child_process";
-import { buildPiResumeLaunchSpecFromContext } from "../orchestration/agent-resume.ts";
+import { buildPiResumeLaunchSpec } from "../orchestration/agent-resume.ts";
 import type { ResumablePayload } from "./codes.ts";
 
 export interface PiSelfLaunchTarget {
@@ -15,9 +15,9 @@ export type ResumablePiAgentLaunchOutcome =
 	| { started: false; reason: string };
 
 export function buildResumablePiAgentWakePrompt(payload: ResumablePayload): string {
-	const context = payload.resumeContext;
+	const context = payload.agent.resumeContext;
 	const taskSummary = payload.taskSummary?.trim().slice(0, 2_000);
-	const contextPointers = (context?.contextPointers ?? [])
+	const contextPointers = context.contextPointers
 		.slice(0, 20)
 		.map(
 			(pointer) =>
@@ -26,7 +26,7 @@ export function buildResumablePiAgentWakePrompt(payload: ResumablePayload): stri
 	return [
 		"Resume this interrupted delegated task using the persisted session context and the same logical agent identity.",
 		...(taskSummary ? [`Task: ${taskSummary}`] : []),
-		...(context?.latestCheckpointId ? [`Latest checkpoint: ${context.latestCheckpointId}`] : []),
+		...(context.latestCheckpointId ? [`Latest checkpoint: ${context.latestCheckpointId}`] : []),
 		...(contextPointers.length > 0 ? ["Persisted context pointers:", ...contextPointers] : []),
 		"Continue from the persisted transcript and referenced checkpoints or artifacts, then finish with a persisted terminal result.",
 	].join("\n");
@@ -40,21 +40,17 @@ export async function launchResumablePiAgent(options: {
 	parentSessionId: string;
 	environment: NodeJS.ProcessEnv;
 }): Promise<ResumablePiAgentLaunchOutcome> {
-	const context = options.payload.resumeContext;
+	const context = options.payload.agent.resumeContext;
 	if (!context || context.provider !== "pi") {
 		return { started: false, reason: "Pi resume context is unavailable." };
 	}
-	const spec = buildPiResumeLaunchSpecFromContext(
-		context,
-		{
-			executable: options.target.executable,
-			argsPrefix: options.target.argsPrefix,
-			parentPid: options.parentPid,
-			parentSessionId: options.parentSessionId,
-			wakePrompt: buildResumablePiAgentWakePrompt(options.payload),
-		},
-		options.payload.agentId,
-	);
+	const spec = buildPiResumeLaunchSpec(options.payload.agent, {
+		executable: options.target.executable,
+		argsPrefix: options.target.argsPrefix,
+		parentPid: options.parentPid,
+		parentSessionId: options.parentSessionId,
+		wakePrompt: buildResumablePiAgentWakePrompt(options.payload),
+	});
 	if ([spec.executable, spec.cwd, ...spec.args].some((value) => value.includes("\0"))) {
 		return { started: false, reason: "Resume launch data contains a null byte." };
 	}

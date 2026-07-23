@@ -20,6 +20,7 @@ import tmuxAgentManagerExtension, {
 	getTmuxAgentManagerDataRoot,
 } from "../src/bundled-resources/extensions/tmux-agent-manager/index.ts";
 import { ENV_AGENT_DIR } from "../src/config.ts";
+import { PI_ORCHESTRATION_AGENT_ID_ENV } from "../src/core/process-identity.ts";
 
 // ---------------------------------------------------------------------------
 // Pure dispatch-grant.ts unit tests — no session/tmux access, direct function calls.
@@ -581,6 +582,7 @@ describe.skipIf(process.platform === "win32")("tmux dispatch grant — approval-
 		// grant envelope (fire_task always spreads its own pid/sessionId onto the launch profile).
 		expect(command).toContain(`--parent-pid '${process.pid}'`);
 		expect(command).toContain(`--parent-session '${context.sessionManager.getSessionFile()}'`);
+		expect(command).toContain(`${PI_ORCHESTRATION_AGENT_ID_ENV}='tmux:grant-job-1:pi-1'`);
 		expect(command).not.toContain("--no-approve");
 		expect(laneEvents).toContainEqual(expect.objectContaining({ phase: "dispatch", status: "launched" }));
 

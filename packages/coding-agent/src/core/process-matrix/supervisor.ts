@@ -6,7 +6,7 @@
  * real processes. `runtime.ts` is the only caller that supplies real deps and real I/O.
  */
 
-import type { AgentResumeContext } from "../orchestration/contracts.ts";
+import type { AgentIdentityContract } from "../orchestration/contracts.ts";
 import type {
 	ProcessMatrixEntry,
 	ReconcileMatrixResult,
@@ -17,7 +17,7 @@ import type {
 import { buildEntryId } from "./store.ts";
 
 export interface BuildMasterEntryFacts {
-	sessionId: string;
+	agent: AgentIdentityContract;
 	pid: number;
 	hostname: string;
 	now: string;
@@ -25,10 +25,10 @@ export interface BuildMasterEntryFacts {
 
 export function buildMasterEntry(facts: BuildMasterEntryFacts): ProcessMatrixEntry {
 	return {
-		entryId: buildEntryId("master", facts.sessionId),
+		entryId: buildEntryId("master", facts.agent.resumeContext.sessionId),
 		role: "master",
+		agent: structuredClone(facts.agent),
 		pid: facts.pid,
-		sessionId: facts.sessionId,
 		hostname: facts.hostname,
 		startedAt: facts.now,
 		heartbeatAt: facts.now,
@@ -37,26 +37,23 @@ export function buildMasterEntry(facts: BuildMasterEntryFacts): ProcessMatrixEnt
 }
 
 export interface BuildWorkerEntryFacts {
-	sessionId: string;
+	agent: AgentIdentityContract;
 	pid: number;
 	hostname: string;
 	now: string;
 	parentPid: number;
 	parentSessionId?: string;
-	laneKey?: string;
 	tmuxSession?: string;
 	tmuxPanePid?: number;
 	taskRef?: string;
-	agentId?: string;
-	resumeContext?: AgentResumeContext;
 }
 
 export function buildWorkerEntry(facts: BuildWorkerEntryFacts): ProcessMatrixEntry {
 	const entry: ProcessMatrixEntry = {
-		entryId: buildEntryId("worker", facts.sessionId),
+		entryId: buildEntryId("worker", facts.agent.resumeContext.sessionId),
 		role: "worker",
+		agent: structuredClone(facts.agent),
 		pid: facts.pid,
-		sessionId: facts.sessionId,
 		hostname: facts.hostname,
 		startedAt: facts.now,
 		heartbeatAt: facts.now,
@@ -64,12 +61,9 @@ export function buildWorkerEntry(facts: BuildWorkerEntryFacts): ProcessMatrixEnt
 		parentPid: facts.parentPid,
 	};
 	if (facts.parentSessionId !== undefined) entry.parentSessionId = facts.parentSessionId;
-	if (facts.laneKey !== undefined) entry.laneKey = facts.laneKey;
 	if (facts.tmuxSession !== undefined) entry.tmuxSession = facts.tmuxSession;
 	if (facts.tmuxPanePid !== undefined) entry.tmuxPanePid = facts.tmuxPanePid;
 	if (facts.taskRef !== undefined) entry.taskRef = facts.taskRef;
-	if (facts.agentId !== undefined) entry.agentId = facts.agentId;
-	if (facts.resumeContext !== undefined) entry.resumeContext = structuredClone(facts.resumeContext);
 	return entry;
 }
 
@@ -94,7 +88,7 @@ export function detectOrphanedWorkers(
 	return entries.filter((entry) => {
 		if (entry.role !== "worker") return false;
 		if (entry.status === "closed") return false;
-		if (deps.ownSessionId !== undefined && entry.sessionId === deps.ownSessionId) return false;
+		if (deps.ownSessionId !== undefined && entry.agent.resumeContext.sessionId === deps.ownSessionId) return false;
 		if (entry.parentPid === undefined) return false;
 		return !deps.isPidAlive(entry.parentPid);
 	});

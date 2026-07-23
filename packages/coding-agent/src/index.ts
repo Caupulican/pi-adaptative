@@ -241,6 +241,7 @@ export type {
 	ResolvedResource,
 } from "./core/package-manager.ts";
 export { DefaultPackageManager } from "./core/package-manager.ts";
+export { PI_ORCHESTRATION_AGENT_ID_ENV } from "./core/process-identity.ts";
 export {
 	ACTIVE_TURN_TTL_MS,
 	AUTO_RELOAD_COORDINATOR_TTL_MS,

@@ -82,13 +82,17 @@ export interface AgentResumeContext {
 	latestCheckpointId?: string;
 }
 
-/** Durable logical identity. A replacement OS process resumes this same binding after interruption. */
-export interface AgentBindingContract {
-	schemaVersion: typeof ORCHESTRATION_SCHEMA_VERSION;
+/** Provider-neutral logical identity shared by durable orchestration and process supervision. */
+export interface AgentIdentityContract {
 	agentId: string;
+	resumeContext: AgentResumeContext;
+}
+
+/** Durable logical identity. A replacement OS process resumes this same binding after interruption. */
+export interface AgentBindingContract extends AgentIdentityContract {
+	schemaVersion: typeof ORCHESTRATION_SCHEMA_VERSION;
 	role: WorkerRole;
 	status: AgentBindingStatus;
-	resumeContext: AgentResumeContext;
 	activeAttemptId?: string;
 	createdAt: string;
 	updatedAt: string;
@@ -141,15 +145,21 @@ export interface TaskContract {
 	updatedAt: string;
 }
 
-export type ResourcePointerKind =
-	| "repository"
-	| "worktree"
-	| "artifact"
-	| "evidence"
-	| "memory-query"
-	| "skill"
-	| "prompt"
-	| "service";
+export const RESOURCE_POINTER_KINDS = [
+	"repository",
+	"worktree",
+	"artifact",
+	"evidence",
+	"memory-query",
+	"skill",
+	"prompt",
+	"service",
+] as const;
+export type ResourcePointerKind = (typeof RESOURCE_POINTER_KINDS)[number];
+
+export function isResourcePointerKind(value: unknown): value is ResourcePointerKind {
+	return RESOURCE_POINTER_KINDS.some((kind) => kind === value);
+}
 
 export interface ResourcePointer {
 	id: string;

@@ -33,8 +33,17 @@ function masterEntry(overrides: Partial<ProcessMatrixEntry> = {}): ProcessMatrix
 	return {
 		entryId: buildEntryId("master", "session-1"),
 		role: "master",
+		agent: {
+			agentId: "agent-session-1",
+			resumeContext: {
+				provider: "pi",
+				sessionId: "session-1",
+				cwd: "/repo",
+				resourceProfileNames: [],
+				contextPointers: [],
+			},
+		},
 		pid: 1000,
-		sessionId: "session-1",
 		hostname: "host-a",
 		startedAt: "2026-07-19T00:00:00.000Z",
 		heartbeatAt: "2026-07-19T00:00:00.000Z",
@@ -101,6 +110,39 @@ describe("process-matrix store", () => {
 
 		const listed = await listEntries(agentDir);
 		expect(listed).toEqual([good]);
+	});
+
+	it("rejects entries that duplicate identity across the retired parallel-field schema", async () => {
+		const agentDir = tempAgentDir();
+		await writeEntry(agentDir, masterEntry());
+		const retiredEntry = {
+			...masterEntry(),
+			agent: undefined,
+			sessionId: "session-1",
+			agentId: "agent-session-1",
+			resumeContext: masterEntry().agent.resumeContext,
+		};
+		writeFileSync(entryPath(agentDir, retiredEntry.entryId), JSON.stringify(retiredEntry), "utf-8");
+
+		expect(await readEntry(agentDir, retiredEntry.entryId)).toBeUndefined();
+		expect(await listEntries(agentDir)).toEqual([]);
+	});
+
+	it("rejects a resumable payload whose logical identity diverges from its entry", async () => {
+		const agentDir = tempAgentDir();
+		const entry = masterEntry({
+			status: "resumable",
+			resumable: {
+				lastCode: "resumable",
+				agent: {
+					...masterEntry().agent,
+					agentId: "different-agent",
+				},
+			},
+		});
+		await writeEntry(agentDir, entry);
+
+		expect(await readEntry(agentDir, entry.entryId)).toBeUndefined();
 	});
 
 	it("removeEntry deletes the file and is a no-op when already absent", async () => {

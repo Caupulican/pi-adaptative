@@ -1,4 +1,5 @@
 import { describe, expect, it } from "vitest";
+import type { AgentIdentityContract } from "../src/core/orchestration/contracts.ts";
 import type { ProcessMatrixEntry } from "../src/core/process-matrix/codes.ts";
 import {
 	applyAdoption,
@@ -15,12 +16,26 @@ import {
 
 const NOW = "2026-07-19T00:00:00.000Z";
 
+function agent(sessionId: string, worktreeLaneKey?: string): AgentIdentityContract {
+	return {
+		agentId: `agent-${sessionId}`,
+		resumeContext: {
+			provider: "pi",
+			sessionId,
+			cwd: "/repo",
+			...(worktreeLaneKey ? { worktreeLaneKey } : {}),
+			resourceProfileNames: [],
+			contextPointers: [],
+		},
+	};
+}
+
 function worker(overrides: Partial<ProcessMatrixEntry> = {}): ProcessMatrixEntry {
 	return {
 		entryId: "worker-w1",
 		role: "worker",
+		agent: agent("w1"),
 		pid: 200,
-		sessionId: "w1",
 		hostname: "host-a",
 		startedAt: NOW,
 		heartbeatAt: NOW,
@@ -41,12 +56,12 @@ function neverAlive(): boolean {
 describe("process-matrix supervisor (pure)", () => {
 	describe("buildMasterEntry / buildWorkerEntry", () => {
 		it("buildMasterEntry produces a running entry keyed master-<sessionId>", () => {
-			const entry = buildMasterEntry({ sessionId: "m1", pid: 100, hostname: "host-a", now: NOW });
+			const entry = buildMasterEntry({ agent: agent("m1"), pid: 100, hostname: "host-a", now: NOW });
 			expect(entry).toEqual({
 				entryId: "master-m1",
 				role: "master",
+				agent: agent("m1"),
 				pid: 100,
-				sessionId: "m1",
 				hostname: "host-a",
 				startedAt: NOW,
 				heartbeatAt: NOW,
@@ -56,7 +71,7 @@ describe("process-matrix supervisor (pure)", () => {
 
 		it("buildWorkerEntry produces a running entry keyed worker-<sessionId>, omitting unset optionals", () => {
 			const entry = buildWorkerEntry({
-				sessionId: "w1",
+				agent: agent("w1"),
 				pid: 200,
 				hostname: "host-a",
 				now: NOW,
@@ -65,33 +80,32 @@ describe("process-matrix supervisor (pure)", () => {
 			expect(entry).toEqual({
 				entryId: "worker-w1",
 				role: "worker",
+				agent: agent("w1"),
 				pid: 200,
-				sessionId: "w1",
 				hostname: "host-a",
 				startedAt: NOW,
 				heartbeatAt: NOW,
 				status: "running",
 				parentPid: 100,
 			});
-			expect(entry).not.toHaveProperty("laneKey");
+			expect(entry.agent.resumeContext.worktreeLaneKey).toBeUndefined();
 			expect(entry).not.toHaveProperty("parentSessionId");
 		});
 
 		it("buildWorkerEntry carries through optional identity fields when provided", () => {
 			const entry = buildWorkerEntry({
-				sessionId: "w1",
+				agent: agent("w1", "adhoc-1"),
 				pid: 200,
 				hostname: "host-a",
 				now: NOW,
 				parentPid: 100,
 				parentSessionId: "m1",
-				laneKey: "adhoc-1",
 				tmuxSession: "pi-job-1",
 				tmuxPanePid: 300,
 				taskRef: "goal-1",
 			});
 			expect(entry.parentSessionId).toBe("m1");
-			expect(entry.laneKey).toBe("adhoc-1");
+			expect(entry.agent.resumeContext.worktreeLaneKey).toBe("adhoc-1");
 			expect(entry.tmuxSession).toBe("pi-job-1");
 			expect(entry.tmuxPanePid).toBe(300);
 			expect(entry.taskRef).toBe("goal-1");
@@ -99,7 +113,7 @@ describe("process-matrix supervisor (pure)", () => {
 	});
 
 	it("applyHeartbeat only updates heartbeatAt", () => {
-		const entry = buildMasterEntry({ sessionId: "m1", pid: 100, hostname: "host-a", now: NOW });
+		const entry = buildMasterEntry({ agent: agent("m1"), pid: 100, hostname: "host-a", now: NOW });
 		const later = "2026-07-19T00:00:30.000Z";
 		expect(applyHeartbeat(entry, later)).toEqual({ ...entry, heartbeatAt: later });
 	});
@@ -116,12 +130,12 @@ describe("process-matrix supervisor (pure)", () => {
 		});
 
 		it("never flags a master entry, regardless of liveness", () => {
-			const entries = [buildMasterEntry({ sessionId: "m1", pid: 100, hostname: "host-a", now: NOW })];
+			const entries = [buildMasterEntry({ agent: agent("m1"), pid: 100, hostname: "host-a", now: NOW })];
 			expect(detectOrphanedWorkers(entries, { isPidAlive: neverAlive })).toEqual([]);
 		});
 
 		it("excludes this session's own entry even if it would otherwise match", () => {
-			const entries = [worker({ sessionId: "self", entryId: "worker-self", parentPid: 999 })];
+			const entries = [worker({ agent: agent("self"), entryId: "worker-self", parentPid: 999 })];
 			expect(detectOrphanedWorkers(entries, { isPidAlive: neverAlive, ownSessionId: "self" })).toEqual([]);
 		});
 
@@ -149,7 +163,7 @@ describe("process-matrix supervisor (pure)", () => {
 
 	it("markResumable attaches the payload and sets status/heartbeat", () => {
 		const entry = beginWindDown(worker(), "parent_lost", "2026-07-19T00:01:00.000Z");
-		const payload = { laneKey: "adhoc-1", lastCode: "resumable" as const };
+		const payload = { agent: agent("w1", "adhoc-1"), lastCode: "resumable" as const };
 		const result = markResumable(entry, payload, "2026-07-19T00:01:00.000Z");
 		expect(result.status).toBe("resumable");
 		expect(result.resumable).toEqual(payload);

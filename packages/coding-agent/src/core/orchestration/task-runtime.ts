@@ -1,9 +1,11 @@
 import { randomUUID } from "node:crypto";
 import { isDeepStrictEqual } from "node:util";
 import type { JsonObject } from "../autonomy/contracts.ts";
+import { createAgentIdentity } from "./agent-resume.ts";
 import {
 	type AcceptanceCriterion,
 	type AgentBindingContract,
+	type AgentIdentityContract,
 	type AgentResumeContext,
 	type AppendOrchestrationEventInput,
 	type ApprovalOutcome,
@@ -806,18 +808,20 @@ export class DurableTaskRuntime {
 	registerAgent(input: RegisterAgentInput): AgentBindingContract {
 		this.refresh();
 		const now = this.nowIso();
+		let identity: AgentIdentityContract;
+		try {
+			identity = createAgentIdentity(input.agentId ?? `agent-${this.createId()}`, input.resumeContext);
+		} catch (error) {
+			throw new DurableTaskRuntimeError(error instanceof Error ? error.message : String(error));
+		}
 		const agent: AgentBindingContract = {
 			schemaVersion: ORCHESTRATION_SCHEMA_VERSION,
-			agentId: input.agentId ?? `agent-${this.createId()}`,
+			...identity,
 			role: input.role,
 			status: "registered",
-			resumeContext: structuredClone(input.resumeContext),
 			createdAt: now,
 			updatedAt: now,
 		};
-		if (!agent.resumeContext.sessionId || !agent.resumeContext.cwd) {
-			throw new DurableTaskRuntimeError("Agent resume context requires sessionId and cwd.");
-		}
 		if (this.state.agents[agent.agentId])
 			throw new DurableTaskRuntimeError(`Agent '${agent.agentId}' already exists.`);
 		this.commit({

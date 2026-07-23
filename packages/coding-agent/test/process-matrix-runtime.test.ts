@@ -2,10 +2,13 @@ import { mkdtempSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { afterEach, describe, expect, it, vi } from "vitest";
+import type { AgentIdentityContract, AgentResumeContext } from "../src/core/orchestration/contracts.ts";
 import type { ProcessMatrixEntry } from "../src/core/process-matrix/codes.ts";
 import {
+	getOrchestrationAgentId,
 	getParentPid,
 	getParentSessionId,
+	PI_ORCHESTRATION_AGENT_ID_ENV,
 	PI_PARENT_PID_ENV,
 	PI_PARENT_SESSION_ENV,
 	type ProcessMatrixRuntimeConfig,
@@ -53,6 +56,13 @@ describe("getParentSessionId", () => {
 	});
 });
 
+describe("getOrchestrationAgentId", () => {
+	it("returns one trimmed logical identity and rejects empty values", () => {
+		expect(getOrchestrationAgentId({ [PI_ORCHESTRATION_AGENT_ID_ENV]: "  worker-1  " })).toBe("worker-1");
+		expect(getOrchestrationAgentId({ [PI_ORCHESTRATION_AGENT_ID_ENV]: "   " })).toBeUndefined();
+	});
+});
+
 // ---------------------------------------------------------------------------
 // startProcessMatrixRuntime -- behavioral coverage of the timer/watcher
 // composition, with only setInterval/clearInterval faked (fs I/O and the
@@ -69,6 +79,23 @@ const GRACE_MS = 60_000;
 const PARENT_PID = 424_242;
 const NEW_PARENT_PID = 515_151;
 const T0 = Date.parse("2026-07-19T12:00:00.000Z");
+
+function agentIdentity(
+	sessionId: string,
+	options: { agentId?: string; resumeContext?: Partial<AgentResumeContext> } = {},
+): AgentIdentityContract {
+	return {
+		agentId: options.agentId ?? `agent-${sessionId}`,
+		resumeContext: {
+			provider: "pi",
+			sessionId,
+			cwd: "/repo",
+			resourceProfileNames: [],
+			contextPointers: [],
+			...options.resumeContext,
+		},
+	};
+}
 
 interface Harness {
 	agentDir: string;
@@ -100,7 +127,13 @@ function makeHarness(overrides: Partial<ProcessMatrixRuntimeConfig> = {}): Harne
 	};
 	harness.config = {
 		agentDir,
-		sessionId: "runtime-test-session",
+		agent: agentIdentity("runtime-test-session", {
+			resumeContext: {
+				...(process.env[PI_WORKTREE_LANE_ENV]?.trim()
+					? { worktreeLaneKey: process.env[PI_WORKTREE_LANE_ENV]?.trim() }
+					: {}),
+			},
+		}),
 		hasUI: false,
 		settings: { enabled: true, heartbeatMs: HEARTBEAT_MS, adoptionGraceMs: GRACE_MS, watcherPollMs: POLL_MS },
 		isProcessAlive: (pid) => harness.livePids.has(pid),
@@ -161,7 +194,7 @@ async function awaitState<T>(
 }
 
 function workerEntryId(harness: Harness): string {
-	return buildEntryId("worker", harness.config.sessionId);
+	return buildEntryId("worker", harness.config.agent.resumeContext.sessionId);
 }
 
 async function readWorkerEntry(harness: Harness): Promise<ProcessMatrixEntry | undefined> {
@@ -173,8 +206,8 @@ async function registerLiveParent(harness: Harness, sessionId: string, pid = PAR
 	await writeEntry(harness.agentDir, {
 		entryId: buildEntryId("master", sessionId),
 		role: "master",
+		agent: agentIdentity(sessionId),
 		pid,
-		sessionId,
 		hostname: "CauDev",
 		startedAt: at,
 		heartbeatAt: at,
@@ -237,7 +270,7 @@ describe("startProcessMatrixRuntime (worker branch)", () => {
 			pid: process.pid,
 			parentPid: PARENT_PID,
 			parentSessionId: "parent-session-1",
-			sessionId: harness.config.sessionId,
+			agent: harness.config.agent,
 		});
 
 		await tick(POLL_MS * 3);
@@ -291,7 +324,7 @@ describe("startProcessMatrixRuntime (worker branch)", () => {
 		expect(entry).toMatchObject({
 			status: "resumable",
 			windDownReason: "parent_lost",
-			resumable: { lastCode: "resumable", laneKey: "lane-alpha" },
+			resumable: { lastCode: "resumable", agent: harness.config.agent },
 		});
 		expect(harness.notices).toHaveLength(1);
 		expect(harness.notices[0]).toContain(`pid ${PARENT_PID}`);
@@ -317,8 +350,7 @@ describe("startProcessMatrixRuntime (worker branch)", () => {
 			contextPointers: [],
 		};
 		const harness = makeHarness({
-			agentId: "agent-worker-1",
-			resumeContext,
+			agent: { agentId: "agent-worker-1", resumeContext },
 			taskSummary: "Finish the scoped implementation",
 		});
 		const handle = await startProcessMatrixRuntime(harness.config);
@@ -329,12 +361,10 @@ describe("startProcessMatrixRuntime (worker branch)", () => {
 			() => readWorkerEntry(harness),
 			(value) => value?.status === "resumable",
 		);
-		expect(entry?.agentId).toBe("agent-worker-1");
-		expect(entry?.resumeContext).toEqual(resumeContext);
+		expect(entry?.agent).toEqual({ agentId: "agent-worker-1", resumeContext });
 		expect(entry?.resumable).toMatchObject({
-			agentId: "agent-worker-1",
+			agent: { agentId: "agent-worker-1", resumeContext },
 			taskSummary: "Finish the scoped implementation",
-			resumeContext,
 		});
 		handle.stop();
 	});
@@ -479,15 +509,16 @@ describe("startProcessMatrixRuntime (master branch)", () => {
 		return {
 			entryId: buildEntryId("worker", "orphan-session"),
 			role: "worker",
+			agent: agentIdentity("orphan-session", {
+				resumeContext: { cwd: "/repo/lane-omega", worktreeLaneKey: "lane-omega" },
+			}),
 			pid: 616_161,
-			sessionId: "orphan-session",
 			hostname: "host-a",
 			startedAt: new Date(T0).toISOString(),
 			heartbeatAt: new Date(T0).toISOString(),
 			status: "running",
 			parentPid: 717_171, // never in livePids -> provably dead
 			parentSessionId: "dead-parent-session",
-			laneKey: "lane-omega",
 		};
 	}
 
@@ -496,7 +527,7 @@ describe("startProcessMatrixRuntime (master branch)", () => {
 		useMasterEnv();
 		const harness = makeHarness();
 		const handle = await startProcessMatrixRuntime(harness.config);
-		const entryId = buildEntryId("master", harness.config.sessionId);
+		const entryId = buildEntryId("master", harness.config.agent.resumeContext.sessionId);
 		const registered = await awaitState(
 			() => readEntry(harness.agentDir, entryId),
 			(entry) => entry !== undefined,
@@ -556,7 +587,7 @@ describe("startProcessMatrixRuntime (master branch)", () => {
 		expect(adopted).toMatchObject({
 			status: "running",
 			parentPid: process.pid,
-			parentSessionId: harness.config.sessionId,
+			parentSessionId: harness.config.agent.resumeContext.sessionId,
 		});
 		handle.stop();
 	});
@@ -627,12 +658,10 @@ describe("startProcessMatrixRuntime (master branch)", () => {
 		const orphan = {
 			...orphanEntry(),
 			status: "resumable" as const,
-			agentId: "logical-agent-1",
-			resumeContext,
+			agent: { agentId: "logical-agent-1", resumeContext },
 			resumable: {
 				lastCode: "resumable" as const,
-				agentId: "logical-agent-1",
-				resumeContext,
+				agent: { agentId: "logical-agent-1", resumeContext },
 				taskSummary: "Finish the worker task",
 			},
 		};
@@ -647,7 +676,7 @@ describe("startProcessMatrixRuntime (master branch)", () => {
 		expect(await readEntry(harness.agentDir, orphan.entryId)).toMatchObject({
 			status: "running",
 			parentPid: process.pid,
-			parentSessionId: harness.config.sessionId,
+			parentSessionId: harness.config.agent.resumeContext.sessionId,
 		});
 
 		finish({ code: 0, signal: null });
