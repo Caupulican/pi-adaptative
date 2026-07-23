@@ -4,11 +4,9 @@ import { BackgroundLaneController, type BackgroundLaneControllerDeps } from "../
 import { resetInFlightWorkRegistryForTests } from "../src/core/reload-blockers.ts";
 
 /**
- * `resolveManagedLaneId` is the goal-to-tmux dispatch adapter's correlation read: given the CALLER's
- * own `laneId` (the id it passed to `recordManagedLane`'s `phase: "dispatch"`, e.g. a reconstructed
- * `tmux:jobId:agentId`), resolve the internal `LaneTracker` id that `Requirement.boundLaneId` and
- * `inFlightGoalLaneIds` actually match. Deterministic keyed lookup against `_managedLaneDispatches`
- * (NOT a racy `getLaneRecords()` diff).
+ * `resolveManagedLaneId` is the goal-to-tmux dispatch adapter's correlation read. The caller's
+ * stable id is the canonical lane id, so goal bindings, persistence, and terminal events all use
+ * the same identity without an in-memory translation.
  */
 function buildDeps(
 	agentDir: string,
@@ -40,19 +38,18 @@ function buildDeps(
 	} as never;
 }
 
-describe("resolveManagedLaneId (correlation read for the goal-to-tmux dispatch adapter)", () => {
+describe("resolveManagedLaneId (stable identity read for the goal-to-tmux dispatch adapter)", () => {
 	afterEach(() => {
 		resetInFlightWorkRegistryForTests();
 	});
 
-	it("resolves the internal LaneTracker id for a tracked dispatch", () => {
+	it("preserves the caller's stable id for a tracked dispatch", () => {
 		const agentDir = "/tmp/pi-test-resolve-managed-lane-tracked";
 		const controller = new BackgroundLaneController(buildDeps(agentDir, []));
 
 		controller.recordManagedLane({ laneId: "tmux:job1:agent1", phase: "dispatch", goalId: "goal-1" });
-		const internalId = controller.getLaneRecords()[0]?.laneId;
-
-		expect(controller.resolveManagedLaneId("tmux:job1:agent1")).toBe(internalId);
+		expect(controller.getLaneRecords()[0]?.laneId).toBe("tmux:job1:agent1");
+		expect(controller.resolveManagedLaneId("tmux:job1:agent1")).toBe("tmux:job1:agent1");
 	});
 
 	it("returns undefined for a callerLaneId that was never dispatched", () => {
@@ -83,12 +80,12 @@ describe("resolveManagedLaneId (correlation read for the goal-to-tmux dispatch a
 	});
 });
 
-describe("REPRO SEED: a dispatched managed lane vanishes from a fresh BackgroundLaneController after /reload", () => {
+describe("managed lane reload recovery", () => {
 	afterEach(() => {
 		resetInFlightWorkRegistryForTests();
 	});
 
-	it("a running tmux-worker lane is GONE from getLaneRecords() on a fresh controller seeded over the same session entries", () => {
+	it("restores the same running tmux-worker identity from the session log", () => {
 		const agentDir = "/tmp/pi-test-c3-reload-vanish";
 		// One shared, mutable entries array simulates the SAME SessionManager persistence surviving a
 		// `/reload` (a fresh SessionManager instance would read back the identical persisted entries).
@@ -101,31 +98,47 @@ describe("REPRO SEED: a dispatched managed lane vanishes from a fresh Background
 		expect(runningRecord).toBeDefined();
 		expect(runningRecord?.status).toBe("running");
 
-		// `recordManagedLane`'s dispatch branch mints the lane + registers in-flight work but calls NO
-		// `appendLaneRecordSnapshot` (only the terminal branch does) — so nothing durable exists for a
-		// fresh controller to reconstruct the RUNNING lane from.
-		expect(sharedEntries).toEqual([]);
+		expect(sharedEntries).toHaveLength(1);
+		expect(sharedEntries[0]).toMatchObject({
+			customType: "lane_record",
+			data: { record: { laneId: "tmux:job-c3:agent1", status: "running", goalId: "goal-c3" } },
+		});
 
-		// Simulate `/reload`: a brand-new BackgroundLaneController over the SAME persisted session
-		// entries (a fresh in-memory LaneTracker, exactly like a new process/session would have).
+		// `/reload` releases only process-local quiesce state; it does not invent a terminal result for
+		// a worker that continues in tmux.
+		before.abortInFlightLanes();
 		const after = new BackgroundLaneController(buildDeps(agentDir, sharedEntries, { goalId: "goal-c3" }));
 
-		// The vanish: the still-running lane is simply absent from the fresh controller's records.
-		expect(after.getLaneRecords()).toEqual([]);
-		expect(after.resolveManagedLaneId("tmux:job-c3:agent1")).toBeUndefined();
+		expect(after.getLaneRecords()).toEqual([runningRecord]);
+		expect(after.resolveManagedLaneId("tmux:job-c3:agent1")).toBe("tmux:job-c3:agent1");
+	});
 
-		// Duplicate-dispatch risk this repro sets up (fixed elsewhere, not here): a goal whose
-		// `Requirement.boundLaneId` still points at `runningRecord.laneId` would no longer find it among
-		// `after.getLaneRecords()`, so the "waiting" branch (keyed on an in-flight lane record for that
-		// id) would no longer apply — the loop would see no in-flight work and could re-dispatch the
-		// same requirement.
-		const stillClaimedBound = runningRecord?.laneId as string;
-		const looksInFlightAfterReload = after
-			.getLaneRecords()
-			.some(
-				(record) =>
-					record.laneId === stillClaimedBound && (record.status === "queued" || record.status === "running"),
-			);
-		expect(looksInFlightAfterReload).toBe(false);
+	it("accepts a terminal report after reload and leaves no active projection", () => {
+		const agentDir = "/tmp/pi-test-managed-lane-reload-terminal";
+		const sharedEntries: SessionEntry[] = [];
+		const before = new BackgroundLaneController(buildDeps(agentDir, sharedEntries));
+		before.recordManagedLane({ laneId: "tmux:job-terminal:agent1", phase: "dispatch" });
+		before.abortInFlightLanes();
+
+		const resumed = new BackgroundLaneController(buildDeps(agentDir, sharedEntries));
+		expect(
+			resumed.recordManagedLane({ laneId: "tmux:job-terminal:agent1", phase: "dispatch", status: "resumed" }),
+		).toBeUndefined();
+		expect(
+			resumed.recordManagedLane({
+				laneId: "tmux:job-terminal:agent1",
+				phase: "terminal",
+				status: "completed",
+				reasonCode: "worker_completed",
+			}),
+		).toMatchObject({
+			laneId: "tmux:job-terminal:agent1",
+			status: "succeeded",
+			reasonCode: "worker_completed",
+		});
+
+		const reopened = new BackgroundLaneController(buildDeps(agentDir, sharedEntries));
+		expect(reopened.getLaneRecords()).toEqual([]);
+		expect(reopened.resolveManagedLaneId("tmux:job-terminal:agent1")).toBeUndefined();
 	});
 });

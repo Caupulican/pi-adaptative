@@ -287,9 +287,8 @@ export interface RuntimeBuilderDeps {
 	getOrchestrationProfileCatalog(): Array<{ profileId: string; role: string; description: string }>;
 	getWorkerLaneRecords(): LaneRecord[];
 	getWorkerResultSnapshots(): WorkerResult[];
-	/** Resolve a managed (e.g. tmux) lane dispatch's internal LaneTracker id from the extension's own
-	 * caller-chosen laneId (`BackgroundLaneController.resolveManagedLaneId`) -- the goal->tmux dispatch
-	 * adapter's correlation read (see `tools/tmux-dispatch.ts`). */
+	/** Confirm a managed dispatch's caller-stable canonical lane id was registered durably before the
+	 * goal binds it (`BackgroundLaneController.resolveManagedLaneId`). */
 	resolveManagedLaneId(callerLaneId: string): string | undefined;
 	/** Worker-delegation runner for SDK/test through-completion calls. */
 	runWorkerDelegationOnce(request: WorkerDelegationRequest): Promise<WorkerDelegationRunOutcome>;

@@ -6,6 +6,7 @@
 
 ### Fixed
 
+- Unified managed-worker identity across dispatch, goal binding, persistence, reload recovery, and terminal reporting; running tmux lanes now restore under the same durable id instead of degrading into indeterminate bindings after `/reload`.
 - Persisted per-check compaction verification score ranges across retry fallback and surfaced them in session analytics and `/usage` diagnostics.
 - Made foreground prompt preparation transactional: routing events stay balanced, failed extension preflight retains pending `nextTurn` context, queued messages cannot reset active-turn cost accounting, and pre-start execution failures release early-painted message identities.
 - Consolidated terminal foreground response handling behind one recovery coordinator with deterministic transient retry, quota failover, retry closeout, compaction, and queued-continuation ordering.

@@ -93,7 +93,7 @@ export interface GoalToolDetails {
 	dispatchedLaneId?: string;
 	/** Set on 'dispatch_worker' when no worker was dispatched: a wired dependency declined (e.g. worker
 	 * delegation disabled, already at capacity, or an honest tmux skip reason -- see
-	 * {@link GoalToolDependencies.dispatchTmuxWorker}), or the reload-vanish dedupe guard refused a
+	 * {@link GoalToolDependencies.dispatchTmuxWorker}), or the indeterminate-binding guard refused a
 	 * re-dispatch against an already-bound requirement (`requirement_already_bound`/`bound_lane_indeterminate`).
 	 * The binding is recorded (or, for a guard refusal, left exactly as it was) with no NEW laneId. */
 	dispatchSkipReason?: string;
@@ -319,10 +319,10 @@ export function createGoalToolDefinition(deps: GoalToolDependencies): ToolDefini
 			// decline into a silent no-laneId no-op indistinguishable from the dep being absent.
 			let dispatchNote: string | undefined;
 			let dispatchSkipReason: string | undefined;
-			// Reload-vanish dedupe guard: checked BEFORE any dispatch side effect, for BOTH
+			// Indeterminate-binding dedupe guard: checked BEFORE any dispatch side effect, for BOTH
 			// routes. A requirement already bound to a lane that is either still live (a plain
-			// duplicate) or whose liveness/outcome cannot be determined at all (the reload-vanish
-			// case -- the lane record and any worker-result snapshot are both gone) must never be
+			// duplicate) or whose liveness/outcome cannot be determined at all (for example, a legacy
+			// snapshot with no lane record or worker result) must never be
 			// re-dispatched silently; only a CONFIRMED terminal outcome allows a legitimate retry.
 			let dispatchGuardRefused = false;
 			if (action.action === "dispatch_worker") {

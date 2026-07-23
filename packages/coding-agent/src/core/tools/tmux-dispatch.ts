@@ -17,11 +17,9 @@ export interface TmuxDispatchDeps {
 	 * live model turn. */
 	createExtensionContext: () => ExtensionContext;
 	/**
-	 * Resolve the tmux extension's own caller-chosen lane id (reconstructed below from the
-	 * `fire_task` result's `details.job`) to the host's internal `LaneTracker` id -- the id
-	 * `Requirement.boundLaneId` / `inFlightGoalLaneIds` actually match
-	 * (`BackgroundLaneController.resolveManagedLaneId`). A deterministic keyed lookup against the
-	 * dispatch this same call just minted, NOT a racy `getLaneRecords()` diff.
+	 * Confirm that the tmux extension's caller-chosen lane id (reconstructed below from the
+	 * `fire_task` result's `details.job`) was durably registered by the host. The returned id is
+	 * identity-preserving and is the same value `Requirement.boundLaneId` uses.
 	 */
 	resolveManagedLaneId: (callerLaneId: string) => string | undefined;
 	/** Active goal id, threaded onto the `fire_task` call so the dispatched lane is goal-tagged
@@ -147,13 +145,13 @@ export async function dispatchTmuxWorker(
 	// Correlate: the extension reports its dispatch under its OWN caller-chosen laneId
 	// (`tmux:${job.id}:${agent.id}`, reconstructed here from the tool result's `details.job` --
 	// the same format `agentLaneId` builds extension-side) which the host's `recordManagedLane`
-	// bridge keys `_managedLaneDispatches` by; `resolveManagedLaneId` reads that keyed map for the
-	// internal id the reducer/continuation machinery actually match on.
+	// bridge preserves as the canonical durable id; `resolveManagedLaneId` confirms that the
+	// matching dispatch report reached the host before the goal binds it.
 	const job = (result.details as FireTaskResultDetails | undefined)?.job;
 	const primary = job?.agents?.[0];
 	if (!job?.id || !primary?.id) return { skipReason: "tmux_dispatch_incomplete" };
 
 	const callerLaneId = `tmux:${job.id}:${primary.id}`;
-	const laneId = deps.resolveManagedLaneId(callerLaneId);
-	return laneId ? { laneId } : { skipReason: "lane_correlation_failed" };
+	const registeredLaneId = deps.resolveManagedLaneId(callerLaneId);
+	return registeredLaneId === callerLaneId ? { laneId: callerLaneId } : { skipReason: "lane_correlation_failed" };
 }

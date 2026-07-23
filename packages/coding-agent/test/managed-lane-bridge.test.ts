@@ -64,8 +64,8 @@ describe("managed lane host bridge (recordManagedLane)", () => {
 		const records = controller.getLaneRecords();
 		expect(records).toHaveLength(1);
 		expect(records[0]).toMatchObject({ type: "tmux-worker", status: "running", goalId: "goal-1" });
-		// The internal LaneTracker id is distinct from the caller's own laneId.
-		expect(records[0]?.laneId).not.toBe("tmux-job-1");
+		// One canonical id crosses dispatch, goal binding, persistence, reload, and terminal reporting.
+		expect(records[0]?.laneId).toBe("tmux-job-1");
 		// The minted record is returned to the in-process caller, not just left in getLaneRecords().
 		expect(returned).toEqual(records[0]);
 

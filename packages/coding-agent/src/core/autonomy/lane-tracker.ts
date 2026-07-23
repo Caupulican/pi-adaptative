@@ -113,15 +113,29 @@ export class LaneTracker {
 		return { ...record };
 	}
 
-	/** Restore a durable queued lane without minting a replacement logical id. */
-	restoreQueued(args: { laneId: string; type: LaneType; goalId?: string; worktreeLaneKey?: string }): LaneRecord {
-		const existing = this._lanes.get(args.laneId);
-		if (existing) return { ...existing };
-		const record: LaneRecord = { laneId: args.laneId, type: args.type, status: "queued" };
+	/** Restore an exact durable projection without minting a replacement logical id or timestamp. */
+	restore(record: LaneRecord): LaneRecord {
+		const restored = { ...record };
+		this._lanes.set(restored.laneId, restored);
+		const suffix = /-(\d+)$/.exec(restored.laneId)?.[1];
+		if (suffix) this.ensureCounterAtLeast(Number(suffix) + 1);
+		this._evictOldTerminal();
+		return { ...restored };
+	}
+
+	/** Start or restart a caller-named lane. The supplied id is its durable logical identity. */
+	startNamed(args: { laneId: string; type: LaneType; goalId?: string; worktreeLaneKey?: string }): LaneRecord {
+		if (!args.laneId) throw new TypeError("A named lane requires a non-empty laneId.");
+		const record: LaneRecord = {
+			laneId: args.laneId,
+			type: args.type,
+			status: "running",
+			startedAt: this._now(),
+		};
 		if (args.goalId !== undefined) record.goalId = args.goalId;
 		if (args.worktreeLaneKey !== undefined) record.worktreeLaneKey = args.worktreeLaneKey;
-		this._lanes.set(args.laneId, record);
-		const suffix = /-(\d+)$/.exec(args.laneId)?.[1];
+		this._lanes.set(record.laneId, record);
+		const suffix = /-(\d+)$/.exec(record.laneId)?.[1];
 		if (suffix) this.ensureCounterAtLeast(Number(suffix) + 1);
 		return { ...record };
 	}
@@ -180,5 +194,10 @@ export class LaneTracker {
 
 	getRecords(): LaneRecord[] {
 		return [...this._lanes.values()].map((record) => ({ ...record }));
+	}
+
+	getRecord(laneId: string): LaneRecord | undefined {
+		const record = this._lanes.get(laneId);
+		return record ? { ...record } : undefined;
 	}
 }

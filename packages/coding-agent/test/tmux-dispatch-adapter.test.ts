@@ -45,7 +45,7 @@ function fauxTmuxTool(execute: ToolDefinition["execute"]): ToolDefinition {
 }
 
 describe("dispatchTmuxWorker (faux tmux tool end-to-end, real BackgroundLaneController)", () => {
-	it("granted dispatch: single pi agent, boundLaneId is the real minted internal id; goal waits then resumes on terminal", async () => {
+	it("granted dispatch: single pi agent, boundLaneId is the caller-stable durable id; goal waits then resumes on terminal", async () => {
 		const sessionManager = InMemorySessionManager.inMemory();
 		const blc = new BackgroundLaneController(buildLaneControllerDeps({ getSessionManager: () => sessionManager }));
 
@@ -70,7 +70,7 @@ describe("dispatchTmuxWorker (faux tmux tool end-to-end, real BackgroundLaneCont
 
 		const outcome = await dispatchTmuxWorker(deps, { requirementId: "req-1", instructions: "do it" });
 		expect(outcome.skipReason).toBeUndefined();
-		expect(outcome.laneId).toBe("tmux-worker-1");
+		expect(outcome.laneId).toBe("tmux:job1:goal-worker-1");
 
 		// Single-agent params: never the 3-agent DEFAULT_AGENT_PROVIDERS fallback.
 		const params = capturedParams as { action: string; agents: Array<{ provider: string; name: string }> };
@@ -89,7 +89,7 @@ describe("dispatchTmuxWorker (faux tmux tool end-to-end, real BackgroundLaneCont
 			laneId: outcome.laneId,
 			now: "T1",
 		});
-		expect(goalState.requirements.find((r) => r.id === "req-1")?.boundLaneId).toBe("tmux-worker-1");
+		expect(goalState.requirements.find((r) => r.id === "req-1")?.boundLaneId).toBe("tmux:job1:goal-worker-1");
 		appendGoalStateSnapshot(sessionManager, goalState);
 
 		const whileRunning = buildGoalRuntimeSnapshot({
@@ -171,7 +171,7 @@ describe("dispatchTmuxWorker (faux tmux tool end-to-end, real BackgroundLaneCont
 		expect(outcome.skipReason).toBe("tmux_dispatch_incomplete");
 	});
 
-	it("lane_correlation_failed when the dispatch cannot be resolved to an internal lane id", async () => {
+	it("lane_correlation_failed when the dispatch was not registered under its stable lane id", async () => {
 		const toolDef = fauxTmuxTool(async () => ({
 			content: [],
 			details: { job: { id: "job1", agents: [{ id: "goal-worker-1" }] } },
@@ -203,7 +203,7 @@ describe("dispatchTmuxWorker (faux tmux tool end-to-end, real BackgroundLaneCont
 		const deps: TmuxDispatchDeps = {
 			getToolDefinition: (name) => (name === "tmux_agent_manager" ? toolDef : undefined),
 			createExtensionContext: () => fauxCtx,
-			resolveManagedLaneId: () => "tmux-worker-1",
+			resolveManagedLaneId: (laneId) => laneId,
 			getGoalId: () => "g1",
 			createLaneWorktree: async (args) => {
 				callOrder.push("createLaneWorktree");
@@ -214,7 +214,7 @@ describe("dispatchTmuxWorker (faux tmux tool end-to-end, real BackgroundLaneCont
 
 		const outcome = await dispatchTmuxWorker(deps, { requirementId: "req-1", instructions: "do it" });
 		expect(outcome.skipReason).toBeUndefined();
-		expect(outcome.laneId).toBe("tmux-worker-1");
+		expect(outcome.laneId).toBe("tmux:job1:goal-worker-1");
 
 		// Lane creation strictly precedes the fire_task call -- never the other way around.
 		expect(callOrder).toEqual(["createLaneWorktree", "fire_task"]);
@@ -265,12 +265,12 @@ describe("dispatchTmuxWorker (faux tmux tool end-to-end, real BackgroundLaneCont
 		const deps: TmuxDispatchDeps = {
 			getToolDefinition: (name) => (name === "tmux_agent_manager" ? toolDef : undefined),
 			createExtensionContext: () => fauxCtx,
-			resolveManagedLaneId: () => "tmux-worker-1",
+			resolveManagedLaneId: (laneId) => laneId,
 			getGoalId: () => "g1",
 		};
 
 		const outcome = await dispatchTmuxWorker(deps, { requirementId: "req-1", instructions: "do it" });
-		expect(outcome.laneId).toBe("tmux-worker-1");
+		expect(outcome.laneId).toBe("tmux:job1:goal-worker-1");
 		const params = capturedParams as { agents: Array<Record<string, unknown>> };
 		expect(params.agents[0]).toEqual({ provider: "pi", name: "goal-worker" });
 	});
@@ -319,14 +319,14 @@ describe("dispatchTmuxWorker (faux tmux tool end-to-end, real BackgroundLaneCont
 		const deps: TmuxDispatchDeps = {
 			getToolDefinition: (name) => (name === "tmux_agent_manager" ? toolDef : undefined),
 			createExtensionContext: () => fauxCtx,
-			resolveManagedLaneId: () => "tmux-worker-1",
+			resolveManagedLaneId: (laneId) => laneId,
 			getGoalId: () => "g1",
 			evaluateWorkerLaneRefusal: () => undefined,
 		};
 
 		const outcome = await dispatchTmuxWorker(deps, { requirementId: "req-1", instructions: "do it" });
 		expect(outcome.skipReason).toBeUndefined();
-		expect(outcome.laneId).toBe("tmux-worker-1");
+		expect(outcome.laneId).toBe("tmux:job1:goal-worker-1");
 		const params = capturedParams as { agents: Array<Record<string, unknown>> };
 		expect(params.agents[0]).toEqual({ provider: "pi", name: "goal-worker" });
 	});

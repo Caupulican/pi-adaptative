@@ -1125,8 +1125,8 @@ export type ExtensionHandler<E, R = undefined> = (event: E, ctx: ExtensionContex
 /**
  * Report for an out-of-process managed lane (e.g. a tmux worker) at dispatch or terminal. `laneId` is
  * a stable identifier the CALLER chooses (e.g. a tmux job id or slug) and reuses unchanged across both
- * reports of the same lane so the host can correlate dispatch -> terminal; it is distinct from the
- * internal lane id the host's LaneTracker mints for the tracked record.
+ * reports of the same lane. The host preserves it as the canonical durable lane identity so goal
+ * bindings and terminal reports remain correlated across controller reloads.
  *
  * Every field beyond `laneId`/`phase` is a CALLER CLAIM, not independently verified by this report:
  * `status` is a free-form label (e.g. a tmux job's own "done"/"blocked" marker, or a lifecycle tag like

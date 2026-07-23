@@ -13,12 +13,9 @@ import {
 } from "../src/core/tools/goal.ts";
 
 /**
- * REPRO-FIRST, then the dedupe guard. Part 1 reproduces the reload-vanish bug with the
- * REAL `BackgroundLaneController` (no tool-layer involved yet) -- proving a genuinely-running managed
- * lane disappears from `getLaneRecords()` after a fresh controller reseeds over the same session
- * entries, which is exactly what leaves a goal's durable `boundLaneId` dangling with nothing left to
- * prove liveness OR completion. Part 2 exercises the `goal.ts` `dispatch_worker` dedupe guard that
- * closes the resulting duplicate-dispatch risk, for a requirement bound by either dispatch target.
+ * Reload recovery plus the conservative dedupe guard. Part 1 proves a running managed lane keeps its
+ * identity across a fresh controller. Part 2 retains the tool-level refusal for legacy/malformed
+ * sessions where a binding exists but neither durable liveness nor a terminal result can be proven.
  */
 
 function buildLaneControllerDeps(overrides: Partial<BackgroundLaneControllerDeps> = {}): BackgroundLaneControllerDeps {
@@ -37,8 +34,8 @@ function buildLaneControllerDeps(overrides: Partial<BackgroundLaneControllerDeps
 	} as unknown as BackgroundLaneControllerDeps;
 }
 
-describe("reload-vanish REPRO (real BackgroundLaneController) -- proven before the guard", () => {
-	it("a running managed lane vanishes from getLaneRecords() once a fresh controller reseeds over the SAME session entries", () => {
+describe("managed lane reload recovery (real BackgroundLaneController)", () => {
+	it("restores a running managed lane under the same canonical id", () => {
 		const sessionManager = InMemorySessionManager.inMemory();
 		const blc = new BackgroundLaneController(buildLaneControllerDeps({ getSessionManager: () => sessionManager }));
 
@@ -47,20 +44,16 @@ describe("reload-vanish REPRO (real BackgroundLaneController) -- proven before t
 		expect(blc.getLaneRecords()[0]?.status).toBe("running");
 		const dispatchedLaneId = blc.getLaneRecords()[0]?.laneId as string;
 
-		// Simulate /reload: a FRESH BackgroundLaneController over the SAME SessionManager entries.
-		// `recordManagedLane`'s dispatch branch never calls `appendLaneRecordSnapshot` (only the
-		// terminal branch persists a snapshot), and `_seedLaneHistory` only re-seeds the id counter --
-		// it never reconstructs running lanes -- so the lane the goal is still durably bound to is gone.
+		blc.abortInFlightLanes();
+		// Simulate /reload: a fresh controller over the same branch-scoped session entries.
 		const reseeded = new BackgroundLaneController(
 			buildLaneControllerDeps({ getSessionManager: () => sessionManager }),
 		);
-		expect(reseeded.getLaneRecords()).toHaveLength(0);
-		expect(reseeded.getLaneRecords().some((record) => record.laneId === dispatchedLaneId)).toBe(false);
-
-		// The consequence: a goal whose Requirement.boundLaneId is this vanished id is no longer
-		// "waiting" against the reseeded (empty) lane records -- nothing here proves the worker either
-		// finished or is still alive, so a naive re-dispatch would risk a genuine duplicate. This is
-		// exactly the risk the dedupe guard below closes.
+		expect(reseeded.getLaneRecords()).toHaveLength(1);
+		expect(reseeded.getLaneRecords()).toContainEqual(
+			expect.objectContaining({ laneId: dispatchedLaneId, status: "running", goalId: "g1" }),
+		);
+		expect(reseeded.resolveManagedLaneId(dispatchedLaneId)).toBe(dispatchedLaneId);
 	});
 });
 
@@ -95,7 +88,7 @@ function firstText(content: Array<{ type: string; text?: string }>): string {
 	return first.text;
 }
 
-describe("goal.ts dispatch_worker reload-vanish dedupe guard (applies to BOTH dispatch targets, checked BEFORE routing)", () => {
+describe("goal.ts dispatch_worker indeterminate-binding guard (applies to both targets before routing)", () => {
 	it("bound + still LIVE (queued/running) lane -> refuses 'requirement_already_bound', preserves boundLaneId, never calls the dispatch dep", async () => {
 		let laneRecords: LaneRecord[] = [];
 		const dispatchedRequirementIds: string[] = [];
@@ -129,7 +122,7 @@ describe("goal.ts dispatch_worker reload-vanish dedupe guard (applies to BOTH di
 		expect(firstText(second.content)).toContain("requirement_already_bound");
 	});
 
-	it("bound + no live lane record + no terminal WorkerResult (the reload-vanish case) -> refuses 'bound_lane_indeterminate', preserves boundLaneId", async () => {
+	it("legacy bound state with no lane record or terminal result refuses 'bound_lane_indeterminate'", async () => {
 		let laneRecords: LaneRecord[] = [];
 		let workerResults: WorkerResult[] = [];
 		const dispatchedRequirementIds: string[] = [];
@@ -153,9 +146,7 @@ describe("goal.ts dispatch_worker reload-vanish dedupe guard (applies to BOTH di
 		});
 		expect(first.details.dispatchedLaneId).toBe("lane-1");
 
-		// Reload-vanish: the lane record is gone (a fresh BackgroundLaneController reseeded, exactly
-		// like the repro above) and there is no persisted worker-result snapshot either -- nothing
-		// proves this lane finished OR is still alive.
+		// Simulate a legacy/malformed snapshot with neither durable liveness nor a terminal result.
 		laneRecords = [];
 		workerResults = [];
 		const stateBeforeRefusal = getState();

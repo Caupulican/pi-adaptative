@@ -45,3 +45,10 @@ export function getLaneRecordSnapshots(entries: readonly SessionEntry[]): LaneRe
 
 	return records;
 }
+
+/** Latest durable projection per logical lane id, preserving first-seen lane order. */
+export function getLatestLaneRecordSnapshots(entries: readonly SessionEntry[]): LaneRecord[] {
+	const latest = new Map<string, LaneRecord>();
+	for (const record of getLaneRecordSnapshots(entries)) latest.set(record.laneId, record);
+	return [...latest.values()].map(cloneLaneRecordForStorage);
+}
