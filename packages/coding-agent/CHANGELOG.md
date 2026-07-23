@@ -6,6 +6,7 @@
 
 ### Fixed
 
+- Consolidated terminal foreground response handling behind one recovery coordinator with deterministic transient retry, quota failover, retry closeout, compaction, and queued-continuation ordering.
 - Consolidated manual and automatic compaction detection, execution, retry, cancellation, persistence, and extension notification behind one controller with a shared result-application path and provider-neutral policy types.
 - Consolidated foreground model tool-protocol selection, probing, calibration, circuit breaking, repair teaching, and turn-local telemetry into one controller shared by session call sites.
 - Made execution policy a mandatory durable pre-lease gate: approvals and owner notifications now replay, approval never grants authority without a newly compiled grant, paused objectives cannot start or resume work, and workers bind their grant before entering leased/running state.

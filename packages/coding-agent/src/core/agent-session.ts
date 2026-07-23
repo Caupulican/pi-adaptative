@@ -9,7 +9,6 @@ import type {
 	AgentMessage,
 	AgentState,
 	AgentTool,
-	ClassifiedError,
 	StreamFn,
 	StreamIdleOptions,
 	ThinkingLevel,
@@ -17,12 +16,9 @@ import type {
 } from "@caupulican/pi-agent-core";
 import {
 	type CustomMessage,
-	classifyFailure,
 	compactToolResultDetailsForRetention,
 	createCustomMessage,
-	DEFAULT_RETRY_POLICY,
 	DEFAULT_STREAM_IDLE,
-	RetryController,
 	withStreamIdleWatchdog,
 } from "@caupulican/pi-agent-core";
 import type {
@@ -44,13 +40,7 @@ import type {
 	TextContent,
 	Usage,
 } from "@caupulican/pi-ai";
-import {
-	cleanupSessionResources,
-	getSupportedThinkingLevels,
-	isContextOverflow,
-	modelsAreEqual,
-	streamSimple,
-} from "@caupulican/pi-ai";
+import { cleanupSessionResources, getSupportedThinkingLevels, modelsAreEqual, streamSimple } from "@caupulican/pi-ai";
 import { getAgentDir } from "../config.ts";
 import { stripFrontmatter } from "../utils/frontmatter.ts";
 import { resourceDir, stateFile } from "./agent-paths.ts";
@@ -73,7 +63,6 @@ import { AutonomyTelemetry } from "./autonomy-telemetry.ts";
 import { BackgroundLaneController } from "./background-lane-controller.ts";
 import { BashExecutionController } from "./bash-execution-controller.ts";
 import type { BashResult } from "./bash-executor.ts";
-import { BillingFailoverController, ExhaustedProviderRegistry } from "./billing-failover-controller.ts";
 import { type AutoCompactionReason, CompactionController } from "./compaction-controller.ts";
 import { CompactionSupport } from "./compaction-support.ts";
 // (module-scope helper for curation goal extraction defined below the imports)
@@ -121,6 +110,7 @@ import type {
 	TurnStartEvent,
 } from "./extensions/index.ts";
 import { FailureCorpusRecorder } from "./failure-corpus.ts";
+import { ForegroundRecoveryController } from "./foreground-recovery-controller.ts";
 import { type ChannelProvider, GatewayRegistry, type JobSchedulerProvider } from "./gateways/channel-provider.ts";
 import { GoalLoopController } from "./goal-loop-controller.ts";
 import type { GoalContinuationPrompt, GoalContinuationPromptLimits } from "./goals/goal-continuation-prompt.ts";
@@ -693,8 +683,6 @@ export class AgentSession {
 
 	private _branchSummaryAbortController: AbortController | undefined = undefined;
 
-	private _retryController!: RetryController;
-
 	private readonly _modelSelection: ModelSelectionController;
 	private readonly _bash: BashExecutionController;
 	private readonly _profileFilter: ProfileFilterController;
@@ -763,7 +751,7 @@ export class AgentSession {
 	 * used by the status report. Its parallel routed drive path delegates every turn back to
 	 * {@link _runAgentPrompt} so the drive loop stays host-side. */
 	private readonly _modelRouter: ModelRouterController;
-	private readonly _billingFailover: BillingFailoverController;
+	private readonly _foregroundRecovery: ForegroundRecoveryController;
 	private readonly _failureCorpus: FailureCorpusRecorder;
 	private readonly _toolRecoveryLogger: ToolRecoveryLogger;
 	private readonly _toolRecoveryEventLogPath: string;
@@ -802,7 +790,7 @@ export class AgentSession {
 		this.agent = config.agent;
 		// Bound every provider stream this session starts against a silently dead connection: a
 		// stall aborts the inner request and surfaces as a retryable "stream stalled" error, which
-		// _isRetryableError routes into the existing auto-retry path. Wrapped exactly once, here.
+		// ForegroundRecoveryController routes into the existing auto-retry path. Wrapped exactly once, here.
 		// The wrapper reports the stall immediately and aborts the inner request; releasing the
 		// inner pump relies on the provider ending its stream after abort (real providers do — see
 		// withStreamIdleWatchdog's contract), so no extra drain is added at this wiring site.
@@ -875,28 +863,6 @@ export class AgentSession {
 			this.agent.state.thinkingLevel = resolved.binding.thinkingLevel as ThinkingLevel;
 			this.settingsManager.setRuntimeResourceProfiles([...config.orchestrationProfile.resourceProfileNames]);
 		}
-		// Auto-retry rides the reliability kernel: the controller owns the attempt counter and the
-		// abortable backoff. This session maps its retry settings onto a RetryPolicy, bridges the
-		// controller's events onto the session event stream, and supplies the live context window so
-		// the overflow-aware classifier can route overflow to compaction instead of a pointless retry.
-		this._retryController = new RetryController(
-			this.agent,
-			() => {
-				const retry = this.settingsManager.getRetrySettings();
-				return {
-					enabled: retry.enabled,
-					maxAttempts: retry.maxRetries,
-					baseDelayMs: retry.baseDelayMs,
-					maxDelayMs: DEFAULT_RETRY_POLICY.maxDelayMs,
-					jitterRatio: 0,
-				};
-			},
-			{
-				onRetryStart: (info) => this._emit({ type: "auto_retry_start", ...info }),
-				onRetryEnd: (info) => this._emit({ type: "auto_retry_end", ...info }),
-			},
-			() => this.model?.contextWindow ?? 0,
-		);
 		this._scopedModels = config.orchestrationProfile
 			? [{ model: this.agent.state.model, thinkingLevel: this.agent.state.thinkingLevel }]
 			: (config.scopedModels ?? []);
@@ -974,7 +940,7 @@ export class AgentSession {
 			getSettingsManager: () => this.settingsManager,
 			getActiveOrchestrationProfile: () => config.orchestrationProfile,
 			getModelRegistry: () => this._modelRegistry,
-			isModelExhausted: (model) => this._billingFailover.isExhausted(`${model.provider}/${model.id}`),
+			isModelExhausted: (model) => this._foregroundRecovery.isModelExhausted(`${model.provider}/${model.id}`),
 			getModel: () => this.model ?? undefined,
 			isDelegateToolActive: () => this.getActiveToolNames().includes("delegate"),
 			isGoalToolActive: () => this.getActiveToolNames().includes("goal"),
@@ -1014,7 +980,7 @@ export class AgentSession {
 			getModelRegistry: () => this._modelRegistry,
 			isRawStream: () => this._isRawStreamSimple(this.agent.streamFn),
 			getRequiredRequestAuth: (model) => this._getRequiredRequestAuth(model),
-			isModelExhausted: (ref) => this._billingFailover.isExhausted(ref),
+			isModelExhausted: (ref) => this._foregroundRecovery.isModelExhausted(ref),
 			getStoredFitnessReport: (ref) => this.getStoredFitnessReports().find((entry) => entry.model === ref)?.report,
 			// Live context is an over-estimate of the span to summarize (includes the kept tail) —
 			// conservative in the safe direction for the summarizer capacity check.
@@ -1079,13 +1045,15 @@ export class AgentSession {
 			eventLogPath: this._toolRecoveryEventLogPath,
 			failureCorpusPath,
 		});
-		this._billingFailover = new BillingFailoverController({
+		this._foregroundRecovery = new ForegroundRecoveryController({
 			agent: this.agent,
 			modelRegistry: this._modelRegistry,
-			exhausted: new ExhaustedProviderRegistry(),
-			subscriptionHop: this.settingsManager.getFailoverSettings().subscriptionHop,
+			settingsManager: this.settingsManager,
+			failureCorpus: this._failureCorpus,
+			getContextWindow: () => this.model?.contextWindow ?? 0,
 			emit: (event) => this._emit(event),
-			recordFailure: (args) => this._failureCorpus.record(args),
+			checkCompaction: (message) => this._checkCompaction(message),
+			onSuccessfulAssistant: () => this._compaction.resetOverflowRecovery(),
 		});
 		this._modelRouter = new ModelRouterController({
 			getAgent: () => this.agent,
@@ -1093,8 +1061,11 @@ export class AgentSession {
 			getSettingsManager: () => this.settingsManager,
 			getSessionManager: () => this.sessionManager,
 			getModelRegistry: () => this._modelRegistry,
-			isModelExhausted: (model) => this._billingFailover.isExhausted(`${model.provider}/${model.id}`),
-			getFailoverStatus: () => ({ ...this._billingFailover.getStatus(), failureStats: this._failureCorpus.stats() }),
+			isModelExhausted: (model) => this._foregroundRecovery.isModelExhausted(`${model.provider}/${model.id}`),
+			getFailoverStatus: () => ({
+				...this._foregroundRecovery.getFailoverStatus(),
+				failureStats: this._failureCorpus.stats(),
+			}),
 			getAgentDir: () => this._agentDir,
 			getReflectionSignal: () => this._reflectionAbort.signal,
 			getBaseSystemPrompt: () => this._baseSystemPrompt,
@@ -1163,7 +1134,7 @@ export class AgentSession {
 			getSessionManager: () => this.sessionManager,
 			getSettingsManager: () => this.settingsManager,
 			getModelRegistry: () => this._modelRegistry,
-			isModelExhausted: (model) => this._billingFailover.isExhausted(`${model.provider}/${model.id}`),
+			isModelExhausted: (model) => this._foregroundRecovery.isModelExhausted(`${model.provider}/${model.id}`),
 			getResourceLoader: () => this._resourceLoader,
 			getExtensionRunner: () => this._extensionRunner,
 			setExtensionRunner: (runner) => {
@@ -2099,9 +2070,6 @@ export class AgentSession {
 		});
 	}
 
-	// Track last assistant message for auto-compaction check
-	private _lastAssistantMessage: AssistantMessage | undefined = undefined;
-
 	/**
 	 * User messages already painted to the UI by an early, synthetic `message_start` fired from
 	 * `_promptUnserialized` — before the model-router judge's bounded LLM call — so the prompt
@@ -2190,45 +2158,19 @@ export class AgentSession {
 			}
 			// Other message types (bashExecution, compactionSummary, branchSummary) are persisted elsewhere
 
-			// Track assistant message for auto-compaction (checked on agent_end)
+			// Track the response for ordered retry/failover/compaction handling after agent_end.
 			if (event.message.role === "assistant") {
-				this._lastAssistantMessage = event.message;
-
 				const assistantMsg = event.message as AssistantMessage;
 				if (messagePersisted) {
 					this._pipeline.observeProviderUsage(this.agent.state.messages, assistantMsg);
 				}
-				if (assistantMsg.stopReason !== "error") {
-					this._compaction.resetOverflowRecovery();
-				}
-
-				// Reset retry counter immediately on successful assistant response
-				// This prevents accumulation across multiple LLM calls within a turn
-				if (assistantMsg.stopReason !== "error" && this._retryController.attempt > 0) {
-					this._emit({
-						type: "auto_retry_end",
-						success: true,
-						attempt: this._retryController.attempt,
-					});
-					this._retryController.reset();
-				}
+				this._foregroundRecovery.observeAssistant(assistantMsg);
 			}
 		}
 	};
 
 	private _willRetryAfterAgentEnd(event: Extract<AgentEvent, { type: "agent_end" }>): boolean {
-		const settings = this.settingsManager.getRetrySettings();
-		if (!settings.enabled || this._retryController.attempt >= settings.maxRetries) {
-			return false;
-		}
-
-		for (let i = event.messages.length - 1; i >= 0; i--) {
-			const message = event.messages[i];
-			if (message.role === "assistant") {
-				return this._isRetryableError(message as AssistantMessage);
-			}
-		}
-		return false;
+		return this._foregroundRecovery.willRetryAfterAgentEnd(event);
 	}
 
 	/** Extract text content from a message */
@@ -2502,7 +2444,7 @@ export class AgentSession {
 
 	/** Current retry attempt (0 if not retrying) */
 	get retryAttempt(): number {
-		return this._retryController.attempt;
+		return this._foregroundRecovery.attempt;
 	}
 
 	/**
@@ -2776,43 +2718,7 @@ export class AgentSession {
 	}
 
 	private async _handlePostAgentRun(): Promise<boolean> {
-		const msg = this._lastAssistantMessage;
-		this._lastAssistantMessage = undefined;
-		if (!msg) {
-			return false;
-		}
-
-		const classified = this._classifyAssistantError(msg);
-		if (classified) {
-			this._failureCorpus.record({
-				provider: msg.provider,
-				modelId: msg.model,
-				message: msg.errorMessage ?? "",
-				classified,
-			});
-		}
-		if (classified?.retryable && (await this._prepareRetry(msg))) {
-			return true;
-		}
-		if (await this._billingFailover.handleAssistantError(msg, classified)) return false;
-
-		if (msg.stopReason === "error" && this._retryController.attempt > 0) {
-			this._emit({
-				type: "auto_retry_end",
-				success: false,
-				attempt: this._retryController.attempt,
-				finalError: msg.errorMessage,
-			});
-			this._retryController.reset();
-		}
-
-		if (await this._checkCompaction(msg)) {
-			return true;
-		}
-
-		// The agent loop drains both queues before emitting agent_end. Any messages
-		// here were queued by agent_end extension handlers and need a continuation.
-		return this.agent.hasQueuedMessages();
+		return this._foregroundRecovery.handlePostAgentRun();
 	}
 
 	/**
@@ -3912,42 +3818,15 @@ export class AgentSession {
 	// =========================================================================
 
 	/**
-	 * Check if an error is retryable (transient provider/network failures). Billing/quota and auth
-	 * are terminal; context overflow is handled by compaction, not retry. The verdict comes from the
-	 * reliability kernel's classifier, fed the host-computed context-overflow flag.
-	 */
-	private _classifyAssistantError(message: AssistantMessage): ClassifiedError | undefined {
-		if (message.stopReason !== "error" || !message.errorMessage) return undefined;
-		const contextWindow = this.model?.contextWindow ?? 0;
-		return classifyFailure({
-			message: message.errorMessage,
-			contextOverflow: isContextOverflow(message, contextWindow),
-			provider: message.provider,
-		});
-	}
-
-	private _isRetryableError(message: AssistantMessage): boolean {
-		return this._classifyAssistantError(message)?.retryable ?? false;
-	}
-
-	/**
-	 * Prepare a retryable error for continuation with exponential backoff.
-	 * @returns true if the caller should continue the agent, false otherwise
-	 */
-	private async _prepareRetry(message: AssistantMessage): Promise<boolean> {
-		return this._retryController.prepareRetry(message);
-	}
-
-	/**
 	 * Cancel in-progress retry.
 	 */
 	abortRetry(): void {
-		this._retryController.abort();
+		this._foregroundRecovery.abortRetry();
 	}
 
 	/** Whether auto-retry is currently in progress */
 	get isRetrying(): boolean {
-		return this._retryController.isRetrying;
+		return this._foregroundRecovery.isRetrying;
 	}
 
 	/** Whether auto-retry is enabled */
