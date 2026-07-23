@@ -8,7 +8,7 @@ describe("Autonomy Telemetry Events", () => {
 		expect(AUTONOMY_TELEMETRY_EVENT_TYPES.approvalRequest).toBe("autonomy.approval_request");
 		expect(AUTONOMY_TELEMETRY_EVENT_TYPES.evidenceBundle).toBe("autonomy.evidence_bundle");
 		expect(AUTONOMY_TELEMETRY_EVENT_TYPES.workerRequest).toBe("autonomy.worker_request");
-		expect(AUTONOMY_TELEMETRY_EVENT_TYPES.workerResult).toBe("autonomy.worker_result");
+		expect(AUTONOMY_TELEMETRY_EVENT_TYPES.workerTerminal).toBe("autonomy.worker_terminal");
 		expect(AUTONOMY_TELEMETRY_EVENT_TYPES.learningDecision).toBe("autonomy.learning_decision");
 	});
 

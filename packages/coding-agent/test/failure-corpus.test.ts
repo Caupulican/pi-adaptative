@@ -1,22 +1,19 @@
-import { describe, expect, it } from "vitest";
+import { mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
+import { afterEach, describe, expect, it } from "vitest";
 import {
 	createToolValidationFailureCorpusRecord,
-	type FailureCorpusFs,
 	FailureCorpusRecorder,
 	redactSecrets,
 } from "../src/core/failure-corpus.ts";
 
-type Files = Map<string, string>;
+const cleanups: string[] = [];
 
-function memFs(files: Files = new Map()): FailureCorpusFs {
-	return {
-		existsSync: (path) => files.has(path),
-		mkdirSync: () => {},
-		appendFileSync: (path, data) => files.set(path, `${files.get(path) ?? ""}${data}`),
-		readFileSync: (path) => files.get(path) ?? "",
-		writeFileSync: (path, data) => files.set(path, data),
-		statSync: (path) => ({ size: Buffer.byteLength(files.get(path) ?? "", "utf-8") }),
-	};
+function tempDir(): string {
+	const dir = mkdtempSync(join(tmpdir(), "pi-failure-corpus-"));
+	cleanups.push(dir);
+	return dir;
 }
 
 function classified(reason: "unknown" | "rate_limit" = "rate_limit") {
@@ -31,11 +28,14 @@ function classified(reason: "unknown" | "rate_limit" = "rate_limit") {
 }
 
 describe("FailureCorpusRecorder", () => {
+	afterEach(() => {
+		for (const dir of cleanups.splice(0)) rmSync(dir, { recursive: true, force: true });
+	});
+
 	it("appends the pinned record shape with a truncated message", () => {
-		const files: Files = new Map();
+		const filePath = join(tempDir(), "state", "failure-corpus.jsonl");
 		const recorder = new FailureCorpusRecorder({
-			filePath: "/agent/state/failure-corpus.jsonl",
-			fs: memFs(files),
+			filePath,
 			now: () => new Date("2026-07-05T00:00:00.000Z"),
 		});
 		recorder.record({
@@ -44,7 +44,7 @@ describe("FailureCorpusRecorder", () => {
 			message: "message ".repeat(100),
 			classified: classified(),
 		});
-		const parsed = JSON.parse(files.get("/agent/state/failure-corpus.jsonl")!.trim()) as {
+		const parsed = JSON.parse(readFileSync(filePath, "utf-8").trim()) as {
 			message: string;
 			ts: string;
 		};
@@ -73,19 +73,19 @@ describe("FailureCorpusRecorder", () => {
 	});
 
 	it("rotates oversized files below a byte low-water mark while retaining newest records", () => {
-		const files: Files = new Map();
-		const path = "/agent/state/failure-corpus.jsonl";
-		files.set(
-			path,
+		const filePath = join(tempDir(), "failure-corpus.jsonl");
+		writeFileSync(
+			filePath,
 			`${Array.from({ length: 1100 }, (_, index) =>
 				JSON.stringify({ ts: String(index), message: "x".repeat(600), reason: "unknown", retryable: false }),
 			).join("\n")}\n`,
+			"utf-8",
 		);
-		new FailureCorpusRecorder({ filePath: path, fs: memFs(files) }).record({
+		new FailureCorpusRecorder({ filePath }).record({
 			message: "latest",
 			classified: classified(),
 		});
-		const rotated = files.get(path)!;
+		const rotated = readFileSync(filePath, "utf-8");
 		const lines = rotated.trim().split("\n");
 		expect(Buffer.byteLength(rotated, "utf-8")).toBeLessThanOrEqual(Math.floor(512 * 1024 * 0.75));
 		expect(lines.length).toBeLessThan(1000);
@@ -114,15 +114,11 @@ describe("FailureCorpusRecorder", () => {
 
 	it("counts unknown classifications and swallows recorder write failures with a debug note", () => {
 		const debug: string[] = [];
-		const throwingFs = {
-			...memFs(),
-			appendFileSync: () => {
-				throw new Error("disk full");
-			},
-		};
+		const dir = tempDir();
+		const blockedParent = join(dir, "not-a-directory");
+		writeFileSync(blockedParent, "file", "utf-8");
 		const recorder = new FailureCorpusRecorder({
-			filePath: "/x/failure-corpus.jsonl",
-			fs: throwingFs,
+			filePath: join(blockedParent, "failure-corpus.jsonl"),
 			debug: (message) => debug.push(message),
 		});
 		expect(() => recorder.record({ message: "m", classified: classified("unknown") })).not.toThrow();

@@ -9,9 +9,9 @@
  * git by the engine (`git-engine.ts`). A deleted or corrupt store is rebuildable via reconcile --
  * every reader here treats missing/corrupt files as "absent", never as an error.
  *
- * Writes are tmp+rename atomic (`util/atomic-file.ts`); the audit log is append-only single-line
- * JSON (O_APPEND, one line per event -- atomic enough for the small records involved). The
- * integration lock is a mkdir-atomic directory with an owner manifest: mkdir either succeeds
+ * Writes are tmp+rename atomic (`util/atomic-file.ts`); the audit log uses the shared bounded JSONL
+ * sink, which serializes concurrent writers and atomically rotates to its newest low-water tail.
+ * The integration lock is a mkdir-atomic directory with an owner manifest: mkdir either succeeds
  * (lock acquired) or fails EEXIST (held), with takeover ONLY for a provably-dead same-host owner.
  */
 
@@ -20,6 +20,7 @@ import { promises as fsPromises, realpathSync } from "node:fs";
 import { hostname as osHostname } from "node:os";
 import { basename, dirname, join } from "node:path";
 import { withFileLock, writeFileAtomic } from "../util/atomic-file.ts";
+import { appendBoundedJsonLine, type BoundedJsonlLimits } from "../util/bounded-jsonl.ts";
 import type {
 	IntegrationLockAcquisition,
 	IntegrationLockOwner,
@@ -45,6 +46,11 @@ export interface SyncStorePaths {
 export const OWNERLESS_LOCK_STALE_MS = 30_000;
 
 const STORE_DIR_NAME = "pi-worktree-sync";
+const WORKTREE_AUDIT_EVENT_LIMITS: BoundedJsonlLimits = {
+	maxBytes: 4 * 1024 * 1024,
+	targetBytes: Math.floor(4 * 1024 * 1024 * 0.75),
+	maxRecords: 10_000,
+};
 
 export function syncStorePaths(gitCommonDir: string): SyncStorePaths {
 	const root = join(gitCommonDir, STORE_DIR_NAME);
@@ -174,8 +180,7 @@ export async function appendAuditEvent(
 	event: { event: string } & Record<string, unknown>,
 	at: string,
 ): Promise<void> {
-	await fsPromises.mkdir(dirname(paths.eventsFile), { recursive: true });
-	await fsPromises.appendFile(paths.eventsFile, `${JSON.stringify({ at, ...event })}\n`, "utf-8");
+	await appendBoundedJsonLine(paths.eventsFile, { at, ...event }, WORKTREE_AUDIT_EVENT_LIMITS);
 }
 
 export interface IntegrationLockDeps {

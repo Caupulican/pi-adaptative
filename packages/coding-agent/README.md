@@ -323,6 +323,8 @@ Pi has two separate startup features:
 
 Use `--offline` or `PI_OFFLINE=1` to disable all startup network operations described here, including update checks, package update checks, and install/update telemetry.
 
+Runtime orchestration, recovery, and learning telemetry stays local. See [docs/telemetry.md](docs/telemetry.md) for its trust boundaries, locations, and retention rules.
+
 ---
 
 ## Context Files

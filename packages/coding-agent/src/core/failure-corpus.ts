@@ -1,7 +1,6 @@
-import { appendFileSync, existsSync, mkdirSync, readFileSync, statSync, writeFileSync } from "node:fs";
-import { dirname } from "node:path";
 import type { ClassifiedError } from "@caupulican/pi-agent-core";
 import { redactKnownSecrets } from "./security/secret-text.ts";
+import { appendBoundedJsonLineSync, type BoundedJsonlLimits } from "./util/bounded-jsonl.ts";
 
 export interface ProviderFailureCorpusRecord {
 	ts: string;
@@ -37,22 +36,14 @@ export interface FailureCorpusStats {
 	unknown: number;
 }
 
-export interface FailureCorpusFs {
-	existsSync(path: string): boolean;
-	mkdirSync(path: string, options: { recursive: true }): void;
-	appendFileSync(path: string, data: string, encoding: "utf-8"): void;
-	readFileSync(path: string, encoding: "utf-8"): string;
-	writeFileSync(path: string, data: string, encoding: "utf-8"): void;
-	statSync(path: string): { size: number };
-}
-
-const DEFAULT_FS: FailureCorpusFs = { existsSync, mkdirSync, appendFileSync, readFileSync, writeFileSync, statSync };
 const MAX_MESSAGE_CHARS = 500;
 const MAX_DETAIL_ITEMS = 50;
 const MAX_DETAIL_CHARS = 256;
-const MAX_FILE_BYTES = 512 * 1024;
-const ROTATED_FILE_TARGET_BYTES = Math.floor(MAX_FILE_BYTES * 0.75);
-const MAX_ROTATED_RECORDS = 1000;
+const FAILURE_CORPUS_LIMITS: BoundedJsonlLimits = {
+	maxBytes: 512 * 1024,
+	targetBytes: Math.floor(512 * 1024 * 0.75),
+	maxRecords: 1_000,
+};
 
 export function createToolValidationFailureCorpusRecord(args: {
 	provider?: string;
@@ -81,48 +72,19 @@ export function createToolValidationFailureCorpusRecord(args: {
 	};
 }
 
-export function writeFailureCorpusRecord(
-	filePath: string,
-	record: FailureCorpusRecord,
-	fs: FailureCorpusFs = DEFAULT_FS,
-): void {
-	fs.mkdirSync(dirname(filePath), { recursive: true });
-	fs.appendFileSync(filePath, `${JSON.stringify(record)}\n`, "utf-8");
-	rotateFailureCorpusIfNeeded(filePath, fs);
-}
-
-function rotateFailureCorpusIfNeeded(filePath: string, fs: FailureCorpusFs): void {
-	if (!fs.existsSync(filePath) || fs.statSync(filePath).size <= MAX_FILE_BYTES) return;
-	const lines = fs
-		.readFileSync(filePath, "utf-8")
-		.split("\n")
-		.filter((line) => line.trim().length > 0);
-	const retained: string[] = [];
-	let retainedBytes = 0;
-	for (let index = lines.length - 1; index >= 0 && retained.length < MAX_ROTATED_RECORDS; index--) {
-		const line = lines[index];
-		const lineBytes = Buffer.byteLength(line, "utf-8") + 1;
-		if (lineBytes > MAX_FILE_BYTES) continue;
-		if (retained.length > 0 && retainedBytes + lineBytes > ROTATED_FILE_TARGET_BYTES) break;
-		retained.push(line);
-		retainedBytes += lineBytes;
-		if (retainedBytes >= ROTATED_FILE_TARGET_BYTES) break;
-	}
-	retained.reverse();
-	fs.writeFileSync(filePath, retained.length > 0 ? `${retained.join("\n")}\n` : "", "utf-8");
+export function writeFailureCorpusRecord(filePath: string, record: FailureCorpusRecord): void {
+	appendBoundedJsonLineSync(filePath, record, FAILURE_CORPUS_LIMITS);
 }
 
 export class FailureCorpusRecorder {
 	private total = 0;
 	private unknown = 0;
 	private readonly filePath: string;
-	private readonly fs: FailureCorpusFs;
 	private readonly now: () => Date;
 	private readonly debug: (message: string) => void;
 
-	constructor(args: { filePath: string; fs?: FailureCorpusFs; now?: () => Date; debug?: (message: string) => void }) {
+	constructor(args: { filePath: string; now?: () => Date; debug?: (message: string) => void }) {
 		this.filePath = args.filePath;
-		this.fs = args.fs ?? DEFAULT_FS;
 		this.now = args.now ?? (() => new Date());
 		this.debug = args.debug ?? (() => {});
 	}
@@ -157,7 +119,7 @@ export class FailureCorpusRecorder {
 
 	private appendRecord(record: FailureCorpusRecord): void {
 		try {
-			writeFailureCorpusRecord(this.filePath, record, this.fs);
+			writeFailureCorpusRecord(this.filePath, record);
 		} catch (error) {
 			this.debug(`failure corpus write skipped: ${error instanceof Error ? error.message : String(error)}`);
 		}

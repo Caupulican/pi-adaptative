@@ -427,7 +427,7 @@ export class WorkerDelegationController {
 		this.recordTerminal(record);
 		appendLaneRecordSnapshot(this.deps.getSessionManager(), record);
 		this.deps.emitAutonomyTelemetry({
-			type: AUTONOMY_TELEMETRY_EVENT_TYPES.workerResult,
+			type: AUTONOMY_TELEMETRY_EVENT_TYPES.workerTerminal,
 			timestamp: new Date().toISOString(),
 			payload: {
 				laneId: record.laneId,

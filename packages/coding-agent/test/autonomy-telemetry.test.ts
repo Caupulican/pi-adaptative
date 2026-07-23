@@ -142,7 +142,7 @@ describe("autonomy telemetry emission (G3)", () => {
 			expect(run.record?.status).toBe("succeeded");
 
 			const events = telemetryEvents(harness).filter(
-				(event) => event.type === AUTONOMY_TELEMETRY_EVENT_TYPES.workerResult,
+				(event) => event.type === AUTONOMY_TELEMETRY_EVENT_TYPES.workerTerminal,
 			);
 			expect(events).toHaveLength(1);
 			const [event] = events;

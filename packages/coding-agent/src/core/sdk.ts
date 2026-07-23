@@ -9,6 +9,7 @@ import { formatNoModelsAvailableMessage } from "./auth-guidance.ts";
 import { AuthStorage } from "./auth-storage.ts";
 import { DEFAULT_ACTIVE_TOOL_NAMES } from "./default-tool-surface.ts";
 import type { ExtensionRunner, LoadExtensionsResult, SessionStartEvent, ToolDefinition } from "./extensions/index.ts";
+import { isInstallTelemetryEnabled } from "./install-telemetry.ts";
 import { ModelRegistry } from "./model-registry.ts";
 import { findInitialModel, resolveProfileModelSettings } from "./model-resolver.ts";
 import type { OrchestrationProfile } from "./orchestration/contracts.ts";
@@ -23,7 +24,6 @@ import type {
 	ResourceProfileSettings,
 } from "./settings-manager.ts";
 import { SettingsManager } from "./settings-manager.ts";
-import { isInstallTelemetryEnabled } from "./telemetry.ts";
 import { time } from "./timings.ts";
 import {
 	createBashTool,

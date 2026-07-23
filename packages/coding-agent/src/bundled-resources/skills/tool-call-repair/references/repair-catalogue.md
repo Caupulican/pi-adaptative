@@ -184,8 +184,8 @@ clean|repaired|bounced, failureModes: [1..5|other], repairsApplied:
 [registry names], taught: none|note|rule}`. Link repair events to the same call's execution
 outcome (did the repaired call succeed?) and compute recurrence-after-teach
 per (model, failureMode). Aggregate per model into the table below. Wire
-through the existing telemetry path (`core/telemetry.ts` / session-analytics)
-rather than a new sink. The "round-trips saved" metric is simply the repaired
+through the existing tool-recovery logger and session analytics rather than a
+new sink. The "round-trips saved" metric is simply the repaired
 count; the "teach works" metric is recurrence decay.
 
 ## Model notes (living table; append, do not rewrite)

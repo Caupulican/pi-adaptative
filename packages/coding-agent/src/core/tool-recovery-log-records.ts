@@ -1,4 +1,3 @@
-import { appendFileSync, existsSync, readFileSync, statSync } from "node:fs";
 import type { ToolArgumentValidationTelemetryEvent } from "@caupulican/pi-ai";
 import {
 	createToolValidationFailureCorpusRecord,
@@ -6,14 +5,16 @@ import {
 	writeFailureCorpusRecord,
 } from "./failure-corpus.ts";
 import { updatePersistedToolRecoveryStats } from "./tool-recovery-stats.ts";
-import { withFileLockSync, writeFileAtomicSync } from "./util/atomic-file.ts";
+import { appendBoundedJsonLineSync, type BoundedJsonlLimits } from "./util/bounded-jsonl.ts";
 
 export const TOOL_RECOVERY_EVENT_LOG_FILE = "tool-recovery-events.jsonl";
 export const TOOL_ARGUMENT_VALIDATION_LOG_KIND = "tool_argument_validation";
 
-const MAX_EVENT_LOG_BYTES = 4 * 1024 * 1024;
-const ROTATED_EVENT_LOG_TARGET_BYTES = Math.floor(MAX_EVENT_LOG_BYTES * 0.75);
-const MAX_ROTATED_EVENT_LOG_RECORDS = 5_000;
+const TOOL_RECOVERY_EVENT_LIMITS: BoundedJsonlLimits = {
+	maxBytes: 4 * 1024 * 1024,
+	targetBytes: Math.floor(4 * 1024 * 1024 * 0.75),
+	maxRecords: 5_000,
+};
 const MAX_TELEMETRY_LIST_ITEMS = 50;
 const MAX_TELEMETRY_TEXT_CHARS = 256;
 
@@ -96,38 +97,14 @@ export function isToolArgumentValidationLogRecord(value: unknown): value is Tool
 	);
 }
 
-function rotateToolRecoveryEventLogIfNeeded(filePath: string): void {
-	if (!existsSync(filePath) || statSync(filePath).size <= MAX_EVENT_LOG_BYTES) return;
-	const lines = readFileSync(filePath, "utf-8")
-		.split("\n")
-		.filter((line) => line.trim().length > 0);
-	const retained: string[] = [];
-	let retainedBytes = 0;
-	for (let index = lines.length - 1; index >= 0 && retained.length < MAX_ROTATED_EVENT_LOG_RECORDS; index--) {
-		const line = lines[index];
-		const lineBytes = Buffer.byteLength(line, "utf-8") + 1;
-		if (lineBytes > MAX_EVENT_LOG_BYTES) continue;
-		if (retained.length > 0 && retainedBytes + lineBytes > ROTATED_EVENT_LOG_TARGET_BYTES) break;
-		retained.push(line);
-		retainedBytes += lineBytes;
-		if (retainedBytes >= ROTATED_EVENT_LOG_TARGET_BYTES) break;
-	}
-	retained.reverse();
-	writeFileAtomicSync(filePath, retained.length > 0 ? `${retained.join("\n")}\n` : "");
-}
-
 /**
  * Append + rotate under a single exclusive lock on `eventLogPath`. Without the lock, a concurrent
  * writer (e.g. another session's tool-recovery worker) could append between this call's read and its
- * rotated rewrite, and that append would be silently discarded when the rewrite lands; the atomic
- * tmp+rename in {@link rotateToolRecoveryEventLogIfNeeded} additionally ensures a reader never observes
- * a partially-rewritten (torn) log file.
+ * rotated rewrite, and that append would be silently discarded when the rewrite lands. The shared
+ * bounded JSONL sink also uses atomic tmp+rename rotation so readers never observe torn log files.
  */
 export function writeToolRecoveryLogRecord(entry: ToolRecoveryLogWorkerRecord): void {
-	withFileLockSync(entry.eventLogPath, () => {
-		appendFileSync(entry.eventLogPath, `${JSON.stringify(entry.record)}\n`, "utf-8");
-		rotateToolRecoveryEventLogIfNeeded(entry.eventLogPath);
-	});
+	appendBoundedJsonLineSync(entry.eventLogPath, entry.record, TOOL_RECOVERY_EVENT_LIMITS);
 	try {
 		updatePersistedToolRecoveryStats(entry.eventLogPath, entry.record);
 	} catch {

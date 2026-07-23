@@ -6,7 +6,7 @@ export const AUTONOMY_TELEMETRY_EVENT_TYPES = {
 	approvalRequest: "autonomy.approval_request",
 	evidenceBundle: "autonomy.evidence_bundle",
 	workerRequest: "autonomy.worker_request",
-	workerResult: "autonomy.worker_result",
+	workerTerminal: "autonomy.worker_terminal",
 	learningDecision: "autonomy.learning_decision",
 } as const;
 
