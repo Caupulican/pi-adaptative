@@ -12,7 +12,7 @@ import { getPrivateLaneDeniedPaths } from "../autonomy/lane-private-paths.ts";
 import { createLaneToolSurface } from "../autonomy/lane-tool-surface.ts";
 import type { LaneRecord, LaneTerminalStatus } from "../autonomy/lane-tracker.ts";
 import { safeRealpathSync } from "../autonomy/path-scope.ts";
-import { appendLaneRecordSnapshot, getLaneRecordSnapshots } from "../autonomy/session-lane-record.ts";
+import { appendLaneRecordSnapshot } from "../autonomy/session-lane-record.ts";
 import { composeSubagentSystemPrompt } from "../autonomy/subagent-prompt.ts";
 import { AUTONOMY_TELEMETRY_EVENT_TYPES, type AutonomyTelemetryEvent } from "../autonomy/telemetry-events.ts";
 import type { GoalState } from "../goals/goal-state.ts";
@@ -255,19 +255,9 @@ export class WorkerDelegationController {
 
 	private getWorkerLifecycle(): WorkerLifecycle {
 		if (this.lifecycle) return this.lifecycle;
-		let minimumNextLaneNumber = 1;
-		try {
-			for (const record of getLaneRecordSnapshots(this.deps.getSessionManager().getEntries())) {
-				const suffix = /^worker-(\d+)$/.exec(record.laneId)?.[1];
-				if (suffix) minimumNextLaneNumber = Math.max(minimumNextLaneNumber, Number(suffix) + 1);
-			}
-		} catch {
-			// Durable runtime IDs remain authoritative when compatibility history is unavailable.
-		}
 		this.lifecycle = new WorkerLifecycle({
 			agentDir: this.deps.getAgentDir(),
 			sessionId: this.deps.getSessionId(),
-			minimumNextLaneNumber,
 		});
 		return this.lifecycle;
 	}

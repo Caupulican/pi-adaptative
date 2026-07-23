@@ -122,6 +122,23 @@ describe("WorkerLifecycle", () => {
 		});
 	});
 
+	it("allocates resumed lane ids from durable tasks only", () => {
+		const agentDir = root();
+		const profile = createTestWorkerOrchestrationProfile({
+			profileId: "worker",
+			model: { provider: "test", id: "model" },
+		});
+		const before = new WorkerLifecycle({ agentDir, sessionId: "session-resumed-id" });
+		expect(before.prepare({ instructions: "first", profile, requiredCapabilities: [] }).record.laneId).toBe(
+			"worker-1",
+		);
+
+		const resumed = new WorkerLifecycle({ agentDir, sessionId: "session-resumed-id" });
+		expect(resumed.prepare({ instructions: "second", profile, requiredCapabilities: [] }).record.laneId).toBe(
+			"worker-2",
+		);
+	});
+
 	it("recovers a missing verifier dispatch after implementation completion", () => {
 		const lifecycle = new WorkerLifecycle({ agentDir: root(), sessionId: "session-verification-dispatch" });
 		const implementation = finishAwaitingVerification(lifecycle, {

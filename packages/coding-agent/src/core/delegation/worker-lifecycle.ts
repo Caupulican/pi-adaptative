@@ -37,14 +37,14 @@ export class WorkerLifecycle {
 	readonly ledger: DelegationOrchestrationLedger;
 	private nextLaneNumber: number;
 
-	constructor(options: { agentDir: string; sessionId: string; minimumNextLaneNumber?: number }) {
+	constructor(options: { agentDir: string; sessionId: string }) {
 		this.ledger = new DelegationOrchestrationLedger(options);
 		const snapshot = this.ledger.runtime.getSnapshot();
 		const highest = Object.keys(snapshot.tasks).reduce((current, taskId) => {
 			const suffix = /^worker-(\d+)$/.exec(taskId)?.[1];
 			return suffix ? Math.max(current, Number(suffix)) : current;
 		}, 0);
-		this.nextLaneNumber = Math.max(highest + 1, options.minimumNextLaneNumber ?? 1);
+		this.nextLaneNumber = highest + 1;
 	}
 
 	prepare(
