@@ -6,6 +6,7 @@
 
 ### Fixed
 
+- Consolidated fitness, adaptation, and tool-selection host state behind one validated lock-safe atomic store; concurrent sessions no longer overwrite profile or tool evidence, and worker read-only mode remains zero-write.
 - Extracted managed tmux-worker lifecycle and claim review from the background coordinator, made managed and in-process workers share one terminal outbox without materializing a withheld worker runtime, removed the research controller's circular dependency on its parent, and renamed raw worker-claim modules so untrusted claims are no longer presented as durable results.
 - Consolidated failure-corpus, tool-recovery, and worktree-audit persistence behind one lock-safe bounded JSONL sink; worktree audit is no longer unbounded, concurrent failure-corpus rotation cannot lose appends, and worker terminal telemetry no longer masquerades as an accepted result.
 - Unified process supervision and durable orchestration on one logical-agent identity, pinned initial tmux workers and exact-session resumes to the same managed lane, and made resume prefer the persisted session file while rejecting divergent lane context.

@@ -2,7 +2,8 @@ import { existsSync, mkdirSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { afterEach, beforeEach, describe, expect, it } from "vitest";
-import { currentHostFingerprint, FitnessStore, type HostFingerprint } from "../src/core/models/fitness-store.ts";
+import { FitnessStore } from "../src/core/models/fitness-store.ts";
+import { currentHostFingerprint, type HostFingerprint } from "../src/core/models/host-state-store.ts";
 import type { ModelFitnessReport } from "../src/core/research/model-fitness.ts";
 
 function report(overrides: Partial<ModelFitnessReport> = {}): ModelFitnessReport {

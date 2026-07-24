@@ -152,3 +152,5 @@ an `AgentSession` transaction because it composes those independent owners and t
 surface; extracting it today would create a callback-heavy proxy rather than a new state owner. Its
 contract is balanced routing events, commit-on-success `nextTurn` consumption, stable per-turn cost
 accounting, and bounded early-message identity cleanup.
+`HostStateStore` owns validated versioned host partitions, lock-scoped mutations, atomic replacement,
+and worker-role zero-write behavior for fitness, model adaptation, and tool-selection evidence.

@@ -5,7 +5,7 @@ import { pathToFileURL } from "node:url";
 import { Worker } from "node:worker_threads";
 import { afterEach, describe, expect, it } from "vitest";
 import { type ModelAdaptationRule, ModelAdaptationStore } from "../src/core/models/adaptation-store.ts";
-import type { HostFingerprint } from "../src/core/models/fitness-store.ts";
+import type { HostFingerprint } from "../src/core/models/host-state-store.ts";
 
 const hostA: HostFingerprint = { id: "host-a", cpu: "cpu-a", cores: 8, totalMemGb: 32 };
 const hostB: HostFingerprint = { id: "host-b", cpu: "cpu-b", cores: 4, totalMemGb: 16 };
@@ -144,7 +144,7 @@ describe("ModelAdaptationStore", () => {
 		expect(store(agentDir).get("model", new Date(Date.UTC(2026, 1, 5))).rules).toEqual([rule(20)]);
 	});
 
-	it("keeps host-keyed profiles separate using fitness-store semantics", () => {
+	it("keeps host-keyed profiles separate using shared host-state semantics", () => {
 		const agentDir = tempAgentDir();
 		dirs.push(agentDir);
 		store(agentDir, hostA).addRule("model", { mode: "mode-a", text: "A" }, new Date(at(1)));
@@ -190,9 +190,9 @@ describe("ModelAdaptationStore", () => {
 	});
 
 	/**
-	 * Two REAL OS threads (not just two same-process instances) hammering `store()` concurrently
+	 * Two REAL OS threads (not just two same-process instances) hammering profile mutations concurrently
 	 * for different models must not lose either side's write — this is the race the shared atomic-file
-	 * lock closes (`store()`'s load-mutate-write now runs under one exclusive lock spanning both the
+	 * lock closes (the load-mutate-write now runs under one exclusive lock spanning both the
 	 * read and the write).
 	 */
 	it("two OS threads writing different models concurrently never lose a write", async () => {

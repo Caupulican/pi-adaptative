@@ -1,9 +1,8 @@
-import { existsSync, mkdirSync, readFileSync, writeFileSync } from "node:fs";
-import { cpus, totalmem } from "node:os";
-import { dirname } from "node:path";
 import { stateFile } from "../agent-paths.ts";
 import type { ModelFitnessReport } from "../research/model-fitness.ts";
 import { isWorkerSession } from "../session-role.ts";
+import { isPlainRecord } from "../util/value-guards.ts";
+import { type HostFingerprint, HostStateStore, isHostFingerprint } from "./host-state-store.ts";
 
 /**
  * Durable, HOST-KEYED storage for model fitness reports. Fitness is a property of a model ON a
@@ -13,27 +12,6 @@ import { isWorkerSession } from "../session-role.ts";
  * including when settings/dotfiles are synced across machines.
  */
 
-export interface HostFingerprint {
-	/** Stable, human-readable id derived from the specs below. */
-	id: string;
-	cpu: string;
-	cores: number;
-	totalMemGb: number;
-}
-
-export function currentHostFingerprint(): HostFingerprint {
-	const cpuList = cpus();
-	const cpu = (cpuList[0]?.model ?? "unknown-cpu").trim();
-	const cores = Math.max(1, cpuList.length);
-	const totalMemGb = Math.round(totalmem() / 1024 ** 3);
-	const id = `${cpu
-		.toLowerCase()
-		.replace(/[^a-z0-9]+/g, "-")
-		.replace(/^-+|-+$/g, "")
-		.slice(0, 48)}-${cores}c-${totalMemGb}g`;
-	return { id, cpu, cores, totalMemGb };
-}
-
 export interface StoredFitnessReport {
 	model: string;
 	report: ModelFitnessReport;
@@ -41,21 +19,88 @@ export interface StoredFitnessReport {
 	host: HostFingerprint;
 }
 
-interface FitnessStoreFile {
-	version: 1;
-	/** hostId -> modelRef -> latest stored report. */
-	hosts: Record<string, Record<string, StoredFitnessReport>>;
+function isFiniteNumber(value: unknown): value is number {
+	return typeof value === "number" && Number.isFinite(value);
+}
+
+function isLaneScore(value: unknown): boolean {
+	return (
+		isPlainRecord(value) &&
+		isFiniteNumber(value.succeeded) &&
+		isFiniteNumber(value.total) &&
+		Array.isArray(value.outcomes) &&
+		value.outcomes.every((outcome) => typeof outcome === "string") &&
+		isFiniteNumber(value.meanMs) &&
+		(value.tokensPerSecond === undefined || isFiniteNumber(value.tokensPerSecond))
+	);
+}
+
+function isFitnessReport(value: unknown): value is ModelFitnessReport {
+	return (
+		isPlainRecord(value) &&
+		isFiniteNumber(value.trials) &&
+		(value.tokensPerSecond === undefined || isFiniteNumber(value.tokensPerSecond)) &&
+		isLaneScore(value.research) &&
+		isLaneScore(value.worker) &&
+		isLaneScore(value.search) &&
+		isLaneScore(value.toolCall) &&
+		isLaneScore(value.digest) &&
+		isPlainRecord(value.judge) &&
+		isFiniteNumber(value.judge.parsed) &&
+		isFiniteNumber(value.judge.planningElevated) &&
+		isFiniteNumber(value.judge.planningTotal) &&
+		isFiniteNumber(value.judge.trivialCheap) &&
+		isFiniteNumber(value.judge.trivialTotal) &&
+		isFiniteNumber(value.judge.total) &&
+		Array.isArray(value.judge.outcomes) &&
+		value.judge.outcomes.every((outcome) => typeof outcome === "string") &&
+		isFiniteNumber(value.judge.meanMs) &&
+		(value.judge.tokensPerSecond === undefined || isFiniteNumber(value.judge.tokensPerSecond)) &&
+		(value.capacity === undefined ||
+			(isPlainRecord(value.capacity) &&
+				isFiniteNumber(value.capacity.registeredContextWindow) &&
+				isFiniteNumber(value.capacity.servedContextWindow) &&
+				Array.isArray(value.capacity.outcomes) &&
+				value.capacity.outcomes.every((outcome) => typeof outcome === "string") &&
+				isFiniteNumber(value.capacity.meanMs))) &&
+		isFiniteNumber(value.totalCostUsd)
+	);
+}
+
+function parseFitnessHost(value: unknown, hostId: string): Record<string, StoredFitnessReport> | undefined {
+	if (!isPlainRecord(value)) return undefined;
+	const reports: Record<string, StoredFitnessReport> = {};
+	for (const [model, candidate] of Object.entries(value)) {
+		if (
+			!isPlainRecord(candidate) ||
+			candidate.model !== model ||
+			typeof candidate.at !== "string" ||
+			!isHostFingerprint(candidate.host) ||
+			candidate.host.id !== hostId ||
+			!isFitnessReport(candidate.report)
+		)
+			continue;
+		reports[model] = {
+			model,
+			report: candidate.report,
+			at: candidate.at,
+			host: candidate.host,
+		};
+	}
+	return reports;
 }
 
 export class FitnessStore {
-	private readonly filePath: string;
-	private readonly fingerprint: () => HostFingerprint;
-	private readonly readOnly: boolean;
+	private readonly storage: HostStateStore<Record<string, StoredFitnessReport>>;
 
 	constructor(filePath: string, options?: { fingerprint?: () => HostFingerprint; readOnly?: boolean }) {
-		this.filePath = filePath;
-		this.fingerprint = options?.fingerprint ?? currentHostFingerprint;
-		this.readOnly = options?.readOnly ?? isWorkerSession();
+		this.storage = new HostStateStore({
+			filePath,
+			version: 1,
+			fingerprint: options?.fingerprint,
+			readOnly: options?.readOnly ?? isWorkerSession(),
+			parseHost: parseFitnessHost,
+		});
 	}
 
 	static forAgentDir(
@@ -65,52 +110,37 @@ export class FitnessStore {
 		return new FitnessStore(stateFile(agentDir, "model-fitness.json"), options);
 	}
 
-	private load(): FitnessStoreFile {
-		try {
-			if (!existsSync(this.filePath)) return { version: 1, hosts: {} };
-			const parsed = JSON.parse(readFileSync(this.filePath, "utf-8")) as FitnessStoreFile;
-			if (parsed && parsed.version === 1 && parsed.hosts && typeof parsed.hosts === "object") {
-				return parsed;
-			}
-		} catch {
-			// Unreadable/corrupt store: start fresh in memory; the next save rewrites the file.
-		}
-		return { version: 1, hosts: {} };
-	}
-
 	/** Persist the latest report for a model on the CURRENT host. Best-effort, returns the entry. */
 	save(model: string, report: ModelFitnessReport, at?: string): StoredFitnessReport {
-		const host = this.fingerprint();
-		const entry: StoredFitnessReport = { model, report, at: at ?? new Date().toISOString(), host };
-		// Zero-footprint (worker session): no dir, no write -- still returns the computed entry.
-		if (this.readOnly) return entry;
-		const file = this.load();
-		file.hosts[host.id] = { ...(file.hosts[host.id] ?? {}), [model]: entry };
-		mkdirSync(dirname(this.filePath), { recursive: true });
-		writeFileSync(this.filePath, `${JSON.stringify(file, null, "\t")}\n`, "utf-8");
-		return entry;
+		return this.storage.mutateCurrentHost(
+			() => ({}),
+			(reports, host) => {
+				const entry: StoredFitnessReport = { model, report, at: at ?? new Date().toISOString(), host };
+				reports[model] = entry;
+				return { result: entry, changed: true };
+			},
+		);
 	}
 
 	/** Drop a model's report for the CURRENT host (uninstall cleanup). No-op when absent. */
 	remove(model: string): void {
-		if (this.readOnly) return;
-		const host = this.fingerprint();
-		const file = this.load();
-		if (!file.hosts[host.id]?.[model]) return;
-		delete file.hosts[host.id][model];
-		mkdirSync(dirname(this.filePath), { recursive: true });
-		writeFileSync(this.filePath, `${JSON.stringify(file, null, "\t")}\n`, "utf-8");
+		this.storage.mutateCurrentHost(
+			() => ({}),
+			(reports) => {
+				if (!reports[model]) return { result: undefined, changed: false };
+				delete reports[model];
+				return { result: undefined, changed: true };
+			},
+		);
 	}
 
 	/** Reports for the current host (default) or an explicit host id. */
 	getForHost(hostId?: string): StoredFitnessReport[] {
-		const file = this.load();
-		return Object.values(file.hosts[hostId ?? this.fingerprint().id] ?? {});
+		return Object.values(this.storage.getHost(hostId) ?? {});
 	}
 
 	/** Every stored report across all hosts (for cross-machine comparisons). */
 	getAll(): StoredFitnessReport[] {
-		const file = this.load();
-		return Object.values(file.hosts).flatMap((models) => Object.values(models));
+		return this.storage.getAllHosts().flatMap((reports) => Object.values(reports));
 	}
 }

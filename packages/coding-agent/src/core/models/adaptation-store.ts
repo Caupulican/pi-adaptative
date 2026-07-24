@@ -1,9 +1,7 @@
-import { existsSync, readFileSync } from "node:fs";
 import { stateFile } from "../agent-paths.ts";
 import { isWorkerSession } from "../session-role.ts";
-import { withFileLockSync, writeFileAtomicSync } from "../util/atomic-file.ts";
 import { isRecordObject } from "../util/value-guards.ts";
-import { currentHostFingerprint, type HostFingerprint } from "./fitness-store.ts";
+import { type HostFingerprint, HostStateStore, isHostFingerprint } from "./host-state-store.ts";
 import {
 	hasUsableModelPerfSample,
 	isModelPerfProfile,
@@ -70,10 +68,10 @@ export interface StoredModelAdaptation {
 	host: HostFingerprint;
 }
 
-interface AdaptationStoreFile {
-	version: 1;
-	/** hostId -> modelRef -> latest stored adaptation profile. */
-	hosts: Record<string, Record<string, StoredModelAdaptation>>;
+interface ProfileMutation {
+	profile: ModelAdaptationProfile;
+	entry?: StoredModelAdaptation;
+	applied: boolean;
 }
 
 function emptyProfile(): ModelAdaptationProfile {
@@ -196,15 +194,40 @@ function mergeRule(rules: readonly ModelAdaptationRule[], rule: ModelAdaptationR
 	return enforceRuleCap([...withoutSameMode, rule]);
 }
 
+function parseAdaptationHost(value: unknown, hostId: string): Record<string, StoredModelAdaptation> | undefined {
+	if (!isRecordObject(value)) return undefined;
+	const profiles: Record<string, StoredModelAdaptation> = {};
+	for (const [model, candidate] of Object.entries(value)) {
+		if (
+			!isRecordObject(candidate) ||
+			candidate.model !== model ||
+			typeof candidate.at !== "string" ||
+			!isHostFingerprint(candidate.host) ||
+			candidate.host.id !== hostId ||
+			!isRecordObject(candidate.profile)
+		)
+			continue;
+		profiles[model] = {
+			model,
+			profile: normalizeProfile(candidate.profile),
+			at: candidate.at,
+			host: candidate.host,
+		};
+	}
+	return profiles;
+}
+
 export class ModelAdaptationStore {
-	private readonly filePath: string;
-	private readonly fingerprint: () => HostFingerprint;
-	private readonly readOnly: boolean;
+	private readonly storage: HostStateStore<Record<string, StoredModelAdaptation>>;
 
 	constructor(filePath: string, options?: { fingerprint?: () => HostFingerprint; readOnly?: boolean }) {
-		this.filePath = filePath;
-		this.fingerprint = options?.fingerprint ?? currentHostFingerprint;
-		this.readOnly = options?.readOnly ?? isWorkerSession();
+		this.storage = new HostStateStore({
+			filePath,
+			version: STORE_VERSION,
+			fingerprint: options?.fingerprint,
+			readOnly: options?.readOnly ?? isWorkerSession(),
+			parseHost: parseAdaptationHost,
+		});
 	}
 
 	static forAgentDir(
@@ -214,39 +237,46 @@ export class ModelAdaptationStore {
 		return new ModelAdaptationStore(stateFile(agentDir, "model-adaptation.json"), options);
 	}
 
-	private load(): AdaptationStoreFile {
-		try {
-			if (!existsSync(this.filePath)) return { version: STORE_VERSION, hosts: {} };
-			const parsed = JSON.parse(readFileSync(this.filePath, "utf-8")) as AdaptationStoreFile;
-			if (parsed && parsed.version === STORE_VERSION && parsed.hosts && typeof parsed.hosts === "object") {
-				return parsed;
-			}
-		} catch {
-			// Unreadable/corrupt store: start fresh in memory; the next save rewrites the file.
-		}
-		return { version: STORE_VERSION, hosts: {} };
-	}
-
-	private write(file: AdaptationStoreFile): void {
-		writeFileAtomicSync(this.filePath, `${JSON.stringify(file, null, "\t")}\n`);
-	}
-
 	/**
 	 * Load-mutate-write under a single exclusive lock so two concurrent stores (e.g. two sessions
 	 * sharing an agentDir) can't both read the old file and clobber each other's write.
 	 */
 	private store(model: string, profile: ModelAdaptationProfile, at: string): StoredModelAdaptation {
-		const host = this.fingerprint();
-		const entry: StoredModelAdaptation = { model, profile: normalizeProfile(profile), at, host };
-		// Zero-footprint (worker session): no lock, no dir, no write -- `save()`/`get()`'s
-		// prune-write path both funnel through here and get the normally-computed entry back.
-		if (this.readOnly) return entry;
-		withFileLockSync(this.filePath, () => {
-			const file = this.load();
-			file.hosts[host.id] = { ...(file.hosts[host.id] ?? {}), [model]: entry };
-			this.write(file);
-		});
-		return entry;
+		return this.storage.mutateCurrentHost(
+			() => ({}),
+			(profiles, host) => {
+				const entry: StoredModelAdaptation = { model, profile: normalizeProfile(profile), at, host };
+				profiles[model] = entry;
+				return { result: entry, changed: true };
+			},
+		);
+	}
+
+	/** Keep the complete profile read-modify-write transaction under the host-state lock. */
+	private mutateProfile(
+		model: string,
+		now: Date,
+		mutate: (profile: ModelAdaptationProfile) => ModelAdaptationProfile | undefined,
+		storedAt = now.toISOString(),
+	): ProfileMutation {
+		return this.storage.mutateCurrentHost<ProfileMutation>(
+			() => ({}),
+			(profiles, host) => {
+				const current = normalizeProfile(profiles[model]?.profile);
+				const activeRules = pruneRetiredRules(current.rules, current.teachStats, now);
+				const pruned = activeRules.length !== current.rules.length;
+				const active = pruned ? { ...current, rules: activeRules } : current;
+				const requested = mutate(active);
+				const applied = requested !== undefined;
+				if (!applied && !pruned) {
+					return { result: { profile: active, applied: false }, changed: false };
+				}
+				const profile = normalizeProfile(requested ?? active);
+				const entry: StoredModelAdaptation = { model, profile, at: storedAt, host };
+				profiles[model] = entry;
+				return { result: { profile, entry, applied }, changed: true };
+			},
+		);
 	}
 
 	/** Persist the profile for a model on the CURRENT host. Best-effort, returns the entry. */
@@ -256,14 +286,12 @@ export class ModelAdaptationStore {
 
 	/** Profile for a model on the current host; prunes retired rules before returning. */
 	get(model: string, now: Date = new Date()): ModelAdaptationProfile {
-		const host = this.fingerprint();
-		const file = this.load();
-		const entry = file.hosts[host.id]?.[model];
+		const entry = this.storage.getHost()?.[model];
 		if (!entry) return emptyProfile();
 		const profile = normalizeProfile(entry.profile);
 		const prunedRules = pruneRetiredRules(profile.rules, profile.teachStats, now);
 		if (prunedRules.length !== profile.rules.length) {
-			return this.store(model, { ...profile, rules: prunedRules }, now.toISOString()).profile;
+			return this.mutateProfile(model, now, () => undefined).profile;
 		}
 		return profile;
 	}
@@ -274,7 +302,6 @@ export class ModelAdaptationStore {
 		rule: { mode: string; text: string; addedAt?: string; lastFiredAt?: string },
 		now = new Date(),
 	): StoredModelAdaptation {
-		const profile = this.get(model, now);
 		const at = now.toISOString();
 		const nextRule: ModelAdaptationRule = {
 			mode: rule.mode,
@@ -282,66 +309,80 @@ export class ModelAdaptationStore {
 			addedAt: rule.addedAt ?? at,
 			lastFiredAt: rule.lastFiredAt ?? at,
 		};
-		return this.store(model, { ...profile, rules: mergeRule(profile.rules, nextRule) }, at);
+		const result = this.mutateProfile(model, now, (profile) => ({
+			...profile,
+			rules: mergeRule(profile.rules, nextRule),
+		}));
+		return result.entry!;
 	}
 
 	removeRule(model: string, mode: string, at = new Date()): boolean {
-		const profile = this.get(model, at);
-		const rules = profile.rules.filter((rule) => rule.mode !== mode);
-		if (rules.length === profile.rules.length) return false;
-		this.store(model, { ...profile, rules }, at.toISOString());
-		return true;
+		return this.mutateProfile(model, at, (profile) => {
+			const rules = profile.rules.filter((rule) => rule.mode !== mode);
+			return rules.length === profile.rules.length ? undefined : { ...profile, rules };
+		}).applied;
 	}
 
 	/** Update last-fired recency for an existing rule. No-op when absent. */
 	markRuleFired(model: string, mode: string, at = new Date()): StoredModelAdaptation | undefined {
-		const profile = this.get(model, at);
-		const rules = profile.rules.map((rule) =>
-			rule.mode === mode ? { ...rule, lastFiredAt: at.toISOString() } : rule,
-		);
-		if (rules.every((rule, index) => rule === profile.rules[index])) return undefined;
-		return this.store(model, { ...profile, rules }, at.toISOString());
+		const result = this.mutateProfile(model, at, (profile) => {
+			const rules = profile.rules.map((rule) =>
+				rule.mode === mode ? { ...rule, lastFiredAt: at.toISOString() } : rule,
+			);
+			return rules.every((rule, index) => rule === profile.rules[index]) ? undefined : { ...profile, rules };
+		});
+		return result.applied ? result.entry : undefined;
 	}
 
 	setProtocol(model: string, protocol: ModelProtocolCalibration, at?: string): StoredModelAdaptation {
 		const now = at ?? (protocol.status === "failed" ? protocol.attemptedAt : protocol.calibratedAt);
-		const profile = this.get(model, new Date(now));
-		return this.store(model, { ...profile, protocol }, now);
+		return this.mutateProfile(model, new Date(now), (profile) => ({ ...profile, protocol }), now).entry!;
 	}
 
 	setToolProbe(model: string, toolProbe: ModelToolProbe, at?: string): StoredModelAdaptation {
 		const now = at ?? toolProbe.probedAt;
-		const profile = this.get(model, new Date(now));
-		return this.store(model, { ...profile, toolProbe }, now);
+		return this.mutateProfile(model, new Date(now), (profile) => ({ ...profile, toolProbe }), now).entry!;
 	}
 
 	recordPerfSample(model: string, sample: ModelPerfSample, at?: string): StoredModelAdaptation | undefined {
 		if (!hasUsableModelPerfSample(sample)) return undefined;
 		const now = at ?? sample.at ?? new Date().toISOString();
-		const profile = this.get(model, new Date(now));
-		const perf = updateModelPerfProfile(profile.perf, sample, now);
-		if (!perf) return undefined;
-		return this.store(model, { ...profile, perf }, now);
+		const result = this.mutateProfile(
+			model,
+			new Date(now),
+			(profile) => {
+				const perf = updateModelPerfProfile(profile.perf, sample, now);
+				return perf ? { ...profile, perf } : undefined;
+			},
+			now,
+		);
+		return result.applied ? result.entry : undefined;
 	}
 
 	removeProtocol(model: string, at = new Date()): boolean {
-		const profile = this.get(model, at);
-		if (!profile.protocol) return false;
-		const { protocol: _protocol, ...rest } = profile;
-		this.store(model, rest, at.toISOString());
-		return true;
+		return this.mutateProfile(model, at, (profile) => {
+			if (!profile.protocol) return undefined;
+			const { protocol: _protocol, ...rest } = profile;
+			return rest;
+		}).applied;
 	}
 
 	setTeachStats(model: string, mode: string, stats: ModelTeachStats, at?: string): StoredModelAdaptation {
 		const now = at ?? new Date().toISOString();
-		const profile = this.get(model, new Date(now));
-		return this.store(model, { ...profile, teachStats: { ...profile.teachStats, [mode]: stats } }, now);
+		return this.mutateProfile(
+			model,
+			new Date(now),
+			(profile) => ({
+				...profile,
+				teachStats: { ...profile.teachStats, [mode]: stats },
+			}),
+			now,
+		).entry!;
 	}
 
 	/** Profiles for the current host (default) or an explicit host id. */
 	getForHost(hostId?: string): StoredModelAdaptation[] {
-		const file = this.load();
-		return Object.values(file.hosts[hostId ?? this.fingerprint().id] ?? {}).map((entry) => ({
+		return Object.values(this.storage.getHost(hostId) ?? {}).map((entry) => ({
 			...entry,
 			profile: normalizeProfile(entry.profile),
 		}));
@@ -349,9 +390,10 @@ export class ModelAdaptationStore {
 
 	/** Every stored profile across all hosts (for cross-machine comparisons). */
 	getAll(): StoredModelAdaptation[] {
-		const file = this.load();
-		return Object.values(file.hosts).flatMap((models) =>
-			Object.values(models).map((entry) => ({ ...entry, profile: normalizeProfile(entry.profile) })),
-		);
+		return this.storage
+			.getAllHosts()
+			.flatMap((models) =>
+				Object.values(models).map((entry) => ({ ...entry, profile: normalizeProfile(entry.profile) })),
+			);
 	}
 }

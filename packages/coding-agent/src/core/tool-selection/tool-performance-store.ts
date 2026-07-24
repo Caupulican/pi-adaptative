@@ -1,7 +1,5 @@
-import { existsSync, mkdirSync, readFileSync, writeFileSync } from "node:fs";
-import { dirname } from "node:path";
 import { stateFile } from "../agent-paths.ts";
-import { currentHostFingerprint, type HostFingerprint } from "../models/fitness-store.ts";
+import { type HostFingerprint, HostStateStore, isHostFingerprint } from "../models/host-state-store.ts";
 import { isWorkerSession } from "../session-role.ts";
 import { isRecordObject } from "../util/value-guards.ts";
 
@@ -91,11 +89,6 @@ interface HostToolPerformanceData {
 	stats: Record<string, ToolPerformanceStats>;
 	observations: ToolSelectionObservation[];
 	intentAgreement: Record<string, ToolSelectionIntentAgreement>;
-}
-
-interface ToolPerformanceStoreFile {
-	version: 1;
-	hosts: Record<string, HostToolPerformanceData>;
 }
 
 export interface ToolExecutionObservation {
@@ -241,27 +234,21 @@ function updateDeviation(
 	return updateEwma(previousDeviation, deviation);
 }
 
-function parseHost(value: unknown): HostToolPerformanceData | undefined {
+function parseHost(value: unknown, hostId: string): HostToolPerformanceData | undefined {
 	if (
 		!isRecordObject(value) ||
-		!isRecordObject(value.host) ||
+		!isHostFingerprint(value.host) ||
+		value.host.id !== hostId ||
 		!isRecordObject(value.stats) ||
 		!Array.isArray(value.observations)
 	)
 		return undefined;
 	const host = value.host;
-	if (
-		typeof host.id !== "string" ||
-		typeof host.cpu !== "string" ||
-		typeof host.cores !== "number" ||
-		typeof host.totalMemGb !== "number"
-	)
-		return undefined;
 	// intentAgreement is a purely additive field (older store files predate it) — tolerate absence
 	// rather than bumping STORE_VERSION, same as any other backward-compatible default-empty field.
 	const intentAgreementRaw = isRecordObject(value.intentAgreement) ? value.intentAgreement : {};
 	return {
-		host: { id: host.id, cpu: host.cpu, cores: host.cores, totalMemGb: host.totalMemGb },
+		host,
 		stats: Object.fromEntries(
 			Object.entries(value.stats).filter((entry): entry is [string, ToolPerformanceStats] => isStats(entry[1])),
 		),
@@ -270,20 +257,6 @@ function parseHost(value: unknown): HostToolPerformanceData | undefined {
 			Object.entries(intentAgreementRaw).filter((entry): entry is [string, ToolSelectionIntentAgreement] =>
 				isIntentAgreement(entry[1]),
 			),
-		),
-	};
-}
-
-function parseFile(value: unknown): ToolPerformanceStoreFile {
-	if (!isRecordObject(value) || value.version !== STORE_VERSION || !isRecordObject(value.hosts)) {
-		return { version: STORE_VERSION, hosts: {} };
-	}
-	return {
-		version: STORE_VERSION,
-		hosts: Object.fromEntries(
-			Object.entries(value.hosts)
-				.map(([hostId, host]) => [hostId, parseHost(host)] as const)
-				.filter((entry): entry is readonly [string, HostToolPerformanceData] => entry[1] !== undefined),
 		),
 	};
 }
@@ -311,14 +284,16 @@ function trimIntentAgreement(
 }
 
 export class ToolPerformanceStore {
-	private readonly filePath: string;
-	private readonly fingerprint: () => HostFingerprint;
-	private readonly readOnly: boolean;
+	private readonly storage: HostStateStore<HostToolPerformanceData>;
 
 	constructor(filePath: string, options: { fingerprint?: () => HostFingerprint; readOnly?: boolean } = {}) {
-		this.filePath = filePath;
-		this.fingerprint = options.fingerprint ?? currentHostFingerprint;
-		this.readOnly = options.readOnly ?? isWorkerSession();
+		this.storage = new HostStateStore({
+			filePath,
+			version: STORE_VERSION,
+			fingerprint: options.fingerprint,
+			readOnly: options.readOnly ?? isWorkerSession(),
+			parseHost,
+		});
 	}
 
 	static forAgentDir(
@@ -328,42 +303,19 @@ export class ToolPerformanceStore {
 		return new ToolPerformanceStore(stateFile(agentDir, "tool-performance.json"), options);
 	}
 
-	private load(): ToolPerformanceStoreFile {
-		try {
-			if (!existsSync(this.filePath)) return { version: STORE_VERSION, hosts: {} };
-			return parseFile(JSON.parse(readFileSync(this.filePath, "utf8")));
-		} catch {
-			return { version: STORE_VERSION, hosts: {} };
-		}
-	}
-
-	private save(file: ToolPerformanceStoreFile): void {
-		// Zero-footprint (worker session): never create the state dir, lock, or file -- the caller
-		// still gets its normally-computed return value from the in-memory `file`.
-		if (this.readOnly) return;
-		mkdirSync(dirname(this.filePath), { recursive: true });
-		writeFileSync(this.filePath, `${JSON.stringify(file, null, "\t")}\n`, "utf8");
-	}
-
-	private hostData(file: ToolPerformanceStoreFile): HostToolPerformanceData {
-		const fingerprint = this.fingerprint();
-		const existing = file.hosts[fingerprint.id];
-		if (existing) return existing;
-		const created: HostToolPerformanceData = { host: fingerprint, stats: {}, observations: [], intentAgreement: {} };
-		file.hosts[fingerprint.id] = created;
-		return created;
+	private createHostData(host: HostFingerprint): HostToolPerformanceData {
+		return { host, stats: {}, observations: [], intentAgreement: {} };
 	}
 
 	get(key: ToolPerformanceKey): ToolPerformanceStats {
-		const file = this.load();
-		const host = file.hosts[this.fingerprint().id];
+		const host = this.storage.getHost();
 		const stats = host?.stats[statKey(key)];
 		return stats ? { ...stats } : emptyStats(key, new Date(0).toISOString());
 	}
 
 	/** Every per-tool track record recorded for a (model,intent) bucket — the promotion.ts input. */
 	getStatsForIntent(modelRef: string, intentClass: ToolSelectionIntentClass): ToolPerformanceStats[] {
-		const host = this.load().hosts[this.fingerprint().id];
+		const host = this.storage.getHost();
 		if (!host) return [];
 		return Object.values(host.stats)
 			.filter((stats) => stats.modelRef === modelRef && stats.intentClass === intentClass)
@@ -372,14 +324,14 @@ export class ToolPerformanceStore {
 
 	/** Durable observe-mode agreement for one (model,intent) bucket (see {@link ToolSelectionIntentAgreement}). */
 	getIntentAgreement(modelRef: string, intentClass: ToolSelectionIntentClass): ToolSelectionIntentAgreement {
-		const host = this.load().hosts[this.fingerprint().id];
+		const host = this.storage.getHost();
 		const record = host?.intentAgreement[intentAgreementKey(modelRef, intentClass)];
 		return record ? { ...record } : emptyIntentAgreement(modelRef, intentClass, new Date(0).toISOString());
 	}
 
 	/** All recorded (model,intent) agreement buckets, optionally scoped to one model — report input. */
 	getAllIntentAgreements(modelRef?: string): ToolSelectionIntentAgreement[] {
-		const host = this.load().hosts[this.fingerprint().id];
+		const host = this.storage.getHost();
 		return Object.values(host?.intentAgreement ?? {})
 			.filter((record) => modelRef === undefined || record.modelRef === modelRef)
 			.map((record) => ({ ...record }));
@@ -390,88 +342,97 @@ export class ToolPerformanceStore {
 		outcome: "repaired" | "bounced",
 		at = new Date().toISOString(),
 	): ToolPerformanceStats {
-		const file = this.load();
-		const host = this.hostData(file);
-		const storageKey = statKey(key);
-		const current = host.stats[storageKey] ?? emptyStats(key, at);
-		const next: ToolPerformanceStats = {
-			...current,
-			repairCount: current.repairCount + (outcome === "repaired" ? 1 : 0),
-			bounceCount: current.bounceCount + (outcome === "bounced" ? 1 : 0),
-			lastUsedAt: at,
-		};
-		host.stats[storageKey] = next;
-		host.stats = trimStats(host.stats);
-		this.save(file);
-		return { ...next };
+		return this.storage.mutateCurrentHost(
+			(host) => this.createHostData(host),
+			(host) => {
+				const storageKey = statKey(key);
+				const current = host.stats[storageKey] ?? emptyStats(key, at);
+				const next: ToolPerformanceStats = {
+					...current,
+					repairCount: current.repairCount + (outcome === "repaired" ? 1 : 0),
+					bounceCount: current.bounceCount + (outcome === "bounced" ? 1 : 0),
+					lastUsedAt: at,
+				};
+				host.stats[storageKey] = next;
+				host.stats = trimStats(host.stats);
+				return { result: { ...next }, changed: true };
+			},
+		);
 	}
 
 	recordExecution(observation: ToolExecutionObservation): ToolPerformanceStats {
 		const at = observation.at ?? new Date().toISOString();
-		const file = this.load();
-		const host = this.hostData(file);
-		const storageKey = statKey(observation.key);
-		const current = host.stats[storageKey] ?? emptyStats(observation.key, at);
-		const latencyMs = finiteNonNegative(observation.latencyMs);
-		const inputTokenEstimate = finiteNonNegative(observation.inputTokenEstimate);
-		const outputTokenEstimate = finiteNonNegative(observation.outputTokenEstimate);
-		const next: ToolPerformanceStats = {
-			...current,
-			alpha: current.alpha + (observation.success ? 1 : 0),
-			beta: current.beta + (observation.success ? 0 : 1),
-			sampleCount: current.sampleCount + 1,
-			latencyEwmaMs: updateEwma(current.latencyEwmaMs, latencyMs),
-			latencyDeviationEwmaMs: updateDeviation(current.latencyEwmaMs, current.latencyDeviationEwmaMs, latencyMs),
-			inputTokenEstimateEwma: updateEwma(current.inputTokenEstimateEwma, inputTokenEstimate),
-			outputTokenEstimateEwma: updateEwma(current.outputTokenEstimateEwma, outputTokenEstimate),
-			failureCount: current.failureCount + (observation.success ? 0 : 1),
-			lastUsedAt: at,
-		};
-		host.stats[storageKey] = next;
-		host.stats = trimStats(host.stats);
-		host.observations.push({
-			...observation.selection,
-			at,
-			modelRef: observation.key.modelRef,
-			intentClass: observation.key.intentClass,
-			actualTool: observation.key.tool,
-			succeeded: observation.success,
-			ranked: observation.selection.ranked.slice(0, 6),
-			shortlist: observation.selection.shortlist.slice(0, 3),
-			latencyMs,
-			inputTokenEstimate,
-			outputTokenEstimate,
-		});
-		if (host.observations.length > MAX_OBSERVATIONS_PER_HOST) {
-			host.observations = host.observations.slice(-MAX_OBSERVATIONS_PER_HOST);
-		}
+		return this.storage.mutateCurrentHost(
+			(host) => this.createHostData(host),
+			(host) => {
+				const storageKey = statKey(observation.key);
+				const current = host.stats[storageKey] ?? emptyStats(observation.key, at);
+				const latencyMs = finiteNonNegative(observation.latencyMs);
+				const inputTokenEstimate = finiteNonNegative(observation.inputTokenEstimate);
+				const outputTokenEstimate = finiteNonNegative(observation.outputTokenEstimate);
+				const next: ToolPerformanceStats = {
+					...current,
+					alpha: current.alpha + (observation.success ? 1 : 0),
+					beta: current.beta + (observation.success ? 0 : 1),
+					sampleCount: current.sampleCount + 1,
+					latencyEwmaMs: updateEwma(current.latencyEwmaMs, latencyMs),
+					latencyDeviationEwmaMs: updateDeviation(
+						current.latencyEwmaMs,
+						current.latencyDeviationEwmaMs,
+						latencyMs,
+					),
+					inputTokenEstimateEwma: updateEwma(current.inputTokenEstimateEwma, inputTokenEstimate),
+					outputTokenEstimateEwma: updateEwma(current.outputTokenEstimateEwma, outputTokenEstimate),
+					failureCount: current.failureCount + (observation.success ? 0 : 1),
+					lastUsedAt: at,
+				};
+				host.stats[storageKey] = next;
+				host.stats = trimStats(host.stats);
+				host.observations.push({
+					...observation.selection,
+					at,
+					modelRef: observation.key.modelRef,
+					intentClass: observation.key.intentClass,
+					actualTool: observation.key.tool,
+					succeeded: observation.success,
+					ranked: observation.selection.ranked.slice(0, 6),
+					shortlist: observation.selection.shortlist.slice(0, 3),
+					latencyMs,
+					inputTokenEstimate,
+					outputTokenEstimate,
+				});
+				if (host.observations.length > MAX_OBSERVATIONS_PER_HOST) {
+					host.observations = host.observations.slice(-MAX_OBSERVATIONS_PER_HOST);
+				}
 
-		// Observe-mode agreement: did the RAW ranking's top pick (before any actual-tool-only
-		// eligibility gating) match what the model actually called? Recorded durably per
-		// (model,intent), separate from the capped `observations` log above, so it survives trimming.
-		const predictedBest = observation.selection.ranked[0]?.tool;
-		const agreed = predictedBest !== undefined && predictedBest === observation.key.tool;
-		const agreementKey = intentAgreementKey(observation.key.modelRef, observation.key.intentClass);
-		const currentAgreement =
-			host.intentAgreement[agreementKey] ??
-			emptyIntentAgreement(observation.key.modelRef, observation.key.intentClass, at);
-		host.intentAgreement[agreementKey] = {
-			...currentAgreement,
-			sampleCount: currentAgreement.sampleCount + 1,
-			agreementCount: currentAgreement.agreementCount + (agreed ? 1 : 0),
-			hintActiveSampleCount: currentAgreement.hintActiveSampleCount + (observation.hintActiveAtCallTime ? 1 : 0),
-			hintActiveAgreementCount:
-				currentAgreement.hintActiveAgreementCount + (observation.hintActiveAtCallTime && agreed ? 1 : 0),
-			lastUpdatedAt: at,
-		};
-		host.intentAgreement = trimIntentAgreement(host.intentAgreement);
+				// Observe-mode agreement: did the RAW ranking's top pick (before any actual-tool-only
+				// eligibility gating) match what the model actually called? Recorded durably per
+				// (model,intent), separate from the capped `observations` log above, so it survives trimming.
+				const predictedBest = observation.selection.ranked[0]?.tool;
+				const agreed = predictedBest !== undefined && predictedBest === observation.key.tool;
+				const agreementKey = intentAgreementKey(observation.key.modelRef, observation.key.intentClass);
+				const currentAgreement =
+					host.intentAgreement[agreementKey] ??
+					emptyIntentAgreement(observation.key.modelRef, observation.key.intentClass, at);
+				host.intentAgreement[agreementKey] = {
+					...currentAgreement,
+					sampleCount: currentAgreement.sampleCount + 1,
+					agreementCount: currentAgreement.agreementCount + (agreed ? 1 : 0),
+					hintActiveSampleCount:
+						currentAgreement.hintActiveSampleCount + (observation.hintActiveAtCallTime ? 1 : 0),
+					hintActiveAgreementCount:
+						currentAgreement.hintActiveAgreementCount + (observation.hintActiveAtCallTime && agreed ? 1 : 0),
+					lastUpdatedAt: at,
+				};
+				host.intentAgreement = trimIntentAgreement(host.intentAgreement);
 
-		this.save(file);
-		return { ...next };
+				return { result: { ...next }, changed: true };
+			},
+		);
 	}
 
 	getMetrics(modelRef?: string): ToolSelectionMetrics {
-		const host = this.load().hosts[this.fingerprint().id];
+		const host = this.storage.getHost();
 		const observations = (host?.observations ?? []).filter(
 			(observation) => modelRef === undefined || observation.modelRef === modelRef,
 		);
@@ -502,7 +463,7 @@ export class ToolPerformanceStore {
 	}
 
 	getObservations(modelRef?: string): ToolSelectionObservation[] {
-		const host = this.load().hosts[this.fingerprint().id];
+		const host = this.storage.getHost();
 		return (host?.observations ?? [])
 			.filter((observation) => modelRef === undefined || observation.modelRef === modelRef)
 			.map((observation) => ({
