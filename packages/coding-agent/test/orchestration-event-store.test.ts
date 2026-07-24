@@ -118,6 +118,37 @@ describe("OrchestrationEventStore", () => {
 		expect(store.readAll()).toHaveLength(2);
 	});
 
+	it("rejects a missing committed event rather than extending a corrupt tail", () => {
+		const store = makeStore();
+		store.append({ type: "objective.created", aggregateId: "objective-1", actor: "kernel", payload: {} });
+		store.append({ type: "objective.paused", aggregateId: "objective-1", actor: "human", payload: {} });
+		store.append({ type: "objective.resumed", aggregateId: "objective-1", actor: "human", payload: {} });
+		unlinkSync(join(store.eventsDir, "0000000000000002.json"));
+
+		expect(() => store.readAll()).toThrow("Missing orchestration event ordinal 2");
+		expect(() =>
+			store.append({ type: "objective.cancelled", aggregateId: "objective-1", actor: "human", payload: {} }),
+		).toThrow("Missing orchestration event ordinal 2");
+	});
+
+	it("rejects a truncated final event when the valid cursor proves it was committed", () => {
+		const store = makeStore();
+		store.append({ type: "objective.created", aggregateId: "objective-1", actor: "kernel", payload: {} });
+		store.append({ type: "objective.paused", aggregateId: "objective-1", actor: "human", payload: {} });
+		unlinkSync(join(store.eventsDir, "0000000000000002.json"));
+
+		expect(() => store.readAll()).toThrow("Orchestration cursor 2 is ahead of the last committed event 1");
+		expect(() => store.readAfter(0)).toThrow("Orchestration cursor 2 is ahead of the last committed event 1");
+	});
+
+	it("propagates event directory errors instead of treating them as an empty event tail", () => {
+		const store = makeStore();
+		mkdirSync(store.rootDir, { recursive: true });
+		writeFileSync(store.eventsDir, "not a directory\n", "utf-8");
+
+		expect(() => store.readAll()).toThrow(/ENOTDIR|not a directory/i);
+	});
+
 	it("rebuilds an idempotency marker from a committed crash tail", () => {
 		const store = makeStore();
 		const input = {
@@ -187,6 +218,24 @@ describe("OrchestrationEventStore", () => {
 			throughOrdinal: 1,
 			projection: { lastOrdinal: 1, state: "created" },
 		});
+	});
+
+	it("refuses to append when the published projection snapshot is missing", () => {
+		const store = makeStore("missing-published-snapshot", { maxTailEvents: 1 });
+		store.append({
+			type: "objective.created",
+			aggregateId: "objective-1",
+			actor: "kernel",
+			payload: {},
+		});
+		expect(store.compactIfNeeded(1, () => ({ lastOrdinal: 1, state: "created" }))).toBe(true);
+		store.append({ type: "objective.paused", aggregateId: "objective-1", actor: "human", payload: {} });
+		unlinkSync(join(store.snapshotsDir, "0000000000000001.json"));
+
+		expect(() =>
+			store.append({ type: "objective.resumed", aggregateId: "objective-1", actor: "human", payload: {} }),
+		).toThrow("Failed to parse orchestration projection snapshot");
+		expect(readdirSync(store.eventsDir)).toEqual(["0000000000000002.json"]);
 	});
 
 	it("fails loudly on a corrupt committed record", () => {

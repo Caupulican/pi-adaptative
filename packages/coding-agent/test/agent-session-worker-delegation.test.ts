@@ -605,6 +605,68 @@ describe("AgentSession worker delegation", () => {
 		}
 	});
 
+	it("keeps a queued default-profile worker pinned across default-profile changes", async () => {
+		const pinned = workerProfile("pinned-worker", "low");
+		const replacement = workerProfile("replacement-worker", "off");
+		const harness = await createHarness({
+			models: [
+				{ id: "foreground", contextWindow: 128_000 },
+				{ id: "pinned-worker", contextWindow: 128_000, reasoning: true },
+				{ id: "replacement-worker", contextWindow: 128_000 },
+			],
+			settings: { workerDelegation: { enabled: true, maxConcurrent: 1 } },
+			workerOrchestrationProfile: pinned,
+			additionalOrchestrationProfiles: [replacement],
+		});
+		try {
+			let releaseFirst!: () => void;
+			const firstWorkerResponse = new Promise<AssistantMessage>((resolve) => {
+				releaseFirst = () => resolve(fauxAssistantMessage('{"summary":"first worker done"}'));
+			});
+			const workerModelIds: string[] = [];
+			const routeResponse: FauxResponseFactory = (context, _options, _state, model) => {
+				if (!context.systemPrompt?.includes("You are a bounded subagent shipped by a coding-agent session")) {
+					return fauxAssistantMessage("Delegations started.");
+				}
+				workerModelIds.push(model.id);
+				return workerModelIds.length === 1
+					? firstWorkerResponse
+					: fauxAssistantMessage('{"summary":"second worker done"}');
+			};
+			harness.setResponses([
+				fauxAssistantMessage(
+					[
+						fauxToolCall("delegate", { instructions: "First queued-profile worker" }),
+						fauxToolCall("delegate", { instructions: "Second queued-profile worker" }),
+					],
+					{ stopReason: "toolUse" },
+				),
+				routeResponse,
+				routeResponse,
+				routeResponse,
+			]);
+
+			await harness.session.prompt("Delegate both workers", { autoContinueGoal: false });
+			await vi.waitFor(() =>
+				expect(
+					harness.session
+						.getLaneRecords()
+						.some((record) => record.type === "worker" && record.status === "queued"),
+				).toBe(true),
+			);
+			harness.settingsManager.setWorkerDelegationSettings({ orchestrationProfile: replacement.profileId });
+			releaseFirst();
+
+			await vi.waitFor(() => expect(harness.session.getWorkerClaimSnapshots()).toHaveLength(2));
+			expect(workerModelIds).toEqual([
+				pinned.modelPolicy.candidates[0]?.modelId,
+				pinned.modelPolicy.candidates[0]?.modelId,
+			]);
+		} finally {
+			harness.cleanup();
+		}
+	});
+
 	it("returns from the foreground turn while the worker remains genuinely backgrounded", async () => {
 		const harness = await createHarness({ settings: { workerDelegation: { enabled: true } } });
 		let resolveWorker: (message: AssistantMessage) => void = () => {};

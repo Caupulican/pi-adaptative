@@ -508,7 +508,12 @@ export class WorkerDelegationController {
 				);
 				return { started: false, skipReason: "orchestration_ledger_error" };
 			}
-			this.scheduler.enqueue(record, request, false, request.verificationOfTaskId !== undefined);
+			this.scheduler.enqueue(
+				record,
+				{ ...request, profileId: shipment.profile.profileId },
+				false,
+				request.verificationOfTaskId !== undefined,
+			);
 			this.notifications.statusChanged();
 			return { started: true, record };
 		}

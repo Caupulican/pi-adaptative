@@ -17,6 +17,7 @@ import {
 	type ProcessMatrixRuntimeConfig,
 	startProcessMatrixRuntime,
 } from "../src/core/process-matrix/runtime.ts";
+import * as processMatrixStore from "../src/core/process-matrix/store.ts";
 import { buildEntryId, listEntries, readEntry, writeEntry } from "../src/core/process-matrix/store.ts";
 import { applyAdoption, beginWindDown } from "../src/core/process-matrix/supervisor.ts";
 import { PI_WORKTREE_LANE_ENV } from "../src/core/worktree-sync/runtime.ts";
@@ -264,7 +265,7 @@ describe("startProcessMatrixRuntime (worker branch)", () => {
 		expect(await listEntries(harness.agentDir)).toEqual([]);
 		expect(harness.notices).toEqual([]);
 		expect(harness.exitRequests).toBe(0);
-		handle.stop();
+		await handle.stop();
 	});
 
 	it("self-registers a running entry bound to its parent and stays healthy while the parent lives", async () => {
@@ -295,7 +296,7 @@ describe("startProcessMatrixRuntime (worker branch)", () => {
 		expect(stillRunning?.status).toBe("running");
 		expect(harness.notices).toEqual([]);
 		expect(harness.exitRequests).toBe(0);
-		handle.stop();
+		await handle.stop();
 	});
 
 	it("winds down when a reused live PID has no fresh matching parent-session heartbeat", async () => {
@@ -318,7 +319,7 @@ describe("startProcessMatrixRuntime (worker branch)", () => {
 		);
 		expect(woundDown?.windDownReason).toBe("parent_lost");
 		expect(harness.notices[0]).toContain("parent process");
-		handle.stop();
+		await handle.stop();
 	});
 
 	it("parent death winds down gracefully -- never silently -- leaving a lane-tagged resumable payload", async () => {
@@ -345,7 +346,7 @@ describe("startProcessMatrixRuntime (worker branch)", () => {
 		expect(harness.notices[0]).toContain("resumable");
 		// Grace window: wound down but NOT exited yet.
 		expect(harness.exitRequests).toBe(0);
-		handle.stop();
+		await handle.stop();
 	});
 
 	it("persists the exact logical-agent resume context when the parent disappears", async () => {
@@ -384,7 +385,7 @@ describe("startProcessMatrixRuntime (worker branch)", () => {
 			taskRef: "goal-1",
 			taskSummary: "Finish the scoped implementation",
 		});
-		handle.stop();
+		await handle.stop();
 	});
 
 	it("applies a master-written adoption during grace, keeps the adopter's sessionId, and re-arms the watch on the new parent", async () => {
@@ -433,7 +434,7 @@ describe("startProcessMatrixRuntime (worker branch)", () => {
 		expect(harness.notices.some((text) => text.includes(`pid ${NEW_PARENT_PID}`) && text.includes("gone"))).toBe(
 			true,
 		);
-		handle.stop();
+		await handle.stop();
 	});
 
 	it("self-exits cooperatively once the adoption grace window expires unclaimed, and only once", async () => {
@@ -469,7 +470,7 @@ describe("startProcessMatrixRuntime (worker branch)", () => {
 		expect(harness.exitRequests).toBe(1);
 		// The resumable payload survives for a future session to pick up.
 		expect((await readWorkerEntry(harness))?.status).toBe("resumable");
-		handle.stop();
+		await handle.stop();
 	});
 
 	it("honors a master-requested cooperative cleanup while healthy: persists the wind-down, notifies, exits", async () => {
@@ -502,7 +503,7 @@ describe("startProcessMatrixRuntime (worker branch)", () => {
 
 		await tick(POLL_MS * 3);
 		expect(harness.exitRequests).toBe(1);
-		handle.stop();
+		await handle.stop();
 	});
 
 	it("stop() halts the watch: a later parent death is no longer observed", async () => {
@@ -512,13 +513,35 @@ describe("startProcessMatrixRuntime (worker branch)", () => {
 		const handle = await startProcessMatrixRuntime(harness.config);
 		await settle();
 
-		handle.stop();
+		await handle.stop();
 		harness.livePids.delete(PARENT_PID);
 		await tick(POLL_MS * 3);
 
 		expect((await readWorkerEntry(harness))?.status).toBe("closed");
 		expect(harness.notices).toEqual([]);
 		expect(harness.exitRequests).toBe(0);
+	});
+
+	it("an older worker exit cannot close a newer same-session process generation", async () => {
+		vi.useFakeTimers({ toFake: ["setInterval", "clearInterval"] });
+		useWorkerEnv();
+		const harness = makeHarness();
+		const handle = await startProcessMatrixRuntime(harness.config);
+		const registered = await awaitState(
+			() => readWorkerEntry(harness),
+			(entry) => entry !== undefined,
+		);
+		const newer = {
+			...(registered as ProcessMatrixEntry),
+			pid: 919_191,
+			startedAt: new Date(T0 + 1).toISOString(),
+			heartbeatAt: new Date(T0 + 1).toISOString(),
+		};
+		await writeEntry(harness.agentDir, newer);
+
+		await handle.stop();
+
+		expect(await readWorkerEntry(harness)).toEqual(newer);
 	});
 });
 
@@ -560,7 +583,36 @@ describe("startProcessMatrixRuntime (master branch)", () => {
 			(entry) => entry?.heartbeatAt === new Date(T0 + HEARTBEAT_MS).toISOString(),
 		);
 		expect(heartbeated?.heartbeatAt).toBe(new Date(T0 + HEARTBEAT_MS).toISOString());
-		handle.stop();
+		await handle.stop();
+	});
+
+	it("an older master heartbeat and stop cannot overwrite a newer same-session process generation", async () => {
+		vi.useFakeTimers({ toFake: ["setInterval", "clearInterval"] });
+		useMasterEnv();
+		const harness = makeHarness();
+		const handle = await startProcessMatrixRuntime(harness.config);
+		const entryId = buildEntryId("master", harness.config.agent.resumeContext.sessionId);
+		const registered = await awaitState(
+			() => readEntry(harness.agentDir, entryId),
+			(entry) => entry !== undefined,
+		);
+		const newer = {
+			...(registered as ProcessMatrixEntry),
+			pid: 919_191,
+			startedAt: new Date(T0 + 1).toISOString(),
+			heartbeatAt: new Date(T0 + 1).toISOString(),
+		};
+		await writeEntry(harness.agentDir, newer);
+
+		harness.clock.ms = T0 + HEARTBEAT_MS;
+		await tick(HEARTBEAT_MS);
+		await awaitState(
+			async () => harness.diagnostics,
+			(diagnostics) => diagnostics.some((message) => message.includes("ownership moved")),
+		);
+		await handle.stop();
+
+		expect(await readEntry(harness.agentDir, entryId)).toEqual(newer);
 	});
 
 	it("orphan scan without a UI is report-only: a diagnostic names the orphan, nothing is written, nobody is asked", async () => {
@@ -582,7 +634,7 @@ describe("startProcessMatrixRuntime (master branch)", () => {
 			true,
 		);
 		expect(await readEntry(harness.agentDir, orphan.entryId)).toEqual(orphan);
-		handle.stop();
+		await handle.stop();
 	});
 
 	it("prunes terminal and expired records while retaining fresh resumable recovery state", async () => {
@@ -630,7 +682,7 @@ describe("startProcessMatrixRuntime (master branch)", () => {
 			async () => harness.diagnostics,
 			(diagnostics) => diagnostics.some((text) => text.includes("pruned 2")),
 		);
-		handle.stop();
+		await handle.stop();
 	});
 
 	it("headless resume automatically re-adopts a live worker owned by this exact session", async () => {
@@ -653,14 +705,14 @@ describe("startProcessMatrixRuntime (master branch)", () => {
 		expect(adopted?.parentSessionId).toBe(harness.config.agent.resumeContext.sessionId);
 		expect(harness.confirmAsks).toEqual([]);
 		expect(harness.diagnostics.some((text) => text.includes("report-only"))).toBe(false);
-		handle.stop();
+		await handle.stop();
 	});
 
 	it("headless resume repairs and relaunches an exact worker interrupted before its resumable write", async () => {
 		vi.useFakeTimers({ toFake: ["setInterval", "clearInterval"] });
 		useMasterEnv();
 		const completion = new Promise<{ code: number | null; signal: NodeJS.Signals | null }>(() => {});
-		const resumeWorker = vi.fn(async () => ({ started: true as const, completion }));
+		const resumeWorker = vi.fn(async () => ({ started: true as const, pid: 818_181, completion }));
 		const harness = makeHarness({ hasUI: false, resumeWorker, taskRef: "goal-1" });
 		const base = orphanEntry();
 		const orphan = {
@@ -690,7 +742,7 @@ describe("startProcessMatrixRuntime (master branch)", () => {
 			parentPid: process.pid,
 			parentSessionId: harness.config.agent.resumeContext.sessionId,
 		});
-		handle.stop();
+		await handle.stop();
 	});
 
 	it("does not automatically recover an exact-session worker from another goal", async () => {
@@ -715,7 +767,7 @@ describe("startProcessMatrixRuntime (master branch)", () => {
 		expect(resumeWorker).not.toHaveBeenCalled();
 		expect(harness.confirmAsks).toEqual([]);
 		expect(await readEntry(harness.agentDir, orphan.entryId)).toEqual(orphan);
-		handle.stop();
+		await handle.stop();
 	});
 
 	it("does not automatically recover workers when the current goal is terminal", async () => {
@@ -741,7 +793,7 @@ describe("startProcessMatrixRuntime (master branch)", () => {
 		);
 
 		expect(await readEntry(harness.agentDir, orphan.entryId)).toEqual(orphan);
-		handle.stop();
+		await handle.stop();
 	});
 
 	it("persists a terminal handoff after owner-session shutdown and delivers it on resume", async () => {
@@ -751,7 +803,7 @@ describe("startProcessMatrixRuntime (master branch)", () => {
 		const completion = new Promise<{ code: number | null; signal: NodeJS.Signals | null }>((resolve) => {
 			finish = resolve;
 		});
-		const resumeWorker = vi.fn(async () => ({ started: true as const, completion }));
+		const resumeWorker = vi.fn(async () => ({ started: true as const, pid: 818_181, completion }));
 		const harness = makeHarness({ hasUI: false, resumeWorker, taskRef: "goal-1" });
 		const base = orphanEntry();
 		const orphan: ProcessMatrixEntry = {
@@ -787,6 +839,53 @@ describe("startProcessMatrixRuntime (master branch)", () => {
 		await secondHandle.stop();
 	});
 
+	it("does not overwrite a newer worker when terminal acknowledgement races self-registration", async () => {
+		vi.useFakeTimers({ toFake: ["setInterval", "clearInterval"] });
+		useMasterEnv();
+		let signalNotification!: () => void;
+		let releaseNotification!: () => void;
+		const notificationStarted = new Promise<void>((resolve) => {
+			signalNotification = resolve;
+		});
+		const notificationGate = new Promise<void>((resolve) => {
+			releaseNotification = resolve;
+		});
+		let harness!: Harness;
+		harness = makeHarness({
+			notify: async (text) => {
+				signalNotification();
+				await notificationGate;
+				harness.notices.push(text);
+			},
+		});
+		const base = orphanEntry();
+		const pending: ProcessMatrixEntry = {
+			...base,
+			status: "closed",
+			parentSessionId: harness.config.agent.resumeContext.sessionId,
+			terminal: { code: 0, signal: null, observedAt: new Date(T0).toISOString() },
+		};
+		await writeEntry(harness.agentDir, pending);
+
+		const handle = await startProcessMatrixRuntime(harness.config);
+		await notificationStarted;
+		const newer: ProcessMatrixEntry = {
+			...base,
+			pid: 919_191,
+			status: "running",
+			parentSessionId: harness.config.agent.resumeContext.sessionId,
+		};
+		await writeEntry(harness.agentDir, newer);
+		releaseNotification();
+		await awaitState(
+			async () => harness.diagnostics,
+			(diagnostics) => diagnostics.some((message) => message.includes("changed before acknowledgement")),
+		);
+
+		expect(await readEntry(harness.agentDir, pending.entryId)).toEqual(newer);
+		await handle.stop();
+	});
+
 	it("orphan scan with an owner-confirmed adoption writes this master in as the orphan's new parent", async () => {
 		vi.useFakeTimers({ toFake: ["setInterval", "clearInterval"] });
 		useMasterEnv();
@@ -810,7 +909,7 @@ describe("startProcessMatrixRuntime (master branch)", () => {
 			parentPid: process.pid,
 			parentSessionId: harness.config.agent.resumeContext.sessionId,
 		});
-		handle.stop();
+		await handle.stop();
 	});
 
 	it("stop fences a pending owner prompt before it can write an adoption", async () => {
@@ -860,7 +959,7 @@ describe("startProcessMatrixRuntime (master branch)", () => {
 			status: "winding_down",
 			windDownReason: "user_cleanup",
 		});
-		handle.stop();
+		await handle.stop();
 	});
 
 	it("orphan scan with both asks declined leaves the orphan entry untouched", async () => {
@@ -880,7 +979,7 @@ describe("startProcessMatrixRuntime (master branch)", () => {
 
 		expect(harness.confirmAsks).toHaveLength(2);
 		expect(await readEntry(harness.agentDir, orphan.entryId)).toEqual(orphan);
-		handle.stop();
+		await handle.stop();
 	});
 
 	it("relaunches a dead resumable logical agent and notifies the new parent on its terminal process event", async () => {
@@ -890,7 +989,7 @@ describe("startProcessMatrixRuntime (master branch)", () => {
 		const completion = new Promise<{ code: number | null; signal: NodeJS.Signals | null }>((resolve) => {
 			finish = resolve;
 		});
-		const resumeWorker = vi.fn(async () => ({ started: true as const, completion }));
+		const resumeWorker = vi.fn(async () => ({ started: true as const, pid: 818_181, completion }));
 		const harness = makeHarness({ hasUI: true, resumeWorker });
 		harness.confirmAnswers.push(true);
 		const resumeContext = {
@@ -936,6 +1035,215 @@ describe("startProcessMatrixRuntime (master branch)", () => {
 			status: "closed",
 			terminal: { code: 0, signal: null, notificationDeliveredAt: expect.any(String) },
 		});
-		handle.stop();
+		await handle.stop();
+	});
+
+	it("ignores a stale replacement terminal event after a newer worker has claimed the logical entry", async () => {
+		vi.useFakeTimers({ toFake: ["setInterval", "clearInterval"] });
+		useMasterEnv();
+		let finish!: (result: { code: number | null; signal: NodeJS.Signals | null }) => void;
+		const completion = new Promise<{ code: number | null; signal: NodeJS.Signals | null }>((resolve) => {
+			finish = resolve;
+		});
+		const launchedPid = 818_181;
+		const replacementPid = 919_191;
+		const resumeWorker = vi.fn(async () => ({ started: true as const, pid: launchedPid, completion }));
+		const harness = makeHarness({ hasUI: false, resumeWorker, taskRef: "goal-1" });
+		const base = orphanEntry();
+		const orphan: ProcessMatrixEntry = {
+			...base,
+			status: "resumable",
+			parentSessionId: harness.config.agent.resumeContext.sessionId,
+			taskRef: "goal-1",
+			resumable: { lastCode: "resumable", agent: base.agent, taskRef: "goal-1" },
+		};
+		await writeEntry(harness.agentDir, orphan);
+
+		const handle = await startProcessMatrixRuntime(harness.config);
+		await awaitState(
+			() => readEntry(harness.agentDir, orphan.entryId),
+			(entry) => entry?.pid === launchedPid,
+		);
+		const newerReplacement = {
+			...(await readEntry(harness.agentDir, orphan.entryId)),
+			pid: replacementPid,
+		};
+		await writeEntry(harness.agentDir, newerReplacement as ProcessMatrixEntry);
+
+		finish({ code: 0, signal: null });
+		await awaitState(
+			async () => harness.diagnostics,
+			(diagnostics) => diagnostics.some((message) => message.includes("ignored stale terminal handoff")),
+		);
+
+		const current = await readEntry(harness.agentDir, orphan.entryId);
+		expect(current).toMatchObject({
+			status: "running",
+			pid: replacementPid,
+		});
+		expect(current?.terminal).toBeUndefined();
+		expect(harness.notices).toEqual([]);
+		await handle.stop();
+	});
+
+	it("persists terminal state from a replacement that self-registers before launcher bookkeeping", async () => {
+		vi.useFakeTimers({ toFake: ["setInterval", "clearInterval"] });
+		useMasterEnv();
+		let finish!: (result: { code: number | null; signal: NodeJS.Signals | null }) => void;
+		const completion = new Promise<{ code: number | null; signal: NodeJS.Signals | null }>((resolve) => {
+			finish = resolve;
+		});
+		const launchedPid = 818_181;
+		const replacementStartedAt = "2026-07-19T12:01:00.000Z";
+		let agentDir = "";
+		let entryId = "";
+		const resumeWorker = vi.fn(async () => {
+			const claimed = await readEntry(agentDir, entryId);
+			expect(claimed).toBeDefined();
+			await writeEntry(agentDir, {
+				...(claimed as ProcessMatrixEntry),
+				pid: launchedPid,
+				startedAt: replacementStartedAt,
+				heartbeatAt: replacementStartedAt,
+			});
+			return { started: true as const, pid: launchedPid, completion };
+		});
+		const harness = makeHarness({ hasUI: false, resumeWorker, taskRef: "goal-1" });
+		const base = orphanEntry();
+		const orphan: ProcessMatrixEntry = {
+			...base,
+			status: "resumable",
+			parentSessionId: harness.config.agent.resumeContext.sessionId,
+			taskRef: "goal-1",
+			resumable: { lastCode: "resumable", agent: base.agent, taskRef: "goal-1" },
+		};
+		agentDir = harness.agentDir;
+		entryId = orphan.entryId;
+		await writeEntry(agentDir, orphan);
+
+		const handle = await startProcessMatrixRuntime(harness.config);
+		await awaitState(
+			() => readEntry(agentDir, entryId),
+			(entry) => entry?.startedAt === replacementStartedAt,
+		);
+		finish({ code: 0, signal: null });
+
+		const terminal = await awaitState(
+			() => readEntry(agentDir, entryId),
+			(entry) => entry?.terminal?.code === 0,
+		);
+		expect(terminal).toMatchObject({
+			pid: launchedPid,
+			startedAt: replacementStartedAt,
+			status: "closed",
+			terminal: { code: 0, signal: null },
+		});
+		await handle.stop();
+	});
+
+	it("persists a terminal handoff when recording the launched pid fails before worker self-registration", async () => {
+		vi.useFakeTimers({ toFake: ["setInterval", "clearInterval"] });
+		useMasterEnv();
+		let finish!: (result: { code: number | null; signal: NodeJS.Signals | null }) => void;
+		const completion = new Promise<{ code: number | null; signal: NodeJS.Signals | null }>((resolve) => {
+			finish = resolve;
+		});
+		const launchedPid = 818_181;
+		const resumeWorker = vi.fn(async () => ({ started: true as const, pid: launchedPid, completion }));
+		const harness = makeHarness({ hasUI: false, resumeWorker, taskRef: "goal-1" });
+		const base = orphanEntry();
+		const orphan: ProcessMatrixEntry = {
+			...base,
+			status: "resumable",
+			parentSessionId: harness.config.agent.resumeContext.sessionId,
+			taskRef: "goal-1",
+			resumable: { lastCode: "resumable", agent: base.agent, taskRef: "goal-1" },
+		};
+		await writeEntry(harness.agentDir, orphan);
+		const originalWriteEntryIfUnchanged = processMatrixStore.writeEntryIfUnchanged;
+		let failLaunchedPidWrite = true;
+		vi.spyOn(processMatrixStore, "writeEntryIfUnchanged").mockImplementation(
+			async (agentDir, entryId, expected, next) => {
+				if (
+					failLaunchedPidWrite &&
+					entryId === orphan.entryId &&
+					next.pid === launchedPid &&
+					next.status === "running"
+				) {
+					failLaunchedPidWrite = false;
+					throw new Error("injected pid-record write failure");
+				}
+				return originalWriteEntryIfUnchanged(agentDir, entryId, expected, next);
+			},
+		);
+
+		const handle = await startProcessMatrixRuntime(harness.config);
+		await awaitState(
+			async () => harness.diagnostics,
+			(diagnostics) => diagnostics.some((message) => message.includes("failed to record resumed worker pid")),
+		);
+		finish({ code: 7, signal: null });
+
+		const terminal = await awaitState(
+			() => readEntry(harness.agentDir, orphan.entryId),
+			(entry) => entry?.terminal?.code === 7,
+		);
+		expect(terminal).toMatchObject({ pid: launchedPid, status: "closed", terminal: { code: 7, signal: null } });
+		expect(harness.notices.some((notice) => notice.includes("terminal process state"))).toBe(true);
+		await handle.stop();
+	});
+
+	it("preserves an undelivered terminal handoff when owner shutdown wins immediately after spawn", async () => {
+		vi.useFakeTimers({ toFake: ["setInterval", "clearInterval"] });
+		useMasterEnv();
+		let launch!: (outcome: {
+			started: true;
+			pid: number;
+			completion: Promise<{ code: number | null; signal: NodeJS.Signals | null }>;
+		}) => void;
+		let finish!: (result: { code: number | null; signal: NodeJS.Signals | null }) => void;
+		const completion = new Promise<{ code: number | null; signal: NodeJS.Signals | null }>((resolve) => {
+			finish = resolve;
+		});
+		const launchedPid = 818_181;
+		const resumeWorker = vi.fn(
+			() =>
+				new Promise<{
+					started: true;
+					pid: number;
+					completion: Promise<{ code: number | null; signal: NodeJS.Signals | null }>;
+				}>((resolve) => {
+					launch = resolve;
+				}),
+		);
+		const harness = makeHarness({ hasUI: false, resumeWorker, taskRef: "goal-1" });
+		const base = orphanEntry();
+		const orphan: ProcessMatrixEntry = {
+			...base,
+			status: "resumable",
+			parentSessionId: harness.config.agent.resumeContext.sessionId,
+			taskRef: "goal-1",
+			resumable: { lastCode: "resumable", agent: base.agent, taskRef: "goal-1" },
+		};
+		await writeEntry(harness.agentDir, orphan);
+
+		const handle = await startProcessMatrixRuntime(harness.config);
+		await awaitState(
+			async () => resumeWorker.mock.calls.length,
+			(count) => count === 1,
+		);
+		const stopped = Promise.resolve(handle.stop());
+		launch({ started: true, pid: launchedPid, completion });
+		await stopped;
+		finish({ code: 7, signal: null });
+
+		const terminal = await awaitState(
+			() => readEntry(harness.agentDir, orphan.entryId),
+			(entry) => entry?.terminal?.code === 7,
+		);
+		expect(terminal).toMatchObject({ pid: launchedPid, status: "closed", terminal: { code: 7, signal: null } });
+		expect(terminal?.terminal?.notificationDeliveredAt).toBeUndefined();
+		expect(harness.notices).toEqual([]);
+		expect(harness.diagnostics.some((message) => message.includes("launched after owner shutdown"))).toBe(true);
 	});
 });

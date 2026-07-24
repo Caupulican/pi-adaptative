@@ -30,7 +30,15 @@ import { getParentPid, getParentSessionId, getProcessTaskRef } from "../process-
 import type { ResolvedProcessMatrixSettings } from "../settings-manager.ts";
 import { getBoundWorktreeLaneKey } from "../worktree-sync/runtime.ts";
 import type { ProcessMatrixEntry, ResumablePayload } from "./codes.ts";
-import { buildEntryId, listEntries, readEntry, removeEntry, writeEntry, writeEntrySync } from "./store.ts";
+import {
+	buildEntryId,
+	listEntries,
+	readEntry,
+	removeEntryIfUnchanged,
+	writeEntry,
+	writeEntryIfUnchanged,
+	writeEntryIfUnchangedSync,
+} from "./store.ts";
 import {
 	applyAdoption,
 	applyHeartbeat,
@@ -88,6 +96,8 @@ export interface ProcessMatrixRuntimeConfig {
 export type ResumeWorkerLaunchOutcome =
 	| {
 			started: true;
+			/** OS identity of this specific replacement process, used to fence its terminal handoff. */
+			pid: number;
 			completion: Promise<{ code: number | null; signal: NodeJS.Signals | null }>;
 	  }
 	| { started: false; reason: string };
@@ -162,21 +172,41 @@ async function startMasterBranch(
 	}
 
 	let stopped = false;
+	let ownsEntry = true;
+	let heartbeatTask: Promise<void> | undefined;
 	const lifetime = new AbortController();
 	const heartbeatTimer = setInterval(() => {
-		if (stopped) return;
-		entry = applyHeartbeat(entry, nowIso(now));
-		void writeEntry(config.agentDir, entry).catch((error) => {
-			config.onDiagnostic?.(`process-matrix: failed to write master heartbeat: ${describeError(error)}`);
-		});
+		if (stopped || !ownsEntry || heartbeatTask) return;
+		const expected = entry;
+		const next = applyHeartbeat(expected, nowIso(now));
+		heartbeatTask = writeEntryIfUnchanged(config.agentDir, expected.entryId, expected, next)
+			.then((written) => {
+				if (written) {
+					entry = next;
+					return;
+				}
+				ownsEntry = false;
+				lifetime.abort();
+				clearInterval(heartbeatTimer);
+				process.off("exit", closeOnExit);
+				config.onDiagnostic?.("process-matrix: master entry ownership moved to a newer process generation");
+			})
+			.catch((error: unknown) => {
+				config.onDiagnostic?.(`process-matrix: failed to write master heartbeat: ${describeError(error)}`);
+			})
+			.finally(() => {
+				heartbeatTask = undefined;
+			});
 	}, config.settings.heartbeatMs);
 	heartbeatTimer.unref?.();
 
 	// Best-effort close on process exit. A SIGKILLed master leaving "running" is fine -- reconcile's
 	// own dead-pid detection covers it; this only makes the common clean-exit case tidy.
 	const closeOnExit = (): void => {
+		if (!ownsEntry) return;
 		try {
-			writeEntrySync(config.agentDir, markClosed(entry, nowIso(now)));
+			const closed = markClosed(entry, nowIso(now));
+			if (writeEntryIfUnchangedSync(config.agentDir, entry, closed)) entry = closed;
 		} catch {
 			// Best-effort only -- see module doc.
 		}
@@ -193,8 +223,12 @@ async function startMasterBranch(
 			stopped = true;
 			lifetime.abort();
 			clearInterval(heartbeatTimer);
-			closeOnExit();
 			process.off("exit", closeOnExit);
+			await heartbeatTask;
+			if (ownsEntry) {
+				const closed = markClosed(entry, nowIso(now));
+				if (await writeEntryIfUnchanged(config.agentDir, entry.entryId, entry, closed)) entry = closed;
+			}
 			await maintenance;
 		},
 	};
@@ -218,27 +252,41 @@ async function reconcileAndRunOrphanScan(
 		now: now(),
 		resumableTtlMs: PROCESS_MATRIX_RESUMABLE_RETENTION_MS,
 	});
+	const originalByEntryId = new Map(entries.map((entry) => [entry.entryId, entry]));
 	const recoveredEntryIdSet = new Set(reconciled.recoveredEntryIds);
-	await Promise.all([
-		...reconciled.prunedEntryIds.map((entryId) => removeEntry(config.agentDir, entryId)),
-		...reconciled.kept
-			.filter((entry) => recoveredEntryIdSet.has(entry.entryId))
-			.map((entry) => writeEntry(config.agentDir, entry)),
+	const [prunedOutcomes, recoveredOutcomes] = await Promise.all([
+		Promise.all(
+			reconciled.prunedEntryIds.map((entryId) => {
+				const original = originalByEntryId.get(entryId);
+				return original ? removeEntryIfUnchanged(config.agentDir, original) : false;
+			}),
+		),
+		Promise.all(
+			reconciled.kept
+				.filter((entry) => recoveredEntryIdSet.has(entry.entryId))
+				.map((entry) => {
+					const original = originalByEntryId.get(entry.entryId);
+					return original ? writeEntryIfUnchanged(config.agentDir, entry.entryId, original, entry) : false;
+				}),
+		),
 	]);
 	if (signal.aborted) return;
-	if (reconciled.recoveredEntryIds.length > 0) {
+	const recoveredCount = recoveredOutcomes.filter(Boolean).length;
+	const prunedCount = prunedOutcomes.filter(Boolean).length;
+	if (recoveredCount > 0) {
 		config.onDiagnostic?.(
-			`process-matrix: recovered ${reconciled.recoveredEntryIds.length} interrupted Pi worker entr${reconciled.recoveredEntryIds.length === 1 ? "y" : "ies"}`,
+			`process-matrix: recovered ${recoveredCount} interrupted Pi worker entr${recoveredCount === 1 ? "y" : "ies"}`,
 		);
 	}
-	if (reconciled.prunedEntryIds.length > 0) {
+	if (prunedCount > 0) {
 		config.onDiagnostic?.(
-			`process-matrix: pruned ${reconciled.prunedEntryIds.length} terminal or expired entr${reconciled.prunedEntryIds.length === 1 ? "y" : "ies"}`,
+			`process-matrix: pruned ${prunedCount} terminal or expired entr${prunedCount === 1 ? "y" : "ies"}`,
 		);
 	}
-	await deliverTerminalNotifications(config, reconciled.kept, now, signal);
+	const currentEntries = await listEntries(config.agentDir);
+	await deliverTerminalNotifications(config, currentEntries, now, signal);
 	if (signal.aborted) return;
-	await runOrphanScan(config, reconciled.kept, now, signal);
+	await runOrphanScan(config, currentEntries, now, signal);
 }
 
 async function deliverTerminalNotifications(
@@ -266,7 +314,12 @@ async function deliverTerminalNotifications(
 			continue;
 		}
 		try {
-			await writeEntry(config.agentDir, markTerminalNotificationDelivered(entry, nowIso(now)));
+			const delivered = markTerminalNotificationDelivered(entry, nowIso(now));
+			if (!(await writeEntryIfUnchanged(config.agentDir, entry.entryId, entry, delivered))) {
+				config.onDiagnostic?.(
+					`process-matrix: terminal handoff changed before acknowledgement for ${entry.entryId}`,
+				);
+			}
 		} catch (error) {
 			config.onDiagnostic?.(
 				`process-matrix: failed to acknowledge terminal handoff for ${entry.entryId}: ${describeError(error)}`,
@@ -338,7 +391,9 @@ async function runOrphanScan(
 		if (!cleanup || signal.aborted) continue;
 		const windingDown = beginWindDown(orphan, "user_cleanup", nowIso(now));
 		try {
-			await writeEntry(config.agentDir, windingDown);
+			if (!(await writeEntryIfUnchanged(config.agentDir, orphan.entryId, orphan, windingDown))) {
+				config.onDiagnostic?.(`process-matrix: cleanup skipped because ${orphan.entryId} changed`);
+			}
 		} catch (error) {
 			config.onDiagnostic?.(
 				`process-matrix: failed to write cleanup for ${orphan.entryId}: ${describeError(error)}`,
@@ -379,8 +434,8 @@ async function adoptLiveOrphan(
 		parentSessionId: config.agent.resumeContext.sessionId,
 	});
 	try {
-		await writeEntry(config.agentDir, adopted);
-		if (signal.aborted) await writeEntry(config.agentDir, orphan);
+		if (!(await writeEntryIfUnchanged(config.agentDir, orphan.entryId, orphan, adopted))) return;
+		if (signal.aborted) await writeEntryIfUnchanged(config.agentDir, orphan.entryId, adopted, orphan);
 	} catch (error) {
 		config.onDiagnostic?.(`process-matrix: failed to write adoption for ${orphan.entryId}: ${describeError(error)}`);
 	}
@@ -403,61 +458,120 @@ async function resumeDeadOrphan(
 		parentPid: process.pid,
 		parentSessionId: config.agent.resumeContext.sessionId,
 	});
+	let launched: Extract<ResumeWorkerLaunchOutcome, { started: true }>;
 	try {
-		await writeEntry(config.agentDir, claimed);
+		if (!(await writeEntryIfUnchanged(config.agentDir, orphan.entryId, orphan, claimed))) return;
 		if (signal.aborted) {
-			await writeEntry(config.agentDir, orphan);
+			await writeEntryIfUnchanged(config.agentDir, orphan.entryId, claimed, orphan);
 			return;
 		}
-		const launched = await config.resumeWorker(payload);
-		if (!launched.started) {
-			await writeEntry(config.agentDir, orphan);
-			config.onDiagnostic?.(`process-matrix: failed to resume ${orphan.entryId}: ${launched.reason}`);
+		const launchOutcome = await config.resumeWorker(payload);
+		if (!launchOutcome.started) {
+			await writeEntryIfUnchanged(config.agentDir, orphan.entryId, claimed, orphan);
+			config.onDiagnostic?.(`process-matrix: failed to resume ${orphan.entryId}: ${launchOutcome.reason}`);
 			return;
 		}
-		void launched.completion.then(
-			(result) => persistResumedWorkerTerminal(config, claimed, result, signal),
-			(error: unknown) => {
-				config.onDiagnostic?.(
-					`process-matrix: resumed agent ${payload.agent.agentId} terminal signal failed: ${describeError(error)}`,
-				);
-			},
-		);
+		launched = launchOutcome;
 	} catch (error) {
 		try {
-			await writeEntry(config.agentDir, orphan);
+			await writeEntryIfUnchanged(config.agentDir, orphan.entryId, claimed, orphan);
 		} catch {
 			// The original resumable record remains the intended recovery state.
 		}
 		config.onDiagnostic?.(`process-matrix: failed to resume ${orphan.entryId}: ${describeError(error)}`);
+		return;
 	}
+	const launchedEntry = { ...claimed, pid: launched.pid };
+	if (!signal.aborted) {
+		try {
+			// Bridge the interval before the replacement can self-register. Without its real PID here, a
+			// restarted master can mistake this live replacement for the original dead process and spawn
+			// a duplicate.
+			await writeEntryIfUnchanged(config.agentDir, claimed.entryId, claimed, launchedEntry);
+		} catch (error) {
+			config.onDiagnostic?.(
+				`process-matrix: failed to record resumed worker pid for ${orphan.entryId}: ${describeError(error)}`,
+			);
+		}
+	} else {
+		config.onDiagnostic?.(
+			`process-matrix: resumed worker ${orphan.entryId} launched after owner shutdown; preserving its terminal handoff only`,
+		);
+	}
+	void launched.completion.then(
+		(result) => persistResumedWorkerTerminal(config, launchedEntry, claimed, result, signal),
+		(error: unknown) => {
+			config.onDiagnostic?.(
+				`process-matrix: resumed agent ${payload.agent.agentId} terminal signal failed: ${describeError(error)}`,
+			);
+		},
+	);
 }
 
 async function persistResumedWorkerTerminal(
 	config: ProcessMatrixRuntimeConfig,
 	claimed: ProcessMatrixEntry,
+	preLaunchClaim: ProcessMatrixEntry,
 	result: { code: number | null; signal: NodeJS.Signals | null },
 	lifetime: AbortSignal,
 ): Promise<void> {
-	let terminal: ProcessMatrixEntry;
 	try {
-		const current = (await readEntry(config.agentDir, claimed.entryId)) ?? claimed;
-		terminal = markTerminal(current, result, new Date().toISOString());
-		await writeEntry(config.agentDir, terminal);
+		const observedAt = new Date().toISOString();
+		const terminal = markTerminal(claimed, result, observedAt);
+		if (await writeEntryIfUnchanged(config.agentDir, claimed.entryId, claimed, terminal)) {
+			if (lifetime.aborted) return;
+			await notifyResumedWorkerTerminal(config, terminal, lifetime);
+			return;
+		}
+		const selfRegistered = await readEntry(config.agentDir, claimed.entryId);
+		if (selfRegistered?.pid === claimed.pid) {
+			const registeredTerminal = markTerminal(selfRegistered, result, observedAt);
+			if (await writeEntryIfUnchanged(config.agentDir, claimed.entryId, selfRegistered, registeredTerminal)) {
+				if (lifetime.aborted) return;
+				await notifyResumedWorkerTerminal(config, registeredTerminal, lifetime);
+				return;
+			}
+		}
+		// If recording the spawned PID failed (or shutdown won the race immediately after spawn), the
+		// untouched pre-launch claim proves no newer process has taken this logical entry. Upgrade it
+		// to the actual exited process before persisting its terminal handoff.
+		const fallbackTerminal = markTerminal({ ...preLaunchClaim, pid: claimed.pid }, result, observedAt);
+		if (await writeEntryIfUnchanged(config.agentDir, claimed.entryId, preLaunchClaim, fallbackTerminal)) {
+			if (lifetime.aborted) return;
+			await notifyResumedWorkerTerminal(config, fallbackTerminal, lifetime);
+			return;
+		}
+		if (await writeEntryIfUnchanged(config.agentDir, claimed.entryId, undefined, terminal)) {
+			if (lifetime.aborted) return;
+			await notifyResumedWorkerTerminal(config, terminal, lifetime);
+			return;
+		}
+		config.onDiagnostic?.(`process-matrix: ignored stale terminal handoff for ${claimed.entryId}`);
 	} catch (error) {
 		config.onDiagnostic?.(
 			`process-matrix: failed to persist terminal handoff for ${claimed.entryId}: ${describeError(error)}`,
 		);
-		return;
 	}
+}
+
+async function notifyResumedWorkerTerminal(
+	config: ProcessMatrixRuntimeConfig,
+	terminal: ProcessMatrixEntry,
+	lifetime: AbortSignal,
+): Promise<void> {
 	if (lifetime.aborted) return;
 	try {
 		await config.notify(formatTerminalNotification(terminal));
 		if (lifetime.aborted) return;
-		await writeEntry(config.agentDir, markTerminalNotificationDelivered(terminal, new Date().toISOString()));
+		const delivered = markTerminalNotificationDelivered(terminal, new Date().toISOString());
+		if (!(await writeEntryIfUnchanged(config.agentDir, terminal.entryId, terminal, delivered))) {
+			config.onDiagnostic?.(
+				`process-matrix: terminal handoff changed before acknowledgement for ${terminal.entryId}`,
+			);
+		}
 	} catch (error) {
 		config.onDiagnostic?.(
-			`process-matrix: failed to deliver terminal handoff for ${claimed.entryId}: ${describeError(error)}`,
+			`process-matrix: failed to deliver terminal handoff for ${terminal.entryId}: ${describeError(error)}`,
 		);
 	}
 }
@@ -507,7 +621,8 @@ async function startWorkerBranch(
 	const closeOnExit = (code: number | null = null): void => {
 		if (preserveResumableOnExit) return;
 		try {
-			writeEntrySync(config.agentDir, markTerminal(entry, { code, signal: null }, nowIso(now)));
+			const terminal = markTerminal(entry, { code, signal: null }, nowIso(now));
+			if (writeEntryIfUnchangedSync(config.agentDir, entry, terminal)) entry = terminal;
 		} catch {
 			// Best-effort. Dead-pid reconciliation remains authoritative.
 		}
@@ -523,13 +638,29 @@ async function startWorkerBranch(
 		process.off("exit", closeOnExit);
 	};
 
-	const persist = async (next: ProcessMatrixEntry, failureContext: string): Promise<void> => {
-		entry = next;
+	const persist = async (
+		expected: ProcessMatrixEntry,
+		next: ProcessMatrixEntry,
+		failureContext: string,
+	): Promise<boolean> => {
 		try {
-			await writeEntry(config.agentDir, entry);
+			if (await writeEntryIfUnchanged(config.agentDir, expected.entryId, expected, next)) {
+				entry = next;
+				return true;
+			}
+			const current = await readEntry(config.agentDir, expected.entryId);
+			if (current?.pid === process.pid) entry = current;
+			else {
+				stopped = true;
+				if (timer) clearInterval(timer);
+				timer = undefined;
+				process.off("exit", closeOnExit);
+				config.onDiagnostic?.("process-matrix: worker entry ownership moved to a newer process generation");
+			}
 		} catch (error) {
 			config.onDiagnostic?.(`process-matrix: ${failureContext}: ${describeError(error)}`);
 		}
+		return false;
 	};
 
 	const startHealthyWatch = (): void => {
@@ -568,29 +699,30 @@ async function startWorkerBranch(
 		if (!fresh) return;
 		const directive = pollWorkerDirective(fresh, currentParentPid, { isPidAlive: config.isProcessAlive });
 		if (directive.code !== "user_cleanup") return;
-		await persist(
-			beginWindDown(fresh, "user_cleanup", nowIso(now)),
-			"failed to write a master-requested worker wind-down",
-		);
+		if (
+			!(await persist(
+				fresh,
+				beginWindDown(fresh, "user_cleanup", nowIso(now)),
+				"failed to write a master-requested worker wind-down",
+			))
+		)
+			return;
 		emitRuntimeNotice(config, "process-matrix: the parent session requested a cooperative cleanup. Winding down.");
 		stop();
 		config.requestExit();
 	};
 
 	const enterWindDown = async (): Promise<void> => {
-		if (timer) {
-			clearInterval(timer);
-			timer = undefined;
-		}
 		const windDownAt = nowIso(now);
-		preserveResumableOnExit = true;
+		const expected = entry;
 		const resumable: ResumablePayload = { lastCode: "resumable", agent: structuredClone(config.agent) };
-		if (entry.taskRef !== undefined) resumable.taskRef = entry.taskRef;
-		if (entry.taskSummary !== undefined) resumable.taskSummary = entry.taskSummary;
-		await persist(
-			markResumable(beginWindDown(entry, "parent_lost", windDownAt), resumable, windDownAt),
-			"failed to write worker wind-down",
-		);
+		if (expected.taskRef !== undefined) resumable.taskRef = expected.taskRef;
+		if (expected.taskSummary !== undefined) resumable.taskSummary = expected.taskSummary;
+		const woundDown = markResumable(beginWindDown(expected, "parent_lost", windDownAt), resumable, windDownAt);
+		if (!(await persist(expected, woundDown, "failed to write worker wind-down"))) return;
+		if (timer) clearInterval(timer);
+		timer = undefined;
+		preserveResumableOnExit = true;
 		emitRuntimeNotice(
 			config,
 			`process-matrix: parent process (pid ${currentParentPid}) is gone. Winding down gracefully; this task is resumable.`,
@@ -618,10 +750,14 @@ async function startWorkerBranch(
 			if (directive.code === "adopt" && fresh.parentSessionId) {
 				// The adopting master persists its session id with the pid. Require both on the next
 				// healthy tick; accepting a pid-only adoption would reintroduce the PID-reuse bug.
-				await persist(
-					applyAdoption(fresh, { parentPid: directive.parentPid, parentSessionId: fresh.parentSessionId }),
-					"failed to write worker adoption",
-				);
+				if (
+					!(await persist(
+						fresh,
+						applyAdoption(fresh, { parentPid: directive.parentPid, parentSessionId: fresh.parentSessionId }),
+						"failed to write worker adoption",
+					))
+				)
+					return;
 				emitRuntimeNotice(
 					config,
 					`process-matrix: adopted by a new parent (pid ${directive.parentPid}). Resuming.`,

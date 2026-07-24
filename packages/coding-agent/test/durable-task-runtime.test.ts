@@ -1,7 +1,8 @@
 import { mkdirSync, readdirSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { afterEach, describe, expect, it } from "vitest";
+import { afterEach, describe, expect, it, vi } from "vitest";
+import type { JsonObject } from "../src/core/autonomy/contracts.ts";
 import { buildPiResumeLaunchSpec } from "../src/core/orchestration/agent-resume.ts";
 import {
 	type ApprovalRequestContract,
@@ -215,6 +216,38 @@ describe("DurableTaskRuntime", () => {
 		reopened.bindAttemptGrant(attempt.attemptId, grant);
 		expect(reopened.getSnapshot().attempts[attempt.attemptId]?.grant).toEqual(grant);
 		expect(reopened.getSnapshot().lastOrdinal).toBe(4);
+	});
+
+	it("rebuilds from a snapshot installed between the initial snapshot read and tail read", () => {
+		const { runtime, store } = createHarness();
+		const objective = runtime.createObjective({
+			objectiveId: "startup-race-objective",
+			title: "Preserve baseline",
+			description: "Compaction must not erase the replay prefix during construction",
+		});
+		store.compactIfNeeded(runtime.getSnapshot().lastOrdinal, () => runtime.getSnapshot() as unknown as JsonObject);
+		runtime.createTask({
+			taskId: "startup-race-task",
+			objectiveId: objective.objectiveId,
+			title: "Tail event",
+			description: "Arrives after compaction",
+			role: "implementer",
+		});
+		const originalReadProjectionSnapshot = store.readProjectionSnapshot.bind(store);
+		let hideInitialSnapshot = true;
+		vi.spyOn(store, "readProjectionSnapshot").mockImplementation(() => {
+			if (hideInitialSnapshot) {
+				hideInitialSnapshot = false;
+				return undefined;
+			}
+			return originalReadProjectionSnapshot();
+		});
+
+		const reopened = new DurableTaskRuntime({ store });
+		expect(reopened.getSnapshot()).toMatchObject({
+			objectives: { [objective.objectiveId]: { objective: { title: "Preserve baseline" } } },
+			tasks: { "startup-race-task": { task: { title: "Tail event" } } },
+		});
 	});
 
 	it("requires trusted evidence before completing criterion-bound tasks and objectives", () => {

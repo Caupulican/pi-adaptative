@@ -10,6 +10,7 @@ export interface PiSelfLaunchTarget {
 export type ResumablePiAgentLaunchOutcome =
 	| {
 			started: true;
+			pid: number;
 			completion: Promise<{ code: number | null; signal: NodeJS.Signals | null }>;
 	  }
 	| { started: false; reason: string };
@@ -65,6 +66,11 @@ export async function launchResumablePiAgent(options: {
 		return await new Promise<ResumablePiAgentLaunchOutcome>((resolve) => {
 			child.once("error", (error) => resolve({ started: false, reason: error.message }));
 			child.once("spawn", () => {
+				const childPid = child.pid;
+				if (childPid === undefined || !Number.isSafeInteger(childPid) || childPid <= 0) {
+					resolve({ started: false, reason: "Resume process started without a valid pid." });
+					return;
+				}
 				const completion = new Promise<{ code: number | null; signal: NodeJS.Signals | null }>(
 					(resolveCompletion, rejectCompletion) => {
 						child.once("exit", (code, signal) => resolveCompletion({ code, signal }));
@@ -72,7 +78,7 @@ export async function launchResumablePiAgent(options: {
 					},
 				);
 				child.unref();
-				resolve({ started: true, completion });
+				resolve({ started: true, pid: childPid, completion });
 			});
 		});
 	} catch (error) {

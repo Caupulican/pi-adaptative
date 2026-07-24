@@ -26,6 +26,7 @@ import { acquireWorkRun } from "../../utils/work-directory.ts";
 import { BorderedLoader } from "./components/bordered-loader.ts";
 import type { EditorOverlayHost } from "./editor-overlay-host.ts";
 import type { ExtensionUiHost } from "./extension-ui-host.ts";
+import { handleNonFatalSessionReplacementError } from "./session-replacement-errors.ts";
 import { theme } from "./theme/theme.ts";
 
 type PathCommand = "/export" | "/import";
@@ -119,20 +120,26 @@ export async function handleImportCommand(host: ImportCommandHost, text: string)
 		host.renderCurrentSessionState();
 		host.showStatus(`Session imported from: ${inputPath}`);
 	} catch (error: unknown) {
+		if (handleNonFatalSessionReplacementError(host, error)) return;
 		if (error instanceof MissingSessionCwdError) {
 			const selectedCwd = await host.promptForMissingSessionCwd(error);
 			if (!selectedCwd) {
 				host.showStatus("Import cancelled");
 				return;
 			}
-			const result = await host.runtimeHost.importFromJsonl(inputPath, selectedCwd);
-			if (result.cancelled) {
-				host.showStatus("Import cancelled");
+			try {
+				const result = await host.runtimeHost.importFromJsonl(inputPath, selectedCwd);
+				if (result.cancelled) {
+					host.showStatus("Import cancelled");
+					return;
+				}
+				host.renderCurrentSessionState();
+				host.showStatus(`Session imported from: ${inputPath}`);
 				return;
+			} catch (retryError: unknown) {
+				if (handleNonFatalSessionReplacementError(host, retryError)) return;
+				await host.handleFatalRuntimeError("Failed to import session", retryError);
 			}
-			host.renderCurrentSessionState();
-			host.showStatus(`Session imported from: ${inputPath}`);
-			return;
 		}
 		if (error instanceof SessionImportFileNotFoundError) {
 			host.showError(`Failed to import session: ${error.message}`);

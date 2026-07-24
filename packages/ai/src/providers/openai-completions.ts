@@ -1064,13 +1064,13 @@ export function convertMessages(
 					// Always send tool result with text (or placeholder if only images)
 					const hasText = textResult.length > 0;
 					// Some providers require the 'name' field in tool results
-					const toolResultMsg: ChatCompletionToolMessageParam = {
+					const toolResultMsg: ChatCompletionToolMessageParam & { name?: string } = {
 						role: "tool",
 						content: sanitizeSurrogates(hasText ? textResult : "(see attached image)"),
 						tool_call_id: toolMsg.toolCallId,
 					};
 					if (compat.requiresToolResultName && toolMsg.toolName) {
-						(toolResultMsg as any).name = toolMsg.toolName;
+						toolResultMsg.name = toolNameMap.toProviderName(toolMsg.toolName);
 					}
 					params.push(toolResultMsg);
 					pushedNativeToolResult = true;

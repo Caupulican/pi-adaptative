@@ -93,6 +93,11 @@ describe("SessionManager compacted payload release", () => {
 		if (!entry || entry.type !== "message") return;
 		expect(Object.getOwnPropertyDescriptor(entry.message, "content")?.get).toBeTypeOf("function");
 		expect((entry.message as ToolResultMessage).content).toEqual([{ type: "text", text: payload }]);
+
+		const liveContext = reopened.buildSessionContext();
+		expect(liveContext.messages.map((message) => message.role)).toEqual(["compactionSummary", "user"]);
+		expect(JSON.stringify(liveContext.messages)).not.toContain("large-prefix");
+		expect(JSON.stringify(liveContext.messages)).not.toContain("large-tail");
 	});
 
 	it("keeps in-memory sessions self-contained", () => {

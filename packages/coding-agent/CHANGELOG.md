@@ -8,6 +8,11 @@
 
 ### Fixed
 
+- Pinned queued default-profile workers to the profile resolved at admission so a settings reload cannot silently switch their model, thinking level, or tool grant before execution.
+- Rebased durable-runtime startup tails onto a projection snapshot installed during the initial read, preventing a concurrent compaction from replaying post-snapshot events without their prefix.
+- Made durable orchestration replay and append fail closed on missing event ordinals, truncated tails, inaccessible storage, invalid snapshot idempotency data, and missing or changed published snapshots without reparsing an unchanged projection on every append.
+- Fenced process-matrix reconciliation, adoption, cleanup, self-owned heartbeat/exit, resumed-worker PID publication, terminal persistence, and delivery acknowledgement with one shared per-entry conditional-write contract so stale process generations cannot overwrite newer registrations.
+- Made session teardown, activation, and quit failures drain every cleanup step; replacement failures reconstruct and rebind the previous durable session, clean rejected candidate resources/artifacts, remain distinct from post-commit callbacks, and serialize process disposal behind any admitted replacement.
 - Made session replacement transactional through candidate preparation and awaited old-session resource shutdown, moved process/worktree supervision under the active session lifecycle, restored exact session+task workers only after goal activation, persisted late terminal notices for replay to the owning session, denied automatic recovery for mismatched or terminal goals, and bounded process-matrix retention.
 - Fenced overlapping session replacements and RPC prompt/replacement races, and made durable worker terminal notifications acknowledge delivery only after the bounded parent handoff is persisted; owner-question handoffs no longer spend a redundant model turn.
 - Made `/resume`, `--resume`, `--continue`, and exact `--session` restore a blocked goal through the same core persisted transition as `/goal resume`, before worker supervision starts.

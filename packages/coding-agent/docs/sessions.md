@@ -43,6 +43,13 @@ If the selected session contains a blocked durable goal, Pi applies the same tra
 `--session` use the same startup rule. Active goals remain active; completed or cancelled goals are
 never reopened automatically.
 
+Session replacement has an explicit recovery boundary. Preparation failure leaves the current runtime
+untouched. If retiring the current runtime, rebinding, or starting supervision fails, Pi completes every
+cleanup step, cleans the candidate, and reconstructs the previous session from its durable manager. A
+failure in an extension's post-replacement `withSession` callback is reported separately because the
+replacement is already valid and remains active. Process shutdown uses the same draining teardown and
+waits for an already-admitted replacement before disposing the runtime it leaves active.
+
 In the picker you can:
 
 - search by typing

@@ -10,8 +10,10 @@ import {
 	processMatrixDir,
 	readEntry,
 	removeEntry,
+	removeEntryIfUnchanged,
 	writeEntry,
-	writeEntrySync,
+	writeEntryIfUnchanged,
+	writeEntryIfUnchangedSync,
 } from "../src/core/process-matrix/store.ts";
 
 const cleanups: string[] = [];
@@ -83,11 +85,36 @@ describe("process-matrix store", () => {
 		expect(raw).toContain('\n\t"role"');
 	});
 
-	it("writeEntrySync/readEntry round-trip (the exit-hook writer)", async () => {
+	it("writeEntryIfUnchangedSync conditionally persists the exit-hook terminal state", async () => {
 		const agentDir = tempAgentDir();
-		const entry = masterEntry({ status: "closed" });
-		writeEntrySync(agentDir, entry);
-		expect(await readEntry(agentDir, entry.entryId)).toEqual(entry);
+		const running = masterEntry();
+		const closed = masterEntry({ status: "closed" });
+		await writeEntry(agentDir, running);
+		expect(writeEntryIfUnchangedSync(agentDir, running, closed)).toBe(true);
+		expect(await readEntry(agentDir, running.entryId)).toEqual(closed);
+	});
+
+	it("writeEntryIfUnchanged never overwrites an entry changed by another cooperating writer", async () => {
+		const agentDir = tempAgentDir();
+		const original = masterEntry();
+		const newer = { ...original, pid: 2000 };
+		const terminal = { ...original, status: "closed" as const };
+		await writeEntry(agentDir, original);
+		await writeEntry(agentDir, newer);
+
+		expect(await writeEntryIfUnchanged(agentDir, original.entryId, original, terminal)).toBe(false);
+		expect(await readEntry(agentDir, original.entryId)).toEqual(newer);
+	});
+
+	it("writeEntryIfUnchangedSync never closes a newer process generation", async () => {
+		const agentDir = tempAgentDir();
+		const original = masterEntry();
+		const newer = { ...original, pid: 2000 };
+		const terminal = { ...original, status: "closed" as const };
+		await writeEntry(agentDir, newer);
+
+		expect(writeEntryIfUnchangedSync(agentDir, original, terminal)).toBe(false);
+		expect(await readEntry(agentDir, original.entryId)).toEqual(newer);
 	});
 
 	it("a corrupt entry file reads as absent and is skipped by listEntries", async () => {
@@ -152,5 +179,16 @@ describe("process-matrix store", () => {
 		await removeEntry(agentDir, entry.entryId);
 		expect(await readEntry(agentDir, entry.entryId)).toBeUndefined();
 		await expect(removeEntry(agentDir, entry.entryId)).resolves.toBeUndefined();
+	});
+
+	it("removeEntryIfUnchanged preserves a newer self-registration", async () => {
+		const agentDir = tempAgentDir();
+		const scanned = masterEntry({ pid: 1000 });
+		const newer = masterEntry({ pid: 2000 });
+		await writeEntry(agentDir, scanned);
+		await writeEntry(agentDir, newer);
+
+		expect(await removeEntryIfUnchanged(agentDir, scanned)).toBe(false);
+		expect(await readEntry(agentDir, scanned.entryId)).toEqual(newer);
 	});
 });

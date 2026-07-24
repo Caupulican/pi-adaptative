@@ -51,6 +51,7 @@ import { TreeSelectorComponent } from "./components/tree-selector.ts";
 import { TrustSelectorComponent } from "./components/trust-selector.ts";
 import { UserMessageSelectorComponent } from "./components/user-message-selector.ts";
 import type { ExtensionUiHost } from "./extension-ui-host.ts";
+import { handleNonFatalSessionReplacementError } from "./session-replacement-errors.ts";
 import { theme } from "./theme/theme.ts";
 
 /** Shared seam for the interdependent selector/navigation flows. */
@@ -482,21 +483,29 @@ export async function handleResumeSession(
 		host.showStatus(result.goalResume.resumed ? "Resumed session and goal" : "Resumed session");
 		return result;
 	} catch (error: unknown) {
+		const disposition = handleNonFatalSessionReplacementError(host, error);
+		if (disposition) return { cancelled: disposition === "previous_restored" };
 		if (error instanceof MissingSessionCwdError) {
 			const selectedCwd = await host.promptForMissingSessionCwd(error);
 			if (!selectedCwd) {
 				host.showStatus("Resume cancelled");
 				return { cancelled: true };
 			}
-			const result = await switchSessionAndResumeGoal(host, sessionPath, options, selectedCwd);
-			if (result.cancelled) {
+			try {
+				const result = await switchSessionAndResumeGoal(host, sessionPath, options, selectedCwd);
+				if (result.cancelled) {
+					return result;
+				}
+				host.renderCurrentSessionState();
+				host.showStatus(
+					result.goalResume.resumed ? "Resumed session and goal in current cwd" : "Resumed session in current cwd",
+				);
 				return result;
+			} catch (retryError: unknown) {
+				const retryDisposition = handleNonFatalSessionReplacementError(host, retryError);
+				if (retryDisposition) return { cancelled: retryDisposition === "previous_restored" };
+				return host.handleFatalRuntimeError("Failed to resume session", retryError);
 			}
-			host.renderCurrentSessionState();
-			host.showStatus(
-				result.goalResume.resumed ? "Resumed session and goal in current cwd" : "Resumed session in current cwd",
-			);
-			return result;
 		}
 		return host.handleFatalRuntimeError("Failed to resume session", error);
 	}

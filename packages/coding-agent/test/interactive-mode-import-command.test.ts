@@ -1,5 +1,5 @@
 import { describe, expect, it, vi } from "vitest";
-import { SessionImportFileNotFoundError } from "../src/core/agent-session-runtime.ts";
+import { SessionImportFileNotFoundError, SessionReplacementRuntimeError } from "../src/core/agent-session-runtime.ts";
 import { InteractiveMode } from "../src/modes/interactive/interactive-mode.ts";
 
 type PathCommand = "/export" | "/import";
@@ -139,6 +139,36 @@ describe("InteractiveMode /import parsing", () => {
 
 		expect(showError).toHaveBeenCalledWith("Failed to import session: File not found: /tmp/missing-session.jsonl");
 		expect(showStatus).not.toHaveBeenCalled();
+		expect(handleFatalRuntimeError).not.toHaveBeenCalled();
+	});
+
+	it("reports a recovered activation failure without terminating the restored session", async () => {
+		const failure = new SessionReplacementRuntimeError("activation", new Error("runtime resource failed"), true);
+		const importFromJsonl = vi.fn(async () => {
+			throw failure;
+		});
+		const showError = vi.fn();
+		const renderCurrentSessionState = vi.fn();
+		const handleFatalRuntimeError = vi.fn(async () => {
+			throw new Error("unexpected fatal error");
+		});
+		const context: ImportCommandContext = {
+			statusContainer: { clear: vi.fn() },
+			runtimeHost: { importFromJsonl },
+			showError,
+			showStatus: vi.fn(),
+			extensionUiHost: { showExtensionConfirm: vi.fn(async () => true) },
+			handleRuntimeSessionChange: vi.fn(async () => {}),
+			renderCurrentSessionState,
+			handleFatalRuntimeError,
+			promptForMissingSessionCwd: vi.fn(async () => undefined),
+			getPathCommandArgument: interactiveModePrototype.getPathCommandArgument,
+		};
+
+		await interactiveModePrototype.handleImportCommand.call(context, "/import /tmp/recovered.jsonl");
+
+		expect(renderCurrentSessionState).toHaveBeenCalledOnce();
+		expect(showError).toHaveBeenCalledWith(failure.message);
 		expect(handleFatalRuntimeError).not.toHaveBeenCalled();
 	});
 });

@@ -98,6 +98,7 @@ import * as resourceDisplay from "./resource-display.ts";
 import * as resourceShellCommands from "./resource-shell-commands.ts";
 import * as sessionFlows from "./session-flow-commands.ts";
 import * as sessionIoCommands from "./session-io-commands.ts";
+import { handleNonFatalSessionReplacementError } from "./session-replacement-errors.ts";
 import * as settingsSelectorFlow from "./settings-selector-flow.ts";
 import * as signalLifecycle from "./signal-lifecycle.ts";
 import * as startupChecks from "./startup-checks.ts";
@@ -1164,6 +1165,8 @@ export class InteractiveMode {
 						}
 						return result;
 					} catch (error: unknown) {
+						const disposition = this.handleNonFatalSessionReplacementError(error);
+						if (disposition) return { cancelled: disposition === "previous_restored" };
 						return this.handleFatalRuntimeError("Failed to create session", error);
 					}
 				},
@@ -1177,6 +1180,8 @@ export class InteractiveMode {
 						}
 						return { cancelled: result.cancelled };
 					} catch (error: unknown) {
+						const disposition = this.handleNonFatalSessionReplacementError(error);
+						if (disposition) return { cancelled: disposition === "previous_restored" };
 						return this.handleFatalRuntimeError("Failed to fork session", error);
 					}
 				},
@@ -1289,6 +1294,18 @@ export class InteractiveMode {
 		stopThemeWatcher();
 		this.stop();
 		process.exit(1);
+	}
+
+	private handleNonFatalSessionReplacementError(
+		error: unknown,
+	): "previous_restored" | "replacement_committed" | undefined {
+		return handleNonFatalSessionReplacementError(
+			{
+				renderCurrentSessionState: () => this.renderCurrentSessionState(),
+				showError: (message) => this.showError(message),
+			},
+			error,
+		);
 	}
 
 	private renderCurrentSessionState(): void {
@@ -4032,6 +4049,7 @@ export class InteractiveMode {
 			this.chatContainer.addChild(new Text(`${theme.fg("accent", label)}`, 1, 1));
 			this.ui.requestRender();
 		} catch (error: unknown) {
+			if (this.handleNonFatalSessionReplacementError(error)) return;
 			await this.handleFatalRuntimeError("Failed to create session", error);
 		}
 	}

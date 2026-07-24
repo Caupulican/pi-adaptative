@@ -9,6 +9,8 @@ import {
 	createAgentSessionFromServices,
 	createAgentSessionRuntime,
 	createAgentSessionServices,
+	SessionReplacementCallbackError,
+	SessionReplacementRuntimeError,
 } from "../src/core/agent-session-runtime.ts";
 import { AuthStorage } from "../src/core/auth-storage.ts";
 import type {
@@ -208,6 +210,44 @@ describe("AgentSessionRuntime session lifecycle events", () => {
 		expect(resource.start).not.toHaveBeenCalled();
 	});
 
+	it("reconstructs the previous runtime when teardown reports a resource failure", async () => {
+		const { runtimeHost } = await createRuntimeHost(() => {});
+		const originalSession = runtimeHost.session;
+		await originalSession.prompt("persist teardown recovery source");
+		const originalSessionId = originalSession.sessionId;
+		const sessionDir = originalSession.sessionManager.getSessionDir();
+		const filesBefore = readdirSync(sessionDir).filter((name) => name.endsWith(".jsonl"));
+		let failStop = true;
+		const resource = {
+			start: vi.fn(async () => {}),
+			stop: vi.fn(async () => {
+				if (failStop) {
+					failStop = false;
+					throw new Error("supervisor stop failed");
+				}
+			}),
+		};
+		runtimeHost.setRebindSession(async (session) => {
+			await session.bindExtensions({});
+		});
+		runtimeHost.registerSessionResource(resource);
+
+		let failure: unknown;
+		try {
+			await runtimeHost.newSession();
+		} catch (error: unknown) {
+			failure = error;
+		}
+
+		expect(failure).toBeInstanceOf(SessionReplacementRuntimeError);
+		expect(failure).toMatchObject({ phase: "teardown", recovered: true });
+		expect(runtimeHost.session.sessionId).toBe(originalSessionId);
+		expect(runtimeHost.session).not.toBe(originalSession);
+		expect(resource.stop).toHaveBeenCalledOnce();
+		expect(resource.start).toHaveBeenCalledOnce();
+		expect(readdirSync(sessionDir).filter((name) => name.endsWith(".jsonl"))).toEqual(filesBefore);
+	});
+
 	it("removes a prepared fork artifact when replacement construction fails", async () => {
 		const { runtimeHost } = await createRuntimeHost(() => {}, { failRuntimeCreationAt: 2 });
 		await runtimeHost.session.prompt("hello");
@@ -315,6 +355,136 @@ describe("AgentSessionRuntime session lifecycle events", () => {
 			`start:${runtimeHost.session.sessionId}`,
 			"withSession",
 		]);
+	});
+
+	it("reconstructs the previous runtime when replacement supervision fails to start", async () => {
+		const { runtimeHost } = await createRuntimeHost(() => {});
+		const originalSession = runtimeHost.session;
+		await originalSession.prompt("persist rollback source");
+		const originalSessionId = originalSession.sessionId;
+		const sessionDir = originalSession.sessionManager.getSessionDir();
+		const filesBefore = readdirSync(sessionDir).filter((name) => name.endsWith(".jsonl"));
+		const phases: string[] = [];
+		let rejectedCandidate = false;
+		runtimeHost.setRebindSession(async (session) => {
+			await session.bindExtensions({});
+		});
+		runtimeHost.registerSessionResource({
+			stop: async () => {
+				phases.push("stop");
+			},
+			start: async (session) => {
+				phases.push(`start:${session.sessionId}`);
+				if (session.sessionId !== originalSessionId && !rejectedCandidate) {
+					rejectedCandidate = true;
+					throw new Error("replacement supervisor failed");
+				}
+			},
+		});
+
+		let failure: unknown;
+		try {
+			await runtimeHost.newSession();
+		} catch (error: unknown) {
+			failure = error;
+		}
+
+		expect(failure).toBeInstanceOf(SessionReplacementRuntimeError);
+		expect(failure).toMatchObject({ phase: "activation", recovered: true });
+		expect(runtimeHost.session.sessionId).toBe(originalSessionId);
+		expect(runtimeHost.session).not.toBe(originalSession);
+		expect(phases).toEqual([
+			"stop",
+			expect.stringMatching(/^start:(?!.*undefined)/),
+			"stop",
+			`start:${originalSessionId}`,
+		]);
+		expect(readdirSync(sessionDir).filter((name) => name.endsWith(".jsonl"))).toEqual(filesBefore);
+	});
+
+	it("keeps the committed replacement active when withSession fails", async () => {
+		const { runtimeHost } = await createRuntimeHost(() => {});
+		const originalSession = runtimeHost.session;
+		const resource = { start: vi.fn(async () => {}), stop: vi.fn(async () => {}) };
+		runtimeHost.registerSessionResource(resource);
+
+		let failure: unknown;
+		try {
+			await runtimeHost.newSession({
+				withSession: async () => {
+					throw new Error("extension continuation failed");
+				},
+			});
+		} catch (error: unknown) {
+			failure = error;
+		}
+
+		expect(failure).toBeInstanceOf(SessionReplacementCallbackError);
+		expect(failure).toMatchObject({ replacementCommitted: true });
+		expect(runtimeHost.session).not.toBe(originalSession);
+		expect(resource.stop).toHaveBeenCalledOnce();
+		expect(resource.start).toHaveBeenCalledOnce();
+	});
+
+	it("drains every quit cleanup after a resource failure and makes disposal idempotent", async () => {
+		const { runtimeHost } = await createRuntimeHost(() => {});
+		const disposeSession = vi.spyOn(runtimeHost.session, "disposeAndWait");
+		let failFirstStop = true;
+		const firstResource = {
+			start: vi.fn(async () => {}),
+			stop: vi.fn(async () => {
+				if (failFirstStop) {
+					failFirstStop = false;
+					throw new Error("first resource failed to stop");
+				}
+			}),
+		};
+		const secondResource = { start: vi.fn(async () => {}), stop: vi.fn(async () => {}) };
+		runtimeHost.registerSessionResource(firstResource);
+		runtimeHost.registerSessionResource(secondResource);
+
+		await expect(runtimeHost.dispose()).rejects.toThrow("first resource failed to stop");
+
+		expect(firstResource.stop).toHaveBeenCalledOnce();
+		expect(secondResource.stop).toHaveBeenCalledOnce();
+		expect(disposeSession).toHaveBeenCalledOnce();
+		await expect(runtimeHost.dispose()).resolves.toBeUndefined();
+		expect(firstResource.stop).toHaveBeenCalledTimes(2);
+		expect(secondResource.stop).toHaveBeenCalledOnce();
+		expect(disposeSession).toHaveBeenCalledOnce();
+		await expect(runtimeHost.dispose()).resolves.toBeUndefined();
+		expect(firstResource.stop).toHaveBeenCalledTimes(2);
+	});
+
+	it("waits for an admitted replacement before disposing its resulting runtime", async () => {
+		const { runtimeHost } = await createRuntimeHost(() => {});
+		let releaseRebind!: () => void;
+		let signalRebind!: () => void;
+		const rebindStarted = new Promise<void>((resolve) => {
+			signalRebind = resolve;
+		});
+		const rebindGate = new Promise<void>((resolve) => {
+			releaseRebind = resolve;
+		});
+		runtimeHost.setRebindSession(async (session) => {
+			await session.bindExtensions({});
+			signalRebind();
+			await rebindGate;
+		});
+
+		const replacement = runtimeHost.newSession();
+		await rebindStarted;
+		const replacementSession = runtimeHost.session;
+		const disposeReplacement = vi.spyOn(replacementSession, "disposeAndWait");
+		const disposal = runtimeHost.dispose();
+		expect(disposeReplacement).not.toHaveBeenCalled();
+
+		releaseRebind();
+		await replacement;
+		await disposal;
+
+		expect(disposeReplacement).toHaveBeenCalledOnce();
+		await expect(runtimeHost.newSession()).rejects.toThrow("already been disposed");
 	});
 
 	it("runs beforeSessionInvalidate after session_shutdown and before rebindSession", async () => {

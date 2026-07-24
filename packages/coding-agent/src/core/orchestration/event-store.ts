@@ -54,6 +54,17 @@ interface SnapshotBaseline {
 	snapshotFile: string;
 }
 
+interface SnapshotFileSignature {
+	size: number;
+	mtimeMs: number;
+	ctimeMs: number;
+}
+
+interface VerifiedSnapshotBaseline {
+	baseline: SnapshotBaseline;
+	signature: SnapshotFileSignature;
+}
+
 export interface OrchestrationEventStoreOptions {
 	agentDir: string;
 	sessionId: string;
@@ -155,6 +166,7 @@ export class OrchestrationEventStore {
 	private readonly maxTailBytes: number;
 	private readonly maxIdempotencyEvents: number;
 	private readonly listeners = new Set<(event: OrchestrationEvent) => void>();
+	private verifiedSnapshotBaseline: VerifiedSnapshotBaseline | undefined;
 
 	constructor(options: OrchestrationEventStoreOptions) {
 		this.rootDir = stateFile(options.agentDir, "orchestration", safeSessionDirectoryName(options.sessionId));
@@ -232,8 +244,10 @@ export class OrchestrationEventStore {
 			throw new OrchestrationSnapshotRequiredError(baseline.throughOrdinal);
 		}
 		const events: OrchestrationEvent[] = [];
+		const names = this.eventFileNamesUnlocked();
+		this.assertReadableTailUnlocked(names, baseline?.throughOrdinal ?? 0);
 		let previousOrdinal = ordinal;
-		for (const name of this.eventFileNamesUnlocked()) {
+		for (const name of names) {
 			const match = EVENT_FILE_PATTERN.exec(name);
 			if (!match) continue;
 			const fileOrdinal = Number(match[1]);
@@ -336,6 +350,7 @@ export class OrchestrationEventStore {
 		const names = this.eventFileNamesUnlocked();
 		const events: OrchestrationEvent[] = [];
 		const baselineOrdinal = this.readProjectionSnapshotUnlocked()?.throughOrdinal ?? 0;
+		this.assertReadableTailUnlocked(names, baselineOrdinal);
 		let previousOrdinal = baselineOrdinal;
 		for (const name of names) {
 			const match = EVENT_FILE_PATTERN.exec(name);
@@ -357,8 +372,9 @@ export class OrchestrationEventStore {
 			return readdirSync(this.eventsDir)
 				.filter((candidate) => EVENT_FILE_PATTERN.test(candidate))
 				.sort();
-		} catch {
-			return [];
+		} catch (error) {
+			if ((error as NodeJS.ErrnoException).code === "ENOENT") return [];
+			throw error;
 		}
 	}
 
@@ -377,6 +393,35 @@ export class OrchestrationEventStore {
 				.sort();
 		} catch {
 			return [];
+		}
+	}
+
+	/** Event files are a contiguous append-only tail after the published snapshot. */
+	private assertContiguousTailOrdinalsUnlocked(names: readonly string[], baselineOrdinal: number): void {
+		let expectedOrdinal = baselineOrdinal + 1;
+		for (const name of names) {
+			const ordinal = Number(EVENT_FILE_PATTERN.exec(name)?.[1] ?? 0);
+			// A crash after publishing the baseline but before pruning is safe: the snapshot covers these files.
+			if (ordinal <= baselineOrdinal) continue;
+			if (ordinal !== expectedOrdinal) {
+				throw new OrchestrationEventStoreError(
+					`Missing orchestration event ordinal ${expectedOrdinal} before ${name}.`,
+				);
+			}
+			expectedOrdinal++;
+		}
+	}
+
+	/** A valid cursor may lag a newly published snapshot, but it must never lead its committed tail. */
+	private assertReadableTailUnlocked(names: readonly string[], baselineOrdinal: number): void {
+		this.assertContiguousTailOrdinalsUnlocked(names, baselineOrdinal);
+		const highestEventOrdinal = names.length > 0 ? Number(EVENT_FILE_PATTERN.exec(names.at(-1)!)?.[1] ?? 0) : 0;
+		const highestCommittedOrdinal = Math.max(baselineOrdinal, highestEventOrdinal);
+		const cursor = parseCursor(this.cursorPath);
+		if (cursor && cursor.lastOrdinal > highestCommittedOrdinal) {
+			throw new OrchestrationEventStoreError(
+				`Orchestration cursor ${cursor.lastOrdinal} is ahead of the last committed event ${highestCommittedOrdinal}.`,
+			);
 		}
 	}
 
@@ -439,6 +484,11 @@ export class OrchestrationEventStore {
 			Array.isArray(snapshot.projection) ||
 			!Array.isArray(snapshot.idempotencyEvents) ||
 			!snapshot.idempotencyEvents.every(isOrchestrationEvent) ||
+			!snapshot.idempotencyEvents.every(
+				(event) => event.ordinal <= baseline.throughOrdinal && event.idempotencyKey !== undefined,
+			) ||
+			new Set(snapshot.idempotencyEvents.map((event) => event.idempotencyKey)).size !==
+				snapshot.idempotencyEvents.length ||
 			typeof snapshot.digest !== "string" ||
 			snapshot.digest !== baseline.digest
 		) {
@@ -456,6 +506,57 @@ export class OrchestrationEventStore {
 			throw new OrchestrationEventStoreError("Orchestration projection snapshot digest mismatch.");
 		}
 		return { ...content, digest: baseline.digest };
+	}
+
+	/**
+	 * Appends need a verified snapshot baseline but must not deserialize its projection on every event.
+	 * The baseline pointer remains small and is reread each time; an immutable snapshot is reparsed only
+	 * when its pointer or filesystem identity changes.
+	 */
+	private readVerifiedSnapshotBaselineUnlocked(): SnapshotBaseline | undefined {
+		const baseline = this.readBaselineUnlocked();
+		if (!baseline) {
+			this.verifiedSnapshotBaseline = undefined;
+			return undefined;
+		}
+		const signature = this.snapshotFileSignatureUnlocked(baseline);
+		const cached = this.verifiedSnapshotBaseline;
+		if (
+			cached &&
+			cached.baseline.throughOrdinal === baseline.throughOrdinal &&
+			cached.baseline.digest === baseline.digest &&
+			cached.baseline.snapshotFile === baseline.snapshotFile &&
+			cached.signature.size === signature.size &&
+			cached.signature.mtimeMs === signature.mtimeMs &&
+			cached.signature.ctimeMs === signature.ctimeMs
+		) {
+			return baseline;
+		}
+		this.readProjectionSnapshotUnlocked();
+		const verifiedSignature = this.snapshotFileSignatureUnlocked(baseline);
+		if (
+			verifiedSignature.size !== signature.size ||
+			verifiedSignature.mtimeMs !== signature.mtimeMs ||
+			verifiedSignature.ctimeMs !== signature.ctimeMs
+		) {
+			throw new OrchestrationEventStoreError("Orchestration projection snapshot changed while being verified.");
+		}
+		this.verifiedSnapshotBaseline = { baseline, signature };
+		return baseline;
+	}
+
+	private snapshotFileSignatureUnlocked(baseline: SnapshotBaseline): SnapshotFileSignature {
+		try {
+			const stats = statSync(join(this.snapshotsDir, baseline.snapshotFile));
+			if (!stats.isFile())
+				throw new OrchestrationEventStoreError("Orchestration projection snapshot is not a file.");
+			return { size: stats.size, mtimeMs: stats.mtimeMs, ctimeMs: stats.ctimeMs };
+		} catch (error) {
+			if (error instanceof OrchestrationEventStoreError) throw error;
+			throw new OrchestrationEventStoreError(
+				`Failed to parse orchestration projection snapshot: ${error instanceof Error ? error.message : String(error)}`,
+			);
+		}
 	}
 
 	private unlinkManagedFile(filePath: string): void {
@@ -509,7 +610,12 @@ export class OrchestrationEventStore {
 			throw new OrchestrationEventStoreError("Invalid orchestration idempotency marker.");
 		}
 		const marker = parsed as Record<string, unknown>;
-		if (marker.version !== 1 || marker.key !== key || !Number.isSafeInteger(marker.ordinal)) {
+		if (
+			marker.version !== 1 ||
+			marker.key !== key ||
+			!Number.isSafeInteger(marker.ordinal) ||
+			Number(marker.ordinal) < 1
+		) {
 			throw new OrchestrationEventStoreError("Invalid orchestration idempotency marker.");
 		}
 		const ordinal = Number(marker.ordinal);
@@ -532,7 +638,8 @@ export class OrchestrationEventStore {
 	 */
 	private synchronizeIndexesUnlocked(): SynchronizedIndexes {
 		const names = this.eventFileNamesUnlocked();
-		const baselineOrdinal = this.readBaselineUnlocked()?.throughOrdinal ?? 0;
+		const baselineOrdinal = this.readVerifiedSnapshotBaselineUnlocked()?.throughOrdinal ?? 0;
+		this.assertReadableTailUnlocked(names, baselineOrdinal);
 		const highestEventOrdinal = names.length > 0 ? Number(EVENT_FILE_PATTERN.exec(names.at(-1)!)?.[1] ?? 0) : 0;
 		const highest = Math.max(baselineOrdinal, highestEventOrdinal);
 		const cursor = parseCursor(this.cursorPath);

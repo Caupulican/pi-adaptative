@@ -824,9 +824,23 @@ export class DurableTaskRuntime {
 		this.now = options.now ?? Date.now;
 		this.createId = options.createId ?? randomUUID;
 		const snapshot = this.store.readProjectionSnapshot();
-		this.state = snapshot
-			? projectionFromSnapshot(snapshot.projection, snapshot.throughOrdinal)
-			: projectOrchestrationEvents(this.store.readAll());
+		if (snapshot) {
+			this.state = projectionFromSnapshot(snapshot.projection, snapshot.throughOrdinal);
+		} else {
+			const events = this.store.readAll();
+			// Compaction may install a baseline between the first snapshot read and readAll(). In that
+			// case readAll() returns only the new tail, which must be applied to that baseline rather
+			// than projected as a standalone history.
+			const snapshotAfterRead = this.store.readProjectionSnapshot();
+			this.state = snapshotAfterRead
+				? events
+						.filter((event) => event.ordinal > snapshotAfterRead.throughOrdinal)
+						.reduce(
+							reduceOrchestrationEvent,
+							projectionFromSnapshot(snapshotAfterRead.projection, snapshotAfterRead.throughOrdinal),
+						)
+				: projectOrchestrationEvents(events);
+		}
 		this.refresh();
 	}
 

@@ -2,6 +2,7 @@
 
 ### Fixed
 
+- Mapped required OpenAI-compatible tool-result names through the same reversible provider alias as declarations and assistant calls, preserving invalid or colliding local tool identities across the full round trip.
 - Remapped reserved OpenAI Responses function names and invalid/custom function names reversibly across OpenAI, Azure, Codex, Google, Anthropic, Mistral, and Bedrock declarations, history, forced choices, and returned calls.
 - Corrected GPT-5.6 Codex subscription context metadata to the current 272k-token upstream limit.
 - Centralized model thinking-level resolution so every provider uses the same explicit/default/fallback precedence and capability clamping contract.

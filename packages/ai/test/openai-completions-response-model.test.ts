@@ -301,6 +301,71 @@ describe("openai-completions responseModel", () => {
 		expect(toolCall).toMatchObject({ type: "toolCall", name: "mcp/server:do_thing" });
 	});
 
+	it("maps required tool-result names through the same provider alias without mutating local history", async () => {
+		mockState.chunks = [
+			{
+				id: "chatcmpl-tool-result-name",
+				model: "openrouter/auto",
+				choices: [{ index: 0, delta: { content: "done" }, finish_reason: "stop" }],
+				usage: {
+					prompt_tokens: 1,
+					completion_tokens: 1,
+					prompt_tokens_details: { cached_tokens: 0 },
+					completion_tokens_details: { reasoning_tokens: 0 },
+				},
+			},
+		];
+		const toolName = "mcp.server:do_thing";
+		const context = {
+			tools: [{ name: toolName, description: "Do thing", parameters: { type: "object", properties: {} } }],
+			messages: [
+				{ role: "user" as const, content: "run it", timestamp: 1 },
+				{
+					role: "assistant" as const,
+					content: [{ type: "toolCall" as const, id: "call_1", name: toolName, arguments: {} }],
+					api: "openai-completions" as const,
+					provider: "openrouter",
+					model: "openrouter/auto",
+					usage: {
+						input: 0,
+						output: 0,
+						cacheRead: 0,
+						cacheWrite: 0,
+						totalTokens: 0,
+						cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, total: 0 },
+					},
+					stopReason: "toolUse" as const,
+					timestamp: 2,
+				},
+				{
+					role: "toolResult" as const,
+					toolCallId: "call_1",
+					toolName,
+					content: [{ type: "text" as const, text: "ok" }],
+					isError: false,
+					timestamp: 3,
+				},
+			],
+		};
+
+		await complete({ ...openRouterAuto(), compat: { requiresToolResultName: true } }, context, { apiKey: "test" });
+
+		const request = mockState.requests[0] as {
+			messages: Array<{
+				role: string;
+				name?: string;
+				tool_calls?: Array<{ function: { name: string } }>;
+			}>;
+			tools?: Array<{ function: { name: string } }>;
+		};
+		expect(request.tools?.[0]?.function.name).toBe("mcp_server_do_thing");
+		expect(request.messages.find((message) => message.role === "assistant")?.tool_calls?.[0]?.function.name).toBe(
+			"mcp_server_do_thing",
+		);
+		expect(request.messages.find((message) => message.role === "tool")?.name).toBe("mcp_server_do_thing");
+		expect(context.messages[2]?.toolName).toBe(toolName);
+	});
+
 	it("marks truncated streamed tool arguments as provider tool errors", async () => {
 		mockState.chunks = [
 			{

@@ -16,7 +16,11 @@ process breaks.
 Every `pi` process registers exactly one entry in the matrix, keyed by `<role>-<sessionId>`, under
 `state/process-matrix/` (see `agent-paths.ts` -- durable, survives `/reload` and crashes, not the
 transient `work/` tree). The session ID is derived from the entry's single `AgentIdentityContract`;
-process entries and resumable payloads do not carry parallel agent/session/lane context fields.
+process entries and resumable payloads do not carry parallel agent/session/lane context fields. All
+post-registration transitions use the same per-entry lock and replace/delete only the exact process
+generation they observed. An older same-session process therefore loses write ownership as soon as a
+newer process registers; its late heartbeat, reconciliation, or exit hook cannot overwrite the newer
+entry.
 
 - **Master** (no declared parent): writes its own entry once at startup, heartbeats it on an
   interval, and -- once, at startup -- scans the matrix for **orphaned workers**: worker entries
@@ -47,11 +51,13 @@ persisted session file with its agent ID, cwd, worktree, orchestration profile, 
 and bounded wake task. The direct-argv launch prefers the exact persisted `sessionFile` over an ID
 lookup, carries the stable logical-agent ID in `PI_ORCHESTRATION_AGENT_ID`, and names the latest
 checkpoint plus bounded context pointers in the wake prompt instead of copying a second transcript.
-The resumed process overwrites the same `<role>-<sessionId>` matrix entry. Its terminal process event
-is first persisted as an undelivered matrix handoff, then delivered to the owning parent session and
-marked delivered. If that owner switched sessions before the event arrived, the bounded handoff
-survives and replays on its next resume instead of being injected into the wrong transcript. A
-still-live foreign orphan follows the adopt/cleanup flow below.
+The resumed process overwrites the same `<role>-<sessionId>` matrix entry. The launcher publishes its
+PID before self-registration, and terminal persistence plus delivery acknowledgement conditionally
+replace only the process generation they observed. A stale completion can therefore never close a
+newer replacement. The terminal event is first persisted as an undelivered matrix handoff, then
+delivered to the owning parent session and marked delivered. If that owner switched sessions before
+the event arrived, the bounded handoff survives and replays on its next resume instead of being
+injected into the wrong transcript. A still-live foreign orphan follows the adopt/cleanup flow below.
 
 1. Ask: *"adopt worker `<entryId>` (lane `<laneKey>`)?"* Yes → this session becomes the worker's
    new parent (an adoption grant is written into the worker's own entry).

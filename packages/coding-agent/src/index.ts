@@ -294,6 +294,8 @@ export {
 	createReadTool,
 	createWriteTool,
 	type PromptTemplate,
+	SessionReplacementCallbackError,
+	SessionReplacementRuntimeError,
 } from "./core/sdk.ts";
 export {
 	type CompactionSettings,

@@ -4,6 +4,7 @@ import type {
 	GoalContinuationLoopOptions,
 	GoalContinuationLoopResult,
 } from "../src/core/agent-session.ts";
+import { SessionReplacementCallbackError, SessionReplacementRuntimeError } from "../src/core/agent-session-runtime.ts";
 import { applyGoalEvent, createGoalState, type GoalState } from "../src/core/goals/goal-state.ts";
 import { BUILTIN_SLASH_COMMANDS } from "../src/core/slash-commands.ts";
 import { InteractiveMode } from "../src/modes/interactive/interactive-mode.ts";
@@ -310,6 +311,70 @@ describe("InteractiveMode /goal-continue command", () => {
 		expect(phases).toEqual(["resources:active", "withSession"]);
 		expect(statuses).toEqual(["Resumed session and goal"]);
 		expect(refreshCount).toBe(1);
+	});
+
+	it("keeps a restored previous session alive when selected-session activation fails", async () => {
+		const errors: string[] = [];
+		let renderCount = 0;
+		let fatalCount = 0;
+		const host = {
+			loadingAnimation: undefined,
+			statusContainer: { clear() {} },
+			runtimeHost: {
+				switchSession: async () => {
+					throw new SessionReplacementRuntimeError("activation", new Error("supervisor failed"), true);
+				},
+			},
+			renderCurrentSessionState: () => {
+				renderCount++;
+			},
+			showStatus() {},
+			showError: (message: string) => errors.push(message),
+			refreshAutonomyFooterStatus() {},
+			handleFatalRuntimeError: async () => {
+				fatalCount++;
+				throw new Error("unexpected fatal replacement failure");
+			},
+		} as unknown as SessionFlowHost;
+
+		await expect(handleResumeSession(host, "/tmp/failed-session.jsonl")).resolves.toEqual({ cancelled: true });
+		expect(renderCount).toBe(1);
+		expect(fatalCount).toBe(0);
+		expect(errors).toEqual([
+			"Session replacement activation failed; the previous session was restored: supervisor failed",
+		]);
+	});
+
+	it("keeps the replacement selected when its extension continuation fails", async () => {
+		const errors: string[] = [];
+		let renderCount = 0;
+		let fatalCount = 0;
+		const host = {
+			loadingAnimation: undefined,
+			statusContainer: { clear() {} },
+			runtimeHost: {
+				switchSession: async () => {
+					throw new SessionReplacementCallbackError(new Error("continuation failed"));
+				},
+			},
+			renderCurrentSessionState: () => {
+				renderCount++;
+			},
+			showStatus() {},
+			showError: (message: string) => errors.push(message),
+			refreshAutonomyFooterStatus() {},
+			handleFatalRuntimeError: async () => {
+				fatalCount++;
+				throw new Error("unexpected fatal callback failure");
+			},
+		} as unknown as SessionFlowHost;
+
+		await expect(handleResumeSession(host, "/tmp/selected-session.jsonl")).resolves.toEqual({ cancelled: false });
+		expect(renderCount).toBe(1);
+		expect(fatalCount).toBe(0);
+		expect(errors).toEqual([
+			"Session replacement completed, but its withSession callback failed: continuation failed",
+		]);
 	});
 
 	it("lets the user manually complete or close a goal without running the model", async () => {

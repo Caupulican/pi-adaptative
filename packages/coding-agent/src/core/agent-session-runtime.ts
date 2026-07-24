@@ -20,6 +20,20 @@ export interface CreateAgentSessionRuntimeResult extends CreateAgentSessionResul
 	diagnostics: AgentSessionRuntimeDiagnostic[];
 }
 
+interface AgentSessionRuntimeState {
+	session: AgentSession;
+	services: AgentSessionServices;
+	diagnostics: AgentSessionRuntimeDiagnostic[];
+	modelFallbackMessage?: string;
+}
+
+interface RuntimeShutdownProgress {
+	shutdownEventEmitted: boolean;
+	stoppedResources: Set<AgentSessionRuntimeResource>;
+	hostInvalidated: boolean;
+	sessionDisposed: boolean;
+}
+
 /** Session-owned background runtime that must not survive a session replacement. */
 export interface AgentSessionRuntimeResource {
 	start(session: AgentSession): Promise<void>;
@@ -69,6 +83,46 @@ export class SessionImportFileNotFoundError extends Error {
 	}
 }
 
+/** A teardown or activation failure at the replacement boundary, including rollback outcome. */
+export class SessionReplacementRuntimeError extends Error {
+	readonly phase: "teardown" | "activation";
+	readonly recovered: boolean;
+	readonly transitionError: unknown;
+	readonly recoveryError: unknown | undefined;
+
+	constructor(
+		phase: "teardown" | "activation",
+		transitionError: unknown,
+		recovered: boolean,
+		recoveryError?: unknown,
+	) {
+		const transitionMessage = transitionError instanceof Error ? transitionError.message : String(transitionError);
+		super(
+			recovered
+				? `Session replacement ${phase} failed; the previous session was restored: ${transitionMessage}`
+				: `Session replacement ${phase} failed and the previous session could not be restored safely: ${transitionMessage}`,
+		);
+		this.name = "SessionReplacementRuntimeError";
+		this.phase = phase;
+		this.recovered = recovered;
+		this.transitionError = transitionError;
+		this.recoveryError = recoveryError;
+	}
+}
+
+/** A post-commit extension callback failed; the replacement itself remains the active session. */
+export class SessionReplacementCallbackError extends Error {
+	readonly replacementCommitted = true;
+	readonly callbackError: unknown;
+
+	constructor(callbackError: unknown) {
+		const callbackMessage = callbackError instanceof Error ? callbackError.message : String(callbackError);
+		super(`Session replacement completed, but its withSession callback failed: ${callbackMessage}`);
+		this.name = "SessionReplacementCallbackError";
+		this.callbackError = callbackError;
+	}
+}
+
 function extractUserMessageText(content: string | Array<{ type: string; text?: string }>): string {
 	if (typeof content === "string") {
 		return content;
@@ -95,6 +149,15 @@ export class AgentSessionRuntime {
 	private _diagnostics: AgentSessionRuntimeDiagnostic[];
 	private _modelFallbackMessage?: string;
 	private _replacementInFlight: Promise<unknown> | undefined;
+	private _disposeInFlight: Promise<void> | undefined;
+	private _disposeStarted = false;
+	private _disposed = false;
+	private readonly disposeProgress: RuntimeShutdownProgress = {
+		shutdownEventEmitted: false,
+		stoppedResources: new Set(),
+		hostInvalidated: false,
+		sessionDisposed: false,
+	};
 	private readonly sessionResources: AgentSessionRuntimeResource[] = [];
 
 	constructor(
@@ -193,14 +256,12 @@ export class AgentSessionRuntime {
 	}
 
 	private async teardownCurrent(reason: SessionShutdownEvent["reason"], targetSessionFile?: string): Promise<void> {
-		await emitSessionShutdownEvent(this.session.extensionRunner, {
-			type: "session_shutdown",
-			reason,
-			targetSessionFile,
+		const errors = await this.shutdownRuntime(this.session, reason, targetSessionFile, {
+			stopResources: true,
+			invalidateHost: true,
 		});
-		for (const resource of this.sessionResources) await resource.stop();
-		this.beforeSessionInvalidate?.();
-		await this.session.disposeAndWait();
+		if (errors.length === 1) throw errors[0];
+		if (errors.length > 1) throw new AggregateError(errors, "Session runtime teardown failed.");
 	}
 
 	private async discardPrepared(result: CreateAgentSessionRuntimeResult): Promise<void> {
@@ -232,36 +293,182 @@ export class AgentSessionRuntime {
 		result: CreateAgentSessionRuntimeResult,
 		options: SessionReplacementCommitOptions,
 	): Promise<void> {
+		const previous = this.snapshot();
 		try {
 			await this.teardownCurrent(options.reason, options.targetSessionFile);
-		} catch (error) {
-			await this.discardPrepared(result);
-			options.onDiscard?.();
-			throw error;
+		} catch (transitionError: unknown) {
+			const recoveryError = await this.restorePreviousAfterRuntimeFailure(previous, result, options, false);
+			throw new SessionReplacementRuntimeError(
+				"teardown",
+				transitionError,
+				recoveryError === undefined,
+				recoveryError,
+			);
 		}
 		this.apply(result);
-		await this.finishSessionReplacement(options);
+		try {
+			await this.activateReplacement(options);
+		} catch (activationError: unknown) {
+			const recoveryError = await this.restorePreviousAfterRuntimeFailure(previous, result, options, true);
+			throw new SessionReplacementRuntimeError(
+				"activation",
+				activationError,
+				recoveryError === undefined,
+				recoveryError,
+			);
+		}
+		if (options.withSession) {
+			try {
+				await options.withSession(this.session.createReplacedSessionContext());
+			} catch (callbackError: unknown) {
+				throw new SessionReplacementCallbackError(callbackError);
+			}
+		}
 	}
 
-	private apply(result: CreateAgentSessionRuntimeResult): void {
+	private snapshot(): AgentSessionRuntimeState {
+		return {
+			session: this._session,
+			services: this._services,
+			diagnostics: [...this._diagnostics],
+			...(this._modelFallbackMessage !== undefined ? { modelFallbackMessage: this._modelFallbackMessage } : {}),
+		};
+	}
+
+	private apply(result: AgentSessionRuntimeState): void {
 		this._session = result.session;
 		this._services = result.services;
 		this._diagnostics = result.diagnostics;
 		this._modelFallbackMessage = result.modelFallbackMessage;
 	}
 
-	private async finishSessionReplacement(options: SessionReplacementCommitOptions): Promise<void> {
+	private async activateReplacement(options: SessionReplacementCommitOptions): Promise<void> {
 		if (this.rebindSession) {
 			await this.rebindSession(this.session);
 		}
 		await options.beforeSessionResourcesStart?.(this.session);
 		for (const resource of this.sessionResources) await resource.start(this.session);
-		if (options.withSession) {
-			await options.withSession(this.session.createReplacedSessionContext());
+	}
+
+	private async restorePreviousAfterRuntimeFailure(
+		previous: AgentSessionRuntimeState,
+		failed: CreateAgentSessionRuntimeResult,
+		options: SessionReplacementCommitOptions,
+		candidateActivated: boolean,
+	): Promise<unknown | undefined> {
+		const cleanupErrors = await this.shutdownRuntime(failed.session, options.reason, previous.session.sessionFile, {
+			stopResources: candidateActivated,
+			invalidateHost: candidateActivated,
+		});
+		// The old AgentSession was disposed at the commit boundary, but its SessionManager remains the
+		// durable reconstruction source. Restore the old snapshot temporarily so rollback-only artifact
+		// cleanup cannot mistake the failed candidate for the active session.
+		this.apply(previous);
+		try {
+			options.onDiscard?.();
+		} catch (error: unknown) {
+			cleanupErrors.push(error);
 		}
+
+		let restored: CreateAgentSessionRuntimeResult | undefined;
+		try {
+			restored = await this.createRuntime({
+				cwd: previous.services.cwd,
+				agentDir: previous.services.agentDir,
+				sessionManager: previous.session.sessionManager,
+				sessionStartEvent: {
+					type: "session_start",
+					reason: "resume",
+					previousSessionFile: failed.session.sessionFile,
+				},
+			});
+			this.apply(restored);
+			if (this.rebindSession) await this.rebindSession(this.session);
+			for (const resource of this.sessionResources) await resource.start(this.session);
+		} catch (recoveryError: unknown) {
+			if (restored) {
+				cleanupErrors.push(
+					...(await this.shutdownRuntime(restored.session, "resume", failed.session.sessionFile, {
+						stopResources: true,
+						invalidateHost: true,
+					})),
+				);
+			}
+			this.apply(previous);
+			return cleanupErrors.length > 0
+				? new AggregateError([...cleanupErrors, recoveryError], "Session rollback and cleanup failed.")
+				: recoveryError;
+		}
+
+		return cleanupErrors.length > 0
+			? new AggregateError(
+					cleanupErrors,
+					"The previous session was restored, but failed replacement cleanup was incomplete.",
+				)
+			: undefined;
+	}
+
+	private async shutdownRuntime(
+		session: AgentSession,
+		reason: SessionShutdownEvent["reason"],
+		targetSessionFile: string | undefined,
+		options: { stopResources: boolean; invalidateHost: boolean; progress?: RuntimeShutdownProgress },
+	): Promise<unknown[]> {
+		const errors: unknown[] = [];
+		const progress =
+			options.progress ??
+			({
+				shutdownEventEmitted: false,
+				stoppedResources: new Set(),
+				hostInvalidated: false,
+				sessionDisposed: false,
+			} satisfies RuntimeShutdownProgress);
+		if (!progress.shutdownEventEmitted) {
+			try {
+				await emitSessionShutdownEvent(session.extensionRunner, {
+					type: "session_shutdown",
+					reason,
+					targetSessionFile,
+				});
+				progress.shutdownEventEmitted = true;
+			} catch (error: unknown) {
+				errors.push(error);
+			}
+		}
+		if (options.stopResources) {
+			for (const resource of this.sessionResources) {
+				if (progress.stoppedResources.has(resource)) continue;
+				try {
+					await resource.stop();
+					progress.stoppedResources.add(resource);
+				} catch (error: unknown) {
+					errors.push(error);
+				}
+			}
+		}
+		if (options.invalidateHost && !progress.hostInvalidated) {
+			try {
+				this.beforeSessionInvalidate?.();
+				progress.hostInvalidated = true;
+			} catch (error: unknown) {
+				errors.push(error);
+			}
+		}
+		if (!progress.sessionDisposed) {
+			try {
+				await session.disposeAndWait();
+				progress.sessionDisposed = true;
+			} catch (error: unknown) {
+				errors.push(error);
+			}
+		}
+		return errors;
 	}
 
 	private runSessionReplacement<T>(operation: () => Promise<T>): Promise<T> {
+		if (this._disposeStarted) {
+			return Promise.reject(new Error("The session runtime has already been disposed."));
+		}
 		if (this._replacementInFlight) {
 			return Promise.reject(new Error("A session replacement is already in progress."));
 		}
@@ -522,13 +729,33 @@ export class AgentSessionRuntime {
 	}
 
 	async dispose(): Promise<void> {
-		await emitSessionShutdownEvent(this.session.extensionRunner, {
-			type: "session_shutdown",
-			reason: "quit",
-		});
-		for (const resource of this.sessionResources) await resource.stop();
-		this.beforeSessionInvalidate?.();
-		await this.session.disposeAndWait();
+		if (this._disposeInFlight) return this._disposeInFlight;
+		if (this._disposed) return;
+		this._disposeStarted = true;
+		const replacement = this._replacementInFlight;
+		const disposal = (async () => {
+			if (replacement) {
+				try {
+					await replacement;
+				} catch {
+					// Replacement already reports its own error; dispose whichever runtime it left active.
+				}
+			}
+			const errors = await this.shutdownRuntime(this.session, "quit", undefined, {
+				stopResources: true,
+				invalidateHost: true,
+				progress: this.disposeProgress,
+			});
+			if (errors.length === 1) throw errors[0];
+			if (errors.length > 1) throw new AggregateError(errors, "Session runtime disposal failed.");
+			this._disposed = true;
+		})();
+		this._disposeInFlight = disposal;
+		try {
+			await disposal;
+		} finally {
+			this._disposeInFlight = undefined;
+		}
 	}
 }
 
