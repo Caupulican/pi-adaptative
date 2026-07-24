@@ -21,7 +21,7 @@ describe("createAgentSession session manager defaults", () => {
 
 	afterEach(() => {
 		if (tempDir && existsSync(tempDir)) {
-			rmSync(tempDir, { recursive: true, force: true });
+			rmSync(tempDir, { recursive: true, force: true, maxRetries: 5, retryDelay: 100 });
 		}
 	});
 
@@ -47,7 +47,7 @@ describe("createAgentSession session manager defaults", () => {
 		expect(existsSync(expectedSessionDir)).toBe(false);
 		expect(existsSync(join(cwd, ".pi"))).toBe(false);
 
-		session.dispose();
+		await session.disposeAndWait();
 	});
 
 	it("keeps an explicit sessionManager override", async () => {
@@ -65,7 +65,7 @@ describe("createAgentSession session manager defaults", () => {
 		expect(session.sessionManager).toBe(sessionManager);
 		expect(session.sessionManager.isPersisted()).toBe(false);
 
-		session.dispose();
+		await session.disposeAndWait();
 	});
 
 	it("derives cwd from an explicit sessionManager when cwd is omitted", async () => {
@@ -94,6 +94,6 @@ describe("createAgentSession session manager defaults", () => {
 
 		expect(realpathSync.native(output.trim())).toBe(realpathSync.native(sessionCwd));
 
-		session.dispose();
+		await session.disposeAndWait();
 	});
 });

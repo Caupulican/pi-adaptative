@@ -9,6 +9,7 @@
 
 ### Fixed
 
+- Fixed Windows startup migration of the NTFS `auth.json:Zone.Identifier` alternate data stream so its bytes move into bounded legacy state and the named stream is removed without rewriting the auth file.
 - Persisted one immutable admission-time worker execution contract across queueing, retry, restart recovery, and mandatory verifier recovery, so profile edits cannot silently switch a pending worker's model, thinking level, tools, execution policy, or resource identity; current host policy may still narrow the recorded authority.
 - Rebased durable-runtime startup tails onto a projection snapshot installed during the initial read, preventing a concurrent compaction from replaying post-snapshot events without their prefix.
 - Made durable orchestration replay and append fail closed on missing event ordinals, truncated tails, inaccessible storage, invalid snapshot idempotency data, and missing or changed published snapshots without reparsing an unchanged projection on every append.

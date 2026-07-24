@@ -477,7 +477,21 @@ function migrateLegacyAgentFile(agentDir: string, legacyName: string, canonicalP
 		if (!target) return;
 	}
 	mkdirSync(dirname(target), { recursive: true });
-	renameSync(legacyPath, target);
+	try {
+		renameSync(legacyPath, target);
+	} catch (renameError) {
+		// Windows cannot rename an NTFS alternate data stream into a regular file. Preserve the
+		// bytes first, then remove only the named stream; never move or rewrite the owning auth file.
+		writeFileSync(target, readFileSync(legacyPath), { flag: "wx" });
+		try {
+			unlinkSync(legacyPath);
+		} catch {
+			try {
+				unlinkSync(target);
+			} catch {}
+			throw renameError;
+		}
+	}
 }
 
 /** Remove only empty real per-project session directories; transcript files are never retention-pruned. */

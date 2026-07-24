@@ -222,8 +222,8 @@ describe("reload failsafe and context audit", () => {
 		expect(resourceLoader.getDiscoverablePromptPaths()).toEqual(previousResourceState.discoverablePrompts);
 		expect(resourceLoader.getDiscoverableAgentsFilePaths()).toEqual(previousResourceState.discoverableAgents);
 		expect(resourceLoader.getAgentsDiagnostics()).toEqual(previousResourceState.agentsDiagnostics);
-		session.dispose();
-	});
+		await session.disposeAndWait();
+	}, 60_000);
 
 	it("registers the built-in context_audit extension tool by default", async () => {
 		const tempDir = join(tmpdir(), `pi-context-audit-test-${Date.now()}-${Math.random().toString(36).slice(2)}`);

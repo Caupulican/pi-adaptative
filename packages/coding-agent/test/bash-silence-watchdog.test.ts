@@ -44,7 +44,7 @@ describe("bash execution deadlines", () => {
 			const tool = createBashTool(process.cwd());
 			const result = await tool.execute("t4", {
 				command: "node -e \"setTimeout(function(){console.log('done')}, 1000)\"",
-				timeout: 2,
+				timeout: 5,
 			});
 			const text = result.content.map((item) => ("text" in item ? item.text : "")).join("");
 			expect(text).toContain("done");

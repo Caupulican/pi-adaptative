@@ -1,7 +1,6 @@
 import { mkdirSync, readdirSync, rmSync, unlinkSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { dirname, join, relative, sep } from "node:path";
-import { fileURLToPath } from "node:url";
 import { afterEach, describe, expect, it } from "vitest";
 import { ORCHESTRATION_SCHEMA_VERSION, type OrchestrationEvent } from "../src/core/orchestration/contracts.ts";
 import {
@@ -40,7 +39,7 @@ function makeAgentDir(): string {
 
 function writeConcurrentAppendWorker(agentDir: string): string {
 	const workerPath = join(agentDir, "orchestration-append-worker.mjs");
-	const eventStoreModule = fileURLToPath(new URL("../src/core/orchestration/event-store.ts", import.meta.url));
+	const eventStoreModule = new URL("../src/core/orchestration/event-store.ts", import.meta.url).href;
 	writeFileSync(
 		workerPath,
 		`import { parentPort, workerData } from "node:worker_threads";

@@ -1,3 +1,4 @@
+import { resolve } from "node:path";
 import { describe, expect, it } from "vitest";
 import {
 	buildWorkerExecutionPlan,
@@ -115,6 +116,6 @@ describe("buildWorkerExecutionPlan", () => {
 		expect(effective.requiredCapabilities).toEqual(["filesystem.read"]);
 		expect(effective.writeEnabled).toBe(false);
 		expect(effective.writePaths).toEqual([]);
-		expect(effective.deniedPaths).toEqual(["/repo/private", "/repo/new-private"]);
+		expect(effective.deniedPaths).toEqual([resolve("/repo/private"), resolve("/repo/new-private")]);
 	});
 });

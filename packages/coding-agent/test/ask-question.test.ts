@@ -70,7 +70,7 @@ function createDialog(input: readonly AskQuestion[] = questions, options: Dialog
 	const dialog = new AskQuestionDialog({
 		questions: input,
 		theme,
-		keybindings: new KeybindingsManager(),
+		keybindings: new KeybindingsManager({ "app.clipboard.pasteImage": "ctrl+v" }),
 		requestRender: () => {
 			renders++;
 		},
