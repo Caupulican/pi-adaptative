@@ -7,6 +7,23 @@ export interface ResolvedOrchestrationModel {
 	binding: OrchestrationModelBinding;
 }
 
+export function resolvePinnedOrchestrationModel(
+	binding: OrchestrationModelBinding,
+	modelRegistry: ModelRegistry,
+	isUnavailable: (model: Model<Api>) => boolean = () => false,
+): ResolvedOrchestrationModel | undefined {
+	const model = modelRegistry.find(binding.provider, binding.modelId);
+	if (
+		!model ||
+		!modelRegistry.hasConfiguredAuth(model) ||
+		isUnavailable(model) ||
+		!getSupportedThinkingLevels(model).includes(binding.thinkingLevel)
+	) {
+		return undefined;
+	}
+	return { model, binding: structuredClone(binding) };
+}
+
 /**
  * Resolve an owner-authored model policy without weakening it. Fixed policies never fall through;
  * ordered policies use only their declared order, and every candidate must have configured auth
@@ -18,17 +35,12 @@ export function resolveConfiguredOrchestrationModel(
 	isUnavailable: (model: Model<Api>) => boolean = () => false,
 ): ResolvedOrchestrationModel | undefined {
 	for (const binding of profile.modelPolicy.candidates) {
-		const model = modelRegistry.find(binding.provider, binding.modelId);
-		if (
-			!model ||
-			!modelRegistry.hasConfiguredAuth(model) ||
-			isUnavailable(model) ||
-			!getSupportedThinkingLevels(model).includes(binding.thinkingLevel)
-		) {
+		const resolved = resolvePinnedOrchestrationModel(binding, modelRegistry, isUnavailable);
+		if (!resolved) {
 			if (profile.modelPolicy.mode === "fixed") return undefined;
 			continue;
 		}
-		return { model, binding: structuredClone(binding) };
+		return resolved;
 	}
 	return undefined;
 }

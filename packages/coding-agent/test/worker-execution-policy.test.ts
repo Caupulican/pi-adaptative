@@ -1,5 +1,9 @@
 import { describe, expect, it } from "vitest";
-import { buildWorkerExecutionPlan } from "../src/core/delegation/worker-execution-policy.ts";
+import {
+	buildWorkerExecutionPlan,
+	narrowWorkerExecutionPlan,
+	workerExecutionAuthorityFromPlan,
+} from "../src/core/delegation/worker-execution-policy.ts";
 import type { ResolvedWorkerDelegationSettings } from "../src/core/settings-manager.ts";
 import { createTestWorkerOrchestrationProfile } from "./orchestration-profile-fixture.ts";
 
@@ -81,5 +85,36 @@ describe("buildWorkerExecutionPlan", () => {
 
 		expect(globalDisabled.budget.maxCostUsd).toBeUndefined();
 		expect(profileZero.budget.maxCostUsd).toBe(0);
+	});
+
+	it("allows live settings to narrow admitted authority but never widen it", () => {
+		const profile = createTestWorkerOrchestrationProfile({
+			profileId: "immutable-authority",
+			model: { provider: "test", id: "model" },
+			capabilityCeiling: ["filesystem.read", "filesystem.write"],
+			toolNames: ["read", "write"],
+		});
+		const admitted = buildWorkerExecutionPlan({
+			profile,
+			settings: settings({ writeEnabled: false, writePaths: [] }),
+			cwd: "/repo",
+			deniedPaths: ["/repo/private"],
+			memoryEnabled: false,
+		});
+		const widened = buildWorkerExecutionPlan({
+			profile,
+			settings: settings({ writeEnabled: true, writePaths: ["/repo"] }),
+			cwd: "/repo",
+			deniedPaths: ["/repo/new-private"],
+			memoryEnabled: true,
+		});
+
+		const effective = narrowWorkerExecutionPlan(workerExecutionAuthorityFromPlan(admitted), widened);
+
+		expect(effective.toolManifests.map((manifest) => manifest.toolName)).toEqual(["read"]);
+		expect(effective.requiredCapabilities).toEqual(["filesystem.read"]);
+		expect(effective.writeEnabled).toBe(false);
+		expect(effective.writePaths).toEqual([]);
+		expect(effective.deniedPaths).toEqual(["/repo/private", "/repo/new-private"]);
 	});
 });

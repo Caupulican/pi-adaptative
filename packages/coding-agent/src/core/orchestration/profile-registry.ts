@@ -9,7 +9,13 @@ import type {
 	TaskContract,
 	ToolCapabilityManifest,
 } from "./contracts.ts";
-import { HARNESS_CAPABILITIES, ORCHESTRATION_SCHEMA_VERSION, toJsonObject, WORKER_ROLES } from "./contracts.ts";
+import {
+	HARNESS_CAPABILITIES,
+	ORCHESTRATION_SCHEMA_VERSION,
+	ORCHESTRATION_THINKING_LEVELS,
+	toJsonObject,
+	WORKER_ROLES,
+} from "./contracts.ts";
 import { ORCHESTRATION_PROFILE_TOOL_NAMES } from "./lane-tool-manifests.ts";
 import {
 	type CompileExecutionGrantInput,
@@ -229,8 +235,6 @@ export function validateOrchestrationProfile(profile: OrchestrationProfile): voi
 	toJsonObject({ profile });
 }
 
-const THINKING_LEVELS = ["off", "minimal", "low", "medium", "high", "xhigh", "max", "ultra"] as const;
-
 function isStringArray(value: unknown): value is string[] {
 	return Array.isArray(value) && value.every((entry) => typeof entry === "string");
 }
@@ -289,14 +293,16 @@ export function parseOrchestrationProfile(value: unknown, sourcePath?: string): 
 			typeof candidate.provider !== "string" ||
 			typeof candidate.modelId !== "string" ||
 			typeof candidate.thinkingLevel !== "string" ||
-			!THINKING_LEVELS.includes(candidate.thinkingLevel as (typeof THINKING_LEVELS)[number])
+			!ORCHESTRATION_THINKING_LEVELS.includes(
+				candidate.thinkingLevel as (typeof ORCHESTRATION_THINKING_LEVELS)[number],
+			)
 		) {
 			throw new OrchestrationProfileError("Orchestration profile model candidate is invalid.");
 		}
 		return {
 			provider: candidate.provider,
 			modelId: candidate.modelId,
-			thinkingLevel: candidate.thinkingLevel as (typeof THINKING_LEVELS)[number],
+			thinkingLevel: candidate.thinkingLevel as (typeof ORCHESTRATION_THINKING_LEVELS)[number],
 		};
 	});
 	if (

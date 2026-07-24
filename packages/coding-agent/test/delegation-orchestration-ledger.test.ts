@@ -6,8 +6,9 @@ import { applyGoalEvent, createGoalState, type GoalState } from "../src/core/goa
 import { ORCHESTRATION_SCHEMA_VERSION, type OrchestrationProfile } from "../src/core/orchestration/contracts.ts";
 import { DelegationOrchestrationLedger } from "../src/core/orchestration/delegation-ledger.ts";
 import { projectGoalObjective } from "../src/core/orchestration/work-state-projection.ts";
+import { createWorkerExecutionContract } from "../src/core/orchestration/worker-execution-contract.ts";
 import { createWorkerResultContract } from "../src/core/orchestration/worker-result-adapter.ts";
-import { createTestExecutionGrant } from "./orchestration-profile-fixture.ts";
+import { createTestExecutionGrant, createTestWorkerExecutionAuthority } from "./orchestration-profile-fixture.ts";
 
 const roots: string[] = [];
 
@@ -40,6 +41,31 @@ function profile(): OrchestrationProfile {
 		createdAt: now,
 		updatedAt: now,
 	};
+}
+
+function executionContract(worker: OrchestrationProfile) {
+	const { verificationProfileId: _verificationProfileId, ...verifierBase } = worker;
+	const verifier: OrchestrationProfile = {
+		...verifierBase,
+		profileId: "verifier-fast",
+		description: "Pinned verifier",
+		role: "verifier",
+		capabilityCeiling: ["filesystem.read", "worktree.read"],
+		toolNames: ["read"],
+		requireIndependentVerification: false,
+	};
+	return createWorkerExecutionContract({
+		worker: {
+			profile: worker,
+			modelBinding: worker.modelPolicy.candidates[0]!,
+			authority: createTestWorkerExecutionAuthority(worker),
+		},
+		verifier: {
+			profile: verifier,
+			modelBinding: verifier.modelPolicy.candidates[0]!,
+			authority: createTestWorkerExecutionAuthority(verifier),
+		},
+	});
 }
 
 function goal(acceptanceCriteria: readonly { id: string; description: string; required: boolean }[]): GoalState {
@@ -83,7 +109,7 @@ describe("DelegationOrchestrationLedger", () => {
 		const queued = first.prepare({
 			laneId: "worker-1",
 			instructions: "Implement the bounded change",
-			profile: profile(),
+			executionContract: executionContract(profile()),
 			requiredCapabilities: ["filesystem.read", "filesystem.write"],
 		});
 		bindTestGrant(first, queued.attemptId, "grant-session-1");
@@ -98,6 +124,13 @@ describe("DelegationOrchestrationLedger", () => {
 			dispatch: {
 				profileId: "implementer-fast",
 				instructions: "Implement the bounded change",
+				executionContract: {
+					worker: {
+						profile: { profileId: "implementer-fast" },
+						modelBinding: { provider: "test", modelId: "fast", thinkingLevel: "off" },
+					},
+					verifier: { profile: { profileId: "verifier-fast", role: "verifier" } },
+				},
 			},
 		});
 		expect(recovered[0]?.attemptId).not.toBe(handle.attemptId);
@@ -127,7 +160,7 @@ describe("DelegationOrchestrationLedger", () => {
 		const queued = first.prepare({
 			laneId: "worker-1",
 			instructions: "Inspect",
-			profile: profile(),
+			executionContract: executionContract(profile()),
 			requiredCapabilities: ["filesystem.read"],
 		});
 		const reopened = new DelegationOrchestrationLedger({ agentDir, sessionId: "session-2" });
@@ -143,7 +176,7 @@ describe("DelegationOrchestrationLedger", () => {
 		const queued = first.prepare({
 			laneId: "worker-1",
 			instructions: "One attempt only",
-			profile: limitedProfile,
+			executionContract: executionContract(limitedProfile),
 			requiredCapabilities: ["filesystem.read"],
 		});
 		bindTestGrant(first, queued.attemptId, "grant-limited");
@@ -160,7 +193,7 @@ describe("DelegationOrchestrationLedger", () => {
 		const queued = ledger.prepare({
 			laneId: "worker-1",
 			instructions: "Change one file",
-			profile: profile(),
+			executionContract: executionContract(profile()),
 			requiredCapabilities: ["filesystem.read", "filesystem.write"],
 		});
 		bindTestGrant(ledger, queued.attemptId, "grant-session-3");
@@ -193,7 +226,7 @@ describe("DelegationOrchestrationLedger", () => {
 		ledger.prepare({
 			laneId: "worker-1",
 			instructions: "Implement",
-			profile: profile(),
+			executionContract: executionContract(profile()),
 			requiredCapabilities: ["filesystem.read"],
 			goal: firstGoal,
 		});
@@ -208,7 +241,7 @@ describe("DelegationOrchestrationLedger", () => {
 		ledger.prepare({
 			laneId: "worker-2",
 			instructions: "Verify metadata",
-			profile: profile(),
+			executionContract: executionContract(profile()),
 			requiredCapabilities: ["filesystem.read"],
 			goal: expandedGoal,
 		});

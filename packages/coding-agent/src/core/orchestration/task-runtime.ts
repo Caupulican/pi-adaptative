@@ -26,10 +26,12 @@ import {
 	type RiskBudget,
 	type TaskContract,
 	toJsonObject,
+	type WorkerExecutionContract,
 	type WorkerResultContract,
 } from "./contracts.ts";
 import { type OrchestrationEventStore, OrchestrationSnapshotRequiredError } from "./event-store.ts";
 import { validateRiskBudget } from "./risk-budget.ts";
+import { parseWorkerExecutionContract } from "./worker-execution-contract.ts";
 
 export interface ObjectiveRuntimeState {
 	objective: ObjectiveContract;
@@ -205,6 +207,65 @@ function stringArray(value: unknown, label: string): string[] {
 		throw new DurableTaskRuntimeError(`${label} must be a string array.`);
 	}
 	return [...value];
+}
+
+const DISPATCH_FIELDS = new Set([
+	"taskId",
+	"profileId",
+	"instructions",
+	"resourcePointerIds",
+	"executionKind",
+	"logicalLaneId",
+	"dispatchSequence",
+	"provider",
+	"authorizationId",
+	"worktreeLaneKey",
+	"executionContract",
+]);
+
+function dispatchFromValue(value: unknown, label: string): OrchestrationDispatchRequest {
+	const dispatch = record(value, label);
+	const unsupportedField = Object.keys(dispatch).find((field) => !DISPATCH_FIELDS.has(field));
+	if (unsupportedField) throw new DurableTaskRuntimeError(`${label}.${unsupportedField} is unsupported.`);
+	const executionKind = dispatch.executionKind;
+	if (executionKind !== undefined && executionKind !== "in-process" && executionKind !== "managed-process") {
+		throw new DurableTaskRuntimeError(`${label}.executionKind is invalid.`);
+	}
+	for (const field of ["logicalLaneId", "provider", "authorizationId", "worktreeLaneKey"] as const) {
+		if (dispatch[field] !== undefined && typeof dispatch[field] !== "string") {
+			throw new DurableTaskRuntimeError(`${label}.${field} is invalid.`);
+		}
+	}
+	if (
+		dispatch.dispatchSequence !== undefined &&
+		(!Number.isSafeInteger(dispatch.dispatchSequence) || Number(dispatch.dispatchSequence) < 1)
+	) {
+		throw new DurableTaskRuntimeError(`${label}.dispatchSequence is invalid.`);
+	}
+	let executionContract: WorkerExecutionContract | undefined;
+	try {
+		executionContract = dispatch.executionContract
+			? parseWorkerExecutionContract(dispatch.executionContract)
+			: undefined;
+	} catch (error) {
+		throw new DurableTaskRuntimeError(error instanceof Error ? error.message : String(error));
+	}
+	if (executionContract && executionKind === "managed-process") {
+		throw new DurableTaskRuntimeError(`${label} cannot combine a worker execution contract with managed execution.`);
+	}
+	return {
+		taskId: string(dispatch.taskId, `${label}.taskId`),
+		profileId: string(dispatch.profileId, `${label}.profileId`),
+		instructions: string(dispatch.instructions, `${label}.instructions`),
+		resourcePointerIds: stringArray(dispatch.resourcePointerIds, `${label}.resourcePointerIds`),
+		...(executionKind ? { executionKind } : {}),
+		...(typeof dispatch.logicalLaneId === "string" ? { logicalLaneId: dispatch.logicalLaneId } : {}),
+		...(typeof dispatch.dispatchSequence === "number" ? { dispatchSequence: dispatch.dispatchSequence } : {}),
+		...(typeof dispatch.provider === "string" ? { provider: dispatch.provider } : {}),
+		...(typeof dispatch.authorizationId === "string" ? { authorizationId: dispatch.authorizationId } : {}),
+		...(typeof dispatch.worktreeLaneKey === "string" ? { worktreeLaneKey: dispatch.worktreeLaneKey } : {}),
+		...(executionContract ? { executionContract } : {}),
+	};
 }
 
 function objectiveFromPayload(payload: JsonObject): ObjectiveContract {
@@ -539,12 +600,21 @@ export function reduceOrchestrationEvent(
 			if (!task) throw new DurableTaskRuntimeError(`Attempt '${attemptId}' references an unknown task.`);
 			if (attempts[attemptId])
 				throw new DurableTaskRuntimeError(`Attempt '${attemptId}' was queued more than once.`);
+			const dispatch = dispatchFromValue(event.payload.dispatch, "attempt.queued.dispatch");
+			if (dispatch.taskId !== taskId) {
+				throw new DurableTaskRuntimeError(`Attempt '${attemptId}' dispatch task does not match its task.`);
+			}
+			if (
+				dispatch.executionContract &&
+				(dispatch.executionContract.worker.profile.profileId !== dispatch.profileId ||
+					dispatch.executionContract.worker.profile.role !== task.task.role)
+			) {
+				throw new DurableTaskRuntimeError(`Attempt '${attemptId}' execution contract does not match its dispatch.`);
+			}
 			attempts[attemptId] = {
 				attemptId,
 				taskId,
-				dispatch: structuredClone(
-					record(event.payload.dispatch, "attempt.queued.dispatch"),
-				) as unknown as OrchestrationDispatchRequest,
+				dispatch,
 				status: "queued",
 				...(typeof event.payload.grantId === "string" ? { grantId: event.payload.grantId } : {}),
 				checkpointIds: [],
@@ -1075,11 +1145,16 @@ export class DurableTaskRuntime {
 				`Task '${taskId}' is awaiting approval '${pendingApproval.request.approvalId}'.`,
 			);
 		}
-		if (dispatch.taskId !== taskId) {
+		const normalizedDispatch = dispatchFromValue(dispatch, "dispatch");
+		if (normalizedDispatch.taskId !== taskId) {
 			throw new DurableTaskRuntimeError("Dispatch taskId does not match the queued task.");
 		}
-		if (!dispatch.profileId.trim() || !dispatch.instructions.trim()) {
-			throw new DurableTaskRuntimeError("Dispatch profileId and instructions are required.");
+		if (
+			normalizedDispatch.executionContract &&
+			(normalizedDispatch.executionContract.worker.profile.profileId !== normalizedDispatch.profileId ||
+				normalizedDispatch.executionContract.worker.profile.role !== task.task.role)
+		) {
+			throw new DurableTaskRuntimeError("Execution contract does not match the dispatch profile and task role.");
 		}
 		const objective = this.state.objectives[task.task.objectiveId]!.objective;
 		const attemptCeilings = [task.task.riskBudget.maxAttempts, objective.riskBudget.maxAttempts].filter(
@@ -1095,7 +1170,7 @@ export class DurableTaskRuntime {
 			aggregateId: taskId,
 			actor: "runtime",
 			idempotencyKey: `attempt-queued:${attemptId}`,
-			payload: toJsonObject({ attemptId, taskId, dispatch, ...(grantId ? { grantId } : {}) }),
+			payload: toJsonObject({ attemptId, taskId, dispatch: normalizedDispatch, ...(grantId ? { grantId } : {}) }),
 		});
 		return structuredClone(this.state.attempts[attemptId]!);
 	}

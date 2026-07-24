@@ -8,7 +8,7 @@
 
 ### Fixed
 
-- Pinned queued default-profile workers to the profile resolved at admission so a settings reload cannot silently switch their model, thinking level, or tool grant before execution.
+- Persisted one immutable admission-time worker execution contract across queueing, retry, restart recovery, and mandatory verifier recovery, so profile edits cannot silently switch a pending worker's model, thinking level, tools, execution policy, or resource identity; current host policy may still narrow the recorded authority.
 - Rebased durable-runtime startup tails onto a projection snapshot installed during the initial read, preventing a concurrent compaction from replaying post-snapshot events without their prefix.
 - Made durable orchestration replay and append fail closed on missing event ordinals, truncated tails, inaccessible storage, invalid snapshot idempotency data, and missing or changed published snapshots without reparsing an unchanged projection on every append.
 - Fenced process-matrix reconciliation, adoption, cleanup, self-owned heartbeat/exit, resumed-worker PID publication, terminal persistence, and delivery acknowledgement with one shared per-entry conditional-write contract so stale process generations cannot overwrite newer registrations.

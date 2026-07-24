@@ -1,7 +1,14 @@
 import type { Api, Model } from "@caupulican/pi-ai";
 import type { ModelRegistry } from "../model-registry.ts";
-import type { OrchestrationModelBinding, OrchestrationProfile } from "../orchestration/contracts.ts";
-import { resolveConfiguredOrchestrationModel } from "../orchestration/model-binding.ts";
+import type {
+	OrchestrationModelBinding,
+	OrchestrationProfile,
+	WorkerProfileExecutionContract,
+} from "../orchestration/contracts.ts";
+import {
+	resolveConfiguredOrchestrationModel,
+	resolvePinnedOrchestrationModel,
+} from "../orchestration/model-binding.ts";
 import { OrchestrationProfileStore } from "../orchestration/profile-store.ts";
 import type { SettingsManager } from "../settings-manager.ts";
 import type { WorkerDelegationRequest } from "./worker-delegation-request.ts";
@@ -79,14 +86,32 @@ export class WorkerProfileResolver {
 		return selected;
 	}
 
+	resolveContract(
+		contract: WorkerProfileExecutionContract,
+	): { ok: true; resolved: ResolvedWorkerProfile } | { ok: false; reason: string } {
+		// The architect allowlist authorized this immutable contract at admission. Live session/goal
+		// controls may revoke execution, but mutable profile files cannot retroactively redefine it.
+		const resolvedModel = resolvePinnedOrchestrationModel(
+			contract.modelBinding,
+			this.options.getModelRegistry(),
+			(model) => this.options.isModelExhausted(model),
+		);
+		if (!resolvedModel) return { ok: false, reason: "orchestration_profile_model_unavailable" };
+		return {
+			ok: true,
+			resolved: {
+				model: resolvedModel.model,
+				modelBinding: resolvedModel.binding,
+				profile: structuredClone(contract.profile),
+				...(contract.soul ? { soul: contract.soul } : {}),
+			},
+		};
+	}
+
 	private resolveProfileId(
 		profileId: string,
 	): { ok: true; resolved: ResolvedWorkerProfile } | { ok: false; reason: string } {
-		const activeProfile = this.options.getActiveOrchestrationProfile();
-		if (
-			activeProfile &&
-			(activeProfile.role !== "orchestrator" || !activeProfile.dispatchProfileIds.includes(profileId))
-		) {
+		if (!this.isProfileAuthorized(profileId)) {
 			return { ok: false, reason: "orchestration_profile_not_authorized_for_orchestrator" };
 		}
 		const profile = this.loadProfiles().registry.get(profileId);
@@ -114,6 +139,14 @@ export class WorkerProfileResolver {
 				...(soul ? { soul } : {}),
 			},
 		};
+	}
+
+	private isProfileAuthorized(profileId: string): boolean {
+		const activeProfile = this.options.getActiveOrchestrationProfile();
+		return (
+			!activeProfile ||
+			(activeProfile.role === "orchestrator" && activeProfile.dispatchProfileIds.includes(profileId))
+		);
 	}
 
 	private loadProfiles(): ReturnType<OrchestrationProfileStore["load"]> {

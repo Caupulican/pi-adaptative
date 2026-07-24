@@ -4,8 +4,8 @@ import type { GoalState } from "../goals/goal-state.ts";
 import type {
 	HarnessCapability,
 	OrchestrationDispatchRequest,
-	OrchestrationProfile,
 	RiskBudget,
+	WorkerExecutionContract,
 	WorkerRole,
 } from "./contracts.ts";
 import { OrchestrationEventStore } from "./event-store.ts";
@@ -21,7 +21,7 @@ export interface DelegationLedgerOptions {
 export interface PrepareDelegationInput {
 	laneId: string;
 	instructions: string;
-	profile: OrchestrationProfile;
+	executionContract: WorkerExecutionContract;
 	requiredCapabilities: readonly HarnessCapability[];
 	goal?: GoalState;
 	verificationOfTaskId?: string;
@@ -72,13 +72,15 @@ export class DelegationOrchestrationLedger {
 	}
 
 	prepare(input: PrepareDelegationInput): AttemptRuntimeState {
+		const profile = input.executionContract.worker.profile;
 		return this.prepareNormalized({
 			laneId: input.laneId,
 			instructions: input.instructions,
-			profileId: input.profile.profileId,
-			role: input.profile.role,
+			profileId: profile.profileId,
+			role: profile.role,
 			requiredCapabilities: input.requiredCapabilities,
-			riskBudget: input.profile.budget,
+			riskBudget: profile.budget,
+			executionContract: input.executionContract,
 			...(input.goal ? { goal: input.goal } : {}),
 			...(input.verificationOfTaskId ? { verificationOfTaskId: input.verificationOfTaskId } : {}),
 		});
@@ -119,6 +121,7 @@ export class DelegationOrchestrationLedger {
 		goal?: GoalState;
 		goalId?: string;
 		verificationOfTaskId?: string;
+		executionContract?: WorkerExecutionContract;
 		dispatchMetadata?: Pick<
 			OrchestrationDispatchRequest,
 			"executionKind" | "logicalLaneId" | "dispatchSequence" | "provider" | "authorizationId" | "worktreeLaneKey"
@@ -183,6 +186,7 @@ export class DelegationOrchestrationLedger {
 			profileId: input.profileId,
 			instructions: input.instructions,
 			resourcePointerIds: [],
+			...(input.executionContract ? { executionContract: input.executionContract } : {}),
 			...input.dispatchMetadata,
 		});
 	}

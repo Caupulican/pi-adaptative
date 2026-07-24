@@ -23,7 +23,17 @@ export const WORKER_ROLES = [
 ] as const;
 export type WorkerRole = (typeof WORKER_ROLES)[number];
 
-export type OrchestrationThinkingLevel = "off" | "minimal" | "low" | "medium" | "high" | "xhigh" | "max" | "ultra";
+export const ORCHESTRATION_THINKING_LEVELS = [
+	"off",
+	"minimal",
+	"low",
+	"medium",
+	"high",
+	"xhigh",
+	"max",
+	"ultra",
+] as const;
+export type OrchestrationThinkingLevel = (typeof ORCHESTRATION_THINKING_LEVELS)[number];
 
 export interface OrchestrationModelBinding {
 	provider: string;
@@ -204,6 +214,33 @@ export interface OrchestrationProfile {
 	updatedAt: string;
 }
 
+/** Admission-time worker profile materialization. Profile files are never consulted after this is persisted. */
+export interface WorkerProfileExecutionContract {
+	schemaVersion: typeof ORCHESTRATION_SCHEMA_VERSION;
+	profile: OrchestrationProfile;
+	modelBinding: OrchestrationModelBinding;
+	authority: WorkerExecutionAuthorityContract;
+	/** Resolved resource-profile identity text. Other worker resources are represented by profile tools. */
+	soul?: string;
+}
+
+/** Effective authority admitted for one materialized worker profile. */
+export interface WorkerExecutionAuthorityContract {
+	capabilities: readonly HarnessCapability[];
+	toolNames: readonly string[];
+	readPaths: readonly string[];
+	writePaths: readonly string[];
+	deniedPaths: readonly string[];
+	budget: RiskBudget;
+}
+
+/** Immutable execution contract owned by the runtime, including any mandatory verifier. */
+export interface WorkerExecutionContract {
+	schemaVersion: typeof ORCHESTRATION_SCHEMA_VERSION;
+	worker: WorkerProfileExecutionContract;
+	verifier?: WorkerProfileExecutionContract;
+}
+
 /** The orchestrator may select only a profile and task; model/thinking fields are intentionally absent. */
 export interface OrchestrationDispatchRequest {
 	taskId: string;
@@ -222,6 +259,8 @@ export interface OrchestrationDispatchRequest {
 	authorizationId?: string;
 	/** Worktree-sync lane claimed by the external dispatcher. */
 	worktreeLaneKey?: string;
+	/** Runtime-owned immutable worker materialization. Never accepted from a model tool call. */
+	executionContract?: WorkerExecutionContract;
 }
 
 export type CapabilityEnforcementKind =

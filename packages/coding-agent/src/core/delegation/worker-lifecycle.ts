@@ -1,6 +1,6 @@
 import type { LaneRecord } from "../autonomy/lane-tracker.ts";
 import type { GoalState } from "../goals/goal-state.ts";
-import type { ExecutionGrant, WorkerResultContract } from "../orchestration/contracts.ts";
+import type { ExecutionGrant, WorkerExecutionContract, WorkerResultContract } from "../orchestration/contracts.ts";
 import {
 	DelegationOrchestrationLedger,
 	type PrepareDelegationInput,
@@ -8,6 +8,7 @@ import {
 	type StartedDelegationAttempt,
 } from "../orchestration/delegation-ledger.ts";
 import type { AttemptRuntimeState, TaskRuntimeProjection } from "../orchestration/task-runtime.ts";
+import { verifierWorkerExecutionContract } from "../orchestration/worker-execution-contract.ts";
 import {
 	ACTIVE_WORKER_ATTEMPT_STATUSES,
 	isManagedWorkerAttempt,
@@ -24,6 +25,7 @@ export type PendingVerificationRecovery =
 			implementationProfileId: string;
 			summary: string;
 			artifactUris: readonly string[];
+			verifierExecutionContract?: WorkerExecutionContract;
 	  }
 	| {
 			action: "reconcile";
@@ -215,6 +217,9 @@ export class WorkerLifecycle {
 				.sort((left, right) => left.task.createdAt.localeCompare(right.task.createdAt))
 				.at(-1);
 			if (!verifier) {
+				const verifierExecutionContract = implementationAttempt.dispatch.executionContract
+					? verifierWorkerExecutionContract(implementationAttempt.dispatch.executionContract)
+					: undefined;
 				return [
 					{
 						action: "dispatch" as const,
@@ -222,6 +227,7 @@ export class WorkerLifecycle {
 						implementationProfileId: implementationAttempt.dispatch.profileId,
 						summary: implementationAttempt.result.summary,
 						artifactUris: implementationAttempt.result.artifacts.map((artifact) => artifact.uri),
+						...(verifierExecutionContract ? { verifierExecutionContract } : {}),
 					},
 				];
 			}

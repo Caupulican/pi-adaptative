@@ -4,9 +4,18 @@ import { join } from "node:path";
 import { afterEach, describe, expect, it } from "vitest";
 import { WorkerLifecycle } from "../src/core/delegation/worker-lifecycle.ts";
 import { applyGoalEvent, createGoalState } from "../src/core/goals/goal-state.ts";
-import { ORCHESTRATION_SCHEMA_VERSION, type WorkerResultContract } from "../src/core/orchestration/contracts.ts";
+import {
+	ORCHESTRATION_SCHEMA_VERSION,
+	type OrchestrationProfile,
+	type WorkerResultContract,
+} from "../src/core/orchestration/contracts.ts";
 import type { StartedDelegationAttempt } from "../src/core/orchestration/delegation-ledger.ts";
-import { createTestExecutionGrant, createTestWorkerOrchestrationProfile } from "./orchestration-profile-fixture.ts";
+import { createWorkerExecutionContract } from "../src/core/orchestration/worker-execution-contract.ts";
+import {
+	createTestExecutionGrant,
+	createTestWorkerExecutionAuthority,
+	createTestWorkerOrchestrationProfile,
+} from "./orchestration-profile-fixture.ts";
 
 const roots: string[] = [];
 
@@ -66,6 +75,31 @@ function startWithGrant(lifecycle: WorkerLifecycle, laneId: string, leaseTtlMs: 
 	return lifecycle.start(laneId, leaseTtlMs);
 }
 
+function executionContract(profile: OrchestrationProfile) {
+	const authority = createTestWorkerExecutionAuthority(profile);
+	if (!profile.requireIndependentVerification || !profile.verificationProfileId) {
+		return createWorkerExecutionContract({
+			worker: { profile, modelBinding: profile.modelPolicy.candidates[0]!, authority },
+		});
+	}
+	const { verificationProfileId: _verificationProfileId, ...verifierBase } = profile;
+	const verifier: OrchestrationProfile = {
+		...verifierBase,
+		profileId: profile.verificationProfileId,
+		description: "Pinned verifier",
+		role: "verifier",
+		requireIndependentVerification: false,
+	};
+	return createWorkerExecutionContract({
+		worker: { profile, modelBinding: profile.modelPolicy.candidates[0]!, authority },
+		verifier: {
+			profile: verifier,
+			modelBinding: verifier.modelPolicy.candidates[0]!,
+			authority: createTestWorkerExecutionAuthority(verifier),
+		},
+	});
+}
+
 function finishAwaitingVerification(
 	lifecycle: WorkerLifecycle,
 	overrides: Partial<Pick<WorkerResultContract, "reasonCode" | "summary" | "artifacts" | "evidence">> = {},
@@ -76,7 +110,11 @@ function finishAwaitingVerification(
 		requireIndependentVerification: true,
 		verificationProfileId: "verifier",
 	});
-	const prepared = lifecycle.prepare({ instructions: "implement", profile, requiredCapabilities: [] });
+	const prepared = lifecycle.prepare({
+		instructions: "implement",
+		executionContract: executionContract(profile),
+		requiredCapabilities: [],
+	});
 	const handle = startWithGrant(lifecycle, prepared.record.laneId, profile.leaseTtlMs);
 	lifecycle.finish(
 		resultFor(handle, {
@@ -185,7 +223,7 @@ describe("WorkerLifecycle", () => {
 		const lifecycle = new WorkerLifecycle({ agentDir, sessionId: "session-1" });
 		const prepared = lifecycle.prepare({
 			instructions: "inspect",
-			profile,
+			executionContract: executionContract(profile),
 			requiredCapabilities: ["filesystem.read"],
 		});
 		const handle = startWithGrant(lifecycle, prepared.record.laneId, profile.leaseTtlMs);
@@ -210,7 +248,11 @@ describe("WorkerLifecycle", () => {
 			model: { provider: "test", id: "model" },
 		});
 		const lifecycle = new WorkerLifecycle({ agentDir: root(), sessionId: "session-2" });
-		const prepared = lifecycle.prepare({ instructions: "inspect", profile, requiredCapabilities: [] });
+		const prepared = lifecycle.prepare({
+			instructions: "inspect",
+			executionContract: executionContract(profile),
+			requiredCapabilities: [],
+		});
 
 		expect(lifecycle.cancel(prepared.record.laneId, "session_disposed")).toMatchObject({
 			status: "canceled",
@@ -227,7 +269,12 @@ describe("WorkerLifecycle", () => {
 		const lifecycle = new WorkerLifecycle({ agentDir, sessionId: "session-goal-state" });
 		let goal = createGoalState({ goalId: "g1", userGoal: "Ship", now: "T0" });
 		goal = applyGoalEvent(goal, { type: "add_requirement", id: "req-1", text: "Finish", now: "T1" });
-		const prepared = lifecycle.prepare({ instructions: "work", profile, requiredCapabilities: [], goal });
+		const prepared = lifecycle.prepare({
+			instructions: "work",
+			executionContract: executionContract(profile),
+			requiredCapabilities: [],
+			goal,
+		});
 
 		goal = applyGoalEvent(goal, { type: "block_goal", reason: "owner pause", now: "T2" });
 		expect(lifecycle.synchronizeGoalState(goal)).toEqual([]);
@@ -256,14 +303,22 @@ describe("WorkerLifecycle", () => {
 			model: { provider: "test", id: "model" },
 		});
 		const before = new WorkerLifecycle({ agentDir, sessionId: "session-resumed-id" });
-		expect(before.prepare({ instructions: "first", profile, requiredCapabilities: [] }).record.laneId).toBe(
-			"worker-1",
-		);
+		expect(
+			before.prepare({
+				instructions: "first",
+				executionContract: executionContract(profile),
+				requiredCapabilities: [],
+			}).record.laneId,
+		).toBe("worker-1");
 
 		const resumed = new WorkerLifecycle({ agentDir, sessionId: "session-resumed-id" });
-		expect(resumed.prepare({ instructions: "second", profile, requiredCapabilities: [] }).record.laneId).toBe(
-			"worker-2",
-		);
+		expect(
+			resumed.prepare({
+				instructions: "second",
+				executionContract: executionContract(profile),
+				requiredCapabilities: [],
+			}).record.laneId,
+		).toBe("worker-2");
 	});
 
 	it("recovers a missing verifier dispatch after implementation completion", () => {
@@ -280,13 +335,16 @@ describe("WorkerLifecycle", () => {
 			],
 		});
 
-		expect(lifecycle.getPendingVerificationRecoveries()).toEqual([
+		expect(lifecycle.getPendingVerificationRecoveries()).toMatchObject([
 			{
 				action: "dispatch",
 				subjectTaskId: implementation.laneId,
 				implementationProfileId: "implementation",
 				summary: "implementation persisted",
 				artifactUris: ["file:///repo/output.ts"],
+				verifierExecutionContract: {
+					worker: { profile: { profileId: "verifier", role: "verifier" } },
+				},
 			},
 		]);
 	});
@@ -301,7 +359,7 @@ describe("WorkerLifecycle", () => {
 		});
 		const verifier = lifecycle.prepare({
 			instructions: "verify",
-			profile: verifierProfile,
+			executionContract: executionContract(verifierProfile),
 			requiredCapabilities: [],
 			verificationOfTaskId: implementation.laneId,
 		});
@@ -352,7 +410,7 @@ describe("WorkerLifecycle", () => {
 		});
 		const verifier = lifecycle.prepare({
 			instructions: "verify",
-			profile: verifierProfile,
+			executionContract: executionContract(verifierProfile),
 			requiredCapabilities: [],
 			verificationOfTaskId: implementation.laneId,
 		});

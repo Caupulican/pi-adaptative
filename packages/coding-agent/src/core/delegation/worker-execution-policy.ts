@@ -5,6 +5,7 @@ import type {
 	OrchestrationProfile,
 	RiskBudget,
 	ToolCapabilityManifest,
+	WorkerExecutionAuthorityContract,
 	WorkerRole,
 } from "../orchestration/contracts.ts";
 import { buildLaneToolManifests } from "../orchestration/lane-tool-manifests.ts";
@@ -26,6 +27,64 @@ export interface WorkerExecutionPlan {
 	writeEnabled: boolean;
 	processEnabled: boolean;
 	budget: RiskBudget;
+}
+
+function pathContains(scope: string, candidate: string): boolean {
+	const relative = path.relative(scope, candidate);
+	return relative === "" || (!relative.startsWith(`..${path.sep}`) && relative !== ".." && !path.isAbsolute(relative));
+}
+
+function intersectPathScopes(admittedPaths: readonly string[], currentPaths: readonly string[]): string[] {
+	const intersections = admittedPaths.flatMap((admitted) =>
+		currentPaths.flatMap((current) => {
+			if (pathContains(admitted, current)) return [current];
+			if (pathContains(current, admitted)) return [admitted];
+			return [];
+		}),
+	);
+	return [...new Set(intersections.map((entry) => path.resolve(entry)))];
+}
+
+export function workerExecutionAuthorityFromPlan(plan: WorkerExecutionPlan): WorkerExecutionAuthorityContract {
+	return {
+		capabilities: [...plan.requiredCapabilities],
+		toolNames: plan.toolManifests.map((manifest) => manifest.toolName),
+		readPaths: [...plan.readPaths],
+		writePaths: [...plan.writePaths],
+		deniedPaths: [...plan.deniedPaths],
+		budget: { ...plan.budget },
+	};
+}
+
+/** Apply live revocations to admitted authority without allowing later settings to widen it. */
+export function narrowWorkerExecutionPlan(
+	admitted: WorkerExecutionAuthorityContract,
+	current: WorkerExecutionPlan,
+): WorkerExecutionPlan {
+	const admittedTools = new Set(admitted.toolNames);
+	const admittedCapabilities = new Set(admitted.capabilities);
+	const toolManifests = current.toolManifests.filter(
+		(manifest) =>
+			admittedTools.has(manifest.toolName) &&
+			manifest.capabilities.every((capability) => admittedCapabilities.has(capability)),
+	);
+	const requiredCapabilities = [...new Set(toolManifests.flatMap((manifest) => manifest.capabilities))];
+	const grantedTools = new Set(toolManifests.map((manifest) => manifest.toolName));
+	const readEnabled = requiredCapabilities.some(
+		(capability) => capability === "filesystem.read" || capability === "worktree.read",
+	);
+	const writeEnabled = grantedTools.has("write") || grantedTools.has("edit");
+	return {
+		toolManifests,
+		requiredCapabilities,
+		readPaths: readEnabled ? intersectPathScopes(admitted.readPaths, current.readPaths) : [],
+		writePaths: writeEnabled ? intersectPathScopes(admitted.writePaths, current.writePaths) : [],
+		deniedPaths: [...new Set([...admitted.deniedPaths, ...current.deniedPaths].map((entry) => path.resolve(entry)))],
+		readMemory: grantedTools.has("memory"),
+		writeEnabled,
+		processEnabled: grantedTools.has("run_process"),
+		budget: intersectRiskBudgets(admitted.budget, current.budget),
+	};
 }
 
 export function buildWorkerExecutionPlan(args: {

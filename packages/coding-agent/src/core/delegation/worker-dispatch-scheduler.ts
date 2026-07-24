@@ -11,7 +11,7 @@ export type WorkerDispatchAdmission =
 export interface WorkerDispatchSchedulerOptions {
 	agentDir: string;
 	isDisposed(): boolean;
-	admit(request: WorkerDelegationRequest): WorkerDispatchAdmission;
+	admit(request: WorkerDelegationRequest, record: LaneRecord): WorkerDispatchAdmission;
 	getRecord(laneId: string): LaneRecord | undefined;
 	run(request: WorkerDelegationRequest, record: LaneRecord): Promise<WorkerDelegationRunOutcome>;
 	cancel(laneId: string, reasonCode: string): void;
@@ -79,11 +79,14 @@ export class WorkerDispatchScheduler {
 		this.draining = true;
 		try {
 			for (const [laneId, request] of [...this.queued]) {
-				const admission = this.options.admit(request);
-				if (admission.action === "wait") continue;
 				const record = this.options.getRecord(laneId);
+				if (!record) {
+					this.removeQueued(laneId);
+					continue;
+				}
+				const admission = this.options.admit(request, record);
+				if (admission.action === "wait") continue;
 				this.removeQueued(laneId);
-				if (!record) continue;
 				if (admission.action === "cancel") {
 					this.options.cancel(laneId, admission.reasonCode);
 					continue;

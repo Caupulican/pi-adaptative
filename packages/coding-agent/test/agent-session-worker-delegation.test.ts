@@ -605,8 +605,12 @@ describe("AgentSession worker delegation", () => {
 		}
 	});
 
-	it("keeps a queued default-profile worker pinned across default-profile changes", async () => {
-		const pinned = workerProfile("pinned-worker", "low");
+	it("keeps a queued worker's full execution contract pinned across profile edits", async () => {
+		const pinned: OrchestrationProfile = {
+			...workerProfile("pinned-worker", "low"),
+			capabilityCeiling: ["filesystem.read", "filesystem.write"],
+			toolNames: ["read", "write"],
+		};
 		const replacement = workerProfile("replacement-worker", "off");
 		const harness = await createHarness({
 			models: [
@@ -624,11 +628,15 @@ describe("AgentSession worker delegation", () => {
 				releaseFirst = () => resolve(fauxAssistantMessage('{"summary":"first worker done"}'));
 			});
 			const workerModelIds: string[] = [];
-			const routeResponse: FauxResponseFactory = (context, _options, _state, model) => {
+			const workerReasoning: unknown[] = [];
+			const workerToolNames: string[][] = [];
+			const routeResponse: FauxResponseFactory = (context, options, _state, model) => {
 				if (!context.systemPrompt?.includes("You are a bounded subagent shipped by a coding-agent session")) {
 					return fauxAssistantMessage("Delegations started.");
 				}
 				workerModelIds.push(model.id);
+				workerReasoning.push(options?.reasoning);
+				workerToolNames.push(context.tools?.map((tool) => tool.name) ?? []);
 				return workerModelIds.length === 1
 					? firstWorkerResponse
 					: fauxAssistantMessage('{"summary":"second worker done"}');
@@ -654,7 +662,27 @@ describe("AgentSession worker delegation", () => {
 						.some((record) => record.type === "worker" && record.status === "queued"),
 				).toBe(true),
 			);
-			harness.settingsManager.setWorkerDelegationSettings({ orchestrationProfile: replacement.profileId });
+			new OrchestrationProfileStore({
+				agentDir: harness.tempDir,
+				cwd: harness.tempDir,
+				projectTrusted: true,
+			}).save(
+				{
+					...replacement,
+					profileId: pinned.profileId,
+					description: "Mutated in-place worker profile",
+					capabilityCeiling: [],
+					toolNames: [],
+					updatedAt: new Date().toISOString(),
+				},
+				"global",
+				{ overwrite: true },
+			);
+			harness.settingsManager.setWorkerDelegationSettings({
+				orchestrationProfile: replacement.profileId,
+				writeEnabled: true,
+				writePaths: ["src"],
+			});
 			releaseFirst();
 
 			await vi.waitFor(() => expect(harness.session.getWorkerClaimSnapshots()).toHaveLength(2));
@@ -662,6 +690,8 @@ describe("AgentSession worker delegation", () => {
 				pinned.modelPolicy.candidates[0]?.modelId,
 				pinned.modelPolicy.candidates[0]?.modelId,
 			]);
+			expect(workerReasoning).toEqual(["low", "low"]);
+			expect(workerToolNames).toEqual([["read"], ["read"]]);
 		} finally {
 			harness.cleanup();
 		}

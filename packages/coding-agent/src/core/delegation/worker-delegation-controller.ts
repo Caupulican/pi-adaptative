@@ -18,9 +18,13 @@ import { AUTONOMY_TELEMETRY_EVENT_TYPES, type AutonomyTelemetryEvent } from "../
 import type { GoalState } from "../goals/goal-state.ts";
 import { deriveModelCapabilityProfile, type ModelCapabilityProfile } from "../model-capability.ts";
 import type { ModelRegistry } from "../model-registry.ts";
-import type { OrchestrationProfile } from "../orchestration/contracts.ts";
+import type { OrchestrationProfile, WorkerExecutionContract } from "../orchestration/contracts.ts";
 import type { StartedDelegationAttempt } from "../orchestration/delegation-ledger.ts";
 import type { AttemptRuntimeState, TaskRuntimeProjection } from "../orchestration/task-runtime.ts";
+import {
+	createWorkerExecutionContract,
+	verifierWorkerExecutionContract,
+} from "../orchestration/worker-execution-contract.ts";
 import { createWorkerResultContract } from "../orchestration/worker-result-adapter.ts";
 import { registerInFlightWork } from "../reload-blockers.ts";
 import type { ResolvedWorkerDelegationSettings, SettingsManager } from "../settings-manager.ts";
@@ -30,7 +34,9 @@ import { type WorkerDispatchAdmission, WorkerDispatchScheduler } from "./worker-
 import {
 	buildWorkerExecutionPlan,
 	compileWorkerExecutionGrant,
+	narrowWorkerExecutionPlan,
 	type WorkerExecutionPlan,
+	workerExecutionAuthorityFromPlan,
 } from "./worker-execution-policy.ts";
 import type { WorkerLifecycle } from "./worker-lifecycle.ts";
 import type { WorkerNotificationCoordinator } from "./worker-notification-coordinator.ts";
@@ -85,6 +91,8 @@ type WorkerAdmission =
 			settings: ResolvedWorkerDelegationSettings;
 			shipment: ResolvedWorkerProfile;
 			verifierShipment?: ResolvedWorkerProfile;
+			executionContract: WorkerExecutionContract;
+			executionPlan: WorkerExecutionPlan;
 	  }
 	| { ok: false; skipReason: string };
 
@@ -128,7 +136,7 @@ export class WorkerDelegationController {
 		this.scheduler = new WorkerDispatchScheduler({
 			agentDir: this.deps.getAgentDir?.() ?? "",
 			isDisposed: () => this.deps.isDisposed(),
-			admit: (request) => this.workerDispatchAdmission(request),
+			admit: (request, record) => this.workerDispatchAdmission(request, record),
 			getRecord: (laneId) => this.getWorkerLifecycle().getRecord(laneId),
 			run: (request, record) => this.runOnce(request, undefined, record),
 			cancel: (laneId, reasonCode) => {
@@ -307,21 +315,26 @@ export class WorkerDelegationController {
 				}
 				continue;
 			}
-			const implementation = this.resolveWorkerAdmission({
-				instructions: recovery.summary,
-				profileId: recovery.implementationProfileId,
-			});
-			const started =
-				implementation.ok && implementation.verifierShipment
-					? this.start(
-							this.buildVerifierRequest({
-								subjectTaskId: recovery.subjectTaskId,
-								verifierProfileId: implementation.verifierShipment.profile.profileId,
-								summary: recovery.summary,
-								artifactUris: recovery.artifactUris,
-							}),
-						)
-					: { started: false as const, skipReason: "independent_verifier_unavailable" };
+			const legacyImplementation = recovery.verifierExecutionContract
+				? undefined
+				: this.resolveWorkerAdmission({
+						instructions: recovery.summary,
+						profileId: recovery.implementationProfileId,
+					});
+			const verifierProfileId =
+				recovery.verifierExecutionContract?.worker.profile.profileId ??
+				(legacyImplementation?.ok ? legacyImplementation.verifierShipment?.profile.profileId : undefined);
+			const started = verifierProfileId
+				? this.startInternal(
+						this.buildVerifierRequest({
+							subjectTaskId: recovery.subjectTaskId,
+							verifierProfileId,
+							summary: recovery.summary,
+							artifactUris: recovery.artifactUris,
+						}),
+						recovery.verifierExecutionContract,
+					)
+				: { started: false as const, skipReason: "independent_verifier_unavailable" };
 			if (!started.started) {
 				this.safeWarn(`Recovered verification for ${recovery.subjectTaskId} did not start: ${started.skipReason}`);
 			}
@@ -361,26 +374,77 @@ export class WorkerDelegationController {
 	}
 
 	/** Single admission contract shared by enqueue, scheduler revalidation, and execution. */
-	private resolveWorkerAdmission(request: WorkerDelegationRequest): WorkerAdmission {
+	private resolveWorkerAdmission(
+		request: WorkerDelegationRequest,
+		pinnedContract?: WorkerExecutionContract,
+	): WorkerAdmission {
 		if (this.deps.isDisposed()) return { ok: false, skipReason: "session_disposed" };
 		const instructions = request.instructions.trim();
 		if (!instructions) return { ok: false, skipReason: "missing_instructions" };
 		if (!this.deps.isDelegateToolActive()) return { ok: false, skipReason: "delegate_tool_inactive" };
 		const settings = this.deps.getSettingsManager().getWorkerDelegationSettings();
 		if (!settings.enabled) return { ok: false, skipReason: "worker_delegation_disabled" };
-		const resolved = this.resolveWorkerShipment(request, settings);
-		if (!resolved.ok) return resolved;
-		const verifier = this.resolveRequiredVerifier(resolved.shipment.profile);
-		if (!verifier.ok) return verifier;
-		if (!this.laneCapabilityProfile(resolved.shipment.model).backgroundLanesEnabled) {
+		if (pinnedContract && request.profileId && request.profileId !== pinnedContract.worker.profile.profileId) {
+			return { ok: false, skipReason: "orchestration_execution_contract_mismatch" };
+		}
+		const resolved = pinnedContract
+			? this.getWorkerProfileResolver().resolveContract(pinnedContract.worker)
+			: this.resolveWorkerShipment(request, settings);
+		if (!resolved.ok) {
+			return { ok: false, skipReason: "skipReason" in resolved ? resolved.skipReason : resolved.reason };
+		}
+		const shipment = "shipment" in resolved ? resolved.shipment : resolved.resolved;
+		if (request.verificationOfTaskId && shipment.profile.role !== "verifier") {
+			return { ok: false, skipReason: "verification_profile_role_mismatch" };
+		}
+		if (!request.verificationOfTaskId && shipment.profile.role === "verifier") {
+			return { ok: false, skipReason: "verifier_profile_requires_runtime_dispatch" };
+		}
+		let verifierShipment: ResolvedWorkerProfile | undefined;
+		if (pinnedContract?.verifier) {
+			const verifier = this.getWorkerProfileResolver().resolveContract(pinnedContract.verifier);
+			if (!verifier.ok) {
+				return { ok: false, skipReason: `independent_verifier_unavailable:${verifier.reason}` };
+			}
+			verifierShipment = verifier.resolved;
+		} else {
+			const verifier = this.resolveRequiredVerifier(shipment.profile);
+			if (!verifier.ok) return verifier;
+			verifierShipment = verifier.shipment;
+		}
+		if (!this.laneCapabilityProfile(shipment.model).backgroundLanesEnabled) {
 			return { ok: false, skipReason: "model_delegation_unsupported" };
 		}
+		const currentExecutionPlan = this.buildWorkerExecutionPlan(shipment.profile, settings);
+		const executionPlan = pinnedContract
+			? narrowWorkerExecutionPlan(pinnedContract.worker.authority, currentExecutionPlan)
+			: currentExecutionPlan;
+		const executionContract =
+			pinnedContract ??
+			createWorkerExecutionContract({
+				worker: {
+					...shipment,
+					authority: workerExecutionAuthorityFromPlan(executionPlan),
+				},
+				...(verifierShipment
+					? {
+							verifier: {
+								...verifierShipment,
+								authority: workerExecutionAuthorityFromPlan(
+									this.buildWorkerExecutionPlan(verifierShipment.profile, settings),
+								),
+							},
+						}
+					: {}),
+			});
 		return {
 			ok: true,
 			instructions,
 			settings,
-			shipment: resolved.shipment,
-			...(verifier.shipment ? { verifierShipment: verifier.shipment } : {}),
+			shipment,
+			...(verifierShipment ? { verifierShipment } : {}),
+			executionContract,
+			executionPlan,
 		};
 	}
 
@@ -432,8 +496,9 @@ export class WorkerDelegationController {
 		return lifecycle.getRunningCount(profile.profileId) < profile.maxConcurrent;
 	}
 
-	private workerDispatchAdmission(request: WorkerDelegationRequest): WorkerDispatchAdmission {
-		const admission = this.resolveWorkerAdmission(request);
+	private workerDispatchAdmission(request: WorkerDelegationRequest, record: LaneRecord): WorkerDispatchAdmission {
+		const contract = this.getWorkerLifecycle().getActiveAttempt(record.laneId)?.dispatch.executionContract;
+		const admission = this.resolveWorkerAdmission(request, contract);
 		if (!admission.ok) return { action: "cancel", reasonCode: admission.skipReason };
 		return this.hasWorkerCapacity(admission.settings, admission.shipment.profile)
 			? { action: "start" }
@@ -460,11 +525,10 @@ export class WorkerDelegationController {
 		admission: Extract<WorkerAdmission, { ok: true }>,
 		existingRecord?: LaneRecord,
 	): PreparedWorkerAttempt {
-		const executionPlan = this.buildWorkerExecutionPlan(admission.shipment.profile, admission.settings);
 		const lifecycle = this.getWorkerLifecycle();
 		if (existingRecord) {
 			return {
-				executionPlan,
+				executionPlan: admission.executionPlan,
 				lifecycle,
 				record: existingRecord,
 				attempt: lifecycle.getActiveAttempt(existingRecord.laneId),
@@ -473,18 +537,25 @@ export class WorkerDelegationController {
 		const goal = this.deps.getGoalStateSnapshot();
 		const prepared = lifecycle.prepare({
 			instructions: admission.instructions,
-			profile: admission.shipment.profile,
-			requiredCapabilities: executionPlan.requiredCapabilities,
+			executionContract: admission.executionContract,
+			requiredCapabilities: admission.executionPlan.requiredCapabilities,
 			...(request.verificationOfTaskId ? { verificationOfTaskId: request.verificationOfTaskId } : {}),
 			...(goal ? { goal } : {}),
 		});
-		return { executionPlan, lifecycle, ...prepared };
+		return { executionPlan: admission.executionPlan, lifecycle, ...prepared };
 	}
 
 	start(
 		request: WorkerDelegationRequest,
 	): { started: false; skipReason: string } | { started: true; record: LaneRecord } {
-		const admission = this.resolveWorkerAdmission(request);
+		return this.startInternal(request);
+	}
+
+	private startInternal(
+		request: WorkerDelegationRequest,
+		pinnedContract?: WorkerExecutionContract,
+	): { started: false; skipReason: string } | { started: true; record: LaneRecord } {
+		const admission = this.resolveWorkerAdmission(request, pinnedContract);
 		if (!admission.ok) return { started: false, skipReason: admission.skipReason };
 		this.recoverDurableQueue();
 		const { settings, shipment } = admission;
@@ -550,7 +621,10 @@ export class WorkerDelegationController {
 		existingRecord?: LaneRecord,
 		preparedAdmission?: Extract<WorkerAdmission, { ok: true }>,
 	): Promise<WorkerDelegationRunOutcome> {
-		const admission = preparedAdmission ?? this.resolveWorkerAdmission(request);
+		const pinnedContract = existingRecord
+			? this.getWorkerLifecycle().getActiveAttempt(existingRecord.laneId)?.dispatch.executionContract
+			: undefined;
+		const admission = preparedAdmission ?? this.resolveWorkerAdmission(request, pinnedContract);
 		if (!admission.ok) return { started: false, skipReason: admission.skipReason };
 		this.recoverDurableQueue();
 		const { instructions, settings, verifierShipment } = admission;
@@ -857,13 +931,14 @@ export class WorkerDelegationController {
 				terminalRecords.push(subject);
 			} else if (verificationRequired) {
 				const verifierStart = verifierShipment
-					? this.start(
+					? this.startInternal(
 							this.buildVerifierRequest({
 								subjectTaskId: startedRecord.laneId,
 								verifierProfileId: verifierShipment.profile.profileId,
 								summary: rawOutcome.claim.summary,
 								artifactUris: rawOutcome.claim.changedFiles,
 							}),
+							verifierWorkerExecutionContract(admission.executionContract),
 						)
 					: { started: false as const, skipReason: "independent_verifier_unavailable" };
 				if (verifierStart.started) {

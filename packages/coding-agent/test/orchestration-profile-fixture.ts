@@ -5,6 +5,7 @@ import {
 	ORCHESTRATION_SCHEMA_VERSION,
 	type OrchestrationProfile,
 	type OrchestrationThinkingLevel,
+	type WorkerExecutionAuthorityContract,
 	type WorkerRole,
 } from "../src/core/orchestration/contracts.ts";
 import { OrchestrationProfileStore } from "../src/core/orchestration/profile-store.ts";
@@ -53,6 +54,28 @@ export function createTestWorkerOrchestrationProfile(args: {
 		...(args.verificationProfileId ? { verificationProfileId: args.verificationProfileId } : {}),
 		createdAt: now,
 		updatedAt: now,
+	};
+}
+
+export function createTestWorkerExecutionAuthority(
+	profile: OrchestrationProfile,
+	rootPath = "/repo",
+): WorkerExecutionAuthorityContract {
+	return {
+		capabilities: [...profile.capabilityCeiling],
+		toolNames: [...profile.toolNames],
+		readPaths: profile.capabilityCeiling.some(
+			(capability) => capability === "filesystem.read" || capability === "worktree.read",
+		)
+			? [rootPath]
+			: [],
+		writePaths: profile.capabilityCeiling.some(
+			(capability) => capability === "filesystem.write" || capability === "worktree.mutate",
+		)
+			? [rootPath]
+			: [],
+		deniedPaths: [],
+		budget: { ...profile.budget },
 	};
 }
 
