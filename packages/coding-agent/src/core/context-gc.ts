@@ -48,6 +48,8 @@ export interface ContextGcCurationHooks {
 export interface ContextGcOptions extends NormalizedContextGcSettings {
 	cwd: string;
 	storageDir?: string;
+	/** Acquire the leased store only when an eligible payload is actually written. */
+	acquireStorageDir?: () => string;
 	writePayloads?: boolean;
 	curation?: ContextGcCurationHooks;
 }
@@ -344,15 +346,18 @@ function storagePathFor(storageDir: string | undefined, key: string): string | u
 }
 
 function maybeStoreOriginal(options: ContextGcOptions, key: string, original: string): string | undefined {
-	const path = storagePathFor(options.storageDir, key);
-	if (!path || !options.writePayloads) return path;
+	const plannedPath = storagePathFor(options.storageDir, key);
+	if (!plannedPath || !options.writePayloads) return plannedPath;
 	try {
-		mkdirSync(options.storageDir!, { recursive: true });
+		const storageDir = options.acquireStorageDir?.() ?? options.storageDir;
+		const path = storagePathFor(storageDir, key);
+		if (!path || !storageDir) return undefined;
+		mkdirSync(storageDir, { recursive: true });
 		if (!existsSync(path)) writeFileSync(path, original, "utf8");
+		return path;
 	} catch {
 		return undefined;
 	}
-	return path;
 }
 
 function reasonText(record: ContextGcPackedRecord): string {
@@ -427,6 +432,7 @@ export function applyContextGc(
 	rawSettings: ContextGcSettings & {
 		cwd?: string;
 		storageDir?: string;
+		acquireStorageDir?: () => string;
 		writePayloads?: boolean;
 		curation?: ContextGcCurationHooks;
 	},
@@ -446,6 +452,7 @@ export function applyContextGc(
 		...settings,
 		cwd: rawSettings.cwd ?? process.cwd(),
 		storageDir: rawSettings.storageDir,
+		acquireStorageDir: rawSettings.acquireStorageDir,
 		writePayloads: rawSettings.writePayloads ?? true,
 		curation: rawSettings.curation,
 	};

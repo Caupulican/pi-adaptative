@@ -13,7 +13,8 @@
  *   state/     durable machine state (model adaptation/fitness, tool performance,
  *              learning observations, trust decisions, …)                                 -- stateDir/stateFile
  *   cache/     rebuildable, safe to delete (tool-path probes, jiti transform cache, uv)    -- cacheDir/cacheFile
- *   work/      transient/scratch, delegated to work-directory.ts (tenant/run/lease)        -- re-exported below
+ *   work/      transient/scratch, delegated to work-directory.ts (tenant/run/lease),
+ *              including context/sessions/<session-id>/{gc,artifacts}                     -- re-exported below
  *   runtimes/<kind>  models/<kind>                                                         -- runtimesDir/modelsDir
  *   npm/ git/ sessions/                                                                    -- npmDir/gitDir/sessionsDir
  *   worktrees/<repo-slug>/<laneKey>   durable lane checkouts (core/worktree-sync)           -- worktreesDir
@@ -39,6 +40,7 @@ import {
 	getWorkRoot,
 	getWorkRunDir,
 	getWorkTenantDir,
+	hasActiveWorkRunLease,
 	pruneWorkTenant,
 } from "../utils/work-directory.ts";
 import { getReloadCoordinationDir } from "./reload-blockers.ts";
@@ -126,6 +128,7 @@ export {
 	getWorkTenantDir,
 	getWorkRunDir,
 	getProcessWorkRun,
+	hasActiveWorkRunLease,
 	acquireWorkRun,
 	createWorkRunId,
 	pruneWorkTenant,

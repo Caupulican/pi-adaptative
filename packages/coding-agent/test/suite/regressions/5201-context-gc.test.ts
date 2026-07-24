@@ -177,6 +177,44 @@ describe("Context GC", () => {
 		expect(result.report.savedTokens).toBeGreaterThan(0);
 	});
 
+	it("acquires context storage only when an eligible payload is written", () => {
+		const root = mkdtempSync(join(tmpdir(), "pi-context-gc-lazy-store-"));
+		tempDirs.push(root);
+		const storageDir = join(root, "gc");
+		const messages: AgentMessage[] = [
+			assistantToolCall("bash-old", "bash", { command: "npm test" }),
+			toolResult("bash-old", "bash", large("OLD BASH PAYLOAD")),
+			user("later"),
+		];
+		let acquisitions = 0;
+		const acquireStorageDir = () => {
+			acquisitions++;
+			return storageDir;
+		};
+
+		applyContextGc(messages, {
+			cwd: "/repo",
+			storageDir,
+			acquireStorageDir,
+			preserveRecentMessages: 0,
+			minToolResultChars: 20,
+			writePayloads: false,
+		});
+		expect(acquisitions).toBe(0);
+		expect(existsSync(storageDir)).toBe(false);
+
+		applyContextGc(messages, {
+			cwd: "/repo",
+			storageDir,
+			acquireStorageDir,
+			preserveRecentMessages: 0,
+			minToolResultChars: 20,
+			writePayloads: true,
+		});
+		expect(acquisitions).toBe(1);
+		expect(existsSync(storageDir)).toBe(true);
+	});
+
 	it("does not write payload files for relative storage dirs", () => {
 		const repo = mkdtempSync(join(tmpdir(), "pi-context-gc-repo-"));
 		tempDirs.push(repo);
@@ -210,6 +248,8 @@ describe("Context GC", () => {
 		const harness = createHarness();
 		try {
 			const agentDir = harness.tempDir;
+			const contextWorkDir = join(agentDir, "work", "context");
+			expect(existsSync(contextWorkDir)).toBe(false);
 			// _contextGcStorageDir moved to ContextPipeline (god-file decomposition); its dependency
 			// captures the session agentDir at construction rather than reading the sessionDir.
 			const session = harness.session as unknown as {
@@ -217,14 +257,18 @@ describe("Context GC", () => {
 			};
 
 			const storageDir = session._pipeline._contextGcStorageDir();
-			expect(storageDir).toBe(join(agentDir, "work", "context", "gc", harness.sessionManager.getSessionId()));
+			expect(storageDir).toBe(
+				join(agentDir, "work", "context", "sessions", harness.sessionManager.getSessionId(), "gc"),
+			);
+			expect(existsSync(contextWorkDir)).toBe(false);
 			expect(storageDir).not.toBe(
 				join(
 					harness.sessionManager.getSessionDir(),
 					"work",
 					"context",
-					"gc",
+					"sessions",
 					harness.sessionManager.getSessionId(),
+					"gc",
 				),
 			);
 		} finally {

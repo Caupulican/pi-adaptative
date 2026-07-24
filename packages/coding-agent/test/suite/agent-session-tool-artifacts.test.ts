@@ -142,12 +142,8 @@ describe("AgentSession live tool construction wires a session-scoped file Artifa
 
 		const details = findToolResultDetails(harness);
 		expect(details?.artifactId).toBeUndefined();
-		// createFileArtifactStore() creates baseDir immediately at tool-construction time
-		// (agent-session.ts builds it whether or not any artifact is ever written), so the
-		// directory existing is expected; the assertion is that it holds no artifact files.
 		const artifactDir = sessionArtifactDir(harness);
-		expect(existsSync(artifactDir)).toBe(true);
-		expect(readdirSync(artifactDir).filter((entry) => !entry.startsWith("."))).toEqual([]);
+		expect(existsSync(artifactDir)).toBe(false);
 	});
 
 	it("a small live find result is never packed to disk", async () => {
@@ -167,8 +163,7 @@ describe("AgentSession live tool construction wires a session-scoped file Artifa
 		const details = findToolResultDetails(harness);
 		expect(details?.artifactId).toBeUndefined();
 		const artifactDir = sessionArtifactDir(harness);
-		expect(existsSync(artifactDir)).toBe(true);
-		expect(readdirSync(artifactDir).filter((entry) => !entry.startsWith("."))).toEqual([]);
+		expect(existsSync(artifactDir)).toBe(false);
 	});
 
 	it("an artifact from an earlier tool call survives a later, unrelated tool call in the same session (current behavior: accumulates without release/cleanup)", async () => {

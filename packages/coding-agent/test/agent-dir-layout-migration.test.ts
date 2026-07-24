@@ -4,7 +4,7 @@ import * as path from "node:path";
 import { afterEach, describe, expect, it } from "vitest";
 import { ENV_AGENT_DIR } from "../src/config.ts";
 import { stateFile } from "../src/core/agent-paths.ts";
-import { migrateAgentDirLayout, runMigrations } from "../src/migrations.ts";
+import { migrateAgentDirLayout, pruneEmptySessionNamespaces, runMigrations } from "../src/migrations.ts";
 
 describe("migrateAgentDirLayout", () => {
 	const tempDirs: string[] = [];
@@ -46,18 +46,25 @@ describe("migrateAgentDirLayout", () => {
 		expect(fs.readFileSync(newPath, "utf-8")).toBe(afterFirstRun);
 	});
 
-	it("tolerates a partial prior run: never overwrites an existing target", () => {
+	it("merges a partial prior run with canonical decisions winning conflicts", () => {
 		const agentDir = createAgentDir();
-		// Simulate a half-completed earlier migration: both the old root file (stale/orphaned) and the
-		// new state/ file (the one that should win) exist at once.
-		fs.writeFileSync(path.join(agentDir, "trust.json"), `${JSON.stringify({ stale: true })}\n`, "utf-8");
+		fs.writeFileSync(
+			path.join(agentDir, "trust.json"),
+			`${JSON.stringify({ shared: false, legacyOnly: true })}\n`,
+			"utf-8",
+		);
 		fs.mkdirSync(path.join(agentDir, "state"), { recursive: true });
 		const canonicalPath = stateFile(agentDir, "trust.json");
-		fs.writeFileSync(canonicalPath, `${JSON.stringify({ canonical: true })}\n`, "utf-8");
+		fs.writeFileSync(canonicalPath, `${JSON.stringify({ shared: true, canonicalOnly: true })}\n`, "utf-8");
 
 		migrateAgentDirLayout(agentDir);
 
-		expect(JSON.parse(fs.readFileSync(canonicalPath, "utf-8"))).toEqual({ canonical: true });
+		expect(fs.existsSync(path.join(agentDir, "trust.json"))).toBe(false);
+		expect(JSON.parse(fs.readFileSync(canonicalPath, "utf-8"))).toEqual({
+			canonicalOnly: true,
+			legacyOnly: true,
+			shared: true,
+		});
 	});
 
 	it("never touches user config/resources", () => {
@@ -90,6 +97,19 @@ describe("migrateAgentDirLayout", () => {
 		const agentDir = createAgentDir();
 		expect(() => migrateAgentDirLayout(agentDir)).not.toThrow();
 		expect(fs.existsSync(path.join(agentDir, "state"))).toBe(false);
+	});
+
+	it("removes only empty session namespaces and preserves durable transcripts", () => {
+		const agentDir = createAgentDir();
+		const emptyDir = path.join(agentDir, "sessions", "empty-project");
+		const populatedDir = path.join(agentDir, "sessions", "populated-project");
+		fs.mkdirSync(emptyDir, { recursive: true });
+		fs.mkdirSync(populatedDir, { recursive: true });
+		fs.writeFileSync(path.join(populatedDir, "session.jsonl"), "durable transcript\n", "utf-8");
+
+		expect(pruneEmptySessionNamespaces(agentDir)).toEqual([emptyDir]);
+		expect(fs.existsSync(emptyDir)).toBe(false);
+		expect(fs.readFileSync(path.join(populatedDir, "session.jsonl"), "utf-8")).toBe("durable transcript\n");
 	});
 });
 

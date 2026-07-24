@@ -7,7 +7,7 @@
  * docs/context-management-rework/memory-architecture.md).
  *
  * `createFileArtifactStore` is wired into live grep/find tool construction in
- * agent-session.ts (session-scoped under `<agentDir>/context-artifacts/<sessionId>/`).
+ * agent-session.ts (session-scoped under `<agentDir>/work/context/sessions/<sessionId>/artifacts/`).
  * References are registered at pack time and released when context-gc evicts the
  * corresponding grep/find tool result (opportunistic, conservative cleanup), with a
  * best-effort dispose-time sweep for zero-reference artifacts. Payloads are retrievable
@@ -187,8 +187,12 @@ export function createInMemoryArtifactStore(): ArtifactStore {
 }
 
 export interface FileArtifactStoreOptions {
-	/** Directory the store persists artifact payloads and metadata under. Created if missing. */
+	/** Leased session work directory where payloads and metadata live. Created on first use. */
 	baseDir: string;
+	/** Migrate an existing store before probing it; must remain zero-write when no legacy data exists. */
+	prepareBaseDir?: () => void;
+	/** Acquire the owning lease immediately before the first real store access. */
+	acquireBaseDir?: () => string;
 }
 
 interface PersistedArtifactMeta {
@@ -286,11 +290,28 @@ function writeMeta(baseDir: string, id: string, meta: PersistedArtifactMeta): vo
  */
 export function createFileArtifactStore(options: FileArtifactStoreOptions): ArtifactStore {
 	const baseDir = options.baseDir;
-	mkdirSync(baseDir, { recursive: true });
 	const cleanedUpThisInstance = new Set<string>();
+	let acquiredBaseDir: string | undefined;
+	let preparedBaseDir = false;
+	const ensureBaseDir = (): string => {
+		preparedBaseDir = true;
+		acquiredBaseDir ??= options.acquireBaseDir?.() ?? baseDir;
+		mkdirSync(acquiredBaseDir, { recursive: true });
+		return acquiredBaseDir;
+	};
+	const ensureExistingBaseDir = (): boolean => {
+		if (!preparedBaseDir) {
+			options.prepareBaseDir?.();
+			preparedBaseDir = true;
+		}
+		if (!existsSync(baseDir)) return false;
+		ensureBaseDir();
+		return true;
+	};
 
 	return {
 		write(request: ArtifactWriteRequest): ArtifactRecord {
+			ensureBaseDir();
 			const id = generateArtifactId(request);
 			const existingMeta = readMeta(baseDir, id);
 			const existingPayloadPath = payloadPath(baseDir, id);
@@ -319,6 +340,7 @@ export function createFileArtifactStore(options: FileArtifactStoreOptions): Arti
 
 		read(id: string): ArtifactRecord | MissingArtifactMarker {
 			if (!isSafeArtifactId(id)) return { id, missing: true, reason: "not_found" };
+			if (!ensureExistingBaseDir()) return { id, missing: true, reason: "not_found" };
 			const meta = readMeta(baseDir, id);
 			const pPath = payloadPath(baseDir, id);
 			if (!meta || !existsSync(pPath)) {
@@ -329,6 +351,7 @@ export function createFileArtifactStore(options: FileArtifactStoreOptions): Arti
 
 		readRef(id: string): ContextArtifactRef | undefined {
 			if (!isSafeArtifactId(id)) return undefined;
+			if (!ensureExistingBaseDir()) return undefined;
 			const meta = readMeta(baseDir, id);
 			if (!meta || !existsSync(payloadPath(baseDir, id))) return undefined;
 			return meta.ref;
@@ -336,11 +359,13 @@ export function createFileArtifactStore(options: FileArtifactStoreOptions): Arti
 
 		has(id: string): boolean {
 			if (!isSafeArtifactId(id)) return false;
+			if (!ensureExistingBaseDir()) return false;
 			return readMeta(baseDir, id) !== undefined && existsSync(payloadPath(baseDir, id));
 		},
 
 		addReference(id: string, holderId: string): boolean {
 			if (!isSafeArtifactId(id)) return false;
+			if (!ensureExistingBaseDir()) return false;
 			const meta = readMeta(baseDir, id);
 			if (!meta || !existsSync(payloadPath(baseDir, id))) return false;
 			if (!meta.references.includes(holderId)) {
@@ -352,6 +377,7 @@ export function createFileArtifactStore(options: FileArtifactStoreOptions): Arti
 
 		removeReference(id: string, holderId: string): boolean {
 			if (!isSafeArtifactId(id)) return false;
+			if (!ensureExistingBaseDir()) return false;
 			const meta = readMeta(baseDir, id);
 			if (!meta) return false;
 			const index = meta.references.indexOf(holderId);
@@ -363,11 +389,13 @@ export function createFileArtifactStore(options: FileArtifactStoreOptions): Arti
 
 		referenceCount(id: string): number {
 			if (!isSafeArtifactId(id)) return 0;
+			if (!ensureExistingBaseDir()) return 0;
 			return readMeta(baseDir, id)?.references.length ?? 0;
 		},
 
 		cleanup(): string[] {
 			const deleted: string[] = [];
+			if (!ensureExistingBaseDir()) return deleted;
 			for (const entry of readdirSync(baseDir)) {
 				if (!entry.endsWith(META_SUFFIX)) continue;
 				const id = entry.slice(0, -META_SUFFIX.length);

@@ -51,7 +51,12 @@ import {
 	type PromptPolicyShadowReport,
 	planPromptPolicy,
 } from "./context/context-prompt-policy.ts";
-import { acquireContextStoreRetention, type ContextStoreRetentionLease } from "./context/context-store-retention.ts";
+import {
+	acquireContextStoreRetention,
+	type ContextStoreRetentionLease,
+	getContextStoreDir,
+	migrateLegacyContextStores,
+} from "./context/context-store-retention.ts";
 import { applyContextGc, type ContextGcReport } from "./context-gc.ts";
 import type { MemoryManager } from "./memory/memory-manager.ts";
 import type { ModelRegistry } from "./model-registry.ts";
@@ -273,11 +278,11 @@ export class ContextPipeline {
 	}
 
 	private _contextGcStorageDir(): string {
-		return this._ensureContextStoreRetention().gcDir;
+		return getContextStoreDir(this.deps.getAgentDir(), "gc", this.deps.getSessionManager().getSessionId());
 	}
 
 	private _toolArtifactsDir(): string {
-		return this._ensureContextStoreRetention().artifactsDir;
+		return getContextStoreDir(this.deps.getAgentDir(), "artifacts", this.deps.getSessionManager().getSessionId());
 	}
 
 	/**
@@ -294,7 +299,12 @@ export class ContextPipeline {
 	 * sessions hold PID-marked leases; inactive stores are pruned by age, count, and bytes.
 	 */
 	getToolArtifactStore(): ArtifactStore {
-		this._toolArtifactStore ??= createFileArtifactStore({ baseDir: this._toolArtifactsDir() });
+		this._toolArtifactStore ??= createFileArtifactStore({
+			baseDir: this._toolArtifactsDir(),
+			prepareBaseDir: () =>
+				migrateLegacyContextStores(this.deps.getAgentDir(), this.deps.getSessionManager().getSessionId()),
+			acquireBaseDir: () => this._ensureContextStoreRetention().artifactsDir,
+		});
 		return this._toolArtifactStore;
 	}
 
@@ -825,6 +835,7 @@ export class ContextPipeline {
 				},
 				cwd: this.deps.getCwd(),
 				storageDir: this._contextGcStorageDir(),
+				acquireStorageDir: () => this._ensureContextStoreRetention().gcDir,
 				writePayloads,
 				curation: curationSettings.enabled
 					? {

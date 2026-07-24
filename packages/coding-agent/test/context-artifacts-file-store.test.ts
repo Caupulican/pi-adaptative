@@ -291,10 +291,12 @@ describe("createFileArtifactStore", () => {
 	});
 
 	describe("baseDir creation", () => {
-		it("creates baseDir recursively if it does not exist yet", () => {
+		it("creates baseDir recursively on first write, not construction", () => {
 			const nested = join(baseDir, "nested", "artifacts");
 			expect(existsSync(nested)).toBe(false);
-			createFileArtifactStore({ baseDir: nested });
+			const store = createFileArtifactStore({ baseDir: nested });
+			expect(existsSync(nested)).toBe(false);
+			store.write(makeRequest());
 			expect(existsSync(nested)).toBe(true);
 		});
 

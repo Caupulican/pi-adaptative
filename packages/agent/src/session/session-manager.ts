@@ -13,7 +13,7 @@ import {
 	writeFileSync,
 } from "node:fs";
 import { readdir, stat } from "node:fs/promises";
-import { join, resolve } from "node:path";
+import { dirname, join, resolve } from "node:path";
 import { createInterface } from "node:readline";
 import { StringDecoder } from "node:string_decoder";
 import type { ImageContent, Message, TextContent } from "@caupulican/pi-ai";
@@ -442,8 +442,9 @@ export function buildSessionContext(
 }
 
 /**
- * Compute the default session directory for a cwd.
- * Encodes cwd into a safe directory name under ~/.pi/agent/sessions/.
+ * Compute the default session directory for a cwd without creating it.
+ * Encodes cwd into a safe directory name under ~/.pi/agent/sessions/; persistence creates the
+ * parent only when the first durable response is written.
  */
 function getEncodedSessionDirName(cwd: string): string {
 	return `--${encodeURIComponent(resolvePath(cwd))}--`;
@@ -468,11 +469,7 @@ function getDefaultSessionDirCandidates(cwd: string, agentDir: string): string[]
 }
 
 export function getDefaultSessionDir(cwd: string, agentDir: string): string {
-	const sessionDir = getDefaultSessionDirPath(cwd, agentDir);
-	if (!existsSync(sessionDir)) {
-		mkdirSync(sessionDir, { recursive: true });
-	}
-	return sessionDir;
+	return getDefaultSessionDirPath(cwd, agentDir);
 }
 
 const SESSION_READ_BUFFER_SIZE = 1024 * 1024;
@@ -953,9 +950,6 @@ export class SessionManager {
 		this.sessionDir = normalizePath(sessionDir);
 		this.agentDir = agentDir;
 		this.persist = persist;
-		if (persist && this.sessionDir && !existsSync(this.sessionDir)) {
-			mkdirSync(this.sessionDir, { recursive: true });
-		}
 
 		if (sessionFile) {
 			this.setSessionFile(sessionFile);
@@ -1067,8 +1061,14 @@ export class SessionManager {
 		}
 	}
 
+	private _ensureSessionFileParent(targetFile: string): void {
+		const parentDir = dirname(targetFile);
+		if (!existsSync(parentDir)) mkdirSync(parentDir, { recursive: true });
+	}
+
 	private _rewriteFile(targetFile = this.sessionFile): void {
 		if (!this.persist || !targetFile) return;
+		this._ensureSessionFileParent(targetFile);
 		// Write-then-rename keeps the session file valid at every instant: truncating
 		// in place leaves a torn-file window for crashes or a concurrent process
 		// appending to the same session.
@@ -1239,6 +1239,7 @@ export class SessionManager {
 		const hasAssistant = this.fileEntries.some((e) => e.type === "message" && e.message.role === "assistant");
 		if (!hasAssistant) {
 			if (this.flushed) {
+				this._ensureSessionFileParent(this.sessionFile);
 				appendFileSync(this.sessionFile, `${JSON.stringify(entry)}\n`);
 			} else {
 				// Mark as not flushed so when assistant arrives, all entries get written
@@ -1248,6 +1249,7 @@ export class SessionManager {
 		}
 
 		if (!this.flushed) {
+			this._ensureSessionFileParent(this.sessionFile);
 			const fd = openSync(this.sessionFile, "wx");
 			try {
 				for (const e of this.fileEntries) {
@@ -1258,6 +1260,7 @@ export class SessionManager {
 			}
 			this.flushed = true;
 		} else {
+			this._ensureSessionFileParent(this.sessionFile);
 			appendFileSync(this.sessionFile, `${JSON.stringify(entry)}\n`);
 		}
 	}

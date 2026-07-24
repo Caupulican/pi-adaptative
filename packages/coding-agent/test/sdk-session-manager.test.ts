@@ -44,6 +44,8 @@ describe("createAgentSession session manager defaults", () => {
 
 		expect(sessionDir).toBe(expectedSessionDir);
 		expect(sessionFile?.startsWith(`${expectedSessionDir}${sep}`)).toBe(true);
+		expect(existsSync(expectedSessionDir)).toBe(false);
+		expect(existsSync(join(cwd, ".pi"))).toBe(false);
 
 		session.dispose();
 	});

@@ -229,6 +229,14 @@ function hasActiveLease(runDir: string): boolean {
 	return false;
 }
 
+/**
+ * Report whether a managed run is leased or being cleaned. Stale local markers are removed as part
+ * of the check; malformed or foreign-host markers remain fail-closed and count as active.
+ */
+export function hasActiveWorkRunLease(runDir: string): boolean {
+	return cleanupMarkerBlocksAcquisition(runDir) || hasActiveLease(runDir);
+}
+
 function measureDirectory(path: string, budget: ScanBudget, depth = 0): { bytes: number; complete: boolean } {
 	if (depth > MAX_DIRECTORY_DEPTH || budget.remaining <= 0) return { bytes: 0, complete: false };
 	let bytes = 0;

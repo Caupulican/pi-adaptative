@@ -3,12 +3,26 @@
  */
 
 import chalk from "chalk";
-import { chmodSync, existsSync, mkdirSync, readdirSync, readFileSync, renameSync, rmSync, writeFileSync } from "fs";
+import {
+	chmodSync,
+	existsSync,
+	lstatSync,
+	mkdirSync,
+	readdirSync,
+	readFileSync,
+	renameSync,
+	rmdirSync,
+	rmSync,
+	unlinkSync,
+	writeFileSync,
+} from "fs";
 import { dirname, join } from "path";
 import { CONFIG_DIR_NAME, getAgentDir, getBinDir } from "./config.ts";
-import { stateDir } from "./core/agent-paths.ts";
+import { sessionsDir, stateFile } from "./core/agent-paths.ts";
+import { migrateLegacyContextStores, pruneContextStores } from "./core/context/context-store-retention.ts";
 import { migrateKeybindingsConfig } from "./core/keybindings.ts";
 import { isLegacyEnvVarNameConfigValue } from "./core/resolve-config-value.ts";
+import { withFileLockSync, writeFileAtomicSync } from "./core/util/atomic-file.ts";
 import { stripJsonComments } from "./utils/json.ts";
 
 const MIGRATION_GUIDE_URL =
@@ -359,38 +373,89 @@ function migrateToolsToBin(): void {
 }
 
 /**
- * Root-level machine-managed stragglers to relocate into their canonical `state/` location.
- * Every other machine-managed file already writes through
- * `state/`/`cache/`/`work/` via `core/agent-paths.ts` -- this is the one confirmed root straggler.
- * Deliberately NOT included: `resource-profiles/` (moving it would also require updating the two
- * user-visible scope descriptions in `profile-menu-controller.ts`, out of this migration's file
- * scope -- kept at root, recorded OPEN) and reload-coordination (verified already `work/`-scoped via
- * `getReloadCoordinationDir`, so it was never a root straggler to begin with).
+ * Root-level machine-managed trust state is relocated into `state/`. If both layouts exist, valid
+ * entries are merged under the canonical file's lock and canonical decisions win conflicts.
  */
-const AGENT_DIR_ROOT_TO_STATE_STRAGGLERS = ["trust.json"];
+const MAX_SESSION_NAMESPACES_TO_PRUNE = 10_000;
+
+type MigratedTrustFile = Record<string, boolean | null>;
+
+function readMigratedTrustFile(path: string): MigratedTrustFile | undefined {
+	try {
+		const parsed = JSON.parse(readFileSync(path, "utf-8")) as unknown;
+		if (typeof parsed !== "object" || parsed === null || Array.isArray(parsed)) return undefined;
+		const trust: MigratedTrustFile = {};
+		for (const [key, value] of Object.entries(parsed)) {
+			if (value !== true && value !== false && value !== null) return undefined;
+			trust[key] = value;
+		}
+		return trust;
+	} catch {
+		return undefined;
+	}
+}
+
+function migrateTrustState(agentDir: string): void {
+	const oldPath = join(agentDir, "trust.json");
+	if (!existsSync(oldPath)) return;
+	const newPath = stateFile(agentDir, "trust.json");
+	if (!existsSync(newPath)) {
+		mkdirSync(dirname(newPath), { recursive: true });
+		renameSync(oldPath, newPath);
+		return;
+	}
+
+	withFileLockSync(newPath, () => {
+		const legacy = readMigratedTrustFile(oldPath);
+		const canonical = readMigratedTrustFile(newPath);
+		if (!legacy || !canonical) return;
+		const merged = { ...legacy, ...canonical };
+		const sorted = Object.fromEntries(Object.entries(merged).sort(([left], [right]) => left.localeCompare(right)));
+		writeFileAtomicSync(newPath, `${JSON.stringify(sorted, null, 2)}\n`);
+		unlinkSync(oldPath);
+	});
+}
+
+/** Remove only empty real per-project session directories; transcript files are never retention-pruned. */
+export function pruneEmptySessionNamespaces(agentDir: string): string[] {
+	const root = sessionsDir(agentDir);
+	let candidates: string[];
+	try {
+		candidates = readdirSync(root, { withFileTypes: true })
+			.slice(0, MAX_SESSION_NAMESPACES_TO_PRUNE)
+			.filter((entry) => entry.isDirectory() && !entry.isSymbolicLink())
+			.map((entry) => join(root, entry.name));
+	} catch {
+		return [];
+	}
+
+	const removed: string[] = [];
+	for (const candidate of candidates) {
+		try {
+			const stats = lstatSync(candidate);
+			if (!stats.isDirectory() || stats.isSymbolicLink() || readdirSync(candidate).length > 0) continue;
+			rmdirSync(candidate);
+			removed.push(candidate);
+		} catch {}
+	}
+	return removed;
+}
 
 /**
- * Move confirmed root-level machine-managed stragglers into `state/`. Idempotent (a prior move
- * leaves nothing at the old path, so a re-run is a no-op) and partial-run-tolerant (a target that
- * already exists is left untouched -- never overwritten, so a half-completed earlier run converges
- * instead of clobbering data). Each move is independently try/catch-guarded: startup migrations must
- * never throw, and one straggler failing to move must not block the others or abort startup. Never
- * touches user config/resources -- only the explicit allowlist above.
+ * Consolidate known machine-managed layout generations. Each migration is independently guarded:
+ * startup never fails because cleanup is unavailable, and unknown files/resources remain untouched.
  */
 export function migrateAgentDirLayout(agentDir: string): void {
-	const targetDir = stateDir(agentDir);
-	for (const name of AGENT_DIR_ROOT_TO_STATE_STRAGGLERS) {
-		try {
-			const oldPath = join(agentDir, name);
-			if (!existsSync(oldPath)) continue;
-			const newPath = join(targetDir, name);
-			if (existsSync(newPath)) continue; // Partial prior run: target already migrated, never overwrite.
-			mkdirSync(targetDir, { recursive: true });
-			renameSync(oldPath, newPath);
-		} catch {
-			// Best-effort: startup must not fail because one straggler could not be relocated.
-		}
+	try {
+		migrateTrustState(agentDir);
+	} catch {
+		// Best-effort: startup must not fail because one straggler could not be relocated.
 	}
+	try {
+		migrateLegacyContextStores(agentDir);
+		pruneContextStores(agentDir);
+	} catch {}
+	pruneEmptySessionNamespaces(agentDir);
 }
 
 /**

@@ -41,7 +41,8 @@ describe("TranscriptRecallProvider (cross-session recall)", () => {
 		cwd = join(tempDir, "cwd");
 		mkdirSync(agentDir, { recursive: true });
 		mkdirSync(cwd, { recursive: true });
-		sessionDir = getDefaultSessionDir(cwd, agentDir); // creates + returns the resolved dir
+		sessionDir = getDefaultSessionDir(cwd, agentDir);
+		mkdirSync(sessionDir, { recursive: true });
 	});
 
 	afterEach(() => {

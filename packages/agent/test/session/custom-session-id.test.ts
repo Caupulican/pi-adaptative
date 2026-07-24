@@ -1,4 +1,4 @@
-import { existsSync, mkdtempSync, writeFileSync } from "node:fs";
+import { existsSync, mkdirSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { basename, join } from "node:path";
 import { describe, expect, it } from "vitest";
@@ -73,6 +73,22 @@ describe("SessionManager.newSession with custom id", () => {
 		expect(sessionFile).toContain("created-session-id");
 		expect(basename(sessionFile)).toMatch(/^\d{4}-\d{2}-\d{2}T\d{2}-\d{2}-\d{2}-\d{3}Z_created-session-id\.jsonl$/);
 		expect(existsSync(sessionFile)).toBe(false);
+	});
+
+	it("does not create a default session namespace before the first durable response", () => {
+		const root = mkdtempSync(join(tmpdir(), "pi-session-manager-lazy-"));
+		try {
+			const cwd = join(root, "project");
+			const agentDir = join(root, "agent");
+			mkdirSync(cwd);
+			const session = SessionManager.create(cwd, agentDir);
+
+			expect(session.getSessionFile()).toBeDefined();
+			expect(existsSync(session.getSessionDir())).toBe(false);
+			expect(existsSync(join(cwd, ".pi"))).toBe(false);
+		} finally {
+			rmSync(root, { recursive: true, force: true });
+		}
 	});
 
 	it("generates a UUIDv7 id when creating a branched session", () => {
