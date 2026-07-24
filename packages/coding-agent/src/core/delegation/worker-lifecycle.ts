@@ -56,14 +56,20 @@ export class WorkerLifecycle {
 
 	prepare(
 		input: Omit<PrepareDelegationInput, "laneId">,
-		laneId = `worker-${this.nextLaneNumber++}`,
+		laneId?: string,
 	): {
 		record: LaneRecord;
 		attempt: AttemptRuntimeState;
 	} {
-		const attempt = this.ledger.prepare({ ...input, laneId });
-		const record = this.getRecord(laneId);
-		if (!record) throw new Error(`Durable worker '${laneId}' was not projected after enqueue.`);
+		let selectedLaneId = laneId;
+		if (!selectedLaneId) {
+			const snapshot = this.ledger.runtime.getSnapshot();
+			while (snapshot.tasks[`worker-${this.nextLaneNumber}`]) this.nextLaneNumber += 1;
+			selectedLaneId = `worker-${this.nextLaneNumber++}`;
+		}
+		const attempt = this.ledger.prepare({ ...input, laneId: selectedLaneId });
+		const record = this.getRecord(selectedLaneId);
+		if (!record) throw new Error(`Durable worker '${selectedLaneId}' was not projected after enqueue.`);
 		return { record, attempt };
 	}
 

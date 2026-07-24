@@ -296,13 +296,14 @@ describe("WorkerLifecycle", () => {
 		});
 	});
 
-	it("allocates resumed lane ids from durable tasks only", () => {
+	it("allocates resumed lane ids from current durable tasks", () => {
 		const agentDir = root();
 		const profile = createTestWorkerOrchestrationProfile({
 			profileId: "worker",
 			model: { provider: "test", id: "model" },
 		});
 		const before = new WorkerLifecycle({ agentDir, sessionId: "session-resumed-id" });
+		const resumed = new WorkerLifecycle({ agentDir, sessionId: "session-resumed-id" });
 		expect(
 			before.prepare({
 				instructions: "first",
@@ -311,7 +312,6 @@ describe("WorkerLifecycle", () => {
 			}).record.laneId,
 		).toBe("worker-1");
 
-		const resumed = new WorkerLifecycle({ agentDir, sessionId: "session-resumed-id" });
 		expect(
 			resumed.prepare({
 				instructions: "second",

@@ -109,6 +109,8 @@ export class WorkerDelegationController {
 	private readonly lifecycle: WorkerLifecycle;
 	private profileResolver: WorkerProfileResolver | undefined;
 	private queueRecovered = false;
+	private recoveringDurableState = false;
+	private readonly verificationRecoveryFailures = new Map<string, string>();
 	private readonly notifications: WorkerNotificationCoordinator;
 	private readonly scheduler: WorkerDispatchScheduler;
 	private readonly laneAbortControllers = new Map<string, AbortController>();
@@ -293,54 +295,69 @@ export class WorkerDelegationController {
 	}
 
 	private recoverDurableQueue(): void {
-		if (this.queueRecovered) return;
-		this.queueRecovered = true;
+		if (this.recoveringDurableState) return;
+		this.recoveringDurableState = true;
 		const lifecycle = this.getWorkerLifecycle();
-		for (const { attempt, record, verificationOfTaskId } of lifecycle.recoverQueued()) {
-			const request: WorkerDelegationRequest = {
-				instructions: attempt.dispatch.instructions,
-				profileId: attempt.dispatch.profileId,
-				...(verificationOfTaskId ? { verificationOfTaskId } : {}),
-			};
-			this.scheduler.enqueue(record, request, true, verificationOfTaskId !== undefined);
-		}
-		for (const recovery of lifecycle.getPendingVerificationRecoveries()) {
-			if (recovery.action === "reconcile") {
-				try {
-					this.publishTerminalRecord(lifecycle.reconcileVerification(recovery));
-				} catch (error) {
+		try {
+			if (!this.queueRecovered) {
+				for (const { attempt, record, verificationOfTaskId } of lifecycle.recoverQueued()) {
+					const request: WorkerDelegationRequest = {
+						instructions: attempt.dispatch.instructions,
+						profileId: attempt.dispatch.profileId,
+						...(verificationOfTaskId ? { verificationOfTaskId } : {}),
+					};
+					this.scheduler.enqueue(record, request, true, verificationOfTaskId !== undefined);
+				}
+				this.queueRecovered = true;
+			}
+			for (const recovery of lifecycle.getPendingVerificationRecoveries()) {
+				if (recovery.action === "reconcile") {
+					try {
+						this.publishTerminalRecord(lifecycle.reconcileVerification(recovery));
+						this.verificationRecoveryFailures.delete(recovery.subjectTaskId);
+					} catch (error) {
+						this.safeWarn(
+							`Failed to reconcile recovered verification for ${recovery.subjectTaskId}: ${error instanceof Error ? error.message : String(error)}`,
+						);
+					}
+					continue;
+				}
+				const legacyImplementation = recovery.verifierExecutionContract
+					? undefined
+					: this.resolveWorkerAdmission({
+							instructions: recovery.summary,
+							profileId: recovery.implementationProfileId,
+						});
+				const verifierProfileId =
+					recovery.verifierExecutionContract?.worker.profile.profileId ??
+					(legacyImplementation?.ok ? legacyImplementation.verifierShipment?.profile.profileId : undefined);
+				const started = verifierProfileId
+					? this.startInternal(
+							this.buildVerifierRequest({
+								subjectTaskId: recovery.subjectTaskId,
+								verifierProfileId,
+								summary: recovery.summary,
+								artifactUris: recovery.artifactUris,
+							}),
+							recovery.verifierExecutionContract,
+						)
+					: { started: false as const, skipReason: "independent_verifier_unavailable" };
+				if (started.started) {
+					this.verificationRecoveryFailures.delete(recovery.subjectTaskId);
+					continue;
+				}
+				if (this.verificationRecoveryFailures.get(recovery.subjectTaskId) !== started.skipReason) {
+					this.verificationRecoveryFailures.set(recovery.subjectTaskId, started.skipReason);
 					this.safeWarn(
-						`Failed to reconcile recovered verification for ${recovery.subjectTaskId}: ${error instanceof Error ? error.message : String(error)}`,
+						`Recovered verification for ${recovery.subjectTaskId} did not start: ${started.skipReason}`,
 					);
 				}
-				continue;
 			}
-			const legacyImplementation = recovery.verifierExecutionContract
-				? undefined
-				: this.resolveWorkerAdmission({
-						instructions: recovery.summary,
-						profileId: recovery.implementationProfileId,
-					});
-			const verifierProfileId =
-				recovery.verifierExecutionContract?.worker.profile.profileId ??
-				(legacyImplementation?.ok ? legacyImplementation.verifierShipment?.profile.profileId : undefined);
-			const started = verifierProfileId
-				? this.startInternal(
-						this.buildVerifierRequest({
-							subjectTaskId: recovery.subjectTaskId,
-							verifierProfileId,
-							summary: recovery.summary,
-							artifactUris: recovery.artifactUris,
-						}),
-						recovery.verifierExecutionContract,
-					)
-				: { started: false as const, skipReason: "independent_verifier_unavailable" };
-			if (!started.started) {
-				this.safeWarn(`Recovered verification for ${recovery.subjectTaskId} did not start: ${started.skipReason}`);
+			for (const notification of lifecycle.getPendingTerminalNotifications()) {
+				this.notifications.recordTerminal(notification.record, notification.notificationId);
 			}
-		}
-		for (const notification of lifecycle.getPendingTerminalNotifications()) {
-			this.notifications.recordTerminal(notification.record, notification.notificationId);
+		} finally {
+			this.recoveringDurableState = false;
 		}
 	}
 
@@ -557,7 +574,7 @@ export class WorkerDelegationController {
 	): { started: false; skipReason: string } | { started: true; record: LaneRecord } {
 		const admission = this.resolveWorkerAdmission(request, pinnedContract);
 		if (!admission.ok) return { started: false, skipReason: admission.skipReason };
-		this.recoverDurableQueue();
+		if (!request.verificationOfTaskId) this.recoverDurableQueue();
 		const { settings, shipment } = admission;
 
 		const foreground = this.deps.getModel();
@@ -626,7 +643,7 @@ export class WorkerDelegationController {
 			: undefined;
 		const admission = preparedAdmission ?? this.resolveWorkerAdmission(request, pinnedContract);
 		if (!admission.ok) return { started: false, skipReason: admission.skipReason };
-		this.recoverDurableQueue();
+		if (!request.verificationOfTaskId) this.recoverDurableQueue();
 		const { instructions, settings, verifierShipment } = admission;
 		const { model, modelBinding, profile: orchestrationProfile, soul } = admission.shipment;
 		if (!this.hasWorkerCapacity(settings, orchestrationProfile)) {

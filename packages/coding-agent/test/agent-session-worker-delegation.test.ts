@@ -4,11 +4,15 @@ import { type AssistantMessage, type FauxResponseFactory, fauxAssistantMessage, 
 import { describe, expect, it, vi } from "vitest";
 import { getLaneRecordSnapshots } from "../src/core/autonomy/session-lane-record.ts";
 import { getWorkerRequestSnapshots } from "../src/core/delegation/session-worker-claim.ts";
+import { WorkerLifecycle } from "../src/core/delegation/worker-lifecycle.ts";
 import { createGoalState } from "../src/core/goals/goal-state.ts";
 import { getWorkerHumanInputsRequiringDelivery } from "../src/core/human-input.ts";
 import { ORCHESTRATION_SCHEMA_VERSION, type OrchestrationProfile } from "../src/core/orchestration/contracts.ts";
 import { OrchestrationEventStore } from "../src/core/orchestration/event-store.ts";
 import { OrchestrationProfileStore } from "../src/core/orchestration/profile-store.ts";
+import { createWorkerExecutionContract } from "../src/core/orchestration/worker-execution-contract.ts";
+import { createWorkerResultContract } from "../src/core/orchestration/worker-result-adapter.ts";
+import { createTestExecutionGrant, createTestWorkerExecutionAuthority } from "./orchestration-profile-fixture.ts";
 import { createHarness, type Harness } from "./suite/harness.ts";
 
 const WORKER_JSON =
@@ -966,6 +970,113 @@ describe("AgentSession worker delegation", () => {
 					'{"summary":"cleanup","status":"completed","verdict":"rejected","reasonCodes":["cleanup"],"findings":[]}',
 				),
 			);
+			harness.cleanup();
+		}
+	});
+
+	it("retries recovered verification after its temporary admission failure clears", async () => {
+		const { implementationProfile, verifierProfile } = verifiedWorkerProfiles();
+		const harness = await createHarness({
+			settings: { workerDelegation: { enabled: false } },
+			workerOrchestrationProfile: implementationProfile,
+			additionalOrchestrationProfiles: [verifierProfile],
+		});
+		try {
+			const lifecycle = new WorkerLifecycle({
+				agentDir: harness.tempDir,
+				sessionId: harness.session.sessionId,
+			});
+			const executionContract = createWorkerExecutionContract({
+				worker: {
+					profile: implementationProfile,
+					modelBinding: implementationProfile.modelPolicy.candidates[0]!,
+					authority: createTestWorkerExecutionAuthority(implementationProfile, harness.tempDir),
+				},
+				verifier: {
+					profile: verifierProfile,
+					modelBinding: verifierProfile.modelPolicy.candidates[0]!,
+					authority: createTestWorkerExecutionAuthority(verifierProfile, harness.tempDir),
+				},
+			});
+			const prepared = lifecycle.prepare({
+				instructions: "Implement before restart",
+				executionContract,
+				requiredCapabilities: [],
+			});
+			const task = lifecycle.getTask(prepared.attempt.taskId);
+			if (!task) throw new Error("Expected durable implementation task");
+			lifecycle.bindGrant(
+				prepared.attempt.attemptId,
+				createTestExecutionGrant({
+					objectiveId: task.task.objectiveId,
+					taskId: prepared.attempt.taskId,
+					attemptId: prepared.attempt.attemptId,
+					role: task.task.role,
+				}),
+			);
+			const handle = lifecycle.start(prepared.record.laneId, implementationProfile.leaseTtlMs);
+			lifecycle.finish(
+				createWorkerResultContract({
+					handle,
+					claim: {
+						requestId: prepared.record.laneId,
+						status: "completed",
+						summary: "Implementation survived the interrupted owner session.",
+						changedFiles: [],
+					},
+					accepted: true,
+					cwd: harness.tempDir,
+					wallClockMs: 10,
+					toolCalls: 0,
+					verificationRequired: true,
+					reasonCode: "independent_verification_required",
+				}),
+				{ notify: false },
+			);
+
+			expect(
+				harness.session.getLaneRecords().find((record) => record.laneId === prepared.record.laneId),
+			).toMatchObject({
+				status: "running",
+				reasonCode: "independent_verification_required",
+			});
+			expect(harness.getPendingResponseCount()).toBe(0);
+
+			harness.setResponses([
+				fauxAssistantMessage("Recovery boundary reached."),
+				fauxAssistantMessage(
+					'{"summary":"recovered verification passed","status":"completed","verdict":"accepted","reasonCodes":["recovery_check_passed"],"findings":[]}',
+				),
+			]);
+			harness.settingsManager.setWorkerDelegationSettings({
+				enabled: true,
+				orchestrationProfile: implementationProfile.profileId,
+			});
+			expect(harness.session.getLaneRecords()).toEqual(
+				expect.arrayContaining([
+					expect.objectContaining({
+						profileId: verifierProfile.profileId,
+						status: "queued",
+					}),
+				]),
+			);
+			await harness.session.prompt("Reach the next owner-idle recovery boundary", { autoContinueGoal: false });
+
+			await vi.waitFor(() => {
+				expect(harness.session.getWorkerClaimSnapshots()).toHaveLength(1);
+				expect(
+					harness.session.getLaneRecords().find((record) => record.laneId === prepared.record.laneId),
+				).toMatchObject({
+					status: "succeeded",
+					reasonCode: "independent_verification_accepted",
+				});
+			});
+			expect(harness.session.getWorkerClaimSnapshots()[0]?.verification).toEqual({
+				subjectTaskId: prepared.record.laneId,
+				verdict: "accepted",
+				reasonCodes: ["recovery_check_passed"],
+			});
+		} finally {
 			harness.cleanup();
 		}
 	});
