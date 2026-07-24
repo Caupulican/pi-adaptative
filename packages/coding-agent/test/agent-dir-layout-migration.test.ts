@@ -3,7 +3,7 @@ import * as os from "node:os";
 import * as path from "node:path";
 import { afterEach, describe, expect, it } from "vitest";
 import { ENV_AGENT_DIR } from "../src/config.ts";
-import { stateFile } from "../src/core/agent-paths.ts";
+import { configBackupsDir, directoryProfilesDir, stateFile } from "../src/core/agent-paths.ts";
 import { migrateAgentDirLayout, pruneEmptySessionNamespaces, runMigrations } from "../src/migrations.ts";
 
 describe("migrateAgentDirLayout", () => {
@@ -81,6 +81,72 @@ describe("migrateAgentDirLayout", () => {
 		expect(fs.existsSync(path.join(agentDir, "settings.json"))).toBe(true);
 		expect(fs.existsSync(path.join(agentDir, "MEMORY.md"))).toBe(true);
 		expect(fs.existsSync(path.join(agentDir, "skills", "my-skill", "SKILL.md"))).toBe(true);
+	});
+
+	it("relocates legacy backup and directory-profile roots into their canonical containers", () => {
+		const agentDir = createAgentDir();
+		fs.mkdirSync(path.join(agentDir, "backups"), { recursive: true });
+		fs.writeFileSync(path.join(agentDir, "backups", "config-old.json"), "backup\n", "utf-8");
+		fs.mkdirSync(path.join(agentDir, "resource-profiles", "workspace-hash"), { recursive: true });
+		fs.writeFileSync(
+			path.join(agentDir, "resource-profiles", "workspace-hash", "settings.json"),
+			"profile\n",
+			"utf-8",
+		);
+
+		migrateAgentDirLayout(agentDir);
+
+		expect(fs.existsSync(path.join(agentDir, "backups"))).toBe(false);
+		expect(fs.readFileSync(path.join(configBackupsDir(agentDir), "config-old.json"), "utf-8")).toBe("backup\n");
+		expect(fs.existsSync(path.join(agentDir, "resource-profiles"))).toBe(false);
+		expect(
+			fs.readFileSync(path.join(directoryProfilesDir(agentDir), "workspace-hash", "settings.json"), "utf-8"),
+		).toBe("profile\n");
+	});
+
+	it("preserves both copies when a legacy directory entry conflicts with canonical data", () => {
+		const agentDir = createAgentDir();
+		const legacyProfile = path.join(agentDir, "resource-profiles", "workspace-hash", "settings.json");
+		const canonicalProfile = path.join(directoryProfilesDir(agentDir), "workspace-hash", "settings.json");
+		fs.mkdirSync(path.dirname(legacyProfile), { recursive: true });
+		fs.mkdirSync(path.dirname(canonicalProfile), { recursive: true });
+		fs.writeFileSync(legacyProfile, "legacy\n", "utf-8");
+		fs.writeFileSync(canonicalProfile, "canonical\n", "utf-8");
+
+		migrateAgentDirLayout(agentDir);
+
+		expect(fs.readFileSync(canonicalProfile, "utf-8")).toBe("canonical\n");
+		expect(
+			fs.readFileSync(
+				stateFile(agentDir, "migration-conflicts", "resource-profiles", "workspace-hash", "settings.json"),
+				"utf-8",
+			),
+		).toBe("legacy\n");
+		expect(fs.existsSync(path.join(agentDir, "resource-profiles"))).toBe(false);
+	});
+
+	it("contains obsolete state, scratch, and a Windows metadata sidecar without deleting their contents", () => {
+		const agentDir = createAgentDir();
+		fs.mkdirSync(path.join(agentDir, "auto-learn"), { recursive: true });
+		fs.writeFileSync(path.join(agentDir, "auto-learn", "state.json"), "state\n", "utf-8");
+		fs.mkdirSync(path.join(agentDir, "tmp", "report-files"), { recursive: true });
+		fs.writeFileSync(path.join(agentDir, "tmp", "report-files", "report.json"), "report\n", "utf-8");
+		fs.writeFileSync(path.join(agentDir, "auth.json:Zone.Identifier"), "zone\n", "utf-8");
+
+		migrateAgentDirLayout(agentDir);
+
+		expect(fs.existsSync(path.join(agentDir, "auto-learn"))).toBe(false);
+		expect(fs.readFileSync(stateFile(agentDir, "legacy-layout", "auto-learn", "state.json"), "utf-8")).toBe(
+			"state\n",
+		);
+		expect(fs.existsSync(path.join(agentDir, "tmp"))).toBe(false);
+		expect(fs.readFileSync(stateFile(agentDir, "legacy-layout", "tmp", "report-files", "report.json"), "utf-8")).toBe(
+			"report\n",
+		);
+		expect(fs.existsSync(path.join(agentDir, "auth.json:Zone.Identifier"))).toBe(false);
+		expect(
+			fs.readFileSync(stateFile(agentDir, "legacy-layout", "sidecars", "auth.json.Zone.Identifier"), "utf-8"),
+		).toBe("zone\n");
 	});
 
 	it("is a no-op on a tree that is already fully migrated", () => {

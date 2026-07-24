@@ -18,7 +18,7 @@ import {
 } from "fs";
 import { dirname, join } from "path";
 import { CONFIG_DIR_NAME, getAgentDir, getBinDir } from "./config.ts";
-import { sessionsDir, stateFile } from "./core/agent-paths.ts";
+import { configBackupsDir, directoryProfilesDir, sessionsDir, stateFile } from "./core/agent-paths.ts";
 import { migrateLegacyContextStores, pruneContextStores } from "./core/context/context-store-retention.ts";
 import { migrateKeybindingsConfig } from "./core/keybindings.ts";
 import { isLegacyEnvVarNameConfigValue } from "./core/resolve-config-value.ts";
@@ -377,6 +377,8 @@ function migrateToolsToBin(): void {
  * entries are merged under the canonical file's lock and canonical decisions win conflicts.
  */
 const MAX_SESSION_NAMESPACES_TO_PRUNE = 10_000;
+const MAX_LEGACY_DIRECTORY_ENTRIES_TO_MIGRATE = 10_000;
+const MAX_MIGRATION_CONFLICT_SUFFIXES = 1_000;
 
 type MigratedTrustFile = Record<string, boolean | null>;
 
@@ -414,6 +416,68 @@ function migrateTrustState(agentDir: string): void {
 		writeFileAtomicSync(newPath, `${JSON.stringify(sorted, null, 2)}\n`);
 		unlinkSync(oldPath);
 	});
+}
+
+function migrationConflictPath(agentDir: string, legacyName: string, entryName: string): string | undefined {
+	const conflictDir = stateFile(agentDir, "migration-conflicts", legacyName);
+	for (let suffix = 0; suffix < MAX_MIGRATION_CONFLICT_SUFFIXES; suffix++) {
+		const name = suffix === 0 ? entryName : `${entryName}.legacy-${suffix}`;
+		const candidate = join(conflictDir, name);
+		if (!existsSync(candidate)) return candidate;
+	}
+	return undefined;
+}
+
+/**
+ * Relocate one known legacy root without traversing its contents. A whole-root rename is O(1);
+ * partial migrations scan a bounded number of top-level entries and preserve collisions under
+ * state/migration-conflicts instead of overwriting either copy.
+ */
+function migrateLegacyAgentDirectory(agentDir: string, legacyName: string, canonicalDir: string): void {
+	const legacyDir = join(agentDir, legacyName);
+	if (!existsSync(legacyDir)) return;
+	const legacyStats = lstatSync(legacyDir);
+	if (!legacyStats.isDirectory() || legacyStats.isSymbolicLink()) return;
+
+	if (!existsSync(canonicalDir)) {
+		mkdirSync(dirname(canonicalDir), { recursive: true });
+		renameSync(legacyDir, canonicalDir);
+		return;
+	}
+
+	const canonicalStats = lstatSync(canonicalDir);
+	if (!canonicalStats.isDirectory() || canonicalStats.isSymbolicLink()) return;
+	const entries = readdirSync(legacyDir).slice(0, MAX_LEGACY_DIRECTORY_ENTRIES_TO_MIGRATE);
+	for (const entry of entries) {
+		const source = join(legacyDir, entry);
+		let target = join(canonicalDir, entry);
+		if (existsSync(target)) {
+			target = migrationConflictPath(agentDir, legacyName, entry) ?? "";
+			if (!target) continue;
+			mkdirSync(dirname(target), { recursive: true });
+		}
+		try {
+			renameSync(source, target);
+		} catch {}
+	}
+
+	try {
+		rmdirSync(legacyDir);
+	} catch {}
+}
+
+function migrateLegacyAgentFile(agentDir: string, legacyName: string, canonicalPath: string): void {
+	const legacyPath = join(agentDir, legacyName);
+	if (!existsSync(legacyPath)) return;
+	const legacyStats = lstatSync(legacyPath);
+	if (!legacyStats.isFile() || legacyStats.isSymbolicLink()) return;
+	let target = canonicalPath;
+	if (existsSync(target)) {
+		target = migrationConflictPath(agentDir, "root-files", legacyName.replaceAll(":", ".")) ?? "";
+		if (!target) return;
+	}
+	mkdirSync(dirname(target), { recursive: true });
+	renameSync(legacyPath, target);
 }
 
 /** Remove only empty real per-project session directories; transcript files are never retention-pruned. */
@@ -454,6 +518,25 @@ export function migrateAgentDirLayout(agentDir: string): void {
 	try {
 		migrateLegacyContextStores(agentDir);
 		pruneContextStores(agentDir);
+	} catch {}
+	try {
+		migrateLegacyAgentDirectory(agentDir, "backups", configBackupsDir(agentDir));
+	} catch {}
+	try {
+		migrateLegacyAgentDirectory(agentDir, "resource-profiles", directoryProfilesDir(agentDir));
+	} catch {}
+	try {
+		migrateLegacyAgentDirectory(agentDir, "auto-learn", stateFile(agentDir, "legacy-layout", "auto-learn"));
+	} catch {}
+	try {
+		migrateLegacyAgentDirectory(agentDir, "tmp", stateFile(agentDir, "legacy-layout", "tmp"));
+	} catch {}
+	try {
+		migrateLegacyAgentFile(
+			agentDir,
+			"auth.json:Zone.Identifier",
+			stateFile(agentDir, "legacy-layout", "sidecars", "auth.json.Zone.Identifier"),
+		);
 	} catch {}
 	pruneEmptySessionNamespaces(agentDir);
 }

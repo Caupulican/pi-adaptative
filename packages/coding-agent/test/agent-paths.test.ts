@@ -5,12 +5,15 @@ import { afterEach, describe, expect, it } from "vitest";
 import {
 	cacheDir,
 	cacheFile,
+	configBackupsDir,
 	configFile,
+	directoryProfilesDir,
 	getProcessWorkRun,
 	getWorkRoot,
 	gitDir,
 	modelsDir,
 	npmDir,
+	okfMemoryDir,
 	reloadCoordinationDir,
 	resourceDir,
 	runtimesDir,
@@ -35,6 +38,12 @@ describe("agent-paths SSOT accessors", () => {
 	it("configFile builds a root-level user config/memory path", () => {
 		expect(configFile(AGENT_DIR, "auth.json")).toBe(join(AGENT_DIR, "auth.json"));
 		expect(configFile(AGENT_DIR, "MEMORY.md")).toBe(join(AGENT_DIR, "MEMORY.md"));
+	});
+
+	it("authored memory and durable profile/backup collections have canonical containers", () => {
+		expect(okfMemoryDir(AGENT_DIR)).toBe(join(AGENT_DIR, "okf-memory"));
+		expect(directoryProfilesDir(AGENT_DIR)).toBe(join(AGENT_DIR, "profiles", "directories"));
+		expect(configBackupsDir(AGENT_DIR)).toBe(join(AGENT_DIR, "state", "backups", "config"));
 	});
 
 	it("stateDir/stateFile build canonical state/ paths", () => {

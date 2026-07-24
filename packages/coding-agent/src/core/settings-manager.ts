@@ -1,12 +1,12 @@
 import type { Transport } from "@caupulican/pi-ai";
 import { createHash } from "crypto";
-import { existsSync, mkdirSync, readFileSync, realpathSync, rmSync, statSync, writeFileSync } from "fs";
+import { existsSync, mkdirSync, readFileSync, realpathSync, rmdirSync, rmSync, statSync, writeFileSync } from "fs";
 import { homedir } from "os";
 import { basename, dirname, join, relative, resolve, sep } from "path";
 import lockfile from "proper-lockfile";
 import { CONFIG_DIR_NAME, getAgentDir, getProfilesDir } from "../config.ts";
 import { normalizePath, resolvePath } from "../utils/paths.ts";
-import { configFile } from "./agent-paths.ts";
+import { configFile, directoryProfilesDir } from "./agent-paths.ts";
 import { DEFAULT_CONTEXT_GC_SETTINGS } from "./context-gc.ts";
 import {
 	DEFAULT_GOAL_AUTO_CONTINUE,
@@ -541,14 +541,10 @@ export function getDirectoryResourceProfileInfo(
 ): DirectoryResourceProfileInfo {
 	const root = findDirectoryProfileRoot(cwd);
 	const hash = createHash("sha256").update(root).digest("hex").slice(0, 16);
-	// resource-profiles/ stays at the agentDir root (not state/): moving it needs the two user-visible
-	// scope descriptions in profile-menu-controller.ts updated in the same change, which has not
-	// happened yet. Still routed through the SSOT root accessor so the eventual move is a one-line
-	// change here.
 	return {
 		root,
 		hash,
-		path: join(configFile(resolvePath(agentDir), "resource-profiles"), hash, "settings.json"),
+		path: join(directoryProfilesDir(resolvePath(agentDir)), hash, "settings.json"),
 	};
 }
 
@@ -833,15 +829,22 @@ export class FileSettingsStorage implements SettingsStorage {
 	private globalSettingsPath: string;
 	private projectSettingsPath: string;
 	private directoryProfileInfo: DirectoryResourceProfileInfo;
+	private legacyDirectoryProfilePath: string;
 	private profilesDir: string;
 
 	constructor(cwd: string, agentDir: string) {
 		const resolvedCwd = resolvePath(cwd);
 		const resolvedAgentDir = resolvePath(agentDir);
 		this.profileResolutionBaseDir = resolvedCwd;
-		this.globalSettingsPath = join(resolvedAgentDir, "settings.json");
+		this.globalSettingsPath = configFile(resolvedAgentDir, "settings.json");
 		this.projectSettingsPath = join(resolvedCwd, CONFIG_DIR_NAME, "settings.json");
 		this.directoryProfileInfo = getDirectoryResourceProfileInfo(resolvedCwd, resolvedAgentDir);
+		this.legacyDirectoryProfilePath = join(
+			resolvedAgentDir,
+			"resource-profiles",
+			this.directoryProfileInfo.hash,
+			"settings.json",
+		);
 		this.profilesDir = getProfilesDir(resolvedAgentDir);
 	}
 
@@ -859,7 +862,27 @@ export class FileSettingsStorage implements SettingsStorage {
 
 	readDirectoryResourceProfile(): string | undefined {
 		const path = this.directoryProfileInfo.path;
-		return existsSync(path) ? readFileSync(path, "utf-8") : undefined;
+		if (existsSync(path)) return readFileSync(path, "utf-8");
+		return existsSync(this.legacyDirectoryProfilePath)
+			? readFileSync(this.legacyDirectoryProfilePath, "utf-8")
+			: undefined;
+	}
+
+	private removeMigratedDirectoryProfile(): void {
+		if (!existsSync(this.legacyDirectoryProfilePath)) return;
+		try {
+			rmSync(this.legacyDirectoryProfilePath, { force: true });
+		} catch {
+			return;
+		}
+		for (const directory of [
+			dirname(this.legacyDirectoryProfilePath),
+			dirname(dirname(this.legacyDirectoryProfilePath)),
+		]) {
+			try {
+				rmdirSync(directory);
+			} catch {}
+		}
 	}
 
 	private acquireLockSyncWithRetry(path: string): () => void {
@@ -897,30 +920,43 @@ export class FileSettingsStorage implements SettingsStorage {
 					? this.projectSettingsPath
 					: this.directoryProfileInfo.path;
 		const dir = dirname(path);
+		const legacyPath = scope === "directoryProfile" ? this.legacyDirectoryProfilePath : undefined;
 
-		let release: (() => void) | undefined;
+		const releases: Array<() => void> = [];
+		let migratedLegacy = false;
 		try {
-			// Only create directory and lock if file exists or we need to write
-			const fileExists = existsSync(path);
-			if (fileExists) {
-				release = this.acquireLockSyncWithRetry(path);
+			const legacyExists = legacyPath !== undefined && existsSync(legacyPath);
+			const canonicalExists = existsSync(path);
+			let currentPath = canonicalExists ? path : legacyExists ? (legacyPath ?? path) : path;
+			const fileExists = canonicalExists || legacyExists;
+
+			// Directory-profile locks always follow legacy -> canonical order, including a partial migration
+			// where both files exist. This keeps old and new SDK clients from deadlocking each other.
+			if (legacyPath && legacyExists) releases.push(this.acquireLockSyncWithRetry(legacyPath));
+			if (canonicalExists) releases.push(this.acquireLockSyncWithRetry(path));
+
+			// A legacy directory overlay can race another process that already knows the canonical path.
+			// Hold the legacy lock, then bind to the canonical lock before deriving the update.
+			if (legacyExists && !canonicalExists) {
+				if (!existsSync(dir)) mkdirSync(dir, { recursive: true });
+				releases.push(this.acquireLockSyncWithRetry(path));
+				if (existsSync(path)) currentPath = path;
 			}
-			const current = fileExists ? readFileSync(path, "utf-8") : undefined;
+
+			const current = fileExists ? readFileSync(currentPath, "utf-8") : undefined;
 			const next = fn(current);
 			if (next !== undefined) {
 				// Only create directory when we actually need to write
 				if (!existsSync(dir)) {
 					mkdirSync(dir, { recursive: true });
 				}
-				if (!release) {
-					release = this.acquireLockSyncWithRetry(path);
-				}
+				if (releases.length === 0) releases.push(this.acquireLockSyncWithRetry(path));
 				writeFileSync(path, next, "utf-8");
+				migratedLegacy = legacyExists;
 			}
 		} finally {
-			if (release) {
-				release();
-			}
+			for (const release of releases.reverse()) release();
+			if (migratedLegacy) this.removeMigratedDirectoryProfile();
 		}
 	}
 }

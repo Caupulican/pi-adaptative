@@ -6,6 +6,7 @@
 
 ### Fixed
 
+- Contained directory profile overlays and configuration backups under canonical `profiles/` and `state/` namespaces, archived obsolete root scratch/Auto Learn layouts, and added bounded conflict-preserving migration with zero-write legacy reads.
 - Consolidated generated context payloads under one leased, bounded per-session work namespace; context/report inspection and unflushed session creation are now zero-write, recognized legacy stores migrate safely, and empty session namespaces are pruned without applying retention to transcripts.
 - Consolidated fitness, adaptation, and tool-selection host state behind one validated lock-safe atomic store; concurrent sessions no longer overwrite profile or tool evidence, and worker read-only mode remains zero-write.
 - Extracted managed tmux-worker lifecycle and claim review from the background coordinator, made managed and in-process workers share one terminal outbox without materializing a withheld worker runtime, removed the research controller's circular dependency on its parent, and renamed raw worker-claim modules so untrusted claims are no longer presented as durable results.

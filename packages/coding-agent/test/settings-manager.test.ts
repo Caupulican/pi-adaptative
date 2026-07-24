@@ -1,6 +1,6 @@
 import { existsSync, mkdirSync, readFileSync, realpathSync, rmSync, writeFileSync } from "fs";
 import { homedir } from "os";
-import { join } from "path";
+import { dirname, join } from "path";
 import { afterEach, beforeEach, describe, expect, it } from "vitest";
 import { DEFAULT_CONTEXT_GC_SETTINGS } from "../src/core/context-gc.ts";
 import { DEFAULT_HTTP_IDLE_TIMEOUT_MS } from "../src/core/http-dispatcher.ts";
@@ -1196,7 +1196,7 @@ describe("SettingsManager", () => {
 	describe("resource profiles", () => {
 		it("loads zero-footprint directory resource profile settings from the user agent dir", () => {
 			const info = getDirectoryResourceProfileInfo(projectDir, agentDir);
-			mkdirSync(join(agentDir, "resource-profiles", info.hash), { recursive: true });
+			mkdirSync(dirname(info.path), { recursive: true });
 			writeFileSync(
 				info.path,
 				JSON.stringify({
@@ -1215,6 +1215,49 @@ describe("SettingsManager", () => {
 			expect(manager.getDirectoryResourceProfileInfo()?.path).toBe(info.path);
 			expect(manager.getResourceProfileFilter("extensions").block).toEqual(["noisy-ext"]);
 			expect(manager.getResourceProfileFilter("tools").allow).toEqual(["read", "rg"]);
+		});
+
+		it("reads a legacy directory overlay without writes and converges it on the next scoped update", async () => {
+			const info = getDirectoryResourceProfileInfo(projectDir, agentDir);
+			const legacyPath = join(agentDir, "resource-profiles", info.hash, "settings.json");
+			mkdirSync(dirname(legacyPath), { recursive: true });
+			writeFileSync(
+				legacyPath,
+				JSON.stringify({
+					activeResourceProfile: "lean",
+					resourceProfiles: { lean: { tools: { allow: ["read"] } } },
+				}),
+			);
+
+			const manager = SettingsManager.create(projectDir, agentDir);
+			expect(manager.getActiveResourceProfileNames()).toContain("lean");
+			expect(existsSync(info.path)).toBe(false);
+
+			manager.setActiveProfile("lean", "directory");
+			await manager.flush();
+
+			expect(existsSync(info.path)).toBe(true);
+			expect(existsSync(legacyPath)).toBe(false);
+			expect(existsSync(join(agentDir, "resource-profiles"))).toBe(false);
+		});
+
+		it("keeps canonical directory settings authoritative while removing a stale legacy copy after write", async () => {
+			const info = getDirectoryResourceProfileInfo(projectDir, agentDir);
+			const legacyPath = join(agentDir, "resource-profiles", info.hash, "settings.json");
+			mkdirSync(dirname(legacyPath), { recursive: true });
+			mkdirSync(dirname(info.path), { recursive: true });
+			writeFileSync(legacyPath, JSON.stringify({ activeResourceProfile: "legacy" }));
+			writeFileSync(info.path, JSON.stringify({ activeResourceProfile: "canonical" }));
+
+			const manager = SettingsManager.create(projectDir, agentDir);
+			expect(manager.getActiveResourceProfileNames()).toContain("canonical");
+			expect(manager.getActiveResourceProfileNames()).not.toContain("legacy");
+
+			manager.setActiveProfile("canonical", "directory");
+			await manager.flush();
+
+			expect(existsSync(legacyPath)).toBe(false);
+			expect(existsSync(join(agentDir, "resource-profiles"))).toBe(false);
 		});
 
 		it("combines legacy disabledResources with active resource profile filters", () => {

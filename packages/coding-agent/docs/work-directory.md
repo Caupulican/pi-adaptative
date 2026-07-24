@@ -36,7 +36,7 @@ Use a named run only for transient coordination that must be shared across Pi pr
 
 ## Not transient
 
-Configuration and durable user data stay outside `work/`: `settings.json`, `auth.json`, `models.json`, `sessions/`, `state/`, `skills/`, `extensions/`, `prompts/`, `themes/`, profiles, backups, and managed binaries.
+Configuration and durable user data stay outside `work/`: `settings.json`, `auth.json`, `models.json`, `sessions/`, `state/`, `skills/`, `extensions/`, `prompts/`, `themes/`, profiles, backups, and managed binaries. Directory overlays are contained under `profiles/directories/`; explicit configuration snapshots are contained under `state/backups/config/`.
 
 Do not put Automata memory or its graph in Pi's work directory. Automata remains an external memory system.
 
@@ -51,9 +51,12 @@ straggler:
 ```text
 ~/.pi/agent/
   auth.json settings.json models.json keybindings.json MEMORY.md USER.md SYSTEM.md …   user config/memory (root)
+  okf-memory/                                                                          authored memory (root)
   skills/ extensions/ prompts/ themes/ profiles/                                       user resources (root)
+    profiles/directories/<workspace-hash>/settings.json                                directory overlays
   state/     durable machine state: model adaptation/fitness, tool-performance,        -- stateDir/stateFile
-             learning observations, trust decisions (trust.json), failure corpus, …
+             learning observations, trust decisions, failure corpus, config backups, …
+    state/backups/config/                                                              explicit config snapshots
   cache/     rebuildable, safe to delete: tool-path probes, jiti transform cache, uv    -- cacheDir/cacheFile
   bin/       managed executable helpers (fd, rg)                                       -- binDir (legacy getBinDir accessor)
   work/      transient/scratch (this document)                                         -- re-exported from agent-paths.ts
@@ -63,8 +66,9 @@ straggler:
 `state/` holds durable history — deleting it loses real data, not just cache. `cache/` is always safe
 to delete; the next run re-probes or recomputes it. A startup migration (`migrateAgentDirLayout`,
 `src/migrations.ts`, run before any store/trust read) relocates confirmed root-level stragglers into
-their canonical location — currently just `trust.json` into `state/` — idempotently and without ever
-overwriting an already-migrated target. `resource-profiles/` intentionally stays at the agent-directory
-root rather than moving under `state/`: it's surfaced in two user-visible profile-menu description
-strings, and moving it needs those updated in the same change (tracked open in the bug ledger, not a
-silent gap).
+their canonical locations: `trust.json` into `state/`, `backups/` into `state/backups/config/`, and
+`resource-profiles/` into `profiles/directories/`. Obsolete root `auto-learn/` and `tmp/` trees are
+preserved under `state/legacy-layout/`, where they cannot compete with live config/resources. Whole
+roots move atomically when possible; literal Windows `auth.json:Zone.Identifier` sidecars move there
+too. Partial migrations scan a bounded number of top-level entries and preserve collisions under
+`state/migration-conflicts/` instead of overwriting either copy.

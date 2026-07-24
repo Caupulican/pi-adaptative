@@ -14,7 +14,7 @@ import * as fs from "node:fs";
 import * as path from "node:path";
 import type { Api, Model } from "@caupulican/pi-ai";
 import type { Component, SelectItem, TUI } from "@caupulican/pi-tui";
-import { getAgentDir } from "../../config.ts";
+import { getAgentDir, getProfilesDir } from "../../config.ts";
 import type { AgentSession } from "../../core/agent-session.ts";
 import { resolveCliModel } from "../../core/model-resolver.ts";
 import type { NormalizedProfile } from "../../core/profile-registry.ts";
@@ -50,7 +50,7 @@ function deletionScopeForProfile(profile: NormalizedProfile): WritableProfileSco
 		case "global-settings":
 			return "global";
 		case "profile-file": {
-			const localProfilePath = path.resolve(getAgentDir(), "profiles", `${profile.name}.json`);
+			const localProfilePath = path.resolve(getProfilesDir(), `${profile.name}.json`);
 			return profile.sourcePath && path.resolve(profile.sourcePath) === localProfilePath
 				? "reusable-file"
 				: undefined;
@@ -329,7 +329,7 @@ export class ProfileMenuController {
 			{
 				value: "directory",
 				label: "directory",
-				description: "~/.pi/agent/resource-profiles/<hash>/settings.json",
+				description: "~/.pi/agent/profiles/directories/<hash>/settings.json",
 			},
 			{ value: "project", label: "project", description: ".pi/settings.json" },
 			{ value: "global", label: "global", description: "~/.pi/agent/settings.json" },
@@ -812,7 +812,7 @@ export class ProfileMenuController {
 		}
 
 		const settingsSnapshot = this.settingsManager.createReloadSnapshot();
-		const profilesDir = path.join(getAgentDir(), "profiles");
+		const profilesDir = getProfilesDir();
 		const profileFilesSnapshot = scope === "reusable-file" ? captureProfileFiles(profilesDir) : undefined;
 		let stagedRuntimeApplied = false;
 		try {
@@ -864,7 +864,7 @@ export class ProfileMenuController {
 		const errors: string[] = [];
 		try {
 			if (definition?.scope === "reusable-file") {
-				restoreProfileFiles(path.join(getAgentDir(), "profiles"), definition.profileFilesSnapshot!);
+				restoreProfileFiles(getProfilesDir(), definition.profileFilesSnapshot!);
 			} else if (definition && definition.scope !== "session") {
 				this.settingsManager.restoreProfileDefinitionFromReloadSnapshot(
 					definition.profileName,
@@ -904,7 +904,7 @@ export class ProfileMenuController {
 			{
 				value: "directory",
 				label: "directory",
-				description: "~/.pi/agent/resource-profiles/<hash>/settings.json",
+				description: "~/.pi/agent/profiles/directories/<hash>/settings.json",
 			},
 			{ value: "project", label: "project", description: ".pi/settings.json" },
 			{ value: "global", label: "global", description: "~/.pi/agent/settings.json" },
@@ -1298,8 +1298,7 @@ export class ProfileMenuController {
 			);
 		});
 		const settingsSnapshot = this.settingsManager.createReloadSnapshot();
-		const profileFilesSnapshot =
-			scope === "reusable-file" ? captureProfileFiles(path.join(getAgentDir(), "profiles")) : undefined;
+		const profileFilesSnapshot = scope === "reusable-file" ? captureProfileFiles(getProfilesDir()) : undefined;
 		let switchedToNone = false;
 		try {
 			if (wasActive) {

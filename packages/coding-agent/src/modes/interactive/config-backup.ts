@@ -12,7 +12,8 @@
 import * as fs from "node:fs";
 import * as path from "node:path";
 import type { Component } from "@caupulican/pi-tui";
-import { getAgentDir } from "../../config.ts";
+import { getAgentDir, getProfilesDir } from "../../config.ts";
+import { configBackupsDir } from "../../core/agent-paths.ts";
 import type {
 	GlobalResourceProfileConfiguration,
 	ModelRouterSettings,
@@ -180,7 +181,7 @@ function profileConfigurationFromSettings(settings: Settings): GlobalResourcePro
 
 export async function handleConfigBackupCommand(host: ConfigBackupHost, fileArg?: string): Promise<void> {
 	try {
-		const profilesDir = path.join(getAgentDir(), "profiles");
+		const profilesDir = getProfilesDir();
 		const profiles: Record<string, unknown> = {};
 		if (fs.existsSync(profilesDir)) {
 			const entries = fs.readdirSync(profilesDir);
@@ -212,7 +213,7 @@ export async function handleConfigBackupCommand(host: ConfigBackupHost, fileArg?
 
 		let targetFile = fileArg;
 		if (!targetFile) {
-			const backupsDir = path.join(getAgentDir(), "backups");
+			const backupsDir = configBackupsDir(getAgentDir());
 			fs.mkdirSync(backupsDir, { recursive: true });
 			const timestamp = new Date().toISOString().replace(/[:.]/g, "-");
 			targetFile = path.join(backupsDir, `config-${timestamp}.json`);
@@ -316,7 +317,7 @@ export async function handleConfigRestoreCommand(host: ConfigRestoreHost, fileAr
 			return;
 		}
 
-		const profilesDir = path.join(getAgentDir(), "profiles");
+		const profilesDir = getProfilesDir();
 		const profileFilesSnapshot = captureProfileFiles(profilesDir);
 		const settingsSnapshot = host.settingsManager.createReloadSnapshot();
 		let restoreStarted = false;

@@ -6,7 +6,7 @@ Pi uses JSON settings files with project settings overriding global settings. Pi
 |----------|-------|
 | `~/.pi/agent/settings.json` | Global (all projects) |
 | `.pi/settings.json` | Project (current directory) |
-| `~/.pi/agent/resource-profiles/<hash>/settings.json` | User-level per repo/directory overlay; no repo files written |
+| `~/.pi/agent/profiles/directories/<hash>/settings.json` | User-level per repo/directory overlay; no repo files written |
 | `~/.pi/agent/profiles/*.json` | Reusable named profile definitions |
 
 Edit directly or use `/settings` for common options.
@@ -623,7 +623,7 @@ Reusable profile files live under `~/.pi/agent/profiles/<name>.json`. They use a
 
 `resources` uses the same allow/block filter shape as `resourceProfiles`. Relative paths that start with `./` or `../` resolve from the profile file directory.
 
-Zero-footprint repo/directory overlays live under `~/.pi/agent/resource-profiles/<hash>/settings.json`, where `<hash>` is derived from the nearest VCS root (or current directory when no VCS root exists). These files are user-level settings; Pi does not write `.pi/settings.json` just to remember directory profiles.
+Zero-footprint repo/directory overlays live under `~/.pi/agent/profiles/directories/<hash>/settings.json`, where `<hash>` is derived from the nearest VCS root (or current directory when no VCS root exists). These files are user-level settings; Pi does not write `.pi/settings.json` just to remember directory profiles. Startup migrates the former root-level `resource-profiles/` layout without overwriting canonical data.
 
 ## Example
 

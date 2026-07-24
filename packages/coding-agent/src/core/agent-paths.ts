@@ -9,9 +9,11 @@
  * ```
  * <agentDir>/
  *   auth.json settings.json models.json keybindings.json MEMORY.md USER.md SYSTEM.md …   user CONFIG/MEMORY (root, kept)
+ *   okf-memory/                                                                            authored memory (root, kept)
  *   skills/ extensions/ prompts/ themes/ profiles/                                        user RESOURCES (root, kept)
+ *     profiles/directories/<workspace-hash>/settings.json                                 directory overlays
  *   state/     durable machine state (model adaptation/fitness, tool performance,
- *              learning observations, trust decisions, …)                                 -- stateDir/stateFile
+ *              learning observations, trust decisions, config backups, …)                 -- stateDir/stateFile
  *   cache/     rebuildable, safe to delete (tool-path probes, jiti transform cache, uv)    -- cacheDir/cacheFile
  *   work/      transient/scratch, delegated to work-directory.ts (tenant/run/lease),
  *              including context/sessions/<session-id>/{gc,artifacts}                     -- re-exported below
@@ -50,6 +52,11 @@ export function configFile(agentDir: string, name: string): string {
 	return join(agentDir, name);
 }
 
+/** `<agentDir>/okf-memory` -- user-authored durable OKF memory documents. */
+export function okfMemoryDir(agentDir: string): string {
+	return join(agentDir, "okf-memory");
+}
+
 /** `<agentDir>/state` -- durable machine-managed state. Deleting it loses real history, not just cache. */
 export function stateDir(agentDir: string): string {
 	return join(agentDir, "state");
@@ -58,6 +65,11 @@ export function stateDir(agentDir: string): string {
 /** `<agentDir>/state/<segments…>` */
 export function stateFile(agentDir: string, ...segments: string[]): string {
 	return join(stateDir(agentDir), ...segments);
+}
+
+/** `<agentDir>/state/backups/config` -- explicit user-requested configuration snapshots. */
+export function configBackupsDir(agentDir: string): string {
+	return stateFile(agentDir, "backups", "config");
 }
 
 /** `<agentDir>/cache` -- rebuildable; safe to delete (the next run just re-probes/recomputes). */
@@ -115,6 +127,11 @@ export type AgentResourceKind = "skills" | "prompts" | "themes" | "extensions" |
 /** `<agentDir>/<kind>` -- a user-managed resource directory. Root, kept: moving it breaks users. */
 export function resourceDir(kind: AgentResourceKind, agentDir: string): string {
 	return join(agentDir, kind);
+}
+
+/** `<agentDir>/profiles/directories` -- durable per-directory resource-profile overlays. */
+export function directoryProfilesDir(agentDir: string): string {
+	return join(resourceDir("profiles", agentDir), "directories");
 }
 
 /**

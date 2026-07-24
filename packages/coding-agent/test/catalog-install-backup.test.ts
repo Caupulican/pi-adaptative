@@ -1,7 +1,8 @@
-import { existsSync, mkdirSync, readFileSync, rmSync, writeFileSync } from "fs";
+import { existsSync, mkdirSync, readdirSync, readFileSync, rmSync, writeFileSync } from "fs";
 import { join, resolve } from "path";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { ENV_AGENT_DIR } from "../src/config.ts";
+import { configBackupsDir } from "../src/core/agent-paths.ts";
 import { SettingsManager } from "../src/core/settings-manager.ts";
 import { InteractiveMode } from "../src/modes/interactive/interactive-mode.ts";
 import { initTheme } from "../src/modes/interactive/theme/theme.ts";
@@ -199,6 +200,22 @@ describe("Catalog, Install Resources, Config Backup & Restore", () => {
 	describe("Backup and Restore", () => {
 		const handleConfigBackupCommand = (InteractiveMode.prototype as any).handleConfigBackupCommand;
 		const handleConfigRestoreCommand = (InteractiveMode.prototype as any).handleConfigRestoreCommand;
+
+		it("contains default backup artifacts under durable state", async () => {
+			const manager = SettingsManager.create(projectDir, agentDir);
+			const context = {
+				settingsManager: manager,
+				showError: vi.fn(),
+				showStatus: vi.fn(),
+			};
+
+			await handleConfigBackupCommand.call(context);
+
+			const backupFiles = readdirSync(configBackupsDir(agentDir));
+			expect(backupFiles).toHaveLength(1);
+			expect(backupFiles[0]).toMatch(/^config-.*\.json$/);
+			expect(existsSync(join(agentDir, "backups"))).toBe(false);
+		});
 
 		it("round-trips profiles and resource-relevant settings while keeping roots untrusted", async () => {
 			const manager = SettingsManager.create(projectDir, agentDir);

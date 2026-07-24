@@ -18,8 +18,8 @@
  * stays the single owner of the pass ordering.
  */
 
-import { join } from "node:path";
 import type { AgentMessage, CustomMessage } from "@caupulican/pi-agent-core";
+import { configFile, okfMemoryDir } from "./agent-paths.ts";
 import { collectCurrentWorkMemory } from "./context/current-work-memory.ts";
 import { createFileStoreMemoryProvider } from "./context/file-store-memory-provider.ts";
 import { shouldQueryLongTermMemory } from "./context/long-term-memory-trigger.ts";
@@ -139,7 +139,7 @@ export class MemoryController {
 	 * yet user-configurable -- see the memory-retrieval settings doc comment.
 	 */
 	private _memoryOkfDir(): string {
-		return join(this.deps.getAgentDir(), "okf-memory");
+		return okfMemoryDir(this.deps.getAgentDir());
 	}
 
 	/**
@@ -155,8 +155,8 @@ export class MemoryController {
 
 	private _getFileStoreMemoryProvider(): ContextMemoryProvider {
 		this._fileStoreMemoryProvider ??= createFileStoreMemoryProvider({
-			memoryFilePath: join(this.deps.getAgentDir(), "MEMORY.md"),
-			userFilePath: join(this.deps.getAgentDir(), "USER.md"),
+			memoryFilePath: configFile(this.deps.getAgentDir(), "MEMORY.md"),
+			userFilePath: configFile(this.deps.getAgentDir(), "USER.md"),
 		});
 		return this._fileStoreMemoryProvider;
 	}
