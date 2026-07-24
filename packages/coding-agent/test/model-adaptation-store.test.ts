@@ -1,11 +1,10 @@
 import { existsSync, mkdirSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { pathToFileURL } from "node:url";
-import { Worker } from "node:worker_threads";
 import { afterEach, describe, expect, it } from "vitest";
 import { type ModelAdaptationRule, ModelAdaptationStore } from "../src/core/models/adaptation-store.ts";
 import type { HostFingerprint } from "../src/core/models/host-state-store.ts";
+import { runSignaledWorkerThreads } from "./worker-thread-fixture.ts";
 
 const hostA: HostFingerprint = { id: "host-a", cpu: "cpu-a", cores: 8, totalMemGb: 32 };
 const hostB: HostFingerprint = { id: "host-b", cpu: "cpu-b", cores: 4, totalMemGb: 16 };
@@ -221,19 +220,10 @@ parentPort.postMessage({ done: true });
 
 		const count = 40;
 		const prefixes = ["model-a", "model-b"];
-		const workers = prefixes.map(
-			(prefix) => new Worker(pathToFileURL(workerPath), { workerData: { agentDir, prefix, count } }),
+		await runSignaledWorkerThreads(
+			workerPath,
+			prefixes.map((prefix) => ({ agentDir, prefix, count })),
 		);
-		await Promise.all(
-			workers.map(
-				(worker) =>
-					new Promise<void>((resolve, reject) => {
-						worker.on("message", () => resolve());
-						worker.on("error", reject);
-					}),
-			),
-		);
-		await Promise.all(workers.map((worker) => worker.terminate()));
 
 		const expected = prefixes.flatMap((prefix) => Array.from({ length: count }, (_, i) => `${prefix}-${i}`)).sort();
 		// Default fingerprint (no override) — both worker threads run on this same host, so they land

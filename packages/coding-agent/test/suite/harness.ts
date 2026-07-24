@@ -8,7 +8,13 @@ import { join } from "node:path";
 import type { AgentMessage, AgentTool } from "@caupulican/pi-agent-core";
 import { Agent, convertToLlm } from "@caupulican/pi-agent-core";
 import { SessionManager } from "@caupulican/pi-agent-core/node";
-import type { FauxModelDefinition, FauxProviderRegistration, FauxResponseStep, Model } from "@caupulican/pi-ai";
+import type {
+	FauxModelDefinition,
+	FauxProviderRegistration,
+	FauxResponseStep,
+	Model,
+	RegisterFauxProviderOptions,
+} from "@caupulican/pi-ai";
 import { registerFauxProvider } from "@caupulican/pi-ai";
 import { AgentSession, type AgentSessionEvent } from "../../src/core/agent-session.ts";
 import { AuthStorage } from "../../src/core/auth-storage.ts";
@@ -60,6 +66,7 @@ export function getAssistantTexts(harness: Harness): string[] {
 
 export interface HarnessOptions {
 	models?: FauxModelDefinition[];
+	fauxProvider?: Pick<RegisterFauxProviderOptions, "api" | "provider">;
 	settings?: Partial<Settings>;
 	systemPrompt?: string;
 	tools?: AgentTool[];
@@ -109,6 +116,7 @@ function createTempDir(): string {
 export async function createHarness(options: HarnessOptions = {}): Promise<Harness> {
 	const tempDir = createTempDir();
 	const fauxProvider: FauxProviderRegistration = registerFauxProvider({
+		...options.fauxProvider,
 		models: options.models,
 	});
 	fauxProvider.setResponses([]);
@@ -178,6 +186,7 @@ export async function createHarness(options: HarnessOptions = {}): Promise<Harne
 				name: registeredModel.name,
 				api: registeredModel.api,
 				reasoning: registeredModel.reasoning,
+				textToolCallProtocol: registeredModel.textToolCallProtocol,
 				input: registeredModel.input,
 				cost: registeredModel.cost,
 				contextWindow: registeredModel.contextWindow,

@@ -38,6 +38,7 @@ export interface FauxModelDefinition {
 	id: string;
 	name?: string;
 	reasoning?: boolean;
+	textToolCallProtocol?: Model<string>["textToolCallProtocol"];
 	defaultThinkingLevel?: Model<string>["defaultThinkingLevel"];
 	thinkingLevelMap?: Model<string>["thinkingLevelMap"];
 	input?: ("text" | "image")[];
@@ -424,6 +425,7 @@ export function registerFauxProvider(options: RegisterFauxProviderOptions = {}):
 		provider,
 		baseUrl: DEFAULT_BASE_URL,
 		reasoning: definition.reasoning ?? false,
+		textToolCallProtocol: definition.textToolCallProtocol,
 		defaultThinkingLevel: definition.defaultThinkingLevel,
 		thinkingLevelMap: definition.thinkingLevelMap ? { ...definition.thinkingLevelMap } : undefined,
 		input: definition.input ?? ["text", "image"],

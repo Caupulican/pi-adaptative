@@ -1,6 +1,7 @@
 import { mkdirSync, readdirSync, rmSync, unlinkSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { dirname, join, relative, sep } from "node:path";
+import { fileURLToPath } from "node:url";
 import { afterEach, describe, expect, it } from "vitest";
 import { ORCHESTRATION_SCHEMA_VERSION, type OrchestrationEvent } from "../src/core/orchestration/contracts.ts";
 import {
@@ -9,6 +10,7 @@ import {
 	OrchestrationEventStoreError,
 	OrchestrationSnapshotRequiredError,
 } from "../src/core/orchestration/event-store.ts";
+import { runSignaledWorkerThreads } from "./worker-thread-fixture.ts";
 
 const tempDirs: string[] = [];
 
@@ -27,6 +29,43 @@ function makeStore(
 		createEventId: () => `event-${tick}`,
 		...retention,
 	});
+}
+
+function makeAgentDir(): string {
+	const agentDir = join(tmpdir(), `pi-orchestration-events-${process.pid}-${tempDirs.length}-${Date.now()}`);
+	mkdirSync(agentDir, { recursive: true });
+	tempDirs.push(agentDir);
+	return agentDir;
+}
+
+function writeConcurrentAppendWorker(agentDir: string): string {
+	const workerPath = join(agentDir, "orchestration-append-worker.mjs");
+	const eventStoreModule = fileURLToPath(new URL("../src/core/orchestration/event-store.ts", import.meta.url));
+	writeFileSync(
+		workerPath,
+		`import { parentPort, workerData } from "node:worker_threads";
+import { OrchestrationEventStore } from ${JSON.stringify(eventStoreModule)};
+const { agentDir, sessionId, writerId, iterations } = workerData;
+let eventSequence = 0;
+const store = new OrchestrationEventStore({
+	agentDir,
+	sessionId,
+	createEventId: () => \`event-\${writerId}-\${eventSequence++}\`,
+});
+for (let index = 0; index < iterations; index++) {
+	store.append({
+		type: "objective.created",
+		aggregateId: \`objective-\${writerId}-\${index}\`,
+		actor: "kernel",
+		idempotencyKey: \`writer-\${writerId}-event-\${index}\`,
+		payload: { writerId, index },
+	});
+}
+parentPort.postMessage({ done: true });
+`,
+		"utf-8",
+	);
+	return workerPath;
 }
 
 afterEach(() => {
@@ -83,6 +122,41 @@ describe("OrchestrationEventStore", () => {
 		expect(second).toEqual(first);
 		expect(store.readAll()).toHaveLength(1);
 		expect(notifications).toHaveLength(1);
+	});
+
+	it("preserves every unique append from simultaneous independent writers", async () => {
+		const agentDir = makeAgentDir();
+		const sessionId = "shared-concurrent-session";
+		const workerPath = writeConcurrentAppendWorker(agentDir);
+		const iterationsPerWriter = 40;
+		const writerIds = ["first", "second"];
+
+		await runSignaledWorkerThreads(
+			workerPath,
+			writerIds.map((writerId) => ({ agentDir, sessionId, writerId, iterations: iterationsPerWriter })),
+		);
+
+		const reopened = new OrchestrationEventStore({ agentDir, sessionId });
+		const events = reopened.readAll();
+		expect(events).toHaveLength(iterationsPerWriter * writerIds.length);
+		expect(events.map((event) => event.ordinal)).toEqual(
+			Array.from({ length: events.length }, (_entry, index) => index + 1),
+		);
+		expect(new Set(events.map((event) => event.idempotencyKey)).size).toBe(events.length);
+		expect(new Set(events.map((event) => event.eventId)).size).toBe(events.length);
+	}, 20_000);
+
+	it("isolates independent session event tails beneath one agent directory", () => {
+		const agentDir = makeAgentDir();
+		const first = new OrchestrationEventStore({ agentDir, sessionId: "session-a" });
+		const second = new OrchestrationEventStore({ agentDir, sessionId: "session-b" });
+
+		first.append({ type: "objective.created", aggregateId: "objective-a", actor: "kernel", payload: {} });
+		second.append({ type: "objective.created", aggregateId: "objective-b", actor: "kernel", payload: {} });
+
+		expect(first.rootDir).not.toBe(second.rootDir);
+		expect(first.readAll()).toMatchObject([{ ordinal: 1, aggregateId: "objective-a" }]);
+		expect(second.readAll()).toMatchObject([{ ordinal: 1, aggregateId: "objective-b" }]);
 	});
 
 	it("rejects a stale expected cursor", () => {

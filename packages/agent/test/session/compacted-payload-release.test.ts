@@ -100,6 +100,48 @@ describe("SessionManager compacted payload release", () => {
 		expect(JSON.stringify(liveContext.messages)).not.toContain("large-tail");
 	});
 
+	it("keeps repeated compaction and reopen cycles free of stale large payloads", () => {
+		const dir = mkdtempSync(join(tmpdir(), "pi-compacted-payload-soak-"));
+		tempDirs.push(dir);
+		let session = SessionManager.create(dir, dir, dir);
+		const compactedEntryIds: string[] = [];
+		const payloadMarkers: string[] = [];
+
+		for (let cycle = 0; cycle < 12; cycle++) {
+			session.appendMessage({ role: "user", content: `cycle-${cycle}-start`, timestamp: cycle * 10 + 1 });
+			session.appendMessage(assistantMessage());
+			const marker = `payload-cycle-${cycle}`;
+			payloadMarkers.push(marker);
+			compactedEntryIds.push(
+				session.appendMessage(toolResultMessage(`${marker}-prefix-${"x".repeat(32 * 1024)}-${marker}-tail`)),
+			);
+			const keptId = session.appendMessage({
+				role: "user",
+				content: `cycle-${cycle}-keep`,
+				timestamp: cycle * 10 + 4,
+			});
+			session.appendCompaction(`summary-cycle-${cycle}`, keptId, 10_000 + cycle);
+
+			const sessionFile = session.getSessionFile();
+			expect(sessionFile).toBeTypeOf("string");
+			if (!sessionFile) throw new Error("Expected persisted soak session");
+			session = SessionManager.open(sessionFile, dir, dir);
+
+			const liveContext = session.buildSessionContext();
+			expect(liveContext.messages.map((message) => message.role)).toEqual(["compactionSummary", "user"]);
+			const serializedContext = JSON.stringify(liveContext.messages);
+			expect(serializedContext).toContain(`summary-cycle-${cycle}`);
+			for (const oldMarker of payloadMarkers) expect(serializedContext).not.toContain(oldMarker);
+			for (const entryId of compactedEntryIds) {
+				const entry = session.getEntry(entryId);
+				expect(entry?.type).toBe("message");
+				if (entry?.type === "message") {
+					expect(Object.getOwnPropertyDescriptor(entry.message, "content")?.get).toBeTypeOf("function");
+				}
+			}
+		}
+	});
+
 	it("keeps in-memory sessions self-contained", () => {
 		const session = SessionManager.inMemory();
 		session.appendMessage({ role: "user", content: "start", timestamp: 1 });

@@ -1,5 +1,9 @@
 ## [Unreleased]
 
+### Added
+
+- Added text-tool-protocol metadata to faux model definitions so provider-neutral harness tests exercise native and text-routed tool contracts through the same model surface.
+
 ### Fixed
 
 - Mapped required OpenAI-compatible tool-result names through the same reversible provider alias as declarations and assistant calls, preserving invalid or colliding local tool identities across the full round trip.

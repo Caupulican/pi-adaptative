@@ -179,4 +179,24 @@ describe("lazy extension loading", () => {
 		expect(counters().imports).toEqual([]);
 		session.dispose();
 	});
+
+	it("does not import or construct a profile-withheld extension", async () => {
+		writeLazyPackage(tempDir, "withheld", "withheld_tool", "should never execute");
+		const settingsManager = SettingsManager.create(tempDir, tempDir);
+		settingsManager.addInlineResourceProfileDefinitions({
+			lean: { tools: { allow: ["read"] } },
+		});
+		settingsManager.setRuntimeResourceProfiles(["lean"]);
+		const resourceLoader = new DefaultResourceLoader({
+			cwd: tempDir,
+			agentDir: tempDir,
+			settingsManager,
+		});
+
+		await resourceLoader.reload();
+
+		expect(resourceLoader.getExtensions().extensions).toEqual([]);
+		expect(counters().imports).toEqual([]);
+		expect(counters().factories).toEqual([]);
+	});
 });

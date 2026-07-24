@@ -2,6 +2,7 @@
 
 ### Added
 
+- Added one targeted `accept:core-workflows` gate covering active-worker crash/restart fencing, simultaneous durable writers, repeated compaction/reopen cleanup, provider-neutral routing/reasoning/result/retry contracts, and adversarial UAC omission without running the full test suite.
 - Added owner-authored orchestration profiles with pinned model/thinking/tool/resource/budget policy, architect-owned worker allowlists, durable DAG attempts and fenced typed results, exact-session process-worker resume, and a constrained direct-argv `run_process` launcher for execution profiles.
 - Added one event-driven native interaction layer for human questions, task steps, and worker lanes: batched single/multi-select questions with unrestricted custom text, clipboard image attachments, skip/review flows, grouped width-bounded work status, durable human worker labels/profile ids, quiet idle behavior, progressive evidence detail, and host-owned lifecycle across extension reload and session resume. Worker UAC excludes the question tool before construction, and the legacy question examples now adapt this native contract instead of carrying two UI implementations.
 - Added a bounded session image store for clipboard attachments, configurable through `images.clipboardDirectory`, with stable numbered references that survive `/resume` and deterministic latest-image resolution for prompts such as “look at the image.”

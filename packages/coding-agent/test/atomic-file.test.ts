@@ -2,11 +2,10 @@ import * as fs from "node:fs";
 import { existsSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { pathToFileURL } from "node:url";
-import { Worker } from "node:worker_threads";
 import lockfile from "proper-lockfile";
 import { afterEach, describe, expect, it, vi } from "vitest";
 import { withFileLock, withFileLockSync, writeFileAtomic, writeFileAtomicSync } from "../src/core/util/atomic-file.ts";
+import { runSignaledWorkerThreads } from "./worker-thread-fixture.ts";
 
 // `renameSync` is a named export consumed directly by atomic-file.ts (`import { renameSync } from
 // "node:fs"`), and Node's ESM module namespace is not configurable — `vi.spyOn` can't redefine it
@@ -297,25 +296,10 @@ parentPort.postMessage({ done: true });
 		const filePath = join(dir, "counter.json");
 		const iterationsPerWorker = 150;
 
-		const workers = [1, 2].map(
-			() => new Worker(pathToFileURL(workerPath), { workerData: { filePath, iterations: iterationsPerWorker } }),
+		await runSignaledWorkerThreads(
+			workerPath,
+			[1, 2].map(() => ({ filePath, iterations: iterationsPerWorker })),
 		);
-		try {
-			await Promise.all(
-				workers.map(
-					(worker) =>
-						new Promise<void>((resolve, reject) => {
-							worker.on("message", () => resolve());
-							worker.on("error", reject);
-						}),
-				),
-			);
-		} finally {
-			// Always terminate, including on a worker error: leaving a worker running past this test
-			// keeps its file handles open into `dir`, which afterEach removes next — a live handle
-			// makes that rmSync fail with ENOTEMPTY/EPERM on Windows.
-			await Promise.all(workers.map((worker) => worker.terminate()));
-		}
 
 		// Every increment landed — a torn or lost write would leave the count short of the total.
 		const final = JSON.parse(readFileSync(filePath, "utf-8")) as { count: number };

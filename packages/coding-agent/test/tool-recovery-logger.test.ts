@@ -2,7 +2,6 @@ import { existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, statSync, wri
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { pathToFileURL } from "node:url";
-import { Worker } from "node:worker_threads";
 import type { ToolArgumentValidationTelemetryEvent } from "@caupulican/pi-ai";
 import { afterEach, describe, expect, it } from "vitest";
 import {
@@ -10,6 +9,7 @@ import {
 	writeToolRecoveryLogRecord,
 } from "../src/core/tool-recovery-log-records.ts";
 import { ToolRecoveryLogger } from "../src/core/tool-recovery-logger.ts";
+import { runSignaledWorkerThreads } from "./worker-thread-fixture.ts";
 
 const tempDirs: string[] = [];
 
@@ -277,22 +277,15 @@ parentPort.postMessage({ done: true });
 		);
 
 		const iterationsPerWorker = 40;
-		const workers = [1, 2].map(
-			(workerId) =>
-				new Worker(pathToFileURL(workerPath), {
-					workerData: { eventLogPath, failureCorpusPath, workerId, iterations: iterationsPerWorker },
-				}),
+		await runSignaledWorkerThreads(
+			workerPath,
+			[1, 2].map((workerId) => ({
+				eventLogPath,
+				failureCorpusPath,
+				workerId,
+				iterations: iterationsPerWorker,
+			})),
 		);
-		await Promise.all(
-			workers.map(
-				(worker) =>
-					new Promise<void>((resolve, reject) => {
-						worker.on("message", () => resolve());
-						worker.on("error", reject);
-					}),
-			),
-		);
-		await Promise.all(workers.map((worker) => worker.terminate()));
 
 		const lines = readFileSync(eventLogPath, "utf-8")
 			.trim()

@@ -1,8 +1,6 @@
 import { existsSync, mkdirSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { pathToFileURL } from "node:url";
-import { Worker } from "node:worker_threads";
 import { afterEach, beforeEach, describe, expect, it } from "vitest";
 import {
 	computeCurationProposals,
@@ -10,6 +8,7 @@ import {
 	type PromotedSkillInfo,
 	SkillCurator,
 } from "../src/core/learning/skill-curator.ts";
+import { runSignaledWorkerThreads } from "./worker-thread-fixture.ts";
 
 /**
  * Skill curator (#32): propose-only archival of stale reflection-promoted skills + consolidation of
@@ -160,22 +159,10 @@ parentPort.postMessage({ done: true });
 		);
 
 		const iterationsPerWorker = 40;
-		const workers = [1, 2].map(
-			() =>
-				new Worker(pathToFileURL(workerPath), {
-					workerData: { skillsDir: dir, name: "promoted-one", iterations: iterationsPerWorker },
-				}),
+		await runSignaledWorkerThreads(
+			workerPath,
+			[1, 2].map(() => ({ skillsDir: dir, name: "promoted-one", iterations: iterationsPerWorker })),
 		);
-		await Promise.all(
-			workers.map(
-				(worker) =>
-					new Promise<void>((resolve, reject) => {
-						worker.on("message", () => resolve());
-						worker.on("error", reject);
-					}),
-			),
-		);
-		await Promise.all(workers.map((worker) => worker.terminate()));
 
 		const curator = new SkillCurator(dir);
 		const promoted = curator.loadPromotedSkills().find((s) => s.name === "promoted-one");

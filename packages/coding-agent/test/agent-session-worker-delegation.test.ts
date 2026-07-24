@@ -1081,6 +1081,106 @@ describe("AgentSession worker delegation", () => {
 		}
 	});
 
+	it("recovers an interrupted active worker with a fresh fence and delivers one terminal handoff", async () => {
+		const profile = workerProfile("faux-1");
+		const harness = await createHarness({
+			settings: { workerDelegation: { enabled: true } },
+			workerOrchestrationProfile: profile,
+		});
+		try {
+			const interrupted = new WorkerLifecycle({
+				agentDir: harness.tempDir,
+				sessionId: harness.session.sessionId,
+			});
+			const executionContract = createWorkerExecutionContract({
+				worker: {
+					profile,
+					modelBinding: profile.modelPolicy.candidates[0]!,
+					authority: createTestWorkerExecutionAuthority(profile, harness.tempDir),
+				},
+			});
+			const prepared = interrupted.prepare({
+				instructions: "Complete after the owner process restarts",
+				executionContract,
+				requiredCapabilities: [],
+			});
+			const task = interrupted.getTask(prepared.attempt.taskId);
+			if (!task) throw new Error("Expected interrupted durable task");
+			interrupted.bindGrant(
+				prepared.attempt.attemptId,
+				createTestExecutionGrant({
+					objectiveId: task.task.objectiveId,
+					taskId: prepared.attempt.taskId,
+					attemptId: prepared.attempt.attemptId,
+					role: task.task.role,
+				}),
+			);
+			const staleHandle = interrupted.start(prepared.record.laneId, profile.leaseTtlMs);
+
+			harness.setResponses([
+				fauxAssistantMessage("Owner recovery boundary reached."),
+				fauxAssistantMessage('{"summary":"recovered worker completed","findings":[]}'),
+				fauxAssistantMessage("Recovered handoff acknowledged."),
+			]);
+			expect(harness.session.getLaneRecords()).toEqual(
+				expect.arrayContaining([expect.objectContaining({ laneId: prepared.record.laneId, status: "queued" })]),
+			);
+			const recoveredBeforeRun = interrupted.getTaskRuntimeSnapshot();
+			expect(task.attemptIds).toHaveLength(1);
+			expect(recoveredBeforeRun.tasks[prepared.record.laneId]?.attemptIds).toHaveLength(2);
+			expect(recoveredBeforeRun.attempts[prepared.attempt.attemptId]?.status).toBe("expired");
+			expect(
+				recoveredBeforeRun.tasks[prepared.record.laneId]?.attemptIds
+					.map((attemptId) => recoveredBeforeRun.attempts[attemptId])
+					.at(-1)?.dispatch.executionContract,
+			).toEqual(executionContract);
+
+			await harness.session.prompt("Resume interrupted durable work", { autoContinueGoal: false });
+			await vi.waitFor(() => {
+				expect(harness.session.getWorkerClaimSnapshots()).toHaveLength(1);
+				expect(
+					harness.session.getLaneRecords().find((record) => record.laneId === prepared.record.laneId),
+				).toMatchObject({ status: "succeeded" });
+			});
+
+			expect(() =>
+				interrupted.finish(
+					createWorkerResultContract({
+						handle: staleHandle,
+						claim: {
+							requestId: prepared.record.laneId,
+							status: "completed",
+							summary: "stale worker attempted completion",
+							changedFiles: [],
+						},
+						accepted: true,
+						cwd: harness.tempDir,
+						wallClockMs: 10,
+						toolCalls: 0,
+					}),
+				),
+			).toThrow();
+
+			const eventStore = new OrchestrationEventStore({
+				agentDir: harness.tempDir,
+				sessionId: harness.session.sessionId,
+			});
+			await vi.waitFor(() => {
+				expect(eventStore.readAll().filter((event) => event.type === "notification.delivered")).toHaveLength(1);
+			});
+			expect(eventStore.readAll().filter((event) => event.type === "notification.enqueued")).toHaveLength(1);
+			expect(
+				harness.sessionManager
+					.getEntries()
+					.filter(
+						(entry) => entry.type === "custom_message" && entry.customType === "background-worker-completion",
+					),
+			).toHaveLength(1);
+		} finally {
+			harness.cleanup();
+		}
+	});
+
 	it("keeps the implementation blocked when the owner-pinned verifier rejects it", async () => {
 		const { implementationProfile, verifierProfile } = verifiedWorkerProfiles();
 		const harness = await createHarness({

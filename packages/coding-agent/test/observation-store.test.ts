@@ -1,10 +1,9 @@
 import { existsSync, mkdirSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { pathToFileURL } from "node:url";
-import { Worker } from "node:worker_threads";
 import { afterEach, beforeEach, describe, expect, it } from "vitest";
 import { ObservationStore, observationKey } from "../src/core/learning/observation-store.ts";
+import { runSignaledWorkerThreads } from "./worker-thread-fixture.ts";
 
 /**
  * G6 evidence-strength store: bounded, durable observation counts that let the learning gate
@@ -140,20 +139,10 @@ parentPort.postMessage({ done: true });
 
 		const key = observationKey("memory", "hammered lesson");
 		const iterationsPerWorker = 40; // total stays under MAX_COUNT (100) so the cap never masks a loss
-		const workers = [1, 2].map(
-			() =>
-				new Worker(pathToFileURL(workerPath), { workerData: { agentDir, key, iterations: iterationsPerWorker } }),
+		await runSignaledWorkerThreads(
+			workerPath,
+			[1, 2].map(() => ({ agentDir, key, iterations: iterationsPerWorker })),
 		);
-		await Promise.all(
-			workers.map(
-				(worker) =>
-					new Promise<void>((resolve, reject) => {
-						worker.on("message", () => resolve());
-						worker.on("error", reject);
-					}),
-			),
-		);
-		await Promise.all(workers.map((worker) => worker.terminate()));
 
 		expect(ObservationStore.forAgentDir(agentDir).get(key)).toBe(iterationsPerWorker * 2);
 	}, 20_000);
