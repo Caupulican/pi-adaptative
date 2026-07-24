@@ -4,13 +4,21 @@ import { InteractiveMode } from "../src/modes/interactive/interactive-mode.ts";
 type RebindHarness = {
 	unsubscribe?: () => void;
 	unsubscribeExtensionsChanged?: () => void;
-	runtimeHost: { session: { onExtensionsChanged(callback: () => void): () => void } };
+	runtimeHost: {
+		session: {
+			onExtensionsChanged(callback: () => void): () => void;
+			resumePendingHumanInput(): Promise<void>;
+			settingsManager: { getClipboardImageDirectory(): undefined };
+			sessionManager: { isPersisted(): false };
+		};
+	};
 	applyRuntimeSettings(): void;
 	bindCurrentSessionExtensions(): Promise<void>;
 	subscribeToAgent(): void;
 	updateAvailableProviderCount(): Promise<void>;
 	updateEditorBorderColor(): void;
 	updateTerminalTitle(): void;
+	refreshOrchestrationWidget(): void;
 	refreshUIAfterExtensionsChanged(): Promise<void>;
 	rebindCurrentSession(): Promise<void>;
 };
@@ -26,6 +34,9 @@ function createModeHarness(): { mode: RebindHarness; fireExtensionsChanged: () =
 				listener = callback;
 				return vi.fn();
 			},
+			resumePendingHumanInput: vi.fn(async () => {}),
+			settingsManager: { getClipboardImageDirectory: () => undefined },
+			sessionManager: { isPersisted: () => false },
 		},
 	};
 	mode.applyRuntimeSettings = vi.fn();
@@ -34,6 +45,7 @@ function createModeHarness(): { mode: RebindHarness; fireExtensionsChanged: () =
 	mode.updateAvailableProviderCount = vi.fn(async () => {});
 	mode.updateEditorBorderColor = vi.fn();
 	mode.updateTerminalTitle = vi.fn();
+	mode.refreshOrchestrationWidget = vi.fn();
 	mode.refreshUIAfterExtensionsChanged = vi.fn(async () => {});
 	return {
 		mode,

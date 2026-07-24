@@ -29,6 +29,7 @@ describe("model switch capability ordering", () => {
 				"python",
 				"edit",
 				"write",
+				"ask_question",
 				"run_toolkit_script",
 				"artifact_retrieve",
 			]);
