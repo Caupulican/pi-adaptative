@@ -23,13 +23,14 @@ import type {
 	WorkerDelegationRunOutcome,
 } from "./agent-session.ts";
 import { type LaneRecord, LaneTracker } from "./autonomy/lane-tracker.ts";
-import { appendLaneRecordSnapshot } from "./autonomy/session-lane-record.ts";
+import { appendLaneRecordSnapshot, getLatestLaneRecordSnapshots } from "./autonomy/session-lane-record.ts";
 import { ManagedLaneController } from "./delegation/managed-lane-controller.ts";
 import {
 	WorkerDelegationController,
 	type WorkerDelegationControllerDeps,
 } from "./delegation/worker-delegation-controller.ts";
 import type { WorkerDelegationRequest } from "./delegation/worker-delegation-request.ts";
+import { WorkerLifecycle } from "./delegation/worker-lifecycle.ts";
 import { WorkerNotificationCoordinator } from "./delegation/worker-notification-coordinator.ts";
 import type { ManagedLaneEvent } from "./extensions/types.ts";
 import { GoalAutoContinueController } from "./goals/goal-auto-continue-controller.ts";
@@ -42,6 +43,7 @@ import { LaneModelResolver, type LaneModelResolverDeps } from "./research/lane-m
 import type { ModelFitnessReport } from "./research/model-fitness.ts";
 import { ModelFitnessController, type ModelFitnessControllerDeps } from "./research/model-fitness-controller.ts";
 import { ResearchLaneController, type ResearchLaneControllerDeps } from "./research/research-lane-controller.ts";
+import { getActiveSessionBranchEntries } from "./session-snapshot.ts";
 
 export { isLocalExecutionModel } from "./delegation/worker-delegation-controller.ts";
 export { clampLaneMaxUsd } from "./research/lane-model-resolver.ts";
@@ -75,6 +77,8 @@ export class BackgroundLaneController {
 	private _managedLanes: ManagedLaneController | undefined;
 	/** Lazily materialized so a UAC surface without `delegate` allocates no worker runtime state. */
 	private _workers: WorkerDelegationController | undefined;
+	/** One durable lifecycle shared by every worker execution adapter. */
+	private _workerLifecycle: WorkerLifecycle | undefined;
 	/** Shared terminal outbox for managed and in-process workers; lazy under UAC omission. */
 	private _workerNotifications: WorkerNotificationCoordinator | undefined;
 	private readonly deps: BackgroundLaneControllerDeps;
@@ -89,8 +93,8 @@ export class BackgroundLaneController {
 		}
 	}
 
-	private _recordWorkerTerminal(record: LaneRecord): void {
-		this._getWorkerNotificationCoordinator().recordTerminal(record);
+	private _recordWorkerTerminal(record: LaneRecord, durableNotificationId: string): void {
+		this._getWorkerNotificationCoordinator().recordTerminal(record, durableNotificationId);
 	}
 
 	constructor(deps: BackgroundLaneControllerDeps) {
@@ -111,36 +115,66 @@ export class BackgroundLaneController {
 	}
 
 	private _getWorkerController(): WorkerDelegationController {
-		this._workers ??= new WorkerDelegationController(this.deps, this._getWorkerNotificationCoordinator());
+		this._workers ??= new WorkerDelegationController(
+			this.deps,
+			this._getWorkerNotificationCoordinator(),
+			this._getWorkerLifecycle(),
+		);
 		return this._workers;
+	}
+
+	private _getWorkerLifecycle(): WorkerLifecycle {
+		if (this._workerLifecycle) return this._workerLifecycle;
+		const lifecycle = new WorkerLifecycle({
+			agentDir: this.deps.getAgentDir(),
+			sessionId: this.deps.getSessionId(),
+		});
+		this._workerLifecycle = lifecycle;
+		for (const notification of lifecycle.getPendingTerminalNotifications()) {
+			this._getWorkerNotificationCoordinator().recordTerminal(notification.record, notification.notificationId);
+		}
+		return lifecycle;
 	}
 
 	private _getWorkerNotificationCoordinator(): WorkerNotificationCoordinator {
 		this._workerNotifications ??= new WorkerNotificationCoordinator({
-			getWorkerRecords: () => this._workers?.getLoadedRecords() ?? [],
+			getWorkerRecords: () => this._workerLifecycle?.getAllRecords() ?? [],
 			emitStatus: (status) => {
-				this.deps.emit({
-					type: "delegate_workers",
-					...status,
-					terminalSinceFlush: [...status.terminalSinceFlush],
-				});
+				try {
+					this.deps.emit({
+						type: "delegate_workers",
+						...status,
+						terminalSinceFlush: [...status.terminalSinceFlush],
+					});
+				} catch {
+					// A partial integration must not crash the event-driven terminal outbox.
+				}
 			},
 			notify: (records) => this.deps.notifyWorkerTerminalHandoff(records),
 			warn: (message) => this._safeWarn(message),
-			markDurableDelivered: (notificationIds) => this._workers?.markNotificationsDelivered(notificationIds),
+			markDurableDelivered: (notificationIds) => this._workerLifecycle?.markNotificationsDelivered(notificationIds),
 		});
 		return this._workerNotifications;
 	}
 
 	private _getManagedLaneController(): ManagedLaneController {
-		this._managedLanes ??= new ManagedLaneController(this.deps, this._laneTracker, (record) =>
-			this._recordWorkerTerminal(record),
+		this._managedLanes ??= new ManagedLaneController(
+			this.deps,
+			this._getWorkerLifecycle(),
+			(record, notificationId) => this._recordWorkerTerminal(record, notificationId),
 		);
 		return this._managedLanes;
 	}
 
 	private _hydrateManagedLanes(): void {
-		this._getManagedLaneController().ensureHydrated();
+		if (this._managedLanes) {
+			this._managedLanes.ensureHydrated();
+			return;
+		}
+		const hasPersistedActiveManagedLane = getLatestLaneRecordSnapshots(
+			getActiveSessionBranchEntries(this.deps.getSessionManager()),
+		).some((record) => record.type === "tmux-worker" && (record.status === "queued" || record.status === "running"));
+		if (hasPersistedActiveManagedLane) this._getManagedLaneController().ensureHydrated();
 	}
 
 	/** Live lane records tracked by this process (running and terminal). */
@@ -149,12 +183,16 @@ export class BackgroundLaneController {
 		const workerRecords =
 			this._workers?.getRecords() ??
 			(this.deps.isDelegateToolActive?.() ? this._getWorkerController().getRecords() : []);
-		return [...this._laneTracker.getRecords(), ...workerRecords];
+		return [
+			...this._laneTracker.getRecords(),
+			...workerRecords,
+			...(this._workerLifecycle?.getManagedRecords() ?? []),
+		];
 	}
 
 	/** Does not materialize the worker controller when UAC omitted delegation. */
 	getTaskRuntimeSnapshot(): TaskRuntimeProjection | undefined {
-		return this._workers?.getTaskRuntimeSnapshot();
+		return this._workerLifecycle?.getTaskRuntimeSnapshot();
 	}
 
 	/** Reconcile only when delegation has already been materialized; UAC omission stays zero-load. */

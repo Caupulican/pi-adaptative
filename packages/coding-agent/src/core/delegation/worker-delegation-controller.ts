@@ -32,7 +32,7 @@ import {
 	compileWorkerExecutionGrant,
 	type WorkerExecutionPlan,
 } from "./worker-execution-policy.ts";
-import { WorkerLifecycle } from "./worker-lifecycle.ts";
+import type { WorkerLifecycle } from "./worker-lifecycle.ts";
 import type { WorkerNotificationCoordinator } from "./worker-notification-coordinator.ts";
 import { type ResolvedWorkerProfile, WorkerProfileResolver } from "./worker-profile-resolver.ts";
 import { runWorker } from "./worker-runner.ts";
@@ -69,6 +69,7 @@ export interface WorkerDelegationControllerDeps {
 	emitAutonomyTelemetry(event: AutonomyTelemetryEvent): void;
 	getGoalStateSnapshot(): GoalState | undefined;
 	saveWorkerClaimSnapshot(claim: WorkerClaim, request?: WorkerRequest): string;
+	queueWorkerHumanInput(request: { workerRequestId: string; message: string; blockers: readonly string[] }): void;
 	readMemoryForLane(query: string): Promise<string>;
 	addSpawnedUsage(
 		usage: Usage,
@@ -97,7 +98,7 @@ interface PreparedWorkerAttempt {
 export class WorkerDelegationController {
 	private readonly deps: WorkerDelegationControllerDeps;
 	private readonly workerAbort = new AbortController();
-	private lifecycle: WorkerLifecycle | undefined;
+	private readonly lifecycle: WorkerLifecycle;
 	private profileResolver: WorkerProfileResolver | undefined;
 	private queueRecovered = false;
 	private readonly notifications: WorkerNotificationCoordinator;
@@ -116,9 +117,14 @@ export class WorkerDelegationController {
 		}
 	>();
 
-	constructor(deps: WorkerDelegationControllerDeps, notifications: WorkerNotificationCoordinator) {
+	constructor(
+		deps: WorkerDelegationControllerDeps,
+		notifications: WorkerNotificationCoordinator,
+		lifecycle: WorkerLifecycle,
+	) {
 		this.deps = deps;
 		this.notifications = notifications;
+		this.lifecycle = lifecycle;
 		this.scheduler = new WorkerDispatchScheduler({
 			agentDir: this.deps.getAgentDir?.() ?? "",
 			isDisposed: () => this.deps.isDisposed(),
@@ -149,7 +155,7 @@ export class WorkerDelegationController {
 
 	recordTerminal(record: LaneRecord): void {
 		if (record.status === "queued" || record.status === "running") return;
-		if (record.type === "worker" && this.lifecycle) {
+		if (record.type === "worker") {
 			const notification = this.lifecycle.getTerminalNotification(record.laneId);
 			if (notification?.status === "delivered") return;
 			if (notification) {
@@ -161,27 +167,27 @@ export class WorkerDelegationController {
 	}
 
 	getRecords(): LaneRecord[] {
-		if (!this.lifecycle && this.deps.isDelegateToolActive?.()) this.recoverDurableQueue();
-		return this.lifecycle?.getRecords() ?? [];
+		if (this.deps.isDelegateToolActive?.()) this.recoverDurableQueue();
+		return this.lifecycle.getRecords();
 	}
 
 	/** Process-local worker records for the shared terminal notifier; never triggers durable recovery. */
 	getLoadedRecords(): LaneRecord[] {
-		return this.lifecycle?.getRecords() ?? [];
+		return this.lifecycle.getRecords();
 	}
 
 	markNotificationsDelivered(notificationIds: readonly string[]): void {
-		this.lifecycle?.markNotificationsDelivered(notificationIds);
+		this.lifecycle.markNotificationsDelivered(notificationIds);
 	}
 
 	abort(): void {
 		this.workerAbort.abort();
-		for (const record of this.lifecycle?.getRecords() ?? []) {
+		for (const record of this.lifecycle.getRecords()) {
 			if (record.status !== "queued" && record.status !== "running") continue;
 			const ledger = this.inFlightLedgers.get(record.laneId);
 			if (!ledger) {
 				try {
-					const canceled = this.lifecycle?.cancel(record.laneId, "session_disposed");
+					const canceled = this.lifecycle.cancel(record.laneId, "session_disposed");
 					if (canceled) {
 						this.publishTerminalRecord(canceled);
 					}
@@ -243,15 +249,7 @@ export class WorkerDelegationController {
 	}
 
 	private getWorkerLifecycle(): WorkerLifecycle {
-		if (this.lifecycle) return this.lifecycle;
-		const lifecycle = new WorkerLifecycle({
-			agentDir: this.deps.getAgentDir(),
-			sessionId: this.deps.getSessionId(),
-		});
-		this.lifecycle = lifecycle;
-		const goal = this.deps.getGoalStateSnapshot();
-		if (goal) this.publishGoalTerminalRecords(lifecycle.synchronizeGoalState(goal));
-		return lifecycle;
+		return this.lifecycle;
 	}
 
 	private getWorkerProfileResolver(): WorkerProfileResolver {
@@ -270,12 +268,11 @@ export class WorkerDelegationController {
 
 	/** Read-only durable worker projection. Undefined means the delegate capability never loaded. */
 	getTaskRuntimeSnapshot(): TaskRuntimeProjection | undefined {
-		return this.lifecycle?.getTaskRuntimeSnapshot();
+		return this.lifecycle.getTaskRuntimeSnapshot();
 	}
 
 	/** Reconcile the session goal into an already-loaded worker runtime without defeating lazy UAC. */
 	synchronizeGoalState(goal: GoalState): void {
-		if (!this.lifecycle) return;
 		this.publishGoalTerminalRecords(this.lifecycle.synchronizeGoalState(goal));
 	}
 
@@ -575,7 +572,7 @@ export class WorkerDelegationController {
 			lifecycle.cancel(prepared.record.laneId, compiled.reasonCodes.join(","));
 			return { started: false, skipReason: `execution_policy_denied:${compiled.reasonCodes.join(",")}` };
 		}
-		lifecycle.bindGrant(prepared.attempt.attemptId, compiled.grant.grantId);
+		lifecycle.bindGrant(prepared.attempt.attemptId, compiled.grant);
 		const durableHandle = lifecycle.start(prepared.record.laneId, orchestrationProfile.leaseTtlMs);
 		const startedRecord = lifecycle.getRecord(prepared.record.laneId);
 		if (!startedRecord) return { started: false, skipReason: "orchestration_projection_missing" };
@@ -874,6 +871,13 @@ export class WorkerDelegationController {
 						`Independent verifier for ${startedRecord.laneId} did not start: ${verifierStart.skipReason}`,
 					);
 				}
+			}
+			if (outcome.acceptance.outcome === "ask-user" && terminalRecords.length > 0) {
+				this.deps.queueWorkerHumanInput({
+					workerRequestId: startedRecord.laneId,
+					message: outcome.acceptance.message ?? "Worker output requires owner review.",
+					blockers: outcome.claim.blockers ?? [],
+				});
 			}
 			for (const terminalRecord of terminalRecords) {
 				this.publishTerminalRecord(terminalRecord);

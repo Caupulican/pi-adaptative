@@ -87,7 +87,17 @@ Modifier combinations: `ctrl+shift+x`, `alt+ctrl+x`, `ctrl+shift+alt+x`, `ctrl+1
 | `app.exit` | `ctrl+d` | Exit (when editor empty) |
 | `app.suspend` | `ctrl+z` (none on Windows) | Suspend to background |
 | `app.editor.external` | `ctrl+g` | Open in external editor (`$VISUAL` or `$EDITOR`) |
-| `app.clipboard.pasteImage` | `alt+v` | Paste image from clipboard |
+| `app.clipboard.pasteImage` | `ctrl+v` (Unix/macOS), `alt+v` (Windows), both (WSL) | Paste image or clipboard text |
+
+### Native Questions
+
+These actions apply while the built-in `ask_question` interaction has focus. The dialog also uses the configurable `tui.select.*` and `tui.input.*` actions above, plus `app.clipboard.pasteImage` while entering a custom **Other** answer.
+
+| Keybinding id | Default | Description |
+|--------|---------|-------------|
+| `app.question.next` | `tab`, `right` | Move to the next question or review |
+| `app.question.previous` | `shift+tab`, `left` | Move to the previous question |
+| `app.question.toggle` | `space` | Toggle a multi-select answer |
 
 ### Sessions
 

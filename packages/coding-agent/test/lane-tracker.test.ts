@@ -177,6 +177,8 @@ describe("isLaneRecord", () => {
 		costUsd: 0.05,
 		goalId: "g1",
 		evidenceEntryId: "entry-1",
+		label: "Inspect the worker lifecycle",
+		profileId: "fast-worker",
 	};
 
 	it("accepts a fully populated record and a minimal one", () => {
@@ -191,6 +193,8 @@ describe("isLaneRecord", () => {
 		expect(isLaneRecord({ ...valid, type: "pipeline" })).toBe(false);
 		expect(isLaneRecord({ ...valid, status: "done" })).toBe(false);
 		expect(isLaneRecord({ ...valid, costUsd: "free" })).toBe(false);
+		expect(isLaneRecord({ ...valid, label: 7 })).toBe(false);
+		expect(isLaneRecord({ ...valid, profileId: false })).toBe(false);
 		const { laneId: _laneId, ...missingLaneId } = valid;
 		expect(isLaneRecord(missingLaneId)).toBe(false);
 	});

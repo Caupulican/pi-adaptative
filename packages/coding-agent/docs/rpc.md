@@ -1063,7 +1063,7 @@ Extensions can request user interaction via `ctx.ui.select()`, `ctx.ui.confirm()
 
 There are two categories of extension UI methods:
 
-- **Dialog methods** (`select`, `confirm`, `input`, `editor`): emit an `extension_ui_request` on stdout and block until the client sends back an `extension_ui_response` on stdin with the matching `id`.
+- **Dialog methods** (`questions`, `select`, `confirm`, `input`, `editor`): emit an `extension_ui_request` on stdout and block until the client sends back an `extension_ui_response` on stdin with the matching `id`.
 - **Fire-and-forget methods** (`notify`, `setStatus`, `setWidget`, `setTitle`, `set_editor_text`): emit an `extension_ui_request` on stdout but do not expect a response. The client can display the information or ignore it.
 
 If a dialog method includes a `timeout` field, the agent-side will auto-resolve with a default value when the timeout expires. The client does not need to track timeouts.
@@ -1083,6 +1083,33 @@ Note: `ctx.hasUI` is `true` in RPC mode because the dialog and fire-and-forget m
 ### Extension UI Requests (stdout)
 
 All requests have `type: "extension_ui_request"`, a unique `id`, and a `method` field.
+
+#### questions
+
+Present the native structured owner-input contract. `request.questions` contains one to four questions, each with a stable `id`, heading, prompt, two to four options, and optional `multiSelect`. `acceptsImages` reports whether the routed model can receive image answer blocks.
+
+```json
+{
+  "type": "extension_ui_request",
+  "id": "uuid-q",
+  "method": "questions",
+  "request": {
+    "requestId": "human-input:call-1",
+    "acceptsImages": true,
+    "questions": [{
+      "id": "scope",
+      "header": "Scope",
+      "question": "How broad should this be?",
+      "options": [
+        {"label": "Focused", "description": "Change only the failing workflow."},
+        {"label": "Complete", "description": "Cover the full related surface."}
+      ]
+    }]
+  }
+}
+```
+
+Expected response: `extension_ui_response` with an `answers` array and optional `images` array, or `cancelled: true`. Free-form answer text is not length-clamped by the protocol; Pi externalizes large values before they enter model context. Clients must not send `customArtifact`: artifact references are harness-owned. Submitted images are validated and retained in the bounded session image store before the answer checkpoint so `/resume` can restore them.
 
 #### select
 
@@ -1227,7 +1254,23 @@ Set the text in the input editor. Fire-and-forget.
 
 ### Extension UI Responses (stdin)
 
-Responses are sent for dialog methods only (`select`, `confirm`, `input`, `editor`). The `id` must match the request.
+Responses are sent for dialog methods only (`questions`, `select`, `confirm`, `input`, `editor`). The `id` must match the request. Malformed, ambiguous, unknown, or expired responses fail closed with an `extension_ui_response` error instead of settling another request.
+
+#### Structured question response
+
+```json
+{
+  "type": "extension_ui_response",
+  "id": "uuid-q",
+  "answers": [{
+    "id": "scope",
+    "header": "Scope",
+    "question": "How broad should this be?",
+    "selected": ["Focused"],
+    "skipped": false
+  }]
+}
+```
 
 #### Value response (select, input, editor)
 

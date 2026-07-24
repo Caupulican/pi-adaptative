@@ -1,4 +1,4 @@
-import { mkdirSync, rmSync, unlinkSync, writeFileSync } from "node:fs";
+import { mkdirSync, readdirSync, rmSync, unlinkSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { dirname, join, relative, sep } from "node:path";
 import { afterEach, describe, expect, it } from "vitest";
@@ -7,11 +7,15 @@ import {
 	OrchestrationConcurrencyError,
 	OrchestrationEventStore,
 	OrchestrationEventStoreError,
+	OrchestrationSnapshotRequiredError,
 } from "../src/core/orchestration/event-store.ts";
 
 const tempDirs: string[] = [];
 
-function makeStore(sessionId = "session-1"): OrchestrationEventStore {
+function makeStore(
+	sessionId = "session-1",
+	retention: { maxTailEvents?: number; maxTailBytes?: number; maxIdempotencyEvents?: number } = {},
+): OrchestrationEventStore {
 	const agentDir = join(tmpdir(), `pi-orchestration-events-${process.pid}-${tempDirs.length}-${Date.now()}`);
 	mkdirSync(agentDir, { recursive: true });
 	tempDirs.push(agentDir);
@@ -21,6 +25,7 @@ function makeStore(sessionId = "session-1"): OrchestrationEventStore {
 		sessionId,
 		now: () => `2026-07-23T00:00:0${tick++}.000Z`,
 		createEventId: () => `event-${tick}`,
+		...retention,
 	});
 }
 
@@ -129,6 +134,59 @@ describe("OrchestrationEventStore", () => {
 
 		expect(replayed).toEqual(first);
 		expect(store.readAll()).toHaveLength(1);
+	});
+
+	it("compacts a bounded event tail into a verified projection without resetting ordinals", () => {
+		const store = makeStore("bounded", { maxTailEvents: 2, maxTailBytes: 1_000_000 });
+		const firstInput = {
+			type: "objective.created" as const,
+			aggregateId: "objective-1",
+			actor: "kernel" as const,
+			idempotencyKey: "objective-created:objective-1",
+			payload: { objectiveId: "objective-1" },
+		};
+		const first = store.append(firstInput);
+		store.append({
+			type: "objective.paused",
+			aggregateId: "objective-1",
+			actor: "human",
+			idempotencyKey: "objective-paused:objective-1",
+			payload: {},
+		});
+		const projection = { lastOrdinal: 2, state: "paused" };
+
+		expect(store.compactIfNeeded(2, () => projection)).toBe(true);
+		expect(store.readProjectionSnapshot()).toEqual({ throughOrdinal: 2, projection });
+		expect(readdirSync(store.snapshotsDir)).toEqual(["0000000000000002.json"]);
+		expect(readdirSync(store.eventsDir)).toEqual([]);
+		expect(() => store.readAfter(0)).toThrow(OrchestrationSnapshotRequiredError);
+		expect(store.append(firstInput)).toEqual(first);
+
+		const next = store.append({
+			type: "objective.resumed",
+			aggregateId: "objective-1",
+			actor: "human",
+			payload: {},
+		});
+		expect(next.ordinal).toBe(3);
+		expect(store.readAfter(2)).toEqual([next]);
+	});
+
+	it("keeps the published snapshot authoritative when an unpublished newer snapshot file is left behind", () => {
+		const store = makeStore("snapshot-publication", { maxTailEvents: 1 });
+		store.append({
+			type: "objective.created",
+			aggregateId: "objective-1",
+			actor: "kernel",
+			payload: {},
+		});
+		expect(store.compactIfNeeded(1, () => ({ lastOrdinal: 1, state: "created" }))).toBe(true);
+		writeFileSync(join(store.snapshotsDir, "0000000000000002.json"), "interrupted publication\n", "utf-8");
+
+		expect(store.readProjectionSnapshot()).toEqual({
+			throughOrdinal: 1,
+			projection: { lastOrdinal: 1, state: "created" },
+		});
 	});
 
 	it("fails loudly on a corrupt committed record", () => {

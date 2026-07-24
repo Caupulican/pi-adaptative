@@ -19,7 +19,7 @@ import type { LoadExtensionsResult, ResourceLoader } from "../src/index.ts";
  *
  * Constructs RuntimeBuilder DIRECTLY (same rationale as
  * runtime-builder-reload-reconcile.test.ts: this repo bans cast-wired private access) and drives
- * `buildRuntime()` with a `getBaseToolsOverride` supplying four minimal fake tools -- this skips
+ * `buildRuntime()` with a `getBaseToolsOverride` supplying five minimal fake tools -- this skips
  * the entire real built-in tool-factory block (goal/task-steps/delegate/model-fitness/scout/
  * toolkit-script/worktree-sync), which is irrelevant to the ceiling itself: the ceiling gates on
  * NAME alone, regardless of which factory produced the definition.
@@ -43,6 +43,7 @@ function makeDeps(
 	cwd: string,
 	getBaseToolsOverride: () => Record<string, AgentTool> = () => ({
 		goal: fakeTool("goal"),
+		ask_question: fakeTool("ask_question"),
 		python: fakeTool("python"),
 		read: fakeTool("read"),
 		edit: fakeTool("edit"),
@@ -107,8 +108,8 @@ function makeDeps(
 		getCustomTools: () => [],
 		// Truthy override skips the entire built-in diagnostics/goal/task-steps/delegate/model-
 		// fitness/scout/toolkit-script/worktree-sync tool creation block -- irrelevant to a ceiling
-		// that gates purely on tool NAME. Four fake tools stand in for two forbidden (goal, python)
-		// and two never-forbidden (read, edit) names.
+		// that gates purely on tool NAME. Five fake tools stand in for three forbidden
+		// (goal, ask_question, python) and two never-forbidden (read, edit) names.
 		getBaseToolsOverride,
 		getRequestedActiveToolNames: () => requestedActiveToolNames,
 		setRequestedActiveToolNames: (names) => {
@@ -116,9 +117,9 @@ function makeDeps(
 		},
 		getToolProfileFilter: () => undefined,
 		setToolProfileFilter: () => {},
-		// The allow-list EXPLICITLY grants every one of the four tools, including the two
+		// The allow-list EXPLICITLY grants every one of the five tools, including the three
 		// worker-forbidden ones -- the point of this test is that the ceiling wins anyway.
-		getAllowedToolNames: () => new Set(["goal", "python", "read", "edit"]),
+		getAllowedToolNames: () => new Set(["goal", "ask_question", "python", "read", "edit"]),
 		getExcludedToolNames: () => undefined,
 		deriveToolProfileFilter: () => unreachable("deriveToolProfileFilter"),
 		isToolOrCommandAllowedByProfile: () => false,
@@ -139,6 +140,7 @@ function makeDeps(
 		reapplyActiveProfileModelSettings: async () => unreachable("reapplyActiveProfileModelSettings"),
 		notifyExtensionsChanged: () => unreachable("notifyExtensionsChanged"),
 		getToolArtifactStore: () => unreachable("getToolArtifactStore"),
+		getSessionImageStore: () => undefined,
 		getMemoryManager: () => ({ getToolDefinitions: () => [] }) as unknown as MemoryManager,
 		getMemoryAuditDiagnostics: () => unreachable("getMemoryAuditDiagnostics"),
 		clearPendingMemoryProviders: () => unreachable("clearPendingMemoryProviders"),
@@ -195,17 +197,20 @@ describe("RuntimeBuilder worker UAC ceiling (D2)", () => {
 			const runtimeBuilder = new RuntimeBuilder(
 				makeDeps("/tmp/pi-worker-ceiling-test", () => ({
 					goal: observeReads(fakeTool("goal")),
+					ask_question: observeReads(fakeTool("ask_question")),
 					python: observeReads(fakeTool("python")),
 					read: fakeTool("read"),
 					edit: fakeTool("edit"),
 				})),
 			);
-			runtimeBuilder.buildRuntime({ activeToolNames: ["goal", "python", "read", "edit"] });
+			runtimeBuilder.buildRuntime({ activeToolNames: ["goal", "ask_question", "python", "read", "edit"] });
 			expect(forbiddenToolReads).toBe(0);
 
 			expect(runtimeBuilder.getToolDefinition("goal")).toBeUndefined();
+			expect(runtimeBuilder.getToolDefinition("ask_question")).toBeUndefined();
 			expect(runtimeBuilder.getToolDefinition("python")).toBeUndefined();
 			expect(runtimeBuilder.getAllTools().map((tool) => tool.name)).not.toContain("goal");
+			expect(runtimeBuilder.getAllTools().map((tool) => tool.name)).not.toContain("ask_question");
 			expect(runtimeBuilder.getAllTools().map((tool) => tool.name)).not.toContain("python");
 
 			expect(runtimeBuilder.getToolDefinition("read")).toBeDefined();
@@ -219,17 +224,18 @@ describe("RuntimeBuilder worker UAC ceiling (D2)", () => {
 		}
 	});
 
-	it("keeps the same build byte-identical (all four tools present) for a main session", () => {
+	it("keeps the same build byte-identical (all five tools present) for a main session", () => {
 		delete process.env[PI_SESSION_ROLE_ENV];
 		const runtimeBuilder = new RuntimeBuilder(makeDeps("/tmp/pi-worker-ceiling-test-main"));
-		runtimeBuilder.buildRuntime({ activeToolNames: ["goal", "python", "read", "edit"] });
+		runtimeBuilder.buildRuntime({ activeToolNames: ["goal", "ask_question", "python", "read", "edit"] });
 
 		expect(runtimeBuilder.getToolDefinition("goal")).toBeDefined();
+		expect(runtimeBuilder.getToolDefinition("ask_question")).toBeDefined();
 		expect(runtimeBuilder.getToolDefinition("python")).toBeDefined();
 		expect(runtimeBuilder.getToolDefinition("read")).toBeDefined();
 		expect(runtimeBuilder.getToolDefinition("edit")).toBeDefined();
 		expect(runtimeBuilder.getAllTools().map((tool) => tool.name)).toEqual(
-			expect.arrayContaining(["goal", "python", "read", "edit"]),
+			expect.arrayContaining(["goal", "ask_question", "python", "read", "edit"]),
 		);
 	});
 });

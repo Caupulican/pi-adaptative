@@ -19,6 +19,7 @@ import type {
 	ExtensionWidgetOptions,
 	WorkingIndicatorOptions,
 } from "../../core/extensions/index.ts";
+import type { HumanInputPresentationResult } from "../../core/human-input.ts";
 import {
 	flushRawStdout,
 	takeOverStdout,
@@ -36,6 +37,7 @@ import type {
 	RpcSessionState,
 	RpcSlashCommand,
 } from "./rpc-types.ts";
+import { decodeRpcCommand, decodeRpcExtensionUIResponse } from "./rpc-types.ts";
 
 // Re-export types for consumers
 export type {
@@ -78,8 +80,9 @@ export async function runRpcMode(runtimeHost: AgentSessionRuntime): Promise<neve
 	// Pending extension UI requests waiting for response
 	const pendingExtensionRequests = new Map<
 		string,
-		{ resolve: (value: any) => void; reject: (error: Error) => void }
+		{ resolve: (value: RpcExtensionUIResponse) => void; reject: (error: Error) => void }
 	>();
+	const activePromptRuns = new Set<Promise<void>>();
 
 	// Shutdown request flag
 	let shutdownRequested = false;
@@ -120,10 +123,19 @@ export async function runRpcMode(runtimeHost: AgentSessionRuntime): Promise<neve
 
 			pendingExtensionRequests.set(id, {
 				resolve: (response: RpcExtensionUIResponse) => {
-					cleanup();
-					resolve(parseResponse(response));
+					try {
+						const parsed = parseResponse(response);
+						cleanup();
+						resolve(parsed);
+					} catch (parseError: unknown) {
+						cleanup();
+						reject(parseError instanceof Error ? parseError : new Error(String(parseError)));
+					}
 				},
-				reject,
+				reject: (dialogError: Error) => {
+					cleanup();
+					reject(dialogError);
+				},
 			});
 			output({ type: "extension_ui_request", id, ...request } as RpcExtensionUIRequest);
 		});
@@ -133,6 +145,26 @@ export async function runRpcMode(runtimeHost: AgentSessionRuntime): Promise<neve
 	 * Create an extension UI context that uses the RPC protocol.
 	 */
 	const createExtensionUIContext = (): ExtensionUIContext => ({
+		askQuestions: (request, opts) =>
+			createDialogPromise<HumanInputPresentationResult>(
+				opts,
+				{ answers: [], cancelled: true, reason: "interrupted" as const, imageContents: [] },
+				{ method: "questions", request },
+				(response) => {
+					if ("cancelled" in response && response.cancelled) {
+						return { answers: [], cancelled: true, reason: "user_cancelled" as const, imageContents: [] };
+					}
+					if ("answers" in response) {
+						return {
+							answers: response.answers,
+							cancelled: false,
+							imageContents: response.images ?? [],
+						};
+					}
+					return { answers: [], cancelled: true, reason: "user_cancelled" as const, imageContents: [] };
+				},
+			),
+
 		select: (title, options, opts) =>
 			createDialogPromise(opts, undefined, { method: "select", title, options, timeout: opts?.timeout }, (r) =>
 				"cancelled" in r && r.cancelled ? undefined : "value" in r ? r.value : undefined,
@@ -255,6 +287,7 @@ export async function runRpcMode(runtimeHost: AgentSessionRuntime): Promise<neve
 			return new Promise((resolve, reject) => {
 				pendingExtensionRequests.set(id, {
 					resolve: (response: RpcExtensionUIResponse) => {
+						pendingExtensionRequests.delete(id);
 						if ("cancelled" in response && response.cancelled) {
 							resolve(undefined);
 						} else if ("value" in response) {
@@ -263,7 +296,10 @@ export async function runRpcMode(runtimeHost: AgentSessionRuntime): Promise<neve
 							resolve(undefined);
 						}
 					},
-					reject,
+					reject: (editorError: Error) => {
+						pendingExtensionRequests.delete(id);
+						reject(editorError);
+					},
 				});
 				output({ type: "extension_ui_request", id, method: "editor", title, prefill } as RpcExtensionUIRequest);
 			});
@@ -311,6 +347,7 @@ export async function runRpcMode(runtimeHost: AgentSessionRuntime): Promise<neve
 
 	runtimeHost.setRebindSession(async () => {
 		await rebindSession();
+		await session.resumePendingHumanInput();
 	});
 
 	const rebindSession = async (): Promise<void> => {
@@ -381,6 +418,9 @@ export async function runRpcMode(runtimeHost: AgentSessionRuntime): Promise<neve
 	// Handle a single command
 	const handleCommand = async (command: RpcCommand): Promise<RpcResponse | undefined> => {
 		const id = command.id;
+		if (runtimeHost.isReplacing) {
+			return error(id, command.type, "Session replacement is in progress; retry this command after it completes.");
+		}
 
 		switch (command.type) {
 			// =================================================================
@@ -391,22 +431,26 @@ export async function runRpcMode(runtimeHost: AgentSessionRuntime): Promise<neve
 				// Start prompt handling immediately, but emit the authoritative response only after
 				// prompt preflight succeeds. Queued and immediately handled prompts also count as success.
 				let preflightSucceeded = false;
-				void session
-					.prompt(command.message, {
-						images: command.images,
-						streamingBehavior: command.streamingBehavior,
-						source: "rpc",
-						preflightResult: (didSucceed) => {
-							if (didSucceed) {
-								preflightSucceeded = true;
-								output(success(id, "prompt"));
-							}
-						},
-					})
+				const promptRun = session.prompt(command.message, {
+					images: command.images,
+					streamingBehavior: command.streamingBehavior,
+					source: "rpc",
+					preflightResult: (didSucceed) => {
+						if (didSucceed) {
+							preflightSucceeded = true;
+							output(success(id, "prompt"));
+						}
+					},
+				});
+				activePromptRuns.add(promptRun);
+				void promptRun
 					.catch((e) => {
 						if (!preflightSucceeded) {
 							output(error(id, "prompt", e.message));
 						}
+					})
+					.finally(() => {
+						activePromptRuns.delete(promptRun);
 					});
 				return undefined;
 			}
@@ -427,11 +471,11 @@ export async function runRpcMode(runtimeHost: AgentSessionRuntime): Promise<neve
 			}
 
 			case "new_session": {
+				if (activePromptRuns.size > 0) {
+					return error(id, "new_session", "Cannot replace the session while a prompt is in progress.");
+				}
 				const options = command.parentSession ? { parentSession: command.parentSession } : undefined;
 				const result = await runtimeHost.newSession(options);
-				if (!result.cancelled) {
-					await rebindSession();
-				}
 				return success(id, "new_session", result);
 			}
 
@@ -594,30 +638,30 @@ export async function runRpcMode(runtimeHost: AgentSessionRuntime): Promise<neve
 			}
 
 			case "switch_session": {
-				const result = await runtimeHost.switchSession(command.sessionPath);
-				if (!result.cancelled) {
-					await rebindSession();
+				if (activePromptRuns.size > 0) {
+					return error(id, "switch_session", "Cannot replace the session while a prompt is in progress.");
 				}
+				const result = await runtimeHost.switchSession(command.sessionPath);
 				return success(id, "switch_session", result);
 			}
 
 			case "fork": {
-				const result = await runtimeHost.fork(command.entryId);
-				if (!result.cancelled) {
-					await rebindSession();
+				if (activePromptRuns.size > 0) {
+					return error(id, "fork", "Cannot replace the session while a prompt is in progress.");
 				}
+				const result = await runtimeHost.fork(command.entryId);
 				return success(id, "fork", { text: result.selectedText, cancelled: result.cancelled });
 			}
 
 			case "clone": {
+				if (activePromptRuns.size > 0) {
+					return error(id, "clone", "Cannot replace the session while a prompt is in progress.");
+				}
 				const leafId = session.sessionManager.getLeafId();
 				if (!leafId) {
 					return error(id, "clone", "Cannot clone session: no current entry selected");
 				}
 				const result = await runtimeHost.fork(leafId, { position: "at" });
-				if (!result.cancelled) {
-					await rebindSession();
-				}
 				return success(id, "clone", { cancelled: result.cancelled });
 			}
 
@@ -703,6 +747,10 @@ export async function runRpcMode(runtimeHost: AgentSessionRuntime): Promise<neve
 			process.exit(exitCode);
 		}
 		shuttingDown = true;
+		for (const pending of pendingExtensionRequests.values()) {
+			pending.reject(new Error("RPC host shut down before the extension UI request completed."));
+		}
+		pendingExtensionRequests.clear();
 		for (const cleanup of signalCleanupHandlers) {
 			cleanup();
 		}
@@ -757,16 +805,40 @@ export async function runRpcMode(runtimeHost: AgentSessionRuntime): Promise<neve
 
 		// Handle extension UI responses
 		if (parsedRecord.type === "extension_ui_response") {
-			const response = parsedRecord as RpcExtensionUIResponse;
-			const pending = pendingExtensionRequests.get(response.id);
-			if (pending) {
-				pendingExtensionRequests.delete(response.id);
-				pending.resolve(response);
+			const response = decodeRpcExtensionUIResponse(parsedRecord);
+			if (!response) {
+				output(
+					error(
+						typeof parsedRecord.id === "string" ? parsedRecord.id : undefined,
+						"extension_ui_response",
+						"Invalid extension UI response.",
+					),
+				);
+				await waitForRawStdoutBackpressure();
+				return;
 			}
+			const pending = pendingExtensionRequests.get(response.id);
+			if (!pending) {
+				output(error(response.id, "extension_ui_response", "Unknown or expired extension UI request id."));
+				await waitForRawStdoutBackpressure();
+				return;
+			}
+			pending.resolve(response);
 			return;
 		}
 
-		const command = parsedRecord as RpcCommand;
+		const command = decodeRpcCommand(parsedRecord);
+		if (!command) {
+			output(
+				error(
+					typeof parsedRecord.id === "string" ? parsedRecord.id : undefined,
+					parsedRecord.type,
+					`Invalid ${parsedRecord.type} command payload.`,
+				),
+			);
+			await waitForRawStdoutBackpressure();
+			return;
+		}
 		const commandId = command.id;
 		const commandType = command.type;
 		try {
@@ -798,6 +870,12 @@ export async function runRpcMode(runtimeHost: AgentSessionRuntime): Promise<neve
 			process.stdin.off("end", onInputEnd);
 		};
 	})();
+	void session.resumePendingHumanInput().catch((resumeError: unknown) => {
+		output({
+			type: "human_input_resume_error",
+			error: resumeError instanceof Error ? resumeError.message : String(resumeError),
+		});
+	});
 
 	// Keep process alive forever
 	return new Promise(() => {});

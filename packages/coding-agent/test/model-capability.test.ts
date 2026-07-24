@@ -21,6 +21,7 @@ const DEFAULT_ACTIVE = [
 	"context_audit",
 	"goal",
 	"task_steps",
+	"ask_question",
 	"delegate",
 	"run_toolkit_script",
 	"worktree_sync",
@@ -177,12 +178,20 @@ describe("filterToolNamesForCapability", () => {
 			"python",
 			"edit",
 			"write",
+			"ask_question",
 			"run_toolkit_script",
 		]);
 
 		const chat = deriveModelCapabilityProfile({ contextWindow: 4_096 });
 		expect(filterToolNamesForCapability(DEFAULT_ACTIVE, chat)).toEqual([...MODEL_CAPABILITY_CHAT_ALLOWED_TOOLS]);
 		expect(filterToolNamesForCapability(DEFAULT_ACTIVE, chat)).toEqual([]);
+	});
+
+	it("keeps owner clarification available to lean and minimal models", () => {
+		for (const contextWindow of [16_384, 8_192]) {
+			const profile = deriveModelCapabilityProfile({ contextWindow });
+			expect(filterToolNamesForCapability(DEFAULT_ACTIVE, profile)).toContain("ask_question");
+		}
 	});
 
 	it("preserves requested order and never invents tools", () => {

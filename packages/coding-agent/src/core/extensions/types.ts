@@ -59,6 +59,7 @@ import type { MemoryProvider as ContextMemoryProvider } from "../context/memory-
 import type { EventBus } from "../event-bus.ts";
 import type { ExecOptions, ExecResult } from "../exec.ts";
 import type { ReadonlyFooterDataProvider } from "../footer-data-provider.ts";
+import type { HumanInputPresentationRequest, HumanInputPresentationResult } from "../human-input.ts";
 import type { KeybindingsManager } from "../keybindings.ts";
 import type { MemoryProvider } from "../memory/memory-provider.ts";
 import type { ModelRegistry } from "../model-registry.ts";
@@ -130,6 +131,12 @@ export type EditorFactory = (tui: TUI, theme: EditorTheme, keybindings: Keybindi
  * Each mode (interactive, RPC, print) provides its own implementation.
  */
 export interface ExtensionUIContext {
+	/** Present a transport-neutral, typed owner-input request. */
+	askQuestions(
+		request: HumanInputPresentationRequest,
+		opts?: Pick<ExtensionUIDialogOptions, "signal">,
+	): Promise<HumanInputPresentationResult>;
+
 	/** Show a selector and return the user's choice. */
 	select(title: string, options: string[], opts?: ExtensionUIDialogOptions): Promise<string | undefined>;
 
@@ -306,7 +313,7 @@ export interface CompactOptions {
 export interface ExtensionContext {
 	/** UI methods for user interaction */
 	ui: ExtensionUIContext;
-	/** Whether UI is available (false in print/RPC mode) */
+	/** Whether the host can settle UI requests (false in print mode; true for TUI and RPC hosts). */
 	hasUI: boolean;
 	/** Runtime mode hosting this extension invocation. */
 	mode: "tui" | "print" | "rpc";
@@ -1146,39 +1153,64 @@ export interface ExtensionStorage {
  * reports of the same lane. The host preserves it as the canonical durable lane identity so goal
  * bindings and terminal reports remain correlated across controller reloads.
  *
- * Every field beyond `laneId`/`phase` is a CALLER CLAIM, not independently verified by this report:
- * `status` is a free-form label (e.g. a tmux job's own "done"/"blocked" marker, or a lifecycle tag like
- * "dismissed"/"resumed") — the host maps it defensively onto its own terminal-status vocabulary rather
- * than assuming the caller already speaks it; `changedFiles` and `request` are likewise unverified
- * (claims-to-review).
+ * External status, changed files, usage, and provider execution remain caller claims. Dispatch authority
+ * is different: the host compiles the claimed tool/path/budget scope into a typed execution grant and
+ * persists it before the extension may start the process. This proves the host authorization boundary,
+ * not that a third-party child CLI enforces the same scope internally.
  */
-export interface ManagedLaneEvent {
+export interface ManagedLaneDispatch {
+	/** Monotonic turn number for this logical lane. */
+	sequence: number;
+	/** Exact task instruction dispatched to the external worker. */
+	instructions: string;
+	/** Owner-selected immutable execution profile identity. */
+	profileId: string;
+	/** Provider/launcher identity used by the external process. */
+	provider: string;
+	/** Authorization record that covered this launch or follow-up. */
+	authorizationId: string;
+	/** How the owner authority was established. */
+	authorizationKind: "standing-grant" | "one-shot-owner-approval" | "legacy-recovery";
+	/** Exact child tool surface requested at launch. */
+	allowedTools: readonly string[];
+	/** Exact write path claims requested at launch. */
+	writePaths: readonly string[];
+	/** Advisory cross-process cost ceiling when supplied by the owner grant. */
+	maxCostUsd?: number;
+	/** Lease duration for this externally supervised turn. */
+	leaseTtlMs: number;
+}
+
+interface ManagedLaneEventBase {
 	laneId: string;
-	phase: "dispatch" | "terminal";
 	/** Goal this managed lane's work is bound to, if any — tags the tracked lane for goal orchestration. */
 	goalId?: string;
-	status?: string;
-	reasonCode?: string;
-	changedFiles?: readonly string[];
 	/**
-	 * Worktree-sync lane key this managed lane was dispatched into, present only on `phase:"dispatch"`
-	 * when the launched agent carried a `worktreeLane` (a lane-first tmux dispatch -- see
-	 * `tmux-dispatch.ts`'s `createLaneWorktree`). A CALLER CLAIM like every other field here; the host
-	 * stamps it verbatim onto the minted `LaneRecord.worktreeLaneKey` with no independent verification.
+	 * Worktree-sync lane key this managed lane was dispatched into. A caller claim like every other
+	 * field here; the host retains it for routing/review but does not treat it as verified authority.
 	 */
 	worktreeLaneKey?: string;
-	/** Caller-supplied context for this report (e.g. `{ turn }` on a follow-up dispatch). Free-form —
-	 * never assume a particular shape host-side. */
-	request?: unknown;
-	/**
-	 * Terminal-only usage claim for this managed lane's out-of-process work (e.g. a tmux worker's own
-	 * usage report). ADVISORY, same trust level as every other field on this event — the host attributes
-	 * `usage.cost.total` onto the completed lane's `costUsd` verbatim, with NO re-pricing (the caller's
-	 * model is unknown to the host, so re-pricing is both impossible and unnecessary). Ignored on
-	 * `phase: "dispatch"`.
-	 */
-	usage?: Usage;
 }
+
+export type ManagedLaneEvent =
+	| (ManagedLaneEventBase & {
+			phase: "dispatch";
+			dispatch: ManagedLaneDispatch;
+	  })
+	| (ManagedLaneEventBase & {
+			phase: "terminal";
+			status?: string;
+			reasonCode?: string;
+			changedFiles?: readonly string[];
+			/**
+			 * Terminal-only usage claim for this managed lane's out-of-process work (e.g. a tmux worker's own
+			 * usage report). ADVISORY, same trust level as every other field on this event — the host attributes
+			 * `usage.cost.total` onto the completed lane's `costUsd` verbatim, with NO re-pricing (the caller's
+			 * model is unknown to the host, so re-pricing is both impossible and unnecessary). Ignored on
+			 * `phase: "dispatch"`.
+			 */
+			usage?: Usage;
+	  });
 
 /**
  * ExtensionAPI passed to extension factory functions.

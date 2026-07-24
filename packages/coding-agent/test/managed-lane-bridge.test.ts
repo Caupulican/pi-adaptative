@@ -8,6 +8,7 @@ import { buildGoalRuntimeSnapshot } from "../src/core/goals/goal-runtime-snapsho
 import { applyGoalEvent, createGoalState } from "../src/core/goals/goal-state.ts";
 import { appendGoalStateSnapshot } from "../src/core/goals/session-goal-state.ts";
 import { getInFlightWorkUnits, resetInFlightWorkRegistryForTests } from "../src/core/reload-blockers.ts";
+import { createTestManagedLaneDispatch } from "./managed-lane-fixture.ts";
 
 /**
  * `recordManagedLane` is the host side of `pi.reportManagedLane`: the honest cross-process seam
@@ -32,7 +33,7 @@ function buildDeps(
 	} as unknown as SessionManager;
 	return {
 		isDisposed: () => false,
-		getSessionId: () => "test-session",
+		getSessionId: () => `test-session:${process.pid}:${agentDir}`,
 		getCwd: () => "/repo",
 		getAgentDir: () => agentDir,
 		getSessionManager: () => sessionManager,
@@ -56,7 +57,12 @@ describe("managed lane host bridge (recordManagedLane)", () => {
 		const agentDir = "/tmp/pi-test-managed-lane-dispatch";
 		const controller = new BackgroundLaneController(buildDeps(agentDir, { goalId: "goal-1" }));
 
-		const returned = controller.recordManagedLane({ laneId: "tmux-job-1", phase: "dispatch", goalId: "goal-1" });
+		const returned = controller.recordManagedLane({
+			laneId: "tmux-job-1",
+			phase: "dispatch",
+			goalId: "goal-1",
+			dispatch: createTestManagedLaneDispatch(),
+		});
 
 		const records = controller.getLaneRecords();
 		expect(records).toHaveLength(1);
@@ -85,7 +91,12 @@ describe("managed lane host bridge (recordManagedLane)", () => {
 			}),
 		);
 
-		controller.recordManagedLane({ laneId: "tmux-job-2", phase: "dispatch", goalId: "goal-2" });
+		controller.recordManagedLane({
+			laneId: "tmux-job-2",
+			phase: "dispatch",
+			goalId: "goal-2",
+			dispatch: createTestManagedLaneDispatch(),
+		});
 		expect(getInFlightWorkUnits(agentDir)).toHaveLength(1);
 
 		const returned = controller.recordManagedLane({
@@ -98,7 +109,10 @@ describe("managed lane host bridge (recordManagedLane)", () => {
 
 		const records = controller.getLaneRecords();
 		expect(records).toHaveLength(1);
-		expect(records[0]).toMatchObject({ status: "succeeded", reasonCode: "worker_completed" });
+		expect(records[0]).toMatchObject({
+			status: "failed",
+			reasonCode: "parent_review_required:missing_path_scope",
+		});
 		// The completed record is returned to the in-process caller.
 		expect(returned).toEqual(records[0]);
 
@@ -119,7 +133,11 @@ describe("managed lane host bridge (recordManagedLane)", () => {
 			buildDeps("/tmp/pi-test-managed-lane-handoff", { notifyWorkerTerminalHandoff }),
 		);
 
-		controller.recordManagedLane({ laneId: "tmux-job-handoff", phase: "dispatch" });
+		controller.recordManagedLane({
+			laneId: "tmux-job-handoff",
+			phase: "dispatch",
+			dispatch: createTestManagedLaneDispatch(),
+		});
 		const terminal = controller.recordManagedLane({
 			laneId: "tmux-job-handoff",
 			phase: "terminal",
@@ -139,7 +157,11 @@ describe("managed lane host bridge (recordManagedLane)", () => {
 			buildDeps("/tmp/pi-test-managed-lane-uac-notify", { notifyWorkerTerminalHandoff }),
 		);
 
-		controller.recordManagedLane({ laneId: "tmux-job-uac", phase: "dispatch" });
+		controller.recordManagedLane({
+			laneId: "tmux-job-uac",
+			phase: "dispatch",
+			dispatch: createTestManagedLaneDispatch(),
+		});
 		controller.recordManagedLane({ laneId: "tmux-job-uac", phase: "terminal", status: "succeeded" });
 		await vi.waitFor(() => expect(notifyWorkerTerminalHandoff).toHaveBeenCalledTimes(1));
 
@@ -150,8 +172,16 @@ describe("managed lane host bridge (recordManagedLane)", () => {
 		const agentDir = "/tmp/pi-test-managed-lane-duplicate-dispatch";
 		const controller = new BackgroundLaneController(buildDeps(agentDir));
 
-		const first = controller.recordManagedLane({ laneId: "tmux-job-3", phase: "dispatch" });
-		const second = controller.recordManagedLane({ laneId: "tmux-job-3", phase: "dispatch" });
+		const first = controller.recordManagedLane({
+			laneId: "tmux-job-3",
+			phase: "dispatch",
+			dispatch: createTestManagedLaneDispatch(),
+		});
+		const second = controller.recordManagedLane({
+			laneId: "tmux-job-3",
+			phase: "dispatch",
+			dispatch: createTestManagedLaneDispatch(),
+		});
 
 		expect(controller.getLaneRecords()).toHaveLength(1);
 		expect(getInFlightWorkUnits(agentDir)).toHaveLength(1);
@@ -193,7 +223,11 @@ describe("managed lane host bridge (recordManagedLane)", () => {
 			}),
 		);
 
-		controller.recordManagedLane({ laneId: "tmux-job-4", phase: "dispatch" });
+		controller.recordManagedLane({
+			laneId: "tmux-job-4",
+			phase: "dispatch",
+			dispatch: createTestManagedLaneDispatch(),
+		});
 		expect(getInFlightWorkUnits(agentDir)).toHaveLength(1);
 
 		expect(() => controller.recordManagedLane({ laneId: "tmux-job-4", phase: "terminal", status: "failed" })).toThrow(
@@ -208,7 +242,11 @@ describe("managed lane host bridge (recordManagedLane)", () => {
 		const controller = new BackgroundLaneController(buildDeps(agentDir));
 
 		expect(controller.getActiveLaneCount()).toBe(0);
-		controller.recordManagedLane({ laneId: "tmux-job-5", phase: "dispatch" });
+		controller.recordManagedLane({
+			laneId: "tmux-job-5",
+			phase: "dispatch",
+			dispatch: createTestManagedLaneDispatch(),
+		});
 		expect(controller.getActiveLaneCount()).toBe(1);
 	});
 
@@ -216,7 +254,12 @@ describe("managed lane host bridge (recordManagedLane)", () => {
 		const agentDir = "/tmp/pi-test-managed-lane-usage-cost";
 		const controller = new BackgroundLaneController(buildDeps(agentDir, { goalId: "goal-6" }));
 
-		controller.recordManagedLane({ laneId: "tmux-job-6", phase: "dispatch", goalId: "goal-6" });
+		controller.recordManagedLane({
+			laneId: "tmux-job-6",
+			phase: "dispatch",
+			goalId: "goal-6",
+			dispatch: createTestManagedLaneDispatch(),
+		});
 		const returned = controller.recordManagedLane({
 			laneId: "tmux-job-6",
 			phase: "terminal",
@@ -239,7 +282,11 @@ describe("managed lane host bridge (recordManagedLane)", () => {
 		const agentDir = "/tmp/pi-test-managed-lane-no-usage-cost";
 		const controller = new BackgroundLaneController(buildDeps(agentDir));
 
-		controller.recordManagedLane({ laneId: "tmux-job-7", phase: "dispatch" });
+		controller.recordManagedLane({
+			laneId: "tmux-job-7",
+			phase: "dispatch",
+			dispatch: createTestManagedLaneDispatch(),
+		});
 		const returned = controller.recordManagedLane({ laneId: "tmux-job-7", phase: "terminal", status: "succeeded" });
 
 		expect(returned?.costUsd).toBeUndefined();
@@ -249,7 +296,11 @@ describe("managed lane host bridge (recordManagedLane)", () => {
 		const agentDir = "/tmp/pi-test-managed-lane-duplicate-terminal";
 		const controller = new BackgroundLaneController(buildDeps(agentDir));
 
-		controller.recordManagedLane({ laneId: "tmux-job-8", phase: "dispatch" });
+		controller.recordManagedLane({
+			laneId: "tmux-job-8",
+			phase: "dispatch",
+			dispatch: createTestManagedLaneDispatch(),
+		});
 		const first = controller.recordManagedLane({ laneId: "tmux-job-8", phase: "terminal", status: "succeeded" });
 		expect(first).toBeDefined();
 
@@ -263,7 +314,7 @@ describe("managed lane host bridge (recordManagedLane)", () => {
 		const sessionManager = InMemorySessionManager.inMemory();
 		const controller = new BackgroundLaneController({
 			isDisposed: () => false,
-			getSessionId: () => "test-session",
+			getSessionId: () => `test-session:${process.pid}:managed-lane-spend-sum`,
 			getCwd: () => "/repo",
 			getAgentDir: () => "/tmp/pi-test-managed-lane-spend-sum",
 			getSessionManager: () => sessionManager,
@@ -274,7 +325,12 @@ describe("managed lane host bridge (recordManagedLane)", () => {
 			notifyWorkerTerminalHandoff: async () => {},
 		} as never);
 
-		controller.recordManagedLane({ laneId: "tmux-job-9", phase: "dispatch", goalId: "goal-9" });
+		controller.recordManagedLane({
+			laneId: "tmux-job-9",
+			phase: "dispatch",
+			goalId: "goal-9",
+			dispatch: createTestManagedLaneDispatch(),
+		});
 		const dispatchedLaneId = controller.getLaneRecords()[0]?.laneId as string;
 
 		let goalState = createGoalState({ goalId: "goal-9", userGoal: "Ship the thing", now: "T0" });

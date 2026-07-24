@@ -107,6 +107,11 @@ export function stateFile(agentDir: string, ...segments: string[]): string {
 	return join(stateDir(agentDir), ...segments);
 }
 
+/** `<agentDir>/state/attachments` -- bounded, session-keyed clipboard image attachments. */
+export function attachmentsDir(agentDir: string): string {
+	return stateFile(agentDir, "attachments");
+}
+
 /** `<agentDir>/state/extensions/<namespace>` -- durable state owned by one extension. */
 export function extensionStateDir(agentDir: string, namespace: string): string {
 	assertPortablePathSegment("Extension namespace", namespace);

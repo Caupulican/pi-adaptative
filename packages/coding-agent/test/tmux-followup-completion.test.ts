@@ -32,7 +32,13 @@ type SentMessage = {
 	message: { customType: string; content: string; display: boolean; details?: unknown };
 	options?: { triggerTurn?: boolean; deliverAs?: string };
 };
-type LaneEvent = { laneId: string; phase: "dispatch" | "terminal"; status?: string; request?: unknown };
+type LaneEvent = {
+	laneId: string;
+	phase: "dispatch" | "terminal";
+	status?: string;
+	reasonCode?: string;
+	dispatch?: { sequence: number; instructions: string };
+};
 
 /** A smarter fake tmux than a plain `exit 0` stub: it answers list-sessions/has-session/list-panes/
  * `display-message -p ... #{pane_pipe}` from small state files under `stateDir`, and appends every
@@ -195,7 +201,7 @@ describe.skipIf(process.platform === "win32")("tmux follow-up + dismiss + sessio
 		return { jobDir, jobPath, resultPath };
 	}
 
-	function installExtension() {
+	function installExtension(opts: { reportManagedLane?: (event: LaneEvent) => void } = {}) {
 		const handlers = new Map<string, Handler[]>();
 		const sent: SentMessage[] = [];
 		const laneEvents: LaneEvent[] = [];
@@ -228,6 +234,7 @@ describe.skipIf(process.platform === "win32")("tmux follow-up + dismiss + sessio
 			},
 			reportManagedLane(event: LaneEvent) {
 				laneEvents.push(event);
+				opts.reportManagedLane?.(event);
 			},
 			appendEntry,
 		};
@@ -255,7 +262,7 @@ describe.skipIf(process.platform === "win32")("tmux follow-up + dismiss + sessio
 		return { registeredTool, handlers, sent, laneEvents, context, seedCustomEntry: appendEntry };
 	}
 
-	it("send_followup dispatches a fresh turn and its terminal fires exactly once via the same followUp handoff path", async () => {
+	it("send_followup dispatches a fresh durable turn and reports its terminal exactly once through the host lane bridge", async () => {
 		const jobId = "followup-job";
 		const paneId = "%1";
 		const sessionName = "followup-session";
@@ -297,7 +304,11 @@ describe.skipIf(process.platform === "win32")("tmux follow-up + dismiss + sessio
 		const calls = readCalls(stateDir);
 		expect(calls.some((line) => line.startsWith("pipe-pane") && line.includes(paneId))).toBe(true);
 		expect(laneEvents).toContainEqual(
-			expect.objectContaining({ laneId: `tmux:${jobId}:worker`, phase: "dispatch", status: "follow-up" }),
+			expect.objectContaining({
+				laneId: `tmux:${jobId}:worker`,
+				phase: "dispatch",
+				dispatch: expect.objectContaining({ sequence: 2, instructions: "take another look" }),
+			}),
 		);
 
 		// Simulate the re-armed watcher settling on turn 2's marker.
@@ -321,10 +332,9 @@ describe.skipIf(process.platform === "win32")("tmux follow-up + dismiss + sessio
 		// (every execute() call does this — no reliance on real fs.watch timing, matching how the
 		// existing completion test drives its own handoff assertion).
 		await registeredTool.execute("poke-1", { action: "list_jobs" }, new AbortController().signal, () => {}, context);
-		expect(sent).toHaveLength(1);
-		expect(sent[0]?.options).toEqual({ triggerTurn: true, deliverAs: "followUp" });
-		expect(sent[0]?.message.customType).toBe("tmux-background-completion");
-		expect(sent[0]?.message.content).toContain("worker: done");
+		// reportManagedLane is the sole production wake path; the extension must not inject a second
+		// transcript message when that bridge exists.
+		expect(sent).toEqual([]);
 		expect(laneEvents).toContainEqual(expect.objectContaining({ laneId: `tmux:${jobId}:worker`, phase: "terminal" }));
 
 		const jobAfterTerminal = JSON.parse(fs.readFileSync(jobPath, "utf8"));
@@ -332,8 +342,58 @@ describe.skipIf(process.platform === "win32")("tmux follow-up + dismiss + sessio
 
 		// A further refresh must NOT re-deliver the same turn's handoff.
 		await registeredTool.execute("poke-2", { action: "list_jobs" }, new AbortController().signal, () => {}, context);
-		expect(sent).toHaveLength(1);
+		expect(sent).toEqual([]);
 		expect(intervalSpy).not.toHaveBeenCalled();
+	});
+
+	it("does not arm a watcher or inject a follow-up when the host cannot reserve its durable turn", async () => {
+		const jobId = "followup-reservation-failure";
+		const paneId = "%4";
+		const sessionName = "followup-reservation-session";
+		setSessions(stateDir, [sessionName]);
+		setPanes(stateDir, sessionName, [paneId]);
+		const { jobDir, jobPath } = writeJob(jobId, { paneId, sessionName });
+		const { registeredTool, laneEvents, context, seedCustomEntry } = installExtension({
+			reportManagedLane(event) {
+				if (event.phase === "dispatch") throw new Error("host reservation unavailable");
+			},
+		});
+		seedCustomEntry("tmux-dispatch-grant", {
+			grantId: "reservation-test-grant",
+			createdAt: new Date().toISOString(),
+			agent: "pi",
+			scope: {},
+			envelope: {},
+			budget: { maxLaunches: 1 },
+		});
+		const callsBefore = readCalls(stateDir).length;
+
+		await expect(
+			registeredTool.execute(
+				"followup-reservation-failure",
+				{ action: "send_followup", jobId, task: "must not be injected" },
+				new AbortController().signal,
+				() => {},
+				context,
+			),
+		).rejects.toThrow("host reservation unavailable");
+
+		const sideEffects = readCalls(stateDir).slice(callsBefore);
+		expect(sideEffects.some((call) => /^(pipe-pane|send-keys|set-buffer|paste-buffer)\b/.test(call))).toBe(false);
+		expect(fs.existsSync(path.join(jobDir, "worker.turn-2.prompt.md"))).toBe(false);
+		expect(fs.existsSync(path.join(jobDir, "pane-watcher.turn-2.sh"))).toBe(false);
+		expect(JSON.parse(fs.readFileSync(jobPath, "utf8")).agents[0]).toMatchObject({
+			currentTurn: 2,
+			result: { status: "failed", reason: "managed_process_launch_reservation_failed" },
+		});
+		expect(laneEvents).toMatchObject([
+			{ phase: "dispatch", laneId: `tmux:${jobId}:worker` },
+			{
+				phase: "terminal",
+				laneId: `tmux:${jobId}:worker`,
+				reasonCode: "managed_process_launch_reservation_failed",
+			},
+		]);
 	});
 
 	it("refuses send_followup when the tmux session or the target pane is gone, without relaunching anything", async () => {
@@ -448,10 +508,14 @@ describe.skipIf(process.platform === "win32")("tmux follow-up + dismiss + sessio
 		expect(calls.some((line) => line.startsWith("pipe-pane") && line.includes(resumablePane))).toBe(true);
 		expect(calls.some((line) => line.startsWith("pipe-pane") && line.includes(pipedPane))).toBe(false);
 		expect(laneEvents).toContainEqual(
-			expect.objectContaining({ laneId: `tmux:${resumableId}:worker`, phase: "dispatch", status: "resumed" }),
+			expect.objectContaining({
+				laneId: `tmux:${resumableId}:worker`,
+				phase: "dispatch",
+				dispatch: expect.objectContaining({ sequence: 1 }),
+			}),
 		);
 		expect(
-			laneEvents.some((event) => event.laneId === `tmux:${alreadyPipedId}:worker` && event.status === "resumed"),
+			laneEvents.some((event) => event.laneId === `tmux:${alreadyPipedId}:worker` && event.phase === "dispatch"),
 		).toBe(false);
 
 		for (const handler of handlers.get("session_shutdown") ?? []) await handler({}, context);

@@ -1,7 +1,10 @@
+import { mkdtempSync, realpathSync, rmSync } from "node:fs";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
 import { Agent } from "@caupulican/pi-agent-core";
 import { SessionManager } from "@caupulican/pi-agent-core/node";
 import { getModel } from "@caupulican/pi-ai";
-import { describe, expect, it } from "vitest";
+import { afterEach, describe, expect, it } from "vitest";
 import { AgentSession } from "../src/core/agent-session.ts";
 import { AuthStorage } from "../src/core/auth-storage.ts";
 import type { BackgroundLaneController } from "../src/core/background-lane-controller.ts";
@@ -9,10 +12,22 @@ import { applyGoalEvent, createGoalState } from "../src/core/goals/goal-state.ts
 import { appendGoalStateSnapshot } from "../src/core/goals/session-goal-state.ts";
 import { ModelRegistry } from "../src/core/model-registry.ts";
 import { SettingsManager } from "../src/core/settings-manager.ts";
+import { createTestManagedLaneDispatch } from "./managed-lane-fixture.ts";
 import { createTestResourceLoader } from "./utilities.ts";
+
+const testAgentDirs: string[] = [];
+
+afterEach(() => {
+	while (testAgentDirs.length > 0) {
+		const agentDir = testAgentDirs.pop();
+		if (agentDir) rmSync(agentDir, { recursive: true, force: true });
+	}
+});
 
 describe("Phase 10E: AgentSession Goal Continuation Loop", () => {
 	function createTestSession() {
+		const agentDir = mkdtempSync(join(realpathSync.native(tmpdir()), "pi-goal-continuation-"));
+		testAgentDirs.push(agentDir);
 		const sessionManager = SessionManager.inMemory();
 		const settingsManager = SettingsManager.inMemory();
 		const model = getModel("anthropic", "claude-sonnet-4-5");
@@ -33,6 +48,7 @@ describe("Phase 10E: AgentSession Goal Continuation Loop", () => {
 			settingsManager,
 			resourceLoader: createTestResourceLoader(),
 			cwd: process.cwd(),
+			agentDir,
 			modelRegistry: ModelRegistry.inMemory(AuthStorage.inMemory()),
 		});
 
@@ -82,13 +98,21 @@ describe("Phase 10E: AgentSession Goal Continuation Loop", () => {
 
 		session.prompt = async (text: string, options?: unknown) => {
 			promptCalls.push({ text, options });
-			// Simulate the LLM turn finishing the goal
-			const nextState = applyGoalEvent(state, {
-				type: "satisfy_requirement",
-				id: "req-1",
-				evidenceIds: [],
+			// Simulate the LLM turn proving the requirement and finishing the goal.
+			let nextState = applyGoalEvent(state, {
+				type: "add_evidence",
+				id: "evidence-1",
+				kind: "user",
+				summary: "Owner-accepted proof",
 				now: "T1",
 			});
+			nextState = applyGoalEvent(nextState, {
+				type: "satisfy_requirement",
+				id: "req-1",
+				evidenceIds: ["evidence-1"],
+				now: "T1",
+			});
+			nextState = applyGoalEvent(nextState, { type: "complete_goal", now: "T1" });
 			appendGoalStateSnapshot(sessionManager, nextState);
 		};
 
@@ -237,7 +261,12 @@ describe("Phase 10E: AgentSession Goal Continuation Loop", () => {
 			const backgroundLanes = (session as unknown as { _backgroundLanes: BackgroundLaneController })
 				._backgroundLanes;
 
-			backgroundLanes.recordManagedLane({ laneId: "tmux-job-e2e", phase: "dispatch", goalId: "g1" });
+			backgroundLanes.recordManagedLane({
+				laneId: "tmux-job-e2e",
+				phase: "dispatch",
+				goalId: "g1",
+				dispatch: createTestManagedLaneDispatch(),
+			});
 			const dispatchedLaneId = backgroundLanes.getLaneRecords()[0]?.laneId as string;
 			expect(dispatchedLaneId).toBeDefined();
 

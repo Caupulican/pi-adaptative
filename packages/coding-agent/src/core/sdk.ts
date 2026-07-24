@@ -562,7 +562,7 @@ export async function createAgentSession(options: CreateAgentSessionOptions = {}
 	} catch (error) {
 		// Preserve the established non-fatal fallback for a genuinely unresolved profile model.
 		if (!modelFallbackMessage?.startsWith("Profile model resolution error:")) {
-			session.dispose();
+			await session.disposeAndWait();
 			throw error;
 		}
 	}

@@ -18,6 +18,7 @@ export function getDefaultActiveToolNames(_platform: NodeJS.Platform = process.p
 		"context_audit",
 		"goal",
 		"task_steps",
+		"ask_question",
 		"delegate",
 		"run_toolkit_script",
 	];

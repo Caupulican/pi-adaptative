@@ -81,6 +81,36 @@ describe("GatewayRegistry (R8 interface-driven gateways/cron)", () => {
 		expect(late.started).toBe(true);
 	});
 
+	it("waits for a late async start before completing shutdown", async () => {
+		const registry = new GatewayRegistry();
+		await registry.start(() => {});
+		let releaseStart!: () => void;
+		let stopCalled = false;
+		const startGate = new Promise<void>((resolve) => {
+			releaseStart = resolve;
+		});
+		registry.registerChannel({
+			name: "late-async",
+			start: async () => startGate,
+			send: () => {},
+			stop: () => {
+				stopCalled = true;
+			},
+		});
+
+		let shutdownSettled = false;
+		const shutdown = registry.stop().then(() => {
+			shutdownSettled = true;
+		});
+		await Promise.resolve();
+		expect(shutdownSettled).toBe(false);
+		expect(stopCalled).toBe(false);
+
+		releaseStart();
+		await shutdown;
+		expect(stopCalled).toBe(true);
+	});
+
 	it("is a no-op when empty (the default — no transports baked in)", async () => {
 		const registry = new GatewayRegistry();
 		expect(registry.channelCount).toBe(0);

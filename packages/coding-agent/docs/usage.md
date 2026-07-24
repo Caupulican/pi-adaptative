@@ -30,12 +30,20 @@ The editor can be replaced temporarily by built-in UI such as `/settings` or by 
 | File reference | Type `@` to fuzzy-search project files |
 | Path completion | Press Tab to complete paths |
 | Multi-line input | Shift+Enter, or Ctrl+Enter on Windows Terminal |
-| Images | Paste with Ctrl+V, Alt+V on Windows, or drag into the terminal |
+| Images | Paste with Ctrl+V on Unix/macOS, Alt+V on Windows, or either on WSL; the same action pastes text when no image is present |
 | Platform shell command | `!command` runs in PowerShell on Windows or Bash elsewhere and sends output to the model |
 | Hidden platform shell command | `!!command` runs without sending output to the model |
 | External editor | Ctrl+G opens `$VISUAL` or `$EDITOR` |
 
 See [Keybindings](keybindings.md) for all shortcuts and customization.
+
+Pasted images are stored under `~/.pi/agent/state/attachments` by default and attached to the current prompt as numbered markers. Later prompts can say `look at image #2` or `look at the image` for the latest current-session attachment. Set `images.clipboardDirectory` to use another folder; a relative folder is an explicit workspace-relative choice. Storage is bounded and Pi never writes an attachment folder into the workspace by default.
+
+### Questions, Steps, and Workers
+
+When an owner choice materially changes the result, the built-in `ask_question` interaction presents up to four questions together. It supports single choice, multi-select, an unrestricted multi-line custom **Other** answer, clipboard text or image paste, explicit **Skip**, configurable keyboard navigation, cancellation, and a final review before a multi-question answer is submitted. The request is checkpointed before display; `/resume` restores the original tool call, and large answers remain exact in a retrievable artifact while only a bounded projection enters prompt context. TUI and RPC hosts use the same fail-closed typed request. Image paste is refused with a visible explanation when the routed model cannot accept images instead of silently replacing it with a placeholder. Non-interactive sessions fail closed instead of inventing an answer, and worker sessions do not construct the question tool.
+
+Native task steps and worker lanes share the same compact work panel. Steps and agents are grouped separately; durable worker task labels and owner-authored profile ids remain visible after `/resume`. Completed worker output remains untrusted until the parent verifies it through the existing result and review contracts.
 
 ## Slash Commands
 
@@ -64,6 +72,8 @@ Type `/` in the editor to open command completion. Extensions can register custo
 | `/toolhealth` | Show tool repair diagnostics and learned standing rules |
 | `/toolprobe [provider/model]` | Probe native/text tool-call support and persist a host-local verdict |
 | `/toolrule-remove <model> <mode>` | Remove one learned tool repair standing rule |
+| `/goal [status\|resume\|complete\|close\|reopen <requirement-id>\|override <text>]` | Inspect or control the durable session goal |
+| `/goal-continue [maxTurns] [maxStallTurns] [maxMinutes]` | Continue the active goal within explicit bounds |
 | `/task`, `/steps` | Manage the native session checklist; see [Task steps](task-steps.md) |
 | `/quit` | Quit pi |
 
@@ -96,6 +106,8 @@ pi --fork <path|id>    # Fork a session into a new session file
 Useful session commands:
 
 - `/session` shows the current session file and ID.
+- `/resume` also resumes a blocked durable goal before that session's worker/process supervision starts;
+  `/goal resume` applies the same persisted transition in place.
 - `/tree` navigates the in-file session tree and can summarize abandoned branches.
 - `/fork` creates a new session from an earlier user message.
 - `/clone` duplicates the current active branch into a new session file.
@@ -202,7 +214,7 @@ cat README.md | pi -p "Summarize this text"
 | `--no-builtin-tools`, `-nbt` | Disable built-in tools but keep extension/custom tools enabled |
 | `--no-tools`, `-nt` | Disable all tools |
 
-Built-in tools include `read`, `edit`, `write`, `grep`, `find`, `ls`, and the uv-managed `python` tool. The agent always sees one stable `bash` tool contract. On Windows, Pi parses its supported simple-command grammar and converts it deterministically to PowerShell; unsupported shell constructs fail closed. Agent, interactive, and RPC shell calls have a 120-second wall-clock default, and Python calls default to 30 seconds. Native goal, task-step, delegation, context, and toolkit tools are activated when their capability/profile gates allow them.
+Built-in tools include `read`, `edit`, `write`, `grep`, `find`, `ls`, `ask_question`, and the uv-managed `python` tool. The agent always sees one stable `bash` tool contract. On Windows, Pi parses its supported simple-command grammar and converts it deterministically to PowerShell; unsupported shell constructs fail closed. Agent, interactive, and RPC shell calls have a 120-second wall-clock default, and Python calls default to 30 seconds. Native goal, task-step, human-question, delegation, context, and toolkit tools are activated when their capability/profile gates allow them.
 
 ### Resource Options
 

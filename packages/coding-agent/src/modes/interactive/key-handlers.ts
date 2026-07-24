@@ -106,7 +106,7 @@ export function setupKeyHandlers(host: KeyHandlersHost): void {
 		}
 	};
 
-	// Handle clipboard image paste (triggered on Ctrl+V)
+	// Handle the configurable platform paste chord (Ctrl+V on Unix, Alt+V on Windows).
 	host.defaultEditor.onPasteImage = () => {
 		host.handleClipboardImagePaste();
 	};

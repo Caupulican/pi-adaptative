@@ -14,6 +14,7 @@ export interface BuildPiResumeLaunchSpecOptions {
 	argsPrefix?: readonly string[];
 	parentPid: number;
 	parentSessionId: string;
+	taskRef?: string;
 	wakePrompt?: string;
 }
 
@@ -87,6 +88,7 @@ export function buildPiResumeLaunchSpec(
 	args.push("--session", context.sessionFile ?? context.sessionId);
 	args.push("--parent-pid", String(options.parentPid));
 	args.push("--parent-session", options.parentSessionId);
+	if (options.taskRef?.trim()) args.push("--task-ref", options.taskRef.trim());
 	if (context.worktreeLaneKey) args.push("--worktree-lane", context.worktreeLaneKey);
 	if (context.orchestrationProfileId) {
 		args.push("--orchestration-profile", context.orchestrationProfileId);

@@ -52,6 +52,7 @@ export const MODEL_CAPABILITY_MINIMAL_ALLOWED_TOOLS: readonly string[] = [
 	"powershell",
 	"edit",
 	"write",
+	"ask_question",
 	// The executor tool: minimal-class models ARE the daily-ops executors, and its schema is tiny.
 	"run_toolkit_script",
 ];

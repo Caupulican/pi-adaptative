@@ -37,15 +37,17 @@ export function isWorkerSession(env: NodeJS.ProcessEnv = process.env): boolean {
 
 /**
  * Tools a worker session may never activate: the orchestration/self-adaptation surface that would
- * let a worker spawn its own sub-orchestration, mutate settings-driven learning/model state, or
- * shell out to the unbounded `python` execution contract. `python` is load-bearing for the
- * zero-footprint guarantee (it can write anywhere the interpreter can reach); `context_scout` is
+ * let a worker spawn its own sub-orchestration, bypass its parent to request owner input, mutate
+ * settings-driven learning/model state, or shell out to the unbounded `python` execution contract.
+ * `python` is load-bearing for the zero-footprint guarantee (it can write anywhere the interpreter
+ * can reach); `context_scout` is
  * sub-orchestration (spawns its own isolated agent loop). `bash` is deliberately NOT included: it
  * stays available as the documented cooperative boundary (see docs/worktree-sync.md) — the same
  * trust model the lane gate already applies to foreign CLIs it cannot structurally contain.
  */
 export const WORKER_FORBIDDEN_TOOLS: ReadonlySet<string> = new Set([
 	"goal",
+	"ask_question",
 	"delegate",
 	"delegate_status",
 	"improvement_loop",

@@ -112,6 +112,7 @@ function makeDeps(cwd: string, resourceLoader: ResourceLoader): TestDeps {
 		reapplyActiveProfileModelSettings: async () => {},
 		notifyExtensionsChanged: () => unreachable("notifyExtensionsChanged"),
 		getToolArtifactStore: () => unreachable("getToolArtifactStore"),
+		getSessionImageStore: () => undefined,
 		getMemoryManager: () => ({ getToolDefinitions: () => [] }) as unknown as MemoryManager,
 		getMemoryAuditDiagnostics: () => unreachable("getMemoryAuditDiagnostics"),
 		clearPendingMemoryProviders: () => {},

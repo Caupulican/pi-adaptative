@@ -7,6 +7,7 @@ import { ORCHESTRATION_SCHEMA_VERSION, type OrchestrationProfile } from "../src/
 import { DelegationOrchestrationLedger } from "../src/core/orchestration/delegation-ledger.ts";
 import { projectGoalObjective } from "../src/core/orchestration/work-state-projection.ts";
 import { createWorkerResultContract } from "../src/core/orchestration/worker-result-adapter.ts";
+import { createTestExecutionGrant } from "./orchestration-profile-fixture.ts";
 
 const roots: string[] = [];
 
@@ -54,6 +55,23 @@ function goal(acceptanceCriteria: readonly { id: string; description: string; re
 	return state;
 }
 
+function bindTestGrant(ledger: DelegationOrchestrationLedger, attemptId: string, grantId: string): void {
+	const snapshot = ledger.runtime.getSnapshot();
+	const attempt = snapshot.attempts[attemptId];
+	const task = attempt ? snapshot.tasks[attempt.taskId] : undefined;
+	if (!attempt || !task) throw new Error(`Missing test attempt ${attemptId}`);
+	ledger.runtime.bindAttemptGrant(
+		attemptId,
+		createTestExecutionGrant({
+			objectiveId: task.task.objectiveId,
+			taskId: task.task.taskId,
+			attemptId,
+			role: task.task.role,
+			grantId,
+		}),
+	);
+}
+
 afterEach(() => {
 	for (const directory of roots.splice(0)) rmSync(directory, { recursive: true, force: true });
 });
@@ -68,7 +86,7 @@ describe("DelegationOrchestrationLedger", () => {
 			profile: profile(),
 			requiredCapabilities: ["filesystem.read", "filesystem.write"],
 		});
-		first.runtime.bindAttemptGrant(queued.attemptId, "grant-session-1");
+		bindTestGrant(first, queued.attemptId, "grant-session-1");
 		const handle = first.start(queued.attemptId, 60_000);
 
 		const reopened = new DelegationOrchestrationLedger({ agentDir, sessionId: "session-1" });
@@ -128,7 +146,7 @@ describe("DelegationOrchestrationLedger", () => {
 			profile: limitedProfile,
 			requiredCapabilities: ["filesystem.read"],
 		});
-		first.runtime.bindAttemptGrant(queued.attemptId, "grant-limited");
+		bindTestGrant(first, queued.attemptId, "grant-limited");
 		first.start(queued.attemptId, 60_000);
 
 		const reopened = new DelegationOrchestrationLedger({ agentDir, sessionId: "session-limited" });
@@ -145,7 +163,7 @@ describe("DelegationOrchestrationLedger", () => {
 			profile: profile(),
 			requiredCapabilities: ["filesystem.read", "filesystem.write"],
 		});
-		ledger.runtime.bindAttemptGrant(queued.attemptId, "grant-session-3");
+		bindTestGrant(ledger, queued.attemptId, "grant-session-3");
 		const handle = ledger.start(queued.attemptId, 60_000);
 		const result = createWorkerResultContract({
 			handle,

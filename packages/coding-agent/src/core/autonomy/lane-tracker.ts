@@ -16,6 +16,10 @@ export interface LaneRecord {
 	laneId: string;
 	type: LaneType;
 	status: LaneStatus;
+	/** Bounded human-readable work label retained across session resume. */
+	label?: string;
+	/** Owner-authored profile that fixed the worker's model, thinking, tools, and budget. */
+	profileId?: string;
 	reasonCode?: string;
 	startedAt?: string;
 	completedAt?: string;
@@ -49,6 +53,8 @@ export function isLaneRecord(value: unknown): value is LaneRecord {
 	if (typeof record.laneId !== "string" || record.laneId.length === 0) return false;
 	if (typeof record.type !== "string" || !LANE_TYPES.includes(record.type)) return false;
 	if (typeof record.status !== "string" || !LANE_STATUSES.includes(record.status)) return false;
+	if (!isOptionalString(record.label)) return false;
+	if (!isOptionalString(record.profileId)) return false;
 	if (!isOptionalString(record.reasonCode)) return false;
 	if (!isOptionalString(record.startedAt)) return false;
 	if (!isOptionalString(record.completedAt)) return false;

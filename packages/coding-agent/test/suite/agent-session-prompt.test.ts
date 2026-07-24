@@ -284,6 +284,7 @@ describe("AgentSession prompt characterization", () => {
 			"context_audit",
 			"goal",
 			"task_steps",
+			"ask_question",
 			"delegate",
 			"run_toolkit_script",
 			"artifact_retrieve",

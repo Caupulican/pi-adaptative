@@ -365,6 +365,21 @@ describe("AgentSession live tool construction wires a session-scoped file Artifa
 			expect(harness.session.getActiveToolNames()).toContain("artifact_retrieve");
 		});
 
+		it("setActiveToolsByName(['ask_question']) auto-activates artifact_retrieve unless UAC excludes it", async () => {
+			const allowed = await createHarness({ initialActiveToolNames: ["read"] });
+			harnesses.push(allowed);
+			allowed.session.setActiveToolsByName(["ask_question"]);
+			expect(allowed.session.getActiveToolNames()).toEqual(["ask_question", "artifact_retrieve"]);
+
+			const denied = await createHarness({
+				initialActiveToolNames: ["read"],
+				excludedToolNames: ["artifact_retrieve"],
+			});
+			harnesses.push(denied);
+			denied.session.setActiveToolsByName(["ask_question"]);
+			expect(denied.session.getActiveToolNames()).toEqual(["ask_question"]);
+		});
+
 		it("setActiveToolsByName(['run_toolkit_script']) auto-activates artifact_retrieve", async () => {
 			const harness = await createHarness({
 				initialActiveToolNames: ["read", "bash", "edit", "write", "context_audit", "goal"],

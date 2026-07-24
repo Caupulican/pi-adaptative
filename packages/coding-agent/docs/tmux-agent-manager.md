@@ -64,6 +64,10 @@ actions manage that persistence:
 An idle worker (no turn currently dispatched) does not hold this session's reload-quiesce; `/reload` is
 never blocked merely because a persistent tmux worker exists between turns.
 
+Running managed lanes are checkpointed at dispatch and rehydrated with the same lane identity after
+`/reload`. A later terminal event therefore completes the existing goal binding instead of minting a
+replacement lane or risking a duplicate dispatch.
+
 ## Approval-gated dispatch: the standing grant
 
 A real (non-dry-run) `fire_task` or `send_followup` launch requires either a **standing grant** or a
@@ -73,7 +77,9 @@ one-shot interactive approval — never a silent launch:
   (required), and optionally `goalId` (an unscoped grant covers any goal), `allowedTools`,
   `resourceProfile`, `writePaths`, and `expiresInMinutes`. Requires interactive confirmation when a UI is
   attached; in print/rpc/non-interactive mode, requires the `--allow-tmux-dispatch` CLI flag instead.
-  Once granted, matching launches proceed unattended and consume one unit of `maxLaunches` for each child process launched.
+  Once granted, matching launches proceed unattended. Team launches validate every child against the
+  grant and consume one unit of `maxLaunches` for each child process launched; a single-provider grant
+  cannot authorize a mixed-provider team.
 - **`revoke_grant`** ends a standing grant early (defaults to whichever grant is currently active).
 - With **no covering grant**: an interactive session is prompted for a one-shot approval; a
   non-interactive session (no UI, no grant) is **refused** with a clear error — never launched silently.
@@ -118,8 +124,9 @@ When no worker was dispatched, the tool response's `dispatchSkipReason` explains
 - `requirement_already_bound` — the requirement is already bound to a lane that is still queued/running;
   no duplicate dispatch was attempted.
 - `bound_lane_indeterminate` — the requirement is bound to a lane whose liveness/outcome cannot be
-  determined (e.g. after `/reload`); dispatch is refused rather than risking a duplicate worker. A bound
-  lane with a confirmed terminal outcome allows a fresh dispatch normally.
+  determined because its durable record is missing or malformed; dispatch is refused rather than
+  risking a duplicate worker. Normal `/reload` rehydrates running managed lanes. A bound lane with a
+  confirmed terminal outcome allows a fresh dispatch normally.
 
 ## Safety
 

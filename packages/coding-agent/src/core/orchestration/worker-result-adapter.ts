@@ -82,7 +82,7 @@ export function createWorkerResultContract(args: {
 	handle: StartedDelegationAttempt;
 	claim: WorkerClaim;
 	accepted: boolean;
-	costUsd: number;
+	costUsd?: number;
 	cwd: string;
 	inputTokens?: number;
 	outputTokens?: number;
@@ -132,7 +132,7 @@ export function createWorkerResultContract(args: {
 			...(args.inputTokens !== undefined ? { inputTokens: args.inputTokens } : {}),
 			...(args.outputTokens !== undefined ? { outputTokens: args.outputTokens } : {}),
 			...(args.totalTokens !== undefined ? { totalTokens: args.totalTokens } : {}),
-			costUsd: args.costUsd,
+			...(args.costUsd !== undefined ? { costUsd: args.costUsd } : {}),
 			wallClockMs: args.wallClockMs,
 			toolCalls: args.toolCalls,
 		},

@@ -18,6 +18,7 @@ export interface Args {
 	worktreeLane?: string;
 	parentPid?: number;
 	parentSession?: string;
+	taskRef?: string;
 	thinking?: ThinkingLevel;
 	continue?: boolean;
 	resume?: boolean;
@@ -112,6 +113,8 @@ export function parseArgs(args: string[]): Args {
 			}
 		} else if (arg === "--parent-session" && i + 1 < args.length) {
 			result.parentSession = args[++i];
+		} else if (arg === "--task-ref" && i + 1 < args.length) {
+			result.taskRef = args[++i];
 		} else if (arg === "--name" || arg === "-n") {
 			if (i + 1 < args.length) {
 				result.name = args[++i];
@@ -278,6 +281,7 @@ ${chalk.bold("Options:")}
   --worktree-lane <laneKey>      Bind this session to a worktree-sync lane (sets PI_WORKTREE_LANE; enables the lane gate + epoch watcher)
   --parent-pid <pid>             Declare this session as a process-matrix worker of parent pid (sets PI_PARENT_PID)
   --parent-session <id>          Declare the parent session id for a process-matrix worker (sets PI_PARENT_SESSION)
+  --task-ref <id>                Bind process recovery to a goal/task identity (sets PI_TASK_REF)
   --mode <mode>                  Output mode: text (default), json, or rpc
   --print, -p                    Non-interactive mode: process prompt and exit
   --print-usage                  With -p: emit cumulative session usage (one JSON line,
@@ -429,6 +433,7 @@ ${chalk.bold("Built-in Tool Names:")}
   edit       - Edit files with find/replace
   write      - Write files (creates/overwrites)
   task_steps - Track the active session checklist
+  ask_question - Ask the human owner for a consequential choice
   context_audit - Inspect active context/tool/system prompt usage (read-only)
   grep       - Search file contents (read-only, off by default)
   find       - Find files by glob pattern (read-only, off by default)

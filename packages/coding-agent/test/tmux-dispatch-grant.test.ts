@@ -100,18 +100,21 @@ describe("dispatch-grant pure logic", () => {
 		expect(withoutProfile).toContainEqual({ flag: "--no-skills" });
 	});
 
-	it("buildLaunchProfileFlags appends --parent-pid/--parent-session only when present on the source", () => {
+	it("buildLaunchProfileFlags appends process identity only when present on the source", () => {
 		const withParent = buildLaunchProfileFlags({
 			...ONE_SHOT_LAUNCH_PROFILE_SOURCE,
 			parentPid: 4242,
 			parentSession: "master-session-1",
+			taskRef: "goal-1",
 		});
 		expect(withParent).toContainEqual({ flag: "--parent-pid", value: "4242" });
 		expect(withParent).toContainEqual({ flag: "--parent-session", value: "master-session-1" });
+		expect(withParent).toContainEqual({ flag: "--task-ref", value: "goal-1" });
 
 		const withoutParent = buildLaunchProfileFlags(ONE_SHOT_LAUNCH_PROFILE_SOURCE);
 		expect(withoutParent.some((flag) => flag.flag === "--parent-pid")).toBe(false);
 		expect(withoutParent.some((flag) => flag.flag === "--parent-session")).toBe(false);
+		expect(withoutParent.some((flag) => flag.flag === "--task-ref")).toBe(false);
 	});
 
 	it("decodeTmuxWorkerUsageClaim permissively decodes a partial claim and rejects non-objects", () => {
@@ -147,9 +150,21 @@ type LaneEvent = {
 	laneId: string;
 	phase: "dispatch" | "terminal";
 	status?: string;
+	reasonCode?: string;
 	goalId?: string;
-	request?: unknown;
 	worktreeLaneKey?: string;
+	dispatch?: {
+		sequence: number;
+		instructions: string;
+		profileId: string;
+		provider: string;
+		authorizationId: string;
+		authorizationKind: "standing-grant" | "one-shot-owner-approval" | "legacy-recovery";
+		allowedTools: readonly string[];
+		writePaths: readonly string[];
+		maxCostUsd?: number;
+		leaseTtlMs: number;
+	};
 };
 type UsageReport = { usage: unknown; opts?: { label?: string; sourceSessionId?: string; reportId?: string } };
 type StoredEntry = { id: string; parentId: string | null; type: "custom"; customType: string; data: unknown };
@@ -235,6 +250,17 @@ function seedAliveSession(stateDir: string, sessionName: string, paneId: string)
 	fs.appendFileSync(path.join(stateDir, `panes-${sessionName}.txt`), `${paneId}\n`);
 }
 
+function readFakeTmuxCalls(stateDir: string): string[] {
+	try {
+		return fs
+			.readFileSync(path.join(stateDir, "calls.log"), "utf8")
+			.split("\n")
+			.filter((line) => line.length > 0);
+	} catch {
+		return [];
+	}
+}
+
 function writeJobFixture(
 	tempDir: string,
 	parentSessionFile: string,
@@ -310,6 +336,7 @@ function installExtension(
 		hasUI?: boolean;
 		confirmImpl?: (title: string, message: string) => Promise<boolean>;
 		flags?: Record<string, boolean | string>;
+		reportManagedLane?: (event: LaneEvent) => void;
 	},
 ) {
 	const entries: StoredEntry[] = [];
@@ -339,6 +366,7 @@ function installExtension(
 		appendEntry,
 		reportManagedLane(event: LaneEvent) {
 			laneEvents.push(event);
+			opts?.reportManagedLane?.(event);
 		},
 		reportSpawnedUsage(usage: unknown, reportOpts?: UsageReport["opts"]) {
 			usageReports.push({ usage, opts: reportOpts });
@@ -542,6 +570,46 @@ describe.skipIf(process.platform === "win32")("tmux dispatch grant — approval-
 		).rejects.toThrow(/no standing grant for tmux dispatch/);
 	});
 
+	it("reserves the durable managed lane before creating a process or job artifact", async () => {
+		const jobId = "reservation-failure-job";
+		const { registeredTool, context, laneEvents, seedCustomEntry } = installExtension(tempDir, {
+			hasUI: false,
+			reportManagedLane(event) {
+				if (event.phase === "dispatch") throw new Error("host reservation unavailable");
+			},
+		});
+		seedCustomEntry(GRANT_CUSTOM_TYPE, buildGrant({ agent: "pi", maxLaunches: 1 }));
+		const callsBefore = readFakeTmuxCalls(stateDir).length;
+
+		await expect(
+			registeredTool.execute(
+				"fire-reservation-failure",
+				{
+					action: "fire_task",
+					task: "must not launch",
+					jobId,
+					agents: [{ provider: "pi" }],
+					dryRun: false,
+				},
+				new AbortController().signal,
+				() => {},
+				context,
+			),
+		).rejects.toThrow("host reservation unavailable");
+
+		const launchCalls = readFakeTmuxCalls(stateDir).slice(callsBefore);
+		expect(launchCalls.some((call) => /^(new-session|split-window|send-keys|pipe-pane)\b/.test(call))).toBe(false);
+		expect(fs.existsSync(path.join(getTmuxAgentManagerDataRoot(), "jobs", jobId))).toBe(false);
+		expect(laneEvents).toMatchObject([
+			{ phase: "dispatch", laneId: `tmux:${jobId}:pi-1` },
+			{
+				phase: "terminal",
+				laneId: `tmux:${jobId}:pi-1`,
+				reasonCode: "managed_process_launch_reservation_failed",
+			},
+		]);
+	});
+
 	it("a valid grant lets fire_task dispatch UNATTENDED (no confirm prompt), carries grant-derived launch-profile flags on the child pi command, reports the tmux-worker lane, and decrements the launch budget until exhausted", async () => {
 		const { registeredTool, context, laneEvents, confirmCalls, seedCustomEntry } = installExtension(tempDir, {
 			hasUI: true,
@@ -563,6 +631,7 @@ describe.skipIf(process.platform === "win32")("tmux dispatch grant — approval-
 			{
 				action: "fire_task",
 				task: "investigate",
+				goalId: "goal-1",
 				jobId: "grant-job-1",
 				agents: [{ provider: "pi" }],
 				dryRun: false,
@@ -582,9 +651,21 @@ describe.skipIf(process.platform === "win32")("tmux dispatch grant — approval-
 		// grant envelope (fire_task always spreads its own pid/sessionId onto the launch profile).
 		expect(command).toContain(`--parent-pid '${process.pid}'`);
 		expect(command).toContain(`--parent-session '${context.sessionManager.getSessionFile()}'`);
+		expect(command).toContain("--task-ref 'goal-1'");
 		expect(command).toContain(`${PI_ORCHESTRATION_AGENT_ID_ENV}='tmux:grant-job-1:pi-1'`);
 		expect(command).not.toContain("--no-approve");
-		expect(laneEvents).toContainEqual(expect.objectContaining({ phase: "dispatch", status: "launched" }));
+		expect(laneEvents).toContainEqual(
+			expect.objectContaining({
+				phase: "dispatch",
+				dispatch: expect.objectContaining({
+					authorizationId: grant.grantId,
+					authorizationKind: "standing-grant",
+					profileId: "tmux:pi",
+					allowedTools: ["read", "grep"],
+					writePaths: ["/tmp/scope"],
+				}),
+			}),
+		);
 
 		// Budget was 1; it is now exhausted, so a SECOND real launch under the SAME (still hasUI-capable,
 		// but here forced non-interactive) session is refused rather than silently reusing the grant.
@@ -655,7 +736,11 @@ describe.skipIf(process.platform === "win32")("tmux dispatch grant — approval-
 		expect(command).toContain("adhoc-1");
 		expect(command).toContain("never touch main directly");
 		expect(laneEvents).toContainEqual(
-			expect.objectContaining({ phase: "dispatch", status: "launched", worktreeLaneKey: "adhoc-1" }),
+			expect.objectContaining({
+				phase: "dispatch",
+				worktreeLaneKey: "adhoc-1",
+				dispatch: expect.objectContaining({ authorizationId: grant.grantId, sequence: 1 }),
+			}),
 		);
 	});
 

@@ -38,6 +38,11 @@ For the JSONL file format and SessionManager API, see [Session Format](session-f
 
 `/resume` opens an interactive session picker for the current project. `pi -r` opens the same picker at startup.
 
+If the selected session contains a blocked durable goal, Pi applies the same transition as
+`/goal resume` before restarting that session's worker and process supervisors. `pi -c`, `pi -r`, and
+`--session` use the same startup rule. Active goals remain active; completed or cancelled goals are
+never reopened automatically.
+
 In the picker you can:
 
 - search by typing
@@ -48,6 +53,9 @@ In the picker you can:
 - delete with Ctrl+D, then confirm
 
 When available, pi uses the `trash` CLI for deletion instead of permanently removing files.
+
+Use `/goal resume` when you want to resume the blocked goal in the current session without switching
+sessions.
 
 ## Naming Sessions
 

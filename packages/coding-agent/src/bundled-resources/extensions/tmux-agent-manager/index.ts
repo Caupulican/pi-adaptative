@@ -19,6 +19,7 @@ import {
 	buildLaunchProfileFlags,
 	buildTombstone,
 	countGrantUsages,
+	DEFAULT_READ_BIASED_TOOLS,
 	decodeTmuxWorkerUsageClaim,
 	describeGrant,
 	GRANT_CUSTOM_TYPE,
@@ -104,8 +105,8 @@ type Params = {
 	dryRun?: boolean;
 	force?: boolean;
 	confirm?: string;
-	/** Goal this dispatch/grant is scoped to. Optional today (no caller wires it yet); accepted so a
-	 * future goal-loop dispatch can pass it through to grant scope/coverage checks without a shape change. */
+	/** Goal this dispatch/grant is scoped to. Goal-bound dispatch wires this through to grant
+	 * coverage, managed-lane ownership, and the child process's task-recovery fence. */
 	goalId?: string;
 	/** grant_dispatch: target agent for the standing grant. revoke_grant: unused (the active grant's own
 	 * agent is used for its tombstone; this field is not required to revoke). */
@@ -167,6 +168,15 @@ type FireAgentPlan = {
 	/** Mirrors `AgentSpec.worktreeLane` -- carried onto the plan so `applyLaunchProfile` (per-agent
 	 * flags) and the dispatch-phase `reportManagedLane` call can both read it after `buildFireTaskPlan`. */
 	worktreeLane?: string;
+	/** Durable host-lifecycle metadata for the current turn. */
+	dispatchAuthorizationId?: string;
+	dispatchAuthorizationKind?: "standing-grant" | "one-shot-owner-approval" | "legacy-recovery";
+	dispatchAllowedTools?: string[];
+	dispatchWritePaths?: string[];
+	dispatchMaxCostUsd?: number;
+	dispatchInstructions?: string;
+	dispatchGoalId?: string;
+	dispatchLeaseTtlMs?: number;
 };
 type FireTaskPlan = {
 	id: string;
@@ -197,22 +207,37 @@ type FireTaskPlan = {
  * synthesized single-agent, single-turn spec (send_followup, reconcile resume) can reuse it without
  * fabricating unrelated FireTaskPlan fields (createdAt, jobPath, task, ...). */
 type PaneWatcherJobSpec = Pick<FireTaskPlan, "id" | "sessionName" | "deadlineSeconds" | "agents">;
-type ManagedLaneBridgeEvent = {
-	laneId: string;
-	phase: "dispatch" | "terminal";
-	goalId?: string;
-	status?: string;
-	reasonCode?: string;
-	changedFiles?: string[];
-	worktreeLaneKey?: string;
-	request?: unknown;
-	usage?: Usage;
+type ManagedLaneDispatchBridge = {
+	sequence: number;
+	instructions: string;
+	profileId: string;
+	provider: string;
+	authorizationId: string;
+	authorizationKind: "standing-grant" | "one-shot-owner-approval" | "legacy-recovery";
+	allowedTools: readonly string[];
+	writePaths: readonly string[];
+	maxCostUsd?: number;
+	leaseTtlMs: number;
 };
+type ManagedLaneBridgeEventBase = {
+	laneId: string;
+	goalId?: string;
+	worktreeLaneKey?: string;
+};
+type ManagedLaneBridgeEvent =
+	| (ManagedLaneBridgeEventBase & { phase: "dispatch"; dispatch: ManagedLaneDispatchBridge })
+	| (ManagedLaneBridgeEventBase & {
+			phase: "terminal";
+			status?: string;
+			reasonCode?: string;
+			changedFiles?: string[];
+			usage?: Usage;
+	  });
 /** The subset of `ExtensionAPI` this file calls through a narrow local type instead of the full
  * `ExtensionAPI`, so a lightweight test double only needs to implement what a given test path actually
- * exercises. `reportManagedLane`/`reportSpawnedUsage` are wired live host-side (the lane/usage bridge)
- * but stay optional-chained here — best-effort reporting, never a gate: a host/test double that omits
- * them degrades to "the lane/usage claim was not reported," never a crash or a silently-skipped launch.
+ * exercises. Production hosts provide `reportManagedLane`, making its pre-launch durable reservation a
+ * hard gate. The optional shape only preserves standalone extension-test hosts; without the bridge,
+ * lifecycle durability is explicitly unavailable. `reportSpawnedUsage` remains an advisory claim sink.
  * `appendEntry`/`getFlag`/`registerFlag` back the STANDING GRANT itself (session persistence + the
  * non-interactive opt-in flag); `registerFlag` is called unconditionally at extension load so it stays
  * optional-chained too, while `appendEntry`/`getFlag` are asserted present at the point a grant action
@@ -229,6 +254,126 @@ type HostBridge = {
 };
 function agentLaneId(jobId: string, agentId: string): string {
 	return `tmux:${jobId}:${agentId}`;
+}
+
+function managedDispatch(job: FireTaskPlan, agent: FireAgentPlan): ManagedLaneDispatchBridge {
+	const sequence = agent.currentTurn ?? 1;
+	const instructions = agent.dispatchInstructions ?? job.task;
+	const authorizationId = agent.dispatchAuthorizationId ?? `legacy-job:${job.id}:turn:${sequence}`;
+	return {
+		sequence,
+		instructions,
+		profileId: `tmux:${agent.provider}`,
+		provider: agent.provider,
+		authorizationId,
+		authorizationKind: agent.dispatchAuthorizationKind ?? "legacy-recovery",
+		allowedTools: agent.dispatchAllowedTools ?? DEFAULT_READ_BIASED_TOOLS,
+		writePaths: agent.dispatchWritePaths ?? [],
+		...(agent.dispatchMaxCostUsd !== undefined ? { maxCostUsd: agent.dispatchMaxCostUsd } : {}),
+		leaseTtlMs: agent.dispatchLeaseTtlMs ?? job.deadlineSeconds * 1_000,
+	};
+}
+
+function managedAuthorization(
+	grant: TmuxDispatchGrant | undefined,
+	fallbackId: string,
+): {
+	authorizationId: string;
+	authorizationKind: "standing-grant" | "one-shot-owner-approval";
+	launchSource: LaunchProfileSource;
+	allowedTools: string[];
+	writePaths: string[];
+	maxCostUsd?: number;
+} {
+	const launchSource = grant ? launchProfileSourceFromGrant(grant) : ONE_SHOT_LAUNCH_PROFILE_SOURCE;
+	return {
+		authorizationId: grant?.grantId ?? fallbackId,
+		authorizationKind: grant ? "standing-grant" : "one-shot-owner-approval",
+		launchSource,
+		allowedTools: [...(launchSource.allowedTools?.length ? launchSource.allowedTools : DEFAULT_READ_BIASED_TOOLS)],
+		writePaths: [...(launchSource.writePaths ?? [])],
+		...(grant?.budget.maxUsdAdvisory !== undefined ? { maxCostUsd: grant.budget.maxUsdAdvisory } : {}),
+	};
+}
+
+function applyManagedAuthorization(
+	agent: FireAgentPlan,
+	authorization: ReturnType<typeof managedAuthorization>,
+	args: { instructions: string; goalId?: string; leaseTtlMs: number },
+): void {
+	agent.dispatchAuthorizationId = authorization.authorizationId;
+	agent.dispatchAuthorizationKind = authorization.authorizationKind;
+	agent.dispatchAllowedTools = [...authorization.allowedTools];
+	agent.dispatchWritePaths = [...authorization.writePaths];
+	if (authorization.maxCostUsd !== undefined) agent.dispatchMaxCostUsd = authorization.maxCostUsd;
+	else delete agent.dispatchMaxCostUsd;
+	agent.dispatchInstructions = args.instructions;
+	agent.dispatchGoalId = args.goalId;
+	agent.dispatchLeaseTtlMs = args.leaseTtlMs;
+}
+
+function reportManagedDispatchReservations(
+	bridge: HostBridge,
+	job: FireTaskPlan,
+	agents: readonly FireAgentPlan[],
+): void {
+	if (!bridge.reportManagedLane) return;
+	const attemptedLaneIds: string[] = [];
+	try {
+		for (const agent of agents) {
+			const laneId = agentLaneId(job.id, agent.id);
+			attemptedLaneIds.push(laneId);
+			bridge.reportManagedLane({
+				laneId,
+				phase: "dispatch",
+				goalId: agent.dispatchGoalId,
+				worktreeLaneKey: agent.worktreeLane,
+				dispatch: managedDispatch(job, agent),
+			});
+		}
+	} catch (error: unknown) {
+		for (const laneId of attemptedLaneIds) {
+			try {
+				bridge.reportManagedLane({
+					laneId,
+					phase: "terminal",
+					status: "failed",
+					reasonCode: "managed_process_launch_reservation_failed",
+				});
+			} catch {
+				// Preserve the reservation error; durable leases fence any compensation failure.
+			}
+		}
+		throw error;
+	}
+}
+
+function reportManagedLaunchFailure(bridge: HostBridge, job: FireTaskPlan, reasonCode: string): void {
+	if (!bridge.reportManagedLane) return;
+	for (const agent of job.agents) {
+		reportManagedAgentFailure(bridge, job.id, agent.id, reasonCode);
+	}
+}
+
+function reportManagedAgentFailure(bridge: HostBridge, jobId: string, agentId: string, reasonCode: string): void {
+	if (!bridge.reportManagedLane) return;
+	try {
+		bridge.reportManagedLane({
+			laneId: agentLaneId(jobId, agentId),
+			phase: "terminal",
+			status: "failed",
+			reasonCode,
+		});
+	} catch {
+		// Preserve the launch failure; durable leases fence any terminal-report failure.
+	}
+}
+
+function sameStringValues(left: readonly string[], right: readonly string[]): boolean {
+	if (left.length !== right.length) return false;
+	const sortedLeft = [...left].sort();
+	const sortedRight = [...right].sort();
+	return sortedLeft.every((value, index) => value === sortedRight[index]);
 }
 
 const EXTENSION_ROOT = path.dirname(fileURLToPath(import.meta.url));
@@ -383,6 +528,9 @@ function runTmux(args: string[], timeoutMs = 5_000): RunResult {
 		error: result.error ? String(result.error.message || result.error) : undefined,
 		args: [tmux, ...args],
 	};
+}
+function requireTmuxRun(result: RunResult, action: string): void {
+	if (!result.ok) throw new Error(`${action} failed: ${result.error || result.stderr || `exit ${result.status}`}`);
 }
 function detectTmux(): TmuxDetection {
 	const tmuxBin = process.env.PI_TMUX_MANAGER_TMUX_BIN || findExecutable("tmux");
@@ -892,6 +1040,22 @@ function turnWatcherPath(job: FireTaskPlan, turn: number): string {
 function currentResultPath(job: FireTaskPlan, agent: FireAgentPlan): string {
 	return turnResultPath(job.jobDir, agent.id, agent.currentTurn ?? 1, agent.resultPath);
 }
+
+function persistAgentTurnFailure(jobId: string, agentId: string, turn: number, reason: string): void {
+	persistJobPatch(jobId, (current) => {
+		const agent = current.agents.find((entry) => entry.id === agentId);
+		if (!agent || agent.currentTurn !== turn) return undefined;
+		const result: AgentResult = {
+			status: "failed",
+			detectedAt: new Date().toISOString(),
+			reason,
+		};
+		fs.writeFileSync(currentResultPath(current, agent), `${JSON.stringify(result, null, 2)}\n`, { mode: 0o600 });
+		agent.result = result;
+		delete agent.pendingTurn;
+		return current;
+	});
+}
 /** Atomically read-modify-write job.json, always from a FRESH read (never from a caller's possibly
  * stale in-memory copy), mirroring the temp+rename pattern the original notify path used. */
 function persistJobPatch(jobId: string, mutate: (current: FireTaskPlan) => FireTaskPlan | undefined): FireTaskPlan {
@@ -904,8 +1068,8 @@ function persistJobPatch(jobId: string, mutate: (current: FireTaskPlan) => FireT
 	return mutated;
 }
 function sendCommandToPane(paneId: string, command: string): void {
-	runTmux(["send-keys", "-t", paneId, "-l", command]);
-	runTmux(["send-keys", "-t", paneId, "Enter"]);
+	requireTmuxRun(runTmux(["send-keys", "-t", paneId, "-l", command]), `tmux command injection for ${paneId}`);
+	requireTmuxRun(runTmux(["send-keys", "-t", paneId, "Enter"]), `tmux command submit for ${paneId}`);
 }
 function launchTmuxSession(
 	sessionName: string,
@@ -926,36 +1090,50 @@ function launchTmuxSession(
 	runs.push(create);
 	if (!create.ok)
 		throw new Error(`tmux new-session failed: ${create.error || create.stderr || `exit ${create.status}`}`);
-	const firstPane = create.stdout.trim();
-	paneIds.push(firstPane);
-	sendCommandToPane(firstPane, first.command);
-	for (const pane of panes.slice(1)) {
-		const split = runTmux(
-			["split-window", "-d", "-P", "-F", "#{pane_id}", "-t", `${sessionName}:0`, "-c", pane.cwd || cwd],
-			5_000,
-		);
-		runs.push(split);
-		if (!split.ok)
-			throw new Error(`tmux split-window failed: ${split.error || split.stderr || `exit ${split.status}`}`);
-		const paneId = split.stdout.trim();
-		paneIds.push(paneId);
-		sendCommandToPane(paneId, pane.command);
+	try {
+		const firstPane = create.stdout.trim();
+		paneIds.push(firstPane);
+		sendCommandToPane(firstPane, first.command);
+		for (const pane of panes.slice(1)) {
+			const split = runTmux(
+				["split-window", "-d", "-P", "-F", "#{pane_id}", "-t", `${sessionName}:0`, "-c", pane.cwd || cwd],
+				5_000,
+			);
+			runs.push(split);
+			if (!split.ok)
+				throw new Error(`tmux split-window failed: ${split.error || split.stderr || `exit ${split.status}`}`);
+			const paneId = split.stdout.trim();
+			paneIds.push(paneId);
+			sendCommandToPane(paneId, pane.command);
+		}
+		runs.push(runTmux(["select-layout", "-t", `${sessionName}:0`, "tiled"], 3_000));
+		return { runs, paneIds };
+	} catch (error: unknown) {
+		runTmux(["kill-session", "-t", sessionName], 5_000);
+		throw error;
 	}
-	runs.push(runTmux(["select-layout", "-t", `${sessionName}:0`, "tiled"], 3_000));
-	return { runs, paneIds };
 }
 function injectPromptToPane(paneId: string, prompt: string, provider: Provider): void {
 	const text = interactivePromptText(prompt);
 	if (provider === "claude") {
 		const bufferName = `pi-tmux-${crypto.randomBytes(4).toString("hex")}`;
-		runTmux(["set-buffer", "-b", bufferName, text], 10_000);
-		runTmux(["paste-buffer", "-b", bufferName, "-t", paneId], 10_000);
-		runTmux(["send-keys", "-t", paneId, "Enter"], 3_000);
-		runTmux(["delete-buffer", "-b", bufferName], 3_000);
+		requireTmuxRun(runTmux(["set-buffer", "-b", bufferName, text], 10_000), "tmux prompt buffer creation");
+		try {
+			requireTmuxRun(
+				runTmux(["paste-buffer", "-b", bufferName, "-t", paneId], 10_000),
+				`tmux prompt injection for ${paneId}`,
+			);
+			requireTmuxRun(runTmux(["send-keys", "-t", paneId, "Enter"], 3_000), `tmux prompt submit for ${paneId}`);
+		} finally {
+			runTmux(["delete-buffer", "-b", bufferName], 3_000);
+		}
 		return;
 	}
-	runTmux(["send-keys", "-t", paneId, "-l", text], 10_000);
-	runTmux(["send-keys", "-t", paneId, provider === "agy" ? "C-m" : "Enter"], 3_000);
+	requireTmuxRun(runTmux(["send-keys", "-t", paneId, "-l", text], 10_000), `tmux prompt injection for ${paneId}`);
+	requireTmuxRun(
+		runTmux(["send-keys", "-t", paneId, provider === "agy" ? "C-m" : "Enter"], 3_000),
+		`tmux prompt submit for ${paneId}`,
+	);
 }
 /** Write a fresh per-turn prompt + single-agent watcher script and arm `pipe-pane -O` for it. Used by
  * send_followup to open a NEW turn on an already-live pane. Does not inject the prompt text into the
@@ -1507,55 +1685,77 @@ async function executeTool(
 			jobId: job.id,
 			description: `fire_task launch of job ${job.id} (${job.agents.length} child process${job.agents.length === 1 ? "" : "es"}: ${job.agents.map((agent) => `${agent.name}/${agent.provider}`).join(", ")})`,
 		});
+		const managedAuthority = managedAuthorization(authorization.grant, `one-shot:${job.id}:turn:1`);
+		for (const agent of job.agents) {
+			agent.currentTurn = 1;
+			applyManagedAuthorization(agent, managedAuthority, {
+				instructions: job.task,
+				goalId: params.goalId,
+				leaseTtlMs: job.deadlineSeconds * 1_000,
+			});
+		}
 		applyLaunchProfile(job, {
-			...(authorization.grant ? launchProfileSourceFromGrant(authorization.grant) : ONE_SHOT_LAUNCH_PROFILE_SOURCE),
+			...managedAuthority.launchSource,
+			...(params.goalId ? { taskRef: params.goalId } : {}),
 			// Process-matrix parent identity: the dispatched child self-registers as a worker of THIS
 			// session and winds down gracefully if this session disappears (see dispatch-grant.ts's
 			// `LaunchProfileSource.parentPid`/`parentSession` doc).
 			parentPid: process.pid,
 			parentSession: ctx.sessionManager.getSessionId?.() ?? ctx.sessionManager.getSessionFile(),
 		});
-		const archivedJobDir = prepareJobDirForLaunch(job, params.force);
-		const panes = job.agents.map((agent) => ({
-			title: agent.name,
-			cwd: agent.cwd,
-			command: agent.command || defaultProviderInvocation(agent.provider),
-		}));
-		const launch = launchTmuxSession(job.sessionName, job.cwd, panes);
-		job.agents.forEach((agent, index) => {
-			agent.paneId = launch.paneIds[index];
-		});
-		writeFireTaskFiles(job);
-		const watcherPanes = startPaneWatchers(job);
-		for (const agent of job.agents) {
-			if (!agent.paneId) continue;
-			injectPromptToPane(agent.paneId, fs.readFileSync(agent.promptPath, "utf8"), agent.provider);
-			bridge.reportManagedLane?.({
-				laneId: agentLaneId(job.id, agent.id),
-				phase: "dispatch",
-				status: "launched",
-				goalId: params.goalId,
-				worktreeLaneKey: agent.worktreeLane,
+		// The host commits the full execution grant and starts the durable lease before any child
+		// process, job artifact, watcher, or prompt side effect occurs.
+		reportManagedDispatchReservations(bridge, job, job.agents);
+		let sessionCreated = false;
+		try {
+			const archivedJobDir = prepareJobDirForLaunch(job, params.force);
+			const panes = job.agents.map((agent) => ({
+				title: agent.name,
+				cwd: agent.cwd,
+				command: agent.command || defaultProviderInvocation(agent.provider),
+			}));
+			const launch = launchTmuxSession(job.sessionName, job.cwd, panes);
+			sessionCreated = true;
+			job.agents.forEach((agent, index) => {
+				agent.paneId = launch.paneIds[index];
 			});
-		}
-		return {
-			content: [
-				{
-					type: "text",
-					text: [
-						`Launched tmux interactive fire-and-forget job ${job.id}.`,
-						`Session: ${job.sessionName}`,
-						`Attach: tmux attach -t ${job.sessionName}`,
-						`Job state: ${job.jobPath}`,
-						archivedJobDir ? `Archived previous job dir: ${archivedJobDir}` : undefined,
-						"Completion: event-driven pane output watchers armed (no polling).",
-					]
-						.filter(Boolean)
-						.join("\n"),
+			writeFireTaskFiles(job);
+			const watcherPanes = startPaneWatchers(job);
+			for (const agent of job.agents) {
+				if (!agent.paneId) continue;
+				injectPromptToPane(agent.paneId, fs.readFileSync(agent.promptPath, "utf8"), agent.provider);
+			}
+			return {
+				content: [
+					{
+						type: "text",
+						text: [
+							`Launched tmux interactive fire-and-forget job ${job.id}.`,
+							`Session: ${job.sessionName}`,
+							`Attach: tmux attach -t ${job.sessionName}`,
+							`Job state: ${job.jobPath}`,
+							archivedJobDir ? `Archived previous job dir: ${archivedJobDir}` : undefined,
+							"Completion: event-driven pane output watchers armed (no polling).",
+						]
+							.filter(Boolean)
+							.join("\n"),
+					},
+				],
+				details: {
+					action,
+					detection,
+					job,
+					runs: launch.runs,
+					paneIds: launch.paneIds,
+					watcherPanes,
+					archivedJobDir,
 				},
-			],
-			details: { action, detection, job, runs: launch.runs, paneIds: launch.paneIds, watcherPanes, archivedJobDir },
-		};
+			};
+		} catch (error: unknown) {
+			if (sessionCreated) runTmux(["kill-session", "-t", job.sessionName], 5_000);
+			reportManagedLaunchFailure(bridge, job, "managed_process_launch_failed");
+			throw error;
+		}
 	}
 	if (action === "send_followup") {
 		if (!params.jobId) throw new Error("send_followup requires jobId");
@@ -1604,12 +1804,23 @@ async function executeTool(
 		// APPROVAL-GATED LAUNCH (doctrine-regression mandatory): a follow-up dispatches a fresh
 		// turn into an already-running child, so there is no new child command to profile — only the
 		// grant/one-shot authorization is resolved here (no applyLaunchProfile call).
-		await authorizeLaunch(bridge, ctx, {
+		const authorization = await authorizeLaunch(bridge, ctx, {
 			agents: [targetAgent.provider],
 			goalId: params.goalId,
 			jobId: `${job.id}:turn:${turn}`,
 			description: `send_followup turn ${turn} to ${targetAgent.name} in job ${job.id}`,
 		});
+		const managedAuthority = managedAuthorization(authorization.grant, `one-shot:${job.id}:turn:${turn}`);
+		const launchAllowedTools = targetAgent.dispatchAllowedTools ?? [...DEFAULT_READ_BIASED_TOOLS];
+		const launchWritePaths = targetAgent.dispatchWritePaths ?? [];
+		if (
+			!sameStringValues(launchAllowedTools, managedAuthority.allowedTools) ||
+			!sameStringValues(launchWritePaths, managedAuthority.writePaths)
+		) {
+			throw new Error(
+				`send_followup refused: authorization scope differs from the already-running process for ${targetAgent.name}; relaunch the worker to apply a new tool or write-path scope.`,
+			);
+		}
 		// Reserve before watcher/prompt side effects. Reconcile re-arms a reserved turn but never
 		// re-injects it, so crash recovery cannot duplicate a provider prompt.
 		const reserved = persistJobPatch(job.id, (current) => {
@@ -1618,28 +1829,38 @@ async function executeTool(
 			agent.currentTurn = turn;
 			agent.pendingTurn = turn;
 			agent.result = undefined;
+			applyManagedAuthorization(agent, managedAuthority, {
+				instructions: followupTask,
+				goalId: params.goalId,
+				leaseTtlMs: job.deadlineSeconds * 1_000,
+			});
 			current.currentTurn = turn;
 			return current;
 		});
 		const reservedAgent = reserved.agents.find((agent) => agent.id === targetAgent.id);
 		if (!reservedAgent || reservedAgent.pendingTurn !== turn)
 			throw new Error(`send_followup refused: failed to reserve turn ${turn} for ${targetAgent.id}`);
-		const written = dispatchAgentTurn(reserved, reservedAgent, turn, promptText);
-		injectPromptToPane(reservedAgent.paneId as string, promptText, reservedAgent.provider);
-		persistJobPatch(job.id, (current) => {
-			const agent = current.agents.find((entry) => entry.id === reservedAgent.id);
-			if (!agent || agent.pendingTurn !== turn) return undefined;
-			delete agent.pendingTurn;
-			return current;
-		});
-		bridge.reportManagedLane?.({
-			laneId: agentLaneId(job.id, targetAgent.id),
-			phase: "dispatch",
-			status: "follow-up",
-			goalId: params.goalId,
-			request: { turn },
-			worktreeLaneKey: targetAgent.worktreeLane,
-		});
+		try {
+			reportManagedDispatchReservations(bridge, reserved, [reservedAgent]);
+		} catch (error: unknown) {
+			persistAgentTurnFailure(job.id, reservedAgent.id, turn, "managed_process_launch_reservation_failed");
+			throw error;
+		}
+		let written: ReturnType<typeof dispatchAgentTurn>;
+		try {
+			written = dispatchAgentTurn(reserved, reservedAgent, turn, promptText);
+			injectPromptToPane(reservedAgent.paneId as string, promptText, reservedAgent.provider);
+			persistJobPatch(job.id, (current) => {
+				const agent = current.agents.find((entry) => entry.id === reservedAgent.id);
+				if (!agent || agent.pendingTurn !== turn) return undefined;
+				delete agent.pendingTurn;
+				return current;
+			});
+		} catch (error: unknown) {
+			persistAgentTurnFailure(job.id, reservedAgent.id, turn, "managed_process_followup_failed");
+			reportManagedAgentFailure(bridge, job.id, reservedAgent.id, "managed_process_followup_failed");
+			throw error;
+		}
 		return {
 			content: [
 				{
@@ -1805,13 +2026,8 @@ function reconcileTmuxSessions(ctx: ExtensionContext, bridge: HostBridge): void 
 			if (agent.result !== undefined) continue;
 			if (!agent.paneId || !tmuxPaneExists(job.sessionName, agent.paneId)) continue;
 			if (tmuxPaneHasPipe(agent.paneId)) continue;
+			reportManagedDispatchReservations(bridge, job, [agent]);
 			rearmAgentWatcher(job, agent);
-			bridge.reportManagedLane?.({
-				laneId: agentLaneId(job.id, agent.id),
-				phase: "dispatch",
-				status: "resumed",
-				worktreeLaneKey: agent.worktreeLane,
-			});
 		}
 	}
 }
@@ -1846,27 +2062,6 @@ export default function tmuxAgentManagerExtension(pi: ExtensionAPI) {
 			// single whole-job notifiedAt flag.
 			const pendingAgents = job.agents.filter((agent) => (agent.notifiedTurn ?? 0) < (agent.currentTurn ?? 1));
 			if (pendingAgents.length === 0) continue;
-			pi.sendMessage(
-				{
-					customType: "tmux-background-completion",
-					content: formatFireTaskHandoff(job),
-					display: true,
-					details: {
-						jobId: job.id,
-						sessionName: job.sessionName,
-						agents: job.agents.map((agent) => ({ id: agent.id, name: agent.name, status: agent.result?.status })),
-					},
-				},
-				{ triggerTurn: true, deliverAs: "followUp" },
-			);
-			persistJobPatch(job.id, (current) => {
-				current.notifiedAt = new Date().toISOString();
-				for (const agent of current.agents) {
-					const inMemoryAgent = job.agents.find((entry) => entry.id === agent.id);
-					agent.notifiedTurn = inMemoryAgent?.currentTurn ?? agent.currentTurn ?? 1;
-				}
-				return current;
-			});
 			for (const agent of pendingAgents) {
 				// Advisory-only, and only ever reported when the worker itself chose to write the
 				// claim file — never fabricated, never a hard cross-process cap.
@@ -1884,6 +2079,37 @@ export default function tmuxAgentManagerExtension(pi: ExtensionAPI) {
 					});
 				}
 			}
+			// Production hosts own the sole durable wake path through reportManagedLane. The direct
+			// message remains only for lightweight/standalone hosts that omit that bridge entirely.
+			if (!bridge.reportManagedLane) {
+				pi.sendMessage(
+					{
+						customType: "tmux-background-completion",
+						content: formatFireTaskHandoff(job),
+						display: true,
+						details: {
+							jobId: job.id,
+							sessionName: job.sessionName,
+							agents: job.agents.map((agent) => ({
+								id: agent.id,
+								name: agent.name,
+								status: agent.result?.status,
+							})),
+						},
+					},
+					{ triggerTurn: true, deliverAs: "followUp" },
+				);
+			}
+			// reportManagedLane persisted the terminal result + outbox synchronously before returning.
+			// This marker only suppresses duplicate extension reports; it is not notification truth.
+			persistJobPatch(job.id, (current) => {
+				current.notifiedAt = new Date().toISOString();
+				for (const agent of current.agents) {
+					const inMemoryAgent = job.agents.find((entry) => entry.id === agent.id);
+					agent.notifiedTurn = inMemoryAgent?.currentTurn ?? agent.currentTurn ?? 1;
+				}
+				return current;
+			});
 			if (ctx.hasUI) ctx.ui.notify(`tmux background task ${job.id} completed.`, "info");
 		}
 

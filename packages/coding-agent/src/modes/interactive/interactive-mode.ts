@@ -22,7 +22,7 @@ import {
 	TruncatedText,
 	TUI,
 } from "@caupulican/pi-tui";
-import { APP_NAME, APP_TITLE, VERSION } from "../../config.ts";
+import { APP_NAME, APP_TITLE, getAgentDir, VERSION } from "../../config.ts";
 import { type AgentSession, type AgentSessionEvent, parseSkillBlock } from "../../core/agent-session.ts";
 import type { AgentSessionRuntime } from "../../core/agent-session-runtime.ts";
 import type {
@@ -45,6 +45,7 @@ import type { PrismLlamaCppRuntime } from "../../core/models/llamacpp-runtime.ts
 import type { OllamaRuntime, TransformersRuntime } from "../../core/models/local-runtime.ts";
 import type { ResourceDiagnostic } from "../../core/resource-loader.ts";
 import { formatMissingSessionCwdPrompt, type MissingSessionCwdError } from "../../core/session-cwd.ts";
+import { SessionImageStore } from "../../core/session-image-store.ts";
 import type {
 	AutoLearnSettings,
 	AutonomyMode,
@@ -237,6 +238,7 @@ export class InteractiveMode {
 	private pendingUserInputs: UserInputSubmission[] = [];
 	private pendingClipboardImages: PendingClipboardImage[] = [];
 	private clipboardImageCounter = 0;
+	private clipboardImageStore: SessionImageStore | undefined;
 	private loadingAnimation: Loader | undefined = undefined;
 	private workingMessage: string | undefined = undefined;
 	private workingVisible = true;
@@ -439,6 +441,7 @@ export class InteractiveMode {
 				},
 				getBuiltInHeader: () => this.builtInHeader,
 				getAutocompleteProvider: () => this.autocompleteProvider,
+				getClipboardImageStore: () => this.clipboardImageStore,
 				getToolsExpanded: () => this.toolOutputExpanded,
 				pushAutocompleteProviderWrapper: (factory) => {
 					this.autocompleteProviderWrappers.push(factory);
@@ -1244,6 +1247,18 @@ export class InteractiveMode {
 	private async rebindCurrentSession(): Promise<void> {
 		this.unsubscribe?.();
 		this.unsubscribe = undefined;
+		this.pendingClipboardImages = [];
+		this.clipboardImageCounter = 0;
+		const clipboardImageDirectory = this.settingsManager.getClipboardImageDirectory();
+		this.clipboardImageStore =
+			this.sessionManager.isPersisted() || clipboardImageDirectory
+				? new SessionImageStore({
+						agentDir: getAgentDir(),
+						cwd: this.sessionManager.getCwd(),
+						sessionId: this.sessionManager.getSessionId(),
+						directory: clipboardImageDirectory,
+					})
+				: undefined;
 		this.applyRuntimeSettings();
 		await this.bindCurrentSessionExtensions();
 		this.subscribeToAgent();
@@ -1252,6 +1267,13 @@ export class InteractiveMode {
 		this.updateEditorBorderColor();
 		this.updateTerminalTitle();
 		this.refreshOrchestrationWidget();
+		try {
+			await this.session.resumePendingHumanInput();
+		} catch (error: unknown) {
+			this.showError(
+				`Failed to resume pending user input: ${error instanceof Error ? error.message : String(error)}`,
+			);
+		}
 	}
 
 	private subscribeToExtensionsChanged(): void {
@@ -1537,6 +1559,8 @@ export class InteractiveMode {
 
 	private handleClipboardImagePaste(): Promise<void> {
 		const self = this;
+		const selectedModel = this.session?.model;
+		const modelCannotSeeImages = selectedModel ? !selectedModel.input.includes("image") : false;
 		return clipboardInput.handleClipboardImagePaste({
 			get pendingClipboardImages() {
 				return self.pendingClipboardImages;
@@ -1552,6 +1576,12 @@ export class InteractiveMode {
 			},
 			editor: this.editor,
 			ui: this.ui,
+			autoResizeImages: this.settingsManager.getImageAutoResize(),
+			blockImages: this.settingsManager.getBlockImages() || modelCannotSeeImages,
+			blockImagesReason: modelCannotSeeImages
+				? "The selected model does not accept image input. Switch to an image-capable model or route this inspection to a vision worker."
+				: undefined,
+			imageStore: this.clipboardImageStore,
 			showStatus: (message) => this.showStatus(message),
 			showWarning: (message) => this.showWarning(message),
 		});
@@ -1573,6 +1603,7 @@ export class InteractiveMode {
 				set clipboardImageCounter(value) {
 					self.clipboardImageCounter = value;
 				},
+				clipboardImageStore: this.clipboardImageStore,
 			},
 			text,
 		);
@@ -3211,6 +3242,7 @@ export class InteractiveMode {
 			showSelector: (create) => this.showSelector(create),
 			showStatus: (message) => this.showStatus(message),
 			showError: (message) => this.showError(message),
+			refreshAutonomyFooterStatus: () => this.refreshAutonomyFooterStatus(),
 			renderCurrentSessionState: () => this.renderCurrentSessionState(),
 			renderInitialMessages: (options) => this.renderInitialMessages(options),
 			flushCompactionQueue: (options) => this.flushCompactionQueue(options),

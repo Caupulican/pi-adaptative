@@ -49,6 +49,7 @@ export async function launchResumablePiAgent(options: {
 		argsPrefix: options.target.argsPrefix,
 		parentPid: options.parentPid,
 		parentSessionId: options.parentSessionId,
+		taskRef: options.payload.taskRef,
 		wakePrompt: buildResumablePiAgentWakePrompt(options.payload),
 	});
 	if ([spec.executable, spec.cwd, ...spec.args].some((value) => value.includes("\0"))) {

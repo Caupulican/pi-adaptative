@@ -5,11 +5,13 @@ import type {
 	OrchestrationProfile,
 	RiskBudget,
 	ToolCapabilityManifest,
+	WorkerRole,
 } from "../orchestration/contracts.ts";
 import { buildLaneToolManifests } from "../orchestration/lane-tool-manifests.ts";
 import { ExecutionPolicyCompiler } from "../orchestration/policy-compiler.ts";
 import { intersectRiskBudgets } from "../orchestration/risk-budget.ts";
 import type { ResolvedWorkerDelegationSettings } from "../settings-manager.ts";
+import { getToolCapabilityPolicy } from "../tool-capability-policy.ts";
 
 const READ_TOOL_NAMES = ["read", "grep", "find", "ls"] as const;
 const WRITE_TOOL_NAMES = ["write", "edit"] as const;
@@ -109,6 +111,62 @@ export function compileWorkerExecutionGrant(args: {
 		requestedBudget: args.plan.budget,
 		authorityBudget: args.plan.budget,
 		policyVersion: "worker-profile-v1",
+	});
+	if (compiled.outcome !== "allow") return { ok: false, reasonCodes: compiled.reasonCodes };
+	return { ok: true, grant: compiled.grant };
+}
+
+/** Compile the host's durable authority record before an externally managed process is launched. */
+export function compileManagedProcessExecutionGrant(args: {
+	target: { objectiveId: string; taskId: string; attemptId: string };
+	laneId: string;
+	authorizationId: string;
+	role: WorkerRole;
+	allowedTools: readonly string[];
+	writePaths: readonly string[];
+	cwd: string;
+	deniedPaths: readonly string[];
+	budget: RiskBudget;
+}): { ok: true; grant: ExecutionGrant } | { ok: false; reasonCodes: readonly string[] } {
+	const manifests: ToolCapabilityManifest[] = [];
+	const unknownTools: string[] = [];
+	for (const toolName of [...new Set(args.allowedTools)]) {
+		const policy = getToolCapabilityPolicy(toolName);
+		const capability = policy?.capabilityCandidates[0];
+		if (!policy || !capability) {
+			unknownTools.push(toolName);
+			continue;
+		}
+		manifests.push({
+			toolName,
+			moduleSpecifier: `managed-process:${toolName}`,
+			capabilities: [capability],
+			roles: [args.role],
+			enforcements: [policy.enforcement],
+		});
+	}
+	if (unknownTools.length > 0) return { ok: false, reasonCodes: unknownTools.map((name) => `unknown_tool:${name}`) };
+	const capabilities = [...new Set(manifests.flatMap((manifest) => manifest.capabilities))];
+	const readEnabled = capabilities.some(
+		(capability) => capability === "filesystem.read" || capability === "worktree.read",
+	);
+	const compiled = new ExecutionPolicyCompiler().compile({
+		...args.target,
+		subjectId: `managed:${args.laneId}:${args.authorizationId}`,
+		role: args.role,
+		requiredCapabilities: capabilities,
+		requestedCapabilities: capabilities,
+		authorityCapabilities: capabilities,
+		requestedTools: manifests.map((manifest) => manifest.toolName),
+		toolManifests: manifests,
+		readPaths: readEnabled ? [path.resolve(args.cwd)] : [],
+		writePaths: args.writePaths.map((entry) =>
+			path.isAbsolute(entry) ? path.resolve(entry) : path.resolve(args.cwd, entry),
+		),
+		deniedPaths: args.deniedPaths.map((entry) => path.resolve(entry)),
+		requestedBudget: args.budget,
+		authorityBudget: args.budget,
+		policyVersion: "managed-process-v1",
 	});
 	if (compiled.outcome !== "allow") return { ok: false, reasonCodes: compiled.reasonCodes };
 	return { ok: true, grant: compiled.grant };

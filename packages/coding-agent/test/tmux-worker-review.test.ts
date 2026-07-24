@@ -5,6 +5,7 @@ import { BackgroundLaneController, type BackgroundLaneControllerDeps } from "../
 import type { ExtensionContext } from "../src/core/extensions/types.ts";
 import { getInFlightWorkUnits, resetInFlightWorkRegistryForTests } from "../src/core/reload-blockers.ts";
 import { createDelegateStatusToolDefinition } from "../src/core/tools/delegate-status.ts";
+import { createTestManagedLaneDispatch } from "./managed-lane-fixture.ts";
 
 const ctx = undefined as unknown as ExtensionContext;
 
@@ -31,7 +32,7 @@ function buildDeps(
 	} as unknown as SessionManager;
 	const deps = {
 		isDisposed: () => false,
-		getSessionId: () => "test-session",
+		getSessionId: () => `test-session:${process.pid}:${agentDir}`,
 		getCwd: () => overrides?.cwd ?? "/repo",
 		getAgentDir: () => agentDir,
 		getSessionManager: () => sessionManager,
@@ -57,7 +58,11 @@ describe("host re-review of a managed (tmux) lane's changed files", () => {
 		});
 		const controller = new BackgroundLaneController(deps);
 
-		controller.recordManagedLane({ laneId: "tmux-job-1", phase: "dispatch" });
+		controller.recordManagedLane({
+			laneId: "tmux-job-1",
+			phase: "dispatch",
+			dispatch: createTestManagedLaneDispatch(),
+		});
 		controller.recordManagedLane({
 			laneId: "tmux-job-1",
 			phase: "terminal",
@@ -77,7 +82,11 @@ describe("host re-review of a managed (tmux) lane's changed files", () => {
 		});
 		const controller = new BackgroundLaneController(deps);
 
-		controller.recordManagedLane({ laneId: "tmux-job-2", phase: "dispatch" });
+		controller.recordManagedLane({
+			laneId: "tmux-job-2",
+			phase: "dispatch",
+			dispatch: createTestManagedLaneDispatch(),
+		});
 		controller.recordManagedLane({
 			laneId: "tmux-job-2",
 			phase: "terminal",
@@ -94,7 +103,11 @@ describe("host re-review of a managed (tmux) lane's changed files", () => {
 		const { deps, savedClaims } = buildDeps(agentDir, { envelope: undefined });
 		const controller = new BackgroundLaneController(deps);
 
-		controller.recordManagedLane({ laneId: "tmux-job-3", phase: "dispatch" });
+		controller.recordManagedLane({
+			laneId: "tmux-job-3",
+			phase: "dispatch",
+			dispatch: createTestManagedLaneDispatch(),
+		});
 		controller.recordManagedLane({
 			laneId: "tmux-job-3",
 			phase: "terminal",
@@ -112,7 +125,11 @@ describe("host re-review of a managed (tmux) lane's changed files", () => {
 		});
 		const controller = new BackgroundLaneController(deps);
 
-		controller.recordManagedLane({ laneId: "tmux-job-4", phase: "dispatch" });
+		controller.recordManagedLane({
+			laneId: "tmux-job-4",
+			phase: "dispatch",
+			dispatch: createTestManagedLaneDispatch(),
+		});
 		controller.recordManagedLane({ laneId: "tmux-job-4", phase: "terminal", status: "succeeded", changedFiles: [] });
 
 		expect(savedClaims[0]?.claim.parentReviewRequired).toBe(false);
@@ -125,7 +142,11 @@ describe("host re-review of a managed (tmux) lane's changed files", () => {
 		});
 		const controller = new BackgroundLaneController(deps);
 
-		controller.recordManagedLane({ laneId: "tmux-job-5", phase: "dispatch" });
+		controller.recordManagedLane({
+			laneId: "tmux-job-5",
+			phase: "dispatch",
+			dispatch: createTestManagedLaneDispatch(),
+		});
 		controller.recordManagedLane({
 			laneId: "tmux-job-5",
 			phase: "terminal",
@@ -152,7 +173,11 @@ describe("host re-review of a managed (tmux) lane's changed files", () => {
 		});
 		const controller = new BackgroundLaneController(deps);
 
-		controller.recordManagedLane({ laneId: "tmux-job-6", phase: "dispatch" });
+		controller.recordManagedLane({
+			laneId: "tmux-job-6",
+			phase: "dispatch",
+			dispatch: createTestManagedLaneDispatch(),
+		});
 		controller.recordManagedLane({
 			laneId: "tmux-job-6",
 			phase: "terminal",

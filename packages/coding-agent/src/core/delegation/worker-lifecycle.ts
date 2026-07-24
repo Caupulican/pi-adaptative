@@ -1,15 +1,19 @@
 import type { LaneRecord } from "../autonomy/lane-tracker.ts";
 import type { GoalState } from "../goals/goal-state.ts";
-import type { WorkerResultContract } from "../orchestration/contracts.ts";
+import type { ExecutionGrant, WorkerResultContract } from "../orchestration/contracts.ts";
 import {
 	DelegationOrchestrationLedger,
 	type PrepareDelegationInput,
+	type PrepareManagedDelegationInput,
 	type StartedDelegationAttempt,
 } from "../orchestration/delegation-ledger.ts";
 import type { AttemptRuntimeState, TaskRuntimeProjection } from "../orchestration/task-runtime.ts";
 import {
 	ACTIVE_WORKER_ATTEMPT_STATUSES,
+	isManagedWorkerAttempt,
+	projectManagedWorkerLaneRecords,
 	projectWorkerLaneRecord,
+	selectedManagedWorkerAttempt,
 	selectedWorkerAttempt,
 } from "./worker-lane-projection.ts";
 
@@ -61,6 +65,64 @@ export class WorkerLifecycle {
 		return { record, attempt };
 	}
 
+	prepareManaged(
+		input: PrepareManagedDelegationInput & {
+			leaseTtlMs: number;
+			compileGrant(target: { objectiveId: string; taskId: string; attemptId: string }): ExecutionGrant;
+		},
+	): {
+		record: LaneRecord;
+		attempt: AttemptRuntimeState;
+		handle: StartedDelegationAttempt;
+		created: boolean;
+	} {
+		const before = selectedManagedWorkerAttempt(this.ledger.runtime.getSnapshot(), input.laneId);
+		if (before?.dispatch.dispatchSequence === input.dispatchSequence) {
+			if (
+				before.dispatch.provider !== "legacy" &&
+				(before.dispatch.instructions !== input.instructions ||
+					before.dispatch.profileId !== input.profileId ||
+					before.dispatch.provider !== input.provider ||
+					before.dispatch.worktreeLaneKey !== input.worktreeLaneKey ||
+					before.dispatch.authorizationId !== input.authorizationId)
+			) {
+				throw new Error(
+					`Managed worker '${input.laneId}' turn ${input.dispatchSequence} was re-reported with conflicting dispatch data.`,
+				);
+			}
+			if (before.status === "queued") {
+				const handle = this.startPreparedManagedAttempt(before, input.leaseTtlMs, input.compileGrant);
+				const record = this.getManagedRecord(input.laneId);
+				if (!record) throw new Error(`Managed worker '${input.laneId}' was not projected.`);
+				return {
+					record,
+					attempt: this.ledger.runtime.getSnapshot().attempts[before.attemptId]!,
+					handle,
+					created: true,
+				};
+			}
+			const record = this.getManagedRecord(input.laneId);
+			if (!record) throw new Error(`Managed worker '${input.laneId}' was not projected.`);
+			if (!before.lease) throw new Error(`Managed worker '${input.laneId}' has no durable lease.`);
+			return {
+				record,
+				attempt: before,
+				handle: this.startedHandle(before),
+				created: false,
+			};
+		}
+		if (before && ACTIVE_WORKER_ATTEMPT_STATUSES.has(before.status)) {
+			throw new Error(
+				`Managed worker '${input.laneId}' cannot dispatch turn ${input.dispatchSequence} while turn ${before.dispatch.dispatchSequence ?? 1} is active.`,
+			);
+		}
+		const attempt = this.ledger.prepareManaged(input);
+		const handle = this.startPreparedManagedAttempt(attempt, input.leaseTtlMs, input.compileGrant);
+		const record = this.getManagedRecord(input.laneId);
+		if (!record) throw new Error(`Managed worker '${input.laneId}' was not projected after dispatch.`);
+		return { record, attempt: this.ledger.runtime.getSnapshot().attempts[attempt.attemptId]!, handle, created: true };
+	}
+
 	synchronizeGoalState(goal: GoalState): LaneRecord[] {
 		const before = new Map(this.getRecords().map((record) => [record.laneId, record.status]));
 		this.ledger.synchronizeGoalState(goal);
@@ -79,8 +141,8 @@ export class WorkerLifecycle {
 		return this.ledger.start(attempt.attemptId, leaseTtlMs);
 	}
 
-	bindGrant(attemptId: string, grantId: string): void {
-		this.ledger.runtime.bindAttemptGrant(attemptId, grantId);
+	bindGrant(attemptId: string, grant: ExecutionGrant): void {
+		this.ledger.runtime.bindAttemptGrant(attemptId, grant);
 	}
 
 	finish(result: WorkerResultContract, options: { notify?: boolean } = {}): LaneRecord {
@@ -126,6 +188,7 @@ export class WorkerLifecycle {
 		verificationOfTaskId?: string;
 	}> {
 		return this.ledger.recoverQueuedDispatches().flatMap((attempt) => {
+			if (isManagedWorkerAttempt(attempt)) return [];
 			const record = this.getRecord(attempt.taskId);
 			const task = this.ledger.runtime.getSnapshot().tasks[attempt.taskId]?.task;
 			return record
@@ -205,13 +268,36 @@ export class WorkerLifecycle {
 	getRecords(): LaneRecord[] {
 		const snapshot = this.ledger.runtime.getSnapshot();
 		return Object.keys(snapshot.tasks).flatMap((taskId) => {
+			const attempt = selectedWorkerAttempt(snapshot, taskId);
+			if (!attempt || isManagedWorkerAttempt(attempt)) return [];
 			const record = projectWorkerLaneRecord(snapshot, taskId);
 			return record ? [record] : [];
 		});
 	}
 
+	getManagedRecords(): LaneRecord[] {
+		return projectManagedWorkerLaneRecords(this.ledger.runtime.getSnapshot());
+	}
+
+	getAllRecords(): LaneRecord[] {
+		return [...this.getRecords(), ...this.getManagedRecords()];
+	}
+
 	getRecord(laneId: string): LaneRecord | undefined {
 		return projectWorkerLaneRecord(this.ledger.runtime.getSnapshot(), laneId);
+	}
+
+	getManagedRecord(laneId: string): LaneRecord | undefined {
+		return this.getManagedRecords().find((record) => record.laneId === laneId);
+	}
+
+	getManagedAttempt(laneId: string): AttemptRuntimeState | undefined {
+		return selectedManagedWorkerAttempt(this.ledger.runtime.getSnapshot(), laneId);
+	}
+
+	getManagedHandle(laneId: string): StartedDelegationAttempt | undefined {
+		const attempt = this.getManagedAttempt(laneId);
+		return attempt?.lease ? this.startedHandle(attempt) : undefined;
 	}
 
 	getActiveAttempt(laneId: string): AttemptRuntimeState | undefined {
@@ -222,7 +308,11 @@ export class WorkerLifecycle {
 		const snapshot = this.ledger.runtime.getSnapshot();
 		return Object.keys(snapshot.tasks).filter((taskId) => {
 			const attempt = selectedWorkerAttempt(snapshot, taskId);
-			return attempt?.status === "running" && (!profileId || attempt.dispatch.profileId === profileId);
+			return (
+				attempt?.status === "running" &&
+				!isManagedWorkerAttempt(attempt) &&
+				(!profileId || attempt.dispatch.profileId === profileId)
+			);
 		}).length;
 	}
 
@@ -242,10 +332,10 @@ export class WorkerLifecycle {
 	getTerminalNotification(
 		laneId: string,
 	): { notificationId: string; status: "pending" | "delivered"; record: LaneRecord } | undefined {
-		const record = this.getRecord(laneId);
+		const record = this.getRecord(laneId) ?? this.getManagedRecord(laneId);
 		if (!record || record.status === "queued" || record.status === "running") return undefined;
 		this.enqueueTerminalNotification(record);
-		const attempt = this.getActiveAttempt(laneId);
+		const attempt = this.getActiveAttempt(laneId) ?? this.getManagedAttempt(laneId);
 		if (!attempt) return undefined;
 		const notificationId = `worker-terminal:${attempt.attemptId}`;
 		const notification = this.ledger.runtime.getSnapshot().notifications[notificationId];
@@ -267,7 +357,7 @@ export class WorkerLifecycle {
 	}
 
 	private enqueueTerminalNotification(record: LaneRecord): void {
-		const attempt = this.getActiveAttempt(record.laneId);
+		const attempt = this.getActiveAttempt(record.laneId) ?? this.getManagedAttempt(record.laneId);
 		if (!attempt || ACTIVE_WORKER_ATTEMPT_STATUSES.has(attempt.status)) return;
 		const snapshot = this.ledger.runtime.getSnapshot();
 		const task = snapshot.tasks[attempt.taskId];
@@ -287,5 +377,38 @@ export class WorkerLifecycle {
 			throw new Error(`Durable worker '${laneId}' has no active attempt.`);
 		}
 		return attempt;
+	}
+
+	private startedHandle(attempt: AttemptRuntimeState): StartedDelegationAttempt {
+		const task = this.ledger.runtime.getSnapshot().tasks[attempt.taskId];
+		if (!task || !attempt.lease) throw new Error(`Attempt '${attempt.attemptId}' has no started handle.`);
+		return {
+			objectiveId: task.task.objectiveId,
+			taskId: task.task.taskId,
+			attemptId: attempt.attemptId,
+			leaseId: attempt.lease.leaseId,
+			fencingToken: attempt.lease.fencingToken,
+			expiresAt: attempt.lease.expiresAt,
+		};
+	}
+
+	private startPreparedManagedAttempt(
+		attempt: AttemptRuntimeState,
+		leaseTtlMs: number,
+		compileGrant: (target: { objectiveId: string; taskId: string; attemptId: string }) => ExecutionGrant,
+	): StartedDelegationAttempt {
+		const task = this.ledger.runtime.getSnapshot().tasks[attempt.taskId];
+		if (!task) throw new Error(`Managed attempt '${attempt.attemptId}' has no durable task.`);
+		const grant = compileGrant({
+			objectiveId: task.task.objectiveId,
+			taskId: task.task.taskId,
+			attemptId: attempt.attemptId,
+		});
+		this.bindGrant(attempt.attemptId, grant);
+		return this.ledger.start(
+			attempt.attemptId,
+			leaseTtlMs,
+			`managed:${attempt.dispatch.logicalLaneId ?? attempt.taskId}`,
+		);
 	}
 }

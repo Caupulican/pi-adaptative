@@ -301,7 +301,6 @@ describe.skipIf(process.platform === "win32")("bundled tmux agent manager comple
 				return undefined;
 			},
 			appendEntry: customEntries.appendEntry,
-			reportManagedLane() {},
 			reportSpawnedUsage() {},
 			sendMessage(message: SentMessage["message"], options?: SentMessage["options"]) {
 				const record = { message, options };

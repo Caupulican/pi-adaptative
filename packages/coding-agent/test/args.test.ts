@@ -44,13 +44,14 @@ describe("parseArgs", () => {
 			}
 		});
 
-		test("lists the native task and Python tool surfaces", () => {
+		test("lists the native task, question, and Python tool surfaces", () => {
 			const log = vi.spyOn(console, "log").mockImplementation(() => {});
 			try {
 				printHelp();
 				const output = log.mock.calls.map((call) => call.join(" ")).join("\n");
 				expect(output).toContain("python");
 				expect(output).toContain("task_steps");
+				expect(output).toContain("ask_question");
 				expect(output).not.toContain("task_goal");
 				expect(output).not.toContain("task_background");
 			} finally {
@@ -159,6 +160,11 @@ describe("parseArgs", () => {
 		test("parses --session-id", () => {
 			const result = parseArgs(["--session-id", "orchestrated-session"]);
 			expect(result.sessionId).toBe("orchestrated-session");
+		});
+
+		test("parses --task-ref", () => {
+			const result = parseArgs(["--task-ref", "goal-42"]);
+			expect(result.taskRef).toBe("goal-42");
 		});
 
 		test("parses --fork", () => {

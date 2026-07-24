@@ -14,6 +14,8 @@ export {
 } from "./agent-session.ts";
 export {
 	AgentSessionRuntime,
+	type AgentSessionRuntimeResource,
+	type AgentSessionSwitchOptions,
 	type CreateAgentSessionRuntimeFactory,
 	type CreateAgentSessionRuntimeResult,
 	createAgentSessionRuntime,

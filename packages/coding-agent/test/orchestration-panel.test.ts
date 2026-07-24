@@ -23,8 +23,8 @@ describe("orchestration panel", () => {
 				status: "running",
 				summary: ["1 running", "1 queued"],
 				rows: [
-					{ status: "running", label: "implementer", meta: ["profile fast-worker"] },
-					{ status: "queued", label: "verifier" },
+					{ status: "running", label: "implementer", section: "Agents", meta: ["profile fast-worker"] },
+					{ status: "queued", label: "verifier", section: "Agents" },
 				],
 				notices: [{ status: "warning", text: "1 mutation awaiting parent review." }],
 			},
@@ -34,6 +34,7 @@ describe("orchestration panel", () => {
 
 		expect(text).toContain("[workers] status");
 		expect(text).toContain("1 running · 1 queued");
+		expect(text).toContain("Agents");
 		expect(text).toContain("● implementer");
 		expect(text).toContain("◌ verifier");
 		expect(text).toContain("awaiting parent review");
@@ -70,15 +71,24 @@ describe("orchestration panel", () => {
 		let state = addTaskStep(createTaskStepsState("T0"), { content: "Inspect", status: "in_progress" }, "T1");
 		state = addTaskStep(state, { content: "Implement" }, "T2");
 		const active = createOrchestrationActivityModel(state, [
-			{ laneId: "worker-2", type: "worker", status: "running" },
+			{
+				laneId: "worker-2",
+				type: "worker",
+				status: "running",
+				label: "Implement clipboard image support",
+				profileId: "fast-worker",
+			},
 		]);
 		const text = stripAnsi(
 			new OrchestrationPanelComponent(theme, active ?? { label: "missing" }).render(80).join("\n"),
 		);
 
-		expect(text).toContain("[orchestration] active");
-		expect(text).toContain("2 open · 1 worker");
+		expect(text).toContain("[work] active");
+		expect(text).toContain("2 steps · 1 agent");
+		expect(text).toContain("Steps");
+		expect(text).toContain("Agents");
 		expect(text).toContain("● Inspect");
-		expect(text).toContain("● worker-2");
+		expect(text).toContain("● Implement clipboard image support");
+		expect(text).toContain("worker-2 · profile fast-worker");
 	});
 });

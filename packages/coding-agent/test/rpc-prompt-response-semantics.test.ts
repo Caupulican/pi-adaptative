@@ -176,6 +176,7 @@ function createRuntimeHost(options: { withAuth: boolean; responseDelayMs: number
 
 async function startRpcMode(options: { withAuth: boolean; responseDelayMs: number; model?: Model<any> }): Promise<{
 	lineHandler: (line: string) => void;
+	runtimeHost: AgentSessionRuntime;
 	cleanup: () => Promise<void>;
 }> {
 	rpcIo.outputLines = [];
@@ -185,7 +186,7 @@ async function startRpcMode(options: { withAuth: boolean; responseDelayMs: numbe
 	void runRpcMode(runtimeHost);
 	await vi.waitFor(() => expect(rpcIo.lineHandler).toBeDefined());
 
-	return { lineHandler: rpcIo.lineHandler!, cleanup };
+	return { lineHandler: rpcIo.lineHandler!, runtimeHost, cleanup };
 }
 
 describe("RPC prompt response semantics", () => {
@@ -218,6 +219,30 @@ describe("RPC prompt response semantics", () => {
 				expect(responses).toHaveLength(1);
 				expect(responses[0]).toMatchObject({ command: "get_commands", success: true });
 			});
+		} finally {
+			await cleanup();
+		}
+	});
+
+	it("uses the runtime replacement callback as the single RPC rebind and replay owner", async () => {
+		const { lineHandler, runtimeHost, cleanup } = await startRpcMode({ withAuth: true, responseDelayMs: 0 });
+		try {
+			const callback = vi.mocked(runtimeHost.setRebindSession).mock.calls[0]?.[0];
+			if (!callback) throw new Error("Expected RPC replacement callback");
+			const bindSpy = vi.spyOn(runtimeHost.session, "bindExtensions");
+			const resumeSpy = vi.spyOn(runtimeHost.session, "resumePendingHumanInput");
+			vi.mocked(runtimeHost.newSession).mockImplementation(async () => {
+				await callback(runtimeHost.session);
+				return { cancelled: false };
+			});
+
+			lineHandler(JSON.stringify({ id: "replace-once", type: "new_session" }));
+
+			await vi.waitFor(() => {
+				expect(getResponses(rpcIo.outputLines, "new_session")).toHaveLength(1);
+			});
+			expect(bindSpy).toHaveBeenCalledTimes(1);
+			expect(resumeSpy).toHaveBeenCalledTimes(1);
 		} finally {
 			await cleanup();
 		}
@@ -314,6 +339,31 @@ describe("RPC prompt response semantics", () => {
 			});
 
 			await sleep(150);
+		} finally {
+			await cleanup();
+		}
+	});
+
+	it("rejects session replacement while an asynchronous RPC prompt still owns the session", async () => {
+		const { lineHandler, runtimeHost, cleanup } = await startRpcMode({ withAuth: true, responseDelayMs: 250 });
+
+		try {
+			lineHandler(JSON.stringify({ id: "active-prompt", type: "prompt", message: "Keep this session active" }));
+			await vi.waitFor(() => {
+				expect(getPromptResponses(rpcIo.outputLines, "active-prompt")).toHaveLength(1);
+			});
+
+			lineHandler(JSON.stringify({ id: "unsafe-replacement", type: "new_session" }));
+			await vi.waitFor(() => {
+				expect(getResponses(rpcIo.outputLines, "new_session")).toContainEqual(
+					expect.objectContaining({
+						id: "unsafe-replacement",
+						success: false,
+						error: "Cannot replace the session while a prompt is in progress.",
+					}),
+				);
+			});
+			expect(runtimeHost.newSession).not.toHaveBeenCalled();
 		} finally {
 			await cleanup();
 		}

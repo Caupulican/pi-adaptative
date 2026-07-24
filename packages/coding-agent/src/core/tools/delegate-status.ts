@@ -27,6 +27,8 @@ type Input = Static<typeof schema>;
 
 export interface DelegateStatusLaneView {
 	laneId: string;
+	label?: string;
+	profileId?: string;
 	type: LaneRecord["type"];
 	status: LaneRecord["status"];
 	reasonCode?: string;
@@ -100,6 +102,8 @@ function formatRecord(record: LaneRecord, claim: WorkerClaim | undefined): strin
 function laneView(record: LaneRecord, claim: WorkerClaim | undefined): DelegateStatusLaneView {
 	return {
 		laneId: record.laneId,
+		...(record.label ? { label: record.label } : {}),
+		...(record.profileId ? { profileId: record.profileId } : {}),
 		type: record.type,
 		status: record.status,
 		...(record.reasonCode ? { reasonCode: record.reasonCode } : {}),
@@ -108,9 +112,13 @@ function laneView(record: LaneRecord, claim: WorkerClaim | undefined): DelegateS
 }
 
 function lanePanelRow(view: DelegateStatusLaneView, details?: DelegateStatusToolDetails): OrchestrationPanelRow {
-	const meta = [view.type, view.reasonCode, view.unreviewed ? "review required" : undefined].filter(
-		(value): value is string => value !== undefined,
-	);
+	const meta = [
+		view.label ? view.laneId : undefined,
+		view.profileId ? `profile ${view.profileId}` : undefined,
+		view.type === "tmux-worker" ? "tmux" : undefined,
+		view.reasonCode,
+		view.unreviewed ? "review required" : undefined,
+	].filter((value): value is string => value !== undefined);
 	const expandedDetails = [
 		details?.claimSummary ? `untrusted claim: ${details.claimSummary}` : undefined,
 		details?.changedFiles?.length ? `changed: ${details.changedFiles.join(", ")}` : undefined,
@@ -118,7 +126,7 @@ function lanePanelRow(view: DelegateStatusLaneView, details?: DelegateStatusTool
 	].filter((value): value is string => value !== undefined);
 	return {
 		status: view.status,
-		label: view.laneId,
+		label: view.label ?? view.laneId,
 		meta,
 		details: expandedDetails,
 	};

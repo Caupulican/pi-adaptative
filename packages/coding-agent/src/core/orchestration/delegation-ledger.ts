@@ -1,6 +1,13 @@
+import { deriveWorkerTaskLabel } from "../delegation/worker-task-label.ts";
 import { hasGoalAcceptanceOverride } from "../goals/goal-acceptance.ts";
 import type { GoalState } from "../goals/goal-state.ts";
-import type { HarnessCapability, OrchestrationProfile } from "./contracts.ts";
+import type {
+	HarnessCapability,
+	OrchestrationDispatchRequest,
+	OrchestrationProfile,
+	RiskBudget,
+	WorkerRole,
+} from "./contracts.ts";
 import { OrchestrationEventStore } from "./event-store.ts";
 import { type AttemptRuntimeState, DurableTaskRuntime, DurableTaskRuntimeError } from "./task-runtime.ts";
 import { goalObjectiveId, projectGoalAcceptanceEvidence, projectGoalObjective } from "./work-state-projection.ts";
@@ -18,6 +25,20 @@ export interface PrepareDelegationInput {
 	requiredCapabilities: readonly HarnessCapability[];
 	goal?: GoalState;
 	verificationOfTaskId?: string;
+}
+
+export interface PrepareManagedDelegationInput {
+	laneId: string;
+	dispatchSequence: number;
+	instructions: string;
+	profileId: string;
+	provider: string;
+	authorizationId: string;
+	role: WorkerRole;
+	riskBudget: RiskBudget;
+	goal?: GoalState;
+	goalId?: string;
+	worktreeLaneKey?: string;
 }
 
 export interface StartedDelegationAttempt {
@@ -51,6 +72,58 @@ export class DelegationOrchestrationLedger {
 	}
 
 	prepare(input: PrepareDelegationInput): AttemptRuntimeState {
+		return this.prepareNormalized({
+			laneId: input.laneId,
+			instructions: input.instructions,
+			profileId: input.profile.profileId,
+			role: input.profile.role,
+			requiredCapabilities: input.requiredCapabilities,
+			riskBudget: input.profile.budget,
+			...(input.goal ? { goal: input.goal } : {}),
+			...(input.verificationOfTaskId ? { verificationOfTaskId: input.verificationOfTaskId } : {}),
+		});
+	}
+
+	prepareManaged(input: PrepareManagedDelegationInput): AttemptRuntimeState {
+		if (!Number.isSafeInteger(input.dispatchSequence) || input.dispatchSequence < 1) {
+			throw new DurableTaskRuntimeError("Managed dispatch sequence must be a positive integer.");
+		}
+		const taskId = `${input.laneId}:turn:${input.dispatchSequence}`;
+		return this.prepareNormalized({
+			laneId: taskId,
+			instructions: input.instructions,
+			profileId: input.profileId,
+			role: input.role,
+			requiredCapabilities: [],
+			riskBudget: input.riskBudget,
+			...(input.goal ? { goal: input.goal } : {}),
+			...(input.goalId ? { goalId: input.goalId } : {}),
+			dispatchMetadata: {
+				executionKind: "managed-process",
+				logicalLaneId: input.laneId,
+				dispatchSequence: input.dispatchSequence,
+				provider: input.provider,
+				authorizationId: input.authorizationId,
+				...(input.worktreeLaneKey ? { worktreeLaneKey: input.worktreeLaneKey } : {}),
+			},
+		});
+	}
+
+	private prepareNormalized(input: {
+		laneId: string;
+		instructions: string;
+		profileId: string;
+		role: WorkerRole;
+		requiredCapabilities: readonly HarnessCapability[];
+		riskBudget: RiskBudget;
+		goal?: GoalState;
+		goalId?: string;
+		verificationOfTaskId?: string;
+		dispatchMetadata?: Pick<
+			OrchestrationDispatchRequest,
+			"executionKind" | "logicalLaneId" | "dispatchSequence" | "provider" | "authorizationId" | "worktreeLaneKey"
+		>;
+	}): AttemptRuntimeState {
 		let snapshot = this.runtime.getSnapshot();
 		const existingVerificationSubject = input.verificationOfTaskId
 			? snapshot.tasks[input.verificationOfTaskId]
@@ -60,15 +133,17 @@ export class DelegationOrchestrationLedger {
 		}
 		const projectedGoal = input.goal ? projectGoalObjective(input.goal) : undefined;
 		const objectiveId =
-			existingVerificationSubject?.task.objectiveId ?? projectedGoal?.objectiveId ?? `session:${this.sessionId}`;
+			existingVerificationSubject?.task.objectiveId ??
+			projectedGoal?.objectiveId ??
+			(input.goalId ? goalObjectiveId(input.goalId) : `session:${this.sessionId}`);
 		if (input.goal && objectiveId === projectedGoal?.objectiveId) {
 			this.synchronizeGoalState(input.goal);
 			snapshot = this.runtime.getSnapshot();
 		} else if (!snapshot.objectives[objectiveId]) {
 			this.runtime.createObjective({
 				objectiveId,
-				title: `Session ${this.sessionId}`,
-				description: "Session-scoped delegated work",
+				title: input.goalId ? `Goal ${input.goalId}` : `Session ${this.sessionId}`,
+				description: input.goalId ? "Externally managed goal work" : "Session-scoped delegated work",
 			});
 			snapshot = this.runtime.getSnapshot();
 		}
@@ -80,11 +155,11 @@ export class DelegationOrchestrationLedger {
 			this.runtime.createTask({
 				taskId: input.laneId,
 				objectiveId,
-				title: `Delegated ${input.profile.role} work`,
+				title: deriveWorkerTaskLabel(input.instructions, `Delegated ${input.role} work`),
 				description: input.instructions,
-				role: input.profile.role,
+				role: input.role,
 				requiredCapabilities: input.requiredCapabilities,
-				riskBudget: input.profile.budget,
+				riskBudget: input.riskBudget,
 				...(input.verificationOfTaskId
 					? {
 							verificationOfTaskId: input.verificationOfTaskId,
@@ -105,9 +180,10 @@ export class DelegationOrchestrationLedger {
 
 		return this.runtime.queueAttempt(input.laneId, {
 			taskId: input.laneId,
-			profileId: input.profile.profileId,
+			profileId: input.profileId,
 			instructions: input.instructions,
 			resourcePointerIds: [],
+			...input.dispatchMetadata,
 		});
 	}
 
@@ -136,13 +212,13 @@ export class DelegationOrchestrationLedger {
 		}
 	}
 
-	start(attemptId: string, leaseTtlMs: number): StartedDelegationAttempt {
+	start(attemptId: string, leaseTtlMs: number, ownerId = `in-process:${this.sessionId}`): StartedDelegationAttempt {
 		const snapshot = this.runtime.getSnapshot();
 		const attempt = snapshot.attempts[attemptId];
 		if (!attempt) throw new DurableTaskRuntimeError(`Unknown attempt '${attemptId}'.`);
 		const task = snapshot.tasks[attempt.taskId];
 		if (!task) throw new DurableTaskRuntimeError(`Unknown task '${attempt.taskId}'.`);
-		const lease = this.runtime.leaseAttempt(attemptId, `in-process:${this.sessionId}`, leaseTtlMs);
+		const lease = this.runtime.leaseAttempt(attemptId, ownerId, leaseTtlMs);
 		this.runtime.startAttempt(attemptId, lease.leaseId, lease.fencingToken);
 		return {
 			objectiveId: task.task.objectiveId,
@@ -160,7 +236,7 @@ export class DelegationOrchestrationLedger {
 
 	/** Fence interrupted isolated completions and queue one replacement attempt per task. */
 	recoverQueuedDispatches(): AttemptRuntimeState[] {
-		this.runtime.recoverInterruptedUnboundAttempts();
+		this.runtime.recoverInterruptedUnboundAttempts((attempt) => attempt.dispatch.executionKind !== "managed-process");
 		let snapshot = this.runtime.getSnapshot();
 		for (const task of Object.values(snapshot.tasks)) {
 			const attempts = task.attemptIds.map((attemptId) => snapshot.attempts[attemptId]).filter(Boolean);
@@ -176,6 +252,8 @@ export class DelegationOrchestrationLedger {
 			this.runtime.queueAttempt(task.task.taskId, interrupted.dispatch);
 			snapshot = this.runtime.getSnapshot();
 		}
-		return Object.values(snapshot.attempts).filter((attempt) => attempt.status === "queued");
+		return Object.values(snapshot.attempts).filter(
+			(attempt) => attempt.status === "queued" && attempt.dispatch.executionKind !== "managed-process",
+		);
 	}
 }

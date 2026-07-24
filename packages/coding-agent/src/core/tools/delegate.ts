@@ -44,6 +44,7 @@ export interface DelegateToolDetails {
 	skipReason?: string;
 	profileId?: string;
 	laneId?: string;
+	label?: string;
 	status?: LaneRecord["status"];
 	reasonCode?: string;
 	accepted?: boolean;
@@ -133,8 +134,10 @@ function delegatePanelModel(details: DelegateToolDetails | undefined): Orchestra
 		rows: [
 			{
 				status: rowStatus,
-				label: details.laneId ?? "worker lane",
-				meta,
+				label: details.label ?? details.laneId ?? "worker lane",
+				meta: [details.label ? details.laneId : undefined, ...meta].filter(
+					(value): value is string => value !== undefined,
+				),
 				details: detailsLines,
 			},
 		],
@@ -209,8 +212,9 @@ export function createDelegateToolDefinition(deps: DelegateToolDependencies): To
 					],
 					details: {
 						started: true,
-						profileId: input.profileId,
+						profileId: started.record.profileId ?? input.profileId,
 						laneId: started.record.laneId,
+						label: started.record.label,
 						status: started.record.status,
 					},
 				};
@@ -245,8 +249,9 @@ export function createDelegateToolDefinition(deps: DelegateToolDependencies): To
 				content: [{ type: "text" as const, text: lines.join("\n") }],
 				details: {
 					started: true,
-					profileId: input.profileId,
+					profileId: run.record?.profileId ?? input.profileId,
 					laneId: run.record?.laneId,
+					label: run.record?.label,
 					status: run.record?.status,
 					reasonCode: run.record?.reasonCode,
 					accepted: outcome?.accepted,

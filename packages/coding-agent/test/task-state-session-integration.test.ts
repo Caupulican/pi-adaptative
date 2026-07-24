@@ -26,7 +26,7 @@ function createSession(): AgentSession {
 	});
 }
 
-describe("native task_steps session integration", () => {
+describe("native task and question session integration", () => {
 	it("saves and restores task state through AgentSession", () => {
 		const session = createSession();
 		const state = addTaskStep(createTaskStepsState("T0"), { content: "Persist natively" }, "T1");
@@ -51,5 +51,11 @@ describe("native task_steps session integration", () => {
 			content: "Wire native task steps",
 			status: "in_progress",
 		});
+	});
+
+	it("registers ask_question as an active built-in without an extension", () => {
+		const session = createSession();
+		expect(session.getActiveToolNames()).toContain("ask_question");
+		expect(session.getToolDefinition("ask_question")?.executionMode).toBe("sequential");
 	});
 });

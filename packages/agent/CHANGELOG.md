@@ -1,5 +1,9 @@
 ## [Unreleased]
 
+### Added
+
+- Added non-mutating branched session-manager construction so hosts can prepare a fork before replacing a live runtime.
+
 ### Fixed
 
 - Calibrated compaction verification around exact path identities and independently weighted operation/error recall, consolidated the duplicated summary-verification path, and preserved structured failed-attempt telemetry through deterministic retry fallback.

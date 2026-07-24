@@ -5,7 +5,9 @@ import { describe, expect, it, vi } from "vitest";
 import { getLaneRecordSnapshots } from "../src/core/autonomy/session-lane-record.ts";
 import { getWorkerRequestSnapshots } from "../src/core/delegation/session-worker-claim.ts";
 import { createGoalState } from "../src/core/goals/goal-state.ts";
+import { getWorkerHumanInputsRequiringDelivery } from "../src/core/human-input.ts";
 import { ORCHESTRATION_SCHEMA_VERSION, type OrchestrationProfile } from "../src/core/orchestration/contracts.ts";
+import { OrchestrationEventStore } from "../src/core/orchestration/event-store.ts";
 import { OrchestrationProfileStore } from "../src/core/orchestration/profile-store.ts";
 import { createHarness, type Harness } from "./suite/harness.ts";
 
@@ -513,6 +515,9 @@ describe("AgentSession worker delegation", () => {
 				outcome: "ask-user",
 				reasonCode: "parent_review_required",
 			});
+			expect(getWorkerHumanInputsRequiringDelivery(harness.sessionManager)).toMatchObject([
+				{ request: { source: "worker", workerRequestId: run.record?.laneId }, status: "pending" },
+			]);
 			const request = getWorkerRequestSnapshots(harness.sessionManager.getEntries())[0];
 			expect(request?.envelope.allowedTools).toEqual(["read", "grep", "find", "ls", "write", "edit"]);
 			expect(request?.envelope.allowedTools).not.toContain("delegate");
@@ -681,6 +686,100 @@ describe("AgentSession worker delegation", () => {
 		} finally {
 			unsubscribe();
 			if (!workerResolved) resolveWorker(fauxAssistantMessage('{"summary":"test cleanup"}'));
+			harness.cleanup();
+		}
+	});
+
+	it("persists a terminal handoff before acknowledging its durable notification", async () => {
+		const harness = await createHarness({ settings: { workerDelegation: { enabled: true } } });
+		let resolveWorker: (message: AssistantMessage) => void = () => {};
+		let resolveForeground: (message: AssistantMessage) => void = () => {};
+		const workerResponse = new Promise<AssistantMessage>((resolve) => {
+			resolveWorker = resolve;
+		});
+		const foregroundResponse = new Promise<AssistantMessage>((resolve) => {
+			resolveForeground = resolve;
+		});
+		let signalForegroundStarted!: () => void;
+		const foregroundStarted = new Promise<void>((resolve) => {
+			signalForegroundStarted = resolve;
+		});
+		const routeResponse: FauxResponseFactory = (context) =>
+			context.systemPrompt?.includes("You are a bounded subagent shipped by a coding-agent session")
+				? workerResponse
+				: fauxAssistantMessage("Foreground remained responsive.");
+		const heldForegroundResponse: FauxResponseFactory = () => {
+			signalForegroundStarted();
+			return foregroundResponse;
+		};
+		let signalTerminal!: () => void;
+		let signalWakeReply!: () => void;
+		const terminal = new Promise<void>((resolve) => {
+			signalTerminal = resolve;
+		});
+		const wakeReply = new Promise<void>((resolve) => {
+			signalWakeReply = resolve;
+		});
+		const unsubscribe = harness.session.subscribe((event) => {
+			if (
+				event.type === "delegate_workers" &&
+				event.terminalSinceFlush.some((record) => record.status === "succeeded")
+			) {
+				signalTerminal();
+			}
+			if (
+				event.type === "message_end" &&
+				event.message.role === "assistant" &&
+				JSON.stringify(event.message.content).includes("Durable handoff acknowledged.")
+			) {
+				signalWakeReply();
+			}
+		});
+		try {
+			harness.setResponses([
+				fauxAssistantMessage([fauxToolCall("delegate", { instructions: "Wait for the durable result" })], {
+					stopReason: "toolUse",
+				}),
+				routeResponse,
+				routeResponse,
+				heldForegroundResponse,
+				fauxAssistantMessage("Durable handoff acknowledged."),
+			]);
+
+			await harness.session.prompt("Start one durable background worker", { autoContinueGoal: false });
+			const foregroundRun = harness.session.prompt("Keep the foreground occupied", { autoContinueGoal: false });
+			await foregroundStarted;
+
+			resolveWorker(fauxAssistantMessage('{"summary":"durable result arrived"}'));
+			await terminal;
+
+			const eventStore = new OrchestrationEventStore({
+				agentDir: harness.tempDir,
+				sessionId: harness.sessionManager.getSessionId(),
+			});
+			expect(eventStore.readAll().some((event) => event.type === "notification.enqueued")).toBe(true);
+			expect(eventStore.readAll().some((event) => event.type === "notification.delivered")).toBe(false);
+			expect(
+				harness.sessionManager
+					.getEntries()
+					.some((entry) => entry.type === "custom_message" && entry.customType === "background-worker-completion"),
+			).toBe(false);
+
+			resolveForeground(fauxAssistantMessage("Foreground released."));
+			await foregroundRun;
+			await wakeReply;
+			await vi.waitFor(() => {
+				expect(eventStore.readAll().some((event) => event.type === "notification.delivered")).toBe(true);
+			});
+			expect(
+				harness.sessionManager
+					.getEntries()
+					.some((entry) => entry.type === "custom_message" && entry.customType === "background-worker-completion"),
+			).toBe(true);
+		} finally {
+			unsubscribe();
+			resolveWorker(fauxAssistantMessage('{"summary":"test cleanup"}'));
+			resolveForeground(fauxAssistantMessage("Test cleanup."));
 			harness.cleanup();
 		}
 	});

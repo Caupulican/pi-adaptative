@@ -9,6 +9,7 @@
 import type { AgentIdentityContract } from "../orchestration/contracts.ts";
 import type {
 	ProcessMatrixEntry,
+	ProcessTerminalHandoff,
 	ReconcileMatrixResult,
 	ResumablePayload,
 	WindDownReason,
@@ -46,6 +47,7 @@ export interface BuildWorkerEntryFacts {
 	tmuxSession?: string;
 	tmuxPanePid?: number;
 	taskRef?: string;
+	taskSummary?: string;
 }
 
 export function buildWorkerEntry(facts: BuildWorkerEntryFacts): ProcessMatrixEntry {
@@ -64,6 +66,7 @@ export function buildWorkerEntry(facts: BuildWorkerEntryFacts): ProcessMatrixEnt
 	if (facts.tmuxSession !== undefined) entry.tmuxSession = facts.tmuxSession;
 	if (facts.tmuxPanePid !== undefined) entry.tmuxPanePid = facts.tmuxPanePid;
 	if (facts.taskRef !== undefined) entry.taskRef = facts.taskRef;
+	if (facts.taskSummary !== undefined) entry.taskSummary = facts.taskSummary;
 	return entry;
 }
 
@@ -104,6 +107,22 @@ export function markResumable(entry: ProcessMatrixEntry, payload: ResumablePaylo
 
 export function markClosed(entry: ProcessMatrixEntry, now: string): ProcessMatrixEntry {
 	return { ...entry, status: "closed", heartbeatAt: now };
+}
+
+export function markTerminal(
+	entry: ProcessMatrixEntry,
+	terminal: Pick<ProcessTerminalHandoff, "code" | "signal">,
+	now: string,
+): ProcessMatrixEntry {
+	return {
+		...markClosed(entry, now),
+		terminal: { code: terminal.code, signal: terminal.signal, observedAt: now },
+	};
+}
+
+export function markTerminalNotificationDelivered(entry: ProcessMatrixEntry, now: string): ProcessMatrixEntry {
+	if (!entry.terminal) return entry;
+	return { ...entry, terminal: { ...entry.terminal, notificationDeliveredAt: now } };
 }
 
 export interface AdoptionFacts {
@@ -154,21 +173,36 @@ export interface ReconcileMatrixDeps {
 }
 
 /**
- * Prune `closed` entries and any `running`/`winding_down` entry whose OWN pid is dead (a crashed
- * process that never reached `closed`). `resumable`/`adopted` entries are kept until they age past
- * `resumableTtlMs` -- they carry a payload a future session may still pick up.
+ * Prune `closed` entries and unrecoverable dead processes. A dead Pi worker that was interrupted
+ * before persisting its own resumable transition is repaired from its already-durable logical-agent
+ * identity. `resumable`/`adopted` entries are kept until they age past `resumableTtlMs`.
  */
 export function reconcileMatrix(entries: ProcessMatrixEntry[], deps: ReconcileMatrixDeps): ReconcileMatrixResult {
 	const kept: ProcessMatrixEntry[] = [];
 	const prunedEntryIds: string[] = [];
+	const recoveredEntryIds: string[] = [];
 	for (const entry of entries) {
 		if (entry.status === "closed") {
-			prunedEntryIds.push(entry.entryId);
+			const terminalAt = Date.parse(entry.terminal?.observedAt ?? entry.heartbeatAt);
+			const terminalExpired = !Number.isFinite(terminalAt) || deps.now - terminalAt > deps.resumableTtlMs;
+			if (entry.terminal && !entry.terminal.notificationDeliveredAt && !terminalExpired) kept.push(entry);
+			else prunedEntryIds.push(entry.entryId);
 			continue;
 		}
 		if (entry.status === "running" || entry.status === "winding_down") {
 			if (!deps.isPidAlive(entry.pid)) {
-				prunedEntryIds.push(entry.entryId);
+				if (entry.role === "worker" && entry.agent.resumeContext.provider === "pi") {
+					const payload: ResumablePayload = {
+						agent: structuredClone(entry.agent),
+						lastCode: "resumable",
+					};
+					if (entry.taskRef !== undefined) payload.taskRef = entry.taskRef;
+					if (entry.taskSummary !== undefined) payload.taskSummary = entry.taskSummary;
+					kept.push(markResumable(entry, payload, new Date(deps.now).toISOString()));
+					recoveredEntryIds.push(entry.entryId);
+				} else {
+					prunedEntryIds.push(entry.entryId);
+				}
 				continue;
 			}
 			kept.push(entry);
@@ -176,11 +210,11 @@ export function reconcileMatrix(entries: ProcessMatrixEntry[], deps: ReconcileMa
 		}
 		// resumable / adopted: TTL-gated on the entry's own last heartbeat.
 		const heartbeatMs = Date.parse(entry.heartbeatAt);
-		if (Number.isFinite(heartbeatMs) && deps.now - heartbeatMs > deps.resumableTtlMs) {
+		if (!Number.isFinite(heartbeatMs) || deps.now - heartbeatMs > deps.resumableTtlMs) {
 			prunedEntryIds.push(entry.entryId);
 			continue;
 		}
 		kept.push(entry);
 	}
-	return { code: "reconciled", kept, prunedEntryIds };
+	return { code: "reconciled", kept, prunedEntryIds, recoveredEntryIds };
 }

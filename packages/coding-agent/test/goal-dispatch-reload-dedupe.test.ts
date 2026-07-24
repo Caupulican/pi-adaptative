@@ -11,6 +11,7 @@ import {
 	type GoalToolDetails,
 	type GoalToolInput,
 } from "../src/core/tools/goal.ts";
+import { createTestManagedLaneDispatch } from "./managed-lane-fixture.ts";
 
 /**
  * Reload recovery plus the conservative dedupe guard. Part 1 proves a running managed lane keeps its
@@ -23,7 +24,7 @@ function buildLaneControllerDeps(overrides: Partial<BackgroundLaneControllerDeps
 		(overrides.getSessionManager?.() as SessionManager | undefined) ?? InMemorySessionManager.inMemory();
 	return {
 		isDisposed: () => false,
-		getSessionId: () => "test-session",
+		getSessionId: () => sessionManager.getSessionId(),
 		getCwd: () => "/repo",
 		getAgentDir: () => "/tmp/pi-test-goal-dispatch-reload-dedupe",
 		getSessionManager: () => sessionManager,
@@ -39,7 +40,12 @@ describe("managed lane reload recovery (real BackgroundLaneController)", () => {
 		const sessionManager = InMemorySessionManager.inMemory();
 		const blc = new BackgroundLaneController(buildLaneControllerDeps({ getSessionManager: () => sessionManager }));
 
-		blc.recordManagedLane({ laneId: "tmux:job1:agent1", phase: "dispatch", goalId: "g1" });
+		blc.recordManagedLane({
+			laneId: "tmux:job1:agent1",
+			phase: "dispatch",
+			goalId: "g1",
+			dispatch: createTestManagedLaneDispatch(),
+		});
 		expect(blc.getLaneRecords()).toHaveLength(1);
 		expect(blc.getLaneRecords()[0]?.status).toBe("running");
 		const dispatchedLaneId = blc.getLaneRecords()[0]?.laneId as string;

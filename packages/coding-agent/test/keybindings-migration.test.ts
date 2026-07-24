@@ -3,7 +3,7 @@ import * as os from "node:os";
 import * as path from "node:path";
 import { afterEach, describe, expect, it } from "vitest";
 import { ENV_AGENT_DIR } from "../src/config.ts";
-import { KeybindingsManager } from "../src/core/keybindings.ts";
+import { defaultImagePasteKeys, KeybindingsManager } from "../src/core/keybindings.ts";
 import { runMigrations } from "../src/migrations.ts";
 
 describe("keybindings migration", () => {
@@ -69,12 +69,20 @@ describe("keybindings migration", () => {
 		});
 	});
 
-	it("defaults image paste to alt+v so ctrl+v remains available for terminal text paste", () => {
+	it("defaults image paste to ctrl+v on Unix while preserving Windows terminal paste", () => {
 		const keybindings = new KeybindingsManager();
+		const configuredDefault = defaultImagePasteKeys();
 
-		expect(keybindings.getKeys("app.clipboard.pasteImage")).toEqual(["alt+v"]);
-		expect(keybindings.matches("\x16", "app.clipboard.pasteImage")).toBe(false);
-		expect(keybindings.matches("\x1bv", "app.clipboard.pasteImage")).toBe(true);
+		expect(keybindings.getKeys("app.clipboard.pasteImage")).toEqual(
+			Array.isArray(configuredDefault) ? configuredDefault : [configuredDefault],
+		);
+		expect(defaultImagePasteKeys("darwin", {}, "Darwin")).toBe("ctrl+v");
+		expect(defaultImagePasteKeys("linux", {}, "generic-linux")).toBe("ctrl+v");
+		expect(defaultImagePasteKeys("win32", {}, "Windows")).toBe("alt+v");
+		expect(defaultImagePasteKeys("linux", { WSL_DISTRO_NAME: "Ubuntu" }, "generic-linux")).toEqual([
+			"alt+v",
+			"ctrl+v",
+		]);
 	});
 
 	it("loads old key names in memory before the file is rewritten", () => {

@@ -6,7 +6,7 @@ import { WorkerLifecycle } from "../src/core/delegation/worker-lifecycle.ts";
 import { applyGoalEvent, createGoalState } from "../src/core/goals/goal-state.ts";
 import { ORCHESTRATION_SCHEMA_VERSION, type WorkerResultContract } from "../src/core/orchestration/contracts.ts";
 import type { StartedDelegationAttempt } from "../src/core/orchestration/delegation-ledger.ts";
-import { createTestWorkerOrchestrationProfile } from "./orchestration-profile-fixture.ts";
+import { createTestExecutionGrant, createTestWorkerOrchestrationProfile } from "./orchestration-profile-fixture.ts";
 
 const roots: string[] = [];
 
@@ -52,7 +52,17 @@ function resultFor(
 function startWithGrant(lifecycle: WorkerLifecycle, laneId: string, leaseTtlMs: number): StartedDelegationAttempt {
 	const attempt = lifecycle.getActiveAttempt(laneId);
 	if (!attempt) throw new Error(`Expected active attempt for ${laneId}`);
-	lifecycle.bindGrant(attempt.attemptId, `grant-${attempt.attemptId}`);
+	const task = lifecycle.getTask(attempt.taskId);
+	if (!task) throw new Error(`Expected durable task for ${laneId}`);
+	lifecycle.bindGrant(
+		attempt.attemptId,
+		createTestExecutionGrant({
+			objectiveId: task.task.objectiveId,
+			taskId: attempt.taskId,
+			attemptId: attempt.attemptId,
+			role: task.task.role,
+		}),
+	);
 	return lifecycle.start(laneId, leaseTtlMs);
 }
 
@@ -81,6 +91,91 @@ function finishAwaitingVerification(
 }
 
 describe("WorkerLifecycle", () => {
+	it("uses the same durable lifecycle and terminal outbox for managed-process workers", () => {
+		const agentDir = root();
+		const lifecycle = new WorkerLifecycle({ agentDir, sessionId: "session-managed" });
+		const prepared = lifecycle.prepareManaged({
+			laneId: "tmux:job:worker",
+			dispatchSequence: 1,
+			instructions: "inspect externally",
+			profileId: "tmux:pi",
+			provider: "pi",
+			authorizationId: "grant-managed",
+			role: "implementer",
+			riskBudget: { maxAttempts: 1, maxWallClockMs: 60_000 },
+			leaseTtlMs: 60_000,
+			compileGrant: createTestExecutionGrant,
+		});
+		expect(prepared.record).toMatchObject({ laneId: "tmux:job:worker", type: "tmux-worker", status: "running" });
+		lifecycle.finish(resultFor(prepared.handle));
+
+		const resumed = new WorkerLifecycle({ agentDir, sessionId: "session-managed" });
+		expect(resumed.getManagedRecord("tmux:job:worker")).toMatchObject({ status: "succeeded" });
+		const [notification] = resumed.getPendingTerminalNotifications();
+		expect(notification).toMatchObject({ record: { laneId: "tmux:job:worker", type: "tmux-worker" } });
+		if (!notification) throw new Error("Expected managed terminal notification");
+		resumed.markNotificationsDelivered([notification.notificationId]);
+		expect(new WorkerLifecycle({ agentDir, sessionId: "session-managed" }).getPendingTerminalNotifications()).toEqual(
+			[],
+		);
+	});
+
+	it("keeps managed follow-up turns distinct while projecting one logical lane", () => {
+		const lifecycle = new WorkerLifecycle({ agentDir: root(), sessionId: "session-managed-followup" });
+		const first = lifecycle.prepareManaged({
+			laneId: "tmux:followup:worker",
+			dispatchSequence: 1,
+			instructions: "first turn",
+			profileId: "tmux:pi",
+			provider: "pi",
+			authorizationId: "grant-1",
+			role: "implementer",
+			riskBudget: { maxAttempts: 1 },
+			leaseTtlMs: 60_000,
+			compileGrant: createTestExecutionGrant,
+		});
+		lifecycle.finish(resultFor(first.handle));
+		const second = lifecycle.prepareManaged({
+			laneId: "tmux:followup:worker",
+			dispatchSequence: 2,
+			instructions: "second turn",
+			profileId: "tmux:pi",
+			provider: "pi",
+			authorizationId: "grant-2",
+			role: "implementer",
+			riskBudget: { maxAttempts: 1 },
+			leaseTtlMs: 60_000,
+			compileGrant: createTestExecutionGrant,
+		});
+
+		expect(second.record).toMatchObject({ laneId: "tmux:followup:worker", status: "running" });
+		expect(lifecycle.getManagedRecords()).toHaveLength(1);
+		expect(Object.keys(lifecycle.getTaskRuntimeSnapshot().tasks)).toEqual([
+			"tmux:followup:worker:turn:1",
+			"tmux:followup:worker:turn:2",
+		]);
+	});
+
+	it("does not replay a managed process as an in-process completion after restart", () => {
+		const agentDir = root();
+		new WorkerLifecycle({ agentDir, sessionId: "session-managed-recovery" }).prepareManaged({
+			laneId: "tmux:recovery:worker",
+			dispatchSequence: 1,
+			instructions: "remain externally supervised",
+			profileId: "tmux:pi",
+			provider: "pi",
+			authorizationId: "grant-managed",
+			role: "implementer",
+			riskBudget: { maxAttempts: 1 },
+			leaseTtlMs: 60_000,
+			compileGrant: createTestExecutionGrant,
+		});
+		const resumed = new WorkerLifecycle({ agentDir, sessionId: "session-managed-recovery" });
+
+		expect(resumed.recoverQueued()).toEqual([]);
+		expect(resumed.getManagedRecord("tmux:recovery:worker")).toMatchObject({ status: "running" });
+	});
+
 	it("persists terminal notifications until the parent acknowledges delivery", () => {
 		const agentDir = root();
 		const profile = createTestWorkerOrchestrationProfile({

@@ -7,6 +7,7 @@ import { buildGoalRuntimeSnapshot } from "../src/core/goals/goal-runtime-snapsho
 import { applyGoalEvent, createGoalState } from "../src/core/goals/goal-state.ts";
 import { appendGoalStateSnapshot } from "../src/core/goals/session-goal-state.ts";
 import { classifyDispatchError, dispatchTmuxWorker, type TmuxDispatchDeps } from "../src/core/tools/tmux-dispatch.ts";
+import { createTestManagedLaneDispatch } from "./managed-lane-fixture.ts";
 
 /**
  * SPIKE/REPRO-FIRST: proves the WHOLE goal->tmux dispatch loop end-to-end with a
@@ -21,7 +22,7 @@ function buildLaneControllerDeps(overrides: Partial<BackgroundLaneControllerDeps
 		(overrides.getSessionManager?.() as SessionManager | undefined) ?? InMemorySessionManager.inMemory();
 	return {
 		isDisposed: () => false,
-		getSessionId: () => "test-session",
+		getSessionId: () => sessionManager.getSessionId(),
 		getCwd: () => "/repo",
 		getAgentDir: () => "/tmp/pi-test-tmux-dispatch-adapter",
 		getSessionManager: () => sessionManager,
@@ -54,7 +55,12 @@ describe("dispatchTmuxWorker (faux tmux tool end-to-end, real BackgroundLaneCont
 			capturedParams = params;
 			// The REAL bridge mechanism: the extension reports its dispatch under ITS OWN
 			// caller-chosen laneId (tmux:<jobId>:<agentId>), which mints a genuine tmux-worker lane.
-			blc.recordManagedLane({ laneId: "tmux:job1:goal-worker-1", phase: "dispatch", goalId: "g1" });
+			blc.recordManagedLane({
+				laneId: "tmux:job1:goal-worker-1",
+				phase: "dispatch",
+				goalId: "g1",
+				dispatch: createTestManagedLaneDispatch(),
+			});
 			return {
 				content: [{ type: "text" as const, text: "launched" }],
 				details: { job: { id: "job1", agents: [{ id: "goal-worker-1" }] } },

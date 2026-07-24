@@ -27,6 +27,7 @@ import { AuthStorage } from "./core/auth-storage.ts";
 import { formatDoctorReport, runDoctor, runUpdatePreflight } from "./core/doctor.ts";
 import { exportFromFile } from "./core/export-html/index.ts";
 import type { ExtensionFactory } from "./core/extensions/types.ts";
+import { resumeBlockedPersistedGoal } from "./core/goals/goal-lifecycle.ts";
 import { configureHttpDispatcher } from "./core/http-dispatcher.ts";
 import { KeybindingsManager } from "./core/keybindings.ts";
 import { formatLaneWorkerRefusal } from "./core/model-capability.ts";
@@ -39,7 +40,6 @@ import {
 	type ScopedModel,
 } from "./core/model-resolver.ts";
 import { collectModelRouterConfigDiagnostics } from "./core/model-router/config-diagnostics.ts";
-import { createAgentIdentity } from "./core/orchestration/agent-resume.ts";
 import type { OrchestrationProfile } from "./core/orchestration/contracts.ts";
 import { resolveConfiguredOrchestrationModel } from "./core/orchestration/model-binding.ts";
 import { OrchestrationProfileStore } from "./core/orchestration/profile-store.ts";
@@ -47,11 +47,10 @@ import { restoreStdout, takeOverStdout } from "./core/output-guard.ts";
 import type { ResumablePayload } from "./core/process-matrix/codes.ts";
 import { launchResumablePiAgent } from "./core/process-matrix/resume-launcher.ts";
 import {
-	getOrchestrationAgentId,
 	PI_PARENT_PID_ENV,
 	PI_PARENT_SESSION_ENV,
+	PI_TASK_REF_ENV,
 	type ResumeWorkerLaunchOutcome,
-	startProcessMatrixRuntime,
 } from "./core/process-matrix/runtime.ts";
 import { isReloadSessionProcessAlive } from "./core/reload-blockers.ts";
 import { parseResourceProfileInput } from "./core/resource-profile-blocks.ts";
@@ -70,14 +69,11 @@ import {
 	listSessions,
 	openSession,
 } from "./core/session-manager-factory.ts";
+import { SessionSupervisionRuntime } from "./core/session-supervision-runtime.ts";
 import { SettingsManager } from "./core/settings-manager.ts";
 import { printTimings, resetTimings, time } from "./core/timings.ts";
 import { hasProjectTrustInputs, ProjectTrustStore } from "./core/trust-manager.ts";
-import {
-	getBoundWorktreeLaneKey,
-	PI_WORKTREE_LANE_ENV,
-	startWorktreeSyncRuntime,
-} from "./core/worktree-sync/runtime.ts";
+import { getBoundWorktreeLaneKey, PI_WORKTREE_LANE_ENV } from "./core/worktree-sync/runtime.ts";
 import { runMigrations, showDeprecationWarnings } from "./migrations.ts";
 
 import { handleConfigCommand, handlePackageCommand } from "./package-manager-cli.ts";
@@ -721,6 +717,9 @@ export async function main(args: string[], options?: MainOptions) {
 	if (parsed.parentSession) {
 		process.env[PI_PARENT_SESSION_ENV] = parsed.parentSession;
 	}
+	if (parsed.taskRef) {
+		process.env[PI_TASK_REF_ENV] = parsed.taskRef;
+	}
 	let appMode = resolveAppMode(parsed, process.stdin.isTTY);
 	const shouldTakeOverStdout = appMode !== "interactive";
 	if (shouldTakeOverStdout) {
@@ -1029,6 +1028,10 @@ export async function main(args: string[], options?: MainOptions) {
 	const { services, session, modelFallbackMessage } = runtime;
 	const { settingsManager, modelRegistry, resourceLoader } = services;
 	configureHttpDispatcher(settingsManager.getHttpIdleTimeoutMs());
+	if (parsed.resume || parsed.continue || parsed.session !== undefined) {
+		const resumed = resumeBlockedPersistedGoal(session);
+		if (!resumed.ok) throw new Error(`Failed to resume persisted goal: ${resumed.error}`);
+	}
 
 	// A lane-bound session refuses AUTHORITATIVELY at its own startup when its model cannot reliably
 	// drive the lane-gate/recovery surface unattended (full capability class, a declared context
@@ -1047,88 +1050,36 @@ export async function main(args: string[], options?: MainOptions) {
 		}
 	}
 
-	// A read-only command (--help, --list-models) prints and exits without ever reserving a
-	// session (see the createSessionManager in-memory-session gate above) -- for the same reason,
-	// it must not fire either of the runtimes below. Both are launched with `void` (fire-and-
-	// forget) and race the imminent `process.exit()` a few lines down in the --help/--list-models
-	// branches: their first write (worktree-sync's reconcile pass, process-matrix's master-entry
-	// writeEntry -- core/process-matrix/runtime.ts's startMasterBranch) can still be in flight on
-	// the libuv threadpool when process.exit() forcibly tears the process down, which on Windows
-	// can leave the just-written file's handle held by the OS a beat longer than the process
-	// itself survives -- long enough for an immediately-following rmSync of the temp agent dir
-	// (see test/session-id-readonly.test.ts) to observe EPERM. A read-only command has no session
-	// and nothing to supervise, so the correct fix is not starting either runtime for it at all.
+	// A read-only command (--help, --list-models) uses an in-memory session and has nothing to
+	// supervise. Do not start either runtime: even an awaited startup would create needless state
+	// and violate the read-only zero-write contract.
 	const isReadOnlyCommand = parsed.help || parsed.listModels !== undefined;
 
-	// Worktree-sync session runtime (no-op unless enabled): one startup reconcile pass, plus --
-	// for a lane-bound session -- the epoch watcher that injects a deterministic staleness notice
-	// the moment another lane lands (steer mid-turn, its own turn when idle). Fire-and-forget:
-	// a broken repo state must never block session startup.
+	// Session-owned supervision is replaced with /new, /resume, and /fork. This keeps notices,
+	// process identity, orphan recovery, and worktree watchers bound to the active session instead
+	// of retaining the initial session after it has been disposed.
 	if (!isReadOnlyCommand) {
-		void startWorktreeSyncRuntime({
-			cwd: sessionManager.getCwd(),
+		const supervision = new SessionSupervisionRuntime({
 			agentDir,
-			settingsManager,
-			sessionId: sessionManager.getSessionId(),
-			notify: (text) => {
-				void session.sendCustomMessage(
-					{ customType: "worktree-sync-notice", content: text, display: true },
-					{ triggerTurn: true, deliverAs: "steer" },
-				);
-			},
-			onDiagnostic: (message) => {
-				console.error(chalk.yellow(`Warning: ${message}`));
-			},
-		});
-	}
-
-	// Process-matrix runtime (no-op unless enabled): durable master/worker supervision surviving
-	// restarts -- a master asks before touching any orphaned worker it finds on resume; a worker
-	// winds down gracefully (never silently) when its parent disappears. Fire-and-forget, same as
-	// worktree-sync above: a broken store must never block session startup.
-	if (!isReadOnlyCommand) {
-		const activeOrchestrationProfileId =
-			parsed.orchestrationProfile?.trim() || settingsManager.getActiveOrchestrationProfile();
-		const sessionFile = sessionManager.getSessionFile();
-		const agent = createAgentIdentity(getOrchestrationAgentId() ?? sessionManager.getSessionId(), {
-			provider: "pi" as const,
-			sessionId: sessionManager.getSessionId(),
-			sessionDir: sessionManager.getSessionDir(),
-			...(sessionFile ? { sessionFile } : {}),
-			cwd: sessionManager.getCwd(),
-			...(boundWorktreeLaneKey ? { worktreeLaneKey: boundWorktreeLaneKey } : {}),
-			...(activeOrchestrationProfileId ? { orchestrationProfileId: activeOrchestrationProfileId } : {}),
-			resourceProfileNames: settingsManager.getActiveResourceProfileNames(),
-			...(session.model ? { modelRef: `${session.model.provider}/${session.model.id}` } : {}),
-			contextPointers: [],
-		});
-		void startProcessMatrixRuntime({
-			agentDir,
-			agent,
-			taskSummary: session.getGoalStateSnapshot()?.userGoal,
-			resumeWorker: (payload) => launchResumableWorker(payload, sessionManager.getSessionId()),
 			hasUI: appMode === "interactive",
-			settings: settingsManager.getProcessMatrixSettings(),
+			orchestrationProfileId: parsed.orchestrationProfile?.trim() || undefined,
 			isProcessAlive: isReloadSessionProcessAlive,
 			promptConfirm,
-			notify: (text) => {
-				void session.sendCustomMessage(
-					{ customType: "process-matrix-notice", content: text, display: true },
-					{ triggerTurn: true, deliverAs: "steer" },
-				);
-			},
+			resumeWorker: launchResumableWorker,
 			onDiagnostic: (message) => {
 				console.error(chalk.yellow(`Warning: ${message}`));
 			},
-			requestExit: () => {
+			requestExit: (activeSession) => {
 				try {
-					session.dispose();
+					activeSession.dispose();
 				} catch {
 					// Best-effort: exit must proceed even if dispose() itself throws.
 				}
 				process.exit(0);
 			},
 		});
+		await supervision.start(session);
+		runtime.registerSessionResource(supervision);
 	}
 
 	if (parsed.help) {

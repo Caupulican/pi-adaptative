@@ -40,6 +40,17 @@ describe("blockImages setting", () => {
 			expect(manager.getImageAutoResize()).toBe(true);
 			expect(manager.getBlockImages()).toBe(true);
 		});
+
+		it("stores and clears the configured clipboard image directory", () => {
+			const manager = SettingsManager.inMemory({});
+			expect(manager.getClipboardImageDirectory()).toBeUndefined();
+
+			manager.setClipboardImageDirectory("  ~/Pictures/pi  ");
+			expect(manager.getClipboardImageDirectory()).toBe("~/Pictures/pi");
+
+			manager.setClipboardImageDirectory(undefined);
+			expect(manager.getClipboardImageDirectory()).toBeUndefined();
+		});
 	});
 
 	describe("Read tool", () => {

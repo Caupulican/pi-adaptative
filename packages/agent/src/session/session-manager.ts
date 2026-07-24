@@ -1676,11 +1676,11 @@ export class SessionManager {
 	}
 
 	/**
-	 * Create a new session file containing only the path from root to the specified leaf.
-	 * Useful for extracting a single conversation path from a branched session.
-	 * Returns the new session file path, or undefined if not persisting.
+	 * Create an independent session manager containing only the path from root to the specified
+	 * leaf. The source manager is not mutated, so callers can prepare a replacement runtime before
+	 * retiring the current one.
 	 */
-	createBranchedSession(leafId: string): string | undefined {
+	createBranchedSessionManager(leafId: string): SessionManager {
 		const previousSessionFile = this.sessionFile;
 		const path = this.getBranch(leafId);
 		if (path.length === 0) {
@@ -1713,49 +1713,7 @@ export class SessionManager {
 			}
 		}
 
-		if (this.persist) {
-			// Build label entries
-			const lastEntryId = pathWithoutLabels[pathWithoutLabels.length - 1]?.id || null;
-			let parentId = lastEntryId;
-			const labelEntries: LabelEntry[] = [];
-			for (const { targetId, label, timestamp: labelTimestamp } of labelsToWrite) {
-				const labelEntry: LabelEntry = {
-					type: "label",
-					id: generateId(new Set(pathEntryIds)),
-					parentId,
-					timestamp: labelTimestamp,
-					targetId,
-					label,
-				};
-				pathEntryIds.add(labelEntry.id);
-				labelEntries.push(labelEntry);
-				parentId = labelEntry.id;
-			}
-
-			this.fileEntries = [header, ...pathWithoutLabels, ...labelEntries];
-			this.sessionId = newSessionId;
-			this._buildIndex();
-
-			// Only write the file now if it contains an assistant message.
-			// Otherwise defer to _persist(), which creates the file on the
-			// first assistant response, matching the newSession() contract
-			// and avoiding the duplicate-header bug when _persist()'s
-			// no-assistant guard later resets flushed to false.
-			const hasAssistant = this.fileEntries.some((e) => e.type === "message" && e.message.role === "assistant");
-			if (hasAssistant) {
-				// Keep the source file active while cold compacted getters are serialized into the branch.
-				this._rewriteFile(newSessionFile);
-				this.flushed = true;
-			} else {
-				this.flushed = false;
-			}
-			this.sessionFile = newSessionFile;
-			this._resetEntryFileIndex();
-
-			return newSessionFile;
-		}
-
-		// In-memory mode: replace current session with the path + labels
+		// Label entries belong to the copied branch, not the source manager.
 		const labelEntries: LabelEntry[] = [];
 		let parentId = pathWithoutLabels[pathWithoutLabels.length - 1]?.id || null;
 		for (const { targetId, label, timestamp: labelTimestamp } of labelsToWrite) {
@@ -1770,10 +1728,53 @@ export class SessionManager {
 			labelEntries.push(labelEntry);
 			parentId = labelEntry.id;
 		}
-		this.fileEntries = [header, ...pathWithoutLabels, ...labelEntries];
-		this.sessionId = newSessionId;
-		this._buildIndex();
-		return undefined;
+
+		const branched = new SessionManager(this.cwd, this.sessionDir, undefined, this.persist, this.agentDir);
+		branched.fileEntries = [header, ...pathWithoutLabels, ...labelEntries];
+		branched.sessionId = newSessionId;
+		branched.sessionFile = this.persist ? newSessionFile : undefined;
+		branched.coldPayloadEntryIds.clear();
+		for (const id of this.coldPayloadEntryIds) {
+			if (pathEntryIds.has(id)) branched.coldPayloadEntryIds.add(id);
+		}
+		branched._buildIndex();
+
+		// Only write the file now if it contains an assistant message. Otherwise defer to _persist(),
+		// matching newSession() and avoiding a duplicate-header write on the first assistant response.
+		const hasAssistant = branched.fileEntries.some(
+			(entry) => entry.type === "message" && entry.message.role === "assistant",
+		);
+		if (this.persist && hasAssistant) {
+			// Keep the source manager active while cold compacted getters serialize into the copy.
+			branched._rewriteFile();
+			branched.flushed = true;
+		} else {
+			branched.flushed = false;
+		}
+		return branched;
+	}
+
+	/**
+	 * Create a branch and make it current on this manager.
+	 *
+	 * Prefer createBranchedSessionManager() when a caller is replacing a live runtime and needs to
+	 * keep this manager intact until the replacement has been constructed successfully.
+	 */
+	createBranchedSession(leafId: string): string | undefined {
+		const branched = this.createBranchedSessionManager(leafId);
+		this.sessionId = branched.sessionId;
+		this.sessionFile = branched.sessionFile;
+		this.flushed = branched.flushed;
+		this.fileEntries = branched.fileEntries;
+		this.entries = branched.entries;
+		this.byId = branched.byId;
+		this.labelsById = branched.labelsById;
+		this.labelTimestampsById = branched.labelTimestampsById;
+		this.leafId = branched.leafId;
+		this.coldPayloadEntryIds.clear();
+		for (const id of branched.coldPayloadEntryIds) this.coldPayloadEntryIds.add(id);
+		this._resetEntryFileIndex();
+		return this.sessionFile;
 	}
 
 	/**

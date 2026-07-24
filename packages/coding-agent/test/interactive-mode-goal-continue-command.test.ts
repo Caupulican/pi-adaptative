@@ -1,8 +1,13 @@
 import { describe, expect, it } from "vitest";
-import type { GoalContinuationLoopOptions, GoalContinuationLoopResult } from "../src/core/agent-session.ts";
+import type {
+	AgentSession,
+	GoalContinuationLoopOptions,
+	GoalContinuationLoopResult,
+} from "../src/core/agent-session.ts";
 import { applyGoalEvent, createGoalState, type GoalState } from "../src/core/goals/goal-state.ts";
 import { BUILTIN_SLASH_COMMANDS } from "../src/core/slash-commands.ts";
 import { InteractiveMode } from "../src/modes/interactive/interactive-mode.ts";
+import { handleResumeSession, type SessionFlowHost } from "../src/modes/interactive/session-flow-commands.ts";
 
 type ParsedGoalContinueCommand = { ok: true; maxTurns: number; maxStallTurns: number } | { ok: false; error: string };
 
@@ -230,6 +235,81 @@ describe("InteractiveMode /goal-continue command", () => {
 		expect(getState()?.status).toBe("active");
 		expect(getState()?.requirements[0].status).toBe("open");
 		expect(statuses[0]).toContain("goal resumed");
+	});
+
+	it("uses the canonical persisted transition for /goal resume", async () => {
+		let state = createGoalState({ goalId: "g1", userGoal: "Ship", now: "T0" });
+		state = applyGoalEvent(state, { type: "block_goal", reason: "waiting", now: "T1" });
+		const resumed = createGoalCommandContext(state);
+
+		await interactiveModePrototype.handleGoalCommand.call(resumed.context, "/goal resume");
+
+		expect(resumed.saved).toHaveLength(1);
+		expect(resumed.getState()?.status).toBe("active");
+		expect(resumed.statuses).toEqual(["Goal resumed."]);
+		expect(resumed.getRefreshCount()).toBe(1);
+	});
+
+	it("resumes a selected session's blocked goal through the same transition", async () => {
+		let previousState = createGoalState({ goalId: "old", userGoal: "Old", now: "T0" });
+		previousState = applyGoalEvent(previousState, { type: "block_goal", reason: "old", now: "T1" });
+		let replacementState = createGoalState({ goalId: "g1", userGoal: "Ship", now: "T0" });
+		replacementState = applyGoalEvent(replacementState, {
+			type: "block_goal",
+			reason: "interrupted",
+			now: "T1",
+		});
+		const saved: GoalState[] = [];
+		const statuses: string[] = [];
+		const phases: string[] = [];
+		let refreshCount = 0;
+		const replacementSession = {
+			getGoalStateSnapshot: () => replacementState,
+			saveGoalStateSnapshot: (next: GoalState) => {
+				replacementState = next;
+				saved.push(next);
+				return "entry";
+			},
+		} as unknown as AgentSession;
+		const switchSession: SessionFlowHost["runtimeHost"]["switchSession"] = async (_path, options) => {
+			await options?.beforeSessionResourcesStart?.(replacementSession);
+			phases.push(`resources:${replacementState.status}`);
+			await options?.withSession?.({} as never);
+			return { cancelled: false };
+		};
+		const host = {
+			loadingAnimation: undefined,
+			statusContainer: { clear() {} },
+			runtimeHost: { switchSession },
+			renderCurrentSessionState() {},
+			showStatus: (message: string) => statuses.push(message),
+			showError: (message: string) => {
+				throw new Error(message);
+			},
+			refreshAutonomyFooterStatus: () => {
+				refreshCount++;
+			},
+			session: {
+				getGoalStateSnapshot: () => previousState,
+				saveGoalStateSnapshot: (next: GoalState) => {
+					previousState = next;
+					return "entry";
+				},
+			},
+		} as unknown as SessionFlowHost;
+
+		await handleResumeSession(host, "/tmp/resumed-session.jsonl", {
+			withSession: async () => {
+				phases.push("withSession");
+			},
+		});
+
+		expect(saved).toHaveLength(1);
+		expect(previousState.status).toBe("blocked");
+		expect(replacementState.status).toBe("active");
+		expect(phases).toEqual(["resources:active", "withSession"]);
+		expect(statuses).toEqual(["Resumed session and goal"]);
+		expect(refreshCount).toBe(1);
 	});
 
 	it("lets the user manually complete or close a goal without running the model", async () => {

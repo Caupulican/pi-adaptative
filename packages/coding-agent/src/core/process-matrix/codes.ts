@@ -32,8 +32,17 @@ export type WindDownReason = "parent_lost" | "parent_shutdown" | "user_cleanup";
 /** What a wound-down worker leaves behind so its task can be picked back up. */
 export interface ResumablePayload {
 	agent: AgentIdentityContract;
+	taskRef?: string;
 	taskSummary?: string;
 	lastCode: ProcessStatus;
+}
+
+/** Durable terminal notification outbox for one worker process. */
+export interface ProcessTerminalHandoff {
+	code: number | null;
+	signal: string | null;
+	observedAt: string;
+	notificationDeliveredAt?: string;
 }
 
 /** One process-matrix entry: one file under `state/process-matrix/<entryId>.json` (see `store.ts`). */
@@ -52,8 +61,10 @@ export interface ProcessMatrixEntry {
 	tmuxSession?: string;
 	tmuxPanePid?: number;
 	taskRef?: string;
+	taskSummary?: string;
 	windDownReason?: WindDownReason;
 	resumable?: ResumablePayload;
+	terminal?: ProcessTerminalHandoff;
 }
 
 /** What a master decides to do about one orphaned worker during the startup scan. */
@@ -70,4 +81,5 @@ export interface ReconcileMatrixResult {
 	code: "reconciled";
 	kept: ProcessMatrixEntry[];
 	prunedEntryIds: string[];
+	recoveredEntryIds: string[];
 }

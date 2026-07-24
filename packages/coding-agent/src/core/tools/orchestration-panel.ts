@@ -24,6 +24,7 @@ export type OrchestrationRowStatus =
 export interface OrchestrationPanelRow {
 	status: OrchestrationRowStatus;
 	label: string;
+	section?: string;
 	meta?: readonly string[];
 	details?: readonly string[];
 }
@@ -115,11 +116,16 @@ export function createOrchestrationActivityModel(
 	);
 	if (openSteps.length === 0 && activeLanes.length === 0) return undefined;
 
-	const taskRows = orderedSteps.slice(0, 5).map(taskStepPanelRow);
+	const taskRows = orderedSteps.slice(0, 5).map((step) => ({ ...taskStepPanelRow(step), section: "Steps" }));
 	const laneRows: OrchestrationPanelRow[] = activeLanes.slice(0, 3).map((lane) => ({
 		status: lane.status,
-		label: lane.laneId,
-		meta: [lane.type === "tmux-worker" ? "tmux worker" : "worker"],
+		label: lane.label ?? lane.laneId,
+		section: "Agents",
+		meta: [
+			lane.label ? lane.laneId : undefined,
+			lane.profileId ? `profile ${lane.profileId}` : undefined,
+			lane.type === "tmux-worker" ? "tmux" : undefined,
+		].filter((value): value is string => value !== undefined),
 	}));
 	const runningLanes = activeLanes.filter((lane) => lane.status === "running").length;
 	const queuedLanes = activeLanes.length - runningLanes;
@@ -127,12 +133,12 @@ export function createOrchestrationActivityModel(
 	const workingSteps = openSteps.filter((step) => step.status === "in_progress").length;
 	const evidenceMissing = taskState?.steps.some((step) => step.status === "completed" && step.evidence.length === 0);
 	return {
-		label: "orchestration",
+		label: "work",
 		action: workingSteps + runningLanes > 0 ? "active" : "ready",
 		status: blockedSteps > 0 ? "warning" : workingSteps + runningLanes > 0 ? "running" : "idle",
 		summary: [
-			openSteps.length ? `${openSteps.length} open` : undefined,
-			runningLanes ? `${runningLanes} worker${runningLanes === 1 ? "" : "s"}` : undefined,
+			openSteps.length ? `${openSteps.length} step${openSteps.length === 1 ? "" : "s"}` : undefined,
+			runningLanes ? `${runningLanes} agent${runningLanes === 1 ? "" : "s"}` : undefined,
 			queuedLanes ? `${queuedLanes} queued` : undefined,
 		].filter((value): value is string => value !== undefined),
 		rows: [...taskRows, ...laneRows],
@@ -177,7 +183,14 @@ export function renderOrchestrationPanelLines(
 	const lines = [summary ? `${title}  ${theme.fg("dim", summary)}` : title];
 	const rows = model.rows ?? [];
 	if (rows.length > 0) {
-		for (const row of rows) lines.push(...renderRow(theme, row, safeWidth, expanded));
+		let section: string | undefined;
+		for (const row of rows) {
+			if (row.section && row.section !== section) {
+				section = row.section;
+				lines.push(`  ${theme.fg("muted", theme.bold(row.section))}`);
+			}
+			lines.push(...renderRow(theme, row, safeWidth, expanded));
+		}
 	} else if (model.emptyText) {
 		lines.push(`  ${theme.fg("muted", model.emptyText)}`);
 	}

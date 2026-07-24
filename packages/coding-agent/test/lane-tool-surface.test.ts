@@ -41,6 +41,7 @@ describe("classified lane tool surface", () => {
 		expect(first.tools.map((tool) => tool.name)).toEqual(first.allowedTools);
 		expect(first.tools[0]).not.toBe(second.tools[0]);
 		expect(first.allowedTools).not.toContain("delegate");
+		expect(first.allowedTools).not.toContain("ask_question");
 		expect(first.allowedTools).not.toContain("bash");
 	});
 
@@ -62,6 +63,7 @@ describe("classified lane tool surface", () => {
 		});
 		expect(allowed.allowedTools).toEqual(["read", "grep", "find", "ls", "write", "edit"]);
 		expect(allowed.allowedTools).not.toContain("delegate");
+		expect(allowed.allowedTools).not.toContain("ask_question");
 
 		const blocked = createLaneToolSurface({ cwd, profile: profile({ tools: { block: ["*"] } }) });
 		expect(blocked.allowedTools).toEqual([]);

@@ -1,17 +1,20 @@
-import { execSync, spawn } from "child_process";
+import { execFileSync, execSync, spawn } from "child_process";
 import { platform } from "os";
 import { afterEach, beforeEach, describe, expect, test, vi } from "vitest";
-import { copyToClipboard } from "../src/utils/clipboard.ts";
+import { copyToClipboard, readClipboardText } from "../src/utils/clipboard.ts";
 
 const mocks = vi.hoisted(() => {
 	return {
 		clipboard: {
 			setText: vi.fn<(text: string) => Promise<void>>(),
+			getText: vi.fn<() => Promise<string>>(),
 		},
+		execFileSync: vi.fn(),
 		execSync: vi.fn(),
 		spawn: vi.fn(),
 		platform: vi.fn<() => NodeJS.Platform>(),
 		isWaylandSession: vi.fn<() => boolean>(),
+		isWslEnvironment: vi.fn<() => boolean>(),
 	};
 });
 
@@ -23,6 +26,7 @@ vi.mock("../src/utils/clipboard-native.js", () => {
 
 vi.mock("child_process", () => {
 	return {
+		execFileSync: mocks.execFileSync,
 		execSync: mocks.execSync,
 		spawn: mocks.spawn,
 	};
@@ -42,7 +46,14 @@ vi.mock("../src/utils/clipboard-image.js", () => {
 	};
 });
 
+vi.mock("../src/utils/platform.js", () => {
+	return {
+		isWslEnvironment: mocks.isWslEnvironment,
+	};
+});
+
 const mockedExecSync = vi.mocked(execSync);
+const mockedExecFileSync = vi.mocked(execFileSync);
 const mockedSpawn = vi.mocked(spawn);
 const mockedPlatform = vi.mocked(platform);
 
@@ -62,12 +73,17 @@ beforeEach(() => {
 	stdoutWrites = [];
 	nativeResolved = false;
 	mocks.clipboard.setText.mockReset();
+	mocks.clipboard.getText.mockReset();
+	mocks.clipboard.getText.mockResolvedValue("");
+	mocks.execFileSync.mockReset();
 	mocks.execSync.mockReset();
 	mocks.spawn.mockReset();
 	mocks.platform.mockReset();
 	mocks.isWaylandSession.mockReset();
+	mocks.isWslEnvironment.mockReset();
 	mockedPlatform.mockReturnValue("darwin");
 	mocks.isWaylandSession.mockReturnValue(false);
+	mocks.isWslEnvironment.mockReturnValue(false);
 	mocks.clipboard.setText.mockImplementation(async () => {
 		await new Promise((resolve) => setTimeout(resolve, 1));
 		nativeResolved = true;
@@ -146,5 +162,39 @@ describe("copyToClipboard", () => {
 
 		await expect(copyToClipboard("x".repeat(80_000))).rejects.toThrow("Failed to copy to clipboard");
 		expect(osc52Writes()).toHaveLength(0);
+	});
+});
+
+describe("readClipboardText", () => {
+	test("reads native clipboard text outside Linux", async () => {
+		mocks.clipboard.getText.mockResolvedValue("clipboard text");
+
+		await expect(readClipboardText()).resolves.toBe("clipboard text");
+		expect(mockedExecFileSync).not.toHaveBeenCalled();
+	});
+
+	test("falls back to pbpaste when native clipboard read fails", async () => {
+		mocks.clipboard.getText.mockRejectedValue(new Error("native failed"));
+		mockedExecFileSync.mockReturnValue("fallback text");
+
+		await expect(readClipboardText()).resolves.toBe("fallback text");
+		expect(mockedExecFileSync).toHaveBeenCalledWith(
+			"pbpaste",
+			[],
+			expect.objectContaining({ encoding: "utf8", timeout: 3000 }),
+		);
+	});
+
+	test("requests an explicit Wayland text target", async () => {
+		mockedPlatform.mockReturnValue("linux");
+		mocks.isWaylandSession.mockReturnValue(true);
+		mockedExecFileSync.mockReturnValue("wayland text");
+
+		await expect(readClipboardText()).resolves.toBe("wayland text");
+		expect(mockedExecFileSync).toHaveBeenCalledWith(
+			"wl-paste",
+			["--no-newline", "--type", "text"],
+			expect.objectContaining({ encoding: "utf8", timeout: 3000 }),
+		);
 	});
 });

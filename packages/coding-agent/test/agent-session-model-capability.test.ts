@@ -25,6 +25,7 @@ describe("model capability auto-detection", () => {
 				"context_audit",
 				"goal",
 				"task_steps",
+				"ask_question",
 				"delegate",
 				"run_toolkit_script",
 				"artifact_retrieve",
@@ -50,6 +51,7 @@ describe("model capability auto-detection", () => {
 				"python",
 				"edit",
 				"write",
+				"ask_question",
 				"run_toolkit_script",
 				"artifact_retrieve",
 			]);
@@ -73,6 +75,20 @@ describe("model capability auto-detection", () => {
 		try {
 			expect(harness.session.getModelCapabilityProfile().class).toBe("chat");
 			expect(harness.session.getActiveToolNames()).toEqual([]);
+		} finally {
+			harness.cleanup();
+		}
+	});
+
+	it("fails visibly instead of silently downgrading images for a text-only model", async () => {
+		const harness = await createHarness({ models: [{ id: "text-only", contextWindow: 200_000, input: ["text"] }] });
+		try {
+			await expect(
+				harness.session.prompt("Inspect this image", {
+					images: [{ type: "image", data: "AQID", mimeType: "image/png" }],
+				}),
+			).rejects.toThrow("does not accept image input");
+			expect(harness.session.messages).toEqual([]);
 		} finally {
 			harness.cleanup();
 		}
@@ -111,6 +127,7 @@ describe("model capability auto-detection", () => {
 				"python",
 				"edit",
 				"write",
+				"ask_question",
 				"run_toolkit_script",
 				"artifact_retrieve",
 			]);
@@ -143,6 +160,7 @@ describe("model capability auto-detection", () => {
 				"python",
 				"edit",
 				"write",
+				"ask_question",
 				"run_toolkit_script",
 				"artifact_retrieve",
 			]);
@@ -175,6 +193,7 @@ describe("model capability auto-detection", () => {
 				"python",
 				"edit",
 				"write",
+				"ask_question",
 				"run_toolkit_script",
 				"artifact_retrieve",
 			]);

@@ -80,6 +80,7 @@ describe("regression #3592: no-builtin-tools keeps extension tools enabled", () 
 				.sort(),
 		).toEqual([
 			"artifact_retrieve",
+			"ask_question",
 			"bash",
 			"context_audit",
 			"delegate",

@@ -140,6 +140,7 @@ export interface TerminalSettings {
 export interface ImageSettings {
 	autoResize?: boolean; // default: true (resize images to 2000x2000 max for better model compatibility)
 	blockImages?: boolean; // default: false - when true, prevents all images from being sent to LLM providers
+	clipboardDirectory?: string; // default: <agentDir>/state/attachments; relative paths resolve from the active cwd
 }
 
 export interface ThinkingBudgetsSettings {
@@ -3108,6 +3109,23 @@ export class SettingsManager {
 		}
 		this.globalSettings.images.blockImages = blocked;
 		this.markModified("images", "blockImages");
+		this.save();
+	}
+
+	getClipboardImageDirectory(): string | undefined {
+		return this.settings.images?.clipboardDirectory?.trim() || undefined;
+	}
+
+	setClipboardImageDirectory(directory: string | undefined): void {
+		if (!this.globalSettings.images) {
+			this.globalSettings.images = {};
+		}
+		if (directory?.trim()) {
+			this.globalSettings.images.clipboardDirectory = directory.trim();
+		} else {
+			delete this.globalSettings.images.clipboardDirectory;
+		}
+		this.markModified("images", "clipboardDirectory");
 		this.save();
 	}
 

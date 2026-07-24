@@ -15,6 +15,7 @@ import {
 	type AttemptLease,
 	type AttemptStatus,
 	type EvidenceContract,
+	type ExecutionGrant,
 	isHarnessCapability,
 	type ObjectiveContract,
 	type ObjectiveStatus,
@@ -27,7 +28,7 @@ import {
 	toJsonObject,
 	type WorkerResultContract,
 } from "./contracts.ts";
-import type { OrchestrationEventStore } from "./event-store.ts";
+import { type OrchestrationEventStore, OrchestrationSnapshotRequiredError } from "./event-store.ts";
 import { validateRiskBudget } from "./risk-budget.ts";
 
 export interface ObjectiveRuntimeState {
@@ -55,6 +56,8 @@ export interface AttemptRuntimeState {
 	status: AttemptStatus;
 	reasonCode?: string;
 	grantId?: string;
+	/** Full compiled authority for new attempts; grantId alone is retained only when replaying legacy events. */
+	grant?: ExecutionGrant;
 	agentId?: string;
 	lease?: AttemptLease;
 	checkpointIds: readonly string[];
@@ -146,6 +149,25 @@ function emptyProjection(): TaskRuntimeProjection {
 
 function cloneProjection(state: TaskRuntimeProjection): TaskRuntimeProjection {
 	return structuredClone(state);
+}
+
+function projectionFromSnapshot(projection: JsonObject, throughOrdinal: number): TaskRuntimeProjection {
+	const candidate = record(projection, "orchestration projection snapshot");
+	if (candidate.lastOrdinal !== throughOrdinal) {
+		throw new DurableTaskRuntimeError("Orchestration projection snapshot ordinal does not match its baseline.");
+	}
+	for (const field of [
+		"agents",
+		"objectives",
+		"tasks",
+		"attempts",
+		"checkpoints",
+		"approvals",
+		"notifications",
+	] as const) {
+		record(candidate[field], `orchestration projection snapshot.${field}`);
+	}
+	return structuredClone(candidate) as unknown as TaskRuntimeProjection;
 }
 
 function record(value: unknown, label: string): Record<string, unknown> {
@@ -540,9 +562,13 @@ export function reduceOrchestrationEvent(
 			const attemptId = string(event.payload.attemptId, "attempt.grant_bound.attemptId");
 			const attempt = attempts[attemptId];
 			if (!attempt) throw new DurableTaskRuntimeError(`Unknown attempt '${attemptId}'.`);
+			const grant = event.payload.grant
+				? (structuredClone(record(event.payload.grant, "attempt.grant_bound.grant")) as unknown as ExecutionGrant)
+				: undefined;
 			attempts[attemptId] = {
 				...attempt,
-				grantId: string(event.payload.grantId, "attempt.grant_bound.grantId"),
+				grantId: grant?.grantId ?? string(event.payload.grantId, "attempt.grant_bound.grantId"),
+				...(grant ? { grant } : {}),
 				updatedAt: event.occurredAt,
 			};
 			break;
@@ -797,7 +823,11 @@ export class DurableTaskRuntime {
 		this.store = options.store;
 		this.now = options.now ?? Date.now;
 		this.createId = options.createId ?? randomUUID;
-		this.state = projectOrchestrationEvents(this.store.readAll());
+		const snapshot = this.store.readProjectionSnapshot();
+		this.state = snapshot
+			? projectionFromSnapshot(snapshot.projection, snapshot.throughOrdinal)
+			: projectOrchestrationEvents(this.store.readAll());
+		this.refresh();
 	}
 
 	getSnapshot(): TaskRuntimeProjection {
@@ -1056,13 +1086,24 @@ export class DurableTaskRuntime {
 		return structuredClone(this.state.attempts[attemptId]!);
 	}
 
-	bindAttemptGrant(attemptId: string, grantId: string): AttemptRuntimeState {
+	bindAttemptGrant(attemptId: string, grant: ExecutionGrant): AttemptRuntimeState {
 		this.refresh();
 		const attempt = this.requireAttempt(attemptId);
 		if (!["queued", "leased", "running"].includes(attempt.status)) {
 			throw new DurableTaskRuntimeError(`Attempt '${attemptId}' cannot bind a grant from '${attempt.status}'.`);
 		}
-		if (!grantId.trim()) throw new DurableTaskRuntimeError("Grant id is required.");
+		if (!grant.grantId.trim()) throw new DurableTaskRuntimeError("Grant id is required.");
+		const task = this.state.tasks[attempt.taskId];
+		if (
+			!task ||
+			grant.schemaVersion !== ORCHESTRATION_SCHEMA_VERSION ||
+			grant.attemptId !== attemptId ||
+			grant.taskId !== attempt.taskId ||
+			grant.objectiveId !== task.task.objectiveId ||
+			grant.role !== task.task.role
+		) {
+			throw new DurableTaskRuntimeError("Execution grant target does not match the attempt.");
+		}
 		const approval = this.approvalForAttempt(attemptId);
 		if (approval?.status === "pending") {
 			throw new DurableTaskRuntimeError(
@@ -1072,14 +1113,19 @@ export class DurableTaskRuntime {
 		if (approval?.status === "rejected") {
 			throw new DurableTaskRuntimeError(`Approval '${approval.request.approvalId}' was rejected.`);
 		}
-		if (attempt.grantId === grantId) return structuredClone(attempt);
+		if (attempt.grantId === grant.grantId) {
+			if (attempt.grant && !isDeepStrictEqual(attempt.grant, grant)) {
+				throw new DurableTaskRuntimeError(`Attempt '${attemptId}' grant has conflicting content.`);
+			}
+			return structuredClone(attempt);
+		}
 		if (attempt.grantId) throw new DurableTaskRuntimeError(`Attempt '${attemptId}' already has a different grant.`);
 		this.commit({
 			type: "attempt.grant_bound",
 			aggregateId: attemptId,
 			actor: "policy",
-			idempotencyKey: `attempt-grant-bound:${attemptId}:${grantId}`,
-			payload: toJsonObject({ attemptId, grantId }),
+			idempotencyKey: `attempt-grant-bound:${attemptId}:${grant.grantId}`,
+			payload: toJsonObject({ attemptId, grant }),
 		});
 		return structuredClone(this.state.attempts[attemptId]!);
 	}
@@ -1295,11 +1341,17 @@ export class DurableTaskRuntime {
 	 * transcript, so its old lease is fenced and the task becomes dispatchable for a fresh attempt.
 	 * Agent-bound attempts are intentionally excluded: those must wake the same logical agent.
 	 */
-	recoverInterruptedUnboundAttempts(): string[] {
+	recoverInterruptedUnboundAttempts(shouldRecover: (attempt: AttemptRuntimeState) => boolean = () => true): string[] {
 		this.refresh();
 		const recovered: string[] = [];
 		for (const attempt of Object.values(this.state.attempts)) {
-			if ((attempt.status !== "leased" && attempt.status !== "running") || attempt.agentId) continue;
+			if (
+				(attempt.status !== "leased" && attempt.status !== "running") ||
+				attempt.agentId ||
+				!shouldRecover(attempt)
+			) {
+				continue;
+			}
 			this.commit({
 				type: "attempt.lease_expired",
 				aggregateId: attempt.attemptId,
@@ -1656,14 +1708,34 @@ export class DurableTaskRuntime {
 	}
 
 	private refresh(): void {
-		for (const event of this.store.readAfter(this.state.lastOrdinal)) {
+		let events: OrchestrationEvent[];
+		try {
+			events = this.store.readAfter(this.state.lastOrdinal);
+		} catch (error) {
+			if (!(error instanceof OrchestrationSnapshotRequiredError)) throw error;
+			const snapshot = this.store.readProjectionSnapshot();
+			if (!snapshot || snapshot.throughOrdinal < error.throughOrdinal) {
+				throw new DurableTaskRuntimeError("Required orchestration projection snapshot is unavailable.");
+			}
+			this.state = projectionFromSnapshot(snapshot.projection, snapshot.throughOrdinal);
+			events = this.store.readAfter(this.state.lastOrdinal);
+		}
+		for (const event of events) {
 			this.state = reduceOrchestrationEvent(this.state, event);
 		}
+		this.compactCurrentProjection();
 	}
 
 	private commit(input: AppendOrchestrationEventInput): void {
+		this.compactCurrentProjection();
 		const event = this.store.append(input, { expectedLastOrdinal: this.state.lastOrdinal });
 		if (event.ordinal > this.state.lastOrdinal) this.state = reduceOrchestrationEvent(this.state, event);
+	}
+
+	private compactCurrentProjection(): void {
+		if (this.state.lastOrdinal > 0) {
+			this.store.compactIfNeeded(this.state.lastOrdinal, () => toJsonObject(this.state));
+		}
 	}
 
 	private nowIso(): string {

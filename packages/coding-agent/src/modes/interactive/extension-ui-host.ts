@@ -23,7 +23,7 @@ import type {
 	OverlayHandle,
 	OverlayOptions,
 } from "@caupulican/pi-tui";
-import { Container, matchesKey, Spacer, Text, type TUI } from "@caupulican/pi-tui";
+import { Container, Editor, matchesKey, Spacer, Text, type TUI } from "@caupulican/pi-tui";
 import type { AgentSession } from "../../core/agent-session.ts";
 import type {
 	AutocompleteProviderFactory,
@@ -35,7 +35,11 @@ import type {
 	ExtensionWidgetOptions,
 } from "../../core/extensions/index.ts";
 import type { FooterDataProvider, ReadonlyFooterDataProvider } from "../../core/footer-data-provider.ts";
+import type { HumanInputPresentationRequest, HumanInputPresentationResult } from "../../core/human-input.ts";
 import type { KeybindingsManager } from "../../core/keybindings.ts";
+import type { SessionImageStore } from "../../core/session-image-store.ts";
+import { AskQuestionDialog } from "../../core/tools/ask-question.ts";
+import { handleClipboardImagePaste } from "./clipboard-input.ts";
 import type { CustomEditor } from "./components/custom-editor.ts";
 import { ExtensionEditorComponent } from "./components/extension-editor.ts";
 import { ExtensionInputComponent } from "./components/extension-input.ts";
@@ -83,6 +87,7 @@ export interface ExtensionUiHostUi {
 	setEditor(editor: EditorComponent): void;
 	getBuiltInHeader(): Component | undefined;
 	getAutocompleteProvider(): AutocompleteProvider | undefined;
+	getClipboardImageStore(): Pick<SessionImageStore, "write"> | undefined;
 	getToolsExpanded(): boolean;
 	pushAutocompleteProviderWrapper(factory: AutocompleteProviderFactory): void;
 	resetAutocompleteProviderWrappers(): void;
@@ -475,6 +480,7 @@ export class ExtensionUiHost {
 	 */
 	createExtensionUIContext(): ExtensionUIContext {
 		return {
+			askQuestions: (request, opts) => this.showHumanInput(request, opts),
 			select: (title, options, opts) => this.showExtensionSelector(title, options, opts),
 			confirm: (title, message, opts) => this.showExtensionConfirm(title, message, opts),
 			input: (title, placeholder, opts) => this.showExtensionInput(title, placeholder, opts),
@@ -523,6 +529,44 @@ export class ExtensionUiHost {
 			getToolsExpanded: () => this.ui.getToolsExpanded(),
 			setToolsExpanded: (expanded) => this.ui.setToolsExpanded(expanded),
 		};
+	}
+
+	private showHumanInput(
+		request: HumanInputPresentationRequest,
+		opts?: Pick<ExtensionUIDialogOptions, "signal">,
+	): Promise<HumanInputPresentationResult> {
+		if (opts?.signal?.aborted) {
+			return Promise.resolve({ answers: [], cancelled: true, reason: "interrupted", imageContents: [] });
+		}
+		return this.showExtensionCustom<HumanInputPresentationResult>((tui, currentTheme, keybindings, done) => {
+			let onAbort: (() => void) | undefined;
+			const finish = (result: HumanInputPresentationResult) => {
+				if (onAbort) opts?.signal?.removeEventListener("abort", onAbort);
+				done(result);
+			};
+			const settings = this.session.settingsManager;
+			const modelCannotSeeImages = !request.acceptsImages;
+			const dialog = new AskQuestionDialog({
+				questions: request.questions,
+				theme: currentTheme,
+				keybindings,
+				requestRender: () => tui.requestRender(),
+				finish,
+				createAnswerEditor: () => new Editor(tui, getEditorTheme()),
+				clipboard: {
+					autoResizeImages: settings.getImageAutoResize(),
+					blockImages: settings.getBlockImages() || modelCannotSeeImages,
+					blockImagesReason: modelCannotSeeImages
+						? "The selected model does not accept image input. Switch to an image-capable model or route this inspection to a vision worker."
+						: undefined,
+					imageStore: this.ui.getClipboardImageStore(),
+				},
+				pasteClipboardImage: handleClipboardImagePaste,
+			});
+			onAbort = () => dialog.cancel("interrupted");
+			opts?.signal?.addEventListener("abort", onAbort, { once: true });
+			return dialog;
+		}).catch(() => ({ answers: [], cancelled: true, reason: "interrupted", imageContents: [] }));
 	}
 
 	/**

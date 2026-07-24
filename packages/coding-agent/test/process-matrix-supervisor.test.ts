@@ -10,6 +10,8 @@ import {
 	detectOrphanedWorkers,
 	markClosed,
 	markResumable,
+	markTerminal,
+	markTerminalNotificationDelivered,
 	pollWorkerDirective,
 	reconcileMatrix,
 } from "../src/core/process-matrix/supervisor.ts";
@@ -103,12 +105,14 @@ describe("process-matrix supervisor (pure)", () => {
 				tmuxSession: "pi-job-1",
 				tmuxPanePid: 300,
 				taskRef: "goal-1",
+				taskSummary: "Ship goal 1",
 			});
 			expect(entry.parentSessionId).toBe("m1");
 			expect(entry.agent.resumeContext.worktreeLaneKey).toBe("adhoc-1");
 			expect(entry.tmuxSession).toBe("pi-job-1");
 			expect(entry.tmuxPanePid).toBe(300);
 			expect(entry.taskRef).toBe("goal-1");
+			expect(entry.taskSummary).toBe("Ship goal 1");
 		});
 	});
 
@@ -176,6 +180,16 @@ describe("process-matrix supervisor (pure)", () => {
 		expect(result).toEqual({ ...entry, status: "closed", heartbeatAt: "2026-07-19T00:02:00.000Z" });
 	});
 
+	it("markTerminal creates an undelivered outbox and marks delivery separately", () => {
+		const terminal = markTerminal(worker(), { code: 0, signal: null }, "2026-07-19T00:02:00.000Z");
+		expect(terminal).toMatchObject({
+			status: "closed",
+			terminal: { code: 0, signal: null, observedAt: "2026-07-19T00:02:00.000Z" },
+		});
+		const delivered = markTerminalNotificationDelivered(terminal, "2026-07-19T00:03:00.000Z");
+		expect(delivered.terminal?.notificationDeliveredAt).toBe("2026-07-19T00:03:00.000Z");
+	});
+
 	describe("applyAdoption", () => {
 		it("sets status running, adopts the new parent, and clears windDownReason", () => {
 			const entry = beginWindDown(worker(), "parent_lost", "2026-07-19T00:01:00.000Z");
@@ -226,17 +240,59 @@ describe("process-matrix supervisor (pure)", () => {
 	describe("reconcileMatrix", () => {
 		const deps = { isPidAlive: alwaysAlive, now: Date.parse("2026-07-19T01:00:00.000Z"), resumableTtlMs: 60_000 };
 
-		it("prunes closed entries unconditionally", () => {
+		it("prunes closed entries without a pending terminal handoff", () => {
 			const entries = [worker({ status: "closed" })];
 			const result = reconcileMatrix(entries, deps);
-			expect(result).toEqual({ code: "reconciled", kept: [], prunedEntryIds: ["worker-w1"] });
+			expect(result).toEqual({
+				code: "reconciled",
+				kept: [],
+				prunedEntryIds: ["worker-w1"],
+				recoveredEntryIds: [],
+			});
 		});
 
-		it("prunes running/winding_down entries whose own pid is dead", () => {
-			const entries = [worker({ status: "running" }), worker({ entryId: "worker-w2", status: "winding_down" })];
+		it("retains an undelivered terminal outbox until delivery or TTL expiry", () => {
+			const fresh = markTerminal(worker(), { code: 0, signal: null }, "2026-07-19T00:59:30.000Z");
+			const delivered = markTerminalNotificationDelivered(fresh, "2026-07-19T00:59:40.000Z");
+			const expired = markTerminal(worker({ entryId: "worker-w2" }), { code: 1, signal: null }, NOW);
+
+			expect(reconcileMatrix([fresh], deps).kept).toEqual([fresh]);
+			expect(reconcileMatrix([delivered], deps).prunedEntryIds).toEqual([delivered.entryId]);
+			expect(reconcileMatrix([expired], deps).prunedEntryIds).toEqual([expired.entryId]);
+		});
+
+		it("repairs interrupted Pi workers into resumable records", () => {
+			const entries = [
+				worker({ status: "running", taskRef: "goal-1", taskSummary: "Ship goal 1" }),
+				worker({ entryId: "worker-w2", status: "winding_down" }),
+			];
 			const result = reconcileMatrix(entries, { ...deps, isPidAlive: neverAlive });
+			expect(result.kept.map((entry) => entry.status)).toEqual(["resumable", "resumable"]);
+			expect(result.kept.map((entry) => entry.resumable?.agent)).toEqual(entries.map((entry) => entry.agent));
+			expect(result.kept[0]?.resumable).toMatchObject({ taskRef: "goal-1", taskSummary: "Ship goal 1" });
+			expect(result.prunedEntryIds).toEqual([]);
+			expect(result.recoveredEntryIds.sort()).toEqual(["worker-w1", "worker-w2"]);
+		});
+
+		it("prunes dead masters and external workers that Pi cannot resume", () => {
+			const master = buildMasterEntry({ agent: agent("m1"), pid: 100, hostname: "host-a", now: NOW });
+			const externalWorker = worker({
+				entryId: "worker-external",
+				agent: {
+					agentId: "external",
+					resumeContext: {
+						provider: "external",
+						sessionId: "external",
+						cwd: "/repo",
+						resourceProfileNames: [],
+						contextPointers: [],
+					},
+				},
+			});
+			const result = reconcileMatrix([master, externalWorker], { ...deps, isPidAlive: neverAlive });
 			expect(result.kept).toEqual([]);
-			expect(result.prunedEntryIds.sort()).toEqual(["worker-w1", "worker-w2"]);
+			expect(result.prunedEntryIds).toEqual(["master-m1", "worker-external"]);
+			expect(result.recoveredEntryIds).toEqual([]);
 		});
 
 		it("keeps running/winding_down entries whose own pid is alive", () => {
@@ -244,6 +300,7 @@ describe("process-matrix supervisor (pure)", () => {
 			const result = reconcileMatrix(entries, deps);
 			expect(result.kept).toEqual(entries);
 			expect(result.prunedEntryIds).toEqual([]);
+			expect(result.recoveredEntryIds).toEqual([]);
 		});
 
 		it("keeps a resumable entry within the TTL window", () => {
@@ -254,6 +311,13 @@ describe("process-matrix supervisor (pure)", () => {
 
 		it("prunes a resumable entry older than the TTL window", () => {
 			const entries = [worker({ status: "resumable", heartbeatAt: "2026-07-19T00:00:00.000Z" })];
+			const result = reconcileMatrix(entries, deps);
+			expect(result.kept).toEqual([]);
+			expect(result.prunedEntryIds).toEqual(["worker-w1"]);
+		});
+
+		it("prunes malformed-age recovery records instead of retaining them forever", () => {
+			const entries = [worker({ status: "resumable", heartbeatAt: "not-a-time" })];
 			const result = reconcileMatrix(entries, deps);
 			expect(result.kept).toEqual([]);
 			expect(result.prunedEntryIds).toEqual(["worker-w1"]);

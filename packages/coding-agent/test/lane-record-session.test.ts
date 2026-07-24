@@ -16,6 +16,8 @@ function laneRecord(overrides: Partial<LaneRecord> = {}): LaneRecord {
 		startedAt: "2026-07-01T00:00:00.000Z",
 		completedAt: "2026-07-01T00:00:01.000Z",
 		costUsd: 0.1,
+		label: "Inspect the session lane records",
+		profileId: "research-fast",
 		...overrides,
 	};
 }
@@ -37,6 +39,8 @@ describe("session lane record snapshots", () => {
 		expect(records).toHaveLength(2);
 		expect(records[0]?.laneId).toBe("research-1");
 		expect(records[0]?.status).toBe("succeeded");
+		expect(records[0]?.label).toBe("Inspect the session lane records");
+		expect(records[0]?.profileId).toBe("research-fast");
 		expect(records[1]?.laneId).toBe("research-2");
 		expect(records[1]?.reasonCode).toBe("model_error");
 	});

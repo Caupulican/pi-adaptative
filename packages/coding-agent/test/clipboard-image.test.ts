@@ -35,6 +35,11 @@ vi.mock("fs", async (importOriginal) => {
 	};
 });
 
+vi.mock("os", async (importOriginal) => {
+	const actual = await importOriginal<typeof import("os")>();
+	return { ...actual, release: () => "generic-linux" };
+});
+
 vi.mock("../src/utils/clipboard-native.js", () => {
 	return {
 		clipboard: mocks.clipboard,

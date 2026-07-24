@@ -20,25 +20,38 @@ process entries and resumable payloads do not carry parallel agent/session/lane 
 
 - **Master** (no declared parent): writes its own entry once at startup, heartbeats it on an
   interval, and -- once, at startup -- scans the matrix for **orphaned workers**: worker entries
-  whose recorded parent pid is dead.
+  whose recorded parent pid is dead. `/new`, `/resume`, and `/fork` replace this session-owned
+  runtime, so its identity, notifications, and scan always follow the active session.
 - **Worker** (launched with `PI_PARENT_PID` / `--parent-pid` set): self-registers its own entry
   (the only writer of that entry during normal operation) and watches its parent's liveness on a
   poll interval.
 
 ### Resume: a master never auto-kills what it finds
 
-On startup, a master's orphan scan finds worker entries whose parent is dead. It never assumes
-those workers are also dead -- a worker can outlive a crashed parent -- so it never kills or
-silently repurposes anything. Instead, for each orphan, **interactively**:
+On startup or in-process session resume, a master's orphan scan finds worker entries whose parent
+is dead. It never assumes those workers are also dead -- a worker can outlive a crashed parent --
+so it never kills anything. Recovery is identity-fenced:
 
-If the worker's own process is dead and its resumable payload contains a Pi session context, the
-first prompt offers to resume that same logical agent. Acceptance launches the exact persisted
-session file with its agent ID, cwd, worktree, orchestration profile, resource pointers, and bounded
-wake task. The direct-argv launch prefers the exact persisted `sessionFile` over an ID lookup,
-carries the stable logical-agent ID in `PI_ORCHESTRATION_AGENT_ID`, and names the latest checkpoint
-plus bounded context pointers in the wake prompt instead of copying a second transcript. The resumed process overwrites the same
-`<role>-<sessionId>` matrix entry and reports its terminal process state through an event-driven
-parent notification. A still-live orphan follows the adopt/cleanup flow below.
+- If the worker's recorded `parentSessionId` and `taskRef` exactly match the active session and its
+  active goal/task identity, resume restores that existing ownership without another approval. A
+  live worker is re-adopted; a dead worker with a complete resumable Pi context is relaunched as the
+  same logical agent. Terminal or still-blocked goals disable automatic recovery. This works in
+  interactive, print, and RPC modes and is the process-level counterpart to `/resume` restoring the
+  goal before supervisors start.
+- Every foreign orphan remains owner-gated. Interactive mode offers resume/adopt/cleanup; headless
+  modes report it without writes or process actions.
+
+When a foreign worker's own process is dead and its resumable payload contains a Pi session
+context, the first prompt offers to resume that same logical agent. Acceptance launches the exact
+persisted session file with its agent ID, cwd, worktree, orchestration profile, resource pointers,
+and bounded wake task. The direct-argv launch prefers the exact persisted `sessionFile` over an ID
+lookup, carries the stable logical-agent ID in `PI_ORCHESTRATION_AGENT_ID`, and names the latest
+checkpoint plus bounded context pointers in the wake prompt instead of copying a second transcript.
+The resumed process overwrites the same `<role>-<sessionId>` matrix entry. Its terminal process event
+is first persisted as an undelivered matrix handoff, then delivered to the owning parent session and
+marked delivered. If that owner switched sessions before the event arrived, the bounded handoff
+survives and replays on its next resume instead of being injected into the wrong transcript. A
+still-live foreign orphan follows the adopt/cleanup flow below.
 
 1. Ask: *"adopt worker `<entryId>` (lane `<laneKey>`)?"* Yes → this session becomes the worker's
    new parent (an adoption grant is written into the worker's own entry).
@@ -47,17 +60,17 @@ parent notification. A still-live orphan follows the adopt/cleanup flow below.
    killed).
 3. If both declined: leave the entry untouched.
 
-**Non-interactively** (print/RPC mode, or no TTY), the scan is report-only: it logs what it found
-and writes nothing, kills nothing. The one-time startup scan is the only place a master ever
-touches another session's entry, and only with explicit owner confirmation each time.
+**Non-interactively** (print/RPC mode, or no TTY), foreign orphans are report-only: the scan logs
+what it found and writes nothing. Exact-session recovery remains active because it restores an
+already-recorded authority relationship rather than claiming another session's worker.
 
 ### A worker on parent death: wind down, never vanish
 
 A worker polls its parent's pid on `watcherPollMs`. The moment that pid is no longer alive, it:
 
 1. Marks its own entry `winding_down` (reason `parent_lost`), then `resumable` with a payload
-   containing one clone of its logical-agent identity (exact Pi session/cwd/profile/lane context)
-   and a bounded task summary.
+   containing one clone of its logical-agent identity (exact Pi session/cwd/profile/lane context),
+   its stable task reference, and a bounded task summary.
 2. Emits one steer notice into its own session.
 3. Starts a bounded grace window (`adoptionGraceMs`), polling its own entry every
    `watcherPollMs` for a directive a new master may have written (see above):
@@ -79,11 +92,12 @@ Cross-process, like `PI_WORKTREE_LANE`/`--worktree-lane`:
 | `PI_PARENT_PID` | `--parent-pid <pid>` | Declares this process as a worker of `<pid>`. A malformed or non-positive value is ignored (never a crash on bad env) -- the process falls back to acting as a master. |
 | `PI_PARENT_SESSION` | `--parent-session <id>` | The parent's sessionId, recorded alongside the pid for diagnostics/adoption. |
 | `PI_ORCHESTRATION_AGENT_ID` | launch-only | Pins the logical agent identity across the initial process and exact-session resumes. |
+| `PI_TASK_REF` | `--task-ref <id>` | Pins the goal/task identity used to fence automatic recovery across process generations. |
 
-`tmux_agent_manager`'s `fire_task` sets all three automatically on every `pi`-provider child it
-launches (its own pid/sessionId and the managed lane ID as logical agent ID), the same way it
-threads `--worktree-lane` for a lane-first dispatch -- see `dispatch-grant.ts`'s
-`LaunchProfileSource.parentPid`/`parentSession`.
+`tmux_agent_manager`'s `fire_task` sets the parent pid/session and logical agent ID automatically on
+every `pi`-provider child it launches. Goal-bound launches also set `PI_TASK_REF` from `goalId`, the
+same way lane-first dispatch threads `--worktree-lane` -- see `dispatch-grant.ts`'s
+`LaunchProfileSource`.
 
 ## Settings
 
@@ -104,12 +118,11 @@ process-matrix entry are a sanctioned artifact, exactly like its own session tra
 ceiling is untouched, and this is not a new escalation surface. A worker never writes any *other*
 session's entry.
 
-The one narrow exception on the master side: during the ask-gated startup orphan scan, a master
-that the owner explicitly told to adopt or clean up a specific orphan writes that grant directly
-into the *orphan's* own entry (never anywhere else, never without that confirmation). This mirrors
-`worktree-sync`'s integration-lock takeover of a provably dead owner's resource -- a new owner may
-claim what a dead owner left behind, audited (here, by the interactive confirmation itself) rather
-than assumed. Outside that one handshake, a master never writes another session's entry.
+The narrow exceptions on the master side are identity-fenced exact-session recovery and the
+ask-gated foreign-orphan scan. Exact recovery may restore the same recorded parent session without
+another prompt. Claiming or cleaning up a foreign orphan still requires explicit owner approval and
+writes only that orphan's entry. Outside those handshakes, a master never writes another session's
+entry.
 
 ## Foreign-CLI limitation
 
@@ -125,10 +138,10 @@ cooperative boundary this system cannot structurally enforce across an arbitrary
   an owner-confirmed grant the process itself later notices and applies.
 - It does not re-attach a tmux pane or re-dispatch a lane when adopting a still-live worker --
   adoption changes who that worker considers its parent. Relaunch is reserved for a dead worker
-  with a complete persisted Pi resume context and still requires owner confirmation.
-- Correctness never depends on a heartbeat or a watcher tick arriving -- a crashed process just
-  leaves a stale entry behind. `supervisor.ts`'s `reconcileMatrix` (prune `closed` and any
-  `running`/`winding_down` entry whose own pid is dead; keep `resumable`/`adopted` until they age
-  past a TTL) is the building block for cleaning those up; nothing in this build wires it into an
-  automatic sweep yet -- the matrix directory is left to grow with stale entries until a future
-  caller (a manual command, or a periodic sweep) invokes it.
+  with a complete persisted Pi resume context. Exact session+task recovery is automatic; every
+  mismatched or foreign identity remains owner-gated.
+- Correctness never depends on a heartbeat or watcher tick arriving. Each master activation runs
+  the pure reconciliation pass once: a Pi worker interrupted before its own resumable write is
+  repaired from its durable logical-agent identity, closed and unrecoverable records are removed,
+  undelivered terminal handoffs are retained, and resumable/adopted/pending-terminal records remain
+  recoverable for at most 30 days before expiry.

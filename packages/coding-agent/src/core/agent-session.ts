@@ -38,6 +38,7 @@ import type {
 	SimpleStreamOptions,
 	StopReason,
 	TextContent,
+	ToolResultMessage,
 	Usage,
 } from "@caupulican/pi-ai";
 import { cleanupSessionResources, getSupportedThinkingLevels, modelsAreEqual, streamSimple } from "@caupulican/pi-ai";
@@ -122,6 +123,18 @@ import {
 import { applyGoalEvent, type GoalState } from "./goals/goal-state.ts";
 import { appendGoalStateSnapshot, getLatestGoalStateSnapshot } from "./goals/session-goal-state.ts";
 import { constrainStreamIdleToHttpTimeout } from "./http-dispatcher.ts";
+import {
+	beginHumanInputRequest,
+	createHumanInputRequest,
+	formatHumanInputAnswerText,
+	getLatestHumanInputSnapshots,
+	getResumableHumanInputSnapshot,
+	getWorkerHumanInputsRequiringDelivery,
+	HUMAN_INPUT_WORKER_RESPONSE_CUSTOM_TYPE,
+	type HumanInputRequest,
+	type HumanInputSnapshot,
+	resolveHumanInput,
+} from "./human-input.ts";
 import type { LearningAuditRecord } from "./learning/learning-audit.ts";
 import type { DemandSignals, ReflectionResult } from "./learning/reflection-engine.ts";
 import { appendLearningDecisionSnapshot, getLearningDecisionSnapshots } from "./learning/session-learning-decision.ts";
@@ -169,6 +182,7 @@ import type { ResourceExtensionPaths, ResourceLoader } from "./resource-loader.t
 import { stripResourceProfileBlocks } from "./resource-profile-blocks.ts";
 import { RuntimeBuilder } from "./runtime-builder.ts";
 import { SessionAnalytics, type ToolArgumentValidationStats } from "./session-analytics.ts";
+import { SessionImageStore } from "./session-image-store.ts";
 import { getActiveSessionBranchEntries } from "./session-snapshot.ts";
 import { SessionTreeNavigator } from "./session-tree-navigator.ts";
 import type { ResourceProfileFilterSettings, SettingsManager } from "./settings-manager.ts";
@@ -683,6 +697,9 @@ export class AgentSession {
 	private _queuedExtensionCommands: string[] = [];
 	private _pendingNextTurnMessages: CustomMessage[] = [];
 	private _streamingPromptSubmissionTail: Promise<void> = Promise.resolve();
+	/** Serializes owner-input overlays so concurrent worker terminals cannot replace each other. */
+	private _humanInputTail: Promise<void> = Promise.resolve();
+	private _activeHumanInputRequestIds = new Set<string>();
 	/**
 	 * The last tool set requested via setActiveToolsByName BEFORE model-capability filtering, so
 	 * switching from a small-window model back to a large one restores the full requested set.
@@ -767,6 +784,7 @@ export class AgentSession {
 	private readonly _toolRecoveryEventLogPath: string;
 	private _skillCuratorInstance?: SkillCurator;
 	private _disposed = false;
+	private _disposeCompletion: Promise<void> | undefined;
 	private readonly _reflectionAbort = new AbortController();
 	/** Native reflection engine + learning-apply/rollback path (see reflection-controller.ts); owns no
 	 * session state, applies durable writes through the bundled memory tool and the session log. */
@@ -964,6 +982,7 @@ export class AgentSession {
 			getEvidenceBundleSnapshot: () => this.getEvidenceBundleSnapshot(),
 			saveEvidenceBundleSnapshot: (bundle) => this.saveEvidenceBundleSnapshot(bundle),
 			saveWorkerClaimSnapshot: (claim, request) => this.saveWorkerClaimSnapshot(claim, request),
+			queueWorkerHumanInput: (request) => this._queueWorkerHumanInput(request),
 			readMemoryForLane: (query) => this._memory.readMemoryForLane(query),
 			addSpawnedUsage: (usage, opts) => this.addSpawnedUsage(usage, opts),
 			runIsolatedCompletion: (opts) => this.runIsolatedCompletion(opts),
@@ -1189,6 +1208,7 @@ export class AgentSession {
 			reapplyActiveProfileModelSettings: () => this._profileFilter.reapplyActiveProfileModelSettings(),
 			notifyExtensionsChanged: () => this._notifyExtensionsChanged(),
 			getToolArtifactStore: () => this._getToolArtifactStore(),
+			getSessionImageStore: () => this._getSessionImageStore(),
 			getMemoryManager: () => this._memory.getMemoryManager(),
 			getMemoryAuditDiagnostics: () => this._memory.getMemoryAuditDiagnostics(),
 			clearPendingMemoryProviders: () => this._memory.clearPendingProviders(),
@@ -1700,6 +1720,17 @@ export class AgentSession {
 		return this._pipeline.getToolArtifactStore();
 	}
 
+	private _getSessionImageStore(): SessionImageStore | undefined {
+		const directory = this.settingsManager.getClipboardImageDirectory();
+		if (!this.sessionManager.isPersisted() && !directory) return undefined;
+		return new SessionImageStore({
+			agentDir: this._agentDir,
+			cwd: this._cwd,
+			sessionId: this.sessionId,
+			directory,
+		});
+	}
+
 	/**
 	 * Context-transform hot-path delegation to {@link ContextPipeline.runContextAudit}. Kept as a
 	 * one-line method (not inlined) so the transform stays the single owner of the pass ordering.
@@ -2048,10 +2079,25 @@ export class AgentSession {
 	private async _notifyWorkerTerminalHandoff(
 		records: readonly { laneId: string; status: LaneTerminalStatus; reasonCode?: string }[],
 	): Promise<void> {
-		if (this._disposed || records.length === 0) return;
+		if (records.length === 0) return;
+		if (this._disposed) throw new Error("Session disposed before worker terminal handoff was persisted");
+		// sendCustomMessage only queues in process memory while the foreground is streaming. Wait for
+		// the owning run to settle so a successful return proves the handoff reached session storage
+		// before the durable notification outbox marks it delivered.
+		await this.agent.waitForIdle();
+		if (this._disposed) throw new Error("Session disposed before worker terminal handoff was persisted");
 		const included = records.slice(0, 8);
 		const sanitize = (value: string): string => value.replace(/[\r\n]+/g, " ").slice(0, 120);
 		const omitted = records.length - included.length;
+		const workerRequestsAwaitingDelivery = new Set(
+			getWorkerHumanInputsRequiringDelivery(this.sessionManager).flatMap((snapshot) =>
+				snapshot.request.workerRequestId ? [snapshot.request.workerRequestId] : [],
+			),
+		);
+		const ownerQuestionWillWakeParent =
+			this._extensionUIContext !== undefined &&
+			this._extensionMode !== "print" &&
+			records.every((record) => workerRequestsAwaitingDelivery.has(record.laneId));
 		const content = [
 			"Background worker terminal handoff:",
 			...included.map((record) => {
@@ -2068,7 +2114,7 @@ export class AgentSession {
 				display: true,
 				details: { records: included },
 			},
-			{ triggerTurn: true, deliverAs: "followUp" },
+			{ triggerTurn: !ownerQuestionWillWakeParent, deliverAs: "followUp" },
 		);
 	}
 
@@ -2177,6 +2223,9 @@ export class AgentSession {
 				}
 				this._foregroundRecovery.observeAssistant(assistantMsg);
 			}
+		}
+		if (event.type === "agent_end" && !this._willRetryAfterAgentEnd(event)) {
+			this._schedulePendingWorkerHumanInputs();
 		}
 	};
 
@@ -2369,47 +2418,52 @@ export class AgentSession {
 	 * Call this when completely done with the session.
 	 */
 	dispose(): void {
-		try {
-			this._backgroundLanes.clearGoalAutoContinueTimer();
-			this._backgroundLanes.clearResearchLaneTimer();
-			this.abortRetry();
-			this.abortCompaction();
-			this.abortBranchSummary();
-			this.abortBash();
-			disposePersistentShellSession(this._shellSessionKey);
-			this._cancelPrefixWarm();
-			this.agent.abort();
-			// Stop any deployment-registered gateway channels / schedulers.
-			void this._gatewayRegistry.stop().catch(() => {});
-			// Abort any in-flight background reflection so it cannot keep spending tokens or
-			// write memory/skills against this now-disposed session.
-			this._disposed = true;
-			this._reflectionAbort.abort();
-			// Abort any in-flight research pass or delegated worker for the same reason: a disposed
-			// session must not keep spending tokens or persist evidence against dead state.
-			this._backgroundLanes.abortInFlightLanes();
-			// Clear the hooks this session installed on the shared agent so their closures stop
-			// pinning this (deactivated) session — and all its history/maps — in memory if the agent
-			// instance outlives the session.
+		if (this._disposed) return;
+		this._disposed = true;
+		const shutdowns: Promise<unknown>[] = [];
+		const safely = (action: () => void): void => {
+			try {
+				action();
+			} catch {
+				// Every independent cleanup remains best-effort; one failure cannot skip the rest.
+			}
+		};
+		const track = (action: () => Promise<unknown>): void => {
+			try {
+				shutdowns.push(action());
+			} catch {
+				// A synchronously throwing async-resource adapter cannot skip the remaining shutdowns.
+			}
+		};
+
+		safely(() => this._backgroundLanes.clearGoalAutoContinueTimer());
+		safely(() => this._backgroundLanes.clearResearchLaneTimer());
+		safely(() => this.abortRetry());
+		safely(() => this.abortCompaction());
+		safely(() => this.abortBranchSummary());
+		safely(() => this.abortBash());
+		safely(() => disposePersistentShellSession(this._shellSessionKey));
+		safely(() => this._cancelPrefixWarm());
+		safely(() => this.agent.abort());
+		track(() => this._gatewayRegistry.stop());
+		safely(() => this._reflectionAbort.abort());
+		safely(() => this._backgroundLanes.abortInFlightLanes());
+		safely(() => {
 			this.agent.afterToolCall = undefined;
 			this.agent.transformContext = undefined;
-		} catch {
-			// Dispose must succeed even if an abort hook throws.
-		}
-
-		this._extensionRunner.invalidate(
-			"This extension ctx is stale after session replacement or reload. Do not use a captured pi or command ctx after ctx.newSession(), ctx.fork(), ctx.switchSession(), or ctx.reload(). For newSession, fork, and switchSession, move post-replacement work into withSession and use the ctx passed to withSession. For reload, do not use the old ctx after await ctx.reload().",
+		});
+		safely(() =>
+			this._extensionRunner.invalidate(
+				"This extension ctx is stale after session replacement or reload. Do not use a captured pi or command ctx after ctx.newSession(), ctx.fork(), ctx.switchSession(), or ctx.reload(). For newSession, fork, and switchSession, move post-replacement work into withSession and use the ctx passed to withSession. For reload, do not use the old ctx after await ctx.reload().",
+			),
 		);
-		this._disconnectFromAgent();
+		safely(() => this._disconnectFromAgent());
 		this._eventListeners = [];
 		// Best-effort memory cleanup (release locks/handles). Write-side onSessionEnd is wired on a
 		// true session-end hook; file-store shutdown is a no-op.
-		void this._memory
-			.getMemoryManager()
-			.shutdownAll()
-			.catch(() => {});
-		void this._toolRecoveryLogger.shutdown().catch(() => {});
-		cleanupSessionResources(this.sessionId);
+		track(() => this._memory.getMemoryManager().shutdownAll());
+		track(() => this._toolRecoveryLogger.shutdown());
+		safely(() => cleanupSessionResources(this.sessionId));
 		// Best-effort final sweep for any grep/find artifact already released (reference
 		// count zero) but not yet reclaimed -- e.g. a release whose cleanup() call failed
 		// transiently. This is conservative: it never releases a still-referenced
@@ -2417,11 +2471,14 @@ export class AgentSession {
 		// short to cross preserveRecentMessages) correctly leaves that artifact in place,
 		// resolvable if the same session is resumed later. It does not sweep OTHER
 		// sessions' artifact directories.
-		try {
-			this._pipeline.cleanupToolArtifactStoreOnDispose();
-		} catch {
-			// Best-effort; dispose must succeed regardless.
-		}
+		safely(() => this._pipeline.cleanupToolArtifactStoreOnDispose());
+		this._disposeCompletion = Promise.allSettled(shutdowns).then(() => undefined);
+	}
+
+	/** Dispose synchronously-visible state, then await all session-owned asynchronous shutdowns. */
+	async disposeAndWait(): Promise<void> {
+		this.dispose();
+		await this._disposeCompletion;
 	}
 
 	// =========================================================================
@@ -2511,7 +2568,7 @@ export class AgentSession {
 	 * Changes take effect on the next agent turn.
 	 *
 	 * artifact_retrieve is auto-activated as a companion whenever an artifact-producing tool
-	 * (grep, find, or run_toolkit_script) ends up in the resulting active set and artifact_retrieve
+	 * (grep, find, run_toolkit_script, or ask_question) ends up in the resulting active set and artifact_retrieve
 	 * is registered (i.e. not excluded/
 	 * blocked/outside an allowlist -- the registry itself is built with that same filter,
 	 * so registry presence already tracks "allowed"). This is enforced here, not just in
@@ -2546,7 +2603,8 @@ export class AgentSession {
 		if (
 			validToolNames.includes("grep") ||
 			validToolNames.includes("find") ||
-			validToolNames.includes("run_toolkit_script")
+			validToolNames.includes("run_toolkit_script") ||
+			validToolNames.includes("ask_question")
 		) {
 			addIfRegistered("artifact_retrieve");
 		}
@@ -2663,6 +2721,197 @@ export class AgentSession {
 			this._flushPendingBashMessages();
 			await this._drainQueuedExtensionCommands();
 		}
+	}
+
+	private _queueWorkerHumanInput(request: {
+		workerRequestId: string;
+		message: string;
+		blockers: readonly string[];
+	}): void {
+		const existing = getLatestHumanInputSnapshots(this.sessionManager).find(
+			(snapshot) => snapshot.request.workerRequestId === request.workerRequestId,
+		);
+		if (existing) return;
+		const blockerText = request.blockers
+			.slice(0, 4)
+			.map((blocker) => blocker.slice(0, 500))
+			.join("; ");
+		const question = createHumanInputRequest({
+			source: "worker",
+			workerRequestId: request.workerRequestId,
+			questions: [
+				{
+					id: "worker_review",
+					header: "Worker review",
+					question: `${request.message.slice(0, 1_500)}${blockerText ? ` Blockers: ${blockerText}` : ""}`,
+					options: [
+						{
+							label: "Review now",
+							description: "Have the parent inspect the worker claim and evidence before reconciling it.",
+						},
+						{
+							label: "Keep blocked",
+							description: "Leave the worker result blocked and continue without accepting its output.",
+						},
+					],
+				},
+			],
+			acceptsImages: false,
+		});
+		beginHumanInputRequest(this.sessionManager, question);
+		if (!this.isStreaming) this._scheduleWorkerHumanInput(question);
+	}
+
+	private _schedulePendingWorkerHumanInputs(): void {
+		for (const snapshot of getWorkerHumanInputsRequiringDelivery(this.sessionManager)) {
+			this._scheduleWorkerHumanInput(snapshot);
+		}
+	}
+
+	private _scheduleWorkerHumanInput(input: HumanInputRequest | HumanInputSnapshot): void {
+		const snapshot: HumanInputSnapshot =
+			"status" in input ? input : { request: input, status: "pending", answers: [], updatedAt: input.createdAt };
+		const requestId = snapshot.request.requestId;
+		if (this._activeHumanInputRequestIds.has(requestId)) return;
+		this._activeHumanInputRequestIds.add(requestId);
+		this._humanInputTail = this._humanInputTail
+			.then(async () => {
+				await this._resolveWorkerHumanInput(snapshot);
+			})
+			.catch((error: unknown) => {
+				this._emit({
+					type: "warning",
+					message: `Worker owner-input request failed: ${error instanceof Error ? error.message : String(error)}`,
+				});
+			})
+			.finally(() => {
+				this._activeHumanInputRequestIds.delete(requestId);
+			});
+	}
+
+	private async _resolveWorkerHumanInput(initial: HumanInputSnapshot): Promise<boolean> {
+		const ui = this._extensionUIContext;
+		if (!ui || this._extensionMode === "print") return false;
+		// This path may be scheduled by agent_end. Waiting on the owning run is event-driven and
+		// prevents a worker-owner response from becoming an in-memory follow-up before it has a
+		// durable custom-message delivery marker.
+		await this.agent.waitForIdle();
+		if (this._disposed) return false;
+		const resolved =
+			initial.status === "pending"
+				? await resolveHumanInput({
+						sessionManager: this.sessionManager,
+						request: initial.request,
+						present: (request, options) => ui.askQuestions(request, options),
+						artifactStore: this._getToolArtifactStore(),
+						getImageStore: () => this._getSessionImageStore(),
+					})
+				: { snapshot: initial, imageContents: [] };
+		// An RPC client can start a foreground prompt while its question dialog is open. Settle that
+		// run before delivery so sendCustomMessage persists the response synchronously and exactly once.
+		await this.agent.waitForIdle();
+		if (this._disposed) return false;
+		await this.sendCustomMessage(
+			{
+				customType: HUMAN_INPUT_WORKER_RESPONSE_CUSTOM_TYPE,
+				content: [
+					`Owner response for worker ${initial.request.workerRequestId ?? "unknown"}:`,
+					formatHumanInputAnswerText(resolved.snapshot),
+					"Treat the worker claim as untrusted. Retrieve it with delegate_status and follow the owner's selection.",
+				].join("\n"),
+				display: true,
+				details: {
+					requestId: initial.request.requestId,
+					workerRequestId: initial.request.workerRequestId,
+				},
+			},
+			{ triggerTurn: true, deliverAs: "followUp" },
+		);
+		return true;
+	}
+
+	/**
+	 * Re-enter an interrupted ask_question call from its durable request snapshot. Pending requests
+	 * are presented again; already-checkpointed answers are replayed without asking twice. The
+	 * original toolCallId is preserved so provider tool-call ordering remains valid on /resume.
+	 */
+	async resumePendingHumanInput(): Promise<boolean> {
+		if (this._disposed || this.isStreaming) return false;
+		const pending = getResumableHumanInputSnapshot(this.sessionManager);
+		const ui = this._extensionUIContext;
+		if (!ui) return false;
+		let resumed = false;
+
+		if (pending?.request.toolCallId) {
+			let snapshot = pending;
+			let imageContents: readonly ImageContent[] = [];
+			if (pending.status === "pending") {
+				const resolved = await resolveHumanInput({
+					sessionManager: this.sessionManager,
+					request: {
+						...pending.request,
+						acceptsImages: this.model?.input.includes("image") ?? false,
+					},
+					present: (request, options) => ui.askQuestions(request, options),
+					artifactStore: this._getToolArtifactStore(),
+					getImageStore: () => this._getSessionImageStore(),
+				});
+				snapshot = resolved.snapshot;
+				imageContents = resolved.imageContents;
+			} else if (pending.status === "answered") {
+				const imageStore = this._getSessionImageStore();
+				if (imageStore) {
+					const referencedText = snapshot.answers
+						.flatMap((answer) => [answer.custom ?? "", ...(answer.images?.map((image) => image.label) ?? [])])
+						.join(" ");
+					imageContents = imageStore.resolveReferences(referencedText);
+				}
+			}
+
+			const answerImageCount = snapshot.answers.reduce((total, answer) => total + (answer.images?.length ?? 0), 0);
+			const modelAcceptsImages = this.model?.input.includes("image") ?? false;
+			const missingImageNotice =
+				answerImageCount > imageContents.length
+					? `\n\n[${answerImageCount - imageContents.length} attached image(s) could not be restored from durable storage.]`
+					: "";
+			const unsupportedImageNotice =
+				imageContents.length > 0 && !modelAcceptsImages
+					? "\n\n[Attached images were retained but not sent because the selected model does not accept image input.]"
+					: "";
+			const toolResult: ToolResultMessage = {
+				role: "toolResult",
+				toolCallId: pending.request.toolCallId,
+				toolName: pending.request.toolName ?? "ask_question",
+				content: [
+					{
+						type: "text",
+						text: `${formatHumanInputAnswerText(snapshot)}${missingImageNotice}${unsupportedImageNotice}`,
+					},
+					...(modelAcceptsImages ? imageContents : []),
+				],
+				details: {
+					questions: snapshot.request.questions,
+					answers: snapshot.answers,
+					cancelled: snapshot.status === "cancelled",
+					...(snapshot.reason ? { reason: snapshot.reason } : {}),
+				},
+				isError: false,
+				timestamp: Date.now(),
+			};
+			await this._runAgentPrompt(toolResult);
+			resumed = true;
+		}
+
+		for (const workerInput of getWorkerHumanInputsRequiringDelivery(this.sessionManager)) {
+			if (this._activeHumanInputRequestIds.has(workerInput.request.requestId)) continue;
+			this._activeHumanInputRequestIds.add(workerInput.request.requestId);
+			try {
+				resumed = (await this._resolveWorkerHumanInput(workerInput)) || resumed;
+			} finally {
+				this._activeHumanInputRequestIds.delete(workerInput.request.requestId);
+			}
+		}
+		return resumed;
 	}
 
 	/**
@@ -2890,6 +3139,11 @@ export class AgentSession {
 			// Validate model
 			if (!requestModel) {
 				throw new Error(formatNoModelSelectedMessage());
+			}
+			if (currentImages && currentImages.length > 0 && !requestModel.input.includes("image")) {
+				throw new Error(
+					`Model "${requestModel.provider}/${requestModel.id}" does not accept image input. Select an image-capable model or route the inspection to a vision worker.`,
+				);
 			}
 			// A manual/default local model has no RouteDecision, so the router readiness gate above is
 			// intentionally a no-op. It still needs the same managed-runtime boot/residency guarantee.

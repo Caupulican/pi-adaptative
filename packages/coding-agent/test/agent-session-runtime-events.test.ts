@@ -1,9 +1,9 @@
-import { existsSync, mkdirSync, rmSync } from "node:fs";
+import { existsSync, mkdirSync, readdirSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { SessionManager } from "@caupulican/pi-agent-core/node";
 import { fauxAssistantMessage, registerFauxProvider } from "@caupulican/pi-ai";
-import { afterEach, describe, expect, it } from "vitest";
+import { afterEach, describe, expect, it, vi } from "vitest";
 import {
 	type CreateAgentSessionRuntimeFactory,
 	createAgentSessionFromServices,
@@ -34,7 +34,7 @@ describe("AgentSessionRuntime session lifecycle events", () => {
 		}
 	});
 
-	async function createRuntimeHost(extensionFactory: ExtensionFactory) {
+	async function createRuntimeHost(extensionFactory: ExtensionFactory, options?: { failRuntimeCreationAt?: number }) {
 		const tempDir = join(tmpdir(), `pi-runtime-events-${Date.now()}-${Math.random().toString(36).slice(2)}`);
 		mkdirSync(tempDir, { recursive: true });
 
@@ -55,7 +55,12 @@ describe("AgentSessionRuntime session lifecycle events", () => {
 				noThemes: true,
 			},
 		};
+		let runtimeCreationCount = 0;
 		const createRuntime: CreateAgentSessionRuntimeFactory = async ({ cwd, sessionManager, sessionStartEvent }) => {
+			runtimeCreationCount++;
+			if (runtimeCreationCount === options?.failRuntimeCreationAt) {
+				throw new Error("replacement preparation failed");
+			}
 			const services = await createAgentSessionServices({
 				...runtimeOptions,
 				cwd,
@@ -157,6 +162,161 @@ describe("AgentSessionRuntime session lifecycle events", () => {
 		expect(events).toEqual([{ type: "session_before_switch", reason: "new", targetSessionFile: undefined }]);
 	});
 
+	it("rejects overlapping session replacements before either can invalidate the wrong runtime", async () => {
+		let releaseFirstSwitch!: () => void;
+		let signalFirstSwitch!: () => void;
+		const firstSwitchStarted = new Promise<void>((resolve) => {
+			signalFirstSwitch = resolve;
+		});
+		const firstSwitchGate = new Promise<void>((resolve) => {
+			releaseFirstSwitch = resolve;
+		});
+		let switchCount = 0;
+		const { runtimeHost } = await createRuntimeHost((pi) => {
+			pi.on("session_before_switch", async () => {
+				switchCount++;
+				if (switchCount === 1) {
+					signalFirstSwitch();
+					await firstSwitchGate;
+				}
+			});
+		});
+
+		const firstReplacement = runtimeHost.newSession();
+		await firstSwitchStarted;
+		expect(runtimeHost.isReplacing).toBe(true);
+		await expect(runtimeHost.newSession()).rejects.toThrow("A session replacement is already in progress.");
+		expect(switchCount).toBe(1);
+
+		releaseFirstSwitch();
+		await expect(firstReplacement).resolves.toEqual({ cancelled: false });
+		expect(runtimeHost.isReplacing).toBe(false);
+	});
+
+	it("keeps the working session and its resources active when replacement preparation fails", async () => {
+		const { runtimeHost } = await createRuntimeHost(() => {}, { failRuntimeCreationAt: 2 });
+		const originalSession = runtimeHost.session;
+		const originalContext = originalSession.extensionRunner.createContext();
+		const resource = { start: vi.fn(async () => {}), stop: vi.fn(async () => {}) };
+		runtimeHost.registerSessionResource(resource);
+
+		await expect(runtimeHost.newSession()).rejects.toThrow("replacement preparation failed");
+
+		expect(runtimeHost.session).toBe(originalSession);
+		expect(originalContext.cwd).toBe(originalSession.sessionManager.getCwd());
+		expect(resource.stop).not.toHaveBeenCalled();
+		expect(resource.start).not.toHaveBeenCalled();
+	});
+
+	it("removes a prepared fork artifact when replacement construction fails", async () => {
+		const { runtimeHost } = await createRuntimeHost(() => {}, { failRuntimeCreationAt: 2 });
+		await runtimeHost.session.prompt("hello");
+		const originalSession = runtimeHost.session;
+		const userEntry = originalSession.getUserMessagesForForking()[0];
+		const sessionDir = originalSession.sessionManager.getSessionDir();
+		const filesBefore = readdirSync(sessionDir).filter((name) => name.endsWith(".jsonl"));
+
+		await expect(runtimeHost.fork(userEntry.entryId, { position: "at" })).rejects.toThrow(
+			"replacement preparation failed",
+		);
+
+		expect(runtimeHost.session).toBe(originalSession);
+		expect(readdirSync(sessionDir).filter((name) => name.endsWith(".jsonl"))).toEqual(filesBefore);
+	});
+
+	it("stops session-owned resources before invalidation and starts them on the replacement", async () => {
+		const phases: string[] = [];
+		const { runtimeHost } = await createRuntimeHost(() => {});
+		const resource = {
+			start: vi.fn(async (session: typeof runtimeHost.session) => {
+				phases.push(`start:${session.sessionId}`);
+			}),
+			stop: vi.fn(async () => {
+				phases.push("stop");
+			}),
+		};
+		runtimeHost.registerSessionResource(resource);
+		const originalSessionId = runtimeHost.session.sessionId;
+
+		await runtimeHost.newSession();
+
+		expect(runtimeHost.session.sessionId).not.toBe(originalSessionId);
+		expect(phases).toEqual(["stop", `start:${runtimeHost.session.sessionId}`]);
+	});
+
+	it("awaits old-session asynchronous shutdown before starting replacement supervision", async () => {
+		let releaseGatewayStop!: () => void;
+		let signalGatewayStop!: () => void;
+		const gatewayStopStarted = new Promise<void>((resolve) => {
+			signalGatewayStop = resolve;
+		});
+		const gatewayStopGate = new Promise<void>((resolve) => {
+			releaseGatewayStop = resolve;
+		});
+		const { runtimeHost } = await createRuntimeHost(() => {});
+		const oldSession = runtimeHost.session;
+		oldSession.registerChannelProvider({
+			name: "slow-shutdown",
+			start: () => {},
+			send: () => {},
+			stop: async () => {
+				signalGatewayStop();
+				await gatewayStopGate;
+			},
+		});
+		await oldSession.gateways.start(() => {});
+		const resource = { start: vi.fn(async () => {}), stop: vi.fn(async () => {}) };
+		runtimeHost.registerSessionResource(resource);
+
+		const replacement = runtimeHost.newSession();
+		await gatewayStopStarted;
+
+		expect(runtimeHost.session).toBe(oldSession);
+		expect(resource.stop).toHaveBeenCalledOnce();
+		expect(resource.start).not.toHaveBeenCalled();
+
+		releaseGatewayStop();
+		await replacement;
+		expect(runtimeHost.session).not.toBe(oldSession);
+		expect(resource.start).toHaveBeenCalledOnce();
+	});
+
+	it("runs replacement activation before supervisors and extension callbacks", async () => {
+		const phases: string[] = [];
+		const { runtimeHost } = await createRuntimeHost(() => {});
+		const targetManager = SessionManager.create(
+			runtimeHost.cwd,
+			runtimeHost.services.agentDir,
+			runtimeHost.session.sessionManager.getSessionDir(),
+		);
+		const targetSessionFile = targetManager.getSessionFile();
+		expect(targetSessionFile).toBeTruthy();
+		runtimeHost.registerSessionResource({
+			stop: async () => {
+				phases.push("stop");
+			},
+			start: async (session) => {
+				phases.push(`start:${session.sessionId}`);
+			},
+		});
+
+		await runtimeHost.switchSession(targetSessionFile!, {
+			beforeSessionResourcesStart: (session) => {
+				phases.push(`activate:${session.sessionId}`);
+			},
+			withSession: async () => {
+				phases.push("withSession");
+			},
+		});
+
+		expect(phases).toEqual([
+			"stop",
+			`activate:${runtimeHost.session.sessionId}`,
+			`start:${runtimeHost.session.sessionId}`,
+			"withSession",
+		]);
+	});
+
 	it("runs beforeSessionInvalidate after session_shutdown and before rebindSession", async () => {
 		const phases: string[] = [];
 		const { runtimeHost } = await createRuntimeHost((pi) => {
@@ -255,9 +415,9 @@ describe("AgentSessionRuntime session lifecycle events", () => {
 		expect(reloadCalls).toBe(0);
 
 		mutableAgentState.isStreaming = false;
-		(runtimeHost.session as any)._compactionAbortController = new AbortController();
+		const compacting = vi.spyOn(runtimeHost.session, "isCompacting", "get").mockReturnValue(true);
 		await expect(ctx.reload()).rejects.toThrow(/compaction/);
 		expect(reloadCalls).toBe(0);
-		(runtimeHost.session as any)._compactionAbortController = undefined;
+		compacting.mockRestore();
 	});
 });

@@ -6,7 +6,14 @@ const context = {} as ExtensionContext;
 
 const tool = createDelegateStatusToolDefinition({
 	getLaneRecords: () => [
-		{ laneId: "worker-1", type: "worker", status: "succeeded", reasonCode: "worker_completed" },
+		{
+			laneId: "worker-1",
+			type: "worker",
+			status: "succeeded",
+			reasonCode: "worker_completed",
+			label: "Inspect the router",
+			profileId: "fast-reviewer",
+		},
 		{ laneId: "worker-2", type: "worker", status: "running" },
 		{ laneId: "tmux-worker-1", type: "tmux-worker", status: "succeeded", reasonCode: "worker_completed" },
 	],
@@ -32,6 +39,9 @@ describe("delegate_status", () => {
 		expect(text).toContain("UNTRUSTED");
 		expect(text).toContain("inspect this");
 		expect(text).toContain("usage-1");
+		expect(result.details).toMatchObject({
+			lanes: [{ laneId: "worker-1", label: "Inspect the router", profileId: "fast-reviewer" }],
+		});
 	});
 
 	it("does not disclose unknown lane data", async () => {

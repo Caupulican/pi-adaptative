@@ -2,6 +2,7 @@ import type { SessionEntry, SessionManager } from "@caupulican/pi-agent-core/nod
 import { afterEach, describe, expect, it } from "vitest";
 import { BackgroundLaneController, type BackgroundLaneControllerDeps } from "../src/core/background-lane-controller.ts";
 import { resetInFlightWorkRegistryForTests } from "../src/core/reload-blockers.ts";
+import { createTestManagedLaneDispatch } from "./managed-lane-fixture.ts";
 
 /**
  * `resolveManagedLaneId` is the goal-to-tmux dispatch adapter's correlation read. The caller's
@@ -28,7 +29,7 @@ function buildDeps(
 	} as unknown as SessionManager;
 	return {
 		isDisposed: () => false,
-		getSessionId: () => "test-session",
+		getSessionId: () => `test-session:${process.pid}:${agentDir}`,
 		getCwd: () => "/repo",
 		getAgentDir: () => agentDir,
 		getSessionManager: () => sessionManager,
@@ -47,7 +48,12 @@ describe("resolveManagedLaneId (stable identity read for the goal-to-tmux dispat
 		const agentDir = "/tmp/pi-test-resolve-managed-lane-tracked";
 		const controller = new BackgroundLaneController(buildDeps(agentDir, []));
 
-		controller.recordManagedLane({ laneId: "tmux:job1:agent1", phase: "dispatch", goalId: "goal-1" });
+		controller.recordManagedLane({
+			laneId: "tmux:job1:agent1",
+			phase: "dispatch",
+			goalId: "goal-1",
+			dispatch: createTestManagedLaneDispatch(),
+		});
 		expect(controller.getLaneRecords()[0]?.laneId).toBe("tmux:job1:agent1");
 		expect(controller.resolveManagedLaneId("tmux:job1:agent1")).toBe("tmux:job1:agent1");
 	});
@@ -63,7 +69,11 @@ describe("resolveManagedLaneId (stable identity read for the goal-to-tmux dispat
 		const agentDir = "/tmp/pi-test-resolve-managed-lane-terminal";
 		const controller = new BackgroundLaneController(buildDeps(agentDir, []));
 
-		controller.recordManagedLane({ laneId: "tmux:job2:agent1", phase: "dispatch" });
+		controller.recordManagedLane({
+			laneId: "tmux:job2:agent1",
+			phase: "dispatch",
+			dispatch: createTestManagedLaneDispatch(),
+		});
 		expect(controller.resolveManagedLaneId("tmux:job2:agent1")).toBeDefined();
 
 		controller.recordManagedLane({ laneId: "tmux:job2:agent1", phase: "terminal", status: "succeeded" });
@@ -74,7 +84,11 @@ describe("resolveManagedLaneId (stable identity read for the goal-to-tmux dispat
 		const agentDir = "/tmp/pi-test-resolve-managed-lane-distinct-keys";
 		const controller = new BackgroundLaneController(buildDeps(agentDir, []));
 
-		controller.recordManagedLane({ laneId: "tmux:job3:agent1", phase: "dispatch" });
+		controller.recordManagedLane({
+			laneId: "tmux:job3:agent1",
+			phase: "dispatch",
+			dispatch: createTestManagedLaneDispatch(),
+		});
 
 		expect(controller.resolveManagedLaneId("tmux:job3:agent2")).toBeUndefined();
 	});
@@ -92,7 +106,12 @@ describe("managed lane reload recovery", () => {
 		const sharedEntries: SessionEntry[] = [];
 
 		const before = new BackgroundLaneController(buildDeps(agentDir, sharedEntries, { goalId: "goal-c3" }));
-		before.recordManagedLane({ laneId: "tmux:job-c3:agent1", phase: "dispatch", goalId: "goal-c3" });
+		before.recordManagedLane({
+			laneId: "tmux:job-c3:agent1",
+			phase: "dispatch",
+			goalId: "goal-c3",
+			dispatch: createTestManagedLaneDispatch(),
+		});
 
 		const runningRecord = before.getLaneRecords()[0];
 		expect(runningRecord).toBeDefined();
@@ -117,12 +136,20 @@ describe("managed lane reload recovery", () => {
 		const agentDir = "/tmp/pi-test-managed-lane-reload-terminal";
 		const sharedEntries: SessionEntry[] = [];
 		const before = new BackgroundLaneController(buildDeps(agentDir, sharedEntries));
-		before.recordManagedLane({ laneId: "tmux:job-terminal:agent1", phase: "dispatch" });
+		before.recordManagedLane({
+			laneId: "tmux:job-terminal:agent1",
+			phase: "dispatch",
+			dispatch: createTestManagedLaneDispatch(),
+		});
 		before.abortInFlightLanes();
 
 		const resumed = new BackgroundLaneController(buildDeps(agentDir, sharedEntries));
 		expect(
-			resumed.recordManagedLane({ laneId: "tmux:job-terminal:agent1", phase: "dispatch", status: "resumed" }),
+			resumed.recordManagedLane({
+				laneId: "tmux:job-terminal:agent1",
+				phase: "dispatch",
+				dispatch: createTestManagedLaneDispatch(),
+			}),
 		).toBeUndefined();
 		expect(
 			resumed.recordManagedLane({

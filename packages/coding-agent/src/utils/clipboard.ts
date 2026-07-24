@@ -1,8 +1,9 @@
-import { execSync } from "child_process";
+import { execFileSync, execSync } from "child_process";
 import { platform } from "os";
 import { spawnProcess, waitForChildProcessWithTermination } from "./child-process.ts";
 import { isWaylandSession } from "./clipboard-image.ts";
 import { clipboard } from "./clipboard-native.ts";
+import { isWslEnvironment } from "./platform.ts";
 
 type NativeClipboardExecOptions = {
 	input: string;
@@ -19,6 +20,7 @@ function copyToX11Clipboard(options: NativeClipboardExecOptions): void {
 }
 
 const MAX_OSC52_ENCODED_LENGTH = 100_000;
+const MAX_CLIPBOARD_TEXT_BYTES = 10 * 1024 * 1024;
 
 function isRemoteSession(env: NodeJS.ProcessEnv = process.env): boolean {
 	return Boolean(env.SSH_CONNECTION || env.SSH_CLIENT || env.MOSH_CONNECTION);
@@ -131,4 +133,51 @@ export async function copyToClipboard(text: string): Promise<void> {
 	if (!copied) {
 		throw new Error("Failed to copy to clipboard");
 	}
+}
+
+export async function readClipboardText(): Promise<string | null> {
+	const p = platform();
+	if (isRemoteSession()) return null;
+
+	if (clipboard && p !== "linux") {
+		try {
+			const text = await clipboard.getText();
+			if (text) return text;
+		} catch {}
+	}
+
+	const read = (command: string, args: string[]): string | null => {
+		try {
+			const output = execFileSync(command, args, {
+				encoding: "utf8",
+				maxBuffer: MAX_CLIPBOARD_TEXT_BYTES,
+				stdio: ["ignore", "pipe", "ignore"],
+				timeout: 3000,
+			});
+			return output.length > 0 ? output : null;
+		} catch {
+			return null;
+		}
+	};
+
+	if (p === "darwin") return read("pbpaste", []);
+	if (p === "win32") {
+		return read("powershell", ["-NoProfile", "-NonInteractive", "-Command", "Get-Clipboard -Raw"]);
+	}
+	if (process.env.TERMUX_VERSION) {
+		const termux = read("termux-clipboard-get", []);
+		if (termux) return termux;
+	}
+	if (isWslEnvironment()) {
+		const windows = read("powershell.exe", ["-NoProfile", "-NonInteractive", "-Command", "Get-Clipboard -Raw"]);
+		if (windows) return windows.replace(/\r\n/g, "\n");
+	}
+	if (isWaylandSession()) {
+		const wayland = read("wl-paste", ["--no-newline", "--type", "text"]);
+		if (wayland) return wayland;
+	}
+	return (
+		read("xclip", ["-selection", "clipboard", "-target", "UTF8_STRING", "-o"]) ??
+		read("xsel", ["--clipboard", "--output"])
+	);
 }

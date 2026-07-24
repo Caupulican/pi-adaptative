@@ -223,6 +223,8 @@ export interface LaunchProfileSource {
 	 */
 	parentPid?: number;
 	parentSession?: string;
+	/** Stable goal/task identity used to fence process-matrix recovery. */
+	taskRef?: string;
 }
 
 /** A grant-covered launch derives its profile from the grant's envelope. */
@@ -258,6 +260,7 @@ export function buildLaunchProfileFlags(source: LaunchProfileSource): LaunchProf
 	if (source.worktreeLane) flags.push({ flag: "--worktree-lane", value: source.worktreeLane });
 	if (source.parentPid !== undefined) flags.push({ flag: "--parent-pid", value: String(source.parentPid) });
 	if (source.parentSession) flags.push({ flag: "--parent-session", value: source.parentSession });
+	if (source.taskRef) flags.push({ flag: "--task-ref", value: source.taskRef });
 	flags.push({ flag: "--append-system-prompt", value: buildScopedSystemPrompt(source) });
 	return flags;
 }

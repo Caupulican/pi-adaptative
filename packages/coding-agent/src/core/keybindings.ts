@@ -8,6 +8,7 @@ import {
 } from "@caupulican/pi-tui";
 import { existsSync, readFileSync } from "fs";
 import { getAgentDir } from "../config.ts";
+import { isWslEnvironment } from "../utils/platform.ts";
 import { configFile } from "./agent-paths.ts";
 import { isRecordObject } from "./util/value-guards.ts";
 
@@ -27,6 +28,9 @@ export interface AppKeybindings {
 	"app.message.followUp": true;
 	"app.message.dequeue": true;
 	"app.clipboard.pasteImage": true;
+	"app.question.next": true;
+	"app.question.previous": true;
+	"app.question.toggle": true;
 	"app.session.new": true;
 	"app.session.tree": true;
 	"app.session.fork": true;
@@ -58,6 +62,16 @@ export interface AppKeybindings {
 }
 
 export type AppKeybinding = keyof AppKeybindings;
+
+export function defaultImagePasteKeys(
+	platform: NodeJS.Platform = process.platform,
+	env: NodeJS.ProcessEnv = process.env,
+	kernelRelease?: string,
+): KeyId | KeyId[] {
+	if (platform === "win32") return "alt+v";
+	if (isWslEnvironment(env, platform, kernelRelease)) return ["alt+v", "ctrl+v"];
+	return "ctrl+v";
+}
 
 declare module "@caupulican/pi-tui" {
 	interface Keybindings extends AppKeybindings {}
@@ -107,8 +121,20 @@ export const KEYBINDINGS = {
 		description: "Restore queued messages",
 	},
 	"app.clipboard.pasteImage": {
-		defaultKeys: "alt+v",
+		defaultKeys: defaultImagePasteKeys(),
 		description: "Paste image from clipboard",
+	},
+	"app.question.next": {
+		defaultKeys: ["tab", "right"],
+		description: "Next question or review",
+	},
+	"app.question.previous": {
+		defaultKeys: ["shift+tab", "left"],
+		description: "Previous question",
+	},
+	"app.question.toggle": {
+		defaultKeys: "space",
+		description: "Toggle a multi-select answer",
 	},
 	"app.session.new": { defaultKeys: [], description: "Start a new session" },
 	"app.session.tree": { defaultKeys: [], description: "Open session tree" },

@@ -269,7 +269,9 @@ export {
 export {
 	AgentSessionRuntime,
 	type AgentSessionRuntimeDiagnostic,
+	type AgentSessionRuntimeResource,
 	type AgentSessionServices,
+	type AgentSessionSwitchOptions,
 	type CreateAgentSessionFromServicesOptions,
 	type CreateAgentSessionOptions,
 	type CreateAgentSessionResult,
@@ -318,6 +320,16 @@ export {
 	type SkillFrontmatter,
 } from "./core/skills.ts";
 export { createSyntheticSourceInfo } from "./core/source-info.ts";
+export {
+	type AskQuestion,
+	type AskQuestionAnswer,
+	AskQuestionDialog,
+	type AskQuestionStopReason,
+	type AskQuestionToolDetails,
+	type AskQuestionToolInput,
+	type AskQuestionToolOptions,
+	createAskQuestionToolDefinition,
+} from "./core/tools/ask-question.ts";
 // Tools
 export {
 	type BashOperations,

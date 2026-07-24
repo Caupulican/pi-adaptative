@@ -189,6 +189,12 @@ export async function emitSessionShutdownEvent(
 }
 
 const noOpUIContext: ExtensionUIContext = {
+	askQuestions: async () => ({
+		answers: [],
+		cancelled: true,
+		reason: "ui_unavailable",
+		imageContents: [],
+	}),
 	select: async () => undefined,
 	confirm: async () => false,
 	input: async () => undefined,

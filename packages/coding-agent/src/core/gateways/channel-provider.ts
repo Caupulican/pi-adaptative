@@ -66,20 +66,38 @@ export class GatewayRegistry {
 	private readonly schedulers = new Map<string, JobSchedulerProvider>();
 	private started = false;
 	private inboundHandler: ChannelInboundHandler = () => {};
+	private readonly pendingLifecycle = new Set<Promise<void>>();
+
+	private trackLifecycle(operation: () => void | Promise<void>): void {
+		let pending: Promise<void>;
+		try {
+			pending = Promise.resolve(operation()).catch(() => {});
+		} catch {
+			return;
+		}
+		this.pendingLifecycle.add(pending);
+		void pending.finally(() => this.pendingLifecycle.delete(pending));
+	}
+
+	private async drainLifecycle(): Promise<void> {
+		while (this.pendingLifecycle.size > 0) {
+			await Promise.allSettled([...this.pendingLifecycle]);
+		}
+	}
 
 	registerChannel(provider: ChannelProvider): void {
 		// Stop a same-named provider being replaced so its listeners/sockets don't leak (Bug #17).
 		const existing = this.channels.get(provider.name);
-		if (existing && existing !== provider) void Promise.resolve(existing.stop()).catch(() => {});
+		if (existing && existing !== provider) this.trackLifecycle(() => existing.stop());
 		this.channels.set(provider.name, provider);
-		if (this.started) void Promise.resolve(provider.start(this.inboundHandler)).catch(() => {});
+		if (this.started) this.trackLifecycle(() => provider.start(this.inboundHandler));
 	}
 
 	registerScheduler(provider: JobSchedulerProvider): void {
 		const existing = this.schedulers.get(provider.name);
-		if (existing && existing !== provider) void Promise.resolve(existing.stop()).catch(() => {});
+		if (existing && existing !== provider) this.trackLifecycle(() => existing.stop());
 		this.schedulers.set(provider.name, provider);
-		if (this.started) void Promise.resolve(provider.start()).catch(() => {});
+		if (this.started) this.trackLifecycle(() => provider.start());
 	}
 
 	getChannel(name: string): ChannelProvider | undefined {
@@ -96,7 +114,10 @@ export class GatewayRegistry {
 
 	/** Start every registered provider; inbound channel messages are routed to `onInbound`. */
 	async start(onInbound: ChannelInboundHandler): Promise<void> {
-		if (this.started) return;
+		if (this.started) {
+			await this.drainLifecycle();
+			return;
+		}
 		this.started = true;
 		this.inboundHandler = onInbound;
 		for (const channel of this.channels.values()) {
@@ -111,12 +132,19 @@ export class GatewayRegistry {
 				await scheduler.start();
 			} catch {}
 		}
+		await this.drainLifecycle();
 	}
 
 	/** Stop every registered provider. Best-effort; always leaves the registry stopped. */
 	async stop(): Promise<void> {
-		if (!this.started) return;
+		if (!this.started) {
+			await this.drainLifecycle();
+			return;
+		}
 		this.started = false;
+		// Late-registration starts and replacement stops must settle before the final stop pass;
+		// otherwise an async start can complete after shutdown and leak a listener/process.
+		await this.drainLifecycle();
 		for (const channel of this.channels.values()) {
 			try {
 				await channel.stop();

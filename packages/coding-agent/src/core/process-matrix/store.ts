@@ -28,6 +28,14 @@ function isProcessStatus(value: unknown): value is ProcessStatus {
 	);
 }
 
+function isOptionalString(value: unknown, maxLength: number): boolean {
+	return value === undefined || (typeof value === "string" && value.length <= maxLength);
+}
+
+function isTimestamp(value: unknown): value is string {
+	return typeof value === "string" && Number.isFinite(Date.parse(value));
+}
+
 export function processMatrixDir(agentDir: string): string {
 	return stateFile(agentDir, "process-matrix");
 }
@@ -65,16 +73,39 @@ function isProcessMatrixEntry(value: unknown): value is ProcessMatrixEntry {
 		(!isPlainRecord(value.resumable) ||
 			!isAgentIdentity(value.resumable.agent) ||
 			!isDeepStrictEqual(value.resumable.agent, value.agent) ||
-			!isProcessStatus(value.resumable.lastCode))
+			!isProcessStatus(value.resumable.lastCode) ||
+			!isOptionalString(value.resumable.taskRef, 512) ||
+			!isOptionalString(value.resumable.taskSummary, 2_000))
 	)
 		return false;
+	if (
+		value.terminal !== undefined &&
+		(!isPlainRecord(value.terminal) ||
+			!(value.terminal.code === null || Number.isSafeInteger(value.terminal.code)) ||
+			!(
+				value.terminal.signal === null ||
+				(typeof value.terminal.signal === "string" && value.terminal.signal.length <= 100)
+			) ||
+			!isTimestamp(value.terminal.observedAt) ||
+			!(value.terminal.notificationDeliveredAt === undefined || isTimestamp(value.terminal.notificationDeliveredAt)))
+	)
+		return false;
+	if (value.terminal !== undefined && value.status !== "closed") return false;
+	if (value.status === "resumable" && value.resumable === undefined) return false;
 	return (
 		value.entryId === buildEntryId(value.role, sessionId) &&
 		Number.isSafeInteger(value.pid) &&
 		typeof value.hostname === "string" &&
-		typeof value.startedAt === "string" &&
-		typeof value.heartbeatAt === "string" &&
-		isProcessStatus(value.status)
+		value.hostname.length <= 255 &&
+		isTimestamp(value.startedAt) &&
+		isTimestamp(value.heartbeatAt) &&
+		isProcessStatus(value.status) &&
+		(value.parentPid === undefined || (Number.isSafeInteger(value.parentPid) && Number(value.parentPid) > 0)) &&
+		isOptionalString(value.parentSessionId, 512) &&
+		isOptionalString(value.tmuxSession, 512) &&
+		(value.tmuxPanePid === undefined || Number.isSafeInteger(value.tmuxPanePid)) &&
+		isOptionalString(value.taskRef, 512) &&
+		isOptionalString(value.taskSummary, 2_000)
 	);
 }
 

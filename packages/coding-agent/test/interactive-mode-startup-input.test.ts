@@ -38,6 +38,7 @@ type InputContext = {
 type ClipboardImageContext = {
 	pendingClipboardImages: Array<{ label: string; content: unknown }>;
 	clipboardImageCounter: number;
+	clipboardImageStore?: { resolveReferences: (text: string) => unknown[] };
 	takeClipboardImagesForText: (text: string) => unknown[] | undefined;
 };
 
@@ -175,5 +176,21 @@ describe("InteractiveMode startup input", () => {
 		});
 		expect(context.pendingClipboardImages).toEqual([]);
 		expect(context.clipboardImageCounter).toBe(0);
+	});
+
+	it("resolves a later natural-language reference from the session image store", () => {
+		const storedImage = { type: "image", data: "stored", mimeType: "image/png" };
+		const context: ClipboardImageContext = {
+			pendingClipboardImages: [],
+			clipboardImageCounter: 0,
+			clipboardImageStore: { resolveReferences: () => [storedImage] },
+			takeClipboardImagesForText: (text: string) =>
+				interactiveModePrototype.takeClipboardImagesForText.call(context, text),
+		};
+
+		expect(interactiveModePrototype.buildUserInputSubmission.call(context, "look at the image")).toEqual({
+			text: "look at the image",
+			images: [storedImage],
+		});
 	});
 });

@@ -6,6 +6,7 @@ import { join } from "path";
 import { getAgentDir } from "../config.ts";
 import { clipboard } from "./clipboard-native.ts";
 import { loadPhoton } from "./photon.ts";
+import { isWslEnvironment } from "./platform.ts";
 import { getProcessWorkRun } from "./work-directory.ts";
 
 export type ClipboardImage = {
@@ -141,19 +142,6 @@ function readClipboardImageViaWlPaste(): ClipboardImage | null {
 	return { bytes: data.stdout, mimeType: baseMimeType(selectedType) };
 }
 
-function isWSL(env: NodeJS.ProcessEnv = process.env): boolean {
-	if (env.WSL_DISTRO_NAME || env.WSLENV) {
-		return true;
-	}
-
-	try {
-		const release = readFileSync("/proc/version", "utf-8");
-		return /microsoft|wsl/i.test(release);
-	} catch {
-		return false;
-	}
-}
-
 /**
  * On WSL, the Linux clipboard (Wayland/X11) does not receive image data from
  * Windows screenshots (Win+Shift+S). PowerShell can access the Windows clipboard
@@ -269,7 +257,7 @@ export async function readClipboardImage(options?: {
 	let image: ClipboardImage | null = null;
 
 	if (platform === "linux") {
-		const wsl = isWSL(env);
+		const wsl = isWslEnvironment(env, platform);
 		const wayland = isWaylandSession(env);
 
 		if (wayland || wsl) {

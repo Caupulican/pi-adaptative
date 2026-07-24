@@ -469,6 +469,19 @@ Keep `retry.provider.maxRetries` at `0` unless provider-level retries are explic
 | `terminal.clearOnShrink` | boolean | `false` | Clear empty rows when content shrinks (can cause flicker) |
 | `images.autoResize` | boolean | `true` | Resize images to 2000x2000 max |
 | `images.blockImages` | boolean | `false` | Block all images from being sent to LLM |
+| `images.clipboardDirectory` | string | `~/.pi/agent/state/attachments` | Store clipboard image attachments here; relative paths resolve from the active working directory |
+
+Clipboard images use stable session numbers such as `[Image #3]`. A later prompt can refer to that number or say “look at the image” to attach the latest image from the current session again. The default directory is created only after an image is pasted, never inside the working repository. Pi recognizes and prunes only its own integrity-tagged files, with fixed 30-day, 512-file, and 512 MiB ceilings; unrelated files in a configured directory are untouched. `--no-session` keeps attachments in memory unless `images.clipboardDirectory` explicitly requests persistence.
+
+To keep captures in an explicit location:
+
+```json
+{
+  "images": {
+    "clipboardDirectory": "~/Pictures/pi-captures"
+  }
+}
+```
 
 ### Shell
 

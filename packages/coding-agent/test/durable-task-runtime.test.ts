@@ -1,4 +1,4 @@
-import { mkdirSync, rmSync } from "node:fs";
+import { mkdirSync, readdirSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { afterEach, describe, expect, it } from "vitest";
@@ -11,6 +11,7 @@ import {
 import { OrchestrationEventStore } from "../src/core/orchestration/event-store.ts";
 import { DurableTaskRuntime, DurableTaskRuntimeError } from "../src/core/orchestration/task-runtime.ts";
 import { buildResumablePiAgentWakePrompt } from "../src/core/process-matrix/resume-launcher.ts";
+import { createTestExecutionGrant } from "./orchestration-profile-fixture.ts";
 
 interface Harness {
 	agentDir: string;
@@ -165,6 +166,55 @@ describe("DurableTaskRuntime", () => {
 		expect(snapshot.tasks[explore.taskId]?.task.status).toBe("completed");
 		expect(snapshot.tasks[build.taskId]?.task.status).toBe("ready");
 		expect(snapshot.attempts[attempt.attemptId]?.checkpointIds).toEqual([checkpoint.checkpointId]);
+	});
+
+	it("reopens and catches up from a compacted projection while keeping the event tail bounded", () => {
+		const agentDir = join(tmpdir(), `pi-durable-runtime-bounded-${process.pid}-${Date.now()}`);
+		mkdirSync(agentDir, { recursive: true });
+		tempDirs.push(agentDir);
+		const store = new OrchestrationEventStore({
+			agentDir,
+			sessionId: "bounded-session",
+			maxTailEvents: 3,
+			maxTailBytes: 1_000_000,
+		});
+		const stale = new DurableTaskRuntime({ store });
+		const runtime = new DurableTaskRuntime({ store });
+		const objective = runtime.createObjective({
+			objectiveId: "bounded-objective",
+			title: "Bound history",
+			description: "Retain current truth without retaining the full event prefix",
+		});
+		const task = runtime.createTask({
+			taskId: "bounded-task",
+			objectiveId: objective.objectiveId,
+			title: "Run",
+			description: "Run after compaction",
+			role: "implementer",
+		});
+		const attempt = runtime.queueAttempt(task.taskId, dispatch(task.taskId));
+
+		// A read boundary performs maintenance once the configured tail threshold is reached.
+		expect(runtime.getSnapshot().lastOrdinal).toBe(3);
+		expect(readdirSync(store.eventsDir)).toEqual([]);
+		expect(store.readProjectionSnapshot()?.throughOrdinal).toBe(3);
+
+		const reopened = new DurableTaskRuntime({ store });
+		expect(reopened.getSnapshot()).toMatchObject({
+			lastOrdinal: 3,
+			objectives: { [objective.objectiveId]: { objective: { title: "Bound history" } } },
+			tasks: { [task.taskId]: { attemptIds: [attempt.attemptId] } },
+		});
+		expect(stale.getSnapshot().lastOrdinal).toBe(3);
+
+		const grant = createTestExecutionGrant({
+			objectiveId: objective.objectiveId,
+			taskId: task.taskId,
+			attemptId: attempt.attemptId,
+		});
+		reopened.bindAttemptGrant(attempt.attemptId, grant);
+		expect(reopened.getSnapshot().attempts[attempt.attemptId]?.grant).toEqual(grant);
+		expect(reopened.getSnapshot().lastOrdinal).toBe(4);
 	});
 
 	it("requires trusted evidence before completing criterion-bound tasks and objectives", () => {
@@ -469,9 +519,18 @@ describe("DurableTaskRuntime", () => {
 
 		harness.runtime.requestApproval(approval);
 		expect(() => harness.runtime.leaseAttempt(attempt.attemptId, "worker-1", 60_000)).toThrow("awaiting approval");
-		expect(() => harness.runtime.bindAttemptGrant(attempt.attemptId, "grant-before-owner")).toThrow(
-			"awaiting approval",
-		);
+		expect(() =>
+			harness.runtime.bindAttemptGrant(
+				attempt.attemptId,
+				createTestExecutionGrant({
+					objectiveId: objective.objectiveId,
+					taskId: task.taskId,
+					attemptId: attempt.attemptId,
+					role: task.role,
+					grantId: "grant-before-owner",
+				}),
+			),
+		).toThrow("awaiting approval");
 
 		const reopened = new DurableTaskRuntime({ store: harness.store, now: () => harness.clock.ms });
 		expect(reopened.getSnapshot()).toMatchObject({
@@ -486,7 +545,19 @@ describe("DurableTaskRuntime", () => {
 
 		reopened.resolveApproval(approval.approvalId, "approved", "owner_approved_process_execution");
 		expect(() => reopened.leaseAttempt(attempt.attemptId, "worker-1", 60_000)).toThrow("requires an execution grant");
-		reopened.bindAttemptGrant(attempt.attemptId, "grant-after-owner");
+		const approvedGrant = createTestExecutionGrant({
+			objectiveId: objective.objectiveId,
+			taskId: task.taskId,
+			attemptId: attempt.attemptId,
+			role: task.role,
+			grantId: "grant-after-owner",
+		});
+		reopened.bindAttemptGrant(attempt.attemptId, approvedGrant);
+		expect(
+			new DurableTaskRuntime({ store: harness.store, now: () => harness.clock.ms }).getSnapshot().attempts[
+				attempt.attemptId
+			]?.grant,
+		).toEqual(approvedGrant);
 		expect(reopened.leaseAttempt(attempt.attemptId, "worker-1", 60_000).attemptId).toBe(attempt.attemptId);
 	});
 
@@ -598,7 +669,11 @@ describe("DurableTaskRuntime", () => {
 		});
 
 		const resuming = harness.runtime.requestAgentResume(agent.agentId);
-		const launch = buildPiResumeLaunchSpec(resuming, { parentPid: 1234, parentSessionId: "parent-session" });
+		const launch = buildPiResumeLaunchSpec(resuming, {
+			parentPid: 1234,
+			parentSessionId: "parent-session",
+			taskRef: "goal-1",
+		});
 		expect(launch).toEqual({
 			executable: "pi",
 			args: [
@@ -610,6 +685,8 @@ describe("DurableTaskRuntime", () => {
 				"1234",
 				"--parent-session",
 				"parent-session",
+				"--task-ref",
+				"goal-1",
 				"--worktree-lane",
 				"lane-explorer-1",
 				"--orchestration-profile",

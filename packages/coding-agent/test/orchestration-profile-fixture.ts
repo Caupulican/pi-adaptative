@@ -1,5 +1,6 @@
 import type { Api, Model } from "@caupulican/pi-ai";
 import {
+	type ExecutionGrant,
 	type HarnessCapability,
 	ORCHESTRATION_SCHEMA_VERSION,
 	type OrchestrationProfile,
@@ -52,6 +53,34 @@ export function createTestWorkerOrchestrationProfile(args: {
 		...(args.verificationProfileId ? { verificationProfileId: args.verificationProfileId } : {}),
 		createdAt: now,
 		updatedAt: now,
+	};
+}
+
+export function createTestExecutionGrant(args: {
+	objectiveId: string;
+	taskId: string;
+	attemptId: string;
+	role?: WorkerRole;
+	grantId?: string;
+}): ExecutionGrant {
+	return {
+		schemaVersion: ORCHESTRATION_SCHEMA_VERSION,
+		grantId: args.grantId ?? `grant-${args.attemptId}`,
+		objectiveId: args.objectiveId,
+		taskId: args.taskId,
+		attemptId: args.attemptId,
+		subjectId: `test:${args.attemptId}`,
+		role: args.role ?? "implementer",
+		capabilities: [],
+		allowedTools: [],
+		resources: [],
+		readPaths: [],
+		writePaths: [],
+		deniedPaths: [],
+		budget: {},
+		policyVersion: "test-v1",
+		decisionTrace: [],
+		issuedAt: new Date().toISOString(),
 	};
 }
 

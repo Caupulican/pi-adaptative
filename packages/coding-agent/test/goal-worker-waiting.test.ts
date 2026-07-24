@@ -8,6 +8,7 @@ import { DEFAULT_GOAL_CUMULATIVE_MAX_WORKER_SPEND_USD } from "../src/core/goals/
 import { buildGoalRuntimeSnapshot } from "../src/core/goals/goal-runtime-snapshot.ts";
 import { applyGoalEvent, createGoalState } from "../src/core/goals/goal-state.ts";
 import { appendGoalStateSnapshot } from "../src/core/goals/session-goal-state.ts";
+import { createTestManagedLaneDispatch } from "./managed-lane-fixture.ts";
 
 /**
  * REPRO-FIRST: this file proves the bug before proving the fix.
@@ -27,6 +28,8 @@ import { appendGoalStateSnapshot } from "../src/core/goals/session-goal-state.ts
  * this confirms the bug is real, warranting the fix below.
  */
 
+let nextTestSession = 1;
+
 function buildLaneControllerDeps(overrides: Partial<BackgroundLaneControllerDeps> = {}): BackgroundLaneControllerDeps {
 	const sessionManager =
 		(overrides.getSessionManager?.() as SessionManager | undefined) ??
@@ -34,9 +37,10 @@ function buildLaneControllerDeps(overrides: Partial<BackgroundLaneControllerDeps
 			getEntries: () => [],
 			appendCustomEntry: () => "entry-1",
 		} as unknown as SessionManager);
+	const sessionId = sessionManager.getSessionId?.() ?? `test-session:${process.pid}:${nextTestSession++}`;
 	return {
 		isDisposed: () => false,
-		getSessionId: () => "test-session",
+		getSessionId: () => sessionId,
 		getCwd: () => "/repo",
 		getAgentDir: () => "/tmp/pi-test-goal-worker-waiting",
 		getSessionManager: () => sessionManager,
@@ -70,7 +74,12 @@ describe("the 'waiting' continuation state (goal-runtime-snapshot + BackgroundLa
 			buildLaneControllerDeps({ getSessionManager: () => sessionManager }),
 		);
 
-		controller.recordManagedLane({ laneId: "tmux-job-1", phase: "dispatch", goalId: "g1" });
+		controller.recordManagedLane({
+			laneId: "tmux-job-1",
+			phase: "dispatch",
+			goalId: "g1",
+			dispatch: createTestManagedLaneDispatch(),
+		});
 		const dispatchedLaneId = controller.getLaneRecords()[0]?.laneId;
 		expect(dispatchedLaneId).toBeDefined();
 
@@ -92,7 +101,12 @@ describe("the 'waiting' continuation state (goal-runtime-snapshot + BackgroundLa
 			buildLaneControllerDeps({ getSessionManager: () => sessionManager }),
 		);
 
-		controller.recordManagedLane({ laneId: "tmux-job-2", phase: "dispatch", goalId: "g1" });
+		controller.recordManagedLane({
+			laneId: "tmux-job-2",
+			phase: "dispatch",
+			goalId: "g1",
+			dispatch: createTestManagedLaneDispatch(),
+		});
 		const dispatchedLaneId = controller.getLaneRecords()[0]?.laneId as string;
 		seedGoalWithOptionalBinding(sessionManager, { goalId: "g1", boundLaneId: dispatchedLaneId });
 
@@ -145,7 +159,12 @@ describe("the 'waiting' continuation state (goal-runtime-snapshot + BackgroundLa
 		const controller = new BackgroundLaneController(
 			buildLaneControllerDeps({ getSessionManager: () => sessionManager }),
 		);
-		controller.recordManagedLane({ laneId: "tmux-job-3", phase: "dispatch", goalId: "some-other-goal" });
+		controller.recordManagedLane({
+			laneId: "tmux-job-3",
+			phase: "dispatch",
+			goalId: "some-other-goal",
+			dispatch: createTestManagedLaneDispatch(),
+		});
 		const dispatchedLaneId = controller.getLaneRecords()[0]?.laneId as string;
 		seedGoalWithOptionalBinding(sessionManager, { goalId: "g1", boundLaneId: dispatchedLaneId });
 
@@ -179,7 +198,12 @@ describe("the never-hang wait-timeout escalates a hung worker instead of waiting
 		const controller = new BackgroundLaneController(
 			buildLaneControllerDeps({ getSessionManager: () => sessionManager }),
 		);
-		controller.recordManagedLane({ laneId: "tmux-worker-1", phase: "dispatch", goalId: "g1" });
+		controller.recordManagedLane({
+			laneId: "tmux-worker-1",
+			phase: "dispatch",
+			goalId: "g1",
+			dispatch: createTestManagedLaneDispatch(),
+		});
 		seedGoalBoundAt(sessionManager, "2026-01-01T00:00:00.000Z");
 
 		const snapshot = buildGoalRuntimeSnapshot({
@@ -199,7 +223,12 @@ describe("the never-hang wait-timeout escalates a hung worker instead of waiting
 		const controller = new BackgroundLaneController(
 			buildLaneControllerDeps({ getSessionManager: () => sessionManager }),
 		);
-		controller.recordManagedLane({ laneId: "tmux-worker-1", phase: "dispatch", goalId: "g1" });
+		controller.recordManagedLane({
+			laneId: "tmux-worker-1",
+			phase: "dispatch",
+			goalId: "g1",
+			dispatch: createTestManagedLaneDispatch(),
+		});
 		seedGoalBoundAt(sessionManager, "2026-01-01T00:00:00.000Z");
 
 		// The lane is STILL queued/running (a hang, not a completion) -- without the wait-timeout this
@@ -402,7 +431,12 @@ describe("idle scheduler does not arm while a bound worker is in flight (belt-an
 
 	it("does not arm the idle timer when a queued/running lane matches the active goal", () => {
 		const controller = new BackgroundLaneController(makeAutoContinueDeps());
-		controller.recordManagedLane({ laneId: "tmux-job-1", phase: "dispatch", goalId: "g1" });
+		controller.recordManagedLane({
+			laneId: "tmux-job-1",
+			phase: "dispatch",
+			goalId: "g1",
+			dispatch: createTestManagedLaneDispatch(),
+		});
 
 		const timeoutSpy = vi.spyOn(globalThis, "setTimeout");
 		try {
@@ -428,7 +462,12 @@ describe("idle scheduler does not arm while a bound worker is in flight (belt-an
 
 	it("re-arms once the in-flight lane for the goal has terminated", () => {
 		const controller = new BackgroundLaneController(makeAutoContinueDeps());
-		controller.recordManagedLane({ laneId: "tmux-job-4", phase: "dispatch", goalId: "g1" });
+		controller.recordManagedLane({
+			laneId: "tmux-job-4",
+			phase: "dispatch",
+			goalId: "g1",
+			dispatch: createTestManagedLaneDispatch(),
+		});
 
 		const timeoutSpy = vi.spyOn(globalThis, "setTimeout");
 		try {
@@ -437,7 +476,7 @@ describe("idle scheduler does not arm while a bound worker is in flight (belt-an
 
 			controller.recordManagedLane({ laneId: "tmux-job-4", phase: "terminal", status: "succeeded" });
 			controller.scheduleGoalAutoContinueFromIdle();
-			expect(timeoutSpy).toHaveBeenCalledTimes(1);
+			expect(timeoutSpy.mock.calls.filter((call) => call[1] === 0)).toHaveLength(1);
 		} finally {
 			controller.clearGoalAutoContinueTimer();
 			timeoutSpy.mockRestore();

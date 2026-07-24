@@ -23,7 +23,7 @@ export class ExecutionPolicyGate {
 	evaluate(input: CompileExecutionGrantInput): PolicyCompilationResult {
 		const result = this.compiler.compile(input);
 		if (result.outcome === "allow") {
-			this.runtime.bindAttemptGrant(input.attemptId, result.grant.grantId);
+			this.runtime.bindAttemptGrant(input.attemptId, result.grant);
 		} else if (result.outcome === "approval-required") {
 			this.runtime.requestApproval(result.approval);
 		}

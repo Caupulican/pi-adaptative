@@ -10,6 +10,7 @@ import type { CompactionResult } from "@caupulican/pi-agent-core/node";
 import type { ImageContent, Model } from "@caupulican/pi-ai";
 import type { SessionStats, ToolProbeReport } from "../../core/agent-session.ts";
 import type { BashResult } from "../../core/bash-executor.ts";
+import type { HumanInputAnswer, HumanInputPresentationRequest } from "../../core/human-input.ts";
 import type { SourceInfo } from "../../core/source-info.ts";
 
 // ============================================================================
@@ -71,6 +72,121 @@ export type RpcCommand =
 
 	// Commands (available for invocation via prompt)
 	| { id?: string; type: "get_commands" };
+
+function isRpcImageContent(value: unknown): value is ImageContent {
+	if (typeof value !== "object" || value === null || Array.isArray(value)) return false;
+	const record = value as Record<string, unknown>;
+	return record.type === "image" && typeof record.data === "string" && typeof record.mimeType === "string";
+}
+
+function hasOptionalImages(value: unknown): boolean {
+	return value === undefined || (Array.isArray(value) && value.every(isRpcImageContent));
+}
+
+function hasOptionalString(value: unknown): boolean {
+	return value === undefined || typeof value === "string";
+}
+
+function hasOptionalBoolean(value: unknown): boolean {
+	return value === undefined || typeof value === "boolean";
+}
+
+/** Fail-closed runtime decoder for the full untrusted JSONL command union. */
+export function decodeRpcCommand(value: unknown): RpcCommand | undefined {
+	if (typeof value !== "object" || value === null || Array.isArray(value)) return undefined;
+	const record = value as Record<string, unknown>;
+	if (typeof record.type !== "string" || (record.id !== undefined && typeof record.id !== "string")) {
+		return undefined;
+	}
+	switch (record.type) {
+		case "prompt":
+			if (
+				typeof record.message !== "string" ||
+				!hasOptionalImages(record.images) ||
+				(record.streamingBehavior !== undefined &&
+					record.streamingBehavior !== "steer" &&
+					record.streamingBehavior !== "followUp")
+			)
+				return undefined;
+			break;
+		case "steer":
+		case "follow_up":
+			if (typeof record.message !== "string" || !hasOptionalImages(record.images)) return undefined;
+			break;
+		case "new_session":
+			if (!hasOptionalString(record.parentSession)) return undefined;
+			break;
+		case "set_model":
+			if (typeof record.provider !== "string" || typeof record.modelId !== "string") return undefined;
+			break;
+		case "set_thinking_level":
+			if (
+				record.level !== "off" &&
+				record.level !== "minimal" &&
+				record.level !== "low" &&
+				record.level !== "medium" &&
+				record.level !== "high" &&
+				record.level !== "xhigh" &&
+				record.level !== "max" &&
+				record.level !== "ultra"
+			)
+				return undefined;
+			break;
+		case "set_steering_mode":
+		case "set_follow_up_mode":
+			if (record.mode !== "all" && record.mode !== "one-at-a-time") return undefined;
+			break;
+		case "compact":
+			if (!hasOptionalString(record.customInstructions)) return undefined;
+			break;
+		case "set_auto_compaction":
+		case "set_auto_retry":
+			if (typeof record.enabled !== "boolean") return undefined;
+			break;
+		case "bash":
+			if (typeof record.command !== "string" || !hasOptionalBoolean(record.excludeFromContext)) return undefined;
+			break;
+		case "tool_probe":
+			if (!hasOptionalString(record.model)) return undefined;
+			break;
+		case "remove_tool_repair_rule":
+			if (typeof record.model !== "string" || typeof record.mode !== "string") return undefined;
+			break;
+		case "reset_tool_protocol":
+			if (typeof record.model !== "string") return undefined;
+			break;
+		case "export_html":
+			if (!hasOptionalString(record.outputPath)) return undefined;
+			break;
+		case "switch_session":
+			if (typeof record.sessionPath !== "string") return undefined;
+			break;
+		case "fork":
+			if (typeof record.entryId !== "string") return undefined;
+			break;
+		case "set_session_name":
+			if (typeof record.name !== "string") return undefined;
+			break;
+		case "abort":
+		case "get_state":
+		case "cycle_model":
+		case "get_available_models":
+		case "cycle_thinking_level":
+		case "abort_retry":
+		case "abort_bash":
+		case "get_session_stats":
+		case "get_tool_repair_health":
+		case "clone":
+		case "get_fork_messages":
+		case "get_last_assistant_text":
+		case "get_messages":
+		case "get_commands":
+			break;
+		default:
+			return undefined;
+	}
+	return record as RpcCommand;
+}
 
 // ============================================================================
 // RPC Slash Command (for get_commands response)
@@ -219,6 +335,7 @@ export type RpcResponse =
 
 /** Emitted when an extension needs user input */
 export type RpcExtensionUIRequest =
+	| { type: "extension_ui_request"; id: string; method: "questions"; request: HumanInputPresentationRequest }
 	| { type: "extension_ui_request"; id: string; method: "select"; title: string; options: string[]; timeout?: number }
 	| { type: "extension_ui_request"; id: string; method: "confirm"; title: string; message: string; timeout?: number }
 	| {
@@ -261,9 +378,30 @@ export type RpcExtensionUIRequest =
 
 /** Response to an extension UI request */
 export type RpcExtensionUIResponse =
+	| {
+			type: "extension_ui_response";
+			id: string;
+			answers: HumanInputAnswer[];
+			images?: ImageContent[];
+	  }
 	| { type: "extension_ui_response"; id: string; value: string }
 	| { type: "extension_ui_response"; id: string; confirmed: boolean }
 	| { type: "extension_ui_response"; id: string; cancelled: true };
+
+/** Fail-closed decoder for the untrusted JSONL extension-UI boundary. */
+export function decodeRpcExtensionUIResponse(value: unknown): RpcExtensionUIResponse | undefined {
+	if (typeof value !== "object" || value === null || Array.isArray(value)) return undefined;
+	const record = value as Record<string, unknown>;
+	if (record.type !== "extension_ui_response" || typeof record.id !== "string") return undefined;
+	const isCancelled = record.cancelled === true;
+	const hasValue = typeof record.value === "string";
+	const hasConfirmation = typeof record.confirmed === "boolean";
+	const hasAnswers = Array.isArray(record.answers) && (record.images === undefined || Array.isArray(record.images));
+	if (Number(isCancelled) + Number(hasValue) + Number(hasConfirmation) + Number(hasAnswers) !== 1) {
+		return undefined;
+	}
+	return record as RpcExtensionUIResponse;
+}
 
 // ============================================================================
 // Helper type for extracting command types

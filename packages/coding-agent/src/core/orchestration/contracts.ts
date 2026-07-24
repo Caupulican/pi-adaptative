@@ -210,6 +210,18 @@ export interface OrchestrationDispatchRequest {
 	profileId: string;
 	instructions: string;
 	resourcePointerIds: readonly string[];
+	/** Execution owner. Omitted on legacy records and normalized to in-process. */
+	executionKind?: "in-process" | "managed-process";
+	/** Stable external lane identity shared by successive managed-process turns. */
+	logicalLaneId?: string;
+	/** Monotonic dispatch sequence within a managed-process logical lane. */
+	dispatchSequence?: number;
+	/** External provider identity retained for routing and diagnostics. */
+	provider?: string;
+	/** Owner approval or standing-grant record that authorized an external launch. */
+	authorizationId?: string;
+	/** Worktree-sync lane claimed by the external dispatcher. */
+	worktreeLaneKey?: string;
 }
 
 export type CapabilityEnforcementKind =

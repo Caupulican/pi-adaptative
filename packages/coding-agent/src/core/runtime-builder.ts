@@ -82,6 +82,7 @@ import { describeInFlightWorkUnit, getInFlightWorkUnits } from "./reload-blocker
 import type { ModelFitnessReport } from "./research/model-fitness.ts";
 import type { ResourceLoader } from "./resource-loader.ts";
 import { ScoutController } from "./scout-controller.ts";
+import type { SessionImageStore } from "./session-image-store.ts";
 import { getSessionRole, isWorkerSession, WORKER_FORBIDDEN_TOOLS } from "./session-role.ts";
 import {
 	matchesResourceProfilePattern,
@@ -97,6 +98,7 @@ import {
 	REFLEX_INTERPRETER_SYSTEM_PROMPT,
 } from "./toolkit/reflex-interpreter.ts";
 import { executeToolkitScript } from "./toolkit/script-runner.ts";
+import { createAskQuestionToolDefinition } from "./tools/ask-question.ts";
 import { createContextScoutToolDefinition } from "./tools/context-scout.ts";
 import { createDelegateToolDefinition } from "./tools/delegate.ts";
 import { createDelegateStatusToolDefinition } from "./tools/delegate-status.ts";
@@ -260,6 +262,8 @@ export interface RuntimeBuilderDeps {
 
 	/** Session-scoped tool-output artifact store for artifact-producing tools and artifact_retrieve (gated on the profile). */
 	getToolArtifactStore(): ArtifactStore;
+	/** Lazily resolve durable image storage only for a persisted/configured session. */
+	getSessionImageStore(): Pick<SessionImageStore, "retainContent"> | undefined;
 
 	/** Live memory manager — its provider tools join the registry. */
 	getMemoryManager(): MemoryManager;
@@ -865,6 +869,14 @@ export class RuntimeBuilder {
 					},
 				});
 				this._baseToolDefinitions.set(taskStepsToolDefinition.name, taskStepsToolDefinition);
+			}
+			if (toolAccess.allows("ask_question")) {
+				const askQuestionToolDefinition = createAskQuestionToolDefinition({
+					sessionManager: this.deps.getSessionManager(),
+					artifactStore: toolArtifactStore,
+					getImageStore: () => this.deps.getSessionImageStore(),
+				});
+				this._baseToolDefinitions.set(askQuestionToolDefinition.name, askQuestionToolDefinition);
 			}
 			if (toolAccess.allows("delegate")) {
 				const delegateToolDefinition = createDelegateToolDefinition({
