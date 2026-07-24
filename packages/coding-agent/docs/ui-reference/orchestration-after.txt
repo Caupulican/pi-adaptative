@@ -1,0 +1,7 @@
+[orchestration] active  3 open · 1 worker · 1 queued
+  ● Implement the native panel  high priority · @implementer
+  ! Verify worker review state
+  ○ Run focused tests
+  ● worker-2  worker
+  ◌ tmux-worker-3  tmux worker
+  ! Completed work still needs attached evidence.

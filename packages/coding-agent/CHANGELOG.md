@@ -3,9 +3,11 @@
 ### Added
 
 - Added owner-authored orchestration profiles with pinned model/thinking/tool/resource/budget policy, architect-owned worker allowlists, durable DAG attempts and fenced typed results, exact-session process-worker resume, and a constrained direct-argv `run_process` launcher for execution profiles.
+- Added one event-driven native orchestration panel for task steps and worker lanes, with quiet idle behavior, width-bounded status hierarchy, progressive evidence detail, and host-owned widget lifecycle that survives extension reloads.
 
 ### Fixed
 
+- Added a zero-write, single-namespace extension storage contract for durable state, rebuildable cache, and automatically released bounded work; extension loading now honors injected agent directories for transform cache and storage, while `pi doctor` reports unexpected root writers through a bounded read-only audit.
 - Contained directory profile overlays and configuration backups under canonical `profiles/` and `state/` namespaces, archived obsolete root scratch/Auto Learn layouts, and added bounded conflict-preserving migration with zero-write legacy reads.
 - Consolidated generated context payloads under one leased, bounded per-session work namespace; context/report inspection and unflushed session creation are now zero-write, recognized legacy stores migrate safely, and empty session namespaces are pruned without applying retention to transcripts.
 - Consolidated fitness, adaptation, and tool-selection host state behind one validated lock-safe atomic store; concurrent sessions no longer overwrite profile or tool evidence, and worker read-only mode remains zero-write.

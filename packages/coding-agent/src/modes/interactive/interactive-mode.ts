@@ -53,6 +53,7 @@ import type {
 } from "../../core/settings-manager.ts";
 import { BUILTIN_SLASH_COMMANDS } from "../../core/slash-commands.ts";
 import type { SourceInfo } from "../../core/source-info.ts";
+import { createOrchestrationActivityModel, OrchestrationPanelComponent } from "../../core/tools/orchestration-panel.ts";
 import { getCwdRelativePath, resolvePath } from "../../utils/paths.ts";
 import { ensureTool } from "../../utils/tools-manager.ts";
 import { checkForNewPiVersion, type LatestPiRelease } from "../../utils/version-check.ts";
@@ -667,6 +668,7 @@ export class InteractiveMode {
 		onThemeChange(() => {
 			this.ui.invalidate();
 			this.updateEditorBorderColor();
+			this.refreshOrchestrationWidget();
 			this.ui.requestRender();
 		});
 
@@ -800,6 +802,18 @@ export class InteractiveMode {
 	private refreshAutonomyFooterStatus(): void {
 		this.footerDataProvider.setAutonomyStatusSnapshot(this.session.getAutonomyStatusSnapshot());
 		this.footer.invalidate();
+	}
+
+	private refreshOrchestrationWidget(): void {
+		const model = createOrchestrationActivityModel(
+			this.session.getTaskStepsStateSnapshot(),
+			this.session.getLaneRecords(),
+		);
+		this.extensionUiHost.setHostWidget(
+			"native-orchestration",
+			model ? new OrchestrationPanelComponent(theme, model) : undefined,
+			"belowEditor",
+		);
 	}
 
 	private checkForPackageUpdates(): Promise<string[]> {
@@ -1237,6 +1251,7 @@ export class InteractiveMode {
 		await this.updateAvailableProviderCount();
 		this.updateEditorBorderColor();
 		this.updateTerminalTitle();
+		this.refreshOrchestrationWidget();
 	}
 
 	private subscribeToExtensionsChanged(): void {
@@ -1963,6 +1978,7 @@ export class InteractiveMode {
 
 			case "session_info_changed":
 				this.updateTerminalTitle();
+				this.refreshOrchestrationWidget();
 				this.footer.invalidate();
 				this.ui.requestRender();
 				break;
@@ -1992,6 +2008,7 @@ export class InteractiveMode {
 								: undefined;
 				const status = activeParts.length > 0 ? activeParts.join(", ") : terminalStatus;
 				this.footerDataProvider.setExtensionStatus("delegate", status ? `delegate: ${status}` : undefined);
+				this.refreshOrchestrationWidget();
 				this.footer.invalidate();
 				break;
 			}
@@ -2100,6 +2117,13 @@ export class InteractiveMode {
 					);
 					this.toolPanels.finish(event.toolCallId);
 					this.ui.requestRender();
+				}
+				if (
+					event.toolName === "task_steps" ||
+					event.toolName === "delegate" ||
+					event.toolName === "delegate_status"
+				) {
+					this.refreshOrchestrationWidget();
 				}
 				break;
 			}
@@ -3888,6 +3912,7 @@ export class InteractiveMode {
 			},
 			text,
 		);
+		this.refreshOrchestrationWidget();
 	}
 
 	private async handleGoalContinueCommand(text: string): Promise<void> {
@@ -4134,6 +4159,7 @@ export class InteractiveMode {
 			this.loadingAnimation = undefined;
 		}
 		this.authDialogs.cancelActiveDialog();
+		this.extensionUiHost.clearHostWidgets();
 		this.extensionUiHost.resetExtensionUI();
 		this.overlayHost.unmount();
 		this.footer.dispose();

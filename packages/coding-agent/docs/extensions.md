@@ -13,6 +13,7 @@ Extensions are TypeScript modules that extend pi's behavior. They can subscribe 
 - **Custom UI components** - Full TUI components with keyboard input via `ctx.ui.custom()` for complex interactions
 - **Custom commands** - Register commands like `/mycommand` via `pi.registerCommand()`
 - **Session persistence** - Store state that survives restarts via `pi.appendEntry()`
+- **Owned storage** - Keep durable state, rebuildable cache, and bounded work in one extension namespace
 - **Custom rendering** - Control how tool calls/results and messages appear in TUI
 
 **Example use cases:**
@@ -1268,6 +1269,49 @@ export default function (pi: ExtensionAPI) {
 
 ## ExtensionAPI Methods
 
+### pi.getStorage(namespace)
+
+Bind one portable storage namespace to the current extension generation:
+
+```typescript
+import { mkdir, writeFile } from "node:fs/promises";
+import { join } from "node:path";
+
+export default function (pi: ExtensionAPI) {
+  const storage = pi.getStorage("my-extension");
+
+  pi.registerCommand("save-extension-state", {
+    handler: async (_args, ctx) => {
+      await mkdir(storage.stateDir, { recursive: true });
+      await writeFile(join(storage.stateDir, "state.json"), JSON.stringify({ cwd: ctx.cwd }), "utf8");
+    },
+  });
+}
+```
+
+The returned paths have separate lifecycles:
+
+- `stateDir` → `~/.pi/agent/state/extensions/<namespace>/`: durable machine state. Deleting it loses history.
+- `cacheDir` → `~/.pi/agent/cache/extensions/<namespace>/`: rebuildable data. It must be safe to delete.
+- `acquireWorkRun()` → `~/.pi/agent/work/extensions/<namespace>/<run-id>/`: transient output with an ownership manifest, active lease, and hard retention ceilings.
+
+Calling `getStorage()` is zero-write. It validates the namespace and only returns paths; create `stateDir` or `cacheDir` when the extension actually writes. A generation may bind only one namespace, repeated calls with that namespace return the same view, and unrelated loaded extensions cannot claim the same namespace. Names are lowercase portable path segments of at most 64 characters; traversal, separators, uppercase ambiguity, trailing dots, and Windows-reserved names are rejected.
+
+Work leases are released automatically if the factory fails and when the extension unloads or reloads. Release a lease sooner when the operation is finished; release is idempotent and does not immediately delete its artifacts:
+
+```typescript
+const run = storage.acquireWorkRun({ runId: "export-1", retention: { maxRuns: 8 } });
+try {
+  await writeFile(join(run.path, "report.json"), JSON.stringify(report), "utf8");
+} finally {
+  run.release();
+}
+```
+
+Extension-selected retention can only reduce the harness defaults. It cannot exceed 30 days, 64 inactive runs, 512 MiB, 10,000 scanned runs, or 100,000 recursively scanned entries, and it cannot be disabled through this API. Do not create extension-specific directories directly beside `auth.json` and `settings.json`. Do not store credentials in extension state or cache; use Pi authentication configuration, environment-backed references, or an external credential manager.
+
+Extensions are trusted process code, so Pi cannot prevent one from bypassing this API and writing an arbitrary filesystem path. The enforceable package contract is: bundled/packaged extensions use `getStorage()`, transient artifacts go through bounded leases, and `pi doctor` makes nonconforming root writers visible. Durable state must compact its own history; rebuildable cache must impose its own file/byte policy. Neither directory is an unbounded artifact sink.
+
 ### pi.on(event, handler)
 
 Subscribe to events. See [Events](#events) for event types and return values.
@@ -1684,6 +1728,15 @@ pi.registerCommand("my-setup-teardown", {
 
 ## State Management
 
+Use the storage class that matches the data:
+
+- Branch/session state that must follow conversation history belongs in tool result `details` or `pi.appendEntry()`.
+- Durable extension-global machine state belongs in `pi.getStorage(...).stateDir`.
+- Recomputable indexes and downloaded derivatives belong in `cacheDir`.
+- Reports, downloads, subprocess output, and scratch files belong in a leased `acquireWorkRun()` directory.
+
+Never place extension artifacts directly under `~/.pi/agent/`; `pi doctor` reports unexpected root entries without moving or deleting them.
+
 Extensions with state should store it in tool result `details` for proper branching support:
 
 ```typescript
@@ -2011,6 +2064,10 @@ import {
   DEFAULT_MAX_BYTES, // 50KB
   DEFAULT_MAX_LINES, // 2000
 } from "@caupulican/pi-adaptative";
+import { writeFile } from "node:fs/promises";
+import { join } from "node:path";
+
+const storage = pi.getStorage("my-extension");
 
 async execute(toolCallId, params, signal, onUpdate, ctx) {
   const output = await runCommand();
@@ -2024,8 +2081,11 @@ async execute(toolCallId, params, signal, onUpdate, ctx) {
   let result = truncation.content;
 
   if (truncation.truncated) {
-    // Write full output to temp file
-    const tempFile = writeTempFile(output);
+    // Write full output into this extension's bounded work area
+    const run = storage.acquireWorkRun();
+    const tempFile = join(run.path, "full-output.txt");
+    await writeFile(tempFile, output, "utf8");
+    run.release();
 
     // Inform the LLM where to find complete output
     result += `\n\n[Output truncated: ${truncation.outputLines} of ${truncation.totalLines} lines`;

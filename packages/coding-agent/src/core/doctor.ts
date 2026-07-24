@@ -8,6 +8,7 @@ import {
 	loadAvailableFffNodePackage,
 	probeVersion,
 } from "../utils/tools-manager.ts";
+import { type AgentDirectoryLayoutReport, inspectAgentDirectoryLayout } from "./agent-directory-layout.ts";
 import { OllamaRuntime } from "./models/local-runtime.ts";
 import { ensurePythonRuntime, type PythonRuntimeOutcome } from "./python-runtime.ts";
 
@@ -44,6 +45,13 @@ export interface DoctorCheck {
 
 export interface DoctorReport {
 	checks: DoctorCheck[];
+	notices?: DoctorNotice[];
+}
+
+export interface DoctorNotice {
+	id: string;
+	label: string;
+	detail: string;
 }
 
 /** Minimal slice of OllamaRuntime the doctor needs -- lets tests inject a fake without touching the real runtime. */
@@ -58,6 +66,7 @@ export interface DoctorDeps {
 	/** Best-effort `<command> --version` probe; undefined if it can't be run. Used only to enrich a status line, never for presence detection. */
 	probeVersion: (command: string, versionArgs?: readonly string[]) => string | undefined;
 	ollamaRuntime: DoctorOllamaRuntime;
+	inspectAgentDirectoryLayout: () => AgentDirectoryLayoutReport;
 }
 
 export interface RunDoctorOptions {
@@ -78,6 +87,7 @@ const realDoctorDeps: DoctorDeps = {
 	ensurePythonRuntime,
 	probeVersion,
 	ollamaRuntime: new OllamaRuntime({ agentDir: getAgentDir() }),
+	inspectAgentDirectoryLayout: () => inspectAgentDirectoryLayout(getAgentDir()),
 };
 
 const RIPGREP_GUIDE = [
@@ -193,6 +203,33 @@ async function checkPython(deps: DoctorDeps, silent: boolean): Promise<DoctorChe
 	};
 }
 
+function checkAgentDirectoryLayout(deps: DoctorDeps): DoctorNotice[] {
+	const report = deps.inspectAgentDirectoryLayout();
+	if (report.error) {
+		return [
+			{
+				id: "agent-directory-layout",
+				label: "Agent directory layout",
+				detail: `could not inspect ${report.agentDir}: ${report.error}`,
+			},
+		];
+	}
+	if (report.unexpectedEntryCount === 0 && !report.truncated) return [];
+
+	const listed = report.unexpectedEntries.join(", ");
+	const omitted = report.unexpectedEntryCount - report.unexpectedEntries.length;
+	const count = report.truncated ? `at least ${report.unexpectedEntryCount}` : String(report.unexpectedEntryCount);
+	const listing = listed ? `: ${listed}${omitted > 0 ? ` (+${omitted} more)` : ""}` : "";
+	const truncation = report.truncated ? `; scan stopped after ${report.scannedEntries} entries` : "";
+	return [
+		{
+			id: "agent-directory-layout",
+			label: "Agent directory layout",
+			detail: `${count} unexpected root entr${report.unexpectedEntryCount === 1 ? "y" : "ies"}${listing}${truncation}. Extension data belongs under state/extensions, cache/extensions, or leased work/extensions`,
+		},
+	];
+}
+
 export async function runDoctor(
 	deps: DoctorDeps = realDoctorDeps,
 	options: RunDoctorOptions = {},
@@ -203,7 +240,7 @@ export async function runDoctor(
 		checkOllama(deps),
 		checkPython(deps, silent),
 	]);
-	return { checks: [fffNode, checkRipgrep(deps), ollama, python] };
+	return { checks: [fffNode, checkRipgrep(deps), ollama, python], notices: checkAgentDirectoryLayout(deps) };
 }
 
 export function formatDoctorReport(report: DoctorReport): string {
@@ -215,6 +252,9 @@ export function formatDoctorReport(report: DoctorReport): string {
 		if (!check.present && check.guide) {
 			for (const guideLine of check.guide) lines.push(`  ${guideLine}`);
 		}
+	}
+	for (const notice of report.notices ?? []) {
+		lines.push(`${chalk.yellow("[WARN]")} ${notice.label} -- ${notice.detail}`);
 	}
 	return lines.join("\n");
 }

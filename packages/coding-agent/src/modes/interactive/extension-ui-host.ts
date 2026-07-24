@@ -109,6 +109,9 @@ export interface ExtensionUiHostDeps {
 	ui: ExtensionUiHostUi;
 }
 
+type DisposableComponent = Component & { dispose?(): void };
+type WidgetPlacement = "aboveEditor" | "belowEditor";
+
 export class ExtensionUiHost {
 	private readonly deps: ExtensionUiHostDeps;
 
@@ -123,6 +126,9 @@ export class ExtensionUiHost {
 	// Extension widgets (components rendered above/below the editor)
 	private extensionWidgetsAbove = new Map<string, Component & { dispose?(): void }>();
 	private extensionWidgetsBelow = new Map<string, Component & { dispose?(): void }>();
+	// Host-owned widgets survive extension reloads and are cleared only by the owning interactive mode.
+	private hostWidgetsAbove = new Map<string, DisposableComponent>();
+	private hostWidgetsBelow = new Map<string, DisposableComponent>();
 
 	// Custom footer from extension (undefined = use built-in footer)
 	private customFooter: (Component & { dispose?(): void }) | undefined = undefined;
@@ -219,6 +225,31 @@ export class ExtensionUiHost {
 	// Maximum total widget lines to prevent viewport overflow
 	private static readonly MAX_WIDGET_LINES = 10;
 
+	private removeWidget(map: Map<string, DisposableComponent>, key: string): void {
+		const existing = map.get(key);
+		existing?.dispose?.();
+		map.delete(key);
+	}
+
+	/** Mount a native host widget without coupling it to extension reload lifecycle. */
+	setHostWidget(key: string, component: DisposableComponent | undefined, placement: WidgetPlacement): void {
+		this.removeWidget(this.hostWidgetsAbove, key);
+		this.removeWidget(this.hostWidgetsBelow, key);
+		if (component) {
+			const target = placement === "belowEditor" ? this.hostWidgetsBelow : this.hostWidgetsAbove;
+			target.set(key, component);
+		}
+		this.renderWidgets();
+	}
+
+	clearHostWidgets(): void {
+		for (const widget of this.hostWidgetsAbove.values()) widget.dispose?.();
+		for (const widget of this.hostWidgetsBelow.values()) widget.dispose?.();
+		this.hostWidgetsAbove.clear();
+		this.hostWidgetsBelow.clear();
+		this.renderWidgets();
+	}
+
 	/**
 	 * Set an extension widget (string array or custom component).
 	 */
@@ -228,14 +259,8 @@ export class ExtensionUiHost {
 		options?: ExtensionWidgetOptions,
 	): void {
 		const placement = options?.placement ?? "aboveEditor";
-		const removeExisting = (map: Map<string, Component & { dispose?(): void }>) => {
-			const existing = map.get(key);
-			if (existing?.dispose) existing.dispose();
-			map.delete(key);
-		};
-
-		removeExisting(this.extensionWidgetsAbove);
-		removeExisting(this.extensionWidgetsBelow);
+		this.removeWidget(this.extensionWidgetsAbove, key);
+		this.removeWidget(this.extensionWidgetsBelow, key);
 
 		if (content === undefined) {
 			this.renderWidgets();
@@ -309,20 +334,30 @@ export class ExtensionUiHost {
 	 */
 	renderWidgets(): void {
 		if (!this.ui.widgetContainerAbove || !this.ui.widgetContainerBelow) return;
-		this.renderWidgetContainer(this.ui.widgetContainerAbove, this.extensionWidgetsAbove, true, true);
-		this.renderWidgetContainer(this.ui.widgetContainerBelow, this.extensionWidgetsBelow, false, false);
+		this.renderWidgetContainer(
+			this.ui.widgetContainerAbove,
+			[this.hostWidgetsAbove, this.extensionWidgetsAbove],
+			true,
+			true,
+		);
+		this.renderWidgetContainer(
+			this.ui.widgetContainerBelow,
+			[this.hostWidgetsBelow, this.extensionWidgetsBelow],
+			false,
+			false,
+		);
 		this.ui.tui.requestRender();
 	}
 
 	private renderWidgetContainer(
 		container: Container,
-		widgets: Map<string, Component & { dispose?(): void }>,
+		widgetGroups: readonly Map<string, DisposableComponent>[],
 		spacerWhenEmpty: boolean,
 		leadingSpacer: boolean,
 	): void {
 		container.clear();
 
-		if (widgets.size === 0) {
+		if (widgetGroups.every((widgets) => widgets.size === 0)) {
 			if (spacerWhenEmpty) {
 				container.addChild(new Spacer(1));
 			}
@@ -332,8 +367,10 @@ export class ExtensionUiHost {
 		if (leadingSpacer) {
 			container.addChild(new Spacer(1));
 		}
-		for (const component of widgets.values()) {
-			container.addChild(component);
+		for (const widgets of widgetGroups) {
+			for (const component of widgets.values()) {
+				container.addChild(component);
+			}
 		}
 	}
 

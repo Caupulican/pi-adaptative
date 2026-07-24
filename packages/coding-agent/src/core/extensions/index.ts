@@ -69,9 +69,11 @@ export type {
 	// Runtime
 	ExtensionRuntime,
 	ExtensionShortcut,
+	ExtensionStorage,
 	ExtensionUIContext,
 	ExtensionUIDialogOptions,
 	ExtensionWidgetOptions,
+	ExtensionWorkRunOptions,
 	FindToolCallEvent,
 	FindToolResultEvent,
 	GetActiveToolsHandler,

@@ -59,7 +59,7 @@ describe("Extension loader transform cache", () => {
 	async function load(extFile: string) {
 		const eventBus = createEventBus();
 		const runtime = createExtensionRuntime();
-		const { extension, error } = await loadExtension(extFile, cwdDir, eventBus, runtime);
+		const { extension, error } = await loadExtension(extFile, cwdDir, eventBus, runtime, { agentDir });
 		expect(error).toBeNull();
 		return extension!;
 	}
@@ -145,5 +145,16 @@ describe("Extension loader transform cache", () => {
 		// If the module (not just its transformed source) were cached across loads, this would
 		// read "count=2". moduleCache:false means top-level state resets every load.
 		expect(ext2.tools.get("counter_tool")?.definition.description).toBe("count=1");
+	});
+
+	it("keeps low-level loads zero-footprint when no agent directory is injected", async () => {
+		const extFile = join(cwdDir, "zero-footprint.ts");
+		writeFileSync(extFile, "export default () => {};\n");
+
+		const loaded = await loadExtension(extFile, cwdDir, createEventBus(), createExtensionRuntime());
+
+		expect(loaded.error).toBeNull();
+		expect(existsSync(cacheDir)).toBe(false);
+		expect(existsSync(join(cwdDir, ".pi"))).toBe(false);
 	});
 });

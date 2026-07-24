@@ -104,6 +104,7 @@ export function createExtensionifyToolDefinition(
 				// Load the extension in isolation
 				const { extension, error: loadError } = await loadExtension(indexPath, tempDir, eventBus, runtime, {
 					fresh: true,
+					agentDir,
 				});
 
 				if (loadError) {

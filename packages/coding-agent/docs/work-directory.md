@@ -22,7 +22,7 @@ The default per-tenant retention policy is 30 days, 64 inactive runs, 512 MiB, 1
 
 ## Repository API
 
-Extensions and internal code can use the public helpers:
+Harness internals and programmatic SDK integrations can use the low-level public helpers:
 
 ```ts
 import { acquireWorkRun, getProcessWorkRun, pruneWorkTenant } from "@caupulican/pi-adaptative";
@@ -33,6 +33,8 @@ import { acquireWorkRun, getProcessWorkRun, pruneWorkTenant } from "@caupulican/
 - `pruneWorkTenant(...)` applies bounded retention to one category and tenant.
 
 Use a named run only for transient coordination that must be shared across Pi processes. Use a generated run for commands, reports, downloads, tests, benchmarks, probes, and output spills.
+
+Packaged extensions should use `pi.getStorage("extension-name").acquireWorkRun()` instead. It binds work to one extension namespace, releases leases automatically on failure/unload, and clamps extension-selected retention to the harness ceiling. Calling `getStorage()` alone creates no directories. Durable extension state and rebuildable extension cache similarly live under `state/extensions/<namespace>/` and `cache/extensions/<namespace>/`; see [extensions.md](extensions.md#pigetstoragenamespace).
 
 ## Not transient
 
@@ -57,9 +59,12 @@ straggler:
   state/     durable machine state: model adaptation/fitness, tool-performance,        -- stateDir/stateFile
              learning observations, trust decisions, failure corpus, config backups, …
     state/backups/config/                                                              explicit config snapshots
+    state/extensions/<namespace>/                                                      extension durable state
   cache/     rebuildable, safe to delete: tool-path probes, jiti transform cache, uv    -- cacheDir/cacheFile
+    cache/extensions/<namespace>/                                                      extension rebuildable cache
   bin/       managed executable helpers (fd, rg)                                       -- binDir (legacy getBinDir accessor)
   work/      transient/scratch (this document)                                         -- re-exported from agent-paths.ts
+    work/extensions/<namespace>/<run-id>/                                              extension leased work
   runtimes/<kind>  models/<kind>  sessions/  npm/  git/  worktrees/                    -- runtimesDir/modelsDir/sessionsDir/npmDir/gitDir/worktreesDir
 ```
 
@@ -72,3 +77,5 @@ preserved under `state/legacy-layout/`, where they cannot compete with live conf
 roots move atomically when possible; literal Windows `auth.json:Zone.Identifier` sidecars move there
 too. Partial migrations scan a bounded number of top-level entries and preserve collisions under
 `state/migration-conflicts/` instead of overwriting either copy.
+
+`pi doctor` performs a bounded, read-only scan of the agent directory root. It stays silent for the canonical config, memory, resource, and storage entries above and warns about external or legacy root writers. The audit never relocates or deletes unknown data.

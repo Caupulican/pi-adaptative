@@ -37,6 +37,8 @@
 import { join } from "node:path";
 import {
 	acquireWorkRun,
+	assertPortablePathSegment,
+	boundedWorkRetention,
 	createWorkRunId,
 	getProcessWorkRun,
 	getWorkRoot,
@@ -46,6 +48,44 @@ import {
 	pruneWorkTenant,
 } from "../utils/work-directory.ts";
 import { getReloadCoordinationDir } from "./reload-blockers.ts";
+
+/** Root entries reserved for user-authored configuration and memory. */
+export const AGENT_ROOT_FILE_NAMES = [
+	"auth.json",
+	"settings.json",
+	"models.json",
+	"keybindings.json",
+	"MEMORY.md",
+	"USER.md",
+	"SYSTEM.md",
+	"APPEND_SYSTEM.md",
+] as const;
+
+/** Root entries reserved for user resources and machine-managed storage classes. */
+export const AGENT_ROOT_DIRECTORY_NAMES = [
+	"okf-memory",
+	"skills",
+	"extensions",
+	"prompts",
+	"themes",
+	"profiles",
+	"state",
+	"cache",
+	"bin",
+	"work",
+	"runtimes",
+	"models",
+	"sessions",
+	"npm",
+	"git",
+	"worktrees",
+] as const;
+
+const AGENT_ROOT_ENTRY_NAMES = new Set<string>([...AGENT_ROOT_FILE_NAMES, ...AGENT_ROOT_DIRECTORY_NAMES]);
+
+export function isCanonicalAgentRootEntry(name: string): boolean {
+	return AGENT_ROOT_ENTRY_NAMES.has(name);
+}
 
 /** `<agentDir>/<name>` -- a root-level user config/memory file (auth.json, settings.json, MEMORY.md, …). */
 export function configFile(agentDir: string, name: string): string {
@@ -67,6 +107,12 @@ export function stateFile(agentDir: string, ...segments: string[]): string {
 	return join(stateDir(agentDir), ...segments);
 }
 
+/** `<agentDir>/state/extensions/<namespace>` -- durable state owned by one extension. */
+export function extensionStateDir(agentDir: string, namespace: string): string {
+	assertPortablePathSegment("Extension namespace", namespace);
+	return stateFile(agentDir, "extensions", namespace);
+}
+
 /** `<agentDir>/state/backups/config` -- explicit user-requested configuration snapshots. */
 export function configBackupsDir(agentDir: string): string {
 	return stateFile(agentDir, "backups", "config");
@@ -80,6 +126,12 @@ export function cacheDir(agentDir: string): string {
 /** `<agentDir>/cache/<segments…>` */
 export function cacheFile(agentDir: string, ...segments: string[]): string {
 	return join(cacheDir(agentDir), ...segments);
+}
+
+/** `<agentDir>/cache/extensions/<namespace>` -- rebuildable cache owned by one extension. */
+export function extensionCacheDir(agentDir: string, namespace: string): string {
+	assertPortablePathSegment("Extension namespace", namespace);
+	return cacheFile(agentDir, "extensions", namespace);
 }
 
 /** `<agentDir>/bin` -- managed executable helpers (fd, rg). */
@@ -142,6 +194,8 @@ export function directoryProfilesDir(agentDir: string): string {
  */
 export {
 	getWorkRoot,
+	assertPortablePathSegment,
+	boundedWorkRetention,
 	getWorkTenantDir,
 	getWorkRunDir,
 	getProcessWorkRun,

@@ -669,6 +669,7 @@ export class DefaultResourceLoader implements ResourceLoader {
 	async loadSingleExtension(extensionPath: string): Promise<{ extension: Extension | null; error: string | null }> {
 		const result = await loadExtension(extensionPath, this.cwd, this.eventBus, this.extensionsResult.runtime, {
 			fresh: true,
+			agentDir: this.agentDir,
 		});
 		if (result.extension && !result.error) {
 			const loaded = result.extension;
@@ -922,7 +923,9 @@ export class DefaultResourceLoader implements ResourceLoader {
 						...profileFilteredExternalExtensions,
 					]);
 
-			const extensionsResult = await loadExtensions(extensionPaths, this.cwd, this.eventBus);
+			const extensionsResult = await loadExtensions(extensionPaths, this.cwd, this.eventBus, {
+				agentDir: this.agentDir,
+			});
 			const inlineExtensions = await this.loadExtensionFactories(extensionsResult.runtime);
 			extensionsResult.extensions.push(...inlineExtensions.extensions);
 			extensionsResult.errors.push(...inlineExtensions.errors);
@@ -1496,7 +1499,9 @@ export class DefaultResourceLoader implements ResourceLoader {
 		for (const [index, factory] of this.extensionFactories.entries()) {
 			const extensionPath = `<inline:${index + 1}>`;
 			try {
-				const extension = await loadExtensionFromFactory(factory, this.cwd, this.eventBus, runtime, extensionPath);
+				const extension = await loadExtensionFromFactory(factory, this.cwd, this.eventBus, runtime, extensionPath, {
+					agentDir: this.agentDir,
+				});
 				extensions.push(extension);
 			} catch (error) {
 				const message = error instanceof Error ? error.message : "failed to load extension";

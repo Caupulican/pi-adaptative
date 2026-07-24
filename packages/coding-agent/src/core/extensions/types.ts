@@ -53,6 +53,7 @@ import type {
 } from "@caupulican/pi-tui";
 import type { Static, TSchema } from "typebox";
 import type { Theme } from "../../modes/interactive/theme/theme.ts";
+import type { WorkRetentionOptions, WorkRunLease } from "../../utils/work-directory.ts";
 import type { BashResult } from "../bash-executor.ts";
 import type { MemoryProvider as ContextMemoryProvider } from "../context/memory-provider-contract.ts";
 import type { EventBus } from "../event-bus.ts";
@@ -1122,6 +1123,23 @@ export interface ResolvedCommand extends RegisteredCommand {
 // biome-ignore lint/suspicious/noConfusingVoidType: void allows bare return statements
 export type ExtensionHandler<E, R = undefined> = (event: E, ctx: ExtensionContext) => Promise<R | void> | R | void;
 
+/** Options for one transient extension work run. */
+export interface ExtensionWorkRunOptions {
+	runId?: string;
+	retention?: Omit<WorkRetentionOptions, "now">;
+}
+
+/**
+ * Namespaced extension-owned storage. Paths are pure and do not create directories. Transient work
+ * must be acquired through a lease, which the host releases automatically on unload or failed load.
+ */
+export interface ExtensionStorage {
+	readonly namespace: string;
+	readonly stateDir: string;
+	readonly cacheDir: string;
+	acquireWorkRun(options?: ExtensionWorkRunOptions): WorkRunLease;
+}
+
 /**
  * Report for an out-of-process managed lane (e.g. a tmux worker) at dispatch or terminal. `laneId` is
  * a stable identifier the CALLER chooses (e.g. a tmux job id or slug) and reuses unchanged across both
@@ -1166,6 +1184,12 @@ export interface ManagedLaneEvent {
  * ExtensionAPI passed to extension factory functions.
  */
 export interface ExtensionAPI {
+	/**
+	 * Bind this extension generation to one portable storage namespace. Repeated calls with the same
+	 * namespace return the same view; selecting a second namespace is rejected to prevent sprawl.
+	 */
+	getStorage(namespace: string): ExtensionStorage;
+
 	// =========================================================================
 	// Event Subscription
 	// =========================================================================
@@ -1599,6 +1623,8 @@ export interface ExtensionRuntimeState {
 	/** Memory-provider objects owned by each extension generation, for exact live unload. */
 	memoryProvidersByExtension: Map<string, Set<MemoryProvider>>;
 	contextMemoryProvidersByExtension: Map<string, Set<ContextMemoryProvider>>;
+	/** Active namespace owner, preventing unrelated extensions from silently sharing storage. */
+	extensionStorageOwners: Map<string, Extension>;
 }
 
 /**
@@ -1687,6 +1713,8 @@ export interface Extension {
 	commands: Map<string, RegisteredCommand>;
 	flags: Map<string, ExtensionFlag>;
 	shortcuts: Map<KeyId, ExtensionShortcut>;
+	/** Canonical storage view requested by this extension generation, if any. */
+	storage?: ExtensionStorage;
 	/** Optional lazy loader for tool-only extensions loaded on first tool use. */
 	lazy?: {
 		loaded: boolean;

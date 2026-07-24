@@ -1,0 +1,7 @@
+[task_steps] success
+task_steps update recorded.
+Task steps (3 visible, 3 tracked):
+- [>] step-1 Implement the native panel (high, implementer)
+- [ ] step-2 Run focused tests
+- [!] step-3 Verify worker review state
+Reminder: a completed step has no evidence attached; attach evidence via update before treating it as verified.

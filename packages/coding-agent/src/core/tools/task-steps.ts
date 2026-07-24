@@ -16,6 +16,12 @@ import {
 	type TaskStepsState,
 	updateTaskStep,
 } from "../tasks/task-state.ts";
+import {
+	emptyOrchestrationCall,
+	OrchestrationPanelComponent,
+	type OrchestrationPanelModel,
+	taskStepPanelRow,
+} from "./orchestration-panel.ts";
 
 const statusSchema = Type.Union([
 	Type.Literal("pending"),
@@ -179,6 +185,75 @@ function errorResult(action: TaskStepsAction, error: string, state?: TaskStepsSt
 	};
 }
 
+function taskStepsPanelModel(details: TaskStepsToolDetails, expanded: boolean): OrchestrationPanelModel {
+	const state = details.state;
+	if (!state) {
+		return {
+			label: "task steps",
+			action: details.action,
+			status: details.error ? "error" : "idle",
+			emptyText: details.error ?? "No checklist state.",
+		};
+	}
+	const active = state.steps.filter((step) => step.status === "in_progress");
+	const blocked = state.steps.filter((step) => step.status === "blocked");
+	const pending = state.steps.filter((step) => step.status === "pending");
+	const completed = state.steps.filter((step) => step.status === "completed");
+	const cancelled = state.steps.filter((step) => step.status === "cancelled");
+	const open = [...active, ...blocked, ...pending];
+	const terminal = details.showCompleted ? [...completed, ...cancelled] : [];
+	const candidates = [...open, ...terminal];
+	const limit = expanded ? 24 : 8;
+	const rows = candidates.slice(0, limit).map(taskStepPanelRow);
+	const archivedDone = state.archive.completed + state.archive.cancelled;
+	const done = completed.length + state.archive.completed;
+	const summary = [
+		active.length ? `${active.length} working` : undefined,
+		`${open.length} open`,
+		`${done} done`,
+		blocked.length ? `${blocked.length} blocked` : undefined,
+		archivedDone ? `${archivedDone} archived` : undefined,
+	].filter((value): value is string => value !== undefined);
+	const notices = [];
+	if (!details.showCompleted && completed.length + cancelled.length > 0) {
+		notices.push({
+			status: "info" as const,
+			text: `${completed.length + cancelled.length} finished step${completed.length + cancelled.length === 1 ? "" : "s"} hidden`,
+		});
+	}
+	if (details.duplicateOfStepId) {
+		notices.push({ status: "info" as const, text: "Duplicate open step ignored." });
+	}
+	if (details.demotedStepIds?.length) {
+		notices.push({
+			status: "info" as const,
+			text: `${details.demotedStepIds.length} previous working step${details.demotedStepIds.length === 1 ? "" : "s"} returned to pending.`,
+		});
+	}
+	if (details.verificationNudgeNeeded) {
+		notices.push({ status: "warning" as const, text: "Completed work still needs attached evidence." });
+	}
+	const status = details.error
+		? "error"
+		: blocked.length > 0
+			? "warning"
+			: active.length > 0
+				? "running"
+				: open.length === 0 && state.steps.length > 0
+					? "success"
+					: "idle";
+	return {
+		label: "task steps",
+		action: details.action,
+		status,
+		summary,
+		rows,
+		notices,
+		emptyText: state.steps.length === 0 ? "No tracked steps." : "All open steps are done.",
+		hiddenRowCount: Math.max(0, candidates.length - rows.length),
+	};
+}
+
 export function createTaskStepsToolDefinition(deps: TaskStepsToolDependencies): ToolDefinition {
 	const now = deps.now ?? (() => new Date().toISOString());
 	return {
@@ -197,6 +272,28 @@ export function createTaskStepsToolDefinition(deps: TaskStepsToolDependencies): 
 			"Use goal for the durable goal ledger and delegate/delegate_status for worker lanes; do not emulate background execution inside task_steps.",
 		],
 		parameters: taskStepsSchema,
+		renderShell: "self",
+		renderCall() {
+			return emptyOrchestrationCall();
+		},
+		renderResult(result, { expanded, isPartial }, theme) {
+			if (isPartial) {
+				return new OrchestrationPanelComponent(theme, {
+					label: "task steps",
+					action: "updating",
+					status: "running",
+				});
+			}
+			const details = result.details as TaskStepsToolDetails | undefined;
+			if (!details) {
+				return new OrchestrationPanelComponent(theme, {
+					label: "task steps",
+					status: "error",
+					emptyText: "No task-step details were returned.",
+				});
+			}
+			return new OrchestrationPanelComponent(theme, taskStepsPanelModel(details, expanded), expanded);
+		},
 		async execute(_toolCallId, input: TaskStepsToolInput) {
 			const timestamp = now();
 			const current = deps.getTaskStepsState();

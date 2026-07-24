@@ -2,7 +2,13 @@ import { existsSync, mkdirSync, mkdtempSync, rmSync, utimesSync, writeFileSync }
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { afterEach, describe, expect, it } from "vitest";
-import { acquireWorkRun, getWorkRunDir, pruneWorkTenant, WORK_RUN_MANIFEST_FILE } from "../src/utils/work-directory.ts";
+import {
+	acquireWorkRun,
+	boundedWorkRetention,
+	getWorkRunDir,
+	pruneWorkTenant,
+	WORK_RUN_MANIFEST_FILE,
+} from "../src/utils/work-directory.ts";
 
 const tempDirs: string[] = [];
 
@@ -17,6 +23,25 @@ afterEach(() => {
 });
 
 describe("work directory", () => {
+	it("clamps delegated retention requests to the harness ceiling", () => {
+		expect(
+			boundedWorkRetention({
+				maxAgeMs: Number.MAX_SAFE_INTEGER,
+				maxRuns: Number.MAX_SAFE_INTEGER,
+				maxTotalBytes: Number.MAX_SAFE_INTEGER,
+				maxScannedEntries: Number.MAX_SAFE_INTEGER,
+				maxScannedRuns: Number.MAX_SAFE_INTEGER,
+			}),
+		).toEqual({
+			maxAgeMs: 30 * 24 * 60 * 60 * 1000,
+			maxRuns: 64,
+			maxTotalBytes: 512 * 1024 * 1024,
+			maxScannedEntries: 100_000,
+			maxScannedRuns: 10_000,
+			now: undefined,
+		});
+	});
+
 	it("creates the strict category/tenant/run hierarchy with an ownership manifest", () => {
 		const agentDir = createAgentDir();
 		const lease = acquireWorkRun({

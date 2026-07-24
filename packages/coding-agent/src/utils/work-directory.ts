@@ -75,6 +75,30 @@ export interface WorkRetentionOptions {
 	now?: number;
 }
 
+/**
+ * Clamp caller-selected retention to the harness ceiling. Consumers may retain less, but cannot turn
+ * a managed work tenant into an unbounded artifact store by raising or disabling these limits.
+ */
+export function boundedWorkRetention(options: WorkRetentionOptions = {}): WorkRetentionOptions {
+	return {
+		maxAgeMs: Math.min(nonNegativeLimit(options.maxAgeMs, DEFAULT_MAX_AGE_MS), DEFAULT_MAX_AGE_MS),
+		maxRuns: Math.min(nonNegativeLimit(options.maxRuns, DEFAULT_MAX_RUNS), DEFAULT_MAX_RUNS),
+		maxTotalBytes: Math.min(
+			nonNegativeLimit(options.maxTotalBytes, DEFAULT_MAX_TOTAL_BYTES),
+			DEFAULT_MAX_TOTAL_BYTES,
+		),
+		maxScannedEntries: Math.min(
+			nonNegativeLimit(options.maxScannedEntries, DEFAULT_MAX_SCANNED_ENTRIES),
+			DEFAULT_MAX_SCANNED_ENTRIES,
+		),
+		maxScannedRuns: Math.min(
+			nonNegativeLimit(options.maxScannedRuns, DEFAULT_MAX_SCANNED_RUNS),
+			DEFAULT_MAX_SCANNED_RUNS,
+		),
+		now: options.now,
+	};
+}
+
 export interface AcquireWorkRunOptions {
 	agentDir: string;
 	category: string;
@@ -99,7 +123,7 @@ function nonNegativeLimit(value: number | undefined, fallback: number): number {
 	return value !== undefined && Number.isFinite(value) && value >= 0 ? Math.floor(value) : fallback;
 }
 
-function assertPortableSegment(label: string, value: string): void {
+export function assertPortablePathSegment(label: string, value: string): void {
 	if (!SEGMENT_PATTERN.test(value) || value.endsWith(".")) {
 		throw new Error(`${label} must be a lowercase portable path segment (1-64 characters)`);
 	}
@@ -337,15 +361,15 @@ export function getWorkRoot(agentDir: string): string {
 }
 
 export function getWorkTenantDir(agentDir: string, category: string, tenant: string): string {
-	assertPortableSegment("Work category", category);
-	assertPortableSegment("Work tenant", tenant);
+	assertPortablePathSegment("Work category", category);
+	assertPortablePathSegment("Work tenant", tenant);
 	return join(getWorkRoot(agentDir), category, tenant);
 }
 
 export function getWorkRunDir(agentDir: string, category: string, tenant: string, runId: string): string {
-	assertPortableSegment("Work category", category);
-	assertPortableSegment("Work tenant", tenant);
-	assertPortableSegment("Work run id", runId);
+	assertPortablePathSegment("Work category", category);
+	assertPortablePathSegment("Work tenant", tenant);
+	assertPortablePathSegment("Work run id", runId);
 	return join(getWorkRoot(agentDir), category, tenant, runId);
 }
 
@@ -430,9 +454,9 @@ export function getProcessWorkRun(agentDir: string, category: string, tenant: st
 export function acquireWorkRun(options: AcquireWorkRunOptions): WorkRunLease {
 	const now = options.now ?? Date.now();
 	const runId = options.runId ?? createWorkRunId(now);
-	assertPortableSegment("Work category", options.category);
-	assertPortableSegment("Work tenant", options.tenant);
-	assertPortableSegment("Work run id", runId);
+	assertPortablePathSegment("Work category", options.category);
+	assertPortablePathSegment("Work tenant", options.tenant);
+	assertPortablePathSegment("Work run id", runId);
 	const tenantDir = ensureTenantDirectory(options.agentDir, options.category, options.tenant);
 	const runDir = join(tenantDir, runId);
 	let created = false;

@@ -1,0 +1,6 @@
+[task steps]  1 working · 2 open · 4 done
+  ● Implement the native panel  high priority · @implementer
+  ○ Run focused tests
+  ! Verify worker review state
+
+π teams  ● implementer  ·  ◌ verifier  ·  /teams

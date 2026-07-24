@@ -2,6 +2,12 @@ import { type Static, Type } from "typebox";
 import type { WorkerClaim } from "../autonomy/contracts.ts";
 import type { LaneRecord } from "../autonomy/lane-tracker.ts";
 import type { ToolDefinition } from "../extensions/types.ts";
+import {
+	emptyOrchestrationCall,
+	OrchestrationPanelComponent,
+	type OrchestrationPanelModel,
+	type OrchestrationPanelRow,
+} from "./orchestration-panel.ts";
 
 const schema = Type.Object(
 	{
@@ -18,6 +24,34 @@ const schema = Type.Object(
 	{ additionalProperties: false },
 );
 type Input = Static<typeof schema>;
+
+export interface DelegateStatusLaneView {
+	laneId: string;
+	type: LaneRecord["type"];
+	status: LaneRecord["status"];
+	reasonCode?: string;
+	unreviewed: boolean;
+}
+
+export interface DelegateStatusToolDetails {
+	kind: "overview" | "lane" | "review" | "error";
+	count?: number;
+	queued?: number;
+	running?: number;
+	terminal?: number;
+	unreviewedCount?: number;
+	unreviewedLaneIds?: readonly string[];
+	lanes?: readonly DelegateStatusLaneView[];
+	laneId?: string;
+	status?: LaneRecord["status"];
+	unreviewed?: boolean;
+	reviewed?: boolean;
+	reviewedAt?: string;
+	reason?: string;
+	claimSummary?: string;
+	changedFiles?: readonly string[];
+	blockers?: readonly string[];
+}
 
 export type AcknowledgeWorkerReviewResult =
 	| { ok: true; requestId: string; reviewedAt: string }
@@ -63,6 +97,96 @@ function formatRecord(record: LaneRecord, claim: WorkerClaim | undefined): strin
 	return lines.join("\n").slice(0, 16 * 1024);
 }
 
+function laneView(record: LaneRecord, claim: WorkerClaim | undefined): DelegateStatusLaneView {
+	return {
+		laneId: record.laneId,
+		type: record.type,
+		status: record.status,
+		...(record.reasonCode ? { reasonCode: record.reasonCode } : {}),
+		unreviewed: isUnreviewed(claim),
+	};
+}
+
+function lanePanelRow(view: DelegateStatusLaneView, details?: DelegateStatusToolDetails): OrchestrationPanelRow {
+	const meta = [view.type, view.reasonCode, view.unreviewed ? "review required" : undefined].filter(
+		(value): value is string => value !== undefined,
+	);
+	const expandedDetails = [
+		details?.claimSummary ? `untrusted claim: ${details.claimSummary}` : undefined,
+		details?.changedFiles?.length ? `changed: ${details.changedFiles.join(", ")}` : undefined,
+		...(details?.blockers ?? []).map((blocker) => `blocker: ${blocker}`),
+	].filter((value): value is string => value !== undefined);
+	return {
+		status: view.status,
+		label: view.laneId,
+		meta,
+		details: expandedDetails,
+	};
+}
+
+function delegateStatusPanelModel(details: DelegateStatusToolDetails | undefined): OrchestrationPanelModel {
+	if (!details) {
+		return {
+			label: "workers",
+			action: "status",
+			status: "idle",
+			emptyText: "No structured worker status was retained.",
+		};
+	}
+	if (details.kind === "error") {
+		return {
+			label: "workers",
+			action: "status",
+			status: "error",
+			emptyText: details.reason ?? "Worker status is unavailable.",
+		};
+	}
+	if (details.kind === "review") {
+		return {
+			label: "workers",
+			action: details.reviewed ? "reviewed" : "review required",
+			status: details.reviewed ? "success" : "warning",
+			rows: details.laneId
+				? [
+						{
+							status: details.reviewed ? "reviewed" : "blocked",
+							label: details.laneId,
+							meta: details.reviewedAt ? [`reviewed ${details.reviewedAt}`] : undefined,
+						},
+					]
+				: undefined,
+			emptyText: details.reason,
+		};
+	}
+	const lanes = details.lanes ?? [];
+	const rows = lanes.map((view) => lanePanelRow(view, details.kind === "lane" ? details : undefined));
+	const running = details.running ?? lanes.filter((lane) => lane.status === "running").length;
+	const queued = details.queued ?? lanes.filter((lane) => lane.status === "queued").length;
+	const terminal = details.terminal ?? lanes.length - running - queued;
+	const unreviewed = details.unreviewedCount ?? lanes.filter((lane) => lane.unreviewed).length;
+	return {
+		label: "workers",
+		action: details.kind === "lane" ? "lane" : "status",
+		status: unreviewed > 0 ? "warning" : running + queued > 0 ? "running" : lanes.length > 0 ? "success" : "idle",
+		summary: [
+			running ? `${running} running` : undefined,
+			queued ? `${queued} queued` : undefined,
+			terminal ? `${terminal} terminal` : undefined,
+		].filter((value): value is string => value !== undefined),
+		rows,
+		emptyText: "No worker lanes.",
+		notices:
+			unreviewed > 0
+				? [
+						{
+							status: "warning",
+							text: `${unreviewed} worker mutation${unreviewed === 1 ? "" : "s"} awaiting parent review.`,
+						},
+					]
+				: undefined,
+	};
+}
+
 export function createDelegateStatusToolDefinition(deps: DelegateStatusDependencies): ToolDefinition {
 	return {
 		name: "delegate_status",
@@ -72,18 +196,36 @@ export function createDelegateStatusToolDefinition(deps: DelegateStatusDependenc
 		promptSnippet:
 			"Inspect delegated workers after a terminal handoff without receiving a late transcript injection; acknowledge unreviewed mutations.",
 		parameters: schema,
+		renderShell: "self",
+		renderCall() {
+			return emptyOrchestrationCall();
+		},
+		renderResult(result, { expanded, isPartial }, theme) {
+			if (isPartial) {
+				return new OrchestrationPanelComponent(theme, {
+					label: "workers",
+					action: "reading",
+					status: "running",
+				});
+			}
+			return new OrchestrationPanelComponent(
+				theme,
+				delegateStatusPanelModel(result.details as DelegateStatusToolDetails | undefined),
+				expanded,
+			);
+		},
 		async execute(_toolCallId, input: Input) {
 			if (input.action === "review") {
 				if (!input.laneId) {
 					return {
 						content: [{ type: "text" as const, text: "review action requires laneId" }],
-						details: { reviewed: false, reason: "missing_lane_id" },
+						details: { kind: "review", reviewed: false, reason: "missing_lane_id" },
 					};
 				}
 				if (!deps.acknowledgeWorkerReview) {
 					return {
 						content: [{ type: "text" as const, text: "review acknowledgement is not available in this session" }],
-						details: { reviewed: false, reason: "review_unsupported" },
+						details: { kind: "review", reviewed: false, reason: "review_unsupported" },
 					};
 				}
 				const outcome = deps.acknowledgeWorkerReview(input.laneId);
@@ -92,7 +234,7 @@ export function createDelegateStatusToolDefinition(deps: DelegateStatusDependenc
 						content: [
 							{ type: "text" as const, text: `review not acknowledged (${input.laneId}): ${outcome.reason}` },
 						],
-						details: { laneId: input.laneId, reviewed: false, reason: outcome.reason },
+						details: { kind: "review", laneId: input.laneId, reviewed: false, reason: outcome.reason },
 					};
 				}
 				return {
@@ -102,7 +244,12 @@ export function createDelegateStatusToolDefinition(deps: DelegateStatusDependenc
 							text: `reviewed ${input.laneId} at ${outcome.reviewedAt} — unreviewed-mutation notice cleared`,
 						},
 					],
-					details: { laneId: input.laneId, reviewed: true, reviewedAt: outcome.reviewedAt },
+					details: {
+						kind: "review",
+						laneId: input.laneId,
+						reviewed: true,
+						reviewedAt: outcome.reviewedAt,
+					},
 				};
 			}
 
@@ -117,15 +264,20 @@ export function createDelegateStatusToolDefinition(deps: DelegateStatusDependenc
 				if (!record) {
 					return {
 						content: [{ type: "text" as const, text: "unknown_worker_lane" }],
-						details: { reason: "unknown_worker_lane" },
+						details: { kind: "error", reason: "unknown_worker_lane" },
 					};
 				}
 				return {
 					content: [{ type: "text" as const, text: formatRecord(record, claims.get(record.laneId)) }],
 					details: {
+						kind: "lane",
 						laneId: record.laneId,
 						status: record.status,
 						unreviewed: isUnreviewed(claims.get(record.laneId)),
+						lanes: [laneView(record, claims.get(record.laneId))],
+						claimSummary: claims.get(record.laneId)?.summary.slice(0, 8_000),
+						changedFiles: claims.get(record.laneId)?.changedFiles.slice(0, 64),
+						blockers: claims.get(record.laneId)?.blockers?.slice(0, 16),
 					},
 				};
 			}
@@ -137,6 +289,9 @@ export function createDelegateStatusToolDefinition(deps: DelegateStatusDependenc
 			const terminal = records.length - queued - running;
 			const recent = recentRecords.map((record) => formatRecord(record, claims.get(record.laneId)));
 			const olderUnreviewed = unreviewedRecords.filter((record) => !recentLaneIds.has(record.laneId));
+			const displayedRecords = [...recentRecords, ...olderUnreviewed.slice(0, 10)].filter(
+				(record, index, all) => all.findIndex((candidate) => candidate.laneId === record.laneId) === index,
+			);
 			const olderUnreviewedText =
 				olderUnreviewed.length > 0
 					? `\n\nOlder unreviewed workers (outside the recent list):\n${olderUnreviewed
@@ -161,12 +316,14 @@ export function createDelegateStatusToolDefinition(deps: DelegateStatusDependenc
 					},
 				],
 				details: {
+					kind: "overview",
 					count: recent.length,
 					queued,
 					running,
 					terminal,
 					unreviewedCount: unreviewedRecords.length,
 					unreviewedLaneIds: unreviewedRecords.map((record) => record.laneId),
+					lanes: displayedRecords.map((record) => laneView(record, claims.get(record.laneId))),
 				},
 			};
 		},

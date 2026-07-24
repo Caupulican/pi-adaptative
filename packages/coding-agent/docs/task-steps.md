@@ -83,6 +83,14 @@ The old user-level task-steps extension also implemented detached jobs, teams, a
 
 Native worker lanes emit terminal handoff notifications and retain bounded results for explicit retrieval; task steps do not poll worker processes or inspect logs to detect completion.
 
+## Native orchestration UI
+
+Interactive sessions render task steps, worker dispatch, and worker status through one shared orchestration panel. The compact tool result shows status and counts first; expanding tool output reveals bounded notes, evidence, changed files, blockers, and untrusted worker claims. Checklist IDs stay out of the collapsed task view.
+
+While work is open, a host-owned panel below the editor combines the active checklist with queued or running `worker` and `tmux-worker` lanes. It updates from session and terminal-lane events, never by polling output. It disappears when no checklist item or worker is active and survives extension reloads without becoming extension-owned state.
+
+The visual contract is deliberately restrained for a keyboard-first terminal: semantic theme colors, status glyphs that remain meaningful without color, no animation, no hard frame, bounded rows, and width-safe truncation. Extension widgets still render independently; reloading or clearing them does not remove the native orchestration panel.
+
 ## Persistence and isolation
 
 Task state is stored only as custom entries in the active `SessionManager`. It follows normal session persistence, resume, and lifecycle behavior. Separate sessions cannot read or mutate each other's checklists, and malformed or future-version snapshots are ignored during restore.

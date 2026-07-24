@@ -29,6 +29,7 @@ import { createEventBus, type EventBus } from "../event-bus.ts";
 import type { ExecOptions } from "../exec.ts";
 import { execCommand } from "../exec.ts";
 import { createSyntheticSourceInfo } from "../source-info.ts";
+import { createExtensionStorage } from "./storage.ts";
 import type {
 	Extension,
 	ExtensionAPI,
@@ -207,6 +208,7 @@ export function createExtensionRuntime(): ExtensionRuntime {
 		string,
 		Set<Parameters<ExtensionRuntime["registerContextMemoryProvider"]>[0]>
 	>();
+	const extensionStorageOwners = new Map<string, Extension>();
 
 	const runtime: ExtensionRuntime = {
 		sendMessage: notInitialized,
@@ -252,6 +254,7 @@ export function createExtensionRuntime(): ExtensionRuntime {
 		},
 		memoryProvidersByExtension,
 		contextMemoryProvidersByExtension,
+		extensionStorageOwners,
 	};
 
 	return runtime;
@@ -267,6 +270,7 @@ function createExtensionAPI(
 	runtime: ExtensionRuntime,
 	cwd: string,
 	eventBus: EventBus,
+	agentDir: string,
 ): ExtensionAPI {
 	// A factory can time out while its promise continues running. Route every later API call through
 	// an extension-generation guard so stale async work cannot register tools, handlers, or providers.
@@ -286,6 +290,38 @@ function createExtensionAPI(
 	});
 
 	const api = {
+		getStorage(namespace: string) {
+			runtime.assertActive();
+			if (extension.storage) {
+				if (extension.storage.namespace !== namespace) {
+					throw new Error(
+						`Extension ${extension.path} already owns storage namespace ${extension.storage.namespace}; cannot also use ${namespace}`,
+					);
+				}
+				return extension.storage;
+			}
+			const storage = createExtensionStorage(agentDir, namespace, runtime.assertActive, (disposer) =>
+				extension.disposers.push(disposer),
+			);
+			const previousOwner = runtime.extensionStorageOwners.get(namespace);
+			if (previousOwner && previousOwner.path !== extension.path) {
+				throw new Error(
+					`Extension storage namespace ${namespace} is already owned by ${previousOwner.path}; ${extension.path} cannot also use it`,
+				);
+			}
+			runtime.extensionStorageOwners.set(namespace, extension);
+			extension.disposers.push(() => {
+				if (runtime.extensionStorageOwners.get(namespace) !== extension) return;
+				if (previousOwner && !inactiveExtensions.has(previousOwner)) {
+					runtime.extensionStorageOwners.set(namespace, previousOwner);
+				} else {
+					runtime.extensionStorageOwners.delete(namespace);
+				}
+			});
+			extension.storage = storage;
+			return storage;
+		},
+
 		// Registration methods - write to extension
 		on(event: string, handler: HandlerFn): void {
 			runtime.assertActive();
@@ -504,7 +540,11 @@ async function runExtensionFactory(
 	}
 }
 
-async function loadExtensionModule(extensionPath: string, opts?: { fresh?: boolean; moduleTimeoutMs?: number }) {
+async function loadExtensionModule(
+	extensionPath: string,
+	transformCacheAgentDir: string | undefined,
+	opts?: { fresh?: boolean; moduleTimeoutMs?: number },
+) {
 	const jiti = createJiti(import.meta.url, {
 		// A fresh jiti instance is created on every call and moduleCache is disabled so each load
 		// evaluates the module from scratch, producing a genuinely new instance with reset top-level
@@ -518,11 +558,11 @@ async function loadExtensionModule(extensionPath: string, opts?: { fresh?: boole
 		// sibling exists next to the extension file) makes unchanged extensions skip Babel on repeat
 		// loads while still isolating module state, and edits are still detected automatically via
 		// the content hash. Do not hand-roll a second in-memory transform cache on top of this: it
-		// would duplicate jiti's own content-hash-validated cache for no benefit.
+		// would duplicate jiti's own content-hash-validated cache for no benefit. Production loaders
+		// pass an explicit agent dir; low-level callers that omit it remain zero-write and skip fsCache.
 		moduleCache: false,
-		fsCache: cacheFile(getAgentDir(), "jiti-transforms"),
+		fsCache: transformCacheAgentDir ? cacheFile(transformCacheAgentDir, "jiti-transforms") : false,
 		// In Bun binary: use virtualModules for bundled packages (no filesystem resolution)
-		// Also disable tryNative so jiti handles ALL imports (not just the entry point)
 		// In Node.js/dev: use aliases to resolve to node_modules paths
 		...(isBunBinary ? { virtualModules: VIRTUAL_MODULES, tryNative: false } : { alias: getAliases() }),
 	});
@@ -670,18 +710,20 @@ export async function loadExtension(
 	cwd: string,
 	eventBus: EventBus,
 	runtime: ExtensionRuntime,
-	opts?: { fresh?: boolean; factoryTimeoutMs?: number; moduleTimeoutMs?: number },
+	opts?: { fresh?: boolean; factoryTimeoutMs?: number; moduleTimeoutMs?: number; agentDir?: string },
 ): Promise<{ extension: Extension | null; error: string | null }> {
 	const resolvedPath = resolvePath(extensionPath, cwd, { normalizeUnicodeSpaces: true });
+	const resolvedAgentDir = resolvePath(opts?.agentDir ?? getAgentDir());
+	const transformCacheAgentDir = opts?.agentDir ? resolvedAgentDir : undefined;
 
 	try {
-		const factory = await loadExtensionModule(resolvedPath, opts);
+		const factory = await loadExtensionModule(resolvedPath, transformCacheAgentDir, opts);
 		if (!factory) {
 			return { extension: null, error: `Extension does not export a valid factory function: ${extensionPath}` };
 		}
 
 		const extension = createExtension(extensionPath, resolvedPath);
-		const api = createExtensionAPI(extension, runtime, cwd, eventBus);
+		const api = createExtensionAPI(extension, runtime, cwd, eventBus, resolvedAgentDir);
 		const runtimeSnapshot = snapshotExtensionLoadRuntime(runtime);
 		try {
 			await runExtensionFactory(factory, api, opts?.factoryTimeoutMs);
@@ -739,6 +781,8 @@ function createLazyExtension(
 	cwd: string,
 	eventBus: EventBus,
 	runtime: ExtensionRuntime,
+	agentDir: string,
+	transformCacheAgentDir: string | undefined,
 	lazyTools: LazyToolManifest[],
 ): Extension {
 	const extension = createExtension(extensionPath, resolvedPath);
@@ -751,11 +795,11 @@ function createLazyExtension(
 		if (extension.lazy?.loading) return extension.lazy.loading;
 
 		const loading = (async () => {
-			const factory = await loadExtensionModule(resolvedPath);
+			const factory = await loadExtensionModule(resolvedPath, transformCacheAgentDir);
 			if (!factory) {
 				throw new Error(`Extension does not export a valid factory function: ${extensionPath}`);
 			}
-			const api = createExtensionAPI(extension, runtime, cwd, eventBus);
+			const api = createExtensionAPI(extension, runtime, cwd, eventBus, agentDir);
 			const runtimeSnapshot = snapshotExtensionLoadRuntime(runtime);
 			try {
 				await runExtensionFactory(factory, api);
@@ -812,11 +856,12 @@ export async function loadExtensionFromFactory(
 	eventBus: EventBus,
 	runtime: ExtensionRuntime,
 	extensionPath = "<inline>",
-	options: { factoryTimeoutMs?: number } = {},
+	options: { factoryTimeoutMs?: number; agentDir?: string } = {},
 ): Promise<Extension> {
 	const extension = createExtension(extensionPath, extensionPath);
 	const resolvedCwd = resolvePath(cwd);
-	const api = createExtensionAPI(extension, runtime, resolvedCwd, eventBus);
+	const resolvedAgentDir = resolvePath(options.agentDir ?? getAgentDir());
+	const api = createExtensionAPI(extension, runtime, resolvedCwd, eventBus, resolvedAgentDir);
 	const runtimeSnapshot = snapshotExtensionLoadRuntime(runtime);
 	try {
 		await runExtensionFactory(factory, api, options.factoryTimeoutMs);
@@ -835,11 +880,14 @@ export async function loadExtensions(
 	paths: Array<string | ExtensionLoadSpec>,
 	cwd: string,
 	eventBus?: EventBus,
+	options: { agentDir?: string } = {},
 ): Promise<LoadExtensionsResult> {
 	const extensions: Extension[] = [];
 	const errors: Array<{ path: string; error: string }> = [];
 	const resolvedCwd = resolvePath(cwd);
 	const resolvedEventBus = eventBus ?? createEventBus();
+	const resolvedAgentDir = resolvePath(options.agentDir ?? getAgentDir());
+	const transformCacheAgentDir = options.agentDir ? resolvedAgentDir : undefined;
 	const runtime = createExtensionRuntime();
 
 	for (const spec of paths) {
@@ -854,12 +902,29 @@ export async function loadExtensions(
 		// for the whole extension set. Lazy tool manifests skip import entirely here.
 		await yieldToEventLoop();
 		if (lazyTools?.length) {
-			extensions.push(createLazyExtension(extPath, resolvedPath, resolvedCwd, resolvedEventBus, runtime, lazyTools));
+			extensions.push(
+				createLazyExtension(
+					extPath,
+					resolvedPath,
+					resolvedCwd,
+					resolvedEventBus,
+					runtime,
+					resolvedAgentDir,
+					transformCacheAgentDir,
+					lazyTools,
+				),
+			);
 			await yieldToEventLoop();
 			continue;
 		}
 
-		const { extension, error } = await loadExtension(extPath, resolvedCwd, resolvedEventBus, runtime);
+		const { extension, error } = await loadExtension(
+			extPath,
+			resolvedCwd,
+			resolvedEventBus,
+			runtime,
+			options.agentDir ? { agentDir: resolvedAgentDir } : undefined,
+		);
 		await yieldToEventLoop();
 
 		if (error) {
@@ -1096,5 +1161,5 @@ export async function discoverAndLoadExtensions(
 		addPaths([resolved]);
 	}
 
-	return loadExtensions(allPaths, resolvedCwd, eventBus);
+	return loadExtensions(allPaths, resolvedCwd, eventBus, { agentDir: resolvedAgentDir });
 }

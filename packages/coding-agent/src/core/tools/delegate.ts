@@ -3,6 +3,12 @@ import type { LaneRecord } from "../autonomy/lane-tracker.ts";
 import type { WorkerDelegationRequest } from "../delegation/worker-delegation-request.ts";
 import type { WorkerRunOutcome } from "../delegation/worker-runner.ts";
 import type { ToolDefinition } from "../extensions/types.ts";
+import {
+	emptyOrchestrationCall,
+	OrchestrationPanelComponent,
+	type OrchestrationPanelModel,
+	type OrchestrationRowStatus,
+} from "./orchestration-panel.ts";
 
 function createDelegateSchema() {
 	return Type.Object(
@@ -36,10 +42,14 @@ export interface DelegateRunOutcome {
 export interface DelegateToolDetails {
 	started: boolean;
 	skipReason?: string;
+	profileId?: string;
 	laneId?: string;
-	status?: string;
+	status?: LaneRecord["status"];
+	reasonCode?: string;
 	accepted?: boolean;
 	costUsd?: number;
+	summary?: string;
+	blockers?: readonly string[];
 }
 
 export interface DelegateToolDependencies {
@@ -51,7 +61,7 @@ export interface DelegateToolDependencies {
 }
 
 const DELEGATE_DESCRIPTION_CORE =
-	"Delegate one bounded, self-contained task to an isolated worker lane with classified workspace tools. The owner-authored profile fixes memory, process, model, thinking, and tool authority; writes additionally require workerDelegation.writeEnabled and non-empty writePaths, with every successful path reported for parent review. Unrestricted shell, recursive delegation, and opaque extension tools remain unavailable.";
+	"Delegate one bounded, self-contained task to an isolated worker lane with classified workspace tools. Workers are read-only by default. The owner-authored profile fixes memory, process, model, thinking, and tool authority; writes additionally require that workerDelegation.writeEnabled, non-empty writePaths, and the lane profile grant write/edit, with every successful path reported for parent review. Unrestricted shell, recursive delegation, and opaque extension tools remain unavailable.";
 
 // Synchronous wiring: no `deps.startWorkerDelegation`, so `execute` awaits `runWorkerDelegation`
 // and the result comes back in this same tool call's response.
@@ -79,6 +89,62 @@ const ASYNC_DELEGATE_PROMPT_GUIDELINES = [
 	"If delegate_status reports blockers, resolve them yourself or ask the user; do not re-delegate the same task blindly.",
 ];
 
+function delegatePanelModel(details: DelegateToolDetails | undefined): OrchestrationPanelModel {
+	if (!details) {
+		return {
+			label: "workers",
+			action: "dispatch",
+			status: "idle",
+			emptyText: "No structured worker details were retained.",
+		};
+	}
+	if (!details.started) {
+		return {
+			label: "workers",
+			action: "dispatch skipped",
+			status: "warning",
+			emptyText: details.skipReason ?? "The worker was not started.",
+		};
+	}
+	const laneStatus = details.status ?? "queued";
+	const rowStatus: OrchestrationRowStatus = laneStatus;
+	const meta = [
+		details.profileId ? `profile ${details.profileId}` : undefined,
+		details.reasonCode,
+		details.accepted === undefined ? undefined : details.accepted ? "accepted" : "not accepted",
+		details.costUsd === undefined ? undefined : `$${details.costUsd.toFixed(4)}`,
+	].filter((value): value is string => value !== undefined);
+	const detailsLines = [
+		details.summary ? `untrusted claim: ${details.summary}` : undefined,
+		...(details.blockers ?? []).map((blocker) => `blocker: ${blocker}`),
+	].filter((value): value is string => value !== undefined);
+	const active = laneStatus === "queued" || laneStatus === "running";
+	return {
+		label: "workers",
+		action: active ? "dispatched" : "completed",
+		status: active
+			? "running"
+			: laneStatus === "succeeded" && details.accepted !== false
+				? "success"
+				: laneStatus === "failed"
+					? "error"
+					: "warning",
+		summary: active ? ["terminal handoff will wake this session"] : undefined,
+		rows: [
+			{
+				status: rowStatus,
+				label: details.laneId ?? "worker lane",
+				meta,
+				details: detailsLines,
+			},
+		],
+		notices:
+			details.accepted === false
+				? [{ status: "warning", text: "Worker output was not accepted; inspect and verify before use." }]
+				: undefined,
+	};
+}
+
 export function createDelegateToolDefinition(deps: DelegateToolDependencies): ToolDefinition {
 	const isAsyncWiring = deps.startWorkerDelegation !== undefined;
 	const profileGuideline =
@@ -97,6 +163,24 @@ export function createDelegateToolDefinition(deps: DelegateToolDependencies): To
 			...(isAsyncWiring ? ASYNC_DELEGATE_PROMPT_GUIDELINES : SYNCHRONOUS_DELEGATE_PROMPT_GUIDELINES),
 		],
 		parameters: delegateSchema,
+		renderShell: "self",
+		renderCall() {
+			return emptyOrchestrationCall();
+		},
+		renderResult(result, { expanded, isPartial }, theme) {
+			if (isPartial) {
+				return new OrchestrationPanelComponent(theme, {
+					label: "workers",
+					action: "dispatching",
+					status: "running",
+				});
+			}
+			return new OrchestrationPanelComponent(
+				theme,
+				delegatePanelModel(result.details as DelegateToolDetails | undefined),
+				expanded,
+			);
+		},
 		async execute(
 			_toolCallId,
 			input: DelegateToolInput,
@@ -113,7 +197,7 @@ export function createDelegateToolDefinition(deps: DelegateToolDependencies): To
 				if (!started.started) {
 					return {
 						content: [{ type: "text" as const, text: `delegate skipped: ${started.skipReason}` }],
-						details: { started: false, skipReason: started.skipReason },
+						details: { started: false, skipReason: started.skipReason, profileId: input.profileId },
 					};
 				}
 				return {
@@ -123,7 +207,12 @@ export function createDelegateToolDefinition(deps: DelegateToolDependencies): To
 							text: `delegate started (${started.record.status}) — wait for its terminal handoff, then retrieve once with delegate_status`,
 						},
 					],
-					details: { started: true, laneId: started.record.laneId, status: started.record.status },
+					details: {
+						started: true,
+						profileId: input.profileId,
+						laneId: started.record.laneId,
+						status: started.record.status,
+					},
 				};
 			}
 			const run = await deps.runWorkerDelegation(request);
@@ -131,7 +220,7 @@ export function createDelegateToolDefinition(deps: DelegateToolDependencies): To
 				const reason = run.skipReason ?? "unknown";
 				return {
 					content: [{ type: "text" as const, text: `delegate skipped: ${reason}` }],
-					details: { started: false, skipReason: reason },
+					details: { started: false, skipReason: reason, profileId: input.profileId },
 				};
 			}
 
@@ -156,10 +245,14 @@ export function createDelegateToolDefinition(deps: DelegateToolDependencies): To
 				content: [{ type: "text" as const, text: lines.join("\n") }],
 				details: {
 					started: true,
+					profileId: input.profileId,
 					laneId: run.record?.laneId,
 					status: run.record?.status,
+					reasonCode: run.record?.reasonCode,
 					accepted: outcome?.accepted,
 					costUsd: outcome?.costUsd,
+					summary: outcome?.claim.summary.slice(0, 8_000),
+					blockers: outcome?.claim.blockers?.slice(0, 16),
 				},
 			};
 		},

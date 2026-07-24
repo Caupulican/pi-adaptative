@@ -53,6 +53,13 @@ function baseDeps(overrides: Partial<DoctorDeps> = {}): DoctorDeps {
 			}),
 			installGuide: () => ["guide line 1", "guide line 2"],
 		},
+		inspectAgentDirectoryLayout: () => ({
+			agentDir: "/agent",
+			scannedEntries: 0,
+			unexpectedEntryCount: 0,
+			unexpectedEntries: [],
+			truncated: false,
+		}),
 		...overrides,
 	};
 }
@@ -258,6 +265,28 @@ describe("runDoctor: overall report shape", () => {
 		expect(report.checks.map((c) => c.id).sort()).toEqual(["fff-node", "ollama", "python", "ripgrep"]);
 	});
 
+	it("surfaces unexpected root entries as a bounded warning without changing tool checks", async () => {
+		const report = await runDoctor(
+			baseDeps({
+				inspectAgentDirectoryLayout: () => ({
+					agentDir: "/agent",
+					scannedEntries: 3,
+					unexpectedEntryCount: 2,
+					unexpectedEntries: ["external-a", "external-b"],
+					truncated: false,
+				}),
+			}),
+		);
+
+		expect(report.checks).toHaveLength(4);
+		expect(report.notices).toEqual([
+			expect.objectContaining({
+				id: "agent-directory-layout",
+				detail: expect.stringContaining("external-a, external-b"),
+			}),
+		]);
+	});
+
 	it("uses the real tools-manager/OllamaRuntime wiring by default (no deps injected)", async () => {
 		// Just proves runDoctor is callable with no args -- the doctor CLI
 		// command and the update preflight both rely on this default wiring.
@@ -280,6 +309,16 @@ describe("formatDoctorReport", () => {
 		expect(text).toContain("[MISSING] Tool B");
 		expect(text).toContain("do this");
 		expect(text).toContain("then that");
+	});
+
+	it("formats layout notices as warnings rather than missing tools", () => {
+		const text = formatDoctorReport({
+			checks: [],
+			notices: [{ id: "layout", label: "Agent directory layout", detail: "unexpected root entry: old-data" }],
+		});
+
+		expect(text).toContain("[WARN] Agent directory layout");
+		expect(text).not.toContain("[MISSING]");
 	});
 });
 
