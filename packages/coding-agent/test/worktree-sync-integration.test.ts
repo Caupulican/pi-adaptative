@@ -357,7 +357,7 @@ describe("worktree-sync against real git", () => {
 		const result = await landLane(deps, {
 			laneKey: "gate-drift",
 			gate: "on",
-			gateCommand: 'git commit --allow-empty -m "gate mutated lane"',
+			gateCommand: "git commit --allow-empty -m gate-mutated-lane",
 		});
 		expect(result.code).toBe("lane_changed_during_gate");
 		expect(await git(repo, "rev-parse", "main")).toBe(mainBefore);
