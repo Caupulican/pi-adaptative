@@ -113,6 +113,7 @@ import {
 	type ThemeColor,
 	theme,
 } from "./theme/theme.ts";
+import * as usageCommands from "./usage-commands.ts";
 
 const TUI_HISTORY_RELOAD_CHUNK_SIZE = 20;
 const TUI_LIVE_HISTORY_MAX_COMPONENTS = 260;
@@ -1805,7 +1806,12 @@ export class InteractiveMode {
 				this.editor.setText("");
 				return;
 			}
-			if (text === "/usage" || text === "/cost") {
+			if (text === "/usage") {
+				this.handleUsageMenuCommand();
+				this.editor.setText("");
+				return;
+			}
+			if (text === "/cost") {
 				this.handleUsageCommand();
 				this.editor.setText("");
 				return;
@@ -3992,6 +3998,16 @@ export class InteractiveMode {
 			chatContainer: this.chatContainer,
 			ui: this.ui,
 			getCurrentAutoLearnSettings: () => this.getCurrentAutoLearnSettings(),
+		});
+	}
+
+	private handleUsageMenuCommand(): void {
+		usageCommands.handleUsageMenuCommand({
+			session: this.session,
+			showSelector: (create) => this.showSelector(create),
+			showStatus: (message) => this.showStatus(message),
+			showError: (message) => this.showError(message),
+			showUsageReport: () => this.handleUsageCommand(),
 		});
 	}
 

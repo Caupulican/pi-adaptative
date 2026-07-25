@@ -3,6 +3,7 @@
 ### Added
 
 - Added a provider-neutral shell search guard that rejects broad `rg`/recursive `grep`/`find`/`fd` scans before execution and supports an explicit managed-file override with bounded disk use.
+- Added an OpenAI subscription `/usage` flow for inspecting earned reset passes, reviewing reset details, confirming redemption, retrying idempotently, and refreshing remaining availability.
 
 ### Fixed
 

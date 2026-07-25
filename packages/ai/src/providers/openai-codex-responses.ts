@@ -43,6 +43,11 @@ import { formatProviderError, normalizeProviderError } from "../utils/error-body
 import { AssistantMessageEventStream } from "../utils/event-stream.ts";
 import { headersToRecord } from "../utils/headers.ts";
 import { StreamingLineDecoder } from "../utils/streaming-lines.ts";
+import {
+	buildOpenAICodexHeaders,
+	DEFAULT_OPENAI_CODEX_BASE_URL,
+	requireOpenAICodexAccountId,
+} from "./openai-codex-auth.ts";
 import { clampOpenAIPromptCacheKey } from "./openai-prompt-cache.ts";
 import {
 	buildResponsesInstructions,
@@ -57,8 +62,6 @@ import { buildBaseOptions } from "./simple-options.ts";
 // Configuration
 // ============================================================================
 
-const DEFAULT_CODEX_BASE_URL = "https://chatgpt.com/backend-api";
-const JWT_CLAIM_PATH = "https://api.openai.com/auth" as const;
 const DEFAULT_MAX_RETRIES = 0;
 const BASE_DELAY_MS = 1000;
 const DEFAULT_MAX_RETRY_DELAY_MS = 60_000;
@@ -295,7 +298,7 @@ export const streamOpenAICodexResponses: StreamFunction<"openai-codex-responses"
 				throw new Error(`No API key for provider: ${model.provider}`);
 			}
 
-			const accountId = extractAccountId(apiKey);
+			const accountId = requireOpenAICodexAccountId(apiKey);
 			let body: RequestBody | undefined;
 			if (options?.onPayload) {
 				body = buildRequestBody(model, context, options);
@@ -444,7 +447,7 @@ export const streamOpenAICodexResponses: StreamFunction<"openai-codex-responses"
 							sseHeaders = buildSSEHeaders(
 								model.headers,
 								options?.headers,
-								extractAccountId(replacementKey),
+								requireOpenAICodexAccountId(replacementKey),
 								replacementKey,
 								options?.sessionId,
 								model.openaiResponsesLite === true,
@@ -667,7 +670,7 @@ function resolveCodexServiceTier(
 }
 
 function resolveCodexUrl(baseUrl?: string): string {
-	const raw = baseUrl && baseUrl.trim().length > 0 ? baseUrl : DEFAULT_CODEX_BASE_URL;
+	const raw = baseUrl && baseUrl.trim().length > 0 ? baseUrl : DEFAULT_OPENAI_CODEX_BASE_URL;
 	const normalized = raw.replace(/\/+$/, "");
 	if (normalized.endsWith("/codex/responses")) return normalized;
 	if (normalized.endsWith("/codex")) return `${normalized}/responses`;
@@ -1735,19 +1738,6 @@ async function parseErrorResponse(response: Response): Promise<{ message: string
 // Auth & Headers
 // ============================================================================
 
-function extractAccountId(token: string): string {
-	try {
-		const parts = token.split(".");
-		if (parts.length !== 3) throw new Error("Invalid token");
-		const payload = JSON.parse(atob(parts[1]));
-		const accountId = payload?.[JWT_CLAIM_PATH]?.chatgpt_account_id;
-		if (!accountId) throw new Error("No account ID in token");
-		return accountId;
-	} catch {
-		throw new Error("Failed to extract accountId from token");
-	}
-}
-
 function createCodexRequestId(): string {
 	if (typeof globalThis.crypto?.randomUUID === "function") {
 		return globalThis.crypto.randomUUID();
@@ -1761,16 +1751,14 @@ function buildBaseCodexHeaders(
 	accountId: string,
 	token: string,
 ): Headers {
-	const headers = new Headers(initHeaders);
-	for (const [key, value] of Object.entries(additionalHeaders || {})) {
-		headers.set(key, value);
-	}
-	headers.set("Authorization", `Bearer ${token}`);
-	headers.set("chatgpt-account-id", accountId);
-	headers.set("originator", "pi");
 	const userAgent = _os ? `pi (${_os.platform()} ${_os.release()}; ${_os.arch()})` : "pi (browser)";
-	headers.set("User-Agent", userAgent);
-	return headers;
+	return buildOpenAICodexHeaders({
+		token,
+		accountId,
+		initial: initHeaders,
+		additional: additionalHeaders,
+		userAgent,
+	});
 }
 
 function buildSSEHeaders(

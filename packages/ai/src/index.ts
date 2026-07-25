@@ -16,6 +16,7 @@ export type { GoogleThinkingLevel } from "./providers/google-shared.ts";
 export type { GoogleVertexOptions } from "./providers/google-vertex.ts";
 export * from "./providers/images/register-builtins.ts";
 export type { MistralOptions } from "./providers/mistral.ts";
+export * from "./providers/openai-codex-account.ts";
 export type {
 	OpenAICodexResponsesOptions,
 	OpenAICodexWebSocketDebugStats,

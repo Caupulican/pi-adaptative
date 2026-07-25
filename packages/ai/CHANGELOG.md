@@ -1,8 +1,13 @@
 ## [Unreleased]
 
+### Added
+
+- Added a bounded OpenAI Codex subscription account client for listing and redeeming earned usage-limit resets.
+
 ### Fixed
 
 - Preserved structured status and error codes from OpenAI Codex stream failures so shared retry policy does not depend on unstable prose.
+- Consolidated ChatGPT account-ID decoding and request-header construction across OAuth, model requests, and subscription account requests.
 
 ## [0.81.40] - 2026-07-24
 
