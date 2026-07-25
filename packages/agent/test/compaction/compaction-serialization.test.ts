@@ -73,6 +73,45 @@ describe("serializeConversation", () => {
 		expect(result).not.toContain("t".repeat(3000));
 	});
 
+	it("should bound large tool-call arguments while preserving call identity", () => {
+		const messages: Message[] = [
+			{
+				role: "assistant",
+				content: [
+					{
+						type: "toolCall",
+						id: "tc1",
+						name: "edit",
+						arguments: {
+							path: "src/large.ts",
+							oldText: "x".repeat(2_000_000),
+							newText: "y".repeat(2_000_000),
+						},
+					},
+				],
+				api: "anthropic",
+				provider: "anthropic",
+				model: "test",
+				usage: {
+					input: 0,
+					output: 0,
+					cacheRead: 0,
+					cacheWrite: 0,
+					totalTokens: 0,
+					cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, total: 0 },
+				},
+				stopReason: "toolUse",
+				timestamp: Date.now(),
+			},
+		];
+
+		const result = serializeConversation(messages);
+
+		expect(result).toContain('edit(path="src/large.ts"');
+		expect(result).toContain("more characters truncated");
+		expect(result.length).toBeLessThan(3000);
+	});
+
 	it("should not truncate assistant or user messages", () => {
 		const longText = "y".repeat(5000);
 		const messages: Message[] = [

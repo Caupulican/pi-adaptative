@@ -9,12 +9,12 @@ import {
 } from "../../src/compaction/index.ts";
 import type { SessionEntry, SessionMessageEntry } from "../../src/session/session-manager.ts";
 
-function createModel(id = "test-model"): Model<"anthropic-messages"> {
+function createModel(id = "test-model", provider = "anthropic"): Model<"anthropic-messages"> {
 	return {
 		id,
 		name: id,
 		api: "anthropic-messages",
-		provider: "anthropic",
+		provider,
 		baseUrl: "https://api.openai.com",
 		reasoning: false,
 		input: ["text"],
@@ -479,6 +479,34 @@ describe("runCompactionLoop", () => {
 		expect(summarizeAndVerify).toHaveBeenCalledTimes(3);
 		expect(summarizeAndVerify.mock.calls[1]?.[0]?.chunked).toBe(true);
 		expect(outcome.cycles).toBe(3);
+	});
+
+	it("does not mutate the compaction plan after a provider transient exhausts request retries", async () => {
+		const message =
+			"Summarization failed: Codex error: An error occurred while processing your request. You can retry your request. Please include request ID req_test.";
+		const summarizeAndVerify = vi.fn(async () => {
+			throw new Error(message);
+		});
+		const buildDeterministicCheckpoint = vi.fn(async () => ({ result: createResult("deterministic") }));
+		const onTransition = vi.fn();
+
+		const outcome = await runCompactionLoop({
+			getBranch: () => branch,
+			measureLiveTokens: () => 1200,
+			shouldCompact: (tokens) => tokens > 1000,
+			getPostApplyMargin: () => 10,
+			getBaseKeepRecentTokens: () => 800,
+			resolveModelAndAuth: async () => ({ model: createModel("codex", "openai-codex") }),
+			summarizeAndVerify,
+			buildDeterministicCheckpoint,
+			apply: async () => {},
+			onTransition,
+		});
+
+		expect(outcome).toEqual({ kind: "failed", reason: message, cycles: 1 });
+		expect(summarizeAndVerify).toHaveBeenCalledTimes(1);
+		expect(buildDeterministicCheckpoint).not.toHaveBeenCalled();
+		expect(onTransition).not.toHaveBeenCalled();
 	});
 
 	it("returns a failed outcome when deterministic checkpoint preparation fails", async () => {

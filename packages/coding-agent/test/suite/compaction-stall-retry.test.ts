@@ -68,6 +68,49 @@ describe("compaction stall retry", () => {
 		expect(harness.sessionManager.getEntries().some((entry) => entry.type === "compaction")).toBe(true);
 	}, 5000);
 
+	it("a transient provider response failure retries the same summarization attempt", async () => {
+		const harness = await createHarness({
+			settings: { retry: { enabled: true, maxRetries: 2, baseDelayMs: 1 } },
+		});
+		harnesses.push(harness);
+
+		await harness.session.prompt("one");
+		await harness.session.prompt("two");
+
+		const recoveredSummary = [
+			"## Active Task",
+			"two",
+			"",
+			"### Mandatory Rules",
+			"(none)",
+			"",
+			"## Working Set",
+			"(none)",
+			"",
+			"## Files",
+			"(none)",
+			"",
+			"## Open Problems",
+			"(none)",
+			"",
+			"## Done",
+			"(none)",
+		].join("\n");
+		const transient = fauxAssistantMessage("", {
+			stopReason: "error",
+			errorMessage:
+				"Codex error: An error occurred while processing your request. You can retry your request. Please include request ID req_test.",
+		});
+		harness.setResponses([transient, fauxAssistantMessage(recoveredSummary)]);
+
+		const result = await harness.session.compact();
+		expect(result.summary).toBe(recoveredSummary);
+		expect(harness.sessionManager.getEntries().filter((entry) => entry.type === "compaction")).toHaveLength(1);
+		expect(harness.eventsOfType("warning").some((event) => event.message.includes("manual compaction cycle 2"))).toBe(
+			false,
+		);
+	});
+
 	it("exhausted retries still surface the stall error", async () => {
 		setStreamIdleOptionsForTests({ connectMs: 200, activeIdleMs: 200, quietIdleMs: 200 });
 		const harness = await createHarness({

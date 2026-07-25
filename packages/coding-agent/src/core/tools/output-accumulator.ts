@@ -10,6 +10,10 @@ export interface OutputAccumulatorOptions {
 	maxBytes?: number;
 	tempFilePrefix?: string;
 	tempDirectory?: string;
+	/** Stream the complete output to disk even when the bounded in-memory view is not truncated. */
+	persistAllOutput?: boolean;
+	/** Maximum raw bytes persisted to the managed output file. Defaults to no additional cap. */
+	maxPersistedBytes?: number;
 }
 
 export interface OutputSnapshot {
@@ -17,6 +21,8 @@ export interface OutputSnapshot {
 	truncation: TruncationResult;
 	fullOutputPath?: string;
 	fullOutputError?: string;
+	persistedOutputTruncated?: boolean;
+	persistedOutputBytes?: number;
 }
 
 export interface OutputPreview {
@@ -75,6 +81,8 @@ export class OutputAccumulator {
 	private readonly maxBytes: number;
 	private readonly tempFilePrefix: string;
 	private readonly tempDirectory: string;
+	private readonly persistAllOutput: boolean;
+	private readonly maxPersistedBytes: number;
 	private readonly decoder = new TextDecoder();
 
 	private rawChunks: Buffer[] = [];
@@ -97,12 +105,16 @@ export class OutputAccumulator {
 	private tempFilePath: string | undefined;
 	private tempFileFd: number | undefined;
 	private tempFileError: string | undefined;
+	private persistedOutputBytes = 0;
+	private persistedOutputTruncated = false;
 
 	constructor(options: OutputAccumulatorOptions = {}) {
 		this.maxLines = options.maxLines ?? DEFAULT_MAX_LINES;
 		this.maxBytes = options.maxBytes ?? DEFAULT_MAX_BYTES;
 		this.tempFilePrefix = options.tempFilePrefix ?? "pi-output";
 		this.tempDirectory = options.tempDirectory ?? getProcessWorkRun(getAgentDir(), "outputs", "tool-streams").path;
+		this.persistAllOutput = options.persistAllOutput ?? false;
+		this.maxPersistedBytes = options.maxPersistedBytes ?? Number.POSITIVE_INFINITY;
 	}
 
 	append(data: Buffer): void {
@@ -137,6 +149,8 @@ export class OutputAccumulator {
 			...snapshot,
 			fullOutputPath: this.fullOutputPath(),
 			fullOutputError: this.tempFileError,
+			persistedOutputTruncated: this.persistedOutputTruncated || undefined,
+			persistedOutputBytes: this.persistedOutputTruncated ? this.persistedOutputBytes : undefined,
 		};
 	}
 
@@ -161,6 +175,8 @@ export class OutputAccumulator {
 			...snapshot,
 			fullOutputPath: this.fullOutputPath(),
 			fullOutputError: this.tempFileError,
+			persistedOutputTruncated: this.persistedOutputTruncated || undefined,
+			persistedOutputBytes: this.persistedOutputTruncated ? this.persistedOutputBytes : undefined,
 		};
 	}
 
@@ -188,7 +204,7 @@ export class OutputAccumulator {
 		if (this.tempFileFd !== undefined || this.shouldUseTempFile()) {
 			if (this.tryEnsureTempFile() && this.tempFileFd !== undefined) {
 				try {
-					writeSync(this.tempFileFd, data);
+					this.writePersisted(data);
 				} catch (error) {
 					this.recordTempFileError(error);
 				}
@@ -359,7 +375,10 @@ export class OutputAccumulator {
 
 	private shouldUseTempFile(): boolean {
 		return (
-			this.totalRawBytes > this.maxBytes || this.totalDecodedBytes > this.maxBytes || this.totalLines > this.maxLines
+			this.persistAllOutput ||
+			this.totalRawBytes > this.maxBytes ||
+			this.totalDecodedBytes > this.maxBytes ||
+			this.totalLines > this.maxLines
 		);
 	}
 
@@ -378,7 +397,7 @@ export class OutputAccumulator {
 			this.tempFilePath ??= defaultTempFilePath(this.tempDirectory, this.tempFilePrefix);
 			this.tempFileFd = openSync(this.tempFilePath, "w");
 			for (const chunk of this.rawChunks) {
-				writeSync(this.tempFileFd, chunk);
+				this.writePersisted(chunk);
 			}
 			this.rawChunks = [];
 			return true;
@@ -386,6 +405,24 @@ export class OutputAccumulator {
 			this.recordTempFileError(error);
 			return false;
 		}
+	}
+
+	private writePersisted(data: Buffer): void {
+		if (this.tempFileFd === undefined || data.length === 0) return;
+		const remaining = Math.max(0, this.maxPersistedBytes - this.persistedOutputBytes);
+		if (remaining === 0) {
+			this.persistedOutputTruncated = true;
+			return;
+		}
+		const bounded = data.length > remaining ? data.subarray(0, remaining) : data;
+		let offset = 0;
+		while (offset < bounded.length) {
+			const written = writeSync(this.tempFileFd, bounded, offset, bounded.length - offset);
+			if (written <= 0) throw new Error("Managed output write made no progress");
+			offset += written;
+			this.persistedOutputBytes += written;
+		}
+		if (bounded.length < data.length) this.persistedOutputTruncated = true;
 	}
 
 	private recordTempFileError(error: unknown): void {

@@ -36,6 +36,22 @@ describe("classifyFailure", () => {
 		expect(classifyFailure({ message: "stream stalled: no events for 30000ms" }).reason).toBe("stream_stall");
 	});
 
+	it.each([
+		[
+			"openai-codex",
+			"Codex error: An error occurred while processing your request. You can retry your request, or contact support. Please include request ID req_test.",
+		],
+		["bedrock", '{"message":"The system encountered an unexpected error. Try your request again."}'],
+		["generic", "The provider could not finish. Please retry your request."],
+	])("classifies %s explicit retry guidance as a transient server error", (_name, message) => {
+		expect(classifyFailure({ message })).toMatchObject({
+			reason: "server_error",
+			retryable: true,
+			shouldRotateCredential: false,
+			shouldFallback: true,
+		});
+	});
+
 	it("classifies context overflow as compact-only", () => {
 		const c = classifyFailure({ message: "prompt is too long", contextOverflow: true });
 		expect(c).toMatchObject({

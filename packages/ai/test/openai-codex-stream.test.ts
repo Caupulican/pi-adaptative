@@ -385,6 +385,36 @@ describe("openai-codex streaming", () => {
 		cleanupSessionResources(sessionId);
 	});
 
+	it("preserves status and code from a Codex websocket error event", async () => {
+		vi.stubGlobal(
+			"fetch",
+			vi.fn(async () => new Response("unexpected", { status: 500 })),
+		);
+		installScriptedWebSocket([
+			[
+				{
+					type: "error",
+					status: 500,
+					error: {
+						type: "server_error",
+						code: "internal_server_error",
+						message: "An error occurred while processing your request. You can retry your request.",
+					},
+				},
+			],
+		]);
+
+		const result = await streamOpenAICodexResponses(createCodexModel(), createCodexContext(), {
+			apiKey: mockToken(),
+			transport: "websocket",
+		}).result();
+
+		expect(result.stopReason).toBe("error");
+		expect(result.errorMessage).toContain("500");
+		expect(result.errorMessage).toContain("internal_server_error");
+		expect(result.errorMessage).toContain("You can retry your request");
+	});
+
 	it("does not replay a Codex websocket request after response output has started", async () => {
 		vi.stubGlobal(
 			"fetch",

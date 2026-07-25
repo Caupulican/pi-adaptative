@@ -1,5 +1,9 @@
 ## [Unreleased]
 
+### Fixed
+
+- Restored explicit provider retry-message classification, routed compaction failures through the shared reliability classifier, and bounded serialized tool-call arguments before summarization.
+
 ## [0.81.40] - 2026-07-24
 
 ### Added

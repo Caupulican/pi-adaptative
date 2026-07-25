@@ -1,5 +1,9 @@
 ## [Unreleased]
 
+### Fixed
+
+- Preserved structured status and error codes from OpenAI Codex stream failures so shared retry policy does not depend on unstable prose.
+
 ## [0.81.40] - 2026-07-24
 
 ### Added

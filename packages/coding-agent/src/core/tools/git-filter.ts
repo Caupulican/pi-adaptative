@@ -7,6 +7,9 @@ import { waitForChildProcessWithTermination } from "../../utils/child-process.ts
 import { createSafeWriteStream } from "../../utils/safe-write-stream.ts";
 import { trackDetachedChildPid, untrackDetachedChildPid } from "../../utils/shell.ts";
 import { getProcessWorkRun } from "../../utils/work-directory.ts";
+import { isComplexShellCommand, parseCommandPrefixes } from "./shell-command-parser.ts";
+
+export { isComplexShellCommand, parseCommandPrefixes, tokenizeCommand } from "./shell-command-parser.ts";
 
 /**
  * Retention budget for git output held in memory while filtering. Output beyond
@@ -70,74 +73,6 @@ export function unicodeTruncate(str: string, maxLength: number): string {
 	const chars = Array.from(str);
 	if (chars.length <= maxLength) return str;
 	return `${chars.slice(0, maxLength).join("")}...`;
-}
-
-export function tokenizeCommand(command: string): string[] | null {
-	const args: string[] = [];
-	let current = "";
-	let inDoubleQuotes = false;
-	let inSingleQuotes = false;
-	let escapeNext = false;
-
-	for (let i = 0; i < command.length; i++) {
-		const char = command[i];
-		if (escapeNext) {
-			current += char;
-			escapeNext = false;
-			continue;
-		}
-		if (char === "\\" && !inSingleQuotes) {
-			escapeNext = true;
-			continue;
-		}
-		if (char === '"' && !inSingleQuotes) {
-			inDoubleQuotes = !inDoubleQuotes;
-		} else if (char === "'" && !inDoubleQuotes) {
-			inSingleQuotes = !inSingleQuotes;
-		} else if (/\s/.test(char) && !inDoubleQuotes && !inSingleQuotes) {
-			if (current) {
-				args.push(current);
-				current = "";
-			}
-		} else {
-			current += char;
-		}
-	}
-	if (inDoubleQuotes || inSingleQuotes || escapeNext) return null;
-	if (current) args.push(current);
-	return args;
-}
-
-export interface ParsedCommand {
-	envVars: Record<string, string>;
-	coreCommandTokens: string[];
-}
-
-export function parseCommandPrefixes(command: string): ParsedCommand | null {
-	const tokens = tokenizeCommand(command);
-	if (!tokens || tokens.length === 0) return null;
-
-	const envVars: Record<string, string> = {};
-	let i = 0;
-	const envPattern = /^([a-zA-Z_][a-zA-Z0-9_]*)=(.*)$/;
-
-	while (i < tokens.length) {
-		const token = tokens[i];
-		const match = token.match(envPattern);
-		if (!match) break;
-		let value = match[2];
-		if ((value.startsWith('"') && value.endsWith('"')) || (value.startsWith("'") && value.endsWith("'"))) {
-			value = value.slice(1, -1);
-		}
-		envVars[match[1]] = value;
-		i++;
-	}
-
-	return { envVars, coreCommandTokens: tokens.slice(i) };
-}
-
-export function isComplexShellCommand(command: string): boolean {
-	return /[|><&;\n\r$`()*?[\]#]/.test(command);
 }
 
 function quoteForShell(arg: string): string {

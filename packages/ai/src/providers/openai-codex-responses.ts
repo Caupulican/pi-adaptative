@@ -733,6 +733,15 @@ function isWebSocketConnectionLimitError(error: unknown): boolean {
 	return error instanceof CodexApiError && error.code === WEBSOCKET_CONNECTION_LIMIT_ERROR_CODE;
 }
 
+function formatCodexEventError(prefix: string, event: Record<string, unknown>, code: string, message: string): string {
+	const status = typeof event.status === "number" && Number.isFinite(event.status) ? event.status : undefined;
+	const metadata = [status === undefined ? undefined : `status ${status}`, code ? `code ${code}` : undefined].filter(
+		(value): value is string => value !== undefined,
+	);
+	const detail = message || (code ? "no message" : JSON.stringify(event));
+	return `${prefix}${metadata.length > 0 ? ` (${metadata.join(", ")})` : ""}: ${detail}`;
+}
+
 async function* mapCodexEvents(events: AsyncIterable<Record<string, unknown>>): AsyncGenerator<ResponseStreamEvent> {
 	for await (const event of events) {
 		const type = typeof event.type === "string" ? event.type : undefined;
@@ -747,7 +756,7 @@ async function* mapCodexEvents(events: AsyncIterable<Record<string, unknown>>): 
 			const rawMessage = nestedError?.message ?? event.message;
 			const code = typeof rawCode === "string" ? rawCode : "";
 			const message = typeof rawMessage === "string" ? rawMessage : "";
-			throw new CodexApiError(`Codex error: ${message || code || JSON.stringify(event)}`, {
+			throw new CodexApiError(formatCodexEventError("Codex error", event, code, message), {
 				code: code || undefined,
 				payload: event,
 			});
@@ -755,9 +764,12 @@ async function* mapCodexEvents(events: AsyncIterable<Record<string, unknown>>): 
 
 		if (type === "response.failed") {
 			const response = (event as { response?: { error?: { code?: string; message?: string } } }).response;
-			const code = response?.error?.code;
-			const message = response?.error?.message;
-			throw new CodexApiError(message || "Codex response failed", { code, payload: event });
+			const code = response?.error?.code ?? "";
+			const message = response?.error?.message ?? "";
+			throw new CodexApiError(formatCodexEventError("Codex response failed", event, code, message), {
+				code: code || undefined,
+				payload: event,
+			});
 		}
 
 		if (type === "response.done" || type === "response.completed" || type === "response.incomplete") {

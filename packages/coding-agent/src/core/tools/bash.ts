@@ -29,6 +29,7 @@ import { withExclusiveMutationBarrier } from "./file-mutation-queue.ts";
 import { classifyGitCommand, executeFilteredGit } from "./git-filter.ts";
 import { OutputAccumulator } from "./output-accumulator.ts";
 import { getTextOutput, invalidArgText, str } from "./render-utils.ts";
+import { assessShellSearchScope, BROAD_SEARCH_OUTPUT_ROUTE } from "./search-command-guard.ts";
 import { routeShellContract } from "./shell-contract-router.ts";
 import { acquirePersistentShellSession } from "./shell-session.ts";
 import { wrapToolDefinition } from "./tool-definition-wrapper.ts";
@@ -73,6 +74,12 @@ const bashSchema = Type.Object({
 			description: `Wall-clock timeout in seconds. Defaults to ${DEFAULT_COMMAND_TIMEOUT_SECONDS}; positive overrides are capped at ${MAX_COMMAND_TIMEOUT_SECONDS}. Zero or negative values use the default.`,
 		}),
 	),
+	broadSearch: Type.Optional(
+		Type.Literal(BROAD_SEARCH_OUTPUT_ROUTE, {
+			description:
+				"Explicit override for a broad rg/grep/find/fd scan that cannot be narrowed. The command runs, but its complete output is routed to a file and excluded from model context.",
+		}),
+	),
 });
 
 export type BashToolInput = Static<typeof bashSchema>;
@@ -81,6 +88,8 @@ export interface BashToolDetails {
 	truncation?: TruncationResult;
 	fullOutputPath?: string;
 	fullOutputError?: string;
+	persistedOutputTruncated?: boolean;
+	persistedOutputBytes?: number;
 	preview?: {
 		content: string;
 		skippedLines: number;
@@ -303,11 +312,14 @@ export interface BashToolOptions {
 	windowsShellPythonEngine?: boolean;
 	/** Test/embedding hook: overrides the engine tier's runtime/spawn/state resolution. */
 	windowsShellEngineOptions?: WindowsShellEngineOptions;
+	/** Test/embedding hook: override the managed directory used for complete command output. */
+	outputDirectory?: string;
 }
 
 const BASH_PREVIEW_LINES = 5;
 const BASH_PREVIEW_BYTES = 8 * 1024;
 const BASH_UPDATE_THROTTLE_MS = 100;
+const BROAD_SEARCH_MAX_PERSISTED_BYTES = 8 * 1024 * 1024;
 
 type BashRenderState = {
 	startedAt: number | undefined;
@@ -458,7 +470,7 @@ function createShellToolDefinition(
 	return {
 		name: toolName,
 		label: toolName,
-		description: `${contractDescription} Returns stdout and stderr. Output is truncated to last ${DEFAULT_MAX_LINES} lines or ${DEFAULT_MAX_BYTES / 1024}KB (whichever is hit first). If truncated, full output is saved to a temp file. Commands have a ${DEFAULT_COMMAND_TIMEOUT_SECONDS}-second wall-clock default, including commands that keep producing output; use a positive timeout only when a scoped operation justifies a larger bound (maximum ${MAX_COMMAND_TIMEOUT_SECONDS} seconds).`,
+		description: `${contractDescription} Returns stdout and stderr. Output is truncated to last ${DEFAULT_MAX_LINES} lines or ${DEFAULT_MAX_BYTES / 1024}KB (whichever is hit first). If truncated, full output is saved to a managed file. Broad rg/grep/find/fd scans are rejected before execution; when an exhaustive scan is unavoidable, set broadSearch="${BROAD_SEARCH_OUTPUT_ROUTE}" to route all output to a managed file instead of model context. Commands have a ${DEFAULT_COMMAND_TIMEOUT_SECONDS}-second wall-clock default, including commands that keep producing output; use a positive timeout only when a scoped operation justifies a larger bound (maximum ${MAX_COMMAND_TIMEOUT_SECONDS} seconds).`,
 		promptSnippet: routesWindowsContract
 			? "Execute Bash-like commands; Pi routes them deterministically to PowerShell or a bundled Python engine on Windows"
 			: "Execute Bash commands (ls, grep, find, etc.)",
@@ -468,20 +480,36 @@ function createShellToolDefinition(
 					"Pipelines, redirection, expansion (variables, command substitution, globs), chaining (&&/||/;), and cd/export/unset are supported and routed to a bundled Python engine; a fixed set of named constructs (job control, process substitution, heredocs, arithmetic expansion, nested shells, and similar) fail closed with an actionable message instead of being guessed.",
 					"Working directory and environment changes from cd/export/unset persist across subsequent bash calls, including calls that route to the PowerShell tier.",
 					"Supported Bash-like file commands are converted with literal-path operations; verify targets before recursive rm, cp, or mv calls.",
-					"Keep searches scoped and purpose-driven: discover paths first, pass an explicit root and filters, prefer rg over broad find, and increase the timeout only for a justified bounded search.",
+					`Keep searches scoped and purpose-driven: discover paths first, pass an explicit root and filters, and prefer the bounded grep/find tools. Broad shell searches are rejected; use broadSearch="${BROAD_SEARCH_OUTPUT_ROUTE}" only for an unavoidable exhaustive scan, then inspect the returned file with bounded reads or narrower searches.`,
 				]
 			: [
-					"Keep searches scoped and purpose-driven: discover paths first, pass an explicit root and filters, prefer rg over broad find, and increase the timeout only for a justified bounded search.",
+					`Keep searches scoped and purpose-driven: discover paths first, pass an explicit root and filters, and prefer the bounded grep/find tools. Broad shell searches are rejected; use broadSearch="${BROAD_SEARCH_OUTPUT_ROUTE}" only for an unavoidable exhaustive scan, then inspect the returned file with bounded reads or narrower searches.`,
 				],
 		parameters: bashSchema,
 		async execute(
 			_toolCallId,
-			{ command, timeout }: { command: string; timeout?: number },
+			{
+				command,
+				timeout,
+				broadSearch,
+			}: { command: string; timeout?: number; broadSearch?: typeof BROAD_SEARCH_OUTPUT_ROUTE },
 			signal?: AbortSignal,
 			onUpdate?,
 			_ctx?,
 		) {
-			const output = new OutputAccumulator({ tempFilePrefix: `pi-${toolName}` });
+			const searchScope = assessShellSearchScope(command, cwd);
+			if (searchScope.kind === "broad" && broadSearch !== BROAD_SEARCH_OUTPUT_ROUTE) {
+				throw new Error(
+					`Broad search blocked before execution: ${searchScope.reason}. Narrow the path, glob, type, or pattern; prefer the grep/find tool with explicit path/glob/limit. If an exhaustive scan is required, retry with broadSearch="${BROAD_SEARCH_OUTPUT_ROUTE}"; Pi will keep its output out of context and return a managed file path for bounded read or search follow-up.`,
+				);
+			}
+			const routeBroadSearchOutput = searchScope.kind === "broad";
+			const output = new OutputAccumulator({
+				tempFilePrefix: `pi-${toolName}`,
+				tempDirectory: options?.outputDirectory,
+				persistAllOutput: routeBroadSearchOutput,
+				maxPersistedBytes: routeBroadSearchOutput ? BROAD_SEARCH_MAX_PERSISTED_BYTES : undefined,
+			});
 			let updateTimer: NodeJS.Timeout | undefined;
 			let updateDirty = false;
 			let lastUpdateAt = 0;
@@ -493,6 +521,21 @@ function createShellToolDefinition(
 				const snapshot = output.previewSnapshot(BASH_PREVIEW_LINES, BASH_PREVIEW_BYTES, {
 					persistIfFullTruncated: true,
 				});
+				if (routeBroadSearchOutput) {
+					const notice = snapshot.fullOutputPath
+						? `Broad search running. Output is being routed to ${snapshot.fullOutputPath}`
+						: "Broad search running. Output is being routed to a managed file";
+					onUpdate({
+						content: [{ type: "text", text: notice }],
+						details: {
+							fullOutputPath: snapshot.fullOutputPath,
+							fullOutputError: snapshot.fullOutputError,
+							persistedOutputTruncated: snapshot.persistedOutputTruncated,
+							persistedOutputBytes: snapshot.persistedOutputBytes,
+						},
+					});
+					return;
+				}
 				const preview = {
 					content: snapshot.content.replace(/\r/g, ""),
 					skippedLines: Math.max(0, snapshot.truncation.totalLines - snapshot.truncation.outputLines),
@@ -548,6 +591,30 @@ function createShellToolDefinition(
 
 			const formatOutput = (snapshot: Awaited<ReturnType<typeof finishOutput>>, emptyText = "(no output)") => {
 				const truncation = snapshot.truncation;
+				if (routeBroadSearchOutput) {
+					if (snapshot.fullOutputPath) {
+						const persistenceNotice = snapshot.persistedOutputTruncated
+							? `The managed ${formatSize(BROAD_SEARCH_MAX_PERSISTED_BYTES)} file limit was reached; later output was discarded.`
+							: "";
+						return {
+							text: `Broad search output routed to ${snapshot.fullOutputPath}. ${persistenceNotice} Inspect it with bounded read offsets or a narrower search.`,
+							details: {
+								...(truncation.truncated ? { truncation } : {}),
+								fullOutputPath: snapshot.fullOutputPath,
+								persistedOutputTruncated: snapshot.persistedOutputTruncated,
+								persistedOutputBytes: snapshot.persistedOutputBytes,
+							},
+						};
+					}
+					const boundedTail = snapshot.content.replace(/\r/g, "") || emptyText;
+					return {
+						text: `Broad search output could not be routed to a managed file${snapshot.fullOutputError ? `: ${snapshot.fullOutputError}` : ""}. Bounded tail:\n${boundedTail}`,
+						details: {
+							...(truncation.truncated ? { truncation } : {}),
+							fullOutputError: snapshot.fullOutputError ?? "managed output file unavailable",
+						},
+					};
+				}
 				let text = snapshot.content.replace(/\r/g, "") || emptyText;
 				let details: BashToolDetails | undefined;
 				const preview = output.preview(BASH_PREVIEW_LINES, BASH_PREVIEW_BYTES);

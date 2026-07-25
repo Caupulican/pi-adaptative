@@ -1,4 +1,5 @@
 import type { Model } from "@caupulican/pi-ai";
+import { classifyFailure } from "../reliability/classifier.ts";
 import type { SessionEntry } from "../session/session-manager.ts";
 import { type CompactionResult, mergeCompactionVerificationReports } from "./compaction.ts";
 import { CompactionVerificationError, type VerificationReport } from "./verification.ts";
@@ -147,7 +148,7 @@ export async function runCompactionLoop(deps: CompactionLoopDeps): Promise<Compa
 			if (error instanceof CompactionVerificationError) {
 				pendingVerificationReports.push(...error.reports);
 			}
-			const failure = mapFailureCause(error);
+			const failure = mapFailureCause(error, modelInfo.model.provider);
 			lastCause = failure.cause;
 			if (lastCause === "aborted") {
 				return { kind: "failed", reason: lastCause, cycles: cycle };
@@ -285,7 +286,7 @@ function sameParams(a: CompactionCycleParams, b: CompactionCycleParams): boolean
 	);
 }
 
-function mapFailureCause(error: unknown): { cause: string; detail?: string } {
+function mapFailureCause(error: unknown, provider?: string): { cause: string; detail?: string } {
 	const message = error instanceof Error ? error.message : typeof error === "string" ? error : "";
 	if (message.includes("gate-failed")) return { cause: "gate-failed", detail: boundedDetail(message) };
 	if (message.includes("summary-demand-exceeds-reserve"))
@@ -293,14 +294,15 @@ function mapFailureCause(error: unknown): { cause: string; detail?: string } {
 	if (message.includes("input-overflow")) return { cause: "input-overflow", detail: boundedDetail(message) };
 	// A length-stopped summary lost gated sections; escalating the tier buys a larger output cap.
 	if (message.includes("summary-length-stop")) return { cause: "length-stop", detail: boundedDetail(message) };
-	if (
-		/stream stalled|overloaded|rate.?limit|too many requests|service.?unavailable|server.?error|network.?error|fetch failed|timeout|timed out/i.test(
-			message,
-		)
-	)
-		return { cause: "provider-failure", detail: boundedDetail(message) };
 	if (message.includes("auto-compaction-cancelled")) return { cause: "aborted", detail: boundedDetail(message) };
-	if (message.includes("auth") || message.includes("api key") || message.includes("not compacted"))
+	const classified = classifyFailure({ message, provider });
+	if (classified.retryable) return { cause: "provider-failure", detail: boundedDetail(message) };
+	if (
+		classified.reason === "auth" ||
+		classified.reason === "billing_or_quota" ||
+		message.includes("api key") ||
+		message.includes("not compacted")
+	)
 		return { cause: "auth-failed", detail: boundedDetail(message) };
 	return { cause: "unknown-failure", detail: boundedDetail(message) };
 }

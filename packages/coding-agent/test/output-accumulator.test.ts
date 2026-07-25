@@ -1,4 +1,4 @@
-import { mkdtempSync, rmSync } from "node:fs";
+import { mkdtempSync, readFileSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { afterEach, beforeEach, describe, expect, it } from "vitest";
@@ -67,5 +67,42 @@ describe("OutputAccumulator", () => {
 		output.append(euro.subarray(1));
 
 		expect(output.snapshot().content).toBe("€\n");
+	});
+
+	it("can persist all output while retaining only a bounded in-memory view", async () => {
+		const output = new OutputAccumulator({
+			maxLines: 10,
+			maxBytes: 1024,
+			tempDirectory,
+			persistAllOutput: true,
+		});
+		output.append(Buffer.from("small output\n", "utf-8"));
+		output.finish();
+
+		const snapshot = output.snapshot();
+		await output.closeTempFile();
+
+		expect(snapshot.truncation.truncated).toBe(false);
+		expect(snapshot.fullOutputPath).toBeDefined();
+		expect(readFileSync(snapshot.fullOutputPath ?? "", "utf-8")).toBe("small output\n");
+	});
+
+	it("bounds explicitly persisted output and discloses discarded bytes", async () => {
+		const output = new OutputAccumulator({
+			maxLines: 10,
+			maxBytes: 1024,
+			tempDirectory,
+			persistAllOutput: true,
+			maxPersistedBytes: 5,
+		});
+		output.append(Buffer.from("0123456789", "utf-8"));
+		output.finish();
+
+		const snapshot = output.snapshot();
+		await output.closeTempFile();
+
+		expect(snapshot.persistedOutputTruncated).toBe(true);
+		expect(snapshot.persistedOutputBytes).toBe(5);
+		expect(readFileSync(snapshot.fullOutputPath ?? "", "utf-8")).toBe("01234");
 	});
 });

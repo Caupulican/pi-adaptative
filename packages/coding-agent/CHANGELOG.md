@@ -1,5 +1,13 @@
 ## [Unreleased]
 
+### Added
+
+- Added a provider-neutral shell search guard that rejects broad `rg`/recursive `grep`/`find`/`fd` scans before execution and supports an explicit managed-file override with bounded disk use.
+
+### Fixed
+
+- Kept retry-guided compaction provider failures inside the exact-request retry layer instead of restarting the compaction plan as an unknown failure.
+
 ## [0.81.40] - 2026-07-24
 
 ### Added
