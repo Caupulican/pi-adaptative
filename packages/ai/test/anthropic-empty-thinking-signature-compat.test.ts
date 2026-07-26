@@ -80,6 +80,12 @@ describe("Anthropic empty thinking signature compat", () => {
 		expect(assistant?.content).toEqual([{ type: "text", text: "internal reasoning" }]);
 	});
 
+	it("preserves empty thinking text when the signature is present", async () => {
+		const payload = await capturePayload(makeModel(), makeContext("signed-thinking", ""));
+		const assistant = payload.messages?.find((message) => message.role === "assistant");
+		expect(assistant?.content).toEqual([{ type: "thinking", thinking: "", signature: "signed-thinking" }]);
+	});
+
 	it("preserves empty-signature thinking when allowEmptySignature is enabled", async () => {
 		const payload = await capturePayload(makeModel(true), makeContext(" "));
 		const assistant = payload.messages?.find((message) => message.role === "assistant");

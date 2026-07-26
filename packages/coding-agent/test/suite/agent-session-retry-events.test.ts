@@ -73,6 +73,22 @@ describe("AgentSession retry and event characterization", () => {
 		expect(harness.faux.state.callCount).toBe(3);
 	});
 
+	it("reports an aborted retry attempt as unsuccessful", async () => {
+		const harness = await createHarness({ settings: { retry: { enabled: true, maxRetries: 3, baseDelayMs: 1 } } });
+		harnesses.push(harness);
+		harness.setResponses([
+			fauxAssistantMessage("", { stopReason: "error", errorMessage: "overloaded_error" }),
+			fauxAssistantMessage("", { stopReason: "aborted", errorMessage: "Request aborted" }),
+		]);
+
+		await harness.session.prompt("test");
+
+		expect(harness.eventsOfType("auto_retry_end")).toEqual([
+			expect.objectContaining({ success: false, attempt: 1, finalError: "Request aborted" }),
+		]);
+		expect(harness.session.isRetrying).toBe(false);
+	});
+
 	it("exhausts max retries and emits a failure event", async () => {
 		const harness = await createHarness({ settings: { retry: { enabled: true, maxRetries: 2, baseDelayMs: 1 } } });
 		harnesses.push(harness);

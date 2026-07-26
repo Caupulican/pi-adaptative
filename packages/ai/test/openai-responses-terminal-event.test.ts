@@ -249,6 +249,33 @@ async function* createCapturedReasoningSummaryDelimiterEvents(): AsyncIterable<R
 	} as unknown as ResponseStreamEvent;
 }
 
+async function* createTerminalReasoningSignatureEvents(): AsyncIterable<ResponseStreamEvent> {
+	yield {
+		type: "response.output_item.added",
+		item: { id: "rs_terminal", type: "reasoning", summary: [], content: [] },
+	} as unknown as ResponseStreamEvent;
+	yield {
+		type: "response.output_item.done",
+		item: { id: "rs_terminal", type: "reasoning", summary: [], content: [] },
+	} as unknown as ResponseStreamEvent;
+	yield {
+		type: "response.completed",
+		response: {
+			id: "resp_terminal_reasoning",
+			status: "completed",
+			output: [
+				{
+					id: "rs_terminal",
+					type: "reasoning",
+					summary: [],
+					content: [],
+					encrypted_content: "encrypted-terminal-reasoning",
+				},
+			],
+		},
+	} as unknown as ResponseStreamEvent;
+}
+
 describe("OpenAI Responses terminal events", () => {
 	it("rejects streams that end before a terminal response event", async () => {
 		const model = createModel();
@@ -379,5 +406,24 @@ describe("OpenAI Responses terminal events", () => {
 		expect(thinkingDeltas.join("")).not.toContain("<!-- -->");
 		expect(output.content).toHaveLength(1);
 		expect(output.content[0]).toMatchObject({ type: "thinking", thinking: "Checking the repository state." });
+	});
+
+	it("backfills terminal encrypted reasoning into the persisted thinking signature", async () => {
+		const model = createModel();
+		const output = createOutput(model);
+
+		await processResponsesStream(
+			createTerminalReasoningSignatureEvents(),
+			output,
+			new AssistantMessageEventStream(),
+			model,
+		);
+
+		const thinking = output.content.find((block) => block.type === "thinking");
+		expect(thinking?.thinkingSignature).toBeDefined();
+		expect(JSON.parse(thinking?.thinkingSignature ?? "{}")).toMatchObject({
+			id: "rs_terminal",
+			encrypted_content: "encrypted-terminal-reasoning",
+		});
 	});
 });

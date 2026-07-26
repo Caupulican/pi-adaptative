@@ -330,6 +330,22 @@ describe("AgentSessionRuntime characterization", () => {
 		).toEqual(beforeMessages);
 	});
 
+	it("explains why an unsaved persisted session cannot be forked", async () => {
+		const { runtime } = await createRuntimeForTest(() => {});
+		const sessionFile = runtime.session.sessionFile;
+		const leafId = runtime.session.sessionManager.appendMessage({
+			role: "user",
+			content: "not answered yet",
+			timestamp: Date.now(),
+		});
+		expect(sessionFile).toBeDefined();
+		expect(existsSync(sessionFile!)).toBe(false);
+
+		await expect(runtime.fork(leafId, { position: "at" })).rejects.toThrow(
+			"This session has not been saved yet. Wait for the first assistant response before cloning or forking it.",
+		);
+	});
+
 	it("duplicates the current active branch in-memory when forking at the current position", async () => {
 		const tempDir = join(tmpdir(), `pi-runtime-suite-in-memory-${Date.now()}-${Math.random().toString(36).slice(2)}`);
 		mkdirSync(tempDir, { recursive: true });

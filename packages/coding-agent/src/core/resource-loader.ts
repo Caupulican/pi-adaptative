@@ -248,6 +248,7 @@ function loadRawContextFilesFromDir(dir: string): Array<{ path: string; rawConte
 		const filePath = join(dir, filename);
 		if (existsSync(filePath)) {
 			try {
+				if (!statSync(filePath).isFile()) continue;
 				files.push({ path: filePath, rawContent: readFileSync(filePath, "utf-8") });
 			} catch (error) {
 				console.error(chalk.yellow(`Warning: Could not read ${filePath}: ${error}`));

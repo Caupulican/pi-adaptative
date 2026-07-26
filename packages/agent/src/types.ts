@@ -12,6 +12,7 @@ import type {
 	Tool,
 	ToolArgumentValidationTelemetryEvent,
 	ToolResultMessage,
+	Usage,
 } from "@caupulican/pi-ai";
 import type { Static, TSchema } from "typebox";
 
@@ -66,6 +67,7 @@ export interface BeforeToolCallResult {
  * Merge semantics are field-by-field:
  * - `content`: if provided, replaces the tool result content array in full
  * - `details`: if provided, replaces the tool result details value in full
+ * - `usage`: if provided, replaces provider usage reported by the tool
  * - `isError`: if provided, replaces the tool result error flag
  * - `terminate`: if provided, replaces the early-termination hint
  *
@@ -75,6 +77,7 @@ export interface BeforeToolCallResult {
 export interface AfterToolCallResult {
 	content?: (TextContent | ImageContent)[];
 	details?: unknown;
+	usage?: Usage;
 	isError?: boolean;
 	/**
 	 * Hint that the agent should stop after the current tool batch.
@@ -414,6 +417,8 @@ export interface AgentToolResult<T> {
 	content: (TextContent | ImageContent)[];
 	/** Arbitrary structured details for logs or UI rendering. */
 	details: T;
+	/** Provider usage spent inside this tool, for durable budget and cost accounting. */
+	usage?: Usage;
 	/**
 	 * Hint that the agent should stop after the current tool batch.
 	 * Early termination only happens when every finalized tool result in the batch sets this to true.

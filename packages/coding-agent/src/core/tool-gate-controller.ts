@@ -96,6 +96,7 @@ export class ToolGateController {
 		const runner = this.deps.getExtensionRunner();
 		let content = result.content;
 		let details = result.details;
+		let usage = result.usage;
 		let resolvedIsError = isError;
 
 		if (runner.hasHandlers("tool_result")) {
@@ -107,11 +108,13 @@ export class ToolGateController {
 				content,
 				details,
 				isError,
+				usage,
 			});
 			if (hookResult) {
 				content = hookResult.content ?? content;
 				details = hookResult.details;
 				resolvedIsError = hookResult.isError ?? isError;
+				usage = hookResult.usage ?? usage;
 			}
 		}
 
@@ -127,9 +130,14 @@ export class ToolGateController {
 		}
 
 		this.deps.getToolSelectionController?.()?.complete(toolCall.id, !resolvedIsError, content);
-		if (content === result.content && details === result.details && resolvedIsError === isError) {
+		if (
+			content === result.content &&
+			details === result.details &&
+			resolvedIsError === isError &&
+			usage === result.usage
+		) {
 			return undefined;
 		}
-		return { content, details, isError: resolvedIsError };
+		return { content, details, isError: resolvedIsError, usage };
 	};
 }

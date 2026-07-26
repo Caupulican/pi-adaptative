@@ -582,6 +582,7 @@ export class CompactionController {
 			result.tokensBefore,
 			result.details,
 			fromExtension,
+			result.usage,
 		);
 		this.deps.refreshAfterCompaction();
 		const savedEntry = this.deps.sessionManager

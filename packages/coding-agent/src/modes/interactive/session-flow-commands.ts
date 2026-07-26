@@ -13,7 +13,7 @@
 
 import { randomUUID } from "node:crypto";
 import type { SessionManager } from "@caupulican/pi-agent-core/node";
-import type { Model } from "@caupulican/pi-ai";
+import type { Api, Model } from "@caupulican/pi-ai";
 import type { EditorComponent } from "@caupulican/pi-tui";
 import { type Component, type Container, Loader, Spacer, Text, type TUI } from "@caupulican/pi-tui";
 import type {
@@ -37,7 +37,11 @@ import {
 import type { GoalState } from "../../core/goals/goal-state.ts";
 import { applyGoalAction, completeGoalManually } from "../../core/goals/goal-tool-core.ts";
 import type { KeybindingsManager } from "../../core/keybindings.ts";
-import { findExactModelReferenceMatch, resolveModelScope } from "../../core/model-resolver.ts";
+import {
+	findExactModelReferenceMatch,
+	resolveModelScope,
+	resolveModelScopeWithDiagnostics,
+} from "../../core/model-resolver.ts";
 import { MissingSessionCwdError } from "../../core/session-cwd.ts";
 import { listAllSessions, listSessions, openSession } from "../../core/session-manager-factory.ts";
 import type { SettingsManager } from "../../core/settings-manager.ts";
@@ -91,9 +95,9 @@ export interface SessionFlowHost {
 	promptForMissingSessionCwd(error: MissingSessionCwdError): Promise<string | undefined>;
 	updateEditorBorderColor(): void;
 	updateAvailableProviderCount(): Promise<void>;
-	maybeWarnAboutAnthropicSubscriptionAuth(model?: Model<any>): Promise<void>;
+	maybeWarnAboutAnthropicSubscriptionAuth(model?: Model<Api>): Promise<void>;
 	checkDaxnutsEasterEgg(model: { provider: string; id: string }): void;
-	getModelCandidates(): Promise<Model<any>[]>;
+	getModelCandidates(): Promise<Model<Api>[]>;
 	shutdown(options?: { fromSignal?: boolean }): Promise<void>;
 }
 
@@ -145,14 +149,19 @@ export async function showModelsSelector(host: SessionFlowHost): Promise<void> {
 	// Get all available models
 	host.session.modelRegistry.refresh();
 	const allModels = host.session.modelRegistry.getAvailable();
+	const allModelIds = new Set(allModels.map((model) => `${model.provider}/${model.id}`));
+	const configuredPatterns = host.settingsManager.getEnabledModels();
+	const sessionScopedModels = host.session.scopedModels;
 
-	if (allModels.length === 0) {
+	if (allModels.length === 0 && !configuredPatterns?.length && sessionScopedModels.length === 0) {
 		host.showStatus("No models available");
 		return;
 	}
+	const configuredScope = configuredPatterns?.length
+		? await resolveModelScopeWithDiagnostics(configuredPatterns, host.session.modelRegistry)
+		: undefined;
 
 	// Check if session has scoped models (from previous session-only changes or CLI --models)
-	const sessionScopedModels = host.session.scopedModels;
 	const hasSessionScope = sessionScopedModels.length > 0;
 
 	// Build enabled model IDs from session state or settings
@@ -161,19 +170,22 @@ export async function showModelsSelector(host: SessionFlowHost): Promise<void> {
 	if (hasSessionScope) {
 		// Use current session's scoped models
 		currentEnabledIds = sessionScopedModels.map((scoped) => `${scoped.model.provider}/${scoped.model.id}`);
-	} else {
-		// Fall back to settings
-		const patterns = host.settingsManager.getEnabledModels();
-		if (patterns !== undefined && patterns.length > 0) {
-			const scopedModels = await resolveModelScope(patterns, host.session.modelRegistry);
-			currentEnabledIds = scopedModels.map((scoped) => `${scoped.model.provider}/${scoped.model.id}`);
-		}
+	} else if (configuredScope) {
+		currentEnabledIds = configuredScope.scopedModels.map((scoped) => `${scoped.model.provider}/${scoped.model.id}`);
+	}
+
+	for (const diagnostic of configuredScope?.diagnostics ?? []) {
+		if (diagnostic.code !== "no-match") continue;
+		currentEnabledIds ??= [];
+		if (!currentEnabledIds.includes(diagnostic.pattern)) currentEnabledIds.push(diagnostic.pattern);
 	}
 
 	// Helper to update session's scoped models (session-only, no persist)
 	const updateSessionModels = async (enabledIds: string[] | null) => {
 		currentEnabledIds = enabledIds === null ? null : [...enabledIds];
-		if (enabledIds && enabledIds.length > 0 && enabledIds.length < allModels.length) {
+		const hasEnabledAvailableModel = enabledIds?.some((id) => allModelIds.has(id)) ?? false;
+		const allAvailableModelsEnabled = enabledIds !== null && [...allModelIds].every((id) => enabledIds.includes(id));
+		if (enabledIds && hasEnabledAvailableModel && !allAvailableModelsEnabled) {
 			const newScopedModels = await resolveModelScope(enabledIds, host.session.modelRegistry);
 			host.session.setScopedModels(
 				newScopedModels.map((sm) => ({
@@ -201,10 +213,11 @@ export async function showModelsSelector(host: SessionFlowHost): Promise<void> {
 				},
 				onPersist: (enabledIds) => {
 					// Persist to settings
-					const newPatterns =
-						enabledIds === null || enabledIds.length === allModels.length
-							? undefined // All enabled = clear filter
-							: enabledIds;
+					const allEnabled =
+						enabledIds !== null &&
+						enabledIds.length === allModels.length &&
+						enabledIds.every((id) => allModelIds.has(id));
+					const newPatterns = enabledIds === null || allEnabled ? undefined : enabledIds;
 					host.settingsManager.setEnabledModels(newPatterns ? [...newPatterns] : undefined);
 					host.showStatus("Model selection saved to settings");
 				},
@@ -559,7 +572,7 @@ export async function handleModelCommand(host: SessionFlowHost, searchTerm?: str
 	await showModelSelector(host, searchTerm);
 }
 
-export async function findExactModelMatch(host: SessionFlowHost, searchTerm: string): Promise<Model<any> | undefined> {
+export async function findExactModelMatch(host: SessionFlowHost, searchTerm: string): Promise<Model<Api> | undefined> {
 	const models = await host.getModelCandidates();
 	return findExactModelReferenceMatch(searchTerm, models);
 }

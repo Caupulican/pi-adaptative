@@ -52,11 +52,12 @@ const BILLING_OR_QUOTA =
 const AUTH = /\b401\b|unauthorized|invalid.?api.?key|authentication.?error|forbidden|permission.?denied/i;
 const RATE_LIMIT = /rate.?limit|too many requests|(?<![A-Za-z0-9])429(?![A-Za-z0-9])/i;
 const OVERLOADED = /overloaded/i;
-const STREAM_STALL = /stream stalled|ended without|stream ended before message_stop|reset before headers/i;
+const STREAM_STALL =
+	/stream stalled|ended without|stream ended before message_stop|stream ended before a terminal response event|reset before headers/i;
 const SERVER_ERROR =
-	/(?<![A-Za-z0-9])(?:500|502|503|504)(?![A-Za-z0-9])|service.?unavailable|server.?error|internal.?error|provider.?returned.?error|upstream.?connect|http2 request did not get a response|retry delay|you can retry your request|try your request again|please retry your request/i;
+	/(?<![A-Za-z0-9])(?:500|502|503|504)(?![A-Za-z0-9])|service.?unavailable|server.?error|internal.?error|provider.?returned.?error|upstream.?connect|http2 request did not get a response|ResourceExhausted|retry delay|you can retry your request|try your request again|please retry your request/i;
 const NETWORK =
-	/network.?error|connection.?error|connection.?refused|connection.?lost|websocket.?closed|websocket.?error|other side closed|fetch failed|socket hang up|socket connection was closed|timed? out|timeout|terminated/i;
+	/network.?error|connection.?error|connection.?refused|connection.?lost|websocket.?closed|websocket.?error|other side closed|fetch failed|getaddrinfo|ENOTFOUND|EAI_AGAIN|socket hang up|socket connection was closed|timed? out|timeout|terminated/i;
 
 const RETRY_AFTER_S = /retry.?(?:after|in)\s+(\d+(?:\.\d+)?)\s*s\b|"retryDelay"\s*:\s*"(\d+(?:\.\d+)?)s"/i;
 const RETRY_AFTER_MS = /retry.?(?:after|in)\s+(\d+)\s*ms\b/i;

@@ -369,6 +369,7 @@ export async function processResponsesStream<TApi extends Api>(
 	let currentBlock: ThinkingContent | TextContent | (ToolCall & { partialJson: string }) | null = null;
 	let currentReasoningSummaryPartText = "";
 	let sawTerminalResponseEvent = false;
+	const reasoningBlocksById = new Map<string, ThinkingContent>();
 	const blocks = output.content;
 	const blockIndex = () => blocks.length - 1;
 	const ensureMessageOutputTextPart = (): ResponseOutputText | undefined => {
@@ -387,10 +388,22 @@ export async function processResponsesStream<TApi extends Api>(
 		currentItem.content.push(part);
 		return part;
 	};
+	const backfillReasoningSignatures = (responseOutput: ResponseReasoningItem[]): void => {
+		for (const item of responseOutput) {
+			if (!item.encrypted_content) continue;
+			const block = reasoningBlocksById.get(item.id);
+			if (!block?.thinkingSignature) continue;
+
+			const storedItem = JSON.parse(block.thinkingSignature) as ResponseReasoningItem;
+			if (storedItem.encrypted_content) continue;
+			block.thinkingSignature = JSON.stringify({ ...storedItem, encrypted_content: item.encrypted_content });
+		}
+	};
 	const finalizeResponse = (
 		response: Extract<ResponseStreamEvent, { type: "response.completed" | "response.incomplete" }>["response"],
 	): void => {
 		sawTerminalResponseEvent = true;
+		backfillReasoningSignatures((response.output ?? []).filter((item) => item.type === "reasoning"));
 		if (response?.id) {
 			output.responseId = response.id;
 		}
@@ -411,6 +424,7 @@ export async function processResponsesStream<TApi extends Api>(
 				cacheReadTokens += orchestrationInputCachedTokens;
 				outputTokens += orchestrationOutputTokens;
 			}
+			const providerCost = (response.usage as { cost?: number }).cost ?? 0;
 			output.usage = {
 				// OpenAI includes cached tokens in input_tokens, so subtract to get non-cached input.
 				// Sakana Fugu Ultra also reports billable orchestration tokens in token details fields.
@@ -420,7 +434,7 @@ export async function processResponsesStream<TApi extends Api>(
 				cacheRead: cacheReadTokens,
 				cacheWrite: cacheWriteTokens,
 				totalTokens,
-				cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, total: (response.usage as any).cost || 0 },
+				cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, total: providerCost },
 			};
 		}
 		calculateCost(model, output.usage, {
@@ -592,6 +606,7 @@ export async function processResponsesStream<TApi extends Api>(
 				const contentText = item.content?.map((c) => c.text).join("\n\n") || "";
 				currentBlock.thinking = summaryText || contentText || currentBlock.thinking;
 				currentBlock.thinkingSignature = JSON.stringify(item);
+				reasoningBlocksById.set(item.id, currentBlock);
 				stream.push({
 					type: "thinking_end",
 					contentIndex: blockIndex(),

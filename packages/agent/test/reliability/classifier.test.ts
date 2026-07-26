@@ -21,10 +21,13 @@ describe("classifyFailure", () => {
 			"502 Bad Gateway",
 			"service unavailable",
 			"network error: fetch failed",
+			"getaddrinfo ENOTFOUND api.example.test",
+			"getaddrinfo EAI_AGAIN api.example.test",
 			"connection lost",
 			"socket hang up",
 			"Socket connection was closed unexpectedly",
 			"stream ended before message_stop",
+			"OpenAI Responses stream ended before a terminal response event",
 			"stream stalled: no events for 30000ms",
 			"Request timed out",
 		]) {
@@ -34,6 +37,16 @@ describe("classifyFailure", () => {
 			expect(c.shouldRotateCredential, msg).toBe(false);
 		}
 		expect(classifyFailure({ message: "stream stalled: no events for 30000ms" }).reason).toBe("stream_stall");
+	});
+
+	it("classifies gRPC resource exhaustion as a transient server error", () => {
+		expect(classifyFailure({ message: "ResourceExhausted: temporarily unable to serve this request" })).toMatchObject(
+			{
+				reason: "server_error",
+				retryable: true,
+				shouldFallback: true,
+			},
+		);
 	});
 
 	it.each([

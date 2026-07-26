@@ -5,7 +5,7 @@
  * a summary of the branch being left so context isn't lost.
  */
 
-import type { AssistantMessage, Context, Model, SimpleStreamOptions } from "@caupulican/pi-ai";
+import type { AssistantMessage, Context, Model, SimpleStreamOptions, Usage } from "@caupulican/pi-ai";
 import { completeSimple } from "@caupulican/pi-ai";
 import {
 	convertToLlm,
@@ -16,6 +16,7 @@ import {
 import { classifyFailure } from "../reliability/classifier.ts";
 import type { ReadonlySessionManager, SessionEntry } from "../session/session-manager.ts";
 import type { AgentMessage, StreamFn } from "../types.ts";
+import { addUsage, createEmptyUsage } from "../usage.ts";
 import { estimateTokens } from "./compaction.ts";
 import {
 	computeFileLists,
@@ -35,6 +36,8 @@ export interface BranchSummaryResult {
 	summary?: string;
 	readFiles?: string[];
 	modifiedFiles?: string[];
+	/** Provider usage spent generating the summary, including retry attempts. */
+	usage?: Usage;
 	aborted?: boolean;
 	error?: string;
 }
@@ -67,7 +70,7 @@ export interface GenerateBranchSummaryOptions {
 	/** Model to use for summarization */
 	model: Model<any>;
 	/** API key for the model */
-	apiKey: string;
+	apiKey: string | undefined;
 	/** Request headers for the model */
 	headers?: Record<string, string>;
 	/** Abort signal for cancellation */
@@ -348,6 +351,7 @@ export async function generateBranchSummary(
 	// Call LLM for summarization. Retry transient provider/watchdog failures so branch summaries
 	// use the same reliability doctrine as compaction instead of bypassing the host stream wrapper.
 	let response: AssistantMessage | undefined;
+	const usage = createEmptyUsage();
 	for (let attempt = 0; attempt < 3; attempt++) {
 		response = await completeBranchSummary(
 			model,
@@ -355,6 +359,7 @@ export async function generateBranchSummary(
 			{ apiKey, headers, signal, maxTokens: 2048 },
 			streamFn,
 		);
+		addUsage(usage, response.usage);
 		if (response.stopReason !== "error") break;
 		const classified = classifyFailure({ message: response.errorMessage ?? "", provider: response.provider });
 		if (!classified.retryable || signal.aborted) break;
@@ -385,5 +390,6 @@ export async function generateBranchSummary(
 		summary: summary || "No summary generated",
 		readFiles,
 		modifiedFiles,
+		usage,
 	};
 }

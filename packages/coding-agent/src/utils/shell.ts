@@ -2,6 +2,7 @@ import { existsSync } from "node:fs";
 import { delimiter } from "node:path";
 import { spawnSync } from "child_process";
 import { getBinDir } from "../config.ts";
+import { normalizePath } from "./paths.ts";
 
 export type PlatformShellToolName = "bash" | "powershell";
 
@@ -110,9 +111,10 @@ export function getShellConfig(
 	shellName: PlatformShellToolName = getPlatformShellToolName(),
 ): ShellConfig {
 	if (customShellPath) {
-		if (!existsSync(customShellPath)) throw new Error(`Custom shell path not found: ${customShellPath}`);
+		const resolvedShellPath = normalizePath(customShellPath);
+		if (!existsSync(resolvedShellPath)) throw new Error(`Custom shell path not found: ${resolvedShellPath}`);
 		return {
-			shell: customShellPath,
+			shell: resolvedShellPath,
 			args: shellName === "powershell" ? [...POWERSHELL_ARGS] : ["-c"],
 		};
 	}

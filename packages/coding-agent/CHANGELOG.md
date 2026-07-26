@@ -18,6 +18,9 @@
 - Removed successful orchestration bookkeeping from collapsed chat history, retained full detail on explicit expansion, and prevented resumed terminal state from replaying as new completion feedback.
 - Deferred retained tool-result reads, renderer construction, and image conversion during collapsed history reload until explicit expansion, with the materialized payload released again on collapse.
 - Prevented denied extension code and embedded profile content from crossing the read/import boundary, preserved exact CLI/live grants through reloads without invalidating their shared runtime, and made core acceptance fail on skipped or todo evidence.
+- Preserved durable usage from tool hooks, compaction, branch summaries, and resumed sessions across session, daily, and cumulative accounting.
+- Rejected resource directories as context files, resolved scoped model IDs literally, exposed unavailable selections, and clarified unsaved-session fork failures.
+- Consolidated external-editor execution, restored the Windows terminal title after package checks, reported aborted retries as failures, and corrected manual update checks, npm uninstall compatibility, read-error rendering, and sibling extension paths.
 
 ## [0.81.40] - 2026-07-24
 

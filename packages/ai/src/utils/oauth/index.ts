@@ -18,6 +18,7 @@ export {
 	normalizeDomain,
 	refreshGitHubCopilotToken,
 } from "./github-copilot.ts";
+export { kimiCodingOAuthProvider, loginKimiCoding } from "./kimi-coding.ts";
 // OpenAI Codex (ChatGPT OAuth)
 export {
 	loginOpenAICodex,
@@ -27,8 +28,9 @@ export {
 	openaiCodexOAuthProvider,
 	refreshOpenAICodexToken,
 } from "./openai-codex.ts";
-
+export { loginOpenRouter, openRouterOAuthProvider } from "./openrouter.ts";
 export * from "./types.ts";
+export { loginXai, refreshXaiToken, xaiOAuthProvider } from "./xai.ts";
 
 // ============================================================================
 // Provider Registry
@@ -36,13 +38,19 @@ export * from "./types.ts";
 
 import { anthropicOAuthProvider } from "./anthropic.ts";
 import { githubCopilotOAuthProvider } from "./github-copilot.ts";
+import { kimiCodingOAuthProvider } from "./kimi-coding.ts";
 import { openaiCodexOAuthProvider } from "./openai-codex.ts";
+import { openRouterOAuthProvider } from "./openrouter.ts";
 import type { OAuthCredentials, OAuthProviderId, OAuthProviderInfo, OAuthProviderInterface } from "./types.ts";
+import { xaiOAuthProvider } from "./xai.ts";
 
 const BUILT_IN_OAUTH_PROVIDERS: OAuthProviderInterface[] = [
 	anthropicOAuthProvider,
 	githubCopilotOAuthProvider,
 	openaiCodexOAuthProvider,
+	xaiOAuthProvider,
+	kimiCodingOAuthProvider,
+	openRouterOAuthProvider,
 ];
 
 const oauthProviderRegistry = new Map<string, OAuthProviderInterface>(

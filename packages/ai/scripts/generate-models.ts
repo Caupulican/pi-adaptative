@@ -9,6 +9,7 @@ import {
 	CLOUDFLARE_AI_GATEWAY_OPENAI_BASE_URL,
 	CLOUDFLARE_WORKERS_AI_BASE_URL,
 } from "../src/providers/cloudflare.ts";
+import { detectOpenRouterCacheControlFormat } from "../src/providers/openrouter-cache.ts";
 import type {
 	AnthropicMessagesCompat,
 	Api,
@@ -69,6 +70,24 @@ const COPILOT_STATIC_HEADERS = {
 const KIMI_STATIC_HEADERS = {
 	"User-Agent": "KimiCLI/1.5",
 } as const;
+
+const QWEN_TOKEN_PLAN_COMPAT: OpenAICompletionsCompat = {
+	thinkingFormat: "qwen",
+	supportsDeveloperRole: false,
+	supportsStore: false,
+};
+const QWEN_TOKEN_PLAN_VARIANTS = [
+	{
+		source: "alibaba-token-plan",
+		provider: "qwen-token-plan",
+		baseUrl: "https://token-plan.ap-southeast-1.maas.aliyuncs.com/compatible-mode/v1",
+	},
+	{
+		source: "alibaba-token-plan-cn",
+		provider: "qwen-token-plan-cn",
+		baseUrl: "https://token-plan.cn-beijing.maas.aliyuncs.com/compatible-mode/v1",
+	},
+] as const;
 
 const TOGETHER_BASE_URL = "https://api.together.ai/v1";
 const TOGETHER_BASE_COMPAT: OpenAICompletionsCompat = {
@@ -211,6 +230,10 @@ const OPENAI_RESPONSES_NONE_REASONING_MODELS = new Set([
 	"gpt-5.6-terra",
 	"gpt-5.6-luna",
 ]);
+const XAI_RESPONSES_MODEL_ID = "grok-4.5";
+const XAI_RESPONSES_COMPAT: OpenAIResponsesCompat = {
+	supportsLongCacheRetention: false,
+};
 
 function mergeThinkingLevelMap(model: Model<any>, map: NonNullable<Model<any>["thinkingLevelMap"]>): void {
 	model.thinkingLevelMap = { ...model.thinkingLevelMap, ...map };
@@ -322,6 +345,9 @@ function applyThinkingLevelMetadata(model: Model<any>): void {
 		OPENAI_RESPONSES_NONE_REASONING_MODELS.has(model.id)
 	) {
 		mergeThinkingLevelMap(model, { off: "none" });
+	}
+	if (model.provider === "xai" && model.api === "openai-responses" && model.id === XAI_RESPONSES_MODEL_ID) {
+		mergeThinkingLevelMap(model, { off: null, minimal: null });
 	}
 	if (supportsOpenAiXhigh(model.id)) {
 		mergeThinkingLevelMap(model, { xhigh: "xhigh" });
@@ -814,13 +840,15 @@ async function loadModelsDevData(): Promise<Model<any>[]> {
 			for (const [modelId, model] of Object.entries(data.xai.models)) {
 				const m = model as ModelsDevModel;
 				if (m.tool_call !== true) continue;
+				const useResponsesApi = modelId === XAI_RESPONSES_MODEL_ID;
 
 				models.push({
 					id: modelId,
 					name: m.name || modelId,
-					api: "openai-completions",
+					api: useResponsesApi ? "openai-responses" : "openai-completions",
 					provider: "xai",
 					baseUrl: "https://api.x.ai/v1",
+					...(useResponsesApi ? { compat: { ...XAI_RESPONSES_COMPAT } } : {}),
 					reasoning: m.reasoning === true,
 					input: m.modalities?.input?.includes("image") ? ["text", "image"] : ["text"],
 					cost: {
@@ -1013,11 +1041,12 @@ async function loadModelsDevData(): Promise<Model<any>[]> {
 				const npm = m.provider?.npm;
 				let api: Api;
 				let baseUrl: string;
-				let compat: OpenAICompletionsCompat | undefined;
+				let compat: OpenAICompletionsCompat | OpenAIResponsesCompat | undefined;
 
 				if (npm === "@ai-sdk/openai") {
 					api = "openai-responses";
 					baseUrl = `${variant.basePath}/v1`;
+					compat = { sessionAffinityFormat: "openai-nosession" };
 				} else if (npm === "@ai-sdk/anthropic") {
 					api = "anthropic-messages";
 					// Anthropic SDK appends /v1/messages to baseURL
@@ -1093,12 +1122,13 @@ async function loadModelsDevData(): Promise<Model<any>[]> {
 				if (m.tool_call !== true) continue;
 				if (m.status === "deprecated") continue;
 
-				// Claude 4.x models route to Anthropic Messages API
-				const isCopilotClaude4 = /^claude-(haiku|sonnet|opus)-4([.\-]|$)/.test(modelId);
-				// gpt-5 models require responses API, others use completions
-				const needsResponsesApi = modelId.startsWith("gpt-5") || modelId.startsWith("oswe");
+				// Claude 4.x and 5.x models route to Anthropic Messages API.
+				const isCopilotClaude = /^claude-(fable|haiku|sonnet|opus)-[45]([.\-]|$)/.test(modelId);
+				// GPT-5, OSWE, and MAI-Code models are only served through the Responses endpoint.
+				const needsResponsesApi =
+					modelId.startsWith("gpt-5") || modelId.startsWith("oswe") || modelId.startsWith("mai-");
 
-				const api: Api = isCopilotClaude4
+				const api: Api = isCopilotClaude
 					? "anthropic-messages"
 					: needsResponsesApi
 						? "openai-responses"
@@ -1198,6 +1228,7 @@ async function loadModelsDevData(): Promise<Model<any>[]> {
 					// Kimi For Coding's Anthropic-compatible API - SDK appends /v1/messages
 					baseUrl: "https://api.kimi.com/coding",
 					headers: { ...KIMI_STATIC_HEADERS },
+					compat: { authFormat: "bearer" },
 					reasoning: m.reasoning === true,
 					input: m.modalities?.input?.includes("image") ? ["text", "image"] : ["text"],
 					cost: {
@@ -1294,6 +1325,34 @@ async function loadModelsDevData(): Promise<Model<any>[]> {
 						maxTokens: m.limit?.output || 4096,
 					});
 				}
+			}
+		}
+
+		// Alibaba Cloud Model Studio Token Plan exposes the same OpenAI-compatible catalog in two regions.
+		for (const { source, provider, baseUrl } of QWEN_TOKEN_PLAN_VARIANTS) {
+			const providerModels = data[source]?.models;
+			if (!providerModels) continue;
+			for (const [modelId, model] of Object.entries(providerModels)) {
+				const m = model as ModelsDevModel;
+				if (m.tool_call !== true) continue;
+				models.push({
+					id: modelId,
+					name: m.name || modelId,
+					api: "openai-completions",
+					provider,
+					baseUrl,
+					compat: QWEN_TOKEN_PLAN_COMPAT,
+					reasoning: m.reasoning === true,
+					input: m.modalities?.input?.includes("image") ? ["text", "image"] : ["text"],
+					cost: {
+						input: m.cost?.input || 0,
+						output: m.cost?.output || 0,
+						cacheRead: m.cost?.cache_read || 0,
+						cacheWrite: m.cost?.cache_write || 0,
+					},
+					contextWindow: m.limit?.context || 4096,
+					maxTokens: m.limit?.output || 4096,
+				});
 			}
 		}
 
@@ -1733,7 +1792,11 @@ async function generateModels() {
 	allModels.push(...deepseekV4Models);
 
 	for (const candidate of allModels) {
-		if (candidate.api === "openai-completions" && candidate.id.includes("deepseek-v4")) {
+		if (
+			candidate.api === "openai-completions" &&
+			candidate.id.includes("deepseek-v4") &&
+			(candidate.provider === "deepseek" || candidate.provider === "openrouter")
+		) {
 			candidate.compat = {
 				...candidate.compat,
 				...(candidate.provider === "openrouter"
@@ -1962,6 +2025,24 @@ async function generateModels() {
 			},
 			contextWindow: 262144, // 256k tokens
 			maxTokens: 262144,
+		});
+	}
+
+	// Keep the preview available until models.dev publishes it for both Token Plan regions.
+	for (const { provider, baseUrl } of QWEN_TOKEN_PLAN_VARIANTS) {
+		if (allModels.some((model) => model.provider === provider && model.id === "qwen3.8-max-preview")) continue;
+		allModels.push({
+			id: "qwen3.8-max-preview",
+			name: "Qwen3.8 Max Preview",
+			api: "openai-completions",
+			provider,
+			baseUrl,
+			compat: QWEN_TOKEN_PLAN_COMPAT,
+			reasoning: true,
+			input: ["text", "image"],
+			cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 },
+			contextWindow: 1_000_000,
+			maxTokens: 65_536,
 		});
 	}
 
@@ -2195,6 +2276,10 @@ async function generateModels() {
 	for (const model of allModels) {
 		if (model.api === "bedrock-converse-stream" && model.input.includes("image")) {
 			model.supportedImageMimeTypes = bedrockSupportedImageMimeTypes;
+		}
+		if (model.api === "openai-completions") {
+			const cacheControlFormat = detectOpenRouterCacheControlFormat(model.provider, model.id);
+			if (cacheControlFormat) model.compat = { ...model.compat, cacheControlFormat };
 		}
 		applyThinkingLevelMetadata(model);
 	}

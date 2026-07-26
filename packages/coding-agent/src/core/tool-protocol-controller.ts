@@ -38,6 +38,7 @@ import type {
 	ModelToolProbeVerdict,
 	NativeToolProbeGrade,
 } from "./models/adaptation-store.ts";
+import type { RequestAuth } from "./request-auth.ts";
 import type { SettingsManager } from "./settings-manager.ts";
 import type { ToolRecoveryLoggerStats } from "./tool-recovery-logger.ts";
 import { formatToolRepairHealthReport } from "./tool-repair-health.ts";
@@ -81,7 +82,7 @@ export interface ToolProtocolControllerDeps {
 	getModelRegistry(): ModelRegistry;
 	adaptationStore: ModelAdaptationStore;
 	isRawStreamSimple(fn: StreamFn): boolean;
-	getRequiredRequestAuth(model: Model<Api>): Promise<{ apiKey: string; headers?: Record<string, string> }>;
+	getRequiredRequestAuth(model: Model<Api>): Promise<RequestAuth>;
 	addSpawnedUsage(usage: Usage, opts: { label?: string; reportId: string }): string | undefined;
 	emitWarning(message: string): void;
 	sendCorrectiveSteer(message: string): Promise<void>;

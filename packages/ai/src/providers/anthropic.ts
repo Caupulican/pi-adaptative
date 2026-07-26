@@ -29,6 +29,7 @@ import type {
 import { AssistantMessageEventStream } from "../utils/event-stream.ts";
 import { headersToRecord } from "../utils/headers.ts";
 import { parseJsonWithRepair, parseStreamingJson } from "../utils/json-parse.ts";
+import { retryProviderRequest } from "../utils/provider-retry.ts";
 import { sanitizeSurrogates } from "../utils/sanitize-unicode.ts";
 import { StreamingLineDecoder } from "../utils/streaming-lines.ts";
 import { createToolNameMap, type ToolNameMap } from "../utils/tool-names.ts";
@@ -165,6 +166,7 @@ function getAnthropicCompat(
 	const isCloudflareAiGatewayAnthropic =
 		model.provider === "cloudflare-ai-gateway" && model.baseUrl.includes("anthropic");
 	return {
+		authFormat: model.compat?.authFormat ?? "api-key",
 		supportsEagerToolInputStreaming: model.compat?.supportsEagerToolInputStreaming ?? !isFireworks,
 		supportsLongCacheRetention: model.compat?.supportsLongCacheRetention ?? !isFireworks,
 		sendSessionAffinityHeaders:
@@ -245,6 +247,14 @@ function mergeHeaders(...headerSources: (Record<string, string | null> | undefin
 		}
 	}
 	return merged;
+}
+
+function hasAuthorizationHeader(...headerSources: (Record<string, string> | undefined)[]): boolean {
+	return headerSources.some((headers) =>
+		Object.entries(headers ?? {}).some(
+			([name, value]) => name.toLowerCase() === "authorization" && value.trim().length > 0,
+		),
+	);
 }
 
 interface ServerSentEvent {
@@ -440,7 +450,7 @@ export const streamAnthropic: StreamFunction<"anthropic-messages", AnthropicOpti
 				isOAuth = false;
 			} else {
 				const apiKey = options?.apiKey;
-				if (!apiKey) {
+				if (!apiKey && !hasAuthorizationHeader(model.headers, options?.headers)) {
 					throw new Error(`No API key for provider: ${model.provider}`);
 				}
 
@@ -480,9 +490,16 @@ export const streamAnthropic: StreamFunction<"anthropic-messages", AnthropicOpti
 			const requestOptions = {
 				...(options?.signal ? { signal: options.signal } : {}),
 				...(options?.timeoutMs !== undefined ? { timeout: options.timeoutMs } : {}),
-				maxRetries: options?.maxRetries ?? 0,
+				maxRetries: 0,
 			};
-			const response = await client.messages.create({ ...params, stream: true }, requestOptions).asResponse();
+			const response = await retryProviderRequest(
+				() => client.messages.create({ ...params, stream: true }, requestOptions).asResponse(),
+				{
+					maxRetries: options?.maxRetries,
+					maxRetryDelayMs: options?.maxRetryDelayMs,
+					signal: options?.signal,
+				},
+			);
 			await options?.onResponse?.({ status: response.status, headers: headersToRecord(response.headers) }, model);
 			stream.push({ type: "start", partial: output });
 
@@ -631,24 +648,27 @@ export const streamAnthropic: StreamFunction<"anthropic-messages", AnthropicOpti
 					}
 					// Only update usage fields if present (not null).
 					// Preserves input_tokens from message_start when proxies omit it in message_delta.
-					if (event.usage.input_tokens != null) {
-						output.usage.input = event.usage.input_tokens;
-					}
-					if (event.usage.output_tokens != null) {
-						output.usage.output = event.usage.output_tokens;
-					}
-					if (event.usage.cache_read_input_tokens != null) {
-						output.usage.cacheRead = event.usage.cache_read_input_tokens;
-					}
-					if (event.usage.cache_creation_input_tokens != null) {
-						output.usage.cacheWrite = event.usage.cache_creation_input_tokens;
+					if (event.usage) {
+						if (event.usage.input_tokens != null) {
+							output.usage.input = event.usage.input_tokens;
+						}
+						if (event.usage.output_tokens != null) {
+							output.usage.output = event.usage.output_tokens;
+						}
+						if (event.usage.cache_read_input_tokens != null) {
+							output.usage.cacheRead = event.usage.cache_read_input_tokens;
+						}
+						if (event.usage.cache_creation_input_tokens != null) {
+							output.usage.cacheWrite = event.usage.cache_creation_input_tokens;
+						}
+						const providerCost = (event.usage as { cost?: number }).cost;
+						if (providerCost !== undefined) {
+							output.usage.cost.total = providerCost || 0;
+						}
 					}
 					// Anthropic doesn't provide total_tokens, compute from components
 					output.usage.totalTokens =
 						output.usage.input + output.usage.output + output.usage.cacheRead + output.usage.cacheWrite;
-					if ((event.usage as any).cost !== undefined) {
-						output.usage.cost.total = (event.usage as any).cost || 0;
-					}
 					calculateCost(model, output.usage);
 				}
 			}
@@ -709,7 +729,7 @@ export const streamSimpleAnthropic: StreamFunction<"anthropic-messages", SimpleS
 	options?: SimpleStreamOptions,
 ): AssistantMessageEventStream => {
 	const apiKey = options?.apiKey;
-	if (!apiKey) {
+	if (!apiKey && !hasAuthorizationHeader(model.headers, options?.headers)) {
 		throw new Error(`No API key for provider: ${model.provider}`);
 	}
 
@@ -752,7 +772,7 @@ function isOAuthToken(apiKey: string): boolean {
 
 function createClient(
 	model: Model<"anthropic-messages">,
-	apiKey: string,
+	apiKey: string | undefined,
 	interleavedThinking: boolean,
 	useFineGrainedToolStreamingBeta: boolean,
 	optionsHeaders?: Record<string, string>,
@@ -767,6 +787,29 @@ function createClient(
 	}
 	if (needsInterleavedBeta) {
 		betaFeatures.push(INTERLEAVED_THINKING_BETA);
+	}
+
+	if (!apiKey && hasAuthorizationHeader(model.headers, optionsHeaders)) {
+		const client = new Anthropic({
+			apiKey: null,
+			authToken: null,
+			baseURL: model.provider === "cloudflare-ai-gateway" ? resolveCloudflareBaseUrl(model) : model.baseUrl,
+			dangerouslyAllowBrowser: true,
+			defaultHeaders: mergeHeaders(
+				{
+					accept: "application/json",
+					"anthropic-dangerous-direct-browser-access": "true",
+					...(betaFeatures.length > 0 ? { "anthropic-beta": betaFeatures.join(",") } : {}),
+				},
+				model.headers,
+				optionsHeaders,
+			),
+		});
+		return { client, isOAuthToken: false };
+	}
+
+	if (!apiKey) {
+		throw new Error(`No API key for provider: ${model.provider}`);
 	}
 
 	if (model.provider === "cloudflare-ai-gateway") {
@@ -785,6 +828,27 @@ function createClient(
 					...(betaFeatures.length > 0 ? { "anthropic-beta": betaFeatures.join(",") } : {}),
 				},
 				model.headers,
+				optionsHeaders,
+			),
+		});
+
+		return { client, isOAuthToken: false };
+	}
+
+	if (getAnthropicCompat(model).authFormat === "bearer") {
+		const client = new Anthropic({
+			apiKey: null,
+			authToken: apiKey,
+			baseURL: model.baseUrl,
+			dangerouslyAllowBrowser: true,
+			defaultHeaders: mergeHeaders(
+				{
+					accept: "application/json",
+					"anthropic-dangerous-direct-browser-access": "true",
+					...(betaFeatures.length > 0 ? { "anthropic-beta": betaFeatures.join(",") } : {}),
+				},
+				model.headers,
+				dynamicHeaders,
 				optionsHeaders,
 			),
 		});
@@ -1069,11 +1133,13 @@ function convertMessages(
 						});
 						continue;
 					}
-					if (block.thinking.trim().length === 0) continue;
+					const thinkingSignature = block.thinkingSignature;
+					const hasThinkingSignature = !!thinkingSignature && thinkingSignature.trim().length > 0;
+					if (block.thinking.trim().length === 0 && !hasThinkingSignature) continue;
 					// If thinking signature is missing/empty (e.g., from aborted stream),
 					// convert to plain text for Anthropic. Some compatible providers emit
 					// and accept empty signatures, so let marked models preserve the block.
-					if (!block.thinkingSignature || block.thinkingSignature.trim().length === 0) {
+					if (!hasThinkingSignature) {
 						blocks.push(
 							allowEmptySignature
 								? {
@@ -1090,7 +1156,7 @@ function convertMessages(
 						blocks.push({
 							type: "thinking",
 							thinking: sanitizeSurrogates(block.thinking),
-							signature: block.thinkingSignature,
+							signature: thinkingSignature,
 						});
 					}
 				} else if (block.type === "toolCall") {

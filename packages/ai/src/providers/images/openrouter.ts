@@ -17,6 +17,7 @@ import type {
 } from "../../types.ts";
 import { formatProviderError, normalizeProviderError } from "../../utils/error-body.ts";
 import { headersToRecord } from "../../utils/headers.ts";
+import { retryProviderRequest } from "../../utils/provider-retry.ts";
 import { sanitizeSurrogates } from "../../utils/sanitize-unicode.ts";
 
 interface OpenRouterGeneratedImage {
@@ -63,11 +64,19 @@ export const generateImagesOpenRouter: ImagesFunction<"openrouter-images", Image
 		const requestOptions = {
 			...(options?.signal ? { signal: options.signal } : {}),
 			...(options?.timeoutMs !== undefined ? { timeout: options.timeoutMs } : {}),
-			maxRetries: options?.maxRetries ?? 0,
+			maxRetries: 0,
 		};
-		const { data: response, response: rawResponse } = await client.chat.completions
-			.create(params as unknown as ChatCompletionCreateParamsNonStreaming, requestOptions)
-			.withResponse();
+		const { data: response, response: rawResponse } = await retryProviderRequest(
+			() =>
+				client.chat.completions
+					.create(params as unknown as ChatCompletionCreateParamsNonStreaming, requestOptions)
+					.withResponse(),
+			{
+				maxRetries: options?.maxRetries,
+				maxRetryDelayMs: options?.maxRetryDelayMs,
+				signal: options?.signal,
+			},
+		);
 		await options?.onResponse?.({ status: rawResponse.status, headers: headersToRecord(rawResponse.headers) }, model);
 
 		const imageResponse = response as OpenRouterImageGenerationResponse;

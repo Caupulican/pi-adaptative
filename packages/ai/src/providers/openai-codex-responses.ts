@@ -43,6 +43,7 @@ import { formatProviderError, normalizeProviderError } from "../utils/error-body
 import { AssistantMessageEventStream } from "../utils/event-stream.ts";
 import { headersToRecord } from "../utils/headers.ts";
 import { StreamingLineDecoder } from "../utils/streaming-lines.ts";
+import { uuidv7 } from "../utils/uuid.ts";
 import {
 	buildOpenAICodexHeaders,
 	DEFAULT_OPENAI_CODEX_BASE_URL,
@@ -70,6 +71,8 @@ const CODEX_TOOL_CALL_PROVIDERS = new Set(["openai", "openai-codex", "opencode"]
 const WEBSOCKET_MESSAGE_TOO_BIG_CLOSE_CODE = 1009;
 const WEBSOCKET_CONNECTION_LIMIT_ERROR_CODE = "websocket_connection_limit_reached";
 const WEBSOCKET_CONNECTION_LIMIT_RETRIES = 1;
+const PREVIOUS_RESPONSE_NOT_FOUND_ERROR_CODE = "previous_response_not_found";
+const PREVIOUS_RESPONSE_NOT_FOUND_RETRIES = 1;
 const OPENAI_INTERNAL_CODEX_RESPONSES_LITE_HEADER = "x-openai-internal-codex-responses-lite";
 const WS_RESPONSES_LITE_CLIENT_METADATA_KEY = "ws_request_header_x_openai_internal_codex_responses_lite";
 
@@ -97,6 +100,7 @@ export interface OpenAICodexResponsesOptions extends StreamOptions {
 	reasoningSummary?: "auto" | "concise" | "detailed" | "off" | "on" | null;
 	serviceTier?: ResponseCreateParamsStreaming["service_tier"];
 	textVerbosity?: "low" | "medium" | "high";
+	toolChoice?: "auto" | "none" | "required";
 }
 
 type CodexResponseStatus = "completed" | "incomplete" | "failed" | "cancelled" | "queued" | "in_progress";
@@ -123,7 +127,7 @@ interface RequestBody {
 	previous_response_id?: string;
 	input?: ResponseInput;
 	tools?: OpenAITool[];
-	tool_choice?: "auto";
+	tool_choice?: OpenAICodexResponsesOptions["toolChoice"];
 	parallel_tool_calls?: boolean;
 	temperature?: number;
 	reasoning?: { effort?: string; summary?: string; context?: "auto" | "current_turn" | "all_turns" };
@@ -182,9 +186,16 @@ function getRetryAfterDelayMs(headers: Headers): number | undefined {
 	return undefined;
 }
 
-function capRetryDelayMs(delayMs: number, options?: StreamOptions): number {
+class RetryDelayExceededError extends Error {}
+
+function validateRetryDelayMs(delayMs: number, options?: StreamOptions): number {
 	const maxRetryDelayMs = options?.maxRetryDelayMs ?? DEFAULT_MAX_RETRY_DELAY_MS;
-	return maxRetryDelayMs > 0 ? Math.min(delayMs, maxRetryDelayMs) : delayMs;
+	if (maxRetryDelayMs > 0 && delayMs > maxRetryDelayMs) {
+		throw new RetryDelayExceededError(
+			`Server requested ${Math.ceil(delayMs / 1000)}s retry delay (max: ${Math.ceil(maxRetryDelayMs / 1000)}s)`,
+		);
+	}
+	return delayMs;
 }
 
 function normalizeTimeoutMs(value: number | undefined): number | undefined {
@@ -299,23 +310,25 @@ export const streamOpenAICodexResponses: StreamFunction<"openai-codex-responses"
 			}
 
 			const accountId = requireOpenAICodexAccountId(apiKey);
+			const cacheSessionId =
+				options?.cacheRetention === "none" ? undefined : clampOpenAIPromptCacheKey(options?.sessionId);
 			let body: RequestBody | undefined;
 			if (options?.onPayload) {
-				body = buildRequestBody(model, context, options);
+				body = buildRequestBody(model, context, options, cacheSessionId);
 				const nextBody = await options.onPayload(body, model);
 				if (nextBody !== undefined) body = nextBody as RequestBody;
 			}
 			const getBody = (): RequestBody => {
-				if (!body) body = buildRequestBody(model, context, options);
+				if (!body) body = buildRequestBody(model, context, options, cacheSessionId);
 				return body;
 			};
-			const websocketRequestId = options?.sessionId || createCodexRequestId();
+			const websocketRequestId = cacheSessionId ?? uuidv7();
 			let sseHeaders = buildSSEHeaders(
 				model.headers,
 				options?.headers,
 				accountId,
 				apiKey,
-				options?.sessionId,
+				cacheSessionId,
 				model.openaiResponsesLite === true,
 			);
 			const websocketHeaders = buildWebSocketHeaders(
@@ -333,16 +346,19 @@ export const streamOpenAICodexResponses: StreamFunction<"openai-codex-responses"
 			const idleTimeoutMs = normalizeTimeoutMs(options?.timeoutMs);
 			const websocketConnectTimeoutMs = normalizeTimeoutMs(options?.websocketConnectTimeoutMs);
 			const transport = options?.transport || "auto";
-			const websocketDisabledForSession = transport !== "sse" && isWebSocketSseFallbackActive(options?.sessionId);
+			let startEmitted = false;
+			const websocketDisabledForSession = transport !== "sse" && isWebSocketSseFallbackActive(cacheSessionId);
 			if (websocketDisabledForSession) {
-				recordWebSocketSseFallback(options?.sessionId);
+				recordWebSocketSseFallback(cacheSessionId);
 			}
 
 			if (transport !== "sse" && !websocketDisabledForSession) {
 				let websocketStarted = false;
 				let websocketConnectionLimitRetries = 0;
+				let missingContinuationRetries = 0;
 				try {
 					while (true) {
+						websocketStarted = false;
 						try {
 							await processWebSocketStream(
 								resolveCodexWebSocketUrl(model.baseUrl),
@@ -354,13 +370,28 @@ export const streamOpenAICodexResponses: StreamFunction<"openai-codex-responses"
 								model,
 								() => {
 									websocketStarted = true;
+									if (!startEmitted) {
+										startEmitted = true;
+										stream.push({ type: "start", partial: output });
+									}
 								},
 								idleTimeoutMs,
 								websocketConnectTimeoutMs,
+								cacheSessionId,
 								options,
 							);
 							break;
 						} catch (error) {
+							const missingContinuationCanReplay =
+								!options?.signal?.aborted &&
+								missingContinuationRetries < PREVIOUS_RESPONSE_NOT_FOUND_RETRIES &&
+								isPreviousResponseNotFoundError(error) &&
+								output.content.length === 0 &&
+								output.usage.totalTokens === 0;
+							if (missingContinuationCanReplay) {
+								missingContinuationRetries++;
+								continue;
+							}
 							if (
 								!websocketStarted &&
 								!options?.signal?.aborted &&
@@ -400,12 +431,12 @@ export const streamOpenAICodexResponses: StreamFunction<"openai-codex-responses"
 							requestBytes: new TextEncoder().encode(serializeBody()).byteLength,
 						}),
 					);
-					recordWebSocketFailure(options?.sessionId, error);
-					markCodexRouteRetrySse(options?.sessionId);
+					recordWebSocketFailure(cacheSessionId, error);
+					markCodexRouteRetrySse(cacheSessionId);
 					if (websocketStarted) {
 						throw error;
 					}
-					recordWebSocketSseFallback(options?.sessionId);
+					recordWebSocketSseFallback(cacheSessionId);
 				}
 			}
 
@@ -449,7 +480,7 @@ export const streamOpenAICodexResponses: StreamFunction<"openai-codex-responses"
 								options?.headers,
 								requireOpenAICodexAccountId(replacementKey),
 								replacementKey,
-								options?.sessionId,
+								cacheSessionId,
 								model.openaiResponsesLite === true,
 							);
 							continue;
@@ -462,9 +493,7 @@ export const streamOpenAICodexResponses: StreamFunction<"openai-codex-responses"
 						const delayMs =
 							retryAfterDelayMs === undefined
 								? BASE_DELAY_MS * 2 ** attempt
-								: response.status === 429
-									? capRetryDelayMs(retryAfterDelayMs, options)
-									: retryAfterDelayMs;
+								: validateRetryDelayMs(retryAfterDelayMs, options);
 
 						await abortableSleep(delayMs, options?.signal);
 						continue;
@@ -485,7 +514,11 @@ export const streamOpenAICodexResponses: StreamFunction<"openai-codex-responses"
 					}
 					lastError = error instanceof Error ? error : new Error(String(error));
 					// Network errors are retryable unless the thrown message is a terminal quota/usage limit.
-					if (attempt < maxRetries && !isTerminalRateLimitError(lastError.message)) {
+					if (
+						attempt < maxRetries &&
+						!(lastError instanceof RetryDelayExceededError) &&
+						!isTerminalRateLimitError(lastError.message)
+					) {
 						const delayMs = BASE_DELAY_MS * 2 ** attempt;
 						await abortableSleep(delayMs, options?.signal);
 						continue;
@@ -503,9 +536,12 @@ export const streamOpenAICodexResponses: StreamFunction<"openai-codex-responses"
 			}
 
 			appendCodexSubscriptionRateLimitDiagnostics(output, response.headers);
-			stream.push({ type: "start", partial: output });
+			if (!startEmitted) {
+				startEmitted = true;
+				stream.push({ type: "start", partial: output });
+			}
 			await processStream(response, output, stream, model, context, options);
-			markSseSuccess(options?.sessionId);
+			markSseSuccess(cacheSessionId);
 
 			if (options?.signal?.aborted) {
 				throw new Error("Request was aborted");
@@ -556,7 +592,8 @@ export const streamSimpleOpenAICodexResponses: StreamFunction<"openai-codex-resp
 function buildRequestBody(
 	model: Model<"openai-codex-responses">,
 	context: Context,
-	options?: OpenAICodexResponsesOptions,
+	options: OpenAICodexResponsesOptions | undefined,
+	cacheSessionId: string | undefined,
 ): RequestBody {
 	const lite = model.openaiResponsesLite === true;
 	const toolNameMap = createOpenAIResponsesToolNameMap(context.tools ?? []);
@@ -593,8 +630,8 @@ function buildRequestBody(
 		input,
 		text: { verbosity: options?.textVerbosity || "low" },
 		include: ["reasoning.encrypted_content"],
-		prompt_cache_key: clampOpenAIPromptCacheKey(options?.sessionId),
-		tool_choice: "auto",
+		prompt_cache_key: cacheSessionId,
+		tool_choice: options?.toolChoice ?? "auto",
 		parallel_tool_calls: !lite,
 	};
 
@@ -734,6 +771,10 @@ function isCodexNonTransportError(error: unknown): boolean {
 
 function isWebSocketConnectionLimitError(error: unknown): boolean {
 	return error instanceof CodexApiError && error.code === WEBSOCKET_CONNECTION_LIMIT_ERROR_CODE;
+}
+
+function isPreviousResponseNotFoundError(error: unknown): boolean {
+	return error instanceof CodexApiError && error.code === PREVIOUS_RESPONSE_NOT_FOUND_ERROR_CODE;
 }
 
 function formatCodexEventError(prefix: string, event: Record<string, unknown>, code: string, message: string): string {
@@ -1565,7 +1606,9 @@ function prepareIncrementalWebSocketRequest(
 		...context,
 		messages: context.messages.slice(continuation.sourceMessageCount),
 	};
-	const tailBody = buildRequestBody(model, tailContext, options);
+	const cacheSessionId =
+		options?.cacheRetention === "none" ? undefined : clampOpenAIPromptCacheKey(options?.sessionId);
+	const tailBody = buildRequestBody(model, tailContext, options, cacheSessionId);
 	if (!requestBodiesMatchExceptInput(tailBody, continuation.requestShape)) return undefined;
 	const tailInput = tailBody.input ?? [];
 	if (tailInput.length < continuation.responseItems.length) return undefined;
@@ -1581,8 +1624,6 @@ function prepareIncrementalWebSocketRequest(
 
 async function* startWebSocketOutputOnFirstEvent(
 	events: AsyncIterable<ResponseStreamEvent>,
-	output: AssistantMessage,
-	stream: AssistantMessageEventStream,
 	onStart: () => void,
 ): AsyncGenerator<ResponseStreamEvent> {
 	let started = false;
@@ -1590,7 +1631,6 @@ async function* startWebSocketOutputOnFirstEvent(
 		if (!started) {
 			started = true;
 			onStart();
-			stream.push({ type: "start", partial: output });
 		}
 		yield event;
 	}
@@ -1607,13 +1647,14 @@ async function processWebSocketStream(
 	onStart: () => void,
 	idleTimeoutMs: number | undefined,
 	websocketConnectTimeoutMs: number | undefined,
+	cacheSessionId: string | undefined,
 	options?: OpenAICodexResponsesOptions,
 ): Promise<void> {
 	const toolNameMap = createOpenAIResponsesToolNameMap(context.tools ?? []);
 	const { socket, entry, reused, release } = await acquireWebSocket(
 		url,
 		headers,
-		options?.sessionId,
+		cacheSessionId,
 		options?.apiKey ?? "",
 		options?.signal,
 		websocketConnectTimeoutMs,
@@ -1640,7 +1681,7 @@ async function processWebSocketStream(
 				},
 			}
 		: requestBody;
-	const stats = options?.sessionId ? getOrCreateWebSocketDebugStats(options.sessionId) : undefined;
+	const stats = cacheSessionId ? getOrCreateWebSocketDebugStats(cacheSessionId) : undefined;
 	if (stats) {
 		stats.requests++;
 		if (reused) stats.connectionsReused++;
@@ -1663,8 +1704,6 @@ async function processWebSocketStream(
 		await processResponsesStream(
 			startWebSocketOutputOnFirstEvent(
 				mapCodexEvents(parseWebSocket(socket, options?.signal, idleTimeoutMs)),
-				output,
-				stream,
 				onStart,
 			),
 			output,
@@ -1737,13 +1776,6 @@ async function parseErrorResponse(response: Response): Promise<{ message: string
 // ============================================================================
 // Auth & Headers
 // ============================================================================
-
-function createCodexRequestId(): string {
-	if (typeof globalThis.crypto?.randomUUID === "function") {
-		return globalThis.crypto.randomUUID();
-	}
-	return `codex_${Date.now()}_${Math.random().toString(36).slice(2, 10)}`;
-}
 
 function buildBaseCodexHeaders(
 	initHeaders: Record<string, string> | undefined,

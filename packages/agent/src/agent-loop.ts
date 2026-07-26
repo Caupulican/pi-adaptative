@@ -1044,6 +1044,7 @@ async function finalizeExecutedToolCall(
 				result = {
 					content: afterResult.content ?? result.content,
 					details: afterResult.details ?? result.details,
+					usage: afterResult.usage ?? result.usage,
 					terminate: afterResult.terminate ?? result.terminate,
 				};
 				isError = afterResult.isError ?? isError;
@@ -1051,12 +1052,13 @@ async function finalizeExecutedToolCall(
 		} catch (error) {
 			failureMessage = error instanceof Error ? error.message : String(error);
 			errorClass = error instanceof Error ? error.name : typeof error;
-			result = createErrorToolResult(failureMessage);
+			result = { ...createErrorToolResult(failureMessage), usage: result.usage };
 			isError = true;
 		}
 	}
 
 	if (isError) {
+		const usage = result.usage;
 		const record = rememberToolFailure(
 			toolFailureMemory,
 			prepared.toolCall.name,
@@ -1065,7 +1067,7 @@ async function finalizeExecutedToolCall(
 			classifyToolFailure(failureMessage, errorClass),
 			toolFailureCorrection(failureMessage, "failed"),
 		);
-		result = createToolFailureResult(record, result.terminate);
+		result = { ...createToolFailureResult(record, result.terminate), usage };
 	} else {
 		clearToolFailure(toolFailureMemory, prepared.toolCall.name, prepared.args);
 	}
@@ -1131,6 +1133,7 @@ function createToolResultMessage(finalized: FinalizedToolCallOutcome): ToolResul
 		toolName: finalized.toolCall.name,
 		content: finalized.result.content,
 		details: finalized.result.details,
+		usage: finalized.result.usage,
 		isError: finalized.isError,
 		timestamp: Date.now(),
 	};

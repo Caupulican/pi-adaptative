@@ -6,7 +6,7 @@
  */
 
 import type { AssistantMessage, Context, Model, SimpleStreamOptions, Usage } from "@caupulican/pi-ai";
-import { completeSimple } from "@caupulican/pi-ai";
+import { completeSimple, uuidv7 } from "@caupulican/pi-ai";
 import {
 	convertToLlm,
 	createBranchSummaryMessage,
@@ -15,6 +15,7 @@ import {
 } from "../messages.ts";
 import { buildSessionContext, type CompactionEntry, type SessionEntry } from "../session/session-manager.ts";
 import type { AgentMessage, StreamFn, ThinkingLevel } from "../types.ts";
+import { addUsage, combineUsage, createEmptyUsage } from "../usage.ts";
 import { type CompactionFacts, extractCompactionFacts, renderFactsBlock } from "./extraction.ts";
 import {
 	computeFileLists,
@@ -123,6 +124,8 @@ export interface CompactionResult<T = unknown> {
 	summary: string;
 	firstKeptEntryId: string;
 	tokensBefore: number;
+	/** Provider usage spent generating this checkpoint, including chunk and verification retries. */
+	usage?: Usage;
 	/** Extension-specific data (e.g., ArtifactIndex, version markers for structured compaction) */
 	details?: T;
 	verification?: VerificationReport;
@@ -265,20 +268,38 @@ export interface ContextUsageEstimate {
 	lastUsageIndex: number | null;
 }
 
-function getLastAssistantUsageInfo(messages: AgentMessage[]): { usage: Usage; index: number } | undefined {
-	for (let i = messages.length - 1; i >= 0; i--) {
-		const usage = getAssistantUsage(messages[i]);
-		if (usage) return { usage, index: i };
+/**
+ * Find the newest assistant usage that still describes the current message prefix.
+ *
+ * Compaction can insert a newer summary before retained older messages. Usage recorded by an
+ * assistant before that inserted message describes the pre-compaction prefix and must not anchor
+ * the rebuilt context estimate. Walking forward lets the newest timestamp in the prefix invalidate
+ * those stale usage blocks while still accepting the first response produced after compaction.
+ */
+export function getApplicableAssistantUsageInfo(
+	messages: readonly AgentMessage[],
+): { usage: Usage; index: number } | undefined {
+	let latestPrefixTimestamp = Number.NEGATIVE_INFINITY;
+	let usageInfo: { usage: Usage; index: number } | undefined;
+
+	for (let i = 0; i < messages.length; i++) {
+		const message = messages[i];
+		const usage = getAssistantUsage(message);
+		if (usage && message.timestamp >= latestPrefixTimestamp) {
+			usageInfo = { usage, index: i };
+		}
+		latestPrefixTimestamp = Math.max(latestPrefixTimestamp, message.timestamp);
 	}
-	return undefined;
+
+	return usageInfo;
 }
 
 /**
  * Estimate context tokens from messages, using the last assistant usage when available.
  * If there are messages after the last usage, estimate their tokens with estimateTokens.
  */
-export function estimateContextTokens(messages: AgentMessage[]): ContextUsageEstimate {
-	const usageInfo = getLastAssistantUsageInfo(messages);
+export function estimateContextTokens(messages: readonly AgentMessage[]): ContextUsageEstimate {
+	const usageInfo = getApplicableAssistantUsageInfo(messages);
 
 	if (!usageInfo) {
 		let estimated = 0;
@@ -627,11 +648,16 @@ function createSummarizationOptions(
 	signal: AbortSignal | undefined,
 	thinkingLevel: ThinkingLevel | undefined,
 ): SimpleStreamOptions {
-	// SUMMARIZATION_SYSTEM_PROMPT is static and the compaction retry ladder can resend a
-	// near-identical prefix (same conversation/facts block) within one attempt — let the provider
-	// cache it so a retry only pays for the variable tail. Matches the repo's default ("short")
-	// exactly; set explicitly so the intent isn't silently dependent on the provider default.
-	const options: SimpleStreamOptions = { maxTokens, signal, apiKey, headers, cacheRetention: "short" };
+	// Summaries are one-shot prompts. A fresh affinity identity prevents them from contaminating the
+	// foreground continuation cache, while "none" prevents cache writes that cannot be reused.
+	const options: SimpleStreamOptions = {
+		maxTokens,
+		signal,
+		apiKey,
+		headers,
+		cacheRetention: "none",
+		sessionId: uuidv7(),
+	};
 	if (model.reasoning && thinkingLevel && thinkingLevel !== "off") {
 		options.reasoning = thinkingLevel;
 	}
@@ -703,6 +729,43 @@ export async function generateSummary(
 	chunked = false,
 	precomputedConversationText?: string,
 ): Promise<string> {
+	return (
+		await generateSummaryWithUsage(
+			currentMessages,
+			model,
+			reserveTokens,
+			apiKey,
+			headers,
+			signal,
+			customInstructions,
+			previousSummary,
+			thinkingLevel,
+			streamFn,
+			preDigest,
+			factsBlock,
+			chunked,
+			precomputedConversationText,
+		)
+	).text;
+}
+
+export async function generateSummaryWithUsage(
+	currentMessages: AgentMessage[],
+	model: Model<any>,
+	reserveTokens: number,
+	apiKey: string | undefined,
+	headers?: Record<string, string>,
+	signal?: AbortSignal,
+	customInstructions?: string,
+	previousSummary?: string,
+	thinkingLevel?: ThinkingLevel,
+	streamFn?: StreamFn,
+	preDigest?: (conversationText: string, signal?: AbortSignal) => Promise<string>,
+	factsBlock = "verification demands:\nfiles-modified-recall (must appear in ## Files):\nfiles-read-recall (must appear as exact paths in ## Files, path recall threshold applies):\nworking-set-recall (must appear in ## Working Set):\nopen-errors-recall (must appear in ## Open Problems):\nactions-recall (must appear in ## Done):\nmandatory-rules-recall (must appear in ### Mandatory Rules):\nactive-task-containment (must appear in ## Active Task):\ncancelled-work-dropped (must NOT appear outside ### Mandatory Rules):",
+	chunked = false,
+	precomputedConversationText?: string,
+): Promise<{ text: string; usage: Usage }> {
+	const usage = createEmptyUsage();
 	const summaryBudget = getSummaryBudget(reserveTokens, model, factsBlock);
 	const maxTokens = summaryBudget;
 
@@ -738,6 +801,7 @@ export async function generateSummary(
 			inputBound,
 			previousSummary,
 			promptSuffix,
+			usage,
 		);
 	}
 
@@ -760,6 +824,7 @@ export async function generateSummary(
 		createSummarizationOptions(model, maxTokens, apiKey, headers, signal, thinkingLevel),
 		streamFn,
 	);
+	addUsage(usage, response.usage);
 
 	if (response.stopReason === "error") {
 		throw new Error(`Summarization failed: ${response.errorMessage || "Unknown error"}`);
@@ -770,7 +835,7 @@ export async function generateSummary(
 		throw new Error("summary-length-stop: summarizer hit its output cap before completing the checkpoint");
 	}
 
-	return truncateSummaryToBudget(extractTextContent(response), summaryBudget);
+	return { text: truncateSummaryToBudget(extractTextContent(response), summaryBudget), usage };
 }
 
 function fillPromptTemplate(template: string, factsBlock: string, budget: number): string {
@@ -860,6 +925,7 @@ async function summarizeChunks(
 	inputBound: number,
 	previousSummary: string | undefined,
 	promptSuffix: string,
+	usage: Usage,
 ): Promise<string> {
 	let reducedText = conversationText;
 	for (let pass = 0; pass < 3; pass++) {
@@ -873,6 +939,7 @@ async function summarizeChunks(
 			thinkingLevel,
 			streamFn,
 			inputBound,
+			usage,
 		);
 		if (estimateStringTokens(buildSummarizationPrompt(summary, previousSummary, promptSuffix)) <= inputBound) {
 			return summary;
@@ -892,6 +959,7 @@ async function summarizeChunkPass(
 	thinkingLevel: ThinkingLevel | undefined,
 	streamFn: StreamFn | undefined,
 	inputBound: number,
+	usage: Usage,
 ): Promise<string> {
 	const maxChunkTokens = getChunkSummarizationTokenBudget(inputBound);
 	const maxChunkChars = Math.max(1, maxChunkTokens * 4);
@@ -915,6 +983,7 @@ async function summarizeChunkPass(
 			createSummarizationOptions(model, maxTokens, apiKey, headers, signal, thinkingLevel),
 			streamFn,
 		);
+		addUsage(usage, response.usage);
 		if (response.stopReason === "error") {
 			throw new Error(`Summarization failed: ${response.errorMessage || "Unknown error"}`);
 		}
@@ -1114,6 +1183,7 @@ Be concise. Focus on what's needed to understand the kept suffix.`;
 
 interface VerifiedSummaryResult {
 	summary: string;
+	usage: Usage;
 	verification: VerificationReport;
 	verificationGateFailures: VerificationReport[];
 	deterministicGapFills: number;
@@ -1136,6 +1206,7 @@ async function generateVerifiedSummary(options: {
 	chunked: boolean;
 }): Promise<VerifiedSummaryResult> {
 	let retryInstructions = options.customInstructions;
+	const usage = createEmptyUsage();
 	const verificationGateFailures: VerificationReport[] = [];
 	const precomputedConversationText = await prepareSummarizationConversationText(
 		options.messages,
@@ -1144,7 +1215,7 @@ async function generateVerifiedSummary(options: {
 	);
 
 	for (let attempt = 0; attempt < 2; attempt++) {
-		const summary = await generateSummary(
+		const generated = await generateSummaryWithUsage(
 			options.messages,
 			options.model,
 			options.reserveTokens,
@@ -1160,9 +1231,11 @@ async function generateVerifiedSummary(options: {
 			options.chunked,
 			precomputedConversationText,
 		);
+		addUsage(usage, generated.usage);
+		const summary = generated.text;
 		const verification = verifySummary(summary, options.facts);
 		if (verification.ok) {
-			return { summary, verification, verificationGateFailures, deterministicGapFills: 0 };
+			return { summary, usage, verification, verificationGateFailures, deterministicGapFills: 0 };
 		}
 
 		verificationGateFailures.push(verification);
@@ -1176,6 +1249,7 @@ async function generateVerifiedSummary(options: {
 		if (filled.verification.ok) {
 			return {
 				summary: filled.summary,
+				usage,
 				verification: filled.verification,
 				verificationGateFailures,
 				deterministicGapFills: filled.changed ? 1 : 0,
@@ -1251,8 +1325,9 @@ export async function compact(
 				});
 
 	let summary = verified?.summary ?? "No prior history.";
+	let summaryUsage = verified?.usage;
 	if (isSplitTurn) {
-		const turnPrefixSummary = await generateTurnPrefixSummary(
+		const turnPrefix = await generateTurnPrefixSummary(
 			turnPrefixMessages,
 			model,
 			settings.reserveTokens,
@@ -1262,7 +1337,8 @@ export async function compact(
 			thinkingLevel,
 			streamFn,
 		);
-		summary = `${summary}\n\n---\n\n**Turn Context (split turn):**\n\n${turnPrefixSummary}`;
+		summary = `${summary}\n\n---\n\n**Turn Context (split turn):**\n\n${turnPrefix.text}`;
+		summaryUsage = combineUsage(summaryUsage, turnPrefix.usage);
 	}
 
 	const { readFiles, modifiedFiles } = computeFileLists(fileOps);
@@ -1276,6 +1352,7 @@ export async function compact(
 			summary,
 			firstKeptEntryId,
 			tokensBefore,
+			usage: summaryUsage,
 			details: {
 				readFiles,
 				modifiedFiles,
@@ -1382,7 +1459,7 @@ async function generateTurnPrefixSummary(
 	signal?: AbortSignal,
 	thinkingLevel?: ThinkingLevel,
 	streamFn?: StreamFn,
-): Promise<string> {
+): Promise<{ text: string; usage: Usage }> {
 	const maxTokens = Math.min(
 		Math.floor(0.5 * reserveTokens),
 		model.maxTokens > 0 ? model.maxTokens : Number.POSITIVE_INFINITY,
@@ -1409,8 +1486,11 @@ async function generateTurnPrefixSummary(
 		throw new Error(`Turn prefix summarization failed: ${response.errorMessage || "Unknown error"}`);
 	}
 
-	return response.content
-		.filter((c): c is { type: "text"; text: string } => c.type === "text")
-		.map((c) => c.text)
-		.join("\n");
+	return {
+		text: response.content
+			.filter((c): c is { type: "text"; text: string } => c.type === "text")
+			.map((c) => c.text)
+			.join("\n"),
+		usage: response.usage,
+	};
 }

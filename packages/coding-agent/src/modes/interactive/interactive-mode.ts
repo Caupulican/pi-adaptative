@@ -678,11 +678,18 @@ export class InteractiveMode {
 		});
 
 		// Start package update check asynchronously
-		this.checkForPackageUpdates().then((updates) => {
-			if (updates.length > 0) {
-				this.showPackageUpdateNotification(updates);
-			}
-		});
+		this.checkForPackageUpdates()
+			.then((updates) => {
+				if (updates.length > 0) {
+					this.showPackageUpdateNotification(updates);
+				}
+			})
+			.finally(() => {
+				// npm can overwrite the shared Windows console title while checking extension versions.
+				if (process.platform === "win32" && this.isInitialized) {
+					this.updateTerminalTitle();
+				}
+			});
 
 		// Check tmux keyboard setup asynchronously
 		this.checkTmuxKeyboardSetup().then((warning) => {

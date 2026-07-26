@@ -7,6 +7,7 @@ import {
 	type Api,
 	type AssistantMessageEventStream,
 	type Context,
+	getEnvAuthHeaders,
 	getModels,
 	getProviders,
 	type KnownProvider,
@@ -30,6 +31,7 @@ import { stripJsonComments } from "../utils/json.ts";
 import { normalizePath } from "../utils/paths.ts";
 import type { AuthStatus, AuthStorage } from "./auth-storage.ts";
 import { BUILT_IN_PROVIDER_DISPLAY_NAMES } from "./provider-display-names.ts";
+import { hasAuthenticationHeaders, hasUsableRequestAuth } from "./request-auth.ts";
 import {
 	clearConfigValueCache,
 	getConfigValueEnvVarNames,
@@ -135,11 +137,17 @@ const OpenAICompletionsCompatSchema = Type.Object({
 	openRouterRouting: Type.Optional(OpenRouterRoutingSchema),
 	vercelGatewayRouting: Type.Optional(VercelGatewayRoutingSchema),
 	supportsStrictMode: Type.Optional(Type.Boolean()),
+	sendSessionAffinityHeaders: Type.Optional(Type.Boolean()),
+	sessionAffinityFormat: Type.Optional(
+		Type.Union([Type.Literal("openai"), Type.Literal("openai-nosession"), Type.Literal("openrouter")]),
+	),
 	supportsLongCacheRetention: Type.Optional(Type.Boolean()),
 });
 
 const OpenAIResponsesCompatSchema = Type.Object({
-	sendSessionIdHeader: Type.Optional(Type.Boolean()),
+	sessionAffinityFormat: Type.Optional(
+		Type.Union([Type.Literal("openai"), Type.Literal("openai-nosession"), Type.Literal("openrouter")]),
+	),
 	supportsLongCacheRetention: Type.Optional(Type.Boolean()),
 });
 
@@ -741,8 +749,16 @@ export class ModelRegistry {
 		const providerApiKey = this.providerRequestConfigs.get(model.provider)?.apiKey;
 		return (
 			this.authStorage.hasAuth(model.provider) ||
-			(providerApiKey !== undefined && isConfigValueConfigured(providerApiKey))
+			(providerApiKey !== undefined && isConfigValueConfigured(providerApiKey)) ||
+			hasAuthenticationHeaders(model.headers)
 		);
+	}
+
+	canUseResolvedRequestAuth(
+		model: Model<Api>,
+		auth: ResolvedRequestAuth,
+	): auth is Extract<ResolvedRequestAuth, { ok: true }> {
+		return auth.ok && (hasUsableRequestAuth(auth) || (!this.isUsingOAuth(model) && this.hasConfiguredAuth(model)));
 	}
 
 	private getModelRequestKey(provider: string, modelId: string): string {
@@ -796,9 +812,10 @@ export class ModelRegistry {
 				`model "${model.provider}/${model.id}"`,
 			);
 
+			const envAuthHeaders = getEnvAuthHeaders(model.provider);
 			let headers =
-				model.headers || providerHeaders || modelHeaders
-					? { ...model.headers, ...providerHeaders, ...modelHeaders }
+				envAuthHeaders || model.headers || providerHeaders || modelHeaders
+					? { ...envAuthHeaders, ...model.headers, ...providerHeaders, ...modelHeaders }
 					: undefined;
 
 			if (providerConfig?.authHeader) {

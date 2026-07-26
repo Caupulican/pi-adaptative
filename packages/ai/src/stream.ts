@@ -1,7 +1,7 @@
 import "./providers/register-builtins.ts";
 
 import { getApiProvider } from "./api-registry.ts";
-import { getEnvApiKey } from "./env-api-keys.ts";
+import { getEnvApiKey, getEnvAuthHeaders } from "./env-api-keys.ts";
 import type {
 	Api,
 	AssistantMessage,
@@ -27,11 +27,20 @@ function hasExplicitApiKey(apiKey: string | undefined): apiKey is string {
 	return typeof apiKey === "string" && apiKey.trim().length > 0;
 }
 
-function withEnvApiKey<TOptions extends StreamOptions>(
+function hasAuthorizationHeader(headers: Record<string, string> | undefined): boolean {
+	return Object.entries(headers ?? {}).some(
+		([name, value]) => name.toLowerCase() === "authorization" && value.trim().length > 0,
+	);
+}
+
+function withEnvAuth<TOptions extends StreamOptions>(
 	model: Model<Api>,
 	options: TOptions | undefined,
 ): TOptions | undefined {
 	if (hasExplicitApiKey(options?.apiKey)) return options;
+	if (hasAuthorizationHeader(options?.headers)) return options;
+	const envHeaders = getEnvAuthHeaders(model.provider);
+	if (envHeaders) return { ...options, headers: { ...envHeaders, ...options?.headers } } as TOptions;
 	const apiKey = getEnvApiKey(model.provider);
 	if (!apiKey) return options;
 	return { ...options, apiKey } as TOptions;
@@ -329,7 +338,7 @@ export function stream<TApi extends Api>(
 	options?: ProviderStreamOptions,
 ): AssistantMessageEventStream {
 	const provider = resolveApiProvider(model.api);
-	const resolvedOptions = withEnvApiKey(model, options) as StreamOptions;
+	const resolvedOptions = withEnvAuth(model, options) as StreamOptions;
 	const protocolContext = withTextToolProtocolContext(context, resolvedOptions);
 	return withTextToolProtocolResult(
 		provider.stream(model, protocolContext, resolvedOptions),
@@ -354,7 +363,7 @@ export function streamSimple<TApi extends Api>(
 	options?: SimpleStreamOptions,
 ): AssistantMessageEventStream {
 	const provider = resolveApiProvider(model.api);
-	const resolvedOptions = withEnvApiKey(model, options);
+	const resolvedOptions = withEnvAuth(model, options);
 	const protocolContext = withTextToolProtocolContext(context, resolvedOptions);
 	return withTextToolProtocolResult(
 		provider.streamSimple(model, protocolContext, resolvedOptions),

@@ -22,8 +22,42 @@ export interface ExternalEditorHost {
 	showWarning(message: string): void;
 }
 
+export interface ExternalEditorOptions {
+	command: string;
+	content: string;
+}
+
+export type ExternalEditorResult = { status: "complete"; content: string } | { status: "failed" };
+
 function resolveEditorCommand(): string | undefined {
 	return process.env.VISUAL || process.env.EDITOR;
+}
+
+/**
+ * Edit text through the configured external editor while keeping all temporary
+ * artifacts inside Pi's bounded user-level work directory.
+ */
+export async function editInExternalEditor(options: ExternalEditorOptions): Promise<ExternalEditorResult> {
+	const tmpFile = path.join(
+		getProcessWorkRun(getAgentDir(), "editors", "external").path,
+		`pi-editor-${randomUUID()}.pi.md`,
+	);
+
+	try {
+		fs.writeFileSync(tmpFile, options.content, "utf-8");
+		process.stdout.write(`Launching external editor: ${options.command}\nPi will resume when the editor exits.\n`);
+		const status = await runExternalEditor(options.command, tmpFile);
+		if (status !== 0) {
+			return { status: "failed" };
+		}
+		return { status: "complete", content: fs.readFileSync(tmpFile, "utf-8").replace(/\n$/, "") };
+	} finally {
+		try {
+			fs.unlinkSync(tmpFile);
+		} catch {
+			// Cleanup is best effort.
+		}
+	}
 }
 
 export async function openExternalEditor(host: ExternalEditorHost): Promise<void> {
@@ -34,38 +68,16 @@ export async function openExternalEditor(host: ExternalEditorHost): Promise<void
 	}
 
 	const currentText = host.editor.getExpandedText?.() ?? host.editor.getText();
-	const tmpFile = path.join(
-		getProcessWorkRun(getAgentDir(), "editors", "external").path,
-		`pi-editor-${randomUUID()}.pi.md`,
-	);
 
 	try {
-		// Write current content to temp file
-		fs.writeFileSync(tmpFile, currentText, "utf-8");
-
 		// Stop TUI to release terminal
 		host.ui.stop();
 
-		process.stdout.write(`Launching external editor: ${editorCmd}\nPi will resume when the editor exits.\n`);
-
-		// Cross-platform executable resolution preserves quoted Windows paths without
-		// asking a shell to reinterpret the temporary file path.
-		const status = await runExternalEditor(editorCmd, tmpFile);
-
-		// On successful exit (status 0), replace editor content
-		if (status === 0) {
-			const newContent = fs.readFileSync(tmpFile, "utf-8").replace(/\n$/, "");
-			host.editor.setText(newContent);
+		const result = await editInExternalEditor({ command: editorCmd, content: currentText });
+		if (result.status === "complete") {
+			host.editor.setText(result.content);
 		}
-		// On non-zero exit, keep original text (no action needed)
 	} finally {
-		// Clean up temp file
-		try {
-			fs.unlinkSync(tmpFile);
-		} catch {
-			// Ignore cleanup errors
-		}
-
 		// Restart TUI
 		host.ui.start();
 		// Force full re-render since external editor uses alternate screen

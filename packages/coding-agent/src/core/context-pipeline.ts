@@ -29,6 +29,7 @@ import {
 	type CompactionEntry,
 	calculateContextTokens,
 	estimateTokens,
+	getApplicableAssistantUsageInfo,
 	getLatestCompactionEntry,
 	type SessionEntry,
 	type SessionManager,
@@ -134,37 +135,13 @@ interface ContextTokenEstimate {
 	lastUsageIndex: number | null;
 }
 
-/** Mirrors compaction.ts's private `getAssistantUsage`: a non-aborted, non-error assistant
- * message's usage, or undefined. */
-function assistantUsageForTokenEstimate(message: AgentMessage): Usage | undefined {
-	if (message.role !== "assistant") return undefined;
-	const assistant = message as AssistantMessage;
-	if (assistant.stopReason === "aborted" || assistant.stopReason === "error" || !assistant.usage) return undefined;
-	return assistant.usage;
-}
-
-/** Mirrors compaction.ts's private `getLastAssistantUsageInfo`: the most recent message with
- * usable usage and its index, scanning from the end. */
-function findLastAssistantUsage(messages: AgentMessage[]): { usage: Usage; index: number } | undefined {
-	for (let index = messages.length - 1; index >= 0; index--) {
-		const message = messages[index];
-		if (!message) continue;
-		const usage = assistantUsageForTokenEstimate(message);
-		if (usage) return { usage, index };
-	}
-	return undefined;
-}
-
 /**
- * Incremental-memo reimplementation of `estimateContextTokens` (compaction.ts), built
- * from that module's exported per-message primitives (`estimateTokens`, `calculateContextTokens`)
- * instead of adding a memo parameter to `estimateContextTokens` itself: compaction.ts is left
- * unmodified, so the incremental design stays entirely inside context-pipeline.ts, matching a
- * "zero agent-session.ts change" scope. The orchestration (finding the last-assistant-usage
- * boundary, summing) is cheap and always reruns in full; only the expensive per-message
+ * Incremental-memo implementation of `estimateContextTokens` (compaction.ts). The shared
+ * `getApplicableAssistantUsageInfo` owns usage-anchor selection so compaction rewrites cannot make
+ * this hot path drift from the canonical estimator. Only the expensive per-message
  * `estimateTokens` text scan is memoized, keyed by message object identity exactly like
- * `_auditMemo`. Produces byte-identical output to `estimateContextTokens(messages)` for the
- * same input regardless of `memo` -- see the equivalence test.
+ * `_auditMemo`. Produces byte-identical output to `estimateContextTokens(messages)` for the same
+ * input regardless of `memo` -- see the equivalence test.
  */
 function estimateContextTokensMemoized(messages: AgentMessage[], memo?: TokenMemo): ContextTokenEstimate {
 	const freshMemo: TokenMemo | undefined = memo ? new Map() : undefined;
@@ -175,7 +152,7 @@ function estimateContextTokensMemoized(messages: AgentMessage[], memo?: TokenMem
 		return tokens;
 	};
 
-	const usageInfo = findLastAssistantUsage(messages);
+	const usageInfo = getApplicableAssistantUsageInfo(messages);
 	let result: ContextTokenEstimate;
 	if (!usageInfo) {
 		let estimated = 0;

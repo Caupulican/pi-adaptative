@@ -12,6 +12,7 @@ import type { Api, Model } from "@caupulican/pi-ai";
 import type { ModelRegistry } from "./model-registry.ts";
 import { resolveCliModel } from "./model-resolver.ts";
 import { evaluateSurfaceFitness } from "./model-router/fitness-gate.ts";
+import type { RequestAuth } from "./request-auth.ts";
 import type { ModelFitnessReport } from "./research/model-fitness.ts";
 import type { SettingsManager } from "./settings-manager.ts";
 
@@ -22,7 +23,7 @@ export interface CompactionSupportDeps {
 	/** True when the agent's streamFn is (or wraps) the raw streamSimple — auth must be explicit then. */
 	isRawStream(): boolean;
 	/** Host auth resolution that THROWS with a user-actionable message when no key exists. */
-	getRequiredRequestAuth(model: Model<Api>): Promise<{ apiKey?: string; headers?: Record<string, string> }>;
+	getRequiredRequestAuth(model: Model<Api>): Promise<RequestAuth>;
 	isModelExhausted(ref: string): boolean;
 	getStoredFitnessReport(ref: string): ModelFitnessReport | undefined;
 	/** Estimated tokens of the summarization input (live context; over-estimates, which is safe). */
@@ -71,10 +72,7 @@ export class CompactionSupport {
 		};
 	}
 
-	async getRequestAuth(model: Model<Api>): Promise<{
-		apiKey?: string;
-		headers?: Record<string, string>;
-	}> {
+	async getRequestAuth(model: Model<Api>): Promise<RequestAuth> {
 		if (this.deps.isRawStream()) {
 			return this.deps.getRequiredRequestAuth(model);
 		}
@@ -117,7 +115,7 @@ export class CompactionSupport {
 			const registry = this.deps.getModelRegistry();
 			let auth = await registry.getApiKeyAndHeaders(compactionModel);
 			let readiness: string | undefined;
-			if (auth.ok && auth.apiKey) {
+			if (registry.canUseResolvedRequestAuth(compactionModel, auth)) {
 				readiness = await this.readinessFailure(compactionModel);
 				if (!readiness) return { model: compactionModel, apiKey: auth.apiKey, headers: auth.headers };
 			}
@@ -125,7 +123,7 @@ export class CompactionSupport {
 				compactionModel.provider === sessionModel.provider && compactionModel.id === sessionModel.id;
 			if (!isSameModel) {
 				auth = await registry.getApiKeyAndHeaders(sessionModel);
-				if (auth.ok && auth.apiKey) {
+				if (registry.canUseResolvedRequestAuth(sessionModel, auth)) {
 					readiness = await this.readinessFailure(sessionModel);
 					if (!readiness) return { model: sessionModel, apiKey: auth.apiKey, headers: auth.headers };
 				}
@@ -134,7 +132,7 @@ export class CompactionSupport {
 				model: sessionModel,
 				failure: readiness
 					? `summarizer ${isSameModel ? compactionModel.id : sessionModel.id} not ready: ${readiness}`
-					: `no usable API key for the summarizer (tried ${compactionModel.id}${isSameModel ? "" : ` and ${sessionModel.id}`})`,
+					: `no usable request authentication for the summarizer (tried ${compactionModel.id}${isSameModel ? "" : ` and ${sessionModel.id}`})`,
 			};
 		}
 

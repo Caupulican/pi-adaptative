@@ -14,6 +14,7 @@ export * from "./session/message-retention.ts";
 export * from "./tool-failure-memory.ts";
 // Types
 export * from "./types.ts";
+export * from "./usage.ts";
 // Shell output utilities
 export * from "./utils/shell-output.ts";
 export { uuidv7 } from "./uuid.ts";

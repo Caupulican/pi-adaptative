@@ -1,5 +1,9 @@
 ## [Unreleased]
 
+### Fixed
+
+- Kept paste-marker IDs synchronized after deletion, normalized tabs and CR/CRLF output, cleared the inverted cursor on shutdown, restored legacy Alt-key parsing, and bounded narrow-editor scroll borders.
+
 ## [0.81.40] - 2026-07-24
 
 ## [0.81.39] - 2026-07-20

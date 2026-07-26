@@ -84,11 +84,12 @@ export class ForegroundRecoveryController {
 	observeAssistant(message: AssistantMessage): void {
 		this.lastAssistantMessage = message;
 		if (message.stopReason === "error") return;
-		this.deps.onSuccessfulAssistant();
-		if (this.retry.attempt > 0) {
-			this.deps.emit({ type: "auto_retry_end", success: true, attempt: this.retry.attempt });
-			this.retry.reset();
+		if (message.stopReason === "aborted") {
+			this.finishRetry(false, message.errorMessage ?? "Retry aborted");
+			return;
 		}
+		this.deps.onSuccessfulAssistant();
+		this.finishRetry(true);
 	}
 
 	willRetryAfterAgentEnd(event: Extract<AgentEvent, { type: "agent_end" }>): boolean {
@@ -118,17 +119,15 @@ export class ForegroundRecoveryController {
 		if (classified?.retryable && (await this.retry.prepareRetry(message))) return true;
 		if (await this.billingFailover.handleAssistantError(message, classified)) return false;
 
-		if (message.stopReason === "error" && this.retry.attempt > 0) {
-			this.deps.emit({
-				type: "auto_retry_end",
-				success: false,
-				attempt: this.retry.attempt,
-				finalError: message.errorMessage,
-			});
-			this.retry.reset();
-		}
+		if (message.stopReason === "error") this.finishRetry(false, message.errorMessage);
 		if (await this.deps.checkCompaction(message)) return true;
 		return this.deps.agent.hasQueuedMessages();
+	}
+
+	private finishRetry(success: boolean, finalError?: string): void {
+		if (this.retry.attempt === 0) return;
+		this.deps.emit({ type: "auto_retry_end", success, attempt: this.retry.attempt, finalError });
+		this.retry.reset();
 	}
 
 	private classifyAssistantError(message: AssistantMessage): ClassifiedError | undefined {

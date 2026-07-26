@@ -1,7 +1,7 @@
 import assert from "node:assert";
 import { performance } from "node:perf_hooks";
 import { describe, it } from "node:test";
-import { visibleWidth, wrapTextWithAnsi } from "../src/utils.ts";
+import { normalizeTerminalOutput, visibleWidth, wrapTextWithAnsi } from "../src/utils.ts";
 
 describe("wrapTextWithAnsi", () => {
 	describe("underline styling", () => {
@@ -102,6 +102,30 @@ describe("wrapTextWithAnsi", () => {
 	});
 
 	describe("basic wrapping", () => {
+		it("should handle LF, CRLF, and CR line endings while preserving ANSI state", () => {
+			const red = "\x1b[31m";
+			const reset = "\x1b[0m";
+
+			assert.deepStrictEqual(wrapTextWithAnsi(`${red}first\r\nsecond\rthird\nfourth${reset}`, 80), [
+				`${red}first`,
+				`${red}second`,
+				`${red}third`,
+				`${red}fourth${reset}`,
+			]);
+		});
+
+		it("should expand visible tabs without changing tabs inside terminal control sequences", () => {
+			const sequences = [
+				"\x1b]8;;https://example.test/a\tb\x07",
+				"\x1b]0;window\ttitle\x1b\\",
+				"\x1b_payload\tdata\x1b\\",
+			];
+
+			for (const sequence of sequences) {
+				assert.strictEqual(normalizeTerminalOutput(`${sequence}label\ttext`), `${sequence}label   text`);
+			}
+		});
+
 		it("should wrap plain text correctly", () => {
 			const text = "hello world this is a test";
 			const wrapped = wrapTextWithAnsi(text, 10);

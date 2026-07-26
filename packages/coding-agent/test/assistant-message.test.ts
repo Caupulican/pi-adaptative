@@ -54,4 +54,22 @@ describe("AssistantMessageComponent", () => {
 		expect(rendered.includes(OSC133_ZONE_END)).toBe(false);
 		expect(rendered.includes(OSC133_ZONE_FINAL)).toBe(false);
 	});
+
+	test("coalesces adjacent thinking blocks into one hidden label", () => {
+		initTheme("dark");
+
+		const component = new AssistantMessageComponent(
+			createAssistantMessage([
+				{ type: "thinking", thinking: "first thought" },
+				{ type: "thinking", thinking: "" },
+				{ type: "thinking", thinking: "second thought" },
+				{ type: "text", text: "answer" },
+			]),
+			true,
+		);
+		const rendered = component.render(80).join("\n");
+
+		expect(rendered.match(/Thinking\.\.\./g)).toHaveLength(1);
+		expect(rendered).toContain("answer");
+	});
 });

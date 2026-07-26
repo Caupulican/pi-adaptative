@@ -36,6 +36,7 @@ const compat: Required<OpenAICompletionsCompat> = {
 	supportsStrictMode: true,
 	cacheControlFormat: "anthropic",
 	sendSessionAffinityHeaders: false,
+	sessionAffinityFormat: "openai",
 	supportsLongCacheRetention: true,
 };
 

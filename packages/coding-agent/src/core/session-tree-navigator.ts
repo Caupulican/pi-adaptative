@@ -15,19 +15,20 @@ import {
 	generateBranchSummary,
 	type SessionManager,
 } from "@caupulican/pi-agent-core/node";
-import type { Model } from "@caupulican/pi-ai";
+import type { Api, Model, Usage } from "@caupulican/pi-ai";
 import type { ExtensionRunner, SessionBeforeTreeResult, TreePreparation } from "./extensions/index.ts";
+import type { RequestAuth } from "./request-auth.ts";
 import type { SettingsManager } from "./settings-manager.ts";
 
 export interface SessionTreeNavigatorDeps {
 	/** Session log — leaf/branch reads and writes go through this. */
 	getSessionManager(): SessionManager;
 	/** Current model — required to run the default branch summarizer. */
-	getModel(): Model<any> | undefined;
+	getModel(): Model<Api> | undefined;
 	/** Extension runner — `session_before_tree`/`session_tree` hooks fire here. */
 	getExtensionRunner(): ExtensionRunner;
 	/** Resolve request auth for the summarizer call (session-owned, also used by compaction). */
-	getRequiredRequestAuth(model: Model<any>): Promise<{ apiKey: string; headers?: Record<string, string> }>;
+	getRequiredRequestAuth(model: Model<Api>): Promise<RequestAuth>;
 	/** Settings — branch-summary reserve tokens. */
 	getSettingsManager(): SettingsManager;
 	/** The underlying agent — the rebuilt message view is assigned to `agent.state.messages`. */
@@ -105,7 +106,7 @@ export class SessionTreeNavigator {
 		this.deps.setBranchSummaryAbort(branchSummaryAbort);
 
 		try {
-			let extensionSummary: { summary: string; details?: unknown } | undefined;
+			let extensionSummary: { summary: string; details?: unknown; usage?: Usage } | undefined;
 			let fromExtension = false;
 
 			// Emit session_before_tree event
@@ -140,6 +141,7 @@ export class SessionTreeNavigator {
 			// Run default summarizer if needed
 			let summaryText: string | undefined;
 			let summaryDetails: unknown;
+			let summaryUsage: Usage | undefined;
 			if (options.summarize && entriesToSummarize.length > 0 && !extensionSummary) {
 				const model = this.deps.getModel()!;
 				const { apiKey, headers } = await this.deps.getRequiredRequestAuth(model);
@@ -161,6 +163,7 @@ export class SessionTreeNavigator {
 					throw new Error(result.error);
 				}
 				summaryText = result.summary;
+				summaryUsage = result.usage;
 				summaryDetails = {
 					readFiles: result.readFiles || [],
 					modifiedFiles: result.modifiedFiles || [],
@@ -168,6 +171,7 @@ export class SessionTreeNavigator {
 			} else if (extensionSummary) {
 				summaryText = extensionSummary.summary;
 				summaryDetails = extensionSummary.details;
+				summaryUsage = extensionSummary.usage;
 			}
 
 			// Determine the new leaf position based on target type
@@ -198,7 +202,13 @@ export class SessionTreeNavigator {
 			let summaryEntry: BranchSummaryEntry | undefined;
 			if (summaryText) {
 				// Create summary at target position (can be null for root)
-				const summaryId = sessionManager.branchWithSummary(newLeafId, summaryText, summaryDetails, fromExtension);
+				const summaryId = sessionManager.branchWithSummary(
+					newLeafId,
+					summaryText,
+					summaryDetails,
+					fromExtension,
+					summaryUsage,
+				);
 				summaryEntry = sessionManager.getEntry(summaryId) as BranchSummaryEntry;
 
 				// Attach label to the summary entry

@@ -1,7 +1,8 @@
 import { existsSync, readdirSync, statSync } from "node:fs";
 import { join, resolve } from "node:path";
+import { getSessionEntryUsage } from "@caupulican/pi-agent-core";
 import { loadEntriesFromFile, type SessionEntry } from "@caupulican/pi-agent-core/node";
-import type { AssistantMessage, Usage } from "@caupulican/pi-ai";
+import type { Usage } from "@caupulican/pi-ai";
 import { SPAWNED_USAGE_CUSTOM_TYPE, type SpawnedUsageReport } from "../agent-session-contracts.ts";
 
 export type DailyUsageWindow = {
@@ -61,9 +62,8 @@ function addDailyUsageFromEntries(
 	let hasUsage = false;
 	for (const entry of entries) {
 		if (!isInsideWindow(Date.parse(entry.timestamp), window)) continue;
-		if (entry.type === "message" && entry.message.role === "assistant") {
-			const usage = (entry.message as AssistantMessage).usage;
-			if (!usage) continue;
+		const usage = getSessionEntryUsage(entry);
+		if (usage) {
 			totals.ownCost += usage.cost.total;
 			addUsage(totals, usage);
 			hasUsage = true;

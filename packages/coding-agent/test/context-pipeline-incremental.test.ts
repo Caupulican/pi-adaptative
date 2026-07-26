@@ -309,4 +309,16 @@ describe("ContextPipeline incremental memo: token estimate", () => {
 		const calls2 = tokensSpy.mock.calls.length - before2;
 		expect(calls2).toBe(1); // only the new trailing message
 	});
+
+	it("does not anchor to assistant usage from before a newer compaction summary", () => {
+		const pipeline = createPipeline({ value: 0 });
+		const messages: AgentMessage[] = [
+			userMessage("summary", 200),
+			assistantMessageWithUsage("stale", 100, 9_500),
+			userMessage("tail", 300),
+		];
+
+		const estimated = pipeline.estimateCurrentContextTokens(messages);
+		expect(estimated).toBeLessThan(100);
+	});
 });

@@ -1,6 +1,6 @@
 import { spawnSync } from "node:child_process";
 import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
-import { tmpdir } from "node:os";
+import { homedir, tmpdir } from "node:os";
 import { join } from "node:path";
 import { describe, expect, it } from "vitest";
 import { requiredCapabilitiesForTool } from "../src/core/autonomy/approval-gate.ts";
@@ -41,6 +41,13 @@ describe("automatic platform shell contract", () => {
 		expect(prefixPowerShellCommand("Write-Output 'ok'")).toBe(`${POWERSHELL_UTF8_PREFIX}Write-Output 'ok'`);
 		expect(prefixPowerShellCommand(`${POWERSHELL_UTF8_PREFIX}Write-Output 'ok'`)).toBe(
 			`${POWERSHELL_UTF8_PREFIX}Write-Output 'ok'`,
+		);
+	});
+
+	it("expands a home-relative custom shell path before validation", () => {
+		const missingPath = `~/.pi-shell-does-not-exist-${process.pid}`;
+		expect(() => getShellConfig(missingPath, "bash")).toThrow(
+			`Custom shell path not found: ${join(homedir(), missingPath.slice(2))}`,
 		);
 	});
 

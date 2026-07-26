@@ -4,6 +4,7 @@
 
 - Added a bounded OpenAI Codex subscription account client for listing and redeeming earned usage-limit resets.
 - Added host-managed Amazon Bedrock SSO recovery with exact-profile handoff and one pre-response request replay.
+- Added subscription OAuth flows for OpenRouter, Kimi Coding, and xAI, plus built-in Qwen Token Plan models for both supported regions.
 
 ### Changed
 
@@ -14,6 +15,8 @@
 - Preserved structured status and error codes from OpenAI Codex stream failures so shared retry policy does not depend on unstable prose.
 - Consolidated ChatGPT account-ID decoding and request-header construction across OAuth, model requests, and subscription account requests.
 - Corrected Claude Opus 5 on Amazon Bedrock to expose inference-profile IDs only, use adaptive thinking with xhigh/max effort and prompt caching, and preserve AWS validation messages without serializing response-stream internals.
+- Made OpenAI-, Anthropic-, Azure-, and OpenRouter-image retries abortable and provider-consistent, with bounded server-directed delays.
+- Corrected Codex cache-boundary recovery, OpenRouter cache markers and session-affinity headers, cross-API tool-call IDs, Anthropic empty-thinking signatures, usage-less deltas, encrypted reasoning backfill, and unknown Bedrock stop reasons.
 
 ## [0.81.40] - 2026-07-24
 

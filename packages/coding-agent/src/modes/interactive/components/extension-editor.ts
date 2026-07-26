@@ -3,9 +3,6 @@
  * Supports Ctrl+G for external editor.
  */
 
-import { randomUUID } from "node:crypto";
-import * as fs from "node:fs";
-import * as path from "node:path";
 import {
 	Container,
 	Editor,
@@ -16,10 +13,8 @@ import {
 	Text,
 	type TUI,
 } from "@caupulican/pi-tui";
-import { getAgentDir } from "../../../config.ts";
 import type { KeybindingsManager } from "../../../core/keybindings.ts";
-import { runExternalEditor } from "../../../utils/external-editor-command.ts";
-import { getProcessWorkRun } from "../../../utils/work-directory.ts";
+import { editInExternalEditor } from "../external-editor.ts";
 import { getEditorTheme, theme } from "../theme/theme.ts";
 import { DynamicBorder } from "./dynamic-border.ts";
 import { keyHint } from "./keybinding-hints.ts";
@@ -119,28 +114,14 @@ export class ExtensionEditorComponent extends Container implements Focusable {
 		}
 
 		const currentText = this.editor.getText();
-		const tmpFile = path.join(
-			getProcessWorkRun(getAgentDir(), "editors", "extensions").path,
-			`pi-extension-editor-${randomUUID()}.md`,
-		);
 
 		try {
-			fs.writeFileSync(tmpFile, currentText, "utf-8");
 			this.tui.stop();
-
-			process.stdout.write(`Launching external editor: ${editorCmd}\nPi will resume when the editor exits.\n`);
-			const status = await runExternalEditor(editorCmd, tmpFile);
-
-			if (status === 0) {
-				const newContent = fs.readFileSync(tmpFile, "utf-8").replace(/\n$/, "");
-				this.editor.setText(newContent);
+			const result = await editInExternalEditor({ command: editorCmd, content: currentText });
+			if (result.status === "complete") {
+				this.editor.setText(result.content);
 			}
 		} finally {
-			try {
-				fs.unlinkSync(tmpFile);
-			} catch {
-				// Ignore cleanup errors
-			}
 			this.tui.start();
 			// Force full re-render since external editor uses alternate screen
 			this.tui.requestRender(true);

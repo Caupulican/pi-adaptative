@@ -25,6 +25,10 @@ if (typeof process !== "undefined" && (process.versions?.node || process.version
 
 import type { KnownProvider } from "./types.ts";
 
+export const ANTHROPIC_AUTH_TOKEN_ENV = "ANTHROPIC_AUTH_TOKEN";
+export const ANTHROPIC_OAUTH_TOKEN_ENV = "ANTHROPIC_OAUTH_TOKEN";
+export const ANTHROPIC_API_KEY_ENV = "ANTHROPIC_API_KEY";
+
 let _procEnvCache: Map<string, string> | null = null;
 
 type ProcessEnv = Record<string, string | undefined>;
@@ -103,9 +107,10 @@ function getApiKeyEnvVars(provider: string): readonly string[] | undefined {
 		return ["COPILOT_GITHUB_TOKEN"];
 	}
 
-	// ANTHROPIC_OAUTH_TOKEN takes precedence over ANTHROPIC_API_KEY
+	// ANTHROPIC_AUTH_TOKEN participates in discovery/status, but getEnvApiKey skips it because it
+	// must be sent as an Authorization header rather than as Anthropic API-key/OAuth auth.
 	if (provider === "anthropic") {
-		return ["ANTHROPIC_OAUTH_TOKEN", "ANTHROPIC_API_KEY"];
+		return [ANTHROPIC_AUTH_TOKEN_ENV, ANTHROPIC_OAUTH_TOKEN_ENV, ANTHROPIC_API_KEY_ENV];
 	}
 
 	// Sakana's Codex/Fugu integration documents SAKANA_API_KEY. The models page
@@ -140,6 +145,8 @@ function getApiKeyEnvVars(provider: string): readonly string[] | undefined {
 		"kimi-coding": "KIMI_API_KEY",
 		"cloudflare-workers-ai": "CLOUDFLARE_API_KEY",
 		"cloudflare-ai-gateway": "CLOUDFLARE_API_KEY",
+		"qwen-token-plan": "QWEN_TOKEN_PLAN_API_KEY",
+		"qwen-token-plan-cn": "QWEN_TOKEN_PLAN_CN_API_KEY",
 		xiaomi: "XIAOMI_API_KEY",
 		"xiaomi-token-plan-cn": "XIAOMI_TOKEN_PLAN_CN_API_KEY",
 		"xiaomi-token-plan-ams": "XIAOMI_TOKEN_PLAN_AMS_API_KEY",
@@ -180,8 +187,9 @@ export function getEnvApiKey(provider: string): string | undefined;
 export function getEnvApiKey(provider: string): string | undefined {
 	const envKeys = findEnvKeys(provider);
 	const procEnv = getProcessEnv();
-	if (envKeys?.[0]) {
-		return procEnv?.[envKeys[0]] || getProcEnv(envKeys[0]);
+	if (envKeys?.length) {
+		const apiKeyEnv = provider === "anthropic" ? envKeys.find((key) => key !== ANTHROPIC_AUTH_TOKEN_ENV) : envKeys[0];
+		if (apiKeyEnv) return procEnv?.[apiKeyEnv] || getProcEnv(apiKeyEnv);
 	}
 
 	// Vertex AI supports either an explicit API key or Application Default Credentials.
@@ -228,4 +236,12 @@ export function getEnvApiKey(provider: string): string | undefined {
 	}
 
 	return undefined;
+}
+
+/** Resolve environment credentials that must be transported as headers rather than API keys. */
+export function getEnvAuthHeaders(provider: string): Record<string, string> | undefined {
+	if (provider !== "anthropic") return undefined;
+	const procEnv = getProcessEnv();
+	const token = procEnv?.[ANTHROPIC_AUTH_TOKEN_ENV] || getProcEnv(ANTHROPIC_AUTH_TOKEN_ENV);
+	return token ? { Authorization: `Bearer ${token}` } : undefined;
 }

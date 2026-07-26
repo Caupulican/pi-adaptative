@@ -10,7 +10,13 @@
 
 import { existsSync, mkdirSync, readFileSync, writeFileSync } from "node:fs";
 import { dirname } from "node:path";
-import type { AgentMessage, AgentState } from "@caupulican/pi-agent-core";
+import {
+	type AgentMessage,
+	type AgentState,
+	addUsage,
+	createEmptyUsage,
+	getSessionEntryUsage,
+} from "@caupulican/pi-agent-core";
 import {
 	CURRENT_SESSION_VERSION,
 	calculateContextTokens,
@@ -120,27 +126,27 @@ export class SessionAnalytics {
 	}
 
 	getSessionStats(): SessionStats {
-		const state = this.deps.getState();
-		const userMessages = state.messages.filter((m) => m.role === "user").length;
-		const assistantMessages = state.messages.filter((m) => m.role === "assistant").length;
-		const toolResults = state.messages.filter((m) => m.role === "toolResult").length;
-
+		let userMessages = 0;
+		let assistantMessages = 0;
+		let toolResults = 0;
+		let totalMessages = 0;
 		let toolCalls = 0;
-		let totalInput = 0;
-		let totalOutput = 0;
-		let totalCacheRead = 0;
-		let totalCacheWrite = 0;
-		let totalCost = 0;
+		const usage = createEmptyUsage();
 
-		for (const message of state.messages) {
-			if (message.role === "assistant") {
-				const assistantMsg = message as AssistantMessage;
+		for (const entry of this.deps.getSessionManager().getEntries()) {
+			const entryUsage = getSessionEntryUsage(entry);
+			if (entryUsage) addUsage(usage, entryUsage);
+			if (entry.type !== "message") continue;
+			totalMessages++;
+			const message = entry.message;
+			if (message.role === "user") {
+				userMessages++;
+			} else if (message.role === "toolResult") {
+				toolResults++;
+			} else if (message.role === "assistant") {
+				assistantMessages++;
+				const assistantMsg = message;
 				toolCalls += assistantMsg.content.filter((c) => c.type === "toolCall").length;
-				totalInput += assistantMsg.usage.input;
-				totalOutput += assistantMsg.usage.output;
-				totalCacheRead += assistantMsg.usage.cacheRead;
-				totalCacheWrite += assistantMsg.usage.cacheWrite;
-				totalCost += assistantMsg.usage.cost.total;
 			}
 		}
 
@@ -154,15 +160,15 @@ export class SessionAnalytics {
 			assistantMessages,
 			toolCalls,
 			toolResults,
-			totalMessages: state.messages.length,
+			totalMessages,
 			tokens: {
-				input: totalInput,
-				output: totalOutput,
-				cacheRead: totalCacheRead,
-				cacheWrite: totalCacheWrite,
-				total: totalInput + totalOutput + totalCacheRead + totalCacheWrite,
+				input: usage.input,
+				output: usage.output,
+				cacheRead: usage.cacheRead,
+				cacheWrite: usage.cacheWrite,
+				total: usage.input + usage.output + usage.cacheRead + usage.cacheWrite,
 			},
-			cost: totalCost,
+			cost: usage.cost.total,
 			contextUsage: this.getContextUsage(),
 			toolArgumentValidation,
 			compactionGates,
@@ -283,37 +289,15 @@ export class SessionAnalytics {
 	 * silently under-counts the grandchildren.
 	 */
 	getCumulativeUsage(): Usage {
-		let input = 0;
-		let output = 0;
-		let cacheRead = 0;
-		let cacheWrite = 0;
-		let totalTokens = 0;
-		let costInput = 0;
-		let costOutput = 0;
-		let costCacheRead = 0;
-		let costCacheWrite = 0;
-		let costTotal = 0;
-		const add = (usage: Usage) => {
-			input += usage.input;
-			output += usage.output;
-			cacheRead += usage.cacheRead;
-			cacheWrite += usage.cacheWrite;
-			totalTokens += usage.totalTokens;
-			costInput += usage.cost.input;
-			costOutput += usage.cost.output;
-			costCacheRead += usage.cost.cacheRead;
-			costCacheWrite += usage.cost.cacheWrite;
-			costTotal += usage.cost.total;
-		};
-		for (const message of this.deps.getState().messages) {
-			if (message.role !== "assistant") continue;
-			const usage = (message as AssistantMessage).usage;
-			if (!usage) continue;
-			add(usage);
+		const total = createEmptyUsage();
+		const entries = this.deps.getSessionManager().getEntries();
+		for (const entry of entries) {
+			const usage = getSessionEntryUsage(entry);
+			if (usage) addUsage(total, usage);
 		}
 		// Roll up usage this session attributed to its own spawned children (single-hop).
 		const seenSpawnedReportIds = new Set<string>();
-		for (const entry of this.deps.getSessionManager().getEntries()) {
+		for (const entry of entries) {
 			if (entry.type !== "custom" || entry.customType !== SPAWNED_USAGE_CUSTOM_TYPE) continue;
 			const data = entry.data as SpawnedUsageReport | undefined;
 			if (!data?.usage) continue;
@@ -321,22 +305,9 @@ export class SessionAnalytics {
 				if (seenSpawnedReportIds.has(data.reportId)) continue;
 				seenSpawnedReportIds.add(data.reportId);
 			}
-			add(data.usage);
+			addUsage(total, data.usage);
 		}
-		return {
-			input,
-			output,
-			cacheRead,
-			cacheWrite,
-			totalTokens,
-			cost: {
-				input: costInput,
-				output: costOutput,
-				cacheRead: costCacheRead,
-				cacheWrite: costCacheWrite,
-				total: costTotal,
-			},
-		};
+		return total;
 	}
 
 	/**

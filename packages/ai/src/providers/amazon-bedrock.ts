@@ -247,7 +247,9 @@ export const streamBedrock: StreamFunction<"bedrock-converse-stream", BedrockOpt
 						} else if (item.contentBlockStop) {
 							handleContentBlockStop(item.contentBlockStop, blocks, output, stream);
 						} else if (item.messageStop) {
-							output.stopReason = mapStopReason(item.messageStop.stopReason);
+							const mapped = mapStopReason(item.messageStop.stopReason);
+							output.stopReason = mapped.stopReason;
+							if (mapped.errorMessage) output.errorMessage = mapped.errorMessage;
 						} else if (item.metadata) {
 							handleMetadata(item.metadata, model, output);
 						} else if (item.internalServerException) {
@@ -268,7 +270,7 @@ export const streamBedrock: StreamFunction<"bedrock-converse-stream", BedrockOpt
 					}
 
 					if (output.stopReason === "error" || output.stopReason === "aborted") {
-						throw new Error("An unknown error occurred");
+						throw new Error(output.errorMessage || "An unknown error occurred");
 					}
 
 					stream.push({ type: "done", reason: output.stopReason, message: output });
@@ -960,18 +962,18 @@ function convertToolConfig(
 	return { tools: bedrockTools, toolChoice: bedrockToolChoice };
 }
 
-function mapStopReason(reason: string | undefined): StopReason {
+function mapStopReason(reason: string | undefined): { stopReason: StopReason; errorMessage?: string } {
 	switch (reason) {
 		case BedrockStopReason.END_TURN:
 		case BedrockStopReason.STOP_SEQUENCE:
-			return "stop";
+			return { stopReason: "stop" };
 		case BedrockStopReason.MAX_TOKENS:
 		case BedrockStopReason.MODEL_CONTEXT_WINDOW_EXCEEDED:
-			return "length";
+			return { stopReason: "length" };
 		case BedrockStopReason.TOOL_USE:
-			return "toolUse";
+			return { stopReason: "toolUse" };
 		default:
-			return "error";
+			return reason ? { stopReason: "error", errorMessage: reason } : { stopReason: "error" };
 	}
 }
 
@@ -1031,7 +1033,7 @@ function isGovCloudBedrockTarget(model: Model<"bedrock-converse-stream">, option
 function buildAdditionalModelRequestFields(
 	model: Model<"bedrock-converse-stream">,
 	options: BedrockOptions,
-): Record<string, any> | undefined {
+): Record<string, DocumentType> | undefined {
 	if (!options.reasoning || !model.reasoning) {
 		return undefined;
 	}
@@ -1040,7 +1042,7 @@ function buildAdditionalModelRequestFields(
 		// GovCloud Bedrock currently rejects the Claude thinking.display field.
 		// Omit it there until the GovCloud Converse schema catches up.
 		const display = isGovCloudBedrockTarget(model, options) ? undefined : (options.thinkingDisplay ?? "summarized");
-		const result: Record<string, any> = supportsAdaptiveThinking(model.id, model.name)
+		const result: Record<string, DocumentType> = supportsAdaptiveThinking(model.id, model.name)
 			? {
 					thinking: { type: "adaptive", ...(display !== undefined ? { display } : {}) },
 					output_config: { effort: mapThinkingLevelToEffort(model, options.reasoning) },

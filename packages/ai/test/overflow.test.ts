@@ -56,6 +56,11 @@ describe("isContextOverflow", () => {
 		expect(isContextOverflow(message, 131072)).toBe(true);
 	});
 
+	it("detects DashScope input range errors", () => {
+		const message = createErrorMessage("Range of input length should be [1, 999744]");
+		expect(isContextOverflow(message, 1_000_000)).toBe(true);
+	});
+
 	it("does not treat generic non-overflow Ollama errors as overflow", () => {
 		const message = createErrorMessage("500 `model runner crashed unexpectedly`");
 		expect(isContextOverflow(message, 32768)).toBe(false);

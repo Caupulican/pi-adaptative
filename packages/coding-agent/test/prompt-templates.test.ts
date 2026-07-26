@@ -195,6 +195,19 @@ describe("substituteArgs", () => {
 	test("should handle command with only placeholders", () => {
 		expect(substituteArgs("$1 $2 $@", ["a", "b", "c"])).toBe("a b a b c");
 	});
+
+	test("should support positional and all-argument defaults", () => {
+		const template = `\${1:-first}\n\${@:-all}\n\${ARGUMENTS:-all}`;
+
+		expect(substituteArgs(template, [])).toBe("first\nall\nall");
+		expect(substituteArgs(template, ["one", "two"])).toBe("one\none two\none two");
+	});
+
+	test("should not recursively substitute defaults or argument values", () => {
+		expect(substituteArgs(`\${1:-$ARGUMENTS}`, [])).toBe("$ARGUMENTS");
+		expect(substituteArgs(`\${@:-$1}`, [])).toBe("$1");
+		expect(substituteArgs(`\${1:-fallback}`, ["$ARGUMENTS"])).toBe("$ARGUMENTS");
+	});
 });
 
 // ============================================================================

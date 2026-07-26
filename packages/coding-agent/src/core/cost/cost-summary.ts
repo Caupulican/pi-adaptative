@@ -1,5 +1,6 @@
+import { getSessionEntryUsage } from "@caupulican/pi-agent-core";
 import type { SessionEntry } from "@caupulican/pi-agent-core/node";
-import type { AssistantMessage, Usage } from "@caupulican/pi-ai";
+import type { Usage } from "@caupulican/pi-ai";
 import { SPAWNED_USAGE_CUSTOM_TYPE, type SpawnedUsageReport } from "../agent-session-contracts.ts";
 import type { DailyUsageTotals, DailyUsageWindow } from "./daily-usage.ts";
 
@@ -46,8 +47,9 @@ export function accumulateCurrentSessionCostsFromEntries(
 	entries: readonly SessionEntry[],
 ): CurrentSessionCostAccumulator {
 	for (const entry of entries) {
-		if (entry.type === "message" && entry.message.role === "assistant") {
-			const total = getUsageTotalCost((entry.message as AssistantMessage).usage);
+		const usage = getSessionEntryUsage(entry);
+		if (usage) {
+			const total = getUsageTotalCost(usage);
 			if (total !== undefined) accumulator.ownCost += total;
 			continue;
 		}

@@ -119,6 +119,16 @@ describe("generateSummary reasoning options", () => {
 		expect(completeSimpleMock.mock.calls[0][2]).not.toHaveProperty("reasoning");
 	});
 
+	it("disables caching and isolates each standalone summary request", async () => {
+		await generateSummary(messages, createModel(false), 2000, "test-key");
+		await generateSummary(messages, createModel(false), 2000, "test-key");
+
+		const options = completeSimpleMock.mock.calls.map((call) => call[2]);
+		expect(options.map((entry) => entry?.cacheRetention)).toEqual(["none", "none"]);
+		expect(options[0]?.sessionId).toMatch(/^[0-9a-f-]{36}$/);
+		expect(options[1]?.sessionId).not.toBe(options[0]?.sessionId);
+	});
+
 	it("clamps compaction summary maxTokens to the model output cap", async () => {
 		const preparation: CompactionPreparation = {
 			firstKeptEntryId: "entry-keep",

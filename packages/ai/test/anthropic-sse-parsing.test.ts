@@ -321,6 +321,33 @@ describe("Anthropic raw SSE parsing", () => {
 		expect(result.usage.cost.output).toBeGreaterThan(0);
 	});
 
+	it("preserves accumulated usage when message_delta omits usage", async () => {
+		const model = getModel("anthropic", "claude-haiku-4-5");
+		const context: Context = {
+			messages: [{ role: "user", content: "Say hello.", timestamp: Date.now() }],
+		};
+		const response = createSseResponse(
+			minimalAnthropicEvents.map((event) =>
+				event.event === "message_delta"
+					? {
+							event: "message_delta",
+							data: JSON.stringify({ type: "message_delta", delta: { stop_reason: "end_turn" } }),
+						}
+					: event,
+			),
+		);
+
+		const result = await streamAnthropic(model, context, {
+			client: createFakeAnthropicClient(response),
+		}).result();
+
+		expect(result.stopReason).toBe("stop");
+		expect(result.errorMessage).toBeUndefined();
+		expect(result.content).toEqual([{ type: "text", text: "Hello" }]);
+		expect(result.usage.input).toBe(12);
+		expect(result.usage.totalTokens).toBe(12);
+	});
+
 	it("rejects a multi-line SSE event whose total exceeds the event bound", async () => {
 		const model = getModel("anthropic", "claude-haiku-4-5");
 		const context: Context = { messages: [{ role: "user", content: "hello", timestamp: 1 }] };

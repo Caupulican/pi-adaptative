@@ -16,6 +16,7 @@ import type {
 import { formatProviderError, normalizeProviderError } from "../utils/error-body.ts";
 import { AssistantMessageEventStream } from "../utils/event-stream.ts";
 import { headersToRecord } from "../utils/headers.ts";
+import { retryProviderRequest } from "../utils/provider-retry.ts";
 import { isCloudflareProvider, resolveCloudflareBaseUrl } from "./cloudflare.ts";
 import { buildCopilotDynamicHeaders, hasCopilotVisionInput } from "./github-copilot-headers.ts";
 import { clampOpenAIPromptCacheKey } from "./openai-prompt-cache.ts";
@@ -31,6 +32,10 @@ import { buildBaseOptions } from "./simple-options.ts";
 const OPENAI_TOOL_CALL_PROVIDERS = new Set(["openai", "openai-codex", "opencode", "fugu"]);
 const FUGU_DEFAULT_TIMEOUT_MS = 7_200_000;
 const FUGU_DEFAULT_MAX_RETRIES = 4;
+
+function detectSessionAffinityFormat(model: Pick<Model<"openai-responses">, "provider" | "baseUrl">) {
+	return model.provider === "openrouter" || model.baseUrl.includes("openrouter.ai") ? "openrouter" : "openai";
+}
 
 /**
  * Resolve cache retention preference.
@@ -48,7 +53,7 @@ function resolveCacheRetention(cacheRetention?: CacheRetention): CacheRetention 
 
 function getCompat(model: Model<"openai-responses">): Required<OpenAIResponsesCompat> {
 	return {
-		sendSessionIdHeader: model.compat?.sendSessionIdHeader ?? true,
+		sessionAffinityFormat: model.compat?.sessionAffinityFormat ?? detectSessionAffinityFormat(model),
 		supportsLongCacheRetention: model.compat?.supportsLongCacheRetention ?? true,
 	};
 }
@@ -69,6 +74,7 @@ export interface OpenAIResponsesOptions extends StreamOptions {
 	reasoningEffort?: "none" | "minimal" | "low" | "medium" | "high" | "xhigh" | "max" | "ultra";
 	reasoningSummary?: "auto" | "detailed" | "concise" | null;
 	serviceTier?: ResponseCreateParamsStreaming["service_tier"];
+	toolChoice?: ResponseCreateParamsStreaming["tool_choice"];
 }
 
 /**
@@ -123,9 +129,16 @@ export const streamOpenAIResponses: StreamFunction<"openai-responses", OpenAIRes
 					: model.provider === "fugu"
 						? { timeout: FUGU_DEFAULT_TIMEOUT_MS }
 						: {}),
-				maxRetries: options?.maxRetries ?? (model.provider === "fugu" ? FUGU_DEFAULT_MAX_RETRIES : 0),
+				maxRetries: 0,
 			};
-			const { data: openaiStream, response } = await client.responses.create(params, requestOptions).withResponse();
+			const { data: openaiStream, response } = await retryProviderRequest(
+				() => client.responses.create(params, requestOptions).withResponse(),
+				{
+					maxRetries: options?.maxRetries ?? (model.provider === "fugu" ? FUGU_DEFAULT_MAX_RETRIES : 0),
+					maxRetryDelayMs: options?.maxRetryDelayMs,
+					signal: options?.signal,
+				},
+			);
 			await options?.onResponse?.({ status: response.status, headers: headersToRecord(response.headers) }, model);
 			stream.push({ type: "start", partial: output });
 
@@ -218,10 +231,14 @@ function createClient(
 	}
 
 	if (sessionId) {
-		if (compat.sendSessionIdHeader) {
-			headers.session_id = sessionId;
+		if (compat.sessionAffinityFormat === "openrouter") {
+			headers["x-session-id"] = sessionId;
+		} else {
+			if (compat.sessionAffinityFormat === "openai") {
+				headers.session_id = sessionId;
+			}
+			headers["x-client-request-id"] = sessionId;
 		}
-		headers["x-client-request-id"] = sessionId;
 	}
 
 	// Merge options headers last so they can override defaults
@@ -284,6 +301,9 @@ function buildParams(model: Model<"openai-responses">, context: Context, options
 
 	if (context.tools && context.tools.length > 0) {
 		params.tools = convertResponsesTools(context.tools, { toolNameMap });
+	}
+	if (options?.toolChoice !== undefined) {
+		params.tool_choice = options.toolChoice;
 	}
 
 	if (model.reasoning) {

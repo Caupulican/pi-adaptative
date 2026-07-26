@@ -149,6 +149,7 @@ import { validateOrchestrationProfile } from "./orchestration/profile-registry.t
 import { ProfileFilterController } from "./profile-filter-controller.ts";
 import { expandPromptTemplate, type PromptTemplate } from "./prompt-templates.ts";
 import { ReflectionController } from "./reflection-controller.ts";
+import type { RequestAuth } from "./request-auth.ts";
 import type { ModelFitnessReport } from "./research/model-fitness.ts";
 import {
 	appendEvidenceBundleSnapshot,
@@ -1039,10 +1040,7 @@ export class AgentSession {
 		return fn === streamSimple || (fn as { [RAW_STREAM_MARKER]?: boolean })[RAW_STREAM_MARKER] === true;
 	}
 
-	private async _getRequiredRequestAuth(model: Model<Api>): Promise<{
-		apiKey: string;
-		headers?: Record<string, string>;
-	}> {
+	private async _getRequiredRequestAuth(model: Model<Api>): Promise<RequestAuth> {
 		const result = await this._modelRegistry.getApiKeyAndHeaders(model);
 		if (!result.ok) {
 			if (result.error.startsWith("No API key found")) {
@@ -1050,7 +1048,7 @@ export class AgentSession {
 			}
 			throw new Error(result.error);
 		}
-		if (result.apiKey) {
+		if (this._modelRegistry.canUseResolvedRequestAuth(model, result)) {
 			return { apiKey: result.apiKey, headers: result.headers };
 		}
 
