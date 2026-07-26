@@ -3,6 +3,7 @@ import type { GoalEvent } from "../src/core/goals/goal-state.ts";
 import {
 	applyGoalEvent,
 	createGoalState,
+	MAX_GOAL_EVENT_HISTORY,
 	parseGoalState,
 	serializeGoalState,
 	shouldContinueGoalLoop,
@@ -155,6 +156,37 @@ describe("Goal State (Phase 4)", () => {
 		state = applyGoalEvent(state, { type: "complete_goal_manually", now: "T5" });
 		expect(state.status).toBe("completed");
 		expect(state.requirements[0].status).toBe("open");
+	});
+
+	it("keeps paused, usage-limited, and budget-limited states distinct", () => {
+		let state = createGoalState({ goalId: "g1", userGoal: "Fix bugs", now: "T0" });
+		state = applyGoalEvent(state, { type: "pause_goal", now: "T1" });
+		expect(state.status).toBe("paused");
+		state = applyGoalEvent(state, { type: "resume_goal", now: "T2" });
+		state = applyGoalEvent(state, {
+			type: "system_stop_goal",
+			status: "usage_limited",
+			reason: "quota",
+			now: "T3",
+		});
+		expect(state.status).toBe("usage_limited");
+		state = applyGoalEvent(state, { type: "resume_goal", now: "T4" });
+		state = applyGoalEvent(state, {
+			type: "system_stop_goal",
+			status: "budget_limited",
+			reason: "tokens",
+			now: "T5",
+		});
+		expect(state.status).toBe("budget_limited");
+	});
+
+	it("bounds retained event history while preserving monotonic revisions", () => {
+		let state = createGoalState({ goalId: "g1", userGoal: "Fix bugs", now: "T0" });
+		for (let index = 1; index <= MAX_GOAL_EVENT_HISTORY + 25; index++) {
+			state = applyGoalEvent(state, { type: "no_progress", now: `T${index}` });
+		}
+		expect(state.events).toHaveLength(MAX_GOAL_EVENT_HISTORY);
+		expect(state.revision).toBe(MAX_GOAL_EVENT_HISTORY + 25);
 	});
 
 	it("serialization round-trips", () => {

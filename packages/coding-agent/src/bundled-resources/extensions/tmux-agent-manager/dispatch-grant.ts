@@ -262,6 +262,7 @@ export function buildLaunchProfileFlags(source: LaunchProfileSource): LaunchProf
 	if (source.parentSession) flags.push({ flag: "--parent-session", value: source.parentSession });
 	if (source.taskRef) flags.push({ flag: "--task-ref", value: source.taskRef });
 	flags.push({ flag: "--append-system-prompt", value: buildScopedSystemPrompt(source) });
+	flags.push({ flag: "--session-mode", value: "worker" });
 	return flags;
 }
 

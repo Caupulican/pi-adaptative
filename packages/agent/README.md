@@ -44,12 +44,13 @@ LLMs only understand `user`, `assistant`, and `toolResult`. The `convertToLlm` f
 ### Message Flow
 
 ```
-AgentMessage[] → transformContext() → AgentMessage[] → convertToLlm() → Message[] → LLM
-                    (optional)                           (required)
+AgentMessage[] → failure boundary → transformContext() → convertToLlm() → Message[] → LLM
+                                      (optional)            (required)
 ```
 
-1. **transformContext**: Prune old messages, inject external context
-2. **convertToLlm**: Filter out UI-only messages, convert custom types to LLM format
+1. **failure boundary**: Remove failed tool protocol turns and retain only bounded unresolved failure records
+2. **transformContext**: Prune old messages, inject external context
+3. **convertToLlm**: Filter out UI-only messages, convert custom types to LLM format
 
 ## Event Flow
 
@@ -427,7 +428,11 @@ execute: async (toolCallId, params, signal, onUpdate) => {
 }
 ```
 
-Thrown errors are caught by the agent and reported to the LLM as tool errors with `isError: true`.
+Thrown errors are caught and persisted as bounded `isError: true` records containing a stable operation key,
+occurrence count, state, tool name, failure code, and corrective action from the shared repair catalogue. Raw
+failure output and failed tool protocol turns do not reach later provider requests. The unresolved record teaches
+the next attempt without replaying the error payload, and a later successful execution of that operation clears
+the reminder.
 
 Return `terminate: true` from `execute()` or `afterToolCall` to hint that the agent should stop after the current tool batch. This only takes effect when every finalized tool result in the batch is terminating. The hint is runtime-only; emitted `toolResult` transcript messages remain standard LLM tool results.
 

@@ -71,7 +71,7 @@ const THINKING_DESCRIPTIONS: Record<ThinkingLevel, string> = {
 };
 
 const AUTONOMY_MODES: AutonomyMode[] = ["off", "safe", "balanced", "full"];
-const AUTONOMY_GOAL_CONTINUE_TURN_VALUES = ["1", "3", "5", "10", "20"];
+const AUTONOMY_GOAL_CONTINUE_TURN_VALUES = ["0", "1", "3", "5", "10", "20"];
 const AUTONOMY_MAX_STALL_TURN_VALUES = ["0", "5", "10", "20", "30", "50", "100"];
 const AUTONOMY_GOAL_CONTINUE_MAX_WALL_CLOCK_MINUTE_VALUES = ["0", "15", "30", "60", "120", "240", "480", "1440"];
 const AUTONOMY_GOAL_AUTO_CONTINUE_DELAY_MS_VALUES = ["0", "250", "1000", "5000", "30000", "60000"];
@@ -160,7 +160,7 @@ function autonomySummary(settings: AutonomySettings): string {
 	const stall = settings.maxStallTurns ?? DEFAULT_AUTONOMY_MAX_STALL_TURNS;
 	const autoContinue = settings.goalAutoContinue ?? DEFAULT_AUTONOMY_GOAL_AUTO_CONTINUE;
 	const modeLabel = mode === "full" ? "standing autonomy" : mode;
-	return `${modeLabel}, ${turns} turns, stall ${stall}, auto ${autoContinue ? "on" : "off"}`;
+	return `${modeLabel}, ${turns === 0 ? "unbounded turns" : `${turns} turns`}, stall ${stall}, auto ${autoContinue ? "on" : "off"}`;
 }
 
 function autonomyGoalContinueTurnsValue(settings: AutonomySettings): string {
@@ -717,14 +717,14 @@ class AutonomySettingsSubmenu extends Container {
 			{
 				id: "autonomy-goal-auto-continue",
 				label: "Goal auto-continue",
-				description: "Inject bounded continuation prompts when Pi becomes idle with an active open goal",
+				description: "Continue an active goal whenever Pi becomes idle until a real terminal condition",
 				currentValue: autonomyGoalAutoContinueValue(this.state),
 				values: ["true", "false"],
 			},
 			{
 				id: "autonomy-goal-continue-turns",
 				label: "Goal turns",
-				description: "Maximum continuation prompts in one idle or explicit goal loop",
+				description: "Optional continuation prompt limit; 0 is unbounded like Codex",
 				currentValue: autonomyGoalContinueTurnsValue(this.state),
 				values: AUTONOMY_GOAL_CONTINUE_TURN_VALUES,
 			},

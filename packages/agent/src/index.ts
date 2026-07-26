@@ -10,6 +10,8 @@ export * from "./proxy.ts";
 export * from "./reliability/index.ts";
 // Session message retention (pure)
 export * from "./session/message-retention.ts";
+// Provider-neutral failed tool-call context boundary
+export * from "./tool-failure-memory.ts";
 // Types
 export * from "./types.ts";
 // Shell output utilities

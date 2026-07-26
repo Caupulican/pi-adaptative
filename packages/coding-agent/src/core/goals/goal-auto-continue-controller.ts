@@ -4,7 +4,7 @@ import type {
 	GoalContinuationLoopResult,
 	PromptOptions,
 } from "../agent-session.ts";
-import { type ModelCapabilityProfile, scaleContinuationBudgetsForCapability } from "../model-capability.ts";
+import type { ModelCapabilityProfile } from "../model-capability.ts";
 import type { SettingsManager } from "../settings-manager.ts";
 import type { GoalRuntimeSnapshot, GoalRuntimeSnapshotSettings } from "./goal-runtime-snapshot.ts";
 
@@ -16,6 +16,7 @@ export interface GoalAutoContinueControllerDeps {
 	getGoalRuntimeSnapshot(settings: GoalRuntimeSnapshotSettings): GoalRuntimeSnapshot;
 	hasInFlightLaneForGoal(goalId: string): boolean;
 	continueGoalLoop(options: GoalContinuationLoopOptions): Promise<GoalContinuationLoopResult>;
+	markGoalToolUnavailable(): void;
 	emit(event: AgentSessionEvent): void;
 }
 
@@ -64,7 +65,10 @@ export class GoalAutoContinueController {
 	async continueExclusive(options: GoalContinuationLoopOptions): Promise<GoalContinuationLoopResult> {
 		if (this._isContinuing) return this.skippedResult(options, "already_continuing");
 		if (this.deps.isDisposed()) return this.skippedResult(options, "session_disposed");
-		if (!this.deps.isGoalToolActive()) return this.skippedResult(options, "goal_tool_unavailable");
+		if (!this.deps.isGoalToolActive()) {
+			this.deps.markGoalToolUnavailable();
+			return this.skippedResult(options, "goal_tool_unavailable");
+		}
 		this._isContinuing = true;
 		try {
 			return await this.deps.continueGoalLoop(options);
@@ -81,15 +85,11 @@ export class GoalAutoContinueController {
 		if (!goalAutoContinue) return;
 		const snapshot = this.deps.getGoalRuntimeSnapshot({ maxStallTurns });
 		if (snapshot.continuation.action !== "continue") return;
-		const scaled = scaleContinuationBudgetsForCapability(this.deps.getModelCapabilityProfile(), {
-			maxTurns: goalContinueTurns,
-			maxWallClockMinutes: goalContinueMaxWallClockMinutes,
-		});
 		try {
 			await this.continueExclusive({
-				maxTurns: scaled.maxTurns,
+				maxTurns: goalContinueTurns,
 				maxStallTurns,
-				maxWallClockMinutes: scaled.maxWallClockMinutes,
+				maxWallClockMinutes: goalContinueMaxWallClockMinutes,
 			});
 		} catch (error) {
 			const message = error instanceof Error ? error.message : String(error);

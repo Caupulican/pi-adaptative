@@ -13,7 +13,7 @@
 import * as fs from "node:fs";
 import * as path from "node:path";
 import type { SessionManager, TruncationResult } from "@caupulican/pi-agent-core/node";
-import type { Component, Container, Loader, TUI } from "@caupulican/pi-tui";
+import type { Component, Container, TUI } from "@caupulican/pi-tui";
 import { getAgentDir } from "../../config.ts";
 import type { AgentSession } from "../../core/agent-session.ts";
 import type { SettingsManager } from "../../core/settings-manager.ts";
@@ -62,8 +62,6 @@ export interface BashCommandHost {
 export interface CompactCommandHost {
 	readonly sessionManager: Pick<SessionManager, "getEntries">;
 	showWarning(message: string): void;
-	loadingAnimation: Loader | undefined;
-	readonly statusContainer: { clear: () => void };
 	readonly session: Pick<AgentSession, "compact">;
 }
 
@@ -292,12 +290,6 @@ export async function handleCompactCommand(host: CompactCommandHost, customInstr
 		host.showWarning("Nothing to compact (no messages yet)");
 		return;
 	}
-
-	if (host.loadingAnimation) {
-		host.loadingAnimation.stop();
-		host.loadingAnimation = undefined;
-	}
-	host.statusContainer.clear();
 
 	try {
 		await host.session.compact(customInstructions);

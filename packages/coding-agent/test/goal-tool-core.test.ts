@@ -1,4 +1,5 @@
 import { describe, expect, it } from "vitest";
+import { cancelGoal, resumeGoal } from "../src/core/goals/goal-lifecycle.ts";
 import { createGoalState } from "../src/core/goals/goal-state.ts";
 import { applyGoalAction, completeGoalManually, summarizeGoalState } from "../src/core/goals/goal-tool-core.ts";
 
@@ -34,14 +35,14 @@ describe("applyGoalAction (goal producer core)", () => {
 		expect(second.error).toContain("already exists");
 	});
 
-	it("allows restarting the same goal id", () => {
+	it("refuses to restart the same unfinished goal id", () => {
 		const started = applyGoalAction(undefined, { action: "start", goalId: "g1", userGoal: "A" }, "T0");
 		expect(started.ok).toBe(true);
 		if (!started.ok) return;
 		const restart = applyGoalAction(started.state, { action: "start", goalId: "g1", userGoal: "A2" }, "T1");
-		expect(restart.ok).toBe(true);
-		if (!restart.ok) return;
-		expect(restart.state.userGoal).toBe("A2");
+		expect(restart.ok).toBe(false);
+		if (restart.ok) return;
+		expect(restart.error).toContain("unfinished goal");
 	});
 
 	it("adds requirements and rejects duplicates", () => {
@@ -111,7 +112,7 @@ describe("applyGoalAction (goal producer core)", () => {
 			applyGoalAction(state, { action: "block_requirement", requirementId: "r1", reason: "no access" }, "T2"),
 		);
 		state = expectOk(applyGoalAction(state, { action: "block_goal", reason: "stuck" }, "T3"));
-		state = expectOk(applyGoalAction(state, { action: "resume_goal" }, "T4"));
+		state = expectOk(resumeGoal(state, "T4"));
 		state = expectOk(applyGoalAction(state, { action: "reopen_requirement", requirementId: "r1" }, "T5"));
 
 		expect(state.status).toBe("active");
@@ -120,13 +121,13 @@ describe("applyGoalAction (goal producer core)", () => {
 		expect(state.requirements[0].blockedReason).toBeUndefined();
 
 		state = expectOk(applyGoalAction(state, { action: "block_goal", reason: "blocked again" }, "T6"));
-		state = expectOk(applyGoalAction(state, { action: "cancel" }, "T7"));
+		state = expectOk(cancelGoal(state, "T7"));
 		expect(state.status).toBe("cancelled");
 	});
 
 	it("rejects updates after the goal is no longer active", () => {
 		let state = createGoalState({ goalId: "g1", userGoal: "A", now: "T0" });
-		state = expectOk(applyGoalAction(state, { action: "cancel" }, "T1"));
+		state = expectOk(cancelGoal(state, "T1"));
 		expect(state.status).toBe("cancelled");
 		const afterCancel = applyGoalAction(state, { action: "progress" }, "T2");
 		expect(afterCancel.ok).toBe(false);
@@ -253,7 +254,7 @@ describe("applyGoalAction (goal producer core)", () => {
 		state = expectOk(applyGoalAction(state, { action: "add_requirement", requirementId: "r1", text: "Do X" }, "T1"));
 		const summary = summarizeGoalState(state);
 		expect(summary).toContain("Goal 'g1'");
-		expect(summary).toContain("1 open");
+		expect(summary).toContain("Legacy ledger: 1 requirements, 0 evidence; open: r1.");
 	});
 });
 

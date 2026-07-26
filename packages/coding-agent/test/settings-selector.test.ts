@@ -153,7 +153,7 @@ describe("settings selector", () => {
 
 		expect(output).toContain("Autonomy");
 		expect(output).toContain("standing autonomy");
-		expect(output).toContain("20 turns, stall 20, auto on");
+		expect(output).toContain("unbounded turns, stall 20, auto on");
 	});
 
 	it("persists goal continue turns from the Autonomy submenu", () => {
@@ -174,7 +174,7 @@ describe("settings selector", () => {
 			{
 				mode: "balanced",
 				maxStallTurns: 20,
-				goalContinueTurns: 1, // 20 -> 1
+				goalContinueTurns: 1, // unbounded (0) -> 1
 				goalContinueMaxWallClockMinutes: 0,
 				goalAutoContinue: true,
 				goalAutoContinueDelayMs: 0,

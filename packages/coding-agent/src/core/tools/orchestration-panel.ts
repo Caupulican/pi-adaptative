@@ -2,8 +2,7 @@ import type { Component } from "@caupulican/pi-tui";
 import { truncateToWidth, visibleWidth } from "@caupulican/pi-tui";
 import { renderTitleBadge, type TitleBadgeStatus } from "../../modes/interactive/components/tool-title.ts";
 import type { Theme, ThemeColor } from "../../modes/interactive/theme/theme.ts";
-import type { LaneRecord } from "../autonomy/lane-tracker.ts";
-import type { TaskStep, TaskStepsState } from "../tasks/task-state.ts";
+import type { TaskStep } from "../tasks/task-state.ts";
 
 export type OrchestrationRowStatus =
 	| "pending"
@@ -94,58 +93,6 @@ export function taskStepPanelRow(step: TaskStep): OrchestrationPanelRow {
 		label: step.status === "in_progress" ? (step.activeForm ?? step.content) : step.content,
 		meta,
 		details,
-	};
-}
-
-/** Build the quiet below-editor view from native session truth. No active work means no widget. */
-export function createOrchestrationActivityModel(
-	taskState: TaskStepsState | undefined,
-	laneRecords: readonly LaneRecord[],
-): OrchestrationPanelModel | undefined {
-	const openSteps =
-		taskState?.steps.filter((step) => step.status !== "completed" && step.status !== "cancelled") ?? [];
-	const orderedSteps = [
-		...openSteps.filter((step) => step.status === "in_progress"),
-		...openSteps.filter((step) => step.status === "blocked"),
-		...openSteps.filter((step) => step.status === "pending"),
-	];
-	const activeLanes = laneRecords.filter(
-		(lane) =>
-			(lane.type === "worker" || lane.type === "tmux-worker") &&
-			(lane.status === "running" || lane.status === "queued"),
-	);
-	if (openSteps.length === 0 && activeLanes.length === 0) return undefined;
-
-	const taskRows = orderedSteps.slice(0, 5).map((step) => ({ ...taskStepPanelRow(step), section: "Steps" }));
-	const laneRows: OrchestrationPanelRow[] = activeLanes.slice(0, 3).map((lane) => ({
-		status: lane.status,
-		label: lane.label ?? lane.laneId,
-		section: "Agents",
-		meta: [
-			lane.label ? lane.laneId : undefined,
-			lane.profileId ? `profile ${lane.profileId}` : undefined,
-			lane.type === "tmux-worker" ? "tmux" : undefined,
-		].filter((value): value is string => value !== undefined),
-	}));
-	const runningLanes = activeLanes.filter((lane) => lane.status === "running").length;
-	const queuedLanes = activeLanes.length - runningLanes;
-	const blockedSteps = openSteps.filter((step) => step.status === "blocked").length;
-	const workingSteps = openSteps.filter((step) => step.status === "in_progress").length;
-	const evidenceMissing = taskState?.steps.some((step) => step.status === "completed" && step.evidence.length === 0);
-	return {
-		label: "work",
-		action: workingSteps + runningLanes > 0 ? "active" : "ready",
-		status: blockedSteps > 0 ? "warning" : workingSteps + runningLanes > 0 ? "running" : "idle",
-		summary: [
-			openSteps.length ? `${openSteps.length} step${openSteps.length === 1 ? "" : "s"}` : undefined,
-			runningLanes ? `${runningLanes} agent${runningLanes === 1 ? "" : "s"}` : undefined,
-			queuedLanes ? `${queuedLanes} queued` : undefined,
-		].filter((value): value is string => value !== undefined),
-		rows: [...taskRows, ...laneRows],
-		hiddenRowCount: Math.max(0, openSteps.length + activeLanes.length - taskRows.length - laneRows.length),
-		notices: evidenceMissing
-			? [{ status: "warning", text: "Completed work still needs attached evidence." }]
-			: undefined,
 	};
 }
 

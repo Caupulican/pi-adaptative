@@ -19,8 +19,22 @@ import { getParentPid } from "./process-identity.ts";
 import { getBoundWorktreeLaneKey } from "./worktree-sync/runtime.ts";
 
 export type SessionRole = "main" | "worker";
+export type TerminalSessionMode = "user" | "worker";
 
-const PI_SESSION_ROLE_ENV = "PI_SESSION_ROLE";
+export const PI_SESSION_ROLE_ENV = "PI_SESSION_ROLE";
+
+export function isTerminalSessionMode(value: string): value is TerminalSessionMode {
+	return value === "user" || value === "worker";
+}
+
+/** Apply the terminal audience declaration without bypassing worker inference or UAC ceilings. */
+export function setTerminalSessionMode(mode: TerminalSessionMode, env: NodeJS.ProcessEnv = process.env): void {
+	if (mode === "worker") {
+		env[PI_SESSION_ROLE_ENV] = "worker";
+	} else if (env[PI_SESSION_ROLE_ENV] !== "worker") {
+		env[PI_SESSION_ROLE_ENV] = "main";
+	}
+}
 
 /** Derive this process's session role from the environment (env-injectable for tests). */
 export function getSessionRole(env: NodeJS.ProcessEnv = process.env): SessionRole {

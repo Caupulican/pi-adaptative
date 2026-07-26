@@ -85,18 +85,23 @@ describe("goal tool", () => {
 		expect(getState()?.stallTurns).toBe(0);
 	});
 
-	it("recovers a blocked ledger instead of requiring a replacement goal", async () => {
+	it("reads a blocked ledger without exposing owner resume authority", async () => {
 		const { run, getState } = createHarness();
 		await run({ action: "start", goalId: "g1", userGoal: "Ship" });
 		await run({ action: "add_requirement", requirementId: "r1", text: "Get access" });
 		await run({ action: "block_requirement", requirementId: "r1", reason: "waiting for user" });
 		await run({ action: "block_goal", reason: "waiting for user" });
 
-		const resumed = await run({ action: "resume_goal" });
-		expect(resumed.details.applied).toBe(true);
-		const reopened = await run({ action: "reopen_requirement", requirementId: "r1" });
-		expect(reopened.details.applied).toBe(true);
-		expect(getState()?.status).toBe("active");
-		expect(getState()?.requirements[0].status).toBe("open");
+		const viewed = await run({ action: "get" });
+		expect(viewed.details.applied).toBe(false);
+		expect(viewed.content[0]).toMatchObject({ type: "text", text: expect.stringContaining("blocked") });
+		expect(getState()?.status).toBe("blocked");
+	});
+
+	it("persists an explicitly supplied positive token budget", async () => {
+		const { run, getState } = createHarness();
+		await run({ action: "start", goalId: "g1", userGoal: "Ship", tokenBudget: 12_000 });
+		expect(getState()?.tokenBudget).toBe(12_000);
+		expect(getState()?.tokensUsed).toBe(0);
 	});
 });

@@ -1,6 +1,16 @@
-[task steps]  1 working · 2 open · 4 done
-  ● Implement the native panel  high priority · @implementer
-  ○ Run focused tests
-  ! Verify worker review state
+Codex mechanism (20dafe201d91d4405eef05ecd1db0257f13a9ac8)
+- one event-owned status row adjacent to the composer
+- width-bounded label
+- absent when no task is running
 
-π teams  ● implementer  ·  ◌ verifier  ·  /teams
+Claude Code mechanism (2.1.219, 7006c4c3acac98e554d3997baeda6a7fa4d1ff7c)
+- activeForm preferred for current task wording
+- bounded horizontal activity summary
+- short completion-feedback hold
+
+Pi constraints
+- canonical goal/task/lane truth
+- semantic theme tokens
+- explicit expansion for detail
+- no replay of terminal state on resume
+- no human UI routing in worker sessions

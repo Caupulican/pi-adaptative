@@ -3,6 +3,7 @@ import { type Static, Type } from "typebox";
 import type { WorkerClaim } from "../autonomy/contracts.ts";
 import type { LaneRecord } from "../autonomy/lane-tracker.ts";
 import type { ToolDefinition } from "../extensions/types.ts";
+import { type GoalStateRevision, getGoalStateRevision } from "../goals/goal-lifecycle.ts";
 import type { GoalEvidenceKind, GoalState } from "../goals/goal-state.ts";
 import {
 	applyGoalAction,
@@ -11,12 +12,18 @@ import {
 	type OpenTaskStepRef,
 	summarizeGoalState,
 } from "../goals/goal-tool-core.ts";
+import {
+	emptyOrchestrationCall,
+	OrchestrationPanelComponent,
+	type OrchestrationPanelModel,
+} from "./orchestration-panel.ts";
 import { resolveToCwd } from "./path-utils.ts";
 
 const goalSchema = Type.Object(
 	{
 		action: Type.Union(
 			[
+				Type.Literal("get"),
 				Type.Literal("start"),
 				Type.Literal("add_requirement"),
 				Type.Literal("satisfy_requirement"),
@@ -28,13 +35,14 @@ const goalSchema = Type.Object(
 				Type.Literal("no_progress"),
 				Type.Literal("complete"),
 				Type.Literal("block_goal"),
-				Type.Literal("resume_goal"),
-				Type.Literal("cancel"),
 			],
-			{ description: "Ledger action to record." },
+			{ description: "Goal record action." },
 		),
 		goalId: Type.Optional(Type.String({ description: "Stable goal id. Required for action 'start'." })),
 		userGoal: Type.Optional(Type.String({ description: "The goal statement. Required for action 'start'." })),
+		tokenBudget: Type.Optional(
+			Type.Integer({ minimum: 1, description: "Optional positive token budget for action 'start'." }),
+		),
 		requirementId: Type.Optional(
 			Type.String({
 				description:
@@ -72,8 +80,7 @@ const goalSchema = Type.Object(
 		reason: Type.Optional(Type.String({ description: "Reason for block_requirement or block_goal." })),
 		dispatchTarget: Type.Optional(
 			Type.Union([Type.Literal("in_process"), Type.Literal("tmux")], {
-				description:
-					"Worker runtime for dispatch_worker. Defaults to 'in_process'. 'tmux' dispatches a persistent tmux worker via the tmux_agent_manager extension -- only takes effect when that dependency is wired AND an owner-granted standing dispatch grant covers it; otherwise the dispatch is honestly skipped with a dispatchSkipReason (never a silent fallback or a fake launch).",
+				description: "Legacy worker target. Prefer the delegate tool for new work.",
 			}),
 		),
 	},
@@ -83,7 +90,7 @@ const goalSchema = Type.Object(
 export type GoalToolInput = Static<typeof goalSchema>;
 
 export interface GoalToolDetails {
-	action: GoalActionName;
+	action: GoalActionName | "get";
 	applied: boolean;
 	error?: string;
 	state?: GoalState;
@@ -103,7 +110,7 @@ export interface GoalToolDependencies {
 	/** Read the latest persisted goal state for the active session. */
 	getGoalState: () => GoalState | undefined;
 	/** Persist a new goal state snapshot to the active session. */
-	saveGoalState: (state: GoalState) => void;
+	saveGoalState: (state: GoalState, expected?: GoalStateRevision) => void;
 	/** Clock injection for deterministic tests. */
 	now?: () => string;
 	/**
@@ -222,7 +229,12 @@ async function resolveEvidenceVerified(
 function toGoalAction(input: GoalToolInput): GoalAction | { error: string } {
 	switch (input.action) {
 		case "start":
-			return { action: "start", goalId: input.goalId ?? "", userGoal: input.userGoal ?? "" };
+			return {
+				action: "start",
+				goalId: input.goalId ?? "",
+				userGoal: input.userGoal ?? "",
+				tokenBudget: input.tokenBudget,
+			};
 		case "add_requirement":
 			return { action: "add_requirement", requirementId: input.requirementId ?? "", text: input.text ?? "" };
 		case "satisfy_requirement":
@@ -266,13 +278,66 @@ function toGoalAction(input: GoalToolInput): GoalAction | { error: string } {
 			return { action: "complete" };
 		case "block_goal":
 			return { action: "block_goal", reason: input.reason ?? "" };
-		case "resume_goal":
-			return { action: "resume_goal" };
-		case "cancel":
-			return { action: "cancel" };
+		case "get":
+			return { error: "get is handled as a read-only action." };
 		default:
 			return { error: "Unknown goal action." };
 	}
+}
+
+function goalPanelModel(details: GoalToolDetails | undefined): OrchestrationPanelModel {
+	const state = details?.state;
+	if (!state) {
+		return {
+			label: "goal",
+			action: details?.action,
+			status: details?.error ? "error" : "idle",
+			emptyText: details?.error ?? "No goal state was returned.",
+		};
+	}
+	const satisfied = state.requirements.filter((requirement) => requirement.status === "satisfied").length;
+	return {
+		label: "goal",
+		action: details.action,
+		status:
+			state.status === "completed"
+				? "success"
+				: state.status === "blocked" ||
+						state.status === "paused" ||
+						state.status === "usage_limited" ||
+						state.status === "budget_limited"
+					? "warning"
+					: state.status === "cancelled"
+						? "idle"
+						: "running",
+		summary: [
+			`${satisfied}/${state.requirements.length} requirements`,
+			`${state.evidence.length} evidence`,
+			...(state.tokenBudget !== undefined ? [`${state.tokensUsed ?? 0}/${state.tokenBudget} tokens`] : []),
+		],
+		rows: state.requirements.map((requirement) => ({
+			status:
+				requirement.status === "satisfied"
+					? ("completed" as const)
+					: requirement.status === "open"
+						? ("pending" as const)
+						: ("blocked" as const),
+			label: requirement.text,
+			meta: [
+				requirement.id,
+				requirement.evidenceIds.length > 0 ? `${requirement.evidenceIds.length} evidence` : undefined,
+				requirement.boundLaneId ? `worker ${requirement.boundLaneId}` : undefined,
+			].filter((value): value is string => value !== undefined),
+			details: requirement.blockedReason ? [`blocked: ${requirement.blockedReason}`] : undefined,
+		})),
+		notices: [
+			...(details.dispatchSkipReason
+				? [{ status: "warning" as const, text: `Worker dispatch skipped: ${details.dispatchSkipReason}` }]
+				: []),
+			...(state.blockedReason ? [{ status: "warning" as const, text: state.blockedReason }] : []),
+		],
+		emptyText: "No requirements recorded.",
+	};
 }
 
 export function createGoalToolDefinition(deps: GoalToolDependencies): ToolDefinition {
@@ -281,18 +346,24 @@ export function createGoalToolDefinition(deps: GoalToolDependencies): ToolDefini
 		name: "goal",
 		label: "goal",
 		description:
-			"Record and update the durable goal ledger for the current task. Maintains a structured goal with requirements, evidence, and progress so long tasks can be resumed and continued. Start a goal, add requirements, attach evidence, mark requirements satisfied or blocked, reopen resolved blockers, resume blocked goals, and mark progress. This is the producer that drives /goal-continue; without recorded goal state, continuation has nothing to act on.",
-		promptSnippet: "Record goal, requirements, evidence, and progress in the durable goal ledger.",
+			"Read or update the compact durable goal record for explicitly requested long-running work. Planning belongs to task_steps, workers to delegate, and evidence to current tools/artifacts. Pause, resume, edit, clear, and budget stops are owner/system controlled.",
+		promptSnippet: "Read or update the compact durable goal record.",
 		promptGuidelines: [
-			"At the start of a multi-step task, call goal with action 'start' to record the user goal, then add the concrete requirements with 'add_requirement'.",
-			"As you make progress, record evidence with 'add_evidence' and mark requirements satisfied with 'satisfy_requirement', citing the evidence ids.",
-			"For 'add_evidence', kind 'tool' expects a real toolCallId in 'uri' and kind 'file' expects a real path; both are checked and recorded as verified or not. Kind 'worker' expects a laneId in 'uri' and verifies true only for a reviewed, completed worker result. Kinds 'user'/'finding'/'test' carry no checkable ref.",
-			"Use 'dispatch_worker' to bind a requirement to a worker lane while it is being worked; this records the binding only -- it never satisfies the requirement. Record 'worker'-kind evidence citing that laneId once the worker completes, then call 'satisfy_requirement'.",
-			"Use 'progress' when you advance without satisfying a specific requirement, and 'no_progress' when a turn yields nothing, so stall detection works.",
-			"When the user resolves a blocker, use 'resume_goal' and 'reopen_requirement' as needed; do not strand the old ledger or start a duplicate goal.",
-			"Mark the goal 'complete' only when every requirement is satisfied and each requirement cites verified or user-confirmed evidence. Use 'block_goal' or 'block_requirement' with a reason when you are stuck and need the user. A blocked goal can still be resumed or cancelled.",
+			"Call action 'start' only when the user or system explicitly requests a persistent goal. Do not infer a goal from an ordinary multi-step task. Set tokenBudget only when the user explicitly requested a token budget.",
+			"Use 'get' when the current objective or status is uncertain. Use task_steps for decomposition and delegate for workers; detailed ledger actions exist only for goals that already use the legacy ledger.",
+			"Mark 'complete' only after current authoritative evidence proves the full objective and no required work remains. Mark 'block_goal' only after the same genuine impasse persists for three goal turns.",
 		],
 		parameters: goalSchema,
+		renderShell: "self",
+		renderCall() {
+			return emptyOrchestrationCall();
+		},
+		renderResult(result, { expanded, isPartial }, theme) {
+			if (isPartial) return emptyOrchestrationCall();
+			const details = result.details as GoalToolDetails | undefined;
+			if (!expanded && details?.applied) return emptyOrchestrationCall();
+			return new OrchestrationPanelComponent(theme, goalPanelModel(details), true);
+		},
 		async execute(
 			_toolCallId,
 			input: GoalToolInput,
@@ -300,6 +371,19 @@ export function createGoalToolDefinition(deps: GoalToolDependencies): ToolDefini
 			content: Array<{ type: "text"; text: string }>;
 			details: GoalToolDetails;
 		}> {
+			if (input.action === "get") {
+				const state = deps.getGoalState();
+				if (!state) {
+					return {
+						content: [{ type: "text", text: "No goal exists for this session." }],
+						details: { action: "get", applied: false },
+					};
+				}
+				return {
+					content: [{ type: "text", text: summarizeGoalState(state) }],
+					details: { action: "get", applied: false, state },
+				};
+			}
 			const mapped = toGoalAction(input);
 			if ("error" in mapped) {
 				return {
@@ -396,7 +480,7 @@ export function createGoalToolDefinition(deps: GoalToolDependencies): ToolDefini
 						details: { action: input.action, applied: false, error: result.error, state: current },
 					};
 				}
-				deps.saveGoalState(result.state);
+				deps.saveGoalState(result.state, current ? getGoalStateRevision(current) : undefined);
 				nextState = result.state;
 			}
 

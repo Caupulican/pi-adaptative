@@ -5,8 +5,6 @@ import { SessionManager } from "@caupulican/pi-agent-core/node";
 import type { Message } from "@caupulican/pi-ai";
 import { afterEach, describe, expect, it } from "vitest";
 import type { ExtensionContext } from "../src/core/extensions/types.ts";
-import { buildGoalContinuationPrompt } from "../src/core/goals/goal-continuation-prompt.ts";
-import type { GoalRuntimeSnapshot } from "../src/core/goals/goal-runtime-snapshot.ts";
 import { createGoalState, isGoalState, parseGoalState, serializeGoalState } from "../src/core/goals/goal-state.ts";
 import { applyGoalAction } from "../src/core/goals/goal-tool-core.ts";
 import { appendGoalStateSnapshot, getLatestGoalStateSnapshot } from "../src/core/goals/session-goal-state.ts";
@@ -260,84 +258,6 @@ describe("goal-state serialization round-trips the verified field", () => {
 		expect(parsed?.evidence.find((e) => e.id === "e-true")?.verified).toBe(true);
 		expect(parsed?.evidence.find((e) => e.id === "e-false")?.verified).toBe(false);
 		expect(parsed?.evidence.find((e) => e.id === "e-absent")?.verified).toBeUndefined();
-	});
-});
-
-describe("goal-continuation-prompt renders per-evidence verified status", () => {
-	it("shows verified/unverified/n-a labels for evidence entries", () => {
-		let state = createGoalState({ goalId: "g1", userGoal: "User Goal", now: "T0" });
-		const added = applyGoalAction(state, { action: "add_requirement", requirementId: "r1", text: "Req 1" }, "T1");
-		expect(added.ok).toBe(true);
-		if (!added.ok) return;
-		state = added.state;
-
-		const step1 = applyGoalAction(
-			state,
-			{
-				action: "add_evidence",
-				evidenceId: "e-true",
-				kind: "tool",
-				summary: "verified evidence",
-				uri: "call-1",
-				verified: true,
-			},
-			"T2",
-		);
-		expect(step1.ok).toBe(true);
-		if (!step1.ok) return;
-		state = step1.state;
-
-		const step2 = applyGoalAction(
-			state,
-			{
-				action: "add_evidence",
-				evidenceId: "e-false",
-				kind: "file",
-				summary: "unverified evidence",
-				uri: "x.txt",
-				verified: false,
-			},
-			"T3",
-		);
-		expect(step2.ok).toBe(true);
-		if (!step2.ok) return;
-		state = step2.state;
-
-		const step3 = applyGoalAction(
-			state,
-			{ action: "add_evidence", evidenceId: "e-user", kind: "user", summary: "user-confirmed evidence" },
-			"T4",
-		);
-		expect(step3.ok).toBe(true);
-		if (!step3.ok) return;
-		state = step3.state;
-
-		const snapshot: GoalRuntimeSnapshot = {
-			goalState: state,
-			workerClaims: [],
-			learningDecisions: [],
-			continuation: {
-				action: "continue",
-				reasonCode: "goal_active",
-				message: "Active",
-				openRequirementIds: ["r1"],
-				blockedRequirementIds: [],
-				satisfiedRequirementIds: [],
-			},
-		};
-
-		const prompt = buildGoalContinuationPrompt({ snapshot });
-		expect(prompt.text).toContain("Evidence:");
-		// The structural prefix (id/kind/verified-label) stays outside the untrusted-content
-		// boundary; the summary text is fenced inside it (goal-continuation-prompt.ts wraps
-		// goal-ledger evidence summaries as untrusted free text) -- assert both separately rather
-		// than as one contiguous string.
-		expect(prompt.text).toContain("e-true [tool, verified]:");
-		expect(prompt.text).toContain("verified evidence");
-		expect(prompt.text).toContain("e-false [file, unverified]:");
-		expect(prompt.text).toContain("unverified evidence");
-		expect(prompt.text).toContain("e-user [user, n/a]:");
-		expect(prompt.text).toContain("user-confirmed evidence");
 	});
 });
 

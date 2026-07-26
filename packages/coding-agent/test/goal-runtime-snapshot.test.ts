@@ -101,7 +101,7 @@ describe("Phase 10B: Goal Runtime Snapshot", () => {
 		expect(snapshot.learningDecisions[1].reasonCode).toBe("l2");
 	});
 
-	it("continuation finalizes when latest goal has no open requirements", () => {
+	it("continuation keeps a compact active goal moving without duplicate requirements", () => {
 		const sessionManager = SessionManager.inMemory();
 		const state = createGoalState({ goalId: "g1", userGoal: "Done", now: "T0" });
 		appendGoalStateSnapshot(sessionManager, state);
@@ -111,8 +111,8 @@ describe("Phase 10B: Goal Runtime Snapshot", () => {
 			settings: { maxStallTurns: 3 },
 		});
 
-		expect(snapshot.continuation.action).toBe("finalize");
-		expect(snapshot.continuation.reasonCode).toBe("no_open_requirements");
+		expect(snapshot.continuation.action).toBe("continue");
+		expect(snapshot.continuation.reasonCode).toBe("goal_active");
 	});
 
 	it("continuation continues when latest goal has an open requirement", () => {
@@ -130,7 +130,7 @@ describe("Phase 10B: Goal Runtime Snapshot", () => {
 		expect(snapshot.continuation.reasonCode).toBe("goal_active");
 	});
 
-	it("invalid/malformed newer snapshot entries are ignored through existing loaders", () => {
+	it("fails goal state closed on corruption while non-executing record loaders retain their older valid values", () => {
 		const sessionManager = SessionManager.inMemory();
 
 		appendGoalStateSnapshot(sessionManager, createGoalState({ goalId: "valid-goal", userGoal: "Task", now: "T0" }));
@@ -164,7 +164,7 @@ describe("Phase 10B: Goal Runtime Snapshot", () => {
 			settings: { maxStallTurns: 3 },
 		});
 
-		expect(snapshot.goalState?.goalId).toBe("valid-goal");
+		expect(snapshot.goalState).toBeUndefined();
 		expect(snapshot.latestEvidenceBundle?.query).toBe("valid-evidence");
 		expect(snapshot.workerClaims.length).toBe(1);
 		expect(snapshot.workerClaims[0].requestId).toBe("valid-worker");

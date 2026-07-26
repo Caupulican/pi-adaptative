@@ -16,6 +16,14 @@ export interface ToolExecutionOptions {
 	showImages?: boolean;
 	imageWidthCells?: number;
 	repair?: ToolCallRepairInfo;
+	/** Avoid reading retained history result payloads until the user expands tool output. */
+	deferResultUntilExpanded?: boolean;
+}
+
+interface ToolExecutionResult {
+	content: Array<{ type: string; text?: string; data?: string; mimeType?: string }>;
+	isError: boolean;
+	details?: unknown;
 }
 
 // Components only use built-in definitions for display (renderers, grouping), so one
@@ -53,6 +61,7 @@ export class ToolExecutionComponent extends Container {
 	private toolCallId: string;
 	private args: any;
 	private repair: ToolCallRepairInfo | undefined;
+	private deferResultUntilExpanded: boolean;
 	private expanded = false;
 	private showImages: boolean;
 	private imageWidthCells: number;
@@ -64,11 +73,8 @@ export class ToolExecutionComponent extends Container {
 	private cwd: string;
 	private executionStarted = false;
 	private argsComplete = false;
-	private result?: {
-		content: Array<{ type: string; text?: string; data?: string; mimeType?: string }>;
-		isError: boolean;
-		details?: any;
-	};
+	private result?: ToolExecutionResult;
+	private materializedResult?: ToolExecutionResult;
 	private convertedImages: Map<number, { data: string; mimeType: string }> = new Map();
 	private hideComponent = false;
 
@@ -86,6 +92,7 @@ export class ToolExecutionComponent extends Container {
 		this.toolCallId = toolCallId;
 		this.args = args;
 		this.repair = options.repair;
+		this.deferResultUntilExpanded = options.deferResultUntilExpanded ?? false;
 		this.toolDefinition = toolDefinition;
 		this.builtInToolDefinition = getBuiltInToolDefinitions(cwd)[toolName as ToolName];
 		this.toolGroup = this.resolveToolGroup();
@@ -202,11 +209,13 @@ export class ToolExecutionComponent extends Container {
 		args: any,
 		toolDefinition: ToolDefinition<any, any> | undefined,
 		repair?: ToolCallRepairInfo,
+		deferResultUntilExpanded = false,
 	): void {
 		this.toolName = toolName;
 		this.toolCallId = toolCallId;
 		this.args = args;
 		this.repair = repair;
+		this.deferResultUntilExpanded = deferResultUntilExpanded;
 		this.toolDefinition = toolDefinition;
 		this.builtInToolDefinition = getBuiltInToolDefinitions(this.cwd)[toolName as ToolName];
 		this.toolGroup = this.resolveToolGroup();
@@ -214,6 +223,7 @@ export class ToolExecutionComponent extends Container {
 		this.argsComplete = false;
 		this.isPartial = true;
 		this.result = undefined;
+		this.materializedResult = undefined;
 		this.callRendererComponent = undefined;
 		this.resultRendererComponent = undefined;
 		this.rendererState = {};
@@ -238,8 +248,8 @@ export class ToolExecutionComponent extends Container {
 		return this.repair?.repaired ? new Text(theme.fg("dim", "[repaired arguments]"), 0, 0) : undefined;
 	}
 
-	private createResultFallback(): Component | undefined {
-		const output = this.getTextOutput();
+	private createResultFallback(result: ToolExecutionResult): Component | undefined {
+		const output = this.getTextOutput(result);
 		if (!output) {
 			return undefined;
 		}
@@ -275,30 +285,43 @@ export class ToolExecutionComponent extends Container {
 		this.ui.requestRender();
 	}
 
-	updateResult(
-		result: {
-			content: Array<{ type: string; text?: string; data?: string; mimeType?: string }>;
-			details?: any;
-			isError: boolean;
-		},
-		isPartial = false,
-	): void {
+	updateResult(result: ToolExecutionResult, isPartial = false): void {
 		// Final results live in the chat scrollback for the rest of the process.
 		// Oversized details would pin large payloads per tool call, so retain the
 		// same compacted form a resumed session would see.
 		if (!isPartial) compactRetainedDetails(result, MAX_TUI_RETAINED_DETAILS_BYTES);
 		this.result = result;
+		this.materializedResult = undefined;
 		this.isPartial = isPartial;
 		this.updateDisplay();
-		this.maybeConvertImagesForKitty();
+		if (this.shouldMaterializeResult()) this.maybeConvertImagesForKitty();
+	}
+
+	private shouldMaterializeResult(): boolean {
+		return (
+			this.result !== undefined &&
+			(!this.deferResultUntilExpanded || this.expanded || this.isPartial || this.result.isError)
+		);
+	}
+
+	private getMaterializedResult(): ToolExecutionResult | undefined {
+		if (!this.shouldMaterializeResult() || !this.result) return undefined;
+		if (!this.deferResultUntilExpanded) return this.result;
+		this.materializedResult ??= {
+			content: this.result.content,
+			isError: this.result.isError,
+			details: this.result.details,
+		};
+		return this.materializedResult;
 	}
 
 	private maybeConvertImagesForKitty(): void {
+		const result = this.getMaterializedResult();
+		if (!result) return;
 		const caps = getCapabilities();
 		if (caps.images !== "kitty") return;
-		if (!this.result) return;
 
-		const imageBlocks = this.result.content.filter((c) => c.type === "image");
+		const imageBlocks = result.content.filter((c) => c.type === "image");
 		for (let i = 0; i < imageBlocks.length; i++) {
 			const img = imageBlocks[i];
 			if (!img.data || !img.mimeType) continue;
@@ -307,7 +330,7 @@ export class ToolExecutionComponent extends Container {
 
 			const index = i;
 			convertToPng(img.data, img.mimeType).then((converted) => {
-				if (converted) {
+				if (converted && this.getMaterializedResult() === result) {
 					this.convertedImages.set(index, converted);
 					this.updateDisplay();
 					this.ui.requestRender();
@@ -318,7 +341,13 @@ export class ToolExecutionComponent extends Container {
 
 	setExpanded(expanded: boolean): void {
 		this.expanded = expanded;
+		if (!expanded && this.deferResultUntilExpanded) {
+			this.resultRendererComponent = undefined;
+			this.materializedResult = undefined;
+			this.convertedImages.clear();
+		}
 		this.updateDisplay();
+		if (expanded) this.maybeConvertImagesForKitty();
 	}
 
 	setShowImages(show: boolean): void {
@@ -361,11 +390,13 @@ export class ToolExecutionComponent extends Container {
 		if (this.hideComponent) {
 			return [];
 		}
-		return super.render(width);
+		const lines = super.render(width);
+		return lines.every((line) => line.trim().length === 0) ? [] : lines;
 	}
 
 	private updateDisplay(): void {
 		const bgFn = (text: string) => theme.bg(this.getBackgroundColor(), text);
+		const materializedResult = this.getMaterializedResult();
 
 		let hasContent = false;
 		this.hideComponent = false;
@@ -399,10 +430,10 @@ export class ToolExecutionComponent extends Container {
 				hasContent = true;
 			}
 
-			if (this.result) {
+			if (materializedResult) {
 				const resultRenderer = this.getResultRenderer();
 				if (!resultRenderer) {
-					const component = this.createResultFallback();
+					const component = this.createResultFallback(materializedResult);
 					if (component) {
 						renderContainer.addChild(component);
 						hasContent = true;
@@ -410,7 +441,7 @@ export class ToolExecutionComponent extends Container {
 				} else {
 					try {
 						const component = resultRenderer(
-							{ content: this.result.content as any, details: this.result.details },
+							{ content: materializedResult.content as any, details: materializedResult.details },
 							{ expanded: this.expanded, isPartial: this.isPartial },
 							theme,
 							this.getRenderContext(this.resultRendererComponent),
@@ -420,7 +451,7 @@ export class ToolExecutionComponent extends Container {
 						hasContent = true;
 					} catch {
 						this.resultRendererComponent = undefined;
-						const component = this.createResultFallback();
+						const component = this.createResultFallback(materializedResult);
 						if (component) {
 							renderContainer.addChild(component);
 							hasContent = true;
@@ -430,7 +461,7 @@ export class ToolExecutionComponent extends Container {
 			}
 		} else {
 			this.contentText.setCustomBgFn(bgFn);
-			this.contentText.setText(this.formatToolExecution());
+			this.contentText.setText(this.formatToolExecution(materializedResult));
 			hasContent = true;
 		}
 
@@ -443,8 +474,8 @@ export class ToolExecutionComponent extends Container {
 		}
 		this.imageSpacers = [];
 
-		if (this.result) {
-			const imageBlocks = this.result.content.filter((c) => c.type === "image");
+		if (materializedResult) {
+			const imageBlocks = materializedResult.content.filter((c) => c.type === "image");
 			const caps = getCapabilities();
 			for (let i = 0; i < imageBlocks.length; i++) {
 				const img = imageBlocks[i];
@@ -474,11 +505,11 @@ export class ToolExecutionComponent extends Container {
 		}
 	}
 
-	private getTextOutput(): string {
-		return getRenderedTextOutput(this.result, this.showImages);
+	private getTextOutput(result: ToolExecutionResult): string {
+		return getRenderedTextOutput(result, this.showImages);
 	}
 
-	private formatToolExecution(): string {
+	private formatToolExecution(result: ToolExecutionResult | undefined): string {
 		let text = renderTitleBadge(theme, {
 			label: this.getDisplayLabel(),
 			status: this.titleBadgeStatus(),
@@ -490,7 +521,7 @@ export class ToolExecutionComponent extends Container {
 		if (content) {
 			text += `\n\n${content}`;
 		}
-		const output = this.getTextOutput();
+		const output = result ? this.getTextOutput(result) : "";
 		if (output) {
 			// Same display bound as createResultFallback: unknown tools must not
 			// dump arbitrarily large payloads into the scrollback.

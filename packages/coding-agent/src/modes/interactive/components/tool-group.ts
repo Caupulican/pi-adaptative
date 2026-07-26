@@ -55,6 +55,8 @@ export class ToolGroupComponent implements Component {
 		const safeWidth = Math.max(1, width);
 		if (this.expanded) return this.tools.flatMap((tool) => tool.render(safeWidth));
 
+		const collapsed = this.renderCollapsed(safeWidth);
+		if (collapsed.length === 0) return [];
 		const box = new Box(1, 1, (text) => theme.bg(this.getBackgroundColor(), text));
 		box.addChild({ render: (contentWidth) => this.renderCollapsed(contentWidth), invalidate: () => {} });
 		return [" ".repeat(safeWidth), ...box.render(safeWidth)];

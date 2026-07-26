@@ -6,6 +6,7 @@ import { AgentSession } from "../src/core/agent-session.ts";
 import { AuthStorage } from "../src/core/auth-storage.ts";
 import { applyGoalEvent, createGoalState } from "../src/core/goals/goal-state.ts";
 import {
+	appendGoalClearedSnapshot,
 	appendGoalStateSnapshot,
 	GOAL_STATE_CUSTOM_TYPE,
 	getLatestGoalStateSnapshot,
@@ -55,14 +56,12 @@ describe("Phase 9A: Goal State Session Persistence", () => {
 		const state = createGoalState({ goalId: "g1", userGoal: "Fix bugs", now: "T0" });
 		appendGoalStateSnapshot(sessionManager, state);
 
-		sessionManager.appendCustomEntry(GOAL_STATE_CUSTOM_TYPE, { version: 1, state: { invalid: true } }); // Invalid state
-
 		const latest = getLatestGoalStateSnapshot(sessionManager);
 		expect(latest).toBeDefined();
 		expect(latest?.goalId).toBe("g1");
 	});
 
-	it("invalid/non-plain goal payload is ignored while an older valid state remains", () => {
+	it("fails closed on a corrupt newest goal payload instead of resurrecting older work", () => {
 		const sessionManager = SessionManager.inMemory();
 
 		const validState = createGoalState({ goalId: "g1", userGoal: "Fix bugs", now: "T0" });
@@ -73,10 +72,10 @@ describe("Phase 9A: Goal State Session Persistence", () => {
 		sessionManager.appendCustomEntry(GOAL_STATE_CUSTOM_TYPE, payload);
 
 		const latest = getLatestGoalStateSnapshot(sessionManager);
-		expect(latest?.goalId).toBe("g1");
+		expect(latest).toBeUndefined();
 	});
 
-	it("non-finite stallTurns is ignored while an older valid state remains", () => {
+	it("fails closed when the newest goal checkpoint is invalid", () => {
 		const sessionManager = SessionManager.inMemory();
 
 		const validState = createGoalState({ goalId: "g1", userGoal: "Fix bugs", now: "T0" });
@@ -91,7 +90,54 @@ describe("Phase 9A: Goal State Session Persistence", () => {
 		sessionManager.appendCustomEntry(GOAL_STATE_CUSTOM_TYPE, { version: 1, state: newerValidState2 });
 
 		const latest = getLatestGoalStateSnapshot(sessionManager);
-		expect(latest?.goalId).toBe("g1");
+		expect(latest).toBeUndefined();
+	});
+
+	it("journals canonical transitions linearly and replays the exact state", () => {
+		const sessionManager = SessionManager.inMemory();
+		let state = createGoalState({ goalId: "g1", userGoal: "Fix bugs", now: "T0" });
+		appendGoalStateSnapshot(sessionManager, state);
+		for (let index = 1; index <= 500; index++) {
+			const previous = state;
+			state = applyGoalEvent(state, { type: "no_progress", now: `T${index}` });
+			appendGoalStateSnapshot(sessionManager, state, previous);
+		}
+
+		expect(getLatestGoalStateSnapshot(sessionManager)).toEqual(state);
+		const bytes = Buffer.byteLength(JSON.stringify(sessionManager.getEntries()), "utf8");
+		expect(bytes).toBeLessThan(250_000);
+	});
+
+	it("reuses the reconstructed state while the newest goal journal entry is unchanged", () => {
+		const sessionManager = SessionManager.inMemory();
+		let state = createGoalState({ goalId: "g1", userGoal: "Fix bugs", now: "T0" });
+		appendGoalStateSnapshot(sessionManager, state);
+		for (let index = 1; index <= 100; index++) {
+			const previous = state;
+			state = applyGoalEvent(state, { type: "no_progress", now: `T${index}` });
+			appendGoalStateSnapshot(sessionManager, state, previous);
+		}
+
+		let reads = 0;
+		const source = {
+			getLatestCustomEntryOnBranch: (...args: Parameters<SessionManager["getLatestCustomEntryOnBranch"]>) => {
+				reads++;
+				return sessionManager.getLatestCustomEntryOnBranch(...args);
+			},
+		};
+		expect(getLatestGoalStateSnapshot(source)).toEqual(state);
+		const replayReads = reads;
+		expect(replayReads).toBeGreaterThan(1);
+		expect(getLatestGoalStateSnapshot(source)).toEqual(state);
+		expect(reads).toBe(replayReads + 1);
+	});
+
+	it("a clear tombstone prevents older active state from reappearing", () => {
+		const sessionManager = SessionManager.inMemory();
+		const state = createGoalState({ goalId: "g1", userGoal: "Fix bugs", now: "T0" });
+		appendGoalStateSnapshot(sessionManager, state);
+		appendGoalClearedSnapshot(sessionManager, state, "T1");
+		expect(getLatestGoalStateSnapshot(sessionManager)).toBeUndefined();
 	});
 
 	it("snapshots do not retain caller-owned nested array references", () => {

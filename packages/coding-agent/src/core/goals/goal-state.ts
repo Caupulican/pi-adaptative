@@ -1,13 +1,48 @@
 import { isPlainRecord } from "../util/value-guards.ts";
 
-export type GoalStatus = "active" | "completed" | "blocked" | "cancelled";
+export type GoalStatus =
+	| "active"
+	| "paused"
+	| "blocked"
+	| "usage_limited"
+	| "budget_limited"
+	| "completed"
+	| "cancelled";
 export type RequirementStatus = "open" | "satisfied" | "blocked";
 export type GoalEvidenceKind = "file" | "test" | "tool" | "user" | "finding" | "worker";
+
+export const MAX_GOAL_OBJECTIVE_LENGTH = 4_000;
+export const MAX_GOAL_EVENT_HISTORY = 128;
+
+/** One shared lifecycle classification for tools, runtime, persistence, and UI. */
+export function isGoalExecutionActive(status: GoalStatus): boolean {
+	return status === "active";
+}
+
+export function isGoalResumableStatus(status: GoalStatus): boolean {
+	return status === "paused" || status === "blocked" || status === "usage_limited";
+}
+
+export function isGoalTerminalStatus(status: GoalStatus): boolean {
+	return status === "completed" || status === "cancelled" || status === "budget_limited";
+}
+
+export function isGoalUnfinishedStatus(status: GoalStatus): boolean {
+	return status !== "completed" && status !== "cancelled";
+}
 
 export interface GoalState {
 	goalId: string;
 	userGoal: string;
 	status: GoalStatus;
+	/** Monotonic state revision used by compare-and-append persistence. Legacy snapshots start at 0. */
+	revision?: number;
+	/** Monotonic meaningful-progress revision used by the continuation stall gate. */
+	progressRevision?: number;
+	/** Optional owner-requested token ceiling. Charged usage is uncached input plus output. */
+	tokenBudget?: number;
+	/** Exact usage attributed to submitted goal-continuation turns. */
+	tokensUsed?: number;
 	requirements: readonly Requirement[];
 	evidence: readonly GoalEvidenceRef[];
 	events: readonly GoalEvent[];
@@ -38,15 +73,6 @@ export interface GoalState {
 	 */
 	continuationSpendUsd?: number;
 	/**
-	 * Bookkeeping only: the session's own cumulative cost reading as of the last recorded pass,
-	 * used to derive the NEXT pass's spend delta (`event.sessionCostUsd - continuationSpendCheckpointUsd`)
-	 * while keeping `applyGoalEvent` pure (it consumes one externally-observed absolute reading per
-	 * call rather than reaching for session state itself). Not meaningful read in isolation; `undefined`
-	 * means no pass has been recorded yet, so the first recorded pass establishes the checkpoint with a
-	 * zero delta rather than mis-attributing all pre-goal-loop session spend to that one pass.
-	 */
-	continuationSpendCheckpointUsd?: number;
-	/**
 	 * Cumulative USD attributed to WORKER/SUBAGENT spend for this goal's lanes (in-process worker
 	 * usage via `addSpawnedUsage`, out-of-process tmux-worker usage via the advisory
 	 * `reportSpawnedUsage` claim) — the counterpart this goal's OWN model spend excludes (see
@@ -56,6 +82,8 @@ export interface GoalState {
 	 * across the process boundary.
 	 */
 	continuationWorkerSpendUsd?: number;
+	/** Durable acceptance override; avoids depending on an unbounded historical event scan. */
+	acceptanceOverride?: boolean;
 }
 
 export interface Requirement {
@@ -98,6 +126,7 @@ export interface GoalEvidenceRef {
 }
 
 export type GoalEvent =
+	| { type: "edit_goal"; userGoal: string; tokenBudget?: number; now: string }
 	| { type: "add_requirement"; id: string; text: string; now: string }
 	| { type: "satisfy_requirement"; id: string; evidenceIds: readonly string[]; now: string }
 	| { type: "block_requirement"; id: string; blockedReason: string; now: string }
@@ -133,18 +162,18 @@ export type GoalEvent =
 			turns: number;
 			/** This pass's own active wall-clock duration, in milliseconds. */
 			wallClockMs: number;
-			/**
-			 * The session's own cumulative model spend (`getCostSummary().ownCost`) AT THE TIME this pass
-			 * was recorded — an absolute reading, not a pre-computed delta. See
-			 * `GoalState.continuationSpendCheckpointUsd` for how the reducer derives the delta.
-			 */
-			sessionCostUsd: number;
+			/** Exact uncached input + output tokens produced after this pass's session-entry cursor. */
+			tokens: number;
+			/** Exact model spend produced after this pass's session-entry cursor. */
+			spendUsd: number;
 			now: string;
 	  }
 	| { type: "complete_goal"; acceptanceOverride?: boolean; now: string }
 	| { type: "complete_goal_manually"; now: string }
 	| { type: "block_goal"; reason: string; now: string }
+	| { type: "pause_goal"; now: string }
 	| { type: "resume_goal"; now: string }
+	| { type: "system_stop_goal"; status: "blocked" | "usage_limited" | "budget_limited"; reason: string; now: string }
 	| { type: "cancel_goal"; now: string };
 
 function isStringArray(value: unknown): value is readonly string[] {
@@ -152,7 +181,15 @@ function isStringArray(value: unknown): value is readonly string[] {
 }
 
 function isGoalStatus(value: unknown): value is GoalStatus {
-	return value === "active" || value === "completed" || value === "blocked" || value === "cancelled";
+	return (
+		value === "active" ||
+		value === "paused" ||
+		value === "blocked" ||
+		value === "usage_limited" ||
+		value === "budget_limited" ||
+		value === "completed" ||
+		value === "cancelled"
+	);
 }
 
 function isRequirementStatus(value: unknown): value is RequirementStatus {
@@ -209,9 +246,11 @@ function isGoalEvidenceRef(value: unknown): value is GoalEvidenceRef {
 	);
 }
 
-function isGoalEvent(value: unknown): value is GoalEvent {
+export function isGoalEvent(value: unknown): value is GoalEvent {
 	if (!isPlainRecord(value) || typeof value.type !== "string" || typeof value.now !== "string") return false;
 	switch (value.type) {
+		case "edit_goal":
+			return typeof value.userGoal === "string" && hasOptionalFiniteNumber(value, "tokenBudget");
 		case "add_requirement":
 			return typeof value.id === "string" && typeof value.text === "string";
 		case "satisfy_requirement":
@@ -238,19 +277,27 @@ function isGoalEvent(value: unknown): value is GoalEvent {
 		case "complete_goal":
 			return hasOptionalBoolean(value, "acceptanceOverride");
 		case "complete_goal_manually":
+		case "pause_goal":
 		case "resume_goal":
 		case "cancel_goal":
 			return true;
 		case "block_goal":
 			return typeof value.reason === "string";
+		case "system_stop_goal":
+			return (
+				(value.status === "blocked" || value.status === "usage_limited" || value.status === "budget_limited") &&
+				typeof value.reason === "string"
+			);
 		case "record_continuation_budget":
 			return (
 				typeof value.turns === "number" &&
 				Number.isFinite(value.turns) &&
 				typeof value.wallClockMs === "number" &&
 				Number.isFinite(value.wallClockMs) &&
-				typeof value.sessionCostUsd === "number" &&
-				Number.isFinite(value.sessionCostUsd)
+				typeof value.tokens === "number" &&
+				Number.isFinite(value.tokens) &&
+				typeof value.spendUsd === "number" &&
+				Number.isFinite(value.spendUsd)
 			);
 		default:
 			return false;
@@ -263,6 +310,10 @@ export function isGoalState(value: unknown): value is GoalState {
 		typeof value.goalId === "string" &&
 		typeof value.userGoal === "string" &&
 		isGoalStatus(value.status) &&
+		hasOptionalFiniteNumber(value, "revision") &&
+		hasOptionalFiniteNumber(value, "progressRevision") &&
+		hasOptionalFiniteNumber(value, "tokenBudget") &&
+		hasOptionalFiniteNumber(value, "tokensUsed") &&
 		Array.isArray(value.requirements) &&
 		value.requirements.every(isRequirement) &&
 		Array.isArray(value.evidence) &&
@@ -278,8 +329,8 @@ export function isGoalState(value: unknown): value is GoalState {
 		hasOptionalFiniteNumber(value, "continuationTurnsUsed") &&
 		hasOptionalFiniteNumber(value, "continuationWallClockMs") &&
 		hasOptionalFiniteNumber(value, "continuationSpendUsd") &&
-		hasOptionalFiniteNumber(value, "continuationSpendCheckpointUsd") &&
-		hasOptionalFiniteNumber(value, "continuationWorkerSpendUsd")
+		hasOptionalFiniteNumber(value, "continuationWorkerSpendUsd") &&
+		hasOptionalBoolean(value, "acceptanceOverride")
 	);
 }
 
@@ -301,6 +352,10 @@ function cloneGoalEvent(event: GoalEvent): GoalEvent {
 	return { ...event };
 }
 
+export function cloneGoalEventForStorage(event: GoalEvent): GoalEvent {
+	return cloneGoalEvent(event);
+}
+
 function cloneGoalState(state: GoalState): GoalState {
 	return {
 		...state,
@@ -314,11 +369,20 @@ export function cloneGoalStateForStorage(state: GoalState): GoalState {
 	return cloneGoalState(state);
 }
 
-export function createGoalState(args: { goalId: string; userGoal: string; now: string }): GoalState {
+export function createGoalState(args: {
+	goalId: string;
+	userGoal: string;
+	now: string;
+	tokenBudget?: number;
+}): GoalState {
 	return {
 		goalId: args.goalId,
 		userGoal: args.userGoal,
 		status: "active",
+		revision: 0,
+		progressRevision: 0,
+		tokensUsed: 0,
+		...(args.tokenBudget !== undefined ? { tokenBudget: args.tokenBudget } : {}),
 		requirements: [],
 		evidence: [],
 		events: [],
@@ -336,13 +400,30 @@ export function createGoalState(args: { goalId: string; userGoal: string; now: s
 export function applyGoalEvent(state: GoalState, event: GoalEvent): GoalState {
 	const newState: GoalState = {
 		...state,
+		revision: (state.revision ?? 0) + 1,
 		requirements: state.requirements.map(cloneRequirement),
 		evidence: state.evidence.map(cloneGoalEvidenceRef),
-		events: [...state.events.map(cloneGoalEvent), cloneGoalEvent(event)],
+		events: [...state.events.map(cloneGoalEvent), cloneGoalEvent(event)].slice(-MAX_GOAL_EVENT_HISTORY),
 		updatedAt: event.now,
 	};
 
 	switch (event.type) {
+		case "edit_goal": {
+			newState.userGoal = event.userGoal;
+			if (event.tokenBudget !== undefined) newState.tokenBudget = event.tokenBudget;
+			if (state.status === "completed") newState.status = "active";
+			if (
+				state.status === "budget_limited" &&
+				event.tokenBudget !== undefined &&
+				event.tokenBudget > (state.tokensUsed ?? 0)
+			) {
+				newState.status = "active";
+			}
+			if (newState.status === "active") newState.blockedReason = undefined;
+			newState.progressRevision = (state.progressRevision ?? 0) + 1;
+			break;
+		}
+
 		case "add_requirement": {
 			const existingIndex = newState.requirements.findIndex((requirement) => requirement.id === event.id);
 			const newRequirement: Requirement = {
@@ -360,6 +441,7 @@ export function applyGoalEvent(state: GoalState, event: GoalEvent): GoalState {
 			} else {
 				newState.requirements = [...newState.requirements, newRequirement];
 			}
+			newState.progressRevision = (state.progressRevision ?? 0) + 1;
 			break;
 		}
 
@@ -379,6 +461,7 @@ export function applyGoalEvent(state: GoalState, event: GoalEvent): GoalState {
 			}
 			newState.lastProgressAt = event.now;
 			newState.stallTurns = 0;
+			newState.progressRevision = (state.progressRevision ?? 0) + 1;
 			break;
 		}
 
@@ -454,12 +537,16 @@ export function applyGoalEvent(state: GoalState, event: GoalEvent): GoalState {
 			} else {
 				newState.evidence = [...newState.evidence, newEvidence];
 			}
+			if (event.kind === "user" || event.verified === true) {
+				newState.progressRevision = (state.progressRevision ?? 0) + 1;
+			}
 			break;
 		}
 
 		case "progress": {
 			newState.lastProgressAt = event.now;
 			newState.stallTurns = 0;
+			newState.progressRevision = (state.progressRevision ?? 0) + 1;
 			break;
 		}
 
@@ -469,16 +556,10 @@ export function applyGoalEvent(state: GoalState, event: GoalEvent): GoalState {
 		}
 
 		case "record_continuation_budget": {
-			const previousCheckpoint = state.continuationSpendCheckpointUsd;
-			// No prior checkpoint (first pass ever recorded for this goal): there is no valid "before"
-			// reading to diff against, so attribute a zero delta for this one pass rather than mis-count
-			// all pre-goal-loop session spend into it. Every subsequent pass gets an accurate delta.
-			const spendDelta =
-				previousCheckpoint === undefined ? 0 : Math.max(0, event.sessionCostUsd - previousCheckpoint);
 			newState.continuationTurnsUsed = (state.continuationTurnsUsed ?? 0) + event.turns;
 			newState.continuationWallClockMs = (state.continuationWallClockMs ?? 0) + event.wallClockMs;
-			newState.continuationSpendUsd = (state.continuationSpendUsd ?? 0) + spendDelta;
-			newState.continuationSpendCheckpointUsd = event.sessionCostUsd;
+			newState.continuationSpendUsd = (state.continuationSpendUsd ?? 0) + Math.max(0, event.spendUsd);
+			newState.tokensUsed = (state.tokensUsed ?? 0) + Math.max(0, event.tokens);
 			break;
 		}
 
@@ -487,6 +568,7 @@ export function applyGoalEvent(state: GoalState, event: GoalEvent): GoalState {
 			if (!hasUnsatisfied) {
 				newState.status = "completed";
 				newState.blockedReason = undefined;
+				newState.acceptanceOverride = event.acceptanceOverride;
 			}
 			break;
 		}
@@ -496,6 +578,7 @@ export function applyGoalEvent(state: GoalState, event: GoalEvent): GoalState {
 			newState.blockedReason = undefined;
 			newState.lastProgressAt = event.now;
 			newState.stallTurns = 0;
+			newState.acceptanceOverride = true;
 			break;
 		}
 
@@ -505,11 +588,23 @@ export function applyGoalEvent(state: GoalState, event: GoalEvent): GoalState {
 			break;
 		}
 
+		case "pause_goal": {
+			newState.status = "paused";
+			newState.blockedReason = undefined;
+			break;
+		}
+
 		case "resume_goal": {
 			newState.status = "active";
 			newState.blockedReason = undefined;
 			newState.lastProgressAt = event.now;
 			newState.stallTurns = 0;
+			break;
+		}
+
+		case "system_stop_goal": {
+			newState.status = event.status;
+			newState.blockedReason = event.reason;
 			break;
 		}
 
@@ -524,7 +619,7 @@ export function applyGoalEvent(state: GoalState, event: GoalEvent): GoalState {
 }
 
 export function shouldContinueGoalLoop(args: { state: GoalState; maxStallTurns: number; now: string }): boolean {
-	if (args.state.status !== "active") {
+	if (!isGoalExecutionActive(args.state.status)) {
 		return false;
 	}
 	if (args.state.stallTurns >= args.maxStallTurns) {

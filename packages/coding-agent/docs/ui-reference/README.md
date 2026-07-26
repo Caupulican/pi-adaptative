@@ -1,9 +1,9 @@
-# Orchestration UI reference frames
+# Activity-lane reference frames
 
-Sanitized text frames used for the native orchestration UI remediation. They contain no session, repository, credential, or model data.
+Sanitized, source-labeled evidence for the orchestration UI remediation:
 
-- `orchestration-before.txt`: prior generic tool-output hierarchy.
-- `orchestration-reference.txt`: interaction mechanics extracted from the owner's Pi Teams/task-steps extensions: quiet idle state, compact active summary, status-first rows, and detail on demand. This is a mechanics reference, not copied source or visual identity.
-- `orchestration-after.txt`: packaged native panel target shared by task and worker tools.
+- `orchestration-before.txt`: duplicated multiline transcript, footer, and loader surfaces.
+- `orchestration-reference.txt`: lifecycle mechanisms verified in current Codex and Claude Code builds plus Pi-specific constraints.
+- `orchestration-after.txt`: the merged Pi-native target immediately above the prompt editor.
 
-These are terminal frames, so the acceptance instrument is cell width, text hierarchy, status identity without color, and behavior under expansion. Semantic colors remain owned by Pi's dark/light theme tokens.
+The acceptance instrument is terminal-cell width, state identity without color, focus preservation, bounded completion feedback, resume behavior, idle zero-height behavior, and explicit user-versus-worker audience routing.

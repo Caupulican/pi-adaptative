@@ -111,6 +111,24 @@ describe("parseArgs", () => {
 		});
 	});
 
+	describe("--session-mode flag", () => {
+		test.each(["user", "worker"] as const)("parses %s", (mode) => {
+			expect(parseArgs(["--session-mode", mode]).sessionMode).toBe(mode);
+		});
+
+		test("rejects an invalid mode", () => {
+			expect(parseArgs(["--session-mode", "observer"]).diagnostics).toEqual([
+				{ type: "error", message: 'Invalid session mode "observer". Use user or worker.' },
+			]);
+		});
+
+		test("requires a value", () => {
+			expect(parseArgs(["--session-mode"]).diagnostics).toEqual([
+				{ type: "error", message: "--session-mode requires user or worker" },
+			]);
+		});
+	});
+
 	describe("flags with values", () => {
 		test("parses --provider", () => {
 			const result = parseArgs(["--provider", "openai"]);

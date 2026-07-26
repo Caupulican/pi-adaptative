@@ -119,16 +119,35 @@ describe("BackgroundLaneController.continueGoalLoopExclusive (guard mechanics)",
 		expect(afterDispose.stopReason).toBe("session_disposed");
 		expect(afterDispose.turnsSubmitted).toBe(0);
 	});
+
+	it("persists a stopped transition instead of stranding an active goal when its tool is unavailable", async () => {
+		let state = makeSnapshot("g1").goalState;
+		let stopCalls = 0;
+		const controller = new BackgroundLaneController({
+			isDisposed: () => false,
+			isGoalToolActive: () => false,
+			getGoalRuntimeSnapshot: () => ({ ...makeSnapshot("g1"), goalState: state }),
+			continueGoalLoop: async () => {
+				throw new Error("must not run");
+			},
+			markGoalToolUnavailable: () => {
+				stopCalls++;
+				if (state) state = applyGoalEvent(state, { type: "block_goal", reason: "tool unavailable", now: "T1" });
+			},
+		} as never);
+
+		const result = await controller.continueGoalLoopExclusive({ maxTurns: 1, maxStallTurns: 20 });
+
+		expect(stopCalls).toBe(1);
+		expect(result.stopReason).toBe("goal_tool_unavailable");
+		expect(result.finalSnapshot.goalState?.status).toBe("blocked");
+	});
 });
 
 function seedOpenGoal(harness: Awaited<ReturnType<typeof createHarness>>): void {
 	let state = createGoalState({ goalId: "g1", userGoal: "Ship the mutex fix", now: "T0" });
 	state = applyGoalEvent(state, { type: "add_requirement", id: "req-1", text: "Requirement 1", now: "T0" });
 	appendGoalStateSnapshot(harness.sessionManager, state);
-}
-
-function countContinuationPrompts(harness: Awaited<ReturnType<typeof createHarness>>): number {
-	return getUserTexts(harness).filter((text) => text.includes("Goal continuation context")).length;
 }
 
 async function waitUntil(predicate: () => boolean, timeoutMs = 5000, intervalMs = 5): Promise<void> {
@@ -149,6 +168,7 @@ describe("AgentSession goal-continuation single-flight mutex (end-to-end)", () =
 		process.on("unhandledRejection", onUnhandledRejection);
 		try {
 			seedOpenGoal(harness);
+			harness.settingsManager.setAutonomySettings({ goalContinueTurns: 1 });
 
 			let idlePassStarted = false;
 			let releaseIdlePass: (() => void) | undefined;
@@ -161,9 +181,7 @@ describe("AgentSession goal-continuation single-flight mutex (end-to-end)", () =
 				async () => {
 					idlePassStarted = true;
 					await idleGate;
-					// Plain text, no tool call: the goal state does not advance, so the idle-triggered
-					// loop stops after exactly this one pass (`goal_state_not_advanced`) -- no further
-					// queued responses are needed.
+					// The explicit one-turn setting stops this idle invocation after the gated pass.
 					return fauxAssistantMessage("idle continuation pass settled");
 				},
 			]);
@@ -194,12 +212,13 @@ describe("AgentSession goal-continuation single-flight mutex (end-to-end)", () =
 
 			// Let the idle-triggered pass complete.
 			releaseIdlePass?.();
-			await waitUntil(() => countContinuationPrompts(harness) >= 1);
+			await waitUntil(() => (harness.session.getGoalStateSnapshot()?.continuationTurnsUsed ?? 0) >= 1);
 			// Drain trailing microtasks so the idle loop's own `finally` has cleared the mutex flag.
 			await new Promise((resolve) => setTimeout(resolve, 10));
 
 			// Exactly one loop actually submitted a continuation prompt.
-			expect(countContinuationPrompts(harness)).toBe(1);
+			expect(harness.session.getGoalStateSnapshot()?.continuationTurnsUsed).toBe(1);
+			expect(getUserTexts(harness)).toEqual(["start the task"]);
 
 			expect(unhandledRejections).toEqual([]);
 			const warnings = harness.eventsOfType("warning");

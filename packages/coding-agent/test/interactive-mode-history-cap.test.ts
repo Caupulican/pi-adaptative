@@ -1,6 +1,7 @@
 import type { AgentMessage } from "@caupulican/pi-agent-core";
 import { Container, Text } from "@caupulican/pi-tui";
 import { beforeAll, describe, expect, test, vi } from "vitest";
+import { messagesForTuiHistoryReload } from "../src/modes/interactive/history-reload-math.ts";
 import { InteractiveMode } from "../src/modes/interactive/interactive-mode.ts";
 import { initTheme } from "../src/modes/interactive/theme/theme.ts";
 
@@ -61,6 +62,31 @@ describe("InteractiveMode TUI reload history cap", () => {
 		expect(renderedText).toContain("omitted from TUI reload history");
 		expect(renderedText).not.toContain("huge-line-0");
 		expect(renderedText).toContain("huge-line-1499");
+	});
+
+	test("does not read collapsed tool-result payloads while selecting reload history", () => {
+		let contentReads = 0;
+		const toolResult = {
+			role: "toolResult",
+			toolCallId: "call-1",
+			toolName: "read",
+			isError: false,
+			timestamp: 1,
+		} as AgentMessage;
+		Object.defineProperty(toolResult, "content", {
+			enumerable: true,
+			get: () => {
+				contentReads++;
+				return [{ type: "text", text: "deferred payload" }];
+			},
+		});
+
+		const selected = messagesForTuiHistoryReload([makeAssistantMessage("before"), toolResult], {
+			includeToolResultContent: false,
+		});
+
+		expect(contentReads).toBe(0);
+		expect(selected.messages[1]).toBe(toolResult);
 	});
 
 	test("caps live chat component tree to protect redraw FPS", () => {
@@ -179,6 +205,48 @@ describe("InteractiveMode TUI reload history cap", () => {
 		expect(rendered).not.toContain("OLD");
 		expect(rendered).toContain("message-0");
 		expect(rendered).toContain("message-44");
+	});
+
+	test("wires collapsed reload results through the deferred component boundary", async () => {
+		const ctx = createRenderContext();
+		ctx.toolOutputExpanded = false;
+		let contentReads = 0;
+		const assistant = {
+			role: "assistant",
+			content: [{ type: "toolCall", id: "call-1", name: "read", arguments: { path: "notes.txt" } }],
+			stopReason: "toolUse",
+		} as unknown as AgentMessage;
+		const toolResult = {
+			role: "toolResult",
+			toolCallId: "call-1",
+			toolName: "read",
+			isError: false,
+			timestamp: 1,
+		} as AgentMessage;
+		Object.defineProperty(toolResult, "content", {
+			enumerable: true,
+			get: () => {
+				contentReads++;
+				return [{ type: "text", text: "deferred payload" }];
+			},
+		});
+		const deferredComponent = { updateResult: vi.fn() };
+		ctx.attachToolExecutionComponent = vi.fn(() => deferredComponent);
+		ctx.toolPanels = { activeEntries: () => [], hasActive: () => false, finish: vi.fn() };
+
+		await (InteractiveMode as any).prototype.renderSessionContext.call(ctx, {
+			messages: [assistant, toolResult],
+		});
+
+		expect(contentReads).toBe(0);
+		expect(ctx.attachToolExecutionComponent).toHaveBeenCalledWith(
+			"read",
+			"call-1",
+			{ path: "notes.txt" },
+			undefined,
+			true,
+		);
+		expect(deferredComponent.updateResult).toHaveBeenCalledTimes(1);
 	});
 
 	test("two overlapped renderSessionContext calls finish with the visible container intact", async () => {

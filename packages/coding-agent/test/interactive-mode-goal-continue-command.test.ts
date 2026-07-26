@@ -21,7 +21,9 @@ type InteractiveModePrototype = {
 type GoalCommandContext = {
 	session: {
 		getGoalStateSnapshot: () => GoalState | undefined;
-		saveGoalStateSnapshot: (state: GoalState) => string;
+		saveGoalStateSnapshot: (state: GoalState, expected?: { goalId: string; revision: number }) => string;
+		clearGoalStateSnapshot: (state: GoalState, now: string) => string;
+		restoreGoalRuntimeAfterResume: () => void;
 		sendUserMessage: (content: string) => Promise<void>;
 		continueGoalLoop: (options: GoalContinuationLoopOptions) => Promise<GoalContinuationLoopResult>;
 		getGoalRuntimeSnapshot: (settings: { maxStallTurns: number }) => GoalContinuationLoopResult["finalSnapshot"];
@@ -29,6 +31,8 @@ type GoalCommandContext = {
 	showStatus: (message: string) => void;
 	showError: (message: string) => void;
 	refreshAutonomyFooterStatus: () => void;
+	refreshActivityLane?: () => void;
+	activityLane?: { announce: (message: string, status?: "success" | "failure" | "neutral") => void };
 };
 
 type GoalContinueCommandContext = {
@@ -39,6 +43,8 @@ type GoalContinueCommandContext = {
 	showStatus: (message: string) => void;
 	showError: (message: string) => void;
 	refreshAutonomyFooterStatus: () => void;
+	refreshActivityLane?: () => void;
+	activityLane?: { announce: (message: string, status?: "success" | "failure" | "neutral") => void };
 };
 
 const interactiveModePrototype = InteractiveMode.prototype as unknown as InteractiveModePrototype;
@@ -82,6 +88,7 @@ function createContext(result: GoalContinuationLoopResult = createLoopResult()) 
 		showError: (message) => {
 			errors.push(message);
 		},
+		activityLane: { announce: (message) => statuses.push(message) },
 		refreshAutonomyFooterStatus: () => {
 			refreshCount++;
 		},
@@ -96,6 +103,7 @@ function createGoalCommandContext(initialState?: GoalState) {
 	const errors: string[] = [];
 	const prompts: string[] = [];
 	let continuationCalls = 0;
+	let runtimeRestoreCalls = 0;
 	let refreshCount = 0;
 	const context: GoalCommandContext = {
 		session: {
@@ -104,6 +112,13 @@ function createGoalCommandContext(initialState?: GoalState) {
 				state = next;
 				saved.push(next);
 				return "entry";
+			},
+			clearGoalStateSnapshot: () => {
+				state = undefined;
+				return "cleared";
+			},
+			restoreGoalRuntimeAfterResume: () => {
+				runtimeRestoreCalls++;
 			},
 			sendUserMessage: async (content) => {
 				prompts.push(content);
@@ -137,6 +152,7 @@ function createGoalCommandContext(initialState?: GoalState) {
 		},
 		showStatus: (message) => statuses.push(message),
 		showError: (message) => errors.push(message),
+		activityLane: { announce: (message) => statuses.push(message) },
 		refreshAutonomyFooterStatus: () => {
 			refreshCount++;
 		},
@@ -149,6 +165,7 @@ function createGoalCommandContext(initialState?: GoalState) {
 		prompts,
 		getState: () => state,
 		getContinuationCalls: () => continuationCalls,
+		getRuntimeRestoreCalls: () => runtimeRestoreCalls,
 		getRefreshCount: () => refreshCount,
 	};
 }
@@ -165,6 +182,8 @@ describe("InteractiveMode /goal-continue command", () => {
 			session: {
 				getGoalStateSnapshot: () => undefined,
 				saveGoalStateSnapshot: () => "entry",
+				clearGoalStateSnapshot: () => "cleared",
+				restoreGoalRuntimeAfterResume: () => {},
 				sendUserMessage: async () => {},
 				continueGoalLoop: async () => createLoopResult(),
 				getGoalRuntimeSnapshot: () =>
@@ -186,6 +205,7 @@ describe("InteractiveMode /goal-continue command", () => {
 			},
 			showStatus: (message) => statuses.push(message),
 			showError: () => {},
+			activityLane: { announce: (message) => statuses.push(message) },
 			refreshAutonomyFooterStatus: () => {},
 		};
 
@@ -194,19 +214,15 @@ describe("InteractiveMode /goal-continue command", () => {
 		expect(statuses[0]).toContain("Goal: none (ask-user/missing_goal_state)");
 	});
 
-	it("starts a goal, deterministically seeds one requirement, then asks the model to decompose", async () => {
+	it("starts one compact goal record and continues it through the hidden runtime lane", async () => {
 		const { context, saved, prompts, statuses } = createGoalCommandContext();
 
 		await interactiveModePrototype.handleGoalCommand.call(context, "/goal ship the thing");
 
 		expect(saved[0].userGoal).toBe("ship the thing");
-		// The deterministic seed makes the continuation loop drivable even when the model skips
-		// decomposition (field incident: goal wedged at finalize/no_open_requirements).
-		expect(saved[1]?.requirements).toHaveLength(1);
-		expect(saved[1]?.requirements[0]?.text).toBe("ship the thing");
-		expect(saved[1]?.requirements[0]?.status).toBe("open");
-		expect(prompts[0]).toContain("Use the goal tool this turn to decompose this goal");
-		expect(prompts[0]).toContain("satisfy_requirement");
+		expect(saved).toHaveLength(1);
+		expect(saved[0]?.requirements).toEqual([]);
+		expect(prompts).toEqual([]);
 		expect(statuses.at(-1)).toContain("Goal started");
 	});
 
@@ -232,7 +248,7 @@ describe("InteractiveMode /goal-continue command", () => {
 
 		await interactiveModePrototype.handleGoalCommand.call(context, "/goal reopen r1");
 
-		expect(saved).toHaveLength(2);
+		expect(saved).toHaveLength(1);
 		expect(getState()?.status).toBe("active");
 		expect(getState()?.requirements[0].status).toBe("open");
 		expect(statuses[0]).toContain("goal resumed");
@@ -249,9 +265,10 @@ describe("InteractiveMode /goal-continue command", () => {
 		expect(resumed.getState()?.status).toBe("active");
 		expect(resumed.statuses).toEqual(["Goal resumed."]);
 		expect(resumed.getRefreshCount()).toBe(1);
+		expect(resumed.getRuntimeRestoreCalls()).toBe(1);
 	});
 
-	it("resumes a selected session's blocked goal through the same transition", async () => {
+	it("offers an explicit owner choice before resuming a selected session's stopped goal", async () => {
 		let previousState = createGoalState({ goalId: "old", userGoal: "Old", now: "T0" });
 		previousState = applyGoalEvent(previousState, { type: "block_goal", reason: "old", now: "T1" });
 		let replacementState = createGoalState({ goalId: "g1", userGoal: "Ship", now: "T0" });
@@ -264,6 +281,15 @@ describe("InteractiveMode /goal-continue command", () => {
 		const statuses: string[] = [];
 		const phases: string[] = [];
 		let refreshCount = 0;
+		let runtimeRestoreCount = 0;
+		const previousSession = {
+			getGoalStateSnapshot: () => previousState,
+			saveGoalStateSnapshot: (next: GoalState) => {
+				previousState = next;
+				return "entry";
+			},
+			restoreGoalRuntimeAfterResume: () => {},
+		} as unknown as AgentSession;
 		const replacementSession = {
 			getGoalStateSnapshot: () => replacementState,
 			saveGoalStateSnapshot: (next: GoalState) => {
@@ -271,14 +297,22 @@ describe("InteractiveMode /goal-continue command", () => {
 				saved.push(next);
 				return "entry";
 			},
+			restoreGoalRuntimeAfterResume: () => {
+				runtimeRestoreCount++;
+			},
 		} as unknown as AgentSession;
+		let activeSession = previousSession;
 		const switchSession: SessionFlowHost["runtimeHost"]["switchSession"] = async (_path, options) => {
 			await options?.beforeSessionResourcesStart?.(replacementSession);
 			phases.push(`resources:${replacementState.status}`);
+			activeSession = replacementSession;
 			await options?.withSession?.({} as never);
 			return { cancelled: false };
 		};
 		const host = {
+			get session() {
+				return activeSession;
+			},
 			loadingAnimation: undefined,
 			statusContainer: { clear() {} },
 			runtimeHost: { switchSession },
@@ -290,12 +324,8 @@ describe("InteractiveMode /goal-continue command", () => {
 			refreshAutonomyFooterStatus: () => {
 				refreshCount++;
 			},
-			session: {
-				getGoalStateSnapshot: () => previousState,
-				saveGoalStateSnapshot: (next: GoalState) => {
-					previousState = next;
-					return "entry";
-				},
+			extensionUiHost: {
+				showExtensionSelector: async () => "Resume goal",
 			},
 		} as unknown as SessionFlowHost;
 
@@ -308,9 +338,48 @@ describe("InteractiveMode /goal-continue command", () => {
 		expect(saved).toHaveLength(1);
 		expect(previousState.status).toBe("blocked");
 		expect(replacementState.status).toBe("active");
-		expect(phases).toEqual(["resources:active", "withSession"]);
+		expect(phases).toEqual(["resources:blocked", "withSession"]);
 		expect(statuses).toEqual(["Resumed session and goal"]);
 		expect(refreshCount).toBe(1);
+		expect(runtimeRestoreCount).toBe(1);
+	});
+
+	it("leaves a selected session's stopped goal untouched when the owner declines resume", async () => {
+		let state = applyGoalEvent(createGoalState({ goalId: "g1", userGoal: "Ship", now: "T0" }), {
+			type: "pause_goal",
+			now: "T1",
+		});
+		let restoreCalls = 0;
+		const session = {
+			getGoalStateSnapshot: () => state,
+			saveGoalStateSnapshot: (next: GoalState) => {
+				state = next;
+				return "entry";
+			},
+			restoreGoalRuntimeAfterResume: () => {
+				restoreCalls++;
+			},
+		} as unknown as AgentSession;
+		const statuses: string[] = [];
+		const host = {
+			session,
+			loadingAnimation: undefined,
+			statusContainer: { clear() {} },
+			runtimeHost: { switchSession: async () => ({ cancelled: false }) },
+			renderCurrentSessionState() {},
+			showStatus: (message: string) => statuses.push(message),
+			showError: (message: string) => {
+				throw new Error(message);
+			},
+			refreshAutonomyFooterStatus() {},
+			extensionUiHost: { showExtensionSelector: async () => "Leave stopped" },
+		} as unknown as SessionFlowHost;
+
+		await handleResumeSession(host, "/tmp/resumed-session.jsonl");
+
+		expect(state.status).toBe("paused");
+		expect(restoreCalls).toBe(0);
+		expect(statuses).toEqual(["Resumed session; goal state preserved"]);
 	});
 
 	it("keeps a restored previous session alive when selected-session activation fails", async () => {
@@ -401,18 +470,19 @@ describe("InteractiveMode /goal-continue command", () => {
 
 		await interactiveModePrototype.handleGoalCommand.call(context, "/goal override New goal");
 
-		expect(saved[0].status).toBe("cancelled");
+		expect(saved).toHaveLength(1);
+		expect(saved[0].status).toBe("active");
 		expect(getState()?.status).toBe("active");
 		expect(getState()?.userGoal).toBe("New goal");
-		expect(getState()?.requirements).toHaveLength(1);
-		expect(prompts).toHaveLength(1);
+		expect(getState()?.requirements).toHaveLength(0);
+		expect(prompts).toHaveLength(0);
 		expect(statuses.at(-1)).toContain("Goal overridden");
 	});
 
-	it("parses default and explicit bounded arguments", () => {
+	it("defaults to unbounded and preserves explicit safe-integer limits", () => {
 		expect(interactiveModePrototype.parseGoalContinueCommand("/goal-continue")).toEqual({
 			ok: true,
-			maxTurns: 20,
+			maxTurns: 0,
 			maxStallTurns: 20,
 			maxWallClockMinutes: 0,
 		});
@@ -422,12 +492,18 @@ describe("InteractiveMode /goal-continue command", () => {
 			maxStallTurns: 0,
 			maxWallClockMinutes: 0,
 		});
+		expect(interactiveModePrototype.parseGoalContinueCommand("/goal-continue 1000 0")).toEqual({
+			ok: true,
+			maxTurns: 1000,
+			maxStallTurns: 0,
+			maxWallClockMinutes: 0,
+		});
 	});
 
 	it("rejects invalid arguments", () => {
 		const invalid = [
-			"/goal-continue 0",
-			"/goal-continue 21",
+			"/goal-continue -1",
+			"/goal-continue 9007199254740992",
 			"/goal-continue 1 101",
 			"/goal-continue 1.5",
 			"/goal-continue one",
@@ -441,14 +517,14 @@ describe("InteractiveMode /goal-continue command", () => {
 
 	it("runs the bounded goal loop with parsed options and reports status", async () => {
 		const { context, calls, statuses, errors, getRefreshCount } = createContext(
-			createLoopResult({ stopReason: "goal_state_not_advanced", turnsSubmitted: 2 }),
+			createLoopResult({ stopReason: "max_turns_reached", turnsSubmitted: 2 }),
 		);
 
 		await interactiveModePrototype.handleGoalContinueCommand.call(context, "/goal-continue 2 10");
 
 		expect(calls).toEqual([{ maxTurns: 2, maxStallTurns: 10, maxWallClockMinutes: 0 }]);
 		expect(statuses[0]).toContain("Goal continuation started");
-		expect(statuses[1]).toContain("goal_state_not_advanced");
+		expect(statuses[1]).toContain("max_turns_reached");
 		expect(statuses[1]).toContain("submitted 2 turn(s)");
 		expect(errors).toEqual([]);
 		expect(getRefreshCount()).toBe(1);
@@ -457,10 +533,12 @@ describe("InteractiveMode /goal-continue command", () => {
 	it("shows an error and does not run for invalid arguments", async () => {
 		const { context, calls, errors, getRefreshCount } = createContext();
 
-		await interactiveModePrototype.handleGoalContinueCommand.call(context, "/goal-continue 1000");
+		await interactiveModePrototype.handleGoalContinueCommand.call(context, "/goal-continue -1");
 
 		expect(calls).toEqual([]);
-		expect(errors).toEqual(["Usage: /goal-continue [maxTurns 1-20] [maxStallTurns 0-100] [maxMinutes 0-1440]"]);
+		expect(errors).toEqual([
+			"Usage: /goal-continue [maxTurns 0=unbounded] [maxStallTurns 0-100] [maxMinutes 0-1440]",
+		]);
 		expect(getRefreshCount()).toBe(0);
 	});
 

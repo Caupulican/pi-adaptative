@@ -193,7 +193,7 @@ export const DEFAULT_AUTONOMY_GOAL_AUTO_CONTINUE_DELAY_MS = DEFAULT_GOAL_AUTO_CO
 export interface AutonomySettings {
 	mode?: AutonomyMode; // default: off; presets drive Auto Learn/reflection without many knobs
 	maxStallTurns?: number; // default: 20; maximum no-progress rounds before goal continuation asks the user
-	goalContinueTurns?: number; // default: 20; maximum continuation prompts per idle/explicit goal loop
+	goalContinueTurns?: number; // default: 0 (unbounded); a positive value is an explicit per-loop limit
 	goalContinueMaxWallClockMinutes?: number; // default: 0; 0 disables wall-clock budget
 	goalAutoContinue?: boolean; // default: true; auto-inject continuation prompts when an active goal is idle
 	goalAutoContinueDelayMs?: number; // default: 0; delay before idle auto-continuation starts
@@ -3254,7 +3254,7 @@ export class SettingsManager {
 		const goalContinueTurns = sanitizeIntegerSetting(
 			configuredGoalContinueTurns,
 			DEFAULT_AUTONOMY_GOAL_CONTINUE_TURNS,
-			1,
+			0,
 			MAX_GOAL_CONTINUE_MAX_TURNS,
 		);
 		const goalContinueMaxWallClockMinutes = sanitizeIntegerSetting(

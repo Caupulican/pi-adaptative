@@ -67,6 +67,7 @@ import {
 } from "./extensions/index.ts";
 import { disposeExtensionEventSubscriptions } from "./extensions/loader.ts";
 import { emitSessionShutdownEvent } from "./extensions/runner.ts";
+import type { GoalStateRevision } from "./goals/goal-lifecycle.ts";
 import type { GoalState } from "./goals/goal-state.ts";
 import type { OpenTaskStepRef } from "./goals/goal-tool-core.ts";
 import type { MemoryManager } from "./memory/memory-manager.ts";
@@ -278,7 +279,7 @@ export interface RuntimeBuilderDeps {
 
 	/** Goal-tool state accessors. */
 	getGoalStateSnapshot(): GoalState | undefined;
-	saveGoalStateSnapshot(state: GoalState): string;
+	saveGoalStateSnapshot(state: GoalState, expected?: GoalStateRevision): string;
 	/** Native task-step state accessors. */
 	getTaskStepsStateSnapshot(): TaskStepsState | undefined;
 	saveTaskStepsStateSnapshot(state: TaskStepsState): string;
@@ -807,8 +808,8 @@ export class RuntimeBuilder {
 			if (toolAccess.allows("goal")) {
 				const goalToolDefinition = createGoalToolDefinition({
 					getGoalState: () => this.deps.getGoalStateSnapshot(),
-					saveGoalState: (state) => {
-						this.deps.saveGoalStateSnapshot(state);
+					saveGoalState: (state, expected) => {
+						this.deps.saveGoalStateSnapshot(state, expected);
 					},
 					// kind:"tool" evidence refs verify against real session records.
 					hasToolCallId: (toolCallId) => hasAnsweredToolCallOnBranch(this.deps.getSessionManager(), toolCallId),

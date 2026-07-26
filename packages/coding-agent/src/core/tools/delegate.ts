@@ -171,18 +171,10 @@ export function createDelegateToolDefinition(deps: DelegateToolDependencies): To
 			return emptyOrchestrationCall();
 		},
 		renderResult(result, { expanded, isPartial }, theme) {
-			if (isPartial) {
-				return new OrchestrationPanelComponent(theme, {
-					label: "workers",
-					action: "dispatching",
-					status: "running",
-				});
-			}
-			return new OrchestrationPanelComponent(
-				theme,
-				delegatePanelModel(result.details as DelegateToolDetails | undefined),
-				expanded,
-			);
+			if (isPartial) return emptyOrchestrationCall();
+			const details = result.details as DelegateToolDetails | undefined;
+			if (!expanded && details?.started) return emptyOrchestrationCall();
+			return new OrchestrationPanelComponent(theme, delegatePanelModel(details), expanded);
 		},
 		async execute(
 			_toolCallId,

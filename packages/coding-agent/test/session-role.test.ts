@@ -1,6 +1,6 @@
 import { describe, expect, it } from "vitest";
 import { PI_PARENT_PID_ENV } from "../src/core/process-identity.ts";
-import { getSessionRole, isWorkerSession } from "../src/core/session-role.ts";
+import { getSessionRole, isWorkerSession, setTerminalSessionMode } from "../src/core/session-role.ts";
 import { PI_WORKTREE_LANE_ENV } from "../src/core/worktree-sync/runtime.ts";
 
 /**
@@ -55,5 +55,17 @@ describe("getSessionRole / isWorkerSession", () => {
 		const env = { PI_SESSION_ROLE: "main" };
 		expect(getSessionRole(env)).toBe("main");
 		expect(isWorkerSession(env)).toBe(false);
+	});
+
+	it("maps explicit terminal audience onto the authoritative role without allowing escalation", () => {
+		const workerEnv: NodeJS.ProcessEnv = {};
+		setTerminalSessionMode("worker", workerEnv);
+		expect(getSessionRole(workerEnv)).toBe("worker");
+		setTerminalSessionMode("user", workerEnv);
+		expect(getSessionRole(workerEnv)).toBe("worker");
+
+		const laneEnv: NodeJS.ProcessEnv = { [PI_WORKTREE_LANE_ENV]: "adhoc-1" };
+		setTerminalSessionMode("user", laneEnv);
+		expect(getSessionRole(laneEnv)).toBe("worker");
 	});
 });

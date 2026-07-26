@@ -1,7 +1,6 @@
 import { SessionManager } from "@caupulican/pi-agent-core/node";
 import { describe, expect, it } from "vitest";
-import { buildGoalContinuationPrompt } from "../src/core/goals/goal-continuation-prompt.ts";
-import { buildGoalRuntimeSnapshot, type GoalRuntimeSnapshot } from "../src/core/goals/goal-runtime-snapshot.ts";
+import { buildGoalRuntimeSnapshot } from "../src/core/goals/goal-runtime-snapshot.ts";
 import { applyGoalEvent, createGoalState, type GoalState } from "../src/core/goals/goal-state.ts";
 import {
 	applyGoalAction,
@@ -29,7 +28,6 @@ function expectOk(result: ReturnType<typeof applyGoalAction>): GoalState {
  *  (a) buildGoalRuntimeSnapshot includes an open task-steps summary (branch-scoped).
  *  (b) satisfying/completing a requirement emits a cheap-text-match nudge when an open task
  *      step's content references it.
- *  (c) goal-continuation-prompt renders the open task-steps summary.
  * No shared state machine: goal code only ever READS an already-resolved task-steps summary; it
  * never mutates task state.
  */
@@ -88,64 +86,6 @@ describe("goal<->task cross-visibility", () => {
 			session.branch(branchALeaf);
 			const snapshotA = buildGoalRuntimeSnapshot({ sessionManager: session, settings: { maxStallTurns: 3 } });
 			expect(snapshotA.openTaskSteps?.map((step) => step.content)).toEqual(["Branch A step"]);
-		});
-	});
-
-	describe("buildGoalContinuationPrompt: open task-steps summary rendering", () => {
-		function baseSnapshot(overrides: Partial<GoalRuntimeSnapshot> = {}): GoalRuntimeSnapshot {
-			return {
-				workerClaims: [],
-				learningDecisions: [],
-				continuation: {
-					action: "continue",
-					reasonCode: "goal_active",
-					message: "Active",
-					openRequirementIds: [],
-					blockedRequirementIds: [],
-					satisfiedRequirementIds: [],
-				},
-				...overrides,
-			};
-		}
-
-		it("renders nothing extra when openTaskSteps is absent (backward compatible)", () => {
-			const prompt = buildGoalContinuationPrompt({ snapshot: baseSnapshot() });
-			expect(prompt.text).not.toContain("Open Task Steps");
-		});
-
-		it("renders the open task-steps summary with status and content", () => {
-			const snapshot = baseSnapshot({
-				openTaskSteps: [
-					{ id: "step-1", status: "in_progress", content: "Wire the nudge" },
-					{ id: "step-2", status: "blocked", content: "Waiting on review" },
-				],
-			});
-			const prompt = buildGoalContinuationPrompt({ snapshot });
-			expect(prompt.text).toContain("Open Task Steps");
-			// The structural prefix (status/id) stays outside the untrusted-content boundary; the
-			// step content is fenced inside it (goal-continuation-prompt.ts wraps open-task-step
-			// content as untrusted free text) -- assert both separately rather than as one
-			// contiguous string.
-			expect(prompt.text).toContain("[in_progress] step-1:");
-			expect(prompt.text).toContain("Wire the nudge");
-			expect(prompt.text).toContain("[blocked] step-2:");
-			expect(prompt.text).toContain("Waiting on review");
-			expect(prompt.truncated).toBe(false);
-		});
-
-		it("truncates open task steps beyond the configured limit", () => {
-			const openTaskSteps = Array.from({ length: 5 }, (_, index) => ({
-				id: `step-${index + 1}`,
-				status: "pending" as const,
-				content: `Step ${index + 1}`,
-			}));
-			const snapshot = baseSnapshot({ openTaskSteps });
-			const prompt = buildGoalContinuationPrompt({ snapshot, limits: { maxOpenTaskSteps: 2 } });
-			expect(prompt.text).toContain("step-1");
-			expect(prompt.text).toContain("step-2");
-			expect(prompt.text).not.toContain("step-3");
-			expect(prompt.text).toContain("3 more open task step(s) omitted");
-			expect(prompt.truncated).toBe(true);
 		});
 	});
 

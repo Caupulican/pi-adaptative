@@ -4,7 +4,7 @@ import { describe, expect, it, vi } from "vitest";
 import type { LaneRecord } from "../src/core/autonomy/lane-tracker.ts";
 import { BackgroundLaneController, type BackgroundLaneControllerDeps } from "../src/core/background-lane-controller.ts";
 import { GoalLoopController, type GoalLoopControllerDeps } from "../src/core/goal-loop-controller.ts";
-import { DEFAULT_GOAL_CUMULATIVE_MAX_WORKER_SPEND_USD } from "../src/core/goals/goal-continuation-defaults.ts";
+import { DEFAULT_GOAL_CUMULATIVE_MAX_TOTAL_SPEND_USD } from "../src/core/goals/goal-continuation-defaults.ts";
 import { buildGoalRuntimeSnapshot } from "../src/core/goals/goal-runtime-snapshot.ts";
 import { applyGoalEvent, createGoalState } from "../src/core/goals/goal-state.ts";
 import { appendGoalStateSnapshot } from "../src/core/goals/session-goal-state.ts";
@@ -18,9 +18,7 @@ import { createTestManagedLaneDispatch } from "./managed-lane-fixture.ts";
  * (`Requirement.boundLaneId`) to a queued/running worker lane therefore read as plain
  * `action:"continue"`, which broke in two ways:
  *  (a) `GoalLoopController.continueGoalLoop` would submit a continuation pass against a goal that
- *      cannot have advanced (the bound worker is still running) — the very next read sees an
- *      unchanged progress signature and the loop STOPS with a misleading `goal_state_not_advanced`,
- *      even though the goal is nowhere near stalled; and
+ *      cannot have advanced because the bound worker is still running, wasting context and budget;
  *  (b) `BackgroundLaneController.scheduleGoalAutoContinueFromIdle` would happily arm the idle timer
  *      and race a second dispatch against the SAME open requirement while the first worker still runs.
  * Every test below asserts the FIXED behavior. Run against the pre-fix source, the "waiting" tests
@@ -267,15 +265,18 @@ describe("GoalLoopController neither stalls nor races while a bound worker is in
 		} as ReturnType<GoalLoopControllerDeps["getGoalRuntimeSnapshot"]>;
 	}
 
-	it("returns immediately with stopReason:'worker_in_flight' and submits zero passes while waiting (never goal_state_not_advanced)", async () => {
+	it("returns immediately with stopReason:'worker_in_flight' and submits zero hollow passes while waiting", async () => {
 		const promptCalls: string[] = [];
-		const recorded: Array<{ turns: number; wallClockMs: number }> = [];
+		const recorded: Array<{ turns: number; wallClockMs: number; usageCursor: string | null }> = [];
 		const controller = new GoalLoopController({
 			getGoalRuntimeSnapshot: () => makeSnapshot("waiting", "worker_in_flight"),
 			prompt: async (text) => {
 				promptCalls.push(text);
 			},
+			captureUsageCursor: () => null,
 			recordGoalContinuationPass: (pass) => recorded.push(pass),
+			recordGoalContinuationFailure: () => {},
+			markGoalBudgetLimited: () => {},
 		});
 
 		const result = await controller.continueGoalLoop({ maxStallTurns: 20, maxTurns: 5 });
@@ -295,7 +296,10 @@ describe("GoalLoopController neither stalls nor races while a bound worker is in
 			prompt: async (text) => {
 				promptCalls.push(text);
 			},
+			captureUsageCursor: () => null,
 			recordGoalContinuationPass: () => {},
+			recordGoalContinuationFailure: () => {},
+			markGoalBudgetLimited: () => {},
 		});
 
 		const whileWaiting = await controller.continueGoalLoop({ maxStallTurns: 20, maxTurns: 5 });
@@ -316,7 +320,7 @@ describe("worker-spend cumulative budget ceiling (goal-loop-controller)", () => 
 		const promptCalls: string[] = [];
 		let state = createGoalState({ goalId: "g1", userGoal: "Ship it", now: "T0" });
 		state = applyGoalEvent(state, { type: "add_requirement", id: "req-1", text: "Req 1", now: "T0" });
-		state = { ...state, continuationWorkerSpendUsd: DEFAULT_GOAL_CUMULATIVE_MAX_WORKER_SPEND_USD };
+		state = { ...state, continuationWorkerSpendUsd: DEFAULT_GOAL_CUMULATIVE_MAX_TOTAL_SPEND_USD };
 
 		const controller = new GoalLoopController({
 			getGoalRuntimeSnapshot: () => ({
@@ -335,7 +339,10 @@ describe("worker-spend cumulative budget ceiling (goal-loop-controller)", () => 
 			prompt: async (text) => {
 				promptCalls.push(text);
 			},
+			captureUsageCursor: () => null,
 			recordGoalContinuationPass: () => {},
+			recordGoalContinuationFailure: () => {},
+			markGoalBudgetLimited: () => {},
 		});
 
 		const result = await controller.continueGoalLoop({ maxStallTurns: 20, maxTurns: 5 });
@@ -363,7 +370,10 @@ describe("worker-spend cumulative budget ceiling (goal-loop-controller)", () => 
 				},
 			}),
 			prompt: async () => {},
+			captureUsageCursor: () => null,
 			recordGoalContinuationPass: () => {},
+			recordGoalContinuationFailure: () => {},
+			markGoalBudgetLimited: () => {},
 		});
 
 		const result = await controller.continueGoalLoop({ maxStallTurns: 20, maxTurns: 5 });

@@ -4,10 +4,17 @@
 
 - Added a provider-neutral shell search guard that rejects broad `rg`/recursive `grep`/`find`/`fd` scans before execution and supports an explicit managed-file override with bounded disk use.
 - Added an OpenAI subscription `/usage` flow for inspecting earned reset passes, reviewing reset details, confirming redemption, retrying idempotently, and refreshing remaining availability.
+- Added one event-driven activity lane above the editor for routing, tools, task steps, goals, workers, queues, compaction, and retries, plus an explicit `--session-mode user|worker` audience contract for unattended terminals.
+
+### Changed
+
+- Made durable goals use compact Codex-style provider context and continue without a turn limit by default; positive user-configured limits are preserved exactly and are never reduced by model capability routing.
 
 ### Fixed
 
 - Kept retry-guided compaction provider failures inside the exact-request retry layer instead of restarting the compaction plan as an unknown failure.
+- Removed successful orchestration bookkeeping from collapsed chat history, retained full detail on explicit expansion, and prevented resumed terminal state from replaying as new completion feedback.
+- Deferred retained tool-result reads, renderer construction, and image conversion during collapsed history reload until explicit expansion, with the materialized payload released again on collapse.
 
 ## [0.81.40] - 2026-07-24
 

@@ -209,18 +209,12 @@ export function createDelegateStatusToolDefinition(deps: DelegateStatusDependenc
 			return emptyOrchestrationCall();
 		},
 		renderResult(result, { expanded, isPartial }, theme) {
-			if (isPartial) {
-				return new OrchestrationPanelComponent(theme, {
-					label: "workers",
-					action: "reading",
-					status: "running",
-				});
+			if (isPartial) return emptyOrchestrationCall();
+			const details = result.details as DelegateStatusToolDetails | undefined;
+			if (!expanded && details && details.kind !== "error" && !(details.kind === "review" && !details.reviewed)) {
+				return emptyOrchestrationCall();
 			}
-			return new OrchestrationPanelComponent(
-				theme,
-				delegateStatusPanelModel(result.details as DelegateStatusToolDetails | undefined),
-				expanded,
-			);
+			return new OrchestrationPanelComponent(theme, delegateStatusPanelModel(details), expanded);
 		},
 		async execute(_toolCallId, input: Input) {
 			if (input.action === "review") {

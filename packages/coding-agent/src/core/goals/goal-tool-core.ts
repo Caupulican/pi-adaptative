@@ -1,12 +1,21 @@
 import { taskStepReferencesRequirement } from "../tasks/task-projection.ts";
 import { getUnprovenGoalRequirementIds } from "./goal-acceptance.ts";
+import { formatGoalRecord, projectGoalRecord } from "./goal-record.ts";
 import {
 	applyGoalEvent,
 	createGoalState,
 	type GoalEvent,
 	type GoalEvidenceKind,
 	type GoalState,
+	isGoalUnfinishedStatus,
+	MAX_GOAL_OBJECTIVE_LENGTH,
 } from "./goal-state.ts";
+
+const MAX_GOAL_ID_LENGTH = 128;
+const MAX_GOAL_REQUIREMENTS = 256;
+const MAX_GOAL_EVIDENCE = 512;
+const MAX_GOAL_LEDGER_TEXT_LENGTH = 4_000;
+const MAX_GOAL_URI_LENGTH = 4_096;
 
 /**
  * Agent-facing goal ledger actions.
@@ -19,7 +28,7 @@ import {
  * {@link GoalEvent}, so the durable state model stays the single source of truth.
  */
 export type GoalAction =
-	| { action: "start"; goalId: string; userGoal: string }
+	| { action: "start"; goalId: string; userGoal: string; tokenBudget?: number }
 	| { action: "add_requirement"; requirementId: string; text: string }
 	| { action: "satisfy_requirement"; requirementId: string; evidenceIds?: readonly string[] }
 	| { action: "block_requirement"; requirementId: string; reason: string }
@@ -52,9 +61,7 @@ export type GoalAction =
 	| { action: "progress" }
 	| { action: "no_progress" }
 	| { action: "complete" }
-	| { action: "block_goal"; reason: string }
-	| { action: "resume_goal" }
-	| { action: "cancel" };
+	| { action: "block_goal"; reason: string };
 
 export type GoalActionName = GoalAction["action"];
 
@@ -106,40 +113,32 @@ export function applyGoalAction(
 		const userGoal = action.userGoal.trim();
 		if (!goalId) return { ok: false, error: "start requires a non-empty goalId." };
 		if (!userGoal) return { ok: false, error: "start requires a non-empty userGoal." };
-		if (current && current.status === "active" && current.goalId !== goalId) {
+		if (goalId.length > MAX_GOAL_ID_LENGTH) {
+			return { ok: false, error: `start goalId must be at most ${MAX_GOAL_ID_LENGTH} characters.` };
+		}
+		if (userGoal.length > MAX_GOAL_OBJECTIVE_LENGTH) {
+			return { ok: false, error: `start userGoal must be at most ${MAX_GOAL_OBJECTIVE_LENGTH} characters.` };
+		}
+		if (action.tokenBudget !== undefined && (!Number.isSafeInteger(action.tokenBudget) || action.tokenBudget <= 0)) {
+			return { ok: false, error: "start tokenBudget must be a positive integer when provided." };
+		}
+		if (current && isGoalUnfinishedStatus(current.status)) {
 			return {
 				ok: false,
-				error: `An active goal '${current.goalId}' already exists. Complete, block, or cancel it before starting '${goalId}'.`,
+				error: `An unfinished goal '${current.goalId}' already exists (${current.status}). Complete, clear, or explicitly replace it before starting '${goalId}'.`,
 			};
 		}
-		return { ok: true, state: createGoalState({ goalId, userGoal, now }) };
+		return { ok: true, state: createGoalState({ goalId, userGoal, tokenBudget: action.tokenBudget, now }) };
 	}
 
 	if (!current) {
 		return { ok: false, error: "No active goal. Use action 'start' before recording goal updates." };
 	}
 
-	if (action.action === "resume_goal") {
-		if (current.status !== "blocked") {
-			return {
-				ok: false,
-				error: `Goal '${current.goalId}' is ${current.status}; only blocked goals can be resumed.`,
-			};
-		}
-		return { ok: true, state: applyGoalEvent(current, { type: "resume_goal", now }) };
-	}
-
 	if (current.status !== "active") {
-		if (current.status === "blocked" && action.action === "cancel") {
-			return { ok: true, state: applyGoalEvent(current, { type: "cancel_goal", now }) };
-		}
-		const recovery =
-			current.status === "blocked"
-				? "Resume it with action 'resume_goal', cancel it, or start a replacement goal."
-				: "Start a new goal before recording updates.";
 		return {
 			ok: false,
-			error: `Goal '${current.goalId}' is ${current.status}. ${recovery}`,
+			error: `Goal '${current.goalId}' is ${current.status}. Lifecycle changes are owner/system controlled; use the /goal controls.`,
 		};
 	}
 
@@ -162,6 +161,15 @@ function toGoalEvent(
 			const text = action.text.trim();
 			if (!id) return { ok: false, error: "add_requirement requires a non-empty requirementId." };
 			if (!text) return { ok: false, error: "add_requirement requires non-empty text." };
+			if (id.length > MAX_GOAL_ID_LENGTH) {
+				return { ok: false, error: `requirementId must be at most ${MAX_GOAL_ID_LENGTH} characters.` };
+			}
+			if (text.length > MAX_GOAL_LEDGER_TEXT_LENGTH) {
+				return { ok: false, error: `requirement text must be at most ${MAX_GOAL_LEDGER_TEXT_LENGTH} characters.` };
+			}
+			if (state.requirements.length >= MAX_GOAL_REQUIREMENTS) {
+				return { ok: false, error: `Goal already has the maximum ${MAX_GOAL_REQUIREMENTS} requirements.` };
+			}
 			if (requirementExists(state, id)) {
 				return { ok: false, error: `Requirement '${id}' already exists.` };
 			}
@@ -224,6 +232,18 @@ function toGoalEvent(
 			const summary = action.summary.trim();
 			if (!id) return { ok: false, error: "add_evidence requires a non-empty evidenceId." };
 			if (!summary) return { ok: false, error: "add_evidence requires a non-empty summary." };
+			if (id.length > MAX_GOAL_ID_LENGTH) {
+				return { ok: false, error: `evidenceId must be at most ${MAX_GOAL_ID_LENGTH} characters.` };
+			}
+			if (summary.length > MAX_GOAL_LEDGER_TEXT_LENGTH) {
+				return { ok: false, error: `evidence summary must be at most ${MAX_GOAL_LEDGER_TEXT_LENGTH} characters.` };
+			}
+			if ((action.uri?.trim().length ?? 0) > MAX_GOAL_URI_LENGTH) {
+				return { ok: false, error: `evidence uri must be at most ${MAX_GOAL_URI_LENGTH} characters.` };
+			}
+			if (state.evidence.length >= MAX_GOAL_EVIDENCE) {
+				return { ok: false, error: `Goal already has the maximum ${MAX_GOAL_EVIDENCE} evidence entries.` };
+			}
 			if (evidenceExists(state, id)) {
 				return { ok: false, error: `Evidence '${id}' already exists.` };
 			}
@@ -272,10 +292,6 @@ function toGoalEvent(
 			if (!reason) return { ok: false, error: "block_goal requires a non-empty reason." };
 			return { ok: true, event: { type: "block_goal", reason, now } };
 		}
-		case "resume_goal":
-			return { ok: true, event: { type: "resume_goal", now } };
-		case "cancel":
-			return { ok: true, event: { type: "cancel_goal", now } };
 		default:
 			return { ok: false, error: "Unknown goal action." };
 	}
@@ -304,15 +320,16 @@ export function summarizeGoalState(
 	state: GoalState,
 	options?: { action?: GoalAction; openTaskSteps?: readonly OpenTaskStepRef[] },
 ): string {
-	const open = state.requirements.filter((requirement) => requirement.status === "open").length;
-	const satisfied = state.requirements.filter((requirement) => requirement.status === "satisfied").length;
-	const blocked = state.requirements.filter((requirement) => requirement.status === "blocked").length;
-	const lines = [
-		`Goal '${state.goalId}' (${state.status}): ${state.userGoal}`,
-		`Requirements: ${state.requirements.length} total — ${open} open, ${satisfied} satisfied, ${blocked} blocked.`,
-		`Evidence: ${state.evidence.length}. Stall turns: ${state.stallTurns}.`,
-	];
-	if (state.blockedReason) lines.push(`Blocked reason: ${state.blockedReason}`);
+	const lines = [formatGoalRecord(projectGoalRecord(state))];
+	if (state.requirements.length > 0) {
+		const openIds = state.requirements
+			.filter((requirement) => requirement.status === "open")
+			.slice(0, 20)
+			.map((requirement) => requirement.id);
+		lines.push(
+			`Legacy ledger: ${state.requirements.length} requirements, ${state.evidence.length} evidence${openIds.length > 0 ? `; open: ${openIds.join(", ")}` : ""}.`,
+		);
+	}
 	if (options?.action) {
 		lines.push(...buildGoalTaskCrossVisibilityNudges(options.action, state, options.openTaskSteps));
 	}

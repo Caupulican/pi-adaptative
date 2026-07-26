@@ -5,10 +5,13 @@ export type GoalContinuationAction = "continue" | "ask-user" | "finalize" | "sto
 export type GoalContinuationReasonCode =
 	| "goal_active"
 	| "goal_completed"
+	| "goal_paused"
 	| "goal_blocked"
+	| "goal_usage_limited"
+	| "goal_budget_limited"
 	| "goal_cancelled"
 	| "stall_limit_reached"
-	| "no_open_requirements"
+	| "goal_completion_required"
 	| "acceptance_evidence_required"
 	| "blocked_requirements_present"
 	| "missing_goal_state"
@@ -40,7 +43,7 @@ export function evaluateGoalContinuation(args: {
 	 * LaneIds currently queued/running AND tagged with THIS goal's id (see `LaneRecord.goalId`).
 	 * When an open requirement is bound (`Requirement.boundLaneId`) to one of these lanes, the
 	 * goal is WAITING on that worker rather than stalled or ready for another pass: the loop must not
-	 * submit a hollow continuation prompt (which would then misreport as `goal_state_not_advanced`),
+	 * submit a hollow continuation prompt (which would waste a turn while no parent work can advance),
 	 * and the idle scheduler must not race a re-dispatch against the same open requirement. Optional
 	 * so every pre-existing (in-flight-unaware) caller keeps compiling and behaving unchanged.
 	 */
@@ -123,12 +126,39 @@ export function evaluateGoalContinuation(args: {
 		};
 	}
 
+	if (state.status === "paused") {
+		return {
+			...baseDecision,
+			action: "stop",
+			reasonCode: "goal_paused",
+			message: "The goal is paused by the owner.",
+		};
+	}
+
 	if (state.status === "blocked") {
 		return {
 			...baseDecision,
 			action: "ask-user",
 			reasonCode: "goal_blocked",
 			message: "The goal is explicitly blocked.",
+		};
+	}
+
+	if (state.status === "usage_limited") {
+		return {
+			...baseDecision,
+			action: "ask-user",
+			reasonCode: "goal_usage_limited",
+			message: "The goal stopped after the active provider reached a usage limit.",
+		};
+	}
+
+	if (state.status === "budget_limited") {
+		return {
+			...baseDecision,
+			action: "stop",
+			reasonCode: "goal_budget_limited",
+			message: "The goal exhausted its configured budget.",
 		};
 	}
 
@@ -141,17 +171,23 @@ export function evaluateGoalContinuation(args: {
 		};
 	}
 
-	// Status is active
-	if (blockedRequirementIds.length > 0) {
-		return {
-			...baseDecision,
-			action: "ask-user",
-			reasonCode: "blocked_requirements_present",
-			message: "One or more requirements are blocked.",
-		};
-	}
-
 	if (openRequirementIds.length === 0) {
+		if (blockedRequirementIds.length > 0) {
+			return {
+				...baseDecision,
+				action: "ask-user",
+				reasonCode: "blocked_requirements_present",
+				message: "All remaining legacy goal requirements are blocked.",
+			};
+		}
+		if (state.requirements.length === 0) {
+			return {
+				...baseDecision,
+				action: "continue",
+				reasonCode: "goal_active",
+				message: "The compact goal record is active.",
+			};
+		}
 		const unprovenRequirementIds = getUnprovenGoalRequirementIds(state);
 		if (unprovenRequirementIds.length > 0) {
 			return {
@@ -163,9 +199,9 @@ export function evaluateGoalContinuation(args: {
 		}
 		return {
 			...baseDecision,
-			action: "finalize",
-			reasonCode: "no_open_requirements",
-			message: "There are no open requirements left to satisfy.",
+			action: "continue",
+			reasonCode: "goal_completion_required",
+			message: "All requirements are proven. Mark the goal complete only after confirming no required work remains.",
 		};
 	}
 

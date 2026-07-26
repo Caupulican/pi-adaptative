@@ -5,13 +5,11 @@
  * active goal moving" loop: each pass reads the goal runtime snapshot, and — only while the snapshot
  * says `continue` — submits one continuation prompt back through the session's own prompt path. It
  * owns no state; the goal state lives in the session log and is read fresh every pass. Termination is
- * fully budget-gated (per-invocation turn cap, per-invocation wall-clock cap, a DURABLE cumulative
- * per-goal budget — turns + active wall-clock, persisted on `GoalState` across every invocation for
- * the goal's lifetime — and a no-progress guard on a MEANINGFUL progress signature — satisfied-
- * requirement count + ref-backed evidence count — so hollow goal-tool calls (e.g. add_requirement/
- * reopen churn that satisfies nothing) cannot defeat the stall guard). Each submitted pass also
- * reports its turn/wall-clock/spend contribution back to the session via `recordGoalContinuationPass`
- * so the cumulative budget stays accurate.
+ * fully budget-gated (an optional user-supplied per-invocation turn cap, per-invocation wall-clock
+ * cap, and durable per-goal wall-clock/spend budgets). Each submitted pass reports exact
+ * token/wall-clock/spend contribution back
+ * to the session. Progress is inferred from real work and terminal goal updates; the compact goal
+ * record does not require bookkeeping mutations merely to earn another continuation turn.
  */
 
 import type {
@@ -23,62 +21,37 @@ import type {
 	PromptOptions,
 } from "./agent-session.ts";
 import {
-	DEFAULT_GOAL_CUMULATIVE_MAX_TURNS,
+	DEFAULT_GOAL_CUMULATIVE_MAX_TOTAL_SPEND_USD,
 	DEFAULT_GOAL_CUMULATIVE_MAX_WALL_CLOCK_MS,
-	DEFAULT_GOAL_CUMULATIVE_MAX_WORKER_SPEND_USD,
 } from "./goals/goal-continuation-defaults.ts";
-import { buildGoalContinuationPrompt } from "./goals/goal-continuation-prompt.ts";
+import {
+	buildGoalContinuationPrompt,
+	GOAL_CONTINUATION_TRIGGER_CUSTOM_TYPE,
+} from "./goals/goal-continuation-prompt.ts";
 import type { GoalRuntimeSnapshot, GoalRuntimeSnapshotSettings } from "./goals/goal-runtime-snapshot.ts";
 import type { GoalState } from "./goals/goal-state.ts";
 
 /**
- * Progress signature for goal-loop stall detection. Keys ONLY on state that reflects actual
- * progress toward the goal — `goalId`, `status`, the count of satisfied requirements, and the
- * count of evidence entries that carry a ref (`uri`) AND are TRUSTED: either actually validated
- * (`verified === true`) or `kind === "user"` (a human-confirmed claim). Deliberately excludes
- * `events.length`, `updatedAt`, and `stallTurns`: those change on every goal-tool call (including
- * no-op churn like re-adding/reopening a requirement without satisfying anything), which let hollow
- * passes look like progress and defeat `goal_state_not_advanced`.
- *
- * `verified` is `undefined` both for evidence that hasn't been checked yet AND for evidence kinds
- * that carry no checkable ref at all (`"user"`/`"finding"`/`"test"` — see the doc comment on
- * `GoalEvidenceRef.verified` in `goal-state.ts`). Treating "undefined" as trusted would let a model spam
- * `kind:"finding"` evidence with a fabricated `uri` every turn — always undefined, always counted —
- * which is the same class of hollow churn this signature exists to stop. So `undefined` does NOT
- * count; only an explicit `verified === true` (a real, checked ref) or `kind === "user"` (mirrors
- * the `complete` gate's trusted set in `goal-tool-core.ts`'s `isVerifiedOrUserEvidence`) counts.
- * `satisfiedRequirementCount` still advances the signature for legitimate-but-unverifiable work
- * (e.g. `kind:"finding"`/`"test"` evidence cited on a `satisfy_requirement` call), and the
- * continuation controller's own `stallTurns` path remains available for the model to self-report.
- */
-function goalProgressSignature(state: GoalState | undefined): string | undefined {
-	if (!state) return undefined;
-	const satisfiedRequirementCount = state.requirements.filter(
-		(requirement) => requirement.status === "satisfied",
-	).length;
-	const refEvidenceCount = state.evidence.filter(
-		(evidence) =>
-			typeof evidence.uri === "string" &&
-			evidence.uri.trim().length > 0 &&
-			(evidence.verified === true || evidence.kind === "user"),
-	).length;
-	return `${state.goalId}:${state.status}:${satisfiedRequirementCount}:${refEvidenceCount}`;
-}
-
-/**
- * Whether the goal's DURABLE cumulative continuation budget (turns and/or active wall-clock,
+ * Whether the goal's DURABLE cumulative continuation budget (active wall-clock and spend,
  * persisted on `GoalState` and summed across every `continueGoalLoop` invocation for the goal's
  * lifetime) has been exhausted. Read fresh at the top of every pass (not just the top of the
  * invocation), so a single long-running invocation that crosses the ceiling mid-loop stops
  * immediately rather than waiting for the next invocation to notice. `undefined` counters (goal
  * state predating this field, or a fresh goal) count as `0` — never exhausted.
  */
-function isGoalContinuationBudgetExhausted(state: GoalState | undefined): boolean {
-	if (!state) return false;
-	if ((state.continuationTurnsUsed ?? 0) >= DEFAULT_GOAL_CUMULATIVE_MAX_TURNS) return true;
-	if ((state.continuationWallClockMs ?? 0) >= DEFAULT_GOAL_CUMULATIVE_MAX_WALL_CLOCK_MS) return true;
-	if ((state.continuationWorkerSpendUsd ?? 0) >= DEFAULT_GOAL_CUMULATIVE_MAX_WORKER_SPEND_USD) return true;
-	return false;
+function getGoalContinuationBudgetExhaustion(state: GoalState | undefined): string | undefined {
+	if (!state || state.status !== "active") return undefined;
+	if (state.tokenBudget !== undefined && (state.tokensUsed ?? 0) >= state.tokenBudget) {
+		return `token budget exhausted (${state.tokensUsed ?? 0}/${state.tokenBudget})`;
+	}
+	if ((state.continuationWallClockMs ?? 0) >= DEFAULT_GOAL_CUMULATIVE_MAX_WALL_CLOCK_MS) {
+		return `continuation wall-clock budget exhausted (${state.continuationWallClockMs ?? 0}/${DEFAULT_GOAL_CUMULATIVE_MAX_WALL_CLOCK_MS}ms)`;
+	}
+	const spend = (state.continuationSpendUsd ?? 0) + (state.continuationWorkerSpendUsd ?? 0);
+	if (spend >= DEFAULT_GOAL_CUMULATIVE_MAX_TOTAL_SPEND_USD) {
+		return `total spend budget exhausted ($${spend.toFixed(4)}/$${DEFAULT_GOAL_CUMULATIVE_MAX_TOTAL_SPEND_USD.toFixed(2)})`;
+	}
+	return undefined;
 }
 
 /**
@@ -98,13 +71,19 @@ export interface GoalLoopControllerDeps {
 	getGoalRuntimeSnapshot(settings: GoalRuntimeSnapshotSettings): GoalRuntimeSnapshot;
 	/** Submit a continuation prompt through the session's own prompt path. */
 	prompt(text: string, options?: PromptOptions): Promise<void>;
+	/** Capture the append-only branch cursor immediately before a continuation prompt. */
+	captureUsageCursor(): string | null;
 	/**
 	 * Persist one submitted pass's contribution to the active goal's durable cumulative budget
 	 * (turns + active wall-clock; USD is attributed by the implementation from the session's own
 	 * spend, not passed in here — see `AgentSession.recordGoalContinuationPass`). Called once per
 	 * pass actually SUBMITTED (never for a no-op `continueGoalOnce` call).
 	 */
-	recordGoalContinuationPass(pass: { turns: number; wallClockMs: number }): void;
+	recordGoalContinuationPass(pass: { turns: number; wallClockMs: number; usageCursor: string | null }): void;
+	/** Persist an exhausted/non-retryable continuation failure as a stopped goal state. */
+	recordGoalContinuationFailure(error: unknown): void;
+	/** Persist a reason-specific budget terminal state before returning control. */
+	markGoalBudgetLimited(reason: string): void;
 }
 
 export class GoalLoopController {
@@ -121,18 +100,23 @@ export class GoalLoopController {
 			return { submitted: false, snapshot };
 		}
 
-		const prompt = buildGoalContinuationPrompt({ snapshot, limits: options.promptLimits });
+		const prompt = buildGoalContinuationPrompt();
 		await this.deps.prompt(prompt.text, {
 			expandPromptTemplates: false,
 			processSlashCommands: false,
 			autoContinueGoal: false,
+			internalContextType: GOAL_CONTINUATION_TRIGGER_CUSTOM_TYPE,
 		});
 
 		return { submitted: true, snapshot, prompt };
 	}
 
 	async continueGoalLoop(options: GoalContinuationLoopOptions): Promise<GoalContinuationLoopResult> {
+		if (!Number.isSafeInteger(options.maxTurns) || options.maxTurns < 0) {
+			throw new Error("Goal continuation maxTurns must be a non-negative safe integer; 0 means unbounded.");
+		}
 		let turnsSubmitted = 0;
+		const hasExplicitTurnLimit = options.maxTurns > 0;
 		const now = options.now ?? Date.now;
 		const maxWallClockMs =
 			typeof options.maxWallClockMinutes === "number" && options.maxWallClockMinutes > 0
@@ -142,53 +126,54 @@ export class GoalLoopController {
 		const hasReachedWallClockBudget = () => maxWallClockMs !== undefined && now() - startedAt >= maxWallClockMs;
 		const snapshot = () => this.deps.getGoalRuntimeSnapshot({ maxStallTurns: options.maxStallTurns });
 
-		if (options.maxTurns <= 0) {
-			return {
-				turnsSubmitted: 0,
-				stopReason: "max_turns_reached",
-				finalSnapshot: snapshot(),
-			};
-		}
-
 		if (hasReachedWallClockBudget()) {
 			return { turnsSubmitted, stopReason: "wall_clock_budget_reached", finalSnapshot: snapshot() };
 		}
 
-		while (turnsSubmitted < options.maxTurns) {
+		while (!hasExplicitTurnLimit || turnsSubmitted < options.maxTurns) {
 			const beforeSnapshot = snapshot();
 			if (beforeSnapshot.continuation.action !== "continue") {
 				return { turnsSubmitted, stopReason: nonContinueStopReason(beforeSnapshot), finalSnapshot: beforeSnapshot };
 			}
 
-			// Cumulative (durable, cross-invocation) budget — read fresh every pass, not just at the top
+			// Durable cross-invocation budget — read fresh every pass, not just at the top
 			// of this invocation, so a single long-running call still stops the moment it crosses the
 			// ceiling rather than overshooting until the next invocation notices.
-			if (isGoalContinuationBudgetExhausted(beforeSnapshot.goalState)) {
-				return { turnsSubmitted, stopReason: "goal_budget_exhausted", finalSnapshot: beforeSnapshot };
+			const beforeBudgetExhaustion = getGoalContinuationBudgetExhaustion(beforeSnapshot.goalState);
+			if (beforeBudgetExhaustion) {
+				this.deps.markGoalBudgetLimited(beforeBudgetExhaustion);
+				return { turnsSubmitted, stopReason: "goal_budget_exhausted", finalSnapshot: snapshot() };
 			}
 
-			const beforeKey = goalProgressSignature(beforeSnapshot.goalState);
-
 			const passStartedAt = now();
-			const result = await this.continueGoalOnce(options);
+			const usageCursor = this.deps.captureUsageCursor();
+			let result: GoalContinuationOnceResult;
+			try {
+				result = await this.continueGoalOnce(options);
+			} catch (error) {
+				turnsSubmitted++;
+				this.deps.recordGoalContinuationPass({ turns: 1, wallClockMs: now() - passStartedAt, usageCursor });
+				this.deps.recordGoalContinuationFailure(error);
+				throw error;
+			}
 			if (result.submitted) {
 				turnsSubmitted++;
-				this.deps.recordGoalContinuationPass({ turns: 1, wallClockMs: now() - passStartedAt });
+				this.deps.recordGoalContinuationPass({ turns: 1, wallClockMs: now() - passStartedAt, usageCursor });
 			}
 
 			if (hasReachedWallClockBudget()) {
 				return { turnsSubmitted, stopReason: "wall_clock_budget_reached", finalSnapshot: snapshot() };
 			}
 
-			const afterSnapshot = snapshot();
+			let afterSnapshot = snapshot();
+			const afterBudgetExhaustion = getGoalContinuationBudgetExhaustion(afterSnapshot.goalState);
+			if (afterBudgetExhaustion) {
+				this.deps.markGoalBudgetLimited(afterBudgetExhaustion);
+				afterSnapshot = snapshot();
+				return { turnsSubmitted, stopReason: "goal_budget_exhausted", finalSnapshot: afterSnapshot };
+			}
 			if (afterSnapshot.continuation.action !== "continue") {
 				return { turnsSubmitted, stopReason: nonContinueStopReason(afterSnapshot), finalSnapshot: afterSnapshot };
-			}
-
-			const afterKey = goalProgressSignature(afterSnapshot.goalState);
-
-			if (beforeKey === afterKey) {
-				return { turnsSubmitted, stopReason: "goal_state_not_advanced", finalSnapshot: afterSnapshot };
 			}
 		}
 

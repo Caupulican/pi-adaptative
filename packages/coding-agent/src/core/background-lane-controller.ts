@@ -64,6 +64,8 @@ export interface BackgroundLaneControllerDeps
 	getGoalRuntimeSnapshot(settings: GoalRuntimeSnapshotSettings): GoalRuntimeSnapshot;
 	/** Drive-loop boundary: the session's bounded goal-continuation loop (owns `prompt()`, not us). */
 	continueGoalLoop(options: GoalContinuationLoopOptions): Promise<GoalContinuationLoopResult>;
+	/** Persist an explicit stopped state when the selected surface cannot drive the active goal. */
+	markGoalToolUnavailable(): void;
 }
 
 export class BackgroundLaneController {
@@ -110,6 +112,7 @@ export class BackgroundLaneController {
 			getGoalRuntimeSnapshot: deps.getGoalRuntimeSnapshot,
 			hasInFlightLaneForGoal: (goalId) => this._hasInFlightLaneForGoal(goalId),
 			continueGoalLoop: deps.continueGoalLoop,
+			markGoalToolUnavailable: deps.markGoalToolUnavailable,
 			emit: deps.emit,
 		});
 	}

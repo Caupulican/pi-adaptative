@@ -3,6 +3,7 @@
 ### Fixed
 
 - Restored explicit provider retry-message classification, routed compaction failures through the shared reliability classifier, and bounded serialized tool-call arguments before summarization.
+- Replaced failed tool-call transcript payloads with a bounded occurrence-and-repair ledger, removed failed protocol turns before provider conversion, and clear matching failure reminders after a successful retry.
 
 ## [0.81.40] - 2026-07-24
 

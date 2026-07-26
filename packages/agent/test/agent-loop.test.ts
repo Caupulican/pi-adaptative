@@ -1,9 +1,11 @@
 import {
 	type AssistantMessage,
 	type AssistantMessageEvent,
+	type Context,
 	EventStream,
 	type Message,
 	type Model,
+	type ToolResultMessage,
 	type UserMessage,
 } from "@caupulican/pi-ai";
 import { Type } from "typebox";
@@ -388,9 +390,11 @@ describe("agentLoop with AgentMessage", () => {
 		expect(executed).toBe(0);
 		expect(escalations).toEqual([{ tool: "count", repeats: 3 }]);
 		const thirdResultText = toolResults[2]?.content[0]?.type === "text" ? toolResults[2].content[0].text : undefined;
-		expect(thirdResultText).toContain("Repeated validation failure (3 identical attempts)");
-		expect(thirdResultText).toContain("Full tool schema:");
-		expect(thirdResultText).toContain("Valid example:");
+		expect(thirdResultText).toContain('"occ":3');
+		expect(thirdResultText).toContain('"state":"rejected"');
+		expect(thirdResultText).toContain('"failure_code":"invalid_arguments"');
+		expect(thirdResultText).toContain("expected number, received string");
+		expect(thirdResultText).not.toContain("Full tool schema:");
 	});
 
 	it("does not accumulate distinct validation failures", async () => {
@@ -453,7 +457,7 @@ describe("agentLoop with AgentMessage", () => {
 		expect(escalations).toEqual([]);
 	});
 
-	it("teaches after repeated identical execution failures before runaway stop", async () => {
+	it("consolidates repeated identical execution failures before runaway stop", async () => {
 		const toolSchema = Type.Object({ path: Type.String() });
 		const tool: AgentTool<typeof toolSchema, { path: string }> = {
 			name: "read_file",
@@ -506,15 +510,178 @@ describe("agentLoop with AgentMessage", () => {
 		const messages = await stream.result();
 		const toolResults = messages.filter((message) => message.role === "toolResult");
 		expect(toolResults).toHaveLength(2);
-		expect(toolResults[0]?.content[0]).toEqual({ type: "text", text: "backend exploded" });
+		expect(toolResults[0]?.content[0]).toMatchObject({
+			type: "text",
+			text: expect.stringContaining('"occ":1'),
+		});
 		expect(toolResults[1]?.content[0]).toMatchObject({
 			type: "text",
-			text: expect.stringContaining("failed twice with the same TypeError error"),
+			text: expect.stringContaining('"occ":2'),
 		});
-		expect(toolResults[1]?.content[1]).toEqual({ type: "text", text: "backend exploded" });
+		expect(JSON.stringify(toolResults)).not.toContain("backend exploded");
 	});
 
-	it("adds catalogued guidance to matching tool execution errors", async () => {
+	it("replaces failed execution output with one occurrence ledger and clears it after success", async () => {
+		const toolSchema = Type.Object({ command: Type.String() });
+		let attempts = 0;
+		const tool: AgentTool<typeof toolSchema, { command: string }> = {
+			name: "shell",
+			label: "Shell",
+			description: "Run a command",
+			parameters: toolSchema,
+			async execute(_toolCallId, params) {
+				attempts++;
+				if (attempts <= 2) {
+					throw new Error(`RAW_FAILURE_OUTPUT:${"x".repeat(20_000)}`);
+				}
+				return {
+					content: [{ type: "text", text: "command succeeded" }],
+					details: { command: params.command },
+				};
+			},
+		};
+		const context: AgentContext = { systemPrompt: "base prompt", messages: [], tools: [tool] };
+		const providerContexts: Array<{ systemPrompt: string; messages: Message[] }> = [];
+		let callIndex = 0;
+		const stream = agentLoop(
+			[createUserMessage("run it")],
+			context,
+			{ model: createModel(), convertToLlm: identityConverter },
+			undefined,
+			(_model, providerContext) => {
+				providerContexts.push({
+					systemPrompt: providerContext.systemPrompt ?? "",
+					messages: structuredClone(providerContext.messages),
+				});
+				const mockStream = new MockAssistantStream();
+				queueMicrotask(() => {
+					if (callIndex < 3) {
+						mockStream.push({
+							type: "done",
+							reason: "toolUse",
+							message: createAssistantMessage(
+								[
+									{
+										type: "toolCall",
+										id: `tool-${callIndex}`,
+										name: "shell",
+										arguments: { command: "npm run focused" },
+									},
+								],
+								"toolUse",
+							),
+						});
+					} else {
+						mockStream.push({
+							type: "done",
+							reason: "stop",
+							message: createAssistantMessage([{ type: "text", text: "done" }]),
+						});
+					}
+					callIndex++;
+				});
+				return mockStream;
+			},
+		);
+
+		for await (const _event of stream) {
+			// consume
+		}
+
+		const messages = await stream.result();
+		const failedResults = messages.filter(
+			(message): message is ToolResultMessage => message.role === "toolResult" && message.isError === true,
+		);
+		expect(providerContexts).toHaveLength(4);
+		expect(providerContexts[1]?.systemPrompt).toContain("<harness_tool_failures>");
+		expect(providerContexts[1]?.systemPrompt).toContain('"occ":1');
+		expect(providerContexts[1]?.systemPrompt).toContain('"state":"failed"');
+		expect(providerContexts[1]?.systemPrompt).toContain("npm run focused");
+		expect(providerContexts[1]?.systemPrompt).toContain("Change the arguments or approach before retrying");
+		expect(JSON.stringify(providerContexts[1])).not.toContain("RAW_FAILURE_OUTPUT");
+		expect(providerContexts[1]?.messages.some((message) => message.role === "toolResult")).toBe(false);
+		expect(providerContexts[2]?.systemPrompt).toContain('"occ":2');
+		expect(providerContexts[2]?.systemPrompt.match(/failure_key/g) ?? []).toHaveLength(1);
+		expect(providerContexts[3]?.systemPrompt).not.toContain("<harness_tool_failures>");
+		expect(JSON.stringify(providerContexts[3])).not.toContain("RAW_FAILURE_OUTPUT");
+		expect(providerContexts[3]?.messages.some((message) => message.role === "toolResult")).toBe(true);
+		expect(failedResults).toHaveLength(2);
+		expect(JSON.stringify(failedResults)).not.toContain("RAW_FAILURE_OUTPUT");
+		expect(JSON.stringify(failedResults).length).toBeLessThan(2_000);
+		expect(failedResults[1]?.content).toEqual([
+			expect.objectContaining({ type: "text", text: expect.stringContaining('"occ":2') }),
+		]);
+	});
+
+	it("sanitizes legacy failed tool turns before provider conversion", async () => {
+		const failedAssistant = createAssistantMessage(
+			[
+				{
+					type: "toolCall",
+					id: "legacy-call",
+					name: "shell",
+					arguments: { command: "legacy command" },
+				},
+			],
+			"toolUse",
+		);
+		const context: AgentContext = {
+			systemPrompt: "base prompt",
+			messages: [
+				createUserMessage("old turn"),
+				failedAssistant,
+				{
+					role: "toolResult",
+					toolCallId: "legacy-call",
+					toolName: "shell",
+					content: [{ type: "text", text: `LEGACY_RAW_OUTPUT:${"y".repeat(20_000)}` }],
+					details: {},
+					isError: true,
+					timestamp: Date.now(),
+				},
+			],
+			tools: [],
+		};
+		let providerContext: Context | undefined;
+		let transformInput: AgentMessage[] | undefined;
+		const stream = agentLoop(
+			[createUserMessage("continue")],
+			context,
+			{
+				model: createModel(),
+				transformContext: async (messages) => {
+					transformInput = structuredClone(messages);
+					return messages;
+				},
+				convertToLlm: identityConverter,
+			},
+			undefined,
+			(_model, nextContext) => {
+				providerContext = structuredClone(nextContext);
+				const mockStream = new MockAssistantStream();
+				queueMicrotask(() => {
+					mockStream.push({
+						type: "done",
+						reason: "stop",
+						message: createAssistantMessage([{ type: "text", text: "done" }]),
+					});
+				});
+				return mockStream;
+			},
+		);
+
+		for await (const _event of stream) {
+			// consume
+		}
+
+		expect(providerContext?.systemPrompt).toContain("<harness_tool_failures>");
+		expect(providerContext?.systemPrompt).toContain("legacy command");
+		expect(JSON.stringify(providerContext)).not.toContain("LEGACY_RAW_OUTPUT");
+		expect(providerContext?.messages.some((message) => message.role === "toolResult")).toBe(false);
+		expect(JSON.stringify(transformInput)).not.toContain("LEGACY_RAW_OUTPUT");
+	});
+
+	it("reduces matching tool execution errors to a stable failure code", async () => {
 		const toolSchema = Type.Object({ path: Type.String() });
 		const tool: AgentTool<typeof toolSchema, { path: string }> = {
 			name: "read_file",
@@ -566,14 +733,11 @@ describe("agentLoop with AgentMessage", () => {
 
 		const messages = await stream.result();
 		const toolResult = messages.find((message) => message.role === "toolResult");
-		expect(toolResult?.content[0]).toEqual({
-			type: "text",
-			text: "ENOENT: no such file or directory, open 'missing.txt'",
-		});
-		expect(toolResult?.content[1]).toEqual({
-			type: "text",
-			text: "[harness] Path was not found; list the parent directory or re-read the path before retrying.",
-		});
+		expect(toolResult?.content).toEqual([
+			expect.objectContaining({ type: "text", text: expect.stringContaining('"failure_code":"enoent"') }),
+		]);
+		expect(JSON.stringify(toolResult)).toContain("list the parent directory or re-read the path");
+		expect(JSON.stringify(toolResult)).not.toContain("no such file or directory");
 	});
 
 	it("links repaired validation telemetry to teach state and execution outcome without arguments", async () => {
@@ -837,8 +1001,10 @@ describe("agentLoop with AgentMessage", () => {
 			toolName: "echo",
 		});
 		expect(toolResult?.content).toEqual([
-			{ type: "text", text: "Tool call arguments were truncated before complete JSON was received." },
+			expect.objectContaining({ type: "text", text: expect.stringContaining('"failure_code":"malformed_call"') }),
 		]);
+		expect(JSON.stringify(toolResult)).toContain("complete JSON argument object");
+		expect(JSON.stringify(toolResult)).not.toContain("truncated before complete JSON");
 	});
 
 	it("should execute mutated beforeToolCall args without revalidation", async () => {

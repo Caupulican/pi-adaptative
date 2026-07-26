@@ -6,6 +6,7 @@ import type { ThinkingLevel } from "@caupulican/pi-agent-core";
 import chalk from "chalk";
 import { APP_NAME, CONFIG_DIR_NAME, ENV_AGENT_DIR, ENV_SESSION_DIR } from "../config.ts";
 import type { ExtensionFlag } from "../core/extensions/types.ts";
+import { isTerminalSessionMode, type TerminalSessionMode } from "../core/session-role.ts";
 
 export type Mode = "text" | "json" | "rpc";
 
@@ -19,6 +20,7 @@ export interface Args {
 	parentPid?: number;
 	parentSession?: string;
 	taskRef?: string;
+	sessionMode?: TerminalSessionMode;
 	thinking?: ThinkingLevel;
 	continue?: boolean;
 	resume?: boolean;
@@ -115,6 +117,19 @@ export function parseArgs(args: string[]): Args {
 			result.parentSession = args[++i];
 		} else if (arg === "--task-ref" && i + 1 < args.length) {
 			result.taskRef = args[++i];
+		} else if (arg === "--session-mode") {
+			const mode = args[i + 1];
+			if (!mode) {
+				result.diagnostics.push({ type: "error", message: "--session-mode requires user or worker" });
+			} else {
+				i++;
+				if (isTerminalSessionMode(mode)) result.sessionMode = mode;
+				else
+					result.diagnostics.push({
+						type: "error",
+						message: `Invalid session mode "${mode}". Use user or worker.`,
+					});
+			}
 		} else if (arg === "--name" || arg === "-n") {
 			if (i + 1 < args.length) {
 				result.name = args[++i];
@@ -282,6 +297,7 @@ ${chalk.bold("Options:")}
   --parent-pid <pid>             Declare this session as a process-matrix worker of parent pid (sets PI_PARENT_PID)
   --parent-session <id>          Declare the parent session id for a process-matrix worker (sets PI_PARENT_SESSION)
   --task-ref <id>                Bind process recovery to a goal/task identity (sets PI_TASK_REF)
+  --session-mode <user|worker>   Declare whether a human is watching this terminal (default: user)
   --mode <mode>                  Output mode: text (default), json, or rpc
   --print, -p                    Non-interactive mode: process prompt and exit
   --print-usage                  With -p: emit cumulative session usage (one JSON line,

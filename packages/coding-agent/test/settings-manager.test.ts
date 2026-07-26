@@ -258,7 +258,7 @@ describe("SettingsManager", () => {
 			expect(manager.getAutonomySettings()).toEqual({
 				mode: "off",
 				maxStallTurns: 20,
-				goalContinueTurns: 20,
+				goalContinueTurns: 0,
 				goalContinueMaxWallClockMinutes: 0,
 				goalAutoContinue: true,
 				goalAutoContinueDelayMs: 0,
@@ -272,7 +272,7 @@ describe("SettingsManager", () => {
 			expect(manager.getAutonomySettings()).toEqual({
 				mode: "full",
 				maxStallTurns: 30,
-				goalContinueTurns: 20,
+				goalContinueTurns: 0,
 				goalContinueMaxWallClockMinutes: 0,
 				goalAutoContinue: true,
 				goalAutoContinueDelayMs: 0,
@@ -282,7 +282,7 @@ describe("SettingsManager", () => {
 		it("should preserve zero and sanitize invalid max stall turn settings to the default", () => {
 			writeFileSync(
 				join(agentDir, "settings.json"),
-				JSON.stringify({ autonomy: { mode: "balanced", maxStallTurns: 0 } }),
+				JSON.stringify({ autonomy: { mode: "balanced", maxStallTurns: 0, goalContinueTurns: 1000 } }),
 			);
 
 			let manager = SettingsManager.create(projectDir, agentDir);
@@ -290,7 +290,7 @@ describe("SettingsManager", () => {
 			expect(manager.getAutonomySettings()).toEqual({
 				mode: "balanced",
 				maxStallTurns: 0,
-				goalContinueTurns: 20,
+				goalContinueTurns: 1000,
 				goalContinueMaxWallClockMinutes: 0,
 				goalAutoContinue: true,
 				goalAutoContinueDelayMs: 0,
@@ -306,7 +306,7 @@ describe("SettingsManager", () => {
 			expect(manager.getAutonomySettings()).toEqual({
 				mode: "balanced",
 				maxStallTurns: 20,
-				goalContinueTurns: 20,
+				goalContinueTurns: 0,
 				goalContinueMaxWallClockMinutes: 0,
 				goalAutoContinue: true,
 				goalAutoContinueDelayMs: 0,

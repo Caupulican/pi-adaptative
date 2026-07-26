@@ -7,7 +7,7 @@ import {
 	type AssistantMessage,
 	type Context,
 	EventStream,
-	getToolExecutionErrorGuidance,
+	formatToolRepairStandingRule,
 	streamSimple,
 	type ToolArgumentExecutionOutcome,
 	ToolArgumentValidationError,
@@ -15,6 +15,17 @@ import {
 	type ToolResultMessage,
 	validateToolArguments,
 } from "@caupulican/pi-ai";
+import {
+	classifyToolFailure,
+	clearToolFailure,
+	createToolFailureMemoryTracker,
+	createToolFailureResult,
+	normalizeToolSignature,
+	rememberToolFailure,
+	sanitizeToolFailureContext,
+	type ToolFailureMemoryTracker,
+	toolFailureCorrection,
+} from "./tool-failure-memory.ts";
 import type {
 	AgentContext,
 	AgentEvent,
@@ -191,21 +202,6 @@ function createAgentStream(): EventStream<AgentEvent, AgentMessage[]> {
 const STALL_WINDOW_PERIODS = 4;
 
 /**
- * Normalize a tool-call batch into a stable signature for runaway-loop detection. Volatile argument
- * tokens — epoch/timestamps, UUIDs, long hashes/nonces — are masked so a model retrying the SAME call
- * with a fresh timestamp/id each turn still collapses to one signature and is detected (bug #28). Only
- * clearly-volatile patterns are masked: short numbers (`file2.ts`, `line 42`, `count: 3`) are kept so
- * genuinely-distinct calls (reading numbered files, different line ranges) are NOT falsely merged.
- */
-function normalizeToolSignature(pairs: Array<[string, unknown]>): string {
-	return JSON.stringify(pairs)
-		.replace(/[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}/gi, "<uuid>")
-		.replace(/\d{4}-\d{2}-\d{2}[tT][0-9:.]+(?:z|[+-]\d{2}:?\d{2})?/gi, "<ts>")
-		.replace(/\b[0-9a-f]{16,}\b/gi, "<hex>")
-		.replace(/\d{10,}/g, "<num>");
-}
-
-/**
  * Main loop logic shared by agentLoop and agentLoopContinue.
  */
 async function runLoop(
@@ -232,7 +228,7 @@ async function runLoop(
 	const stallWindow: string[] = [];
 	const validationFailureTracker: ToolValidationFailureTracker = { repeats: 0 };
 	const repairTeachTracker: ToolRepairTeachTracker = new Map();
-	const executionFailureTracker: ToolExecutionFailureTracker = { repeats: 0 };
+	let toolFailureMemory = createToolFailureMemoryTracker(currentContext.messages);
 	// Check for steering messages at start (user may have typed while waiting)
 	let pendingMessages: AgentMessage[] = (await config.getSteeringMessages?.()) || [];
 
@@ -281,7 +277,7 @@ async function runLoop(
 					config,
 					validationFailureTracker,
 					repairTeachTracker,
-					executionFailureTracker,
+					toolFailureMemory,
 					signal,
 					emit,
 				);
@@ -318,6 +314,9 @@ async function runLoop(
 			const nextTurnSnapshot = await config.prepareNextTurn?.(nextTurnContext);
 			if (nextTurnSnapshot) {
 				currentContext = nextTurnSnapshot.context ?? currentContext;
+				if (nextTurnSnapshot.context) {
+					toolFailureMemory = createToolFailureMemoryTracker(currentContext.messages);
+				}
 				config = {
 					...config,
 					model: nextTurnSnapshot.model ?? config.model,
@@ -366,18 +365,19 @@ async function streamAssistantResponse(
 	emit: AgentEventSink,
 	streamFn?: StreamFn,
 ): Promise<AssistantMessage> {
-	// Apply context transform if configured (AgentMessage[] → AgentMessage[])
-	let messages = context.messages;
+	// Failed protocol turns never reach host transforms or provider conversion. Their bounded,
+	// unresolved state is carried separately in the system prompt until the same operation succeeds.
+	const sanitized = sanitizeToolFailureContext(context.messages, context.systemPrompt);
+	let messages = sanitized.messages;
 	if (config.transformContext) {
 		messages = await config.transformContext(messages, signal);
 	}
-
 	// Convert to LLM-compatible messages (AgentMessage[] → Message[])
 	const llmMessages = await config.convertToLlm(messages);
 
 	// Build LLM context
 	const llmContext: Context = {
-		systemPrompt: context.systemPrompt,
+		systemPrompt: sanitized.systemPrompt,
 		messages: llmMessages,
 		tools: context.tools,
 	};
@@ -471,7 +471,7 @@ async function executeToolCalls(
 	config: AgentLoopConfig,
 	validationFailureTracker: ToolValidationFailureTracker,
 	repairTeachTracker: ToolRepairTeachTracker,
-	executionFailureTracker: ToolExecutionFailureTracker,
+	toolFailureMemory: ToolFailureMemoryTracker,
 	signal: AbortSignal | undefined,
 	emit: AgentEventSink,
 ): Promise<ExecutedToolCallBatch> {
@@ -487,7 +487,7 @@ async function executeToolCalls(
 			config,
 			validationFailureTracker,
 			repairTeachTracker,
-			executionFailureTracker,
+			toolFailureMemory,
 			signal,
 			emit,
 		);
@@ -499,7 +499,7 @@ async function executeToolCalls(
 		config,
 		validationFailureTracker,
 		repairTeachTracker,
-		executionFailureTracker,
+		toolFailureMemory,
 		signal,
 		emit,
 	);
@@ -517,7 +517,7 @@ async function executeToolCallsSequential(
 	config: AgentLoopConfig,
 	validationFailureTracker: ToolValidationFailureTracker,
 	repairTeachTracker: ToolRepairTeachTracker,
-	executionFailureTracker: ToolExecutionFailureTracker,
+	toolFailureMemory: ToolFailureMemoryTracker,
 	signal: AbortSignal | undefined,
 	emit: AgentEventSink,
 ): Promise<ExecutedToolCallBatch> {
@@ -536,13 +536,8 @@ async function executeToolCallsSequential(
 		await emitToolExecutionStart(toolCall, emit);
 		let finalized: FinalizedToolCallOutcome;
 		if (preparation.kind === "immediate") {
-			resetExecutionFailureTracker(executionFailureTracker);
 			emitToolArgumentValidationTelemetry(config, preparation.validationEvent, "not_run", "none");
-			finalized = {
-				toolCall,
-				result: preparation.result,
-				isError: preparation.isError,
-			};
+			finalized = finalizeRejectedToolCall(toolCall, preparation, toolFailureMemory);
 		} else {
 			const executed = await executePreparedToolCall(preparation, signal, emit);
 			finalized = await finalizeExecutedToolCall(
@@ -552,7 +547,7 @@ async function executeToolCallsSequential(
 				executed,
 				config,
 				repairTeachTracker,
-				executionFailureTracker,
+				toolFailureMemory,
 				signal,
 			);
 		}
@@ -581,7 +576,7 @@ async function executeToolCallsParallel(
 	config: AgentLoopConfig,
 	validationFailureTracker: ToolValidationFailureTracker,
 	repairTeachTracker: ToolRepairTeachTracker,
-	executionFailureTracker: ToolExecutionFailureTracker,
+	toolFailureMemory: ToolFailureMemoryTracker,
 	signal: AbortSignal | undefined,
 	emit: AgentEventSink,
 ): Promise<ExecutedToolCallBatch> {
@@ -598,13 +593,8 @@ async function executeToolCallsParallel(
 		);
 		await emitToolExecutionStart(toolCall, emit);
 		if (preparation.kind === "immediate") {
-			resetExecutionFailureTracker(executionFailureTracker);
 			emitToolArgumentValidationTelemetry(config, preparation.validationEvent, "not_run", "none");
-			const finalized = {
-				toolCall,
-				result: preparation.result,
-				isError: preparation.isError,
-			} satisfies FinalizedToolCallOutcome;
+			const finalized = finalizeRejectedToolCall(toolCall, preparation, toolFailureMemory);
 			await emitToolExecutionEnd(finalized, emit);
 			finalizedCalls.push(finalized);
 			if (signal?.aborted) {
@@ -622,7 +612,7 @@ async function executeToolCallsParallel(
 				executed,
 				config,
 				repairTeachTracker,
-				executionFailureTracker,
+				toolFailureMemory,
 				signal,
 			);
 			await emitToolExecutionEnd(finalized, emit);
@@ -661,6 +651,8 @@ type ImmediateToolCallOutcome = {
 	kind: "immediate";
 	result: AgentToolResult<any>;
 	isError: boolean;
+	failureCode: string;
+	correction: string;
 	validationEvent?: ToolArgumentValidationTelemetryEvent;
 };
 
@@ -668,6 +660,7 @@ type ExecutedToolCallOutcome = {
 	result: AgentToolResult<any>;
 	isError: boolean;
 	errorClass?: string;
+	failureMessage?: string;
 };
 
 type FinalizedToolCallOutcome = {
@@ -686,15 +679,8 @@ type ToolValidationFailureTracker = {
 
 type ToolRepairTeachTracker = Map<string, number>;
 
-type ToolExecutionFailureTracker = {
-	signature?: string;
-	repeats: number;
-	taughtSignature?: string;
-};
-
 const DEFAULT_TOOL_VALIDATION_ESCALATION_THRESHOLD = 3;
 const TOOL_REPAIR_TEACH_EVERY = 5;
-const TOOL_EXECUTION_FAILURE_TEACH_AT = 2;
 
 function shouldTerminateToolBatch(finalizedCalls: FinalizedToolCallOutcome[]): boolean {
 	return finalizedCalls.length > 0 && finalizedCalls.every((finalized) => finalized.result.terminate === true);
@@ -731,6 +717,26 @@ function createValidationBounceTelemetry(
 		taught: "none",
 		executionOutcome: "not_run",
 	};
+}
+
+function validationFailureCorrection(
+	event: ToolArgumentValidationTelemetryEvent | undefined,
+	toolName: string,
+): string {
+	const shape = event?.failureShape
+		?.slice(0, 3)
+		.map((entry) => `${entry.path}: expected ${entry.expectedType}, received ${entry.receivedType}`)
+		.join("; ");
+	const rules = [
+		...new Set(
+			(event?.failureModes ?? [])
+				.filter((mode) => mode !== "other")
+				.map((mode) => formatToolRepairStandingRule(mode)),
+		),
+	];
+	return [`Match ${toolName} arguments to its current schema.`, shape ? `Fix ${shape}.` : undefined, ...rules]
+		.filter((part): part is string => part !== undefined)
+		.join(" ");
 }
 
 function resetValidationFailureTracker(tracker: ToolValidationFailureTracker): void {
@@ -812,6 +818,8 @@ async function prepareToolCall(
 			kind: "immediate",
 			result: createErrorToolResult(toolCall.errorMessage),
 			isError: true,
+			failureCode: "malformed_call",
+			correction: "Resend one complete JSON argument object matching the current tool schema.",
 			validationEvent: createValidationBounceTelemetry(config, toolCall, "unknown_tool"),
 		};
 	}
@@ -822,6 +830,8 @@ async function prepareToolCall(
 			kind: "immediate",
 			result: createErrorToolResult(`Tool ${toolCall.name} not found`),
 			isError: true,
+			failureCode: "unknown_tool",
+			correction: "Choose a tool from the currently available tool list.",
 			validationEvent: createValidationBounceTelemetry(config, toolCall, "unknown_tool"),
 		};
 	}
@@ -860,6 +870,8 @@ async function prepareToolCall(
 					kind: "immediate",
 					result: createErrorToolResult("Operation aborted"),
 					isError: true,
+					failureCode: "aborted",
+					correction: "Retry only if the operation is still required.",
 					validationEvent,
 				};
 			}
@@ -868,6 +880,8 @@ async function prepareToolCall(
 					kind: "immediate",
 					result: createErrorToolResult(beforeResult.reason || "Tool execution was blocked"),
 					isError: true,
+					failureCode: "blocked",
+					correction: "Choose an allowed approach or request the required authority before retrying.",
 					validationEvent,
 				};
 			}
@@ -877,6 +891,8 @@ async function prepareToolCall(
 				kind: "immediate",
 				result: createErrorToolResult("Operation aborted"),
 				isError: true,
+				failureCode: "aborted",
+				correction: "Retry only if the operation is still required.",
 				validationEvent,
 			};
 		}
@@ -897,9 +913,33 @@ async function prepareToolCall(
 			kind: "immediate",
 			result: createErrorToolResult(message),
 			isError: true,
+			failureCode: isToolArgumentValidationError(error) ? "invalid_arguments" : "preflight_error",
+			correction: isToolArgumentValidationError(error)
+				? validationFailureCorrection(validationEvent, toolCall.name)
+				: toolFailureCorrection(message, "rejected"),
 			validationEvent,
 		};
 	}
+}
+
+function finalizeRejectedToolCall(
+	toolCall: AgentToolCall,
+	outcome: ImmediateToolCallOutcome,
+	tracker: ToolFailureMemoryTracker,
+): FinalizedToolCallOutcome {
+	const record = rememberToolFailure(
+		tracker,
+		toolCall.name,
+		toolCall.arguments,
+		"rejected",
+		outcome.failureCode,
+		outcome.correction,
+	);
+	return {
+		toolCall,
+		result: createToolFailureResult(record, outcome.result.terminate),
+		isError: true,
+	};
 }
 
 async function executePreparedToolCall(
@@ -934,9 +974,10 @@ async function executePreparedToolCall(
 		await Promise.all(updateEvents);
 		const message = error instanceof Error ? error.message : String(error);
 		return {
-			result: createErrorToolResultWithGuidance(message),
+			result: createErrorToolResult(message),
 			isError: true,
 			errorClass: error instanceof Error ? error.name : typeof error,
+			failureMessage: message,
 		};
 	}
 }
@@ -971,42 +1012,6 @@ function appendRepairTeachNotes(
 	};
 }
 
-function resetExecutionFailureTracker(tracker: ToolExecutionFailureTracker): void {
-	tracker.signature = undefined;
-	tracker.repeats = 0;
-}
-
-function executionFailureSignature(prepared: PreparedToolCall, errorClass: string): string {
-	return `${normalizeToolSignature([[prepared.toolCall.name, prepared.args]])}\0${errorClass}`;
-}
-
-function appendExecutionFailureTeachNote(
-	result: AgentToolResult<any>,
-	prepared: PreparedToolCall,
-	errorClass: string | undefined,
-	tracker: ToolExecutionFailureTracker,
-): AgentToolResult<any> {
-	const signature = executionFailureSignature(prepared, errorClass ?? "tool-error");
-	if (tracker.signature === signature) {
-		tracker.repeats++;
-	} else {
-		tracker.signature = signature;
-		tracker.repeats = 1;
-	}
-	if (tracker.repeats !== TOOL_EXECUTION_FAILURE_TEACH_AT || tracker.taughtSignature === signature) return result;
-	tracker.taughtSignature = signature;
-	return {
-		...result,
-		content: [
-			{
-				type: "text",
-				text: `[harness] This exact ${prepared.toolCall.name} call failed twice with the same ${errorClass ?? "tool"} error. Change the arguments or approach; do not resend the identical call.`,
-			},
-			...result.content,
-		],
-	};
-}
-
 async function finalizeExecutedToolCall(
 	currentContext: AgentContext,
 	assistantMessage: AssistantMessage,
@@ -1014,11 +1019,13 @@ async function finalizeExecutedToolCall(
 	executed: ExecutedToolCallOutcome,
 	config: AgentLoopConfig,
 	repairTeachTracker: ToolRepairTeachTracker,
-	executionFailureTracker: ToolExecutionFailureTracker,
+	toolFailureMemory: ToolFailureMemoryTracker,
 	signal: AbortSignal | undefined,
 ): Promise<FinalizedToolCallOutcome> {
 	let result = executed.result;
 	let isError = executed.isError;
+	let failureMessage = executed.failureMessage ?? "";
+	let errorClass = executed.errorClass;
 
 	if (config.afterToolCall) {
 		try {
@@ -1042,18 +1049,30 @@ async function finalizeExecutedToolCall(
 				isError = afterResult.isError ?? isError;
 			}
 		} catch (error) {
-			result = createErrorToolResult(error instanceof Error ? error.message : String(error));
+			failureMessage = error instanceof Error ? error.message : String(error);
+			errorClass = error instanceof Error ? error.name : typeof error;
+			result = createErrorToolResult(failureMessage);
 			isError = true;
 		}
 	}
 
 	if (isError) {
-		result = appendExecutionFailureTeachNote(result, prepared, executed.errorClass, executionFailureTracker);
+		const record = rememberToolFailure(
+			toolFailureMemory,
+			prepared.toolCall.name,
+			prepared.args,
+			"failed",
+			classifyToolFailure(failureMessage, errorClass),
+			toolFailureCorrection(failureMessage, "failed"),
+		);
+		result = createToolFailureResult(record, result.terminate);
 	} else {
-		resetExecutionFailureTracker(executionFailureTracker);
+		clearToolFailure(toolFailureMemory, prepared.toolCall.name, prepared.args);
 	}
 
-	const repaired = appendRepairTeachNotes(result, prepared.toolCall, repairTeachTracker, config);
+	const repaired = isError
+		? { result, taught: false }
+		: appendRepairTeachNotes(result, prepared.toolCall, repairTeachTracker, config);
 	emitToolArgumentValidationTelemetry(
 		config,
 		prepared.validationEvent,
@@ -1071,18 +1090,6 @@ async function finalizeExecutedToolCall(
 function createErrorToolResult(message: string): AgentToolResult<any> {
 	return {
 		content: [{ type: "text", text: message }],
-		details: {},
-	};
-}
-
-function createErrorToolResultWithGuidance(message: string): AgentToolResult<any> {
-	const guidance = getToolExecutionErrorGuidance(message);
-	if (!guidance) return createErrorToolResult(message);
-	return {
-		content: [
-			{ type: "text", text: message },
-			{ type: "text", text: `[harness] ${guidance}` },
-		],
 		details: {},
 	};
 }

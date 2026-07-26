@@ -13,6 +13,11 @@ import type { Message } from "@caupulican/pi-ai";
 export const TUI_HISTORY_RELOAD_MAX_LINES = 1000;
 export const TUI_HISTORY_RELOAD_WRAP_WIDTH = 100;
 
+export interface TuiHistoryReloadOptions {
+	/** Read tool-result content while sizing history. False when tool output is collapsed. */
+	includeToolResultContent?: boolean;
+}
+
 export function getContentText(content: unknown): string {
 	if (typeof content === "string") return content;
 	if (Array.isArray(content)) {
@@ -57,7 +62,12 @@ export function getTuiHistoryMessageText(message: AgentMessage): string {
 	}
 }
 
-export function estimateTuiHistoryLines(message: AgentMessage): number {
+export function estimateTuiHistoryLines(message: AgentMessage, options: TuiHistoryReloadOptions = {}): number {
+	if (message.role === "toolResult" && options.includeToolResultContent === false) {
+		// Tool results render inside their matching tool-call component, not as a separate row.
+		// Retain a one-line accounting floor so orphaned results cannot bypass the reload bound.
+		return 1;
+	}
 	const text = getTuiHistoryMessageText(message);
 	const hardLines = text.length > 0 ? text.split(/\r\n|\r|\n/).length : 1;
 	const wrappedLines = Math.ceil(text.length / TUI_HISTORY_RELOAD_WRAP_WIDTH);
@@ -99,7 +109,10 @@ export function trimMessageToTuiHistoryTail(message: AgentMessage, maxEstimatedL
 	return clone;
 }
 
-export function messagesForTuiHistoryReload(messages: AgentMessage[]): {
+export function messagesForTuiHistoryReload(
+	messages: AgentMessage[],
+	options: TuiHistoryReloadOptions = {},
+): {
 	messages: AgentMessage[];
 	omittedMessages: number;
 	estimatedLines: number;
@@ -107,7 +120,7 @@ export function messagesForTuiHistoryReload(messages: AgentMessage[]): {
 	let estimatedLines = 0;
 	let start = messages.length;
 	for (let i = messages.length - 1; i >= 0; i--) {
-		const nextLines = estimateTuiHistoryLines(messages[i]);
+		const nextLines = estimateTuiHistoryLines(messages[i], options);
 		if (start < messages.length && estimatedLines + nextLines > TUI_HISTORY_RELOAD_MAX_LINES) break;
 		estimatedLines += nextLines;
 		start = i;
@@ -115,7 +128,7 @@ export function messagesForTuiHistoryReload(messages: AgentMessage[]): {
 	}
 	const selected = messages.slice(start);
 	if (selected.length > 0 && estimatedLines > TUI_HISTORY_RELOAD_MAX_LINES) {
-		const tailLines = selected.slice(1).reduce((sum, message) => sum + estimateTuiHistoryLines(message), 0);
+		const tailLines = selected.slice(1).reduce((sum, message) => sum + estimateTuiHistoryLines(message, options), 0);
 		const firstAllowance = TUI_HISTORY_RELOAD_MAX_LINES - tailLines;
 		if (firstAllowance <= 4) {
 			selected.shift();
@@ -124,7 +137,7 @@ export function messagesForTuiHistoryReload(messages: AgentMessage[]): {
 		} else {
 			// Reserve room for truncation marker, role chrome, and wrap variance.
 			selected[0] = trimMessageToTuiHistoryTail(selected[0], firstAllowance - 4);
-			estimatedLines = tailLines + estimateTuiHistoryLines(selected[0]);
+			estimatedLines = tailLines + estimateTuiHistoryLines(selected[0], options);
 		}
 	}
 	return {

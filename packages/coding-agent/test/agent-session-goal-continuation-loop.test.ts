@@ -60,12 +60,29 @@ describe("Phase 10E: AgentSession Goal Continuation Loop", () => {
 		return { sessionManager, session, promptCalls };
 	}
 
-	it("maxTurns <= 0 does not call prompt and returns max_turns_reached", async () => {
-		const { session, promptCalls } = createTestSession();
+	it("maxTurns 0 is unbounded and stops only when the goal reaches a terminal state", async () => {
+		const { session, sessionManager, promptCalls } = createTestSession();
+		const state = createGoalState({ goalId: "g1", userGoal: "User Goal Here", now: "T0" });
+		appendGoalStateSnapshot(sessionManager, state);
+		session.prompt = async (text: string, options?: unknown) => {
+			promptCalls.push({ text, options });
+			appendGoalStateSnapshot(sessionManager, applyGoalEvent(state, { type: "complete_goal", now: "T1" }));
+		};
+
 		const result = await session.continueGoalLoop({ maxStallTurns: 3, maxTurns: 0 });
-		expect(result.turnsSubmitted).toBe(0);
-		expect(result.stopReason).toBe("max_turns_reached");
-		expect(promptCalls.length).toBe(0);
+		expect(result.turnsSubmitted).toBe(1);
+		expect(result.stopReason).toBe("continuation_not_allowed");
+		expect(promptCalls.length).toBe(1);
+	});
+
+	it("rejects negative or unsafe explicit turn limits", async () => {
+		const { session } = createTestSession();
+		await expect(session.continueGoalLoop({ maxStallTurns: 3, maxTurns: -1 })).rejects.toThrow(
+			/non-negative safe integer/,
+		);
+		await expect(
+			session.continueGoalLoop({ maxStallTurns: 3, maxTurns: Number.MAX_SAFE_INTEGER + 1 }),
+		).rejects.toThrow(/non-negative safe integer/);
 	});
 
 	it("missing/non-continue goal returns continuation_not_allowed and does not call prompt", async () => {
@@ -76,7 +93,7 @@ describe("Phase 10E: AgentSession Goal Continuation Loop", () => {
 		expect(promptCalls.length).toBe(0);
 	});
 
-	it("open goal with prompt that does not save an updated goal state submits once then stops with goal_state_not_advanced", async () => {
+	it("an explicit turn limit is honored even when the compact goal record is unchanged", async () => {
 		const { session, sessionManager, promptCalls } = createTestSession();
 
 		let state = createGoalState({ goalId: "g1", userGoal: "User Goal Here", now: "T0" });
@@ -84,9 +101,9 @@ describe("Phase 10E: AgentSession Goal Continuation Loop", () => {
 		appendGoalStateSnapshot(sessionManager, state);
 
 		const result = await session.continueGoalLoop({ maxStallTurns: 3, maxTurns: 5 });
-		expect(result.turnsSubmitted).toBe(1);
-		expect(result.stopReason).toBe("goal_state_not_advanced");
-		expect(promptCalls.length).toBe(1);
+		expect(result.turnsSubmitted).toBe(5);
+		expect(result.stopReason).toBe("max_turns_reached");
+		expect(promptCalls.length).toBe(5);
 	});
 
 	it("prompt that appends a completed goal snapshot submits once, then stops with continuation_not_allowed", async () => {
@@ -138,8 +155,8 @@ describe("Phase 10E: AgentSession Goal Continuation Loop", () => {
 		session.prompt = async (text: string, options?: unknown) => {
 			promptCalls.push({ text, options });
 			callCount++;
-			// Simulate the LLM making genuine progress each turn (satisfying a requirement), which
-			// advances the goal-loop progress signature and keeps the loop going until maxTurns.
+			// Simulate the LLM making genuine progress each turn while the explicit limit remains the
+			// only per-invocation turn ceiling.
 			state = applyGoalEvent(state, {
 				type: "satisfy_requirement",
 				id: `req-${callCount}`,
@@ -153,25 +170,6 @@ describe("Phase 10E: AgentSession Goal Continuation Loop", () => {
 		expect(result.turnsSubmitted).toBe(3);
 		expect(result.stopReason).toBe("max_turns_reached");
 		expect(promptCalls.length).toBe(3);
-	});
-
-	it("loop uses promptLimits by passing them through to continueGoalOnce", async () => {
-		const { session, sessionManager, promptCalls } = createTestSession();
-
-		let state = createGoalState({ goalId: "g1", userGoal: "User Goal Here", now: "T0" });
-		state = applyGoalEvent(state, { type: "add_requirement", id: "req-1", text: "Req 1 text", now: "T0" });
-		appendGoalStateSnapshot(sessionManager, state);
-
-		const result = await session.continueGoalLoop({
-			maxStallTurns: 3,
-			maxTurns: 1,
-			promptLimits: { maxTextLength: 100 },
-		});
-
-		expect(result.turnsSubmitted).toBe(1);
-		expect(promptCalls.length).toBe(1);
-		// Text should be truncated to length 100
-		expect(promptCalls[0].text.length).toBe(100);
 	});
 
 	it("stops with wall_clock_budget_reached if time is exceeded during loop", async () => {
@@ -228,8 +226,7 @@ describe("Phase 10E: AgentSession Goal Continuation Loop", () => {
 			promptCalls.push({ text, options });
 			callCount++;
 			mockNow += 100 * 60_000; // +100 minutes
-			// Simulate genuine per-turn progress (satisfying a requirement) so the goal-loop progress
-			// signature advances and the loop keeps going until maxTurns.
+			// Simulate genuine per-turn progress while the explicit limit remains authoritative.
 			state = applyGoalEvent(state, {
 				type: "satisfy_requirement",
 				id: `req-${callCount}`,
@@ -252,7 +249,7 @@ describe("Phase 10E: AgentSession Goal Continuation Loop", () => {
 	});
 
 	describe("the 'waiting' continuation state, wired through the real production seam", () => {
-		it("does not stall with goal_state_not_advanced while a bound in-flight worker runs, and resumes once it terminates", async () => {
+		it("waits while a bound worker runs and resumes once it terminates", async () => {
 			const { session, sessionManager, promptCalls } = createTestSession();
 
 			// Reach the SAME BackgroundLaneController instance agent-session.ts wires into
@@ -282,7 +279,7 @@ describe("Phase 10E: AgentSession Goal Continuation Loop", () => {
 			appendGoalStateSnapshot(sessionManager, state);
 
 			// While the worker is in flight, the loop must pause with the benign worker_in_flight
-			// stopReason -- NOT goal_state_not_advanced -- and must submit zero passes.
+			// stopReason and must submit zero passes.
 			const whileRunning = await session.continueGoalLoop({ maxStallTurns: 3, maxTurns: 5 });
 			expect(whileRunning.turnsSubmitted).toBe(0);
 			expect(whileRunning.stopReason).toBe("worker_in_flight");
@@ -292,9 +289,9 @@ describe("Phase 10E: AgentSession Goal Continuation Loop", () => {
 			// The worker terminates; the goal resumes on its own on the next invocation.
 			backgroundLanes.recordManagedLane({ laneId: "tmux-job-e2e", phase: "terminal", status: "succeeded" });
 
-			const afterResume = await session.continueGoalLoop({ maxStallTurns: 3, maxTurns: 5 });
+			const afterResume = await session.continueGoalLoop({ maxStallTurns: 3, maxTurns: 1 });
 			expect(afterResume.turnsSubmitted).toBe(1);
-			expect(afterResume.stopReason).toBe("goal_state_not_advanced");
+			expect(afterResume.stopReason).toBe("max_turns_reached");
 			expect(promptCalls.length).toBe(1);
 		});
 	});

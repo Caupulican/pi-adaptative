@@ -104,33 +104,13 @@ describe("Phase 10D: AgentSession Goal Continuation Once", () => {
 
 		expect(promptCalls.length).toBe(1);
 		const call = promptCalls[0];
-		expect(call.text).toContain("Goal continuation context");
-		expect(call.text).toContain("g1");
-		expect(call.text).toContain("Req 1 text");
+		expect(call.text).toBe("Continue working toward the active goal.");
 
 		expect(call.options).toEqual({
 			expandPromptTemplates: false,
 			processSlashCommands: false,
 			autoContinueGoal: false,
+			internalContextType: "goal_continuation_trigger",
 		});
-	});
-
-	it("promptLimits are honored", async () => {
-		const { session, sessionManager, promptCalls } = createTestSession();
-
-		let state = createGoalState({ goalId: "g1", userGoal: "User Goal Here", now: "T0" });
-		state = applyGoalEvent(state, { type: "add_requirement", id: "req-1", text: "Req 1 text", now: "T0" });
-		appendGoalStateSnapshot(sessionManager, state);
-
-		const result = await session.continueGoalOnce({
-			maxStallTurns: 3,
-			promptLimits: { maxTextLength: 100 },
-		});
-
-		expect(result.submitted).toBe(true);
-		expect(result.prompt?.truncated).toBe(true);
-
-		expect(promptCalls.length).toBe(1);
-		expect(promptCalls[0].text.length).toBe(100);
 	});
 });

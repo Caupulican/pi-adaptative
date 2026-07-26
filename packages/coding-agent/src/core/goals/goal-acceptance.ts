@@ -24,6 +24,7 @@ export function getUnprovenGoalRequirementIds(state: GoalState): string[] {
  * already-completed persisted goal cannot strand durable work during resume.
  */
 export function hasGoalAcceptanceOverride(state: GoalState): boolean {
+	if (state.acceptanceOverride !== undefined) return state.acceptanceOverride;
 	const completion = [...state.events]
 		.reverse()
 		.find((event) => event.type === "complete_goal" || event.type === "complete_goal_manually");

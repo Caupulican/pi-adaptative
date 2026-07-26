@@ -1,44 +1,38 @@
-# UI polish — native orchestration
+# UI polish — activity lane
 
-UI type: desktop pro-tool TUI. Named incumbent: the owner's Pi Teams and task-steps extensions. Phase: context/presentation consolidation. Same-task frames are indexed in `docs/ui-reference/`; only information choreography was extracted. No extension code, branding, frame geometry, commands, polling, or storage behavior was copied.
+UI type: dense keyboard-first terminal tool. Phase: transient-status consolidation. Comparison sources: Codex `20dafe201d91d4405eef05ecd1db0257f13a9ac8`, Claude Code 2.1.219 (`7006c4c3acac98e554d3997baeda6a7fa4d1ff7c`), and the owner's Pi Teams/task-steps extensions. Only information choreography and lifecycle mechanics were extracted; no branding, frame geometry, source text, or identity was copied.
 
 ## Ranked findings
 
-1. Fact: native tools rendered implementation-oriented text while the reference made active state scannable in one glance → risk: the packaged harness felt less integrated than its extensions → fix: one semantic, width-aware orchestration panel shared by checklist and workers → M, completed.
-2. Fact: worker activity lived in a footer fragment and checklist state lived only in transcript output → risk: users had to mentally reconcile two surfaces → fix: one quiet below-editor projection from native session truth, absent when idle → M, completed.
-3. Fact: extension widget lifecycle was the only reusable mounting path → risk: native UI either impersonated an extension or disappeared on `/reload` → fix: separate host-owned and extension-owned widget maps while keeping one renderer/container path → M, completed.
-4. Fact: raw details exposed IDs and long evidence at the same weight as current work → risk: dense output buried the next action → fix: collapsed views omit checklist IDs and defer bounded evidence/claims to expansion → S, completed.
+1. Task, goal, worker, routing, retry, compaction, queue, and tool progress used separate transcript, footer, widget, and loader paths. This duplicated truth and polluted scrollback. They now project into one event-driven horizontal line immediately above the editor.
+2. Completed work needed feedback without becoming permanent history. The lane uses a muted active dot, holds green/red terminal feedback for two seconds, then removes it by timer event.
+3. Resumed state could replay old terminal work as new. Session replacement primes terminal identities without displaying them; only later transitions flash.
+4. Successful orchestration bookkeeping still produced empty or multiline tool cards. Collapsed successful task, goal, and worker tools now render nothing; explicit tool expansion retains the structured detail.
+5. A terminal process did not prove a human was watching. `--session-mode user|worker` feeds the authoritative session-role contract; unattended workers do not receive approval UI, extension TUI context, widgets, footer, loaders, or activity-lane routing.
+6. Loading session history still invoked collapsed tool-result renderers and image conversion. Retained results now stay behind their existing payload accessor until expansion; one expansion materializes once, and collapse releases the display cache.
 
-## Visual battery
-
-| Check | Verdict | Evidence |
-|---|---|---|
-| Iconography / imagery weight | PASS | One restrained status-glyph language; no decorative icon set is appropriate for a terminal. |
-| Surface tone steps + tonal grace | PASS | Existing semantic theme tones carry title, text, dim metadata, accent, warning, and error without hard borders. |
-| Spacing rhythm + alignment / symmetry / balance | PASS | Shared two/four-cell insets and measured suffix/label widths keep rows aligned. |
-| Typography hierarchy | PASS | Badge/action, bold active work, normal labels, and dim metadata form a closed hierarchy. |
-| State clarity — selection, hover, focus | PASS | Non-interactive rows encode every state; existing keyboard expansion remains the single focused interaction. |
-| Content-quality bugs wearing UI clothes | PASS | Empty, hidden-count, missing-evidence, unreviewed, skipped, and unknown-lane states are explicit and bounded. |
-| Density calibration | PASS | At most eight persistent rows plus header/notice; idle state mounts nothing. |
-| Theme, width, and DPI parity | PASS | No literal colors or cell assumptions; semantic tokens and `visibleWidth` bounds cover terminal variation. |
-
-## UX battery
+## Acceptance battery
 
 | Check | Verdict | Evidence |
 |---|---|---|
-| Surrounding-context compatibility | PASS | No polling, focus capture, modal, shell, filesystem, or extension-lifecycle side effect. |
-| First-60-seconds friction | PASS | State appears automatically when native work exists and disappears automatically when drained. |
-| Interruption audit | PASS | Updates replace a host widget in place and never steal focus. |
-| Dead-end audit | PASS | Empty/error/skipped/review-required states explain the condition in text. |
-| Muscle-memory parity | PASS | Existing `/task`, `task_steps`, `delegate_status`, and tool-expansion paths remain unchanged. |
-| Latency honesty | PASS | Session and lane terminal events update immediately; no hidden completion polling. |
-| Destructive-action safety | N/A | Presentation owns no mutation or destructive control. |
-| Discoverability | PASS | The automatic panel is visible during work; slash-command help and tool results remain the full entry paths. |
+| One status owner | PASS | One `ActivityLaneComponent`; the prior native orchestration widget and delegate footer fragment were removed. |
+| Width and density | PASS | One line, display-cell truncation, bounded labels, and `+N` overflow. |
+| State clarity | PASS | Glyph plus text plus semantic theme color; status is never color-only. |
+| Completion lifecycle | PASS | Event/timer driven; success/failure disappears after a bounded hold. |
+| Resume correctness | PASS | Existing terminal identities are primed and do not replay. |
+| History cleanliness | PASS | Successful orchestration calls are absent while collapsed; retained tool-result payloads are not read or rendered until the existing expansion key is used. |
+| Failure honesty | PASS | Tool errors, compaction failures, and final retry failures remain textual and actionable. |
+| Audience isolation | PASS | Worker role disables human UI capability and does not mount transient visual surfaces. |
+| Focus and interruption | PASS | The lane never captures focus; cancellation remains on the existing interrupt binding. |
 
-Accessibility gate: PASS. State is conveyed by glyph and text as well as color, focus remains in the editor, motion is absent, and lines are clipped by display-cell width.
+Accessibility gate: PASS. The lane uses text and glyphs in addition to color, has no decorative motion, preserves editor focus, and stays within measured terminal width.
 
-## Acceptance test
+## Mechanism merge
 
-Repeat the same before/reference/after task at the same 80-column terminal width, then at 34 columns and in both themes. It must pass the art-design-system filters: flow (state → work → evidence), product (one coherent native system), and reality (long content, concurrent lanes, reload/resume, idle cleanup). Leak-check every frame before reuse.
+- From Codex: one live task/status row owned by the composer area, updated by events, absent when idle.
+- From Claude: active-form task wording, bounded horizontal activity, and short-lived completion feedback.
+- From Pi: canonical goal/task/lane state, semantic theme tokens, explicit expansion, durable resume identity, and least-privilege session role.
 
-The packaged TUI was also smoked at 100 columns with an isolated agent directory: add → `ready`, start → `active`, done → widget absent. No provider request was sent.
+The resulting UI is a Pi-native projection, not an incumbent clone.
+
+Controlled 100-column smoke with an isolated agent directory and no provider request: `/task add` rendered one `Next 1/1` line, `/task start step-1` replaced it with `Step 1/1`, `/task done step-1` rendered `Completed` briefly, and the lane then returned to zero height. The temporary agent directory was removed.

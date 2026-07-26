@@ -53,7 +53,7 @@ describe("Phase 10A: Goal Continuation Controller", () => {
 		expect(decision.reasonCode).toBe("goal_cancelled");
 	});
 
-	it("active goal with blocked requirement asks user and reports blockedRequirementIds", () => {
+	it("a blocked legacy requirement does not stop other open work", () => {
 		let state = createGoalState({ goalId: "g1", userGoal: "Test", now: "T0" });
 		state = applyGoalEvent(state, { type: "add_requirement", id: "req-1", text: "Req 1", now: "T0" });
 		state = applyGoalEvent(state, { type: "add_requirement", id: "req-2", text: "Req 2", now: "T0" });
@@ -64,13 +64,25 @@ describe("Phase 10A: Goal Continuation Controller", () => {
 			settings: { maxStallTurns: 3 },
 		});
 
-		expect(decision.action).toBe("ask-user");
-		expect(decision.reasonCode).toBe("blocked_requirements_present");
+		expect(decision.action).toBe("continue");
+		expect(decision.reasonCode).toBe("goal_active");
 		expect(decision.blockedRequirementIds).toEqual(["req-1"]);
 		expect(decision.openRequirementIds).toEqual(["req-2"]);
 	});
 
-	it("active goal with no open requirements finalizes", () => {
+	it("asks the owner when every remaining legacy requirement is blocked", () => {
+		let state = createGoalState({ goalId: "g1", userGoal: "Test", now: "T0" });
+		state = applyGoalEvent(state, { type: "add_requirement", id: "req-1", text: "Req 1", now: "T0" });
+		state = applyGoalEvent(state, { type: "block_requirement", id: "req-1", blockedReason: "hard", now: "T1" });
+
+		const decision = evaluateGoalContinuation({ state, settings: { maxStallTurns: 3 } });
+
+		expect(decision.action).toBe("ask-user");
+		expect(decision.reasonCode).toBe("blocked_requirements_present");
+		expect(decision.blockedRequirementIds).toEqual(["req-1"]);
+	});
+
+	it("a compact active goal needs no duplicate requirement ledger", () => {
 		const state = createGoalState({ goalId: "g1", userGoal: "Test", now: "T0" });
 
 		const decision = evaluateGoalContinuation({
@@ -78,9 +90,20 @@ describe("Phase 10A: Goal Continuation Controller", () => {
 			settings: { maxStallTurns: 3 },
 		});
 
-		expect(decision.action).toBe("finalize");
-		expect(decision.reasonCode).toBe("no_open_requirements");
+		expect(decision.action).toBe("continue");
+		expect(decision.reasonCode).toBe("goal_active");
 		expect(decision.openRequirementIds).toEqual([]);
+	});
+
+	it.each([
+		["paused", "stop", "goal_paused"],
+		["usage_limited", "ask-user", "goal_usage_limited"],
+		["budget_limited", "stop", "goal_budget_limited"],
+	] as const)("classifies %s lifecycle state consistently", (status, action, reasonCode) => {
+		const state = { ...createGoalState({ goalId: "g1", userGoal: "Test", now: "T0" }), status };
+		const decision = evaluateGoalContinuation({ state, settings: { maxStallTurns: 3 } });
+		expect(decision.action).toBe(action);
+		expect(decision.reasonCode).toBe(reasonCode);
 	});
 
 	it("continues when satisfied requirements still lack trusted acceptance evidence", () => {

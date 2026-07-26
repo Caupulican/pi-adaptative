@@ -44,7 +44,7 @@ export function projectGoalObjective(goal: GoalState): GoalObjectiveProjection {
 			description: requirement.text,
 			required: true,
 		})),
-		riskBudget: {},
+		riskBudget: goal.tokenBudget !== undefined ? { maxTokens: goal.tokenBudget } : {},
 	};
 }
 

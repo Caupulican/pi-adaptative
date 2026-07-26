@@ -277,13 +277,7 @@ export function createTaskStepsToolDefinition(deps: TaskStepsToolDependencies): 
 			return emptyOrchestrationCall();
 		},
 		renderResult(result, { expanded, isPartial }, theme) {
-			if (isPartial) {
-				return new OrchestrationPanelComponent(theme, {
-					label: "task steps",
-					action: "updating",
-					status: "running",
-				});
-			}
+			if (isPartial) return emptyOrchestrationCall();
 			const details = result.details as TaskStepsToolDetails | undefined;
 			if (!details) {
 				return new OrchestrationPanelComponent(theme, {
@@ -292,6 +286,7 @@ export function createTaskStepsToolDefinition(deps: TaskStepsToolDependencies): 
 					emptyText: "No task-step details were returned.",
 				});
 			}
+			if (!expanded && details.applied) return emptyOrchestrationCall();
 			return new OrchestrationPanelComponent(theme, taskStepsPanelModel(details, expanded), expanded);
 		},
 		async execute(_toolCallId, input: TaskStepsToolInput) {

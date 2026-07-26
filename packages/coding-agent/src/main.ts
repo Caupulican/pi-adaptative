@@ -27,7 +27,6 @@ import { AuthStorage } from "./core/auth-storage.ts";
 import { formatDoctorReport, runDoctor, runUpdatePreflight } from "./core/doctor.ts";
 import { exportFromFile } from "./core/export-html/index.ts";
 import type { ExtensionFactory } from "./core/extensions/types.ts";
-import { resumeBlockedPersistedGoal } from "./core/goals/goal-lifecycle.ts";
 import { configureHttpDispatcher } from "./core/http-dispatcher.ts";
 import { KeybindingsManager } from "./core/keybindings.ts";
 import { formatLaneWorkerRefusal } from "./core/model-capability.ts";
@@ -69,6 +68,7 @@ import {
 	listSessions,
 	openSession,
 } from "./core/session-manager-factory.ts";
+import { getSessionRole, setTerminalSessionMode } from "./core/session-role.ts";
 import { SessionSupervisionRuntime } from "./core/session-supervision-runtime.ts";
 import { SettingsManager } from "./core/settings-manager.ts";
 import { printTimings, resetTimings, time } from "./core/timings.ts";
@@ -319,6 +319,7 @@ async function createSessionManager(
 	cwd: string,
 	sessionDir: string | undefined,
 	settingsManager: SettingsManager,
+	hasHumanUI: boolean,
 ): Promise<SessionManager> {
 	if (parsed.noSession || parsed.help || parsed.listModels !== undefined) {
 		return SessionManager.inMemory(cwd);
@@ -356,6 +357,10 @@ async function createSessionManager(
 				return openSession(resolved.path, sessionDir);
 
 			case "global": {
+				if (!hasHumanUI) {
+					console.error(chalk.red("Cannot open a cross-project session without a user approval UI."));
+					process.exit(1);
+				}
 				console.log(chalk.yellow(`Session found in different project: ${resolved.cwd}`));
 				const shouldFork = await promptConfirm("Fork this session into current directory?");
 				if (!shouldFork) {
@@ -372,6 +377,10 @@ async function createSessionManager(
 	}
 
 	if (parsed.resume) {
+		if (!hasHumanUI) {
+			console.error(chalk.red("Error: --resume requires --session-mode user; use --session <id> for workers."));
+			process.exit(1);
+		}
 		const { initTheme, stopThemeWatcher } = await import("./modes/interactive/theme/theme.ts");
 		initTheme(settingsManager.getTheme(), true);
 		try {
@@ -720,7 +729,11 @@ export async function main(args: string[], options?: MainOptions) {
 	if (parsed.taskRef) {
 		process.env[PI_TASK_REF_ENV] = parsed.taskRef;
 	}
+	if (parsed.sessionMode) {
+		setTerminalSessionMode(parsed.sessionMode);
+	}
 	let appMode = resolveAppMode(parsed, process.stdin.isTTY);
+	let hasHumanUI = appMode === "interactive" && getSessionRole() === "main";
 	const shouldTakeOverStdout = appMode !== "interactive";
 	if (shouldTakeOverStdout) {
 		takeOverStdout();
@@ -775,10 +788,10 @@ export async function main(args: string[], options?: MainOptions) {
 		(parsed.sessionDir ? normalizePath(parsed.sessionDir) : undefined) ??
 		(envSessionDir ? expandTildePath(envSessionDir) : undefined) ??
 		startupSettingsManager.getSessionDir();
-	let sessionManager = await createSessionManager(parsed, cwd, sessionDir, startupSettingsManager);
+	let sessionManager = await createSessionManager(parsed, cwd, sessionDir, startupSettingsManager, hasHumanUI);
 	const missingSessionCwdIssue = getMissingSessionCwdIssue(sessionManager, cwd);
 	if (missingSessionCwdIssue) {
-		if (appMode === "interactive") {
+		if (hasHumanUI) {
 			const selectedCwd = await promptForMissingSessionCwd(missingSessionCwdIssue, startupSettingsManager);
 			if (!selectedCwd) {
 				process.exit(0);
@@ -799,7 +812,7 @@ export async function main(args: string[], options?: MainOptions) {
 	}
 	time("createSessionManager");
 
-	const trustPromptMode: AppMode = parsed.help || parsed.listModels !== undefined ? "print" : appMode;
+	const trustPromptMode: AppMode = parsed.help || parsed.listModels !== undefined || !hasHumanUI ? "print" : appMode;
 	const projectTrustedForSession = await resolveProjectTrusted({
 		cwd: sessionManager.getCwd(),
 		trustStore,
@@ -1029,8 +1042,9 @@ export async function main(args: string[], options?: MainOptions) {
 	const { settingsManager, modelRegistry, resourceLoader } = services;
 	configureHttpDispatcher(settingsManager.getHttpIdleTimeoutMs());
 	if (parsed.resume || parsed.continue || parsed.session !== undefined) {
-		const resumed = resumeBlockedPersistedGoal(session);
-		if (!resumed.ok) throw new Error(`Failed to resume persisted goal: ${resumed.error}`);
+		// Restoring a session must not mutate owner intent. Active goals may resume their runtime;
+		// paused/blocked/limited goals remain stopped until an explicit owner action.
+		session.restoreGoalRuntimeAfterResume();
 	}
 
 	// A lane-bound session refuses AUTHORITATIVELY at its own startup when its model cannot reliably
@@ -1061,7 +1075,7 @@ export async function main(args: string[], options?: MainOptions) {
 	if (!isReadOnlyCommand) {
 		const supervision = new SessionSupervisionRuntime({
 			agentDir,
-			hasUI: appMode === "interactive",
+			hasUI: hasHumanUI,
 			orchestrationProfileId: parsed.orchestrationProfile?.trim() || undefined,
 			isProcessAlive: isReloadSessionProcessAlive,
 			promptConfirm,
@@ -1102,6 +1116,7 @@ export async function main(args: string[], options?: MainOptions) {
 		stdinContent = await readPipedStdin();
 		if (stdinContent !== undefined && appMode === "interactive") {
 			appMode = "print";
+			hasHumanUI = false;
 		}
 	}
 	time("readPipedStdin");
@@ -1113,11 +1128,11 @@ export async function main(args: string[], options?: MainOptions) {
 	);
 	time("prepareInitialMessage");
 	const { initTheme, stopThemeWatcher } = await import("./modes/interactive/theme/theme.ts");
-	initTheme(settingsManager.getTheme(), appMode === "interactive");
+	initTheme(settingsManager.getTheme(), hasHumanUI);
 	time("initTheme");
 
 	// Show deprecation warnings in interactive mode
-	if (appMode === "interactive" && deprecationWarnings.length > 0) {
+	if (hasHumanUI && deprecationWarnings.length > 0) {
 		await showDeprecationWarnings(deprecationWarnings);
 	}
 
@@ -1152,6 +1167,7 @@ export async function main(args: string[], options?: MainOptions) {
 			initialImages,
 			initialMessages: parsed.messages,
 			verbose: parsed.verbose,
+			hasHumanAudience: hasHumanUI,
 		});
 		if (startupBenchmark) {
 			await interactiveMode.init();

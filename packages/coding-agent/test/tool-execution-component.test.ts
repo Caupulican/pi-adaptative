@@ -733,6 +733,46 @@ printf '\nWINDOWS_IPV4\n'; powershell.exe -NoProfile -Command "Get-NetIPAddress 
 		expect(expanded).toContain("hidden content");
 	});
 
+	test("does not materialize deferred history results until expansion", () => {
+		let contentReads = 0;
+		const result = { details: undefined, isError: false } as {
+			content: Array<{ type: string; text: string }>;
+			details: undefined;
+			isError: boolean;
+		};
+		Object.defineProperty(result, "content", {
+			enumerable: true,
+			get: () => {
+				contentReads++;
+				return [{ type: "text", text: "loaded on expansion" }];
+			},
+		});
+		const component = new ToolExecutionComponent(
+			"read",
+			"tool-lazy-history-result",
+			{ path: "notes.txt" },
+			{ deferResultUntilExpanded: true },
+			createReadToolDefinition(process.cwd()),
+			createFakeTui(),
+			process.cwd(),
+		);
+
+		component.updateResult(result);
+		expect(contentReads).toBe(0);
+		expect(stripAnsi(component.render(120).join("\n"))).not.toContain("loaded on expansion");
+		expect(contentReads).toBe(0);
+
+		component.setExpanded(true);
+		expect(stripAnsi(component.render(120).join("\n"))).toContain("loaded on expansion");
+		expect(contentReads).toBe(1);
+
+		component.setExpanded(false);
+		expect(stripAnsi(component.render(120).join("\n"))).not.toContain("loaded on expansion");
+		expect(contentReads).toBe(1);
+		component.setExpanded(true);
+		expect(contentReads).toBe(2);
+	});
+
 	for (const scenario of [
 		{
 			title: "SKILL.md",

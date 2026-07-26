@@ -16,6 +16,7 @@ import type {
 } from "@caupulican/pi-agent-core";
 import {
 	type CustomMessage,
+	classifyFailure,
 	compactToolResultDetailsForRetention,
 	createCustomMessage,
 	DEFAULT_STREAM_IDLE,
@@ -114,14 +115,20 @@ import { FailureCorpusRecorder } from "./failure-corpus.ts";
 import { ForegroundRecoveryController } from "./foreground-recovery-controller.ts";
 import { type ChannelProvider, GatewayRegistry, type JobSchedulerProvider } from "./gateways/channel-provider.ts";
 import { GoalLoopController } from "./goal-loop-controller.ts";
-import type { GoalContinuationPrompt, GoalContinuationPromptLimits } from "./goals/goal-continuation-prompt.ts";
+import { injectCompactGoalContext } from "./goals/compact-goal-context.ts";
+import type { GoalContinuationPrompt } from "./goals/goal-continuation-prompt.ts";
+import { type GoalStateRevision, getGoalStateRevision, stopGoalFromSystem } from "./goals/goal-lifecycle.ts";
 import {
 	buildGoalRuntimeSnapshot,
 	type GoalRuntimeSnapshot,
 	type GoalRuntimeSnapshotSettings,
 } from "./goals/goal-runtime-snapshot.ts";
 import { applyGoalEvent, type GoalState } from "./goals/goal-state.ts";
-import { appendGoalStateSnapshot, getLatestGoalStateSnapshot } from "./goals/session-goal-state.ts";
+import {
+	appendGoalClearedSnapshot,
+	appendGoalStateSnapshot,
+	getLatestGoalStateSnapshot,
+} from "./goals/session-goal-state.ts";
 import { constrainStreamIdleToHttpTimeout } from "./http-dispatcher.ts";
 import {
 	beginHumanInputRequest,
@@ -409,6 +416,8 @@ export interface PromptOptions {
 	preflightResult?: (success: boolean) => void;
 	/** Whether an idle active goal should auto-inject bounded continuation prompts after this prompt settles. Default: true. */
 	autoContinueGoal?: boolean;
+	/** Internal hidden text turn. Persisted as a typed custom marker instead of visible user chat. */
+	internalContextType?: string;
 }
 
 export type { ToolProbeReport, ToolProbeResult, ToolProbeVerdict } from "./tool-protocol-controller.ts";
@@ -625,7 +634,6 @@ export interface WorkerDelegationRunOutcome {
 
 export interface GoalContinuationOnceOptions {
 	maxStallTurns: number;
-	promptLimits?: GoalContinuationPromptLimits;
 }
 
 export interface GoalContinuationOnceResult {
@@ -638,7 +646,6 @@ export type GoalContinuationLoopStopReason =
 	| "continuation_not_allowed"
 	| "max_turns_reached"
 	| "wall_clock_budget_reached"
-	| "goal_state_not_advanced"
 	| "goal_budget_exhausted"
 	// Skip outcomes from the BackgroundLaneController single-flight guard (`continueGoalLoopExclusive`):
 	// the loop never ran a pass because another goal loop already owned the mutex, or the session was
@@ -652,12 +659,13 @@ export type GoalContinuationLoopStopReason =
 	// /goal continuation (both funnel through the same single-flight guard). `turnsSubmitted` 0.
 	| "goal_tool_unavailable"
 	// A worker is dispatched (queued/running) against an open requirement this goal owns — the
-	// loop paused WITHOUT submitting a pass (never reaches `goal_state_not_advanced`) and will resume
+	// loop paused WITHOUT submitting a pass and will resume
 	// on its own once the worker terminates. Distinct from `continuation_not_allowed` (which reads as
 	// a terminal refusal needing a human/new decision) — this is a benign, self-resolving wait.
 	| "worker_in_flight";
 
 export interface GoalContinuationLoopOptions extends GoalContinuationOnceOptions {
+	/** Optional user limit. 0 means unbounded and is the default. */
 	maxTurns: number;
 	/** 0 or undefined disables wall-clock budget. */
 	maxWallClockMinutes?: number;
@@ -979,6 +987,7 @@ export class AgentSession {
 			emitAutonomyTelemetry: (event) => this._emitAutonomyTelemetry(event),
 			getGoalStateSnapshot: () => this.getGoalStateSnapshot(),
 			getGoalRuntimeSnapshot: (settings) => this.getGoalRuntimeSnapshot(settings),
+			markGoalToolUnavailable: () => this.markGoalToolUnavailable(),
 			getEvidenceBundleSnapshot: () => this.getEvidenceBundleSnapshot(),
 			saveEvidenceBundleSnapshot: (bundle) => this.saveEvidenceBundleSnapshot(bundle),
 			saveWorkerClaimSnapshot: (claim, request) => this.saveWorkerClaimSnapshot(claim, request),
@@ -1131,7 +1140,10 @@ export class AgentSession {
 		this._goalContinuation = new GoalLoopController({
 			getGoalRuntimeSnapshot: (settings) => this.getGoalRuntimeSnapshot(settings),
 			prompt: (text, options) => this.prompt(text, options),
+			captureUsageCursor: () => this.sessionManager.getLeafId(),
 			recordGoalContinuationPass: (pass) => this.recordGoalContinuationPass(pass),
+			recordGoalContinuationFailure: (error) => this.recordGoalContinuationFailure(error),
+			markGoalBudgetLimited: (reason) => this.markGoalBudgetLimited(reason),
 		});
 		this._extensionRunnerRef = config.extensionRunnerRef;
 		this._initialActiveToolNames = config.orchestrationProfile
@@ -1569,7 +1581,7 @@ export class AgentSession {
 			// character caps are the only budget protection for this block -- load-bearing,
 			// not merely defensive.
 			const gcMessages = this._maybeAppendMemoryEvidenceBlock(enforcementResult.messages, memoryReport);
-			return gcMessages;
+			return injectCompactGoalContext(gcMessages, this.getGoalStateSnapshot());
 		};
 	}
 
@@ -3019,6 +3031,7 @@ export class AgentSession {
 		// selected/authenticated — can un-register it from _earlyDisplayedUserMessages instead of
 		// leaking the reference forever.
 		let userMessage: AgentMessage | undefined;
+		let promptMessage: AgentMessage | undefined;
 		let routingStarted = false;
 		let pendingNextTurnCount = 0;
 		// Effectiveness feedback: remember the recall page + the query so we can score, after the
@@ -3104,17 +3117,29 @@ export class AgentSession {
 			// (seconds), not a regex; awaiting it first made the prompt appear to hang. The
 			// authoritative message_start emitted later for this SAME object is suppressed in
 			// _handleAgentEvent (see _earlyDisplayedUserMessages) so it is still shown exactly once.
-			const userContent: (TextContent | ImageContent)[] = [{ type: "text", text: expandedText }];
-			if (currentImages) {
-				userContent.push(...currentImages);
+			if (options?.internalContextType) {
+				if (currentImages && currentImages.length > 0) {
+					throw new Error("Internal context turns do not accept image attachments.");
+				}
+				promptMessage = createCustomMessage(
+					options.internalContextType,
+					expandedText,
+					false,
+					undefined,
+					new Date().toISOString(),
+				);
+			} else {
+				const userContent: (TextContent | ImageContent)[] = [{ type: "text", text: expandedText }];
+				if (currentImages) userContent.push(...currentImages);
+				userMessage = {
+					role: "user",
+					content: userContent,
+					timestamp: Date.now(),
+				};
+				promptMessage = userMessage;
+				this._earlyDisplayedUserMessages.add(userMessage);
+				this._emit({ type: "message_start", message: userMessage });
 			}
-			userMessage = {
-				role: "user",
-				content: userContent,
-				timestamp: Date.now(),
-			};
-			this._earlyDisplayedUserMessages.add(userMessage);
-			this._emit({ type: "message_start", message: userMessage });
 
 			// Bracket the routing/prep phase (judge, model/auth checks, compaction, ...) so the UI can
 			// show general "working" feedback for it — otherwise the user stares at their own echoed
@@ -3180,7 +3205,7 @@ export class AgentSession {
 			// prefetch a relevant <memory_context> page from past sessions and prepend it as data ahead of
 			// the user message. Best-effort and gated: trivial turns are skipped, and providers return ""
 			// (no page) when nothing is relevant — so it stays net-negative and the GC packs stale pages.
-			if (this._memory.shouldAttemptRecall(expandedText)) {
+			if (!options?.internalContextType && this._memory.shouldAttemptRecall(expandedText)) {
 				try {
 					const recall = await this._memory.prefetchRecall(expandedText);
 					if (recall) {
@@ -3201,7 +3226,7 @@ export class AgentSession {
 
 			// Add user message (built earlier, before the router judge, so it could be painted
 			// immediately — see the early message_start emit above).
-			messages.push(userMessage);
+			messages.push(promptMessage);
 
 			// Inject any pending "nextTurn" messages as context alongside the user message
 			pendingNextTurnCount = this._pendingNextTurnMessages.length;
@@ -3209,7 +3234,7 @@ export class AgentSession {
 				messages.push(msg);
 			}
 
-			const taskStepsState = this.getTaskStepsStateSnapshot();
+			const taskStepsState = options?.internalContextType ? undefined : this.getTaskStepsStateSnapshot();
 			const taskStepsContext = taskStepsState ? formatTaskStepsContext(taskStepsState) : undefined;
 			if (taskStepsState && taskStepsContext) {
 				messages.push(
@@ -4215,8 +4240,17 @@ export class AgentSession {
 	 *
 	 * @returns the id of the appended custom entry
 	 */
-	saveGoalStateSnapshot(state: GoalState): string {
-		const entryId = appendGoalStateSnapshot(this.sessionManager, state);
+	saveGoalStateSnapshot(state: GoalState, expected?: GoalStateRevision): string {
+		const current = this.getGoalStateSnapshot();
+		if (
+			expected &&
+			(!current || current.goalId !== expected.goalId || (current.revision ?? 0) !== expected.revision)
+		) {
+			throw new Error(
+				`Goal state changed concurrently; expected ${expected.goalId}@${expected.revision}, found ${current ? `${current.goalId}@${current.revision ?? 0}` : "none"}. Retry against the latest state.`,
+			);
+		}
+		const entryId = appendGoalStateSnapshot(this.sessionManager, state, current);
 		try {
 			this._backgroundLanes.synchronizeGoalState(state);
 		} catch (error) {
@@ -4228,6 +4262,19 @@ export class AgentSession {
 		return entryId;
 	}
 
+	/** Persist a branch-scoped tombstone and stop goal-owned execution without resurrecting old state. */
+	clearGoalStateSnapshot(state: GoalState, now: string): string {
+		const current = this.getGoalStateSnapshot();
+		const expected = getGoalStateRevision(state);
+		if (!current || current.goalId !== expected.goalId || (current.revision ?? 0) !== expected.revision) {
+			throw new Error("Goal state changed concurrently; retry clear against the latest state.");
+		}
+		if (state.status !== "completed" && state.status !== "cancelled") {
+			this._backgroundLanes.synchronizeGoalState(applyGoalEvent(state, { type: "cancel_goal", now }));
+		}
+		return appendGoalClearedSnapshot(this.sessionManager, state, now);
+	}
+
 	/**
 	 * Retrieve the latest valid goal state snapshot from the session log.
 	 */
@@ -4236,28 +4283,83 @@ export class AgentSession {
 	}
 
 	/**
-	 * Persist one submitted continuation pass's turn/wall-clock/spend contribution onto the active
+	 * Persist one submitted continuation pass's exact turn/wall-clock/token/spend contribution onto the active
 	 * goal's durable cumulative budget (see `GoalState.continuationTurnsUsed` et al.). This is the
 	 * "persistence dep" `GoalLoopController` calls once per pass actually submitted — it, not the
-	 * loop controller, is where USD gets attributed: it reads the session's OWN cumulative model
-	 * spend (`getCostSummary().ownCost` — deliberately excludes worker/subagent spend, which is
-	 * tracked and budgeted separately) and threads that single absolute reading into a
-	 * `record_continuation_budget` event; the pure reducer in `goal-state.ts` derives the delta.
+	 * loop controller, is where usage gets attributed: it scans only assistant messages appended on
+	 * the active branch after the pass's captured cursor. Compaction cannot erase or reattribute that
+	 * append-only interval, and unrelated foreground turns outside the interval are excluded.
 	 * A no-op when no goal state exists (defensive — in practice this is only ever called right
 	 * after a pass the loop already confirmed was submitted against an active goal).
 	 */
-	recordGoalContinuationPass(pass: { turns: number; wallClockMs: number }): void {
+	recordGoalContinuationPass(pass: { turns: number; wallClockMs: number; usageCursor: string | null }): void {
 		const state = this.getGoalStateSnapshot();
 		if (!state) return;
-		const sessionCostUsd = this.getCostSummary().ownCost;
+		const branch = this.sessionManager.getBranch();
+		const cursorIndex = pass.usageCursor === null ? -1 : branch.findIndex((entry) => entry.id === pass.usageCursor);
+		if (pass.usageCursor !== null && cursorIndex < 0) {
+			this._emit({
+				type: "warning",
+				message: "Goal usage cursor is no longer on the active branch; stopping instead of guessing usage.",
+			});
+			this.recordGoalContinuationFailure(new Error("goal_usage_cursor_lost"));
+			return;
+		}
+		let tokens = 0;
+		let spendUsd = 0;
+		for (const entry of branch.slice(cursorIndex + 1)) {
+			if (entry.type !== "message" || entry.message.role !== "assistant") continue;
+			const usage = (entry.message as AssistantMessage).usage;
+			tokens += Math.max(0, usage.input) + Math.max(0, usage.output);
+			spendUsd += Math.max(0, usage.cost.total);
+		}
 		const updated = applyGoalEvent(state, {
 			type: "record_continuation_budget",
 			turns: pass.turns,
 			wallClockMs: pass.wallClockMs,
-			sessionCostUsd,
+			tokens,
+			spendUsd,
 			now: new Date().toISOString(),
 		});
-		this.saveGoalStateSnapshot(updated);
+		this.saveGoalStateSnapshot(updated, getGoalStateRevision(state));
+	}
+
+	private recordGoalContinuationFailure(error: unknown): void {
+		const state = this.getGoalStateSnapshot();
+		if (!state || state.status !== "active") return;
+		const message = error instanceof Error ? error.message : String(error);
+		const classified = classifyFailure({ message, provider: this.model?.provider });
+		const status = classified.reason === "billing_or_quota" ? "usage_limited" : "blocked";
+		const stopped = stopGoalFromSystem(
+			state,
+			{ status, reason: `${classified.reason}: ${message}` },
+			new Date().toISOString(),
+		);
+		if (stopped.ok) this.saveGoalStateSnapshot(stopped.state, getGoalStateRevision(state));
+	}
+
+	private markGoalBudgetLimited(reason: string): void {
+		const state = this.getGoalStateSnapshot();
+		const stopped = stopGoalFromSystem(state, { status: "budget_limited", reason }, new Date().toISOString());
+		if (stopped.ok && state) this.saveGoalStateSnapshot(stopped.state, getGoalStateRevision(state));
+	}
+
+	private markGoalToolUnavailable(): void {
+		const state = this.getGoalStateSnapshot();
+		const stopped = stopGoalFromSystem(
+			state,
+			{
+				status: "blocked",
+				reason: "goal_tool_unavailable: the active capability surface cannot update durable goal state",
+			},
+			new Date().toISOString(),
+		);
+		if (stopped.ok && state) this.saveGoalStateSnapshot(stopped.state, getGoalStateRevision(state));
+	}
+
+	/** Restore runtime intent without mutating persisted goal lifecycle state. */
+	restoreGoalRuntimeAfterResume(): void {
+		this._backgroundLanes.scheduleGoalAutoContinueFromIdle();
 	}
 
 	/** Save native task-step state to the active session log. */
