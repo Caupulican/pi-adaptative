@@ -23,8 +23,6 @@ import { DefaultResourceLoader } from "../src/core/resource-loader.ts";
 import { SettingsManager } from "../src/core/settings-manager.ts";
 import { createCodingTools } from "../src/index.ts";
 
-const API_KEY = process.env.ANTHROPIC_OAUTH_TOKEN || process.env.ANTHROPIC_API_KEY;
-
 describe("Extension live load/unload", () => {
 	let tempDir: string;
 
@@ -229,7 +227,7 @@ export default (pi) => {
 		beforeEach(() => {
 			const model = getModel("anthropic", "claude-sonnet-4-5")!;
 			const agent = new Agent({
-				getApiKey: () => API_KEY,
+				getApiKey: () => "pi-test-only",
 				initialState: {
 					model,
 					systemPrompt: "You are a test assistant.",
@@ -267,7 +265,7 @@ export default (pi) => {
 			}
 		});
 
-		it.skipIf(!API_KEY)("adds extension tool to live runner without full reload", async () => {
+		it("adds extension tool to live runner without full reload", async () => {
 			// Create a temporary extension with a tool
 			const extDir = join(tempDir, "live-load-tool");
 			mkdirSync(extDir, { recursive: true });
@@ -281,7 +279,7 @@ export default (pi) => {
 		label: "Live Loaded Tool",
 		description: "Loaded live",
 		parameters: {},
-		execute: async () => ({ content: [{ type: "text", text: "live" }] }),
+		execute: async () => ({ content: [{ type: "text", text: pi.getActiveTools().includes("live_loaded_tool") ? "runtime-active" : "runtime-missing" }] }),
 	});
 };
 			`,
@@ -301,9 +299,44 @@ export default (pi) => {
 			// Verify the extension is in the resource loader
 			const loaded = resourceLoader.getLoadedExtension(extFile);
 			expect(loaded).toBeDefined();
+			const output = await loaded!.tools
+				.get("live_loaded_tool")!
+				.definition.execute("tool-call", {}, undefined, undefined, undefined as never);
+			expect(output.content[0]).toEqual({ type: "text", text: "runtime-active" });
 		});
 
-		it.skipIf(!API_KEY)("prevents load while agent is streaming", async () => {
+		it("preserves the exact live-load grant across a full runtime reload", async () => {
+			const extDir = join(tempDir, "live-load-reload");
+			mkdirSync(extDir, { recursive: true });
+			const extFile = join(extDir, "index.ts");
+			writeFileSync(
+				extFile,
+				`
+export default (pi) => {
+	pi.registerTool({
+		name: "reload_survivor",
+		label: "Reload Survivor",
+		description: "Survives a full reload",
+		parameters: {},
+		execute: async () => ({ content: [{ type: "text", text: pi.getActiveTools().includes("reload_survivor") ? "runtime-active" : "runtime-missing" }] }),
+	});
+};
+			`,
+			);
+
+			await session.loadExtensionLive(extFile);
+			await session.reload();
+
+			expect(session.getActiveToolNames()).toContain("reload_survivor");
+			const loaded = resourceLoader.getLoadedExtension(extFile);
+			expect(loaded).toBeDefined();
+			const output = await loaded!.tools
+				.get("reload_survivor")!
+				.definition.execute("tool-call", {}, undefined, undefined, undefined as never);
+			expect(output.content[0]).toEqual({ type: "text", text: "runtime-active" });
+		});
+
+		it("prevents load while agent is streaming", async () => {
 			const extDir = join(tempDir, "live-load-streaming");
 			mkdirSync(extDir, { recursive: true });
 			const extFile = join(extDir, "index.ts");
@@ -326,7 +359,7 @@ export default (pi) => {
 			Object.defineProperty(session, "isStreaming", { get: () => false, configurable: true });
 		});
 
-		it.skipIf(!API_KEY)("prevents load while context compaction is active", async () => {
+		it("prevents load while context compaction is active", async () => {
 			const extDir = join(tempDir, "live-load-compacting");
 			mkdirSync(extDir, { recursive: true });
 			const extFile = join(extDir, "index.ts");
@@ -382,7 +415,7 @@ export default () => {};
 		beforeEach(() => {
 			const model = getModel("anthropic", "claude-sonnet-4-5")!;
 			const agent = new Agent({
-				getApiKey: () => API_KEY,
+				getApiKey: () => "pi-test-only",
 				initialState: {
 					model,
 					systemPrompt: "You are a test assistant.",
@@ -419,7 +452,7 @@ export default () => {};
 			}
 		});
 
-		it.skipIf(!API_KEY)("removes extension tool from live runner without full reload", async () => {
+		it("removes extension tool from live runner without full reload", async () => {
 			// Create and load an extension with a tool
 			const extDir = join(tempDir, "live-unload-tool");
 			mkdirSync(extDir, { recursive: true });
@@ -456,7 +489,7 @@ export default (pi) => {
 			expect(loaded).toBeUndefined();
 		});
 
-		it.skipIf(!API_KEY)("unloadExtensionLive removes provider from registry", async () => {
+		it("unloadExtensionLive removes provider from registry", async () => {
 			// Create and load an extension with a provider
 			const extDir = join(tempDir, "live-unload-provider");
 			mkdirSync(extDir, { recursive: true });
@@ -502,7 +535,7 @@ export default (pi) => {
 			expect(providersAfter).not.toContain("live-unload-test-provider");
 		});
 
-		it.skipIf(!API_KEY)("does nothing if extension not loaded", async () => {
+		it("does nothing if extension not loaded", async () => {
 			const extFile = join(tempDir, "nonexistent", "extension.ts");
 
 			// Should not throw, just return
@@ -513,7 +546,7 @@ export default (pi) => {
 			expect(loaded).toBeUndefined();
 		});
 
-		it.skipIf(!API_KEY)("prevents unload while agent is streaming", async () => {
+		it("prevents unload while agent is streaming", async () => {
 			// Create and load an extension
 			const extDir = join(tempDir, "live-unload-streaming");
 			mkdirSync(extDir, { recursive: true });
@@ -539,7 +572,7 @@ export default (pi) => {
 			Object.defineProperty(session, "isStreaming", { get: () => false, configurable: true });
 		});
 
-		it.skipIf(!API_KEY)("prevents unload while context compaction is active", async () => {
+		it("prevents unload while context compaction is active", async () => {
 			// Create and load an extension
 			const extDir = join(tempDir, "live-unload-compacting");
 			mkdirSync(extDir, { recursive: true });
@@ -573,7 +606,7 @@ export default (pi) => {
 		beforeEach(() => {
 			const model = getModel("anthropic", "claude-sonnet-4-5")!;
 			const agent = new Agent({
-				getApiKey: () => API_KEY,
+				getApiKey: () => "pi-test-only",
 				initialState: {
 					model,
 					systemPrompt: "You are a test assistant.",
@@ -683,7 +716,7 @@ export default (pi) => {
 			).not.toContainEqual(expect.objectContaining({ providerId: "live-context-memory" }));
 		});
 
-		it.skipIf(!API_KEY)("session_start lifecycle event is emitted on loadExtensionLive", async () => {
+		it("session_start lifecycle event is emitted on loadExtensionLive", async () => {
 			const extDir = join(tempDir, "lifecycle-start");
 			mkdirSync(extDir, { recursive: true });
 			const extFile = join(extDir, "index.ts");
@@ -708,7 +741,7 @@ export default (pi) => {
 			expect(loaded).toBeDefined();
 		});
 
-		it.skipIf(!API_KEY)("can load and unload multiple extensions in sequence", async () => {
+		it("can load and unload multiple extensions in sequence", async () => {
 			const ext1Dir = join(tempDir, "multi-1");
 			const ext2Dir = join(tempDir, "multi-2");
 			mkdirSync(ext1Dir, { recursive: true });
@@ -730,7 +763,13 @@ export default (pi) => {
 				ext2File,
 				`
 export default (pi) => {
-	pi.registerTool({ name: "tool_2", label: "T2", description: "T2", parameters: {}, execute: async () => ({}) });
+	pi.registerTool({
+		name: "tool_2",
+		label: "T2",
+		description: "T2",
+		parameters: {},
+		execute: async () => ({ content: [{ type: "text", text: pi.getActiveTools().includes("tool_2") ? "runtime-active" : "runtime-missing" }] }),
+	});
 };
 			`,
 			);
@@ -748,6 +787,11 @@ export default (pi) => {
 			const afterUnload1 = session.getActiveToolNames();
 			expect(afterUnload1).not.toContain("tool_1");
 			expect(afterUnload1).toContain("tool_2");
+			const output = await resourceLoader
+				.getLoadedExtension(ext2File)!
+				.tools.get("tool_2")!
+				.definition.execute("tool-call", {}, undefined, undefined, undefined as never);
+			expect(output.content[0]).toEqual({ type: "text", text: "runtime-active" });
 
 			// Unload second
 			await session.unloadExtensionLive(ext2File);

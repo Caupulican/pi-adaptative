@@ -10,6 +10,7 @@
 
 import type { Agent, ThinkingLevel } from "@caupulican/pi-agent-core";
 import type { SessionManager } from "@caupulican/pi-agent-core/node";
+import { type ExtensionImportAuthority, isExtensionPathAllowedForImport } from "./extension-import-authority.ts";
 import type { Extension } from "./extensions/index.ts";
 import type { ModelRegistry } from "./model-registry.ts";
 import { findInitialModel, resolveProfileModelSettings } from "./model-resolver.ts";
@@ -115,7 +116,16 @@ export class ProfileFilterController {
 		);
 	}
 
-	filterExtensionsForRuntime(extensions: Extension[]): Extension[] {
+	/**
+	 * Decide whether a path has authority to cross the import boundary. Explicit owner loads may
+	 * proceed without a profile, while discovery-driven loads require an active profile grant.
+	 * User disables remain a hard stop for both paths.
+	 */
+	isExtensionPathAllowed(extensionPath: string, authority: ExtensionImportAuthority, baseDir = ""): boolean {
+		return isExtensionPathAllowedForImport(this.deps.getSettingsManager(), extensionPath, authority, baseDir);
+	}
+
+	filterExtensionsForRuntime(extensions: Extension[], explicitLiveExtensionPaths?: ReadonlySet<string>): Extension[] {
 		const settingsManager = this.deps.getSettingsManager();
 		this._inertExtensionWarnings = [];
 		this._profileDeniedExtensionCount = 0;
@@ -126,13 +136,24 @@ export class ProfileFilterController {
 				this._profileDeniedExtensionCount = extensions.length;
 				return [];
 			}
-			// No profile in play: only inline/SDK extensions load by default. That is the baseline, not
-			// a profile denial, so it is not counted as withheld.
-			return extensions.filter((extension) => extension.sourceInfo.source === "inline");
+			// No profile in play: inline/SDK extensions and exact owner-approved CLI/live loads are the
+			// only runtime authorities. Discovery alone must never promote an extension into executable code.
+			// This baseline is not a profile denial, so it is not counted as withheld.
+			return extensions.filter((extension) => {
+				if (extension.sourceInfo.source === "inline") return true;
+				const explicitlyApproved =
+					extension.sourceInfo.source === "cli" ||
+					explicitLiveExtensionPaths?.has(extension.path) === true ||
+					explicitLiveExtensionPaths?.has(extension.resolvedPath) === true;
+				return (
+					explicitlyApproved &&
+					this.isExtensionPathAllowed(extension.path, "explicit", extension.sourceInfo.baseDir)
+				);
+			});
 		}
 		const hasToolOrCommandGate = this._hasToolOrCommandProfileGate();
 		const allowedExtensions = extensions.filter((extension) =>
-			settingsManager.isResourceAllowedByProfile("extensions", extension.path, extension.sourceInfo.baseDir),
+			this.isExtensionPathAllowed(extension.path, "profile", extension.sourceInfo.baseDir),
 		);
 		this._profileDeniedExtensionCount = extensions.length - allowedExtensions.length;
 		return allowedExtensions.map((extension) => {

@@ -33,6 +33,7 @@ import { canonicalizePath, isLocalPath, markPathIgnoredByCloudSync, resolvePath 
 import { getProcessWorkRun } from "../utils/work-directory.ts";
 import { gitDir, npmDir } from "./agent-paths.ts";
 import { createRollingOutputBuffer } from "./exec.ts";
+import { isExtensionPathAllowedForImport } from "./extension-import-authority.ts";
 import { isStdoutTakenOver } from "./output-guard.ts";
 import { mergeResourceProfileMap, parseResourceProfileBlocks } from "./resource-profile-blocks.ts";
 import type { PackageSource, ResourceProfileSettings, Settings, SettingsManager } from "./settings-manager.ts";
@@ -2488,7 +2489,20 @@ export class DefaultPackageManager implements PackageManager {
 		for (const resourceType of RESOURCE_TYPES) {
 			if (resourceType === "themes") continue;
 			const target = this.getTargetMap(accumulator, resourceType);
-			for (const path of target.keys()) {
+			for (const [path, entry] of target) {
+				// Embedded profile discovery is content I/O, not metadata discovery. A disabled or
+				// profile-denied resource cannot be read to define the authority that would then admit
+				// itself. Configured extensions also stay metadata-only when no profile is active.
+				const baseDir =
+					entry.metadata.baseDir ??
+					(entry.metadata.scope === "project" ? join(this.cwd, CONFIG_DIR_NAME) : this.agentDir);
+				const allowed =
+					resourceType === "extensions"
+						? isExtensionPathAllowedForImport(this.settingsManager, path, "profile", baseDir)
+						: this.settingsManager.isResourceAllowedByProfile(resourceType, path, baseDir);
+				if (!entry.enabled || !allowed) {
+					continue;
+				}
 				const scanPath = this.getResourceProfileScanPath(resourceType, path);
 				if (!scanPath) continue;
 				try {

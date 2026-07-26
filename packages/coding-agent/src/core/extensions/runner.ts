@@ -11,6 +11,7 @@ import type { ResourceDiagnostic } from "../diagnostics.ts";
 import type { KeybindingsConfig } from "../keybindings.ts";
 import type { ModelRegistry } from "../model-registry.ts";
 import type { BuildSystemPromptOptions } from "../system-prompt.ts";
+import { DEFAULT_STALE_EXTENSION_CONTEXT_MESSAGE } from "./stale-context.ts";
 import type {
 	BeforeAgentStartEvent,
 	BeforeAgentStartEventResult,
@@ -510,13 +511,15 @@ export class ExtensionRunner {
 		return this.shortcutDiagnostics;
 	}
 
-	invalidate(
-		message = "This extension ctx is stale after session replacement or reload. Do not use a captured pi or command ctx after ctx.newSession(), ctx.fork(), ctx.switchSession(), or ctx.reload(). For newSession, fork, and switchSession, move post-replacement work into withSession and use the ctx passed to withSession. For reload, do not use the old ctx after await ctx.reload().",
-	): void {
-		if (!this.staleMessage) {
-			this.staleMessage = message;
-			this.runtime.invalidate(message);
-		}
+	/** Retire only this runner while preserving a shared runtime used by its live replacement. */
+	retire(message = DEFAULT_STALE_EXTENSION_CONTEXT_MESSAGE): void {
+		this.staleMessage ??= message;
+	}
+
+	/** Invalidate this runner and every ExtensionAPI bound to its runtime generation. */
+	invalidate(message = DEFAULT_STALE_EXTENSION_CONTEXT_MESSAGE): void {
+		this.retire(message);
+		this.runtime.invalidate(message);
 	}
 
 	private assertActive(): void {

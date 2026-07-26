@@ -95,6 +95,7 @@ function makeDeps(cwd: string, resourceLoader: ResourceLoader): TestDeps {
 		getExcludedToolNames: () => undefined,
 		deriveToolProfileFilter: () => ({ allow: [], block: [] }),
 		isToolOrCommandAllowedByProfile: () => false,
+		isExtensionPathAllowed: (_path, authority) => authority === "explicit",
 		filterExtensionsForRuntime: (extensions) => extensions,
 		setUnboundToolGrantWarnings: (warnings) => {
 			unboundToolGrantWarnings = warnings;
@@ -236,6 +237,58 @@ describe("RuntimeBuilder.reload — local-runtime reconcile hook", () => {
 
 		expect(reloadCount).toBe(1);
 		expect(getCalls()).toBe(0);
+	});
+});
+
+describe("RuntimeBuilder.reconcileLoadedExtensions — import authority", () => {
+	let tempDir: string | undefined;
+
+	afterEach(() => {
+		if (tempDir) rmSync(tempDir, { recursive: true, force: true });
+		tempDir = undefined;
+	});
+
+	it("does not import discoverable extensions without an active profile grant", async () => {
+		tempDir = mkdtempSync(join(tmpdir(), "pi-runtime-builder-no-profile-"));
+		const discoverablePath = join(tempDir, "discovered-extension", "index.ts");
+		let loadCalls = 0;
+		const extensionsResult: LoadExtensionsResult = {
+			extensions: [],
+			errors: [],
+			runtime: createExtensionRuntime(),
+		};
+		const resourceLoader: ResourceLoader = {
+			getExtensions: () => extensionsResult,
+			getSkills: () => ({ skills: [], diagnostics: [] }),
+			getActiveSkills: () => [],
+			getPrompts: () => ({ prompts: [], diagnostics: [] }),
+			getActivePrompts: () => [],
+			getThemes: () => ({ themes: [], diagnostics: [] }),
+			getActiveThemes: () => [],
+			getAgentsFiles: () => ({ agentsFiles: [] }),
+			getAgentsDiagnostics: () => [],
+			getDiscoverableSkillPaths: () => [],
+			getDiscoverablePromptPaths: () => [],
+			getDiscoverableAgentsFilePaths: () => [],
+			getSystemPrompt: () => undefined,
+			getAppendSystemPrompt: () => [],
+			getLoadedExtension: () => undefined,
+			removeLoadedExtension: () => undefined,
+			loadSingleExtension: async () => {
+				loadCalls += 1;
+				return { extension: null, error: "unexpected import" };
+			},
+			extendResources: () => {},
+			reload: async () => {},
+			getDiscoverableExtensionPaths: async () => [discoverablePath],
+		};
+		const { deps } = makeDeps(tempDir, resourceLoader);
+		deps.notifyExtensionsChanged = () => {};
+		const runtimeBuilder = new RuntimeBuilder(deps);
+
+		await runtimeBuilder.reconcileLoadedExtensions();
+
+		expect(loadCalls).toBe(0);
 	});
 });
 

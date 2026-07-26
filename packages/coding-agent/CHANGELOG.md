@@ -16,6 +16,7 @@
 - Kept retry-guided compaction provider failures inside the exact-request retry layer instead of restarting the compaction plan as an unknown failure.
 - Removed successful orchestration bookkeeping from collapsed chat history, retained full detail on explicit expansion, and prevented resumed terminal state from replaying as new completion feedback.
 - Deferred retained tool-result reads, renderer construction, and image conversion during collapsed history reload until explicit expansion, with the materialized payload released again on collapse.
+- Prevented denied extension code and embedded profile content from crossing the read/import boundary, preserved exact CLI/live grants through reloads without invalidating their shared runtime, and made core acceptance fail on skipped or todo evidence.
 
 ## [0.81.40] - 2026-07-24
 

@@ -12,6 +12,21 @@ import { SettingsManager } from "../src/core/settings-manager.ts";
 import type { Skill } from "../src/core/skills.ts";
 import { createSyntheticSourceInfo } from "../src/core/source-info.ts";
 
+function settingsWithExtensionsGranted(...allowedExtensions: string[]): SettingsManager {
+	return SettingsManager.inMemory({
+		resourceProfiles: {
+			"extension-tests": {
+				extensions: { allow: allowedExtensions },
+				skills: { allow: ["*"] },
+				prompts: { allow: ["*"] },
+				agents: { allow: ["*"] },
+				tools: { allow: ["*"] },
+			},
+		},
+		activeResourceProfiles: ["extension-tests"],
+	});
+}
+
 describe("DefaultResourceLoader", () => {
 	let tempDir: string;
 	let agentDir: string;
@@ -197,7 +212,12 @@ Project skill`,
 			symlinkSync(sharedExtDir, join(agentDir, "extensions"), "dir");
 			symlinkSync(sharedExtDir, join(cwd, ".pi", "extensions"), "dir");
 
-			const loader = new DefaultResourceLoader({ cwd, agentDir });
+			const settingsManager = settingsWithExtensionsGranted("shared.ts");
+			const loader = new DefaultResourceLoader({
+				cwd,
+				agentDir,
+				settingsManager,
+			});
 			await loader.reload();
 
 			const extensionsResult = loader.getExtensions();
@@ -243,7 +263,11 @@ Project skill`,
 }`,
 			);
 
-			const loader = new DefaultResourceLoader({ cwd, agentDir });
+			const loader = new DefaultResourceLoader({
+				cwd,
+				agentDir,
+				settingsManager: settingsWithExtensionsGranted("project.ts", "user.ts"),
+			});
 			await loader.reload();
 
 			const extensionsResult = loader.getExtensions();
@@ -276,7 +300,7 @@ Project skill`,
 		});
 
 		it("should honor overrides for auto-discovered resources", async () => {
-			const settingsManager = SettingsManager.inMemory();
+			const settingsManager = settingsWithExtensionsGranted("disabled.ts");
 			settingsManager.setExtensionPaths(["-extensions/disabled.ts"]);
 			settingsManager.setSkillPaths(["-skills/skip-skill"]);
 			settingsManager.setPromptTemplatePaths(["-prompts/skip.md"]);
@@ -905,7 +929,11 @@ export default function(pi: ExtensionAPI) {
 }`,
 			);
 
-			const loader = new DefaultResourceLoader({ cwd, agentDir });
+			const loader = new DefaultResourceLoader({
+				cwd,
+				agentDir,
+				settingsManager: settingsWithExtensionsGranted("ext1", "ext2"),
+			});
 			await loader.reload();
 
 			const { errors } = loader.getExtensions();
@@ -958,6 +986,7 @@ export default function(pi: ExtensionAPI) {
 			const loader = new DefaultResourceLoader({
 				cwd,
 				agentDir,
+				settingsManager: settingsWithExtensionsGranted("global.ts", "explicit-extension.ts"),
 				additionalExtensionPaths: [explicitExtPath],
 			});
 			await loader.reload();

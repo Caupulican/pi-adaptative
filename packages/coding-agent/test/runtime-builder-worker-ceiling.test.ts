@@ -123,6 +123,7 @@ function makeDeps(
 		getExcludedToolNames: () => undefined,
 		deriveToolProfileFilter: () => unreachable("deriveToolProfileFilter"),
 		isToolOrCommandAllowedByProfile: () => false,
+		isExtensionPathAllowed: (_path, authority) => authority === "explicit",
 		filterExtensionsForRuntime: (extensions) => extensions,
 		setUnboundToolGrantWarnings: (warnings) => {
 			unboundToolGrantWarnings = warnings;

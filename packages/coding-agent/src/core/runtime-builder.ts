@@ -52,6 +52,7 @@ import type { ContextGcReport } from "./context-gc.ts";
 import { DEFAULT_ACTIVE_TOOL_NAMES, mapToolNamesForPlatform } from "./default-tool-surface.ts";
 import { acknowledgeWorkerClaimReview } from "./delegation/session-worker-claim.ts";
 import type { WorkerDelegationRequest } from "./delegation/worker-delegation-request.ts";
+import type { ExtensionImportAuthority } from "./extension-import-authority.ts";
 import { createCoreDiagnosticsToolDefinitions } from "./extensions/builtin.ts";
 import {
 	type ContextUsage,
@@ -234,8 +235,10 @@ export interface RuntimeBuilderDeps {
 	deriveToolProfileFilter(): Required<ResourceProfileFilterSettings>;
 	/** True when a tool/command name survives the active profile's allow/block + user allow/exclude. */
 	isToolOrCommandAllowedByProfile(name: string): boolean;
+	/** Import-boundary decision for an exact owner load or an automatic profile-driven load. */
+	isExtensionPathAllowed(path: string, authority: ExtensionImportAuthority, baseDir?: string): boolean;
 	/** Filter the loaded extensions through the active resource profile (records inert/denied warnings host-side). */
-	filterExtensionsForRuntime(extensions: Extension[]): Extension[];
+	filterExtensionsForRuntime(extensions: Extension[], explicitLiveExtensionPaths?: ReadonlySet<string>): Extension[];
 	/** Sink for the unbound-profile-tool-grant warnings surfaced in /context. */
 	setUnboundToolGrantWarnings(warnings: string[]): void;
 	getUnboundToolGrantWarnings(): string[];
@@ -364,6 +367,8 @@ export class RuntimeBuilder {
 	private _toolPromptSnippets: Map<string, string> = new Map();
 	private _toolPromptGuidelines: Map<string, string[]> = new Map();
 	private _baseToolDefinitions: Map<string, ToolDefinition> = new Map();
+	/** Exact extensions the owner approved through the live-load API. Discovery never populates this set. */
+	private readonly _explicitLiveExtensionPaths = new Set<string>();
 	private _reloadPromise: Promise<void> | undefined;
 	private _reloadRequested = false;
 
@@ -1016,7 +1021,10 @@ export class RuntimeBuilder {
 				extensionsResult.runtime.flagValues.set(name, value);
 			}
 		}
-		const extensions = this.deps.filterExtensionsForRuntime(extensionsResult.extensions);
+		const extensions = this.deps.filterExtensionsForRuntime(
+			extensionsResult.extensions,
+			this._explicitLiveExtensionPaths,
+		);
 		const runtimeExtensionPaths = new Set(extensions.map((extension) => extension.path));
 		extensionsResult.runtime.pendingProviderRegistrations =
 			extensionsResult.runtime.pendingProviderRegistrations.filter((registration) =>
@@ -1150,6 +1158,17 @@ export class RuntimeBuilder {
 				deferExtensionDispose: true,
 				skipSettingsReload: true,
 			});
+			// A live-load call is an exact session-owned grant. Resource discovery deliberately cannot
+			// recreate it without a profile, so restore only those approved paths into the new runtime
+			// generation before binding it.
+			for (const extensionPath of this._explicitLiveExtensionPaths) {
+				if (
+					this.deps.isExtensionPathAllowed(extensionPath, "explicit") &&
+					!this.deps.getResourceLoader().getLoadedExtension(extensionPath)
+				) {
+					await this._importExtension(extensionPath);
+				}
+			}
 			// Replace the previous extension-owned provider generation before binding the new one. The
 			// bulk refresh also preserves API/OAuth streams for surviving non-extension providers.
 			this.deps.getModelRegistry().unregisterProviders(previousExtensionProviderNames);
@@ -1217,10 +1236,27 @@ export class RuntimeBuilder {
 	 */
 	async unloadExtensionLive(extensionPath: string): Promise<void> {
 		this._assertReloadQuiescent("unload extension");
+		try {
+			await this._unloadExtensionLive(extensionPath, true, true);
+		} catch (error) {
+			await this._recoverLiveExtensionFailure();
+			throw error;
+		}
+	}
 
+	private async _unloadExtensionLive(
+		extensionPath: string,
+		revokeExplicitGrant: boolean,
+		notify: boolean,
+	): Promise<void> {
 		const ext = this.deps.getResourceLoader().getLoadedExtension(extensionPath);
+		const explicitGrantPath = ext?.path ?? extensionPath;
+		const hadExplicitGrant = this._explicitLiveExtensionPaths.has(explicitGrantPath);
+		if (revokeExplicitGrant) {
+			this._explicitLiveExtensionPaths.delete(explicitGrantPath);
+		}
 		if (!ext) {
-			return; // Nothing to unload
+			return;
 		}
 
 		const previousRunner = this.deps.getExtensionRunner();
@@ -1250,7 +1286,7 @@ export class RuntimeBuilder {
 				flagValues: previousFlagValues,
 				includeAllExtensionTools: true,
 			});
-			previousRunner.invalidate();
+			previousRunner.retire();
 			const memorySnapshot = this.deps.createMemoryReloadSnapshot();
 			this.deps.restoreMemoryReloadSnapshot({
 				...memorySnapshot,
@@ -1265,14 +1301,12 @@ export class RuntimeBuilder {
 			runtime.contextMemoryProvidersByExtension.delete(ext.path);
 			await this.deps.initializeMemory();
 
-			// Notify extensions-changed listeners
-			this.deps.notifyExtensionsChanged();
+			if (notify) {
+				this.deps.notifyExtensionsChanged();
+			}
 		} catch (error) {
-			// Fall back to full reload on error
-			try {
-				await this.reload();
-			} catch {
-				// Suppress nested error; original error will be thrown below
+			if (revokeExplicitGrant && hadExplicitGrant) {
+				this._explicitLiveExtensionPaths.add(explicitGrantPath);
 			}
 			throw error;
 		}
@@ -1286,16 +1320,30 @@ export class RuntimeBuilder {
 	 */
 	async loadExtensionLive(extensionPath: string): Promise<void> {
 		this._assertReloadQuiescent("load extension");
-		if (!this.deps.getSettingsManager().isResourceAllowedByProfile("extensions", extensionPath)) {
-			throw new Error(`Cannot load extension outside the active resource profile: ${extensionPath}`);
+		this._assertExtensionLoadAllowed(extensionPath, "explicit");
+		try {
+			await this._loadExtensionLive(extensionPath, "explicit", true);
+		} catch (error) {
+			await this._recoverLiveExtensionFailure();
+			throw error;
 		}
+	}
 
+	private async _loadExtensionLive(
+		extensionPath: string,
+		authority: ExtensionImportAuthority,
+		notify: boolean,
+	): Promise<void> {
 		const previousRunner = this.deps.getExtensionRunner();
+		let explicitGrantPath: string | undefined;
+		let hadExplicitGrant = false;
 		try {
 			// Load the extension with fresh import
-			const { extension, error } = await this.deps.getResourceLoader().loadSingleExtension(extensionPath);
-			if (error || !extension) {
-				throw new Error(error || `Failed to load extension: ${extensionPath}`);
+			const extension = await this._importExtension(extensionPath);
+			if (authority === "explicit") {
+				explicitGrantPath = extension.path;
+				hadExplicitGrant = this._explicitLiveExtensionPaths.has(explicitGrantPath);
+				this._explicitLiveExtensionPaths.add(explicitGrantPath);
 			}
 
 			// Rebuild runtime to aggregate tools/commands/handlers/providers
@@ -1312,17 +1360,38 @@ export class RuntimeBuilder {
 			// Activate newly registered legacy/context providers immediately. Reinitialization also
 			// refreshes provider tools and preserves all providers owned by existing extensions.
 			await this.deps.initializeMemory();
+			previousRunner.retire();
 
-			// Notify extensions-changed listeners
-			this.deps.notifyExtensionsChanged();
+			if (notify) {
+				this.deps.notifyExtensionsChanged();
+			}
 		} catch (error) {
-			// Fall back to full reload on error
-			try {
-				await this.reload();
-			} catch {
-				// Suppress nested error; original error will be thrown below
+			if (explicitGrantPath && !hadExplicitGrant) {
+				this._explicitLiveExtensionPaths.delete(explicitGrantPath);
 			}
 			throw error;
+		}
+	}
+
+	private async _importExtension(extensionPath: string): Promise<Extension> {
+		const { extension, error } = await this.deps.getResourceLoader().loadSingleExtension(extensionPath);
+		if (error || !extension) {
+			throw new Error(error || `Failed to load extension: ${extensionPath}`);
+		}
+		return extension;
+	}
+
+	private _assertExtensionLoadAllowed(extensionPath: string, authority: ExtensionImportAuthority): void {
+		if (!this.deps.isExtensionPathAllowed(extensionPath, authority)) {
+			throw new Error(`Cannot load extension outside the active resource profile: ${extensionPath}`);
+		}
+	}
+
+	private async _recoverLiveExtensionFailure(): Promise<void> {
+		try {
+			await this.reload();
+		} catch {
+			// Preserve the original live-operation error; recovery is best effort.
 		}
 	}
 
@@ -1338,71 +1407,44 @@ export class RuntimeBuilder {
 			// Get all discoverable extension paths
 			const allDiscoverablePaths = await this.deps.getResourceLoader().getDiscoverableExtensionPaths();
 
-			// Get the target enabled set based on profile filters
-			const targetEnabledSet = new Set<string>();
-			for (const path of allDiscoverablePaths) {
-				if (this.deps.getSettingsManager().isResourceAllowedByProfile("extensions", path)) {
-					targetEnabledSet.add(path);
-				}
-			}
-
-			// Get currently loaded set
 			const loadedExtensions = this.deps.getResourceLoader().getExtensions().extensions;
-			const loadedSet = new Set<string>();
-			for (const ext of loadedExtensions) {
-				loadedSet.add(ext.path);
+			const targetAuthorities = new Map<string, "loaded" | ExtensionImportAuthority>();
+			for (const extension of this.deps.filterExtensionsForRuntime(
+				loadedExtensions,
+				this._explicitLiveExtensionPaths,
+			)) {
+				targetAuthorities.set(extension.path, "loaded");
 			}
-
-			// Collect unloads and loads
-			const toUnload: string[] = [];
-			const toLoad: string[] = [];
-
-			for (const path of loadedSet) {
-				if (!targetEnabledSet.has(path)) {
-					toUnload.push(path);
+			for (const path of this._explicitLiveExtensionPaths) {
+				if (this.deps.isExtensionPathAllowed(path, "explicit")) {
+					targetAuthorities.set(path, "explicit");
+				}
+			}
+			for (const path of allDiscoverablePaths) {
+				if (this.deps.isExtensionPathAllowed(path, "profile") && !targetAuthorities.has(path)) {
+					targetAuthorities.set(path, "profile");
 				}
 			}
 
-			for (const path of targetEnabledSet) {
-				if (!loadedSet.has(path)) {
-					toLoad.push(path);
-				}
+			// Apply unloads first, then loads. A failed mutation stops the generation immediately; the
+			// outer recovery reload restores one coherent runtime instead of compounding partial changes.
+			for (const extension of [...loadedExtensions]) {
+				if (targetAuthorities.has(extension.path) || targetAuthorities.has(extension.resolvedPath)) continue;
+				this._assertReloadQuiescent("reconcile extensions");
+				await this._unloadExtensionLive(extension.path, false, false);
 			}
 
-			// Apply unloads first, then loads, to minimize churn
-			// Collect errors but continue through all operations
-			const errors: Error[] = [];
-
-			for (const path of toUnload) {
-				try {
-					await this.unloadExtensionLive(path);
-				} catch (error) {
-					errors.push(error instanceof Error ? error : new Error(String(error)));
-				}
-			}
-
-			for (const path of toLoad) {
-				try {
-					await this.loadExtensionLive(path);
-				} catch (error) {
-					errors.push(error instanceof Error ? error : new Error(String(error)));
-				}
-			}
-
-			// If any errors occurred, throw the first one (already fell back to full reload in load/unload)
-			if (errors.length > 0) {
-				throw errors[0];
+			for (const [path, authority] of targetAuthorities) {
+				if (authority === "loaded" || this.deps.getResourceLoader().getLoadedExtension(path)) continue;
+				this._assertReloadQuiescent("reconcile extensions");
+				this._assertExtensionLoadAllowed(path, authority);
+				await this._loadExtensionLive(path, authority, false);
 			}
 
 			// Single notification at the end
 			this.deps.notifyExtensionsChanged();
 		} catch (error) {
-			// Fall back to full reload on error
-			try {
-				await this.reload();
-			} catch {
-				// Suppress nested error; original error will be thrown below
-			}
+			await this._recoverLiveExtensionFailure();
 			throw error;
 		}
 	}

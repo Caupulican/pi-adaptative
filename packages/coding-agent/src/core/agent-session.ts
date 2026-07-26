@@ -773,7 +773,10 @@ export class AgentSession {
 			getExcludedToolNames: () => this._excludedToolNames,
 			deriveToolProfileFilter: () => this._profileFilter.deriveToolProfileFilter(),
 			isToolOrCommandAllowedByProfile: (name) => this._profileFilter.isToolOrCommandAllowedByProfile(name),
-			filterExtensionsForRuntime: (extensions) => this._profileFilter.filterExtensionsForRuntime(extensions),
+			isExtensionPathAllowed: (path, authority, baseDir) =>
+				this._profileFilter.isExtensionPathAllowed(path, authority, baseDir),
+			filterExtensionsForRuntime: (extensions, explicitLiveExtensionPaths) =>
+				this._profileFilter.filterExtensionsForRuntime(extensions, explicitLiveExtensionPaths),
 			setUnboundToolGrantWarnings: (warnings) => {
 				this._unboundToolGrantWarnings = warnings;
 			},
@@ -2034,11 +2037,7 @@ export class AgentSession {
 			this.agent.afterToolCall = undefined;
 			this.agent.transformContext = undefined;
 		});
-		safely(() =>
-			this._extensionRunner.invalidate(
-				"This extension ctx is stale after session replacement or reload. Do not use a captured pi or command ctx after ctx.newSession(), ctx.fork(), ctx.switchSession(), or ctx.reload(). For newSession, fork, and switchSession, move post-replacement work into withSession and use the ctx passed to withSession. For reload, do not use the old ctx after await ctx.reload().",
-			),
-		);
+		safely(() => this._extensionRunner.invalidate());
 		safely(() => this._disconnectFromAgent());
 		this._eventListeners = [];
 		// Best-effort memory cleanup (release locks/handles). Write-side onSessionEnd is wired on a

@@ -10,6 +10,7 @@ export type { ResourceCollision, ResourceDiagnostic } from "./diagnostics.ts";
 import { canonicalizePath, isLocalPath, resolvePath } from "../utils/paths.ts";
 import { configFile, resourceDir } from "./agent-paths.ts";
 import { createEventBus, type EventBus } from "./event-bus.ts";
+import { hasProfileExtensionImportAuthority } from "./extension-import-authority.ts";
 import {
 	createExtensionRuntime,
 	disposeExtensionEventSubscriptions,
@@ -906,20 +907,26 @@ export class DefaultResourceLoader implements ResourceLoader {
 			for (const entryPath of externalExtensions) {
 				metadataByPath.set(entryPath, { source: "external", scope: "user", origin: "top-level" });
 			}
-			const activeProfilesForExt = this.settingsManager.getActiveResourceProfileNames();
+			const hasProfileExtensionAuthority = hasProfileExtensionImportAuthority(this.settingsManager);
 			const extensionProfileFilter = this.settingsManager.getResourceProfileFilter("extensions");
+			// CLI paths carry an exact owner grant, but an active profile and user disables still bound
+			// that authority. Other disk extensions require an active profile before their modules cross
+			// the import boundary; discovery remains metadata-only when no profile is active.
+			const profileFilteredCliExtensions = filterPathsByProfile(cliEnabledExtensions, "extensions");
+			const profileFilteredConfiguredExtensions = hasProfileExtensionAuthority ? enabledExtensions : [];
 			const profileFilteredBundledExtensions =
-				activeProfilesForExt.length === 0 || extensionProfileFilter.allow.length === 0
+				!hasProfileExtensionAuthority || extensionProfileFilter.allow.length === 0
 					? []
 					: filterPathsByProfile(bundledExtensions, "extensions");
-			const profileFilteredExternalExtensions =
-				activeProfilesForExt.length === 0 ? [] : filterPathsByProfile(externalExtensions, "extensions");
+			const profileFilteredExternalExtensions = hasProfileExtensionAuthority
+				? filterPathsByProfile(externalExtensions, "extensions")
+				: [];
 
 			const extensionPaths = this.noExtensions
-				? cliEnabledExtensions
-				: this.mergePaths(cliEnabledExtensions, [
+				? profileFilteredCliExtensions
+				: this.mergePaths(profileFilteredCliExtensions, [
 						...profileFilteredBundledExtensions,
-						...filterPathsByProfile(enabledExtensions, "extensions"),
+						...profileFilteredConfiguredExtensions,
 						...profileFilteredExternalExtensions,
 					]);
 

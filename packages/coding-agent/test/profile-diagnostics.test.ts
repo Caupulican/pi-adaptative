@@ -14,7 +14,10 @@ import { createHarness } from "./test-harness.ts";
 type ExtensionFilterSession = {
 	// Profile filtering moved to ProfileFilterController (P7 Task 5b); reach through _profileFilter.
 	_profileFilter: {
-		filterExtensionsForRuntime(extensions: Extension[]): Extension[];
+		filterExtensionsForRuntime(
+			extensions: Extension[],
+			explicitLiveExtensionPaths?: ReadonlySet<string>,
+		): Extension[];
 		_inertExtensionWarnings: string[];
 		_profileDeniedExtensionCount: number;
 	};
@@ -78,18 +81,37 @@ describe("G14: user disable beats profile grant, surfaced", () => {
 	});
 });
 
-describe("T5: runtime extension filter with no active profile keeps only inline/SDK extensions", () => {
-	it("drops external extensions and keeps inline ones", () => {
+describe("T5: runtime extension filter with no active profile keeps only owner-approved extensions", () => {
+	it("drops discovered extensions and keeps inline or CLI-authorized ones", () => {
 		const harness = createHarness();
 		try {
 			const session = harness.session as unknown as ExtensionFilterSession;
 			const kept = session._profileFilter.filterExtensionsForRuntime([
 				makeExtension("/x/inline-ext.ts", { source: "inline" }),
+				makeExtension("/x/cli-ext.ts", { source: "cli" }),
 				makeExtension("/x/external-ext.ts", { source: "external" }),
 			]);
-			expect(kept.map((extension) => extension.path)).toEqual(["/x/inline-ext.ts"]);
-			// The inline-only baseline is not a profile denial, so nothing is reported as withheld.
+			expect(kept.map((extension) => extension.path)).toEqual(["/x/inline-ext.ts", "/x/cli-ext.ts"]);
+			// The owner-authorized baseline is not a profile denial, so nothing is reported as withheld.
 			expect(session._profileFilter._profileDeniedExtensionCount).toBe(0);
+		} finally {
+			harness.cleanup();
+		}
+	});
+
+	it("keeps only the exact external extension approved through live load", () => {
+		const harness = createHarness();
+		try {
+			const session = harness.session as unknown as ExtensionFilterSession;
+			const approvedPath = "/x/owner-approved-ext.ts";
+			const kept = session._profileFilter.filterExtensionsForRuntime(
+				[
+					makeExtension(approvedPath, { source: "local" }),
+					makeExtension("/x/discovered-only-ext.ts", { source: "local" }),
+				],
+				new Set([approvedPath]),
+			);
+			expect(kept.map((extension) => extension.path)).toEqual([approvedPath]);
 		} finally {
 			harness.cleanup();
 		}
