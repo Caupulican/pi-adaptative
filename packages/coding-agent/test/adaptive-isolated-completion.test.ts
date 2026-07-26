@@ -100,6 +100,7 @@ describe("runIsolatedCompletion isolation invariants", () => {
 		expect(capturedContext?.tools).toEqual([]);
 		expect(capturedOptions?.cacheRetention).toBe("none");
 		expect(capturedOptions?.reasoning).toBe("off");
+		expect(capturedOptions?.interactionMode).toBe("background");
 		// No REAL sessionId crosses the isolation boundary, but a synthetic, namespaced
 		// cache-affinity key is now sent so provider-side session-affinity caching can still route
 		// repeat calls from the same lane consistently.

@@ -7,6 +7,7 @@ import { configFile } from "./agent-paths.ts";
 import { AgentSession } from "./agent-session.ts";
 import { formatNoModelsAvailableMessage } from "./auth-guidance.ts";
 import { AuthStorage } from "./auth-storage.ts";
+import { recoverBedrockSsoAuthentication } from "./bedrock-sso-login.ts";
 import { DEFAULT_ACTIVE_TOOL_NAMES } from "./default-tool-surface.ts";
 import type { ExtensionRunner, LoadExtensionsResult, SessionStartEvent, ToolDefinition } from "./extensions/index.ts";
 import { isInstallTelemetryEnabled } from "./install-telemetry.ts";
@@ -18,6 +19,7 @@ import { validateOrchestrationProfile } from "./orchestration/profile-registry.t
 import type { ResourceLoader } from "./resource-loader.ts";
 import { DefaultResourceLoader } from "./resource-loader.ts";
 import { parseResourceProfileInput } from "./resource-profile-blocks.ts";
+import { isWorkerSession } from "./session-role.ts";
 import type {
 	ProfileDefinitionInput,
 	ResourceProfileFilterSettings,
@@ -241,6 +243,8 @@ export async function createAgentSession(options: CreateAgentSessionOptions = {}
 	const modelRegistry = options.modelRegistry ?? ModelRegistry.create(authStorage, modelsPath);
 
 	const settingsManager = options.settingsManager ?? SettingsManager.create(cwd, agentDir);
+	const isChildSession = options.isChildSession ?? process.env.PI_CHILD_SESSION === "1";
+	const forceBackgroundRequests = isChildSession || isWorkerSession();
 	const orchestrationProfile = options.orchestrationProfile;
 	if (orchestrationProfile) {
 		validateOrchestrationProfile(orchestrationProfile);
@@ -466,6 +470,8 @@ export async function createAgentSession(options: CreateAgentSessionOptions = {}
 			const attributionHeaders = getAttributionHeaders(model, settingsManager, options?.sessionId);
 			return streamSimple(model, context, {
 				...options,
+				interactionMode: forceBackgroundRequests ? "background" : (options?.interactionMode ?? "user"),
+				onInteractiveAuthRecovery: options?.onInteractiveAuthRecovery ?? recoverBedrockSsoAuthentication,
 				apiKey: auth.apiKey,
 				onAuthRejection:
 					auth.apiKey && model.provider === "openai-codex"
@@ -548,7 +554,7 @@ export async function createAgentSession(options: CreateAgentSessionOptions = {}
 		isExplicitThinking: orchestrationProfile
 			? true
 			: (options.isExplicitThinking ?? options.thinkingLevel !== undefined),
-		isChildSession: options.isChildSession ?? process.env.PI_CHILD_SESSION === "1",
+		isChildSession,
 		orchestrationProfile,
 		sessionStartEvent: options.sessionStartEvent,
 	});

@@ -177,6 +177,7 @@ export class ReflectionController {
 			const options: SimpleStreamOptions = {
 				maxTokens: opts.maxTokens,
 				signal: opts.signal,
+				interactionMode: "background",
 				cacheRetention: opts.cacheRetention,
 				reasoning: thinkingLevel,
 				sessionId: affinityKey,
@@ -210,6 +211,7 @@ export class ReflectionController {
 				};
 				const loopConfig: AgentLoopConfig = {
 					model,
+					interactionMode: "background",
 					maxTokens: opts.maxTokens,
 					cacheRetention: opts.cacheRetention,
 					reasoning: thinkingLevel,

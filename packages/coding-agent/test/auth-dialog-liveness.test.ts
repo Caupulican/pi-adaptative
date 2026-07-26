@@ -1,11 +1,18 @@
 import { Container } from "@caupulican/pi-tui";
-import { beforeAll, describe, expect, it, vi } from "vitest";
+import { afterEach, beforeAll, describe, expect, it, vi } from "vitest";
 import { AuthDialogsController } from "../src/modes/interactive/auth-dialogs-controller.ts";
 import { LoginDialogComponent } from "../src/modes/interactive/components/login-dialog.ts";
 import { EditorOverlayHost } from "../src/modes/interactive/editor-overlay-host.ts";
 import { initTheme } from "../src/modes/interactive/theme/theme.ts";
 
 beforeAll(() => initTheme("dark"));
+
+const originalAwsProfile = process.env.AWS_PROFILE;
+
+afterEach(() => {
+	if (originalAwsProfile === undefined) delete process.env.AWS_PROFILE;
+	else process.env.AWS_PROFILE = originalAwsProfile;
+});
 
 describe("authentication dialog liveness", () => {
 	it("cancels a pending prompt exactly once", async () => {
@@ -152,5 +159,42 @@ describe("authentication dialog liveness", () => {
 		expect(login).toHaveBeenCalledOnce();
 		expect(showError).not.toHaveBeenCalled();
 		expect(container.children).toEqual([replacement]);
+	});
+
+	it("runs Bedrock login for the configured profile and restores the editor", async () => {
+		process.env.AWS_PROFILE = "work-sso";
+		const editor = { render: () => ["editor"], invalidate: () => {} };
+		const overlayHost = { swap: vi.fn() };
+		const showError = vi.fn();
+		const showStatus = vi.fn();
+		const loginBedrockSso = vi.fn(async () => {});
+		const refresh = vi.fn();
+		const controller = new AuthDialogsController({
+			getSession: () => ({ modelRegistry: { refresh } }) as never,
+			loginBedrockSso,
+			ui: {
+				tui: { requestRender: vi.fn() },
+				overlayHost,
+				getEditor: () => editor,
+				showError,
+				showStatus,
+				updateAvailableProviderCount: vi.fn(async () => {}),
+				invalidateFooter: vi.fn(),
+				updateEditorBorderColor: vi.fn(),
+			} as never,
+		});
+		const showBedrockDialog = (
+			controller as unknown as {
+				showBedrockSsoDialog(providerId: string, providerName: string): Promise<void>;
+			}
+		).showBedrockSsoDialog.bind(controller);
+
+		await showBedrockDialog("amazon-bedrock", "Amazon Bedrock");
+
+		expect(loginBedrockSso).toHaveBeenCalledWith("work-sso", expect.objectContaining({ signal: expect.anything() }));
+		expect(refresh).toHaveBeenCalledOnce();
+		expect(showStatus).toHaveBeenCalledWith(expect.stringContaining('AWS profile "work-sso"'));
+		expect(showError).not.toHaveBeenCalled();
+		expect(overlayHost.swap).toHaveBeenLastCalledWith(editor);
 	});
 });

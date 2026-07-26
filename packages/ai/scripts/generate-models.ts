@@ -188,6 +188,7 @@ const EAGER_TOOL_INPUT_STREAMING_UNSUPPORTED_ANTHROPIC_MODELS = new Set([
 	"github-copilot:claude-sonnet-4",
 	"github-copilot:claude-sonnet-4.5",
 ]);
+const BEDROCK_INFERENCE_PROFILE_ONLY_MODEL_IDS = new Set(["anthropic.claude-opus-5"]);
 
 const DEEPSEEK_V4_THINKING_LEVEL_MAP = {
 	minimal: null,
@@ -267,14 +268,26 @@ function isAnthropicAdaptiveThinkingModel(modelId: string): boolean {
 		modelId.includes("opus-4.7") ||
 		modelId.includes("opus-4-8") ||
 		modelId.includes("opus-4.8") ||
+		modelId.includes("opus-5") ||
+		modelId.includes("opus.5") ||
 		modelId.includes("sonnet-4-6") ||
-		modelId.includes("sonnet-4.6")
+		modelId.includes("sonnet-4.6") ||
+		modelId.includes("sonnet-5") ||
+		modelId.includes("sonnet.5") ||
+		modelId.includes("fable-5")
 	);
 }
 
 function isAnthropicTemperatureUnsupportedModel(modelId: string): boolean {
 	const id = modelId.toLowerCase();
-	return id.includes("opus-4-7") || id.includes("opus-4.7") || id.includes("opus-4-8") || id.includes("opus-4.8");
+	return (
+		id.includes("opus-4-7") ||
+		id.includes("opus-4.7") ||
+		id.includes("opus-4-8") ||
+		id.includes("opus-4.8") ||
+		id.includes("opus-5") ||
+		id.includes("opus.5")
+	);
 }
 
 function mergeAnthropicMessagesCompat(model: Model<Api>, compat: AnthropicMessagesCompat): void {
@@ -329,16 +342,31 @@ function applyThinkingLevelMetadata(model: Model<any>): void {
 	if (model.id.endsWith("gpt-5.5-pro")) {
 		mergeThinkingLevelMap(model, { off: null, minimal: null, low: null });
 	}
-	if (model.id.includes("opus-4-6") || model.id.includes("opus-4.6")) {
-		mergeThinkingLevelMap(model, { xhigh: "max" });
+	// Anthropic adaptive-thinking effort support:
+	// - max is available on all adaptive-thinking Claude models.
+	// - xhigh is available on Opus 4.7/4.8/5, Sonnet 5, and Fable 5.
+	if (
+		model.id.includes("opus-4-6") ||
+		model.id.includes("opus-4.6") ||
+		model.id.includes("sonnet-4-6") ||
+		model.id.includes("sonnet-4.6")
+	) {
+		mergeThinkingLevelMap(model, { max: "max" });
 	}
 	if (
 		model.id.includes("opus-4-7") ||
 		model.id.includes("opus-4.7") ||
 		model.id.includes("opus-4-8") ||
-		model.id.includes("opus-4.8")
+		model.id.includes("opus-4.8") ||
+		model.id.includes("opus-5") ||
+		model.id.includes("opus.5") ||
+		model.id.includes("sonnet-5") ||
+		model.id.includes("sonnet.5")
 	) {
-		mergeThinkingLevelMap(model, { xhigh: "xhigh" });
+		mergeThinkingLevelMap(model, { xhigh: "xhigh", max: "max" });
+	}
+	if (model.id.includes("fable-5")) {
+		mergeThinkingLevelMap(model, { off: null, xhigh: "xhigh", max: "max" });
 	}
 	if (model.api === "anthropic-messages" && isAnthropicAdaptiveThinkingModel(model.id)) {
 		mergeAnthropicMessagesCompat(model, { forceAdaptiveThinking: true });
@@ -535,6 +563,7 @@ async function loadModelsDevData(): Promise<Model<any>[]> {
 			for (const [modelId, model] of Object.entries(data["amazon-bedrock"].models)) {
 				const m = model as ModelsDevModel;
 				if (m.tool_call !== true) continue;
+				if (BEDROCK_INFERENCE_PROFILE_ONLY_MODEL_IDS.has(modelId)) continue;
 
 				let id = modelId;
 

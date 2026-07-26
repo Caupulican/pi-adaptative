@@ -5,6 +5,8 @@ import type { Context, Model } from "../src/types.ts";
 import { hasBedrockCredentials } from "./bedrock-utils.ts";
 
 interface BedrockThinkingPayload {
+	system?: Array<{ text?: string; cachePoint?: unknown }>;
+	messages?: Array<{ content?: Array<{ text?: string; cachePoint?: unknown }> }>;
 	additionalModelRequestFields?: {
 		thinking?: { type: string; budget_tokens?: number; display?: string };
 		output_config?: { effort?: string };
@@ -21,6 +23,7 @@ class PayloadCaptured extends Error {
 
 function makeContext(): Context {
 	return {
+		systemPrompt: "You are helpful.",
 		messages: [{ role: "user", content: "Hello", timestamp: Date.now() }],
 	};
 }
@@ -81,6 +84,63 @@ describe("Bedrock thinking payload", () => {
 		expect(payload.additionalModelRequestFields?.thinking).toEqual({ type: "adaptive", display: "summarized" });
 		expect(payload.additionalModelRequestFields?.output_config).toEqual({ effort: "xhigh" });
 		expect(payload.additionalModelRequestFields?.anthropic_beta).toBeUndefined();
+	});
+
+	it("uses adaptive thinking for Claude Opus 5 when reasoning is enabled", async () => {
+		const model = getModel("amazon-bedrock", "global.anthropic.claude-opus-5");
+
+		const payload = await capturePayload(model);
+
+		expect(payload.additionalModelRequestFields?.thinking).toEqual({ type: "adaptive", display: "summarized" });
+		expect(payload.additionalModelRequestFields?.output_config).toEqual({ effort: "high" });
+		expect(payload.additionalModelRequestFields?.anthropic_beta).toBeUndefined();
+	});
+
+	it("maps xhigh reasoning to effort=xhigh for Claude Opus 5", async () => {
+		const model = getModel("amazon-bedrock", "global.anthropic.claude-opus-5");
+
+		const payload = await capturePayload(model, { reasoning: "xhigh" });
+
+		expect(payload.additionalModelRequestFields?.thinking).toEqual({ type: "adaptive", display: "summarized" });
+		expect(payload.additionalModelRequestFields?.output_config).toEqual({ effort: "xhigh" });
+		expect(payload.additionalModelRequestFields?.anthropic_beta).toBeUndefined();
+	});
+
+	it("adds prompt cache points for Claude Opus 5 inference profiles", async () => {
+		const model = getModel("amazon-bedrock", "global.anthropic.claude-opus-5");
+
+		const payload = await capturePayload(model, { cacheRetention: "short" });
+
+		expect(payload.system?.some((block) => block.cachePoint !== undefined)).toBe(true);
+		expect(payload.messages?.at(-1)?.content?.some((block) => block.cachePoint !== undefined)).toBe(true);
+	});
+
+	it("preserves the inference-profile validation message when the AWS response body is a stream", async () => {
+		const model = getModel("amazon-bedrock", "global.anthropic.claude-opus-5");
+		const validationError = Object.assign(
+			new Error(
+				"Invocation of model ID anthropic.claude-opus-5 with on-demand throughput isn't supported. Retry with an inference profile.",
+			),
+			{
+				name: "ValidationException",
+				$metadata: { httpStatusCode: 400 },
+				$response: {
+					statusCode: 400,
+					body: { pipe: () => undefined, _readableState: { buffer: [], length: 0 } },
+				},
+			},
+		);
+
+		const result = await streamBedrock(model, makeContext(), {
+			onPayload: () => {
+				throw validationError;
+			},
+		}).result();
+
+		expect(result.stopReason).toBe("error");
+		expect(result.errorMessage).toContain("on-demand throughput isn't supported");
+		expect(result.errorMessage).toContain("inference profile");
+		expect(result.errorMessage).not.toContain("_readableState");
 	});
 
 	it("omits display for GovCloud model ids on non-adaptive Claude thinking", async () => {

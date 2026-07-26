@@ -3,11 +3,17 @@
 ### Added
 
 - Added a bounded OpenAI Codex subscription account client for listing and redeeming earned usage-limit resets.
+- Added host-managed Amazon Bedrock SSO recovery with exact-profile handoff and one pre-response request replay.
+
+### Changed
+
+- Refreshed the generated model catalogue from current models.dev, OpenRouter, and Vercel AI Gateway metadata.
 
 ### Fixed
 
 - Preserved structured status and error codes from OpenAI Codex stream failures so shared retry policy does not depend on unstable prose.
 - Consolidated ChatGPT account-ID decoding and request-header construction across OAuth, model requests, and subscription account requests.
+- Corrected Claude Opus 5 on Amazon Bedrock to expose inference-profile IDs only, use adaptive thinking with xhigh/max effort and prompt caching, and preserve AWS validation messages without serializing response-stream internals.
 
 ## [0.81.40] - 2026-07-24
 

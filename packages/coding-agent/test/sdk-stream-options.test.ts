@@ -77,6 +77,7 @@ describe("createAgentSession stream options", () => {
 		settings: { httpIdleTimeoutMs?: number; websocketConnectTimeoutMs?: number },
 		requestOptions: SimpleStreamOptions = {},
 		provider = "capture-provider",
+		isChildSession = false,
 	): Promise<SimpleStreamOptions | undefined> {
 		const model = createModel(api, provider);
 		const settingsManager = SettingsManager.inMemory(settings);
@@ -103,6 +104,7 @@ describe("createAgentSession stream options", () => {
 			modelRegistry,
 			settingsManager,
 			sessionManager,
+			isChildSession,
 		});
 
 		try {
@@ -118,6 +120,25 @@ describe("createAgentSession stream options", () => {
 		const options = await captureStreamOptions("openai-codex-responses", { httpIdleTimeoutMs: 1234 });
 
 		expect(options?.timeoutMs).toBe(1234);
+	});
+
+	it("marks a direct foreground SDK request as user-facing", async () => {
+		const options = await captureStreamOptions("openai-completions", {});
+
+		expect(options?.interactionMode).toBe("user");
+		expect(options?.onInteractiveAuthRecovery).toBeTypeOf("function");
+	});
+
+	it("clamps child SDK requests to background mode", async () => {
+		const options = await captureStreamOptions(
+			"openai-completions",
+			{},
+			{ interactionMode: "user" },
+			"capture-provider",
+			true,
+		);
+
+		expect(options?.interactionMode).toBe("background");
 	});
 
 	it("forwards httpIdleTimeoutMs as timeoutMs for other providers", async () => {

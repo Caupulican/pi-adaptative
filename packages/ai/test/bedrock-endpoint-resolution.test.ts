@@ -2,6 +2,7 @@ import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 
 const bedrockMock = vi.hoisted(() => ({
 	constructorCalls: [] as Array<Record<string, unknown>>,
+	send: vi.fn<() => Promise<unknown>>(),
 }));
 
 vi.mock("@aws-sdk/client-bedrock-runtime", () => {
@@ -12,8 +13,8 @@ vi.mock("@aws-sdk/client-bedrock-runtime", () => {
 			bedrockMock.constructorCalls.push(config);
 		}
 
-		send(): Promise<never> {
-			return Promise.reject(new Error("mock send"));
+		send(): Promise<unknown> {
+			return bedrockMock.send();
 		}
 	}
 
@@ -45,7 +46,7 @@ vi.mock("@aws-sdk/client-bedrock-runtime", () => {
 });
 
 import { getModel } from "../src/models.ts";
-import { streamBedrock } from "../src/providers/amazon-bedrock.ts";
+import { streamBedrock, streamSimpleBedrock } from "../src/providers/amazon-bedrock.ts";
 import type { Context, Model } from "../src/types.ts";
 
 const context: Context = {
@@ -58,6 +59,8 @@ const originalAwsProfile = process.env.AWS_PROFILE;
 
 beforeEach(() => {
 	bedrockMock.constructorCalls.length = 0;
+	bedrockMock.send.mockReset();
+	bedrockMock.send.mockRejectedValue(new Error("mock send"));
 	delete process.env.AWS_REGION;
 	delete process.env.AWS_DEFAULT_REGION;
 	delete process.env.AWS_PROFILE;
@@ -83,8 +86,11 @@ afterEach(() => {
 	}
 });
 
-async function captureClientConfig(model: Model<"bedrock-converse-stream">): Promise<Record<string, unknown>> {
-	await streamBedrock(model, context, { cacheRetention: "none" }).result();
+async function captureClientConfig(
+	model: Model<"bedrock-converse-stream">,
+	options: { profile?: string } = {},
+): Promise<Record<string, unknown>> {
+	await streamBedrock(model, context, { cacheRetention: "none", ...options }).result();
 	expect(bedrockMock.constructorCalls).toHaveLength(1);
 	return bedrockMock.constructorCalls[0];
 }
@@ -127,5 +133,282 @@ describe("bedrock endpoint resolution", () => {
 
 		expect(config.endpoint).toBe("https://bedrock-vpc.example.com");
 		expect(config.region).toBe("us-west-2");
+	});
+
+	it("lets an explicit profile resolve its own region instead of pinning the catalog endpoint", async () => {
+		const model = getModel("amazon-bedrock", "eu.anthropic.claude-sonnet-4-5-20250929-v1:0");
+
+		const config = await captureClientConfig(model, { profile: "work-sso" });
+
+		expect(config.profile).toBe("work-sso");
+		expect(config.region).toBeUndefined();
+		expect(config.endpoint).toBeUndefined();
+	});
+});
+
+describe("bedrock SSO recovery", () => {
+	function successfulResponse(): unknown {
+		return {
+			$metadata: {},
+			stream: (async function* () {
+				yield { messageStart: { role: "assistant" } };
+				yield { messageStop: { stopReason: "end_turn" } };
+			})(),
+		};
+	}
+
+	it("uses the recovery callback owned by the request", async () => {
+		process.env.AWS_PROFILE = "work-sso";
+		const expired = Object.assign(new Error("The SSO session has expired; run aws sso login"), {
+			name: "CredentialsProviderError",
+		});
+		bedrockMock.send.mockRejectedValueOnce(expired).mockResolvedValueOnce(successfulResponse());
+		const recovery = vi.fn(async () => true);
+		const model = getModel("amazon-bedrock", "us.anthropic.claude-opus-4-8");
+
+		const result = await streamBedrock(model, context, {
+			cacheRetention: "none",
+			onInteractiveAuthRecovery: recovery,
+		}).result();
+
+		expect(result.stopReason).toBe("stop");
+		expect(recovery).toHaveBeenCalledOnce();
+		expect(bedrockMock.send).toHaveBeenCalledTimes(2);
+	});
+
+	it("recovers the implicit default profile selected by the AWS SDK", async () => {
+		const expired = Object.assign(new Error("The SSO session has expired; run aws sso login"), {
+			name: "CredentialsProviderError",
+		});
+		bedrockMock.send.mockRejectedValueOnce(expired).mockResolvedValueOnce(successfulResponse());
+		const recovery = vi.fn(async () => true);
+		const model = getModel("amazon-bedrock", "us.anthropic.claude-opus-4-8");
+
+		const result = await streamBedrock(model, context, {
+			cacheRetention: "none",
+			onInteractiveAuthRecovery: recovery,
+		}).result();
+
+		expect(result.stopReason).toBe("stop");
+		expect(recovery).toHaveBeenCalledWith(expect.objectContaining({ profile: "default" }));
+		expect(bedrockMock.send).toHaveBeenCalledTimes(2);
+	});
+
+	it("bounds recovery handoff details and honors a declined recovery", async () => {
+		process.env.AWS_PROFILE = "work-sso";
+		const expired = Object.assign(new Error(`The SSO session has expired; run aws sso login. ${"x".repeat(2_000)}`), {
+			name: "CredentialsProviderError",
+		});
+		bedrockMock.send.mockRejectedValue(expired);
+		let handedOffMessage = "";
+		const recovery = vi.fn(async (request: { errorMessage: string }) => {
+			handedOffMessage = request.errorMessage;
+			return false;
+		});
+		const model = getModel("amazon-bedrock", "us.anthropic.claude-opus-4-8");
+
+		const result = await streamBedrock(model, context, {
+			cacheRetention: "none",
+			onInteractiveAuthRecovery: recovery,
+		}).result();
+
+		expect(result.stopReason).toBe("error");
+		expect(recovery).toHaveBeenCalledOnce();
+		expect(handedOffMessage.length).toBeLessThanOrEqual(512);
+		expect(bedrockMock.send).toHaveBeenCalledOnce();
+	});
+
+	it("logs into the exact configured profile and retries once with a fresh client", async () => {
+		process.env.AWS_PROFILE = "work-sso";
+		const expired = Object.assign(
+			new Error(
+				"The SSO session associated with this profile has expired. To refresh this SSO session run aws sso login with the corresponding profile.",
+			),
+			{ name: "CredentialsProviderError" },
+		);
+		bedrockMock.send.mockRejectedValueOnce(expired).mockResolvedValueOnce(successfulResponse());
+		const login = vi.fn(async () => true);
+		const model = getModel("amazon-bedrock", "us.anthropic.claude-opus-4-8");
+
+		const result = await streamBedrock(model, context, {
+			cacheRetention: "none",
+			onInteractiveAuthRecovery: login,
+		}).result();
+
+		expect(result.stopReason).toBe("stop");
+		expect(login).toHaveBeenCalledOnce();
+		expect(login).toHaveBeenCalledWith(
+			expect.objectContaining({ profile: "work-sso", errorName: "CredentialsProviderError" }),
+		);
+		expect(bedrockMock.constructorCalls).toHaveLength(2);
+		expect(bedrockMock.send).toHaveBeenCalledTimes(2);
+	});
+
+	it("recovers when the SDK wraps the SSO credential failure as a cause", async () => {
+		process.env.AWS_PROFILE = "work-sso";
+		const expired = Object.assign(new Error("The SSO session is invalid; run aws sso login"), {
+			name: "CredentialsProviderError",
+		});
+		bedrockMock.send
+			.mockRejectedValueOnce(new Error("credential resolution failed", { cause: expired }))
+			.mockResolvedValueOnce(successfulResponse());
+		const login = vi.fn(async () => true);
+		const model = getModel("amazon-bedrock", "us.anthropic.claude-opus-4-8");
+
+		const result = await streamBedrock(model, context, {
+			cacheRetention: "none",
+			onInteractiveAuthRecovery: login,
+		}).result();
+
+		expect(result.stopReason).toBe("stop");
+		expect(login).toHaveBeenCalledWith(
+			expect.objectContaining({ errorName: "CredentialsProviderError", profile: "work-sso" }),
+		);
+		expect(bedrockMock.send).toHaveBeenCalledTimes(2);
+	});
+
+	it("bounds repeated SSO expiry to one login and one request replay", async () => {
+		process.env.AWS_PROFILE = "work-sso";
+		const expired = Object.assign(new Error("The SSO session has expired; run aws sso login"), {
+			name: "CredentialsProviderError",
+		});
+		bedrockMock.send.mockRejectedValue(expired);
+		const login = vi.fn(async () => true);
+		const model = getModel("amazon-bedrock", "us.anthropic.claude-opus-4-8");
+
+		const result = await streamBedrock(model, context, {
+			cacheRetention: "none",
+			onInteractiveAuthRecovery: login,
+		}).result();
+
+		expect(result.stopReason).toBe("error");
+		expect(login).toHaveBeenCalledOnce();
+		expect(bedrockMock.send).toHaveBeenCalledTimes(2);
+	});
+
+	it("does not reinterpret an expired static session token as SSO", async () => {
+		process.env.AWS_PROFILE = "static-profile";
+		const expired = Object.assign(new Error("The security token included in the request is expired"), {
+			name: "ExpiredTokenException",
+		});
+		bedrockMock.send.mockRejectedValue(expired);
+		const login = vi.fn(async () => true);
+		const model = getModel("amazon-bedrock", "us.anthropic.claude-opus-4-8");
+
+		const result = await streamBedrock(model, context, {
+			cacheRetention: "none",
+			onInteractiveAuthRecovery: login,
+		}).result();
+
+		expect(result.stopReason).toBe("error");
+		expect(login).not.toHaveBeenCalled();
+		expect(bedrockMock.send).toHaveBeenCalledOnce();
+	});
+
+	it("does not start interactive recovery for a background request", async () => {
+		process.env.AWS_PROFILE = "work-sso";
+		const expired = Object.assign(new Error("The SSO session has expired; run aws sso login"), {
+			name: "CredentialsProviderError",
+		});
+		bedrockMock.send.mockRejectedValue(expired);
+		const login = vi.fn(async () => true);
+		const model = getModel("amazon-bedrock", "us.anthropic.claude-opus-4-8");
+
+		const result = await streamBedrock(model, context, {
+			cacheRetention: "none",
+			interactionMode: "background",
+			onInteractiveAuthRecovery: login,
+		}).result();
+
+		expect(result.stopReason).toBe("error");
+		expect(login).not.toHaveBeenCalled();
+		expect(bedrockMock.send).toHaveBeenCalledOnce();
+	});
+
+	it("preserves background mode through the simple-stream adapter", async () => {
+		process.env.AWS_PROFILE = "work-sso";
+		const expired = Object.assign(new Error("The SSO session has expired; run aws sso login"), {
+			name: "CredentialsProviderError",
+		});
+		bedrockMock.send.mockRejectedValue(expired);
+		const login = vi.fn(async () => true);
+		const model = getModel("amazon-bedrock", "us.anthropic.claude-opus-4-8");
+
+		const result = await streamSimpleBedrock(model, context, {
+			cacheRetention: "none",
+			interactionMode: "background",
+			onInteractiveAuthRecovery: login,
+		}).result();
+
+		expect(result.stopReason).toBe("error");
+		expect(login).not.toHaveBeenCalled();
+		expect(bedrockMock.send).toHaveBeenCalledOnce();
+	});
+
+	it("preserves request-owned recovery through the simple-stream adapter", async () => {
+		process.env.AWS_PROFILE = "work-sso";
+		const expired = Object.assign(new Error("The SSO session has expired; run aws sso login"), {
+			name: "CredentialsProviderError",
+		});
+		bedrockMock.send.mockRejectedValueOnce(expired).mockResolvedValueOnce(successfulResponse());
+		const login = vi.fn(async () => true);
+		const model = getModel("amazon-bedrock", "us.anthropic.claude-opus-4-8");
+
+		const result = await streamSimpleBedrock(model, context, {
+			cacheRetention: "none",
+			interactionMode: "user",
+			onInteractiveAuthRecovery: login,
+		}).result();
+
+		expect(result.stopReason).toBe("stop");
+		expect(login).toHaveBeenCalledOnce();
+		expect(bedrockMock.send).toHaveBeenCalledTimes(2);
+	});
+
+	it("does not start recovery after request cancellation", async () => {
+		process.env.AWS_PROFILE = "work-sso";
+		const expired = Object.assign(new Error("The SSO session has expired; run aws sso login"), {
+			name: "CredentialsProviderError",
+		});
+		bedrockMock.send.mockRejectedValue(expired);
+		const login = vi.fn(async () => true);
+		const controller = new AbortController();
+		controller.abort();
+		const model = getModel("amazon-bedrock", "us.anthropic.claude-opus-4-8");
+
+		const result = await streamBedrock(model, context, {
+			cacheRetention: "none",
+			signal: controller.signal,
+			onInteractiveAuthRecovery: login,
+		}).result();
+
+		expect(result.stopReason).toBe("aborted");
+		expect(login).not.toHaveBeenCalled();
+		expect(bedrockMock.send).toHaveBeenCalledOnce();
+	});
+
+	it("never replays after the response stream has started", async () => {
+		process.env.AWS_PROFILE = "work-sso";
+		const expired = Object.assign(new Error("SSO session expired; run aws sso login"), {
+			name: "CredentialsProviderError",
+		});
+		bedrockMock.send.mockResolvedValue({
+			$metadata: {},
+			stream: (async function* () {
+				yield { messageStart: { role: "assistant" } };
+				throw expired;
+			})(),
+		});
+		const login = vi.fn(async () => true);
+		const model = getModel("amazon-bedrock", "us.anthropic.claude-opus-4-8");
+
+		const result = await streamBedrock(model, context, {
+			cacheRetention: "none",
+			onInteractiveAuthRecovery: login,
+		}).result();
+
+		expect(result.stopReason).toBe("error");
+		expect(login).not.toHaveBeenCalled();
+		expect(bedrockMock.send).toHaveBeenCalledOnce();
 	});
 });

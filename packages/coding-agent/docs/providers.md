@@ -202,7 +202,7 @@ export AZURE_OPENAI_DEPLOYMENT_NAME_MAP=gpt-4=my-gpt4,gpt-4o=my-gpt4o
 ### Amazon Bedrock
 
 ```bash
-# Option 1: AWS Profile
+# Option 1: AWS Profile (recommended for IAM Identity Center / SSO)
 export AWS_PROFILE=your-profile
 
 # Option 2: IAM Keys
@@ -215,6 +215,14 @@ export AWS_BEARER_TOKEN_BEDROCK=...
 # Optional region (defaults to us-east-1)
 export AWS_REGION=us-west-2
 ```
+
+For an SSO profile, AWS CLI v2 is required and the modern `sso-session` profile format is recommended.
+Start Pi with `AWS_PROFILE` set, or run `/login amazon-bedrock` and enter the profile name for the
+current Pi process. Pi runs `aws sso login --profile <profile>` without a shell. The AWS SDK refreshes
+ordinary role credentials; if the underlying SSO session later expires, Pi performs one foreground
+login and replays the Bedrock request once, only before a response has started. Background and worker
+requests never open a browser and instead return an authentication-required error to the owning
+session.
 
 Also supports ECS task roles (`AWS_CONTAINER_CREDENTIALS_*`) and IRSA (`AWS_WEB_IDENTITY_TOKEN_FILE`).
 

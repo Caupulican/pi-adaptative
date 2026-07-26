@@ -5,6 +5,7 @@
 - Added a provider-neutral shell search guard that rejects broad `rg`/recursive `grep`/`find`/`fd` scans before execution and supports an explicit managed-file override with bounded disk use.
 - Added an OpenAI subscription `/usage` flow for inspecting earned reset passes, reviewing reset details, confirming redemption, retrying idempotently, and refreshing remaining availability.
 - Added one event-driven activity lane above the editor for routing, tools, task steps, goals, workers, queues, compaction, and retries, plus an explicit `--session-mode user|worker` audience contract for unattended terminals.
+- Added managed Amazon Bedrock SSO login for the exact configured AWS profile, with bounded single-flight CLI execution, automatic pre-response recovery, and a strict no-browser boundary for worker and background requests.
 
 ### Changed
 

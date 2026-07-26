@@ -15,6 +15,7 @@ import { getProviders, type Model, type OAuthProviderId, type OAuthSelectPrompt 
 import type { Component, TUI } from "@caupulican/pi-tui";
 import { getAuthPath, getDocsPath } from "../../config.ts";
 import type { AgentSession } from "../../core/agent-session.ts";
+import { type BedrockSsoLoginOptions, loginBedrockSsoProfile } from "../../core/bedrock-sso-login.ts";
 import { cliProviderAliases, defaultModelPerProvider } from "../../core/model-resolver.ts";
 import { BUILT_IN_PROVIDER_DISPLAY_NAMES } from "../../core/provider-display-names.ts";
 import { ExtensionSelectorComponent } from "./components/extension-selector.ts";
@@ -67,6 +68,7 @@ export interface AuthDialogsControllerUi {
 export interface AuthDialogsControllerDeps {
 	getSession(): AgentSession;
 	ui: AuthDialogsControllerUi;
+	loginBedrockSso?: (profile: string, options?: BedrockSsoLoginOptions) => Promise<void>;
 }
 
 export class AuthDialogsController {
@@ -405,6 +407,30 @@ export class AuthDialogsController {
 	}
 
 	private showBedrockSetupDialog(providerId: string, providerName: string): void {
+		const configuredProfile = process.env.AWS_PROFILE?.trim();
+		const ssoLabel = configuredProfile
+			? `Sign in with SSO profile "${configuredProfile}"`
+			: "Sign in with an AWS SSO profile";
+		const otherLabel = "Use IAM, bearer, or role credentials";
+		this.ui.showSelector((done) => {
+			const selector = new ExtensionSelectorComponent(
+				"Set up Amazon Bedrock:",
+				[ssoLabel, otherLabel],
+				(option) => {
+					done();
+					if (option === ssoLabel) void this.showBedrockSsoDialog(providerId, providerName);
+					else this.showBedrockCredentialInfoDialog(providerId, providerName);
+				},
+				() => {
+					done();
+					this.ui.requestRender();
+				},
+			);
+			return { component: selector, focus: selector };
+		});
+	}
+
+	private showBedrockCredentialInfoDialog(providerId: string, providerName: string): void {
 		this.cancelActiveDialog();
 		const dialog = new LoginDialogComponent(
 			this.ui.tui,
@@ -417,12 +443,56 @@ export class AuthDialogsController {
 		);
 		dialog.showInfo([
 			theme.fg("text", "Amazon Bedrock uses AWS credentials instead of a single API key."),
-			theme.fg("text", "Configure an AWS profile, IAM keys, bearer token, or role-based credentials."),
+			theme.fg("text", "Configure IAM keys, a bearer token, or role-based credentials before starting Pi."),
 			theme.fg("muted", "See:"),
 			theme.fg("accent", `  ${path.join(getDocsPath(), "providers.md")}`),
 		]);
-
 		this.mountLoginDialog(dialog);
+	}
+
+	private async showBedrockSsoDialog(providerId: string, providerName: string): Promise<void> {
+		this.cancelActiveDialog();
+		const dialog = new LoginDialogComponent(
+			this.ui.tui,
+			providerId,
+			() => {
+				this.restoreEditorFromDialog(dialog);
+			},
+			providerName,
+			"Amazon Bedrock SSO",
+		);
+		this.mountLoginDialog(dialog);
+		const restoreEditor = () => this.restoreEditorFromDialog(dialog);
+
+		try {
+			const configuredProfile = process.env.AWS_PROFILE?.trim();
+			const profile =
+				configuredProfile ?? (await dialog.showPrompt("AWS SSO profile name:", "my-work-profile")).trim();
+			if (!profile) throw new Error("AWS profile name cannot be empty.");
+
+			if (configuredProfile) {
+				dialog.showInfo([
+					theme.fg("text", `Using AWS profile: ${profile}`),
+					theme.fg("muted", "Complete the IAM Identity Center sign-in in your browser."),
+				]);
+			}
+			dialog.showProgress("Waiting for AWS SSO authentication...");
+			await (this.deps.loginBedrockSso ?? loginBedrockSsoProfile)(profile, { signal: dialog.signal });
+			process.env.AWS_PROFILE = profile;
+
+			if (!restoreEditor()) return;
+			this.session.modelRegistry.refresh();
+			await this.ui.updateAvailableProviderCount();
+			this.ui.invalidateFooter();
+			this.ui.updateEditorBorderColor();
+			this.ui.showStatus(`Signed in with AWS profile "${profile}". The AWS SSO session is ready.`);
+		} catch (error: unknown) {
+			if (!restoreEditor()) return;
+			const message = error instanceof Error ? error.message : String(error);
+			if (message !== "Login cancelled" && message !== "AWS SSO login was cancelled") {
+				this.ui.showError(`Failed to sign in to ${providerName}: ${message}`);
+			}
+		}
 	}
 
 	private async showApiKeyLoginDialog(providerId: string, providerName: string): Promise<void> {

@@ -2,10 +2,11 @@ import { describe, expect, it } from "vitest";
 import { getModel, getSupportedThinkingLevels } from "../src/models.ts";
 
 describe("getSupportedThinkingLevels", () => {
-	it("includes xhigh for Anthropic Opus 4.6 on anthropic-messages API", () => {
+	it("includes max but not xhigh for Anthropic Opus 4.6 on anthropic-messages API", () => {
 		const model = getModel("anthropic", "claude-opus-4-6");
 		expect(model).toBeDefined();
-		expect(getSupportedThinkingLevels(model!)).toContain("xhigh");
+		expect(getSupportedThinkingLevels(model!)).toContain("max");
+		expect(getSupportedThinkingLevels(model!)).not.toContain("xhigh");
 	});
 
 	it("includes xhigh for Anthropic Opus 4.8 on anthropic-messages API", () => {
@@ -14,10 +15,10 @@ describe("getSupportedThinkingLevels", () => {
 		expect(getSupportedThinkingLevels(model!)).toContain("xhigh");
 	});
 
-	it("includes xhigh for Anthropic Opus 4.8 on anthropic-messages API", () => {
-		const model = getModel("anthropic", "claude-opus-4-8");
+	it("includes xhigh and max for Bedrock Claude Opus 5", () => {
+		const model = getModel("amazon-bedrock", "global.anthropic.claude-opus-5");
 		expect(model).toBeDefined();
-		expect(getSupportedThinkingLevels(model!)).toContain("xhigh");
+		expect(getSupportedThinkingLevels(model!)).toEqual(expect.arrayContaining(["xhigh", "max"]));
 	});
 
 	it("does not include xhigh for non-Opus Anthropic models", () => {
@@ -74,9 +75,10 @@ describe("getSupportedThinkingLevels", () => {
 		expect(getSupportedThinkingLevels(model!)).toEqual(["off", "high", "xhigh"]);
 	});
 
-	it("includes xhigh for OpenRouter Opus 4.6 (openai-completions API)", () => {
+	it("includes max but not xhigh for OpenRouter Opus 4.6 (openai-completions API)", () => {
 		const model = getModel("openrouter", "anthropic/claude-opus-4.6");
 		expect(model).toBeDefined();
-		expect(getSupportedThinkingLevels(model!)).toContain("xhigh");
+		expect(getSupportedThinkingLevels(model!)).toContain("max");
+		expect(getSupportedThinkingLevels(model!)).not.toContain("xhigh");
 	});
 });

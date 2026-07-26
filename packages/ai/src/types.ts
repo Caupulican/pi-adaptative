@@ -105,7 +105,25 @@ export interface TextToolProtocolParseEvent {
 	reason?: TextToolProtocolParseFailure;
 }
 
+export interface InteractiveAuthRecoveryRequest {
+	method: "aws-sso";
+	providerId: string;
+	profile: string;
+	errorName?: string;
+	errorMessage: string;
+	signal?: AbortSignal;
+}
+
+export type InteractiveAuthRecoveryHandler = (request: InteractiveAuthRecoveryRequest) => boolean | Promise<boolean>;
+
 export interface StreamOptions {
+	/**
+	 * Whether a human-facing host may perform interactive recovery for this request.
+	 * Background lanes must set "background" so providers never open browsers or request input.
+	 */
+	interactionMode?: "user" | "background";
+	/** Request-scoped host boundary for human authentication. Never invoked by background requests. */
+	onInteractiveAuthRecovery?: InteractiveAuthRecoveryHandler;
 	/**
 	 * Recover one rejected OAuth credential before any response body is consumed.
 	 * The callback must not expose credentials in diagnostics.

@@ -49,6 +49,7 @@ import { parseStreamingJson } from "../utils/json-parse.ts";
 import { createHttpProxyAgentsForTarget } from "../utils/node-http-proxy.ts";
 import { sanitizeSurrogates } from "../utils/sanitize-unicode.ts";
 import { createToolNameMap, type ToolNameMap } from "../utils/tool-names.ts";
+import { getRecoverableBedrockSsoError } from "./bedrock-sso.ts";
 import { adjustMaxTokensForThinking, buildBaseOptions, clampReasoning } from "./simple-options.ts";
 import { transformMessages } from "./transform-messages.ts";
 
@@ -122,10 +123,12 @@ export const streamBedrock: StreamFunction<"bedrock-converse-stream", BedrockOpt
 		const blocks = output.content as Block[];
 
 		const config: BedrockRuntimeClientConfig = {
-			profile: options.profile,
+			profile: options.profile?.trim() || undefined,
 		};
 		const configuredRegion = getConfiguredBedrockRegion(options);
-		const hasConfiguredProfile = hasConfiguredBedrockProfile();
+		const configuredProfile = getConfiguredBedrockProfile(options);
+		const recoveryProfile = configuredProfile ?? "default";
+		const hasConfiguredProfile = configuredProfile !== undefined;
 		const endpointRegion = getStandardBedrockEndpointRegion(model.baseUrl);
 		const useExplicitEndpoint = shouldUseExplicitBedrockEndpoint(
 			model.baseUrl,
@@ -148,7 +151,7 @@ export const streamBedrock: StreamFunction<"bedrock-converse-stream", BedrockOpt
 		if (typeof process !== "undefined" && (process.versions?.node || process.versions?.bun)) {
 			// Region resolution: explicit option > env vars > SDK default chain.
 			// When AWS_PROFILE is set, we leave region undefined so the SDK can
-			// resovle it from aws profile configs. Otherwise fall back to us-east-1.
+			// resolve it from AWS profile config. Otherwise fall back to us-east-1.
 			if (configuredRegion) {
 				config.region = configuredRegion;
 			} else if (endpointRegion && useExplicitEndpoint) {
@@ -188,10 +191,6 @@ export const streamBedrock: StreamFunction<"bedrock-converse-stream", BedrockOpt
 		}
 
 		try {
-			const client = new BedrockRuntimeClient(config);
-			if (options.headers && Object.keys(options.headers).length > 0) {
-				addCustomHeadersMiddleware(client, options.headers);
-			}
 			const cacheRetention = resolveCacheRetention(options.cacheRetention);
 			const inferenceMaxTokens = options.maxTokens ?? (isAnthropicClaudeModel(model) ? model.maxTokens : undefined);
 			let commandInput = {
@@ -210,59 +209,97 @@ export const streamBedrock: StreamFunction<"bedrock-converse-stream", BedrockOpt
 			if (nextCommandInput !== undefined) {
 				commandInput = nextCommandInput as typeof commandInput;
 			}
-			const command = new ConverseStreamCommand(commandInput);
-
-			const response = await client.send(command, { abortSignal: options.signal });
-			if (response.$metadata.httpStatusCode !== undefined) {
-				const responseHeaders: Record<string, string> = {};
-				if (response.$metadata.requestId) {
-					responseHeaders["x-amzn-requestid"] = response.$metadata.requestId;
-				}
-				await options?.onResponse?.({ status: response.$metadata.httpStatusCode, headers: responseHeaders }, model);
-			}
-
-			if (!response.stream) {
-				throw new Error("Bedrock returned a response without a stream");
-			}
-			for await (const item of response.stream) {
-				if (item.messageStart) {
-					if (item.messageStart.role !== ConversationRole.ASSISTANT) {
-						throw new Error("Unexpected assistant message start but got user message start instead");
+			let ssoRecoveryAttempted = false;
+			while (true) {
+				let receivedResponse = false;
+				try {
+					const client = new BedrockRuntimeClient(config);
+					if (options.headers && Object.keys(options.headers).length > 0) {
+						addCustomHeadersMiddleware(client, options.headers);
 					}
-					stream.push({ type: "start", partial: output });
-				} else if (item.contentBlockStart) {
-					handleContentBlockStart(item.contentBlockStart, blocks, output, stream, toolNameMap);
-				} else if (item.contentBlockDelta) {
-					handleContentBlockDelta(item.contentBlockDelta, blocks, output, stream);
-				} else if (item.contentBlockStop) {
-					handleContentBlockStop(item.contentBlockStop, blocks, output, stream);
-				} else if (item.messageStop) {
-					output.stopReason = mapStopReason(item.messageStop.stopReason);
-				} else if (item.metadata) {
-					handleMetadata(item.metadata, model, output);
-				} else if (item.internalServerException) {
-					throw item.internalServerException;
-				} else if (item.modelStreamErrorException) {
-					throw item.modelStreamErrorException;
-				} else if (item.validationException) {
-					throw item.validationException;
-				} else if (item.throttlingException) {
-					throw item.throttlingException;
-				} else if (item.serviceUnavailableException) {
-					throw item.serviceUnavailableException;
+					const command = new ConverseStreamCommand(commandInput);
+					const response = await client.send(command, { abortSignal: options.signal });
+					receivedResponse = true;
+					if (response.$metadata.httpStatusCode !== undefined) {
+						const responseHeaders: Record<string, string> = {};
+						if (response.$metadata.requestId) {
+							responseHeaders["x-amzn-requestid"] = response.$metadata.requestId;
+						}
+						await options?.onResponse?.(
+							{ status: response.$metadata.httpStatusCode, headers: responseHeaders },
+							model,
+						);
+					}
+
+					if (!response.stream) {
+						throw new Error("Bedrock returned a response without a stream");
+					}
+					for await (const item of response.stream) {
+						if (item.messageStart) {
+							if (item.messageStart.role !== ConversationRole.ASSISTANT) {
+								throw new Error("Unexpected assistant message start but got user message start instead");
+							}
+							stream.push({ type: "start", partial: output });
+						} else if (item.contentBlockStart) {
+							handleContentBlockStart(item.contentBlockStart, blocks, output, stream, toolNameMap);
+						} else if (item.contentBlockDelta) {
+							handleContentBlockDelta(item.contentBlockDelta, blocks, output, stream);
+						} else if (item.contentBlockStop) {
+							handleContentBlockStop(item.contentBlockStop, blocks, output, stream);
+						} else if (item.messageStop) {
+							output.stopReason = mapStopReason(item.messageStop.stopReason);
+						} else if (item.metadata) {
+							handleMetadata(item.metadata, model, output);
+						} else if (item.internalServerException) {
+							throw item.internalServerException;
+						} else if (item.modelStreamErrorException) {
+							throw item.modelStreamErrorException;
+						} else if (item.validationException) {
+							throw item.validationException;
+						} else if (item.throttlingException) {
+							throw item.throttlingException;
+						} else if (item.serviceUnavailableException) {
+							throw item.serviceUnavailableException;
+						}
+					}
+
+					if (options.signal?.aborted) {
+						throw new Error("Request was aborted");
+					}
+
+					if (output.stopReason === "error" || output.stopReason === "aborted") {
+						throw new Error("An unknown error occurred");
+					}
+
+					stream.push({ type: "done", reason: output.stopReason, message: output });
+					stream.end();
+					break;
+				} catch (error) {
+					const ssoError = getRecoverableBedrockSsoError(error);
+					if (
+						!ssoRecoveryAttempted &&
+						!receivedResponse &&
+						!options.signal?.aborted &&
+						options.interactionMode !== "background" &&
+						options.onInteractiveAuthRecovery &&
+						ssoError &&
+						!useBearerToken &&
+						process.env.AWS_BEDROCK_SKIP_AUTH !== "1" &&
+						(await options.onInteractiveAuthRecovery({
+							method: "aws-sso",
+							providerId: model.provider,
+							profile: recoveryProfile,
+							...(ssoError.name ? { errorName: ssoError.name } : {}),
+							errorMessage: ssoError.message,
+							...(options.signal ? { signal: options.signal } : {}),
+						}))
+					) {
+						ssoRecoveryAttempted = true;
+						continue;
+					}
+					throw error;
 				}
 			}
-
-			if (options.signal?.aborted) {
-				throw new Error("Request was aborted");
-			}
-
-			if (output.stopReason === "error" || output.stopReason === "aborted") {
-				throw new Error("An unknown error occurred");
-			}
-
-			stream.push({ type: "done", reason: output.stopReason, message: output });
-			stream.end();
 		} catch (error) {
 			for (const block of output.content) {
 				delete (block as Block).index;
@@ -543,13 +580,27 @@ function getModelMatchCandidates(modelId: string, modelName?: string): string[] 
 function supportsAdaptiveThinking(modelId: string, modelName?: string): boolean {
 	const candidates = getModelMatchCandidates(modelId, modelName);
 	return candidates.some(
-		(s) => s.includes("opus-4-6") || s.includes("opus-4-7") || s.includes("opus-4-8") || s.includes("sonnet-4-6"),
+		(s) =>
+			s.includes("opus-4-6") ||
+			s.includes("opus-4-7") ||
+			s.includes("opus-4-8") ||
+			s.includes("opus-5") ||
+			s.includes("sonnet-4-6") ||
+			s.includes("sonnet-5") ||
+			s.includes("fable-5"),
 	);
 }
 
 function supportsNativeXhighEffort(model: Model<"bedrock-converse-stream">): boolean {
 	const candidates = getModelMatchCandidates(model.id, model.name);
-	return candidates.some((s) => s.includes("opus-4-7") || s.includes("opus-4-8"));
+	return candidates.some(
+		(s) =>
+			s.includes("opus-4-7") ||
+			s.includes("opus-4-8") ||
+			s.includes("opus-5") ||
+			s.includes("sonnet-5") ||
+			s.includes("fable-5"),
+	);
 }
 
 function mapThinkingLevelToEffort(
@@ -627,6 +678,8 @@ function supportsPromptCaching(model: Model<"bedrock-converse-stream">): boolean
 		if (typeof process !== "undefined" && process.env.AWS_BEDROCK_FORCE_CACHE === "1") return true;
 		return false;
 	}
+	// Claude 5 models (fable-5, opus-5, sonnet-5)
+	if (candidates.some((s) => s.includes("fable-5") || s.includes("opus-5") || s.includes("sonnet-5"))) return true;
 	// Claude 4.x models (opus-4, sonnet-4, haiku-4)
 	if (candidates.some((s) => s.includes("-4-"))) return true;
 	// Claude 3.7 Sonnet
@@ -930,12 +983,12 @@ function getConfiguredBedrockRegion(options: BedrockOptions): string | undefined
 	return options.region || process.env.AWS_REGION || process.env.AWS_DEFAULT_REGION || undefined;
 }
 
-function hasConfiguredBedrockProfile(): boolean {
+function getConfiguredBedrockProfile(options: BedrockOptions): string | undefined {
 	if (typeof process === "undefined") {
-		return false;
+		return options.profile?.trim() || undefined;
 	}
 
-	return Boolean(process.env.AWS_PROFILE);
+	return options.profile?.trim() || process.env.AWS_PROFILE?.trim() || undefined;
 }
 
 function getStandardBedrockEndpointRegion(baseUrl: string | undefined): string | undefined {

@@ -48,4 +48,26 @@ describe("streamProxy", () => {
 		expect(result.stopReason).toBe("error");
 		expect(result.errorMessage).toContain("stream ended before terminal event");
 	});
+
+	it("preserves background interaction mode across the proxy boundary", async () => {
+		let requestBody: string | undefined;
+		vi.stubGlobal(
+			"fetch",
+			vi.fn(async (_input: string | URL | Request, init?: RequestInit) => {
+				requestBody = typeof init?.body === "string" ? init.body : undefined;
+				return sseResponse("");
+			}),
+		);
+
+		const stream = streamProxy(createModel(), { messages: [] } as unknown as Context, {
+			proxyUrl: "https://proxy.test",
+			authToken: "token",
+			interactionMode: "background",
+		});
+		await stream.result();
+
+		expect(requestBody).toBeDefined();
+		const request = JSON.parse(requestBody ?? "{}") as { options?: { interactionMode?: string } };
+		expect(request.options?.interactionMode).toBe("background");
+	});
 });

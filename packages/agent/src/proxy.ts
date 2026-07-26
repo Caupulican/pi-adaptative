@@ -61,6 +61,7 @@ type ProxySerializableStreamOptions = Pick<
 	SimpleStreamOptions,
 	| "temperature"
 	| "maxTokens"
+	| "interactionMode"
 	| "reasoning"
 	| "cacheRetention"
 	| "sessionId"
@@ -103,6 +104,7 @@ function buildProxyRequestOptions(options: ProxyStreamOptions): ProxySerializabl
 	return {
 		temperature: options.temperature,
 		maxTokens: options.maxTokens,
+		interactionMode: options.interactionMode,
 		reasoning: options.reasoning,
 		cacheRetention: options.cacheRetention,
 		sessionId: options.sessionId,

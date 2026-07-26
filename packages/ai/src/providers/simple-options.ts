@@ -20,6 +20,8 @@ export function buildBaseOptions(_model: Model<Api>, options?: SimpleStreamOptio
 		maxRetries: options?.maxRetries,
 		maxRetryDelayMs: options?.maxRetryDelayMs,
 		metadata: options?.metadata,
+		interactionMode: options?.interactionMode,
+		onInteractiveAuthRecovery: options?.onInteractiveAuthRecovery,
 	};
 }
 
