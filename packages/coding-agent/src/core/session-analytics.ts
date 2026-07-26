@@ -20,14 +20,7 @@ import {
 	type SessionHeader,
 	type SessionManager,
 } from "@caupulican/pi-agent-core/node";
-import type {
-	AssistantMessage,
-	Model,
-	ToolArgumentExecutionOutcome,
-	ToolArgumentTeachState,
-	ToolArgumentValidationTelemetryEvent,
-	Usage,
-} from "@caupulican/pi-ai";
+import type { AssistantMessage, Model, Usage } from "@caupulican/pi-ai";
 import { getSessionsDir } from "../config.ts";
 import { theme } from "../modes/interactive/theme/theme.ts";
 import { resolvePath } from "../utils/paths.ts";
@@ -37,7 +30,7 @@ import {
 	SPAWNED_USAGE_CUSTOM_TYPE,
 	type SpawnedUsageReport,
 	type SpawnedUsageTotals,
-} from "./agent-session.ts";
+} from "./agent-session-contracts.ts";
 import {
 	accumulateCurrentSessionCostsFromEntries,
 	type CurrentSessionCostAccumulator,
@@ -65,32 +58,11 @@ import {
 	createEmptyToolArgumentValidationStats,
 	getToolRecoveryRecordSequence,
 	readPersistedToolRecoveryStats,
+	type ToolArgumentValidationRecord,
+	type ToolArgumentValidationStats,
 } from "./tool-recovery-stats.ts";
 
 export const TOOL_ARGUMENT_VALIDATION_CUSTOM_TYPE = "tool_argument_validation";
-
-export interface ToolArgumentValidationTeachEfficacy {
-	recurrenceBefore: number;
-	recurrenceAfter: number;
-	repairedThenSucceeded: number;
-	repairedThenFailed: number;
-	repairedThenNotRun: number;
-}
-
-export interface ToolArgumentValidationStats {
-	clean: number;
-	repaired: number;
-	bounced: number;
-	failureModes: Record<string, number>;
-	repairsApplied: Record<string, number>;
-	taught: Record<ToolArgumentTeachState, number>;
-	executionOutcome: Record<ToolArgumentExecutionOutcome, number>;
-	teachEfficacy: Record<string, ToolArgumentValidationTeachEfficacy>;
-}
-
-export interface ToolArgumentValidationRecord extends ToolArgumentValidationTelemetryEvent {
-	version: 1;
-}
 
 export interface SessionAnalyticsDeps {
 	/** Live agent state — assistant-message usage and message counts are read from here. */

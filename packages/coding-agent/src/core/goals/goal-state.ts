@@ -56,30 +56,28 @@ export interface GoalState {
 	 * invocation for its lifetime (idle-driven auto-continues and manual continues alike) —
 	 * durable via goal-state persistence, so it survives process restarts and idle cycles.
 	 * Optional because snapshots persisted before this field existed carry no value; treat
-	 * `undefined` as `0` everywhere it is read (see `applyGoalEvent`'s `record_continuation_budget`
-	 * case and `goal-loop-controller.ts`'s budget check).
+	 * `undefined` as `0` everywhere it is read.
 	 */
 	continuationTurnsUsed?: number;
 	/**
-	 * Cumulative ACTIVE wall-clock milliseconds spent running continuation passes for this goal —
+	 * Observed cumulative ACTIVE wall-clock milliseconds spent running continuation passes for this goal —
 	 * the sum of each individual pass's own await duration, NOT wall-clock time elapsed between
 	 * passes or during idle gaps. Same backward-compat/undefined-as-0 note as `continuationTurnsUsed`.
 	 */
 	continuationWallClockMs?: number;
 	/**
-	 * Cumulative USD attributed to this goal's own continuation passes, derived from the session's
-	 * own model spend (`getCostSummary().ownCost` at the persistence dep) — deliberately excludes
-	 * worker/subagent spend, which is tracked and budgeted separately. Same backward-compat note.
+	 * Observed cumulative USD attributed to this goal's own continuation passes from assistant messages
+	 * appended within each pass's captured branch interval. Deliberately excludes worker/subagent spend,
+	 * which is reported separately. Same backward-compat note.
 	 */
 	continuationSpendUsd?: number;
 	/**
-	 * Cumulative USD attributed to WORKER/SUBAGENT spend for this goal's lanes (in-process worker
+	 * Observed cumulative USD attributed to WORKER/SUBAGENT spend for this goal's lanes (in-process worker
 	 * usage via `addSpawnedUsage`, out-of-process tmux-worker usage via the advisory
 	 * `reportSpawnedUsage` claim) — the counterpart this goal's OWN model spend excludes (see
 	 * {@link continuationSpendUsd}). Populated by the runtime that sums lane spend by goalId; this
 	 * field is only the durable slot. Same backward-compat/undefined-as-0 note as the other
-	 * continuation budget fields. Advisory for out-of-process (tmux) workers — never a hard cap
-	 * across the process boundary.
+	 * continuation accounting fields. This is advisory telemetry, not an implicit execution limit.
 	 */
 	continuationWorkerSpendUsd?: number;
 	/** Durable acceptance override; avoids depending on an unbounded historical event scan. */

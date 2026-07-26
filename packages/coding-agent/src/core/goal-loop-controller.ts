@@ -5,11 +5,11 @@
  * active goal moving" loop: each pass reads the goal runtime snapshot, and — only while the snapshot
  * says `continue` — submits one continuation prompt back through the session's own prompt path. It
  * owns no state; the goal state lives in the session log and is read fresh every pass. Termination is
- * fully budget-gated (an optional user-supplied per-invocation turn cap, per-invocation wall-clock
- * cap, and durable per-goal wall-clock/spend budgets). Each submitted pass reports exact
- * token/wall-clock/spend contribution back
- * to the session. Progress is inferred from real work and terminal goal updates; the compact goal
- * record does not require bookkeeping mutations merely to earn another continuation turn.
+ * gated only by real terminal conditions and limits the owner explicitly supplied: an optional
+ * per-invocation turn cap, an optional per-invocation wall-clock cap, and an optional durable token
+ * budget on the goal. Each submitted pass still reports exact token/wall-clock/spend contribution
+ * for observability. Progress is inferred from real work and terminal goal updates; telemetry never
+ * becomes an implicit execution limit.
  */
 
 import type {
@@ -19,11 +19,7 @@ import type {
 	GoalContinuationOnceOptions,
 	GoalContinuationOnceResult,
 	PromptOptions,
-} from "./agent-session.ts";
-import {
-	DEFAULT_GOAL_CUMULATIVE_MAX_TOTAL_SPEND_USD,
-	DEFAULT_GOAL_CUMULATIVE_MAX_WALL_CLOCK_MS,
-} from "./goals/goal-continuation-defaults.ts";
+} from "./agent-session-contracts.ts";
 import {
 	buildGoalContinuationPrompt,
 	GOAL_CONTINUATION_TRIGGER_CUSTOM_TYPE,
@@ -32,24 +28,14 @@ import type { GoalRuntimeSnapshot, GoalRuntimeSnapshotSettings } from "./goals/g
 import type { GoalState } from "./goals/goal-state.ts";
 
 /**
- * Whether the goal's DURABLE cumulative continuation budget (active wall-clock and spend,
- * persisted on `GoalState` and summed across every `continueGoalLoop` invocation for the goal's
- * lifetime) has been exhausted. Read fresh at the top of every pass (not just the top of the
- * invocation), so a single long-running invocation that crosses the ceiling mid-loop stops
- * immediately rather than waiting for the next invocation to notice. `undefined` counters (goal
- * state predating this field, or a fresh goal) count as `0` — never exhausted.
+ * Resolve an owner-supplied durable goal budget. Wall-clock and spend counters are deliberately
+ * absent here: they are telemetry unless the public goal contract grows matching explicit limits.
+ * Execution limits are policy inputs, not hidden runtime defaults.
  */
-function getGoalContinuationBudgetExhaustion(state: GoalState | undefined): string | undefined {
+function getExplicitGoalBudgetExhaustion(state: GoalState | undefined): string | undefined {
 	if (!state || state.status !== "active") return undefined;
 	if (state.tokenBudget !== undefined && (state.tokensUsed ?? 0) >= state.tokenBudget) {
 		return `token budget exhausted (${state.tokensUsed ?? 0}/${state.tokenBudget})`;
-	}
-	if ((state.continuationWallClockMs ?? 0) >= DEFAULT_GOAL_CUMULATIVE_MAX_WALL_CLOCK_MS) {
-		return `continuation wall-clock budget exhausted (${state.continuationWallClockMs ?? 0}/${DEFAULT_GOAL_CUMULATIVE_MAX_WALL_CLOCK_MS}ms)`;
-	}
-	const spend = (state.continuationSpendUsd ?? 0) + (state.continuationWorkerSpendUsd ?? 0);
-	if (spend >= DEFAULT_GOAL_CUMULATIVE_MAX_TOTAL_SPEND_USD) {
-		return `total spend budget exhausted ($${spend.toFixed(4)}/$${DEFAULT_GOAL_CUMULATIVE_MAX_TOTAL_SPEND_USD.toFixed(2)})`;
 	}
 	return undefined;
 }
@@ -74,7 +60,7 @@ export interface GoalLoopControllerDeps {
 	/** Capture the append-only branch cursor immediately before a continuation prompt. */
 	captureUsageCursor(): string | null;
 	/**
-	 * Persist one submitted pass's contribution to the active goal's durable cumulative budget
+	 * Persist one submitted pass's contribution to the active goal's durable cumulative accounting
 	 * (turns + active wall-clock; USD is attributed by the implementation from the session's own
 	 * spend, not passed in here — see `AgentSession.recordGoalContinuationPass`). Called once per
 	 * pass actually SUBMITTED (never for a no-op `continueGoalOnce` call).
@@ -136,10 +122,9 @@ export class GoalLoopController {
 				return { turnsSubmitted, stopReason: nonContinueStopReason(beforeSnapshot), finalSnapshot: beforeSnapshot };
 			}
 
-			// Durable cross-invocation budget — read fresh every pass, not just at the top
-			// of this invocation, so a single long-running call still stops the moment it crosses the
-			// ceiling rather than overshooting until the next invocation notices.
-			const beforeBudgetExhaustion = getGoalContinuationBudgetExhaustion(beforeSnapshot.goalState);
+			// Owner-supplied durable token budget — read fresh every pass so an invocation stops as
+			// soon as its own latest persisted usage crosses the explicit ceiling.
+			const beforeBudgetExhaustion = getExplicitGoalBudgetExhaustion(beforeSnapshot.goalState);
 			if (beforeBudgetExhaustion) {
 				this.deps.markGoalBudgetLimited(beforeBudgetExhaustion);
 				return { turnsSubmitted, stopReason: "goal_budget_exhausted", finalSnapshot: snapshot() };
@@ -166,7 +151,7 @@ export class GoalLoopController {
 			}
 
 			let afterSnapshot = snapshot();
-			const afterBudgetExhaustion = getGoalContinuationBudgetExhaustion(afterSnapshot.goalState);
+			const afterBudgetExhaustion = getExplicitGoalBudgetExhaustion(afterSnapshot.goalState);
 			if (afterBudgetExhaustion) {
 				this.deps.markGoalBudgetLimited(afterBudgetExhaustion);
 				afterSnapshot = snapshot();

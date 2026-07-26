@@ -1,11 +1,10 @@
-import { createHash, randomUUID } from "node:crypto";
+import { randomUUID } from "node:crypto";
 import { readFileSync } from "node:fs";
 import { basename, dirname } from "node:path";
 import type {
 	Agent,
 	AgentContext,
 	AgentEvent,
-	AgentLoopConfig,
 	AgentMessage,
 	AgentState,
 	AgentTool,
@@ -16,7 +15,6 @@ import type {
 } from "@caupulican/pi-agent-core";
 import {
 	type CustomMessage,
-	classifyFailure,
 	compactToolResultDetailsForRetention,
 	createCustomMessage,
 	DEFAULT_STREAM_IDLE,
@@ -31,15 +29,12 @@ import type {
 import type {
 	Api,
 	AssistantMessage,
-	CacheRetention,
 	Context,
 	ImageContent,
 	Message,
 	Model,
 	SimpleStreamOptions,
-	StopReason,
 	TextContent,
-	ToolResultMessage,
 	Usage,
 } from "@caupulican/pi-ai";
 import { cleanupSessionResources, getSupportedThinkingLevels, modelsAreEqual, streamSimple } from "@caupulican/pi-ai";
@@ -88,7 +83,6 @@ import type { DailyUsageTotals } from "./cost/daily-usage.ts";
 import { type CostGuardDecision, downgradeReasoning, estimateTurnCostUsd, evaluateCostGuard } from "./cost-guard.ts";
 import { appendWorkerClaimSnapshot, getWorkerClaimSnapshots } from "./delegation/session-worker-claim.ts";
 import type { WorkerDelegationRequest } from "./delegation/worker-delegation-request.ts";
-import type { WorkerRunOutcome } from "./delegation/worker-runner.ts";
 import type {
 	ContextUsage,
 	ExtensionCommandContextActions,
@@ -96,7 +90,6 @@ import type {
 	ExtensionErrorListener,
 	ExtensionRunner,
 	ExtensionUIContext,
-	InputSource,
 	MessageEndEvent,
 	MessageStartEvent,
 	MessageUpdateEvent,
@@ -114,34 +107,14 @@ import type {
 import { FailureCorpusRecorder } from "./failure-corpus.ts";
 import { ForegroundRecoveryController } from "./foreground-recovery-controller.ts";
 import { type ChannelProvider, GatewayRegistry, type JobSchedulerProvider } from "./gateways/channel-provider.ts";
-import { GoalLoopController } from "./goal-loop-controller.ts";
 import { injectCompactGoalContext } from "./goals/compact-goal-context.ts";
-import type { GoalContinuationPrompt } from "./goals/goal-continuation-prompt.ts";
-import { type GoalStateRevision, getGoalStateRevision, stopGoalFromSystem } from "./goals/goal-lifecycle.ts";
-import {
-	buildGoalRuntimeSnapshot,
-	type GoalRuntimeSnapshot,
-	type GoalRuntimeSnapshotSettings,
-} from "./goals/goal-runtime-snapshot.ts";
-import { applyGoalEvent, type GoalState } from "./goals/goal-state.ts";
-import {
-	appendGoalClearedSnapshot,
-	appendGoalStateSnapshot,
-	getLatestGoalStateSnapshot,
-} from "./goals/session-goal-state.ts";
+import type { GoalStateRevision } from "./goals/goal-lifecycle.ts";
+import type { GoalRuntimeSnapshot, GoalRuntimeSnapshotSettings } from "./goals/goal-runtime-snapshot.ts";
+import { GoalSessionController } from "./goals/goal-session-controller.ts";
+import type { GoalState } from "./goals/goal-state.ts";
 import { constrainStreamIdleToHttpTimeout } from "./http-dispatcher.ts";
-import {
-	beginHumanInputRequest,
-	createHumanInputRequest,
-	formatHumanInputAnswerText,
-	getLatestHumanInputSnapshots,
-	getResumableHumanInputSnapshot,
-	getWorkerHumanInputsRequiringDelivery,
-	HUMAN_INPUT_WORKER_RESPONSE_CUSTOM_TYPE,
-	type HumanInputRequest,
-	type HumanInputSnapshot,
-	resolveHumanInput,
-} from "./human-input.ts";
+import { getWorkerHumanInputsRequiringDelivery } from "./human-input.ts";
+import { HumanInputController } from "./human-input-controller.ts";
 import type { LearningAuditRecord } from "./learning/learning-audit.ts";
 import type { DemandSignals, ReflectionResult } from "./learning/reflection-engine.ts";
 import { appendLearningDecisionSnapshot, getLearningDecisionSnapshots } from "./learning/session-learning-decision.ts";
@@ -164,21 +137,19 @@ import { ModelAdaptationStore } from "./models/adaptation-store.ts";
 import type { StoredFitnessReport } from "./models/fitness-store.ts";
 import type { PrismLlamaCppRuntime } from "./models/llamacpp-runtime.ts";
 import { HF_TRANSFORMERS_PROVIDER, OLLAMA_PROVIDER } from "./models/local-registration.ts";
-import type { LocalRuntimeDeps, OllamaRuntime, TransformersRuntime } from "./models/local-runtime.ts";
+import type { OllamaRuntime, TransformersRuntime } from "./models/local-runtime.ts";
 import {
 	DEFAULT_ADAPTIVE_STREAM_IDLE_CEILING_MS,
 	estimateContextPromptTokens,
 	resolveAdaptiveStreamIdleOptions,
 	withModelPerfProfile,
 } from "./models/perf-profile.ts";
-import type { OrchestrationProfile } from "./orchestration/contracts.ts";
 import { resolveConfiguredOrchestrationModel } from "./orchestration/model-binding.ts";
 import { validateOrchestrationProfile } from "./orchestration/profile-registry.ts";
 import { ProfileFilterController } from "./profile-filter-controller.ts";
 import { expandPromptTemplate, type PromptTemplate } from "./prompt-templates.ts";
 import { ReflectionController } from "./reflection-controller.ts";
 import type { ModelFitnessReport } from "./research/model-fitness.ts";
-import type { ResearchRunResult } from "./research/research-runner.ts";
 import {
 	appendEvidenceBundleSnapshot,
 	getEvidenceBundleSnapshots,
@@ -188,7 +159,7 @@ import { collectWorkspaceSources } from "./research/workspace-collector.ts";
 import type { ResourceExtensionPaths, ResourceLoader } from "./resource-loader.ts";
 import { stripResourceProfileBlocks } from "./resource-profile-blocks.ts";
 import { RuntimeBuilder } from "./runtime-builder.ts";
-import { SessionAnalytics, type ToolArgumentValidationStats } from "./session-analytics.ts";
+import { SessionAnalytics } from "./session-analytics.ts";
 import { SessionImageStore } from "./session-image-store.ts";
 import { getActiveSessionBranchEntries } from "./session-snapshot.ts";
 import { SessionTreeNavigator } from "./session-tree-navigator.ts";
@@ -243,445 +214,31 @@ function tagRawness(wrapped: StreamFn, innerIsRawStreamSimple: boolean): StreamF
 	return wrapped;
 }
 
-// ============================================================================
-// Skill Block Parsing
-// ============================================================================
+export * from "./agent-session-contracts.ts";
 
-/** Parsed skill block from a user message */
-export interface ParsedSkillBlock {
-	name: string;
-	location: string;
-	content: string;
-	userMessage: string | undefined;
-}
-
-/**
- * Parse a skill block from message text.
- * Returns null if the text doesn't contain a skill block.
- */
-export function parseSkillBlock(text: string): ParsedSkillBlock | null {
-	const match = text.match(/^<skill name="([^"]+)" location="([^"]+)">\n([\s\S]*?)\n<\/skill>(?:\n\n([\s\S]+))?$/);
-	if (!match) return null;
-	return {
-		name: match[1],
-		location: match[2],
-		content: match[3],
-		userMessage: match[4]?.trim() || undefined,
-	};
-}
-
-/** Session-specific events that extend the core AgentEvent */
-export type AgentSessionEvent =
-	| Exclude<AgentEvent, { type: "agent_end" }>
-	| {
-			type: "agent_end";
-			messages: AgentMessage[];
-			willRetry: boolean;
-	  }
-	| {
-			type: "queue_update";
-			steering: readonly string[];
-			followUp: readonly string[];
-			commands: readonly string[];
-	  }
-	| { type: "compaction_start"; reason: "manual" | "threshold" | "overflow" }
-	| { type: "session_info_changed"; name: string | undefined }
-	| { type: "thinking_level_changed"; level: ThinkingLevel }
-	| { type: "warning"; message: string }
-	| {
-			type: "compaction_end";
-			reason: "manual" | "threshold" | "overflow";
-			result: CompactionResult | undefined;
-			aborted: boolean;
-			willRetry: boolean;
-			errorMessage?: string;
-			/**
-			 * Benign no-op explanation for auto-compaction (e.g. "nothing to compact yet"). Auto
-			 * bails must never be silent: without a result, either errorMessage (real failure) or
-			 * skipReason (harmless skip) is set so the UI can show why nothing changed.
-			 */
-			skipReason?: string;
-	  }
-	| { type: "auto_retry_start"; attempt: number; maxAttempts: number; delayMs: number; errorMessage: string }
-	| { type: "auto_retry_end"; success: boolean; attempt: number; finalError?: string }
-	// Brackets the routing/prep phase of a turn (judge + model/auth checks + compaction, etc.) — the
-	// gap between the user's prompt painting and the turn actually starting to stream, which today
-	// has no visible feedback. UI-only: no persistence, no bearing on the turn itself. Always paired
-	// exactly once per _promptUnserialized attempt that reaches past the early-return paths (queued
-	// steer/followUp, extension commands, input-transform) — never emitted for those.
-	| { type: "routing_start" }
-	| { type: "routing_end" }
-	| {
-			type: "delegate_workers";
-			active: number;
-			queued: number;
-			running: number;
-			completedSinceFlush: number;
-			failedSinceFlush: number;
-			terminalSinceFlush: Array<{
-				laneId: string;
-				status: LaneTerminalStatus;
-				reasonCode?: string;
-			}>;
-	  };
-
-/** Listener function for agent session events */
-export type AgentSessionEventListener = (event: AgentSessionEvent) => void;
-
-// ============================================================================
-// Types
-// ============================================================================
-
-export interface AgentSessionConfig {
-	agent: Agent;
-	sessionManager: SessionManager;
-	settingsManager: SettingsManager;
-	cwd: string;
-	/** User-level agent state directory for generated runtime artifacts. */
-	agentDir?: string;
-	/** Models to cycle through with Ctrl+P (from --models flag) */
-	scopedModels?: Array<{ model: Model<Api>; thinkingLevel?: ThinkingLevel }>;
-	/** Resource loader for skills, prompts, themes, context files, system prompt */
-	resourceLoader: ResourceLoader;
-	/** SDK custom tools registered outside extensions */
-	customTools?: ToolDefinition[];
-	/** Model registry for API key resolution and model discovery */
-	modelRegistry: ModelRegistry;
-	/** Initial active built-in tool names. Default: [read, bash, edit, write, context_audit, goal] */
-	initialActiveToolNames?: string[];
-	/** Optional allowlist of tool names. When provided, only these tool names are exposed. */
-	allowedToolNames?: string[];
-	/** Optional denylist of tool names. When provided, these tool names are not exposed. */
-	excludedToolNames?: string[];
-	/** Optional resource-profile allow/block filters for tool names. */
-	toolProfileFilter?: ResourceProfileFilterSettings;
-	/**
-	 * Whether the model/thinking level came from an explicit launch flag. When false, the active
-	 * profile's model/thinking is re-applied on reload() so live profile edits take effect; when
-	 * true, the explicit launch-time choice is preserved.
-	 */
-	isExplicitModel?: boolean;
-	isExplicitThinking?: boolean;
-	/** True when this session is a spawned subagent/child — gates durable memory writes. */
-	isChildSession?: boolean;
-	/**
-	 * Override base tools (useful for custom runtimes).
-	 *
-	 * These are synthesized into minimal ToolDefinitions internally so AgentSession can keep
-	 * a definition-first registry even when callers provide plain AgentTool instances.
-	 */
-	baseToolsOverride?: Record<string, AgentTool>;
-	/** Mutable ref used by Agent to access the current ExtensionRunner */
-	extensionRunnerRef?: { current?: ExtensionRunner };
-	/** Session start event metadata emitted when extensions bind to this runtime. */
-	sessionStartEvent?: SessionStartEvent;
-	/**
-	 * Pointer-first workspace source collector for the autonomous research lane. Injected in unit
-	 * tests so they don't spawn a real ripgrep child (which would escape fake timers); production
-	 * defaults to the real, best-effort collector.
-	 */
-	collectWorkspaceSources?: typeof collectWorkspaceSources;
-	/** Immutable owner-authored orchestration policy; dispatch cannot mutate it. */
-	orchestrationProfile?: OrchestrationProfile;
-	/**
-	 * Injected fetch/spawn/exists for the local (Ollama) runtime health-check + boot used by the
-	 * model router before a turn routed to a local model (see LocalRuntimeController.ensureLocalModelReady).
-	 * Unit tests inject fakes so they never hit a real network/process; production defaults to the real ones.
-	 */
-	localRuntimeDeps?: LocalRuntimeDeps;
-}
-
-export interface ExtensionBindings {
-	uiContext?: ExtensionUIContext;
-	mode?: ExtensionContext["mode"];
-	commandContextActions?: ExtensionCommandContextActions;
-	abortHandler?: () => void;
-	shutdownHandler?: ShutdownHandler;
-	onError?: ExtensionErrorListener;
-}
-
-/** Options for AgentSession.prompt() */
-export interface PromptOptions {
-	/** Whether to expand file-based prompt templates and skills (default: true). */
-	expandPromptTemplates?: boolean;
-	/** Whether slash commands should be handled before sending to the model. Defaults to expandPromptTemplates. */
-	processSlashCommands?: boolean;
-	/** Image attachments */
-	images?: ImageContent[];
-	/** When streaming, how to queue the message: "steer" (interrupt) or "followUp" (wait). Required if streaming. */
-	streamingBehavior?: "steer" | "followUp";
-	/** Source of input for extension input event handlers. Defaults to "interactive". */
-	source?: InputSource;
-	/** Internal hook used by RPC mode to observe prompt preflight acceptance or rejection. */
-	preflightResult?: (success: boolean) => void;
-	/** Whether an idle active goal should auto-inject bounded continuation prompts after this prompt settles. Default: true. */
-	autoContinueGoal?: boolean;
-	/** Internal hidden text turn. Persisted as a typed custom marker instead of visible user chat. */
-	internalContextType?: string;
-}
+import type {
+	AgentSessionConfig,
+	AgentSessionEvent,
+	AgentSessionEventListener,
+	ExtensionBindings,
+	GoalContinuationLoopOptions,
+	GoalContinuationLoopResult,
+	GoalContinuationOnceOptions,
+	GoalContinuationOnceResult,
+	IsolatedCompletionOptions,
+	IsolatedCompletionResult,
+	ModelCycleResult,
+	PromptOptions,
+	ResearchLaneRunOutcome,
+	RunawayStopRecord,
+	SessionStats,
+	SpawnedUsageTotals,
+	ToolValidationEscalationRecord,
+	WorkerDelegationRunOutcome,
+} from "./agent-session-contracts.ts";
+import { RUNAWAY_STOP_CUSTOM_TYPE, TOOL_VALIDATION_ESCALATION_CUSTOM_TYPE } from "./agent-session-contracts.ts";
 
 export type { ToolProbeReport, ToolProbeResult, ToolProbeVerdict } from "./tool-protocol-controller.ts";
-
-/** Result from cycleModel() */
-export interface ModelCycleResult {
-	model: Model<Api>;
-	thinkingLevel: ThinkingLevel;
-	/** Whether cycling through scoped models (--models flag) or all available */
-	isScoped: boolean;
-}
-
-/** Session statistics for /session command */
-export interface CompactionGateCheckStats {
-	failures: number;
-	minScore?: number;
-	maxScore?: number;
-	threshold?: number;
-	comparator?: "minimum" | "maximum";
-}
-
-export interface CompactionGateStats {
-	gateFailures: number;
-	deterministicGapFills: number;
-	compactionsWithGateFailures: number;
-	checks: Record<string, CompactionGateCheckStats>;
-}
-
-export interface SessionStats {
-	sessionFile: string | undefined;
-	sessionId: string;
-	userMessages: number;
-	assistantMessages: number;
-	toolCalls: number;
-	toolResults: number;
-	totalMessages: number;
-	tokens: {
-		input: number;
-		output: number;
-		cacheRead: number;
-		cacheWrite: number;
-		total: number;
-	};
-	cost: number;
-	contextUsage?: ContextUsage;
-	toolArgumentValidation: ToolArgumentValidationStats;
-	compactionGates: CompactionGateStats;
-}
-
-/** customType for spawned-usage roll-up entries (Cost Aggregation, Model A). */
-export const SPAWNED_USAGE_CUSTOM_TYPE = "spawned_usage";
-
-/**
- * customType for a persisted runaway-loop-backstop entry: the agent loop stopped a turn stuck
- * repeating one identical tool-call signature. This is the session-log/telemetry sink for
- * {@link Agent.onRunawayStop} — see `_installAgentToolHooks`.
- */
-export const RUNAWAY_STOP_CUSTOM_TYPE = "runaway_stop";
-
-/** Payload persisted for a {@link RUNAWAY_STOP_CUSTOM_TYPE} entry. */
-export interface RunawayStopRecord {
-	signature: string;
-	repeats: number;
-	model?: string;
-	provider?: string;
-	at: string;
-}
-
-/**
- * customType for a persisted tool-validation-escalation entry: the agent loop bounced the same
- * tool-call validation failure enough times to escalate. This is the session-log/telemetry sink for
- * {@link Agent.onToolValidationEscalation} — see `_installAgentToolHooks`.
- */
-export const TOOL_VALIDATION_ESCALATION_CUSTOM_TYPE = "tool_validation_escalation";
-
-/** Payload persisted for a {@link TOOL_VALIDATION_ESCALATION_CUSTOM_TYPE} entry. */
-export interface ToolValidationEscalationRecord {
-	tool: string;
-	signature: string;
-	repeats: number;
-	model: string;
-	provider: string;
-	at: string;
-}
-
-/**
- * A single spawned/subagent usage report, persisted as a `CustomEntry`
- * (`customType: "spawned_usage"`). Persistence-only — does NOT enter LLM context.
- *
- * Single-hop invariant: each report MUST already include the reporter's own usage AND its
- * accumulated sub-usage. A child rolls up its grandchildren, then reports once to its direct
- * parent. Only the direct parent records the report — never a grandparent — so cost cannot be
- * double-counted across levels.
- */
-export interface SpawnedUsageReport {
-	/** Cumulative usage attributed to the spawned session (own + its own sub-usage). */
-	usage: Usage;
-	/** Human-readable source label for diagnostics (e.g. subagent name). */
-	label?: string;
-	/** Session id of the reporting child, if known. */
-	sourceSessionId?: string;
-	/** Stable id used to de-duplicate re-reports (retries, double agent_end). */
-	reportId?: string;
-}
-
-/** Aggregated spawned-usage totals derived from `spawned_usage` custom entries. */
-export interface SpawnedUsageTotals {
-	/** Summed `usage.cost.total` across all recorded reports. */
-	cost: number;
-	/** Number of distinct reports recorded. */
-	reports: number;
-}
-
-/**
- * Options for {@link AgentSession.runIsolatedCompletion} — an LLM call fully isolated from the main
- * session. With no tools it is one-shot (reflection); lane callers may supply a bounded child loop.
- */
-export interface IsolatedCompletionOptions {
-	/** System prompt for the isolated call. */
-	systemPrompt: string;
-	/** The isolated conversation (e.g. the reflection prompt). NOT the main session history. */
-	messages: Message[];
-	/** Model to use. Defaults to the session model; callers should pass a cheap model. */
-	model?: Model<Api>;
-	/** Thinking level. Defaults to "off" to keep the call cheap. */
-	thinkingLevel?: ThinkingLevel;
-	/** Output token cap. */
-	maxTokens?: number;
-	/** Fresh tools owned by the isolated child. Omitted/empty preserves one-shot behavior. */
-	tools?: AgentTool[];
-	/** Maximum assistant turns for a tool-enabled child loop. Ignored by one-shot calls. */
-	maxTurns?: number;
-	/**
-	 * Optional tool-free finalization prompt. When the bounded child loop exhausts its turns on an
-	 * assistant tool-call message with no text, one final provider call receives the gathered transcript
-	 * plus this prompt so useful work is not discarded solely for lacking a terminal summary.
-	 */
-	finalTextPrompt?: string;
-	/** Child-only capability/path gate. Never inherited from the foreground session. */
-	beforeToolCall?: AgentLoopConfig["beforeToolCall"];
-	/** Child-only result observer (for example, successful scoped-write accounting). */
-	afterToolCall?: AgentLoopConfig["afterToolCall"];
-	/** Abort signal. */
-	signal?: AbortSignal;
-	/**
-	 * Prompt-cache retention for this isolated call. REQUIRED — the provider-level default is
-	 * `"short"`, the opposite of this primitive's old implicit default, so a caller that forgot to
-	 * set it would silently pay full input price forever. Pass `"none"` explicitly to preserve full
-	 * isolation (no caching); callers whose `systemPrompt` is STATIC across calls (e.g. reflection,
-	 * #33) should pass `"short"`/`"long"` so the provider reuses the cached prefix and bills only the
-	 * variable tail.
-	 */
-	cacheRetention: CacheRetention;
-	/**
-	 * Lane/caller kind (e.g. `"reflection"`, `"research"`, `"worker"`, `"fitness"`) used to derive this
-	 * call's synthetic cache-affinity key (see {@link computeLaneAffinityKey}). Omitted callers fall
-	 * back to {@link DEFAULT_ISOLATED_LANE_KIND} — still a stable, namespaced key, just not
-	 * lane-differentiated. Never the real session id.
-	 */
-	laneKind?: string;
-}
-
-/** Fallback {@link IsolatedCompletionOptions.laneKind} for callers that do not tag their lane. */
-export const DEFAULT_ISOLATED_LANE_KIND = "isolated";
-
-/**
- * Derive a STABLE synthetic cache-affinity key for an isolated completion lane. Isolated calls
- * deliberately never carry the real session id (see reflection-controller.ts's isolation invariants —
- * an isolated call must not entangle with the main session), which today also means every isolated
- * call looks like a brand-new, uncorrelated session to providers with session-affinity headers /
- * `prompt_cache_key` (anthropic.ts's `x-session-affinity`, openai-responses.ts /
- * openai-completions.ts's `prompt_cache_key`), defeating their cache routing.
- *
- * This key is deterministic per `(laneKind, model, systemPrompt)` — the SAME lane calling the SAME
- * model with the SAME (static) system prompt always gets the SAME key, so repeat calls route to the
- * same cache-warm backend — while remaining fully synthetic: it is a salted hash, namespaced with a
- * `lane:` prefix, and never derived from or equal to the real session id.
- */
-export function computeLaneAffinityKey(laneKind: string, model: Model<Api> | undefined, systemPrompt: string): string {
-	const modelKey = model ? `${model.provider}/${model.id}` : "unknown-model";
-	// NUL-separated fields: laneKind/modelKey are drawn from small caller-controlled vocabularies
-	// that never contain a raw NUL, so this cannot field-collide the way a plain colon/space join could.
-	const digest = createHash("sha256")
-		.update(["pi-lane-affinity-v1", laneKind, modelKey, systemPrompt].join("\u0000"))
-		.digest("hex")
-		.slice(0, 32);
-	return `lane:${laneKind}:${digest}`;
-}
-
-/** Result of an isolated completion: the text, the usage spent, and the stop reason. */
-export interface IsolatedCompletionResult {
-	text: string;
-	usage: Usage;
-	stopReason: StopReason;
-}
-
-export interface ResearchLaneRunOutcome {
-	/** False when the pass was skipped before starting (see skipReason). */
-	started: boolean;
-	skipReason?: string;
-	/** Terminal lane record when the pass ran. */
-	record?: LaneRecord;
-	result?: ResearchRunResult;
-}
-
-export interface WorkerDelegationRunOutcome {
-	/** False when the delegation was skipped before starting (see skipReason). */
-	started: boolean;
-	skipReason?: string;
-	/** Terminal lane record when the delegation ran. */
-	record?: LaneRecord;
-	outcome?: WorkerRunOutcome;
-}
-
-export interface GoalContinuationOnceOptions {
-	maxStallTurns: number;
-}
-
-export interface GoalContinuationOnceResult {
-	submitted: boolean;
-	snapshot: GoalRuntimeSnapshot;
-	prompt?: GoalContinuationPrompt;
-}
-
-export type GoalContinuationLoopStopReason =
-	| "continuation_not_allowed"
-	| "max_turns_reached"
-	| "wall_clock_budget_reached"
-	| "goal_budget_exhausted"
-	// Skip outcomes from the BackgroundLaneController single-flight guard (`continueGoalLoopExclusive`):
-	// the loop never ran a pass because another goal loop already owned the mutex, or the session was
-	// disposed before this request could start. `turnsSubmitted` is always 0 for both.
-	| "already_continuing"
-	| "session_disposed"
-	// Capability-adaptive skip: the session's ACTIVE tool surface lacks the `goal` tool (lean
-	// capability blocklist, worker role ceiling, --tools/profile exclusion), so continuation
-	// prompts cannot be executed by this session -- driving them anyway would enforce complex
-	// agentic work on a surface that cannot perform it. Covers idle autosteer AND manual
-	// /goal continuation (both funnel through the same single-flight guard). `turnsSubmitted` 0.
-	| "goal_tool_unavailable"
-	// A worker is dispatched (queued/running) against an open requirement this goal owns — the
-	// loop paused WITHOUT submitting a pass and will resume
-	// on its own once the worker terminates. Distinct from `continuation_not_allowed` (which reads as
-	// a terminal refusal needing a human/new decision) — this is a benign, self-resolving wait.
-	| "worker_in_flight";
-
-export interface GoalContinuationLoopOptions extends GoalContinuationOnceOptions {
-	/** Optional user limit. 0 means unbounded and is the default. */
-	maxTurns: number;
-	/** 0 or undefined disables wall-clock budget. */
-	maxWallClockMinutes?: number;
-	/** Test seam for wall-clock budget enforcement. Defaults to Date.now. */
-	now?: () => number;
-}
-
-export interface GoalContinuationLoopResult {
-	turnsSubmitted: number;
-	stopReason: GoalContinuationLoopStopReason;
-	finalSnapshot: GoalRuntimeSnapshot;
-}
-
-// ============================================================================
-// Constants
-// ============================================================================
 
 // ============================================================================
 // AgentSession Class
@@ -705,9 +262,6 @@ export class AgentSession {
 	private _queuedExtensionCommands: string[] = [];
 	private _pendingNextTurnMessages: CustomMessage[] = [];
 	private _streamingPromptSubmissionTail: Promise<void> = Promise.resolve();
-	/** Serializes owner-input overlays so concurrent worker terminals cannot replace each other. */
-	private _humanInputTail: Promise<void> = Promise.resolve();
-	private _activeHumanInputRequestIds = new Set<string>();
 	/**
 	 * The last tool set requested via setActiveToolsByName BEFORE model-capability filtering, so
 	 * switching from a small-window model back to a large one restores the full requested set.
@@ -751,6 +305,7 @@ export class AgentSession {
 	 * background-lane-controller.ts); owns the lane timers/guards, the last research-lane skip
 	 * reason, the live LaneTracker, and the in-flight research/worker abort controllers. */
 	private readonly _backgroundLanes: BackgroundLaneController;
+	private readonly _humanInput: HumanInputController;
 	/** Plug-and-play memory subsystem (see memory-controller.ts); owns the OKF retrieval provider, the
 	 * latest retrieval/prompt-inclusion reports, the reload-safe MemoryManager, the recall
 	 * effectiveness tracker, and the extension-contributed pending providers. */
@@ -797,9 +352,8 @@ export class AgentSession {
 	/** Native reflection engine + learning-apply/rollback path (see reflection-controller.ts); owns no
 	 * session state, applies durable writes through the bundled memory tool and the session log. */
 	private readonly _reflection: ReflectionController;
-	/** Bounded goal auto-continuation loop (see goal-loop-controller.ts); reads goal state fresh
-	 * each pass and re-enters the session's own prompt path. */
-	private readonly _goalContinuation: GoalLoopController;
+	/** Durable goal lifecycle, accounting, and raw continuation loop. */
+	private readonly _goals: GoalSessionController;
 	private readonly _isChildSession: boolean;
 	private _baseToolsOverride?: Record<string, AgentTool>;
 	private _sessionStartEvent: SessionStartEvent;
@@ -966,6 +520,30 @@ export class AgentSession {
 			getLearningAuditRecords: () => this.getLearningAuditRecords(),
 		});
 		this._modelRegistry = config.modelRegistry;
+		this._humanInput = new HumanInputController({
+			getSessionManager: () => this.sessionManager,
+			getUIContext: () => this._extensionUIContext,
+			getExtensionMode: () => this._extensionMode,
+			waitForIdle: () => this.agent.waitForIdle(),
+			isDisposed: () => this._disposed,
+			isStreaming: () => this.isStreaming,
+			getModel: () => this.model,
+			getArtifactStore: () => this._getToolArtifactStore(),
+			getImageStore: () => this._getSessionImageStore(),
+			runAgentPrompt: (messages) => this._runAgentPrompt(messages),
+			sendCustomMessage: (message, options) => this.sendCustomMessage(message, options),
+			emitWarning: (message) => this._emit({ type: "warning", message }),
+		});
+		this._goals = new GoalSessionController({
+			getSessionManager: () => this.sessionManager,
+			getModelProvider: () => this.model?.provider,
+			getLaneRecords: () => this._backgroundLanes.getLaneRecords(),
+			getTaskRuntimeSnapshot: () => this._backgroundLanes.getTaskRuntimeSnapshot(),
+			synchronizeGoalState: (state) => this._backgroundLanes.synchronizeGoalState(state),
+			scheduleGoalAutoContinueFromIdle: () => this._backgroundLanes.scheduleGoalAutoContinueFromIdle(),
+			prompt: (text, options) => this.prompt(text, options),
+			emitWarning: (message) => this._emit({ type: "warning", message }),
+		});
 		this._backgroundLanes = new BackgroundLaneController({
 			isDisposed: () => this._disposed,
 			isChildSession: () => this._isChildSession,
@@ -987,18 +565,18 @@ export class AgentSession {
 			emitAutonomyTelemetry: (event) => this._emitAutonomyTelemetry(event),
 			getGoalStateSnapshot: () => this.getGoalStateSnapshot(),
 			getGoalRuntimeSnapshot: (settings) => this.getGoalRuntimeSnapshot(settings),
-			markGoalToolUnavailable: () => this.markGoalToolUnavailable(),
+			markGoalToolUnavailable: () => this._goals.markToolUnavailable(),
 			getEvidenceBundleSnapshot: () => this.getEvidenceBundleSnapshot(),
 			saveEvidenceBundleSnapshot: (bundle) => this.saveEvidenceBundleSnapshot(bundle),
 			saveWorkerClaimSnapshot: (claim, request) => this.saveWorkerClaimSnapshot(claim, request),
-			queueWorkerHumanInput: (request) => this._queueWorkerHumanInput(request),
+			queueWorkerHumanInput: (request) => this._humanInput.queueWorkerInput(request),
 			readMemoryForLane: (query) => this._memory.readMemoryForLane(query),
 			addSpawnedUsage: (usage, opts) => this.addSpawnedUsage(usage, opts),
 			runIsolatedCompletion: (opts) => this.runIsolatedCompletion(opts),
 			// RAW loop, deliberately bypassing the public `continueGoalLoop` — that method now delegates
 			// to this controller's own `continueGoalLoopExclusive` guard, so routing through it here would
 			// recurse into the guard from inside itself instead of driving the actual continuation pass.
-			continueGoalLoop: (options) => this._goalContinuation.continueGoalLoop(options),
+			continueGoalLoop: (options) => this._goals.continueLoop(options),
 			collectWorkspaceSources: (args) => this._collectWorkspaceSources(args),
 		});
 		this._memory = new MemoryController({
@@ -1136,14 +714,6 @@ export class AgentSession {
 			ensureModelReady: (model) => this._localRuntimeController.ensureIsolatedModelReady(model),
 			addSpawnedUsage: (usage, opts) => this.addSpawnedUsage(usage, opts),
 			saveLearningDecisionSnapshot: (decision) => this.saveLearningDecisionSnapshot(decision),
-		});
-		this._goalContinuation = new GoalLoopController({
-			getGoalRuntimeSnapshot: (settings) => this.getGoalRuntimeSnapshot(settings),
-			prompt: (text, options) => this.prompt(text, options),
-			captureUsageCursor: () => this.sessionManager.getLeafId(),
-			recordGoalContinuationPass: (pass) => this.recordGoalContinuationPass(pass),
-			recordGoalContinuationFailure: (error) => this.recordGoalContinuationFailure(error),
-			markGoalBudgetLimited: (reason) => this.markGoalBudgetLimited(reason),
 		});
 		this._extensionRunnerRef = config.extensionRunnerRef;
 		this._initialActiveToolNames = config.orchestrationProfile
@@ -2237,7 +1807,7 @@ export class AgentSession {
 			}
 		}
 		if (event.type === "agent_end" && !this._willRetryAfterAgentEnd(event)) {
-			this._schedulePendingWorkerHumanInputs();
+			this._humanInput.schedulePendingWorkerInputs();
 		}
 	};
 
@@ -2735,195 +2305,13 @@ export class AgentSession {
 		}
 	}
 
-	private _queueWorkerHumanInput(request: {
-		workerRequestId: string;
-		message: string;
-		blockers: readonly string[];
-	}): void {
-		const existing = getLatestHumanInputSnapshots(this.sessionManager).find(
-			(snapshot) => snapshot.request.workerRequestId === request.workerRequestId,
-		);
-		if (existing) return;
-		const blockerText = request.blockers
-			.slice(0, 4)
-			.map((blocker) => blocker.slice(0, 500))
-			.join("; ");
-		const question = createHumanInputRequest({
-			source: "worker",
-			workerRequestId: request.workerRequestId,
-			questions: [
-				{
-					id: "worker_review",
-					header: "Worker review",
-					question: `${request.message.slice(0, 1_500)}${blockerText ? ` Blockers: ${blockerText}` : ""}`,
-					options: [
-						{
-							label: "Review now",
-							description: "Have the parent inspect the worker claim and evidence before reconciling it.",
-						},
-						{
-							label: "Keep blocked",
-							description: "Leave the worker result blocked and continue without accepting its output.",
-						},
-					],
-				},
-			],
-			acceptsImages: false,
-		});
-		beginHumanInputRequest(this.sessionManager, question);
-		if (!this.isStreaming) this._scheduleWorkerHumanInput(question);
-	}
-
-	private _schedulePendingWorkerHumanInputs(): void {
-		for (const snapshot of getWorkerHumanInputsRequiringDelivery(this.sessionManager)) {
-			this._scheduleWorkerHumanInput(snapshot);
-		}
-	}
-
-	private _scheduleWorkerHumanInput(input: HumanInputRequest | HumanInputSnapshot): void {
-		const snapshot: HumanInputSnapshot =
-			"status" in input ? input : { request: input, status: "pending", answers: [], updatedAt: input.createdAt };
-		const requestId = snapshot.request.requestId;
-		if (this._activeHumanInputRequestIds.has(requestId)) return;
-		this._activeHumanInputRequestIds.add(requestId);
-		this._humanInputTail = this._humanInputTail
-			.then(async () => {
-				await this._resolveWorkerHumanInput(snapshot);
-			})
-			.catch((error: unknown) => {
-				this._emit({
-					type: "warning",
-					message: `Worker owner-input request failed: ${error instanceof Error ? error.message : String(error)}`,
-				});
-			})
-			.finally(() => {
-				this._activeHumanInputRequestIds.delete(requestId);
-			});
-	}
-
-	private async _resolveWorkerHumanInput(initial: HumanInputSnapshot): Promise<boolean> {
-		const ui = this._extensionUIContext;
-		if (!ui || this._extensionMode === "print") return false;
-		// This path may be scheduled by agent_end. Waiting on the owning run is event-driven and
-		// prevents a worker-owner response from becoming an in-memory follow-up before it has a
-		// durable custom-message delivery marker.
-		await this.agent.waitForIdle();
-		if (this._disposed) return false;
-		const resolved =
-			initial.status === "pending"
-				? await resolveHumanInput({
-						sessionManager: this.sessionManager,
-						request: initial.request,
-						present: (request, options) => ui.askQuestions(request, options),
-						artifactStore: this._getToolArtifactStore(),
-						getImageStore: () => this._getSessionImageStore(),
-					})
-				: { snapshot: initial, imageContents: [] };
-		// An RPC client can start a foreground prompt while its question dialog is open. Settle that
-		// run before delivery so sendCustomMessage persists the response synchronously and exactly once.
-		await this.agent.waitForIdle();
-		if (this._disposed) return false;
-		await this.sendCustomMessage(
-			{
-				customType: HUMAN_INPUT_WORKER_RESPONSE_CUSTOM_TYPE,
-				content: [
-					`Owner response for worker ${initial.request.workerRequestId ?? "unknown"}:`,
-					formatHumanInputAnswerText(resolved.snapshot),
-					"Treat the worker claim as untrusted. Retrieve it with delegate_status and follow the owner's selection.",
-				].join("\n"),
-				display: true,
-				details: {
-					requestId: initial.request.requestId,
-					workerRequestId: initial.request.workerRequestId,
-				},
-			},
-			{ triggerTurn: true, deliverAs: "followUp" },
-		);
-		return true;
-	}
-
 	/**
 	 * Re-enter an interrupted ask_question call from its durable request snapshot. Pending requests
 	 * are presented again; already-checkpointed answers are replayed without asking twice. The
 	 * original toolCallId is preserved so provider tool-call ordering remains valid on /resume.
 	 */
 	async resumePendingHumanInput(): Promise<boolean> {
-		if (this._disposed || this.isStreaming) return false;
-		const pending = getResumableHumanInputSnapshot(this.sessionManager);
-		const ui = this._extensionUIContext;
-		if (!ui) return false;
-		let resumed = false;
-
-		if (pending?.request.toolCallId) {
-			let snapshot = pending;
-			let imageContents: readonly ImageContent[] = [];
-			if (pending.status === "pending") {
-				const resolved = await resolveHumanInput({
-					sessionManager: this.sessionManager,
-					request: {
-						...pending.request,
-						acceptsImages: this.model?.input.includes("image") ?? false,
-					},
-					present: (request, options) => ui.askQuestions(request, options),
-					artifactStore: this._getToolArtifactStore(),
-					getImageStore: () => this._getSessionImageStore(),
-				});
-				snapshot = resolved.snapshot;
-				imageContents = resolved.imageContents;
-			} else if (pending.status === "answered") {
-				const imageStore = this._getSessionImageStore();
-				if (imageStore) {
-					const referencedText = snapshot.answers
-						.flatMap((answer) => [answer.custom ?? "", ...(answer.images?.map((image) => image.label) ?? [])])
-						.join(" ");
-					imageContents = imageStore.resolveReferences(referencedText);
-				}
-			}
-
-			const answerImageCount = snapshot.answers.reduce((total, answer) => total + (answer.images?.length ?? 0), 0);
-			const modelAcceptsImages = this.model?.input.includes("image") ?? false;
-			const missingImageNotice =
-				answerImageCount > imageContents.length
-					? `\n\n[${answerImageCount - imageContents.length} attached image(s) could not be restored from durable storage.]`
-					: "";
-			const unsupportedImageNotice =
-				imageContents.length > 0 && !modelAcceptsImages
-					? "\n\n[Attached images were retained but not sent because the selected model does not accept image input.]"
-					: "";
-			const toolResult: ToolResultMessage = {
-				role: "toolResult",
-				toolCallId: pending.request.toolCallId,
-				toolName: pending.request.toolName ?? "ask_question",
-				content: [
-					{
-						type: "text",
-						text: `${formatHumanInputAnswerText(snapshot)}${missingImageNotice}${unsupportedImageNotice}`,
-					},
-					...(modelAcceptsImages ? imageContents : []),
-				],
-				details: {
-					questions: snapshot.request.questions,
-					answers: snapshot.answers,
-					cancelled: snapshot.status === "cancelled",
-					...(snapshot.reason ? { reason: snapshot.reason } : {}),
-				},
-				isError: false,
-				timestamp: Date.now(),
-			};
-			await this._runAgentPrompt(toolResult);
-			resumed = true;
-		}
-
-		for (const workerInput of getWorkerHumanInputsRequiringDelivery(this.sessionManager)) {
-			if (this._activeHumanInputRequestIds.has(workerInput.request.requestId)) continue;
-			this._activeHumanInputRequestIds.add(workerInput.request.requestId);
-			try {
-				resumed = (await this._resolveWorkerHumanInput(workerInput)) || resumed;
-			} finally {
-				this._activeHumanInputRequestIds.delete(workerInput.request.requestId);
-			}
-		}
-		return resumed;
+		return this._humanInput.resumePending();
 	}
 
 	/**
@@ -4241,50 +3629,24 @@ export class AgentSession {
 	 * @returns the id of the appended custom entry
 	 */
 	saveGoalStateSnapshot(state: GoalState, expected?: GoalStateRevision): string {
-		const current = this.getGoalStateSnapshot();
-		if (
-			expected &&
-			(!current || current.goalId !== expected.goalId || (current.revision ?? 0) !== expected.revision)
-		) {
-			throw new Error(
-				`Goal state changed concurrently; expected ${expected.goalId}@${expected.revision}, found ${current ? `${current.goalId}@${current.revision ?? 0}` : "none"}. Retry against the latest state.`,
-			);
-		}
-		const entryId = appendGoalStateSnapshot(this.sessionManager, state, current);
-		try {
-			this._backgroundLanes.synchronizeGoalState(state);
-		} catch (error) {
-			this._emit({
-				type: "warning",
-				message: `Goal state persisted but durable worker reconciliation failed: ${error instanceof Error ? error.message : String(error)}`,
-			});
-		}
-		return entryId;
+		return this._goals.saveState(state, expected);
 	}
 
 	/** Persist a branch-scoped tombstone and stop goal-owned execution without resurrecting old state. */
 	clearGoalStateSnapshot(state: GoalState, now: string): string {
-		const current = this.getGoalStateSnapshot();
-		const expected = getGoalStateRevision(state);
-		if (!current || current.goalId !== expected.goalId || (current.revision ?? 0) !== expected.revision) {
-			throw new Error("Goal state changed concurrently; retry clear against the latest state.");
-		}
-		if (state.status !== "completed" && state.status !== "cancelled") {
-			this._backgroundLanes.synchronizeGoalState(applyGoalEvent(state, { type: "cancel_goal", now }));
-		}
-		return appendGoalClearedSnapshot(this.sessionManager, state, now);
+		return this._goals.clearState(state, now);
 	}
 
 	/**
 	 * Retrieve the latest valid goal state snapshot from the session log.
 	 */
 	getGoalStateSnapshot(): GoalState | undefined {
-		return getLatestGoalStateSnapshot(this.sessionManager);
+		return this._goals.getState();
 	}
 
 	/**
 	 * Persist one submitted continuation pass's exact turn/wall-clock/token/spend contribution onto the active
-	 * goal's durable cumulative budget (see `GoalState.continuationTurnsUsed` et al.). This is the
+	 * goal's durable cumulative accounting (see `GoalState.continuationTurnsUsed` et al.). This is the
 	 * "persistence dep" `GoalLoopController` calls once per pass actually submitted — it, not the
 	 * loop controller, is where usage gets attributed: it scans only assistant messages appended on
 	 * the active branch after the pass's captured cursor. Compaction cannot erase or reattribute that
@@ -4293,73 +3655,12 @@ export class AgentSession {
 	 * after a pass the loop already confirmed was submitted against an active goal).
 	 */
 	recordGoalContinuationPass(pass: { turns: number; wallClockMs: number; usageCursor: string | null }): void {
-		const state = this.getGoalStateSnapshot();
-		if (!state) return;
-		const branch = this.sessionManager.getBranch();
-		const cursorIndex = pass.usageCursor === null ? -1 : branch.findIndex((entry) => entry.id === pass.usageCursor);
-		if (pass.usageCursor !== null && cursorIndex < 0) {
-			this._emit({
-				type: "warning",
-				message: "Goal usage cursor is no longer on the active branch; stopping instead of guessing usage.",
-			});
-			this.recordGoalContinuationFailure(new Error("goal_usage_cursor_lost"));
-			return;
-		}
-		let tokens = 0;
-		let spendUsd = 0;
-		for (const entry of branch.slice(cursorIndex + 1)) {
-			if (entry.type !== "message" || entry.message.role !== "assistant") continue;
-			const usage = (entry.message as AssistantMessage).usage;
-			tokens += Math.max(0, usage.input) + Math.max(0, usage.output);
-			spendUsd += Math.max(0, usage.cost.total);
-		}
-		const updated = applyGoalEvent(state, {
-			type: "record_continuation_budget",
-			turns: pass.turns,
-			wallClockMs: pass.wallClockMs,
-			tokens,
-			spendUsd,
-			now: new Date().toISOString(),
-		});
-		this.saveGoalStateSnapshot(updated, getGoalStateRevision(state));
-	}
-
-	private recordGoalContinuationFailure(error: unknown): void {
-		const state = this.getGoalStateSnapshot();
-		if (!state || state.status !== "active") return;
-		const message = error instanceof Error ? error.message : String(error);
-		const classified = classifyFailure({ message, provider: this.model?.provider });
-		const status = classified.reason === "billing_or_quota" ? "usage_limited" : "blocked";
-		const stopped = stopGoalFromSystem(
-			state,
-			{ status, reason: `${classified.reason}: ${message}` },
-			new Date().toISOString(),
-		);
-		if (stopped.ok) this.saveGoalStateSnapshot(stopped.state, getGoalStateRevision(state));
-	}
-
-	private markGoalBudgetLimited(reason: string): void {
-		const state = this.getGoalStateSnapshot();
-		const stopped = stopGoalFromSystem(state, { status: "budget_limited", reason }, new Date().toISOString());
-		if (stopped.ok && state) this.saveGoalStateSnapshot(stopped.state, getGoalStateRevision(state));
-	}
-
-	private markGoalToolUnavailable(): void {
-		const state = this.getGoalStateSnapshot();
-		const stopped = stopGoalFromSystem(
-			state,
-			{
-				status: "blocked",
-				reason: "goal_tool_unavailable: the active capability surface cannot update durable goal state",
-			},
-			new Date().toISOString(),
-		);
-		if (stopped.ok && state) this.saveGoalStateSnapshot(stopped.state, getGoalStateRevision(state));
+		this._goals.recordContinuationPass(pass);
 	}
 
 	/** Restore runtime intent without mutating persisted goal lifecycle state. */
 	restoreGoalRuntimeAfterResume(): void {
-		this._backgroundLanes.scheduleGoalAutoContinueFromIdle();
+		this._goals.restoreAfterResume();
 	}
 
 	/** Save native task-step state to the active session log. */
@@ -4438,12 +3739,7 @@ export class AgentSession {
 	 * same live lane state, since both reach this same method.
 	 */
 	getGoalRuntimeSnapshot(settings: GoalRuntimeSnapshotSettings): GoalRuntimeSnapshot {
-		return buildGoalRuntimeSnapshot({
-			sessionManager: this.sessionManager,
-			settings,
-			laneRecords: this._backgroundLanes.getLaneRecords(),
-			taskRuntime: this._backgroundLanes.getTaskRuntimeSnapshot(),
-		});
+		return this._goals.getRuntimeSnapshot(settings);
 	}
 
 	/**
@@ -4514,7 +3810,7 @@ export class AgentSession {
 	}
 
 	async continueGoalOnce(options: GoalContinuationOnceOptions): Promise<GoalContinuationOnceResult> {
-		return this._goalContinuation.continueGoalOnce(options);
+		return this._goals.continueOnce(options);
 	}
 
 	/**
@@ -4522,7 +3818,7 @@ export class AgentSession {
 	 * continuation. Delegates to {@link BackgroundLaneController.continueGoalLoopExclusive}, the
 	 * single-flight guard that prevents two goal loops from racing to submit prompts through the
 	 * same session (which throws "Agent is already processing" from the second submission). Do not
-	 * call `this._goalContinuation.continueGoalLoop` directly from here — that bypasses the guard.
+	 * call `this._goals.continueLoop` directly from here — that bypasses the guard.
 	 */
 	async continueGoalLoop(options: GoalContinuationLoopOptions): Promise<GoalContinuationLoopResult> {
 		return this._backgroundLanes.continueGoalLoopExclusive(options);

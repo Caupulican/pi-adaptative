@@ -36,7 +36,11 @@ import type { Agent, AgentMessage, ThinkingLevel } from "@caupulican/pi-agent-co
 import type { SessionManager } from "@caupulican/pi-agent-core/node";
 import type { Api, Message, Model, Usage } from "@caupulican/pi-ai";
 import { clampThinkingLevel, modelsAreEqual } from "@caupulican/pi-ai";
-import type { AgentSessionEvent, IsolatedCompletionOptions, IsolatedCompletionResult } from "./agent-session.ts";
+import type {
+	AgentSessionEvent,
+	IsolatedCompletionOptions,
+	IsolatedCompletionResult,
+} from "./agent-session-contracts.ts";
 import type { RouteDecision } from "./autonomy/contracts.ts";
 import { AUTONOMY_TELEMETRY_EVENT_TYPES, type AutonomyTelemetryEvent } from "./autonomy/telemetry-events.ts";
 import { latestUserPromptText } from "./context-pipeline.ts";

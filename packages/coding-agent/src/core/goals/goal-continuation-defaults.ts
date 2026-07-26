@@ -11,24 +11,6 @@ export const MAX_GOAL_CONTINUE_MAX_STALL_TURNS = 100;
 export const MAX_GOAL_CONTINUE_MAX_WALL_CLOCK_MINUTES = 24 * 60;
 export const MAX_GOAL_AUTO_CONTINUE_DELAY_MS = 60_000;
 
-/** Durable per-goal wall-clock ceiling across continuation passes. */
-export const DEFAULT_GOAL_CUMULATIVE_MAX_WALL_CLOCK_MS = 4 * 60 * 60_000; // 4h of ACTIVE pass time (sum
-// of each submitted pass's own await duration, NOT wall-clock time between passes/idle gaps) — a
-// workday-sized ceiling, far above what one bounded invocation would consume in practice.
-
-/**
- * Cumulative, PER-GOAL total spend ceiling across the continuation model and worker/subagent lanes.
- * Worker spend is summed by goalId in `goal-runtime-snapshot.ts`; foreground continuation spend is
- * attributed from the exact append-only session interval for each submitted pass. ACCURATE for
- * in-process worker/research lanes (their
- * lane record carries a real `costUsd` set on completion); ADVISORY-ONLY for out-of-process tmux
- * workers, whose self-reported usage (`reportSpawnedUsage`) currently carries no goalId/lane
- * correlation key — a documented gap, not a hidden one. A conservative but
- * generous dollar figure: this exists to bound a genuinely runaway goal's worker fan-out cost, not to
- * cut off normal delegation.
- */
-export const DEFAULT_GOAL_CUMULATIVE_MAX_TOTAL_SPEND_USD = 20;
-
 /**
  * Never-hang backstop for a bound-in-flight worker (`evaluateGoalContinuation`'s
  * `worker_wait_timeout` reasonCode): the maximum time a goal waits on a dispatched worker

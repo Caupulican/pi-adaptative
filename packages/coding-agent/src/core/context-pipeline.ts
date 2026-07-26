@@ -35,7 +35,7 @@ import {
 	TokenBudget,
 } from "@caupulican/pi-agent-core/node";
 import type { Api, AssistantMessage, Model, Usage } from "@caupulican/pi-ai";
-import type { IsolatedCompletionOptions, IsolatedCompletionResult } from "./agent-session.ts";
+import type { IsolatedCompletionOptions, IsolatedCompletionResult } from "./agent-session-contracts.ts";
 import { BrainCurator, type CurationTelemetrySnapshot, preDigestConversationText } from "./context/brain-curator.ts";
 import { type ArtifactStore, createFileArtifactStore } from "./context/context-artifacts.ts";
 import {

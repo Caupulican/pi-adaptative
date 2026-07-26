@@ -43,7 +43,7 @@ import type {
 	IsolatedCompletionOptions,
 	IsolatedCompletionResult,
 	WorkerDelegationRunOutcome,
-} from "./agent-session.ts";
+} from "./agent-session-contracts.ts";
 import type { WorkerClaim } from "./autonomy/contracts.ts";
 import type { LaneRecord } from "./autonomy/lane-tracker.ts";
 import type { ArtifactStore } from "./context/context-artifacts.ts";

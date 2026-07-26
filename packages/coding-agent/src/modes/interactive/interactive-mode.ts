@@ -6,7 +6,6 @@
 import * as fs from "node:fs";
 import * as path from "node:path";
 import type { AgentMessage, ToolCallRepairInfo } from "@caupulican/pi-agent-core";
-import { createCompactionSummaryMessage } from "@caupulican/pi-agent-core";
 import type { SessionContext, SessionManager, TruncationResult } from "@caupulican/pi-agent-core/node";
 import type { AssistantMessage, ImageContent, Message, Model, ToolCall } from "@caupulican/pi-ai";
 import type { AutocompleteProvider, EditorComponent, Keybinding, MarkdownTheme, SelectItem } from "@caupulican/pi-tui";
@@ -24,11 +23,7 @@ import {
 import { APP_NAME, APP_TITLE, getAgentDir, VERSION } from "../../config.ts";
 import { type AgentSession, type AgentSessionEvent, parseSkillBlock } from "../../core/agent-session.ts";
 import type { AgentSessionRuntime } from "../../core/agent-session-runtime.ts";
-import type {
-	AutocompleteProviderFactory,
-	ExtensionCommandContext,
-	ExtensionRunner,
-} from "../../core/extensions/index.ts";
+import type { AutocompleteProviderFactory, ExtensionCommandContext } from "../../core/extensions/index.ts";
 import { FooterDataProvider } from "../../core/footer-data-provider.ts";
 import {
 	DEFAULT_GOAL_CONTINUE_MAX_STALL_TURNS,
@@ -42,7 +37,6 @@ import { configureHttpDispatcher } from "../../core/http-dispatcher.ts";
 import { type AppKeybinding, KeybindingsManager } from "../../core/keybindings.ts";
 import type { PrismLlamaCppRuntime } from "../../core/models/llamacpp-runtime.ts";
 import type { OllamaRuntime, TransformersRuntime } from "../../core/models/local-runtime.ts";
-import type { ResourceDiagnostic } from "../../core/resource-loader.ts";
 import { formatMissingSessionCwdPrompt, type MissingSessionCwdError } from "../../core/session-cwd.ts";
 import { SessionImageStore } from "../../core/session-image-store.ts";
 import type {
@@ -51,10 +45,8 @@ import type {
 	SelfModificationSettings,
 	SettingsScope,
 } from "../../core/settings-manager.ts";
-import { BUILTIN_SLASH_COMMANDS } from "../../core/slash-commands.ts";
-import type { SourceInfo } from "../../core/source-info.ts";
 import { isRecordObject } from "../../core/util/value-guards.ts";
-import { getCwdRelativePath, resolvePath } from "../../utils/paths.ts";
+import { resolvePath } from "../../utils/paths.ts";
 import { ensureTool } from "../../utils/tools-manager.ts";
 import { checkForNewPiVersion, type LatestPiRelease } from "../../utils/version-check.ts";
 import { AuthDialogsController } from "./auth-dialogs-controller.ts";
@@ -68,10 +60,11 @@ import { AssistantMessageComponent } from "./components/assistant-message.ts";
 import { BashExecutionComponent } from "./components/bash-execution.ts";
 import { BranchSummaryMessageComponent } from "./components/branch-summary-message.ts";
 import { CompactionSummaryMessageComponent } from "./components/compaction-summary-message.ts";
-import { CountdownTimer } from "./components/countdown-timer.ts";
+import type { CountdownTimer } from "./components/countdown-timer.ts";
 import { CustomEditor } from "./components/custom-editor.ts";
 import { CustomMessageComponent } from "./components/custom-message.ts";
 import { DynamicBorder } from "./components/dynamic-border.ts";
+import { ExpandableText, isExpandable } from "./components/expandable-text.ts";
 import type { FitnessRole } from "./components/fitness-role-selector.ts";
 import { FooterComponent } from "./components/footer.ts";
 import { formatKeyText, keyDisplayText, keyHint, keyText, rawKeyHint } from "./components/keybinding-hints.ts";
@@ -80,7 +73,6 @@ import { ToolExecutionComponent } from "./components/tool-execution.ts";
 import { ToolGroupComponent } from "./components/tool-group.ts";
 import {
 	getToolPanelActionKey,
-	getToolPanelResultActionKeys,
 	shouldReuseToolPanelInPlace,
 	ToolPanelRegistry,
 } from "./components/tool-panel-registry.ts";
@@ -90,11 +82,12 @@ import { EditorOverlayHost } from "./editor-overlay-host.ts";
 import { ExtensionUiHost } from "./extension-ui-host.ts";
 import { openEditorForPath, openExternalEditor } from "./external-editor.ts";
 import * as historyReloadMath from "./history-reload-math.ts";
+import { handleInteractiveEvent, type InteractiveEventHost } from "./interactive-event-controller.ts";
 import * as keyHandlers from "./key-handlers.ts";
+import { type LoadedResourcesViewOptions, renderLoadedResources } from "./loaded-resources-view.ts";
 import * as localModelCommands from "./local-model-commands.ts";
 import { ProfileMenuController } from "./profile-menu-controller.ts";
 import * as reportCommands from "./report-commands.ts";
-import * as resourceDisplay from "./resource-display.ts";
 import * as resourceShellCommands from "./resource-shell-commands.ts";
 import * as sessionFlows from "./session-flow-commands.ts";
 import * as sessionIoCommands from "./session-io-commands.ts";
@@ -110,7 +103,6 @@ import {
 	setRegisteredThemes,
 	setTheme,
 	stopThemeWatcher,
-	type ThemeColor,
 	theme,
 } from "./theme/theme.ts";
 import * as usageCommands from "./usage-commands.ts";
@@ -119,36 +111,6 @@ const TUI_HISTORY_RELOAD_CHUNK_SIZE = 20;
 const TUI_LIVE_HISTORY_MAX_COMPONENTS = 260;
 const TUI_LIVE_HISTORY_TRIM_TO_COMPONENTS = 220;
 const STREAMING_UI_UPDATE_INTERVAL_MS = 80;
-
-/** Interface for components that can be expanded/collapsed */
-interface Expandable {
-	setExpanded(expanded: boolean): void;
-}
-
-function isExpandable(obj: unknown): obj is Expandable {
-	return typeof obj === "object" && obj !== null && "setExpanded" in obj && typeof obj.setExpanded === "function";
-}
-
-class ExpandableText extends Text implements Expandable {
-	private readonly getCollapsedText: () => string;
-	private readonly getExpandedText: () => string;
-
-	constructor(
-		getCollapsedText: () => string,
-		getExpandedText: () => string,
-		expanded = false,
-		paddingX = 0,
-		paddingY = 0,
-	) {
-		super(expanded ? getExpandedText() : getCollapsedText(), paddingX, paddingY);
-		this.getCollapsedText = getCollapsedText;
-		this.getExpandedText = getExpandedText;
-	}
-
-	setExpanded(expanded: boolean): void {
-		this.setText(expanded ? this.getExpandedText() : this.getCollapsedText());
-	}
-}
 
 type UserInputSubmission = {
 	text: string;
@@ -300,11 +262,11 @@ export class InteractiveMode {
 	private pendingBashComponents: BashExecutionComponent[] = [];
 
 	// Auto-compaction state
-	private autoCompactionEscapeHandler?: () => void;
+	public autoCompactionEscapeHandler?: () => void;
 
 	// Auto-retry state
-	private retryCountdown: CountdownTimer | undefined = undefined;
-	private retryEscapeHandler?: () => void;
+	public retryCountdown: CountdownTimer | undefined = undefined;
+	public retryEscapeHandler?: () => void;
 
 	// Messages queued while compaction is running
 	private compactionQueuedMessages: CompactionQueuedMessage[] = [];
@@ -487,21 +449,6 @@ export class InteractiveMode {
 		// Register themes from resource loader and initialize
 		setRegisteredThemes(this.session.resourceLoader.getThemes().themes);
 		initTheme(this.settingsManager.getTheme(), true);
-	}
-
-	private getBuiltInCommandConflictDiagnostics(extensionRunner: ExtensionRunner): ResourceDiagnostic[] {
-		const builtinNames = new Set(BUILTIN_SLASH_COMMANDS.map((command) => command.name));
-		return extensionRunner
-			.getRegisteredCommands()
-			.filter((command) => builtinNames.has(command.name))
-			.map((command) => ({
-				type: "warning" as const,
-				message:
-					command.invocationName === command.name
-						? `Extension command '/${command.name}' conflicts with built-in interactive command. Skipping in autocomplete.`
-						: `Extension command '/${command.name}' conflicts with built-in interactive command. Available as '/${command.invocationName}'.`,
-				path: command.sourceInfo.path,
-			}));
 	}
 
 	// Thin delegate retained so setupAutocompleteProvider's base-provider seam
@@ -839,19 +786,19 @@ export class InteractiveMode {
 		}
 	}
 
-	private toolActivityKind(toolName: string): ActivityLaneKind {
+	public toolActivityKind(toolName: string): ActivityLaneKind {
 		if (toolName === "task_steps") return "task";
 		if (toolName === "goal") return "goal";
 		if (toolName === "delegate" || toolName === "delegate_status") return "worker";
 		return "tool";
 	}
 
-	private toolActivityLabel(toolName: string): string {
+	public toolActivityLabel(toolName: string): string {
 		const label = this.getRegisteredToolDefinition(toolName)?.label?.trim() || toolName;
 		return label.replace(/[_-]+/g, " ").replace(/(^|\s)\S/g, (character) => character.toUpperCase());
 	}
 
-	private toolActivityTerminalStatus(isError: boolean, details: unknown): "success" | "failure" | "neutral" {
+	public toolActivityTerminalStatus(isError: boolean, details: unknown): "success" | "failure" | "neutral" {
 		if (isError) return "failure";
 		if (!isRecordObject(details)) return "success";
 		if (details.applied === false || details.kind === "error") return "failure";
@@ -887,297 +834,21 @@ export class InteractiveMode {
 	// Extension System
 	// =========================================================================
 
-	// The resource-display formatters below are pure and live in ./resource-display.ts.
-	// These thin `this.`-delegates are retained so showLoadedResources' formatter
-	// injection seam (exercised via prototype stubs in interactive-mode-status.test.ts)
-	// keeps working unchanged.
-	private formatDisplayPath(p: string): string {
-		return resourceDisplay.formatDisplayPath(p);
-	}
-
-	private formatExtensionDisplayPath(path: string): string {
-		return resourceDisplay.formatExtensionDisplayPath(path);
-	}
-
-	private formatContextPath(p: string): string {
-		const cwd = path.resolve(this.sessionManager.getCwd());
-		const absolutePath = path.isAbsolute(p) ? path.resolve(p) : path.resolve(cwd, p);
-		const relativePath = getCwdRelativePath(absolutePath, cwd);
-		if (relativePath !== undefined) {
-			return relativePath;
-		}
-
-		return this.formatDisplayPath(absolutePath);
-	}
-
 	private getStartupExpansionState(): boolean {
 		return this.options.verbose || this.toolOutputExpanded;
 	}
 
-	private getShortPath(fullPath: string, sourceInfo?: SourceInfo): string {
-		return resourceDisplay.getShortPath(fullPath, sourceInfo);
+	private showLoadedResources(options?: LoadedResourcesViewOptions): void {
+		renderLoadedResources(
+			{
+				session: this.session,
+				chatContainer: this.chatContainer,
+				verbose: this.options.verbose ?? false,
+				expanded: this.getStartupExpansionState(),
+			},
+			options,
+		);
 	}
-
-	private getCompactPathLabel(resourcePath: string, sourceInfo?: SourceInfo): string {
-		return resourceDisplay.getCompactPathLabel(resourcePath, sourceInfo);
-	}
-
-	private getCompactPackageSourceLabel(sourceInfo?: SourceInfo): string {
-		return resourceDisplay.getCompactPackageSourceLabel(sourceInfo);
-	}
-
-	private getCompactExtensionLabel(resourcePath: string, sourceInfo?: SourceInfo): string {
-		return resourceDisplay.getCompactExtensionLabel(resourcePath, sourceInfo);
-	}
-
-	private getCompactDisplayPathSegments(resourcePath: string): string[] {
-		return resourceDisplay.getCompactDisplayPathSegments(resourcePath);
-	}
-
-	private getCompactNonPackageExtensionLabel(
-		resourcePath: string,
-		index: number,
-		allPaths: Array<{ path: string; segments: string[] }>,
-	): string {
-		return resourceDisplay.getCompactNonPackageExtensionLabel(resourcePath, index, allPaths);
-	}
-
-	private getCompactExtensionLabels(extensions: Array<{ path: string; sourceInfo?: SourceInfo }>): string[] {
-		return resourceDisplay.getCompactExtensionLabels(extensions);
-	}
-
-	private getScopeGroup(sourceInfo?: SourceInfo): "user" | "project" | "path" {
-		return resourceDisplay.getScopeGroup(sourceInfo);
-	}
-
-	private isPackageSource(sourceInfo?: SourceInfo): boolean {
-		return resourceDisplay.isPackageSource(sourceInfo);
-	}
-
-	private buildScopeGroups(items: Array<{ path: string; sourceInfo?: SourceInfo }>): Array<{
-		scope: "user" | "project" | "path";
-		paths: Array<{ path: string; sourceInfo?: SourceInfo }>;
-		packages: Map<string, Array<{ path: string; sourceInfo?: SourceInfo }>>;
-	}> {
-		return resourceDisplay.buildScopeGroups(items);
-	}
-
-	private formatScopeGroups(
-		groups: Array<{
-			scope: "user" | "project" | "path";
-			paths: Array<{ path: string; sourceInfo?: SourceInfo }>;
-			packages: Map<string, Array<{ path: string; sourceInfo?: SourceInfo }>>;
-		}>,
-		options: {
-			formatPath: (item: { path: string; sourceInfo?: SourceInfo }) => string;
-			formatPackagePath: (item: { path: string; sourceInfo?: SourceInfo }, source: string) => string;
-		},
-	): string {
-		return resourceDisplay.formatScopeGroups(groups, options);
-	}
-
-	private formatDiagnostics(diagnostics: readonly ResourceDiagnostic[], sourceInfos: Map<string, SourceInfo>): string {
-		return resourceDisplay.formatDiagnostics(diagnostics, sourceInfos);
-	}
-
-	private showLoadedResources(options?: {
-		extensions?: Array<{ path: string; sourceInfo?: SourceInfo }>;
-		force?: boolean;
-		showDiagnosticsWhenQuiet?: boolean;
-	}): void {
-		const showListing = options?.force || this.options.verbose || !this.settingsManager.getQuietStartup();
-		const showDiagnostics = showListing || options?.showDiagnosticsWhenQuiet === true;
-		if (!showListing && !showDiagnostics) {
-			return;
-		}
-
-		const sectionHeader = (name: string, color: ThemeColor = "mdHeading") => theme.fg(color, `[${name}]`);
-		const formatCompactList = (items: string[], options?: { sort?: boolean }): string => {
-			const labels = items.map((item) => item.trim()).filter((item) => item.length > 0);
-			if (options?.sort !== false) {
-				labels.sort((a, b) => a.localeCompare(b));
-			}
-			return theme.fg("dim", `  ${labels.join(", ")}`);
-		};
-		const addLoadedSection = (
-			name: string,
-			collapsedBody: string,
-			expandedBody = collapsedBody,
-			color: ThemeColor = "mdHeading",
-		): void => {
-			const section = new ExpandableText(
-				() => `${sectionHeader(name, color)}\n${collapsedBody}`,
-				() => `${sectionHeader(name, color)}\n${expandedBody}`,
-				this.getStartupExpansionState(),
-				0,
-				0,
-			);
-			this.chatContainer.addChild(section);
-			this.chatContainer.addChild(new Spacer(1));
-		};
-
-		const skillsResult = this.session.resourceLoader.getSkills();
-		const promptsResult = this.session.resourceLoader.getPrompts();
-		const themesResult = this.session.resourceLoader.getThemes();
-		const extensions =
-			options?.extensions ??
-			this.session.resourceLoader.getExtensions().extensions.map((extension) => ({
-				path: extension.path,
-				sourceInfo: extension.sourceInfo,
-			}));
-		const sourceInfos = new Map<string, SourceInfo>();
-		for (const extension of extensions) {
-			if (extension.sourceInfo) {
-				sourceInfos.set(extension.path, extension.sourceInfo);
-			}
-		}
-		for (const skill of skillsResult.skills) {
-			if (skill.sourceInfo) {
-				sourceInfos.set(skill.filePath, skill.sourceInfo);
-			}
-		}
-		for (const prompt of promptsResult.prompts) {
-			if (prompt.sourceInfo) {
-				sourceInfos.set(prompt.filePath, prompt.sourceInfo);
-			}
-		}
-		for (const loadedTheme of themesResult.themes) {
-			if (loadedTheme.sourcePath && loadedTheme.sourceInfo) {
-				sourceInfos.set(loadedTheme.sourcePath, loadedTheme.sourceInfo);
-			}
-		}
-
-		if (showListing) {
-			const contextFiles = this.session.resourceLoader.getAgentsFiles().agentsFiles;
-			if (contextFiles.length > 0) {
-				this.chatContainer.addChild(new Spacer(1));
-				const contextList = contextFiles
-					.map((f) => theme.fg("dim", `  ${this.formatDisplayPath(f.path)}`))
-					.join("\n");
-				const contextCompactList = formatCompactList(
-					contextFiles.map((contextFile) => this.formatContextPath(contextFile.path)),
-					{ sort: false },
-				);
-				addLoadedSection("Context", contextCompactList, contextList);
-			}
-
-			const skills = this.session.resourceLoader.getActiveSkills();
-			if (skills.length > 0) {
-				const groups = this.buildScopeGroups(
-					skills.map((skill) => ({ path: skill.filePath, sourceInfo: skill.sourceInfo })),
-				);
-				const skillList = this.formatScopeGroups(groups, {
-					formatPath: (item) => this.formatDisplayPath(item.path),
-					formatPackagePath: (item) => this.getShortPath(item.path, item.sourceInfo),
-				});
-				const skillCompactList = formatCompactList(skills.map((skill) => skill.name));
-				addLoadedSection("Skills", skillCompactList, skillList);
-			}
-
-			const templates = this.session.promptTemplates;
-			if (templates.length > 0) {
-				const groups = this.buildScopeGroups(
-					templates.map((template) => ({ path: template.filePath, sourceInfo: template.sourceInfo })),
-				);
-				const templateByPath = new Map(templates.map((t) => [t.filePath, t]));
-				const templateList = this.formatScopeGroups(groups, {
-					formatPath: (item) => {
-						const template = templateByPath.get(item.path);
-						return template ? `/${template.name}` : this.formatDisplayPath(item.path);
-					},
-					formatPackagePath: (item) => {
-						const template = templateByPath.get(item.path);
-						return template ? `/${template.name}` : this.formatDisplayPath(item.path);
-					},
-				});
-				const promptCompactList = formatCompactList(templates.map((template) => `/${template.name}`));
-				addLoadedSection("Prompts", promptCompactList, templateList);
-			}
-
-			if (extensions.length > 0) {
-				const groups = this.buildScopeGroups(extensions);
-				const extList = this.formatScopeGroups(groups, {
-					formatPath: (item) => this.formatExtensionDisplayPath(item.path),
-					formatPackagePath: (item) =>
-						this.formatExtensionDisplayPath(this.getShortPath(item.path, item.sourceInfo)),
-				});
-				const extensionCompactList = formatCompactList(this.getCompactExtensionLabels(extensions));
-				addLoadedSection("Extensions", extensionCompactList, extList, "mdHeading");
-			}
-
-			// Show loaded themes (excluding built-in)
-			const loadedThemes = themesResult.themes;
-			const customThemes = loadedThemes.filter((t) => t.sourcePath);
-			if (customThemes.length > 0) {
-				const groups = this.buildScopeGroups(
-					customThemes.map((loadedTheme) => ({
-						path: loadedTheme.sourcePath!,
-						sourceInfo: loadedTheme.sourceInfo,
-					})),
-				);
-				const themeList = this.formatScopeGroups(groups, {
-					formatPath: (item) => this.formatDisplayPath(item.path),
-					formatPackagePath: (item) => this.getShortPath(item.path, item.sourceInfo),
-				});
-				const themeCompactList = formatCompactList(
-					customThemes.map(
-						(loadedTheme) =>
-							loadedTheme.name ?? this.getCompactPathLabel(loadedTheme.sourcePath!, loadedTheme.sourceInfo),
-					),
-				);
-				addLoadedSection("Themes", themeCompactList, themeList);
-			}
-		}
-
-		if (showDiagnostics) {
-			const skillDiagnostics = skillsResult.diagnostics;
-			if (skillDiagnostics.length > 0) {
-				const warningLines = this.formatDiagnostics(skillDiagnostics, sourceInfos);
-				this.chatContainer.addChild(new Text(`${theme.fg("warning", "[Skill conflicts]")}\n${warningLines}`, 0, 0));
-				this.chatContainer.addChild(new Spacer(1));
-			}
-
-			const promptDiagnostics = promptsResult.diagnostics;
-			if (promptDiagnostics.length > 0) {
-				const warningLines = this.formatDiagnostics(promptDiagnostics, sourceInfos);
-				this.chatContainer.addChild(
-					new Text(`${theme.fg("warning", "[Prompt conflicts]")}\n${warningLines}`, 0, 0),
-				);
-				this.chatContainer.addChild(new Spacer(1));
-			}
-
-			const extensionDiagnostics: ResourceDiagnostic[] = [];
-			const extensionErrors = this.session.resourceLoader.getExtensions().errors;
-			if (extensionErrors.length > 0) {
-				for (const error of extensionErrors) {
-					extensionDiagnostics.push({ type: "error", message: error.error, path: error.path });
-				}
-			}
-
-			const commandDiagnostics = this.session.extensionRunner.getCommandDiagnostics();
-			extensionDiagnostics.push(...commandDiagnostics);
-			extensionDiagnostics.push(...this.getBuiltInCommandConflictDiagnostics(this.session.extensionRunner));
-
-			const shortcutDiagnostics = this.session.extensionRunner.getShortcutDiagnostics();
-			extensionDiagnostics.push(...shortcutDiagnostics);
-
-			if (extensionDiagnostics.length > 0) {
-				const warningLines = this.formatDiagnostics(extensionDiagnostics, sourceInfos);
-				this.chatContainer.addChild(
-					new Text(`${theme.fg("warning", "[Extension issues]")}\n${warningLines}`, 0, 0),
-				);
-				this.chatContainer.addChild(new Spacer(1));
-			}
-
-			const themeDiagnostics = themesResult.diagnostics;
-			if (themeDiagnostics.length > 0) {
-				const warningLines = this.formatDiagnostics(themeDiagnostics, sourceInfos);
-				this.chatContainer.addChild(new Text(`${theme.fg("warning", "[Theme conflicts]")}\n${warningLines}`, 0, 0));
-				this.chatContainer.addChild(new Spacer(1));
-			}
-		}
-	}
-
 	/**
 	 * Initialize the extension system with TUI-based UI context.
 	 */
@@ -1465,7 +1136,7 @@ export class InteractiveMode {
 		return component;
 	}
 
-	private clearActiveToolCalls(): void {
+	public clearActiveToolCalls(): void {
 		this.toolPanels.clearActive();
 	}
 
@@ -2040,403 +1711,9 @@ export class InteractiveMode {
 		});
 	}
 
-	private async handleEvent(event: AgentSessionEvent): Promise<void> {
-		if (!this.isInitialized) {
-			await this.init();
-		}
-
-		this.footer.invalidate();
-
-		switch (event.type) {
-			// Part B: general "the system is processing" feedback for the routing/prep gap before a
-			// turn starts streaming (the judge is a real bounded LLM call, not instant) — independent
-			// of thinking level, since this isn't model-thinking. Reuses the same working loader
-			// agent_start below uses, so the hand-off into real streaming is the same
-			// stop-then-recreate it already does — no distinct spinner, no double-render.
-			case "routing_start":
-				if (!this.session.isStreaming && !this.loadingAnimation && this.workingVisible) {
-					if (this.workingIndicatorOptions) {
-						this.loadingAnimation = this.createWorkingLoader();
-						this.statusContainer.addChild(this.loadingAnimation);
-					} else {
-						this.activityLane?.start({ id: "runtime:routing", kind: "runtime", label: "Routing" });
-					}
-					this.ui.requestRender();
-				}
-				break;
-
-			case "routing_end":
-				// Unconditional: covers both a clean hand-off into agent_start (which immediately
-				// stops-and-recreates its own loader anyway) and a turn that failed before ever
-				// starting, which must not leave the indicator spinning forever.
-				this.stopWorkingLoader();
-				this.ui.requestRender();
-				break;
-
-			case "agent_start":
-				this.clearActiveToolCalls();
-				if (this.settingsManager.getShowTerminalProgress()) {
-					this.ui.terminal.setProgress(true);
-				}
-				// Restore main escape handler if retry handler is still active
-				// (retry success event fires later, but we need main handler now)
-				if (this.retryEscapeHandler) {
-					this.defaultEditor.onEscape = this.retryEscapeHandler;
-					this.retryEscapeHandler = undefined;
-				}
-				if (this.retryCountdown) {
-					this.retryCountdown.dispose();
-					this.retryCountdown = undefined;
-				}
-				this.activityLane?.remove("runtime:retry");
-				this.stopWorkingLoader();
-				if (this.workingVisible) {
-					if (this.workingIndicatorOptions) {
-						this.loadingAnimation = this.createWorkingLoader();
-						this.statusContainer.addChild(this.loadingAnimation);
-					} else {
-						this.activityLane?.start({
-							id: "runtime:turn",
-							kind: "runtime",
-							label: this.getWorkingLoaderMessage(),
-						});
-					}
-				}
-				this.ui.requestRender();
-				break;
-
-			case "queue_update":
-				this.updatePendingMessagesDisplay();
-				this.ui.requestRender();
-				break;
-
-			case "session_info_changed":
-				this.updateTerminalTitle();
-				this.refreshActivityLane();
-				this.footer.invalidate();
-				this.ui.requestRender();
-				break;
-
-			case "thinking_level_changed":
-				this.footer.invalidate();
-				this.updateEditorBorderColor();
-				break;
-
-			case "warning":
-				this.showWarning(event.message);
-				break;
-
-			case "delegate_workers": {
-				this.footerDataProvider.setExtensionStatus("delegate", undefined);
-				this.refreshActivityLane();
-				this.footer.invalidate();
-				break;
-			}
-
-			case "message_start":
-				if (event.message.role === "custom") {
-					this.addMessageToChat(event.message);
-					this.ui.requestRender();
-				} else if (event.message.role === "user") {
-					this.addMessageToChat(event.message);
-					this.updatePendingMessagesDisplay();
-					this.ui.requestRender();
-				} else if (event.message.role === "assistant") {
-					this.clearPendingStreamingUiUpdate();
-					this.lastStreamingUiUpdateAt = 0;
-					this.streamingComponent = new AssistantMessageComponent(
-						undefined,
-						this.hideThinkingBlock,
-						this.getMarkdownThemeWithSettings(),
-						this.hiddenThinkingLabel,
-					);
-					this.streamingMessage = event.message;
-					this.chatContainer.addChild(this.streamingComponent);
-					this.applyStreamingMessageUpdate(this.streamingMessage, { force: true });
-					this.trimLiveTuiHistory();
-				}
-				break;
-
-			case "message_update":
-				if (this.streamingComponent && event.message.role === "assistant") {
-					this.applyStreamingMessageUpdate(event.message);
-				}
-				break;
-
-			case "message_end":
-				if (event.message.role === "user") break;
-				if (this.streamingComponent && event.message.role === "assistant") {
-					this.streamingMessage = event.message;
-					let errorMessage: string | undefined;
-					if (this.streamingMessage.stopReason === "aborted") {
-						const retryAttempt = this.session.retryAttempt;
-						errorMessage =
-							retryAttempt > 0
-								? `Aborted after ${retryAttempt} retry attempt${retryAttempt > 1 ? "s" : ""}`
-								: "Operation aborted";
-						this.streamingMessage.errorMessage = errorMessage;
-					}
-					this.applyStreamingMessageUpdate(this.streamingMessage, { force: true });
-
-					if (this.streamingMessage.stopReason === "aborted" || this.streamingMessage.stopReason === "error") {
-						if (!errorMessage) {
-							errorMessage = this.streamingMessage.errorMessage || "Error";
-						}
-						for (const [, component] of this.toolPanels.activeEntries()) {
-							component.updateResult({
-								content: [{ type: "text", text: errorMessage }],
-								isError: true,
-							});
-						}
-						this.clearActiveToolCalls();
-					} else {
-						// Args are now complete - trigger diff computation for edit tools
-						for (const [, component] of this.toolPanels.activeEntries()) {
-							component.setArgsComplete();
-						}
-					}
-					this.streamingComponent = undefined;
-					this.streamingMessage = undefined;
-					this.footer.invalidate();
-				}
-				this.ui.requestRender();
-				break;
-
-			case "tool_execution_start": {
-				this.activityLane?.start({
-					id: `tool:${event.toolCallId}`,
-					kind: this.toolActivityKind(event.toolName),
-					label: this.toolActivityLabel(event.toolName),
-				});
-				let component = this.toolPanels.getActive(event.toolCallId);
-				if (!component)
-					component = this.attachToolExecutionComponent(
-						event.toolName,
-						event.toolCallId,
-						event.args,
-						event.repair,
-					);
-				else component.updateArgs(event.args, event.repair);
-				component.markExecutionStarted(event.repair);
-				this.ui.requestRender();
-				break;
-			}
-
-			case "tool_execution_update": {
-				const component = this.toolPanels.getActive(event.toolCallId);
-				if (component) {
-					component.updateArgs(event.args, event.repair);
-					component.updateResult({ ...event.partialResult, isError: false }, true);
-					this.ui.requestRender();
-				}
-				break;
-			}
-
-			case "tool_execution_end": {
-				const toolActivityId = `tool:${event.toolCallId}`;
-				const toolKind = this.toolActivityKind(event.toolName);
-				const terminalStatus = this.toolActivityTerminalStatus(event.isError, event.result.details);
-				if (toolKind === "tool" || terminalStatus !== "success") {
-					this.activityLane?.finish(toolActivityId, terminalStatus, {
-						id: toolActivityId,
-						kind: toolKind,
-						label: this.toolActivityLabel(event.toolName),
-					});
-				} else {
-					this.activityLane?.remove(toolActivityId);
-				}
-				const component = this.toolPanels.getActive(event.toolCallId);
-				if (component) {
-					component.updateResult({ ...event.result, isError: event.isError });
-					this.toolPanels.registerAliases(
-						component,
-						getToolPanelResultActionKeys(this.getToolPanelScope(), event.toolName, event.result),
-					);
-					this.toolPanels.finish(event.toolCallId);
-					this.ui.requestRender();
-				}
-				if (
-					event.toolName === "task_steps" ||
-					event.toolName === "goal" ||
-					event.toolName === "delegate" ||
-					event.toolName === "delegate_status"
-				) {
-					this.refreshActivityLane();
-				}
-				break;
-			}
-
-			case "agent_end":
-				// Native in-process reflection fully replaces the subprocess learning paths
-				// (continuous-learning AND autonomy-review) when enabled; otherwise fall back to legacy.
-				if (this.isNativeReflectionEnabled()) {
-					this.maybeRunNativeReflection(event.messages);
-				} else if (!this.maybeStartAutoLearn()) {
-					this.maybeStartAutonomyReview(event.messages);
-				}
-				if (this.settingsManager.getShowTerminalProgress()) {
-					this.ui.terminal.setProgress(false);
-				}
-				if (event.willRetry) {
-					this.activityLane?.remove("runtime:turn");
-				} else {
-					const finalAssistant = event.messages.findLast(
-						(message): message is AssistantMessage => message.role === "assistant",
-					);
-					const failed = finalAssistant?.stopReason === "error" || finalAssistant?.stopReason === "aborted";
-					this.activityLane?.finish("runtime:turn", failed ? "failure" : "success", {
-						id: "runtime:turn",
-						kind: "runtime",
-						label: failed ? "Turn failed" : "Done",
-					});
-				}
-				if (this.loadingAnimation) {
-					this.loadingAnimation.stop();
-					this.loadingAnimation = undefined;
-					this.statusContainer.clear();
-				}
-				if (this.streamingComponent) {
-					this.chatContainer.removeChild(this.streamingComponent);
-					this.streamingComponent = undefined;
-					this.streamingMessage = undefined;
-				}
-				this.clearActiveToolCalls();
-				this.activityLane?.removeByPrefix("tool:");
-
-				await this.checkShutdownRequested();
-
-				this.ui.requestRender();
-				break;
-
-			case "compaction_start": {
-				if (this.settingsManager.getShowTerminalProgress()) {
-					this.ui.terminal.setProgress(true);
-				}
-				// Keep editor active; submissions are queued during compaction.
-				this.autoCompactionEscapeHandler = this.defaultEditor.onEscape;
-				this.defaultEditor.onEscape = () => {
-					this.session.abortCompaction();
-				};
-				this.stopWorkingLoader();
-				const cancelHint = `(${keyText("app.interrupt")} to cancel)`;
-				const label =
-					event.reason === "manual"
-						? `Compacting context ${cancelHint}`
-						: `${event.reason === "overflow" ? "Context overflow · " : ""}Auto-compacting ${cancelHint}`;
-				this.activityLane?.start({ id: "runtime:compaction", kind: "runtime", label });
-				this.ui.requestRender();
-				break;
-			}
-
-			case "compaction_end": {
-				if (this.settingsManager.getShowTerminalProgress()) {
-					this.ui.terminal.setProgress(false);
-				}
-				if (this.autoCompactionEscapeHandler) {
-					this.defaultEditor.onEscape = this.autoCompactionEscapeHandler;
-					this.autoCompactionEscapeHandler = undefined;
-				}
-				if (event.aborted) {
-					this.activityLane?.finish("runtime:compaction", "neutral", {
-						id: "runtime:compaction",
-						kind: "runtime",
-						label: "Compaction cancelled",
-					});
-					if (event.reason === "manual") {
-						this.showError("Compaction cancelled");
-					}
-				} else if (event.result) {
-					this.activityLane?.finish("runtime:compaction", "success", {
-						id: "runtime:compaction",
-						kind: "runtime",
-						label: "Context compacted",
-					});
-					await this.rebuildChatFromMessages();
-					this.addMessageToChat(
-						createCompactionSummaryMessage(
-							event.result.summary,
-							event.result.tokensBefore,
-							new Date().toISOString(),
-						),
-					);
-					this.footer.invalidate();
-				} else if (event.errorMessage) {
-					this.activityLane?.finish("runtime:compaction", "failure", {
-						id: "runtime:compaction",
-						kind: "runtime",
-						label: "Compaction failed",
-					});
-					if (event.reason === "manual") {
-						this.showError(event.errorMessage);
-					} else {
-						this.chatContainer.addChild(new Spacer(1));
-						this.chatContainer.addChild(new Text(theme.fg("error", event.errorMessage), 1, 0));
-					}
-				} else if (event.skipReason) {
-					this.activityLane?.finish("runtime:compaction", "neutral", {
-						id: "runtime:compaction",
-						kind: "runtime",
-						label: `Compaction skipped · ${event.skipReason}`,
-					});
-				}
-				void this.flushCompactionQueue({ willRetry: event.willRetry });
-				this.ui.requestRender();
-				break;
-			}
-
-			case "auto_retry_start": {
-				// Set up escape to abort retry
-				this.retryEscapeHandler = this.defaultEditor.onEscape;
-				this.defaultEditor.onEscape = () => {
-					this.session.abortRetry();
-				};
-				this.retryCountdown?.dispose();
-				const retryMessage = (seconds: number) =>
-					`Retry ${event.attempt}/${event.maxAttempts} in ${seconds}s · ${keyText("app.interrupt")} cancel`;
-				this.activityLane?.wait({
-					id: "runtime:retry",
-					kind: "runtime",
-					label: retryMessage(Math.ceil(event.delayMs / 1000)),
-				});
-				this.retryCountdown = new CountdownTimer(
-					event.delayMs,
-					this.ui,
-					(seconds) => {
-						this.activityLane?.update("runtime:retry", retryMessage(seconds));
-					},
-					() => {
-						this.retryCountdown = undefined;
-					},
-				);
-				this.ui.requestRender();
-				break;
-			}
-
-			case "auto_retry_end": {
-				// Restore escape handler
-				if (this.retryEscapeHandler) {
-					this.defaultEditor.onEscape = this.retryEscapeHandler;
-					this.retryEscapeHandler = undefined;
-				}
-				if (this.retryCountdown) {
-					this.retryCountdown.dispose();
-					this.retryCountdown = undefined;
-				}
-				this.activityLane?.finish("runtime:retry", event.success ? "success" : "failure", {
-					id: "runtime:retry",
-					kind: "runtime",
-					label: event.success ? "Retry resumed" : "Retry failed",
-				});
-				// Show error only on final failure (success shows normal response)
-				if (!event.success) {
-					this.showError(`Retry failed after ${event.attempt} attempts: ${event.finalError || "Unknown error"}`);
-				}
-				this.ui.requestRender();
-				break;
-			}
-		}
+	private handleEvent(event: AgentSessionEvent): Promise<void> {
+		return handleInteractiveEvent(this as unknown as InteractiveEventHost, event);
 	}
-
 	/** Extract text content from a user message */
 	// Thin `this.`-delegate to the pure formatter in ./history-reload-math.ts; kept so
 	// addMessageToChat and the prototype-based interactive-mode tests resolve it via `this`.
@@ -2550,7 +1827,7 @@ export class InteractiveMode {
 		}
 	}
 
-	private applyStreamingMessageUpdate(message: AssistantMessage, options: { force?: boolean } = {}): void {
+	public applyStreamingMessageUpdate(message: AssistantMessage, options: { force?: boolean } = {}): void {
 		this.streamingMessage = message;
 		if (!this.streamingComponent) return;
 

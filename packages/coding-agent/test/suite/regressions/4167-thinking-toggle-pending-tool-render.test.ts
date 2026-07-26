@@ -4,7 +4,7 @@ import type { AssistantMessage, ToolResultMessage, Usage } from "@caupulican/pi-
 import { Container, Text, type TUI } from "@caupulican/pi-tui";
 import { beforeAll, describe, expect, test, vi } from "vitest";
 import type { AgentSessionEvent } from "../../../src/core/agent-session.ts";
-import type { ToolExecutionComponent } from "../../../src/modes/interactive/components/tool-execution.ts";
+import { ToolExecutionComponent } from "../../../src/modes/interactive/components/tool-execution.ts";
 import { ToolPanelRegistry } from "../../../src/modes/interactive/components/tool-panel-registry.ts";
 import { InteractiveMode } from "../../../src/modes/interactive/interactive-mode.ts";
 import { initTheme } from "../../../src/modes/interactive/theme/theme.ts";
@@ -178,6 +178,11 @@ describe("InteractiveMode.renderSessionContext", () => {
 		});
 
 		expect(fakeThis.toolPanels.hasActive(TOOL_CALL_ID)).toBe(false);
+		expect(renderChat(fakeThis.chatContainer)).not.toContain("FINAL_RESULT");
+		const panel = fakeThis.chatContainer.children.find(
+			(component): component is ToolExecutionComponent => component instanceof ToolExecutionComponent,
+		);
+		panel?.setExpanded(true);
 		expect(renderChat(fakeThis.chatContainer)).toContain("FINAL_RESULT");
 	});
 
@@ -193,6 +198,11 @@ describe("InteractiveMode.renderSessionContext", () => {
 		);
 
 		expect(fakeThis.toolPanels.hasActive(TOOL_CALL_ID)).toBe(false);
+		expect(renderChat(fakeThis.chatContainer)).not.toContain("HISTORICAL_RESULT");
+		const panel = fakeThis.chatContainer.children.find(
+			(component): component is ToolExecutionComponent => component instanceof ToolExecutionComponent,
+		);
+		panel?.setExpanded(true);
 		expect(renderChat(fakeThis.chatContainer)).toContain("HISTORICAL_RESULT");
 	});
 });

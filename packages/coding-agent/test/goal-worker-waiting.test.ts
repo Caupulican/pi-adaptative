@@ -4,7 +4,6 @@ import { describe, expect, it, vi } from "vitest";
 import type { LaneRecord } from "../src/core/autonomy/lane-tracker.ts";
 import { BackgroundLaneController, type BackgroundLaneControllerDeps } from "../src/core/background-lane-controller.ts";
 import { GoalLoopController, type GoalLoopControllerDeps } from "../src/core/goal-loop-controller.ts";
-import { DEFAULT_GOAL_CUMULATIVE_MAX_TOTAL_SPEND_USD } from "../src/core/goals/goal-continuation-defaults.ts";
 import { buildGoalRuntimeSnapshot } from "../src/core/goals/goal-runtime-snapshot.ts";
 import { applyGoalEvent, createGoalState } from "../src/core/goals/goal-state.ts";
 import { appendGoalStateSnapshot } from "../src/core/goals/session-goal-state.ts";
@@ -315,12 +314,12 @@ describe("GoalLoopController neither stalls nor races while a bound worker is in
 	});
 });
 
-describe("worker-spend cumulative budget ceiling (goal-loop-controller)", () => {
-	it("a goal already at/over the worker-spend ceiling stops immediately with goal_budget_exhausted, submitting no pass", async () => {
+describe("worker-spend accounting stays advisory (goal-loop-controller)", () => {
+	it("high observed worker spend does not stop a goal without an owner-supplied budget", async () => {
 		const promptCalls: string[] = [];
 		let state = createGoalState({ goalId: "g1", userGoal: "Ship it", now: "T0" });
 		state = applyGoalEvent(state, { type: "add_requirement", id: "req-1", text: "Req 1", now: "T0" });
-		state = { ...state, continuationWorkerSpendUsd: DEFAULT_GOAL_CUMULATIVE_MAX_TOTAL_SPEND_USD };
+		state = { ...state, continuationWorkerSpendUsd: 10_000 };
 
 		const controller = new GoalLoopController({
 			getGoalRuntimeSnapshot: () => ({
@@ -345,13 +344,13 @@ describe("worker-spend cumulative budget ceiling (goal-loop-controller)", () => 
 			markGoalBudgetLimited: () => {},
 		});
 
-		const result = await controller.continueGoalLoop({ maxStallTurns: 20, maxTurns: 5 });
-		expect(result.turnsSubmitted).toBe(0);
-		expect(result.stopReason).toBe("goal_budget_exhausted");
-		expect(promptCalls).toEqual([]);
+		const result = await controller.continueGoalLoop({ maxStallTurns: 20, maxTurns: 1 });
+		expect(result.turnsSubmitted).toBe(1);
+		expect(result.stopReason).toBe("max_turns_reached");
+		expect(promptCalls).toHaveLength(1);
 	});
 
-	it("a fresh goal (worker spend 0) is not affected by the worker-spend ceiling", async () => {
+	it("a fresh goal also continues normally", async () => {
 		let state = createGoalState({ goalId: "g1", userGoal: "Ship it", now: "T0" });
 		state = applyGoalEvent(state, { type: "add_requirement", id: "req-1", text: "Req 1", now: "T0" });
 

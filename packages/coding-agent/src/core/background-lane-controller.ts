@@ -21,7 +21,7 @@ import type {
 	PromptOptions,
 	ResearchLaneRunOutcome,
 	WorkerDelegationRunOutcome,
-} from "./agent-session.ts";
+} from "./agent-session-contracts.ts";
 import { type LaneRecord, LaneTracker } from "./autonomy/lane-tracker.ts";
 import { appendLaneRecordSnapshot, getLatestLaneRecordSnapshots } from "./autonomy/session-lane-record.ts";
 import { ManagedLaneController } from "./delegation/managed-lane-controller.ts";

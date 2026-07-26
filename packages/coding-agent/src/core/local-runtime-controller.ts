@@ -11,7 +11,7 @@
 
 import { totalmem } from "node:os";
 import type { Api, AssistantMessage, Model } from "@caupulican/pi-ai";
-import type { AgentSessionEvent } from "./agent-session.ts";
+import type { AgentSessionEvent } from "./agent-session-contracts.ts";
 import type { RouteDecision } from "./autonomy/contracts.ts";
 import type { ExtensionUIContext } from "./extensions/index.ts";
 import { type PrismLlamaCppDeps, PrismLlamaCppRuntime } from "./models/llamacpp-runtime.ts";

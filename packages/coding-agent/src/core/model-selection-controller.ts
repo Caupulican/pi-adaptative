@@ -14,7 +14,7 @@ import type { Agent, ThinkingLevel } from "@caupulican/pi-agent-core";
 import type { SessionManager } from "@caupulican/pi-agent-core/node";
 import type { Api, Model } from "@caupulican/pi-ai";
 import { clampThinkingLevel, getSupportedThinkingLevels, modelsAreEqual } from "@caupulican/pi-ai";
-import type { AgentSessionEvent, ModelCycleResult } from "./agent-session.ts";
+import type { AgentSessionEvent, ModelCycleResult } from "./agent-session-contracts.ts";
 import { DEFAULT_THINKING_LEVEL } from "./defaults.ts";
 import type { ExtensionRunner } from "./extensions/index.ts";
 import type { ModelCapabilityProfile } from "./model-capability.ts";

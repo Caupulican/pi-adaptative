@@ -10,7 +10,11 @@ import {
 	writeFileSync,
 } from "node:fs";
 import { dirname, join } from "node:path";
-import type { ToolArgumentValidationRecord, ToolArgumentValidationStats } from "./session-analytics.ts";
+import type {
+	ToolArgumentExecutionOutcome,
+	ToolArgumentTeachState,
+	ToolArgumentValidationTelemetryEvent,
+} from "@caupulican/pi-ai";
 import {
 	isToolArgumentValidationLogRecord,
 	type ToolArgumentValidationLogRecord,
@@ -20,6 +24,29 @@ const MAX_DETAIL_KEYS = 1_000;
 const MAX_STATS_FILES = 1_000;
 const MAX_STATS_FILE_AGE_MS = 90 * 24 * 60 * 60 * 1000;
 const OTHER_DETAIL_KEY = "__other__";
+
+export interface ToolArgumentValidationTeachEfficacy {
+	recurrenceBefore: number;
+	recurrenceAfter: number;
+	repairedThenSucceeded: number;
+	repairedThenFailed: number;
+	repairedThenNotRun: number;
+}
+
+export interface ToolArgumentValidationStats {
+	clean: number;
+	repaired: number;
+	bounced: number;
+	failureModes: Record<string, number>;
+	repairsApplied: Record<string, number>;
+	taught: Record<ToolArgumentTeachState, number>;
+	executionOutcome: Record<ToolArgumentExecutionOutcome, number>;
+	teachEfficacy: Record<string, ToolArgumentValidationTeachEfficacy>;
+}
+
+export interface ToolArgumentValidationRecord extends ToolArgumentValidationTelemetryEvent {
+	version: 1;
+}
 
 interface PersistedToolRecoveryStats {
 	version: 1;

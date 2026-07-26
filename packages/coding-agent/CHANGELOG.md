@@ -8,7 +8,8 @@
 
 ### Changed
 
-- Made durable goals use compact Codex-style provider context and continue without a turn limit by default; positive user-configured limits are preserved exactly and are never reduced by model capability routing.
+- Made durable goals use compact Codex-style provider context and continue without implicit turn, active-time, or spend limits; only owner-supplied token and per-invocation limits stop execution, while time/spend remain observable accounting.
+- Split AgentSession contracts, durable goal lifecycle/accounting, owner-input replay, interactive event dispatch, and startup-resource rendering into focused owners, with a repository check preventing either coordinator from reclaiming those responsibilities or exceeding its size boundary.
 
 ### Fixed
 

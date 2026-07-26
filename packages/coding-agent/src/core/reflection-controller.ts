@@ -35,7 +35,7 @@ import {
 	DEFAULT_ISOLATED_LANE_KIND,
 	type IsolatedCompletionOptions,
 	type IsolatedCompletionResult,
-} from "./agent-session.ts";
+} from "./agent-session-contracts.ts";
 import type { LearningDecision } from "./autonomy/contracts.ts";
 import { AUTONOMY_TELEMETRY_EVENT_TYPES, type AutonomyTelemetryEvent } from "./autonomy/telemetry-events.ts";
 import {

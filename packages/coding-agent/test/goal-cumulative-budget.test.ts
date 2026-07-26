@@ -4,7 +4,6 @@ import { getModel } from "@caupulican/pi-ai";
 import { describe, expect, it } from "vitest";
 import { AgentSession } from "../src/core/agent-session.ts";
 import { AuthStorage } from "../src/core/auth-storage.ts";
-import { DEFAULT_GOAL_CUMULATIVE_MAX_WALL_CLOCK_MS } from "../src/core/goals/goal-continuation-defaults.ts";
 import { applyGoalEvent, createGoalState, isGoalState } from "../src/core/goals/goal-state.ts";
 import { appendGoalStateSnapshot } from "../src/core/goals/session-goal-state.ts";
 import { ModelRegistry } from "../src/core/model-registry.ts";
@@ -188,12 +187,6 @@ describe("per-goal cumulative continuation budget", () => {
 		});
 	});
 
-	describe("durable wall-clock defaults", () => {
-		it("the cumulative wall-clock ceiling is a multi-hour, not a multi-minute, budget", () => {
-			expect(DEFAULT_GOAL_CUMULATIVE_MAX_WALL_CLOCK_MS).toBeGreaterThanOrEqual(60 * 60_000);
-		});
-	});
-
 	describe("end-to-end loop (real AgentSession)", () => {
 		it("cumulative turns/wall-clock persist across two separate continueGoalLoop invocations for one goal", async () => {
 			const { session, sessionManager, promptCalls } = createTestSession();
@@ -225,7 +218,7 @@ describe("per-goal cumulative continuation budget", () => {
 			expect(promptCalls.length).toBe(2);
 		});
 
-		it("a goal already at/over the cumulative wall-clock ceiling stops immediately with goal_budget_exhausted", async () => {
+		it("large observed wall-clock and spend remain telemetry when the owner supplied no budget", async () => {
 			const { session, sessionManager, promptCalls } = createTestSession();
 
 			let state = createGoalState({ goalId: "g1", userGoal: "User Goal Here", now: "T0" });
@@ -233,8 +226,30 @@ describe("per-goal cumulative continuation budget", () => {
 			state = applyGoalEvent(state, {
 				type: "record_continuation_budget",
 				turns: 1,
-				wallClockMs: DEFAULT_GOAL_CUMULATIVE_MAX_WALL_CLOCK_MS,
+				wallClockMs: 48 * 60 * 60_000,
 				tokens: 0,
+				spendUsd: 10_000,
+				now: "T1",
+			});
+			state = { ...state, continuationWorkerSpendUsd: 10_000 };
+			appendGoalStateSnapshot(sessionManager, state);
+
+			const result = await session.continueGoalLoop({ maxStallTurns: 3, maxTurns: 1 });
+			expect(result.turnsSubmitted).toBe(1);
+			expect(result.stopReason).toBe("max_turns_reached");
+			expect(promptCalls.length).toBe(1);
+		});
+
+		it("an explicit durable token budget still stops the goal", async () => {
+			const { session, sessionManager, promptCalls } = createTestSession();
+
+			let state = createGoalState({ goalId: "g1", userGoal: "User Goal Here", now: "T0", tokenBudget: 100 });
+			state = applyGoalEvent(state, { type: "add_requirement", id: "req-1", text: "Req 1 text", now: "T0" });
+			state = applyGoalEvent(state, {
+				type: "record_continuation_budget",
+				turns: 1,
+				wallClockMs: 1,
+				tokens: 100,
 				spendUsd: 0,
 				now: "T1",
 			});
@@ -244,18 +259,6 @@ describe("per-goal cumulative continuation budget", () => {
 			expect(result.turnsSubmitted).toBe(0);
 			expect(result.stopReason).toBe("goal_budget_exhausted");
 			expect(promptCalls.length).toBe(0);
-		});
-
-		it("a fresh goal (clean cumulative counters) is not affected by the budget ceiling", async () => {
-			const { session, sessionManager, promptCalls } = createTestSession();
-
-			let state = createGoalState({ goalId: "g1", userGoal: "User Goal Here", now: "T0" });
-			state = applyGoalEvent(state, { type: "add_requirement", id: "req-1", text: "Req 1 text", now: "T0" });
-			appendGoalStateSnapshot(sessionManager, state);
-
-			const result = await session.continueGoalLoop({ maxStallTurns: 3, maxTurns: 1 });
-			expect(result.stopReason).not.toBe("goal_budget_exhausted");
-			expect(promptCalls.length).toBe(1);
 		});
 
 		it("recordGoalContinuationPass is a no-op when no goal state exists", () => {
