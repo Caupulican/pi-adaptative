@@ -1,5 +1,9 @@
 ## [Unreleased]
 
+### Added
+
+- Added sensitive single-line input with masked rendering plus a private multiline editor that preserves plaintext dotenv formatting while disabling history, undo, kill-ring retention, autocomplete, paste collapsing, and external-editor copies.
+
 ### Fixed
 
 - Kept paste-marker IDs synchronized after deletion, normalized tabs and CR/CRLF output, cleared the inverted cursor on shutdown, restored legacy Alt-key parsing, and bounded narrow-editor scroll borders.

@@ -100,6 +100,13 @@ export {
 	type ReadToolOptions,
 } from "./read.ts";
 export {
+	createSecretStoreToolDefinition,
+	type SecretStoreStatus,
+	type SecretStoreToolDetails,
+	type SecretStoreToolInput,
+	type SecretStoreToolOptions,
+} from "./secret-store.ts";
+export {
 	createSkillAuditTool,
 	createSkillAuditToolDefinition,
 	jaccard,

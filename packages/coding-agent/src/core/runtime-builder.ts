@@ -84,6 +84,8 @@ import { describeInFlightWorkUnit, getInFlightWorkUnits } from "./reload-blocker
 import type { ModelFitnessReport } from "./research/model-fitness.ts";
 import type { ResourceLoader } from "./resource-loader.ts";
 import { ScoutController } from "./scout-controller.ts";
+import { wrapToolWithCredentialExposureGuard } from "./secrets/credential-exposure-guard.ts";
+import { SecretVault } from "./secrets/secret-vault.ts";
 import type { SessionImageStore } from "./session-image-store.ts";
 import { getSessionRole, isWorkerSession, WORKER_FORBIDDEN_TOOLS } from "./session-role.ts";
 import {
@@ -113,9 +115,12 @@ import { resolveToCwd } from "./tools/path-utils.ts";
 import { createReadTool } from "./tools/read.ts";
 import { createRunProcessToolDefinition } from "./tools/run-process.ts";
 import { createRunToolkitScriptToolDefinition } from "./tools/run-toolkit-script.ts";
+import { createSecretStoreToolDefinition } from "./tools/secret-store.ts";
+import { disposePersistentShellSession } from "./tools/shell-session.ts";
 import { createTaskStepsToolDefinition } from "./tools/task-steps.ts";
 import { dispatchTmuxWorker } from "./tools/tmux-dispatch.ts";
 import { createToolDefinitionFromAgentTool } from "./tools/tool-definition-wrapper.ts";
+import { disposeWindowsShellState } from "./tools/windows-shell-state.ts";
 import { createWorktreeSyncToolDefinition } from "./tools/worktree-sync.ts";
 import { createLane } from "./worktree-sync/git-engine.ts";
 import { WorktreeLaneGate } from "./worktree-sync/lane-gate.ts";
@@ -371,11 +376,20 @@ export class RuntimeBuilder {
 	private readonly _explicitLiveExtensionPaths = new Set<string>();
 	private _reloadPromise: Promise<void> | undefined;
 	private _reloadRequested = false;
+	private readonly _secretVault: SecretVault;
 
 	private readonly deps: RuntimeBuilderDeps;
 
 	constructor(deps: RuntimeBuilderDeps) {
 		this.deps = deps;
+		this._secretVault = new SecretVault({
+			agentDir: deps.getAgentDir(),
+			onEnvironmentChanged: () => {
+				const sessionKey = deps.getShellSessionKey();
+				disposePersistentShellSession(sessionKey);
+				disposeWindowsShellState(sessionKey);
+			},
+		});
 	}
 
 	/**
@@ -434,9 +448,9 @@ export class RuntimeBuilder {
 				),
 			getCwd: () => cwd,
 			buildReadOnlyTools: (toolCwd) => [
-				createReadTool(toolCwd),
-				createGrepTool(toolCwd, { artifactStore }),
-				createFindTool(toolCwd, { artifactStore }),
+				wrapToolWithCredentialExposureGuard(createReadTool(toolCwd), toolCwd, this._secretVault),
+				wrapToolWithCredentialExposureGuard(createGrepTool(toolCwd, { artifactStore }), toolCwd, this._secretVault),
+				wrapToolWithCredentialExposureGuard(createFindTool(toolCwd, { artifactStore }), toolCwd, this._secretVault),
 			],
 			streamFn: this.deps.getAgent().streamFn,
 			fileExists: (path) => existsSync(resolveCwdPath(cwd, path)),
@@ -559,9 +573,15 @@ export class RuntimeBuilder {
 			runner,
 		);
 
-		const toolRegistry = new Map(wrappedBuiltInTools.map((tool) => [tool.name, tool]));
+		const toolRegistry = new Map(
+			wrappedBuiltInTools.map((tool) => {
+				const guarded = wrapToolWithCredentialExposureGuard(tool, this.deps.getCwd(), this._secretVault);
+				return [guarded.name, guarded] as const;
+			}),
+		);
 		for (const tool of wrappedExtensionTools as AgentTool[]) {
-			toolRegistry.set(tool.name, tool);
+			const guarded = wrapToolWithCredentialExposureGuard(tool, this.deps.getCwd(), this._secretVault);
+			toolRegistry.set(guarded.name, guarded);
 		}
 		this._toolRegistry = toolRegistry;
 
@@ -756,7 +776,12 @@ export class RuntimeBuilder {
 				shellPath,
 				sessionKey: this.deps.getShellSessionKey(),
 				platform: process.platform,
+				spawnHook: (context) => ({
+					...context,
+					env: { ...context.env, ...this._secretVault.getEnvironmentForCwd(context.cwd) },
+				}),
 			},
+			python: { environment: (cwd) => this._secretVault.getEnvironmentForCwd(cwd) },
 			grep: { artifactStore: toolArtifactStore },
 			find: { artifactStore: toolArtifactStore },
 			artifact_retrieve: { artifactStore: toolArtifactStore },
@@ -883,6 +908,10 @@ export class RuntimeBuilder {
 					getImageStore: () => this.deps.getSessionImageStore(),
 				});
 				this._baseToolDefinitions.set(askQuestionToolDefinition.name, askQuestionToolDefinition);
+			}
+			if (toolAccess.allows("secret_store")) {
+				const secretStoreToolDefinition = createSecretStoreToolDefinition({ vault: this._secretVault });
+				this._baseToolDefinitions.set(secretStoreToolDefinition.name, secretStoreToolDefinition);
 			}
 			if (toolAccess.allows("delegate")) {
 				const delegateToolDefinition = createDelegateToolDefinition({

@@ -452,6 +452,7 @@ ${chalk.bold("Built-in Tool Names:")}
   write      - Write files (creates/overwrites)
   task_steps - Track the active session checklist
   ask_question - Ask the human owner for a consequential choice
+  secret_store - Capture and manage model-blind owner credentials
   context_audit - Inspect active context/tool/system prompt usage (read-only)
   grep       - Search file contents (read-only, off by default)
   find       - Find files by glob pattern (read-only, off by default)

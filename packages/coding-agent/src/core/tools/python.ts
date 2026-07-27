@@ -102,6 +102,8 @@ export interface PythonOperations {
 export interface PythonToolOptions {
 	resolveRuntime?: () => Promise<PythonRuntimeOutcome>;
 	operations?: PythonOperations;
+	/** Additional process environment resolved from the final execution cwd. */
+	environment?: (cwd: string) => NodeJS.ProcessEnv;
 	/** Override only for tests or embedded runtimes; production uses the process work directory. */
 	outputDirectory?: string;
 }
@@ -185,7 +187,8 @@ export function createPythonToolDefinition(
 			"Prefer python for bounded scripts, data shaping, structured transformations, and cross-platform logic when it is clearer than a shell pipeline.",
 			"Prefer read/edit/write for small exact source edits. For Python file transformations, preserve encoding and newline style, write atomically, and verify the resulting diff.",
 			"Keep work scoped: avoid recursive home/filesystem scans, pass explicit roots and filters, and request a larger timeout only when the bounded workload justifies it.",
-			"Do not use python for destructive deletion, credentials, publish/push/release, or long-running services without explicit user approval.",
+			"Do not inspect or print credentials. When secret_store activates a bound profile, use its injected environment only through the credential-consuming program.",
+			"Do not use python for destructive deletion, publish/push/release, or long-running services without explicit user approval.",
 		],
 		parameters: pythonSchema,
 		async execute(_toolCallId, input, signal) {
@@ -235,6 +238,7 @@ export function createPythonToolDefinition(
 						signal,
 						env: {
 							...process.env,
+							...options.environment?.(cwd),
 							PI_PYTHON_TOOL: "1",
 							PYTHONDONTWRITEBYTECODE: "1",
 							PYTHONIOENCODING: "utf-8",

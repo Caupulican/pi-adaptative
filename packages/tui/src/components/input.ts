@@ -13,6 +13,13 @@ interface InputState {
 	cursor: number;
 }
 
+export interface InputOptions {
+	/** Mask every entered grapheme. The underlying value is still returned by getValue(). */
+	sensitive?: boolean;
+	/** Mask used for sensitive input. Defaults to a single bullet. */
+	maskCharacter?: string;
+}
+
 /**
  * Input component - single-line text input with horizontal scrolling
  */
@@ -35,6 +42,13 @@ export class Input implements Component, Focusable {
 
 	// Undo support
 	private undoStack = new UndoStack<InputState>();
+	private readonly sensitive: boolean;
+	private readonly maskCharacter: string;
+
+	constructor(options: InputOptions = {}) {
+		this.sensitive = options.sensitive ?? false;
+		this.maskCharacter = options.maskCharacter || "•";
+	}
 
 	getValue(): string {
 		return this.value;
@@ -43,6 +57,17 @@ export class Input implements Component, Focusable {
 	setValue(value: string): void {
 		this.value = value;
 		this.cursor = Math.min(this.cursor, value.length);
+	}
+
+	/** Clear the live value and every editing buffer that could retain it. */
+	clear(): void {
+		this.value = "";
+		this.cursor = 0;
+		this.pasteBuffer = "";
+		this.isInPaste = false;
+		this.lastAction = null;
+		this.undoStack.clear();
+		this.killRing = new KillRing();
 	}
 
 	handleInput(data: string): void {
@@ -93,7 +118,7 @@ export class Input implements Component, Focusable {
 
 		// Undo
 		if (kb.matches(data, "tui.editor.undo")) {
-			this.undo();
+			if (!this.sensitive) this.undo();
 			return;
 		}
 
@@ -136,11 +161,11 @@ export class Input implements Component, Focusable {
 
 		// Kill ring actions
 		if (kb.matches(data, "tui.editor.yank")) {
-			this.yank();
+			if (!this.sensitive) this.yank();
 			return;
 		}
 		if (kb.matches(data, "tui.editor.yankPop")) {
-			this.yankPop();
+			if (!this.sensitive) this.yankPop();
 			return;
 		}
 
@@ -250,8 +275,12 @@ export class Input implements Component, Focusable {
 		if (this.cursor === 0) return;
 		this.pushUndo();
 		const deletedText = this.value.slice(0, this.cursor);
-		this.killRing.push(deletedText, { prepend: true, accumulate: this.lastAction === "kill" });
-		this.lastAction = "kill";
+		if (!this.sensitive) {
+			this.killRing.push(deletedText, { prepend: true, accumulate: this.lastAction === "kill" });
+			this.lastAction = "kill";
+		} else {
+			this.lastAction = null;
+		}
 		this.value = this.value.slice(this.cursor);
 		this.cursor = 0;
 	}
@@ -260,8 +289,12 @@ export class Input implements Component, Focusable {
 		if (this.cursor >= this.value.length) return;
 		this.pushUndo();
 		const deletedText = this.value.slice(this.cursor);
-		this.killRing.push(deletedText, { prepend: false, accumulate: this.lastAction === "kill" });
-		this.lastAction = "kill";
+		if (!this.sensitive) {
+			this.killRing.push(deletedText, { prepend: false, accumulate: this.lastAction === "kill" });
+			this.lastAction = "kill";
+		} else {
+			this.lastAction = null;
+		}
 		this.value = this.value.slice(0, this.cursor);
 	}
 
@@ -279,8 +312,12 @@ export class Input implements Component, Focusable {
 		this.cursor = oldCursor;
 
 		const deletedText = this.value.slice(deleteFrom, this.cursor);
-		this.killRing.push(deletedText, { prepend: true, accumulate: wasKill });
-		this.lastAction = "kill";
+		if (!this.sensitive) {
+			this.killRing.push(deletedText, { prepend: true, accumulate: wasKill });
+			this.lastAction = "kill";
+		} else {
+			this.lastAction = null;
+		}
 
 		this.value = this.value.slice(0, deleteFrom) + this.value.slice(this.cursor);
 		this.cursor = deleteFrom;
@@ -300,8 +337,12 @@ export class Input implements Component, Focusable {
 		this.cursor = oldCursor;
 
 		const deletedText = this.value.slice(this.cursor, deleteTo);
-		this.killRing.push(deletedText, { prepend: false, accumulate: wasKill });
-		this.lastAction = "kill";
+		if (!this.sensitive) {
+			this.killRing.push(deletedText, { prepend: false, accumulate: wasKill });
+			this.lastAction = "kill";
+		} else {
+			this.lastAction = null;
+		}
 
 		this.value = this.value.slice(0, this.cursor) + this.value.slice(deleteTo);
 	}
@@ -336,6 +377,7 @@ export class Input implements Component, Focusable {
 	}
 
 	private pushUndo(): void {
+		if (this.sensitive) return;
 		this.undoStack.push({ value: this.value, cursor: this.cursor });
 	}
 
@@ -363,8 +405,11 @@ export class Input implements Component, Focusable {
 		this.lastAction = null;
 		this.pushUndo();
 
-		// Clean the pasted text - remove newlines and carriage returns
-		const cleanText = pastedText.replace(/\r\n/g, "").replace(/\r/g, "").replace(/\n/g, "").replace(/\t/g, "    ");
+		// Sensitive values preserve pasted payloads (including multiline credentials). Regular
+		// single-line inputs retain their historical newline/tab normalization.
+		const cleanText = this.sensitive
+			? pastedText.replace(/\r\n/g, "\n").replace(/\r/g, "\n")
+			: pastedText.replace(/\r\n/g, "").replace(/\r/g, "").replace(/\n/g, "").replace(/\t/g, "    ");
 
 		// Insert at cursor position
 		this.value = this.value.slice(0, this.cursor) + cleanText + this.value.slice(this.cursor);
@@ -376,6 +421,12 @@ export class Input implements Component, Focusable {
 	}
 
 	render(width: number): string[] {
+		const displayValue = this.sensitive
+			? [...segmenter.segment(this.value)].map(() => this.maskCharacter).join("")
+			: this.value;
+		const displayCursor = this.sensitive
+			? [...segmenter.segment(this.value.slice(0, this.cursor))].length * this.maskCharacter.length
+			: this.cursor;
 		// Calculate visible window
 		const prompt = "> ";
 		const availableWidth = width - prompt.length;
@@ -385,17 +436,17 @@ export class Input implements Component, Focusable {
 		}
 
 		let visibleText = "";
-		let cursorDisplay = this.cursor;
-		const totalWidth = visibleWidth(this.value);
+		let cursorDisplay = displayCursor;
+		const totalWidth = visibleWidth(displayValue);
 
 		if (totalWidth < availableWidth) {
 			// Everything fits (leave room for cursor at end)
-			visibleText = this.value;
+			visibleText = displayValue;
 		} else {
 			// Need horizontal scrolling
 			// Reserve one column for cursor if it's at the end
 			const scrollWidth = this.cursor === this.value.length ? availableWidth - 1 : availableWidth;
-			const cursorCol = visibleWidth(this.value.slice(0, this.cursor));
+			const cursorCol = visibleWidth(displayValue.slice(0, displayCursor));
 
 			if (scrollWidth > 0) {
 				const halfWidth = Math.floor(scrollWidth / 2);
@@ -412,8 +463,8 @@ export class Input implements Component, Focusable {
 					startCol = Math.max(0, cursorCol - halfWidth);
 				}
 
-				visibleText = sliceByColumn(this.value, startCol, scrollWidth, true);
-				const beforeCursor = sliceByColumn(this.value, startCol, Math.max(0, cursorCol - startCol), true);
+				visibleText = sliceByColumn(displayValue, startCol, scrollWidth, true);
+				const beforeCursor = sliceByColumn(displayValue, startCol, Math.max(0, cursorCol - startCol), true);
 				cursorDisplay = beforeCursor.length;
 			} else {
 				visibleText = "";

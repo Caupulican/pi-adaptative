@@ -190,6 +190,14 @@ export function assessOperationRisk(input: RiskAssessmentInput): RiskAssessment 
 			requiresApproval: false,
 		};
 	}
+	if (input.toolName === "secret_store") {
+		return {
+			risk: "scoped-write",
+			reasonCode: "native_owner_secret_flow",
+			reasons: ["Native secret-store mutations require model-blind owner input and in-tool confirmation"],
+			requiresApproval: false,
+		};
+	}
 	if (READ_ONLY_QUESTION_RE.test(operation) && !EXPLICIT_MODIFY_REQUEST_RE.test(operation)) {
 		return {
 			risk: "read-only",

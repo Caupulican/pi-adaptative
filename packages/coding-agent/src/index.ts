@@ -304,6 +304,17 @@ export {
 	SessionReplacementRuntimeError,
 } from "./core/sdk.ts";
 export {
+	type SecretEnvDestinationState,
+	type SecretMaterializationResult,
+	type SecretProfileSummary,
+	type SecretRemovalResult,
+	type SecretVariableValue,
+	SecretVault,
+	SecretVaultError,
+	type SecretVaultErrorCode,
+	type SecretVaultOptions,
+} from "./core/secrets/secret-vault.ts";
+export {
 	type CompactionSettings,
 	type DirectoryResourceProfileInfo,
 	getDirectoryResourceProfileInfo,
@@ -353,6 +364,7 @@ export {
 	createLocalBashOperations,
 	createLsToolDefinition,
 	createReadToolDefinition,
+	createSecretStoreToolDefinition,
 	createWriteToolDefinition,
 	DEFAULT_MAX_BYTES,
 	DEFAULT_MAX_LINES,
@@ -377,6 +389,10 @@ export {
 	type ReadToolDetails,
 	type ReadToolInput,
 	type ReadToolOptions,
+	type SecretStoreStatus,
+	type SecretStoreToolDetails,
+	type SecretStoreToolInput,
+	type SecretStoreToolOptions,
 	type ToolsOptions,
 	type TruncationOptions,
 	type TruncationResult,

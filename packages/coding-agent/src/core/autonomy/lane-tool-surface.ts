@@ -8,6 +8,7 @@ import type {
 	ToolCapabilityManifest,
 } from "../orchestration/contracts.ts";
 import type { NormalizedProfile } from "../profile-registry.ts";
+import { wrapToolWithCredentialExposureGuard } from "../secrets/credential-exposure-guard.ts";
 import { matchesResourceProfilePattern } from "../settings-manager.ts";
 import { createEditTool } from "../tools/edit.ts";
 import { createFindTool } from "../tools/find.ts";
@@ -117,7 +118,7 @@ function createLaneTools(
 	}
 	return names.flatMap((name) => {
 		const factory = factories.get(name);
-		return factory ? [factory()] : [];
+		return factory ? [wrapToolWithCredentialExposureGuard(factory(), cwd)] : [];
 	});
 }
 

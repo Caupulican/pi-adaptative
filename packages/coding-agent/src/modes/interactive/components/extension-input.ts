@@ -11,6 +11,7 @@ import { keyHint } from "./keybinding-hints.ts";
 export interface ExtensionInputOptions {
 	tui?: TUI;
 	timeout?: number;
+	sensitive?: boolean;
 }
 
 export class ExtensionInputComponent extends Container implements Focusable {
@@ -50,6 +51,10 @@ export class ExtensionInputComponent extends Container implements Focusable {
 		this.titleText = new Text(theme.fg("accent", title), 1, 0);
 		this.addChild(this.titleText);
 		this.addChild(new Spacer(1));
+		if (opts?.sensitive) {
+			this.addChild(new Text(theme.fg("muted", "Hidden input · not sent to the model"), 1, 0));
+			this.addChild(new Spacer(1));
+		}
 
 		if (opts?.timeout && opts.timeout > 0 && opts.tui) {
 			this.countdown = new CountdownTimer(
@@ -60,7 +65,7 @@ export class ExtensionInputComponent extends Container implements Focusable {
 			);
 		}
 
-		this.input = new Input();
+		this.input = new Input({ sensitive: opts?.sensitive });
 		this.addChild(this.input);
 		this.addChild(new Spacer(1));
 		this.addChild(
@@ -83,5 +88,6 @@ export class ExtensionInputComponent extends Container implements Focusable {
 
 	dispose(): void {
 		this.countdown?.dispose();
+		this.input.clear();
 	}
 }

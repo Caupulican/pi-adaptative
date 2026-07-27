@@ -19,12 +19,26 @@ import { getEditorTheme, theme } from "../theme/theme.ts";
 import { DynamicBorder } from "./dynamic-border.ts";
 import { keyHint } from "./keybinding-hints.ts";
 
+export interface ExtensionEditorOptions extends EditorOptions {
+	/** Visible owner-only content that must not enter editor history, autocomplete, or external files. */
+	privateContent?: boolean;
+	/** Muted reassurance/instruction shown immediately above the editor. */
+	notice?: string;
+	/** External editors create plaintext temporary files, so private editors always disable this. */
+	allowExternalEditor?: boolean;
+	/** Programmatic cancellation for tool-owned dialogs. */
+	signal?: AbortSignal;
+}
+
 export class ExtensionEditorComponent extends Container implements Focusable {
 	private editor: Editor;
 	private onSubmitCallback: (value: string) => void;
 	private onCancelCallback: () => void;
 	private tui: TUI;
 	private keybindings: KeybindingsManager;
+	private readonly allowExternalEditor: boolean;
+	private readonly signal: AbortSignal | undefined;
+	private readonly onAbort: (() => void) | undefined;
 
 	private _focused = false;
 	get focused(): boolean {
@@ -42,7 +56,7 @@ export class ExtensionEditorComponent extends Container implements Focusable {
 		prefill: string | undefined,
 		onSubmit: (value: string) => void,
 		onCancel: () => void,
-		options?: EditorOptions,
+		options?: ExtensionEditorOptions,
 	) {
 		super();
 
@@ -50,6 +64,10 @@ export class ExtensionEditorComponent extends Container implements Focusable {
 		this.keybindings = keybindings;
 		this.onSubmitCallback = onSubmit;
 		this.onCancelCallback = onCancel;
+		this.allowExternalEditor = options?.privateContent ? false : (options?.allowExternalEditor ?? true);
+		this.signal = options?.signal;
+		this.onAbort = this.signal ? () => this.onCancelCallback() : undefined;
+		if (this.onAbort) this.signal?.addEventListener("abort", this.onAbort, { once: true });
 
 		// Add top border
 		this.addChild(new DynamicBorder());
@@ -58,6 +76,15 @@ export class ExtensionEditorComponent extends Container implements Focusable {
 		// Add title
 		this.addChild(new Text(theme.fg("accent", title), 1, 0));
 		this.addChild(new Spacer(1));
+		const notice =
+			options?.notice ??
+			(options?.privateContent
+				? "Private editor · visible only in this terminal · not sent to the model"
+				: undefined);
+		if (notice) {
+			this.addChild(new Text(theme.fg("muted", notice), 1, 0));
+			this.addChild(new Spacer(1));
+		}
 
 		// Create editor
 		this.editor = new Editor(tui, getEditorTheme(), options);
@@ -73,7 +100,7 @@ export class ExtensionEditorComponent extends Container implements Focusable {
 		this.addChild(new Spacer(1));
 
 		// Add hint
-		const hasExternalEditor = !!(process.env.VISUAL || process.env.EDITOR);
+		const hasExternalEditor = this.allowExternalEditor && !!(process.env.VISUAL || process.env.EDITOR);
 		const hint =
 			keyHint("tui.select.confirm", "submit") +
 			"  " +
@@ -99,7 +126,7 @@ export class ExtensionEditorComponent extends Container implements Focusable {
 
 		// External editor (app keybinding)
 		if (this.keybindings.matches(keyData, "app.editor.external")) {
-			this.openExternalEditor();
+			if (this.allowExternalEditor) this.openExternalEditor();
 			return;
 		}
 
@@ -108,6 +135,7 @@ export class ExtensionEditorComponent extends Container implements Focusable {
 	}
 
 	private async openExternalEditor(): Promise<void> {
+		if (!this.allowExternalEditor) return;
 		const editorCmd = process.env.VISUAL || process.env.EDITOR;
 		if (!editorCmd) {
 			return;
@@ -126,5 +154,10 @@ export class ExtensionEditorComponent extends Container implements Focusable {
 			// Force full re-render since external editor uses alternate screen
 			this.tui.requestRender(true);
 		}
+	}
+
+	dispose(): void {
+		if (this.onAbort) this.signal?.removeEventListener("abort", this.onAbort);
+		this.editor.clear();
 	}
 }

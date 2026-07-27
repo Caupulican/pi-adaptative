@@ -107,6 +107,11 @@ export interface AtomicFileLockOptions {
 	stale?: number;
 }
 
+export interface AtomicFileWriteOptions {
+	/** POSIX permission bits applied to the temporary file and inherited by the renamed destination. */
+	mode?: number;
+}
+
 const DEFAULT_RETRIES = 10;
 const DEFAULT_REALPATH = false;
 /**
@@ -251,13 +256,13 @@ async function removeTemporaryPath(tmpPath: string): Promise<void> {
 	}
 }
 
-export function writeFileAtomicSync(filePath: string, content: string): void {
+export function writeFileAtomicSync(filePath: string, content: string, options?: AtomicFileWriteOptions): void {
 	mkdirSync(dirname(filePath), { recursive: true });
 	const tmpPath = temporaryPath(filePath);
 	let renamed = false;
 	try {
 		// `wx` makes a nonce collision harmless: never truncate another writer's temporary file.
-		writeFileSync(tmpPath, content, { encoding: "utf-8", flag: "wx" });
+		writeFileSync(tmpPath, content, { encoding: "utf-8", flag: "wx", mode: options?.mode });
 		renameSyncWithRetry(tmpPath, filePath);
 		renamed = true;
 	} finally {
@@ -266,13 +271,17 @@ export function writeFileAtomicSync(filePath: string, content: string): void {
 }
 
 /** Async counterpart of {@link writeFileAtomicSync}. */
-export async function writeFileAtomic(filePath: string, content: string): Promise<void> {
+export async function writeFileAtomic(
+	filePath: string,
+	content: string,
+	options?: AtomicFileWriteOptions,
+): Promise<void> {
 	await fsPromises.mkdir(dirname(filePath), { recursive: true });
 	const tmpPath = temporaryPath(filePath);
 	let renamed = false;
 	try {
 		// `wx` makes a nonce collision harmless: never truncate another writer's temporary file.
-		await fsPromises.writeFile(tmpPath, content, { encoding: "utf-8", flag: "wx" });
+		await fsPromises.writeFile(tmpPath, content, { encoding: "utf-8", flag: "wx", mode: options?.mode });
 		await renameWithRetry(tmpPath, filePath);
 		renamed = true;
 	} finally {

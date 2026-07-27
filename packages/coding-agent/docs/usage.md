@@ -45,6 +45,14 @@ When an owner choice materially changes the result, the built-in `ask_question` 
 
 Native task steps and worker lanes share the same compact work panel. Steps and agents are grouped separately; durable worker task labels and owner-authored profile ids remain visible after `/resume`. Completed worker output remains untrusted until the parent verifies it through the existing result and review contracts.
 
+### Secret Store
+
+In an interactive user session, ask the agent to store or adopt a project's dotenv file, for example: `Store this project's credentials in the project-dev secret profile.` The native `secret_store` tool opens a private multiline editor where the owner pastes ordinary plaintext dotenv content. Existing unmanaged dotenv content is prefilled locally for review. The editor disables history, undo, kill-ring, autocomplete, paste collapsing, and external-editor temp files, and clears its buffer on close. Only profile, variable-name, and workspace-binding metadata reaches the model; the plaintext document never enters tool arguments, results, transcripts, or telemetry. Pi collects the vault passphrase through separate masked input and encrypts the bounded profile and bindings under `~/.pi/agent/state/secrets/vault.json`. Only the derived key and explicitly activated profile environment remain cached in the current Pi process; asking the agent to lock the vault or exiting Pi clears them and resets credential-bearing shell state. Worker, print, and RPC sessions cannot use the capture path.
+
+The encrypted binding remembers the workspace and relative dotenv filename. Later, the agent can list that metadata and call `secret_store` materialization for the current workspace without asking for a destination again. Once unlocked and materialized, Pi injects the profile into Bash and Python child environments so the agent runs the consuming application normally without reading or sourcing the file. Direct read, edit, search, and shell-inspection attempts against credential files are refused across foreground and worker tool surfaces, and known values are redacted from streamed results and errors.
+
+Every materialized dotenv file is plaintext and mode `0600` on POSIX. Workspace copies must remain ignored by version control. The protection is a model-facing tool boundary, not an OS sandbox: another process running as the same OS user can read the file, and code deliberately granted network or process authority can use the injected credential. Keep execution policy and approval gates appropriate to that authority.
+
 ## Slash Commands
 
 Type `/` in the editor to open command completion. Extensions can register custom commands, skills are available as `/skill:name`, and prompt templates expand via `/templatename`.
@@ -214,7 +222,7 @@ cat README.md | pi -p "Summarize this text"
 | `--no-builtin-tools`, `-nbt` | Disable built-in tools but keep extension/custom tools enabled |
 | `--no-tools`, `-nt` | Disable all tools |
 
-Built-in tools include `read`, `edit`, `write`, `grep`, `find`, `ls`, `ask_question`, and the uv-managed `python` tool. The agent always sees one stable `bash` tool contract. On Windows, Pi parses its supported simple-command grammar and converts it deterministically to PowerShell; unsupported shell constructs fail closed. Agent, interactive, and RPC shell calls have a 120-second wall-clock default, and Python calls default to 30 seconds. Native goal, task-step, human-question, delegation, context, and toolkit tools are activated when their capability/profile gates allow them.
+Built-in tools include `read`, `edit`, `write`, `grep`, `find`, `ls`, `ask_question`, `secret_store`, and the uv-managed `python` tool. The agent always sees one stable `bash` tool contract. On Windows, Pi parses its supported simple-command grammar and converts it deterministically to PowerShell; unsupported shell constructs fail closed. Agent, interactive, and RPC shell calls have a 120-second wall-clock default, and Python calls default to 30 seconds. Native goal, task-step, human-question, secret-store, delegation, context, and toolkit tools are activated when their capability/profile gates allow them.
 
 ### Resource Options
 

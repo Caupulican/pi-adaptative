@@ -11,12 +11,15 @@ import {
 	getProcessWorkRun,
 	getWorkRoot,
 	gitDir,
+	managedSecretEnvDir,
 	modelsDir,
 	npmDir,
 	okfMemoryDir,
 	reloadCoordinationDir,
 	resourceDir,
 	runtimesDir,
+	secretsDir,
+	secretVaultFile,
 	sessionsDir,
 	stateDir,
 	stateFile,
@@ -50,6 +53,12 @@ describe("agent-paths SSOT accessors", () => {
 		expect(stateDir(AGENT_DIR)).toBe(join(AGENT_DIR, "state"));
 		expect(stateFile(AGENT_DIR, "trust.json")).toBe(join(AGENT_DIR, "state", "trust.json"));
 		expect(stateFile(AGENT_DIR, "model-adaptation.json")).toBe(join(AGENT_DIR, "state", "model-adaptation.json"));
+	});
+
+	it("keeps encrypted and materialized secret state under one bounded state container", () => {
+		expect(secretsDir(AGENT_DIR)).toBe(join(AGENT_DIR, "state", "secrets"));
+		expect(secretVaultFile(AGENT_DIR)).toBe(join(AGENT_DIR, "state", "secrets", "vault.json"));
+		expect(managedSecretEnvDir(AGENT_DIR)).toBe(join(AGENT_DIR, "state", "secrets", "materialized"));
 	});
 
 	it("cacheDir/cacheFile build canonical cache/ paths", () => {

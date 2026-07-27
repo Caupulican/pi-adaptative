@@ -654,6 +654,7 @@ export class ExtensionUiHost {
 			input = new ExtensionInputComponent(title, placeholder, (value) => finish(value), cancel, {
 				tui: this.ui.tui,
 				timeout: opts?.timeout,
+				sensitive: opts?.sensitive,
 			});
 			this.extensionInput = input;
 			this.activeExtensionDialogCancel = cancel;

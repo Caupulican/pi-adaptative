@@ -100,6 +100,8 @@ export interface ExtensionUIDialogOptions {
 	signal?: AbortSignal;
 	/** Timeout in milliseconds. Dialog auto-dismisses with live countdown display. */
 	timeout?: number;
+	/** Mask input and keep it out of UI editing history. Supported only by the interactive TUI host. */
+	sensitive?: boolean;
 }
 
 /** Placement for extension widgets. */
